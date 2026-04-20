@@ -1,0 +1,16 @@
+[package]
+name = "flambeau-bench"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "First-class correctness-sweep + perf-matrix + cert-diff harness. Emits JSON certs + PMC snapshots."
+
+[dependencies]
+flambeau-core = { path = "../core" }
+flambeau-runtime = { path = "../runtime" }
+anyhow.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+toml.workspace = true
+tracing.workspace = true

@@ -1,0 +1,12 @@
+[package]
+name = "flambeau-kernels-hip"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "HIP `.cu` kernel sources compiled to `.hsaco` via hipcc in build.rs. gfx906 first, gfx908/gfx90a/gfx942/gfx1031/gfx1100 via arch_primitives."
+
+[dependencies]
+
+[build-dependencies]
+anyhow.workspace = true

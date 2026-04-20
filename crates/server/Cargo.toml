@@ -1,0 +1,18 @@
+[package]
+name = "flambeau-server"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "OpenAI-compatible HTTP server (/v1/chat/completions, /v1/completions, /v1/models, SSE)."
+
+[dependencies]
+flambeau-core = { path = "../core" }
+flambeau-runtime = { path = "../runtime" }
+anyhow.workspace = true
+axum.workspace = true
+tower.workspace = true
+tokio.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tracing.workspace = true

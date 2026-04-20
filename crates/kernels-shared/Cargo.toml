@@ -1,0 +1,9 @@
+[package]
+name = "flambeau-kernels-shared"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "Backend-neutral algorithmic-core .cuh headers (MMQ tile, block-quant unpack, softmax math)."
+
+[dependencies]

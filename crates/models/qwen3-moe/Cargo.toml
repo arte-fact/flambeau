@@ -1,0 +1,13 @@
+[package]
+name = "flambeau-qwen3-moe"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "Qwen3.x MoE model family (Qwen3-30B-A3B, Qwen3-Coder MoE). Block composition only, zero kernels."
+
+[dependencies]
+flambeau-core = { path = "../../core" }
+flambeau-ops = { path = "../../ops" }
+flambeau-quant = { path = "../../quant" }
+anyhow.workspace = true

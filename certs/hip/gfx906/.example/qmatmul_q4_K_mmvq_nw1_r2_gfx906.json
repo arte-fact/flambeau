@@ -1,0 +1,54 @@
+{
+  "_schema_version": 1,
+  "_comment": "EXAMPLE cert — illustrates the schema. Real certs are emitted by `flambeau bench sweep` and carry measured numbers, not placeholders.",
+  "impl_id": "qmatmul_q4_K_mmvq_nw1_r2_gfx906",
+  "backend": "hip",
+  "arch": "gfx906",
+  "op": "qmatmul",
+  "dtype": "Q4_K",
+  "dtype_q": "Q8_1",
+  "source": {
+    "file": "crates/kernels-hip/src/mmvq.cu",
+    "symbol": "mul_mat_vec_q4_K_q8_1_nw1_r2",
+    "port_of": "candle P29 — candle-hip-kernels/src/quantized.cu::indexed_moe_forward_q4k_q8_1_nw1 pattern adapted to dense MMVQ"
+  },
+  "correctness": {
+    "reference": "gpu_dequant + f32_matmul (rocBLAS)",
+    "tolerance": { "max_abs_scale": 5e-3, "absolute_floor": 1.0 },
+    "shapes_tested": [
+      { "m": 1,   "k": 2048, "n": 2048,   "max_abs_diff": 2.1e-4, "status": "pass" },
+      { "m": 1,   "k": 5120, "n": 5120,   "max_abs_diff": 3.4e-4, "status": "pass" },
+      { "m": 8,   "k": 5120, "n": 5120,   "max_abs_diff": 4.1e-4, "status": "pass" },
+      { "m": 16,  "k": 5120, "n": 128256, "max_abs_diff": 6.2e-4, "status": "pass" }
+    ],
+    "summary": { "total": 4, "passed": 4, "failed": 0 }
+  },
+  "pmc": {
+    "tool": "rocprofv3",
+    "driver": "ROCm 7.1.1",
+    "counters": {
+      "vgpr_count": 48,
+      "waves_per_simd": 4,
+      "lds_bytes_per_block": 0,
+      "valu_busy_pct": 58.2,
+      "mem_busy_pct": 72.4,
+      "mem_stall_pct": 4.1,
+      "avg_ns_per_call": 34200,
+      "shape_profiled": { "m": 1, "k": 5120, "n": 5120 }
+    }
+  },
+  "perf": {
+    "shape_profiled": { "m": 1, "k": 5120, "n": 5120 },
+    "median_us": 34.2,
+    "p95_us": 35.8,
+    "calls_profiled": 512,
+    "compared_against": [
+      { "impl_id": "qmatmul_q4_K_mmvq_nw1_r1_gfx906", "median_us": 47.1, "ratio": 1.38 }
+    ]
+  },
+  "committed": {
+    "git_sha": "0000000000000000000000000000000000000000",
+    "date_utc": "2026-04-20T00:00:00Z",
+    "rig": "example-rig"
+  }
+}

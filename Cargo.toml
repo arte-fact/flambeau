@@ -1,0 +1,54 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/core",
+    "crates/quant",
+    "crates/kernels-shared",
+    "crates/kernels-hip",
+    "crates/backend-hip",
+    "crates/ops",
+    "crates/models/qwen3-moe",
+    "crates/runtime",
+    "crates/bench",
+    "crates/autotune",
+    "crates/server",
+    "crates/mcp-server",
+    "crates/cli",
+]
+
+[workspace.package]
+version = "0.1.0-dev"
+edition = "2021"
+rust-version = "1.82"
+license = "Apache-2.0"
+repository = "https://github.com/arte-fact/flambeau"
+
+[workspace.dependencies]
+# Shared across crates — pin once here, reference via `workspace = true`.
+anyhow = "1"
+thiserror = "2"
+bytemuck = { version = "1", features = ["derive"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+toml = "0.8"
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "signal"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+# Server
+axum = { version = "0.7", features = ["json"] }
+tower = "0.5"
+# Model loading
+memmap2 = "0.9"
+tokenizers = "0.20"
+minijinja = "2"
+# CLI
+clap = { version = "4", features = ["derive"] }
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+codegen-units = 1
+debug = 1          # keep line info for rocprofv3 / perf attribution
+
+[profile.dev]
+opt-level = 1      # compiled kernels are slow without this; pure-Rust is fine at 1

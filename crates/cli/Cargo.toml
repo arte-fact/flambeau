@@ -1,0 +1,24 @@
+[package]
+name = "flambeau-cli"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "flambeau"
+path = "src/main.rs"
+
+[dependencies]
+flambeau-core = { path = "../core" }
+flambeau-quant = { path = "../quant" }
+flambeau-runtime = { path = "../runtime" }
+flambeau-bench = { path = "../bench" }
+flambeau-autotune = { path = "../autotune" }
+flambeau-server = { path = "../server" }
+flambeau-mcp-server = { path = "../mcp-server" }
+anyhow.workspace = true
+clap.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true

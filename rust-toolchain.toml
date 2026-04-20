@@ -1,0 +1,6 @@
+[toolchain]
+# Floating stable. Minimum supported: 1.85 (for edition2024 in transitive deps).
+# Pin a concrete version here if reproducibility matters more than ease of upgrade.
+channel = "stable"
+components = ["rustfmt", "clippy"]
+profile = "minimal"

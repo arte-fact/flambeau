@@ -1,0 +1,13 @@
+[package]
+name = "flambeau-backend-hip"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "HIP device/stream/allocator + kernel-impl registrations against flambeau-core traits."
+
+[dependencies]
+flambeau-core = { path = "../core" }
+flambeau-kernels-hip = { path = "../kernels-hip" }
+anyhow.workspace = true
+thiserror.workspace = true

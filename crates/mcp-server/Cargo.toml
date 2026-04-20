@@ -1,0 +1,18 @@
+[package]
+name = "flambeau-mcp-server"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "M-track — dev-only MCP server exposing sweep/matrix/profile/A-B/inspect/cert-diff tools. Never prod."
+
+[dependencies]
+flambeau-core = { path = "../core" }
+flambeau-bench = { path = "../bench" }
+flambeau-autotune = { path = "../autotune" }
+anyhow.workspace = true
+axum.workspace = true
+tokio.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tracing.workspace = true

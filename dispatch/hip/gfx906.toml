@@ -1,0 +1,46 @@
+# HIP gfx906 (Radeon VII / MI50) dispatch matrix — PRIMARY tuned target.
+#
+# Schema:
+#   [[<op_family>]]               # qmatmul | qmatmul_moe | attention_decode |
+#                                 # attention_prefill | rmsnorm | rope | softmax |
+#                                 # swiglu | topk | quantize | collective
+#   dtype       = "Q4_K"          # single dtype string, or list for multi-dtype ops
+#   dtype_q     = "F16"           # optional — activation dtype for quant ops
+#   shape       = { <axis> = "<predicate>", ... }
+#                                 # predicates: "any" | ">=N" | "<N" | "A..B" | literal
+#                                 # axes depend on op family (m/k/n for matmul;
+#                                 # d/n_kv/l_k for attention; etc.)
+#   impl        = "<impl_id>"     # matches a KernelImpl::ID in backend-hip
+#   cert        = "certs/hip/gfx906/<impl_id>.json"
+#   notes       = "<optional one-liner>"   # human memo; not load-bearing
+#
+# Rules:
+#   - Every `impl` must reference an IMPL registered in backend-hip.
+#   - Every `cert` path must exist and be green. `bench cert-check` enforces.
+#   - Two rows whose `shape` predicates both match the same concrete shape = build error.
+#   - Most-specific predicate wins. "any" is the fallback.
+#   - No env-flag gating. Runtime overrides go into gfx906.local.toml (gitignored).
+#
+# V1.0: this file is EMPTY except for the example block below. Real rows land in
+# V1.3+ as kernels + certs land. Delete the `.example` row when the first real
+# QMatMul cert lands.
+
+# ------------------------------------------------------------------------------
+# EXAMPLE — remove once a real row replaces it.
+# Illustrates the shape-predicate grammar and cert path convention.
+# ------------------------------------------------------------------------------
+[[qmatmul.example]]
+dtype  = "Q4_K"
+dtype_q = "Q8_1"                                       # activation quantized to Q8_1
+shape  = { m = "1..16", k = "any", n = "any" }         # decode / small-M path
+impl   = "qmatmul_q4_K_mmvq_nw1_r2_gfx906"             # id from KernelImpl::ID
+cert   = "certs/hip/gfx906/.example/qmatmul_q4_K_mmvq_nw1_r2_gfx906.json"
+notes  = "Decode MMVQ with multi-row DPP reduce (r2). Port of candle P29."
+
+[[qmatmul.example]]
+dtype  = "Q4_K"
+dtype_q = "Q8_1"
+shape  = { m = ">=128", k = "any", n = "any" }         # prefill path
+impl   = "qmatmul_q4_K_mmq_turbo_4warp_x8_gfx906"
+cert   = "certs/hip/gfx906/.example/qmatmul_q4_K_mmq_turbo_4warp_x8_gfx906.json"
+notes  = "4-warp LDS-tiled MMQ with stream-K + L2 prefetch. Port of llamacpp-turbo."

@@ -1,0 +1,13 @@
+[package]
+name = "flambeau-quant"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+flambeau-core = { path = "../core" }
+anyhow.workspace = true
+thiserror.workspace = true
+bytemuck.workspace = true
+memmap2.workspace = true

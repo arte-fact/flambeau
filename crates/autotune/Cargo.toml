@@ -1,0 +1,15 @@
+[package]
+name = "flambeau-autotune"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "T-track warmup-tuner: shape recorder + micro-bench runner + local-override writer. Selects between certed variants only."
+
+[dependencies]
+flambeau-core = { path = "../core" }
+flambeau-bench = { path = "../bench" }
+anyhow.workspace = true
+serde.workspace = true
+toml.workspace = true
+tracing.workspace = true

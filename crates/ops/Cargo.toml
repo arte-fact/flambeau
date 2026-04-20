@@ -1,0 +1,11 @@
+[package]
+name = "flambeau-ops"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "High-level fused ops (Attention, MoE, DenseMlp, SwiGLU, RmsNorm, RoPE, GDN) composed from core traits. Mesh-generic."
+
+[dependencies]
+flambeau-core = { path = "../core" }
+anyhow.workspace = true

@@ -1,0 +1,32 @@
+# Rust build
+/target
+**/target
+Cargo.lock.bak
+
+# Machine-local autotuner overrides (T-track). Committed table is source of truth.
+dispatch/**/*.local.toml
+
+# rocprofv3 / Nsight traces
+/profiles/
+*.rocpd
+*.csv.rocprof
+*.json.rocprof
+*.nsys-rep
+*.ncu-rep
+
+# Compiled kernel artefacts cached outside target/
+*.hsaco
+*.cubin
+*.fatbin
+
+# Editor / OS
+.DS_Store
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# Python venvs (if any)
+.venv/
+venv/
