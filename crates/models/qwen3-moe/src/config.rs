@@ -147,6 +147,13 @@ pub struct Qwen3MoEConfig {
 }
 
 impl Qwen3MoEConfig {
+    /// `true` iff this is the dense-hybrid arch (`qwen35`) — no routed MoE
+    /// experts, only a single dense FFN per layer. Used by the loader +
+    /// forward path to pick the dense-FFN code path (V2.2).
+    pub fn is_dense_ffn(&self) -> bool {
+        self.num_experts == 0
+    }
+
     /// Parse config from an opened GGUF file. Fails with a typed error if
     /// required keys are missing or the architecture tag isn't supported.
     pub fn from_gguf(file: &GgufFile) -> Result<Self, Qwen3MoEConfigError> {
