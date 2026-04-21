@@ -1,0 +1,76 @@
+{
+  "schema_version": 1,
+  "impl_id": "rmsnorm_f16_gfx906",
+  "backend": "hip",
+  "arch": "gfx906",
+  "op": "rmsnorm",
+  "dtype_weight": "F16",
+  "dtype_activation": "F16",
+  "tolerance_formula": "|err| <= 1e-2 * max(|ref|, sqrt(k))",
+  "results": [
+    {
+      "m": 1,
+      "k": 2048,
+      "n": 2048,
+      "seed": 13532696731359440213,
+      "max_rel_err": 0.0,
+      "tolerance": 0.01,
+      "pass": true
+    },
+    {
+      "m": 1,
+      "k": 5120,
+      "n": 5120,
+      "seed": 6161625717786667349,
+      "max_rel_err": 0.0,
+      "tolerance": 0.01,
+      "pass": true
+    },
+    {
+      "m": 1,
+      "k": 15360,
+      "n": 15360,
+      "seed": 38133079586976085,
+      "max_rel_err": 0.0,
+      "tolerance": 0.01,
+      "pass": true
+    },
+    {
+      "m": 8,
+      "k": 5120,
+      "n": 5120,
+      "seed": 6161625717920288550,
+      "max_rel_err": 0.00034119692,
+      "tolerance": 0.01,
+      "pass": true
+    },
+    {
+      "m": 128,
+      "k": 5120,
+      "n": 5120,
+      "seed": 6161625720210937710,
+      "max_rel_err": 0.00068239385,
+      "tolerance": 0.01,
+      "pass": true
+    },
+    {
+      "m": 512,
+      "k": 5120,
+      "n": 5120,
+      "seed": 6161625727541015022,
+      "max_rel_err": 0.00068239385,
+      "tolerance": 0.01,
+      "pass": true
+    }
+  ],
+  "pass": true,
+  "emitted_at": "2026-04-20T19:28:12Z",
+  "rig": "threadreaper-gfx906",
+  "pmc": {
+    "vgpr_count": 26,
+    "sgpr_count": null,
+    "waves_per_simd": 9,
+    "mem_busy_pct": null,
+    "valu_busy_pct": null
+  }
+}

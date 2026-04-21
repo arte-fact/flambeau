@@ -1,0 +1,49 @@
+{
+  "schema_version": 1,
+  "impl_id": "split_q_gate_f16_gfx906",
+  "backend": "hip",
+  "arch": "gfx906",
+  "op": "split_q_gate",
+  "dtype_weight": "F16",
+  "dtype_activation": "F16",
+  "tolerance_formula": "exact match (strided copy, no arithmetic)",
+  "results": [
+    {
+      "m": 1,
+      "k": 16,
+      "n": 256,
+      "seed": 12643719,
+      "max_rel_err": 0.0,
+      "tolerance": 0.0,
+      "pass": true
+    },
+    {
+      "m": 128,
+      "k": 16,
+      "n": 256,
+      "seed": 12772670,
+      "max_rel_err": 0.0,
+      "tolerance": 0.0,
+      "pass": true
+    },
+    {
+      "m": 1,
+      "k": 2,
+      "n": 256,
+      "seed": 12644461,
+      "max_rel_err": 0.0,
+      "tolerance": 0.0,
+      "pass": true
+    }
+  ],
+  "pass": true,
+  "emitted_at": "2026-04-20T22:26:57Z",
+  "rig": "threadreaper-gfx906",
+  "pmc": {
+    "vgpr_count": 7,
+    "sgpr_count": null,
+    "waves_per_simd": 10,
+    "mem_busy_pct": null,
+    "valu_busy_pct": null
+  }
+}

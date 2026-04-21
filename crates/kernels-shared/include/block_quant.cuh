@@ -1,0 +1,88 @@
+#pragma once
+// Backend-neutral block-quant layouts.
+// Byte-identical to ggml-common.h + candle k_quants.rs so pointer-casts
+// from mmap'd GGUF data work on GPU without repacking.
+
+#include <hip/hip_runtime.h>
+
+#ifndef QK8_0
+#define QK8_0 32
+#endif
+#ifndef QK8_1
+#define QK8_1 32
+#endif
+#ifndef QK_K
+#define QK_K 256
+#endif
+#ifndef K_SCALE_SIZE
+#define K_SCALE_SIZE 12
+#endif
+
+// fp16 — `_Float16` is the HIP/clang built-in half type; ggml calls this
+// `ggml_fp16_t` (a typedef of `__half`). Using the built-in keeps us away
+// from hip/amd_hip_fp16.h's heavier wrapper class for pointer casts.
+typedef _Float16 fb_fp16_t;
+
+typedef struct {
+    fb_fp16_t d;             // scale
+    int8_t    qs[QK8_0];     // signed quants
+} flambeau_block_q8_0;
+static_assert(sizeof(flambeau_block_q8_0) == 2 + QK8_0, "block_q8_0 size");
+
+typedef struct {
+    fb_fp16_t d;             // scale
+    fb_fp16_t s;             // sum(x) * d — used by Q4_1/Q5_1 vec_dot
+    int8_t    qs[QK8_1];     // signed quants
+} flambeau_block_q8_1;
+static_assert(sizeof(flambeau_block_q8_1) == 4 + QK8_1, "block_q8_1 size");
+
+// Q4_K — 4-bit K-quant, super-block of 256 elements split into 8 sub-blocks
+// of 32. Byte-identical to ggml-common.h block_q4_K and to flambeau-quant's
+// BlockQ4K.
+typedef struct {
+    fb_fp16_t d;                           // super-block scale
+    fb_fp16_t dmin;                        // super-block min scale
+    uint8_t   scales[K_SCALE_SIZE];        // packed 6-bit (scale, min) pairs × 8
+    uint8_t   qs[QK_K / 2];                // 256 × 4-bit quants (low/high nibble)
+} flambeau_block_q4_K;
+static_assert(sizeof(flambeau_block_q4_K) == 2 + 2 + K_SCALE_SIZE + QK_K / 2,
+              "block_q4_K size");
+
+// Reconstruct the 6-bit (scale, min) pair for sub-block `j` (0..7) from the
+// packed 12-byte scales array. Mirrors candle's `get_scale_min_k4` exactly.
+__device__ __forceinline__ void flambeau_q4k_scale_min(
+    int j, const uint8_t* __restrict__ q, uint8_t* sc, uint8_t* m) {
+    if (j < 4) {
+        *sc = q[j]     & 63;
+        *m  = q[j + 4] & 63;
+    } else {
+        *sc = (q[j + 4] & 0xF) | ((q[j - 4] >> 6) << 4);
+        *m  = (q[j + 4] >>  4) | ((q[j]     >> 6) << 4);
+    }
+}
+
+// Q5_K — 5-bit K-quant: 4-bit low nibble in `qs` + 1 high bit in `qh`.
+// Byte layout identical to flambeau-quant's BlockQ5K.
+typedef struct {
+    fb_fp16_t d;
+    fb_fp16_t dmin;
+    uint8_t   scales[K_SCALE_SIZE];        // same 6-bit (sc, m) × 8 layout as Q4_K
+    uint8_t   qh[QK_K / 8];                // one high bit per element, 32 bytes
+    uint8_t   qs[QK_K / 2];                // low 4 bits per element, 128 bytes
+} flambeau_block_q5_K;
+static_assert(sizeof(flambeau_block_q5_K) ==
+                  2 + 2 + K_SCALE_SIZE + QK_K / 8 + QK_K / 2,
+              "block_q5_K size");
+
+// Q6_K — 6-bit K-quant: 4-bit low nibble in `ql` + 2 high bits in `qh` +
+// per-16-element i8 scales + super-block `d`. Byte layout identical to
+// flambeau-quant's BlockQ6K.
+typedef struct {
+    uint8_t   ql[QK_K / 2];                // 128 bytes, 4 bits per element
+    uint8_t   qh[QK_K / 4];                // 64 bytes, 2 bits per element
+    int8_t    scales[QK_K / 16];           // 16 signed byte scales
+    fb_fp16_t d;                           // super-block scale
+} flambeau_block_q6_K;
+static_assert(sizeof(flambeau_block_q6_K) ==
+                  QK_K / 2 + QK_K / 4 + QK_K / 16 + 2,
+              "block_q6_K size");

@@ -8,9 +8,13 @@ description = "Session, typed KV cache (F16/Q8/turbo), Mesh<N>, collectives, sam
 
 [dependencies]
 flambeau-core = { path = "../core" }
-flambeau-ops = { path = "../ops" }
 flambeau-quant = { path = "../quant" }
+# flambeau-ops is NOT a dependency: it depends on backend-hip, which depends
+# on runtime, which would cycle. V1.7's mesh-generic trait lands in core.
 anyhow.workspace = true
+bytemuck.workspace = true
+half.workspace = true
+thiserror.workspace = true
 tokio.workspace = true
 tracing.workspace = true
 tokenizers.workspace = true

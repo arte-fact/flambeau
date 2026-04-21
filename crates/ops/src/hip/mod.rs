@@ -1,0 +1,173 @@
+//! HIP-specialised op surface.
+//!
+//! Every model-visible op lands here as a stateless free function taking
+//! `&OpsRegistry` + `&HipStream` + device pointers + shape. The registry
+//! pre-loads one `HipModule` per kernel stem at session init; per-call cost
+//! is one symbol lookup (`hipModuleGetFunction`) + `hipModuleLaunchKernel`.
+//!
+//! Architectural placement:
+//! - Op wrappers here **never** parse hsaco, never write dispatch predicates
+//!   from env flags. They resolve variant selection through the committed
+//!   `KernelDescriptor` tables in `flambeau-backend-hip::impls` (architectural
+//!   rule 1: dispatch lives in `dispatch/<backend>/<arch>.toml`, mirrored by
+//!   the Rust table).
+//! - The lifetime story: each op call borrows `&OpsRegistry` and a `&HipStream`;
+//!   all kernel args are locals in the launch function so they live until
+//!   `kernel.launch(...)` returns. This matches the pattern already in
+//!   `flambeau-bench::sweep_*`.
+
+use std::collections::HashMap;
+
+use anyhow::{anyhow, Result};
+pub use flambeau_backend_hip::{HipDevice, HipStream};
+use flambeau_backend_hip::HipModule;
+use flambeau_core::Device;
+
+pub mod attention;
+pub mod cast;
+pub mod conv;
+pub mod mlp;
+pub mod moe;
+pub mod norm;
+pub mod pe;
+pub mod qmatmul;
+pub mod recurrent;
+pub mod router;
+pub mod softmax;
+
+/// Kernel stems every V1.7 model might touch. Loaded once in
+/// [`OpsRegistry::new`]; missing entries fail fast so model code never races
+/// an unloaded module.
+///
+/// Keep this list aligned with `kernels-hip/src/kernels/*.cu`. The build's
+/// `hsaco.rs` lists the authoritative set in its `CATALOGUE`.
+pub const KERNEL_STEMS: &[&str] = &[
+    // Qmatmul — MMVQ + MMQ, all dtypes.
+    "mmvq_q8_0",
+    "mmvq_q8_0_dp4a",
+    "mmvq_q8_0_dp4a_vdr2",
+    "mmvq_q8_0_llamacpp_style",
+    "mmvq_q8_0_gate_up_dp4a",
+    "mmvq_q4_k",
+    "indexed_moe_mmvq_q4_k_r2_dp4a",
+    "indexed_moe_mmvq_q4_k_gate_up_dp4a",
+    "indexed_moe_mmvq_q4_k_gate_up_mbatch",
+    "mmvq_q4_k_r2",
+    "mmvq_q5_k",
+    "mmvq_q5_k_r2",
+    "mmvq_q6_k",
+    "mmvq_q6_k_r4",
+    "mmvq_q6_k_dp4a",
+    "mmq_q8_0_oracle",
+    "mmq_q8_0_4warp",
+    "mmq_q4_K_4warp",
+    "mmq_q6_K_4warp",
+    // Activation quantisation + glue.
+    "quantize_q8_1",
+    "quantize_f16_q8_1",
+    "cast_f32_f16",
+    "cast_f16_f32",
+    // Norm / pointwise.
+    "rmsnorm_f16",
+    "rmsnorm_f32",
+    "rmsnorm_q8_1_fused",
+    "l2_norm_f32",
+    "causal_conv1d_f32",
+    "gdn_alpha_beta_f32",
+    "gdn_state_step_f32",
+    "shared_expert_scale_f32",
+    "split_q_gate_f16",
+    "swiglu_f16",
+    "swiglu_f32",
+    "silu_f32",
+    "sigmoid_mul_f16",
+    "scale_f32",
+    "add_f16",
+    "rope_f16",
+    "rope_neox_partial_f16",
+    "softmax_masked_f16",
+    // Attention.
+    "attention_decode_f16",
+    "attention_decode_q8_kv",
+    "attention_prefill_f16",
+    // MoE.
+    "topk_f32",
+    "indexed_moe_mmvq_q4_k",
+    "indexed_moe_mmvq_q4_k_r2",
+    "indexed_moe_mmvq_q4_k_gate_up",
+    "indexed_moe_mmvq_q6_k",
+    "indexed_moe_mmq_q4_k",
+    "moe_combine_f16",
+    "dense_gemv_f32_f16",
+];
+
+/// Single-session registry of loaded HIP kernel modules. Built once at model
+/// init, passed by shared reference into every op call.
+pub struct OpsRegistry {
+    device_id: i32,
+    modules: HashMap<&'static str, HipModule>,
+}
+
+/// Sugar so the loader's `impl_id` → `not loaded` mismatch becomes an error
+/// at the call site instead of a panic in `unwrap`.
+#[derive(Debug, thiserror::Error)]
+pub enum OpsRegistryError {
+    #[error("kernel stem `{0}` not present in hsaco catalogue")]
+    Missing(&'static str),
+    #[error("HIP module load for `{stem}` failed: {source}")]
+    Load {
+        stem: &'static str,
+        #[source]
+        source: anyhow::Error,
+    },
+}
+
+impl OpsRegistry {
+    /// Load every entry in [`KERNEL_STEMS`] into a fresh `HipModule`. Fails
+    /// fast if any stem is missing from the catalogue or HIP refuses the load.
+    ///
+    /// Binds `dev` first so the modules load onto the right device even when
+    /// the caller built multiple `OpsRegistry`s back-to-back on a multi-GPU
+    /// cluster — `hipModuleLoadData` silently picks the thread's current
+    /// device, and the resulting "invalid device ordinal" at launch time is
+    /// very hard to trace without this bind.
+    pub fn new(dev: &HipDevice) -> Result<Self, OpsRegistryError> {
+        dev.bind().map_err(|e| OpsRegistryError::Load {
+            stem: "<bind>",
+            source: anyhow!("{e:?}"),
+        })?;
+        let mut modules = HashMap::with_capacity(KERNEL_STEMS.len());
+        for &stem in KERNEL_STEMS {
+            let bytes = flambeau_kernels_hip::hsaco(stem)
+                .ok_or(OpsRegistryError::Missing(stem))?;
+            let module = HipModule::load(dev.id(), bytes).map_err(|e| {
+                OpsRegistryError::Load { stem, source: anyhow!("{e:?}") }
+            })?;
+            modules.insert(stem, module);
+        }
+        Ok(Self { device_id: dev.id(), modules })
+    }
+
+    /// Look up a previously-loaded module by kernel stem. Returns `None` if
+    /// `new` was called without that stem (i.e. `KERNEL_STEMS` drift).
+    pub fn module(&self, stem: &str) -> Option<&HipModule> {
+        self.modules.get(stem)
+    }
+
+    /// Lookup helper that errors with a useful message. Most call sites want
+    /// this.
+    pub(crate) fn expect_module(&self, stem: &'static str) -> Result<&HipModule> {
+        self.modules
+            .get(stem)
+            .ok_or_else(|| anyhow!("kernel stem `{stem}` not loaded in OpsRegistry"))
+    }
+
+    /// HIP device id the registry was bound to; ops sanity-check the stream's
+    /// device matches.
+    pub fn device_id(&self) -> i32 {
+        self.device_id
+    }
+}
+
+// HipDevice / HipStream are re-exported at the top of this module so model
+// crates don't have to depend on `flambeau-backend-hip` directly.

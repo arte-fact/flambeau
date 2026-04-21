@@ -1,0 +1,130 @@
+{
+  "schema_version": 1,
+  "impl_id": "attention_decode_f16_gfx906",
+  "backend": "hip",
+  "arch": "gfx906",
+  "op": "attention_decode",
+  "dtype_weight": "F16",
+  "dtype_activation": "F16",
+  "tolerance_formula": "|err| <= 2e-2 * max(|ref|, sqrt(head_dim))",
+  "results": [
+    {
+      "m": 4,
+      "k": 16,
+      "n": 64,
+      "seed": 14251854,
+      "max_rel_err": 0.0,
+      "tolerance": 0.02,
+      "pass": true
+    },
+    {
+      "m": 4,
+      "k": 128,
+      "n": 64,
+      "seed": 14238622,
+      "max_rel_err": 0.0,
+      "tolerance": 0.02,
+      "pass": true
+    },
+    {
+      "m": 4,
+      "k": 1024,
+      "n": 64,
+      "seed": 14214430,
+      "max_rel_err": 0.0,
+      "tolerance": 0.02,
+      "pass": true
+    },
+    {
+      "m": 4,
+      "k": 4096,
+      "n": 64,
+      "seed": 14623006,
+      "max_rel_err": 0.0,
+      "tolerance": 0.02,
+      "pass": true
+    },
+    {
+      "m": 32,
+      "k": 16,
+      "n": 128,
+      "seed": 13744910,
+      "max_rel_err": 0.00094161957,
+      "tolerance": 0.02,
+      "pass": true
+    },
+    {
+      "m": 32,
+      "k": 128,
+      "n": 128,
+      "seed": 13733854,
+      "max_rel_err": 0.00013486992,
+      "tolerance": 0.02,
+      "pass": true
+    },
+    {
+      "m": 32,
+      "k": 1024,
+      "n": 128,
+      "seed": 13642078,
+      "max_rel_err": 0.00003371748,
+      "tolerance": 0.02,
+      "pass": true
+    },
+    {
+      "m": 32,
+      "k": 4096,
+      "n": 128,
+      "seed": 14151006,
+      "max_rel_err": 0.00001685874,
+      "tolerance": 0.02,
+      "pass": true
+    },
+    {
+      "m": 16,
+      "k": 16,
+      "n": 256,
+      "seed": 12592014,
+      "max_rel_err": 0.00061387353,
+      "tolerance": 0.02,
+      "pass": true
+    },
+    {
+      "m": 16,
+      "k": 128,
+      "n": 256,
+      "seed": 12588894,
+      "max_rel_err": 0.000011920929,
+      "tolerance": 0.02,
+      "pass": true
+    },
+    {
+      "m": 16,
+      "k": 1024,
+      "n": 256,
+      "seed": 12693982,
+      "max_rel_err": 0.000047683716,
+      "tolerance": 0.02,
+      "pass": true
+    },
+    {
+      "m": 16,
+      "k": 4096,
+      "n": 256,
+      "seed": 13006302,
+      "max_rel_err": 0.000023841858,
+      "tolerance": 0.02,
+      "pass": true
+    }
+  ],
+  "pass": true,
+  "emitted_at": "2026-04-21T09:56:44Z",
+  "rig": "threadreaper-gfx906",
+  "pmc": {
+    "vgpr_count": 20,
+    "sgpr_count": null,
+    "waves_per_simd": 10,
+    "mem_busy_pct": null,
+    "valu_busy_pct": null
+  }
+}

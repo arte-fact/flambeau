@@ -1,0 +1,94 @@
+{
+  "schema_version": 1,
+  "impl_id": "attention_prefill_f16_gfx906",
+  "backend": "hip",
+  "arch": "gfx906",
+  "op": "attention_prefill",
+  "dtype_weight": "F16",
+  "dtype_activation": "F16",
+  "tolerance_formula": "|err| <= 2e-2 * max(|ref|, sqrt(head_dim))",
+  "results": [
+    {
+      "m": 8,
+      "k": 8,
+      "n": 128,
+      "seed": 13745806,
+      "max_rel_err": 0.00093457947,
+      "tolerance": 0.02,
+      "pass": true
+    },
+    {
+      "m": 128,
+      "k": 128,
+      "n": 128,
+      "seed": 13729886,
+      "max_rel_err": 0.0007342144,
+      "tolerance": 0.02,
+      "pass": true
+    },
+    {
+      "m": 128,
+      "k": 640,
+      "n": 128,
+      "seed": 13746270,
+      "max_rel_err": 0.00026973983,
+      "tolerance": 0.02,
+      "pass": true
+    },
+    {
+      "m": 512,
+      "k": 512,
+      "n": 128,
+      "seed": 13715806,
+      "max_rel_err": 0.0009487666,
+      "tolerance": 0.02,
+      "pass": true
+    },
+    {
+      "m": 8,
+      "k": 8,
+      "n": 256,
+      "seed": 12592654,
+      "max_rel_err": 0.00038146973,
+      "tolerance": 0.02,
+      "pass": true
+    },
+    {
+      "m": 128,
+      "k": 128,
+      "n": 256,
+      "seed": 12589278,
+      "max_rel_err": 0.00076293945,
+      "tolerance": 0.02,
+      "pass": true
+    },
+    {
+      "m": 128,
+      "k": 640,
+      "n": 256,
+      "seed": 12605662,
+      "max_rel_err": 0.00019073486,
+      "tolerance": 0.02,
+      "pass": true
+    },
+    {
+      "m": 512,
+      "k": 512,
+      "n": 256,
+      "seed": 12636638,
+      "max_rel_err": 0.00076293945,
+      "tolerance": 0.02,
+      "pass": true
+    }
+  ],
+  "pass": true,
+  "emitted_at": "2026-04-21T10:04:52Z",
+  "rig": "threadreaper-gfx906",
+  "pmc": {
+    "vgpr_count": 20,
+    "sgpr_count": null,
+    "waves_per_simd": 10,
+    "mem_busy_pct": null,
+    "valu_busy_pct": null
+  }
+}

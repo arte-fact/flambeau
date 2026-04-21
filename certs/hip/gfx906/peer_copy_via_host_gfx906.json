@@ -1,0 +1,67 @@
+{
+  "schema_version": 1,
+  "impl_id": "peer_copy_via_host_gfx906",
+  "backend": "hip",
+  "arch": "gfx906",
+  "op": "peer_copy_via_host",
+  "dtype_weight": "U8",
+  "dtype_activation": "U8",
+  "tolerance_formula": "exact byte-pattern round-trip across all (src, dst) pairs",
+  "results": [
+    {
+      "m": 4096,
+      "k": 1,
+      "n": 1,
+      "seed": 11263471,
+      "max_rel_err": 0.0,
+      "tolerance": 0.0,
+      "pass": true
+    },
+    {
+      "m": 65536,
+      "k": 1,
+      "n": 1,
+      "seed": 11193839,
+      "max_rel_err": 0.0,
+      "tolerance": 0.0,
+      "pass": true
+    },
+    {
+      "m": 262144,
+      "k": 1,
+      "n": 1,
+      "seed": 11521519,
+      "max_rel_err": 0.0,
+      "tolerance": 0.0,
+      "pass": true
+    },
+    {
+      "m": 4194304,
+      "k": 1,
+      "n": 1,
+      "seed": 15453679,
+      "max_rel_err": 0.0,
+      "tolerance": 0.0,
+      "pass": true
+    },
+    {
+      "m": 16777216,
+      "k": 1,
+      "n": 1,
+      "seed": 28036591,
+      "max_rel_err": 0.0,
+      "tolerance": 0.0,
+      "pass": true
+    }
+  ],
+  "pass": true,
+  "emitted_at": "2026-04-21T08:55:56Z",
+  "rig": "threadreaper-gfx906",
+  "pmc": {
+    "vgpr_count": null,
+    "sgpr_count": null,
+    "waves_per_simd": null,
+    "mem_busy_pct": null,
+    "valu_busy_pct": null
+  }
+}

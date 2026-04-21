@@ -1,0 +1,40 @@
+{
+  "schema_version": 1,
+  "impl_id": "indexed_moe_mmvq_q6_k_gfx906",
+  "backend": "hip",
+  "arch": "gfx906",
+  "op": "indexed_moe_mmvq",
+  "dtype_weight": "Q6_K",
+  "dtype_activation": "Q8_1",
+  "tolerance_formula": "|err| <= 5e-2 * max(|ref|, sqrt(k))  (Q6_K weights; same envelope as Q4_K MoE MMVQ)",
+  "results": [
+    {
+      "m": 1,
+      "k": 512,
+      "n": 256,
+      "seed": 14576490,
+      "max_rel_err": 0.0025927057,
+      "tolerance": 0.05,
+      "pass": true
+    },
+    {
+      "m": 4,
+      "k": 512,
+      "n": 256,
+      "seed": 14576139,
+      "max_rel_err": 0.002349139,
+      "tolerance": 0.05,
+      "pass": true
+    }
+  ],
+  "pass": true,
+  "emitted_at": "2026-04-21T10:17:15Z",
+  "rig": "threadreaper-gfx906",
+  "pmc": {
+    "vgpr_count": 22,
+    "sgpr_count": null,
+    "waves_per_simd": 10,
+    "mem_busy_pct": null,
+    "valu_busy_pct": null
+  }
+}

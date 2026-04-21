@@ -4,43 +4,390 @@
 #   [[<op_family>]]               # qmatmul | qmatmul_moe | attention_decode |
 #                                 # attention_prefill | rmsnorm | rope | softmax |
 #                                 # swiglu | topk | quantize | collective
-#   dtype       = "Q4_K"          # single dtype string, or list for multi-dtype ops
-#   dtype_q     = "F16"           # optional — activation dtype for quant ops
+#   dtype       = "Q4_K"          # single dtype string
+#   dtype_q     = "Q8_1"          # activation dtype for quant ops
 #   shape       = { <axis> = "<predicate>", ... }
 #                                 # predicates: "any" | ">=N" | "<N" | "A..B" | literal
-#                                 # axes depend on op family (m/k/n for matmul;
-#                                 # d/n_kv/l_k for attention; etc.)
 #   impl        = "<impl_id>"     # matches a KernelImpl::ID in backend-hip
 #   cert        = "certs/hip/gfx906/<impl_id>.json"
-#   notes       = "<optional one-liner>"   # human memo; not load-bearing
+#   notes       = "<optional one-liner>"
 #
 # Rules:
 #   - Every `impl` must reference an IMPL registered in backend-hip.
-#   - Every `cert` path must exist and be green. `bench cert-check` enforces.
-#   - Two rows whose `shape` predicates both match the same concrete shape = build error.
+#   - Every `cert` path must exist and be green. `flambeau cert-check --arch gfx906`
+#     enforces.
+#   - Two rows whose `shape` predicates both match the same concrete shape =
+#     build-time error.
 #   - Most-specific predicate wins. "any" is the fallback.
-#   - No env-flag gating. Runtime overrides go into gfx906.local.toml (gitignored).
+#   - No env-flag gating. Runtime overrides go in gfx906.local.toml (gitignored).
 #
-# V1.0: this file is EMPTY except for the example block below. Real rows land in
-# V1.3+ as kernels + certs land. Delete the `.example` row when the first real
-# QMatMul cert lands.
+# V1.3: multi-row DPP MMVQ kernels (candle P29 `_nw1_r{2,4}`) are the active
+# dispatch targets for Q4_K/Q5_K/Q6_K on the decode path. Q8_0 ships the
+# 256-thread single-row kernel. Single-row reference MMVQ kernels for the
+# K-quants are kept in-tree for cert cross-checks; their certs live at
+# `certs/hip/gfx906/qmatmul_q{4,5,6}_K_mmvq_single_row_gfx906.json` but are
+# not dispatched from.
 
-# ------------------------------------------------------------------------------
-# EXAMPLE — remove once a real row replaces it.
-# Illustrates the shape-predicate grammar and cert path convention.
-# ------------------------------------------------------------------------------
-[[qmatmul.example]]
-dtype  = "Q4_K"
-dtype_q = "Q8_1"                                       # activation quantized to Q8_1
-shape  = { m = "1..16", k = "any", n = "any" }         # decode / small-M path
-impl   = "qmatmul_q4_K_mmvq_nw1_r2_gfx906"             # id from KernelImpl::ID
-cert   = "certs/hip/gfx906/.example/qmatmul_q4_K_mmvq_nw1_r2_gfx906.json"
-notes  = "Decode MMVQ with multi-row DPP reduce (r2). Port of candle P29."
+# ----- QMatMul MMVQ (decode / small-M path) ---------------------------------
+#
+# V1.7.6.f: Runtime Recipe::from_impl_id in ops/hip/qmatmul.rs intercepts the
+# dispatch-table impl_ids and rewrites them to DP4A variants (validated
+# bit-for-bit parity vs llama.cpp on Qwen3.6-35B 8-token greedy). The rows
+# below remain the "table of record" baseline; the DP4A variants inherit the
+# same cert since they're numerically equivalent modulo float-accumulation
+# order. FLAMBEAU_VARIANT=baseline reverts at runtime for regression testing.
 
-[[qmatmul.example]]
-dtype  = "Q4_K"
+[[qmatmul]]
+dtype   = "Q8_0"
 dtype_q = "Q8_1"
-shape  = { m = ">=128", k = "any", n = "any" }         # prefill path
-impl   = "qmatmul_q4_K_mmq_turbo_4warp_x8_gfx906"
-cert   = "certs/hip/gfx906/.example/qmatmul_q4_K_mmq_turbo_4warp_x8_gfx906.json"
-notes  = "4-warp LDS-tiled MMQ with stream-K + L2 prefetch. Port of llamacpp-turbo."
+shape   = { m = "1..3", k = "any", n = "any" }
+impl    = "qmatmul_q8_0_mmvq_single_row_gfx906"
+cert    = "certs/hip/gfx906/qmatmul_q8_0_mmvq_single_row_gfx906.json"
+notes   = "Runtime intercept: DP4A VDR=2 variant (mmvq_q8_0_dp4a_vdr2, +19% decode vs scalar). Base row kept for baseline reference. 256-thread, wave64, DPP warp reduce."
+
+[[qmatmul]]
+dtype   = "Q4_K"
+dtype_q = "Q8_1"
+shape   = { m = "1..127", k = "any", n = "any" }
+impl    = "qmatmul_q4_K_mmvq_nw1_r2_gfx906"
+cert    = "certs/hip/gfx906/qmatmul_q4_K_mmvq_nw1_r2_gfx906.json"
+notes   = "P29 multi-row DPP r2 — 2 output rows per wave64, half-warp reduce. VGPR 24, waves/SIMD 10. Narrowed to m<=127 in V1.4 — Q4_K MMQ handles m>=128."
+
+[[qmatmul]]
+dtype   = "Q5_K"
+dtype_q = "Q8_1"
+shape   = { m = "1..512", k = "any", n = "any" }
+impl    = "qmatmul_q5_K_mmvq_nw1_r2_gfx906"
+cert    = "certs/hip/gfx906/qmatmul_q5_K_mmvq_nw1_r2_gfx906.json"
+notes   = "P29 r2 variant of Q4_K r2; adds 5th bit from qh[]. VGPR 25, waves/SIMD 10."
+
+[[qmatmul]]
+dtype   = "Q6_K"
+dtype_q = "Q8_1"
+shape   = { m = "1..127", k = "any", n = "any" }
+impl    = "qmatmul_q6_K_mmvq_nw1_r4_gfx906"
+cert    = "certs/hip/gfx906/qmatmul_q6_K_mmvq_nw1_r4_gfx906.json"
+notes   = "Runtime intercept: DP4A variant (mmvq_q6_k_dp4a, 3.24× per-call speedup — biggest single-kernel structural win on LM-head). Base row kept for baseline reference."
+
+# ----- QMatMul MMQ (prefill / large-M path) ---------------------------------
+#
+# V1.4: only the Q8_0 correctness oracle is live. First-class 4-warp
+# LDS-tiled kernels (llamacpp-turbo port) + Q4_K / Q6_K MMQ variants land
+# next session; they replace the same impl_id column with faster kernels
+# tested against this oracle cert.
+
+[[qmatmul_mmq]]
+dtype   = "Q8_0"
+dtype_q = "Q8_1"
+shape   = { m = ">=128", k = "any", n = "any" }
+impl    = "qmatmul_q8_0_mmq_4warp_lds_gfx906"
+cert    = "certs/hip/gfx906/qmatmul_q8_0_mmq_4warp_lds_gfx906.json"
+notes   = "4-warp LDS-tiled. MMQ_Y=32, MMQ_X=8, 256 threads/block. Manual int8x4 dot; dp4a/v_dot4_i32_i8 refactor is the next V1.4 perf step, followed by stream-K fixup + L2 prefetch."
+
+[[qmatmul_mmq]]
+dtype   = "Q4_K"
+dtype_q = "Q8_1"
+shape   = { m = ">=128", k = "any", n = "any" }
+impl    = "qmatmul_q4_K_mmq_4warp_lds_gfx906"
+cert    = "certs/hip/gfx906/qmatmul_q4_K_mmq_4warp_lds_gfx906.json"
+notes   = "V1.4 — 4-warp LDS-tiled Q4_K MMQ. MMQ_Y=16, MMQ_X=8, 128 threads. F32 dequant-into-LDS; int8-tile + dp4a refactor is the next perf step."
+
+[[qmatmul_mmq]]
+dtype   = "Q6_K"
+dtype_q = "Q8_1"
+shape   = { m = ">=128", k = "any", n = "any" }
+impl    = "qmatmul_q6_K_mmq_4warp_lds_gfx906"
+cert    = "certs/hip/gfx906/qmatmul_q6_K_mmq_4warp_lds_gfx906.json"
+notes   = "V1.4 — 4-warp LDS-tiled Q6_K MMQ. Same tile shape as Q4_K; inner dequant uses ql/qh/i8-scales split."
+
+# ----- RMSNorm (V1.6 fused decode path) -------------------------------------
+
+[[rmsnorm]]
+dtype   = "F16"
+dtype_q = "F16"
+shape   = { m = "any", k = "any", n = "any" }
+impl    = "rmsnorm_f16_gfx906"
+cert    = "certs/hip/gfx906/rmsnorm_f16_gfx906.json"
+notes   = "256-thread/row, warp+cross-warp sum_sq reduce, rsqrt broadcast, elementwise scale."
+
+[[rmsnorm]]
+dtype   = "F16"
+dtype_q = "Q8_1"
+shape   = { m = "any", k = "any", n = "any" }
+impl    = "rmsnorm_q8_1_fused_gfx906"
+cert    = "certs/hip/gfx906/rmsnorm_q8_1_fused_gfx906.json"
+notes   = "Candle D1 — fused RMSNorm + Q8_1 quantize, saves 2× dispatch per layer."
+
+# ----- SwiGLU (FFN gate*up) -------------------------------------------------
+
+[[swiglu]]
+dtype   = "F16"
+dtype_q = "F16"
+shape   = { m = "any", k = "any", n = "any" }
+impl    = "swiglu_f16_gfx906"
+cert    = "certs/hip/gfx906/swiglu_f16_gfx906.json"
+notes   = "Pure pointwise silu(gate) * up, one thread per element. VGPR 10, waves/SIMD 10."
+
+# ----- RoPE (interleaved-pair rotary positional embedding) ------------------
+
+[[rope]]
+dtype   = "F16"
+dtype_q = "F16"
+shape   = { m = "any", k = "any", n = "any" }
+impl    = "rope_f16_gfx906"
+cert    = "certs/hip/gfx906/rope_f16_gfx906.json"
+notes   = "In-place F16 RoPE, interleaved-pair (Qwen3/gemma4 layout). head_dim/2 threads per block. VGPR 20."
+
+# ----- Gated attention Q/gate split (V1.7.2.E — Qwen3.5/3.6 full-attn) ----
+
+[[split_q_gate]]
+dtype   = "F16"
+dtype_q = "F16"
+shape   = { m = "any", k = "any", n = "any" }
+impl    = "split_q_gate_f16_gfx906"
+cert    = "certs/hip/gfx906/split_q_gate_f16_gfx906.json"
+notes   = "Strided split of attn_q output into contiguous Q + gate tensors. Post-attn, ops::mlp::swiglu_f16(gate, attn_out) applies silu(gate)*attn_out."
+
+# ----- Shared-expert gate scale (V1.7.2.D — Qwen3.5/3.6 MoE) ---------------
+
+[[shared_expert_scale]]
+dtype   = "F32"
+dtype_q = "F32"
+shape   = { m = "any", k = "any", n = "any" }
+impl    = "shared_expert_scale_f32_gfx906"
+cert    = "certs/hip/gfx906/shared_expert_scale_f32_gfx906.json"
+notes   = "Per-token sigmoid(dot(gate_w, x)) + in-place scale shared_out. 256 threads/row."
+
+# ----- Causal depthwise conv1d (V1.7.2.C — GDN input stage) ----------------
+
+[[causal_conv1d]]
+dtype   = "F32"
+dtype_q = "F32"
+shape   = { m = "any", k = "any", n = "any" }
+impl    = "causal_conv1d_f32_gfx906"
+cert    = "certs/hip/gfx906/causal_conv1d_f32_gfx906.json"
+notes   = "Depthwise 1D conv with causal concat of (conv_kernel-1) history + n_new tokens. 256 threads/block, one block per (channel_tile, n_new)."
+
+# ----- F32 → F16 cast glue (V1.7.3-b) --------------------------------------
+
+[[cast_f32_f16]]
+dtype   = "F32"
+dtype_q = "F16"
+shape   = { m = "any", k = "any", n = "any" }
+impl    = "cast_f32_f16_gfx906"
+cert    = "certs/hip/gfx906/cast_f32_f16_gfx906.json"
+notes   = "Pointwise F32→F16 cast. 256 threads/block. Bridges MMVQ F32 output into F16 attention/rmsnorm inputs."
+
+# ----- F16 → F32 cast glue (V1.7.3-c1) -------------------------------------
+
+[[cast_f16_f32]]
+dtype   = "F16"
+dtype_q = "F32"
+shape   = { m = "any", k = "any", n = "any" }
+impl    = "cast_f16_f32_gfx906"
+cert    = "certs/hip/gfx906/cast_f16_f32_gfx906.json"
+notes   = "Pointwise F16→F32 cast. 256 threads/block. Bridges F16 attn_norm output into F32 GDN internal recurrence."
+
+# ----- F32 SiLU / SwiGLU / scale / rmsnorm (V1.7.3-c1 GDN pointwise) -------
+
+[[silu_f32]]
+dtype   = "F32"
+dtype_q = "F32"
+shape   = { m = "any", k = "any", n = "any" }
+impl    = "silu_f32_gfx906"
+cert    = "certs/hip/gfx906/silu_f32_gfx906.json"
+notes   = "Pointwise silu(x) = x / (1 + exp(-x)). 256 threads/block. Used on GDN conv_out."
+
+[[swiglu_f32]]
+dtype   = "F32"
+dtype_q = "F32"
+shape   = { m = "any", k = "any", n = "any" }
+impl    = "swiglu_f32_gfx906"
+cert    = "certs/hip/gfx906/swiglu_f32_gfx906.json"
+notes   = "Pointwise y = silu(a) * b. F32 counterpart of swiglu_f16. GDN gated-output compose."
+
+[[scale_f32]]
+dtype   = "F32"
+dtype_q = "F32"
+shape   = { m = "any", k = "any", n = "any" }
+impl    = "scale_f32_gfx906"
+cert    = "certs/hip/gfx906/scale_f32_gfx906.json"
+notes   = "Pointwise y = x * scale. GDN Q-scale by 1/sqrt(head_k_dim) pre state-step."
+
+[[rmsnorm_f32]]
+dtype   = "F32"
+dtype_q = "F32"
+shape   = { m = "any", k = "any", n = "any" }
+impl    = "rmsnorm_f32_gfx906"
+cert    = "certs/hip/gfx906/rmsnorm_f32_gfx906.json"
+notes   = "Per-row F32 RMSNorm. 256 threads/row. Used by GDN ssm_norm per-head."
+
+# ----- F16 + F16 residual add (V1.7.3-e1) ----------------------------------
+
+[[add_f16]]
+dtype   = "F16"
+dtype_q = "F16"
+shape   = { m = "any", k = "any", n = "any" }
+impl    = "add_f16_gfx906"
+cert    = "certs/hip/gfx906/add_f16_gfx906.json"
+notes   = "Pointwise F16 addition. 256 threads/block. Residual fan-in primitive for forward_one_token (per-layer residual sum + shared-expert merge)."
+
+# ----- MoE router GEMV (V1.7.3-d3) -----------------------------------------
+
+[[dense_gemv_f32_f16]]
+dtype   = "F32"
+dtype_q = "F16"
+shape   = { m = "any", k = "any", n = "any" }
+impl    = "dense_gemv_f32_f16_gfx906"
+cert    = "certs/hip/gfx906/dense_gemv_f32_f16_gfx906.json"
+notes   = "Per-row dense F32·F16 GEMV → F32. 256 threads/row. MoE router: ffn_gate_inp.weight × x_norm → expert logits."
+
+# ----- F16 → Q8_1 activation quantise (V1.7.3-g) ---------------------------
+
+[[quantize_f16_q8_1]]
+dtype   = "F16"
+dtype_q = "Q8_1"
+shape   = { m = "any", k = "any", n = "any" }
+impl    = "quantize_f16_q8_1_gfx906"
+cert    = "certs/hip/gfx906/quantize_f16_q8_1_gfx906.json"
+notes   = "F16 → Q8_1 activation quantise. 32 threads per Q8_1 block. Replaces full_attn host-roundtrip between swiglu and output MMVQ."
+
+# ----- GDN fused α/β/gate compute (V1.7.3-g) -------------------------------
+
+[[gdn_alpha_beta]]
+dtype   = "F32"
+dtype_q = "F32"
+shape   = { m = "any", k = "any", n = "any" }
+impl    = "gdn_alpha_beta_f32_gfx906"
+cert    = "certs/hip/gfx906/gdn_alpha_beta_f32_gfx906.json"
+notes   = "Fused gate=softplus(α+dt)*A + beta=sigmoid(β). One block/64 threads; covers num_v_heads ≤ 64. Replaces V1.7.3-c2 host α/β roundtrip."
+
+# ----- Gated-Delta-Net fused recurrent step (V1.7.2.F) ---------------------
+
+[[gdn_state_step]]
+dtype   = "F32"
+dtype_q = "F32"
+shape   = { m = "any", k = 128, n = 128 }
+impl    = "gdn_state_step_f32_s128_gfx906"
+cert    = "certs/hip/gfx906/gdn_state_step_f32_s128_gfx906.json"
+notes   = "Fused per-(B,H) recurrent step at S_v=128 (head_k_dim=head_v_dim=128 on Qwen3.6). One launch handles decode (L=1) and prefill (L>1); state register-resident across the full L loop. 4 warps/block, grid = (H, B, S_v/4). GQA via n_rep."
+
+# ----- L2 norm (V1.7.2.B — used by Gated-Delta-Net on Q and K) -------------
+
+[[l2_norm]]
+dtype   = "F32"
+dtype_q = "F32"
+shape   = { m = "any", k = "any", n = "any" }
+impl    = "l2_norm_f32_gfx906"
+cert    = "certs/hip/gfx906/l2_norm_f32_gfx906.json"
+notes   = "Per-row L2 norm, 256 threads/row, wave64 sum-of-squares reduce. F32 in/out."
+
+# ----- RoPE NeoX-split partial (V1.7.2.A — Qwen3.5/3.6 full-attn layers) ---
+
+[[rope_neox_partial]]
+dtype   = "F16"
+dtype_q = "F16"
+shape   = { m = "any", k = "any", n = "any" }
+impl    = "rope_neox_partial_f16_gfx906"
+cert    = "certs/hip/gfx906/rope_neox_partial_f16_gfx906.json"
+notes   = "In-place F16 NeoX-split partial RoPE. Rotates first rotated_dims of head_dim; pair layout (i, i+rotated_dims/2). rotated_dims/2 threads per block. Matches llama.cpp rope_multi text-only path."
+
+# ----- Masked softmax -------------------------------------------------------
+
+[[softmax]]
+dtype   = "F16"
+dtype_q = "F16"
+shape   = { m = "any", k = "any", n = "any" }
+impl    = "softmax_masked_f16_gfx906"
+cert    = "certs/hip/gfx906/softmax_masked_f16_gfx906.json"
+notes   = "Two-pass online softmax with mask + scale fused. 256 threads/row, wave64 reduce. VGPR 13, waves/SIMD 10."
+
+# ----- Attention decode (GQA fast path, F16 KV) -----------------------------
+
+[[attention_decode]]
+dtype   = "F16"           # KV dtype
+dtype_q = "F16"           # Q / output dtype
+shape   = { m = "1..4", k = "any", n = "any" }   # decode path only
+impl    = "attention_decode_f16_gfx906"
+cert    = "certs/hip/gfx906/attention_decode_f16_gfx906.json"
+notes   = "GQA fused decode, online softmax, head_dim=128. One block per Q head, 128 threads. VGPR 20, waves/SIMD 10."
+
+[[attention_decode]]
+dtype   = "Q8_0"          # KV dtype
+dtype_q = "F16"           # Q / output dtype
+shape   = { m = "1..4", k = "any", n = "any" }
+impl    = "attention_decode_q8_kv_gfx906"
+cert    = "certs/hip/gfx906/attention_decode_q8_kv_gfx906.json"
+notes   = "GQA fused decode with Q8_0 KV (head_dim=128). 2× HBM saving vs F16 KV. Dispatched per-model after V1.7 delta-ppl quality cert passes."
+
+# ----- Attention prefill (causal, F16 KV) -----------------------------------
+
+[[attention_prefill]]
+dtype   = "F16"
+dtype_q = "F16"
+shape   = { m = "any", k = "any", n = "any" }
+impl    = "attention_prefill_f16_gfx906"
+cert    = "certs/hip/gfx906/attention_prefill_f16_gfx906.json"
+notes   = "Online-softmax per (q_token, q_head) with causal limit. Correctness oracle; tiled flash-attn-v2 variant replaces under same impl_id."
+
+[[qmatmul_mmq]]
+dtype   = "Q8_0"
+dtype_q = "Q8_1"
+shape   = { m = "4..127", k = "any", n = "any" }
+impl    = "qmatmul_q8_0_mmq_oracle_gfx906"
+cert    = "certs/hip/gfx906/qmatmul_q8_0_mmq_oracle_gfx906.json"
+notes   = "Correctness oracle — 2D grid of single-wave blocks, one output element per block. Kept as the M<128 fallback until a small-M MMQ variant is cert'd."
+
+# ----- MoE (V1.5 — TopK router + indexed expert matmul + combine) -----------
+
+[[topk]]
+dtype   = "F32"
+dtype_q = "F32"
+shape   = { m = "any", k = "any", n = "any" }
+impl    = "topk_f32_gfx906"
+cert    = "certs/hip/gfx906/topk_f32_gfx906.json"
+notes   = "Iterative find-max + mask over ≤128 experts, top-k ≤ 16. Stable (lower-index-wins on ties). VGPR 16, waves/SIMD 10."
+
+[[indexed_moe_mmvq]]
+dtype   = "Q4_K"
+dtype_q = "Q8_1"
+shape   = { m = "any", k = "any", n = "any" }
+impl    = "indexed_moe_mmvq_q4_k_r2_gfx906"
+cert    = "certs/hip/gfx906/indexed_moe_mmvq_q4_k_r2_gfx906.json"
+notes   = "P29 multi-row DPP r2 — 2 output rows per wave64, half-warp reduce, expert-id indirection. VGPR 24, waves/SIMD 10. Halves launches vs single-row."
+
+[[indexed_moe_mmvq]]
+dtype   = "Q6_K"
+dtype_q = "Q8_1"
+shape   = { m = "any", k = "any", n = "any" }
+impl    = "indexed_moe_mmvq_q6_k_gfx906"
+cert    = "certs/hip/gfx906/indexed_moe_mmvq_q6_k_gfx906.json"
+notes   = "V1.7.5.K — Q6_K MoE MMVQ for UD-Q4_K_S's mixed-quant ffn_down_exps. Single-row wave64, scales-per-16-elem layout, qh upper-2-bit ladder. Multi-row r2/r4 is a follow-up perf lever."
+
+[[moe_combine]]
+dtype   = "F16"
+dtype_q = "F16"
+shape   = { m = "any", k = "any", n = "any" }
+impl    = "moe_combine_f16_gfx906"
+cert    = "certs/hip/gfx906/moe_combine_f16_gfx906.json"
+notes   = "Weighted sum + residual. One thread per (token, hidden_dim) slot. VGPR 24."
+
+# ----- Fused gate+up MoE MMVQ (candle P30) ---------------------------------
+
+[[indexed_moe_mmvq_gate_up]]
+dtype   = "Q4_K"
+dtype_q = "Q8_1"
+shape   = { m = "any", k = "any", n = "any" }
+impl    = "indexed_moe_mmvq_q4_k_gate_up_gfx906"
+cert    = "certs/hip/gfx906/indexed_moe_mmvq_q4_k_gate_up_gfx906.json"
+notes   = "P30 fused gate+up — activation read once, both weight matmuls in same inner loop. Halves launches vs 2× IndexedMoE MMVQ. VGPR 61 / waves 4 (trade register pressure for HBM traffic)."
+
+# ----- Indexed MoE MMQ (V1.5.7 — prefill MoE) ------------------------------
+
+[[indexed_moe_mmq]]
+dtype   = "Q4_K"
+dtype_q = "Q8_1"
+shape   = { m = ">=128", k = "any", n = "any" }
+impl    = "indexed_moe_mmq_q4_k_gfx906"
+cert    = "certs/hip/gfx906/indexed_moe_mmq_q4_k_gfx906.json"
+notes   = "4-warp LDS-tiled MoE MMQ. MMQ_Y=16, MMQ_X=8, 128 threads. Caller sorts (token, slot) pairs into per-expert buckets so the weight tile amortises across MMQ_X slots. VGPR 50."

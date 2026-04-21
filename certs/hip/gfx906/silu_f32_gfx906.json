@@ -1,0 +1,58 @@
+{
+  "schema_version": 1,
+  "impl_id": "silu_f32_gfx906",
+  "backend": "hip",
+  "arch": "gfx906",
+  "op": "silu_f32",
+  "dtype_weight": "F32",
+  "dtype_activation": "F32",
+  "tolerance_formula": "|err| <= 1e-6 * max(|ref|, 1)",
+  "results": [
+    {
+      "m": 64,
+      "k": 1,
+      "n": 1,
+      "seed": 12647341,
+      "max_rel_err": 2.9802322e-8,
+      "tolerance": 0.000001,
+      "pass": true
+    },
+    {
+      "m": 1024,
+      "k": 1,
+      "n": 1,
+      "seed": 12631021,
+      "max_rel_err": 2.9802322e-8,
+      "tolerance": 0.000001,
+      "pass": true
+    },
+    {
+      "m": 4096,
+      "k": 1,
+      "n": 1,
+      "seed": 12709869,
+      "max_rel_err": 2.9802322e-8,
+      "tolerance": 0.000001,
+      "pass": true
+    },
+    {
+      "m": 8192,
+      "k": 1,
+      "n": 1,
+      "seed": 12771309,
+      "max_rel_err": 2.9802322e-8,
+      "tolerance": 0.000001,
+      "pass": true
+    }
+  ],
+  "pass": true,
+  "emitted_at": "2026-04-20T23:24:13Z",
+  "rig": "threadreaper-gfx906",
+  "pmc": {
+    "vgpr_count": 9,
+    "sgpr_count": null,
+    "waves_per_simd": 10,
+    "mem_busy_pct": null,
+    "valu_busy_pct": null
+  }
+}

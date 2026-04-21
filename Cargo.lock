@@ -178,6 +178,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "byteorder"
+version = "1.5.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "1fd0f2584146f6f2ef48085050886acf353beff7305ebd1ae69500e27c67f64b"
+
+[[package]]
 name = "bytes"
 version = "1.11.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -282,6 +288,12 @@ name = "crossbeam-utils"
 version = "0.8.21"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d0a5c400df2834b80a4c3327b3aad3a4c4cd4de0629063962b03235697506a28"
+
+[[package]]
+name = "crunchy"
+version = "0.2.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "460fbee9c2c2f33933d720630a6a0bac33ba7053db5344fac858d4b8952d77d5"
 
 [[package]]
 name = "darling"
@@ -409,9 +421,14 @@ name = "flambeau-backend-hip"
 version = "0.1.0-dev"
 dependencies = [
  "anyhow",
+ "bytemuck",
  "flambeau-core",
  "flambeau-kernels-hip",
+ "flambeau-quant",
+ "flambeau-runtime",
+ "half",
  "thiserror 2.0.18",
+ "tracing",
 ]
 
 [[package]]
@@ -419,8 +436,13 @@ name = "flambeau-bench"
 version = "0.1.0-dev"
 dependencies = [
  "anyhow",
+ "bytemuck",
+ "flambeau-backend-hip",
  "flambeau-core",
+ "flambeau-kernels-hip",
+ "flambeau-quant",
  "flambeau-runtime",
+ "half",
  "serde",
  "serde_json",
  "toml",
@@ -486,7 +508,12 @@ name = "flambeau-ops"
 version = "0.1.0-dev"
 dependencies = [
  "anyhow",
+ "flambeau-backend-hip",
  "flambeau-core",
+ "flambeau-kernels-hip",
+ "flambeau-quant",
+ "half",
+ "thiserror 2.0.18",
 ]
 
 [[package]]
@@ -495,9 +522,16 @@ version = "0.1.0-dev"
 dependencies = [
  "anyhow",
  "bytemuck",
+ "byteorder",
  "flambeau-core",
+ "half",
  "memmap2",
+ "minijinja",
+ "minijinja-contrib",
+ "serde",
+ "serde_json",
  "thiserror 2.0.18",
+ "tokenizers",
 ]
 
 [[package]]
@@ -505,9 +539,17 @@ name = "flambeau-qwen3-moe"
 version = "0.1.0-dev"
 dependencies = [
  "anyhow",
+ "bytemuck",
+ "flambeau-backend-hip",
  "flambeau-core",
  "flambeau-ops",
  "flambeau-quant",
+ "flambeau-runtime",
+ "half",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
+ "tracing",
 ]
 
 [[package]]
@@ -515,10 +557,12 @@ name = "flambeau-runtime"
 version = "0.1.0-dev"
 dependencies = [
  "anyhow",
+ "bytemuck",
  "flambeau-core",
- "flambeau-ops",
  "flambeau-quant",
+ "half",
  "minijinja",
+ "thiserror 2.0.18",
  "tokenizers",
  "tokio",
  "tracing",
@@ -530,8 +574,13 @@ version = "0.1.0-dev"
 dependencies = [
  "anyhow",
  "axum",
+ "flambeau-backend-hip",
  "flambeau-core",
+ "flambeau-ops",
+ "flambeau-quant",
+ "flambeau-qwen3-moe",
  "flambeau-runtime",
+ "half",
  "serde",
  "serde_json",
  "tokio",
@@ -596,6 +645,18 @@ dependencies = [
  "cfg-if",
  "libc",
  "wasi",
+]
+
+[[package]]
+name = "half"
+version = "2.7.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "6ea2d84b969582b4b1864a92dc5d27cd2b77b622a8d79306834f1be5ba20d84b"
+dependencies = [
+ "bytemuck",
+ "cfg-if",
+ "crunchy",
+ "zerocopy",
 ]
 
 [[package]]
@@ -842,6 +903,16 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "805bfd7352166bae857ee569628b52bcd85a1cecf7810861ebceb1686b72b75d"
 dependencies = [
  "memo-map",
+ "serde",
+]
+
+[[package]]
+name = "minijinja-contrib"
+version = "2.19.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "45092d80391870622fcf3bd82f5d2af18f99533ea60debb4bc9db0c76f0e809a"
+dependencies = [
+ "minijinja",
  "serde",
 ]
 

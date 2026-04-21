@@ -5,9 +5,25 @@ edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 description = "HIP device/stream/allocator + kernel-impl registrations against flambeau-core traits."
+build = "build.rs"
+
+[features]
+default = []
+# Opt-in RCCL linkage. Off by default so `cargo build` works on hosts without
+# `librccl.so` on the linker search path. Enable for multi-GPU collectives.
+rccl = []
 
 [dependencies]
 flambeau-core = { path = "../core" }
 flambeau-kernels-hip = { path = "../kernels-hip" }
+flambeau-runtime = { path = "../runtime" }
 anyhow.workspace = true
+bytemuck.workspace = true
+half.workspace = true
 thiserror.workspace = true
+tracing.workspace = true
+
+[dev-dependencies]
+bytemuck.workspace = true
+flambeau-quant = { path = "../quant" }
+half.workspace = true

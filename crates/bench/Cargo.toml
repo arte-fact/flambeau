@@ -6,10 +6,21 @@ rust-version.workspace = true
 license.workspace = true
 description = "First-class correctness-sweep + perf-matrix + cert-diff harness. Emits JSON certs + PMC snapshots."
 
+[features]
+default = []
+# Pulls in backend-hip so `sweep` can run on real MI50. Off by default so
+# `cargo check -p flambeau-bench` stays ROCm-free.
+hip = ["dep:flambeau-backend-hip", "dep:flambeau-kernels-hip", "dep:flambeau-quant", "dep:half", "dep:bytemuck"]
+
 [dependencies]
 flambeau-core = { path = "../core" }
 flambeau-runtime = { path = "../runtime" }
+flambeau-backend-hip = { path = "../backend-hip", optional = true }
+flambeau-kernels-hip = { path = "../kernels-hip", optional = true }
+flambeau-quant = { path = "../quant", optional = true }
 anyhow.workspace = true
+bytemuck = { workspace = true, optional = true }
+half = { workspace = true, optional = true }
 serde.workspace = true
 serde_json.workspace = true
 toml.workspace = true

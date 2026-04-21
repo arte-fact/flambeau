@@ -1,0 +1,58 @@
+{
+  "schema_version": 1,
+  "impl_id": "rope_neox_partial_f16_gfx906",
+  "backend": "hip",
+  "arch": "gfx906",
+  "op": "rope_neox_partial",
+  "dtype_weight": "F16",
+  "dtype_activation": "F16",
+  "tolerance_formula": "|err| <= 5e-3 * max(|ref|, 1)  (F16 round-off floor)",
+  "results": [
+    {
+      "m": 1,
+      "k": 16,
+      "n": 256,
+      "seed": 12646827,
+      "max_rel_err": 0.00012207031,
+      "tolerance": 0.005,
+      "pass": true
+    },
+    {
+      "m": 1,
+      "k": 2,
+      "n": 256,
+      "seed": 12647377,
+      "max_rel_err": 0.000121831894,
+      "tolerance": 0.005,
+      "pass": true
+    },
+    {
+      "m": 128,
+      "k": 16,
+      "n": 256,
+      "seed": 12649278,
+      "max_rel_err": 0.00036609173,
+      "tolerance": 0.005,
+      "pass": true
+    },
+    {
+      "m": 128,
+      "k": 2,
+      "n": 256,
+      "seed": 12649764,
+      "max_rel_err": 0.00036603212,
+      "tolerance": 0.005,
+      "pass": true
+    }
+  ],
+  "pass": true,
+  "emitted_at": "2026-04-20T22:10:03Z",
+  "rig": "threadreaper-gfx906",
+  "pmc": {
+    "vgpr_count": 20,
+    "sgpr_count": null,
+    "waves_per_simd": 10,
+    "mem_busy_pct": null,
+    "valu_busy_pct": null
+  }
+}

@@ -1,0 +1,58 @@
+{
+  "schema_version": 1,
+  "impl_id": "swiglu_f16_gfx906",
+  "backend": "hip",
+  "arch": "gfx906",
+  "op": "swiglu",
+  "dtype_weight": "F16",
+  "dtype_activation": "F16",
+  "tolerance_formula": "|err| <= 5e-3 * max(|ref|, 1)",
+  "results": [
+    {
+      "m": 1,
+      "k": 2048,
+      "n": 2048,
+      "seed": 13532696731315099630,
+      "max_rel_err": 0.0,
+      "tolerance": 0.005,
+      "pass": true
+    },
+    {
+      "m": 1,
+      "k": 15360,
+      "n": 15360,
+      "seed": 38133079567766510,
+      "max_rel_err": 0.0006142506,
+      "tolerance": 0.005,
+      "pass": true
+    },
+    {
+      "m": 8,
+      "k": 15360,
+      "n": 15360,
+      "seed": 305064636437733358,
+      "max_rel_err": 0.00087412586,
+      "tolerance": 0.005,
+      "pass": true
+    },
+    {
+      "m": 128,
+      "k": 15360,
+      "n": 15360,
+      "seed": 4881034183074840558,
+      "max_rel_err": 0.0009708738,
+      "tolerance": 0.005,
+      "pass": true
+    }
+  ],
+  "pass": true,
+  "emitted_at": "2026-04-20T19:30:15Z",
+  "rig": "threadreaper-gfx906",
+  "pmc": {
+    "vgpr_count": 10,
+    "sgpr_count": null,
+    "waves_per_simd": 10,
+    "mem_busy_pct": null,
+    "valu_busy_pct": null
+  }
+}

@@ -5,3 +5,15 @@
 //! See `doc/ROADMAP-V1-QWEN36-GFX906.md` step V1.0 for what lands here first.
 
 #![forbid(unsafe_op_in_unsafe_fn)]
+
+pub mod device;
+pub mod op;
+
+pub use device::{
+    CopyDirection, Device, DeviceError, DevicePtr, DeviceResult, Stream,
+};
+pub use op::{
+    KernelDescriptor, KernelImpl, Op, OpContract, QDtype, QMatMul, QMatMulCfg, QMatMulInput,
+    QMatMulOutput, RmsNorm, RmsNormCfg, RmsNormInput, RmsNormOutput, SwiGLU, SwiGLUCfg,
+    SwiGLUInput, SwiGLUOutput, Tolerance,
+};

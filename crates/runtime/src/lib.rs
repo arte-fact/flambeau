@@ -1,7 +1,23 @@
 //! flambeau-runtime — the glue between models and physical devices.
 //!
-//! V1.0 skeleton: `Mesh<N>` trait surface + reference (host-bounce) collectives.
-//! V1.2: real RCCL collectives land in `flambeau-backend-hip`, registered against
-//! the runtime's collective ops.
-//! V1.6: typed `KvCache<L>` for `F16Contig`, `F16Transposed`, `Q8Contig`, `Q8Transposed`.
-//! V1.7: chat template + tokenizer glue + CPU-side sampler.
+//! V1.2: `Mesh<N>` trait surface + collective ops (`AllReduce`, `AllGather`,
+//! `AllToAll`, `Broadcast`) with a CPU host-bounce reference impl. Real RCCL
+//! impls land in `flambeau-backend-hip` and register against these traits.
+//!
+//! V1.6: typed `KvCache<L>` for `F16Contig`, `F16Transposed`, `Q8Contig`,
+//! `Q8Transposed`. V1.7: chat template + tokenizer glue + CPU-side sampler.
+
+#![forbid(unsafe_op_in_unsafe_fn)]
+
+pub mod collective;
+pub mod kv_cache;
+pub mod mesh;
+pub mod sampling;
+
+pub use collective::{
+    AllGather, AllReduce, AllToAll, Broadcast, CollectiveError, CollectiveResult, RefMesh,
+    RefRankHandle,
+};
+pub use kv_cache::{CacheLayout, F16Contig, KvCache, KvCacheError, KvCacheResult, Q8Contig};
+pub use mesh::{CollectiveCfg, CollectiveDType, LayerAssignment, Mesh, RankId, ReduceOp};
+pub use sampling::{sample, Rng, Sampling};

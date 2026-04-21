@@ -1,0 +1,58 @@
+{
+  "schema_version": 1,
+  "impl_id": "dense_gemv_f32_f16_gfx906",
+  "backend": "hip",
+  "arch": "gfx906",
+  "op": "dense_gemv_f32_f16",
+  "dtype_weight": "F32",
+  "dtype_activation": "F16",
+  "tolerance_formula": "|err| <= 1e-3 * max(|ref|, 1) vs F64 reference with F16-quantised input",
+  "results": [
+    {
+      "m": 4,
+      "k": 256,
+      "n": 1,
+      "seed": 12644850,
+      "max_rel_err": 1.1920929e-7,
+      "tolerance": 0.001,
+      "pass": true
+    },
+    {
+      "m": 16,
+      "k": 1024,
+      "n": 1,
+      "seed": 12634014,
+      "max_rel_err": 2.7567148e-7,
+      "tolerance": 0.001,
+      "pass": true
+    },
+    {
+      "m": 128,
+      "k": 2048,
+      "n": 1,
+      "seed": 12612718,
+      "max_rel_err": 8.046627e-7,
+      "tolerance": 0.001,
+      "pass": true
+    },
+    {
+      "m": 256,
+      "k": 2048,
+      "n": 1,
+      "seed": 12603630,
+      "max_rel_err": 7.1525574e-7,
+      "tolerance": 0.001,
+      "pass": true
+    }
+  ],
+  "pass": true,
+  "emitted_at": "2026-04-21T07:26:46Z",
+  "rig": "threadreaper-gfx906",
+  "pmc": {
+    "vgpr_count": 15,
+    "sgpr_count": null,
+    "waves_per_simd": 10,
+    "mem_busy_pct": null,
+    "valu_busy_pct": null
+  }
+}

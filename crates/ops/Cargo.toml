@@ -6,6 +6,22 @@ rust-version.workspace = true
 license.workspace = true
 description = "High-level fused ops (Attention, MoE, DenseMlp, SwiGLU, RmsNorm, RoPE, GDN) composed from core traits. Mesh-generic."
 
+[features]
+default = []
+# V1 ships HIP only. When CUDA lands the crate grows a parallel `cuda`
+# feature without forcing dep re-selection downstream.
+hip = ["dep:flambeau-backend-hip", "dep:flambeau-kernels-hip"]
+
 [dependencies]
 flambeau-core = { path = "../core" }
+flambeau-quant = { path = "../quant" }
+# flambeau-runtime is intentionally NOT a dependency: runtime → ops → backend-hip
+# → runtime would cycle. Mesh-generic trait surface lands in V1.7.5 behind a
+# trait that lives in core or runtime (not here).
+flambeau-backend-hip = { path = "../backend-hip", optional = true }
+flambeau-kernels-hip = { path = "../kernels-hip", optional = true }
 anyhow.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+half.workspace = true

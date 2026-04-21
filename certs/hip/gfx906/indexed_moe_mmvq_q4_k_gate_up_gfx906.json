@@ -1,0 +1,40 @@
+{
+  "schema_version": 1,
+  "impl_id": "indexed_moe_mmvq_q4_k_gate_up_gfx906",
+  "backend": "hip",
+  "arch": "gfx906",
+  "op": "indexed_moe_mmvq_gate_up",
+  "dtype_weight": "Q4_K",
+  "dtype_activation": "Q8_1",
+  "tolerance_formula": "|err| <= 5e-2 * max(|ref|, sqrt(k))  (same envelope as non-fused MoE MMVQ)",
+  "results": [
+    {
+      "m": 1,
+      "k": 2048,
+      "n": 256,
+      "seed": 14598429,
+      "max_rel_err": 0.0037617749,
+      "tolerance": 0.05,
+      "pass": true
+    },
+    {
+      "m": 8,
+      "k": 2048,
+      "n": 256,
+      "seed": 14599122,
+      "max_rel_err": 0.0046264715,
+      "tolerance": 0.05,
+      "pass": true
+    }
+  ],
+  "pass": true,
+  "emitted_at": "2026-04-20T20:22:06Z",
+  "rig": "threadreaper-gfx906",
+  "pmc": {
+    "vgpr_count": 61,
+    "sgpr_count": null,
+    "waves_per_simd": 4,
+    "mem_busy_pct": null,
+    "valu_busy_pct": null
+  }
+}

@@ -113,6 +113,7 @@ flambeau/
 - `CLAUDE.md` — architectural rules, measurement discipline, technical lessons from the candle sessions. Read before touching anything substantive.
 - `doc/ARCHITECTURE.md` — framework design (crates, traits, dispatch, KV layouts, phasing).
 - `doc/ROADMAP-V1-QWEN36-GFX906.md` — current execution plan; V1.0 through V1.8 + T-track + M-track.
+- `doc/GLOSSARY.md` — plain-English glossary of every technical term used across the project docs, aimed at beginners. Start here if the jargon is unfamiliar.
 - `doc/candle-prior-art.md` — where in `/artefact/candle/` + `/artefact/llamacpp-turbo/` to look for each port target.
 - `/artefact/candle/` — source framework; kernel prior art, not architectural patterns.
 - `/artefact/llama.cpp/` + `/artefact/llamacpp-turbo/llama-cpp-gfx906-turbo/` — correctness oracle + port targets for 4-warp LDS-tiled MMQ.

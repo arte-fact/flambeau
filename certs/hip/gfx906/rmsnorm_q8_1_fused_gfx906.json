@@ -1,0 +1,67 @@
+{
+  "schema_version": 1,
+  "impl_id": "rmsnorm_q8_1_fused_gfx906",
+  "backend": "hip",
+  "arch": "gfx906",
+  "op": "rmsnorm_q8_1_fused",
+  "dtype_weight": "F16",
+  "dtype_activation": "Q8_1",
+  "tolerance_formula": "|err| <= 2e-2 * max(|ref|, sqrt(k) * 0.01)",
+  "results": [
+    {
+      "m": 1,
+      "k": 2048,
+      "n": 2048,
+      "seed": 14600926,
+      "max_rel_err": 0.0003320245,
+      "tolerance": 0.02,
+      "pass": true
+    },
+    {
+      "m": 1,
+      "k": 5120,
+      "n": 5120,
+      "seed": 14600926,
+      "max_rel_err": 0.00033328342,
+      "tolerance": 0.02,
+      "pass": true
+    },
+    {
+      "m": 1,
+      "k": 15360,
+      "n": 15360,
+      "seed": 14600926,
+      "max_rel_err": 0.00019487401,
+      "tolerance": 0.02,
+      "pass": true
+    },
+    {
+      "m": 8,
+      "k": 5120,
+      "n": 5120,
+      "seed": 14600926,
+      "max_rel_err": 0.00033728182,
+      "tolerance": 0.02,
+      "pass": true
+    },
+    {
+      "m": 128,
+      "k": 5120,
+      "n": 5120,
+      "seed": 14600926,
+      "max_rel_err": 0.000338448,
+      "tolerance": 0.02,
+      "pass": true
+    }
+  ],
+  "pass": true,
+  "emitted_at": "2026-04-20T19:32:57Z",
+  "rig": "threadreaper-gfx906",
+  "pmc": {
+    "vgpr_count": 24,
+    "sgpr_count": null,
+    "waves_per_simd": 10,
+    "mem_busy_pct": null,
+    "valu_busy_pct": null
+  }
+}

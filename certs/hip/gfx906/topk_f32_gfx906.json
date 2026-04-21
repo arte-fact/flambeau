@@ -1,0 +1,85 @@
+{
+  "schema_version": 1,
+  "impl_id": "topk_f32_gfx906",
+  "backend": "hip",
+  "arch": "gfx906",
+  "op": "topk_softmax",
+  "dtype_weight": "F32",
+  "dtype_activation": "F32",
+  "tolerance_formula": "indices match exactly; softmax weights within 1e-4 abs",
+  "results": [
+    {
+      "m": 1,
+      "k": 128,
+      "n": 8,
+      "seed": 14598331,
+      "max_rel_err": 0.0,
+      "tolerance": 0.0001,
+      "pass": true
+    },
+    {
+      "m": 8,
+      "k": 128,
+      "n": 8,
+      "seed": 14599158,
+      "max_rel_err": 1.4901161e-8,
+      "tolerance": 0.0001,
+      "pass": true
+    },
+    {
+      "m": 128,
+      "k": 128,
+      "n": 8,
+      "seed": 14611038,
+      "max_rel_err": 1.4901161e-8,
+      "tolerance": 0.0001,
+      "pass": true
+    },
+    {
+      "m": 512,
+      "k": 128,
+      "n": 8,
+      "seed": 14551774,
+      "max_rel_err": 2.9802322e-8,
+      "tolerance": 0.0001,
+      "pass": true
+    },
+    {
+      "m": 1,
+      "k": 256,
+      "n": 8,
+      "seed": 14598331,
+      "max_rel_err": 0.0,
+      "tolerance": 0.0001,
+      "pass": true
+    },
+    {
+      "m": 8,
+      "k": 256,
+      "n": 8,
+      "seed": 14599158,
+      "max_rel_err": 1.4901161e-8,
+      "tolerance": 0.0001,
+      "pass": true
+    },
+    {
+      "m": 128,
+      "k": 256,
+      "n": 8,
+      "seed": 14611038,
+      "max_rel_err": 1.4901161e-8,
+      "tolerance": 0.0001,
+      "pass": true
+    }
+  ],
+  "pass": true,
+  "emitted_at": "2026-04-21T11:56:01Z",
+  "rig": "threadreaper-gfx906",
+  "pmc": {
+    "vgpr_count": 16,
+    "sgpr_count": null,
+    "waves_per_simd": 10,
+    "mem_busy_pct": null,
+    "valu_busy_pct": null
+  }
+}

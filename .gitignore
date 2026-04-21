@@ -8,11 +8,15 @@ dispatch/**/*.local.toml
 
 # rocprofv3 / Nsight traces
 /profiles/
+/.rocprofv3/
 *.rocpd
 *.csv.rocprof
 *.json.rocprof
 *.nsys-rep
 *.ncu-rep
+
+# Machine-local driver / rocprof env pins — use .env.example as the template.
+.env
 
 # Compiled kernel artefacts cached outside target/
 *.hsaco
@@ -30,3 +34,6 @@ dispatch/**/*.local.toml
 # Python venvs (if any)
 .venv/
 venv/
+
+# Claude Code runtime state
+.claude/

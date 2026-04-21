@@ -1,0 +1,85 @@
+{
+  "schema_version": 1,
+  "impl_id": "qmatmul_q8_0_mmq_oracle_gfx906",
+  "backend": "hip",
+  "arch": "gfx906",
+  "op": "qmatmul_mmq",
+  "dtype_weight": "Q8_0",
+  "dtype_activation": "Q8_1",
+  "tolerance_formula": "|err| <= 3e-2 * max(|ref|, sqrt(k))",
+  "results": [
+    {
+      "m": 4,
+      "k": 2048,
+      "n": 2048,
+      "seed": 3009893643340524938,
+      "max_rel_err": 0.0022341448,
+      "tolerance": 0.03,
+      "pass": true
+    },
+    {
+      "m": 8,
+      "k": 2048,
+      "n": 2048,
+      "seed": 3009893643416879910,
+      "max_rel_err": 0.0024156466,
+      "tolerance": 0.03,
+      "pass": true
+    },
+    {
+      "m": 16,
+      "k": 2048,
+      "n": 2048,
+      "seed": 3009893643569589854,
+      "max_rel_err": 0.0019719668,
+      "tolerance": 0.03,
+      "pass": true
+    },
+    {
+      "m": 4,
+      "k": 5120,
+      "n": 5120,
+      "seed": 16748106145072583050,
+      "max_rel_err": 0.0021638281,
+      "tolerance": 0.03,
+      "pass": true
+    },
+    {
+      "m": 8,
+      "k": 5120,
+      "n": 5120,
+      "seed": 16748106145148938022,
+      "max_rel_err": 0.00220056,
+      "tolerance": 0.03,
+      "pass": true
+    },
+    {
+      "m": 4,
+      "k": 5120,
+      "n": 15360,
+      "seed": 1027578852110778762,
+      "max_rel_err": 0.002112622,
+      "tolerance": 0.03,
+      "pass": true
+    },
+    {
+      "m": 4,
+      "k": 15360,
+      "n": 5120,
+      "seed": 10624613506872891786,
+      "max_rel_err": 0.0020374318,
+      "tolerance": 0.03,
+      "pass": true
+    }
+  ],
+  "pass": true,
+  "emitted_at": "2026-04-20T18:12:21Z",
+  "rig": "threadreaper-gfx906",
+  "pmc": {
+    "vgpr_count": 20,
+    "sgpr_count": 32,
+    "waves_per_simd": 10,
+    "mem_busy_pct": 9.730701,
+    "valu_busy_pct": 5.494725
+  }
+}

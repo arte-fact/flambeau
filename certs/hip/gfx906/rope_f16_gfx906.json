@@ -1,0 +1,58 @@
+{
+  "schema_version": 1,
+  "impl_id": "rope_f16_gfx906",
+  "backend": "hip",
+  "arch": "gfx906",
+  "op": "rope",
+  "dtype_weight": "F16",
+  "dtype_activation": "F16",
+  "tolerance_formula": "|err| <= 5e-3 * max(|ref|, 1)  (F16 round-off floor)",
+  "results": [
+    {
+      "m": 1,
+      "k": 32,
+      "n": 128,
+      "seed": 12646463,
+      "max_rel_err": 0.00012207031,
+      "tolerance": 0.005,
+      "pass": true
+    },
+    {
+      "m": 1,
+      "k": 4,
+      "n": 128,
+      "seed": 12647299,
+      "max_rel_err": 0.0001219511,
+      "tolerance": 0.005,
+      "pass": true
+    },
+    {
+      "m": 128,
+      "k": 32,
+      "n": 128,
+      "seed": 12649358,
+      "max_rel_err": 0.00048828125,
+      "tolerance": 0.005,
+      "pass": true
+    },
+    {
+      "m": 128,
+      "k": 4,
+      "n": 128,
+      "seed": 12650258,
+      "max_rel_err": 0.00036606193,
+      "tolerance": 0.005,
+      "pass": true
+    }
+  ],
+  "pass": true,
+  "emitted_at": "2026-04-20T19:41:13Z",
+  "rig": "threadreaper-gfx906",
+  "pmc": {
+    "vgpr_count": 20,
+    "sgpr_count": null,
+    "waves_per_simd": 10,
+    "mem_busy_pct": null,
+    "valu_busy_pct": null
+  }
+}

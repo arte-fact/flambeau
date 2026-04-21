@@ -10,4 +10,14 @@ flambeau-core = { path = "../core" }
 anyhow.workspace = true
 thiserror.workspace = true
 bytemuck.workspace = true
+byteorder.workspace = true
+half.workspace = true
 memmap2.workspace = true
+tokenizers = { workspace = true }
+serde_json.workspace = true
+minijinja.workspace = true
+minijinja-contrib = { version = "2", features = ["pycompat"] }
+serde = { workspace = true, features = ["derive"] }
+
+[dev-dependencies]
+byteorder.workspace = true

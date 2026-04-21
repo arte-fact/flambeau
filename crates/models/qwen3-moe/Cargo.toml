@@ -10,4 +10,23 @@ description = "Qwen3.x MoE model family (Qwen3-30B-A3B, Qwen3-Coder MoE). Block 
 flambeau-core = { path = "../../core" }
 flambeau-ops = { path = "../../ops" }
 flambeau-quant = { path = "../../quant" }
+flambeau-runtime = { path = "../../runtime" }
 anyhow.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+half.workspace = true
+bytemuck.workspace = true
+
+[features]
+default = []
+# Session allocation + weight upload require a HIP device; gate so non-HIP
+# builds (CI lint, sandbox `cargo check`) stay green.
+hip = ["flambeau-ops/hip", "dep:flambeau-backend-hip"]
+
+[dependencies.flambeau-backend-hip]
+path = "../../backend-hip"
+optional = true
+
+[dev-dependencies]
+serde = { workspace = true, features = ["derive"] }
+serde_json.workspace = true
