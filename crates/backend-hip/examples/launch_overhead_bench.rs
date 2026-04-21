@@ -61,33 +61,65 @@ fn main() -> anyhow::Result<()> {
     }
     stream.synchronize()?;
 
-    // Measured window.
+    let cfg = LaunchCfg::one_d(1, 32);
+
+    // --- Path A: fresh KernelArgs per iter (V1 hot-path shape) ---
     let t0 = Instant::now();
     for i in 0..n_iters {
         let mut args = KernelArgs::new();
         args.push(&dst_u64);      // x
-        args.push(&dst_u64);      // y (same buffer, 1.0 scale = no-op)
+        args.push(&dst_u64);      // y
         args.push(&n_elems);      // n
         args.push(&scale);        // scale
-        let cfg = LaunchCfg::one_d(1, 32);
         unsafe { kernel.launch(stream, cfg, args)? };
         if sync_every > 0 && (i + 1) % sync_every == 0 {
             stream.synchronize()?;
         }
     }
     stream.synchronize()?;
-    let dt = t0.elapsed();
+    let dt_a = t0.elapsed();
 
-    let per_call_ns = dt.as_nanos() as f64 / n_iters as f64;
-    let per_call_us = per_call_ns / 1000.0;
+    // --- Path B: V2.1 pre-allocated pool, launch_raw on hot path ---
+    //
+    // Build the arg pointer array ONCE, then launch_raw in the loop.
+    // Tests whether the Vec allocation + push calls are the dominant
+    // Rust-side cost, or if it's the FFI crossing itself.
+    let mut args_pool = KernelArgs::new();
+    args_pool.push(&dst_u64);
+    args_pool.push(&dst_u64);
+    args_pool.push(&n_elems);
+    args_pool.push(&scale);
+    let args_raw = args_pool.raw_ptrs();
+
+    let t0 = Instant::now();
+    for i in 0..n_iters {
+        unsafe { kernel.launch_raw(stream, cfg, args_raw)? };
+        if sync_every > 0 && (i + 1) % sync_every == 0 {
+            stream.synchronize()?;
+        }
+    }
+    stream.synchronize()?;
+    let dt_b = t0.elapsed();
+
+    let ns_per_call_a = dt_a.as_nanos() as f64 / n_iters as f64;
+    let ns_per_call_b = dt_b.as_nanos() as f64 / n_iters as f64;
     eprintln!(
-        "[lob] {} iterations, sync_every={}, total {:.3} ms → {:.3} µs/launch",
-        n_iters,
-        sync_every,
-        dt.as_secs_f64() * 1000.0,
-        per_call_us
+        "[lob] {n_iters} iters, sync_every={sync_every}"
     );
-    eprintln!("[lob] (rocprof hipModuleLaunchKernel baseline from V1.7.6 cert: 3.67 µs avg)");
+    eprintln!(
+        "[lob]  A (fresh KernelArgs):  {:>7.3} ms total → {:>6.3} µs/launch",
+        dt_a.as_secs_f64() * 1000.0,
+        ns_per_call_a / 1000.0
+    );
+    eprintln!(
+        "[lob]  B (pool + launch_raw): {:>7.3} ms total → {:>6.3} µs/launch  (saves {:.3} µs/call)",
+        dt_b.as_secs_f64() * 1000.0,
+        ns_per_call_b / 1000.0,
+        (ns_per_call_a - ns_per_call_b) / 1000.0
+    );
+    eprintln!(
+        "[lob]  gfx906 rocprof hipModuleLaunchKernel avg (same binary earlier): ~2.25 µs"
+    );
 
     unsafe { dev.dealloc(d_ptr, 4)? };
     Ok(())

@@ -153,6 +153,32 @@ impl<'a> KernelArgs<'a> {
     fn as_raw(&mut self) -> *mut *mut std::os::raw::c_void {
         self.ptrs.as_mut_ptr()
     }
+
+    /// Same as `as_raw` but exposed publicly so callers that reuse a
+    /// `KernelArgs` across many launches can pass the pointer to
+    /// [`HipKernel::launch_raw`] directly. See V2.1 docs: this saves
+    /// one Vec allocation + N `push()` calls per launch when the arg
+    /// layout is stable (common case: same kernel, same shape, different
+    /// device pointers mutated in-place by the caller).
+    pub fn raw_ptrs(&mut self) -> *mut *mut std::os::raw::c_void {
+        self.ptrs.as_mut_ptr()
+    }
+
+    /// Overwrite slot `idx` with a new `&T`. Caller must ensure `idx` is
+    /// less than the number of previously-pushed slots. Used by reuse-pool
+    /// callers that construct once and update pointers per launch.
+    pub fn set<T>(&mut self, idx: usize, v: &'a T) {
+        debug_assert!(idx < self.ptrs.len(), "set({idx}) out of bounds");
+        self.ptrs[idx] = v as *const T as *mut _;
+    }
+
+    pub fn len(&self) -> usize {
+        self.ptrs.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.ptrs.is_empty()
+    }
 }
 
 /// Per-kernel static attributes queried via `hipFuncGetAttribute` — the
@@ -234,6 +260,42 @@ impl<'m> HipKernel<'m> {
                 cfg.shared_bytes as c_uint,
                 stream.raw_handle() as crate::sys::hipStream_t,
                 args.as_raw(),
+                ptr::null_mut(),
+            )
+        };
+        check(code, "hipModuleLaunchKernel")
+    }
+
+    /// Lower-latency launch: caller pre-built the arg pointer array.
+    /// Used by V2.1's reuse-pool pattern — callers that launch the same
+    /// kernel many times with a stable arg layout can construct a
+    /// `KernelArgs` once, call `.raw_ptrs()` once, and invoke this in
+    /// a tight loop without re-running the builder each iteration.
+    ///
+    /// # Safety
+    /// - `args_ptr` must point to a valid array of at least the number
+    ///   of arguments this kernel expects.
+    /// - Each entry must point to storage matching the kernel's signature
+    ///   at the corresponding position, and that storage must remain live
+    ///   until the stream consumes the launch.
+    pub unsafe fn launch_raw(
+        &self,
+        stream: &HipStream,
+        cfg: LaunchCfg,
+        args_ptr: *mut *mut std::os::raw::c_void,
+    ) -> DeviceResult<()> {
+        let code = unsafe {
+            hipModuleLaunchKernel(
+                self.raw,
+                cfg.grid.0 as c_uint,
+                cfg.grid.1 as c_uint,
+                cfg.grid.2 as c_uint,
+                cfg.block.0 as c_uint,
+                cfg.block.1 as c_uint,
+                cfg.block.2 as c_uint,
+                cfg.shared_bytes as c_uint,
+                stream.raw_handle() as crate::sys::hipStream_t,
+                args_ptr,
                 ptr::null_mut(),
             )
         };
