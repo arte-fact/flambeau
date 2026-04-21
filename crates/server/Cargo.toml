@@ -9,10 +9,27 @@ description = "OpenAI-compatible HTTP server (/v1/chat/completions, /v1/completi
 [dependencies]
 flambeau-core = { path = "../core" }
 flambeau-runtime = { path = "../runtime" }
+flambeau-quant = { path = "../quant" }
+flambeau-qwen3-moe = { path = "../models/qwen3-moe" }
+flambeau-ops = { path = "../ops" }
 anyhow.workspace = true
 axum.workspace = true
 tower.workspace = true
 tokio.workspace = true
-serde.workspace = true
+serde = { workspace = true, features = ["derive"] }
 serde_json.workspace = true
 tracing.workspace = true
+half.workspace = true
+
+[dependencies.flambeau-backend-hip]
+path = "../backend-hip"
+optional = true
+
+[features]
+default = []
+# HIP inference backend. Off by default so `cargo check` works without ROCm.
+hip = [
+    "dep:flambeau-backend-hip",
+    "flambeau-ops/hip",
+    "flambeau-qwen3-moe/hip",
+]

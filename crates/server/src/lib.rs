@@ -1,7 +1,29 @@
 //! flambeau-server — V1.8 OpenAI-compatible HTTP API.
 //!
 //! v1 surface: `GET /health`, `GET /v1/models`, `POST /v1/completions`,
-//! `POST /v1/chat/completions` (+ SSE when `stream: true`).
+//! `POST /v1/chat/completions` (non-streaming only in V1.8.B; SSE is V1.8.C).
 //! Chat template from GGUF `tokenizer.chat_template` via `minijinja`.
 //!
-//! Function calling, tool use, logprobs, `/v1/embeddings`, `/metrics` are V2.
+//! Single-session model: one shared `ModelState` behind a Tokio mutex.
+//! Concurrent HTTP requests serialise through the mutex — continuous
+//! batching is V2. The V1 target is "works end-to-end with real OpenAI
+//! clients", not throughput at load.
+
+#![forbid(unsafe_op_in_unsafe_fn)]
+
+pub mod api;
+pub mod state;
+
+#[cfg(feature = "hip")]
+pub mod routes;
+#[cfg(feature = "hip")]
+pub mod serve;
+
+pub use api::{
+    ChatChoice, ChatCompletionRequest, ChatCompletionResponse, ChatMessage, CompletionChoice,
+    CompletionRequest, CompletionResponse, ModelObject, ModelsListResponse, Usage,
+};
+pub use state::SamplingParams;
+
+#[cfg(feature = "hip")]
+pub use serve::{serve, ServeConfig};

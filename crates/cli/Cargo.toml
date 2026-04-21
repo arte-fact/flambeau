@@ -9,6 +9,14 @@ license.workspace = true
 name = "flambeau"
 path = "src/main.rs"
 
+[features]
+default = []
+# Enables the HIP-backed `flambeau sweep --arch gfx906` path — requires
+# ROCm/hipcc at build time and real MI50 hardware at run time.
+hip_sweep = ["flambeau-bench/hip"]
+# Enables `flambeau serve` — loads a real model on HIP devices.
+hip_serve = ["flambeau-server/hip"]
+
 [dependencies]
 flambeau-core = { path = "../core" }
 flambeau-quant = { path = "../quant" }

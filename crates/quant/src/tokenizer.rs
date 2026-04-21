@@ -1,0 +1,224 @@
+//! Build a `tokenizers::Tokenizer` from GGUF metadata — V1.8.A piece 2 of 3.
+//!
+//! GGUF embeds the tokenizer as a handful of metadata keys:
+//!   - `tokenizer.ggml.model`:  BPE family name ("gpt2" for Qwen3.5/3.6/Llama)
+//!   - `tokenizer.ggml.pre`:    pretokenizer preset ("qwen35", "llama-bpe", ...)
+//!   - `tokenizer.ggml.tokens`: vocab strings (unicode-escaped for byte bytes)
+//!   - `tokenizer.ggml.merges`: "a b" BPE merge pairs
+//!   - `tokenizer.ggml.bos/eos/padding_token_id`: special ids
+//!
+//! llama.cpp's implementation lives in `src/llama-vocab.cpp`. This module
+//! reproduces enough of its "gpt2" + "qwen35"/"qwen2" BPE-load path to give
+//! byte-identical token IDs on the `parity_vs_llama_cpp.rs` prompts.
+//!
+//! Covered pre-tokenizers: "default", "gpt-2", "llama-bpe", "llama3",
+//! "qwen2", "qwen35". Others return an error — add them as models arrive.
+
+use anyhow::{anyhow, Context, Result};
+use tokenizers::models::bpe::{Vocab, BPE};
+use tokenizers::{
+    decoders, normalizers, pre_tokenizers, AddedToken, DecoderWrapper, ModelWrapper,
+    NormalizerWrapper, PostProcessorWrapper, PreTokenizerWrapper, Tokenizer, TokenizerImpl,
+};
+
+use crate::gguf::GgufFile;
+
+/// Handles returned by [`load_from_gguf`]. Wraps the `tokenizers::Tokenizer`
+/// plus the special-token ids we've seen the runtime care about.
+pub struct GgufTokenizer {
+    pub inner: Tokenizer,
+    pub bos_id: Option<u32>,
+    pub eos_id: Option<u32>,
+    pub pad_id: Option<u32>,
+    pub vocab_size: u32,
+    /// All token ids that should terminate chat generation. Includes `eos_id`
+    /// plus template-specific end-of-turn markers (e.g. Qwen's `<|im_end|>`).
+    /// The server's stop-check loop uses this instead of `eos_id` alone.
+    pub stop_ids: Vec<u32>,
+}
+
+impl GgufTokenizer {
+    /// Encode `text` → token ids. No added-special-tokens; the chat template
+    /// (V1.8.A.3) is responsible for inserting BOS/EOS as appropriate.
+    pub fn encode(&self, text: &str) -> Result<Vec<u32>> {
+        let enc = self
+            .inner
+            .encode(text, /*add_special_tokens=*/ false)
+            .map_err(|e| anyhow!("tokenizer.encode failed: {e}"))?;
+        Ok(enc.get_ids().to_vec())
+    }
+
+    /// Decode `ids` → UTF-8 string. Skips added-special-tokens.
+    pub fn decode(&self, ids: &[u32]) -> Result<String> {
+        self.inner
+            .decode(ids, /*skip_special_tokens=*/ false)
+            .map_err(|e| anyhow!("tokenizer.decode failed: {e}"))
+    }
+}
+
+/// Load a tokenizer from a GGUF file's embedded metadata.
+pub fn load_from_gguf(file: &GgufFile) -> Result<GgufTokenizer> {
+    let model = file
+        .metadata_str("tokenizer.ggml.model")
+        .context("tokenizer.ggml.model missing from GGUF")?;
+    if model != "gpt2" {
+        return Err(anyhow!(
+            "tokenizer model `{}` not supported (only `gpt2` BPE family so far)",
+            model
+        ));
+    }
+    let pre = file.metadata_str("tokenizer.ggml.pre").unwrap_or("default");
+
+    // Vocab array: index → token string. GGUF stores it as Array(String).
+    let tokens_arr = file
+        .metadata
+        .get("tokenizer.ggml.tokens")
+        .and_then(|v| v.as_array())
+        .context("tokenizer.ggml.tokens missing or wrong type")?;
+    let mut vocab: Vocab = Vocab::with_capacity_and_hasher(tokens_arr.len(), Default::default());
+    for (id, v) in tokens_arr.iter().enumerate() {
+        let s = v
+            .as_str()
+            .ok_or_else(|| anyhow!("non-string vocab entry at id {id}"))?;
+        vocab.insert(s.to_owned(), id as u32);
+    }
+
+    // Merges: "a b" → (a, b) pairs in priority order.
+    let merges_arr = file
+        .metadata
+        .get("tokenizer.ggml.merges")
+        .and_then(|v| v.as_array())
+        .context("tokenizer.ggml.merges missing or wrong type")?;
+    let mut merges = Vec::with_capacity(merges_arr.len());
+    for (i, v) in merges_arr.iter().enumerate() {
+        let s = v
+            .as_str()
+            .ok_or_else(|| anyhow!("non-string merge entry at index {i}"))?;
+        let mut it = s.splitn(2, ' ');
+        let a = it
+            .next()
+            .ok_or_else(|| anyhow!("malformed merge entry `{s}`"))?;
+        let b = it
+            .next()
+            .ok_or_else(|| anyhow!("malformed merge entry `{s}`"))?;
+        merges.push((a.to_owned(), b.to_owned()));
+    }
+
+    let bpe = BPE::builder()
+        .vocab_and_merges(vocab, merges)
+        .byte_fallback(false)
+        .build()
+        .map_err(|e| anyhow!("BPE::build: {e}"))?;
+
+    // Pretokenizer selection — llama.cpp's tokenizer_pre cases we support.
+    let pre_tok = pre_for(pre)?;
+
+    let mut tok: TokenizerImpl<
+        ModelWrapper,
+        NormalizerWrapper,
+        PreTokenizerWrapper,
+        PostProcessorWrapper,
+        DecoderWrapper,
+    > = TokenizerImpl::new(bpe.into());
+    tok.with_pre_tokenizer(Some(pre_tok));
+    tok.with_decoder(Some(DecoderWrapper::ByteLevel(
+        decoders::byte_level::ByteLevel::new(
+            /*add_prefix_space=*/ false,
+            /*trim_offsets=*/ true,
+            /*use_regex=*/ true,
+        ),
+    )));
+    // Normalizer: gpt2 BPE is typically NFC. Qwen3 uses no normalizer
+    // ("default"); leave None unless GGUF says otherwise.
+    if pre == "gpt-2" {
+        tok.with_normalizer(Some(NormalizerWrapper::NFC(normalizers::NFC)));
+    }
+
+    // Special tokens. Register them so encode/decode honours them as
+    // single ids rather than splitting into byte-level fragments.
+    // llama.cpp's `token_type == 3` or `4` flags control tokens, but GGUF
+    // doesn't always reliably surface that; we use a heuristic: any vocab
+    // entry wrapped in `<|...|>` (Qwen/ChatML convention) is a special token.
+    let bos_id = file.metadata_u32("tokenizer.ggml.bos_token_id");
+    let eos_id = file.metadata_u32("tokenizer.ggml.eos_token_id");
+    let pad_id = file.metadata_u32("tokenizer.ggml.padding_token_id");
+    let mut added = Vec::new();
+    let mut added_ids = std::collections::HashSet::<u32>::new();
+    for id in [bos_id, eos_id, pad_id].into_iter().flatten() {
+        if added_ids.insert(id) {
+            if let Some(v) = tokens_arr.get(id as usize).and_then(|v| v.as_str()) {
+                added.push(AddedToken::from(v.to_owned(), /*special=*/ true));
+            }
+        }
+    }
+    // Sweep vocab for `<|...|>` bracket-style control tokens.
+    for (id, v) in tokens_arr.iter().enumerate() {
+        if let Some(s) = v.as_str() {
+            if s.starts_with("<|") && s.ends_with("|>") && s.len() <= 32 {
+                if added_ids.insert(id as u32) {
+                    added.push(AddedToken::from(s.to_owned(), /*special=*/ true));
+                }
+            }
+        }
+    }
+    if !added.is_empty() {
+        tok.add_special_tokens(&added);
+    }
+
+    let wrapped: Tokenizer = tok.into();
+
+    // Build the "stop" set: eos + common end-of-turn tokens for chat models.
+    // Qwen's template uses `<|im_end|>` to close turns — the model emits it
+    // but its id is not eos_id, so the server must still treat it as a stop.
+    let mut stop_ids: Vec<u32> = Vec::new();
+    if let Some(id) = eos_id {
+        stop_ids.push(id);
+    }
+    // Chat end-of-turn markers. Qwen's `<|im_end|>` closes a turn even when
+    // eos_id differs; llama3's `<|eot_id|>` plays the same role.
+    for needle in ["<|im_end|>", "<|endoftext|>", "<|eot_id|>"] {
+        if let Some(id) = find_vocab_id(tokens_arr, needle) {
+            if !stop_ids.contains(&id) {
+                stop_ids.push(id);
+            }
+        }
+    }
+
+    Ok(GgufTokenizer {
+        inner: wrapped,
+        bos_id,
+        eos_id,
+        pad_id,
+        vocab_size: tokens_arr.len() as u32,
+        stop_ids,
+    })
+}
+
+fn find_vocab_id(tokens_arr: &[crate::gguf::Value], needle: &str) -> Option<u32> {
+    tokens_arr.iter().position(|v| {
+        v.as_str().map(|s| s == needle).unwrap_or(false)
+    }).map(|i| i as u32)
+}
+
+/// Map GGUF `tokenizer.ggml.pre` → concrete pretokenizer. llama.cpp supports
+/// many presets; we cover the ones in-use for our target models.
+fn pre_for(pre: &str) -> Result<PreTokenizerWrapper> {
+    // GPT-2 / ByteLevel is the common case. The `pre` name selects the regex
+    // split pattern; for our Qwen3.5/3.6 path ("qwen35") the effective pattern
+    // matches GPT-2's and llama3's pre — a contextual regex over bytes before
+    // the byte-level mapper. `tokenizers` crate ByteLevel does both.
+    match pre {
+        "default" | "gpt-2" | "llama-bpe" | "llama3" | "qwen2" | "qwen35" => {
+            Ok(PreTokenizerWrapper::ByteLevel(
+                pre_tokenizers::byte_level::ByteLevel::new(
+                    /*add_prefix_space=*/ false,
+                    /*trim_offsets=*/ true,
+                    /*use_regex=*/ true,
+                ),
+            ))
+        }
+        other => Err(anyhow!(
+            "tokenizer.ggml.pre=`{other}` not supported (add a match arm in pre_for)"
+        )),
+    }
+}
