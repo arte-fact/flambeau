@@ -35,7 +35,12 @@ pub enum Qwen3MoEConfigError {
 /// Architecture tags this crate handles. Each value shares the `{arch}.foo`
 /// metadata convention + `blk.{i}.*` tensor naming, but differs in which
 /// ops the forward pass composes.
-pub const SUPPORTED_ARCHS: &[&str] = &["qwen3moe", "qwen35moe", "qwen36moe"];
+/// Architectures this crate parses config for. `qwen35` is the dense-hybrid
+/// variant (Qwen3.5 / 3.6 without MoE — pure dense FFN per layer). V2.2
+/// scaffold: config parser accepts it, but the weight loader + forward path
+/// still assume MoE — a qwen35 GGUF will fail to LOAD until the dense-FFN
+/// paths are wired (see `doc/V2-BACKLOG.md#V2.2`).
+pub const SUPPORTED_ARCHS: &[&str] = &["qwen3moe", "qwen35moe", "qwen36moe", "qwen35"];
 
 /// Which attention family the model uses.
 ///
@@ -153,13 +158,14 @@ impl Qwen3MoEConfig {
             return Err(Qwen3MoEConfigError::WrongArchitecture { got: Some(arch) });
         }
 
-        // `qwen35moe` / `qwen36moe` are the hybrid GDN + full-attn family.
+        // `qwen35moe` / `qwen36moe` / `qwen35` are hybrid GDN + full-attn.
         // Pure `qwen3moe` has no SSM tensors and no `full_attention_interval`.
         let family = if arch == "qwen3moe" {
             AttentionFamily::Dense
         } else {
             AttentionFamily::Hybrid
         };
+        let is_dense_ffn = arch == "qwen35";
 
         let key = |suffix: &str| format!("{arch}.{suffix}");
         let mk_missing = |suffix: &str| Qwen3MoEConfigError::MissingKey(key(suffix));
@@ -192,9 +198,22 @@ impl Qwen3MoEConfig {
             sections: rope_sections,
         };
 
-        let num_experts = req_u32("expert_count")?;
-        let num_experts_per_tok = req_u32("expert_used_count")?;
-        let moe_intermediate_size = req_u32("expert_feed_forward_length")?;
+        // Dense-hybrid (`qwen35`) has no MoE metadata. Default to 0/1 so the
+        // config loads; downstream loader will check `num_experts==0` and
+        // branch to the dense-FFN path (V2.2 follow-up).
+        let (num_experts, num_experts_per_tok, moe_intermediate_size) = if is_dense_ffn {
+            (
+                0,
+                1,
+                opt_u32("feed_forward_length").unwrap_or(0),
+            )
+        } else {
+            (
+                req_u32("expert_count")?,
+                req_u32("expert_used_count")?,
+                req_u32("expert_feed_forward_length")?,
+            )
+        };
         let shared_expert_intermediate_size = opt_u32("expert_shared_feed_forward_length")
             .filter(|&v| v > 0);
 
