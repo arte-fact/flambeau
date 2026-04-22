@@ -18,6 +18,31 @@ pub const INDEXED_MOE_MMQ_X: usize = 8;
 /// `MMQ_Y` for `indexed_moe_mmq_q4_k` — output rows per block.
 pub const INDEXED_MOE_MMQ_Y: usize = 16;
 
+/// Shape scalars for indexed-MoE MMQ launchers. All five tile8/turbo
+/// kernels take this identical tuple; grouping it gives named fields at
+/// call sites and one-point change for future additions.
+///
+/// For the `down` kernels (which process per-pair activations as effective
+/// tokens) `n_tokens` is set to `n_pairs = original_n_tokens * top_k` and
+/// `top_k` is set to `1` — the kernel's Y indexing collapses correctly.
+#[derive(Debug, Clone, Copy)]
+pub struct MoeShape {
+    /// Output row count (gate/up: `inter`; down: `hidden`).
+    pub n_rows: usize,
+    /// Y activation row axis.
+    pub n_tokens: usize,
+    /// Experts per token; 1 for the down kernels.
+    pub top_k: usize,
+    /// Super-blocks per weight row (= K / QK_K).
+    pub n_sb_per_row: usize,
+    /// Total experts across the MoE layer.
+    pub n_experts: usize,
+    /// Upper bound on `padded_total` (= `total_pairs + n_experts * 8` for
+    /// the V2.6.a pad-to-8 sort). Kernel early-exits past the on-device
+    /// actual padded_total.
+    pub padded_total_upper_bound: usize,
+}
+
 /// TopK router over per-token logits. Emits `(token, slot)` → expert index
 /// plus normalised softmax weights over the k selected experts per token.
 ///
@@ -241,7 +266,6 @@ pub fn indexed_moe_mmvq_q4_k_r2_sorted(
 /// Grid.y is an upper bound on padded_total / 8; kernel early-exits
 /// blocks past the actual (on-device) padded_offsets[n_experts] → avoids
 /// DtoH sync.
-#[allow(clippy::too_many_arguments)]
 pub fn indexed_moe_mmq_q4_k_gate_up_tile8(
     reg: &OpsRegistry,
     stream: &HipStream,
@@ -253,21 +277,16 @@ pub fn indexed_moe_mmq_q4_k_gate_up_tile8(
     padded_offsets: DevicePtr,
     gate_out: DevicePtr,
     up_out: DevicePtr,
-    n_rows: usize,
-    n_tokens: usize,
-    top_k: usize,
-    n_sb_per_row: usize,
-    n_experts: usize,
-    padded_total_upper_bound: usize,
+    shape: MoeShape,
 ) -> Result<()> {
     let module = reg.expect_module("indexed_moe_mmq_q4_k_gate_up_tile8_dp4a")?;
     let kernel = module.kernel("flambeau_indexed_moe_mmq_q4_k_gate_up_tile8_dp4a_q8_1")?;
 
-    let n_rows_i = n_rows as i32;
-    let n_tokens_i = n_tokens as i32;
-    let top_k_i = top_k as i32;
-    let nb_i = n_sb_per_row as i32;
-    let n_experts_i = n_experts as i32;
+    let n_rows_i = shape.n_rows as i32;
+    let n_tokens_i = shape.n_tokens as i32;
+    let top_k_i = shape.top_k as i32;
+    let nb_i = shape.n_sb_per_row as i32;
+    let n_experts_i = shape.n_experts as i32;
     let g_ptr: u64 = w_gate.as_usize() as u64;
     let u_ptr: u64 = w_up.as_usize() as u64;
     let y_ptr: u64 = y.as_usize() as u64;
@@ -291,9 +310,9 @@ pub fn indexed_moe_mmq_q4_k_gate_up_tile8(
     args.push(&nb_i);
     args.push(&n_experts_i);
     // Upper-bound grid.y; in-kernel early-exit handles actual padded_total.
-    let grid_y = padded_total_upper_bound.div_ceil(8) as u32;
+    let grid_y = shape.padded_total_upper_bound.div_ceil(8) as u32;
     let cfg = LaunchCfg {
-        grid: ((n_rows as u32).div_ceil(64), grid_y, 1),
+        grid: ((shape.n_rows as u32).div_ceil(64), grid_y, 1),
         block: (64, 1, 1),
         shared_bytes: 0,
     };
@@ -303,7 +322,6 @@ pub fn indexed_moe_mmq_q4_k_gate_up_tile8(
 
 /// V2.6.b: down-projection tile8 MoE MMQ. Same per-block layout as
 /// the gate_up tile8; activation is indexed by pair_idx directly.
-#[allow(clippy::too_many_arguments)]
 pub fn indexed_moe_mmq_q4_k_down_tile8(
     reg: &OpsRegistry,
     stream: &HipStream,
@@ -313,21 +331,16 @@ pub fn indexed_moe_mmq_q4_k_down_tile8(
     sorted_pair_idx_padded: DevicePtr,
     padded_offsets: DevicePtr,
     dst: DevicePtr,
-    n_rows: usize,
-    n_tokens: usize,
-    top_k: usize,
-    n_sb_per_row: usize,
-    n_experts: usize,
-    padded_total_upper_bound: usize,
+    shape: MoeShape,
 ) -> Result<()> {
     let module = reg.expect_module("indexed_moe_mmq_q4_k_down_tile8_dp4a")?;
     let kernel = module.kernel("flambeau_indexed_moe_mmq_q4_k_down_tile8_dp4a_q8_1")?;
 
-    let n_rows_i = n_rows as i32;
-    let n_tokens_i = n_tokens as i32;
-    let top_k_i = top_k as i32;
-    let nb_i = n_sb_per_row as i32;
-    let n_experts_i = n_experts as i32;
+    let n_rows_i = shape.n_rows as i32;
+    let n_tokens_i = shape.n_tokens as i32;
+    let top_k_i = shape.top_k as i32;
+    let nb_i = shape.n_sb_per_row as i32;
+    let n_experts_i = shape.n_experts as i32;
     let w_ptr: u64 = w.as_usize() as u64;
     let y_ptr: u64 = y.as_usize() as u64;
     let e_ptr: u64 = expert_ids.as_usize() as u64;
@@ -346,9 +359,9 @@ pub fn indexed_moe_mmq_q4_k_down_tile8(
     args.push(&top_k_i);
     args.push(&nb_i);
     args.push(&n_experts_i);
-    let grid_y = padded_total_upper_bound.div_ceil(8) as u32;
+    let grid_y = shape.padded_total_upper_bound.div_ceil(8) as u32;
     let cfg = LaunchCfg {
-        grid: ((n_rows as u32).div_ceil(64), grid_y, 1),
+        grid: ((shape.n_rows as u32).div_ceil(64), grid_y, 1),
         block: (64, 1, 1),
         shared_bytes: 0,
     };
@@ -377,21 +390,16 @@ pub fn indexed_moe_mmq_q4_k_gate_up_turbo(
     padded_offsets: DevicePtr,
     gate_out: DevicePtr,
     up_out: DevicePtr,
-    n_rows: usize,              // inter
-    n_tokens: usize,            // Y activation row count (per-token)
-    top_k: usize,
-    n_sb_per_row: usize,        // hidden / QK_K for gate_w/up_w
-    n_experts: usize,
-    padded_total_upper_bound: usize,
+    shape: MoeShape,            // n_rows=inter, n_sb_per_row=hidden/QK_K
 ) -> Result<()> {
     let module = reg.expect_module("indexed_moe_mmq_q4_k_gate_up_turbo")?;
     let kernel = module.kernel("flambeau_indexed_moe_mmq_q4_k_gate_up_turbo_q8_1")?;
 
-    let n_rows_i = n_rows as i32;
-    let n_tokens_i = n_tokens as i32;
-    let top_k_i = top_k as i32;
-    let nb_i = n_sb_per_row as i32;
-    let n_experts_i = n_experts as i32;
+    let n_rows_i = shape.n_rows as i32;
+    let n_tokens_i = shape.n_tokens as i32;
+    let top_k_i = shape.top_k as i32;
+    let nb_i = shape.n_sb_per_row as i32;
+    let n_experts_i = shape.n_experts as i32;
     let gw_ptr: u64 = gate_w.as_usize() as u64;
     let uw_ptr: u64 = up_w.as_usize() as u64;
     let y_ptr: u64 = y_mmq.as_usize() as u64;
@@ -417,8 +425,8 @@ pub fn indexed_moe_mmq_q4_k_gate_up_turbo(
     args.push(&n_experts_i);
 
     // Grid: MMQ_Y=128, MMQ_X=8.
-    let grid_x = (n_rows as u32).div_ceil(128);
-    let grid_y = (padded_total_upper_bound as u32).div_ceil(8);
+    let grid_x = (shape.n_rows as u32).div_ceil(128);
+    let grid_y = (shape.padded_total_upper_bound as u32).div_ceil(8);
     // LDS: tile_y (MMQ_X=8 × 36 = 288 ints)
     //    + 2 × TILE_X_TOTAL (TXS_QS=4224 + TXS_DM=128 + TXS_SC=528 = 4880 ints)
     //    = 288 + 9760 = 10048 ints = 40192 B
@@ -444,19 +452,15 @@ pub fn indexed_moe_mmq_q4_k_down_turbo(
     sorted_pair_idx_padded: DevicePtr,
     padded_offsets: DevicePtr,
     dst: DevicePtr,
-    n_rows: usize,              // hidden
-    n_pairs: usize,             // n_tokens * top_k
-    n_sb_per_row: usize,        // inter / QK_K for down_w
-    n_experts: usize,
-    padded_total_upper_bound: usize,
+    shape: MoeShape,            // n_tokens holds n_pairs; top_k unused (kernel signature lacks it)
 ) -> Result<()> {
     let module = reg.expect_module("indexed_moe_mmq_q4_k_down_turbo")?;
     let kernel = module.kernel("flambeau_indexed_moe_mmq_q4_k_down_turbo_q8_1")?;
 
-    let n_rows_i = n_rows as i32;
-    let n_pairs_i = n_pairs as i32;
-    let nb_i = n_sb_per_row as i32;
-    let n_experts_i = n_experts as i32;
+    let n_rows_i = shape.n_rows as i32;
+    let n_pairs_i = shape.n_tokens as i32;    // down's Y axis is per-pair
+    let nb_i = shape.n_sb_per_row as i32;
+    let n_experts_i = shape.n_experts as i32;
     let w_ptr: u64 = down_w.as_usize() as u64;
     let y_ptr: u64 = y_mmq.as_usize() as u64;
     let e_ptr: u64 = expert_ids.as_usize() as u64;
@@ -476,8 +480,8 @@ pub fn indexed_moe_mmq_q4_k_down_turbo(
     args.push(&nb_i);
     args.push(&n_experts_i);
 
-    let grid_x = (n_rows as u32).div_ceil(128);
-    let grid_y = (padded_total_upper_bound as u32).div_ceil(8);
+    let grid_x = (shape.n_rows as u32).div_ceil(128);
+    let grid_y = (shape.padded_total_upper_bound as u32).div_ceil(8);
     // LDS: tile_y (MMQ_X=8 × 36 = 288) + 1 × TILE_X (4880) = 5168 ints = 20672 B
     const SHARED_BYTES: u32 = 20992;
     let cfg = LaunchCfg {
@@ -503,21 +507,16 @@ pub fn indexed_moe_mmq_q6_k_down_tile8(
     sorted_pair_idx_padded: DevicePtr,
     padded_offsets: DevicePtr,
     dst: DevicePtr,
-    n_rows: usize,
-    n_tokens: usize,
-    top_k: usize,
-    n_sb_per_row: usize,
-    n_experts: usize,
-    padded_total_upper_bound: usize,
+    shape: MoeShape,
 ) -> Result<()> {
     let module = reg.expect_module("indexed_moe_mmq_q6_k_down_tile8_dp4a")?;
     let kernel = module.kernel("flambeau_indexed_moe_mmq_q6_k_down_tile8_dp4a_q8_1")?;
 
-    let n_rows_i = n_rows as i32;
-    let n_tokens_i = n_tokens as i32;
-    let top_k_i = top_k as i32;
-    let nb_i = n_sb_per_row as i32;
-    let n_experts_i = n_experts as i32;
+    let n_rows_i = shape.n_rows as i32;
+    let n_tokens_i = shape.n_tokens as i32;
+    let top_k_i = shape.top_k as i32;
+    let nb_i = shape.n_sb_per_row as i32;
+    let n_experts_i = shape.n_experts as i32;
     let w_ptr: u64 = w.as_usize() as u64;
     let y_ptr: u64 = y.as_usize() as u64;
     let e_ptr: u64 = expert_ids.as_usize() as u64;
@@ -536,9 +535,9 @@ pub fn indexed_moe_mmq_q6_k_down_tile8(
     args.push(&top_k_i);
     args.push(&nb_i);
     args.push(&n_experts_i);
-    let grid_y = padded_total_upper_bound.div_ceil(8) as u32;
+    let grid_y = shape.padded_total_upper_bound.div_ceil(8) as u32;
     let cfg = LaunchCfg {
-        grid: ((n_rows as u32).div_ceil(64), grid_y, 1),
+        grid: ((shape.n_rows as u32).div_ceil(64), grid_y, 1),
         block: (64, 1, 1),
         shared_bytes: 0,
     };

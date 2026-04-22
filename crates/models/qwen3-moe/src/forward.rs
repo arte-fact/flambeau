@@ -5131,12 +5131,14 @@ pub fn forward_moe_ffn_prefill(
             scratch.sort_padded_offsets,
             scratch.gate_out_f32,
             scratch.up_out_f32,
-            inter,
-            n_tokens,
-            top_k,
-            nb_per_row_hidden,
-            n_experts,
-            padded_total_ub,
+            flambeau_ops::hip::moe::MoeShape {
+                n_rows: inter,
+                n_tokens,
+                top_k,
+                n_sb_per_row: nb_per_row_hidden,
+                n_experts,
+                padded_total_upper_bound: padded_total_ub,
+            },
         )
         .context("prefill indexed_moe gate+up turbo")?;
     } else {
@@ -5151,12 +5153,14 @@ pub fn forward_moe_ffn_prefill(
             scratch.sort_padded_offsets,
             scratch.gate_out_f32,
             scratch.up_out_f32,
-            inter,
-            n_tokens,
-            top_k,
-            nb_per_row_hidden,
-            n_experts,
-            padded_total_ub,
+            flambeau_ops::hip::moe::MoeShape {
+                n_rows: inter,
+                n_tokens,
+                top_k,
+                n_sb_per_row: nb_per_row_hidden,
+                n_experts,
+                padded_total_upper_bound: padded_total_ub,
+            },
         )
         .context("prefill indexed_moe gate+up tile8")?;
     }
@@ -5266,11 +5270,14 @@ pub fn forward_moe_ffn_prefill(
                 scratch.sort_sorted_pair_idx_padded,
                 scratch.sort_padded_offsets,
                 scratch.down_f32,
-                hidden,
-                n_tokens * top_k,
-                nb_per_row_inter,
-                n_experts,
-                padded_total_ub,
+                flambeau_ops::hip::moe::MoeShape {
+                    n_rows: hidden,
+                    n_tokens: n_tokens * top_k,
+                    top_k: 1,
+                    n_sb_per_row: nb_per_row_inter,
+                    n_experts,
+                    padded_total_upper_bound: padded_total_ub,
+                },
             )
             .context("prefill indexed_moe down q4_k turbo")?;
         }
@@ -5285,12 +5292,14 @@ pub fn forward_moe_ffn_prefill(
                 scratch.sort_sorted_pair_idx_padded,
                 scratch.sort_padded_offsets,
                 scratch.down_f32,
-                hidden,
-                n_tokens * top_k,
-                1,
-                nb_per_row_inter,
-                n_experts,
-                padded_total_ub,
+                flambeau_ops::hip::moe::MoeShape {
+                    n_rows: hidden,
+                    n_tokens: n_tokens * top_k,
+                    top_k: 1,
+                    n_sb_per_row: nb_per_row_inter,
+                    n_experts,
+                    padded_total_upper_bound: padded_total_ub,
+                },
             )
             .context("prefill indexed_moe down q4_k tile8")?;
         }
@@ -5332,12 +5341,14 @@ pub fn forward_moe_ffn_prefill(
                 scratch.sort_sorted_pair_idx_padded,
                 scratch.sort_padded_offsets,
                 scratch.down_f32,
-                hidden,
-                n_tokens * top_k,
-                1,
-                nb_per_row_inter,
-                n_experts,
-                padded_total_ub,
+                flambeau_ops::hip::moe::MoeShape {
+                    n_rows: hidden,
+                    n_tokens: n_tokens * top_k,
+                    top_k: 1,
+                    n_sb_per_row: nb_per_row_inter,
+                    n_experts,
+                    padded_total_upper_bound: padded_total_ub,
+                },
             )
             .context("prefill indexed_moe down q6_k tile8")?;
         }
