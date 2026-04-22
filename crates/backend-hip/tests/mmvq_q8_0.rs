@@ -135,7 +135,7 @@ fn alloc_and_upload<T: Copy>(dev: &HipDevice, data: &[T]) -> DevicePtr {
 }
 
 fn run_mmvq_q8_0(n_rows: usize, k: usize, seed: u64) -> (Vec<f32>, Vec<f32>) {
-    assert!(k.is_multiple_of(QK));
+    assert!(k % QK == 0);
     let blocks_per_row = k / QK;
 
     let dev = HipDevice::new(0).unwrap();

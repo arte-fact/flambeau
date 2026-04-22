@@ -20,13 +20,19 @@ use super::OpsRegistry;
 /// K-quants, loops MMVQ across rows — the dispatcher's job is to tell us
 /// which impl wins, not to paper over that MMVQ is per-row.
 ///
-/// `act_q8_1` must already be Q8_1-quantised; use [`super::norm::quantize_q8_1`]
-/// or the fused `rmsnorm_quant_q8_1` upstream.
+/// Takes both the standard [`flambeau_quant::BlockQ8_1`] layout and the DS4
+/// [`flambeau_quant::BlockQ8_1Mmq`] layout. The dispatcher picks:
+///   - `act_q8_1`      → MMVQ and Mmq4Warp kernels (36 B per-row blocks)
+///   - `act_q8_1_mmq`  → MmqLdsX64 kernel (144 B DS4 blocks)
+///
+/// Decode-path callers that never hit the MmqLdsX64 recipe can pass a null
+/// [`DevicePtr`] for `act_q8_1_mmq`; use [`qmatmul_decode`] for ergonomics.
 pub fn qmatmul(
     reg: &OpsRegistry,
     stream: &HipStream,
     weights: DevicePtr,
     act_q8_1: DevicePtr,
+    act_q8_1_mmq: DevicePtr,
     dst: DevicePtr,
     m: usize,
     k: usize,
@@ -73,8 +79,29 @@ pub fn qmatmul(
             let nb_per_row = k / block_elems(dtype_weight);
             mmq_launch(reg, stream, recipe, weights, act_q8_1, dst, n, m, nb_per_row)
         }
+        RecipeKind::MmqLdsX64 => {
+            if act_q8_1_mmq.as_usize() == 0 {
+                bail!(
+                    "qmatmul dispatched to MmqLdsX64 (impl {}) but caller \
+                     did not populate act_q8_1_mmq — run \
+                     ops::norm::quantize_f16_q8_1_mmq upstream or use \
+                     qmatmul_decode() if this is a decode path",
+                    desc.impl_id
+                );
+            }
+            let nb_per_row = k / block_elems(dtype_weight);
+            mmq_lds_x64_launch(
+                reg, stream, recipe, weights, act_q8_1_mmq, dst, n, m, nb_per_row,
+            )
+        }
+        RecipeKind::MmqWave64 => {
+            mmq_wave64_launch(
+                reg, stream, recipe, weights, act_q8_1, dst, n, m, k,
+            )
+        }
     }
 }
+
 
 /// Decode-path MMVQ for a single activation row. Caller is responsible for
 /// ensuring `m == 1` in the dispatch sense (one Q8_1-quantised vector of K
@@ -190,6 +217,19 @@ enum RecipeKind {
     Mmvq,
     MmqOracle,
     Mmq4Warp,
+    /// V2.2.d.P5 port of candle's 4-warp LDS-tiled MMQ with DS4 Q8_1 activation
+    /// layout. Differs from `Mmq4Warp` in: 2D block dims (64, 4, 1), 9 scalar
+    /// args (ncols_x, nrows_x, ncols_y, stride_col_y, stride_row_x, nrows_dst),
+    /// dynamic shared-memory bytes, and the Y buffer pre-formatted as
+    /// `BlockQ8_1Mmq` via `flambeau_quantize_q8_1_mmq`.
+    MmqLdsX64,
+    /// V2.2.d fix 1 — wave64 MMQ for Q5_K (candle port `mul_mat_q5_K_gfx906_v2`).
+    /// Consumes the standard `flambeau_block_q8_1` layout (NOT DS4), so no
+    /// special activation quantise is needed at call sites. Grid =
+    /// (ceil(N/64), ceil(M/8)), block = 64 threads (1 warp), 8 output cols
+    /// per tile. Args: `(vx, vy, dst, ncols_x=K, nrows_x=N, ncols_y=M,
+    /// nrows_y=K, nrows_dst=N)`.
+    MmqWave64,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -200,7 +240,7 @@ struct Recipe {
     threads: u32,
     /// MMVQ only — output rows per block.
     rows_per_block: u32,
-    /// MMQ only — (rows_per_tile, batches_per_tile).
+    /// Mmq4Warp only — (rows_per_tile, batches_per_tile).
     mmq_tile: (u32, u32),
 }
 
@@ -219,6 +259,21 @@ impl Recipe {
         let force_dp4a_only = variant.as_deref() == Some("dp4a");
         let force_llamacpp = variant.as_deref() == Some("llamacpp_style");
         let impl_id = match (impl_id, force_baseline, force_dp4a_only, force_llamacpp) {
+            // V2.7: baseline-opt-out reverts tile16 → tile8 for regression A/B.
+            // Must precede the general `force_baseline` catch-all below so the
+            // MMQ rename happens even when baseline is requested.
+            ("qmatmul_q8_0_mmq_wave64_tile16_gfx906", true, _, _) => {
+                "qmatmul_q8_0_mmq_wave64_gfx906"
+            }
+            // V2.13 attempted FLAMBEAU_Q4_1_WAVE64 intercept. NULL RESULT:
+            // wave64 single-warp Q4_1 was 3.5× SLOWER than 4warp_lds
+            // (1319 → 4647 ms / 528 calls). Q4_1's 32-element block is 8×
+            // smaller than K-quants' 256-element super-block, so wave64
+            // emits 16× more tile-blocks for the same output area and loses
+            // on launch overhead. 4warp_lds's 128×64 tile + activation LDS
+            // tiling is structurally correct for finer-grained quants;
+            // a proper Q4_1 improvement needs 4warp-level work, not V2.3.b
+            // single-warp wave64. Kernel kept in-tree for future reference.
             // opt-out to pre-DP4A scalar
             (_, true, _, _) => impl_id,
             // llamacpp-style (A/B research only)
@@ -233,9 +288,9 @@ impl Recipe {
             ("qmatmul_q8_0_mmvq_single_row_gfx906", _, _, _) => {
                 "qmatmul_q8_0_mmvq_dp4a_vdr2_gfx906"
             }
-            ("qmatmul_q6_K_mmvq_nw1_r4_gfx906", _, _, _) => {
-                "qmatmul_q6_K_mmvq_dp4a_gfx906"
-            }
+            // V2.3.d.1: Q6_K DP4A runtime intercept removed — dispatch row
+            // `qmatmul_q6_K_mmvq_dp4a_gfx906` now points at the real DP4A
+            // kernel directly with its own sweep cert.
             _ => impl_id,
         };
         Ok(match impl_id {
@@ -277,6 +332,14 @@ impl Recipe {
                 entry: "flambeau_mmvq_q4_k_r2_q8_1",
                 threads: 64,
                 rows_per_block: 2,
+                mmq_tile: (0, 0),
+            },
+            "qmatmul_q4_1_mmvq_dp4a_gfx906" => Self {
+                kind: RecipeKind::Mmvq,
+                stem: "mmvq_q4_1",
+                entry: "flambeau_mmvq_q4_1_q8_1",
+                threads: 256,
+                rows_per_block: 1,
                 mmq_tile: (0, 0),
             },
             "qmatmul_q5_K_mmvq_nw1_r2_gfx906" => Self {
@@ -334,6 +397,46 @@ impl Recipe {
                 rows_per_block: 0,
                 mmq_tile: (32, 8),
             },
+            "qmatmul_q8_0_mmq_wave64_gfx906" => Self {
+                kind: RecipeKind::MmqWave64,
+                stem: "mmq_q8_0_wave64",
+                entry: "flambeau_mmq_q8_0_wave64_q8_1",
+                threads: 64,
+                rows_per_block: 0,
+                // MMQ_Y=64 rows × TILE_N=8 cols per tile (matches K-quant wave64)
+                mmq_tile: (64, 8),
+            },
+            "qmatmul_q8_0_mmq_wave64_tile16_gfx906" => Self {
+                kind: RecipeKind::MmqWave64,
+                stem: "mmq_q8_0_wave64_tile16",
+                entry: "flambeau_mmq_q8_0_wave64_tile16_q8_1",
+                threads: 64,
+                rows_per_block: 0,
+                // MMQ_Y=64 rows × TILE_N=16 — halves weight HBM bandwidth vs
+                // the TILE_N=8 variant at the cost of doubled per-thread
+                // accumulator VGPR (16 floats).
+                mmq_tile: (64, 16),
+            },
+            "qmatmul_q4_1_mmq_4warp_lds_gfx906" => Self {
+                kind: RecipeKind::MmqLdsX64,
+                stem: "mmq_q4_1_4warp_lds",
+                entry: "flambeau_mmq_q4_1_4warp_lds_q8_1",
+                threads: 0,      // unused for MmqLdsX64 (2D block dims hard-coded in launcher)
+                rows_per_block: 0,
+                // MMQ_Y=128, MMQ_X=64 — used by the launcher to compute the grid
+                // and dynamic LDS bytes. These MUST match mmq_q4_1_4warp_lds.cu.
+                mmq_tile: (128, 64),
+            },
+            // V2.13.a: wave64 MMQ for Q4_1. Same shape family as Q8_0/K-quant
+            // wave64 kernels — MMQ_Y=64, TILE_N=8, 64 threads, DP4A inner.
+            "qmatmul_q4_1_mmq_wave64_gfx906" => Self {
+                kind: RecipeKind::MmqWave64,
+                stem: "mmq_q4_1_wave64",
+                entry: "flambeau_mmq_q4_1_wave64_q8_1",
+                threads: 64,
+                rows_per_block: 0,
+                mmq_tile: (64, 8),
+            },
             "qmatmul_q4_K_mmq_4warp_lds_gfx906" => Self {
                 kind: RecipeKind::Mmq4Warp,
                 stem: "mmq_q4_K_4warp",
@@ -342,6 +445,24 @@ impl Recipe {
                 rows_per_block: 0,
                 mmq_tile: (16, 8),
             },
+            "qmatmul_q4_K_mmq_wave64_gfx906" => Self {
+                kind: RecipeKind::MmqWave64,
+                stem: "mmq_q4_K_wave64",
+                entry: "flambeau_mmq_q4_K_wave64_q8_1",
+                threads: 64,
+                rows_per_block: 0,
+                // MMQ_Y = 64 rows, TILE_N = 8 cols per tile
+                mmq_tile: (64, 8),
+            },
+            "qmatmul_q5_K_mmq_wave64_gfx906" => Self {
+                kind: RecipeKind::MmqWave64,
+                stem: "mmq_q5_K_wave64",
+                entry: "flambeau_mmq_q5_K_wave64_q8_1",
+                threads: 64,
+                rows_per_block: 0,
+                // MMQ_Y = 64 rows, TILE_N = 8 cols per tile
+                mmq_tile: (64, 8),
+            },
             "qmatmul_q6_K_mmq_4warp_lds_gfx906" => Self {
                 kind: RecipeKind::Mmq4Warp,
                 stem: "mmq_q6_K_4warp",
@@ -349,6 +470,15 @@ impl Recipe {
                 threads: 128,
                 rows_per_block: 0,
                 mmq_tile: (16, 8),
+            },
+            "qmatmul_q6_K_mmq_wave64_gfx906" => Self {
+                kind: RecipeKind::MmqWave64,
+                stem: "mmq_q6_K_wave64",
+                entry: "flambeau_mmq_q6_K_wave64_q8_1",
+                threads: 64,
+                rows_per_block: 0,
+                // MMQ_Y = 64 rows, TILE_N = 8 cols per tile
+                mmq_tile: (64, 8),
             },
             other => bail!("no launch recipe registered for impl_id {other}"),
         })
@@ -422,10 +552,131 @@ fn mmq_launch(
     Ok(())
 }
 
+/// Launch the 4-warp LDS-tiled MMQ with DS4 Q8_1 activation layout.
+/// Expected inputs:
+///   weights  : flambeau_block_q4_1 * [n_rows, n_blocks_per_row]
+///   act_q8_1 : flambeau_block_q8_1_mmq * [n_big_blocks_k, n_batches]  (NOTE: MMQ layout)
+///   dst      : f32 * [n_batches, n_rows]  (col-major in our naming)
+/// where `n_big_blocks_k = n_blocks_per_row * QK4_1 / (4 * QK8_1) = n_blocks_per_row / 4`.
+fn mmq_lds_x64_launch(
+    reg: &OpsRegistry,
+    stream: &HipStream,
+    recipe: Recipe,
+    weights: DevicePtr,
+    act_q8_1_mmq: DevicePtr,
+    dst: DevicePtr,
+    n_rows: usize,
+    n_batches: usize,
+    n_blocks_per_row: usize,
+) -> Result<()> {
+    let module = reg.expect_module(recipe.stem)?;
+    let kernel = module.kernel(recipe.entry)?;
+
+    // Kernel expects (ncols_x, nrows_x, ncols_y, stride_col_y, stride_row_x, nrows_dst).
+    //   ncols_x = K (elements)
+    //   nrows_x = N (weight rows)
+    //   ncols_y = M (batch rows)
+    //   stride_col_y = ncols_y (Y is (big_k, col) row-major in blocks)
+    //   stride_row_x = n_blocks_per_row (X row stride in Q4_1 blocks)
+    //   nrows_dst    = n_rows
+    const QK4_1: usize = 32;
+    let ncols_x = (n_blocks_per_row * QK4_1) as i32;
+    let nrows_x = n_rows as i32;
+    let ncols_y = n_batches as i32;
+    let stride_col_y = n_batches as i32;
+    let stride_row_x = n_blocks_per_row as i32;
+    let nrows_dst = n_rows as i32;
+
+    let w_ptr: u64 = weights.as_usize() as u64;
+    let a_ptr: u64 = act_q8_1_mmq.as_usize() as u64;
+    let d_ptr: u64 = dst.as_usize() as u64;
+    let mut args = KernelArgs::new();
+    args.push(&w_ptr);
+    args.push(&a_ptr);
+    args.push(&d_ptr);
+    args.push(&ncols_x);
+    args.push(&nrows_x);
+    args.push(&ncols_y);
+    args.push(&stride_col_y);
+    args.push(&stride_row_x);
+    args.push(&nrows_dst);
+
+    // Dynamic LDS byte budget. Must match mmq_q4_1_4warp_lds.cu exactly.
+    // Layout (int-addressed):
+    //   tile_y: pad_up(mmq_x * MMQ_TILE_Y_K, MMQ_NWARPS * WARP_SIZE) ints
+    //   x_qs:   MMQ_Y * (MMQ_TILE_NE_K + 1) ints
+    //   x_dm:   (MMQ_Y * (MMQ_TILE_NE_K / QI4_1) + MMQ_Y / QI4_1) half2
+    // With MMQ_Y=128, MMQ_X=64, MMQ_TILE_NE_K=32, QI4_1=4, QI8_1=8,
+    //      MMQ_TILE_Y_K = 32 + 32/8 = 36, MMQ_NWARPS=4, WARP_SIZE=64:
+    //   tile_y = pad_up(64*36, 256) = 2304 ints
+    //   x_qs   = 128 * 33           = 4224 ints
+    //   x_dm   = 128*8 + 32         = 1056 half2 = 1056 ints (4 B each)
+    // Total ints = 7584  →  30_336 B
+    const SHARED_BYTES: u32 = 7584 * 4;
+
+    let (rows_per_tile, batches_per_tile) = recipe.mmq_tile;
+    let grid_x = (n_rows as u32).div_ceil(rows_per_tile);
+    let grid_y = (n_batches as u32).div_ceil(batches_per_tile);
+    let cfg = LaunchCfg {
+        grid: (grid_x, grid_y, 1),
+        // 2D block: (WARP_SIZE, MMQ_NWARPS, 1) = (64, 4, 1).
+        block: (64, 4, 1),
+        shared_bytes: SHARED_BYTES,
+    };
+    unsafe { kernel.launch(stream, cfg, args)? };
+    Ok(())
+}
+
+/// Launch the wave64 Q5_K MMQ (V2.2.d fix 1). Expected inputs:
+///   weights  : flambeau_block_q5_K * [n_rows, K/QK_K]
+///   act_q8_1 : flambeau_block_q8_1 * [n_batches, K/QK8_1]  (standard layout)
+///   dst      : f32 * [n_batches, n_rows]  (col-major; `dst[col*nrows_dst+row]`)
+fn mmq_wave64_launch(
+    reg: &OpsRegistry,
+    stream: &HipStream,
+    recipe: Recipe,
+    weights: DevicePtr,
+    act_q8_1: DevicePtr,
+    dst: DevicePtr,
+    n_rows: usize,
+    n_batches: usize,
+    k: usize,
+) -> Result<()> {
+    let module = reg.expect_module(recipe.stem)?;
+    let kernel = module.kernel(recipe.entry)?;
+    let ncols_x = k as i32;
+    let nrows_x = n_rows as i32;
+    let ncols_y = n_batches as i32;
+    let nrows_y = k as i32;  // Y's K dim in elements (blocks = K / QK8_1)
+    let nrows_dst = n_rows as i32;
+    let w_ptr: u64 = weights.as_usize() as u64;
+    let a_ptr: u64 = act_q8_1.as_usize() as u64;
+    let d_ptr: u64 = dst.as_usize() as u64;
+    let mut args = KernelArgs::new();
+    args.push(&w_ptr);
+    args.push(&a_ptr);
+    args.push(&d_ptr);
+    args.push(&ncols_x);
+    args.push(&nrows_x);
+    args.push(&ncols_y);
+    args.push(&nrows_y);
+    args.push(&nrows_dst);
+    let (rows_per_tile, batches_per_tile) = recipe.mmq_tile;
+    let grid_x = (n_rows as u32).div_ceil(rows_per_tile);
+    let grid_y = (n_batches as u32).div_ceil(batches_per_tile);
+    let cfg = LaunchCfg {
+        grid: (grid_x, grid_y, 1),
+        block: (recipe.threads, 1, 1),
+        shared_bytes: 0,
+    };
+    unsafe { kernel.launch(stream, cfg, args)? };
+    Ok(())
+}
+
 fn block_elems(dtype: QDtype) -> usize {
     use flambeau_quant::{QK8_0, QK_K};
     match dtype {
-        QDtype::Q8_0 | QDtype::Q8_1 => QK8_0,
+        QDtype::Q8_0 | QDtype::Q8_1 | QDtype::Q4_1 => QK8_0,
         QDtype::Q4_K | QDtype::Q5_K | QDtype::Q6_K => QK_K,
         other => panic!("qmatmul weight dtype {other:?} not supported"),
     }

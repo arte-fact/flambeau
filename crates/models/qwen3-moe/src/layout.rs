@@ -15,7 +15,7 @@ use flambeau_quant::{GgmlDType, GgufFile, TensorInfo};
 
 use crate::config::{AttentionFamily, Qwen3MoEConfig};
 use crate::names::{
-    CommonNames, DenseAttnNames, FullAttnNames, GdnNames, GlobalNames, MoeFfnNames,
+    CommonNames, DenseAttnNames, DenseFfnNames, FullAttnNames, GdnNames, GlobalNames, MoeFfnNames,
 };
 
 /// Tensor name + cached `TensorInfo` + byte size. Cloned from the GGUF
@@ -91,18 +91,28 @@ pub struct GdnTensors {
     pub ssm_out: ResolvedTensor,
 }
 
-/// Per-layer FFN descriptors. Every layer uses MoE — the only variation is
-/// whether a shared expert is present (hybrid arches only).
+/// Per-layer FFN descriptors. One of two shapes, selected by the arch:
+///
+/// - **MoE** (`qwen3moe` / `qwen35moe` / `qwen36moe`): `ffn_gate_inp` +
+///   `ffn_{gate,up,down}_exps` populated; optional `shared` expert on hybrid
+///   arches. `dense` is `None`.
+/// - **Dense** (`qwen35`): `dense` populated; all MoE fields are `None`.
+///
+/// The two branches are mutually exclusive — the forward pass consults
+/// `cfg.is_dense_ffn()` to pick the right path.
 #[derive(Debug, Clone)]
 pub struct MoeFfnTensors {
-    pub ffn_gate_inp: ResolvedTensor,
-    pub ffn_gate_exps: ResolvedTensor,
-    pub ffn_up_exps: ResolvedTensor,
-    pub ffn_down_exps: ResolvedTensor,
+    pub ffn_gate_inp: Option<ResolvedTensor>,
+    pub ffn_gate_exps: Option<ResolvedTensor>,
+    pub ffn_up_exps: Option<ResolvedTensor>,
+    pub ffn_down_exps: Option<ResolvedTensor>,
     /// Present iff the arch carries an always-on shared expert. The gate
     /// scalar `ffn_gate_inp_shexp` mixes shared-expert output with routed
     /// expert output.
     pub shared: Option<SharedExpertTensors>,
+    /// Some iff `arch=qwen35` — a single gate/up/down triple replaces the
+    /// entire routed+shared MoE stack.
+    pub dense: Option<DenseFfnTensors>,
 }
 
 #[derive(Debug, Clone)]
@@ -111,6 +121,13 @@ pub struct SharedExpertTensors {
     pub ffn_gate_shexp: ResolvedTensor,
     pub ffn_up_shexp: ResolvedTensor,
     pub ffn_down_shexp: ResolvedTensor,
+}
+
+#[derive(Debug, Clone)]
+pub struct DenseFfnTensors {
+    pub ffn_gate: ResolvedTensor,
+    pub ffn_up: ResolvedTensor,
+    pub ffn_down: ResolvedTensor,
 }
 
 /// Per-block bound tensor descriptors.
@@ -167,6 +184,7 @@ impl ModelLayout {
         for layer_idx in 0..cfg.num_layers {
             let c = CommonNames::for_layer(layer_idx);
             let m = MoeFfnNames::for_layer(layer_idx);
+            let d = DenseFfnNames::for_layer(layer_idx);
 
             let attn_norm = required(&c.attn_norm)?;
             // Hybrid arches expose `post_attention_norm`; dense `ffn_norm`.
@@ -220,23 +238,38 @@ impl ModelLayout {
                 }
             };
 
-            let shared = if cfg.shared_expert_intermediate_size.is_some() {
-                Some(SharedExpertTensors {
-                    ffn_gate_inp_shexp: required(&m.ffn_gate_inp_shexp)?,
-                    ffn_gate_shexp: required(&m.ffn_gate_shexp)?,
-                    ffn_up_shexp: required(&m.ffn_up_shexp)?,
-                    ffn_down_shexp: required(&m.ffn_down_shexp)?,
-                })
+            let ffn = if cfg.is_dense_ffn() {
+                MoeFfnTensors {
+                    ffn_gate_inp: None,
+                    ffn_gate_exps: None,
+                    ffn_up_exps: None,
+                    ffn_down_exps: None,
+                    shared: None,
+                    dense: Some(DenseFfnTensors {
+                        ffn_gate: required(&d.ffn_gate)?,
+                        ffn_up: required(&d.ffn_up)?,
+                        ffn_down: required(&d.ffn_down)?,
+                    }),
+                }
             } else {
-                None
-            };
-
-            let ffn = MoeFfnTensors {
-                ffn_gate_inp: required(&m.ffn_gate_inp)?,
-                ffn_gate_exps: required(&m.ffn_gate_exps)?,
-                ffn_up_exps: required(&m.ffn_up_exps)?,
-                ffn_down_exps: required(&m.ffn_down_exps)?,
-                shared,
+                let shared = if cfg.shared_expert_intermediate_size.is_some() {
+                    Some(SharedExpertTensors {
+                        ffn_gate_inp_shexp: required(&m.ffn_gate_inp_shexp)?,
+                        ffn_gate_shexp: required(&m.ffn_gate_shexp)?,
+                        ffn_up_shexp: required(&m.ffn_up_shexp)?,
+                        ffn_down_shexp: required(&m.ffn_down_shexp)?,
+                    })
+                } else {
+                    None
+                };
+                MoeFfnTensors {
+                    ffn_gate_inp: Some(required(&m.ffn_gate_inp)?),
+                    ffn_gate_exps: Some(required(&m.ffn_gate_exps)?),
+                    ffn_up_exps: Some(required(&m.ffn_up_exps)?),
+                    ffn_down_exps: Some(required(&m.ffn_down_exps)?),
+                    shared,
+                    dense: None,
+                }
             };
 
             layers.push(LayerDescriptor {
@@ -319,15 +352,19 @@ fn attn_block_bytes(block: &LayerAttnBlock) -> u64 {
 }
 
 fn ffn_bytes(f: &MoeFfnTensors) -> u64 {
-    let mut s = f.ffn_gate_inp.size_bytes
-        + f.ffn_gate_exps.size_bytes
-        + f.ffn_up_exps.size_bytes
-        + f.ffn_down_exps.size_bytes;
+    let mut s = 0u64;
+    if let Some(t) = &f.ffn_gate_inp { s += t.size_bytes; }
+    if let Some(t) = &f.ffn_gate_exps { s += t.size_bytes; }
+    if let Some(t) = &f.ffn_up_exps { s += t.size_bytes; }
+    if let Some(t) = &f.ffn_down_exps { s += t.size_bytes; }
     if let Some(sh) = &f.shared {
         s += sh.ffn_gate_inp_shexp.size_bytes
             + sh.ffn_gate_shexp.size_bytes
             + sh.ffn_up_shexp.size_bytes
             + sh.ffn_down_shexp.size_bytes;
+    }
+    if let Some(d) = &f.dense {
+        s += d.ffn_gate.size_bytes + d.ffn_up.size_bytes + d.ffn_down.size_bytes;
     }
     s
 }

@@ -1,3 +1,5 @@
+// Kernel launcher fns legitimately take many args (ptrs + shape scalars).
+#![allow(clippy::too_many_arguments)]
 //! flambeau-ops — typed fused building blocks used by model crates.
 //!
 //! Everything here is `Mesh<N>`-generic: `Mesh<1>` is a degenerate single-GPU
@@ -18,9 +20,10 @@
 //! - `attention` — decode (F16 KV, Q8 KV) + prefill (F16).
 //! - `moe` — TopK router, IndexedMoE MMVQ + MMQ + fused gate+up, combine.
 //!
-//! Each op module exposes stateless free functions that accept `&OpsRegistry`
-//! + device pointers + shape. The registry owns the `HipModule`s; each launch
-//! looks up the kernel by name (cheap) and fires. No per-call hsaco parsing.
+//! Each op module exposes stateless free functions that accept `&OpsRegistry`,
+//! device pointers, and shape scalars. The registry owns the `HipModule`s;
+//! each launch looks up the kernel by name (cheap) and fires. No per-call
+//! hsaco parsing.
 //!
 //! Mesh-genericity: the HIP-specialised surface below takes a single
 //! `HipDevice` / `HipStream`. V1.7.5 wraps this behind a `MeshOps<M: Mesh>`

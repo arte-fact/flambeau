@@ -196,7 +196,7 @@ fn aggregate_pmc(rows: &[CounterRow], kernel_name: &str) -> Result<PmcSnapshot> 
     let vgpr = filtered[0].vgpr_count;
     let sgpr = filtered[0].sgpr_count;
 
-    let mut mean = |counter: &str| -> Option<f32> {
+    let mean = |counter: &str| -> Option<f32> {
         let vals: Vec<f64> = filtered
             .iter()
             .filter(|r| r.counter_name == counter)

@@ -248,7 +248,7 @@ fn run_moe_mmvq_shape(
     let total_blocks = n_experts * n_rows * nb_per_row;
     let w_bytes = total_blocks * std::mem::size_of::<BlockQ4K>();
     let w_raw = tame_q4k_scales(seeded_bytes(seed, w_bytes));
-    let w_blocks: &[BlockQ4K] = bytemuck::cast_slice(&w_raw);
+    let _w_blocks: &[BlockQ4K] = bytemuck::cast_slice(&w_raw);
 
     // Activations + router-selected experts.
     let act_f32 = seeded_f32(seed.wrapping_add(0xA1), n_tokens * k_dim);
@@ -511,7 +511,7 @@ fn run_r2_shape(
         args.push(&n_tokens_i);
         args.push(&top_k_i);
         args.push(&nb_i);
-        let grid_x = ((n_rows as u32) + 1) / 2;
+        let grid_x = (n_rows as u32).div_ceil(2);
         let cfg = LaunchCfg {
             grid: (grid_x, (n_tokens * top_k) as u32, 1),
             block: (64, 1, 1),
@@ -1159,7 +1159,7 @@ fn run_mmq_shape(
         args.push(&n_rows_i);
         args.push(&nb_i);
         args.push(&top_k_i);
-        let grid_x = ((n_rows as u32) + MMQ_Y as u32 - 1) / MMQ_Y as u32;
+        let grid_x = (n_rows as u32).div_ceil(MMQ_Y as u32);
         let cfg = LaunchCfg {
             grid: (grid_x, n_buckets as u32, 1),
             block: (128, 1, 1),
@@ -1314,7 +1314,7 @@ fn run_combine_shape(
         args.push(&top_k_i);
         args.push(&hidden_i);
         let total = n_tokens * hidden;
-        let cfg = LaunchCfg::one_d(((total + 255) / 256) as u32, 256);
+        let cfg = LaunchCfg::one_d(total.div_ceil(256) as u32, 256);
         unsafe { kernel.launch(stream, cfg, args)? };
         stream.synchronize()?;
     }
@@ -1389,7 +1389,7 @@ fn seeded_f32(seed: u64, n: usize) -> Vec<f32> {
         .map(|_| {
             s = s.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
             let u = (s >> 32) as u32;
-            ((u as f32 / u32::MAX as f32) - 0.5)
+            (u as f32 / u32::MAX as f32) - 0.5
         })
         .collect()
 }

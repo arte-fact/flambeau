@@ -36,54 +36,137 @@ pub const QMATMUL_GFX906: &[KernelDescriptor] = &[
     },
     KernelDescriptor {
         op_name: "QMatMul",
+        impl_id: "qmatmul_q4_1_mmvq_dp4a_gfx906",
+        backend: "hip",
+        arch: "gfx906",
+        dtype_weight: QDtype::Q4_1,
+        dtype_activation: QDtype::Q8_1,
+        m_range: (1, 127),
+        cert_rel_path: "certs/hip/gfx906/qmatmul_q4_1_mmvq_dp4a_gfx906.json",
+    },
+    KernelDescriptor {
+        op_name: "QMatMul",
         impl_id: "qmatmul_q5_K_mmvq_nw1_r2_gfx906",
         backend: "hip",
         arch: "gfx906",
         dtype_weight: QDtype::Q5_K,
         dtype_activation: QDtype::Q8_1,
-        m_range: (1, 512),
+        // V2.2.d fix 1: narrowed from (1, 512) to (1, 127) so prefill paths
+        // route to the wave64 MMQ kernel below instead of looping MMVQ per row.
+        m_range: (1, 127),
         cert_rel_path: "certs/hip/gfx906/qmatmul_q5_K_mmvq_nw1_r2_gfx906.json",
     },
     KernelDescriptor {
         op_name: "QMatMul",
-        impl_id: "qmatmul_q6_K_mmvq_nw1_r4_gfx906",
+        impl_id: "qmatmul_q5_K_mmq_wave64_gfx906",
+        backend: "hip",
+        arch: "gfx906",
+        dtype_weight: QDtype::Q5_K,
+        dtype_activation: QDtype::Q8_1,
+        m_range: (128, usize::MAX),
+        cert_rel_path: "certs/hip/gfx906/qmatmul_q5_K_mmq_wave64_gfx906.json",
+    },
+    KernelDescriptor {
+        op_name: "QMatMul",
+        // V2.3.d.1: the DP4A kernel (3.24× per-call win on LM-head) used
+        // to swap in via a runtime intercept in `ops/qmatmul.rs`, which
+        // routed under the r4 scalar cert even though the actual kernel
+        // was uncertified. Sweep-certed the DP4A variant directly and
+        // also fixed a 32-bit unsigned-subtract borrow-chain bug in it
+        // (same class as V2.3.b.4's mmq_q6_K_wave64 fix). Now dispatched
+        // directly, intercept removed.
+        impl_id: "qmatmul_q6_K_mmvq_dp4a_gfx906",
         backend: "hip",
         arch: "gfx906",
         dtype_weight: QDtype::Q6_K,
         dtype_activation: QDtype::Q8_1,
         m_range: (1, 127),
-        cert_rel_path: "certs/hip/gfx906/qmatmul_q6_K_mmvq_nw1_r4_gfx906.json",
+        cert_rel_path: "certs/hip/gfx906/qmatmul_q6_K_mmvq_dp4a_gfx906.json",
     },
     // MMQ (prefill): m ≥ 128
     KernelDescriptor {
         op_name: "QMatMul",
-        impl_id: "qmatmul_q8_0_mmq_4warp_lds_gfx906",
+        // V2.7: TILE_N=16 wave64 MMQ replaces TILE_N=8 at m ≥ 128. Halves weight
+        // HBM fetches (each decoded weight tile reused across 16 activations vs 8).
+        // Kernel PMC at m=512 k=2048 n=4096: MemUnitBusy 97.6 % → 83.1 %,
+        // VALUBusy 19.1 % → 65.5 %. End-to-end Qwen3.6-35B prefill is a wash
+        // (MoE Q4_K dominates); tile16 wins show on Q8_0-heavy workloads.
+        // `FLAMBEAU_VARIANT=baseline` reverts to the V2.4.c TILE_N=8 kernel.
+        // V2.11.b: dispatch_qmatmul() overrides tile16 → tile8 when n < 1024
+        // (small-N shapes like shexp gate/up k=2048 n=512 lose at tile16).
+        impl_id: "qmatmul_q8_0_mmq_wave64_tile16_gfx906",
         backend: "hip",
         arch: "gfx906",
         dtype_weight: QDtype::Q8_0,
         dtype_activation: QDtype::Q8_1,
         m_range: (128, usize::MAX),
-        cert_rel_path: "certs/hip/gfx906/qmatmul_q8_0_mmq_4warp_lds_gfx906.json",
+        cert_rel_path: "certs/hip/gfx906/qmatmul_q8_0_mmq_wave64_tile16_gfx906.json",
     },
     KernelDescriptor {
         op_name: "QMatMul",
-        impl_id: "qmatmul_q4_K_mmq_4warp_lds_gfx906",
+        // V2.13.a: wave64 port of Q4_1 MMQ. Never matched by default dispatch
+        // (m_range MAX..MAX); lookup-only. Promoted to default after V2.13.b
+        // A/B confirms uplift.
+        impl_id: "qmatmul_q4_1_mmq_wave64_gfx906",
+        backend: "hip",
+        arch: "gfx906",
+        dtype_weight: QDtype::Q4_1,
+        dtype_activation: QDtype::Q8_1,
+        m_range: (usize::MAX, usize::MAX),
+        cert_rel_path: "certs/hip/gfx906/qmatmul_q4_1_mmq_wave64_gfx906.json",
+    },
+    KernelDescriptor {
+        op_name: "QMatMul",
+        impl_id: "qmatmul_q4_1_mmq_4warp_lds_gfx906",
+        backend: "hip",
+        arch: "gfx906",
+        dtype_weight: QDtype::Q4_1,
+        dtype_activation: QDtype::Q8_1,
+        m_range: (128, usize::MAX),
+        cert_rel_path: "certs/hip/gfx906/qmatmul_q4_1_mmq_4warp_lds_gfx906.json",
+    },
+    KernelDescriptor {
+        op_name: "QMatMul",
+        // V2.14.b: llamacpp-turbo 4-warp LDS-tiled Q4_K MMQ port. 256 threads
+        // (4 warps × 64), MMQ_Y=16, MMQ_X=16, double-buffered Y LDS per
+        // super-block. Closes the ~1.4× gap to turbo's pp512=1012.80 identified
+        // in candle/bench/qwen36_3way_findings.md. Never matched by default
+        // dispatch (m_range MAX..MAX); lookup-only until V2.14.d A/B.
+        // Indexed-MoE wrapping lands in V2.14.c.
+        impl_id: "qmatmul_q4_K_mmq_turbo_gfx906",
+        backend: "hip",
+        arch: "gfx906",
+        dtype_weight: QDtype::Q4_K,
+        dtype_activation: QDtype::Q8_1,
+        m_range: (usize::MAX, usize::MAX),
+        cert_rel_path: "certs/hip/gfx906/qmatmul_q4_K_mmq_turbo_gfx906.json",
+    },
+    KernelDescriptor {
+        op_name: "QMatMul",
+        // V2.3.b.2: wave64 MMQ replaces the V1.4 F32-tile placeholder
+        // (`qmatmul_q4_K_mmq_4warp_lds_gfx906`) at m >= 128. Kernel is the
+        // candle port `mmq_q4_K_wave64.cu`; structural mirror of the V2.2.d
+        // Q5_K wave64 with flat 4-bit nibble decode (no qh merge).
+        impl_id: "qmatmul_q4_K_mmq_wave64_gfx906",
         backend: "hip",
         arch: "gfx906",
         dtype_weight: QDtype::Q4_K,
         dtype_activation: QDtype::Q8_1,
         m_range: (128, usize::MAX),
-        cert_rel_path: "certs/hip/gfx906/qmatmul_q4_K_mmq_4warp_lds_gfx906.json",
+        cert_rel_path: "certs/hip/gfx906/qmatmul_q4_K_mmq_wave64_gfx906.json",
     },
     KernelDescriptor {
         op_name: "QMatMul",
-        impl_id: "qmatmul_q6_K_mmq_4warp_lds_gfx906",
+        // V2.3.b.4: wave64 MMQ replaces the V1.4 F32-tile placeholder
+        // (`qmatmul_q6_K_mmq_4warp_lds_gfx906`) at m >= 128. Kernel:
+        // `mmq_q6_K_wave64.cu`, authored fresh — candle has no Q6_K MMQ.
+        impl_id: "qmatmul_q6_K_mmq_wave64_gfx906",
         backend: "hip",
         arch: "gfx906",
         dtype_weight: QDtype::Q6_K,
         dtype_activation: QDtype::Q8_1,
         m_range: (128, usize::MAX),
-        cert_rel_path: "certs/hip/gfx906/qmatmul_q6_K_mmq_4warp_lds_gfx906.json",
+        cert_rel_path: "certs/hip/gfx906/qmatmul_q6_K_mmq_wave64_gfx906.json",
     },
     // MMQ oracle covers the mid-M band (4..128) for Q8_0.
     KernelDescriptor {
@@ -507,6 +590,13 @@ pub const INDEXED_MOE_MMQ_GFX906: &[KernelDescriptor] = &[
 pub fn dispatch_qmatmul(cfg: &QMatMulCfg) -> Option<&'static KernelDescriptor> {
     first_match(QMATMUL_GFX906, cfg.dtype_weight, cfg.dtype_activation, cfg.m)
 }
+// V2.11.b was an attempt at shape-aware (n < 1024 → tile8) for Q8_0 MMQ,
+// based on microbench PMC showing tile16 MemBusy crashes 75 % → 35 % at
+// small-N. End-to-end was a regression: the shexp shapes (k=2048 n=512)
+// are already-fast (~0.15 ms/call), and routing them through tile8's
+// smaller MMQ_X adds 24 ms of kernel time over keeping them on tile16.
+// PMC efficiency > wall-clock only when the per-call work is large
+// enough for the efficiency gap to matter. Reverted.
 
 /// Pick the RMSNorm impl for `(dtype_in, dtype_out)` — `rmsnorm_f16_gfx906`
 /// when both are F16, `rmsnorm_q8_1_fused_gfx906` when output is Q8_1.
@@ -574,9 +664,11 @@ mod tests {
     }
 
     #[test]
-    fn mmvq_decode_selects_r4_for_q6_k() {
+    fn mmvq_decode_selects_dp4a_for_q6_k() {
+        // V2.3.d.1: Q6_K MMVQ decode dispatch is the DP4A kernel directly
+        // (runtime intercept removed after the borrow-chain bug was fixed).
         let d = dispatch_qmatmul(&cfg(QDtype::Q6_K, QDtype::Q8_1, 1)).unwrap();
-        assert_eq!(d.impl_id, "qmatmul_q6_K_mmvq_nw1_r4_gfx906");
+        assert_eq!(d.impl_id, "qmatmul_q6_K_mmvq_dp4a_gfx906");
     }
 
     #[test]
@@ -586,16 +678,18 @@ mod tests {
     }
 
     #[test]
-    fn mmq_4warp_at_m_128() {
+    fn mmq_tile16_at_m_128() {
         let d = dispatch_qmatmul(&cfg(QDtype::Q8_0, QDtype::Q8_1, 128)).unwrap();
-        assert_eq!(d.impl_id, "qmatmul_q8_0_mmq_4warp_lds_gfx906");
+        // V2.7: default large-N Q8_0 MMQ is tile16.
+        assert_eq!(d.impl_id, "qmatmul_q8_0_mmq_wave64_tile16_gfx906");
     }
 
     #[test]
-    fn mmq_4warp_at_m_2048() {
+    fn mmq_tile16_at_m_2048() {
         let d = dispatch_qmatmul(&cfg(QDtype::Q8_0, QDtype::Q8_1, 2048)).unwrap();
-        assert_eq!(d.impl_id, "qmatmul_q8_0_mmq_4warp_lds_gfx906");
+        assert_eq!(d.impl_id, "qmatmul_q8_0_mmq_wave64_tile16_gfx906");
     }
+
 
     #[test]
     fn unknown_dtype_combo_returns_none() {

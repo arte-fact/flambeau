@@ -151,7 +151,7 @@
     "vgpr_count": 32,
     "sgpr_count": 32,
     "waves_per_simd": 8,
-    "mem_busy_pct": 22.271067,
-    "valu_busy_pct": 4.947927
+    "mem_busy_pct": 21.700815,
+    "valu_busy_pct": 4.921811
   }
 }

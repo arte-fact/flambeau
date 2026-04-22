@@ -1,6 +1,6 @@
 //! Unit tests for the cert JSON writer + `cert-check` gate.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use flambeau_bench::cert::{Cert, ShapeResult, SCHEMA_VERSION};
@@ -18,7 +18,7 @@ fn tempdir() -> PathBuf {
     p
 }
 
-fn write_dispatch(root: &PathBuf, impl_id: &str, cert_rel: &str) -> PathBuf {
+fn write_dispatch(root: &Path, impl_id: &str, cert_rel: &str) -> PathBuf {
     let dispatch_dir = root.join("dispatch/hip");
     std::fs::create_dir_all(&dispatch_dir).unwrap();
     let toml = format!(
@@ -36,7 +36,7 @@ cert = "{cert_rel}"
     path
 }
 
-fn write_green_cert(root: &PathBuf, impl_id: &str, rel_path: &str) {
+fn write_green_cert(root: &Path, impl_id: &str, rel_path: &str) {
     let cert = Cert {
         schema_version: SCHEMA_VERSION,
         impl_id: impl_id.to_string(),

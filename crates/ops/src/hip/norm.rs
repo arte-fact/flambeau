@@ -170,6 +170,71 @@ pub fn quantize_q8_1(
     Ok(())
 }
 
+/// V2.2.d.P8 — F32 activation → BlockQ8_1Mmq (DS4 layout) for the 4-warp
+/// LDS-tiled MMQ prefill path. Output is `[n_big_blocks, total_b]`
+/// row-major of 144 B blocks (128 F32 elements per block). Grid =
+/// `(ncols/128, total_b)`, block = 128 threads.
+pub fn quantize_q8_1_mmq(
+    reg: &OpsRegistry,
+    stream: &HipStream,
+    x_f32: DevicePtr,
+    y_q8_1_mmq: DevicePtr,
+    ncols: usize,
+    total_b: usize,
+) -> Result<()> {
+    assert_eq!(ncols % 128, 0, "quantize_q8_1_mmq expects ncols % 128 == 0");
+    let module = reg.expect_module("quantize_q8_1_mmq")?;
+    let kernel = module.kernel("flambeau_quantize_q8_1_mmq")?;
+    let ncols_i = ncols as i32;
+    let total_b_i = total_b as i32;
+    let x_ptr: u64 = x_f32.as_usize() as u64;
+    let y_ptr: u64 = y_q8_1_mmq.as_usize() as u64;
+    let mut args = KernelArgs::new();
+    args.push(&x_ptr);
+    args.push(&y_ptr);
+    args.push(&ncols_i);
+    args.push(&total_b_i);
+    let cfg = LaunchCfg {
+        grid: ((ncols / 128) as u32, total_b as u32, 1),
+        block: (128, 1, 1),
+        shared_bytes: 0,
+    };
+    unsafe { kernel.launch(stream, cfg, args)? };
+    Ok(())
+}
+
+/// F16 sibling of [`quantize_q8_1_mmq`]. Used by the forward prefill path
+/// after rmsnorm (which emits F16) to produce the DS4 layout for
+/// `mmq_q4_1_4warp_lds` and future K-quant turbo kernels.
+pub fn quantize_f16_q8_1_mmq(
+    reg: &OpsRegistry,
+    stream: &HipStream,
+    x_f16: DevicePtr,
+    y_q8_1_mmq: DevicePtr,
+    ncols: usize,
+    total_b: usize,
+) -> Result<()> {
+    assert_eq!(ncols % 128, 0, "quantize_f16_q8_1_mmq expects ncols % 128 == 0");
+    let module = reg.expect_module("quantize_f16_q8_1_mmq")?;
+    let kernel = module.kernel("flambeau_quantize_f16_q8_1_mmq")?;
+    let ncols_i = ncols as i32;
+    let total_b_i = total_b as i32;
+    let x_ptr: u64 = x_f16.as_usize() as u64;
+    let y_ptr: u64 = y_q8_1_mmq.as_usize() as u64;
+    let mut args = KernelArgs::new();
+    args.push(&x_ptr);
+    args.push(&y_ptr);
+    args.push(&ncols_i);
+    args.push(&total_b_i);
+    let cfg = LaunchCfg {
+        grid: ((ncols / 128) as u32, total_b as u32, 1),
+        block: (128, 1, 1),
+        shared_bytes: 0,
+    };
+    unsafe { kernel.launch(stream, cfg, args)? };
+    Ok(())
+}
+
 /// F16 sibling of [`quantize_q8_1`]. Used by the full-attention forward to
 /// skip the host-roundtrip F16→F32 placeholder between swiglu and the
 /// output-projection MMVQ.

@@ -24,6 +24,7 @@ struct Gguf {
     tensors: Vec<TensorSpec>,
 }
 
+#[allow(dead_code)] // U64 is constructed via the writer branches kept for completeness.
 enum MetaValue {
     U32(u32),
     U64(u64),

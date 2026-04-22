@@ -17,8 +17,10 @@ use std::cmp::Ordering;
 
 /// Sampling strategy.
 #[derive(Debug, Clone, Copy)]
+#[derive(Default)]
 pub enum Sampling {
     /// argmax — deterministic, matches OpenAI `temperature=0`.
+    #[default]
     Greedy,
     /// Softmax(logits / temp), sample from full distribution.
     Temperature { temp: f32 },
@@ -27,11 +29,6 @@ pub enum Sampling {
     TopP { temp: f32, p: f32 },
 }
 
-impl Default for Sampling {
-    fn default() -> Self {
-        Sampling::Greedy
-    }
-}
 
 /// Deterministic PRNG. xoshiro256** — fast, small-state, well-distributed.
 #[derive(Debug, Clone, Copy)]

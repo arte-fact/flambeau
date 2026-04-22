@@ -1,8 +1,9 @@
 //! V1.6.3 attention decode (F16 KV, GQA) correctness sweep.
 //!
 //! Covers the two V1 head_dim values:
-//!   - head_dim=128, GQA-32/4 — Qwen3.5 family.
-//!   - head_dim=256, GQA-16/2 — Qwen3.6 family.
+//! - head_dim=128, GQA-32/4 — Qwen3.5 family.
+//! - head_dim=256, GQA-16/2 — Qwen3.6 family.
+//!
 //! Sequence lengths cover early context (16) through long context
 //! (4096 — the usual decode sweet spot).
 
@@ -220,7 +221,7 @@ fn seeded_f32(seed: u64, n: usize) -> Vec<f32> {
         .map(|_| {
             s = s.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
             let u = (s >> 32) as u32;
-            ((u as f32 / u32::MAX as f32) - 0.5)
+            (u as f32 / u32::MAX as f32) - 0.5
         })
         .collect()
 }

@@ -209,7 +209,7 @@ pub(crate) fn dispose_layer_cache(cache: LayerCache, device: &HipDevice) -> Resu
 }
 
 /// Zero-fill `bytes` of device memory at `ptr`. Uses a host-side zero buffer
-/// + `memcpy_async` — the V1 HIP backend doesn't expose `hipMemset` through
+/// and `memcpy_async` — the V1 HIP backend doesn't expose `hipMemset` through
 /// its `Device` trait yet, and this path is on the cold (session-init) path
 /// so a ~2 MB staging buffer is not a concern.
 fn zero_f32(device: &HipDevice, ptr: DevicePtr, bytes: usize) -> Result<()> {

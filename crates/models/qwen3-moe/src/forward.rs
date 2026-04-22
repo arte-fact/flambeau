@@ -25,16 +25,22 @@ use flambeau_ops::hip::{
     conv::causal_conv1d_f32,
     mlp::{add_f16, scale_f32, sigmoid_mul_f16, silu_f32, swiglu_f32},
     moe::{
-        indexed_moe_mmvq_q4_k_gate_up, indexed_moe_mmvq_q4_k_r2, indexed_moe_mmvq_q6_k,
-        moe_combine_f16, shared_expert_scale_f32, topk_f32,
+        indexed_moe_mmq_q4_k_down_tile8, indexed_moe_mmq_q4_k_down_turbo,
+        indexed_moe_mmq_q4_k_gate_up_tile8, indexed_moe_mmq_q4_k_gate_up_turbo,
+        indexed_moe_mmq_q6_k_down_tile8,
+        indexed_moe_mmvq_q4_k_gate_up, indexed_moe_mmvq_q4_k_gate_up_sorted,
+        indexed_moe_mmvq_q4_k_r2, indexed_moe_mmvq_q4_k_r2_sorted,
+        indexed_moe_mmvq_q6_k, moe_combine_f16, moe_sort_by_expert,
+        moe_sort_by_expert_padded, shared_expert_scale_f32, topk_f32,
     },
     norm::{
-        l2_norm_f32, quantize_f16_q8_1, quantize_q8_1, rmsnorm_f16, rmsnorm_f32,
+        l2_norm_f32, quantize_f16_q8_1, quantize_f16_q8_1_mmq, quantize_q8_1,
+        quantize_q8_1_mmq, rmsnorm_f16, rmsnorm_f32,
         rmsnorm_quant_q8_1,
     },
     pe::rope_neox_partial_f16,
     qmatmul::{mmvq, mmvq_q8_0_gate_up, qmatmul},
-    recurrent::{gdn_alpha_beta_f32, gdn_state_step_f32_s128},
+    recurrent::{gdn_alpha_beta_f32, gdn_split_qkv_f32, gdn_state_step_f32_s128},
     router::dense_gemv_f32_f16,
     HipDevice, HipStream, OpsRegistry,
 };
@@ -43,7 +49,7 @@ use flambeau_runtime::KvCache;
 
 use crate::config::Qwen3MoEConfig;
 use crate::session::{GdnLayerState, LayerCache};
-use crate::weights::{DeviceTensor, FullAttnWeights, GdnWeights};
+use crate::weights::{DenseFfnWeights, DeviceTensor, FullAttnWeights, GdnWeights};
 
 /// Workspace buffers needed by one decode step of a full-attention layer.
 /// Sized once at session init against the model config; shared across all
@@ -202,6 +208,7 @@ fn qdtype_of(dtype: GgmlDType) -> Result<QDtype> {
         GgmlDType::Q5K => QDtype::Q5_K,
         GgmlDType::Q6K => QDtype::Q6_K,
         GgmlDType::Q8_0 => QDtype::Q8_0,
+        GgmlDType::Q4_1 => QDtype::Q4_1,
         other => bail!("weight dtype {other:?} not supported by V1 qmatmul dispatch"),
     })
 }
@@ -986,8 +993,8 @@ pub fn forward_gdn_decode(
     )
     .context("scale_f32 Q")?;
 
-    // 11. Alpha/β/gate compute — fused device kernel (V1.7.3-g). Replaces
-    // the V1.7.3-c2 host roundtrip. Everything stays on-device.
+    // 11. Alpha/β/gate compute — fused device kernel (V1.7.3-g, V2.2.d fix 3
+    // batched across tokens). Decode runs n_tokens = 1.
     gdn_alpha_beta_f32(
         ops,
         stream,
@@ -998,6 +1005,7 @@ pub fn forward_gdn_decode(
         scratch.gate_device,
         scratch.beta_device,
         num_v_heads,
+        /* n_tokens = */ 1,
     )
     .context("gdn_alpha_beta_f32 fused")?;
 
@@ -1291,6 +1299,9 @@ pub fn forward_moe_ffn_decode(
     residual: DevicePtr,
     out: DevicePtr,
 ) -> Result<()> {
+    let ffn_gate_exps = ffn.ffn_gate_exps.as_ref().expect("MoE forward: ffn_gate_exps missing");
+    let ffn_up_exps = ffn.ffn_up_exps.as_ref().expect("MoE forward: ffn_up_exps missing");
+    let ffn_down_exps = ffn.ffn_down_exps.as_ref().expect("MoE forward: ffn_down_exps missing");
     let hidden = cfg.hidden_size;
     let inter = cfg.moe_intermediate_size;
     let top_k = cfg.num_experts_per_tok;
@@ -1316,29 +1327,29 @@ pub fn forward_moe_ffn_decode(
     // gate+up must both be Q4_K (UD-Q4_K_S keeps them Q4_K). down may be
     // either Q4_K (all layers in plain Q4_K_M) or Q6_K (promoted in UD
     // variants for quality); dispatch on its dtype below.
-    if ffn.ffn_gate_exps.dtype != GgmlDType::Q4K
-        || ffn.ffn_up_exps.dtype != GgmlDType::Q4K
+    if ffn_gate_exps.dtype != GgmlDType::Q4K
+        || ffn_up_exps.dtype != GgmlDType::Q4K
     {
         bail!(
             "V1 indexed-MoE path requires Q4_K gate/up expert weights; got gate={:?}, up={:?}",
-            ffn.ffn_gate_exps.dtype,
-            ffn.ffn_up_exps.dtype,
+            ffn_gate_exps.dtype,
+            ffn_up_exps.dtype,
         );
     }
-    if ffn.ffn_down_exps.dtype != GgmlDType::Q4K
-        && ffn.ffn_down_exps.dtype != GgmlDType::Q6K
+    if ffn_down_exps.dtype != GgmlDType::Q4K
+        && ffn_down_exps.dtype != GgmlDType::Q6K
     {
         bail!(
             "V1 indexed-MoE path requires Q4_K or Q6_K ffn_down_exps; got {:?}",
-            ffn.ffn_down_exps.dtype
+            ffn_down_exps.dtype
         );
     }
 
     indexed_moe_mmvq_q4_k_gate_up(
         ops,
         stream,
-        ffn.ffn_gate_exps.ptr,
-        ffn.ffn_up_exps.ptr,
+        ffn_gate_exps.ptr,
+        ffn_up_exps.ptr,
         scratch.x_q8_1,
         scratch.expert_ids,
         scratch.gate_out_f32,
@@ -1380,11 +1391,11 @@ pub fn forward_moe_ffn_decode(
     // experts as its own "effective token" with `top_k = 1` and its own
     // expert id. The scratch already holds `expert_ids[0..top_k]` which
     // doubles as the flat expert lookup (`flat[i] = expert_ids[0 * 1 + i]`).
-    match ffn.ffn_down_exps.dtype {
+    match ffn_down_exps.dtype {
         GgmlDType::Q4K => indexed_moe_mmvq_q4_k_r2(
             ops,
             stream,
-            ffn.ffn_down_exps.ptr,
+            ffn_down_exps.ptr,
             scratch.activated_q8_1,
             scratch.expert_ids,
             scratch.down_f32,
@@ -1397,7 +1408,7 @@ pub fn forward_moe_ffn_decode(
         GgmlDType::Q6K => indexed_moe_mmvq_q6_k(
             ops,
             stream,
-            ffn.ffn_down_exps.ptr,
+            ffn_down_exps.ptr,
             scratch.activated_q8_1,
             scratch.expert_ids,
             scratch.down_f32,
@@ -1692,6 +1703,393 @@ pub fn forward_shared_expert_decode(
     cast_f32_to_f16(ops, stream, scratch.down_f32, shared_out, hidden)
         .context("shexp cast → f16")?;
 
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// V2.2.c — dense FFN decode (arch=qwen35).
+//
+// One gate+up+down triple per layer (no router, no experts, no shared expert).
+// Structurally identical to forward_shared_expert_decode minus the
+// sigmoid-gate post-scale. `forward_dense_ffn_decode` writes the residual sum
+// `x_out = residual + FFN(x_norm)` in one shot so callers don't need to add
+// later.
+// ---------------------------------------------------------------------------
+
+pub struct DenseFfnScratch {
+    // Q8_1 of `x_norm`, shared across gate/up matmuls.
+    pub x_q8_1: DevicePtr,
+    // Dense gate/up matmul outputs, F32 [inter].
+    pub gate_f32: DevicePtr,
+    pub up_f32: DevicePtr,
+    // SwiGLU output + F16 round-trip for the down matmul input.
+    pub activated_f32: DevicePtr,
+    pub activated_f16: DevicePtr,
+    pub activated_q8_1: DevicePtr,
+    // Down matmul outputs (F32 → F16) for the residual add.
+    pub down_f32: DevicePtr,
+    pub down_f16: DevicePtr,
+    // Bookkeeping.
+    x_q8_1_bytes: usize,
+    inter_f32_bytes: usize,
+    inter_f16_bytes: usize,
+    inter_q8_1_bytes: usize,
+    hidden_f32_bytes: usize,
+    hidden_f16_bytes: usize,
+    disposed: bool,
+}
+
+impl DenseFfnScratch {
+    pub fn new(cfg: &Qwen3MoEConfig, device: &HipDevice) -> Result<Self> {
+        let hidden = cfg.hidden_size;
+        let inter = cfg.moe_intermediate_size;
+        assert!(hidden % 32 == 0, "hidden must be a multiple of QK8_1=32");
+        assert!(inter % 32 == 0, "inter (moe_intermediate_size) must be a multiple of QK8_1=32");
+
+        let x_q8_1_bytes = (hidden / 32) * std::mem::size_of::<BlockQ8_1>();
+        let inter_f32_bytes = inter * 4;
+        let inter_f16_bytes = inter * 2;
+        let inter_q8_1_bytes = (inter / 32) * std::mem::size_of::<BlockQ8_1>();
+        let hidden_f32_bytes = hidden * 4;
+        let hidden_f16_bytes = hidden * 2;
+
+        let x_q8_1 = device.alloc(x_q8_1_bytes)?;
+        let gate_f32 = device.alloc(inter_f32_bytes)?;
+        let up_f32 = device.alloc(inter_f32_bytes)?;
+        let activated_f32 = device.alloc(inter_f32_bytes)?;
+        let activated_f16 = device.alloc(inter_f16_bytes)?;
+        let activated_q8_1 = device.alloc(inter_q8_1_bytes)?;
+        let down_f32 = device.alloc(hidden_f32_bytes)?;
+        let down_f16 = device.alloc(hidden_f16_bytes)?;
+
+        Ok(Self {
+            x_q8_1,
+            gate_f32,
+            up_f32,
+            activated_f32,
+            activated_f16,
+            activated_q8_1,
+            down_f32,
+            down_f16,
+            x_q8_1_bytes,
+            inter_f32_bytes,
+            inter_f16_bytes,
+            inter_q8_1_bytes,
+            hidden_f32_bytes,
+            hidden_f16_bytes,
+            disposed: false,
+        })
+    }
+
+    pub fn dispose(mut self, device: &HipDevice) -> Result<()> {
+        if self.disposed {
+            return Ok(());
+        }
+        self.disposed = true;
+        unsafe {
+            device.dealloc(self.x_q8_1, self.x_q8_1_bytes)?;
+            device.dealloc(self.gate_f32, self.inter_f32_bytes)?;
+            device.dealloc(self.up_f32, self.inter_f32_bytes)?;
+            device.dealloc(self.activated_f32, self.inter_f32_bytes)?;
+            device.dealloc(self.activated_f16, self.inter_f16_bytes)?;
+            device.dealloc(self.activated_q8_1, self.inter_q8_1_bytes)?;
+            device.dealloc(self.down_f32, self.hidden_f32_bytes)?;
+            device.dealloc(self.down_f16, self.hidden_f16_bytes)?;
+        }
+        Ok(())
+    }
+}
+
+impl Drop for DenseFfnScratch {
+    fn drop(&mut self) {
+        if !self.disposed {
+            tracing::warn!(
+                target: "flambeau_qwen3_moe::forward",
+                "DenseFfnScratch dropped without dispose(device); device buffers leaked"
+            );
+        }
+    }
+}
+
+/// One decode step of a dense FFN block (arch=qwen35). Writes
+/// `x_out = residual + ffn_down(swiglu(ffn_gate(x_norm), ffn_up(x_norm)))`
+/// into `x_out`. No router, no experts, no sigmoid-gate scaling.
+#[allow(clippy::too_many_arguments)]
+pub fn forward_dense_ffn_decode(
+    ops: &OpsRegistry,
+    stream: &HipStream,
+    cfg: &Qwen3MoEConfig,
+    dense: &DenseFfnWeights,
+    scratch: &mut DenseFfnScratch,
+    x_norm: DevicePtr,
+    residual: DevicePtr,
+    x_out: DevicePtr,
+) -> Result<()> {
+    let hidden = cfg.hidden_size;
+    let inter = cfg.moe_intermediate_size;
+
+    // 1. Quantise x_norm → Q8_1 once, reused for gate/up.
+    quantize_f16_q8_1(ops, stream, x_norm, scratch.x_q8_1, hidden)
+        .context("dense ffn x_norm → Q8_1")?;
+
+    // 2. gate matmul: weight[inter, hidden] × x[hidden] → gate_f32[inter].
+    //    Decode path: m=1 never hits MmqLdsX64 → DevicePtr(0) for the DS4 buffer.
+    qmatmul(
+        ops,
+        stream,
+        dense.ffn_gate.ptr,
+        scratch.x_q8_1,
+        DevicePtr(0),
+        scratch.gate_f32,
+        1,
+        hidden,
+        inter,
+        qdtype_of(dense.ffn_gate.dtype)?,
+    )
+    .context("dense ffn gate qmatmul")?;
+
+    // 3. up matmul: same shape as gate.
+    qmatmul(
+        ops,
+        stream,
+        dense.ffn_up.ptr,
+        scratch.x_q8_1,
+        DevicePtr(0),
+        scratch.up_f32,
+        1,
+        hidden,
+        inter,
+        qdtype_of(dense.ffn_up.dtype)?,
+    )
+    .context("dense ffn up qmatmul")?;
+
+    // 4. SwiGLU(gate, up) → activated_f32.
+    swiglu_f32(
+        ops,
+        stream,
+        scratch.gate_f32,
+        scratch.up_f32,
+        scratch.activated_f32,
+        inter,
+    )
+    .context("dense ffn swiglu_f32")?;
+
+    // 5. Cast + quantise activated for the down matmul.
+    cast_f32_to_f16(
+        ops,
+        stream,
+        scratch.activated_f32,
+        scratch.activated_f16,
+        inter,
+    )
+    .context("dense ffn cast activated → f16")?;
+    quantize_f16_q8_1(
+        ops,
+        stream,
+        scratch.activated_f16,
+        scratch.activated_q8_1,
+        inter,
+    )
+    .context("dense ffn quantise activated → Q8_1")?;
+
+    // 6. down matmul: weight[hidden, inter] × activated[inter] → down_f32[hidden].
+    //    Decode path: m=1 never hits MmqLdsX64.
+    qmatmul(
+        ops,
+        stream,
+        dense.ffn_down.ptr,
+        scratch.activated_q8_1,
+        DevicePtr(0),
+        scratch.down_f32,
+        1,
+        inter,
+        hidden,
+        qdtype_of(dense.ffn_down.dtype)?,
+    )
+    .context("dense ffn down qmatmul")?;
+
+    // 7. Cast down F32→F16, residual add into x_out.
+    cast_f32_to_f16(ops, stream, scratch.down_f32, scratch.down_f16, hidden)
+        .context("dense ffn cast down → f16")?;
+    add_f16(ops, stream, residual, scratch.down_f16, x_out, hidden)
+        .context("dense ffn residual: residual + down")?;
+
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// V2.2.c — dense FFN prefill (arch=qwen35, L tokens).
+// ---------------------------------------------------------------------------
+
+pub struct DenseFfnPrefillScratch {
+    pub max_tokens: usize,
+    pub x_q8_1: DevicePtr,
+    /// V2.2.d.P8 — DS4 Q8_1 MMQ layout sibling of `x_q8_1`, consumed by the
+    /// 4-warp LDS-tiled Q4_1 MMQ (and future Q4_K / Q6_K MMQ turbo kernels)
+    /// at m ≥ 128. Populated from `x_q8_1` F16 source via the
+    /// `flambeau_quantize_f16_q8_1_mmq` kernel alongside the standard quant.
+    pub x_q8_1_mmq: DevicePtr,
+    pub gate_f32: DevicePtr,
+    pub up_f32: DevicePtr,
+    pub activated_f32: DevicePtr,
+    pub activated_f16: DevicePtr,
+    pub activated_q8_1: DevicePtr,
+    /// V2.2.d.P8 — DS4 sibling of `activated_q8_1` for the down-projection.
+    pub activated_q8_1_mmq: DevicePtr,
+    pub down_f32: DevicePtr,
+    pub down_f16: DevicePtr,
+    x_q8_1_bytes: usize,
+    x_q8_1_mmq_bytes: usize,
+    inter_f32_bytes: usize,
+    inter_f16_bytes: usize,
+    inter_q8_1_bytes: usize,
+    inter_q8_1_mmq_bytes: usize,
+    hidden_f32_bytes: usize,
+    hidden_f16_bytes: usize,
+    disposed: bool,
+}
+
+impl DenseFfnPrefillScratch {
+    pub fn new(cfg: &Qwen3MoEConfig, device: &HipDevice, max_tokens: usize) -> Result<Self> {
+        let hidden = cfg.hidden_size;
+        let inter = cfg.moe_intermediate_size;
+        assert!(max_tokens >= 1);
+        assert!(
+            hidden % 128 == 0,
+            "hidden must be a multiple of QK8_1_MMQ=128"
+        );
+        assert!(
+            inter % 128 == 0,
+            "moe_intermediate_size must be a multiple of QK8_1_MMQ=128"
+        );
+        let mmq_block = std::mem::size_of::<flambeau_quant::BlockQ8_1Mmq>();
+        let x_q8_1_bytes = max_tokens * (hidden / 32) * std::mem::size_of::<BlockQ8_1>();
+        let x_q8_1_mmq_bytes = max_tokens * (hidden / 128) * mmq_block;
+        let inter_f32_bytes = max_tokens * inter * 4;
+        let inter_f16_bytes = max_tokens * inter * 2;
+        let inter_q8_1_bytes = max_tokens * (inter / 32) * std::mem::size_of::<BlockQ8_1>();
+        let inter_q8_1_mmq_bytes = max_tokens * (inter / 128) * mmq_block;
+        let hidden_f32_bytes = max_tokens * hidden * 4;
+        let hidden_f16_bytes = max_tokens * hidden * 2;
+        Ok(Self {
+            max_tokens,
+            x_q8_1: device.alloc(x_q8_1_bytes)?,
+            x_q8_1_mmq: device.alloc(x_q8_1_mmq_bytes)?,
+            gate_f32: device.alloc(inter_f32_bytes)?,
+            up_f32: device.alloc(inter_f32_bytes)?,
+            activated_f32: device.alloc(inter_f32_bytes)?,
+            activated_f16: device.alloc(inter_f16_bytes)?,
+            activated_q8_1: device.alloc(inter_q8_1_bytes)?,
+            activated_q8_1_mmq: device.alloc(inter_q8_1_mmq_bytes)?,
+            down_f32: device.alloc(hidden_f32_bytes)?,
+            down_f16: device.alloc(hidden_f16_bytes)?,
+            x_q8_1_bytes,
+            x_q8_1_mmq_bytes,
+            inter_f32_bytes,
+            inter_f16_bytes,
+            inter_q8_1_bytes,
+            inter_q8_1_mmq_bytes,
+            hidden_f32_bytes,
+            hidden_f16_bytes,
+            disposed: false,
+        })
+    }
+
+    pub fn dispose(mut self, device: &HipDevice) -> Result<()> {
+        if self.disposed {
+            return Ok(());
+        }
+        self.disposed = true;
+        unsafe {
+            device.dealloc(self.x_q8_1, self.x_q8_1_bytes)?;
+            device.dealloc(self.x_q8_1_mmq, self.x_q8_1_mmq_bytes)?;
+            device.dealloc(self.gate_f32, self.inter_f32_bytes)?;
+            device.dealloc(self.up_f32, self.inter_f32_bytes)?;
+            device.dealloc(self.activated_f32, self.inter_f32_bytes)?;
+            device.dealloc(self.activated_f16, self.inter_f16_bytes)?;
+            device.dealloc(self.activated_q8_1, self.inter_q8_1_bytes)?;
+            device.dealloc(self.activated_q8_1_mmq, self.inter_q8_1_mmq_bytes)?;
+            device.dealloc(self.down_f32, self.hidden_f32_bytes)?;
+            device.dealloc(self.down_f16, self.hidden_f16_bytes)?;
+        }
+        Ok(())
+    }
+}
+
+impl Drop for DenseFfnPrefillScratch {
+    fn drop(&mut self) {
+        if !self.disposed {
+            tracing::warn!(
+                target: "flambeau_qwen3_moe::forward",
+                "DenseFfnPrefillScratch dropped without dispose(device); buffers leaked"
+            );
+        }
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn forward_dense_ffn_prefill(
+    ops: &OpsRegistry,
+    stream: &HipStream,
+    cfg: &Qwen3MoEConfig,
+    dense: &DenseFfnWeights,
+    scratch: &mut DenseFfnPrefillScratch,
+    x_norm: DevicePtr,
+    residual: DevicePtr,
+    x_out: DevicePtr,
+    n_tokens: usize,
+) -> Result<()> {
+    let hidden = cfg.hidden_size;
+    let inter = cfg.moe_intermediate_size;
+
+    // Quantise x_norm to BOTH Q8_1 layouts: the standard per-row layout
+    // consumed by MMVQ / Mmq4Warp kernels, and the DS4 MMQ layout consumed
+    // by the 4-warp LDS-tiled turbo kernel (Q4_1 at m ≥ 128). qmatmul()
+    // dispatches to whichever matches the weight dtype + M.
+    quantize_f16_q8_1(ops, stream, x_norm, scratch.x_q8_1, n_tokens * hidden)
+        .context("dense ffn prefill x_norm → Q8_1 (std)")?;
+    quantize_f16_q8_1_mmq(ops, stream, x_norm, scratch.x_q8_1_mmq, hidden, n_tokens)
+        .context("dense ffn prefill x_norm → Q8_1 (MMQ DS4)")?;
+
+    qmatmul(
+        ops, stream,
+        dense.ffn_gate.ptr,
+        scratch.x_q8_1, scratch.x_q8_1_mmq,
+        scratch.gate_f32,
+        n_tokens, hidden, inter,
+        qdtype_of(dense.ffn_gate.dtype)?,
+    ).context("dense ffn prefill gate qmatmul")?;
+    qmatmul(
+        ops, stream,
+        dense.ffn_up.ptr,
+        scratch.x_q8_1, scratch.x_q8_1_mmq,
+        scratch.up_f32,
+        n_tokens, hidden, inter,
+        qdtype_of(dense.ffn_up.dtype)?,
+    ).context("dense ffn prefill up qmatmul")?;
+
+    swiglu_f32(ops, stream, scratch.gate_f32, scratch.up_f32, scratch.activated_f32, n_tokens * inter)
+        .context("dense ffn prefill swiglu_f32")?;
+    cast_f32_to_f16(ops, stream, scratch.activated_f32, scratch.activated_f16, n_tokens * inter)
+        .context("dense ffn prefill cast activated → f16")?;
+    quantize_f16_q8_1(ops, stream, scratch.activated_f16, scratch.activated_q8_1, n_tokens * inter)
+        .context("dense ffn prefill quantise activated → Q8_1 (std)")?;
+    quantize_f16_q8_1_mmq(ops, stream, scratch.activated_f16, scratch.activated_q8_1_mmq, inter, n_tokens)
+        .context("dense ffn prefill quantise activated → Q8_1 (MMQ DS4)")?;
+
+    qmatmul(
+        ops, stream,
+        dense.ffn_down.ptr,
+        scratch.activated_q8_1, scratch.activated_q8_1_mmq,
+        scratch.down_f32,
+        n_tokens, inter, hidden,
+        qdtype_of(dense.ffn_down.dtype)?,
+    ).context("dense ffn prefill down qmatmul")?;
+
+    cast_f32_to_f16(ops, stream, scratch.down_f32, scratch.down_f16, n_tokens * hidden)
+        .context("dense ffn prefill cast down → f16")?;
+    add_f16(ops, stream, residual, scratch.down_f16, x_out, n_tokens * hidden)
+        .context("dense ffn prefill residual: residual + down")?;
     Ok(())
 }
 
@@ -2077,6 +2475,9 @@ pub struct LayerForwardScratch {
     pub gdn: Option<GdnScratch>,
     pub moe: Option<MoeScratch>,
     pub shared: Option<SharedExpertScratch>,
+    /// Present iff `cfg.is_dense_ffn()` (arch=qwen35); replaces the moe/shared
+    /// scratches on that path.
+    pub dense_ffn: Option<DenseFfnScratch>,
     /// F16 `[hidden]` — holds the post-attention residual (`x_in + attn_delta`).
     pub mid_f16: DevicePtr,
     /// F16 `[hidden]` — holds rmsnorm(mid, post_attn_norm_or_ffn_norm).
@@ -2098,11 +2499,18 @@ impl LayerForwardScratch {
 
         let full_attn = Some(FullAttnScratch::new(cfg, device)?);
         let gdn = Some(GdnScratch::new(cfg, device)?);
-        let moe = Some(MoeScratch::new(cfg, device)?);
-        let shared = if cfg.shared_expert_intermediate_size.is_some() {
-            Some(SharedExpertScratch::new(cfg, device)?)
+        // Dense-FFN arches (qwen35) skip the MoE router + shared expert
+        // scratch entirely. Allocate dense scratch in its place.
+        let (moe, shared, dense_ffn) = if cfg.is_dense_ffn() {
+            (None, None, Some(DenseFfnScratch::new(cfg, device)?))
         } else {
-            None
+            let moe = Some(MoeScratch::new(cfg, device)?);
+            let shared = if cfg.shared_expert_intermediate_size.is_some() {
+                Some(SharedExpertScratch::new(cfg, device)?)
+            } else {
+                None
+            };
+            (moe, shared, None)
         };
 
         let mid_f16 = device.alloc(hidden_bytes)?;
@@ -2115,6 +2523,7 @@ impl LayerForwardScratch {
             gdn,
             moe,
             shared,
+            dense_ffn,
             mid_f16,
             mid_norm_f16,
             shared_delta_f16,
@@ -2145,6 +2554,9 @@ impl LayerForwardScratch {
             s.dispose(device)?;
         }
         if let Some(s) = self.shared.take() {
+            s.dispose(device)?;
+        }
+        if let Some(s) = self.dense_ffn.take() {
             s.dispose(device)?;
         }
         Ok(())
@@ -2252,7 +2664,35 @@ pub fn forward_layer_decode(
     )
     .context("post-attn rmsnorm")?;
 
-    // 4. Optional shared expert delta.
+    // 4. FFN. Two flavours:
+    //    - arch=qwen35 (dense): single gate/up/down triple, no router. Writes
+    //      `x_out = mid + FFN(mid_norm)` directly.
+    //    - MoE arches: optional shared expert delta + router + routed MoE
+    //      (residual folded into moe_combine).
+    if cfg.is_dense_ffn() {
+        let dense_w = layer_weights
+            .ffn
+            .dense
+            .as_ref()
+            .context("dense FFN forward: layer.ffn.dense missing")?;
+        let dense_scratch = scratch
+            .dense_ffn
+            .as_mut()
+            .context("LayerForwardScratch.dense_ffn missing")?;
+        forward_dense_ffn_decode(
+            ops,
+            stream,
+            cfg,
+            dense_w,
+            dense_scratch,
+            scratch.mid_norm_f16,
+            scratch.mid_f16,
+            x_out,
+        )?;
+        return Ok(());
+    }
+
+    // MoE path — optional shared expert delta.
     let moe_residual = if let (Some(shared_w), Some(shared_scratch)) =
         (layer_weights.ffn.shared.as_ref(), scratch.shared.as_mut())
     {
@@ -2290,7 +2730,7 @@ pub fn forward_layer_decode(
         ops,
         stream,
         cfg,
-        &layer_weights.ffn.ffn_gate_inp,
+        layer_weights.ffn.ffn_gate_inp.as_ref().expect("MoE forward: ffn_gate_inp missing"),
         moe,
         scratch.mid_norm_f16,
     )?;
@@ -2378,11 +2818,10 @@ impl Drop for ForwardOneTokenScratch {
 /// history), and returns the argmax-sampled next token id.
 ///
 /// Flow:
-///   1. Embed `token_id` → hidden_a [hidden] F16.
-///   2. For il in 0..num_layers:
-///        forward_layer_decode(il, hidden_{a,b}, ...) swap
-///   3. forward_output_head_decode(hidden, output_norm, lm_head) → logits.
-///   4. `argmax_token_host(logits)` → next token id.
+/// 1. Embed `token_id` → hidden_a [hidden] F16.
+/// 2. For il in 0..num_layers: `forward_layer_decode(il, hidden_{a,b}, ...)` then swap.
+/// 3. `forward_output_head_decode(hidden, output_norm, lm_head)` → logits.
+/// 4. `argmax_token_host(logits)` → next token id.
 ///
 /// `lm_head`: if `cfg.tied_lm_head` is true, pass `&weights.token_embd` —
 /// otherwise the untied `&weights.output`. Wiring this pick is the
@@ -3094,7 +3533,12 @@ pub fn forward_prefill_pp(
 /// activations + scratch < 10 MB total — comfortable even on 16 GB cards.
 pub struct FullAttnPrefillScratch {
     pub max_tokens: usize,
+    pub x_norm_f16: DevicePtr,      // F16 [max_L, hidden] — rmsnorm output buffer
+                                    //                      (V2.2.d.P8: split away from the
+                                    //                       D1 fused rmsnorm+quant path so we
+                                    //                       can emit both Q8_1 layouts.)
     pub x_q8_1: DevicePtr,          // Q8_1 blocks [max_L, hidden/32]
+    pub x_q8_1_mmq: DevicePtr,      // BlockQ8_1Mmq [hidden/128, max_L] — DS4 layout for MmqLdsX64
     pub mmvq_f32: DevicePtr,        // F32 [max_L, max(2*H*D, H_kv*D, hidden)]
     pub q_fused_f16: DevicePtr,     // F16 [max_L, 2*n_heads*head_dim]
     pub q_f16: DevicePtr,           // F16 [max_L, n_heads*head_dim]
@@ -3105,8 +3549,11 @@ pub struct FullAttnPrefillScratch {
     pub gated_out_f16: DevicePtr,   // F16 [max_L, n_heads*head_dim]
     pub positions: DevicePtr,       // i32 [max_L]
     pub gated_q8_1: DevicePtr,      // Q8_1 [max_L, n_heads*head_dim/32]
+    pub gated_q8_1_mmq: DevicePtr,  // BlockQ8_1Mmq [q_width/128, max_L] — DS4 layout
     // Bookkeeping.
+    x_norm_f16_bytes: usize,
     x_q8_1_bytes: usize,
+    x_q8_1_mmq_bytes: usize,
     mmvq_f32_bytes: usize,
     q_fused_bytes: usize,
     qk_bytes: usize,
@@ -3114,6 +3561,7 @@ pub struct FullAttnPrefillScratch {
     attn_bytes: usize,
     positions_bytes: usize,
     gated_q8_1_bytes: usize,
+    gated_q8_1_mmq_bytes: usize,
     disposed: bool,
 }
 
@@ -3135,8 +3583,19 @@ impl FullAttnPrefillScratch {
 
         assert!(hidden % 32 == 0, "hidden must be a multiple of QK8_1=32");
         assert!(q_width % 32 == 0, "n_heads * head_dim must be multiple of 32");
+        assert!(
+            hidden % 128 == 0,
+            "hidden must be a multiple of QK8_1_MMQ=128 for the DS4 layout"
+        );
+        assert!(
+            q_width % 128 == 0,
+            "n_heads * head_dim must be a multiple of QK8_1_MMQ=128 for the DS4 layout"
+        );
 
+        let mmq_block = std::mem::size_of::<flambeau_quant::BlockQ8_1Mmq>();
+        let x_norm_f16_bytes = max_tokens * hidden * 2;
         let x_q8_1_bytes = max_tokens * (hidden / 32) * std::mem::size_of::<BlockQ8_1>();
+        let x_q8_1_mmq_bytes = max_tokens * (hidden / 128) * mmq_block;
         let mmvq_f32_bytes = max_tokens * q_fused_width.max(hidden) * 4;
         let q_fused_bytes = max_tokens * q_fused_width * 2;
         let qk_bytes = max_tokens * q_width * 2;
@@ -3145,8 +3604,11 @@ impl FullAttnPrefillScratch {
         let positions_bytes = max_tokens * 4;
         let gated_q8_1_bytes =
             max_tokens * (q_width / 32) * std::mem::size_of::<BlockQ8_1>();
+        let gated_q8_1_mmq_bytes = max_tokens * (q_width / 128) * mmq_block;
 
+        let x_norm_f16 = device.alloc(x_norm_f16_bytes)?;
         let x_q8_1 = device.alloc(x_q8_1_bytes)?;
+        let x_q8_1_mmq = device.alloc(x_q8_1_mmq_bytes)?;
         let mmvq_f32 = device.alloc(mmvq_f32_bytes)?;
         let q_fused_f16 = device.alloc(q_fused_bytes)?;
         let q_f16 = device.alloc(qk_bytes)?;
@@ -3157,10 +3619,13 @@ impl FullAttnPrefillScratch {
         let gated_out_f16 = device.alloc(attn_bytes)?;
         let positions = device.alloc(positions_bytes)?;
         let gated_q8_1 = device.alloc(gated_q8_1_bytes)?;
+        let gated_q8_1_mmq = device.alloc(gated_q8_1_mmq_bytes)?;
 
         Ok(Self {
             max_tokens,
+            x_norm_f16,
             x_q8_1,
+            x_q8_1_mmq,
             mmvq_f32,
             q_fused_f16,
             q_f16,
@@ -3171,7 +3636,10 @@ impl FullAttnPrefillScratch {
             gated_out_f16,
             positions,
             gated_q8_1,
+            gated_q8_1_mmq,
+            x_norm_f16_bytes,
             x_q8_1_bytes,
+            x_q8_1_mmq_bytes,
             mmvq_f32_bytes,
             q_fused_bytes,
             qk_bytes,
@@ -3179,6 +3647,7 @@ impl FullAttnPrefillScratch {
             attn_bytes,
             positions_bytes,
             gated_q8_1_bytes,
+            gated_q8_1_mmq_bytes,
             disposed: false,
         })
     }
@@ -3190,7 +3659,9 @@ impl FullAttnPrefillScratch {
         self.disposed = true;
         // SAFETY: every pointer came from `device.alloc(bytes)` above.
         unsafe {
+            device.dealloc(self.x_norm_f16, self.x_norm_f16_bytes)?;
             device.dealloc(self.x_q8_1, self.x_q8_1_bytes)?;
+            device.dealloc(self.x_q8_1_mmq, self.x_q8_1_mmq_bytes)?;
             device.dealloc(self.mmvq_f32, self.mmvq_f32_bytes)?;
             device.dealloc(self.q_fused_f16, self.q_fused_bytes)?;
             device.dealloc(self.q_f16, self.qk_bytes)?;
@@ -3201,6 +3672,7 @@ impl FullAttnPrefillScratch {
             device.dealloc(self.gated_out_f16, self.attn_bytes)?;
             device.dealloc(self.positions, self.positions_bytes)?;
             device.dealloc(self.gated_q8_1, self.gated_q8_1_bytes)?;
+            device.dealloc(self.gated_q8_1_mmq, self.gated_q8_1_mmq_bytes)?;
         }
         Ok(())
     }
@@ -3281,18 +3753,32 @@ pub fn forward_full_attn_prefill(
     let q_width = n_heads * head_dim;
     let rope = &cfg.rope;
 
-    // 1. Fused rmsnorm(x_in) + Q8_1 quantise across all L rows.
-    rmsnorm_quant_q8_1(
+    // 1. rmsnorm(x_in) → F16 scratch, then quantise to BOTH Q8_1 layouts.
+    //
+    // V2.2.d.P8: the older D1 fused rmsnorm+quant_q8_1 kernel writes only
+    // the standard per-row layout. To feed the 4-warp LDS-tiled Q4_1 MMQ
+    // kernel at M ≥ 128 we need the DS4 (BlockQ8_1Mmq) layout in parallel.
+    // Unfused rmsnorm costs one extra HBM round-trip per token (x_norm_f16
+    // buffer, ~n_tokens·hidden·2 B), negligible against attention wall-clock.
+    rmsnorm_f16(
         ops,
         stream,
         x_in,
         attn_norm.ptr,
-        scratch.x_q8_1,
+        scratch.x_norm_f16,
         n_tokens,
         hidden,
         cfg.rms_norm_eps,
     )
-    .context("prefill attn_norm + quant")?;
+    .context("prefill attn_norm")?;
+    quantize_f16_q8_1(
+        ops, stream, scratch.x_norm_f16, scratch.x_q8_1, n_tokens * hidden,
+    )
+    .context("prefill attn x_norm → Q8_1 (std)")?;
+    quantize_f16_q8_1_mmq(
+        ops, stream, scratch.x_norm_f16, scratch.x_q8_1_mmq, hidden, n_tokens,
+    )
+    .context("prefill attn x_norm → Q8_1 (MMQ DS4)")?;
 
     // 2. Q|gate projection across L rows. `qmatmul` auto-dispatches to
     //    looped MMVQ (mid-M) or MMQ (M ≥ 128) based on the table.
@@ -3309,7 +3795,7 @@ pub fn forward_full_attn_prefill(
         ops,
         stream,
         weights.attn_q.ptr,
-        scratch.x_q8_1,
+        scratch.x_q8_1, scratch.x_q8_1_mmq,
         scratch.mmvq_f32,
         n_tokens,
         q_k,
@@ -3350,7 +3836,9 @@ pub fn forward_full_attn_prefill(
         );
     }
     qmatmul(
-        ops, stream, weights.attn_k.ptr, scratch.x_q8_1, scratch.mmvq_f32,
+        ops, stream, weights.attn_k.ptr,
+        scratch.x_q8_1, scratch.x_q8_1_mmq,
+        scratch.mmvq_f32,
         n_tokens, k_k, k_rows, dtype_k,
     )
     .context("prefill qmatmul attn_k")?;
@@ -3369,7 +3857,9 @@ pub fn forward_full_attn_prefill(
         );
     }
     qmatmul(
-        ops, stream, weights.attn_v.ptr, scratch.x_q8_1, scratch.mmvq_f32,
+        ops, stream, weights.attn_v.ptr,
+        scratch.x_q8_1, scratch.x_q8_1_mmq,
+        scratch.mmvq_f32,
         n_tokens, v_k, v_rows, dtype_v,
     )
     .context("prefill qmatmul attn_v")?;
@@ -3481,7 +3971,7 @@ pub fn forward_full_attn_prefill(
     )
     .context("prefill post-attn sigmoid-gate")?;
 
-    // 10. Quantise gated_out to Q8_1 for the output-projection matmul.
+    // 10. Quantise gated_out to BOTH Q8_1 layouts for the output projection.
     quantize_f16_q8_1(
         ops,
         stream,
@@ -3489,7 +3979,16 @@ pub fn forward_full_attn_prefill(
         scratch.gated_q8_1,
         n_tokens * q_width,
     )
-    .context("prefill quantise gated → Q8_1")?;
+    .context("prefill quantise gated → Q8_1 (std)")?;
+    quantize_f16_q8_1_mmq(
+        ops,
+        stream,
+        scratch.gated_out_f16,
+        scratch.gated_q8_1_mmq,
+        q_width,
+        n_tokens,
+    )
+    .context("prefill quantise gated → Q8_1 (MMQ DS4)")?;
 
     // 11. Output projection across L tokens.
     let dtype_o = qdtype_of(weights.attn_output.dtype)?;
@@ -3505,7 +4004,7 @@ pub fn forward_full_attn_prefill(
         ops,
         stream,
         weights.attn_output.ptr,
-        scratch.gated_q8_1,
+        scratch.gated_q8_1, scratch.gated_q8_1_mmq,
         scratch.mmvq_f32,
         n_tokens,
         o_k,
@@ -3534,7 +4033,9 @@ pub fn forward_full_attn_prefill(
 /// tensor is per-layer (doesn't grow with L) and lives in the session.
 pub struct GdnPrefillScratch {
     pub max_tokens: usize,
+    pub x_norm_f16: DevicePtr,      // F16 [L, hidden] — V2.2.d.P8 unfused rmsnorm sink
     pub x_q8_1: DevicePtr,
+    pub x_q8_1_mmq: DevicePtr,      // DS4 layout sibling of x_q8_1 for MmqLdsX64
     pub qkv_mixed_f32: DevicePtr,   // [L, conv_channels]
     pub z_f32: DevicePtr,           // [L, d_inner]
     pub alpha_f32: DevicePtr,       // [L, num_v_heads]
@@ -3549,11 +4050,14 @@ pub struct GdnPrefillScratch {
     pub out_normed: DevicePtr,
     pub gated_f32: DevicePtr,
     pub gated_q8_1: DevicePtr,
+    pub gated_q8_1_mmq: DevicePtr,  // DS4 layout sibling of gated_q8_1
     pub ssm_out_f32: DevicePtr,     // [L, hidden]
     pub gate_device: DevicePtr,     // [L, num_v_heads]
     pub beta_device: DevicePtr,     // [L, num_v_heads]
     // Bookkeeping.
+    x_norm_f16_bytes: usize,
     x_q8_1_bytes: usize,
+    x_q8_1_mmq_bytes: usize,
     qkv_mixed_bytes: usize,
     z_bytes: usize,
     alpha_beta_bytes: usize,
@@ -3566,6 +4070,7 @@ pub struct GdnPrefillScratch {
     out_normed_bytes: usize,
     gated_f32_bytes: usize,
     gated_q8_1_bytes: usize,
+    gated_q8_1_mmq_bytes: usize,
     ssm_out_bytes: usize,
     gate_device_bytes: usize,
     disposed: bool,
@@ -3590,12 +4095,23 @@ impl GdnPrefillScratch {
 
         assert!(hidden % 32 == 0, "hidden must be a multiple of QK8_1=32");
         assert!(
+            hidden % 128 == 0,
+            "hidden must be a multiple of QK8_1_MMQ=128 for the DS4 layout"
+        );
+        assert!(
+            d_inner % 128 == 0,
+            "d_inner must be a multiple of QK8_1_MMQ=128 for the DS4 layout"
+        );
+        assert!(
             head_k_dim == 128 && head_v_dim == 128,
             "V1.7.2.F gdn_state_step kernel only instantiated at S_v=128"
         );
 
+        let mmq_block = std::mem::size_of::<flambeau_quant::BlockQ8_1Mmq>();
+        let x_norm_f16_bytes = max_tokens * hidden * 2;
         let x_q8_1_bytes =
             max_tokens * (hidden / 32) * std::mem::size_of::<BlockQ8_1>();
+        let x_q8_1_mmq_bytes = max_tokens * (hidden / 128) * mmq_block;
         let qkv_mixed_bytes = max_tokens * conv_channels * 4;
         let z_bytes = max_tokens * d_inner * 4;
         let alpha_beta_bytes = max_tokens * num_v_heads * 4;
@@ -3609,10 +4125,13 @@ impl GdnPrefillScratch {
         let gated_f32_bytes = max_tokens * d_inner * 4;
         let gated_q8_1_bytes =
             max_tokens * (d_inner / 32) * std::mem::size_of::<BlockQ8_1>();
+        let gated_q8_1_mmq_bytes = max_tokens * (d_inner / 128) * mmq_block;
         let ssm_out_bytes = max_tokens * hidden * 4;
         let gate_device_bytes = max_tokens * num_v_heads * 4;
 
+        let x_norm_f16 = device.alloc(x_norm_f16_bytes)?;
         let x_q8_1 = device.alloc(x_q8_1_bytes)?;
+        let x_q8_1_mmq = device.alloc(x_q8_1_mmq_bytes)?;
         let qkv_mixed_f32 = device.alloc(qkv_mixed_bytes)?;
         let z_f32 = device.alloc(z_bytes)?;
         let alpha_f32 = device.alloc(alpha_beta_bytes)?;
@@ -3627,13 +4146,16 @@ impl GdnPrefillScratch {
         let out_normed = device.alloc(out_normed_bytes)?;
         let gated_f32 = device.alloc(gated_f32_bytes)?;
         let gated_q8_1 = device.alloc(gated_q8_1_bytes)?;
+        let gated_q8_1_mmq = device.alloc(gated_q8_1_mmq_bytes)?;
         let ssm_out_f32 = device.alloc(ssm_out_bytes)?;
         let gate_device = device.alloc(gate_device_bytes)?;
         let beta_device = device.alloc(gate_device_bytes)?;
 
         Ok(Self {
             max_tokens,
+            x_norm_f16,
             x_q8_1,
+            x_q8_1_mmq,
             qkv_mixed_f32,
             z_f32,
             alpha_f32,
@@ -3648,10 +4170,13 @@ impl GdnPrefillScratch {
             out_normed,
             gated_f32,
             gated_q8_1,
+            gated_q8_1_mmq,
             ssm_out_f32,
             gate_device,
             beta_device,
+            x_norm_f16_bytes,
             x_q8_1_bytes,
+            x_q8_1_mmq_bytes,
             qkv_mixed_bytes,
             z_bytes,
             alpha_beta_bytes,
@@ -3664,6 +4189,7 @@ impl GdnPrefillScratch {
             out_normed_bytes,
             gated_f32_bytes,
             gated_q8_1_bytes,
+            gated_q8_1_mmq_bytes,
             ssm_out_bytes,
             gate_device_bytes,
             disposed: false,
@@ -3677,7 +4203,9 @@ impl GdnPrefillScratch {
         self.disposed = true;
         // SAFETY: every pointer came from `device.alloc(bytes)` above.
         unsafe {
+            device.dealloc(self.x_norm_f16, self.x_norm_f16_bytes)?;
             device.dealloc(self.x_q8_1, self.x_q8_1_bytes)?;
+            device.dealloc(self.x_q8_1_mmq, self.x_q8_1_mmq_bytes)?;
             device.dealloc(self.qkv_mixed_f32, self.qkv_mixed_bytes)?;
             device.dealloc(self.z_f32, self.z_bytes)?;
             device.dealloc(self.alpha_f32, self.alpha_beta_bytes)?;
@@ -3692,6 +4220,7 @@ impl GdnPrefillScratch {
             device.dealloc(self.out_normed, self.out_normed_bytes)?;
             device.dealloc(self.gated_f32, self.gated_f32_bytes)?;
             device.dealloc(self.gated_q8_1, self.gated_q8_1_bytes)?;
+            device.dealloc(self.gated_q8_1_mmq, self.gated_q8_1_mmq_bytes)?;
             device.dealloc(self.ssm_out_f32, self.ssm_out_bytes)?;
             device.dealloc(self.gate_device, self.gate_device_bytes)?;
             device.dealloc(self.beta_device, self.gate_device_bytes)?;
@@ -3881,25 +4410,40 @@ pub fn forward_gdn_prefill(
         .as_ref()
         .context("V1 GDN forward requires ssm_beta")?;
 
-    // 1. Fused rmsnorm + Q8_1 quantise across L rows.
-    rmsnorm_quant_q8_1(
+    // 1. rmsnorm(x_in) → F16 scratch, then quantise to BOTH Q8_1 layouts.
+    //    V2.2.d.P8 de-fuses the old rmsnorm_quant_q8_1 so we can emit the
+    //    DS4 (BlockQ8_1Mmq) layout consumed by the new Q4_1 MMQ kernel at
+    //    m ≥ 128 alongside the standard per-row layout for MMVQ.
+    rmsnorm_f16(
         ops,
         stream,
         x_in,
         attn_norm.ptr,
-        scratch.x_q8_1,
+        scratch.x_norm_f16,
         n_tokens,
         hidden,
         cfg.rms_norm_eps,
     )
-    .context("gdn prefill attn_norm + quant")?;
+    .context("gdn prefill attn_norm")?;
+    quantize_f16_q8_1(
+        ops, stream, scratch.x_norm_f16, scratch.x_q8_1, n_tokens * hidden,
+    )
+    .context("gdn prefill x_norm → Q8_1 (std)")?;
+    quantize_f16_q8_1_mmq(
+        ops, stream, scratch.x_norm_f16, scratch.x_q8_1_mmq, hidden, n_tokens,
+    )
+    .context("gdn prefill x_norm → Q8_1 (MMQ DS4)")?;
 
-    // 2..5. Hidden-input projections at M = L.
+    // 2..5. Hidden-input projections at M = L. attn_qkv / attn_gate are Q4_1
+    // on Qwen3.5-9B → route to MmqLdsX64 at m ≥ 128. ssm_alpha / ssm_beta are
+    // Q5_K / other → never route to MmqLdsX64 (dispatch has no row). The mmq
+    // buffer is passed to all four; dispatch picks per-weight-dtype.
     run_qmatmul_from_tensor(
         ops,
         stream,
         &weights.attn_qkv,
         scratch.x_q8_1,
+        scratch.x_q8_1_mmq,
         scratch.qkv_mixed_f32,
         n_tokens,
         hidden,
@@ -3911,6 +4455,7 @@ pub fn forward_gdn_prefill(
         stream,
         &weights.attn_gate,
         scratch.x_q8_1,
+        scratch.x_q8_1_mmq,
         scratch.z_f32,
         n_tokens,
         hidden,
@@ -3922,6 +4467,7 @@ pub fn forward_gdn_prefill(
         stream,
         ssm_alpha,
         scratch.x_q8_1,
+        scratch.x_q8_1_mmq,
         scratch.alpha_f32,
         n_tokens,
         hidden,
@@ -3933,6 +4479,7 @@ pub fn forward_gdn_prefill(
         stream,
         ssm_beta,
         scratch.x_q8_1,
+        scratch.x_q8_1_mmq,
         scratch.beta_f32,
         n_tokens,
         hidden,
@@ -3983,20 +4530,37 @@ pub fn forward_gdn_prefill(
     )
     .context("prefill silu_f32(conv_out)")?;
 
-    // 8. Split silu_out into Q / K / V contiguous buffers. Uses 3 × L
-    // stream-ordered memcpys per the note above gather_qkv_strided.
-    // (Future fusion into a single split kernel saves the launch overhead.)
-    gather_qkv_strided(
-        device,
-        stream,
-        scratch.silu_out,
-        scratch.q_norm_f32, // temp staging — will be overwritten by l2_norm
-        scratch.k_norm_f32,
-        scratch.v_f32,
-        n_tokens,
-        qk_size,
-        v_size,
-    )?;
+    // 8. Split silu_out into Q / K / V contiguous buffers. V2.4.d fused
+    // `gdn_split_qkv_f32` kernel replaces the 3×L memcpy loop (~1500
+    // driver calls per layer at L=512). FLAMBEAU_QKV_FUSED=0 reverts
+    // to the memcpy loop for regression comparison.
+    if std::env::var("FLAMBEAU_QKV_FUSED").as_deref() == Ok("0") {
+        let _ = device; // unused in fused path
+        gather_qkv_strided(
+            device,
+            stream,
+            scratch.silu_out,
+            scratch.q_norm_f32,
+            scratch.k_norm_f32,
+            scratch.v_f32,
+            n_tokens,
+            qk_size,
+            v_size,
+        )?;
+    } else {
+        gdn_split_qkv_f32(
+            ops,
+            stream,
+            scratch.silu_out,
+            scratch.q_norm_f32,
+            scratch.k_norm_f32,
+            scratch.v_f32,
+            n_tokens,
+            qk_size,
+            v_size,
+        )
+        .context("prefill gdn_split_qkv_f32")?;
+    }
 
     // 9. L2-normalise Q and K per head (row = head, k = head_k_dim).
     l2_norm_f32(
@@ -4032,23 +4596,23 @@ pub fn forward_gdn_prefill(
     )
     .context("prefill scale_f32 Q")?;
 
-    // 11. α / β / gate compute — call the single-token kernel L times with
-    // per-token offsets. gate/beta lay out contiguously as [L, num_v_heads].
-    let per_token_bytes = num_v_heads * 4;
-    for t in 0..n_tokens {
-        gdn_alpha_beta_f32(
-            ops,
-            stream,
-            scratch.alpha_f32.offset_bytes(t * per_token_bytes),
-            scratch.beta_f32.offset_bytes(t * per_token_bytes),
-            weights.ssm_dt_bias.ptr,
-            weights.ssm_a.ptr,
-            scratch.gate_device.offset_bytes(t * per_token_bytes),
-            scratch.beta_device.offset_bytes(t * per_token_bytes),
-            num_v_heads,
-        )
-        .with_context(|| format!("prefill gdn_alpha_beta_f32 token {t}"))?;
-    }
+    // 11. α / β / gate compute — batched across all L tokens in one launch
+    // (V2.2.d fix 3). The kernel's grid.x = n_tokens, block = num_v_heads.
+    // gate/beta lay out contiguously as [L, num_v_heads]; the per-head
+    // constants ssm_dt_bias / ssm_a are shared across the L rows.
+    gdn_alpha_beta_f32(
+        ops,
+        stream,
+        scratch.alpha_f32,
+        scratch.beta_f32,
+        weights.ssm_dt_bias.ptr,
+        weights.ssm_a.ptr,
+        scratch.gate_device,
+        scratch.beta_device,
+        num_v_heads,
+        n_tokens,
+    )
+    .context("prefill gdn_alpha_beta_f32 (batched)")?;
 
     // 12. GDN state step — kernel natively handles B=1, H=num_v_heads, L.
     let n_rep = num_v_heads / num_k_heads;
@@ -4108,7 +4672,7 @@ pub fn forward_gdn_prefill(
     )
     .context("prefill swiglu_f32(z, out_normed)")?;
 
-    // 15. Quantise gated → Q8_1 for the ssm_out matmul.
+    // 15. Quantise gated → both Q8_1 layouts for the ssm_out matmul.
     quantize_q8_1(
         ops,
         stream,
@@ -4116,14 +4680,27 @@ pub fn forward_gdn_prefill(
         scratch.gated_q8_1,
         n_tokens * d_inner,
     )
-    .context("prefill quantise gated → Q8_1")?;
+    .context("prefill quantise gated → Q8_1 (std)")?;
+    quantize_q8_1_mmq(
+        ops,
+        stream,
+        scratch.gated_f32,
+        scratch.gated_q8_1_mmq,
+        d_inner,
+        n_tokens,
+    )
+    .context("prefill quantise gated → Q8_1 (MMQ DS4)")?;
 
-    // 16. ssm_out projection at M = L.
+    // 16. ssm_out projection at M = L. ssm_out is typically Q5_K / Q8_0 on
+    // V1 models and does not route to MmqLdsX64, but we pass the mmq buffer
+    // so dispatch has it available if a Q4_1 ssm_out lands in some future
+    // GGUF dtype mix.
     run_qmatmul_from_tensor(
         ops,
         stream,
         &weights.ssm_out,
         scratch.gated_q8_1,
+        scratch.gated_q8_1_mmq,
         scratch.ssm_out_f32,
         n_tokens,
         d_inner,
@@ -4145,12 +4722,18 @@ pub fn forward_gdn_prefill(
 }
 
 /// Helper: run a qmatmul against a `DeviceTensor`, validating dims + dispatching on dtype.
+///
+/// Takes both the standard [`flambeau_quant::BlockQ8_1`] buffer and the DS4
+/// [`flambeau_quant::BlockQ8_1Mmq`] buffer. Callers whose weight dtype never
+/// routes to the MmqLdsX64 kernel (everything except Q4_1 as of V2.2.d.P8)
+/// can legitimately pass [`DevicePtr(0)`] for `act_q8_1_mmq`.
 #[allow(clippy::too_many_arguments)]
 fn run_qmatmul_from_tensor(
     ops: &OpsRegistry,
     stream: &HipStream,
     w: &DeviceTensor,
     act_q8_1: DevicePtr,
+    act_q8_1_mmq: DevicePtr,
     dst: DevicePtr,
     m: usize,
     expected_k: usize,
@@ -4164,7 +4747,7 @@ fn run_qmatmul_from_tensor(
             "{label} shape [{rows}, {k}] != expected [{expected_rows}, {expected_k}]"
         );
     }
-    qmatmul(ops, stream, w.ptr, act_q8_1, dst, m, k, rows, dtype)
+    qmatmul(ops, stream, w.ptr, act_q8_1, act_q8_1_mmq, dst, m, k, rows, dtype)
         .with_context(|| format!("qmatmul {label}"))
 }
 
@@ -4185,8 +4768,22 @@ pub struct MoePrefillScratch {
     pub activated_f32: DevicePtr,
     pub activated_f16: DevicePtr,
     pub activated_q8_1: DevicePtr,
+    // V2.14.c DS4 Q8_1 activation buffers (turbo MoE variant only).
+    // `x_q8_1_mmq`: hidden activation in DS4 layout — [hidden/128, n_tokens].
+    // `activated_q8_1_mmq`: per-pair SwiGLU'd activation in DS4 layout — [inter/128, n_pairs].
+    pub x_q8_1_mmq: DevicePtr,
+    pub activated_q8_1_mmq: DevicePtr,
     pub down_f32: DevicePtr,           // F32 [L, top_k, hidden]
     pub down_f16: DevicePtr,
+    // V2.5.a sort-by-expert state. Only populated / used when
+    // FLAMBEAU_MOE_SORTED=1 is set on the gate+up path.
+    pub sort_counts: DevicePtr,        // i32 [n_experts]
+    pub sort_offsets: DevicePtr,       // i32 [n_experts + 1]
+    pub sort_cursors: DevicePtr,       // i32 [n_experts]
+    pub sort_sorted_pair_idx: DevicePtr, // i32 [L * top_k]
+    // V2.6.a padded sort outputs (only touched when tile8 path is on).
+    pub sort_padded_offsets: DevicePtr,   // i32 [n_experts + 1]
+    pub sort_sorted_pair_idx_padded: DevicePtr, // i32 [max_tokens * top_k + n_experts * 8]
     x_q8_1_bytes: usize,
     router_logits_bytes: usize,
     expert_ids_bytes: usize,
@@ -4195,8 +4792,16 @@ pub struct MoePrefillScratch {
     activated_f32_bytes: usize,
     activated_f16_bytes: usize,
     activated_q8_1_bytes: usize,
+    x_q8_1_mmq_bytes: usize,
+    activated_q8_1_mmq_bytes: usize,
     down_f32_bytes: usize,
     down_f16_bytes: usize,
+    sort_counts_bytes: usize,
+    sort_offsets_bytes: usize,
+    sort_cursors_bytes: usize,
+    sort_sorted_pair_idx_bytes: usize,
+    sort_padded_offsets_bytes: usize,
+    sort_sorted_pair_idx_padded_bytes: usize,
     disposed: bool,
 }
 
@@ -4224,6 +4829,13 @@ impl MoePrefillScratch {
         let activated_f16_bytes = max_tokens * top_k * inter * 2;
         let activated_q8_1_bytes =
             max_tokens * top_k * (inter / 32) * std::mem::size_of::<BlockQ8_1>();
+        // V2.14.c DS4 activation buffers. 144 bytes per MMQ block (128 elements).
+        // hidden/128 big_blocks × max_tokens rows for gate+up (per-token);
+        // inter/128 big_blocks × max_tokens*top_k rows for down (per-pair).
+        let x_q8_1_mmq_bytes =
+            max_tokens * (hidden / 128) * std::mem::size_of::<flambeau_quant::BlockQ8_1Mmq>();
+        let activated_q8_1_mmq_bytes =
+            max_tokens * top_k * (inter / 128) * std::mem::size_of::<flambeau_quant::BlockQ8_1Mmq>();
         let down_f32_bytes = max_tokens * top_k * hidden * 4;
         let down_f16_bytes = max_tokens * top_k * hidden * 2;
 
@@ -4236,8 +4848,27 @@ impl MoePrefillScratch {
         let activated_f32 = device.alloc(activated_f32_bytes)?;
         let activated_f16 = device.alloc(activated_f16_bytes)?;
         let activated_q8_1 = device.alloc(activated_q8_1_bytes)?;
+        let x_q8_1_mmq = device.alloc(x_q8_1_mmq_bytes)?;
+        let activated_q8_1_mmq = device.alloc(activated_q8_1_mmq_bytes)?;
         let down_f32 = device.alloc(down_f32_bytes)?;
         let down_f16 = device.alloc(down_f16_bytes)?;
+
+        // V2.5.a sort-by-expert scratch
+        let sort_counts_bytes = n_experts * 4;
+        let sort_offsets_bytes = (n_experts + 1) * 4;
+        let sort_cursors_bytes = n_experts * 4;
+        let sort_sorted_pair_idx_bytes = max_tokens * top_k * 4;
+        let sort_counts = device.alloc(sort_counts_bytes)?;
+        let sort_offsets = device.alloc(sort_offsets_bytes)?;
+        let sort_cursors = device.alloc(sort_cursors_bytes)?;
+        let sort_sorted_pair_idx = device.alloc(sort_sorted_pair_idx_bytes)?;
+        // V2.6.a padded sort outputs. Upper bound on padded total: the
+        // real total plus up to 7 padding entries per expert.
+        let sort_padded_offsets_bytes = (n_experts + 1) * 4;
+        let sort_sorted_pair_idx_padded_bytes =
+            (max_tokens * top_k + n_experts * 8) * 4;
+        let sort_padded_offsets = device.alloc(sort_padded_offsets_bytes)?;
+        let sort_sorted_pair_idx_padded = device.alloc(sort_sorted_pair_idx_padded_bytes)?;
 
         Ok(Self {
             max_tokens,
@@ -4250,8 +4881,16 @@ impl MoePrefillScratch {
             activated_f32,
             activated_f16,
             activated_q8_1,
+            x_q8_1_mmq,
+            activated_q8_1_mmq,
             down_f32,
             down_f16,
+            sort_counts,
+            sort_offsets,
+            sort_cursors,
+            sort_sorted_pair_idx,
+            sort_padded_offsets,
+            sort_sorted_pair_idx_padded,
             x_q8_1_bytes,
             router_logits_bytes,
             expert_ids_bytes,
@@ -4260,8 +4899,16 @@ impl MoePrefillScratch {
             activated_f32_bytes,
             activated_f16_bytes,
             activated_q8_1_bytes,
+            x_q8_1_mmq_bytes,
+            activated_q8_1_mmq_bytes,
             down_f32_bytes,
             down_f16_bytes,
+            sort_counts_bytes,
+            sort_offsets_bytes,
+            sort_cursors_bytes,
+            sort_sorted_pair_idx_bytes,
+            sort_padded_offsets_bytes,
+            sort_sorted_pair_idx_padded_bytes,
             disposed: false,
         })
     }
@@ -4281,8 +4928,16 @@ impl MoePrefillScratch {
             device.dealloc(self.activated_f32, self.activated_f32_bytes)?;
             device.dealloc(self.activated_f16, self.activated_f16_bytes)?;
             device.dealloc(self.activated_q8_1, self.activated_q8_1_bytes)?;
+            device.dealloc(self.x_q8_1_mmq, self.x_q8_1_mmq_bytes)?;
+            device.dealloc(self.activated_q8_1_mmq, self.activated_q8_1_mmq_bytes)?;
             device.dealloc(self.down_f32, self.down_f32_bytes)?;
             device.dealloc(self.down_f16, self.down_f16_bytes)?;
+            device.dealloc(self.sort_counts, self.sort_counts_bytes)?;
+            device.dealloc(self.sort_offsets, self.sort_offsets_bytes)?;
+            device.dealloc(self.sort_cursors, self.sort_cursors_bytes)?;
+            device.dealloc(self.sort_sorted_pair_idx, self.sort_sorted_pair_idx_bytes)?;
+            device.dealloc(self.sort_padded_offsets, self.sort_padded_offsets_bytes)?;
+            device.dealloc(self.sort_sorted_pair_idx_padded, self.sort_sorted_pair_idx_padded_bytes)?;
         }
         Ok(())
     }
@@ -4299,10 +4954,10 @@ impl Drop for MoePrefillScratch {
     }
 }
 
-/// Run the MoE router for a prefill chunk. Produces L × top_k expert ids
-/// + softmaxed weights. `dense_gemv_f32_f16` is currently 1-row; we loop L
-/// times (launch overhead ≈ L µs, negligible at typical chunk sizes). V2
-/// fusion: a true M-dimension variant.
+/// Run the MoE router for a prefill chunk. Produces L × top_k expert ids and
+/// softmaxed weights. `dense_gemv_f32_f16` is currently 1-row; we loop L
+/// times (launch overhead ≈ L µs, negligible at typical chunk sizes).
+/// V2 fusion candidate: a true M-dimension variant.
 pub fn forward_router_prefill(
     ops: &OpsRegistry,
     stream: &HipStream,
@@ -4383,9 +5038,14 @@ pub fn forward_moe_ffn_prefill(
         );
     }
 
+    let ffn_gate_exps = ffn.ffn_gate_exps.as_ref().expect("MoE prefill: ffn_gate_exps missing");
+    let ffn_up_exps = ffn.ffn_up_exps.as_ref().expect("MoE prefill: ffn_up_exps missing");
+    let ffn_down_exps = ffn.ffn_down_exps.as_ref().expect("MoE prefill: ffn_down_exps missing");
+
     let hidden = cfg.hidden_size;
     let inter = cfg.moe_intermediate_size;
     let top_k = cfg.num_experts_per_tok;
+    let n_experts = cfg.num_experts;
 
     const QK_K: usize = 256;
     if hidden % QK_K != 0 {
@@ -4397,21 +5057,21 @@ pub fn forward_moe_ffn_prefill(
     let nb_per_row_hidden = hidden / QK_K;
     let nb_per_row_inter = inter / QK_K;
 
-    if ffn.ffn_gate_exps.dtype != GgmlDType::Q4K
-        || ffn.ffn_up_exps.dtype != GgmlDType::Q4K
+    if ffn_gate_exps.dtype != GgmlDType::Q4K
+        || ffn_up_exps.dtype != GgmlDType::Q4K
     {
         bail!(
             "V1 indexed-MoE path requires Q4_K gate/up expert weights; got gate={:?}, up={:?}",
-            ffn.ffn_gate_exps.dtype,
-            ffn.ffn_up_exps.dtype,
+            ffn_gate_exps.dtype,
+            ffn_up_exps.dtype,
         );
     }
-    if ffn.ffn_down_exps.dtype != GgmlDType::Q4K
-        && ffn.ffn_down_exps.dtype != GgmlDType::Q6K
+    if ffn_down_exps.dtype != GgmlDType::Q4K
+        && ffn_down_exps.dtype != GgmlDType::Q6K
     {
         bail!(
             "V1 indexed-MoE path requires Q4_K or Q6_K ffn_down_exps; got {:?}",
-            ffn.ffn_down_exps.dtype
+            ffn_down_exps.dtype
         );
     }
 
@@ -4419,22 +5079,133 @@ pub fn forward_moe_ffn_prefill(
     quantize_f16_q8_1(ops, stream, x_norm, scratch.x_q8_1, n_tokens * hidden)
         .context("prefill moe x_norm → Q8_1")?;
 
-    // 2. Fused gate+up for all L × top_k expert matmuls in one launch.
-    indexed_moe_mmvq_q4_k_gate_up(
-        ops,
-        stream,
-        ffn.ffn_gate_exps.ptr,
-        ffn.ffn_up_exps.ptr,
-        scratch.x_q8_1,
-        scratch.expert_ids,
-        scratch.gate_out_f32,
-        scratch.up_out_f32,
-        inter,
-        n_tokens,
-        top_k,
-        nb_per_row_hidden,
-    )
-    .context("prefill indexed_moe gate+up")?;
+    // 2. Path selection:
+    //   tile8  (V2.6.b, default): sort+pad + 64×8-tile MMQ kernel
+    //   sorted (V2.5.b): sort + r4 block reorder
+    //   none   (V2.4): raw r4
+    // FLAMBEAU_MOE_VARIANT in {tile8, sorted, r4}. Default = tile8.
+    // FLAMBEAU_MOE_SORTED=0 still works as a shortcut to force r4.
+    let moe_variant = std::env::var("FLAMBEAU_MOE_VARIANT")
+        .ok()
+        .unwrap_or_else(|| {
+            if std::env::var("FLAMBEAU_MOE_SORTED").as_deref() == Ok("0") {
+                "r4".to_string()
+            } else {
+                "tile8".to_string()
+            }
+        });
+    let total_pairs = n_tokens * top_k;
+    if moe_variant == "turbo" || moe_variant == "tile8" {
+        moe_sort_by_expert_padded(
+            ops,
+            stream,
+            scratch.expert_ids,
+            scratch.sort_counts,
+            scratch.sort_offsets,
+            scratch.sort_cursors,
+            scratch.sort_sorted_pair_idx,
+            scratch.sort_padded_offsets,
+            scratch.sort_sorted_pair_idx_padded,
+            total_pairs,
+            n_experts,
+            scratch.max_tokens,
+            top_k,
+        )
+        .context("prefill moe_sort_by_expert_padded")?;
+        // Upper bound on padded_total: real total plus up to 7 padding entries
+        // per expert. Kernel early-exits blocks past the actual count.
+        let padded_total_ub = total_pairs + n_experts * 8;
+    if moe_variant == "turbo" {
+        // V2.14.c: DS4 Q8_1 activation for turbo gate_up. Per-TOKEN layout
+        // — hidden activation shared across the top_k slots of each token.
+        quantize_f16_q8_1_mmq(ops, stream, x_norm, scratch.x_q8_1_mmq, hidden, n_tokens)
+            .context("prefill turbo quantize x_norm → Q8_1_MMQ")?;
+        indexed_moe_mmq_q4_k_gate_up_turbo(
+            ops,
+            stream,
+            ffn_gate_exps.ptr,
+            ffn_up_exps.ptr,
+            scratch.x_q8_1_mmq,
+            scratch.expert_ids,
+            scratch.sort_sorted_pair_idx_padded,
+            scratch.sort_padded_offsets,
+            scratch.gate_out_f32,
+            scratch.up_out_f32,
+            inter,
+            n_tokens,
+            top_k,
+            nb_per_row_hidden,
+            n_experts,
+            padded_total_ub,
+        )
+        .context("prefill indexed_moe gate+up turbo")?;
+    } else {
+        indexed_moe_mmq_q4_k_gate_up_tile8(
+            ops,
+            stream,
+            ffn_gate_exps.ptr,
+            ffn_up_exps.ptr,
+            scratch.x_q8_1,
+            scratch.expert_ids,
+            scratch.sort_sorted_pair_idx_padded,
+            scratch.sort_padded_offsets,
+            scratch.gate_out_f32,
+            scratch.up_out_f32,
+            inter,
+            n_tokens,
+            top_k,
+            nb_per_row_hidden,
+            n_experts,
+            padded_total_ub,
+        )
+        .context("prefill indexed_moe gate+up tile8")?;
+    }
+    } else if moe_variant == "sorted" {
+        moe_sort_by_expert(
+            ops,
+            stream,
+            scratch.expert_ids,
+            scratch.sort_counts,
+            scratch.sort_offsets,
+            scratch.sort_cursors,
+            scratch.sort_sorted_pair_idx,
+            total_pairs,
+            n_experts,
+        )
+        .context("prefill moe_sort_by_expert")?;
+        indexed_moe_mmvq_q4_k_gate_up_sorted(
+            ops,
+            stream,
+            ffn_gate_exps.ptr,
+            ffn_up_exps.ptr,
+            scratch.x_q8_1,
+            scratch.expert_ids,
+            scratch.sort_sorted_pair_idx,
+            scratch.gate_out_f32,
+            scratch.up_out_f32,
+            inter,
+            n_tokens,
+            top_k,
+            nb_per_row_hidden,
+        )
+        .context("prefill indexed_moe gate+up (sorted)")?;
+    } else {
+        indexed_moe_mmvq_q4_k_gate_up(
+            ops,
+            stream,
+            ffn_gate_exps.ptr,
+            ffn_up_exps.ptr,
+            scratch.x_q8_1,
+            scratch.expert_ids,
+            scratch.gate_out_f32,
+            scratch.up_out_f32,
+            inter,
+            n_tokens,
+            top_k,
+            nb_per_row_hidden,
+        )
+        .context("prefill indexed_moe gate+up")?;
+    }
 
     // 3. SwiGLU over [L, top_k, inter] flat.
     swiglu_f32(
@@ -4457,24 +5228,90 @@ pub fn forward_moe_ffn_prefill(
         n_tokens * top_k * inter,
     )
     .context("prefill cast activated → f16")?;
-    quantize_f16_q8_1(
-        ops,
-        stream,
-        scratch.activated_f16,
-        scratch.activated_q8_1,
-        n_tokens * top_k * inter,
-    )
-    .context("prefill quantise activated → Q8_1")?;
+    if moe_variant == "turbo" {
+        // V2.14.c turbo path: DS4 Q8_1 activation for down matmul, per-PAIR layout.
+        quantize_f16_q8_1_mmq(
+            ops,
+            stream,
+            scratch.activated_f16,
+            scratch.activated_q8_1_mmq,
+            inter,
+            n_tokens * top_k,
+        )
+        .context("prefill turbo quantise activated → Q8_1_MMQ")?;
+    } else {
+        quantize_f16_q8_1(
+            ops,
+            stream,
+            scratch.activated_f16,
+            scratch.activated_q8_1,
+            n_tokens * top_k * inter,
+        )
+        .context("prefill quantise activated → Q8_1")?;
+    }
 
     // 5. Down matmul: treat each of L × top_k activations as one
     // "effective token" with top_k_inner = 1 and its own expert id. The
     // scratch's flat `expert_ids` [L, top_k] doubles as the flat lookup
     // [L * top_k] when viewed with stride 1.
-    match ffn.ffn_down_exps.dtype {
+    match ffn_down_exps.dtype {
+        GgmlDType::Q4K if moe_variant == "turbo" => {
+            let padded_total_ub = total_pairs + n_experts * 8;
+            indexed_moe_mmq_q4_k_down_turbo(
+                ops,
+                stream,
+                ffn_down_exps.ptr,
+                scratch.activated_q8_1_mmq,
+                scratch.expert_ids,
+                scratch.sort_sorted_pair_idx_padded,
+                scratch.sort_padded_offsets,
+                scratch.down_f32,
+                hidden,
+                n_tokens * top_k,
+                nb_per_row_inter,
+                n_experts,
+                padded_total_ub,
+            )
+            .context("prefill indexed_moe down q4_k turbo")?;
+        }
+        GgmlDType::Q4K if moe_variant == "tile8" => {
+            let padded_total_ub = total_pairs + n_experts * 8;
+            indexed_moe_mmq_q4_k_down_tile8(
+                ops,
+                stream,
+                ffn_down_exps.ptr,
+                scratch.activated_q8_1,
+                scratch.expert_ids,
+                scratch.sort_sorted_pair_idx_padded,
+                scratch.sort_padded_offsets,
+                scratch.down_f32,
+                hidden,
+                n_tokens * top_k,
+                1,
+                nb_per_row_inter,
+                n_experts,
+                padded_total_ub,
+            )
+            .context("prefill indexed_moe down q4_k tile8")?;
+        }
+        GgmlDType::Q4K if moe_variant == "sorted" => indexed_moe_mmvq_q4_k_r2_sorted(
+            ops,
+            stream,
+            ffn_down_exps.ptr,
+            scratch.activated_q8_1,
+            scratch.expert_ids,
+            scratch.sort_sorted_pair_idx,
+            scratch.down_f32,
+            hidden,
+            n_tokens * top_k,
+            1,
+            nb_per_row_inter,
+        )
+        .context("prefill indexed_moe down q4_k r2 sorted")?,
         GgmlDType::Q4K => indexed_moe_mmvq_q4_k_r2(
             ops,
             stream,
-            ffn.ffn_down_exps.ptr,
+            ffn_down_exps.ptr,
             scratch.activated_q8_1,
             scratch.expert_ids,
             scratch.down_f32,
@@ -4484,10 +5321,30 @@ pub fn forward_moe_ffn_prefill(
             nb_per_row_inter,
         )
         .context("prefill indexed_moe down q4_k r2")?,
+        GgmlDType::Q6K if moe_variant == "tile8" => {
+            let padded_total_ub = total_pairs + n_experts * 8;
+            indexed_moe_mmq_q6_k_down_tile8(
+                ops,
+                stream,
+                ffn_down_exps.ptr,
+                scratch.activated_q8_1,
+                scratch.expert_ids,
+                scratch.sort_sorted_pair_idx_padded,
+                scratch.sort_padded_offsets,
+                scratch.down_f32,
+                hidden,
+                n_tokens * top_k,
+                1,
+                nb_per_row_inter,
+                n_experts,
+                padded_total_ub,
+            )
+            .context("prefill indexed_moe down q6_k tile8")?;
+        }
         GgmlDType::Q6K => indexed_moe_mmvq_q6_k(
             ops,
             stream,
-            ffn.ffn_down_exps.ptr,
+            ffn_down_exps.ptr,
             scratch.activated_q8_1,
             scratch.expert_ids,
             scratch.down_f32,
@@ -4658,12 +5515,17 @@ pub fn forward_shared_expert_prefill(
     quantize_f16_q8_1(ops, stream, x_norm, scratch.x_q8_1, n_tokens * hidden)
         .context("prefill shexp x_norm → Q8_1")?;
 
+    // Shared-expert FFN weights are Q4_K on all V1 targets (Qwen3.6 MoE);
+    // Q4_K has no MmqLdsX64 row in dispatch, so the DS4 Q8_1 buffer is
+    // semantically unused here — DevicePtr(0) is honest, not a placeholder.
+    // If a future Q4_K turbo kernel lands, add x_q8_1_mmq to
+    // SharedExpertPrefillScratch and populate it alongside x_q8_1.
     run_qmatmul_from_tensor(
-        ops, stream, &shared.ffn_gate_shexp, scratch.x_q8_1, scratch.gate_f32,
+        ops, stream, &shared.ffn_gate_shexp, scratch.x_q8_1, DevicePtr(0), scratch.gate_f32,
         n_tokens, hidden, inter, "ffn_gate_shexp",
     )?;
     run_qmatmul_from_tensor(
-        ops, stream, &shared.ffn_up_shexp, scratch.x_q8_1, scratch.up_f32,
+        ops, stream, &shared.ffn_up_shexp, scratch.x_q8_1, DevicePtr(0), scratch.up_f32,
         n_tokens, hidden, inter, "ffn_up_shexp",
     )?;
     swiglu_f32(
@@ -4680,7 +5542,8 @@ pub fn forward_shared_expert_prefill(
     )
     .context("prefill shexp quantise → Q8_1")?;
     run_qmatmul_from_tensor(
-        ops, stream, &shared.ffn_down_shexp, scratch.activated_q8_1, scratch.down_f32,
+        ops, stream, &shared.ffn_down_shexp, scratch.activated_q8_1, DevicePtr(0),
+        scratch.down_f32,
         n_tokens, inter, hidden, "ffn_down_shexp",
     )?;
     cast_f16_to_f32(ops, stream, x_norm, scratch.x_norm_f32, n_tokens * hidden)
@@ -4708,6 +5571,8 @@ pub struct LayerPrefillScratch {
     pub gdn: Option<GdnPrefillScratch>,
     pub moe: Option<MoePrefillScratch>,
     pub shared: Option<SharedExpertPrefillScratch>,
+    /// Present iff `cfg.is_dense_ffn()`.
+    pub dense_ffn: Option<DenseFfnPrefillScratch>,
     pub mid_f16: DevicePtr,           // F16 [L, hidden] — post-attn residual
     pub mid_norm_f16: DevicePtr,      // F16 [L, hidden] — rmsnorm(mid)
     pub shared_delta_f16: DevicePtr,  // F16 [L, hidden]
@@ -4727,11 +5592,16 @@ impl LayerPrefillScratch {
 
         let full_attn = Some(FullAttnPrefillScratch::new(cfg, device, max_tokens)?);
         let gdn = Some(GdnPrefillScratch::new(cfg, device, max_tokens)?);
-        let moe = Some(MoePrefillScratch::new(cfg, device, max_tokens)?);
-        let shared = if cfg.shared_expert_intermediate_size.is_some() {
-            Some(SharedExpertPrefillScratch::new(cfg, device, max_tokens)?)
+        let (moe, shared, dense_ffn) = if cfg.is_dense_ffn() {
+            (None, None, Some(DenseFfnPrefillScratch::new(cfg, device, max_tokens)?))
         } else {
-            None
+            let moe = Some(MoePrefillScratch::new(cfg, device, max_tokens)?);
+            let shared = if cfg.shared_expert_intermediate_size.is_some() {
+                Some(SharedExpertPrefillScratch::new(cfg, device, max_tokens)?)
+            } else {
+                None
+            };
+            (moe, shared, None)
         };
 
         let mid_f16 = device.alloc(hidden_bytes)?;
@@ -4745,6 +5615,7 @@ impl LayerPrefillScratch {
             gdn,
             moe,
             shared,
+            dense_ffn,
             mid_f16,
             mid_norm_f16,
             shared_delta_f16,
@@ -4775,6 +5646,9 @@ impl LayerPrefillScratch {
             s.dispose(device)?;
         }
         if let Some(s) = self.shared.take() {
+            s.dispose(device)?;
+        }
+        if let Some(s) = self.dense_ffn.take() {
             s.dispose(device)?;
         }
         Ok(())
@@ -4889,7 +5763,32 @@ pub fn forward_layer_prefill(
     )
     .context("prefill post-attn rmsnorm")?;
 
-    // 4. Optional shared expert.
+    // 4. FFN. Dense (qwen35) or MoE + optional shared expert.
+    if cfg.is_dense_ffn() {
+        let dense_w = layer_weights
+            .ffn
+            .dense
+            .as_ref()
+            .context("dense FFN prefill: layer.ffn.dense missing")?;
+        let dense_scratch = scratch
+            .dense_ffn
+            .as_mut()
+            .context("LayerPrefillScratch.dense_ffn missing")?;
+        forward_dense_ffn_prefill(
+            ops,
+            stream,
+            cfg,
+            dense_w,
+            dense_scratch,
+            scratch.mid_norm_f16,
+            scratch.mid_f16,
+            x_out,
+            n_tokens,
+        )?;
+        return Ok(());
+    }
+
+    // MoE path.
     let moe_residual = if let (Some(shared_w), Some(shared_scratch)) =
         (layer_weights.ffn.shared.as_ref(), scratch.shared.as_mut())
     {
@@ -4926,7 +5825,7 @@ pub fn forward_layer_prefill(
         ops,
         stream,
         cfg,
-        &layer_weights.ffn.ffn_gate_inp,
+        layer_weights.ffn.ffn_gate_inp.as_ref().expect("MoE forward: ffn_gate_inp missing"),
         moe,
         scratch.mid_norm_f16,
         n_tokens,
@@ -5113,3 +6012,4 @@ pub fn forward_prefill(
 
     argmax_token_host(device, stream, output_head_scratch.logits_f32, cfg.vocab_size)
 }
+

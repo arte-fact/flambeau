@@ -76,10 +76,10 @@
   "emitted_at": "2026-04-20T21:01:26Z",
   "rig": "threadreaper-gfx906",
   "pmc": {
-    "vgpr_count": 34,
-    "sgpr_count": null,
-    "waves_per_simd": 7,
-    "mem_busy_pct": null,
-    "valu_busy_pct": null
+    "vgpr_count": 28,
+    "sgpr_count": 32,
+    "waves_per_simd": 9,
+    "mem_busy_pct": 10.063375,
+    "valu_busy_pct": 1.755234
   }
 }

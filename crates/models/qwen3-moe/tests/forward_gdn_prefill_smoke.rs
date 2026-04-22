@@ -169,7 +169,7 @@ fn forward_gdn_prefill_l4_smoke() -> Result<()> {
     let l = 8usize;
 
     let attn_norm_val = 1.0f32;
-    let attn_norm = alloc_f32(
+    let _attn_norm = alloc_f32(
         &device,
         "blk.0.attn_norm.weight",
         &vec![attn_norm_val; hidden],
@@ -198,8 +198,9 @@ fn forward_gdn_prefill_l4_smoke() -> Result<()> {
         bytes: hidden * 2,
         name: Arc::from("blk.0.attn_norm.weight"),
     };
-    // Release the incorrect F32 alloc; we built a replacement above.
-    drop(attn_norm_val);
+    // (previous step replaced the attn_norm F32 fill with the F16 alloc above;
+    // `attn_norm_val` is a Copy scalar so no explicit drop is needed.)
+    let _ = attn_norm_val;
 
     let attn_qkv = alloc_q8_0_zero(&device, "blk.0.attn_qkv.weight", conv_channels, hidden)?;
     let attn_gate = alloc_q8_0_zero(&device, "blk.0.attn_gate.weight", d_inner, hidden)?;

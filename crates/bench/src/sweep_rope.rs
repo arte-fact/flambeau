@@ -118,7 +118,7 @@ fn run_shape_cert(
 
     // --- Oracle: CPU reference at positions ---
     let mut ref_rotated = vec![0.0f32; total];
-    for t in 0..n_tokens {
+    for (t, &pos) in positions.iter().enumerate().take(n_tokens) {
         for h in 0..n_heads {
             for pair in 0..(head_dim / 2) {
                 let base = (t * n_heads + h) * head_dim + 2 * pair;
@@ -126,7 +126,7 @@ fn run_shape_cert(
                 let x1 = x0_f16[base + 1].to_f32();
                 let inv_freq =
                     1.0f32 / theta_base.powf(2.0 * (pair as f32) / (head_dim as f32));
-                let angle = (positions[t] as f32) * inv_freq;
+                let angle = (pos as f32) * inv_freq;
                 let c = angle.cos();
                 let s = angle.sin();
                 ref_rotated[base] = f16::from_f32(x0 * c - x1 * s).to_f32();
@@ -224,7 +224,7 @@ fn seeded_f32(seed: u64, n: usize) -> Vec<f32> {
         .map(|_| {
             s = s.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
             let u = (s >> 32) as u32;
-            ((u as f32 / u32::MAX as f32) - 0.5)
+            (u as f32 / u32::MAX as f32) - 0.5
         })
         .collect()
 }

@@ -1,39 +1,45 @@
 {
   "gguf_bytes": 20882024960,
-  "load_secs": 4.22702523,
+  "load_secs": 4.350685006,
   "mesh_ranks": 2,
   "model_tag": "Qwen3.6-35B-A3B-UD-Q4_K_S",
-  "notes": "V1.7.6 baseline. Per-L prefill numbers are fresh-session (no history); decode is 1-token prefill + N greedy steps. tok/s excludes load time. Regenerate: `FLAMBEAU_QWEN3_GGUF=... cargo test --release -p flambeau-qwen3-moe --features hip --test perf_baseline_qwen3_moe -- --nocapture`",
+  "notes": "V2.10.b (Q4_K gate_up_tile8 inline-accumulator refactor — Scratch 156 → 48 B, kernel −15.5 %; V2.9.b down kernels at (64, 2)). Per-L prefill numbers are fresh-session (no history); decode is 1-token prefill + N greedy steps. tok/s excludes load time. Regenerate: `FLAMBEAU_QWEN3_GGUF=... cargo test --release -p flambeau-qwen3-moe --features hip --test perf_baseline_qwen3_moe -- --nocapture`",
   "runs": [
     {
       "n_tokens": 8,
       "phase": "prefill",
-      "tok_per_sec": 71.63528271204589,
-      "wall_secs": 0.111676812
+      "tok_per_sec": 91.23747323748306,
+      "wall_secs": 0.08768327
     },
     {
       "n_tokens": 64,
       "phase": "prefill",
-      "tok_per_sec": 75.07325530951141,
-      "wall_secs": 0.852500664
+      "tok_per_sec": 127.31403123581723,
+      "wall_secs": 0.502694003
     },
     {
       "n_tokens": 128,
       "phase": "prefill",
-      "tok_per_sec": 141.0259086838886,
-      "wall_secs": 0.907634641
+      "tok_per_sec": 481.72249814739126,
+      "wall_secs": 0.265713145
     },
     {
       "n_tokens": 512,
       "phase": "prefill",
-      "tok_per_sec": 140.4206915662727,
-      "wall_secs": 3.646186287
+      "tok_per_sec": 665.6495403013873,
+      "wall_secs": 0.76917352
+    },
+    {
+      "n_tokens": 1024,
+      "phase": "prefill",
+      "tok_per_sec": 700.7671648537236,
+      "wall_secs": 1.46125568
     },
     {
       "n_tokens": 64,
       "phase": "decode",
-      "tok_per_sec": 30.656826630060113,
-      "wall_secs": 2.08762638
+      "tok_per_sec": 58.3450581070285,
+      "wall_secs": 1.09692238
     }
   ]
 }

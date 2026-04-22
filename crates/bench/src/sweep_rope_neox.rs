@@ -115,7 +115,7 @@ fn run_shape(
     // CPU reference: rotate only dims [0, rotated_dims), pass the rest through.
     let half = rotated_dims / 2;
     let mut reference = vec![0.0f32; total];
-    for t in 0..n_tokens {
+    for (t, &pos) in positions.iter().enumerate().take(n_tokens) {
         for h in 0..n_heads {
             let base = (t * n_heads + h) * head_dim;
             // Pass-through block.
@@ -130,7 +130,7 @@ fn run_shape(
                 let x1 = x0_f16[hi].to_f32();
                 let inv_freq =
                     1.0f32 / theta_base.powf(2.0 * (pair_i as f32) / (rotated_dims as f32));
-                let angle = (positions[t] as f32) * inv_freq;
+                let angle = (pos as f32) * inv_freq;
                 let c = angle.cos();
                 let s = angle.sin();
                 reference[lo] = f16::from_f32(x0 * c - x1 * s).to_f32();

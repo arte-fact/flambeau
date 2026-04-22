@@ -11,7 +11,7 @@ use std::path::Path;
 use std::time::Instant;
 
 use anyhow::{Context, Result};
-use flambeau_backend_hip::{device_count, HipCluster, HipDevice};
+use flambeau_backend_hip::{device_count, HipCluster};
 use flambeau_core::{CopyDirection, Device, DevicePtr, Stream};
 
 use crate::cert::{now_utc_iso8601, Cert, PmcSnapshot, ShapeResult, SCHEMA_VERSION};

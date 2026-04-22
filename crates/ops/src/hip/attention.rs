@@ -167,7 +167,15 @@ pub fn split_q_gate_f16(
 /// `n_k_tokens` KV rows with causal masking (`q_token_i` attends to
 /// `k_token_0..k_token_{q_offset + i}`).
 ///
-/// Launch: `(n_q_tokens, n_heads_q)`, 128 threads/block.
+/// Dispatches:
+///   - `attention_prefill_flash_tile_f16` (V2.2.d fix 4 candle port —
+///     BR=4 LDS-tiled flash-attn v2) when `n_q_tokens >= 4` and head_dim
+///     ∈ {64, 128, 256}. Per-call time on gfx906 is ~5× the previous
+///     oracle kernel at pp512 (measured 2026-04-22: 2994 µs → target
+///     ≤800 µs).
+///   - The per-(q_token, q_head) oracle kernel (`attention_prefill_f16`)
+///     otherwise. Shape grid covers the n_q < 4 edge that flash-tile's
+///     BR=4 coop-load pattern under-utilises.
 pub fn attention_prefill_f16(
     reg: &OpsRegistry,
     stream: &HipStream,
@@ -183,25 +191,60 @@ pub fn attention_prefill_f16(
     q_offset: usize,
     scale: f32,
 ) -> Result<()> {
-    // Kernel supports head_dim ∈ {64, 128, 256}; block = head_dim.
     assert!(
         head_dim == 64 || head_dim == 128 || head_dim == 256,
         "attention_prefill_f16: head_dim {head_dim} not supported (expected 64, 128, or 256)"
     );
-    let module = reg.expect_module("attention_prefill_f16")?;
-    let kernel = module.kernel("flambeau_attention_prefill_f16")?;
 
-    let n_q_i = n_q_tokens as i32;
-    let n_heads_q_i = n_heads_q as i32;
-    let n_heads_kv_i = n_heads_kv as i32;
-    let head_dim_i = head_dim as i32;
-    let n_k_i = n_k_tokens as i32;
-    let q_off_i = q_offset as i32;
-    let scale_f = scale;
+    let use_flash_tile = n_q_tokens >= 4;
+
     let q_ptr: u64 = q.as_usize() as u64;
     let k_ptr: u64 = k_cache.as_usize() as u64;
     let v_ptr: u64 = v_cache.as_usize() as u64;
     let o_ptr: u64 = out.as_usize() as u64;
+    let n_q_i = n_q_tokens as i32;
+    let n_heads_q_i = n_heads_q as i32;
+    let n_heads_kv_i = n_heads_kv as i32;
+    let n_k_i = n_k_tokens as i32;
+    let q_off_i = q_offset as i32;
+    let scale_f = scale;
+
+    if use_flash_tile {
+        // BR=4 LDS-tiled kernel.
+        let module = reg.expect_module("attention_prefill_flash_tile_f16")?;
+        let entry = match head_dim {
+            64 => "flambeau_attention_prefill_flash_tile_d64_f16",
+            128 => "flambeau_attention_prefill_flash_tile_d128_f16",
+            256 => "flambeau_attention_prefill_flash_tile_d256_f16",
+            _ => unreachable!(),
+        };
+        let kernel = module.kernel(entry)?;
+        let mut args = KernelArgs::new();
+        args.push(&q_ptr);
+        args.push(&k_ptr);
+        args.push(&v_ptr);
+        args.push(&o_ptr);
+        args.push(&n_q_i);
+        args.push(&n_heads_q_i);
+        args.push(&n_heads_kv_i);
+        args.push(&n_k_i);
+        args.push(&q_off_i);
+        args.push(&scale_f);
+        const BR: u32 = 4;
+        const WARP: u32 = 64;
+        let cfg = LaunchCfg {
+            grid: ((n_q_tokens as u32).div_ceil(BR), n_heads_q as u32, 1),
+            block: (WARP, BR, 1),
+            shared_bytes: 0,
+        };
+        unsafe { kernel.launch(stream, cfg, args)? };
+        return Ok(());
+    }
+
+    // Oracle path for n_q < 4 (very short prompts / edge shapes).
+    let module = reg.expect_module("attention_prefill_f16")?;
+    let kernel = module.kernel("flambeau_attention_prefill_f16")?;
+    let head_dim_i = head_dim as i32;
     let mut args = KernelArgs::new();
     args.push(&q_ptr);
     args.push(&k_ptr);

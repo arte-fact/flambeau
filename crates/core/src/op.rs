@@ -110,12 +110,14 @@ pub struct QMatMulCfg {
 /// Narrow dtype tag for `QMatMulCfg`. Mirrors `flambeau-quant::GgmlDType`
 /// but kept here without the quant-crate dep so `core` stays leaf-level.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[allow(non_camel_case_types)] // match GGUF / ggml dtype naming (Q4_K, Q5_K, Q6_K).
 pub enum QDtype {
     F32,
     F16,
     BF16,
     Q8_0,
     Q8_1,
+    Q4_1,
     Q4_K,
     Q5_K,
     Q6_K,
@@ -129,6 +131,7 @@ impl QDtype {
             Self::BF16 => "BF16",
             Self::Q8_0 => "Q8_0",
             Self::Q8_1 => "Q8_1",
+            Self::Q4_1 => "Q4_1",
             Self::Q4_K => "Q4_K",
             Self::Q5_K => "Q5_K",
             Self::Q6_K => "Q6_K",

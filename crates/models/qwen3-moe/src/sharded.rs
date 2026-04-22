@@ -157,15 +157,20 @@ impl Qwen3MoERankShard {
                     free(&mut g.ssm_out);
                 }
             }
-            free(&mut l.ffn.ffn_gate_inp);
-            free(&mut l.ffn.ffn_gate_exps);
-            free(&mut l.ffn.ffn_up_exps);
-            free(&mut l.ffn.ffn_down_exps);
+            if let Some(t) = &mut l.ffn.ffn_gate_inp { free(t); }
+            if let Some(t) = &mut l.ffn.ffn_gate_exps { free(t); }
+            if let Some(t) = &mut l.ffn.ffn_up_exps { free(t); }
+            if let Some(t) = &mut l.ffn.ffn_down_exps { free(t); }
             if let Some(s) = &mut l.ffn.shared {
                 free(&mut s.ffn_gate_inp_shexp);
                 free(&mut s.ffn_gate_shexp);
                 free(&mut s.ffn_up_shexp);
                 free(&mut s.ffn_down_shexp);
+            }
+            if let Some(d) = &mut l.ffn.dense {
+                free(&mut d.ffn_gate);
+                free(&mut d.ffn_up);
+                free(&mut d.ffn_down);
             }
         }
         out
@@ -432,12 +437,17 @@ fn iter_layer_tensor_bytes(l: &LayerWeights) -> Vec<usize> {
             }
         }
     }
-    v.extend([
-        l.ffn.ffn_gate_inp.bytes,
-        l.ffn.ffn_gate_exps.bytes,
-        l.ffn.ffn_up_exps.bytes,
-        l.ffn.ffn_down_exps.bytes,
-    ]);
+    for t in [
+        &l.ffn.ffn_gate_inp,
+        &l.ffn.ffn_gate_exps,
+        &l.ffn.ffn_up_exps,
+        &l.ffn.ffn_down_exps,
+    ]
+    .into_iter()
+    .flatten()
+    {
+        v.push(t.bytes);
+    }
     if let Some(s) = &l.ffn.shared {
         v.extend([
             s.ffn_gate_inp_shexp.bytes,
@@ -445,6 +455,9 @@ fn iter_layer_tensor_bytes(l: &LayerWeights) -> Vec<usize> {
             s.ffn_up_shexp.bytes,
             s.ffn_down_shexp.bytes,
         ]);
+    }
+    if let Some(d) = &l.ffn.dense {
+        v.extend([d.ffn_gate.bytes, d.ffn_up.bytes, d.ffn_down.bytes]);
     }
     v
 }
@@ -826,16 +839,31 @@ fn upload_ffn(
     device: &HipDevice,
     total: &mut usize,
 ) -> Result<FfnWeights> {
+    let opt_up_raw = |t: &Option<ResolvedTensor>, total: &mut usize| -> Result<Option<DeviceTensor>> {
+        t.as_ref().map(|r| up_raw(file, r, device, total)).transpose()
+    };
+    let dense = f
+        .dense
+        .as_ref()
+        .map(|d| -> Result<crate::weights::DenseFfnWeights> {
+            Ok(crate::weights::DenseFfnWeights {
+                ffn_gate: up_raw(file, &d.ffn_gate, device, total)?,
+                ffn_up: up_raw(file, &d.ffn_up, device, total)?,
+                ffn_down: up_raw(file, &d.ffn_down, device, total)?,
+            })
+        })
+        .transpose()?;
     Ok(FfnWeights {
-        ffn_gate_inp: up_raw(file, &f.ffn_gate_inp, device, total)?,
-        ffn_gate_exps: up_raw(file, &f.ffn_gate_exps, device, total)?,
-        ffn_up_exps: up_raw(file, &f.ffn_up_exps, device, total)?,
-        ffn_down_exps: up_raw(file, &f.ffn_down_exps, device, total)?,
+        ffn_gate_inp: opt_up_raw(&f.ffn_gate_inp, total)?,
+        ffn_gate_exps: opt_up_raw(&f.ffn_gate_exps, total)?,
+        ffn_up_exps: opt_up_raw(&f.ffn_up_exps, total)?,
+        ffn_down_exps: opt_up_raw(&f.ffn_down_exps, total)?,
         shared: f
             .shared
             .as_ref()
             .map(|s| upload_shared(s, file, device, total))
             .transpose()?,
+        dense,
     })
 }
 

@@ -283,11 +283,11 @@ fn build_ffn(dev: &HipDevice, cfg: &Qwen3MoEConfig, il: usize) -> Result<FfnWeig
         .flat_map(|e| (0..hidden).map(move |i| 0.01 * e as f32 * (i as f32 + 1.0)))
         .collect();
     Ok(FfnWeights {
-        ffn_gate_inp: alloc_f32_2d(dev, &format!("blk.{il}.ffn_gate_inp.weight"),
-            &gate_inp_host, n_experts as u64, hidden as u64)?,
-        ffn_gate_exps: alloc_q4k_3d(dev, &format!("blk.{il}.ffn_gate_exps.weight"), n_experts, inter, hidden)?,
-        ffn_up_exps: alloc_q4k_3d(dev, &format!("blk.{il}.ffn_up_exps.weight"), n_experts, inter, hidden)?,
-        ffn_down_exps: alloc_q4k_3d(dev, &format!("blk.{il}.ffn_down_exps.weight"), n_experts, hidden, inter)?,
+        ffn_gate_inp: Some(alloc_f32_2d(dev, &format!("blk.{il}.ffn_gate_inp.weight"),
+            &gate_inp_host, n_experts as u64, hidden as u64)?),
+        ffn_gate_exps: Some(alloc_q4k_3d(dev, &format!("blk.{il}.ffn_gate_exps.weight"), n_experts, inter, hidden)?),
+        ffn_up_exps: Some(alloc_q4k_3d(dev, &format!("blk.{il}.ffn_up_exps.weight"), n_experts, inter, hidden)?),
+        ffn_down_exps: Some(alloc_q4k_3d(dev, &format!("blk.{il}.ffn_down_exps.weight"), n_experts, hidden, inter)?),
         shared: Some(SharedExpertWeights {
             ffn_gate_inp_shexp: alloc_f32(dev, &format!("blk.{il}.ffn_gate_inp_shexp.weight"),
                 &vec![0.05f32; hidden])?,
@@ -295,6 +295,7 @@ fn build_ffn(dev: &HipDevice, cfg: &Qwen3MoEConfig, il: usize) -> Result<FfnWeig
             ffn_up_shexp: alloc_q4k_2d(dev, &format!("blk.{il}.ffn_up_shexp.weight"), shared_inter, hidden)?,
             ffn_down_shexp: alloc_q4k_2d(dev, &format!("blk.{il}.ffn_down_shexp.weight"), hidden, shared_inter)?,
         }),
+        dense: None,
     })
 }
 

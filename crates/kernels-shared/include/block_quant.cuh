@@ -11,6 +11,9 @@
 #ifndef QK8_1
 #define QK8_1 32
 #endif
+#ifndef QK4_1
+#define QK4_1 32
+#endif
 #ifndef QK_K
 #define QK_K 256
 #endif
@@ -35,6 +38,37 @@ typedef struct {
     int8_t    qs[QK8_1];     // signed quants
 } flambeau_block_q8_1;
 static_assert(sizeof(flambeau_block_q8_1) == 4 + QK8_1, "block_q8_1 size");
+
+// Q8_1 MMQ layout — turbo / candle 4-warp LDS-tiled prefill path's activation
+// block. One MMQ block holds 4 × 32 = 128 elements (vs standard Q8_1's 32).
+// Header: 4 × half2 ds (one (d, d*sum) per 32-element sub-block) = 16 B.
+// Body:   4 × QK8_1 = 128 int8 quants = 128 B.
+// Total: 144 B.
+//
+// Storage: (k_big_block, col) row-major in the device buffer — the MMQ
+// K-loop fetches 144-B strides along the col axis, sharing each block
+// across all threads in the tile's col-group.
+//
+// Source: /artefact/candle/candle-hip-kernels/src/mmq_turbo.cu:159-167.
+typedef struct {
+    fb_fp16_t ds[8];                  // 4 × half2 = 8 fp16 ((d, d*sum) × 4)
+    int8_t    qs[4 * QK8_1];          // 128 signed quants
+} flambeau_block_q8_1_mmq;
+static_assert(sizeof(flambeau_block_q8_1_mmq) == 16 + 4 * QK8_1,
+              "block_q8_1_mmq size");
+#ifndef QK8_1_MMQ
+#define QK8_1_MMQ (4 * QK8_1)         // 128 elements per MMQ block
+#endif
+
+// Q4_1 — 4-bit legacy quant with min offset. Block of 32 elements, 16 bytes
+// of nibble-packed unsigned quants. Reconstruction: y = d * q - m (where
+// q in [0, 15], so effectively y = d * (q - m/d) but kept separate).
+typedef struct {
+    fb_fp16_t d;                  // delta (scale)
+    fb_fp16_t m;                  // min
+    uint8_t   qs[QK4_1 / 2];      // 16 bytes, 4-bit nibbles (low | high)
+} flambeau_block_q4_1;
+static_assert(sizeof(flambeau_block_q4_1) == 2 + 2 + QK4_1 / 2, "block_q4_1 size");
 
 // Q4_K — 4-bit K-quant, super-block of 256 elements split into 8 sub-blocks
 // of 32. Byte-identical to ggml-common.h block_q4_K and to flambeau-quant's

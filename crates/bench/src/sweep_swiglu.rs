@@ -115,7 +115,7 @@ fn run_shape(
     args.push(&d_u_ptr);
     args.push(&d_y_ptr);
     args.push(&n_i);
-    let cfg = LaunchCfg::one_d(((n + 255) / 256) as u32, 256);
+    let cfg = LaunchCfg::one_d(n.div_ceil(256) as u32, 256);
     unsafe { kernel.launch(stream, cfg, args)? };
     stream.synchronize()?;
 
@@ -159,7 +159,7 @@ fn seeded_f32(seed: u64, n: usize) -> Vec<f32> {
             let u = (s >> 32) as u32;
             // Bounded to [-2, 2] — inside SwiGLU's "interesting" dynamic
             // range; f16 has plenty of precision here.
-            ((u as f32 / u32::MAX as f32) * 4.0 - 2.0)
+            (u as f32 / u32::MAX as f32) * 4.0 - 2.0
         })
         .collect()
 }

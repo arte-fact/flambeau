@@ -263,7 +263,7 @@ fn seeded_f32(seed: u64, n: usize) -> Vec<f32> {
             s = s.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
             let u = (s >> 32) as u32;
             // Keep inputs to [-0.5, 0.5] so F16 round-off doesn't dominate.
-            ((u as f32 / u32::MAX as f32) - 0.5)
+            (u as f32 / u32::MAX as f32) - 0.5
         })
         .collect()
 }

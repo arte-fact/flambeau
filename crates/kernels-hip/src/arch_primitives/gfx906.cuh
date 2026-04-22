@@ -109,6 +109,43 @@ static __device__ __forceinline__ float gfx906_quarter_warp_reduce_sum(float x) 
     return x;
 }
 
+// Eighth-warp (8 lanes) — stops at xor-4. Used by V2.4.c r8 MoE layouts.
+// All 3 steps are DPP within the same 16-lane bank so no cross-bank shuffle
+// is needed.
+static __device__ __forceinline__ float gfx906_eighth_warp_reduce_sum(float x) {
+    x = gfx906_dpp_add_xor1(x);
+    x = gfx906_dpp_add_xor2(x);
+    x += gfx906_shuffle_xor4(x);
+    return x;
+}
+
+// ---------------------------------------------------------------------------
+// Fast-math primitives — ported from candle's gfx906_primitives.cuh
+// (V2.2.d fix 4 flash-attn port). Each maps to a single gfx906 SFU
+// instruction (2-4 cycles) vs software math's ~10-20 instructions.
+// ---------------------------------------------------------------------------
+
+#ifndef GFX906_LOG2E
+#define GFX906_LOG2E 1.4426950408889634f
+#endif
+
+static __device__ __forceinline__ float gfx906_rcp(float x) {
+    float r;
+    asm volatile("v_rcp_f32 %0, %1" : "=v"(r) : "v"(x));
+    return r;
+}
+
+static __device__ __forceinline__ float gfx906_exp2(float x) {
+    float r;
+    asm volatile("v_exp_f32 %0, %1" : "=v"(r) : "v"(x));
+    return r;
+}
+
+/// exp(x) = exp2(x * log2(e)) — 1 FMA + 1 SFU cycle.
+static __device__ __forceinline__ float gfx906_fast_exp(float x) {
+    return gfx906_exp2(x * GFX906_LOG2E);
+}
+
 #else  // non-HIP fallback, should never be reached in V1
 
 static __device__ __forceinline__ float gfx906_warp_reduce_sum(float x) {

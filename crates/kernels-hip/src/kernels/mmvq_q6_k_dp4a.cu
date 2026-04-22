@@ -81,25 +81,39 @@ extern "C" __global__ void flambeau_mmvq_q6_k_dp4a_q8_1(
         const float d8_0 = (float) ya0->d;
         const float d8_1 = (float) ya1->d;
 
-        // i=0: low nibble of each ql byte, low 2 bits of qh byte (vih bits 4-5).
+        // V2.3.d.1 correctness fix: the original code did
+        //     `(unsigned)(vil | vih) - 0x20202020u`
+        // as a 32-bit unsigned subtract to apply the Q6_K −32 bias byte-wise.
+        // That is NOT a per-byte saturate subtract — when any source byte
+        // is < 32 (~50 % of random weights), the borrow cascades into the
+        // next byte and shifts its decoded value by −1. Errors up to 90 %
+        // at m≥128, and 6 % even at the dispatched m=1, k=15360 shape.
+        //
+        // Fix: use the DP4A identity
+        //     (raw − 32) · y  =  raw · y  −  32 · Σ y
+        // — store `raw = vil | vih` as unsigned [0, 63] (safe to read as
+        // signed int8 because top 2 bits are zero), compute one extra
+        // `dp4a(0x01010101, y, 0)` per term for the bias correction.
+        // Same pattern V2.3.b.4's mmq_q6_K_wave64 uses; HIP has no
+        // per-byte saturate-subtract equivalent of CUDA's `__vsubss4`.
         float sumf = 0.0f;
         {
             const int sc  = (int) sc_ptr[0];
             const int vil = (vl >> 0) & 0x0F0F0F0F;
             const int vih = ((vh >> 0) << 4) & 0x30303030;
-            // raw_q = (vil | vih) - 32, byte-wise. Safe for range [0,63] → [-32,31].
-            const int vi  = (int) ((unsigned) (vil | vih) - 0x20202020u);
-            const int dot = flambeau_dp4a_q6k(vi, u0, 0);
-            sumf += d8_0 * ((float) dot * (float) sc);
+            const int raw = vil | vih;                       // [0, 63] per byte
+            const int dot = flambeau_dp4a_q6k(raw, u0, 0);
+            const int sumy = flambeau_dp4a_q6k(0x01010101, u0, 0);
+            sumf += d8_0 * ((float) (dot - 32 * sumy) * (float) sc);
         }
-        // i=1: high nibble of each ql byte, high 2 bits of qh byte.
         {
             const int sc  = (int) sc_ptr[4];
             const int vil = (vl >> 4) & 0x0F0F0F0F;
             const int vih = ((vh >> 4) << 4) & 0x30303030;
-            const int vi  = (int) ((unsigned) (vil | vih) - 0x20202020u);
-            const int dot = flambeau_dp4a_q6k(vi, u1, 0);
-            sumf += d8_1 * ((float) dot * (float) sc);
+            const int raw = vil | vih;
+            const int dot = flambeau_dp4a_q6k(raw, u1, 0);
+            const int sumy = flambeau_dp4a_q6k(0x01010101, u1, 0);
+            sumf += d8_1 * ((float) (dot - 32 * sumy) * (float) sc);
         }
 
         const float d = (float) bk->d;

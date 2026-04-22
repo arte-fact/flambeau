@@ -23,7 +23,8 @@ use flambeau_backend_hip::{
 use flambeau_core::{CopyDirection, Device, DevicePtr, Stream};
 use flambeau_kernels_hip as kernels;
 use flambeau_quant::{
-    dequantize_into, BlockQ4K, BlockQ5K, BlockQ6K, BlockQ8_0, BlockQ8_1, GgmlDType, QK8_0, QK_K,
+    dequantize_into, BlockQ4K, BlockQ4_1, BlockQ5K, BlockQ6K, BlockQ8_0, BlockQ8_1, GgmlDType,
+    QK8_0, QK_K,
 };
 use half::f16;
 
@@ -46,6 +47,13 @@ pub enum Dtype {
     Q5KR2,
     /// r4 multi-row variant of Q6_K (4 output rows per wave64).
     Q6KR4,
+    /// V1.6 DP4A single-row Q6_K variant. Cooperative 64 lanes across
+    /// 2 super-blocks, inner DP4A via `__builtin_amdgcn_sdot4`. Runtime
+    /// intercepts the base Q6_K row when this kernel is loaded.
+    Q6KDP4A,
+    /// V2.2.b Q4_1 legacy quant with per-block min offset. Single row per
+    /// 256-thread block, DP4A inner loop.
+    Q4_1,
 }
 
 impl Dtype {
@@ -54,7 +62,8 @@ impl Dtype {
             Dtype::Q8_0 => "Q8_0",
             Dtype::Q4K | Dtype::Q4KR2 => "Q4_K",
             Dtype::Q5K | Dtype::Q5KR2 => "Q5_K",
-            Dtype::Q6K | Dtype::Q6KR4 => "Q6_K",
+            Dtype::Q6K | Dtype::Q6KR4 | Dtype::Q6KDP4A => "Q6_K",
+            Dtype::Q4_1 => "Q4_1",
         }
     }
 
@@ -63,7 +72,8 @@ impl Dtype {
             Dtype::Q8_0 => GgmlDType::Q8_0,
             Dtype::Q4K | Dtype::Q4KR2 => GgmlDType::Q4K,
             Dtype::Q5K | Dtype::Q5KR2 => GgmlDType::Q5K,
-            Dtype::Q6K | Dtype::Q6KR4 => GgmlDType::Q6K,
+            Dtype::Q6K | Dtype::Q6KR4 | Dtype::Q6KDP4A => GgmlDType::Q6K,
+            Dtype::Q4_1 => GgmlDType::Q4_1,
         }
     }
 
@@ -76,6 +86,8 @@ impl Dtype {
             Dtype::Q4KR2 => "qmatmul_q4_K_mmvq_nw1_r2_gfx906",
             Dtype::Q5KR2 => "qmatmul_q5_K_mmvq_nw1_r2_gfx906",
             Dtype::Q6KR4 => "qmatmul_q6_K_mmvq_nw1_r4_gfx906",
+            Dtype::Q6KDP4A => "qmatmul_q6_K_mmvq_dp4a_gfx906",
+            Dtype::Q4_1 => "qmatmul_q4_1_mmvq_dp4a_gfx906",
         }
     }
 
@@ -88,6 +100,8 @@ impl Dtype {
             Dtype::Q4KR2 => "mmvq_q4_k_r2",
             Dtype::Q5KR2 => "mmvq_q5_k_r2",
             Dtype::Q6KR4 => "mmvq_q6_k_r4",
+            Dtype::Q6KDP4A => "mmvq_q6_k_dp4a",
+            Dtype::Q4_1 => "mmvq_q4_1",
         }
     }
 
@@ -100,6 +114,8 @@ impl Dtype {
             Dtype::Q4KR2 => "flambeau_mmvq_q4_k_r2_q8_1",
             Dtype::Q5KR2 => "flambeau_mmvq_q5_k_r2_q8_1",
             Dtype::Q6KR4 => "flambeau_mmvq_q6_k_r4_q8_1",
+            Dtype::Q6KDP4A => "flambeau_mmvq_q6_k_dp4a_q8_1",
+            Dtype::Q4_1 => "flambeau_mmvq_q4_1_q8_1",
         }
     }
 
@@ -108,7 +124,8 @@ impl Dtype {
             Dtype::Q8_0 => std::mem::size_of::<BlockQ8_0>(),
             Dtype::Q4K | Dtype::Q4KR2 => std::mem::size_of::<BlockQ4K>(),
             Dtype::Q5K | Dtype::Q5KR2 => std::mem::size_of::<BlockQ5K>(),
-            Dtype::Q6K | Dtype::Q6KR4 => std::mem::size_of::<BlockQ6K>(),
+            Dtype::Q6K | Dtype::Q6KR4 | Dtype::Q6KDP4A => std::mem::size_of::<BlockQ6K>(),
+            Dtype::Q4_1 => std::mem::size_of::<BlockQ4_1>(),
         }
     }
 
@@ -118,7 +135,7 @@ impl Dtype {
 
     fn launch_threads(self) -> u32 {
         match self {
-            Dtype::Q8_0 => 256,
+            Dtype::Q8_0 | Dtype::Q4_1 => 256,
             _ => 64,
         }
     }
@@ -129,6 +146,7 @@ impl Dtype {
         match self {
             Dtype::Q6KR4 => 4,
             Dtype::Q4KR2 | Dtype::Q5KR2 => 2,
+            // Q6KDP4A is a single-row kernel (inner cooperative across 2 super-blocks).
             _ => 1,
         }
     }
@@ -419,7 +437,7 @@ fn tame_scales(dtype: Dtype, raw: Vec<u8>) -> Vec<u8> {
                 block[0..2].copy_from_slice(&d.to_bits().to_le_bytes());
                 block[2..4].copy_from_slice(&dmin.to_bits().to_le_bytes());
             }
-            Dtype::Q6K | Dtype::Q6KR4 => {
+            Dtype::Q6K | Dtype::Q6KR4 | Dtype::Q6KDP4A => {
                 // BlockQ6K: ql[128] + qh[64] + scales[16] i8 + d (f16 at offset 208..210).
                 // Scale range: map each scale byte into [-32, 32] for plausibility.
                 let scales_off = QK_K / 2 + QK_K / 4; // 128+64 = 192
@@ -430,6 +448,13 @@ fn tame_scales(dtype: Dtype, raw: Vec<u8>) -> Vec<u8> {
                 let d_off = scales_off + QK_K / 16;
                 let d = f16::from_f32((block[d_off] as f32 / 255.0) * 0.05 + 0.01);
                 block[d_off..d_off + 2].copy_from_slice(&d.to_bits().to_le_bytes());
+            }
+            Dtype::Q4_1 => {
+                // BlockQ4_1: d (f16, 0..2) + m (f16, 2..4) + qs[16] (4..20).
+                let d = f16::from_f32((block[0] as f32 / 255.0) * 0.1 + 0.01);
+                let m = f16::from_f32((block[1] as f32 / 255.0) * 0.05);
+                block[0..2].copy_from_slice(&d.to_bits().to_le_bytes());
+                block[2..4].copy_from_slice(&m.to_bits().to_le_bytes());
             }
         }
     }

@@ -31,7 +31,7 @@ use crate::sys::{
     hipStreamSynchronize, HIP_HOST_MALLOC_PORTABLE, HIP_SUCCESS,
 };
 use crate::HipDevice;
-use flambeau_core::{CopyDirection, Device, DeviceError, DevicePtr, DeviceResult, Stream};
+use flambeau_core::{Device, DeviceError, DevicePtr, DeviceResult};
 
 /// One entry per rank: the pinned host bounce buffer (grown on demand)
 /// wrapped in a mutex so two concurrent peer copies can't race on the
@@ -101,13 +101,15 @@ impl HipCluster {
     /// log a warn from `Drop` in that case).
     pub fn dispose(mut self) -> DeviceResult<()> {
         for bounce in self.bounces.drain(..) {
-            let mut b = bounce.into_inner().map_err(|_| DeviceError::Backend {
+            let b = bounce.into_inner().map_err(|_| DeviceError::Backend {
                 backend: "hip",
                 code: -1,
                 message: "HipCluster bounce mutex poisoned during dispose".into(),
             })?;
             if !b.ptr.is_null() {
-                // SAFETY: `b.ptr` came from `hipHostMalloc` above.
+                // SAFETY: `b.ptr` came from `hipHostMalloc` above. `b` is a
+                // local from `into_inner` so it drops after this block; no
+                // need to null-out the fields.
                 let rc = unsafe { hipHostFree(b.ptr) };
                 if rc != HIP_SUCCESS {
                     return Err(DeviceError::Backend {
@@ -116,8 +118,6 @@ impl HipCluster {
                         message: format!("hipHostFree: {}", error_string(rc)),
                     });
                 }
-                b.ptr = ptr::null_mut();
-                b.bytes = 0;
             }
         }
         Ok(())

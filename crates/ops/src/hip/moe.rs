@@ -59,7 +59,7 @@ pub fn topk_f32(
     args.push(&k_i);
     // blockDim must be a multiple of wave64 and ≥64 so `n_warps = blockDim>>6`
     // is non-zero. Threads past n_experts load -INF via the kernel's guard.
-    let block = ((n_experts.max(64) + 63) / 64 * 64) as u32;
+    let block = (n_experts.max(64).div_ceil(64) * 64) as u32;
     let cfg = LaunchCfg::one_d(n_tokens as u32, block);
     unsafe { kernel.launch(stream, cfg, args)? };
     Ok(())
@@ -85,13 +85,26 @@ pub fn indexed_moe_mmvq_q4_k_r2(
     top_k: usize,
     n_sb_per_row: usize,
 ) -> Result<()> {
-    // V1.7.6.f productisation: DP4A is the default. `FLAMBEAU_VARIANT=baseline`
-    // reverts to the scalar kernel for regression comparison only.
-    let force_baseline = std::env::var("FLAMBEAU_VARIANT").as_deref() == Ok("baseline");
-    let (stem, entry) = if force_baseline {
-        ("indexed_moe_mmvq_q4_k_r2", "flambeau_indexed_moe_mmvq_q4_k_r2_q8_1")
+    // V2.4.b productisation: shape-aware — r4 (quarter-wave) at prefill
+    // (n_tokens ≥ 32, launch-overhead-bound), r2 (half-wave) at decode
+    // (n_tokens < 32, per-thread-work-bound). Measured r4 +8 % prefill but
+    // -2 % decode vs r2; the split captures both.
+    // A/B knobs:
+    //   FLAMBEAU_VARIANT=baseline → scalar (regression compare only)
+    //   FLAMBEAU_VARIANT=dp4a_r2  → r2 everywhere (prior V2.4.a default)
+    //   FLAMBEAU_VARIANT=dp4a_r4  → r4 everywhere (force r4 at decode too)
+    let variant = std::env::var("FLAMBEAU_VARIANT").ok();
+    let force_baseline = variant.as_deref() == Some("baseline");
+    let force_dp4a_r2 = variant.as_deref() == Some("dp4a_r2");
+    let force_dp4a_r4 = variant.as_deref() == Some("dp4a_r4");
+    const R4_TOKEN_THRESHOLD: usize = 32;
+    let use_r4 = force_dp4a_r4 || (!force_baseline && !force_dp4a_r2 && n_tokens >= R4_TOKEN_THRESHOLD);
+    let (stem, entry, rows_per_block) = if force_baseline {
+        ("indexed_moe_mmvq_q4_k_r2", "flambeau_indexed_moe_mmvq_q4_k_r2_q8_1", 2u32)
+    } else if use_r4 {
+        ("indexed_moe_mmvq_q4_k_r4_dp4a", "flambeau_indexed_moe_mmvq_q4_k_r4_dp4a_q8_1", 4)
     } else {
-        ("indexed_moe_mmvq_q4_k_r2_dp4a", "flambeau_indexed_moe_mmvq_q4_k_r2_dp4a_q8_1")
+        ("indexed_moe_mmvq_q4_k_r2_dp4a", "flambeau_indexed_moe_mmvq_q4_k_r2_dp4a_q8_1", 2)
     };
     let module = reg.expect_module(stem)?;
     let kernel = module.kernel(entry)?;
@@ -113,7 +126,7 @@ pub fn indexed_moe_mmvq_q4_k_r2(
     args.push(&n_tokens_i);
     args.push(&top_k_i);
     args.push(&nb_i);
-    let grid_x = ((n_rows as u32) + 1) / 2;
+    let grid_x = (n_rows as u32).div_ceil(rows_per_block);
     let cfg = LaunchCfg {
         grid: (grid_x, (n_tokens * top_k) as u32, 1),
         block: (64, 1, 1),
@@ -176,6 +189,421 @@ pub fn indexed_moe_mmvq_q6_k(
 /// and `up = W_u · x` reading `x` only once. Shapes match
 /// `indexed_moe_mmvq_q4_k_r2` but with two separate weight tensors and two
 /// separate F32 output tensors.
+/// V2.5.b: sorted-reorder variant of `indexed_moe_mmvq_q4_k_r2` (down
+/// projection). Same ordering trick as the gate_up sorted kernel.
+pub fn indexed_moe_mmvq_q4_k_r2_sorted(
+    reg: &OpsRegistry,
+    stream: &HipStream,
+    w: DevicePtr,
+    y: DevicePtr,
+    expert_ids: DevicePtr,
+    sorted_pair_idx: DevicePtr,
+    dst: DevicePtr,
+    n_rows: usize,
+    n_tokens: usize,
+    top_k: usize,
+    n_sb_per_row: usize,
+) -> Result<()> {
+    let module = reg.expect_module("indexed_moe_mmvq_q4_k_r4_sorted_dp4a")?;
+    let kernel = module.kernel("flambeau_indexed_moe_mmvq_q4_k_r4_sorted_dp4a_q8_1")?;
+    let n_rows_i = n_rows as i32;
+    let n_tokens_i = n_tokens as i32;
+    let top_k_i = top_k as i32;
+    let nb_i = n_sb_per_row as i32;
+    let w_ptr: u64 = w.as_usize() as u64;
+    let y_ptr: u64 = y.as_usize() as u64;
+    let e_ptr: u64 = expert_ids.as_usize() as u64;
+    let s_ptr: u64 = sorted_pair_idx.as_usize() as u64;
+    let d_ptr: u64 = dst.as_usize() as u64;
+    let mut args = KernelArgs::new();
+    args.push(&w_ptr);
+    args.push(&y_ptr);
+    args.push(&e_ptr);
+    args.push(&s_ptr);
+    args.push(&d_ptr);
+    args.push(&n_rows_i);
+    args.push(&n_tokens_i);
+    args.push(&top_k_i);
+    args.push(&nb_i);
+    let cfg = LaunchCfg {
+        grid: ((n_rows as u32).div_ceil(4), (n_tokens * top_k) as u32, 1),
+        block: (64, 1, 1),
+        shared_bytes: 0,
+    };
+    unsafe { kernel.launch(stream, cfg, args)? };
+    Ok(())
+}
+
+/// V2.6.b: fused gate+up tile8 MoE MMQ. Block = 64 rows × 8 slots = 512
+/// outputs; all 8 slots guaranteed same expert via V2.6.a padded sort.
+/// Weight tile decoded ONCE per thread per sub-block, reused across 8 cols.
+///
+/// Grid.y is an upper bound on padded_total / 8; kernel early-exits
+/// blocks past the actual (on-device) padded_offsets[n_experts] → avoids
+/// DtoH sync.
+#[allow(clippy::too_many_arguments)]
+pub fn indexed_moe_mmq_q4_k_gate_up_tile8(
+    reg: &OpsRegistry,
+    stream: &HipStream,
+    w_gate: DevicePtr,
+    w_up: DevicePtr,
+    y: DevicePtr,
+    expert_ids: DevicePtr,
+    sorted_pair_idx_padded: DevicePtr,
+    padded_offsets: DevicePtr,
+    gate_out: DevicePtr,
+    up_out: DevicePtr,
+    n_rows: usize,
+    n_tokens: usize,
+    top_k: usize,
+    n_sb_per_row: usize,
+    n_experts: usize,
+    padded_total_upper_bound: usize,
+) -> Result<()> {
+    let module = reg.expect_module("indexed_moe_mmq_q4_k_gate_up_tile8_dp4a")?;
+    let kernel = module.kernel("flambeau_indexed_moe_mmq_q4_k_gate_up_tile8_dp4a_q8_1")?;
+
+    let n_rows_i = n_rows as i32;
+    let n_tokens_i = n_tokens as i32;
+    let top_k_i = top_k as i32;
+    let nb_i = n_sb_per_row as i32;
+    let n_experts_i = n_experts as i32;
+    let g_ptr: u64 = w_gate.as_usize() as u64;
+    let u_ptr: u64 = w_up.as_usize() as u64;
+    let y_ptr: u64 = y.as_usize() as u64;
+    let e_ptr: u64 = expert_ids.as_usize() as u64;
+    let s_ptr: u64 = sorted_pair_idx_padded.as_usize() as u64;
+    let po_ptr: u64 = padded_offsets.as_usize() as u64;
+    let go_ptr: u64 = gate_out.as_usize() as u64;
+    let uo_ptr: u64 = up_out.as_usize() as u64;
+    let mut args = KernelArgs::new();
+    args.push(&g_ptr);
+    args.push(&u_ptr);
+    args.push(&y_ptr);
+    args.push(&e_ptr);
+    args.push(&s_ptr);
+    args.push(&po_ptr);
+    args.push(&go_ptr);
+    args.push(&uo_ptr);
+    args.push(&n_rows_i);
+    args.push(&n_tokens_i);
+    args.push(&top_k_i);
+    args.push(&nb_i);
+    args.push(&n_experts_i);
+    // Upper-bound grid.y; in-kernel early-exit handles actual padded_total.
+    let grid_y = padded_total_upper_bound.div_ceil(8) as u32;
+    let cfg = LaunchCfg {
+        grid: ((n_rows as u32).div_ceil(64), grid_y, 1),
+        block: (64, 1, 1),
+        shared_bytes: 0,
+    };
+    unsafe { kernel.launch(stream, cfg, args)? };
+    Ok(())
+}
+
+/// V2.6.b: down-projection tile8 MoE MMQ. Same per-block layout as
+/// the gate_up tile8; activation is indexed by pair_idx directly.
+#[allow(clippy::too_many_arguments)]
+pub fn indexed_moe_mmq_q4_k_down_tile8(
+    reg: &OpsRegistry,
+    stream: &HipStream,
+    w: DevicePtr,
+    y: DevicePtr,
+    expert_ids: DevicePtr,
+    sorted_pair_idx_padded: DevicePtr,
+    padded_offsets: DevicePtr,
+    dst: DevicePtr,
+    n_rows: usize,
+    n_tokens: usize,
+    top_k: usize,
+    n_sb_per_row: usize,
+    n_experts: usize,
+    padded_total_upper_bound: usize,
+) -> Result<()> {
+    let module = reg.expect_module("indexed_moe_mmq_q4_k_down_tile8_dp4a")?;
+    let kernel = module.kernel("flambeau_indexed_moe_mmq_q4_k_down_tile8_dp4a_q8_1")?;
+
+    let n_rows_i = n_rows as i32;
+    let n_tokens_i = n_tokens as i32;
+    let top_k_i = top_k as i32;
+    let nb_i = n_sb_per_row as i32;
+    let n_experts_i = n_experts as i32;
+    let w_ptr: u64 = w.as_usize() as u64;
+    let y_ptr: u64 = y.as_usize() as u64;
+    let e_ptr: u64 = expert_ids.as_usize() as u64;
+    let s_ptr: u64 = sorted_pair_idx_padded.as_usize() as u64;
+    let po_ptr: u64 = padded_offsets.as_usize() as u64;
+    let d_ptr: u64 = dst.as_usize() as u64;
+    let mut args = KernelArgs::new();
+    args.push(&w_ptr);
+    args.push(&y_ptr);
+    args.push(&e_ptr);
+    args.push(&s_ptr);
+    args.push(&po_ptr);
+    args.push(&d_ptr);
+    args.push(&n_rows_i);
+    args.push(&n_tokens_i);
+    args.push(&top_k_i);
+    args.push(&nb_i);
+    args.push(&n_experts_i);
+    let grid_y = padded_total_upper_bound.div_ceil(8) as u32;
+    let cfg = LaunchCfg {
+        grid: ((n_rows as u32).div_ceil(64), grid_y, 1),
+        block: (64, 1, 1),
+        shared_bytes: 0,
+    };
+    unsafe { kernel.launch(stream, cfg, args)? };
+    Ok(())
+}
+
+/// V2.14.c: llamacpp-turbo 4-warp LDS-tiled indexed-MoE Q4_K gate+up MMQ.
+/// MMQ_Y=128, MMQ_X=8 (aligned with V2.6.a padded sort), 256 threads/block.
+/// Dual weight LDS tile (gate + up) + shared Y LDS tile with per-token
+/// indirect gather. DS4 Q8_1 activation (per-token layout).
+///
+/// **V2.14.d null result**: this kernel is slower than `_tile8` on Qwen3.6-35B
+/// indexed-MoE workloads (−17 to −21 % end-to-end). Root cause: the turbo LDS
+/// pattern amortises Y-LDS loads across many output cols (dense uses
+/// MMQ_X=32-64); at MMQ_X=8 the LDS overhead dominates. Opt-in via
+/// `FLAMBEAU_MOE_VARIANT=turbo`; default stays on `_tile8`.
+pub fn indexed_moe_mmq_q4_k_gate_up_turbo(
+    reg: &OpsRegistry,
+    stream: &HipStream,
+    gate_w: DevicePtr,
+    up_w: DevicePtr,
+    y_mmq: DevicePtr,           // DS4 Q8_1 activation — per-TOKEN layout (not per-pair)
+    expert_ids: DevicePtr,
+    sorted_pair_idx_padded: DevicePtr,
+    padded_offsets: DevicePtr,
+    gate_out: DevicePtr,
+    up_out: DevicePtr,
+    n_rows: usize,              // inter
+    n_tokens: usize,            // Y activation row count (per-token)
+    top_k: usize,
+    n_sb_per_row: usize,        // hidden / QK_K for gate_w/up_w
+    n_experts: usize,
+    padded_total_upper_bound: usize,
+) -> Result<()> {
+    let module = reg.expect_module("indexed_moe_mmq_q4_k_gate_up_turbo")?;
+    let kernel = module.kernel("flambeau_indexed_moe_mmq_q4_k_gate_up_turbo_q8_1")?;
+
+    let n_rows_i = n_rows as i32;
+    let n_tokens_i = n_tokens as i32;
+    let top_k_i = top_k as i32;
+    let nb_i = n_sb_per_row as i32;
+    let n_experts_i = n_experts as i32;
+    let gw_ptr: u64 = gate_w.as_usize() as u64;
+    let uw_ptr: u64 = up_w.as_usize() as u64;
+    let y_ptr: u64 = y_mmq.as_usize() as u64;
+    let e_ptr: u64 = expert_ids.as_usize() as u64;
+    let s_ptr: u64 = sorted_pair_idx_padded.as_usize() as u64;
+    let po_ptr: u64 = padded_offsets.as_usize() as u64;
+    let g_ptr: u64 = gate_out.as_usize() as u64;
+    let u_ptr: u64 = up_out.as_usize() as u64;
+
+    let mut args = KernelArgs::new();
+    args.push(&gw_ptr);
+    args.push(&uw_ptr);
+    args.push(&y_ptr);
+    args.push(&e_ptr);
+    args.push(&s_ptr);
+    args.push(&po_ptr);
+    args.push(&g_ptr);
+    args.push(&u_ptr);
+    args.push(&n_rows_i);
+    args.push(&n_tokens_i);
+    args.push(&top_k_i);
+    args.push(&nb_i);
+    args.push(&n_experts_i);
+
+    // Grid: MMQ_Y=128, MMQ_X=8.
+    let grid_x = (n_rows as u32).div_ceil(128);
+    let grid_y = (padded_total_upper_bound as u32).div_ceil(8);
+    // LDS: tile_y (MMQ_X=8 × 36 = 288 ints)
+    //    + 2 × TILE_X_TOTAL (TXS_QS=4224 + TXS_DM=128 + TXS_SC=528 = 4880 ints)
+    //    = 288 + 9760 = 10048 ints = 40192 B
+    const SHARED_BYTES: u32 = 40448;
+    let cfg = LaunchCfg {
+        grid: (grid_x, grid_y, 1),
+        block: (64, 4, 1),
+        shared_bytes: SHARED_BYTES,
+    };
+    unsafe { kernel.launch(stream, cfg, args)? };
+    Ok(())
+}
+
+/// V2.14.c: Q4_K down sibling of `indexed_moe_mmq_q4_k_gate_up_turbo`.
+/// Single weight matrix; activation indexed by per-pair sort; output also
+/// indexed by per-pair.
+pub fn indexed_moe_mmq_q4_k_down_turbo(
+    reg: &OpsRegistry,
+    stream: &HipStream,
+    down_w: DevicePtr,
+    y_mmq: DevicePtr,
+    expert_ids: DevicePtr,
+    sorted_pair_idx_padded: DevicePtr,
+    padded_offsets: DevicePtr,
+    dst: DevicePtr,
+    n_rows: usize,              // hidden
+    n_pairs: usize,             // n_tokens * top_k
+    n_sb_per_row: usize,        // inter / QK_K for down_w
+    n_experts: usize,
+    padded_total_upper_bound: usize,
+) -> Result<()> {
+    let module = reg.expect_module("indexed_moe_mmq_q4_k_down_turbo")?;
+    let kernel = module.kernel("flambeau_indexed_moe_mmq_q4_k_down_turbo_q8_1")?;
+
+    let n_rows_i = n_rows as i32;
+    let n_pairs_i = n_pairs as i32;
+    let nb_i = n_sb_per_row as i32;
+    let n_experts_i = n_experts as i32;
+    let w_ptr: u64 = down_w.as_usize() as u64;
+    let y_ptr: u64 = y_mmq.as_usize() as u64;
+    let e_ptr: u64 = expert_ids.as_usize() as u64;
+    let s_ptr: u64 = sorted_pair_idx_padded.as_usize() as u64;
+    let po_ptr: u64 = padded_offsets.as_usize() as u64;
+    let d_ptr: u64 = dst.as_usize() as u64;
+
+    let mut args = KernelArgs::new();
+    args.push(&w_ptr);
+    args.push(&y_ptr);
+    args.push(&e_ptr);
+    args.push(&s_ptr);
+    args.push(&po_ptr);
+    args.push(&d_ptr);
+    args.push(&n_rows_i);
+    args.push(&n_pairs_i);
+    args.push(&nb_i);
+    args.push(&n_experts_i);
+
+    let grid_x = (n_rows as u32).div_ceil(128);
+    let grid_y = (padded_total_upper_bound as u32).div_ceil(8);
+    // LDS: tile_y (MMQ_X=8 × 36 = 288) + 1 × TILE_X (4880) = 5168 ints = 20672 B
+    const SHARED_BYTES: u32 = 20992;
+    let cfg = LaunchCfg {
+        grid: (grid_x, grid_y, 1),
+        block: (64, 4, 1),
+        shared_bytes: SHARED_BYTES,
+    };
+    unsafe { kernel.launch(stream, cfg, args)? };
+    Ok(())
+}
+
+/// V2.8.b: Q6_K sibling of `indexed_moe_mmq_q4_k_down_tile8`. Same
+/// tile layout (64 rows × 8 slot-cols, 1 wave64, V2.6.a padded-sort
+/// per-block-expert invariant) with Q6_K decode (raw·y - 32·Σy bias
+/// correction to avoid the byte-borrow bug). Used for UD-Q4_K_S
+/// `ffn_down_exps` layers that are Q6_K-quantised.
+pub fn indexed_moe_mmq_q6_k_down_tile8(
+    reg: &OpsRegistry,
+    stream: &HipStream,
+    w: DevicePtr,
+    y: DevicePtr,
+    expert_ids: DevicePtr,
+    sorted_pair_idx_padded: DevicePtr,
+    padded_offsets: DevicePtr,
+    dst: DevicePtr,
+    n_rows: usize,
+    n_tokens: usize,
+    top_k: usize,
+    n_sb_per_row: usize,
+    n_experts: usize,
+    padded_total_upper_bound: usize,
+) -> Result<()> {
+    let module = reg.expect_module("indexed_moe_mmq_q6_k_down_tile8_dp4a")?;
+    let kernel = module.kernel("flambeau_indexed_moe_mmq_q6_k_down_tile8_dp4a_q8_1")?;
+
+    let n_rows_i = n_rows as i32;
+    let n_tokens_i = n_tokens as i32;
+    let top_k_i = top_k as i32;
+    let nb_i = n_sb_per_row as i32;
+    let n_experts_i = n_experts as i32;
+    let w_ptr: u64 = w.as_usize() as u64;
+    let y_ptr: u64 = y.as_usize() as u64;
+    let e_ptr: u64 = expert_ids.as_usize() as u64;
+    let s_ptr: u64 = sorted_pair_idx_padded.as_usize() as u64;
+    let po_ptr: u64 = padded_offsets.as_usize() as u64;
+    let d_ptr: u64 = dst.as_usize() as u64;
+    let mut args = KernelArgs::new();
+    args.push(&w_ptr);
+    args.push(&y_ptr);
+    args.push(&e_ptr);
+    args.push(&s_ptr);
+    args.push(&po_ptr);
+    args.push(&d_ptr);
+    args.push(&n_rows_i);
+    args.push(&n_tokens_i);
+    args.push(&top_k_i);
+    args.push(&nb_i);
+    args.push(&n_experts_i);
+    let grid_y = padded_total_upper_bound.div_ceil(8) as u32;
+    let cfg = LaunchCfg {
+        grid: ((n_rows as u32).div_ceil(64), grid_y, 1),
+        block: (64, 1, 1),
+        shared_bytes: 0,
+    };
+    unsafe { kernel.launch(stream, cfg, args)? };
+    Ok(())
+}
+
+/// V2.5.b: sorted-reorder variant of `indexed_moe_mmvq_q4_k_gate_up`
+/// that takes `sorted_pair_idx` (produced by `moe_sort_by_expert`) and
+/// remaps `blockIdx.y` → original (token, slot). Adjacent blocks thus
+/// share the same expert → L2 cache reuse on weight tiles.
+///
+/// Must be called after `moe_sort_by_expert` has populated
+/// `sorted_pair_idx[total]` with the sort permutation.
+pub fn indexed_moe_mmvq_q4_k_gate_up_sorted(
+    reg: &OpsRegistry,
+    stream: &HipStream,
+    w_gate: DevicePtr,
+    w_up: DevicePtr,
+    y: DevicePtr,
+    expert_ids: DevicePtr,
+    sorted_pair_idx: DevicePtr,
+    gate_out: DevicePtr,
+    up_out: DevicePtr,
+    n_rows: usize,
+    n_tokens: usize,
+    top_k: usize,
+    n_sb_per_row: usize,
+) -> Result<()> {
+    let module = reg.expect_module("indexed_moe_mmvq_q4_k_gate_up_r4_sorted_dp4a")?;
+    let kernel = module.kernel("flambeau_indexed_moe_mmvq_q4_k_gate_up_r4_sorted_dp4a_q8_1")?;
+
+    let n_rows_i = n_rows as i32;
+    let n_tokens_i = n_tokens as i32;
+    let top_k_i = top_k as i32;
+    let nb_i = n_sb_per_row as i32;
+    let g_ptr: u64 = w_gate.as_usize() as u64;
+    let u_ptr: u64 = w_up.as_usize() as u64;
+    let y_ptr: u64 = y.as_usize() as u64;
+    let e_ptr: u64 = expert_ids.as_usize() as u64;
+    let s_ptr: u64 = sorted_pair_idx.as_usize() as u64;
+    let go_ptr: u64 = gate_out.as_usize() as u64;
+    let uo_ptr: u64 = up_out.as_usize() as u64;
+    let mut args = KernelArgs::new();
+    args.push(&g_ptr);
+    args.push(&u_ptr);
+    args.push(&y_ptr);
+    args.push(&e_ptr);
+    args.push(&s_ptr);
+    args.push(&go_ptr);
+    args.push(&uo_ptr);
+    args.push(&n_rows_i);
+    args.push(&n_tokens_i);
+    args.push(&top_k_i);
+    args.push(&nb_i);
+    // r4 shape: 4 rows/block, grid.x = n_rows / 4.
+    let cfg = LaunchCfg {
+        grid: ((n_rows as u32).div_ceil(4), (n_tokens * top_k) as u32, 1),
+        block: (64, 1, 1),
+        shared_bytes: 0,
+    };
+    unsafe { kernel.launch(stream, cfg, args)? };
+    Ok(())
+}
+
 pub fn indexed_moe_mmvq_q4_k_gate_up(
     reg: &OpsRegistry,
     stream: &HipStream,
@@ -190,11 +618,22 @@ pub fn indexed_moe_mmvq_q4_k_gate_up(
     top_k: usize,
     n_sb_per_row: usize,
 ) -> Result<()> {
-    // V1.7.6.f productisation: DP4A gate+up fusion is the default.
-    // FLAMBEAU_VARIANT=baseline → unfused scalar (regression compare only).
-    // FLAMBEAU_MBATCH=1 → llama.cpp-style top_k-warps-per-block mbatch (proven
-    // null on MI50, kept as an A/B knob).
-    let force_baseline = std::env::var("FLAMBEAU_VARIANT").as_deref() == Ok("baseline");
+    // V2.4.a productisation: r4 variant is the default — 4 rows per block
+    // (quarter-warp per row) halves block count again vs r2 and quarters vs
+    // the V1.7.6 baseline. Measured +19 % pp=512 on Qwen3.6-35B-A3B Mesh<2>,
+    // +7 % decode. Parity bit-exact with llama.cpp on 8-token greedy.
+    //
+    // A/B knobs (regression compare only):
+    //   FLAMBEAU_VARIANT=baseline → unfused scalar
+    //   FLAMBEAU_VARIANT=dp4a_r1  → single-row DP4A (prior default)
+    //   FLAMBEAU_VARIANT=dp4a_r2  → r2 (half-warp per row)
+    //   FLAMBEAU_MBATCH=1         → llama.cpp-style top_k-warps mbatch (null)
+    let variant = std::env::var("FLAMBEAU_VARIANT").ok();
+    let force_baseline = variant.as_deref() == Some("baseline");
+    let force_dp4a_r1 = variant.as_deref() == Some("dp4a_r1");
+    let force_dp4a_r2 = variant.as_deref() == Some("dp4a_r2");
+    let force_dp4a_r4 = variant.as_deref() == Some("dp4a_r4");
+    let force_dp4a_r8 = variant.as_deref() == Some("dp4a_r8");
     let mbatch = std::env::var("FLAMBEAU_MBATCH").is_ok();
     let (stem, entry) = if force_baseline {
         (
@@ -206,10 +645,31 @@ pub fn indexed_moe_mmvq_q4_k_gate_up(
             "indexed_moe_mmvq_q4_k_gate_up_mbatch",
             "flambeau_indexed_moe_mmvq_q4_k_gate_up_mbatch_q8_1",
         )
-    } else {
+    } else if force_dp4a_r1 {
         (
             "indexed_moe_mmvq_q4_k_gate_up_dp4a",
             "flambeau_indexed_moe_mmvq_q4_k_gate_up_dp4a_q8_1",
+        )
+    } else if force_dp4a_r2 {
+        (
+            "indexed_moe_mmvq_q4_k_gate_up_r2_dp4a",
+            "flambeau_indexed_moe_mmvq_q4_k_gate_up_r2_dp4a_q8_1",
+        )
+    } else if force_dp4a_r8 {
+        (
+            "indexed_moe_mmvq_q4_k_gate_up_r8_dp4a",
+            "flambeau_indexed_moe_mmvq_q4_k_gate_up_r8_dp4a_q8_1",
+        )
+    } else if force_dp4a_r4 {
+        (
+            "indexed_moe_mmvq_q4_k_gate_up_r4_dp4a",
+            "flambeau_indexed_moe_mmvq_q4_k_gate_up_r4_dp4a_q8_1",
+        )
+    } else {
+        // Default: r4
+        (
+            "indexed_moe_mmvq_q4_k_gate_up_r4_dp4a",
+            "flambeau_indexed_moe_mmvq_q4_k_gate_up_r4_dp4a_q8_1",
         )
     };
     let module = reg.expect_module(stem)?;
@@ -237,16 +697,34 @@ pub fn indexed_moe_mmvq_q4_k_gate_up(
     args.push(&top_k_i);
     args.push(&nb_i);
     let cfg = if mbatch {
-        // llama.cpp-style MoE shape: block (64 × top_k × 1), grid (n_rows × n_tokens × 1).
-        // top_k warps per block run independently, one per expert-slot.
         LaunchCfg {
             grid: (n_rows as u32, n_tokens as u32, 1),
             block: (64, top_k as u32, 1),
             shared_bytes: 0,
         }
-    } else {
+    } else if force_dp4a_r8 {
+        // r8: 8 rows per block via eighth-wave-per-row; grid.x /= 8.
+        LaunchCfg {
+            grid: ((n_rows as u32).div_ceil(8), (n_tokens * top_k) as u32, 1),
+            block: (64, 1, 1),
+            shared_bytes: 0,
+        }
+    } else if force_dp4a_r2 {
+        LaunchCfg {
+            grid: ((n_rows as u32).div_ceil(2), (n_tokens * top_k) as u32, 1),
+            block: (64, 1, 1),
+            shared_bytes: 0,
+        }
+    } else if force_baseline || force_dp4a_r1 {
         LaunchCfg {
             grid: (n_rows as u32, (n_tokens * top_k) as u32, 1),
+            block: (64, 1, 1),
+            shared_bytes: 0,
+        }
+    } else {
+        // Default: r4 (4 rows per block, quarter-wave-per-row).
+        LaunchCfg {
+            grid: ((n_rows as u32).div_ceil(4), (n_tokens * top_k) as u32, 1),
             block: (64, 1, 1),
             shared_bytes: 0,
         }
@@ -298,7 +776,7 @@ pub fn indexed_moe_mmq_q4_k(
     args.push(&nb_i);
     args.push(&top_k_i);
     let grid_x =
-        ((n_rows as u32) + INDEXED_MOE_MMQ_Y as u32 - 1) / INDEXED_MOE_MMQ_Y as u32;
+        (n_rows as u32).div_ceil(INDEXED_MOE_MMQ_Y as u32);
     let cfg = LaunchCfg {
         grid: (grid_x, n_buckets as u32, 1),
         block: (128, 1, 1),
@@ -375,7 +853,7 @@ pub fn moe_combine_f16(
     args.push(&top_k_i);
     args.push(&hidden_i);
     let total = n_tokens * hidden;
-    let cfg = LaunchCfg::one_d(((total + 255) / 256) as u32, 256);
+    let cfg = LaunchCfg::one_d(total.div_ceil(256) as u32, 256);
     unsafe { kernel.launch(stream, cfg, args)? };
     Ok(())
 }
@@ -421,6 +899,187 @@ pub fn build_expert_buckets(
     (bucket_expert, bucket_slots)
 }
 
+// ---------------------------------------------------------------------------
+// V2.5.a: sort (token, slot) pairs by expert_id so same-expert groups can
+// be processed by a real MMQ kernel (instead of the current per-pair
+// MMVQ at prefill).
+//
+// Given `expert_ids[total]` (total = n_tokens * top_k) with values in
+// [0, n_experts), produces:
+//   counts[n_experts]           — #pairs per expert (atomic histogram)
+//   offsets[n_experts + 1]      — exclusive prefix-sum, offsets[n_experts]=total
+//   sorted_pair_idx[total]      — input pair indices grouped by expert
+//
+// Caller must zero `counts` before invocation. `cursors` is a scratch
+// buffer of n_experts ints used internally by the scatter kernel.
+//
+// Three sequential kernel launches; no host round-trip.
+// ---------------------------------------------------------------------------
+pub fn moe_sort_by_expert(
+    reg: &OpsRegistry,
+    stream: &HipStream,
+    expert_ids: DevicePtr,      // [total] i32
+    counts: DevicePtr,          // [n_experts] i32, pre-zeroed
+    offsets: DevicePtr,         // [n_experts + 1] i32 (written)
+    cursors: DevicePtr,         // [n_experts] i32 scratch (written)
+    sorted_pair_idx: DevicePtr, // [total] i32 (written)
+    total: usize,
+    n_experts: usize,
+) -> Result<()> {
+    assert!(
+        n_experts <= 512,
+        "moe_sort_by_expert: n_experts {n_experts} > 512 (bump MAX_N_EXPERTS in .cu)"
+    );
+    let module = reg.expect_module("moe_sort_by_expert")?;
+    let k_zero = module.kernel("flambeau_moe_sort_zero_counts")?;
+    let k_count = module.kernel("flambeau_moe_sort_count")?;
+    let k_scan = module.kernel("flambeau_moe_sort_scan_offsets")?;
+    let k_scatter = module.kernel("flambeau_moe_sort_scatter")?;
+
+    let total_i = total as i32;
+    let n_experts_i = n_experts as i32;
+    let e_ptr: u64 = expert_ids.as_usize() as u64;
+    let c_ptr: u64 = counts.as_usize() as u64;
+    let o_ptr: u64 = offsets.as_usize() as u64;
+    let k_ptr: u64 = cursors.as_usize() as u64;
+    let s_ptr: u64 = sorted_pair_idx.as_usize() as u64;
+
+    // Kernel 0: zero counts
+    {
+        let mut args = KernelArgs::new();
+        args.push(&c_ptr);
+        args.push(&n_experts_i);
+        let cfg = LaunchCfg {
+            grid: (1, 1, 1),
+            block: (512, 1, 1),
+            shared_bytes: 0,
+        };
+        unsafe { k_zero.launch(stream, cfg, args)? };
+    }
+    // Kernel 1: histogram
+    {
+        let mut args = KernelArgs::new();
+        args.push(&e_ptr);
+        args.push(&c_ptr);
+        args.push(&total_i);
+        const BLOCK: u32 = 256;
+        let grid = (total as u32).div_ceil(BLOCK);
+        let cfg = LaunchCfg::one_d(grid, BLOCK);
+        unsafe { k_count.launch(stream, cfg, args)? };
+    }
+    // Kernel 2: scan to offsets + init cursors (single block, 512 threads)
+    {
+        let mut args = KernelArgs::new();
+        args.push(&c_ptr);
+        args.push(&o_ptr);
+        args.push(&k_ptr);
+        args.push(&n_experts_i);
+        let cfg = LaunchCfg {
+            grid: (1, 1, 1),
+            block: (512, 1, 1),
+            shared_bytes: 0,
+        };
+        unsafe { k_scan.launch(stream, cfg, args)? };
+    }
+    // Kernel 3: scatter
+    {
+        let mut args = KernelArgs::new();
+        args.push(&e_ptr);
+        args.push(&k_ptr);
+        args.push(&s_ptr);
+        args.push(&total_i);
+        const BLOCK: u32 = 256;
+        let grid = (total as u32).div_ceil(BLOCK);
+        let cfg = LaunchCfg::one_d(grid, BLOCK);
+        unsafe { k_scatter.launch(stream, cfg, args)? };
+    }
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// V2.6.a: padded variant of `moe_sort_by_expert` that rounds each expert's
+// range to a multiple of 8. Produces BOTH the standard (unpadded) outputs
+// AND a `sorted_pair_idx_padded[total_padded]` / `padded_offsets[n_experts+1]`
+// pair where padded slots repeat the last real pair_idx (so an 8-slot
+// per-block MMQ kernel can assume all 8 slots in its block share an expert).
+// ---------------------------------------------------------------------------
+#[allow(clippy::too_many_arguments)]
+pub fn moe_sort_by_expert_padded(
+    reg: &OpsRegistry,
+    stream: &HipStream,
+    expert_ids: DevicePtr,                 // [total] i32
+    counts: DevicePtr,                     // [n_experts] i32, overwritten
+    offsets: DevicePtr,                    // [n_experts + 1] i32 (written)
+    cursors: DevicePtr,                    // [n_experts] i32 scratch
+    sorted_pair_idx: DevicePtr,            // [total] i32 (written, unpadded)
+    padded_offsets: DevicePtr,             // [n_experts + 1] i32 (written)
+    sorted_pair_idx_padded: DevicePtr,     // [total_padded_cap] i32 (written)
+    total: usize,
+    n_experts: usize,
+    max_tokens: usize,
+    top_k: usize,
+) -> Result<()> {
+    // 1. Run the standard (unpadded) sort — fills counts, offsets, cursors,
+    //    sorted_pair_idx.
+    moe_sort_by_expert(
+        reg,
+        stream,
+        expert_ids,
+        counts,
+        offsets,
+        cursors,
+        sorted_pair_idx,
+        total,
+        n_experts,
+    )?;
+
+    let module = reg.expect_module("moe_sort_by_expert")?;
+    let k_scan_padded = module.kernel("flambeau_moe_sort_scan_padded_offsets")?;
+    let k_pad_copy = module.kernel("flambeau_moe_sort_pad_copy")?;
+
+    let n_experts_i = n_experts as i32;
+    let c_ptr: u64 = counts.as_usize() as u64;
+    let o_ptr: u64 = offsets.as_usize() as u64;
+    let po_ptr: u64 = padded_offsets.as_usize() as u64;
+    let spi_ptr: u64 = sorted_pair_idx.as_usize() as u64;
+    let spip_ptr: u64 = sorted_pair_idx_padded.as_usize() as u64;
+
+    // 2. Scan counts → padded_offsets (single-block Blelloch).
+    {
+        let mut args = KernelArgs::new();
+        args.push(&c_ptr);
+        args.push(&po_ptr);
+        args.push(&n_experts_i);
+        let cfg = LaunchCfg {
+            grid: (1, 1, 1),
+            block: (512, 1, 1),
+            shared_bytes: 0,
+        };
+        unsafe { k_scan_padded.launch(stream, cfg, args)? };
+    }
+    // 3. Copy + pad-fill. grid.x covers the worst case (all pairs to one
+    //    expert, rounded up to mult of 8); blocks that fall outside an
+    //    expert's padded range early-exit.
+    {
+        let mut args = KernelArgs::new();
+        args.push(&spi_ptr);
+        args.push(&o_ptr);
+        args.push(&c_ptr);
+        args.push(&po_ptr);
+        args.push(&spip_ptr);
+        args.push(&n_experts_i);
+        let max_per_expert = (max_tokens * top_k + 7) & !7;
+        let grid_x = (max_per_expert as u32).div_ceil(256);
+        let cfg = LaunchCfg {
+            grid: (grid_x.max(1), n_experts as u32, 1),
+            block: (256, 1, 1),
+            shared_bytes: 0,
+        };
+        unsafe { k_pad_copy.launch(stream, cfg, args)? };
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -437,13 +1096,13 @@ mod tests {
         assert_eq!(be, vec![0, 1, 2]);
         assert_eq!(bs.len(), 3 * INDEXED_MOE_MMQ_X);
         // Expert 0 refs: (t=0,slot=0), (t=1,slot=0), (t=2,slot=0).
-        assert_eq!(bs[0], (0 << 16) | 0);
-        assert_eq!(bs[1], (1 << 16) | 0);
-        assert_eq!(bs[2], (2 << 16) | 0);
+        assert_eq!(bs[0], 0);
+        assert_eq!(bs[1], 1 << 16);
+        assert_eq!(bs[2], 2 << 16);
         assert_eq!(bs[3], -1);
         // Expert 1 refs: (t=0,slot=1), (t=1,slot=1).
         let b1 = INDEXED_MOE_MMQ_X;
-        assert_eq!(bs[b1], (0 << 16) | 1);
+        assert_eq!(bs[b1], 1);
         assert_eq!(bs[b1 + 1], (1 << 16) | 1);
         assert_eq!(bs[b1 + 2], -1);
     }
@@ -458,7 +1117,7 @@ mod tests {
         // Second bucket has 2 real refs (entries 8 and 9 = (t=4,slot=0)
         // and (t=4,slot=1)) then 6 sentinels.
         let b2 = INDEXED_MOE_MMQ_X;
-        assert_eq!(bs[b2], (4 << 16) | 0);
+        assert_eq!(bs[b2], 4 << 16);
         assert_eq!(bs[b2 + 1], (4 << 16) | 1);
         for i in 2..INDEXED_MOE_MMQ_X {
             assert_eq!(bs[b2 + i], -1);

@@ -257,6 +257,8 @@ fn sweep(arch: &str, op: Option<&str>, dtype: &str) -> Result<()> {
                     "Q4_K_r2" => vec![Dtype::Q4KR2],
                     "Q5_K_r2" => vec![Dtype::Q5KR2],
                     "Q6_K_r4" => vec![Dtype::Q6KR4],
+                    "Q6_K_dp4a" => vec![Dtype::Q6KDP4A],
+                    "Q4_1" => vec![Dtype::Q4_1],
                     other => anyhow::bail!("unknown dtype {other}"),
                 };
                 let root = repo_root();
@@ -272,28 +274,53 @@ fn sweep(arch: &str, op: Option<&str>, dtype: &str) -> Result<()> {
                         cert.rig
                     );
                 }
-                return Ok(());
+                Ok(())
             }
             "qmatmul_mmq" => {
                 use flambeau_bench::sweep_mmq::{run_sweep, Dtype as MmqDtype, SweepSpec};
                 let (dtypes, spec_builder): (Vec<MmqDtype>, fn(MmqDtype) -> SweepSpec) = match dtype {
                     "Q8_0" | "Q8_0_oracle" => (vec![MmqDtype::Q8_0Oracle], SweepSpec::v1_4_oracle),
                     "Q8_0_4warp" => (vec![MmqDtype::Q8_04Warp], SweepSpec::v1_4_prefill),
+                    "Q8_0_wave64" => (vec![MmqDtype::Q8_0Wave64], SweepSpec::v1_4_prefill),
+                    "Q8_0_wave64_tile16" => {
+                        (vec![MmqDtype::Q8_0Wave64Tile16], SweepSpec::v1_4_prefill)
+                    }
+                    "Q4_1" | "Q4_1_4warp" => (vec![MmqDtype::Q4_14Warp], SweepSpec::v1_4_prefill),
+                    "Q4_1_wave64" => (vec![MmqDtype::Q4_1Wave64], SweepSpec::v1_4_prefill),
                     "Q4_K" | "Q4_K_4warp" => (vec![MmqDtype::Q4K4Warp], SweepSpec::v1_4_prefill),
+                    "Q4_K_wave64" => (vec![MmqDtype::Q4KWave64], SweepSpec::v1_4_prefill),
+                    "Q4_K_turbo" => (vec![MmqDtype::Q4KTurbo], SweepSpec::v1_4_prefill),
+                    "Q5_K" | "Q5_K_wave64" => (vec![MmqDtype::Q5KWave64], SweepSpec::v1_4_prefill),
                     "Q6_K" | "Q6_K_4warp" => (vec![MmqDtype::Q6K4Warp], SweepSpec::v1_4_prefill),
+                    "Q6_K_wave64" => (vec![MmqDtype::Q6KWave64], SweepSpec::v1_4_prefill),
                     "all" => (
                         vec![
                             MmqDtype::Q8_0Oracle,
                             MmqDtype::Q8_04Warp,
+                            MmqDtype::Q8_0Wave64,
+                            MmqDtype::Q8_0Wave64Tile16,
+                            MmqDtype::Q4_14Warp,
+                            MmqDtype::Q4_1Wave64,
                             MmqDtype::Q4K4Warp,
+                            MmqDtype::Q4KWave64,
+                            MmqDtype::Q5KWave64,
                             MmqDtype::Q6K4Warp,
+                            MmqDtype::Q6KWave64,
                         ],
                         // Oracle uses its small grid, 4warp uses the prefill grid.
                         |d| match d {
                             MmqDtype::Q8_0Oracle => SweepSpec::v1_4_oracle(d),
                             MmqDtype::Q8_04Warp
+                            | MmqDtype::Q8_0Wave64
+                            | MmqDtype::Q8_0Wave64Tile16
+                            | MmqDtype::Q4_14Warp
+                            | MmqDtype::Q4_1Wave64
+                            | MmqDtype::Q4KTurbo
                             | MmqDtype::Q4K4Warp
-                            | MmqDtype::Q6K4Warp => SweepSpec::v1_4_prefill(d),
+                            | MmqDtype::Q4KWave64
+                            | MmqDtype::Q5KWave64
+                            | MmqDtype::Q6K4Warp
+                            | MmqDtype::Q6KWave64 => SweepSpec::v1_4_prefill(d),
                         },
                     ),
                     other => anyhow::bail!("unknown MMQ dtype {other}"),
@@ -312,7 +339,7 @@ fn sweep(arch: &str, op: Option<&str>, dtype: &str) -> Result<()> {
                         cert.rig
                     );
                 }
-                return Ok(());
+                Ok(())
             }
             "rmsnorm" => {
                 use flambeau_bench::sweep_rmsnorm::{run_sweep, SweepSpec};
@@ -323,7 +350,7 @@ fn sweep(arch: &str, op: Option<&str>, dtype: &str) -> Result<()> {
                     "sweep rmsnorm: pass={} shapes={} rig={}",
                     cert.pass, cert.results.len(), cert.rig
                 );
-                return Ok(());
+                Ok(())
             }
             "swiglu" => {
                 use flambeau_bench::sweep_swiglu::run_sweep;
@@ -333,7 +360,7 @@ fn sweep(arch: &str, op: Option<&str>, dtype: &str) -> Result<()> {
                     "sweep swiglu: pass={} shapes={} rig={}",
                     cert.pass, cert.results.len(), cert.rig
                 );
-                return Ok(());
+                Ok(())
             }
             "rmsnorm_q8_1" => {
                 use flambeau_bench::sweep_rmsnorm_q8_1::run_sweep;
@@ -343,7 +370,27 @@ fn sweep(arch: &str, op: Option<&str>, dtype: &str) -> Result<()> {
                     "sweep rmsnorm_q8_1: pass={} shapes={} rig={}",
                     cert.pass, cert.results.len(), cert.rig
                 );
-                return Ok(());
+                Ok(())
+            }
+            "quantize_q8_1_mmq" => {
+                use flambeau_bench::sweep_quantize_q8_1_mmq::run_sweep;
+                let _ = dtype;
+                let cert = run_sweep(&repo_root())?;
+                println!(
+                    "sweep quantize_q8_1_mmq: pass={} shapes={} rig={}",
+                    cert.pass, cert.results.len(), cert.rig
+                );
+                Ok(())
+            }
+            "attention_prefill_flash_tile" => {
+                use flambeau_bench::sweep_attention_prefill::run_sweep_flash_tile;
+                let _ = dtype;
+                let cert = run_sweep_flash_tile(&repo_root())?;
+                println!(
+                    "sweep attention_prefill_flash_tile: pass={} shapes={} rig={}",
+                    cert.pass, cert.results.len(), cert.rig
+                );
+                Ok(())
             }
             "rope" => {
                 use flambeau_bench::sweep_rope::run_sweep;
@@ -353,7 +400,7 @@ fn sweep(arch: &str, op: Option<&str>, dtype: &str) -> Result<()> {
                     "sweep rope: pass={} shapes={} rig={}",
                     cert.pass, cert.results.len(), cert.rig
                 );
-                return Ok(());
+                Ok(())
             }
             "rope_neox_partial" => {
                 use flambeau_bench::sweep_rope_neox::run_sweep;
@@ -363,7 +410,7 @@ fn sweep(arch: &str, op: Option<&str>, dtype: &str) -> Result<()> {
                     "sweep rope_neox_partial: pass={} shapes={} rig={}",
                     cert.pass, cert.results.len(), cert.rig
                 );
-                return Ok(());
+                Ok(())
             }
             "l2_norm" => {
                 use flambeau_bench::sweep_l2_norm::run_sweep;
@@ -373,7 +420,7 @@ fn sweep(arch: &str, op: Option<&str>, dtype: &str) -> Result<()> {
                     "sweep l2_norm: pass={} shapes={} rig={}",
                     cert.pass, cert.results.len(), cert.rig
                 );
-                return Ok(());
+                Ok(())
             }
             "causal_conv1d" => {
                 use flambeau_bench::sweep_causal_conv1d::run_sweep;
@@ -383,7 +430,7 @@ fn sweep(arch: &str, op: Option<&str>, dtype: &str) -> Result<()> {
                     "sweep causal_conv1d: pass={} shapes={} rig={}",
                     cert.pass, cert.results.len(), cert.rig
                 );
-                return Ok(());
+                Ok(())
             }
             "gdn_state_step" => {
                 use flambeau_bench::sweep_gdn_step::run_sweep;
@@ -393,7 +440,7 @@ fn sweep(arch: &str, op: Option<&str>, dtype: &str) -> Result<()> {
                     "sweep gdn_state_step: pass={} shapes={} rig={}",
                     cert.pass, cert.results.len(), cert.rig
                 );
-                return Ok(());
+                Ok(())
             }
             "cast_f32_f16" => {
                 use flambeau_bench::sweep_cast::run_sweep;
@@ -403,7 +450,7 @@ fn sweep(arch: &str, op: Option<&str>, dtype: &str) -> Result<()> {
                     "sweep cast_f32_f16: pass={} shapes={} rig={}",
                     cert.pass, cert.results.len(), cert.rig
                 );
-                return Ok(());
+                Ok(())
             }
             "cast_f16_f32" => {
                 use flambeau_bench::sweep_f32_pointwise::run_cast_f16_f32_sweep;
@@ -413,7 +460,7 @@ fn sweep(arch: &str, op: Option<&str>, dtype: &str) -> Result<()> {
                     "sweep cast_f16_f32: pass={} shapes={} rig={}",
                     cert.pass, cert.results.len(), cert.rig
                 );
-                return Ok(());
+                Ok(())
             }
             "silu_f32" => {
                 use flambeau_bench::sweep_f32_pointwise::run_silu_sweep;
@@ -423,7 +470,7 @@ fn sweep(arch: &str, op: Option<&str>, dtype: &str) -> Result<()> {
                     "sweep silu_f32: pass={} shapes={} rig={}",
                     cert.pass, cert.results.len(), cert.rig
                 );
-                return Ok(());
+                Ok(())
             }
             "swiglu_f32" => {
                 use flambeau_bench::sweep_f32_pointwise::run_swiglu_sweep;
@@ -433,7 +480,7 @@ fn sweep(arch: &str, op: Option<&str>, dtype: &str) -> Result<()> {
                     "sweep swiglu_f32: pass={} shapes={} rig={}",
                     cert.pass, cert.results.len(), cert.rig
                 );
-                return Ok(());
+                Ok(())
             }
             "scale_f32" => {
                 use flambeau_bench::sweep_f32_pointwise::run_scale_sweep;
@@ -443,7 +490,7 @@ fn sweep(arch: &str, op: Option<&str>, dtype: &str) -> Result<()> {
                     "sweep scale_f32: pass={} shapes={} rig={}",
                     cert.pass, cert.results.len(), cert.rig
                 );
-                return Ok(());
+                Ok(())
             }
             "rmsnorm_f32" => {
                 use flambeau_bench::sweep_f32_pointwise::run_rmsnorm_f32_sweep;
@@ -453,7 +500,7 @@ fn sweep(arch: &str, op: Option<&str>, dtype: &str) -> Result<()> {
                     "sweep rmsnorm_f32: pass={} shapes={} rig={}",
                     cert.pass, cert.results.len(), cert.rig
                 );
-                return Ok(());
+                Ok(())
             }
             "gdn_alpha_beta" => {
                 use flambeau_bench::sweep_f32_pointwise::run_gdn_alpha_beta_sweep;
@@ -463,7 +510,7 @@ fn sweep(arch: &str, op: Option<&str>, dtype: &str) -> Result<()> {
                     "sweep gdn_alpha_beta: pass={} shapes={} rig={}",
                     cert.pass, cert.results.len(), cert.rig
                 );
-                return Ok(());
+                Ok(())
             }
             "quantize_f16_q8_1" => {
                 use flambeau_bench::sweep_f32_pointwise::run_quantize_f16_q8_1_sweep;
@@ -473,7 +520,7 @@ fn sweep(arch: &str, op: Option<&str>, dtype: &str) -> Result<()> {
                     "sweep quantize_f16_q8_1: pass={} shapes={} rig={}",
                     cert.pass, cert.results.len(), cert.rig
                 );
-                return Ok(());
+                Ok(())
             }
             "dense_gemv_f32_f16" => {
                 use flambeau_bench::sweep_f32_pointwise::run_dense_gemv_sweep;
@@ -483,7 +530,7 @@ fn sweep(arch: &str, op: Option<&str>, dtype: &str) -> Result<()> {
                     "sweep dense_gemv_f32_f16: pass={} shapes={} rig={}",
                     cert.pass, cert.results.len(), cert.rig
                 );
-                return Ok(());
+                Ok(())
             }
             "add_f16" => {
                 use flambeau_bench::sweep_f32_pointwise::run_add_f16_sweep;
@@ -493,7 +540,7 @@ fn sweep(arch: &str, op: Option<&str>, dtype: &str) -> Result<()> {
                     "sweep add_f16: pass={} shapes={} rig={}",
                     cert.pass, cert.results.len(), cert.rig
                 );
-                return Ok(());
+                Ok(())
             }
             "peer_copy_via_host" => {
                 use flambeau_bench::sweep_peer_copy::run_sweep;
@@ -503,7 +550,7 @@ fn sweep(arch: &str, op: Option<&str>, dtype: &str) -> Result<()> {
                     "sweep peer_copy_via_host: pass={} shapes={} rig={}",
                     cert.pass, cert.results.len(), cert.rig
                 );
-                return Ok(());
+                Ok(())
             }
             "shared_expert_scale" => {
                 use flambeau_bench::sweep_shared_expert::run_sweep;
@@ -513,7 +560,7 @@ fn sweep(arch: &str, op: Option<&str>, dtype: &str) -> Result<()> {
                     "sweep shared_expert_scale: pass={} shapes={} rig={}",
                     cert.pass, cert.results.len(), cert.rig
                 );
-                return Ok(());
+                Ok(())
             }
             "split_q_gate" => {
                 use flambeau_bench::sweep_split_q_gate::run_sweep;
@@ -523,7 +570,7 @@ fn sweep(arch: &str, op: Option<&str>, dtype: &str) -> Result<()> {
                     "sweep split_q_gate: pass={} shapes={} rig={}",
                     cert.pass, cert.results.len(), cert.rig
                 );
-                return Ok(());
+                Ok(())
             }
             "softmax" => {
                 use flambeau_bench::sweep_softmax::run_sweep;
@@ -533,7 +580,7 @@ fn sweep(arch: &str, op: Option<&str>, dtype: &str) -> Result<()> {
                     "sweep softmax: pass={} shapes={} rig={}",
                     cert.pass, cert.results.len(), cert.rig
                 );
-                return Ok(());
+                Ok(())
             }
             "attention_decode" => {
                 use flambeau_bench::sweep_attention::run_sweep;
@@ -543,7 +590,7 @@ fn sweep(arch: &str, op: Option<&str>, dtype: &str) -> Result<()> {
                     "sweep attention_decode: pass={} shapes={} rig={}",
                     cert.pass, cert.results.len(), cert.rig
                 );
-                return Ok(());
+                Ok(())
             }
             "attention_prefill" => {
                 use flambeau_bench::sweep_attention_prefill::run_sweep;
@@ -553,7 +600,7 @@ fn sweep(arch: &str, op: Option<&str>, dtype: &str) -> Result<()> {
                     "sweep attention_prefill: pass={} shapes={} rig={}",
                     cert.pass, cert.results.len(), cert.rig
                 );
-                return Ok(());
+                Ok(())
             }
             "attention_decode_q8_kv" => {
                 use flambeau_bench::sweep_attention_q8_kv::run_sweep;
@@ -563,7 +610,7 @@ fn sweep(arch: &str, op: Option<&str>, dtype: &str) -> Result<()> {
                     "sweep attention_decode_q8_kv: pass={} shapes={} rig={}",
                     cert.pass, cert.results.len(), cert.rig
                 );
-                return Ok(());
+                Ok(())
             }
             "topk" => {
                 use flambeau_bench::sweep_moe::run_topk_sweep;
@@ -573,7 +620,7 @@ fn sweep(arch: &str, op: Option<&str>, dtype: &str) -> Result<()> {
                     "sweep topk: pass={} shapes={} rig={}",
                     cert.pass, cert.results.len(), cert.rig
                 );
-                return Ok(());
+                Ok(())
             }
             "indexed_moe_mmvq" => {
                 use flambeau_bench::sweep_moe::run_indexed_moe_mmvq_sweep;
@@ -583,7 +630,7 @@ fn sweep(arch: &str, op: Option<&str>, dtype: &str) -> Result<()> {
                     "sweep indexed_moe_mmvq: pass={} shapes={} rig={}",
                     cert.pass, cert.results.len(), cert.rig
                 );
-                return Ok(());
+                Ok(())
             }
             "moe_combine" => {
                 use flambeau_bench::sweep_moe::run_moe_combine_sweep;
@@ -593,7 +640,7 @@ fn sweep(arch: &str, op: Option<&str>, dtype: &str) -> Result<()> {
                     "sweep moe_combine: pass={} shapes={} rig={}",
                     cert.pass, cert.results.len(), cert.rig
                 );
-                return Ok(());
+                Ok(())
             }
             "indexed_moe_mmvq_gate_up" => {
                 use flambeau_bench::sweep_moe::run_gate_up_sweep;
@@ -603,7 +650,7 @@ fn sweep(arch: &str, op: Option<&str>, dtype: &str) -> Result<()> {
                     "sweep indexed_moe_mmvq_gate_up: pass={} shapes={} rig={}",
                     cert.pass, cert.results.len(), cert.rig
                 );
-                return Ok(());
+                Ok(())
             }
             "indexed_moe_mmvq_r2" => {
                 use flambeau_bench::sweep_moe::run_indexed_moe_mmvq_r2_sweep;
@@ -613,7 +660,7 @@ fn sweep(arch: &str, op: Option<&str>, dtype: &str) -> Result<()> {
                     "sweep indexed_moe_mmvq_r2: pass={} shapes={} rig={}",
                     cert.pass, cert.results.len(), cert.rig
                 );
-                return Ok(());
+                Ok(())
             }
             "indexed_moe_mmvq_q6_k" => {
                 use flambeau_bench::sweep_moe::run_indexed_moe_mmvq_q6_k_sweep;
@@ -623,7 +670,7 @@ fn sweep(arch: &str, op: Option<&str>, dtype: &str) -> Result<()> {
                     "sweep indexed_moe_mmvq_q6_k: pass={} shapes={} rig={}",
                     cert.pass, cert.results.len(), cert.rig
                 );
-                return Ok(());
+                Ok(())
             }
             "indexed_moe_mmq" => {
                 use flambeau_bench::sweep_moe::run_indexed_moe_mmq_sweep;
@@ -633,7 +680,7 @@ fn sweep(arch: &str, op: Option<&str>, dtype: &str) -> Result<()> {
                     "sweep indexed_moe_mmq: pass={} shapes={} rig={}",
                     cert.pass, cert.results.len(), cert.rig
                 );
-                return Ok(());
+                Ok(())
             }
             other => anyhow::bail!("unknown --op {other} (qmatmul | qmatmul_mmq | rmsnorm)"),
         }
@@ -650,7 +697,7 @@ fn pmc_probe(kernel: &str, m: usize, k: usize, n: usize) -> Result<()> {
     {
         let entry = flambeau_bench::pmc_probe::run_one(kernel, m, k, n)?;
         println!("probe ok: entry={entry} m={m} k={k} n={n}");
-        return Ok(());
+        Ok(())
     }
     #[cfg(not(feature = "hip_sweep"))]
     {
@@ -695,6 +742,11 @@ fn pmc_refresh(arch: &str) -> Result<()> {
             ("qmatmul_q6_K_mmvq_nw1_r4_gfx906", "mmvq_q6_k_r4", 1, 2048, 64),
             ("qmatmul_q8_0_mmq_oracle_gfx906", "mmq_q8_0_oracle", 8, 2048, 64),
             ("qmatmul_q8_0_mmq_4warp_lds_gfx906", "mmq_q8_0_4warp", 128, 2048, 64),
+            ("qmatmul_q8_0_mmq_wave64_gfx906", "mmq_q8_0_wave64", 128, 2048, 4096),
+            ("qmatmul_q4_1_mmq_4warp_lds_gfx906", "mmq_q4_1_4warp_lds", 128, 2048, 4096),
+            ("qmatmul_q4_K_mmq_wave64_gfx906", "mmq_q4_K_wave64", 128, 2048, 4096),
+            ("qmatmul_q5_K_mmq_wave64_gfx906", "mmq_q5_K_wave64", 128, 2048, 4096),
+            ("qmatmul_q6_K_mmq_wave64_gfx906", "mmq_q6_K_wave64", 128, 2048, 4096),
         ];
 
         for &(impl_id, stem, m, k, n) in targets {
@@ -741,7 +793,7 @@ fn pmc_refresh(arch: &str) -> Result<()> {
                 pmc.valu_busy_pct,
             );
         }
-        return Ok(());
+        Ok(())
     }
     #[cfg(not(feature = "hip_sweep"))]
     {
@@ -762,6 +814,11 @@ fn kernel_entry(stem: &str) -> Result<&'static str> {
         "mmvq_q6_k_r4" => "flambeau_mmvq_q6_k_r4_q8_1",
         "mmq_q8_0_oracle" => "flambeau_mmq_q8_0_oracle_q8_1",
         "mmq_q8_0_4warp" => "flambeau_mmq_q8_0_4warp_q8_1",
+        "mmq_q8_0_wave64" => "flambeau_mmq_q8_0_wave64_q8_1",
+        "mmq_q4_1_4warp_lds" => "flambeau_mmq_q4_1_4warp_lds_q8_1",
+        "mmq_q4_K_wave64" => "flambeau_mmq_q4_K_wave64_q8_1",
+        "mmq_q5_K_wave64" => "flambeau_mmq_q5_K_wave64_q8_1",
+        "mmq_q6_K_wave64" => "flambeau_mmq_q6_K_wave64_q8_1",
         other => anyhow::bail!("unknown kernel stem {other}"),
     })
 }

@@ -177,11 +177,12 @@ fn forward_router_then_moe_smoke() -> Result<()> {
         alloc_q4k_experts(&device, "blk.0.ffn_down_exps.weight", n_experts, hidden, inter)?;
 
     let ffn = FfnWeights {
-        ffn_gate_inp: gate_inp.clone(),
-        ffn_gate_exps: gate_exps.clone(),
-        ffn_up_exps: up_exps.clone(),
-        ffn_down_exps: down_exps.clone(),
+        ffn_gate_inp: Some(gate_inp.clone()),
+        ffn_gate_exps: Some(gate_exps.clone()),
+        ffn_up_exps: Some(up_exps.clone()),
+        ffn_down_exps: Some(down_exps.clone()),
         shared: None,
+        dense: None,
     };
 
     let mut scratch = MoeScratch::new(&cfg, &device)?;
@@ -216,7 +217,7 @@ fn forward_router_then_moe_smoke() -> Result<()> {
     stream.synchronize()?;
 
     // 1. Router.
-    forward_router_decode(&ops, stream, &cfg, &ffn.ffn_gate_inp, &mut scratch, d_x)?;
+    forward_router_decode(&ops, stream, &cfg, ffn.ffn_gate_inp.as_ref().unwrap(), &mut scratch, d_x)?;
 
     // Read back expert_ids + weights and sanity check.
     let mut ids_host = vec![0i32; top_k];

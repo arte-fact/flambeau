@@ -1,3 +1,5 @@
+// Model forward fns legitimately take many args (weights + scratch + config).
+#![allow(clippy::too_many_arguments)]
 //! flambeau-qwen3-moe — Qwen3.x MoE family composition.
 //!
 //! V1.7 target: `Qwen3MoEModel` with `forward_one_token` and `forward_prefill`,

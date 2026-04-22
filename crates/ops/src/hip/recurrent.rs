@@ -87,12 +87,19 @@ pub fn gdn_state_step_f32_s128(
     Ok(())
 }
 
-/// Fused GDN α/β/gate compute over `[num_v_heads]` F32 elements:
-///   gate_out[i] = softplus(alpha_in[i] + ssm_dt_bias[i]) * ssm_a[i]
-///   beta_out[i] = sigmoid(beta_in[i])
+/// Fused GDN α/β/gate compute over `n_tokens × num_v_heads` F32 elements:
+///   gate_out[t, i] = softplus(alpha_in[t, i] + ssm_dt_bias[i]) * ssm_a[i]
+///   beta_out[t, i] = sigmoid(beta_in[t, i])
 ///
-/// Replaces V1.7.3-c2's host-roundtrip placeholder. One block of 64 threads
-/// covers Qwen3.6's `num_v_heads = 32`.
+/// Per-head constants `ssm_dt_bias` and `ssm_a` are shared across all
+/// `n_tokens` rows. Grid = `(n_tokens, 1, 1)`, block = `(num_v_heads,
+/// 1, 1)`. For decode `n_tokens = 1`; for prefill `n_tokens = L`.
+///
+/// V2.2.d fix 3: batched across tokens in one launch. Previously the
+/// caller looped L times at one-token-per-launch; at pp512 × 16 GDN
+/// layers that fired 12k tiny launches dominated by argument
+/// marshalling (profile 2026-04-22: ~50 ms in the kernel + ~150 ms
+/// rocclr_copyBuffer overhead).
 #[allow(clippy::too_many_arguments)]
 pub fn gdn_alpha_beta_f32(
     reg: &OpsRegistry,
@@ -103,11 +110,18 @@ pub fn gdn_alpha_beta_f32(
     ssm_a: DevicePtr,
     gate_out: DevicePtr,
     beta_out: DevicePtr,
-    n: usize,
+    num_v_heads: usize,
+    n_tokens: usize,
 ) -> Result<()> {
+    assert!(n_tokens >= 1, "gdn_alpha_beta_f32 needs n_tokens >= 1");
+    assert!(
+        num_v_heads <= 1024,
+        "gdn_alpha_beta_f32 expects num_v_heads <= block-size cap 1024"
+    );
     let module = reg.expect_module("gdn_alpha_beta_f32")?;
     let kernel = module.kernel("flambeau_gdn_alpha_beta_f32")?;
-    let n_i = n as i32;
+    let num_v_i = num_v_heads as i32;
+    let n_tokens_i = n_tokens as i32;
     let a_ptr: u64 = alpha_in.as_usize() as u64;
     let b_ptr: u64 = beta_in.as_usize() as u64;
     let dt_ptr: u64 = ssm_dt_bias.as_usize() as u64;
@@ -121,8 +135,53 @@ pub fn gdn_alpha_beta_f32(
     args.push(&sa_ptr);
     args.push(&g_ptr);
     args.push(&bo_ptr);
-    args.push(&n_i);
-    let cfg = LaunchCfg::one_d((n as u32).div_ceil(64), 64);
+    args.push(&num_v_i);
+    args.push(&n_tokens_i);
+    let cfg = LaunchCfg {
+        grid: (n_tokens as u32, 1, 1),
+        block: (num_v_heads as u32, 1, 1),
+        shared_bytes: 0,
+    };
+    unsafe { kernel.launch(stream, cfg, args)? };
+    Ok(())
+}
+
+/// V2.4.d fused split: replaces the 3×L DtoD memcpy loop in
+/// `forward.rs::gather_qkv_strided`. Reads one row of silu_out per token
+/// and strided-writes into q_out / k_out / v_out.
+pub fn gdn_split_qkv_f32(
+    reg: &OpsRegistry,
+    stream: &HipStream,
+    silu_out: DevicePtr,
+    q_out: DevicePtr,
+    k_out: DevicePtr,
+    v_out: DevicePtr,
+    n_tokens: usize,
+    qk_size: usize,
+    v_size: usize,
+) -> Result<()> {
+    let module = reg.expect_module("gdn_split_qkv_f32")?;
+    let kernel = module.kernel("flambeau_gdn_split_qkv_f32")?;
+    let conv_channels = 2 * qk_size + v_size;
+    let total = n_tokens * conv_channels;
+    let s_ptr: u64 = silu_out.as_usize() as u64;
+    let q_ptr: u64 = q_out.as_usize() as u64;
+    let k_ptr: u64 = k_out.as_usize() as u64;
+    let v_ptr: u64 = v_out.as_usize() as u64;
+    let n_tokens_i = n_tokens as i32;
+    let qk_i = qk_size as i32;
+    let v_i = v_size as i32;
+    let mut args = KernelArgs::new();
+    args.push(&s_ptr);
+    args.push(&q_ptr);
+    args.push(&k_ptr);
+    args.push(&v_ptr);
+    args.push(&n_tokens_i);
+    args.push(&qk_i);
+    args.push(&v_i);
+    const BLOCK: u32 = 256;
+    let grid = (total as u32).div_ceil(BLOCK);
+    let cfg = LaunchCfg::one_d(grid, BLOCK);
     unsafe { kernel.launch(stream, cfg, args)? };
     Ok(())
 }

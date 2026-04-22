@@ -450,11 +450,12 @@ fn build_ffn_weights(
     };
 
     Ok(FfnWeights {
-        ffn_gate_inp: gate_inp,
-        ffn_gate_exps: gate_exps,
-        ffn_up_exps: up_exps,
-        ffn_down_exps: down_exps,
+        ffn_gate_inp: Some(gate_inp),
+        ffn_gate_exps: Some(gate_exps),
+        ffn_up_exps: Some(up_exps),
+        ffn_down_exps: Some(down_exps),
         shared: Some(shared),
+        dense: None,
     })
 }
 

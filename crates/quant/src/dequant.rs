@@ -421,8 +421,8 @@ mod tests {
         }
         let mut out = vec![0.0f32; QK8_0];
         dequant_q8_0(&[block], &mut out);
-        for i in 0..QK8_0 {
-            assert_eq!(out[i], (i as i8 - 16) as f32);
+        for (i, &v) in out.iter().enumerate() {
+            assert_eq!(v, (i as i8 - 16) as f32);
         }
     }
 
@@ -459,8 +459,8 @@ mod tests {
         }
         let mut out = vec![0.0f32; QK_K];
         dequant_q8_k(&[block], &mut out);
-        for i in 0..QK_K {
-            assert_eq!(out[i], 0.25 * (i as i32 - 128) as f32);
+        for (i, &v) in out.iter().enumerate() {
+            assert_eq!(v, 0.25 * (i as i32 - 128) as f32);
         }
     }
 

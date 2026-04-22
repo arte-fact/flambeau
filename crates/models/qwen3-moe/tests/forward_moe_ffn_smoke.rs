@@ -171,11 +171,12 @@ fn forward_moe_ffn_decode_smoke() -> Result<()> {
     let gate_inp = alloc_f32_vec(&device, "blk.0.ffn_gate_inp.weight", &gate_inp_host)?;
 
     let ffn = FfnWeights {
-        ffn_gate_inp: gate_inp.clone(),
-        ffn_gate_exps: gate_w.clone(),
-        ffn_up_exps: up_w.clone(),
-        ffn_down_exps: down_w.clone(),
+        ffn_gate_inp: Some(gate_inp.clone()),
+        ffn_gate_exps: Some(gate_w.clone()),
+        ffn_up_exps: Some(up_w.clone()),
+        ffn_down_exps: Some(down_w.clone()),
         shared: None,
+        dense: None,
     };
 
     let mut scratch = MoeScratch::new(&cfg, &device)?;

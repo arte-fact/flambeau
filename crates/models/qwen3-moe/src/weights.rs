@@ -1,3 +1,8 @@
+// The `.map(|t| upload(t))` pattern is deliberate: it passes a single-use
+// closure into `Option::map` while keeping the `FnMut` borrow structure
+// explicit. Clippy's `.map(&mut upload)` suggestion works but is one more
+// reborrow dance to read in a dozen adjacent sites.
+#![allow(clippy::redundant_closure)]
 //! Device-resident weight tensors for a Qwen3.x MoE model.
 //!
 //! Upload path: [`ModelWeights::upload`] walks a [`ModelLayout`] and
@@ -104,12 +109,23 @@ pub struct SharedExpertWeights {
 }
 
 #[derive(Debug, Clone)]
+pub struct DenseFfnWeights {
+    pub ffn_gate: DeviceTensor,
+    pub ffn_up: DeviceTensor,
+    pub ffn_down: DeviceTensor,
+}
+
+/// Per-layer FFN weights. Mirrors [`MoeFfnTensors`] — mutually exclusive
+/// MoE vs dense branches, picked by `cfg.is_dense_ffn()`. MoE fields are
+/// `Some` iff `dense.is_none()` and vice versa.
+#[derive(Debug, Clone)]
 pub struct FfnWeights {
-    pub ffn_gate_inp: DeviceTensor,
-    pub ffn_gate_exps: DeviceTensor,
-    pub ffn_up_exps: DeviceTensor,
-    pub ffn_down_exps: DeviceTensor,
+    pub ffn_gate_inp: Option<DeviceTensor>,
+    pub ffn_gate_exps: Option<DeviceTensor>,
+    pub ffn_up_exps: Option<DeviceTensor>,
+    pub ffn_down_exps: Option<DeviceTensor>,
     pub shared: Option<SharedExpertWeights>,
+    pub dense: Option<DenseFfnWeights>,
 }
 
 #[derive(Debug, Clone)]
@@ -365,15 +381,20 @@ impl ModelWeights {
                     }
                 }
             }
-            v.push(&mut l.ffn.ffn_gate_inp);
-            v.push(&mut l.ffn.ffn_gate_exps);
-            v.push(&mut l.ffn.ffn_up_exps);
-            v.push(&mut l.ffn.ffn_down_exps);
+            if let Some(t) = &mut l.ffn.ffn_gate_inp { v.push(t); }
+            if let Some(t) = &mut l.ffn.ffn_gate_exps { v.push(t); }
+            if let Some(t) = &mut l.ffn.ffn_up_exps { v.push(t); }
+            if let Some(t) = &mut l.ffn.ffn_down_exps { v.push(t); }
             if let Some(s) = &mut l.ffn.shared {
                 v.push(&mut s.ffn_gate_inp_shexp);
                 v.push(&mut s.ffn_gate_shexp);
                 v.push(&mut s.ffn_up_shexp);
                 v.push(&mut s.ffn_down_shexp);
+            }
+            if let Some(d) = &mut l.ffn.dense {
+                v.push(&mut d.ffn_gate);
+                v.push(&mut d.ffn_up);
+                v.push(&mut d.ffn_down);
             }
         }
         v.into_iter()
@@ -431,10 +452,15 @@ fn layer_iter(l: &LayerWeights) -> Vec<&DeviceTensor> {
             );
         }
     }
-    v.push(&l.ffn.ffn_gate_inp);
-    v.push(&l.ffn.ffn_gate_exps);
-    v.push(&l.ffn.ffn_up_exps);
-    v.push(&l.ffn.ffn_down_exps);
+    if let Some(t) = &l.ffn.ffn_gate_inp { v.push(t); }
+    if let Some(t) = &l.ffn.ffn_gate_exps { v.push(t); }
+    if let Some(t) = &l.ffn.ffn_up_exps { v.push(t); }
+    if let Some(t) = &l.ffn.ffn_down_exps { v.push(t); }
+    if let Some(d) = &l.ffn.dense {
+        v.push(&d.ffn_gate);
+        v.push(&d.ffn_up);
+        v.push(&d.ffn_down);
+    }
     if let Some(s) = &l.ffn.shared {
         v.extend([
             &s.ffn_gate_inp_shexp,
@@ -543,12 +569,24 @@ fn upload_ffn<F>(f: &MoeFfnTensors, upload: &mut F) -> Result<FfnWeights>
 where
     F: FnMut(&ResolvedTensor) -> Result<DeviceTensor>,
 {
+    let dense = f
+        .dense
+        .as_ref()
+        .map(|d| -> Result<DenseFfnWeights> {
+            Ok(DenseFfnWeights {
+                ffn_gate: upload(&d.ffn_gate)?,
+                ffn_up: upload(&d.ffn_up)?,
+                ffn_down: upload(&d.ffn_down)?,
+            })
+        })
+        .transpose()?;
     Ok(FfnWeights {
-        ffn_gate_inp: upload(&f.ffn_gate_inp)?,
-        ffn_gate_exps: upload(&f.ffn_gate_exps)?,
-        ffn_up_exps: upload(&f.ffn_up_exps)?,
-        ffn_down_exps: upload(&f.ffn_down_exps)?,
+        ffn_gate_inp: f.ffn_gate_inp.as_ref().map(|t| upload(t)).transpose()?,
+        ffn_gate_exps: f.ffn_gate_exps.as_ref().map(|t| upload(t)).transpose()?,
+        ffn_up_exps: f.ffn_up_exps.as_ref().map(|t| upload(t)).transpose()?,
+        ffn_down_exps: f.ffn_down_exps.as_ref().map(|t| upload(t)).transpose()?,
         shared: f.shared.as_ref().map(|s| upload_shared(s, upload)).transpose()?,
+        dense,
     })
 }
 

@@ -217,7 +217,7 @@ fn seeded_f32(seed: u64, n: usize) -> Vec<f32> {
             s = s.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
             let u = (s >> 32) as u32;
             // Attention scores are typically small — keep inputs bounded.
-            ((u as f32 / u32::MAX as f32) * 4.0 - 2.0)
+            (u as f32 / u32::MAX as f32) * 4.0 - 2.0
         })
         .collect()
 }

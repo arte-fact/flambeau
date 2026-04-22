@@ -79,6 +79,16 @@ pub struct GdnNames {
     pub ssm_out: String,
 }
 
+/// Dense FFN names — single gate/up/down triple per layer. Used by
+/// `arch=qwen35` (Qwen3.5 dense-hybrid: GDN + full-attn + dense FFN).
+/// For MoE arches (`qwen35moe`/`qwen36moe`) see `MoeFfnNames`.
+#[derive(Debug, Clone)]
+pub struct DenseFfnNames {
+    pub ffn_gate: String,
+    pub ffn_up: String,
+    pub ffn_down: String,
+}
+
 /// MoE FFN names — always routed experts; optional shared-expert path on
 /// hybrid arches.
 #[derive(Debug, Clone)]
@@ -163,6 +173,17 @@ impl GdnNames {
     }
 }
 
+impl DenseFfnNames {
+    pub fn for_layer(layer: usize) -> Self {
+        let prefix = format!("blk.{layer}");
+        Self {
+            ffn_gate: format!("{prefix}.ffn_gate.weight"),
+            ffn_up: format!("{prefix}.ffn_up.weight"),
+            ffn_down: format!("{prefix}.ffn_down.weight"),
+        }
+    }
+}
+
 impl MoeFfnNames {
     pub fn for_layer(layer: usize) -> Self {
         let prefix = format!("blk.{layer}");
@@ -217,6 +238,14 @@ mod tests {
         assert_eq!(g.ssm_conv1d, "blk.7.ssm_conv1d.weight");
         assert_eq!(g.ssm_dt_bias, "blk.7.ssm_dt.bias");
         assert_eq!(g.ssm_a, "blk.7.ssm_a");
+    }
+
+    #[test]
+    fn dense_ffn_names_follow_llama_cpp_convention() {
+        let d = DenseFfnNames::for_layer(5);
+        assert_eq!(d.ffn_gate, "blk.5.ffn_gate.weight");
+        assert_eq!(d.ffn_up, "blk.5.ffn_up.weight");
+        assert_eq!(d.ffn_down, "blk.5.ffn_down.weight");
     }
 
     #[test]

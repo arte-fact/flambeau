@@ -154,11 +154,10 @@ pub fn load_from_gguf(file: &GgufFile) -> Result<GgufTokenizer> {
     // Sweep vocab for `<|...|>` bracket-style control tokens.
     for (id, v) in tokens_arr.iter().enumerate() {
         if let Some(s) = v.as_str() {
-            if s.starts_with("<|") && s.ends_with("|>") && s.len() <= 32 {
-                if added_ids.insert(id as u32) {
+            if s.starts_with("<|") && s.ends_with("|>") && s.len() <= 32
+                && added_ids.insert(id as u32) {
                     added.push(AddedToken::from(s.to_owned(), /*special=*/ true));
                 }
-            }
         }
     }
     if !added.is_empty() {

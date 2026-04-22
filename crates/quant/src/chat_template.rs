@@ -80,7 +80,7 @@ impl ChatTemplate {
                 // path (no <think>...</think> blocks). Flip for reasoning mode.
                 enable_thinking => false,
                 // Vision/tool calls disabled on the server-level V1 slice.
-                tools => MjValue::from_serialize(&Vec::<String>::new()),
+                tools => MjValue::from_serialize(Vec::<String>::new()),
             })
             .map_err(|e| anyhow!("minijinja render: {e}"))?;
         Ok(rendered)

@@ -7,6 +7,11 @@
 //!
 //! Matrix / PMC / dispatch-A/B land in V1.4+ on the same scaffolding.
 
+// Kernel sweep harnesses legitimately take many arguments (device + kernel
+// handles + shape scalars + seed). Silencing the style lint crate-wide is
+// simpler than annotating every `run_*_shape` function.
+#![allow(clippy::too_many_arguments)]
+
 pub mod cert;
 pub mod dispatch;
 pub mod pmc;
@@ -16,6 +21,9 @@ pub mod sweep_mmvq;
 
 #[cfg(feature = "hip")]
 pub mod sweep_mmq;
+
+#[cfg(feature = "hip")]
+pub mod sweep_quantize_q8_1_mmq;
 
 #[cfg(feature = "hip")]
 pub mod pmc_probe;

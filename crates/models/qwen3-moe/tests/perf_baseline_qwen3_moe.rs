@@ -115,10 +115,23 @@ fn perf_baseline_qwen3_moe_mesh_all() -> Result<()> {
 
     let mut results: Vec<(String, usize, f64, f64)> = Vec::new();
 
+    // Profiling modes:
+    //   FLAMBEAU_PREFILL_ONLY=1  — only run prefill-grid loop, skip decode
+    //   FLAMBEAU_PREFILL_L=<N>   — restrict prefill-grid to a single L
+    let prefill_only = std::env::var("FLAMBEAU_PREFILL_ONLY").is_ok();
+    let prefill_single_l: Option<usize> = std::env::var("FLAMBEAU_PREFILL_L")
+        .ok()
+        .and_then(|s| s.parse().ok());
+    let prefill_grid: Vec<usize> = match prefill_single_l {
+        Some(l) => vec![l],
+        None => vec![8, 64, 128, 512, 1024],
+    };
+
     // Prefill throughput at a few chunk sizes. Each run is a fresh session
     // (KV/GDN state starts zeroed) so per-L numbers aren't cross-contaminated
     // by history length effects.
-    for &l in &[8usize, 64, 128, 512] {
+    for l in &prefill_grid {
+        let l = *l;
         let mut session = Qwen3MoEShardedSession::new(&model, &cluster)?;
         let mut scratch = ShardedForwardPrefillScratch::new(&model, &cluster, l)?;
         let tokens: Vec<u32> = (0..l as u32).map(|i| (1 + i * 37) % 151000).collect();
@@ -141,6 +154,13 @@ fn perf_baseline_qwen3_moe_mesh_all() -> Result<()> {
         session.dispose(&cluster)?;
     }
 
+    if prefill_only {
+        // Skip decode in profiling mode.
+        model.dispose(&cluster)?;
+        cluster.dispose()?;
+        return Ok(());
+    }
+
     // Decode throughput: prefill 1 token, then N decode steps feeding the
     // argmax back. Matches how `flambeau serve` will run.
     for &tg in &[64usize] {
@@ -159,8 +179,22 @@ fn perf_baseline_qwen3_moe_mesh_all() -> Result<()> {
         )?;
 
         let mut next = seed;
+        // Warm GPU out of idle DPM state before timing — first 8-16 decode
+        // steps after `session.new()` can be up to 2× slower while clocks
+        // ramp. 16-step warmup eliminates that.
+        let warmup = 16usize;
+        for step in 0..warmup {
+            next = forward_one_token_pp(
+                &model,
+                &mut session,
+                &cluster,
+                &mut decode_scratch,
+                next,
+                /*position=*/ 1 + step,
+            )?;
+        }
         let t0 = Instant::now();
-        for step in 0..tg {
+        for step in warmup..(warmup + tg) {
             next = forward_one_token_pp(
                 &model,
                 &mut session,
@@ -204,10 +238,7 @@ fn perf_baseline_qwen3_moe_mesh_all() -> Result<()> {
                 "tok_per_sec": tps,
             })
         }).collect::<Vec<_>>(),
-        "notes": "V1.7.6 baseline. Per-L prefill numbers are fresh-session \
-                 (no history); decode is 1-token prefill + N greedy steps. \
-                 tok/s excludes load time. Regenerate: \
-                 `FLAMBEAU_QWEN3_GGUF=... cargo test --release -p flambeau-qwen3-moe --features hip --test perf_baseline_qwen3_moe -- --nocapture`",
+        "notes": "V2.10.b (Q4_K gate_up_tile8 inline-accumulator refactor — Scratch 156 → 48 B, kernel −15.5 %; V2.9.b down kernels at (64, 2)). Per-L prefill numbers are fresh-session (no history); decode is 1-token prefill + N greedy steps. tok/s excludes load time. Regenerate: `FLAMBEAU_QWEN3_GGUF=... cargo test --release -p flambeau-qwen3-moe --features hip --test perf_baseline_qwen3_moe -- --nocapture`",
     });
     std::fs::write(&out_path, serde_json::to_string_pretty(&json)? + "\n")?;
     eprintln!("wrote snapshot → {}", out_path.display());
