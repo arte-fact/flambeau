@@ -525,6 +525,7 @@ dependencies = [
  "byteorder",
  "flambeau-core",
  "half",
+ "libc",
  "memmap2",
  "minijinja",
  "minijinja-contrib",

@@ -18,6 +18,7 @@ serde_json.workspace = true
 minijinja.workspace = true
 minijinja-contrib = { version = "2", features = ["pycompat"] }
 serde = { workspace = true, features = ["derive"] }
+libc = "0.2"
 
 [dev-dependencies]
 byteorder.workspace = true

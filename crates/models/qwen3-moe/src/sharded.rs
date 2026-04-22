@@ -471,6 +471,22 @@ fn upload_one(
     r: &ResolvedTensor,
     device: &HipDevice,
 ) -> Result<(DeviceTensor, usize)> {
+    if std::env::var("FLAMBEAU_LOAD_TRACE").is_ok() {
+        let t0 = std::time::Instant::now();
+        let out = upload_one_inner(file, r, device);
+        eprintln!("  [load] upload_one {:<50} {:?} {:>7.1} MB {:>6.1} ms",
+            r.name, r.dtype, r.size_bytes as f64 / 1e6,
+            t0.elapsed().as_secs_f64() * 1000.0);
+        return out;
+    }
+    upload_one_inner(file, r, device)
+}
+
+fn upload_one_inner(
+    file: &GgufFile,
+    r: &ResolvedTensor,
+    device: &HipDevice,
+) -> Result<(DeviceTensor, usize)> {
     let bytes = r.size_bytes as usize;
     let raw = file
         .tensor_raw(&r.name)
@@ -499,6 +515,14 @@ fn upload_one(
             )
             .map_err(|e| anyhow::anyhow!("memcpy `{}`: {e}", r.name))?;
     }
+    // V2.17: sync after every tensor to prevent HIP queue backlog on
+    // large loads. `upload_one` stays non-munmapping by default so it's
+    // safe for tensors shared across ranks (token_embd, output_norm,
+    // output — the last rank reads them AFTER rank 0 uploads them).
+    // Per-layer uploads go through `upload_one_and_drop` which also calls
+    // `file.advise_drop_tensor` (munmap) to keep page cache under RAM.
+    device.default_stream().synchronize()
+        .map_err(|e| anyhow::anyhow!("stream sync after `{}`: {e}", r.name))?;
     Ok((
         DeviceTensor {
             ptr,
@@ -564,6 +588,12 @@ fn upload_as_f16(
     }
     device.default_stream().synchronize()?;
     drop(host);
+    // Same drop-only-for-layer-private rule as upload_one; safe to drop here
+    // because upload_as_f16 is called for per-layer norms + the global
+    // output_norm, but output_norm is only uploaded by is_last rank, no
+    // sharing conflict. Explicit drop of the staged `host` Vec already frees
+    // the converted buffer; the mmap source pages are released by madvise
+    // in the caller via `up_f16_drop` when appropriate.
     Ok((
         DeviceTensor {
             ptr,
@@ -587,8 +617,24 @@ fn upload_as_q8_0(
     r: &ResolvedTensor,
     device: &HipDevice,
 ) -> Result<(DeviceTensor, usize)> {
+    if std::env::var("FLAMBEAU_LOAD_TRACE").is_ok() {
+        let t0 = std::time::Instant::now();
+        let out = upload_as_q8_0_inner(file, r, device);
+        eprintln!("  [load] as_q8_0    {:<50} {:?} {:>7.1} MB {:>6.1} ms",
+            r.name, r.dtype, r.size_bytes as f64 / 1e6,
+            t0.elapsed().as_secs_f64() * 1000.0);
+        return out;
+    }
+    upload_as_q8_0_inner(file, r, device)
+}
+
+fn upload_as_q8_0_inner(
+    file: &GgufFile,
+    r: &ResolvedTensor,
+    device: &HipDevice,
+) -> Result<(DeviceTensor, usize)> {
     if r.dtype == GgmlDType::Q8_0 {
-        return upload_one(file, r, device);
+        return upload_one_inner(file, r, device);
     }
     if r.dtype != GgmlDType::F32 {
         bail!(
@@ -722,6 +768,12 @@ fn up_raw(
 ) -> Result<DeviceTensor> {
     let (t, b) = upload_one(file, r, device)?;
     *total += b;
+    // V2.17: this helper is called ONLY from per-layer upload paths
+    // (upload_dense / upload_full_attn / upload_gdn / upload_ffn). Each
+    // layer's tensors are uploaded exactly once (by the owning rank) so
+    // it's safe to munmap their mmap ranges here — keeps page cache
+    // under host RAM for GGUFs larger than RAM.
+    file.advise_drop_tensor(&r.name);
     Ok(t)
 }
 
@@ -734,6 +786,7 @@ fn up_f16(
 ) -> Result<DeviceTensor> {
     let (t, b) = upload_as_f16(file, r, device)?;
     *total += b;
+    file.advise_drop_tensor(&r.name);
     Ok(t)
 }
 
@@ -746,6 +799,7 @@ fn up_q8_0(
 ) -> Result<DeviceTensor> {
     let (t, b) = upload_as_q8_0(file, r, device)?;
     *total += b;
+    file.advise_drop_tensor(&r.name);
     Ok(t)
 }
 

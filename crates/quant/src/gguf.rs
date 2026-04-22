@@ -190,6 +190,15 @@ impl GgufFile {
     pub fn open<P: AsRef<Path>>(path: P) -> Result<Self> {
         let path = path.as_ref();
         let file = File::open(path)?;
+        // V2.17: mirror llama.cpp's loader hints. SEQUENTIAL tells the
+        // kernel to prefetch aggressively + evict early pages once we've
+        // moved past them. Combined with per-tensor `munmap` during
+        // loading, this keeps page-cache pressure bounded for GGUFs
+        // larger than host RAM.
+        use std::os::unix::io::AsRawFd;
+        unsafe {
+            libc::posix_fadvise(file.as_raw_fd(), 0, 0, libc::POSIX_FADV_SEQUENTIAL);
+        }
         // SAFETY: we treat the mmap as read-only for the reader's lifetime.
         // A concurrent writer modifying the file would make reads unsafe, but
         // model weights are a cold artefact — callers must not mutate them.
@@ -290,6 +299,53 @@ impl GgufFile {
     pub fn tensor_raw(&self, name: &str) -> Result<&[u8]> {
         let info = self.info(name)?;
         self.raw_for(info, 0, info.size_in_bytes())
+    }
+
+    /// Hint the kernel that the given tensor's mmap range will not be
+    /// re-read (equivalent to `madvise(MADV_DONTNEED)` on just those pages).
+    /// Safe to call even if the tensor doesn't exist — it's a best-effort
+    /// hint. Used by the weight loader to keep page-cache pressure low when
+    /// the GGUF is larger than host RAM: without this, loading Qwen3.6-27B-
+    /// UD-Q8_K_XL (33 GiB) on a 31 GiB box blows up per-tensor transfer
+    /// latency 100× past the RAM watermark.
+    /// Drop the mmap range for this tensor (definitively, via `munmap` —
+    /// same technique llama.cpp's `unmap_fragment` uses; `madvise(DONTNEED)`
+    /// is advisory and does not reliably free page cache on Linux 5.x/6.x).
+    /// Only the page-aligned inner slice is unmapped; partially-used
+    /// boundary pages stay mapped so neighbouring tensors still work.
+    ///
+    /// Safe to call even if the tensor doesn't exist — best-effort hint.
+    /// Caller must have already transferred (and synced) the bytes off to
+    /// GPU. After this, the tensor is no longer accessible via
+    /// `tensor_raw`.
+    pub fn advise_drop_tensor(&self, name: &str) {
+        let Ok(info) = self.info(name) else { return };
+        let abs_start = (self.tensor_data_offset + info.rel_offset) as usize;
+        let byte_len = info.size_in_bytes() as usize;
+        if abs_start + byte_len > self.mmap.len() {
+            return;
+        }
+        // Round START UP to the next page (leave partially-used boundary
+        // pages alone — other tensors may share them). Round END DOWN to
+        // page boundary for the same reason.
+        let page_size = 4096usize;
+        let aligned_start = (abs_start + page_size - 1) & !(page_size - 1);
+        let aligned_end = (abs_start + byte_len) & !(page_size - 1);
+        if aligned_end <= aligned_start {
+            return;
+        }
+        let len = aligned_end - aligned_start;
+        // SAFETY: munmapping a range entirely inside our own mmap. After
+        // this, accessing those bytes via `tensor_raw` would SIGSEGV; the
+        // loader guarantees it's done with this tensor.
+        let rc = unsafe {
+            let addr = self.mmap.as_ptr().add(aligned_start) as *mut libc::c_void;
+            libc::munmap(addr, len)
+        };
+        if rc != 0 && std::env::var("FLAMBEAU_LOAD_TRACE").is_ok() {
+            eprintln!("  [munmap] {} failed: {}", name,
+                std::io::Error::last_os_error());
+        }
     }
 
     /// Zero-copy slice of bytes `[byte_start, byte_start + byte_len)` of
