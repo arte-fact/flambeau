@@ -118,13 +118,27 @@ fn perf_baseline_qwen3_moe_mesh_all() -> Result<()> {
     // Profiling modes:
     //   FLAMBEAU_PREFILL_ONLY=1  — only run prefill-grid loop, skip decode
     //   FLAMBEAU_PREFILL_L=<N>   — restrict prefill-grid to a single L
+    //   FLAMBEAU_TG_LEN=<N>      — override decode length (default 64)
+    //   FLAMBEAU_LONG_TEXT=<N>   — long-text scenario: prefill N tokens, then
+    //                              decode FLAMBEAU_TG_LEN tokens continuing
+    //                              from position N (real chat latency).
+    //                              Disables the prefill grid + short-decode
+    //                              loop.
     let prefill_only = std::env::var("FLAMBEAU_PREFILL_ONLY").is_ok();
     let prefill_single_l: Option<usize> = std::env::var("FLAMBEAU_PREFILL_L")
         .ok()
         .and_then(|s| s.parse().ok());
-    let prefill_grid: Vec<usize> = match prefill_single_l {
-        Some(l) => vec![l],
-        None => vec![8, 64, 128, 512, 1024],
+    let long_text_prompt: Option<usize> = std::env::var("FLAMBEAU_LONG_TEXT")
+        .ok()
+        .and_then(|s| s.parse().ok());
+    let tg_len: usize = std::env::var("FLAMBEAU_TG_LEN")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(64);
+    let prefill_grid: Vec<usize> = match (long_text_prompt, prefill_single_l) {
+        (Some(_), _) => vec![],          // long-text handled below
+        (None, Some(l)) => vec![l],
+        (None, None) => vec![8, 64, 128, 512, 1024],
     };
 
     // Prefill throughput at a few chunk sizes. Each run is a fresh session
@@ -161,9 +175,108 @@ fn perf_baseline_qwen3_moe_mesh_all() -> Result<()> {
         return Ok(());
     }
 
+    // Long-text mode: prefill a big prompt, then decode FLAMBEAU_TG_LEN
+    // tokens CONTINUING from position=prompt_len. Reports TTFT + per-step
+    // decode latency histogram so we can see if decode slows down as the
+    // KV cache fills up (= real chat scenario).
+    if let Some(prompt_len) = long_text_prompt {
+        let mut session = Qwen3MoEShardedSession::new(&model, &cluster)?;
+        let mut prefill_scratch =
+            ShardedForwardPrefillScratch::new(&model, &cluster, prompt_len)?;
+        let mut decode_scratch = ShardedForwardOneTokenScratch::new(&model, &cluster)?;
+
+        let prompt_tokens: Vec<u32> =
+            (0..prompt_len as u32).map(|i| (1 + i * 37) % 151000).collect();
+
+        let t_prefill = Instant::now();
+        let seed = forward_prefill_pp(
+            &model,
+            &mut session,
+            &cluster,
+            &mut prefill_scratch,
+            &prompt_tokens,
+            0,
+        )?;
+        let ttft = t_prefill.elapsed().as_secs_f64();
+        let prefill_tps = prompt_len as f64 / ttft;
+        eprintln!(
+            "  long-text prefill L={prompt_len:<5} TTFT={:.2}s  ({:.2} tok/s)",
+            ttft, prefill_tps
+        );
+
+        // Warm GPU for per-step timing. Warmup decode steps start at
+        // position=prompt_len.
+        let warmup = 16usize;
+        let mut next = seed;
+        for step in 0..warmup {
+            next = forward_one_token_pp(
+                &model,
+                &mut session,
+                &cluster,
+                &mut decode_scratch,
+                next,
+                prompt_len + step,
+            )?;
+        }
+
+        // Timed decode. Record per-step wall-clock so we can see degradation.
+        let mut per_step = Vec::with_capacity(tg_len);
+        for step in 0..tg_len {
+            let t0 = Instant::now();
+            next = forward_one_token_pp(
+                &model,
+                &mut session,
+                &cluster,
+                &mut decode_scratch,
+                next,
+                prompt_len + warmup + step,
+            )?;
+            per_step.push(t0.elapsed().as_secs_f64());
+        }
+        let total_decode: f64 = per_step.iter().sum();
+        let tpot = total_decode / tg_len as f64;
+        let decode_tps = tg_len as f64 / total_decode;
+        eprintln!(
+            "  long-text decode tg={tg_len:<4} total={:.2}s  TPOT={:.1} ms  ({:.2} tok/s)",
+            total_decode, tpot * 1000.0, decode_tps
+        );
+
+        // Per-step latency summary: min / median / max + slice-of-4 means
+        // (early, early-mid, late-mid, late). Detects KV-cache-growth
+        // slowdown over the decode window.
+        let mut sorted = per_step.clone();
+        sorted.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        let min_ms = sorted[0] * 1000.0;
+        let med_ms = sorted[sorted.len() / 2] * 1000.0;
+        let max_ms = sorted[sorted.len() - 1] * 1000.0;
+        eprintln!(
+            "  per-step min/med/max = {:.1} / {:.1} / {:.1} ms",
+            min_ms, med_ms, max_ms
+        );
+        let q = tg_len / 4;
+        if q >= 1 {
+            for (i, label) in ["early", "e-mid", "l-mid", "late"].iter().enumerate() {
+                let slice = &per_step[i * q..(i + 1) * q];
+                let s: f64 = slice.iter().sum::<f64>() / slice.len() as f64;
+                eprintln!("    {label}: {:.1} ms/tok ({:.1} tok/s)", s * 1000.0, 1.0 / s);
+            }
+        }
+
+        results.push(("long-prefill".into(), prompt_len, ttft, prefill_tps));
+        results.push(("long-decode".into(), tg_len, total_decode, decode_tps));
+
+        decode_scratch.dispose(&cluster)?;
+        prefill_scratch.dispose(&cluster)?;
+        session.dispose(&cluster)?;
+
+        model.dispose(&cluster)?;
+        cluster.dispose()?;
+        return Ok(());
+    }
+
     // Decode throughput: prefill 1 token, then N decode steps feeding the
     // argmax back. Matches how `flambeau serve` will run.
-    for &tg in &[64usize] {
+    for &tg in &[tg_len] {
         let mut session = Qwen3MoEShardedSession::new(&model, &cluster)?;
         let mut prefill_scratch = ShardedForwardPrefillScratch::new(&model, &cluster, 1)?;
         let mut decode_scratch = ShardedForwardOneTokenScratch::new(&model, &cluster)?;
