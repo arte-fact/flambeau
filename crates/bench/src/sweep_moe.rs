@@ -622,6 +622,203 @@ pub fn run_indexed_moe_mmvq_q6_k_sweep(repo_root: &Path) -> Result<Cert> {
     Ok(cert)
 }
 
+/// V2.22.a — Q8_0 indexed-MoE MMVQ correctness sweep. Shapes cover the
+/// Qwen3.6-35B-A3B MoE footprint in UD-Q8_K_XL: hidden=2048, inter=768,
+/// n_experts=256, top_k=8. Scaled down to 16 experts for cert runtime.
+pub fn run_indexed_moe_mmvq_q8_0_sweep(repo_root: &Path) -> Result<Cert> {
+    let dev = ensure_dev()?;
+    let kb = kernels::hsaco("indexed_moe_mmvq_q8_0").unwrap();
+    let module = HipModule::load(dev.id(), kb)?;
+    let kernel: HipKernel<'_> =
+        module.kernel("flambeau_indexed_moe_mmvq_q8_0_dp4a_q8_1")?;
+    let attrs: FuncAttributes = kernel.attributes()?;
+    let q_kb = kernels::hsaco("quantize_q8_1").unwrap();
+    let q_module = HipModule::load(dev.id(), q_kb)?;
+    let q_kernel: HipKernel<'_> = q_module.kernel("flambeau_quantize_row_q8_1")?;
+
+    let n_experts = 16usize;
+    let cases = [
+        (1usize, 4usize, 256usize, 2048usize),  // Qwen3.6 gate/up: hidden=2048, inter≈ n_rows here
+        (4, 4, 256, 2048),                       // prefill L=4
+        (1, 4, 2048, 768),                       // down-like: n_rows=hidden, k=inter
+    ];
+    let mut results = Vec::new();
+    for (n_tokens, top_k, n_rows, k_dim) in cases {
+        let seed = 0xDEC0DE
+            ^ (n_tokens as u64 * 53 + top_k as u64 * 17 + n_rows as u64 * 7)
+            ^ 0xB8D0u64;
+        let max_rel = run_q8_0_shape(
+            &dev, &kernel, &q_kernel, n_experts, n_rows, k_dim, top_k, n_tokens, seed,
+        )?;
+        let tol = 3e-2;
+        results.push(ShapeResult {
+            m: n_tokens,
+            k: k_dim,
+            n: n_rows,
+            seed,
+            max_rel_err: max_rel,
+            tolerance: tol,
+            pass: max_rel <= tol,
+        });
+    }
+    let pass = results.iter().all(|r| r.pass);
+    let cert = Cert {
+        schema_version: SCHEMA_VERSION,
+        impl_id: "indexed_moe_mmvq_q8_0_gfx906".to_string(),
+        backend: "hip".to_string(),
+        arch: "gfx906".to_string(),
+        op: "indexed_moe_mmvq".to_string(),
+        dtype_weight: "Q8_0".to_string(),
+        dtype_activation: "Q8_1".to_string(),
+        tolerance_formula:
+            "|err| <= 3e-2 * max(|ref|, sqrt(k))  (Q8_0 indexed-MoE; DP4A VDR=2 same envelope as dense Q8_0 MMVQ)".to_string(),
+        results,
+        pass,
+        emitted_at: now_utc_iso8601(),
+        rig: rig_tag(),
+        pmc: Some(pmc_from(&attrs)),
+    };
+    cert.write_to_disk(repo_root)?;
+    Ok(cert)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn run_q8_0_shape(
+    dev: &HipDevice,
+    kernel: &HipKernel<'_>,
+    q_kernel: &HipKernel<'_>,
+    n_experts: usize,
+    n_rows: usize,
+    k_dim: usize,
+    top_k: usize,
+    n_tokens: usize,
+    seed: u64,
+) -> Result<f32> {
+    assert_eq!(k_dim % QK8, 0);
+    let nb_per_row = k_dim / QK8;
+
+    // Quantise weights on host to Q8_0 from seeded F32 (same distribution as
+    // the activation sweeps, so kernel-side rounding bias is clean).
+    let w_elems = n_experts * n_rows * k_dim;
+    let w_f32 = seeded_f32(seed, w_elems);
+    let w_q8_0: Vec<u8> = {
+        let mut out = Vec::with_capacity(n_experts * n_rows * nb_per_row * 34);
+        for block in w_f32.chunks_exact(QK8) {
+            let amax = block.iter().fold(0.0f32, |m, v| m.max(v.abs()));
+            let d = amax / 127.0;
+            let id = if d != 0.0 { 1.0 / d } else { 0.0 };
+            let d_f16 = half::f16::from_f32(d);
+            out.extend_from_slice(&d_f16.to_bits().to_le_bytes());
+            for &v in block {
+                let q = (v * id).round().clamp(-127.0, 127.0) as i8;
+                out.push(q as u8);
+            }
+        }
+        out
+    };
+
+    let act_f32 = seeded_f32(seed.wrapping_add(0xA1), n_tokens * k_dim);
+    let expert_ids: Vec<i32> = (0..n_tokens * top_k)
+        .map(|i| {
+            let h = (i as u64)
+                .wrapping_mul(0x9E3779B97F4A7C15)
+                .wrapping_add(seed.wrapping_mul(0x12345));
+            ((h >> 32) as u32 % n_experts as u32) as i32
+        })
+        .collect();
+
+    let d_w = upload(dev, &w_q8_0);
+    let d_act = upload(dev, &act_f32);
+    let y_blocks_total = n_tokens * nb_per_row;
+    let d_y = dev.alloc(y_blocks_total * std::mem::size_of::<BlockQ8_1>())?;
+    let d_ids = upload(dev, &expert_ids);
+    let d_dst = dev.alloc(n_tokens * top_k * n_rows * 4)?;
+
+    // Quantise activation F32 → Q8_1.
+    {
+        let stream = dev.default_stream();
+        let n_elems = (n_tokens * k_dim) as i32;
+        let d_a_p: u64 = d_act.as_usize() as u64;
+        let d_y_p: u64 = d_y.as_usize() as u64;
+        let mut args = KernelArgs::new();
+        args.push(&d_a_p);
+        args.push(&d_y_p);
+        args.push(&n_elems);
+        let cfg = LaunchCfg::one_d(y_blocks_total as u32, QK8 as u32);
+        unsafe { q_kernel.launch(stream, cfg, args)? };
+        stream.synchronize()?;
+    }
+
+    // Q8_0 MoE MMVQ: block=256 threads, grid={n_rows, n_tokens*top_k, 1}.
+    {
+        let stream = dev.default_stream();
+        let n_rows_i = n_rows as i32;
+        let n_tokens_i = n_tokens as i32;
+        let top_k_i = top_k as i32;
+        let nb_i = nb_per_row as i32;
+        let d_w_p: u64 = d_w.as_usize() as u64;
+        let d_y_p: u64 = d_y.as_usize() as u64;
+        let d_ids_p: u64 = d_ids.as_usize() as u64;
+        let d_dst_p: u64 = d_dst.as_usize() as u64;
+        let mut args = KernelArgs::new();
+        args.push(&d_w_p);
+        args.push(&d_y_p);
+        args.push(&d_ids_p);
+        args.push(&d_dst_p);
+        args.push(&n_rows_i);
+        args.push(&n_tokens_i);
+        args.push(&top_k_i);
+        args.push(&nb_i);
+        let cfg = LaunchCfg {
+            grid: (n_rows as u32, (n_tokens * top_k) as u32, 1),
+            block: (256, 1, 1),
+            shared_bytes: 0,
+        };
+        unsafe { kernel.launch(stream, cfg, args)? };
+        stream.synchronize()?;
+    }
+
+    let mut got = vec![0.0f32; n_tokens * top_k * n_rows];
+    unsafe {
+        dev.memcpy_async(
+            dev.default_stream(),
+            CopyDirection::DeviceToHost,
+            DevicePtr(got.as_mut_ptr() as usize),
+            d_dst,
+            n_tokens * top_k * n_rows * 4,
+        )?;
+    }
+    dev.default_stream().synchronize()?;
+    unsafe {
+        dev.dealloc(d_w, w_q8_0.len())?;
+        dev.dealloc(d_act, act_f32.len() * 4)?;
+        dev.dealloc(d_y, y_blocks_total * std::mem::size_of::<BlockQ8_1>())?;
+        dev.dealloc(d_ids, expert_ids.len() * 4)?;
+        dev.dealloc(d_dst, n_tokens * top_k * n_rows * 4)?;
+    }
+
+    // Reference: CPU F32 dequant of weights + Q8_1-roundtripped activation.
+    let mut w_dequant = vec![0.0f32; w_elems];
+    flambeau_quant::dequantize_into(flambeau_quant::GgmlDType::Q8_0, &w_q8_0, &mut w_dequant)?;
+    let act_rt = q8_1_roundtrip(&act_f32);
+    let mut reference = vec![0.0f32; n_tokens * top_k * n_rows];
+    for t in 0..n_tokens {
+        for slot in 0..top_k {
+            let expert = expert_ids[t * top_k + slot] as usize;
+            for row in 0..n_rows {
+                let mut acc = 0.0f64;
+                for j in 0..k_dim {
+                    let w = w_dequant[((expert * n_rows) + row) * k_dim + j];
+                    let a = act_rt[t * k_dim + j];
+                    acc += (w * a) as f64;
+                }
+                reference[(t * top_k + slot) * n_rows + row] = acc as f32;
+            }
+        }
+    }
+    Ok(max_rel_err_with_floor(&got, &reference, k_dim))
+}
+
 fn run_q6k_shape(
     dev: &HipDevice,
     kernel: &HipKernel<'_>,

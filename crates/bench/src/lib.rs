@@ -80,4 +80,13 @@ pub mod sweep_attention_prefill;
 pub mod sweep_attention_q8_kv;
 
 #[cfg(feature = "hip")]
+pub mod sweep_attention_splitk;
+
+#[cfg(feature = "hip")]
+pub mod sweep_mmvq_f16;
+
+#[cfg(feature = "hip")]
+pub mod sweep_q4_0_q5_0;
+
+#[cfg(feature = "hip")]
 pub mod sweep_moe;

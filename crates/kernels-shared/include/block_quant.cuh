@@ -70,6 +70,33 @@ typedef struct {
 } flambeau_block_q4_1;
 static_assert(sizeof(flambeau_block_q4_1) == 2 + 2 + QK4_1 / 2, "block_q4_1 size");
 
+#ifndef QK4_0
+#define QK4_0 32
+#endif
+#ifndef QK5_0
+#define QK5_0 32
+#endif
+
+// Q4_0 — 4-bit legacy quant with zero-point -8 (no min). Block of 32
+// elements, 16 bytes nibble-packed unsigned quants. Reconstruction:
+// y = d * (q - 8) where q ∈ [0, 15].
+typedef struct {
+    fb_fp16_t d;                  // delta (scale)
+    uint8_t   qs[QK4_0 / 2];      // 16 bytes, 4-bit nibbles (low | high)
+} flambeau_block_q4_0;
+static_assert(sizeof(flambeau_block_q4_0) == 2 + QK4_0 / 2, "block_q4_0 size");
+
+// Q5_0 — 5-bit legacy quant with zero-point -16 (no min). Block of 32
+// elements: 16 bytes of low-4-bit nibbles, 4 bytes packing the 5th bit
+// for each of 32 elements (bit i of the uint32 → 5th bit of element i).
+// Reconstruction: q5 = (qh_bit_i << 4) | nibble_i, then y = d * (q5 - 16).
+typedef struct {
+    fb_fp16_t d;                  // delta (scale)
+    uint8_t   qh[4];              // 32 "5th bits", one per element
+    uint8_t   qs[QK5_0 / 2];      // 16 bytes, 4-bit nibbles (low | high)
+} flambeau_block_q5_0;
+static_assert(sizeof(flambeau_block_q5_0) == 2 + 4 + QK5_0 / 2, "block_q5_0 size");
+
 // Q4_K — 4-bit K-quant, super-block of 256 elements split into 8 sub-blocks
 // of 32. Byte-identical to ggml-common.h block_q4_K and to flambeau-quant's
 // BlockQ4K.

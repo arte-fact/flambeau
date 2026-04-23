@@ -210,6 +210,101 @@ pub fn indexed_moe_mmvq_q6_k(
     Ok(())
 }
 
+/// V2.23.a — Q4_0 indexed-MoE MMVQ. Unblocks Qwen3.6-35B-A3B-Q4_0 whose
+/// MoE expert weights are Q4_0 (gate+up+down in most layers). Same
+/// contract as `indexed_moe_mmvq_q8_0`, 256 threads/block with VDR=2 DP4A.
+pub fn indexed_moe_mmvq_q4_0(
+    reg: &OpsRegistry,
+    stream: &HipStream,
+    w: DevicePtr,
+    y: DevicePtr,
+    expert_ids: DevicePtr,
+    dst: DevicePtr,
+    n_rows: usize,
+    n_tokens: usize,
+    top_k: usize,
+    n_blocks_per_row: usize,
+) -> Result<()> {
+    let module = reg.expect_module("indexed_moe_mmvq_q4_0")?;
+    let kernel = module.kernel("flambeau_indexed_moe_mmvq_q4_0_q8_1")?;
+    let n_rows_i = n_rows as i32;
+    let n_tokens_i = n_tokens as i32;
+    let top_k_i = top_k as i32;
+    let nb_i = n_blocks_per_row as i32;
+    let w_ptr: u64 = w.as_usize() as u64;
+    let y_ptr: u64 = y.as_usize() as u64;
+    let e_ptr: u64 = expert_ids.as_usize() as u64;
+    let d_ptr: u64 = dst.as_usize() as u64;
+    let mut args = KernelArgs::new();
+    args.push(&w_ptr);
+    args.push(&y_ptr);
+    args.push(&e_ptr);
+    args.push(&d_ptr);
+    args.push(&n_rows_i);
+    args.push(&n_tokens_i);
+    args.push(&top_k_i);
+    args.push(&nb_i);
+    let cfg = LaunchCfg {
+        grid: (n_rows as u32, (n_tokens * top_k) as u32, 1),
+        block: (256, 1, 1),
+        shared_bytes: 0,
+    };
+    unsafe { kernel.launch(stream, cfg, args)? };
+    Ok(())
+}
+
+/// V2.22.a — Q8_0 indexed-MoE MMVQ. Unblocks UD-Q8_K_XL GGUFs whose MoE
+/// expert weights stay Q8_0 instead of the usual Q4_K/Q4_K_S. Uses VDR=2
+/// DP4A inside the inner loop (matches `mmvq_q8_0_dp4a_vdr2` pattern),
+/// 256 threads/block, 1 output row per block. A multi-row r2/r4 variant
+/// is the next perf lever; single-row is adequate for V2.22's unblock goal.
+///
+/// Contract:
+///   * weights       [n_experts, n_rows, n_blocks_per_row]   Q8_0 blocks
+///   * activations   [n_tokens, n_blocks_per_row]            Q8_1 blocks
+///   * expert_ids    [n_tokens, top_k]                       i32
+///   * dst           [n_tokens, top_k, n_rows]               F32
+pub fn indexed_moe_mmvq_q8_0(
+    reg: &OpsRegistry,
+    stream: &HipStream,
+    w: DevicePtr,
+    y: DevicePtr,
+    expert_ids: DevicePtr,
+    dst: DevicePtr,
+    n_rows: usize,
+    n_tokens: usize,
+    top_k: usize,
+    n_blocks_per_row: usize,
+) -> Result<()> {
+    let module = reg.expect_module("indexed_moe_mmvq_q8_0")?;
+    let kernel = module.kernel("flambeau_indexed_moe_mmvq_q8_0_dp4a_q8_1")?;
+
+    let n_rows_i = n_rows as i32;
+    let n_tokens_i = n_tokens as i32;
+    let top_k_i = top_k as i32;
+    let nb_i = n_blocks_per_row as i32;
+    let w_ptr: u64 = w.as_usize() as u64;
+    let y_ptr: u64 = y.as_usize() as u64;
+    let e_ptr: u64 = expert_ids.as_usize() as u64;
+    let d_ptr: u64 = dst.as_usize() as u64;
+    let mut args = KernelArgs::new();
+    args.push(&w_ptr);
+    args.push(&y_ptr);
+    args.push(&e_ptr);
+    args.push(&d_ptr);
+    args.push(&n_rows_i);
+    args.push(&n_tokens_i);
+    args.push(&top_k_i);
+    args.push(&nb_i);
+    let cfg = LaunchCfg {
+        grid: (n_rows as u32, (n_tokens * top_k) as u32, 1),
+        block: (256, 1, 1),
+        shared_bytes: 0,
+    };
+    unsafe { kernel.launch(stream, cfg, args)? };
+    Ok(())
+}
+
 /// Fused gate+up MoE MMVQ (candle P30). One launch does both `gate = W_g · x`
 /// and `up = W_u · x` reading `x` only once. Shapes match
 /// `indexed_moe_mmvq_q4_k_r2` but with two separate weight tensors and two

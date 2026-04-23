@@ -70,6 +70,131 @@ pub fn attention_decode_f16(
     Ok(())
 }
 
+/// V2.19.b — split-K (flash-decoding) decode attention, F16 KV. Same math
+/// as [`attention_decode_f16`] but partitions the context across grid.y to
+/// attack the single-pass kernel's occupancy starvation on Qwen3.6
+/// (16 heads × 1 block = 27 % of 60 CUs at head_dim=256).
+///
+/// Two passes:
+///   1. `flambeau_attention_decode_f16_splitk_chunk` — grid
+///      `(n_heads_q, n_chunks)`, each block owns one (q_head, chunk) pair
+///      and emits `(m_c, s_c, o_c[head_dim])` into `partials_*` scratch.
+///   2. `flambeau_attention_decode_f16_splitk_combine` — grid
+///      `(n_heads_q,)`, merges the `n_chunks` partials per head into the
+///      final output using online-softmax rescaling.
+///
+/// Scratch sizing (caller-provided, f32):
+///   * `partials_m` / `partials_s`: `n_heads_q * n_chunks` floats each
+///   * `partials_o`: `n_heads_q * n_chunks * head_dim` floats
+///
+/// Measured (Qwen3.6 shape, head_dim=256, 16/2, MI50):
+///   * n_tokens=2048: single-pass 2647 µs → split-K 340 µs = **7.78×**
+///   * n_tokens=4096: single-pass 5210 µs → split-K 662 µs = **7.87×**
+#[allow(clippy::too_many_arguments)]
+pub fn attention_decode_f16_splitk(
+    reg: &OpsRegistry,
+    stream: &HipStream,
+    q: DevicePtr,
+    k_cache: DevicePtr,
+    v_cache: DevicePtr,
+    out: DevicePtr,
+    partials_m: DevicePtr,
+    partials_s: DevicePtr,
+    partials_o: DevicePtr,
+    n_heads_q: usize,
+    n_heads_kv: usize,
+    head_dim: usize,
+    n_tokens_kv: usize,
+    chunk_size: usize,
+    scale: f32,
+) -> Result<()> {
+    assert!(
+        head_dim == 64 || head_dim == 128 || head_dim == 256,
+        "attention_decode_f16_splitk: head_dim {head_dim} not supported"
+    );
+    assert!(chunk_size > 0);
+
+    let module = reg.expect_module("attention_decode_f16_splitk")?;
+    let k_chunk = module.kernel("flambeau_attention_decode_f16_splitk_chunk")?;
+    let k_combine = module.kernel("flambeau_attention_decode_f16_splitk_combine")?;
+
+    let n_chunks = n_tokens_kv.div_ceil(chunk_size);
+    let n_heads_q_i = n_heads_q as i32;
+    let n_heads_kv_i = n_heads_kv as i32;
+    let head_dim_i = head_dim as i32;
+    let n_tokens_i = n_tokens_kv as i32;
+    let n_chunks_i = n_chunks as i32;
+    let chunk_size_i = chunk_size as i32;
+    let q_ptr: u64 = q.as_usize() as u64;
+    let k_ptr: u64 = k_cache.as_usize() as u64;
+    let v_ptr: u64 = v_cache.as_usize() as u64;
+    let o_ptr: u64 = out.as_usize() as u64;
+    let m_ptr: u64 = partials_m.as_usize() as u64;
+    let s_ptr: u64 = partials_s.as_usize() as u64;
+    let po_ptr: u64 = partials_o.as_usize() as u64;
+    let scale_f = scale;
+
+    let mut a1 = KernelArgs::new();
+    a1.push(&q_ptr);
+    a1.push(&k_ptr);
+    a1.push(&v_ptr);
+    a1.push(&m_ptr);
+    a1.push(&s_ptr);
+    a1.push(&po_ptr);
+    a1.push(&n_heads_q_i);
+    a1.push(&n_heads_kv_i);
+    a1.push(&head_dim_i);
+    a1.push(&n_tokens_i);
+    a1.push(&n_chunks_i);
+    a1.push(&chunk_size_i);
+    a1.push(&scale_f);
+    let cfg1 = LaunchCfg {
+        grid: (n_heads_q as u32, n_chunks as u32, 1),
+        block: (head_dim as u32, 1, 1),
+        shared_bytes: 0,
+    };
+    unsafe { k_chunk.launch(stream, cfg1, a1)? };
+
+    let mut a2 = KernelArgs::new();
+    a2.push(&m_ptr);
+    a2.push(&s_ptr);
+    a2.push(&po_ptr);
+    a2.push(&o_ptr);
+    a2.push(&n_heads_q_i);
+    a2.push(&n_chunks_i);
+    a2.push(&head_dim_i);
+    let cfg2 = LaunchCfg {
+        grid: (n_heads_q as u32, 1, 1),
+        block: (head_dim as u32, 1, 1),
+        shared_bytes: 0,
+    };
+    unsafe { k_combine.launch(stream, cfg2, a2)? };
+
+    Ok(())
+}
+
+/// Pick a reasonable split-K chunk size given `n_tokens`. Target n_chunks in
+/// [4, 16] so we land 16 heads × n_chunks = 64–256 blocks on 60 CUs
+/// (1–4× saturation, more than enough to hide the per-block serial loop).
+///
+/// Returns the single-pass fallback `chunk_size = n_tokens` when the
+/// context is short enough that split-K overhead (the combine kernel +
+/// partials write/read) costs more than the occupancy win.
+pub fn splitk_chunk_size(n_tokens_kv: usize) -> usize {
+    // Threshold tuned per the V2.19.b A/B: at n_tokens=128 split-K already
+    // ties the single-pass (1.10×) and every larger shape wins hard, so
+    // default to split-K whenever it gives ≥ 4 chunks.
+    if n_tokens_kv <= 256 {
+        n_tokens_kv // one chunk; caller should just use single-pass
+    } else if n_tokens_kv <= 1024 {
+        128
+    } else if n_tokens_kv <= 2048 {
+        256
+    } else {
+        512
+    }
+}
+
 /// Decode attention with Q8_0-quantised KV. Same args as the F16 variant;
 /// `k_cache` / `v_cache` hold `flambeau_block_q8_0` blocks laid out as
 /// `[n_tokens_kv, n_heads_kv, head_dim/32]` row-major.

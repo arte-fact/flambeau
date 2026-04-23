@@ -39,6 +39,56 @@ pub fn qmatmul(
     n: usize,
     dtype_weight: QDtype,
 ) -> Result<()> {
+    // V2.21.b — F16 weight short-circuits the dispatch table. Row-by-row
+    // MMVQ for M rows covers both the L=1 warmup prefill (which enters via
+    // qmatmul rather than mmvq) and the L>1 prefill path until V2.21.d
+    // lands a proper F16 MMQ. Per-row cost is ~30 µs roofline; at L=1024 ×
+    // 117 F16 matmuls that's 3.6 s of F16 MMVQ — prefill-slow but
+    // correct, matching V2's "make it load first" pattern.
+    if dtype_weight == QDtype::F16 {
+        let act_row_bytes = (k / 32) * std::mem::size_of::<flambeau_quant::BlockQ8_1>();
+        let dst_row_bytes = n * 4;
+        for i in 0..m {
+            mmvq_f16_launch(
+                reg,
+                stream,
+                weights,
+                act_q8_1.offset_bytes(i * act_row_bytes),
+                dst.offset_bytes(i * dst_row_bytes),
+                n,
+                k,
+            )?;
+        }
+        let _ = act_q8_1_mmq;
+        return Ok(());
+    }
+    // V2.23.a — Q4_0 / Q5_0 prefill fallback via row-by-row MMVQ. A proper
+    // MMQ tile8 is queued as V2.23.b; MMVQ is correctness-complete and
+    // unblocks load-and-run on Qwen3.6-35B-A3B-Q4_0.
+    if dtype_weight == QDtype::Q4_0 || dtype_weight == QDtype::Q5_0 {
+        let (stem, entry) = match dtype_weight {
+            QDtype::Q4_0 => ("mmvq_q4_0", "flambeau_mmvq_q4_0_q8_1"),
+            QDtype::Q5_0 => ("mmvq_q5_0", "flambeau_mmvq_q5_0_q8_1"),
+            _ => unreachable!(),
+        };
+        let act_row_bytes = (k / 32) * std::mem::size_of::<flambeau_quant::BlockQ8_1>();
+        let dst_row_bytes = n * 4;
+        for i in 0..m {
+            mmvq_simple_launch(
+                reg,
+                stream,
+                stem,
+                entry,
+                weights,
+                act_q8_1.offset_bytes(i * act_row_bytes),
+                dst.offset_bytes(i * dst_row_bytes),
+                n,
+                k,
+            )?;
+        }
+        let _ = act_q8_1_mmq;
+        return Ok(());
+    }
     let cfg = QMatMulCfg {
         dtype_weight,
         dtype_activation: QDtype::Q8_1,
@@ -159,6 +209,25 @@ pub fn mmvq(
     k: usize,
     dtype_weight: QDtype,
 ) -> Result<()> {
+    // V2.21.b — F16 weight × Q8_1 activation bypasses the dispatch table.
+    if dtype_weight == QDtype::F16 {
+        return mmvq_f16_launch(reg, stream, weights, act_q8_1, dst, n_rows, k);
+    }
+    // V2.23.a — Q4_0 / Q5_0 bypass the dispatch table. Unblock Qwen3.6-35B
+    // -A3B-Q4_0 which uses Q4_0 for attn/FFN and Q5_0 for shared-expert FFN.
+    // Single productionised kernel per dtype, no shape-dependent selection.
+    if dtype_weight == QDtype::Q4_0 {
+        return mmvq_simple_launch(
+            reg, stream, "mmvq_q4_0", "flambeau_mmvq_q4_0_q8_1",
+            weights, act_q8_1, dst, n_rows, k,
+        );
+    }
+    if dtype_weight == QDtype::Q5_0 {
+        return mmvq_simple_launch(
+            reg, stream, "mmvq_q5_0", "flambeau_mmvq_q5_0_q8_1",
+            weights, act_q8_1, dst, n_rows, k,
+        );
+    }
     let cfg = QMatMulCfg {
         dtype_weight,
         dtype_activation: QDtype::Q8_1,
@@ -175,6 +244,70 @@ pub fn mmvq(
     }
     let nb_per_row = k / block_elems(dtype_weight);
     mmvq_launch(reg, stream, recipe, weights, act_q8_1, dst, n_rows, nb_per_row)
+}
+
+/// V2.23.a — common launch path for single-block-per-row Q-weight MMVQ
+/// kernels that take (w, y_q8_1, dst, n_rows, n_blocks_per_row) and expect
+/// 256 threads. Used for Q4_0, Q5_0 and (via `mmvq()` short-circuit) any
+/// future single-kernel MMVQ variants.
+fn mmvq_simple_launch(
+    reg: &OpsRegistry,
+    stream: &HipStream,
+    module_stem: &'static str,
+    kernel_entry: &'static str,
+    weights: DevicePtr,
+    act_q8_1: DevicePtr,
+    dst: DevicePtr,
+    n_rows: usize,
+    k: usize,
+) -> Result<()> {
+    assert_eq!(k % 32, 0, "{module_stem} requires k % 32 == 0");
+    let module = reg.expect_module(module_stem)?;
+    let kernel = module.kernel(kernel_entry)?;
+    let n_rows_i = n_rows as i32;
+    let n_blocks_i = (k / 32) as i32;
+    let w_ptr: u64 = weights.as_usize() as u64;
+    let y_ptr: u64 = act_q8_1.as_usize() as u64;
+    let d_ptr: u64 = dst.as_usize() as u64;
+    let mut args = KernelArgs::new();
+    args.push(&w_ptr);
+    args.push(&y_ptr);
+    args.push(&d_ptr);
+    args.push(&n_rows_i);
+    args.push(&n_blocks_i);
+    let cfg = LaunchCfg::one_d(n_rows as u32, 256);
+    unsafe { kernel.launch(stream, cfg, args)? };
+    Ok(())
+}
+
+/// V2.21.b — direct launch for the F16-weight × Q8_1-activation MMVQ.
+/// Kernel stem `mmvq_f16_q8_1`, block = 256 threads, grid = n_rows.
+fn mmvq_f16_launch(
+    reg: &OpsRegistry,
+    stream: &HipStream,
+    weights: DevicePtr,
+    act_q8_1: DevicePtr,
+    dst: DevicePtr,
+    n_rows: usize,
+    k: usize,
+) -> Result<()> {
+    assert_eq!(k % 32, 0, "mmvq_f16_q8_1 requires k % 32 == 0");
+    let module = reg.expect_module("mmvq_f16_q8_1")?;
+    let kernel = module.kernel("flambeau_mmvq_f16_q8_1")?;
+    let n_rows_i = n_rows as i32;
+    let n_blocks_i = (k / 32) as i32;
+    let w_ptr: u64 = weights.as_usize() as u64;
+    let y_ptr: u64 = act_q8_1.as_usize() as u64;
+    let d_ptr: u64 = dst.as_usize() as u64;
+    let mut args = KernelArgs::new();
+    args.push(&w_ptr);
+    args.push(&y_ptr);
+    args.push(&d_ptr);
+    args.push(&n_rows_i);
+    args.push(&n_blocks_i);
+    let cfg = LaunchCfg::one_d(n_rows as u32, 256);
+    unsafe { kernel.launch(stream, cfg, args)? };
+    Ok(())
 }
 
 /// Prefill-path MMQ for M batch rows. `m` must be ≥ the dispatch floor for
@@ -676,8 +809,15 @@ fn mmq_wave64_launch(
 fn block_elems(dtype: QDtype) -> usize {
     use flambeau_quant::{QK8_0, QK_K};
     match dtype {
-        QDtype::Q8_0 | QDtype::Q8_1 | QDtype::Q4_1 => QK8_0,
+        QDtype::Q8_0 | QDtype::Q8_1 | QDtype::Q4_0 | QDtype::Q4_1 | QDtype::Q5_0 => QK8_0,
         QDtype::Q4_K | QDtype::Q5_K | QDtype::Q6_K => QK_K,
+        // V2.21.b — F16 is "1 element per block" in terms of the quant-block
+        // unit used for `n_blocks_per_row = k / block_elems`. The F16 MMVQ
+        // kernel multiplies F16 weight by Q8_1 activation (QK8_1=32), so the
+        // inner loop iterates over Q8_1 blocks — the weight side has no blocks,
+        // but `n_blocks_per_row` reflects the Q8_1 activation stride. Return 32
+        // to match the caller's `k / 32` computation used for the Q8_1 side.
+        QDtype::F16 => 32,
         other => panic!("qmatmul weight dtype {other:?} not supported"),
     }
 }

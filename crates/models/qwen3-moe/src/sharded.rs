@@ -487,6 +487,24 @@ fn upload_one_inner(
     r: &ResolvedTensor,
     device: &HipDevice,
 ) -> Result<(DeviceTensor, usize)> {
+    // V2.22.a — BF16 tensors in UD-Q8_K_XL (10 total per 35B-UD-Q8_K_XL:
+    // 1 attn_qkv, 1 attn_gate, 1–4 of each ffn_*_exps + shexp) aren't
+    // supported by any V1 MMVQ/MMQ path. Transparently quantise to Q8_0 at
+    // load so downstream dispatch flows through the Q8_0 kernels V2.22.a
+    // just added. Precision loss is ~0.4 % (Q8 step vs BF16 step) — tiny
+    // compared to the Q8_0 noise elsewhere in the model.
+    if r.dtype == GgmlDType::BF16 {
+        return upload_bf16_as_q8_0(file, r, device);
+    }
+    // V2.23.a — 5 Qwen3.6-35B-A3B-Q4_0 layers store `ffn_down_exps` as
+    // Q4_1 (scattered among 35 Q4_0 + 5 Q4_1). Rather than author a Q4_1
+    // indexed-MoE kernel for 5 tensors, convert them to Q8_0 on host at
+    // load so they flow through `indexed_moe_mmvq_q8_0`. Applied only to
+    // tensors whose name contains "_exps" (the MoE expert slabs) — non-MoE
+    // Q4_1 (Qwen3.5-9B-Q4_1) still flows through the Q4_1 kernel.
+    if r.dtype == GgmlDType::Q4_1 && r.name.contains("_exps") {
+        return upload_q4_1_as_q8_0(file, r, device);
+    }
     let bytes = r.size_bytes as usize;
     let raw = file
         .tensor_raw(&r.name)
@@ -612,6 +630,170 @@ fn upload_as_f16(
 /// to `mmvq` (which requires a Q-quant). Quant scheme matches
 /// `flambeau_block_q8_0`: per-32-elem block absmax / 127 → d (F16),
 /// qs[i] = round(x[i] / d) clamped to [-127, 127].
+/// V2.22.a — BF16 tensor → Q8_0 on device. BF16's 16 bits are the upper half
+/// of a F32, so widen to F32 byte-by-byte, then use the standard Q8_0 per-32-
+/// block absmax/127 quantise. Preserves dims + name; sets dtype=Q8_0 so
+/// the downstream dispatch treats it like any other Q8_0 weight.
+fn upload_bf16_as_q8_0(
+    file: &GgufFile,
+    r: &ResolvedTensor,
+    device: &HipDevice,
+) -> Result<(DeviceTensor, usize)> {
+    let raw = file
+        .tensor_raw(&r.name)
+        .with_context(|| format!("tensor_raw `{}`", r.name))?;
+    let elems: usize = r.dims.iter().product::<u64>() as usize;
+    let src_bytes = elems * 2;
+    if raw.len() < src_bytes {
+        bail!(
+            "upload_bf16_as_q8_0: `{}` mmap slice {} < expected {} ({} elems × 2)",
+            r.name, raw.len(), src_bytes, elems
+        );
+    }
+    if elems % QK8_0 != 0 {
+        bail!(
+            "upload_bf16_as_q8_0: `{}` elem count {elems} not multiple of QK8_0={QK8_0}",
+            r.name
+        );
+    }
+    let src_u16: &[u16] = bytemuck::cast_slice(&raw[..src_bytes]);
+    // Widen to F32 once so the quant inner loop stays hot.
+    let src_f32: Vec<f32> = src_u16
+        .iter()
+        .map(|&b| f32::from_bits((b as u32) << 16))
+        .collect();
+    let n_blocks = elems / QK8_0;
+    let block_size = 34usize;
+    let out_bytes = n_blocks * block_size;
+    let mut buf: Vec<u8> = Vec::with_capacity(out_bytes);
+    for block in src_f32.chunks_exact(QK8_0) {
+        let absmax = block.iter().map(|v| v.abs()).fold(0.0f32, f32::max);
+        let d = absmax / 127.0;
+        let id = if d != 0.0 { 1.0 / d } else { 0.0 };
+        let d_f16 = half::f16::from_f32(d);
+        buf.extend_from_slice(&d_f16.to_bits().to_le_bytes());
+        for &v in block {
+            let q = (v * id).round_ties_even() as i32;
+            let q = q.clamp(-127, 127) as i8;
+            buf.push(q as u8);
+        }
+    }
+    debug_assert_eq!(buf.len(), out_bytes);
+    let ptr = device.alloc(out_bytes)?;
+    unsafe {
+        device
+            .memcpy_async(
+                device.default_stream(),
+                CopyDirection::HostToDevice,
+                ptr,
+                DevicePtr(buf.as_ptr() as usize),
+                out_bytes,
+            )
+            .map_err(|e| anyhow::anyhow!("memcpy (bf16→Q8_0) `{}`: {e}", r.name))?;
+    }
+    device.default_stream().synchronize()?;
+    drop(buf);
+    drop(src_f32);
+    Ok((
+        DeviceTensor {
+            ptr,
+            dtype: GgmlDType::Q8_0,
+            dims: r.dims.clone(),
+            bytes: out_bytes,
+            name: std::sync::Arc::from(r.name.as_str()),
+        },
+        out_bytes,
+    ))
+}
+
+/// V2.23.a — Q4_1 MoE tensor → Q8_0 on device. Q4_1 stores 20 bytes/block:
+/// `d (f16) + m (f16) + 16 × 4-bit nibbles`, reconstruction `y = d·q + m`
+/// where `q ∈ [0, 15]`. Dequantise to F32 on host, then apply the standard
+/// absmax/127 Q8_0 encoder. ~0.4 % additional noise vs Q4_1's own noise.
+fn upload_q4_1_as_q8_0(
+    file: &GgufFile,
+    r: &ResolvedTensor,
+    device: &HipDevice,
+) -> Result<(DeviceTensor, usize)> {
+    const QK4_1: usize = 32;
+    const Q4_1_BLOCK: usize = 2 + 2 + QK4_1 / 2; // d + m + 16 nibbles = 20 B
+    let elems: usize = r.dims.iter().product::<u64>() as usize;
+    if elems % QK4_1 != 0 {
+        bail!(
+            "upload_q4_1_as_q8_0: `{}` elem count {elems} not multiple of QK4_1={QK4_1}",
+            r.name
+        );
+    }
+    let raw = file
+        .tensor_raw(&r.name)
+        .with_context(|| format!("tensor_raw `{}`", r.name))?;
+    let n_blocks = elems / QK4_1;
+    let expected_bytes = n_blocks * Q4_1_BLOCK;
+    if raw.len() < expected_bytes {
+        bail!(
+            "upload_q4_1_as_q8_0: `{}` mmap slice {} < expected {}",
+            r.name, raw.len(), expected_bytes
+        );
+    }
+    // Dequantise to F32 on host. Same ggml layout as mmvq_q4_1: byte i of
+    // qs holds low-nibble at element i, high-nibble at element i+16.
+    let mut dq = vec![0.0f32; elems];
+    for bi in 0..n_blocks {
+        let off = bi * Q4_1_BLOCK;
+        let d = half::f16::from_bits(u16::from_le_bytes([raw[off], raw[off + 1]])).to_f32();
+        let m = half::f16::from_bits(u16::from_le_bytes([raw[off + 2], raw[off + 3]])).to_f32();
+        let qs = &raw[off + 4..off + 20];
+        for i in 0..16 {
+            let lo = (qs[i] & 0x0F) as f32;
+            let hi = ((qs[i] >> 4) & 0x0F) as f32;
+            dq[bi * QK4_1 + i] = d * lo + m;
+            dq[bi * QK4_1 + i + 16] = d * hi + m;
+        }
+    }
+    // Now encode to Q8_0 via the same absmax/127 path used in upload_as_q8_0.
+    let out_n_blocks = elems / QK8_0;
+    let out_bytes = out_n_blocks * 34;
+    let mut buf: Vec<u8> = Vec::with_capacity(out_bytes);
+    for block in dq.chunks_exact(QK8_0) {
+        let absmax = block.iter().map(|v| v.abs()).fold(0.0f32, f32::max);
+        let d = absmax / 127.0;
+        let id = if d != 0.0 { 1.0 / d } else { 0.0 };
+        let d_f16 = half::f16::from_f32(d);
+        buf.extend_from_slice(&d_f16.to_bits().to_le_bytes());
+        for &v in block {
+            let q = (v * id).round_ties_even() as i32;
+            let q = q.clamp(-127, 127) as i8;
+            buf.push(q as u8);
+        }
+    }
+    debug_assert_eq!(buf.len(), out_bytes);
+    let ptr = device.alloc(out_bytes)?;
+    unsafe {
+        device
+            .memcpy_async(
+                device.default_stream(),
+                CopyDirection::HostToDevice,
+                ptr,
+                DevicePtr(buf.as_ptr() as usize),
+                out_bytes,
+            )
+            .map_err(|e| anyhow::anyhow!("memcpy (Q4_1→Q8_0) `{}`: {e}", r.name))?;
+    }
+    device.default_stream().synchronize()?;
+    drop(buf);
+    drop(dq);
+    Ok((
+        DeviceTensor {
+            ptr,
+            dtype: GgmlDType::Q8_0,
+            dims: r.dims.clone(),
+            bytes: out_bytes,
+            name: std::sync::Arc::from(r.name.as_str()),
+        },
+        out_bytes,
+    ))
+}
+
 fn upload_as_q8_0(
     file: &GgufFile,
     r: &ResolvedTensor,

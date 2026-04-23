@@ -336,6 +336,22 @@ impl    = "attention_decode_f16_gfx906"
 cert    = "certs/hip/gfx906/attention_decode_f16_gfx906.json"
 notes   = "GQA fused decode, online softmax, head_dim=128. One block per Q head, 128 threads. VGPR 20, waves/SIMD 10."
 
+[[qmatmul_mmvq]]
+dtype   = "F16"
+dtype_q = "Q8_1"
+shape   = { m = "any", k = "any", n = "any" }
+impl    = "mmvq_f16_q8_1_gfx906"
+cert    = "certs/hip/gfx906/mmvq_f16_q8_1_gfx906.json"
+notes   = "V2.21.b — F16 weight × Q8_1 activation MMVQ. Unblocks Unsloth UD-Q8_K_XL GGUFs (i-matrix-flagged layers kept in F16). 256 threads × n_rows blocks, 8 elements/thread F32 FMA. No DP4A (weight is F16). HBM-bound at ~30 µs/call for 6144×5120."
+
+[[attention_decode]]
+dtype   = "F16"
+dtype_q = "F16"
+shape   = { m = "1..4", k = "256..", n = "any" }   # long-context decode
+impl    = "attention_decode_f16_splitk_gfx906"
+cert    = "certs/hip/gfx906/attention_decode_f16_splitk_gfx906.json"
+notes   = "V2.19.b flash-decoding split-K. Two-pass (chunk + combine) partitioning n_tokens across grid.y lifts grid from 16 to 16×n_chunks blocks, attacking the single-pass kernel's 27% CU occupancy on Qwen3.6. Measured 7.78× at n_tokens=2048 head_dim=256; forward.rs threshold is n_tokens_kv > 256. FLAMBEAU_VARIANT=baseline opts out."
+
 [[attention_decode]]
 dtype   = "Q8_0"          # KV dtype
 dtype_q = "F16"           # Q / output dtype
@@ -387,6 +403,38 @@ shape   = { m = "any", k = "any", n = "any" }
 impl    = "indexed_moe_mmvq_q6_k_gfx906"
 cert    = "certs/hip/gfx906/indexed_moe_mmvq_q6_k_gfx906.json"
 notes   = "V1.7.5.K — Q6_K MoE MMVQ for UD-Q4_K_S's mixed-quant ffn_down_exps. Single-row wave64, scales-per-16-elem layout, qh upper-2-bit ladder. Multi-row r2/r4 is a follow-up perf lever."
+
+[[indexed_moe_mmvq]]
+dtype   = "Q8_0"
+dtype_q = "Q8_1"
+shape   = { m = "any", k = "any", n = "any" }
+impl    = "indexed_moe_mmvq_q8_0_gfx906"
+cert    = "certs/hip/gfx906/indexed_moe_mmvq_q8_0_gfx906.json"
+notes   = "V2.22.a — Q8_0 MoE MMVQ for UD-Q8_K_XL's Q8_0 expert weights (ffn_gate/up/down + ffn_*_shexp). 256-thread VDR=2 DP4A kernel, 1 output row per block. BF16 layers quantised to Q8_0 on host at load so they flow through this path too. MMQ tile8 variant queued for V2.22.b (prefill speed-up)."
+
+[[qmatmul_mmvq]]
+dtype   = "Q4_0"
+dtype_q = "Q8_1"
+shape   = { m = "any", k = "any", n = "any" }
+impl    = "mmvq_q4_0_gfx906"
+cert    = "certs/hip/gfx906/mmvq_q4_0_gfx906.json"
+notes   = "V2.23.a — Q4_0 dense MMVQ for Qwen3.6-35B-A3B-Q4_0 (attn_qkv/gate/output/q, ssm_out in Q4_0). 256-thread DP4A, nibble-pair pattern from mmvq_q4_1 with the bias-correction identity `(q - 8) · y = dp4a(q, y) - 8·s_y`."
+
+[[qmatmul_mmvq]]
+dtype   = "Q5_0"
+dtype_q = "Q8_1"
+shape   = { m = "any", k = "any", n = "any" }
+impl    = "mmvq_q5_0_gfx906"
+cert    = "certs/hip/gfx906/mmvq_q5_0_gfx906.json"
+notes   = "V2.23.a — Q5_0 dense MMVQ for Qwen3.6-35B-A3B-Q4_0 shared-expert FFN (ffn_*_shexp in 20 layers). 256-thread DP4A: computes `(q5 - 16)·y = nibble·y + 16·bit·y - 16·s_y` with the 5th-bit packed field expanded to int-per-4-bytes for a second DP4A."
+
+[[indexed_moe_mmvq]]
+dtype   = "Q4_0"
+dtype_q = "Q8_1"
+shape   = { m = "any", k = "any", n = "any" }
+impl    = "indexed_moe_mmvq_q4_0_gfx906"
+cert    = "certs/hip/gfx906/indexed_moe_mmvq_q4_0_gfx906.json"
+notes   = "V2.23.a — Q4_0 indexed-MoE MMVQ for Qwen3.6-35B-A3B-Q4_0 expert weights. Same inner loop as dense mmvq_q4_0 + expert-id indirection on the weight tensor; 256 threads/block, grid (n_rows, n_tokens·top_k). 5 Q4_1 ffn_down_exps layers get host-converted to Q8_0 at load."
 
 [[moe_combine]]
 dtype   = "F16"

@@ -1,0 +1,49 @@
+{
+  "schema_version": 1,
+  "impl_id": "indexed_moe_mmvq_q8_0_gfx906",
+  "backend": "hip",
+  "arch": "gfx906",
+  "op": "indexed_moe_mmvq",
+  "dtype_weight": "Q8_0",
+  "dtype_activation": "Q8_1",
+  "tolerance_formula": "|err| <= 3e-2 * max(|ref|, sqrt(k))  (Q8_0 indexed-MoE; DP4A VDR=2 same envelope as dense Q8_0 MMVQ)",
+  "results": [
+    {
+      "m": 1,
+      "k": 2048,
+      "n": 256,
+      "seed": 14581623,
+      "max_rel_err": 0.000047230813,
+      "tolerance": 0.03,
+      "pass": true
+    },
+    {
+      "m": 4,
+      "k": 2048,
+      "n": 256,
+      "seed": 14577686,
+      "max_rel_err": 0.000057741185,
+      "tolerance": 0.03,
+      "pass": true
+    },
+    {
+      "m": 1,
+      "k": 768,
+      "n": 2048,
+      "seed": 14565495,
+      "max_rel_err": 0.000046414207,
+      "tolerance": 0.03,
+      "pass": true
+    }
+  ],
+  "pass": true,
+  "emitted_at": "2026-04-23T07:35:42Z",
+  "rig": "threadreaper-gfx906",
+  "pmc": {
+    "vgpr_count": 18,
+    "sgpr_count": null,
+    "waves_per_simd": 10,
+    "mem_busy_pct": null,
+    "valu_busy_pct": null
+  }
+}
