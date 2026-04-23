@@ -140,6 +140,20 @@ pub const QMATMUL_GFX906: &[KernelDescriptor] = &[
     },
     KernelDescriptor {
         op_name: "QMatMul",
+        // V2.30.a: wave64 Q5_0 MMQ — shexp dense prefill for
+        // Qwen3.6-35B-A3B-Q4_0 (20/40 layers have Q5_0 shared-expert FFN).
+        // Default dispatched at m >= 32; qmatmul() short-circuits m < 32 to
+        // the Q5_0 MMVQ single-row kernel (V2.23).
+        impl_id: "qmatmul_q5_0_mmq_wave64_gfx906",
+        backend: "hip",
+        arch: "gfx906",
+        dtype_weight: QDtype::Q5_0,
+        dtype_activation: QDtype::Q8_1,
+        m_range: (32, usize::MAX),
+        cert_rel_path: "certs/hip/gfx906/qmatmul_q5_0_mmq_wave64_gfx906.json",
+    },
+    KernelDescriptor {
+        op_name: "QMatMul",
         // V2.14.b: llamacpp-turbo 4-warp LDS-tiled Q4_K MMQ port. 256 threads
         // (4 warps × 64), MMQ_Y=16, MMQ_X=16, double-buffered Y LDS per
         // super-block. Closes the ~1.4× gap to turbo's pp512=1012.80 identified

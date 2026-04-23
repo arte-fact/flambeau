@@ -70,8 +70,12 @@ pub fn qmatmul(
     // MMVQ short-circuit.
     //
     // V2.23.a — Q5_0 / Q5_1 still MMVQ row-by-row (no tile kernel yet).
-    if matches!(dtype_weight, QDtype::Q5_0 | QDtype::Q5_1)
+    // V2.30.a — Q5_0 at m >= 32 routes through the wave64 tile via
+    // dispatch_qmatmul; m < 32 stays on the MMVQ short-circuit. Q5_1 has no
+    // tile kernel yet, still MMVQ row-by-row.
+    if dtype_weight == QDtype::Q5_1
         || (dtype_weight == QDtype::Q4_0 && m < 32)
+        || (dtype_weight == QDtype::Q5_0 && m < 32)
     {
         let (stem, entry) = match dtype_weight {
             QDtype::Q4_0 => ("mmvq_q4_0", "flambeau_mmvq_q4_0_q8_1"),
@@ -682,6 +686,17 @@ impl Recipe {
                 kind: RecipeKind::MmqWave64,
                 stem: "mmq_q4_0_wave64",
                 entry: "flambeau_mmq_q4_0_wave64_q8_1",
+                threads: 64,
+                rows_per_block: 0,
+                mmq_tile: (64, 8),
+            },
+            // V2.30.a: wave64 MMQ for Q5_0. Same tile shape + launch as Q4_0;
+            // inner loop adds the 5th-bit `16·bit·y` DP4A term (V2.23's
+            // mmvq_q5_0 pattern).
+            "qmatmul_q5_0_mmq_wave64_gfx906" => Self {
+                kind: RecipeKind::MmqWave64,
+                stem: "mmq_q5_0_wave64",
+                entry: "flambeau_mmq_q5_0_wave64_q8_1",
                 threads: 64,
                 rows_per_block: 0,
                 mmq_tile: (64, 8),

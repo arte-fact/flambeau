@@ -347,6 +347,7 @@ fn sweep(arch: &str, op: Option<&str>, dtype: &str) -> Result<()> {
                     "Q4_1" | "Q4_1_4warp" => (vec![MmqDtype::Q4_14Warp], SweepSpec::v1_4_prefill),
                     "Q4_1_wave64" => (vec![MmqDtype::Q4_1Wave64], SweepSpec::v1_4_prefill),
                     "Q4_0" | "Q4_0_wave64" => (vec![MmqDtype::Q4_0Wave64], SweepSpec::v1_4_prefill),
+                    "Q5_0" | "Q5_0_wave64" => (vec![MmqDtype::Q5_0Wave64], SweepSpec::v1_4_prefill),
                     "Q4_K" | "Q4_K_4warp" => (vec![MmqDtype::Q4K4Warp], SweepSpec::v1_4_prefill),
                     "Q4_K_wave64" => (vec![MmqDtype::Q4KWave64], SweepSpec::v1_4_prefill),
                     "Q4_K_turbo" => (vec![MmqDtype::Q4KTurbo], SweepSpec::v1_4_prefill),
@@ -362,6 +363,7 @@ fn sweep(arch: &str, op: Option<&str>, dtype: &str) -> Result<()> {
                             MmqDtype::Q4_14Warp,
                             MmqDtype::Q4_1Wave64,
                             MmqDtype::Q4_0Wave64,
+                            MmqDtype::Q5_0Wave64,
                             MmqDtype::Q4K4Warp,
                             MmqDtype::Q4KWave64,
                             MmqDtype::Q5KWave64,
@@ -377,6 +379,7 @@ fn sweep(arch: &str, op: Option<&str>, dtype: &str) -> Result<()> {
                             | MmqDtype::Q4_14Warp
                             | MmqDtype::Q4_1Wave64
                             | MmqDtype::Q4_0Wave64
+                            | MmqDtype::Q5_0Wave64
                             | MmqDtype::Q4KTurbo
                             | MmqDtype::Q4K4Warp
                             | MmqDtype::Q4KWave64

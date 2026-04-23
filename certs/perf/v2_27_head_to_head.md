@@ -31,24 +31,25 @@ Ratios flambeau / llama.cpp (higher = flambeau leads):
 
 ## Update — V2.28 Q4_0 MMQ + V2.29 F16 MMQ tile land
 
-Post-V2.27, the V2.28 + V2.29 chains shipped MMQ tile kernels for the two dtypes with the biggest gaps. Updated numbers for the primary targets:
+Post-V2.27, the V2.28 + V2.29 + V2.30 chains shipped MMQ tile kernels for the three dtypes with the biggest gaps. Updated numbers for the primary targets:
 
-| Model | Mesh | flambeau pp (V2.29) | llama.cpp pp | Δ vs V2.27 | flambeau tg | llama.cpp tg |
+| Model | Mesh | flambeau pp (V2.30) | llama.cpp pp | Δ vs V2.27 | flambeau tg | llama.cpp tg |
 |---|---:|---:|---:|---|---:|---:|
-| Qwen3.6-35B-A3B-Q4_0 | 4 | **275.1** | 1118.4 | +108 % (132 → 275) | 46.9 | 62.3 |
+| Qwen3.6-35B-A3B-Q4_0 | 4 | **603.4** | 1118.4 | +357 % (132 → 603) | 47.4 | 62.3 |
 | Qwen3.6-27B-UD-Q8_K_XL | 4 | **95.0** | 141.9 | +69 % (56 → 95) | 17.0 | 16.8 |
 
-Prefill ratio climbed from **0.12 → 0.25** on Qwen3.6-35B-A3B-Q4_0 and **0.40 → 0.67** on Qwen3.6-27B-UD-Q8_K_XL. Decode unchanged on Q4_0 (V2.28.d r2 port was NULL — see note below) and on 27B-UD-Q8_K_XL (m<8 still uses MMVQ).
+Prefill ratio climbed from **0.12 → 0.54** on Qwen3.6-35B-A3B-Q4_0 and **0.40 → 0.67** on Qwen3.6-27B-UD-Q8_K_XL. Decode unchanged on Q4_0 (V2.28.d r2 port was NULL — see note below) and on 27B-UD-Q8_K_XL (m<8 still uses MMVQ).
 
 Contributions:
 - **V2.28.b** (dense Q4_0 MMQ): 132 → 163 tok/s = +24 % (closes attn_qkv / attn_gate / attn_output / ssm_out on the Q4_0 weight side)
 - **V2.28.c** (indexed-MoE Q4_0 MMQ tile8, gate+up fused + down): 163 → **275 tok/s = +68 % on top of .b, +108 % cumulative** (closes the 40 / 40 layers of ffn_*_exps Q4_0 in MoE prefill)
 - **V2.28.d NULL** (Q4_0 r2 decode MMVQ): −21 % decode + argmax drift. Candle P29 r2 pattern (scalar F32 per lane + half-warp reduce) strictly loses on Q4_0 because it throws away the DP4A advantage that Q4_0's flat-block structure enables. Kernel moved to `_unverified/` with diagnosis. Decode path stays on single-row DP4A.
 - **V2.29.a** (F16 tile-M MMQ): 27B-UD-Q8_K_XL prefill 56.2 → 95.0 tok/s = **+69 %**. 64 threads/block wave64, MMQ_Y=64 × MMQ_X=8, weight read once per K-sub-block into registers + reused 8× across activation rows. Activation side L1-broadcast (same as mmvq — hot line). Decode unchanged (m<8 routes to V2.25 multi-row).
+- **V2.30.a** (Q5_0 wave64 MMQ): 35B-A3B-Q4_0 prefill 275 → **603 tok/s = +119 %** on top of V2.28.c. V2.26.b was deferred on the estimate "shexp is a small fraction of prefill wall" — V2.30 proved that wrong: 20/40 layers have Q5_0 for all three ffn_*_shexp matmuls, and routing them through MMQ tile (from MMVQ row-by-row) was worth over 2× at L=512. Inner loop mirrors V2.28.a Q4_0 tile + V2.23 mmvq_q5_0's `(q5 - 16)·y = dp4a(nibble,y) + 16·dp4a(bit,y) - 16·y_s` 5th-bit DP4A path. Cert 7/7 shapes.
 
-## Remaining gap after V2.28
+## Remaining gap after V2.28+V2.29+V2.30
 
-Still 4× behind llama.cpp on 35B-A3B-Q4_0 prefill (275 vs 1118). Breakdown:
+Still 1.85× behind llama.cpp on 35B-A3B-Q4_0 prefill (603 vs 1118). Breakdown:
 
 - ~5 layers of 40 (V2.23.a Q4_1→Q8_0 for ffn_down_exps) still use MMVQ fallback for the down step — V2.22.b deferred Q8_0 indexed-MoE MMQ tile8 would close this.
 - Residual sort/pad overhead at every MoE layer entry — common with Q4_K path, V2.31 MMQ_X≥16 restructure is the lever.
