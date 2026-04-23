@@ -262,6 +262,5 @@ extern "C" {
     fn libc_gethostname(name: *mut std::os::raw::c_char, len: usize) -> i32;
 }
 
-// Silence unused-import warnings on non-hip builds (feature gate above).
-#[allow(dead_code)]
+#[expect(dead_code, reason = "anchor that keeps the `f16` import live on non-hip builds where the sweep fns are feature-gated out")]
 fn _assert_f16_used(_x: f16) {}

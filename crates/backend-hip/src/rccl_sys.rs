@@ -1,7 +1,14 @@
 //! Minimal FFI to RCCL (`librccl`). Hand-written — see `sys.rs` for the
 //! HIP-runtime equivalent and the same rationale.
 
-#![allow(non_camel_case_types, non_snake_case, dead_code)]
+#![allow(
+    non_camel_case_types,
+    non_snake_case,
+    dead_code,
+    reason = "hand-written FFI bindings mirror C NCCL/RCCL symbol names; `dead_code` \
+              covers symbols held for future collectives that are declared but not yet \
+              wired (per V1.2 partial rollout)."
+)]
 
 use std::os::raw::{c_char, c_int, c_void};
 

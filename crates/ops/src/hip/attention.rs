@@ -90,7 +90,6 @@ pub fn attention_decode_f16(
 /// Measured (Qwen3.6 shape, head_dim=256, 16/2, MI50):
 ///   * n_tokens=2048: single-pass 2647 µs → split-K 340 µs = **7.78×**
 ///   * n_tokens=4096: single-pass 5210 µs → split-K 662 µs = **7.87×**
-#[allow(clippy::too_many_arguments)]
 pub fn attention_decode_f16_splitk(
     reg: &OpsRegistry,
     stream: &HipStream,

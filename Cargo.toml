@@ -54,3 +54,58 @@ debug = 1          # keep line info for rocprofv3 / perf attribution
 
 [profile.dev]
 opt-level = 1      # compiled kernels are slow without this; pure-Rust is fine at 1
+
+# Workspace-wide lint configuration — per M-STATIC-VERIFICATION.
+# Member crates opt in with `[lints] workspace = true`.
+[workspace.lints.rust]
+ambiguous_negative_literals      = "warn"
+missing_debug_implementations    = "warn"
+redundant_imports                = "warn"
+redundant_lifetimes              = "warn"
+trivial_numeric_casts            = "warn"
+unsafe_op_in_unsafe_fn           = "warn"
+unused_lifetimes                 = "warn"
+
+[workspace.lints.clippy]
+# Major groups — priority = -1 so individual overrides below win.
+cargo        = { level = "warn", priority = -1 }
+complexity   = { level = "warn", priority = -1 }
+correctness  = { level = "warn", priority = -1 }
+pedantic     = { level = "warn", priority = -1 }
+perf         = { level = "warn", priority = -1 }
+style        = { level = "warn", priority = -1 }
+suspicious   = { level = "warn", priority = -1 }
+
+# Selected `restriction`-group lints that drive quality/consistency.
+allow_attributes_without_reason  = "warn"
+assertions_on_result_states      = "warn"
+clone_on_ref_ptr                 = "warn"
+map_err_ignore                   = "warn"
+undocumented_unsafe_blocks       = "warn"
+unnecessary_safety_comment       = "warn"
+unused_result_ok                 = "warn"
+
+# Clashes with message-template-style structured logging.
+literal_string_with_formatting_args = "allow"
+
+# Not published to crates.io — we don't maintain per-crate description/readme/
+# keywords/categories. Re-enable if/when any crate becomes externally consumed.
+cargo_common_metadata   = "allow"
+multiple_crate_versions = "allow"
+
+# Flambeau-specific opt-outs — kernel-shape math routinely int↔f32-casts,
+# and several `pedantic` lints are high-noise for the workload. Each gets
+# a rationale here in the spirit of M-LINT-OVERRIDE-EXPECT.
+cast_precision_loss      = "allow"   # int → f32 is routine in kernel-shape math
+cast_possible_truncation = "allow"   # same
+cast_sign_loss           = "allow"   # same (signed offsets into device buffers)
+cast_lossless            = "allow"   # same
+module_name_repetitions  = "allow"   # `hip::hip_device` et al. are idiomatic here
+missing_errors_doc       = "warn"    # tracked in P2.2, fixed incrementally
+missing_panics_doc       = "warn"    # same
+must_use_candidate       = "allow"   # high-noise pedantic, low signal here
+missing_const_for_fn     = "allow"   # same
+return_self_not_must_use = "allow"   # builder-style APIs are already obvious
+similar_names            = "allow"   # kernel variants genuinely share prefixes (q4_k, q5_k, …)
+too_many_lines           = "allow"   # forward.rs splits tracked in P3.2, not by line cap
+doc_markdown             = "allow"   # bare identifiers in docs (Q4_K, gfx906) aren't code spans

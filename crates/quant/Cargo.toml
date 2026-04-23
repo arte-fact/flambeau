@@ -22,3 +22,6 @@ libc = "0.2"
 
 [dev-dependencies]
 byteorder.workspace = true
+
+[lints]
+workspace = true

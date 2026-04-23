@@ -8,7 +8,13 @@
 //! The `hipError_t` enum has hundreds of values; we treat it as an i32 and
 //! rely on `hipGetErrorString` to format anything non-zero.
 
-#![allow(non_camel_case_types, non_snake_case)]
+#![allow(
+    non_camel_case_types,
+    non_snake_case,
+    reason = "hand-written FFI bindings mirror C HIP symbol names (hipError_t, \
+              hipDeviceSynchronize, …). Renaming breaks one-to-one correspondence \
+              with the upstream header and complicates diffs against ROCm releases."
+)]
 
 use std::os::raw::{c_char, c_int, c_uint, c_void};
 

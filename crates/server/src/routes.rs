@@ -1,7 +1,7 @@
 //! HTTP route handlers. Requires `hip` feature (loads real model).
 
 use std::sync::Arc;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 use anyhow::{anyhow, bail, Context, Result};
 use axum::extract::State;
@@ -58,6 +58,11 @@ pub async fn models(State(state): State<SharedState>) -> impl IntoResponse {
 }
 
 /// POST /v1/chat/completions — non-streaming only in V1.8.B.
+#[tracing::instrument(
+    name = "server.chat_completions",
+    skip_all,
+    fields(messages = req.messages.len(), stream = req.stream)
+)]
 pub async fn chat_completions(
     State(state): State<SharedState>,
     Json(req): Json<ChatCompletionRequest>,
@@ -119,6 +124,11 @@ pub async fn chat_completions(
 }
 
 /// POST /v1/completions — legacy text-completion endpoint.
+#[tracing::instrument(
+    name = "server.completions",
+    skip_all,
+    fields(stream = req.stream)
+)]
 pub async fn completions(
     State(state): State<SharedState>,
     Json(req): Json<CompletionRequest>,
@@ -176,6 +186,8 @@ fn run_completion_blocking(
     prompt: String,
     params: SamplingParams,
 ) -> Result<(String, u32, u32, String)> {
+    let request_start = Instant::now();
+
     // Serialise: one forward at a time through this server instance.
     let _guard = state
         .inflight
@@ -187,6 +199,13 @@ fn run_completion_blocking(
         bail!("prompt tokenized to 0 tokens");
     }
     let prompt_tokens = prompt_ids.len() as u32;
+
+    tracing::info!(
+        target: "server.completion.start",
+        prompt_tokens,
+        max_tokens = params.max_tokens,
+        "completion request accepted after queue wait"
+    );
 
     let cluster = &state.cluster;
     let model = &state.model;
@@ -201,6 +220,7 @@ fn run_completion_blocking(
         ShardedForwardOneTokenScratch::new(model, cluster).context("decode scratch")?;
 
     // Prefill — consumes all prompt_ids, returns argmax of the last position.
+    let prefill_start = Instant::now();
     let first_next = forward_prefill_pp(
         model,
         &mut session,
@@ -210,6 +230,12 @@ fn run_completion_blocking(
         /*start_position=*/ 0,
     )
     .context("prefill")?;
+    tracing::info!(
+        target: "server.completion.first_token",
+        prompt_tokens,
+        ttft_ms = prefill_start.elapsed().as_secs_f64() * 1000.0,
+        "first token produced (time-to-first-token)"
+    );
 
     // Decode loop.
     let _rng = Rng::from_seed(params.seed);
@@ -260,6 +286,15 @@ fn run_completion_blocking(
         .dispose(cluster)
         .context("dispose prefill scratch")?;
     session.dispose(cluster).context("dispose session")?;
+
+    tracing::info!(
+        target: "server.completion.finish",
+        prompt_tokens,
+        completion_tokens = generated.len() as u32,
+        finish_reason,
+        total_ms = request_start.elapsed().as_secs_f64() * 1000.0,
+        "completion request finished"
+    );
 
     finalise(&state, prompt_tokens, &generated, finish_reason)
 }

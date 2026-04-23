@@ -69,11 +69,13 @@ fn check_buf(buf: &[u8], cfg: &CollectiveCfg) -> CollectiveResult<()> {
 /// Each rank holds a `RefRankHandle` that issues collectives against this
 /// shared state. Tests spawn N threads, hand each its handle, and assert the
 /// post-collective buffer matches the math.
+#[derive(Debug)]
 pub struct RefMesh {
     size: u32,
     staging: Arc<RefStaging>,
 }
 
+#[derive(Debug)]
 struct RefStaging {
     /// Per-rank byte buffers for the current collective phase. Initial contents
     /// come from the rank's call; post-barrier the reducer fills them in-place.
@@ -115,7 +117,7 @@ impl Mesh for RefMesh {
 }
 
 /// Per-rank handle to the reference mesh. Clonable; held by driver threads.
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct RefRankHandle {
     pub rank: RankId,
     size: u32,

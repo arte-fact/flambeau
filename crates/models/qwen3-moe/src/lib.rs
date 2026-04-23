@@ -1,5 +1,10 @@
-// Model forward fns legitimately take many args (weights + scratch + config).
-#![allow(clippy::too_many_arguments)]
+#![allow(
+    clippy::too_many_arguments,
+    reason = "forward fns pass weights + per-layer scratches + shape config through flat \
+              parameter lists to avoid per-dispatch struct copies on the decode hot path. \
+              Scoped at crate level because forward bodies are `#[cfg(feature = \"hip\")]` \
+              gated and `#[expect]` would be unfulfilled on non-hip builds."
+)]
 //! flambeau-qwen3-moe — Qwen3.x MoE family composition.
 //!
 //! V1.7 target: `Qwen3MoEModel` with `forward_one_token` and `forward_prefill`,

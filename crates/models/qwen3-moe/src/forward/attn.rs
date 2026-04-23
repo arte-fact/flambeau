@@ -1,0 +1,1055 @@
+//! Full-attention forward: decode (one token) + prefill (L tokens).
+//!
+//! Composes the attention block — RMSNorm + fused Q|gate projection + K/V
+//! projection + partial NeoX RoPE + KV append + softmax attention + output
+//! projection. The KV cache is `F16Contig`; Q8-KV is a separate code path
+//! in V2+.
+
+#![cfg(feature = "hip")]
+
+use anyhow::{Context, Result};
+use flambeau_core::{CopyDirection, Device, DevicePtr, QDtype, Stream};
+use flambeau_ops::hip::{
+    attention::{attention_decode_f16, attention_prefill_f16, split_q_gate_f16},
+    cast::cast_f32_to_f16,
+    mlp::add_f16,
+    norm::{quantize_f16_q8_1, quantize_f16_q8_1_mmq, rmsnorm_f16, rmsnorm_quant_q8_1},
+    pe::rope_neox_partial_f16,
+    qmatmul::{mmvq, mmvq_q8_0_gate_up, qmatmul},
+    HipDevice, HipStream, OpsRegistry,
+};
+use flambeau_runtime::KvCache;
+
+use super::common::{mat_shape, qdtype_of, upload_position};
+use crate::config::Qwen3MoEConfig;
+use crate::session::LayerCache;
+use crate::weights::{DeviceTensor, FullAttnWeights};
+
+/// Workspace buffers needed by one decode step of a full-attention layer.
+/// Sized once at session init against the model config; shared across all
+/// full-attn layers (they all have the same intermediate dims).
+pub struct FullAttnScratch {
+    pub x_norm: DevicePtr,         // F16 [H]
+    pub x_q8_1: DevicePtr,         // Q8_1 blocks [H / 32]
+    pub mmvq_f32: DevicePtr,       // F32 [max(fused_q_width, H)]
+    pub q_fused_f16: DevicePtr,    // F16 [2 * n_heads * head_dim]
+    pub q_f16: DevicePtr,          // F16 [n_heads * head_dim]
+    pub gate_f16: DevicePtr,       // F16 [n_heads * head_dim]
+    pub k_f16: DevicePtr,          // F16 [n_kv_heads * head_dim]
+    pub v_f16: DevicePtr,          // F16 [n_kv_heads * head_dim]
+    pub attn_out_f16: DevicePtr,   // F16 [n_heads * head_dim]
+    pub gated_out_f16: DevicePtr,  // F16 [n_heads * head_dim]
+    pub positions: DevicePtr,      // i32 [1] — position for the current token
+    // V2.19.b — split-K (flash-decoding) partials. Sized for
+    // `MAX_SPLITK_CHUNKS` chunks so the scratch can serve any context up to
+    // `MAX_SPLITK_CHUNKS * SPLITK_CHUNK_SIZE_LONG` tokens; dispatch asserts
+    // `n_chunks <= MAX_SPLITK_CHUNKS`.
+    pub splitk_partials_m: DevicePtr,  // F32 [n_heads * MAX_SPLITK_CHUNKS]
+    pub splitk_partials_s: DevicePtr,  // F32 [n_heads * MAX_SPLITK_CHUNKS]
+    pub splitk_partials_o: DevicePtr,  // F32 [n_heads * MAX_SPLITK_CHUNKS * head_dim]
+    // Sizes for teardown + sanity asserts.
+    x_norm_bytes: usize,
+    x_q8_1_bytes: usize,
+    mmvq_f32_bytes: usize,
+    q_fused_bytes: usize,
+    qk_bytes: usize,
+    kv_bytes: usize,
+    attn_bytes: usize,
+    positions_bytes: usize,
+    splitk_ms_bytes: usize,
+    splitk_o_bytes: usize,
+    disposed: bool,
+}
+
+/// V2.19.b — partials scratch budget. 32 chunks × 512 tokens/chunk = 16 384
+/// tokens max context covered by split-K (≥ anything practical on gfx906
+/// decode). Bump alongside the dispatch threshold if context ever exceeds.
+pub const MAX_SPLITK_CHUNKS: usize = 32;
+
+impl FullAttnScratch {
+    pub fn new(cfg: &Qwen3MoEConfig, device: &HipDevice) -> Result<Self> {
+        let hidden = cfg.hidden_size;
+        let head_dim = cfg.head_dim;
+        let n_heads = cfg.num_heads;
+        let n_kv_heads = cfg.num_kv_heads;
+
+        let q_fused_width = 2 * n_heads * head_dim;
+        let q_width = n_heads * head_dim;
+        let kv_width = n_kv_heads * head_dim;
+
+        assert!(hidden % 32 == 0, "hidden must be a multiple of QK8_1=32");
+
+        let x_norm_bytes = hidden * 2;
+        // `x_q8_1` is reused for two activations: the RMSNorm-output quant
+        // of `hidden` elements (feeds Q/K/V matmuls), and the post-attn
+        // gated_out quant of `n_heads*head_dim` elements (feeds the output
+        // matmul). Size for the max — Qwen3.6 has `n_heads*head_dim=4096 >
+        // hidden=2048`, so budgeting only `hidden/32` blocks OOB-writes.
+        let x_q8_1_elems = hidden.max(q_width);
+        assert!(x_q8_1_elems % 32 == 0, "x_q8_1 elems must be multiple of QK8_1=32");
+        let x_q8_1_bytes = (x_q8_1_elems / 32) * std::mem::size_of::<BlockQ8_1>();
+        // Max MMVQ output width across all layer matmuls:
+        //   attn_q: q_fused_width (8192)
+        //   attn_output: hidden (2048)
+        //   attn_k/v: kv_width (512)
+        let mmvq_f32_bytes = q_fused_width.max(hidden) * 4;
+        let q_fused_bytes = q_fused_width * 2;
+        let qk_bytes = q_width * 2;
+        let kv_bytes = kv_width * 2;
+        let attn_bytes = q_width * 2;
+        let positions_bytes = 4;
+        // splitk partials: f32 × [n_heads, MAX_CHUNKS] (m, s) and
+        // f32 × [n_heads, MAX_CHUNKS, head_dim] (o).
+        let splitk_ms_bytes = n_heads * MAX_SPLITK_CHUNKS * 4;
+        let splitk_o_bytes = n_heads * MAX_SPLITK_CHUNKS * head_dim * 4;
+
+        let x_norm = device.alloc(x_norm_bytes)?;
+        let x_q8_1 = device.alloc(x_q8_1_bytes)?;
+        let mmvq_f32 = device.alloc(mmvq_f32_bytes)?;
+        let q_fused_f16 = device.alloc(q_fused_bytes)?;
+        let q_f16 = device.alloc(qk_bytes)?;
+        let gate_f16 = device.alloc(qk_bytes)?;
+        let k_f16 = device.alloc(kv_bytes)?;
+        let v_f16 = device.alloc(kv_bytes)?;
+        let attn_out_f16 = device.alloc(attn_bytes)?;
+        let gated_out_f16 = device.alloc(attn_bytes)?;
+        let positions = device.alloc(positions_bytes)?;
+        let splitk_partials_m = device.alloc(splitk_ms_bytes)?;
+        let splitk_partials_s = device.alloc(splitk_ms_bytes)?;
+        let splitk_partials_o = device.alloc(splitk_o_bytes)?;
+
+        Ok(Self {
+            x_norm,
+            x_q8_1,
+            mmvq_f32,
+            q_fused_f16,
+            q_f16,
+            gate_f16,
+            k_f16,
+            v_f16,
+            attn_out_f16,
+            gated_out_f16,
+            positions,
+            splitk_partials_m,
+            splitk_partials_s,
+            splitk_partials_o,
+            x_norm_bytes,
+            x_q8_1_bytes,
+            mmvq_f32_bytes,
+            q_fused_bytes,
+            qk_bytes,
+            kv_bytes,
+            attn_bytes,
+            positions_bytes,
+            splitk_ms_bytes,
+            splitk_o_bytes,
+            disposed: false,
+        })
+    }
+
+    pub fn dispose(mut self, device: &HipDevice) -> Result<()> {
+        if self.disposed {
+            return Ok(());
+        }
+        self.disposed = true;
+        // SAFETY: every pointer came from `device.alloc(bytes)` above.
+        unsafe {
+            device.dealloc(self.x_norm, self.x_norm_bytes)?;
+            device.dealloc(self.x_q8_1, self.x_q8_1_bytes)?;
+            device.dealloc(self.mmvq_f32, self.mmvq_f32_bytes)?;
+            device.dealloc(self.q_fused_f16, self.q_fused_bytes)?;
+            device.dealloc(self.q_f16, self.qk_bytes)?;
+            device.dealloc(self.gate_f16, self.qk_bytes)?;
+            device.dealloc(self.k_f16, self.kv_bytes)?;
+            device.dealloc(self.v_f16, self.kv_bytes)?;
+            device.dealloc(self.attn_out_f16, self.attn_bytes)?;
+            device.dealloc(self.gated_out_f16, self.attn_bytes)?;
+            device.dealloc(self.positions, self.positions_bytes)?;
+            device.dealloc(self.splitk_partials_m, self.splitk_ms_bytes)?;
+            device.dealloc(self.splitk_partials_s, self.splitk_ms_bytes)?;
+            device.dealloc(self.splitk_partials_o, self.splitk_o_bytes)?;
+        }
+        Ok(())
+    }
+}
+
+impl Drop for FullAttnScratch {
+    fn drop(&mut self) {
+        if !self.disposed {
+            tracing::warn!(
+                target: "flambeau_qwen3_moe::forward",
+                "FullAttnScratch dropped without dispose(device); device buffers leaked"
+            );
+        }
+    }
+}
+
+// `upload_position`, `qdtype_of`, `mat_shape` moved to `forward::common`.
+
+/// Decode step for one full-attention layer. Consumes `x_in` (F16 `[H]`)
+/// and writes the pre-residual output to `delta_out` (F16 `[H]`). The
+/// caller is expected to do the residual sum (`out = x_in + delta_out`)
+/// outside this function — V1.7.3-e adds the fused residual-add kernel
+/// for the top-level compose.
+///
+/// Appends to `kv_cache` at the current tail. `position` is the 0-based
+/// token index used by RoPE and also the `n_tokens_kv` for the attention
+/// kernel after the append bumps the cache size by 1.
+pub fn forward_full_attn_decode(
+    ops: &OpsRegistry,
+    stream: &HipStream,
+    device: &HipDevice,
+    cfg: &Qwen3MoEConfig,
+    attn_norm: &DeviceTensor,
+    post_attn_norm: Option<&DeviceTensor>,
+    weights: &FullAttnWeights,
+    kv_cache: &mut KvCache<flambeau_runtime::F16Contig, HipDevice>,
+    scratch: &mut FullAttnScratch,
+    x_in: DevicePtr,
+    delta_out: DevicePtr,
+    position: usize,
+) -> Result<()> {
+    // V1.7.3-b wires the attention block only; the FFN side of the
+    // residual is V1.7.3-d. `post_attn_norm` is still unused here; keep
+    // the handle so V1.7.3-d can call it without a second signature.
+    let _ = post_attn_norm;
+
+    let hidden = cfg.hidden_size;
+    let head_dim = cfg.head_dim;
+    let n_heads = cfg.num_heads;
+    let n_kv_heads = cfg.num_kv_heads;
+    let rope = &cfg.rope;
+
+    // 1. Fused RMSNorm(x_in) + Q8_1 quantise.
+    rmsnorm_quant_q8_1(
+        ops,
+        stream,
+        x_in,
+        attn_norm.ptr,
+        scratch.x_q8_1,
+        1,
+        hidden,
+        cfg.rms_norm_eps,
+    )
+    .context("attn_norm + quant")?;
+
+    // 2. Q|gate projection. `attn_q.weight` rows = `2 * n_heads * head_dim`
+    //    (fused). Output lands in F32; cast to F16 for the downstream
+    //    F16-only kernels.
+    let dtype_q = qdtype_of(weights.attn_q.dtype)?;
+    let (q_rows, q_k) = mat_shape(&weights.attn_q)?;
+    if q_rows != 2 * n_heads * head_dim || q_k != hidden {
+        bail!(
+            "attn_q shape [{q_rows}, {q_k}] != expected [{}, {}]",
+            2 * n_heads * head_dim,
+            hidden
+        );
+    }
+    mmvq(
+        ops,
+        stream,
+        weights.attn_q.ptr,
+        scratch.x_q8_1,
+        scratch.mmvq_f32,
+        q_rows,
+        q_k,
+        dtype_q,
+    )
+    .context("mmvq attn_q")?;
+    cast_f32_to_f16(ops, stream, scratch.mmvq_f32, scratch.q_fused_f16, q_rows)
+        .context("cast attn_q → f16")?;
+
+    // 3. Split Q and gate halves out of the fused projection.
+    split_q_gate_f16(
+        ops,
+        stream,
+        scratch.q_fused_f16,
+        scratch.q_f16,
+        scratch.gate_f16,
+        1,
+        n_heads,
+        head_dim,
+    )
+    .context("split_q_gate")?;
+
+    // 4+5. K and V projections. Both Q8_0, both [n_kv_heads*head_dim, hidden],
+    // both read the same x_q8_1. Fuse when FLAMBEAU_VARIANT=dp4a_vdr2 via
+    // mmvq_q8_0_gate_up kernel (writes to 2 F32 buffers). Avoids one launch
+    // per full-attn layer + halves activation HBM reads on this path.
+    let dtype_k = qdtype_of(weights.attn_k.dtype)?;
+    let dtype_v = qdtype_of(weights.attn_v.dtype)?;
+    let (k_rows, k_k) = mat_shape(&weights.attn_k)?;
+    let (v_rows, v_k) = mat_shape(&weights.attn_v)?;
+    if k_rows != n_kv_heads * head_dim || k_k != hidden {
+        bail!(
+            "attn_k shape [{k_rows}, {k_k}] != expected [{}, {}]",
+            n_kv_heads * head_dim,
+            hidden
+        );
+    }
+    if v_rows != n_kv_heads * head_dim || v_k != hidden {
+        bail!(
+            "attn_v shape [{v_rows}, {v_k}] != expected [{}, {}]",
+            n_kv_heads * head_dim,
+            hidden
+        );
+    }
+    let fuse_kv = std::env::var("FLAMBEAU_VARIANT").as_deref() != Ok("baseline")
+        && weights.attn_k.dtype == flambeau_quant::GgmlDType::Q8_0
+        && weights.attn_v.dtype == flambeau_quant::GgmlDType::Q8_0;
+    if fuse_kv {
+        // Fused K+V matmul, then two casts (K, V go to different F16 dsts).
+        // K output → mmvq_f32[0..k_rows]; V output → mmvq_f32[k_rows..k_rows+v_rows].
+        // scratch.mmvq_f32 is sized for attn_q (8192 rows), so 1024-row K+V fits.
+        let v_f32_offset = scratch.mmvq_f32.offset_bytes(k_rows * 4);
+        mmvq_q8_0_gate_up(
+            ops,
+            stream,
+            weights.attn_k.ptr,
+            weights.attn_v.ptr,
+            scratch.x_q8_1,
+            scratch.mmvq_f32,
+            v_f32_offset,
+            k_rows,
+            v_rows,
+            k_k,
+        )
+        .context("attn_k + attn_v fused mmvq_q8_0")?;
+        cast_f32_to_f16(ops, stream, scratch.mmvq_f32, scratch.k_f16, k_rows)
+            .context("cast attn_k → f16")?;
+        cast_f32_to_f16(ops, stream, v_f32_offset, scratch.v_f16, v_rows)
+            .context("cast attn_v → f16")?;
+    } else {
+        mmvq(
+            ops, stream, weights.attn_k.ptr, scratch.x_q8_1,
+            scratch.mmvq_f32, k_rows, k_k, dtype_k,
+        ).context("mmvq attn_k")?;
+        cast_f32_to_f16(ops, stream, scratch.mmvq_f32, scratch.k_f16, k_rows)
+            .context("cast attn_k → f16")?;
+        mmvq(
+            ops, stream, weights.attn_v.ptr, scratch.x_q8_1,
+            scratch.mmvq_f32, v_rows, v_k, dtype_v,
+        ).context("mmvq attn_v")?;
+        cast_f32_to_f16(ops, stream, scratch.mmvq_f32, scratch.v_f16, v_rows)
+            .context("cast attn_v → f16")?;
+    }
+
+    // 6. Per-head RMSNorm on Q and K.
+    let q_norm_dim = weights
+        .attn_q_norm
+        .dims
+        .first()
+        .copied()
+        .context("attn_q_norm missing dim")? as usize;
+    if q_norm_dim != head_dim {
+        bail!("attn_q_norm dim {q_norm_dim} != head_dim {head_dim}");
+    }
+    rmsnorm_f16(
+        ops,
+        stream,
+        scratch.q_f16,
+        weights.attn_q_norm.ptr,
+        scratch.q_f16,
+        n_heads,
+        head_dim,
+        cfg.rms_norm_eps,
+    )
+    .context("attn_q_norm")?;
+    rmsnorm_f16(
+        ops,
+        stream,
+        scratch.k_f16,
+        weights.attn_k_norm.ptr,
+        scratch.k_f16,
+        n_kv_heads,
+        head_dim,
+        cfg.rms_norm_eps,
+    )
+    .context("attn_k_norm")?;
+
+    // 7. RoPE on Q and K. Multi-freq partial NeoX for Qwen3.5/3.6 text-only.
+    upload_position(device, stream, scratch.positions, position as i32)
+        .context("positions upload")?;
+    rope_neox_partial_f16(
+        ops,
+        stream,
+        scratch.q_f16,
+        scratch.positions,
+        rope.freq_base,
+        1,
+        n_heads,
+        head_dim,
+        rope.rotated_dims,
+    )
+    .context("rope Q")?;
+    rope_neox_partial_f16(
+        ops,
+        stream,
+        scratch.k_f16,
+        scratch.positions,
+        rope.freq_base,
+        1,
+        n_kv_heads,
+        head_dim,
+        rope.rotated_dims,
+    )
+    .context("rope K")?;
+
+    // 8. Append K, V to the KV cache at the tail slot.
+    // SAFETY: scratch.k_f16 and v_f16 are contiguous F16 `[n_kv_heads, head_dim]`.
+    unsafe {
+        kv_cache
+            .append(device, stream, scratch.k_f16, scratch.v_f16, 1)
+            .map_err(|e| anyhow::anyhow!("kv_cache.append: {e}"))?;
+    }
+
+    // 9. Attention decode against the full cache (includes the token we
+    //    just appended — `current_tokens = position + 1`).
+    //
+    // V2.19.b — split-K (flash-decoding) for long contexts. The single-pass
+    // kernel hits 27 % CU occupancy (16 heads × 1 block on 60 CUs) and
+    // serialises over n_tokens_kv per block; at n_tokens=2048 that's 2647 µs
+    // vs split-K's 340 µs (7.78×). FLAMBEAU_VARIANT=baseline opts out.
+    let n_tokens_kv = kv_cache.current_tokens();
+    let scale = (head_dim as f32).sqrt().recip();
+    let use_splitk = std::env::var("FLAMBEAU_VARIANT").as_deref() != Ok("baseline")
+        && n_tokens_kv > 256;
+    if use_splitk {
+        let chunk_size = flambeau_ops::hip::attention::splitk_chunk_size(n_tokens_kv);
+        let n_chunks = n_tokens_kv.div_ceil(chunk_size);
+        debug_assert!(
+            n_chunks <= MAX_SPLITK_CHUNKS,
+            "split-K n_chunks={n_chunks} exceeds scratch budget MAX={MAX_SPLITK_CHUNKS}"
+        );
+        flambeau_ops::hip::attention::attention_decode_f16_splitk(
+            ops,
+            stream,
+            scratch.q_f16,
+            kv_cache.k_buffer(),
+            kv_cache.v_buffer(),
+            scratch.attn_out_f16,
+            scratch.splitk_partials_m,
+            scratch.splitk_partials_s,
+            scratch.splitk_partials_o,
+            n_heads,
+            n_kv_heads,
+            head_dim,
+            n_tokens_kv,
+            chunk_size,
+            scale,
+        )
+        .context("attention_decode_f16_splitk")?;
+    } else {
+        attention_decode_f16(
+            ops,
+            stream,
+            scratch.q_f16,
+            kv_cache.k_buffer(),
+            kv_cache.v_buffer(),
+            scratch.attn_out_f16,
+            n_heads,
+            n_kv_heads,
+            head_dim,
+            n_tokens_kv,
+            scale,
+        )
+        .context("attention_decode_f16")?;
+    }
+
+    // 10. Post-attention sigmoid-gate: gated_out = sigmoid(gate) * attn_out.
+    // Qwen3.5/3.6 uses a plain logistic sigmoid (per llama.cpp qwen35moe.cpp
+    // `gate_sigmoid = sigmoid(Qcur_full view); attn_gated = attn * gate_sigmoid`)
+    // NOT SiLU. Using swiglu here adds an extra factor of `gate`; that was
+    // V1.7.4.b's root cause — our full-attn layer 3 diverged 10-25× per element
+    // from llama.cpp, cascading through the remaining 37 layers into garbage
+    // logits. See `project_v1_7_4_b_sigmoid_gate.md`.
+    let gated_elems = n_heads * head_dim;
+    sigmoid_mul_f16(
+        ops,
+        stream,
+        scratch.gate_f16,
+        scratch.attn_out_f16,
+        scratch.gated_out_f16,
+        gated_elems,
+    )
+    .context("post-attn sigmoid-gate")?;
+
+    // 11. Quantise gated_out to Q8_1 for the output projection. Fused
+    // F16 → Q8_1 kernel lands from V1.7.3-g; replaces the earlier host
+    // roundtrip.
+    quantize_f16_q8_1(ops, stream, scratch.gated_out_f16, scratch.x_q8_1, gated_elems)
+        .context("quantize gated_out → Q8_1")?;
+
+    // 12. Output projection `[hidden, n_heads*head_dim]`.
+    let dtype_o = qdtype_of(weights.attn_output.dtype)?;
+    let (o_rows, o_k) = mat_shape(&weights.attn_output)?;
+    if o_rows != hidden || o_k != gated_elems {
+        bail!(
+            "attn_output shape [{o_rows}, {o_k}] != expected [{}, {}]",
+            hidden,
+            gated_elems
+        );
+    }
+    mmvq(
+        ops,
+        stream,
+        weights.attn_output.ptr,
+        scratch.x_q8_1,
+        scratch.mmvq_f32,
+        o_rows,
+        o_k,
+        dtype_o,
+    )
+    .context("mmvq attn_output")?;
+    cast_f32_to_f16(ops, stream, scratch.mmvq_f32, delta_out, o_rows)
+        .context("cast attn_output → f16")?;
+
+    Ok(())
+}
+
+/// Route a `LayerCache` entry through the full-attn forward, pulling the
+/// correct `KvCache` out of the enum. Fails if the layer is actually a
+/// GDN layer (caller dispatch error).
+pub fn forward_full_attn_layer_decode(
+    ops: &OpsRegistry,
+    stream: &HipStream,
+    device: &HipDevice,
+    cfg: &Qwen3MoEConfig,
+    layer_weights: &crate::weights::LayerWeights,
+    layer_cache: &mut LayerCache,
+    scratch: &mut FullAttnScratch,
+    x_in: DevicePtr,
+    delta_out: DevicePtr,
+    position: usize,
+) -> Result<()> {
+    let LayerCache::FullAttn(kv) = layer_cache else {
+        bail!(
+            "layer {} is not a full-attn layer (cache variant mismatch)",
+            layer_weights.layer_idx
+        );
+    };
+    let crate::weights::AttnWeights::FullAttn(fa) = &layer_weights.attn else {
+        bail!(
+            "layer {} weights are not FullAttn variant",
+            layer_weights.layer_idx
+        );
+    };
+    forward_full_attn_decode(
+        ops,
+        stream,
+        device,
+        cfg,
+        &layer_weights.attn_norm,
+        layer_weights.post_attention_norm.as_ref(),
+        fa,
+        kv,
+        scratch,
+        x_in,
+        delta_out,
+        position,
+    )
+}
+
+
+// ---------------------------------------------------------------------------
+// V1.7.3-f1 — full-attention prefill (L > 1).
+// ---------------------------------------------------------------------------
+
+/// Workspace for one prefill chunk of a full-attention layer. Sized once
+/// against `(cfg, max_prefill_tokens)` — the caller chunks long prompts
+/// to keep scratch VRAM bounded (V1.7.3-f4 decides the chunk size).
+///
+/// The buffers scale linearly with `max_prefill_tokens` except `x_q8_1`
+/// (which scales in blocks of 32 inputs). At hidden=2048 and L=128:
+/// activations + scratch < 10 MB total — comfortable even on 16 GB cards.
+pub struct FullAttnPrefillScratch {
+    pub max_tokens: usize,
+    pub x_norm_f16: DevicePtr,      // F16 [max_L, hidden] — rmsnorm output buffer
+                                    //                      (V2.2.d.P8: split away from the
+                                    //                       D1 fused rmsnorm+quant path so we
+                                    //                       can emit both Q8_1 layouts.)
+    pub x_q8_1: DevicePtr,          // Q8_1 blocks [max_L, hidden/32]
+    pub x_q8_1_mmq: DevicePtr,      // BlockQ8_1Mmq [hidden/128, max_L] — DS4 layout for MmqLdsX64
+    pub mmvq_f32: DevicePtr,        // F32 [max_L, max(2*H*D, H_kv*D, hidden)]
+    pub q_fused_f16: DevicePtr,     // F16 [max_L, 2*n_heads*head_dim]
+    pub q_f16: DevicePtr,           // F16 [max_L, n_heads*head_dim]
+    pub gate_f16: DevicePtr,        // F16 [max_L, n_heads*head_dim]
+    pub k_f16: DevicePtr,           // F16 [max_L, n_kv_heads*head_dim]
+    pub v_f16: DevicePtr,           // F16 [max_L, n_kv_heads*head_dim]
+    pub attn_out_f16: DevicePtr,    // F16 [max_L, n_heads*head_dim]
+    pub gated_out_f16: DevicePtr,   // F16 [max_L, n_heads*head_dim]
+    pub positions: DevicePtr,       // i32 [max_L]
+    pub gated_q8_1: DevicePtr,      // Q8_1 [max_L, n_heads*head_dim/32]
+    pub gated_q8_1_mmq: DevicePtr,  // BlockQ8_1Mmq [q_width/128, max_L] — DS4 layout
+    // Bookkeeping.
+    x_norm_f16_bytes: usize,
+    x_q8_1_bytes: usize,
+    x_q8_1_mmq_bytes: usize,
+    mmvq_f32_bytes: usize,
+    q_fused_bytes: usize,
+    qk_bytes: usize,
+    kv_bytes: usize,
+    attn_bytes: usize,
+    positions_bytes: usize,
+    gated_q8_1_bytes: usize,
+    gated_q8_1_mmq_bytes: usize,
+    disposed: bool,
+}
+
+impl FullAttnPrefillScratch {
+    pub fn new(
+        cfg: &Qwen3MoEConfig,
+        device: &HipDevice,
+        max_tokens: usize,
+    ) -> Result<Self> {
+        assert!(max_tokens >= 1, "max_tokens must be >= 1");
+        let hidden = cfg.hidden_size;
+        let head_dim = cfg.head_dim;
+        let n_heads = cfg.num_heads;
+        let n_kv_heads = cfg.num_kv_heads;
+
+        let q_fused_width = 2 * n_heads * head_dim;
+        let q_width = n_heads * head_dim;
+        let kv_width = n_kv_heads * head_dim;
+
+        assert!(hidden % 32 == 0, "hidden must be a multiple of QK8_1=32");
+        assert!(q_width % 32 == 0, "n_heads * head_dim must be multiple of 32");
+        assert!(
+            hidden % 128 == 0,
+            "hidden must be a multiple of QK8_1_MMQ=128 for the DS4 layout"
+        );
+        assert!(
+            q_width % 128 == 0,
+            "n_heads * head_dim must be a multiple of QK8_1_MMQ=128 for the DS4 layout"
+        );
+
+        let mmq_block = std::mem::size_of::<flambeau_quant::BlockQ8_1Mmq>();
+        let x_norm_f16_bytes = max_tokens * hidden * 2;
+        let x_q8_1_bytes = max_tokens * (hidden / 32) * std::mem::size_of::<BlockQ8_1>();
+        let x_q8_1_mmq_bytes = max_tokens * (hidden / 128) * mmq_block;
+        let mmvq_f32_bytes = max_tokens * q_fused_width.max(hidden) * 4;
+        let q_fused_bytes = max_tokens * q_fused_width * 2;
+        let qk_bytes = max_tokens * q_width * 2;
+        let kv_bytes = max_tokens * kv_width * 2;
+        let attn_bytes = max_tokens * q_width * 2;
+        let positions_bytes = max_tokens * 4;
+        let gated_q8_1_bytes =
+            max_tokens * (q_width / 32) * std::mem::size_of::<BlockQ8_1>();
+        let gated_q8_1_mmq_bytes = max_tokens * (q_width / 128) * mmq_block;
+
+        let x_norm_f16 = device.alloc(x_norm_f16_bytes)?;
+        let x_q8_1 = device.alloc(x_q8_1_bytes)?;
+        let x_q8_1_mmq = device.alloc(x_q8_1_mmq_bytes)?;
+        let mmvq_f32 = device.alloc(mmvq_f32_bytes)?;
+        let q_fused_f16 = device.alloc(q_fused_bytes)?;
+        let q_f16 = device.alloc(qk_bytes)?;
+        let gate_f16 = device.alloc(qk_bytes)?;
+        let k_f16 = device.alloc(kv_bytes)?;
+        let v_f16 = device.alloc(kv_bytes)?;
+        let attn_out_f16 = device.alloc(attn_bytes)?;
+        let gated_out_f16 = device.alloc(attn_bytes)?;
+        let positions = device.alloc(positions_bytes)?;
+        let gated_q8_1 = device.alloc(gated_q8_1_bytes)?;
+        let gated_q8_1_mmq = device.alloc(gated_q8_1_mmq_bytes)?;
+
+        Ok(Self {
+            max_tokens,
+            x_norm_f16,
+            x_q8_1,
+            x_q8_1_mmq,
+            mmvq_f32,
+            q_fused_f16,
+            q_f16,
+            gate_f16,
+            k_f16,
+            v_f16,
+            attn_out_f16,
+            gated_out_f16,
+            positions,
+            gated_q8_1,
+            gated_q8_1_mmq,
+            x_norm_f16_bytes,
+            x_q8_1_bytes,
+            x_q8_1_mmq_bytes,
+            mmvq_f32_bytes,
+            q_fused_bytes,
+            qk_bytes,
+            kv_bytes,
+            attn_bytes,
+            positions_bytes,
+            gated_q8_1_bytes,
+            gated_q8_1_mmq_bytes,
+            disposed: false,
+        })
+    }
+
+    pub fn dispose(mut self, device: &HipDevice) -> Result<()> {
+        if self.disposed {
+            return Ok(());
+        }
+        self.disposed = true;
+        // SAFETY: every pointer came from `device.alloc(bytes)` above.
+        unsafe {
+            device.dealloc(self.x_norm_f16, self.x_norm_f16_bytes)?;
+            device.dealloc(self.x_q8_1, self.x_q8_1_bytes)?;
+            device.dealloc(self.x_q8_1_mmq, self.x_q8_1_mmq_bytes)?;
+            device.dealloc(self.mmvq_f32, self.mmvq_f32_bytes)?;
+            device.dealloc(self.q_fused_f16, self.q_fused_bytes)?;
+            device.dealloc(self.q_f16, self.qk_bytes)?;
+            device.dealloc(self.gate_f16, self.qk_bytes)?;
+            device.dealloc(self.k_f16, self.kv_bytes)?;
+            device.dealloc(self.v_f16, self.kv_bytes)?;
+            device.dealloc(self.attn_out_f16, self.attn_bytes)?;
+            device.dealloc(self.gated_out_f16, self.attn_bytes)?;
+            device.dealloc(self.positions, self.positions_bytes)?;
+            device.dealloc(self.gated_q8_1, self.gated_q8_1_bytes)?;
+            device.dealloc(self.gated_q8_1_mmq, self.gated_q8_1_mmq_bytes)?;
+        }
+        Ok(())
+    }
+}
+
+impl Drop for FullAttnPrefillScratch {
+    fn drop(&mut self) {
+        if !self.disposed {
+            tracing::warn!(
+                target: "flambeau_qwen3_moe::forward",
+                "FullAttnPrefillScratch dropped without dispose(device); device buffers leaked"
+            );
+        }
+    }
+}
+
+/// Upload `L` i32 positions `[start_position, start_position + L)` into the
+/// `positions` scratch slot. Matches `rope_neox_partial_f16`'s expectation.
+fn upload_positions_range(
+    device: &HipDevice,
+    stream: &HipStream,
+    dst: DevicePtr,
+    start_position: usize,
+    n: usize,
+) -> Result<()> {
+    let host: Vec<i32> = (0..n).map(|i| (start_position + i) as i32).collect();
+    // SAFETY: `dst` has at least `n * 4` valid bytes; `host` is the same length.
+    unsafe {
+        device.memcpy_async(
+            stream,
+            CopyDirection::HostToDevice,
+            dst,
+            DevicePtr(host.as_ptr() as usize),
+            n * 4,
+        )?;
+    }
+    stream.synchronize()?;
+    Ok(())
+}
+
+/// Prefill step for one full-attention layer over `n_tokens = L` inputs.
+/// The KV cache is expected to hold `start_position` tokens of history
+/// (0 on a fresh sequence); this call appends the L new tokens and
+/// computes causal attention for each new Q row against the combined
+/// `[history + L]` KV.
+///
+/// `x_in` layout: F16 `[L, hidden]`, row-major (rows are tokens).
+/// `delta_out` layout: F16 `[L, hidden]`.
+pub fn forward_full_attn_prefill(
+    ops: &OpsRegistry,
+    stream: &HipStream,
+    device: &HipDevice,
+    cfg: &Qwen3MoEConfig,
+    attn_norm: &DeviceTensor,
+    weights: &FullAttnWeights,
+    kv_cache: &mut KvCache<flambeau_runtime::F16Contig, HipDevice>,
+    scratch: &mut FullAttnPrefillScratch,
+    x_in: DevicePtr,
+    delta_out: DevicePtr,
+    n_tokens: usize,
+    start_position: usize,
+) -> Result<()> {
+    if n_tokens == 0 {
+        bail!("forward_full_attn_prefill called with n_tokens = 0");
+    }
+    if n_tokens > scratch.max_tokens {
+        bail!(
+            "forward_full_attn_prefill: n_tokens={n_tokens} > scratch.max_tokens={}; caller must chunk",
+            scratch.max_tokens
+        );
+    }
+
+    let hidden = cfg.hidden_size;
+    let head_dim = cfg.head_dim;
+    let n_heads = cfg.num_heads;
+    let n_kv_heads = cfg.num_kv_heads;
+    let q_width = n_heads * head_dim;
+    let rope = &cfg.rope;
+
+    // 1. rmsnorm(x_in) → F16 scratch, then quantise to BOTH Q8_1 layouts.
+    //
+    // V2.2.d.P8: the older D1 fused rmsnorm+quant_q8_1 kernel writes only
+    // the standard per-row layout. To feed the 4-warp LDS-tiled Q4_1 MMQ
+    // kernel at M ≥ 128 we need the DS4 (BlockQ8_1Mmq) layout in parallel.
+    // Unfused rmsnorm costs one extra HBM round-trip per token (x_norm_f16
+    // buffer, ~n_tokens·hidden·2 B), negligible against attention wall-clock.
+    rmsnorm_f16(
+        ops,
+        stream,
+        x_in,
+        attn_norm.ptr,
+        scratch.x_norm_f16,
+        n_tokens,
+        hidden,
+        cfg.rms_norm_eps,
+    )
+    .context("prefill attn_norm")?;
+    quantize_f16_q8_1(
+        ops, stream, scratch.x_norm_f16, scratch.x_q8_1, n_tokens * hidden,
+    )
+    .context("prefill attn x_norm → Q8_1 (std)")?;
+    quantize_f16_q8_1_mmq(
+        ops, stream, scratch.x_norm_f16, scratch.x_q8_1_mmq, hidden, n_tokens,
+    )
+    .context("prefill attn x_norm → Q8_1 (MMQ DS4)")?;
+
+    // 2. Q|gate projection across L rows. `qmatmul` auto-dispatches to
+    //    looped MMVQ (mid-M) or MMQ (M ≥ 128) based on the table.
+    let dtype_q = qdtype_of(weights.attn_q.dtype)?;
+    let (q_rows, q_k) = mat_shape(&weights.attn_q)?;
+    if q_rows != 2 * n_heads * head_dim || q_k != hidden {
+        bail!(
+            "attn_q shape [{q_rows}, {q_k}] != expected [{}, {}]",
+            2 * n_heads * head_dim,
+            hidden
+        );
+    }
+    qmatmul(
+        ops,
+        stream,
+        weights.attn_q.ptr,
+        scratch.x_q8_1, scratch.x_q8_1_mmq,
+        scratch.mmvq_f32,
+        n_tokens,
+        q_k,
+        q_rows,
+        dtype_q,
+    )
+    .context("prefill qmatmul attn_q")?;
+    cast_f32_to_f16(
+        ops,
+        stream,
+        scratch.mmvq_f32,
+        scratch.q_fused_f16,
+        n_tokens * q_rows,
+    )
+    .context("prefill cast attn_q → f16")?;
+
+    // 3. Split Q | gate across L tokens.
+    split_q_gate_f16(
+        ops,
+        stream,
+        scratch.q_fused_f16,
+        scratch.q_f16,
+        scratch.gate_f16,
+        n_tokens,
+        n_heads,
+        head_dim,
+    )
+    .context("prefill split_q_gate")?;
+
+    // 4. K / V projections.
+    let dtype_k = qdtype_of(weights.attn_k.dtype)?;
+    let (k_rows, k_k) = mat_shape(&weights.attn_k)?;
+    if k_rows != n_kv_heads * head_dim || k_k != hidden {
+        bail!(
+            "attn_k shape [{k_rows}, {k_k}] != expected [{}, {}]",
+            n_kv_heads * head_dim,
+            hidden
+        );
+    }
+    qmatmul(
+        ops, stream, weights.attn_k.ptr,
+        scratch.x_q8_1, scratch.x_q8_1_mmq,
+        scratch.mmvq_f32,
+        n_tokens, k_k, k_rows, dtype_k,
+    )
+    .context("prefill qmatmul attn_k")?;
+    cast_f32_to_f16(
+        ops, stream, scratch.mmvq_f32, scratch.k_f16, n_tokens * k_rows,
+    )
+    .context("prefill cast attn_k → f16")?;
+
+    let dtype_v = qdtype_of(weights.attn_v.dtype)?;
+    let (v_rows, v_k) = mat_shape(&weights.attn_v)?;
+    if v_rows != n_kv_heads * head_dim || v_k != hidden {
+        bail!(
+            "attn_v shape [{v_rows}, {v_k}] != expected [{}, {}]",
+            n_kv_heads * head_dim,
+            hidden
+        );
+    }
+    qmatmul(
+        ops, stream, weights.attn_v.ptr,
+        scratch.x_q8_1, scratch.x_q8_1_mmq,
+        scratch.mmvq_f32,
+        n_tokens, v_k, v_rows, dtype_v,
+    )
+    .context("prefill qmatmul attn_v")?;
+    cast_f32_to_f16(
+        ops, stream, scratch.mmvq_f32, scratch.v_f16, n_tokens * v_rows,
+    )
+    .context("prefill cast attn_v → f16")?;
+
+    // 5. Per-head Q/K rmsnorm. Flatten the outer dim to L × heads.
+    let q_norm_dim = weights
+        .attn_q_norm
+        .dims
+        .first()
+        .copied()
+        .context("attn_q_norm missing dim")? as usize;
+    if q_norm_dim != head_dim {
+        bail!("attn_q_norm dim {q_norm_dim} != head_dim {head_dim}");
+    }
+    rmsnorm_f16(
+        ops,
+        stream,
+        scratch.q_f16,
+        weights.attn_q_norm.ptr,
+        scratch.q_f16,
+        n_tokens * n_heads,
+        head_dim,
+        cfg.rms_norm_eps,
+    )
+    .context("prefill attn_q_norm")?;
+    rmsnorm_f16(
+        ops,
+        stream,
+        scratch.k_f16,
+        weights.attn_k_norm.ptr,
+        scratch.k_f16,
+        n_tokens * n_kv_heads,
+        head_dim,
+        cfg.rms_norm_eps,
+    )
+    .context("prefill attn_k_norm")?;
+
+    // 6. RoPE on Q / K, with per-token positions.
+    upload_positions_range(device, stream, scratch.positions, start_position, n_tokens)?;
+    rope_neox_partial_f16(
+        ops,
+        stream,
+        scratch.q_f16,
+        scratch.positions,
+        rope.freq_base,
+        n_tokens,
+        n_heads,
+        head_dim,
+        rope.rotated_dims,
+    )
+    .context("prefill rope Q")?;
+    rope_neox_partial_f16(
+        ops,
+        stream,
+        scratch.k_f16,
+        scratch.positions,
+        rope.freq_base,
+        n_tokens,
+        n_kv_heads,
+        head_dim,
+        rope.rotated_dims,
+    )
+    .context("prefill rope K")?;
+
+    // 7. Append all L tokens to the KV cache.
+    // SAFETY: scratch.k_f16 / v_f16 hold `n_tokens * n_kv_heads * head_dim` F16s.
+    unsafe {
+        kv_cache
+            .append(device, stream, scratch.k_f16, scratch.v_f16, n_tokens)
+            .map_err(|e| anyhow::anyhow!("kv_cache.append(L={n_tokens}): {e}"))?;
+    }
+
+    // 8. Causal prefill attention. `n_k_tokens = start_position + L`
+    // (after append); `q_offset = start_position` so Q row i attends to
+    // K rows `0..start_position + i + 1`.
+    let n_k_tokens = kv_cache.current_tokens();
+    let scale = (head_dim as f32).sqrt().recip();
+    attention_prefill_f16(
+        ops,
+        stream,
+        scratch.q_f16,
+        kv_cache.k_buffer(),
+        kv_cache.v_buffer(),
+        scratch.attn_out_f16,
+        n_tokens,
+        n_heads,
+        n_kv_heads,
+        head_dim,
+        n_k_tokens,
+        start_position,
+        scale,
+    )
+    .context("attention_prefill_f16")?;
+
+    // 9. Post-attention sigmoid-gate: gated_out = sigmoid(gate) * attn_out,
+    // per token. See V1.7.4.b note in the decode path — Qwen3.5/3.6 uses
+    // plain sigmoid, not SiLU.
+    sigmoid_mul_f16(
+        ops,
+        stream,
+        scratch.gate_f16,
+        scratch.attn_out_f16,
+        scratch.gated_out_f16,
+        n_tokens * q_width,
+    )
+    .context("prefill post-attn sigmoid-gate")?;
+
+    // 10. Quantise gated_out to BOTH Q8_1 layouts for the output projection.
+    quantize_f16_q8_1(
+        ops,
+        stream,
+        scratch.gated_out_f16,
+        scratch.gated_q8_1,
+        n_tokens * q_width,
+    )
+    .context("prefill quantise gated → Q8_1 (std)")?;
+    quantize_f16_q8_1_mmq(
+        ops,
+        stream,
+        scratch.gated_out_f16,
+        scratch.gated_q8_1_mmq,
+        q_width,
+        n_tokens,
+    )
+    .context("prefill quantise gated → Q8_1 (MMQ DS4)")?;
+
+    // 11. Output projection across L tokens.
+    let dtype_o = qdtype_of(weights.attn_output.dtype)?;
+    let (o_rows, o_k) = mat_shape(&weights.attn_output)?;
+    if o_rows != hidden || o_k != q_width {
+        bail!(
+            "attn_output shape [{o_rows}, {o_k}] != expected [{}, {}]",
+            hidden,
+            q_width
+        );
+    }
+    qmatmul(
+        ops,
+        stream,
+        weights.attn_output.ptr,
+        scratch.gated_q8_1, scratch.gated_q8_1_mmq,
+        scratch.mmvq_f32,
+        n_tokens,
+        o_k,
+        o_rows,
+        dtype_o,
+    )
+    .context("prefill qmatmul attn_output")?;
+    cast_f32_to_f16(
+        ops,
+        stream,
+        scratch.mmvq_f32,
+        delta_out,
+        n_tokens * hidden,
+    )
+    .context("prefill cast attn_output → f16")?;
+
+    Ok(())
+}

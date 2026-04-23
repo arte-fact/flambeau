@@ -7,11 +7,13 @@
 #![forbid(unsafe_op_in_unsafe_fn)]
 
 pub mod device;
+pub mod kernel_limits;
 pub mod op;
 
 pub use device::{
     CopyDirection, Device, DeviceError, DevicePtr, DeviceResult, Stream,
 };
+pub use kernel_limits::{MOE_SORT_MAX_EXPERTS, TOPK_MAX_EXPERTS};
 pub use op::{
     KernelDescriptor, KernelImpl, Op, OpContract, QDtype, QMatMul, QMatMulCfg, QMatMulInput,
     QMatMulOutput, RmsNorm, RmsNormCfg, RmsNormInput, RmsNormOutput, SwiGLU, SwiGLUCfg,

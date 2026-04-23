@@ -682,7 +682,6 @@ pub fn run_indexed_moe_mmvq_q8_0_sweep(repo_root: &Path) -> Result<Cert> {
     Ok(cert)
 }
 
-#[allow(clippy::too_many_arguments)]
 fn run_q8_0_shape(
     dev: &HipDevice,
     kernel: &HipKernel<'_>,

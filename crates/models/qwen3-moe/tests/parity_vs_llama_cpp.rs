@@ -53,7 +53,7 @@ struct ParityCert {
     #[serde(default = "default_expect_pass")]
     expect_pass: bool,
     /// Free-form note — reference prompt, llama.cpp / candle commit, etc.
-    #[allow(dead_code)] // kept so cert JSON keeps documenting its provenance
+    #[expect(dead_code, reason = "cert provenance (reference prompt, upstream commit); never read by the test itself")]
     notes: String,
 }
 

@@ -8,6 +8,11 @@
 //! `make_qkx1_quants` quantiser. Future V1.3 cert grid will fold in real
 //! round-trip GGUFs.
 
+#![expect(
+    clippy::undocumented_unsafe_blocks,
+    reason = "test fixture — every `unsafe {}` below is a kernel launch or `memcpy_async`               whose invariant is uniform: host/device buffers live for the bounded               `synchronize()` that follows, pointers are freshly allocated above, kernel               ABIs match kernels-hip. Per-site SAFETY comments would just repeat this."
+)]
+
 use flambeau_backend_hip::{device_count, HipDevice, HipKernel, HipModule, KernelArgs, LaunchCfg};
 use flambeau_core::{CopyDirection, Device, DevicePtr, Stream};
 use flambeau_kernels_hip as kernels;
@@ -220,7 +225,7 @@ fn max_rel_err(got: &[f32], reference: &[f32]) -> f32 {
         .fold(0.0f32, f32::max)
 }
 
-#[allow(dead_code)]
+#[allow(dead_code, reason = "printf-style cert debug helper; called ad-hoc when investigating correctness regressions. `#[allow]` because the whole fn body is `#[cfg(feature = \"hip\")]` gated")]
 fn debug_worst(got: &[f32], reference: &[f32]) {
     let mut worst = (0usize, 0.0f32);
     for (i, (g, r)) in got.iter().zip(reference).enumerate() {

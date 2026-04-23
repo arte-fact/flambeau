@@ -107,7 +107,6 @@ pub fn run_sweep(repo_root: &Path) -> Result<Cert> {
     Ok(cert)
 }
 
-#[allow(clippy::too_many_arguments)]
 fn run_shape(
     dev: &HipDevice,
     k_chunk: &HipKernel<'_>,

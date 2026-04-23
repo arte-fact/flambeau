@@ -25,6 +25,7 @@ use crate::gguf::GgufFile;
 
 /// Handles returned by [`load_from_gguf`]. Wraps the `tokenizers::Tokenizer`
 /// plus the special-token ids we've seen the runtime care about.
+#[derive(Debug)]
 pub struct GgufTokenizer {
     pub inner: Tokenizer,
     pub bos_id: Option<u32>,
@@ -40,6 +41,10 @@ pub struct GgufTokenizer {
 impl GgufTokenizer {
     /// Encode `text` → token ids. No added-special-tokens; the chat template
     /// (V1.8.A.3) is responsible for inserting BOS/EOS as appropriate.
+    ///
+    /// # Errors
+    /// Returns an `anyhow` error wrapping whatever `tokenizers::Tokenizer::encode`
+    /// reports — typically a malformed input or normaliser failure.
     pub fn encode(&self, text: &str) -> Result<Vec<u32>> {
         let enc = self
             .inner
@@ -49,6 +54,10 @@ impl GgufTokenizer {
     }
 
     /// Decode `ids` → UTF-8 string. Skips added-special-tokens.
+    ///
+    /// # Errors
+    /// Returns an `anyhow` error wrapping whatever `tokenizers::Tokenizer::decode`
+    /// reports — typically an out-of-vocab id or invalid UTF-8 byte sequence.
     pub fn decode(&self, ids: &[u32]) -> Result<String> {
         self.inner
             .decode(ids, /*skip_special_tokens=*/ false)
@@ -57,6 +66,12 @@ impl GgufTokenizer {
 }
 
 /// Load a tokenizer from a GGUF file's embedded metadata.
+///
+/// # Errors
+/// Returns an `anyhow` error if the required GGUF metadata keys are missing
+/// (`tokenizer.ggml.model`, vocab arrays, merges), if the vocab/merges can't
+/// be reconstructed into a `tokenizers::Tokenizer`, or if the tokenizer
+/// model name isn't one of the V1-supported families (BPE/GPT2-style).
 pub fn load_from_gguf(file: &GgufFile) -> Result<GgufTokenizer> {
     let model = file
         .metadata_str("tokenizer.ggml.model")

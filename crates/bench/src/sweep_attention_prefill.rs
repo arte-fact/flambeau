@@ -107,7 +107,6 @@ pub fn run_sweep(repo_root: &Path) -> Result<Cert> {
     Ok(cert)
 }
 
-#[allow(clippy::too_many_arguments)]
 fn run_shape(
     dev: &HipDevice,
     kernel: &HipKernel<'_>,
@@ -338,7 +337,6 @@ pub fn run_sweep_flash_tile(repo_root: &Path) -> Result<Cert> {
     Ok(cert)
 }
 
-#[allow(clippy::too_many_arguments)]
 fn run_shape_flash_tile(
     dev: &HipDevice,
     kernel: &HipKernel<'_>,

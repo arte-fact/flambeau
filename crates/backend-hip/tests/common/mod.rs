@@ -80,6 +80,9 @@ pub fn max_rel_err(got: &[f32], reference: &[f32]) -> f32 {
 pub fn alloc_and_upload<T: Copy>(dev: &HipDevice, data: &[T]) -> DevicePtr {
     let bytes = std::mem::size_of_val(data);
     let d = dev.alloc(bytes).unwrap();
+    // SAFETY: `d` is a fresh `bytes`-sized device allocation. `data` is a live
+    // host slice sized exactly `bytes`. We `synchronize` immediately after, so
+    // the host slice definitely outlives the copy.
     unsafe {
         dev.memcpy_async(
             dev.default_stream(),
@@ -96,6 +99,9 @@ pub fn alloc_and_upload<T: Copy>(dev: &HipDevice, data: &[T]) -> DevicePtr {
 
 pub fn download_f32(dev: &HipDevice, src: DevicePtr, len: usize) -> Vec<f32> {
     let mut out = vec![0.0f32; len];
+    // SAFETY: `out` is a fresh `len*4`-byte host allocation. `src` is the
+    // caller's device pointer, required to be live and sized `≥ len*4`.
+    // We `synchronize` immediately after, so `out` outlives the copy.
     unsafe {
         dev.memcpy_async(
             dev.default_stream(),
@@ -134,6 +140,10 @@ pub fn quantize_q8_1_on_device(
     args.push(&d_y_q8_1_ptr);
     args.push(&n_elems);
     let cfg = LaunchCfg::one_d(y_blocks as u32, QK8 as u32);
+    // SAFETY: kernel ABI is `(const f32*, BlockQ8_1*, int)`; `args` holds
+    // `&d_y_f32_ptr`, `&d_y_q8_1_ptr`, `&n_elems` which live until the
+    // synchronize below. Device pointers are both live and correctly sized
+    // (`d_y_f32` by caller, `d_y_q8_1` by the alloc above).
     unsafe { kernel.launch(stream, cfg, args).unwrap() };
     stream.synchronize().unwrap();
 

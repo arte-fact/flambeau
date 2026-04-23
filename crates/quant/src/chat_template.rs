@@ -32,8 +32,21 @@ pub struct ChatTemplate {
     template_name: &'static str,
 }
 
+impl std::fmt::Debug for ChatTemplate {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ChatTemplate")
+            .field("template_name", &self.template_name)
+            .finish_non_exhaustive()
+    }
+}
+
 impl ChatTemplate {
     /// Load `tokenizer.chat_template` from a GGUF and pre-compile it.
+    ///
+    /// # Errors
+    /// - `anyhow` wrapping "tokenizer.chat_template missing" if the GGUF
+    ///   lacks the metadata key.
+    /// - Any error [`from_string`] can return (minijinja parse failure).
     pub fn load_from_gguf(file: &GgufFile) -> Result<Self> {
         let tpl_str = file
             .metadata_str("tokenizer.chat_template")
@@ -44,6 +57,9 @@ impl ChatTemplate {
 
     /// Pre-compile a raw template string. Accepts owned String so we can
     /// stash it in the environment for the `'static` lifetime.
+    ///
+    /// # Errors
+    /// `anyhow` wrapping `minijinja::Error` if the template fails to parse.
     pub fn from_string(tpl_str: String) -> Result<Self> {
         let mut env = Environment::new();
         // Install Python-compat string/list methods. Qwen's template uses
@@ -63,6 +79,11 @@ impl ChatTemplate {
 
     /// Render messages into the model prompt. `add_generation_prompt=true`
     /// appends the assistant header so the model completes into a new turn.
+    ///
+    /// # Errors
+    /// `anyhow` wrapping a `minijinja::Error` if the template references an
+    /// undefined variable, applies an unknown filter/method, or raises from
+    /// inside a `{% raise %}` block.
     pub fn render(
         &self,
         messages: &[ChatMessage],

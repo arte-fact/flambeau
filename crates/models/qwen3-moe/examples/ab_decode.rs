@@ -31,7 +31,7 @@ use std::process::{Command, Stdio};
 #[derive(Debug, Deserialize)]
 struct ChildResult {
     devices: Vec<i32>,
-    #[allow(dead_code)]
+    #[expect(dead_code, reason = "part of the child-process JSON contract; reserved for future variance reporting")]
     steps: u32,
     wall_secs: f64,
     tok_per_sec: f64,

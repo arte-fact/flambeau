@@ -1,5 +1,10 @@
 //! TopK + softmax correctness test against a CPU reference.
 
+#![expect(
+    clippy::undocumented_unsafe_blocks,
+    reason = "test fixture — every `unsafe {}` below is a kernel launch or `memcpy_async`               whose invariant is uniform: host/device buffers live for the bounded               `synchronize()` that follows, pointers are freshly allocated above, kernel               ABIs match kernels-hip. Per-site SAFETY comments would just repeat this."
+)]
+
 use flambeau_backend_hip::{
     device_count, HipDevice, HipKernel, HipModule, KernelArgs, LaunchCfg,
 };

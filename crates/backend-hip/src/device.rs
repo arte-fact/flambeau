@@ -39,6 +39,8 @@ fn check(code: c_int, ctx: &'static str) -> DeviceResult<()> {
 /// Number of HIP devices visible to this process.
 pub fn device_count() -> DeviceResult<i32> {
     let mut count: c_int = 0;
+    // SAFETY: `hipGetDeviceCount` writes an `int` through the out-pointer and
+    // reads nothing from it. `&mut count` is valid for writes of `sizeof(int)`.
     let code = unsafe { hipGetDeviceCount(&mut count as *mut _) };
     check(code, "hipGetDeviceCount")?;
     Ok(count as i32)
@@ -46,12 +48,16 @@ pub fn device_count() -> DeviceResult<i32> {
 
 /// Bind the current thread's HIP context to `device_id`.
 pub fn bind(device_id: i32) -> DeviceResult<()> {
+    // SAFETY: `hipSetDevice` takes an `int` by value and touches no caller memory.
+    // A negative or out-of-range id is returned as an error via the return code.
     check(unsafe { hipSetDevice(device_id as c_int) }, "hipSetDevice")
 }
 
 /// Return the HIP context's current device id.
 pub fn current_device() -> DeviceResult<i32> {
     let mut id: c_int = -1;
+    // SAFETY: `hipGetDevice` writes an `int` through the out-pointer and reads
+    // nothing from it. `&mut id` is valid for writes of `sizeof(int)`.
     check(unsafe { hipGetDevice(&mut id as *mut _) }, "hipGetDevice")?;
     Ok(id as i32)
 }
@@ -62,7 +68,23 @@ pub struct HipStream {
     device_id: i32,
 }
 
+impl std::fmt::Debug for HipStream {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("HipStream")
+            .field("ptr", &(self.ptr as usize))
+            .field("device_id", &self.device_id)
+            .finish()
+    }
+}
+
+// SAFETY: `hipStream_t` is an opaque driver handle with no Rust-side aliasing.
+// HIP streams are documented as safe to pass between threads (operations
+// serialise within a stream driver-side). `HipStream` owns its handle and
+// destroys it on drop, so there is no cross-thread double-free risk.
 unsafe impl Send for HipStream {}
+// SAFETY: See `Send`. `&HipStream` only lets other threads read the handle
+// pointer and call `hipStreamSynchronize` / submit work — both are thread-safe
+// per the HIP runtime contract.
 unsafe impl Sync for HipStream {}
 
 impl HipStream {
@@ -70,6 +92,8 @@ impl HipStream {
     /// `bind(device_id)` in effect for the current thread.
     pub fn new(device_id: i32) -> DeviceResult<Self> {
         let mut s: hipStream_t = ptr::null_mut();
+        // SAFETY: `hipStreamCreate` writes a stream handle through the
+        // out-pointer. `&mut s` is valid for writes of a `hipStream_t`.
         check(unsafe { hipStreamCreate(&mut s as *mut _) }, "hipStreamCreate")?;
         Ok(Self {
             ptr: s,
@@ -89,7 +113,10 @@ impl HipStream {
 impl Drop for HipStream {
     fn drop(&mut self) {
         if !self.ptr.is_null() {
-            // Best-effort: stream destroy errors are non-actionable at drop time.
+            // SAFETY: `self.ptr` was returned by `hipStreamCreate` in `new()`
+            // and is not shared with any other owning type (streams are Send
+            // but never Clone). The null check above guards against a partially-
+            // constructed instance. Destroy errors are non-actionable at drop.
             let _ = unsafe { hipStreamDestroy(self.ptr) };
             self.ptr = ptr::null_mut();
         }
@@ -102,6 +129,8 @@ impl Stream for HipStream {
     }
 
     fn synchronize(&self) -> DeviceResult<()> {
+        // SAFETY: `self.ptr` is a live stream handle (owned, non-null once
+        // constructed; drop sets it back to null but no method can observe that).
         check(
             unsafe { hipStreamSynchronize(self.ptr) },
             "hipStreamSynchronize",
@@ -114,6 +143,7 @@ impl Stream for HipStream {
 /// Construction calls `hipSetDevice` once, but there is no guarantee that the
 /// process's HIP context stays on this device across calls — callers driving
 /// multiple GPUs from one thread must `HipDevice::bind()` before operations.
+#[derive(Debug)]
 pub struct HipDevice {
     id: i32,
     default_stream: HipStream,
@@ -171,6 +201,9 @@ impl Device for HipDevice {
         }
         self.bind()?;
         let mut p: *mut std::os::raw::c_void = ptr::null_mut();
+        // SAFETY: `hipMalloc` writes a pointer through the out-pointer and
+        // reads nothing from it. `&mut p` is valid for writes of `sizeof(void*)`.
+        // The returned device pointer is owned by `DevicePtr`.
         let code = unsafe { hipMalloc(&mut p as *mut _, bytes) };
         if code != HIP_SUCCESS {
             return Err(DeviceError::Alloc {
@@ -188,6 +221,9 @@ impl Device for HipDevice {
             return Ok(());
         }
         self.bind()?;
+        // SAFETY: caller's contract on `Device::dealloc` is that `ptr` was
+        // returned by a prior `alloc` on a compatible device and is not
+        // aliased. The null guard above handles `DevicePtr::NULL`.
         check(unsafe { hipFree(ptr.0 as *mut _) }, "hipFree")
     }
 
@@ -208,6 +244,11 @@ impl Device for HipDevice {
             CopyDirection::DeviceToHost => hipMemcpyKind::DeviceToHost,
             CopyDirection::DeviceToDevice => hipMemcpyKind::DeviceToDevice,
         };
+        // SAFETY: caller's contract on `Device::memcpy_async` is that `src`
+        // and `dst` are each valid for reads/writes of `bytes` in their
+        // respective address spaces per `dir`, and that neither is aliased
+        // by another pending op on the same stream. `stream.raw()` is a
+        // live handle owned by the caller's `HipStream`.
         let code = unsafe {
             hipMemcpyAsync(
                 dst.0 as *mut _,
@@ -223,6 +264,8 @@ impl Device for HipDevice {
     fn synchronize(&self) -> DeviceResult<()> {
         self.bind()?;
         check(
+            // SAFETY: `hipDeviceSynchronize` takes no arguments and operates
+            // on the thread-current HIP context, which `self.bind()` just set.
             unsafe { sys::hipDeviceSynchronize() },
             "hipDeviceSynchronize",
         )

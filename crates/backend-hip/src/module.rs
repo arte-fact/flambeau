@@ -51,7 +51,22 @@ pub struct HipModule {
     device_id: i32,
 }
 
+impl std::fmt::Debug for HipModule {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("HipModule")
+            .field("raw", &(self.raw as usize))
+            .field("device_id", &self.device_id)
+            .finish()
+    }
+}
+
+// SAFETY: `hipModule_t` is an opaque driver handle with no Rust-side aliasing.
+// HIP modules are immutable once loaded — kernel lookups on one module from
+// multiple threads are safe per the HIP runtime contract. `HipModule` owns its
+// handle and unloads on drop, so no cross-thread double-free risk.
 unsafe impl Send for HipModule {}
+// SAFETY: see `Send`. `&HipModule` only lets other threads resolve kernel
+// symbols (`hipModuleGetFunction`) and read `device_id`; both are thread-safe.
 unsafe impl Sync for HipModule {}
 
 impl HipModule {
@@ -60,6 +75,10 @@ impl HipModule {
     /// effect for the current thread.
     pub fn load(device_id: i32, image: &[u8]) -> DeviceResult<Self> {
         let mut m: hipModule_t = ptr::null_mut();
+        // SAFETY: `hipModuleLoadData` reads the ELF image pointed to by
+        // `image.as_ptr()` for its full length (driver-internal copy) and
+        // writes a module handle through the out-pointer. `image` is a live
+        // slice for the duration of this call; `&mut m` is valid for writes.
         let code =
             unsafe { hipModuleLoadData(&mut m as *mut _, image.as_ptr() as *const _) };
         check(code, "hipModuleLoadData")?;
@@ -81,6 +100,10 @@ impl HipModule {
             message: format!("kernel name contains NUL: {name:?}"),
         })?;
         let mut f: hipFunction_t = ptr::null_mut();
+        // SAFETY: `self.raw` is a live module handle (owned, unloaded only on
+        // drop). `cname` is a valid, NUL-terminated C string (constructed from
+        // `CString::new` above). The driver writes the function handle through
+        // `&mut f`, which is valid for writes.
         let code = unsafe {
             hipModuleGetFunction(&mut f as *mut _, self.raw, cname.as_ptr())
         };
@@ -96,6 +119,9 @@ impl HipModule {
 impl Drop for HipModule {
     fn drop(&mut self) {
         if !self.raw.is_null() {
+            // SAFETY: `self.raw` was returned by `hipModuleLoadData` in `load()`
+            // and is not shared (no `Clone`). The null guard above is defensive
+            // against a partially-constructed instance.
             let _ = unsafe { hipModuleUnload(self.raw) };
             self.raw = ptr::null_mut();
         }
@@ -108,6 +134,15 @@ pub struct HipKernel<'m> {
     raw: hipFunction_t,
     pub name: String,
     _module: PhantomData<&'m HipModule>,
+}
+
+impl<'m> std::fmt::Debug for HipKernel<'m> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("HipKernel")
+            .field("raw", &(self.raw as usize))
+            .field("name", &self.name)
+            .finish()
+    }
 }
 
 /// Launch configuration — grid + block dimensions + dynamic shared mem.
@@ -134,6 +169,14 @@ impl LaunchCfg {
 pub struct KernelArgs<'a> {
     ptrs: Vec<*mut std::os::raw::c_void>,
     _marker: PhantomData<&'a ()>,
+}
+
+impl<'a> std::fmt::Debug for KernelArgs<'a> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("KernelArgs")
+            .field("len", &self.ptrs.len())
+            .finish()
+    }
 }
 
 impl<'a> KernelArgs<'a> {
@@ -210,6 +253,9 @@ impl<'m> HipKernel<'m> {
     pub fn attributes(&self) -> DeviceResult<FuncAttributes> {
         fn q(raw: hipFunction_t, attr: std::os::raw::c_int, ctx: &'static str) -> DeviceResult<i32> {
             let mut v: std::os::raw::c_int = 0;
+            // SAFETY: `raw` is a live function handle (invariant of the enclosing
+            // `HipKernel`, which borrows from its `HipModule`). `&mut v` is valid
+            // for writes of `sizeof(int)`; the driver does not read from it.
             let code = unsafe { hipFuncGetAttribute(&mut v as *mut _, attr, raw) };
             check(code, ctx)?;
             Ok(v as i32)
@@ -248,6 +294,12 @@ impl<'m> HipKernel<'m> {
         cfg: LaunchCfg,
         mut args: KernelArgs<'_>,
     ) -> DeviceResult<()> {
+        // SAFETY: the outer fn is `unsafe`; the caller's contract (see doc
+        // comment above) covers arg-storage lifetime, launch-cfg bounds, and
+        // device-pointer validity. `self.raw` is live (borrowed from its
+        // owning `HipModule` via `PhantomData`). `args.as_raw()` points into
+        // `args.ptrs`, which lives until this function returns — `hipModule-
+        // LaunchKernel` copies the pointer array synchronously before return.
         let code = unsafe {
             hipModuleLaunchKernel(
                 self.raw,
@@ -284,6 +336,11 @@ impl<'m> HipKernel<'m> {
         cfg: LaunchCfg,
         args_ptr: *mut *mut std::os::raw::c_void,
     ) -> DeviceResult<()> {
+        // SAFETY: the outer fn is `unsafe`; the caller's contract (see doc
+        // comment above) covers arg-array validity and per-slot storage
+        // lifetime. `self.raw` is live (module borrow via `PhantomData`).
+        // `hipModuleLaunchKernel` copies the arg pointer array synchronously
+        // before return.
         let code = unsafe {
             hipModuleLaunchKernel(
                 self.raw,

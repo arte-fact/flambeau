@@ -33,3 +33,6 @@ hip = [
     "flambeau-ops/hip",
     "flambeau-qwen3-moe/hip",
 ]
+
+[lints]
+workspace = true

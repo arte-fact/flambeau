@@ -7,7 +7,7 @@
 
 use anyhow::Result;
 use flambeau_backend_hip::{HipStream, KernelArgs, LaunchCfg};
-use flambeau_core::DevicePtr;
+use flambeau_core::{DevicePtr, MOE_SORT_MAX_EXPERTS, TOPK_MAX_EXPERTS};
 
 use super::OpsRegistry;
 
@@ -58,13 +58,13 @@ pub fn topk_f32(
     n_experts: usize,
     k: usize,
 ) -> Result<()> {
-    // Kernel's compile-time ceiling is TOPK_MAX_EXPERTS = 256. Launching
-    // with more than that silently drops the tail and triggers OOB LDS
-    // writes at the cross-warp reduce (V1.7.4.a root cause was this
-    // hardcoded at 128, tripping on Qwen3.6's 256 experts).
+    // Kernel's compile-time ceiling — must match `#define TOPK_MAX_EXPERTS`
+    // in `kernels-hip/src/kernels/topk_softmax.cu`. Pre-V1.7.4.a this was
+    // hardcoded at 128 on both sides, silently dropping experts 128..255 on
+    // Qwen3.6 and triggering OOB LDS writes at the cross-warp reduce.
     assert!(
-        n_experts <= 256,
-        "topk_f32: n_experts {n_experts} > 256 (bump TOPK_MAX_EXPERTS + add cert shape)"
+        n_experts <= TOPK_MAX_EXPERTS,
+        "topk_f32: n_experts {n_experts} > {TOPK_MAX_EXPERTS} (bump TOPK_MAX_EXPERTS in core::kernel_limits + .cu #define + add cert shape)"
     );
     let module = reg.expect_module("topk_f32")?;
     let kernel = module.kernel("flambeau_topk_softmax_f32")?;
@@ -975,11 +975,10 @@ pub fn build_expert_buckets(
     let mut bucket_expert = Vec::new();
     let mut bucket_slots = Vec::new();
     for e in experts {
-        // Safe by construction: `experts` comes from `per_expert.keys()`
-        // moments earlier with no concurrent mutation.
         let refs = per_expert
             .remove(&e)
-            .expect("expert key enumerated but missing on remove");
+            .expect("per_expert invariant: `experts` was collected from per_expert.keys() \
+                     moments earlier with no intervening mutation; remove() cannot miss");
         for chunk in refs.chunks(INDEXED_MOE_MMQ_X) {
             bucket_expert.push(e);
             for &r in chunk {
@@ -1021,8 +1020,8 @@ pub fn moe_sort_by_expert(
     n_experts: usize,
 ) -> Result<()> {
     assert!(
-        n_experts <= 512,
-        "moe_sort_by_expert: n_experts {n_experts} > 512 (bump MAX_N_EXPERTS in .cu)"
+        n_experts <= MOE_SORT_MAX_EXPERTS,
+        "moe_sort_by_expert: n_experts {n_experts} > {MOE_SORT_MAX_EXPERTS} (bump MOE_SORT_MAX_EXPERTS in core::kernel_limits + matching `#define` in kernels-hip/src/kernels/moe_sort.cu)"
     );
     let module = reg.expect_module("moe_sort_by_expert")?;
     let k_zero = module.kernel("flambeau_moe_sort_zero_counts")?;
@@ -1097,7 +1096,6 @@ pub fn moe_sort_by_expert(
 // pair where padded slots repeat the last real pair_idx (so an 8-slot
 // per-block MMQ kernel can assume all 8 slots in its block share an expert).
 // ---------------------------------------------------------------------------
-#[allow(clippy::too_many_arguments)]
 pub fn moe_sort_by_expert_padded(
     reg: &OpsRegistry,
     stream: &HipStream,

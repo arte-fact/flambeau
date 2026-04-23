@@ -211,6 +211,7 @@ pub fn layer_names(num_layers: usize) -> Vec<CommonNames> {
 }
 
 /// Global (non-per-layer) tensor names.
+#[derive(Debug)]
 pub struct GlobalNames;
 
 impl GlobalNames {

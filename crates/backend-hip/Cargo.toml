@@ -27,3 +27,6 @@ tracing.workspace = true
 bytemuck.workspace = true
 flambeau-quant = { path = "../quant" }
 half.workspace = true
+
+[lints]
+workspace = true

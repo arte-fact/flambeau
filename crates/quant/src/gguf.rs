@@ -187,6 +187,12 @@ pub struct GgufFile {
 
 impl GgufFile {
     /// Open `path`, mmap it, parse the header and tensor index.
+    ///
+    /// # Errors
+    /// - `std::io::Error` wrapped as `QuantError::Io` if the file can't be
+    ///   opened or mmapped.
+    /// - Propagates [`from_mmap`] errors: `BadMagic`, `UnsupportedVersion`,
+    ///   `TruncatedHeader`, or a metadata/tensor-index parse error.
     pub fn open<P: AsRef<Path>>(path: P) -> Result<Self> {
         let path = path.as_ref();
         let file = File::open(path)?;
@@ -196,6 +202,10 @@ impl GgufFile {
         // loading, this keeps page-cache pressure bounded for GGUFs
         // larger than host RAM.
         use std::os::unix::io::AsRawFd;
+        // SAFETY: `posix_fadvise` operates on a kernel-side fd and never reads
+        // or writes caller memory. `file.as_raw_fd()` is a valid open fd for
+        // the lifetime of `file`. Return code is non-actionable (best-effort
+        // page-cache hint), so we ignore it.
         unsafe {
             libc::posix_fadvise(file.as_raw_fd(), 0, 0, libc::POSIX_FADV_SEQUENTIAL);
         }
@@ -208,6 +218,13 @@ impl GgufFile {
 
     /// Parse a GGUF header from an already-mmapped blob. Split from [`open`]
     /// so tests can feed in-memory fixtures.
+    ///
+    /// # Errors
+    /// - `QuantError::BadMagic` if the blob doesn't start with `GGUF`.
+    /// - `QuantError::UnsupportedVersion` for versions outside {2, 3}.
+    /// - `QuantError::TruncatedHeader` if any metadata or tensor-index read
+    ///   runs past the mmap's length.
+    /// - `QuantError::Io` wrapping a `byteorder` short-read error.
     pub fn from_mmap(path: PathBuf, mmap: Arc<Mmap>) -> Result<Self> {
         let mut cur = Cursor::new(&mmap[..]);
 
@@ -296,6 +313,11 @@ impl GgufFile {
 
     /// Zero-copy slice of the full payload for `name`. Lifetime is tied to
     /// `self` (which owns the mmap).
+    ///
+    /// # Errors
+    /// - `QuantError::TensorNotFound` if `name` is not in the tensor index.
+    /// - `QuantError::TruncatedTensor` if the recorded tensor extent runs
+    ///   past the mmap's length.
     pub fn tensor_raw(&self, name: &str) -> Result<&[u8]> {
         let info = self.info(name)?;
         self.raw_for(info, 0, info.size_in_bytes())
@@ -386,6 +408,10 @@ impl GgufFile {
         Ok(&self.mmap[abs_start as usize..abs_end as usize])
     }
 
+    /// Look up a tensor's metadata by name.
+    ///
+    /// # Errors
+    /// `QuantError::UnknownTensor` if `name` is not in the index.
     pub fn info(&self, name: &str) -> Result<&TensorInfo> {
         self.tensors
             .get(name)
@@ -395,6 +421,11 @@ impl GgufFile {
     }
 
     /// Dequantise `name`'s full payload to a fresh `Vec<f32>`.
+    ///
+    /// # Errors
+    /// - `QuantError::UnknownTensor` if `name` is not indexed.
+    /// - `QuantError::TruncatedTensor` if the mmap is short.
+    /// - `QuantError::UnsupportedDtype` if the dtype lacks a dequantiser.
     pub fn dequantize_tensor(&self, name: &str) -> Result<Vec<f32>> {
         let info = self.info(name)?;
         let raw = self.tensor_raw(name)?;
@@ -405,6 +436,13 @@ impl GgufFile {
     /// X5 pattern: read rows `[row_start, row_start + row_count)` of a 2D
     /// tensor. Each row is `cols` elements; `cols` must be a multiple of the
     /// dtype's block_size. Returns the raw packed bytes for this row range.
+    ///
+    /// # Errors
+    /// - `QuantError::UnknownTensor` if `name` is not indexed.
+    /// - `QuantError::RangeOutOfBounds` if the tensor isn't 2D, rows aren't
+    ///   aligned to the dtype's block boundary, or `row_start + row_count`
+    ///   exceeds the row count.
+    /// - `QuantError::TruncatedTensor` if the underlying mmap is short.
     pub fn tensor_row_range_raw(
         &self,
         name: &str,
@@ -447,6 +485,10 @@ impl GgufFile {
     /// X5 pattern for MoE: read experts `[e_start, e_start + e_count)` of a
     /// 3D expert tensor `[num_experts, d1, d2]`. `d1 * d2` must be a multiple
     /// of the dtype's block_size.
+    ///
+    /// # Errors
+    /// Same error space as [`tensor_row_range_raw`] — `UnknownTensor`,
+    /// `RangeOutOfBounds`, or `TruncatedTensor`.
     pub fn tensor_expert_range_raw(
         &self,
         name: &str,

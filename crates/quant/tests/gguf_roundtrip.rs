@@ -24,7 +24,7 @@ struct Gguf {
     tensors: Vec<TensorSpec>,
 }
 
-#[allow(dead_code)] // U64 is constructed via the writer branches kept for completeness.
+#[expect(dead_code, reason = "U64 is constructed via writer branches kept for GGUF-spec completeness; roundtrip test exercises only U32/String in practice")]
 enum MetaValue {
     U32(u32),
     U64(u64),

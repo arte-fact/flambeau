@@ -41,6 +41,15 @@ struct RankBounce {
     bytes: usize,
 }
 
+impl std::fmt::Debug for RankBounce {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("RankBounce")
+            .field("ptr", &(self.ptr as usize))
+            .field("bytes", &self.bytes)
+            .finish()
+    }
+}
+
 // SAFETY: `RankBounce` holds a raw pointer returned by `hipHostMalloc`.
 // It's only mutated under the cluster's per-rank mutex, and reads during
 // memcpy are driver-synchronised.
@@ -58,6 +67,7 @@ impl RankBounce {
 /// Multi-device cluster holding one `HipDevice` + one pinned bounce slab
 /// per rank. Only the peer-copy primitive is wired today; V1.7.5-C+ add
 /// pipeline-level orchestration on top.
+#[derive(Debug)]
 pub struct HipCluster {
     devices: Vec<HipDevice>,
     /// One default stream per rank. The `HipDevice` already owns a default
@@ -138,6 +148,9 @@ impl HipCluster {
         // hot-path payloads are all small (≤ 512 KB), so a single grow to
         // the first observed size is the common case.
         if !slot.ptr.is_null() {
+            // SAFETY: `slot.ptr` came from a prior `hipHostMalloc` in this same
+            // function. The `slot` mutex guard serialises access so nobody else
+            // is reading/writing the buffer; we null the field immediately after.
             let rc = unsafe { hipHostFree(slot.ptr) };
             if rc != HIP_SUCCESS {
                 return Err(DeviceError::Backend {
@@ -154,6 +167,9 @@ impl HipCluster {
         // page's NUMA affinity.
         self.devices[rank].bind()?;
         let mut ptr: *mut c_void = ptr::null_mut();
+        // SAFETY: `hipHostMalloc` writes a host pointer through the out-pointer
+        // and reads nothing from it. `&mut ptr` is valid for writes of
+        // `sizeof(void*)`. Returned pointer ownership is transferred into `slot`.
         let rc = unsafe { hipHostMalloc(&mut ptr, need, HIP_HOST_MALLOC_PORTABLE) };
         if rc != HIP_SUCCESS {
             return Err(DeviceError::Alloc {
@@ -210,6 +226,9 @@ impl HipCluster {
         if src_rank == dst_rank {
             let device = &self.devices[dst_rank];
             device.bind()?;
+            // SAFETY: caller's contract on this `unsafe fn` requires both
+            // `src_ptr` and `dst_ptr` to be valid for `bytes` on this device,
+            // and non-aliased with any other pending op on `default_stream`.
             unsafe {
                 device.memcpy_async(
                     device.default_stream(),
@@ -230,6 +249,10 @@ impl HipCluster {
         //    command queue.
         let src_dev = &self.devices[src_rank];
         src_dev.bind()?;
+        // SAFETY: `buf` is a live pinned-host allocation sized `bytes` (from
+        // `ensure_bounce`). `src_ptr` is valid for `bytes` on `src_dev` per the
+        // outer fn's caller contract. `src_dev.default_stream().raw()` is a
+        // live stream handle owned by `src_dev`.
         let rc = unsafe {
             hipMemcpyAsync(
                 buf,
@@ -240,12 +263,17 @@ impl HipCluster {
             )
         };
         check(rc, "peer_copy DtoH")?;
+        // SAFETY: live stream handle as above.
         let rc = unsafe { hipStreamSynchronize(src_dev.default_stream().raw()) };
         check(rc, "peer_copy DtoH sync")?;
 
         // 2. HtoD on dst rank's default stream.
         let dst_dev = &self.devices[dst_rank];
         dst_dev.bind()?;
+        // SAFETY: `buf` still holds the transferred bytes (DtoH sync above
+        // guarantees the pinned buffer is fully populated). `dst_ptr` is
+        // valid for `bytes` on `dst_dev` per the outer fn's caller contract.
+        // `dst_dev.default_stream().raw()` is a live stream handle.
         let rc = unsafe {
             hipMemcpyAsync(
                 dst_ptr.as_usize() as *mut c_void,

@@ -18,7 +18,7 @@
 use std::time::Instant;
 
 use flambeau_backend_hip::{device_count, HipDevice, HipModule, KernelArgs, LaunchCfg};
-#[allow(unused_imports)]
+#[expect(unused_imports, reason = "traits imported for type inference on `HipDevice` methods; not named directly")]
 use flambeau_core::{Device, DevicePtr, Stream};
 use flambeau_kernels_hip as kernels;
 

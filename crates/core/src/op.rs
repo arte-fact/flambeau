@@ -85,13 +85,16 @@ pub trait KernelImpl<O: Op, D: Device>: Send + Sync + 'static {
 /// Used for both MMVQ (M=1 decode path) and MMQ (M≥128 prefill path) —
 /// same op, different impls. The dispatcher picks between them based on
 /// the `m` predicate in `dispatch/hip/gfx906.toml`.
+#[derive(Debug)]
 pub struct QMatMul;
 
 /// RMSNorm — root-mean-square layer normalisation with a learnable weight
 /// vector. Same `Op` at both F16 and Q8_1 outputs; impls select via dtype.
+#[derive(Debug)]
 pub struct RmsNorm;
 
 /// SwiGLU — `silu(gate) * up`, pointwise. Used post-FFN-gate+up.
+#[derive(Debug)]
 pub struct SwiGLU;
 
 /// `QMatMul` config — dtype + shape extents known at dispatch time.
@@ -110,7 +113,11 @@ pub struct QMatMulCfg {
 /// Narrow dtype tag for `QMatMulCfg`. Mirrors `flambeau-quant::GgmlDType`
 /// but kept here without the quant-crate dep so `core` stays leaf-level.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[allow(non_camel_case_types)] // match GGUF / ggml dtype naming (Q4_K, Q5_K, Q6_K).
+#[expect(
+    non_camel_case_types,
+    reason = "mirror GGUF / ggml dtype names (Q4_K, Q5_K, Q6_K) so logs/errors/dispatch \
+              rows read the same as the external file format and llama.cpp references"
+)]
 pub enum QDtype {
     F32,
     F16,
@@ -165,11 +172,13 @@ pub struct RmsNormCfg {
     pub eps: f32,
 }
 
+#[derive(Debug)]
 pub struct RmsNormInput<'a, D: Device> {
     pub x: crate::device::DevicePtr,
     pub weight: crate::device::DevicePtr,
     pub _marker: std::marker::PhantomData<&'a D>,
 }
+#[derive(Debug)]
 pub struct RmsNormOutput<'a, D: Device> {
     pub y: crate::device::DevicePtr,
     pub _marker: std::marker::PhantomData<&'a D>,
@@ -188,11 +197,13 @@ pub struct SwiGLUCfg {
     pub n: usize,
 }
 
+#[derive(Debug)]
 pub struct SwiGLUInput<'a, D: Device> {
     pub gate: crate::device::DevicePtr,
     pub up: crate::device::DevicePtr,
     pub _marker: std::marker::PhantomData<&'a D>,
 }
+#[derive(Debug)]
 pub struct SwiGLUOutput<'a, D: Device> {
     pub y: crate::device::DevicePtr,
     pub _marker: std::marker::PhantomData<&'a D>,
@@ -207,6 +218,7 @@ impl Op for SwiGLU {
 /// Placeholder input view — carries device pointers to (weights, activation,
 /// output). Real `Tensor<'a, D>` / `QTensor<'a, D>` shapes replace this in
 /// V1.7 when the model forward-pass lands.
+#[derive(Debug)]
 pub struct QMatMulInput<'a, D: Device> {
     pub weights_bytes: usize,
     pub weights: crate::device::DevicePtr,
@@ -214,6 +226,7 @@ pub struct QMatMulInput<'a, D: Device> {
     pub _marker: std::marker::PhantomData<&'a D>,
 }
 
+#[derive(Debug)]
 pub struct QMatMulOutput<'a, D: Device> {
     pub dst: crate::device::DevicePtr,
     pub _marker: std::marker::PhantomData<&'a D>,

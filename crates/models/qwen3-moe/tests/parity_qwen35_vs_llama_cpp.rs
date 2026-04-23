@@ -24,12 +24,12 @@ struct ParityCert {
     seed_token_id: u32,
     expected_token_ids: Vec<u32>,
     #[serde(default)]
-    #[allow(dead_code)]
+    #[expect(dead_code, reason = "second-oracle field; cert JSON retains candle run for diffs")]
     candle_token_ids: Vec<u32>,
     temperature: f32,
     #[serde(default = "default_expect_pass")]
     expect_pass: bool,
-    #[allow(dead_code)]
+    #[expect(dead_code, reason = "cert provenance; never read by the test itself")]
     notes: String,
 }
 

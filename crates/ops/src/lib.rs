@@ -1,5 +1,11 @@
-// Kernel launcher fns legitimately take many args (ptrs + shape scalars).
-#![allow(clippy::too_many_arguments)]
+#![allow(
+    clippy::too_many_arguments,
+    reason = "kernel launchers mirror kernel-side signatures; collapsing into arg structs \
+              adds a Rust-side copy per dispatch and is the #1 gfx906 launch-overhead lever \
+              per V1.7.6 memory (V2.4.d showed each eliminated driver call saves ~1 µs). \
+              Scoped at crate level because launcher bodies are `#[cfg(feature = \"hip\")]` \
+              gated and `#[expect]` would be unfulfilled on non-hip builds."
+)]
 //! flambeau-ops — typed fused building blocks used by model crates.
 //!
 //! Everything here is `Mesh<N>`-generic: `Mesh<1>` is a degenerate single-GPU

@@ -1,8 +1,9 @@
-// The `.map(|t| upload(t))` pattern is deliberate: it passes a single-use
-// closure into `Option::map` while keeping the `FnMut` borrow structure
-// explicit. Clippy's `.map(&mut upload)` suggestion works but is one more
-// reborrow dance to read in a dozen adjacent sites.
-#![allow(clippy::redundant_closure)]
+#![expect(
+    clippy::redundant_closure,
+    reason = "the `.map(|t| upload(t))` pattern keeps the FnMut borrow structure explicit \
+              across a dozen adjacent upload sites; clippy's `.map(&mut upload)` rewrite \
+              adds a reborrow dance with no readability win"
+)]
 //! Device-resident weight tensors for a Qwen3.x MoE model.
 //!
 //! Upload path: [`ModelWeights::upload`] walks a [`ModelLayout`] and

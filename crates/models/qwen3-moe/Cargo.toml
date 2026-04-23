@@ -30,3 +30,6 @@ optional = true
 [dev-dependencies]
 serde = { workspace = true, features = ["derive"] }
 serde_json.workspace = true
+
+[lints]
+workspace = true

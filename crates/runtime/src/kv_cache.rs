@@ -48,6 +48,7 @@ pub trait CacheLayout: Send + Sync + 'static {
 
 /// F16, K and V both stored in `[max_tokens, n_heads, head_dim]` order.
 /// This is the baseline; matches llama.cpp's `-gwo default` K/V layout.
+#[derive(Debug)]
 pub struct F16Contig;
 
 impl CacheLayout for F16Contig {
@@ -67,6 +68,7 @@ impl CacheLayout for F16Contig {
 /// model. The correctness cert alone (K/V round-trip matches the F16
 /// reference within Q8 quant noise) is what V1.6.6 gates on — the
 /// per-model quality cert comes with the V1.7 model loader.
+#[derive(Debug)]
 pub struct Q8Contig;
 
 impl CacheLayout for Q8Contig {
@@ -119,6 +121,21 @@ pub struct KvCache<L: CacheLayout, D: Device> {
     bytes_per_tensor: usize,
     _layout: PhantomData<L>,
     _device: PhantomData<D>,
+}
+
+impl<L: CacheLayout, D: Device> std::fmt::Debug for KvCache<L, D> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("KvCache")
+            .field("layout", &L::NAME)
+            .field("max_tokens", &self.max_tokens)
+            .field("current_tokens", &self.current_tokens)
+            .field("n_heads", &self.n_heads)
+            .field("head_dim", &self.head_dim)
+            .field("bytes_per_tensor", &self.bytes_per_tensor)
+            // Device pointers and PhantomData intentionally elided —
+            // their values are not useful to print.
+            .finish_non_exhaustive()
+    }
 }
 
 impl<L: CacheLayout, D: Device> KvCache<L, D> {
@@ -185,6 +202,12 @@ impl<L: CacheLayout, D: Device> KvCache<L, D> {
         let total_bytes = n_new * per_token_bytes;
         let k_dst = self.k.offset_bytes(offset_bytes);
         let v_dst = self.v.offset_bytes(offset_bytes);
+        // SAFETY: this outer fn is `unsafe` with caller contract stated in the
+        // doc comment (source buffers live, correctly-sized, same device).
+        // `k_dst`/`v_dst` are interior offsets into `self.k`/`self.v`, both
+        // allocated on `device` in `new()`, sized at least `offset_bytes +
+        // total_bytes` (bounded by the capacity check above). `stream` is the
+        // caller's stream for this cache's device.
         unsafe {
             device.memcpy_async(
                 stream,

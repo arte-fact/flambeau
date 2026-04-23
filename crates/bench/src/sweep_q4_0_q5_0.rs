@@ -116,7 +116,6 @@ fn run_dense_sweep(
     Ok(cert)
 }
 
-#[allow(clippy::too_many_arguments)]
 fn run_dense_shape(
     dev: &HipDevice,
     kernel: &HipKernel<'_>,
@@ -274,7 +273,6 @@ pub fn run_indexed_moe_mmvq_q4_0_sweep(repo_root: &Path) -> Result<Cert> {
     Ok(cert)
 }
 
-#[allow(clippy::too_many_arguments)]
 fn run_q4_0_moe_shape(
     dev: &HipDevice,
     kernel: &HipKernel<'_>,

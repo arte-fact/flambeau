@@ -97,6 +97,8 @@ fn multi_device_bind_is_safe() {
     // Each alloc must bind to the right device internally.
     let p0 = d0.alloc(64).unwrap();
     let p1 = d1.alloc(64).unwrap();
+    // SAFETY: each pointer was returned by the matching device's `alloc` above;
+    // no stream work is pending against them.
     unsafe {
         d0.dealloc(p0, 64).unwrap();
         d1.dealloc(p1, 64).unwrap();

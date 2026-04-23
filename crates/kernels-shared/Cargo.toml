@@ -7,3 +7,6 @@ license.workspace = true
 description = "Backend-neutral algorithmic-core .cuh headers (MMQ tile, block-quant unpack, softmax math)."
 
 [dependencies]
+
+[lints]
+workspace = true

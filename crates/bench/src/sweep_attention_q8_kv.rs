@@ -128,7 +128,6 @@ fn dequantize_row_q8_0(xs: &[BlockQ8_0]) -> Vec<f32> {
     out
 }
 
-#[allow(clippy::too_many_arguments)]
 fn run_shape(
     dev: &HipDevice,
     kernel: &HipKernel<'_>,

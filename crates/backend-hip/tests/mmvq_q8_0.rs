@@ -8,6 +8,11 @@
 //! step will drive the full `M ∈ {1,8,16,128,512}` × `K,N ∈ {2048, 5120,
 //! 15360, 128256}` grid.
 
+#![expect(
+    clippy::undocumented_unsafe_blocks,
+    reason = "test fixture — every `unsafe {}` below is a kernel launch or `memcpy_async`               whose invariant is uniform: host/device buffers live for the bounded               `synchronize()` that follows, pointers are freshly allocated above, kernel               ABIs match kernels-hip. Per-site SAFETY comments would just repeat this."
+)]
+
 use std::f32;
 
 use flambeau_backend_hip::{device_count, HipDevice, HipKernel, HipModule, KernelArgs, LaunchCfg};

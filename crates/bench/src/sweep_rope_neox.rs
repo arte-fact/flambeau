@@ -206,7 +206,6 @@ fn run_shape(
     Ok(oracle_err.max(roundtrip_err))
 }
 
-#[allow(clippy::too_many_arguments)]
 fn launch(
     dev: &HipDevice,
     kernel: &HipKernel<'_>,

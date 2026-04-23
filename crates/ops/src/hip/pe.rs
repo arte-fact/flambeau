@@ -56,7 +56,6 @@ pub fn rope_f16(
 /// `rotated_dims` must be even and ≤ `head_dim`.
 ///
 /// Grid: `(n_tokens, n_heads)`. Block: `rotated_dims / 2` threads.
-#[allow(clippy::too_many_arguments)]
 pub fn rope_neox_partial_f16(
     reg: &OpsRegistry,
     stream: &HipStream,

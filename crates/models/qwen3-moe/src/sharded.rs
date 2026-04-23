@@ -350,7 +350,6 @@ impl Qwen3MoEShardedModel {
 
     /// Build a new `Qwen3MoERankShard` from already-allocated device
     /// tensors — caller guarantees layer_idx / dtype / dims are valid.
-    #[allow(clippy::too_many_arguments)]
     pub fn new_shard(
         rank: RankId,
         device_id: i32,

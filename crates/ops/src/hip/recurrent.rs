@@ -27,7 +27,6 @@ use super::OpsRegistry;
 /// Launch: grid `(H, B, ceil(S_v / warps_per_block))`, block
 /// `(WARP_SIZE=64, 4, 1)` — 4 warps per block, each warp owns one output
 /// column. `warps_per_block = 4` ⇒ grid_z = `S_v / 4 = 32` at S_v=128.
-#[allow(clippy::too_many_arguments)]
 pub fn gdn_state_step_f32_s128(
     reg: &OpsRegistry,
     stream: &HipStream,
@@ -100,7 +99,6 @@ pub fn gdn_state_step_f32_s128(
 /// layers that fired 12k tiny launches dominated by argument
 /// marshalling (profile 2026-04-22: ~50 ms in the kernel + ~150 ms
 /// rocclr_copyBuffer overhead).
-#[allow(clippy::too_many_arguments)]
 pub fn gdn_alpha_beta_f32(
     reg: &OpsRegistry,
     stream: &HipStream,
