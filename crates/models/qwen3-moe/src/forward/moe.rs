@@ -10,31 +10,42 @@
 
 #![cfg(feature = "hip")]
 
+#![expect(
+    clippy::undocumented_unsafe_blocks,
+    reason = "forward-path composition — every unsafe block is a kernel.launch or \
+              memcpy_async over DevicePtrs owned by the session's scratch / weights / \
+              KV cache. Buffers live for the whole session; sync is driven by the top- \
+              level forward_*_decode/prefill caller."
+)]
+
 use anyhow::{bail, Context, Result};
-use flambeau_core::{Device, DevicePtr, QDtype};
+use flambeau_core::{Device, DevicePtr};
 use flambeau_ops::hip::{
     cast::{cast_f16_to_f32, cast_f32_to_f16},
-    mlp::{add_f16, sigmoid_mul_f16, swiglu_f32},
+    mlp::swiglu_f32,
     moe::{
         indexed_moe_mmq_q4_k_down_tile8, indexed_moe_mmq_q4_k_down_turbo,
         indexed_moe_mmq_q4_k_gate_up_tile8, indexed_moe_mmq_q4_k_gate_up_turbo,
         indexed_moe_mmq_q6_k_down_tile8,
         indexed_moe_mmvq_q4_k_gate_up, indexed_moe_mmvq_q4_k_gate_up_sorted,
-        indexed_moe_mmvq_q4_k_r2, indexed_moe_mmvq_q4_k_r2_sorted,
-        indexed_moe_mmvq_q4_0, indexed_moe_mmvq_q6_k, indexed_moe_mmvq_q8_0,
+        indexed_moe_mmvq_q4_k_r2, indexed_moe_mmvq_q4_k_r2_sorted, indexed_moe_mmvq_q6_k,
         moe_combine_f16, moe_sort_by_expert,
         moe_sort_by_expert_padded, shared_expert_scale_f32, topk_f32,
     },
     norm::{quantize_f16_q8_1, quantize_f16_q8_1_mmq},
-    qmatmul::{mmvq, mmvq_q8_0_gate_up, qmatmul},
+    qmatmul::mmvq_q8_0_gate_up,
     router::dense_gemv_f32_f16,
     HipDevice, HipStream, OpsRegistry,
 };
 use flambeau_quant::{BlockQ8_1, GgmlDType};
 
-use super::common::{mat_shape, qdtype_of, run_mmvq_from_tensor, run_qmatmul_from_tensor};
+use super::common::{
+    cast_and_quantize_f32_to_q8_1, mat_shape, run_indexed_moe_down,
+    run_indexed_moe_gate_up, run_mmvq_from_tensor, run_qmatmul_from_tensor, validate_moe_dtypes,
+    QK_K,
+};
 use crate::config::Qwen3MoEConfig;
-use crate::weights::{DeviceTensor, FfnWeights, SharedExpertWeights};
+use crate::weights::DeviceTensor;
 
 // ---------------------------------------------------------------------------
 // V1.7.3-d1 — routed MoE FFN decode step.
@@ -210,88 +221,35 @@ pub fn forward_moe_ffn_decode(
     // 2. Fused gate + up matmul across top_k selected experts in one launch.
     // Weight shape (outermost-first): `[n_experts, inter, hidden]`. The
     // indexed_moe kernels take n_sb_per_row = hidden / QK_K.
-    const QK_K: usize = 256;
-    if hidden % QK_K != 0 {
-        bail!("MoE expects hidden={hidden} divisible by QK_K={QK_K}");
-    }
-    if inter % QK_K != 0 {
-        bail!("MoE expects moe_intermediate_size={inter} divisible by QK_K={QK_K}");
-    }
-    let nb_per_row_hidden = hidden / QK_K;
-    let nb_per_row_inter = inter / QK_K;
-
     // gate+up may both be Q4_K (standard UD-Q4_K_S) or Q8_0 (V2.22.a:
     // UD-Q8_K_XL). down may be Q4_K, Q6_K (UD-Q4_K_S ffn_down promotion),
     // or Q8_0 (UD-Q8_K_XL). BF16 layers in UD-Q8_K_XL aren't handled here
     // yet — loader converts them to Q8_0 on host.
     let gate_dt = ffn_gate_exps.dtype;
     let up_dt = ffn_up_exps.dtype;
-    if !(gate_dt == up_dt
-        && (gate_dt == GgmlDType::Q4K
-            || gate_dt == GgmlDType::Q8_0
-            || gate_dt == GgmlDType::Q4_0))
-    {
-        bail!(
-            "indexed-MoE gate/up dtypes must match and be Q4_K, Q8_0 or Q4_0; got gate={:?}, up={:?}",
-            gate_dt, up_dt
-        );
-    }
-    if ffn_down_exps.dtype != GgmlDType::Q4K
-        && ffn_down_exps.dtype != GgmlDType::Q6K
-        && ffn_down_exps.dtype != GgmlDType::Q8_0
-        && ffn_down_exps.dtype != GgmlDType::Q4_0
-    {
-        bail!(
-            "indexed-MoE ffn_down_exps must be Q4_K, Q6_K, Q8_0 or Q4_0; got {:?}",
-            ffn_down_exps.dtype
-        );
-    }
-
-    // Block size per row: Q4_K/Q5_K/Q6_K use 256-elem super-blocks; Q8_0,
-    // Q4_0 and Q5_0 use 32-elem blocks (same as the Q8_1 activation block).
-    let nb_per_row_hidden_gate = match gate_dt {
-        GgmlDType::Q8_0 | GgmlDType::Q4_0 => hidden / 32,
-        _ => nb_per_row_hidden,
-    };
-
-    match gate_dt {
-        GgmlDType::Q4K => indexed_moe_mmvq_q4_k_gate_up(
-            ops,
-            stream,
-            ffn_gate_exps.ptr,
-            ffn_up_exps.ptr,
-            scratch.x_q8_1,
-            scratch.expert_ids,
-            scratch.gate_out_f32,
-            scratch.up_out_f32,
-            inter,
-            1,
-            top_k,
-            nb_per_row_hidden,
-        )
-        .context("indexed_moe gate+up q4_k")?,
-        GgmlDType::Q8_0 => {
-            indexed_moe_mmvq_q8_0(
-                ops, stream, ffn_gate_exps.ptr, scratch.x_q8_1, scratch.expert_ids,
-                scratch.gate_out_f32, inter, 1, top_k, nb_per_row_hidden_gate,
-            ).context("indexed_moe gate q8_0")?;
-            indexed_moe_mmvq_q8_0(
-                ops, stream, ffn_up_exps.ptr, scratch.x_q8_1, scratch.expert_ids,
-                scratch.up_out_f32, inter, 1, top_k, nb_per_row_hidden_gate,
-            ).context("indexed_moe up q8_0")?;
-        }
-        GgmlDType::Q4_0 => {
-            indexed_moe_mmvq_q4_0(
-                ops, stream, ffn_gate_exps.ptr, scratch.x_q8_1, scratch.expert_ids,
-                scratch.gate_out_f32, inter, 1, top_k, nb_per_row_hidden_gate,
-            ).context("indexed_moe gate q4_0")?;
-            indexed_moe_mmvq_q4_0(
-                ops, stream, ffn_up_exps.ptr, scratch.x_q8_1, scratch.expert_ids,
-                scratch.up_out_f32, inter, 1, top_k, nb_per_row_hidden_gate,
-            ).context("indexed_moe up q4_0")?;
-        }
-        _ => unreachable!("gate dtype was validated above"),
-    }
+    validate_moe_dtypes(
+        "indexed-MoE",
+        gate_dt,
+        up_dt,
+        ffn_down_exps.dtype,
+        hidden,
+        inter,
+    )?;
+    run_indexed_moe_gate_up(
+        ops,
+        stream,
+        gate_dt,
+        ffn_gate_exps.ptr,
+        ffn_up_exps.ptr,
+        scratch.x_q8_1,
+        scratch.expert_ids,
+        scratch.gate_out_f32,
+        scratch.up_out_f32,
+        inter,
+        1,
+        top_k,
+        hidden,
+    )?;
 
     // 3. SwiGLU(gate, up) → activated, F32.
     swiglu_f32(
@@ -307,63 +265,34 @@ pub fn forward_moe_ffn_decode(
     // 4. Cast activated F32 → F16, then quantise F16 → Q8_1. Layout is
     // `[top_k, inter]` flat — each row of `activated_q8_1` is one expert's
     // input to the down matmul (re-used as one "effective token" below).
-    cast_f32_to_f16(ops, stream, scratch.activated_f32, scratch.activated_f16, top_k * inter)
-        .context("cast activated → f16")?;
-    quantize_f16_q8_1(
+    cast_and_quantize_f32_to_q8_1(
         ops,
         stream,
+        scratch.activated_f32,
         scratch.activated_f16,
         scratch.activated_q8_1,
         top_k * inter,
-    )
-    .context("quantise activated → Q8_1")?;
+        "moe decode activated",
+    )?;
 
     // 5. Down matmul. Indexed MoE MMVQ dispatches by
     // `expert_ids[token * top_k + slot]`. Treat each of our top_k routed
     // experts as its own "effective token" with `top_k = 1` and its own
     // expert id. The scratch already holds `expert_ids[0..top_k]` which
     // doubles as the flat expert lookup (`flat[i] = expert_ids[0 * 1 + i]`).
-    match ffn_down_exps.dtype {
-        GgmlDType::Q4K => indexed_moe_mmvq_q4_k_r2(
-            ops,
-            stream,
-            ffn_down_exps.ptr,
-            scratch.activated_q8_1,
-            scratch.expert_ids,
-            scratch.down_f32,
-            hidden,
-            top_k, // n_tokens_effective
-            1,     // top_k=1 in this re-indexed view
-            nb_per_row_inter,
-        )
-        .context("indexed_moe down q4_k r2")?,
-        GgmlDType::Q6K => indexed_moe_mmvq_q6_k(
-            ops,
-            stream,
-            ffn_down_exps.ptr,
-            scratch.activated_q8_1,
-            scratch.expert_ids,
-            scratch.down_f32,
-            hidden,
-            top_k,
-            1,
-            nb_per_row_inter,
-        )
-        .context("indexed_moe down q6_k")?,
-        GgmlDType::Q8_0 => indexed_moe_mmvq_q8_0(
-            ops, stream,
-            ffn_down_exps.ptr, scratch.activated_q8_1, scratch.expert_ids,
-            scratch.down_f32,
-            hidden, top_k, 1, inter / 32,
-        ).context("indexed_moe down q8_0")?,
-        GgmlDType::Q4_0 => indexed_moe_mmvq_q4_0(
-            ops, stream,
-            ffn_down_exps.ptr, scratch.activated_q8_1, scratch.expert_ids,
-            scratch.down_f32,
-            hidden, top_k, 1, inter / 32,
-        ).context("indexed_moe down q4_0")?,
-        other => bail!("unreachable: ffn_down_exps dtype {other:?} should have been rejected"),
-    }
+    run_indexed_moe_down(
+        ops,
+        stream,
+        ffn_down_exps.dtype,
+        ffn_down_exps.ptr,
+        scratch.activated_q8_1,
+        scratch.expert_ids,
+        scratch.down_f32,
+        hidden,
+        top_k, // n_tokens_effective
+        1,     // top_k=1 in this re-indexed view
+        inter,
+    )?;
 
     // 6. Cast expert outputs to F16 for the combine kernel.
     cast_f32_to_f16(
@@ -597,22 +526,15 @@ pub fn forward_shared_expert_decode(
     // Tried F32→Q8_1 direct (skip F16 intermediate) — regressed ~1% because
     // the F32 quantize kernel is slower per-element than the F16 one (no
     // packed fp16 max-reduction). Two small kernels beat one big one here.
-    cast_f32_to_f16(
+    cast_and_quantize_f32_to_q8_1(
         ops,
         stream,
         scratch.activated_f32,
         scratch.activated_f16,
-        inter,
-    )
-    .context("shexp cast activated → f16")?;
-    quantize_f16_q8_1(
-        ops,
-        stream,
-        scratch.activated_f16,
         scratch.activated_q8_1,
         inter,
-    )
-    .context("shexp quantise activated → Q8_1")?;
+        "shexp decode activated",
+    )?;
 
     // 6. Dense down matmul → down_f32 [hidden].
     run_mmvq_from_tensor(
@@ -992,6 +914,26 @@ pub fn forward_router_prefill(
 
 /// Routed MoE FFN prefill. Mirrors `forward_moe_ffn_decode` but parametrised
 /// by `n_tokens`; every indexed-MoE op already takes an `n_tokens` arg.
+/// Resolve `FLAMBEAU_MOE_VARIANT` (falling back to `FLAMBEAU_MOE_SORTED=0 → r4`,
+/// else `tile8`). Cached on first call for the lifetime of the process —
+/// env vars don't change under our runtime, and the prefill hot path hit
+/// this twice per layer per token.
+fn moe_variant_cached() -> &'static str {
+    use std::sync::OnceLock;
+    static CACHED: OnceLock<String> = OnceLock::new();
+    CACHED
+        .get_or_init(|| {
+            std::env::var("FLAMBEAU_MOE_VARIANT").ok().unwrap_or_else(|| {
+                if std::env::var("FLAMBEAU_MOE_SORTED").as_deref() == Ok("0") {
+                    "r4".to_string()
+                } else {
+                    "tile8".to_string()
+                }
+            })
+        })
+        .as_str()
+}
+
 pub fn forward_moe_ffn_prefill(
     ops: &OpsRegistry,
     stream: &HipStream,
@@ -1031,39 +973,19 @@ pub fn forward_moe_ffn_prefill(
     let top_k = cfg.num_experts_per_tok;
     let n_experts = cfg.num_experts;
 
-    const QK_K: usize = 256;
-    if hidden % QK_K != 0 {
-        bail!("MoE expects hidden={hidden} divisible by QK_K={QK_K}");
-    }
-    if inter % QK_K != 0 {
-        bail!("MoE expects moe_intermediate_size={inter} divisible by QK_K={QK_K}");
-    }
-    let nb_per_row_hidden = hidden / QK_K;
-    let nb_per_row_inter = inter / QK_K;
-
     let gate_dt_pre = ffn_gate_exps.dtype;
     let up_dt_pre = ffn_up_exps.dtype;
     let down_dt_pre = ffn_down_exps.dtype;
-    if !(gate_dt_pre == up_dt_pre
-        && (gate_dt_pre == GgmlDType::Q4K
-            || gate_dt_pre == GgmlDType::Q8_0
-            || gate_dt_pre == GgmlDType::Q4_0))
-    {
-        bail!(
-            "indexed-MoE prefill gate/up dtypes must match and be Q4_K, Q8_0 or Q4_0; got gate={:?}, up={:?}",
-            gate_dt_pre, up_dt_pre
-        );
-    }
-    if down_dt_pre != GgmlDType::Q4K
-        && down_dt_pre != GgmlDType::Q6K
-        && down_dt_pre != GgmlDType::Q8_0
-        && down_dt_pre != GgmlDType::Q4_0
-    {
-        bail!(
-            "indexed-MoE prefill ffn_down_exps must be Q4_K, Q6_K, Q8_0 or Q4_0; got {:?}",
-            down_dt_pre
-        );
-    }
+    validate_moe_dtypes(
+        "indexed-MoE prefill",
+        gate_dt_pre,
+        up_dt_pre,
+        down_dt_pre,
+        hidden,
+        inter,
+    )?;
+    let nb_per_row_hidden = hidden / QK_K;
+    let nb_per_row_inter = inter / QK_K;
 
     // 1. Quantise x_norm [L, hidden] → Q8_1.
     quantize_f16_q8_1(ops, stream, x_norm, scratch.x_q8_1, n_tokens * hidden)
@@ -1072,121 +994,56 @@ pub fn forward_moe_ffn_prefill(
     // V2.22.a / V2.23.a — Q8_0 / Q4_0 fast path. Skip sort/pad + MMQ tile8
     // (not ported yet); use plain indexed MoE MMVQ with n_tokens > 1. Slower
     // than tile8 at prefill but structurally correct — unblocks UD-Q8_K_XL
-    // and Qwen3.6-35B-A3B-Q4_0 load-and-run.
-    if gate_dt_pre == GgmlDType::Q4_0 {
-        let nb_hidden_q4 = hidden / 32;
-        let nb_inter_q4 = inter / 32;
-        indexed_moe_mmvq_q4_0(
-            ops, stream,
-            ffn_gate_exps.ptr, scratch.x_q8_1, scratch.expert_ids,
-            scratch.gate_out_f32,
-            inter, n_tokens, top_k, nb_hidden_q4,
-        ).context("prefill indexed_moe gate q4_0")?;
-        indexed_moe_mmvq_q4_0(
-            ops, stream,
-            ffn_up_exps.ptr, scratch.x_q8_1, scratch.expert_ids,
-            scratch.up_out_f32,
-            inter, n_tokens, top_k, nb_hidden_q4,
-        ).context("prefill indexed_moe up q4_0")?;
-        swiglu_f32(
-            ops, stream,
-            scratch.gate_out_f32, scratch.up_out_f32, scratch.activated_f32,
-            n_tokens * top_k * inter,
-        ).context("prefill moe swiglu_f32 (q4_0 path)")?;
-        cast_f32_to_f16(
-            ops, stream, scratch.activated_f32, scratch.activated_f16,
-            n_tokens * top_k * inter,
-        ).context("prefill cast activated → f16 (q4_0 path)")?;
-        quantize_f16_q8_1(
-            ops, stream, scratch.activated_f16, scratch.activated_q8_1,
-            n_tokens * top_k * inter,
-        ).context("prefill quantise activated → Q8_1 (q4_0 path)")?;
-        match down_dt_pre {
-            GgmlDType::Q4_0 => indexed_moe_mmvq_q4_0(
-                ops, stream,
-                ffn_down_exps.ptr, scratch.activated_q8_1, scratch.expert_ids,
-                scratch.down_f32,
-                hidden, n_tokens * top_k, 1, nb_inter_q4,
-            ).context("prefill indexed_moe down q4_0")?,
-            GgmlDType::Q8_0 => indexed_moe_mmvq_q8_0(
-                ops, stream,
-                ffn_down_exps.ptr, scratch.activated_q8_1, scratch.expert_ids,
-                scratch.down_f32,
-                hidden, n_tokens * top_k, 1, nb_inter_q4,
-            ).context("prefill indexed_moe down q8_0 (mixed q4_0 gate+up)")?,
+    // and Qwen3.6-35B-A3B-Q4_0 load-and-run. V2.22.b will add MMQ tile8 for
+    // Q8_0 to recover prefill throughput.
+    //
+    // Allowed combos: Q8_0 gate+up requires Q8_0 down; Q4_0 gate+up allows
+    // either Q4_0 or Q8_0 down (V2.23.a ffn_down promotion).
+    if gate_dt_pre == GgmlDType::Q4_0 || gate_dt_pre == GgmlDType::Q8_0 {
+        match (gate_dt_pre, down_dt_pre) {
+            (GgmlDType::Q4_0, GgmlDType::Q4_0)
+            | (GgmlDType::Q4_0, GgmlDType::Q8_0)
+            | (GgmlDType::Q8_0, GgmlDType::Q8_0) => {}
             _ => bail!(
-                "V2.23.a Q4_0 MoE prefill path requires Q4_0 or Q8_0 down_exps; got {:?}",
-                down_dt_pre
+                "Q4_0/Q8_0 prefill fast path: down_dt must pair with gate_dt as (Q4_0,Q4_0), (Q4_0,Q8_0) or (Q8_0,Q8_0); got ({:?}, {:?})",
+                gate_dt_pre, down_dt_pre
             ),
         }
-        cast_f32_to_f16(
-            ops, stream, scratch.down_f32, scratch.down_f16,
-            n_tokens * top_k * hidden,
-        ).context("prefill cast down → f16 (q4_0 path)")?;
-        moe_combine_f16(
-            ops, stream,
-            scratch.down_f16, scratch.expert_weights, residual, out,
-            n_tokens, top_k, hidden,
-        ).context("prefill moe_combine (q4_0 path)")?;
-        return Ok(());
-    }
-
-    // V2.22.a — Q8_0 fast path. Skip sort/pad + MMQ tile8 (not ported yet);
-    // use plain indexed MoE MMVQ with n_tokens > 1. Slower than tile8 at
-    // prefill (no per-expert batching) but structurally correct and enough
-    // to unblock UD-Q8_K_XL load-and-run. V2.22.b will add MMQ tile8 for
-    // Q8_0 to recover prefill throughput.
-    if gate_dt_pre == GgmlDType::Q8_0 {
-        let nb_hidden_q8 = hidden / 32;
-        let nb_inter_q8 = inter / 32;
-        indexed_moe_mmvq_q8_0(
-            ops, stream,
-            ffn_gate_exps.ptr, scratch.x_q8_1, scratch.expert_ids,
-            scratch.gate_out_f32,
-            inter, n_tokens, top_k, nb_hidden_q8,
-        ).context("prefill indexed_moe gate q8_0")?;
-        indexed_moe_mmvq_q8_0(
-            ops, stream,
-            ffn_up_exps.ptr, scratch.x_q8_1, scratch.expert_ids,
-            scratch.up_out_f32,
-            inter, n_tokens, top_k, nb_hidden_q8,
-        ).context("prefill indexed_moe up q8_0")?;
+        run_indexed_moe_gate_up(
+            ops, stream, gate_dt_pre, ffn_gate_exps.ptr, ffn_up_exps.ptr,
+            scratch.x_q8_1, scratch.expert_ids, scratch.gate_out_f32,
+            scratch.up_out_f32, inter, n_tokens, top_k, hidden,
+        )?;
         swiglu_f32(
             ops, stream,
             scratch.gate_out_f32, scratch.up_out_f32, scratch.activated_f32,
             n_tokens * top_k * inter,
-        ).context("prefill moe swiglu_f32 (q8_0 path)")?;
-        cast_f32_to_f16(
-            ops, stream, scratch.activated_f32, scratch.activated_f16,
+        ).context("prefill moe swiglu_f32 (q4_0/q8_0 path)")?;
+        cast_and_quantize_f32_to_q8_1(
+            ops,
+            stream,
+            scratch.activated_f32,
+            scratch.activated_f16,
+            scratch.activated_q8_1,
             n_tokens * top_k * inter,
-        ).context("prefill cast activated → f16 (q8_0 path)")?;
-        quantize_f16_q8_1(
-            ops, stream, scratch.activated_f16, scratch.activated_q8_1,
-            n_tokens * top_k * inter,
-        ).context("prefill quantise activated → Q8_1 (q8_0 path)")?;
-        // Down matmul: treat each of (L × top_k) as its own "effective token"
-        // with top_k_inner = 1 — same pattern as decode-path down.
-        if down_dt_pre != GgmlDType::Q8_0 {
-            bail!(
-                "V2.22.a Q8_0 MoE prefill path requires Q8_0 ffn_down_exps too; got {:?}",
-                down_dt_pre
-            );
-        }
-        indexed_moe_mmvq_q8_0(
-            ops, stream,
-            ffn_down_exps.ptr, scratch.activated_q8_1, scratch.expert_ids,
-            scratch.down_f32,
-            hidden, n_tokens * top_k, 1, nb_inter_q8,
-        ).context("prefill indexed_moe down q8_0")?;
+            "prefill moe activated (q4_0/q8_0 path)",
+        )?;
+        // Down matmul: each (token, slot) pair is its own "effective token"
+        // with top_k_inner = 1, same pattern as decode-path down.
+        run_indexed_moe_down(
+            ops, stream, down_dt_pre, ffn_down_exps.ptr, scratch.activated_q8_1,
+            scratch.expert_ids, scratch.down_f32,
+            hidden, n_tokens * top_k, 1, inter,
+        )?;
         cast_f32_to_f16(
             ops, stream, scratch.down_f32, scratch.down_f16,
             n_tokens * top_k * hidden,
-        ).context("prefill cast down → f16 (q8_0 path)")?;
+        ).context("prefill cast down → f16 (q4_0/q8_0 path)")?;
         moe_combine_f16(
             ops, stream,
             scratch.down_f16, scratch.expert_weights, residual, out,
             n_tokens, top_k, hidden,
-        ).context("prefill moe_combine (q8_0 path)")?;
+        ).context("prefill moe_combine (q4_0/q8_0 path)")?;
         return Ok(());
     }
 
@@ -1196,15 +1053,9 @@ pub fn forward_moe_ffn_prefill(
     //   none   (V2.4): raw r4
     // FLAMBEAU_MOE_VARIANT in {tile8, sorted, r4}. Default = tile8.
     // FLAMBEAU_MOE_SORTED=0 still works as a shortcut to force r4.
-    let moe_variant = std::env::var("FLAMBEAU_MOE_VARIANT")
-        .ok()
-        .unwrap_or_else(|| {
-            if std::env::var("FLAMBEAU_MOE_SORTED").as_deref() == Ok("0") {
-                "r4".to_string()
-            } else {
-                "tile8".to_string()
-            }
-        });
+    // Env vars are process-static — resolve once per process (T3.4), avoid
+    // one getenv per layer per token.
+    let moe_variant = moe_variant_cached();
     let total_pairs = n_tokens * top_k;
     if moe_variant == "turbo" || moe_variant == "tile8" {
         moe_sort_by_expert_padded(
@@ -1656,14 +1507,15 @@ pub fn forward_shared_expert_prefill(
         n_tokens * inter,
     )
     .context("prefill shexp swiglu_f32")?;
-    cast_f32_to_f16(
-        ops, stream, scratch.activated_f32, scratch.activated_f16, n_tokens * inter,
-    )
-    .context("prefill shexp cast activated → f16")?;
-    quantize_f16_q8_1(
-        ops, stream, scratch.activated_f16, scratch.activated_q8_1, n_tokens * inter,
-    )
-    .context("prefill shexp quantise → Q8_1")?;
+    cast_and_quantize_f32_to_q8_1(
+        ops,
+        stream,
+        scratch.activated_f32,
+        scratch.activated_f16,
+        scratch.activated_q8_1,
+        n_tokens * inter,
+        "prefill shexp activated",
+    )?;
     run_qmatmul_from_tensor(
         ops, stream, &shared.ffn_down_shexp, scratch.activated_q8_1, DevicePtr(0),
         scratch.down_f32,

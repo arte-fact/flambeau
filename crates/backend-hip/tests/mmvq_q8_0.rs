@@ -46,7 +46,7 @@ fn quantize_q8_0(xs: &[f32]) -> Vec<BlockQ8_0> {
         let block = &xs[i * QK..(i + 1) * QK];
         let amax = block.iter().fold(0.0f32, |m, &v| m.max(v.abs()));
         let d = amax / 127.0;
-        let id = if d != 0.0 { 1.0 / d } else { 0.0 };
+        let id = if d == 0.0 { 0.0 } else { 1.0 / d };
         let mut qs = [0i8; QK];
         for (j, &v) in block.iter().enumerate() {
             let q = (v * id).round().clamp(-127.0, 127.0) as i8;
@@ -82,7 +82,7 @@ fn quantize_q8_1(xs: &[f32]) -> Vec<f32> {
         let block = &xs[i * QK..(i + 1) * QK];
         let amax = block.iter().fold(0.0f32, |m, &v| m.max(v.abs()));
         let d = amax / 127.0;
-        let id = if d != 0.0 { 1.0 / d } else { 0.0 };
+        let id = if d == 0.0 { 0.0 } else { 1.0 / d };
         // Match the kernel's rintf (round-to-nearest, ties-to-even).
         for (j, &v) in block.iter().enumerate() {
             let q = (v * id).round().clamp(-127.0, 127.0) as i32;

@@ -14,6 +14,13 @@
 
 #![cfg(feature = "hip")]
 
+#![expect(
+    clippy::undocumented_unsafe_blocks,
+    reason = "sweep harness — every unsafe block is a kernel launch or a memcpy_async \
+              over buffers allocated locally in the same function and freed before \
+              return; invariant is uniform across all sites."
+)]
+
 use std::path::Path;
 
 use anyhow::{bail, Context, Result};
@@ -29,6 +36,7 @@ use flambeau_quant::{
 use half::f16;
 
 use crate::cert::{now_utc_iso8601, Cert, PmcSnapshot, ShapeResult, SCHEMA_VERSION};
+use crate::harness::{alloc_and_upload, max_rel_err_with_floor, rig, seeded_f32_range};
 
 const QK8: usize = QK8_0;
 
@@ -197,7 +205,7 @@ pub fn run_sweep(spec: &SweepSpec, repo_root: &Path) -> Result<Cert> {
                 .wrapping_add((m as u64).wrapping_mul(0x1234567))
                 .wrapping_add((k as u64).wrapping_mul(0x9E3779B97F4A7C15));
             let (got, reference) = run_shape(&dev, spec.dtype, m, k, seed)?;
-            let max_rel_err = max_rel_err(&got, &reference, k);
+            let max_rel_err = max_rel_err_with_floor(&got, &reference, (k as f32).sqrt());
             let tolerance = cert_tol(k);
             results.push(ShapeResult {
                 m,
@@ -221,10 +229,7 @@ pub fn run_sweep(spec: &SweepSpec, repo_root: &Path) -> Result<Cert> {
 
     let pass = results.iter().all(|r| r.pass);
 
-    let rig = format!(
-        "{}-gfx906",
-        hostname().unwrap_or_else(|| "unknown".to_string())
-    );
+    let rig = rig();
     let cert = Cert {
         schema_version: SCHEMA_VERSION,
         impl_id: spec.dtype.impl_id().to_string(),
@@ -317,7 +322,7 @@ fn run_shape(
     // Generate random weights (raw bit pattern — the kernel operates on bytes).
     let weights_raw = seeded_bytes(seed, weights_blocks * block_bytes);
     let weights_raw = tame_scales(dtype, weights_raw);
-    let y_f32 = seeded_f32(seed.wrapping_add(0xA5A5A5A5), k);
+    let y_f32 = seeded_f32_range(seed.wrapping_add(0xA5A5A5A5), k, -1.0, 1.0);
 
     // Dequantise weights on CPU for the reference matmul.
     let total_elems = m * k;
@@ -325,8 +330,8 @@ fn run_shape(
     dequantize_into(dtype.ggml(), &weights_raw, &mut weights_dequant)?;
 
     // Upload inputs.
-    let d_x = alloc_and_upload_bytes(dev, &weights_raw);
-    let d_y_f32 = alloc_and_upload_slice(dev, &y_f32);
+    let d_x = alloc_and_upload(dev, weights_raw.as_slice());
+    let d_y_f32 = alloc_and_upload(dev, y_f32.as_slice());
 
     // Quantise activation to Q8_1 on device.
     let y_q8_1_blocks = k / QK8;
@@ -400,17 +405,6 @@ fn seeded_bytes(seed: u64, n: usize) -> Vec<u8> {
         .map(|_| {
             s = s.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
             (s >> 24) as u8
-        })
-        .collect()
-}
-
-fn seeded_f32(seed: u64, n: usize) -> Vec<f32> {
-    let mut s = seed.wrapping_mul(6364136223846793005).wrapping_add(1);
-    (0..n)
-        .map(|_| {
-            s = s.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
-            let u = (s >> 32) as u32;
-            (u as f32 / u32::MAX as f32) * 2.0 - 1.0
         })
         .collect()
 }
@@ -489,25 +483,6 @@ fn reference_matmul(weights_f32: &[f32], y_f32: &[f32], m: usize, k: usize) -> V
     out
 }
 
-/// Relative error with an absolute-scale floor on the reference. The floor
-/// tracks the expected magnitude of a random F32 inner product (`sqrt(K)` for
-/// unit-variance operands). Without it, cancellation-heavy rows
-/// (`|ref| << sqrt(K)`) blow up the relative metric even when the absolute
-/// error is well inside the Q8_1 quant-noise envelope.
-fn max_rel_err(got: &[f32], reference: &[f32], k: usize) -> f32 {
-    // Expected magnitude of a "normal" row dot product when operands are
-    // random at unit-ish variance is `sqrt(K) * scale`. The synthetic inputs
-    // this sweep uses have weights scaled so row sums land in the thousands,
-    // so `sqrt(K)` is a conservative floor — it's always below the typical
-    // |ref|, and it pins the rel-err denominator when a cancellation-heavy
-    // row happens to come out near zero.
-    let abs_floor = (k as f32).sqrt();
-    got.iter()
-        .zip(reference)
-        .map(|(g, r)| (g - r).abs() / r.abs().max(abs_floor))
-        .fold(0.0f32, f32::max)
-}
-
 fn cert_tol(_k: usize) -> f32 {
     // 3e-2 is the measured worst-case across the V1.3 grid on gfx906 for the
     // single-row on-the-fly-dequant kernels — dominated by Q8_1 activation
@@ -517,43 +492,3 @@ fn cert_tol(_k: usize) -> f32 {
     3e-2
 }
 
-fn alloc_and_upload_slice<T: bytemuck::Pod>(dev: &HipDevice, data: &[T]) -> DevicePtr {
-    alloc_and_upload_bytes(dev, bytemuck::cast_slice(data))
-}
-
-fn alloc_and_upload_bytes(dev: &HipDevice, data: &[u8]) -> DevicePtr {
-    let d = dev.alloc(data.len()).unwrap();
-    unsafe {
-        dev.memcpy_async(
-            dev.default_stream(),
-            CopyDirection::HostToDevice,
-            d,
-            DevicePtr(data.as_ptr() as usize),
-            data.len(),
-        )
-        .unwrap();
-    }
-    dev.default_stream().synchronize().unwrap();
-    d
-}
-
-fn hostname() -> Option<String> {
-    std::env::var("HOSTNAME").ok().or_else(|| {
-        let mut buf = vec![0u8; 256];
-        // SAFETY: libc::gethostname is async-signal-safe; we check rv.
-        let rv = unsafe { libc_gethostname(buf.as_mut_ptr() as *mut _, buf.len()) };
-        if rv != 0 {
-            return None;
-        }
-        let end = buf.iter().position(|&b| b == 0).unwrap_or(buf.len());
-        buf.truncate(end);
-        String::from_utf8(buf).ok()
-    })
-}
-
-// Minimal hostname syscall binding — avoids pulling in `libc` across the
-// workspace just for one function. Falls back to `$HOSTNAME` above.
-extern "C" {
-    #[link_name = "gethostname"]
-    fn libc_gethostname(name: *mut std::os::raw::c_char, len: usize) -> i32;
-}

@@ -9,6 +9,13 @@
 
 #![cfg(feature = "hip")]
 
+#![expect(
+    clippy::undocumented_unsafe_blocks,
+    reason = "sweep harness — every unsafe block is a kernel launch or a memcpy_async \
+              over buffers allocated locally in the same function and freed before \
+              return; invariant is uniform across all sites."
+)]
+
 use std::path::Path;
 
 use anyhow::{bail, Context, Result};
@@ -20,6 +27,7 @@ use flambeau_kernels_hip as kernels;
 use half::f16;
 
 use crate::cert::{now_utc_iso8601, Cert, PmcSnapshot, ShapeResult, SCHEMA_VERSION};
+use crate::harness::{alloc_and_upload, max_rel_err_with_floor, rig, seeded_f32_range};
 
 pub fn run_sweep(repo_root: &Path) -> Result<Cert> {
     let n = device_count().context("hipGetDeviceCount")?;
@@ -68,7 +76,7 @@ pub fn run_sweep(repo_root: &Path) -> Result<Cert> {
     }
 
     let pass = results.iter().all(|r| r.pass);
-    let rig = format!("{}-gfx906", hostname().unwrap_or_else(|| "unknown".into()));
+    let rig = rig();
     let cert = Cert {
         schema_version: SCHEMA_VERSION,
         impl_id: "rope_neox_partial_f16_gfx906".to_string(),
@@ -108,7 +116,7 @@ fn run_shape(
     assert!(rotated_dims <= head_dim);
 
     let total = n_tokens * n_heads * head_dim;
-    let x0_f32 = seeded_f32(seed, total);
+    let x0_f32 = seeded_f32_range(seed, total, -0.5, 0.5);
     let x0_f16: Vec<f16> = x0_f32.iter().map(|v| f16::from_f32(*v)).collect();
     let positions: Vec<i32> = (0..n_tokens as i32).collect();
 
@@ -166,7 +174,7 @@ fn run_shape(
     }
     dev.default_stream().synchronize()?;
     let got1_f32: Vec<f32> = got1.iter().map(|v| v.to_f32()).collect();
-    let oracle_err = max_rel_err(&got1_f32, &reference);
+    let oracle_err = max_rel_err_with_floor(&got1_f32, &reference, 1.0);
 
     // Round-trip: rotate by -positions; should return to original modulo F16.
     let neg_positions: Vec<i32> = positions.iter().map(|p| -p).collect();
@@ -201,7 +209,7 @@ fn run_shape(
     }
 
     let got2_f32: Vec<f32> = got2.iter().map(|v| v.to_f32()).collect();
-    let roundtrip_err = max_rel_err(&got2_f32, &x0_f32);
+    let roundtrip_err = max_rel_err_with_floor(&got2_f32, &x0_f32, 1.0);
 
     Ok(oracle_err.max(roundtrip_err))
 }
@@ -241,55 +249,3 @@ fn launch(
     Ok(())
 }
 
-fn alloc_and_upload<T: Copy>(dev: &HipDevice, data: &[T]) -> DevicePtr {
-    let bytes = std::mem::size_of_val(data);
-    let d = dev.alloc(bytes).unwrap();
-    unsafe {
-        dev.memcpy_async(
-            dev.default_stream(),
-            CopyDirection::HostToDevice,
-            d,
-            DevicePtr(data.as_ptr() as usize),
-            bytes,
-        )
-        .unwrap();
-    }
-    dev.default_stream().synchronize().unwrap();
-    d
-}
-
-fn seeded_f32(seed: u64, n: usize) -> Vec<f32> {
-    let mut s = seed.wrapping_mul(6364136223846793005).wrapping_add(1);
-    (0..n)
-        .map(|_| {
-            s = s.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
-            let u = (s >> 32) as u32;
-            (u as f32 / u32::MAX as f32) - 0.5
-        })
-        .collect()
-}
-
-fn max_rel_err(got: &[f32], reference: &[f32]) -> f32 {
-    got.iter()
-        .zip(reference)
-        .map(|(g, r)| (g - r).abs() / r.abs().max(1.0))
-        .fold(0.0f32, f32::max)
-}
-
-fn hostname() -> Option<String> {
-    std::env::var("HOSTNAME").ok().or_else(|| {
-        let mut buf = vec![0u8; 256];
-        let rv = unsafe { libc_gethostname(buf.as_mut_ptr() as *mut _, buf.len()) };
-        if rv != 0 {
-            return None;
-        }
-        let end = buf.iter().position(|&b| b == 0).unwrap_or(buf.len());
-        buf.truncate(end);
-        String::from_utf8(buf).ok()
-    })
-}
-
-extern "C" {
-    #[link_name = "gethostname"]
-    fn libc_gethostname(name: *mut std::os::raw::c_char, len: usize) -> i32;
-}

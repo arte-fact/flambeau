@@ -7,6 +7,13 @@
 
 #![cfg(feature = "hip")]
 
+#![expect(
+    clippy::undocumented_unsafe_blocks,
+    reason = "sweep harness — every unsafe block is a kernel launch or a memcpy_async \
+              over buffers allocated locally in the same function and freed before \
+              return; invariant is uniform across all sites."
+)]
+
 use std::path::Path;
 use std::time::Instant;
 
@@ -15,6 +22,7 @@ use flambeau_backend_hip::{device_count, HipCluster};
 use flambeau_core::{CopyDirection, Device, DevicePtr, Stream};
 
 use crate::cert::{now_utc_iso8601, Cert, PmcSnapshot, ShapeResult, SCHEMA_VERSION};
+use crate::harness::rig;
 
 /// Payload sizes we cert against — cover the PP hot path (≤ 512 KB) and
 /// one bulk point to confirm the single-chunk path degrades gracefully
@@ -61,7 +69,7 @@ pub fn run_sweep(repo_root: &Path) -> Result<Cert> {
     }
 
     let pass = results.iter().all(|r| r.pass);
-    let rig = format!("{}-gfx906", hostname().unwrap_or_else(|| "unknown".into()));
+    let rig = rig();
     let cert = Cert {
         schema_version: SCHEMA_VERSION,
         impl_id: "peer_copy_via_host_gfx906".to_string(),
@@ -233,20 +241,3 @@ fn run_shape(cluster: &HipCluster, bytes: usize) -> Result<(f32, f32)> {
     Ok((max_err, best_gbps))
 }
 
-fn hostname() -> Option<String> {
-    std::env::var("HOSTNAME").ok().or_else(|| {
-        let mut buf = vec![0u8; 256];
-        let rv = unsafe { libc_gethostname(buf.as_mut_ptr() as *mut _, buf.len()) };
-        if rv != 0 {
-            return None;
-        }
-        let end = buf.iter().position(|&b| b == 0).unwrap_or(buf.len());
-        buf.truncate(end);
-        String::from_utf8(buf).ok()
-    })
-}
-
-extern "C" {
-    #[link_name = "gethostname"]
-    fn libc_gethostname(name: *mut std::os::raw::c_char, len: usize) -> i32;
-}

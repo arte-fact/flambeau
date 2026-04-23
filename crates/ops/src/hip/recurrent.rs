@@ -4,6 +4,14 @@
 //! runs the recurrence loop over `L` tokens with the state held in registers,
 //! so decode (L=1) and prefill (L>1) share the same dispatch path.
 
+#![expect(
+    clippy::undocumented_unsafe_blocks,
+    reason = "op wrapper — every unsafe block is a kernel.launch or memcpy_async over \
+              DevicePtrs validated by the caller; the kernel stem + entry are resolved \
+              through the validated registry and the ABI matches the kernels extern-C \
+              signature."
+)]
+
 use anyhow::Result;
 use flambeau_backend_hip::{HipStream, KernelArgs, LaunchCfg};
 use flambeau_core::DevicePtr;

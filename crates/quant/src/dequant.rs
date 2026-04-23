@@ -9,6 +9,19 @@
 //! These functions are the correctness oracle against which every GPU MMVQ /
 //! MMQ kernel is certed. Performance is not a concern here.
 
+// Dequantize code routinely casts packed unsigned nibbles / bytes to signed
+// quant codes (the GGUF format uses u8 storage for [-N, N-1] signed quants
+// that the decoder recovers by a bias subtract). These casts are intentional
+// and bit-preserving — clippy::cast_possible_wrap doesn't apply.
+//
+// Test asserts compare against exact-representable f32 constants (powers of
+// 2, zeros, small integers) that round-trip through quant → dequant with
+// zero error — strict `==` is correct there, not an epsilon comparison.
+#![expect(
+    clippy::cast_possible_wrap,
+    reason = "bit-preserving u8/usize → i8/i32 casts on quant codes"
+)]
+
 use byteorder::{ByteOrder, LittleEndian};
 use half::{bf16, f16};
 
@@ -21,6 +34,10 @@ use crate::error::QuantError;
 
 /// Dispatch on `dtype` and dequantize `raw` (one tensor's packed bytes) into a
 /// freshly-allocated `Vec<f32>` of length `elem_count`.
+///
+/// # Errors
+/// Returns an error if `raw` is the wrong byte length for `elem_count` of
+/// `dtype`, or if `elem_count` is not a multiple of the dtype's block size.
 pub fn dequantize_to_vec(
     dtype: GgmlDType,
     raw: &[u8],
@@ -33,6 +50,10 @@ pub fn dequantize_to_vec(
 
 /// Dequantize `raw` into a caller-supplied `out` buffer of exactly `elem_count`
 /// elements. This is the allocation-free form used by the sweep harness.
+///
+/// # Errors
+/// Returns an error if `raw` is the wrong byte length for `out.len()` of
+/// `dtype`, or if `out.len()` is not a multiple of the dtype's block size.
 pub fn dequantize_into(
     dtype: GgmlDType,
     raw: &[u8],
@@ -223,8 +244,8 @@ fn dequant_q2_k(xs: &[BlockQ2K], ys: &mut [f32]) {
 }
 
 fn dequant_q3_k(xs: &[BlockQ3K], ys: &mut [f32]) {
-    const KMASK1: u32 = 0x03030303;
-    const KMASK2: u32 = 0x0f0f0f0f;
+    const KMASK1: u32 = 0x0303_0303;
+    const KMASK2: u32 = 0x0f0f_0f0f;
 
     for (i, x) in xs.iter().enumerate() {
         let y = &mut ys[i * QK_K..(i + 1) * QK_K];
@@ -376,6 +397,10 @@ fn dequant_q8_k(xs: &[BlockQ8K], ys: &mut [f32]) {
 }
 
 #[cfg(test)]
+#[expect(
+    clippy::float_cmp,
+    reason = "test asserts use exact-representable f32 sentinel values"
+)]
 mod tests {
     use super::*;
 

@@ -235,9 +235,7 @@ pub fn capture_runtime_pmc_default(
     // Prefer the pinned binary from `.env` (ROCPROFV3), otherwise fall back
     // to `PATH` lookup. No hardcoded absolute fallbacks — ROCm's install
     // prefix varies per rig and committing one breaks CI/portability.
-    let bin = std::env::var("ROCPROFV3")
-        .map(PathBuf::from)
-        .unwrap_or_else(|_| PathBuf::from("rocprofv3"));
+    let bin = std::env::var("ROCPROFV3").map_or_else(|_| PathBuf::from("rocprofv3"), PathBuf::from);
     capture_runtime_pmc(&bin, workdir, cmd, args, kernel_name, DEFAULT_COUNTERS)
 }
 

@@ -9,6 +9,12 @@
 
 #![cfg(feature = "hip")]
 
+#![expect(
+    clippy::undocumented_unsafe_blocks,
+    reason = "bench A/B test — every unsafe block is a kernel.launch or memcpy_async \
+              over locally-allocated buffers. Scope ends at synchronize + dealloc."
+)]
+
 use flambeau_backend_hip::{device_count, HipDevice, HipModule, KernelArgs, LaunchCfg};
 use flambeau_core::{CopyDirection, Device, DevicePtr, Stream};
 use flambeau_kernels_hip as kernels;

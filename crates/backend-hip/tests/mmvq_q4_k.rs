@@ -12,6 +12,11 @@
     clippy::undocumented_unsafe_blocks,
     reason = "test fixture — every `unsafe {}` below is a kernel launch or `memcpy_async`               whose invariant is uniform: host/device buffers live for the bounded               `synchronize()` that follows, pointers are freshly allocated above, kernel               ABIs match kernels-hip. Per-site SAFETY comments would just repeat this."
 )]
+#![expect(
+    clippy::cast_possible_wrap,
+    reason = "usize → i32 casts here are kernel-shape math (row/col/block indices \
+              bounded by GGUF dims); wrap is not possible for any shape we ever run."
+)]
 
 use flambeau_backend_hip::{device_count, HipDevice, HipKernel, HipModule, KernelArgs, LaunchCfg};
 use flambeau_core::{CopyDirection, Device, DevicePtr, Stream};
@@ -79,7 +84,7 @@ fn quantize_q8_1_roundtrip(xs: &[f32]) -> Vec<f32> {
         let block = &xs[i * QK8..(i + 1) * QK8];
         let amax = block.iter().fold(0.0f32, |m, &v| m.max(v.abs()));
         let d = amax / 127.0;
-        let id = if d != 0.0 { 1.0 / d } else { 0.0 };
+        let id = if d == 0.0 { 0.0 } else { 1.0 / d };
         for (j, &v) in block.iter().enumerate() {
             let q = (v * id).round().clamp(-127.0, 127.0) as i32;
             out[i * QK8 + j] = (q as f32) * d;

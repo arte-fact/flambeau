@@ -9,6 +9,13 @@
 
 #![cfg(feature = "hip")]
 
+#![expect(
+    clippy::undocumented_unsafe_blocks,
+    reason = "sweep harness — every unsafe block is a kernel launch or a memcpy_async \
+              over buffers allocated locally in the same function and freed before \
+              return; invariant is uniform across all sites."
+)]
+
 use std::path::Path;
 
 use anyhow::{bail, Context, Result};
@@ -20,6 +27,7 @@ use flambeau_kernels_hip as kernels;
 use half::f16;
 
 use crate::cert::{now_utc_iso8601, Cert, PmcSnapshot, ShapeResult, SCHEMA_VERSION};
+use crate::harness::{alloc_and_upload, max_rel_err_with_floor, rig, seeded_f32_range};
 
 /// (head_dim, n_heads_q, n_heads_kv) — V1 target families + tests.
 const SHAPES: &[(usize, usize, usize)] = &[
@@ -50,7 +58,7 @@ pub fn run_sweep(repo_root: &Path) -> Result<Cert> {
                 ^ (n_tokens as u64 * 101);
             let (got, reference) =
                 run_shape(&dev, &kernel, head_dim, n_heads_q, n_heads_kv, n_tokens, seed)?;
-            let max_rel = max_rel_err(&got, &reference, head_dim);
+            let max_rel = max_rel_err_with_floor(&got, &reference, (head_dim as f32).sqrt() * 0.01);
             // Online softmax + F16 output round-trip + F32 reference comparison.
             // 2e-2 at n_tokens=4096 is on the order of F16's 2^-10 precision
             // compounded by the exp/sum chain; well below a usable bar.
@@ -74,7 +82,7 @@ pub fn run_sweep(repo_root: &Path) -> Result<Cert> {
     }
 
     let pass = results.iter().all(|r| r.pass);
-    let rig = format!("{}-gfx906", hostname().unwrap_or_else(|| "unknown".into()));
+    let rig = rig();
     let cert = Cert {
         schema_version: SCHEMA_VERSION,
         impl_id: "attention_decode_f16_gfx906".to_string(),
@@ -112,9 +120,9 @@ fn run_shape(
     // Random Q / K / V.
     let q_len = n_heads_q * head_dim;
     let kv_len = n_tokens * n_heads_kv * head_dim;
-    let q_f32 = seeded_f32(seed, q_len);
-    let k_f32 = seeded_f32(seed.wrapping_add(0xA1), kv_len);
-    let v_f32 = seeded_f32(seed.wrapping_add(0xA2), kv_len);
+    let q_f32 = seeded_f32_range(seed, q_len, -0.5, 0.5);
+    let k_f32 = seeded_f32_range(seed.wrapping_add(0xA1), kv_len, -0.5, 0.5);
+    let v_f32 = seeded_f32_range(seed.wrapping_add(0xA2), kv_len, -0.5, 0.5);
     let q_f16: Vec<f16> = q_f32.iter().map(|v| f16::from_f32(*v)).collect();
     let k_f16: Vec<f16> = k_f32.iter().map(|v| f16::from_f32(*v)).collect();
     let v_f16: Vec<f16> = v_f32.iter().map(|v| f16::from_f32(*v)).collect();
@@ -215,56 +223,3 @@ fn run_shape(
     Ok((got, reference))
 }
 
-fn seeded_f32(seed: u64, n: usize) -> Vec<f32> {
-    let mut s = seed.wrapping_mul(6364136223846793005).wrapping_add(1);
-    (0..n)
-        .map(|_| {
-            s = s.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
-            let u = (s >> 32) as u32;
-            (u as f32 / u32::MAX as f32) - 0.5
-        })
-        .collect()
-}
-
-fn alloc_and_upload<T: Copy>(dev: &HipDevice, data: &[T]) -> DevicePtr {
-    let bytes = std::mem::size_of_val(data);
-    let d = dev.alloc(bytes).unwrap();
-    unsafe {
-        dev.memcpy_async(
-            dev.default_stream(),
-            CopyDirection::HostToDevice,
-            d,
-            DevicePtr(data.as_ptr() as usize),
-            bytes,
-        )
-        .unwrap();
-    }
-    dev.default_stream().synchronize().unwrap();
-    d
-}
-
-fn max_rel_err(got: &[f32], reference: &[f32], head_dim: usize) -> f32 {
-    let abs_floor = (head_dim as f32).sqrt() * 0.01;
-    got.iter()
-        .zip(reference)
-        .map(|(g, r)| (g - r).abs() / r.abs().max(abs_floor))
-        .fold(0.0f32, f32::max)
-}
-
-fn hostname() -> Option<String> {
-    std::env::var("HOSTNAME").ok().or_else(|| {
-        let mut buf = vec![0u8; 256];
-        let rv = unsafe { libc_gethostname(buf.as_mut_ptr() as *mut _, buf.len()) };
-        if rv != 0 {
-            return None;
-        }
-        let end = buf.iter().position(|&b| b == 0).unwrap_or(buf.len());
-        buf.truncate(end);
-        String::from_utf8(buf).ok()
-    })
-}
-
-extern "C" {
-    #[link_name = "gethostname"]
-    fn libc_gethostname(name: *mut std::os::raw::c_char, len: usize) -> i32;
-}

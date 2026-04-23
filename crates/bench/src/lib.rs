@@ -20,6 +20,9 @@ pub mod dispatch;
 pub mod pmc;
 
 #[cfg(feature = "hip")]
+pub mod harness;
+
+#[cfg(feature = "hip")]
 pub mod sweep_mmvq;
 
 #[cfg(feature = "hip")]

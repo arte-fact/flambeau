@@ -54,7 +54,7 @@ fn run_side(label: &str, devices: &str, variant: &str, steps: &str) -> Result<Ch
     let json_out = PathBuf::from(format!("/tmp/flambeau_ab_{label}.json"));
     let _ = std::fs::remove_file(&json_out);
     let gguf = std::env::var("FLAMBEAU_QWEN3_GGUF")
-        .map_err(|_| anyhow!("FLAMBEAU_QWEN3_GGUF unset"))?;
+        .map_err(|_unset| anyhow!("FLAMBEAU_QWEN3_GGUF unset"))?;
 
     eprintln!("[{label}] spawn decode_profile devices={devices} variant={variant} steps={steps}");
     let output = Command::new(&child_bin)

@@ -3,6 +3,14 @@
 //! Only one kernel today: depthwise causal conv1d. Gated-Delta-Net uses it
 //! between the QKV input projection and the silu activation.
 
+#![expect(
+    clippy::undocumented_unsafe_blocks,
+    reason = "op wrapper — every unsafe block is a kernel.launch or memcpy_async over \
+              DevicePtrs validated by the caller; the kernel stem + entry are resolved \
+              through the validated registry and the ABI matches the kernels extern-C \
+              signature."
+)]
+
 use anyhow::Result;
 use flambeau_backend_hip::{HipStream, KernelArgs, LaunchCfg};
 use flambeau_core::DevicePtr;

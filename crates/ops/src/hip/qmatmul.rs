@@ -9,6 +9,14 @@
 //! `flambeau-backend-hip`, which mirrors the non-overlapping predicates in
 //! `dispatch/hip/gfx906.toml`.
 
+#![expect(
+    clippy::undocumented_unsafe_blocks,
+    reason = "op wrapper — every unsafe block is a `kernel.launch` or `memcpy_async` \
+              over `DevicePtr`s validated by the caller; the kernel stem + entry are \
+              resolved through the validated registry and the ABI matches the kernels \
+              extern-C signature."
+)]
+
 use anyhow::{anyhow, bail, Result};
 use flambeau_backend_hip::{dispatch_qmatmul, HipStream, KernelArgs, LaunchCfg};
 use flambeau_core::{DevicePtr, QDtype, QMatMulCfg};

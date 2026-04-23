@@ -2,6 +2,13 @@
 
 #![cfg(feature = "hip")]
 
+#![expect(
+    clippy::undocumented_unsafe_blocks,
+    reason = "sweep harness — every unsafe block is a kernel launch or a memcpy_async \
+              over buffers allocated locally in the same function and freed before \
+              return; invariant is uniform across all sites."
+)]
+
 use std::path::Path;
 
 use anyhow::{bail, Context, Result};
@@ -13,6 +20,7 @@ use flambeau_kernels_hip as kernels;
 use half::f16;
 
 use crate::cert::{now_utc_iso8601, Cert, PmcSnapshot, ShapeResult, SCHEMA_VERSION};
+use crate::harness::{alloc_and_upload, rig, seeded_f32_range};
 
 pub fn run_sweep(repo_root: &Path) -> Result<Cert> {
     let n = device_count().context("hipGetDeviceCount")?;
@@ -48,7 +56,7 @@ pub fn run_sweep(repo_root: &Path) -> Result<Cert> {
     }
 
     let pass = results.iter().all(|r| r.pass);
-    let rig = format!("{}-gfx906", hostname().unwrap_or_else(|| "unknown".into()));
+    let rig = rig();
     let cert = Cert {
         schema_version: SCHEMA_VERSION,
         impl_id: "split_q_gate_f16_gfx906".to_string(),
@@ -84,7 +92,7 @@ fn run_shape(
 ) -> Result<f32> {
     let total_fused = n_tokens * n_head * 2 * head_dim;
     let total_split = n_tokens * n_head * head_dim;
-    let fused_f32 = seeded_f32(seed, total_fused);
+    let fused_f32 = seeded_f32_range(seed, total_fused, -0.5, 0.5);
     let fused_f16: Vec<f16> = fused_f32.iter().map(|v| f16::from_f32(*v)).collect();
 
     // CPU reference split.
@@ -164,48 +172,3 @@ fn run_shape(
     Ok(err)
 }
 
-fn alloc_and_upload<T: Copy>(dev: &HipDevice, data: &[T]) -> DevicePtr {
-    let bytes = std::mem::size_of_val(data);
-    let d = dev.alloc(bytes).unwrap();
-    unsafe {
-        dev.memcpy_async(
-            dev.default_stream(),
-            CopyDirection::HostToDevice,
-            d,
-            DevicePtr(data.as_ptr() as usize),
-            bytes,
-        )
-        .unwrap();
-    }
-    dev.default_stream().synchronize().unwrap();
-    d
-}
-
-fn seeded_f32(seed: u64, n: usize) -> Vec<f32> {
-    let mut s = seed.wrapping_mul(6364136223846793005).wrapping_add(1);
-    (0..n)
-        .map(|_| {
-            s = s.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
-            let u = (s >> 32) as u32;
-            (u as f32 / u32::MAX as f32) - 0.5
-        })
-        .collect()
-}
-
-fn hostname() -> Option<String> {
-    std::env::var("HOSTNAME").ok().or_else(|| {
-        let mut buf = vec![0u8; 256];
-        let rv = unsafe { libc_gethostname(buf.as_mut_ptr() as *mut _, buf.len()) };
-        if rv != 0 {
-            return None;
-        }
-        let end = buf.iter().position(|&b| b == 0).unwrap_or(buf.len());
-        buf.truncate(end);
-        String::from_utf8(buf).ok()
-    })
-}
-
-extern "C" {
-    #[link_name = "gethostname"]
-    fn libc_gethostname(name: *mut std::os::raw::c_char, len: usize) -> i32;
-}

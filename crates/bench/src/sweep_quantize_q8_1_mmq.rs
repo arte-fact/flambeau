@@ -11,6 +11,13 @@
 
 #![cfg(feature = "hip")]
 
+#![expect(
+    clippy::undocumented_unsafe_blocks,
+    reason = "sweep harness — every unsafe block is a kernel launch or a memcpy_async \
+              over buffers allocated locally in the same function and freed before \
+              return; invariant is uniform across all sites."
+)]
+
 use std::path::Path;
 
 use anyhow::{bail, Context, Result};
@@ -20,9 +27,9 @@ use flambeau_backend_hip::{
 use flambeau_core::{CopyDirection, Device, DevicePtr, Stream};
 use flambeau_kernels_hip as kernels;
 use flambeau_quant::BlockQ8_1Mmq;
-use half::f16;
 
 use crate::cert::{now_utc_iso8601, Cert, ShapeResult, SCHEMA_VERSION};
+use crate::harness::{rig, seeded_f32_range};
 
 pub fn run_sweep(repo_root: &Path) -> Result<Cert> {
     let n = device_count().context("hipGetDeviceCount")?;
@@ -70,10 +77,7 @@ pub fn run_sweep(repo_root: &Path) -> Result<Cert> {
     }
 
     let pass = results.iter().all(|r| r.pass);
-    let rig = format!(
-        "{}-gfx906",
-        hostname().unwrap_or_else(|| "unknown".into())
-    );
+    let rig = rig();
 
     let cert = Cert {
         schema_version: SCHEMA_VERSION,
@@ -112,7 +116,7 @@ fn run_shape(
     let n_big_blocks = ncols / 128;
 
     // Seeded F32 input [total_b, ncols] row-major.
-    let input = seeded_f32(seed, total_b * ncols);
+    let input = seeded_f32_range(seed, total_b * ncols, -1.0, 1.0);
     let d_x = dev.alloc(total_b * ncols * 4)?;
     unsafe {
         dev.memcpy_async(
@@ -233,34 +237,3 @@ fn run_shape(
     Ok((max_rel_err.max(ssum_max_err), !any_nan))
 }
 
-fn seeded_f32(seed: u64, n: usize) -> Vec<f32> {
-    let mut s = seed.wrapping_mul(6364136223846793005).wrapping_add(1);
-    (0..n)
-        .map(|_| {
-            s = s.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
-            let u = (s >> 32) as u32;
-            (u as f32 / u32::MAX as f32) * 2.0 - 1.0
-        })
-        .collect()
-}
-
-fn hostname() -> Option<String> {
-    std::env::var("HOSTNAME").ok().or_else(|| {
-        let mut buf = vec![0u8; 256];
-        let rv = unsafe { libc_gethostname(buf.as_mut_ptr() as *mut _, buf.len()) };
-        if rv != 0 {
-            return None;
-        }
-        let end = buf.iter().position(|&b| b == 0).unwrap_or(buf.len());
-        buf.truncate(end);
-        String::from_utf8(buf).ok()
-    })
-}
-
-extern "C" {
-    #[link_name = "gethostname"]
-    fn libc_gethostname(name: *mut std::os::raw::c_char, len: usize) -> i32;
-}
-
-#[expect(dead_code, reason = "anchor that keeps the `f16` import live on non-hip builds where the sweep fns are feature-gated out")]
-fn _assert_f16_used(_x: f16) {}

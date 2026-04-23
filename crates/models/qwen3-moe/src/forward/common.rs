@@ -13,7 +13,229 @@ use flambeau_ops::hip::{
 };
 use flambeau_quant::GgmlDType;
 
+use flambeau_ops::hip::cast::cast_f32_to_f16;
+use flambeau_ops::hip::moe::{
+    indexed_moe_mmvq_q4_0, indexed_moe_mmvq_q4_k_gate_up, indexed_moe_mmvq_q4_k_r2,
+    indexed_moe_mmvq_q6_k, indexed_moe_mmvq_q8_0,
+};
+use flambeau_ops::hip::norm::quantize_f16_q8_1;
+
 use crate::weights::DeviceTensor;
+
+/// K-quant super-block size. Q4_K / Q5_K / Q6_K weights pack 256 elements
+/// per super-block; MoE weight dims `[n_experts, inter, hidden]` must be
+/// divisible by `QK_K` on the `hidden` and `inter` axes so our indexed-MoE
+/// kernels can walk super-blocks without a row-straddling tail.
+pub(crate) const QK_K: usize = 256;
+
+/// Assert MoE expert dtypes fall inside the supported set and that
+/// `hidden` / `inter` are `QK_K`-aligned. Shared by decode and prefill.
+///
+/// Gate and up must agree in dtype and be one of `Q4_K / Q8_0 / Q4_0`.
+/// Down may additionally be `Q6_K` (UD-Q4_K_S `ffn_down_exps` promotion).
+///
+/// `label` disambiguates decode vs prefill in error messages; pass
+/// `"indexed-MoE"` for decode and `"indexed-MoE prefill"` for prefill to
+/// preserve the existing text that downstream tests grep against.
+///
+/// # Errors
+/// Returns an error if any dtype is outside the supported set or
+/// `hidden` / `inter` are not multiples of `QK_K`.
+pub(crate) fn validate_moe_dtypes(
+    label: &str,
+    gate_dt: GgmlDType,
+    up_dt: GgmlDType,
+    down_dt: GgmlDType,
+    hidden: usize,
+    inter: usize,
+) -> Result<()> {
+    if hidden % QK_K != 0 {
+        bail!("MoE expects hidden={hidden} divisible by QK_K={QK_K}");
+    }
+    if inter % QK_K != 0 {
+        bail!("MoE expects moe_intermediate_size={inter} divisible by QK_K={QK_K}");
+    }
+    if !(gate_dt == up_dt
+        && (gate_dt == GgmlDType::Q4K
+            || gate_dt == GgmlDType::Q8_0
+            || gate_dt == GgmlDType::Q4_0))
+    {
+        bail!(
+            "{label} gate/up dtypes must match and be Q4_K, Q8_0 or Q4_0; got gate={gate_dt:?}, up={up_dt:?}"
+        );
+    }
+    if down_dt != GgmlDType::Q4K
+        && down_dt != GgmlDType::Q6K
+        && down_dt != GgmlDType::Q8_0
+        && down_dt != GgmlDType::Q4_0
+    {
+        bail!(
+            "{label} ffn_down_exps must be Q4_K, Q6_K, Q8_0 or Q4_0; got {down_dt:?}"
+        );
+    }
+    Ok(())
+}
+
+/// Run the MoE gate+up matmul for one dispatch shape. Parametrised on
+/// `n_tokens` so both decode (n_tokens=1) and prefill share a single
+/// implementation. Dispatches:
+/// - Q4_K → fused `indexed_moe_mmvq_q4_k_gate_up` (1 kernel, 2 outputs)
+/// - Q8_0 / Q4_0 → two separate `indexed_moe_mmvq_q{8_0,4_0}` launches
+///
+/// Caller must have validated `dtype` via [`validate_moe_dtypes`].
+///
+/// # Errors
+/// Returns an error if the underlying kernel launch fails.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "thin parametric wrapper over a family of indexed-MoE kernels; flattens into \
+              the caller's existing scratch-pointer flow so introducing a context struct \
+              would just rewrap the same pointers."
+)]
+pub(crate) fn run_indexed_moe_gate_up(
+    ops: &OpsRegistry,
+    stream: &HipStream,
+    dtype: GgmlDType,
+    w_gate: DevicePtr,
+    w_up: DevicePtr,
+    x_q8_1: DevicePtr,
+    expert_ids: DevicePtr,
+    gate_out: DevicePtr,
+    up_out: DevicePtr,
+    inter: usize,
+    n_tokens: usize,
+    top_k: usize,
+    hidden: usize,
+) -> Result<()> {
+    match dtype {
+        GgmlDType::Q4K => {
+            let nb = hidden / QK_K;
+            indexed_moe_mmvq_q4_k_gate_up(
+                ops, stream, w_gate, w_up, x_q8_1, expert_ids, gate_out, up_out, inter,
+                n_tokens, top_k, nb,
+            )
+            .context("indexed_moe gate+up q4_k")
+        }
+        GgmlDType::Q8_0 => {
+            let nb = hidden / 32;
+            indexed_moe_mmvq_q8_0(
+                ops, stream, w_gate, x_q8_1, expert_ids, gate_out, inter, n_tokens,
+                top_k, nb,
+            )
+            .context("indexed_moe gate q8_0")?;
+            indexed_moe_mmvq_q8_0(
+                ops, stream, w_up, x_q8_1, expert_ids, up_out, inter, n_tokens, top_k,
+                nb,
+            )
+            .context("indexed_moe up q8_0")
+        }
+        GgmlDType::Q4_0 => {
+            let nb = hidden / 32;
+            indexed_moe_mmvq_q4_0(
+                ops, stream, w_gate, x_q8_1, expert_ids, gate_out, inter, n_tokens,
+                top_k, nb,
+            )
+            .context("indexed_moe gate q4_0")?;
+            indexed_moe_mmvq_q4_0(
+                ops, stream, w_up, x_q8_1, expert_ids, up_out, inter, n_tokens, top_k,
+                nb,
+            )
+            .context("indexed_moe up q4_0")
+        }
+        _ => bail!("run_indexed_moe_gate_up: unsupported gate dtype {dtype:?} (expected Q4_K / Q8_0 / Q4_0)"),
+    }
+}
+
+/// Run the MoE down matmul for one dispatch shape. Parametrised on
+/// `n_tokens_eff` and `top_k_inner` so callers that have already flattened
+/// the `(n_tokens, top_k)` routing into per-expert effective tokens can
+/// pass `(n_tokens * top_k, 1)` (decode + prefill down-step pattern), and
+/// the standard prefill path can pass `(n_tokens, top_k)` directly.
+/// Dispatches Q4_K (r2 variant), Q6_K, Q8_0, Q4_0.
+///
+/// # Errors
+/// Returns an error if the underlying kernel launch fails or the dtype is
+/// outside the supported set.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "thin parametric wrapper over a family of indexed-MoE kernels; flattens into \
+              the caller's existing scratch-pointer flow so introducing a context struct \
+              would just rewrap the same pointers."
+)]
+pub(crate) fn run_indexed_moe_down(
+    ops: &OpsRegistry,
+    stream: &HipStream,
+    dtype: GgmlDType,
+    w_down: DevicePtr,
+    activated_q8_1: DevicePtr,
+    expert_ids: DevicePtr,
+    down_out: DevicePtr,
+    hidden: usize,
+    n_tokens_eff: usize,
+    top_k_inner: usize,
+    inter: usize,
+) -> Result<()> {
+    match dtype {
+        GgmlDType::Q4K => {
+            let nb = inter / QK_K;
+            indexed_moe_mmvq_q4_k_r2(
+                ops, stream, w_down, activated_q8_1, expert_ids, down_out, hidden,
+                n_tokens_eff, top_k_inner, nb,
+            )
+            .context("indexed_moe down q4_k r2")
+        }
+        GgmlDType::Q6K => {
+            let nb = inter / QK_K;
+            indexed_moe_mmvq_q6_k(
+                ops, stream, w_down, activated_q8_1, expert_ids, down_out, hidden,
+                n_tokens_eff, top_k_inner, nb,
+            )
+            .context("indexed_moe down q6_k")
+        }
+        GgmlDType::Q8_0 => {
+            let nb = inter / 32;
+            indexed_moe_mmvq_q8_0(
+                ops, stream, w_down, activated_q8_1, expert_ids, down_out, hidden,
+                n_tokens_eff, top_k_inner, nb,
+            )
+            .context("indexed_moe down q8_0")
+        }
+        GgmlDType::Q4_0 => {
+            let nb = inter / 32;
+            indexed_moe_mmvq_q4_0(
+                ops, stream, w_down, activated_q8_1, expert_ids, down_out, hidden,
+                n_tokens_eff, top_k_inner, nb,
+            )
+            .context("indexed_moe down q4_0")
+        }
+        _ => bail!("run_indexed_moe_down: unsupported down dtype {dtype:?} (expected Q4_K / Q6_K / Q8_0 / Q4_0)"),
+    }
+}
+
+/// Cast F32 → F16 then quantize F16 → Q8_1, in that order. The two-kernel
+/// pipeline is used on every MoE + shared-expert down-input path; a fused
+/// F32→Q8_1 kernel was tried (V2.x memory) and regressed by ~1% because the
+/// F32 quantise path lacks the packed fp16 max-reduction.
+///
+/// `label` is a short prefix that propagates into both step's error
+/// contexts so backtraces stay readable.
+///
+/// # Errors
+/// Returns an error if either kernel launch fails.
+pub(crate) fn cast_and_quantize_f32_to_q8_1(
+    ops: &OpsRegistry,
+    stream: &HipStream,
+    src_f32: DevicePtr,
+    tmp_f16: DevicePtr,
+    dst_q8_1: DevicePtr,
+    n_elems: usize,
+    label: &str,
+) -> Result<()> {
+    cast_f32_to_f16(ops, stream, src_f32, tmp_f16, n_elems)
+        .with_context(|| format!("{label}: cast f32 → f16"))?;
+    quantize_f16_q8_1(ops, stream, tmp_f16, dst_q8_1, n_elems)
+        .with_context(|| format!("{label}: quantize f16 → Q8_1"))
+}
 
 /// Write `[position]` as an i32 into the 4-byte `positions` scratch slot.
 /// Used by RoPE to pick the angle per token.
@@ -97,8 +319,7 @@ pub(super) fn row_bytes_for_dtype(dtype: GgmlDType, hidden: usize) -> Result<usi
     let type_size = dtype.type_size();
     if block_size > 1 && hidden % block_size != 0 {
         bail!(
-            "token_embd hidden {hidden} is not a multiple of block_size {block_size} for {:?}",
-            dtype
+            "token_embd hidden {hidden} is not a multiple of block_size {block_size} for {dtype:?}"
         );
     }
     let n_blocks = hidden / block_size;

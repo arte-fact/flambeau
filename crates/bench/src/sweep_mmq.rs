@@ -14,6 +14,13 @@
 
 #![cfg(feature = "hip")]
 
+#![expect(
+    clippy::undocumented_unsafe_blocks,
+    reason = "sweep harness — every unsafe block is a kernel launch or a memcpy_async \
+              over buffers allocated locally in the same function and freed before \
+              return; invariant is uniform across all sites."
+)]
+
 use std::path::Path;
 
 use anyhow::{bail, Context, Result};
@@ -29,6 +36,7 @@ use flambeau_quant::{
 use half::f16;
 
 use crate::cert::{now_utc_iso8601, Cert, PmcSnapshot, ShapeResult, SCHEMA_VERSION};
+use crate::harness::{alloc_and_upload, max_rel_err_with_floor, rig, seeded_f32_range};
 
 const QK8: usize = QK8_0;
 
@@ -276,7 +284,7 @@ pub fn run_sweep(spec: &SweepSpec, repo_root: &Path) -> Result<Cert> {
             .wrapping_add((sh.k as u64).wrapping_mul(0x9E3779B97F4A7C15))
             .wrapping_add((sh.n as u64).wrapping_mul(0xDEADBEEFCAFEBABE));
         let (got, reference) = run_shape(&dev, spec.dtype, sh.m, sh.k, sh.n, seed)?;
-        let max_rel_err = max_rel_err(&got, &reference, sh.k);
+        let max_rel_err = max_rel_err_with_floor(&got, &reference, (sh.k as f32).sqrt());
         let tolerance = cert_tol(spec.dtype, sh.k);
         results.push(ShapeResult {
             m: sh.m,
@@ -297,10 +305,7 @@ pub fn run_sweep(spec: &SweepSpec, repo_root: &Path) -> Result<Cert> {
     }
 
     let pass = results.iter().all(|r| r.pass);
-    let rig = format!(
-        "{}-gfx906",
-        hostname().unwrap_or_else(|| "unknown".into())
-    );
+    let rig = rig();
 
     let cert = Cert {
         schema_version: SCHEMA_VERSION,
@@ -377,15 +382,15 @@ fn run_shape(
     let weights_raw = tame_weight_scales(dtype, weights_raw);
 
     // Activation: [m, k] F32.
-    let act_f32 = seeded_f32(seed.wrapping_add(0xA5A5A5A5), m * k);
+    let act_f32 = seeded_f32_range(seed.wrapping_add(0xA5A5A5A5), m * k, -1.0, 1.0);
 
     // CPU dequantise weights for the reference.
     let mut w_dequant = vec![0.0f32; n * k];
     dequantize_into(dtype.ggml(), &weights_raw, &mut w_dequant)?;
 
     // Device allocs + upload.
-    let d_x = alloc_and_upload_bytes(dev, &weights_raw);
-    let d_act = alloc_and_upload_bytes(dev, bytemuck::cast_slice(&act_f32));
+    let d_x = alloc_and_upload(dev, weights_raw.as_slice());
+    let d_act = alloc_and_upload(dev, act_f32.as_slice());
 
     // Allocate activation Q8_1 buffer sized for whichever layout we use.
     let (d_y_q8_1, y_bytes_total) = if uses_mmq_layout {
@@ -578,17 +583,6 @@ fn seeded_bytes(seed: u64, n: usize) -> Vec<u8> {
         .collect()
 }
 
-fn seeded_f32(seed: u64, n: usize) -> Vec<f32> {
-    let mut s = seed.wrapping_mul(6364136223846793005).wrapping_add(1);
-    (0..n)
-        .map(|_| {
-            s = s.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
-            let u = (s >> 32) as u32;
-            (u as f32 / u32::MAX as f32) * 2.0 - 1.0
-        })
-        .collect()
-}
-
 fn tame_weight_scales(dtype: Dtype, mut raw: Vec<u8>) -> Vec<u8> {
     let bs = dtype.weight_block_bytes();
     let nblocks = raw.len() / bs;
@@ -678,14 +672,6 @@ fn reference_matmul(weights: &[f32], act: &[f32], m: usize, k: usize, n: usize) 
     out
 }
 
-fn max_rel_err(got: &[f32], reference: &[f32], k: usize) -> f32 {
-    let abs_floor = (k as f32).sqrt();
-    got.iter()
-        .zip(reference)
-        .map(|(g, r)| (g - r).abs() / r.abs().max(abs_floor))
-        .fold(0.0f32, f32::max)
-}
-
 fn cert_tol(dtype: Dtype, _k: usize) -> f32 {
     match dtype {
         // Q5_K has compound super-block × sub-block scale errors; at large M the
@@ -697,36 +683,3 @@ fn cert_tol(dtype: Dtype, _k: usize) -> f32 {
     }
 }
 
-fn alloc_and_upload_bytes(dev: &HipDevice, data: &[u8]) -> DevicePtr {
-    let d = dev.alloc(data.len()).unwrap();
-    unsafe {
-        dev.memcpy_async(
-            dev.default_stream(),
-            CopyDirection::HostToDevice,
-            d,
-            DevicePtr(data.as_ptr() as usize),
-            data.len(),
-        )
-        .unwrap();
-    }
-    dev.default_stream().synchronize().unwrap();
-    d
-}
-
-fn hostname() -> Option<String> {
-    std::env::var("HOSTNAME").ok().or_else(|| {
-        let mut buf = vec![0u8; 256];
-        let rv = unsafe { libc_gethostname(buf.as_mut_ptr() as *mut _, buf.len()) };
-        if rv != 0 {
-            return None;
-        }
-        let end = buf.iter().position(|&b| b == 0).unwrap_or(buf.len());
-        buf.truncate(end);
-        String::from_utf8(buf).ok()
-    })
-}
-
-extern "C" {
-    #[link_name = "gethostname"]
-    fn libc_gethostname(name: *mut std::os::raw::c_char, len: usize) -> i32;
-}

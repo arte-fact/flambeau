@@ -3,6 +3,14 @@
 //! Both kernels use 256 threads/row, one block per row. Layout of the Q8_1
 //! output is the GGUF-standard `[d (fp16), s (fp16), qs[32] (i8)]` block.
 
+#![expect(
+    clippy::undocumented_unsafe_blocks,
+    reason = "op wrapper — every unsafe block is a `kernel.launch` or `memcpy_async` \
+              over `DevicePtr`s validated by the caller; the kernel stem + entry are \
+              resolved through the validated registry and the ABI matches the kernels \
+              extern-C signature."
+)]
+
 use anyhow::Result;
 use flambeau_backend_hip::{HipStream, KernelArgs, LaunchCfg};
 use flambeau_core::DevicePtr;

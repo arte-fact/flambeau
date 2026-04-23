@@ -18,7 +18,6 @@
 use std::collections::HashMap;
 use std::ffi::CString;
 use std::marker::PhantomData;
-use std::os::raw::c_uint;
 use std::ptr;
 use std::sync::RwLock;
 
@@ -101,7 +100,7 @@ impl HipModule {
         // writes a module handle through the out-pointer. `image` is a live
         // slice for the duration of this call; `&mut m` is valid for writes.
         let code =
-            unsafe { hipModuleLoadData(&mut m as *mut _, image.as_ptr() as *const _) };
+            unsafe { hipModuleLoadData(&raw mut m, image.as_ptr().cast()) };
         check(code, "hipModuleLoadData")?;
         Ok(Self {
             raw: m,
@@ -176,7 +175,7 @@ impl HipModule {
     /// Raw driver resolution. Shared between `kernel` (cached) and
     /// `kernel_dynamic` (not cached).
     fn resolve(&self, name: &str) -> DeviceResult<hipFunction_t> {
-        let cname = CString::new(name).map_err(|_| DeviceError::Backend {
+        let cname = CString::new(name).map_err(|_nul| DeviceError::Backend {
             backend: BACKEND,
             code: -1,
             message: format!("kernel name contains NUL: {name:?}"),
@@ -186,7 +185,7 @@ impl HipModule {
         // drop). `cname` is a valid, NUL-terminated C string (constructed from
         // `CString::new` above). The driver writes the function handle through
         // `&mut f`, which is valid for writes.
-        let code = unsafe { hipModuleGetFunction(&mut f as *mut _, self.raw, cname.as_ptr()) };
+        let code = unsafe { hipModuleGetFunction(&raw mut f, self.raw, cname.as_ptr()) };
         check(code, "hipModuleGetFunction")?;
         Ok(f)
     }
@@ -217,7 +216,7 @@ pub struct HipKernel<'m> {
     _module: PhantomData<&'m HipModule>,
 }
 
-impl<'m> std::fmt::Debug for HipKernel<'m> {
+impl std::fmt::Debug for HipKernel<'_> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("HipKernel")
             .field("raw", &(self.raw as usize))
@@ -252,7 +251,7 @@ pub struct KernelArgs<'a> {
     _marker: PhantomData<&'a ()>,
 }
 
-impl<'a> std::fmt::Debug for KernelArgs<'a> {
+impl std::fmt::Debug for KernelArgs<'_> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("KernelArgs")
             .field("len", &self.ptrs.len())
@@ -271,7 +270,7 @@ impl<'a> KernelArgs<'a> {
     /// the kernel reads them asynchronously, so arg storage must outlive
     /// the stream's consumption of the launch).
     pub fn push<T>(&mut self, v: &'a T) {
-        self.ptrs.push(v as *const T as *mut _);
+        self.ptrs.push(std::ptr::from_ref::<T>(v) as *mut _);
     }
 
     fn as_raw(&mut self) -> *mut *mut std::os::raw::c_void {
@@ -293,7 +292,7 @@ impl<'a> KernelArgs<'a> {
     /// callers that construct once and update pointers per launch.
     pub fn set<T>(&mut self, idx: usize, v: &'a T) {
         debug_assert!(idx < self.ptrs.len(), "set({idx}) out of bounds");
-        self.ptrs[idx] = v as *const T as *mut _;
+        self.ptrs[idx] = std::ptr::from_ref::<T>(v) as *mut _;
     }
 
     pub fn len(&self) -> usize {
@@ -328,7 +327,7 @@ impl FuncAttributes {
     }
 }
 
-impl<'m> HipKernel<'m> {
+impl HipKernel<'_> {
     /// Query the kernel's static attributes — VGPR count, shared-mem
     /// footprint, etc. Cheap in-process call; no kernel launch.
     pub fn attributes(&self) -> DeviceResult<FuncAttributes> {
@@ -337,9 +336,9 @@ impl<'m> HipKernel<'m> {
             // SAFETY: `raw` is a live function handle (invariant of the enclosing
             // `HipKernel`, which borrows from its `HipModule`). `&mut v` is valid
             // for writes of `sizeof(int)`; the driver does not read from it.
-            let code = unsafe { hipFuncGetAttribute(&mut v as *mut _, attr, raw) };
+            let code = unsafe { hipFuncGetAttribute(&raw mut v, attr, raw) };
             check(code, ctx)?;
-            Ok(v as i32)
+            Ok(v)
         }
         let num_regs = q(self.raw, HIP_FUNC_ATTRIBUTE_NUM_REGS, "hipFuncGetAttribute NUM_REGS")?
             .max(0) as u32;
@@ -384,13 +383,13 @@ impl<'m> HipKernel<'m> {
         let code = unsafe {
             hipModuleLaunchKernel(
                 self.raw,
-                cfg.grid.0 as c_uint,
-                cfg.grid.1 as c_uint,
-                cfg.grid.2 as c_uint,
-                cfg.block.0 as c_uint,
-                cfg.block.1 as c_uint,
-                cfg.block.2 as c_uint,
-                cfg.shared_bytes as c_uint,
+                cfg.grid.0,
+                cfg.grid.1,
+                cfg.grid.2,
+                cfg.block.0,
+                cfg.block.1,
+                cfg.block.2,
+                cfg.shared_bytes,
                 stream.raw_handle() as crate::sys::hipStream_t,
                 args.as_raw(),
                 ptr::null_mut(),
@@ -425,13 +424,13 @@ impl<'m> HipKernel<'m> {
         let code = unsafe {
             hipModuleLaunchKernel(
                 self.raw,
-                cfg.grid.0 as c_uint,
-                cfg.grid.1 as c_uint,
-                cfg.grid.2 as c_uint,
-                cfg.block.0 as c_uint,
-                cfg.block.1 as c_uint,
-                cfg.block.2 as c_uint,
-                cfg.shared_bytes as c_uint,
+                cfg.grid.0,
+                cfg.grid.1,
+                cfg.grid.2,
+                cfg.block.0,
+                cfg.block.1,
+                cfg.block.2,
+                cfg.shared_bytes,
                 stream.raw_handle() as crate::sys::hipStream_t,
                 args_ptr,
                 ptr::null_mut(),

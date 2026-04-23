@@ -8,6 +8,14 @@
 
 #![cfg(feature = "hip")]
 
+#![expect(
+    clippy::undocumented_unsafe_blocks,
+    reason = "forward-path composition — every unsafe block is a kernel.launch or \
+              memcpy_async over DevicePtrs owned by the session's scratch / weights / \
+              KV cache. Buffers live for the whole session; sync is driven by the top- \
+              level forward_*_decode/prefill caller."
+)]
+
 use anyhow::{bail, Context, Result};
 use flambeau_core::{Device, DevicePtr};
 use flambeau_ops::hip::{HipDevice, HipStream, OpsRegistry};

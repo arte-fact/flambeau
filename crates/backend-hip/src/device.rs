@@ -41,16 +41,16 @@ pub fn device_count() -> DeviceResult<i32> {
     let mut count: c_int = 0;
     // SAFETY: `hipGetDeviceCount` writes an `int` through the out-pointer and
     // reads nothing from it. `&mut count` is valid for writes of `sizeof(int)`.
-    let code = unsafe { hipGetDeviceCount(&mut count as *mut _) };
+    let code = unsafe { hipGetDeviceCount(&raw mut count) };
     check(code, "hipGetDeviceCount")?;
-    Ok(count as i32)
+    Ok(count)
 }
 
 /// Bind the current thread's HIP context to `device_id`.
 pub fn bind(device_id: i32) -> DeviceResult<()> {
     // SAFETY: `hipSetDevice` takes an `int` by value and touches no caller memory.
     // A negative or out-of-range id is returned as an error via the return code.
-    check(unsafe { hipSetDevice(device_id as c_int) }, "hipSetDevice")
+    check(unsafe { hipSetDevice(device_id) }, "hipSetDevice")
 }
 
 /// Return the HIP context's current device id.
@@ -58,8 +58,8 @@ pub fn current_device() -> DeviceResult<i32> {
     let mut id: c_int = -1;
     // SAFETY: `hipGetDevice` writes an `int` through the out-pointer and reads
     // nothing from it. `&mut id` is valid for writes of `sizeof(int)`.
-    check(unsafe { hipGetDevice(&mut id as *mut _) }, "hipGetDevice")?;
-    Ok(id as i32)
+    check(unsafe { hipGetDevice(&raw mut id) }, "hipGetDevice")?;
+    Ok(id)
 }
 
 /// A HIP stream. Drop destroys the underlying `hipStream_t`.
@@ -94,7 +94,7 @@ impl HipStream {
         let mut s: hipStream_t = ptr::null_mut();
         // SAFETY: `hipStreamCreate` writes a stream handle through the
         // out-pointer. `&mut s` is valid for writes of a `hipStream_t`.
-        check(unsafe { hipStreamCreate(&mut s as *mut _) }, "hipStreamCreate")?;
+        check(unsafe { hipStreamCreate(&raw mut s) }, "hipStreamCreate")?;
         Ok(Self {
             ptr: s,
             device_id,
@@ -204,7 +204,7 @@ impl Device for HipDevice {
         // SAFETY: `hipMalloc` writes a pointer through the out-pointer and
         // reads nothing from it. `&mut p` is valid for writes of `sizeof(void*)`.
         // The returned device pointer is owned by `DevicePtr`.
-        let code = unsafe { hipMalloc(&mut p as *mut _, bytes) };
+        let code = unsafe { hipMalloc(&raw mut p, bytes) };
         if code != HIP_SUCCESS {
             return Err(DeviceError::Alloc {
                 backend: BACKEND,

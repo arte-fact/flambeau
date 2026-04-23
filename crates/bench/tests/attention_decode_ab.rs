@@ -13,6 +13,12 @@
 
 #![cfg(feature = "hip")]
 
+#![expect(
+    clippy::undocumented_unsafe_blocks,
+    reason = "bench A/B test — every unsafe block is a kernel.launch or memcpy_async \
+              over locally-allocated buffers. Scope ends at synchronize + dealloc."
+)]
+
 use std::time::Instant;
 
 use flambeau_backend_hip::{device_count, HipDevice, HipKernel, HipModule, KernelArgs, LaunchCfg};
@@ -146,6 +152,10 @@ fn time_kernel(
     (min, median, max)
 }
 
+#[expect(
+    clippy::too_many_arguments,
+    reason = "A/B test launcher: mirrors the split-K kernel's 12-slot signature; bundling into a struct would obscure the correspondence to the on-device kernel layout."
+)]
 fn launch_splitk(
     dev: &HipDevice,
     k_chunk: &HipKernel<'_>,

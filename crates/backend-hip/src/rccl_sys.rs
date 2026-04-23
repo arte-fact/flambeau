@@ -10,6 +10,13 @@
               wired (per V1.2 partial rollout)."
 )]
 
+#![expect(
+    clippy::undocumented_unsafe_blocks,
+    reason = "RCCL FFI — every unsafe block wraps an ncclGroup* / ncclAllReduce* / \
+              ncclCommInitAll call with comm / stream / buffer pointers validated at \
+              HipMesh construction and owned for the communicators lifetime."
+)]
+
 use std::os::raw::{c_char, c_int, c_void};
 
 use crate::sys::hipStream_t;

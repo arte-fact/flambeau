@@ -5,6 +5,14 @@
 //! [`build_expert_buckets`]. Byte-compatible with `sweep_moe::build_expert_buckets`;
 //! the two will be folded into one helper when V1.7.3 consumes this.
 
+#![expect(
+    clippy::undocumented_unsafe_blocks,
+    reason = "op wrapper — every unsafe block is a `kernel.launch` or `memcpy_async` \
+              over `DevicePtr`s validated by the caller; the kernel stem + entry are \
+              resolved through the validated registry and the ABI matches the kernels \
+              extern-C signature."
+)]
+
 use anyhow::Result;
 use flambeau_backend_hip::{HipStream, KernelArgs, LaunchCfg};
 use flambeau_core::{DevicePtr, MOE_SORT_MAX_EXPERTS, TOPK_MAX_EXPERTS};

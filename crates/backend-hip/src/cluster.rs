@@ -56,6 +56,7 @@ impl std::fmt::Debug for RankBounce {
         f.debug_struct("RankBounce")
             .field("ptr", &(self.ptr.load(Ordering::Relaxed) as usize))
             .field("bytes", &self.bytes.load(Ordering::Relaxed))
+            .field("grow_lock", &"<Mutex>")
             .finish()
     }
 }
@@ -178,7 +179,7 @@ impl HipCluster {
         }
 
         // Cold path: serialise growers.
-        let _guard = slot.grow_lock.lock().map_err(|_| DeviceError::Backend {
+        let _guard = slot.grow_lock.lock().map_err(|_poisoned| DeviceError::Backend {
             backend: "hip",
             code: -1,
             message: "HipCluster grow_lock poisoned".into(),
@@ -220,7 +221,7 @@ impl HipCluster {
         // SAFETY: `hipHostMalloc` writes a host pointer through the out-pointer
         // and reads nothing from it. `&mut new_ptr` is valid for writes of
         // `sizeof(void*)`. Returned pointer ownership is transferred into `slot`.
-        let rc = unsafe { hipHostMalloc(&mut new_ptr, need, HIP_HOST_MALLOC_PORTABLE) };
+        let rc = unsafe { hipHostMalloc(&raw mut new_ptr, need, HIP_HOST_MALLOC_PORTABLE) };
         if rc != HIP_SUCCESS {
             return Err(DeviceError::Alloc {
                 backend: "hip",
@@ -330,7 +331,7 @@ impl HipCluster {
         let rc = unsafe {
             hipMemcpyAsync(
                 dst_ptr.as_usize() as *mut c_void,
-                buf as *const c_void,
+                buf.cast_const(),
                 bytes,
                 hipMemcpyKind::HostToDevice,
                 dst_dev.default_stream().raw(),
@@ -350,7 +351,7 @@ impl HipCluster {
 
 impl Drop for HipCluster {
     fn drop(&mut self) {
-        for bounce in self.bounces.iter() {
+        for bounce in &self.bounces {
             // Relaxed is fine here: we're on the sole remaining thread
             // holding this cluster (Drop implies no outstanding borrows).
             let p = bounce.ptr.load(Ordering::Relaxed);

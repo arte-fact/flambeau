@@ -7,6 +7,13 @@
 
 #![cfg(feature = "hip")]
 
+#![expect(
+    clippy::undocumented_unsafe_blocks,
+    reason = "test fixture — every unsafe block is a kernel launch or memcpy_async \
+              over host/device buffers that live for the bounded synchronize that \
+              follows; per-site SAFETY comments would just repeat this."
+)]
+
 use anyhow::Result;
 use flambeau_core::{CopyDirection, Device, DevicePtr, Stream};
 use flambeau_ops::hip::{HipDevice, OpsRegistry};

@@ -8,6 +8,13 @@
 
 #![cfg(feature = "hip")]
 
+#![expect(
+    clippy::undocumented_unsafe_blocks,
+    reason = "sweep harness — every unsafe block is a kernel launch or a memcpy_async \
+              over buffers allocated locally in the same function and freed before \
+              return; invariant is uniform across all sites."
+)]
+
 use std::path::Path;
 
 use anyhow::{bail, Context, Result};
@@ -19,44 +26,16 @@ use flambeau_kernels_hip as kernels;
 use half::f16;
 
 use crate::cert::{now_utc_iso8601, Cert, PmcSnapshot, ShapeResult, SCHEMA_VERSION};
+use crate::harness::{alloc_and_upload, max_rel_err_with_floor, rig, seeded_f32_range};
 
 // --- helpers ---------------------------------------------------------------
 
 fn seeded_f32(seed: u64, n: usize) -> Vec<f32> {
-    let mut s = seed.wrapping_mul(6364136223846793005).wrapping_add(1);
-    (0..n)
-        .map(|_| {
-            s = s
-                .wrapping_mul(6364136223846793005)
-                .wrapping_add(1442695040888963407);
-            let u = (s >> 32) as u32;
-            (u as f32 / u32::MAX as f32) - 0.5
-        })
-        .collect()
-}
-
-fn alloc_and_upload<T: Copy>(dev: &HipDevice, data: &[T]) -> DevicePtr {
-    let bytes = std::mem::size_of_val(data);
-    let d = dev.alloc(bytes).unwrap();
-    unsafe {
-        dev.memcpy_async(
-            dev.default_stream(),
-            CopyDirection::HostToDevice,
-            d,
-            DevicePtr(data.as_ptr() as usize),
-            bytes,
-        )
-        .unwrap();
-    }
-    dev.default_stream().synchronize().unwrap();
-    d
+    seeded_f32_range(seed, n, -0.5, 0.5)
 }
 
 fn max_rel_err(got: &[f32], reference: &[f32]) -> f32 {
-    got.iter()
-        .zip(reference)
-        .map(|(g, r)| (g - r).abs() / r.abs().max(1.0))
-        .fold(0.0f32, f32::max)
+    max_rel_err_with_floor(got, reference, 1.0)
 }
 
 fn open_kernel(stem: &str, entry: &str) -> Result<(HipDevice, HipModule, String)> {
@@ -69,27 +48,8 @@ fn open_kernel(stem: &str, entry: &str) -> Result<(HipDevice, HipModule, String)
     let kb = kernels::hsaco(stem)
         .ok_or_else(|| anyhow::anyhow!("{stem} not compiled"))?;
     let module = HipModule::load(dev.id(), kb)?;
-    let _ = module.kernel(entry)?; // validate upfront
+    let _ = module.kernel_dynamic(entry)?; // validate upfront
     Ok((dev, module, entry.to_string()))
-}
-
-fn rig() -> String {
-    let h = std::env::var("HOSTNAME").ok().or_else(|| {
-        let mut buf = vec![0u8; 256];
-        let rv = unsafe { libc_gethostname(buf.as_mut_ptr() as *mut _, buf.len()) };
-        if rv != 0 {
-            return None;
-        }
-        let end = buf.iter().position(|&b| b == 0).unwrap_or(buf.len());
-        buf.truncate(end);
-        String::from_utf8(buf).ok()
-    });
-    format!("{}-gfx906", h.unwrap_or_else(|| "unknown".into()))
-}
-
-extern "C" {
-    #[link_name = "gethostname"]
-    fn libc_gethostname(name: *mut std::os::raw::c_char, len: usize) -> i32;
 }
 
 fn pmc(kernel: &HipKernel<'_>) -> Option<PmcSnapshot> {
@@ -107,7 +67,7 @@ fn pmc(kernel: &HipKernel<'_>) -> Option<PmcSnapshot> {
 
 pub fn run_silu_sweep(repo_root: &Path) -> Result<Cert> {
     let (dev, module, entry) = open_kernel("silu_f32", "flambeau_silu_f32")?;
-    let kernel = module.kernel(&entry)?;
+    let kernel = module.kernel_dynamic(&entry)?;
     let shapes = [64usize, 1024, 4096, 8192];
     let mut results = Vec::new();
     for n in shapes {
@@ -185,7 +145,7 @@ pub fn run_silu_sweep(repo_root: &Path) -> Result<Cert> {
 
 pub fn run_swiglu_sweep(repo_root: &Path) -> Result<Cert> {
     let (dev, module, entry) = open_kernel("swiglu_f32", "flambeau_swiglu_f32")?;
-    let kernel = module.kernel(&entry)?;
+    let kernel = module.kernel_dynamic(&entry)?;
     let shapes = [256usize, 1024, 4096];
     let mut results = Vec::new();
     for n in shapes {
@@ -270,7 +230,7 @@ pub fn run_swiglu_sweep(repo_root: &Path) -> Result<Cert> {
 
 pub fn run_scale_sweep(repo_root: &Path) -> Result<Cert> {
     let (dev, module, entry) = open_kernel("scale_f32", "flambeau_scale_f32")?;
-    let kernel = module.kernel(&entry)?;
+    let kernel = module.kernel_dynamic(&entry)?;
     let shapes = [64usize, 1024, 2048, 4096];
     let mut results = Vec::new();
     for n in shapes {
@@ -344,7 +304,7 @@ pub fn run_scale_sweep(repo_root: &Path) -> Result<Cert> {
 
 pub fn run_rmsnorm_f32_sweep(repo_root: &Path) -> Result<Cert> {
     let (dev, module, entry) = open_kernel("rmsnorm_f32", "flambeau_rmsnorm_f32")?;
-    let kernel = module.kernel(&entry)?;
+    let kernel = module.kernel_dynamic(&entry)?;
     // GDN ssm_norm shapes: per-head over num_v_heads × head_v_dim.
     //   Qwen3.6: (32, 128). Include 9B variant and a 1-row sanity check.
     let shapes = [(32usize, 128usize), (16, 128), (1, 512)];
@@ -436,7 +396,7 @@ pub fn run_rmsnorm_f32_sweep(repo_root: &Path) -> Result<Cert> {
 
 pub fn run_gdn_alpha_beta_sweep(repo_root: &Path) -> Result<Cert> {
     let (dev, module, entry) = open_kernel("gdn_alpha_beta_f32", "flambeau_gdn_alpha_beta_f32")?;
-    let kernel = module.kernel(&entry)?;
+    let kernel = module.kernel_dynamic(&entry)?;
     // num_v_heads in our supported range: 2 (tiny smoke), 32 (Qwen3.6), 64 (upper fixture).
     let shapes = [2usize, 32, 64];
     let mut results = Vec::new();
@@ -559,7 +519,7 @@ pub fn run_quantize_f16_q8_1_sweep(repo_root: &Path) -> Result<Cert> {
         "quantize_f16_q8_1",
         "flambeau_quantize_row_f16_q8_1",
     )?;
-    let kernel = module.kernel(&entry)?;
+    let kernel = module.kernel_dynamic(&entry)?;
     // Must be multiples of 32. Cover shapes the full-attn forward hits
     // (n_heads * head_dim = 4096 for Qwen3.6) + small sanity.
     let shapes = [32usize, 256, 4096];
@@ -693,7 +653,7 @@ pub fn run_quantize_f16_q8_1_sweep(repo_root: &Path) -> Result<Cert> {
 
 pub fn run_add_f16_sweep(repo_root: &Path) -> Result<Cert> {
     let (dev, module, entry) = open_kernel("add_f16", "flambeau_add_f16")?;
-    let kernel = module.kernel(&entry)?;
+    let kernel = module.kernel_dynamic(&entry)?;
     let shapes = [64usize, 256, 2048, 4096, 8192];
     let mut results = Vec::new();
     for n in shapes {
@@ -785,7 +745,7 @@ pub fn run_add_f16_sweep(repo_root: &Path) -> Result<Cert> {
 
 pub fn run_dense_gemv_sweep(repo_root: &Path) -> Result<Cert> {
     let (dev, module, entry) = open_kernel("dense_gemv_f32_f16", "flambeau_dense_gemv_f32_f16")?;
-    let kernel = module.kernel(&entry)?;
+    let kernel = module.kernel_dynamic(&entry)?;
     // MoE router shapes: n_rows = n_experts (4, 128, 256), k = hidden (2048).
     // Small n_experts + small k for sanity.
     let shapes = [
@@ -885,7 +845,7 @@ pub fn run_dense_gemv_sweep(repo_root: &Path) -> Result<Cert> {
 
 pub fn run_cast_f16_f32_sweep(repo_root: &Path) -> Result<Cert> {
     let (dev, module, entry) = open_kernel("cast_f16_f32", "flambeau_cast_f16_f32")?;
-    let kernel = module.kernel(&entry)?;
+    let kernel = module.kernel_dynamic(&entry)?;
     let shapes = [64usize, 1024, 2048, 4096, 8192];
     let mut results = Vec::new();
     for n in shapes {

@@ -4,6 +4,13 @@
 
 #![cfg(feature = "hip")]
 
+#![expect(
+    clippy::undocumented_unsafe_blocks,
+    reason = "sweep harness — every unsafe block is a kernel launch or a memcpy_async \
+              over buffers allocated locally in the same function and freed before \
+              return; invariant is uniform across all sites."
+)]
+
 use std::path::Path;
 
 use anyhow::{bail, Context, Result};
@@ -13,9 +20,9 @@ use flambeau_backend_hip::{
 use flambeau_core::{CopyDirection, Device, DevicePtr, Stream};
 use flambeau_kernels_hip as kernels;
 use flambeau_quant::{BlockQ4_0, BlockQ5_0, BlockQ8_1, QK8_0};
-use half::f16;
 
 use crate::cert::{now_utc_iso8601, Cert, PmcSnapshot, ShapeResult, SCHEMA_VERSION};
+use crate::harness::{max_rel_err_with_floor, rig, seeded_f32_range};
 
 pub fn run_mmvq_q4_0_sweep(repo_root: &Path) -> Result<Cert> {
     run_dense_sweep(
@@ -67,7 +74,7 @@ fn run_dense_sweep(
     dev.bind()?;
     let kb = kernels::hsaco(stem).unwrap();
     let module = HipModule::load(dev.id(), kb)?;
-    let kernel: HipKernel<'_> = module.kernel(entry)?;
+    let kernel: HipKernel<'_> = module.kernel_dynamic(entry)?;
     let attrs: FuncAttributes = kernel.attributes()?;
     let q_kb = kernels::hsaco("quantize_q8_1").unwrap();
     let q_module = HipModule::load(dev.id(), q_kb)?;
@@ -103,7 +110,7 @@ fn run_dense_sweep(
         results,
         pass,
         emitted_at: now_utc_iso8601(),
-        rig: rig_tag(),
+        rig: rig(),
         pmc: Some(PmcSnapshot {
             vgpr_count: Some(attrs.num_regs),
             sgpr_count: None,
@@ -125,8 +132,8 @@ fn run_dense_shape(
     seed: u64,
     encode: EncodeFn,
 ) -> Result<f32> {
-    let w_f32 = seeded_f32(seed, n_rows * k);
-    let x_f32 = seeded_f32(seed.wrapping_add(0xA1), k);
+    let w_f32 = seeded_f32_range(seed, n_rows * k, -0.5, 0.5);
+    let x_f32 = seeded_f32_range(seed.wrapping_add(0xA1), k, -0.5, 0.5);
     let w_bytes = encode(&w_f32);
     let n_blocks_per_row = k / 32;
 
@@ -206,7 +213,7 @@ fn run_dense_shape(
         }
         reference[row] = acc as f32;
     }
-    Ok(max_rel_err(&got, &reference, k))
+    Ok(max_rel_err_with_floor(&got, &reference, (k as f32).sqrt() * 0.01))
 }
 
 pub fn run_indexed_moe_mmvq_q4_0_sweep(repo_root: &Path) -> Result<Cert> {
@@ -260,7 +267,7 @@ pub fn run_indexed_moe_mmvq_q4_0_sweep(repo_root: &Path) -> Result<Cert> {
         results,
         pass,
         emitted_at: now_utc_iso8601(),
-        rig: rig_tag(),
+        rig: rig(),
         pmc: Some(PmcSnapshot {
             vgpr_count: Some(attrs.num_regs),
             sgpr_count: None,
@@ -286,10 +293,10 @@ fn run_q4_0_moe_shape(
 ) -> Result<f32> {
     let nb_per_row = k_dim / 32;
     let w_elems = n_experts * n_rows * k_dim;
-    let w_f32 = seeded_f32(seed, w_elems);
+    let w_f32 = seeded_f32_range(seed, w_elems, -0.5, 0.5);
     let w_bytes = encode_q4_0(&w_f32);
 
-    let act_f32 = seeded_f32(seed.wrapping_add(0xA1), n_tokens * k_dim);
+    let act_f32 = seeded_f32_range(seed.wrapping_add(0xA1), n_tokens * k_dim, -0.5, 0.5);
     let expert_ids: Vec<i32> = (0..n_tokens * top_k)
         .map(|i| {
             let h = (i as u64)
@@ -387,7 +394,7 @@ fn run_q4_0_moe_shape(
             }
         }
     }
-    Ok(max_rel_err(&got, &reference, k_dim))
+    Ok(max_rel_err_with_floor(&got, &reference, (k_dim as f32).sqrt() * 0.01))
 }
 
 // ---------- encoders + helpers ----------
@@ -426,7 +433,7 @@ fn encode_q4_0(xs: &[f32]) -> Vec<u8> {
 }
 
 fn encode_q5_1(xs: &[f32]) -> Vec<u8> {
-    use flambeau_quant::{BlockQ5_1, QK8_0};
+    use flambeau_quant::BlockQ5_1;
     assert_eq!(xs.len() % QK8_0, 0);
     let nb = xs.len() / QK8_0;
     let mut out = Vec::with_capacity(nb * std::mem::size_of::<BlockQ5_1>());
@@ -498,17 +505,6 @@ fn encode_q5_0(xs: &[f32]) -> Vec<u8> {
     out
 }
 
-fn seeded_f32(seed: u64, n: usize) -> Vec<f32> {
-    let mut s = seed.wrapping_mul(6364136223846793005).wrapping_add(1);
-    (0..n)
-        .map(|_| {
-            s = s.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
-            let u = (s >> 32) as u32;
-            (u as f32 / u32::MAX as f32) - 0.5
-        })
-        .collect()
-}
-
 fn upload<T: Copy>(dev: &HipDevice, data: &[T]) -> DevicePtr {
     let bytes = std::mem::size_of_val(data);
     let d = dev.alloc(bytes).unwrap();
@@ -540,32 +536,3 @@ fn q8_1_roundtrip(xs: &[f32]) -> Vec<f32> {
     out
 }
 
-fn max_rel_err(got: &[f32], reference: &[f32], k: usize) -> f32 {
-    let abs_floor = (k as f32).sqrt() * 0.01;
-    got.iter()
-        .zip(reference)
-        .map(|(g, r)| (g - r).abs() / r.abs().max(abs_floor))
-        .fold(0.0f32, f32::max)
-}
-
-fn rig_tag() -> String {
-    format!("{}-gfx906", hostname().unwrap_or_else(|| "unknown".into()))
-}
-
-fn hostname() -> Option<String> {
-    std::env::var("HOSTNAME").ok().or_else(|| {
-        let mut buf = vec![0u8; 256];
-        let rv = unsafe { libc_gethostname(buf.as_mut_ptr() as *mut _, buf.len()) };
-        if rv != 0 {
-            return None;
-        }
-        let end = buf.iter().position(|&b| b == 0).unwrap_or(buf.len());
-        buf.truncate(end);
-        String::from_utf8(buf).ok()
-    })
-}
-
-extern "C" {
-    #[link_name = "gethostname"]
-    fn libc_gethostname(name: *mut std::os::raw::c_char, len: usize) -> i32;
-}

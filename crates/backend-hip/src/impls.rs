@@ -6,7 +6,7 @@
 //! [`dispatch_qmatmul`] with a runtime `QMatMulCfg` and gets back the
 //! matching `KernelDescriptor` (or `None` if no impl applies).
 
-use flambeau_core::{KernelDescriptor, QDtype, QMatMulCfg};
+use flambeau_core::{DirectCallKernel, KernelDescriptor, QDtype, QMatMulCfg};
 
 /// Static table of every `QMatMul` impl on `gfx906` this build ships. Order
 /// matches `dispatch/hip/gfx906.toml`; the first `matches` win is returned.
@@ -568,6 +568,153 @@ pub const INDEXED_MOE_MMVQ_GATE_UP_GFX906: &[KernelDescriptor] = &[
     },
 ];
 
+/// Catalog of kernels that are invoked directly from call sites (via
+/// `reg.expect_module("stem")`) rather than through shape-based dispatch.
+/// Each entry must have a matching row in `dispatch/hip/gfx906.toml` and a
+/// cert on disk. The `dispatch_toml_roundtrip` test (below) enforces both.
+///
+/// Membership rule: a kernel belongs here when there is exactly one
+/// implementation per `(op, dtype)` — no `m_range` choice to make. Adding
+/// a second implementation for the same dtype means promoting the pair into
+/// a `KernelDescriptor` table so shape-dispatch can pick between them.
+pub const DIRECT_CALL_KERNELS_GFX906: &[DirectCallKernel] = &[
+    // V2.19.b flash-decoding split-K attention for long-context decode.
+    // Forward layer crosses the threshold at `n_tokens_kv > 256` and
+    // invokes this kernel directly rather than `attention_decode_f16`.
+    DirectCallKernel {
+        impl_id: "attention_decode_f16_splitk_gfx906",
+        cert_rel_path: "certs/hip/gfx906/attention_decode_f16_splitk_gfx906.json",
+    },
+    // V2.23.a — dense Q4_0 / Q5_0 MMVQ (DP4A) for Qwen3.6-35B-A3B-Q4_0
+    // attention and shared-expert weights. Single-kernel per dtype.
+    DirectCallKernel {
+        impl_id: "mmvq_q4_0_gfx906",
+        cert_rel_path: "certs/hip/gfx906/mmvq_q4_0_gfx906.json",
+    },
+    DirectCallKernel {
+        impl_id: "mmvq_q5_0_gfx906",
+        cert_rel_path: "certs/hip/gfx906/mmvq_q5_0_gfx906.json",
+    },
+    // V2.26.a — Q5_1 dense MMVQ (llama.cpp parity).
+    DirectCallKernel {
+        impl_id: "mmvq_q5_1_gfx906",
+        cert_rel_path: "certs/hip/gfx906/mmvq_q5_1_gfx906.json",
+    },
+    // V2.21.b / V2.25.a — F16 × Q8_1 MMVQ + MMQ (Unsloth UD-Q8_K_XL F16 layers).
+    DirectCallKernel {
+        impl_id: "mmvq_f16_q8_1_gfx906",
+        cert_rel_path: "certs/hip/gfx906/mmvq_f16_q8_1_gfx906.json",
+    },
+    DirectCallKernel {
+        impl_id: "mmq_f16_q8_1_gfx906",
+        cert_rel_path: "certs/hip/gfx906/mmq_f16_q8_1_gfx906.json",
+    },
+    // V2.22.a / V2.23.a / V1.7.5.K — indexed-MoE MMVQ for Q8_0 / Q4_0 / Q6_K
+    // expert weights. Routing is by GGUF tensor dtype, not shape.
+    DirectCallKernel {
+        impl_id: "indexed_moe_mmvq_q8_0_gfx906",
+        cert_rel_path: "certs/hip/gfx906/indexed_moe_mmvq_q8_0_gfx906.json",
+    },
+    DirectCallKernel {
+        impl_id: "indexed_moe_mmvq_q4_0_gfx906",
+        cert_rel_path: "certs/hip/gfx906/indexed_moe_mmvq_q4_0_gfx906.json",
+    },
+    DirectCallKernel {
+        impl_id: "indexed_moe_mmvq_q6_k_gfx906",
+        cert_rel_path: "certs/hip/gfx906/indexed_moe_mmvq_q6_k_gfx906.json",
+    },
+];
+
+/// Catalog of kernels that are **not** dispatched at runtime but are kept
+/// in-tree as A/B baselines for correctness / perf comparison. Each has a
+/// cert under `certs/hip/gfx906/` and a call site in `crates/bench/src/`
+/// or `crates/cli/src/main.rs` (PMC-refresh target list).
+///
+/// Unlike [`DIRECT_CALL_KERNELS_GFX906`], these are not invoked by any
+/// forward-path code — a bench sweep (or PMC refresh) is the only caller.
+/// They stay registered here so:
+///
+/// 1. The `dispatch_toml_roundtrip` test does not need to special-case
+///    TOML rows for bench baselines.
+/// 2. Future simplifier passes have a single source of truth for
+///    "this kernel is not dead — it's a reference baseline" and don't
+///    propose deletion. (Sessions 1 and 2 of the simplification pass both
+///    initially flagged these as orphans; this catalog closes that loop.)
+///
+/// Matches the "Single-row reference MMVQ kernels for the K-quants are
+/// kept in-tree for cert cross-checks" note in `dispatch/hip/gfx906.toml`.
+pub const BENCH_REFERENCE_KERNELS_GFX906: &[DirectCallKernel] = &[
+    // V1.6 long-context attention baseline — pre-split-K reference.
+    DirectCallKernel {
+        impl_id: "attention_prefill_flash_tile_f16_gfx906",
+        cert_rel_path: "certs/hip/gfx906/attention_prefill_flash_tile_f16_gfx906.json",
+    },
+    // V1.5 single-row indexed-MoE MMVQ baseline. Production ships r2 (and Q6_K
+    // dp4a); this stays as the A/B reference it was promoted from.
+    DirectCallKernel {
+        impl_id: "indexed_moe_mmvq_q4_k_gfx906",
+        cert_rel_path: "certs/hip/gfx906/indexed_moe_mmvq_q4_k_gfx906.json",
+    },
+    // V1.7.5.B PP hand-off bandwidth cert. Exercised by `bench sweep
+    // peer_copy_via_host` on the rig; not a kernel-launch dispatch.
+    DirectCallKernel {
+        impl_id: "peer_copy_via_host_gfx906",
+        cert_rel_path: "certs/hip/gfx906/peer_copy_via_host_gfx906.json",
+    },
+    // V1.4 4-warp LDS-tiled MMQ placeholders. Superseded by wave64 in
+    // production (Q4_K wave64 V2.3.b.2, Q6_K wave64 V2.3.b.4, Q8_0
+    // wave64_tile16 V2.7). Kept as bench A/B baselines — `sweep_mmq` runs
+    // them as Q{4,6}K4Warp / Q8_04Warp variants alongside the shipped
+    // kernels so the comparison stays live. See CLI PMC-refresh target
+    // list at `crates/cli/src/main.rs`.
+    DirectCallKernel {
+        impl_id: "qmatmul_q4_K_mmq_4warp_lds_gfx906",
+        cert_rel_path: "certs/hip/gfx906/qmatmul_q4_K_mmq_4warp_lds_gfx906.json",
+    },
+    DirectCallKernel {
+        impl_id: "qmatmul_q6_K_mmq_4warp_lds_gfx906",
+        cert_rel_path: "certs/hip/gfx906/qmatmul_q6_K_mmq_4warp_lds_gfx906.json",
+    },
+    DirectCallKernel {
+        impl_id: "qmatmul_q8_0_mmq_4warp_lds_gfx906",
+        cert_rel_path: "certs/hip/gfx906/qmatmul_q8_0_mmq_4warp_lds_gfx906.json",
+    },
+    // V2.7 superseded Q8_0 MMQ wave64 by wave64_tile16 at m >= 128. Wave64
+    // stays as the bench baseline (PMC-refresh target).
+    DirectCallKernel {
+        impl_id: "qmatmul_q8_0_mmq_wave64_gfx906",
+        cert_rel_path: "certs/hip/gfx906/qmatmul_q8_0_mmq_wave64_gfx906.json",
+    },
+    // V1.3 single-row MMVQ references. Production dispatches r2/r4/dp4a at
+    // m < 128 for the K-quants; the single_row kernels stay as cross-check
+    // baselines (called out in the TOML header).
+    DirectCallKernel {
+        impl_id: "qmatmul_q4_K_mmvq_single_row_gfx906",
+        cert_rel_path: "certs/hip/gfx906/qmatmul_q4_K_mmvq_single_row_gfx906.json",
+    },
+    DirectCallKernel {
+        impl_id: "qmatmul_q5_K_mmvq_single_row_gfx906",
+        cert_rel_path: "certs/hip/gfx906/qmatmul_q5_K_mmvq_single_row_gfx906.json",
+    },
+    DirectCallKernel {
+        impl_id: "qmatmul_q6_K_mmvq_single_row_gfx906",
+        cert_rel_path: "certs/hip/gfx906/qmatmul_q6_K_mmvq_single_row_gfx906.json",
+    },
+    // V2.3.d Q6_K multi-row r4. Superseded by dp4a at runtime; r4 remains
+    // a cross-check baseline invoked from the PMC-refresh target list.
+    DirectCallKernel {
+        impl_id: "qmatmul_q6_K_mmvq_nw1_r4_gfx906",
+        cert_rel_path: "certs/hip/gfx906/qmatmul_q6_K_mmvq_nw1_r4_gfx906.json",
+    },
+    // V1.4 turbo Q8_1 quantise — bench-only sanity (the forward path uses
+    // `quantize_f16_q8_1` via `DIRECT_CALL_KERNELS_GFX906`, which is a
+    // distinct kernel).
+    DirectCallKernel {
+        impl_id: "quantize_q8_1_mmq_gfx906",
+        cert_rel_path: "certs/hip/gfx906/quantize_q8_1_mmq_gfx906.json",
+    },
+];
+
 pub const INDEXED_MOE_MMQ_GFX906: &[KernelDescriptor] = &[
     // V1.5.7: 4-warp LDS-tiled MoE MMQ. Caller sorts (token, slot) pairs into
     // per-expert buckets so the weight tile amortises across MMQ_X=8 slots.
@@ -745,6 +892,208 @@ mod tests {
                 );
             }
         }
+        for d in DIRECT_CALL_KERNELS_GFX906 {
+            let p = repo_root.join(d.cert_rel_path);
+            assert!(
+                p.exists(),
+                "cert missing for direct-call kernel {}: {}",
+                d.impl_id,
+                p.display()
+            );
+        }
+        for d in BENCH_REFERENCE_KERNELS_GFX906 {
+            let p = repo_root.join(d.cert_rel_path);
+            assert!(
+                p.exists(),
+                "cert missing for bench-reference kernel {}: {}",
+                d.impl_id,
+                p.display()
+            );
+        }
+    }
+
+    /// V2.8-class regression guard. Every `impl = "..."` row in
+    /// `dispatch/hip/gfx906.toml` must be registered in either a
+    /// `KernelDescriptor` table or `DIRECT_CALL_KERNELS_GFX906`. Otherwise a
+    /// routing swap in the TOML won't actually change runtime behaviour
+    /// (V2.8 tile16 bug).
+    #[test]
+    fn dispatch_toml_roundtrip() {
+        let repo_root = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .unwrap()
+            .parent()
+            .unwrap()
+            .to_path_buf();
+        let toml_path = repo_root.join("dispatch/hip/gfx906.toml");
+        let toml_src = std::fs::read_to_string(&toml_path)
+            .unwrap_or_else(|e| panic!("read {}: {}", toml_path.display(), e));
+
+        // Collect every `impl = "..."` value in the TOML (commented lines
+        // starting with `#` are ignored).
+        let mut toml_impls: Vec<String> = Vec::new();
+        for line in toml_src.lines() {
+            let trimmed = line.trim_start();
+            if trimmed.starts_with('#') {
+                continue;
+            }
+            if let Some(rest) = trimmed.strip_prefix("impl") {
+                let rest = rest.trim_start();
+                if let Some(rest) = rest.strip_prefix('=') {
+                    let rest = rest.trim();
+                    if let Some(val) = rest.strip_prefix('"') {
+                        if let Some(end) = val.find('"') {
+                            toml_impls.push(val[..end].to_string());
+                        }
+                    }
+                }
+            }
+        }
+        assert!(
+            !toml_impls.is_empty(),
+            "no `impl = \"...\"` rows parsed from {}",
+            toml_path.display()
+        );
+
+        // Build the registered-impl set from every KernelDescriptor table
+        // plus DIRECT_CALL_KERNELS_GFX906.
+        let mut registered: std::collections::HashSet<&'static str> =
+            std::collections::HashSet::new();
+        for table in [
+            QMATMUL_GFX906,
+            RMSNORM_GFX906,
+            SWIGLU_GFX906,
+            ROPE_GFX906,
+            SOFTMAX_GFX906,
+            ATTENTION_DECODE_GFX906,
+            ATTENTION_PREFILL_GFX906,
+            TOPK_GFX906,
+            INDEXED_MOE_MMVQ_GFX906,
+            MOE_COMBINE_GFX906,
+            INDEXED_MOE_MMVQ_GATE_UP_GFX906,
+            INDEXED_MOE_MMQ_GFX906,
+            ROPE_NEOX_PARTIAL_GFX906,
+            L2_NORM_GFX906,
+            ADD_F16_GFX906,
+            CAST_F16_F32_GFX906,
+            CAST_F32_F16_GFX906,
+            CAUSAL_CONV1D_GFX906,
+            DENSE_GEMV_F32_F16_GFX906,
+            GDN_ALPHA_BETA_GFX906,
+            GDN_STATE_STEP_GFX906,
+            QUANTIZE_F16_Q8_1_GFX906,
+            RMSNORM_F32_GFX906,
+            SCALE_F32_GFX906,
+            SHARED_EXPERT_SCALE_GFX906,
+            SILU_F32_GFX906,
+            SPLIT_Q_GATE_GFX906,
+            SWIGLU_F32_GFX906,
+        ] {
+            for d in table {
+                registered.insert(d.impl_id);
+            }
+        }
+        for d in DIRECT_CALL_KERNELS_GFX906 {
+            registered.insert(d.impl_id);
+        }
+        for d in BENCH_REFERENCE_KERNELS_GFX906 {
+            registered.insert(d.impl_id);
+        }
+
+        let unregistered: Vec<&str> = toml_impls
+            .iter()
+            .filter(|id| !registered.contains(id.as_str()))
+            .map(String::as_str)
+            .collect();
+        assert!(
+            unregistered.is_empty(),
+            "dispatch/hip/gfx906.toml references impls not registered in \
+             backend-hip (KernelDescriptor table or DIRECT_CALL_KERNELS_GFX906): {unregistered:?}. \
+             Either add a KernelDescriptor (shape-dispatch) or a DirectCallKernel \
+             (single-impl per dtype)."
+        );
+    }
+
+    /// Reverse roundtrip: every cert JSON under `certs/hip/gfx906/` must
+    /// be registered in one of the three catalogs (shape-dispatch,
+    /// direct-call, bench-reference). Catches the inverse drift: a cert
+    /// lingering after its kernel was removed.
+    #[test]
+    fn every_cert_on_disk_is_registered() {
+        let repo_root = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .unwrap()
+            .parent()
+            .unwrap()
+            .to_path_buf();
+        let cert_dir = repo_root.join("certs/hip/gfx906");
+        let entries = match std::fs::read_dir(&cert_dir) {
+            Ok(e) => e,
+            Err(e) => panic!("read_dir {}: {}", cert_dir.display(), e),
+        };
+
+        let mut registered: std::collections::HashSet<&'static str> =
+            std::collections::HashSet::new();
+        for table in [
+            QMATMUL_GFX906,
+            RMSNORM_GFX906,
+            SWIGLU_GFX906,
+            ROPE_GFX906,
+            SOFTMAX_GFX906,
+            ATTENTION_DECODE_GFX906,
+            ATTENTION_PREFILL_GFX906,
+            TOPK_GFX906,
+            INDEXED_MOE_MMVQ_GFX906,
+            MOE_COMBINE_GFX906,
+            INDEXED_MOE_MMVQ_GATE_UP_GFX906,
+            INDEXED_MOE_MMQ_GFX906,
+            ROPE_NEOX_PARTIAL_GFX906,
+            L2_NORM_GFX906,
+            ADD_F16_GFX906,
+            CAST_F16_F32_GFX906,
+            CAST_F32_F16_GFX906,
+            CAUSAL_CONV1D_GFX906,
+            DENSE_GEMV_F32_F16_GFX906,
+            GDN_ALPHA_BETA_GFX906,
+            GDN_STATE_STEP_GFX906,
+            QUANTIZE_F16_Q8_1_GFX906,
+            RMSNORM_F32_GFX906,
+            SCALE_F32_GFX906,
+            SHARED_EXPERT_SCALE_GFX906,
+            SILU_F32_GFX906,
+            SPLIT_Q_GATE_GFX906,
+            SWIGLU_F32_GFX906,
+        ] {
+            for d in table {
+                registered.insert(d.impl_id);
+            }
+        }
+        for d in DIRECT_CALL_KERNELS_GFX906 {
+            registered.insert(d.impl_id);
+        }
+        for d in BENCH_REFERENCE_KERNELS_GFX906 {
+            registered.insert(d.impl_id);
+        }
+
+        let mut orphans: Vec<String> = Vec::new();
+        for entry in entries {
+            let entry = entry.unwrap();
+            let name = entry.file_name();
+            let name = name.to_string_lossy();
+            let Some(stem) = name.strip_suffix(".json") else {
+                continue;
+            };
+            if !registered.contains(stem) {
+                orphans.push(stem.to_string());
+            }
+        }
+        orphans.sort();
+        assert!(
+            orphans.is_empty(),
+            "cert files under certs/hip/gfx906/ without a matching registration: \
+             {orphans:?}. Either delete the cert, or add a row to KernelDescriptor, \
+             DIRECT_CALL_KERNELS_GFX906, or BENCH_REFERENCE_KERNELS_GFX906."
+        );
     }
 
     #[test]

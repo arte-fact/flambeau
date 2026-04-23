@@ -194,6 +194,7 @@ impl GgufFile {
     /// - Propagates [`from_mmap`] errors: `BadMagic`, `UnsupportedVersion`,
     ///   `TruncatedHeader`, or a metadata/tensor-index parse error.
     pub fn open<P: AsRef<Path>>(path: P) -> Result<Self> {
+        use std::os::unix::io::AsRawFd;
         let path = path.as_ref();
         let file = File::open(path)?;
         // V2.17: mirror llama.cpp's loader hints. SEQUENTIAL tells the
@@ -201,7 +202,6 @@ impl GgufFile {
         // moved past them. Combined with per-tensor `munmap` during
         // loading, this keeps page-cache pressure bounded for GGUFs
         // larger than host RAM.
-        use std::os::unix::io::AsRawFd;
         // SAFETY: `posix_fadvise` operates on a kernel-side fd and never reads
         // or writes caller memory. `file.as_raw_fd()` is a valid open fd for
         // the lifetime of `file`. Return code is non-actionable (best-effort
@@ -276,7 +276,7 @@ impl GgufFile {
         let header_end = cur.position();
         let alignment = metadata
             .get("general.alignment")
-            .and_then(|v| v.as_u64())
+            .and_then(Value::as_u64)
             .unwrap_or(DEFAULT_ALIGNMENT);
         let tensor_data_offset = header_end.div_ceil(alignment) * alignment;
 

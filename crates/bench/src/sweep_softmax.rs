@@ -2,6 +2,13 @@
 
 #![cfg(feature = "hip")]
 
+#![expect(
+    clippy::undocumented_unsafe_blocks,
+    reason = "sweep harness — every unsafe block is a kernel launch or a memcpy_async \
+              over buffers allocated locally in the same function and freed before \
+              return; invariant is uniform across all sites."
+)]
+
 use std::path::Path;
 
 use anyhow::{bail, Context, Result};
@@ -13,6 +20,7 @@ use flambeau_kernels_hip as kernels;
 use half::f16;
 
 use crate::cert::{now_utc_iso8601, Cert, PmcSnapshot, ShapeResult, SCHEMA_VERSION};
+use crate::harness::{alloc_and_upload, max_rel_err_with_floor, rig, seeded_f32_range};
 
 pub fn run_sweep(repo_root: &Path) -> Result<Cert> {
     let n = device_count().context("hipGetDeviceCount")?;
@@ -43,9 +51,9 @@ pub fn run_sweep(repo_root: &Path) -> Result<Cert> {
     let mut results = Vec::new();
     for (m, k) in shapes {
         let (got_causal, ref_causal) = run_shape(&dev, &kernel, m, k, scale, seed, true)?;
-        let err_causal = max_rel_err(&got_causal, &ref_causal);
+        let err_causal = max_rel_err_with_floor(&got_causal, &ref_causal, 1e-6);
         let (got_plain, ref_plain) = run_shape(&dev, &kernel, m, k, scale, seed, false)?;
-        let err_plain = max_rel_err(&got_plain, &ref_plain);
+        let err_plain = max_rel_err_with_floor(&got_plain, &ref_plain, 1e-6);
         let max_err = err_causal.max(err_plain);
         let tol = 5e-3;
         results.push(ShapeResult {
@@ -65,7 +73,7 @@ pub fn run_sweep(repo_root: &Path) -> Result<Cert> {
     }
 
     let pass = results.iter().all(|r| r.pass);
-    let rig = format!("{}-gfx906", hostname().unwrap_or_else(|| "unknown".into()));
+    let rig = rig();
     let cert = Cert {
         schema_version: SCHEMA_VERSION,
         impl_id: "softmax_masked_f16_gfx906".to_string(),
@@ -100,7 +108,7 @@ fn run_shape(
     seed: u64,
     causal: bool,
 ) -> Result<(Vec<f32>, Vec<f32>)> {
-    let scores_f32 = seeded_f32(seed, m * k);
+    let scores_f32 = seeded_f32_range(seed, m * k, -2.0, 2.0);
     let scores_f16: Vec<f16> = scores_f32.iter().map(|v| f16::from_f32(*v)).collect();
 
     // Causal mask: entry at (row, col) = -INF when col > (row mod n_q_per_head)
@@ -210,56 +218,3 @@ fn run_shape(
     Ok((got, reference))
 }
 
-fn seeded_f32(seed: u64, n: usize) -> Vec<f32> {
-    let mut s = seed.wrapping_mul(6364136223846793005).wrapping_add(1);
-    (0..n)
-        .map(|_| {
-            s = s.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
-            let u = (s >> 32) as u32;
-            // Attention scores are typically small — keep inputs bounded.
-            (u as f32 / u32::MAX as f32) * 4.0 - 2.0
-        })
-        .collect()
-}
-
-fn alloc_and_upload<T: Copy>(dev: &HipDevice, data: &[T]) -> DevicePtr {
-    let bytes = std::mem::size_of_val(data);
-    let d = dev.alloc(bytes).unwrap();
-    unsafe {
-        dev.memcpy_async(
-            dev.default_stream(),
-            CopyDirection::HostToDevice,
-            d,
-            DevicePtr(data.as_ptr() as usize),
-            bytes,
-        )
-        .unwrap();
-    }
-    dev.default_stream().synchronize().unwrap();
-    d
-}
-
-fn max_rel_err(got: &[f32], reference: &[f32]) -> f32 {
-    got.iter()
-        .zip(reference)
-        .map(|(g, r)| (g - r).abs() / r.abs().max(1e-6))
-        .fold(0.0f32, f32::max)
-}
-
-fn hostname() -> Option<String> {
-    std::env::var("HOSTNAME").ok().or_else(|| {
-        let mut buf = vec![0u8; 256];
-        let rv = unsafe { libc_gethostname(buf.as_mut_ptr() as *mut _, buf.len()) };
-        if rv != 0 {
-            return None;
-        }
-        let end = buf.iter().position(|&b| b == 0).unwrap_or(buf.len());
-        buf.truncate(end);
-        String::from_utf8(buf).ok()
-    })
-}
-
-extern "C" {
-    #[link_name = "gethostname"]
-    fn libc_gethostname(name: *mut std::os::raw::c_char, len: usize) -> i32;
-}

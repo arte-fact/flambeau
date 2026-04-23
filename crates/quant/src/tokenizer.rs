@@ -78,8 +78,7 @@ pub fn load_from_gguf(file: &GgufFile) -> Result<GgufTokenizer> {
         .context("tokenizer.ggml.model missing from GGUF")?;
     if model != "gpt2" {
         return Err(anyhow!(
-            "tokenizer model `{}` not supported (only `gpt2` BPE family so far)",
-            model
+            "tokenizer model `{model}` not supported (only `gpt2` BPE family so far)"
         ));
     }
     let pre = file.metadata_str("tokenizer.ggml.pre").unwrap_or("default");
@@ -90,7 +89,8 @@ pub fn load_from_gguf(file: &GgufFile) -> Result<GgufTokenizer> {
         .get("tokenizer.ggml.tokens")
         .and_then(|v| v.as_array())
         .context("tokenizer.ggml.tokens missing or wrong type")?;
-    let mut vocab: Vocab = Vocab::with_capacity_and_hasher(tokens_arr.len(), Default::default());
+    let mut vocab: Vocab =
+        Vocab::with_capacity_and_hasher(tokens_arr.len(), std::hash::RandomState::new());
     for (id, v) in tokens_arr.iter().enumerate() {
         let s = v
             .as_str()
@@ -210,7 +210,7 @@ pub fn load_from_gguf(file: &GgufFile) -> Result<GgufTokenizer> {
 
 fn find_vocab_id(tokens_arr: &[crate::gguf::Value], needle: &str) -> Option<u32> {
     tokens_arr.iter().position(|v| {
-        v.as_str().map(|s| s == needle).unwrap_or(false)
+        v.as_str().is_some_and(|s| s == needle)
     }).map(|i| i as u32)
 }
 

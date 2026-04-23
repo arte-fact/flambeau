@@ -115,7 +115,7 @@ fn layout_enumerates_every_tensor() -> Result<()> {
             (AttentionFamily::Dense, false, LayerAttnBlock::Dense(_)) => num_dense += 1,
             (AttentionFamily::Hybrid, true, LayerAttnBlock::Gdn(_)) => num_gdn += 1,
             (AttentionFamily::Hybrid, false, LayerAttnBlock::FullAttn(_)) => {
-                num_full_attn += 1
+                num_full_attn += 1;
             }
             other => panic!("layer {i} classification mismatch: {other:?}"),
         }

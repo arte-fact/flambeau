@@ -36,7 +36,6 @@ fn rccl_all_reduce_sum_f32_mesh_4_standalone() {
     let mut handles = Vec::with_capacity(n as usize);
     for r in 0..n {
         let mesh = Arc::clone(&mesh);
-        let cfg = cfg;
         handles.push(thread::spawn(move || {
             let rank = mesh.rank_handle(RankId(r));
             let dev = HipDevice::new(rank.device_id()).unwrap();

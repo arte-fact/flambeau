@@ -4,6 +4,14 @@
 //! in every Qwen3.x GGUF we target, so we don't pay for a quantised path
 //! here. Output goes to `moe::topk_f32`.
 
+#![expect(
+    clippy::undocumented_unsafe_blocks,
+    reason = "op wrapper — every unsafe block is a kernel.launch or memcpy_async over \
+              DevicePtrs validated by the caller; the kernel stem + entry are resolved \
+              through the validated registry and the ABI matches the kernels extern-C \
+              signature."
+)]
+
 use anyhow::Result;
 use flambeau_backend_hip::{HipStream, KernelArgs, LaunchCfg};
 use flambeau_core::DevicePtr;

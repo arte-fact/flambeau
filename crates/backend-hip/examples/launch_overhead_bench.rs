@@ -15,6 +15,14 @@
 //! real work) so kernel-side time is ~kernel-launch-latency and the
 //! measurement is dominated by the launch path.
 
+#![expect(
+    clippy::undocumented_unsafe_blocks,
+    reason = "launch-overhead micro-bench: every unsafe block is a `kernel.launch`, \
+              `kernel.launch_raw`, or `dev.dealloc`; args + buffers are freshly \
+              allocated in `main` and live until program exit. Per-site SAFETY \
+              comments would just repeat the same invariant."
+)]
+
 use std::time::Instant;
 
 use flambeau_backend_hip::{device_count, HipDevice, HipModule, KernelArgs, LaunchCfg};

@@ -13,15 +13,22 @@
 
 #![cfg(feature = "hip")]
 
+#![expect(
+    clippy::undocumented_unsafe_blocks,
+    reason = "forward-path composition — every unsafe block is a kernel.launch or \
+              memcpy_async over DevicePtrs owned by the session's scratch / weights / \
+              KV cache. Buffers live for the whole session; sync is driven by the top- \
+              level forward_*_decode/prefill caller."
+)]
+
 use anyhow::{bail, Context, Result};
 use flambeau_core::{CopyDirection, Device, DevicePtr, Stream};
 use flambeau_ops::hip::{
-    norm::{quantize_f16_q8_1, rmsnorm_f16, rmsnorm_quant_q8_1},
+    norm::rmsnorm_quant_q8_1,
     qmatmul::mmvq,
     HipDevice, HipStream, OpsRegistry,
 };
 use flambeau_quant::{BlockQ8_1, GgmlDType};
-use half::f16;
 
 use super::common::{mat_shape, qdtype_of, row_bytes_for_dtype};
 use crate::config::Qwen3MoEConfig;

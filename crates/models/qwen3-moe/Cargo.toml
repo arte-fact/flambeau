@@ -31,5 +31,12 @@ optional = true
 serde = { workspace = true, features = ["derive"] }
 serde_json.workspace = true
 
+# Examples that pull in `flambeau-backend-hip` or the `forward` module need
+# the `hip` feature. Without this, `cargo clippy --workspace --all-targets`
+# tries to compile them feature-less and fails on unresolved imports.
+[[example]]
+name = "decode_profile"
+required-features = ["hip"]
+
 [lints]
 workspace = true

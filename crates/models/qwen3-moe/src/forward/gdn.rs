@@ -8,24 +8,23 @@
 #![cfg(feature = "hip")]
 
 use anyhow::{bail, Context, Result};
-use flambeau_core::{CopyDirection, Device, DevicePtr, QDtype, Stream};
+use flambeau_core::{CopyDirection, Device, DevicePtr};
 use flambeau_ops::hip::{
-    cast::{cast_f16_to_f32, cast_f32_to_f16},
+    cast::cast_f32_to_f16,
     conv::causal_conv1d_f32,
     mlp::{scale_f32, silu_f32, swiglu_f32},
-    moe::shared_expert_scale_f32,
     norm::{
         l2_norm_f32, quantize_f16_q8_1, quantize_f16_q8_1_mmq, quantize_q8_1,
         quantize_q8_1_mmq, rmsnorm_f16, rmsnorm_f32, rmsnorm_quant_q8_1,
     },
-    qmatmul::{mmvq, mmvq_q8_0_gate_up, qmatmul},
+    qmatmul::mmvq_q8_0_gate_up,
     recurrent::{gdn_alpha_beta_f32, gdn_split_qkv_f32, gdn_state_step_f32_s128},
     HipDevice, HipStream, OpsRegistry,
 };
-use flambeau_quant::{BlockQ8_1, GgmlDType};
+use flambeau_quant::BlockQ8_1;
 
 use super::common::{
-    mat_shape, qdtype_of, run_mmvq_from_tensor, run_qmatmul_from_tensor,
+    mat_shape, run_mmvq_from_tensor, run_qmatmul_from_tensor,
 };
 use crate::config::Qwen3MoEConfig;
 use crate::session::{GdnLayerState, LayerCache};

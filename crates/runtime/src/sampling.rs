@@ -41,7 +41,7 @@ impl Rng {
         // SplitMix64 to expand 1 → 4 words (avoids a zero state).
         let mut x = seed.wrapping_add(0x9E3779B97F4A7C15);
         let mut out = [0u64; 4];
-        for slot in out.iter_mut() {
+        for slot in &mut out {
             x = (x ^ (x >> 30)).wrapping_mul(0xBF58476D1CE4E5B9);
             x = (x ^ (x >> 27)).wrapping_mul(0x94D049BB133111EB);
             *slot = x ^ (x >> 31);
@@ -235,7 +235,7 @@ fn sample_top_p(
             return *id;
         }
     }
-    kept.last().map(|(id, _)| *id).unwrap_or(0)
+    kept.last().map_or(0, |(id, _)| *id)
 }
 
 fn multinomial_pick(probs: &[f32], sum: f32, rng: &mut Rng) -> u32 {

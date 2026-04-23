@@ -7,6 +7,12 @@
 //! Byte-for-byte cross-checking against llama.cpp `gguf-dump` requires a
 //! committed real-GGUF fixture — deferred to a separate integration test.
 
+#![expect(
+    clippy::float_cmp,
+    reason = "test asserts round-trip exact-representable f32 sentinel values (i * 0.25) \
+              through a serialise → mmap → read pipeline; strict `==` is correct."
+)]
+
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -134,11 +140,11 @@ fn write_str(buf: &mut Vec<u8>, s: &str) {
 /// Wrap a `Vec<u8>` in a type that satisfies `Deref<Target=[u8]>` so we can
 /// hand it to `GgufFile::from_mmap` which expects an `Arc<Mmap>`.
 /// We don't need a real mmap — the reader only reads the slice.
-fn open_bytes(bytes: Vec<u8>) -> GgufFile {
+fn open_bytes(bytes: &[u8]) -> GgufFile {
     // Write to a tempfile, mmap it. Simpler than faking `memmap2::Mmap`.
     let tmp = tempdir();
     let p = tmp.join("synthetic.gguf");
-    std::fs::write(&p, &bytes).unwrap();
+    std::fs::write(&p, bytes).unwrap();
     let file = GgufFile::open(&p).unwrap();
     // Leak tmp for the test duration — test exits shortly, and the mmap
     // inside `file` holds a handle regardless.
@@ -181,7 +187,7 @@ fn header_and_tensor_index_round_trip() {
             payload_f32,
         )
         .finish();
-    let gguf = open_bytes(bytes);
+    let gguf = open_bytes(&bytes);
 
     assert_eq!(gguf.version, GgufVersion::V3);
     assert_eq!(gguf.architecture(), Some("qwen3moe"));
@@ -207,7 +213,7 @@ fn two_tensors_offsets_stay_disjoint() {
         .tensor("a.weight", GgmlDType::F32, &[4], a)
         .tensor("b.weight", GgmlDType::F32, &[4], b)
         .finish();
-    let gguf = open_bytes(bytes);
+    let gguf = open_bytes(&bytes);
     let a = gguf.dequantize_tensor("a.weight").unwrap();
     let b = gguf.dequantize_tensor("b.weight").unwrap();
     assert_eq!(a, vec![0.0, 1.0, 2.0, 3.0]);
@@ -233,7 +239,7 @@ fn row_range_picks_correct_slice_of_2d_f32() {
         .meta("general.architecture", MetaValue::String("test".into()))
         .tensor("w", GgmlDType::F32, &[cols, rows], payload)
         .finish();
-    let gguf = open_bytes(bytes);
+    let gguf = open_bytes(&bytes);
 
     // After dims.reverse() the reader exposes dims = [rows, cols] = [4, 8].
     let info = gguf.info("w").unwrap();
@@ -272,7 +278,7 @@ fn expert_range_picks_correct_slice_of_3d_f32() {
         .meta("general.architecture", MetaValue::String("test".into()))
         .tensor("experts", GgmlDType::F32, &[d2, d1, e], payload)
         .finish();
-    let gguf = open_bytes(bytes);
+    let gguf = open_bytes(&bytes);
     assert_eq!(gguf.info("experts").unwrap().dims, vec![e, d1, d2]);
 
     // Load expert 1 only.
@@ -303,7 +309,7 @@ fn unknown_tensor_reports_clearly() {
         .meta("general.architecture", MetaValue::String("test".into()))
         .tensor("a", GgmlDType::F32, &[1], vec![0, 0, 0, 0])
         .finish();
-    let gguf = open_bytes(bytes);
+    let gguf = open_bytes(&bytes);
     let err = gguf.info("missing").unwrap_err();
     assert!(format!("{err}").contains("missing"));
 }
@@ -318,7 +324,7 @@ fn metadata_string_array_round_trips() {
         )
         .tensor("a", GgmlDType::F32, &[1], vec![0, 0, 0, 0])
         .finish();
-    let gguf = open_bytes(bytes);
+    let gguf = open_bytes(&bytes);
     let arr = gguf
         .metadata
         .get("tokenizer.ggml.tokens")

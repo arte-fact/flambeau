@@ -13,13 +13,28 @@
 #   notes       = "<optional one-liner>"
 #
 # Rules:
-#   - Every `impl` must reference an IMPL registered in backend-hip.
+#   - Every `impl` must reference either (a) a `KernelDescriptor` in a
+#     shape-dispatch table in `backend-hip/src/impls.rs` (for ops whose
+#     implementation choice depends on `m_range`), or (b) a
+#     `DirectCallKernel` in `DIRECT_CALL_KERNELS_GFX906` (for ops with
+#     exactly one implementation per dtype / GGUF layer type, invoked via
+#     `reg.expect_module("stem")` from `crates/ops/hip/*` and
+#     `crates/models/qwen3-moe/src/forward/*`).
+#   - The `dispatch_toml_roundtrip` test in backend-hip asserts both halves
+#     of this invariant at `cargo test --workspace`. It is the V2.8-class
+#     regression guard — V2.8 shipped a silent routing bug because the TOML
+#     row was swapped from tile8 to tile16 without touching `impls.rs`.
 #   - Every `cert` path must exist and be green. `flambeau cert-check --arch gfx906`
 #     enforces.
 #   - Two rows whose `shape` predicates both match the same concrete shape =
 #     build-time error.
 #   - Most-specific predicate wins. "any" is the fallback.
 #   - No env-flag gating. Runtime overrides go in gfx906.local.toml (gitignored).
+#
+# Dormant A/B candidates in `impls.rs` (registered with m_range=(MAX,MAX) so
+# shape-dispatch never picks them; listed here for discoverability):
+#   - qmatmul_q4_1_mmq_wave64_gfx906   (V2.13.a, promote pending A/B)
+#   - qmatmul_q4_K_mmq_turbo_gfx906    (V2.14.b, promote pending A/B)
 #
 # V1.3: multi-row DPP MMVQ kernels (candle P29 `_nw1_r{2,4}`) are the active
 # dispatch targets for Q4_K/Q5_K/Q6_K on the decode path. Q8_0 ships the

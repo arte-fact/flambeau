@@ -163,7 +163,7 @@ fn mmvq_q8_0_dp4a_matches_scalar_small() {
     ] {
         let scalar = run_kernel("mmvq_q8_0", "flambeau_mmvq_q8_0_q8_1", n_rows, k, seed);
         let dp4a   = run_kernel("mmvq_q8_0_dp4a", "flambeau_mmvq_q8_0_dp4a_q8_1", n_rows, k, seed);
-        eprintln!("[n_rows={n_rows} k={k}] scalar={:?} dp4a={:?}", scalar, dp4a);
+        eprintln!("[n_rows={n_rows} k={k}] scalar={scalar:?} dp4a={dp4a:?}");
         let max_abs = scalar.iter().zip(&dp4a).map(|(a, b)| (a - b).abs()).fold(0.0f32, f32::max);
         let max_ref = scalar.iter().fold(0.0f32, |a, &b| a.max(b.abs())).max(1.0);
         let rel = max_abs / max_ref;

@@ -13,6 +13,7 @@
 //! lint hosts without ROCm, and for `cargo check` in sandboxes.
 
 use std::env;
+use std::fmt::Write as _;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -55,15 +56,18 @@ fn main() {
     );
     for (stem, path) in &entries {
         let const_name = stem.to_uppercase();
-        hsaco_rs.push_str(&format!(
-            "pub const {const_name}_HSACO: &[u8] = include_bytes!(r\"{}\");\n",
+        writeln!(
+            hsaco_rs,
+            "pub const {const_name}_HSACO: &[u8] = include_bytes!(r\"{}\");",
             path.display()
-        ));
+        )
+        .expect("write to String is infallible");
     }
     hsaco_rs.push_str("\npub static CATALOGUE: &[(&str, &[u8])] = &[\n");
     for (stem, _) in &entries {
         let const_name = stem.to_uppercase();
-        hsaco_rs.push_str(&format!("    (\"{stem}\", {const_name}_HSACO),\n"));
+        writeln!(hsaco_rs, "    (\"{stem}\", {const_name}_HSACO),")
+            .expect("write to String is infallible");
     }
     hsaco_rs.push_str("];\n");
     fs::write(out_dir.join("hsaco.rs"), hsaco_rs).expect("write hsaco.rs");
@@ -171,10 +175,8 @@ fn compile_cu(
             stderr.replace('\n', " | ")
         );
     }
-    if !output.status.success() {
-        panic!(
-            "hipcc failed for {}:\n--- stderr ---\n{stderr}\n--- stdout ---\n{stdout}",
-            cu.display()
-        );
-    }
+    assert!(output.status.success(),
+        "hipcc failed for {}:\n--- stderr ---\n{stderr}\n--- stdout ---\n{stdout}",
+        cu.display()
+    );
 }

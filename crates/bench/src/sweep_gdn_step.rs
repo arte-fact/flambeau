@@ -17,6 +17,13 @@
 
 #![cfg(feature = "hip")]
 
+#![expect(
+    clippy::undocumented_unsafe_blocks,
+    reason = "sweep harness — every unsafe block is a kernel launch or a memcpy_async \
+              over buffers allocated locally in the same function and freed before \
+              return; invariant is uniform across all sites."
+)]
+
 use std::path::Path;
 
 use anyhow::{bail, Context, Result};
@@ -27,6 +34,7 @@ use flambeau_core::{CopyDirection, Device, DevicePtr, Stream};
 use flambeau_kernels_hip as kernels;
 
 use crate::cert::{now_utc_iso8601, Cert, PmcSnapshot, ShapeResult, SCHEMA_VERSION};
+use crate::harness::{alloc_and_upload, max_rel_err_with_floor, rig, seeded_f32_range};
 
 const S_V: usize = 128;
 
@@ -72,7 +80,7 @@ pub fn run_sweep(repo_root: &Path) -> Result<Cert> {
     }
 
     let pass = results.iter().all(|r| r.pass);
-    let rig = format!("{}-gfx906", hostname().unwrap_or_else(|| "unknown".into()));
+    let rig = rig();
     let cert = Cert {
         schema_version: SCHEMA_VERSION,
         impl_id: "gdn_state_step_f32_s128_gfx906".to_string(),
@@ -119,34 +127,43 @@ fn run_shape(
     // Gate scaled so exp(gate) stays well below 1 — keeps the recurrence
     // numerically tame over L steps and avoids state blow-up that would
     // dominate the tolerance.
-    let mut gate = seeded_f32(seed ^ 0xA1, gb_elems);
+    let mut gate = seeded_f32_range(seed ^ 0xA1, gb_elems, -0.5, 0.5);
     for g in gate.iter_mut() {
         *g = -(g.abs() + 0.1);
     }
-    let mut beta = seeded_f32(seed ^ 0xB2, gb_elems);
+    let mut beta = seeded_f32_range(seed ^ 0xB2, gb_elems, -0.5, 0.5);
     for b_val in beta.iter_mut() {
         *b_val = 0.1 + 0.4 * (b_val.abs());
     }
-    let q = seeded_f32(seed ^ 0xC3, qk_elems);
-    let k = seeded_f32(seed ^ 0xD4, qk_elems);
-    let v = seeded_f32(seed ^ 0xE5, v_elems);
-    let state_init = seeded_f32(seed ^ 0xF6, state_elems)
+    let q = seeded_f32_range(seed ^ 0xC3, qk_elems, -0.5, 0.5);
+    let k = seeded_f32_range(seed ^ 0xD4, qk_elems, -0.5, 0.5);
+    let v = seeded_f32_range(seed ^ 0xE5, v_elems, -0.5, 0.5);
+    let state_init = seeded_f32_range(seed ^ 0xF6, state_elems, -0.5, 0.5)
         .into_iter()
         .map(|x| x * 0.01)
         .collect::<Vec<_>>();
 
     // CPU reference. Col-outer layout matches the kernel so we can compare
-    // the post-run state element-wise without a transpose.
+    // the post-run state element-wise without a transpose. Input q/k/v and
+    // output attn_ref use the **L-outer layout** `[B, L, H_*, S_v]` the
+    // kernel expects (per the V1.7.5.D.1 layout fix — the kernel comment
+    // calls out that L=1 silently papered over the bug until L>1 surfaced
+    // it). Previous revision of this reference used head-outer indexing
+    // which passed L=1 but drifted at L>1 — see task #22.
     let mut state_ref = state_init.clone();
     let mut attn_ref = vec![0.0f32; attn_elems];
     for bi in 0..b {
-        for hv in 0..h_v {
-            let hkv = hv % h_kv;
-            let bh = bi * h_v + hv;
-            let bh_kv = bi * h_kv + hkv;
-            for t in 0..l {
-                let g = (gate[bh * l + t] as f64).exp() as f32;
-                let bt = beta[bh * l + t];
+        for t in 0..l {
+            for hv in 0..h_v {
+                let hkv = hv % h_kv;
+                let bh = bi * h_v + hv;
+                // gate / beta: [B, L, H_v].
+                let gb_idx = (bi * l + t) * h_v + hv;
+                let g = (gate[gb_idx] as f64).exp() as f32;
+                let bt = beta[gb_idx];
+                // q / k: [B, L, H_kv, S_v].  v: [B, L, H_v, S_v].
+                let qk_base = ((bi * l + t) * h_kv + hkv) * S_V;
+                let v_base = ((bi * l + t) * h_v + hv) * S_V;
                 for col in 0..S_V {
                     // state[col, *] *= g
                     let state_base = (bh * S_V + col) * S_V;
@@ -156,23 +173,20 @@ fn run_shape(
                     // sk = Σ state[col, i] * k[t, i]
                     let mut sk = 0.0f32;
                     for i in 0..S_V {
-                        sk += state_ref[state_base + i]
-                            * k[((bh_kv * l) + t) * S_V + i];
+                        sk += state_ref[state_base + i] * k[qk_base + i];
                     }
-                    let v_col = v[((bh * l) + t) * S_V + col];
+                    let v_col = v[v_base + col];
                     let delta = (v_col - sk) * bt;
                     // state[col, i] += k[i] * delta
                     for i in 0..S_V {
-                        state_ref[state_base + i] +=
-                            k[((bh_kv * l) + t) * S_V + i] * delta;
+                        state_ref[state_base + i] += k[qk_base + i] * delta;
                     }
-                    // attn[t, col] = Σ state[col, i] * q[t, i]
+                    // attn_out: [B, L, H_v, S_v] (kernel post-V1.7.5.D.1).
                     let mut a = 0.0f32;
                     for i in 0..S_V {
-                        a += state_ref[state_base + i]
-                            * q[((bh_kv * l) + t) * S_V + i];
+                        a += state_ref[state_base + i] * q[qk_base + i];
                     }
-                    attn_ref[((bh * l) + t) * S_V + col] = a;
+                    attn_ref[((bi * l + t) * h_v + hv) * S_V + col] = a;
                 }
             }
         }
@@ -252,62 +266,8 @@ fn run_shape(
         dev.dealloc(d_attn, attn_elems * 4)?;
     }
 
-    let state_err = max_rel_err(&got_state, &state_ref);
-    let attn_err = max_rel_err(&got_attn, &attn_ref);
+    let state_err = max_rel_err_with_floor(&got_state, &state_ref, 1.0);
+    let attn_err = max_rel_err_with_floor(&got_attn, &attn_ref, 1.0);
     Ok(state_err.max(attn_err))
 }
 
-fn alloc_and_upload<T: Copy>(dev: &HipDevice, data: &[T]) -> DevicePtr {
-    let bytes = std::mem::size_of_val(data);
-    let d = dev.alloc(bytes).unwrap();
-    unsafe {
-        dev.memcpy_async(
-            dev.default_stream(),
-            CopyDirection::HostToDevice,
-            d,
-            DevicePtr(data.as_ptr() as usize),
-            bytes,
-        )
-        .unwrap();
-    }
-    dev.default_stream().synchronize().unwrap();
-    d
-}
-
-fn seeded_f32(seed: u64, n: usize) -> Vec<f32> {
-    let mut s = seed.wrapping_mul(6364136223846793005).wrapping_add(1);
-    (0..n)
-        .map(|_| {
-            s = s
-                .wrapping_mul(6364136223846793005)
-                .wrapping_add(1442695040888963407);
-            let u = (s >> 32) as u32;
-            (u as f32 / u32::MAX as f32) - 0.5
-        })
-        .collect()
-}
-
-fn max_rel_err(got: &[f32], reference: &[f32]) -> f32 {
-    got.iter()
-        .zip(reference)
-        .map(|(g, r)| (g - r).abs() / r.abs().max(1.0))
-        .fold(0.0f32, f32::max)
-}
-
-fn hostname() -> Option<String> {
-    std::env::var("HOSTNAME").ok().or_else(|| {
-        let mut buf = vec![0u8; 256];
-        let rv = unsafe { libc_gethostname(buf.as_mut_ptr() as *mut _, buf.len()) };
-        if rv != 0 {
-            return None;
-        }
-        let end = buf.iter().position(|&b| b == 0).unwrap_or(buf.len());
-        buf.truncate(end);
-        String::from_utf8(buf).ok()
-    })
-}
-
-extern "C" {
-    #[link_name = "gethostname"]
-    fn libc_gethostname(name: *mut std::os::raw::c_char, len: usize) -> i32;
-}

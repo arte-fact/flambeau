@@ -263,6 +263,25 @@ impl KernelDescriptor {
     }
 }
 
+/// Registry entry for a kernel that is invoked directly by a call site
+/// (`reg.expect_module("stem")`) rather than through shape-based dispatch.
+///
+/// Use this for ops where the implementation choice is fixed per dtype / GGUF
+/// layer type rather than dependent on an `m_range` predicate — e.g.
+/// `indexed_moe_mmvq_q8_0`, `mmvq_q4_0`, `attention_decode_f16_splitk`. These
+/// kernels still need a `dispatch/*.toml` row and a cert, but there is
+/// exactly one implementation per (op, dtype) tuple so the shape-dispatch
+/// machinery adds no value.
+///
+/// The `dispatch_toml_roundtrip` test in `backend-hip` asserts every TOML
+/// `impl = "..."` entry is covered by a `KernelDescriptor` OR a
+/// `DirectCallKernel`, closing the V2.8-class drift window.
+#[derive(Debug, Clone, Copy)]
+pub struct DirectCallKernel {
+    pub impl_id: &'static str,
+    pub cert_rel_path: &'static str,
+}
+
 // const fn helper — QDtype's PartialEq isn't const-callable on stable Rust.
 const fn eq_qdtype(a: QDtype, b: QDtype) -> bool {
     a as u8 == b as u8

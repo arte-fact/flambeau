@@ -190,7 +190,7 @@ fn inspect_gguf(path: &str) -> Result<()> {
     println!("tensors ({}):", file.tensors.len());
     for name in &file.tensor_order {
         let info = &file.tensors[name];
-        let dims: Vec<String> = info.dims.iter().map(|d| d.to_string()).collect();
+        let dims: Vec<String> = info.dims.iter().map(std::string::ToString::to_string).collect();
         println!(
             "  {name:<56} {:<5} [{}] off={} size={}",
             info.dtype.name(),
@@ -234,6 +234,64 @@ fn repo_root() -> std::path::PathBuf {
     // of the CLI crate at build time; at runtime we just use the current dir
     // since `flambeau sweep` is expected to run from the workspace root.
     std::env::current_dir().expect("cwd")
+}
+
+/// Registry of sweep ops whose entry point is `fn(&Path) -> Result<Cert>`
+/// (i.e. no dtype-dispatch logic — that lives in `qmatmul` / `qmatmul_mmq`
+/// / `rmsnorm` which stay hand-rolled). Adding a new single-shape sweep is
+/// one row here; typos become compile errors.
+#[cfg(feature = "hip_sweep")]
+type SweepFn =
+    fn(&std::path::Path) -> anyhow::Result<flambeau_bench::cert::Cert>;
+
+#[cfg(feature = "hip_sweep")]
+const SIMPLE_SWEEPS: &[(&str, SweepFn)] = &[
+    ("rmsnorm_q8_1", flambeau_bench::sweep_rmsnorm_q8_1::run_sweep),
+    ("swiglu", flambeau_bench::sweep_swiglu::run_sweep),
+    ("quantize_q8_1_mmq", flambeau_bench::sweep_quantize_q8_1_mmq::run_sweep),
+    ("attention_prefill_flash_tile", flambeau_bench::sweep_attention_prefill::run_sweep_flash_tile),
+    ("rope", flambeau_bench::sweep_rope::run_sweep),
+    ("rope_neox_partial", flambeau_bench::sweep_rope_neox::run_sweep),
+    ("l2_norm", flambeau_bench::sweep_l2_norm::run_sweep),
+    ("causal_conv1d", flambeau_bench::sweep_causal_conv1d::run_sweep),
+    ("gdn_state_step", flambeau_bench::sweep_gdn_step::run_sweep),
+    ("cast_f32_f16", flambeau_bench::sweep_cast::run_sweep),
+    ("cast_f16_f32", flambeau_bench::sweep_f32_pointwise::run_cast_f16_f32_sweep),
+    ("silu_f32", flambeau_bench::sweep_f32_pointwise::run_silu_sweep),
+    ("swiglu_f32", flambeau_bench::sweep_f32_pointwise::run_swiglu_sweep),
+    ("scale_f32", flambeau_bench::sweep_f32_pointwise::run_scale_sweep),
+    ("rmsnorm_f32", flambeau_bench::sweep_f32_pointwise::run_rmsnorm_f32_sweep),
+    ("gdn_alpha_beta", flambeau_bench::sweep_f32_pointwise::run_gdn_alpha_beta_sweep),
+    ("quantize_f16_q8_1", flambeau_bench::sweep_f32_pointwise::run_quantize_f16_q8_1_sweep),
+    ("dense_gemv_f32_f16", flambeau_bench::sweep_f32_pointwise::run_dense_gemv_sweep),
+    ("add_f16", flambeau_bench::sweep_f32_pointwise::run_add_f16_sweep),
+    ("peer_copy_via_host", flambeau_bench::sweep_peer_copy::run_sweep),
+    ("shared_expert_scale", flambeau_bench::sweep_shared_expert::run_sweep),
+    ("split_q_gate", flambeau_bench::sweep_split_q_gate::run_sweep),
+    ("softmax", flambeau_bench::sweep_softmax::run_sweep),
+    ("attention_decode", flambeau_bench::sweep_attention::run_sweep),
+    ("attention_prefill", flambeau_bench::sweep_attention_prefill::run_sweep),
+    ("attention_decode_q8_kv", flambeau_bench::sweep_attention_q8_kv::run_sweep),
+    ("attention_decode_splitk", flambeau_bench::sweep_attention_splitk::run_sweep),
+    ("mmvq_f16", flambeau_bench::sweep_mmvq_f16::run_sweep),
+    ("mmq_f16", flambeau_bench::sweep_mmvq_f16::run_mmq_sweep),
+    ("mmvq_q4_0", flambeau_bench::sweep_q4_0_q5_0::run_mmvq_q4_0_sweep),
+    ("mmvq_q5_0", flambeau_bench::sweep_q4_0_q5_0::run_mmvq_q5_0_sweep),
+    ("mmvq_q5_1", flambeau_bench::sweep_q4_0_q5_0::run_mmvq_q5_1_sweep),
+    ("indexed_moe_mmvq_q4_0", flambeau_bench::sweep_q4_0_q5_0::run_indexed_moe_mmvq_q4_0_sweep),
+    ("topk", flambeau_bench::sweep_moe::run_topk_sweep),
+    ("indexed_moe_mmvq", flambeau_bench::sweep_moe::run_indexed_moe_mmvq_sweep),
+    ("moe_combine", flambeau_bench::sweep_moe::run_moe_combine_sweep),
+    ("indexed_moe_mmvq_gate_up", flambeau_bench::sweep_moe::run_gate_up_sweep),
+    ("indexed_moe_mmvq_r2", flambeau_bench::sweep_moe::run_indexed_moe_mmvq_r2_sweep),
+    ("indexed_moe_mmvq_q6_k", flambeau_bench::sweep_moe::run_indexed_moe_mmvq_q6_k_sweep),
+    ("indexed_moe_mmvq_q8_0", flambeau_bench::sweep_moe::run_indexed_moe_mmvq_q8_0_sweep),
+    ("indexed_moe_mmq", flambeau_bench::sweep_moe::run_indexed_moe_mmq_sweep),
+];
+
+#[cfg(feature = "hip_sweep")]
+fn find_simple_sweep(op: &str) -> Option<SweepFn> {
+    SIMPLE_SWEEPS.iter().find(|(k, _)| *k == op).map(|(_, f)| *f)
 }
 
 fn sweep(arch: &str, op: Option<&str>, dtype: &str) -> Result<()> {
@@ -352,409 +410,22 @@ fn sweep(arch: &str, op: Option<&str>, dtype: &str) -> Result<()> {
                 );
                 Ok(())
             }
-            "swiglu" => {
-                use flambeau_bench::sweep_swiglu::run_sweep;
-                let _ = dtype;
-                let cert = run_sweep(&repo_root())?;
-                println!(
-                    "sweep swiglu: pass={} shapes={} rig={}",
-                    cert.pass, cert.results.len(), cert.rig
-                );
-                Ok(())
+            other => {
+                if let Some(run) = find_simple_sweep(other) {
+                    let _ = dtype;
+                    let cert = run(&repo_root())?;
+                    println!(
+                        "sweep {other}: pass={} shapes={} rig={}",
+                        cert.pass, cert.results.len(), cert.rig
+                    );
+                    Ok(())
+                } else {
+                    anyhow::bail!(
+                        "unknown --op {other} (qmatmul | qmatmul_mmq | rmsnorm | one of {:?})",
+                        SIMPLE_SWEEPS.iter().map(|(k, _)| *k).collect::<Vec<_>>()
+                    )
+                }
             }
-            "rmsnorm_q8_1" => {
-                use flambeau_bench::sweep_rmsnorm_q8_1::run_sweep;
-                let _ = dtype;
-                let cert = run_sweep(&repo_root())?;
-                println!(
-                    "sweep rmsnorm_q8_1: pass={} shapes={} rig={}",
-                    cert.pass, cert.results.len(), cert.rig
-                );
-                Ok(())
-            }
-            "quantize_q8_1_mmq" => {
-                use flambeau_bench::sweep_quantize_q8_1_mmq::run_sweep;
-                let _ = dtype;
-                let cert = run_sweep(&repo_root())?;
-                println!(
-                    "sweep quantize_q8_1_mmq: pass={} shapes={} rig={}",
-                    cert.pass, cert.results.len(), cert.rig
-                );
-                Ok(())
-            }
-            "attention_prefill_flash_tile" => {
-                use flambeau_bench::sweep_attention_prefill::run_sweep_flash_tile;
-                let _ = dtype;
-                let cert = run_sweep_flash_tile(&repo_root())?;
-                println!(
-                    "sweep attention_prefill_flash_tile: pass={} shapes={} rig={}",
-                    cert.pass, cert.results.len(), cert.rig
-                );
-                Ok(())
-            }
-            "rope" => {
-                use flambeau_bench::sweep_rope::run_sweep;
-                let _ = dtype;
-                let cert = run_sweep(&repo_root())?;
-                println!(
-                    "sweep rope: pass={} shapes={} rig={}",
-                    cert.pass, cert.results.len(), cert.rig
-                );
-                Ok(())
-            }
-            "rope_neox_partial" => {
-                use flambeau_bench::sweep_rope_neox::run_sweep;
-                let _ = dtype;
-                let cert = run_sweep(&repo_root())?;
-                println!(
-                    "sweep rope_neox_partial: pass={} shapes={} rig={}",
-                    cert.pass, cert.results.len(), cert.rig
-                );
-                Ok(())
-            }
-            "l2_norm" => {
-                use flambeau_bench::sweep_l2_norm::run_sweep;
-                let _ = dtype;
-                let cert = run_sweep(&repo_root())?;
-                println!(
-                    "sweep l2_norm: pass={} shapes={} rig={}",
-                    cert.pass, cert.results.len(), cert.rig
-                );
-                Ok(())
-            }
-            "causal_conv1d" => {
-                use flambeau_bench::sweep_causal_conv1d::run_sweep;
-                let _ = dtype;
-                let cert = run_sweep(&repo_root())?;
-                println!(
-                    "sweep causal_conv1d: pass={} shapes={} rig={}",
-                    cert.pass, cert.results.len(), cert.rig
-                );
-                Ok(())
-            }
-            "gdn_state_step" => {
-                use flambeau_bench::sweep_gdn_step::run_sweep;
-                let _ = dtype;
-                let cert = run_sweep(&repo_root())?;
-                println!(
-                    "sweep gdn_state_step: pass={} shapes={} rig={}",
-                    cert.pass, cert.results.len(), cert.rig
-                );
-                Ok(())
-            }
-            "cast_f32_f16" => {
-                use flambeau_bench::sweep_cast::run_sweep;
-                let _ = dtype;
-                let cert = run_sweep(&repo_root())?;
-                println!(
-                    "sweep cast_f32_f16: pass={} shapes={} rig={}",
-                    cert.pass, cert.results.len(), cert.rig
-                );
-                Ok(())
-            }
-            "cast_f16_f32" => {
-                use flambeau_bench::sweep_f32_pointwise::run_cast_f16_f32_sweep;
-                let _ = dtype;
-                let cert = run_cast_f16_f32_sweep(&repo_root())?;
-                println!(
-                    "sweep cast_f16_f32: pass={} shapes={} rig={}",
-                    cert.pass, cert.results.len(), cert.rig
-                );
-                Ok(())
-            }
-            "silu_f32" => {
-                use flambeau_bench::sweep_f32_pointwise::run_silu_sweep;
-                let _ = dtype;
-                let cert = run_silu_sweep(&repo_root())?;
-                println!(
-                    "sweep silu_f32: pass={} shapes={} rig={}",
-                    cert.pass, cert.results.len(), cert.rig
-                );
-                Ok(())
-            }
-            "swiglu_f32" => {
-                use flambeau_bench::sweep_f32_pointwise::run_swiglu_sweep;
-                let _ = dtype;
-                let cert = run_swiglu_sweep(&repo_root())?;
-                println!(
-                    "sweep swiglu_f32: pass={} shapes={} rig={}",
-                    cert.pass, cert.results.len(), cert.rig
-                );
-                Ok(())
-            }
-            "scale_f32" => {
-                use flambeau_bench::sweep_f32_pointwise::run_scale_sweep;
-                let _ = dtype;
-                let cert = run_scale_sweep(&repo_root())?;
-                println!(
-                    "sweep scale_f32: pass={} shapes={} rig={}",
-                    cert.pass, cert.results.len(), cert.rig
-                );
-                Ok(())
-            }
-            "rmsnorm_f32" => {
-                use flambeau_bench::sweep_f32_pointwise::run_rmsnorm_f32_sweep;
-                let _ = dtype;
-                let cert = run_rmsnorm_f32_sweep(&repo_root())?;
-                println!(
-                    "sweep rmsnorm_f32: pass={} shapes={} rig={}",
-                    cert.pass, cert.results.len(), cert.rig
-                );
-                Ok(())
-            }
-            "gdn_alpha_beta" => {
-                use flambeau_bench::sweep_f32_pointwise::run_gdn_alpha_beta_sweep;
-                let _ = dtype;
-                let cert = run_gdn_alpha_beta_sweep(&repo_root())?;
-                println!(
-                    "sweep gdn_alpha_beta: pass={} shapes={} rig={}",
-                    cert.pass, cert.results.len(), cert.rig
-                );
-                Ok(())
-            }
-            "quantize_f16_q8_1" => {
-                use flambeau_bench::sweep_f32_pointwise::run_quantize_f16_q8_1_sweep;
-                let _ = dtype;
-                let cert = run_quantize_f16_q8_1_sweep(&repo_root())?;
-                println!(
-                    "sweep quantize_f16_q8_1: pass={} shapes={} rig={}",
-                    cert.pass, cert.results.len(), cert.rig
-                );
-                Ok(())
-            }
-            "dense_gemv_f32_f16" => {
-                use flambeau_bench::sweep_f32_pointwise::run_dense_gemv_sweep;
-                let _ = dtype;
-                let cert = run_dense_gemv_sweep(&repo_root())?;
-                println!(
-                    "sweep dense_gemv_f32_f16: pass={} shapes={} rig={}",
-                    cert.pass, cert.results.len(), cert.rig
-                );
-                Ok(())
-            }
-            "add_f16" => {
-                use flambeau_bench::sweep_f32_pointwise::run_add_f16_sweep;
-                let _ = dtype;
-                let cert = run_add_f16_sweep(&repo_root())?;
-                println!(
-                    "sweep add_f16: pass={} shapes={} rig={}",
-                    cert.pass, cert.results.len(), cert.rig
-                );
-                Ok(())
-            }
-            "peer_copy_via_host" => {
-                use flambeau_bench::sweep_peer_copy::run_sweep;
-                let _ = dtype;
-                let cert = run_sweep(&repo_root())?;
-                println!(
-                    "sweep peer_copy_via_host: pass={} shapes={} rig={}",
-                    cert.pass, cert.results.len(), cert.rig
-                );
-                Ok(())
-            }
-            "shared_expert_scale" => {
-                use flambeau_bench::sweep_shared_expert::run_sweep;
-                let _ = dtype;
-                let cert = run_sweep(&repo_root())?;
-                println!(
-                    "sweep shared_expert_scale: pass={} shapes={} rig={}",
-                    cert.pass, cert.results.len(), cert.rig
-                );
-                Ok(())
-            }
-            "split_q_gate" => {
-                use flambeau_bench::sweep_split_q_gate::run_sweep;
-                let _ = dtype;
-                let cert = run_sweep(&repo_root())?;
-                println!(
-                    "sweep split_q_gate: pass={} shapes={} rig={}",
-                    cert.pass, cert.results.len(), cert.rig
-                );
-                Ok(())
-            }
-            "softmax" => {
-                use flambeau_bench::sweep_softmax::run_sweep;
-                let _ = dtype;
-                let cert = run_sweep(&repo_root())?;
-                println!(
-                    "sweep softmax: pass={} shapes={} rig={}",
-                    cert.pass, cert.results.len(), cert.rig
-                );
-                Ok(())
-            }
-            "attention_decode" => {
-                use flambeau_bench::sweep_attention::run_sweep;
-                let _ = dtype;
-                let cert = run_sweep(&repo_root())?;
-                println!(
-                    "sweep attention_decode: pass={} shapes={} rig={}",
-                    cert.pass, cert.results.len(), cert.rig
-                );
-                Ok(())
-            }
-            "attention_prefill" => {
-                use flambeau_bench::sweep_attention_prefill::run_sweep;
-                let _ = dtype;
-                let cert = run_sweep(&repo_root())?;
-                println!(
-                    "sweep attention_prefill: pass={} shapes={} rig={}",
-                    cert.pass, cert.results.len(), cert.rig
-                );
-                Ok(())
-            }
-            "attention_decode_q8_kv" => {
-                use flambeau_bench::sweep_attention_q8_kv::run_sweep;
-                let _ = dtype;
-                let cert = run_sweep(&repo_root())?;
-                println!(
-                    "sweep attention_decode_q8_kv: pass={} shapes={} rig={}",
-                    cert.pass, cert.results.len(), cert.rig
-                );
-                Ok(())
-            }
-            "attention_decode_splitk" => {
-                use flambeau_bench::sweep_attention_splitk::run_sweep;
-                let _ = dtype;
-                let cert = run_sweep(&repo_root())?;
-                println!(
-                    "sweep attention_decode_splitk: pass={} shapes={} rig={}",
-                    cert.pass, cert.results.len(), cert.rig
-                );
-                Ok(())
-            }
-            "mmvq_f16" => {
-                use flambeau_bench::sweep_mmvq_f16::run_sweep;
-                let _ = dtype;
-                let cert = run_sweep(&repo_root())?;
-                println!(
-                    "sweep mmvq_f16: pass={} shapes={} rig={}",
-                    cert.pass, cert.results.len(), cert.rig
-                );
-                Ok(())
-            }
-            "mmq_f16" => {
-                use flambeau_bench::sweep_mmvq_f16::run_mmq_sweep;
-                let _ = dtype;
-                let cert = run_mmq_sweep(&repo_root())?;
-                println!(
-                    "sweep mmq_f16: pass={} shapes={} rig={}",
-                    cert.pass, cert.results.len(), cert.rig
-                );
-                Ok(())
-            }
-            "mmvq_q4_0" => {
-                use flambeau_bench::sweep_q4_0_q5_0::run_mmvq_q4_0_sweep;
-                let _ = dtype;
-                let cert = run_mmvq_q4_0_sweep(&repo_root())?;
-                println!("sweep mmvq_q4_0: pass={} shapes={} rig={}",
-                    cert.pass, cert.results.len(), cert.rig);
-                Ok(())
-            }
-            "mmvq_q5_0" => {
-                use flambeau_bench::sweep_q4_0_q5_0::run_mmvq_q5_0_sweep;
-                let _ = dtype;
-                let cert = run_mmvq_q5_0_sweep(&repo_root())?;
-                println!("sweep mmvq_q5_0: pass={} shapes={} rig={}",
-                    cert.pass, cert.results.len(), cert.rig);
-                Ok(())
-            }
-            "mmvq_q5_1" => {
-                use flambeau_bench::sweep_q4_0_q5_0::run_mmvq_q5_1_sweep;
-                let _ = dtype;
-                let cert = run_mmvq_q5_1_sweep(&repo_root())?;
-                println!("sweep mmvq_q5_1: pass={} shapes={} rig={}",
-                    cert.pass, cert.results.len(), cert.rig);
-                Ok(())
-            }
-            "indexed_moe_mmvq_q4_0" => {
-                use flambeau_bench::sweep_q4_0_q5_0::run_indexed_moe_mmvq_q4_0_sweep;
-                let _ = dtype;
-                let cert = run_indexed_moe_mmvq_q4_0_sweep(&repo_root())?;
-                println!("sweep indexed_moe_mmvq_q4_0: pass={} shapes={} rig={}",
-                    cert.pass, cert.results.len(), cert.rig);
-                Ok(())
-            }
-            "topk" => {
-                use flambeau_bench::sweep_moe::run_topk_sweep;
-                let _ = dtype;
-                let cert = run_topk_sweep(&repo_root())?;
-                println!(
-                    "sweep topk: pass={} shapes={} rig={}",
-                    cert.pass, cert.results.len(), cert.rig
-                );
-                Ok(())
-            }
-            "indexed_moe_mmvq" => {
-                use flambeau_bench::sweep_moe::run_indexed_moe_mmvq_sweep;
-                let _ = dtype;
-                let cert = run_indexed_moe_mmvq_sweep(&repo_root())?;
-                println!(
-                    "sweep indexed_moe_mmvq: pass={} shapes={} rig={}",
-                    cert.pass, cert.results.len(), cert.rig
-                );
-                Ok(())
-            }
-            "moe_combine" => {
-                use flambeau_bench::sweep_moe::run_moe_combine_sweep;
-                let _ = dtype;
-                let cert = run_moe_combine_sweep(&repo_root())?;
-                println!(
-                    "sweep moe_combine: pass={} shapes={} rig={}",
-                    cert.pass, cert.results.len(), cert.rig
-                );
-                Ok(())
-            }
-            "indexed_moe_mmvq_gate_up" => {
-                use flambeau_bench::sweep_moe::run_gate_up_sweep;
-                let _ = dtype;
-                let cert = run_gate_up_sweep(&repo_root())?;
-                println!(
-                    "sweep indexed_moe_mmvq_gate_up: pass={} shapes={} rig={}",
-                    cert.pass, cert.results.len(), cert.rig
-                );
-                Ok(())
-            }
-            "indexed_moe_mmvq_r2" => {
-                use flambeau_bench::sweep_moe::run_indexed_moe_mmvq_r2_sweep;
-                let _ = dtype;
-                let cert = run_indexed_moe_mmvq_r2_sweep(&repo_root())?;
-                println!(
-                    "sweep indexed_moe_mmvq_r2: pass={} shapes={} rig={}",
-                    cert.pass, cert.results.len(), cert.rig
-                );
-                Ok(())
-            }
-            "indexed_moe_mmvq_q6_k" => {
-                use flambeau_bench::sweep_moe::run_indexed_moe_mmvq_q6_k_sweep;
-                let _ = dtype;
-                let cert = run_indexed_moe_mmvq_q6_k_sweep(&repo_root())?;
-                println!(
-                    "sweep indexed_moe_mmvq_q6_k: pass={} shapes={} rig={}",
-                    cert.pass, cert.results.len(), cert.rig
-                );
-                Ok(())
-            }
-            "indexed_moe_mmvq_q8_0" => {
-                use flambeau_bench::sweep_moe::run_indexed_moe_mmvq_q8_0_sweep;
-                let _ = dtype;
-                let cert = run_indexed_moe_mmvq_q8_0_sweep(&repo_root())?;
-                println!(
-                    "sweep indexed_moe_mmvq_q8_0: pass={} shapes={} rig={}",
-                    cert.pass, cert.results.len(), cert.rig
-                );
-                Ok(())
-            }
-            "indexed_moe_mmq" => {
-                use flambeau_bench::sweep_moe::run_indexed_moe_mmq_sweep;
-                let _ = dtype;
-                let cert = run_indexed_moe_mmq_sweep(&repo_root())?;
-                println!(
-                    "sweep indexed_moe_mmq: pass={} shapes={} rig={}",
-                    cert.pass, cert.results.len(), cert.rig
-                );
-                Ok(())
-            }
-            other => anyhow::bail!("unknown --op {other} (qmatmul | qmatmul_mmq | rmsnorm)"),
         }
     }
     #[cfg(not(feature = "hip_sweep"))]

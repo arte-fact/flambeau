@@ -15,7 +15,7 @@ pub use device::{
 };
 pub use kernel_limits::{MOE_SORT_MAX_EXPERTS, TOPK_MAX_EXPERTS};
 pub use op::{
-    KernelDescriptor, KernelImpl, Op, OpContract, QDtype, QMatMul, QMatMulCfg, QMatMulInput,
-    QMatMulOutput, RmsNorm, RmsNormCfg, RmsNormInput, RmsNormOutput, SwiGLU, SwiGLUCfg,
-    SwiGLUInput, SwiGLUOutput, Tolerance,
+    DirectCallKernel, KernelDescriptor, KernelImpl, Op, OpContract, QDtype, QMatMul, QMatMulCfg,
+    QMatMulInput, QMatMulOutput, RmsNorm, RmsNormCfg, RmsNormInput, RmsNormOutput, SwiGLU,
+    SwiGLUCfg, SwiGLUInput, SwiGLUOutput, Tolerance,
 };

@@ -17,6 +17,13 @@
 //! - `HipRankHandle::all_reduce_host(host_bytes, ...)` — convenience that
 //!   copies H→D, calls RCCL, copies D→H. Used by the cert harness.
 
+#![expect(
+    clippy::undocumented_unsafe_blocks,
+    reason = "RCCL FFI — every unsafe block wraps an `nccl*` call with comm / stream / \
+              buffer pointers validated at HipMesh construction and owned for the \
+              communicators lifetime."
+)]
+
 use std::os::raw::c_int;
 use std::ptr;
 use std::sync::Arc;
@@ -175,7 +182,7 @@ impl HipRankHandle {
         rccl_check(code, "ncclCommInitRank")?;
         self.mesh.comms[self.rank.0 as usize]
             .set(comm)
-            .map_err(|_| CollectiveError::Device {
+            .map_err(|_comm| CollectiveError::Device {
                 backend: "hip",
                 ctx: "connect:set",
                 message: "rank already initialised".into(),

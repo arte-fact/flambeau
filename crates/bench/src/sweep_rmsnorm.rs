@@ -10,6 +10,13 @@
 
 #![cfg(feature = "hip")]
 
+#![expect(
+    clippy::undocumented_unsafe_blocks,
+    reason = "sweep harness — every unsafe block is a kernel launch or a memcpy_async \
+              over buffers allocated locally in the same function and freed before \
+              return; invariant is uniform across all sites."
+)]
+
 use std::path::Path;
 
 use anyhow::{bail, Context, Result};
@@ -21,6 +28,7 @@ use flambeau_kernels_hip as kernels;
 use half::f16;
 
 use crate::cert::{now_utc_iso8601, Cert, PmcSnapshot, ShapeResult, SCHEMA_VERSION};
+use crate::harness::{alloc_and_upload, max_rel_err_with_floor, rig, seeded_f32_range};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Dtype {
@@ -104,7 +112,7 @@ pub fn run_sweep(spec: &SweepSpec, repo_root: &Path) -> Result<Cert> {
             .wrapping_add((sh.m as u64).wrapping_mul(0x1234567))
             .wrapping_add((sh.k as u64).wrapping_mul(0x9E3779B97F4A7C15));
         let (got, reference) = run_shape(&dev, spec.dtype, sh.m, sh.k, spec.eps, seed)?;
-        let max_rel_err = max_rel_err(&got, &reference, sh.k);
+        let max_rel_err = max_rel_err_with_floor(&got, &reference, (sh.k as f32).sqrt() * 0.01);
         let tolerance = cert_tol();
         results.push(ShapeResult {
             m: sh.m,
@@ -123,10 +131,7 @@ pub fn run_sweep(spec: &SweepSpec, repo_root: &Path) -> Result<Cert> {
     }
 
     let pass = results.iter().all(|r| r.pass);
-    let rig = format!(
-        "{}-gfx906",
-        hostname().unwrap_or_else(|| "unknown".into())
-    );
+    let rig = rig();
     let cert = Cert {
         schema_version: SCHEMA_VERSION,
         impl_id: spec.dtype.impl_id().to_string(),
@@ -180,8 +185,8 @@ fn run_shape(
     let kernel: HipKernel<'_> = module.kernel(dtype.kernel_entry())?;
 
     // Generate random F16 x and weight.
-    let x_f32 = seeded_f32(seed, m * k);
-    let w_f32 = seeded_f32(seed.wrapping_add(0x5A5A5A5A), k);
+    let x_f32 = seeded_f32_range(seed, m * k, -0.5, 0.5);
+    let w_f32 = seeded_f32_range(seed.wrapping_add(0x5A5A5A5A), k, -0.5, 0.5);
     let x_f16: Vec<f16> = x_f32.iter().map(|v| f16::from_f32(*v)).collect();
     let w_f16: Vec<f16> = w_f32.iter().map(|v| f16::from_f32(*v)).collect();
 
@@ -256,46 +261,6 @@ fn run_shape(
 
 // ---- utilities ----
 
-fn seeded_f32(seed: u64, n: usize) -> Vec<f32> {
-    let mut s = seed.wrapping_mul(6364136223846793005).wrapping_add(1);
-    (0..n)
-        .map(|_| {
-            s = s.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
-            let u = (s >> 32) as u32;
-            // Keep inputs to [-0.5, 0.5] so F16 round-off doesn't dominate.
-            (u as f32 / u32::MAX as f32) - 0.5
-        })
-        .collect()
-}
-
-fn alloc_and_upload<T: Copy>(dev: &HipDevice, data: &[T]) -> DevicePtr {
-    let bytes = std::mem::size_of_val(data);
-    let d = dev.alloc(bytes).unwrap();
-    unsafe {
-        dev.memcpy_async(
-            dev.default_stream(),
-            CopyDirection::HostToDevice,
-            d,
-            DevicePtr(data.as_ptr() as usize),
-            bytes,
-        )
-        .unwrap();
-    }
-    dev.default_stream().synchronize().unwrap();
-    d
-}
-
-fn max_rel_err(got: &[f32], reference: &[f32], k: usize) -> f32 {
-    // Same floor-on-|ref| model as the MMVQ sweep: F16 noise scales with
-    // sqrt(K) for summations; use a modest abs floor so cancellation-heavy
-    // outputs don't blow up the metric.
-    let abs_floor = (k as f32).sqrt() * 0.01;
-    got.iter()
-        .zip(reference)
-        .map(|(g, r)| (g - r).abs() / r.abs().max(abs_floor))
-        .fold(0.0f32, f32::max)
-}
-
 fn cert_tol() -> f32 {
     // RMSNorm's F16 output has ~2^-10 precision per element, but the
     // rsqrt/multiply chain + F32 reduction is tight enough that 5e-3 holds
@@ -303,20 +268,3 @@ fn cert_tol() -> f32 {
     1e-2
 }
 
-fn hostname() -> Option<String> {
-    std::env::var("HOSTNAME").ok().or_else(|| {
-        let mut buf = vec![0u8; 256];
-        let rv = unsafe { libc_gethostname(buf.as_mut_ptr() as *mut _, buf.len()) };
-        if rv != 0 {
-            return None;
-        }
-        let end = buf.iter().position(|&b| b == 0).unwrap_or(buf.len());
-        buf.truncate(end);
-        String::from_utf8(buf).ok()
-    })
-}
-
-extern "C" {
-    #[link_name = "gethostname"]
-    fn libc_gethostname(name: *mut std::os::raw::c_char, len: usize) -> i32;
-}

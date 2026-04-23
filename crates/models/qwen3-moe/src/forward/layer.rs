@@ -7,14 +7,21 @@
 
 #![cfg(feature = "hip")]
 
+#![expect(
+    clippy::undocumented_unsafe_blocks,
+    reason = "forward-path composition — every unsafe block is a kernel.launch or \
+              memcpy_async over DevicePtrs owned by the session's scratch / weights / \
+              KV cache. Buffers live for the whole session; sync is driven by the top- \
+              level forward_*_decode/prefill caller."
+)]
+
 use anyhow::{bail, Context, Result};
 use flambeau_core::{Device, DevicePtr};
 use flambeau_ops::hip::{
     mlp::add_f16,
-    norm::{rmsnorm_f16, rmsnorm_quant_q8_1},
+    norm::rmsnorm_f16,
     HipDevice, HipStream, OpsRegistry,
 };
-use flambeau_runtime::KvCache;
 
 use super::{
     DenseFfnPrefillScratch, DenseFfnScratch, FullAttnPrefillScratch, FullAttnScratch,
@@ -30,7 +37,6 @@ use super::moe::{
 };
 use crate::config::Qwen3MoEConfig;
 use crate::session::LayerCache;
-use crate::weights::LayerWeights;
 
 // ---------------------------------------------------------------------------
 // V1.7.3-e4 — per-layer composition (residual sums + ffn/post-attn norm +

@@ -9,17 +9,22 @@
 
 #![cfg(feature = "hip")]
 
+#![expect(
+    clippy::undocumented_unsafe_blocks,
+    reason = "forward-path composition — every unsafe block is a kernel.launch or \
+              memcpy_async over DevicePtrs owned by the session's scratch / weights / \
+              KV cache. Buffers live for the whole session; sync is driven by the top- \
+              level forward_*_decode/prefill caller."
+)]
+
 use anyhow::{bail, Context, Result};
-use flambeau_backend_hip::HipCluster;
 use flambeau_core::{CopyDirection, Device, DevicePtr, Stream};
-use flambeau_ops::hip::{HipDevice, OpsRegistry};
-use flambeau_runtime::RankId;
+use flambeau_ops::hip::HipDevice;
 
 use super::{
     argmax_token_host, forward_embed_decode_host, forward_layer_decode, forward_layer_prefill,
     forward_output_head_decode, LayerForwardScratch, LayerPrefillScratch, OutputHeadScratch,
 };
-use crate::config::Qwen3MoEConfig;
 
 // ---------------------------------------------------------------------------
 // V1.7.5.C — pipeline-parallel forward_one_token.

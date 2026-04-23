@@ -41,7 +41,7 @@ fn cpu_topk_softmax(
         });
         // Softmax over top-k raw logits.
         let top: Vec<f32> = pairs[..k].iter().map(|p| p.0).collect();
-        let m = top.iter().cloned().fold(f32::NEG_INFINITY, f32::max);
+        let m = top.iter().copied().fold(f32::NEG_INFINITY, f32::max);
         let sum: f32 = top.iter().map(|v| (v - m).exp()).sum();
         for i in 0..k {
             idxs[t * k + i] = pairs[i].1;
