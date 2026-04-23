@@ -273,7 +273,7 @@ fn forward_router_then_moe_smoke() -> Result<()> {
     );
 
     // 2. MoE FFN — with zero expert weights this should return residual.
-    forward_moe_ffn_decode(&ops, stream, &cfg, &ffn, &mut scratch, d_x, d_residual, d_out)?;
+    forward_moe_ffn_decode(&ops, stream, &cfg, &ffn, &mut scratch, d_x, d_residual, None, d_out)?;
 
     let mut out_host = vec![f16::from_f32(0.0); hidden];
     unsafe {

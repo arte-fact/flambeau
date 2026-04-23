@@ -50,6 +50,46 @@ pub fn rmsnorm_f16(
     Ok(())
 }
 
+/// V2.23.a.1 — fused `mid = x_in + delta; mid_norm = rmsnorm(mid) * weight`.
+/// Replaces `add_f16` + `rmsnorm_f16` pair at the attention-residual epilogue.
+/// Both `mid` and `mid_norm` are needed downstream.
+pub fn rmsnorm_f16_add_residual(
+    reg: &OpsRegistry,
+    stream: &HipStream,
+    x_in: DevicePtr,
+    delta: DevicePtr,
+    weight: DevicePtr,
+    mid: DevicePtr,
+    mid_norm: DevicePtr,
+    m: usize,
+    k: usize,
+    eps: f32,
+) -> Result<()> {
+    let module = reg.expect_module("rmsnorm_f16_add_residual")?;
+    let kernel = module.kernel("flambeau_rmsnorm_f16_add_residual")?;
+
+    let m_i = m as i32;
+    let k_i = k as i32;
+    let eps_f = eps;
+    let x_ptr: u64 = x_in.as_usize() as u64;
+    let d_ptr: u64 = delta.as_usize() as u64;
+    let w_ptr: u64 = weight.as_usize() as u64;
+    let m_ptr: u64 = mid.as_usize() as u64;
+    let n_ptr: u64 = mid_norm.as_usize() as u64;
+    let mut args = KernelArgs::new();
+    args.push(&x_ptr);
+    args.push(&d_ptr);
+    args.push(&w_ptr);
+    args.push(&m_ptr);
+    args.push(&n_ptr);
+    args.push(&m_i);
+    args.push(&k_i);
+    args.push(&eps_f);
+    let cfg = LaunchCfg::one_d(m as u32, 256);
+    unsafe { kernel.launch(stream, cfg, args)? };
+    Ok(())
+}
+
 /// Fused RMSNorm + Q8_1-quantize. Saves the round-trip to HBM between
 /// norm-out and the next matmul's activation-quantize step (candle D1).
 /// Output is `m * (k / 32)` `flambeau_block_q8_1` blocks, layout matching

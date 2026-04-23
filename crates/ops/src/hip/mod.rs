@@ -105,6 +105,7 @@ pub const KERNEL_STEMS: &[&str] = &[
     "cast_f16_f32",
     // Norm / pointwise.
     "rmsnorm_f16",
+    "rmsnorm_f16_add_residual",
     "rmsnorm_f32",
     "rmsnorm_q8_1_fused",
     "l2_norm_f32",
@@ -137,6 +138,7 @@ pub const KERNEL_STEMS: &[&str] = &[
     "indexed_moe_mmvq_q8_0",
     "indexed_moe_mmq_q4_k",
     "moe_combine_f16",
+    "moe_combine_two_residuals_f16",
     "dense_gemv_f32_f16",
 ];
 

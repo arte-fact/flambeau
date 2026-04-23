@@ -195,6 +195,7 @@ pub fn forward_moe_ffn_decode(
     scratch: &mut MoeScratch,
     x_norm: DevicePtr,
     residual: DevicePtr,
+    extra_residual: Option<DevicePtr>,
     out: DevicePtr,
 ) -> Result<()> {
     let ffn_gate_exps = ffn
@@ -304,22 +305,37 @@ pub fn forward_moe_ffn_decode(
     )
     .context("cast down → f16")?;
 
-    // 7. Weighted sum + residual. `moe_combine_f16` writes
-    //   out[h] = residual[h] + Σ_k weights[k] · expert_outs[k, h]
-    // into the caller's `out`. `expert_outs[n_tokens=1, top_k, hidden]`
-    // is `scratch.down_f16` in place.
-    moe_combine_f16(
-        ops,
-        stream,
-        scratch.down_f16,
-        scratch.expert_weights,
-        residual,
-        out,
-        1,
-        top_k,
-        hidden,
-    )
-    .context("moe_combine_f16")?;
+    // 7. Weighted sum + residual. V2.23.a.2 — if caller provides a second
+    // residual (shared-expert delta), fuse it into the combine step so
+    // we skip the standalone add_f16 between shared expert and combine.
+    if let Some(extra) = extra_residual {
+        flambeau_ops::hip::moe::moe_combine_two_residuals_f16(
+            ops,
+            stream,
+            scratch.down_f16,
+            scratch.expert_weights,
+            residual,
+            extra,
+            out,
+            1,
+            top_k,
+            hidden,
+        )
+        .context("moe_combine_two_residuals_f16")?;
+    } else {
+        moe_combine_f16(
+            ops,
+            stream,
+            scratch.down_f16,
+            scratch.expert_weights,
+            residual,
+            out,
+            1,
+            top_k,
+            hidden,
+        )
+        .context("moe_combine_f16")?;
+    }
 
     Ok(())
 }

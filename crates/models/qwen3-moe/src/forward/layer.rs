@@ -19,7 +19,7 @@ use anyhow::{bail, Context, Result};
 use flambeau_core::{Device, DevicePtr};
 use flambeau_ops::hip::{
     mlp::add_f16,
-    norm::rmsnorm_f16,
+    norm::{rmsnorm_f16, rmsnorm_f16_add_residual},
     HipDevice, HipStream, OpsRegistry,
 };
 
@@ -221,27 +221,27 @@ pub fn forward_layer_decode(
         )?;
     }
 
-    // 2. Residual: mid = x_in + attn_delta (in-place on mid_f16).
-    add_f16(ops, stream, x_in, scratch.mid_f16, scratch.mid_f16, hidden)
-        .context("layer residual: x_in + attn_delta")?;
-
-    // 3. post-attention / ffn norm → mid_norm.
+    // 2+3. V2.23.a.1 fused: `mid = x_in + attn_delta; mid_norm = rmsnorm(mid)*w`.
+    // Saves one kernel launch per layer per token vs the old add_f16 + rmsnorm
+    // pair. Both outputs consumed downstream.
     let post_norm = layer_weights
         .post_attention_norm
         .as_ref()
         .or(layer_weights.ffn_norm.as_ref())
         .context("layer missing both post_attention_norm and ffn_norm")?;
-    rmsnorm_f16(
+    rmsnorm_f16_add_residual(
         ops,
         stream,
+        x_in,
         scratch.mid_f16,
         post_norm.ptr,
+        scratch.mid_f16,
         scratch.mid_norm_f16,
         1,
         hidden,
         cfg.rms_norm_eps,
     )
-    .context("post-attn rmsnorm")?;
+    .context("fused post-attn add+rmsnorm")?;
 
     // 4. FFN. Two flavours:
     //    - arch=qwen35 (dense): single gate/up/down triple, no router. Writes
@@ -271,8 +271,10 @@ pub fn forward_layer_decode(
         return Ok(());
     }
 
-    // MoE path — optional shared expert delta.
-    let moe_residual = if let (Some(shared_w), Some(shared_scratch)) =
+    // MoE path — optional shared expert delta. V2.23.a.2 skips the explicit
+    // `add_f16(mid, shared_delta)` by passing both residuals to
+    // `moe_combine_two_residuals_f16`, saving one launch per layer per token.
+    let (moe_residual, shared_extra) = if let (Some(shared_w), Some(shared_scratch)) =
         (layer_weights.ffn.shared.as_ref(), scratch.shared.as_mut())
     {
         forward_shared_expert_decode(
@@ -284,20 +286,10 @@ pub fn forward_layer_decode(
             scratch.mid_norm_f16,
             scratch.shared_delta_f16,
         )?;
-        // moe_res = mid + shared_delta (fused into moe_combine's residual below).
-        add_f16(
-            ops,
-            stream,
-            scratch.mid_f16,
-            scratch.shared_delta_f16,
-            scratch.moe_residual_f16,
-            hidden,
-        )
-        .context("moe residual: mid + shared_delta")?;
-        scratch.moe_residual_f16
+        (scratch.mid_f16, Some(scratch.shared_delta_f16))
     } else {
-        // Dense arch with no shared expert: moe_combine's residual is just mid.
-        scratch.mid_f16
+        // Dense arch with no shared expert: combine's residual is just mid.
+        (scratch.mid_f16, None)
     };
 
     // 5. Router (dense F32 GEMV + topk).
@@ -319,7 +311,8 @@ pub fn forward_layer_decode(
         scratch.mid_norm_f16,
     )?;
 
-    // 6. Routed MoE FFN — fuses the residual add in moe_combine.
+    // 6. Routed MoE FFN — fuses the residual add in moe_combine (and optionally
+    // the shared-expert delta residual via V2.23.a.2 two-residuals variant).
     forward_moe_ffn_decode(
         ops,
         stream,
@@ -328,6 +321,7 @@ pub fn forward_layer_decode(
         moe,
         scratch.mid_norm_f16,
         moe_residual,
+        shared_extra,
         x_out,
     )?;
 

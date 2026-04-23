@@ -249,6 +249,7 @@ fn forward_moe_ffn_decode_smoke() -> Result<()> {
         &mut scratch,
         d_x,
         d_residual,
+        None,
         d_out,
     )?;
 
