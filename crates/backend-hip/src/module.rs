@@ -15,10 +15,12 @@
 //! - Stream ownership. `launch` takes `&HipStream`; the stream must live on
 //!   the same device as the module.
 
+use std::collections::HashMap;
 use std::ffi::CString;
 use std::marker::PhantomData;
 use std::os::raw::c_uint;
 use std::ptr;
+use std::sync::RwLock;
 
 use flambeau_core::{DeviceError, DeviceResult};
 
@@ -49,6 +51,17 @@ fn check(code: i32, ctx: &'static str) -> DeviceResult<()> {
 pub struct HipModule {
     raw: hipModule_t,
     device_id: i32,
+    /// Resolved kernel-function handles, keyed by entry-point symbol name.
+    ///
+    /// The cache is insert-only in practice: every launch site in
+    /// `crates/ops/src/hip/*` passes a string literal, and after warmup
+    /// every entry point has been resolved once. The cache turns per-launch
+    /// kernel resolution from `CString::new` + `hipModuleGetFunction` into
+    /// an uncontended `RwLock::read` + `HashMap::get` — see [C1 in
+    /// `RUST-PERF-CORRECTIONS.md`]. V2 continuous batching will contend the
+    /// read lock at most N (num-ranks) ways; a `Mutex` would be fine today
+    /// but `RwLock` is forward-compatible for cheap.
+    kernel_cache: RwLock<HashMap<&'static str, hipFunction_t>>,
 }
 
 impl std::fmt::Debug for HipModule {
@@ -56,6 +69,14 @@ impl std::fmt::Debug for HipModule {
         f.debug_struct("HipModule")
             .field("raw", &(self.raw as usize))
             .field("device_id", &self.device_id)
+            .field(
+                "kernel_cache_size",
+                &self
+                    .kernel_cache
+                    .read()
+                    .map(|g| g.len())
+                    .unwrap_or(usize::MAX),
+            )
             .finish()
     }
 }
@@ -85,6 +106,7 @@ impl HipModule {
         Ok(Self {
             raw: m,
             device_id,
+            kernel_cache: RwLock::new(HashMap::new()),
         })
     }
 
@@ -93,7 +115,67 @@ impl HipModule {
     }
 
     /// Resolve a kernel by its extern-C symbol name.
-    pub fn kernel(&self, name: &str) -> DeviceResult<HipKernel<'_>> {
+    ///
+    /// Hot path: served from an uncontended read-lock on the per-module
+    /// kernel cache. Cold path (first call for this name) goes through
+    /// `hipModuleGetFunction` under the write lock and populates the cache.
+    ///
+    /// `name` must be a `'static` string — every call site in
+    /// `crates/ops/src/hip/*` passes a literal, and the cache key borrows
+    /// that literal without allocating. If `name` is genuinely dynamic,
+    /// call [`Self::kernel_dynamic`] which pays the CString + String cost.
+    ///
+    /// # Errors
+    /// Returns `DeviceError::Backend` if the name contains a NUL byte or
+    /// the driver reports `hipModuleGetFunction` failure.
+    pub fn kernel(&self, name: &'static str) -> DeviceResult<HipKernel<'_>> {
+        if let Some(raw) = self
+            .kernel_cache
+            .read()
+            .ok()
+            .and_then(|g| g.get(name).copied())
+        {
+            return Ok(HipKernel {
+                raw,
+                name,
+                _module: PhantomData,
+            });
+        }
+        let raw = self.resolve(name)?;
+        if let Ok(mut guard) = self.kernel_cache.write() {
+            // `entry` not `insert` — tolerates a concurrent resolve during
+            // the brief window between the read-miss and the write-acquire.
+            guard.entry(name).or_insert(raw);
+        }
+        Ok(HipKernel {
+            raw,
+            name,
+            _module: PhantomData,
+        })
+    }
+
+    /// Resolve a kernel whose name is not known at compile time. Bypasses the
+    /// kernel cache (the cache key is `&'static str`) — pays the `CString +
+    /// String` cost per call. Prefer [`Self::kernel`] on the hot path.
+    ///
+    /// # Errors
+    /// Same as [`Self::kernel`].
+    pub fn kernel_dynamic(&self, name: &str) -> DeviceResult<HipKernel<'_>> {
+        let raw = self.resolve(name)?;
+        Ok(HipKernel {
+            raw,
+            // "<dyn>" is never read on the hot path; `HipKernel.name` is only
+            // used by the `Debug` impl. Keeping it as `&'static str` avoids
+            // a per-call allocation while the kernel handle itself carries
+            // the identifying address.
+            name: "<dyn>",
+            _module: PhantomData,
+        })
+    }
+
+    /// Raw driver resolution. Shared between `kernel` (cached) and
+    /// `kernel_dynamic` (not cached).
+    fn resolve(&self, name: &str) -> DeviceResult<hipFunction_t> {
         let cname = CString::new(name).map_err(|_| DeviceError::Backend {
             backend: BACKEND,
             code: -1,
@@ -104,15 +186,9 @@ impl HipModule {
         // drop). `cname` is a valid, NUL-terminated C string (constructed from
         // `CString::new` above). The driver writes the function handle through
         // `&mut f`, which is valid for writes.
-        let code = unsafe {
-            hipModuleGetFunction(&mut f as *mut _, self.raw, cname.as_ptr())
-        };
+        let code = unsafe { hipModuleGetFunction(&mut f as *mut _, self.raw, cname.as_ptr()) };
         check(code, "hipModuleGetFunction")?;
-        Ok(HipKernel {
-            raw: f,
-            name: name.to_string(),
-            _module: PhantomData,
-        })
+        Ok(f)
     }
 }
 
@@ -130,9 +206,14 @@ impl Drop for HipModule {
 
 /// A kernel handle derived from a `HipModule`. Borrows from the module so
 /// the module stays alive as long as any kernel handle does.
+///
+/// `name` is `&'static str`: hot-path call sites pass string literals and
+/// the cache keys borrow those literals. The `_dyn_name` field is kept
+/// around as `None` in the hot path so `Debug`/error messages still work;
+/// callers using [`HipModule::kernel_dynamic`] populate it.
 pub struct HipKernel<'m> {
     raw: hipFunction_t,
-    pub name: String,
+    pub name: &'static str,
     _module: PhantomData<&'m HipModule>,
 }
 

@@ -69,7 +69,7 @@ fn upload<T: Copy + 'static>(dev: &HipDevice, data: &[T]) -> DevicePtr {
     d
 }
 
-fn run_kernel(stem: &str, entry: &str, n_rows: usize, k: usize, seed: u64) -> Vec<f32> {
+fn run_kernel(stem: &str, entry: &'static str, n_rows: usize, k: usize, seed: u64) -> Vec<f32> {
     let blocks_per_row = k / QK;
     let dev = HipDevice::new(0).unwrap();
     dev.bind().unwrap();

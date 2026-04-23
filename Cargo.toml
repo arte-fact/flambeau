@@ -51,6 +51,16 @@ opt-level = 3
 lto = "thin"
 codegen-units = 1
 debug = 1          # keep line info for rocprofv3 / perf attribution
+# C9: server posture — any panic is fatal-and-restart. Unwinding costs
+# small code size + a few percent on some hot paths. We keep `debug=1`
+# above so crash lines still appear in `perf`/rocprofv3 traces; unwind
+# backtraces are sacrificed for the code-size / launch-path win.
+panic = "abort"
+
+# Panic=abort must also apply to release-mode test binaries (otherwise
+# cargo emits a separate release-unwind profile which defeats the point).
+[profile.release.package."*"]
+# intentionally empty — here so the profile inherits without overrides.
 
 [profile.dev]
 opt-level = 1      # compiled kernels are slow without this; pure-Rust is fine at 1

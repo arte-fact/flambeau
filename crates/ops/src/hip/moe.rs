@@ -956,39 +956,83 @@ pub fn moe_combine_f16(
 /// refs. Returns `(bucket_expert, bucket_slots)` where `bucket_slots[i, col]`
 /// is either `token << 16 | slot` or `-1` sentinel padding. Deterministic —
 /// experts are emitted in ascending-id order.
+///
+/// Implementation (C4): counting-sort over `expert_id`. Two linear passes
+/// over `expert_ids`, no `HashMap`, no allocations beyond the output vecs
+/// and a `Vec<u32>` of size `max_expert_id + 1`. The old `HashMap` path
+/// showed up in `forward_*_prefill` profiles; for Qwen3.6 with 256 experts
+/// that's a ~256-entry dense Vec — trivially cheaper than the HashMap
+/// round-trip.
 pub fn build_expert_buckets(
     expert_ids: &[i32],
     n_tokens: usize,
     top_k: usize,
 ) -> (Vec<i32>, Vec<i32>) {
-    use std::collections::HashMap;
-    let mut per_expert: HashMap<i32, Vec<i32>> = HashMap::new();
+    let total = n_tokens * top_k;
+    if total == 0 {
+        return (Vec::new(), Vec::new());
+    }
+
+    // Pass 1: find `max_expert_id` + count pairs per expert.
+    let max_expert = expert_ids.iter().copied().max().unwrap_or(0);
+    // Experts < 0 are invalid — caller contract — but guard cheaply so we
+    // don't OOB the counts array. `as usize` casts negatives to giant
+    // positives; mask first.
+    debug_assert!(
+        expert_ids.iter().all(|&e| e >= 0),
+        "expert_ids must be non-negative"
+    );
+    let n_experts = (max_expert as usize) + 1;
+    let mut counts = vec![0u32; n_experts];
+    for &e in expert_ids {
+        counts[e as usize] += 1;
+    }
+
+    // Pass 2: compute per-expert write offsets by prefix-summing counts
+    // after inflating each to its bucket-padded count
+    // (`ceil(count / MMQ_X) * MMQ_X`). This sizes the output exactly.
+    let mut starts = vec![0usize; n_experts];
+    let mut padded_total = 0usize;
+    for e in 0..n_experts {
+        starts[e] = padded_total;
+        let c = counts[e] as usize;
+        if c > 0 {
+            let padded = c.div_ceil(INDEXED_MOE_MMQ_X) * INDEXED_MOE_MMQ_X;
+            padded_total += padded;
+        }
+    }
+    let n_buckets = padded_total / INDEXED_MOE_MMQ_X;
+
+    // Allocate output in one shot and initialise to -1 (the pad sentinel).
+    let mut bucket_slots = vec![-1i32; padded_total];
+    let mut bucket_expert = Vec::with_capacity(n_buckets);
+    // One bucket_expert entry per MMQ_X chunk. We can fill this up-front
+    // because we already know each expert contributes
+    // `count.div_ceil(MMQ_X)` chunks in ascending-id order.
+    for e in 0..n_experts {
+        let c = counts[e] as usize;
+        if c == 0 {
+            continue;
+        }
+        let chunks = c.div_ceil(INDEXED_MOE_MMQ_X);
+        for _ in 0..chunks {
+            bucket_expert.push(e as i32);
+        }
+    }
+
+    // Pass 3 (over pairs): scatter each packed pair into its expert's
+    // reserved region, bumping a per-expert cursor. `starts` acts as the
+    // cursor — we dense-overwrite the -1 pads for real refs.
     for t in 0..n_tokens {
         for slot in 0..top_k {
-            let e = expert_ids[t * top_k + slot];
+            let e = expert_ids[t * top_k + slot] as usize;
             let packed = ((t as i32) << 16) | (slot as i32);
-            per_expert.entry(e).or_default().push(packed);
+            let dst = starts[e];
+            bucket_slots[dst] = packed;
+            starts[e] = dst + 1;
         }
     }
-    let mut experts: Vec<i32> = per_expert.keys().copied().collect();
-    experts.sort();
-    let mut bucket_expert = Vec::new();
-    let mut bucket_slots = Vec::new();
-    for e in experts {
-        let refs = per_expert
-            .remove(&e)
-            .expect("per_expert invariant: `experts` was collected from per_expert.keys() \
-                     moments earlier with no intervening mutation; remove() cannot miss");
-        for chunk in refs.chunks(INDEXED_MOE_MMQ_X) {
-            bucket_expert.push(e);
-            for &r in chunk {
-                bucket_slots.push(r);
-            }
-            for _ in chunk.len()..INDEXED_MOE_MMQ_X {
-                bucket_slots.push(-1);
-            }
-        }
-    }
+
     (bucket_expert, bucket_slots)
 }
 

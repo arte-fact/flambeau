@@ -82,6 +82,12 @@ impl ShardedForwardOneTokenScratch {
         cluster: &flambeau_backend_hip::HipCluster,
     ) -> Result<Self> {
         let hidden_bytes = model.config.hidden_size * 2;
+        // C3: pre-size the cluster's pinned bounce buffers to the
+        // stage-boundary payload. Decode hand-offs are one hidden-state
+        // F16 vector per hop (`hidden_size * 2`). Doing this once here
+        // means every subsequent `peer_copy_via_host` hits the lock-free
+        // atomic fast path in `ensure_bounce`.
+        cluster.reserve_bounce_capacity(hidden_bytes)?;
         let mut per_rank = Vec::with_capacity(cluster.ranks());
         for rank_idx in 0..cluster.ranks() {
             let device = cluster.device(rank_idx);
@@ -388,6 +394,11 @@ impl ShardedForwardPrefillScratch {
     ) -> Result<Self> {
         assert!(max_tokens >= 1, "max_tokens must be >= 1");
         let hidden_bytes = max_tokens * model.config.hidden_size * 2;
+        // C3: size the cluster's pinned bounces to the max prefill payload
+        // (decode hand-offs only need `hidden_bytes / max_tokens`; prefill
+        // dominates). This is a max; `reserve_bounce_capacity` never
+        // shrinks.
+        cluster.reserve_bounce_capacity(hidden_bytes)?;
         let mut per_rank = Vec::with_capacity(cluster.ranks());
         for rank_idx in 0..cluster.ranks() {
             let device = cluster.device(rank_idx);

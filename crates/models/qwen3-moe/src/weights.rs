@@ -308,7 +308,13 @@ impl ModelWeights {
     }
 
     fn iter_tensors_mut(&mut self) -> impl Iterator<Item = &mut DeviceTensor> + '_ {
-        let mut v: Vec<&mut DeviceTensor> = Vec::new();
+        // C7: pre-size for the known ceiling — 3 globals plus up to 25
+        // per-layer tensors (2 norms + 8 attn + shared-expert trio + moe
+        // quartet + router). Over-provisioning by a handful is cheaper than
+        // growing a Vec of mut refs mid-walk.
+        let per_layer_max = 25;
+        let cap = 3 + self.layers.len() * per_layer_max;
+        let mut v: Vec<&mut DeviceTensor> = Vec::with_capacity(cap);
         v.push(&mut self.token_embd);
         v.push(&mut self.output_norm);
         if let Some(o) = &mut self.output {

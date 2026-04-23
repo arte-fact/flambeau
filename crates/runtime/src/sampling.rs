@@ -73,11 +73,73 @@ impl Rng {
 
 /// Sample one token from the logit row. `logits.len()` = vocab_size.
 /// Returns the vocab id.
+///
+/// Allocates per call for the non-greedy paths (temperature / top-p need
+/// vocab-sized scratch). Prefer [`Sampler::sample`] on the decode hot path
+/// where the buffers can be reused across tokens.
 pub fn sample(logits: &[f32], mode: Sampling, rng: &mut Rng) -> u32 {
     match mode {
         Sampling::Greedy => argmax(logits),
-        Sampling::Temperature { temp } => sample_softmax_temp(logits, temp, rng),
-        Sampling::TopP { temp, p } => sample_top_p(logits, temp, p, rng),
+        Sampling::Temperature { temp } => {
+            let mut probs = Vec::with_capacity(logits.len());
+            sample_softmax_temp(logits, temp, rng, &mut probs)
+        }
+        Sampling::TopP { temp, p } => {
+            let mut probs = Vec::with_capacity(logits.len());
+            sample_top_p(logits, temp, p, rng, &mut probs)
+        }
+    }
+}
+
+/// Per-session sampler that reuses scratch across tokens. On Qwen3.6
+/// (vocab=151 936) each non-greedy call would otherwise allocate ~593 KiB
+/// (`Vec<f32>` for temperature) or ~1.16 MiB (`Vec<(u32, f32)>` for top-p);
+/// reusing the buffers turns the alloc churn into a one-time cost per
+/// session — see C2 in `RUST-PERF-CORRECTIONS.md`.
+#[derive(Debug)]
+pub struct Sampler {
+    rng: Rng,
+    /// Reused for `Sampling::Temperature`.
+    probs_f32: Vec<f32>,
+    /// Reused for `Sampling::TopP`.
+    probs_pair: Vec<(u32, f32)>,
+}
+
+impl Sampler {
+    /// Build a sampler seeded by `seed`. Scratch buffers are empty and will
+    /// grow on the first non-greedy call to `vocab_size`, after which they
+    /// stay at peak capacity for the lifetime of this `Sampler`.
+    pub fn from_seed(seed: u64) -> Self {
+        Self {
+            rng: Rng::from_seed(seed),
+            probs_f32: Vec::new(),
+            probs_pair: Vec::new(),
+        }
+    }
+
+    /// Pre-reserve scratch for a known `vocab_size`. Optional — the first
+    /// non-greedy call grows the buffers anyway — but avoids a reallocation
+    /// on the first sampled token.
+    pub fn reserve(&mut self, vocab_size: usize) {
+        self.probs_f32.reserve(vocab_size);
+        self.probs_pair.reserve(vocab_size);
+    }
+
+    pub fn rng_mut(&mut self) -> &mut Rng {
+        &mut self.rng
+    }
+
+    /// Sample one token. See module-level notes on determinism.
+    pub fn sample(&mut self, logits: &[f32], mode: Sampling) -> u32 {
+        match mode {
+            Sampling::Greedy => argmax(logits),
+            Sampling::Temperature { temp } => {
+                sample_softmax_temp(logits, temp, &mut self.rng, &mut self.probs_f32)
+            }
+            Sampling::TopP { temp, p } => {
+                sample_top_p(logits, temp, p, &mut self.rng, &mut self.probs_pair)
+            }
+        }
     }
 }
 
@@ -94,7 +156,11 @@ fn argmax(logits: &[f32]) -> u32 {
 }
 
 /// Numerically-stable softmax with temperature, then multinomial sample.
-fn sample_softmax_temp(logits: &[f32], temp: f32, rng: &mut Rng) -> u32 {
+///
+/// `probs` is caller-owned scratch: cleared + resized on entry. A freshly
+/// constructed `Vec` is fine (the first call will grow it to `logits.len()`);
+/// reusing one across calls avoids the vocab-sized allocation per token.
+fn sample_softmax_temp(logits: &[f32], temp: f32, rng: &mut Rng, probs: &mut Vec<f32>) -> u32 {
     let inv_t = if temp <= 0.0 { 1.0 } else { 1.0 / temp };
     let mut max_l = f32::NEG_INFINITY;
     for &v in logits {
@@ -103,19 +169,28 @@ fn sample_softmax_temp(logits: &[f32], temp: f32, rng: &mut Rng) -> u32 {
             max_l = scaled;
         }
     }
-    // Probabilities scaled: exp(l*inv_t - max).
+    // Probabilities scaled: exp(l*inv_t - max). Reuse `probs`.
+    probs.clear();
+    probs.reserve(logits.len());
     let mut sum = 0.0f32;
-    let mut probs = vec![0.0f32; logits.len()];
-    for (i, &v) in logits.iter().enumerate() {
+    for &v in logits {
         let p = (v * inv_t - max_l).exp();
-        probs[i] = p;
+        probs.push(p);
         sum += p;
     }
-    multinomial_pick(&probs, sum, rng)
+    multinomial_pick(probs, sum, rng)
 }
 
 /// Temperature + nucleus (top-p) sampling.
-fn sample_top_p(logits: &[f32], temp: f32, p: f32, rng: &mut Rng) -> u32 {
+///
+/// `probs` is caller-owned scratch (see [`sample_softmax_temp`]).
+fn sample_top_p(
+    logits: &[f32],
+    temp: f32,
+    p: f32,
+    rng: &mut Rng,
+    probs: &mut Vec<(u32, f32)>,
+) -> u32 {
     let inv_t = if temp <= 0.0 { 1.0 } else { 1.0 / temp };
     let mut max_l = f32::NEG_INFINITY;
     for &v in logits {
@@ -124,12 +199,15 @@ fn sample_top_p(logits: &[f32], temp: f32, p: f32, rng: &mut Rng) -> u32 {
             max_l = scaled;
         }
     }
-    // Softmax over full vocab first.
-    let mut probs: Vec<(u32, f32)> = logits
-        .iter()
-        .enumerate()
-        .map(|(i, &v)| (i as u32, (v * inv_t - max_l).exp()))
-        .collect();
+    // Softmax over full vocab first. Reuse `probs`.
+    probs.clear();
+    probs.reserve(logits.len());
+    probs.extend(
+        logits
+            .iter()
+            .enumerate()
+            .map(|(i, &v)| (i as u32, (v * inv_t - max_l).exp())),
+    );
     let sum_full: f32 = probs.iter().map(|(_, p)| *p).sum();
     for (_, pv) in probs.iter_mut() {
         *pv /= sum_full;
@@ -230,6 +308,39 @@ mod tests {
         let mut b = Rng::from_seed(99);
         for _ in 0..1000 {
             assert_eq!(a.next_u64(), b.next_u64());
+        }
+    }
+
+    #[test]
+    fn sampler_matches_free_fn_on_equal_seed() {
+        // The reusable `Sampler` must produce bit-identical results to the
+        // one-shot free `sample` fn when both start from the same seed.
+        let logits = [1.0, 2.0, 3.0, 2.5, 1.5];
+        let modes = [
+            Sampling::Greedy,
+            Sampling::Temperature { temp: 0.7 },
+            Sampling::TopP { temp: 1.0, p: 0.9 },
+        ];
+        for mode in modes {
+            let mut rng = Rng::from_seed(4242);
+            let free = sample(&logits, mode, &mut rng);
+            let mut sampler = Sampler::from_seed(4242);
+            let owned = sampler.sample(&logits, mode);
+            assert_eq!(free, owned, "mismatch on mode {mode:?}");
+        }
+    }
+
+    #[test]
+    fn sampler_reuse_across_calls_is_deterministic() {
+        // Same Sampler, many calls: must produce the same sequence across
+        // two independently-constructed Samplers with equal seeds.
+        let logits = [0.5, 0.3, 1.2, 0.9, 0.1, 2.0, 0.0];
+        let mut a = Sampler::from_seed(777);
+        let mut b = Sampler::from_seed(777);
+        for _ in 0..500 {
+            let xa = a.sample(&logits, Sampling::Temperature { temp: 0.9 });
+            let xb = b.sample(&logits, Sampling::Temperature { temp: 0.9 });
+            assert_eq!(xa, xb);
         }
     }
 }

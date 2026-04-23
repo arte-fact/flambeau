@@ -16,8 +16,8 @@ use flambeau_qwen3_moe::forward::{
 use flambeau_qwen3_moe::{
     Qwen3MoEConfig, Qwen3MoEShardedModel, Qwen3MoEShardedSession,
 };
-use flambeau_quant::{ChatMessage as TmplMessage, ChatTemplate, GgufTokenizer};
-use flambeau_runtime::{sample as sample_token, Rng};
+use flambeau_quant::{ChatTemplate, GgufTokenizer};
+use flambeau_runtime::Sampler;
 use serde_json::json;
 use tokio::sync::Mutex;
 
@@ -76,18 +76,12 @@ pub async fn chat_completions(
         return Err(ApiError::bad_request("messages[] is empty"));
     }
 
-    // Render chat template → text prompt.
-    let tmpl_msgs: Vec<TmplMessage> = req
-        .messages
-        .iter()
-        .map(|m| TmplMessage {
-            role: m.role.clone(),
-            content: m.content.clone(),
-        })
-        .collect();
+    // Render chat template → text prompt. C5: `render` is generic over
+    // any `Serialize` slice, so we pass `req.messages` directly without
+    // cloning role/content into `TmplMessage`.
     let prompt = state
         .chat_template
-        .render(&tmpl_msgs, /*add_generation_prompt=*/ true)
+        .render(&req.messages, /*add_generation_prompt=*/ true)
         .map_err(ApiError::internal)?;
 
     let params = SamplingParams::from_parts(
@@ -238,7 +232,11 @@ fn run_completion_blocking(
     );
 
     // Decode loop.
-    let _rng = Rng::from_seed(params.seed);
+    // Sampler holds vocab-sized scratch reused across all decode steps
+    // (C2 in RUST-PERF-CORRECTIONS.md). Reserve upfront to avoid the
+    // first-token grow.
+    let mut sampler = Sampler::from_seed(params.seed);
+    sampler.reserve(state.cfg.vocab_size);
     let mut generated: Vec<u32> = Vec::with_capacity(params.max_tokens as usize);
     let stop_ids = &state.tokenizer.stop_ids;
     let is_stop = |t: u32| stop_ids.contains(&t);
@@ -249,7 +247,7 @@ fn run_completion_blocking(
     // To sample properly we'd need a variant that returns logits; punt to V1.9.
     generated.push(first_next);
     if is_stop(first_next) {
-        return finalise(&state, prompt_tokens, &generated, "stop");
+        return finalise(&state, prompt_tokens, generated, "stop");
     }
 
     let mut finish_reason = "length";
@@ -274,7 +272,10 @@ fn run_completion_blocking(
         // the forward's argmax; temperature / top-p is implemented in
         // flambeau_runtime::sample but needs the logit row accessible from
         // forward_one_token_pp, which doesn't currently return it.
-        let _ = sample_token; // reference to keep import used
+        // V1.9: once forward_one_token_pp exposes logits, call
+        //   `sampler.sample(logits, params.sampling)` here instead of
+        // taking the forward's built-in argmax.
+        let _ = &sampler;
         let _ = params.sampling;
     }
 
@@ -296,25 +297,22 @@ fn run_completion_blocking(
         "completion request finished"
     );
 
-    finalise(&state, prompt_tokens, &generated, finish_reason)
+    finalise(&state, prompt_tokens, generated, finish_reason)
 }
 
 fn finalise(
     state: &ServerState,
     prompt_tokens: u32,
-    generated: &[u32],
+    mut generated: Vec<u32>,
     reason: &str,
 ) -> Result<(String, u32, u32, String)> {
     // Strip ALL stop tokens (eos, <|im_end|>, etc.) from decoded text so the
     // client sees clean content. Raw count preserved for `usage` honesty.
+    // C6: `retain` mutates in place instead of allocating a second Vec.
     let stop_ids = &state.tokenizer.stop_ids;
     let completion_tokens = generated.len() as u32;
-    let visible: Vec<u32> = generated
-        .iter()
-        .copied()
-        .filter(|t| !stop_ids.contains(t))
-        .collect();
-    let text = state.tokenizer.decode(&visible).context("decode")?;
+    generated.retain(|t| !stop_ids.contains(t));
+    let text = state.tokenizer.decode(&generated).context("decode")?;
     Ok((text, prompt_tokens, completion_tokens, reason.to_owned()))
 }
 

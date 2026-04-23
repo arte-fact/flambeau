@@ -24,6 +24,7 @@
 
 use std::os::raw::{c_int, c_void};
 use std::ptr;
+use std::sync::atomic::{AtomicPtr, AtomicUsize, Ordering};
 use std::sync::Mutex;
 
 use crate::sys::{
@@ -33,33 +34,38 @@ use crate::sys::{
 use crate::HipDevice;
 use flambeau_core::{Device, DeviceError, DevicePtr, DeviceResult};
 
-/// One entry per rank: the pinned host bounce buffer (grown on demand)
-/// wrapped in a mutex so two concurrent peer copies can't race on the
-/// same allocation.
+/// One entry per rank: the pinned host bounce buffer.
+///
+/// C3-refactor: the hot path (`peer_copy_via_host`) reads `ptr` + `bytes`
+/// lock-free via atomics. The grow path is serialised by `grow_lock` to
+/// prevent concurrent reallocations, but after session warmup the buffer
+/// never grows again — `reserve_bounce_capacity` should be called at
+/// session init so the first real copy hits the lock-free fast path.
 struct RankBounce {
-    ptr: *mut c_void,
-    bytes: usize,
+    /// Pinned host pointer. `null` until first grow.
+    ptr: AtomicPtr<c_void>,
+    /// Current capacity in bytes.
+    bytes: AtomicUsize,
+    /// Serialises grow-path writers. Uncontended in steady state — readers
+    /// never touch this.
+    grow_lock: Mutex<()>,
 }
 
 impl std::fmt::Debug for RankBounce {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("RankBounce")
-            .field("ptr", &(self.ptr as usize))
-            .field("bytes", &self.bytes)
+            .field("ptr", &(self.ptr.load(Ordering::Relaxed) as usize))
+            .field("bytes", &self.bytes.load(Ordering::Relaxed))
             .finish()
     }
 }
 
-// SAFETY: `RankBounce` holds a raw pointer returned by `hipHostMalloc`.
-// It's only mutated under the cluster's per-rank mutex, and reads during
-// memcpy are driver-synchronised.
-unsafe impl Send for RankBounce {}
-
 impl RankBounce {
-    const fn empty() -> Self {
+    fn empty() -> Self {
         Self {
-            ptr: ptr::null_mut(),
-            bytes: 0,
+            ptr: AtomicPtr::new(ptr::null_mut()),
+            bytes: AtomicUsize::new(0),
+            grow_lock: Mutex::new(()),
         }
     }
 }
@@ -70,9 +76,9 @@ impl RankBounce {
 #[derive(Debug)]
 pub struct HipCluster {
     devices: Vec<HipDevice>,
-    /// One default stream per rank. The `HipDevice` already owns a default
-    /// stream; we keep a borrowing view via index for clarity.
-    bounces: Vec<Mutex<RankBounce>>,
+    /// Pinned-host bounce buffers, one per rank. Atomic/lock-free on the
+    /// hot path — see [`RankBounce`].
+    bounces: Vec<RankBounce>,
 }
 
 impl HipCluster {
@@ -90,10 +96,27 @@ impl HipCluster {
         for &id in device_ids {
             devices.push(HipDevice::new(id)?);
         }
-        let bounces = (0..device_ids.len())
-            .map(|_| Mutex::new(RankBounce::empty()))
-            .collect();
+        let bounces = (0..device_ids.len()).map(|_| RankBounce::empty()).collect();
         Ok(Self { devices, bounces })
+    }
+
+    /// Pre-grow every rank's pinned bounce buffer to `bytes_per_rank`.
+    ///
+    /// Call this once at session init with the largest expected
+    /// stage-boundary payload (`hidden_dim * sizeof::<f16>() *
+    /// max_prefill_tokens`). After this call, `peer_copy_via_host` never
+    /// takes the grow lock — it only does the atomic fast-path read.
+    ///
+    /// # Errors
+    /// Returns `DeviceError::Alloc` if any rank's pinned allocation fails.
+    pub fn reserve_bounce_capacity(&self, bytes_per_rank: usize) -> DeviceResult<()> {
+        if bytes_per_rank == 0 {
+            return Ok(());
+        }
+        for rank in 0..self.devices.len() {
+            let _ = self.ensure_bounce(rank, bytes_per_rank)?;
+        }
+        Ok(())
     }
 
     /// Number of ranks in the cluster.
@@ -111,16 +134,16 @@ impl HipCluster {
     /// log a warn from `Drop` in that case).
     pub fn dispose(mut self) -> DeviceResult<()> {
         for bounce in self.bounces.drain(..) {
-            let b = bounce.into_inner().map_err(|_| DeviceError::Backend {
-                backend: "hip",
-                code: -1,
-                message: "HipCluster bounce mutex poisoned during dispose".into(),
-            })?;
-            if !b.ptr.is_null() {
-                // SAFETY: `b.ptr` came from `hipHostMalloc` above. `b` is a
-                // local from `into_inner` so it drops after this block; no
-                // need to null-out the fields.
-                let rc = unsafe { hipHostFree(b.ptr) };
+            // Atomically null out the ptr so a concurrent reader (if the
+            // caller ignored the "dispose after last use" contract) sees
+            // a null rather than a dangling pointer. `bounce` is moved
+            // out of `self.bounces` so no other reference exists.
+            let p = bounce.ptr.swap(ptr::null_mut(), Ordering::AcqRel);
+            if !p.is_null() {
+                // SAFETY: `p` came from `hipHostMalloc` inside `ensure_bounce`.
+                // We atomically swapped it out; `bounce` itself drops at the
+                // end of this iteration.
+                let rc = unsafe { hipHostFree(p) };
                 if rc != HIP_SUCCESS {
                     return Err(DeviceError::Backend {
                         backend: "hip",
@@ -134,24 +157,53 @@ impl HipCluster {
     }
 
     /// Ensure rank `r`'s pinned bounce buffer is at least `need` bytes.
-    /// Grows (re-allocs) if needed; returns the buffer pointer.
+    ///
+    /// Hot path (steady state, buffer already large enough): two atomic
+    /// loads, no lock. Cold path (first call for this capacity): takes the
+    /// grow_lock, double-checks, frees the old slab, allocates a new one,
+    /// and releases the grow_lock. Callers that want to avoid ever hitting
+    /// the cold path should call [`Self::reserve_bounce_capacity`] at
+    /// session init.
     fn ensure_bounce(&self, rank: usize, need: usize) -> DeviceResult<*mut c_void> {
-        let mut slot = self.bounces[rank].lock().map_err(|_| DeviceError::Backend {
+        let slot = &self.bounces[rank];
+        // Fast path: the buffer is already large enough. Acquire ordering
+        // pairs with the Release store in the grow path below so a reader
+        // that observes `bytes >= need` is guaranteed to also observe the
+        // matching `ptr` write.
+        if slot.bytes.load(Ordering::Acquire) >= need {
+            let p = slot.ptr.load(Ordering::Acquire);
+            if !p.is_null() {
+                return Ok(p);
+            }
+        }
+
+        // Cold path: serialise growers.
+        let _guard = slot.grow_lock.lock().map_err(|_| DeviceError::Backend {
             backend: "hip",
             code: -1,
-            message: "HipCluster bounce mutex poisoned".into(),
+            message: "HipCluster grow_lock poisoned".into(),
         })?;
-        if slot.bytes >= need && !slot.ptr.is_null() {
-            return Ok(slot.ptr);
+        // Double-check — another writer may have grown the buffer while we
+        // were waiting for the lock.
+        if slot.bytes.load(Ordering::Acquire) >= need {
+            let p = slot.ptr.load(Ordering::Acquire);
+            if !p.is_null() {
+                return Ok(p);
+            }
         }
-        // Free the old slab (if any) and allocate a fresh one. V1.7.5-B's
-        // hot-path payloads are all small (≤ 512 KB), so a single grow to
-        // the first observed size is the common case.
-        if !slot.ptr.is_null() {
-            // SAFETY: `slot.ptr` came from a prior `hipHostMalloc` in this same
-            // function. The `slot` mutex guard serialises access so nobody else
-            // is reading/writing the buffer; we null the field immediately after.
-            let rc = unsafe { hipHostFree(slot.ptr) };
+
+        // Free the old slab (if any). Readers still holding the stale `ptr`
+        // could race here in principle, but in our discipline the grow
+        // happens at session init before any peer copies fire (see
+        // `reserve_bounce_capacity`), so steady-state readers never see
+        // this transition.
+        let old_ptr = slot.ptr.swap(ptr::null_mut(), Ordering::AcqRel);
+        if !old_ptr.is_null() {
+            // SAFETY: `old_ptr` came from a prior `hipHostMalloc` in this same
+            // function. We atomically swapped it out so no concurrent grower
+            // will double-free; concurrent readers on the fast path are not
+            // permitted in the documented usage (session init before launches).
+            let rc = unsafe { hipHostFree(old_ptr) };
             if rc != HIP_SUCCESS {
                 return Err(DeviceError::Backend {
                     backend: "hip",
@@ -159,18 +211,16 @@ impl HipCluster {
                     message: format!("hipHostFree (grow): {}", error_string(rc)),
                 });
             }
-            slot.ptr = ptr::null_mut();
-            slot.bytes = 0;
         }
         // Bind the source device before allocating pinned memory — on
         // ROCm the current device at alloc time determines the pinned
         // page's NUMA affinity.
         self.devices[rank].bind()?;
-        let mut ptr: *mut c_void = ptr::null_mut();
+        let mut new_ptr: *mut c_void = ptr::null_mut();
         // SAFETY: `hipHostMalloc` writes a host pointer through the out-pointer
-        // and reads nothing from it. `&mut ptr` is valid for writes of
+        // and reads nothing from it. `&mut new_ptr` is valid for writes of
         // `sizeof(void*)`. Returned pointer ownership is transferred into `slot`.
-        let rc = unsafe { hipHostMalloc(&mut ptr, need, HIP_HOST_MALLOC_PORTABLE) };
+        let rc = unsafe { hipHostMalloc(&mut new_ptr, need, HIP_HOST_MALLOC_PORTABLE) };
         if rc != HIP_SUCCESS {
             return Err(DeviceError::Alloc {
                 backend: "hip",
@@ -179,9 +229,12 @@ impl HipCluster {
                 reason: format!("hipHostMalloc: {}", error_string(rc)),
             });
         }
-        slot.ptr = ptr;
-        slot.bytes = need;
-        Ok(ptr)
+        // Release ordering on both stores pairs with the Acquire loads in
+        // the fast path: readers that observe the new `bytes` value are
+        // guaranteed to see the matching `ptr`.
+        slot.ptr.store(new_ptr, Ordering::Release);
+        slot.bytes.store(need, Ordering::Release);
+        Ok(new_ptr)
     }
 
     /// Single-chunk host-bounce peer copy: DtoH on src rank → sync →
@@ -298,14 +351,14 @@ impl HipCluster {
 impl Drop for HipCluster {
     fn drop(&mut self) {
         for bounce in self.bounces.iter() {
-            let b = match bounce.lock() {
-                Ok(g) => g,
-                Err(_) => continue, // poisoned; best-effort
-            };
-            if !b.ptr.is_null() {
+            // Relaxed is fine here: we're on the sole remaining thread
+            // holding this cluster (Drop implies no outstanding borrows).
+            let p = bounce.ptr.load(Ordering::Relaxed);
+            if !p.is_null() {
+                let bytes = bounce.bytes.load(Ordering::Relaxed);
                 tracing::warn!(
                     target: "flambeau_backend_hip::cluster",
-                    bytes = b.bytes,
+                    bytes,
                     "HipCluster dropped without dispose(); pinned host buffer leaked"
                 );
             }

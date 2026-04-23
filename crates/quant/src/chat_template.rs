@@ -80,13 +80,20 @@ impl ChatTemplate {
     /// Render messages into the model prompt. `add_generation_prompt=true`
     /// appends the assistant header so the model completes into a new turn.
     ///
+    /// Generic over the message type so callers (e.g. the HTTP server)
+    /// can pass their request-body type directly rather than cloning into
+    /// [`ChatMessage`] — see C5 in `RUST-PERF-CORRECTIONS.md`. The only
+    /// requirement is that `M` serialises into something the template's
+    /// `messages` binding understands (role + content fields, matching
+    /// the OpenAI chat-completions schema).
+    ///
     /// # Errors
     /// `anyhow` wrapping a `minijinja::Error` if the template references an
     /// undefined variable, applies an unknown filter/method, or raises from
     /// inside a `{% raise %}` block.
-    pub fn render(
+    pub fn render<M: serde::Serialize>(
         &self,
-        messages: &[ChatMessage],
+        messages: &[M],
         add_generation_prompt: bool,
     ) -> Result<String> {
         let tpl = self
