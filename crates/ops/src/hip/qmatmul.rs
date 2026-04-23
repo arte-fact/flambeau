@@ -61,10 +61,14 @@ pub fn qmatmul(
         let _ = act_q8_1_mmq;
         return mmq_f16_launch(reg, stream, weights, act_q8_1, dst, n, m, k);
     }
-    // V2.23.a — Q4_0 / Q5_0 prefill fallback via row-by-row MMVQ. A proper
-    // MMQ tile8 is queued as V2.23.b; MMVQ is correctness-complete and
-    // unblocks load-and-run on Qwen3.6-35B-A3B-Q4_0.
-    if matches!(dtype_weight, QDtype::Q4_0 | QDtype::Q5_0 | QDtype::Q5_1) {
+    // V2.28.b — Q4_0 prefill at m >= 32 routes through the wave64 MMQ tile
+    // via the dispatch table; decode (m < 32) stays on the V2.23 single-row
+    // MMVQ short-circuit.
+    //
+    // V2.23.a — Q5_0 / Q5_1 still MMVQ row-by-row (no tile kernel yet).
+    if matches!(dtype_weight, QDtype::Q5_0 | QDtype::Q5_1)
+        || (dtype_weight == QDtype::Q4_0 && m < 32)
+    {
         let (stem, entry) = match dtype_weight {
             QDtype::Q4_0 => ("mmvq_q4_0", "flambeau_mmvq_q4_0_q8_1"),
             QDtype::Q5_0 => ("mmvq_q5_0", "flambeau_mmvq_q5_0_q8_1"),
@@ -613,6 +617,16 @@ impl Recipe {
                 kind: RecipeKind::MmqWave64,
                 stem: "mmq_q4_1_wave64",
                 entry: "flambeau_mmq_q4_1_wave64_q8_1",
+                threads: 64,
+                rows_per_block: 0,
+                mmq_tile: (64, 8),
+            },
+            // V2.28.a: wave64 MMQ for Q4_0. Closes the 8.5× prefill gap to
+            // llama.cpp on Qwen3.6-35B-A3B-Q4_0 at dense + MoE shapes.
+            "qmatmul_q4_0_mmq_wave64_gfx906" => Self {
+                kind: RecipeKind::MmqWave64,
+                stem: "mmq_q4_0_wave64",
+                entry: "flambeau_mmq_q4_0_wave64_q8_1",
                 threads: 64,
                 rows_per_block: 0,
                 mmq_tile: (64, 8),

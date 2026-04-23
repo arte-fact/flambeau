@@ -124,6 +124,14 @@ cert    = "certs/hip/gfx906/qmatmul_q4_1_mmq_4warp_lds_gfx906.json"
 notes   = "V2.2.d.S1 — 4-warp LDS-tiled Q4_1 MMQ. MMQ_Y=32, MMQ_X=8, 256 threads, DP4A inner (__builtin_amdgcn_sdot4). S1 correctness-first port of llamacpp-turbo's load_tiles_q4_1 + vec_dot_q4_1_q8_1_dp4a; gfx906 vectorised int4 activation loads + L2 prefetch land in S2/S3 under the same impl_id."
 
 [[qmatmul_mmq]]
+dtype   = "Q4_0"
+dtype_q = "Q8_1"
+shape   = { m = ">=32", k = "any", n = "any" }
+impl    = "qmatmul_q4_0_mmq_wave64_gfx906"
+cert    = "certs/hip/gfx906/qmatmul_q4_0_mmq_wave64_gfx906.json"
+notes   = "V2.28.a — wave64 MMQ for Q4_0. MMQ_Y=64, TILE_N=8, 64 threads, DP4A inner with the `(q-8)·y = dp4a(q,y) - 8·y_s` bias-correction identity (same pattern as Q4_1 wave64 but no `m` field). Closes the 8.5× prefill gap to llama.cpp on Qwen3.6-35B-A3B-Q4_0 (V2.27 measured 132 vs 1118 tok/s)."
+
+[[qmatmul_mmq]]
 dtype   = "Q4_K"
 dtype_q = "Q8_1"
 shape   = { m = ">=128", k = "any", n = "any" }

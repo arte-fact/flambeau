@@ -999,7 +999,19 @@ pub fn forward_moe_ffn_prefill(
     //
     // Allowed combos: Q8_0 gate+up requires Q8_0 down; Q4_0 gate+up allows
     // either Q4_0 or Q8_0 down (V2.23.a ffn_down promotion).
-    if gate_dt_pre == GgmlDType::Q4_0 || gate_dt_pre == GgmlDType::Q8_0 {
+    //
+    // V2.28.c — at n_tokens >= 32, route Q4_0 through the tile8 MMQ path
+    // below (sort+pad+fused-tile kernels). MMVQ fallback stays for small
+    // n_tokens where the tile8 kernel's grid overhead dominates.
+    const Q4_0_TILE8_THRESHOLD: usize = 32;
+    // Only use tile8 when BOTH gate/up AND down are Q4_0. Mixed (Q4_0 gate /
+    // Q8_0 down — V2.23.a Q4_1→Q8_0 conversion for 5 layers of 35B-A3B-Q4_0)
+    // stays on the MMVQ fast path until a Q8_0 indexed-MoE down tile8 kernel
+    // lands (V2.22.b future work).
+    let q4_0_use_tile8 = gate_dt_pre == GgmlDType::Q4_0
+        && down_dt_pre == GgmlDType::Q4_0
+        && n_tokens >= Q4_0_TILE8_THRESHOLD;
+    if (gate_dt_pre == GgmlDType::Q4_0 && !q4_0_use_tile8) || gate_dt_pre == GgmlDType::Q8_0 {
         match (gate_dt_pre, down_dt_pre) {
             (GgmlDType::Q4_0, GgmlDType::Q4_0)
             | (GgmlDType::Q4_0, GgmlDType::Q8_0)
@@ -1103,6 +1115,30 @@ pub fn forward_moe_ffn_prefill(
             },
         )
         .context("prefill indexed_moe gate+up turbo")?;
+    } else if gate_dt_pre == GgmlDType::Q4_0 {
+        // V2.28.c — Q4_0 variant of the tile8 gate+up MMQ. n_sb_per_row for
+        // Q4_0 is hidden/32 (no super-block), not hidden/QK_K.
+        flambeau_ops::hip::moe::indexed_moe_mmq_q4_0_gate_up_tile8(
+            ops,
+            stream,
+            ffn_gate_exps.ptr,
+            ffn_up_exps.ptr,
+            scratch.x_q8_1,
+            scratch.expert_ids,
+            scratch.sort_sorted_pair_idx_padded,
+            scratch.sort_padded_offsets,
+            scratch.gate_out_f32,
+            scratch.up_out_f32,
+            flambeau_ops::hip::moe::MoeShape {
+                n_rows: inter,
+                n_tokens,
+                top_k,
+                n_sb_per_row: hidden / 32,
+                n_experts,
+                padded_total_upper_bound: padded_total_ub,
+            },
+        )
+        .context("prefill indexed_moe gate+up q4_0 tile8")?;
     } else {
         indexed_moe_mmq_q4_k_gate_up_tile8(
             ops,
@@ -1327,6 +1363,29 @@ pub fn forward_moe_ffn_prefill(
             nb_per_row_inter,
         )
         .context("prefill indexed_moe down q6_k")?,
+        GgmlDType::Q4_0 if moe_variant == "tile8" => {
+            // V2.28.c — Q4_0 down tile8 for MoE prefill.
+            let padded_total_ub = total_pairs + n_experts * 8;
+            flambeau_ops::hip::moe::indexed_moe_mmq_q4_0_down_tile8(
+                ops,
+                stream,
+                ffn_down_exps.ptr,
+                scratch.activated_q8_1,
+                scratch.expert_ids,
+                scratch.sort_sorted_pair_idx_padded,
+                scratch.sort_padded_offsets,
+                scratch.down_f32,
+                flambeau_ops::hip::moe::MoeShape {
+                    n_rows: hidden,
+                    n_tokens: n_tokens * top_k,
+                    top_k: 1,
+                    n_sb_per_row: inter / 32,
+                    n_experts,
+                    padded_total_upper_bound: padded_total_ub,
+                },
+            )
+            .context("prefill indexed_moe down q4_0 tile8")?;
+        }
         other => bail!("unreachable: ffn_down_exps dtype {other:?} should have been rejected"),
     }
 
