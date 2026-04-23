@@ -6,19 +6,19 @@
 #![cfg(feature = "hip")]
 
 use anyhow::{Context, Result};
-use flambeau_core::{DevicePtr, QDtype};
+use flambeau_core::{Device, DevicePtr};
 use flambeau_ops::hip::{
     cast::cast_f32_to_f16,
-    mlp::{add_f16, sigmoid_mul_f16},
+    mlp::{add_f16, swiglu_f32},
     norm::{quantize_f16_q8_1, quantize_f16_q8_1_mmq},
-    qmatmul::{mmvq, qmatmul},
-    HipStream, OpsRegistry,
+    qmatmul::{mmvq_q8_0_gate_up, qmatmul},
+    HipDevice, HipStream, OpsRegistry,
 };
-use flambeau_quant::GgmlDType;
+use flambeau_quant::BlockQ8_1;
 
-use super::common::{mat_shape, qdtype_of};
+use super::common::{qdtype_of, run_qmatmul_from_tensor};
 use crate::config::Qwen3MoEConfig;
-use crate::weights::{DenseFfnWeights, DeviceTensor};
+use crate::weights::DenseFfnWeights;
 
 // ---------------------------------------------------------------------------
 // V2.2.c — dense FFN decode (arch=qwen35).

@@ -11,10 +11,10 @@
 #![cfg(feature = "hip")]
 
 use anyhow::{bail, Context, Result};
-use flambeau_core::{DevicePtr, QDtype};
+use flambeau_core::{Device, DevicePtr, QDtype};
 use flambeau_ops::hip::{
-    cast::cast_f32_to_f16,
-    mlp::{add_f16, sigmoid_mul_f16},
+    cast::{cast_f16_to_f32, cast_f32_to_f16},
+    mlp::{add_f16, sigmoid_mul_f16, swiglu_f32},
     moe::{
         indexed_moe_mmq_q4_k_down_tile8, indexed_moe_mmq_q4_k_down_turbo,
         indexed_moe_mmq_q4_k_gate_up_tile8, indexed_moe_mmq_q4_k_gate_up_turbo,
@@ -28,11 +28,11 @@ use flambeau_ops::hip::{
     norm::{quantize_f16_q8_1, quantize_f16_q8_1_mmq},
     qmatmul::{mmvq, mmvq_q8_0_gate_up, qmatmul},
     router::dense_gemv_f32_f16,
-    HipStream, OpsRegistry,
+    HipDevice, HipStream, OpsRegistry,
 };
-use flambeau_quant::GgmlDType;
+use flambeau_quant::{BlockQ8_1, GgmlDType};
 
-use super::common::{mat_shape, qdtype_of, run_mmvq_from_tensor};
+use super::common::{mat_shape, qdtype_of, run_mmvq_from_tensor, run_qmatmul_from_tensor};
 use crate::config::Qwen3MoEConfig;
 use crate::weights::{DeviceTensor, FfnWeights, SharedExpertWeights};
 

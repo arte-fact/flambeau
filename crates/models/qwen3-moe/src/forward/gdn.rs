@@ -12,13 +12,13 @@ use flambeau_core::{CopyDirection, Device, DevicePtr, QDtype, Stream};
 use flambeau_ops::hip::{
     cast::{cast_f16_to_f32, cast_f32_to_f16},
     conv::causal_conv1d_f32,
-    mlp::{scale_f32, silu_f32},
+    mlp::{scale_f32, silu_f32, swiglu_f32},
     moe::shared_expert_scale_f32,
     norm::{
         l2_norm_f32, quantize_f16_q8_1, quantize_f16_q8_1_mmq, quantize_q8_1,
-        quantize_q8_1_mmq, rmsnorm_f32, rmsnorm_quant_q8_1,
+        quantize_q8_1_mmq, rmsnorm_f16, rmsnorm_f32, rmsnorm_quant_q8_1,
     },
-    qmatmul::{mmvq, qmatmul},
+    qmatmul::{mmvq, mmvq_q8_0_gate_up, qmatmul},
     recurrent::{gdn_alpha_beta_f32, gdn_split_qkv_f32, gdn_state_step_f32_s128},
     HipDevice, HipStream, OpsRegistry,
 };
@@ -1288,11 +1288,5 @@ pub fn forward_gdn_prefill(
     Ok(())
 }
 
-/// Helper: run a qmatmul against a `DeviceTensor`, validating dims + dispatching on dtype.
-///
-/// Takes both the standard [`flambeau_quant::BlockQ8_1`] buffer and the DS4
-/// [`flambeau_quant::BlockQ8_1Mmq`] buffer. Callers whose weight dtype never
-/// routes to the MmqLdsX64 kernel (everything except Q4_1 as of V2.2.d.P8)
-/// can legitimately pass [`DevicePtr(0)`] for `act_q8_1_mmq`.
 // `run_qmatmul_from_tensor` moved to `forward::common`.
 

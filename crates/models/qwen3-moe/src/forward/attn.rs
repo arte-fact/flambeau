@@ -7,17 +7,18 @@
 
 #![cfg(feature = "hip")]
 
-use anyhow::{Context, Result};
+use anyhow::{bail, Context, Result};
 use flambeau_core::{CopyDirection, Device, DevicePtr, QDtype, Stream};
 use flambeau_ops::hip::{
     attention::{attention_decode_f16, attention_prefill_f16, split_q_gate_f16},
     cast::cast_f32_to_f16,
-    mlp::add_f16,
+    mlp::{add_f16, sigmoid_mul_f16},
     norm::{quantize_f16_q8_1, quantize_f16_q8_1_mmq, rmsnorm_f16, rmsnorm_quant_q8_1},
     pe::rope_neox_partial_f16,
     qmatmul::{mmvq, mmvq_q8_0_gate_up, qmatmul},
     HipDevice, HipStream, OpsRegistry,
 };
+use flambeau_quant::BlockQ8_1;
 use flambeau_runtime::KvCache;
 
 use super::common::{mat_shape, qdtype_of, upload_position};

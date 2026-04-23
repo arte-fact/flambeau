@@ -16,11 +16,11 @@
 use anyhow::{bail, Context, Result};
 use flambeau_core::{CopyDirection, Device, DevicePtr, Stream};
 use flambeau_ops::hip::{
-    norm::{quantize_f16_q8_1, rmsnorm_f16},
+    norm::{quantize_f16_q8_1, rmsnorm_f16, rmsnorm_quant_q8_1},
     qmatmul::mmvq,
     HipDevice, HipStream, OpsRegistry,
 };
-use flambeau_quant::GgmlDType;
+use flambeau_quant::{BlockQ8_1, GgmlDType};
 use half::f16;
 
 use super::common::{mat_shape, qdtype_of, row_bytes_for_dtype};

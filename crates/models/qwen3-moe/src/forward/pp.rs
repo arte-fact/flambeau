@@ -11,8 +11,8 @@
 
 use anyhow::{bail, Context, Result};
 use flambeau_backend_hip::HipCluster;
-use flambeau_core::{Device, DevicePtr};
-use flambeau_ops::hip::OpsRegistry;
+use flambeau_core::{CopyDirection, Device, DevicePtr, Stream};
+use flambeau_ops::hip::{HipDevice, OpsRegistry};
 use flambeau_runtime::RankId;
 
 use super::{

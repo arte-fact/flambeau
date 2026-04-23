@@ -620,6 +620,3 @@ pub fn forward_layer_prefill(
 
     Ok(())
 }
-
-/// Complete scratch for a prefill chunk of L tokens: two hidden ping-pong
-/// buffers + per-layer prefill scratch + output-head scratch.

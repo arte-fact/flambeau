@@ -8,7 +8,7 @@
 
 #![cfg(feature = "hip")]
 
-use anyhow::{Context, Result};
+use anyhow::{bail, Context, Result};
 use flambeau_core::{Device, DevicePtr};
 use flambeau_ops::hip::{HipDevice, HipStream, OpsRegistry};
 
