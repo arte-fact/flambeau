@@ -108,6 +108,25 @@ impl LayerAssignment {
         }
     }
 
+    /// Per-rank layer counts explicitly. Layers are assigned contiguously
+    /// to ranks in order: rank 0 gets `counts[0]` layers, rank 1 gets
+    /// `counts[1]` layers, and so on. Useful for PP load-balancing when
+    /// the last rank carries additional non-layer work (output norm + LM
+    /// head) and should receive fewer transformer layers to compensate.
+    pub fn from_counts(counts: &[u32]) -> Self {
+        let num_ranks = counts.len() as u32;
+        let num_layers: usize = counts.iter().map(|&c| c as usize).sum();
+        assert!(num_ranks >= 1, "need >= 1 rank");
+        assert!(num_layers >= 1, "need >= 1 layer total");
+        let mut layer_to_rank = Vec::with_capacity(num_layers);
+        for (rank, &count) in counts.iter().enumerate() {
+            for _ in 0..count {
+                layer_to_rank.push(RankId(rank as u32));
+            }
+        }
+        Self { layer_to_rank, num_ranks }
+    }
+
     pub fn num_layers(&self) -> usize {
         self.layer_to_rank.len()
     }

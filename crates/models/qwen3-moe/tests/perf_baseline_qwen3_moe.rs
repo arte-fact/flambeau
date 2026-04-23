@@ -91,7 +91,33 @@ fn perf_baseline_qwen3_moe_mesh_all() -> Result<()> {
     }
 
     let cluster = HipCluster::new(&(0..n).collect::<Vec<_>>())?;
-    let assignment = LayerAssignment::contiguous(cfg.num_layers, cluster.ranks() as u32);
+    // V2.23.c — optional per-rank layer-count override via FLAMBEAU_PP_LAYERS
+    // (comma-separated). For Qwen3.6-35B Mesh<4> the default balances to
+    // 11/10/10/9 so the last rank's extra LM-head work doesn't tail-bottleneck.
+    let assignment = if let Ok(s) = std::env::var("FLAMBEAU_PP_LAYERS") {
+        let counts: Vec<u32> = s
+            .split(',')
+            .filter_map(|x| x.trim().parse().ok())
+            .collect();
+        if counts.len() != cluster.ranks() as usize {
+            eprintln!(
+                "FLAMBEAU_PP_LAYERS has {} entries, cluster has {} ranks — ignoring override",
+                counts.len(), cluster.ranks()
+            );
+            LayerAssignment::contiguous(cfg.num_layers, cluster.ranks() as u32)
+        } else if counts.iter().map(|&c| c as usize).sum::<usize>() != cfg.num_layers {
+            eprintln!(
+                "FLAMBEAU_PP_LAYERS sum {} != num_layers {} — ignoring override",
+                counts.iter().sum::<u32>(), cfg.num_layers
+            );
+            LayerAssignment::contiguous(cfg.num_layers, cluster.ranks() as u32)
+        } else {
+            eprintln!("perf-baseline: PP layer override = {:?}", counts);
+            LayerAssignment::from_counts(&counts)
+        }
+    } else {
+        LayerAssignment::contiguous(cfg.num_layers, cluster.ranks() as u32)
+    };
     eprintln!(
         "perf-baseline: loading Qwen3.6-35B across {} ranks ({:.2} GiB weights)…",
         cluster.ranks(),
