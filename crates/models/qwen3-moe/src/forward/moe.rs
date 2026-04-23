@@ -761,10 +761,12 @@ impl MoePrefillScratch {
         let sort_cursors = device.alloc(sort_cursors_bytes)?;
         let sort_sorted_pair_idx = device.alloc(sort_sorted_pair_idx_bytes)?;
         // V2.6.a padded sort outputs. Upper bound on padded total: the
-        // real total plus up to 7 padding entries per expert.
+        // real total plus up to 15 padding entries per expert (V2.31.b
+        // bumped from 7 to accommodate pad-to-16 for tile16 MMQ; tile8
+        // path uses ≤ 7 slack and still fits).
         let sort_padded_offsets_bytes = (n_experts + 1) * 4;
         let sort_sorted_pair_idx_padded_bytes =
-            (max_tokens * top_k + n_experts * 8) * 4;
+            (max_tokens * top_k + n_experts * 16) * 4;
         let sort_padded_offsets = device.alloc(sort_padded_offsets_bytes)?;
         let sort_sorted_pair_idx_padded = device.alloc(sort_sorted_pair_idx_padded_bytes)?;
 

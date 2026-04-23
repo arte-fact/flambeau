@@ -472,6 +472,69 @@ pub fn indexed_moe_mmq_q4_k_down_tile8(
     Ok(())
 }
 
+/// V2.31.b NULL — tile16 variant of V2.6.b's tile8 gate+up MoE MMQ.
+/// Moved to `src/kernels/_unverified/` after measured −33 % prefill
+/// regression on Qwen3.6-35B-A3B-UD-Q4_K_S Mesh<4> L=512. Kernel file
+/// carries the full diagnosis. This wrapper is preserved for
+/// archaeological reference but is unreachable — the referenced module
+/// stem is not in `KERNEL_STEMS`, so `expect_module` returns an error
+/// if called. forward.rs has no call site.
+#[allow(dead_code)]
+pub fn indexed_moe_mmq_q4_k_gate_up_tile16(
+    reg: &OpsRegistry,
+    stream: &HipStream,
+    w_gate: DevicePtr,
+    w_up: DevicePtr,
+    y: DevicePtr,
+    expert_ids: DevicePtr,
+    sorted_pair_idx_padded: DevicePtr,
+    padded_offsets: DevicePtr,
+    gate_out: DevicePtr,
+    up_out: DevicePtr,
+    shape: MoeShape,
+) -> Result<()> {
+    let module = reg.expect_module("indexed_moe_mmq_q4_k_gate_up_tile16_dp4a")?;
+    let kernel = module.kernel("flambeau_indexed_moe_mmq_q4_k_gate_up_tile16_dp4a_q8_1")?;
+
+    let n_rows_i = shape.n_rows as i32;
+    let n_tokens_i = shape.n_tokens as i32;
+    let top_k_i = shape.top_k as i32;
+    let nb_i = shape.n_sb_per_row as i32;
+    let n_experts_i = shape.n_experts as i32;
+    let g_ptr: u64 = w_gate.as_usize() as u64;
+    let u_ptr: u64 = w_up.as_usize() as u64;
+    let y_ptr: u64 = y.as_usize() as u64;
+    let e_ptr: u64 = expert_ids.as_usize() as u64;
+    let s_ptr: u64 = sorted_pair_idx_padded.as_usize() as u64;
+    let po_ptr: u64 = padded_offsets.as_usize() as u64;
+    let go_ptr: u64 = gate_out.as_usize() as u64;
+    let uo_ptr: u64 = up_out.as_usize() as u64;
+    let mut args = KernelArgs::new();
+    args.push(&g_ptr);
+    args.push(&u_ptr);
+    args.push(&y_ptr);
+    args.push(&e_ptr);
+    args.push(&s_ptr);
+    args.push(&po_ptr);
+    args.push(&go_ptr);
+    args.push(&uo_ptr);
+    args.push(&n_rows_i);
+    args.push(&n_tokens_i);
+    args.push(&top_k_i);
+    args.push(&nb_i);
+    args.push(&n_experts_i);
+    // Grid.y covers pad-to-16 padded_total. On-device early-exit handles
+    // the actual padded_total readback (same pattern as tile8).
+    let grid_y = shape.padded_total_upper_bound.div_ceil(16) as u32;
+    let cfg = LaunchCfg {
+        grid: ((shape.n_rows as u32).div_ceil(64), grid_y, 1),
+        block: (64, 1, 1),
+        shared_bytes: 0,
+    };
+    unsafe { kernel.launch(stream, cfg, args)? };
+    Ok(())
+}
+
 /// V2.28.c — Q4_0 gate+up tile8 MoE MMQ sibling. Same contract as the Q4_K
 /// `indexed_moe_mmq_q4_k_gate_up_tile8` wrapper; weight dtype is Q4_0 so
 /// `n_sb_per_row` in the `MoeShape` should be set to `hidden / 32` (Q4_0
@@ -1251,6 +1314,80 @@ pub fn moe_sort_by_expert(
 // pair where padded slots repeat the last real pair_idx (so an 8-slot
 // per-block MMQ kernel can assume all 8 slots in its block share an expert).
 // ---------------------------------------------------------------------------
+/// V2.31.b — pad-to-16 sibling of `moe_sort_by_expert_padded`. Currently
+/// unreachable — the tile16 MMQ kernel it was designed to feed was NULL
+/// on 35B-UD-Q4_K_S (V2.31.b moved to `_unverified/`). Kept in case a
+/// future tile16-class attempt with different kernel internals wants the
+/// pad-to-16 invariant; the scan_padded_offsets_16 kernel is already
+/// compiled into `moe_sort_by_expert`.
+#[allow(dead_code)]
+pub fn moe_sort_by_expert_padded_16(
+    reg: &OpsRegistry,
+    stream: &HipStream,
+    expert_ids: DevicePtr,
+    counts: DevicePtr,
+    offsets: DevicePtr,
+    cursors: DevicePtr,
+    sorted_pair_idx: DevicePtr,
+    padded_offsets: DevicePtr,
+    sorted_pair_idx_padded: DevicePtr,
+    total: usize,
+    n_experts: usize,
+    max_tokens: usize,
+    top_k: usize,
+) -> Result<()> {
+    moe_sort_by_expert(
+        reg,
+        stream,
+        expert_ids,
+        counts,
+        offsets,
+        cursors,
+        sorted_pair_idx,
+        total,
+        n_experts,
+    )?;
+
+    let module = reg.expect_module("moe_sort_by_expert")?;
+    let k_scan_padded = module.kernel("flambeau_moe_sort_scan_padded_offsets_16")?;
+    let k_pad_copy = module.kernel("flambeau_moe_sort_pad_copy")?;
+
+    let n_experts_i = n_experts as i32;
+    let c_ptr: u64 = counts.as_usize() as u64;
+    let o_ptr: u64 = offsets.as_usize() as u64;
+    let po_ptr: u64 = padded_offsets.as_usize() as u64;
+    let spi_ptr: u64 = sorted_pair_idx.as_usize() as u64;
+    let spip_ptr: u64 = sorted_pair_idx_padded.as_usize() as u64;
+
+    {
+        let mut args = KernelArgs::new();
+        args.push(&c_ptr);
+        args.push(&po_ptr);
+        args.push(&n_experts_i);
+        let cfg = LaunchCfg { grid: (1, 1, 1), block: (512, 1, 1), shared_bytes: 0 };
+        unsafe { k_scan_padded.launch(stream, cfg, args)? };
+    }
+    {
+        let mut args = KernelArgs::new();
+        args.push(&spi_ptr);
+        args.push(&o_ptr);
+        args.push(&c_ptr);
+        args.push(&po_ptr);
+        args.push(&spip_ptr);
+        args.push(&n_experts_i);
+        // pad-to-16 worst case: each of `total` pairs + up to 15 padding slots per expert.
+        let max_per_expert = (max_tokens * top_k + 15) & !15;
+        let grid_x = (max_per_expert as u32).div_ceil(256);
+        let cfg = LaunchCfg {
+            grid: (grid_x.max(1), n_experts as u32, 1),
+            block: (256, 1, 1),
+            shared_bytes: 0,
+        };
+        unsafe { k_pad_copy.launch(stream, cfg, args)? };
+    }
+    Ok(())
+}
+
 pub fn moe_sort_by_expert_padded(
     reg: &OpsRegistry,
     stream: &HipStream,

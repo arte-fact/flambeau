@@ -166,6 +166,51 @@ extern "C" __global__ void flambeau_moe_sort_scan_padded_offsets(
 }
 
 // ---------------------------------------------------------------------------
+// Kernel 4b (V2.31.b): pad-to-16 variant of the scan. Same structure,
+// different mask: `(counts[e] + 15) & ~15`. Lets 16-slot-per-block MMQ
+// kernels (tile16, V2.31.b) share the same block-expert invariant. The
+// pad_copy kernel below is pad-agnostic (reads padded_count from
+// padded_offsets[e+1] - padded_offsets[e]) so no tile16 clone needed.
+// ---------------------------------------------------------------------------
+extern "C" __global__ void flambeau_moe_sort_scan_padded_offsets_16(
+    const int* __restrict__ counts,
+    int*       __restrict__ padded_offsets,
+    const int n_experts
+) {
+    __shared__ int s[MAX_N_EXPERTS + 1];
+    const int tid = threadIdx.x;
+
+    int v = 0;
+    if (tid < n_experts) {
+        const int c = counts[tid];
+        v = (c + 15) & ~15;
+    }
+    s[tid] = v;
+    __syncthreads();
+
+    for (int offset = 1; offset < MAX_N_EXPERTS; offset <<= 1) {
+        int t = 0;
+        if (tid >= offset) t = s[tid - offset];
+        __syncthreads();
+        s[tid] += t;
+        __syncthreads();
+    }
+    int excl = (tid == 0) ? 0 : s[tid - 1];
+    __syncthreads();
+    s[tid] = excl;
+    __syncthreads();
+
+    if (tid < n_experts) padded_offsets[tid] = s[tid];
+    if (tid == 0) {
+        int total_padded = 0;
+        for (int i = 0; i < n_experts; ++i) {
+            total_padded += (counts[i] + 15) & ~15;
+        }
+        padded_offsets[n_experts] = total_padded;
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Kernel 5 (V2.6.a): copy unpadded sorted_pair_idx → padded layout and
 // fill each expert's tail padding with the last real entry. Using
 // last-real (rather than -1 sentinel) keeps the 8-slot MMQ kernel branch-
