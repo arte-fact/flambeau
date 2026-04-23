@@ -252,29 +252,25 @@ pub fn forward_moe_ffn_decode(
         hidden,
     )?;
 
-    // 3. SwiGLU(gate, up) → activated, F32.
-    swiglu_f32(
+    // 3+4. V2.23.b.2 — fused `swiglu_f32_to_f16` writes directly to F16,
+    // skipping the standalone cast_f32_to_f16. Then quantize F16 → Q8_1.
+    flambeau_ops::hip::mlp::swiglu_f32_to_f16(
         ops,
         stream,
         scratch.gate_out_f32,
         scratch.up_out_f32,
-        scratch.activated_f32,
+        scratch.activated_f16,
         top_k * inter,
     )
-    .context("moe swiglu_f32")?;
-
-    // 4. Cast activated F32 → F16, then quantise F16 → Q8_1. Layout is
-    // `[top_k, inter]` flat — each row of `activated_q8_1` is one expert's
-    // input to the down matmul (re-used as one "effective token" below).
-    cast_and_quantize_f32_to_q8_1(
+    .context("moe swiglu_f32_to_f16")?;
+    flambeau_ops::hip::norm::quantize_f16_q8_1(
         ops,
         stream,
-        scratch.activated_f32,
         scratch.activated_f16,
         scratch.activated_q8_1,
         top_k * inter,
-        "moe decode activated",
-    )?;
+    )
+    .context("moe quantize activated → Q8_1")?;
 
     // 5. Down matmul. Indexed MoE MMVQ dispatches by
     // `expert_ids[token * top_k + slot]`. Treat each of our top_k routed
@@ -528,29 +524,25 @@ pub fn forward_shared_expert_decode(
     }
 
     // 4. swiglu(gate, up) → activated_f32.
-    swiglu_f32(
+    // 4+5. V2.23.b.2 — fused swiglu_f32_to_f16 + quantize (replaces the
+    // swiglu_f32 → cast_f32_to_f16 → quantize_f16_q8_1 chain).
+    flambeau_ops::hip::mlp::swiglu_f32_to_f16(
         ops,
         stream,
         scratch.gate_f32,
         scratch.up_f32,
-        scratch.activated_f32,
+        scratch.activated_f16,
         inter,
     )
-    .context("shexp swiglu_f32")?;
-
-    // 5. Cast + quantise activated for the down matmul input.
-    // Tried F32→Q8_1 direct (skip F16 intermediate) — regressed ~1% because
-    // the F32 quantize kernel is slower per-element than the F16 one (no
-    // packed fp16 max-reduction). Two small kernels beat one big one here.
-    cast_and_quantize_f32_to_q8_1(
+    .context("shexp swiglu_f32_to_f16")?;
+    flambeau_ops::hip::norm::quantize_f16_q8_1(
         ops,
         stream,
-        scratch.activated_f32,
         scratch.activated_f16,
         scratch.activated_q8_1,
         inter,
-        "shexp decode activated",
-    )?;
+    )
+    .context("shexp quantize activated → Q8_1")?;
 
     // 6. Dense down matmul → down_f32 [hidden].
     run_mmvq_from_tensor(

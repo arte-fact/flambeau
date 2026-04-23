@@ -261,6 +261,56 @@ pub fn indexed_moe_mmvq_q4_0(
     Ok(())
 }
 
+/// V2.23.b.1 — fused gate+up Q4_0 indexed-MoE MMVQ. Reads each Q8_1
+/// activation word once per block and produces both gate and up outputs,
+/// halving the launch count for MoE Q4_0 decode vs calling
+/// `indexed_moe_mmvq_q4_0` twice.
+pub fn indexed_moe_mmvq_q4_0_gate_up(
+    reg: &OpsRegistry,
+    stream: &HipStream,
+    w_gate: DevicePtr,
+    w_up: DevicePtr,
+    y: DevicePtr,
+    expert_ids: DevicePtr,
+    gate_out: DevicePtr,
+    up_out: DevicePtr,
+    n_rows: usize,
+    n_tokens: usize,
+    top_k: usize,
+    n_blocks_per_row: usize,
+) -> Result<()> {
+    let module = reg.expect_module("indexed_moe_mmvq_q4_0_gate_up_dp4a")?;
+    let kernel = module.kernel("flambeau_indexed_moe_mmvq_q4_0_gate_up_dp4a_q8_1")?;
+    let n_rows_i = n_rows as i32;
+    let n_tokens_i = n_tokens as i32;
+    let top_k_i = top_k as i32;
+    let nb_i = n_blocks_per_row as i32;
+    let g_ptr: u64 = w_gate.as_usize() as u64;
+    let u_ptr: u64 = w_up.as_usize() as u64;
+    let y_ptr: u64 = y.as_usize() as u64;
+    let e_ptr: u64 = expert_ids.as_usize() as u64;
+    let go_ptr: u64 = gate_out.as_usize() as u64;
+    let uo_ptr: u64 = up_out.as_usize() as u64;
+    let mut args = KernelArgs::new();
+    args.push(&g_ptr);
+    args.push(&u_ptr);
+    args.push(&y_ptr);
+    args.push(&e_ptr);
+    args.push(&go_ptr);
+    args.push(&uo_ptr);
+    args.push(&n_rows_i);
+    args.push(&n_tokens_i);
+    args.push(&top_k_i);
+    args.push(&nb_i);
+    let cfg = LaunchCfg {
+        grid: (n_rows as u32, (n_tokens * top_k) as u32, 1),
+        block: (256, 1, 1),
+        shared_bytes: 0,
+    };
+    unsafe { kernel.launch(stream, cfg, args)? };
+    Ok(())
+}
+
 /// V2.22.a — Q8_0 indexed-MoE MMVQ. Unblocks UD-Q8_K_XL GGUFs whose MoE
 /// expert weights stay Q8_0 instead of the usual Q4_K/Q4_K_S. Uses VDR=2
 /// DP4A inside the inner loop (matches `mmvq_q8_0_dp4a_vdr2` pattern),

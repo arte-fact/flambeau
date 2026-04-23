@@ -130,17 +130,15 @@ pub(crate) fn run_indexed_moe_gate_up(
             .context("indexed_moe up q8_0")
         }
         GgmlDType::Q4_0 => {
+            // V2.23.b.1 — fused gate+up reads Q8_1 activation once per block
+            // and produces both outputs. Halves launch count for Q4_0 MoE
+            // decode (where the tile8 MMQ path does not fire at n_tokens<32).
             let nb = hidden / 32;
-            indexed_moe_mmvq_q4_0(
-                ops, stream, w_gate, x_q8_1, expert_ids, gate_out, inter, n_tokens,
-                top_k, nb,
+            flambeau_ops::hip::moe::indexed_moe_mmvq_q4_0_gate_up(
+                ops, stream, w_gate, w_up, x_q8_1, expert_ids, gate_out, up_out,
+                inter, n_tokens, top_k, nb,
             )
-            .context("indexed_moe gate q4_0")?;
-            indexed_moe_mmvq_q4_0(
-                ops, stream, w_up, x_q8_1, expert_ids, up_out, inter, n_tokens, top_k,
-                nb,
-            )
-            .context("indexed_moe up q4_0")
+            .context("indexed_moe gate+up q4_0 fused")
         }
         _ => bail!("run_indexed_moe_gate_up: unsupported gate dtype {dtype:?} (expected Q4_K / Q8_0 / Q4_0)"),
     }

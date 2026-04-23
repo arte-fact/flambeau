@@ -68,6 +68,32 @@ pub fn swiglu_f32(
     Ok(())
 }
 
+/// V2.23.b.2 — fused `y_f16[i] = (fp16)(silu(a[i]) * b[i])`. Replaces the
+/// swiglu_f32 + cast_f32_f16 pair on MoE activation paths.
+pub fn swiglu_f32_to_f16(
+    reg: &OpsRegistry,
+    stream: &HipStream,
+    a: DevicePtr,
+    b: DevicePtr,
+    y: DevicePtr,
+    n: usize,
+) -> Result<()> {
+    let module = reg.expect_module("swiglu_f32_to_f16")?;
+    let kernel = module.kernel("flambeau_swiglu_f32_to_f16")?;
+    let n_i = n as i32;
+    let a_ptr: u64 = a.as_usize() as u64;
+    let b_ptr: u64 = b.as_usize() as u64;
+    let y_ptr: u64 = y.as_usize() as u64;
+    let mut args = KernelArgs::new();
+    args.push(&a_ptr);
+    args.push(&b_ptr);
+    args.push(&y_ptr);
+    args.push(&n_i);
+    let cfg = LaunchCfg::one_d((n as u32).div_ceil(256), 256);
+    unsafe { kernel.launch(stream, cfg, args)? };
+    Ok(())
+}
+
 /// Pointwise `y[i] = x[i] * scale`. Used by the GDN path to apply the
 /// attention scale `1 / sqrt(head_k_dim)` to Q before the state step.
 pub fn scale_f32(
