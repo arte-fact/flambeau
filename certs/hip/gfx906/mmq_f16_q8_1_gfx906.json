@@ -1,0 +1,58 @@
+{
+  "schema_version": 1,
+  "impl_id": "mmq_f16_q8_1_gfx906",
+  "backend": "hip",
+  "arch": "gfx906",
+  "op": "qmatmul",
+  "dtype_weight": "F16",
+  "dtype_activation": "Q8_1",
+  "tolerance_formula": "|err| <= 3e-2 * max(|ref|, sqrt(k) * q8_step)",
+  "results": [
+    {
+      "m": 1,
+      "k": 256,
+      "n": 256,
+      "seed": 2011013,
+      "max_rel_err": 0.0000016763806,
+      "tolerance": 0.03,
+      "pass": true
+    },
+    {
+      "m": 8,
+      "k": 256,
+      "n": 256,
+      "seed": 2010760,
+      "max_rel_err": 0.0000023283064,
+      "tolerance": 0.03,
+      "pass": true
+    },
+    {
+      "m": 16,
+      "k": 5120,
+      "n": 6144,
+      "seed": 48344048,
+      "max_rel_err": 0.0000033320011,
+      "tolerance": 0.03,
+      "pass": true
+    },
+    {
+      "m": 8,
+      "k": 6144,
+      "n": 5120,
+      "seed": 40104072,
+      "max_rel_err": 0.0000031937711,
+      "tolerance": 0.03,
+      "pass": true
+    }
+  ],
+  "pass": true,
+  "emitted_at": "2026-04-23T08:37:21Z",
+  "rig": "threadreaper-gfx906",
+  "pmc": {
+    "vgpr_count": 17,
+    "sgpr_count": null,
+    "waves_per_simd": 10,
+    "mem_busy_pct": null,
+    "valu_busy_pct": null
+  }
+}

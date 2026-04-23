@@ -344,6 +344,14 @@ impl    = "mmvq_f16_q8_1_gfx906"
 cert    = "certs/hip/gfx906/mmvq_f16_q8_1_gfx906.json"
 notes   = "V2.21.b — F16 weight × Q8_1 activation MMVQ. Unblocks Unsloth UD-Q8_K_XL GGUFs (i-matrix-flagged layers kept in F16). 256 threads × n_rows blocks, 8 elements/thread F32 FMA. No DP4A (weight is F16). HBM-bound at ~30 µs/call for 6144×5120."
 
+[[qmatmul]]
+dtype   = "F16"
+dtype_q = "Q8_1"
+shape   = { m = "any", k = "any", n = "any" }
+impl    = "mmq_f16_q8_1_gfx906"
+cert    = "certs/hip/gfx906/mmq_f16_q8_1_gfx906.json"
+notes   = "V2.25.a — multi-row F16 × Q8_1. Same per-block math as `mmvq_f16_q8_1`, but grid.y = n_tokens so one launch replaces the V2.21.b Rust-side `for i in 0..m` loop. Modest +4 % prefill win on 27B-UD-Q8_K_XL L=512 (57.1→59.5 tok/s): HIP async queues make per-launch overhead cheap, so the saving is CPU-side only. A proper tile-M kernel (MMQ_X > 1 with LDS-shared weight) would be needed for a bigger win; deferred — F16 on UD-Q8_K_XL is a rare-enough path that the ROI doesn't clear the author cost."
+
 [[attention_decode]]
 dtype   = "F16"
 dtype_q = "F16"
@@ -427,6 +435,14 @@ shape   = { m = "any", k = "any", n = "any" }
 impl    = "mmvq_q5_0_gfx906"
 cert    = "certs/hip/gfx906/mmvq_q5_0_gfx906.json"
 notes   = "V2.23.a — Q5_0 dense MMVQ for Qwen3.6-35B-A3B-Q4_0 shared-expert FFN (ffn_*_shexp in 20 layers). 256-thread DP4A: computes `(q5 - 16)·y = nibble·y + 16·bit·y - 16·s_y` with the 5th-bit packed field expanded to int-per-4-bytes for a second DP4A."
+
+[[qmatmul_mmvq]]
+dtype   = "Q5_1"
+dtype_q = "Q8_1"
+shape   = { m = "any", k = "any", n = "any" }
+impl    = "mmvq_q5_1_gfx906"
+cert    = "certs/hip/gfx906/mmvq_q5_1_gfx906.json"
+notes   = "V2.26.a — Q5_1 dense MMVQ (llama.cpp parity; no current Qwen3 GGUF uses it but unblocks arbitrary incoming GGUF mixes). Identical DP4A structure to Q5_0 but with the Q4_1-style `m·s_y` correction term instead of `-16·d·s_y` since Q5_1 is affine quant (y = d·q5 + m) not zero-point quant."
 
 [[indexed_moe_mmvq]]
 dtype   = "Q4_0"

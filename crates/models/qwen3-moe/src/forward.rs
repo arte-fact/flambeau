@@ -247,6 +247,9 @@ fn qdtype_of(dtype: GgmlDType) -> Result<QDtype> {
         // V2.23.a — Q4_0 and Q5_0 unblock Qwen3.6-35B-A3B-Q4_0.
         GgmlDType::Q4_0 => QDtype::Q4_0,
         GgmlDType::Q5_0 => QDtype::Q5_0,
+        // V2.26.a — Q5_1 (llama.cpp parity; no Qwen3 model currently uses it
+        // but unblocks any incoming GGUF mix).
+        GgmlDType::Q5_1 => QDtype::Q5_1,
         other => bail!("weight dtype {other:?} not supported by V1 qmatmul dispatch"),
     })
 }

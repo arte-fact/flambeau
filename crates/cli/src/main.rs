@@ -632,6 +632,16 @@ fn sweep(arch: &str, op: Option<&str>, dtype: &str) -> Result<()> {
                 );
                 Ok(())
             }
+            "mmq_f16" => {
+                use flambeau_bench::sweep_mmvq_f16::run_mmq_sweep;
+                let _ = dtype;
+                let cert = run_mmq_sweep(&repo_root())?;
+                println!(
+                    "sweep mmq_f16: pass={} shapes={} rig={}",
+                    cert.pass, cert.results.len(), cert.rig
+                );
+                Ok(())
+            }
             "mmvq_q4_0" => {
                 use flambeau_bench::sweep_q4_0_q5_0::run_mmvq_q4_0_sweep;
                 let _ = dtype;
@@ -645,6 +655,14 @@ fn sweep(arch: &str, op: Option<&str>, dtype: &str) -> Result<()> {
                 let _ = dtype;
                 let cert = run_mmvq_q5_0_sweep(&repo_root())?;
                 println!("sweep mmvq_q5_0: pass={} shapes={} rig={}",
+                    cert.pass, cert.results.len(), cert.rig);
+                Ok(())
+            }
+            "mmvq_q5_1" => {
+                use flambeau_bench::sweep_q4_0_q5_0::run_mmvq_q5_1_sweep;
+                let _ = dtype;
+                let cert = run_mmvq_q5_1_sweep(&repo_root())?;
+                println!("sweep mmvq_q5_1: pass={} shapes={} rig={}",
                     cert.pass, cert.results.len(), cert.rig);
                 Ok(())
             }

@@ -97,6 +97,21 @@ typedef struct {
 } flambeau_block_q5_0;
 static_assert(sizeof(flambeau_block_q5_0) == 2 + 4 + QK5_0 / 2, "block_q5_0 size");
 
+#ifndef QK5_1
+#define QK5_1 32
+#endif
+
+// Q5_1 — 5-bit legacy quant with min offset. Block of 32 elements: 16 bytes
+// of low-4-bit nibbles + 4 bytes 5th-bit pack, like Q5_0, but adds a per-
+// block `m` (min) so reconstruction is `y = d · q5 + m` where q5 ∈ [0, 31].
+typedef struct {
+    fb_fp16_t d;                  // delta (scale)
+    fb_fp16_t m;                  // min
+    uint8_t   qh[4];              // 32 "5th bits"
+    uint8_t   qs[QK5_1 / 2];      // 16 bytes, 4-bit nibbles (low | high)
+} flambeau_block_q5_1;
+static_assert(sizeof(flambeau_block_q5_1) == 2 + 2 + 4 + QK5_1 / 2, "block_q5_1 size");
+
 // Q4_K — 4-bit K-quant, super-block of 256 elements split into 8 sub-blocks
 // of 32. Byte-identical to ggml-common.h block_q4_K and to flambeau-quant's
 // BlockQ4K.

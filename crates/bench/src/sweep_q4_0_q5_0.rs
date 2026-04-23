@@ -39,6 +39,17 @@ pub fn run_mmvq_q5_0_sweep(repo_root: &Path) -> Result<Cert> {
     )
 }
 
+pub fn run_mmvq_q5_1_sweep(repo_root: &Path) -> Result<Cert> {
+    run_dense_sweep(
+        repo_root,
+        "mmvq_q5_1",
+        "flambeau_mmvq_q5_1_q8_1",
+        "mmvq_q5_1_gfx906",
+        "Q5_1",
+        /*encode*/ encode_q5_1,
+    )
+}
+
 type EncodeFn = fn(&[f32]) -> Vec<u8>;
 
 fn run_dense_sweep(
@@ -179,10 +190,12 @@ fn run_dense_shape(
 
     // Reference: CPU dequant (via the ggml dtype helper) × Q8_1-roundtrip activation.
     let mut w_dequant = vec![0.0f32; n_rows * k];
-    let (dtype, _) = if w_bytes.len() / n_blocks_per_row / n_rows == 18 {
-        (flambeau_quant::GgmlDType::Q4_0, ())
-    } else {
-        (flambeau_quant::GgmlDType::Q5_0, ())
+    let block_bytes = w_bytes.len() / n_blocks_per_row / n_rows;
+    let dtype = match block_bytes {
+        18 => flambeau_quant::GgmlDType::Q4_0,   // 2 d + 16 nibbles
+        22 => flambeau_quant::GgmlDType::Q5_0,   // 2 d + 4 qh + 16 nibbles
+        24 => flambeau_quant::GgmlDType::Q5_1,   // 2 d + 2 m + 4 qh + 16 nibbles
+        other => panic!("unexpected block size {other}"),
     };
     flambeau_quant::dequantize_into(dtype, &w_bytes, &mut w_dequant)?;
     let x_rt = q8_1_roundtrip(&x_f32);
@@ -410,6 +423,45 @@ fn encode_q4_0(xs: &[f32]) -> Vec<u8> {
             let hi = hi.clamp(0, 15) as u8;
             out.push((hi << 4) | lo);
         }
+    }
+    out
+}
+
+fn encode_q5_1(xs: &[f32]) -> Vec<u8> {
+    use flambeau_quant::{BlockQ5_1, QK8_0};
+    assert_eq!(xs.len() % QK8_0, 0);
+    let nb = xs.len() / QK8_0;
+    let mut out = Vec::with_capacity(nb * std::mem::size_of::<BlockQ5_1>());
+    for block in xs.chunks_exact(QK8_0) {
+        // Q5_1 affine quant: d = (max - min) / 31, m = min, q5 = round((x - m) / d).
+        let mut mn = f32::INFINITY;
+        let mut mx = f32::NEG_INFINITY;
+        for &v in block {
+            if v < mn { mn = v; }
+            if v > mx { mx = v; }
+        }
+        let d = (mx - mn) / 31.0;
+        let id = if d != 0.0 { 1.0 / d } else { 0.0 };
+        let m = mn;
+        let d_f16 = half::f16::from_f32(d);
+        let m_f16 = half::f16::from_f32(m);
+        out.extend_from_slice(&d_f16.to_bits().to_le_bytes());
+        out.extend_from_slice(&m_f16.to_bits().to_le_bytes());
+        let mut qh: u32 = 0;
+        let mut nibbles = [0u8; 16];
+        for i in 0..16 {
+            let x0 = (block[i] - m) * id;
+            let x1 = (block[i + 16] - m) * id;
+            let q0 = (x0 + 0.5) as i32;
+            let q1 = (x1 + 0.5) as i32;
+            let lo = q0.clamp(0, 31) as u8;
+            let hi = q1.clamp(0, 31) as u8;
+            qh |= ((lo as u32 & 0x10) >> 4) << i;
+            qh |= ((hi as u32 & 0x10) >> 4) << (i + 16);
+            nibbles[i] = ((hi & 0x0F) << 4) | (lo & 0x0F);
+        }
+        out.extend_from_slice(&qh.to_le_bytes());
+        out.extend_from_slice(&nibbles);
     }
     out
 }
