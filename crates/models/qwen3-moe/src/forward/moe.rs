@@ -1043,20 +1043,21 @@ pub fn forward_moe_ffn_prefill(
             scratch.x_q8_1, scratch.expert_ids, scratch.gate_out_f32,
             scratch.up_out_f32, inter, n_tokens, top_k, hidden,
         )?;
-        swiglu_f32(
+        // V2.23.d.2 — fused swiglu_f32_to_f16 + quantize. Skips the
+        // standalone cast_f32_to_f16 between swiglu and quantize.
+        flambeau_ops::hip::mlp::swiglu_f32_to_f16(
             ops, stream,
-            scratch.gate_out_f32, scratch.up_out_f32, scratch.activated_f32,
+            scratch.gate_out_f32, scratch.up_out_f32, scratch.activated_f16,
             n_tokens * top_k * inter,
-        ).context("prefill moe swiglu_f32 (q4_0/q8_0 path)")?;
-        cast_and_quantize_f32_to_q8_1(
+        ).context("prefill moe swiglu_f32_to_f16 (q4_0/q8_0 path)")?;
+        flambeau_ops::hip::norm::quantize_f16_q8_1(
             ops,
             stream,
-            scratch.activated_f32,
             scratch.activated_f16,
             scratch.activated_q8_1,
             n_tokens * top_k * inter,
-            "prefill moe activated (q4_0/q8_0 path)",
-        )?;
+        )
+        .context("prefill moe quantize activated (q4_0/q8_0 path)")?;
         // Down matmul: each (token, slot) pair is its own "effective token"
         // with top_k_inner = 1, same pattern as decode-path down.
         run_indexed_moe_down(
@@ -1250,27 +1251,20 @@ pub fn forward_moe_ffn_prefill(
         .context("prefill indexed_moe gate+up")?;
     }
 
-    // 3. SwiGLU over [L, top_k, inter] flat.
-    swiglu_f32(
+    // 3. V2.23.d.2 — fused SwiGLU → F16 over [L, top_k, inter] flat.
+    flambeau_ops::hip::mlp::swiglu_f32_to_f16(
         ops,
         stream,
         scratch.gate_out_f32,
         scratch.up_out_f32,
-        scratch.activated_f32,
-        n_tokens * top_k * inter,
-    )
-    .context("prefill moe swiglu_f32")?;
-
-    // 4. Cast + Q8_1-quantise activated. Each (token, slot) pair is one
-    // "effective token" in the down matmul's input layout.
-    cast_f32_to_f16(
-        ops,
-        stream,
-        scratch.activated_f32,
         scratch.activated_f16,
         n_tokens * top_k * inter,
     )
-    .context("prefill cast activated → f16")?;
+    .context("prefill moe swiglu_f32_to_f16")?;
+
+    // 4. Q8_1-quantise activated. V2.23.d.2 uses `swiglu_f32_to_f16` above
+    // to write F16 directly, skipping the standalone cast_f32_to_f16 on
+    // the main prefill path (turbo variant keeps its DS4 MMQ quantize).
     if moe_variant == "turbo" {
         // V2.14.c turbo path: DS4 Q8_1 activation for down matmul, per-PAIR layout.
         quantize_f16_q8_1_mmq(
@@ -1627,20 +1621,20 @@ pub fn forward_shared_expert_prefill(
         ops, stream, &shared.ffn_up_shexp, scratch.x_q8_1, DevicePtr(0), scratch.up_f32,
         n_tokens, hidden, inter, "ffn_up_shexp",
     )?;
-    swiglu_f32(
-        ops, stream, scratch.gate_f32, scratch.up_f32, scratch.activated_f32,
+    // V2.23.d.2 — fused swiglu_f32_to_f16 + quantize (prefill shared expert).
+    flambeau_ops::hip::mlp::swiglu_f32_to_f16(
+        ops, stream, scratch.gate_f32, scratch.up_f32, scratch.activated_f16,
         n_tokens * inter,
     )
-    .context("prefill shexp swiglu_f32")?;
-    cast_and_quantize_f32_to_q8_1(
+    .context("prefill shexp swiglu_f32_to_f16")?;
+    flambeau_ops::hip::norm::quantize_f16_q8_1(
         ops,
         stream,
-        scratch.activated_f32,
         scratch.activated_f16,
         scratch.activated_q8_1,
         n_tokens * inter,
-        "prefill shexp activated",
-    )?;
+    )
+    .context("prefill shexp quantize activated → Q8_1")?;
     run_qmatmul_from_tensor(
         ops, stream, &shared.ffn_down_shexp, scratch.activated_q8_1, DevicePtr(0),
         scratch.down_f32,

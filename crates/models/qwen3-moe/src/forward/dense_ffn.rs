@@ -209,26 +209,16 @@ pub fn forward_dense_ffn_decode(
         .context("dense ffn up qmatmul")?;
     }
 
-    // 4. SwiGLU(gate, up) → activated_f32.
-    swiglu_f32(
+    // 4+5. V2.23.d.2 fused SwiGLU → F16 + quantise; skips the standalone cast.
+    flambeau_ops::hip::mlp::swiglu_f32_to_f16(
         ops,
         stream,
         scratch.gate_f32,
         scratch.up_f32,
-        scratch.activated_f32,
-        inter,
-    )
-    .context("dense ffn swiglu_f32")?;
-
-    // 5. Cast + quantise activated for the down matmul.
-    cast_f32_to_f16(
-        ops,
-        stream,
-        scratch.activated_f32,
         scratch.activated_f16,
         inter,
     )
-    .context("dense ffn cast activated → f16")?;
+    .context("dense ffn swiglu_f32_to_f16")?;
     quantize_f16_q8_1(
         ops,
         stream,
@@ -413,10 +403,9 @@ pub fn forward_dense_ffn_prefill(
         qdtype_of(dense.ffn_up.dtype)?,
     ).context("dense ffn prefill up qmatmul")?;
 
-    swiglu_f32(ops, stream, scratch.gate_f32, scratch.up_f32, scratch.activated_f32, n_tokens * inter)
-        .context("dense ffn prefill swiglu_f32")?;
-    cast_f32_to_f16(ops, stream, scratch.activated_f32, scratch.activated_f16, n_tokens * inter)
-        .context("dense ffn prefill cast activated → f16")?;
+    // V2.23.d.2 fused SwiGLU → F16 (replaces swiglu_f32 + cast_f32_to_f16).
+    flambeau_ops::hip::mlp::swiglu_f32_to_f16(ops, stream, scratch.gate_f32, scratch.up_f32, scratch.activated_f16, n_tokens * inter)
+        .context("dense ffn prefill swiglu_f32_to_f16")?;
     quantize_f16_q8_1(ops, stream, scratch.activated_f16, scratch.activated_q8_1, n_tokens * inter)
         .context("dense ffn prefill quantise activated → Q8_1 (std)")?;
     quantize_f16_q8_1_mmq(ops, stream, scratch.activated_f16, scratch.activated_q8_1_mmq, inter, n_tokens)

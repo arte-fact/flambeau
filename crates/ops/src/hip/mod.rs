@@ -87,6 +87,7 @@ pub const KERNEL_STEMS: &[&str] = &[
     "indexed_moe_mmvq_q4_0",
     "indexed_moe_mmvq_q4_0_gate_up_dp4a",
     "gdn_split_qkv_f32",
+    "gdn_assemble_conv_input_f32",
     "moe_sort_by_expert",
     "mmq_q4_1_4warp_lds",
     "mmq_q4_1_wave64",

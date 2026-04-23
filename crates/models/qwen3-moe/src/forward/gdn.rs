@@ -384,9 +384,11 @@ pub fn forward_gdn_decode(
     }
 
     // 6. Conv1d step — assemble [history_{k-1}, qkv_mixed] into conv_input,
-    // run causal conv, then shift history forward.
-    assemble_conv_input(
-        device,
+    // run causal conv, then shift history forward. V2.23.d.1 uses a single
+    // fused kernel in place of the prior two DtoD memcpys.
+    let _ = device; // history+current copy now done via kernel, not device
+    flambeau_ops::hip::recurrent::gdn_assemble_conv_input_f32(
+        ops,
         stream,
         layer_state.conv_history,
         scratch.qkv_mixed_f32,

@@ -152,6 +152,40 @@ pub fn gdn_alpha_beta_f32(
     Ok(())
 }
 
+/// V2.23.d.1 — fused `conv_input = [history, current]`. Replaces the two
+/// back-to-back DtoD memcpys in `forward/gdn.rs::assemble_conv_input` (decode
+/// path) with a single elementwise kernel. Each GDN layer at decode fires
+/// this pattern once per token.
+pub fn gdn_assemble_conv_input_f32(
+    reg: &OpsRegistry,
+    stream: &HipStream,
+    history: DevicePtr,
+    current: DevicePtr,
+    conv_input: DevicePtr,
+    conv_channels: usize,
+    conv_kernel: usize,
+) -> Result<()> {
+    let module = reg.expect_module("gdn_assemble_conv_input_f32")?;
+    let kernel = module.kernel("flambeau_gdn_assemble_conv_input_f32")?;
+    let total = conv_channels * conv_kernel;
+    let h_ptr: u64 = history.as_usize() as u64;
+    let c_ptr: u64 = current.as_usize() as u64;
+    let o_ptr: u64 = conv_input.as_usize() as u64;
+    let cc_i = conv_channels as i32;
+    let ck_i = conv_kernel as i32;
+    let mut args = KernelArgs::new();
+    args.push(&h_ptr);
+    args.push(&c_ptr);
+    args.push(&o_ptr);
+    args.push(&cc_i);
+    args.push(&ck_i);
+    const BLOCK: u32 = 256;
+    let grid = (total as u32).div_ceil(BLOCK);
+    let cfg = LaunchCfg::one_d(grid, BLOCK);
+    unsafe { kernel.launch(stream, cfg, args)? };
+    Ok(())
+}
+
 /// V2.4.d fused split: replaces the 3×L DtoD memcpy loop in
 /// `forward.rs::gather_qkv_strided`. Reads one row of silu_out per token
 /// and strided-writes into q_out / k_out / v_out.
