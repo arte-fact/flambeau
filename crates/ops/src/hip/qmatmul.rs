@@ -54,11 +54,15 @@ pub fn qmatmul(
     // 117 F16 matmuls that's 3.6 s of F16 MMVQ — prefill-slow but
     // correct, matching V2's "make it load first" pattern.
     if dtype_weight == QDtype::F16 {
-        // V2.25.a — single multi-row launch replaces the V2.21.b row-by-row
-        // loop (m separate launches). Kernel math is byte-identical; picking
-        // up the activation row via blockIdx.y amortises the ~1 µs launch
-        // overhead across all m rows.
         let _ = act_q8_1_mmq;
+        // V2.29.a — tile-M kernel at m >= 8: each block handles 64 output
+        // rows × 8 activation rows (512 outputs/block) with weight HBM
+        // read once per K-sub-block per thread instead of per activation
+        // row. V2.25 multi-row kept for m < 8 where tile partial-fill
+        // hurts grid occupancy.
+        if m >= 8 {
+            return mmq_f16_tile_launch(reg, stream, weights, act_q8_1, dst, n, m, k);
+        }
         return mmq_f16_launch(reg, stream, weights, act_q8_1, dst, n, m, k);
     }
     // V2.28.b — Q4_0 prefill at m >= 32 routes through the wave64 MMQ tile
@@ -292,6 +296,51 @@ fn mmvq_simple_launch(
     args.push(&n_rows_i);
     args.push(&n_blocks_i);
     let cfg = LaunchCfg::one_d(n_rows as u32, 256);
+    unsafe { kernel.launch(stream, cfg, args)? };
+    Ok(())
+}
+
+/// V2.29.a — tile-M F16 MMQ. 64 threads/block = wave64 × 1 row each, MMQ_Y
+/// = 64 output rows per block, MMQ_X = 8 activation rows per block. Each
+/// thread owns one weight row's dot against all 8 activation rows; weight
+/// is loaded into registers once per K-sub-block and reused 8×. The
+/// activation tile (8 Q8_1 blocks) is read from L1 per sub-block across
+/// the 64 threads.
+fn mmq_f16_tile_launch(
+    reg: &OpsRegistry,
+    stream: &HipStream,
+    weights: DevicePtr,
+    act_q8_1: DevicePtr,
+    dst: DevicePtr,
+    n_rows: usize,
+    n_tokens: usize,
+    k: usize,
+) -> Result<()> {
+    assert_eq!(k % 32, 0, "mmq_f16_tile requires k % 32 == 0");
+    if n_tokens == 0 {
+        return Ok(());
+    }
+    let module = reg.expect_module("mmq_f16_tile")?;
+    let kernel = module.kernel("flambeau_mmq_f16_tile_q8_1")?;
+    let n_rows_i = n_rows as i32;
+    let n_tokens_i = n_tokens as i32;
+    let n_blocks_i = (k / 32) as i32;
+    let w_ptr: u64 = weights.as_usize() as u64;
+    let y_ptr: u64 = act_q8_1.as_usize() as u64;
+    let d_ptr: u64 = dst.as_usize() as u64;
+    let mut args = KernelArgs::new();
+    args.push(&w_ptr);
+    args.push(&y_ptr);
+    args.push(&d_ptr);
+    args.push(&n_rows_i);
+    args.push(&n_tokens_i);
+    args.push(&n_blocks_i);
+    // Block = 64 threads (wave64), grid = (⌈n_rows / 64⌉, ⌈n_tokens / 8⌉).
+    let cfg = LaunchCfg {
+        grid: ((n_rows as u32).div_ceil(64), (n_tokens as u32).div_ceil(8), 1),
+        block: (64, 1, 1),
+        shared_bytes: 0,
+    };
     unsafe { kernel.launch(stream, cfg, args)? };
     Ok(())
 }

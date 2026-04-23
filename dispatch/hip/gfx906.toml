@@ -370,10 +370,18 @@ notes   = "V2.21.b — F16 weight × Q8_1 activation MMVQ. Unblocks Unsloth UD-Q
 [[qmatmul]]
 dtype   = "F16"
 dtype_q = "Q8_1"
-shape   = { m = "any", k = "any", n = "any" }
+shape   = { m = "1..7", k = "any", n = "any" }
 impl    = "mmq_f16_q8_1_gfx906"
 cert    = "certs/hip/gfx906/mmq_f16_q8_1_gfx906.json"
-notes   = "V2.25.a — multi-row F16 × Q8_1. Same per-block math as `mmvq_f16_q8_1`, but grid.y = n_tokens so one launch replaces the V2.21.b Rust-side `for i in 0..m` loop. Modest +4 % prefill win on 27B-UD-Q8_K_XL L=512 (57.1→59.5 tok/s): HIP async queues make per-launch overhead cheap, so the saving is CPU-side only. A proper tile-M kernel (MMQ_X > 1 with LDS-shared weight) would be needed for a bigger win; deferred — F16 on UD-Q8_K_XL is a rare-enough path that the ROI doesn't clear the author cost."
+notes   = "V2.25.a — multi-row F16 × Q8_1. Same per-block math as `mmvq_f16_q8_1`, grid.y = n_tokens. Default for small m where tile partial-fill hurts; V2.29.a tile kernel covers m >= 8."
+
+[[qmatmul]]
+dtype   = "F16"
+dtype_q = "Q8_1"
+shape   = { m = ">=8", k = "any", n = "any" }
+impl    = "mmq_f16_tile_gfx906"
+cert    = "certs/hip/gfx906/mmq_f16_tile_gfx906.json"
+notes   = "V2.29.a — tile-M F16 × Q8_1 MMQ. 64 threads/block wave64, MMQ_Y=64 output rows × MMQ_X=8 activation rows per block (512 outputs/block). Each thread loads 32 F16 weights per K-sub-block once into registers and reuses 8× across activation rows; activation tile reads from L1-hot line across the 64 threads per sub-block. Measured Qwen3.6-27B-UD-Q8_K_XL Mesh<4> prefill L=512: 56.2 → 95.0 tok/s (+69 %, ratio vs llama.cpp 0.40 → 0.67). Under-fill (n_tokens < 8) early-exits per-slot via the slot_token[c] < 0 guard."
 
 [[attention_decode]]
 dtype   = "F16"

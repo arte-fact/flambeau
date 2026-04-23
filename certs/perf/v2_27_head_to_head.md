@@ -29,20 +29,22 @@ Ratios flambeau / llama.cpp (higher = flambeau leads):
 | 35B-A3B-UD-Q8_K_XL Mesh<4> | — (flambeau-only) | — |
 | 35B-A3B-Q4_0 Mesh<4> | **0.12** | 0.76 |
 
-## Update — V2.28 Q4_0 MMQ lands
+## Update — V2.28 Q4_0 MMQ + V2.29 F16 MMQ tile land
 
-Post-V2.27, the V2.28 chain shipped Q4_0 MMQ kernels (dense + indexed-MoE tile8). Updated numbers for the primary target:
+Post-V2.27, the V2.28 + V2.29 chains shipped MMQ tile kernels for the two dtypes with the biggest gaps. Updated numbers for the primary targets:
 
-| Model | Mesh | flambeau pp (V2.28) | llama.cpp pp | Δ vs V2.27 | flambeau tg (V2.28) | llama.cpp tg |
+| Model | Mesh | flambeau pp (V2.29) | llama.cpp pp | Δ vs V2.27 | flambeau tg | llama.cpp tg |
 |---|---:|---:|---:|---|---:|---:|
 | Qwen3.6-35B-A3B-Q4_0 | 4 | **275.1** | 1118.4 | +108 % (132 → 275) | 46.9 | 62.3 |
+| Qwen3.6-27B-UD-Q8_K_XL | 4 | **95.0** | 141.9 | +69 % (56 → 95) | 17.0 | 16.8 |
 
-Prefill ratio climbed from **0.12 → 0.25** of llama.cpp. Decode unchanged at 0.75 (V2.28.d r2 port was NULL — see note below). All other models unchanged by V2.28 (Q4_0 path only).
+Prefill ratio climbed from **0.12 → 0.25** on Qwen3.6-35B-A3B-Q4_0 and **0.40 → 0.67** on Qwen3.6-27B-UD-Q8_K_XL. Decode unchanged on Q4_0 (V2.28.d r2 port was NULL — see note below) and on 27B-UD-Q8_K_XL (m<8 still uses MMVQ).
 
 Contributions:
 - **V2.28.b** (dense Q4_0 MMQ): 132 → 163 tok/s = +24 % (closes attn_qkv / attn_gate / attn_output / ssm_out on the Q4_0 weight side)
 - **V2.28.c** (indexed-MoE Q4_0 MMQ tile8, gate+up fused + down): 163 → **275 tok/s = +68 % on top of .b, +108 % cumulative** (closes the 40 / 40 layers of ffn_*_exps Q4_0 in MoE prefill)
 - **V2.28.d NULL** (Q4_0 r2 decode MMVQ): −21 % decode + argmax drift. Candle P29 r2 pattern (scalar F32 per lane + half-warp reduce) strictly loses on Q4_0 because it throws away the DP4A advantage that Q4_0's flat-block structure enables. Kernel moved to `_unverified/` with diagnosis. Decode path stays on single-row DP4A.
+- **V2.29.a** (F16 tile-M MMQ): 27B-UD-Q8_K_XL prefill 56.2 → 95.0 tok/s = **+69 %**. 64 threads/block wave64, MMQ_Y=64 × MMQ_X=8, weight read once per K-sub-block into registers + reused 8× across activation rows. Activation side L1-broadcast (same as mmvq — hot line). Decode unchanged (m<8 routes to V2.25 multi-row).
 
 ## Remaining gap after V2.28
 
