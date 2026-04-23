@@ -29,6 +29,29 @@ Ratios flambeau / llama.cpp (higher = flambeau leads):
 | 35B-A3B-UD-Q8_K_XL Mesh<4> | — (flambeau-only) | — |
 | 35B-A3B-Q4_0 Mesh<4> | **0.12** | 0.76 |
 
+## Update — V2.28 Q4_0 MMQ lands
+
+Post-V2.27, the V2.28 chain shipped Q4_0 MMQ kernels (dense + indexed-MoE tile8). Updated numbers for the primary target:
+
+| Model | Mesh | flambeau pp (V2.28) | llama.cpp pp | Δ vs V2.27 | flambeau tg (V2.28) | llama.cpp tg |
+|---|---:|---:|---:|---|---:|---:|
+| Qwen3.6-35B-A3B-Q4_0 | 4 | **275.1** | 1118.4 | +108 % (132 → 275) | 46.9 | 62.3 |
+
+Prefill ratio climbed from **0.12 → 0.25** of llama.cpp. Decode unchanged at 0.75 (V2.28.d r2 port was NULL — see note below). All other models unchanged by V2.28 (Q4_0 path only).
+
+Contributions:
+- **V2.28.b** (dense Q4_0 MMQ): 132 → 163 tok/s = +24 % (closes attn_qkv / attn_gate / attn_output / ssm_out on the Q4_0 weight side)
+- **V2.28.c** (indexed-MoE Q4_0 MMQ tile8, gate+up fused + down): 163 → **275 tok/s = +68 % on top of .b, +108 % cumulative** (closes the 40 / 40 layers of ffn_*_exps Q4_0 in MoE prefill)
+- **V2.28.d NULL** (Q4_0 r2 decode MMVQ): −21 % decode + argmax drift. Candle P29 r2 pattern (scalar F32 per lane + half-warp reduce) strictly loses on Q4_0 because it throws away the DP4A advantage that Q4_0's flat-block structure enables. Kernel moved to `_unverified/` with diagnosis. Decode path stays on single-row DP4A.
+
+## Remaining gap after V2.28
+
+Still 4× behind llama.cpp on 35B-A3B-Q4_0 prefill (275 vs 1118). Breakdown:
+
+- ~5 layers of 40 (V2.23.a Q4_1→Q8_0 for ffn_down_exps) still use MMVQ fallback for the down step — V2.22.b deferred Q8_0 indexed-MoE MMQ tile8 would close this.
+- Residual sort/pad overhead at every MoE layer entry — common with Q4_K path, V2.31 MMQ_X≥16 restructure is the lever.
+- Q4_0 decode still on single-row MMVQ — no clean r-family win exists per V2.28.d finding. The real decode-side lever for 35B-A3B-Q4_0 is either: (a) launch-overhead reduction via CUDA-Graph-style batching (V2.x multi-session), or (b) MoE-indexed fused decode (no candle precedent).
+
 ## Findings
 
 ### Prefill: the MMQ-coverage gap is the story

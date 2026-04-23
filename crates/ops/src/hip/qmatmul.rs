@@ -220,6 +220,12 @@ pub fn mmvq(
     // V2.23.a — Q4_0 / Q5_0 bypass the dispatch table. Unblock Qwen3.6-35B
     // -A3B-Q4_0 which uses Q4_0 for attn/FFN and Q5_0 for shared-expert FFN.
     // Single productionised kernel per dtype, no shape-dependent selection.
+    // V2.28.d NULL: tried the r2 half-warp-per-row variant (mmvq_q4_0_r2.cu,
+    // moved to _unverified/) — it drops the DP4A advantage of the single-row
+    // kernel (F32 FMA per lane vs DP4A 4×INT8 per lane). Measured −21 %
+    // decode regression AND a logit re-accumulation-order argmax shift on
+    // seed 9419. The candle P29 r2 pattern wins on K-quants (sub-block
+    // scales block DP4A) but strictly loses on Q4_0's flat-block DP4A path.
     if dtype_weight == QDtype::Q4_0 {
         return mmvq_simple_launch(
             reg, stream, "mmvq_q4_0", "flambeau_mmvq_q4_0_q8_1",
