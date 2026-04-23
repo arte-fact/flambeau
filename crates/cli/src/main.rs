@@ -288,6 +288,8 @@ const SIMPLE_SWEEPS: &[(&str, SweepFn)] = &[
     ("indexed_moe_mmvq_q6_k", flambeau_bench::sweep_moe::run_indexed_moe_mmvq_q6_k_sweep),
     ("indexed_moe_mmvq_q8_0", flambeau_bench::sweep_moe::run_indexed_moe_mmvq_q8_0_sweep),
     ("indexed_moe_mmq", flambeau_bench::sweep_moe::run_indexed_moe_mmq_sweep),
+    ("indexed_moe_mmq_q8_0_gate_up_tile8", flambeau_bench::sweep_moe::run_indexed_moe_mmq_q8_0_gate_up_tile8_sweep),
+    ("indexed_moe_mmq_q8_0_down_tile8", flambeau_bench::sweep_moe::run_indexed_moe_mmq_q8_0_down_tile8_sweep),
 ];
 
 #[cfg(feature = "hip_sweep")]
