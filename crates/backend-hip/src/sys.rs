@@ -96,7 +96,23 @@ extern "C" {
     // pinned buffer, halving throughput.
     pub fn hipHostMalloc(ptr: *mut *mut c_void, size: usize, flags: c_uint) -> c_int;
     pub fn hipHostFree(ptr: *mut c_void) -> c_int;
+
+    // V2.25.b — event primitives for cross-stream / cross-device DAG
+    // scheduling (async peer-copy pipeline-parallel ubatch path).
+    pub fn hipEventCreate(event: *mut hipEvent_t) -> c_int;
+    pub fn hipEventCreateWithFlags(event: *mut hipEvent_t, flags: c_uint) -> c_int;
+    pub fn hipEventDestroy(event: hipEvent_t) -> c_int;
+    pub fn hipEventRecord(event: hipEvent_t, stream: hipStream_t) -> c_int;
+    pub fn hipStreamWaitEvent(stream: hipStream_t, event: hipEvent_t, flags: c_uint) -> c_int;
+    pub fn hipEventSynchronize(event: hipEvent_t) -> c_int;
 }
+
+// Opaque event handle. hipEvent_t ≡ `struct ihipEvent_t *`.
+pub type hipEvent_t = *mut c_void;
+
+// Flag passed to hipEventCreateWithFlags for a latency-optimised event
+// (no timing — we only use events for dependency tracking, not profiling).
+pub const hipEventDisableTiming: c_uint = 0x2;
 
 /// `hipHostMalloc` flag bits from `hip_runtime_api.h`. Use `Portable` to
 /// make the pinned buffer usable from any HIP device in the cluster.

@@ -138,6 +138,90 @@ impl Stream for HipStream {
     }
 }
 
+/// V2.25.b — HIP event for cross-stream DAG scheduling. Used by the async
+/// peer-copy pipeline in `HipCluster::peer_copy_via_host_async`.
+///
+/// Created with `hipEventDisableTiming` — we never call `hipEventElapsedTime`,
+/// just `hipEventRecord` / `hipStreamWaitEvent`. Drop destroys the handle.
+pub struct HipEvent {
+    ptr: crate::sys::hipEvent_t,
+    device_id: i32,
+}
+
+impl std::fmt::Debug for HipEvent {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("HipEvent")
+            .field("ptr", &(self.ptr as usize))
+            .field("device_id", &self.device_id)
+            .finish()
+    }
+}
+
+// SAFETY: hipEvent_t is an opaque driver handle. Events are thread-safe
+// per the HIP runtime contract; record/wait ops serialise at the driver.
+unsafe impl Send for HipEvent {}
+unsafe impl Sync for HipEvent {}
+
+impl HipEvent {
+    /// Create a new timing-disabled event on `device_id`. Caller must have
+    /// `bind(device_id)` in effect.
+    pub fn new(device_id: i32) -> DeviceResult<Self> {
+        let mut e: crate::sys::hipEvent_t = ptr::null_mut();
+        // SAFETY: `hipEventCreateWithFlags` writes an opaque handle through
+        // the out-pointer. `&mut e` is valid for a `hipEvent_t`.
+        check(
+            unsafe {
+                crate::sys::hipEventCreateWithFlags(
+                    &raw mut e,
+                    crate::sys::hipEventDisableTiming,
+                )
+            },
+            "hipEventCreateWithFlags",
+        )?;
+        Ok(Self { ptr: e, device_id })
+    }
+
+    pub fn device_id(&self) -> i32 {
+        self.device_id
+    }
+
+    pub(crate) fn raw(&self) -> crate::sys::hipEvent_t {
+        self.ptr
+    }
+
+    /// Record this event on `stream`. After previous work on `stream`
+    /// completes, the event transitions to the recorded state.
+    pub fn record(&self, stream: &HipStream) -> DeviceResult<()> {
+        // SAFETY: both handles are live (owned by Self / caller).
+        check(
+            unsafe { crate::sys::hipEventRecord(self.ptr, stream.raw()) },
+            "hipEventRecord",
+        )
+    }
+
+    /// Insert a wait on `stream`: subsequent work enqueued on `stream`
+    /// won't start until the event transitions to recorded. Non-blocking
+    /// on the host — the wait is driver-side.
+    pub fn stream_wait(&self, stream: &HipStream) -> DeviceResult<()> {
+        // SAFETY: both handles are live. flags=0 for standard semantics.
+        check(
+            unsafe { crate::sys::hipStreamWaitEvent(stream.raw(), self.ptr, 0) },
+            "hipStreamWaitEvent",
+        )
+    }
+}
+
+impl Drop for HipEvent {
+    fn drop(&mut self) {
+        if !self.ptr.is_null() {
+            // SAFETY: self.ptr was returned by hipEventCreateWithFlags and
+            // is not aliased (events are owned, not Clone).
+            let _ = unsafe { crate::sys::hipEventDestroy(self.ptr) };
+            self.ptr = ptr::null_mut();
+        }
+    }
+}
+
 /// A HIP device. Holds a device id and a default stream.
 ///
 /// Construction calls `hipSetDevice` once, but there is no guarantee that the

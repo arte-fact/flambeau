@@ -441,6 +441,125 @@ impl HipCluster {
 
         Ok(())
     }
+
+    /// V2.25.b — fully-asynchronous PCIe peer copy.
+    ///
+    /// Unlike [`Self::peer_copy_via_host`] which blocks the CPU between DtoH
+    /// and HtoD via `hipStreamSynchronize`, this variant records a HIP event
+    /// after the DtoH and has the destination stream wait on it driver-side.
+    /// The caller's `src_stream` and `dst_stream` continue receiving work
+    /// without host round-trips — essential for the V2.25.d async ubatch
+    /// pipeline where rank k's next ubatch should start before rank k+1's
+    /// current ubatch finishes.
+    ///
+    /// `done_event` is optional: if `Some`, recorded on `dst_stream` after
+    /// the HtoD completes (so downstream dependents can wait without a sync).
+    ///
+    /// Same-rank and rank-out-of-range paths mirror the blocking variant.
+    ///
+    /// # Safety
+    /// - `src_ptr` / `dst_ptr` must be valid for `bytes` on their respective
+    ///   devices.
+    /// - `src_stream` must be on `src_rank`'s device; `dst_stream` on
+    ///   `dst_rank`'s device.
+    /// - No other work may concurrently alias the pinned bounce buffer
+    ///   bytes for `src_rank` between the DtoH and HtoD on different streams.
+    ///   In practice this means: do not issue two overlapping async peer
+    ///   copies from the SAME source rank on different lanes without
+    ///   per-lane bounce buffers — the current impl has one bounce per rank.
+    ///   V2.25.d works around this by pacing: each ubatch stage completes
+    ///   its DtoH before the next stage starts its DtoH on the same rank.
+    pub unsafe fn peer_copy_via_host_async(
+        &self,
+        dst_ptr: DevicePtr,
+        dst_rank: usize,
+        src_ptr: DevicePtr,
+        src_rank: usize,
+        bytes: usize,
+        src_stream: &HipStream,
+        dst_stream: &HipStream,
+        bridge_event: &crate::HipEvent,
+        done_event: Option<&crate::HipEvent>,
+    ) -> DeviceResult<()> {
+        if bytes == 0 {
+            return Ok(());
+        }
+        if src_rank >= self.devices.len() || dst_rank >= self.devices.len() {
+            return Err(DeviceError::Backend {
+                backend: "hip",
+                code: -1,
+                message: format!(
+                    "peer_copy_via_host_async: rank out of range (src={src_rank}, dst={dst_rank}, N={})",
+                    self.devices.len()
+                ),
+            });
+        }
+        if src_rank == dst_rank {
+            // Same-rank DtoD on dst_stream, no cross-device events needed.
+            let device = &self.devices[dst_rank];
+            device.bind()?;
+            // SAFETY: caller's contract on this `unsafe fn`.
+            unsafe {
+                device.memcpy_async(
+                    dst_stream,
+                    flambeau_core::CopyDirection::DeviceToDevice,
+                    dst_ptr,
+                    src_ptr,
+                    bytes,
+                )?;
+            }
+            if let Some(done) = done_event {
+                done.record(dst_stream)?;
+            }
+            return Ok(());
+        }
+
+        let buf = self.ensure_bounce(src_rank, bytes)?;
+
+        // 1. DtoH on src_stream.
+        let src_dev = &self.devices[src_rank];
+        src_dev.bind()?;
+        // SAFETY: per caller contract + `ensure_bounce` guarantees `buf` is a
+        // live pinned-host region of `bytes` bytes.
+        let rc = unsafe {
+            hipMemcpyAsync(
+                buf,
+                src_ptr.as_usize() as *const c_void,
+                bytes,
+                hipMemcpyKind::DeviceToHost,
+                src_stream.raw(),
+            )
+        };
+        check(rc, "peer_copy_async DtoH")?;
+        // 2. Record bridge event on src_stream.
+        bridge_event.record(src_stream)?;
+
+        // 3. dst_stream waits on the bridge event (driver-side, no CPU sync).
+        let dst_dev = &self.devices[dst_rank];
+        dst_dev.bind()?;
+        bridge_event.stream_wait(dst_stream)?;
+
+        // 4. HtoD on dst_stream.
+        // SAFETY: bridge_event guarantees the pinned buf is populated before
+        // this HtoD starts (driver DAG edge).
+        let rc = unsafe {
+            hipMemcpyAsync(
+                dst_ptr.as_usize() as *mut c_void,
+                buf.cast_const(),
+                bytes,
+                hipMemcpyKind::HostToDevice,
+                dst_stream.raw(),
+            )
+        };
+        check(rc, "peer_copy_async HtoD")?;
+
+        // 5. Optional done event for downstream waiters.
+        if let Some(done) = done_event {
+            done.record(dst_stream)?;
+        }
+
+        Ok(())
+    }
 }
 
 impl Drop for HipCluster {
