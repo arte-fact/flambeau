@@ -35,14 +35,18 @@ pub const QMATMUL_GFX906: &[KernelDescriptor] = &[
         cert_rel_path: "certs/hip/gfx906/qmatmul_q4_K_mmvq_nw1_r2_gfx906.json",
     },
     KernelDescriptor {
+        // V2.24.a.3 — 128-thread single-row DP4A Q4_1 MMVQ. Same DP4A
+        // math as V2.2.b but half the threads per block, reducing kernel
+        // dispatch overhead + increasing CU occupancy. r1 scalar +
+        // r2 DP4A attempts NULL'd; thin-block is the last MMVQ lever.
         op_name: "QMatMul",
-        impl_id: "qmatmul_q4_1_mmvq_dp4a_gfx906",
+        impl_id: "qmatmul_q4_1_mmvq_t128_gfx906",
         backend: "hip",
         arch: "gfx906",
         dtype_weight: QDtype::Q4_1,
         dtype_activation: QDtype::Q8_1,
         m_range: (1, 127),
-        cert_rel_path: "certs/hip/gfx906/qmatmul_q4_1_mmvq_dp4a_gfx906.json",
+        cert_rel_path: "certs/hip/gfx906/qmatmul_q4_1_mmvq_t128_gfx906.json",
     },
     KernelDescriptor {
         op_name: "QMatMul",

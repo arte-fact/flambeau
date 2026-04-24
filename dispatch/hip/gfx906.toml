@@ -72,9 +72,9 @@ notes   = "P29 multi-row DPP r2 — 2 output rows per wave64, half-warp reduce. 
 dtype   = "Q4_1"
 dtype_q = "Q8_1"
 shape   = { m = "1..127", k = "any", n = "any" }
-impl    = "qmatmul_q4_1_mmvq_dp4a_gfx906"
-cert    = "certs/hip/gfx906/qmatmul_q4_1_mmvq_dp4a_gfx906.json"
-notes   = "V2.2.b — single-kernel Q4_1 × Q8_1 DP4A MMVQ for Qwen3.5-9B-Q4_1. 256-thread one-row-per-block, VDR=2 (4 int32 × (vi0 + vi1) per block). Narrowed to m<=127 in V2.2.d — Q4_1 MMQ handles m>=128."
+impl    = "qmatmul_q4_1_mmvq_t128_gfx906"
+cert    = "certs/hip/gfx906/qmatmul_q4_1_mmvq_t128_gfx906.json"
+notes   = "V2.24.a.3 — 128-thread single-row Q4_1 DP4A MMVQ. Halves threads/block vs V2.2.b to reduce dispatch overhead + raise occupancy. V2.24.a.1 scalar r2 was NULL (−55 %); V2.24.a.2 DP4A r2 was NULL (−7.5 %)."
 
 [[qmatmul]]
 dtype   = "Q5_K"

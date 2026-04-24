@@ -62,6 +62,15 @@ pub enum Dtype {
     /// V2.2.b Q4_1 legacy quant with per-block min offset. Single row per
     /// 256-thread block, DP4A inner loop.
     Q4_1,
+    /// V2.24.a.1 r2 multi-row Q4_1 (64 threads, 2 rows/block, half-warp
+    /// DPP reduce). NULL — lost DP4A parallelism. Kept for regression.
+    Q4_1R2,
+    /// V2.24.a.2 DP4A r2 multi-row Q4_1 (256 threads, 2 rows/block).
+    /// Halves grid + shares Y across rows; preserves DP4A.
+    /// NULL — register pressure regressed wall −7.5 %.
+    Q4_1R2DP4A,
+    /// V2.24.a.3 thin-block 128-thread single-row Q4_1 DP4A.
+    Q4_1T128,
 }
 
 impl Dtype {
@@ -71,7 +80,7 @@ impl Dtype {
             Dtype::Q4K | Dtype::Q4KR2 => "Q4_K",
             Dtype::Q5K | Dtype::Q5KR2 => "Q5_K",
             Dtype::Q6K | Dtype::Q6KR4 | Dtype::Q6KDP4A => "Q6_K",
-            Dtype::Q4_1 => "Q4_1",
+            Dtype::Q4_1 | Dtype::Q4_1R2 | Dtype::Q4_1R2DP4A | Dtype::Q4_1T128 => "Q4_1",
         }
     }
 
@@ -81,7 +90,7 @@ impl Dtype {
             Dtype::Q4K | Dtype::Q4KR2 => GgmlDType::Q4K,
             Dtype::Q5K | Dtype::Q5KR2 => GgmlDType::Q5K,
             Dtype::Q6K | Dtype::Q6KR4 | Dtype::Q6KDP4A => GgmlDType::Q6K,
-            Dtype::Q4_1 => GgmlDType::Q4_1,
+            Dtype::Q4_1 | Dtype::Q4_1R2 | Dtype::Q4_1R2DP4A | Dtype::Q4_1T128 => GgmlDType::Q4_1,
         }
     }
 
@@ -96,6 +105,9 @@ impl Dtype {
             Dtype::Q6KR4 => "qmatmul_q6_K_mmvq_nw1_r4_gfx906",
             Dtype::Q6KDP4A => "qmatmul_q6_K_mmvq_dp4a_gfx906",
             Dtype::Q4_1 => "qmatmul_q4_1_mmvq_dp4a_gfx906",
+            Dtype::Q4_1R2 => "qmatmul_q4_1_mmvq_nw1_r2_gfx906",
+            Dtype::Q4_1R2DP4A => "qmatmul_q4_1_mmvq_r2_dp4a_gfx906",
+            Dtype::Q4_1T128 => "qmatmul_q4_1_mmvq_t128_gfx906",
         }
     }
 
@@ -110,6 +122,9 @@ impl Dtype {
             Dtype::Q6KR4 => "mmvq_q6_k_r4",
             Dtype::Q6KDP4A => "mmvq_q6_k_dp4a",
             Dtype::Q4_1 => "mmvq_q4_1",
+            Dtype::Q4_1R2 => "mmvq_q4_1_r2",
+            Dtype::Q4_1R2DP4A => "mmvq_q4_1_r2_dp4a",
+            Dtype::Q4_1T128 => "mmvq_q4_1_t128",
         }
     }
 
@@ -124,6 +139,9 @@ impl Dtype {
             Dtype::Q6KR4 => "flambeau_mmvq_q6_k_r4_q8_1",
             Dtype::Q6KDP4A => "flambeau_mmvq_q6_k_dp4a_q8_1",
             Dtype::Q4_1 => "flambeau_mmvq_q4_1_q8_1",
+            Dtype::Q4_1R2 => "flambeau_mmvq_q4_1_r2_q8_1",
+            Dtype::Q4_1R2DP4A => "flambeau_mmvq_q4_1_r2_dp4a_q8_1",
+            Dtype::Q4_1T128 => "flambeau_mmvq_q4_1_t128_q8_1",
         }
     }
 
@@ -133,7 +151,7 @@ impl Dtype {
             Dtype::Q4K | Dtype::Q4KR2 => std::mem::size_of::<BlockQ4K>(),
             Dtype::Q5K | Dtype::Q5KR2 => std::mem::size_of::<BlockQ5K>(),
             Dtype::Q6K | Dtype::Q6KR4 | Dtype::Q6KDP4A => std::mem::size_of::<BlockQ6K>(),
-            Dtype::Q4_1 => std::mem::size_of::<BlockQ4_1>(),
+            Dtype::Q4_1 | Dtype::Q4_1R2 | Dtype::Q4_1R2DP4A | Dtype::Q4_1T128 => std::mem::size_of::<BlockQ4_1>(),
         }
     }
 
@@ -143,7 +161,8 @@ impl Dtype {
 
     fn launch_threads(self) -> u32 {
         match self {
-            Dtype::Q8_0 | Dtype::Q4_1 => 256,
+            Dtype::Q8_0 | Dtype::Q4_1 | Dtype::Q4_1R2DP4A => 256,
+            Dtype::Q4_1T128 => 128,
             _ => 64,
         }
     }
@@ -153,7 +172,7 @@ impl Dtype {
     fn rows_per_block(self) -> u32 {
         match self {
             Dtype::Q6KR4 => 4,
-            Dtype::Q4KR2 | Dtype::Q5KR2 => 2,
+            Dtype::Q4KR2 | Dtype::Q5KR2 | Dtype::Q4_1R2 | Dtype::Q4_1R2DP4A => 2,
             // Q6KDP4A is a single-row kernel (inner cooperative across 2 super-blocks).
             _ => 1,
         }
@@ -443,7 +462,7 @@ fn tame_scales(dtype: Dtype, raw: Vec<u8>) -> Vec<u8> {
                 let d = f16::from_f32((block[d_off] as f32 / 255.0) * 0.05 + 0.01);
                 block[d_off..d_off + 2].copy_from_slice(&d.to_bits().to_le_bytes());
             }
-            Dtype::Q4_1 => {
+            Dtype::Q4_1 | Dtype::Q4_1R2 | Dtype::Q4_1R2DP4A | Dtype::Q4_1T128 => {
                 // BlockQ4_1: d (f16, 0..2) + m (f16, 2..4) + qs[16] (4..20).
                 let d = f16::from_f32((block[0] as f32 / 255.0) * 0.1 + 0.01);
                 let m = f16::from_f32((block[1] as f32 / 255.0) * 0.05);
