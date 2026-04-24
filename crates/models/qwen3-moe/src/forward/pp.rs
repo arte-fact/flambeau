@@ -1001,6 +1001,10 @@ pub fn forward_prefill_pp_async(
         );
     }
     cluster.reserve_aux_streams(u_lanes)?;
+    // V2.25.g — per-lane pinned bounces break the single-slab
+    // serialisation. Size to a full ubatch worth of F16 hidden.
+    let bounce_bytes = ubatch_size * model.config.hidden_size * 2;
+    cluster.reserve_lane_bounces(u_lanes, bounce_bytes)?;
 
     let cfg = &model.config;
     let hidden = cfg.hidden_size;
@@ -1125,7 +1129,9 @@ pub fn forward_prefill_pp_async(
                 cluster.with_aux_stream(rank_idx - 1, lane, |src_stream| {
                     cluster.with_aux_stream(rank_idx, lane, |dst_stream| {
                         unsafe {
-                            cluster.peer_copy_via_host_async(
+                            // V2.25.g — use per-lane bounce to allow
+                            // concurrent DtoH across lanes on the same rank.
+                            cluster.peer_copy_via_host_async_laned(
                                 scratch.per_rank[rank_idx].lane_hidden_a(lane),
                                 rank_idx,
                                 scratch.per_rank[rank_idx - 1].lane_hidden_a(lane),
@@ -1135,6 +1141,7 @@ pub fn forward_prefill_pp_async(
                                 dst_stream,
                                 &bridge_events[rank_idx - 1][lane],
                                 None,
+                                Some(lane),
                             )?;
                         }
                         Ok(())

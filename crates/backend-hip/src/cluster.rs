@@ -78,13 +78,22 @@ impl RankBounce {
 pub struct HipCluster {
     devices: Vec<HipDevice>,
     /// Pinned-host bounce buffers, one per rank. Atomic/lock-free on the
-    /// hot path — see [`RankBounce`].
+    /// hot path — see [`RankBounce`]. Used by the blocking
+    /// `peer_copy_via_host` path.
     bounces: Vec<RankBounce>,
     /// V2.25.a — per-rank auxiliary streams for pipeline-parallel ubatch
     /// pipelining. `aux_streams[rank][lane]` is an independent HIP stream on
     /// rank `rank`. Populated lazily by [`HipCluster::reserve_aux_streams`].
     /// Empty by default so the non-pipelined path stays byte-identical.
     aux_streams: Vec<std::sync::Mutex<Vec<HipStream>>>,
+    /// V2.25.g — per-rank × per-lane pinned bounces for the async
+    /// peer-copy path. Previously shared one bounce per rank, which
+    /// serialised concurrent async peer-copies across lanes. Each lane
+    /// now gets its own pinned slab. Populated via
+    /// [`HipCluster::reserve_lane_bounces`]. The Mutex is only held
+    /// during the grow phase; the read path is atomic via RankBounce's
+    /// AtomicPtr / AtomicUsize.
+    lane_bounces: Vec<std::sync::Mutex<Vec<RankBounce>>>,
 }
 
 impl HipCluster {
@@ -106,7 +115,36 @@ impl HipCluster {
         let aux_streams = (0..device_ids.len())
             .map(|_| std::sync::Mutex::new(Vec::new()))
             .collect();
-        Ok(Self { devices, bounces, aux_streams })
+        let lane_bounces = (0..device_ids.len())
+            .map(|_| std::sync::Mutex::new(Vec::new()))
+            .collect();
+        Ok(Self { devices, bounces, aux_streams, lane_bounces })
+    }
+
+    /// V2.25.g — reserve `n_lanes` per-lane pinned bounce slabs per rank,
+    /// each pre-grown to `bytes_per_rank` bytes. Required before using
+    /// [`Self::peer_copy_via_host_async_laned`] at multiple lanes
+    /// concurrently, so each lane has its own pinned memory (no
+    /// serialisation via shared host buffer).
+    pub fn reserve_lane_bounces(&self, n_lanes: usize, bytes_per_rank: usize) -> DeviceResult<()> {
+        for rank in 0..self.devices.len() {
+            let mut slot = self.lane_bounces[rank].lock().map_err(|_| DeviceError::Backend {
+                backend: "hip",
+                code: -1,
+                message: "lane_bounces mutex poisoned".into(),
+            })?;
+            while slot.len() < n_lanes {
+                slot.push(RankBounce::empty());
+            }
+            if bytes_per_rank > 0 {
+                // Grow each lane's slab under its own grow_lock; reuse the
+                // existing RankBounce grow logic.
+                for b in slot.iter() {
+                    self.ensure_bounce_in(b, rank, bytes_per_rank)?;
+                }
+            }
+        }
+        Ok(())
     }
 
     /// V2.25.a — ensure each rank has at least `n_lanes` auxiliary streams
@@ -124,7 +162,9 @@ impl HipCluster {
                 message: "aux_streams mutex poisoned".into(),
             })?;
             while slot.len() < n_lanes {
-                slot.push(HipStream::new(device.id())?);
+                // V2.25.g — non-blocking so lanes truly overlap on the same
+                // device (blocking streams serialise via the null stream).
+                slot.push(HipStream::new_non_blocking(device.id())?);
             }
         }
         Ok(())
@@ -229,38 +269,51 @@ impl HipCluster {
             }
         }
         for bounce in self.bounces.drain(..) {
-            // Atomically null out the ptr so a concurrent reader (if the
-            // caller ignored the "dispose after last use" contract) sees
-            // a null rather than a dangling pointer. `bounce` is moved
-            // out of `self.bounces` so no other reference exists.
-            let p = bounce.ptr.swap(ptr::null_mut(), Ordering::AcqRel);
-            if !p.is_null() {
-                // SAFETY: `p` came from `hipHostMalloc` inside `ensure_bounce`.
-                // We atomically swapped it out; `bounce` itself drops at the
-                // end of this iteration.
-                let rc = unsafe { hipHostFree(p) };
-                if rc != HIP_SUCCESS {
-                    return Err(DeviceError::Backend {
-                        backend: "hip",
-                        code: rc,
-                        message: format!("hipHostFree: {}", error_string(rc)),
-                    });
+            Self::free_bounce(&bounce)?;
+        }
+        // V2.25.g — also free per-lane bounces.
+        for slot in self.lane_bounces.drain(..) {
+            if let Ok(bounces) = slot.into_inner() {
+                for bounce in bounces {
+                    Self::free_bounce(&bounce)?;
                 }
             }
         }
         Ok(())
     }
 
+    fn free_bounce(bounce: &RankBounce) -> DeviceResult<()> {
+        let p = bounce.ptr.swap(ptr::null_mut(), Ordering::AcqRel);
+        if !p.is_null() {
+            // SAFETY: `p` came from `hipHostMalloc` inside `ensure_bounce_in`.
+            // Atomically swapped out; no concurrent reader will see the stale
+            // pointer.
+            let rc = unsafe { hipHostFree(p) };
+            if rc != HIP_SUCCESS {
+                return Err(DeviceError::Backend {
+                    backend: "hip",
+                    code: rc,
+                    message: format!("hipHostFree: {}", error_string(rc)),
+                });
+            }
+        }
+        Ok(())
+    }
+
     /// Ensure rank `r`'s pinned bounce buffer is at least `need` bytes.
-    ///
-    /// Hot path (steady state, buffer already large enough): two atomic
-    /// loads, no lock. Cold path (first call for this capacity): takes the
-    /// grow_lock, double-checks, frees the old slab, allocates a new one,
-    /// and releases the grow_lock. Callers that want to avoid ever hitting
-    /// the cold path should call [`Self::reserve_bounce_capacity`] at
-    /// session init.
     fn ensure_bounce(&self, rank: usize, need: usize) -> DeviceResult<*mut c_void> {
-        let slot = &self.bounces[rank];
+        self.ensure_bounce_in(&self.bounces[rank], rank, need)
+    }
+
+    /// V2.25.g — helper that grows an arbitrary `RankBounce` slot
+    /// associated with `rank` (used for both the default per-rank bounce
+    /// and the per-lane lane_bounces).
+    fn ensure_bounce_in(
+        &self,
+        slot: &RankBounce,
+        rank: usize,
+        need: usize,
+    ) -> DeviceResult<*mut c_void> {
         // Fast path: the buffer is already large enough. Acquire ordering
         // pairs with the Release store in the grow path below so a reader
         // that observes `bytes >= need` is guaranteed to also observe the
@@ -481,6 +534,46 @@ impl HipCluster {
         bridge_event: &crate::HipEvent,
         done_event: Option<&crate::HipEvent>,
     ) -> DeviceResult<()> {
+        // SAFETY: forwards to the laned variant with lane=0 (legacy
+        // per-rank bounce). Callers that need concurrent async peer-copies
+        // across lanes should use `peer_copy_via_host_async_laned`.
+        unsafe {
+            self.peer_copy_via_host_async_laned(
+                dst_ptr, dst_rank, src_ptr, src_rank, bytes,
+                src_stream, dst_stream, bridge_event, done_event, None,
+            )
+        }
+    }
+
+    /// V2.25.g — async peer copy with an optional `lane` for per-lane
+    /// bounce buffer selection. When `lane = Some(L)`, the DtoH writes to
+    /// `lane_bounces[src_rank][L]` (must have been reserved via
+    /// [`Self::reserve_lane_bounces`]). When `None`, falls back to the
+    /// shared per-rank bounce (identical to the unlaned variant).
+    ///
+    /// Per-lane bounces let two concurrent async peer-copies from the
+    /// same source rank truly overlap — each lane has its own pinned
+    /// slab so the driver's memcpy DAG doesn't force serialisation on
+    /// shared host memory.
+    ///
+    /// # Safety
+    /// Same as the unlaned variant. Additionally: when `lane = Some(L)`,
+    /// no other in-flight async copy may alias lane L's bounce on this
+    /// source rank.
+    #[expect(clippy::too_many_arguments, reason = "full peer-copy contract")]
+    pub unsafe fn peer_copy_via_host_async_laned(
+        &self,
+        dst_ptr: DevicePtr,
+        dst_rank: usize,
+        src_ptr: DevicePtr,
+        src_rank: usize,
+        bytes: usize,
+        src_stream: &HipStream,
+        dst_stream: &HipStream,
+        bridge_event: &crate::HipEvent,
+        done_event: Option<&crate::HipEvent>,
+        lane: Option<usize>,
+    ) -> DeviceResult<()> {
         if bytes == 0 {
             return Ok(());
         }
@@ -514,7 +607,29 @@ impl HipCluster {
             return Ok(());
         }
 
-        let buf = self.ensure_bounce(src_rank, bytes)?;
+        let buf = match lane {
+            Some(l) => {
+                let guard = self.lane_bounces[src_rank].lock().map_err(|_| {
+                    DeviceError::Backend {
+                        backend: "hip",
+                        code: -1,
+                        message: "lane_bounces mutex poisoned".into(),
+                    }
+                })?;
+                if l >= guard.len() {
+                    return Err(DeviceError::Backend {
+                        backend: "hip",
+                        code: -1,
+                        message: format!(
+                            "peer_copy_via_host_async_laned: lane {l} not reserved on rank {src_rank} (have {}); call reserve_lane_bounces first",
+                            guard.len()
+                        ),
+                    });
+                }
+                self.ensure_bounce_in(&guard[l], src_rank, bytes)?
+            }
+            None => self.ensure_bounce(src_rank, bytes)?,
+        };
 
         // 1. DtoH on src_stream.
         let src_dev = &self.devices[src_rank];

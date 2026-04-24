@@ -18,7 +18,8 @@ use flambeau_core::{CopyDirection, Device, DeviceError, DevicePtr, DeviceResult,
 
 use crate::sys::{
     self, error_string, hipFree, hipGetDevice, hipGetDeviceCount, hipMalloc, hipMemcpyAsync,
-    hipMemcpyKind, hipSetDevice, hipStreamCreate, hipStreamDestroy, hipStreamSynchronize,
+    hipMemcpyKind, hipSetDevice, hipStreamCreate, hipStreamCreateWithFlags, hipStreamDestroy,
+    hipStreamSynchronize,
     hipStream_t, HIP_SUCCESS,
 };
 
@@ -88,8 +89,12 @@ unsafe impl Send for HipStream {}
 unsafe impl Sync for HipStream {}
 
 impl HipStream {
-    /// Create a new non-blocking stream on `device_id`. Caller must have
-    /// `bind(device_id)` in effect for the current thread.
+    /// Create a new stream on `device_id`. Caller must have `bind(device_id)`
+    /// in effect for the current thread.
+    ///
+    /// NB: `hipStreamCreate` creates a **blocking** stream (serialises with
+    /// the null stream). For truly-concurrent streams on the same device
+    /// use [`Self::new_non_blocking`].
     pub fn new(device_id: i32) -> DeviceResult<Self> {
         let mut s: hipStream_t = ptr::null_mut();
         // SAFETY: `hipStreamCreate` writes a stream handle through the
@@ -99,6 +104,23 @@ impl HipStream {
             ptr: s,
             device_id,
         })
+    }
+
+    /// V2.25.g — create a non-blocking stream (`hipStreamNonBlocking` = 1).
+    /// These streams do NOT serialise with the null stream and can run
+    /// concurrently with each other on the same device, subject to
+    /// occupancy. Used by `HipCluster::reserve_aux_streams` so the
+    /// V2.25.d async ubatch pipeline truly overlaps lanes on the same
+    /// device.
+    pub fn new_non_blocking(device_id: i32) -> DeviceResult<Self> {
+        let mut s: hipStream_t = ptr::null_mut();
+        const HIP_STREAM_NON_BLOCKING: std::os::raw::c_uint = 1;
+        // SAFETY: `hipStreamCreateWithFlags` writes an opaque handle.
+        check(
+            unsafe { hipStreamCreateWithFlags(&raw mut s, HIP_STREAM_NON_BLOCKING) },
+            "hipStreamCreateWithFlags",
+        )?;
+        Ok(Self { ptr: s, device_id })
     }
 
     pub fn device_id(&self) -> i32 {
