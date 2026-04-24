@@ -23,9 +23,20 @@ use std::future::Future;
 use anyhow::{Context, Result};
 use rmcp::handler::server::router::tool::ToolRouter;
 use rmcp::handler::server::wrapper::Parameters;
-use rmcp::model::{ServerCapabilities, ServerInfo};
+use rmcp::model::{CallToolResult, Content, ServerCapabilities, ServerInfo};
 use rmcp::transport::stdio;
 use rmcp::{schemars, tool, tool_handler, tool_router, ServerHandler, ServiceExt};
+
+/// Shorthand: every tool returns this. We construct `CallToolResult`
+/// by hand so the response carries BOTH:
+///   - `structured_content`: the parsed JSON object — what an MCP-spec-
+///     compliant client (Claude Code, MCP Inspector, agents) renders.
+///   - `content[0]`: a *pretty-printed* JSON dump as text fallback —
+///     what older clients see. `CallToolResult::structured()` uses
+///     `to_string()` (compact) for the fallback which renders as a
+///     wall of escaped JSON; pretty-printing makes it readable too.
+///   - `is_error`: false for success, true for tool-level errors.
+type ToolReturn = CallToolResult;
 
 /// The M-track MCP server. Each `#[tool]` method corresponds to one
 /// flambeau dev-surface operation. M1.1 ships the scaffold + a single
@@ -134,7 +145,7 @@ impl FlambeauMcp {
     fn flambeau_ping(
         &self,
         Parameters(PingRequest { note }): Parameters<PingRequest>,
-    ) -> String {
+    ) -> ToolReturn {
         let artefact = serde_json::json!({
             "flambeau_version": env!("CARGO_PKG_VERSION"),
             "note": note.unwrap_or_default(),
@@ -159,7 +170,7 @@ impl FlambeauMcp {
         &self,
         Parameters(InspectGgufRequest { path, max_metadata }):
             Parameters<InspectGgufRequest>,
-    ) -> String {
+    ) -> ToolReturn {
         let max = max_metadata.unwrap_or(64);
         tool_inspect_gguf(&path, max)
             .unwrap_or_else(|e| error_payload("flambeau_inspect_gguf", e))
@@ -173,7 +184,7 @@ impl FlambeauMcp {
         &self,
         Parameters(CertCheckRequest { backend, arch }):
             Parameters<CertCheckRequest>,
-    ) -> String {
+    ) -> ToolReturn {
         let backend = backend.as_deref().unwrap_or("hip");
         let arch = arch.as_deref().unwrap_or("gfx906");
         tool_cert_check(backend, arch)
@@ -189,7 +200,7 @@ impl FlambeauMcp {
         &self,
         Parameters(DispatchReadRequest { backend, arch }):
             Parameters<DispatchReadRequest>,
-    ) -> String {
+    ) -> ToolReturn {
         let backend = backend.as_deref().unwrap_or("hip");
         let arch = arch.as_deref().unwrap_or("gfx906");
         tool_dispatch_read(backend, arch)
@@ -205,16 +216,15 @@ impl FlambeauMcp {
     fn flambeau_tune_dry(
         &self,
         Parameters(TuneDryRequest { model, devices }): Parameters<TuneDryRequest>,
-    ) -> String {
-        serde_json::json!({
+    ) -> ToolReturn {
+        err_result(serde_json::json!({
             "error": "not_shipped",
             "tool": "flambeau_tune_dry",
             "tracking": "ROADMAP-V2 T-track / CLAUDE.md §Side-tracks T1–T5",
             "reason": "T-track autotuner crate is still a stub (crates/autotune is 8 lines). \
                        Implementation landing is out of scope for the V2 MCP track.",
             "received": { "model": model, "devices": devices },
-        })
-        .to_string()
+        }))
     }
 
     /// M1.4 stub: perf-regression matrix. Not shipped — the `flambeau
@@ -225,8 +235,8 @@ impl FlambeauMcp {
         &self,
         Parameters(MatrixRequest { models, prompt_len, tg_len }):
             Parameters<MatrixRequest>,
-    ) -> String {
-        serde_json::json!({
+    ) -> ToolReturn {
+        err_result(serde_json::json!({
             "error": "not_shipped",
             "tool": "flambeau_matrix",
             "tracking": "ROADMAP-V2 §M1.4 → CLI matrix subcommand at crates/cli/src/main.rs todo!()",
@@ -237,8 +247,7 @@ impl FlambeauMcp {
                 "prompt_len": prompt_len,
                 "tg_len": tg_len,
             },
-        })
-        .to_string()
+        }))
     }
 
     /// M1.4 stub: dispatch A/B compare. Not shipped.
@@ -247,16 +256,15 @@ impl FlambeauMcp {
         &self,
         Parameters(DispatchAbRequest { impl_a, impl_b, model }):
             Parameters<DispatchAbRequest>,
-    ) -> String {
-        serde_json::json!({
+    ) -> ToolReturn {
+        err_result(serde_json::json!({
             "error": "not_shipped",
             "tool": "flambeau_dispatch_ab",
             "tracking": "ROADMAP-V2 §M1.b (scoped as follow-up to M1)",
             "reason": "`bench ab` mode isn't implemented in flambeau-bench yet. \
                        Landing is deferred behind M1.5 HTTP transport + M2 client.",
             "received": { "impl_a": impl_a, "impl_b": impl_b, "model": model },
-        })
-        .to_string()
+        }))
     }
 
     /// M1.3: diff a cert JSON at two git commits. Loads each blob via
@@ -273,7 +281,7 @@ impl FlambeauMcp {
         &self,
         Parameters(CertDiffRequest { cert_path, commit_a, commit_b }):
             Parameters<CertDiffRequest>,
-    ) -> String {
+    ) -> ToolReturn {
         let a = commit_a.as_deref().unwrap_or("HEAD~1");
         let b = commit_b.as_deref().unwrap_or("HEAD");
         tool_cert_diff(&cert_path, a, b)
@@ -287,7 +295,7 @@ impl FlambeauMcp {
 /// JSON artefact. Truncates string metadata beyond 4096 bytes to keep
 /// the response size bounded (Qwen3.6's chat template alone is ~8 KB
 /// and would otherwise dominate the payload).
-fn tool_inspect_gguf(path: &str, max_metadata: usize) -> Result<String> {
+fn tool_inspect_gguf(path: &str, max_metadata: usize) -> Result<ToolReturn> {
     use flambeau_quant::gguf::{GgufFile, Value};
     let file = GgufFile::open(path).context("open GGUF")?;
     let mut entries: Vec<(&String, &Value)> = file.metadata.iter().collect();
@@ -365,7 +373,7 @@ fn value_to_json(v: &flambeau_quant::gguf::Value) -> serde_json::Value {
 }
 
 /// Wraps `flambeau_bench::dispatch::cert_check`.
-fn tool_cert_check(backend: &str, arch: &str) -> Result<String> {
+fn tool_cert_check(backend: &str, arch: &str) -> Result<ToolReturn> {
     let repo_root = std::env::current_dir().context("cwd for cert-check")?;
     let dispatch_path = repo_root.join(format!("dispatch/{backend}/{arch}.toml"));
     let report = flambeau_bench::dispatch::cert_check(&repo_root, &dispatch_path)
@@ -409,7 +417,7 @@ fn tool_cert_check(backend: &str, arch: &str) -> Result<String> {
 }
 
 /// Raw read + TOML parse of the dispatch file.
-fn tool_dispatch_read(backend: &str, arch: &str) -> Result<String> {
+fn tool_dispatch_read(backend: &str, arch: &str) -> Result<ToolReturn> {
     let repo_root = std::env::current_dir().context("cwd for dispatch-read")?;
     let dispatch_path = repo_root.join(format!("dispatch/{backend}/{arch}.toml"));
     let toml_src = std::fs::read_to_string(&dispatch_path)
@@ -455,7 +463,7 @@ fn git_show_json(commit: &str, path: &str) -> Result<serde_json::Value> {
 /// arch, op, dtype_weight, dtype_activation, results: [{m, k, n, seed,
 /// max_rel_err, tolerance, pass, pmc?}], ...}`. We diff `results[]` by
 /// `(m, k, n)` key.
-fn tool_cert_diff(cert_path: &str, commit_a: &str, commit_b: &str) -> Result<String> {
+fn tool_cert_diff(cert_path: &str, commit_a: &str, commit_b: &str) -> Result<ToolReturn> {
     let a_json = git_show_json(commit_a, cert_path)?;
     let b_json = git_show_json(commit_b, cert_path)?;
 
@@ -561,6 +569,29 @@ fn tool_cert_diff(cert_path: &str, commit_a: &str, commit_b: &str) -> Result<Str
     Ok(wrap_artefact(artefact, cert_path.to_owned(), msg))
 }
 
+/// Build a tool-success result from any JSON value, with both a
+/// pretty-printed text fallback and the parsed `structured_content`.
+/// Centralised here so every tool body uses the same envelope shape.
+fn ok_result(value: serde_json::Value) -> ToolReturn {
+    let mut r = CallToolResult::structured(value.clone());
+    let pretty =
+        serde_json::to_string_pretty(&value).unwrap_or_else(|_| value.to_string());
+    r.content = vec![Content::text(pretty)];
+    r
+}
+
+/// Same shape but flagged `is_error=true` so the client surfaces a
+/// failure indicator. Tool *invocation* errors (transport, schema)
+/// stay as McpError; this is for tool-*business* errors (e.g.
+/// "not_shipped", "remote tool returned error").
+fn err_result(value: serde_json::Value) -> ToolReturn {
+    let mut r = CallToolResult::structured_error(value.clone());
+    let pretty =
+        serde_json::to_string_pretty(&value).unwrap_or_else(|_| value.to_string());
+    r.content = vec![Content::text(pretty)];
+    r
+}
+
 /// M3.1: wrap every real tool response in the committable-artefact
 /// envelope. An agent driving flambeau-A → flambeau-B can take this
 /// response, write `artefact` to `canonical_path` in its working tree,
@@ -570,23 +601,21 @@ fn wrap_artefact(
     artefact: serde_json::Value,
     canonical_path: impl Into<String>,
     suggested_commit_message: impl Into<String>,
-) -> String {
-    serde_json::json!({
+) -> ToolReturn {
+    ok_result(serde_json::json!({
         "artefact": artefact,
         "canonical_path": canonical_path.into(),
         "suggested_commit_message": suggested_commit_message.into(),
-    })
-    .to_string()
+    }))
 }
 
 /// Shared error payload. Tools never panic — on failure they return a
 /// JSON `{error, tool}` blob that the MCP client can surface.
-fn error_payload(tool: &str, err: anyhow::Error) -> String {
-    serde_json::json!({
+fn error_payload(tool: &str, err: anyhow::Error) -> ToolReturn {
+    err_result(serde_json::json!({
         "error": format!("{err:#}"),
         "tool": tool,
-    })
-    .to_string()
+    }))
 }
 
 // `#[tool_handler]` wires the inherent `tool_router` into
