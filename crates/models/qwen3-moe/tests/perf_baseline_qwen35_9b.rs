@@ -105,7 +105,7 @@ fn perf_baseline_qwen35_9b() -> Result<()> {
         .ok()
         .and_then(|s| s.parse().ok())
         .unwrap_or(if async_enabled { 2 } else { 1 });
-    for &l in &[8usize, 64, 128, 512, 1024] {
+    for &l in &[8usize, 64, 128, 512, 1024, 2048, 4096] {
         let mut session = Qwen3MoEShardedSession::new(&model, &cluster)?;
         let scratch_size = ubatch.map(|u| u.min(l)).unwrap_or(l);
         let mut scratch = flambeau_qwen3_moe::forward::ShardedForwardPrefillScratch::new_with_lanes(
