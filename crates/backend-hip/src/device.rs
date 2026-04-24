@@ -254,7 +254,18 @@ impl Drop for HipEvent {
 /// destroys both the recording graph and the instantiated exec.
 pub struct HipGraphExec {
     exec: crate::sys::hipGraphExec_t,
+    /// Source graph kept alive for the lifetime of the exec. HIP's node
+    /// introspection (`hipGraphKernelNodeGetParams`) requires the source
+    /// graph be live; destroying it before reads fails with
+    /// `hipErrorInvalidValue`. Destroyed in Drop after the exec.
+    graph: crate::sys::hipGraph_t,
     device_id: i32,
+    /// Kernel-type nodes in dispatch order, enumerated at capture time
+    /// via `hipGraphGetNodes` + `hipGraphNodeGetType` filtering. Stored
+    /// in a Vec<usize> because `hipGraphNode_t` is a `*mut c_void` and
+    /// doesn't implement Send/Sync out of the box; we cast back when
+    /// calling the param-update FFI.
+    kernel_nodes: Vec<usize>,
 }
 
 impl std::fmt::Debug for HipGraphExec {
@@ -262,6 +273,7 @@ impl std::fmt::Debug for HipGraphExec {
         f.debug_struct("HipGraphExec")
             .field("exec", &(self.exec as usize))
             .field("device_id", &self.device_id)
+            .field("kernel_nodes", &self.kernel_nodes.len())
             .finish()
     }
 }
@@ -307,6 +319,12 @@ impl HipGraphExec {
         closure_result?;
         check(end_code, "hipStreamEndCapture")?;
 
+        // Enumerate nodes before instantiate so callers can address them
+        // by ordinal. Filter to kernel nodes in dispatch order. The graph
+        // stays alive for the full exec lifetime because
+        // `hipGraphKernelNodeGetParams` requires a live source graph.
+        let kernel_nodes = unsafe { collect_kernel_nodes(graph) }?;
+
         let mut exec: crate::sys::hipGraphExec_t = ptr::null_mut();
         // SAFETY: graph is the handle just returned by end-capture. The
         // err_node + log_buf out-params are optional; pass null / zero.
@@ -319,20 +337,96 @@ impl HipGraphExec {
                 0,
             )
         };
-        // Always destroy the recording graph — the instantiated exec is a
-        // separate owned handle. Leaking the graph would leak every
-        // captured kernel's parameter staging buffer.
-        let _ = unsafe { crate::sys::hipGraphDestroy(graph) };
-        check(inst_code, "hipGraphInstantiate")?;
+        if inst_code != HIP_SUCCESS {
+            // Instantiate failed — clean up the source graph before
+            // returning the error; otherwise we leak it.
+            let _ = unsafe { crate::sys::hipGraphDestroy(graph) };
+            check(inst_code, "hipGraphInstantiate")?;
+        }
 
         Ok(Self {
             exec,
+            graph,
             device_id: stream.device_id(),
+            kernel_nodes,
         })
     }
 
     pub fn device_id(&self) -> i32 {
         self.device_id
+    }
+
+    /// Number of kernel-launch nodes captured (excludes memcpys, memsets,
+    /// and driver-inserted sync nodes).
+    pub fn num_kernel_nodes(&self) -> usize {
+        self.kernel_nodes.len()
+    }
+
+    /// Read the current kernel-node params of kernel node `idx`. Used to
+    /// seed an update: callers typically read, substitute one field
+    /// (e.g. a new `kernelParams` pointer array), then pass the result
+    /// back via [`Self::set_kernel_node_params`].
+    pub fn get_kernel_node_params(
+        &self,
+        idx: usize,
+    ) -> DeviceResult<crate::sys::hipKernelNodeParams> {
+        let node = self.kernel_node_handle(idx)?;
+        let mut params = crate::sys::hipKernelNodeParams {
+            block_dim: crate::sys::hipDim3::default(),
+            extra: ptr::null_mut(),
+            func: ptr::null_mut(),
+            grid_dim: crate::sys::hipDim3::default(),
+            kernel_params: ptr::null_mut(),
+            shared_mem_bytes: 0,
+        };
+        // SAFETY: node is a live kernel-node handle (captured from our
+        // graph before destroy); &mut params is valid for writes of
+        // hipKernelNodeParams.
+        check(
+            unsafe { crate::sys::hipGraphKernelNodeGetParams(node, &raw mut params) },
+            "hipGraphKernelNodeGetParams",
+        )?;
+        Ok(params)
+    }
+
+    /// Update kernel-node `idx`'s launch parameters on the instantiated
+    /// exec. The driver copies the param *values* at call-time (into its
+    /// internal per-node staging buffer), so callers may drop the
+    /// pointer-array backing storage after the call returns.
+    ///
+    /// # Safety
+    /// `params.kernel_params` must point to an array of at least
+    /// `kernel_arity` `*mut c_void` entries, each pointing to storage of
+    /// the exact size and type the kernel's signature expects at that
+    /// argument index. Wrong size / type silently writes garbage into
+    /// the launch's arg frame.
+    pub unsafe fn set_kernel_node_params(
+        &self,
+        idx: usize,
+        params: &crate::sys::hipKernelNodeParams,
+    ) -> DeviceResult<()> {
+        let node = self.kernel_node_handle(idx)?;
+        // SAFETY: exec + node are live; params is caller's responsibility
+        // per the outer unsafe contract above.
+        check(
+            unsafe { crate::sys::hipGraphExecKernelNodeSetParams(self.exec, node, params) },
+            "hipGraphExecKernelNodeSetParams",
+        )
+    }
+
+    fn kernel_node_handle(&self, idx: usize) -> DeviceResult<crate::sys::hipGraphNode_t> {
+        self.kernel_nodes
+            .get(idx)
+            .copied()
+            .map(|u| u as crate::sys::hipGraphNode_t)
+            .ok_or_else(|| DeviceError::Backend {
+                backend: BACKEND,
+                code: -1,
+                message: format!(
+                    "kernel_node({idx}) out of range (have {} kernel nodes)",
+                    self.kernel_nodes.len()
+                ),
+            })
     }
 
     /// Replay the captured subgraph on `stream`. The replay is
@@ -348,6 +442,53 @@ impl HipGraphExec {
     }
 }
 
+/// Walk every node of `graph`, filter to kernel nodes, return their
+/// handles in dispatch order. All node handles from `hipGraphGetNodes`
+/// remain valid against the later-instantiated exec even after the
+/// source graph is destroyed — that's the whole point of exposing them
+/// to `hipGraphExecKernelNodeSetParams`.
+///
+/// # Safety
+/// `graph` must be a live, end-captured `hipGraph_t`.
+unsafe fn collect_kernel_nodes(graph: crate::sys::hipGraph_t) -> DeviceResult<Vec<usize>> {
+    // Query the node count first (nodes=null + num_nodes=&count).
+    let mut count: usize = 0;
+    // SAFETY: hipGraphGetNodes with nodes=null writes count through
+    // the num_nodes pointer and touches nothing else.
+    check(
+        unsafe { crate::sys::hipGraphGetNodes(graph, ptr::null_mut(), &raw mut count) },
+        "hipGraphGetNodes(count)",
+    )?;
+    if count == 0 {
+        return Ok(Vec::new());
+    }
+    let mut nodes: Vec<crate::sys::hipGraphNode_t> = vec![ptr::null_mut(); count];
+    let mut out_count = count;
+    // SAFETY: nodes buffer has `count` slots; out_count starts at count.
+    check(
+        unsafe {
+            crate::sys::hipGraphGetNodes(graph, nodes.as_mut_ptr(), &raw mut out_count)
+        },
+        "hipGraphGetNodes",
+    )?;
+    nodes.truncate(out_count);
+
+    let mut kernel_nodes = Vec::with_capacity(out_count);
+    for node in nodes {
+        let mut ntype: i32 = -1;
+        // SAFETY: node is live (just returned by hipGraphGetNodes), ntype
+        // is local valid storage.
+        check(
+            unsafe { crate::sys::hipGraphNodeGetType(node, &raw mut ntype) },
+            "hipGraphNodeGetType",
+        )?;
+        if ntype == crate::sys::HIP_GRAPH_NODE_TYPE_KERNEL {
+            kernel_nodes.push(node as usize);
+        }
+    }
+    Ok(kernel_nodes)
+}
+
 impl Drop for HipGraphExec {
     fn drop(&mut self) {
         if !self.exec.is_null() {
@@ -355,6 +496,13 @@ impl Drop for HipGraphExec {
             // not aliased (HipGraphExec is owned, not Clone).
             let _ = unsafe { crate::sys::hipGraphExecDestroy(self.exec) };
             self.exec = ptr::null_mut();
+        }
+        if !self.graph.is_null() {
+            // SAFETY: self.graph was returned by hipStreamEndCapture and is
+            // not aliased. Destroy after the exec so the exec's dependency
+            // on node handles is released first.
+            let _ = unsafe { crate::sys::hipGraphDestroy(self.graph) };
+            self.graph = ptr::null_mut();
         }
     }
 }

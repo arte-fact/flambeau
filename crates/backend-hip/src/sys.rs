@@ -122,11 +122,62 @@ extern "C" {
     pub fn hipGraphLaunch(exec: hipGraphExec_t, stream: hipStream_t) -> c_int;
     pub fn hipGraphExecDestroy(exec: hipGraphExec_t) -> c_int;
     pub fn hipGraphDestroy(graph: hipGraph_t) -> c_int;
+
+    // V2.26.a-i2 — graph-node introspection + in-place param update on an
+    // instantiated exec. Lets us capture a forward pass once and replay it
+    // with updated scalar params (e.g. pos, start_position) per ubatch.
+    pub fn hipGraphGetNodes(
+        graph: hipGraph_t,
+        nodes: *mut hipGraphNode_t,
+        num_nodes: *mut usize,
+    ) -> c_int;
+    pub fn hipGraphNodeGetType(node: hipGraphNode_t, ntype: *mut c_int) -> c_int;
+    pub fn hipGraphKernelNodeGetParams(
+        node: hipGraphNode_t,
+        params: *mut hipKernelNodeParams,
+    ) -> c_int;
+    pub fn hipGraphExecKernelNodeSetParams(
+        exec: hipGraphExec_t,
+        node: hipGraphNode_t,
+        params: *const hipKernelNodeParams,
+    ) -> c_int;
 }
 
 // Opaque graph handles from hip_runtime_api.h.
 pub type hipGraph_t = *mut c_void;
 pub type hipGraphExec_t = *mut c_void;
+pub type hipGraphNode_t = *mut c_void;
+
+/// `dim3` as laid out in `hip/amd_detail/amd_hip_runtime.h` — three u32s,
+/// no padding. Same layout as CUDA's dim3. Align 4, size 12.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default)]
+pub struct hipDim3 {
+    pub x: c_uint,
+    pub y: c_uint,
+    pub z: c_uint,
+}
+
+/// `hipKernelNodeParams` from `hip/hip_runtime_api.h`. Field order matches
+/// the HIP header exactly — changing the order silently breaks the ABI.
+/// The 4-byte pads after each `dim3` are inserted by repr(C) to align the
+/// following pointer fields to 8.
+#[repr(C)]
+#[derive(Clone, Copy, Debug)]
+pub struct hipKernelNodeParams {
+    pub block_dim: hipDim3,
+    pub extra: *mut *mut c_void,
+    pub func: *mut c_void,
+    pub grid_dim: hipDim3,
+    pub kernel_params: *mut *mut c_void,
+    pub shared_mem_bytes: c_uint,
+}
+
+/// `hipGraphNodeType` enum values from hip_runtime_api.h. We only care
+/// about Kernel for now; others listed for future use.
+pub const HIP_GRAPH_NODE_TYPE_KERNEL: c_int = 0;
+pub const HIP_GRAPH_NODE_TYPE_MEMCPY: c_int = 1;
+pub const HIP_GRAPH_NODE_TYPE_MEMSET: c_int = 2;
 
 // hipStreamCaptureMode — `hipStreamCaptureModeRelaxed` lets the capturing
 // thread call host APIs that would otherwise trip "illegal during capture"

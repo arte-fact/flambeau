@@ -5,9 +5,18 @@
 //! Goal is to prove the FFI + wrapper cycle (begin/end capture,
 //! instantiate, launch, destroy) is correct on gfx906; perf measurement
 //! lives in the forward-path integration commit.
+//!
+//! V2.26.a-i2 adds the kernel-node param-update POC: capture a real
+//! `flambeau_scale_f32` launch with scale=2.0, replay (y = x·2.0), then
+//! call `hipGraphExecKernelNodeSetParams` to swap scale → 5.0, replay
+//! again, verify y = x·5.0. Proves the per-node param update path on
+//! gfx906 — the enabling mechanism for V2.26.a-i3 through -i7.
 
+use flambeau_backend_hip::module::{HipModule, KernelArgs, LaunchCfg};
+use flambeau_backend_hip::sys::{hipDim3, hipKernelNodeParams};
 use flambeau_backend_hip::{device_count, HipDevice, HipGraphExec, HipStream};
 use flambeau_core::{CopyDirection, Device, DevicePtr, Stream};
+use std::ffi::c_void;
 
 fn maybe_skip() -> bool {
     match device_count() {
@@ -111,4 +120,171 @@ fn capture_empty_graph_is_noop() {
     let exec = HipGraphExec::capture(&s, |_s| Ok(())).expect("empty capture");
     exec.launch(&s).unwrap();
     s.synchronize().unwrap();
+}
+
+/// V2.26.a-i2 POC: capture `flambeau_scale_f32` with scale=2.0, instantiate
+/// the exec, replay and verify y = x·2.0, then use
+/// `hipGraphExecKernelNodeSetParams` to swap scale → 5.0, replay, and
+/// verify y = x·5.0.
+///
+/// Proves we can update scalar kernel params on an instantiated graph
+/// exec — the foundation V2.26.a-i3+ needs to make `forward_layer_prefill`
+/// captureable across different pos values.
+#[test]
+fn kernel_param_update_scale_f32() {
+    if !maybe_skip() {
+        return;
+    }
+    let dev = HipDevice::new(0).expect("HipDevice::new(0)");
+
+    // Load the scale_f32 kernel from flambeau_kernels_hip's hsaco catalogue.
+    let hsaco = flambeau_kernels_hip::hsaco("scale_f32")
+        .expect("scale_f32.hsaco present in this build (else HIP_SKIP_BUILD set)");
+    let module = HipModule::load(0, hsaco).expect("load scale_f32 module");
+    let kernel = module.kernel("flambeau_scale_f32").expect("kernel fn");
+
+    let n: usize = 1024;
+    let bytes = n * 4;
+    let x_dev = dev.alloc(bytes).unwrap();
+    let y_dev = dev.alloc(bytes).unwrap();
+
+    // Host-side x = [1.0, 2.0, ..., N] upload.
+    let x_host: Vec<f32> = (0..n).map(|i| (i + 1) as f32).collect();
+    let stream = HipStream::new_non_blocking(0).unwrap();
+    // SAFETY: x_host lives for the sync below.
+    unsafe {
+        dev.memcpy_async(
+            &stream,
+            CopyDirection::HostToDevice,
+            x_dev,
+            DevicePtr(x_host.as_ptr() as usize),
+            bytes,
+        )
+        .unwrap();
+    }
+    stream.synchronize().unwrap();
+
+    // Stable argument storage — kernelParams[i] pointers reference these
+    // slots at capture time and must remain live across both the initial
+    // capture + launch and the later param-update + launch.
+    let x_ptr_u64: u64 = x_dev.as_usize() as u64;
+    let y_ptr_u64: u64 = y_dev.as_usize() as u64;
+    let n_i: i32 = n as i32;
+    let captured_scale: f32 = 2.0;
+
+    // Capture the scale_f32 launch with scale=2.0.
+    let cap_stream = HipStream::new_non_blocking(0).unwrap();
+    let exec = HipGraphExec::capture(&cap_stream, |s| {
+        let mut args = KernelArgs::new();
+        args.push(&x_ptr_u64);
+        args.push(&y_ptr_u64);
+        args.push(&n_i);
+        args.push(&captured_scale);
+        let cfg = LaunchCfg::one_d((n as u32).div_ceil(256), 256);
+        // SAFETY: all arg-storage references outlive the launch (lexically
+        // bound above). x_dev / y_dev are live device buffers on this dev.
+        unsafe { kernel.launch(s, cfg, args)? };
+        Ok(())
+    })
+    .expect("HipGraphExec::capture scale_f32");
+
+    assert_eq!(
+        exec.num_kernel_nodes(),
+        1,
+        "expected exactly 1 captured kernel node, got {}",
+        exec.num_kernel_nodes()
+    );
+
+    // First replay — should compute y = x · 2.0.
+    exec.launch(&stream).unwrap();
+    stream.synchronize().unwrap();
+
+    let mut y_host = vec![0.0f32; n];
+    // SAFETY: y_host lives for the sync below.
+    unsafe {
+        dev.memcpy_async(
+            &stream,
+            CopyDirection::DeviceToHost,
+            DevicePtr(y_host.as_mut_ptr() as usize),
+            y_dev,
+            bytes,
+        )
+        .unwrap();
+    }
+    stream.synchronize().unwrap();
+    for i in 0..n {
+        let expect = (i + 1) as f32 * 2.0;
+        assert!(
+            (y_host[i] - expect).abs() < 1e-4,
+            "post-capture launch y[{i}]={} want {expect}",
+            y_host[i]
+        );
+    }
+
+    // Build new kernel params with scale = 5.0 via
+    // hipGraphExecKernelNodeSetParams. kernel_params[3] points to a fresh
+    // host f32 holding 5.0; the other 3 slots re-use the existing
+    // x_ptr_u64 / y_ptr_u64 / n_i storage.
+    let new_scale: f32 = 5.0;
+    let mut new_kernel_params: [*mut c_void; 4] = [
+        std::ptr::from_ref(&x_ptr_u64) as *mut c_void,
+        std::ptr::from_ref(&y_ptr_u64) as *mut c_void,
+        std::ptr::from_ref(&n_i) as *mut c_void,
+        std::ptr::from_ref(&new_scale) as *mut c_void,
+    ];
+    let current = exec.get_kernel_node_params(0).expect("get_kernel_node_params");
+    assert!(!current.func.is_null(), "captured node func must be non-null");
+    assert_eq!(current.grid_dim.x, (n as u32).div_ceil(256));
+    assert_eq!(current.block_dim.x, 256);
+
+    let new_params = hipKernelNodeParams {
+        block_dim: current.block_dim,
+        extra: std::ptr::null_mut(),
+        func: current.func,
+        grid_dim: current.grid_dim,
+        kernel_params: new_kernel_params.as_mut_ptr(),
+        shared_mem_bytes: current.shared_mem_bytes,
+    };
+    // SAFETY: new_kernel_params covers the 4 args scale_f32 expects, with
+    // correct sizes / types at each slot. The driver copies param values
+    // from the pointed-to storage during this call; the arrays may be
+    // freed afterwards.
+    unsafe {
+        exec.set_kernel_node_params(0, &new_params)
+            .expect("set_kernel_node_params");
+    }
+
+    // Second replay — should compute y = x · 5.0.
+    exec.launch(&stream).unwrap();
+    stream.synchronize().unwrap();
+    // SAFETY: y_host lives for the sync below.
+    unsafe {
+        dev.memcpy_async(
+            &stream,
+            CopyDirection::DeviceToHost,
+            DevicePtr(y_host.as_mut_ptr() as usize),
+            y_dev,
+            bytes,
+        )
+        .unwrap();
+    }
+    stream.synchronize().unwrap();
+    for i in 0..n {
+        let expect = (i + 1) as f32 * 5.0;
+        assert!(
+            (y_host[i] - expect).abs() < 1e-3,
+            "post-param-update launch y[{i}]={} want {expect}",
+            y_host[i]
+        );
+    }
+
+    // SAFETY: all work on x_dev / y_dev has synced above.
+    unsafe {
+        dev.dealloc(x_dev, bytes).unwrap();
+        dev.dealloc(y_dev, bytes).unwrap();
+    }
+
+    // Keep these alive until here (arg storage lifetime).
+    let _ = (captured_scale, new_scale, new_kernel_params);
+    let _ = hipDim3::default();
 }
