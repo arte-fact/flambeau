@@ -105,7 +105,10 @@ fn perf_baseline_qwen35_9b() -> Result<()> {
         .ok()
         .and_then(|s| s.parse().ok())
         .unwrap_or(if async_enabled { 2 } else { 1 });
-    for &l in &[8usize, 64, 128, 512, 1024, 2048, 4096] {
+    // V2.28.c — extend L to 8192 + 16384 to see how BR=8 flash-tile +
+    // async PP scale at long context. Attention is O(L²·d); expect
+    // per-token tok/s to decline at large L as attention dominates.
+    for &l in &[8usize, 64, 128, 512, 1024, 2048, 4096, 8192, 16384] {
         let mut session = Qwen3MoEShardedSession::new(&model, &cluster)?;
         let scratch_size = ubatch.map(|u| u.min(l)).unwrap_or(l);
         let mut scratch = flambeau_qwen3_moe::forward::ShardedForwardPrefillScratch::new_with_lanes(

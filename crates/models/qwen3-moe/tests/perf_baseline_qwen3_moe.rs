@@ -164,7 +164,8 @@ fn perf_baseline_qwen3_moe_mesh_all() -> Result<()> {
     let prefill_grid: Vec<usize> = match (long_text_prompt, prefill_single_l) {
         (Some(_), _) => vec![],          // long-text handled below
         (None, Some(l)) => vec![l],
-        (None, None) => vec![8, 64, 128, 512, 1024, 2048, 4096],
+        // V2.28.c — extended to 8192 + 16384.
+        (None, None) => vec![8, 64, 128, 512, 1024, 2048, 4096, 8192, 16384],
     };
 
     // V2.27.b — async env plumbing mirroring perf_baseline_qwen35_9b.rs.
