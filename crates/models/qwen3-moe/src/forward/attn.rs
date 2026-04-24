@@ -582,6 +582,17 @@ pub struct FullAttnPrefillScratch {
     pub positions: DevicePtr,       // i32 [max_L]
     pub gated_q8_1: DevicePtr,      // Q8_1 [max_L, n_heads*head_dim/32]
     pub gated_q8_1_mmq: DevicePtr,  // BlockQ8_1Mmq [q_width/128, max_L] — DS4 layout
+    /// V2.26.a-i5a — persistent host-side position buffer. `positions`
+    /// on the device is filled each prefill call via a HtoD memcpy
+    /// whose *source* is this Vec's stable address. Keeping it on the
+    /// scratch (and therefore alive for the scratch's lifetime) is
+    /// what makes the memcpy safe to capture into a `HipGraphExec` —
+    /// the previous path used a transient `Vec<i32>` created inside
+    /// `upload_positions_range`, whose address becomes invalid once
+    /// that function returns and breaks graph replay.
+    ///
+    /// Sized `max_tokens`; writes are in-place via `[..n].copy_from_slice`.
+    pub(crate) positions_host: Vec<i32>,
     // Bookkeeping.
     x_norm_f16_bytes: usize,
     x_q8_1_bytes: usize,
@@ -669,6 +680,7 @@ impl FullAttnPrefillScratch {
             positions,
             gated_q8_1,
             gated_q8_1_mmq,
+            positions_host: vec![0i32; max_tokens],
             x_norm_f16_bytes,
             x_q8_1_bytes,
             x_q8_1_mmq_bytes,
@@ -721,27 +733,54 @@ impl Drop for FullAttnPrefillScratch {
     }
 }
 
-/// Upload `L` i32 positions `[start_position, start_position + L)` into the
-/// `positions` scratch slot. Matches `rope_neox_partial_f16`'s expectation.
+/// Upload `L` i32 positions `[start_position, start_position + L)` into
+/// the device-side `positions` scratch slot.
+///
+/// V2.26.a-i5a — the host-side source is `scratch.positions_host`, a
+/// persistent `Vec<i32>` owned by the scratch. Previously this fn built
+/// a transient `Vec<i32>` on the stack, uploaded, and synced to keep
+/// the Vec alive across the copy. That works for direct dispatch but
+/// breaks graph capture: the memcpy node records the source POINTER;
+/// the driver re-reads from it at replay time; if the Vec is gone,
+/// replay reads freed memory. Using `positions_host` keeps the source
+/// stable for the scratch's lifetime, so the same memcpy replays safely
+/// and — critically — picks up new values when we overwrite the host
+/// Vec between replays.
+///
+/// The internal `stream.synchronize()` is dropped: the memcpy is
+/// ordered in-stream with any subsequent RoPE launch, and the host
+/// storage (`positions_host`) outlives both the copy and the stream
+/// work that reads the device target.
 fn upload_positions_range(
     device: &HipDevice,
     stream: &HipStream,
-    dst: DevicePtr,
+    scratch: &mut FullAttnPrefillScratch,
     start_position: usize,
     n: usize,
 ) -> Result<()> {
-    let host: Vec<i32> = (0..n).map(|i| (start_position + i) as i32).collect();
-    // SAFETY: `dst` has at least `n * 4` valid bytes; `host` is the same length.
+    if n > scratch.max_tokens {
+        anyhow::bail!(
+            "upload_positions_range: n={n} > scratch.max_tokens={}",
+            scratch.max_tokens
+        );
+    }
+    for i in 0..n {
+        scratch.positions_host[i] = (start_position + i) as i32;
+    }
+    // SAFETY: `scratch.positions` has at least `n * 4` valid bytes;
+    // `positions_host` has at least `n` valid i32 slots and outlives
+    // every in-stream reader of the device dst (bounded by the scratch
+    // lifetime, which the caller is responsible for keeping alive
+    // until the stream is synced).
     unsafe {
         device.memcpy_async(
             stream,
             CopyDirection::HostToDevice,
-            dst,
-            DevicePtr(host.as_ptr() as usize),
+            scratch.positions,
+            DevicePtr(scratch.positions_host.as_ptr() as usize),
             n * 4,
         )?;
     }
-    stream.synchronize()?;
     Ok(())
 }
 
@@ -933,7 +972,7 @@ pub fn forward_full_attn_prefill(
     .context("prefill attn_k_norm")?;
 
     // 6. RoPE on Q / K, with per-token positions.
-    upload_positions_range(device, stream, scratch.positions, start_position, n_tokens)?;
+    upload_positions_range(device, stream, scratch, start_position, n_tokens)?;
     rope_neox_partial_f16(
         ops,
         stream,
