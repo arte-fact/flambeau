@@ -12,11 +12,13 @@ pub mod cluster;
 pub mod device;
 pub mod graph_capture;
 pub mod impls;
+pub mod kv_cache_slot;
 pub mod module;
 pub mod sys;
 
 pub use cluster::HipCluster;
 pub use graph_capture::{MemcpyBinding, MemcpySlot, ScalarSlot, SlotBinding, SlotMap};
+pub use kv_cache_slot::kv_cache_append_hip_slot;
 pub use impls::{dispatch_qmatmul, QMATMUL_GFX906};
 pub use module::{FuncAttributes, HipKernel, HipModule, KernelArgs, LaunchCfg};
 
