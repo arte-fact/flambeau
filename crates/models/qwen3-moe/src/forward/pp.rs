@@ -26,6 +26,7 @@ use super::{
     forward_layer_prefill, forward_output_head_decode, LayerForwardScratch, LayerPrefillScratch,
     OutputHeadScratch,
 };
+use crate::session::LayerCache;
 
 // ---------------------------------------------------------------------------
 // V1.7.5.C — pipeline-parallel forward_one_token.
@@ -635,6 +636,21 @@ impl Drop for RankForwardPrefillScratch {
 /// Aggregate scratch for PP prefill: one `RankForwardPrefillScratch` per rank.
 pub struct ShardedForwardPrefillScratch {
     pub per_rank: Vec<RankForwardPrefillScratch>,
+    /// V2.26.a-i5c — per (rank, lane) graph-capture cache used by
+    /// `forward_prefill_pp_async` when `FLAMBEAU_ASYNC_GRAPH=1`. The
+    /// first ubatch on (rank, lane) captures the whole layer chain;
+    /// subsequent ubatches update pos-bearing slots + replay. Empty
+    /// Vec (no sub-Vec) means disabled / lazy.
+    pub graph_cache: Vec<Vec<Option<GraphCacheEntry>>>,
+}
+
+/// V2.26.a-i5c — one cached exec per (rank, lane) with the per-layer
+/// slot bundles that drive pos updates. Captures only the layer-chain
+/// portion (no peer-copy, no embed) — the wrap/unwrap happens outside
+/// the capture closure.
+pub struct GraphCacheEntry {
+    pub exec: flambeau_backend_hip::HipGraphExec,
+    pub layer_slots: Vec<super::layer::LayerPrefillSlots>,
 }
 
 impl ShardedForwardPrefillScratch {
@@ -701,7 +717,13 @@ impl ShardedForwardPrefillScratch {
                 disposed: false,
             });
         }
-        Ok(Self { per_rank })
+        // V2.26.a-i5c — pre-size the graph cache to [ranks][u_lanes]
+        // of None. Populated lazily on the first ubatch that hits
+        // (rank, lane) under FLAMBEAU_ASYNC_GRAPH.
+        let graph_cache: Vec<Vec<Option<GraphCacheEntry>>> = (0..cluster.ranks())
+            .map(|_| (0..u_lanes).map(|_| None).collect())
+            .collect();
+        Ok(Self { per_rank, graph_cache })
     }
 
     pub fn dispose(
@@ -1006,6 +1028,12 @@ pub fn forward_prefill_pp_async(
     // serialisation. Size to a full ubatch worth of F16 hidden.
     let bounce_bytes = ubatch_size * model.config.hidden_size * 2;
     cluster.reserve_lane_bounces(u_lanes, bounce_bytes)?;
+    // V2.26.a-i5c — opt-in graph-capture path. When set, rank r>0's
+    // per-(rank, lane) layer chain is captured on the first ubatch
+    // and replayed (with pos-bearing slot updates) on subsequent
+    // ubatches. Rank 0 stays uncaptured (embed loop is token-varying;
+    // tackled in V2.26.a-i6). Default behaviour unchanged.
+    let use_async_graph = std::env::var("FLAMBEAU_ASYNC_GRAPH").is_ok();
 
     let cfg = &model.config;
     let hidden = cfg.hidden_size;
@@ -1168,6 +1196,14 @@ pub fn forward_prefill_pp_async(
             device.bind()?;
             let shard = &shards[rank_idx];
             let rank_session = &mut session.per_rank[rank_idx];
+            // Split-borrow scratch: graph_cache[rank][lane] and per_rank
+            // are disjoint fields of scratch, so Rust lets us borrow
+            // both mutably at once via explicit field access.
+            let graph_slot_ptr: *mut Option<GraphCacheEntry> = if use_async_graph {
+                &mut scratch.graph_cache[rank_idx][lane]
+            } else {
+                std::ptr::null_mut()
+            };
             let rank_scratch = &mut scratch.per_rank[rank_idx];
             let lane_hidden_a = rank_scratch.lane_hidden_a(lane);
             let lane_hidden_b = rank_scratch.lane_hidden_b(lane);
@@ -1175,47 +1211,204 @@ pub fn forward_prefill_pp_async(
                 .lane_layer_mut(lane)
                 .context("lane_layer_mut")?;
 
-            cluster.with_aux_stream(rank_idx, lane, |s| -> flambeau_core::DeviceResult<()> {
-                let (mut x_in, mut x_out) = (lane_hidden_a, lane_hidden_b);
-                for (local_idx, layer_weights) in shard.layers.iter().enumerate() {
-                    let layer_cache = &mut rank_session.caches[local_idx];
-                    forward_layer_prefill(
-                        &shard.ops,
-                        s,
-                        device,
-                        cfg,
-                        layer_weights,
-                        layer_cache,
-                        layer_scratch,
-                        x_in,
-                        x_out,
-                        u,
-                        pos,
-                        None,
-                    )
-                    .map_err(|e| flambeau_core::DeviceError::Backend {
-                        backend: "hip",
-                        code: -1,
-                        message: format!(
-                            "prefill rank {} layer {}: {e}",
-                            rank_idx, layer_weights.layer_idx
-                        ),
-                    })?;
-                    std::mem::swap(&mut x_in, &mut x_out);
-                }
-                if x_in != lane_hidden_a {
+            // V2.26.a-i5c — if FLAMBEAU_ASYNC_GRAPH is set and the
+            // (rank, lane) cache is empty, capture; if set and cache
+            // is populated, replay with slot updates; otherwise fall
+            // through to the uncaptured closure.
+            // SAFETY: graph_slot_ptr is non-null iff use_async_graph is
+            // true; it was derived from a unique &mut, and no other
+            // borrow of scratch.graph_cache is live here.
+            let graph_slot: Option<&mut Option<GraphCacheEntry>> = if use_async_graph {
+                Some(unsafe { &mut *graph_slot_ptr })
+            } else {
+                None
+            };
+
+            let needs_capture = graph_slot
+                .as_ref()
+                .map(|s| s.is_none())
+                .unwrap_or(false);
+            let needs_replay = graph_slot
+                .as_ref()
+                .map(|s| s.is_some())
+                .unwrap_or(false);
+
+            if needs_replay {
+                // === REPLAY branch ===
+                let entry = graph_slot.as_ref().unwrap().as_ref().unwrap();
+                // Stable per-layer backing for the updated pos scalars.
+                // Must outlive the set_slot call (driver copies values
+                // at submit time). We only update slots for full-attn
+                // layers — GDN layers' state advances naturally inside
+                // the captured graph via in-place state buffer r/w.
+                let n_layers = entry.layer_slots.len();
+                let mut n_k_vals: Vec<i32> = vec![0; n_layers];
+                let mut q_off_vals: Vec<i32> = vec![0; n_layers];
+                for local_idx in 0..n_layers {
+                    let layer_cache = &rank_session.caches[local_idx];
+                    let kv = match layer_cache {
+                        LayerCache::FullAttn(kv) => kv,
+                        LayerCache::Gdn(_) => continue,  // GDN: no slots
+                    };
+                    n_k_vals[local_idx] = (pos + u) as i32;
+                    q_off_vals[local_idx] = pos as i32;
+                    // F16 → 2 bytes per element.
+                    let per_token_bytes = kv.n_heads() * kv.head_dim() * 2;
+                    let k_dst = kv.k_buffer().offset_bytes(pos * per_token_bytes);
+                    let v_dst = kv.v_buffer().offset_bytes(pos * per_token_bytes);
+                    let slots = entry.layer_slots[local_idx].full_attn;
+                    // SAFETY: n_k_vals / q_off_vals live until end of
+                    // this branch (past the launch below). k_dst/v_dst
+                    // are device pointers that stay valid for the
+                    // exec's lifetime.
                     unsafe {
-                        device.memcpy_async(
-                            s,
-                            CopyDirection::DeviceToDevice,
-                            lane_hidden_a,
-                            x_in,
-                            chunk_bytes,
-                        )?;
+                        entry.exec.set_slot(slots.n_k_slot, &n_k_vals[local_idx])
+                            .with_context(|| format!(
+                                "set_slot n_k rank={rank_idx} layer={local_idx}"
+                            ))?;
+                        entry.exec.set_slot(slots.q_off_slot, &q_off_vals[local_idx])
+                            .with_context(|| format!(
+                                "set_slot q_off rank={rank_idx} layer={local_idx}"
+                            ))?;
+                        entry.exec.set_memcpy_slot(slots.k_append_slot, k_dst)
+                            .with_context(|| format!(
+                                "set_memcpy k_dst rank={rank_idx} layer={local_idx}"
+                            ))?;
+                        entry.exec.set_memcpy_slot(slots.v_append_slot, v_dst)
+                            .with_context(|| format!(
+                                "set_memcpy v_dst rank={rank_idx} layer={local_idx}"
+                            ))?;
                     }
                 }
-                Ok(())
-            })?;
+                // Launch the cached exec on this lane's aux stream.
+                cluster.with_aux_stream(rank_idx, lane, |s| entry.exec.launch(s))?;
+                // Manually bump each full-attn layer's tail — the
+                // captured kv_cache_append_hip_slot's Rust-side bump
+                // only ran at capture time (it's not part of the graph
+                // replay). GDN layers don't have a tail counter.
+                for local_idx in 0..n_layers {
+                    let layer_cache = &mut rank_session.caches[local_idx];
+                    if let LayerCache::FullAttn(kv) = layer_cache {
+                        kv.bump_tail(u).map_err(|e| anyhow::anyhow!(
+                            "bump_tail rank={rank_idx} layer={local_idx}: {e}"
+                        ))?;
+                    }
+                }
+            } else if needs_capture {
+                // === CAPTURE branch (first ubatch on this lane) ===
+                let layer_slots: Vec<super::layer::LayerPrefillSlots> = (0..shard.layers.len())
+                    .map(|_| super::layer::LayerPrefillSlots {
+                        full_attn: super::attn::AttnPrefillSlots {
+                            n_k_slot: flambeau_backend_hip::ScalarSlot::new(),
+                            q_off_slot: flambeau_backend_hip::ScalarSlot::new(),
+                            k_append_slot: flambeau_backend_hip::MemcpySlot::new(),
+                            v_append_slot: flambeau_backend_hip::MemcpySlot::new(),
+                        },
+                    })
+                    .collect();
+
+                // Capture under the aux stream. The captured graph
+                // includes: layer chain + optional tail DtoD copy to
+                // lane_hidden_a. kv_cache_append_hip_slot's Rust-side
+                // bump_tail runs ONCE during capture (advancing each
+                // layer's tail by u), which matches this first
+                // ubatch's correct final state.
+                let exec = cluster.with_aux_stream(rank_idx, lane, |aux_s| {
+                    flambeau_backend_hip::HipGraphExec::capture(aux_s, |capture_s| {
+                        let (mut x_in, mut x_out) = (lane_hidden_a, lane_hidden_b);
+                        for (local_idx, layer_weights) in shard.layers.iter().enumerate() {
+                            let layer_cache = &mut rank_session.caches[local_idx];
+                            forward_layer_prefill(
+                                &shard.ops,
+                                capture_s,
+                                device,
+                                cfg,
+                                layer_weights,
+                                layer_cache,
+                                layer_scratch,
+                                x_in,
+                                x_out,
+                                u,
+                                pos,
+                                Some(layer_slots[local_idx]),
+                            )
+                            .map_err(|e| flambeau_core::DeviceError::Backend {
+                                backend: "hip",
+                                code: -1,
+                                message: format!(
+                                    "capture prefill rank {} layer {}: {e}",
+                                    rank_idx, layer_weights.layer_idx
+                                ),
+                            })?;
+                            std::mem::swap(&mut x_in, &mut x_out);
+                        }
+                        if x_in != lane_hidden_a {
+                            // SAFETY: lane_hidden_a / x_in are live
+                            // device ptrs; chunk_bytes is bounded.
+                            unsafe {
+                                device.memcpy_async(
+                                    capture_s,
+                                    CopyDirection::DeviceToDevice,
+                                    lane_hidden_a,
+                                    x_in,
+                                    chunk_bytes,
+                                )?;
+                            }
+                        }
+                        Ok(())
+                    })
+                })?;
+
+                // Launch the freshly-instantiated exec to execute the
+                // captured work for this first ubatch.
+                cluster.with_aux_stream(rank_idx, lane, |s| exec.launch(s))?;
+
+                // Stash in cache for subsequent ubatches.
+                *graph_slot.unwrap() = Some(GraphCacheEntry { exec, layer_slots });
+            } else {
+                // === UNCAPTURED branch (legacy async) ===
+                cluster.with_aux_stream(rank_idx, lane, |s| -> flambeau_core::DeviceResult<()> {
+                    let (mut x_in, mut x_out) = (lane_hidden_a, lane_hidden_b);
+                    for (local_idx, layer_weights) in shard.layers.iter().enumerate() {
+                        let layer_cache = &mut rank_session.caches[local_idx];
+                        forward_layer_prefill(
+                            &shard.ops,
+                            s,
+                            device,
+                            cfg,
+                            layer_weights,
+                            layer_cache,
+                            layer_scratch,
+                            x_in,
+                            x_out,
+                            u,
+                            pos,
+                            None,
+                        )
+                        .map_err(|e| flambeau_core::DeviceError::Backend {
+                            backend: "hip",
+                            code: -1,
+                            message: format!(
+                                "prefill rank {} layer {}: {e}",
+                                rank_idx, layer_weights.layer_idx
+                            ),
+                        })?;
+                        std::mem::swap(&mut x_in, &mut x_out);
+                    }
+                    if x_in != lane_hidden_a {
+                        unsafe {
+                            device.memcpy_async(
+                                s,
+                                CopyDirection::DeviceToDevice,
+                                lane_hidden_a,
+                                x_in,
+                                chunk_bytes,
+                            )?;
+                        }
+                    }
+                    Ok(())
+                })?;
+            }
         }
         } // close for rank_idx
     } // close for t (outer 1F1B timestep loop)
