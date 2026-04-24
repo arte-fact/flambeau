@@ -40,6 +40,157 @@ use crate::weights::DeviceTensor;
 
 // `row_bytes_for_dtype` moved to `forward::common`.
 
+/// V2.26.a-i7b — persistent host-side scratch for the prefill embed
+/// batch path (`forward_embed_prefill_batch`). Sized once per scratch
+/// construction to the largest ubatch the session will ever use;
+/// grown on demand if a caller asks for more.
+///
+/// The Rust Vec's address is read by the batched HtoD memcpy AFTER
+/// the last host-side dequant iteration completes — dropping the
+/// per-token `stream.synchronize()` calls that the legacy per-token
+/// path needed to keep its stack-local buffers alive.
+pub struct EmbedPrefillHostScratch {
+    pub raw: Vec<u8>,
+    pub f16: Vec<half::f16>,
+}
+
+impl EmbedPrefillHostScratch {
+    pub fn with_capacity(max_tokens: usize, row_bytes: usize, hidden: usize) -> Self {
+        Self {
+            raw: vec![0u8; max_tokens * row_bytes],
+            f16: vec![half::f16::ZERO; max_tokens * hidden],
+        }
+    }
+}
+
+/// V2.26.a-i7b — batched embed for `L` prefill tokens. Replaces the
+/// per-token loop `for tid in tokens { forward_embed_decode_host(...) }`
+/// which under async-PP dispatch issued 2L host-blocking
+/// `stream.synchronize()` calls on rank 0 — each of which starved
+/// other-lane / other-rank dispatches of the single Rust driver
+/// thread (a cross-lane barrier in the same shape as V2.26.a-i5a's
+/// `upload_positions_range` fix).
+///
+/// The batched path:
+///   1. Async DtoH each of `L` rows into one persistent host buffer
+///      (caller-owned — usually on `FullAttnPrefillScratch` /
+///      per-rank scratch).
+///   2. Sync ONCE — the downloads all belong to the caller's stream.
+///   3. Dequant all `L` rows on the host (straight-line CPU work;
+///      no kernel launches).
+///   4. Single HtoD copy of the whole batched F16 block to
+///      `out_f16`. No sync needed — stream-ordered with the
+///      subsequent layer-chain kernels; the host scratch's
+///      lifetime is bounded by the caller's `&mut`.
+///
+/// Result on 9B Q4_1 Mesh<4> L=4096 ubatch=128 u_lanes=2: per-pass
+/// embed syncs drop from 2·4096 = 8192 to 1. Freed driver time
+/// lets rank 0 issue other-rank work sooner, tightening 1F1B
+/// pipeline fill.
+pub fn forward_embed_prefill_batch(
+    device: &HipDevice,
+    stream: &HipStream,
+    token_embd: &DeviceTensor,
+    token_ids: &[u32],
+    out_f16: DevicePtr,
+    hidden: usize,
+    host_scratch: &mut EmbedPrefillHostScratch,
+) -> Result<()> {
+    let l = token_ids.len();
+    if l == 0 {
+        return Ok(());
+    }
+    if token_embd.dims.len() != 2 {
+        bail!(
+            "token_embd: expected 2D weight [vocab, hidden], got dims {:?}",
+            token_embd.dims
+        );
+    }
+    let vocab = token_embd.dims[0] as usize;
+    let w_k = token_embd.dims[1] as usize;
+    if w_k != hidden {
+        bail!("token_embd inner dim {w_k} != config hidden {hidden}");
+    }
+    let row_bytes = row_bytes_for_dtype(token_embd.dtype, hidden)?;
+    // Grow host scratch on demand.
+    let raw_need = l * row_bytes;
+    let f16_need = l * hidden;
+    if host_scratch.raw.len() < raw_need {
+        host_scratch.raw.resize(raw_need, 0);
+    }
+    if host_scratch.f16.len() < f16_need {
+        host_scratch.f16.resize(f16_need, half::f16::ZERO);
+    }
+
+    // 1. Async DtoH each row into the batched host buffer. All
+    // issued on `stream` back-to-back — no intermediate sync.
+    for (i, &tid) in token_ids.iter().enumerate() {
+        let t = tid as usize;
+        if t >= vocab {
+            bail!("token_id {tid} >= vocab {vocab}");
+        }
+        let src = token_embd.ptr.offset_bytes(t * row_bytes);
+        let dst_host = DevicePtr(
+            (host_scratch.raw.as_mut_ptr() as usize) + i * row_bytes,
+        );
+        // SAFETY: src is a valid device offset (bounds-checked via
+        // `t < vocab`); host_scratch.raw has >= (i+1)*row_bytes
+        // elements; stream is live.
+        unsafe {
+            device.memcpy_async(
+                stream,
+                CopyDirection::DeviceToHost,
+                dst_host,
+                src,
+                row_bytes,
+            )?;
+        }
+    }
+    stream.synchronize()?;  // ONE sync for all L downloads.
+
+    // 2. Dequant all rows on the host. F16 fast-path avoids the
+    // F32 round-trip.
+    if token_embd.dtype == GgmlDType::F16 {
+        // raw[..] IS the F16 representation (just u8 bytes); cast.
+        let raw_f16 = bytemuck::cast_slice::<u8, half::f16>(
+            &host_scratch.raw[..raw_need],
+        );
+        host_scratch.f16[..f16_need].copy_from_slice(raw_f16);
+    } else {
+        for i in 0..l {
+            let row_raw = &host_scratch.raw[i * row_bytes..(i + 1) * row_bytes];
+            let row_f32 = flambeau_quant::dequantize_to_vec(
+                token_embd.dtype,
+                row_raw,
+                hidden,
+            )
+            .map_err(|e| anyhow::anyhow!("dequant token_embd row {}: {e}", token_ids[i]))?;
+            for (j, v) in row_f32.into_iter().enumerate() {
+                host_scratch.f16[i * hidden + j] = half::f16::from_f32(v);
+            }
+        }
+    }
+
+    // 3. Single HtoD upload of the whole batched F16 block.
+    let upload_bytes = f16_need * 2;
+    // SAFETY: out_f16 has at least `upload_bytes` valid device bytes
+    // (caller contract); host_scratch.f16 is >= f16_need elems; the
+    // scratch outlives the stream's consumption of this copy per
+    // caller's `&mut` guarantee.
+    unsafe {
+        device.memcpy_async(
+            stream,
+            CopyDirection::HostToDevice,
+            out_f16,
+            DevicePtr(host_scratch.f16.as_ptr() as usize),
+            upload_bytes,
+        )?;
+    }
+    // No stream.synchronize — stream ordering guarantees the
+    // subsequent layer-chain kernels see the upload complete.
+    Ok(())
+}
+
 /// Look up a single token's embedding row and write it as F16 into
 /// `out_f16`. Decode-path only (one token). Path: download the row's raw
 /// bytes from `token_embd` on device → dequantise on host → cast to F16 →
@@ -309,5 +460,37 @@ pub fn argmax_token_host(
         }
     }
     Ok(best_idx as u32)
+}
+
+/// Host-side download of the F32 logit row produced by
+/// [`forward_output_head_decode`]. Fills `out` with exactly `vocab` F32
+/// values; any prior contents are replaced. `out.capacity() >= vocab`
+/// avoids a reallocation on the hot path.
+///
+/// Used by the sampler path in the HTTP server (`/v1/chat/completions`
+/// with `temperature > 0` / `top_p < 1`). Greedy callers should keep
+/// using [`argmax_token_host`] to avoid the vocab-sized memcpy + clone.
+pub fn download_logits_host(
+    device: &HipDevice,
+    stream: &HipStream,
+    logits: DevicePtr,
+    vocab: usize,
+    out: &mut Vec<f32>,
+) -> Result<()> {
+    out.clear();
+    out.resize(vocab, 0.0);
+    // SAFETY: `logits` points to at least `vocab * 4` valid device bytes
+    // (caller's contract — OutputHeadScratch sizes it against cfg.vocab_size).
+    unsafe {
+        device.memcpy_async(
+            stream,
+            CopyDirection::DeviceToHost,
+            DevicePtr(out.as_mut_ptr() as usize),
+            logits,
+            vocab * 4,
+        )?;
+    }
+    stream.synchronize()?;
+    Ok(())
 }
 

@@ -57,7 +57,8 @@ pub use moe::{
 pub mod io;
 pub use io::{
     argmax_token_host, download_logits_host, forward_embed_decode_host,
-    forward_output_head_decode, OutputHeadScratch,
+    forward_embed_prefill_batch, forward_output_head_decode, EmbedPrefillHostScratch,
+    OutputHeadScratch,
 };
 
 pub mod layer;

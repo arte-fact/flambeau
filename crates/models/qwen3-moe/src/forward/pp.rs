@@ -642,6 +642,11 @@ pub struct ShardedForwardPrefillScratch {
     /// subsequent ubatches update pos-bearing slots + replay. Empty
     /// Vec (no sub-Vec) means disabled / lazy.
     pub graph_cache: Vec<Vec<Option<GraphCacheEntry>>>,
+    /// V2.26.a-i7b — persistent host-side scratch for rank 0's
+    /// batched embed (`forward_embed_prefill_batch`). Replaces per-token
+    /// DtoH-sync-HtoD-sync pattern that issued 2·u host barriers per
+    /// ubatch and starved async-PP's Rust dispatcher.
+    pub embed_host: super::io::EmbedPrefillHostScratch,
 }
 
 /// V2.26.a-i5c — one cached exec per (rank, lane) with the per-layer
@@ -723,7 +728,11 @@ impl ShardedForwardPrefillScratch {
         let graph_cache: Vec<Vec<Option<GraphCacheEntry>>> = (0..cluster.ranks())
             .map(|_| (0..u_lanes).map(|_| None).collect())
             .collect();
-        Ok(Self { per_rank, graph_cache })
+        // V2.26.a-i7b — rank-0 embed host scratch sized for max ubatch.
+        // row_bytes depends on the token_embd dtype which isn't known
+        // here; start empty and grow on first use.
+        let embed_host = super::io::EmbedPrefillHostScratch { raw: Vec::new(), f16: Vec::new() };
+        Ok(Self { per_rank, graph_cache, embed_host })
     }
 
     pub fn dispose(
@@ -1091,27 +1100,35 @@ pub fn forward_prefill_pp_async(
                 .token_embd
                 .as_ref()
                 .context("rank 0 shard missing token_embd")?;
+            // Split-borrow: embed_host and per_rank are disjoint
+            // fields of scratch; we need mutable access to both.
+            let embed_host: *mut super::io::EmbedPrefillHostScratch = &mut scratch.embed_host;
             let scratch0 = &mut scratch.per_rank[0];
             let lane_hidden_a = scratch0.lane_hidden_a(lane);
 
-            // Embed on the lane's aux stream.
+            // V2.26.a-i7b — batched embed (one sync per ubatch
+            // instead of 2·u). Under 1F1B the Rust driver thread
+            // returned here sooner → more time for other-rank
+            // dispatches.
             cluster.with_aux_stream(0, lane, |s| -> flambeau_core::DeviceResult<()> {
-                for (t, &token_id) in chunk.iter().enumerate() {
-                    forward_embed_decode_host(
-                        rank0,
-                        s,
-                        token_embd,
-                        token_id,
-                        lane_hidden_a.offset_bytes(t * row_bytes),
-                        hidden,
-                    )
-                    .map_err(|e| flambeau_core::DeviceError::Backend {
-                        backend: "hip",
-                        code: -1,
-                        message: format!("embed: {e}"),
-                    })?;
-                }
-                Ok(())
+                // SAFETY: embed_host is a *mut into scratch.embed_host
+                // — disjoint from scratch.per_rank we borrowed above,
+                // so no aliasing.
+                let embed_host_ref = unsafe { &mut *embed_host };
+                super::io::forward_embed_prefill_batch(
+                    rank0,
+                    s,
+                    token_embd,
+                    chunk,
+                    lane_hidden_a,
+                    hidden,
+                    embed_host_ref,
+                )
+                .map_err(|e| flambeau_core::DeviceError::Backend {
+                    backend: "hip",
+                    code: -1,
+                    message: format!("embed_batch: {e}"),
+                })
             })?;
 
             // Run rank 0's layers on the same aux stream.
