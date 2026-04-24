@@ -31,7 +31,7 @@ use crate::sys::{
     error_string, hipHostFree, hipHostMalloc, hipMemcpyAsync, hipMemcpyKind,
     hipStreamSynchronize, HIP_HOST_MALLOC_PORTABLE, HIP_SUCCESS,
 };
-use crate::HipDevice;
+use crate::{HipDevice, HipStream};
 use flambeau_core::{Device, DeviceError, DevicePtr, DeviceResult};
 
 /// One entry per rank: the pinned host bounce buffer.
@@ -80,6 +80,11 @@ pub struct HipCluster {
     /// Pinned-host bounce buffers, one per rank. Atomic/lock-free on the
     /// hot path — see [`RankBounce`].
     bounces: Vec<RankBounce>,
+    /// V2.25.a — per-rank auxiliary streams for pipeline-parallel ubatch
+    /// pipelining. `aux_streams[rank][lane]` is an independent HIP stream on
+    /// rank `rank`. Populated lazily by [`HipCluster::reserve_aux_streams`].
+    /// Empty by default so the non-pipelined path stays byte-identical.
+    aux_streams: Vec<std::sync::Mutex<Vec<HipStream>>>,
 }
 
 impl HipCluster {
@@ -98,7 +103,86 @@ impl HipCluster {
             devices.push(HipDevice::new(id)?);
         }
         let bounces = (0..device_ids.len()).map(|_| RankBounce::empty()).collect();
-        Ok(Self { devices, bounces })
+        let aux_streams = (0..device_ids.len())
+            .map(|_| std::sync::Mutex::new(Vec::new()))
+            .collect();
+        Ok(Self { devices, bounces, aux_streams })
+    }
+
+    /// V2.25.a — ensure each rank has at least `n_lanes` auxiliary streams
+    /// beyond its default stream. Used by the ubatch-pipelined prefill path
+    /// so rank `r` can drive ubatch lane `lane` on its own stream without
+    /// serialising behind the default stream. Idempotent: growing from 2 to
+    /// 4 lanes creates 2 new streams; shrinking does nothing.
+    pub fn reserve_aux_streams(&self, n_lanes: usize) -> DeviceResult<()> {
+        for rank in 0..self.devices.len() {
+            let device = &self.devices[rank];
+            device.bind()?;
+            let mut slot = self.aux_streams[rank].lock().map_err(|_| DeviceError::Backend {
+                backend: "hip",
+                code: -1,
+                message: "aux_streams mutex poisoned".into(),
+            })?;
+            while slot.len() < n_lanes {
+                slot.push(HipStream::new(device.id())?);
+            }
+        }
+        Ok(())
+    }
+
+    /// V2.25.a — run `f` with rank `r`'s aux stream for ubatch lane `lane`.
+    /// The lane must have been pre-reserved via
+    /// [`HipCluster::reserve_aux_streams`] or this returns an error.
+    ///
+    /// Closure API (rather than returning `&HipStream`) so the aux-streams
+    /// Mutex stays held for the duration of the borrow — the `HipStream` is
+    /// Send+Sync, but its lifetime is tied to the Vec entry, which is behind
+    /// the mutex.
+    pub fn with_aux_stream<F, T>(&self, rank: usize, lane: usize, f: F) -> DeviceResult<T>
+    where
+        F: FnOnce(&HipStream) -> DeviceResult<T>,
+    {
+        if rank >= self.devices.len() {
+            return Err(DeviceError::Backend {
+                backend: "hip",
+                code: -1,
+                message: format!("aux_stream: rank {rank} out of range (N={})", self.devices.len()),
+            });
+        }
+        let guard = self.aux_streams[rank].lock().map_err(|_| DeviceError::Backend {
+            backend: "hip",
+            code: -1,
+            message: "aux_streams mutex poisoned".into(),
+        })?;
+        if lane >= guard.len() {
+            return Err(DeviceError::Backend {
+                backend: "hip",
+                code: -1,
+                message: format!(
+                    "aux_stream: lane {lane} not reserved on rank {rank} (have {}); call reserve_aux_streams first",
+                    guard.len()
+                ),
+            });
+        }
+        f(&guard[lane])
+    }
+
+    /// V2.25.a — number of aux streams currently reserved on rank `r`.
+    /// Useful for assertions at the ubatch-loop site.
+    pub fn aux_stream_count(&self, rank: usize) -> DeviceResult<usize> {
+        if rank >= self.devices.len() {
+            return Err(DeviceError::Backend {
+                backend: "hip",
+                code: -1,
+                message: format!("aux_stream_count: rank {rank} out of range"),
+            });
+        }
+        let guard = self.aux_streams[rank].lock().map_err(|_| DeviceError::Backend {
+            backend: "hip",
+            code: -1,
+            message: "aux_streams mutex poisoned".into(),
+        })?;
+        Ok(guard.len())
     }
 
     /// Pre-grow every rank's pinned bounce buffer to `bytes_per_rank`.
@@ -134,6 +218,16 @@ impl HipCluster {
     /// cluster without an explicit call leaks the pinned host memory (we
     /// log a warn from `Drop` in that case).
     pub fn dispose(mut self) -> DeviceResult<()> {
+        // V2.25.a — drop aux streams first; each rank binds its device
+        // before hipStreamDestroy implicit-runs in HipStream's Drop.
+        for (rank, slot) in self.aux_streams.drain(..).enumerate() {
+            if let Ok(streams) = slot.into_inner() {
+                if !streams.is_empty() {
+                    self.devices[rank].bind()?;
+                }
+                drop(streams); // explicit — HipStream::Drop calls hipStreamDestroy
+            }
+        }
         for bounce in self.bounces.drain(..) {
             // Atomically null out the ptr so a concurrent reader (if the
             // caller ignored the "dispose after last use" contract) sees
