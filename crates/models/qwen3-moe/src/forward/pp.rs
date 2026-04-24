@@ -22,8 +22,9 @@ use flambeau_core::{CopyDirection, Device, DevicePtr, Stream};
 use flambeau_ops::hip::HipDevice;
 
 use super::{
-    argmax_token_host, forward_embed_decode_host, forward_layer_decode, forward_layer_prefill,
-    forward_output_head_decode, LayerForwardScratch, LayerPrefillScratch, OutputHeadScratch,
+    argmax_token_host, download_logits_host, forward_embed_decode_host, forward_layer_decode,
+    forward_layer_prefill, forward_output_head_decode, LayerForwardScratch, LayerPrefillScratch,
+    OutputHeadScratch,
 };
 
 // ---------------------------------------------------------------------------
@@ -334,14 +335,230 @@ pub fn forward_one_token_pp(
     )
 }
 
+/// Variant of [`forward_one_token_pp`] that downloads the F32 logit row
+/// into a caller-owned `Vec<f32>` instead of argmax-ing on host. Used by
+/// the HTTP server when `temperature > 0` / `top_p < 1`; greedy callers
+/// should keep using [`forward_one_token_pp`] to skip the download +
+/// server-side softmax.
+pub fn forward_one_token_pp_logits(
+    model: &crate::sharded::Qwen3MoEShardedModel,
+    session: &mut crate::sharded::Qwen3MoEShardedSession,
+    cluster: &flambeau_backend_hip::HipCluster,
+    scratch: &mut ShardedForwardOneTokenScratch,
+    token_id: u32,
+    position: usize,
+    logits_out: &mut Vec<f32>,
+) -> Result<()> {
+    forward_one_token_pp_inner(
+        model, session, cluster, scratch, token_id, position, /*download_logits=*/ Some(logits_out),
+    )
+    .map(|_| ())
+}
+
+/// Shared body for `forward_one_token_pp` and `forward_one_token_pp_logits`.
+/// When `logits_out` is `Some`, downloads the F32 logits into it and returns 0;
+/// when `None`, runs host argmax and returns the sampled token id.
+fn forward_one_token_pp_inner(
+    model: &crate::sharded::Qwen3MoEShardedModel,
+    session: &mut crate::sharded::Qwen3MoEShardedSession,
+    cluster: &flambeau_backend_hip::HipCluster,
+    scratch: &mut ShardedForwardOneTokenScratch,
+    token_id: u32,
+    position: usize,
+    logits_out: Option<&mut Vec<f32>>,
+) -> Result<u32> {
+    // Re-run the same composition as `forward_one_token_pp`, but branch on
+    // the final reducer. Copy-paste is deliberate — the body is ~150 lines
+    // of tightly-ordered HIP calls and threading a branch through would
+    // hurt readability more than a second copy that tracks the original
+    // line-for-line.
+    let n_ranks = model.shards.len();
+    if n_ranks == 0 {
+        bail!("forward_one_token_pp_inner: zero-rank cluster");
+    }
+    let cfg = &model.config;
+    let hidden = cfg.hidden_size;
+    let hidden_bytes = hidden * 2;
+
+    {
+        let rank0 = cluster.device(0);
+        rank0.bind()?;
+        let shard0 = &model.shards[0];
+        let scratch0 = &mut scratch.per_rank[0];
+        let token_embd = shard0
+            .token_embd
+            .as_ref()
+            .context("rank 0 shard missing token_embd")?;
+        forward_embed_decode_host(
+            rank0,
+            rank0.default_stream(),
+            token_embd,
+            token_id,
+            scratch0.hidden_a,
+            hidden,
+        )?;
+    }
+
+    for rank_idx in 0..n_ranks {
+        let device = cluster.device(rank_idx);
+
+        if rank_idx > 0 {
+            unsafe {
+                cluster.peer_copy_via_host(
+                    scratch.per_rank[rank_idx].hidden_a,
+                    rank_idx,
+                    scratch.per_rank[rank_idx - 1].hidden_a,
+                    rank_idx - 1,
+                    hidden_bytes,
+                )?;
+            }
+        }
+        device.bind()?;
+
+        let shard = &model.shards[rank_idx];
+        let rank_scratch = &mut scratch.per_rank[rank_idx];
+        let rank_session = &mut session.per_rank[rank_idx];
+        let layer_scratch = rank_scratch
+            .layer
+            .as_mut()
+            .context("per-rank LayerForwardScratch missing")?;
+
+        let (mut x_in, mut x_out) = (rank_scratch.hidden_a, rank_scratch.hidden_b);
+        for (local_idx, layer_weights) in shard.layers.iter().enumerate() {
+            let layer_cache = &mut rank_session.caches[local_idx];
+            forward_layer_decode(
+                &shard.ops,
+                device.default_stream(),
+                device,
+                cfg,
+                layer_weights,
+                layer_cache,
+                layer_scratch,
+                x_in,
+                x_out,
+                position,
+            )
+            .with_context(|| {
+                format!(
+                    "rank {} layer {} ({})",
+                    rank_idx,
+                    layer_weights.layer_idx,
+                    if cfg.is_recurrent(layer_weights.layer_idx) {
+                        "gdn"
+                    } else {
+                        "full_attn"
+                    },
+                )
+            })?;
+            std::mem::swap(&mut x_in, &mut x_out);
+        }
+        if x_in != rank_scratch.hidden_a {
+            unsafe {
+                device.memcpy_async(
+                    device.default_stream(),
+                    CopyDirection::DeviceToDevice,
+                    rank_scratch.hidden_a,
+                    x_in,
+                    hidden_bytes,
+                )?;
+            }
+        }
+    }
+
+    let last_idx = n_ranks - 1;
+    let last_shard = &model.shards[last_idx];
+    let last_device = cluster.device(last_idx);
+    last_device.bind()?;
+    let last_scratch = &mut scratch.per_rank[last_idx];
+    let output_norm = last_shard
+        .output_norm
+        .as_ref()
+        .context("last rank missing output_norm")?;
+    let lm_head = last_shard
+        .output
+        .as_ref()
+        .or(last_shard.token_embd.as_ref())
+        .context("last rank missing both output.weight and tied token_embd")?;
+    let output_head_scratch = last_scratch
+        .output_head
+        .as_mut()
+        .context("last rank missing output_head scratch")?;
+    forward_output_head_decode(
+        &last_shard.ops,
+        last_device.default_stream(),
+        cfg,
+        output_norm,
+        lm_head,
+        output_head_scratch,
+        last_scratch.hidden_a,
+    )?;
+
+    match logits_out {
+        Some(buf) => {
+            download_logits_host(
+                last_device,
+                last_device.default_stream(),
+                output_head_scratch.logits_f32,
+                cfg.vocab_size,
+                buf,
+            )?;
+            Ok(0)
+        }
+        None => argmax_token_host(
+            last_device,
+            last_device.default_stream(),
+            output_head_scratch.logits_f32,
+            cfg.vocab_size,
+        ),
+    }
+}
+
 // ---------------------------------------------------------------------------
 // V1.7.5.D — pipeline-parallel forward_prefill.
 // ---------------------------------------------------------------------------
+
+/// V2.25.c — one ubatch lane's ping-pong + per-layer scratch. Each rank
+/// holds `u_lanes` of these so V2.25.d can pipeline ubatches across ranks
+/// without aliasing intermediate buffers.
+pub struct UbatchLane {
+    pub hidden_a: DevicePtr,
+    pub hidden_b: DevicePtr,
+    pub layer: LayerPrefillScratch,
+    hidden_bytes: usize,
+}
+
+impl UbatchLane {
+    fn new(
+        cfg: &crate::Qwen3MoEConfig,
+        device: &HipDevice,
+        ubatch_size: usize,
+    ) -> Result<Self> {
+        let hidden_bytes = ubatch_size * cfg.hidden_size * 2;
+        let hidden_a = device.alloc(hidden_bytes)?;
+        let hidden_b = device.alloc(hidden_bytes)?;
+        let layer = LayerPrefillScratch::new(cfg, device, ubatch_size)?;
+        Ok(Self { hidden_a, hidden_b, layer, hidden_bytes })
+    }
+
+    fn dispose(self, device: &HipDevice) -> Result<()> {
+        unsafe {
+            device.dealloc(self.hidden_a, self.hidden_bytes)?;
+            device.dealloc(self.hidden_b, self.hidden_bytes)?;
+        }
+        self.layer.dispose(device)?;
+        Ok(())
+    }
+}
 
 /// Per-rank scratch for a pipeline-parallel prefill chunk of up to
 /// `max_tokens` tokens. Layout mirrors `RankForwardScratch` with the
 /// hidden ping-pong buffers and `LayerPrefillScratch` both sized for `L`
 /// tokens. Only the last rank owns an `OutputHeadScratch`.
+///
+/// V2.25.c — `extra_lanes` holds ADDITIONAL `UbatchLane`s beyond the
+/// implicit lane 0 (which is the hidden_a/hidden_b/layer fields below).
+/// Empty by default; `new_with_lanes(u_lanes > 1)` pre-allocates them so
+/// V2.25.d can pipeline ubatches across ranks without aliasing.
 pub struct RankForwardPrefillScratch {
     pub rank: flambeau_runtime::RankId,
     pub device_id: i32,
@@ -350,11 +567,37 @@ pub struct RankForwardPrefillScratch {
     pub hidden_b: DevicePtr,
     pub layer: Option<LayerPrefillScratch>,
     pub output_head: Option<OutputHeadScratch>,
+    /// V2.25.c — additional ubatch lanes beyond lane 0 (= the above
+    /// hidden_a/hidden_b/layer fields). Used by V2.25.d.
+    pub extra_lanes: Vec<UbatchLane>,
     hidden_bytes: usize,
     disposed: bool,
 }
 
 impl RankForwardPrefillScratch {
+    /// V2.25.c — total ubatch lanes (includes lane 0 = the direct fields).
+    pub fn u_lanes(&self) -> usize { 1 + self.extra_lanes.len() }
+
+    /// V2.25.c — hidden_a for lane `idx`. Lane 0 = `self.hidden_a`;
+    /// lane i>0 = `self.extra_lanes[i-1].hidden_a`.
+    pub fn lane_hidden_a(&self, idx: usize) -> DevicePtr {
+        if idx == 0 { self.hidden_a } else { self.extra_lanes[idx - 1].hidden_a }
+    }
+
+    /// V2.25.c — hidden_b for lane `idx`.
+    pub fn lane_hidden_b(&self, idx: usize) -> DevicePtr {
+        if idx == 0 { self.hidden_b } else { self.extra_lanes[idx - 1].hidden_b }
+    }
+
+    /// V2.25.c — mutable LayerPrefillScratch for lane `idx`.
+    pub fn lane_layer_mut(&mut self, idx: usize) -> Option<&mut LayerPrefillScratch> {
+        if idx == 0 {
+            self.layer.as_mut()
+        } else {
+            Some(&mut self.extra_lanes[idx - 1].layer)
+        }
+    }
+
     pub fn dispose(mut self, device: &HipDevice) -> Result<()> {
         if self.disposed {
             return Ok(());
@@ -366,6 +609,9 @@ impl RankForwardPrefillScratch {
         }
         if let Some(s) = self.layer.take() {
             s.dispose(device)?;
+        }
+        for lane in self.extra_lanes.drain(..) {
+            lane.dispose(device)?;
         }
         if let Some(s) = self.output_head.take() {
             s.dispose(device)?;
@@ -392,13 +638,33 @@ pub struct ShardedForwardPrefillScratch {
 }
 
 impl ShardedForwardPrefillScratch {
+    /// V2.25.c back-compat constructor — single lane, lane size = max_tokens.
+    /// Equivalent to `new_with_lanes(model, cluster, max_tokens, 1)`.
     pub fn new(
         model: &crate::sharded::Qwen3MoEShardedModel,
         cluster: &flambeau_backend_hip::HipCluster,
         max_tokens: usize,
     ) -> Result<Self> {
-        assert!(max_tokens >= 1, "max_tokens must be >= 1");
-        let hidden_bytes = max_tokens * model.config.hidden_size * 2;
+        Self::new_with_lanes(model, cluster, max_tokens, 1)
+    }
+
+    /// V2.25.c — construct per-rank scratch with `u_lanes` lanes, each
+    /// sized for `ubatch_size` tokens. `u_lanes = 1` is byte-identical to
+    /// the pre-V2.25 layout. `u_lanes >= 2` enables V2.25.d async PP
+    /// pipelining (rank k can work on ubatch i+1 while rank k+1 waits
+    /// driver-side for ubatch i's peer-copy).
+    ///
+    /// Memory footprint per rank: `u_lanes × (2 × ubatch_size × hidden × 2
+    /// bytes hidden ping-pong + LayerPrefillScratch)`.
+    pub fn new_with_lanes(
+        model: &crate::sharded::Qwen3MoEShardedModel,
+        cluster: &flambeau_backend_hip::HipCluster,
+        ubatch_size: usize,
+        u_lanes: usize,
+    ) -> Result<Self> {
+        assert!(ubatch_size >= 1, "ubatch_size must be >= 1");
+        assert!(u_lanes >= 1, "u_lanes must be >= 1");
+        let hidden_bytes = ubatch_size * model.config.hidden_size * 2;
         // C3: size the cluster's pinned bounces to the max prefill payload
         // (decode hand-offs only need `hidden_bytes / max_tokens`; prefill
         // dominates). This is a max; `reserve_bounce_capacity` never
@@ -408,9 +674,15 @@ impl ShardedForwardPrefillScratch {
         for rank_idx in 0..cluster.ranks() {
             let device = cluster.device(rank_idx);
             device.bind()?;
+            // Lane 0 — the legacy fields.
             let hidden_a = device.alloc(hidden_bytes)?;
             let hidden_b = device.alloc(hidden_bytes)?;
-            let layer = Some(LayerPrefillScratch::new(&model.config, device, max_tokens)?);
+            let layer = Some(LayerPrefillScratch::new(&model.config, device, ubatch_size)?);
+            // Extra lanes — one fresh UbatchLane per additional u_lane.
+            let mut extra_lanes = Vec::with_capacity(u_lanes.saturating_sub(1));
+            for _ in 1..u_lanes {
+                extra_lanes.push(UbatchLane::new(&model.config, device, ubatch_size)?);
+            }
             let output_head = if rank_idx == cluster.ranks() - 1 {
                 Some(OutputHeadScratch::new(&model.config, device)?)
             } else {
@@ -419,11 +691,12 @@ impl ShardedForwardPrefillScratch {
             per_rank.push(RankForwardPrefillScratch {
                 rank: flambeau_runtime::RankId(rank_idx as u32),
                 device_id: device.id(),
-                max_tokens,
+                max_tokens: ubatch_size,
                 hidden_a,
                 hidden_b,
                 layer,
                 output_head,
+                extra_lanes,
                 hidden_bytes,
                 disposed: false,
             });
@@ -654,6 +927,164 @@ pub fn forward_prefill_pp(
         last_device.default_stream(),
         output_head_scratch.logits_f32,
         cfg.vocab_size,
+    )
+}
+
+/// Variant of [`forward_prefill_pp`] that downloads the F32 logit row for
+/// the last token into `logits_out` instead of argmax-ing on host. See
+/// [`forward_one_token_pp_logits`] for the streaming rationale.
+pub fn forward_prefill_pp_logits(
+    model: &crate::sharded::Qwen3MoEShardedModel,
+    session: &mut crate::sharded::Qwen3MoEShardedSession,
+    cluster: &flambeau_backend_hip::HipCluster,
+    scratch: &mut ShardedForwardPrefillScratch,
+    tokens: &[u32],
+    start_position: usize,
+    logits_out: &mut Vec<f32>,
+) -> Result<()> {
+    let n_ranks = model.shards.len();
+    if n_ranks == 0 {
+        bail!("forward_prefill_pp_logits: zero-rank cluster");
+    }
+    let l = tokens.len();
+    if l == 0 {
+        bail!("forward_prefill_pp_logits called with empty tokens");
+    }
+    let max_tokens = scratch.per_rank[0].max_tokens;
+    if l > max_tokens {
+        bail!(
+            "forward_prefill_pp_logits: L={l} > scratch.max_tokens={max_tokens}; caller must chunk"
+        );
+    }
+    let cfg = &model.config;
+    let hidden = cfg.hidden_size;
+    let row_bytes = hidden * 2;
+    let chunk_bytes = l * row_bytes;
+
+    {
+        let rank0 = cluster.device(0);
+        rank0.bind()?;
+        let shard0 = &model.shards[0];
+        let scratch0 = &mut scratch.per_rank[0];
+        let token_embd = shard0
+            .token_embd
+            .as_ref()
+            .context("rank 0 shard missing token_embd")?;
+        for (t, &token_id) in tokens.iter().enumerate() {
+            forward_embed_decode_host(
+                rank0,
+                rank0.default_stream(),
+                token_embd,
+                token_id,
+                scratch0.hidden_a.offset_bytes(t * row_bytes),
+                hidden,
+            )?;
+        }
+    }
+
+    for rank_idx in 0..n_ranks {
+        let device = cluster.device(rank_idx);
+
+        if rank_idx > 0 {
+            unsafe {
+                cluster.peer_copy_via_host(
+                    scratch.per_rank[rank_idx].hidden_a,
+                    rank_idx,
+                    scratch.per_rank[rank_idx - 1].hidden_a,
+                    rank_idx - 1,
+                    chunk_bytes,
+                )?;
+            }
+        }
+        device.bind()?;
+
+        let shard = &model.shards[rank_idx];
+        let rank_scratch = &mut scratch.per_rank[rank_idx];
+        let rank_session = &mut session.per_rank[rank_idx];
+        let layer_scratch = rank_scratch
+            .layer
+            .as_mut()
+            .context("per-rank LayerPrefillScratch missing")?;
+
+        let (mut x_in, mut x_out) = (rank_scratch.hidden_a, rank_scratch.hidden_b);
+        for (local_idx, layer_weights) in shard.layers.iter().enumerate() {
+            let layer_cache = &mut rank_session.caches[local_idx];
+            forward_layer_prefill(
+                &shard.ops,
+                device.default_stream(),
+                device,
+                cfg,
+                layer_weights,
+                layer_cache,
+                layer_scratch,
+                x_in,
+                x_out,
+                l,
+                start_position,
+            )
+            .with_context(|| {
+                format!(
+                    "prefill rank {} layer {} ({})",
+                    rank_idx,
+                    layer_weights.layer_idx,
+                    if cfg.is_recurrent(layer_weights.layer_idx) {
+                        "gdn"
+                    } else {
+                        "full_attn"
+                    },
+                )
+            })?;
+            std::mem::swap(&mut x_in, &mut x_out);
+        }
+        if x_in != rank_scratch.hidden_a {
+            unsafe {
+                device.memcpy_async(
+                    device.default_stream(),
+                    CopyDirection::DeviceToDevice,
+                    rank_scratch.hidden_a,
+                    x_in,
+                    chunk_bytes,
+                )?;
+            }
+            device.default_stream().synchronize()?;
+        }
+    }
+
+    let last_idx = n_ranks - 1;
+    let last_shard = &model.shards[last_idx];
+    let last_device = cluster.device(last_idx);
+    last_device.bind()?;
+    let last_scratch = &mut scratch.per_rank[last_idx];
+    let output_norm = last_shard
+        .output_norm
+        .as_ref()
+        .context("last rank missing output_norm")?;
+    let lm_head = last_shard
+        .output
+        .as_ref()
+        .or(last_shard.token_embd.as_ref())
+        .context("last rank missing both output.weight and tied token_embd")?;
+    let output_head_scratch = last_scratch
+        .output_head
+        .as_mut()
+        .context("last rank missing output_head scratch")?;
+    let last_token_hidden = last_scratch.hidden_a.offset_bytes((l - 1) * row_bytes);
+    forward_output_head_decode(
+        &last_shard.ops,
+        last_device.default_stream(),
+        cfg,
+        output_norm,
+        lm_head,
+        output_head_scratch,
+        last_token_hidden,
+    )?;
+
+    download_logits_host(
+        last_device,
+        last_device.default_stream(),
+        output_head_scratch.logits_f32,
+        cfg.vocab_size,
+        logits_out,
     )
 }
 
