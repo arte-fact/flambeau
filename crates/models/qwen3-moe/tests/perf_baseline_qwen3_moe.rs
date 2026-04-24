@@ -164,8 +164,25 @@ fn perf_baseline_qwen3_moe_mesh_all() -> Result<()> {
     let prefill_grid: Vec<usize> = match (long_text_prompt, prefill_single_l) {
         (Some(_), _) => vec![],          // long-text handled below
         (None, Some(l)) => vec![l],
-        (None, None) => vec![8, 64, 128, 512, 1024],
+        (None, None) => vec![8, 64, 128, 512, 1024, 2048, 4096],
     };
+
+    // V2.27.b — async env plumbing mirroring perf_baseline_qwen35_9b.rs.
+    //   FLAMBEAU_UBATCH         → chunk size for async 1F1B dispatch
+    //   FLAMBEAU_ASYNC_UBATCH=1 → routes forward_prefill_pp through the
+    //                             async aux-stream path (V2.25.d+)
+    //   FLAMBEAU_U_LANES        → lanes per rank (default 2 when async
+    //                             enabled, 1 otherwise)
+    //   FLAMBEAU_ASYNC_GRAPH=1  → opt-in graph capture layer (V2.26.a-i5c)
+    let ubatch: Option<usize> = std::env::var("FLAMBEAU_UBATCH")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .filter(|&u| u > 0);
+    let async_enabled = std::env::var("FLAMBEAU_ASYNC_UBATCH").is_ok();
+    let u_lanes: usize = std::env::var("FLAMBEAU_U_LANES")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(if async_enabled { 2 } else { 1 });
 
     // Prefill throughput at a few chunk sizes. Each run is a fresh session
     // (KV/GDN state starts zeroed) so per-L numbers aren't cross-contaminated
@@ -173,21 +190,35 @@ fn perf_baseline_qwen3_moe_mesh_all() -> Result<()> {
     for l in &prefill_grid {
         let l = *l;
         let mut session = Qwen3MoEShardedSession::new(&model, &cluster)?;
-        let mut scratch = ShardedForwardPrefillScratch::new(&model, &cluster, l)?;
+        let scratch_size = ubatch.map(|u| u.min(l)).unwrap_or(l);
+        let mut scratch = ShardedForwardPrefillScratch::new_with_lanes(
+            &model, &cluster, scratch_size, u_lanes,
+        )?;
         let tokens: Vec<u32> = (0..l as u32).map(|i| (1 + i * 37) % 151000).collect();
 
         let t0 = Instant::now();
-        let _ = forward_prefill_pp(
-            &model,
-            &mut session,
-            &cluster,
-            &mut scratch,
-            &tokens,
-            0,
-        )?;
+        let last_id = if async_enabled && u_lanes >= 2 {
+            // forward_prefill_pp branches to forward_prefill_pp_async when
+            // FLAMBEAU_ASYNC_UBATCH is set + u_lanes >= 2.
+            forward_prefill_pp(&model, &mut session, &cluster, &mut scratch, &tokens, 0)?
+        } else if let Some(u) = ubatch {
+            // External chunking for sync path (no aux-stream overlap).
+            let mut pos = 0;
+            let mut id = 0;
+            for chunk in tokens.chunks(u) {
+                id = forward_prefill_pp(&model, &mut session, &cluster, &mut scratch, chunk, pos)?;
+                pos += chunk.len();
+            }
+            id
+        } else {
+            forward_prefill_pp(&model, &mut session, &cluster, &mut scratch, &tokens, 0)?
+        };
         let dt = t0.elapsed().as_secs_f64();
         let tps = l as f64 / dt;
-        eprintln!("  prefill L={l:<4} → {:.2} tok/s  ({:.1} ms total)", tps, dt * 1000.0);
+        eprintln!(
+            "  prefill L={l:<4} → {:.2} tok/s  ({:.1} ms total, last_id={last_id})",
+            tps, dt * 1000.0
+        );
         results.push(("prefill".into(), l, dt, tps));
 
         scratch.dispose(&cluster)?;
