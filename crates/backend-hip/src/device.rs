@@ -266,6 +266,9 @@ pub struct HipGraphExec {
     /// doesn't implement Send/Sync out of the box; we cast back when
     /// calling the param-update FFI.
     kernel_nodes: Vec<usize>,
+    /// V2.26.a-i5b — memcpy-type graph nodes in dispatch order. Same
+    /// `Vec<usize>` trick as `kernel_nodes`.
+    memcpy_nodes: Vec<usize>,
     /// V2.26.a-i3 — slot → (kernel_node_idx, arg_idx, arity) bindings
     /// accumulated from tagged pushes during capture.
     slot_map: crate::graph_capture::SlotMap,
@@ -278,7 +281,27 @@ pub struct HipGraphExec {
     /// `hipKernelNodeParams` metadata (func, dims, sharedMemBytes) is
     /// stored alongside so we don't re-fetch on every update.
     node_shadows: std::cell::RefCell<Vec<NodeShadow>>,
+    /// V2.26.a-i5b — shadow of each memcpy node's current params
+    /// (dst, src, count, kind). Same motivation as `node_shadows`:
+    /// `hipGraphMemcpyNodeGetParams` returns the source-graph params,
+    /// not the exec's. Indexed by memcpy-node ordinal.
+    memcpy_shadows: std::cell::RefCell<Vec<MemcpyShadow>>,
 }
+
+/// Per-memcpy-node shadow used by `set_memcpy_slot`.
+#[derive(Clone, Copy, Debug)]
+struct MemcpyShadow {
+    dst: usize,
+    src: usize,
+    count: usize,
+    kind: crate::sys::hipMemcpyKind,
+}
+
+// SAFETY: MemcpyShadow holds raw pointer values (usize) with no
+// aliasing — updates happen only via &mut RefCell<Vec<_>> guarded by
+// HipGraphExec's Send/Sync impl.
+unsafe impl Send for MemcpyShadow {}
+unsafe impl Sync for MemcpyShadow {}
 
 /// Per-kernel-node shadow used by `set_slot`. `ptrs` is our Rust-side
 /// copy of the exec's current kernelParams — mutated in place on
@@ -356,16 +379,17 @@ impl HipGraphExec {
         // End the recorder scope regardless of the closure's outcome so
         // the thread-local state is always reset. Intentionally drain
         // here so any error paths below don't leave the state set.
-        let launches = capture_scope.end().launches;
+        let capture_state = capture_scope.end();
+        let launches = capture_state.launches.clone();
 
         closure_result?;
         check(end_code, "hipStreamEndCapture")?;
 
         // Enumerate nodes before instantiate so callers can address them
-        // by ordinal. Filter to kernel nodes in dispatch order. The graph
-        // stays alive for the full exec lifetime because
-        // `hipGraphKernelNodeGetParams` requires a live source graph.
-        let kernel_nodes = unsafe { collect_kernel_nodes(graph) }?;
+        // by ordinal. Filter into kernel vs memcpy buckets in dispatch
+        // order. The graph stays alive for the full exec lifetime
+        // because `hipGraph*NodeGetParams` requires a live source graph.
+        let (kernel_nodes, memcpy_nodes) = unsafe { collect_nodes_by_type(graph) }?;
 
         let mut exec: crate::sys::hipGraphExec_t = ptr::null_mut();
         // SAFETY: graph is the handle just returned by end-capture. The
@@ -386,11 +410,15 @@ impl HipGraphExec {
             check(inst_code, "hipGraphInstantiate")?;
         }
 
-        // Zip recorded launches with kernel-node ordinals. If no slot
-        // pushes happened, this produces an empty map (still valid).
+        // Zip recorded kernel launches + memcpys with the graph's
+        // corresponding node buckets. If no slot pushes happened on
+        // either side, this produces empty maps (still valid).
+        let memcpys = capture_state.memcpys;
         let slot_map = crate::graph_capture::SlotMap::from_recorder(
             &launches,
             kernel_nodes.len(),
+            &memcpys,
+            memcpy_nodes.len(),
         )
         .map_err(|msg| DeviceError::Backend {
             backend: BACKEND,
@@ -443,14 +471,101 @@ impl HipGraphExec {
             node_shadows.push(NodeShadow { ptrs, meta: params });
         }
 
+        // V2.26.a-i5b — seed the memcpy shadows from the recorded
+        // memcpy params. Index into shadows == memcpy-node ordinal.
+        let mut memcpy_shadows: Vec<MemcpyShadow> = Vec::with_capacity(memcpy_nodes.len());
+        for rec in memcpys.iter() {
+            memcpy_shadows.push(MemcpyShadow {
+                dst: rec.dst,
+                src: rec.src,
+                count: rec.count,
+                kind: rec.kind,
+            });
+        }
+
         Ok(Self {
             exec,
             graph,
             device_id: stream.device_id(),
             kernel_nodes,
+            memcpy_nodes,
             slot_map,
             node_shadows: std::cell::RefCell::new(node_shadows),
+            memcpy_shadows: std::cell::RefCell::new(memcpy_shadows),
         })
+    }
+
+    /// Update a captured memcpy node's dst pointer. Used at replay time
+    /// to retarget (typically) KV-cache append memcpys — src and count
+    /// stay fixed between replays (the scratch layout is stable), only
+    /// dst advances with the KV cache's tail position.
+    ///
+    /// # Safety
+    /// `new_dst` must be a live device pointer valid for `binding.count`
+    /// bytes of writes on the exec's device, for the full duration of
+    /// the next replay.
+    pub unsafe fn set_memcpy_slot(
+        &self,
+        slot: crate::graph_capture::MemcpySlot,
+        new_dst: flambeau_core::DevicePtr,
+    ) -> DeviceResult<()> {
+        let binding = self
+            .slot_map
+            .get_memcpy(slot)
+            .copied()
+            .ok_or_else(|| DeviceError::Backend {
+                backend: BACKEND,
+                code: -1,
+                message: format!(
+                    "HipGraphExec::set_memcpy_slot: slot id={} not bound",
+                    slot.id()
+                ),
+            })?;
+        let mut shadows = self.memcpy_shadows.borrow_mut();
+        let shadow = &mut shadows[binding.memcpy_node_idx];
+        shadow.dst = new_dst.0;
+
+        let node = self.kernel_or_memcpy_node_handle(binding.memcpy_node_idx, NodeBucket::Memcpy)?;
+        // SAFETY: exec + node are live. dst is a caller-provided live
+        // device pointer per the outer unsafe contract. src / count /
+        // kind come from the shadow (capture-time values, valid to
+        // reuse).
+        check(
+            unsafe {
+                crate::sys::hipGraphExecMemcpyNodeSetParams1D(
+                    self.exec,
+                    node,
+                    shadow.dst as *mut std::os::raw::c_void,
+                    shadow.src as *const std::os::raw::c_void,
+                    shadow.count,
+                    shadow.kind,
+                )
+            },
+            "hipGraphExecMemcpyNodeSetParams1D",
+        )
+    }
+
+    fn kernel_or_memcpy_node_handle(
+        &self,
+        idx: usize,
+        bucket: NodeBucket,
+    ) -> DeviceResult<crate::sys::hipGraphNode_t> {
+        let nodes = match bucket {
+            NodeBucket::Kernel => &self.kernel_nodes,
+            NodeBucket::Memcpy => &self.memcpy_nodes,
+        };
+        nodes
+            .get(idx)
+            .copied()
+            .map(|u| u as crate::sys::hipGraphNode_t)
+            .ok_or_else(|| DeviceError::Backend {
+                backend: BACKEND,
+                code: -1,
+                message: format!(
+                    "{bucket:?} node({idx}) out of range (have {} nodes)",
+                    nodes.len()
+                ),
+            })
     }
 
     /// Return the slot→(node, arg) map accumulated during capture. Empty
@@ -607,16 +722,27 @@ impl HipGraphExec {
     }
 }
 
-/// Walk every node of `graph`, filter to kernel nodes, return their
-/// handles in dispatch order. All node handles from `hipGraphGetNodes`
+#[derive(Clone, Copy, Debug)]
+enum NodeBucket {
+    Kernel,
+    Memcpy,
+}
+
+/// Walk every node of `graph`, bucketed by type, preserving dispatch
+/// order within each bucket. All node handles from `hipGraphGetNodes`
 /// remain valid against the later-instantiated exec even after the
 /// source graph is destroyed — that's the whole point of exposing them
-/// to `hipGraphExecKernelNodeSetParams`.
+/// to `hipGraphExec*NodeSetParams`.
+///
+/// Returns `(kernel_nodes, memcpy_nodes)`. Other node types (memsets,
+/// host nodes, empty nodes, graph nodes) are currently discarded —
+/// none of them are emitted by our current forward-path ops.
 ///
 /// # Safety
 /// `graph` must be a live, end-captured `hipGraph_t`.
-unsafe fn collect_kernel_nodes(graph: crate::sys::hipGraph_t) -> DeviceResult<Vec<usize>> {
-    // Query the node count first (nodes=null + num_nodes=&count).
+unsafe fn collect_nodes_by_type(
+    graph: crate::sys::hipGraph_t,
+) -> DeviceResult<(Vec<usize>, Vec<usize>)> {
     let mut count: usize = 0;
     // SAFETY: hipGraphGetNodes with nodes=null writes count through
     // the num_nodes pointer and touches nothing else.
@@ -625,7 +751,7 @@ unsafe fn collect_kernel_nodes(graph: crate::sys::hipGraph_t) -> DeviceResult<Ve
         "hipGraphGetNodes(count)",
     )?;
     if count == 0 {
-        return Ok(Vec::new());
+        return Ok((Vec::new(), Vec::new()));
     }
     let mut nodes: Vec<crate::sys::hipGraphNode_t> = vec![ptr::null_mut(); count];
     let mut out_count = count;
@@ -638,20 +764,26 @@ unsafe fn collect_kernel_nodes(graph: crate::sys::hipGraph_t) -> DeviceResult<Ve
     )?;
     nodes.truncate(out_count);
 
-    let mut kernel_nodes = Vec::with_capacity(out_count);
+    let mut kernel_nodes = Vec::new();
+    let mut memcpy_nodes = Vec::new();
     for node in nodes {
         let mut ntype: i32 = -1;
-        // SAFETY: node is live (just returned by hipGraphGetNodes), ntype
-        // is local valid storage.
+        // SAFETY: node is live (just returned by hipGraphGetNodes).
         check(
             unsafe { crate::sys::hipGraphNodeGetType(node, &raw mut ntype) },
             "hipGraphNodeGetType",
         )?;
-        if ntype == crate::sys::HIP_GRAPH_NODE_TYPE_KERNEL {
-            kernel_nodes.push(node as usize);
+        match ntype {
+            t if t == crate::sys::HIP_GRAPH_NODE_TYPE_KERNEL => {
+                kernel_nodes.push(node as usize);
+            }
+            t if t == crate::sys::HIP_GRAPH_NODE_TYPE_MEMCPY => {
+                memcpy_nodes.push(node as usize);
+            }
+            _ => {}
         }
     }
-    Ok(kernel_nodes)
+    Ok((kernel_nodes, memcpy_nodes))
 }
 
 impl Drop for HipGraphExec {
@@ -706,6 +838,52 @@ impl HipDevice {
     /// before alloc/free/stream ops when multiple devices are in use.
     pub fn bind(&self) -> DeviceResult<()> {
         bind(self.id)
+    }
+
+    /// V2.26.a-i5b — graph-captureable variant of `memcpy_async` that
+    /// tags the memcpy with a [`MemcpySlot`]
+    /// (from `crate::graph_capture`). Under a capture scope, the memcpy
+    /// is recorded with `slot`; post-capture the exec's `SlotMap` binds
+    /// the slot to the resulting memcpy graph node, enabling
+    /// `HipGraphExec::set_memcpy_slot` to retarget dst / src per
+    /// replay.
+    ///
+    /// # Safety
+    /// Same as [`flambeau_core::Device::memcpy_async`] — `dst` and `src`
+    /// must be valid for `bytes` in their respective address spaces
+    /// per `dir`, and neither aliased by another pending op on the
+    /// same stream.
+    pub unsafe fn memcpy_async_slot(
+        &self,
+        stream: &HipStream,
+        dir: CopyDirection,
+        dst: DevicePtr,
+        src: DevicePtr,
+        bytes: usize,
+        slot: crate::graph_capture::MemcpySlot,
+    ) -> DeviceResult<()> {
+        if bytes == 0 {
+            return Ok(());
+        }
+        self.bind()?;
+        let kind = match dir {
+            CopyDirection::HostToDevice => sys::hipMemcpyKind::HostToDevice,
+            CopyDirection::DeviceToHost => sys::hipMemcpyKind::DeviceToHost,
+            CopyDirection::DeviceToDevice => sys::hipMemcpyKind::DeviceToDevice,
+        };
+        crate::graph_capture::record_memcpy(Some(slot), dst.0, src.0, bytes, kind);
+        // SAFETY: same invariants as `Device::memcpy_async`; see the
+        // trait impl below for detail.
+        let code = unsafe {
+            sys::hipMemcpyAsync(
+                dst.0 as *mut _,
+                src.0 as *const _,
+                bytes,
+                kind,
+                stream.raw(),
+            )
+        };
+        check(code, "hipMemcpyAsync")
     }
 }
 
@@ -778,6 +956,11 @@ impl Device for HipDevice {
             CopyDirection::DeviceToHost => hipMemcpyKind::DeviceToHost,
             CopyDirection::DeviceToDevice => hipMemcpyKind::DeviceToDevice,
         };
+        // V2.26.a-i5b — record the memcpy for graph-slot binding when
+        // inside a capture scope. `slot: None` here — the Device trait
+        // surface doesn't carry per-call slot info; callers that want
+        // a tagged memcpy go through `HipDevice::memcpy_async_slot`.
+        crate::graph_capture::record_memcpy(None, dst.0, src.0, bytes, kind);
         // SAFETY: caller's contract on `Device::memcpy_async` is that `src`
         // and `dst` are each valid for reads/writes of `bytes` in their
         // respective address spaces per `dir`, and that neither is aliased

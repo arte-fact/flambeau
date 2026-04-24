@@ -141,6 +141,18 @@ extern "C" {
         node: hipGraphNode_t,
         params: *const hipKernelNodeParams,
     ) -> c_int;
+
+    // V2.26.a-i5b — 1D memcpy-node in-place update on an instantiated exec.
+    // Used to retarget the KV-cache append memcpys per ubatch (dst is
+    // pos-dependent; src and size stay fixed).
+    pub fn hipGraphExecMemcpyNodeSetParams1D(
+        exec: hipGraphExec_t,
+        node: hipGraphNode_t,
+        dst: *mut c_void,
+        src: *const c_void,
+        count: usize,
+        kind: hipMemcpyKind,
+    ) -> c_int;
 }
 
 // Opaque graph handles from hip_runtime_api.h.

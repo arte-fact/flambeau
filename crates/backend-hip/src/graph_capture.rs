@@ -30,6 +30,19 @@ pub struct ScalarSlot {
     id: u32,
 }
 
+/// V2.26.a-i5b — handle to an updateable memcpy-node's parameters
+/// (typically the dst pointer, since src + count are usually fixed in
+/// our KV-cache-append use case). Obtained via [`MemcpySlot::new`];
+/// tagged at capture time by passing it to
+/// [`super::HipDevice::memcpy_async_slot`] or equivalent helper.
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub struct MemcpySlot {
+    id: u32,
+}
+
+// Slot ids share one namespace — ScalarSlot and MemcpySlot can never
+// collide because they're type-distinct at compile time, but drawing
+// from one counter keeps IDs unique across a process.
 static NEXT_SLOT_ID: AtomicU32 = AtomicU32::new(1);
 
 impl ScalarSlot {
@@ -50,9 +63,26 @@ impl Default for ScalarSlot {
     }
 }
 
+impl MemcpySlot {
+    pub fn new() -> Self {
+        let id = NEXT_SLOT_ID.fetch_add(1, Ordering::Relaxed);
+        Self { id }
+    }
+
+    pub fn id(&self) -> u32 {
+        self.id
+    }
+}
+
+impl Default for MemcpySlot {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 /// Per-launch record captured during an active graph capture. Indexes
 /// in `tagged_slots` are into this launch's own `KernelArgs` slots.
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub(crate) struct LaunchRecord {
     /// Total number of kernel arguments this launch pushed (used later
     /// to size the fresh pointer array we hand to
@@ -66,6 +96,20 @@ pub(crate) struct LaunchRecord {
 #[derive(Debug, Default)]
 pub(crate) struct CaptureState {
     pub launches: Vec<LaunchRecord>,
+    /// V2.26.a-i5b — memcpy issues observed during this capture, in
+    /// dispatch order. Each entry records whether the caller tagged the
+    /// memcpy with a [`MemcpySlot`] and the initial (dst, src, count,
+    /// kind) so post-capture we can seed the exec's memcpy shadow.
+    pub memcpys: Vec<MemcpyRecord>,
+}
+
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct MemcpyRecord {
+    pub slot: Option<MemcpySlot>,
+    pub dst: usize,
+    pub src: usize,
+    pub count: usize,
+    pub kind: crate::sys::hipMemcpyKind,
 }
 
 thread_local! {
@@ -129,6 +173,32 @@ pub(crate) fn record_launch(arity: usize, tagged: &[(ScalarSlot, usize)]) {
     });
 }
 
+/// V2.26.a-i5b — called by `HipDevice::memcpy_async*` before submitting
+/// a memcpy. If capture is active, appends a [`MemcpyRecord`] so
+/// post-capture we can zip records with memcpy-type graph nodes.
+/// `slot=None` means the caller isn't interested in updating this
+/// memcpy across replays — we still record it so the dispatch-order
+/// cursor stays aligned with the graph's memcpy nodes.
+pub(crate) fn record_memcpy(
+    slot: Option<MemcpySlot>,
+    dst: usize,
+    src: usize,
+    count: usize,
+    kind: crate::sys::hipMemcpyKind,
+) {
+    CAPTURE_STATE.with(|s| {
+        if let Some(state) = s.borrow_mut().as_mut() {
+            state.memcpys.push(MemcpyRecord {
+                slot,
+                dst,
+                src,
+                count,
+                kind,
+            });
+        }
+    });
+}
+
 /// Post-capture map from a [`ScalarSlot`] to the exact kernel-node +
 /// arg index the slot was tagged at. Built by zipping recorded launches
 /// with kernel-node handles in dispatch order.
@@ -136,6 +206,22 @@ pub(crate) fn record_launch(arity: usize, tagged: &[(ScalarSlot, usize)]) {
 pub struct SlotMap {
     /// slot -> (kernel_node_idx, arg_index, launch_arity)
     entries: HashMap<ScalarSlot, SlotBinding>,
+    /// V2.26.a-i5b — memcpy-slot bindings. memcpy_node_idx indexes into
+    /// the exec's ordered list of memcpy-type graph nodes (SEPARATE
+    /// from kernel_nodes — their indices are not interchangeable).
+    memcpy_entries: HashMap<MemcpySlot, MemcpyBinding>,
+}
+
+#[derive(Clone, Copy, Debug)]
+pub struct MemcpyBinding {
+    pub memcpy_node_idx: usize,
+    /// Initial params captured at record time; `set_memcpy_slot`
+    /// updates a mutable shadow keyed by slot, so src/count/kind can
+    /// survive dst-only updates.
+    pub dst: usize,
+    pub src: usize,
+    pub count: usize,
+    pub kind: crate::sys::hipMemcpyKind,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -170,12 +256,16 @@ impl SlotMap {
     }
 
     /// Build a SlotMap by zipping recorded launches 1:1 with kernel
-    /// node count. Fails if the counts don't match — indicates the
-    /// capture closure did something the recorder didn't see (e.g.
-    /// issued a kernel via a path that bypasses `HipKernel::launch`).
+    /// node count, and memcpy records 1:1 with memcpy node count.
+    /// Fails if either count is off — indicates the capture closure
+    /// did something the recorder didn't see (e.g. issued a kernel via
+    /// a path that bypasses `HipKernel::launch`, or a memcpy via a
+    /// path that bypasses the `memcpy_async*` recorder).
     pub(crate) fn from_recorder(
         launches: &[LaunchRecord],
         kernel_node_count: usize,
+        memcpys: &[MemcpyRecord],
+        memcpy_node_count: usize,
     ) -> Result<Self, String> {
         if launches.len() != kernel_node_count {
             return Err(format!(
@@ -183,6 +273,14 @@ impl SlotMap {
                  launch-recorder saw fewer (bypassed launch path?) or more (untracked driver kernels)",
                 launches.len(),
                 kernel_node_count
+            ));
+        }
+        if memcpys.len() != memcpy_node_count {
+            return Err(format!(
+                "slot-map build: recorded {} memcpys but captured graph has {} memcpy nodes — \
+                 recorder / graph out of sync (untagged memcpy path? unusual kind fold-up?)",
+                memcpys.len(),
+                memcpy_node_count
             ));
         }
         let mut entries: HashMap<ScalarSlot, SlotBinding> = HashMap::new();
@@ -202,7 +300,33 @@ impl SlotMap {
                 }
             }
         }
-        Ok(Self { entries })
+        let mut memcpy_entries: HashMap<MemcpySlot, MemcpyBinding> = HashMap::new();
+        for (memcpy_node_idx, rec) in memcpys.iter().enumerate() {
+            if let Some(slot) = rec.slot {
+                let binding = MemcpyBinding {
+                    memcpy_node_idx,
+                    dst: rec.dst,
+                    src: rec.src,
+                    count: rec.count,
+                    kind: rec.kind,
+                };
+                if memcpy_entries.insert(slot, binding).is_some() {
+                    return Err(format!(
+                        "memcpy slot {:?} declared at multiple sites — use a fresh slot",
+                        slot
+                    ));
+                }
+            }
+        }
+        Ok(Self { entries, memcpy_entries })
+    }
+
+    pub fn get_memcpy(&self, slot: MemcpySlot) -> Option<&MemcpyBinding> {
+        self.memcpy_entries.get(&slot)
+    }
+
+    pub fn memcpy_len(&self) -> usize {
+        self.memcpy_entries.len()
     }
 }
 
@@ -264,7 +388,7 @@ mod tests {
                 tagged_slots: vec![(slot_b, 2)],
             },
         ];
-        let map = SlotMap::from_recorder(&launches, 2).expect("zip");
+        let map = SlotMap::from_recorder(&launches, 2, &[], 0).expect("zip");
         let ba = map.get(slot_a).expect("slot_a present");
         assert_eq!(ba.kernel_node_idx, 0);
         assert_eq!(ba.arg_index, 3);
@@ -281,6 +405,55 @@ mod tests {
             arity: 4,
             tagged_slots: vec![],
         }];
-        assert!(SlotMap::from_recorder(&launches, 2).is_err());
+        assert!(SlotMap::from_recorder(&launches, 2, &[], 0).is_err());
+    }
+
+    #[test]
+    fn memcpy_slot_zips_into_slot_map() {
+        let ms = MemcpySlot::new();
+        let memcpys = vec![
+            MemcpyRecord {
+                slot: None,
+                dst: 0x1000,
+                src: 0x2000,
+                count: 512,
+                kind: crate::sys::hipMemcpyKind::DeviceToDevice,
+            },
+            MemcpyRecord {
+                slot: Some(ms),
+                dst: 0x3000,
+                src: 0x4000,
+                count: 256,
+                kind: crate::sys::hipMemcpyKind::DeviceToDevice,
+            },
+        ];
+        let map = SlotMap::from_recorder(&[], 0, &memcpys, 2).expect("zip");
+        assert_eq!(map.memcpy_len(), 1);
+        let binding = map.get_memcpy(ms).expect("ms bound");
+        assert_eq!(binding.memcpy_node_idx, 1);
+        assert_eq!(binding.dst, 0x3000);
+        assert_eq!(binding.src, 0x4000);
+        assert_eq!(binding.count, 256);
+    }
+
+    #[test]
+    fn record_memcpy_appends_only_during_capture() {
+        // Outside capture: no-op.
+        record_memcpy(None, 0x1000, 0x2000, 64, crate::sys::hipMemcpyKind::DeviceToDevice);
+
+        let scope = CaptureScope::begin();
+        record_memcpy(None, 0x1000, 0x2000, 64, crate::sys::hipMemcpyKind::DeviceToDevice);
+        record_memcpy(
+            Some(MemcpySlot::new()),
+            0x3000,
+            0x4000,
+            128,
+            crate::sys::hipMemcpyKind::HostToDevice,
+        );
+        let state = scope.end();
+        assert_eq!(state.memcpys.len(), 2);
+        assert!(state.memcpys[0].slot.is_none());
+        assert!(state.memcpys[1].slot.is_some());
+        assert_eq!(state.memcpys[1].count, 128);
     }
 }

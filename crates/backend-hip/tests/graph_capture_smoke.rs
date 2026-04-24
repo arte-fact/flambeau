@@ -15,7 +15,7 @@
 use flambeau_backend_hip::module::{HipModule, KernelArgs, LaunchCfg};
 use flambeau_backend_hip::sys::{hipDim3, hipKernelNodeParams};
 use flambeau_backend_hip::{
-    device_count, HipDevice, HipGraphExec, HipStream, ScalarSlot,
+    device_count, HipDevice, HipGraphExec, HipStream, MemcpySlot, ScalarSlot,
 };
 use flambeau_core::{CopyDirection, Device, DevicePtr, Stream};
 use std::ffi::c_void;
@@ -446,4 +446,146 @@ fn slot_map_two_launches_round_trip() {
 
     // Storage-lifetime anchors.
     let _ = (init_scale_0, init_scale_1, new_scale_0, new_scale_1);
+}
+
+/// V2.26.a-i5b POC: capture a D→D memcpy tagged with a `MemcpySlot`,
+/// replay to verify the dst landed, then use `set_memcpy_slot` to
+/// retarget dst to a different device buffer, replay, verify the new
+/// dst got the same data (and the old dst is unchanged since the
+/// second replay).
+///
+/// Proves the memcpy-node update path (`hipGraphExecMemcpyNodeSetParams1D`)
+/// on gfx906 — the foundation V2.26.a-i5b's KvCache::append wiring needs.
+#[test]
+fn memcpy_slot_update_round_trip() {
+    if !maybe_skip() {
+        return;
+    }
+    let dev = HipDevice::new(0).expect("HipDevice::new(0)");
+
+    let n = 256usize;
+    let bytes = n * 4;
+    let src_dev = dev.alloc(bytes).unwrap();
+    let dst_a_dev = dev.alloc(bytes).unwrap();
+    let dst_b_dev = dev.alloc(bytes).unwrap();
+
+    // Seed src with a known pattern; zero both dsts so we can tell
+    // unambiguously which one the replay wrote into.
+    let src_host: Vec<f32> = (0..n).map(|i| (i as f32) * 0.25).collect();
+    let stream = HipStream::new_non_blocking(0).unwrap();
+    unsafe {
+        dev.memcpy_async(
+            &stream,
+            CopyDirection::HostToDevice,
+            src_dev,
+            DevicePtr(src_host.as_ptr() as usize),
+            bytes,
+        )
+        .unwrap();
+        let zeros = vec![0f32; n];
+        dev.memcpy_async(
+            &stream,
+            CopyDirection::HostToDevice,
+            dst_a_dev,
+            DevicePtr(zeros.as_ptr() as usize),
+            bytes,
+        )
+        .unwrap();
+        dev.memcpy_async(
+            &stream,
+            CopyDirection::HostToDevice,
+            dst_b_dev,
+            DevicePtr(zeros.as_ptr() as usize),
+            bytes,
+        )
+        .unwrap();
+    }
+    stream.synchronize().unwrap();
+
+    // Capture a tagged D→D memcpy (src_dev → dst_a_dev).
+    let slot = MemcpySlot::new();
+    let cap_stream = HipStream::new_non_blocking(0).unwrap();
+    let exec = HipGraphExec::capture(&cap_stream, |s| {
+        // SAFETY: all buffers live for the full capture + replay cycle.
+        unsafe {
+            dev.memcpy_async_slot(
+                s,
+                CopyDirection::DeviceToDevice,
+                dst_a_dev,
+                src_dev,
+                bytes,
+                slot,
+            )?;
+        }
+        Ok(())
+    })
+    .expect("capture tagged memcpy");
+
+    // Slot must be bound to a memcpy node.
+    let binding = exec
+        .slot_map()
+        .get_memcpy(slot)
+        .expect("memcpy slot bound");
+    assert_eq!(binding.memcpy_node_idx, 0);
+    assert_eq!(binding.count, bytes);
+    assert_eq!(binding.dst, dst_a_dev.as_usize());
+    assert_eq!(binding.src, src_dev.as_usize());
+
+    // Pre-update replay — dst_a should get the data, dst_b stays zero.
+    exec.launch(&stream).unwrap();
+    stream.synchronize().unwrap();
+
+    let mut a_back = vec![0f32; n];
+    let mut b_back = vec![0f32; n];
+    unsafe {
+        dev.memcpy_async(
+            &stream,
+            CopyDirection::DeviceToHost,
+            DevicePtr(a_back.as_mut_ptr() as usize),
+            dst_a_dev,
+            bytes,
+        )
+        .unwrap();
+        dev.memcpy_async(
+            &stream,
+            CopyDirection::DeviceToHost,
+            DevicePtr(b_back.as_mut_ptr() as usize),
+            dst_b_dev,
+            bytes,
+        )
+        .unwrap();
+    }
+    stream.synchronize().unwrap();
+    assert_eq!(a_back, src_host, "pre-update: dst_a mismatch");
+    assert!(b_back.iter().all(|v| *v == 0.0), "pre-update: dst_b should still be zero");
+
+    // Retarget dst → dst_b_dev via set_memcpy_slot.
+    // SAFETY: dst_b_dev is live for `bytes` device writes.
+    unsafe {
+        exec.set_memcpy_slot(slot, dst_b_dev)
+            .expect("set_memcpy_slot");
+    }
+    exec.launch(&stream).unwrap();
+    stream.synchronize().unwrap();
+
+    let mut b_back2 = vec![0f32; n];
+    unsafe {
+        dev.memcpy_async(
+            &stream,
+            CopyDirection::DeviceToHost,
+            DevicePtr(b_back2.as_mut_ptr() as usize),
+            dst_b_dev,
+            bytes,
+        )
+        .unwrap();
+    }
+    stream.synchronize().unwrap();
+    assert_eq!(b_back2, src_host, "post-update: dst_b didn't receive src");
+
+    // SAFETY: syncs above.
+    unsafe {
+        dev.dealloc(src_dev, bytes).unwrap();
+        dev.dealloc(dst_a_dev, bytes).unwrap();
+        dev.dealloc(dst_b_dev, bytes).unwrap();
+    }
 }
