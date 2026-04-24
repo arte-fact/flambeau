@@ -704,6 +704,19 @@ impl Recipe {
                 rows_per_block: 0,
                 mmq_tile: (64, 8),
             },
+            // V2.29.e: TILE_N=16 port from mmq_q8_0_wave64_tile16. Each
+            // decoded Q4_1 weight tile (8 v[] entries) reused across 16
+            // output cols instead of 8 → halves weight HBM bandwidth.
+            // Targets the 40.8 % of 9B prefill wall-time the 4warp_lds
+            // variant was consuming per V2.29.a audit.
+            "qmatmul_q4_1_mmq_wave64_tile16_gfx906" => Self {
+                kind: RecipeKind::MmqWave64,
+                stem: "mmq_q4_1_wave64_tile16",
+                entry: "flambeau_mmq_q4_1_wave64_tile16_q8_1",
+                threads: 64,
+                rows_per_block: 0,
+                mmq_tile: (64, 16),
+            },
             // V2.28.a: wave64 MMQ for Q4_0. Closes the 8.5× prefill gap to
             // llama.cpp on Qwen3.6-35B-A3B-Q4_0 at dense + MoE shapes.
             "qmatmul_q4_0_mmq_wave64_gfx906" => Self {

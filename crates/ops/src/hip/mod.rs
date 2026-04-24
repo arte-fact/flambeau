@@ -94,6 +94,7 @@ pub const KERNEL_STEMS: &[&str] = &[
     "moe_sort_by_expert",
     "mmq_q4_1_4warp_lds",
     "mmq_q4_1_wave64",
+    "mmq_q4_1_wave64_tile16",
     "mmq_q4_0_wave64",
     "mmq_q5_0_wave64",
     "mmq_q4_K_4warp",
