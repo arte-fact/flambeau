@@ -214,7 +214,25 @@ pub fn forward_one_token_pp(
     // chain captured on first call, replayed with slot updates on
     // subsequent calls. Embed (rank 0), peer-copy, and argmax
     // (rank N-1) stay uncaptured regardless.
+    //
+    // V2.27.a-i5 — additionally fold the output head
+    // (rmsnorm_quant_q8_1 + lm_head mmvq) on the LAST rank into that
+    // rank's captured graph. argmax_token_host stays uncaptured
+    // (host-side scan).
     let use_decode_graph = std::env::var("FLAMBEAU_DECODE_GRAPH").is_ok();
+    let last_idx = n_ranks - 1;
+    // Hoist output-head tensor references before the rank loop so the
+    // last rank's capture closure can borrow them.
+    let last_shard = &model.shards[last_idx];
+    let output_norm = last_shard
+        .output_norm
+        .as_ref()
+        .context("last rank missing output_norm")?;
+    let lm_head = last_shard
+        .output
+        .as_ref()
+        .or(last_shard.token_embd.as_ref())
+        .context("last rank missing both output.weight and tied token_embd")?;
 
     // 2. Per-rank layer loop with stage-boundary peer_copy_via_host.
     for rank_idx in 0..n_ranks {
@@ -334,6 +352,12 @@ pub fn forward_one_token_pp(
                 .collect();
             let hidden_a = rank_scratch.hidden_a;
             let hidden_b = rank_scratch.hidden_b;
+            // V2.27.a-i5 — take output_head scratch as a separate
+            // split-borrow so the capture closure can run the output
+            // head on the last rank.
+            let output_head_scratch_opt: Option<&mut OutputHeadScratch> =
+                rank_scratch.output_head.as_mut();
+            let is_last_rank = rank_idx == last_idx;
             let layer_slots_clone = layer_slots.clone();
             let exec = flambeau_backend_hip::HipGraphExec::capture(
                 device.default_stream(),
@@ -377,6 +401,28 @@ pub fn forward_one_token_pp(
                                 x_in,
                                 hidden_bytes,
                             )?;
+                        }
+                    }
+                    // V2.27.a-i5 — fold output head on last rank into
+                    // the captured graph. rmsnorm_quant_q8_1 + mmvq.
+                    // argmax stays uncaptured (host-side scan after
+                    // the graph replay).
+                    if is_last_rank {
+                        if let Some(output_head_scratch) = output_head_scratch_opt {
+                            forward_output_head_decode(
+                                &shard.ops,
+                                capture_s,
+                                cfg,
+                                output_norm,
+                                lm_head,
+                                output_head_scratch,
+                                hidden_a,
+                            )
+                            .map_err(|e| flambeau_core::DeviceError::Backend {
+                                backend: "hip",
+                                code: -1,
+                                message: format!("capture output head: {e}"),
+                            })?;
                         }
                     }
                     Ok(())
@@ -464,33 +510,27 @@ pub fn forward_one_token_pp(
     }
 
     // 3. Output head on the last rank.
-    let last_idx = n_ranks - 1;
-    let last_shard = &model.shards[last_idx];
+    // V2.27.a-i5 — under FLAMBEAU_DECODE_GRAPH the output head is
+    // folded into the last rank's captured graph (runs during the
+    // exec.launch() above). Skip the uncaptured dispatch here.
     let last_device = cluster.device(last_idx);
     last_device.bind()?;
     let last_scratch = &mut scratch.per_rank[last_idx];
-    let output_norm = last_shard
-        .output_norm
-        .as_ref()
-        .context("last rank missing output_norm")?;
-    let lm_head = last_shard
-        .output
-        .as_ref()
-        .or(last_shard.token_embd.as_ref())
-        .context("last rank missing both output.weight and tied token_embd")?;
     let output_head_scratch = last_scratch
         .output_head
         .as_mut()
         .context("last rank missing output_head scratch")?;
-    forward_output_head_decode(
-        &last_shard.ops,
-        last_device.default_stream(),
-        cfg,
-        output_norm,
-        lm_head,
-        output_head_scratch,
-        last_scratch.hidden_a,
-    )?;
+    if !use_decode_graph {
+        forward_output_head_decode(
+            &last_shard.ops,
+            last_device.default_stream(),
+            cfg,
+            output_norm,
+            lm_head,
+            output_head_scratch,
+            last_scratch.hidden_a,
+        )?;
+    }
 
     // 4. Host argmax.
     argmax_token_host(
