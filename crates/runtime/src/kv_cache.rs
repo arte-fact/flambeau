@@ -228,6 +228,48 @@ impl<L: CacheLayout, D: Device> KvCache<L, D> {
         Ok(())
     }
 
+    /// V2.26.a-i5b2 — compute the (k_dst, v_dst, total_bytes) an append
+    /// of `n_new` rows would target WITHOUT mutating any state. Used by
+    /// backend-specific graph-capture helpers (e.g.
+    /// `flambeau_backend_hip::kv_cache_append_hip_slot`) that need to
+    /// issue a tagged memcpy externally. Returns the same capacity
+    /// error `append` would have raised.
+    pub fn compute_append_dsts(
+        &self,
+        n_new: usize,
+    ) -> KvCacheResult<(DevicePtr, DevicePtr, usize)> {
+        if self.current_tokens + n_new > self.max_tokens {
+            return Err(KvCacheError::CapacityExceeded {
+                current: self.current_tokens,
+                add: n_new,
+                cap: self.max_tokens,
+            });
+        }
+        let per_token_bytes = self.n_heads * L::bytes_per_row(self.head_dim);
+        let offset_bytes = self.current_tokens * per_token_bytes;
+        let total_bytes = n_new * per_token_bytes;
+        let k_dst = self.k.offset_bytes(offset_bytes);
+        let v_dst = self.v.offset_bytes(offset_bytes);
+        Ok((k_dst, v_dst, total_bytes))
+    }
+
+    /// V2.26.a-i5b2 — advance the logical tail by `n_new` rows after a
+    /// caller-driven append (via `compute_append_dsts` + an external
+    /// memcpy, typically under graph capture). Callers that use the
+    /// stock `append` path do NOT call this — `append` bumps the tail
+    /// itself.
+    pub fn bump_tail(&mut self, n_new: usize) -> KvCacheResult<()> {
+        if self.current_tokens + n_new > self.max_tokens {
+            return Err(KvCacheError::CapacityExceeded {
+                current: self.current_tokens,
+                add: n_new,
+                cap: self.max_tokens,
+            });
+        }
+        self.current_tokens += n_new;
+        Ok(())
+    }
+
     /// Reset the cache to empty. Does NOT zero the backing memory; the
     /// attention kernel is expected to respect `current_tokens()`.
     pub fn clear(&mut self) {
