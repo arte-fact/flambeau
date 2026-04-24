@@ -1271,6 +1271,24 @@ pub fn forward_prefill_pp_async(
                  that the tail ≥ 128. See V2.27.d cert."
             );
         }
+        // V2.28.c.1 — long-context extension of the V2.27.d race.
+        // At K ≥ 128 ubatches (e.g. Qwen3.6-35B ub=128 L=16384), the
+        // accumulated cross-lane state-race damage breaks parity
+        // even though per-ubatch work is "long enough" to serialise.
+        // Empirically: L=16384 ub=128 u_lanes=2 last_id=143737 vs
+        // sync 220; L=16384 ub=256 K=64 u_lanes=2 last_id=220 ✓;
+        // L=16384 ub=128 u_lanes=1 last_id=220 ✓. So the threshold
+        // is K (n_ubatches) > 64 with u_lanes > 1 on GDN models.
+        let n_ubatches_val = l.div_ceil(ubatch_size);
+        if n_ubatches_val > 64 {
+            bail!(
+                "forward_prefill_pp_async: L={l} ubatch_size={ubatch_size} produces \
+                 K={n_ubatches_val} ubatches. On a hybrid (GDN) model with u_lanes={u_lanes}, \
+                 K > 64 accumulates enough cross-lane state-race damage that parity breaks \
+                 (V2.28.c.1 finding on Qwen3.6-35B at L=16384). Use u_lanes=1 or larger \
+                 ubatch_size to keep K ≤ 64. See V2.28.c.1 cert."
+            );
+        }
     }
     cluster.reserve_aux_streams(u_lanes)?;
     // V2.25.g — per-lane pinned bounces break the single-slab

@@ -164,8 +164,10 @@ fn perf_baseline_qwen3_moe_mesh_all() -> Result<()> {
     let prefill_grid: Vec<usize> = match (long_text_prompt, prefill_single_l) {
         (Some(_), _) => vec![],          // long-text handled below
         (None, Some(l)) => vec![l],
-        // V2.28.c — extended to 8192 + 16384.
-        (None, None) => vec![8, 64, 128, 512, 1024, 2048, 4096, 8192, 16384],
+        // V2.28.c — extended to 8192. L=16384 is behind the V2.28.c.1
+        // guard at the default ubatch=128; callers wanting L=16384
+        // numbers set FLAMBEAU_UBATCH=256 + FLAMBEAU_PREFILL_L=16384.
+        (None, None) => vec![8, 64, 128, 512, 1024, 2048, 4096, 8192],
     };
 
     // V2.27.b — async env plumbing mirroring perf_baseline_qwen35_9b.rs.

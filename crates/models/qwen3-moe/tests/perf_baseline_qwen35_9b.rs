@@ -105,10 +105,12 @@ fn perf_baseline_qwen35_9b() -> Result<()> {
         .ok()
         .and_then(|s| s.parse().ok())
         .unwrap_or(if async_enabled { 2 } else { 1 });
-    // V2.28.c — extend L to 8192 + 16384 to see how BR=8 flash-tile +
-    // async PP scale at long context. Attention is O(L²·d); expect
-    // per-token tok/s to decline at large L as attention dominates.
-    for &l in &[8usize, 64, 128, 512, 1024, 2048, 4096, 8192, 16384] {
+    // V2.28.c — extend L to 8192 to see how BR=8 flash-tile + async PP
+    // scale at long context. L=16384 is behind the V2.28.c.1 guard
+    // (K=128 ubatches × u_lanes=2 races on GDN state on hybrid
+    // models); callers wanting L=16384 numbers set FLAMBEAU_UBATCH=256
+    // + FLAMBEAU_PREFILL_L=16384 explicitly.
+    for &l in &[8usize, 64, 128, 512, 1024, 2048, 4096, 8192] {
         let mut session = Qwen3MoEShardedSession::new(&model, &cluster)?;
         let scratch_size = ubatch.map(|u| u.min(l)).unwrap_or(l);
         let mut scratch = flambeau_qwen3_moe::forward::ShardedForwardPrefillScratch::new_with_lanes(
