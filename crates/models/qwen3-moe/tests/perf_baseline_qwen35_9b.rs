@@ -91,13 +91,29 @@ fn perf_baseline_qwen35_9b() -> Result<()> {
     let decode_only = std::env::var("FLAMBEAU_DECODE_ONLY").is_ok();
 
     if !decode_only {
+    // V2.24.b.1 — optional external ubatch chunking via FLAMBEAU_UBATCH env.
+    // Iter 1: serial chunked pass (no cross-rank overlap). Should match
+    // unchunked output + be within noise of unchunked wall.
+    let ubatch: Option<usize> = std::env::var("FLAMBEAU_UBATCH")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .filter(|&u| u > 0);
     for &l in &[8usize, 64, 128, 512, 1024] {
         let mut session = Qwen3MoEShardedSession::new(&model, &cluster)?;
-        let mut scratch = ShardedForwardPrefillScratch::new(&model, &cluster, l)?;
+        let scratch_size = ubatch.map(|u| u.min(l)).unwrap_or(l);
+        let mut scratch = ShardedForwardPrefillScratch::new(&model, &cluster, scratch_size)?;
         let tokens: Vec<u32> = (0..l as u32).map(|i| (1 + i * 37) % 151000).collect();
 
         let t0 = Instant::now();
-        let _ = forward_prefill_pp(&model, &mut session, &cluster, &mut scratch, &tokens, 0)?;
+        if let Some(u) = ubatch {
+            let mut pos = 0;
+            for chunk in tokens.chunks(u) {
+                let _ = forward_prefill_pp(&model, &mut session, &cluster, &mut scratch, chunk, pos)?;
+                pos += chunk.len();
+            }
+        } else {
+            let _ = forward_prefill_pp(&model, &mut session, &cluster, &mut scratch, &tokens, 0)?;
+        }
         let dt = t0.elapsed().as_secs_f64();
         let tps = l as f64 / dt;
         eprintln!("  prefill L={l:<4} → {:.2} tok/s  ({:.1} ms total)", tps, dt * 1000.0);
