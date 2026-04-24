@@ -1198,6 +1198,40 @@ pub fn forward_prefill_pp_async(
             "forward_prefill_pp_async: u_lanes={u_lanes} < 2 — no async benefit; construct scratch via new_with_lanes(..., u_lanes >= 2)"
         );
     }
+    // V2.27.d — guard against the GDN cross-lane state race. Qwen3.5/3.6
+    // hybrid models (full_attention_interval set) share `rank_session.caches`
+    // per layer across lanes: the GDN `state` + `conv_history` device
+    // buffers are NOT per-lane. When `u_lanes > 1` and ubatch_size is
+    // small (< ~128 tokens), concurrent ubatches on different aux streams
+    // can read/write the same GDN state tensor with no ordering
+    // between them, producing non-deterministic results (last_id mismatch
+    // vs sync). At ubatch ≥ 128 the per-ubatch kernel work is long
+    // enough that stream scheduling naturally serialises, masking the
+    // race. Proper fix (per-lane GDN state + merge) is V2.30+ scope;
+    // for now reject configurations that reliably hit the race.
+    //
+    // Also rejects any non-divisor ubatch whose TAIL < 128: the last
+    // ubatch runs concurrent with a full-size predecessor on the other
+    // lane, same race.
+    let has_gdn = (0..model.config.num_layers).any(|il| model.config.is_recurrent(il));
+    if has_gdn && u_lanes > 1 {
+        if ubatch_size < 128 {
+            bail!(
+                "forward_prefill_pp_async: ubatch_size={ubatch_size} < 128 with u_lanes={u_lanes} \
+                 on a hybrid (GDN) model races on shared layer state. Use ubatch ≥ 128 or u_lanes=1. \
+                 See V2.27.d cert."
+            );
+        }
+        let tail = l % ubatch_size;
+        if tail != 0 && tail < 128 {
+            bail!(
+                "forward_prefill_pp_async: L={l} ubatch_size={ubatch_size} produces a tail ubatch \
+                 of size {tail} < 128, which on a hybrid (GDN) model races with the concurrent \
+                 full-size ubatch on the other lane. Use ubatch that divides L, or L/ubatch such \
+                 that the tail ≥ 128. See V2.27.d cert."
+            );
+        }
+    }
     cluster.reserve_aux_streams(u_lanes)?;
     // V2.25.g — per-lane pinned bounces break the single-slab
     // serialisation. Size to a full ubatch worth of F16 hidden.
