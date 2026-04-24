@@ -145,6 +145,7 @@ pub fn forward_one_token(
             x_in,
             x_out,
             position,
+            None,
         )?;
         std::mem::swap(&mut x_in, &mut x_out);
     }

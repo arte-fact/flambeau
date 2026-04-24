@@ -81,6 +81,22 @@ impl Drop for RankForwardScratch {
 /// Aggregate scratch: one `RankForwardScratch` per rank in the cluster.
 pub struct ShardedForwardOneTokenScratch {
     pub per_rank: Vec<RankForwardScratch>,
+    /// V2.27.a-i3 — per-rank graph-capture cache for decode. One
+    /// `HipGraphExec` per rank populated lazily on the first token
+    /// when `FLAMBEAU_DECODE_GRAPH=1`. Stores only the per-rank
+    /// layer chain — embed (rank 0), peer-copy, and argmax
+    /// (rank N-1) stay uncaptured.
+    pub graph_cache_decode: Vec<Option<GraphCacheDecodeEntry>>,
+}
+
+/// V2.27.a-i3 — one cached decode exec per rank with per-layer slot
+/// bundles for full-attn layers.
+pub struct GraphCacheDecodeEntry {
+    pub exec: flambeau_backend_hip::HipGraphExec,
+    /// Per-layer slot bundle. `None` entries correspond to GDN
+    /// layers, which advance state in-place and need no slot
+    /// updates at replay.
+    pub layer_slots: Vec<Option<super::layer::LayerDecodeSlots>>,
 }
 
 impl ShardedForwardOneTokenScratch {
@@ -118,7 +134,8 @@ impl ShardedForwardOneTokenScratch {
                 disposed: false,
             });
         }
-        Ok(Self { per_rank })
+        let graph_cache_decode = (0..cluster.ranks()).map(|_| None).collect();
+        Ok(Self { per_rank, graph_cache_decode })
     }
 
     pub fn dispose(
@@ -193,6 +210,12 @@ pub fn forward_one_token_pp(
         )?;
     }
 
+    // V2.27.a-i3 — opt-in decode graph capture gate. Per-rank layer
+    // chain captured on first call, replayed with slot updates on
+    // subsequent calls. Embed (rank 0), peer-copy, and argmax
+    // (rank N-1) stay uncaptured regardless.
+    let use_decode_graph = std::env::var("FLAMBEAU_DECODE_GRAPH").is_ok();
+
     // 2. Per-rank layer loop with stage-boundary peer_copy_via_host.
     for rank_idx in 0..n_ranks {
         let device = cluster.device(rank_idx);
@@ -217,6 +240,13 @@ pub fn forward_one_token_pp(
         device.bind()?;
 
         let shard = &model.shards[rank_idx];
+        // Split-borrow: graph_cache_decode[rank] and per_rank[rank] are
+        // disjoint fields of scratch.
+        let graph_slot_ptr: *mut Option<GraphCacheDecodeEntry> = if use_decode_graph {
+            &mut scratch.graph_cache_decode[rank_idx]
+        } else {
+            std::ptr::null_mut()
+        };
         let rank_scratch = &mut scratch.per_rank[rank_idx];
         let rank_session = &mut session.per_rank[rank_idx];
         let layer_scratch = rank_scratch
@@ -224,6 +254,140 @@ pub fn forward_one_token_pp(
             .as_mut()
             .context("per-rank LayerForwardScratch missing")?;
 
+        // SAFETY: pointer non-null iff use_decode_graph; unique derivation
+        // from &mut, no aliasing live here.
+        let graph_slot: Option<&mut Option<GraphCacheDecodeEntry>> = if use_decode_graph {
+            Some(unsafe { &mut *graph_slot_ptr })
+        } else {
+            None
+        };
+        let needs_capture = graph_slot.as_ref().map(|s| s.is_none()).unwrap_or(false);
+        let needs_replay = graph_slot.as_ref().map(|s| s.is_some()).unwrap_or(false);
+
+        if needs_replay {
+            // === REPLAY branch ===
+            let entry = graph_slot.as_ref().unwrap().as_ref().unwrap();
+            let n_layers = entry.layer_slots.len();
+            // Stable per-layer backing for the updated pos scalar.
+            let mut n_tokens_kv_vals: Vec<i32> = vec![0; n_layers];
+            for local_idx in 0..n_layers {
+                let Some(slots) = entry.layer_slots[local_idx] else { continue };
+                let layer_cache = &rank_session.caches[local_idx];
+                let LayerCache::FullAttn(kv) = layer_cache else {
+                    bail!("graph-capture decode: layer {local_idx} on rank {rank_idx} expected FullAttn cache");
+                };
+                n_tokens_kv_vals[local_idx] = (position + 1) as i32;
+                // F16 → 2 bytes per element.
+                let per_token_bytes = kv.n_heads() * kv.head_dim() * 2;
+                let k_dst = kv.k_buffer().offset_bytes(position * per_token_bytes);
+                let v_dst = kv.v_buffer().offset_bytes(position * per_token_bytes);
+                // SAFETY: n_tokens_kv_vals lives through the launch below;
+                // k_dst/v_dst are device pointers valid for the exec's lifetime.
+                unsafe {
+                    entry.exec.set_slot(
+                        slots.full_attn.n_tokens_kv_slot,
+                        &n_tokens_kv_vals[local_idx],
+                    )?;
+                    entry.exec.set_memcpy_slot(slots.full_attn.k_append_slot, k_dst)?;
+                    entry.exec.set_memcpy_slot(slots.full_attn.v_append_slot, v_dst)?;
+                }
+                // Update the persistent positions_host in the FullAttnScratch
+                // so the captured HtoD memcpy reads the new position at replay.
+                layer_scratch
+                    .full_attn
+                    .as_mut()
+                    .context("full_attn scratch missing")?
+                    .positions_host[0] = position as i32;
+            }
+            entry.exec.launch(device.default_stream())?;
+            // Manually bump each full-attn layer's tail by 1 (captured
+            // kv_cache_append_hip_slot's Rust-side bump only ran at capture).
+            for local_idx in 0..n_layers {
+                if entry.layer_slots[local_idx].is_none() { continue; }
+                if let LayerCache::FullAttn(kv) = &mut rank_session.caches[local_idx] {
+                    kv.bump_tail(1).map_err(|e| anyhow::anyhow!(
+                        "bump_tail rank={rank_idx} layer={local_idx}: {e}"
+                    ))?;
+                }
+            }
+            continue;  // skip uncaptured per-layer loop below
+        }
+
+        if needs_capture {
+            // === CAPTURE branch (first decode call on this rank) ===
+            let layer_slots: Vec<Option<super::layer::LayerDecodeSlots>> = shard
+                .layers
+                .iter()
+                .map(|lw| {
+                    if cfg.is_recurrent(lw.layer_idx) {
+                        None
+                    } else {
+                        Some(super::layer::LayerDecodeSlots {
+                            full_attn: super::attn::AttnDecodeSlots {
+                                n_tokens_kv_slot: flambeau_backend_hip::ScalarSlot::new(),
+                                k_append_slot: flambeau_backend_hip::MemcpySlot::new(),
+                                v_append_slot: flambeau_backend_hip::MemcpySlot::new(),
+                            },
+                        })
+                    }
+                })
+                .collect();
+            let hidden_a = rank_scratch.hidden_a;
+            let hidden_b = rank_scratch.hidden_b;
+            let layer_slots_clone = layer_slots.clone();
+            let exec = flambeau_backend_hip::HipGraphExec::capture(
+                device.default_stream(),
+                |capture_s| {
+                    let (mut x_in, mut x_out) = (hidden_a, hidden_b);
+                    for (local_idx, layer_weights) in shard.layers.iter().enumerate() {
+                        let layer_cache = &mut rank_session.caches[local_idx];
+                        forward_layer_decode(
+                            &shard.ops,
+                            capture_s,
+                            device,
+                            cfg,
+                            layer_weights,
+                            layer_cache,
+                            layer_scratch,
+                            x_in,
+                            x_out,
+                            position,
+                            layer_slots_clone[local_idx],
+                        )
+                        .map_err(|e| flambeau_core::DeviceError::Backend {
+                            backend: "hip",
+                            code: -1,
+                            message: format!(
+                                "capture decode rank {} layer {}: {e}",
+                                rank_idx, layer_weights.layer_idx
+                            ),
+                        })?;
+                        std::mem::swap(&mut x_in, &mut x_out);
+                    }
+                    // Tail memcpy to land final hidden in hidden_a for the
+                    // peer-copy / output-head consumer. Captured graph bakes
+                    // in whichever branch the parity of n_layers selected.
+                    if x_in != hidden_a {
+                        // SAFETY: both pointers live; hidden_bytes bounded.
+                        unsafe {
+                            device.memcpy_async(
+                                capture_s,
+                                CopyDirection::DeviceToDevice,
+                                hidden_a,
+                                x_in,
+                                hidden_bytes,
+                            )?;
+                        }
+                    }
+                    Ok(())
+                },
+            )?;
+            exec.launch(device.default_stream())?;
+            *graph_slot.unwrap() = Some(GraphCacheDecodeEntry { exec, layer_slots });
+            continue;
+        }
+
+        // === UNCAPTURED branch (legacy sync decode) ===
         let (mut x_in, mut x_out) = (rank_scratch.hidden_a, rank_scratch.hidden_b);
         for (local_idx, layer_weights) in shard.layers.iter().enumerate() {
             let layer_cache = &mut rank_session.caches[local_idx];
@@ -238,6 +402,7 @@ pub fn forward_one_token_pp(
                 x_in,
                 x_out,
                 position,
+                None,
             )
             .with_context(|| {
                 format!(
@@ -438,6 +603,7 @@ fn forward_one_token_pp_inner(
                 x_in,
                 x_out,
                 position,
+                None,
             )
             .with_context(|| {
                 format!(

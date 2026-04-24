@@ -12,8 +12,8 @@ use flambeau_backend_hip::{kv_cache_append_hip_slot, MemcpySlot, ScalarSlot};
 use flambeau_core::{CopyDirection, Device, DevicePtr, Stream};
 use flambeau_ops::hip::{
     attention::{
-        attention_decode_f16, attention_prefill_f16, attention_prefill_f16_slots,
-        split_q_gate_f16,
+        attention_decode_f16, attention_decode_f16_slots, attention_prefill_f16,
+        attention_prefill_f16_slots, split_q_gate_f16,
     },
     cast::cast_f32_to_f16,
     mlp::sigmoid_mul_f16,
@@ -210,6 +210,20 @@ impl Drop for FullAttnScratch {
 /// Appends to `kv_cache` at the current tail. `position` is the 0-based
 /// token index used by RoPE and also the `n_tokens_kv` for the attention
 /// kernel after the append bumps the cache size by 1.
+/// V2.27.a-i3 — per-layer slot bundle for graph-captureable decode.
+/// Present only when the caller is building a decode graph capture;
+/// non-capture callers pass `None` to `forward_full_attn_decode`.
+#[derive(Clone, Copy, Debug)]
+pub struct AttnDecodeSlots {
+    /// Tags `n_tokens_kv` at `attention_decode_f16`. Value per replay
+    /// = `position + 1` (cache tail after the current token's append).
+    pub n_tokens_kv_slot: ScalarSlot,
+    /// Tags the K-tensor dst of `kv_cache.append`.
+    pub k_append_slot: MemcpySlot,
+    /// Tags the V-tensor dst of `kv_cache.append`.
+    pub v_append_slot: MemcpySlot,
+}
+
 pub fn forward_full_attn_decode(
     ops: &OpsRegistry,
     stream: &HipStream,
@@ -223,6 +237,7 @@ pub fn forward_full_attn_decode(
     x_in: DevicePtr,
     delta_out: DevicePtr,
     position: usize,
+    slots: Option<AttnDecodeSlots>,
 ) -> Result<()> {
     // V1.7.3-b wires the attention block only; the FFN side of the
     // residual is V1.7.3-d. `post_attn_norm` is still unused here; keep
@@ -427,10 +442,27 @@ pub fn forward_full_attn_decode(
 
     // 8. Append K, V to the KV cache at the tail slot.
     // SAFETY: scratch.k_f16 and v_f16 are contiguous F16 `[n_kv_heads, head_dim]`.
-    unsafe {
-        kv_cache
-            .append(device, stream, scratch.k_f16, scratch.v_f16, 1)
-            .map_err(|e| anyhow::anyhow!("kv_cache.append: {e}"))?;
+    if let Some(AttnDecodeSlots { k_append_slot, v_append_slot, .. }) = slots {
+        // V2.27.a-i3 — capture-tagged append so dst can be retargeted
+        // per replay via HipGraphExec::set_memcpy_slot.
+        unsafe {
+            kv_cache_append_hip_slot(
+                kv_cache,
+                device,
+                stream,
+                scratch.k_f16,
+                scratch.v_f16,
+                1,
+                k_append_slot,
+                v_append_slot,
+            )?;
+        }
+    } else {
+        unsafe {
+            kv_cache
+                .append(device, stream, scratch.k_f16, scratch.v_f16, 1)
+                .map_err(|e| anyhow::anyhow!("kv_cache.append: {e}"))?;
+        }
     }
 
     // 9. Attention decode against the full cache (includes the token we
@@ -442,7 +474,15 @@ pub fn forward_full_attn_decode(
     // vs split-K's 340 µs (7.78×). FLAMBEAU_VARIANT=baseline opts out.
     let n_tokens_kv = kv_cache.current_tokens();
     let scale = (head_dim as f32).sqrt().recip();
-    let use_splitk = std::env::var("FLAMBEAU_VARIANT").as_deref() != Ok("baseline")
+    // V2.27.a-i3 — force single-pass when under graph capture. split-K
+    // has per-call chunk_size/n_chunks params that change with
+    // n_tokens_kv, which graph capture can't retarget cleanly. For
+    // capture mode we accept the single-pass perf profile (fine at
+    // short/medium contexts; split-K advantage kicks in past ~256
+    // tokens which is out of scope for the initial decode-capture
+    // validation).
+    let use_splitk = slots.is_none()
+        && std::env::var("FLAMBEAU_VARIANT").as_deref() != Ok("baseline")
         && n_tokens_kv > 256;
     if use_splitk {
         let chunk_size = flambeau_ops::hip::attention::splitk_chunk_size(n_tokens_kv);
@@ -470,7 +510,8 @@ pub fn forward_full_attn_decode(
         )
         .context("attention_decode_f16_splitk")?;
     } else {
-        attention_decode_f16(
+        let n_tokens_kv_slot = slots.map(|s| s.n_tokens_kv_slot);
+        attention_decode_f16_slots(
             ops,
             stream,
             scratch.q_f16,
@@ -482,6 +523,7 @@ pub fn forward_full_attn_decode(
             head_dim,
             n_tokens_kv,
             scale,
+            n_tokens_kv_slot,
         )
         .context("attention_decode_f16")?;
     }
@@ -551,6 +593,7 @@ pub fn forward_full_attn_layer_decode(
     x_in: DevicePtr,
     delta_out: DevicePtr,
     position: usize,
+    slots: Option<AttnDecodeSlots>,
 ) -> Result<()> {
     let LayerCache::FullAttn(kv) = layer_cache else {
         bail!(
@@ -577,6 +620,7 @@ pub fn forward_full_attn_layer_decode(
         x_in,
         delta_out,
         position,
+        slots,
     )
 }
 

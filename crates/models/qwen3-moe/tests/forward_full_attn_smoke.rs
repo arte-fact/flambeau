@@ -221,6 +221,7 @@ fn forward_full_attn_decode_smoke() -> Result<()> {
         x_in,
         delta_out,
         0,
+        None,
     )?;
 
     // Read back delta_out and confirm every lane is finite.

@@ -43,10 +43,34 @@ pub fn attention_decode_f16(
     n_tokens_kv: usize,
     scale: f32,
 ) -> Result<()> {
-    // Kernel-side shared memory is sized to head_dim=256, block = head_dim.
-    // Any multiple of wave64 ≤ 256 works (1 / 2 / 4 warps cover 64 / 128 /
-    // 256). Larger head_dims need a kernel-side rework (wider block or
-    // per-thread strides) — add the cert shape first, then relax this guard.
+    attention_decode_f16_slots(
+        reg, stream, q, k_cache, v_cache, out, n_heads_q, n_heads_kv, head_dim,
+        n_tokens_kv, scale, None,
+    )
+}
+
+/// V2.27.a-i3 — graph-captureable variant of [`attention_decode_f16`].
+///
+/// Identical behaviour for non-capture callers (slot=None). When
+/// `n_tokens_kv_slot` is Some, the n_tokens_kv kernel arg is tagged
+/// via `KernelArgs::push_slot` so the graph recorder can bind the
+/// slot. Caller then updates the slot per replay via
+/// `HipGraphExec::set_slot` to track the growing KV cache tail.
+#[allow(clippy::too_many_arguments)]
+pub fn attention_decode_f16_slots(
+    reg: &OpsRegistry,
+    stream: &HipStream,
+    q: DevicePtr,
+    k_cache: DevicePtr,
+    v_cache: DevicePtr,
+    out: DevicePtr,
+    n_heads_q: usize,
+    n_heads_kv: usize,
+    head_dim: usize,
+    n_tokens_kv: usize,
+    scale: f32,
+    n_tokens_kv_slot: Option<flambeau_backend_hip::ScalarSlot>,
+) -> Result<()> {
     assert!(
         head_dim == 64 || head_dim == 128 || head_dim == 256,
         "attention_decode_f16: head_dim {head_dim} not supported (expected 64, 128, or 256)"
@@ -71,7 +95,10 @@ pub fn attention_decode_f16(
     args.push(&n_heads_q_i);
     args.push(&n_heads_kv_i);
     args.push(&head_dim_i);
-    args.push(&n_tokens_i);
+    match n_tokens_kv_slot {
+        Some(s) => args.push_slot(&n_tokens_i, s),
+        None => args.push(&n_tokens_i),
+    }
     args.push(&scale_f);
     let cfg = LaunchCfg::one_d(n_heads_q as u32, head_dim as u32);
     unsafe { kernel.launch(stream, cfg, args)? };

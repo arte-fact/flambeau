@@ -168,6 +168,14 @@ impl Drop for LayerForwardScratch {
 ///
 /// On arches without a shared expert (dense qwen3moe), the `shared` and
 /// `moe_res` steps are skipped and `moe_res = mid` is passed directly.
+/// V2.27.a-i3 — optional slot bundle for graph-captureable decode.
+/// Only full-attn layers contribute slots; GDN layers advance state
+/// in-place across replays and need no slot updates.
+#[derive(Clone, Copy, Debug)]
+pub struct LayerDecodeSlots {
+    pub full_attn: super::attn::AttnDecodeSlots,
+}
+
 pub fn forward_layer_decode(
     ops: &OpsRegistry,
     stream: &HipStream,
@@ -179,6 +187,7 @@ pub fn forward_layer_decode(
     x_in: DevicePtr,
     x_out: DevicePtr,
     position: usize,
+    slots: Option<LayerDecodeSlots>,
 ) -> Result<()> {
     let hidden = cfg.hidden_size;
     let il = layer_weights.layer_idx;
@@ -218,6 +227,7 @@ pub fn forward_layer_decode(
             x_in,
             scratch.mid_f16,
             position,
+            slots.map(|s| s.full_attn),
         )?;
     }
 
