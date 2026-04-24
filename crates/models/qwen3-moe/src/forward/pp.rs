@@ -1223,16 +1223,13 @@ pub fn forward_prefill_pp_async(
         .as_ref()
         .or(last_shard.token_embd.as_ref())
         .context("last rank missing both output.weight and tied token_embd")?;
+    // Compute the lane hidden ptr before the mutable borrow of output_head.
+    let last_lane_hidden_a = last_scratch.lane_hidden_a(last_lane);
+    let last_token_hidden = last_lane_hidden_a.offset_bytes((last_u - 1) * row_bytes);
     let output_head_scratch = last_scratch
         .output_head
         .as_mut()
         .context("last rank missing output_head scratch")?;
-    let last_lane_hidden_a = if last_lane == 0 {
-        last_scratch.hidden_a
-    } else {
-        last_scratch.extra_lanes[last_lane - 1].hidden_a
-    };
-    let last_token_hidden = last_lane_hidden_a.offset_bytes((last_u - 1) * row_bytes);
     forward_output_head_decode(
         &last_shard.ops,
         last_device.default_stream(),

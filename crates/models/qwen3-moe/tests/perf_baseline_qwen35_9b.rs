@@ -114,22 +114,27 @@ fn perf_baseline_qwen35_9b() -> Result<()> {
         let tokens: Vec<u32> = (0..l as u32).map(|i| (1 + i * 37) % 151000).collect();
 
         let t0 = Instant::now();
-        if async_enabled && u_lanes >= 2 {
+        let last_id = if async_enabled && u_lanes >= 2 {
             // forward_prefill_pp itself branches into forward_prefill_pp_async
             // when FLAMBEAU_ASYNC_UBATCH is set and u_lanes >= 2.
-            let _ = forward_prefill_pp(&model, &mut session, &cluster, &mut scratch, &tokens, 0)?;
+            forward_prefill_pp(&model, &mut session, &cluster, &mut scratch, &tokens, 0)?
         } else if let Some(u) = ubatch {
             let mut pos = 0;
+            let mut id = 0;
             for chunk in tokens.chunks(u) {
-                let _ = forward_prefill_pp(&model, &mut session, &cluster, &mut scratch, chunk, pos)?;
+                id = forward_prefill_pp(&model, &mut session, &cluster, &mut scratch, chunk, pos)?;
                 pos += chunk.len();
             }
+            id
         } else {
-            let _ = forward_prefill_pp(&model, &mut session, &cluster, &mut scratch, &tokens, 0)?;
-        }
+            forward_prefill_pp(&model, &mut session, &cluster, &mut scratch, &tokens, 0)?
+        };
         let dt = t0.elapsed().as_secs_f64();
         let tps = l as f64 / dt;
-        eprintln!("  prefill L={l:<4} → {:.2} tok/s  ({:.1} ms total)", tps, dt * 1000.0);
+        eprintln!(
+            "  prefill L={l:<4} → {:.2} tok/s  ({:.1} ms total, last_id={last_id})",
+            tps, dt * 1000.0
+        );
         results.push(("prefill".into(), l, dt, tps));
 
         scratch.dispose(&cluster)?;
