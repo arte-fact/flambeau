@@ -1028,19 +1028,33 @@ pub fn forward_prefill_pp_async(
 
     let shards = &model.shards;
 
-    // Issue every (ubatch, rank) work item in order. Async peer-copies +
-    // per-lane aux streams let the driver overlap across ubatches.
-    for ub_idx in 0..n_ubatches {
-        let lane = ub_idx % u_lanes;
-        let start = ub_idx * ubatch_size;
-        let end = (start + ubatch_size).min(l);
-        let u = end - start;
-        let chunk = &tokens[start..end];
-        let pos = start_position + start;
-        let chunk_bytes = u * row_bytes;
+    // V2.25.h — interleaved 1F1B dispatch. At time step t, rank r
+    // processes ubatch (t - r) if in [0, n_ubatches). At steady state
+    // (t in [n_ranks-1, n_ubatches-1]), every rank is dispatching a
+    // different ubatch concurrently, producing real pipeline fill.
+    //
+    // Pre-V2.25.h dispatched `for ub in 0..n_ubatches { for rank in
+    // 0..n_ranks }` which is serial-across-ubatches. That wasted the
+    // aux-stream / per-lane-bounce infrastructure because rank r's
+    // lane-k work finished before rank r ever started lane-k+1 work.
+    let n_timesteps = n_ranks + n_ubatches - 1;
+    for t in 0..n_timesteps {
+        for rank_idx in 0..n_ranks {
+            let ub_idx_signed = t as isize - rank_idx as isize;
+            if ub_idx_signed < 0 || (ub_idx_signed as usize) >= n_ubatches {
+                continue;
+            }
+            let ub_idx = ub_idx_signed as usize;
+            let lane = ub_idx % u_lanes;
+            let start = ub_idx * ubatch_size;
+            let end = (start + ubatch_size).min(l);
+            let u = end - start;
+            let chunk = &tokens[start..end];
+            let pos = start_position + start;
+            let chunk_bytes = u * row_bytes;
 
         // ----- Rank 0: embed + layers -----
-        {
+        if rank_idx == 0 {
             let rank0 = cluster.device(0);
             rank0.bind()?;
             let shard0 = &shards[0];
@@ -1116,10 +1130,9 @@ pub fn forward_prefill_pp_async(
                 }
                 Ok(())
             })?;
-        }
 
-        // ----- Rank r > 0: peer-copy + layers -----
-        for rank_idx in 1..n_ranks {
+        } else {
+            // ----- Rank r > 0: peer-copy + layers -----
             let device = cluster.device(rank_idx);
 
             // Gather the raw stream handles for the cross-rank peer-copy.
@@ -1201,7 +1214,8 @@ pub fn forward_prefill_pp_async(
                 Ok(())
             })?;
         }
-    }
+        } // close for rank_idx
+    } // close for t (outer 1F1B timestep loop)
 
     // ----- Output head on the last rank after the FINAL ubatch -----
     let last_idx = n_ranks - 1;
