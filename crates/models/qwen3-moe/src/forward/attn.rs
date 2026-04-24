@@ -45,6 +45,15 @@ pub struct FullAttnScratch {
     pub attn_out_f16: DevicePtr,   // F16 [n_heads * head_dim]
     pub gated_out_f16: DevicePtr,  // F16 [n_heads * head_dim]
     pub positions: DevicePtr,      // i32 [1] — position for the current token
+    /// V2.27.a-i2b — persistent host-side 1-slot position backing. Same
+    /// motivation as V2.26.a-i5a's `positions_host` for prefill: the
+    /// per-layer `upload_position` HtoD memcpy's source was a stack-local
+    /// `[i32; 1]` requiring an internal `stream.synchronize()` to keep
+    /// it alive across the copy — a per-layer per-token barrier of ~50 µs
+    /// (~5 % of decode wall at 53 tok/s on Mesh<4>). The persistent Vec
+    /// lets us drop the sync and keeps the memcpy source stable for
+    /// V2.27.a-i3's graph-capture path.
+    pub(crate) positions_host: Vec<i32>,
     // V2.19.b — split-K (flash-decoding) partials. Sized for
     // `MAX_SPLITK_CHUNKS` chunks so the scratch can serve any context up to
     // `MAX_SPLITK_CHUNKS * SPLITK_CHUNK_SIZE_LONG` tokens; dispatch asserts
@@ -135,6 +144,7 @@ impl FullAttnScratch {
             attn_out_f16,
             gated_out_f16,
             positions,
+            positions_host: vec![0i32; 1],
             splitk_partials_m,
             splitk_partials_s,
             splitk_partials_o,
@@ -373,8 +383,23 @@ pub fn forward_full_attn_decode(
     .context("attn_k_norm")?;
 
     // 7. RoPE on Q and K. Multi-freq partial NeoX for Qwen3.5/3.6 text-only.
-    upload_position(device, stream, scratch.positions, position as i32)
-        .context("positions upload")?;
+    //
+    // V2.27.a-i2b — upload the position via the scratch's persistent
+    // positions_host Vec so the HtoD source is stable across graph
+    // replays AND we can drop the internal sync the stack-local
+    // [position] variant needed. Saves ~50 µs/layer/token on decode.
+    scratch.positions_host[0] = position as i32;
+    // SAFETY: scratch.positions has 4 valid bytes; positions_host is a
+    // persistent Vec on the scratch whose lifetime exceeds the copy.
+    unsafe {
+        device.memcpy_async(
+            stream,
+            CopyDirection::HostToDevice,
+            scratch.positions,
+            DevicePtr(scratch.positions_host.as_ptr() as usize),
+            4,
+        )?;
+    }
     rope_neox_partial_f16(
         ops,
         stream,
