@@ -8,14 +8,22 @@ description = "M-track — dev-only MCP server exposing sweep/matrix/profile/A-B
 
 [dependencies]
 flambeau-core = { path = "../core" }
+flambeau-quant = { path = "../quant" }
 flambeau-bench = { path = "../bench" }
 flambeau-autotune = { path = "../autotune" }
+toml = { workspace = true }
 anyhow.workspace = true
-axum.workspace = true
 tokio.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 tracing.workspace = true
+rmcp.workspace = true
+# HTTP transport (M1.5)
+axum.workspace = true
+tokio-util = "0.7"
+# schemars is re-exported from rmcp but we pin through the workspace
+# tokenizers for consistency. rmcp re-export is used directly inside
+# the #[tool] macro.
 
 [lints]
 workspace = true

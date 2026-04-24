@@ -1,0 +1,40 @@
+{
+  "messages": [
+    { "role": "user", "content": "Look up the time in Tokyo and search the news." }
+  ],
+  "tools": [
+    {
+      "type": "function",
+      "function": {
+        "name": "get_time",
+        "description": "Get the current time for a city.",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "city": { "type": "string" },
+            "iana_zone": { "type": "string", "description": "Optional IANA timezone override" }
+          },
+          "required": ["city"]
+        }
+      }
+    },
+    {
+      "type": "function",
+      "function": {
+        "name": "search_news",
+        "description": "Search recent news articles.",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "query": { "type": "string" },
+            "max_results": { "type": "integer", "minimum": 1, "maximum": 20 }
+          },
+          "required": ["query"]
+        }
+      }
+    }
+  ],
+  "bos_token": "",
+  "eos_token": "<|im_end|>",
+  "add_generation_prompt": true
+}

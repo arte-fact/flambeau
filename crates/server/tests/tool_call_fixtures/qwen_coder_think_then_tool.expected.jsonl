@@ -1,0 +1,4 @@
+{"ThinkDelta":"The user wants the current weather. I'll use get_weather."}
+{"ToolCallOpen":{"index":0,"name":"get_weather"}}
+{"ToolCallArgumentsDelta":{"index":0,"arguments":"{\"city\":\"San Francisco\"}"}}
+{"ToolCallClose":{"index":0}}

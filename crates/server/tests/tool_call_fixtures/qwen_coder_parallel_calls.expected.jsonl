@@ -1,0 +1,7 @@
+{"ToolCallOpen":{"index":0,"name":"a"}}
+{"ToolCallArgumentsDelta":{"index":0,"arguments":"{\"x\":\"1\"}"}}
+{"ToolCallClose":{"index":0}}
+{"TextDelta":"\n"}
+{"ToolCallOpen":{"index":1,"name":"b"}}
+{"ToolCallArgumentsDelta":{"index":1,"arguments":"{\"y\":\"2\"}"}}
+{"ToolCallClose":{"index":1}}

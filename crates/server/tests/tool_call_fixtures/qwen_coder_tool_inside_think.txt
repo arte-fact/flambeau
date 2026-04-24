@@ -1,0 +1,7 @@
+<think>I could call <tool_call>
+<function=f>
+<parameter=x>
+1
+</parameter>
+</function>
+</tool_call> here if needed.</think>Done.

@@ -108,6 +108,83 @@ fn render_without_generation_prompt_closes_last_turn() {
     );
 }
 
+/// T1.2: Qwen3.6 `<tool_call>` / `</tool_call>` are textual tags, not
+/// single vocab tokens — they tokenise as normal BPE sequences and must
+/// round-trip cleanly through encode/decode. If the vocab-scan in
+/// `tokenizer::load_from_gguf` ever auto-registers them as specials by
+/// mistake, this test surfaces it.
+#[test]
+fn tool_call_tags_roundtrip_through_tokenizer() {
+    let Some(path) = gguf_path() else {
+        eprintln!("FLAMBEAU_QWEN3_GGUF unset — skipping");
+        return;
+    };
+    let gguf = GgufFile::open(&path).expect("open GGUF");
+    let tok = flambeau_quant::load_from_gguf(&gguf).expect("load tokenizer");
+
+    let fixtures = [
+        "<tool_call>",
+        "</tool_call>",
+        "<tool_call>\n{\"name\":\"get_weather\",\"arguments\":\"{}\"}\n</tool_call>",
+        "prefix text <tool_call>{\"name\":\"f\",\"arguments\":\"{}\"}</tool_call> suffix",
+        // Qwen3.6 can emit think + tool_call together (llama.cpp #21118
+        // guards the newline-less variant here):
+        "<think>reasoning</think><tool_call>{\"name\":\"f\",\"arguments\":\"{}\"}</tool_call>",
+    ];
+    for f in fixtures {
+        let ids = tok.encode(f).expect("encode");
+        let back = tok.decode(&ids).expect("decode");
+        assert_eq!(
+            back, f,
+            "tool-call tag round-trip failed: original={f:?}, decoded={back:?}, n_ids={}",
+            ids.len()
+        );
+    }
+}
+
+/// T1.2: `render_with_tools` threads a non-empty `tools[]` through the
+/// Jinja context. Uses a hand-rolled minimal template so the test does
+/// not need a GGUF file.
+#[test]
+fn render_with_tools_passes_into_context() {
+    use serde_json::json;
+    let tpl_src = r#"
+{%- for m in messages -%}
+[{{ m.role }}] {{ m.content }}
+{% endfor -%}
+{%- if tools -%}
+TOOLS: {% for t in tools %}{{ t.function.name }} {% endfor %}
+{%- else -%}
+NO_TOOLS
+{%- endif -%}
+"#;
+    let tpl = ChatTemplate::from_string(tpl_src.to_owned()).expect("parse template");
+    let msgs = vec![ChatMessage {
+        role: "user".into(),
+        content: "hi".into(),
+    }];
+    // Empty tools list → template takes the no-tools branch.
+    let r_none = tpl
+        .render_with_tools::<_, serde_json::Value>(&msgs, None, false, None)
+        .expect("render no tools");
+    assert!(r_none.contains("NO_TOOLS"), "no-tools branch: {r_none:?}");
+
+    // Non-empty list → template sees the list.
+    let tools = vec![json!({"type":"function","function":{"name":"get_weather"}})];
+    let r_some = tpl
+        .render_with_tools(&msgs, Some(&tools), false, None)
+        .expect("render with tools");
+    assert!(
+        r_some.contains("TOOLS: get_weather"),
+        "tools branch: {r_some:?}"
+    );
+
+    // Back-compat: render() delegates to render_with_tools with None, so
+    // the pre-V2.12 empty-tools behaviour is preserved byte-for-byte.
+    let r_compat = tpl.render(&msgs, false).expect("render compat");
+    assert_eq!(r_compat, r_none);
+}
+
 #[test]
 fn can_feed_render_into_tokenizer() {
     let Some(path) = gguf_path() else {

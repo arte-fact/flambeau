@@ -1,0 +1,14 @@
+<tool_call>
+<function=a>
+<parameter=x>
+1
+</parameter>
+</function>
+</tool_call>
+<tool_call>
+<function=b>
+<parameter=y>
+2
+</parameter>
+</function>
+</tool_call>

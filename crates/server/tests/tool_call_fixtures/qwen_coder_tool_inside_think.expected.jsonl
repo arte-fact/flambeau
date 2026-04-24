@@ -1,0 +1,2 @@
+{"ThinkDelta":"I could call <tool_call>\n<function=f>\n<parameter=x>\n1\n</parameter>\n</function>\n</tool_call> here if needed."}
+{"TextDelta":"Done."}

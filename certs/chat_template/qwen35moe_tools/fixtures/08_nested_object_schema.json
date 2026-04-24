@@ -1,0 +1,44 @@
+{
+  "messages": [
+    { "role": "user", "content": "Create a calendar event for tomorrow at 10am with the team." }
+  ],
+  "tools": [
+    {
+      "type": "function",
+      "function": {
+        "name": "create_calendar_event",
+        "description": "Create a calendar event with attendees.",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "title": { "type": "string" },
+            "when": {
+              "type": "object",
+              "properties": {
+                "start": { "type": "string", "format": "date-time" },
+                "end": { "type": "string", "format": "date-time" },
+                "timezone": { "type": "string" }
+              },
+              "required": ["start", "end"]
+            },
+            "attendees": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "properties": {
+                  "email": { "type": "string", "format": "email" },
+                  "role": { "type": "string", "enum": ["required", "optional"] }
+                },
+                "required": ["email"]
+              }
+            }
+          },
+          "required": ["title", "when"]
+        }
+      }
+    }
+  ],
+  "bos_token": "",
+  "eos_token": "<|im_end|>",
+  "add_generation_prompt": true
+}

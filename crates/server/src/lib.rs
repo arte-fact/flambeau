@@ -11,8 +11,11 @@
 
 #![forbid(unsafe_op_in_unsafe_fn)]
 
+pub mod agent_stats;
 pub mod api;
+pub mod mcp_client;
 pub mod state;
+pub mod tool_call_parser;
 
 #[cfg(feature = "hip")]
 pub mod routes;
@@ -21,7 +24,8 @@ pub mod serve;
 
 pub use api::{
     ChatChoice, ChatCompletionRequest, ChatCompletionResponse, ChatMessage, CompletionChoice,
-    CompletionRequest, CompletionResponse, ModelObject, ModelsListResponse, Usage,
+    CompletionRequest, CompletionResponse, FunctionCall, FunctionDef, ModelObject,
+    ModelsListResponse, ToolCall, ToolChoice, ToolChoiceFunction, ToolChoiceNamed, ToolDef, Usage,
 };
 pub use state::SamplingParams;
 

@@ -31,7 +31,10 @@ bytemuck = { version = "1", features = ["derive"] }
 byteorder = "1"
 half = { version = "2", features = ["bytemuck"] }
 serde = { version = "1", features = ["derive"] }
-serde_json = "1"
+# `preserve_order` keeps JSON object field order on parse/serialise —
+# required for byte-for-byte chat-template parity with llama.cpp, whose
+# Python-style `tojson` preserves declaration order (V2.12, T1.3).
+serde_json = { version = "1", features = ["preserve_order"] }
 toml = "0.8"
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "signal"] }
 tracing = "0.1"
@@ -42,7 +45,28 @@ tower = "0.5"
 # Model loading
 memmap2 = "0.9"
 tokenizers = "0.20"
-minijinja = "2"
+# MCP server/client SDK (official rust-sdk). Pinned exactly per
+# ROADMAP-V2-TOOL-CALLING-AND-MCP.md "Risks / rmcp version churn" — the
+# protocol ships version-bump changes and we don't want silent drift.
+# Features: `server` (default) for M1; add `client` for M2.1 when it
+# lands. `transport-io` = stdio transport; `transport-streamable-http-server` = HTTP (M1.5).
+rmcp = { version = "=1.5.0", default-features = false, features = [
+    "server",
+    "client",
+    "macros",
+    "schemars",
+    "transport-io",
+    "transport-streamable-http-server",
+    "transport-streamable-http-client",
+    "transport-streamable-http-client-reqwest",
+    "reqwest",
+] }
+# `json`: enables the `tojson` filter the Qwen3.6 chat template uses
+# (V2.12, certs/chat_template/qwen35moe_tools/). `preserve_order`:
+# minijinja's internal map switches from BTreeMap to IndexMap so object
+# field order survives round-tripping through `{{ x | tojson }}` —
+# required for byte-parity with llama.cpp's (Python-style) render.
+minijinja = { version = "2", features = ["json", "preserve_order"] }
 # CLI
 clap = { version = "4", features = ["derive"] }
 

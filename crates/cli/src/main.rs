@@ -4,7 +4,7 @@
 //! their target step lands. See `doc/ROADMAP-V1-QWEN36-GFX906.md` for what each
 //! subcommand requires.
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
 use flambeau_quant::gguf::{GgufFile, Value};
 
@@ -20,6 +20,21 @@ enum Cmd {
     /// Dump GGUF tensor list, dtype audit, metadata (V1.1).
     InspectGguf {
         path: String,
+    },
+    /// Dump the GGUF-embedded Jinja chat template to a `.jinja` file.
+    ///
+    /// Used by `certs/chat_template/qwen35moe_tools/regenerate.sh` and as
+    /// a general utility for anyone wanting to feed the model's actual
+    /// chat template to an external Jinja renderer (e.g. llama.cpp's
+    /// `test-chat-template`). Non-destructive — prints to stdout when
+    /// `--out` is omitted.
+    ExtractChatTemplate {
+        /// Path to the GGUF file.
+        #[arg(long)]
+        path: String,
+        /// Optional output file. Default: stdout.
+        #[arg(long)]
+        out: Option<String>,
     },
     /// Dump HIP `.hsaco` kernel symbols + VGPR budgets (V1.3+).
     InspectHsaco {
@@ -37,7 +52,8 @@ enum Cmd {
         #[arg(long, default_value = "hip:0")]
         devices: String,
     },
-    /// OpenAI-compatible HTTP server (V1.8).
+    /// OpenAI-compatible HTTP server (V1.8) + optional MCP upstream
+    /// client (V2.17 — ROADMAP-V2 §M2.1).
     Serve {
         #[arg(long)]
         model: String,
@@ -45,6 +61,13 @@ enum Cmd {
         devices: String,
         #[arg(long, default_value_t = 8080)]
         port: u16,
+        /// Upstream MCP server to register as a tool source, e.g.
+        /// `--mcp http://localhost:9090/mcp`. Repeatable. Each URL is
+        /// enumerated once at boot; tools are exposed to the model
+        /// alongside any client-supplied `tools[]`. Names are
+        /// prefixed with a per-server alias to avoid collisions.
+        #[arg(long = "mcp")]
+        mcp_urls: Vec<String>,
     },
     /// T-track warmup-tuner (V1.x side-track).
     Tune {
@@ -55,9 +78,20 @@ enum Cmd {
         #[arg(long)]
         dry_run: bool,
     },
-    /// M-track MCP server (V1.x side-track). Dev-only.
+    /// M-track MCP server (V2.16, ROADMAP-V2 §M1). Dev-only — never
+    /// exposed to production traffic. Wraps flambeau's internal
+    /// dev-surface (sweep / cert-check / pmc-probe / inspect / dispatch)
+    /// as MCP tools that return committable JSON artefacts.
+    ///
+    /// Default transport is stdio (matches Claude Code / mcp-cli).
+    /// `--port N` enables the streamable-HTTP transport (M1.5).
     Mcp {
-        #[arg(long, default_value_t = 9090)]
+        /// Use stdio transport. Default when neither --stdio nor --port
+        /// is given.
+        #[arg(long, default_value_t = false)]
+        stdio: bool,
+        /// Use HTTP transport on the given TCP port. `0` = stdio.
+        #[arg(long, default_value_t = 0)]
         port: u16,
     },
     /// Correctness-sweep harness; emits certs (V1.3+).
@@ -121,11 +155,14 @@ fn main() -> Result<()> {
     let cli = Cli::parse();
     match cli.cmd {
         Cmd::InspectGguf { path } => inspect_gguf(&path)?,
+        Cmd::ExtractChatTemplate { path, out } => extract_chat_template(&path, out.as_deref())?,
         Cmd::InspectHsaco { path } => todo!("V1.3+: implement inspect-hsaco for {path}"),
         Cmd::Infer { model, .. } => todo!("V1.7: implement infer for {model}"),
-        Cmd::Serve { model, devices, port } => serve_cmd(&model, &devices, port)?,
+        Cmd::Serve { model, devices, port, mcp_urls } => {
+            serve_cmd(&model, &devices, port, mcp_urls)?
+        }
         Cmd::Tune { model, .. } => todo!("T-track: implement tune for {model}"),
-        Cmd::Mcp { port } => todo!("M-track: implement mcp on :{port}"),
+        Cmd::Mcp { stdio, port } => mcp_cmd(stdio, port)?,
         Cmd::Sweep { arch, op, dtype } => sweep(&arch, op.as_deref(), &dtype)?,
         Cmd::CertCheck { arch, backend } => cert_check(&backend, &arch)?,
         Cmd::PmcProbe { kernel, m, k, n } => pmc_probe(&kernel, m, k, n)?,
@@ -136,14 +173,24 @@ fn main() -> Result<()> {
 }
 
 #[cfg(not(feature = "hip_serve"))]
-fn serve_cmd(_model: &str, _devices: &str, _port: u16) -> Result<()> {
+fn serve_cmd(
+    _model: &str,
+    _devices: &str,
+    _port: u16,
+    _mcp_urls: Vec<String>,
+) -> Result<()> {
     anyhow::bail!(
         "`flambeau serve` requires building with --features hip_serve (needs ROCm + HIP devices)"
     );
 }
 
 #[cfg(feature = "hip_serve")]
-fn serve_cmd(model: &str, devices: &str, port: u16) -> Result<()> {
+fn serve_cmd(
+    model: &str,
+    devices: &str,
+    port: u16,
+    mcp_urls: Vec<String>,
+) -> Result<()> {
     use std::net::SocketAddr;
     use std::path::PathBuf;
 
@@ -168,12 +215,56 @@ fn serve_cmd(model: &str, devices: &str, port: u16) -> Result<()> {
             .file_stem()
             .map(|s| s.to_string_lossy().to_string())
             .unwrap_or_else(|| "flambeau".to_string()),
+        mcp_urls,
     };
 
     let rt = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()?;
     rt.block_on(flambeau_server::serve(cfg))
+}
+
+/// `flambeau mcp` — boot the M-track MCP server. Stdio transport by
+/// default (matches Claude Code / mcp-cli); `--port N` opts into the
+/// streamable-HTTP transport mounted at `127.0.0.1:N/mcp` (M1.5).
+fn mcp_cmd(stdio: bool, port: u16) -> Result<()> {
+    // If the user passed --stdio explicitly, honour it even if --port
+    // was also supplied (stdio wins). Otherwise pick based on port.
+    let use_stdio = stdio || port == 0;
+    // HTTP transport needs a multi-threaded runtime (axum + tokio tasks);
+    // stdio is fine with a current-thread runtime.
+    if use_stdio {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .context("build tokio runtime")?;
+        return rt.block_on(flambeau_mcp_server::run_stdio());
+    }
+    let rt = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+        .context("build tokio runtime")?;
+    rt.block_on(flambeau_mcp_server::run_http(port))
+}
+
+/// Dump the GGUF's embedded `tokenizer.chat_template` Jinja source.
+/// Writes to `out` (truncating) or stdout when `out` is `None`.
+fn extract_chat_template(path: &str, out: Option<&str>) -> Result<()> {
+    use std::io::Write;
+    let file = GgufFile::open(path)?;
+    let tpl = file
+        .metadata_str("tokenizer.chat_template")
+        .ok_or_else(|| anyhow::anyhow!("tokenizer.chat_template missing from {path}"))?;
+    match out {
+        Some(p) => {
+            std::fs::write(p, tpl)?;
+            eprintln!("wrote {} bytes of chat template to {p}", tpl.len());
+        }
+        None => {
+            std::io::stdout().write_all(tpl.as_bytes())?;
+        }
+    }
+    Ok(())
 }
 
 fn inspect_gguf(path: &str) -> Result<()> {
@@ -285,6 +376,7 @@ const SIMPLE_SWEEPS: &[(&str, SweepFn)] = &[
     ("moe_combine", flambeau_bench::sweep_moe::run_moe_combine_sweep),
     ("indexed_moe_mmvq_gate_up", flambeau_bench::sweep_moe::run_gate_up_sweep),
     ("indexed_moe_mmvq_r2", flambeau_bench::sweep_moe::run_indexed_moe_mmvq_r2_sweep),
+    ("indexed_moe_mmvq_q5_k", flambeau_bench::sweep_moe::run_indexed_moe_mmvq_q5_k_sweep),
     ("indexed_moe_mmvq_q6_k", flambeau_bench::sweep_moe::run_indexed_moe_mmvq_q6_k_sweep),
     ("indexed_moe_mmvq_q8_0", flambeau_bench::sweep_moe::run_indexed_moe_mmvq_q8_0_sweep),
     ("indexed_moe_mmq", flambeau_bench::sweep_moe::run_indexed_moe_mmq_sweep),

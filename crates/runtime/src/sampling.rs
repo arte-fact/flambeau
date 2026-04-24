@@ -1,34 +1,113 @@
-//! CPU-side token sampling — V1.8.A piece 1 of 3.
+//! CPU-side token sampling.
 //!
-//! Takes a `&[f32]` of decoder logits (one per vocab entry) and returns the
-//! sampled token id. Three modes:
-//!  - `Greedy`             → argmax (matches our current decode_profile path).
-//!  - `Temperature(temp)`  → scale logits by `1/temp`, softmax, sample.
-//!  - `TopP { temp, p }`   → temperature + nucleus filter before sampling.
+//! Before V2.12 the config was a three-variant enum (`Greedy | Temperature |
+//! TopP`). V2.12 (T4.b — ROADMAP-V2-TOOL-CALLING-AND-MCP §T4.b) extends it
+//! to a single struct carrying the full OpenAI sampler surface —
+//! `temperature`, `top_p`, `top_k`, `min_p`, `presence_penalty`,
+//! `frequency_penalty`, `repetition_penalty`. Without the penalties,
+//! multi-turn agent loops on Qwen3.5/3.6 degrade to the "long CoT /
+//! garbage output" failure mode community-reported on Ollama.
+//!
+//! Takes a `&[f32]` of decoder logits (one per vocab entry) and an
+//! optional token-history slice (prior-turn tokens — used by the
+//! penalties) and returns the sampled token id.
 //!
 //! Deterministic when `seed` is fixed. The RNG is xoshiro256** (self-contained;
 //! no `rand` dep added so the crate stays light).
 //!
-//! Serving-layer note: the HTTP server (V1.8.B) will construct one `Sampler`
-//! per request from OpenAI params (`temperature`, `top_p`, `seed`). The
-//! runtime owns the logit buffer; sampling is a pure Vec→u32 transformation.
+//! Serving-layer note: the HTTP server constructs one [`Sampler`] per
+//! request from OpenAI params and calls [`Sampler::sample`] once per
+//! token, reusing its scratch buffers across the decode loop.
 
 use std::cmp::Ordering;
 
-/// Sampling strategy.
-#[derive(Debug, Clone, Copy)]
-#[derive(Default)]
-pub enum Sampling {
-    /// argmax — deterministic, matches OpenAI `temperature=0`.
-    #[default]
-    Greedy,
-    /// Softmax(logits / temp), sample from full distribution.
-    Temperature { temp: f32 },
-    /// Temperature + nucleus (top-p) filter: keep minimum-size prefix of
-    /// sorted softmax whose cumulative prob ≥ p, renormalise, sample.
-    TopP { temp: f32, p: f32 },
+/// Full sampler config for one decode step.
+///
+/// Field semantics mirror OpenAI / vLLM:
+/// - `temperature == 0.0` → greedy (skip softmax, argmax). Historical
+///   `Sampling::Greedy` variant maps to `temperature = 0.0` here.
+/// - `top_p = None` → no top-p filter.
+/// - `top_k = None` → no top-k filter.
+/// - `min_p = None` → no min-p filter.
+/// - `repetition_penalty = 1.0` → disabled. Non-1 values scale the
+///   logit of previously-seen tokens (`logit /= penalty` when
+///   `logit > 0`, `logit *= penalty` otherwise) — the llama.cpp
+///   convention, shared by Qwen's `generation_config.json`.
+/// - `presence_penalty = 0.0` → disabled. Subtracts `penalty` from the
+///   logit of any token appearing at least once in history.
+/// - `frequency_penalty = 0.0` → disabled. Subtracts
+///   `penalty * count_in_history` from the logit of each token.
+///
+/// Penalty semantics match OpenAI's reference: penalties are applied
+/// IN-PLACE to logits before any filter or softmax. History is the
+/// caller's per-turn generated-tokens slice.
+#[derive(Debug, Clone)]
+pub struct Sampling {
+    pub temperature: f32,
+    pub top_p: Option<f32>,
+    pub top_k: Option<u32>,
+    pub min_p: Option<f32>,
+    pub repetition_penalty: f32,
+    pub presence_penalty: f32,
+    pub frequency_penalty: f32,
 }
 
+impl Default for Sampling {
+    fn default() -> Self {
+        Self::greedy()
+    }
+}
+
+impl Sampling {
+    /// Greedy sampler — `temperature = 0.0`, no filters, no penalties.
+    /// Deterministic argmax.
+    pub fn greedy() -> Self {
+        Self {
+            temperature: 0.0,
+            top_p: None,
+            top_k: None,
+            min_p: None,
+            repetition_penalty: 1.0,
+            presence_penalty: 0.0,
+            frequency_penalty: 0.0,
+        }
+    }
+
+    /// Temperature-only sampler. Equivalent to the pre-V2.12
+    /// `Sampling::Temperature { temp }` variant.
+    pub fn temperature(temp: f32) -> Self {
+        Self {
+            temperature: temp,
+            ..Self::greedy()
+        }
+    }
+
+    /// Temperature + top-p. Equivalent to the pre-V2.12
+    /// `Sampling::TopP { temp, p }` variant.
+    pub fn top_p(temp: f32, p: f32) -> Self {
+        Self {
+            temperature: temp,
+            top_p: Some(p),
+            ..Self::greedy()
+        }
+    }
+
+    /// `true` iff this config will behave as argmax (no stochastic
+    /// branch will be taken). Used by the server to short-circuit the
+    /// stop-token-mask softening that only makes sense with
+    /// non-deterministic sampling.
+    pub fn is_greedy(&self) -> bool {
+        self.temperature <= 0.0
+    }
+
+    /// True iff any penalty field is active. Caller can skip the
+    /// history-walk when both we and the model don't need it.
+    pub fn has_penalties(&self) -> bool {
+        self.repetition_penalty != 1.0
+            || self.presence_penalty != 0.0
+            || self.frequency_penalty != 0.0
+    }
+}
 
 /// Deterministic PRNG. xoshiro256** — fast, small-state, well-distributed.
 #[derive(Debug, Clone, Copy)]
@@ -71,75 +150,82 @@ impl Rng {
     }
 }
 
-/// Sample one token from the logit row. `logits.len()` = vocab_size.
-/// Returns the vocab id.
-///
-/// Allocates per call for the non-greedy paths (temperature / top-p need
-/// vocab-sized scratch). Prefer [`Sampler::sample`] on the decode hot path
-/// where the buffers can be reused across tokens.
-pub fn sample(logits: &[f32], mode: Sampling, rng: &mut Rng) -> u32 {
-    match mode {
-        Sampling::Greedy => argmax(logits),
-        Sampling::Temperature { temp } => {
-            let mut probs = Vec::with_capacity(logits.len());
-            sample_softmax_temp(logits, temp, rng, &mut probs)
-        }
-        Sampling::TopP { temp, p } => {
-            let mut probs = Vec::with_capacity(logits.len());
-            sample_top_p(logits, temp, p, rng, &mut probs)
-        }
+/// One-shot sample: allocates per call. Prefer [`Sampler::sample`] on
+/// the decode hot path where the scratch buffers can be reused.
+pub fn sample(
+    logits: &[f32],
+    mode: &Sampling,
+    history: &[u32],
+    rng: &mut Rng,
+) -> u32 {
+    // Clone logits into scratch so penalties can mutate without
+    // touching the caller's buffer.
+    let mut scratch: Vec<f32> = logits.to_vec();
+    apply_penalties(&mut scratch, history, mode);
+    if mode.is_greedy() {
+        return argmax(&scratch);
     }
+    let mut pair_scratch: Vec<(u32, f32)> = Vec::new();
+    sample_stochastic(&scratch, mode, rng, &mut pair_scratch)
 }
 
 /// Per-session sampler that reuses scratch across tokens. On Qwen3.6
 /// (vocab=151 936) each non-greedy call would otherwise allocate ~593 KiB
-/// (`Vec<f32>` for temperature) or ~1.16 MiB (`Vec<(u32, f32)>` for top-p);
-/// reusing the buffers turns the alloc churn into a one-time cost per
-/// session — see C2 in `RUST-PERF-CORRECTIONS.md`.
+/// per token; reusing the buffers turns the alloc churn into a one-time
+/// cost per session — see C2 in `RUST-PERF-CORRECTIONS.md`.
 #[derive(Debug)]
 pub struct Sampler {
     rng: Rng,
-    /// Reused for `Sampling::Temperature`.
-    probs_f32: Vec<f32>,
-    /// Reused for `Sampling::TopP`.
-    probs_pair: Vec<(u32, f32)>,
+    /// Reused as the penalty-adjusted logit buffer.
+    logit_scratch: Vec<f32>,
+    /// Reused for top-k / top-p / min-p filtering.
+    pair_scratch: Vec<(u32, f32)>,
 }
 
 impl Sampler {
-    /// Build a sampler seeded by `seed`. Scratch buffers are empty and will
-    /// grow on the first non-greedy call to `vocab_size`, after which they
-    /// stay at peak capacity for the lifetime of this `Sampler`.
+    /// Build a sampler seeded by `seed`. Scratch buffers are empty and
+    /// grow on the first call to `vocab_size`, after which they stay at
+    /// peak capacity for the lifetime of this `Sampler`.
     pub fn from_seed(seed: u64) -> Self {
         Self {
             rng: Rng::from_seed(seed),
-            probs_f32: Vec::new(),
-            probs_pair: Vec::new(),
+            logit_scratch: Vec::new(),
+            pair_scratch: Vec::new(),
         }
     }
 
-    /// Pre-reserve scratch for a known `vocab_size`. Optional — the first
-    /// non-greedy call grows the buffers anyway — but avoids a reallocation
-    /// on the first sampled token.
+    /// Pre-reserve scratch for a known `vocab_size`.
     pub fn reserve(&mut self, vocab_size: usize) {
-        self.probs_f32.reserve(vocab_size);
-        self.probs_pair.reserve(vocab_size);
+        self.logit_scratch.reserve(vocab_size);
+        self.pair_scratch.reserve(vocab_size);
     }
 
     pub fn rng_mut(&mut self) -> &mut Rng {
         &mut self.rng
     }
 
-    /// Sample one token. See module-level notes on determinism.
-    pub fn sample(&mut self, logits: &[f32], mode: Sampling) -> u32 {
-        match mode {
-            Sampling::Greedy => argmax(logits),
-            Sampling::Temperature { temp } => {
-                sample_softmax_temp(logits, temp, &mut self.rng, &mut self.probs_f32)
-            }
-            Sampling::TopP { temp, p } => {
-                sample_top_p(logits, temp, p, &mut self.rng, &mut self.probs_pair)
-            }
+    /// Sample one token. `history` is the per-turn generated-token
+    /// slice (empty `&[]` is fine for the first token, or when the
+    /// request disables penalties). Penalties and filters are applied
+    /// to a clone of `logits` — the caller's buffer is untouched.
+    pub fn sample(
+        &mut self,
+        logits: &[f32],
+        mode: &Sampling,
+        history: &[u32],
+    ) -> u32 {
+        self.logit_scratch.clear();
+        self.logit_scratch.extend_from_slice(logits);
+        apply_penalties(&mut self.logit_scratch, history, mode);
+        if mode.is_greedy() {
+            return argmax(&self.logit_scratch);
         }
+        sample_stochastic(
+            &self.logit_scratch,
+            mode,
+            &mut self.rng,
+            &mut self.pair_scratch,
+        )
     }
 }
 
@@ -155,43 +241,74 @@ fn argmax(logits: &[f32]) -> u32 {
     best
 }
 
-/// Numerically-stable softmax with temperature, then multinomial sample.
-///
-/// `probs` is caller-owned scratch: cleared + resized on entry. A freshly
-/// constructed `Vec` is fine (the first call will grow it to `logits.len()`);
-/// reusing one across calls avoids the vocab-sized allocation per token.
-fn sample_softmax_temp(logits: &[f32], temp: f32, rng: &mut Rng, probs: &mut Vec<f32>) -> u32 {
-    let inv_t = if temp <= 0.0 { 1.0 } else { 1.0 / temp };
-    let mut max_l = f32::NEG_INFINITY;
-    for &v in logits {
-        let scaled = v * inv_t;
-        if scaled > max_l {
-            max_l = scaled;
+/// Apply repetition / presence / frequency penalties in place on
+/// `logits`. All three are no-ops at their default values, so this
+/// returns early when no penalty is active — no history walk at all
+/// on a default-config greedy call.
+fn apply_penalties(logits: &mut [f32], history: &[u32], mode: &Sampling) {
+    if !mode.has_penalties() || history.is_empty() {
+        return;
+    }
+    // For frequency_penalty we need the per-token count in history.
+    // Rather than a full vocab-sized count buffer, use a tiny HashMap
+    // keyed on the tokens that appear — history is typically < 2048.
+    let needs_count = mode.frequency_penalty != 0.0;
+    let mut counts: std::collections::HashMap<u32, u32> =
+        std::collections::HashMap::with_capacity(if needs_count { history.len() } else { 0 });
+    if needs_count {
+        for &tok in history {
+            *counts.entry(tok).or_insert(0) += 1;
         }
     }
-    // Probabilities scaled: exp(l*inv_t - max). Reuse `probs`.
-    probs.clear();
-    probs.reserve(logits.len());
-    let mut sum = 0.0f32;
-    for &v in logits {
-        let p = (v * inv_t - max_l).exp();
-        probs.push(p);
-        sum += p;
+    // For presence / repetition, a flat seen-bitmap over history is
+    // enough. We build a small uniq set on the fly.
+    let mut seen: std::collections::HashSet<u32> =
+        std::collections::HashSet::with_capacity(history.len());
+    for &tok in history {
+        seen.insert(tok);
     }
-    multinomial_pick(probs, sum, rng)
+    for &tok in seen.iter() {
+        let idx = tok as usize;
+        if idx >= logits.len() {
+            continue;
+        }
+        let l = &mut logits[idx];
+        // Repetition penalty (llama.cpp / HF convention). `penalty` is
+        // divisive when logit is positive, multiplicative otherwise —
+        // this preserves sign and is what Qwen's config expects.
+        if mode.repetition_penalty != 1.0 && mode.repetition_penalty > 0.0 {
+            if *l > 0.0 {
+                *l /= mode.repetition_penalty;
+            } else {
+                *l *= mode.repetition_penalty;
+            }
+        }
+        // Presence penalty (OpenAI: subtract penalty from logit).
+        if mode.presence_penalty != 0.0 {
+            *l -= mode.presence_penalty;
+        }
+        // Frequency penalty (OpenAI: subtract penalty * count).
+        if needs_count {
+            if let Some(&c) = counts.get(&tok) {
+                *l -= mode.frequency_penalty * c as f32;
+            }
+        }
+    }
 }
 
-/// Temperature + nucleus (top-p) sampling.
-///
-/// `probs` is caller-owned scratch (see [`sample_softmax_temp`]).
-fn sample_top_p(
+/// Stochastic path: temperature + optional top-k / top-p / min-p.
+/// `pair_scratch` is caller-owned reusable storage.
+fn sample_stochastic(
     logits: &[f32],
-    temp: f32,
-    p: f32,
+    mode: &Sampling,
     rng: &mut Rng,
-    probs: &mut Vec<(u32, f32)>,
+    pair_scratch: &mut Vec<(u32, f32)>,
 ) -> u32 {
-    let inv_t = if temp <= 0.0 { 1.0 } else { 1.0 / temp };
+    let inv_t = if mode.temperature <= 0.0 {
+        1.0
+    } else {
+        1.0 / mode.temperature
+    };
     let mut max_l = f32::NEG_INFINITY;
     for &v in logits {
         let scaled = v * inv_t;
@@ -199,35 +316,73 @@ fn sample_top_p(
             max_l = scaled;
         }
     }
-    // Softmax over full vocab first. Reuse `probs`.
-    probs.clear();
-    probs.reserve(logits.len());
-    probs.extend(
-        logits
-            .iter()
-            .enumerate()
-            .map(|(i, &v)| (i as u32, (v * inv_t - max_l).exp())),
-    );
-    let sum_full: f32 = probs.iter().map(|(_, p)| *p).sum();
-    for (_, pv) in probs.iter_mut() {
-        *pv /= sum_full;
+    // Build (id, prob) pairs via numerically-stable softmax.
+    pair_scratch.clear();
+    pair_scratch.reserve(logits.len());
+    let mut sum = 0.0f32;
+    for (i, &v) in logits.iter().enumerate() {
+        let p = (v * inv_t - max_l).exp();
+        pair_scratch.push((i as u32, p));
+        sum += p;
     }
-
-    // Sort by probability descending, take cumulative-prob prefix covering `p`.
-    probs.sort_unstable_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(Ordering::Equal));
-    let mut cum = 0.0f32;
-    let mut kept_end = 0usize;
-    for (i, &(_, pv)) in probs.iter().enumerate() {
-        cum += pv;
-        kept_end = i + 1;
-        if cum >= p {
-            break;
+    // Normalise.
+    if sum > 0.0 {
+        for (_, p) in pair_scratch.iter_mut() {
+            *p /= sum;
         }
     }
-    let kept = &probs[..kept_end];
-    let sum_kept: f32 = kept.iter().map(|(_, pv)| *pv).sum();
 
-    // Sample from the truncated distribution.
+    // Sort by descending prob — needed for top-k / top-p. We always
+    // sort when any filter is active; for plain-temperature there's no
+    // sort (we go straight to multinomial over the full distribution).
+    let any_filter = mode.top_k.is_some() || mode.top_p.is_some() || mode.min_p.is_some();
+    let kept_end: usize = if any_filter {
+        pair_scratch.sort_unstable_by(|a, b| {
+            b.1.partial_cmp(&a.1).unwrap_or(Ordering::Equal)
+        });
+        // Apply top-k: truncate to first `k` entries.
+        let mut end = pair_scratch.len();
+        if let Some(k) = mode.top_k {
+            end = end.min(k as usize);
+        }
+        // Apply top-p: keep the smallest prefix whose cumulative prob ≥ p.
+        if let Some(p) = mode.top_p {
+            if p < 1.0 && p > 0.0 {
+                let mut cum = 0.0f32;
+                let mut prefix_end = 0usize;
+                for (i, &(_, pv)) in pair_scratch.iter().take(end).enumerate() {
+                    cum += pv;
+                    prefix_end = i + 1;
+                    if cum >= p {
+                        break;
+                    }
+                }
+                end = prefix_end;
+            }
+        }
+        // Apply min-p: drop entries whose prob < min_p * max_prob. The
+        // sort guarantees the first entry is max_prob.
+        if let Some(min_p) = mode.min_p {
+            if min_p > 0.0 {
+                let threshold = pair_scratch[0].1 * min_p;
+                let mut drop_from = end;
+                for (i, &(_, pv)) in pair_scratch.iter().take(end).enumerate() {
+                    if pv < threshold {
+                        drop_from = i;
+                        break;
+                    }
+                }
+                end = drop_from.max(1); // always keep at least the argmax.
+            }
+        }
+        end
+    } else {
+        pair_scratch.len()
+    };
+
+    // Multinomial pick over [0..kept_end] using the retained distribution.
+    let kept = &pair_scratch[..kept_end];
+    let sum_kept: f32 = kept.iter().map(|(_, p)| *p).sum();
     let mut u = rng.next_f32() * sum_kept;
     for (id, pv) in kept {
         u -= pv;
@@ -238,17 +393,6 @@ fn sample_top_p(
     kept.last().map_or(0, |(id, _)| *id)
 }
 
-fn multinomial_pick(probs: &[f32], sum: f32, rng: &mut Rng) -> u32 {
-    let mut u = rng.next_f32() * sum;
-    for (i, &p) in probs.iter().enumerate() {
-        u -= p;
-        if u <= 0.0 {
-            return i as u32;
-        }
-    }
-    (probs.len() - 1) as u32
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -257,15 +401,15 @@ mod tests {
     fn greedy_picks_argmax() {
         let logits = [0.1, 0.5, 0.9, 0.2, -1.0];
         let mut rng = Rng::from_seed(42);
-        assert_eq!(sample(&logits, Sampling::Greedy, &mut rng), 2);
+        assert_eq!(sample(&logits, &Sampling::greedy(), &[], &mut rng), 2);
     }
 
     #[test]
     fn temperature_zero_is_greedy() {
         let logits = [0.1, 0.5, 0.9, 0.2, -1.0];
         let mut rng = Rng::from_seed(42);
-        // temp <= 0 → treated as 1.0 internally. True greedy path is mode-level.
-        assert_eq!(sample(&logits, Sampling::Greedy, &mut rng), 2);
+        let s = Sampling::temperature(0.0);
+        assert_eq!(sample(&logits, &s, &[], &mut rng), 2);
     }
 
     #[test]
@@ -273,32 +417,30 @@ mod tests {
         let logits = [1.0, 2.0, 3.0, 2.5, 1.5];
         let mut rng_a = Rng::from_seed(1234);
         let mut rng_b = Rng::from_seed(1234);
-        let a = sample(&logits, Sampling::Temperature { temp: 0.7 }, &mut rng_a);
-        let b = sample(&logits, Sampling::Temperature { temp: 0.7 }, &mut rng_b);
+        let s = Sampling::temperature(0.7);
+        let a = sample(&logits, &s, &[], &mut rng_a);
+        let b = sample(&logits, &s, &[], &mut rng_b);
         assert_eq!(a, b, "same seed must give same token");
     }
 
     #[test]
     fn top_p_restricts_to_high_probability_tokens() {
-        // With a strongly peaked distribution, top-p=0.1 should pick the argmax.
         let logits = [0.0, 0.0, 10.0, 0.0, 0.0];
         let mut rng = Rng::from_seed(0xabc);
-        let id = sample(&logits, Sampling::TopP { temp: 1.0, p: 0.5 }, &mut rng);
-        assert_eq!(id, 2);
+        let s = Sampling::top_p(1.0, 0.5);
+        assert_eq!(sample(&logits, &s, &[], &mut rng), 2);
     }
 
     #[test]
     fn top_p_distribution_stays_within_nucleus() {
-        // Two near-equal-probability tokens with the rest near zero. Many samples
-        // should land on one of those two.
         let logits = [5.0, 5.0, 0.0, 0.0, 0.0, 0.0, 0.0];
         let mut rng = Rng::from_seed(7);
+        let s = Sampling::top_p(1.0, 0.95);
         let mut counts = [0u32; 7];
         for _ in 0..1000 {
-            let id = sample(&logits, Sampling::TopP { temp: 1.0, p: 0.95 }, &mut rng);
+            let id = sample(&logits, &s, &[], &mut rng);
             counts[id as usize] += 1;
         }
-        // Tokens 0 and 1 should capture ~all probability mass.
         assert!(counts[0] + counts[1] >= 990, "counts={counts:?}");
     }
 
@@ -313,34 +455,133 @@ mod tests {
 
     #[test]
     fn sampler_matches_free_fn_on_equal_seed() {
-        // The reusable `Sampler` must produce bit-identical results to the
-        // one-shot free `sample` fn when both start from the same seed.
         let logits = [1.0, 2.0, 3.0, 2.5, 1.5];
         let modes = [
-            Sampling::Greedy,
-            Sampling::Temperature { temp: 0.7 },
-            Sampling::TopP { temp: 1.0, p: 0.9 },
+            Sampling::greedy(),
+            Sampling::temperature(0.7),
+            Sampling::top_p(1.0, 0.9),
         ];
         for mode in modes {
             let mut rng = Rng::from_seed(4242);
-            let free = sample(&logits, mode, &mut rng);
+            let free = sample(&logits, &mode, &[], &mut rng);
             let mut sampler = Sampler::from_seed(4242);
-            let owned = sampler.sample(&logits, mode);
+            let owned = sampler.sample(&logits, &mode, &[]);
             assert_eq!(free, owned, "mismatch on mode {mode:?}");
         }
     }
 
     #[test]
     fn sampler_reuse_across_calls_is_deterministic() {
-        // Same Sampler, many calls: must produce the same sequence across
-        // two independently-constructed Samplers with equal seeds.
         let logits = [0.5, 0.3, 1.2, 0.9, 0.1, 2.0, 0.0];
+        let mode = Sampling::temperature(0.9);
         let mut a = Sampler::from_seed(777);
         let mut b = Sampler::from_seed(777);
         for _ in 0..500 {
-            let xa = a.sample(&logits, Sampling::Temperature { temp: 0.9 });
-            let xb = b.sample(&logits, Sampling::Temperature { temp: 0.9 });
-            assert_eq!(xa, xb);
+            assert_eq!(a.sample(&logits, &mode, &[]), b.sample(&logits, &mode, &[]));
         }
+    }
+
+    // ---- T4.b.1: new sampler knobs ----
+
+    #[test]
+    fn top_k_restricts_to_k_tokens() {
+        // Five tokens, only the top 2 should be reachable with top_k=2.
+        let logits = [1.0, 2.0, 3.0, 4.0, 5.0];
+        let mode = Sampling {
+            temperature: 1.0,
+            top_k: Some(2),
+            ..Sampling::greedy()
+        };
+        let mut rng = Rng::from_seed(0xdead);
+        let mut seen = std::collections::HashSet::<u32>::new();
+        for _ in 0..1000 {
+            seen.insert(sample(&logits, &mode, &[], &mut rng));
+        }
+        // Only tokens 3, 4 (the top two) should ever be selected.
+        assert!(seen.is_subset(&[3, 4].into_iter().collect()));
+    }
+
+    #[test]
+    fn min_p_drops_low_prob_tokens() {
+        let logits = [0.0, 5.0, 0.0, 5.0, 0.0];
+        // With min_p = 0.5, tokens with prob < 0.5 * max_prob are excluded.
+        // Tokens 1 and 3 are the peaks; 0, 2, 4 are near-zero prob.
+        let mode = Sampling {
+            temperature: 1.0,
+            min_p: Some(0.5),
+            ..Sampling::greedy()
+        };
+        let mut rng = Rng::from_seed(5);
+        let mut seen = std::collections::HashSet::<u32>::new();
+        for _ in 0..1000 {
+            seen.insert(sample(&logits, &mode, &[], &mut rng));
+        }
+        assert!(seen.is_subset(&[1, 3].into_iter().collect()), "{seen:?}");
+    }
+
+    #[test]
+    fn repetition_penalty_suppresses_repeats() {
+        // Token 2 is the clear argmax. With repetition_penalty > 1 and
+        // history = [2], its logit should be divided by the penalty,
+        // letting token 1 (second-best) overtake it in greedy mode.
+        let logits = [1.0, 2.5, 3.0];
+        let mut no_pen = Sampling::greedy();
+        no_pen.repetition_penalty = 1.0;
+        let with_pen = Sampling {
+            repetition_penalty: 2.0,
+            ..Sampling::greedy()
+        };
+        let mut rng = Rng::from_seed(1);
+        assert_eq!(sample(&logits, &no_pen, &[], &mut rng), 2);
+        assert_eq!(
+            sample(&logits, &with_pen, &[2], &mut rng),
+            1,
+            "token 2 (already seen) should lose argmax to token 1 under penalty"
+        );
+    }
+
+    #[test]
+    fn presence_penalty_subtracts_from_seen_token_logit() {
+        // Subtract 2.0 from the logit of any token in history.
+        let logits = [1.0, 2.5, 3.0];
+        let mode = Sampling {
+            presence_penalty: 2.0,
+            ..Sampling::greedy()
+        };
+        let mut rng = Rng::from_seed(1);
+        // Without history, greedy picks 2 (argmax).
+        assert_eq!(sample(&logits, &mode, &[], &mut rng), 2);
+        // With history [2], logit 3.0 → 1.0; argmax becomes token 1 (2.5).
+        assert_eq!(sample(&logits, &mode, &[2], &mut rng), 1);
+    }
+
+    #[test]
+    fn frequency_penalty_scales_with_count() {
+        let logits = [1.0, 5.0, 3.0];
+        // Penalty 1.0 per occurrence. Token 1 seen twice → logit 5-2=3.
+        // Token 2 seen once → logit 3-1=2. Argmax then = token 1 (tied
+        // between 0 and 1, token 1 is first in iteration order when
+        // tied; actually token 0 = 1.0 < 3.0 = token 1).
+        let mode = Sampling {
+            frequency_penalty: 1.0,
+            ..Sampling::greedy()
+        };
+        let mut rng = Rng::from_seed(1);
+        assert_eq!(sample(&logits, &mode, &[1, 1, 2], &mut rng), 1);
+    }
+
+    #[test]
+    fn no_penalty_no_allocation_path() {
+        // History is non-empty but all penalties are default — the
+        // apply_penalties fast-path should skip the history walk. We
+        // can't observe allocation directly, but we CAN assert the
+        // output equals the no-history output.
+        let logits = [0.1, 0.5, 0.9];
+        let mode = Sampling::temperature(0.5);
+        let mut rng_a = Rng::from_seed(0xaaaa);
+        let mut rng_b = Rng::from_seed(0xaaaa);
+        let a = sample(&logits, &mode, &[0, 1, 2, 2, 1], &mut rng_a);
+        let b = sample(&logits, &mode, &[], &mut rng_b);
+        assert_eq!(a, b, "default penalties must be history-independent");
     }
 }

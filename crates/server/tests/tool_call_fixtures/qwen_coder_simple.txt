@@ -1,0 +1,7 @@
+<tool_call>
+<function=get_weather>
+<parameter=city>
+San Francisco
+</parameter>
+</function>
+</tool_call>

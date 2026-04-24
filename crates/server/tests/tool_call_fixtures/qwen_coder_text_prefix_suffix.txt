@@ -1,0 +1,7 @@
+I'll check the weather for you. <tool_call>
+<function=get_weather>
+<parameter=city>
+SF
+</parameter>
+</function>
+</tool_call> Done — result should follow.

@@ -1,0 +1,5 @@
+{"TextDelta":"I'll check the weather for you. "}
+{"ToolCallOpen":{"index":0,"name":"get_weather"}}
+{"ToolCallArgumentsDelta":{"index":0,"arguments":"{\"city\":\"SF\"}"}}
+{"ToolCallClose":{"index":0}}
+{"TextDelta":" Done — result should follow."}

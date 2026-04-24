@@ -1,0 +1,7 @@
+<think>The user wants the current weather. I'll use get_weather.</think><tool_call>
+<function=get_weather>
+<parameter=city>
+San Francisco
+</parameter>
+</function>
+</tool_call>

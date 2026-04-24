@@ -1,0 +1,25 @@
+{
+  "messages": [
+    { "role": "system", "content": "You are a weather agent. Use tools when asked." },
+    { "role": "user", "content": "Weather in Paris?" }
+  ],
+  "tools": [
+    {
+      "type": "function",
+      "function": {
+        "name": "get_weather",
+        "description": "Get the current weather for a city.",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "city": { "type": "string" }
+          },
+          "required": ["city"]
+        }
+      }
+    }
+  ],
+  "bos_token": "",
+  "eos_token": "<|im_end|>",
+  "add_generation_prompt": true
+}

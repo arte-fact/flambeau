@@ -1,0 +1,4 @@
+<tool_call>
+<function=long_fn>
+<parameter=body>
+partial value that never clo

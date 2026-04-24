@@ -1,0 +1,3 @@
+{"ToolCallOpen":{"index":0,"name":"compile"}}
+{"ToolCallArgumentsDelta":{"index":0,"arguments":"{\"snippet\":\"fn foo<T>(x: &T) where T: Copy { }\"}"}}
+{"ToolCallClose":{"index":0}}

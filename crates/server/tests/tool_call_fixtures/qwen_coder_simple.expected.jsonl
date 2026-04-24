@@ -1,0 +1,3 @@
+{"ToolCallOpen":{"index":0,"name":"get_weather"}}
+{"ToolCallArgumentsDelta":{"index":0,"arguments":"{\"city\":\"San Francisco\"}"}}
+{"ToolCallClose":{"index":0}}

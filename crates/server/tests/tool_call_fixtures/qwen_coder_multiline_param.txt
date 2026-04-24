@@ -1,0 +1,9 @@
+<tool_call>
+<function=write_memo>
+<parameter=body>
+line one
+line two
+line three
+</parameter>
+</function>
+</tool_call>

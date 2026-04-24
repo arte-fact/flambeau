@@ -16,10 +16,15 @@ anyhow.workspace = true
 axum.workspace = true
 tower.workspace = true
 tokio.workspace = true
+tokio-stream = { version = "0.1", features = ["sync"] }
 serde = { workspace = true, features = ["derive"] }
 serde_json.workspace = true
 tracing.workspace = true
 half.workspace = true
+# M2.1: MCP client, used when `--mcp <url>` is passed on the command
+# line. Transport is streamable-HTTP; rmcp uses its own reqwest stack
+# under the hood so we don't add a direct dep here.
+rmcp.workspace = true
 
 [dependencies.flambeau-backend-hip]
 path = "../backend-hip"
@@ -33,6 +38,16 @@ hip = [
     "flambeau-ops/hip",
     "flambeau-qwen3-moe/hip",
 ]
+
+[dev-dependencies]
+# M2.1 integration test boots the real flambeau-mcp-server over HTTP
+# in-process and hits it with the client. Keeping these in dev-deps
+# so the core server crate has no runtime dep on the mcp-server (the
+# "never load-bearing" rule from CLAUDE.md).
+flambeau-mcp-server = { path = "../mcp-server" }
+axum.workspace = true
+tokio-util = "0.7"
+tokio = { workspace = true, features = ["macros", "rt-multi-thread", "time"] }
 
 [lints]
 workspace = true
