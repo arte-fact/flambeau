@@ -418,7 +418,7 @@ pub fn attention_prefill_f16_slots(
         let entry = match head_dim {
             64 => "flambeau_attention_prefill_flash_tile_d64_f16",
             128 => "flambeau_attention_prefill_flash_tile_d128_f16",
-            256 => "flambeau_attention_prefill_flash_tile_d256_f16",
+            256 => "flambeau_attention_prefill_flash_tile_d256_br8_f16",
             _ => unreachable!(),
         };
         let kernel = module.kernel(entry)?;
@@ -433,11 +433,14 @@ pub fn attention_prefill_f16_slots(
         push_scalar_maybe_slot(&mut args, &n_k_i, n_k_slot);
         push_scalar_maybe_slot(&mut args, &q_off_i, q_off_slot);
         args.push(&scale_f);
-        const BR: u32 = 4;
+        // V2.29.b — BR depends on which variant we dispatch to.
+        // d256_br8 uses BR=8 (more Q rows per block, fewer blocks);
+        // other head_dims still use BR=4.
+        let br: u32 = if head_dim == 256 { 8 } else { 4 };
         const WARP: u32 = 64;
         let cfg = LaunchCfg {
-            grid: ((n_q_tokens as u32).div_ceil(BR), n_heads_q as u32, 1),
-            block: (WARP, BR, 1),
+            grid: ((n_q_tokens as u32).div_ceil(br), n_heads_q as u32, 1),
+            block: (WARP, br, 1),
             shared_bytes: 0,
         };
         unsafe { kernel.launch(stream, cfg, args)? };

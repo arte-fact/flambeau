@@ -253,3 +253,27 @@ void flambeau_attention_prefill_flash_tile_d256_f16(
         n_q_tokens, n_heads_q, n_heads_kv,
         n_k_tokens, q_offset, scale);
 }
+
+// V2.29.b — BR=8 variant at D=256. Doubles Q rows per block → halves
+// grid.x → fewer blocks, potentially better CU fill on large
+// n_q_tokens. Block = 64 × 8 = 512 threads (hits launch_bounds at 2
+// waves/SIMD → 1 wave/SIMD). LDS: 2 × 16 × 256 × 4 = 32 KiB (same as
+// BR=4 variant, same BC=16 tile width).
+extern "C" __global__ __launch_bounds__(512, 1)
+void flambeau_attention_prefill_flash_tile_d256_br8_f16(
+    const fb_fp16_t* __restrict__ q,
+    const fb_fp16_t* __restrict__ k_cache,
+    const fb_fp16_t* __restrict__ v_cache,
+    fb_fp16_t*       __restrict__ out,
+    const int n_q_tokens,
+    const int n_heads_q,
+    const int n_heads_kv,
+    const int n_k_tokens,
+    const int q_offset,
+    const float scale
+) {
+    flash_attn_prefill_v2_impl</*D=*/256, /*BR=*/8, /*BC=*/16>(
+        q, k_cache, v_cache, out,
+        n_q_tokens, n_heads_q, n_heads_kv,
+        n_k_tokens, q_offset, scale);
+}
