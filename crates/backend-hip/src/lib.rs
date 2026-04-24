@@ -24,7 +24,7 @@ pub mod rccl;
 #[cfg(feature = "rccl")]
 pub mod rccl_sys;
 
-pub use device::{bind, current_device, device_count, HipDevice, HipEvent, HipStream};
+pub use device::{bind, current_device, device_count, HipDevice, HipEvent, HipGraphExec, HipStream};
 
 #[cfg(feature = "rccl")]
 pub use rccl::{HipMesh, HipRankHandle};
