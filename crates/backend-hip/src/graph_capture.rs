@@ -158,6 +158,17 @@ impl SlotMap {
         self.entries.is_empty()
     }
 
+    /// Iterate bindings that target `kernel_node_idx`. Used by
+    /// `HipGraphExec::capture` to size each node's shadow.
+    pub fn bindings_for_node(
+        &self,
+        kernel_node_idx: usize,
+    ) -> impl Iterator<Item = &SlotBinding> {
+        self.entries
+            .values()
+            .filter(move |b| b.kernel_node_idx == kernel_node_idx)
+    }
+
     /// Build a SlotMap by zipping recorded launches 1:1 with kernel
     /// node count. Fails if the counts don't match — indicates the
     /// capture closure did something the recorder didn't see (e.g.

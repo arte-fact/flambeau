@@ -323,6 +323,50 @@ pub fn attention_prefill_f16(
     q_offset: usize,
     scale: f32,
 ) -> Result<()> {
+    attention_prefill_f16_slots(
+        reg, stream, q, k_cache, v_cache, out, n_q_tokens, n_heads_q, n_heads_kv,
+        head_dim, n_k_tokens, q_offset, scale, None, None,
+    )
+}
+
+/// V2.26.a-i4 — graph-captureable variant of [`attention_prefill_f16`].
+///
+/// Behaviour matches the wrapper in every non-capture case. When the
+/// optional [`ScalarSlot`] handles are `Some`, `push_slot` tags their
+/// kernel args so the graph recorder can bind the slots to the
+/// resulting kernel node. Callers can then replay the captured exec at
+/// a different `start_position` by calling `HipGraphExec::set_slot`.
+///
+/// The relevant pos-varying scalars are:
+/// - `n_k_tokens` — total K tokens the causal mask stops at (grows each
+///   ubatch as the KV cache fills).
+/// - `q_offset` — row offset of the Q block into the global causal grid
+///   (equals `start_position`).
+///
+/// Both kernels (flash_tile + oracle) place these at different arg
+/// indices; the slot recorder captures whichever path n_q_tokens
+/// selected. Capturing at a particular n_q and replaying at a different
+/// n_q is unsupported (different path → different node layout).
+///
+/// [`ScalarSlot`]: flambeau_backend_hip::ScalarSlot
+#[allow(clippy::too_many_arguments)]
+pub fn attention_prefill_f16_slots(
+    reg: &OpsRegistry,
+    stream: &HipStream,
+    q: DevicePtr,
+    k_cache: DevicePtr,
+    v_cache: DevicePtr,
+    out: DevicePtr,
+    n_q_tokens: usize,
+    n_heads_q: usize,
+    n_heads_kv: usize,
+    head_dim: usize,
+    n_k_tokens: usize,
+    q_offset: usize,
+    scale: f32,
+    n_k_slot: Option<flambeau_backend_hip::ScalarSlot>,
+    q_off_slot: Option<flambeau_backend_hip::ScalarSlot>,
+) -> Result<()> {
     assert!(
         head_dim == 64 || head_dim == 128 || head_dim == 256,
         "attention_prefill_f16: head_dim {head_dim} not supported (expected 64, 128, or 256)"
@@ -359,8 +403,8 @@ pub fn attention_prefill_f16(
         args.push(&n_q_i);
         args.push(&n_heads_q_i);
         args.push(&n_heads_kv_i);
-        args.push(&n_k_i);
-        args.push(&q_off_i);
+        push_scalar_maybe_slot(&mut args, &n_k_i, n_k_slot);
+        push_scalar_maybe_slot(&mut args, &q_off_i, q_off_slot);
         args.push(&scale_f);
         const BR: u32 = 4;
         const WARP: u32 = 64;
@@ -386,8 +430,8 @@ pub fn attention_prefill_f16(
     args.push(&n_heads_q_i);
     args.push(&n_heads_kv_i);
     args.push(&head_dim_i);
-    args.push(&n_k_i);
-    args.push(&q_off_i);
+    push_scalar_maybe_slot(&mut args, &n_k_i, n_k_slot);
+    push_scalar_maybe_slot(&mut args, &q_off_i, q_off_slot);
     args.push(&scale_f);
     let cfg = LaunchCfg {
         grid: (n_q_tokens as u32, n_heads_q as u32, 1),
@@ -396,4 +440,16 @@ pub fn attention_prefill_f16(
     };
     unsafe { kernel.launch(stream, cfg, args)? };
     Ok(())
+}
+
+#[inline]
+fn push_scalar_maybe_slot<'a, T: 'a>(
+    args: &mut KernelArgs<'a>,
+    v: &'a T,
+    slot: Option<flambeau_backend_hip::ScalarSlot>,
+) {
+    match slot {
+        Some(s) => args.push_slot(v, s),
+        None => args.push(v),
+    }
 }

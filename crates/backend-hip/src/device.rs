@@ -267,11 +267,37 @@ pub struct HipGraphExec {
     /// calling the param-update FFI.
     kernel_nodes: Vec<usize>,
     /// V2.26.a-i3 — slot → (kernel_node_idx, arg_idx, arity) bindings
-    /// accumulated from tagged pushes during capture. Empty when no
-    /// slots were pushed; `set_slot` lookups miss gracefully in that
-    /// case.
+    /// accumulated from tagged pushes during capture.
     slot_map: crate::graph_capture::SlotMap,
+    /// V2.26.a-i4 — shadow of each kernel node's current `kernelParams`
+    /// pointer array, kept in sync with the exec. Without this, every
+    /// `set_slot` would read from `hipGraphKernelNodeGetParams` (which
+    /// returns the *source graph* params — unchanged across exec
+    /// updates), so consecutive `set_slot` calls to the same node would
+    /// clobber each other. Indexed by kernel-node ordinal; cached
+    /// `hipKernelNodeParams` metadata (func, dims, sharedMemBytes) is
+    /// stored alongside so we don't re-fetch on every update.
+    node_shadows: std::cell::RefCell<Vec<NodeShadow>>,
 }
+
+/// Per-kernel-node shadow used by `set_slot`. `ptrs` is our Rust-side
+/// copy of the exec's current kernelParams — mutated in place on
+/// `set_slot`, then handed to `hipGraphExecKernelNodeSetParams` via its
+/// as_mut_ptr(). `meta` preserves the capture-time launch geometry
+/// because those fields never change across slot updates.
+#[derive(Clone)]
+struct NodeShadow {
+    ptrs: Vec<*mut std::os::raw::c_void>,
+    meta: crate::sys::hipKernelNodeParams,
+}
+
+// SAFETY: NodeShadow wraps raw pointers that point to driver-owned
+// staging or caller-owned scalar storage. Moves/access happen only via
+// `&mut RefCell<Vec<NodeShadow>>` from HipGraphExec, which is already
+// guarded for Send/Sync above. The raw pointers are used only in FFI
+// calls that don't alias our Rust-owned state.
+unsafe impl Send for NodeShadow {}
+unsafe impl Sync for NodeShadow {}
 
 impl std::fmt::Debug for HipGraphExec {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -372,12 +398,58 @@ impl HipGraphExec {
             message: format!("HipGraphExec::capture slot-map: {msg}"),
         })?;
 
+        // V2.26.a-i4 — initialise the per-node shadow so `set_slot`
+        // reads state that survives across consecutive updates. We only
+        // populate shadows for nodes that have at least one slot bound
+        // (lazy init for others happens on first set_slot — see `set_slot`).
+        let mut node_shadows: Vec<NodeShadow> = Vec::with_capacity(kernel_nodes.len());
+        for node_idx in 0..kernel_nodes.len() {
+            let node = kernel_nodes[node_idx] as crate::sys::hipGraphNode_t;
+            let mut params = crate::sys::hipKernelNodeParams {
+                block_dim: crate::sys::hipDim3::default(),
+                extra: ptr::null_mut(),
+                func: ptr::null_mut(),
+                grid_dim: crate::sys::hipDim3::default(),
+                kernel_params: ptr::null_mut(),
+                shared_mem_bytes: 0,
+            };
+            // SAFETY: node is live (from hipGraphGetNodes on the still-
+            // alive source graph); params is local stack storage.
+            check(
+                unsafe {
+                    crate::sys::hipGraphKernelNodeGetParams(node, &raw mut params)
+                },
+                "hipGraphKernelNodeGetParams (shadow init)",
+            )?;
+            // Determine arity. Without a dedicated query, pull it from
+            // the slot_map if a slot is bound on this node; else leave 0
+            // and the shadow's ptrs Vec stays empty — set_slot errors
+            // with a clear message if the node has no bound slots.
+            let arity = slot_map
+                .bindings_for_node(node_idx)
+                .next()
+                .map(|b| b.arity)
+                .unwrap_or(0);
+            let ptrs = if arity > 0 && !params.kernel_params.is_null() {
+                // SAFETY: params.kernel_params points to a driver-owned
+                // array of `arity` void* entries.
+                let slice: &[*mut std::os::raw::c_void] = unsafe {
+                    std::slice::from_raw_parts(params.kernel_params, arity)
+                };
+                slice.to_vec()
+            } else {
+                Vec::new()
+            };
+            node_shadows.push(NodeShadow { ptrs, meta: params });
+        }
+
         Ok(Self {
             exec,
             graph,
             device_id: stream.device_id(),
             kernel_nodes,
             slot_map,
+            node_shadows: std::cell::RefCell::new(node_shadows),
         })
     }
 
@@ -419,31 +491,29 @@ impl HipGraphExec {
                     slot.id()
                 ),
             })?;
-        // Read current params so we preserve func, grid, block,
-        // shared_mem_bytes, and the other args' driver-side pointers.
-        let current = self.get_kernel_node_params(binding.kernel_node_idx)?;
-        // SAFETY: current.kernel_params is a valid pointer to
-        // `binding.arity` pointers, all driver-owned and stable at
-        // least until the next SetParams on this node.
-        let current_ptrs: &[*mut std::os::raw::c_void] = unsafe {
-            std::slice::from_raw_parts(current.kernel_params, binding.arity)
-        };
-        let mut new_ptrs: Vec<*mut std::os::raw::c_void> = current_ptrs.to_vec();
-        new_ptrs[binding.arg_index] =
+        let mut shadows = self.node_shadows.borrow_mut();
+        let shadow = &mut shadows[binding.kernel_node_idx];
+        // Mutate the Rust-side shadow and hand the full array to the
+        // driver. Reading via hipGraphKernelNodeGetParams would fetch
+        // the SOURCE graph's params, which never change across
+        // hipGraphExecKernelNodeSetParams calls — consecutive set_slot
+        // updates would clobber each other. The shadow preserves the
+        // latest state across updates.
+        shadow.ptrs[binding.arg_index] =
             std::ptr::from_ref::<T>(new_value) as *mut std::os::raw::c_void;
 
         let new_params = crate::sys::hipKernelNodeParams {
-            block_dim: current.block_dim,
+            block_dim: shadow.meta.block_dim,
             extra: std::ptr::null_mut(),
-            func: current.func,
-            grid_dim: current.grid_dim,
-            kernel_params: new_ptrs.as_mut_ptr(),
-            shared_mem_bytes: current.shared_mem_bytes,
+            func: shadow.meta.func,
+            grid_dim: shadow.meta.grid_dim,
+            kernel_params: shadow.ptrs.as_mut_ptr(),
+            shared_mem_bytes: shadow.meta.shared_mem_bytes,
         };
-        // SAFETY: new_ptrs has `arity` entries; kernel_params[arg_index]
-        // was replaced with `new_value`'s stable reference (caller
-        // contract). Other entries preserve the driver's existing
-        // pointers.
+        // SAFETY: shadow.ptrs has `binding.arity` entries (initialised
+        // from the capture-time kernel_params); kernel_params[arg_index]
+        // was just replaced with `new_value`'s stable reference (caller
+        // contract). Other entries preserve the exec's current pointers.
         unsafe { self.set_kernel_node_params(binding.kernel_node_idx, &new_params) }
     }
 
