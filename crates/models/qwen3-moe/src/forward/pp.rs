@@ -1254,6 +1254,10 @@ pub fn forward_prefill_pp_async(
     // ubatch runs concurrent with a full-size predecessor on the other
     // lane, same race.
     let has_gdn = (0..model.config.num_layers).any(|il| model.config.is_recurrent(il));
+    let n_gdn_layers = (0..model.config.num_layers)
+        .filter(|&il| model.config.is_recurrent(il))
+        .count();
+    let gdn_per_rank = n_gdn_layers / n_ranks.max(1);
     if has_gdn && u_lanes > 1 {
         if ubatch_size < 128 {
             bail!(
@@ -1271,14 +1275,26 @@ pub fn forward_prefill_pp_async(
                  that the tail ≥ 128. See V2.27.d cert."
             );
         }
-        // V2.28.c.1 — long-context extension of the V2.27.d race.
-        // At K ≥ 128 ubatches (e.g. Qwen3.6-35B ub=128 L=16384), the
-        // accumulated cross-lane state-race damage breaks parity
-        // even though per-ubatch work is "long enough" to serialise.
-        // Empirically: L=16384 ub=128 u_lanes=2 last_id=143737 vs
-        // sync 220; L=16384 ub=256 K=64 u_lanes=2 last_id=220 ✓;
-        // L=16384 ub=128 u_lanes=1 last_id=220 ✓. So the threshold
-        // is K (n_ubatches) > 64 with u_lanes > 1 on GDN models.
+        // V2.28.a-i1 — the GDN cross-lane race's severity scales with
+        // per-rank GDN layer count (more shared-state tensors = more
+        // race opportunities per ubatch). Empirically:
+        //   9B (gdn/rank=7):  safe at K ≤ 64
+        //   35B (gdn/rank=7): safe at K ≤ 64
+        //   27B (gdn/rank=12): RACES non-deterministically at K ≥ 32
+        // Reject u_lanes > 1 unconditionally when gdn_per_rank > 10 —
+        // no known ubatch/K combo is safe on those layouts short of
+        // proper per-lane state (deferred).
+        if gdn_per_rank > 10 {
+            bail!(
+                "forward_prefill_pp_async: model has {n_gdn_layers} GDN layers on \
+                 {n_ranks} ranks = {gdn_per_rank} GDN layers/rank. At > 10 GDN layers/rank \
+                 the cross-lane state race produces non-deterministic outputs at all K \
+                 (V2.28.a-i1 finding on Qwen3.6-27B). Use u_lanes=1 for this model. \
+                 See V2.28.a-i1 cert."
+            );
+        }
+        // V2.28.c.1 — at gdn_per_rank ≤ 10, K > 64 still races
+        // (originally the 35B L=16384 finding).
         let n_ubatches_val = l.div_ceil(ubatch_size);
         if n_ubatches_val > 64 {
             bail!(
