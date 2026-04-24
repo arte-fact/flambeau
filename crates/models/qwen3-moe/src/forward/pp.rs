@@ -758,6 +758,25 @@ pub fn forward_prefill_pp(
         bail!("forward_prefill_pp called with empty tokens");
     }
     let max_tokens = scratch.per_rank[0].max_tokens;
+
+    // V2.25.d — opt-in async ubatch path. Requires scratch with
+    // `u_lanes >= 2` (from `new_with_lanes`) and `FLAMBEAU_ASYNC_UBATCH`
+    // set. `FLAMBEAU_UBATCH` controls the ubatch size (defaults to
+    // scratch.max_tokens which keeps behaviour equivalent to sync path).
+    let async_enabled = std::env::var("FLAMBEAU_ASYNC_UBATCH").is_ok();
+    let u_lanes = scratch.per_rank[0].u_lanes();
+    if async_enabled && u_lanes >= 2 {
+        let ubatch_size: usize = std::env::var("FLAMBEAU_UBATCH")
+            .ok()
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(max_tokens);
+        if l > ubatch_size {
+            return forward_prefill_pp_async(
+                model, session, cluster, scratch, tokens, start_position, ubatch_size,
+            );
+        }
+    }
+
     if l > max_tokens {
         bail!(
             "forward_prefill_pp: L={l} > scratch.max_tokens={max_tokens}; caller must chunk"
@@ -912,6 +931,308 @@ pub fn forward_prefill_pp(
         .as_mut()
         .context("last rank missing output_head scratch")?;
     let last_token_hidden = last_scratch.hidden_a.offset_bytes((l - 1) * row_bytes);
+    forward_output_head_decode(
+        &last_shard.ops,
+        last_device.default_stream(),
+        cfg,
+        output_norm,
+        lm_head,
+        output_head_scratch,
+        last_token_hidden,
+    )?;
+
+    argmax_token_host(
+        last_device,
+        last_device.default_stream(),
+        output_head_scratch.logits_f32,
+        cfg.vocab_size,
+    )
+}
+
+/// V2.25.d — async ubatch-pipelined prefill.
+///
+/// Splits `tokens[0..L]` into ubatches of size `ubatch_size` and drives
+/// them across the N ranks using per-rank aux streams (V2.25.a) + async
+/// peer-copies (V2.25.b) + per-lane scratch (V2.25.c). Ubatch i lives on
+/// lane `i % u_lanes`; same-lane kernels serialize via stream ordering
+/// (KV/GDN state coherence), different-lane kernels overlap on the
+/// driver's DAG.
+///
+/// The caller is responsible for:
+///   - constructing `scratch` via `new_with_lanes(..., ubatch_size, u_lanes)`
+///     so each rank has `u_lanes` hidden+layer scratches sized for ubatch
+///   - ensuring `u_lanes >= 2` — the async path has no benefit at u_lanes=1
+///   - setting `FLAMBEAU_ASYNC_UBATCH` env opt-in (top-level
+///     `forward_prefill_pp` routes here when set)
+///
+/// Returns argmax of the LAST token of the LAST ubatch.
+pub fn forward_prefill_pp_async(
+    model: &crate::sharded::Qwen3MoEShardedModel,
+    session: &mut crate::sharded::Qwen3MoEShardedSession,
+    cluster: &flambeau_backend_hip::HipCluster,
+    scratch: &mut ShardedForwardPrefillScratch,
+    tokens: &[u32],
+    start_position: usize,
+    ubatch_size: usize,
+) -> Result<u32> {
+    use flambeau_backend_hip::HipEvent;
+
+    let n_ranks = model.shards.len();
+    if n_ranks == 0 {
+        bail!("forward_prefill_pp_async: zero-rank cluster");
+    }
+    let l = tokens.len();
+    if l == 0 {
+        bail!("forward_prefill_pp_async called with empty tokens");
+    }
+    if ubatch_size == 0 {
+        bail!("forward_prefill_pp_async: ubatch_size must be >= 1");
+    }
+    let max_ubatch = scratch.per_rank[0].max_tokens;
+    if ubatch_size > max_ubatch {
+        bail!(
+            "forward_prefill_pp_async: ubatch_size={ubatch_size} > scratch.max_tokens={max_ubatch}"
+        );
+    }
+    let u_lanes = scratch.per_rank[0].u_lanes();
+    if u_lanes < 2 {
+        bail!(
+            "forward_prefill_pp_async: u_lanes={u_lanes} < 2 — no async benefit; construct scratch via new_with_lanes(..., u_lanes >= 2)"
+        );
+    }
+    cluster.reserve_aux_streams(u_lanes)?;
+
+    let cfg = &model.config;
+    let hidden = cfg.hidden_size;
+    let row_bytes = hidden * 2;
+    let n_ubatches = l.div_ceil(ubatch_size);
+
+    // Pre-allocate bridge events: one per (src_rank, lane) pair. Used to
+    // bridge the DtoH on src_rank to the HtoD on dst_rank inside
+    // peer_copy_via_host_async. Reused each ubatch using the same lane —
+    // hipEventRecord overwrites the prior record.
+    let mut bridge_events: Vec<Vec<HipEvent>> = Vec::with_capacity(n_ranks.saturating_sub(1));
+    for r in 0..n_ranks.saturating_sub(1) {
+        let device = cluster.device(r);
+        device.bind()?;
+        let mut row = Vec::with_capacity(u_lanes);
+        for _ in 0..u_lanes {
+            row.push(HipEvent::new(device.id())?);
+        }
+        bridge_events.push(row);
+    }
+
+    let shards = &model.shards;
+
+    // Issue every (ubatch, rank) work item in order. Async peer-copies +
+    // per-lane aux streams let the driver overlap across ubatches.
+    for ub_idx in 0..n_ubatches {
+        let lane = ub_idx % u_lanes;
+        let start = ub_idx * ubatch_size;
+        let end = (start + ubatch_size).min(l);
+        let u = end - start;
+        let chunk = &tokens[start..end];
+        let pos = start_position + start;
+        let chunk_bytes = u * row_bytes;
+
+        // ----- Rank 0: embed + layers -----
+        {
+            let rank0 = cluster.device(0);
+            rank0.bind()?;
+            let shard0 = &shards[0];
+            let token_embd = shard0
+                .token_embd
+                .as_ref()
+                .context("rank 0 shard missing token_embd")?;
+            let scratch0 = &mut scratch.per_rank[0];
+            let lane_hidden_a = scratch0.lane_hidden_a(lane);
+
+            // Embed on the lane's aux stream.
+            cluster.with_aux_stream(0, lane, |s| -> flambeau_core::DeviceResult<()> {
+                for (t, &token_id) in chunk.iter().enumerate() {
+                    forward_embed_decode_host(
+                        rank0,
+                        s,
+                        token_embd,
+                        token_id,
+                        lane_hidden_a.offset_bytes(t * row_bytes),
+                        hidden,
+                    )
+                    .map_err(|e| flambeau_core::DeviceError::Backend {
+                        backend: "hip",
+                        code: -1,
+                        message: format!("embed: {e}"),
+                    })?;
+                }
+                Ok(())
+            })?;
+
+            // Run rank 0's layers on the same aux stream.
+            let rank_session = &mut session.per_rank[0];
+            let lane_hidden_b = scratch0.lane_hidden_b(lane);
+            let layer_scratch = scratch0
+                .lane_layer_mut(lane)
+                .context("rank 0 lane_layer_mut")?;
+
+            cluster.with_aux_stream(0, lane, |s| -> flambeau_core::DeviceResult<()> {
+                let (mut x_in, mut x_out) = (lane_hidden_a, lane_hidden_b);
+                for (local_idx, layer_weights) in shard0.layers.iter().enumerate() {
+                    let layer_cache = &mut rank_session.caches[local_idx];
+                    forward_layer_prefill(
+                        &shard0.ops,
+                        s,
+                        rank0,
+                        cfg,
+                        layer_weights,
+                        layer_cache,
+                        layer_scratch,
+                        x_in,
+                        x_out,
+                        u,
+                        pos,
+                    )
+                    .map_err(|e| flambeau_core::DeviceError::Backend {
+                        backend: "hip",
+                        code: -1,
+                        message: format!("prefill rank 0 layer {}: {e}", layer_weights.layer_idx),
+                    })?;
+                    std::mem::swap(&mut x_in, &mut x_out);
+                }
+                // Normalise final hidden into lane's hidden_a for peer-copy.
+                if x_in != lane_hidden_a {
+                    unsafe {
+                        rank0.memcpy_async(
+                            s,
+                            CopyDirection::DeviceToDevice,
+                            lane_hidden_a,
+                            x_in,
+                            chunk_bytes,
+                        )?;
+                    }
+                }
+                Ok(())
+            })?;
+        }
+
+        // ----- Rank r > 0: peer-copy + layers -----
+        for rank_idx in 1..n_ranks {
+            let device = cluster.device(rank_idx);
+
+            // Gather the raw stream handles for the cross-rank peer-copy.
+            // We hold both mutexes simultaneously (different rank entries →
+            // different Mutex instances; no deadlock).
+            let src_dst_copy_result: Result<()> =
+                cluster.with_aux_stream(rank_idx - 1, lane, |src_stream| {
+                    cluster.with_aux_stream(rank_idx, lane, |dst_stream| {
+                        unsafe {
+                            cluster.peer_copy_via_host_async(
+                                scratch.per_rank[rank_idx].lane_hidden_a(lane),
+                                rank_idx,
+                                scratch.per_rank[rank_idx - 1].lane_hidden_a(lane),
+                                rank_idx - 1,
+                                chunk_bytes,
+                                src_stream,
+                                dst_stream,
+                                &bridge_events[rank_idx - 1][lane],
+                                None,
+                            )?;
+                        }
+                        Ok(())
+                    })
+                })
+                .map_err(|e| anyhow::anyhow!("peer_copy_async r{}->{}: {e}", rank_idx - 1, rank_idx));
+            src_dst_copy_result?;
+
+            device.bind()?;
+            let shard = &shards[rank_idx];
+            let rank_session = &mut session.per_rank[rank_idx];
+            let rank_scratch = &mut scratch.per_rank[rank_idx];
+            let lane_hidden_a = rank_scratch.lane_hidden_a(lane);
+            let lane_hidden_b = rank_scratch.lane_hidden_b(lane);
+            let layer_scratch = rank_scratch
+                .lane_layer_mut(lane)
+                .context("lane_layer_mut")?;
+
+            cluster.with_aux_stream(rank_idx, lane, |s| -> flambeau_core::DeviceResult<()> {
+                let (mut x_in, mut x_out) = (lane_hidden_a, lane_hidden_b);
+                for (local_idx, layer_weights) in shard.layers.iter().enumerate() {
+                    let layer_cache = &mut rank_session.caches[local_idx];
+                    forward_layer_prefill(
+                        &shard.ops,
+                        s,
+                        device,
+                        cfg,
+                        layer_weights,
+                        layer_cache,
+                        layer_scratch,
+                        x_in,
+                        x_out,
+                        u,
+                        pos,
+                    )
+                    .map_err(|e| flambeau_core::DeviceError::Backend {
+                        backend: "hip",
+                        code: -1,
+                        message: format!(
+                            "prefill rank {} layer {}: {e}",
+                            rank_idx, layer_weights.layer_idx
+                        ),
+                    })?;
+                    std::mem::swap(&mut x_in, &mut x_out);
+                }
+                if x_in != lane_hidden_a {
+                    unsafe {
+                        device.memcpy_async(
+                            s,
+                            CopyDirection::DeviceToDevice,
+                            lane_hidden_a,
+                            x_in,
+                            chunk_bytes,
+                        )?;
+                    }
+                }
+                Ok(())
+            })?;
+        }
+    }
+
+    // ----- Output head on the last rank after the FINAL ubatch -----
+    let last_idx = n_ranks - 1;
+    let last_ub = n_ubatches - 1;
+    let last_lane = last_ub % u_lanes;
+    let last_start = last_ub * ubatch_size;
+    let last_end = (last_start + ubatch_size).min(l);
+    let last_u = last_end - last_start;
+
+    let last_device = cluster.device(last_idx);
+    last_device.bind()?;
+
+    // Sync the last rank's lane so the output head sees completed hidden.
+    cluster.with_aux_stream(last_idx, last_lane, |s| {
+        flambeau_core::Stream::synchronize(s)
+    })?;
+
+    let last_shard = &shards[last_idx];
+    let last_scratch = &mut scratch.per_rank[last_idx];
+    let output_norm = last_shard
+        .output_norm
+        .as_ref()
+        .context("last rank missing output_norm")?;
+    let lm_head = last_shard
+        .output
+        .as_ref()
+        .or(last_shard.token_embd.as_ref())
+        .context("last rank missing both output.weight and tied token_embd")?;
+    let output_head_scratch = last_scratch
+        .output_head
+        .as_mut()
+        .context("last rank missing output_head scratch")?;
+    let last_lane_hidden_a = if last_lane == 0 {
+        last_scratch.hidden_a
+    } else {
+        last_scratch.extra_lanes[last_lane - 1].hidden_a
+    };
+    let last_token_hidden = last_lane_hidden_a.offset_bytes((last_u - 1) * row_bytes);
     forward_output_head_decode(
         &last_shard.ops,
         last_device.default_stream(),

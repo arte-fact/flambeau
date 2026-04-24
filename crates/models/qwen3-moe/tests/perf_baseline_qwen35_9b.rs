@@ -92,20 +92,33 @@ fn perf_baseline_qwen35_9b() -> Result<()> {
 
     if !decode_only {
     // V2.24.b.1 — optional external ubatch chunking via FLAMBEAU_UBATCH env.
-    // Iter 1: serial chunked pass (no cross-rank overlap). Should match
-    // unchunked output + be within noise of unchunked wall.
+    // V2.25.d — FLAMBEAU_ASYNC_UBATCH=1 additionally routes forward_prefill_pp
+    // through the async path (per-rank aux streams + event-bridged peer
+    // copies + per-lane scratch). Requires FLAMBEAU_UBATCH set to the
+    // ubatch size, otherwise falls back to the sync single-batch path.
     let ubatch: Option<usize> = std::env::var("FLAMBEAU_UBATCH")
         .ok()
         .and_then(|s| s.parse().ok())
         .filter(|&u| u > 0);
+    let async_enabled = std::env::var("FLAMBEAU_ASYNC_UBATCH").is_ok();
+    let u_lanes: usize = std::env::var("FLAMBEAU_U_LANES")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(if async_enabled { 2 } else { 1 });
     for &l in &[8usize, 64, 128, 512, 1024] {
         let mut session = Qwen3MoEShardedSession::new(&model, &cluster)?;
         let scratch_size = ubatch.map(|u| u.min(l)).unwrap_or(l);
-        let mut scratch = ShardedForwardPrefillScratch::new(&model, &cluster, scratch_size)?;
+        let mut scratch = flambeau_qwen3_moe::forward::ShardedForwardPrefillScratch::new_with_lanes(
+            &model, &cluster, scratch_size, u_lanes,
+        )?;
         let tokens: Vec<u32> = (0..l as u32).map(|i| (1 + i * 37) % 151000).collect();
 
         let t0 = Instant::now();
-        if let Some(u) = ubatch {
+        if async_enabled && u_lanes >= 2 {
+            // forward_prefill_pp itself branches into forward_prefill_pp_async
+            // when FLAMBEAU_ASYNC_UBATCH is set and u_lanes >= 2.
+            let _ = forward_prefill_pp(&model, &mut session, &cluster, &mut scratch, &tokens, 0)?;
+        } else if let Some(u) = ubatch {
             let mut pos = 0;
             for chunk in tokens.chunks(u) {
                 let _ = forward_prefill_pp(&model, &mut session, &cluster, &mut scratch, chunk, pos)?;

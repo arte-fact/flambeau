@@ -56,7 +56,8 @@ pub use moe::{
 
 pub mod io;
 pub use io::{
-    argmax_token_host, forward_embed_decode_host, forward_output_head_decode, OutputHeadScratch,
+    argmax_token_host, download_logits_host, forward_embed_decode_host,
+    forward_output_head_decode, OutputHeadScratch,
 };
 
 pub mod layer;
@@ -71,6 +72,8 @@ pub use single_device::{
 
 pub mod pp;
 pub use pp::{
-    forward_one_token_pp, forward_prefill_pp, RankForwardPrefillScratch, RankForwardScratch,
-    ShardedForwardOneTokenScratch, ShardedForwardPrefillScratch,
+    forward_one_token_pp, forward_one_token_pp_logits, forward_prefill_pp,
+    forward_prefill_pp_async, forward_prefill_pp_logits, RankForwardPrefillScratch,
+    RankForwardScratch, ShardedForwardOneTokenScratch, ShardedForwardPrefillScratch,
+    UbatchLane,
 };
