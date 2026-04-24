@@ -266,6 +266,11 @@ pub struct HipGraphExec {
     /// doesn't implement Send/Sync out of the box; we cast back when
     /// calling the param-update FFI.
     kernel_nodes: Vec<usize>,
+    /// V2.26.a-i3 — slot → (kernel_node_idx, arg_idx, arity) bindings
+    /// accumulated from tagged pushes during capture. Empty when no
+    /// slots were pushed; `set_slot` lookups miss gracefully in that
+    /// case.
+    slot_map: crate::graph_capture::SlotMap,
 }
 
 impl std::fmt::Debug for HipGraphExec {
@@ -296,6 +301,12 @@ impl HipGraphExec {
     where
         F: FnOnce(&HipStream) -> DeviceResult<()>,
     {
+        // V2.26.a-i3 — enable the thread-local capture recorder for the
+        // duration of this capture. Every `HipKernel::launch` issued
+        // inside `f` will append a LaunchRecord that we later zip with
+        // the graph's kernel nodes to build a SlotMap.
+        let capture_scope = crate::graph_capture::CaptureScope::begin();
+
         // SAFETY: stream is owned+live. Relaxed capture mode lets host APIs
         // run during capture; the closure just enqueues on `stream`.
         check(
@@ -315,6 +326,11 @@ impl HipGraphExec {
         // Must be called whether the closure failed or not — otherwise the
         // stream stays in capture mode and every subsequent submit errors.
         let end_code = unsafe { crate::sys::hipStreamEndCapture(stream.raw(), &raw mut graph) };
+
+        // End the recorder scope regardless of the closure's outcome so
+        // the thread-local state is always reset. Intentionally drain
+        // here so any error paths below don't leave the state set.
+        let launches = capture_scope.end().launches;
 
         closure_result?;
         check(end_code, "hipStreamEndCapture")?;
@@ -344,12 +360,91 @@ impl HipGraphExec {
             check(inst_code, "hipGraphInstantiate")?;
         }
 
+        // Zip recorded launches with kernel-node ordinals. If no slot
+        // pushes happened, this produces an empty map (still valid).
+        let slot_map = crate::graph_capture::SlotMap::from_recorder(
+            &launches,
+            kernel_nodes.len(),
+        )
+        .map_err(|msg| DeviceError::Backend {
+            backend: BACKEND,
+            code: -1,
+            message: format!("HipGraphExec::capture slot-map: {msg}"),
+        })?;
+
         Ok(Self {
             exec,
             graph,
             device_id: stream.device_id(),
             kernel_nodes,
+            slot_map,
         })
+    }
+
+    /// Return the slot→(node, arg) map accumulated during capture. Empty
+    /// if the capture closure didn't push any slots via `KernelArgs::push_slot`.
+    pub fn slot_map(&self) -> &crate::graph_capture::SlotMap {
+        &self.slot_map
+    }
+
+    /// Update the updateable scalar bound to `slot` with `new_value`, by
+    /// building a fresh `kernelParams` pointer array (cloning the current
+    /// array from `hipGraphKernelNodeGetParams`) and calling
+    /// `hipGraphExecKernelNodeSetParams`.
+    ///
+    /// Every untouched arg keeps its current driver-side pointer — the
+    /// driver's previous per-node staging buffer stays readable at least
+    /// until the next SetParams on the same node, which is when the
+    /// values for those pointers are re-snapshotted.
+    ///
+    /// # Safety
+    /// - `new_value` must have the exact size + type the captured
+    ///   kernel expects at this arg slot. Wrong size writes garbage.
+    /// - `new_value` must remain live until this call returns (the HIP
+    ///   runtime copies the value-by-pointer during SetParams).
+    pub unsafe fn set_slot<T>(
+        &self,
+        slot: crate::graph_capture::ScalarSlot,
+        new_value: &T,
+    ) -> DeviceResult<()> {
+        let binding = self
+            .slot_map
+            .get(slot)
+            .copied()
+            .ok_or_else(|| DeviceError::Backend {
+                backend: BACKEND,
+                code: -1,
+                message: format!(
+                    "HipGraphExec::set_slot: slot id={} not bound in this exec's slot_map",
+                    slot.id()
+                ),
+            })?;
+        // Read current params so we preserve func, grid, block,
+        // shared_mem_bytes, and the other args' driver-side pointers.
+        let current = self.get_kernel_node_params(binding.kernel_node_idx)?;
+        // SAFETY: current.kernel_params is a valid pointer to
+        // `binding.arity` pointers, all driver-owned and stable at
+        // least until the next SetParams on this node.
+        let current_ptrs: &[*mut std::os::raw::c_void] = unsafe {
+            std::slice::from_raw_parts(current.kernel_params, binding.arity)
+        };
+        let mut new_ptrs: Vec<*mut std::os::raw::c_void> = current_ptrs.to_vec();
+        new_ptrs[binding.arg_index] =
+            std::ptr::from_ref::<T>(new_value) as *mut std::os::raw::c_void;
+
+        let new_params = crate::sys::hipKernelNodeParams {
+            block_dim: current.block_dim,
+            extra: std::ptr::null_mut(),
+            func: current.func,
+            grid_dim: current.grid_dim,
+            kernel_params: new_ptrs.as_mut_ptr(),
+            shared_mem_bytes: current.shared_mem_bytes,
+        };
+        // SAFETY: new_ptrs has `arity` entries; kernel_params[arg_index]
+        // was replaced with `new_value`'s stable reference (caller
+        // contract). Other entries preserve the driver's existing
+        // pointers.
+        unsafe { self.set_kernel_node_params(binding.kernel_node_idx, &new_params) }
     }
 
     pub fn device_id(&self) -> i32 {

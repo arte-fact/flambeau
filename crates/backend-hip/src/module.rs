@@ -245,9 +245,19 @@ impl LaunchCfg {
 
 /// Kernel argument buffer. Pushes pointer to each arg's storage; the
 /// underlying storage must outlive the launch.
+///
+/// V2.26.a-i3 adds `push_slot`: tag a pushed arg with a
+/// [`ScalarSlot`](crate::graph_capture::ScalarSlot) so post-capture we
+/// can bind the slot to its kernel-node arg index for later
+/// `hipGraphExecKernelNodeSetParams` updates. `push` (untagged) is
+/// unchanged.
 #[derive(Default)]
 pub struct KernelArgs<'a> {
     ptrs: Vec<*mut std::os::raw::c_void>,
+    /// (slot, arg_index_within_this_launch) for every tagged push. Only
+    /// drained into the thread-local capture state at launch time — so
+    /// untagged launches pay zero cost.
+    tagged_slots: Vec<(crate::graph_capture::ScalarSlot, usize)>,
     _marker: PhantomData<&'a ()>,
 }
 
@@ -255,6 +265,7 @@ impl std::fmt::Debug for KernelArgs<'_> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("KernelArgs")
             .field("len", &self.ptrs.len())
+            .field("tagged", &self.tagged_slots.len())
             .finish()
     }
 }
@@ -271,6 +282,22 @@ impl<'a> KernelArgs<'a> {
     /// the stream's consumption of the launch).
     pub fn push<T>(&mut self, v: &'a T) {
         self.ptrs.push(std::ptr::from_ref::<T>(v) as *mut _);
+    }
+
+    /// Push an argument tagged as an updateable scalar. Same as `push`
+    /// for the launch itself; additionally, during an active graph
+    /// capture the tag is recorded so the exec can later update this
+    /// arg in-place via `hipGraphExecKernelNodeSetParams`.
+    ///
+    /// Outside a capture scope this is functionally identical to
+    /// `push` — the tag is stored in the `KernelArgs` but never
+    /// consumed. Ops that want to remain captureable should use
+    /// `push_slot` for every scalar that might vary per ubatch (pos,
+    /// start_position, n_k_tokens, ...).
+    pub fn push_slot<T>(&mut self, v: &'a T, slot: crate::graph_capture::ScalarSlot) {
+        let arg_index = self.ptrs.len();
+        self.push(v);
+        self.tagged_slots.push((slot, arg_index));
     }
 
     fn as_raw(&mut self) -> *mut *mut std::os::raw::c_void {
@@ -374,6 +401,11 @@ impl HipKernel<'_> {
         cfg: LaunchCfg,
         mut args: KernelArgs<'_>,
     ) -> DeviceResult<()> {
+        // V2.26.a-i3 — if a capture is active on this thread, record the
+        // launch's arity + tagged slots so post-capture the exec can build
+        // a SlotMap. Outside capture this is a no-op.
+        crate::graph_capture::record_launch(args.len(), &args.tagged_slots);
+
         // SAFETY: the outer fn is `unsafe`; the caller's contract (see doc
         // comment above) covers arg-storage lifetime, launch-cfg bounds, and
         // device-pointer validity. `self.raw` is live (borrowed from its

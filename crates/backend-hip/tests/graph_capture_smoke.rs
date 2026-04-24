@@ -14,7 +14,9 @@
 
 use flambeau_backend_hip::module::{HipModule, KernelArgs, LaunchCfg};
 use flambeau_backend_hip::sys::{hipDim3, hipKernelNodeParams};
-use flambeau_backend_hip::{device_count, HipDevice, HipGraphExec, HipStream};
+use flambeau_backend_hip::{
+    device_count, HipDevice, HipGraphExec, HipStream, ScalarSlot,
+};
 use flambeau_core::{CopyDirection, Device, DevicePtr, Stream};
 use std::ffi::c_void;
 
@@ -287,4 +289,161 @@ fn kernel_param_update_scale_f32() {
     // Keep these alive until here (arg storage lifetime).
     let _ = (captured_scale, new_scale, new_kernel_params);
     let _ = hipDim3::default();
+}
+
+/// V2.26.a-i3 end-to-end: capture TWO `flambeau_scale_f32` launches in
+/// sequence, each tagging its `scale` arg with a distinct ScalarSlot.
+/// The resulting exec's SlotMap should bind the first slot to kernel
+/// node 0 and the second to kernel node 1. Update both slots via
+/// `set_slot`, replay, verify both output buffers reflect the updated
+/// scales.
+///
+/// This proves the thread-local launch-recorder lines up with
+/// hipGraphGetNodes's dispatch-order node enumeration on gfx906 — the
+/// V2.26.a-i4 pos-rewiring depends on this 1:1 mapping.
+#[test]
+fn slot_map_two_launches_round_trip() {
+    if !maybe_skip() {
+        return;
+    }
+    let dev = HipDevice::new(0).expect("HipDevice::new(0)");
+    let hsaco =
+        flambeau_kernels_hip::hsaco("scale_f32").expect("scale_f32.hsaco present");
+    let module = HipModule::load(0, hsaco).unwrap();
+    let kernel = module.kernel("flambeau_scale_f32").unwrap();
+
+    let n: usize = 256;
+    let bytes = n * 4;
+    // Two independent (x, y) pairs; each captured launch targets its own y.
+    let x_dev = dev.alloc(bytes).unwrap();
+    let y0_dev = dev.alloc(bytes).unwrap();
+    let y1_dev = dev.alloc(bytes).unwrap();
+
+    let x_host: Vec<f32> = (0..n).map(|i| (i + 1) as f32).collect();
+    let stream = HipStream::new_non_blocking(0).unwrap();
+    unsafe {
+        dev.memcpy_async(
+            &stream,
+            CopyDirection::HostToDevice,
+            x_dev,
+            DevicePtr(x_host.as_ptr() as usize),
+            bytes,
+        )
+        .unwrap();
+    }
+    stream.synchronize().unwrap();
+
+    // Stable storage for arg pointers during and after capture.
+    let x_ptr_u64: u64 = x_dev.as_usize() as u64;
+    let y0_ptr_u64: u64 = y0_dev.as_usize() as u64;
+    let y1_ptr_u64: u64 = y1_dev.as_usize() as u64;
+    let n_i: i32 = n as i32;
+    let init_scale_0: f32 = 2.0;
+    let init_scale_1: f32 = 3.0;
+
+    // Allocate slots BEFORE capture.
+    let slot_0 = ScalarSlot::new();
+    let slot_1 = ScalarSlot::new();
+
+    let cap_stream = HipStream::new_non_blocking(0).unwrap();
+    let exec = HipGraphExec::capture(&cap_stream, |s| {
+        // Launch 1: y0 = x * 2.0; tag scale at arg index 3.
+        let mut args0 = KernelArgs::new();
+        args0.push(&x_ptr_u64);
+        args0.push(&y0_ptr_u64);
+        args0.push(&n_i);
+        args0.push_slot(&init_scale_0, slot_0);
+        let cfg = LaunchCfg::one_d((n as u32).div_ceil(256), 256);
+        // SAFETY: arg storage lives for the full capture + replay cycle.
+        unsafe { kernel.launch(s, cfg, args0)? };
+
+        // Launch 2: y1 = x * 3.0; tag scale at arg index 3.
+        let mut args1 = KernelArgs::new();
+        args1.push(&x_ptr_u64);
+        args1.push(&y1_ptr_u64);
+        args1.push(&n_i);
+        args1.push_slot(&init_scale_1, slot_1);
+        // SAFETY: see above.
+        unsafe { kernel.launch(s, cfg, args1)? };
+        Ok(())
+    })
+    .expect("capture");
+
+    assert_eq!(exec.num_kernel_nodes(), 2);
+    let map = exec.slot_map();
+    let b0 = map.get(slot_0).expect("slot_0 bound");
+    let b1 = map.get(slot_1).expect("slot_1 bound");
+    assert_eq!(b0.kernel_node_idx, 0);
+    assert_eq!(b0.arg_index, 3);
+    assert_eq!(b0.arity, 4);
+    assert_eq!(b1.kernel_node_idx, 1);
+    assert_eq!(b1.arg_index, 3);
+    assert_eq!(b1.arity, 4);
+
+    // First replay — outputs = x·2, x·3.
+    exec.launch(&stream).unwrap();
+    stream.synchronize().unwrap();
+
+    // Update both slots: scale_0 = 7.0, scale_1 = 11.0.
+    let new_scale_0: f32 = 7.0;
+    let new_scale_1: f32 = 11.0;
+    // SAFETY: new_scale_{0,1} are f32 matching scale_f32's 4th arg;
+    // each outlives the set_slot call (stack-bound in this function).
+    unsafe {
+        exec.set_slot(slot_0, &new_scale_0)
+            .expect("set_slot(slot_0)");
+        exec.set_slot(slot_1, &new_scale_1)
+            .expect("set_slot(slot_1)");
+    }
+
+    // Second replay — outputs = x·7, x·11.
+    exec.launch(&stream).unwrap();
+    stream.synchronize().unwrap();
+
+    let mut y0_host = vec![0f32; n];
+    let mut y1_host = vec![0f32; n];
+    unsafe {
+        dev.memcpy_async(
+            &stream,
+            CopyDirection::DeviceToHost,
+            DevicePtr(y0_host.as_mut_ptr() as usize),
+            y0_dev,
+            bytes,
+        )
+        .unwrap();
+        dev.memcpy_async(
+            &stream,
+            CopyDirection::DeviceToHost,
+            DevicePtr(y1_host.as_mut_ptr() as usize),
+            y1_dev,
+            bytes,
+        )
+        .unwrap();
+    }
+    stream.synchronize().unwrap();
+
+    for i in 0..n {
+        let want_0 = (i + 1) as f32 * 7.0;
+        let want_1 = (i + 1) as f32 * 11.0;
+        assert!(
+            (y0_host[i] - want_0).abs() < 1e-3,
+            "y0[{i}]={} want {want_0}",
+            y0_host[i]
+        );
+        assert!(
+            (y1_host[i] - want_1).abs() < 1e-3,
+            "y1[{i}]={} want {want_1}",
+            y1_host[i]
+        );
+    }
+
+    // SAFETY: all work has synced above.
+    unsafe {
+        dev.dealloc(x_dev, bytes).unwrap();
+        dev.dealloc(y0_dev, bytes).unwrap();
+        dev.dealloc(y1_dev, bytes).unwrap();
+    }
+
+    // Storage-lifetime anchors.
+    let _ = (init_scale_0, init_scale_1, new_scale_0, new_scale_1);
 }
