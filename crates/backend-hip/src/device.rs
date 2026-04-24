@@ -244,6 +244,121 @@ impl Drop for HipEvent {
     }
 }
 
+/// V2.26.a — executable HIP graph, instantiated from a stream-capture
+/// recording. Replay issues the whole captured sequence to a stream with
+/// a single driver call, collapsing per-kernel launch overhead.
+///
+/// Construction flow: `HipGraphExec::capture(stream, |s| { ...enqueue work on s... })`.
+/// The closure issues whatever kernels / memcpys make up the subgraph; on
+/// return we end capture, instantiate, and hold the executable. Drop
+/// destroys both the recording graph and the instantiated exec.
+pub struct HipGraphExec {
+    exec: crate::sys::hipGraphExec_t,
+    device_id: i32,
+}
+
+impl std::fmt::Debug for HipGraphExec {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("HipGraphExec")
+            .field("exec", &(self.exec as usize))
+            .field("device_id", &self.device_id)
+            .finish()
+    }
+}
+
+// SAFETY: hipGraphExec_t is an opaque driver handle. Graph-exec launch is
+// documented thread-safe on HIP — the same exec can be replayed from
+// multiple threads as long as the stream argument is not shared.
+unsafe impl Send for HipGraphExec {}
+unsafe impl Sync for HipGraphExec {}
+
+impl HipGraphExec {
+    /// Capture the closure's stream work into an executable graph.
+    ///
+    /// `stream` must be a non-null-stream (capture is illegal on the null
+    /// stream). The closure should enqueue all kernels / memcpys that
+    /// make up the subgraph on `stream`. Capture mode is `Relaxed` so
+    /// the closure can run Rust-side work (pointer math, scratch-slot
+    /// selection) interleaved with the enqueues.
+    pub fn capture<F>(stream: &HipStream, f: F) -> DeviceResult<Self>
+    where
+        F: FnOnce(&HipStream) -> DeviceResult<()>,
+    {
+        // SAFETY: stream is owned+live. Relaxed capture mode lets host APIs
+        // run during capture; the closure just enqueues on `stream`.
+        check(
+            unsafe {
+                crate::sys::hipStreamBeginCapture(
+                    stream.raw(),
+                    crate::sys::HIP_STREAM_CAPTURE_MODE_RELAXED,
+                )
+            },
+            "hipStreamBeginCapture",
+        )?;
+
+        let closure_result = f(stream);
+
+        let mut graph: crate::sys::hipGraph_t = ptr::null_mut();
+        // SAFETY: end capture writes the recorded graph through &graph.
+        // Must be called whether the closure failed or not — otherwise the
+        // stream stays in capture mode and every subsequent submit errors.
+        let end_code = unsafe { crate::sys::hipStreamEndCapture(stream.raw(), &raw mut graph) };
+
+        closure_result?;
+        check(end_code, "hipStreamEndCapture")?;
+
+        let mut exec: crate::sys::hipGraphExec_t = ptr::null_mut();
+        // SAFETY: graph is the handle just returned by end-capture. The
+        // err_node + log_buf out-params are optional; pass null / zero.
+        let inst_code = unsafe {
+            crate::sys::hipGraphInstantiate(
+                &raw mut exec,
+                graph,
+                ptr::null_mut(),
+                ptr::null_mut(),
+                0,
+            )
+        };
+        // Always destroy the recording graph — the instantiated exec is a
+        // separate owned handle. Leaking the graph would leak every
+        // captured kernel's parameter staging buffer.
+        let _ = unsafe { crate::sys::hipGraphDestroy(graph) };
+        check(inst_code, "hipGraphInstantiate")?;
+
+        Ok(Self {
+            exec,
+            device_id: stream.device_id(),
+        })
+    }
+
+    pub fn device_id(&self) -> i32 {
+        self.device_id
+    }
+
+    /// Replay the captured subgraph on `stream`. The replay is
+    /// asynchronous — call `stream.synchronize()` to wait.
+    pub fn launch(&self, stream: &HipStream) -> DeviceResult<()> {
+        // SAFETY: self.exec is a live instantiated exec; stream is a
+        // non-null live handle. Graph launches are independent of the
+        // stream's recording state.
+        check(
+            unsafe { crate::sys::hipGraphLaunch(self.exec, stream.raw()) },
+            "hipGraphLaunch",
+        )
+    }
+}
+
+impl Drop for HipGraphExec {
+    fn drop(&mut self) {
+        if !self.exec.is_null() {
+            // SAFETY: self.exec was returned by hipGraphInstantiate and is
+            // not aliased (HipGraphExec is owned, not Clone).
+            let _ = unsafe { crate::sys::hipGraphExecDestroy(self.exec) };
+            self.exec = ptr::null_mut();
+        }
+    }
+}
+
 /// A HIP device. Holds a device id and a default stream.
 ///
 /// Construction calls `hipSetDevice` once, but there is no guarantee that the
