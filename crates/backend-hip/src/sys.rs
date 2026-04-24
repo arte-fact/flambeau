@@ -105,36 +105,7 @@ extern "C" {
     pub fn hipEventRecord(event: hipEvent_t, stream: hipStream_t) -> c_int;
     pub fn hipStreamWaitEvent(stream: hipStream_t, event: hipEvent_t, flags: c_uint) -> c_int;
     pub fn hipEventSynchronize(event: hipEvent_t) -> c_int;
-
-    // V2.26.a — graph-capture primitives. Record a sequence of kernel
-    // launches + memcpys on a stream once, instantiate into an executable
-    // graph, and replay per ubatch. Collapses per-ubatch Rust FFI /
-    // driver launch overhead to a single graph-replay call.
-    pub fn hipStreamBeginCapture(stream: hipStream_t, mode: c_uint) -> c_int;
-    pub fn hipStreamEndCapture(stream: hipStream_t, graph: *mut hipGraph_t) -> c_int;
-    pub fn hipGraphInstantiate(
-        exec: *mut hipGraphExec_t,
-        graph: hipGraph_t,
-        err_node: *mut c_void,
-        log_buf: *mut c_char,
-        buf_size: usize,
-    ) -> c_int;
-    pub fn hipGraphLaunch(exec: hipGraphExec_t, stream: hipStream_t) -> c_int;
-    pub fn hipGraphExecDestroy(exec: hipGraphExec_t) -> c_int;
-    pub fn hipGraphDestroy(graph: hipGraph_t) -> c_int;
 }
-
-// Opaque graph handles from hip_runtime_api.h.
-pub type hipGraph_t = *mut c_void;
-pub type hipGraphExec_t = *mut c_void;
-
-// hipStreamCaptureMode — `hipStreamCaptureModeRelaxed` lets the capturing
-// thread call host APIs that would otherwise trip "illegal during capture"
-// guards. Required because our capture closure runs Rust code (pointer
-// derivation, scratch slot selection) interleaved with kernel launches.
-pub const HIP_STREAM_CAPTURE_MODE_GLOBAL: c_uint = 0;
-pub const HIP_STREAM_CAPTURE_MODE_THREAD_LOCAL: c_uint = 1;
-pub const HIP_STREAM_CAPTURE_MODE_RELAXED: c_uint = 2;
 
 // Opaque event handle. hipEvent_t ≡ `struct ihipEvent_t *`.
 pub type hipEvent_t = *mut c_void;
