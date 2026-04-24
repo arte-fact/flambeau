@@ -437,6 +437,16 @@ impl Drop for LayerPrefillScratch {
 }
 
 /// One prefill chunk through one full layer. Mirrors
+/// V2.26.a-i5b — optional slot bundle for graph-capture. Holds the
+/// per-layer slots that need updating per ubatch (pos-varying scalars
+/// and KV-append dsts). Only the full-attn layer contributes slots in
+/// the V1 target (qwen35 dense, qwen35moe); GDN + dense FFN are
+/// pos-independent from a kernel-arg perspective.
+#[derive(Clone, Copy, Debug)]
+pub struct LayerPrefillSlots {
+    pub full_attn: super::attn::AttnPrefillSlots,
+}
+
 /// `forward_layer_decode`'s math but over `[L, hidden]` tensors.
 pub fn forward_layer_prefill(
     ops: &OpsRegistry,
@@ -450,6 +460,7 @@ pub fn forward_layer_prefill(
     x_out: DevicePtr,
     n_tokens: usize,
     start_position: usize,
+    slots: Option<LayerPrefillSlots>,
 ) -> Result<()> {
     let hidden = cfg.hidden_size;
     let il = layer_weights.layer_idx;
@@ -500,6 +511,7 @@ pub fn forward_layer_prefill(
             scratch.mid_f16,
             n_tokens,
             start_position,
+            slots.map(|s| s.full_attn),
         )?;
     }
 

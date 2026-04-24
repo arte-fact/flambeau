@@ -198,6 +198,7 @@ fn forward_full_attn_prefill_l4_smoke() -> Result<()> {
         delta_out,
         l,
         0,
+        None,
     )?;
 
 

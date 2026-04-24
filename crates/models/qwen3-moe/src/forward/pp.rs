@@ -853,6 +853,7 @@ pub fn forward_prefill_pp(
                 x_out,
                 l,
                 start_position,
+                None,
             )
             .with_context(|| {
                 format!(
@@ -1108,6 +1109,7 @@ pub fn forward_prefill_pp_async(
                         x_out,
                         u,
                         pos,
+                        None,
                     )
                     .map_err(|e| flambeau_core::DeviceError::Backend {
                         backend: "hip",
@@ -1189,6 +1191,7 @@ pub fn forward_prefill_pp_async(
                         x_out,
                         u,
                         pos,
+                        None,
                     )
                     .map_err(|e| flambeau_core::DeviceError::Backend {
                         backend: "hip",
@@ -1360,6 +1363,7 @@ pub fn forward_prefill_pp_logits(
                 x_out,
                 l,
                 start_position,
+                None,
             )
             .with_context(|| {
                 format!(

@@ -8,9 +8,13 @@
 #![cfg(feature = "hip")]
 
 use anyhow::{bail, Context, Result};
+use flambeau_backend_hip::{kv_cache_append_hip_slot, MemcpySlot, ScalarSlot};
 use flambeau_core::{CopyDirection, Device, DevicePtr, Stream};
 use flambeau_ops::hip::{
-    attention::{attention_decode_f16, attention_prefill_f16, split_q_gate_f16},
+    attention::{
+        attention_decode_f16, attention_prefill_f16, attention_prefill_f16_slots,
+        split_q_gate_f16,
+    },
     cast::cast_f32_to_f16,
     mlp::sigmoid_mul_f16,
     norm::{quantize_f16_q8_1, quantize_f16_q8_1_mmq, rmsnorm_f16, rmsnorm_quant_q8_1},
@@ -792,6 +796,31 @@ fn upload_positions_range(
 ///
 /// `x_in` layout: F16 `[L, hidden]`, row-major (rows are tokens).
 /// `delta_out` layout: F16 `[L, hidden]`.
+/// V2.26.a-i5b — optional slot bundle for graph-captureable prefill.
+///
+/// When a caller under [`flambeau_backend_hip::HipGraphExec::capture`]
+/// passes `Some(AttnPrefillSlots { .. })`, `forward_full_attn_prefill`
+/// tags the pos-varying kernel args + the K/V append memcpys so the
+/// resulting exec can be replayed across ubatches with just
+/// `set_slot` + `set_memcpy_slot` calls.
+///
+/// `None` preserves the original non-captureable behaviour — existing
+/// callers are unaffected.
+#[derive(Clone, Copy, Debug)]
+pub struct AttnPrefillSlots {
+    /// Tags `n_k_tokens` at `attention_prefill_f16`. Value per ubatch
+    /// = `start_position + n_tokens` (cache tail after append).
+    pub n_k_slot: ScalarSlot,
+    /// Tags `q_offset` at `attention_prefill_f16`. Value per ubatch
+    /// = `start_position`.
+    pub q_off_slot: ScalarSlot,
+    /// Tags the K-tensor dst of `kv_cache.append`. Value per ubatch
+    /// = `cache.k_buffer + start_position * per_token_bytes`.
+    pub k_append_slot: MemcpySlot,
+    /// Tags the V-tensor dst of `kv_cache.append`.
+    pub v_append_slot: MemcpySlot,
+}
+
 pub fn forward_full_attn_prefill(
     ops: &OpsRegistry,
     stream: &HipStream,
@@ -805,6 +834,7 @@ pub fn forward_full_attn_prefill(
     delta_out: DevicePtr,
     n_tokens: usize,
     start_position: usize,
+    slots: Option<AttnPrefillSlots>,
 ) -> Result<()> {
     if n_tokens == 0 {
         bail!("forward_full_attn_prefill called with n_tokens = 0");
@@ -1000,10 +1030,27 @@ pub fn forward_full_attn_prefill(
 
     // 7. Append all L tokens to the KV cache.
     // SAFETY: scratch.k_f16 / v_f16 hold `n_tokens * n_kv_heads * head_dim` F16s.
-    unsafe {
-        kv_cache
-            .append(device, stream, scratch.k_f16, scratch.v_f16, n_tokens)
-            .map_err(|e| anyhow::anyhow!("kv_cache.append(L={n_tokens}): {e}"))?;
+    if let Some(AttnPrefillSlots { k_append_slot, v_append_slot, .. }) = slots {
+        // V2.26.a-i5b — captureable variant: tag each memcpy so dst can
+        // be retargeted per-replay via HipGraphExec::set_memcpy_slot.
+        unsafe {
+            kv_cache_append_hip_slot(
+                kv_cache,
+                device,
+                stream,
+                scratch.k_f16,
+                scratch.v_f16,
+                n_tokens,
+                k_append_slot,
+                v_append_slot,
+            )?;
+        }
+    } else {
+        unsafe {
+            kv_cache
+                .append(device, stream, scratch.k_f16, scratch.v_f16, n_tokens)
+                .map_err(|e| anyhow::anyhow!("kv_cache.append(L={n_tokens}): {e}"))?;
+        }
     }
 
     // 8. Causal prefill attention. `n_k_tokens = start_position + L`
@@ -1011,7 +1058,11 @@ pub fn forward_full_attn_prefill(
     // K rows `0..start_position + i + 1`.
     let n_k_tokens = kv_cache.current_tokens();
     let scale = (head_dim as f32).sqrt().recip();
-    attention_prefill_f16(
+    let (n_k_slot_opt, q_off_slot_opt) = match slots {
+        Some(s) => (Some(s.n_k_slot), Some(s.q_off_slot)),
+        None => (None, None),
+    };
+    attention_prefill_f16_slots(
         ops,
         stream,
         scratch.q_f16,
@@ -1025,6 +1076,8 @@ pub fn forward_full_attn_prefill(
         n_k_tokens,
         start_position,
         scale,
+        n_k_slot_opt,
+        q_off_slot_opt,
     )
     .context("attention_prefill_f16")?;
 

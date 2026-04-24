@@ -309,6 +309,7 @@ pub fn forward_prefill(
             x_out,
             l,
             start_position,
+            None,
         )?;
         std::mem::swap(&mut x_in, &mut x_out);
     }
