@@ -222,6 +222,15 @@
     border-style: dashed;
   }
 
+  /* C3.2 — syntax-highlighting tokens. Nord palette spans. */
+  .msg.assistant .md-buffer .hl-comment { color: var(--n3); font-style: italic; }
+  .msg.assistant .md-buffer .hl-string  { color: var(--n14); }
+  .msg.assistant .md-buffer .hl-keyword { color: var(--n9); font-weight: 500; }
+  .msg.assistant .md-buffer .hl-number  { color: var(--n15); }
+  .msg.assistant .md-buffer .hl-type    { color: var(--n7); }
+  .msg.assistant .md-buffer .hl-builtin { color: var(--n13); }
+  .msg.assistant .md-buffer .hl-preproc { color: var(--n12); }
+
   /* C1.1 — Tool-call cards.
      One <details> per tool call the model emitted, accumulating
      `function.name` + streaming `function.arguments`. Distinct from
@@ -893,15 +902,80 @@
     //          via inlineTransforms(); nothing to do at the document
     //          level here.
 
-    // Step 5 — splice fenced code blocks back in.
+    // Step 5 — splice fenced code blocks back in. Bodies pass through
+    //          C3.2's syntax highlighter for the languages it knows;
+    //          unknown languages fall through to plain HTML-escape.
     html = html.replace(/(?:<p>)?\x00CODE(\d+)\x00(?:<\/p>)?/g, (_m, n) => {
       const b = blocks[Number(n)];
       const cls = b.lang ? ` class="lang-${escapeHtml(b.lang)}"` : "";
       const preCls = b.closed ? "" : " class=\"unterminated\"";
-      return `<pre${preCls}><code${cls}>${escapeHtml(b.body)}</code></pre>`;
+      const inner = highlightCode(b.body, b.lang);
+      return `<pre${preCls}><code${cls}>${inner}</code></pre>`;
     });
 
     return html;
+  }
+
+  // C3.2 — syntax highlighter. Per-language alternation regex with
+  // named groups; we walk left-to-right, emit a span for each match
+  // and HTML-escape the gaps. Comments and strings are listed first
+  // in each pattern so keywords inside string/comment bodies don't
+  // double-match.
+  const HL_LANGUAGES = {
+    rust: /(?<comment>\/\/[^\n]*|\/\*[\s\S]*?\*\/)|(?<string>"(?:[^"\\]|\\.)*"|'(?:[^'\\]|\\.)*')|(?<keyword>\b(?:fn|let|mut|pub|use|impl|struct|enum|trait|match|if|else|return|for|while|loop|in|as|where|self|Self|true|false|crate|mod|move|ref|const|static|type|async|await|break|continue|dyn|extern|unsafe|box)\b)|(?<number>\b0[xX][0-9a-fA-F_]+\b|\b\d+(?:\.\d+)?(?:[eE][+-]?\d+)?\b)|(?<type>\b[A-Z][\w]*\b)/g,
+    python: /(?<comment>#[^\n]*)|(?<string>"""[\s\S]*?"""|'''[\s\S]*?'''|"(?:[^"\\\n]|\\.)*"|'(?:[^'\\\n]|\\.)*')|(?<keyword>\b(?:def|class|import|from|as|if|elif|else|return|for|while|in|not|and|or|is|lambda|with|try|except|finally|raise|yield|pass|break|continue|global|nonlocal|None|True|False|async|await)\b)|(?<builtin>\b(?:print|len|range|str|int|float|list|dict|tuple|set|map|filter|sum|min|max|enumerate|zip|sorted|reversed|abs|all|any)\b)|(?<number>\b\d+(?:\.\d+)?(?:[eE][+-]?\d+)?\b)/g,
+    json: /(?<string>"(?:[^"\\]|\\.)*")|(?<keyword>\b(?:true|false|null)\b)|(?<number>-?\b\d+(?:\.\d+)?(?:[eE][+-]?\d+)?\b)/g,
+    bash: /(?<comment>#[^\n]*)|(?<string>"(?:[^"\\]|\\.)*"|'(?:[^'\\]|\\.)*')|(?<keyword>\b(?:if|then|fi|else|elif|for|do|done|while|until|case|esac|in|function|return|exit|export|local|declare|readonly|source|cd|echo|printf|read|set|unset|trap|shift|test)\b)|(?<number>\b\d+\b)/g,
+    sh: /(?<comment>#[^\n]*)|(?<string>"(?:[^"\\]|\\.)*"|'(?:[^'\\]|\\.)*')|(?<keyword>\b(?:if|then|fi|else|elif|for|do|done|while|until|case|esac|in|function|return|exit|export|local|declare|readonly|source|cd|echo|printf|read|set|unset|trap|shift|test)\b)|(?<number>\b\d+\b)/g,
+    c: /(?<preproc>^\s*#[^\n]*)|(?<comment>\/\/[^\n]*|\/\*[\s\S]*?\*\/)|(?<string>"(?:[^"\\]|\\.)*"|'(?:[^'\\]|\\.)*')|(?<keyword>\b(?:int|void|char|short|long|float|double|signed|unsigned|struct|union|enum|typedef|static|extern|const|volatile|register|auto|sizeof|return|if|else|for|while|do|switch|case|default|break|continue|goto|NULL)\b)|(?<number>\b0[xX][0-9a-fA-F]+\b|\b\d+(?:\.\d+)?\b)/gm,
+    cpp: /(?<preproc>^\s*#[^\n]*)|(?<comment>\/\/[^\n]*|\/\*[\s\S]*?\*\/)|(?<string>"(?:[^"\\]|\\.)*"|'(?:[^'\\]|\\.)*')|(?<keyword>\b(?:int|void|char|short|long|float|double|bool|auto|class|struct|union|enum|namespace|using|template|typename|public|private|protected|virtual|override|final|static|extern|const|constexpr|volatile|mutable|sizeof|new|delete|return|if|else|for|while|do|switch|case|default|break|continue|throw|try|catch|nullptr|true|false|this)\b)|(?<number>\b0[xX][0-9a-fA-F]+\b|\b\d+(?:\.\d+)?\b)|(?<type>\b[A-Z][\w]*\b)/gm,
+  };
+  /** lang aliases → canonical key */
+  const HL_ALIASES = {
+    rs: "rust",
+    py: "python",
+    js: "javascript",
+    ts: "javascript", // close enough for our needs
+    javascript: "rust", // share keyword set; close-enough fallback
+    shell: "sh",
+    "c++": "cpp",
+    cxx: "cpp",
+    h: "c",
+    hpp: "cpp",
+    yaml: "json", // close enough — keywords are similar-ish
+    yml: "json",
+  };
+
+  function highlightCode(body, lang) {
+    const norm = (lang || "").toLowerCase();
+    const key = HL_LANGUAGES[norm] ? norm
+      : HL_LANGUAGES[HL_ALIASES[norm]] ? HL_ALIASES[norm]
+      : null;
+    if (!key) return escapeHtml(body);
+    const pat = HL_LANGUAGES[key];
+    pat.lastIndex = 0;
+    let out = "";
+    let cursor = 0;
+    let m;
+    while ((m = pat.exec(body)) !== null) {
+      // Emit the un-tokenised gap (HTML-escaped) before this match.
+      if (m.index > cursor) out += escapeHtml(body.slice(cursor, m.index));
+      // Identify which capture group fired.
+      const groups = m.groups || {};
+      let cls = null;
+      for (const k of Object.keys(groups)) {
+        if (groups[k] !== undefined) { cls = k; break; }
+      }
+      const text = m[0];
+      out += cls
+        ? `<span class="hl-${cls}">${escapeHtml(text)}</span>`
+        : escapeHtml(text);
+      cursor = m.index + text.length;
+      // Defensive against zero-width matches stalling the loop.
+      if (text.length === 0) pat.lastIndex++;
+    }
+    if (cursor < body.length) out += escapeHtml(body.slice(cursor));
+    return out;
   }
   /** Inline-level: code spans, bold, italic, links. Operates on
    *  HTML-escaped text — caller has already done escapeHtml(). */

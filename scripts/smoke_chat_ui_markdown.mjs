@@ -70,9 +70,47 @@ expect("hr",
   renderMarkdown("above\n\n---\n\nbelow"),
   ["<hr>"]);
 
-expect("fenced code",
-  renderMarkdown("```rust\nlet x = 1;\nfn main() {}\n```"),
-  ['<pre><code class="lang-rust">let x = 1;\nfn main() {}</code></pre>']);
+// C3.2 — code-block content goes through highlightCode(); for known
+// languages we get keyword/string/number spans. Fenced-code wrappers
+// stay the same.
+expect("fenced rust — keywords highlighted",
+  renderMarkdown("```rust\nfn main() { let x = 1; }\n```"),
+  [
+    '<pre><code class="lang-rust">',
+    '<span class="hl-keyword">fn</span>',
+    '<span class="hl-keyword">let</span>',
+    '<span class="hl-number">1</span>',
+  ]);
+
+expect("fenced python — keywords + strings + comments",
+  renderMarkdown("```python\n# greet\ndef hi(name):\n    return f\"hello {name}\"\n```"),
+  [
+    '<span class="hl-comment"># greet</span>',
+    '<span class="hl-keyword">def</span>',
+    '<span class="hl-keyword">return</span>',
+  ]);
+
+expect("fenced json — strings + literals",
+  renderMarkdown('```json\n{"a": 1, "b": null, "c": true}\n```'),
+  [
+    '<span class="hl-string">&quot;a&quot;</span>',
+    '<span class="hl-keyword">null</span>',
+    '<span class="hl-keyword">true</span>',
+    '<span class="hl-number">1</span>',
+  ]);
+
+expect("fenced bash — keywords",
+  renderMarkdown("```bash\nfor f in *.txt; do echo $f; done\n```"),
+  [
+    '<span class="hl-keyword">for</span>',
+    '<span class="hl-keyword">do</span>',
+    '<span class="hl-keyword">done</span>',
+    '<span class="hl-keyword">echo</span>',
+  ]);
+
+expect("fenced unknown lang — no highlight, just escape",
+  renderMarkdown("```nim\nproc foo() = discard\n```"),
+  ['<pre><code class="lang-nim">proc foo() = discard</code></pre>']);
 
 expect("fenced code (no lang)",
   renderMarkdown("```\nplain\n```"),
@@ -80,7 +118,7 @@ expect("fenced code (no lang)",
 
 expect("unterminated fence — dashed border for streaming",
   renderMarkdown("```py\nimport os\n"),
-  ['<pre class="unterminated"><code class="lang-py">import os']);
+  ['<pre class="unterminated"><code class="lang-py">']);
 
 expect("inline code with html chars",
   renderMarkdown("Use `Vec<T>` for that"),
