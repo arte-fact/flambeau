@@ -49,12 +49,16 @@ pub struct ChatCompletionRequest {
 
     // ---- Sampler fields (T4.b — ships with T1). Behaviour wired in T4.b.2. ----
     /// Per-token repetition penalty applied over the accumulated history.
-    /// Qwen3.5/3.6 published default is ~1.1; omitting it causes "long
-    /// CoT loops, garbage output" on multi-turn agentic workloads.
+    /// llama.cpp convention: `logit /= penalty` when `logit > 0`. Off at
+    /// 1.0. Qwen3-Coder ships `1.05` in its `generation_config.json`;
+    /// other Qwen3 instruct variants leave it at 1.0.
     #[serde(default)]
     pub repetition_penalty: Option<f32>,
-    /// Additive presence penalty against tokens already emitted this turn.
-    /// Qwen3.5 docs publish ~1.5 as the stable-agent default.
+    /// Additive presence penalty: subtracts `value` from the logit of any
+    /// token already emitted this turn. Range -2..2 (OpenAI). Qwen's own
+    /// Best Practices warn that values >1.0 cause "language mixing and a
+    /// slight decrease in model performance" — a previous default of 1.5
+    /// reproduced exactly that failure on long generations. Default off.
     #[serde(default)]
     pub presence_penalty: Option<f32>,
     /// Frequency penalty (OpenAI-compat). Distinct from `presence_penalty`:

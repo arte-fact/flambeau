@@ -685,11 +685,35 @@
     text-overflow: ellipsis;
     max-width: 60%;
   }
+  .sampler-panel .sp-preset-row {
+    padding: 4px 14px 0;
+  }
+  .sampler-panel .sp-preset {
+    display: flex; flex-direction: column; gap: 3px;
+  }
+  .sampler-panel .sp-preset > span {
+    color: var(--text-mute);
+    font-size: 11px;
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+    font-family: "SFMono-Regular", "JetBrains Mono", Menlo, Consolas, monospace;
+  }
+  .sampler-panel .sp-preset select {
+    background: var(--code-bg);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    padding: 6px 8px;
+    color: var(--text);
+    font-family: "SFMono-Regular", "JetBrains Mono", Menlo, Consolas, monospace;
+    font-size: 13px;
+    outline: none;
+  }
+  .sampler-panel .sp-preset select:focus { border-color: var(--accent); }
   .sampler-panel .sp-grid {
     display: grid;
     grid-template-columns: repeat(3, 1fr);
     gap: 8px 12px;
-    padding: 4px 14px 14px;
+    padding: 10px 14px 14px;
   }
   @media (max-width: 600px) {
     .sampler-panel .sp-grid { grid-template-columns: repeat(2, 1fr); }
@@ -877,6 +901,21 @@
           <span>Sampler</span>
           <span class="sp-summary" id="sp-summary"></span>
         </summary>
+        <div class="sp-preset-row">
+          <label class="sp-preset">
+            <span>preset</span>
+            <select id="sp-preset">
+              <option value="auto">auto (detect from model)</option>
+              <option value="qwen3_instruct">Qwen3 / Qwen3.5 / Qwen3.6 instruct</option>
+              <option value="qwen3_thinking">Qwen3 thinking mode</option>
+              <option value="qwen3_coder">Qwen3-Coder</option>
+              <option value="devstral">Devstral / Mistral-Small</option>
+              <option value="gemma3">Gemma 3 / Gemma 4</option>
+              <option value="openai_default">OpenAI defaults (off)</option>
+              <option value="custom">custom</option>
+            </select>
+          </label>
+        </div>
         <div class="sp-grid">
           <label class="sp-field">
             <span>temperature</span>
@@ -894,9 +933,9 @@
             <span>min_p</span>
             <input type="number" id="sp-min_p" step="0.01" min="0" max="1" />
           </label>
-          <label class="sp-field">
+          <label class="sp-field" title="Subtracted from any logit whose token already appears in the response. Qwen explicitly warns: values >1.0 risk language mixing and degenerate output. Keep 0 for normal chat; nudge to 0.5–1.0 only if the model loops.">
             <span>presence_penalty</span>
-            <input type="number" id="sp-presence_penalty" step="0.1" />
+            <input type="number" id="sp-presence_penalty" step="0.1" min="-2" max="2" />
           </label>
           <label class="sp-field">
             <span>repetition_penalty</span>
@@ -904,11 +943,11 @@
           </label>
           <label class="sp-field">
             <span>frequency_penalty</span>
-            <input type="number" id="sp-frequency_penalty" step="0.1" />
+            <input type="number" id="sp-frequency_penalty" step="0.1" min="-2" max="2" />
           </label>
           <label class="sp-field">
             <span>max_tokens</span>
-            <input type="number" id="sp-max_tokens" step="64" min="1" max="32768" />
+            <input type="number" id="sp-max_tokens" step="64" min="1" max="8192" />
           </label>
           <label class="sp-field">
             <span>seed</span>
@@ -916,7 +955,7 @@
           </label>
         </div>
         <div class="sp-actions">
-          <button type="button" class="sp-reset" id="sp-reset">Reset to Qwen defaults</button>
+          <button type="button" class="sp-reset" id="sp-reset">Reset to preset</button>
           <span class="sp-hint">Saved in localStorage. Empty fields fall through to server defaults.</span>
         </div>
       </details>
@@ -1236,34 +1275,94 @@
     "presence_penalty", "repetition_penalty", "frequency_penalty",
     "max_tokens", "seed",
   ];
-  const SAMPLER_QWEN_DEFAULTS = {
-    temperature: 0.8,
-    top_p: 0.95,
-    top_k: 20,
-    min_p: 0,
-    presence_penalty: 1.5,
-    repetition_penalty: 1.1,
-    frequency_penalty: 0,
-    max_tokens: 1024,
-    seed: "",
+  // Per-model presets, sourced from each vendor's published Best
+  // Practices / generation_config.json. The cardinal rule: presence_penalty
+  // stays at 0 by default. Qwen's own README warns that values >1.0
+  // cause "language mixing and a slight decrease in model performance"
+  // — that is the exact failure we hit with the legacy 1.5 default.
+  // See:
+  //   - https://huggingface.co/Qwen/Qwen3-235B-A22B (Best Practices)
+  //   - https://huggingface.co/Qwen/Qwen3-Coder-30B-A3B-Instruct
+  //     (generation_config.json — repetition_penalty=1.05)
+  //   - https://docs.unsloth.ai/basics/tutorial-how-to-run-gemma-3-effectively
+  //   - https://huggingface.co/mistralai/Devstral-Small-2507
+  const SAMPLER_PRESETS = {
+    qwen3_instruct: {
+      label: "Qwen3 / 3.5 / 3.6 instruct",
+      values: { temperature: 0.7, top_p: 0.8, top_k: 20, min_p: 0,
+                presence_penalty: 0, repetition_penalty: 1.0,
+                frequency_penalty: 0, max_tokens: 2048, seed: "" },
+    },
+    qwen3_thinking: {
+      label: "Qwen3 thinking mode",
+      values: { temperature: 0.6, top_p: 0.95, top_k: 20, min_p: 0,
+                presence_penalty: 0, repetition_penalty: 1.0,
+                frequency_penalty: 0, max_tokens: 4096, seed: "" },
+    },
+    qwen3_coder: {
+      label: "Qwen3-Coder",
+      values: { temperature: 0.7, top_p: 0.8, top_k: 20, min_p: 0,
+                presence_penalty: 0, repetition_penalty: 1.05,
+                frequency_penalty: 0, max_tokens: 4096, seed: "" },
+    },
+    devstral: {
+      label: "Devstral / Mistral-Small",
+      values: { temperature: 0.15, top_p: 1.0, top_k: 0, min_p: 0,
+                presence_penalty: 0, repetition_penalty: 1.0,
+                frequency_penalty: 0, max_tokens: 2048, seed: "" },
+    },
+    gemma3: {
+      label: "Gemma 3 / Gemma 4",
+      values: { temperature: 1.0, top_p: 0.95, top_k: 64, min_p: 0,
+                presence_penalty: 0, repetition_penalty: 1.0,
+                frequency_penalty: 0, max_tokens: 2048, seed: "" },
+    },
+    openai_default: {
+      label: "OpenAI defaults (off)",
+      values: { temperature: 1.0, top_p: 1.0, top_k: 0, min_p: 0,
+                presence_penalty: 0, repetition_penalty: 1.0,
+                frequency_penalty: 0, max_tokens: 2048, seed: "" },
+    },
   };
-  const SAMPLER_LS_KEY = "flambeau.sampler.v1";
+  // Match against the model id reported by /v1/models. Tested on the
+  // gguf names under /artefact/models/ — the patterns are intentionally
+  // loose so that quant suffixes / sharding (-00001-of-00003 etc.) and
+  // case variations don't break detection.
+  function pickPresetForModel(modelId) {
+    const m = String(modelId || "").toLowerCase();
+    if (/coder/.test(m)) return "qwen3_coder";
+    if (/thinking/.test(m)) return "qwen3_thinking";
+    if (/qwen/.test(m)) return "qwen3_instruct";
+    if (/devstral|mistral|nemotron/.test(m)) return "devstral";
+    if (/gemma/.test(m)) return "gemma3";
+    return "qwen3_instruct";
+  }
+
+  // Bumped to v3 when presets shipped — old per-field localStorage from
+  // v2 had a top_p=0.95 default that the per-model presets correct.
+  const SAMPLER_LS_KEY = "flambeau.sampler.v3";
+  // Treat the qwen3_instruct preset as the panel's blank-slate values
+  // until we know the model id.
+  const SAMPLER_BLANK = SAMPLER_PRESETS.qwen3_instruct.values;
 
   function loadSamplerState() {
     try {
       const raw = localStorage.getItem(SAMPLER_LS_KEY);
-      if (!raw) return { ...SAMPLER_QWEN_DEFAULTS };
+      if (!raw) return { values: { ...SAMPLER_BLANK }, preset: "auto" };
       const parsed = JSON.parse(raw);
-      const merged = { ...SAMPLER_QWEN_DEFAULTS, ...parsed };
-      return merged;
-    } catch { return { ...SAMPLER_QWEN_DEFAULTS }; }
+      return {
+        values: { ...SAMPLER_BLANK, ...(parsed.values || {}) },
+        preset: parsed.preset || "auto",
+      };
+    } catch { return { values: { ...SAMPLER_BLANK }, preset: "auto" }; }
   }
   function saveSamplerState(state) {
     try { localStorage.setItem(SAMPLER_LS_KEY, JSON.stringify(state)); }
     catch {}
   }
 
-  const samplerState = loadSamplerState();
+  const samplerStore = loadSamplerState();
+  const samplerState = samplerStore.values;
 
   function paintSamplerPanel() {
     for (const field of SAMPLER_FIELDS) {
@@ -1306,27 +1405,80 @@
     return out;
   }
 
-  // Wire panel inputs.
+  function applyPreset(name) {
+    const p = SAMPLER_PRESETS[name];
+    if (!p) return;
+    Object.assign(samplerState, p.values);
+    samplerStore.preset = name;
+    saveSamplerState(samplerStore);
+    paintSamplerPanel();
+    paintPresetSelect();
+  }
+  function paintPresetSelect() {
+    const sel = document.getElementById("sp-preset");
+    if (!sel) return;
+    sel.value = samplerStore.preset;
+  }
+  // Wire panel inputs. Editing any field flips the preset selector to
+  // "custom" — values no longer match a named preset.
   for (const field of SAMPLER_FIELDS) {
     const el = document.getElementById(`sp-${field}`);
     if (!el) continue;
     el.addEventListener("input", () => {
       samplerState[field] = el.value;
-      saveSamplerState(samplerState);
+      samplerStore.preset = "custom";
+      saveSamplerState(samplerStore);
       paintSamplerSummary();
+      paintPresetSelect();
     });
   }
+  document.getElementById("sp-preset")?.addEventListener("change", (e) => {
+    const v = e.target.value;
+    if (v === "auto") {
+      samplerStore.preset = "auto";
+      saveSamplerState(samplerStore);
+      // Re-resolve once the model id is known.
+      autoApplyPresetIfPending();
+      return;
+    }
+    if (v === "custom") {
+      samplerStore.preset = "custom";
+      saveSamplerState(samplerStore);
+      return;
+    }
+    applyPreset(v);
+  });
   document.getElementById("sp-reset")?.addEventListener("click", () => {
-    Object.assign(samplerState, SAMPLER_QWEN_DEFAULTS);
-    saveSamplerState(samplerState);
-    paintSamplerPanel();
+    // "Reset" applies the currently-selected named preset, or re-runs
+    // auto-detect if the user is in auto mode.
+    if (samplerStore.preset === "auto") {
+      autoApplyPresetIfPending(/*force=*/ true);
+    } else if (samplerStore.preset && samplerStore.preset !== "custom") {
+      applyPreset(samplerStore.preset);
+    } else {
+      applyPreset("qwen3_instruct");
+    }
   });
   paintSamplerPanel();
+  paintPresetSelect();
 
   // ---- model discovery -----------------------------------------------------
+  let _knownModelId = null;
+  function autoApplyPresetIfPending(force) {
+    if (!_knownModelId) return;
+    if (!force && samplerStore.preset !== "auto") return;
+    const picked = pickPresetForModel(_knownModelId);
+    Object.assign(samplerState, SAMPLER_PRESETS[picked].values);
+    samplerStore.preset = "auto";
+    saveSamplerState(samplerStore);
+    paintSamplerPanel();
+    paintPresetSelect();
+  }
   fetch("/v1/models").then(r => r.json()).then(j => {
     const id = j?.data?.[0]?.id || "flambeau";
     modelTag.textContent = id;
+    _knownModelId = id;
+    autoApplyPresetIfPending();
   }).catch(() => { modelTag.textContent = "flambeau"; });
 
   // C4.2 — remote-tools panel. Calls C4.1's `/v1/tools` and groups the
