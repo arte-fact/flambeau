@@ -419,6 +419,43 @@
     margin-left: auto;
   }
 
+  /* C5.2 — per-message hover-revealed action buttons (copy / regen). */
+  .msg { position: relative; }
+  .msg-actions {
+    position: absolute;
+    top: -6px;
+    right: 0;
+    display: flex; gap: 4px;
+    opacity: 0;
+    transition: opacity 100ms ease;
+    pointer-events: none;
+  }
+  .msg.user .msg-actions  { right: 8px; }
+  .msg:hover .msg-actions {
+    opacity: 1;
+    pointer-events: auto;
+  }
+  .msg-action-btn {
+    background: var(--panel);
+    border: 1px solid var(--border-2);
+    color: var(--text-mute);
+    font-size: 11px;
+    padding: 3px 8px;
+    border-radius: 6px;
+    cursor: pointer;
+    line-height: 1;
+    transition: color 100ms, background 100ms, border-color 100ms;
+  }
+  .msg-action-btn:hover {
+    color: var(--text);
+    background: var(--panel-2);
+    border-color: var(--text-mute);
+  }
+  .msg-action-btn.copied {
+    color: var(--n14);
+    border-color: var(--n14);
+  }
+
   /* error banner */
   .error {
     background: rgba(191,97,106,0.12);
@@ -938,9 +975,14 @@
     "If the user's request is short or ambiguous, give a short but substantive answer rather than stopping.",
   ].join(" ");
 
-  /** @type {{role:"system"|"user"|"assistant",content:string}[]} */
+  /** @type {{role:"system"|"user"|"assistant"|"tool",content:string|null,tool_call_id?:string,tool_calls?:any[]}[]} */
   const history = [{ role: "system", content: SYSTEM_PROMPT }];
   let generating = false;
+
+  // C5.2 — wrap → history-index mapping so copy / regenerate can look
+  // up the original message payload by clicking the rendered DOM. The
+  // index is updated every time something pushes to `history`.
+  const wrapToHistoryIdx = new WeakMap();
 
   // C3.1 — minimum-viable Markdown renderer for assistant content.
   // Streaming-safe: callers re-invoke on the full accumulated buffer
@@ -1483,7 +1525,80 @@
     bubble.textContent = text;
     wrap.appendChild(bubble);
     thread.appendChild(wrap);
+    // C5.2 — copy button (no regenerate on user messages). Caller is
+    // responsible for storing the wrap → history-index mapping after
+    // they've pushed onto `history`.
+    attachMsgActions(wrap, /*role=*/ "user");
     scrollToBottom();
+    return wrap;
+  }
+
+  /** C5.2 — append the hover-revealed action buttons to a message
+   *  wrap. Copy is universal; regenerate only on assistant turns. */
+  function attachMsgActions(wrap, role) {
+    const bar = document.createElement("div");
+    bar.className = "msg-actions";
+
+    const copyBtn = document.createElement("button");
+    copyBtn.type = "button";
+    copyBtn.className = "msg-action-btn";
+    copyBtn.textContent = "Copy";
+    copyBtn.addEventListener("click", async () => {
+      const idx = wrapToHistoryIdx.get(wrap);
+      if (idx === undefined) return;
+      const entry = history[idx];
+      let text = "";
+      if (entry.content) text += entry.content;
+      if (Array.isArray(entry.tool_calls) && entry.tool_calls.length) {
+        if (text) text += "\n\n";
+        text += entry.tool_calls.map(tc => {
+          const name = tc.function?.name || "";
+          const args = tc.function?.arguments || "";
+          return `${name}(${args})`;
+        }).join("\n");
+      }
+      try {
+        await navigator.clipboard.writeText(text);
+        copyBtn.textContent = "Copied";
+        copyBtn.classList.add("copied");
+        setTimeout(() => {
+          copyBtn.textContent = "Copy";
+          copyBtn.classList.remove("copied");
+        }, 1200);
+      } catch {
+        // Fallback: select+execCommand. Best-effort; modern browsers
+        // gate Clipboard API on user-activation, which a button click
+        // satisfies, so this is rarely needed.
+      }
+    });
+    bar.appendChild(copyBtn);
+
+    if (role === "assistant") {
+      const regenBtn = document.createElement("button");
+      regenBtn.type = "button";
+      regenBtn.className = "msg-action-btn";
+      regenBtn.textContent = "Regenerate";
+      regenBtn.addEventListener("click", () => {
+        if (generating) return;
+        const idx = wrapToHistoryIdx.get(wrap);
+        if (idx === undefined) return;
+        // Truncate history to drop this assistant turn (and anything
+        // after, which would only be later turns the user produced
+        // — they need to be re-elicited too).
+        history.length = idx;
+        // Drop this wrap and any subsequent message wraps in the
+        // thread DOM.
+        let cur = wrap;
+        while (cur) {
+          const next = cur.nextElementSibling;
+          cur.remove();
+          cur = next;
+        }
+        submitPromptResume();
+      });
+      bar.appendChild(regenBtn);
+    }
+    wrap.appendChild(bar);
   }
 
   function appendAssistantShell() {
@@ -1501,6 +1616,9 @@
     wrap.appendChild(tag);
     wrap.appendChild(content);
     thread.appendChild(wrap);
+    // C5.2 — copy + regenerate buttons. Caller pairs the wrap with its
+    // history index when it pushes the assistant turn into history.
+    attachMsgActions(wrap, /*role=*/ "assistant");
     scrollToBottom();
     return { wrap, content, dots };
   }
@@ -1550,7 +1668,8 @@
     send.disabled = true;
 
     history.push({ role: "user", content: text });
-    appendUserMessage(text);
+    const userWrap = appendUserMessage(text);
+    wrapToHistoryIdx.set(userWrap, history.length - 1);
 
     const { wrap, content, dots } = appendAssistantShell();
     let firstDelta = true;
@@ -1765,6 +1884,10 @@
         histEntry.tool_calls = serialisedToolCalls;
         if (!assistantText) histEntry.content = null;
       }
+      // C5.2 — pair the assistant wrap with its eventual history slot
+      // BEFORE the push, so the WeakMap lookup in copy/regenerate
+      // finds the right entry (history.length - 1 after push).
+      wrapToHistoryIdx.set(wrap, history.length);
       history.push(histEntry);
 
       // C1.2 — finish_reason badge + (when tool_calls) the inline
@@ -1844,6 +1967,7 @@
       }
       // Render the user's tool replies in the transcript so the
       // conversation reads naturally on scroll-back.
+      const baseIdx = history.length - calls.length;
       for (let i = 0; i < calls.length; i++) {
         const tag = document.createElement("div");
         tag.className = "msg user";
@@ -1853,6 +1977,10 @@
           `[tool ${calls[i].function?.name || "?"} → ${calls[i].id}]\n${textareas[i].value || ""}`;
         tag.appendChild(bubble);
         thread.appendChild(tag);
+        // C5.2 — copy on tool-reply turns. No regenerate (they're
+        // user-authored).
+        attachMsgActions(tag, "user");
+        wrapToHistoryIdx.set(tag, baseIdx + i);
       }
       formEl.remove();
       scrollToBottom();
@@ -2022,6 +2150,10 @@
         histEntry.tool_calls = serialisedToolCalls;
         if (!assistantText) histEntry.content = null;
       }
+      // C5.2 — pair the assistant wrap with its eventual history slot
+      // BEFORE the push, so the WeakMap lookup in copy/regenerate
+      // finds the right entry (history.length - 1 after push).
+      wrapToHistoryIdx.set(wrap, history.length);
       history.push(histEntry);
       if (finishReason && !noContent) {
         const badge = document.createElement("span");
