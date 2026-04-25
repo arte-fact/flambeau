@@ -351,6 +351,105 @@
     font-size: 14px;
   }
 
+  /* C2.1 — sampler panel above the composer. Collapsible <details>
+     with a 3-column grid of number inputs. Persists per-field in
+     localStorage; the summary chip shows the most-edited fields so
+     the user knows the panel isn't pristine without expanding. */
+  .sampler-panel {
+    background: var(--panel);
+    border: 1px solid var(--border-2);
+    border-radius: 14px;
+    margin-bottom: 10px;
+    overflow: hidden;
+    font-size: 13px;
+  }
+  .sampler-panel > summary {
+    list-style: none;
+    cursor: pointer;
+    padding: 9px 14px;
+    user-select: none;
+    color: var(--text-soft);
+    display: flex; align-items: center; gap: 10px;
+  }
+  .sampler-panel > summary::-webkit-details-marker { display: none; }
+  .sampler-panel > summary::before {
+    content: "▶";
+    font-size: 9px;
+    color: var(--text-mute);
+    transition: transform 120ms ease;
+    display: inline-block;
+  }
+  .sampler-panel[open] > summary::before { transform: rotate(90deg); }
+  .sampler-panel .sp-icon {
+    color: var(--text-mute);
+    font-size: 13px;
+  }
+  .sampler-panel .sp-summary {
+    color: var(--text-mute);
+    font-size: 11.5px;
+    margin-left: auto;
+    font-family: "SFMono-Regular", "JetBrains Mono", Menlo, Consolas, monospace;
+    text-align: right;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    max-width: 60%;
+  }
+  .sampler-panel .sp-grid {
+    display: grid;
+    grid-template-columns: repeat(3, 1fr);
+    gap: 8px 12px;
+    padding: 4px 14px 14px;
+  }
+  @media (max-width: 600px) {
+    .sampler-panel .sp-grid { grid-template-columns: repeat(2, 1fr); }
+  }
+  .sampler-panel .sp-field {
+    display: flex; flex-direction: column;
+    gap: 3px;
+  }
+  .sampler-panel .sp-field > span {
+    color: var(--text-mute);
+    font-size: 11px;
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+    font-family: "SFMono-Regular", "JetBrains Mono", Menlo, Consolas, monospace;
+  }
+  .sampler-panel .sp-field input {
+    background: var(--code-bg);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    padding: 6px 8px;
+    color: var(--text);
+    font-family: "SFMono-Regular", "JetBrains Mono", Menlo, Consolas, monospace;
+    font-size: 13px;
+    box-sizing: border-box;
+    outline: none;
+  }
+  .sampler-panel .sp-field input:focus { border-color: var(--accent); }
+  .sampler-panel .sp-field input::placeholder { color: var(--text-mute); }
+  .sampler-panel .sp-actions {
+    display: flex; align-items: center; gap: 12px;
+    padding: 0 14px 12px;
+  }
+  .sampler-panel .sp-reset {
+    background: transparent;
+    border: 1px solid var(--border-2);
+    color: var(--text-mute);
+    padding: 5px 12px;
+    border-radius: 6px;
+    cursor: pointer;
+    font-size: 12px;
+  }
+  .sampler-panel .sp-reset:hover {
+    color: var(--text);
+    border-color: var(--text-mute);
+  }
+  .sampler-panel .sp-hint {
+    color: var(--text-mute);
+    font-size: 11px;
+  }
+
   /* ---- Composer ---- */
   footer {
     padding: 14px 24px 22px;
@@ -474,6 +573,55 @@
 
   <footer>
     <div class="composer-wrap">
+      <details class="sampler-panel" id="sampler-panel">
+        <summary>
+          <span class="sp-icon">⚙</span>
+          <span>Sampler</span>
+          <span class="sp-summary" id="sp-summary"></span>
+        </summary>
+        <div class="sp-grid">
+          <label class="sp-field">
+            <span>temperature</span>
+            <input type="number" id="sp-temperature" step="0.05" min="0" max="2" />
+          </label>
+          <label class="sp-field">
+            <span>top_p</span>
+            <input type="number" id="sp-top_p" step="0.05" min="0" max="1" />
+          </label>
+          <label class="sp-field">
+            <span>top_k</span>
+            <input type="number" id="sp-top_k" step="1" min="0" />
+          </label>
+          <label class="sp-field">
+            <span>min_p</span>
+            <input type="number" id="sp-min_p" step="0.01" min="0" max="1" />
+          </label>
+          <label class="sp-field">
+            <span>presence_penalty</span>
+            <input type="number" id="sp-presence_penalty" step="0.1" />
+          </label>
+          <label class="sp-field">
+            <span>repetition_penalty</span>
+            <input type="number" id="sp-repetition_penalty" step="0.05" min="0" max="2" />
+          </label>
+          <label class="sp-field">
+            <span>frequency_penalty</span>
+            <input type="number" id="sp-frequency_penalty" step="0.1" />
+          </label>
+          <label class="sp-field">
+            <span>max_tokens</span>
+            <input type="number" id="sp-max_tokens" step="64" min="1" max="32768" />
+          </label>
+          <label class="sp-field">
+            <span>seed</span>
+            <input type="number" id="sp-seed" step="1" placeholder="(random)" />
+          </label>
+        </div>
+        <div class="sp-actions">
+          <button type="button" class="sp-reset" id="sp-reset">Reset to Qwen defaults</button>
+          <span class="sp-hint">Saved in localStorage. Empty fields fall through to server defaults.</span>
+        </div>
+      </details>
       <form class="composer" id="composer" autocomplete="off">
         <textarea id="input"
           rows="1"
@@ -524,6 +672,104 @@
   /** @type {{role:"system"|"user"|"assistant",content:string}[]} */
   const history = [{ role: "system", content: SYSTEM_PROMPT }];
   let generating = false;
+
+  // C2.1 — sampler controls. Per-field localStorage; empty inputs fall
+  // through to server defaults (so an empty `temperature` lets the
+  // server use Qwen3.5's published default of 1.0 from `from_parts`).
+  // The defaults below are the panel's idle values; *not* the wire
+  // defaults — the server has its own, and we don't want to override
+  // them per-request unless the user typed something.
+  const SAMPLER_FIELDS = [
+    "temperature", "top_p", "top_k", "min_p",
+    "presence_penalty", "repetition_penalty", "frequency_penalty",
+    "max_tokens", "seed",
+  ];
+  const SAMPLER_QWEN_DEFAULTS = {
+    temperature: 0.8,
+    top_p: 0.95,
+    top_k: 20,
+    min_p: 0,
+    presence_penalty: 1.5,
+    repetition_penalty: 1.1,
+    frequency_penalty: 0,
+    max_tokens: 1024,
+    seed: "",
+  };
+  const SAMPLER_LS_KEY = "flambeau.sampler.v1";
+
+  function loadSamplerState() {
+    try {
+      const raw = localStorage.getItem(SAMPLER_LS_KEY);
+      if (!raw) return { ...SAMPLER_QWEN_DEFAULTS };
+      const parsed = JSON.parse(raw);
+      const merged = { ...SAMPLER_QWEN_DEFAULTS, ...parsed };
+      return merged;
+    } catch { return { ...SAMPLER_QWEN_DEFAULTS }; }
+  }
+  function saveSamplerState(state) {
+    try { localStorage.setItem(SAMPLER_LS_KEY, JSON.stringify(state)); }
+    catch {}
+  }
+
+  const samplerState = loadSamplerState();
+
+  function paintSamplerPanel() {
+    for (const field of SAMPLER_FIELDS) {
+      const el = document.getElementById(`sp-${field}`);
+      if (!el) continue;
+      const v = samplerState[field];
+      el.value = (v === null || v === undefined) ? "" : String(v);
+    }
+    paintSamplerSummary();
+  }
+  function paintSamplerSummary() {
+    const sum = document.getElementById("sp-summary");
+    if (!sum) return;
+    // Show the fields that diverge from the *server*'s defaults — and
+    // since we don't know the server's defaults precisely from the JS
+    // side, just show non-empty fields.
+    const parts = [];
+    for (const f of SAMPLER_FIELDS) {
+      const v = samplerState[f];
+      if (v === "" || v === null || v === undefined) continue;
+      parts.push(`${f}=${v}`);
+    }
+    sum.textContent = parts.length ? parts.join(", ") : "all defaults";
+  }
+  /** Returns the partial body fields to splice into the request.
+   *  Empty / unparseable inputs are omitted entirely so the server
+   *  applies its own per-field default. */
+  function currentSamplerArgs() {
+    const out = {};
+    for (const f of SAMPLER_FIELDS) {
+      const v = samplerState[f];
+      if (v === "" || v === null || v === undefined) continue;
+      const n = Number(v);
+      if (!Number.isFinite(n)) continue;
+      // Integer-only fields are coerced to int; the rest pass through.
+      if (f === "top_k" || f === "max_tokens") out[f] = Math.trunc(n);
+      else if (f === "seed") out[f] = Math.trunc(n);
+      else out[f] = n;
+    }
+    return out;
+  }
+
+  // Wire panel inputs.
+  for (const field of SAMPLER_FIELDS) {
+    const el = document.getElementById(`sp-${field}`);
+    if (!el) continue;
+    el.addEventListener("input", () => {
+      samplerState[field] = el.value;
+      saveSamplerState(samplerState);
+      paintSamplerSummary();
+    });
+  }
+  document.getElementById("sp-reset")?.addEventListener("click", () => {
+    Object.assign(samplerState, SAMPLER_QWEN_DEFAULTS);
+    saveSamplerState(samplerState);
+    paintSamplerPanel();
+  });
+  paintSamplerPanel();
 
   // ---- model discovery -----------------------------------------------------
   fetch("/v1/models").then(r => r.json()).then(j => {
@@ -686,14 +932,9 @@
           model: modelTag.textContent,
           messages: history,
           stream: true,
-          max_tokens: 1024,
-          // Nucleus sampling defaults — matches OpenAI's chat defaults.
-          // At temp=0.7 / top_p=1.0 the distribution is so peaked that
-          // greedy-equivalent behavior dominates on Qwen3.6; adding top_p
-          // restricts to the 95% nucleus and lets the random draw actually
-          // move the output off the argmax on trivial prompts.
-          temperature: 0.8,
-          top_p: 0.95,
+          // C2.1 — sampler args read from the panel; non-empty fields
+          // override the server's per-field defaults.
+          ...currentSamplerArgs(),
         }),
       });
 
@@ -984,9 +1225,7 @@
           model: modelTag.textContent,
           messages: history,
           stream: true,
-          max_tokens: 1024,
-          temperature: 0.8,
-          top_p: 0.95,
+          ...currentSamplerArgs(),
         }),
       });
       if (!res.ok) {
