@@ -15,7 +15,8 @@ use tokio::sync::Mutex;
 use tracing::info;
 
 use crate::routes::{
-    agent_stats, chat_completions, completions, health, index, models, ServerState, SharedState,
+    agent_stats, chat_completions, completions, health, index, models, tools_endpoint,
+    ServerState, SharedState,
 };
 
 /// Runtime config for `flambeau serve`.
@@ -152,6 +153,9 @@ pub async fn serve(cfg: ServeConfig) -> Result<()> {
         .route("/v1/completions", post(completions))
         // M2.3 — read-only agent-loop telemetry snapshot.
         .route("/v1/agent/stats", get(agent_stats))
+        // C4.1 — read-only introspection of `--mcp`-registered remote
+        // tools. Used by the chat UI's tools panel (C4.2).
+        .route("/v1/tools", get(tools_endpoint))
         .with_state(state);
 
     info!(bind = %cfg.bind_addr, "serving");

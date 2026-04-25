@@ -76,6 +76,20 @@ pub async fn agent_stats(State(state): State<SharedState>) -> impl IntoResponse 
     }))
 }
 
+/// GET /v1/tools — C4.1 introspection for the chat UI's "what tools
+/// does the model see?" panel. Surfaces only the `--mcp <url>`-
+/// discovered remote tools (request-supplied `tools[]` are per-request
+/// and not server state). Tools are reported with their alias-prefixed
+/// `name` (what the model sees), the unprefixed `remote_name` (what
+/// the upstream server knows), the source URL, and the parameters
+/// schema.
+pub async fn tools_endpoint(State(state): State<SharedState>) -> impl IntoResponse {
+    Json(json!({
+        "remote_tools": &state.remote_tools,
+        "count": state.remote_tools.len(),
+    }))
+}
+
 /// GET /v1/models — lists just the loaded model.
 pub async fn models(State(state): State<SharedState>) -> impl IntoResponse {
     Json(ModelsListResponse {
