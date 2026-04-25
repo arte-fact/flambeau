@@ -26,9 +26,10 @@ use flambeau_ops::hip::{
     moe::{
         indexed_moe_mmq_q4_k_down_tile8, indexed_moe_mmq_q4_k_down_turbo,
         indexed_moe_mmq_q4_k_gate_up_tile8, indexed_moe_mmq_q4_k_gate_up_turbo,
-        indexed_moe_mmq_q6_k_down_tile8,
+        indexed_moe_mmq_q5_k_down_tile8, indexed_moe_mmq_q6_k_down_tile8,
         indexed_moe_mmvq_q4_k_gate_up, indexed_moe_mmvq_q4_k_gate_up_sorted,
-        indexed_moe_mmvq_q4_k_r2, indexed_moe_mmvq_q4_k_r2_sorted, indexed_moe_mmvq_q6_k,
+        indexed_moe_mmvq_q4_k_r2, indexed_moe_mmvq_q4_k_r2_sorted, indexed_moe_mmvq_q5_k,
+        indexed_moe_mmvq_q6_k,
         moe_combine_f16, moe_sort_by_expert,
         moe_sort_by_expert_padded, shared_expert_scale_f32, topk_f32,
     },
@@ -892,20 +893,21 @@ pub fn forward_router_prefill(
         );
     }
 
-    let x_row_bytes = hidden * 2;
-    let logits_row_bytes = n_experts * 4;
-    for t in 0..n_tokens {
-        dense_gemv_f32_f16(
-            ops,
-            stream,
-            ffn_gate_inp.ptr,
-            x_norm.offset_bytes(t * x_row_bytes),
-            scratch.router_logits.offset_bytes(t * logits_row_bytes),
-            n_experts,
-            hidden,
-        )
-        .with_context(|| format!("prefill router dense_gemv token {t}"))?;
-    }
+    // V2.31.g — batched dense GEMV: single launch across all L tokens
+    // instead of L individual launches. On 35B Mesh<4> prefill L=512 this
+    // collapsed 20520 launches per pass (40 layers × 512 tokens) down to
+    // 40; profiled 9 % of wall in V2.30.b.
+    flambeau_ops::hip::router::dense_gemv_f32_f16_batched(
+        ops,
+        stream,
+        ffn_gate_inp.ptr,
+        x_norm,
+        scratch.router_logits,
+        n_experts,
+        hidden,
+        n_tokens,
+    )
+    .context("prefill router dense_gemv batched")?;
 
     topk_f32(
         ops,
@@ -1363,6 +1365,45 @@ pub fn forward_moe_ffn_prefill(
             nb_per_row_inter,
         )
         .context("prefill indexed_moe down q4_k r2")?,
+        // V2.31.a — Q5_K tile8 MMQ when sorted-padded path is enabled
+        // (moe_variant="tile8"), else fall through to MMVQ. Closes the
+        // prefill-on-MMVQ hole for Qwen3-Coder-30B's UD-Q4_K_XL ffn_down
+        // (13/48 layers Q5_K).
+        GgmlDType::Q5K if moe_variant == "tile8" => {
+            let padded_total_ub = total_pairs + n_experts * 8;
+            indexed_moe_mmq_q5_k_down_tile8(
+                ops,
+                stream,
+                ffn_down_exps.ptr,
+                scratch.activated_q8_1,
+                scratch.expert_ids,
+                scratch.sort_sorted_pair_idx_padded,
+                scratch.sort_padded_offsets,
+                scratch.down_f32,
+                flambeau_ops::hip::moe::MoeShape {
+                    n_rows: hidden,
+                    n_tokens: n_tokens * top_k,
+                    top_k: 1,
+                    n_sb_per_row: nb_per_row_inter,
+                    n_experts,
+                    padded_total_upper_bound: padded_total_ub,
+                },
+            )
+            .context("prefill indexed_moe down q5_k tile8")?;
+        }
+        GgmlDType::Q5K => indexed_moe_mmvq_q5_k(
+            ops,
+            stream,
+            ffn_down_exps.ptr,
+            scratch.activated_q8_1,
+            scratch.expert_ids,
+            scratch.down_f32,
+            hidden,
+            n_tokens * top_k,
+            1,
+            nb_per_row_inter,
+        )
+        .context("prefill indexed_moe down q5_k")?,
         GgmlDType::Q6K if moe_variant == "tile8" => {
             let padded_total_ub = total_pairs + n_experts * 8;
             indexed_moe_mmq_q6_k_down_tile8(

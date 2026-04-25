@@ -49,3 +49,45 @@ pub fn dense_gemv_f32_f16(
     unsafe { kernel.launch(stream, cfg, args)? };
     Ok(())
 }
+
+/// V2.31.g — batched dense GEMV: `y[t, n] = Σ_k w[n, k] * (float) x[t, k]`.
+/// Weight F32 `[n_rows, k]`; activation F16 `[n_tokens, k]`; output F32
+/// `[n_tokens, n_rows]`.
+///
+/// Launch: `gridDim = (n_rows, n_tokens)`, one block per (row, token) pair.
+/// Collapses a caller-side `for t in 0..n_tokens { gemv_single }` loop
+/// into a single kernel launch — saves ~L µs launch overhead per call at
+/// the cost of a 2D grid.
+pub fn dense_gemv_f32_f16_batched(
+    reg: &OpsRegistry,
+    stream: &HipStream,
+    w: DevicePtr,
+    x: DevicePtr,
+    y: DevicePtr,
+    n_rows: usize,
+    k: usize,
+    n_tokens: usize,
+) -> Result<()> {
+    let module = reg.expect_module("dense_gemv_f32_f16_batched")?;
+    let kernel = module.kernel("flambeau_dense_gemv_f32_f16_batched")?;
+    let n_rows_i = n_rows as i32;
+    let k_i = k as i32;
+    let n_tokens_i = n_tokens as i32;
+    let w_ptr: u64 = w.as_usize() as u64;
+    let x_ptr: u64 = x.as_usize() as u64;
+    let y_ptr: u64 = y.as_usize() as u64;
+    let mut args = KernelArgs::new();
+    args.push(&w_ptr);
+    args.push(&x_ptr);
+    args.push(&y_ptr);
+    args.push(&n_rows_i);
+    args.push(&k_i);
+    args.push(&n_tokens_i);
+    let cfg = LaunchCfg {
+        grid: (n_rows as u32, n_tokens as u32, 1),
+        block: (256, 1, 1),
+        shared_bytes: 0,
+    };
+    unsafe { kernel.launch(stream, cfg, args)? };
+    Ok(())
+}

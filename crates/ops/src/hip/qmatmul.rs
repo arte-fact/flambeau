@@ -501,6 +501,11 @@ impl Recipe {
         let force_baseline = variant.as_deref() == Some("baseline");
         let force_dp4a_only = variant.as_deref() == Some("dp4a");
         let force_llamacpp = variant.as_deref() == Some("llamacpp_style");
+        let force_q8_r4 = variant.as_deref() == Some("q8_r4");
+        let force_q4_1_wave64 = variant.as_deref() == Some("q4_1_wave64");
+        let force_q4_1_tile16 = variant.as_deref() == Some("q4_1_tile16");
+        let force_q4_k_r4 = variant.as_deref() == Some("q4_k_r4");
+        let force_q8_tile32 = variant.as_deref() == Some("q8_tile32");
         let impl_id = match (impl_id, force_baseline, force_dp4a_only, force_llamacpp) {
             // V2.7: baseline-opt-out reverts tile16 → tile8 for regression A/B.
             // Must precede the general `force_baseline` catch-all below so the
@@ -526,6 +531,29 @@ impl Recipe {
             // Old dp4a-only variant (VDR=1) for regression bench
             ("qmatmul_q8_0_mmvq_single_row_gfx906", _, true, _) => {
                 "qmatmul_q8_0_mmvq_dp4a_gfx906"
+            }
+            // V2.31.b: A/B toggle for Q8_0 r4 MMVQ.
+            ("qmatmul_q8_0_mmvq_single_row_gfx906", _, _, _) if force_q8_r4 => {
+                "qmatmul_q8_0_mmvq_r4_dp4a_gfx906"
+            }
+            // V2.31.f: A/B Q4_1 MMQ variants at 100 W (re-test V2.29.e's
+            // null result which was at 200 W envelope).
+            ("qmatmul_q4_1_mmq_4warp_lds_gfx906", _, _, _) if force_q4_1_wave64 => {
+                "qmatmul_q4_1_mmq_wave64_gfx906"
+            }
+            ("qmatmul_q4_1_mmq_4warp_lds_gfx906", _, _, _) if force_q4_1_tile16 => {
+                "qmatmul_q4_1_mmq_wave64_tile16_gfx906"
+            }
+            // V2.31.e: A/B Q4_K MMVQ r4 (quarter-wave per row). Targets the
+            // Qwen3-Coder-30B dense attention Q/K/V/O projections (non-MoE
+            // path) where mmvq_q4_k_r2 is 30 % of decode wall.
+            ("qmatmul_q4_K_mmvq_nw1_r2_gfx906", _, _, _) if force_q4_k_r4 => {
+                "qmatmul_q4_K_mmvq_nw1_r4_gfx906"
+            }
+            // V2.31.d: A/B Q8_0 MMQ TILE_N=32 variant. Targets 27B prefill
+            // where mmq_q8_0_wave64_tile16 is 87 % of wall.
+            ("qmatmul_q8_0_mmq_wave64_tile16_gfx906", _, _, _) if force_q8_tile32 => {
+                "qmatmul_q8_0_mmq_wave64_tile32_gfx906"
             }
             // Default: fastest productised paths.
             ("qmatmul_q8_0_mmvq_single_row_gfx906", _, _, _) => {
@@ -561,6 +589,14 @@ impl Recipe {
                 rows_per_block: 1,
                 mmq_tile: (0, 0),
             },
+            "qmatmul_q8_0_mmvq_r4_dp4a_gfx906" => Self {
+                kind: RecipeKind::Mmvq,
+                stem: "mmvq_q8_0_r4_dp4a",
+                entry: "flambeau_mmvq_q8_0_r4_dp4a_q8_1",
+                threads: 64,
+                rows_per_block: 4,
+                mmq_tile: (0, 0),
+            },
             "qmatmul_q8_0_mmvq_llamacpp_style_gfx906" => Self {
                 kind: RecipeKind::Mmvq,
                 stem: "mmvq_q8_0_llamacpp_style",
@@ -575,6 +611,14 @@ impl Recipe {
                 entry: "flambeau_mmvq_q4_k_r2_q8_1",
                 threads: 64,
                 rows_per_block: 2,
+                mmq_tile: (0, 0),
+            },
+            "qmatmul_q4_K_mmvq_nw1_r4_gfx906" => Self {
+                kind: RecipeKind::Mmvq,
+                stem: "mmvq_q4_k_r4",
+                entry: "flambeau_mmvq_q4_k_r4_q8_1",
+                threads: 64,
+                rows_per_block: 4,
                 mmq_tile: (0, 0),
             },
             "qmatmul_q4_1_mmvq_dp4a_gfx906" => Self {
@@ -672,6 +716,15 @@ impl Recipe {
                 rows_per_block: 0,
                 // MMQ_Y=64 rows × TILE_N=8 cols per tile (matches K-quant wave64)
                 mmq_tile: (64, 8),
+            },
+            "qmatmul_q8_0_mmq_wave64_tile32_gfx906" => Self {
+                kind: RecipeKind::MmqWave64,
+                stem: "mmq_q8_0_wave64_tile32",
+                entry: "flambeau_mmq_q8_0_wave64_tile32_q8_1",
+                threads: 64,
+                rows_per_block: 0,
+                // V2.31.d — TILE_N=32 experimental.
+                mmq_tile: (64, 32),
             },
             "qmatmul_q8_0_mmq_wave64_tile16_gfx906" => Self {
                 kind: RecipeKind::MmqWave64,

@@ -29,7 +29,10 @@ use super::{
     SharedExpertScratch,
 };
 use super::dense_ffn::{forward_dense_ffn_decode, forward_dense_ffn_prefill};
-use super::attn::{forward_full_attn_layer_decode, forward_full_attn_prefill};
+use super::attn::{
+    forward_dense_attn_layer_decode, forward_dense_attn_prefill,
+    forward_full_attn_layer_decode, forward_full_attn_prefill,
+};
 use super::gdn::{forward_gdn_layer_decode, forward_gdn_prefill};
 use super::moe::{
     forward_moe_ffn_decode, forward_moe_ffn_prefill, forward_router_decode,
@@ -78,7 +81,12 @@ impl LayerForwardScratch {
         let hidden_bytes = hidden * 2;
 
         let full_attn = Some(FullAttnScratch::new(cfg, device)?);
-        let gdn = Some(GdnScratch::new(cfg, device)?);
+        // V2.28.b — GDN scratch only on hybrid arches (qwen35moe).
+        let gdn = if cfg.gdn.is_some() {
+            Some(GdnScratch::new(cfg, device)?)
+        } else {
+            None
+        };
         // Dense-FFN arches (qwen35) skip the MoE router + shared expert
         // scratch entirely. Allocate dense scratch in its place.
         let (moe, shared, dense_ffn) = if cfg.is_dense_ffn() {
@@ -216,19 +224,41 @@ pub fn forward_layer_decode(
             .full_attn
             .as_mut()
             .context("LayerForwardScratch.full_attn missing")?;
-        forward_full_attn_layer_decode(
-            ops,
-            stream,
-            device,
-            cfg,
-            layer_weights,
-            layer_cache,
-            full_attn,
-            x_in,
-            scratch.mid_f16,
-            position,
-            slots.map(|s| s.full_attn),
-        )?;
+        // V2.28.b — qwen3moe's dense attention (plain Q projection, no
+        // gate) vs qwen35moe's gated full-attention. Dispatch on the
+        // weights variant.
+        match &layer_weights.attn {
+            crate::weights::AttnWeights::Dense(_) => {
+                forward_dense_attn_layer_decode(
+                    ops,
+                    stream,
+                    device,
+                    cfg,
+                    layer_weights,
+                    layer_cache,
+                    full_attn,
+                    x_in,
+                    scratch.mid_f16,
+                    position,
+                    slots.map(|s| s.full_attn),
+                )?;
+            }
+            _ => {
+                forward_full_attn_layer_decode(
+                    ops,
+                    stream,
+                    device,
+                    cfg,
+                    layer_weights,
+                    layer_cache,
+                    full_attn,
+                    x_in,
+                    scratch.mid_f16,
+                    position,
+                    slots.map(|s| s.full_attn),
+                )?;
+            }
+        }
     }
 
     // 2+3. V2.23.a.1 fused: `mid = x_in + attn_delta; mid_norm = rmsnorm(mid)*w`.
@@ -371,7 +401,13 @@ impl LayerPrefillScratch {
         let hidden_bytes = max_tokens * cfg.hidden_size * 2;
 
         let full_attn = Some(FullAttnPrefillScratch::new(cfg, device, max_tokens)?);
-        let gdn = Some(GdnPrefillScratch::new(cfg, device, max_tokens)?);
+        // V2.28.b — only allocate GDN scratch when the arch actually has
+        // GDN layers (qwen35moe hybrid). qwen3moe is pure full-attn.
+        let gdn = if cfg.gdn.is_some() {
+            Some(GdnPrefillScratch::new(cfg, device, max_tokens)?)
+        } else {
+            None
+        };
         let (moe, shared, dense_ffn) = if cfg.is_dense_ffn() {
             (None, None, Some(DenseFfnPrefillScratch::new(cfg, device, max_tokens)?))
         } else {
@@ -471,6 +507,10 @@ pub fn forward_layer_prefill(
     n_tokens: usize,
     start_position: usize,
     slots: Option<LayerPrefillSlots>,
+    // V2.30.a — optional event for serialising GDN state_step across
+    // lanes on same rank. Only meaningful on recurrent layers; full-attn
+    // layers ignore. `None` on single-lane / sync paths.
+    gdn_state_event: Option<&flambeau_backend_hip::HipEvent>,
 ) -> Result<()> {
     let hidden = cfg.hidden_size;
     let il = layer_weights.layer_idx;
@@ -496,6 +536,7 @@ pub fn forward_layer_prefill(
             x_in,
             scratch.mid_f16,
             n_tokens,
+            gdn_state_event,
         )?;
     } else {
         let LayerCache::FullAttn(kv) = layer_cache else {
@@ -505,24 +546,45 @@ pub fn forward_layer_prefill(
             .full_attn
             .as_mut()
             .context("LayerPrefillScratch.full_attn missing")?;
-        let crate::weights::AttnWeights::FullAttn(fa) = &layer_weights.attn else {
-            bail!("layer {il} expected FullAttn weights");
-        };
-        forward_full_attn_prefill(
-            ops,
-            stream,
-            device,
-            cfg,
-            &layer_weights.attn_norm,
-            fa,
-            kv,
-            full_attn,
-            x_in,
-            scratch.mid_f16,
-            n_tokens,
-            start_position,
-            slots.map(|s| s.full_attn),
-        )?;
+        // V2.28.b — dispatch on attn variant: Dense (qwen3moe) vs
+        // FullAttn (qwen35moe gated full-attn).
+        match &layer_weights.attn {
+            crate::weights::AttnWeights::Dense(d) => {
+                forward_dense_attn_prefill(
+                    ops,
+                    stream,
+                    device,
+                    cfg,
+                    &layer_weights.attn_norm,
+                    d,
+                    kv,
+                    full_attn,
+                    x_in,
+                    scratch.mid_f16,
+                    n_tokens,
+                    start_position,
+                    slots.map(|s| s.full_attn),
+                )?;
+            }
+            crate::weights::AttnWeights::FullAttn(fa) => {
+                forward_full_attn_prefill(
+                    ops,
+                    stream,
+                    device,
+                    cfg,
+                    &layer_weights.attn_norm,
+                    fa,
+                    kv,
+                    full_attn,
+                    x_in,
+                    scratch.mid_f16,
+                    n_tokens,
+                    start_position,
+                    slots.map(|s| s.full_attn),
+                )?;
+            }
+            _ => bail!("layer {il} expected Dense or FullAttn weights"),
+        }
     }
 
     // 2. Residual: mid = x_in + attn_delta (in-place on mid_f16).

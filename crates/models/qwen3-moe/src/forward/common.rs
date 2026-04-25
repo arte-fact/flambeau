@@ -16,7 +16,7 @@ use flambeau_quant::GgmlDType;
 use flambeau_ops::hip::cast::cast_f32_to_f16;
 use flambeau_ops::hip::moe::{
     indexed_moe_mmvq_q4_0, indexed_moe_mmvq_q4_k_gate_up, indexed_moe_mmvq_q4_k_r2,
-    indexed_moe_mmvq_q6_k, indexed_moe_mmvq_q8_0,
+    indexed_moe_mmvq_q5_k, indexed_moe_mmvq_q6_k, indexed_moe_mmvq_q8_0,
 };
 use flambeau_ops::hip::norm::quantize_f16_q8_1;
 
@@ -65,12 +65,13 @@ pub(crate) fn validate_moe_dtypes(
         );
     }
     if down_dt != GgmlDType::Q4K
+        && down_dt != GgmlDType::Q5K
         && down_dt != GgmlDType::Q6K
         && down_dt != GgmlDType::Q8_0
         && down_dt != GgmlDType::Q4_0
     {
         bail!(
-            "{label} ffn_down_exps must be Q4_K, Q6_K, Q8_0 or Q4_0; got {down_dt:?}"
+            "{label} ffn_down_exps must be Q4_K, Q5_K, Q6_K, Q8_0 or Q4_0; got {down_dt:?}"
         );
     }
     Ok(())
@@ -181,6 +182,14 @@ pub(crate) fn run_indexed_moe_down(
                 n_tokens_eff, top_k_inner, nb,
             )
             .context("indexed_moe down q4_k r2")
+        }
+        GgmlDType::Q5K => {
+            let nb = inter / QK_K;
+            indexed_moe_mmvq_q5_k(
+                ops, stream, w_down, activated_q8_1, expert_ids, down_out, hidden,
+                n_tokens_eff, top_k_inner, nb,
+            )
+            .context("indexed_moe down q5_k")
         }
         GgmlDType::Q6K => {
             let nb = inter / QK_K;

@@ -218,6 +218,52 @@ pub fn indexed_moe_mmvq_q6_k(
     Ok(())
 }
 
+/// V2.28.b-i2 — Q5_K indexed-MoE MMVQ. Needed for
+/// Qwen3-Coder-30B-A3B-Instruct-UD-Q4_K_XL whose `ffn_down_exps`
+/// promote to Q5_K on ~13/48 layers (UD mixed-quant). Same shape
+/// contract as `indexed_moe_mmvq_q4_k` / `_q6_k`; inner arithmetic is
+/// byte-identical to `mmvq_q5_k.cu` (5-bit = q4 nibble + high bit from qh).
+pub fn indexed_moe_mmvq_q5_k(
+    reg: &OpsRegistry,
+    stream: &HipStream,
+    w: DevicePtr,
+    y: DevicePtr,
+    expert_ids: DevicePtr,
+    dst: DevicePtr,
+    n_rows: usize,
+    n_tokens: usize,
+    top_k: usize,
+    n_sb_per_row: usize,
+) -> Result<()> {
+    let module = reg.expect_module("indexed_moe_mmvq_q5_k")?;
+    let kernel = module.kernel("flambeau_indexed_moe_mmvq_q5_k_q8_1")?;
+
+    let n_rows_i = n_rows as i32;
+    let n_tokens_i = n_tokens as i32;
+    let top_k_i = top_k as i32;
+    let nb_i = n_sb_per_row as i32;
+    let w_ptr: u64 = w.as_usize() as u64;
+    let y_ptr: u64 = y.as_usize() as u64;
+    let e_ptr: u64 = expert_ids.as_usize() as u64;
+    let d_ptr: u64 = dst.as_usize() as u64;
+    let mut args = KernelArgs::new();
+    args.push(&w_ptr);
+    args.push(&y_ptr);
+    args.push(&e_ptr);
+    args.push(&d_ptr);
+    args.push(&n_rows_i);
+    args.push(&n_tokens_i);
+    args.push(&top_k_i);
+    args.push(&nb_i);
+    let cfg = LaunchCfg {
+        grid: (n_rows as u32, (n_tokens * top_k) as u32, 1),
+        block: (64, 1, 1),
+        shared_bytes: 0,
+    };
+    unsafe { kernel.launch(stream, cfg, args)? };
+    Ok(())
+}
+
 /// V2.23.a — Q4_0 indexed-MoE MMVQ. Unblocks Qwen3.6-35B-A3B-Q4_0 whose
 /// MoE expert weights are Q4_0 (gate+up+down in most layers). Same
 /// contract as `indexed_moe_mmvq_q8_0`, 256 threads/block with VDR=2 DP4A.
@@ -920,6 +966,59 @@ pub fn indexed_moe_mmq_q4_k_down_turbo(
 /// per-block-expert invariant) with Q6_K decode (raw·y - 32·Σy bias
 /// correction to avoid the byte-borrow bug). Used for UD-Q4_K_S
 /// `ffn_down_exps` layers that are Q6_K-quantised.
+/// V2.31.a — Q5_K down-projection MoE MMQ (tile8).
+///
+/// Same contract as `indexed_moe_mmq_q6_k_down_tile8` / `indexed_moe_mmq_q4_k_down_tile8`.
+/// Closes the MMVQ-at-prefill hole for Qwen3-Coder-30B-A3B-UD-Q4_K_XL
+/// (13/48 layers promote `ffn_down_exps` to Q5_K). Profiled as 31.56 %
+/// of prefill wall in V2.30.b; MMQ variant mirrors V2.8.b's Q6_K fix.
+pub fn indexed_moe_mmq_q5_k_down_tile8(
+    reg: &OpsRegistry,
+    stream: &HipStream,
+    w: DevicePtr,
+    y: DevicePtr,
+    expert_ids: DevicePtr,
+    sorted_pair_idx_padded: DevicePtr,
+    padded_offsets: DevicePtr,
+    dst: DevicePtr,
+    shape: MoeShape,
+) -> Result<()> {
+    let module = reg.expect_module("indexed_moe_mmq_q5_k_down_tile8_dp4a")?;
+    let kernel = module.kernel("flambeau_indexed_moe_mmq_q5_k_down_tile8_dp4a_q8_1")?;
+
+    let n_rows_i = shape.n_rows as i32;
+    let n_tokens_i = shape.n_tokens as i32;
+    let top_k_i = shape.top_k as i32;
+    let nb_i = shape.n_sb_per_row as i32;
+    let n_experts_i = shape.n_experts as i32;
+    let w_ptr: u64 = w.as_usize() as u64;
+    let y_ptr: u64 = y.as_usize() as u64;
+    let e_ptr: u64 = expert_ids.as_usize() as u64;
+    let s_ptr: u64 = sorted_pair_idx_padded.as_usize() as u64;
+    let po_ptr: u64 = padded_offsets.as_usize() as u64;
+    let d_ptr: u64 = dst.as_usize() as u64;
+    let mut args = KernelArgs::new();
+    args.push(&w_ptr);
+    args.push(&y_ptr);
+    args.push(&e_ptr);
+    args.push(&s_ptr);
+    args.push(&po_ptr);
+    args.push(&d_ptr);
+    args.push(&n_rows_i);
+    args.push(&n_tokens_i);
+    args.push(&top_k_i);
+    args.push(&nb_i);
+    args.push(&n_experts_i);
+    let grid_y = shape.padded_total_upper_bound.div_ceil(8) as u32;
+    let cfg = LaunchCfg {
+        grid: ((shape.n_rows as u32).div_ceil(64), grid_y, 1),
+        block: (64, 1, 1),
+        shared_bytes: 0,
+    };
+    unsafe { kernel.launch(stream, cfg, args)? };
+    Ok(())
+}
+
 pub fn indexed_moe_mmq_q6_k_down_tile8(
     reg: &OpsRegistry,
     stream: &HipStream,

@@ -943,6 +943,7 @@ pub fn forward_gdn_prefill(
     x_in: DevicePtr,
     delta_out: DevicePtr,
     n_tokens: usize,
+    state_event: Option<&flambeau_backend_hip::HipEvent>,
 ) -> Result<()> {
     if n_tokens == 0 {
         bail!("forward_gdn_prefill called with n_tokens = 0");
@@ -1183,6 +1184,14 @@ pub fn forward_gdn_prefill(
     .context("prefill gdn_alpha_beta_f32 (batched)")?;
 
     // 12. GDN state step — kernel natively handles B=1, H=num_v_heads, L.
+    // V2.30.a — serialise state_step across aux streams on the same
+    // rank. Before-wait ensures previous ubatch's state write has
+    // completed (no-op if event not yet recorded); after-record
+    // signals this ubatch's completion for the next cross-lane caller.
+    if let Some(ev) = state_event {
+        ev.stream_wait(stream)
+            .context("gdn state_step stream_wait")?;
+    }
     let n_rep = num_v_heads / num_k_heads;
     gdn_state_step_f32_s128(
         ops,
@@ -1201,6 +1210,9 @@ pub fn forward_gdn_prefill(
         n_rep,
     )
     .context("prefill gdn_state_step_f32_s128")?;
+    if let Some(ev) = state_event {
+        ev.record(stream).context("gdn state_step record")?;
+    }
 
     // 13. ssm_norm per-head over L × num_v_heads rows.
     let ssm_norm_k = weights

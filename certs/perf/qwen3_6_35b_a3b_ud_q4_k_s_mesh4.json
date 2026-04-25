@@ -1,6 +1,6 @@
 {
   "gguf_bytes": 20882024960,
-  "load_secs": 4.402820459,
+  "load_secs": 17.426099106,
   "mesh_ranks": 4,
   "model_tag": "Qwen3.6-35B-A3B-UD-Q4_K_S",
   "notes": "V2.10.b (Q4_K gate_up_tile8 inline-accumulator refactor — Scratch 156 → 48 B, kernel −15.5 %; V2.9.b down kernels at (64, 2)). Per-L prefill numbers are fresh-session (no history); decode is 1-token prefill + N greedy steps. tok/s excludes load time. Regenerate: `FLAMBEAU_QWEN3_GGUF=... cargo test --release -p flambeau-qwen3-moe --features hip --test perf_baseline_qwen3_moe -- --nocapture`",
@@ -8,38 +8,56 @@
     {
       "n_tokens": 8,
       "phase": "prefill",
-      "tok_per_sec": 86.13673966238532,
-      "wall_secs": 0.092875584
+      "tok_per_sec": 84.7527215926384,
+      "wall_secs": 0.094392249
     },
     {
       "n_tokens": 64,
       "phase": "prefill",
-      "tok_per_sec": 127.97742554999755,
-      "wall_secs": 0.500088197
+      "tok_per_sec": 95.00206712622808,
+      "wall_secs": 0.673669552
     },
     {
       "n_tokens": 128,
       "phase": "prefill",
-      "tok_per_sec": 468.61905666925315,
-      "wall_secs": 0.273142968
+      "tok_per_sec": 493.3085736621581,
+      "wall_secs": 0.259472482
     },
     {
       "n_tokens": 512,
       "phase": "prefill",
-      "tok_per_sec": 655.0004058252026,
-      "wall_secs": 0.781678905
+      "tok_per_sec": 805.6101241464869,
+      "wall_secs": 0.635543155
     },
     {
       "n_tokens": 1024,
       "phase": "prefill",
-      "tok_per_sec": 694.1129205118837,
-      "wall_secs": 1.475264283
+      "tok_per_sec": 1269.017255266323,
+      "wall_secs": 0.806923622
+    },
+    {
+      "n_tokens": 2048,
+      "phase": "prefill",
+      "tok_per_sec": 1499.6350310838939,
+      "wall_secs": 1.3656656169999999
+    },
+    {
+      "n_tokens": 4096,
+      "phase": "prefill",
+      "tok_per_sec": 1594.4840549400922,
+      "wall_secs": 2.5688560430000003
+    },
+    {
+      "n_tokens": 8192,
+      "phase": "prefill",
+      "tok_per_sec": 1477.8839965647526,
+      "wall_secs": 5.543060226
     },
     {
       "n_tokens": 64,
       "phase": "decode",
-      "tok_per_sec": 51.10754812177529,
-      "wall_secs": 1.252261209
+      "tok_per_sec": 54.76081784319712,
+      "wall_secs": 1.168718849
     }
   ]
 }

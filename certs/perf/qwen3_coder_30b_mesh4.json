@@ -1,0 +1,61 @@
+{
+  "arch": "qwen3moe",
+  "async_enabled": true,
+  "gguf_bytes": 17658939392,
+  "load_secs": 15.007265766,
+  "mesh_ranks": 4,
+  "model_tag": "Qwen3-Coder-30B-A3B-Instruct-UD-Q4_K_XL",
+  "notes": "V2.28.b-i5 — first perf baseline for Qwen3-Coder-30B-A3B-Instruct (arch=qwen3moe). 100 W/GPU power cap. Dense attention + Q5_K indexed-MoE MMVQ (V2.28.b-i2). Regenerate: `FLAMBEAU_MESH_RANKS=4 cargo test --release -p flambeau-qwen3-moe --features hip --test perf_baseline_qwen3_coder -- --nocapture`",
+  "runs": [
+    {
+      "n_tokens": 8,
+      "phase": "prefill",
+      "tok_per_sec": 72.55371434886193,
+      "wall_secs": 0.110263135
+    },
+    {
+      "n_tokens": 128,
+      "phase": "prefill",
+      "tok_per_sec": 454.4789644020759,
+      "wall_secs": 0.281641198
+    },
+    {
+      "n_tokens": 512,
+      "phase": "prefill",
+      "tok_per_sec": 641.3114104885547,
+      "wall_secs": 0.798364089
+    },
+    {
+      "n_tokens": 1024,
+      "phase": "prefill",
+      "tok_per_sec": 660.3259503535534,
+      "wall_secs": 1.550749292
+    },
+    {
+      "n_tokens": 2048,
+      "phase": "prefill",
+      "tok_per_sec": 702.2666657229045,
+      "wall_secs": 2.916271126
+    },
+    {
+      "n_tokens": 4096,
+      "phase": "prefill",
+      "tok_per_sec": 513.0450383691403,
+      "wall_secs": 7.983704536
+    },
+    {
+      "n_tokens": 8192,
+      "phase": "prefill",
+      "tok_per_sec": 329.89255922937576,
+      "wall_secs": 24.832327286
+    },
+    {
+      "n_tokens": 64,
+      "phase": "decode",
+      "tok_per_sec": 38.35235752789671,
+      "wall_secs": 1.668737051
+    }
+  ],
+  "u_lanes": 2,
+  "ubatch": 128
+}

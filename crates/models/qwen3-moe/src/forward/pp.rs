@@ -853,6 +853,15 @@ pub struct ShardedForwardPrefillScratch {
     /// DtoH-sync-HtoD-sync pattern that issued 2·u host barriers per
     /// ubatch and starved async-PP's Rust dispatcher.
     pub embed_host: super::io::EmbedPrefillHostScratch,
+    /// V2.30.a — per (rank, local_layer_idx) HipEvent that serialises
+    /// `gdn_state_step` kernel access across lanes on the same rank.
+    /// Ubatch N+1 on the opposite lane waits on this event before
+    /// running its state_step; ubatch N records it after its state_step.
+    /// Same-lane ubatches are already stream-ordered. Eliminates the
+    /// V2.27.d / V2.28.c.1 / V2.28.a-i1 GDN race guards.
+    /// Shape: outer vec is n_ranks; inner vec is local layer count on
+    /// that rank. Entry is None for non-GDN (full-attn) layers.
+    pub gdn_state_events: Vec<Vec<Option<flambeau_backend_hip::HipEvent>>>,
 }
 
 /// V2.26.a-i5c — one cached exec per (rank, lane) with the per-layer
@@ -938,7 +947,31 @@ impl ShardedForwardPrefillScratch {
         // row_bytes depends on the token_embd dtype which isn't known
         // here; start empty and grow on first use.
         let embed_host = super::io::EmbedPrefillHostScratch { raw: Vec::new(), f16: Vec::new() };
-        Ok(Self { per_rank, graph_cache, embed_host })
+        // V2.30.a — one HipEvent per (rank, GDN layer) for cross-lane
+        // state_step serialisation. Allocated eagerly so no hot-path
+        // None-check + device-bind branch; unused on sync / u_lanes=1.
+        let mut gdn_state_events: Vec<Vec<Option<flambeau_backend_hip::HipEvent>>> =
+            Vec::with_capacity(cluster.ranks());
+        for rank_idx in 0..cluster.ranks() {
+            let device = cluster.device(rank_idx);
+            device.bind()?;
+            let shard = &model.shards[rank_idx];
+            let mut rank_events = Vec::with_capacity(shard.layers.len());
+            for layer_weights in shard.layers.iter() {
+                if model.config.is_recurrent(layer_weights.layer_idx) {
+                    rank_events.push(Some(flambeau_backend_hip::HipEvent::new(device.id())?));
+                } else {
+                    rank_events.push(None);
+                }
+            }
+            gdn_state_events.push(rank_events);
+        }
+        Ok(Self {
+            per_rank,
+            graph_cache,
+            embed_host,
+            gdn_state_events,
+        })
     }
 
     pub fn dispose(
@@ -1091,6 +1124,7 @@ pub fn forward_prefill_pp(
                 l,
                 start_position,
                 None,
+                None,
             )
             .with_context(|| {
                 format!(
@@ -1238,74 +1272,16 @@ pub fn forward_prefill_pp_async(
             "forward_prefill_pp_async: u_lanes={u_lanes} < 2 — no async benefit; construct scratch via new_with_lanes(..., u_lanes >= 2)"
         );
     }
-    // V2.27.d — guard against the GDN cross-lane state race. Qwen3.5/3.6
-    // hybrid models (full_attention_interval set) share `rank_session.caches`
-    // per layer across lanes: the GDN `state` + `conv_history` device
-    // buffers are NOT per-lane. When `u_lanes > 1` and ubatch_size is
-    // small (< ~128 tokens), concurrent ubatches on different aux streams
-    // can read/write the same GDN state tensor with no ordering
-    // between them, producing non-deterministic results (last_id mismatch
-    // vs sync). At ubatch ≥ 128 the per-ubatch kernel work is long
-    // enough that stream scheduling naturally serialises, masking the
-    // race. Proper fix (per-lane GDN state + merge) is V2.30+ scope;
-    // for now reject configurations that reliably hit the race.
-    //
-    // Also rejects any non-divisor ubatch whose TAIL < 128: the last
-    // ubatch runs concurrent with a full-size predecessor on the other
-    // lane, same race.
-    let has_gdn = (0..model.config.num_layers).any(|il| model.config.is_recurrent(il));
-    let n_gdn_layers = (0..model.config.num_layers)
-        .filter(|&il| model.config.is_recurrent(il))
-        .count();
-    let gdn_per_rank = n_gdn_layers / n_ranks.max(1);
-    if has_gdn && u_lanes > 1 {
-        if ubatch_size < 128 {
-            bail!(
-                "forward_prefill_pp_async: ubatch_size={ubatch_size} < 128 with u_lanes={u_lanes} \
-                 on a hybrid (GDN) model races on shared layer state. Use ubatch ≥ 128 or u_lanes=1. \
-                 See V2.27.d cert."
-            );
-        }
-        let tail = l % ubatch_size;
-        if tail != 0 && tail < 128 {
-            bail!(
-                "forward_prefill_pp_async: L={l} ubatch_size={ubatch_size} produces a tail ubatch \
-                 of size {tail} < 128, which on a hybrid (GDN) model races with the concurrent \
-                 full-size ubatch on the other lane. Use ubatch that divides L, or L/ubatch such \
-                 that the tail ≥ 128. See V2.27.d cert."
-            );
-        }
-        // V2.28.a-i1 — the GDN cross-lane race's severity scales with
-        // per-rank GDN layer count (more shared-state tensors = more
-        // race opportunities per ubatch). Empirically:
-        //   9B (gdn/rank=7):  safe at K ≤ 64
-        //   35B (gdn/rank=7): safe at K ≤ 64
-        //   27B (gdn/rank=12): RACES non-deterministically at K ≥ 32
-        // Reject u_lanes > 1 unconditionally when gdn_per_rank > 10 —
-        // no known ubatch/K combo is safe on those layouts short of
-        // proper per-lane state (deferred).
-        if gdn_per_rank > 10 {
-            bail!(
-                "forward_prefill_pp_async: model has {n_gdn_layers} GDN layers on \
-                 {n_ranks} ranks = {gdn_per_rank} GDN layers/rank. At > 10 GDN layers/rank \
-                 the cross-lane state race produces non-deterministic outputs at all K \
-                 (V2.28.a-i1 finding on Qwen3.6-27B). Use u_lanes=1 for this model. \
-                 See V2.28.a-i1 cert."
-            );
-        }
-        // V2.28.c.1 — at gdn_per_rank ≤ 10, K > 64 still races
-        // (originally the 35B L=16384 finding).
-        let n_ubatches_val = l.div_ceil(ubatch_size);
-        if n_ubatches_val > 64 {
-            bail!(
-                "forward_prefill_pp_async: L={l} ubatch_size={ubatch_size} produces \
-                 K={n_ubatches_val} ubatches. On a hybrid (GDN) model with u_lanes={u_lanes}, \
-                 K > 64 accumulates enough cross-lane state-race damage that parity breaks \
-                 (V2.28.c.1 finding on Qwen3.6-35B at L=16384). Use u_lanes=1 or larger \
-                 ubatch_size to keep K ≤ 64. See V2.28.c.1 cert."
-            );
-        }
-    }
+    // V2.30.a — the three GDN cross-lane state-race guards (V2.27.d
+    // ubatch<128/tail<128, V2.28.a-i1 gdn_per_rank>10, V2.28.c.1 K>64)
+    // are all the same bug: concurrent ubatches on different aux streams
+    // read/write the shared per-layer GDN state tensor with no
+    // ordering. V2.30.a serialises the GDN `state_step` call itself via
+    // a per-(rank, layer) HipEvent recorded in `scratch.gdn_state_events`.
+    // Each lane's `stream_wait(event)` before `state_step` and `record`
+    // after ensures cross-lane state_step executions are ordered, which
+    // is all that is needed for parity — the rest of the GDN chain
+    // reads/writes only lane-local ubatch-sized buffers.
     cluster.reserve_aux_streams(u_lanes)?;
     // V2.25.g — per-lane pinned bounces break the single-slab
     // serialisation. Size to a full ubatch worth of F16 hidden.
@@ -1411,11 +1387,19 @@ pub fn forward_prefill_pp_async(
             let layer_scratch = scratch0
                 .lane_layer_mut(lane)
                 .context("rank 0 lane_layer_mut")?;
+            // V2.30.a — event vector for this rank's GDN layers. Disjoint
+            // from scratch.per_rank borrowed above.
+            let rank_events: *mut Vec<Option<flambeau_backend_hip::HipEvent>> =
+                &mut scratch.gdn_state_events[0];
 
             cluster.with_aux_stream(0, lane, |s| -> flambeau_core::DeviceResult<()> {
+                // SAFETY: rank_events is *mut into scratch.gdn_state_events[0],
+                // disjoint from scratch.per_rank[0] borrowed above.
+                let rank_events_ref = unsafe { &mut *rank_events };
                 let (mut x_in, mut x_out) = (lane_hidden_a, lane_hidden_b);
                 for (local_idx, layer_weights) in shard0.layers.iter().enumerate() {
                     let layer_cache = &mut rank_session.caches[local_idx];
+                    let gdn_event = rank_events_ref[local_idx].as_ref();
                     forward_layer_prefill(
                         &shard0.ops,
                         s,
@@ -1429,6 +1413,7 @@ pub fn forward_prefill_pp_async(
                         u,
                         pos,
                         None,
+                        gdn_event,
                     )
                     .map_err(|e| flambeau_core::DeviceError::Backend {
                         backend: "hip",
@@ -1495,6 +1480,10 @@ pub fn forward_prefill_pp_async(
             } else {
                 std::ptr::null_mut()
             };
+            // V2.30.a — pull GDN state events out before borrowing per_rank.
+            // Disjoint field of scratch.
+            let rank_events_ptr: *mut Vec<Option<flambeau_backend_hip::HipEvent>> =
+                &mut scratch.gdn_state_events[rank_idx];
             let rank_scratch = &mut scratch.per_rank[rank_idx];
             let lane_hidden_a = rank_scratch.lane_hidden_a(lane);
             let lane_hidden_b = rank_scratch.lane_hidden_b(lane);
@@ -1606,9 +1595,14 @@ pub fn forward_prefill_pp_async(
                 // ubatch's correct final state.
                 let exec = cluster.with_aux_stream(rank_idx, lane, |aux_s| {
                     flambeau_backend_hip::HipGraphExec::capture(aux_s, |capture_s| {
+                        // SAFETY: rank_events_ptr is a *mut into
+                        // scratch.gdn_state_events[rank_idx], disjoint from
+                        // scratch.per_rank[rank_idx] borrowed above.
+                        let rank_events_ref = unsafe { &mut *rank_events_ptr };
                         let (mut x_in, mut x_out) = (lane_hidden_a, lane_hidden_b);
                         for (local_idx, layer_weights) in shard.layers.iter().enumerate() {
                             let layer_cache = &mut rank_session.caches[local_idx];
+                            let gdn_event = rank_events_ref[local_idx].as_ref();
                             forward_layer_prefill(
                                 &shard.ops,
                                 capture_s,
@@ -1622,6 +1616,7 @@ pub fn forward_prefill_pp_async(
                                 u,
                                 pos,
                                 Some(layer_slots[local_idx]),
+                                gdn_event,
                             )
                             .map_err(|e| flambeau_core::DeviceError::Backend {
                                 backend: "hip",
@@ -1659,9 +1654,14 @@ pub fn forward_prefill_pp_async(
             } else {
                 // === UNCAPTURED branch (legacy async) ===
                 cluster.with_aux_stream(rank_idx, lane, |s| -> flambeau_core::DeviceResult<()> {
+                    // SAFETY: rank_events_ptr is a *mut into
+                    // scratch.gdn_state_events[rank_idx], disjoint from
+                    // scratch.per_rank[rank_idx] borrowed above.
+                    let rank_events_ref = unsafe { &mut *rank_events_ptr };
                     let (mut x_in, mut x_out) = (lane_hidden_a, lane_hidden_b);
                     for (local_idx, layer_weights) in shard.layers.iter().enumerate() {
                         let layer_cache = &mut rank_session.caches[local_idx];
+                        let gdn_event = rank_events_ref[local_idx].as_ref();
                         forward_layer_prefill(
                             &shard.ops,
                             s,
@@ -1675,6 +1675,7 @@ pub fn forward_prefill_pp_async(
                             u,
                             pos,
                             None,
+                            gdn_event,
                         )
                         .map_err(|e| flambeau_core::DeviceError::Backend {
                             backend: "hip",
@@ -1847,6 +1848,7 @@ pub fn forward_prefill_pp_logits(
                 x_out,
                 l,
                 start_position,
+                None,
                 None,
             )
             .with_context(|| {
