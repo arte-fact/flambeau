@@ -235,6 +235,111 @@
   }
   .empty-hint .finish { color: var(--n13); }
 
+  /* C1.2 — finish_reason badge in the assistant footer.
+     Shows up below the assistant turn when finish_reason="tool_calls",
+     and as a quieter pill for the other finish reasons. */
+  .finish-badge {
+    display: inline-flex; align-items: center; gap: 6px;
+    margin-top: 8px;
+    padding: 3px 9px;
+    border-radius: 999px;
+    font-size: 11px;
+    letter-spacing: 0.04em;
+    background: var(--panel);
+    border: 1px solid var(--border-2);
+    color: var(--text-mute);
+    user-select: none;
+  }
+  .finish-badge.tool-calls {
+    background: rgba(208,135,112,0.10);
+    border-color: rgba(208,135,112,0.4);
+    color: var(--accent);
+  }
+  .finish-badge.length {
+    background: rgba(235,203,139,0.10);
+    border-color: rgba(235,203,139,0.4);
+    color: var(--n13);
+  }
+
+  /* C1.2 — tool-reply form. Inline below the assistant turn with one
+     textarea per tool_call_id; user types/pastes results, single
+     "Send tool results" button replays the conversation. */
+  .tool-reply-form {
+    margin-top: 10px;
+    padding: 12px;
+    border: 1px dashed var(--border-2);
+    border-radius: 10px;
+    background: rgba(208,135,112,0.04);
+  }
+  .tool-reply-form .trf-title {
+    font-size: 12px;
+    color: var(--text-mute);
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+    margin-bottom: 8px;
+  }
+  .tool-reply-form .trf-row {
+    margin-bottom: 8px;
+  }
+  .tool-reply-form .trf-row:last-child { margin-bottom: 0; }
+  .tool-reply-form .trf-label {
+    display: block;
+    font-size: 12px;
+    color: var(--text-soft);
+    margin-bottom: 4px;
+    font-family: "SFMono-Regular", "JetBrains Mono", Menlo, Consolas, monospace;
+  }
+  .tool-reply-form .trf-label .trf-call-name {
+    color: var(--accent);
+  }
+  .tool-reply-form textarea {
+    width: 100%;
+    min-height: 64px;
+    background: var(--code-bg);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    padding: 8px 10px;
+    color: var(--text);
+    font-family: "SFMono-Regular", "JetBrains Mono", Menlo, Consolas, monospace;
+    font-size: 13px;
+    line-height: 1.45;
+    resize: vertical;
+    box-sizing: border-box;
+  }
+  .tool-reply-form textarea:focus {
+    outline: none;
+    border-color: var(--accent);
+  }
+  .tool-reply-form .trf-actions {
+    display: flex; gap: 8px; align-items: center;
+    margin-top: 4px;
+  }
+  .tool-reply-form button {
+    background: var(--accent);
+    color: var(--n0);
+    border: 0;
+    padding: 7px 14px;
+    border-radius: 6px;
+    cursor: pointer;
+    font-size: 13px;
+    font-weight: 500;
+  }
+  .tool-reply-form button:hover { background: var(--accent-hov); }
+  .tool-reply-form button.ghost {
+    background: transparent;
+    border: 1px solid var(--border-2);
+    color: var(--text-mute);
+  }
+  .tool-reply-form button.ghost:hover {
+    color: var(--text);
+    border-color: var(--text-mute);
+  }
+  .tool-reply-form .trf-hint {
+    font-size: 11px;
+    color: var(--text-mute);
+    margin-left: auto;
+  }
+
   /* error banner */
   .error {
     background: rgba(191,97,106,0.12);
@@ -702,16 +807,17 @@
         content.appendChild(hint);
       }
       // C1.1 — push tool_calls into history alongside content so a
-      // subsequent turn (C1.2 will let the user reply with role=tool)
-      // sees the full assistant message, not just the text part.
+      // subsequent turn (C1.2's role=tool reply) sees the full
+      // assistant message, not just the text part.
       const histEntry = {
         role: "assistant",
         content: assistantText,
       };
+      let serialisedToolCalls = null;
       if (toolCalls.size > 0) {
         // Re-key by `index` order; OpenAI expects the array shape.
         const indices = [...toolCalls.keys()].sort((a, b) => a - b);
-        histEntry.tool_calls = indices.map(i => {
+        serialisedToolCalls = indices.map(i => {
           const e = toolCalls.get(i);
           return {
             id: e.id || `call_${i}`,
@@ -719,9 +825,266 @@
             function: { name: e.name, arguments: e.args },
           };
         });
+        histEntry.tool_calls = serialisedToolCalls;
         if (!assistantText) histEntry.content = null;
       }
       history.push(histEntry);
+
+      // C1.2 — finish_reason badge + (when tool_calls) the inline
+      // tool-reply form. Only attach when something happened — empty
+      // turns already have the empty-hint above.
+      if (finishReason && !noContent) {
+        const badge = document.createElement("span");
+        badge.className = `finish-badge ${finishReason.replace("_", "-")}`;
+        badge.textContent = `finish_reason: ${finishReason}`;
+        wrap.appendChild(badge);
+      }
+      if (finishReason === "tool_calls" && serialisedToolCalls && serialisedToolCalls.length > 0) {
+        appendToolReplyForm(wrap, serialisedToolCalls);
+      }
+
+      generating = false;
+      send.disabled = false;
+      input.focus();
+    }
+  }
+
+  /** C1.2 — render the tool-reply form below an assistant turn that
+   *  ended in finish_reason="tool_calls". One textarea per call.
+   *  Submit pushes one role=tool message per call (in the same order
+   *  the model emitted them) and re-runs the chat completion so the
+   *  model can produce its next turn. */
+  function appendToolReplyForm(wrap, calls) {
+    const formEl = document.createElement("div");
+    formEl.className = "tool-reply-form";
+    const title = document.createElement("div");
+    title.className = "trf-title";
+    title.textContent = `provide ${calls.length} tool result${calls.length > 1 ? "s" : ""}`;
+    formEl.appendChild(title);
+
+    /** @type {HTMLTextAreaElement[]} */
+    const textareas = calls.map((call) => {
+      const row = document.createElement("div");
+      row.className = "trf-row";
+      const label = document.createElement("label");
+      label.className = "trf-label";
+      const nameSpan = document.createElement("span");
+      nameSpan.className = "trf-call-name";
+      nameSpan.textContent = call.function?.name || "(unnamed)";
+      label.appendChild(nameSpan);
+      label.appendChild(document.createTextNode(`  ·  ${call.id}`));
+      const ta = document.createElement("textarea");
+      ta.placeholder = `Result for ${call.id} — JSON or plain text`;
+      row.append(label, ta);
+      formEl.appendChild(row);
+      return ta;
+    });
+
+    const actions = document.createElement("div");
+    actions.className = "trf-actions";
+    const submitBtn = document.createElement("button");
+    submitBtn.type = "button";
+    submitBtn.textContent = `Send tool result${calls.length > 1 ? "s" : ""}`;
+    const cancelBtn = document.createElement("button");
+    cancelBtn.type = "button";
+    cancelBtn.className = "ghost";
+    cancelBtn.textContent = "Skip";
+    const hint = document.createElement("span");
+    hint.className = "trf-hint";
+    hint.textContent = "results re-run the conversation through the model";
+    actions.append(submitBtn, cancelBtn, hint);
+    formEl.appendChild(actions);
+
+    submitBtn.addEventListener("click", async () => {
+      if (generating) return;
+      // Push one role=tool message per call (in OpenAI order, by index).
+      for (let i = 0; i < calls.length; i++) {
+        history.push({
+          role: "tool",
+          tool_call_id: calls[i].id,
+          content: textareas[i].value || "",
+        });
+      }
+      // Render the user's tool replies in the transcript so the
+      // conversation reads naturally on scroll-back.
+      for (let i = 0; i < calls.length; i++) {
+        const tag = document.createElement("div");
+        tag.className = "msg user";
+        const bubble = document.createElement("div");
+        bubble.className = "bubble";
+        bubble.textContent =
+          `[tool ${calls[i].function?.name || "?"} → ${calls[i].id}]\n${textareas[i].value || ""}`;
+        tag.appendChild(bubble);
+        thread.appendChild(tag);
+      }
+      formEl.remove();
+      scrollToBottom();
+      // Re-run the chat completion. submitPromptResume() goes through
+      // the same SSE pipeline as submitPrompt() but skips the user
+      // message append (the role=tool turns ARE the prompt).
+      submitPromptResume();
+    });
+    cancelBtn.addEventListener("click", () => formEl.remove());
+
+    wrap.appendChild(formEl);
+    scrollToBottom();
+    textareas[0]?.focus();
+  }
+
+  /** Re-run the chat completion against the current `history` without
+   *  appending a new user message — used to follow up after the user
+   *  has provided role=tool replies (C1.2). Mirrors submitPrompt's
+   *  fetch + SSE pipeline. */
+  async function submitPromptResume() {
+    if (generating) return;
+    generating = true;
+    send.disabled = true;
+    const { wrap, content, dots } = appendAssistantShell();
+    let firstDelta = true;
+    let assistantText = "";
+    let finishReason = null;
+    const caret = document.createElement("span");
+    caret.className = "caret";
+    /** @type {Map<number, any>} */
+    const toolCalls = new Map();
+    const ensureFirstDeltaPainted = () => {
+      if (firstDelta) {
+        content.innerHTML = "";
+        content.appendChild(caret);
+        firstDelta = false;
+      }
+    };
+    function createToolCallCard(index) {
+      const card = document.createElement("details");
+      card.className = "tool-call-card";
+      const summary = document.createElement("summary");
+      const icon = document.createElement("span");
+      icon.className = "tc-icon"; icon.textContent = "🔧";
+      const nameSpan = document.createElement("span");
+      nameSpan.className = "tc-name";
+      nameSpan.textContent = `tool_call[${index}]`;
+      const idSpan = document.createElement("span");
+      idSpan.className = "tc-id";
+      summary.append(icon, nameSpan, idSpan);
+      const argsPre = document.createElement("pre");
+      argsPre.className = "tc-args streaming";
+      card.append(summary, argsPre);
+      ensureFirstDeltaPainted();
+      content.insertBefore(card, caret);
+      scrollToBottom();
+      return { card, nameSpan, idSpan, argsPre };
+    }
+
+    let reader;
+    try {
+      const res = await fetch("/v1/chat/completions", {
+        method: "POST",
+        headers: { "Content-Type": "application/json", "Accept": "text/event-stream" },
+        body: JSON.stringify({
+          model: modelTag.textContent,
+          messages: history,
+          stream: true,
+          max_tokens: 1024,
+          temperature: 0.8,
+          top_p: 0.95,
+        }),
+      });
+      if (!res.ok) {
+        const body = await res.text().catch(() => "");
+        throw new Error(`HTTP ${res.status} ${res.statusText}${body ? " — " + body : ""}`);
+      }
+      if (!res.body) throw new Error("no response body");
+      reader = res.body.getReader();
+      const decoder = new TextDecoder("utf-8");
+      const parser = makeSseParser(payload => {
+        if (payload === "[DONE]") return;
+        let obj;
+        try { obj = JSON.parse(payload); } catch { return; }
+        if (obj?.error) throw new Error(obj.error.message || "server error");
+        const choice = obj?.choices?.[0];
+        const delta = choice?.delta;
+        const cd = delta?.content;
+        if (typeof cd === "string" && cd.length) {
+          ensureFirstDeltaPainted();
+          assistantText += cd;
+          caret.insertAdjacentText("beforebegin", cd);
+          scrollToBottom();
+        }
+        const tcDeltas = delta?.tool_calls;
+        if (Array.isArray(tcDeltas)) {
+          for (const tc of tcDeltas) {
+            if (typeof tc?.index !== "number") continue;
+            const idx = tc.index;
+            let entry = toolCalls.get(idx);
+            if (!entry) {
+              const dom = createToolCallCard(idx);
+              entry = { id: "", name: "", args: "", ...dom };
+              toolCalls.set(idx, entry);
+            }
+            if (typeof tc.id === "string" && tc.id) {
+              entry.id = tc.id; entry.idSpan.textContent = tc.id;
+            }
+            const fname = tc.function?.name;
+            if (typeof fname === "string" && fname) {
+              entry.name = fname; entry.nameSpan.textContent = fname;
+            }
+            const fargs = tc.function?.arguments;
+            if (typeof fargs === "string" && fargs.length) {
+              entry.args += fargs;
+              entry.argsPre.textContent = entry.args;
+              scrollToBottom();
+            }
+          }
+        }
+        if (choice?.finish_reason) finishReason = choice.finish_reason;
+      });
+      while (true) {
+        const { value, done } = await reader.read();
+        if (done) break;
+        parser(decoder.decode(value, { stream: true }));
+      }
+      parser(decoder.decode());
+    } catch (err) {
+      appendError(err.message || String(err));
+    } finally {
+      try { caret.remove(); } catch {}
+      try { dots.remove(); } catch {}
+      for (const e of toolCalls.values()) e.argsPre.classList.remove("streaming");
+      if (toolCalls.size > 0 && !assistantText) {
+        const first = toolCalls.values().next().value;
+        if (first) first.card.open = true;
+      }
+      const noContent = firstDelta && !assistantText && toolCalls.size === 0;
+      if (noContent) {
+        const hint = document.createElement("span");
+        hint.className = "empty-hint";
+        const reason = finishReason ? finishReason : "no data";
+        hint.innerHTML =
+          `(empty response — <span class="finish">finish_reason: ${reason}</span>)`;
+        content.appendChild(hint);
+      }
+      const histEntry = { role: "assistant", content: assistantText };
+      let serialisedToolCalls = null;
+      if (toolCalls.size > 0) {
+        const indices = [...toolCalls.keys()].sort((a, b) => a - b);
+        serialisedToolCalls = indices.map(i => {
+          const e = toolCalls.get(i);
+          return { id: e.id || `call_${i}`, type: "function",
+                   function: { name: e.name, arguments: e.args } };
+        });
+        histEntry.tool_calls = serialisedToolCalls;
+        if (!assistantText) histEntry.content = null;
+      }
+      history.push(histEntry);
+      if (finishReason && !noContent) {
+        const badge = document.createElement("span");
+        badge.className = `finish-badge ${finishReason.replace("_", "-")}`;
+        badge.textContent = `finish_reason: ${finishReason}`;
+        wrap.appendChild(badge);
+      }
+      if (finishReason === "tool_calls" && serialisedToolCalls && serialisedToolCalls.length > 0) {
+        appendToolReplyForm(wrap, serialisedToolCalls);
+      }
       generating = false;
       send.disabled = false;
       input.focus();
