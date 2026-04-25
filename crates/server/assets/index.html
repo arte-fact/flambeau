@@ -1,0 +1,743 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width,initial-scale=1" />
+<title>Flambeau</title>
+<style>
+  /* ---- Nord palette ---- */
+  :root {
+    --n0:#2e3440; --n1:#3b4252; --n2:#434c5e; --n3:#4c566a;
+    --n4:#d8dee9; --n5:#e5e9f0; --n6:#eceff4;
+    --n7:#8fbcbb; --n8:#88c0d0; --n9:#81a1c1; --n10:#5e81ac;
+    --n11:#bf616a; --n12:#d08770; --n13:#ebcb8b; --n14:#a3be8c; --n15:#b48ead;
+
+    --bg:          var(--n0);
+    --bg-soft:     #292e39;
+    --panel:       var(--n1);
+    --panel-2:     var(--n2);
+    --border:      #3b4252;
+    --border-2:    #4c566a;
+    --text:        var(--n6);
+    --text-soft:   var(--n4);
+    --text-mute:   #7b8394;
+    --accent:      var(--n12);
+    --accent-hov:  #d99985;
+    --user-bg:     var(--n1);
+    --code-bg:     #252932;
+  }
+
+  @media (prefers-color-scheme: light) {
+    /* stay dark; Nord looks best dark here */
+  }
+
+  * { box-sizing: border-box; }
+  html, body { height: 100%; }
+  body {
+    margin: 0;
+    background: var(--bg);
+    color: var(--text);
+    font-family: -apple-system, BlinkMacSystemFont, "Inter", "Segoe UI", Roboto,
+                 "Helvetica Neue", Arial, sans-serif;
+    font-size: 16px;
+    line-height: 1.6;
+    -webkit-font-smoothing: antialiased;
+    overflow: hidden;
+  }
+
+  .app {
+    display: grid;
+    grid-template-rows: 56px 1fr auto;
+    height: 100vh;
+    width: 100%;
+  }
+
+  /* ---- Top bar ---- */
+  header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 0 20px;
+    border-bottom: 1px solid var(--border);
+    background: var(--bg);
+  }
+  .brand {
+    display: flex; align-items: center; gap: 10px;
+    font-family: "Iowan Old Style", "Apple Garamond", "Baskerville", "Times New Roman",
+                 "Droid Serif", Times, serif;
+    font-size: 19px;
+    letter-spacing: 0.2px;
+    color: var(--text);
+  }
+  .brand .spark {
+    width: 18px; height: 18px; display: inline-block;
+    background: radial-gradient(circle, var(--accent) 0 40%, transparent 42%),
+                conic-gradient(var(--accent) 0 25%, transparent 0 50%, var(--accent) 0 75%, transparent 0);
+    mask: radial-gradient(circle, white 40%, transparent 42%),
+          conic-gradient(black 0 25%, transparent 0 50%, black 0 75%, transparent 0);
+    border-radius: 50%;
+    filter: drop-shadow(0 0 4px rgba(208,135,112,0.35));
+  }
+  .model-tag {
+    font-size: 12.5px; color: var(--text-mute);
+    background: var(--panel);
+    padding: 4px 10px; border-radius: 999px;
+    border: 1px solid var(--border);
+    max-width: 50vw;
+    white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+  }
+
+  /* ---- Chat scroll area ---- */
+  main {
+    overflow-y: auto;
+    scroll-behavior: smooth;
+  }
+  main::-webkit-scrollbar { width: 10px; }
+  main::-webkit-scrollbar-thumb {
+    background: var(--border-2); border-radius: 10px;
+  }
+
+  .thread {
+    max-width: 760px;
+    margin: 0 auto;
+    padding: 40px 24px 120px;
+  }
+
+  /* Empty state */
+  .hero {
+    display: flex; flex-direction: column; align-items: center; justify-content: center;
+    min-height: calc(100vh - 56px - 180px);
+    text-align: center;
+  }
+  .hero h1 {
+    font-family: "Iowan Old Style", "Apple Garamond", "Baskerville", "Times New Roman",
+                 "Droid Serif", Times, serif;
+    font-weight: 500;
+    font-size: 42px;
+    line-height: 1.15;
+    color: var(--text);
+    margin: 0 0 32px;
+    letter-spacing: -0.5px;
+  }
+  .hero h1 .accent { color: var(--accent); }
+
+  /* Messages */
+  .msg { margin: 28px 0; }
+  .msg.user {
+    display: flex; justify-content: flex-end;
+  }
+  .msg.user .bubble {
+    max-width: 82%;
+    background: var(--user-bg);
+    border: 1px solid var(--border);
+    padding: 12px 16px;
+    border-radius: 16px;
+    border-top-right-radius: 4px;
+    white-space: pre-wrap;
+    word-wrap: break-word;
+    color: var(--text);
+  }
+  .msg.assistant { padding: 4px 2px; }
+  .msg.assistant .content {
+    color: var(--text);
+    white-space: pre-wrap;
+    word-wrap: break-word;
+  }
+  .msg.assistant .content code {
+    background: var(--code-bg);
+    padding: 2px 6px;
+    border-radius: 4px;
+    font-size: 0.92em;
+    color: var(--n8);
+    font-family: "SFMono-Regular", "JetBrains Mono", Menlo, Consolas, monospace;
+  }
+
+  /* C1.1 — Tool-call cards.
+     One <details> per tool call the model emitted, accumulating
+     `function.name` + streaming `function.arguments`. Distinct from
+     plain content so the user sees at a glance "the model is making
+     a tool call right now". */
+  .tool-call-card {
+    margin: 10px 0;
+    background: rgba(208,135,112,0.06);
+    border: 1px solid rgba(208,135,112,0.35);
+    border-left: 3px solid var(--accent);
+    border-radius: 8px;
+    overflow: hidden;
+    font-family: "SFMono-Regular", "JetBrains Mono", Menlo, Consolas, monospace;
+    font-size: 13px;
+  }
+  .tool-call-card > summary {
+    list-style: none;
+    cursor: pointer;
+    padding: 8px 12px;
+    color: var(--accent);
+    user-select: none;
+    display: flex; align-items: center; gap: 8px;
+    background: rgba(208,135,112,0.04);
+  }
+  .tool-call-card > summary::-webkit-details-marker { display: none; }
+  .tool-call-card > summary::before {
+    content: "▶";
+    font-size: 9px;
+    color: var(--text-mute);
+    transition: transform 120ms ease;
+    display: inline-block;
+  }
+  .tool-call-card[open] > summary::before { transform: rotate(90deg); }
+  .tool-call-card .tc-icon { color: var(--accent); }
+  .tool-call-card .tc-name { color: var(--text); font-weight: 500; }
+  .tool-call-card .tc-id {
+    color: var(--text-mute); font-size: 11px;
+    margin-left: auto;
+  }
+  .tool-call-card pre.tc-args {
+    margin: 0;
+    padding: 10px 12px;
+    color: var(--text);
+    background: var(--code-bg);
+    white-space: pre-wrap;
+    word-break: break-word;
+    border-top: 1px solid var(--border);
+    line-height: 1.45;
+  }
+  .tool-call-card pre.tc-args.streaming::after {
+    content: "▎";
+    color: var(--accent);
+    margin-left: 2px;
+    animation: blink 1s steps(2, start) infinite;
+  }
+  .role-tag {
+    font-size: 11.5px;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    color: var(--text-mute);
+    margin-bottom: 8px;
+  }
+
+  /* typing caret */
+  .caret {
+    display: inline-block;
+    width: 7px; height: 1.05em;
+    margin-left: 2px;
+    vertical-align: -0.15em;
+    background: var(--accent);
+    animation: blink 1s steps(2, start) infinite;
+    border-radius: 1px;
+  }
+  @keyframes blink { to { visibility: hidden; } }
+
+  /* empty-response notice */
+  .empty-hint {
+    color: var(--text-mute);
+    font-style: italic;
+    font-size: 14px;
+  }
+  .empty-hint .finish { color: var(--n13); }
+
+  /* error banner */
+  .error {
+    background: rgba(191,97,106,0.12);
+    border: 1px solid var(--n11);
+    color: var(--n11);
+    padding: 10px 14px;
+    border-radius: 10px;
+    margin: 16px 0;
+    font-size: 14px;
+  }
+
+  /* ---- Composer ---- */
+  footer {
+    padding: 14px 24px 22px;
+    background: linear-gradient(to top, var(--bg) 70%, rgba(46,52,64,0));
+  }
+  .composer-wrap {
+    max-width: 760px;
+    margin: 0 auto;
+  }
+  .composer {
+    display: flex; align-items: flex-end; gap: 10px;
+    background: var(--panel);
+    border: 1px solid var(--border-2);
+    border-radius: 24px;
+    padding: 10px 10px 10px 16px;
+    transition: border-color 120ms ease, box-shadow 120ms ease;
+  }
+  .composer:focus-within {
+    border-color: var(--n9);
+    box-shadow: 0 0 0 3px rgba(129,161,193,0.18);
+  }
+  .composer textarea {
+    flex: 1 1 auto;
+    background: transparent;
+    border: 0; outline: 0; resize: none;
+    color: var(--text);
+    font: inherit;
+    line-height: 1.5;
+    padding: 6px 0;
+    max-height: 240px;
+    min-height: 24px;
+  }
+  .composer textarea::placeholder { color: var(--text-mute); }
+
+  .send-btn {
+    flex: 0 0 auto;
+    width: 36px; height: 36px;
+    border: 0;
+    border-radius: 50%;
+    background: var(--accent);
+    color: var(--n0);
+    cursor: pointer;
+    display: inline-flex; align-items: center; justify-content: center;
+    transition: background 120ms ease, transform 80ms ease;
+  }
+  .send-btn:hover:not(:disabled) { background: var(--accent-hov); }
+  .send-btn:active:not(:disabled) { transform: scale(0.94); }
+  .send-btn:disabled {
+    background: var(--border-2);
+    color: var(--text-mute);
+    cursor: not-allowed;
+  }
+  .send-btn svg { width: 18px; height: 18px; }
+
+  /* pill shortcuts under composer on empty state */
+  .pills {
+    display: flex; gap: 10px; flex-wrap: wrap;
+    justify-content: center;
+    margin-top: 16px;
+  }
+  .pill {
+    background: var(--panel);
+    border: 1px solid var(--border);
+    color: var(--text-soft);
+    padding: 7px 14px;
+    border-radius: 999px;
+    font-size: 13.5px;
+    cursor: pointer;
+    transition: background 120ms ease, border-color 120ms ease, color 120ms ease;
+  }
+  .pill:hover {
+    background: var(--panel-2);
+    border-color: var(--border-2);
+    color: var(--text);
+  }
+  .pill .ico { margin-right: 6px; opacity: 0.9; }
+
+  .footnote {
+    text-align: center;
+    color: var(--text-mute);
+    font-size: 11.5px;
+    margin-top: 10px;
+  }
+  .footnote .dot { opacity: 0.4; margin: 0 6px; }
+
+  /* hide/show hero based on thread state */
+  .thread.has-messages .hero { display: none; }
+
+  /* thinking indicator on assistant row before first token */
+  .dots { display: inline-flex; gap: 4px; padding: 4px 0; }
+  .dots span {
+    width: 6px; height: 6px; border-radius: 50%;
+    background: var(--text-mute);
+    animation: bounce 1.2s infinite ease-in-out;
+  }
+  .dots span:nth-child(2) { animation-delay: 0.15s; }
+  .dots span:nth-child(3) { animation-delay: 0.3s; }
+  @keyframes bounce {
+    0%, 80%, 100% { transform: translateY(0); opacity: 0.4; }
+    40%            { transform: translateY(-4px); opacity: 1; }
+  }
+</style>
+</head>
+<body>
+<div class="app">
+  <header>
+    <div class="brand">
+      <span class="spark"></span>
+      <span>Flambeau</span>
+    </div>
+    <div class="model-tag" id="model-tag">loading…</div>
+  </header>
+
+  <main id="main">
+    <div class="thread" id="thread">
+      <div class="hero" id="hero">
+        <h1>How can I <span class="accent">help</span> you today?</h1>
+      </div>
+    </div>
+  </main>
+
+  <footer>
+    <div class="composer-wrap">
+      <form class="composer" id="composer" autocomplete="off">
+        <textarea id="input"
+          rows="1"
+          placeholder="Message Flambeau…"
+          aria-label="Message"></textarea>
+        <button class="send-btn" id="send" type="submit" title="Send" aria-label="Send">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor"
+               stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M12 19V5" />
+            <path d="M5 12l7-7 7 7" />
+          </svg>
+        </button>
+      </form>
+      <div class="pills" id="pills">
+        <button class="pill" data-prompt="Help me write">✍︎ Write</button>
+        <button class="pill" data-prompt="Explain this to me">✦ Learn</button>
+        <button class="pill" data-prompt="Help me code">⟨⟩ Code</button>
+        <button class="pill" data-prompt="Brainstorm ideas">✱ Brainstorm</button>
+      </div>
+      <div class="footnote">
+        Streaming over <code style="color:var(--n8)">/v1/chat/completions</code>
+        <span class="dot">·</span> Flambeau runs locally on your GPU
+      </div>
+    </div>
+  </footer>
+</div>
+
+<script>
+  // ---- state ---------------------------------------------------------------
+  const thread   = document.getElementById("thread");
+  const hero     = document.getElementById("hero");
+  const main     = document.getElementById("main");
+  const form     = document.getElementById("composer");
+  const input    = document.getElementById("input");
+  const send     = document.getElementById("send");
+  const pills    = document.getElementById("pills");
+  const modelTag = document.getElementById("model-tag");
+
+  // System prompt — prepended to every request so the model has a stable
+  // persona and doesn't greedy-stop after one token on short inputs.
+  const SYSTEM_PROMPT = [
+    "You are Flambeau, a concise and helpful AI assistant running locally on the user's GPU.",
+    "Answer the user directly and completely. Do not repeat or loop. Do not produce empty responses.",
+    "Use Markdown when helpful. For code, use fenced code blocks with the language tag.",
+    "If the user's request is short or ambiguous, give a short but substantive answer rather than stopping.",
+  ].join(" ");
+
+  /** @type {{role:"system"|"user"|"assistant",content:string}[]} */
+  const history = [{ role: "system", content: SYSTEM_PROMPT }];
+  let generating = false;
+
+  // ---- model discovery -----------------------------------------------------
+  fetch("/v1/models").then(r => r.json()).then(j => {
+    const id = j?.data?.[0]?.id || "flambeau";
+    modelTag.textContent = id;
+  }).catch(() => { modelTag.textContent = "flambeau"; });
+
+  // ---- textarea auto-grow --------------------------------------------------
+  function autosize() {
+    input.style.height = "auto";
+    input.style.height = Math.min(input.scrollHeight, 240) + "px";
+  }
+  input.addEventListener("input", autosize);
+  input.addEventListener("keydown", e => {
+    if (e.key === "Enter" && !e.shiftKey) {
+      e.preventDefault();
+      form.requestSubmit();
+    }
+  });
+
+  // ---- pills ---------------------------------------------------------------
+  pills.addEventListener("click", e => {
+    const btn = e.target.closest(".pill");
+    if (!btn) return;
+    input.value = btn.dataset.prompt + " ";
+    input.focus();
+    autosize();
+  });
+
+  // ---- rendering -----------------------------------------------------------
+  function appendUserMessage(text) {
+    thread.classList.add("has-messages");
+    const wrap = document.createElement("div");
+    wrap.className = "msg user";
+    const bubble = document.createElement("div");
+    bubble.className = "bubble";
+    bubble.textContent = text;
+    wrap.appendChild(bubble);
+    thread.appendChild(wrap);
+    scrollToBottom();
+  }
+
+  function appendAssistantShell() {
+    const wrap = document.createElement("div");
+    wrap.className = "msg assistant";
+    const tag = document.createElement("div");
+    tag.className = "role-tag";
+    tag.textContent = "Flambeau";
+    const content = document.createElement("div");
+    content.className = "content";
+    const dots = document.createElement("span");
+    dots.className = "dots";
+    dots.innerHTML = "<span></span><span></span><span></span>";
+    content.appendChild(dots);
+    wrap.appendChild(tag);
+    wrap.appendChild(content);
+    thread.appendChild(wrap);
+    scrollToBottom();
+    return { wrap, content, dots };
+  }
+
+  function appendError(msg) {
+    const el = document.createElement("div");
+    el.className = "error";
+    el.textContent = msg;
+    thread.appendChild(el);
+    scrollToBottom();
+  }
+
+  function scrollToBottom() {
+    // next frame so layout settles
+    requestAnimationFrame(() => {
+      main.scrollTop = main.scrollHeight;
+    });
+  }
+
+  // ---- SSE line parser -----------------------------------------------------
+  // Parses the OpenAI-style `data: {...}\n\n` framing out of a raw stream
+  // buffer and yields deltas. Handles split chunks.
+  function makeSseParser(onFrame) {
+    let buffer = "";
+    return function feed(chunk) {
+      buffer += chunk;
+      let idx;
+      while ((idx = buffer.indexOf("\n\n")) !== -1) {
+        const frame = buffer.slice(0, idx);
+        buffer = buffer.slice(idx + 2);
+        // A frame may contain several `data:` lines; collect them all.
+        const lines = frame.split("\n");
+        for (const line of lines) {
+          if (!line.startsWith("data:")) continue;
+          const payload = line.slice(5).trim();
+          if (!payload) continue;
+          onFrame(payload);
+        }
+      }
+    };
+  }
+
+  // ---- streaming submit ----------------------------------------------------
+  async function submitPrompt(text) {
+    if (generating || !text.trim()) return;
+    generating = true;
+    send.disabled = true;
+
+    history.push({ role: "user", content: text });
+    appendUserMessage(text);
+
+    const { wrap, content, dots } = appendAssistantShell();
+    let firstDelta = true;
+    let assistantText = "";
+    let finishReason = null;
+    const caret = document.createElement("span");
+    caret.className = "caret";
+    // C1.1 — per-tool-call accumulation state, keyed by streaming `index`.
+    // Each entry: { id, name, args, card, argsPre, nameSpan, idSpan }.
+    /** @type {Map<number, {id:string,name:string,args:string,card:HTMLDetailsElement,argsPre:HTMLPreElement,nameSpan:HTMLSpanElement,idSpan:HTMLSpanElement}>} */
+    const toolCalls = new Map();
+
+    const ensureFirstDeltaPainted = () => {
+      if (firstDelta) {
+        content.innerHTML = "";
+        content.appendChild(caret);
+        firstDelta = false;
+      }
+    };
+
+    /** Build a fresh tool-call card and insert it BEFORE the caret so
+     *  subsequent text deltas continue to flow at the end. */
+    function createToolCallCard(index) {
+      const card = document.createElement("details");
+      card.className = "tool-call-card";
+      card.open = false;
+      const summary = document.createElement("summary");
+      const icon = document.createElement("span");
+      icon.className = "tc-icon";
+      icon.textContent = "🔧";
+      const nameSpan = document.createElement("span");
+      nameSpan.className = "tc-name";
+      nameSpan.textContent = `tool_call[${index}]`;
+      const idSpan = document.createElement("span");
+      idSpan.className = "tc-id";
+      summary.append(icon, nameSpan, idSpan);
+      const argsPre = document.createElement("pre");
+      argsPre.className = "tc-args streaming";
+      card.append(summary, argsPre);
+      // Slot it into the content area, before the caret if present.
+      ensureFirstDeltaPainted();
+      content.insertBefore(card, caret);
+      scrollToBottom();
+      return { card, summary, nameSpan, idSpan, argsPre };
+    }
+
+    let reader;
+    try {
+      const res = await fetch("/v1/chat/completions", {
+        method: "POST",
+        headers: { "Content-Type": "application/json", "Accept": "text/event-stream" },
+        body: JSON.stringify({
+          model: modelTag.textContent,
+          messages: history,
+          stream: true,
+          max_tokens: 1024,
+          // Nucleus sampling defaults — matches OpenAI's chat defaults.
+          // At temp=0.7 / top_p=1.0 the distribution is so peaked that
+          // greedy-equivalent behavior dominates on Qwen3.6; adding top_p
+          // restricts to the 95% nucleus and lets the random draw actually
+          // move the output off the argmax on trivial prompts.
+          temperature: 0.8,
+          top_p: 0.95,
+        }),
+      });
+
+      if (!res.ok) {
+        const body = await res.text().catch(() => "");
+        throw new Error(`HTTP ${res.status} ${res.statusText}${body ? " — " + body : ""}`);
+      }
+      if (!res.body) throw new Error("no response body");
+
+      reader = res.body.getReader();
+      const decoder = new TextDecoder("utf-8");
+
+      const parser = makeSseParser(payload => {
+        if (payload === "[DONE]") return;
+        let obj;
+        try { obj = JSON.parse(payload); } catch { return; }
+        if (obj?.error) throw new Error(obj.error.message || "server error");
+        const choice = obj?.choices?.[0];
+        const delta = choice?.delta;
+
+        // Plain content stream (T2.5 / T3.1 text path).
+        const contentDelta = delta?.content;
+        if (typeof contentDelta === "string" && contentDelta.length) {
+          ensureFirstDeltaPainted();
+          assistantText += contentDelta;
+          caret.insertAdjacentText("beforebegin", contentDelta);
+          scrollToBottom();
+        }
+
+        // C1.1 — tool-call deltas. OpenAI shape: each chunk carries
+        // `delta.tool_calls = [{index, id?, type?, function:{name?, arguments?}}, ...]`.
+        // Open/close events arrive as the chunks with `id`+`name`;
+        // arguments stream incrementally. Multiple indices may
+        // coexist when `parallel_tool_calls=true`.
+        const tcDeltas = delta?.tool_calls;
+        if (Array.isArray(tcDeltas)) {
+          for (const tc of tcDeltas) {
+            if (typeof tc?.index !== "number") continue;
+            const idx = tc.index;
+            let entry = toolCalls.get(idx);
+            if (!entry) {
+              const dom = createToolCallCard(idx);
+              entry = {
+                id: "",
+                name: "",
+                args: "",
+                card: dom.card,
+                argsPre: dom.argsPre,
+                nameSpan: dom.nameSpan,
+                idSpan: dom.idSpan,
+              };
+              toolCalls.set(idx, entry);
+            }
+            if (typeof tc.id === "string" && tc.id) {
+              entry.id = tc.id;
+              entry.idSpan.textContent = tc.id;
+            }
+            const fname = tc.function?.name;
+            if (typeof fname === "string" && fname) {
+              entry.name = fname;
+              entry.nameSpan.textContent = fname;
+            }
+            const fargs = tc.function?.arguments;
+            if (typeof fargs === "string" && fargs.length) {
+              entry.args += fargs;
+              entry.argsPre.textContent = entry.args;
+              scrollToBottom();
+            }
+          }
+        }
+
+        if (choice?.finish_reason) {
+          finishReason = choice.finish_reason;
+        }
+      });
+
+      while (true) {
+        const { value, done } = await reader.read();
+        if (done) break;
+        parser(decoder.decode(value, { stream: true }));
+      }
+      parser(decoder.decode()); // flush
+    } catch (err) {
+      appendError(err.message || String(err));
+    } finally {
+      // Always tear down the thinking indicator and caret, even when the
+      // stream closed with zero content tokens (greedy-stop on short prompts)
+      // — otherwise the dots spin forever and it looks like the server hung.
+      try { caret.remove(); } catch {}
+      try { dots.remove(); } catch {}
+      // C1.1 — stop the per-card streaming-blink on every tool call.
+      for (const entry of toolCalls.values()) {
+        entry.argsPre.classList.remove("streaming");
+      }
+      // Auto-expand the first card if the assistant turn was tool-call-only
+      // (no text content) — otherwise the user just sees a single closed
+      // header and might miss what's happening.
+      if (toolCalls.size > 0 && !assistantText) {
+        const first = toolCalls.values().next().value;
+        if (first) first.card.open = true;
+      }
+      const noContent = firstDelta && !assistantText && toolCalls.size === 0;
+      if (noContent) {
+        const hint = document.createElement("span");
+        hint.className = "empty-hint";
+        const reason = finishReason ? finishReason : "no data";
+        hint.innerHTML =
+          `(empty response — <span class="finish">finish_reason: ${reason}</span>. ` +
+          `Flambeau's greedy decoder often stops after one token on short prompts; ` +
+          `try a more concrete question, or set max_tokens higher.)`;
+        content.appendChild(hint);
+      }
+      // C1.1 — push tool_calls into history alongside content so a
+      // subsequent turn (C1.2 will let the user reply with role=tool)
+      // sees the full assistant message, not just the text part.
+      const histEntry = {
+        role: "assistant",
+        content: assistantText,
+      };
+      if (toolCalls.size > 0) {
+        // Re-key by `index` order; OpenAI expects the array shape.
+        const indices = [...toolCalls.keys()].sort((a, b) => a - b);
+        histEntry.tool_calls = indices.map(i => {
+          const e = toolCalls.get(i);
+          return {
+            id: e.id || `call_${i}`,
+            type: "function",
+            function: { name: e.name, arguments: e.args },
+          };
+        });
+        if (!assistantText) histEntry.content = null;
+      }
+      history.push(histEntry);
+      generating = false;
+      send.disabled = false;
+      input.focus();
+    }
+  }
+
+  form.addEventListener("submit", e => {
+    e.preventDefault();
+    const text = input.value;
+    input.value = "";
+    autosize();
+    submitPrompt(text);
+  });
+
+  // focus on load
+  input.focus();
+</script>
+</body>
+</html>
