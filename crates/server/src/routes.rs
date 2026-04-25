@@ -47,6 +47,12 @@ pub struct ServerState {
     /// Per-iteration agent-loop telemetry (M2.3). Ring buffer; surfaced
     /// read-only at `GET /v1/agent/stats`.
     pub agent_stats: crate::agent_stats::AgentStatsRing,
+    /// L3 — tool-call format detected at boot from the GGUF chat
+    /// template. `general.architecture=qwen35moe` alone is not enough
+    /// to decide: the Unsloth UD Qwen3.6 GGUFs ship a Coder-XML
+    /// template even though the arch tag says `qwen35moe`. Honoured
+    /// when a request omits `tool_call_format` or sets it to "auto".
+    pub tool_call_format_default: crate::tool_call_parser::ToolCallFormat,
 }
 
 pub type SharedState = Arc<ServerState>;
@@ -240,7 +246,7 @@ pub async fn chat_completions(
             use crate::tool_call_parser::{dispatcher, split_events, ParserEvent};
             let mut parser = dispatcher(
                 req.tool_call_format.as_deref(),
-                state.cfg.arch.as_str(),
+                state.tool_call_format_default,
             )
             .map_err(|e| ApiError::bad_request(e.to_string()))?;
             let mut events = parser.push(&text);
@@ -564,11 +570,12 @@ fn stream_completion_sse(
     let model_clone = model.clone();
     let tx_clone = tx.clone();
     tokio::task::spawn_blocking(move || {
-        // Build the parser once per request. Arch comes from the loaded
-        // GGUF; the request may override the format explicitly.
+        // Build the parser once per request. Default format is
+        // boot-detected from the chat template (L3); the request may
+        // override explicitly.
         let parser_result = dispatcher(
             tool_call_format.as_deref(),
-            state_clone.cfg.arch.as_str(),
+            state_clone.tool_call_format_default,
         );
         let mut parser = match parser_result {
             Ok(p) => p,
@@ -683,9 +690,16 @@ fn stream_completion_sse(
             "tool_calls"
         } else {
             match &res {
-                Ok(r) => r.as_str(),
+                Ok((r, _, _)) => r.as_str(),
                 Err(_) => "error",
             }
+        };
+        // L3 — emit `usage` on the final chunk so the chat UI can
+        // compute prefill / token-generation rates. Token counts come
+        // from run_completion_blocking_streaming's tuple return.
+        let (prompt_tokens, completion_tokens) = match &res {
+            Ok((_, p, c)) => (*p, *c),
+            Err(_) => (0u32, 0u32),
         };
         let done_frame = json!({
             "id": id_clone,
@@ -697,6 +711,11 @@ fn stream_completion_sse(
                 "delta": {},
                 "finish_reason": finish_reason,
             }],
+            "usage": {
+                "prompt_tokens": prompt_tokens,
+                "completion_tokens": completion_tokens,
+                "total_tokens": prompt_tokens.saturating_add(completion_tokens),
+            },
         });
         let _ = tx_clone.blocking_send(Ok(Event::default().data(done_frame.to_string())));
         if let Err(e) = res {
@@ -902,13 +921,16 @@ fn run_completion_blocking(
 
 /// Streaming variant: pushes text deltas through `emit` as each token is
 /// produced. Returns the finish reason on success.
+/// Streaming variant. Returns `(finish_reason, prompt_tokens,
+/// completion_tokens)` so the SSE producer can emit a final usage
+/// chunk (L3 — pp/tg indicators in the chat UI).
 fn run_completion_blocking_streaming(
     state: SharedState,
     prompt: String,
     params: SamplingParams,
     relax_stop_mask: bool,
     emit: &mut dyn FnMut(&str) -> bool,
-) -> Result<String> {
+) -> Result<(String, u32, u32)> {
     let request_start = Instant::now();
 
     let _guard = state.inflight.blocking_lock();
@@ -1018,7 +1040,7 @@ fn run_completion_blocking_streaming(
     let alive = push_and_emit(first_next, &mut generated, &mut emitted_text)?;
     if !alive {
         cleanup(cluster, decode_scratch, prefill_scratch, session)?;
-        return Ok("stop".into());
+        return Ok(("stop".into(), prompt_tokens, generated.len() as u32));
     }
 
     let mut finish_reason: &str = "length";
@@ -1074,7 +1096,7 @@ fn run_completion_blocking_streaming(
         "streaming completion finished"
     );
 
-    Ok(finish_reason.to_owned())
+    Ok((finish_reason.to_owned(), prompt_tokens, generated.len() as u32))
 }
 
 fn cleanup(

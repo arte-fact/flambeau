@@ -47,6 +47,19 @@ pub async fn serve(cfg: ServeConfig) -> Result<()> {
     let chat_template =
         ChatTemplate::load_from_gguf(&gguf).context("load chat template")?;
 
+    // L3 — detect tool-call format from the chat-template source. The
+    // Unsloth UD Qwen3.6 GGUFs ship a Coder-XML template under the
+    // qwen35moe arch tag; we can't decide from arch alone.
+    let tpl_src = gguf
+        .metadata_str("tokenizer.chat_template")
+        .unwrap_or("");
+    let tool_call_format_default =
+        crate::tool_call_parser::detect_format_from_template(tpl_src);
+    info!(
+        format = ?tool_call_format_default,
+        "tool-call format detected from chat template"
+    );
+
     // Sanity: device_ids must be valid.
     let n_available = device_count().unwrap_or(0);
     for d in &cfg.device_ids {
@@ -143,6 +156,7 @@ pub async fn serve(cfg: ServeConfig) -> Result<()> {
         inflight: Mutex::new(()),
         remote_tools,
         agent_stats: crate::agent_stats::AgentStatsRing::default(),
+        tool_call_format_default,
     });
 
     let app = Router::new()

@@ -104,20 +104,23 @@
   }
 
   /* Empty state */
+  /* L4 — slimmed hero. Centred greeting, smaller font, removed
+     vertical-fill so the composer + panels show without the user
+     having to scroll on first load. */
   .hero {
-    display: flex; flex-direction: column; align-items: center; justify-content: center;
-    min-height: calc(100vh - 56px - 180px);
+    display: flex; flex-direction: column; align-items: center;
+    justify-content: center;
+    min-height: 30vh;
     text-align: center;
+    padding-top: 20px;
   }
   .hero h1 {
-    font-family: "Iowan Old Style", "Apple Garamond", "Baskerville", "Times New Roman",
-                 "Droid Serif", Times, serif;
     font-weight: 500;
-    font-size: 42px;
-    line-height: 1.15;
-    color: var(--text);
-    margin: 0 0 32px;
-    letter-spacing: -0.5px;
+    font-size: 22px;
+    line-height: 1.3;
+    color: var(--text-soft);
+    margin: 0;
+    letter-spacing: -0.3px;
   }
   .hero h1 .accent { color: var(--accent); }
 
@@ -791,39 +794,28 @@
   }
   .send-btn svg { width: 18px; height: 18px; }
 
-  /* pill shortcuts under composer on empty state */
-  .pills {
-    display: flex; gap: 10px; flex-wrap: wrap;
-    justify-content: center;
-    margin-top: 16px;
-  }
-  .pill {
-    background: var(--panel);
-    border: 1px solid var(--border);
-    color: var(--text-soft);
-    padding: 7px 14px;
-    border-radius: 999px;
-    font-size: 13.5px;
-    cursor: pointer;
-    transition: background 120ms ease, border-color 120ms ease, color 120ms ease;
-  }
-  .pill:hover {
-    background: var(--panel-2);
-    border-color: var(--border-2);
-    color: var(--text);
-  }
-  .pill .ico { margin-right: 6px; opacity: 0.9; }
-
-  .footnote {
-    text-align: center;
-    color: var(--text-mute);
-    font-size: 11.5px;
-    margin-top: 10px;
-  }
-  .footnote .dot { opacity: 0.4; margin: 0 6px; }
-
   /* hide/show hero based on thread state */
   .thread.has-messages .hero { display: none; }
+
+  /* L3 — pp/tg perf-pill in the assistant turn footer.
+     Two compact figures (prefill tok/s, decode tok/s) that the
+     client computes from the streaming-chunk timestamps + the
+     `usage` field on the final SSE chunk. */
+  .perf-pill {
+    display: inline-flex; align-items: center; gap: 8px;
+    margin-top: 6px;
+    padding: 3px 10px;
+    border-radius: 999px;
+    font-size: 11px;
+    background: var(--panel);
+    border: 1px solid var(--border-2);
+    color: var(--text-mute);
+    font-family: "SFMono-Regular", "JetBrains Mono", Menlo, Consolas, monospace;
+  }
+  .perf-pill .perf-sep { opacity: 0.4; }
+  .perf-pill .perf-rate {
+    color: var(--text);
+  }
 
   /* thinking indicator on assistant row before first token */
   .dots { display: inline-flex; gap: 4px; padding: 4px 0; }
@@ -941,16 +933,6 @@
           </svg>
         </button>
       </form>
-      <div class="pills" id="pills">
-        <button class="pill" data-prompt="Help me write">✍︎ Write</button>
-        <button class="pill" data-prompt="Explain this to me">✦ Learn</button>
-        <button class="pill" data-prompt="Help me code">⟨⟩ Code</button>
-        <button class="pill" data-prompt="Brainstorm ideas">✱ Brainstorm</button>
-      </div>
-      <div class="footnote">
-        Streaming over <code style="color:var(--n8)">/v1/chat/completions</code>
-        <span class="dot">·</span> Flambeau runs locally on your GPU
-      </div>
     </div>
   </footer>
 </div>
@@ -958,19 +940,23 @@
 <script>
   // ---- state ---------------------------------------------------------------
   const thread   = document.getElementById("thread");
-  const hero     = document.getElementById("hero");
   const main     = document.getElementById("main");
   const form     = document.getElementById("composer");
   const input    = document.getElementById("input");
   const send     = document.getElementById("send");
-  const pills    = document.getElementById("pills");
   const modelTag = document.getElementById("model-tag");
 
-  // System prompt — prepended to every request so the model has a stable
-  // persona and doesn't greedy-stop after one token on short inputs.
+  // System prompt — prepended to every request. L2: the prior version
+  // didn't pin a response language, so Qwen3.6 occasionally drifted
+  // into Chinese on ambiguous prompts. The first sentence below pins
+  // English and only English unless the user explicitly writes in
+  // another language. The last paragraph guards against the
+  // "respond, then summarise yourself" tic this model has on short
+  // prompts.
   const SYSTEM_PROMPT = [
     "You are Flambeau, a concise and helpful AI assistant running locally on the user's GPU.",
-    "Answer the user directly and completely. Do not repeat or loop. Do not produce empty responses.",
+    "Always reply in English. Use the user's language ONLY if they explicitly write to you in a non-English language; otherwise English. Do not include Chinese, Japanese, or other non-Latin script unless the user wrote in those scripts.",
+    "Answer the user directly and completely. Do not repeat, do not loop, do not produce empty responses, and do NOT append a `Summary:` section recapping your own reply.",
     "Use Markdown when helpful. For code, use fenced code blocks with the language tag.",
     "If the user's request is short or ambiguous, give a short but substantive answer rather than stopping.",
   ].join(" ");
@@ -1506,15 +1492,6 @@
     }
   });
 
-  // ---- pills ---------------------------------------------------------------
-  pills.addEventListener("click", e => {
-    const btn = e.target.closest(".pill");
-    if (!btn) return;
-    input.value = btn.dataset.prompt + " ";
-    input.focus();
-    autosize();
-  });
-
   // ---- rendering -----------------------------------------------------------
   function appendUserMessage(text) {
     thread.classList.add("has-messages");
@@ -1686,6 +1663,12 @@
     // DOM order (matches the wire-stream interleaving).
     let mdBuffer = null;
     let mdBufferText = "";
+    // L3 — pp/tg timing. t0 = fetch start, t1 = first content delta
+    // (≈ end of prefill), tEnd = stream finish. Server emits `usage`
+    // on the final SSE chunk so the client can divide token counts.
+    const t0 = performance.now();
+    let t1 = 0;
+    let usage = null;
 
     const ensureFirstDeltaPainted = () => {
       if (firstDelta) {
@@ -1767,12 +1750,21 @@
         // order matching the stream.
         const contentDelta = delta?.content;
         if (typeof contentDelta === "string" && contentDelta.length) {
+          if (t1 === 0) t1 = performance.now();      // L3 — first content
           ensureFirstDeltaPainted();
           assistantText += contentDelta;
           if (!mdBuffer) freshMdBuffer();
           mdBufferText += contentDelta;
           mdBuffer.innerHTML = renderMarkdown(mdBufferText);
           scrollToBottom();
+        }
+        // L3 — server emits `usage` on the final stream chunk.
+        if (obj?.usage) usage = obj.usage;
+        // L3 — also count tool-call deltas as "first activity" so the
+        // perf pill reports a sensible prefill time on tool-only turns
+        // (which produce no content deltas at all).
+        if (t1 === 0 && Array.isArray(delta?.tool_calls) && delta.tool_calls.length) {
+          t1 = performance.now();
         }
 
         // C1.1 — tool-call deltas. OpenAI shape: each chunk carries
@@ -1899,6 +1891,10 @@
         badge.textContent = `finish_reason: ${finishReason}`;
         wrap.appendChild(badge);
       }
+      // L3 — perf pill: prefill tok/s + decode tok/s. Render only
+      // when we have both (a) the timestamps and (b) the server-side
+      // token counts.
+      attachPerfPill(wrap, t0, t1, performance.now(), usage);
       if (finishReason === "tool_calls" && serialisedToolCalls && serialisedToolCalls.length > 0) {
         appendToolReplyForm(wrap, serialisedToolCalls);
       }
@@ -1907,6 +1903,39 @@
       send.disabled = false;
       input.focus();
     }
+  }
+
+  /** L3 — render the prefill / token-generation perf pill below an
+   *  assistant turn. Inputs:
+   *    t0     ms — fetch start
+   *    t1     ms — first content delta arrival (≈ end of prefill)
+   *    tEnd   ms — stream finish
+   *    usage  { prompt_tokens, completion_tokens } from the final
+   *           SSE chunk (server-side counts)
+   *  Renders nothing when timing or counts are unavailable. */
+  function attachPerfPill(wrap, t0, t1, tEnd, usage) {
+    if (!usage) return;
+    const pTok = Number(usage.prompt_tokens) || 0;
+    const cTok = Number(usage.completion_tokens) || 0;
+    if (pTok === 0 && cTok === 0) return;
+
+    const pp_ms = t1 > 0 ? (t1 - t0) : 0;
+    const tg_ms = t1 > 0 ? (tEnd - t1) : 0;
+    const pp_rate = pp_ms > 0 ? (pTok / (pp_ms / 1000)) : 0;
+    const tg_rate = tg_ms > 0 ? (cTok / (tg_ms / 1000)) : 0;
+
+    const fmt = (r) => r >= 100 ? r.toFixed(0) : r.toFixed(1);
+    const pill = document.createElement("span");
+    pill.className = "perf-pill";
+    const pp = document.createElement("span");
+    pp.innerHTML = `pp <span class="perf-rate">${fmt(pp_rate)} tok/s</span> · ${pTok} tok / ${(pp_ms/1000).toFixed(2)} s`;
+    const sep = document.createElement("span");
+    sep.className = "perf-sep";
+    sep.textContent = "·";
+    const tg = document.createElement("span");
+    tg.innerHTML = `tg <span class="perf-rate">${fmt(tg_rate)} tok/s</span> · ${cTok} tok / ${(tg_ms/1000).toFixed(2)} s`;
+    pill.append(pp, sep, tg);
+    wrap.appendChild(pill);
   }
 
   /** C1.2 — render the tool-reply form below an assistant turn that
@@ -2014,6 +2043,10 @@
     const toolCalls = new Map();
     let mdBuffer = null;
     let mdBufferText = "";
+    // L3 — pp/tg timing for resume turns too.
+    const t0 = performance.now();
+    let t1 = 0;
+    let usage = null;
     const ensureFirstDeltaPainted = () => {
       if (firstDelta) {
         content.innerHTML = "";
@@ -2077,6 +2110,7 @@
         const delta = choice?.delta;
         const cd = delta?.content;
         if (typeof cd === "string" && cd.length) {
+          if (t1 === 0) t1 = performance.now();
           ensureFirstDeltaPainted();
           assistantText += cd;
           if (!mdBuffer) freshMdBuffer();
@@ -2084,6 +2118,7 @@
           mdBuffer.innerHTML = renderMarkdown(mdBufferText);
           scrollToBottom();
         }
+        if (obj?.usage) usage = obj.usage;
         const tcDeltas = delta?.tool_calls;
         if (Array.isArray(tcDeltas)) {
           for (const tc of tcDeltas) {
@@ -2161,6 +2196,7 @@
         badge.textContent = `finish_reason: ${finishReason}`;
         wrap.appendChild(badge);
       }
+      attachPerfPill(wrap, t0, t1, performance.now(), usage);
       if (finishReason === "tool_calls" && serialisedToolCalls && serialisedToolCalls.length > 0) {
         appendToolReplyForm(wrap, serialisedToolCalls);
       }

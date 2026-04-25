@@ -230,22 +230,31 @@ impl ToolCallFormat {
 ///   standard used across vLLM / SGLang / llama.cpp for non-Coder Qwens).
 pub fn choose_format(
     request_override: Option<&str>,
-    model_arch: &str,
+    server_default: ToolCallFormat,
 ) -> Result<ToolCallFormat> {
     match request_override {
-        Some("auto") | Some("") | None => Ok(arch_default(model_arch)),
+        Some("auto") | Some("") | None => Ok(server_default),
         Some(s) => ToolCallFormat::from_explicit(s),
     }
 }
 
-fn arch_default(model_arch: &str) -> ToolCallFormat {
-    match model_arch {
-        // Both `qwen35moe` (Qwen3.5/3.6) and `qwen3moe` (Qwen3 / non-hybrid)
-        // default to Hermes; the Coder family uses `qwen3_coder` as an
-        // explicit override.
-        "qwen35moe" | "qwen3moe" => ToolCallFormat::Hermes,
-        "qwen3_coder" | "qwen_coder" => ToolCallFormat::QwenCoder,
-        _ => ToolCallFormat::Hermes,
+/// Peek at the GGUF-embedded chat template and decide whether the
+/// model is trained to emit Hermes-JSON or Qwen3-Coder-XML
+/// tool calls. The Unsloth "UD" Qwen3.6 GGUFs ship a Coder-XML
+/// template even though `general.architecture` says `qwen35moe`,
+/// so we can't rely on arch alone — but the template itself
+/// contains the literal tag tokens that classify it.
+///
+/// Used by `flambeau serve` at startup to set
+/// `ServerState.tool_call_format_default` once per process. Per-
+/// request `tool_call_format` overrides are honoured first.
+pub fn detect_format_from_template(template_src: &str) -> ToolCallFormat {
+    // Coder-XML signature: literal tag instructions in the system
+    // prompt branch. Hermes templates emit JSON-shaped guidance.
+    if template_src.contains("<function=") || template_src.contains("<parameter=") {
+        ToolCallFormat::QwenCoder
+    } else {
+        ToolCallFormat::Hermes
     }
 }
 
@@ -254,9 +263,9 @@ fn arch_default(model_arch: &str) -> ToolCallFormat {
 /// type it is.
 pub fn dispatcher(
     request_override: Option<&str>,
-    model_arch: &str,
+    server_default: ToolCallFormat,
 ) -> Result<Box<dyn ToolCallParser>> {
-    match choose_format(request_override, model_arch)? {
+    match choose_format(request_override, server_default)? {
         ToolCallFormat::Hermes => Ok(Box::new(hermes::HermesJsonParser::new())),
         ToolCallFormat::QwenCoder => Ok(Box::new(qwen3_coder::QwenCoderXmlParser::new())),
     }
@@ -269,7 +278,7 @@ mod tests {
     #[test]
     fn explicit_hermes() {
         assert_eq!(
-            choose_format(Some("hermes"), "qwen35moe").unwrap(),
+            choose_format(Some("hermes"), ToolCallFormat::QwenCoder).unwrap(),
             ToolCallFormat::Hermes
         );
     }
@@ -277,34 +286,60 @@ mod tests {
     #[test]
     fn explicit_qwen_coder() {
         assert_eq!(
-            choose_format(Some("qwen3_coder"), "qwen35moe").unwrap(),
+            choose_format(Some("qwen3_coder"), ToolCallFormat::Hermes).unwrap(),
             ToolCallFormat::QwenCoder
         );
         assert_eq!(
-            choose_format(Some("qwen3-coder"), "qwen35moe").unwrap(),
+            choose_format(Some("qwen3-coder"), ToolCallFormat::Hermes).unwrap(),
             ToolCallFormat::QwenCoder
         );
     }
 
     #[test]
-    fn auto_and_none_use_arch_default() {
+    fn auto_and_none_use_server_default() {
+        // None / "auto" / "" all fall through to the server default.
         assert_eq!(
-            choose_format(None, "qwen35moe").unwrap(),
+            choose_format(None, ToolCallFormat::Hermes).unwrap(),
             ToolCallFormat::Hermes
         );
         assert_eq!(
-            choose_format(Some("auto"), "qwen35moe").unwrap(),
-            ToolCallFormat::Hermes
+            choose_format(Some("auto"), ToolCallFormat::QwenCoder).unwrap(),
+            ToolCallFormat::QwenCoder
         );
         assert_eq!(
-            choose_format(None, "qwen3_coder").unwrap(),
+            choose_format(Some(""), ToolCallFormat::QwenCoder).unwrap(),
             ToolCallFormat::QwenCoder
         );
     }
 
     #[test]
     fn unknown_format_is_error() {
-        assert!(choose_format(Some("qwen42"), "qwen35moe").is_err());
+        assert!(choose_format(Some("qwen42"), ToolCallFormat::Hermes).is_err());
+    }
+
+    #[test]
+    fn detect_format_qwen_coder_template() {
+        // Unsloth UD Qwen3.6 chat template signature.
+        let tpl = r#"
+            ... <tool_call>
+            <function=example>
+            <parameter=key>
+            value
+            </parameter>
+            </function>
+            </tool_call> ...
+        "#;
+        assert_eq!(
+            detect_format_from_template(tpl),
+            ToolCallFormat::QwenCoder
+        );
+    }
+
+    #[test]
+    fn detect_format_hermes_template() {
+        // Hermes-JSON template: no <function= / <parameter= literals.
+        let tpl = r#"<tool_call>{"name":"example","arguments":{}}</tool_call>"#;
+        assert_eq!(detect_format_from_template(tpl), ToolCallFormat::Hermes);
     }
 
     // ---- T2.5: split_events ----
@@ -397,10 +432,10 @@ mod tests {
     fn dispatcher_builds_parser() {
         // Both branches must construct without panicking. The passthrough
         // behaviour itself is covered in the per-parser test modules.
-        let mut p = dispatcher(Some("hermes"), "qwen35moe").unwrap();
+        let mut p = dispatcher(Some("hermes"), ToolCallFormat::QwenCoder).unwrap();
         let _ = p.push("hello");
         let _ = p.finish();
-        let mut p = dispatcher(Some("qwen3_coder"), "qwen35moe").unwrap();
+        let mut p = dispatcher(Some("qwen3_coder"), ToolCallFormat::Hermes).unwrap();
         let _ = p.push("hello");
         let _ = p.finish();
     }
