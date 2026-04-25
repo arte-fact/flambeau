@@ -430,6 +430,105 @@
     font-size: 14px;
   }
 
+  /* C4.2 — remote-tools panel. Collapsible, shows MCP upstreams the
+     server boot enumerated. Hidden entirely when /v1/tools returns
+     count=0 so single-process users (no --mcp flag) don't see a
+     dangling empty section. */
+  .tools-panel {
+    background: var(--panel);
+    border: 1px solid var(--border-2);
+    border-radius: 14px;
+    margin-bottom: 10px;
+    overflow: hidden;
+    font-size: 13px;
+  }
+  .tools-panel > summary {
+    list-style: none;
+    cursor: pointer;
+    padding: 9px 14px;
+    user-select: none;
+    color: var(--text-soft);
+    display: flex; align-items: center; gap: 10px;
+  }
+  .tools-panel > summary::-webkit-details-marker { display: none; }
+  .tools-panel > summary::before {
+    content: "▶";
+    font-size: 9px;
+    color: var(--text-mute);
+    transition: transform 120ms ease;
+    display: inline-block;
+  }
+  .tools-panel[open] > summary::before { transform: rotate(90deg); }
+  .tools-panel .tp-icon { font-size: 13px; }
+  .tools-panel .tp-summary {
+    color: var(--text-mute);
+    font-size: 11.5px;
+    margin-left: auto;
+    font-family: "SFMono-Regular", "JetBrains Mono", Menlo, Consolas, monospace;
+  }
+  .tools-panel .tp-refresh {
+    background: transparent;
+    border: 0;
+    color: var(--text-mute);
+    cursor: pointer;
+    font-size: 14px;
+    padding: 0 4px;
+    margin-left: 4px;
+    border-radius: 4px;
+  }
+  .tools-panel .tp-refresh:hover {
+    color: var(--text);
+    background: var(--bg-soft);
+  }
+  .tools-panel .tp-body {
+    padding: 0 14px 14px;
+  }
+  .tools-panel .tp-server {
+    margin-top: 8px;
+    padding: 8px 10px;
+    background: var(--bg-soft);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+  }
+  .tools-panel .tp-server-head {
+    color: var(--accent);
+    font-family: "SFMono-Regular", "JetBrains Mono", Menlo, Consolas, monospace;
+    font-size: 12px;
+    margin-bottom: 6px;
+    word-break: break-all;
+  }
+  .tools-panel .tp-tool {
+    margin: 6px 0;
+    padding: 6px 0;
+    border-top: 1px solid var(--border);
+  }
+  .tools-panel .tp-tool:first-of-type {
+    border-top: 0;
+    padding-top: 0;
+  }
+  .tools-panel .tp-tool-name {
+    color: var(--text);
+    font-family: "SFMono-Regular", "JetBrains Mono", Menlo, Consolas, monospace;
+    font-size: 12.5px;
+    font-weight: 500;
+  }
+  .tools-panel .tp-tool-desc {
+    color: var(--text-soft);
+    font-size: 12px;
+    margin-top: 2px;
+  }
+  .tools-panel .tp-tool-schema {
+    margin-top: 4px;
+    background: var(--code-bg);
+    border-radius: 6px;
+    padding: 6px 8px;
+    font-family: "SFMono-Regular", "JetBrains Mono", Menlo, Consolas, monospace;
+    font-size: 11px;
+    color: var(--text-soft);
+    overflow-x: auto;
+    white-space: pre;
+  }
+
   /* C2.1 — sampler panel above the composer. Collapsible <details>
      with a 3-column grid of number inputs. Persists per-field in
      localStorage; the summary chip shows the most-edited fields so
@@ -652,6 +751,15 @@
 
   <footer>
     <div class="composer-wrap">
+      <details class="tools-panel" id="tools-panel" hidden>
+        <summary>
+          <span class="tp-icon">🛠</span>
+          <span>Remote tools</span>
+          <span class="tp-summary" id="tp-summary"></span>
+          <button type="button" class="tp-refresh" id="tp-refresh" title="Refresh">↻</button>
+        </summary>
+        <div class="tp-body" id="tp-body"></div>
+      </details>
       <details class="sampler-panel" id="sampler-panel">
         <summary>
           <span class="sp-icon">⚙</span>
@@ -1110,6 +1218,81 @@
     const id = j?.data?.[0]?.id || "flambeau";
     modelTag.textContent = id;
   }).catch(() => { modelTag.textContent = "flambeau"; });
+
+  // C4.2 — remote-tools panel. Calls C4.1's `/v1/tools` and groups the
+  // returned tools by `server_url` for display. Whole panel stays
+  // hidden if the server has no `--mcp` upstreams configured.
+  async function refreshToolsPanel() {
+    const panel = document.getElementById("tools-panel");
+    const summary = document.getElementById("tp-summary");
+    const body = document.getElementById("tp-body");
+    if (!panel || !summary || !body) return;
+    let data;
+    try {
+      const res = await fetch("/v1/tools");
+      if (!res.ok) throw new Error("HTTP " + res.status);
+      data = await res.json();
+    } catch (e) {
+      panel.hidden = true;
+      return;
+    }
+    const tools = Array.isArray(data?.remote_tools) ? data.remote_tools : [];
+    if (tools.length === 0) {
+      panel.hidden = true;
+      return;
+    }
+    panel.hidden = false;
+    // Group tools by server_url so users see one block per upstream.
+    const byServer = new Map();
+    for (const t of tools) {
+      const k = t.server_url || "(unknown)";
+      if (!byServer.has(k)) byServer.set(k, []);
+      byServer.get(k).push(t);
+    }
+    summary.textContent = `${tools.length} tool${tools.length !== 1 ? "s" : ""} on ${byServer.size} server${byServer.size !== 1 ? "s" : ""}`;
+    // Render. innerHTML wipe is fine — the body never has stateful DOM.
+    body.innerHTML = "";
+    for (const [url, ts] of byServer) {
+      const block = document.createElement("div");
+      block.className = "tp-server";
+      const head = document.createElement("div");
+      head.className = "tp-server-head";
+      head.textContent = url;
+      block.appendChild(head);
+      for (const t of ts) {
+        const tool = document.createElement("div");
+        tool.className = "tp-tool";
+        const name = document.createElement("div");
+        name.className = "tp-tool-name";
+        name.textContent = t.name;
+        tool.appendChild(name);
+        if (t.description) {
+          const desc = document.createElement("div");
+          desc.className = "tp-tool-desc";
+          desc.textContent = t.description;
+          tool.appendChild(desc);
+        }
+        if (t.input_schema && Object.keys(t.input_schema).length > 0) {
+          const sch = document.createElement("pre");
+          sch.className = "tp-tool-schema";
+          try {
+            sch.textContent = JSON.stringify(t.input_schema, null, 2);
+          } catch {
+            sch.textContent = String(t.input_schema);
+          }
+          tool.appendChild(sch);
+        }
+        block.appendChild(tool);
+      }
+      body.appendChild(block);
+    }
+  }
+  document.getElementById("tp-refresh")?.addEventListener("click", (e) => {
+    e.preventDefault();
+    e.stopPropagation();
+    refreshToolsPanel();
+  });
+  refreshToolsPanel();
 
   // ---- textarea auto-grow --------------------------------------------------
   function autosize() {
