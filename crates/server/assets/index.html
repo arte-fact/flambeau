@@ -152,6 +152,76 @@
     font-family: "SFMono-Regular", "JetBrains Mono", Menlo, Consolas, monospace;
   }
 
+  /* C3.1 — markdown elements rendered inside .md-buffer. Reset to no
+     pre-wrap so block-level elements (lists, blockquotes, code blocks)
+     control their own whitespace. */
+  .msg.assistant .md-buffer {
+    display: block;
+    white-space: normal;
+  }
+  .msg.assistant .md-buffer p {
+    margin: 0 0 10px;
+    white-space: pre-wrap;
+  }
+  .msg.assistant .md-buffer p:last-child { margin-bottom: 0; }
+  .msg.assistant .md-buffer h1,
+  .msg.assistant .md-buffer h2,
+  .msg.assistant .md-buffer h3 {
+    margin: 18px 0 8px;
+    line-height: 1.25;
+    color: var(--text);
+  }
+  .msg.assistant .md-buffer h1 { font-size: 1.45em; font-weight: 600; }
+  .msg.assistant .md-buffer h2 { font-size: 1.25em; font-weight: 600; }
+  .msg.assistant .md-buffer h3 { font-size: 1.10em; font-weight: 600; }
+  .msg.assistant .md-buffer ul,
+  .msg.assistant .md-buffer ol {
+    margin: 0 0 10px;
+    padding-left: 24px;
+  }
+  .msg.assistant .md-buffer li { margin: 2px 0; }
+  .msg.assistant .md-buffer blockquote {
+    margin: 10px 0;
+    padding: 6px 12px;
+    border-left: 3px solid var(--border-2);
+    color: var(--text-soft);
+    background: rgba(76,86,106,0.15);
+    border-radius: 0 6px 6px 0;
+  }
+  .msg.assistant .md-buffer hr {
+    border: 0;
+    border-top: 1px solid var(--border-2);
+    margin: 14px 0;
+  }
+  .msg.assistant .md-buffer a {
+    color: var(--n8);
+    text-decoration: underline;
+    text-underline-offset: 2px;
+  }
+  .msg.assistant .md-buffer strong { color: var(--text); font-weight: 600; }
+  .msg.assistant .md-buffer em     { color: var(--text); font-style: italic; }
+  .msg.assistant .md-buffer pre {
+    margin: 10px 0;
+    background: var(--code-bg);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 10px 12px;
+    overflow-x: auto;
+    font-family: "SFMono-Regular", "JetBrains Mono", Menlo, Consolas, monospace;
+    font-size: 13px;
+    line-height: 1.45;
+  }
+  .msg.assistant .md-buffer pre code {
+    background: transparent;
+    padding: 0;
+    color: var(--text);
+    font-size: inherit;
+  }
+  .msg.assistant .md-buffer pre.unterminated {
+    border-color: var(--n13);
+    border-style: dashed;
+  }
+
   /* C1.1 — Tool-call cards.
      One <details> per tool call the model emitted, accumulating
      `function.name` + streaming `function.arguments`. Distinct from
@@ -673,6 +743,196 @@
   const history = [{ role: "system", content: SYSTEM_PROMPT }];
   let generating = false;
 
+  // C3.1 — minimum-viable Markdown renderer for assistant content.
+  // Streaming-safe: callers re-invoke on the full accumulated buffer
+  // each delta; result HTML is then assigned to .md-buffer.innerHTML.
+  // Subset covers what Qwen actually emits in chat:
+  //   - fenced code blocks ```lang\n...\n``` (unterminated → dashed)
+  //   - inline code `…`
+  //   - **bold** and *italic* (also __ / _)
+  //   - [text](url) links
+  //   - # / ## / ### headings (start of line)
+  //   - - / * unordered lists, 1. ordered lists (consecutive lines)
+  //   - > blockquote (consecutive lines)
+  //   - --- horizontal rule
+  // Skipped: tables, images, footnotes, autolinks. C3.2 layers
+  // syntax-highlighting on top of the produced <code> blocks.
+  function escapeHtml(s) {
+    return s
+      .replace(/&/g, "&amp;")
+      .replace(/</g, "&lt;")
+      .replace(/>/g, "&gt;")
+      .replace(/"/g, "&quot;")
+      .replace(/'/g, "&#39;");
+  }
+  function renderMarkdown(src) {
+    if (!src) return "";
+
+    // Step 1 — extract fenced code blocks. Two passes:
+    // (a) closed fences: ```lang\n...body...\n``` — must end with the
+    //     literal "\n```" (or "```" at the very start). Greedy matching
+    //     stops at the first closing fence.
+    // (b) one trailing unterminated fence at end-of-input: streaming
+    //     mid-block. Renders with a dashed border so the user knows
+    //     the model is still typing inside it.
+    const blocks = [];
+    let buf = "";
+    {
+      // Pass (a) — closed fences anywhere.
+      const closedFence = /(^|\n)```([^\n`]*)\n([\s\S]*?)\n```(?=\n|$)/g;
+      let last = 0;
+      let m;
+      while ((m = closedFence.exec(src)) !== null) {
+        const matchStart = m.index + m[1].length; // skip the leading \n we captured
+        buf += src.slice(last, matchStart);
+        buf += `\x00CODE${blocks.length}\x00`;
+        blocks.push({
+          lang: (m[2] || "").trim(),
+          body: m[3] ?? "",
+          closed: true,
+        });
+        last = m.index + m[0].length;
+      }
+      let remainder = src.slice(last);
+      // Pass (b) — single trailing unterminated fence. Must start at
+      // beginning of remainder OR after a newline.
+      const open = /(^|\n)```([^\n`]*)\n([\s\S]*)$/.exec(remainder);
+      if (open) {
+        buf += remainder.slice(0, open.index + open[1].length);
+        buf += `\x00CODE${blocks.length}\x00`;
+        blocks.push({
+          lang: (open[2] || "").trim(),
+          body: open[3] ?? "",
+          closed: false,
+        });
+      } else {
+        buf += remainder;
+      }
+    }
+
+    // Step 2 — escape HTML on the non-code remainder.
+    buf = escapeHtml(buf);
+
+    // Step 3 — line-level transforms with light grouping.
+    const lines = buf.split("\n");
+    const out = [];
+    let i = 0;
+    const flushParagraph = (pBuf) => {
+      if (pBuf.length === 0) return;
+      // Collapse soft-wraps inside a paragraph using <br> for clarity;
+      // the <p>'s `white-space:pre-wrap` already preserves them.
+      out.push(`<p>${inlineTransforms(pBuf.join("\n"))}</p>`);
+    };
+    while (i < lines.length) {
+      const ln = lines[i];
+      const lnTrim = ln.trim();
+
+      // Horizontal rule.
+      if (/^---+$/.test(lnTrim) || /^\*\*\*+$/.test(lnTrim)) {
+        out.push("<hr>");
+        i++; continue;
+      }
+      // Headings.
+      const h = /^(#{1,3})\s+(.*)$/.exec(ln);
+      if (h) {
+        const level = h[1].length;
+        out.push(`<h${level}>${inlineTransforms(h[2])}</h${level}>`);
+        i++; continue;
+      }
+      // Blockquote run.
+      if (/^&gt;\s?/.test(ln)) {
+        const body = [];
+        while (i < lines.length && /^&gt;\s?/.test(lines[i])) {
+          body.push(lines[i].replace(/^&gt;\s?/, ""));
+          i++;
+        }
+        out.push(`<blockquote>${inlineTransforms(body.join("\n"))}</blockquote>`);
+        continue;
+      }
+      // Unordered list run.
+      if (/^[-*]\s+/.test(ln)) {
+        const items = [];
+        while (i < lines.length && /^[-*]\s+/.test(lines[i])) {
+          items.push(`<li>${inlineTransforms(lines[i].replace(/^[-*]\s+/, ""))}</li>`);
+          i++;
+        }
+        out.push(`<ul>${items.join("")}</ul>`);
+        continue;
+      }
+      // Ordered list run.
+      if (/^\d+\.\s+/.test(ln)) {
+        const items = [];
+        while (i < lines.length && /^\d+\.\s+/.test(lines[i])) {
+          items.push(`<li>${inlineTransforms(lines[i].replace(/^\d+\.\s+/, ""))}</li>`);
+          i++;
+        }
+        out.push(`<ol>${items.join("")}</ol>`);
+        continue;
+      }
+      // Paragraph: gather lines until blank.
+      if (lnTrim.length === 0) { i++; continue; }
+      const para = [ln];
+      i++;
+      while (i < lines.length) {
+        const next = lines[i];
+        if (next.trim().length === 0) break;
+        if (/^(#{1,3})\s+/.test(next)) break;
+        if (/^[-*]\s+/.test(next)) break;
+        if (/^\d+\.\s+/.test(next)) break;
+        if (/^&gt;\s?/.test(next)) break;
+        if (/^---+$/.test(next.trim())) break;
+        para.push(next);
+        i++;
+      }
+      flushParagraph(para);
+    }
+
+    let html = out.join("\n");
+
+    // Step 4 — inline transforms inside blocks already applied above
+    //          via inlineTransforms(); nothing to do at the document
+    //          level here.
+
+    // Step 5 — splice fenced code blocks back in.
+    html = html.replace(/(?:<p>)?\x00CODE(\d+)\x00(?:<\/p>)?/g, (_m, n) => {
+      const b = blocks[Number(n)];
+      const cls = b.lang ? ` class="lang-${escapeHtml(b.lang)}"` : "";
+      const preCls = b.closed ? "" : " class=\"unterminated\"";
+      return `<pre${preCls}><code${cls}>${escapeHtml(b.body)}</code></pre>`;
+    });
+
+    return html;
+  }
+  /** Inline-level: code spans, bold, italic, links. Operates on
+   *  HTML-escaped text — caller has already done escapeHtml(). */
+  function inlineTransforms(s) {
+    // 1. Inline code first (so its content is NOT touched by the
+    //    bold/italic/link transforms).
+    const codeStash = [];
+    s = s.replace(/`([^`\n]+)`/g, (_m, body) => {
+      codeStash.push(body);
+      return `\x01CODE${codeStash.length - 1}\x01`;
+    });
+    // 2. Bold.
+    s = s.replace(/\*\*([^\s*][^*]*?)\*\*/g, "<strong>$1</strong>");
+    s = s.replace(/__([^\s_][^_]*?)__/g, "<strong>$1</strong>");
+    // 3. Italic. Both forms require the boundary chars to be NOT-word
+    //    characters so identifiers like `snake_case_var` and arithmetic
+    //    like `a*b` don't get false-matched.
+    s = s.replace(/(^|[^\w*])\*([^\s*][^*\n]*?)\*(?=[^\w*]|$)/g, "$1<em>$2</em>");
+    s = s.replace(/(^|[^\w_])_([^\s_][^_\n]*?)_(?=[^\w_]|$)/g, "$1<em>$2</em>");
+    // 4. Links. Plain [text](url); HTML-escape the URL.
+    s = s.replace(/\[([^\]]+)\]\(([^)\s]+)\)/g, (_m, text, url) =>
+      `<a href="${escapeHtml(url)}" target="_blank" rel="noopener">${text}</a>`);
+    // 5. Restore inline code. The stashed body was extracted AFTER the
+    //    document-wide escapeHtml() at step-2 of renderMarkdown, so
+    //    its content is already entity-encoded — wrap in <code>
+    //    without re-escaping (otherwise &lt; → &amp;lt;).
+    s = s.replace(/\x01CODE(\d+)\x01/g,
+      (_m, n) => `<code>${codeStash[Number(n)]}</code>`);
+    return s;
+  }
+
   // C2.1 — sampler controls. Per-field localStorage; empty inputs fall
   // through to server defaults (so an empty `temperature` lets the
   // server use Qwen3.5's published default of 1.0 from `from_parts`).
@@ -885,9 +1145,14 @@
     const caret = document.createElement("span");
     caret.className = "caret";
     // C1.1 — per-tool-call accumulation state, keyed by streaming `index`.
-    // Each entry: { id, name, args, card, argsPre, nameSpan, idSpan }.
     /** @type {Map<number, {id:string,name:string,args:string,card:HTMLDetailsElement,argsPre:HTMLPreElement,nameSpan:HTMLSpanElement,idSpan:HTMLSpanElement}>} */
     const toolCalls = new Map();
+    // C3.1 — text accumulates into an .md-buffer that's re-rendered as
+    // Markdown on each delta. A fresh buffer is started after each
+    // tool-call open so subsequent text appears AFTER the card in
+    // DOM order (matches the wire-stream interleaving).
+    let mdBuffer = null;
+    let mdBufferText = "";
 
     const ensureFirstDeltaPainted = () => {
       if (firstDelta) {
@@ -896,6 +1161,13 @@
         firstDelta = false;
       }
     };
+    function freshMdBuffer() {
+      mdBuffer = document.createElement("span");
+      mdBuffer.className = "md-buffer";
+      mdBufferText = "";
+      ensureFirstDeltaPainted();
+      content.insertBefore(mdBuffer, caret);
+    }
 
     /** Build a fresh tool-call card and insert it BEFORE the caret so
      *  subsequent text deltas continue to flow at the end. */
@@ -955,12 +1227,18 @@
         const choice = obj?.choices?.[0];
         const delta = choice?.delta;
 
-        // Plain content stream (T2.5 / T3.1 text path).
+        // Plain content stream (T2.5 / T3.1 text path). Re-render the
+        // current md-buffer's text on every delta so Markdown updates
+        // live (C3.1). A fresh buffer is created lazily here and after
+        // each tool-call open so cards interleave with text in DOM
+        // order matching the stream.
         const contentDelta = delta?.content;
         if (typeof contentDelta === "string" && contentDelta.length) {
           ensureFirstDeltaPainted();
           assistantText += contentDelta;
-          caret.insertAdjacentText("beforebegin", contentDelta);
+          if (!mdBuffer) freshMdBuffer();
+          mdBufferText += contentDelta;
+          mdBuffer.innerHTML = renderMarkdown(mdBufferText);
           scrollToBottom();
         }
 
@@ -987,6 +1265,10 @@
                 idSpan: dom.idSpan,
               };
               toolCalls.set(idx, entry);
+              // C3.1 — seal the current md-buffer so any subsequent
+              // text appears AFTER this card in DOM order, matching
+              // the wire stream's interleaving.
+              mdBuffer = null;
             }
             if (typeof tc.id === "string" && tc.id) {
               entry.id = tc.id;
@@ -1188,6 +1470,8 @@
     caret.className = "caret";
     /** @type {Map<number, any>} */
     const toolCalls = new Map();
+    let mdBuffer = null;
+    let mdBufferText = "";
     const ensureFirstDeltaPainted = () => {
       if (firstDelta) {
         content.innerHTML = "";
@@ -1195,6 +1479,13 @@
         firstDelta = false;
       }
     };
+    function freshMdBuffer() {
+      mdBuffer = document.createElement("span");
+      mdBuffer.className = "md-buffer";
+      mdBufferText = "";
+      ensureFirstDeltaPainted();
+      content.insertBefore(mdBuffer, caret);
+    }
     function createToolCallCard(index) {
       const card = document.createElement("details");
       card.className = "tool-call-card";
@@ -1246,7 +1537,9 @@
         if (typeof cd === "string" && cd.length) {
           ensureFirstDeltaPainted();
           assistantText += cd;
-          caret.insertAdjacentText("beforebegin", cd);
+          if (!mdBuffer) freshMdBuffer();
+          mdBufferText += cd;
+          mdBuffer.innerHTML = renderMarkdown(mdBufferText);
           scrollToBottom();
         }
         const tcDeltas = delta?.tool_calls;
@@ -1259,6 +1552,7 @@
               const dom = createToolCallCard(idx);
               entry = { id: "", name: "", args: "", ...dom };
               toolCalls.set(idx, entry);
+              mdBuffer = null;
             }
             if (typeof tc.id === "string" && tc.id) {
               entry.id = tc.id; entry.idSpan.textContent = tc.id;
