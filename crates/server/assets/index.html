@@ -430,6 +430,78 @@
     font-size: 14px;
   }
 
+  /* C5.1 — agent-loop stats panel. Fetches /v1/agent/stats and
+     renders the per-iteration ring. Auto-refreshes while open. */
+  .stats-panel {
+    background: var(--panel);
+    border: 1px solid var(--border-2);
+    border-radius: 14px;
+    margin-bottom: 10px;
+    overflow: hidden;
+    font-size: 13px;
+  }
+  .stats-panel > summary {
+    list-style: none;
+    cursor: pointer;
+    padding: 9px 14px;
+    user-select: none;
+    color: var(--text-soft);
+    display: flex; align-items: center; gap: 10px;
+  }
+  .stats-panel > summary::-webkit-details-marker { display: none; }
+  .stats-panel > summary::before {
+    content: "▶";
+    font-size: 9px;
+    color: var(--text-mute);
+    transition: transform 120ms ease;
+    display: inline-block;
+  }
+  .stats-panel[open] > summary::before { transform: rotate(90deg); }
+  .stats-panel .sp2-summary {
+    color: var(--text-mute);
+    font-size: 11.5px;
+    margin-left: auto;
+    font-family: "SFMono-Regular", "JetBrains Mono", Menlo, Consolas, monospace;
+  }
+  .stats-panel .sp2-body { padding: 0 14px 14px; }
+  .stats-panel .sp2-empty {
+    color: var(--text-mute);
+    font-size: 12px;
+    font-style: italic;
+    padding: 4px 0;
+  }
+  .stats-panel table {
+    width: 100%;
+    border-collapse: collapse;
+    font-family: "SFMono-Regular", "JetBrains Mono", Menlo, Consolas, monospace;
+    font-size: 11.5px;
+  }
+  .stats-panel thead th {
+    text-align: left;
+    color: var(--text-mute);
+    font-weight: 500;
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+    font-size: 10.5px;
+    padding: 6px 8px;
+    border-bottom: 1px solid var(--border);
+  }
+  .stats-panel tbody td {
+    padding: 4px 8px;
+    border-bottom: 1px solid var(--border);
+    color: var(--text-soft);
+    vertical-align: top;
+  }
+  .stats-panel tbody tr:last-child td { border-bottom: 0; }
+  .stats-panel .sp2-finish-tool_calls { color: var(--accent); }
+  .stats-panel .sp2-finish-stop       { color: var(--text-mute); }
+  .stats-panel .sp2-finish-length     { color: var(--n13); }
+  .stats-panel .sp2-finish-error      { color: var(--n11); }
+  .stats-panel .sp2-tools-cell {
+    color: var(--text);
+    word-break: break-all;
+  }
+
   /* C4.2 — remote-tools panel. Collapsible, shows MCP upstreams the
      server boot enumerated. Hidden entirely when /v1/tools returns
      count=0 so single-process users (no --mcp flag) don't see a
@@ -751,6 +823,16 @@
 
   <footer>
     <div class="composer-wrap">
+      <details class="stats-panel" id="stats-panel">
+        <summary>
+          <span class="sp2-icon">📊</span>
+          <span>Agent stats</span>
+          <span class="sp2-summary" id="sp2-summary"></span>
+        </summary>
+        <div class="sp2-body" id="sp2-body">
+          <div class="sp2-empty">No iterations yet — send a message that triggers a tool call.</div>
+        </div>
+      </details>
       <details class="tools-panel" id="tools-panel" hidden>
         <summary>
           <span class="tp-icon">🛠</span>
@@ -1293,6 +1375,81 @@
     refreshToolsPanel();
   });
   refreshToolsPanel();
+
+  // C5.1 — agent-loop stats panel. Fetches /v1/agent/stats and
+  // renders the M2.3 ring. Auto-refreshes every 5s while the panel
+  // is open; pauses when closed so we don't spam the server.
+  const statsPanel = document.getElementById("stats-panel");
+  let statsTimer = null;
+  function shortId(s) {
+    if (!s) return "";
+    const stripped = String(s).replace(/^chatcmpl-/, "");
+    return stripped.length > 10 ? stripped.slice(0, 10) + "…" : stripped;
+  }
+  async function refreshStatsPanel() {
+    const body = document.getElementById("sp2-body");
+    const summary = document.getElementById("sp2-summary");
+    if (!body || !summary) return;
+    let data;
+    try {
+      const res = await fetch("/v1/agent/stats");
+      if (!res.ok) throw new Error("HTTP " + res.status);
+      data = await res.json();
+    } catch {
+      summary.textContent = "fetch failed";
+      return;
+    }
+    const iters = Array.isArray(data?.iterations) ? data.iterations : [];
+    summary.textContent = `${iters.length} iter${iters.length !== 1 ? "s" : ""}`;
+    if (iters.length === 0) {
+      body.innerHTML = `<div class="sp2-empty">No iterations yet — send a message that triggers a tool call.</div>`;
+      return;
+    }
+    // Most-recent first, newest at top.
+    const rows = iters.slice().reverse().slice(0, 50);
+    let html = `<table><thead><tr>
+      <th>session</th>
+      <th>iter</th>
+      <th>tools</th>
+      <th>p tok</th>
+      <th>c tok</th>
+      <th>ms</th>
+      <th>finish</th>
+    </tr></thead><tbody>`;
+    for (const r of rows) {
+      const finish = String(r.finish_reason || "");
+      const tools = Array.isArray(r.tool_names) && r.tool_names.length
+        ? r.tool_names.join(", ")
+        : "—";
+      html += `<tr>
+        <td>${escapeHtml(shortId(r.session_id))}</td>
+        <td>${r.iteration ?? "?"}</td>
+        <td class="sp2-tools-cell">${escapeHtml(tools)}</td>
+        <td>${r.prompt_tokens ?? 0}</td>
+        <td>${r.completion_tokens ?? 0}</td>
+        <td>${r.latency_ms ?? 0}</td>
+        <td><span class="sp2-finish-${escapeHtml(finish)}">${escapeHtml(finish)}</span></td>
+      </tr>`;
+    }
+    html += "</tbody></table>";
+    body.innerHTML = html;
+  }
+  function startStatsTimer() {
+    if (statsTimer) return;
+    refreshStatsPanel();
+    statsTimer = setInterval(refreshStatsPanel, 5000);
+  }
+  function stopStatsTimer() {
+    if (!statsTimer) return;
+    clearInterval(statsTimer);
+    statsTimer = null;
+  }
+  if (statsPanel) {
+    statsPanel.addEventListener("toggle", () => {
+      if (statsPanel.open) startStatsTimer();
+      else stopStatsTimer();
+    });
+  }
 
   // ---- textarea auto-grow --------------------------------------------------
   function autosize() {
