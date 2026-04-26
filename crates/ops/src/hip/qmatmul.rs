@@ -820,6 +820,15 @@ impl Recipe {
         // (latency-hiding lever). Opt-in via `FLAMBEAU_Q8_0_MMVQ_T128=on`.
         let force_q8_t128 =
             std::env::var("FLAMBEAU_Q8_0_MMVQ_T128").as_deref() == Ok("on");
+        // C9-followup — combine t128 occupancy lever with VDR=2 inner loop.
+        // After multi-run bench (≥+3 % on both Qwen3.6-27B-Q8_0 and
+        // Qwen3.5-27B-Q8_0), this is the new Q8_0 single-row default. Set
+        // `FLAMBEAU_Q8_0_MMVQ_T128_VDR2=off` to opt out back to the
+        // pre-c9-followup vdr2 schedule.
+        let q8_t128_vdr2_setting =
+            std::env::var("FLAMBEAU_Q8_0_MMVQ_T128_VDR2").ok();
+        let q8_t128_vdr2_opt_out = q8_t128_vdr2_setting.as_deref() == Some("off");
+        let q8_t128_vdr2_default_on = !q8_t128_vdr2_opt_out;
         let impl_id = match (impl_id, force_baseline, force_dp4a_only, force_llamacpp) {
             // V2.7: baseline-opt-out reverts tile16 → tile8 for regression A/B.
             // Must precede the general `force_baseline` catch-all below so the
@@ -876,7 +885,16 @@ impl Recipe {
             ("qmatmul_q8_0_mmvq_dp4a_vdr2_gfx906", _, _, _) if force_q8_t128 => {
                 "qmatmul_q8_0_mmvq_t128_gfx906"
             }
-            // Default: fastest productised paths.
+            // C9-followup — Q8_0 t128_vdr2 (combine occupancy + ILP).
+            // Default-on after multi-run bench. Opt out via
+            // FLAMBEAU_Q8_0_MMVQ_T128_VDR2=off to fall through to vdr2.
+            ("qmatmul_q8_0_mmvq_single_row_gfx906", _, _, _) if q8_t128_vdr2_default_on => {
+                "qmatmul_q8_0_mmvq_t128_vdr2_gfx906"
+            }
+            ("qmatmul_q8_0_mmvq_dp4a_vdr2_gfx906", _, _, _) if q8_t128_vdr2_default_on => {
+                "qmatmul_q8_0_mmvq_t128_vdr2_gfx906"
+            }
+            // Pre-c9-followup default (vdr2 256t).
             ("qmatmul_q8_0_mmvq_single_row_gfx906", _, _, _) => {
                 "qmatmul_q8_0_mmvq_dp4a_vdr2_gfx906"
             }
@@ -930,6 +948,14 @@ impl Recipe {
                 kind: RecipeKind::Mmvq,
                 stem: "mmvq_q8_0_t128",
                 entry: "flambeau_mmvq_q8_0_t128_q8_1",
+                threads: 128,
+                rows_per_block: 1,
+                mmq_tile: (0, 0),
+            },
+            "qmatmul_q8_0_mmvq_t128_vdr2_gfx906" => Self {
+                kind: RecipeKind::Mmvq,
+                stem: "mmvq_q8_0_t128_vdr2",
+                entry: "flambeau_mmvq_q8_0_t128_vdr2_q8_1",
                 threads: 128,
                 rows_per_block: 1,
                 mmq_tile: (0, 0),

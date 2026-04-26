@@ -75,12 +75,15 @@ pub enum Dtype {
     /// for Q8_0 weights — targets the gfx906 latency-bound regime where Q8_0
     /// MMVQ is the dominant kernel on Coder-30B-Q8_0 / 27B-Q8_0 decode.
     Q8_0T128,
+    /// C9-followup t128 + VDR=2 combined (the kernel that should beat
+    /// vdr2-alone where t128-alone lost).
+    Q8_0T128VDR2,
 }
 
 impl Dtype {
     pub fn name(self) -> &'static str {
         match self {
-            Dtype::Q8_0 | Dtype::Q8_0T128 => "Q8_0",
+            Dtype::Q8_0 | Dtype::Q8_0T128 | Dtype::Q8_0T128VDR2 => "Q8_0",
             Dtype::Q4K | Dtype::Q4KR2 => "Q4_K",
             Dtype::Q5K | Dtype::Q5KR2 => "Q5_K",
             Dtype::Q6K | Dtype::Q6KR4 | Dtype::Q6KDP4A => "Q6_K",
@@ -90,7 +93,7 @@ impl Dtype {
 
     pub fn ggml(self) -> GgmlDType {
         match self {
-            Dtype::Q8_0 | Dtype::Q8_0T128 => GgmlDType::Q8_0,
+            Dtype::Q8_0 | Dtype::Q8_0T128 | Dtype::Q8_0T128VDR2 => GgmlDType::Q8_0,
             Dtype::Q4K | Dtype::Q4KR2 => GgmlDType::Q4K,
             Dtype::Q5K | Dtype::Q5KR2 => GgmlDType::Q5K,
             Dtype::Q6K | Dtype::Q6KR4 | Dtype::Q6KDP4A => GgmlDType::Q6K,
@@ -113,6 +116,7 @@ impl Dtype {
             Dtype::Q4_1R2DP4A => "qmatmul_q4_1_mmvq_r2_dp4a_gfx906",
             Dtype::Q4_1T128 => "qmatmul_q4_1_mmvq_t128_gfx906",
             Dtype::Q8_0T128 => "qmatmul_q8_0_mmvq_t128_gfx906",
+            Dtype::Q8_0T128VDR2 => "qmatmul_q8_0_mmvq_t128_vdr2_gfx906",
         }
     }
 
@@ -120,6 +124,7 @@ impl Dtype {
         match self {
             Dtype::Q8_0 => "mmvq_q8_0",
             Dtype::Q8_0T128 => "mmvq_q8_0_t128",
+            Dtype::Q8_0T128VDR2 => "mmvq_q8_0_t128_vdr2",
             Dtype::Q4K => "mmvq_q4_k",
             Dtype::Q5K => "mmvq_q5_k",
             Dtype::Q6K => "mmvq_q6_k",
@@ -149,12 +154,13 @@ impl Dtype {
             Dtype::Q4_1R2DP4A => "flambeau_mmvq_q4_1_r2_dp4a_q8_1",
             Dtype::Q4_1T128 => "flambeau_mmvq_q4_1_t128_q8_1",
             Dtype::Q8_0T128 => "flambeau_mmvq_q8_0_t128_q8_1",
+            Dtype::Q8_0T128VDR2 => "flambeau_mmvq_q8_0_t128_vdr2_q8_1",
         }
     }
 
     fn block_size_bytes(self) -> usize {
         match self {
-            Dtype::Q8_0 | Dtype::Q8_0T128 => std::mem::size_of::<BlockQ8_0>(),
+            Dtype::Q8_0 | Dtype::Q8_0T128 | Dtype::Q8_0T128VDR2 => std::mem::size_of::<BlockQ8_0>(),
             Dtype::Q4K | Dtype::Q4KR2 => std::mem::size_of::<BlockQ4K>(),
             Dtype::Q5K | Dtype::Q5KR2 => std::mem::size_of::<BlockQ5K>(),
             Dtype::Q6K | Dtype::Q6KR4 | Dtype::Q6KDP4A => std::mem::size_of::<BlockQ6K>(),
@@ -169,7 +175,7 @@ impl Dtype {
     fn launch_threads(self) -> u32 {
         match self {
             Dtype::Q8_0 | Dtype::Q4_1 | Dtype::Q4_1R2DP4A => 256,
-            Dtype::Q4_1T128 | Dtype::Q8_0T128 => 128,
+            Dtype::Q4_1T128 | Dtype::Q8_0T128 | Dtype::Q8_0T128VDR2 => 128,
             _ => 64,
         }
     }
@@ -445,7 +451,7 @@ fn tame_scales(dtype: Dtype, raw: Vec<u8>) -> Vec<u8> {
     for i in 0..nblocks {
         let block = &mut r[i * bs..(i + 1) * bs];
         match dtype {
-            Dtype::Q8_0 | Dtype::Q8_0T128 => {
+            Dtype::Q8_0 | Dtype::Q8_0T128 | Dtype::Q8_0T128VDR2 => {
                 // BlockQ8_0: d (f16, 2 bytes) + qs[32]. Scale ≈ 0.01 to 0.11.
                 let d = f16::from_f32((block[0] as f32 / 255.0) * 0.1 + 0.01);
                 block[0..2].copy_from_slice(&d.to_bits().to_le_bytes());
