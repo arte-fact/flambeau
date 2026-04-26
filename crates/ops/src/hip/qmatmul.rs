@@ -256,6 +256,77 @@ pub fn mmvq_q4_0_gate_up_t128(
     Ok(())
 }
 
+/// **C6-i1** — Q4_0 single-warp (64 t/block) MMVQ. Sibling of `mmvq_q4_0_t128`
+/// targeting an even smaller block to pack more in-flight blocks per CU at
+/// gfx906 decode (where occupancy is the lever, not VALU). One wave64/block
+/// = no LDS reduce, just an in-place gfx906 DPP butterfly.
+pub fn mmvq_q4_0_warpcoop64(
+    reg: &OpsRegistry,
+    stream: &HipStream,
+    weights: DevicePtr,
+    y_q8_1: DevicePtr,
+    dst: DevicePtr,
+    n_rows: usize,
+    k: usize,
+) -> Result<()> {
+    let module = reg.expect_module("mmvq_q4_0_warpcoop64")?;
+    let kernel = module.kernel("flambeau_mmvq_q4_0_warpcoop64_q8_1")?;
+    let n_rows_i = n_rows as i32;
+    let n_blocks_i = (k / 32) as i32;
+    let w_ptr: u64 = weights.as_usize() as u64;
+    let y_ptr: u64 = y_q8_1.as_usize() as u64;
+    let d_ptr: u64 = dst.as_usize() as u64;
+    let mut args = KernelArgs::new();
+    args.push(&w_ptr);
+    args.push(&y_ptr);
+    args.push(&d_ptr);
+    args.push(&n_rows_i);
+    args.push(&n_blocks_i);
+    let cfg = LaunchCfg::one_d(n_rows as u32, 64);
+    unsafe { kernel.launch(stream, cfg, args)? };
+    Ok(())
+}
+
+/// **C6-i1** — fused gate+up Q4_0 single-warp. Sibling of
+/// `mmvq_q4_0_gate_up_t128`, same activation-sharing pattern, single-warp
+/// reduce.
+pub fn mmvq_q4_0_gate_up_warpcoop64(
+    reg: &OpsRegistry,
+    stream: &HipStream,
+    gate_w: DevicePtr,
+    up_w: DevicePtr,
+    y_q8_1: DevicePtr,
+    gate_out: DevicePtr,
+    up_out: DevicePtr,
+    n_rows_gate: usize,
+    n_rows_up: usize,
+    k: usize,
+) -> Result<()> {
+    let module = reg.expect_module("mmvq_q4_0_gate_up_warpcoop64")?;
+    let kernel = module.kernel("flambeau_mmvq_q4_0_gate_up_warpcoop64_q8_1")?;
+    let n_rows_g = n_rows_gate as i32;
+    let n_rows_u = n_rows_up as i32;
+    let n_blocks_i = (k / 32) as i32;
+    let gw_ptr: u64 = gate_w.as_usize() as u64;
+    let uw_ptr: u64 = up_w.as_usize() as u64;
+    let y_ptr: u64 = y_q8_1.as_usize() as u64;
+    let g_ptr: u64 = gate_out.as_usize() as u64;
+    let u_ptr: u64 = up_out.as_usize() as u64;
+    let mut args = KernelArgs::new();
+    args.push(&gw_ptr);
+    args.push(&uw_ptr);
+    args.push(&y_ptr);
+    args.push(&g_ptr);
+    args.push(&u_ptr);
+    args.push(&n_rows_g);
+    args.push(&n_rows_u);
+    args.push(&n_blocks_i);
+    let grid = n_rows_gate.max(n_rows_up) as u32;
+    let cfg = LaunchCfg::one_d(grid, 64);
+    unsafe { kernel.launch(stream, cfg, args)? };
+    Ok(())
+}
+
 /// **TP-perf-c4** — Q5_K r2 MMVQ writing directly to F16 destination.
 /// Mirrors `mmvq_q5_k_r2_q8_1` exactly, except the per-row epilogue
 /// casts FP32 → F16 inside the kernel. Used for ssm_out which is the

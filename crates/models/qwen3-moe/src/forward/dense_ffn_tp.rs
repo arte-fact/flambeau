@@ -40,7 +40,10 @@ use flambeau_core::DevicePtr;
 use flambeau_ops::hip::{
     cast::cast_f32_to_f16,
     norm::quantize_f16_q8_1,
-    qmatmul::{mmvq_q4_0_gate_up, mmvq_q4_0_gate_up_t128, mmvq_q8_0_gate_up, qmatmul},
+    qmatmul::{
+        mmvq_q4_0_gate_up, mmvq_q4_0_gate_up_t128, mmvq_q4_0_gate_up_warpcoop64,
+        mmvq_q8_0_gate_up, qmatmul,
+    },
     HipStream, OpsRegistry,
 };
 
@@ -147,11 +150,28 @@ pub fn forward_dense_ffn_decode_tp(
         )
         .context("dense ffn (TP) gate+up fused mmvq_q8_0")?;
     } else if fuse_q4 {
-        // **Cycle-5** — opt-in t128 schedule (128 t/block) targets the
-        // gfx906 latency-bound regime at decode. Default ON via env;
-        // `FLAMBEAU_Q4_0_GU_T128=off` reverts to the 256t kernel (cycle 1).
+        // C6 — three-way schedule pick (mirror of gdn_tp.rs):
+        //   FLAMBEAU_Q4_0_GU_WARPCOOP=on  → 64 t/block (single-warp)
+        //   FLAMBEAU_Q4_0_GU_T128=off     → 256 t/block (cycle 1 baseline)
+        //   default                       → 128 t/block (TP-perf-c5)
+        let use_warpcoop =
+            std::env::var("FLAMBEAU_Q4_0_GU_WARPCOOP").as_deref() == Ok("on");
         let use_t128 = std::env::var("FLAMBEAU_Q4_0_GU_T128").as_deref() != Ok("off");
-        if use_t128 {
+        if use_warpcoop {
+            mmvq_q4_0_gate_up_warpcoop64(
+                ops,
+                stream,
+                ffn_gate.ptr,
+                ffn_up.ptr,
+                scratch.x_q8_1,
+                scratch.gate_f32,
+                scratch.up_f32,
+                local_inter,
+                local_inter,
+                hidden,
+            )
+            .context("dense ffn (TP) gate+up fused mmvq_q4_0_warpcoop64")?;
+        } else if use_t128 {
             mmvq_q4_0_gate_up_t128(
                 ops,
                 stream,

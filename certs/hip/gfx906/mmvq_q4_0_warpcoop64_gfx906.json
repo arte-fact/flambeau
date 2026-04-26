@@ -1,0 +1,49 @@
+{
+  "schema_version": 1,
+  "impl_id": "mmvq_q4_0_warpcoop64_gfx906",
+  "backend": "hip",
+  "arch": "gfx906",
+  "op": "qmatmul_mmvq",
+  "dtype_weight": "Q4_0",
+  "dtype_activation": "Q8_1",
+  "tolerance_formula": "|err| <= 3e-2 * max(|ref|, sqrt(k))",
+  "results": [
+    {
+      "m": 1,
+      "k": 256,
+      "n": 256,
+      "seed": 2016268,
+      "max_rel_err": 0.0057639554,
+      "tolerance": 0.03,
+      "pass": true
+    },
+    {
+      "m": 1,
+      "k": 2048,
+      "n": 2048,
+      "seed": 15998476,
+      "max_rel_err": 0.011908164,
+      "tolerance": 0.03,
+      "pass": true
+    },
+    {
+      "m": 1,
+      "k": 5120,
+      "n": 6144,
+      "seed": 48349708,
+      "max_rel_err": 0.011813859,
+      "tolerance": 0.03,
+      "pass": true
+    }
+  ],
+  "pass": true,
+  "emitted_at": "2026-04-26T21:31:30Z",
+  "rig": "threadreaper-gfx906",
+  "pmc": {
+    "vgpr_count": 17,
+    "sgpr_count": null,
+    "waves_per_simd": 10,
+    "mem_busy_pct": null,
+    "valu_busy_pct": null
+  }
+}

@@ -54,7 +54,10 @@ use flambeau_ops::hip::{
     conv::causal_conv1d_f32,
     mlp::{scale_f32, silu_f32, swiglu_f32},
     norm::{l2_norm_f32, quantize_q8_1, rmsnorm_f32, rmsnorm_quant_q8_1},
-    qmatmul::{mmvq_q4_0_gate_up, mmvq_q4_0_gate_up_t128, mmvq_q5_k_r2_f16dst, mmvq_q8_0_gate_up},
+    qmatmul::{
+        mmvq_q4_0_gate_up, mmvq_q4_0_gate_up_t128, mmvq_q4_0_gate_up_warpcoop64,
+        mmvq_q5_k_r2_f16dst, mmvq_q8_0_gate_up,
+    },
     recurrent::{gdn_alpha_beta_f32, gdn_state_step_f32_s128},
     HipDevice, HipStream, OpsRegistry,
 };
@@ -219,8 +222,28 @@ pub fn forward_gdn_decode_tp(
         )
         .context("attn_qkv + attn_gate (TP) fused mmvq_q8_0")?;
     } else if fuse_qkv_gate_q4_0 {
+        // C6 — three-way schedule pick:
+        //   FLAMBEAU_Q4_0_GU_WARPCOOP=on  → 64 t/block (single-warp, max occupancy)
+        //   FLAMBEAU_Q4_0_GU_T128=off     → 256 t/block (cycle-1 baseline)
+        //   default                       → 128 t/block (TP-perf-c5)
+        let use_warpcoop =
+            std::env::var("FLAMBEAU_Q4_0_GU_WARPCOOP").as_deref() == Ok("on");
         let use_t128 = std::env::var("FLAMBEAU_Q4_0_GU_T128").as_deref() != Ok("off");
-        if use_t128 {
+        if use_warpcoop {
+            mmvq_q4_0_gate_up_warpcoop64(
+                ops,
+                stream,
+                attn_qkv.ptr,
+                attn_gate.ptr,
+                scratch.x_q8_1,
+                scratch.qkv_mixed_f32,
+                scratch.z_f32,
+                local_conv_channels,
+                local_d_inner,
+                hidden,
+            )
+            .context("attn_qkv + attn_gate (TP) fused mmvq_q4_0_warpcoop64")?;
+        } else if use_t128 {
             mmvq_q4_0_gate_up_t128(
                 ops,
                 stream,

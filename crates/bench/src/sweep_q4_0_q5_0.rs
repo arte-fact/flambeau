@@ -59,6 +59,21 @@ pub fn run_mmvq_q5_1_sweep(repo_root: &Path) -> Result<Cert> {
 
 type EncodeFn = fn(&[f32]) -> Vec<u8>;
 
+/// **C6-i1** — Q4_0 single-warp (64 t/block) MMVQ correctness sweep.
+/// Same shapes as `run_mmvq_q4_0_sweep`, only the block-thread count and
+/// kernel stem change.
+pub fn run_mmvq_q4_0_warpcoop64_sweep(repo_root: &Path) -> Result<Cert> {
+    run_dense_sweep_with_block(
+        repo_root,
+        "mmvq_q4_0_warpcoop64",
+        "flambeau_mmvq_q4_0_warpcoop64_q8_1",
+        "mmvq_q4_0_warpcoop64_gfx906",
+        "Q4_0",
+        encode_q4_0,
+        64,
+    )
+}
+
 fn run_dense_sweep(
     repo_root: &Path,
     stem: &str,
@@ -66,6 +81,18 @@ fn run_dense_sweep(
     impl_id: &str,
     dtype_weight: &str,
     encode: EncodeFn,
+) -> Result<Cert> {
+    run_dense_sweep_with_block(repo_root, stem, entry, impl_id, dtype_weight, encode, 256)
+}
+
+fn run_dense_sweep_with_block(
+    repo_root: &Path,
+    stem: &str,
+    entry: &str,
+    impl_id: &str,
+    dtype_weight: &str,
+    encode: EncodeFn,
+    block_threads: u32,
 ) -> Result<Cert> {
     if device_count().context("hipGetDeviceCount")? < 1 {
         bail!("no HIP devices");
@@ -85,7 +112,7 @@ fn run_dense_sweep(
     let mut results = Vec::new();
     for (n_rows, k) in shapes {
         let seed = 0x4E0Cu64 ^ (n_rows as u64 * 7919) ^ (k as u64 * 101);
-        let max_rel = run_dense_shape(&dev, &kernel, &q_kernel, n_rows, k, seed, encode)?;
+        let max_rel = run_dense_shape(&dev, &kernel, &q_kernel, n_rows, k, seed, encode, block_threads)?;
         let tol = 3e-2;
         results.push(ShapeResult {
             m: 1,
@@ -131,6 +158,7 @@ fn run_dense_shape(
     k: usize,
     seed: u64,
     encode: EncodeFn,
+    block_threads: u32,
 ) -> Result<f32> {
     let w_f32 = seeded_f32_range(seed, n_rows * k, -0.5, 0.5);
     let x_f32 = seeded_f32_range(seed.wrapping_add(0xA1), k, -0.5, 0.5);
@@ -171,7 +199,7 @@ fn run_dense_shape(
         args.push(&o_p);
         args.push(&n_rows_i);
         args.push(&n_blocks_i);
-        let cfg = LaunchCfg::one_d(n_rows as u32, 256);
+        let cfg = LaunchCfg::one_d(n_rows as u32, block_threads);
         unsafe { kernel.launch(stream, cfg, args)? };
         stream.synchronize()?;
     }
