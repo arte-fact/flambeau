@@ -185,6 +185,192 @@ pub fn qmatmul(
 ///
 /// Only wired in the DP4A-VDR2 variant; otherwise the caller does two
 /// independent `mmvq(...)` calls.
+/// **TP-perf-c5** — Q4_0 single-row MMVQ with 128 threads/block (the
+/// thin-block schedule that wins for Q4_1 on gfx906 per V2.2.b).
+/// Captures the latency-hiding 2-blocks-per-CU shape that the 256t
+/// `mmvq_q4_0` baseline can't reach. Used through env opt-in.
+pub fn mmvq_q4_0_t128(
+    reg: &OpsRegistry,
+    stream: &HipStream,
+    weights: DevicePtr,
+    y_q8_1: DevicePtr,
+    dst: DevicePtr,
+    n_rows: usize,
+    k: usize,
+) -> Result<()> {
+    let module = reg.expect_module("mmvq_q4_0_t128")?;
+    let kernel = module.kernel("flambeau_mmvq_q4_0_t128_q8_1")?;
+    let n_rows_i = n_rows as i32;
+    let n_blocks_i = (k / 32) as i32;
+    let w_ptr: u64 = weights.as_usize() as u64;
+    let y_ptr: u64 = y_q8_1.as_usize() as u64;
+    let d_ptr: u64 = dst.as_usize() as u64;
+    let mut args = KernelArgs::new();
+    args.push(&w_ptr);
+    args.push(&y_ptr);
+    args.push(&d_ptr);
+    args.push(&n_rows_i);
+    args.push(&n_blocks_i);
+    let cfg = LaunchCfg::one_d(n_rows as u32, 128);
+    unsafe { kernel.launch(stream, cfg, args)? };
+    Ok(())
+}
+
+/// **TP-perf-c5** — fused gate+up Q4_0 t128. Same gate+up activation
+/// sharing as `mmvq_q4_0_gate_up`, but with the t128 schedule for the
+/// gfx906 latency-bound regime.
+pub fn mmvq_q4_0_gate_up_t128(
+    reg: &OpsRegistry,
+    stream: &HipStream,
+    gate_w: DevicePtr,
+    up_w: DevicePtr,
+    y_q8_1: DevicePtr,
+    gate_out: DevicePtr,
+    up_out: DevicePtr,
+    n_rows_gate: usize,
+    n_rows_up: usize,
+    k: usize,
+) -> Result<()> {
+    let module = reg.expect_module("mmvq_q4_0_gate_up_t128_dp4a")?;
+    let kernel = module.kernel("flambeau_mmvq_q4_0_gate_up_t128_dp4a_q8_1")?;
+    let n_rows_g = n_rows_gate as i32;
+    let n_rows_u = n_rows_up as i32;
+    let n_blocks_i = (k / 32) as i32;
+    let gw_ptr: u64 = gate_w.as_usize() as u64;
+    let uw_ptr: u64 = up_w.as_usize() as u64;
+    let y_ptr: u64 = y_q8_1.as_usize() as u64;
+    let g_ptr: u64 = gate_out.as_usize() as u64;
+    let u_ptr: u64 = up_out.as_usize() as u64;
+    let mut args = KernelArgs::new();
+    args.push(&gw_ptr);
+    args.push(&uw_ptr);
+    args.push(&y_ptr);
+    args.push(&g_ptr);
+    args.push(&u_ptr);
+    args.push(&n_rows_g);
+    args.push(&n_rows_u);
+    args.push(&n_blocks_i);
+    let grid = n_rows_gate.max(n_rows_up) as u32;
+    let cfg = LaunchCfg::one_d(grid, 128);
+    unsafe { kernel.launch(stream, cfg, args)? };
+    Ok(())
+}
+
+/// **TP-perf-c4** — Q5_K r2 MMVQ writing directly to F16 destination.
+/// Mirrors `mmvq_q5_k_r2_q8_1` exactly, except the per-row epilogue
+/// casts FP32 → F16 inside the kernel. Used for ssm_out which is the
+/// only Q5_K MMVQ in the TP GDN path that immediately casts F32→F16.
+/// Block grid is `(n_rows + 1) / 2` (2 rows per block, like the F32 version).
+pub fn mmvq_q5_k_r2_f16dst(
+    reg: &OpsRegistry,
+    stream: &HipStream,
+    weights: DevicePtr,
+    y_q8_1: DevicePtr,
+    dst_f16: DevicePtr,
+    n_rows: usize,
+    k: usize,
+) -> Result<()> {
+    let module = reg.expect_module("mmvq_q5_k_r2_f16dst")?;
+    let kernel = module.kernel("flambeau_mmvq_q5_k_r2_f16dst_q8_1")?;
+    let n_rows_i = n_rows as i32;
+    // Q5_K superblock = 256 elems → n_superblocks_per_row = k / 256.
+    let n_superblocks_i = (k / 256) as i32;
+    let w_ptr: u64 = weights.as_usize() as u64;
+    let y_ptr: u64 = y_q8_1.as_usize() as u64;
+    let d_ptr: u64 = dst_f16.as_usize() as u64;
+    let mut args = KernelArgs::new();
+    args.push(&w_ptr);
+    args.push(&y_ptr);
+    args.push(&d_ptr);
+    args.push(&n_rows_i);
+    args.push(&n_superblocks_i);
+    let grid = ((n_rows + 1) / 2) as u32;
+    let cfg = LaunchCfg::one_d(grid, 64);
+    unsafe { kernel.launch(stream, cfg, args)? };
+    Ok(())
+}
+
+/// **TP-perf-c3** — fused K+V Q4_0 dense MMVQ with F16 destination.
+/// K and V always share shape (`[local_n_kv_heads · head_dim, hidden]`)
+/// in TP full-attn layers and read the same Q8_1 activation. This
+/// kernel collapses both MMVQs and both downstream `cast_f32_to_f16`
+/// launches into a single launch — net 3 launches saved per full-attn
+/// layer per rank.
+pub fn mmvq_q4_0_kv_f16dst(
+    reg: &OpsRegistry,
+    stream: &HipStream,
+    k_w: DevicePtr,
+    v_w: DevicePtr,
+    y_q8_1: DevicePtr,
+    k_out_f16: DevicePtr,
+    v_out_f16: DevicePtr,
+    n_rows_kv: usize,
+    k: usize,
+) -> Result<()> {
+    let module = reg.expect_module("mmvq_q4_0_kv_f16dst_dp4a")?;
+    let kernel = module.kernel("flambeau_mmvq_q4_0_kv_f16dst_dp4a_q8_1")?;
+    let n_rows_i = n_rows_kv as i32;
+    let n_blocks_i = (k / 32) as i32;
+    let kw_ptr: u64 = k_w.as_usize() as u64;
+    let vw_ptr: u64 = v_w.as_usize() as u64;
+    let y_ptr: u64 = y_q8_1.as_usize() as u64;
+    let kout_ptr: u64 = k_out_f16.as_usize() as u64;
+    let vout_ptr: u64 = v_out_f16.as_usize() as u64;
+    let mut args = KernelArgs::new();
+    args.push(&kw_ptr);
+    args.push(&vw_ptr);
+    args.push(&y_ptr);
+    args.push(&kout_ptr);
+    args.push(&vout_ptr);
+    args.push(&n_rows_i);
+    args.push(&n_blocks_i);
+    let cfg = LaunchCfg::one_d(n_rows_kv as u32, 256);
+    unsafe { kernel.launch(stream, cfg, args)? };
+    Ok(())
+}
+
+/// **TP-perf-c1** — fused gate+up Q4_0 dense MMVQ. Same shape contract
+/// and asymmetric-row support as `mmvq_q8_0_gate_up`, just for Q4_0
+/// weights. Halves the call count (and the Q8_1 activation HBM read)
+/// when both weights are Q4_0 — the common case on Qwen3.6-x-Q4_0
+/// (attn_qkv+attn_gate in GDN, ffn_gate+ffn_up in dense FFN).
+pub fn mmvq_q4_0_gate_up(
+    reg: &OpsRegistry,
+    stream: &HipStream,
+    gate_w: DevicePtr,
+    up_w: DevicePtr,
+    y_q8_1: DevicePtr,
+    gate_out: DevicePtr,
+    up_out: DevicePtr,
+    n_rows_gate: usize,
+    n_rows_up: usize,
+    k: usize,
+) -> Result<()> {
+    let module = reg.expect_module("mmvq_q4_0_gate_up_dp4a")?;
+    let kernel = module.kernel("flambeau_mmvq_q4_0_gate_up_dp4a_q8_1")?;
+    let n_rows_g = n_rows_gate as i32;
+    let n_rows_u = n_rows_up as i32;
+    let n_blocks_i = (k / 32) as i32;
+    let gw_ptr: u64 = gate_w.as_usize() as u64;
+    let uw_ptr: u64 = up_w.as_usize() as u64;
+    let y_ptr: u64 = y_q8_1.as_usize() as u64;
+    let g_ptr: u64 = gate_out.as_usize() as u64;
+    let u_ptr: u64 = up_out.as_usize() as u64;
+    let mut args = KernelArgs::new();
+    args.push(&gw_ptr);
+    args.push(&uw_ptr);
+    args.push(&y_ptr);
+    args.push(&g_ptr);
+    args.push(&u_ptr);
+    args.push(&n_rows_g);
+    args.push(&n_rows_u);
+    args.push(&n_blocks_i);
+    let grid = n_rows_gate.max(n_rows_up) as u32;
+    let cfg = LaunchCfg::one_d(grid, 256);
+    unsafe { kernel.launch(stream, cfg, args)? };
+    Ok(())
+}
+
 pub fn mmvq_q8_0_gate_up(
     reg: &OpsRegistry,
     stream: &HipStream,

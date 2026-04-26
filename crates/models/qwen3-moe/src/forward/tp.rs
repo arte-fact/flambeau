@@ -238,6 +238,199 @@ use crate::session::LayerCache;
 use crate::tp_sharded::{Qwen3MoETpModel, TpLayerTensor};
 use crate::weights::DeviceTensor;
 
+/// FLAMBEAU_TP_PROBE — rank-aware F16 probe at an arbitrary device pointer.
+/// Used for inspecting per-rank partial buffers.
+fn debug_probe_named_rank(
+    scratch: &ShardedForwardOneTokenScratchTp,
+    cluster: &flambeau_backend_hip::HipCluster,
+    label: &str,
+    il: usize,
+    ptr: DevicePtr,
+    rank: usize,
+) -> anyhow::Result<()> {
+    use flambeau_core::CopyDirection;
+    let device = cluster.device(rank);
+    device.bind()?;
+    let stream = device.default_stream();
+    let n_bytes = scratch.per_rank[rank].hidden_bytes;
+    let n = n_bytes / 2;
+    let mut host = vec![0u16; n];
+    unsafe {
+        device.memcpy_async(
+            stream,
+            CopyDirection::DeviceToHost,
+            DevicePtr(host.as_mut_ptr() as usize),
+            ptr,
+            n_bytes,
+        )?;
+    }
+    flambeau_core::Stream::synchronize(stream)?;
+    let mut nan = 0usize;
+    let mut min = f32::INFINITY;
+    let mut max = f32::NEG_INFINITY;
+    let mut sum = 0.0f64;
+    for &b in &host {
+        let v = half::f16::from_bits(b).to_f32();
+        if v.is_nan() {
+            nan += 1;
+        } else {
+            if v < min { min = v; }
+            if v > max { max = v; }
+            sum += v as f64;
+        }
+    }
+    let mean = sum / (n - nan).max(1) as f64;
+    eprintln!(
+        "  PROBE {label} rank={rank} il={il:>3}  n={n}  nan={nan:>5}  min={min:.6}  max={max:.6}  mean={mean:.6}"
+    );
+    Ok(())
+}
+
+/// FLAMBEAU_TP_PROBE — download `n_bytes` from `ptr` on rank 0, log
+/// min/max/nan/mean. Pointer-explicit variant for probing scratch
+/// buffers other than `hidden_a`.
+fn debug_probe_rank0_named(
+    scratch: &ShardedForwardOneTokenScratchTp,
+    cluster: &flambeau_backend_hip::HipCluster,
+    label: &str,
+    il: usize,
+    ptr: DevicePtr,
+) -> anyhow::Result<()> {
+    use flambeau_core::CopyDirection;
+    let device = cluster.device(0);
+    device.bind()?;
+    let stream = device.default_stream();
+    let n_bytes = scratch.per_rank[0].hidden_bytes;
+    let n = n_bytes / 2;
+    let mut host = vec![0u16; n];
+    unsafe {
+        device.memcpy_async(
+            stream,
+            CopyDirection::DeviceToHost,
+            DevicePtr(host.as_mut_ptr() as usize),
+            ptr,
+            n_bytes,
+        )?;
+    }
+    flambeau_core::Stream::synchronize(stream)?;
+    let mut nan = 0usize;
+    let mut zero = 0usize;
+    let mut min = f32::INFINITY;
+    let mut max = f32::NEG_INFINITY;
+    let mut sum = 0.0f64;
+    for &b in &host {
+        let v = half::f16::from_bits(b).to_f32();
+        if v.is_nan() {
+            nan += 1;
+        } else {
+            if v == 0.0 { zero += 1; }
+            if v < min { min = v; }
+            if v > max { max = v; }
+            sum += v as f64;
+        }
+    }
+    let mean = sum / (n - nan).max(1) as f64;
+    eprintln!(
+        "  PROBE {label} il={il:>3}  n={n}  nan={nan:>5}  zero={zero:>5}  min={min:.4}  max={max:.4}  mean={mean:.4}"
+    );
+    Ok(())
+}
+
+/// FLAMBEAU_TP_PROBE — download rank-r hidden_a, log min/max/nan.
+fn debug_probe_rank_hidden(
+    scratch: &ShardedForwardOneTokenScratchTp,
+    cluster: &flambeau_backend_hip::HipCluster,
+    label: &str,
+    il: usize,
+    rank: usize,
+) -> anyhow::Result<()> {
+    use flambeau_core::CopyDirection;
+    let device = cluster.device(rank);
+    device.bind()?;
+    let stream = device.default_stream();
+    let n_bytes = scratch.per_rank[rank].hidden_bytes;
+    let n = n_bytes / 2;
+    let mut host = vec![0u16; n];
+    unsafe {
+        device.memcpy_async(
+            stream,
+            CopyDirection::DeviceToHost,
+            DevicePtr(host.as_mut_ptr() as usize),
+            scratch.per_rank[rank].hidden_a,
+            n_bytes,
+        )?;
+    }
+    flambeau_core::Stream::synchronize(stream)?;
+    let mut nan = 0usize;
+    let mut min = f32::INFINITY;
+    let mut max = f32::NEG_INFINITY;
+    let mut sum = 0.0f64;
+    for &b in &host {
+        let v = half::f16::from_bits(b).to_f32();
+        if v.is_nan() {
+            nan += 1;
+        } else {
+            if v < min { min = v; }
+            if v > max { max = v; }
+            sum += v as f64;
+        }
+    }
+    let mean = sum / (n - nan).max(1) as f64;
+    let il_str = if il == usize::MAX { "-".to_string() } else { il.to_string() };
+    eprintln!(
+        "  PROBE {label} rank={rank} il={il_str:>3}  n={n}  nan={nan:>5}  min={min:.6}  max={max:.6}  mean={mean:.6}"
+    );
+    Ok(())
+}
+
+/// FLAMBEAU_TP_PROBE — download rank-0 hidden_a, log min/max/nan.
+fn debug_probe_rank0_hidden(
+    scratch: &ShardedForwardOneTokenScratchTp,
+    cluster: &flambeau_backend_hip::HipCluster,
+    label: &str,
+    il: usize,
+) -> anyhow::Result<()> {
+    use flambeau_core::CopyDirection;
+    let device = cluster.device(0);
+    device.bind()?;
+    let stream = device.default_stream();
+    let n_bytes = scratch.per_rank[0].hidden_bytes;
+    let n = n_bytes / 2;
+    let mut host = vec![0u16; n];
+    unsafe {
+        device.memcpy_async(
+            stream,
+            CopyDirection::DeviceToHost,
+            DevicePtr(host.as_mut_ptr() as usize),
+            scratch.per_rank[0].hidden_a,
+            n_bytes,
+        )?;
+    }
+    flambeau_core::Stream::synchronize(stream)?;
+    let mut nan = 0usize;
+    let mut zero = 0usize;
+    let mut min = f32::INFINITY;
+    let mut max = f32::NEG_INFINITY;
+    let mut sum = 0.0f64;
+    for &b in &host {
+        let v = half::f16::from_bits(b).to_f32();
+        if v.is_nan() {
+            nan += 1;
+        } else {
+            if v == 0.0 { zero += 1; }
+            if v < min { min = v; }
+            if v > max { max = v; }
+            sum += v as f64;
+        }
+    }
+    let mean = sum / (n - nan).max(1) as f64;
+    let il_str = if il == usize::MAX { "-".to_string() } else { il.to_string() };
+    eprintln!(
+        "  PROBE {label} il={il_str:>3}  n={n}  nan={nan:>5}  zero={zero:>5}  min={min:.4}  max={max:.4}  mean={mean:.4}"
+    );
+    Ok(())
+}
+
 /// V1 TP forward driver — single-token decode through a TP-sharded model.
 ///
 /// ## Layer dispatch
@@ -355,10 +548,25 @@ fn forward_one_token_tp_inner(
 
     // 2. Layer loop. Every rank runs every layer (full TP topology;
     //    not pipeline-parallel).
+    //
+    // Dispatch matches the non-TP paths (`forward/layer.rs`,
+    // `forward/pp.rs`): `cfg.is_recurrent(il)` is the source of truth.
+    // The earlier local check `interval > 0 && (il+1) % interval == 0`
+    // was wrong for dense arches (qwen35) where `full_attention_interval`
+    // is None → interval == 0 → every layer routed to GDN, which the
+    // dense model has no tensors for, producing all-NaN logits.
     let n_layers = cfg.num_layers;
-    let interval = cfg.full_attention_interval.unwrap_or(0);
-    for il in 0..n_layers {
-        let is_full_attn = interval > 0 && (il + 1) % interval == 0;
+    let layer_limit: usize = std::env::var("FLAMBEAU_TP_LAYER_LIMIT")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(n_layers);
+    let probe = std::env::var("FLAMBEAU_TP_PROBE").is_ok();
+    if probe {
+        debug_probe_rank0_hidden(scratch, cluster, "embed", usize::MAX)?;
+    }
+    let n_run = layer_limit.min(n_layers);
+    for il in 0..n_run {
+        let is_full_attn = !cfg.is_recurrent(il);
         if is_full_attn {
             forward_full_attn_layer_tp(
                 model,
@@ -383,6 +591,11 @@ fn forward_one_token_tp_inner(
             )
             .with_context(|| format!("gdn layer {il}"))?;
         }
+        if probe {
+            for r in 0..cluster.ranks() {
+                debug_probe_rank_hidden(scratch, cluster, "after-layer hidden_a", il, r)?;
+            }
+        }
     }
 
     // 3. Output head + argmax on head_rank only. LM head + token_embd
@@ -402,9 +615,9 @@ fn forward_one_token_tp_inner(
         .as_mut()
         .ok_or_else(|| anyhow!("head_rank={head_rank} missing OutputHeadScratch"))?;
     let logits_f32 = head_scratch.logits_f32;
-    let ops = ops_registry_for(device)?;
+    let ops = &model.ops[head_rank];
     forward_output_head_decode(
-        &ops,
+        ops,
         stream,
         cfg,
         &head_shard.output_norm,
@@ -452,6 +665,9 @@ fn forward_full_attn_layer_tp(
     position: usize,
     world: u32,
 ) -> anyhow::Result<()> {
+    if std::env::var("FLAMBEAU_TP_PROBE").is_ok() {
+        eprintln!("  PROBE entering forward_full_attn_layer_tp il={il} world={world}");
+    }
     let cfg = &model.config;
 
     // 1. Per-rank attn_tp → partial_attn_out.
@@ -484,7 +700,7 @@ fn forward_full_attn_layer_tp(
             .as_mut()
             .ok_or_else(|| anyhow!("rank {r}: missing FullAttnScratch"))?;
 
-        let ops = ops_registry_for(device)?;
+        let ops = &model.ops[r];
         forward_full_attn_decode_tp(
             &ops,
             stream,
@@ -505,6 +721,10 @@ fn forward_full_attn_layer_tp(
             world,
             model.tp.kv_replicated(),
         )?;
+    }
+    if std::env::var("FLAMBEAU_TP_PROBE").is_ok() {
+        let p = scratch.per_rank[0].partial_attn_out;
+        debug_probe_rank0_named(scratch, cluster, "post-attn partial", il, p)?;
     }
 
     // 2+3a. Fused AR-residual + post-attention RMSNorm (TP-3b-i2).
@@ -528,7 +748,35 @@ fn forward_full_attn_layer_tp(
                 .ok_or_else(|| anyhow!("rank {r}: missing LayerForwardScratch"))
         })
         .collect::<anyhow::Result<_>>()?;
-    if world > 1 {
+    let probe = std::env::var("FLAMBEAU_TP_PROBE").is_ok();
+    // **TP-perf-c2** — fused AR+RMSNorm+Q8_1 path. NULL on Qwen3.6-27B-Q4_0
+    // (−1.1% vs unfused AR+norm + separate quantize). Default OFF; opt
+    // in via `FLAMBEAU_AR_FUSE_Q8_1=on` to A/B on other models.
+    let use_q8_1_fused_ar = world > 1
+        && cfg.is_dense_ffn()
+        && std::env::var("FLAMBEAU_AR_FUSE_Q8_1").as_deref() == Ok("on");
+    if use_q8_1_fused_ar {
+        let ffn_x_q8_1_ptrs: Vec<DevicePtr> = (0..cluster.ranks())
+            .map(|r| {
+                scratch.per_rank[r]
+                    .layer
+                    .as_ref()
+                    .and_then(|l| l.dense_ffn.as_ref())
+                    .map(|d| d.x_q8_1)
+                    .ok_or_else(|| anyhow!("rank {r}: missing DenseFfnScratch.x_q8_1"))
+            })
+            .collect::<anyhow::Result<_>>()?;
+        ar_residual_rmsnorm_q8_1(
+            ar,
+            scratch,
+            cluster,
+            world,
+            AttnOrFfn::Attn,
+            &post_norm_ptrs,
+            &ffn_x_q8_1_ptrs,
+            cfg.rms_norm_eps,
+        )?;
+    } else if world > 1 {
         ar_residual_rmsnorm(
             ar,
             scratch,
@@ -545,7 +793,7 @@ fn forward_full_attn_layer_tp(
             let device = cluster.device(r);
             device.bind()?;
             let stream = device.default_stream();
-            let ops = ops_registry_for(device)?;
+            let ops = &model.ops[r];
             flambeau_ops::hip::mlp::add_f16(
                 &ops,
                 stream,
@@ -568,13 +816,23 @@ fn forward_full_attn_layer_tp(
         }
     }
 
+    if probe {
+        debug_probe_rank0_hidden(scratch, cluster, "post-attn-AR hidden_a", il)?;
+        let p = mid_norm_ptrs[0];
+        debug_probe_rank0_named(scratch, cluster, "post-attn-AR mid_norm", il, p)?;
+    }
+
     // 3b. FFN consuming the AR'd-and-normed mid_norm. Dense path
     //     (arch=qwen35) calls forward_dense_ffn_decode_tp; MoE path
     //     (qwen3moe / qwen35moe / qwen36moe) calls
     //     forward_moe_ffn_decode_tp via forward_ffn_block_tp.
     forward_ffn_block_tp(
-        model, scratch, cluster, &mid_norm_ptrs, il, world,
+        model, scratch, cluster, &mid_norm_ptrs, il, world, use_q8_1_fused_ar,
     )?;
+    if probe {
+        let p = scratch.per_rank[0].partial_ffn_out;
+        debug_probe_rank0_named(scratch, cluster, "post-ffn partial", il, p)?;
+    }
 
     // 4. AR-residual on FFN output.
     if world > 1 {
@@ -584,7 +842,7 @@ fn forward_full_attn_layer_tp(
             let device = cluster.device(r);
             device.bind()?;
             let stream = device.default_stream();
-            let ops = ops_registry_for(device)?;
+            let ops = &model.ops[r];
             flambeau_ops::hip::mlp::add_f16(
                 &ops,
                 stream,
@@ -717,6 +975,11 @@ fn forward_ffn_block_tp(
     mid_norm_ptrs: &[DevicePtr],
     il: usize,
     world: u32,
+    // **TP-perf-c2** — when true, the per-rank FFN's x_q8_1 was already
+    // populated by the upstream fused AR+RMSNorm+Q8_1. Only honoured
+    // for the dense-FFN path; MoE always re-quantises because the
+    // router needs F16 input.
+    pre_quantized: bool,
 ) -> anyhow::Result<()> {
     let cfg = &model.config;
     if cfg.is_dense_ffn() {
@@ -735,7 +998,7 @@ fn forward_ffn_block_tp(
                 .dense_ffn
                 .as_mut()
                 .ok_or_else(|| anyhow!("rank {r}: missing DenseFfnScratch"))?;
-            let ops = ops_registry_for(device)?;
+            let ops = &model.ops[r];
             super::dense_ffn_tp::forward_dense_ffn_decode_tp(
                 &ops,
                 stream,
@@ -747,6 +1010,7 @@ fn forward_ffn_block_tp(
                 mid_norm_f16,
                 partial_ffn_out,
                 world,
+                pre_quantized,
             )?;
         }
     } else {
@@ -772,7 +1036,7 @@ fn forward_ffn_block_tp(
                 .unwrap_or(DevicePtr(0));
             let has_shared = cfg.shared_expert_intermediate_size.is_some();
             let layer_scratch = scratch.per_rank[r].layer.as_mut().unwrap();
-            let ops = ops_registry_for(device)?;
+            let ops = &model.ops[r];
 
             // 1. Router (Replicated weight; runs identically per rank).
             {
@@ -866,6 +1130,84 @@ fn forward_ffn_block_tp(
 /// then per-rank `stream_wait` on every peer's event before launching
 /// the fused kernel. Bit-exact equivalent to ar_residual followed by
 /// rmsnorm_f16 — same FP32 reduction order on the same operands.
+/// **TP-perf-c2** — fused TP=2/4 AR + residual + RMSNorm + Q8_1 quantize.
+/// Sister of `ar_residual_rmsnorm` that writes directly into the
+/// downstream FFN's `x_q8_1` scratch, skipping the per-FFN
+/// `quantize_f16_q8_1` launch. Only used on dense-FFN arches (qwen35);
+/// MoE arches keep the F16 path because the router needs an F16 input
+/// for `dense_gemv_f32_f16`.
+fn ar_residual_rmsnorm_q8_1(
+    ar: &BarP2pAllReduce,
+    scratch: &ShardedForwardOneTokenScratchTp,
+    cluster: &flambeau_backend_hip::HipCluster,
+    world: u32,
+    which: AttnOrFfn,
+    weights: &[DevicePtr],
+    out_q8_1: &[DevicePtr],
+    eps: f32,
+) -> anyhow::Result<()> {
+    let partial_ptr = |r: usize| match which {
+        AttnOrFfn::Attn => scratch.per_rank[r].partial_attn_out,
+        AttnOrFfn::Ffn => scratch.per_rank[r].partial_ffn_out,
+    };
+    let hidden_ptr = |r: usize| scratch.per_rank[r].hidden_a;
+
+    // Same producer-event protocol as ar_residual_rmsnorm.
+    for r in 0..cluster.ranks() {
+        let device = cluster.device(r);
+        device.bind()?;
+        scratch.per_rank[r]
+            .producer_done_event
+            .record(device.default_stream())?;
+    }
+    for r in 0..cluster.ranks() {
+        let device = cluster.device(r);
+        device.bind()?;
+        let stream = device.default_stream();
+        for peer in 0..cluster.ranks() {
+            if peer != r {
+                scratch.per_rank[peer]
+                    .producer_done_event
+                    .stream_wait(stream)?;
+            }
+        }
+    }
+    let elem_count = scratch.per_rank[0].hidden_bytes / 2;
+    let n = elem_count as u32;
+    match world {
+        2 => {
+            let hidden = [hidden_ptr(0), hidden_ptr(1)];
+            let partial = [partial_ptr(0), partial_ptr(1)];
+            let w = [weights[0], weights[1]];
+            let o = [out_q8_1[0], out_q8_1[1]];
+            let s0 = cluster.device(0).default_stream();
+            let s1 = cluster.device(1).default_stream();
+            let streams = [s0, s1];
+            // SAFETY: same per-pointer + ordering contract as ar_residual_rmsnorm.
+            unsafe {
+                ar.residual_rmsnorm_q8_1_tp2(&hidden, &partial, &w, &o, n, eps, &streams)?
+            };
+        }
+        4 => {
+            let hidden = [hidden_ptr(0), hidden_ptr(1), hidden_ptr(2), hidden_ptr(3)];
+            let partial = [partial_ptr(0), partial_ptr(1), partial_ptr(2), partial_ptr(3)];
+            let w = [weights[0], weights[1], weights[2], weights[3]];
+            let o = [out_q8_1[0], out_q8_1[1], out_q8_1[2], out_q8_1[3]];
+            let s0 = cluster.device(0).default_stream();
+            let s1 = cluster.device(1).default_stream();
+            let s2 = cluster.device(2).default_stream();
+            let s3 = cluster.device(3).default_stream();
+            let streams = [s0, s1, s2, s3];
+            // SAFETY: same as the tp2 arm.
+            unsafe {
+                ar.residual_rmsnorm_q8_1_tp4(&hidden, &partial, &w, &o, n, eps, &streams)?
+            };
+        }
+        _ => bail!("ar_residual_rmsnorm_q8_1: unsupported world {world}"),
+    }
+    Ok(())
+}
+
 fn ar_residual_rmsnorm(
     ar: &BarP2pAllReduce,
     scratch: &ShardedForwardOneTokenScratchTp,
@@ -975,6 +1317,10 @@ fn forward_gdn_layer_tp(
     il: usize,
     world: u32,
 ) -> anyhow::Result<()> {
+    let probe = std::env::var("FLAMBEAU_TP_PROBE").is_ok();
+    if probe {
+        eprintln!("  PROBE entering forward_gdn_layer_tp il={il} world={world}");
+    }
     let cfg = &model.config;
 
     // 1. Per-rank GDN forward → partial_attn_out.
@@ -1009,7 +1355,7 @@ fn forward_gdn_layer_tp(
             .gdn
             .as_mut()
             .ok_or_else(|| anyhow!("rank {r}: missing GdnScratch"))?;
-        let ops = ops_registry_for(device)?;
+        let ops = &model.ops[r];
 
         super::gdn_tp::forward_gdn_decode_tp(
             &ops,
@@ -1033,6 +1379,14 @@ fn forward_gdn_layer_tp(
             world,
         )?;
     }
+    if probe {
+        for r in 0..cluster.ranks() {
+            let p = scratch.per_rank[r].partial_attn_out;
+            // Reuse the F32 / F16 probe path with rank-r device bound by reading
+            // bytes from rank r's pointer.
+            debug_probe_named_rank(scratch, cluster, "post-gdn partial", il, p, r)?;
+        }
+    }
 
     // 2+3a. Fused AR-residual + post-attention RMSNorm (TP-3b-i2).
     let post_norm_ptrs: Vec<DevicePtr> = (0..cluster.ranks())
@@ -1051,7 +1405,34 @@ fn forward_gdn_layer_tp(
                 .ok_or_else(|| anyhow!("rank {r}: missing LayerForwardScratch"))
         })
         .collect::<anyhow::Result<_>>()?;
-    if world > 1 {
+    // **TP-perf-c2** — same dense-FFN gate as the full-attn driver above.
+    // NULL result on Qwen3.6-27B-Q4_0 TP w=2 (-1.1% vs unfused); default
+    // is OFF, opt in via `FLAMBEAU_AR_FUSE_Q8_1=on` to A/B on other models.
+    let use_q8_1_fused_ar = world > 1
+        && cfg.is_dense_ffn()
+        && std::env::var("FLAMBEAU_AR_FUSE_Q8_1").as_deref() == Ok("on");
+    if use_q8_1_fused_ar {
+        let ffn_x_q8_1_ptrs: Vec<DevicePtr> = (0..cluster.ranks())
+            .map(|r| {
+                scratch.per_rank[r]
+                    .layer
+                    .as_ref()
+                    .and_then(|l| l.dense_ffn.as_ref())
+                    .map(|d| d.x_q8_1)
+                    .ok_or_else(|| anyhow!("rank {r}: missing DenseFfnScratch.x_q8_1"))
+            })
+            .collect::<anyhow::Result<_>>()?;
+        ar_residual_rmsnorm_q8_1(
+            ar,
+            scratch,
+            cluster,
+            world,
+            AttnOrFfn::Attn,
+            &post_norm_ptrs,
+            &ffn_x_q8_1_ptrs,
+            cfg.rms_norm_eps,
+        )?;
+    } else if world > 1 {
         ar_residual_rmsnorm(
             ar,
             scratch,
@@ -1067,7 +1448,7 @@ fn forward_gdn_layer_tp(
             let device = cluster.device(r);
             device.bind()?;
             let stream = device.default_stream();
-            let ops = ops_registry_for(device)?;
+            let ops = &model.ops[r];
             flambeau_ops::hip::mlp::add_f16(
                 &ops,
                 stream,
@@ -1092,7 +1473,7 @@ fn forward_gdn_layer_tp(
 
     // 3b. FFN block (dense or MoE — see forward_ffn_block_tp).
     forward_ffn_block_tp(
-        model, scratch, cluster, &mid_norm_ptrs, il, world,
+        model, scratch, cluster, &mid_norm_ptrs, il, world, use_q8_1_fused_ar,
     )?;
 
     // 4. AR-residual on FFN output.
@@ -1103,7 +1484,7 @@ fn forward_gdn_layer_tp(
             let device = cluster.device(r);
             device.bind()?;
             let stream = device.default_stream();
-            let ops = ops_registry_for(device)?;
+            let ops = &model.ops[r];
             flambeau_ops::hip::mlp::add_f16(
                 &ops,
                 stream,

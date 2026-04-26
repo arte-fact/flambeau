@@ -96,7 +96,25 @@ pub async fn serve(cfg: ServeConfig) -> Result<()> {
         }
     }
 
-    let model_cfg = Qwen3MoEConfig::from_gguf(&gguf).context("model config from GGUF")?;
+    let mut model_cfg = Qwen3MoEConfig::from_gguf(&gguf).context("model config from GGUF")?;
+    // Allow operators to clamp the model's KV-cache provisioning ceiling
+    // (mirrors the test-side FLAMBEAU_CTX_CAP). The on-disk
+    // `context_length` is often the architectural max (262144 for
+    // Qwen3.5/3.6) which would OOM the per-rank KV cache on consumer
+    // VRAM. The clamp only shrinks; explicit increases are ignored.
+    if let Some(cap) = std::env::var("FLAMBEAU_CTX_CAP")
+        .ok()
+        .and_then(|s| s.parse::<usize>().ok())
+    {
+        if cap > 0 && cap < model_cfg.context_length {
+            info!(
+                from = model_cfg.context_length,
+                to = cap,
+                "FLAMBEAU_CTX_CAP shrinking model.context_length"
+            );
+            model_cfg.context_length = cap;
+        }
+    }
     let cluster: Arc<HipCluster> =
         Arc::new(HipCluster::new(&cfg.device_ids).context("HipCluster::new")?);
 
@@ -134,8 +152,15 @@ pub async fn serve(cfg: ServeConfig) -> Result<()> {
                 topology = "tp",
                 "loading model weights"
             );
-            let m = Qwen3MoETpModel::load(&gguf, &cluster, layout)
+            let mut m = Qwen3MoETpModel::load(&gguf, &cluster, layout)
                 .context("Qwen3MoETpModel::load")?;
+            // Re-apply the FLAMBEAU_CTX_CAP clamp on the model-owned cfg.
+            // `Qwen3MoETpModel::load` re-reads the GGUF for its embedded
+            // config, so the clamp on `model_cfg` above doesn't propagate
+            // here without an explicit second clamp.
+            if m.config.context_length > model_cfg.context_length {
+                m.config.context_length = model_cfg.context_length;
+            }
             let ar = BarP2pAllReduce::new(Arc::clone(&cluster))
                 .context("BarP2pAllReduce::new (requires fully-connected peer-access matrix)")?;
             LoadedModel::Tp { model: m, ar }

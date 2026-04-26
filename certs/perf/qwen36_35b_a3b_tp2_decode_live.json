@@ -1,0 +1,25 @@
+{
+  "schema_version": 1,
+  "kind": "tp_decode_perf",
+  "status": "null",
+  "model": "Qwen3.6-35B-A3B-UD-Q4_K_S",
+  "arch": "qwen35moe",
+  "world": 2,
+  "devices": [0, 1],
+  "topology": "Tp",
+  "layers": 40,
+  "context_length": 2048,
+  "load_seconds": 41.36,
+  "weight_bytes_total_gib": 20.42,
+  "weight_bytes_per_rank_gib": 10.21,
+  "captured_via": "cargo test --release -p flambeau-qwen3-moe --features hip --test perf_baseline_qwen36_35b_tp2_gpu_0_1 -- --nocapture",
+  "captured_at": "2026-04-26",
+  "diagnosis": "V1-target Qwen3.6-35B-A3B (qwen35moe — hybrid GDN + MoE + shared expert) loaded clean across GPU 0,1 (10.21 GiB/rank, fits 16 GiB cards comfortably). TP forward then errored at GDN layer 0 with `weight dtype F32 not supported by V1 qmatmul dispatch`. Root cause: the on-disk `ssm_alpha.weight` and `ssm_beta.weight` for Qwen3.6 are F32 (`blk.0.ssm_alpha.weight F32 [32, 2048]`). The PP loader (`sharded.rs::1054-1063`) calls `up_q8_0(...)` to host-quantise these tensors to Q8_0 at load so the existing mmvq_q8_0 path can consume them. The TP loader (`tp_sharded.rs::upload_tp`) lacks this conversion — it raw-memcpys whatever bytes `slice_for_tp` returns. Result: TP-loaded ssm_alpha/beta stay F32 and the first `run_mmvq_from_tensor(ssm_alpha, ...)` call rejects them.",
+  "blocking_bugs_summary": [
+    "Bug 1 (FIXED): TP layer dispatch routed dense `qwen35` arches to GDN. Now uses `!cfg.is_recurrent(il)`. Doesn't apply to this hybrid model.",
+    "Bug 2 (LOCATED, not fixed): On models where ssm_alpha/beta are pre-Q8_0 (e.g. Qwen3.5-9B-Q4_1), `rmsnorm_quant_q8_1` produces wildly varying per-block Q8_1 scales in the TP path → all-NaN downstream. Same kernel works in PP. See `qwen35_9b_q4_1_tp2_decode.json`.",
+    "Bug 3 (LOCATED, not fixed): TP loader (`tp_sharded.rs::upload_tp`) does not host-quantise F32 ssm_alpha/beta to Q8_0 the way `sharded.rs` does. Hits every Qwen3.6 model (27B + 35B both have F32 ssm_alpha/beta). Fix sketch: in `upload_tp` or in a pre-step, detect tensor name `ssm_alpha.weight` / `ssm_beta.weight` and route through a quantised-upload path; the PP-side `up_q8_0` is the prior art."
+  ],
+  "next_step": "To get any Qwen3.6 model running on TP at all, fix Bug 3 first (1-screen-of-code change in tp_sharded.rs, mirror the PP loader's up_q8_0 branch for ssm_alpha/beta). Then Bug 2 will surface on Qwen3.6 just as it does on Qwen3.5-9B — both need fixing for end-to-end TP. The TP-0..TP-5b commit landed structurally complete but never executed live; this is the third distinct bug surfaced by actually running it.",
+  "notes": "Filed as null per CLAUDE.md collaboration norms."
+}

@@ -54,7 +54,7 @@ use flambeau_ops::hip::{
     conv::causal_conv1d_f32,
     mlp::{scale_f32, silu_f32, swiglu_f32},
     norm::{l2_norm_f32, quantize_q8_1, rmsnorm_f32, rmsnorm_quant_q8_1},
-    qmatmul::mmvq_q8_0_gate_up,
+    qmatmul::{mmvq_q4_0_gate_up, mmvq_q4_0_gate_up_t128, mmvq_q5_k_r2_f16dst, mmvq_q8_0_gate_up},
     recurrent::{gdn_alpha_beta_f32, gdn_state_step_f32_s128},
     HipDevice, HipStream, OpsRegistry,
 };
@@ -135,6 +135,41 @@ pub fn forward_gdn_decode_tp(
     }
     let n_rep = num_v_heads / num_k_heads;
 
+    let probe = std::env::var("FLAMBEAU_TP_PROBE").is_ok();
+    macro_rules! probe_f32 {
+        ($label:literal, $ptr:expr, $n:expr) => {
+            if probe {
+                debug_probe_f32(device, stream, $label, $ptr, $n)?;
+            }
+        };
+    }
+    macro_rules! probe_f16 {
+        ($label:literal, $ptr:expr, $n:expr) => {
+            if probe {
+                debug_probe_f16(device, stream, $label, $ptr, $n)?;
+            }
+        };
+    }
+    probe_f16!("gdn x_in", x_in, hidden);
+    if probe {
+        eprintln!(
+            "    META attn_norm.dtype={:?} dims={:?} bytes={}",
+            attn_norm.dtype, attn_norm.dims, attn_norm.bytes
+        );
+        eprintln!(
+            "    META attn_qkv.dtype={:?} dims={:?} bytes={}",
+            attn_qkv.dtype, attn_qkv.dims, attn_qkv.bytes
+        );
+        if attn_norm.dtype == flambeau_quant::GgmlDType::F32 {
+            debug_probe_f32(device, stream, "gdn attn_norm.weight", attn_norm.ptr, attn_norm.dims[0] as usize)?;
+        } else if attn_norm.dtype == flambeau_quant::GgmlDType::F16 {
+            debug_probe_f16(device, stream, "gdn attn_norm.weight", attn_norm.ptr, attn_norm.dims[0] as usize)?;
+        }
+    }
+
+    if probe {
+        debug_probe_q8_1(device, stream, "gdn x_q8_1 PRE-rmsnorm", scratch.x_q8_1, hidden / 32)?;
+    }
     // 1. Fused rmsnorm(x_in) + Q8_1 quantise.
     rmsnorm_quant_q8_1(
         ops,
@@ -147,13 +182,29 @@ pub fn forward_gdn_decode_tp(
         cfg.rms_norm_eps,
     )
     .context("gdn (TP) attn_norm + quant")?;
+    if probe {
+        // x_q8_1 has Q8_1 block layout (4 bytes scale + 4 bytes ds + 32 i8 weights = 40 B/block).
+        // hidden=4096 -> 128 blocks. Just dump byte stats.
+        debug_probe_q8_1(device, stream, "gdn x_q8_1 POST-rmsnorm", scratch.x_q8_1, hidden / 32)?;
+        let n_qkv_bytes = (hidden / attn_qkv.dtype.block_size() as usize)
+            * attn_qkv.dtype.type_size() as usize
+            * 4;
+        debug_probe_quant_bytes(device, stream, "gdn attn_qkv first 4 rows", attn_qkv.ptr, n_qkv_bytes)?;
+    }
 
     // 2..3. attn_qkv (FusedQkvParallel sliced) + attn_gate (ColParallel sliced)
     //       projections. Output dims are local_conv_channels and local_d_inner.
-    let fuse_qkv_gate = std::env::var("FLAMBEAU_VARIANT").as_deref() != Ok("baseline")
-        && attn_qkv.dtype == flambeau_quant::GgmlDType::Q8_0
-        && attn_gate.dtype == flambeau_quant::GgmlDType::Q8_0;
-    if fuse_qkv_gate {
+    //       Both Q8_0 and Q4_0 have fused gate+up MMVQ variants; pick one.
+    let baseline = std::env::var("FLAMBEAU_VARIANT").as_deref() == Ok("baseline");
+    let dt_q = attn_qkv.dtype;
+    let dt_g = attn_gate.dtype;
+    let fuse_qkv_gate_q8_0 = !baseline
+        && dt_q == flambeau_quant::GgmlDType::Q8_0
+        && dt_g == flambeau_quant::GgmlDType::Q8_0;
+    let fuse_qkv_gate_q4_0 = !baseline
+        && dt_q == flambeau_quant::GgmlDType::Q4_0
+        && dt_g == flambeau_quant::GgmlDType::Q4_0;
+    if fuse_qkv_gate_q8_0 {
         mmvq_q8_0_gate_up(
             ops,
             stream,
@@ -167,6 +218,37 @@ pub fn forward_gdn_decode_tp(
             hidden,
         )
         .context("attn_qkv + attn_gate (TP) fused mmvq_q8_0")?;
+    } else if fuse_qkv_gate_q4_0 {
+        let use_t128 = std::env::var("FLAMBEAU_Q4_0_GU_T128").as_deref() != Ok("off");
+        if use_t128 {
+            mmvq_q4_0_gate_up_t128(
+                ops,
+                stream,
+                attn_qkv.ptr,
+                attn_gate.ptr,
+                scratch.x_q8_1,
+                scratch.qkv_mixed_f32,
+                scratch.z_f32,
+                local_conv_channels,
+                local_d_inner,
+                hidden,
+            )
+            .context("attn_qkv + attn_gate (TP) fused mmvq_q4_0_t128")?;
+        } else {
+            mmvq_q4_0_gate_up(
+                ops,
+                stream,
+                attn_qkv.ptr,
+                attn_gate.ptr,
+                scratch.x_q8_1,
+                scratch.qkv_mixed_f32,
+                scratch.z_f32,
+                local_conv_channels,
+                local_d_inner,
+                hidden,
+            )
+            .context("attn_qkv + attn_gate (TP) fused mmvq_q4_0")?;
+        }
     } else {
         run_mmvq_from_tensor(
             ops,
@@ -189,6 +271,8 @@ pub fn forward_gdn_decode_tp(
             "attn_gate (TP)",
         )?;
     }
+    probe_f32!("gdn qkv_mixed_f32", scratch.qkv_mixed_f32, local_conv_channels);
+    probe_f32!("gdn z_f32", scratch.z_f32, local_d_inner);
 
     // 4..5. ssm_alpha + ssm_beta (both ColParallel, [local_num_v_heads, hidden]).
     let fuse_alpha_beta = std::env::var("FLAMBEAU_VARIANT").as_deref() != Ok("baseline")
@@ -398,24 +482,192 @@ pub fn forward_gdn_decode_tp(
     quantize_q8_1(ops, stream, scratch.gated_f32, scratch.gated_q8_1, local_d_inner)
         .context("quantize gated → Q8_1 (TP)")?;
 
-    // 16. Row-parallel ssm_out projection: weight[hidden, local_d_inner]
-    //     × gated[local_d_inner] → ssm_out_f32[hidden] (full-H partial).
-    run_mmvq_from_tensor(
-        ops,
-        stream,
-        ssm_out,
-        scratch.gated_q8_1,
-        scratch.ssm_out_f32,
-        hidden,
-        local_d_inner,
-        "ssm_out (TP)",
-    )?;
+    // 16+17. Row-parallel ssm_out projection — weight[hidden, local_d_inner]
+    //        × gated[local_d_inner] → partial_attn_out[hidden] (full-H partial).
+    //
+    // **Cycle-4 lever** — when ssm_out is Q5_K (the common case for
+    // Qwen3.5/3.6 hybrids), use the F16-dst variant that fuses the
+    // cast_f32_to_f16 into the kernel epilogue. Saves 1 launch + 1
+    // F32 buffer round-trip per GDN layer per rank. Falls back to
+    // the F32+cast pair for any other dtype.
+    // **Cycle-4 null**: F16-dst ssm_out measured +0.3% on Qwen3.6-27B
+    // TP w=2 — within noise envelope (±0.13 across 3 runs). Only 1 call
+    // per GDN layer per rank → 48 calls saved doesn't move the needle.
+    // Default OFF; opt in via `FLAMBEAU_SSM_OUT_F16_DST=on` to A/B on
+    // other models.
+    let ssm_out_f16dst = std::env::var("FLAMBEAU_VARIANT").as_deref() != Ok("baseline")
+        && std::env::var("FLAMBEAU_SSM_OUT_F16_DST").as_deref() == Ok("on")
+        && ssm_out.dtype == flambeau_quant::GgmlDType::Q5K;
+    if ssm_out_f16dst {
+        mmvq_q5_k_r2_f16dst(
+            ops,
+            stream,
+            ssm_out.ptr,
+            scratch.gated_q8_1,
+            partial_attn_out,
+            hidden,
+            local_d_inner,
+        )
+        .context("mmvq_q5_k_r2_f16dst ssm_out (TP)")?;
+    } else {
+        run_mmvq_from_tensor(
+            ops,
+            stream,
+            ssm_out,
+            scratch.gated_q8_1,
+            scratch.ssm_out_f32,
+            hidden,
+            local_d_inner,
+            "ssm_out (TP)",
+        )?;
+        probe_f32!("gdn ssm_out_f32 (pre-cast)", scratch.ssm_out_f32, hidden);
+        cast_f32_to_f16(ops, stream, scratch.ssm_out_f32, partial_attn_out, hidden)
+            .context("cast ssm_out → partial_attn_out (TP)")?;
+    }
 
-    // 17. Cast partial → F16 directly into partial_attn_out (this rank's
-    //     contribution to the AllReduce sum).
-    cast_f32_to_f16(ops, stream, scratch.ssm_out_f32, partial_attn_out, hidden)
-        .context("cast ssm_out → partial_attn_out (TP)")?;
+    Ok(())
+}
 
+fn debug_probe_q8_1(
+    device: &HipDevice,
+    stream: &HipStream,
+    label: &str,
+    ptr: DevicePtr,
+    n_blocks: usize,
+) -> Result<()> {
+    use flambeau_core::Stream;
+    // Q8_1 block: half scale + half ds + i8[32] = 36 B
+    let block_bytes = 36;
+    let n = n_blocks * block_bytes;
+    let mut host = vec![0u8; n];
+    unsafe {
+        device.memcpy_async(
+            stream,
+            CopyDirection::DeviceToHost,
+            DevicePtr(host.as_mut_ptr() as usize),
+            ptr,
+            n,
+        )?;
+    }
+    stream.synchronize()?;
+    // Read scales of first 4 blocks
+    let scales: Vec<f32> = (0..n_blocks.min(4))
+        .map(|b| {
+            let off = b * block_bytes;
+            let bits = u16::from_le_bytes([host[off], host[off + 1]]);
+            half::f16::from_bits(bits).to_f32()
+        })
+        .collect();
+    let nan = scales.iter().filter(|v| v.is_nan()).count();
+    eprintln!("    Q8_1 {label:30}  blocks={n_blocks}  first4_scales={scales:?}  nan={nan}");
+    Ok(())
+}
+
+fn debug_probe_quant_bytes(
+    device: &HipDevice,
+    stream: &HipStream,
+    label: &str,
+    ptr: DevicePtr,
+    n_bytes: usize,
+) -> Result<()> {
+    use flambeau_core::Stream;
+    let mut host = vec![0u8; n_bytes];
+    unsafe {
+        device.memcpy_async(
+            stream,
+            CopyDirection::DeviceToHost,
+            DevicePtr(host.as_mut_ptr() as usize),
+            ptr,
+            n_bytes,
+        )?;
+    }
+    stream.synchronize()?;
+    let nonzero = host.iter().filter(|&&b| b != 0).count();
+    let first16: Vec<u8> = host.iter().take(16).copied().collect();
+    eprintln!(
+        "    BYTES {label:30}  bytes={n_bytes}  nonzero={nonzero}  first16={first16:?}"
+    );
+    Ok(())
+}
+
+fn debug_probe_f32(
+    device: &HipDevice,
+    stream: &HipStream,
+    label: &str,
+    ptr: DevicePtr,
+    n: usize,
+) -> Result<()> {
+    use flambeau_core::Stream;
+    let mut host = vec![0.0f32; n];
+    unsafe {
+        device.memcpy_async(
+            stream,
+            CopyDirection::DeviceToHost,
+            DevicePtr(host.as_mut_ptr() as usize),
+            ptr,
+            n * 4,
+        )?;
+    }
+    stream.synchronize()?;
+    let nan = host.iter().filter(|v| v.is_nan()).count();
+    let inf = host.iter().filter(|v| v.is_infinite()).count();
+    let zero = host.iter().filter(|&&v| v == 0.0).count();
+    let finite: Vec<f32> = host.iter().copied().filter(|v| v.is_finite()).collect();
+    let (min, max, mean) = if finite.is_empty() {
+        (f32::NAN, f32::NAN, f32::NAN)
+    } else {
+        let mn = finite.iter().cloned().fold(f32::INFINITY, f32::min);
+        let mx = finite.iter().cloned().fold(f32::NEG_INFINITY, f32::max);
+        let m = finite.iter().sum::<f32>() / finite.len() as f32;
+        (mn, mx, m)
+    };
+    eprintln!(
+        "    F32 {label:30}  n={n:>5}  nan={nan:>5}  inf={inf:>3}  zero={zero:>5}  min={min:.4}  max={max:.4}  mean={mean:.4}"
+    );
+    Ok(())
+}
+
+fn debug_probe_f16(
+    device: &HipDevice,
+    stream: &HipStream,
+    label: &str,
+    ptr: DevicePtr,
+    n: usize,
+) -> Result<()> {
+    use flambeau_core::Stream;
+    let mut host = vec![0u16; n];
+    unsafe {
+        device.memcpy_async(
+            stream,
+            CopyDirection::DeviceToHost,
+            DevicePtr(host.as_mut_ptr() as usize),
+            ptr,
+            n * 2,
+        )?;
+    }
+    stream.synchronize()?;
+    let mut nan = 0;
+    let mut zero = 0;
+    let mut min = f32::INFINITY;
+    let mut max = f32::NEG_INFINITY;
+    let mut sum = 0.0f64;
+    let mut finite = 0;
+    for &b in &host {
+        let v = half::f16::from_bits(b).to_f32();
+        if v.is_nan() {
+            nan += 1;
+        } else {
+            if v == 0.0 { zero += 1; }
+            min = min.min(v);
+            max = max.max(v);
+            sum += v as f64;
+            finite += 1;
+        }
+    }
+    let mean = if finite > 0 { sum / finite as f64 } else { f64::NAN };
+    eprintln!(
+        "    F16 {label:30}  n={n:>5}  nan={nan:>5}  zero={zero:>5}  min={min:.4}  max={max:.4}  mean={mean:.4}"
+    );
     Ok(())
 }
 

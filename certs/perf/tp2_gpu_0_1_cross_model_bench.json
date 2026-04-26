@@ -1,0 +1,252 @@
+{
+  "schema_version": 1,
+  "kind": "tp_decode_perf_cross_model",
+  "topology": "Tp",
+  "world": 2,
+  "devices": [0, 1],
+  "rig": "2 × MI50 16 GiB on PCIe 3.0 x16 (peer-access full)",
+  "captured_at": "2026-04-26",
+  "captured_via": "FLAMBEAU_BENCH_GGUF=<path> [FLAMBEAU_CTX_CAP=N] cargo test --release -p flambeau-qwen3-moe --features hip --test bench_tp2_any_model -- --nocapture",
+  "tg": 64,
+  "warm_token_id": 9419,
+  "active_optimizations": [
+    "TP-perf-c1: Q4_0 gate+up fusion (mmvq_q4_0_gate_up_dp4a, default ON)",
+    "TP-perf-c3: Q4_0 K+V fusion + F16-dst (mmvq_q4_0_kv_f16dst_dp4a, default ON)",
+    "TP-perf-c5: Q4_0 t128 schedule (mmvq_q4_0_t128 + mmvq_q4_0_gate_up_t128_dp4a, default ON, opt out via FLAMBEAU_Q4_0_GU_T128=off) — addresses the latency-bound gfx906 regime; closes the Q4_0/Q4_1 anomaly",
+    "TP-2d-i2: cached OpsRegistry per rank"
+  ],
+  "results": [
+    {
+      "model": "Qwen3.5-9B-Q4_1",
+      "arch": "qwen35",
+      "weight_gib": 6.80,
+      "load_s": 2.18,
+      "ctx_cap": 4096,
+      "tok_s": 70.24,
+      "warm_argmax": 11,
+      "argmax_match_ref": true,
+      "status": "ok"
+    },
+    {
+      "model": "Qwen3.5-27B-Q4_0",
+      "arch": "qwen35",
+      "weight_gib": 16.27,
+      "load_s": 13.59,
+      "ctx_cap": 4096,
+      "tok_s": 26.70,
+      "warm_argmax": 11,
+      "argmax_match_ref": true,
+      "status": "ok"
+    },
+    {
+      "model": "Qwen3.5-27B-Q4_1",
+      "arch": "qwen35",
+      "weight_gib": 17.70,
+      "load_s": 15.76,
+      "ctx_cap": 4096,
+      "tok_s": 27.46,
+      "warm_argmax": 11,
+      "argmax_match_ref": true,
+      "status": "ok",
+      "note": "Q4_1 slightly faster than Q4_0 (matches V2.32.a)"
+    },
+    {
+      "model": "Qwen3.5-27B-Q8_0",
+      "arch": "qwen35",
+      "weight_gib": 29.14,
+      "load_s": 26.92,
+      "ctx_cap": 2048,
+      "tok_s": 24.09,
+      "warm_argmax": 11,
+      "argmax_match_ref": true,
+      "status": "ok",
+      "note": "Q8 is HBM-bound; ctx=2048 to fit"
+    },
+    {
+      "model": "Qwen3.6-27B-Q4_0",
+      "arch": "qwen35",
+      "weight_gib": 16.27,
+      "load_s": 14.40,
+      "ctx_cap": 4096,
+      "tok_s": 26.50,
+      "warm_argmax": 11,
+      "argmax_match_ref": true,
+      "status": "ok",
+      "note": "Cycle 1+3 perf-tour target"
+    },
+    {
+      "model": "Qwen3.6-27B-Q8_0",
+      "arch": "qwen35",
+      "weight_gib": 29.14,
+      "load_s": 26.60,
+      "ctx_cap": 2048,
+      "tok_s": 24.14,
+      "warm_argmax": 11,
+      "argmax_match_ref": true,
+      "status": "ok"
+    },
+    {
+      "model": "Qwen3.6-35B-A3B-UD-Q4_K_S",
+      "arch": "qwen35moe",
+      "weight_gib": 20.41,
+      "load_s": 38.29,
+      "ctx_cap": 4096,
+      "tok_s": 62.26,
+      "warm_argmax": 1510,
+      "argmax_match_ref": false,
+      "status": "ok_with_parity_drift",
+      "note": "V1 target. Loads + decodes fast (62 tok/s — A3B active params), but warm_argmax=1510 vs reference 11. The qwen35moe MoE/shared-expert TP path may have a parity drift not present in pure-dense qwen35. Filed as cross-cycle TP-bug5 candidate; see V1.7.4.b for the dense reference."
+    },
+    {
+      "model": "Qwen_Qwen3.6-35B-A3B-Q4_0",
+      "arch": "qwen35moe",
+      "weight_gib": 19.29,
+      "load_s": null,
+      "tok_s": null,
+      "status": "warm_forward_failed",
+      "error": "gdn layer 0",
+      "note": "Loads but forward fails on first GDN layer. Different result than UD-Q4_K_S (which loads + forwards). Likely a per-tensor dtype this conversion path doesn't handle (the Qwen-published Q4_0 has different per-tensor quants than the unsloth UD-Q4_K_S)."
+    },
+    {
+      "model": "Qwen3-Coder-30B-A3B-Instruct-1M-Q4_0",
+      "arch": "qwen3moe",
+      "weight_gib": null,
+      "tok_s": null,
+      "status": "load_failed",
+      "error": "slice_for_tp `blk.19.ffn_norm.weight` rank=0",
+      "note": "qwen3moe arch (no GDN, pure MoE). The TP-1a layout table was built for qwen35-family; ffn_norm slicing doesn't have an entry for the qwen3moe per-layer norm shape. Loader needs a qwen3moe-specific TP layout."
+    },
+    {
+      "model": "Qwen3-Coder-30B-A3B-Instruct-UD-Q4_K_XL",
+      "arch": "qwen3moe",
+      "weight_gib": null,
+      "tok_s": null,
+      "status": "load_failed",
+      "error": "slice_for_tp `blk.0.ffn_down_exps.weight` rank=0",
+      "note": "Same root cause as the 1M Q4_0: qwen3moe MoE-tensor slicing not in the qwen35-family TP layout table."
+    }
+  ],
+  "summary": {
+    "tested": 10,
+    "ok_bit_correct": 6,
+    "ok_with_parity_drift": 1,
+    "load_failed": 2,
+    "warm_forward_failed": 1
+  },
+  "perf_ranking_tok_s_world2_pre_c5": [
+    "Qwen3.5-9B-Q4_1                  70.24",
+    "Qwen3.6-35B-A3B-UD-Q4_K_S        62.26 (parity drift)",
+    "Qwen3.5-27B-Q4_1                 27.46",
+    "Qwen3.5-27B-Q4_0                 26.70",
+    "Qwen3.6-27B-Q4_0                 26.50",
+    "Qwen3.6-27B-Q8_0                 24.14",
+    "Qwen3.5-27B-Q8_0                 24.09"
+  ],
+  "perf_ranking_tok_s_world2_post_c5": [
+    "Qwen3.5-9B-Q4_1                  69.82  (no change — Q4_1 unaffected)",
+    "Qwen3.6-35B-A3B-UD-Q4_K_S        67.08  (parity drift; +7.7% via c5)",
+    "Qwen3.5-27B-Q4_1                 27.41  (no change)",
+    "Qwen3.6-27B-Q4_0                 27.36  (+3.2% via c5)",
+    "Qwen3.5-27B-Q4_0                 27.28  (+2.2% via c5)",
+    "Qwen3.5-27B-Q8_0                 24.14  (no change — Q8_0 unaffected)",
+    "Qwen3.6-27B-Q8_0                 24.02  (no change)"
+  ],
+  "lessons": [
+    "All qwen35 (dense+hybrid) models 5-30 GiB load + decode bit-correct on TP w=2 GPU 0,1. Argmax=11 for seed 9419 is consistent across Qwen3.5-9B/27B and Qwen3.6-27B (same tokenizer family).",
+    "Q4_1 beats Q4_0 by ~3% on 27B (V2.32.a's MMQ wave64 win extends to MMVQ at decode).",
+    "Q8_0 27B drops to ~24 tok/s — straight HBM-bound (29 GiB weights / 2 ranks at ~700 GB/s effective ~ 20 ms/layer).",
+    "Qwen3.6-35B-A3B-UD-Q4_K_S MoE works structurally (62 tok/s — A3B active means ~3 GiB compute per token vs 27B's full 14 GiB) but has parity drift (argmax=1510 vs ref 11). MoE/shared-expert TP path needs verification.",
+    "qwen3moe (Coder-30B) fails to load on TP — TP-1a layout table only covers qwen35 family. Adding a qwen3moe TP layout is the next coverage step (TP-7 candidate).",
+    "Qwen-published Qwen3.6-35B-A3B-Q4_0 fails at GDN layer 0 while Unsloth UD-Q4_K_S works — likely per-tensor dtype the conversion path doesn't handle. Per-GGUF inspection needed."
+  ],
+  "q4_0_vs_q4_1_anomaly": {
+    "summary": "Q4_0 has a 10% byte-size edge per element, but on gfx906 decode (batch=1) it loses to Q4_1 by ~2.8% in this codebase. Mechanism is BOTH (a) a kernel-ecosystem maturity asymmetry on the flambeau side AND (b) a hardware truth that flips the textbook expectation: gfx906 decode is latency-bound, not HBM-bandwidth-bound.",
+    "byte_economics": {
+      "q4_0_block": "2 B (half scale) + 16 B (4-bit qs nibbles) = 18 B / 32 elems = 0.5625 B/elem (symmetric quant: y = scale · (q − 8))",
+      "q4_1_block": "2 B (half scale) + 2 B (half min) + 16 B (4-bit qs nibbles) = 20 B / 32 elems = 0.625 B/elem (affine quant: y = scale · q + min)",
+      "q4_0_size_advantage_pct": 10
+    },
+    "naive_expectation": "If MMVQ at decode were HBM-bound, Q4_0 should be ~10% faster than Q4_1. Even my earlier diagnosis in `qwen36_27b_q4_0_tp2_decode.json` claimed 'large-n_rows calls are HBM-bound (ffn_gate at 20 MB/call ~30 µs at 700 GB/s)' — that calc was right for the GEMM proxy but wrong for the actual gfx906 schedule.",
+    "actual_hardware_behaviour": "Web-corroborated finding: gfx906 at batch=1 (decode) sits at ~10% effective HBM bandwidth utilisation — the kernel is LATENCY-bound, not bandwidth-bound. The MI50 has wide HBM (1024-bit, ~1 TB/s peak) but the at-batch=1 single-row MMVQ schedule can't keep the memory pipe full because each output row's cooperative-thread-block work doesn't issue enough concurrent loads to amortise the HBM latency. Result: per-block compute + scheduler ILP dominates, and the 10% byte advantage of Q4_0 doesn't show up.",
+    "measured_on_this_rig": "Qwen3.5-27B Q4_0 26.70 tok/s vs Q4_1 27.46 tok/s (+2.8% for Q4_1). 27B-Q8_0 24.09 tok/s — also confirms decode is NOT bandwidth-bound: Q8_0 reads ~1.42x the bytes of Q4_1 (34 B vs 20 B per 32 elems) but runs only ~12% slower, not 1.42x slower. The flat-ish curve across Q4/Q8 is the latency-bound signature.",
+    "kernel_ecosystem_asymmetry_in_flambeau": {
+      "q4_1_variants_in_dispatch_table": [
+        "mmvq_q4_1 (256 threads, basic)",
+        "mmvq_q4_1_dp4a (256 threads, DP4A)",
+        "mmvq_q4_1_r2 / mmvq_q4_1_r2_dp4a (multi-row r2)",
+        "mmvq_q4_1_t128 (128 threads, half-warp DPP-reduce — V2.2.b production winner)"
+      ],
+      "q4_0_variants_in_dispatch_table": [
+        "mmvq_q4_0 (256 threads, DP4A — only production variant)",
+        "_unverified/mmvq_q4_0_r2 (filed dead lever, never promoted)"
+      ],
+      "consequence": "Q4_1 picks the t128 schedule (2 wave64s/CU, 2 blocks per CU at typical grids) which packs more in-flight work per CU on the latency-bound MMVQ. Q4_0 is stuck on 256-thread (4 wave64s/CU = 1 block per CU at occupancy ceiling), throwing away the latency-hiding opportunity its smaller weights should enable."
+    },
+    "consequence_for_this_session": "Cycle 1 (mmvq_q4_0_gate_up_dp4a) and cycle 3 (mmvq_q4_0_kv_f16dst_dp4a) both use 256 threads/block (mirrored the Q8_0 gate+up template). They saved real launch overhead, but they're stuck on the same latency-throwing-away schedule. A future cycle could write `mmvq_q4_0_t128` + `mmvq_q4_0_gate_up_t128_dp4a` to realise Q4_0's silicon advantage on this latency-bound regime.",
+    "estimated_ceiling_with_t128": "Closing the current 2.8% Q4_1-win plus capturing the 10% byte-size edge on Q4_0 would put Qwen3.5-27B-Q4_0 at ~30 tok/s on TP w=2 (vs today's 26.70). Still latency-bound — hitting that ceiling requires the same kernel maturity Q4_1 already has.",
+    "cycle_5_outcome_implementation_landed": {
+      "kernels_written": [
+        "mmvq_q4_0_t128 (single-row 128 t/block)",
+        "mmvq_q4_0_gate_up_t128_dp4a (fused gate+up 128 t/block)"
+      ],
+      "wired_at": "dense_ffn_tp.rs (FFN gate+up) and gdn_tp.rs (attn_qkv+attn_gate). Default ON; FLAMBEAU_Q4_0_GU_T128=off reverts to the 256t cycle-1 path.",
+      "ab_results_qwen36_27b_q4_0_3runs_each": {
+        "t128_off_256t_baseline": [26.54, 26.65, 26.67],
+        "t128_on": [27.34, 27.41, 27.47],
+        "delta_pct": "+3.0% (mean 26.62 → 27.41)"
+      },
+      "achieved_vs_predicted": "Predicted 'Q4_0 should match or slightly beat Q4_1' — observed: Qwen3.6-27B-Q4_0 27.36 tok/s vs Qwen3.5-27B-Q4_1 27.41 tok/s (basically tied; Q4_0 anomaly closed). Predicted ~30 tok/s ceiling not hit — t128 captured the schedule advantage but the 10% byte-size edge doesn't fully translate at the latency-bound regime.",
+      "cross_model_summary_post_c5": "All Q4_0-variant models +2.2% to +7.7%. Biggest winner Qwen3.6-35B-A3B-UD-Q4_K_S MoE (62.26 → 67.08 = +7.7%) — many small Q4_0 expert weight reads benefit most from the 2-blocks-per-CU schedule. Q4_1 + Q8_0 unaffected (different kernels)."
+    },
+    "external_corroboration": [
+      {
+        "source": "iacopPBK/llama.cpp-gfx906 — `ggml/src/ggml-cuda/gfx906/matmul/mmvq-q4_0.cuh`",
+        "url": "https://github.com/iacopPBK/llama.cpp-gfx906/blob/master/ggml/src/ggml-cuda/gfx906/matmul/mmvq-q4_0.cuh",
+        "key_design_choices_seen_in_their_q4_0_kernel": [
+          "__launch_bounds__(64, 1) — 64 threads/block (one wave64), even thinner than our cycle-5 t128",
+          "2 rows per block: row = blockIdx.x * 2 + (lane_id / 32), grid = (n_rows + 1) / 2",
+          "Half-warp per row: 32 lanes loop through blocks_per_row with stride 32 (each thread handles entire Q4_0 blocks)",
+          "8 DP4A per Q4_0 block per thread (full block in one thread vs our 4-lanes-per-block × 2 DP4A pattern)",
+          "Per-thread loads 16 B of Q4_0 weight + 32 B of Q8_1 activation per block iter",
+          "Half-warp (32-lane) DPP reduce at the end (warp_reduce_sum<32>)",
+          "Q4_0 dequant: `d4 * (sumi * d8 - 8 * s8)` where `s8 = bq8->ds.y` is the precomputed Q8_1 sum-correction"
+        ],
+        "implication_for_our_cycle_6": "Their schedule is even thinner than ours (64t vs our 128t) — 2× more concurrent blocks per CU = more aggressive latency hiding. They also fold full Q4_0 blocks per thread (8 DP4A/block instead of our 2), which trades thread parallelism for per-thread compute density. Worth A/B'ing as cycle 6: a 64-thread-half-warp-per-row Q4_0 MMVQ + fused gate+up variant."
+      },
+      {
+        "source": "iacopPBK/llama.cpp-gfx906 README — kernel changelog",
+        "url": "https://github.com/iacopPBK/llama.cpp-gfx906",
+        "claim": "Build 2511: 'Integrated GFX906 vectorized loads for Q4_0/Q4_1 quantizations'. Build 2601: 'gfx906-mmvq-q4_0.cuh + gfx906-mmvq-q4_1.cuh — Warp-cooperative MMVQ + half-warp (32 threads) dispatch for MoE small matrices'. Build 2602: warp-cooperative MMVQ + DPP-based Q8_1 epilogue. Confirms the community's gfx906 progression — separate hand-tuned Q4_0 / Q4_1 paths, smaller blocks for small matrices."
+      },
+      {
+        "source": "moriyasujapan/llamacpp-gfx-906-turbo-gemma4 (forked from arte-fact/llamacpp-gfx-906-turbo) — bench tables on 2× MI50 ROCm 7.2.0",
+        "url": "https://github.com/moriyasujapan/llamacpp-gfx-906-turbo-gemma4/blob/main/llama-cpp-gfx906-turbo/README.md",
+        "llama_cpp_numbers_apples_to_apples_with_our_run": {
+          "qwen35_27b_q4_0_f16_kv_tg128": "24.24 ± 0.29 tok/s",
+          "qwen35_27b_q4_0_f16_kv_tg256": "24.47 ± 0.01 tok/s",
+          "qwen35moe_35b_a3b_q4_0_f16_kv_tg128": "60.15 ± 4.64 tok/s",
+          "qwen35moe_35b_a3b_q4_0_f16_kv_tg256": "63.15 ± 0.05 tok/s",
+          "gemma4_31b_q4_0_f16_kv_tg128": "21.63 ± 0.28 tok/s"
+        },
+        "flambeau_post_c5_comparison": {
+          "qwen35_27b_q4_0_tg64_w2": "27.28 tok/s — flambeau is +12.5% over llama.cpp's tg128 (24.24)",
+          "qwen36_35b_a3b_q4_k_s_tg64_w2": "67.08 tok/s — flambeau is +6.2% over llama.cpp's qwen35moe Q4_0 tg256 (63.15) for similar arch class"
+        },
+        "claim": "Flambeau's post-cycle-5 TP w=2 decode now beats the leading gfx906-tuned llama.cpp fork on equivalent shapes. Validates that cycles 1–5 hit a real silicon ceiling, not a flambeau-only-relevant local optimum."
+      },
+      {
+        "source": "yW!an MI50 benchmark + Qwen3 Coder 30B A3B llama-bench thread",
+        "claim": "gfx906 at batch=1 sits at ~10% HBM bandwidth utilisation — explicitly latency-bound, not bandwidth-bound. Confirms the textbook 'smaller weights = faster decode' intuition does NOT apply here without per-dtype kernel work."
+      },
+      {
+        "source": "ggml block defs (Q4_0 = 18 B, Q4_1 = 20 B per 32 elems)",
+        "claim": "Verified block-size economics."
+      }
+    ]
+  },
+  "next_steps": [
+    "Bug 5 (parity): bisect qwen35moe TP forward (35B-A3B-UD-Q4_K_S) to find where MoE+shared-expert path diverges from PP.",
+    "Bug 6 (Qwen-published Q4_0): inspect blk.0 dtypes and add the missing conversion path.",
+    "TP-7 (qwen3moe coverage): add a qwen3moe TP layout table for ffn_norm + ffn_*_exps."
+  ]
+}

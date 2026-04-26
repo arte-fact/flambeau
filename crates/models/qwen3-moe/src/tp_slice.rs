@@ -460,28 +460,41 @@ fn slice_fused_qkv_parallel<'a>(
         ));
     }
 
+    // **Bug 4 fix** — on-disk QKV layout is `[Q | K | V]`, NOT `[V | K | Q]`.
+    // Verified empirically: world=1 is bit-correct vs llama.cpp+candle on
+    // Qwen3.5-9B (argmax=11 for seed 9419), and at world=1 this slicer is
+    // a no-op pass-through (all sub-slices sum to the whole tensor in
+    // on-disk order). The forward kernel reads the per-rank slab as
+    // `[Q@0 | K@local_qk | V@2*local_qk]` (gdn_tp.rs:289-293), which
+    // implies the slab order — and therefore the on-disk order, since
+    // world=1 is identity — is `[Q | K | V]`. The previous code labeled
+    // sub-slabs as if on-disk were `[V | K | Q]`, so per-rank slabs at
+    // world>1 were filled with bytes from the wrong on-disk regions.
+    //
     // Per-rank row counts within each sub-slab.
     let v_local_rows = v_part_full / (world as usize);
     let k_local_rows = k_part_full / (world as usize);
     let r = rank as usize;
 
-    // V_part lives at rows [0, v_part_full).
-    let v_offset_rows = r * v_local_rows;
-    // K_part lives at rows [v_part_full, v_part_full + k_part_full).
-    let k_offset_rows = v_part_full + r * k_local_rows;
-    // Q_part lives at rows [v_part_full + k_part_full, outer_full).
-    let q_offset_rows = v_part_full + k_part_full + r * k_local_rows;
+    // On-disk row offsets:
+    //   Q rows live at [0, k_part_full)               (Q has the same shape as K)
+    //   K rows live at [k_part_full, 2*k_part_full)
+    //   V rows live at [2*k_part_full, outer_full)
+    let q_offset_rows = r * k_local_rows;
+    let k_offset_rows = k_part_full + r * k_local_rows;
+    let v_offset_rows = 2 * k_part_full + r * v_local_rows;
 
-    let v_bytes = v_local_rows * row_bytes;
+    let q_bytes = k_local_rows * row_bytes;
     let k_bytes = k_local_rows * row_bytes;
-    // Q has the same per-rank shape as K.
-    let q_bytes = k_bytes;
-    let total_local_bytes = v_bytes + k_bytes + q_bytes;
+    let v_bytes = v_local_rows * row_bytes;
+    let total_local_bytes = q_bytes + k_bytes + v_bytes;
 
+    // Pack per-rank slab in `[Q_local | K_local | V_local]` order — the
+    // order the GDN forward kernel expects (gdn_tp.rs:289-293).
     let mut packed = Vec::with_capacity(total_local_bytes);
-    packed.extend_from_slice(&raw[v_offset_rows * row_bytes..(v_offset_rows + v_local_rows) * row_bytes]);
-    packed.extend_from_slice(&raw[k_offset_rows * row_bytes..(k_offset_rows + k_local_rows) * row_bytes]);
     packed.extend_from_slice(&raw[q_offset_rows * row_bytes..(q_offset_rows + k_local_rows) * row_bytes]);
+    packed.extend_from_slice(&raw[k_offset_rows * row_bytes..(k_offset_rows + k_local_rows) * row_bytes]);
+    packed.extend_from_slice(&raw[v_offset_rows * row_bytes..(v_offset_rows + v_local_rows) * row_bytes]);
     debug_assert_eq!(packed.len(), total_local_bytes);
     Ok(Cow::Owned(packed))
 }

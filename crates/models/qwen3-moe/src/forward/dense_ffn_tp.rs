@@ -40,7 +40,7 @@ use flambeau_core::DevicePtr;
 use flambeau_ops::hip::{
     cast::cast_f32_to_f16,
     norm::quantize_f16_q8_1,
-    qmatmul::{mmvq_q8_0_gate_up, qmatmul},
+    qmatmul::{mmvq_q4_0_gate_up, mmvq_q4_0_gate_up_t128, mmvq_q8_0_gate_up, qmatmul},
     HipStream, OpsRegistry,
 };
 
@@ -79,6 +79,10 @@ pub fn forward_dense_ffn_decode_tp(
     x_norm: DevicePtr,
     partial_ffn_out: DevicePtr,
     tp_world: u32,
+    // **TP-perf-c2** — when true, scratch.x_q8_1 is already populated by
+    // the upstream fused AR+RMSNorm+Q8_1 kernel and the leading
+    // quantize_f16_q8_1 call is skipped. `x_norm` is then unused.
+    pre_quantized: bool,
 ) -> Result<()> {
     if tp_world == 0 {
         bail!("tp_world must be >= 1");
@@ -108,17 +112,27 @@ pub fn forward_dense_ffn_decode_tp(
     // 1. Quantise x_norm → Q8_1 once. x_norm is the AR'd post-attn
     //    hidden state (replicated across ranks, so every rank
     //    quantises the same input — duplicated but correct).
-    quantize_f16_q8_1(ops, stream, x_norm, scratch.x_q8_1, hidden)
-        .context("dense ffn (TP) x_norm → Q8_1")?;
+    //    TP-perf-c2: skip when `pre_quantized` because the upstream
+    //    fused AR+RMSNorm+Q8_1 already wrote scratch.x_q8_1.
+    if !pre_quantized {
+        quantize_f16_q8_1(ops, stream, x_norm, scratch.x_q8_1, hidden)
+            .context("dense ffn (TP) x_norm → Q8_1")?;
+    } else {
+        let _ = x_norm;
+    }
 
-    // 2+3. gate + up matmuls — fused if both Q8_0, else unfused.
+    // 2+3. gate + up matmuls — fused if both Q8_0 or both Q4_0, else unfused.
     let global_baseline = std::env::var("FLAMBEAU_VARIANT").as_deref() == Ok("baseline");
     let specific_off = std::env::var("FLAMBEAU_DENSE_GATE_UP").as_deref() == Ok("unfused");
-    let fuse_gate_up = !global_baseline
+    let fuse_q8 = !global_baseline
         && !specific_off
         && ffn_gate.dtype == flambeau_quant::GgmlDType::Q8_0
         && ffn_up.dtype == flambeau_quant::GgmlDType::Q8_0;
-    if fuse_gate_up {
+    let fuse_q4 = !global_baseline
+        && !specific_off
+        && ffn_gate.dtype == flambeau_quant::GgmlDType::Q4_0
+        && ffn_up.dtype == flambeau_quant::GgmlDType::Q4_0;
+    if fuse_q8 {
         mmvq_q8_0_gate_up(
             ops,
             stream,
@@ -132,6 +146,40 @@ pub fn forward_dense_ffn_decode_tp(
             hidden,
         )
         .context("dense ffn (TP) gate+up fused mmvq_q8_0")?;
+    } else if fuse_q4 {
+        // **Cycle-5** — opt-in t128 schedule (128 t/block) targets the
+        // gfx906 latency-bound regime at decode. Default ON via env;
+        // `FLAMBEAU_Q4_0_GU_T128=off` reverts to the 256t kernel (cycle 1).
+        let use_t128 = std::env::var("FLAMBEAU_Q4_0_GU_T128").as_deref() != Ok("off");
+        if use_t128 {
+            mmvq_q4_0_gate_up_t128(
+                ops,
+                stream,
+                ffn_gate.ptr,
+                ffn_up.ptr,
+                scratch.x_q8_1,
+                scratch.gate_f32,
+                scratch.up_f32,
+                local_inter,
+                local_inter,
+                hidden,
+            )
+            .context("dense ffn (TP) gate+up fused mmvq_q4_0_t128")?;
+        } else {
+            mmvq_q4_0_gate_up(
+                ops,
+                stream,
+                ffn_gate.ptr,
+                ffn_up.ptr,
+                scratch.x_q8_1,
+                scratch.gate_f32,
+                scratch.up_f32,
+                local_inter,
+                local_inter,
+                hidden,
+            )
+            .context("dense ffn (TP) gate+up fused mmvq_q4_0")?;
+        }
     } else {
         qmatmul(
             ops,

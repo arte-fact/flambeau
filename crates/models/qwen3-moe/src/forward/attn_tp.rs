@@ -48,7 +48,7 @@ use flambeau_ops::hip::{
     mlp::sigmoid_mul_f16,
     norm::{quantize_f16_q8_1, rmsnorm_f16, rmsnorm_quant_q8_1},
     pe::rope_neox_partial_f16,
-    qmatmul::mmvq,
+    qmatmul::{mmvq, mmvq_q4_0_kv_f16dst},
     OpsRegistry,
 };
 use flambeau_runtime::KvCache;
@@ -191,14 +191,38 @@ pub fn forward_full_attn_decode_tp(
             "attn_v (TP) shape [{v_rows}, {v_k}] != expected [{expect_kv_rows}, {hidden}]"
         );
     }
-    mmvq(ops, stream, attn_k.ptr, scratch.x_q8_1, scratch.mmvq_f32, k_rows, k_k, dtype_k)
-        .context("mmvq attn_k (TP)")?;
-    cast_f32_to_f16(ops, stream, scratch.mmvq_f32, scratch.k_f16, k_rows)
-        .context("cast attn_k → f16 (TP)")?;
-    mmvq(ops, stream, attn_v.ptr, scratch.x_q8_1, scratch.mmvq_f32, v_rows, v_k, dtype_v)
-        .context("mmvq attn_v (TP)")?;
-    cast_f32_to_f16(ops, stream, scratch.mmvq_f32, scratch.v_f16, v_rows)
-        .context("cast attn_v → f16 (TP)")?;
+    // **Cycle-3 lever** — fused K+V Q4_0 with F16-dst when both K and V
+    // are Q4_0 and shapes match. Saves 1 MMVQ launch + 2 cast launches
+    // per full-attn layer per rank. Falls back to the 4-launch path for
+    // any non-Q4_0 dtype (e.g. Q8_0 K/V on other models).
+    let kv_q4_0_fused = std::env::var("FLAMBEAU_VARIANT").as_deref() != Ok("baseline")
+        && std::env::var("FLAMBEAU_KV_F16_DST").as_deref() != Ok("off")
+        && attn_k.dtype == flambeau_quant::GgmlDType::Q4_0
+        && attn_v.dtype == flambeau_quant::GgmlDType::Q4_0
+        && k_rows == v_rows;
+    if kv_q4_0_fused {
+        mmvq_q4_0_kv_f16dst(
+            ops,
+            stream,
+            attn_k.ptr,
+            attn_v.ptr,
+            scratch.x_q8_1,
+            scratch.k_f16,
+            scratch.v_f16,
+            k_rows,
+            k_k,
+        )
+        .context("mmvq attn_k+v fused F16-dst (TP)")?;
+    } else {
+        mmvq(ops, stream, attn_k.ptr, scratch.x_q8_1, scratch.mmvq_f32, k_rows, k_k, dtype_k)
+            .context("mmvq attn_k (TP)")?;
+        cast_f32_to_f16(ops, stream, scratch.mmvq_f32, scratch.k_f16, k_rows)
+            .context("cast attn_k → f16 (TP)")?;
+        mmvq(ops, stream, attn_v.ptr, scratch.x_q8_1, scratch.mmvq_f32, v_rows, v_k, dtype_v)
+            .context("mmvq attn_v (TP)")?;
+        cast_f32_to_f16(ops, stream, scratch.mmvq_f32, scratch.v_f16, v_rows)
+            .context("cast attn_v → f16 (TP)")?;
+    }
 
     // 6. Per-head RMSNorm on Q and K. Norms are Replicated (per-head_dim).
     let q_norm_dim = attn_q_norm

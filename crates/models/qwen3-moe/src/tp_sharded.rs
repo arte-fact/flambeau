@@ -40,7 +40,7 @@ use std::sync::Arc;
 use anyhow::{anyhow, bail, Context, Result};
 use flambeau_backend_hip::{HipCluster, HipDevice};
 use flambeau_core::{CopyDirection, Device, DevicePtr, Stream};
-use flambeau_quant::GgufFile;
+use flambeau_quant::{GgmlDType, GgufFile};
 use flambeau_runtime::{LayerAssignment, RankId, WeightLayout};
 
 use crate::config::Qwen3MoEConfig;
@@ -48,6 +48,8 @@ use crate::layout::ModelLayout;
 use crate::tp_layout::Qwen35DenseTpLayout;
 use crate::tp_slice::slice_for_tp;
 use crate::weights::DeviceTensor;
+
+const QK8_0: usize = 32;
 
 /// How weights are distributed across the mesh.
 ///
@@ -155,12 +157,19 @@ impl Drop for Qwen3MoETpRankShard {
 
 /// Tensor-parallel sharded model — one [`Qwen3MoETpRankShard`] per
 /// rank, every shard carrying every layer in sliced form.
-#[derive(Debug)]
 pub struct Qwen3MoETpModel {
     pub config: Qwen3MoEConfig,
     pub layout: ModelLayout,
     pub tp: Qwen35DenseTpLayout,
     pub shards: Vec<Qwen3MoETpRankShard>,
+    /// **TP-2d-i2** — per-rank `OpsRegistry` cache. `OpsRegistry::new`
+    /// loads every kernel HSACO via `hipModuleLoadData`, which is a
+    /// real driver call (no global module cache). Constructing one per
+    /// per-op-block per-layer per-rank is the dominant cost on the
+    /// decode hot path (was ~228 ms/layer on 9B before this cache was
+    /// added). Built once at load time and reused across every forward
+    /// call. Indexed by rank.
+    pub ops: Vec<flambeau_ops::hip::OpsRegistry>,
 }
 
 impl Qwen3MoETpModel {
@@ -183,10 +192,18 @@ impl Qwen3MoETpModel {
         let layout = ModelLayout::from_gguf(file, &config)?;
 
         let mut shards = Vec::with_capacity(cluster.ranks());
+        let mut ops_registries: Vec<flambeau_ops::hip::OpsRegistry> =
+            Vec::with_capacity(cluster.ranks());
         for rank_idx in 0..cluster.ranks() as u32 {
             let rank = RankId(rank_idx);
             let device = cluster.device(rank_idx as usize);
             device.bind()?;
+            // **TP-2d-i2** — load every kernel module once per rank at
+            // model-load. Reused across every forward call.
+            ops_registries.push(
+                flambeau_ops::hip::OpsRegistry::new(device)
+                    .map_err(|e| anyhow!("OpsRegistry::new (rank {rank_idx}): {e}"))?,
+            );
 
             // Globals — every rank gets a full copy (V1 layout).
             let (token_embd, b1) = upload_tp(file, &layout.token_embd.name, &tp, rank_idx, device)?;
@@ -241,6 +258,7 @@ impl Qwen3MoETpModel {
             layout,
             tp,
             shards,
+            ops: ops_registries,
         })
     }
 
@@ -271,12 +289,107 @@ impl Qwen3MoETpModel {
     }
 }
 
+/// Per-tensor dtype-conversion target (mirroring `sharded.rs`'s
+/// `up_f16` / `up_q8_0` policy). Returns `None` for tensors uploaded
+/// as-is. Returns `Some(dtype)` when the tensor's source bytes must
+/// be host-converted to `dtype` before upload — required because the
+/// consuming kernels expect a specific dtype the GGUF doesn't always
+/// store (Qwen3.6 ships norms as F32 and `ssm_alpha`/`ssm_beta` as F32,
+/// but the rmsnorm + mmvq_q8_0 kernels expect F16 / Q8_0 respectively).
+fn tp_target_dtype(name: &str, source_dtype: GgmlDType) -> Option<GgmlDType> {
+    if source_dtype != GgmlDType::F32 {
+        return None;
+    }
+    // Norms consumed by F16 rmsnorm kernels — same set as `upload_layer`
+    // in sharded.rs (attn_norm, post_attention_norm, ffn_norm,
+    // attn_q_norm, attn_k_norm) plus the global output_norm.
+    // `ssm_norm` is intentionally excluded — `gdn_tp.rs` calls
+    // `rmsnorm_f32` for it, which wants the F32 weight as-is.
+    const F16_NORM_SUFFIXES: &[&str] = &[
+        "attn_norm.weight",
+        "post_attention_norm.weight",
+        "ffn_norm.weight",
+        "attn_q_norm.weight",
+        "attn_k_norm.weight",
+    ];
+    if name == "output_norm.weight"
+        || F16_NORM_SUFFIXES
+            .iter()
+            .any(|s| name.ends_with(s) && !name.ends_with("ssm_norm.weight"))
+    {
+        return Some(GgmlDType::F16);
+    }
+    // ssm_alpha / ssm_beta (per-v-head [num_v_heads, hidden]) — consumed
+    // by mmvq_q8_0_gate_up / mmvq_q8_0; PP host-quantises F32 → Q8_0.
+    if name.ends_with("ssm_alpha.weight") || name.ends_with("ssm_beta.weight") {
+        return Some(GgmlDType::Q8_0);
+    }
+    None
+}
+
+/// Convert a F32 byte slice to F16 host-side. Returns the converted
+/// bytes (length = `elems * 2`).
+fn convert_f32_to_f16(src: &[u8], elems: usize) -> Result<Vec<u8>> {
+    if src.len() < elems * 4 {
+        bail!(
+            "convert_f32_to_f16: src {} < elems*4 ({})",
+            src.len(),
+            elems * 4
+        );
+    }
+    let f32s: &[f32] = bytemuck::cast_slice(&src[..elems * 4]);
+    let mut out = Vec::with_capacity(elems * 2);
+    for &v in f32s {
+        let h = half::f16::from_f32(v);
+        out.extend_from_slice(&h.to_bits().to_le_bytes());
+    }
+    Ok(out)
+}
+
+/// Quantise a F32 byte slice to Q8_0 host-side (32-element blocks,
+/// 34 B/block: half scale + 32 i8 quants). Mirrors
+/// `sharded.rs::upload_as_q8_0_inner`.
+fn quantize_f32_to_q8_0(src: &[u8], elems: usize) -> Result<Vec<u8>> {
+    if src.len() < elems * 4 {
+        bail!(
+            "quantize_f32_to_q8_0: src {} < elems*4 ({})",
+            src.len(),
+            elems * 4
+        );
+    }
+    if elems % QK8_0 != 0 {
+        bail!(
+            "quantize_f32_to_q8_0: elems {elems} not multiple of QK8_0={QK8_0}"
+        );
+    }
+    let f32s: &[f32] = bytemuck::cast_slice(&src[..elems * 4]);
+    let n_blocks = elems / QK8_0;
+    let block_bytes = 34usize; // half d (2) + 32 i8
+    let mut out = Vec::with_capacity(n_blocks * block_bytes);
+    for block in f32s.chunks_exact(QK8_0) {
+        let absmax = block.iter().map(|v| v.abs()).fold(0.0f32, f32::max);
+        let d = absmax / 127.0;
+        let id = if d != 0.0 { 1.0 / d } else { 0.0 };
+        let d_f16 = half::f16::from_f32(d);
+        out.extend_from_slice(&d_f16.to_bits().to_le_bytes());
+        for &v in block {
+            let q = (v * id).round_ties_even() as i32;
+            let q = q.clamp(-127, 127) as i8;
+            out.push(q as u8);
+        }
+    }
+    Ok(out)
+}
+
 /// Slice + upload a single tensor for the given rank. Returns the
 /// device tensor (with per-rank dims) and the byte count uploaded.
 ///
-/// Dtype conversions (F32→F16 norms etc.) the PP path applies on load
-/// are intentionally **not** applied here; the forward path (TP-2)
-/// reads bytes-as-is and converts where it consumes them.
+/// **Bug 2/3 fix**: applies the same F32→F16 norm conversion and
+/// F32→Q8_0 ssm_alpha/ssm_beta quantisation that `sharded.rs::upload_layer`
+/// does. The original TP-1c design deferred conversion to forward
+/// (see comment in `tp_target_dtype`) but the forward never actually
+/// did it — `rmsnorm_quant_q8_1` reinterpreted F32 norm bytes as F16,
+/// producing all-NaN logits on the first live execution.
 fn upload_tp(
     file: &GgufFile,
     name: &str,
@@ -292,31 +405,51 @@ fn upload_tp(
         .ok_or_else(|| anyhow!("no TP layout entry for tensor `{name}`"))?;
     let bytes_cow = slice_for_tp(file, name, layout, rank)
         .with_context(|| format!("slice_for_tp `{name}` rank={rank}"))?;
-    let n = bytes_cow.len();
-    if n == 0 {
+    if bytes_cow.is_empty() {
         bail!("empty slice for tensor `{name}` rank={rank}");
     }
+    let per_rank_dims = compute_per_rank_dims(&info.dims, layout);
+    let elems: usize = per_rank_dims.iter().product::<u64>() as usize;
+
+    // Apply per-tensor dtype conversion mirroring `sharded.rs`.
+    let target = tp_target_dtype(name, info.dtype);
+    let (final_bytes_cow, final_dtype): (std::borrow::Cow<'_, [u8]>, GgmlDType) = match target {
+        None => (bytes_cow, info.dtype),
+        Some(GgmlDType::F16) => {
+            let converted = convert_f32_to_f16(&bytes_cow, elems)
+                .with_context(|| format!("convert F32→F16 `{name}` rank={rank}"))?;
+            (std::borrow::Cow::Owned(converted), GgmlDType::F16)
+        }
+        Some(GgmlDType::Q8_0) => {
+            let converted = quantize_f32_to_q8_0(&bytes_cow, elems)
+                .with_context(|| format!("quantize F32→Q8_0 `{name}` rank={rank}"))?;
+            (std::borrow::Cow::Owned(converted), GgmlDType::Q8_0)
+        }
+        Some(other) => bail!("tp_target_dtype returned unsupported {other:?} for `{name}`"),
+    };
+
+    let n = final_bytes_cow.len();
     let ptr = device
         .alloc(n)
         .map_err(|e| anyhow!("hipMalloc {n} B `{name}`: {e}"))?;
-    // SAFETY: ptr is a fresh device alloc of n bytes; bytes_cow is a
-    // host buffer (mmap or owned Vec) of n bytes.
+    // SAFETY: ptr is a fresh device alloc of n bytes; final_bytes_cow is
+    // a host buffer (mmap, owned converted Vec, or owned quantised Vec)
+    // of n bytes.
     unsafe {
         device
             .memcpy_async(
                 device.default_stream(),
                 CopyDirection::HostToDevice,
                 ptr,
-                DevicePtr(bytes_cow.as_ptr() as usize),
+                DevicePtr(final_bytes_cow.as_ptr() as usize),
                 n,
             )
             .map_err(|e| anyhow!("memcpy `{name}`: {e}"))?;
     }
-    let per_rank_dims = compute_per_rank_dims(&info.dims, layout);
     Ok((
         DeviceTensor {
             ptr,
-            dtype: info.dtype,
+            dtype: final_dtype,
             dims: per_rank_dims,
             bytes: n,
             name: Arc::from(name),
