@@ -103,11 +103,53 @@ resolution (probe internal GDN scratch buffers like q_norm/k_norm/v
 post-l2norm, conv_input, gdn state pre/post step) and identify the
 exact step where TP and PP diverge.
 
+## Web research — on-disk QKV layout for hybrid Qwen GDN models
+
+Investigated whether the on-disk `attn_qkv` layout for 35B-A3B might
+differ from 9B (which would explain why the same FusedQkvParallel slicer
+works on 9B but not on 35B-A3B). Findings:
+
+* **Qwen3-Next (`qwen3next` arch)** — HF `Qwen3NextGatedDeltaNet.fix_query_key_value_ordering`
+  reshapes its `mixed_qkvz` tensor as
+  `(num_k_heads, 2·head_k_dim + 2·(num_v_heads/num_k_heads)·head_v_dim)`,
+  giving an **interleaved-by-k-group** layout (per group: Q@hkd, K@hkd,
+  V@gs·hvd, Z@gs·hvd) rather than flat `[Q | K | V]` blocks. llama.cpp
+  PR #16095 (merged 2025-11-28) is the first version with native
+  qwen3next support; that arch ships separate `attn_q`, `attn_k`,
+  `attn_v`, `attn_z` tensors *or* a `qkvz` blob with a per-arch
+  unpacking step.
+* **Qwen3.5 / Qwen3.6 (`qwen35moe` arch in flambeau)** — different
+  arch from qwen3next. PP w=4 on Qwen3.6-35B-A3B-UD-Q4_K_S decodes to
+  the correct argmax=11 with the existing `[Q | K | V]` flat-block
+  interpretation. If the on-disk layout were interleaved, PP would
+  also fail — the silu_out → Q/K/V offset split (`gdn_tp.rs:374-377`,
+  matched in PP) is the only place Q/K/V are unstuck, and any wrong
+  layout interpretation would propagate identically through PP and TP.
+  PP's correctness rules out an "on-disk layout differs from slicer
+  assumption" bug for qwen35moe.
+
+So the FusedQkvParallel slicer's `[Q | K | V]` assumption is correct
+for 35B-A3B. The TP bug must be in something the per-rank slicing
+exposes that PP's non-sliced path doesn't — narrowing the search to:
+
+1. A kernel edge-case at the per-rank slab dimensions (`local_conv_channels=4096`,
+   `hidden=2048`) that the kernel hits at TP w=2 but not at PP w=N where
+   the full tensor is loaded.
+2. A scratch-buffer alias / overwrite issue specific to the TP MoE+shared
+   composition (since 9B with dense FFN works at TP w=2 with otherwise
+   identical GDN dims).
+3. An ordering / event-sync gap that's invisible on dense FFN but
+   surfaces when MoE + shared expert produce two partials added
+   in-place to `partial_ffn_out` before the FFN AR.
+
 ## Status
 
-Open. Diagnostic tooling shipped; root cause still hiding. Bisect points
-at layer-0 GDN forward producing slightly-different per-element delta in
-TP vs PP, restricted to the 35B-A3B path (qwen35moe Q8_0 attn_qkv) — not
-9B (qwen35 dense Q4_1). Next session should add probes at GDN-internal
-checkpoints (post-attn-norm, post-attn_qkv, post-conv1d, post-state-step)
-and identify which intermediate first diverges.
+Open. Diagnostic tooling shipped (TP_LAYER0_BISECT, TP_SKIP_SHARED,
+GDN_QKV_FUSE_Q8_0=off, plus matched PP dump in layer.rs). Bug
+restricted to `qwen35moe` + Q8_0 `attn_qkv` + `hidden=2048` + MoE/shared
+FFN combination. Layout-misinterpretation hypothesis ruled out by
+web research + PP correctness. Next session should add probes at
+GDN-internal checkpoints (post-attn-norm, post-attn_qkv per-rank,
+post-conv1d per-rank, post-state-step) and explicitly test whether
+swapping the MoE+shared composition for a synthetic `forward_moe_only`
+or `forward_shared_only` path produces a correctness signal.
