@@ -118,10 +118,21 @@ pub fn qmatmul(
 
     match recipe.kind {
         RecipeKind::Mmvq => {
+            // V2.34-fix-C: `nb_per_row` (kernel arg) counts WEIGHT
+            // superblocks (size = `block_elems(dtype_weight)`); the
+            // activation row stride uses Q8_1's QK8_1=32 element blocks.
+            // For Q4_0/Q4_1/Q5_0/Q5_1/Q8_0 these coincide (block_elems=32).
+            // For Q4_K/Q5_K/Q6_K (block_elems=256=QK_K) they DIVERGE — the
+            // pre-fix `act_row_bytes = nb_per_row * sizeof(BlockQ8_1)` was
+            // 8× too small, so row i ≥ 1 read partway into row 0's
+            // activation. Caused the V2.34 forward_prefill_pp L>1 bug on
+            // every model with K-quant weights routed through this path
+            // (e.g. ssm_out=Q5_K on Qwen3.5/3.6 hybrid).
             let nb_per_row = k / block_elems(dtype_weight);
-            // MMVQ is per-activation-row. Loop M times for M > 1.
+            let act_blocks_per_row = k / 32; // QK8_1 = 32 elements per Q8_1 block.
             let w_row_bytes = 0; // weight doesn't stride per batch
-            let act_row_bytes = nb_per_row * std::mem::size_of::<flambeau_quant::BlockQ8_1>();
+            let act_row_bytes =
+                act_blocks_per_row * std::mem::size_of::<flambeau_quant::BlockQ8_1>();
             let dst_row_bytes = n * 4;
             for i in 0..m {
                 mmvq_launch(
