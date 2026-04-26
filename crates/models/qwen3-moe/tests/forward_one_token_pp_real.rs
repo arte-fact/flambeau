@@ -87,7 +87,12 @@ fn forward_one_token_pp_real_qwen3_moe() -> Result<()> {
 
     // BOS-adjacent token id — any id in-range suffices; we're only checking
     // the path executes. Qwen3 vocab size is 151936; id 1 is safe.
-    let token_id = 1u32;
+    // Override via FLAMBEAU_BENCH_WARM_TOKEN for parity comparisons (B5 bisect:
+    // set to 9419 to match the cross-model bench seed).
+    let token_id: u32 = std::env::var("FLAMBEAU_BENCH_WARM_TOKEN")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(1);
     let next = forward_one_token_pp(
         &model,
         &mut session,

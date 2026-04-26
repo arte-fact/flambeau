@@ -217,6 +217,10 @@ impl BarP2pAllReduce {
         let cfg = launch_cfg(elem_count);
         for r in 0..4 {
             // SAFETY: forwarded from the public-method contract.
+            // **B5 fix** — canonical-order partials (always (p[0], p[1], p[2], p[3]))
+            // so all ranks compute the same FP32 add order. Same reasoning as
+            // residual_tp2: non-canonical order causes divergent F16 hidden
+            // across ranks → MoE router picks different top-k experts.
             unsafe {
                 self.launch_one(
                     ArKind::ResidualTp4,
@@ -225,12 +229,8 @@ impl BarP2pAllReduce {
                     streams[r],
                     ArArgs::Residual {
                         hidden: hidden[r],
-                        partial_local: partial[r],
-                        peers: [
-                            partial[(r + 1) % 4],
-                            partial[(r + 2) % 4],
-                            partial[(r + 3) % 4],
-                        ],
+                        partial_local: partial[0],
+                        peers: [partial[1], partial[2], partial[3]],
                     },
                     elem_count,
                 )?;
@@ -240,6 +240,15 @@ impl BarP2pAllReduce {
     }
 
     /// TP=2 residual. Mirrors `residual_tp4` for two ranks.
+    ///
+    /// **B5 fix** — partial pointers are passed in CANONICAL (rank-id sorted)
+    /// order to both ranks, so both compute `hidden + partial[0] + partial[1]`
+    /// in the same FP32 add order. Without this, rank 0 sums `h + p[0] + p[1]`
+    /// and rank 1 sums `h + p[1] + p[0]` — non-associative F32 → divergent
+    /// F16 cast → divergent post-AR hidden → MoE router picks DIFFERENT top-k
+    /// experts on each rank → AR sums mismatched experts → garbage tokens.
+    /// Dense-FFN paths happen to round to the same argmax despite the drift,
+    /// so this bug only surfaced on qwen35moe (35B-A3B parity drift).
     ///
     /// # Safety
     /// Same per-pointer + ordering contract as `residual_tp4`, with
@@ -255,6 +264,12 @@ impl BarP2pAllReduce {
         let cfg = launch_cfg(elem_count);
         for r in 0..2 {
             // SAFETY: forwarded from the public-method contract.
+            //
+            // Canonical order: partial[0] is "local" arg, partial[1] is "peer"
+            // — for rank 0, partial[0] is local-device read and partial[1] is
+            // a BAR1 P2P read; for rank 1 the roles swap (partial[0] becomes
+            // BAR1 P2P, partial[1] becomes local-device). The kernel just sees
+            // two pointers and sums in the same order on both ranks.
             unsafe {
                 self.launch_one(
                     ArKind::ResidualTp2,
@@ -263,8 +278,8 @@ impl BarP2pAllReduce {
                     streams[r],
                     ArArgs::Residual {
                         hidden: hidden[r],
-                        partial_local: partial[r],
-                        peers: [partial[1 - r], DevicePtr(0), DevicePtr(0)],
+                        partial_local: partial[0],
+                        peers: [partial[1], DevicePtr(0), DevicePtr(0)],
                     },
                     elem_count,
                 )?;
@@ -288,6 +303,7 @@ impl BarP2pAllReduce {
         let cfg = launch_cfg(elem_count);
         for r in 0..4 {
             // SAFETY: forwarded from the public-method contract.
+            // **B5 fix** — canonical-order partials. See residual_tp2 / tp4.
             unsafe {
                 self.launch_one(
                     ArKind::SumTp4,
@@ -295,12 +311,8 @@ impl BarP2pAllReduce {
                     cfg,
                     streams[r],
                     ArArgs::Sum {
-                        partial_local: partial[r],
-                        peers: [
-                            partial[(r + 1) % 4],
-                            partial[(r + 2) % 4],
-                            partial[(r + 3) % 4],
-                        ],
+                        partial_local: partial[0],
+                        peers: [partial[1], partial[2], partial[3]],
                     },
                     elem_count,
                 )?;
@@ -347,6 +359,7 @@ impl BarP2pAllReduce {
         let cfg = LaunchCfg::one_d(1, BLOCK_THREADS);
         for r in 0..4 {
             // SAFETY: forwarded from public-method contract.
+            // **B5 fix** — canonical-order partials. See residual_tp2 / tp4.
             unsafe {
                 self.launch_fused_rmsnorm(
                     ArKind::ResidualRmsNormTp4,
@@ -354,12 +367,8 @@ impl BarP2pAllReduce {
                     cfg,
                     streams[r],
                     hidden[r],
-                    partial[r],
-                    [
-                        partial[(r + 1) % 4],
-                        partial[(r + 2) % 4],
-                        partial[(r + 3) % 4],
-                    ],
+                    partial[0],
+                    [partial[1], partial[2], partial[3]],
                     rms_weight[r],
                     out_norm[r],
                     n,
@@ -405,6 +414,7 @@ impl BarP2pAllReduce {
         let cfg = LaunchCfg::one_d(1, BLOCK_THREADS);
         for r in 0..4 {
             // SAFETY: forwarded from public-method contract.
+            // **B5 fix** — canonical-order partials. See residual_tp2 / tp4.
             unsafe {
                 self.launch_fused_rmsnorm_q8_1(
                     ArKind::ResidualRmsNormQ8_1Tp4,
@@ -412,12 +422,8 @@ impl BarP2pAllReduce {
                     cfg,
                     streams[r],
                     hidden[r],
-                    partial[r],
-                    [
-                        partial[(r + 1) % 4],
-                        partial[(r + 2) % 4],
-                        partial[(r + 3) % 4],
-                    ],
+                    partial[0],
+                    [partial[1], partial[2], partial[3]],
                     rms_weight[r],
                     out_q8_1[r],
                     n,
@@ -455,6 +461,7 @@ impl BarP2pAllReduce {
         let cfg = LaunchCfg::one_d(1, BLOCK_THREADS);
         for r in 0..2 {
             // SAFETY: forwarded from public-method contract.
+            // **B5 fix** — canonical-order partials. See residual_tp2.
             unsafe {
                 self.launch_fused_rmsnorm_q8_1(
                     ArKind::ResidualRmsNormQ8_1Tp2,
@@ -462,8 +469,8 @@ impl BarP2pAllReduce {
                     cfg,
                     streams[r],
                     hidden[r],
-                    partial[r],
-                    [partial[1 - r], DevicePtr(0), DevicePtr(0)],
+                    partial[0],
+                    [partial[1], DevicePtr(0), DevicePtr(0)],
                     rms_weight[r],
                     out_q8_1[r],
                     n,
@@ -501,6 +508,8 @@ impl BarP2pAllReduce {
         let cfg = LaunchCfg::one_d(1, BLOCK_THREADS);
         for r in 0..2 {
             // SAFETY: forwarded from public-method contract.
+            // **B5 fix** — canonical-order partials (partial[0] then partial[1])
+            // so both ranks compute the same FP32 sum order. See residual_tp2.
             unsafe {
                 self.launch_fused_rmsnorm(
                     ArKind::ResidualRmsNormTp2,
@@ -508,8 +517,8 @@ impl BarP2pAllReduce {
                     cfg,
                     streams[r],
                     hidden[r],
-                    partial[r],
-                    [partial[1 - r], DevicePtr(0), DevicePtr(0)],
+                    partial[0],
+                    [partial[1], DevicePtr(0), DevicePtr(0)],
                     rms_weight[r],
                     out_norm[r],
                     n,
@@ -534,6 +543,7 @@ impl BarP2pAllReduce {
         let cfg = launch_cfg(elem_count);
         for r in 0..2 {
             // SAFETY: forwarded from the public-method contract.
+            // **B5 fix** — canonical-order partials. See residual_tp2.
             unsafe {
                 self.launch_one(
                     ArKind::SumTp2,
@@ -541,8 +551,8 @@ impl BarP2pAllReduce {
                     cfg,
                     streams[r],
                     ArArgs::Sum {
-                        partial_local: partial[r],
-                        peers: [partial[1 - r], DevicePtr(0), DevicePtr(0)],
+                        partial_local: partial[0],
+                        peers: [partial[1], DevicePtr(0), DevicePtr(0)],
                     },
                     elem_count,
                 )?;

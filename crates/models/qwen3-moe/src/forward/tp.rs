@@ -365,6 +365,7 @@ fn debug_probe_rank_hidden(
     let mut min = f32::INFINITY;
     let mut max = f32::NEG_INFINITY;
     let mut sum = 0.0f64;
+    let mut sumsq = 0.0f64;
     for &b in &host {
         let v = half::f16::from_bits(b).to_f32();
         if v.is_nan() {
@@ -373,12 +374,18 @@ fn debug_probe_rank_hidden(
             if v < min { min = v; }
             if v > max { max = v; }
             sum += v as f64;
+            sumsq += (v as f64) * (v as f64);
         }
     }
     let mean = sum / (n - nan).max(1) as f64;
+    let l2 = sumsq.sqrt();
+    let head: Vec<f32> = host[..host.len().min(4)]
+        .iter()
+        .map(|&b| half::f16::from_bits(b).to_f32())
+        .collect();
     let il_str = if il == usize::MAX { "-".to_string() } else { il.to_string() };
     eprintln!(
-        "  PROBE {label} rank={rank} il={il_str:>3}  n={n}  nan={nan:>5}  min={min:.6}  max={max:.6}  mean={mean:.6}"
+        "  PROBE {label} rank={rank} il={il_str:>3}  n={n}  nan={nan}  L2={l2:.6}  min={min:.6}  max={max:.6}  mean={mean:.6}  head={head:?}"
     );
     Ok(())
 }
