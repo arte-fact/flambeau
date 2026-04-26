@@ -1062,8 +1062,15 @@ fn forward_ffn_block_tp(
                     moe_scratch,
                     mid_norm_f16,
                 )?;
-                // B5 bisect — dump router output (expert_ids + expert_weights).
-                if std::env::var("FLAMBEAU_TP_LAYER0_BISECT").is_ok() && il == 0 {
+                // B5 router-divergence bisect: dump expert_ids per layer.
+                // Two env gates:
+                //   FLAMBEAU_TP_LAYER0_BISECT=1 — layer 0 only, both ranks.
+                //   FLAMBEAU_PARITY_LAYER_DUMP=1 — every layer, rank 0 only,
+                //                                  format matching layer.rs PP.
+                let layer0_bisect =
+                    std::env::var("FLAMBEAU_TP_LAYER0_BISECT").is_ok() && il == 0;
+                let layer_dump = std::env::var("FLAMBEAU_PARITY_LAYER_DUMP").is_ok();
+                if (layer0_bisect && r < cluster.ranks()) || (layer_dump && r == 0) {
                     use flambeau_core::CopyDirection;
                     let device = cluster.device(r);
                     device.bind()?;
@@ -1088,9 +1095,16 @@ fn forward_ffn_block_tp(
                         )?;
                     }
                     flambeau_core::Stream::synchronize(stream2)?;
-                    eprintln!(
-                        "  PROBE router rank={r} il={il} expert_ids={ids:?} weights={wts:?}"
-                    );
+                    if layer_dump && r == 0 {
+                        eprintln!(
+                            "[router-dump] TP il={il} expert_ids={ids:?} weights={wts:?}"
+                        );
+                    }
+                    if layer0_bisect {
+                        eprintln!(
+                            "  PROBE router rank={r} il={il} expert_ids={ids:?} weights={wts:?}"
+                        );
+                    }
                 }
             }
 

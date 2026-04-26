@@ -391,6 +391,36 @@ pub fn forward_layer_decode(
         moe,
         scratch.mid_norm_f16,
     )?;
+    // B5 router-divergence bisect: dump expert_ids per layer for parity diff.
+    // Gated on FLAMBEAU_PARITY_LAYER_DUMP=1 so it composes with the existing
+    // PP layer-dump infra. Read on the same stream the kernels just used so
+    // the read sees the just-written values.
+    if std::env::var("FLAMBEAU_PARITY_LAYER_DUMP").is_ok() {
+        use flambeau_core::CopyDirection;
+        let top_k = cfg.num_experts_per_tok;
+        let mut ids = vec![0i32; top_k];
+        let mut wts = vec![0f32; top_k];
+        unsafe {
+            device.memcpy_async(
+                stream,
+                CopyDirection::DeviceToHost,
+                DevicePtr(ids.as_mut_ptr() as usize),
+                moe.expert_ids,
+                top_k * std::mem::size_of::<i32>(),
+            )?;
+            device.memcpy_async(
+                stream,
+                CopyDirection::DeviceToHost,
+                DevicePtr(wts.as_mut_ptr() as usize),
+                moe.expert_weights,
+                top_k * std::mem::size_of::<f32>(),
+            )?;
+        }
+        flambeau_core::Stream::synchronize(stream)?;
+        eprintln!(
+            "[router-dump] PP il={il} expert_ids={ids:?} weights={wts:?}"
+        );
+    }
 
     // 6. Routed MoE FFN — fuses the residual add in moe_combine (and optionally
     // the shared-expert delta residual via V2.23.a.2 two-residuals variant).

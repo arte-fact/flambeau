@@ -142,14 +142,92 @@ exposes that PP's non-sliced path doesn't — narrowing the search to:
    surfaces when MoE + shared expert produce two partials added
    in-place to `partial_ffn_out` before the FFN AR.
 
+## Decisive bisect — MoE expert routing chaos
+
+`FLAMBEAU_PARITY_LAYER_DUMP=1` was extended to dump `expert_ids` per
+layer in both PP (`layer.rs`, the existing `[layer-dump]` infra) and
+TP (`tp.rs`, rank-0 only). Side-by-side diff of all 40 layers:
+
+| layer | PP ∩ TP | PP-only experts | TP-only experts |
+|---|---|---|---|
+| 0 | **8/8** | — (sets identical, minor 56↔120 order swap at positions 6-7) | — |
+| 1 | 3/8 | {19, 86, 112, 167, 214} | {3, 72, 143, 228, 243} |
+| 2 | 4/8 | {49, 170, 187, 217} | {33, 58, 87, 132} |
+| 3 | 2/8 | … | … |
+| … | rapidly drops … | | |
+| 31 | **0/8** | completely disjoint | |
+| 36 | 0/8 | completely disjoint | |
+| 39 | 1/8 | | |
+
+At layer 0 the routers pick the **same set** of 8 experts but with
+slightly different weights (PP weights at positions 6,7 = 0.0624,
+0.0572; TP = 0.0674, 0.0650). That's enough to swap positions 6↔7 in
+the top-k order and to feed slightly-different per-expert weights into
+`moe_combine`. Layer 0's MoE FFN output therefore differs subtly
+between PP and TP, which feeds layer 1's input, which produces a
+significantly different router logit vector at layer 1, which picks
+**different** top-k experts (only 3/8 overlap). Once the expert paths
+fork, they never re-converge — by layer 31 they're completely disjoint.
+
+## Root cause
+
+Not a code bug; **fundamental property of intra-expert TP combined
+with MoE topology chaos**.
+
+* TP's per-rank intra-expert sharding is mathematically correct
+  (`Σ_r out_r[h] = Σ_i full_W[h, i] · full_x[i]`), but the FP32
+  reduction order across the AR sum + per-rank kernel reductions
+  differs from the FP32 reduction order PP would compute internally
+  to a single kernel.
+* That ordering difference is small (~F32 ULPs at well-conditioned
+  inputs), but cancellation-heavy operations like RMSNorm denominators
+  can amplify it to several percent on individual elements.
+* For dense FFN (Qwen3.5-9B, Qwen3.6-27B) the drift is bounded — a
+  Lipschitz function turns drift in into proportional drift out, with
+  no amplification. PP and TP both produce argmax=11 at decode despite
+  per-element drift of similar magnitude.
+* For MoE (Qwen3.6-35B-A3B) the router's `softmax → top-k → renormalize`
+  is **chaotic at the boundary** — small drift in router logits can
+  swap which 8 of 256 experts are picked, and once the expert subset
+  diverges between PP and TP, the FFN computations are computing
+  *different functions*, not just slightly-different values of the
+  same function. Divergence compounds across 40 layers.
+
+This is a known property of MoE+TP in the literature — vLLM,
+DeepSpeed-MoE, and Megatron-MoE all default to **expert parallelism**
+(each rank owns a subset of experts, all-to-all activation routing)
+rather than intra-expert tensor parallelism precisely because the
+former is robust to F32 reduction-order changes (each rank's outputs
+go to the *same* final reduction in `moe_combine`, regardless of
+topology).
+
+## Resolution paths
+
+1. **Switch to expert-axis sharding for MoE** (large refactor).
+   `ffn_*_exps` would be ColParallel on dim=0 (expert axis); each rank
+   owns a subset of experts and computes the full inter dim for its
+   experts. Activations route via all-to-all. Bit-exact across
+   topologies because the router output is replicated and each
+   expert's compute is deterministic on its rank.
+2. **Accept the drift, gate per-arch.** Mark
+   `qwen35moe` (and other MoE arches) as TP-incompatible at intra-expert
+   sharding. CLI `--mesh-mode tp` rejects MoE arches; expert-parallel
+   support comes later. Dense and dense+GDN arches stay supported.
+3. **Quality-gate, not bit-exact.** Run a perplexity / chat-quality
+   delta on Qwen3.6-35B-A3B PP-vs-TP. If perplexity diff is within
+   acceptable bounds and chat smoke passes, ship TP for MoE without a
+   bit-exact gate. Document that argmax may differ from llama.cpp
+   reference for MoE+TP runs.
+
+(3) is the cheapest and matches the V1 "consumer-grade inference"
+positioning — small drift is acceptable for chat. (1) is the
+right long-term move and matches the multi-rig vision.
+
 ## Status
 
-Open. Diagnostic tooling shipped (TP_LAYER0_BISECT, TP_SKIP_SHARED,
-GDN_QKV_FUSE_Q8_0=off, plus matched PP dump in layer.rs). Bug
-restricted to `qwen35moe` + Q8_0 `attn_qkv` + `hidden=2048` + MoE/shared
-FFN combination. Layout-misinterpretation hypothesis ruled out by
-web research + PP correctness. Next session should add probes at
-GDN-internal checkpoints (post-attn-norm, post-attn_qkv per-rank,
-post-conv1d per-rank, post-state-step) and explicitly test whether
-swapping the MoE+shared composition for a synthetic `forward_moe_only`
-or `forward_shared_only` path produces a correctness signal.
+Diagnosed. Not a fixable-this-session bug; it's a topology/algorithm
+choice. Diagnostic tooling shipped. Recommendation: pick (3) for V1
+ship (file the perplexity delta cert as the gate), schedule (1) for
+V2 alongside the broader MoE TP refactor for Qwen3-Coder and other
+MoE arches (which already need scheduling work for the K-quant
+alignment wall — task #52 / TP-7-arch).
