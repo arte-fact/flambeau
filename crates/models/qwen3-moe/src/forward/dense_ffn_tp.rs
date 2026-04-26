@@ -42,7 +42,7 @@ use flambeau_ops::hip::{
     norm::quantize_f16_q8_1,
     qmatmul::{
         mmvq_q4_0_gate_up, mmvq_q4_0_gate_up_t128, mmvq_q4_0_gate_up_warpcoop64,
-        mmvq_q8_0_gate_up, qmatmul,
+        mmvq_q4_1_gate_up, mmvq_q8_0_gate_up, qmatmul,
     },
     HipStream, OpsRegistry,
 };
@@ -135,6 +135,12 @@ pub fn forward_dense_ffn_decode_tp(
         && !specific_off
         && ffn_gate.dtype == flambeau_quant::GgmlDType::Q4_0
         && ffn_up.dtype == flambeau_quant::GgmlDType::Q4_0;
+    // C8-i1 — Q4_1 fused gate+up. Sibling of fuse_q4; closes the dense-FFN
+    // launch-pair gap on Qwen3.5-9B-Q4_1 / 27B-Q4_1.
+    let fuse_q4_1 = !global_baseline
+        && !specific_off
+        && ffn_gate.dtype == flambeau_quant::GgmlDType::Q4_1
+        && ffn_up.dtype == flambeau_quant::GgmlDType::Q4_1;
     if fuse_q8 {
         mmvq_q8_0_gate_up(
             ops,
@@ -204,6 +210,23 @@ pub fn forward_dense_ffn_decode_tp(
             )
             .context("dense ffn (TP) gate+up fused mmvq_q4_0")?;
         }
+    } else if fuse_q4_1 {
+        // C8-i1 — Q4_1 dense FFN gate+up fusion. Symmetric (both rows =
+        // local_inter). One launch instead of two, single Q8_1 activation
+        // read per block.
+        mmvq_q4_1_gate_up(
+            ops,
+            stream,
+            ffn_gate.ptr,
+            ffn_up.ptr,
+            scratch.x_q8_1,
+            scratch.gate_f32,
+            scratch.up_f32,
+            local_inter,
+            local_inter,
+            hidden,
+        )
+        .context("dense ffn (TP) gate+up fused mmvq_q4_1")?;
     } else {
         qmatmul(
             ops,

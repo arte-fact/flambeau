@@ -442,6 +442,46 @@ pub fn mmvq_q4_0_gate_up(
     Ok(())
 }
 
+/// **C8-i1** — fused gate+up Q4_1 dense MMVQ. Sibling of `mmvq_q4_0_gate_up`
+/// for Q4_1 weights (Qwen3.5-9B-Q4_1 / 27B-Q4_1 dense FFN). Reads the Q8_1
+/// activation once per block, produces both gate and up outputs.
+pub fn mmvq_q4_1_gate_up(
+    reg: &OpsRegistry,
+    stream: &HipStream,
+    gate_w: DevicePtr,
+    up_w: DevicePtr,
+    y_q8_1: DevicePtr,
+    gate_out: DevicePtr,
+    up_out: DevicePtr,
+    n_rows_gate: usize,
+    n_rows_up: usize,
+    k: usize,
+) -> Result<()> {
+    let module = reg.expect_module("mmvq_q4_1_gate_up_dp4a")?;
+    let kernel = module.kernel("flambeau_mmvq_q4_1_gate_up_dp4a_q8_1")?;
+    let n_rows_g = n_rows_gate as i32;
+    let n_rows_u = n_rows_up as i32;
+    let n_blocks_i = (k / 32) as i32;
+    let gw_ptr: u64 = gate_w.as_usize() as u64;
+    let uw_ptr: u64 = up_w.as_usize() as u64;
+    let y_ptr: u64 = y_q8_1.as_usize() as u64;
+    let g_ptr: u64 = gate_out.as_usize() as u64;
+    let u_ptr: u64 = up_out.as_usize() as u64;
+    let mut args = KernelArgs::new();
+    args.push(&gw_ptr);
+    args.push(&uw_ptr);
+    args.push(&y_ptr);
+    args.push(&g_ptr);
+    args.push(&u_ptr);
+    args.push(&n_rows_g);
+    args.push(&n_rows_u);
+    args.push(&n_blocks_i);
+    let grid = n_rows_gate.max(n_rows_up) as u32;
+    let cfg = LaunchCfg::one_d(grid, 256);
+    unsafe { kernel.launch(stream, cfg, args)? };
+    Ok(())
+}
+
 pub fn mmvq_q8_0_gate_up(
     reg: &OpsRegistry,
     stream: &HipStream,

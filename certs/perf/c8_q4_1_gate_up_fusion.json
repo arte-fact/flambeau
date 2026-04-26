@@ -1,0 +1,45 @@
+{
+  "schema_version": 1,
+  "cycle": "C8",
+  "label": "Q4_1 fused gate+up dense MMVQ",
+  "rig": "threadreaper-gfx906 @ 100W/GPU",
+  "topology": "TP world=2 (gpus 0,1)",
+  "kernel": "mmvq_q4_1_gate_up_dp4a (256t, sibling of mmvq_q4_0_gate_up_dp4a)",
+  "rationale": "Q4_1 dense FFN gate+up was unfused — every layer per rank ran two MMVQ launches with two independent Q8_1 activation reads. Mirrored the Q4_0 fusion (TP-perf-c1) for Q4_1: same 256t schedule, single activation read per block, asymmetric n_rows_gate / n_rows_up supported. Q4_1 reconstruction `+ m_x · s_y · 0.25` instead of Q4_0's `- 8 · d_x · s_y · 0.25`.",
+  "wiring": "dense_ffn_tp.rs `fuse_q4_1` arm parallel to `fuse_q4` (Q4_0). FLAMBEAU_VARIANT=baseline or FLAMBEAU_DENSE_GATE_UP=unfused opts back to two qmatmul calls.",
+  "results": [
+    {
+      "model": "Qwen3.5-9B-Q4_1",
+      "arch": "qwen35",
+      "hidden": 4096,
+      "decode_tok_s_unfused": 69.29,
+      "decode_tok_s_fused": 70.03,
+      "delta_pct": 1.07,
+      "warm_argmax_match": true,
+      "decode_trajectory_bit_exact": true,
+      "note": "Modest win — single per-rank activation read per dense FFN layer is real but small relative to KV attention + LM head decode wall."
+    },
+    {
+      "model": "Qwen3.5-27B-Q4_1",
+      "arch": "qwen35",
+      "hidden": 5120,
+      "decode_tok_s_unfused": 27.17,
+      "decode_tok_s_fused": 27.21,
+      "delta_pct": 0.15,
+      "warm_argmax_match": true,
+      "decode_trajectory_bit_exact": false,
+      "note": "Wash — within run-to-run variance. last_id F32-noise diverges (3163 vs 7) but warm_argmax matches → no correctness regression. 27B-Q4_1 decode is dominated by attention not FFN, so halving FFN MMVQ launches barely registers."
+    }
+  ],
+  "decision": {
+    "ship_default": "yes",
+    "rationale": "Bit-exact decode trajectory on 9B-Q4_1 (the model where it matters), small but real win. Cost is zero — kernel is structurally identical to Q4_0 fusion which is already shipped. No reason to leave Q4_1 dense FFN unfused when both weights match dtype."
+  },
+  "follow_ups": [
+    {
+      "id": "C8-i3-q4_1-kv-fusion",
+      "summary": "K+V dense fusion (mmvq_q4_1_kv_f16dst) — sibling of TP-perf-c3's `mmvq_q4_0_kv_f16dst_dp4a`. Would close the K+V launch pair on Q4_1 attention. Lower priority than gate+up since attention K/V shapes are smaller (n_rows_k = local_kv_dim · head_dim_k, often only 256–512 rows). Defer to next batch."
+    }
+  ],
+  "emitted_at": "2026-04-26T21:50:00Z"
+}
