@@ -201,7 +201,13 @@ pub fn forward_gdn_decode_tp(
     let baseline = std::env::var("FLAMBEAU_VARIANT").as_deref() == Ok("baseline");
     let dt_q = attn_qkv.dtype;
     let dt_g = attn_gate.dtype;
+    // B5 bisect — FLAMBEAU_GDN_QKV_FUSE_Q8_0=off disables only the fused
+    // attn_qkv+attn_gate Q8_0 kernel path (asymmetric rows). Used to check
+    // whether the bug is in the fused gate+up Q8_0 GDN kernel.
+    let gdn_fuse_q8_0_off =
+        std::env::var("FLAMBEAU_GDN_QKV_FUSE_Q8_0").as_deref() == Ok("off");
     let fuse_qkv_gate_q8_0 = !baseline
+        && !gdn_fuse_q8_0_off
         && dt_q == flambeau_quant::GgmlDType::Q8_0
         && dt_g == flambeau_quant::GgmlDType::Q8_0;
     let fuse_qkv_gate_q4_0 = !baseline

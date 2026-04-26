@@ -1041,7 +1041,10 @@ fn forward_ffn_block_tp(
                 .as_ref()
                 .map(|l| l.shared_delta_f16)
                 .unwrap_or(DevicePtr(0));
-            let has_shared = cfg.shared_expert_intermediate_size.is_some();
+            // B5 bisect: FLAMBEAU_TP_SKIP_SHARED=1 skips the shared expert
+            // path entirely (no shared partial added to MoE partial).
+            let skip_shared = std::env::var("FLAMBEAU_TP_SKIP_SHARED").is_ok();
+            let has_shared = cfg.shared_expert_intermediate_size.is_some() && !skip_shared;
             let layer_scratch = scratch.per_rank[r].layer.as_mut().unwrap();
             let ops = &model.ops[r];
 
@@ -1059,6 +1062,36 @@ fn forward_ffn_block_tp(
                     moe_scratch,
                     mid_norm_f16,
                 )?;
+                // B5 bisect — dump router output (expert_ids + expert_weights).
+                if std::env::var("FLAMBEAU_TP_LAYER0_BISECT").is_ok() && il == 0 {
+                    use flambeau_core::CopyDirection;
+                    let device = cluster.device(r);
+                    device.bind()?;
+                    let stream2 = device.default_stream();
+                    let top_k = cfg.num_experts_per_tok;
+                    let mut ids = vec![0i32; top_k];
+                    let mut wts = vec![0f32; top_k];
+                    unsafe {
+                        device.memcpy_async(
+                            stream2,
+                            CopyDirection::DeviceToHost,
+                            DevicePtr(ids.as_mut_ptr() as usize),
+                            moe_scratch.expert_ids,
+                            top_k * std::mem::size_of::<i32>(),
+                        )?;
+                        device.memcpy_async(
+                            stream2,
+                            CopyDirection::DeviceToHost,
+                            DevicePtr(wts.as_mut_ptr() as usize),
+                            moe_scratch.expert_weights,
+                            top_k * std::mem::size_of::<f32>(),
+                        )?;
+                    }
+                    flambeau_core::Stream::synchronize(stream2)?;
+                    eprintln!(
+                        "  PROBE router rank={r} il={il} expert_ids={ids:?} weights={wts:?}"
+                    );
+                }
             }
 
             // 2. (Optional) shared expert → shared_delta_f16.
@@ -1108,6 +1141,21 @@ fn forward_ffn_block_tp(
                 partial_ffn_out,
                 world,
             )?;
+            // B5 bisect — dump MoE partial + shared delta separately
+            // (gated on FLAMBEAU_TP_LAYER0_BISECT). MoE partial is the
+            // RowParallel-sliced sum-over-experts; shared delta is the
+            // shared-expert RowParallel partial. Both per-rank partials
+            // get AR'd later, so per-rank values are sliced (asymmetric).
+            if std::env::var("FLAMBEAU_TP_LAYER0_BISECT").is_ok() && il == 0 {
+                debug_probe_named_rank(
+                    scratch, cluster, "moe partial (pre-shared-add)", il, partial_ffn_out, r,
+                )?;
+                if has_shared {
+                    debug_probe_named_rank(
+                        scratch, cluster, "shared delta", il, shared_delta_f16, r,
+                    )?;
+                }
+            }
             if has_shared {
                 flambeau_ops::hip::mlp::add_f16(
                     &ops,
@@ -1118,6 +1166,11 @@ fn forward_ffn_block_tp(
                     cfg.hidden_size,
                 )
                 .context("moe (TP) + shared expert add_f16")?;
+                if std::env::var("FLAMBEAU_TP_LAYER0_BISECT").is_ok() && il == 0 {
+                    debug_probe_named_rank(
+                        scratch, cluster, "moe partial (post-shared-add)", il, partial_ffn_out, r,
+                    )?;
+                }
             }
         }
     }
@@ -1475,6 +1528,17 @@ fn forward_gdn_layer_tp(
                 cfg.rms_norm_eps,
             )
             .context("dense ffn (TP world=1, gdn-layer) pre-norm")?;
+        }
+    }
+
+    // B5 bisect — dump mid_norm_f16 (post-AR-attn + post-attn-norm).
+    if std::env::var("FLAMBEAU_TP_LAYER0_BISECT").is_ok() && il == 0 {
+        for r in 0..cluster.ranks() {
+            debug_probe_named_rank(scratch, cluster, "mid_norm_f16", il, mid_norm_ptrs[r], r)?;
+        }
+        // Also probe hidden_a (the post-AR-attn pre-norm value).
+        for r in 0..cluster.ranks() {
+            debug_probe_rank_hidden(scratch, cluster, "post-AR-attn hidden_a", il, r)?;
         }
     }
 

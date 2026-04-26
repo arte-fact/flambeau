@@ -282,6 +282,47 @@ pub fn forward_layer_decode(
         cfg.rms_norm_eps,
     )
     .context("fused post-attn add+rmsnorm")?;
+    // B5 bisect — dump PP analogues of TP's "post-AR-attn hidden_a" and
+    // "mid_norm_f16" at layer 0. Gated on FLAMBEAU_TP_LAYER0_BISECT (same
+    // env as TP) so PP and TP runs can be diffed by the same flag.
+    if std::env::var("FLAMBEAU_TP_LAYER0_BISECT").is_ok() && il == 0 {
+        use flambeau_core::CopyDirection;
+        for (label, ptr) in [
+            ("PP post-attn-residual mid_f16", scratch.mid_f16),
+            ("PP post-attn-norm mid_norm_f16", scratch.mid_norm_f16),
+        ] {
+            let n = hidden;
+            let mut host = vec![0u16; n];
+            unsafe {
+                device.memcpy_async(
+                    stream,
+                    CopyDirection::DeviceToHost,
+                    DevicePtr(host.as_mut_ptr() as usize),
+                    ptr,
+                    n * 2,
+                )?;
+            }
+            flambeau_core::Stream::synchronize(stream)?;
+            let mut nan = 0usize;
+            let mut min = f32::INFINITY;
+            let mut max = f32::NEG_INFINITY;
+            let mut sumsq = 0.0f64;
+            for &b in &host {
+                let v = half::f16::from_bits(b).to_f32();
+                if v.is_nan() { nan += 1; } else {
+                    if v < min { min = v; }
+                    if v > max { max = v; }
+                    sumsq += (v as f64) * (v as f64);
+                }
+            }
+            let l2 = sumsq.sqrt();
+            let head: Vec<f32> = host[..host.len().min(4)]
+                .iter().map(|&b| half::f16::from_bits(b).to_f32()).collect();
+            eprintln!(
+                "  {label} il={il} n={n} nan={nan} L2={l2:.6} min={min:.6} max={max:.6} head={head:?}"
+            );
+        }
+    }
 
     // 4. FFN. Two flavours:
     //    - arch=qwen35 (dense): single gate/up/down triple, no router. Writes
