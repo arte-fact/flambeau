@@ -150,13 +150,17 @@ pub fn forward_dense_ffn_decode_tp(
         )
         .context("dense ffn (TP) gate+up fused mmvq_q8_0")?;
     } else if fuse_q4 {
-        // C6 — three-way schedule pick (mirror of gdn_tp.rs):
-        //   FLAMBEAU_Q4_0_GU_WARPCOOP=on  → 64 t/block (single-warp)
-        //   FLAMBEAU_Q4_0_GU_T128=off     → 256 t/block (cycle 1 baseline)
-        //   default                       → 128 t/block (TP-perf-c5)
+        // Dense FFN gate+up is always symmetric (n_rows_gate == n_rows_up
+        // == local_inter), so the shape-aware default still picks t128
+        // (the cycle-5 win). The env toggles match gdn_tp.rs.
         let use_warpcoop =
             std::env::var("FLAMBEAU_Q4_0_GU_WARPCOOP").as_deref() == Ok("on");
-        let use_t128 = std::env::var("FLAMBEAU_Q4_0_GU_T128").as_deref() != Ok("off");
+        let symmetric = true; // dense FFN: n_rows_gate == n_rows_up == local_inter
+        let use_t128 = match std::env::var("FLAMBEAU_Q4_0_GU_T128").as_deref() {
+            Ok("on") => true,
+            Ok("off") => false,
+            _ => symmetric,
+        };
         if use_warpcoop {
             mmvq_q4_0_gate_up_warpcoop64(
                 ops,

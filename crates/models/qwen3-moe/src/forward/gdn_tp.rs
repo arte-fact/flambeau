@@ -222,13 +222,31 @@ pub fn forward_gdn_decode_tp(
         )
         .context("attn_qkv + attn_gate (TP) fused mmvq_q8_0")?;
     } else if fuse_qkv_gate_q4_0 {
-        // C6 — three-way schedule pick:
-        //   FLAMBEAU_Q4_0_GU_WARPCOOP=on  → 64 t/block (single-warp, max occupancy)
-        //   FLAMBEAU_Q4_0_GU_T128=off     → 256 t/block (cycle-1 baseline)
-        //   default                       → 128 t/block (TP-perf-c5)
+        // Shape-aware Q4_0 fused gate+up dispatch (task #53 fix).
+        //
+        // Cycle-5 made t128 the default; benching on Qwen3.6-35B-A3B-Q4_0
+        // (hidden=2048, GDN asymmetric local_conv_channels=2560 vs
+        // local_d_inner=2048) showed t128 regresses -15.5% vs the cycle-1
+        // 256t baseline at *that* shape. On Qwen3.6-27B-Q4_0 (hidden=5120,
+        // dense FFN symmetric) t128 wins +3.3 %.
+        //
+        // The discriminator that matches the measured sign-flip is
+        // (n_rows_gate == n_rows_up) — symmetric → t128, asymmetric → 256t.
+        // GDN's attn_qkv (`local_conv_channels`) ≠ attn_gate
+        // (`local_d_inner`) → asymmetric → 256t default.
+        //
+        //   FLAMBEAU_Q4_0_GU_WARPCOOP=on  → 64 t/block (C6 opt-in)
+        //   FLAMBEAU_Q4_0_GU_T128=on      → force 128 t/block
+        //   FLAMBEAU_Q4_0_GU_T128=off     → force 256 t/block
+        //   default                       → shape-aware (above)
         let use_warpcoop =
             std::env::var("FLAMBEAU_Q4_0_GU_WARPCOOP").as_deref() == Ok("on");
-        let use_t128 = std::env::var("FLAMBEAU_Q4_0_GU_T128").as_deref() != Ok("off");
+        let symmetric = local_conv_channels == local_d_inner;
+        let use_t128 = match std::env::var("FLAMBEAU_Q4_0_GU_T128").as_deref() {
+            Ok("on") => true,
+            Ok("off") => false,
+            _ => symmetric,
+        };
         if use_warpcoop {
             mmvq_q4_0_gate_up_warpcoop64(
                 ops,

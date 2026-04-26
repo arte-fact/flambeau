@@ -52,12 +52,13 @@
   "follow_ups": [
     {
       "id": "C6-followup-shape-aware",
-      "summary": "Shape-aware Q4_0 fused gate+up dispatch — pick 256t/t128/warpcoop64 based on (n_rows_gate, n_rows_up, hidden). 35B-A3B's hidden=2048+asymmetric pair belongs in 256t; 27B's hidden=5120+symmetric pair belongs in warpcoop64; t128 is the conservative middle. Needs T-track tuner to autotune on rig.",
-      "blocks_default_change": true
+      "summary": "Shape-aware Q4_0 fused gate+up dispatch landed in same commit chain as task #53 fix. Discriminator: `n_rows_gate == n_rows_up` (symmetric → t128, asymmetric → 256t). Verified on 27B-Q4_0 (mostly symmetric, t128 path retained) and 35B-A3B-Q4_0 (GDN asymmetric, now routes 256t). Re-bench: 35B-A3B-Q4_0 went 61.47 → 69.32 tok/s (≈+12 %, within run-to-run variance of the 256t baseline). 27B-Q4_0 essentially unchanged (27.47 → 27.21, within variance).",
+      "status": "shipped"
     },
     {
       "id": "Cycle-5-regression-35B-A3B",
-      "summary": "TP-perf-c5 (t128 default) regresses Qwen3.6-35B-A3B-Q4_0 decode by -15.5% vs 256t baseline. Cycle-5 cert only validated on Qwen3.6-27B-Q4_0; needs re-run on hybrid hidden=2048 shapes to either revert default or land shape-aware dispatch."
+      "summary": "Closed by shape-aware dispatch (above). FLAMBEAU_Q4_0_GU_T128=on/off remains as opt-in override; default now picks per call site.",
+      "status": "shipped"
     }
   ],
   "emitted_at": "2026-04-26T21:35:00Z"
