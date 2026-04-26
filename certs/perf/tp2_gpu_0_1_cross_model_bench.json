@@ -101,11 +101,15 @@
       "model": "Qwen_Qwen3.6-35B-A3B-Q4_0",
       "arch": "qwen35moe",
       "weight_gib": 19.29,
-      "load_s": null,
-      "tok_s": null,
-      "status": "warm_forward_failed",
-      "error": "gdn layer 0",
-      "note": "Loads but forward fails on first GDN layer. Different result than UD-Q4_K_S (which loads + forwards). Likely a per-tensor dtype this conversion path doesn't handle (the Qwen-published Q4_0 has different per-tensor quants than the unsloth UD-Q4_K_S)."
+      "load_s": 17.87,
+      "tok_s": 65.43,
+      "status": "ok",
+      "warm_argmax": 64,
+      "ctx_cap": 4096,
+      "nan": 0,
+      "tg": 64,
+      "last_id": 97799,
+      "note": "B6 / V2.35.a fix: Qwen-published Q4_0 packs ffn_down_exps as Q4_1 (gate/up Q4_0); added indexed_moe_mmvq_q4_1 kernel + dispatch + cert. Now loads + decodes 65.43 tok/s on Mesh<2> world=2. warm_argmax=64 not compared to seed-9419 reference 11 (different quant variant)."
     },
     {
       "model": "Qwen3-Coder-30B-A3B-Instruct-1M-Q4_0",
@@ -131,7 +135,8 @@
     "ok_bit_correct": 6,
     "ok_with_parity_drift": 1,
     "load_failed": 2,
-    "warm_forward_failed": 1
+    "warm_forward_failed": 0,
+    "ok_uncerted_quant_variant": 1
   },
   "perf_ranking_tok_s_world2_pre_c5": [
     "Qwen3.5-9B-Q4_1                  70.24",

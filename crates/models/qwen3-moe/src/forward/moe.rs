@@ -1487,6 +1487,24 @@ pub fn forward_moe_ffn_prefill(
             )
             .context("prefill indexed_moe down q8_0 tile8")?;
         }
+        GgmlDType::Q4_1 => {
+            // B6 / V2.35.a — no tile8 MMQ Q4_1 yet; route prefill down through
+            // the plain MMVQ kernel. Slower at large L than tile8 but
+            // unblocks Qwen-published Qwen3.6-35B-A3B-Q4_0 (ffn_down_exps Q4_1).
+            flambeau_ops::hip::moe::indexed_moe_mmvq_q4_1(
+                ops,
+                stream,
+                ffn_down_exps.ptr,
+                scratch.activated_q8_1,
+                scratch.expert_ids,
+                scratch.down_f32,
+                hidden,
+                n_tokens * top_k,
+                1,
+                inter / 32,
+            )
+            .context("prefill indexed_moe down q4_1")?;
+        }
         other => bail!("unreachable: ffn_down_exps dtype {other:?} should have been rejected"),
     }
 

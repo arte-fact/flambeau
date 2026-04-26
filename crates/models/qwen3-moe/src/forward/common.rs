@@ -15,8 +15,8 @@ use flambeau_quant::GgmlDType;
 
 use flambeau_ops::hip::cast::cast_f32_to_f16;
 use flambeau_ops::hip::moe::{
-    indexed_moe_mmvq_q4_0, indexed_moe_mmvq_q4_k_gate_up, indexed_moe_mmvq_q4_k_r2,
-    indexed_moe_mmvq_q5_k, indexed_moe_mmvq_q6_k, indexed_moe_mmvq_q8_0,
+    indexed_moe_mmvq_q4_0, indexed_moe_mmvq_q4_1, indexed_moe_mmvq_q4_k_gate_up,
+    indexed_moe_mmvq_q4_k_r2, indexed_moe_mmvq_q5_k, indexed_moe_mmvq_q6_k, indexed_moe_mmvq_q8_0,
 };
 use flambeau_ops::hip::norm::quantize_f16_q8_1;
 
@@ -69,9 +69,10 @@ pub(crate) fn validate_moe_dtypes(
         && down_dt != GgmlDType::Q6K
         && down_dt != GgmlDType::Q8_0
         && down_dt != GgmlDType::Q4_0
+        && down_dt != GgmlDType::Q4_1
     {
         bail!(
-            "{label} ffn_down_exps must be Q4_K, Q5_K, Q6_K, Q8_0 or Q4_0; got {down_dt:?}"
+            "{label} ffn_down_exps must be Q4_K, Q5_K, Q6_K, Q8_0, Q4_0 or Q4_1; got {down_dt:?}"
         );
     }
     Ok(())
@@ -215,7 +216,18 @@ pub(crate) fn run_indexed_moe_down(
             )
             .context("indexed_moe down q4_0")
         }
-        _ => bail!("run_indexed_moe_down: unsupported down dtype {dtype:?} (expected Q4_K / Q6_K / Q8_0 / Q4_0)"),
+        GgmlDType::Q4_1 => {
+            // B6 / V2.35.a — Qwen-published Qwen3.6-35B-A3B-Q4_0 packs
+            // ffn_down_exps as Q4_1 (gate/up are Q4_0). Same call shape as
+            // Q4_0; only the per-block reconstruction differs.
+            let nb = inter / 32;
+            indexed_moe_mmvq_q4_1(
+                ops, stream, w_down, activated_q8_1, expert_ids, down_out, hidden,
+                n_tokens_eff, top_k_inner, nb,
+            )
+            .context("indexed_moe down q4_1")
+        }
+        _ => bail!("run_indexed_moe_down: unsupported down dtype {dtype:?} (expected Q4_K / Q5_K / Q6_K / Q8_0 / Q4_0 / Q4_1)"),
     }
 }
 

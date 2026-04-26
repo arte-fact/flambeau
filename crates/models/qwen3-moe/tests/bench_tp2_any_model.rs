@@ -168,7 +168,7 @@ fn bench_tp2_any_model() -> Result<()> {
     ) {
         eprintln!(
             "BENCH_RESULT model={model_label} arch={arch} weight_gib={weight_gib:.2} \
-             status=warm_forward_failed err={e}"
+             status=warm_forward_failed err={e:#}"
         );
         return Ok(());
     }

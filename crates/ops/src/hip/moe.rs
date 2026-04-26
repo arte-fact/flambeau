@@ -307,6 +307,50 @@ pub fn indexed_moe_mmvq_q4_0(
     Ok(())
 }
 
+/// B6 / V2.35.a — Q4_1 indexed-MoE MMVQ. Unblocks Qwen-published
+/// Qwen3.6-35B-A3B-Q4_0 whose `ffn_down_exps` are Q4_1 (gate/up are Q4_0,
+/// down is Q4_1). Same contract as `indexed_moe_mmvq_q4_0`; per-block
+/// reconstruction differs (`m_x · s_y` instead of `-8 · d_x · s_y`).
+pub fn indexed_moe_mmvq_q4_1(
+    reg: &OpsRegistry,
+    stream: &HipStream,
+    w: DevicePtr,
+    y: DevicePtr,
+    expert_ids: DevicePtr,
+    dst: DevicePtr,
+    n_rows: usize,
+    n_tokens: usize,
+    top_k: usize,
+    n_blocks_per_row: usize,
+) -> Result<()> {
+    let module = reg.expect_module("indexed_moe_mmvq_q4_1")?;
+    let kernel = module.kernel("flambeau_indexed_moe_mmvq_q4_1_q8_1")?;
+    let n_rows_i = n_rows as i32;
+    let n_tokens_i = n_tokens as i32;
+    let top_k_i = top_k as i32;
+    let nb_i = n_blocks_per_row as i32;
+    let w_ptr: u64 = w.as_usize() as u64;
+    let y_ptr: u64 = y.as_usize() as u64;
+    let e_ptr: u64 = expert_ids.as_usize() as u64;
+    let d_ptr: u64 = dst.as_usize() as u64;
+    let mut args = KernelArgs::new();
+    args.push(&w_ptr);
+    args.push(&y_ptr);
+    args.push(&e_ptr);
+    args.push(&d_ptr);
+    args.push(&n_rows_i);
+    args.push(&n_tokens_i);
+    args.push(&top_k_i);
+    args.push(&nb_i);
+    let cfg = LaunchCfg {
+        grid: (n_rows as u32, (n_tokens * top_k) as u32, 1),
+        block: (256, 1, 1),
+        shared_bytes: 0,
+    };
+    unsafe { kernel.launch(stream, cfg, args)? };
+    Ok(())
+}
+
 /// V2.23.b.1 — fused gate+up Q4_0 indexed-MoE MMVQ. Reads each Q8_1
 /// activation word once per block and produces both gate and up outputs,
 /// halving the launch count for MoE Q4_0 decode vs calling
