@@ -494,8 +494,21 @@ pub fn mmvq_q8_0_gate_up(
     n_rows_up: usize,
     k: usize,
 ) -> Result<()> {
-    let module = reg.expect_module("mmvq_q8_0_gate_up_dp4a")?;
-    let kernel = module.kernel("flambeau_mmvq_q8_0_gate_up_dp4a_q8_1")?;
+    // C9-followup-2: default to t128_vdr2 schedule (same combined lever
+    // that wins +3% on Q8_0 single-row). FLAMBEAU_Q8_0_GU_T128_VDR2=off
+    // reverts to the 256t baseline.
+    let opt_out = std::env::var("FLAMBEAU_Q8_0_GU_T128_VDR2").as_deref() == Ok("off");
+    let (stem, entry, threads) = if opt_out {
+        ("mmvq_q8_0_gate_up_dp4a", "flambeau_mmvq_q8_0_gate_up_dp4a_q8_1", 256u32)
+    } else {
+        (
+            "mmvq_q8_0_gate_up_t128_vdr2",
+            "flambeau_mmvq_q8_0_gate_up_t128_vdr2_q8_1",
+            128u32,
+        )
+    };
+    let module = reg.expect_module(stem)?;
+    let kernel = module.kernel(entry)?;
     let n_rows_g = n_rows_gate as i32;
     let n_rows_u = n_rows_up as i32;
     let n_blocks_i = (k / 32) as i32;
@@ -514,7 +527,7 @@ pub fn mmvq_q8_0_gate_up(
     args.push(&n_rows_u);
     args.push(&n_blocks_i);
     let grid = n_rows_gate.max(n_rows_up) as u32;
-    let cfg = LaunchCfg::one_d(grid, 256);
+    let cfg = LaunchCfg::one_d(grid, threads);
     unsafe { kernel.launch(stream, cfg, args)? };
     Ok(())
 }

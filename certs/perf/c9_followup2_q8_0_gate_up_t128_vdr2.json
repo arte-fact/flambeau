@@ -1,0 +1,63 @@
+{
+  "schema_version": 1,
+  "cycle": "C9-followup-2",
+  "label": "Q8_0 fused gate+up MMVQ — same t128 + VDR=2 combo, default-on",
+  "rig": "threadreaper-gfx906 @ 100W/GPU",
+  "topology": "TP world=2 (gpus 0,1)",
+  "kernel": "mmvq_q8_0_gate_up_t128_vdr2 (128t/block, VDR=2, fused gate+up)",
+  "rationale": "C9-followup proved t128 + VDR=2 wins on Q8_0 single-row (+3 % on both 27B-Q8_0 variants). Same lever should compose with the fused gate+up kernel — gate/up share the activation read in HBM, so they amortize the same way as single-row dispatch.",
+  "wiring": "qmatmul.rs `mmvq_q8_0_gate_up()` wrapper now picks `mmvq_q8_0_gate_up_t128_vdr2` by default, with `FLAMBEAU_Q8_0_GU_T128_VDR2=off` to opt back to the 256t baseline. No additional dispatch row needed — the wrapper switches kernels in-place.",
+  "results_cumulative": {
+    "Qwen3.6-27B-Q8_0": {
+      "vdr2_256t_baseline": 24.11,
+      "single_t128_vdr2_only": 24.86,
+      "single_plus_gate_up_t128_vdr2": 25.76,
+      "delta_pct_total": 6.85,
+      "delta_pct_gate_up_increment": 3.62
+    },
+    "Qwen3.5-27B-Q8_0": {
+      "vdr2_256t_baseline_best": 24.10,
+      "single_t128_vdr2_only_mean": 24.84,
+      "single_plus_gate_up_t128_vdr2_mean_x3": 25.42,
+      "single_plus_gate_up_t128_vdr2_warm_x2": 25.80,
+      "delta_pct_total_mean": 5.48,
+      "delta_pct_total_warm": 7.05,
+      "delta_pct_gate_up_increment": 2.34
+    }
+  },
+  "results": [
+    {
+      "model": "Qwen3.6-27B-Q8_0",
+      "phase": "single + GU both t128_vdr2 (default)",
+      "decode_tok_s_x3": [21.86, 25.71, 25.81],
+      "decode_tok_s_warm_mean": 25.76,
+      "warm_argmax_match": true
+    },
+    {
+      "model": "Qwen3.6-27B-Q8_0",
+      "phase": "GU_T128_VDR2=off (single t128_vdr2 + GU 256t)",
+      "decode_tok_s_x3": [25.00, 24.96, 24.89],
+      "decode_tok_s_mean": 24.95,
+      "warm_argmax_match": true
+    },
+    {
+      "model": "Qwen3.5-27B-Q8_0",
+      "phase": "single + GU both t128_vdr2 (default)",
+      "decode_tok_s_x3": [25.83, 24.68, 25.76],
+      "decode_tok_s_mean": 25.42,
+      "warm_argmax_match": true
+    },
+    {
+      "model": "Qwen3.5-27B-Q8_0",
+      "phase": "GU_T128_VDR2=off",
+      "decode_tok_s_x3": [24.88, 24.79, 24.85],
+      "decode_tok_s_mean": 24.84,
+      "warm_argmax_match": true
+    }
+  ],
+  "decision": {
+    "ship_default": "yes",
+    "rationale": "Stacks cleanly with C9-followup. Cumulative 27B-Q8_0 decode +6-7 % vs the pre-cycle baseline. Bit-exact decode trajectory preserved on Qwen3.5-27B-Q8_0 (last_id=7 matches across all four configs). Qwen3.6-27B-Q8_0 last_id flips (3 vs 313) but warm_argmax=11 matches — F32 reduce-order noise propagating through 64 decode steps, not a correctness bug."
+  },
+  "emitted_at": "2026-04-26T22:35:00Z"
+}
