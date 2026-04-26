@@ -814,6 +814,12 @@ impl Recipe {
         let force_q4_1_tile16 = variant.as_deref() == Some("q4_1_tile16");
         let force_q4_k_r4 = variant.as_deref() == Some("q4_k_r4");
         let force_q8_tile32 = variant.as_deref() == Some("q8_tile32");
+        // C9-i1 — Q8_0 single-row MMVQ t128 schedule (sibling of mmvq_q4_0_t128).
+        // Q8_0 MMVQ eats ~80 % of Qwen3.6-27B-Q8_0 / Coder-30B-Q8_0 decode wall;
+        // t128 trades 1 block / CU at occupancy ceiling for 2 blocks / CU
+        // (latency-hiding lever). Opt-in via `FLAMBEAU_Q8_0_MMVQ_T128=on`.
+        let force_q8_t128 =
+            std::env::var("FLAMBEAU_Q8_0_MMVQ_T128").as_deref() == Ok("on");
         let impl_id = match (impl_id, force_baseline, force_dp4a_only, force_llamacpp) {
             // V2.7: baseline-opt-out reverts tile16 → tile8 for regression A/B.
             // Must precede the general `force_baseline` catch-all below so the
@@ -863,6 +869,13 @@ impl Recipe {
             ("qmatmul_q8_0_mmq_wave64_tile16_gfx906", _, _, _) if force_q8_tile32 => {
                 "qmatmul_q8_0_mmq_wave64_tile32_gfx906"
             }
+            // C9 — Q8_0 MMVQ t128 schedule (opt-in, FLAMBEAU_Q8_0_MMVQ_T128=on).
+            ("qmatmul_q8_0_mmvq_single_row_gfx906", _, _, _) if force_q8_t128 => {
+                "qmatmul_q8_0_mmvq_t128_gfx906"
+            }
+            ("qmatmul_q8_0_mmvq_dp4a_vdr2_gfx906", _, _, _) if force_q8_t128 => {
+                "qmatmul_q8_0_mmvq_t128_gfx906"
+            }
             // Default: fastest productised paths.
             ("qmatmul_q8_0_mmvq_single_row_gfx906", _, _, _) => {
                 "qmatmul_q8_0_mmvq_dp4a_vdr2_gfx906"
@@ -909,6 +922,14 @@ impl Recipe {
                 kind: RecipeKind::Mmvq,
                 stem: "mmvq_q8_0_llamacpp_style",
                 entry: "flambeau_mmvq_q8_0_llamacpp_style_q8_1",
+                threads: 128,
+                rows_per_block: 1,
+                mmq_tile: (0, 0),
+            },
+            "qmatmul_q8_0_mmvq_t128_gfx906" => Self {
+                kind: RecipeKind::Mmvq,
+                stem: "mmvq_q8_0_t128",
+                entry: "flambeau_mmvq_q8_0_t128_q8_1",
                 threads: 128,
                 rows_per_block: 1,
                 mmq_tile: (0, 0),

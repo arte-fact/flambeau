@@ -1,0 +1,52 @@
+{
+  "schema_version": 1,
+  "cycle": "C9",
+  "label": "Q8_0 single-row MMVQ t128 (NULL — vdr2 already wins)",
+  "rig": "threadreaper-gfx906 @ 100W/GPU",
+  "topology": "TP world=2 (gpus 0,1)",
+  "kernel": "mmvq_q8_0_t128 (128t, sibling of mmvq_q4_0_t128 / mmvq_q4_1_t128)",
+  "rationale": "Q8_0 MMVQ is the dominant kernel on Coder-30B-Q8_0 / 27B-Q8_0 decode (~80 % wall per V2.30.b). The thin-block (t128) schedule wins by ~3-5 % on Q4_0 / Q4_1 by trading occupancy ceiling for in-flight blocks-per-CU. Hypothesis: same on Q8_0.",
+  "correctness": {
+    "cert": "certs/hip/gfx906/qmatmul_q8_0_mmvq_t128_gfx906.json",
+    "shapes": 15,
+    "max_rel_err": "≤ tolerance (sweep green)",
+    "vgpr_count": null,
+    "waves_per_simd": null
+  },
+  "results": [
+    {
+      "model": "Qwen3.6-27B-Q8_0",
+      "arch": "qwen35",
+      "hidden": 5120,
+      "decode_tok_s_default_vdr2": 24.25,
+      "decode_tok_s_t128": 23.41,
+      "delta_pct": -3.46,
+      "warm_argmax_match": true,
+      "note": "Modest regression vs default vdr2."
+    },
+    {
+      "model": "Qwen3.5-27B-Q8_0",
+      "arch": "qwen35",
+      "hidden": 5120,
+      "decode_tok_s_default_vdr2": 24.23,
+      "decode_tok_s_t128": 19.58,
+      "delta_pct": -19.19,
+      "warm_argmax_match": true,
+      "note": "Clear regression. Decisive null."
+    }
+  ],
+  "diagnosis": "vdr2 (Vector Dot product Reuse, factor 2) is already the cycle-1 productised default for Q8_0 — it doubles the per-thread inner-loop DP4A unrolling, giving better ILP per thread. t128 is a pure occupancy lever; halving the threads/block AND keeping VDR=1 throws away the ILP win that vdr2 provides. The Q4_0 / Q4_1 case is different because they were on VDR=1 baselines, so there was no ILP loss to compete against. To beat vdr2 on Q8_0 we'd need a `mmvq_q8_0_t128_vdr2` (combine both levers); not implemented this cycle.",
+  "decision": {
+    "ship_default": "no",
+    "ship_opt_in": "yes",
+    "env_toggle": "FLAMBEAU_Q8_0_MMVQ_T128=on",
+    "rationale": "Kernel + cert ship as opt-in for future use (e.g., paired with t128_vdr2 follow-up, or for shape-specific dispatch where vdr2 might lose). Default unchanged."
+  },
+  "follow_ups": [
+    {
+      "id": "C9-followup-t128-vdr2",
+      "summary": "mmvq_q8_0_t128_vdr2 — combines t128 (occupancy) with VDR=2 (ILP). Likely beats both individual variants. Requires re-using vdr2 inner-loop pattern from `mmvq_q8_0_dp4a_vdr2.cu` with the t128 thread budget."
+    }
+  ],
+  "emitted_at": "2026-04-26T22:00:00Z"
+}
