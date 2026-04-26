@@ -116,25 +116,25 @@
       "arch": "qwen3moe",
       "weight_gib": null,
       "tok_s": null,
-      "status": "load_failed",
-      "error": "slice_for_tp `blk.19.ffn_norm.weight` rank=0",
-      "note": "qwen3moe arch (no GDN, pure MoE). The TP-1a layout table was built for qwen35-family; ffn_norm slicing doesn't have an entry for the qwen3moe per-layer norm shape. Loader needs a qwen3moe-specific TP layout."
+      "status": "model_corrupt",
+      "error": "tensor_raw `blk.19.ffn_norm.weight`: byte range [0..+8192) exceeds its 0 bytes",
+      "note": "TP-7 diagnosis (was misclassified as load_failed/TP-layout-missing): the GGUF on disk is truncated. tensor_data_offset=5973344, last tensor blk.47.ffn_up_exps ends at absolute byte ~7.43 GiB but the file is only 7.21 GiB. blk.19.ffn_norm + everything after has its mmap range past EOF. Not a flambeau bug — incomplete download. Re-download or fall back to UD-Q4_K_XL."
     },
     {
       "model": "Qwen3-Coder-30B-A3B-Instruct-UD-Q4_K_XL",
       "arch": "qwen3moe",
       "weight_gib": null,
       "tok_s": null,
-      "status": "load_failed",
-      "error": "slice_for_tp `blk.0.ffn_down_exps.weight` rank=0",
-      "note": "Same root cause as the 1M Q4_0: qwen3moe MoE-tensor slicing not in the qwen35-family TP layout table."
-    }
+      "status": "tp_arch_blocked",
+      "error": "tensor `blk.0.ffn_down_exps.weight` per-rank inner length 384 is not a multiple of dtype block_size 256",
+      "note": "TP-7 diagnosis (was misclassified as TP-layout-missing): the qwen3moe TP layout entries are correct (ColParallel/RowParallel for ffn_*_exps already match the qwen35moe layout). Real blocker: Coder-30B uses expert_feed_forward_length=768; with Q4_K (block_size=256), per-rank inner = 768/world only divides cleanly for world=3, not for world∈{2,4}. Filed as TP-7-arch: needs Replicated fallback for Q4_K MoE expert tensors when sharding misaligns with block_size, OR expert-axis sharding scheme."
   ],
   "summary": {
     "tested": 10,
     "ok_bit_correct": 6,
     "ok_with_parity_drift": 1,
-    "load_failed": 2,
+    "load_failed": 1,
+    "model_corrupt": 1,
     "warm_forward_failed": 0,
     "ok_uncerted_quant_variant": 1
   },
@@ -161,7 +161,7 @@
     "Q4_1 beats Q4_0 by ~3% on 27B (V2.32.a's MMQ wave64 win extends to MMVQ at decode).",
     "Q8_0 27B drops to ~24 tok/s — straight HBM-bound (29 GiB weights / 2 ranks at ~700 GB/s effective ~ 20 ms/layer).",
     "Qwen3.6-35B-A3B-UD-Q4_K_S MoE works structurally (62 tok/s — A3B active means ~3 GiB compute per token vs 27B's full 14 GiB) but has parity drift (argmax=1510 vs ref 11). MoE/shared-expert TP path needs verification.",
-    "qwen3moe (Coder-30B) fails to load on TP — TP-1a layout table only covers qwen35 family. Adding a qwen3moe TP layout is the next coverage step (TP-7 candidate).",
+    "qwen3moe (Coder-30B) on TP — published Q4_0 file is truncated; UD-Q4_K_XL hits the Q4_K block_size=256 vs Coder expert inter=768 alignment wall (768/world∈{2,4} not multiple of 256). qwen3moe layout table coverage is NOT the gap (B6/V2.35.a + TP-7 verified). Real fix: Replicated fallback for misaligned K-quant MoE expert tensors, OR expert-axis sharding. Filed as TP-7-arch.",
     "Qwen-published Qwen3.6-35B-A3B-Q4_0 fails at GDN layer 0 while Unsloth UD-Q4_K_S works — likely per-tensor dtype the conversion path doesn't handle. Per-GGUF inspection needed."
   ],
   "q4_0_vs_q4_1_anomaly": {

@@ -74,14 +74,14 @@ fn bench_tp2_any_model() -> Result<()> {
     let file = match GgufFile::open(&path) {
         Ok(f) => f,
         Err(e) => {
-            eprintln!("BENCH_RESULT model={model_label} status=open_failed err={e}");
+            eprintln!("BENCH_RESULT model={model_label} status=open_failed err={e:#}");
             return Ok(());
         }
     };
     let cfg = match Qwen3MoEConfig::from_gguf(&file) {
         Ok(c) => c,
         Err(e) => {
-            eprintln!("BENCH_RESULT model={model_label} status=cfg_failed err={e}");
+            eprintln!("BENCH_RESULT model={model_label} status=cfg_failed err={e:#}");
             return Ok(());
         }
     };
@@ -98,7 +98,7 @@ fn bench_tp2_any_model() -> Result<()> {
         Ok(l) => l,
         Err(e) => {
             eprintln!(
-                "BENCH_RESULT model={model_label} arch={arch} status=layout_failed err={e}"
+                "BENCH_RESULT model={model_label} arch={arch} status=layout_failed err={e:#}"
             );
             return Ok(());
         }
@@ -119,7 +119,7 @@ fn bench_tp2_any_model() -> Result<()> {
         Ok(m) => m,
         Err(e) => {
             eprintln!(
-                "BENCH_RESULT model={model_label} arch={arch} status=load_failed err={e}"
+                "BENCH_RESULT model={model_label} arch={arch} status=load_failed err={e:#}"
             );
             return Ok(());
         }
@@ -139,7 +139,7 @@ fn bench_tp2_any_model() -> Result<()> {
         Err(e) => {
             eprintln!(
                 "BENCH_RESULT model={model_label} arch={arch} weight_gib={weight_gib:.2} \
-                 status=scratch_alloc_failed err={e}"
+                 status=scratch_alloc_failed err={e:#}"
             );
             return Ok(());
         }
@@ -150,7 +150,7 @@ fn bench_tp2_any_model() -> Result<()> {
         Err(e) => {
             eprintln!(
                 "BENCH_RESULT model={model_label} arch={arch} weight_gib={weight_gib:.2} \
-                 status=session_alloc_failed err={e}"
+                 status=session_alloc_failed err={e:#}"
             );
             return Ok(());
         }
@@ -201,7 +201,7 @@ fn bench_tp2_any_model() -> Result<()> {
         eprintln!(
             "BENCH_RESULT model={model_label} arch={arch} weight_gib={weight_gib:.2} \
              load_s={load_dt:.2} ctx_cap={ctx_cap} \
-             status=decode_failed err={e}"
+             status=decode_failed err={e:#}"
         );
     } else {
         eprintln!(
