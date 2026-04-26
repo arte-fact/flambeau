@@ -20,6 +20,13 @@ use std::os::raw::{c_char, c_int, c_uint, c_void};
 
 pub const HIP_SUCCESS: c_int = 0;
 
+/// `hipErrorPeerAccessAlreadyEnabled` from `hip/hip_runtime_api.h`.
+///
+/// Returned by `hipDeviceEnablePeerAccess` when the (current device, peer)
+/// edge is already authorised — benign on cluster re-bind paths and
+/// treated as success by `HipCluster::new`.
+pub const HIP_ERROR_PEER_ACCESS_ALREADY_ENABLED: c_int = 705;
+
 // Opaque stream handle. HIP defines `typedef struct ihipStream_t* hipStream_t`;
 // from Rust we only ever pass it opaquely, so a void* newtype is enough.
 pub type hipStream_t = *mut c_void;
@@ -96,6 +103,37 @@ extern "C" {
     // pinned buffer, halving throughput.
     pub fn hipHostMalloc(ptr: *mut *mut c_void, size: usize, flags: c_uint) -> c_int;
     pub fn hipHostFree(ptr: *mut c_void) -> c_int;
+
+    // TP-0a — peer access for BAR1-mapped P2P kernels.
+    //
+    // `hipDeviceCanAccessPeer(can, dev, peer)` writes 1 to `*can` if `dev`
+    // is allowed to read/write `peer`'s memory through PCIe BAR1 once peer
+    // access is enabled. On gfx906 PCIe-only rigs the matrix is symmetric
+    // and dense (every pair returns 1) provided the BIOS exposes
+    // Above-4G-Decoding + Resizable-BAR. If a pair returns 0, the BIOS or
+    // motherboard topology blocks BAR1 mapping and the BAR1 P2P AllReduce
+    // path must be skipped on that pair (host-bounce stays as fallback).
+    //
+    // `hipDeviceEnablePeerAccess(peer, flags)` is a per-thread, per-device
+    // operation: it grants the *current* HIP device (last `hipSetDevice`)
+    // permission to dereference pointers owned by `peer`. `flags` is
+    // reserved (HIP requires it to be 0). The "already enabled" return
+    // (`hipErrorPeerAccessAlreadyEnabled`, code 705) is benign and is
+    // treated as success by the cluster bring-up path.
+    //
+    // Unlike `hipMemcpyPeerAsync`, which on this rig has been observed to
+    // submit successfully but leave the source stream in an unsync'able
+    // state (see `cluster.rs` header), the BAR1 *direct dereference*
+    // mechanism enabled by these calls works reliably on the same
+    // gfx906 + ROCm 7.1.x topology — mi50grad ships it in production
+    // and flambeau ports the same path here for TP decode AllReduce.
+    pub fn hipDeviceCanAccessPeer(
+        can_access_peer: *mut c_int,
+        device_id: c_int,
+        peer_device_id: c_int,
+    ) -> c_int;
+    pub fn hipDeviceEnablePeerAccess(peer_device_id: c_int, flags: c_uint) -> c_int;
+    pub fn hipDeviceDisablePeerAccess(peer_device_id: c_int) -> c_int;
 
     // V2.25.b — event primitives for cross-stream / cross-device DAG
     // scheduling (async peer-copy pipeline-parallel ubatch path).

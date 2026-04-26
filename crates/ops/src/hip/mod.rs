@@ -152,6 +152,7 @@ pub const KERNEL_STEMS: &[&str] = &[
     "indexed_moe_mmq_q4_k",
     "moe_combine_f16",
     "moe_combine_two_residuals_f16",
+    "moe_combine_no_residual_f16",
     "dense_gemv_f32_f16",
     "dense_gemv_f32_f16_batched",
 ];

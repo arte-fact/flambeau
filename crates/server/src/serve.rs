@@ -7,17 +7,33 @@ use std::sync::Arc;
 use anyhow::{bail, Context, Result};
 use axum::routing::{get, post};
 use axum::Router;
-use flambeau_backend_hip::{device_count, HipCluster};
+use flambeau_backend_hip::{device_count, BarP2pAllReduce, HipCluster};
 use flambeau_quant::{ChatTemplate, GgufFile};
-use flambeau_qwen3_moe::{Qwen3MoEConfig, Qwen3MoEShardedModel};
+use flambeau_qwen3_moe::{
+    Qwen35DenseTpLayout, Qwen3MoEConfig, Qwen3MoEShardedModel, Qwen3MoETpModel,
+};
 use flambeau_runtime::LayerAssignment;
 use tokio::sync::Mutex;
 use tracing::info;
 
+use crate::model::LoadedModel;
 use crate::routes::{
     agent_stats, chat_completions, completions, health, index, models, tools_endpoint,
     ServerState, SharedState,
 };
+
+/// **TP-5a** — mesh topology selector. PP-V1 default; TP engages the
+/// Qwen3MoETpModel loader + the BarP2pAllReduce-based forward path.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MeshMode {
+    /// Pipeline parallelism — V1 default. `LayerAssignment` distributes
+    /// whole layers across ranks; one `peer_copy_via_host` per stage
+    /// transition.
+    Pp,
+    /// Tensor parallelism — every rank holds every layer (sliced).
+    /// `world` ranks; intra-layer Megatron splits + BAR1 P2P AllReduce.
+    Tp { world: u32 },
+}
 
 /// Runtime config for `flambeau serve`.
 #[derive(Debug, Clone)]
@@ -26,12 +42,22 @@ pub struct ServeConfig {
     pub device_ids: Vec<i32>,
     pub bind_addr: SocketAddr,
     pub model_id: String,
+    /// **TP-5a** — mesh topology. Defaults to `Pp` for V1 callers that
+    /// don't set the field explicitly (constructors use struct-update
+    /// syntax with `..Default::default()`).
+    pub mesh_mode: MeshMode,
     /// Upstream MCP servers to register as a tool source (ROADMAP-V2
     /// §M2.1). Each URL is enumerated once at boot and its tools are
     /// exposed to the model alongside the client-supplied `tools[]`
     /// on each chat completion. The agent loop that actually invokes
     /// the remote tools is M2.2.
     pub mcp_urls: Vec<String>,
+}
+
+impl Default for MeshMode {
+    fn default() -> Self {
+        MeshMode::Pp
+    }
 }
 
 /// Blocking serve loop — loads the model, starts the HTTP server, runs
@@ -71,18 +97,50 @@ pub async fn serve(cfg: ServeConfig) -> Result<()> {
     }
 
     let model_cfg = Qwen3MoEConfig::from_gguf(&gguf).context("model config from GGUF")?;
-    let cluster =
-        HipCluster::new(&cfg.device_ids).context("HipCluster::new")?;
-    let assignment =
-        LayerAssignment::contiguous(model_cfg.num_layers, cluster.ranks() as u32);
+    let cluster: Arc<HipCluster> =
+        Arc::new(HipCluster::new(&cfg.device_ids).context("HipCluster::new")?);
 
-    info!(
-        num_layers = model_cfg.num_layers,
-        ranks = cluster.ranks(),
-        "loading model weights"
-    );
-    let model = Qwen3MoEShardedModel::load(&gguf, &cluster, &assignment)
-        .context("Qwen3MoEShardedModel::load")?;
+    // **TP-5a-i2** — branch on mesh topology. PP path uses the V1.8
+    // sharded loader; TP path validates the layout, slices the GGUF,
+    // and constructs a BarP2pAllReduce against the same cluster.
+    let model: LoadedModel = match cfg.mesh_mode {
+        MeshMode::Pp => {
+            let assignment =
+                LayerAssignment::contiguous(model_cfg.num_layers, cluster.ranks() as u32);
+            info!(
+                num_layers = model_cfg.num_layers,
+                ranks = cluster.ranks(),
+                topology = "pp",
+                "loading model weights"
+            );
+            let m = Qwen3MoEShardedModel::load(&gguf, &cluster, &assignment)
+                .context("Qwen3MoEShardedModel::load")?;
+            LoadedModel::Pp(m)
+        }
+        MeshMode::Tp { world } => {
+            if cluster.ranks() as u32 != world {
+                bail!(
+                    "--mesh-mode tp: --tp-size {world} but cluster has {} ranks",
+                    cluster.ranks()
+                );
+            }
+            let layout = Qwen35DenseTpLayout::new(&model_cfg, world)
+                .context("--mesh-mode tp: layout validation")?;
+            info!(
+                num_layers = model_cfg.num_layers,
+                ranks = cluster.ranks(),
+                world,
+                kv_replicated = layout.kv_replicated(),
+                topology = "tp",
+                "loading model weights"
+            );
+            let m = Qwen3MoETpModel::load(&gguf, &cluster, layout)
+                .context("Qwen3MoETpModel::load")?;
+            let ar = BarP2pAllReduce::new(Arc::clone(&cluster))
+                .context("BarP2pAllReduce::new (requires fully-connected peer-access matrix)")?;
+            LoadedModel::Tp { model: m, ar }
+        }
+    };
 
     // M2.1: enumerate tools on each `--mcp` URL in parallel. A failed
     // URL logs a warning and contributes zero tools; the server still

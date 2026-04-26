@@ -1,0 +1,19 @@
+{
+  "schema_version": 1,
+  "kind": "topology",
+  "backend": "hip",
+  "arch": "gfx906",
+  "rig": "4xMI50",
+  "device_count": 4,
+  "device_ids": [0, 1, 2, 3],
+  "peer_access_matrix": [
+    [true, true, true, true],
+    [true, true, true, true],
+    [true, true, true, true],
+    [true, true, true, true]
+  ],
+  "fully_connected": true,
+  "captured_via": "cargo test --release -p flambeau-backend-hip --test cluster_peer_access -- --nocapture",
+  "captured_at": "2026-04-25",
+  "notes": "TP-0a — 4x MI50 PCIe 3.0 x16, ROCm 7.1.1. Every off-diagonal edge authorised by hipDeviceCanAccessPeer+hipDeviceEnablePeerAccess; BIOS exposes Above-4G-Decoding + Resizable-BAR. Green light for TP-0b/c BAR1 P2P AllReduce kernel — no peer pair requires host-bounce fallback."
+}

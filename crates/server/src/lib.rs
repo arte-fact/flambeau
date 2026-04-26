@@ -18,6 +18,8 @@ pub mod state;
 pub mod tool_call_parser;
 
 #[cfg(feature = "hip")]
+pub mod model;
+#[cfg(feature = "hip")]
 pub mod routes;
 #[cfg(feature = "hip")]
 pub mod serve;
@@ -30,4 +32,6 @@ pub use api::{
 pub use state::SamplingParams;
 
 #[cfg(feature = "hip")]
-pub use serve::{serve, ServeConfig};
+pub use model::{decode_logits, prefill_logits, Inflight, LoadedModel};
+#[cfg(feature = "hip")]
+pub use serve::{serve, MeshMode, ServeConfig};

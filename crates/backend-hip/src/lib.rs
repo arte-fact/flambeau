@@ -8,6 +8,7 @@
 
 #![forbid(unsafe_op_in_unsafe_fn)]
 
+pub mod bar_p2p;
 pub mod cluster;
 pub mod device;
 pub mod graph_capture;
@@ -16,6 +17,7 @@ pub mod kv_cache_slot;
 pub mod module;
 pub mod sys;
 
+pub use bar_p2p::BarP2pAllReduce;
 pub use cluster::HipCluster;
 pub use graph_capture::{MemcpyBinding, MemcpySlot, ScalarSlot, SlotBinding, SlotMap};
 pub use kv_cache_slot::kv_cache_append_hip_slot;

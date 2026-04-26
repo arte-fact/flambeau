@@ -187,6 +187,95 @@ pub(crate) fn alloc_layer_cache(
     }
 }
 
+/// **TP-2e** — per-rank `LayerCache` allocator for tensor-parallel
+/// decode. Uses `local_num_v_heads = num_v_heads / tp_world` and
+/// `local_num_kv_heads = num_kv_heads / tp_world` so each rank's
+/// `KvCache` and `GdnLayerState` are sized for the local head subset
+/// only. Without this, kernels parameterised by `local_*` head counts
+/// would walk into uninitialised slabs in oversized PP-shape allocations.
+///
+/// Caller (`Qwen3MoETpSession::new`) loops over ranks × layers and
+/// binds the device per rank.
+pub(crate) fn alloc_layer_cache_tp(
+    cfg: &Qwen3MoEConfig,
+    device: &HipDevice,
+    il: usize,
+    tp_world: u32,
+) -> Result<LayerCache> {
+    if tp_world == 0 {
+        anyhow::bail!("tp_world must be >= 1");
+    }
+    let world = tp_world as usize;
+    if cfg.is_recurrent(il) {
+        let gdn = cfg
+            .gdn
+            .as_ref()
+            .context("recurrent layer requires cfg.gdn to be Some")?;
+        if gdn.num_v_heads % world != 0 {
+            anyhow::bail!(
+                "alloc_layer_cache_tp: gdn.num_v_heads {} not divisible by tp_world {tp_world}",
+                gdn.num_v_heads
+            );
+        }
+        if gdn.num_k_heads % world != 0 {
+            anyhow::bail!(
+                "alloc_layer_cache_tp: gdn.num_k_heads {} not divisible by tp_world {tp_world}",
+                gdn.num_k_heads
+            );
+        }
+        let head_v_dim = gdn.head_v_dim();
+        let local_num_v_heads = gdn.num_v_heads / world;
+        let local_num_k_heads = gdn.num_k_heads / world;
+        let state_elems = local_num_v_heads * gdn.head_k_dim * head_v_dim;
+        let state_bytes = state_elems * std::mem::size_of::<f32>();
+        let state = device
+            .alloc(state_bytes)
+            .map_err(|e| anyhow!("alloc GDN state (TP) for layer {il}: {e}"))?;
+        zero_f32(device, state, state_bytes)?;
+
+        // local_conv_channels = local_d_inner + 2 · local_qk_size.
+        let local_d_inner = local_num_v_heads * head_v_dim;
+        let local_qk_size = local_num_k_heads * gdn.head_k_dim;
+        let local_conv_channels = local_d_inner + 2 * local_qk_size;
+        let conv_history_elems = (gdn.conv_kernel - 1) * local_conv_channels;
+        let conv_history_bytes = conv_history_elems * std::mem::size_of::<f32>();
+        let conv_history = device
+            .alloc(conv_history_bytes)
+            .map_err(|e| anyhow!("alloc GDN conv-history (TP) for layer {il}: {e}"))?;
+        zero_f32(device, conv_history, conv_history_bytes)?;
+
+        Ok(LayerCache::Gdn(GdnLayerState {
+            state,
+            state_bytes,
+            conv_history,
+            conv_history_bytes,
+            num_v_heads: local_num_v_heads,
+            head_k_dim: gdn.head_k_dim,
+            head_v_dim,
+            conv_kernel: gdn.conv_kernel,
+            conv_channels: local_conv_channels,
+        }))
+    } else {
+        // **TP-4d-i2** — KV-replication fallback: when nKV doesn't
+        // divide world, allocate the full KvCache on every rank.
+        // Caller (forward_full_attn_decode_tp) passes kv_replicated=true
+        // and the K/V projections run with full nKV per rank.
+        let local_n_kv_heads = if cfg.num_kv_heads % world == 0 {
+            cfg.num_kv_heads / world
+        } else {
+            cfg.num_kv_heads
+        };
+        let kv = KvCache::<F16Contig, HipDevice>::new(
+            device,
+            local_n_kv_heads,
+            cfg.head_dim,
+            cfg.context_length,
+        )
+        .map_err(|e| anyhow!("alloc KvCache (TP) for layer {il}: {e}"))?;
+        Ok(LayerCache::FullAttn(kv))
+    }
+}
+
 /// Free a single `LayerCache` on `device`. Mirrors `alloc_layer_cache`.
 pub(crate) fn dispose_layer_cache(cache: LayerCache, device: &HipDevice) -> Result<()> {
     match cache {

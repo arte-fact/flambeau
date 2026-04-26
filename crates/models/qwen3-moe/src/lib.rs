@@ -18,6 +18,8 @@
 pub mod config;
 pub mod names;
 pub mod layout;
+pub mod tp_layout;
+pub mod tp_slice;
 
 #[cfg(feature = "hip")]
 pub mod forward;
@@ -32,6 +34,9 @@ pub mod session;
 pub mod sharded;
 
 #[cfg(feature = "hip")]
+pub mod tp_sharded;
+
+#[cfg(feature = "hip")]
 pub mod weights;
 
 #[cfg(feature = "hip")]
@@ -40,6 +45,11 @@ pub use model::Qwen3MoEModel;
 #[cfg(feature = "hip")]
 pub use sharded::{
     Qwen3MoERankSession, Qwen3MoERankShard, Qwen3MoEShardedModel, Qwen3MoEShardedSession,
+};
+
+#[cfg(feature = "hip")]
+pub use tp_sharded::{
+    Qwen3MoETpModel, Qwen3MoETpRankShard, Qwen3MoETpSession, Topology, TpLayerTensor,
 };
 
 #[cfg(feature = "hip")]
@@ -62,3 +72,5 @@ pub use names::{
     layer_names, CommonNames, DenseAttnNames, FullAttnNames, GdnNames, GlobalNames,
     MoeFfnNames, TensorNames,
 };
+pub use tp_layout::{Qwen35DenseTpLayout, TpLayoutError};
+pub use tp_slice::{slice_bytes_for_tp, slice_for_tp, SliceError};

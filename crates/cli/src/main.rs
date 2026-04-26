@@ -61,6 +61,17 @@ enum Cmd {
         devices: String,
         #[arg(long, default_value_t = 8080)]
         port: u16,
+        /// **TP-5a** — mesh topology: `pp` (pipeline-parallel — V1 default,
+        /// LayerAssignment-based) or `tp` (tensor-parallel — Megatron-style
+        /// per-tensor sharding with BAR1 P2P AllReduce). `pp` preserves
+        /// V1.8 server behaviour; `tp` engages the Qwen3MoETpModel loader.
+        #[arg(long = "mesh-mode", default_value = "pp")]
+        mesh_mode: String,
+        /// **TP-5a** — TP world size when `--mesh-mode tp`. Must equal
+        /// `--devices` count. Ignored for `--mesh-mode pp` (which uses
+        /// `--devices` count as the PP rank count).
+        #[arg(long = "tp-size", default_value_t = 0)]
+        tp_size: u32,
         /// Upstream MCP server to register as a tool source, e.g.
         /// `--mcp http://localhost:9090/mcp`. Repeatable. Each URL is
         /// enumerated once at boot; tools are exposed to the model
@@ -158,8 +169,8 @@ fn main() -> Result<()> {
         Cmd::ExtractChatTemplate { path, out } => extract_chat_template(&path, out.as_deref())?,
         Cmd::InspectHsaco { path } => todo!("V1.3+: implement inspect-hsaco for {path}"),
         Cmd::Infer { model, .. } => todo!("V1.7: implement infer for {model}"),
-        Cmd::Serve { model, devices, port, mcp_urls } => {
-            serve_cmd(&model, &devices, port, mcp_urls)?
+        Cmd::Serve { model, devices, port, mesh_mode, tp_size, mcp_urls } => {
+            serve_cmd(&model, &devices, port, &mesh_mode, tp_size, mcp_urls)?
         }
         Cmd::Tune { model, .. } => todo!("T-track: implement tune for {model}"),
         Cmd::Mcp { stdio, port } => mcp_cmd(stdio, port)?,
@@ -177,6 +188,8 @@ fn serve_cmd(
     _model: &str,
     _devices: &str,
     _port: u16,
+    _mesh_mode: &str,
+    _tp_size: u32,
     _mcp_urls: Vec<String>,
 ) -> Result<()> {
     anyhow::bail!(
@@ -189,6 +202,8 @@ fn serve_cmd(
     model: &str,
     devices: &str,
     port: u16,
+    mesh_mode: &str,
+    tp_size: u32,
     mcp_urls: Vec<String>,
 ) -> Result<()> {
     use std::net::SocketAddr;
@@ -206,6 +221,25 @@ fn serve_cmd(
         anyhow::bail!("--devices must list at least one device ID");
     }
 
+    let mesh_mode_parsed = match mesh_mode {
+        "pp" => flambeau_server::MeshMode::Pp,
+        "tp" => {
+            let tp_size_resolved = if tp_size == 0 {
+                device_ids.len() as u32
+            } else {
+                tp_size
+            };
+            if (tp_size_resolved as usize) != device_ids.len() {
+                anyhow::bail!(
+                    "--mesh-mode tp: --tp-size {tp_size_resolved} must equal --devices count {}",
+                    device_ids.len()
+                );
+            }
+            flambeau_server::MeshMode::Tp { world: tp_size_resolved }
+        }
+        other => anyhow::bail!("--mesh-mode must be `pp` or `tp` (got `{other}`)"),
+    };
+
     let bind_addr: SocketAddr = format!("0.0.0.0:{port}").parse()?;
     let cfg = flambeau_server::ServeConfig {
         gguf_path: PathBuf::from(model),
@@ -215,6 +249,7 @@ fn serve_cmd(
             .file_stem()
             .map(|s| s.to_string_lossy().to_string())
             .unwrap_or_else(|| "flambeau".to_string()),
+        mesh_mode: mesh_mode_parsed,
         mcp_urls,
     };
 

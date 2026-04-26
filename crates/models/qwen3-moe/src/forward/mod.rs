@@ -77,3 +77,21 @@ pub use pp::{
     forward_prefill_pp_async, forward_prefill_pp_logits, RankForwardPrefillScratch,
     RankForwardScratch, ShardedForwardOneTokenScratch, ShardedForwardPrefillScratch, UbatchLane,
 };
+
+pub mod tp;
+pub use tp::{
+    forward_one_token_tp, forward_one_token_tp_logits, RankForwardScratchTp,
+    ShardedForwardOneTokenScratchTp,
+};
+
+pub mod attn_tp;
+pub use attn_tp::forward_full_attn_decode_tp;
+
+pub mod dense_ffn_tp;
+pub use dense_ffn_tp::forward_dense_ffn_decode_tp;
+
+pub mod gdn_tp;
+pub use gdn_tp::forward_gdn_decode_tp;
+
+pub mod moe_tp;
+pub use moe_tp::{forward_moe_ffn_decode_tp, forward_shared_expert_decode_tp};

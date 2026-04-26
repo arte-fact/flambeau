@@ -1,0 +1,213 @@
+//! TP-2c — tensor-parallel `forward_dense_ffn_decode`.
+//!
+//! Sister of [`super::dense_ffn::forward_dense_ffn_decode`] for the
+//! TP-sharded forward path. Same 7-op structure, with two changes:
+//!
+//! 1. `local_inter = cfg.moe_intermediate_size / tp_world` is used
+//!    everywhere the PP version uses `inter`. Sliced weights:
+//!    - `ffn_gate.weight` ColParallel{dim=0} → `[local_inter, hidden]`
+//!    - `ffn_up.weight`   ColParallel{dim=0} → `[local_inter, hidden]`
+//!    - `ffn_down.weight` RowParallel{dim=1} → `[hidden, local_inter]`
+//!
+//! 2. **No residual add.** The PP path computes
+//!    `x_out = residual + down(F16)` in one shot via `add_f16`. The TP
+//!    path emits *only the per-rank `down` projection* (cast to F16)
+//!    into `partial_ffn_out` — caller schedules
+//!    `BarP2pAllReduce::residual_tp{2,4}` immediately after to fold the
+//!    rank-local partials into `hidden` together with the residual.
+//!
+//! ## Same trade-offs as TP-2b
+//!
+//! - `DenseFfnScratch` reused as-is — its `gate_f32` / `up_f32` /
+//!   `activated_*` slabs are sized for full `inter`, so they overflow
+//!   the per-rank slice into space that's never touched. 4× wasteful
+//!   on TP=4; not a correctness issue.
+//! - The fused `mmvq_q8_0_gate_up` branch still works under TP when
+//!   both gate and up are Q8_0 — slicing only changes per-rank row
+//!   counts. Qwen3.5-27B-Q4_1 takes the unfused branch (Q4_1 weights);
+//!   models with Q8_0 dense FFN take the fused branch.
+
+#![cfg(feature = "hip")]
+
+#![expect(
+    clippy::undocumented_unsafe_blocks,
+    reason = "forward-path composition; same rationale as super::dense_ffn — every \
+              unsafe is a kernel launch over session-scoped buffers."
+)]
+
+use anyhow::{bail, Context, Result};
+use flambeau_core::DevicePtr;
+use flambeau_ops::hip::{
+    cast::cast_f32_to_f16,
+    norm::quantize_f16_q8_1,
+    qmatmul::{mmvq_q8_0_gate_up, qmatmul},
+    HipStream, OpsRegistry,
+};
+
+use super::common::qdtype_of;
+use super::dense_ffn::DenseFfnScratch;
+use crate::config::Qwen3MoEConfig;
+use crate::weights::DeviceTensor;
+
+/// Per-rank decode for one dense FFN layer.
+///
+/// `ffn_gate`, `ffn_up`, `ffn_down` are *already sliced* per the
+/// TP-1a layout table.
+///
+/// Output: writes the per-rank `down(SwiGLU(gate, up))` cast to F16
+/// into `partial_ffn_out` (length `hidden`). The caller's AR fold
+/// resolves both the cross-rank reduction and the residual add into
+/// `hidden`.
+///
+/// # Errors
+/// - `tp_world == 0` or `moe_intermediate_size % tp_world != 0`.
+/// - Sliced weight shape mismatch.
+/// - Underlying op-dispatch / kernel-launch failures.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "matches the PP forward_dense_ffn_decode signature — flat parameter list \
+              avoids struct copies on the decode hot path."
+)]
+pub fn forward_dense_ffn_decode_tp(
+    ops: &OpsRegistry,
+    stream: &HipStream,
+    cfg: &Qwen3MoEConfig,
+    ffn_gate: &DeviceTensor,
+    ffn_up: &DeviceTensor,
+    ffn_down: &DeviceTensor,
+    scratch: &mut DenseFfnScratch,
+    x_norm: DevicePtr,
+    partial_ffn_out: DevicePtr,
+    tp_world: u32,
+) -> Result<()> {
+    if tp_world == 0 {
+        bail!("tp_world must be >= 1");
+    }
+    let world = tp_world as usize;
+    let hidden = cfg.hidden_size;
+    let inter = cfg.moe_intermediate_size;
+    if inter % world != 0 {
+        bail!("moe_intermediate_size {inter} not divisible by tp_world {tp_world}");
+    }
+    let local_inter = inter / world;
+
+    // Shape sanity (sliced weights only).
+    let gate_dims = (ffn_gate.dims[0] as usize, ffn_gate.dims[1] as usize);
+    let up_dims = (ffn_up.dims[0] as usize, ffn_up.dims[1] as usize);
+    let down_dims = (ffn_down.dims[0] as usize, ffn_down.dims[1] as usize);
+    if gate_dims != (local_inter, hidden) {
+        bail!("ffn_gate (TP) shape {gate_dims:?} != [{local_inter}, {hidden}]");
+    }
+    if up_dims != (local_inter, hidden) {
+        bail!("ffn_up (TP) shape {up_dims:?} != [{local_inter}, {hidden}]");
+    }
+    if down_dims != (hidden, local_inter) {
+        bail!("ffn_down (TP) shape {down_dims:?} != [{hidden}, {local_inter}]");
+    }
+
+    // 1. Quantise x_norm → Q8_1 once. x_norm is the AR'd post-attn
+    //    hidden state (replicated across ranks, so every rank
+    //    quantises the same input — duplicated but correct).
+    quantize_f16_q8_1(ops, stream, x_norm, scratch.x_q8_1, hidden)
+        .context("dense ffn (TP) x_norm → Q8_1")?;
+
+    // 2+3. gate + up matmuls — fused if both Q8_0, else unfused.
+    let global_baseline = std::env::var("FLAMBEAU_VARIANT").as_deref() == Ok("baseline");
+    let specific_off = std::env::var("FLAMBEAU_DENSE_GATE_UP").as_deref() == Ok("unfused");
+    let fuse_gate_up = !global_baseline
+        && !specific_off
+        && ffn_gate.dtype == flambeau_quant::GgmlDType::Q8_0
+        && ffn_up.dtype == flambeau_quant::GgmlDType::Q8_0;
+    if fuse_gate_up {
+        mmvq_q8_0_gate_up(
+            ops,
+            stream,
+            ffn_gate.ptr,
+            ffn_up.ptr,
+            scratch.x_q8_1,
+            scratch.gate_f32,
+            scratch.up_f32,
+            local_inter,
+            local_inter,
+            hidden,
+        )
+        .context("dense ffn (TP) gate+up fused mmvq_q8_0")?;
+    } else {
+        qmatmul(
+            ops,
+            stream,
+            ffn_gate.ptr,
+            scratch.x_q8_1,
+            DevicePtr(0),
+            scratch.gate_f32,
+            1,
+            hidden,
+            local_inter,
+            qdtype_of(ffn_gate.dtype)?,
+        )
+        .context("dense ffn (TP) gate qmatmul")?;
+        qmatmul(
+            ops,
+            stream,
+            ffn_up.ptr,
+            scratch.x_q8_1,
+            DevicePtr(0),
+            scratch.up_f32,
+            1,
+            hidden,
+            local_inter,
+            qdtype_of(ffn_up.dtype)?,
+        )
+        .context("dense ffn (TP) up qmatmul")?;
+    }
+
+    // 4+5. Fused SwiGLU(gate, up) → F16 + quantise on the per-rank slice.
+    flambeau_ops::hip::mlp::swiglu_f32_to_f16(
+        ops,
+        stream,
+        scratch.gate_f32,
+        scratch.up_f32,
+        scratch.activated_f16,
+        local_inter,
+    )
+    .context("dense ffn (TP) swiglu_f32_to_f16")?;
+    quantize_f16_q8_1(
+        ops,
+        stream,
+        scratch.activated_f16,
+        scratch.activated_q8_1,
+        local_inter,
+    )
+    .context("dense ffn (TP) activated → Q8_1")?;
+
+    // 6. Row-parallel down matmul: weight[hidden, local_inter] × activated[local_inter]
+    //    → down_f32[hidden]. Decode m=1.
+    qmatmul(
+        ops,
+        stream,
+        ffn_down.ptr,
+        scratch.activated_q8_1,
+        DevicePtr(0),
+        scratch.down_f32,
+        1,
+        local_inter,
+        hidden,
+        qdtype_of(ffn_down.dtype)?,
+    )
+    .context("dense ffn (TP) down qmatmul")?;
+
+    // 7. Cast down F32→F16 directly into partial_ffn_out. NO residual
+    //    add here — the AR fold (caller's
+    //    BarP2pAllReduce::residual_tp{2,4}) sums the 4 rank-local
+    //    partials into hidden together with the residual.
+    cast_f32_to_f16(ops, stream, scratch.down_f32, partial_ffn_out, hidden)
+        .context("dense ffn (TP) cast down → partial_ffn_out")?;
+
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    // Substantive tests need GPU; covered by TP-2d's parity smoke
+    // (compares TP at world=1 against PP forward_dense_ffn_decode).
+}

@@ -13,6 +13,7 @@ pub mod collective;
 pub mod kv_cache;
 pub mod mesh;
 pub mod sampling;
+pub mod tp_layout;
 
 pub use collective::{
     AllGather, AllReduce, AllToAll, Broadcast, CollectiveError, CollectiveResult, RefMesh,
@@ -21,3 +22,4 @@ pub use collective::{
 pub use kv_cache::{CacheLayout, F16Contig, KvCache, KvCacheError, KvCacheResult, Q8Contig};
 pub use mesh::{CollectiveCfg, CollectiveDType, LayerAssignment, Mesh, RankId, ReduceOp};
 pub use sampling::{sample, Rng, Sampler, Sampling};
+pub use tp_layout::{LayoutError, WeightLayout};

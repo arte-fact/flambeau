@@ -11,13 +11,7 @@ use axum::response::sse::{Event, KeepAlive, Sse};
 use axum::response::{IntoResponse, Response};
 use axum::Json;
 use flambeau_backend_hip::HipCluster;
-use flambeau_qwen3_moe::forward::{
-    forward_one_token_pp_logits, forward_prefill_pp_logits, ShardedForwardOneTokenScratch,
-    ShardedForwardPrefillScratch,
-};
-use flambeau_qwen3_moe::{
-    Qwen3MoEConfig, Qwen3MoEShardedModel, Qwen3MoEShardedSession,
-};
+use flambeau_qwen3_moe::Qwen3MoEConfig;
 use flambeau_quant::{ChatTemplate, GgufTokenizer};
 use flambeau_runtime::Sampler;
 use serde_json::json;
@@ -25,14 +19,21 @@ use tokio::sync::{mpsc, Mutex};
 use tokio_stream::wrappers::ReceiverStream;
 
 use crate::api::*;
+use crate::model::{decode_logits, prefill_logits, Inflight, LoadedModel};
 use crate::state::SamplingParams;
 
 /// Server-wide shared state — built once at startup.
 pub struct ServerState {
     pub model_id: String,
     pub cfg: Qwen3MoEConfig,
-    pub model: Qwen3MoEShardedModel,
-    pub cluster: HipCluster,
+    /// **TP-5a-i2** — PP or TP loaded model. Handlers dispatch via the
+    /// `crate::model::{prefill_logits, decode_logits}` helpers; they
+    /// don't need to inspect this variant directly.
+    pub model: LoadedModel,
+    /// **TP-5a-i2** — `Arc` so the TP variant's `BarP2pAllReduce` can
+    /// hold a peer reference to the same cluster the handlers borrow
+    /// from.
+    pub cluster: Arc<HipCluster>,
     pub tokenizer: GgufTokenizer,
     pub chat_template: ChatTemplate,
     /// Serialises all forward traffic through the model. Continuous batching
@@ -778,17 +779,12 @@ fn run_completion_blocking(
         "completion request accepted after queue wait"
     );
 
-    let cluster = &state.cluster;
+    let cluster: &HipCluster = &state.cluster;
     let model = &state.model;
 
     // Fresh session per request (no conversation state reuse in V1).
-    let mut session =
-        Qwen3MoEShardedSession::new(model, cluster).context("create session")?;
-    let mut prefill_scratch =
-        ShardedForwardPrefillScratch::new(model, cluster, prompt_ids.len())
-            .context("prefill scratch")?;
-    let mut decode_scratch =
-        ShardedForwardOneTokenScratch::new(model, cluster).context("decode scratch")?;
+    let mut inflight =
+        Inflight::new(model, cluster, prompt_ids.len()).context("create inflight session")?;
 
     // Sampler holds vocab-sized scratch reused across all decode steps
     // (C2 in RUST-PERF-CORRECTIONS.md). Reserve upfront to avoid the
@@ -807,16 +803,8 @@ fn run_completion_blocking(
     // the first response token on multi-turn prompts, producing an empty
     // reply. Suppress it until at least one content token is emitted.
     let prefill_start = Instant::now();
-    forward_prefill_pp_logits(
-        model,
-        &mut session,
-        cluster,
-        &mut prefill_scratch,
-        &prompt_ids,
-        0,
-        &mut logits_buf,
-    )
-    .context("prefill logits")?;
+    prefill_logits(model, cluster, &mut inflight, &prompt_ids, &mut logits_buf)
+        .context("prefill logits")?;
     for &sid in stop_ids {
         if (sid as usize) < logits_buf.len() {
             logits_buf[sid as usize] = f32::NEG_INFINITY;
@@ -830,6 +818,7 @@ fn run_completion_blocking(
         prompt_tokens,
         ttft_ms = prefill_start.elapsed().as_secs_f64() * 1000.0,
         greedy = is_greedy,
+        topology = model.topology(),
         "first token produced (time-to-first-token)"
     );
 
@@ -841,6 +830,9 @@ fn run_completion_blocking(
     // but we keep the check as a defensive guard for future logit-mask
     // changes.
     if is_stop(first_next) {
+        inflight
+            .dispose(cluster)
+            .context("dispose inflight (early-stop)")?;
         return finalise(&state, prompt_tokens, generated, "stop");
     }
 
@@ -865,11 +857,10 @@ fn run_completion_blocking(
     const STOP_BIAS: f32 = 3.0;
     for step in 1..params.max_tokens as usize {
         let force_mask = step < MIN_RESPONSE_TOKENS && !relax_stop_mask;
-        forward_one_token_pp_logits(
+        decode_logits(
             model,
-            &mut session,
             cluster,
-            &mut decode_scratch,
+            &mut inflight,
             last_token,
             prompt_ids.len() + step,
             &mut logits_buf,
@@ -899,13 +890,7 @@ fn run_completion_blocking(
     }
 
     // Dispose per-request scratch/session; keep model + cluster alive.
-    decode_scratch
-        .dispose(cluster)
-        .context("dispose decode scratch")?;
-    prefill_scratch
-        .dispose(cluster)
-        .context("dispose prefill scratch")?;
-    session.dispose(cluster).context("dispose session")?;
+    inflight.dispose(cluster).context("dispose inflight")?;
 
     tracing::info!(
         target: "server.completion.finish",
@@ -949,18 +934,13 @@ fn run_completion_blocking_streaming(
         "streaming completion accepted"
     );
 
-    let cluster = &state.cluster;
+    let cluster: &HipCluster = &state.cluster;
     let model = &state.model;
     let stop_ids = &state.tokenizer.stop_ids;
     let is_stop = |t: u32| stop_ids.contains(&t);
 
-    let mut session =
-        Qwen3MoEShardedSession::new(model, cluster).context("create session")?;
-    let mut prefill_scratch =
-        ShardedForwardPrefillScratch::new(model, cluster, prompt_ids.len())
-            .context("prefill scratch")?;
-    let mut decode_scratch =
-        ShardedForwardOneTokenScratch::new(model, cluster).context("decode scratch")?;
+    let mut inflight =
+        Inflight::new(model, cluster, prompt_ids.len()).context("create inflight session")?;
 
     let mut sampler = Sampler::from_seed(params.seed);
     sampler.reserve(state.cfg.vocab_size);
@@ -973,16 +953,8 @@ fn run_completion_blocking_streaming(
     // non-streaming path for the rationale (multi-turn Qwen3.6 argmaxes
     // `<|im_end|>` immediately otherwise).
     let prefill_start = Instant::now();
-    forward_prefill_pp_logits(
-        model,
-        &mut session,
-        cluster,
-        &mut prefill_scratch,
-        &prompt_ids,
-        0,
-        &mut logits_buf,
-    )
-    .context("prefill logits")?;
+    prefill_logits(model, cluster, &mut inflight, &prompt_ids, &mut logits_buf)
+        .context("prefill logits")?;
     for &sid in stop_ids {
         if (sid as usize) < logits_buf.len() {
             logits_buf[sid as usize] = f32::NEG_INFINITY;
@@ -994,6 +966,7 @@ fn run_completion_blocking_streaming(
         prompt_tokens,
         ttft_ms = prefill_start.elapsed().as_secs_f64() * 1000.0,
         greedy = is_greedy,
+        topology = model.topology(),
         "first token produced (time-to-first-token)"
     );
 
@@ -1039,7 +1012,9 @@ fn run_completion_blocking_streaming(
 
     let alive = push_and_emit(first_next, &mut generated, &mut emitted_text)?;
     if !alive {
-        cleanup(cluster, decode_scratch, prefill_scratch, session)?;
+        inflight
+            .dispose(cluster)
+            .context("dispose inflight (stream early-stop)")?;
         return Ok(("stop".into(), prompt_tokens, generated.len() as u32));
     }
 
@@ -1055,11 +1030,10 @@ fn run_completion_blocking_streaming(
     for step in 1..params.max_tokens as usize {
         // T4.1: same relax-stop-mask behaviour as the non-streaming path.
         let force_mask = step < MIN_RESPONSE_TOKENS && !relax_stop_mask;
-        forward_one_token_pp_logits(
+        decode_logits(
             model,
-            &mut session,
             cluster,
-            &mut decode_scratch,
+            &mut inflight,
             last_token,
             prompt_ids.len() + step,
             &mut logits_buf,
@@ -1085,7 +1059,9 @@ fn run_completion_blocking_streaming(
         }
     }
 
-    cleanup(cluster, decode_scratch, prefill_scratch, session)?;
+    inflight
+        .dispose(cluster)
+        .context("dispose inflight (stream end)")?;
 
     tracing::info!(
         target: "server.completion.finish",
@@ -1097,22 +1073,6 @@ fn run_completion_blocking_streaming(
     );
 
     Ok((finish_reason.to_owned(), prompt_tokens, generated.len() as u32))
-}
-
-fn cleanup(
-    cluster: &HipCluster,
-    decode_scratch: ShardedForwardOneTokenScratch,
-    prefill_scratch: ShardedForwardPrefillScratch,
-    session: Qwen3MoEShardedSession,
-) -> Result<()> {
-    decode_scratch
-        .dispose(cluster)
-        .context("dispose decode scratch")?;
-    prefill_scratch
-        .dispose(cluster)
-        .context("dispose prefill scratch")?;
-    session.dispose(cluster).context("dispose session")?;
-    Ok(())
 }
 
 fn finalise(

@@ -1,10 +1,14 @@
-//! V1.7.5 — multi-device cluster primitive for pipeline parallelism.
+//! Multi-device HIP cluster — PP host-bounce + TP BAR1 peer-access primitives.
 //!
 //! A `HipCluster` owns one `HipDevice` per rank plus a pinned host
-//! bounce buffer per rank. Its single public op today is `peer_copy_via_host`:
+//! bounce buffer per rank. The PP-side primitive is `peer_copy_via_host`:
 //! a **CPU-bounce peer copy** that stages a DeviceToHost transfer on the
 //! source rank and a HostToDevice transfer on the destination rank through
-//! pinned host memory.
+//! pinned host memory. The TP-side primitive (TP-0a) is the on-construction
+//! probe of `hipDeviceCanAccessPeer` + authorisation via
+//! `hipDeviceEnablePeerAccess`; the resulting matrix is exposed via
+//! [`HipCluster::peer_access_matrix`] and consumed by the TP-0c BAR1
+//! AllReduce path.
 //!
 //! Why not direct `hipMemcpyPeerAsync`? The V1 target rig is PCIe-only
 //! (no xGMI / no NVLink / no kernel `CONFIG_HSA_AMD_P2P`). On that
@@ -22,14 +26,15 @@
 //! pipelined path was designed to exceed. Pipelined copy lands later if
 //! we ever shuffle bulk (weight re-sharding, KV migration) between ranks.
 
-use std::os::raw::{c_int, c_void};
+use std::os::raw::{c_int, c_uint, c_void};
 use std::ptr;
 use std::sync::atomic::{AtomicPtr, AtomicUsize, Ordering};
 use std::sync::Mutex;
 
 use crate::sys::{
-    error_string, hipHostFree, hipHostMalloc, hipMemcpyAsync, hipMemcpyKind,
-    hipStreamSynchronize, HIP_HOST_MALLOC_PORTABLE, HIP_SUCCESS,
+    error_string, hipDeviceCanAccessPeer, hipDeviceEnablePeerAccess, hipHostFree, hipHostMalloc,
+    hipMemcpyAsync, hipMemcpyKind, hipStreamSynchronize, HIP_ERROR_PEER_ACCESS_ALREADY_ENABLED,
+    HIP_HOST_MALLOC_PORTABLE, HIP_SUCCESS,
 };
 use crate::{HipDevice, HipStream};
 use flambeau_core::{Device, DeviceError, DevicePtr, DeviceResult};
@@ -94,11 +99,31 @@ pub struct HipCluster {
     /// during the grow phase; the read path is atomic via RankBounce's
     /// AtomicPtr / AtomicUsize.
     lane_bounces: Vec<std::sync::Mutex<Vec<RankBounce>>>,
+    /// TP-0a — N×N matrix of authorised BAR1 peer-access edges.
+    ///
+    /// `peer_access[i][j] == true` iff rank `i`'s HIP device may
+    /// dereference pointers owned by rank `j` directly through PCIe BAR1
+    /// (the prerequisite for the kernel-launched P2P AllReduce path).
+    /// Probed once at construction; the diagonal is always `true` (a
+    /// device trivially "accesses" its own memory).
+    ///
+    /// Populated even when peer-enable failed: callers consult this matrix
+    /// to decide whether to engage the BAR1 AllReduce kernel or fall back
+    /// to the host-bounce path on a per-rank-pair basis.
+    peer_access: Vec<Vec<bool>>,
 }
 
 impl HipCluster {
     /// Open one `HipDevice` per rank. `device_ids[r]` is the HIP ordinal
     /// for rank `r`. Typically `0..N` when every card is usable.
+    ///
+    /// As part of construction the cluster probes the BAR1 peer-access
+    /// matrix (`hipDeviceCanAccessPeer` for every off-diagonal pair) and
+    /// authorises every reachable edge via `hipDeviceEnablePeerAccess`.
+    /// Pairs that report unreachable, or whose enable fails for reasons
+    /// other than "already enabled", are recorded as `false` in
+    /// [`Self::peer_access_matrix`] and the host-bounce AllReduce stays
+    /// available as a fallback for that pair.
     pub fn new(device_ids: &[i32]) -> DeviceResult<Self> {
         if device_ids.is_empty() {
             return Err(DeviceError::Backend {
@@ -118,7 +143,50 @@ impl HipCluster {
         let lane_bounces = (0..device_ids.len())
             .map(|_| std::sync::Mutex::new(Vec::new()))
             .collect();
-        Ok(Self { devices, bounces, aux_streams, lane_bounces })
+        let peer_access = probe_and_enable_peer_access(&devices)?;
+        Ok(Self {
+            devices,
+            bounces,
+            aux_streams,
+            lane_bounces,
+            peer_access,
+        })
+    }
+
+    /// `peer_access[i][j]` — `true` iff rank `i`'s device may dereference
+    /// pointers owned by rank `j` directly via PCIe BAR1.
+    ///
+    /// The diagonal is always `true`. Off-diagonal entries are `true` only
+    /// when both `hipDeviceCanAccessPeer` returned 1 *and* the matching
+    /// `hipDeviceEnablePeerAccess` either succeeded or returned the benign
+    /// "already enabled" status. Use [`Self::can_peer_access`] for a
+    /// single-pair query.
+    pub fn peer_access_matrix(&self) -> &[Vec<bool>] {
+        &self.peer_access
+    }
+
+    /// Convenience accessor: is BAR1 peer access from rank `src` to rank
+    /// `dst` authorised? Out-of-range ranks return `false`.
+    pub fn can_peer_access(&self, src: usize, dst: usize) -> bool {
+        self.peer_access
+            .get(src)
+            .and_then(|row| row.get(dst).copied())
+            .unwrap_or(false)
+    }
+
+    /// Are all off-diagonal edges in the cluster authorised? The BAR1
+    /// AllReduce path requires a fully-reachable matrix — a single 0
+    /// edge means at least one rank can't read at least one peer, and
+    /// the kernel-launched path is unsafe to engage.
+    pub fn peer_access_full(&self) -> bool {
+        for i in 0..self.peer_access.len() {
+            for j in 0..self.peer_access.len() {
+                if i != j && !self.peer_access[i][j] {
+                    return false;
+                }
+            }
+        }
+        true
     }
 
     /// V2.25.g — reserve `n_lanes` per-lane pinned bounce slabs per rank,
@@ -705,4 +773,83 @@ fn check(rc: c_int, tag: &str) -> DeviceResult<()> {
             message: format!("{tag}: {}", error_string(rc)),
         })
     }
+}
+
+/// Probe `hipDeviceCanAccessPeer` for every off-diagonal `(src, dst)` rank
+/// pair and call `hipDeviceEnablePeerAccess` where reachable. Returns the
+/// resulting N×N matrix.
+///
+/// Failures are *not* propagated: a pair that can't be enabled is
+/// recorded as `false` and the cluster continues to construct (the
+/// host-bounce AllReduce stays available for that pair). A `tracing::warn`
+/// is emitted per blocked edge so the operator can correlate against
+/// BIOS / motherboard topology.
+fn probe_and_enable_peer_access(devices: &[HipDevice]) -> DeviceResult<Vec<Vec<bool>>> {
+    let n = devices.len();
+    let mut matrix = vec![vec![false; n]; n];
+    for i in 0..n {
+        matrix[i][i] = true;
+    }
+    if n < 2 {
+        return Ok(matrix);
+    }
+    for src in 0..n {
+        // Bind src so hipDeviceEnablePeerAccess targets the right device —
+        // it operates on the *current* HIP device, granting it access to
+        // the supplied peer.
+        devices[src].bind()?;
+        for dst in 0..n {
+            if src == dst {
+                continue;
+            }
+            let mut can: c_int = 0;
+            // SAFETY: `hipDeviceCanAccessPeer` writes a single c_int
+            // through the out-pointer and reads the two device ordinals
+            // by value. `&raw mut can` is a valid pointer for one i32
+            // write; the device ids come from already-opened HipDevices.
+            let rc = unsafe {
+                hipDeviceCanAccessPeer(&raw mut can, devices[src].id(), devices[dst].id())
+            };
+            if rc != HIP_SUCCESS {
+                tracing::warn!(
+                    target: "flambeau_backend_hip::cluster",
+                    src_rank = src,
+                    dst_rank = dst,
+                    src_device = devices[src].id(),
+                    dst_device = devices[dst].id(),
+                    error = error_string(rc),
+                    "hipDeviceCanAccessPeer failed; treating edge as unreachable"
+                );
+                continue;
+            }
+            if can != 1 {
+                tracing::warn!(
+                    target: "flambeau_backend_hip::cluster",
+                    src_rank = src,
+                    dst_rank = dst,
+                    "hipDeviceCanAccessPeer reported 0; BAR1 P2P not available on this edge \
+                     (check BIOS Above-4G-Decoding + Resizable-BAR)"
+                );
+                continue;
+            }
+            // Reserved per HIP spec — must be 0.
+            const ENABLE_PEER_FLAGS: c_uint = 0;
+            // SAFETY: `hipDeviceEnablePeerAccess` operates on the
+            // currently-bound device (set above) and reads the peer id
+            // by value. No memory is dereferenced through these args.
+            let rc = unsafe { hipDeviceEnablePeerAccess(devices[dst].id(), ENABLE_PEER_FLAGS) };
+            if rc == HIP_SUCCESS || rc == HIP_ERROR_PEER_ACCESS_ALREADY_ENABLED {
+                matrix[src][dst] = true;
+            } else {
+                tracing::warn!(
+                    target: "flambeau_backend_hip::cluster",
+                    src_rank = src,
+                    dst_rank = dst,
+                    error = error_string(rc),
+                    "hipDeviceEnablePeerAccess failed; falling back to host-bounce on this edge"
+                );
+            }
+        }
+    }
+    Ok(matrix)
 }

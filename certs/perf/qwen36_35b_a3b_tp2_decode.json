@@ -1,0 +1,39 @@
+{
+  "schema_version": 1,
+  "kind": "tp_decode_perf",
+  "model": "Qwen3.6-35B-A3B-UD-Q4_K_S",
+  "arch": "qwen35moe",
+  "world": 2,
+  "topology": "Tp",
+  "ar_pattern": "fused-residual-rmsnorm + async-event-driven",
+  "status": "wired-awaiting-gpu",
+  "captured_at": "2026-04-26",
+  "decode_tok_per_s": null,
+  "load_validation": {
+    "cert": "certs/parity/qwen36_35b_a3b_tp2_load.json",
+    "per_rank_overhead_pct": 4.99,
+    "inter_rank_spread_bytes": 0,
+    "fully_balanced": true,
+    "tensors_per_layout": {
+      "ColParallel": 340,
+      "RowParallel": 120,
+      "Replicated": 213,
+      "FusedQkvParallel": 60
+    }
+  },
+  "world_2_rationale": "num_kv_heads=2 doesn't divide world=4 — kv-replication for that case is the standard Megatron workaround but is deferred (TP-4d-i2). World=2 has nKV=1/rank, validates cleanly.",
+  "blocker": "GPU access (kfd open) — `rocm-smi` works but every HIP compute call fails. Independent of TP code.",
+  "tp_4b_i2_4c_i2_status": "complete — MoE + shared-expert TP forward functions wired into layer driver. Shared-expert path uses add_f16 to fold shared_delta into partial_ffn_out before AR.",
+  "plan_targets": {
+    "naive_baseline_tok_s": 53.5,
+    "tp_target_tok_s_min": 75.0,
+    "rationale": "Plan §4 listed Mesh<4> 75 tok/s but with KV=2 we're at world=2 only until TP-4d-i2 KV-replication. World=2 expected band: baseline 53.5 → 65-70 tok/s with TP-3a/3b-i2 host-side savings + halved expert work. World=4 with KV-replication would push to the original ≥75 target."
+  },
+  "exercises": [
+    "TP-4a-i1 (FusedQkvParallel for GDN attn_qkv + ssm_conv1d) — 60 tensors validated",
+    "TP-4a-i2 (forward_gdn_decode_tp) — wired",
+    "TP-4b (MoE 3D ColParallel{dim=1} + RowParallel{dim=2}) — layout validated",
+    "TP-4c (shared expert ColParallel{dim=0} + RowParallel{dim=1}) — layout validated",
+    "TP-3a (async AR), TP-3b-i2 (fused AR+norm) — wired"
+  ]
+}
