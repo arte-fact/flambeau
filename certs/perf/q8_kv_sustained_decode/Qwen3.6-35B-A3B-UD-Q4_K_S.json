@@ -1,0 +1,46 @@
+{
+  "schema_version": 1,
+  "kind": "q8_kv_sustained_decode_bench",
+  "model": "Qwen3.6-35B-A3B-UD-Q4_K_S",
+  "ranks": 4,
+  "tg_steps": 64,
+  "seed_token": 9419,
+  "ctx_lengths": [
+    512,
+    2048,
+    8192
+  ],
+  "rig": "threadreaper-gfx906",
+  "results": [
+    {
+      "ctx": 512,
+      "f16_tg_per_sec": 59.5303916406427,
+      "q8_tg_per_sec": 43.10826964897579,
+      "q8_over_f16": 0.7241388551447868,
+      "f16_prefill_secs": 0.816092095,
+      "q8_prefill_secs": 10.414600047,
+      "f16_decode_secs": 1.075081118,
+      "q8_decode_secs": 1.484633935
+    },
+    {
+      "ctx": 2048,
+      "f16_tg_per_sec": 45.1499463757967,
+      "q8_tg_per_sec": 21.694489689244293,
+      "q8_over_f16": 0.48049868118722605,
+      "f16_prefill_secs": 3.334596815,
+      "q8_prefill_secs": 66.138121111,
+      "f16_decode_secs": 1.417498915,
+      "q8_decode_secs": 2.950057868
+    },
+    {
+      "ctx": 8192,
+      "f16_tg_per_sec": 43.520259427748066,
+      "q8_tg_per_sec": 7.6995646022779,
+      "q8_over_f16": 0.17691908788045363,
+      "f16_prefill_secs": 17.403414764,
+      "q8_prefill_secs": 613.645876354,
+      "f16_decode_secs": 1.470579469,
+      "q8_decode_secs": 8.312158324
+    }
+  ]
+}
