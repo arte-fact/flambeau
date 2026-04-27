@@ -249,25 +249,16 @@ fn apply_penalties(logits: &mut [f32], history: &[u32], mode: &Sampling) {
     if !mode.has_penalties() || history.is_empty() {
         return;
     }
-    // For frequency_penalty we need the per-token count in history.
-    // Rather than a full vocab-sized count buffer, use a tiny HashMap
-    // keyed on the tokens that appear — history is typically < 2048.
-    let needs_count = mode.frequency_penalty != 0.0;
+    // Single-pass build: counts doubles as the "seen" set (any key with
+    // count >= 1 was seen). Saves the second hash pass at ctx ~2K+ where
+    // the prior code did seen-build + counts-build separately.
     let mut counts: std::collections::HashMap<u32, u32> =
-        std::collections::HashMap::with_capacity(if needs_count { history.len() } else { 0 });
-    if needs_count {
-        for &tok in history {
-            *counts.entry(tok).or_insert(0) += 1;
-        }
-    }
-    // For presence / repetition, a flat seen-bitmap over history is
-    // enough. We build a small uniq set on the fly.
-    let mut seen: std::collections::HashSet<u32> =
-        std::collections::HashSet::with_capacity(history.len());
+        std::collections::HashMap::with_capacity(history.len().min(8192));
     for &tok in history {
-        seen.insert(tok);
+        *counts.entry(tok).or_insert(0) += 1;
     }
-    for &tok in seen.iter() {
+    let needs_count = mode.frequency_penalty != 0.0;
+    for (&tok, &c) in counts.iter() {
         let idx = tok as usize;
         if idx >= logits.len() {
             continue;
@@ -289,9 +280,7 @@ fn apply_penalties(logits: &mut [f32], history: &[u32], mode: &Sampling) {
         }
         // Frequency penalty (OpenAI: subtract penalty * count).
         if needs_count {
-            if let Some(&c) = counts.get(&tok) {
-                *l -= mode.frequency_penalty * c as f32;
-            }
+            *l -= mode.frequency_penalty * c as f32;
         }
     }
 }
