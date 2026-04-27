@@ -15,6 +15,7 @@ pub mod graph_capture;
 pub mod impls;
 pub mod kv_cache_slot;
 pub mod module;
+pub mod profile;
 pub mod sys;
 
 pub use bar_p2p::BarP2pAllReduce;

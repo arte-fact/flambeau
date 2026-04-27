@@ -236,6 +236,47 @@ impl HipEvent {
             "hipStreamWaitEvent",
         )
     }
+
+    /// V1-BENCH-CN-80B-5 — timing-enabled event constructor (omits
+    /// `hipEventDisableTiming` so `hipEventElapsedTime` returns valid
+    /// data). Use only for profiling instrumentation; the timing-
+    /// disabled `new()` is cheaper for ordering-only events on the
+    /// production hot path.
+    pub fn new_timing(device_id: i32) -> DeviceResult<Self> {
+        let mut e: crate::sys::hipEvent_t = ptr::null_mut();
+        // SAFETY: hipEventCreate writes through the out-pointer; flags
+        // default = timing enabled.
+        check(
+            unsafe { crate::sys::hipEventCreate(&raw mut e) },
+            "hipEventCreate (timing)",
+        )?;
+        Ok(Self { ptr: e, device_id })
+    }
+
+    /// V1-BENCH-CN-80B-5 — synchronous wait until this event is reached.
+    /// Used by the profiler harness so the host wall-clock observes
+    /// device-side completion before reading `elapsed_ms_since`.
+    pub fn synchronize(&self) -> DeviceResult<()> {
+        // SAFETY: handle owned by Self.
+        check(
+            unsafe { crate::sys::hipEventSynchronize(self.ptr) },
+            "hipEventSynchronize",
+        )
+    }
+
+    /// V1-BENCH-CN-80B-5 — return milliseconds between `start.record(stream)`
+    /// and `self.record(stream)`. Both events must be timing-enabled
+    /// (created via [`new_timing`]). Caller is responsible for syncing
+    /// the events first (or calling [`synchronize`]).
+    pub fn elapsed_ms_since(&self, start: &HipEvent) -> DeviceResult<f32> {
+        let mut ms: f32 = 0.0;
+        // SAFETY: ms is a stack scalar; both event handles live.
+        check(
+            unsafe { crate::sys::hipEventElapsedTime(&raw mut ms, start.ptr, self.ptr) },
+            "hipEventElapsedTime",
+        )?;
+        Ok(ms)
+    }
 }
 
 impl Drop for HipEvent {

@@ -194,6 +194,7 @@ pub fn forward_one_token_pp(
     {
         let rank0 = cluster.device(0);
         rank0.bind()?;
+        flambeau_backend_hip::profile::mark("step_start", rank0, rank0.default_stream())?;
         let shard0 = &model.shards[0];
         let scratch0 = &mut scratch.per_rank[0];
         let token_embd = shard0
@@ -208,6 +209,7 @@ pub fn forward_one_token_pp(
             scratch0.hidden_a,
             hidden,
         )?;
+        flambeau_backend_hip::profile::mark("embed_done", rank0, rank0.default_stream())?;
     }
 
     // V2.27.a-i3 — opt-in decode graph capture gate. Per-rank layer
@@ -256,6 +258,11 @@ pub fn forward_one_token_pp(
         // current device context, not whichever device the module was
         // loaded on.
         device.bind()?;
+        flambeau_backend_hip::profile::mark(
+            "stage_start",
+            device,
+            device.default_stream(),
+        )?;
 
         let shard = &model.shards[rank_idx];
         // Split-borrow: graph_cache_decode[rank] and per_rank[rank] are
@@ -507,6 +514,11 @@ pub fn forward_one_token_pp(
                 )?;
             }
         }
+        flambeau_backend_hip::profile::mark(
+            "stage_end",
+            device,
+            device.default_stream(),
+        )?;
     }
 
     // 3. Output head on the last rank.
@@ -515,6 +527,11 @@ pub fn forward_one_token_pp(
     // exec.launch() above). Skip the uncaptured dispatch here.
     let last_device = cluster.device(last_idx);
     last_device.bind()?;
+    flambeau_backend_hip::profile::mark(
+        "output_head_start",
+        last_device,
+        last_device.default_stream(),
+    )?;
     let last_scratch = &mut scratch.per_rank[last_idx];
     let output_head_scratch = last_scratch
         .output_head
@@ -586,9 +603,15 @@ fn forward_one_token_pp_inner(
     let hidden = cfg.hidden_size;
     let hidden_bytes = hidden * 2;
 
+    // V1-BENCH-CN-80B-5 — section markers. No-op when the thread-local
+    // timer in flambeau_backend_hip::profile is disabled. Each mark is
+    // recorded on the relevant rank's default stream so the elapsed_ms
+    // delta to the next mark on the SAME rank captures the device-side
+    // time spent on that section.
     {
         let rank0 = cluster.device(0);
         rank0.bind()?;
+        flambeau_backend_hip::profile::mark("step_start", rank0, rank0.default_stream())?;
         let shard0 = &model.shards[0];
         let scratch0 = &mut scratch.per_rank[0];
         let token_embd = shard0
@@ -603,6 +626,7 @@ fn forward_one_token_pp_inner(
             scratch0.hidden_a,
             hidden,
         )?;
+        flambeau_backend_hip::profile::mark("embed_done", rank0, rank0.default_stream())?;
     }
 
     for rank_idx in 0..n_ranks {
@@ -620,6 +644,11 @@ fn forward_one_token_pp_inner(
             }
         }
         device.bind()?;
+        flambeau_backend_hip::profile::mark(
+            "stage_start",
+            device,
+            device.default_stream(),
+        )?;
 
         let shard = &model.shards[rank_idx];
         let rank_scratch = &mut scratch.per_rank[rank_idx];
@@ -670,12 +699,22 @@ fn forward_one_token_pp_inner(
                 )?;
             }
         }
+        flambeau_backend_hip::profile::mark(
+            "stage_end",
+            device,
+            device.default_stream(),
+        )?;
     }
 
     let last_idx = n_ranks - 1;
     let last_shard = &model.shards[last_idx];
     let last_device = cluster.device(last_idx);
     last_device.bind()?;
+    flambeau_backend_hip::profile::mark(
+        "output_head_start",
+        last_device,
+        last_device.default_stream(),
+    )?;
     let last_scratch = &mut scratch.per_rank[last_idx];
     let output_norm = last_shard
         .output_norm

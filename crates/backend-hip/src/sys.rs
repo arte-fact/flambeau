@@ -143,6 +143,10 @@ extern "C" {
     pub fn hipEventRecord(event: hipEvent_t, stream: hipStream_t) -> c_int;
     pub fn hipStreamWaitEvent(stream: hipStream_t, event: hipEvent_t, flags: c_uint) -> c_int;
     pub fn hipEventSynchronize(event: hipEvent_t) -> c_int;
+    /// V1-BENCH-CN-80B-5 — measure ms between two recorded events. Both
+    /// events must have been created **without** `hipEventDisableTiming`
+    /// for the timestamp to be valid.
+    pub fn hipEventElapsedTime(ms: *mut f32, start: hipEvent_t, stop: hipEvent_t) -> c_int;
 
     // V2.26.a — graph-capture primitives. Record a sequence of kernel
     // launches + memcpys on a stream once, instantiate into an executable
