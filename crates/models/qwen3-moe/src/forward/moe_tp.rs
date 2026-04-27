@@ -36,7 +36,7 @@ use flambeau_ops::hip::{
 };
 
 use super::common::{run_indexed_moe_down, run_indexed_moe_gate_up, validate_moe_dtypes};
-use super::moe::{MoeScratch, SharedExpertScratch};
+use super::moe::{MoePrefillScratch, MoeScratch, SharedExpertPrefillScratch, SharedExpertScratch};
 use crate::config::Qwen3MoEConfig;
 use crate::weights::DeviceTensor;
 
@@ -285,6 +285,285 @@ pub fn forward_shared_expert_decode_tp(
 
     cast_f32_to_f16(ops, stream, scratch.down_f32, shared_delta_out, hidden)
         .context("shexp (TP) cast down → f16")?;
+
+    Ok(())
+}
+
+/// **AUTO-6c2** — L-batched per-rank MoE FFN prefill.
+///
+/// Sister of [`forward_moe_ffn_decode_tp`] (M=L instead of M=1). Same
+/// per-rank ColParallel (gate/up) + RowParallel (down) sharding; every
+/// kernel call is parametrised by `n_tokens` so a single sweep handles
+/// the whole prompt. Output is `partial_ffn_out[L, hidden]` —
+/// per-rank Σ_k weights[k] * down_local[k, :], no residual. Caller AR's
+/// after this layer.
+///
+/// Like decode_tp, this is the bandwidth-stable indexed-MoE MMVQ path:
+/// no sort+pad MMQ tile8. The PP non-TP `forward_moe_ffn_prefill`
+/// auto-routes to tile8 at `n_tokens >= 32`; the TP MMVQ-per-token
+/// fallback is correct at any L. tile8 + sort-by-expert TP integration
+/// is a V2.x perf lever (would require per-rank sort scratch +
+/// expert-id replication invariant).
+///
+/// `n_tokens` ≤ `scratch.max_tokens`; caller chunks larger prompts.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "matches forward_moe_ffn_decode_tp + non-TP forward_moe_ffn_prefill arg shapes"
+)]
+pub fn forward_moe_ffn_prefill_tp(
+    ops: &OpsRegistry,
+    stream: &HipStream,
+    cfg: &Qwen3MoEConfig,
+    ffn_gate_exps: &DeviceTensor,
+    ffn_up_exps: &DeviceTensor,
+    ffn_down_exps: &DeviceTensor,
+    scratch: &mut MoePrefillScratch,
+    x_norm: DevicePtr,
+    partial_ffn_out: DevicePtr,
+    n_tokens: usize,
+    tp_world: u32,
+) -> Result<()> {
+    if tp_world == 0 {
+        bail!("tp_world must be >= 1");
+    }
+    if n_tokens == 0 {
+        bail!("forward_moe_ffn_prefill_tp called with n_tokens = 0");
+    }
+    if n_tokens > scratch.max_tokens {
+        bail!(
+            "forward_moe_ffn_prefill_tp: n_tokens={n_tokens} > scratch.max_tokens={}",
+            scratch.max_tokens
+        );
+    }
+    let world = tp_world as usize;
+    let hidden = cfg.hidden_size;
+    let inter = cfg.moe_intermediate_size;
+    if inter % world != 0 {
+        bail!("moe_intermediate_size {inter} not divisible by tp_world {tp_world}");
+    }
+    let local_inter = inter / world;
+    let top_k = cfg.num_experts_per_tok;
+
+    // 1. Quantise x_norm[L, hidden] → Q8_1.
+    quantize_f16_q8_1(ops, stream, x_norm, scratch.x_q8_1, n_tokens * hidden)
+        .context("moe (TP) prefill x_norm → Q8_1")?;
+
+    // 2. Validate dtypes (same kernel set as decode TP).
+    validate_moe_dtypes(
+        "indexed-MoE (TP) prefill",
+        ffn_gate_exps.dtype,
+        ffn_up_exps.dtype,
+        ffn_down_exps.dtype,
+        hidden,
+        local_inter,
+    )?;
+
+    // 3. Fused gate + up matmul on per-rank `local_inter` slabs across L tokens.
+    run_indexed_moe_gate_up(
+        ops,
+        stream,
+        ffn_gate_exps.dtype,
+        ffn_gate_exps.ptr,
+        ffn_up_exps.ptr,
+        scratch.x_q8_1,
+        scratch.expert_ids,
+        scratch.gate_out_f32,
+        scratch.up_out_f32,
+        local_inter,
+        n_tokens,
+        top_k,
+        hidden,
+    )?;
+
+    // 4+5. Fused SwiGLU → F16 + Q8_1 quantise over [L, top_k, local_inter].
+    flambeau_ops::hip::mlp::swiglu_f32_to_f16(
+        ops,
+        stream,
+        scratch.gate_out_f32,
+        scratch.up_out_f32,
+        scratch.activated_f16,
+        n_tokens * top_k * local_inter,
+    )
+    .context("moe (TP) prefill swiglu_f32_to_f16")?;
+    flambeau_ops::hip::norm::quantize_f16_q8_1(
+        ops,
+        stream,
+        scratch.activated_f16,
+        scratch.activated_q8_1,
+        n_tokens * top_k * local_inter,
+    )
+    .context("moe (TP) prefill quantize activated → Q8_1")?;
+
+    // 6. Per-rank down matmul on RowParallel-sliced ffn_down_exps. Each
+    //    (token, slot) pair is its own effective token (top_k_inner=1) —
+    //    matches the non-TP prefill's down call shape.
+    run_indexed_moe_down(
+        ops,
+        stream,
+        ffn_down_exps.dtype,
+        ffn_down_exps.ptr,
+        scratch.activated_q8_1,
+        scratch.expert_ids,
+        scratch.down_f32,
+        hidden,
+        n_tokens * top_k,
+        1,
+        local_inter,
+    )?;
+
+    // 7. Cast down F32→F16 over [L, top_k, hidden].
+    cast_f32_to_f16(
+        ops,
+        stream,
+        scratch.down_f32,
+        scratch.down_f16,
+        n_tokens * top_k * hidden,
+    )
+    .context("moe (TP) prefill cast down → f16")?;
+
+    // 8. Combine WITHOUT residual: partial_ffn_out[L, hidden] = Σ_k w[k]*down[k].
+    //    Residual stream is folded by the AR that follows.
+    moe_combine_no_residual_f16(
+        ops,
+        stream,
+        scratch.down_f16,
+        scratch.expert_weights,
+        partial_ffn_out,
+        n_tokens,
+        top_k,
+        hidden,
+    )
+    .context("moe (TP) prefill combine_no_residual_f16")?;
+
+    Ok(())
+}
+
+/// **AUTO-6c2** — L-batched per-rank shared-expert prefill.
+///
+/// Sister of [`forward_shared_expert_decode_tp`] (M=L instead of M=1).
+/// Per-rank ColParallel (gate/up) + RowParallel (down) shared-expert
+/// FFN over L tokens; output is `shared_delta_out[L, hidden]` (no
+/// residual, no scale). The layer driver folds it into
+/// `partial_ffn_out` before the post-FFN AR.
+///
+/// Note: like decode_tp, this omits the `shared_expert_scale_f32` step
+/// the non-TP `forward_shared_expert_prefill` applies. The asymmetry
+/// pre-dates AUTO-6c (it's how forward_shared_expert_decode_tp was
+/// landed at TP-4c-i2). Out of scope to fix here.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "matches forward_shared_expert_decode_tp shape"
+)]
+pub fn forward_shared_expert_prefill_tp(
+    ops: &OpsRegistry,
+    stream: &HipStream,
+    cfg: &Qwen3MoEConfig,
+    ffn_gate_shexp: &DeviceTensor,
+    ffn_up_shexp: &DeviceTensor,
+    ffn_down_shexp: &DeviceTensor,
+    scratch: &mut SharedExpertPrefillScratch,
+    x_norm: DevicePtr,
+    shared_delta_out: DevicePtr,
+    n_tokens: usize,
+    tp_world: u32,
+) -> Result<()> {
+    if tp_world == 0 {
+        bail!("tp_world must be >= 1");
+    }
+    if n_tokens == 0 {
+        bail!("forward_shared_expert_prefill_tp called with n_tokens = 0");
+    }
+    if n_tokens > scratch.max_tokens {
+        bail!(
+            "forward_shared_expert_prefill_tp: n_tokens={n_tokens} > scratch.max_tokens={}",
+            scratch.max_tokens
+        );
+    }
+    let world = tp_world as usize;
+    let hidden = cfg.hidden_size;
+    let inter = cfg
+        .shared_expert_intermediate_size
+        .context("forward_shared_expert_prefill_tp requires cfg.shared_expert_intermediate_size")?;
+    if inter % world != 0 {
+        bail!("shared_expert_intermediate_size {inter} not divisible by tp_world {tp_world}");
+    }
+    let local_inter = inter / world;
+
+    quantize_f16_q8_1(ops, stream, x_norm, scratch.x_q8_1, n_tokens * hidden)
+        .context("shexp (TP) prefill x_norm → Q8_1")?;
+
+    let fuse_gate_up = std::env::var("FLAMBEAU_VARIANT").as_deref() != Ok("baseline")
+        && ffn_gate_shexp.dtype == flambeau_quant::GgmlDType::Q8_0
+        && ffn_up_shexp.dtype == flambeau_quant::GgmlDType::Q8_0
+        && n_tokens == 1;
+    // Fused gate+up MMVQ has no L>1 variant; for prefill, the per-token
+    // dispatch is dropped and we always go through the standard
+    // run_qmatmul path which handles n_tokens > 1 natively.
+    let _ = fuse_gate_up;
+    super::common::run_qmatmul_from_tensor(
+        ops,
+        stream,
+        ffn_gate_shexp,
+        scratch.x_q8_1,
+        DevicePtr(0),
+        scratch.gate_f32,
+        n_tokens,
+        hidden,
+        local_inter,
+        "ffn_gate_shexp (TP) prefill",
+    )?;
+    super::common::run_qmatmul_from_tensor(
+        ops,
+        stream,
+        ffn_up_shexp,
+        scratch.x_q8_1,
+        DevicePtr(0),
+        scratch.up_f32,
+        n_tokens,
+        hidden,
+        local_inter,
+        "ffn_up_shexp (TP) prefill",
+    )?;
+
+    flambeau_ops::hip::mlp::swiglu_f32_to_f16(
+        ops,
+        stream,
+        scratch.gate_f32,
+        scratch.up_f32,
+        scratch.activated_f16,
+        n_tokens * local_inter,
+    )
+    .context("shexp (TP) prefill swiglu_f32_to_f16")?;
+    flambeau_ops::hip::norm::quantize_f16_q8_1(
+        ops,
+        stream,
+        scratch.activated_f16,
+        scratch.activated_q8_1,
+        n_tokens * local_inter,
+    )
+    .context("shexp (TP) prefill quantize activated → Q8_1")?;
+
+    super::common::run_qmatmul_from_tensor(
+        ops,
+        stream,
+        ffn_down_shexp,
+        scratch.activated_q8_1,
+        DevicePtr(0),
+        scratch.down_f32,
+        n_tokens,
+        local_inter,
+        hidden,
+        "ffn_down_shexp (TP) prefill",
+    )?;
+
+    cast_f32_to_f16(
+        ops,
+        stream,
+        scratch.down_f32,
+        shared_delta_out,
+        n_tokens * hidden,
+    )
+    .context("shexp (TP) prefill cast down → f16")?;
 
     Ok(())
 }

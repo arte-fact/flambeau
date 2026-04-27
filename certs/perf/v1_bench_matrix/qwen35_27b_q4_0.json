@@ -1,0 +1,145 @@
+{
+  "model_tag": "qwen35_27b_q4_0",
+  "gguf_path": "/artefact/models/Qwen3.5-27B-Q4_0.gguf",
+  "rig_notes": "4× MI50 PCIe 3.0 x16, 100 W cap, ROCm 7.1.1; tp4 omitted (rig {2,3} BAR1 fault per project_rig_gpu23_link_fault). Hybrid pp2tp2 uses devices 0,2,1,3 to keep {2,3} out of any TP group.",
+  "prefill_lengths": [
+    8,
+    32,
+    128,
+    512,
+    2048
+  ],
+  "decode_lengths": [
+    16,
+    64,
+    256
+  ],
+  "topologies": [
+    {
+      "tag": "pp4",
+      "mesh_mode": "pp",
+      "pp_size": 4,
+      "tp_size": 1,
+      "devices": [
+        0,
+        1,
+        2,
+        3
+      ],
+      "load_secs": 13.174020422,
+      "runs": [
+        {
+          "phase": "prefill",
+          "n_tokens": 8,
+          "wall_secs": 0.422048199,
+          "tok_per_sec": 18.955180993439093
+        },
+        {
+          "phase": "prefill",
+          "n_tokens": 32,
+          "wall_secs": 0.75936763,
+          "tok_per_sec": 42.140326682084144
+        },
+        {
+          "phase": "prefill",
+          "n_tokens": 128,
+          "wall_secs": 0.726457281,
+          "tok_per_sec": 176.19755950935263
+        },
+        {
+          "phase": "prefill",
+          "n_tokens": 512,
+          "wall_secs": 2.639192332,
+          "tok_per_sec": 193.99874491602608
+        },
+        {
+          "phase": "prefill",
+          "n_tokens": 2048,
+          "wall_secs": 10.958724122,
+          "tok_per_sec": 186.8830693427689
+        },
+        {
+          "phase": "decode",
+          "n_tokens": 16,
+          "wall_secs": 0.797408498,
+          "tok_per_sec": 20.064998103393677
+        },
+        {
+          "phase": "decode",
+          "n_tokens": 64,
+          "wall_secs": 3.189250837,
+          "tok_per_sec": 20.067408702227457
+        },
+        {
+          "phase": "decode",
+          "n_tokens": 256,
+          "wall_secs": 13.193672928,
+          "tok_per_sec": 19.403239825409745
+        }
+      ]
+    },
+    {
+      "tag": "pp2tp2",
+      "mesh_mode": "pp+tp",
+      "pp_size": 2,
+      "tp_size": 2,
+      "devices": [
+        0,
+        2,
+        1,
+        3
+      ],
+      "load_secs": 6.609503707,
+      "runs": [
+        {
+          "phase": "prefill",
+          "n_tokens": 8,
+          "wall_secs": 0.236043794,
+          "tok_per_sec": 33.89201581804773
+        },
+        {
+          "phase": "prefill",
+          "n_tokens": 32,
+          "wall_secs": 0.403022264,
+          "tok_per_sec": 79.40007999161058
+        },
+        {
+          "phase": "prefill",
+          "n_tokens": 128,
+          "wall_secs": 0.492395502,
+          "tok_per_sec": 259.95363377628905
+        },
+        {
+          "phase": "prefill",
+          "n_tokens": 512,
+          "wall_secs": 1.931577339,
+          "tok_per_sec": 265.0683406055428
+        },
+        {
+          "phase": "prefill",
+          "n_tokens": 2048,
+          "wall_secs": 6.222326723,
+          "tok_per_sec": 329.13732935781746
+        },
+        {
+          "phase": "decode",
+          "n_tokens": 16,
+          "wall_secs": 0.518972412,
+          "tok_per_sec": 30.830155187516983
+        },
+        {
+          "phase": "decode",
+          "n_tokens": 64,
+          "wall_secs": 2.11392723,
+          "tok_per_sec": 30.275403567226864
+        },
+        {
+          "phase": "decode",
+          "n_tokens": 256,
+          "wall_secs": 8.999959872,
+          "tok_per_sec": 28.444571269306213
+        }
+      ]
+    }
+  ]
+}

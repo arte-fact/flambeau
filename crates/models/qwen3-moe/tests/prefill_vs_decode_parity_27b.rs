@@ -7,7 +7,7 @@
 
 use anyhow::Result;
 use flambeau_backend_hip::{device_count, HipCluster};
-use flambeau_core::{Device, Stream};
+use flambeau_core::Device;
 use flambeau_quant::GgufFile;
 use flambeau_qwen3_moe::forward::{
     forward_one_token_pp, forward_output_head_decode, forward_prefill_pp,

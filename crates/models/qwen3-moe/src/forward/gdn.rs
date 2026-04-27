@@ -18,7 +18,10 @@ use flambeau_ops::hip::{
         quantize_q8_1_mmq, rmsnorm_f16, rmsnorm_f32, rmsnorm_quant_q8_1,
     },
     qmatmul::mmvq_q8_0_gate_up,
-    recurrent::{gdn_alpha_beta_f32, gdn_split_qkv_f32, gdn_state_step_f32_s128},
+    recurrent::{
+        gdn_alpha_beta_f32, gdn_split_qkv_f32, gdn_state_step_alphabeta_f32_s128,
+        gdn_state_step_f32_s128,
+    },
     HipDevice, HipStream, OpsRegistry,
 };
 use flambeau_quant::BlockQ8_1;
@@ -196,42 +199,6 @@ impl Drop for GdnScratch {
             );
         }
     }
-}
-
-/// Assemble the conv1d input tile `[conv_kernel, conv_channels]` from the
-/// layer's history + a fresh `qkv_mixed` row. Uses device-to-device
-/// `memcpy_async` (stream-ordered with the surrounding kernels).
-fn assemble_conv_input(
-    device: &HipDevice,
-    stream: &HipStream,
-    history: DevicePtr,
-    current: DevicePtr,
-    conv_input: DevicePtr,
-    conv_channels: usize,
-    conv_kernel: usize,
-) -> Result<()> {
-    let row_bytes = conv_channels * 4;
-    let hist_rows = conv_kernel - 1;
-    // SAFETY: `conv_input` has `conv_kernel * row_bytes` valid device
-    // bytes; the source buffers are at least `hist_rows * row_bytes` and
-    // `row_bytes` respectively.
-    unsafe {
-        device.memcpy_async(
-            stream,
-            CopyDirection::DeviceToDevice,
-            conv_input,
-            history,
-            hist_rows * row_bytes,
-        )?;
-        device.memcpy_async(
-            stream,
-            CopyDirection::DeviceToDevice,
-            conv_input.offset_bytes(hist_rows * row_bytes),
-            current,
-            row_bytes,
-        )?;
-    }
-    Ok(())
 }
 
 /// After the conv kernel has read `conv_input`, advance the layer's
@@ -460,42 +427,64 @@ pub fn forward_gdn_decode(
     )
     .context("scale_f32 Q")?;
 
-    // 11. Alpha/β/gate compute — fused device kernel (V1.7.3-g, V2.2.d fix 3
-    // batched across tokens). Decode runs n_tokens = 1.
-    gdn_alpha_beta_f32(
-        ops,
-        stream,
-        scratch.alpha_f32,
-        scratch.beta_f32,
-        weights.ssm_dt_bias.ptr,
-        weights.ssm_a.ptr,
-        scratch.gate_device,
-        scratch.beta_device,
-        num_v_heads,
-        /* n_tokens = */ 1,
-    )
-    .context("gdn_alpha_beta_f32 fused")?;
-
-    // 12. GDN state step. V (aliased as v_src) stays in place; Q/K have
-    // been l2-normalised and Q scaled. n_rep = num_v_heads / num_k_heads.
+    // 11–12. C10 — fused state-step that absorbs the α/β/gate compute
+    // (saves one kernel launch per GDN layer per token). Default-on;
+    // `FLAMBEAU_VARIANT=baseline` opts back to the unfused chain for
+    // regression A/B. n_rep = num_v_heads / num_k_heads.
     let n_rep = num_v_heads / num_k_heads;
-    gdn_state_step_f32_s128(
-        ops,
-        stream,
-        scratch.q_norm_f32,
-        scratch.k_norm_f32,
-        v_src,
-        scratch.gate_device,
-        scratch.beta_device,
-        layer_state.state,
-        layer_state.state,   // state_in and state_out alias — kernel handles it
-        scratch.state_out,
-        1,                   // B = 1
-        num_v_heads,
-        1,                   // L = 1 (decode)
-        n_rep,
-    )
-    .context("gdn_state_step_f32_s128")?;
+    let fuse_state_step = std::env::var("FLAMBEAU_VARIANT").as_deref() != Ok("baseline");
+    if fuse_state_step {
+        gdn_state_step_alphabeta_f32_s128(
+            ops,
+            stream,
+            scratch.q_norm_f32,
+            scratch.k_norm_f32,
+            v_src,
+            scratch.alpha_f32,
+            scratch.beta_f32,
+            weights.ssm_dt_bias.ptr,
+            weights.ssm_a.ptr,
+            layer_state.state,
+            layer_state.state,
+            scratch.state_out,
+            1,
+            num_v_heads,
+            1,
+            n_rep,
+        )
+        .context("gdn_state_step_alphabeta_f32_s128 (C10 fused)")?;
+    } else {
+        gdn_alpha_beta_f32(
+            ops,
+            stream,
+            scratch.alpha_f32,
+            scratch.beta_f32,
+            weights.ssm_dt_bias.ptr,
+            weights.ssm_a.ptr,
+            scratch.gate_device,
+            scratch.beta_device,
+            num_v_heads,
+            /* n_tokens = */ 1,
+        )
+        .context("gdn_alpha_beta_f32 fused")?;
+        gdn_state_step_f32_s128(
+            ops,
+            stream,
+            scratch.q_norm_f32,
+            scratch.k_norm_f32,
+            v_src,
+            scratch.gate_device,
+            scratch.beta_device,
+            layer_state.state,
+            layer_state.state,
+            scratch.state_out,
+            1,
+            num_v_heads,
+            1,
+            n_rep,
+        )
+        .context("gdn_state_step_f32_s128 (baseline)")?;
+    }
 
     // 13. ssm_norm per-head on the state-step output.
     let ssm_norm_k = weights
@@ -863,7 +852,7 @@ fn gather_qkv_strided(
 
 /// Assemble `conv_input[(K-1) + L, conv_channels]` from the layer's
 /// `conv_history[(K-1), conv_channels]` + the fresh `qkv_mixed[L, conv_channels]`.
-fn assemble_conv_input_prefill(
+pub(super) fn assemble_conv_input_prefill(
     device: &HipDevice,
     stream: &HipStream,
     history: DevicePtr,
@@ -898,7 +887,7 @@ fn assemble_conv_input_prefill(
 /// After the conv has read `conv_input[(K-1) + L]`, update the layer's
 /// history slot to the last `K-1` rows — `conv_input[L..L+K-1]`. One
 /// memcpy (may alias if L == 0, but prefill has L ≥ 1).
-fn shift_conv_history_prefill(
+pub(super) fn shift_conv_history_prefill(
     device: &HipDevice,
     stream: &HipStream,
     conv_input: DevicePtr,
@@ -1165,51 +1154,67 @@ pub fn forward_gdn_prefill(
     )
     .context("prefill scale_f32 Q")?;
 
-    // 11. α / β / gate compute — batched across all L tokens in one launch
-    // (V2.2.d fix 3). The kernel's grid.x = n_tokens, block = num_v_heads.
-    // gate/beta lay out contiguously as [L, num_v_heads]; the per-head
-    // constants ssm_dt_bias / ssm_a are shared across the L rows.
-    gdn_alpha_beta_f32(
-        ops,
-        stream,
-        scratch.alpha_f32,
-        scratch.beta_f32,
-        weights.ssm_dt_bias.ptr,
-        weights.ssm_a.ptr,
-        scratch.gate_device,
-        scratch.beta_device,
-        num_v_heads,
-        n_tokens,
-    )
-    .context("prefill gdn_alpha_beta_f32 (batched)")?;
-
-    // 12. GDN state step — kernel natively handles B=1, H=num_v_heads, L.
-    // V2.30.a — serialise state_step across aux streams on the same
-    // rank. Before-wait ensures previous ubatch's state write has
-    // completed (no-op if event not yet recorded); after-record
-    // signals this ubatch's completion for the next cross-lane caller.
+    // 11–12. C10 fused state-step (default) absorbs α/β/gate; baseline
+    // chain available via FLAMBEAU_VARIANT=baseline. State-step
+    // event-ordering preserved across both branches (V2.30.a).
+    let n_rep = num_v_heads / num_k_heads;
+    let fuse_state_step = std::env::var("FLAMBEAU_VARIANT").as_deref() != Ok("baseline");
     if let Some(ev) = state_event {
         ev.stream_wait(stream)
             .context("gdn state_step stream_wait")?;
     }
-    let n_rep = num_v_heads / num_k_heads;
-    gdn_state_step_f32_s128(
-        ops,
-        stream,
-        scratch.q_norm_f32,
-        scratch.k_norm_f32,
-        scratch.v_f32,
-        scratch.gate_device,
-        scratch.beta_device,
-        layer_state.state,
-        layer_state.state,
-        scratch.state_out,
-        1,
-        num_v_heads,
-        n_tokens,
-        n_rep,
-    )
-    .context("prefill gdn_state_step_f32_s128")?;
+    if fuse_state_step {
+        gdn_state_step_alphabeta_f32_s128(
+            ops,
+            stream,
+            scratch.q_norm_f32,
+            scratch.k_norm_f32,
+            scratch.v_f32,
+            scratch.alpha_f32,
+            scratch.beta_f32,
+            weights.ssm_dt_bias.ptr,
+            weights.ssm_a.ptr,
+            layer_state.state,
+            layer_state.state,
+            scratch.state_out,
+            1,
+            num_v_heads,
+            n_tokens,
+            n_rep,
+        )
+        .context("prefill gdn_state_step_alphabeta_f32_s128 (C10 fused)")?;
+    } else {
+        gdn_alpha_beta_f32(
+            ops,
+            stream,
+            scratch.alpha_f32,
+            scratch.beta_f32,
+            weights.ssm_dt_bias.ptr,
+            weights.ssm_a.ptr,
+            scratch.gate_device,
+            scratch.beta_device,
+            num_v_heads,
+            n_tokens,
+        )
+        .context("prefill gdn_alpha_beta_f32 (batched)")?;
+        gdn_state_step_f32_s128(
+            ops,
+            stream,
+            scratch.q_norm_f32,
+            scratch.k_norm_f32,
+            scratch.v_f32,
+            scratch.gate_device,
+            scratch.beta_device,
+            layer_state.state,
+            layer_state.state,
+            scratch.state_out,
+            1,
+            num_v_heads,
+            n_tokens,
+            n_rep,
+        )
+        .context("prefill gdn_state_step_f32_s128 (baseline)")?;
+    }
     if let Some(ev) = state_event {
         ev.record(stream).context("gdn state_step record")?;
     }

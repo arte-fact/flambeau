@@ -1,0 +1,647 @@
+//! AUTO-4d — hybrid PP-of-TP forward driver.
+//!
+//! Composes the existing per-layer TP entry points
+//! ([`super::tp::forward_full_attn_layer_tp`],
+//! [`super::tp::forward_gdn_layer_tp`]) per stage, with one
+//! [`HipCluster::peer_copy_via_host`] hop between stages on the
+//! **global** cluster (the one that spans all `pp_size * tp_size`
+//! ranks). The intra-stage AllReduce uses each stage's per-stage
+//! `BarP2pAllReduce` against its sub-cluster — these are constructed
+//! by the server at startup (AUTO-4f).
+//!
+//! ### Embedding & LM head
+//!
+//! The AUTO-4b loader puts `token_embd` only on **stage 0** and
+//! `output_norm` + `output` only on the **last stage**. The driver
+//! mirrors that placement: embed runs on stage 0's TP ranks; the LM
+//! head runs on the last stage's `head_rank` (rank 0 by default).
+//!
+//! ### Inter-stage hand-off
+//!
+//! After stage `s`'s last layer, the residual `hidden_a` on rank 0 of
+//! stage `s` is copied to **every rank** of stage `s+1`'s sub-cluster
+//! via `peer_copy_via_host`. The cost is `tp_size_next × hidden_size ×
+//! 2 B` per token per hop; on Qwen3.5-9B (`hidden=4096`) at
+//! `tp_size=2`, that's 16 KB / hop — well under the 4 KB minimum chunk
+//! size that pinned-bounce was tuned for, but the path is correct.
+
+#![cfg(feature = "hip")]
+
+use anyhow::{anyhow, bail, Context, Result};
+use flambeau_backend_hip::{BarP2pAllReduce, HipCluster};
+use flambeau_core::{Device, Stream};
+
+use crate::hybrid::{
+    Qwen3MoEHybridModel, Qwen3MoEHybridSession, ShardedForwardOneTokenScratchHybrid,
+    ShardedForwardPrefillScratchHybrid,
+};
+
+use super::io::{argmax_token_host, forward_embed_decode_host, forward_output_head_decode};
+use super::tp::{
+    forward_full_attn_layer_tp, forward_gdn_layer_tp, forward_prefill_tp_batched_layers,
+};
+
+/// AUTO-4e — ingest a `prompt_ids` prompt token-by-token and write
+/// the **last** position's F32 logits row into `logits_out`. Mirrors
+/// the TP server-side prefill (`model.rs::prefill_logits` for the
+/// `LoadedModel::Tp` arm), which is itself a per-token loop because
+/// the V1 TP path has no batched prefill kernel — TP-5b "prefill-PP +
+/// decode-TP coexistence" deferred batched-TP-prefill to V2 and
+/// hybrid inherits the same posture. The hand-off cost between
+/// stages stays the same per-token primitive (one F16 hidden vec
+/// per hop); a true batched prefill would change the hop payload to
+/// `[L, hidden] * F16`, deferred until profile data justifies it.
+///
+/// `start_position` is the position the *first* prompt token lands
+/// at — non-zero when this prefill is appending to a session that
+/// already saw earlier tokens.
+pub fn forward_prefill_hybrid_logits(
+    model: &Qwen3MoEHybridModel,
+    scratch: &mut ShardedForwardOneTokenScratchHybrid,
+    global_cluster: &HipCluster,
+    stage_ars: &[BarP2pAllReduce],
+    session: &mut Qwen3MoEHybridSession,
+    prompt_ids: &[u32],
+    start_position: usize,
+    logits_out: &mut Vec<f32>,
+) -> Result<()> {
+    if prompt_ids.is_empty() {
+        bail!("forward_prefill_hybrid_logits: empty prompt");
+    }
+    // **AUTO-6e** — opt-in batched hybrid prefill. Same env gate as
+    // pure-TP (FLAMBEAU_TP_BATCHED=1), same L≥8 threshold for
+    // prefill-scratch alloc amortisation. Falls back to the per-token
+    // loop on small prompts and when the env flag isn't set.
+    let batched_opt_in = std::env::var("FLAMBEAU_TP_BATCHED").as_deref() == Ok("1");
+    if batched_opt_in && prompt_ids.len() >= 8 {
+        return forward_prefill_hybrid_batched_logits(
+            model,
+            global_cluster,
+            stage_ars,
+            session,
+            prompt_ids,
+            start_position,
+            logits_out,
+        )
+        .context("hybrid batched prefill (AUTO-6e)");
+    }
+    let last = prompt_ids.len() - 1;
+    for (i, &tok) in prompt_ids.iter().enumerate() {
+        let pos = start_position + i;
+        if i < last {
+            // Discard logits for non-final positions; only the cache
+            // updates matter, and the per-token forward writes them.
+            forward_one_token_hybrid(
+                model,
+                scratch,
+                global_cluster,
+                stage_ars,
+                session,
+                tok,
+                pos,
+            )
+            .with_context(|| format!("hybrid prefill pos={pos}"))?;
+        } else {
+            forward_one_token_hybrid_logits(
+                model,
+                scratch,
+                global_cluster,
+                stage_ars,
+                session,
+                tok,
+                pos,
+                logits_out,
+            )
+            .with_context(|| format!("hybrid prefill final pos={pos}"))?;
+        }
+    }
+    Ok(())
+}
+
+/// **AUTO-6e3** — L-batched per-stage hybrid prefill.
+///
+/// Mirrors [`forward_one_token_hybrid_inner`] structurally (embed →
+/// per-stage layers → inter-stage hand-off → output head) but every
+/// step is L-aware:
+///
+///  * Stage 0 embeds **all L tokens** into rank-0..N's `hidden_a`
+///    (sized `[L, hidden]` by [`ShardedForwardPrefillScratchHybrid`]).
+///  * Each stage runs [`forward_prefill_tp_batched_layers`] over its
+///    layer range with `il_cache_offset = stage.layer_range.start`
+///    (each stage's session caches were allocated for its slice
+///    only — same convention as the per-token hybrid driver).
+///  * Inter-stage hand-off transfers `[L, hidden]` F16
+///    (`L * hidden * 2` bytes) instead of one hidden vector.
+///  * The last stage runs the LM head on the **last position** of
+///    `hidden_a` and downloads `cfg.vocab_size` F32 logits.
+///
+/// Allocates a fresh [`ShardedForwardPrefillScratchHybrid`] per call
+/// and disposes on every exit path. V2.x: bind it on
+/// `Qwen3MoEHybridSession` to avoid the per-request alloc.
+pub fn forward_prefill_hybrid_batched_logits(
+    model: &Qwen3MoEHybridModel,
+    global_cluster: &HipCluster,
+    stage_ars: &[BarP2pAllReduce],
+    session: &mut Qwen3MoEHybridSession,
+    prompt_ids: &[u32],
+    start_position: usize,
+    logits_out: &mut Vec<f32>,
+) -> Result<()> {
+    if prompt_ids.is_empty() {
+        bail!("forward_prefill_hybrid_batched_logits: empty prompt");
+    }
+    let cfg = &model.config;
+    let n_stages = model.stages.len();
+    let tp_size = model.spec.tp_size as usize;
+
+    if session.stages.len() != n_stages {
+        bail!(
+            "hybrid session.stages.len()={} != model.stages.len()={n_stages}",
+            session.stages.len()
+        );
+    }
+    if stage_ars.len() != n_stages {
+        bail!(
+            "stage_ars.len()={} != model.stages.len()={n_stages}",
+            stage_ars.len()
+        );
+    }
+    if global_cluster.ranks() != n_stages * tp_size {
+        bail!(
+            "global_cluster.ranks()={} != pp_size*tp_size={}",
+            global_cluster.ranks(),
+            n_stages * tp_size
+        );
+    }
+    let world = tp_size as u32;
+    if world != 1 && world != 2 && world != 4 {
+        bail!("hybrid batched prefill: per-stage tp_size ∈ {{1, 2, 4}} (got {world})");
+    }
+
+    let n_tokens = prompt_ids.len();
+    let hidden = cfg.hidden_size;
+    let row_bytes = hidden * 2;
+
+    // 1. Allocate prefill scratch sized to this prompt. RAII guard so
+    //    the scratch is disposed on every exit path.
+    let prefill = ShardedForwardPrefillScratchHybrid::new(model, n_tokens)
+        .context("alloc hybrid prefill scratch")?;
+    struct PrefillGuard<'m> {
+        scratch: Option<ShardedForwardPrefillScratchHybrid>,
+        model: &'m Qwen3MoEHybridModel,
+    }
+    impl Drop for PrefillGuard<'_> {
+        fn drop(&mut self) {
+            if let Some(s) = self.scratch.take() {
+                let _ = s.dispose(self.model);
+            }
+        }
+    }
+    let mut guard = PrefillGuard {
+        scratch: Some(prefill),
+        model,
+    };
+    let scratch_ref = guard.scratch.as_mut().expect("scratch present until drop");
+
+    // 2. Stage 0: embed L tokens on every rank's hidden_a.
+    {
+        let stage = &model.stages[0];
+        if !stage.tp_model.has_token_embd {
+            bail!("hybrid stage 0 is missing token_embd; loader bug");
+        }
+        let stage_scratch = &mut scratch_ref.per_stage[0];
+        for r in 0..stage.sub_cluster.ranks() {
+            let device = stage.sub_cluster.device(r);
+            device.bind()?;
+            let stream = device.default_stream();
+            let dst_base = stage_scratch.per_rank[r].hidden_a;
+            for (i, &tok) in prompt_ids.iter().enumerate() {
+                let dst_row =
+                    flambeau_core::DevicePtr(dst_base.as_usize() + i * row_bytes);
+                forward_embed_decode_host(
+                    device,
+                    stream,
+                    &stage.tp_model.shards[r].token_embd,
+                    tok,
+                    dst_row,
+                    hidden,
+                )
+                .with_context(|| format!("hybrid stage 0 rank {r} embed pos {i}"))?;
+            }
+        }
+    }
+
+    // 3. Per-stage layer loop + L-batched hand-off.
+    for s in 0..n_stages {
+        let stage = &model.stages[s];
+        let stage_scratch = &mut scratch_ref.per_stage[s];
+        let stage_session = &mut session.stages[s];
+        let stage_ar = &stage_ars[s];
+
+        if stage_session.layer_range != stage.layer_range {
+            bail!(
+                "hybrid: session stage {s} range {:?} != model range {:?}",
+                stage_session.layer_range,
+                stage.layer_range
+            );
+        }
+
+        forward_prefill_tp_batched_layers(
+            &stage.tp_model,
+            stage_scratch,
+            &stage.sub_cluster,
+            stage_ar,
+            &mut stage_session.caches,
+            stage.layer_range.clone(),
+            stage.layer_range.start,
+            n_tokens,
+            start_position,
+        )
+        .with_context(|| format!("hybrid stage {s} batched layers {:?}", stage.layer_range))?;
+
+        // Hand-off: copy L hidden vectors from stage s rank 0 to every
+        // rank of stage s+1. Same pinned-bounce pattern as the per-token
+        // path; the only thing that grows is the byte count.
+        if s + 1 < n_stages {
+            let prod_dev = model.stages[s].sub_cluster.device(0);
+            prod_dev.bind()?;
+            prod_dev.default_stream().synchronize()?;
+
+            let src_global_rank = s * tp_size;
+            let src_ptr = scratch_ref.per_stage[s].per_rank[0].hidden_a;
+            let bytes = n_tokens * hidden * 2; // F16 [L, hidden]
+            for dst_local in 0..tp_size {
+                let dst_global_rank = (s + 1) * tp_size + dst_local;
+                let dst_ptr = scratch_ref.per_stage[s + 1].per_rank[dst_local].hidden_a;
+                // SAFETY: src/dst are live `[L, hidden] * F16` allocations on
+                // their respective devices (sized by ShardedForwardPrefillScratchTp::new
+                // for both stages); both ranks belong to global_cluster.
+                // Producer sync above covers source freshness; destinations
+                // are about to be (re-)written by the next stage's first
+                // batched-layer call.
+                unsafe {
+                    global_cluster
+                        .peer_copy_via_host(
+                            dst_ptr,
+                            dst_global_rank,
+                            src_ptr,
+                            src_global_rank,
+                            bytes,
+                        )
+                        .with_context(|| {
+                            format!(
+                                "hybrid batched stage {s} → {} hand-off (rank {src_global_rank} \
+                                 → {dst_global_rank}, {bytes} B)",
+                                s + 1
+                            )
+                        })?;
+                }
+            }
+        }
+    }
+
+    // 4. Last stage: output head on the LAST POSITION + logits download.
+    let head_stage_idx = scratch_ref.head_stage as usize;
+    if head_stage_idx + 1 != n_stages {
+        bail!(
+            "hybrid: head_stage={head_stage_idx} but expected last stage = {}",
+            n_stages - 1
+        );
+    }
+    let last_stage = &model.stages[head_stage_idx];
+    if !last_stage.tp_model.has_output_head {
+        bail!("hybrid last stage is missing output head; loader bug");
+    }
+    let last_scratch = &mut scratch_ref.per_stage[head_stage_idx];
+    let head_rank = last_scratch.head_rank.0 as usize;
+    let device = last_stage.sub_cluster.device(head_rank);
+    device.bind()?;
+    let stream = device.default_stream();
+    let head_shard = &last_stage.tp_model.shards[head_rank];
+    let lm_head = head_shard.output.as_ref().unwrap_or(&head_shard.token_embd);
+    let last_row_off = (n_tokens - 1) * row_bytes;
+    let hidden_a_last = flambeau_core::DevicePtr(
+        last_scratch.per_rank[head_rank].hidden_a.as_usize() + last_row_off,
+    );
+    let head_scratch = last_scratch.per_rank[head_rank]
+        .output_head
+        .as_mut()
+        .ok_or_else(|| {
+            anyhow!("hybrid: head_rank={head_rank} on last stage missing OutputHeadScratch")
+        })?;
+    let logits_f32 = head_scratch.logits_f32;
+    let ops = &last_stage.tp_model.ops[head_rank];
+    forward_output_head_decode(
+        ops,
+        stream,
+        cfg,
+        &head_shard.output_norm,
+        lm_head,
+        head_scratch,
+        hidden_a_last,
+    )
+    .context("hybrid batched forward_output_head_decode")?;
+    logits_out.clear();
+    logits_out.resize(cfg.vocab_size, 0.0f32);
+    // SAFETY: logits_f32 is valid for cfg.vocab_size F32 values on `device`;
+    // logits_out.as_mut_ptr() is host memory of matching size.
+    unsafe {
+        <flambeau_backend_hip::HipDevice as flambeau_core::Device>::memcpy_async(
+            device,
+            stream,
+            flambeau_core::CopyDirection::DeviceToHost,
+            flambeau_core::DevicePtr(logits_out.as_mut_ptr() as usize),
+            logits_f32,
+            cfg.vocab_size * 4,
+        )?;
+    }
+    flambeau_core::Stream::synchronize(stream)?;
+    Ok(())
+}
+
+/// One-token hybrid PP-of-TP decode that returns the greedy argmax.
+/// See [`forward_one_token_hybrid_logits`] for the variant that
+/// downloads the F32 logits row instead.
+pub fn forward_one_token_hybrid(
+    model: &Qwen3MoEHybridModel,
+    scratch: &mut ShardedForwardOneTokenScratchHybrid,
+    global_cluster: &HipCluster,
+    stage_ars: &[BarP2pAllReduce],
+    session: &mut Qwen3MoEHybridSession,
+    token_id: u32,
+    position: usize,
+) -> Result<u32> {
+    forward_one_token_hybrid_inner(
+        model,
+        scratch,
+        global_cluster,
+        stage_ars,
+        session,
+        token_id,
+        position,
+        /* logits_out = */ None,
+    )
+}
+
+/// Variant of [`forward_one_token_hybrid`] that writes the F32 logits
+/// row of the head stage's `head_rank` into `logits_out` (resized to
+/// `cfg.vocab_size`) instead of running argmax host-side. Returns
+/// `Ok(())`; the sampled token is the caller's job (matches PP/TP).
+pub fn forward_one_token_hybrid_logits(
+    model: &Qwen3MoEHybridModel,
+    scratch: &mut ShardedForwardOneTokenScratchHybrid,
+    global_cluster: &HipCluster,
+    stage_ars: &[BarP2pAllReduce],
+    session: &mut Qwen3MoEHybridSession,
+    token_id: u32,
+    position: usize,
+    logits_out: &mut Vec<f32>,
+) -> Result<()> {
+    forward_one_token_hybrid_inner(
+        model,
+        scratch,
+        global_cluster,
+        stage_ars,
+        session,
+        token_id,
+        position,
+        Some(logits_out),
+    )
+    .map(|_| ())
+}
+
+fn forward_one_token_hybrid_inner(
+    model: &Qwen3MoEHybridModel,
+    scratch: &mut ShardedForwardOneTokenScratchHybrid,
+    global_cluster: &HipCluster,
+    stage_ars: &[BarP2pAllReduce],
+    session: &mut Qwen3MoEHybridSession,
+    token_id: u32,
+    position: usize,
+    logits_out: Option<&mut Vec<f32>>,
+) -> Result<u32> {
+    let cfg = &model.config;
+    let n_stages = model.stages.len();
+    let tp_size = model.spec.tp_size as usize;
+
+    // Shape invariants — checked once per call so misuse surfaces here,
+    // not deep inside the per-rank kernel-launch loop.
+    if scratch.per_stage.len() != n_stages {
+        bail!(
+            "hybrid scratch.per_stage.len()={} != model.stages.len()={n_stages}",
+            scratch.per_stage.len()
+        );
+    }
+    if session.stages.len() != n_stages {
+        bail!(
+            "hybrid session.stages.len()={} != model.stages.len()={n_stages}",
+            session.stages.len()
+        );
+    }
+    if stage_ars.len() != n_stages {
+        bail!(
+            "stage_ars.len()={} != model.stages.len()={n_stages}",
+            stage_ars.len()
+        );
+    }
+    if global_cluster.ranks() != n_stages * tp_size {
+        bail!(
+            "global_cluster.ranks()={} != pp_size*tp_size={}",
+            global_cluster.ranks(),
+            n_stages * tp_size
+        );
+    }
+
+    let world = tp_size as u32;
+    if world != 1 && world != 2 && world != 4 {
+        bail!("hybrid: per-stage tp_size ∈ {{1, 2, 4}} (got {world})");
+    }
+
+    let head_stage_idx = scratch.head_stage as usize;
+    if head_stage_idx + 1 != n_stages {
+        bail!(
+            "hybrid: head_stage={head_stage_idx} but expected last stage = {}",
+            n_stages - 1
+        );
+    }
+
+    // ── Stage 0: embed ───────────────────────────────────────────────
+    {
+        let stage = &model.stages[0];
+        if !stage.tp_model.has_token_embd {
+            bail!("hybrid stage 0 is missing token_embd; loader bug");
+        }
+        let stage_scratch = &mut scratch.per_stage[0];
+        for r in 0..stage.sub_cluster.ranks() {
+            let device = stage.sub_cluster.device(r);
+            device.bind()?;
+            let stream = device.default_stream();
+            forward_embed_decode_host(
+                device,
+                stream,
+                &stage.tp_model.shards[r].token_embd,
+                token_id,
+                stage_scratch.per_rank[r].hidden_a,
+                cfg.hidden_size,
+            )
+            .with_context(|| format!("hybrid stage 0 rank {r} embed"))?;
+        }
+    }
+
+    // ── Per-stage layer loops + hand-offs ────────────────────────────
+    for s in 0..n_stages {
+        let stage = &model.stages[s];
+        let stage_scratch = &mut scratch.per_stage[s];
+        let stage_session = &mut session.stages[s];
+        let stage_ar = &stage_ars[s];
+
+        // Sanity: stage_session range must equal stage range. The
+        // session was built from the same model, so this should be
+        // tautological — guard against accidental mis-pairing anyway.
+        if stage_session.layer_range != stage.layer_range {
+            bail!(
+                "hybrid: session stage {s} range {:?} != model range {:?}",
+                stage_session.layer_range,
+                stage.layer_range
+            );
+        }
+
+        // Layer loop. `il` is absolute (used to look up weight tensors
+        // in `stage.tp_model.shards[r].layers[il]`); cache index is
+        // `il - layer_range.start` (each stage's session allocated
+        // exactly its slice of caches).
+        let range_start = stage.layer_range.start;
+        for il in stage.layer_range.clone() {
+            let il_cache = il - range_start;
+            let is_full_attn = !cfg.is_recurrent(il);
+            if is_full_attn {
+                forward_full_attn_layer_tp(
+                    &stage.tp_model,
+                    stage_scratch,
+                    &stage.sub_cluster,
+                    stage_ar,
+                    &mut stage_session.caches,
+                    il,
+                    il_cache,
+                    position,
+                    world,
+                )
+                .with_context(|| format!("hybrid stage {s} full-attn layer {il}"))?;
+            } else {
+                forward_gdn_layer_tp(
+                    &stage.tp_model,
+                    stage_scratch,
+                    &stage.sub_cluster,
+                    stage_ar,
+                    &mut stage_session.caches,
+                    il,
+                    il_cache,
+                    world,
+                )
+                .with_context(|| format!("hybrid stage {s} gdn layer {il}"))?;
+            }
+        }
+
+        // Hand-off: stage s+1's per-rank `hidden_a` ← stage s's rank-0
+        // `hidden_a`. We do `tp_size_next` peer_copy_via_host calls,
+        // each on the **global** cluster (which spans all ranks).
+        if s + 1 < n_stages {
+            // Sync the producer's stream so the source `hidden_a` is
+            // fully written before we DtoH.
+            let prod_dev = model.stages[s].sub_cluster.device(0);
+            prod_dev.bind()?;
+            prod_dev.default_stream().synchronize()?;
+
+            let src_global_rank = s * tp_size; // stage s, local rank 0
+            let src_ptr = scratch.per_stage[s].per_rank[0].hidden_a;
+            let bytes = cfg.hidden_size * 2; // F16
+
+            for dst_local in 0..tp_size {
+                let dst_global_rank = (s + 1) * tp_size + dst_local;
+                let dst_ptr = scratch.per_stage[s + 1].per_rank[dst_local].hidden_a;
+                // SAFETY: `src_ptr` is `cfg.hidden_size * 2` bytes on
+                // `src_global_rank`'s device (allocated by
+                // ShardedForwardOneTokenScratchTp::new for stage s);
+                // `dst_ptr` is the same size on `dst_global_rank`'s
+                // device (allocated for stage s+1). Both ranks belong
+                // to `global_cluster`. No other stream is concurrently
+                // writing either region — the producer sync above
+                // covers the source, and the destinations are about
+                // to be (re-)written by the next stage's first
+                // forward kernel.
+                unsafe {
+                    global_cluster
+                        .peer_copy_via_host(
+                            dst_ptr,
+                            dst_global_rank,
+                            src_ptr,
+                            src_global_rank,
+                            bytes,
+                        )
+                        .with_context(|| {
+                            format!(
+                                "hybrid stage {s} → {} hand-off (rank {src_global_rank} \
+                                 → {dst_global_rank}, {bytes} B)",
+                                s + 1
+                            )
+                        })?;
+                }
+            }
+        }
+    }
+
+    // ── Last stage: output head + argmax / logits download ───────────
+    let last = &model.stages[head_stage_idx];
+    if !last.tp_model.has_output_head {
+        bail!("hybrid last stage is missing output head; loader bug");
+    }
+    let last_scratch = &mut scratch.per_stage[head_stage_idx];
+    let head_rank = last_scratch.head_rank.0 as usize;
+    let device = last.sub_cluster.device(head_rank);
+    device.bind()?;
+    let stream = device.default_stream();
+    let head_shard = &last.tp_model.shards[head_rank];
+    let lm_head = head_shard.output.as_ref().unwrap_or(&head_shard.token_embd);
+    let hidden_a = last_scratch.per_rank[head_rank].hidden_a;
+    let head_scratch = last_scratch.per_rank[head_rank]
+        .output_head
+        .as_mut()
+        .ok_or_else(|| {
+            anyhow!("hybrid: head_rank={head_rank} on last stage missing OutputHeadScratch")
+        })?;
+    let logits_f32 = head_scratch.logits_f32;
+    let ops = &last.tp_model.ops[head_rank];
+    forward_output_head_decode(
+        ops,
+        stream,
+        cfg,
+        &head_shard.output_norm,
+        lm_head,
+        head_scratch,
+        hidden_a,
+    )
+    .context("hybrid forward_output_head_decode")?;
+
+    if let Some(out) = logits_out {
+        out.clear();
+        out.resize(cfg.vocab_size, 0.0f32);
+        // SAFETY: logits_f32 is valid for cfg.vocab_size F32 values on
+        // `device`; out.as_mut_ptr() is host memory of matching size.
+        unsafe {
+            <flambeau_backend_hip::HipDevice as flambeau_core::Device>::memcpy_async(
+                device,
+                stream,
+                flambeau_core::CopyDirection::DeviceToHost,
+                flambeau_core::DevicePtr(out.as_mut_ptr() as usize),
+                logits_f32,
+                cfg.vocab_size * 4,
+            )?;
+        }
+        flambeau_core::Stream::synchronize(stream)?;
+        Ok(0)
+    } else {
+        let token = argmax_token_host(device, stream, logits_f32, cfg.vocab_size)
+            .context("hybrid argmax_token_host")?;
+        Ok(token)
+    }
+}

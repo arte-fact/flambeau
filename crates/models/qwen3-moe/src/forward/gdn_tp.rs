@@ -53,17 +53,25 @@ use flambeau_ops::hip::{
     cast::cast_f32_to_f16,
     conv::causal_conv1d_f32,
     mlp::{scale_f32, silu_f32, swiglu_f32},
-    norm::{l2_norm_f32, quantize_q8_1, rmsnorm_f32, rmsnorm_quant_q8_1},
+    norm::{
+        l2_norm_f32, quantize_f16_q8_1, quantize_f16_q8_1_mmq, quantize_q8_1, quantize_q8_1_mmq,
+        rmsnorm_f16, rmsnorm_f32, rmsnorm_quant_q8_1,
+    },
     qmatmul::{
         mmvq_q4_0_gate_up, mmvq_q4_0_gate_up_t128, mmvq_q4_0_gate_up_warpcoop64,
         mmvq_q5_k_r2_f16dst, mmvq_q8_0_gate_up,
     },
-    recurrent::{gdn_alpha_beta_f32, gdn_state_step_f32_s128},
+    recurrent::{
+        gdn_alpha_beta_f32, gdn_split_qkv_f32, gdn_state_step_alphabeta_f32_s128,
+        gdn_state_step_f32_s128,
+    },
     HipDevice, HipStream, OpsRegistry,
 };
 
-use super::common::{mat_shape, run_mmvq_from_tensor};
-use super::gdn::GdnScratch;
+use super::common::{mat_shape, run_mmvq_from_tensor, run_qmatmul_from_tensor};
+use super::gdn::{
+    assemble_conv_input_prefill, shift_conv_history_prefill, GdnPrefillScratch, GdnScratch,
+};
 use crate::config::Qwen3MoEConfig;
 use crate::session::GdnLayerState;
 use crate::weights::DeviceTensor;
@@ -457,41 +465,63 @@ pub fn forward_gdn_decode_tp(
     )
     .context("scale_f32 Q (TP)")?;
 
-    // 11. Per-rank α/β/gate compute. ssm_dt_bias and ssm_a are 1-D
-    //     ColParallel (per-v-head). The fused kernel is parameterised
-    //     by num_v_heads — pass local_num_v_heads.
-    gdn_alpha_beta_f32(
-        ops,
-        stream,
-        scratch.alpha_f32,
-        scratch.beta_f32,
-        ssm_dt_bias.ptr,
-        ssm_a.ptr,
-        scratch.gate_device,
-        scratch.beta_device,
-        local_num_v_heads,
-        /* n_tokens = */ 1,
-    )
-    .context("gdn_alpha_beta_f32 fused (TP)")?;
-
-    // 12. GDN state step — operates on per-rank head subset.
-    gdn_state_step_f32_s128(
-        ops,
-        stream,
-        scratch.q_norm_f32,
-        scratch.k_norm_f32,
-        v_src,
-        scratch.gate_device,
-        scratch.beta_device,
-        layer_state.state,
-        layer_state.state, // state_in/out alias — kernel handles
-        scratch.state_out,
-        1, // B = 1
-        local_num_v_heads,
-        1, // L = 1 (decode)
-        n_rep,
-    )
-    .context("gdn_state_step_f32_s128 (TP)")?;
+    // 11–12. C10 — per-rank fused state-step (default-on; baseline
+    // chain via FLAMBEAU_VARIANT=baseline). ssm_dt_bias / ssm_a are
+    // 1-D ColParallel — the local slice is the right per-rank head
+    // subset. Operates on local_num_v_heads.
+    let fuse_state_step = std::env::var("FLAMBEAU_VARIANT").as_deref() != Ok("baseline");
+    if fuse_state_step {
+        gdn_state_step_alphabeta_f32_s128(
+            ops,
+            stream,
+            scratch.q_norm_f32,
+            scratch.k_norm_f32,
+            v_src,
+            scratch.alpha_f32,
+            scratch.beta_f32,
+            ssm_dt_bias.ptr,
+            ssm_a.ptr,
+            layer_state.state,
+            layer_state.state,
+            scratch.state_out,
+            1,
+            local_num_v_heads,
+            1,
+            n_rep,
+        )
+        .context("gdn_state_step_alphabeta_f32_s128 (TP, C10 fused)")?;
+    } else {
+        gdn_alpha_beta_f32(
+            ops,
+            stream,
+            scratch.alpha_f32,
+            scratch.beta_f32,
+            ssm_dt_bias.ptr,
+            ssm_a.ptr,
+            scratch.gate_device,
+            scratch.beta_device,
+            local_num_v_heads,
+            /* n_tokens = */ 1,
+        )
+        .context("gdn_alpha_beta_f32 fused (TP)")?;
+        gdn_state_step_f32_s128(
+            ops,
+            stream,
+            scratch.q_norm_f32,
+            scratch.k_norm_f32,
+            v_src,
+            scratch.gate_device,
+            scratch.beta_device,
+            layer_state.state,
+            layer_state.state,
+            scratch.state_out,
+            1,
+            local_num_v_heads,
+            1,
+            n_rep,
+        )
+        .context("gdn_state_step_f32_s128 (TP, baseline)")?;
+    }
 
     // 13. ssm_norm per-(local) head on the state-step output.
     let ssm_norm_k = ssm_norm
@@ -715,6 +745,406 @@ fn debug_probe_f16(
     eprintln!(
         "    F16 {label:30}  n={n:>5}  nan={nan:>5}  zero={zero:>5}  min={min:.4}  max={max:.4}  mean={mean:.4}"
     );
+    Ok(())
+}
+
+/// **AUTO-6c1** — L-batched per-rank GDN prefill.
+///
+/// Sister of [`forward_gdn_decode_tp`] (M=L instead of M=1) and
+/// [`super::gdn::forward_gdn_prefill`] (TP-sliced weights instead of
+/// PP-full). Same 17-op chain — every kernel call is the L-aware variant
+/// and every dim is the per-rank `local_*` count.
+///
+/// Output is `partial_attn_out[L, hidden]`: this rank's contribution to
+/// the AllReduce sum, written at hidden-stride. The caller schedules
+/// `ar_residual_prefill` immediately after to fold the per-rank partials
+/// into the residual.
+///
+/// State management: `layer_state.state` and `layer_state.conv_history`
+/// are read/written in place; the kernels touch only the leading
+/// `local_num_v_heads` slabs (PP-allocation is over-allocated for TP, see
+/// the gdn_tp.rs preamble).
+///
+/// `n_tokens` must be ≤ `scratch.max_tokens`; caller chunks larger
+/// prompts.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "matches forward_gdn_decode_tp + forward_gdn_prefill arg shapes"
+)]
+pub fn forward_gdn_prefill_tp(
+    ops: &OpsRegistry,
+    stream: &HipStream,
+    device: &HipDevice,
+    cfg: &Qwen3MoEConfig,
+    attn_norm: &DeviceTensor,
+    attn_qkv: &DeviceTensor,
+    attn_gate: &DeviceTensor,
+    ssm_alpha: &DeviceTensor,
+    ssm_beta: &DeviceTensor,
+    ssm_a: &DeviceTensor,
+    ssm_dt_bias: &DeviceTensor,
+    ssm_conv1d: &DeviceTensor,
+    ssm_norm: &DeviceTensor,
+    ssm_out: &DeviceTensor,
+    layer_state: &mut GdnLayerState,
+    scratch: &mut GdnPrefillScratch,
+    x_in: DevicePtr,
+    partial_attn_out: DevicePtr,
+    n_tokens: usize,
+    tp_world: u32,
+) -> Result<()> {
+    if tp_world == 0 {
+        bail!("tp_world must be >= 1");
+    }
+    if n_tokens == 0 {
+        bail!("forward_gdn_prefill_tp called with n_tokens = 0");
+    }
+    if n_tokens > scratch.max_tokens {
+        bail!(
+            "forward_gdn_prefill_tp: n_tokens={n_tokens} > scratch.max_tokens={}; caller must chunk",
+            scratch.max_tokens
+        );
+    }
+    let world = tp_world as usize;
+    let gdn = cfg.gdn.as_ref().context("forward_gdn_prefill_tp requires cfg.gdn")?;
+    let hidden = cfg.hidden_size;
+    let d_inner = gdn.d_inner;
+    let num_v_heads = gdn.num_v_heads;
+    let num_k_heads = gdn.num_k_heads;
+    let head_k_dim = gdn.head_k_dim;
+    let head_v_dim = gdn.head_v_dim();
+    let conv_kernel = gdn.conv_kernel;
+    if num_v_heads % world != 0 {
+        bail!("num_v_heads {num_v_heads} not divisible by tp_world {tp_world}");
+    }
+    if num_k_heads % world != 0 {
+        bail!("num_k_heads {num_k_heads} not divisible by tp_world {tp_world}");
+    }
+    if d_inner % world != 0 {
+        bail!("d_inner {d_inner} not divisible by tp_world {tp_world}");
+    }
+    let local_num_v_heads = num_v_heads / world;
+    let local_num_k_heads = num_k_heads / world;
+    let local_d_inner = d_inner / world;
+    let local_qk_size = local_num_k_heads * head_k_dim;
+    let local_v_size = local_num_v_heads * head_v_dim;
+    let local_conv_channels = local_d_inner + 2 * local_qk_size;
+    if local_v_size != local_d_inner {
+        bail!(
+            "GDN per-rank dim bug: local_v_size {local_v_size} != local_d_inner {local_d_inner}"
+        );
+    }
+    let n_rep = num_v_heads / num_k_heads;
+
+    // 1. rmsnorm + dual Q8_1 quantise (std + DS4 MMQ layouts).
+    rmsnorm_f16(
+        ops,
+        stream,
+        x_in,
+        attn_norm.ptr,
+        scratch.x_norm_f16,
+        n_tokens,
+        hidden,
+        cfg.rms_norm_eps,
+    )
+    .context("gdn prefill (TP) attn_norm")?;
+    quantize_f16_q8_1(
+        ops,
+        stream,
+        scratch.x_norm_f16,
+        scratch.x_q8_1,
+        n_tokens * hidden,
+    )
+    .context("gdn prefill (TP) x_norm → Q8_1 (std)")?;
+    quantize_f16_q8_1_mmq(
+        ops,
+        stream,
+        scratch.x_norm_f16,
+        scratch.x_q8_1_mmq,
+        hidden,
+        n_tokens,
+    )
+    .context("gdn prefill (TP) x_norm → Q8_1 (MMQ DS4)")?;
+
+    // 2..5. Per-rank projections at M = L. attn_qkv → [L, local_conv_channels],
+    //       attn_gate → [L, local_d_inner], ssm_alpha/beta → [L, local_num_v_heads].
+    run_qmatmul_from_tensor(
+        ops,
+        stream,
+        attn_qkv,
+        scratch.x_q8_1,
+        scratch.x_q8_1_mmq,
+        scratch.qkv_mixed_f32,
+        n_tokens,
+        hidden,
+        local_conv_channels,
+        "attn_qkv (TP)",
+    )?;
+    run_qmatmul_from_tensor(
+        ops,
+        stream,
+        attn_gate,
+        scratch.x_q8_1,
+        scratch.x_q8_1_mmq,
+        scratch.z_f32,
+        n_tokens,
+        hidden,
+        local_d_inner,
+        "attn_gate (TP)",
+    )?;
+    run_qmatmul_from_tensor(
+        ops,
+        stream,
+        ssm_alpha,
+        scratch.x_q8_1,
+        scratch.x_q8_1_mmq,
+        scratch.alpha_f32,
+        n_tokens,
+        hidden,
+        local_num_v_heads,
+        "ssm_alpha (TP)",
+    )?;
+    run_qmatmul_from_tensor(
+        ops,
+        stream,
+        ssm_beta,
+        scratch.x_q8_1,
+        scratch.x_q8_1_mmq,
+        scratch.beta_f32,
+        n_tokens,
+        hidden,
+        local_num_v_heads,
+        "ssm_beta (TP)",
+    )?;
+
+    // 6. Conv1d step over L tokens. All buffers are at local-stride layout
+    //    (PP-allocated rows are wider but kernels only touch the leading
+    //    local_conv_channels floats per row).
+    assemble_conv_input_prefill(
+        device,
+        stream,
+        layer_state.conv_history,
+        scratch.qkv_mixed_f32,
+        scratch.conv_input,
+        n_tokens,
+        local_conv_channels,
+        conv_kernel,
+    )?;
+    causal_conv1d_f32(
+        ops,
+        stream,
+        scratch.conv_input,
+        ssm_conv1d.ptr,
+        scratch.conv_out,
+        n_tokens,
+        local_conv_channels,
+        conv_kernel,
+    )
+    .context("gdn prefill (TP) causal_conv1d_f32")?;
+    shift_conv_history_prefill(
+        device,
+        stream,
+        scratch.conv_input,
+        layer_state.conv_history,
+        n_tokens,
+        local_conv_channels,
+        conv_kernel,
+    )?;
+
+    // 7. silu(conv_out) over [L, local_conv_channels].
+    silu_f32(
+        ops,
+        stream,
+        scratch.conv_out,
+        scratch.silu_out,
+        n_tokens * local_conv_channels,
+    )
+    .context("gdn prefill (TP) silu_f32(conv_out)")?;
+
+    // 8. Split silu_out into Q | K | V at local sizes.
+    gdn_split_qkv_f32(
+        ops,
+        stream,
+        scratch.silu_out,
+        scratch.q_norm_f32,
+        scratch.k_norm_f32,
+        scratch.v_f32,
+        n_tokens,
+        local_qk_size,
+        local_v_size,
+    )
+    .context("gdn prefill (TP) gdn_split_qkv_f32")?;
+
+    // 9. L2-normalise Q and K per (local) head.
+    l2_norm_f32(
+        ops,
+        stream,
+        scratch.q_norm_f32,
+        scratch.q_norm_f32,
+        n_tokens * local_num_k_heads,
+        head_k_dim,
+        cfg.rms_norm_eps,
+    )
+    .context("gdn prefill (TP) l2_norm Q")?;
+    l2_norm_f32(
+        ops,
+        stream,
+        scratch.k_norm_f32,
+        scratch.k_norm_f32,
+        n_tokens * local_num_k_heads,
+        head_k_dim,
+        cfg.rms_norm_eps,
+    )
+    .context("gdn prefill (TP) l2_norm K")?;
+
+    // 10. Scale Q by 1/sqrt(head_k_dim).
+    let q_scale = 1.0f32 / (head_k_dim as f32).sqrt();
+    scale_f32(
+        ops,
+        stream,
+        scratch.q_norm_f32,
+        scratch.q_norm_f32,
+        n_tokens * local_qk_size,
+        q_scale,
+    )
+    .context("gdn prefill (TP) scale_f32 Q")?;
+
+    // 11–12. C10 fused state-step (default) absorbs α/β/gate; baseline
+    //        chain via FLAMBEAU_VARIANT=baseline. All operands at per-rank
+    //        local_num_v_heads; n_tokens = L. Same kernel as decode_tp,
+    //        just with n_tokens > 1.
+    let fuse_state_step =
+        std::env::var("FLAMBEAU_VARIANT").as_deref() != Ok("baseline");
+    if fuse_state_step {
+        gdn_state_step_alphabeta_f32_s128(
+            ops,
+            stream,
+            scratch.q_norm_f32,
+            scratch.k_norm_f32,
+            scratch.v_f32,
+            scratch.alpha_f32,
+            scratch.beta_f32,
+            ssm_dt_bias.ptr,
+            ssm_a.ptr,
+            layer_state.state,
+            layer_state.state,
+            scratch.state_out,
+            1,
+            local_num_v_heads,
+            n_tokens,
+            n_rep,
+        )
+        .context("gdn prefill (TP) gdn_state_step_alphabeta_f32_s128 (C10 fused)")?;
+    } else {
+        gdn_alpha_beta_f32(
+            ops,
+            stream,
+            scratch.alpha_f32,
+            scratch.beta_f32,
+            ssm_dt_bias.ptr,
+            ssm_a.ptr,
+            scratch.gate_device,
+            scratch.beta_device,
+            local_num_v_heads,
+            n_tokens,
+        )
+        .context("gdn prefill (TP) gdn_alpha_beta_f32 (batched)")?;
+        gdn_state_step_f32_s128(
+            ops,
+            stream,
+            scratch.q_norm_f32,
+            scratch.k_norm_f32,
+            scratch.v_f32,
+            scratch.gate_device,
+            scratch.beta_device,
+            layer_state.state,
+            layer_state.state,
+            scratch.state_out,
+            1,
+            local_num_v_heads,
+            n_tokens,
+            n_rep,
+        )
+        .context("gdn prefill (TP) gdn_state_step_f32_s128 (baseline)")?;
+    }
+
+    // 13. ssm_norm per-(local) head over [L, local_num_v_heads, head_v_dim].
+    let ssm_norm_k = ssm_norm
+        .dims
+        .first()
+        .copied()
+        .context("ssm_norm missing dim")? as usize;
+    if ssm_norm_k != head_v_dim {
+        bail!("ssm_norm dim {ssm_norm_k} != head_v_dim {head_v_dim}");
+    }
+    rmsnorm_f32(
+        ops,
+        stream,
+        scratch.state_out,
+        ssm_norm.ptr,
+        scratch.out_normed,
+        n_tokens * local_num_v_heads,
+        head_v_dim,
+        cfg.rms_norm_eps,
+    )
+    .context("gdn prefill (TP) ssm_norm (rmsnorm_f32)")?;
+
+    // 14. gated = silu(z) * out_normed across [L, local_d_inner].
+    swiglu_f32(
+        ops,
+        stream,
+        scratch.z_f32,
+        scratch.out_normed,
+        scratch.gated_f32,
+        n_tokens * local_d_inner,
+    )
+    .context("gdn prefill (TP) swiglu_f32(z, out_normed)")?;
+
+    // 15. Quantise gated → both Q8_1 layouts for ssm_out matmul.
+    quantize_q8_1(
+        ops,
+        stream,
+        scratch.gated_f32,
+        scratch.gated_q8_1,
+        n_tokens * local_d_inner,
+    )
+    .context("gdn prefill (TP) quantise gated → Q8_1 (std)")?;
+    quantize_q8_1_mmq(
+        ops,
+        stream,
+        scratch.gated_f32,
+        scratch.gated_q8_1_mmq,
+        local_d_inner,
+        n_tokens,
+    )
+    .context("gdn prefill (TP) quantise gated → Q8_1 (MMQ DS4)")?;
+
+    // 16. Row-parallel ssm_out projection: weight [hidden, local_d_inner]
+    //     × gated_q8_1[L, local_d_inner] → ssm_out_f32[L, hidden]. Each
+    //     rank emits a partial sum; AR after this layer folds them.
+    run_qmatmul_from_tensor(
+        ops,
+        stream,
+        ssm_out,
+        scratch.gated_q8_1,
+        scratch.gated_q8_1_mmq,
+        scratch.ssm_out_f32,
+        n_tokens,
+        local_d_inner,
+        hidden,
+        "ssm_out (TP)",
+    )?;
+
+    // 17. Cast back to F16 → partial_attn_out[L, hidden].
+    cast_f32_to_f16(
+        ops,
+        stream,
+        scratch.ssm_out_f32,
+        partial_attn_out,
+        n_tokens * hidden,
+    )
+    .context("gdn prefill (TP) cast ssm_out → f16")?;
+
     Ok(())
 }
 

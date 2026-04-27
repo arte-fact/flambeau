@@ -1,0 +1,272 @@
+{
+  "model_tag": "Qwen3.5-9B-Q4_1",
+  "rig_notes": "4× MI50 PCIe 3.0 x16, 100 W cap, ROCm 7.1.1; tp4 omitted (rig {2,3} BAR1 fault per project_rig_gpu23_link_fault). Hybrid pp2tp2 uses devices 0,2,1,3 to keep {2,3} out of any TP group.",
+  "topologies": [
+    {
+      "tag": "mesh1",
+      "mesh_mode": "pp",
+      "pp_size": 1,
+      "tp_size": 1,
+      "devices": [
+        0
+      ],
+      "load_secs": 1.910107089,
+      "runs": [
+        {
+          "phase": "prefill",
+          "n_tokens": 8,
+          "wall_secs": 0.118625089,
+          "tok_per_sec": 67.43935930787795
+        },
+        {
+          "phase": "prefill",
+          "n_tokens": 64,
+          "wall_secs": 0.983598883,
+          "tok_per_sec": 65.06717433919655
+        },
+        {
+          "phase": "prefill",
+          "n_tokens": 128,
+          "wall_secs": 0.251308883,
+          "tok_per_sec": 509.3333688487247
+        },
+        {
+          "phase": "prefill",
+          "n_tokens": 512,
+          "wall_secs": 0.81622847,
+          "tok_per_sec": 627.2753509810801
+        },
+        {
+          "phase": "decode",
+          "n_tokens": 64,
+          "wall_secs": 1.283381728,
+          "tok_per_sec": 49.86824933197117
+        }
+      ]
+    },
+    {
+      "tag": "pp2",
+      "mesh_mode": "pp",
+      "pp_size": 2,
+      "tp_size": 1,
+      "devices": [
+        0,
+        1
+      ],
+      "load_secs": 1.822495177,
+      "runs": [
+        {
+          "phase": "prefill",
+          "n_tokens": 8,
+          "wall_secs": 0.109094817,
+          "tok_per_sec": 73.33070644410174
+        },
+        {
+          "phase": "prefill",
+          "n_tokens": 64,
+          "wall_secs": 0.965931452,
+          "tok_per_sec": 66.25728965288937
+        },
+        {
+          "phase": "prefill",
+          "n_tokens": 128,
+          "wall_secs": 0.248222654,
+          "tok_per_sec": 515.6660680938494
+        },
+        {
+          "phase": "prefill",
+          "n_tokens": 512,
+          "wall_secs": 0.805884241,
+          "tok_per_sec": 635.3269786795595
+        },
+        {
+          "phase": "decode",
+          "n_tokens": 64,
+          "wall_secs": 1.081063634,
+          "tok_per_sec": 59.20095541757906
+        }
+      ]
+    },
+    {
+      "tag": "tp2",
+      "mesh_mode": "tp",
+      "pp_size": 1,
+      "tp_size": 2,
+      "devices": [
+        0,
+        1
+      ],
+      "load_secs": 2.129989472,
+      "runs": [
+        {
+          "phase": "prefill",
+          "n_tokens": 8,
+          "wall_secs": 0.108101379,
+          "tok_per_sec": 74.0046063612195
+        },
+        {
+          "phase": "prefill_batched",
+          "n_tokens": 8,
+          "wall_secs": 0.064947573,
+          "tok_per_sec": 123.1762732689026
+        },
+        {
+          "phase": "prefill",
+          "n_tokens": 64,
+          "wall_secs": 0.912248465,
+          "tok_per_sec": 70.15632522878512
+        },
+        {
+          "phase": "prefill_batched",
+          "n_tokens": 64,
+          "wall_secs": 0.534863534,
+          "tok_per_sec": 119.6566898501628
+        },
+        {
+          "phase": "prefill",
+          "n_tokens": 128,
+          "wall_secs": 1.869771674,
+          "tok_per_sec": 68.45755649200193
+        },
+        {
+          "phase": "prefill_batched",
+          "n_tokens": 128,
+          "wall_secs": 0.174582159,
+          "tok_per_sec": 733.1791560671444
+        },
+        {
+          "phase": "prefill",
+          "n_tokens": 512,
+          "wall_secs": 8.35569278,
+          "tok_per_sec": 61.275589407201736
+        },
+        {
+          "phase": "prefill_batched",
+          "n_tokens": 512,
+          "wall_secs": 0.53856366,
+          "tok_per_sec": 950.6768429195538
+        },
+        {
+          "phase": "decode",
+          "n_tokens": 64,
+          "wall_secs": 0.927746442,
+          "tok_per_sec": 68.98436588129755
+        }
+      ]
+    },
+    {
+      "tag": "pp4",
+      "mesh_mode": "pp",
+      "pp_size": 4,
+      "tp_size": 1,
+      "devices": [
+        0,
+        1,
+        2,
+        3
+      ],
+      "load_secs": 1.957395011,
+      "runs": [
+        {
+          "phase": "prefill",
+          "n_tokens": 8,
+          "wall_secs": 0.095715401,
+          "tok_per_sec": 83.58111564511964
+        },
+        {
+          "phase": "prefill",
+          "n_tokens": 64,
+          "wall_secs": 0.938822233,
+          "tok_per_sec": 68.17052020113375
+        },
+        {
+          "phase": "prefill",
+          "n_tokens": 128,
+          "wall_secs": 0.244906048,
+          "tok_per_sec": 522.6494039052886
+        },
+        {
+          "phase": "prefill",
+          "n_tokens": 512,
+          "wall_secs": 0.813584512,
+          "tok_per_sec": 629.3138480984259
+        },
+        {
+          "phase": "decode",
+          "n_tokens": 64,
+          "wall_secs": 1.147045107,
+          "tok_per_sec": 55.79553899792713
+        }
+      ]
+    },
+    {
+      "tag": "pp2tp2",
+      "mesh_mode": "pp+tp",
+      "pp_size": 2,
+      "tp_size": 2,
+      "devices": [
+        0,
+        2,
+        1,
+        3
+      ],
+      "load_secs": 3.112850678,
+      "runs": [
+        {
+          "phase": "prefill",
+          "n_tokens": 8,
+          "wall_secs": 0.113068013,
+          "tok_per_sec": 70.75387448437783
+        },
+        {
+          "phase": "prefill_batched",
+          "n_tokens": 8,
+          "wall_secs": 0.064178534,
+          "tok_per_sec": 124.65227080444063
+        },
+        {
+          "phase": "prefill",
+          "n_tokens": 64,
+          "wall_secs": 0.925057234,
+          "tok_per_sec": 69.18490840102982
+        },
+        {
+          "phase": "prefill_batched",
+          "n_tokens": 64,
+          "wall_secs": 0.522472606,
+          "tok_per_sec": 122.49446050382974
+        },
+        {
+          "phase": "prefill",
+          "n_tokens": 128,
+          "wall_secs": 1.906579405,
+          "tok_per_sec": 67.13593971712918
+        },
+        {
+          "phase": "prefill_batched",
+          "n_tokens": 128,
+          "wall_secs": 0.18124358,
+          "tok_per_sec": 706.2319117730957
+        },
+        {
+          "phase": "prefill",
+          "n_tokens": 512,
+          "wall_secs": 8.82563875,
+          "tok_per_sec": 58.01279822381128
+        },
+        {
+          "phase": "prefill_batched",
+          "n_tokens": 512,
+          "wall_secs": 0.556526672,
+          "tok_per_sec": 919.9918454222802
+        },
+        {
+          "phase": "decode",
+          "n_tokens": 64,
+          "wall_secs": 0.941364783,
+          "tok_per_sec": 67.98639714993459
+        }
+      ]
+    }
+  ]
+}

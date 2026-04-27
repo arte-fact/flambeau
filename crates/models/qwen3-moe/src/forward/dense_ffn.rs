@@ -17,7 +17,7 @@ use anyhow::{Context, Result};
 use flambeau_core::{Device, DevicePtr};
 use flambeau_ops::hip::{
     cast::cast_f32_to_f16,
-    mlp::{add_f16, swiglu_f32},
+    mlp::add_f16,
     norm::{quantize_f16_q8_1, quantize_f16_q8_1_mmq},
     qmatmul::{mmvq_q8_0_gate_up, qmatmul},
     HipDevice, HipStream, OpsRegistry,

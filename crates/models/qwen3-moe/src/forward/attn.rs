@@ -9,11 +9,10 @@
 
 use anyhow::{bail, Context, Result};
 use flambeau_backend_hip::{kv_cache_append_hip_slot, MemcpySlot, ScalarSlot};
-use flambeau_core::{CopyDirection, Device, DevicePtr, Stream};
+use flambeau_core::{CopyDirection, Device, DevicePtr};
 use flambeau_ops::hip::{
     attention::{
-        attention_decode_f16, attention_decode_f16_slots, attention_prefill_f16,
-        attention_prefill_f16_slots, split_q_gate_f16,
+        attention_decode_f16_slots, attention_prefill_f16_slots, split_q_gate_f16,
     },
     cast::cast_f32_to_f16,
     mlp::sigmoid_mul_f16,
@@ -25,7 +24,7 @@ use flambeau_ops::hip::{
 use flambeau_quant::BlockQ8_1;
 use flambeau_runtime::KvCache;
 
-use super::common::{mat_shape, qdtype_of, upload_position};
+use super::common::{mat_shape, qdtype_of};
 use crate::config::Qwen3MoEConfig;
 use crate::session::LayerCache;
 use crate::weights::{DenseAttnWeights, DeviceTensor, FullAttnWeights};
@@ -824,7 +823,7 @@ impl Drop for FullAttnPrefillScratch {
 /// ordered in-stream with any subsequent RoPE launch, and the host
 /// storage (`positions_host`) outlives both the copy and the stream
 /// work that reads the device target.
-fn upload_positions_range(
+pub(crate) fn upload_positions_range(
     device: &HipDevice,
     stream: &HipStream,
     scratch: &mut FullAttnPrefillScratch,

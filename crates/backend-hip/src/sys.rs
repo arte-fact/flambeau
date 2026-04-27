@@ -242,6 +242,7 @@ pub type hipEvent_t = *mut c_void;
 
 // Flag passed to hipEventCreateWithFlags for a latency-optimised event
 // (no timing — we only use events for dependency tracking, not profiling).
+#[allow(non_upper_case_globals, reason = "verbatim FFI binding name from HIP runtime headers")]
 pub const hipEventDisableTiming: c_uint = 0x2;
 
 /// `hipHostMalloc` flag bits from `hip_runtime_api.h`. Use `Portable` to

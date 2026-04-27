@@ -1,0 +1,82 @@
+{
+  "model_tag": "qwen36_35b_a3b_ud_q8_k_xl",
+  "gguf_path": "/artefact/models/Qwen3.6-35B-A3B-UD-Q8_K_XL.gguf",
+  "rig_notes": "4× MI50 PCIe 3.0 x16, 100 W cap, ROCm 7.1.1; tp4 omitted (rig {2,3} BAR1 fault per project_rig_gpu23_link_fault). Hybrid pp2tp2 uses devices 0,2,1,3 to keep {2,3} out of any TP group.",
+  "prefill_lengths": [
+    8,
+    32,
+    128,
+    512,
+    2048
+  ],
+  "decode_lengths": [
+    16,
+    64,
+    256
+  ],
+  "topologies": [
+    {
+      "tag": "pp4",
+      "mesh_mode": "pp",
+      "pp_size": 4,
+      "tp_size": 1,
+      "devices": [
+        0,
+        1,
+        2,
+        3
+      ],
+      "load_secs": 50.602501511,
+      "runs": [
+        {
+          "phase": "prefill",
+          "n_tokens": 8,
+          "wall_secs": 0.101951972,
+          "tok_per_sec": 78.46832035774649
+        },
+        {
+          "phase": "prefill",
+          "n_tokens": 32,
+          "wall_secs": 0.333071653,
+          "tok_per_sec": 96.07542314626215
+        },
+        {
+          "phase": "prefill",
+          "n_tokens": 128,
+          "wall_secs": 0.241847652,
+          "tok_per_sec": 529.2588079374862
+        },
+        {
+          "phase": "prefill",
+          "n_tokens": 512,
+          "wall_secs": 0.785686436,
+          "tok_per_sec": 651.6594617652277
+        },
+        {
+          "phase": "prefill",
+          "n_tokens": 2048,
+          "wall_secs": 3.165168572,
+          "tok_per_sec": 647.0429468171783
+        },
+        {
+          "phase": "decode",
+          "n_tokens": 16,
+          "wall_secs": 0.261449817,
+          "tok_per_sec": 61.19721246544228
+        },
+        {
+          "phase": "decode",
+          "n_tokens": 64,
+          "wall_secs": 1.073752418,
+          "tok_per_sec": 59.60405669605672
+        },
+        {
+          "phase": "decode",
+          "n_tokens": 256,
+          "wall_secs": 4.620165017,
+          "tok_per_sec": 55.4092763046433
+        }
+      ]
+    }
+  ]
+}

@@ -12,12 +12,14 @@
 use anyhow::{bail, Context, Result};
 use flambeau_backend_hip::{BarP2pAllReduce, HipCluster};
 use flambeau_qwen3_moe::forward::{
-    forward_one_token_pp_logits, forward_one_token_tp_logits, forward_prefill_pp_logits,
-    ShardedForwardOneTokenScratch, ShardedForwardOneTokenScratchTp, ShardedForwardPrefillScratch,
+    forward_one_token_hybrid_logits, forward_one_token_pp_logits, forward_one_token_tp_logits,
+    forward_prefill_hybrid_logits, forward_prefill_pp_logits, forward_prefill_tp_logits,
+    ShardedForwardOneTokenScratch, ShardedForwardOneTokenScratchHybrid,
+    ShardedForwardOneTokenScratchTp, ShardedForwardPrefillScratch,
 };
 use flambeau_qwen3_moe::{
-    Qwen3MoEConfig, Qwen3MoEShardedModel, Qwen3MoEShardedSession, Qwen3MoETpModel,
-    Qwen3MoETpSession,
+    Qwen3MoEConfig, Qwen3MoEHybridModel, Qwen3MoEHybridSession, Qwen3MoEShardedModel,
+    Qwen3MoEShardedSession, Qwen3MoETpModel, Qwen3MoETpSession,
 };
 
 /// Loaded weights + per-topology auxiliary state.
@@ -35,6 +37,16 @@ pub enum LoadedModel {
         model: Qwen3MoETpModel,
         ar: BarP2pAllReduce,
     },
+    /// **AUTO-4f** — hybrid PP-of-TP. `pp_size` contiguous layer
+    /// stages, each owning a `tp_size`-rank TP subgroup. The
+    /// per-stage `BarP2pAllReduce` instances live alongside the
+    /// model; the inter-stage hand-off uses the server-owned global
+    /// `HipCluster` passed through to [`prefill_logits`] /
+    /// [`decode_logits`].
+    Hybrid {
+        model: Qwen3MoEHybridModel,
+        stage_ars: Vec<BarP2pAllReduce>,
+    },
 }
 
 impl std::fmt::Debug for LoadedModel {
@@ -42,6 +54,10 @@ impl std::fmt::Debug for LoadedModel {
         match self {
             LoadedModel::Pp(_) => f.debug_struct("LoadedModel::Pp").finish(),
             LoadedModel::Tp { .. } => f.debug_struct("LoadedModel::Tp").finish(),
+            LoadedModel::Hybrid { model, .. } => f
+                .debug_struct("LoadedModel::Hybrid")
+                .field("spec", &model.spec)
+                .finish(),
         }
     }
 }
@@ -52,6 +68,7 @@ impl LoadedModel {
         match self {
             LoadedModel::Pp(m) => &m.config,
             LoadedModel::Tp { model, .. } => &model.config,
+            LoadedModel::Hybrid { model, .. } => &model.config,
         }
     }
 
@@ -60,6 +77,7 @@ impl LoadedModel {
         match self {
             LoadedModel::Pp(_) => "pp",
             LoadedModel::Tp { .. } => "tp",
+            LoadedModel::Hybrid { .. } => "pp+tp",
         }
     }
 }
@@ -76,6 +94,10 @@ pub enum Inflight {
     Tp {
         session: Qwen3MoETpSession,
         decode: ShardedForwardOneTokenScratchTp,
+    },
+    Hybrid {
+        session: Qwen3MoEHybridSession,
+        decode: ShardedForwardOneTokenScratchHybrid,
     },
 }
 
@@ -105,11 +127,25 @@ impl Inflight {
                     .context("TP decode scratch")?;
                 Ok(Inflight::Tp { session, decode })
             }
+            LoadedModel::Hybrid { model, .. } => {
+                // `cluster` here is the server's global cluster; the
+                // hybrid session/scratch are sized per-stage against
+                // each stage's owning sub-cluster (no `cluster` arg
+                // needed — sub-clusters live inside `model.stages`).
+                let session = Qwen3MoEHybridSession::new(model)
+                    .context("create hybrid session")?;
+                let decode = ShardedForwardOneTokenScratchHybrid::new(model)
+                    .context("hybrid decode scratch")?;
+                Ok(Inflight::Hybrid { session, decode })
+            }
         }
     }
 
-    /// Free per-rank caches + scratches.
-    pub fn dispose(self, cluster: &HipCluster) -> Result<()> {
+    /// Free per-rank caches + scratches. The hybrid variant also takes
+    /// the parent [`LoadedModel`] (since each per-stage sub-cluster
+    /// lives inside the model, not on the server-owned global
+    /// cluster); pass `model` from the same registration.
+    pub fn dispose(self, cluster: &HipCluster, model: &LoadedModel) -> Result<()> {
         match self {
             Inflight::Pp {
                 session,
@@ -132,17 +168,29 @@ impl Inflight {
                 session.dispose(cluster).context("dispose TP session")?;
                 Ok(())
             }
+            Inflight::Hybrid { session, decode } => {
+                let LoadedModel::Hybrid { model, .. } = model else {
+                    bail!(
+                        "Inflight::Hybrid::dispose: paired LoadedModel variant is not Hybrid"
+                    );
+                };
+                decode
+                    .dispose(model)
+                    .context("dispose hybrid decode scratch")?;
+                session
+                    .dispose(model)
+                    .context("dispose hybrid session")?;
+                Ok(())
+            }
         }
     }
 }
 
 /// Ingest the full prompt and write the logits row for the **last**
-/// prompt position into `logits_out`. PP runs through
-/// [`forward_prefill_pp_logits`] in one batched pass; TP loops
-/// [`forward_one_token_tp_logits`] per prompt token (no TP prefill
-/// kernel exists yet — design accepted in TP-5b "prefill-PP +
-/// decode-TP coexistence" where we treat per-token TP as the prefill
-/// path until a real TP prefill lands).
+/// prompt position into `logits_out`. Each topology dispatches through
+/// its own `forward_prefill_*_logits` entry point; the TP path is a
+/// per-token loop today (AUTO-6a) and gets batched-across-L kernels
+/// in AUTO-6b/c.
 pub fn prefill_logits(
     model: &LoadedModel,
     cluster: &HipCluster,
@@ -162,21 +210,35 @@ pub fn prefill_logits(
         ) => forward_prefill_pp_logits(m, session, cluster, prefill, prompt_ids, 0, logits_out)
             .context("PP prefill_logits"),
         (LoadedModel::Tp { model, ar }, Inflight::Tp { session, decode }) => {
-            for (pos, &tok) in prompt_ids.iter().enumerate() {
-                forward_one_token_tp_logits(
-                    model,
-                    decode,
-                    cluster,
-                    ar,
-                    &mut session.caches,
-                    tok,
-                    pos,
-                    logits_out,
-                )
-                .with_context(|| format!("TP prefill loop @ pos {pos}"))?;
-            }
-            Ok(())
+            forward_prefill_tp_logits(
+                model,
+                decode,
+                cluster,
+                ar,
+                &mut session.caches,
+                prompt_ids,
+                0,
+                logits_out,
+            )
+            .context("TP prefill_logits")
         }
+        (
+            LoadedModel::Hybrid {
+                model: hmodel,
+                stage_ars,
+            },
+            Inflight::Hybrid { session, decode },
+        ) => forward_prefill_hybrid_logits(
+            hmodel,
+            decode,
+            cluster,
+            stage_ars,
+            session,
+            prompt_ids,
+            0,
+            logits_out,
+        )
+        .context("hybrid prefill_logits"),
         _ => bail!("LoadedModel/Inflight variant mismatch"),
     }
 }
@@ -211,6 +273,23 @@ pub fn decode_logits(
             )
             .context("TP decode_logits")
         }
+        (
+            LoadedModel::Hybrid {
+                model: hmodel,
+                stage_ars,
+            },
+            Inflight::Hybrid { session, decode },
+        ) => forward_one_token_hybrid_logits(
+            hmodel,
+            decode,
+            cluster,
+            stage_ars,
+            session,
+            token,
+            position,
+            logits_out,
+        )
+        .context("hybrid decode_logits"),
         _ => bail!("LoadedModel/Inflight variant mismatch"),
     }
 }

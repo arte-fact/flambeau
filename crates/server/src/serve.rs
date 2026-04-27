@@ -10,7 +10,8 @@ use axum::Router;
 use flambeau_backend_hip::{device_count, BarP2pAllReduce, HipCluster};
 use flambeau_quant::{ChatTemplate, GgufFile};
 use flambeau_qwen3_moe::{
-    Qwen35DenseTpLayout, Qwen3MoEConfig, Qwen3MoEShardedModel, Qwen3MoETpModel,
+    HybridMeshSpec, Qwen35DenseTpLayout, Qwen3MoEConfig, Qwen3MoEHybridModel,
+    Qwen3MoEShardedModel, Qwen3MoETpModel,
 };
 use flambeau_runtime::LayerAssignment;
 use tokio::sync::Mutex;
@@ -24,6 +25,11 @@ use crate::routes::{
 
 /// **TP-5a** — mesh topology selector. PP-V1 default; TP engages the
 /// Qwen3MoETpModel loader + the BarP2pAllReduce-based forward path.
+/// **AUTO-4a** — `Hybrid` adds a manual PP-of-TP composition where
+/// `pp_size` contiguous layer stages each own a `tp_size`-rank TP
+/// subgroup. Selection is operator-driven; flambeau does not autodetect
+/// the right topology for a given rig (the bracket-bench harness in
+/// AUTO-5 produces the data, the operator picks the winner).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MeshMode {
     /// Pipeline parallelism — V1 default. `LayerAssignment` distributes
@@ -33,6 +39,13 @@ pub enum MeshMode {
     /// Tensor parallelism — every rank holds every layer (sliced).
     /// `world` ranks; intra-layer Megatron splits + BAR1 P2P AllReduce.
     Tp { world: u32 },
+    /// Hybrid PP-of-TP — `pp_size` contiguous layer stages, each owning
+    /// a `tp_size`-rank TP subgroup. Total ranks = `pp_size * tp_size`.
+    /// Devices are interpreted in stage-major order: `--devices d0,d1,...`
+    /// with `tp_size = 2`, `pp_size = 2` means stage 0 = {d0, d1},
+    /// stage 1 = {d2, d3}. Forward wiring lands in AUTO-4b..f; this
+    /// variant currently boots up to the loader and bails.
+    Hybrid { pp_size: u32, tp_size: u32 },
 }
 
 /// Runtime config for `flambeau serve`.
@@ -115,14 +128,16 @@ pub async fn serve(cfg: ServeConfig) -> Result<()> {
             model_cfg.context_length = cap;
         }
     }
-    let cluster: Arc<HipCluster> =
-        Arc::new(HipCluster::new(&cfg.device_ids).context("HipCluster::new")?);
-
-    // **TP-5a-i2** — branch on mesh topology. PP path uses the V1.8
-    // sharded loader; TP path validates the layout, slices the GGUF,
-    // and constructs a BarP2pAllReduce against the same cluster.
-    let model: LoadedModel = match cfg.mesh_mode {
+    // **AUTO-4f** — construction order matters on this rig. For pure
+    // PP/TP, the single global cluster is built first; for hybrid, the
+    // per-stage sub-clusters are built first (inside
+    // `Qwen3MoEHybridModel::load`) and the global cluster is built
+    // *afterwards*. Reverse order leaves per-stage `peer_access_full`
+    // reporting zero on the off-diagonal (`project_hybrid_cluster_order`).
+    let (cluster, model): (Arc<HipCluster>, LoadedModel) = match cfg.mesh_mode {
         MeshMode::Pp => {
+            let cluster: Arc<HipCluster> =
+                Arc::new(HipCluster::new(&cfg.device_ids).context("HipCluster::new")?);
             let assignment =
                 LayerAssignment::contiguous(model_cfg.num_layers, cluster.ranks() as u32);
             info!(
@@ -133,9 +148,11 @@ pub async fn serve(cfg: ServeConfig) -> Result<()> {
             );
             let m = Qwen3MoEShardedModel::load(&gguf, &cluster, &assignment)
                 .context("Qwen3MoEShardedModel::load")?;
-            LoadedModel::Pp(m)
+            (cluster, LoadedModel::Pp(m))
         }
         MeshMode::Tp { world } => {
+            let cluster: Arc<HipCluster> =
+                Arc::new(HipCluster::new(&cfg.device_ids).context("HipCluster::new")?);
             if cluster.ranks() as u32 != world {
                 bail!(
                     "--mesh-mode tp: --tp-size {world} but cluster has {} ranks",
@@ -163,7 +180,71 @@ pub async fn serve(cfg: ServeConfig) -> Result<()> {
             }
             let ar = BarP2pAllReduce::new(Arc::clone(&cluster))
                 .context("BarP2pAllReduce::new (requires fully-connected peer-access matrix)")?;
-            LoadedModel::Tp { model: m, ar }
+            (cluster, LoadedModel::Tp { model: m, ar })
+        }
+        MeshMode::Hybrid { pp_size, tp_size } => {
+            let spec = HybridMeshSpec { pp_size, tp_size };
+            spec.validate(model_cfg.num_layers, cfg.device_ids.len())
+                .context("--mesh-mode pp+tp: HybridMeshSpec::validate")?;
+            info!(
+                num_layers = model_cfg.num_layers,
+                pp_size,
+                tp_size,
+                ranks = cfg.device_ids.len(),
+                topology = "pp+tp",
+                "loading model weights (hybrid)"
+            );
+            // 1. Per-stage sub-clusters (built inside `load`) + weights.
+            let mut hybrid = Qwen3MoEHybridModel::load(&gguf, &cfg.device_ids, spec)
+                .context("Qwen3MoEHybridModel::load")?;
+            for stage in &hybrid.stages {
+                info!(
+                    stage = stage.stage_idx,
+                    layer_range = ?stage.layer_range,
+                    bytes = stage.tp_model.total_bytes(),
+                    has_token_embd = stage.tp_model.has_token_embd,
+                    has_output_head = stage.tp_model.has_output_head,
+                    "hybrid stage loaded"
+                );
+            }
+            // Re-apply the FLAMBEAU_CTX_CAP clamp on each stage's
+            // model-owned cfg (same reason as the TP arm).
+            for stage in hybrid.stages.iter_mut() {
+                if stage.tp_model.config.context_length > model_cfg.context_length {
+                    stage.tp_model.config.context_length = model_cfg.context_length;
+                }
+            }
+            if hybrid.config.context_length > model_cfg.context_length {
+                hybrid.config.context_length = model_cfg.context_length;
+            }
+            // 2. Per-stage AllReduce, each on its own sub-cluster.
+            let mut stage_ars: Vec<BarP2pAllReduce> = Vec::with_capacity(hybrid.stages.len());
+            for stage in &hybrid.stages {
+                let ar = BarP2pAllReduce::new(Arc::clone(&stage.sub_cluster))
+                    .with_context(|| {
+                        format!(
+                            "BarP2pAllReduce::new for stage {} (devices need fully-\
+                             connected BAR1 peer access)",
+                            stage.stage_idx
+                        )
+                    })?;
+                stage_ars.push(ar);
+            }
+            // 3. Global cluster LAST — used only for inter-stage
+            //    `peer_copy_via_host` hand-off. Constructing it before
+            //    the per-stage sub-clusters/ARs disables BAR1 on the
+            //    sub-cluster off-diagonal (project_hybrid_cluster_order).
+            let cluster: Arc<HipCluster> = Arc::new(
+                HipCluster::new(&cfg.device_ids)
+                    .context("HipCluster::new (global, for inter-stage hand-off)")?,
+            );
+            (
+                cluster,
+                LoadedModel::Hybrid {
+                    model: hybrid,
+                    stage_ars,
+                },
+            )
         }
     };
 

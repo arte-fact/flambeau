@@ -368,6 +368,254 @@ pub fn forward_full_attn_decode_tp(
     Ok(())
 }
 
+/// **AUTO-6b2** — per-rank L-batched full-attn prefill. Counterpart of
+/// [`forward_full_attn_decode_tp`] for n_tokens > 1. Mirrors the
+/// kernel sequence of [`super::attn::forward_full_attn_prefill`] (the
+/// PP version) but emits a `[L, hidden]` partial that the caller folds
+/// via one [`flambeau_backend_hip::BarP2pAllReduce::residual_tp{2,4}`]
+/// across `L * hidden` elements (instead of L per-token ARs).
+///
+/// Reuses [`super::attn::FullAttnPrefillScratch`] verbatim — the
+/// scratch is sized for the *full* (`n_heads`, `n_kv_heads`, `q_width
+/// = n_heads · head_dim`) shapes; per-rank kernels only touch the
+/// head-subset prefix (same waste as `forward_full_attn_decode_tp`,
+/// same trade-off — TP-2b-i2 sized scratch is filed but not on the
+/// AUTO-6 path).
+#[expect(
+    clippy::too_many_arguments,
+    reason = "matches super::attn::forward_full_attn_prefill — flat parameter list \
+              avoids struct copies on the prefill path."
+)]
+pub fn forward_full_attn_prefill_tp(
+    ops: &OpsRegistry,
+    stream: &HipStream,
+    device: &HipDevice,
+    cfg: &Qwen3MoEConfig,
+    attn_norm: &DeviceTensor,
+    attn_q: &DeviceTensor,
+    attn_k: &DeviceTensor,
+    attn_v: &DeviceTensor,
+    attn_output: &DeviceTensor,
+    attn_q_norm: &DeviceTensor,
+    attn_k_norm: &DeviceTensor,
+    kv_cache: &mut KvCache<flambeau_runtime::F16Contig, HipDevice>,
+    scratch: &mut super::attn::FullAttnPrefillScratch,
+    x_in: DevicePtr,
+    partial_attn_out: DevicePtr,
+    n_tokens: usize,
+    start_position: usize,
+    tp_world: u32,
+    kv_replicated: bool,
+) -> Result<()> {
+    use flambeau_ops::hip::attention::attention_prefill_f16_slots;
+    use flambeau_ops::hip::norm::quantize_f16_q8_1_mmq;
+    use flambeau_ops::hip::qmatmul::qmatmul;
+
+    if tp_world == 0 {
+        bail!("tp_world must be >= 1");
+    }
+    if n_tokens == 0 {
+        bail!("forward_full_attn_prefill_tp called with n_tokens = 0");
+    }
+    if n_tokens > scratch.max_tokens {
+        bail!(
+            "forward_full_attn_prefill_tp: n_tokens={n_tokens} > scratch.max_tokens={}",
+            scratch.max_tokens
+        );
+    }
+    let world = tp_world as usize;
+    let hidden = cfg.hidden_size;
+    let head_dim = cfg.head_dim;
+    let n_heads = cfg.num_heads;
+    let n_kv_heads = cfg.num_kv_heads;
+    if n_heads % world != 0 {
+        bail!("num_heads {n_heads} not divisible by tp_world {tp_world}");
+    }
+    let local_n_heads = n_heads / world;
+    let local_n_kv_heads = if kv_replicated {
+        n_kv_heads
+    } else {
+        if n_kv_heads % world != 0 {
+            bail!(
+                "num_kv_heads {n_kv_heads} not divisible by tp_world {tp_world} \
+                 and kv_replicated=false (caller bug)"
+            );
+        }
+        n_kv_heads / world
+    };
+    let local_q_width = local_n_heads * head_dim;
+    let rope = &cfg.rope;
+
+    // 1. RMSNorm[L] then quantise to BOTH Q8_1 layouts (PP-prefill pattern
+    //    — DS4 layout feeds the 4-warp LDS-tiled MMQ at M >= 128).
+    rmsnorm_f16(
+        ops,
+        stream,
+        x_in,
+        attn_norm.ptr,
+        scratch.x_norm_f16,
+        n_tokens,
+        hidden,
+        cfg.rms_norm_eps,
+    )
+    .context("prefill attn_norm (TP)")?;
+    quantize_f16_q8_1(
+        ops, stream, scratch.x_norm_f16, scratch.x_q8_1, n_tokens * hidden,
+    )
+    .context("prefill x_norm → Q8_1 std (TP)")?;
+    quantize_f16_q8_1_mmq(
+        ops, stream, scratch.x_norm_f16, scratch.x_q8_1_mmq, hidden, n_tokens,
+    )
+    .context("prefill x_norm → Q8_1 MMQ (TP)")?;
+
+    // 2. Q|gate fused projection. Per-rank rows = 2 * local_n_heads * head_dim.
+    let dtype_q = qdtype_of(attn_q.dtype)?;
+    let (q_rows, q_k) = mat_shape(attn_q)?;
+    let expect_q_rows = 2 * local_n_heads * head_dim;
+    if q_rows != expect_q_rows || q_k != hidden {
+        bail!(
+            "attn_q (TP prefill) shape [{q_rows}, {q_k}] != [{expect_q_rows}, {hidden}]"
+        );
+    }
+    qmatmul(
+        ops, stream, attn_q.ptr,
+        scratch.x_q8_1, scratch.x_q8_1_mmq,
+        scratch.mmvq_f32, n_tokens, q_k, q_rows, dtype_q,
+    )
+    .context("prefill qmatmul attn_q (TP)")?;
+    cast_f32_to_f16(ops, stream, scratch.mmvq_f32, scratch.q_fused_f16, n_tokens * q_rows)
+        .context("prefill cast attn_q → f16 (TP)")?;
+
+    // 3. Split per-token Q | gate.
+    split_q_gate_f16(
+        ops, stream,
+        scratch.q_fused_f16, scratch.q_f16, scratch.gate_f16,
+        n_tokens, local_n_heads, head_dim,
+    )
+    .context("prefill split_q_gate (TP)")?;
+
+    // 4+5. K and V projections — per-rank shape rows = local_n_kv_heads * head_dim.
+    let dtype_k = qdtype_of(attn_k.dtype)?;
+    let dtype_v = qdtype_of(attn_v.dtype)?;
+    let (k_rows, k_k) = mat_shape(attn_k)?;
+    let (v_rows, v_k) = mat_shape(attn_v)?;
+    let expect_kv_rows = local_n_kv_heads * head_dim;
+    if k_rows != expect_kv_rows || k_k != hidden {
+        bail!("attn_k (TP prefill) shape [{k_rows}, {k_k}] != [{expect_kv_rows}, {hidden}]");
+    }
+    if v_rows != expect_kv_rows || v_k != hidden {
+        bail!("attn_v (TP prefill) shape [{v_rows}, {v_k}] != [{expect_kv_rows}, {hidden}]");
+    }
+    qmatmul(
+        ops, stream, attn_k.ptr,
+        scratch.x_q8_1, scratch.x_q8_1_mmq,
+        scratch.mmvq_f32, n_tokens, k_k, k_rows, dtype_k,
+    )
+    .context("prefill qmatmul attn_k (TP)")?;
+    cast_f32_to_f16(ops, stream, scratch.mmvq_f32, scratch.k_f16, n_tokens * k_rows)
+        .context("prefill cast attn_k → f16 (TP)")?;
+    qmatmul(
+        ops, stream, attn_v.ptr,
+        scratch.x_q8_1, scratch.x_q8_1_mmq,
+        scratch.mmvq_f32, n_tokens, v_k, v_rows, dtype_v,
+    )
+    .context("prefill qmatmul attn_v (TP)")?;
+    cast_f32_to_f16(ops, stream, scratch.mmvq_f32, scratch.v_f16, n_tokens * v_rows)
+        .context("prefill cast attn_v → f16 (TP)")?;
+
+    // 6. Per-head Q/K rmsnorm — flatten outer dim to (L * heads).
+    rmsnorm_f16(
+        ops, stream,
+        scratch.q_f16, attn_q_norm.ptr, scratch.q_f16,
+        n_tokens * local_n_heads, head_dim, cfg.rms_norm_eps,
+    )
+    .context("prefill attn_q_norm (TP)")?;
+    rmsnorm_f16(
+        ops, stream,
+        scratch.k_f16, attn_k_norm.ptr, scratch.k_f16,
+        n_tokens * local_n_kv_heads, head_dim, cfg.rms_norm_eps,
+    )
+    .context("prefill attn_k_norm (TP)")?;
+
+    // 7. RoPE on per-token Q/K.
+    super::attn::upload_positions_range(device, stream, scratch, start_position, n_tokens)?;
+    rope_neox_partial_f16(
+        ops, stream, scratch.q_f16, scratch.positions, rope.freq_base,
+        n_tokens, local_n_heads, head_dim, rope.rotated_dims,
+    )
+    .context("prefill rope Q (TP)")?;
+    rope_neox_partial_f16(
+        ops, stream, scratch.k_f16, scratch.positions, rope.freq_base,
+        n_tokens, local_n_kv_heads, head_dim, rope.rotated_dims,
+    )
+    .context("prefill rope K (TP)")?;
+
+    // 8. Append all L tokens to the per-rank KV cache.
+    // SAFETY: scratch.k_f16/v_f16 hold n_tokens * local_n_kv_heads * head_dim F16s;
+    // KV cache was sized for local_n_kv_heads at construction.
+    unsafe {
+        kv_cache
+            .append(device, stream, scratch.k_f16, scratch.v_f16, n_tokens)
+            .map_err(|e| anyhow::anyhow!("kv_cache.append (TP prefill, L={n_tokens}): {e}"))?;
+    }
+
+    // 9. Causal prefill attention. n_k_tokens = start_position + L (after
+    //    append); q_offset = start_position so row i attends to K rows
+    //    [0..start_position + i + 1].
+    let n_k_tokens = kv_cache.current_tokens();
+    let scale = (head_dim as f32).sqrt().recip();
+    attention_prefill_f16_slots(
+        ops, stream,
+        scratch.q_f16, kv_cache.k_buffer(), kv_cache.v_buffer(),
+        scratch.attn_out_f16,
+        n_tokens, local_n_heads, local_n_kv_heads, head_dim,
+        n_k_tokens, start_position, scale,
+        None, None,
+    )
+    .context("attention_prefill_f16 (TP)")?;
+
+    // 10. Sigmoid-gate (V1.7.4.b — Qwen3.5/3.6 use sigmoid, not SiLU).
+    let gated_elems = n_tokens * local_q_width;
+    sigmoid_mul_f16(
+        ops, stream,
+        scratch.gate_f16, scratch.attn_out_f16, scratch.gated_out_f16,
+        gated_elems,
+    )
+    .context("prefill post-attn sigmoid-gate (TP)")?;
+
+    // 11. Quantise gated_out → BOTH Q8_1 layouts for output projection.
+    quantize_f16_q8_1(
+        ops, stream, scratch.gated_out_f16, scratch.gated_q8_1, gated_elems,
+    )
+    .context("prefill gated → Q8_1 std (TP)")?;
+    quantize_f16_q8_1_mmq(
+        ops, stream, scratch.gated_out_f16, scratch.gated_q8_1_mmq,
+        local_q_width, n_tokens,
+    )
+    .context("prefill gated → Q8_1 MMQ (TP)")?;
+
+    // 12. Row-parallel output projection. Per-rank weight rows = hidden,
+    //     per-rank cols = local_q_width. Result is per-rank partial.
+    let dtype_o = qdtype_of(attn_output.dtype)?;
+    let (o_rows, o_k) = mat_shape(attn_output)?;
+    if o_rows != hidden || o_k != local_q_width {
+        bail!(
+            "attn_output (TP prefill) shape [{o_rows}, {o_k}] != [{hidden}, {local_q_width}]"
+        );
+    }
+    qmatmul(
+        ops, stream, attn_output.ptr,
+        scratch.gated_q8_1, scratch.gated_q8_1_mmq,
+        scratch.mmvq_f32, n_tokens, o_k, o_rows, dtype_o,
+    )
+    .context("prefill qmatmul attn_output (TP)")?;
+    cast_f32_to_f16(
+        ops, stream, scratch.mmvq_f32, partial_attn_out, n_tokens * hidden,
+    )
+    .context("prefill cast attn_output → f16 (TP)")?;
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     // Substantive tests are GPU-gated and live in TP-2d's parity smoke.

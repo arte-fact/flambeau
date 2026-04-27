@@ -152,6 +152,83 @@ pub fn gdn_alpha_beta_f32(
     Ok(())
 }
 
+/// **C10** — fused GDN recurrent step that absorbs the preceding
+/// `gdn_alpha_beta_f32` launch. Same launch shape as
+/// [`gdn_state_step_f32_s128`] but reads the raw mmvq outputs
+/// `alpha_in[B,L,H]` / `beta_in[B,L,H]` plus per-head `ssm_dt_bias` /
+/// `ssm_a` constants directly, computing `softplus`/`sigmoid` inline
+/// in the per-token loop. Saves one launch per GDN layer per token.
+///
+/// Numerically identical to the unfused chain at FP32 (same op order,
+/// same warp-reduce signatures); the cert sweep verifies parity
+/// against `gdn_state_step_f32_s128 ∘ gdn_alpha_beta_f32` on Qwen3.6
+/// shapes.
+#[allow(clippy::too_many_arguments)]
+pub fn gdn_state_step_alphabeta_f32_s128(
+    reg: &OpsRegistry,
+    stream: &HipStream,
+    q: DevicePtr,
+    k: DevicePtr,
+    v: DevicePtr,
+    alpha_in: DevicePtr,
+    beta_in: DevicePtr,
+    ssm_dt_bias: DevicePtr,
+    ssm_a: DevicePtr,
+    state_in: DevicePtr,
+    state_out: DevicePtr,
+    attn_out: DevicePtr,
+    b: usize,
+    h_v: usize,
+    l: usize,
+    n_rep: usize,
+) -> Result<()> {
+    const S_V: u32 = 128;
+    const WARP_SIZE: u32 = 64;
+    const WARPS_PER_BLOCK: u32 = 4;
+
+    let module = reg.expect_module("gdn_state_step_alphabeta_f32")?;
+    let kernel = module.kernel("flambeau_gdn_state_step_alphabeta_f32_s128")?;
+
+    let b_i = b as i32;
+    let h_i = h_v as i32;
+    let l_i = l as i32;
+    let n_rep_i = n_rep as i32;
+    let q_ptr: u64 = q.as_usize() as u64;
+    let k_ptr: u64 = k.as_usize() as u64;
+    let v_ptr: u64 = v.as_usize() as u64;
+    let alpha_ptr: u64 = alpha_in.as_usize() as u64;
+    let beta_ptr: u64 = beta_in.as_usize() as u64;
+    let dt_ptr: u64 = ssm_dt_bias.as_usize() as u64;
+    let sa_ptr: u64 = ssm_a.as_usize() as u64;
+    let sin_ptr: u64 = state_in.as_usize() as u64;
+    let sout_ptr: u64 = state_out.as_usize() as u64;
+    let ao_ptr: u64 = attn_out.as_usize() as u64;
+    let mut args = KernelArgs::new();
+    args.push(&q_ptr);
+    args.push(&k_ptr);
+    args.push(&v_ptr);
+    args.push(&alpha_ptr);
+    args.push(&beta_ptr);
+    args.push(&dt_ptr);
+    args.push(&sa_ptr);
+    args.push(&sin_ptr);
+    args.push(&sout_ptr);
+    args.push(&ao_ptr);
+    args.push(&b_i);
+    args.push(&h_i);
+    args.push(&l_i);
+    args.push(&n_rep_i);
+
+    let grid_z = S_V / WARPS_PER_BLOCK;
+    let cfg = LaunchCfg {
+        grid: (h_v as u32, b as u32, grid_z),
+        block: (WARP_SIZE, WARPS_PER_BLOCK, 1),
+        shared_bytes: 0,
+    };
+    unsafe { kernel.launch(stream, cfg, args)? };
+    Ok(())
+}
+
 /// V2.23.d.1 — fused `conv_input = [history, current]`. Replaces the two
 /// back-to-back DtoD memcpys in `forward/gdn.rs::assemble_conv_input` (decode
 /// path) with a single elementwise kernel. Each GDN layer at decode fires

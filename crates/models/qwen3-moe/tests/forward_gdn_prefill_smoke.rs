@@ -293,6 +293,7 @@ fn forward_gdn_prefill_l4_smoke() -> Result<()> {
         x_in,
         delta_out,
         l,
+        None,
     )?;
 
     let mut out_host = vec![f16::from_f32(0.0); l * hidden];

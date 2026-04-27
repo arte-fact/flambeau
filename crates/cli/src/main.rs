@@ -61,17 +61,29 @@ enum Cmd {
         devices: String,
         #[arg(long, default_value_t = 8080)]
         port: u16,
-        /// **TP-5a** — mesh topology: `pp` (pipeline-parallel — V1 default,
-        /// LayerAssignment-based) or `tp` (tensor-parallel — Megatron-style
-        /// per-tensor sharding with BAR1 P2P AllReduce). `pp` preserves
-        /// V1.8 server behaviour; `tp` engages the Qwen3MoETpModel loader.
+        /// **TP-5a** / **AUTO-4a** — mesh topology:
+        /// - `pp` — pipeline-parallel (V1 default, LayerAssignment-based).
+        /// - `tp` — tensor-parallel (Megatron-style per-tensor sharding
+        ///   with BAR1 P2P AllReduce).
+        /// - `pp+tp` (alias `hybrid`) — manual PP-of-TP. Requires both
+        ///   `--pp-size` and `--tp-size`; `pp_size * tp_size` must equal
+        ///   `--devices` count. Devices are interpreted in stage-major
+        ///   order. flambeau does not autodetect the right topology —
+        ///   pick one with the AUTO-5 bracket-bench harness.
         #[arg(long = "mesh-mode", default_value = "pp")]
         mesh_mode: String,
-        /// **TP-5a** — TP world size when `--mesh-mode tp`. Must equal
-        /// `--devices` count. Ignored for `--mesh-mode pp` (which uses
-        /// `--devices` count as the PP rank count).
+        /// **TP-5a** — TP world size when `--mesh-mode tp`, or per-stage
+        /// TP size when `--mesh-mode pp+tp`. Must equal `--devices` count
+        /// (tp) or `--devices count / --pp-size` (pp+tp). Ignored for
+        /// `--mesh-mode pp` (which uses `--devices` count as the PP rank
+        /// count).
         #[arg(long = "tp-size", default_value_t = 0)]
         tp_size: u32,
+        /// **AUTO-4a** — number of pipeline stages when
+        /// `--mesh-mode pp+tp`. Must divide `num_layers` and satisfy
+        /// `pp_size * tp_size == --devices count`. Ignored for `pp`/`tp`.
+        #[arg(long = "pp-size", default_value_t = 0)]
+        pp_size: u32,
         /// Upstream MCP server to register as a tool source, e.g.
         /// `--mcp http://localhost:9090/mcp`. Repeatable. Each URL is
         /// enumerated once at boot; tools are exposed to the model
@@ -169,8 +181,8 @@ fn main() -> Result<()> {
         Cmd::ExtractChatTemplate { path, out } => extract_chat_template(&path, out.as_deref())?,
         Cmd::InspectHsaco { path } => todo!("V1.3+: implement inspect-hsaco for {path}"),
         Cmd::Infer { model, .. } => todo!("V1.7: implement infer for {model}"),
-        Cmd::Serve { model, devices, port, mesh_mode, tp_size, mcp_urls } => {
-            serve_cmd(&model, &devices, port, &mesh_mode, tp_size, mcp_urls)?
+        Cmd::Serve { model, devices, port, mesh_mode, tp_size, pp_size, mcp_urls } => {
+            serve_cmd(&model, &devices, port, &mesh_mode, tp_size, pp_size, mcp_urls)?
         }
         Cmd::Tune { model, .. } => todo!("T-track: implement tune for {model}"),
         Cmd::Mcp { stdio, port } => mcp_cmd(stdio, port)?,
@@ -190,6 +202,7 @@ fn serve_cmd(
     _port: u16,
     _mesh_mode: &str,
     _tp_size: u32,
+    _pp_size: u32,
     _mcp_urls: Vec<String>,
 ) -> Result<()> {
     anyhow::bail!(
@@ -204,6 +217,7 @@ fn serve_cmd(
     port: u16,
     mesh_mode: &str,
     tp_size: u32,
+    pp_size: u32,
     mcp_urls: Vec<String>,
 ) -> Result<()> {
     use std::net::SocketAddr;
@@ -237,7 +251,29 @@ fn serve_cmd(
             }
             flambeau_server::MeshMode::Tp { world: tp_size_resolved }
         }
-        other => anyhow::bail!("--mesh-mode must be `pp` or `tp` (got `{other}`)"),
+        "pp+tp" | "hybrid" => {
+            // AUTO-4a: both axes are explicit — operator-driven, no
+            // autodetect. Either both unset → bail with usage; otherwise
+            // require pp_size * tp_size == |devices|.
+            if pp_size == 0 || tp_size == 0 {
+                anyhow::bail!(
+                    "--mesh-mode pp+tp requires both --pp-size and --tp-size \
+                     (got pp_size={pp_size}, tp_size={tp_size})"
+                );
+            }
+            let want = (pp_size as usize) * (tp_size as usize);
+            if want != device_ids.len() {
+                anyhow::bail!(
+                    "--mesh-mode pp+tp: pp_size={pp_size} * tp_size={tp_size} = {want} \
+                     must equal --devices count {}",
+                    device_ids.len()
+                );
+            }
+            flambeau_server::MeshMode::Hybrid { pp_size, tp_size }
+        }
+        other => anyhow::bail!(
+            "--mesh-mode must be `pp`, `tp`, or `pp+tp` (got `{other}`)"
+        ),
     };
 
     let bind_addr: SocketAddr = format!("0.0.0.0:{port}").parse()?;
@@ -381,6 +417,7 @@ const SIMPLE_SWEEPS: &[(&str, SweepFn)] = &[
     ("l2_norm", flambeau_bench::sweep_l2_norm::run_sweep),
     ("causal_conv1d", flambeau_bench::sweep_causal_conv1d::run_sweep),
     ("gdn_state_step", flambeau_bench::sweep_gdn_step::run_sweep),
+    ("gdn_state_step_alphabeta", flambeau_bench::sweep_gdn_step_alphabeta::run_sweep),
     ("cast_f32_f16", flambeau_bench::sweep_cast::run_sweep),
     ("cast_f16_f32", flambeau_bench::sweep_f32_pointwise::run_cast_f16_f32_sweep),
     ("silu_f32", flambeau_bench::sweep_f32_pointwise::run_silu_sweep),
@@ -483,6 +520,7 @@ fn sweep(arch: &str, op: Option<&str>, dtype: &str) -> Result<()> {
                     "Q4_1" | "Q4_1_4warp" => (vec![MmqDtype::Q4_14Warp], SweepSpec::v1_4_prefill),
                     "Q4_1_wave64" => (vec![MmqDtype::Q4_1Wave64], SweepSpec::v1_4_prefill),
                     "Q4_0" | "Q4_0_wave64" => (vec![MmqDtype::Q4_0Wave64], SweepSpec::v1_4_prefill),
+                    "Q4_0_4warp" => (vec![MmqDtype::Q4_04Warp], SweepSpec::v1_4_prefill),
                     "Q5_0" | "Q5_0_wave64" => (vec![MmqDtype::Q5_0Wave64], SweepSpec::v1_4_prefill),
                     "Q4_K" | "Q4_K_4warp" => (vec![MmqDtype::Q4K4Warp], SweepSpec::v1_4_prefill),
                     "Q4_K_wave64" => (vec![MmqDtype::Q4KWave64], SweepSpec::v1_4_prefill),
@@ -499,6 +537,7 @@ fn sweep(arch: &str, op: Option<&str>, dtype: &str) -> Result<()> {
                             MmqDtype::Q4_14Warp,
                             MmqDtype::Q4_1Wave64,
                             MmqDtype::Q4_0Wave64,
+                            MmqDtype::Q4_04Warp,
                             MmqDtype::Q5_0Wave64,
                             MmqDtype::Q4K4Warp,
                             MmqDtype::Q4KWave64,
@@ -515,6 +554,7 @@ fn sweep(arch: &str, op: Option<&str>, dtype: &str) -> Result<()> {
                             | MmqDtype::Q4_14Warp
                             | MmqDtype::Q4_1Wave64
                             | MmqDtype::Q4_0Wave64
+                            | MmqDtype::Q4_04Warp
                             | MmqDtype::Q5_0Wave64
                             | MmqDtype::Q4KTurbo
                             | MmqDtype::Q4K4Warp

@@ -132,6 +132,14 @@ cert    = "certs/hip/gfx906/qmatmul_q4_0_mmq_wave64_gfx906.json"
 notes   = "V2.28.a — wave64 MMQ for Q4_0. MMQ_Y=64, TILE_N=8, 64 threads, DP4A inner with the `(q-8)·y = dp4a(q,y) - 8·y_s` bias-correction identity (same pattern as Q4_1 wave64 but no `m` field). Closes the 8.5× prefill gap to llama.cpp on Qwen3.6-35B-A3B-Q4_0 (V2.27 measured 132 vs 1118 tok/s)."
 
 [[qmatmul_mmq]]
+dtype   = "Q4_0"
+dtype_q = "Q8_1"
+shape   = { m = ">=128", k = "any", n = "any" }
+impl    = "qmatmul_q4_0_mmq_4warp_lds_gfx906"
+cert    = "certs/hip/gfx906/qmatmul_q4_0_mmq_4warp_lds_gfx906.json"
+notes   = "V1-BENCH-C1 — 4-warp LDS-tiled Q4_0 MMQ. MMQ_Y=128, MMQ_X=64, 256 threads (4 warps × 64), DS4 Q8_1 activation layout. Direct port of Q4_1 4warp_lds with bias-correction `(q-8)·y = dp4a(q,y) - 8·y_s` in the dot. Targets dense 27B-Q4_0 prefill where the V2.28.a single-warp wave64 saturates at ~70 tok/s pp4 (vs Q4_1 4warp_lds which gets 188 tok/s on the same shape)."
+
+[[qmatmul_mmq]]
 dtype   = "Q5_0"
 dtype_q = "Q8_1"
 shape   = { m = ">=32", k = "any", n = "any" }
@@ -325,7 +333,15 @@ dtype_q = "F32"
 shape   = { m = "any", k = 128, n = 128 }
 impl    = "gdn_state_step_f32_s128_gfx906"
 cert    = "certs/hip/gfx906/gdn_state_step_f32_s128_gfx906.json"
-notes   = "Fused per-(B,H) recurrent step at S_v=128 (head_k_dim=head_v_dim=128 on Qwen3.6). One launch handles decode (L=1) and prefill (L>1); state register-resident across the full L loop. 4 warps/block, grid = (H, B, S_v/4). GQA via n_rep."
+notes   = "Fused per-(B,H) recurrent step at S_v=128 (head_k_dim=head_v_dim=128 on Qwen3.6). One launch handles decode (L=1) and prefill (L>1); state register-resident across the full L loop. 4 warps/block, grid = (H, B, S_v/4). GQA via n_rep. Baseline path; opt-in via FLAMBEAU_VARIANT=baseline."
+
+[[gdn_state_step_alphabeta]]
+dtype   = "F32"
+dtype_q = "F32"
+shape   = { m = "any", k = 128, n = 128 }
+impl    = "gdn_state_step_alphabeta_f32_s128_gfx906"
+cert    = "certs/hip/gfx906/gdn_state_step_alphabeta_f32_s128_gfx906.json"
+notes   = "C10 — same kernel as gdn_state_step_f32_s128 but absorbs the preceding gdn_alpha_beta_f32 launch (softplus/sigmoid/exp inline in the per-token loop). One fewer launch per GDN layer per token; max_rel_err=0.0 vs unfused chain in cert. Default-on; FLAMBEAU_VARIANT=baseline reverts."
 
 # ----- L2 norm (V1.7.2.B — used by Gated-Delta-Net on Q and K) -------------
 

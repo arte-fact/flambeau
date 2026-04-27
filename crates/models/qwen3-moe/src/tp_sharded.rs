@@ -170,6 +170,77 @@ pub struct Qwen3MoETpModel {
     /// added). Built once at load time and reused across every forward
     /// call. Indexed by rank.
     pub ops: Vec<flambeau_ops::hip::OpsRegistry>,
+    /// **AUTO-4b** — range of layer indices actually populated on this
+    /// model's shards. `0..config.num_layers` for a pure-TP load (the
+    /// historical V2.* path). For a hybrid PP+TP stage, this is the
+    /// stage's layer range; layer indices outside the range hold empty
+    /// `Vec<TpLayerTensor>` placeholders in `shards[r].layers`.
+    pub layer_range: std::ops::Range<usize>,
+    /// **AUTO-4b** — `true` iff `token_embd` was actually uploaded on
+    /// every rank (always `true` for pure-TP; only `true` on hybrid
+    /// stage 0).
+    pub has_token_embd: bool,
+    /// **AUTO-4b** — `true` iff `output_norm` (and `output` when the
+    /// model has an explicit LM head) were uploaded on every rank
+    /// (always `true` for pure-TP; only `true` on the last hybrid stage).
+    pub has_output_head: bool,
+}
+
+impl Qwen3MoETpModel {
+    /// **TP-7-arch** — `true` iff the loader had to fall back to
+    /// Replicated upload for layer `il`'s MoE expert tensors (K-quant
+    /// block-size misalignment). The TP forward path detects this and
+    /// runs that layer's MoE with `world=1` semantics + skips the
+    /// post-MoE AllReduce. Layers outside the loaded `layer_range` are
+    /// reported as `false` (they don't run at all on this shard).
+    pub fn moe_replicated_at(&self, il: usize) -> bool {
+        // Inspect rank 0's `ffn_gate_exps` layout for layer `il`.
+        let Some(shard) = self.shards.first() else {
+            return false;
+        };
+        let Some(layer_tensors) = shard.layers.get(il) else {
+            return false;
+        };
+        for tlt in layer_tensors {
+            if tlt.name.ends_with("ffn_gate_exps.weight")
+                || tlt.name.ends_with("ffn_up_exps.weight")
+                || tlt.name.ends_with("ffn_down_exps.weight")
+            {
+                return matches!(tlt.layout, WeightLayout::Replicated);
+            }
+        }
+        false
+    }
+}
+
+/// **AUTO-4b** — knobs the hybrid loader uses to construct a
+/// "partial" `Qwen3MoETpModel` covering only one PP stage. Pure-TP
+/// callers ignore this and use [`Qwen3MoETpModel::load`] (which is a
+/// thin wrapper for `Default::default()`).
+///
+/// Forward paths that have not been taught about partial stages will
+/// panic if asked to access an out-of-range layer; that wiring is
+/// AUTO-4d.
+#[derive(Debug, Clone)]
+pub struct TpLoadOpts {
+    /// Range of layer indices to actually upload. `None` ≡ all layers.
+    pub layer_range: Option<std::ops::Range<usize>>,
+    /// Upload `token_embd`. Set on stage 0 of a hybrid mesh; the embed
+    /// lookup is local to that stage.
+    pub load_token_embd: bool,
+    /// Upload `output_norm` + `output`. Set on the last stage of a
+    /// hybrid mesh; the LM head runs there.
+    pub load_output_head: bool,
+}
+
+impl Default for TpLoadOpts {
+    fn default() -> Self {
+        Self {
+            layer_range: None,
+            load_token_embd: true,
+            load_output_head: true,
+        }
+    }
 }
 
 impl Qwen3MoETpModel {
@@ -181,6 +252,22 @@ impl Qwen3MoETpModel {
     /// - Cluster size ≠ `tp.world()`.
     /// - Any per-tensor slice / upload failure (propagated).
     pub fn load(file: &GgufFile, cluster: &HipCluster, tp: Qwen35DenseTpLayout) -> Result<Self> {
+        Self::load_with_opts(file, cluster, tp, &TpLoadOpts::default())
+    }
+
+    /// **AUTO-4b** — like [`Self::load`], but honours `opts` to upload
+    /// only a layer subrange and/or skip the embedding / LM-head globals.
+    /// Used by [`crate::hybrid::Qwen3MoEHybridModel`] to construct one
+    /// "stage shard" per PP stage. Layer indices outside
+    /// `opts.layer_range` are still present in `shards[r].layers` but
+    /// hold an empty `Vec<TpLayerTensor>`; the forward path must check
+    /// `model.layer_range` before indexing.
+    pub fn load_with_opts(
+        file: &GgufFile,
+        cluster: &HipCluster,
+        tp: Qwen35DenseTpLayout,
+        opts: &TpLoadOpts,
+    ) -> Result<Self> {
         if cluster.ranks() as u32 != tp.world() {
             bail!(
                 "cluster has {} ranks, tp expects world={}",
@@ -190,6 +277,17 @@ impl Qwen3MoETpModel {
         }
         let config = Qwen3MoEConfig::from_gguf(file)?;
         let layout = ModelLayout::from_gguf(file, &config)?;
+        let layer_range = opts
+            .layer_range
+            .clone()
+            .unwrap_or(0..config.num_layers);
+        if layer_range.start > layer_range.end || layer_range.end > config.num_layers {
+            bail!(
+                "TpLoadOpts.layer_range {:?} out of range for num_layers={}",
+                layer_range,
+                config.num_layers
+            );
+        }
 
         let mut shards = Vec::with_capacity(cluster.ranks());
         let mut ops_registries: Vec<flambeau_ops::hip::OpsRegistry> =
@@ -205,29 +303,46 @@ impl Qwen3MoETpModel {
                     .map_err(|e| anyhow!("OpsRegistry::new (rank {rank_idx}): {e}"))?,
             );
 
-            // Globals — every rank gets a full copy (V1 layout).
-            let (token_embd, b1) = upload_tp(file, &layout.token_embd.name, &tp, rank_idx, device)?;
-            let (output_norm, b2) =
-                upload_tp(file, &layout.output_norm.name, &tp, rank_idx, device)?;
+            // Globals — gated by opts (always-on for pure-TP, per-stage
+            // for hybrid). Skipped tensors get a NULL placeholder so the
+            // shard still compiles; dispose treats NULL ptrs as no-ops.
+            let (token_embd, b1) = if opts.load_token_embd {
+                upload_tp(file, &layout.token_embd.name, &tp, rank_idx, device)?
+            } else {
+                (null_device_tensor(&layout.token_embd.name), 0)
+            };
+            let (output_norm, b2) = if opts.load_output_head {
+                upload_tp(file, &layout.output_norm.name, &tp, rank_idx, device)?
+            } else {
+                (null_device_tensor(&layout.output_norm.name), 0)
+            };
             let (output, b3) = if let Some(o) = &layout.output {
-                let (t, b) = upload_tp(file, &o.name, &tp, rank_idx, device)?;
-                (Some(t), b)
+                if opts.load_output_head {
+                    let (t, b) = upload_tp(file, &o.name, &tp, rank_idx, device)?;
+                    (Some(t), b)
+                } else {
+                    (None, 0)
+                }
             } else {
                 (None, 0)
             };
             let mut total_bytes = b1 + b2 + b3;
 
-            // Per-layer tensors — every layer goes onto every rank,
-            // each tensor sliced per its layout.
+            // Per-layer tensors — only those in `layer_range` get
+            // uploaded; the rest get an empty tensor list at the same
+            // index so layer-indexed forward code still resolves
+            // (provided it pre-checks `layer_range`).
             let mut layers: Vec<Vec<TpLayerTensor>> = Vec::with_capacity(layout.layers.len());
-            for desc in &layout.layers {
+            for (il, desc) in layout.layers.iter().enumerate() {
+                if !layer_range.contains(&il) {
+                    layers.push(Vec::new());
+                    continue;
+                }
                 let mut layer_tensors: Vec<TpLayerTensor> = Vec::new();
                 for name in collect_layer_tensor_names(desc) {
-                    let (tensor, b) = upload_tp(file, &name, &tp, rank_idx, device)?;
+                    let (tensor, b, layout_for) =
+                        upload_tp_with_layout(file, &name, &tp, rank_idx, device)?;
                     total_bytes += b;
-                    let layout_for = tp
-                        .for_tensor(&name)
-                        .expect("collect_layer_tensor_names returns only known names");
                     layer_tensors.push(TpLayerTensor {
                         name: Arc::from(name.as_str()),
                         layout: layout_for,
@@ -253,13 +368,36 @@ impl Qwen3MoETpModel {
             });
         }
 
-        Ok(Self {
+        let model = Self {
             config,
             layout,
             tp,
             shards,
             ops: ops_registries,
-        })
+            layer_range,
+            has_token_embd: opts.load_token_embd,
+            has_output_head: opts.load_output_head,
+        };
+        // **TP-7-arch** — the Replicated-MoE forward branch skips the
+        // post-FFN AllReduce because each rank's MoE output is already
+        // a full-hidden update. That's only correct when there's no
+        // shared expert in the same layer (a sharded shared-expert
+        // partial would still need AR-folding). Bail at load time
+        // rather than producing silent corruption.
+        if model.config.shared_expert_intermediate_size.is_some() {
+            for il in model.layer_range.clone() {
+                if model.moe_replicated_at(il) {
+                    bail!(
+                        "TP-7-arch fallback engaged on layer {il} (K-quant MoE expert \
+                         misalignment) but model has a shared expert; that combination \
+                         requires per-layer mixed-mode AR which is not yet implemented. \
+                         Run with --mesh-mode pp instead, or use a Q4_0/Q4_1 quant of \
+                         the model whose MoE expert dims align under the requested TP world."
+                    );
+                }
+            }
+        }
+        Ok(model)
     }
 
     /// Total bytes uploaded across all ranks. Useful for the smoke
@@ -286,6 +424,22 @@ impl Qwen3MoETpModel {
             }
         }
         first_err.map_or(Ok(()), Err)
+    }
+}
+
+/// **AUTO-4b** — placeholder `DeviceTensor` for slots a hybrid stage
+/// shard does not own (e.g. `token_embd` on stages > 0). Free of any
+/// device allocation; dispose's `is_live`-style check sees `ptr ==
+/// NULL` + `bytes == 0` and skips it. The `name` is kept for
+/// diagnostics so a forward path that mistakenly dereferences this
+/// slot produces a useful error.
+fn null_device_tensor(name: &str) -> DeviceTensor {
+    DeviceTensor {
+        ptr: DevicePtr::NULL,
+        dtype: GgmlDType::F16,
+        dims: Vec::new(),
+        bytes: 0,
+        name: Arc::from(name),
     }
 }
 
@@ -397,14 +551,49 @@ fn upload_tp(
     rank: u32,
     device: &HipDevice,
 ) -> Result<(DeviceTensor, usize)> {
+    let (t, b, _layout) = upload_tp_with_layout(file, name, tp, rank, device)?;
+    Ok((t, b))
+}
+
+/// **TP-7-arch** — like [`upload_tp`] but returns the layout that was
+/// **actually** used. Identical to the configured layout in the common
+/// case. For MoE expert tensors (`ffn_*_exps.weight`) whose K-quant
+/// block size doesn't divide the per-rank slice (Coder-30B Q4_K with
+/// `moe_intermediate=768`, world ∈ {2, 4}, block_size=256), this
+/// falls back to [`WeightLayout::Replicated`] — uploads the full
+/// tensor on every rank — and records the override so the forward
+/// path can skip the post-MoE AllReduce on that layer.
+fn upload_tp_with_layout(
+    file: &GgufFile,
+    name: &str,
+    tp: &Qwen35DenseTpLayout,
+    rank: u32,
+    device: &HipDevice,
+) -> Result<(DeviceTensor, usize, WeightLayout)> {
     let info = file
         .info(name)
         .with_context(|| format!("info `{name}`"))?;
-    let layout = tp
+    let configured = tp
         .for_tensor(name)
         .ok_or_else(|| anyhow!("no TP layout entry for tensor `{name}`"))?;
-    let bytes_cow = slice_for_tp(file, name, layout, rank)
-        .with_context(|| format!("slice_for_tp `{name}` rank={rank}"))?;
+    let (bytes_cow, layout) = match slice_for_tp(file, name, configured, rank) {
+        Ok(b) => (b, configured),
+        Err(e) if is_moe_block_misalignment(&e, name) => {
+            tracing::warn!(
+                target: "flambeau_qwen3_moe::tp_sharded",
+                tensor = name,
+                rank,
+                "K-quant MoE expert misalignment — falling back to Replicated upload (TP-7-arch)"
+            );
+            let full_layout = WeightLayout::Replicated;
+            let full = slice_for_tp(file, name, full_layout, rank)
+                .with_context(|| format!("Replicated fallback slice `{name}` rank={rank}"))?;
+            (full, full_layout)
+        }
+        Err(e) => {
+            return Err(e).with_context(|| format!("slice_for_tp `{name}` rank={rank}"));
+        }
+    };
     if bytes_cow.is_empty() {
         bail!("empty slice for tensor `{name}` rank={rank}");
     }
@@ -455,7 +644,27 @@ fn upload_tp(
             name: Arc::from(name),
         },
         n,
+        layout,
     ))
+}
+
+/// **TP-7-arch** — recognise the specific slice failure mode that
+/// warrants the Replicated fallback: K-quant MoE expert tensors
+/// (`ffn_*_exps.weight`) whose per-rank inner dim doesn't align with
+/// the dtype's block size. Other shape mismatches still bail.
+fn is_moe_block_misalignment(err: &anyhow::Error, tensor_name: &str) -> bool {
+    let suffix = tensor_name.rsplit('.').next().unwrap_or(tensor_name);
+    let is_moe_expert = matches!(
+        suffix,
+        "weight"
+    ) && (tensor_name.ends_with("ffn_gate_exps.weight")
+        || tensor_name.ends_with("ffn_up_exps.weight")
+        || tensor_name.ends_with("ffn_down_exps.weight"));
+    if !is_moe_expert {
+        return false;
+    }
+    err.downcast_ref::<crate::tp_slice::SliceError>()
+        .is_some_and(|e| matches!(e, crate::tp_slice::SliceError::InnerBlockMisaligned { .. }))
 }
 
 /// Per-rank dims after applying `layout`. Replicated returns the full

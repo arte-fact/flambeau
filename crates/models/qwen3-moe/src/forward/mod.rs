@@ -1,9 +1,10 @@
 //! Forward-pass composition for a Qwen3.x model.
 //!
 //! Module map:
-//! - `common` — private cross-cutting helpers (`upload_position`,
-//!   `qdtype_of`, `mat_shape`, `row_bytes_for_dtype`,
-//!   `run_mmvq_from_tensor`, `run_qmatmul_from_tensor`).
+//! - `common` — private cross-cutting helpers (`qdtype_of`,
+//!   `mat_shape`, `row_bytes_for_dtype`, `run_mmvq_from_tensor`,
+//!   `run_qmatmul_from_tensor`, `validate_moe_dtypes`,
+//!   `run_indexed_moe_gate_up`, `run_indexed_moe_down`).
 //! - `attn` — full-attention decode + prefill (RMSNorm + fused QKV/gate +
 //!   RoPE + softmax attention + output projection).
 //! - `gdn` — gated-delta-net decode + prefill (hybrid SSM layer).
@@ -80,8 +81,18 @@ pub use pp::{
 
 pub mod tp;
 pub use tp::{
-    forward_one_token_tp, forward_one_token_tp_logits, RankForwardScratchTp,
-    ShardedForwardOneTokenScratchTp,
+    forward_one_token_tp, forward_one_token_tp_logits, forward_prefill_tp_logits,
+    RankForwardPrefillScratchTp, RankForwardScratchTp, ShardedForwardOneTokenScratchTp,
+    ShardedForwardPrefillScratchTp,
+};
+
+pub mod hybrid;
+pub use crate::hybrid::{
+    ShardedForwardOneTokenScratchHybrid, ShardedForwardPrefillScratchHybrid,
+};
+pub use hybrid::{
+    forward_one_token_hybrid, forward_one_token_hybrid_logits,
+    forward_prefill_hybrid_batched_logits, forward_prefill_hybrid_logits,
 };
 
 pub mod attn_tp;

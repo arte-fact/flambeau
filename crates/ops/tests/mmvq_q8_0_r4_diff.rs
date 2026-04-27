@@ -10,9 +10,7 @@
 #![expect(clippy::undocumented_unsafe_blocks, reason = "test fixture")]
 
 use anyhow::Result;
-use flambeau_backend_hip::{
-    device_count, HipDevice, HipKernel, HipModule, KernelArgs, LaunchCfg,
-};
+use flambeau_backend_hip::{device_count, HipDevice, HipKernel, KernelArgs, LaunchCfg};
 use flambeau_core::{CopyDirection, Device, DevicePtr, Stream};
 use half::f16;
 

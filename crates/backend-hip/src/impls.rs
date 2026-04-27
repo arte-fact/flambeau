@@ -132,15 +132,29 @@ pub const QMATMUL_GFX906: &[KernelDescriptor] = &[
     },
     KernelDescriptor {
         op_name: "QMatMul",
-        // V2.28.b: wave64 Q4_0 MMQ — primary prefill path for Qwen3.6-35B-A3B
-        // -Q4_0. Default dispatched at m >= 32. At m < 32 the qmatmul() wrapper
-        // short-circuits to the Q4_0 MMVQ single-row kernel (V2.23).
+        // V1-BENCH-C1: 4-warp LDS-tiled Q4_0 MMQ (port of Q4_1 4warp_lds with
+        // Q4_0 bias-correction in the dot). Engages at m >= 128 ahead of the
+        // wave64 row below; wave64 still owns m=32..127 where the larger tile's
+        // grid-fill dominates. Closes part of the dense-prefill gap on 27B-Q4_0.
+        impl_id: "qmatmul_q4_0_mmq_4warp_lds_gfx906",
+        backend: "hip",
+        arch: "gfx906",
+        dtype_weight: QDtype::Q4_0,
+        dtype_activation: QDtype::Q8_1,
+        m_range: (128, usize::MAX),
+        cert_rel_path: "certs/hip/gfx906/qmatmul_q4_0_mmq_4warp_lds_gfx906.json",
+    },
+    KernelDescriptor {
+        op_name: "QMatMul",
+        // V2.28.b: wave64 Q4_0 MMQ — owns m=32..127 (the C1 4warp_lds row above
+        // takes m >= 128). At m < 32 the qmatmul() wrapper short-circuits to
+        // the Q4_0 MMVQ single-row kernel (V2.23).
         impl_id: "qmatmul_q4_0_mmq_wave64_gfx906",
         backend: "hip",
         arch: "gfx906",
         dtype_weight: QDtype::Q4_0,
         dtype_activation: QDtype::Q8_1,
-        m_range: (32, usize::MAX),
+        m_range: (32, 127),
         cert_rel_path: "certs/hip/gfx906/qmatmul_q4_0_mmq_wave64_gfx906.json",
     },
     KernelDescriptor {

@@ -301,6 +301,118 @@ pub fn forward_dense_ffn_decode_tp(
     Ok(())
 }
 
+/// **AUTO-6b3** — per-rank L-batched dense FFN prefill. Counterpart of
+/// [`forward_dense_ffn_decode_tp`] for n_tokens > 1. Mirrors the
+/// kernel shape of [`super::dense_ffn::forward_dense_ffn_prefill`]
+/// (the PP version) but emits a `[L, hidden]` partial that the caller
+/// folds via one `BarP2pAllReduce::residual_tp{2,4}` call across `L *
+/// hidden` elements (instead of L per-token ARs).
+///
+/// Reuses [`super::dense_ffn::DenseFfnPrefillScratch`] (sized for full
+/// `inter` — same waste profile as the decode TP path; slicing only
+/// changes per-rank row counts).
+#[expect(
+    clippy::too_many_arguments,
+    reason = "matches forward_dense_ffn_decode_tp's flat parameter list."
+)]
+pub fn forward_dense_ffn_prefill_tp(
+    ops: &OpsRegistry,
+    stream: &HipStream,
+    cfg: &Qwen3MoEConfig,
+    ffn_gate: &DeviceTensor,
+    ffn_up: &DeviceTensor,
+    ffn_down: &DeviceTensor,
+    scratch: &mut super::dense_ffn::DenseFfnPrefillScratch,
+    x_norm: DevicePtr,
+    partial_ffn_out: DevicePtr,
+    n_tokens: usize,
+    tp_world: u32,
+) -> Result<()> {
+    use flambeau_ops::hip::norm::quantize_f16_q8_1_mmq;
+
+    if tp_world == 0 {
+        bail!("tp_world must be >= 1");
+    }
+    if n_tokens == 0 {
+        bail!("forward_dense_ffn_prefill_tp called with n_tokens = 0");
+    }
+    let world = tp_world as usize;
+    let hidden = cfg.hidden_size;
+    let inter = cfg.moe_intermediate_size;
+    if inter % world != 0 {
+        bail!("moe_intermediate_size {inter} not divisible by tp_world {tp_world}");
+    }
+    let local_inter = inter / world;
+
+    let gate_dims = (ffn_gate.dims[0] as usize, ffn_gate.dims[1] as usize);
+    let up_dims = (ffn_up.dims[0] as usize, ffn_up.dims[1] as usize);
+    let down_dims = (ffn_down.dims[0] as usize, ffn_down.dims[1] as usize);
+    if gate_dims != (local_inter, hidden) {
+        bail!("ffn_gate (TP prefill) shape {gate_dims:?} != [{local_inter}, {hidden}]");
+    }
+    if up_dims != (local_inter, hidden) {
+        bail!("ffn_up (TP prefill) shape {up_dims:?} != [{local_inter}, {hidden}]");
+    }
+    if down_dims != (hidden, local_inter) {
+        bail!("ffn_down (TP prefill) shape {down_dims:?} != [{hidden}, {local_inter}]");
+    }
+
+    // 1. Quantise x_norm to BOTH Q8_1 layouts.
+    quantize_f16_q8_1(ops, stream, x_norm, scratch.x_q8_1, n_tokens * hidden)
+        .context("dense ffn prefill (TP) x_norm → Q8_1 std")?;
+    quantize_f16_q8_1_mmq(ops, stream, x_norm, scratch.x_q8_1_mmq, hidden, n_tokens)
+        .context("dense ffn prefill (TP) x_norm → Q8_1 MMQ")?;
+
+    // 2+3. gate + up matmuls. Per-rank rows = local_inter.
+    qmatmul(
+        ops, stream, ffn_gate.ptr,
+        scratch.x_q8_1, scratch.x_q8_1_mmq,
+        scratch.gate_f32, n_tokens, hidden, local_inter,
+        qdtype_of(ffn_gate.dtype)?,
+    )
+    .context("dense ffn prefill (TP) gate qmatmul")?;
+    qmatmul(
+        ops, stream, ffn_up.ptr,
+        scratch.x_q8_1, scratch.x_q8_1_mmq,
+        scratch.up_f32, n_tokens, hidden, local_inter,
+        qdtype_of(ffn_up.dtype)?,
+    )
+    .context("dense ffn prefill (TP) up qmatmul")?;
+
+    // 4+5. Fused SwiGLU → F16, then quantise to BOTH Q8_1 layouts.
+    flambeau_ops::hip::mlp::swiglu_f32_to_f16(
+        ops, stream, scratch.gate_f32, scratch.up_f32, scratch.activated_f16,
+        n_tokens * local_inter,
+    )
+    .context("dense ffn prefill (TP) swiglu_f32_to_f16")?;
+    quantize_f16_q8_1(
+        ops, stream, scratch.activated_f16, scratch.activated_q8_1,
+        n_tokens * local_inter,
+    )
+    .context("dense ffn prefill (TP) activated → Q8_1 std")?;
+    quantize_f16_q8_1_mmq(
+        ops, stream, scratch.activated_f16, scratch.activated_q8_1_mmq,
+        local_inter, n_tokens,
+    )
+    .context("dense ffn prefill (TP) activated → Q8_1 MMQ")?;
+
+    // 6. Row-parallel down matmul. Per-rank cols = local_inter, rows = hidden.
+    qmatmul(
+        ops, stream, ffn_down.ptr,
+        scratch.activated_q8_1, scratch.activated_q8_1_mmq,
+        scratch.down_f32, n_tokens, local_inter, hidden,
+        qdtype_of(ffn_down.dtype)?,
+    )
+    .context("dense ffn prefill (TP) down qmatmul")?;
+
+    // 7. Cast F32→F16 directly into partial_ffn_out. AR fold (caller's
+    //    BarP2pAllReduce::residual_tp{2,4}) sums the partials together
+    //    with the residual.
+    cast_f32_to_f16(ops, stream, scratch.down_f32, partial_ffn_out, n_tokens * hidden)
+        .context("dense ffn prefill (TP) cast down → partial_ffn_out")?;
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     // Substantive tests need GPU; covered by TP-2d's parity smoke

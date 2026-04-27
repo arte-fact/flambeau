@@ -29,8 +29,18 @@ use flambeau_qwen3_moe::{
 };
 use flambeau_quant::GgufFile;
 
-const DEVICES: [i32; 2] = [0, 1];
-const WORLD: u32 = 2;
+// Default: Mesh<2> on gpus 0,1. Override via env:
+//   FLAMBEAU_TP_DEVICES=0,1,2,3   (comma-separated device ids)
+// world is derived from DEVICES.len(). Used by Mesh<4> regression bench.
+fn parse_devices() -> Vec<i32> {
+    if let Ok(s) = std::env::var("FLAMBEAU_TP_DEVICES") {
+        s.split(',')
+            .map(|t| t.trim().parse::<i32>().unwrap())
+            .collect()
+    } else {
+        vec![0, 1]
+    }
+}
 const TG: usize = 64;
 const WARM: u32 = 9419;
 
@@ -50,6 +60,8 @@ impl Drop for Cleanup<'_> {
 
 #[test]
 fn bench_tp2_any_model() -> Result<()> {
+    let devices: Vec<i32> = parse_devices();
+    let world: u32 = devices.len() as u32;
     let Ok(path_s) = std::env::var("FLAMBEAU_BENCH_GGUF") else {
         eprintln!("[skip] FLAMBEAU_BENCH_GGUF unset");
         return Ok(());
@@ -60,8 +72,8 @@ fn bench_tp2_any_model() -> Result<()> {
         return Ok(());
     }
     let n_avail = device_count().unwrap_or(0);
-    if n_avail < WORLD as i32 {
-        eprintln!("[skip] need {WORLD} HIP devices (have {n_avail})");
+    if n_avail < world as i32 {
+        eprintln!("[skip] need {world} HIP devices (have {n_avail})");
         return Ok(());
     }
 
@@ -94,7 +106,7 @@ fn bench_tp2_any_model() -> Result<()> {
     }
     eprintln!("  arch={arch} layers={} hidden={}", cfg.num_layers, cfg.hidden_size);
 
-    let tp = match Qwen35DenseTpLayout::new(&cfg, WORLD) {
+    let tp = match Qwen35DenseTpLayout::new(&cfg, world) {
         Ok(l) => l,
         Err(e) => {
             eprintln!(
@@ -103,9 +115,9 @@ fn bench_tp2_any_model() -> Result<()> {
             return Ok(());
         }
     };
-    let cluster = Arc::new(HipCluster::new(&DEVICES)?);
+    let cluster = Arc::new(HipCluster::new(&devices)?);
     if !cluster.peer_access_full() {
-        eprintln!("[skip] peer-access not full on {DEVICES:?}");
+        eprintln!("[skip] peer-access not full on {devices:?}");
         return Ok(());
     }
 

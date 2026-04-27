@@ -831,7 +831,7 @@ fn run_completion_blocking(
     // changes.
     if is_stop(first_next) {
         inflight
-            .dispose(cluster)
+            .dispose(cluster, model)
             .context("dispose inflight (early-stop)")?;
         return finalise(&state, prompt_tokens, generated, "stop");
     }
@@ -890,7 +890,7 @@ fn run_completion_blocking(
     }
 
     // Dispose per-request scratch/session; keep model + cluster alive.
-    inflight.dispose(cluster).context("dispose inflight")?;
+    inflight.dispose(cluster, model).context("dispose inflight")?;
 
     tracing::info!(
         target: "server.completion.finish",
@@ -1013,7 +1013,7 @@ fn run_completion_blocking_streaming(
     let alive = push_and_emit(first_next, &mut generated, &mut emitted_text)?;
     if !alive {
         inflight
-            .dispose(cluster)
+            .dispose(cluster, model)
             .context("dispose inflight (stream early-stop)")?;
         return Ok(("stop".into(), prompt_tokens, generated.len() as u32));
     }
@@ -1060,7 +1060,7 @@ fn run_completion_blocking_streaming(
     }
 
     inflight
-        .dispose(cluster)
+        .dispose(cluster, model)
         .context("dispose inflight (stream end)")?;
 
     tracing::info!(

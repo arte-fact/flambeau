@@ -15,7 +15,7 @@
 //! Forward kernel composition (TP-2b/c/d), parity cert (TP-2d), and
 //! perf cert (TP-2e) follow.
 
-use anyhow::Result;
+use anyhow::{bail, Result};
 use flambeau_backend_hip::{HipCluster, HipDevice, HipEvent};
 use flambeau_core::{Device, DevicePtr};
 use flambeau_runtime::RankId;
@@ -224,15 +224,196 @@ impl ShardedForwardOneTokenScratchTp {
 }
 
 // =====================================================================
+// AUTO-6b1 — ShardedForwardPrefillScratchTp
+// =====================================================================
+
+/// Per-rank scratch for an L-batched TP prefill. Mirrors
+/// [`RankForwardScratchTp`] but every `[hidden]` buffer is grown to
+/// `[max_tokens, hidden]` so a single forward sweep through the layer
+/// chain handles all `L` prompt tokens at once. The per-layer
+/// kernel-level scratch is the same [`super::layer::LayerPrefillScratch`]
+/// the PP path already uses (it is L-aware by design).
+///
+/// Lifecycle: allocate once per request via
+/// [`ShardedForwardPrefillScratchTp::new`], dispose once via
+/// [`ShardedForwardPrefillScratchTp::dispose`]. The decode path
+/// continues to use the cheaper [`ShardedForwardOneTokenScratchTp`].
+pub struct RankForwardPrefillScratchTp {
+    pub rank: RankId,
+    pub device_id: i32,
+    pub max_tokens: usize,
+    /// F16 `[max_tokens, hidden]` — replicated residual stream (post-AR).
+    pub hidden_a: DevicePtr,
+    /// F16 `[max_tokens, hidden]` — ping-pong partner for `hidden_a`.
+    pub hidden_b: DevicePtr,
+    /// F16 `[max_tokens, hidden]` — pre-AR per-rank attn partial.
+    pub partial_attn_out: DevicePtr,
+    /// F16 `[max_tokens, hidden]` — pre-AR per-rank FFN partial.
+    pub partial_ffn_out: DevicePtr,
+    pub layer: Option<super::layer::LayerPrefillScratch>,
+    pub output_head: Option<super::io::OutputHeadScratch>,
+    hidden_bytes: usize,
+    partial_bytes: usize,
+    disposed: bool,
+}
+
+impl RankForwardPrefillScratchTp {
+    /// Free this rank's allocations against its owning device. The
+    /// caller threads the device handle in (mirrors
+    /// [`RankForwardScratchTp::dispose`]).
+    pub fn dispose(mut self, device: &flambeau_backend_hip::HipDevice) -> Result<()> {
+        if self.disposed {
+            return Ok(());
+        }
+        self.disposed = true;
+        // SAFETY: every pointer came from `device.alloc` in `new_with_head_rank`.
+        unsafe {
+            device.dealloc(self.hidden_a, self.hidden_bytes)?;
+            device.dealloc(self.hidden_b, self.hidden_bytes)?;
+            device.dealloc(self.partial_attn_out, self.partial_bytes)?;
+            device.dealloc(self.partial_ffn_out, self.partial_bytes)?;
+        }
+        if let Some(s) = self.layer.take() {
+            s.dispose(device)?;
+        }
+        if let Some(s) = self.output_head.take() {
+            s.dispose(device)?;
+        }
+        Ok(())
+    }
+
+    /// Bytes allocated by this rank's scratch (excluding
+    /// `LayerPrefillScratch` internals — those are owned by the layer
+    /// scratch). Diagnostic for the AUTO-6b1 smoke test.
+    pub fn allocated_bytes(&self) -> usize {
+        2 * self.hidden_bytes + 2 * self.partial_bytes
+    }
+}
+
+impl Drop for RankForwardPrefillScratchTp {
+    fn drop(&mut self) {
+        if !self.disposed {
+            tracing::warn!(
+                target: "flambeau_qwen3_moe::forward",
+                rank = self.rank.0,
+                "RankForwardPrefillScratchTp dropped without dispose(device); buffers leaked"
+            );
+        }
+    }
+}
+
+/// Aggregate per-rank scratch for an L-batched TP prefill. Counterpart
+/// to [`ShardedForwardOneTokenScratchTp`] for the prefill path. The
+/// AUTO-6b2 / AUTO-6b3 batched kernel composites consume this; the
+/// AUTO-6a per-token loop continues to use the decode scratch.
+pub struct ShardedForwardPrefillScratchTp {
+    pub per_rank: Vec<RankForwardPrefillScratchTp>,
+    /// Rank that runs the LM head. V1 default: rank 0 (matches
+    /// decode-time convention).
+    pub head_rank: RankId,
+    pub max_tokens: usize,
+}
+
+impl ShardedForwardPrefillScratchTp {
+    /// Allocate per-rank prefill scratch sized for `max_tokens`. The
+    /// LM head is held only on `head_rank` (default rank 0) — same
+    /// convention as the decode scratch.
+    pub fn new(
+        cfg: &Qwen3MoEConfig,
+        cluster: &HipCluster,
+        max_tokens: usize,
+    ) -> Result<Self> {
+        Self::new_with_head_rank(cfg, cluster, max_tokens, RankId(0))
+    }
+
+    /// Like [`Self::new`] but lets the caller pick which rank owns the
+    /// LM head scratch.
+    pub fn new_with_head_rank(
+        cfg: &Qwen3MoEConfig,
+        cluster: &HipCluster,
+        max_tokens: usize,
+        head_rank: RankId,
+    ) -> Result<Self> {
+        if max_tokens == 0 {
+            bail!("ShardedForwardPrefillScratchTp::new max_tokens must be >= 1");
+        }
+        if (head_rank.0 as usize) >= cluster.ranks() {
+            bail!(
+                "head_rank {} out of range for cluster ranks {}",
+                head_rank.0,
+                cluster.ranks()
+            );
+        }
+        let hidden_bytes = max_tokens * cfg.hidden_size * 2;
+        let partial_bytes = max_tokens * cfg.hidden_size * 2;
+
+        let mut per_rank = Vec::with_capacity(cluster.ranks());
+        for rank_idx in 0..cluster.ranks() {
+            let device = cluster.device(rank_idx);
+            device.bind()?;
+            let hidden_a = device.alloc(hidden_bytes)?;
+            let hidden_b = device.alloc(hidden_bytes)?;
+            let partial_attn_out = device.alloc(partial_bytes)?;
+            let partial_ffn_out = device.alloc(partial_bytes)?;
+            let layer = Some(super::layer::LayerPrefillScratch::new(cfg, device, max_tokens)?);
+            let output_head = if rank_idx as u32 == head_rank.0 {
+                Some(super::io::OutputHeadScratch::new(cfg, device)?)
+            } else {
+                None
+            };
+            per_rank.push(RankForwardPrefillScratchTp {
+                rank: RankId(rank_idx as u32),
+                device_id: device.id(),
+                max_tokens,
+                hidden_a,
+                hidden_b,
+                partial_attn_out,
+                partial_ffn_out,
+                layer,
+                output_head,
+                hidden_bytes,
+                partial_bytes,
+                disposed: false,
+            });
+        }
+        Ok(Self {
+            per_rank,
+            head_rank,
+            max_tokens,
+        })
+    }
+
+    /// Free every rank's scratch.
+    pub fn dispose(mut self, cluster: &HipCluster) -> Result<()> {
+        let mut first_err: Option<anyhow::Error> = None;
+        for rs in self.per_rank.drain(..) {
+            let rank_idx = rs.rank.0 as usize;
+            if let Err(e) = rs.dispose(cluster.device(rank_idx)) {
+                if first_err.is_none() {
+                    first_err = Some(e);
+                }
+            }
+        }
+        first_err.map_or(Ok(()), Err)
+    }
+
+    /// Total bytes allocated across all ranks (rank-level only —
+    /// excludes `LayerPrefillScratch` internals which the layer
+    /// scratch owns separately).
+    pub fn rank_level_bytes(&self) -> usize {
+        self.per_rank.iter().map(|r| r.allocated_bytes()).sum()
+    }
+}
+
+// =====================================================================
 // TP-2d — forward_one_token_tp end-to-end driver
 // =====================================================================
 
-use anyhow::{anyhow, bail, Context};
+use anyhow::{anyhow, Context};
 use flambeau_backend_hip::BarP2pAllReduce;
-use flambeau_ops::hip::{norm::rmsnorm_f16, OpsRegistry};
+use flambeau_ops::hip::norm::rmsnorm_f16;
 
 use super::attn_tp::forward_full_attn_decode_tp;
-use super::dense_ffn_tp::forward_dense_ffn_decode_tp;
 use super::io::{argmax_token_host, forward_embed_decode_host, forward_output_head_decode};
 use crate::session::LayerCache;
 use crate::tp_sharded::{Qwen3MoETpModel, TpLayerTensor};
@@ -501,6 +682,629 @@ pub fn forward_one_token_tp_logits(
     .map(|_| ())
 }
 
+/// **AUTO-6a** — ingest a `prompt_ids` prompt and write the **last**
+/// position's F32 logits row into `logits_out`. Mirrors the shape of
+/// [`super::pp::forward_prefill_pp_logits`] and
+/// [`super::hybrid::forward_prefill_hybrid_logits`] so the server's
+/// `prefill_logits` can dispatch through one symmetric entry point per
+/// topology.
+///
+/// Implementation note: today this is a per-token loop over
+/// [`forward_one_token_tp_logits`] — same behavior as the inline loop
+/// the server used pre-AUTO-6a. AUTO-6b/c swap in batched-across-L
+/// kernels behind the same call site (full-attn + dense FFN first,
+/// then GDN + MoE). `start_position` is the position the *first*
+/// prompt token lands at — non-zero when this prefill is appending to
+/// a session that already saw earlier tokens.
+pub fn forward_prefill_tp_logits(
+    model: &Qwen3MoETpModel,
+    scratch: &mut ShardedForwardOneTokenScratchTp,
+    cluster: &flambeau_backend_hip::HipCluster,
+    ar: &BarP2pAllReduce,
+    layer_caches: &mut [Vec<LayerCache>],
+    prompt_ids: &[u32],
+    start_position: usize,
+    logits_out: &mut Vec<f32>,
+) -> anyhow::Result<()> {
+    if prompt_ids.is_empty() {
+        bail!("forward_prefill_tp_logits: empty prompt");
+    }
+    // **AUTO-6b2 / AUTO-6c4** — opt into the L-batched path when:
+    //   * `FLAMBEAU_TP_BATCHED=1` (off by default until AUTO-6d
+    //     verifies the perf gate),
+    //   * `prompt_ids.len() >= 8` (small prompts amortise the
+    //     prefill-scratch allocation poorly).
+    //
+    // The driver handles all four layer flavors:
+    //   * full-attn + dense FFN  (Qwen3.5 9B/27B Q4_1, dense)
+    //   * GDN + dense FFN        (Qwen3.5 hybrid)
+    //   * full-attn + MoE        (Qwen3-Coder-30B)
+    //   * GDN + MoE + shared exp (Qwen3.6-35B-A3B hybrid MoE)
+    let batched_opt_in = std::env::var("FLAMBEAU_TP_BATCHED").as_deref() == Ok("1");
+    if batched_opt_in && prompt_ids.len() >= 8 {
+        return forward_prefill_tp_batched_logits(
+            model,
+            cluster,
+            ar,
+            layer_caches,
+            prompt_ids,
+            start_position,
+            logits_out,
+        )
+        .context("TP batched prefill (AUTO-6b2 / AUTO-6c4)");
+    }
+    for (i, &tok) in prompt_ids.iter().enumerate() {
+        let pos = start_position + i;
+        forward_one_token_tp_logits(
+            model, scratch, cluster, ar, layer_caches, tok, pos, logits_out,
+        )
+        .with_context(|| format!("TP prefill loop @ pos {pos}"))?;
+    }
+    Ok(())
+}
+
+/// **AUTO-6b2** — L-batched TP prefill driver for dense (qwen35)
+/// arches. Allocates a [`ShardedForwardPrefillScratchTp`] sized to
+/// `prompt_ids.len()` on the fly, runs each layer's full-attn +
+/// dense-FFN with one AR per side per layer (instead of per-token),
+/// then runs the LM head on the last position. Per-token decode
+/// continues via `forward_one_token_tp_logits`.
+///
+/// V2.x deferred: bound the prefill scratch on the inflight session
+/// so we don't pay alloc/dispose per request — for AUTO-6b2 this
+/// keeps the call-site change minimal.
+fn forward_prefill_tp_batched_logits(
+    model: &Qwen3MoETpModel,
+    cluster: &flambeau_backend_hip::HipCluster,
+    ar: &BarP2pAllReduce,
+    layer_caches: &mut [Vec<LayerCache>],
+    prompt_ids: &[u32],
+    start_position: usize,
+    logits_out: &mut Vec<f32>,
+) -> Result<()> {
+    use flambeau_core::Stream;
+
+    let cfg = &model.config;
+    let world = cluster.ranks() as u32;
+    if world != 1 && world != 2 && world != 4 {
+        bail!("TP batched prefill: world ∈ {{1, 2, 4}} (got {world})");
+    }
+    let n_tokens = prompt_ids.len();
+
+    // 1. Allocate a prefill scratch sized to this prompt. Disposed at
+    //    the end of the call.
+    let prefill = ShardedForwardPrefillScratchTp::new(cfg, cluster, n_tokens)
+        .context("alloc TP prefill scratch")?;
+
+    // RAII guard so the scratch is disposed on every exit path.
+    struct PrefillGuard<'c> {
+        scratch: Option<ShardedForwardPrefillScratchTp>,
+        cluster: &'c flambeau_backend_hip::HipCluster,
+    }
+    impl Drop for PrefillGuard<'_> {
+        fn drop(&mut self) {
+            if let Some(s) = self.scratch.take() {
+                let _ = s.dispose(self.cluster);
+            }
+        }
+    }
+    let mut guard = PrefillGuard {
+        scratch: Some(prefill),
+        cluster,
+    };
+    let scratch_ref = guard.scratch.as_mut().expect("scratch present until drop");
+
+    // 2. Embed all L tokens on every rank. Token_embd is Replicated
+    //    so each rank writes the same F16 [L, hidden] into its own
+    //    `hidden_a` (loop the per-row embed helper — same as the
+    //    decode path, just over L positions).
+    let hidden = cfg.hidden_size;
+    let row_bytes = hidden * 2;
+    for r in 0..cluster.ranks() {
+        let device = cluster.device(r);
+        device.bind()?;
+        let stream = device.default_stream();
+        let dst_base = scratch_ref.per_rank[r].hidden_a;
+        for (i, &tok) in prompt_ids.iter().enumerate() {
+            let dst_row = DevicePtr(dst_base.as_usize() + i * row_bytes);
+            forward_embed_decode_host(
+                device,
+                stream,
+                &model.shards[r].token_embd,
+                tok,
+                dst_row,
+                hidden,
+            )
+            .with_context(|| format!("rank {r} prefill embed pos {i}"))?;
+        }
+    }
+
+    // 3. Layer loop. Pure-TP: full range, no cache offset.
+    //    (Body extracted to forward_prefill_tp_batched_layers for
+    //    AUTO-6e1 — hybrid callers pass a stage-local layer range +
+    //    il_cache_offset = range.start.)
+    forward_prefill_tp_batched_layers(
+        model,
+        scratch_ref,
+        cluster,
+        ar,
+        layer_caches,
+        0..cfg.num_layers,
+        0,
+        n_tokens,
+        start_position,
+    )
+    .context("TP batched prefill layer loop")?;
+
+    // 4. Output head + logits download on head_rank, last position.
+    let head_rank = scratch_ref.head_rank.0 as usize;
+    let device = cluster.device(head_rank);
+    device.bind()?;
+    let stream = device.default_stream();
+    let head_shard = &model.shards[head_rank];
+    let lm_head = head_shard.output.as_ref().unwrap_or(&head_shard.token_embd);
+    let last_row_off = (n_tokens - 1) * row_bytes;
+    let hidden_a_last = DevicePtr(scratch_ref.per_rank[head_rank].hidden_a.as_usize() + last_row_off);
+    let head_scratch = scratch_ref.per_rank[head_rank]
+        .output_head
+        .as_mut()
+        .ok_or_else(|| anyhow!("head_rank={head_rank} missing OutputHeadScratch"))?;
+    let logits_f32 = head_scratch.logits_f32;
+    let ops = &model.ops[head_rank];
+    forward_output_head_decode(
+        ops,
+        stream,
+        cfg,
+        &head_shard.output_norm,
+        lm_head,
+        head_scratch,
+        hidden_a_last,
+    )
+    .context("output_head_decode (TP batched prefill)")?;
+    logits_out.clear();
+    logits_out.resize(cfg.vocab_size, 0.0f32);
+    // SAFETY: logits_f32 is valid for cfg.vocab_size F32 values on
+    // `device`; logits_out.as_mut_ptr() is host memory of matching size.
+    unsafe {
+        <flambeau_backend_hip::HipDevice as flambeau_core::Device>::memcpy_async(
+            device,
+            stream,
+            flambeau_core::CopyDirection::DeviceToHost,
+            DevicePtr(logits_out.as_mut_ptr() as usize),
+            logits_f32,
+            cfg.vocab_size * 4,
+        )?;
+    }
+    Stream::synchronize(stream)?;
+    Ok(())
+}
+
+/// **AUTO-6e1** — layer-range-aware body of the L-batched TP prefill.
+/// The same per-layer attn → AR → FFN-norm → FFN → AR chain that
+/// [`forward_prefill_tp_batched_logits`] runs over `0..n_layers`,
+/// extracted so hybrid (PP-of-TP) callers can run only a stage's
+/// slice of layers between inter-stage hand-offs.
+///
+/// Contract:
+///  * `hidden_a` on every rank is the residual stream — read at the
+///    start of each layer, written at the end. Caller is responsible
+///    for embedding the prompt into rank-0..N's `hidden_a` before
+///    `il_range.start`, and for consuming the post-final-layer
+///    `hidden_a` (output head + last-position logits, or hand-off).
+///  * `il_range` enumerates absolute layer indices into
+///    `model.shards[r].layers[il]`.
+///  * `il_cache_offset` is subtracted from `il` to index into
+///    `layer_caches[r]`. Pure-TP callers pass `0` (caches sized to
+///    `cfg.num_layers`); hybrid stages pass `stage.layer_range.start`
+///    (each stage's caches were allocated for its slice only).
+///  * `start_position` is the position the *first* prompt token
+///    lands at — propagated to the full-attn prefill so KV slots are
+///    written at the right offset.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "matches forward_prefill_tp_batched_logits arg shape; the alternative \
+              would be a context struct that just rewraps these pointers"
+)]
+pub fn forward_prefill_tp_batched_layers(
+    model: &Qwen3MoETpModel,
+    scratch_ref: &mut ShardedForwardPrefillScratchTp,
+    cluster: &flambeau_backend_hip::HipCluster,
+    ar: &BarP2pAllReduce,
+    layer_caches: &mut [Vec<LayerCache>],
+    il_range: std::ops::Range<usize>,
+    il_cache_offset: usize,
+    n_tokens: usize,
+    start_position: usize,
+) -> Result<()> {
+    let cfg = &model.config;
+    let world = cluster.ranks() as u32;
+    if world != 1 && world != 2 && world != 4 {
+        bail!("TP batched prefill: world ∈ {{1, 2, 4}} (got {world})");
+    }
+    let kv_replicated = model.tp.kv_replicated();
+    let hidden = cfg.hidden_size;
+    let elem_count_l = (n_tokens * hidden) as u32;
+    for il in il_range {
+        let il_cache = il - il_cache_offset;
+        // 3a. Per-rank attn prefill (full-attn or GDN).
+        let is_full_attn = !cfg.is_recurrent(il);
+        for r in 0..cluster.ranks() {
+            let device = cluster.device(r);
+            device.bind()?;
+            let stream = device.default_stream();
+            let layer_tensors = &model.shards[r].layers[il];
+            let hidden_a = scratch_ref.per_rank[r].hidden_a;
+            let partial_attn_out = scratch_ref.per_rank[r].partial_attn_out;
+            let layer_scratch = scratch_ref.per_rank[r]
+                .layer
+                .as_mut()
+                .ok_or_else(|| anyhow!("rank {r}: missing LayerPrefillScratch"))?;
+            let ops = &model.ops[r];
+            if is_full_attn {
+                let attn_norm = find_by_suffix(layer_tensors, il, "attn_norm.weight")?;
+                let attn_q = find_by_suffix(layer_tensors, il, "attn_q.weight")?;
+                let attn_k = find_by_suffix(layer_tensors, il, "attn_k.weight")?;
+                let attn_v = find_by_suffix(layer_tensors, il, "attn_v.weight")?;
+                let attn_output = find_by_suffix(layer_tensors, il, "attn_output.weight")?;
+                let attn_q_norm = find_by_suffix(layer_tensors, il, "attn_q_norm.weight")?;
+                let attn_k_norm = find_by_suffix(layer_tensors, il, "attn_k_norm.weight")?;
+                let kv_cache = match &mut layer_caches[r][il_cache] {
+                    LayerCache::FullAttn(kv) => kv,
+                    _ => bail!(
+                        "rank {r} layer {il}: full-attn path expects FullAttn cache (got non-FullAttn)"
+                    ),
+                };
+                let full = layer_scratch
+                    .full_attn
+                    .as_mut()
+                    .ok_or_else(|| anyhow!("rank {r}: missing FullAttnPrefillScratch"))?;
+                super::attn_tp::forward_full_attn_prefill_tp(
+                    ops,
+                    stream,
+                    device,
+                    cfg,
+                    attn_norm,
+                    attn_q,
+                    attn_k,
+                    attn_v,
+                    attn_output,
+                    attn_q_norm,
+                    attn_k_norm,
+                    kv_cache,
+                    full,
+                    hidden_a,
+                    partial_attn_out,
+                    n_tokens,
+                    start_position,
+                    world,
+                    kv_replicated,
+                )
+                .with_context(|| format!("full-attn prefill TP layer {il}"))?;
+            } else {
+                let attn_norm = find_by_suffix(layer_tensors, il, "attn_norm.weight")?;
+                let attn_qkv = find_by_suffix(layer_tensors, il, "attn_qkv.weight")?;
+                let attn_gate = find_by_suffix(layer_tensors, il, "attn_gate.weight")?;
+                let ssm_alpha = find_by_suffix(layer_tensors, il, "ssm_alpha.weight")?;
+                let ssm_beta = find_by_suffix(layer_tensors, il, "ssm_beta.weight")?;
+                let ssm_a = find_by_suffix(layer_tensors, il, "ssm_a")?;
+                let ssm_dt_bias = find_by_suffix(layer_tensors, il, "ssm_dt.bias")?;
+                let ssm_conv1d = find_by_suffix(layer_tensors, il, "ssm_conv1d.weight")?;
+                let ssm_norm = find_by_suffix(layer_tensors, il, "ssm_norm.weight")?;
+                let ssm_out = find_by_suffix(layer_tensors, il, "ssm_out.weight")?;
+                let layer_state = match &mut layer_caches[r][il_cache] {
+                    LayerCache::Gdn(state) => state,
+                    _ => bail!(
+                        "rank {r} layer {il}: GDN path expects Gdn cache (got non-Gdn)"
+                    ),
+                };
+                let gdn_scratch = layer_scratch
+                    .gdn
+                    .as_mut()
+                    .ok_or_else(|| anyhow!("rank {r}: missing GdnPrefillScratch"))?;
+                super::gdn_tp::forward_gdn_prefill_tp(
+                    ops,
+                    stream,
+                    device,
+                    cfg,
+                    attn_norm,
+                    attn_qkv,
+                    attn_gate,
+                    ssm_alpha,
+                    ssm_beta,
+                    ssm_a,
+                    ssm_dt_bias,
+                    ssm_conv1d,
+                    ssm_norm,
+                    ssm_out,
+                    layer_state,
+                    gdn_scratch,
+                    hidden_a,
+                    partial_attn_out,
+                    n_tokens,
+                    world,
+                )
+                .with_context(|| format!("gdn prefill TP layer {il}"))?;
+            }
+        }
+        // 3b. AR(hidden_a, partial_attn_out, L*hidden).
+        ar_residual_prefill(ar, scratch_ref, cluster, world, elem_count_l, AttnOrFfn::Attn)?;
+
+        // 3c. ffn_norm[L] over hidden_a → mid_norm.
+        for r in 0..cluster.ranks() {
+            let device = cluster.device(r);
+            device.bind()?;
+            let stream = device.default_stream();
+            let layer_tensors = &model.shards[r].layers[il];
+            let ffn_norm = find_by_suffix(layer_tensors, il, "ffn_norm.weight")
+                .or_else(|_| find_by_suffix(layer_tensors, il, "post_attention_norm.weight"))?;
+            let hidden_a = scratch_ref.per_rank[r].hidden_a;
+            let layer_scratch = scratch_ref.per_rank[r]
+                .layer
+                .as_mut()
+                .ok_or_else(|| anyhow!("rank {r}: missing LayerPrefillScratch"))?;
+            let mid_norm = layer_scratch.mid_norm_f16;
+            let ops = &model.ops[r];
+            rmsnorm_f16(
+                ops,
+                stream,
+                hidden_a,
+                ffn_norm.ptr,
+                mid_norm,
+                n_tokens,
+                hidden,
+                cfg.rms_norm_eps,
+            )
+            .with_context(|| format!("ffn_norm prefill TP layer {il}"))?;
+        }
+
+        // 3d. Per-rank FFN prefill (dense or MoE+optional shared).
+        let moe_replicated = !cfg.is_dense_ffn() && model.moe_replicated_at(il);
+        let ffn_world = if moe_replicated { 1 } else { world };
+        if cfg.is_dense_ffn() {
+            for r in 0..cluster.ranks() {
+                let device = cluster.device(r);
+                device.bind()?;
+                let stream = device.default_stream();
+                let layer_tensors = &model.shards[r].layers[il];
+                let ffn_gate = find_by_suffix(layer_tensors, il, "ffn_gate.weight")?;
+                let ffn_up = find_by_suffix(layer_tensors, il, "ffn_up.weight")?;
+                let ffn_down = find_by_suffix(layer_tensors, il, "ffn_down.weight")?;
+                let partial_ffn_out = scratch_ref.per_rank[r].partial_ffn_out;
+                let layer_scratch = scratch_ref.per_rank[r]
+                    .layer
+                    .as_mut()
+                    .ok_or_else(|| anyhow!("rank {r}: missing LayerPrefillScratch"))?;
+                let mid_norm = layer_scratch.mid_norm_f16;
+                let dense_scratch = layer_scratch
+                    .dense_ffn
+                    .as_mut()
+                    .ok_or_else(|| anyhow!("rank {r}: missing DenseFfnPrefillScratch"))?;
+                let ops = &model.ops[r];
+                super::dense_ffn_tp::forward_dense_ffn_prefill_tp(
+                    ops,
+                    stream,
+                    cfg,
+                    ffn_gate,
+                    ffn_up,
+                    ffn_down,
+                    dense_scratch,
+                    mid_norm,
+                    partial_ffn_out,
+                    n_tokens,
+                    world,
+                )
+                .with_context(|| format!("dense ffn prefill TP layer {il}"))?;
+            }
+        } else {
+            let has_shared = cfg.shared_expert_intermediate_size.is_some()
+                && std::env::var("FLAMBEAU_TP_SKIP_SHARED").is_err();
+            for r in 0..cluster.ranks() {
+                let device = cluster.device(r);
+                device.bind()?;
+                let stream = device.default_stream();
+                let layer_tensors = &model.shards[r].layers[il];
+                let ffn_gate_inp = find_by_suffix(layer_tensors, il, "ffn_gate_inp.weight")?;
+                let ffn_gate_exps = find_by_suffix(layer_tensors, il, "ffn_gate_exps.weight")?;
+                let ffn_up_exps = find_by_suffix(layer_tensors, il, "ffn_up_exps.weight")?;
+                let ffn_down_exps = find_by_suffix(layer_tensors, il, "ffn_down_exps.weight")?;
+                let partial_ffn_out = scratch_ref.per_rank[r].partial_ffn_out;
+                let shared_delta_f16 = scratch_ref.per_rank[r]
+                    .layer
+                    .as_ref()
+                    .map(|l| l.shared_delta_f16)
+                    .unwrap_or(DevicePtr(0));
+                let layer_scratch = scratch_ref.per_rank[r]
+                    .layer
+                    .as_mut()
+                    .ok_or_else(|| anyhow!("rank {r}: missing LayerPrefillScratch"))?;
+                let mid_norm = layer_scratch.mid_norm_f16;
+                let ops = &model.ops[r];
+
+                // 1. Router (Replicated weight; runs identically per rank).
+                {
+                    let moe_scratch = layer_scratch
+                        .moe
+                        .as_mut()
+                        .ok_or_else(|| anyhow!("rank {r}: missing MoePrefillScratch"))?;
+                    super::moe::forward_router_prefill(
+                        ops,
+                        stream,
+                        cfg,
+                        ffn_gate_inp,
+                        moe_scratch,
+                        mid_norm,
+                        n_tokens,
+                    )
+                    .with_context(|| format!("router prefill TP layer {il}"))?;
+                }
+
+                // 2. (Optional) shared expert → shared_delta_f16.
+                if has_shared {
+                    let shared_w_gate = find_by_suffix(layer_tensors, il, "ffn_gate_shexp.weight")?;
+                    let shared_w_up = find_by_suffix(layer_tensors, il, "ffn_up_shexp.weight")?;
+                    let shared_w_down = find_by_suffix(layer_tensors, il, "ffn_down_shexp.weight")?;
+                    let shared_scratch = layer_scratch
+                        .shared
+                        .as_mut()
+                        .ok_or_else(|| anyhow!("rank {r}: missing SharedExpertPrefillScratch"))?;
+                    super::moe_tp::forward_shared_expert_prefill_tp(
+                        ops,
+                        stream,
+                        cfg,
+                        shared_w_gate,
+                        shared_w_up,
+                        shared_w_down,
+                        shared_scratch,
+                        mid_norm,
+                        shared_delta_f16,
+                        n_tokens,
+                        ffn_world,
+                    )
+                    .with_context(|| format!("shared expert prefill TP layer {il}"))?;
+                }
+
+                // 3. MoE FFN forward → partial_ffn_out.
+                let moe_scratch = layer_scratch
+                    .moe
+                    .as_mut()
+                    .ok_or_else(|| anyhow!("rank {r}: missing MoePrefillScratch"))?;
+                super::moe_tp::forward_moe_ffn_prefill_tp(
+                    ops,
+                    stream,
+                    cfg,
+                    ffn_gate_exps,
+                    ffn_up_exps,
+                    ffn_down_exps,
+                    moe_scratch,
+                    mid_norm,
+                    partial_ffn_out,
+                    n_tokens,
+                    ffn_world,
+                )
+                .with_context(|| format!("moe ffn prefill TP layer {il}"))?;
+
+                // 4. Add shared delta to MoE partial in-place.
+                if has_shared {
+                    flambeau_ops::hip::mlp::add_f16(
+                        ops,
+                        stream,
+                        partial_ffn_out,
+                        shared_delta_f16,
+                        partial_ffn_out,
+                        n_tokens * hidden,
+                    )
+                    .with_context(|| {
+                        format!("moe (TP) prefill + shared expert add_f16 layer {il}")
+                    })?;
+                }
+            }
+        }
+        // 3e. AR-residual on FFN output (or replicated add_f16 fallback).
+        if ffn_world > 1 {
+            ar_residual_prefill(ar, scratch_ref, cluster, world, elem_count_l, AttnOrFfn::Ffn)?;
+        } else {
+            for r in 0..cluster.ranks() {
+                let device = cluster.device(r);
+                device.bind()?;
+                let stream = device.default_stream();
+                let ops = &model.ops[r];
+                flambeau_ops::hip::mlp::add_f16(
+                    ops,
+                    stream,
+                    scratch_ref.per_rank[r].hidden_a,
+                    scratch_ref.per_rank[r].partial_ffn_out,
+                    scratch_ref.per_rank[r].hidden_a,
+                    n_tokens * hidden,
+                )
+                .with_context(|| format!("post-MoE replicated add_f16 layer {il}"))?;
+            }
+        }
+    }
+    Ok(())
+}
+
+/// **AUTO-6b2** — explicit-elem-count AR variant of [`ar_residual`]
+/// for the L-batched prefill path. The decode helper derives elem
+/// count from `scratch.per_rank[0].hidden_bytes / 2` (= one F16
+/// hidden vector); the prefill scratch allocates `[max_tokens, hidden]`
+/// so we pass `elem_count = n_tokens * hidden` directly. Same
+/// stream-sync-then-AR shape; the producer_done_event optimization
+/// the decode helper uses is dropped here for simplicity (one
+/// `synchronize` per rank before the AR launch — measured cost is
+/// ~50 µs/rank, negligible against per-layer prefill kernel wall).
+fn ar_residual_prefill(
+    ar: &BarP2pAllReduce,
+    scratch: &mut ShardedForwardPrefillScratchTp,
+    cluster: &flambeau_backend_hip::HipCluster,
+    world: u32,
+    elem_count: u32,
+    kind: AttnOrFfn,
+) -> Result<()> {
+    use flambeau_core::Stream;
+
+    let partial_ptr = |r: usize| match kind {
+        AttnOrFfn::Attn => scratch.per_rank[r].partial_attn_out,
+        AttnOrFfn::Ffn => scratch.per_rank[r].partial_ffn_out,
+    };
+    let hidden_ptr = |r: usize| scratch.per_rank[r].hidden_a;
+
+    // 1. Sync each rank's stream so peer reads see the partial-write
+    //    completed (event-based ordering is the decode optimization;
+    //    deferred for AUTO-6b2 — single synchronize per rank).
+    for r in 0..cluster.ranks() {
+        let device = cluster.device(r);
+        device.bind()?;
+        Stream::synchronize(device.default_stream())?;
+    }
+
+    // 2. Launch AR on each rank's stream. Same kernels as the decode
+    //    path; only the `elem_count` argument grows.
+    match world {
+        1 => {
+            // Degenerate single-rank: in-place add residual + partial.
+            let device = cluster.device(0);
+            device.bind()?;
+            let stream = device.default_stream();
+            let ops = &flambeau_ops::hip::OpsRegistry::new(device)
+                .map_err(|e| anyhow!("OpsRegistry::new (single-rank AR): {e}"))?;
+            flambeau_ops::hip::mlp::add_f16(
+                ops,
+                stream,
+                hidden_ptr(0),
+                partial_ptr(0),
+                hidden_ptr(0),
+                elem_count as usize,
+            )
+            .context("ar_residual_prefill: world=1 add_f16")?;
+        }
+        2 => {
+            let hidden = [hidden_ptr(0), hidden_ptr(1)];
+            let partial = [partial_ptr(0), partial_ptr(1)];
+            let s0 = cluster.device(0).default_stream();
+            let s1 = cluster.device(1).default_stream();
+            let streams = [s0, s1];
+            // SAFETY: every rank's hidden + partial point to live
+            // device allocations of `elem_count * 2` bytes (alloc'd
+            // in ShardedForwardPrefillScratchTp::new). Producer
+            // streams synced above ⇒ peer reads are valid.
+            unsafe { ar.residual_tp2(&hidden, &partial, elem_count, &streams)? };
+        }
+        4 => {
+            let hidden = [hidden_ptr(0), hidden_ptr(1), hidden_ptr(2), hidden_ptr(3)];
+            let partial = [partial_ptr(0), partial_ptr(1), partial_ptr(2), partial_ptr(3)];
+            let s0 = cluster.device(0).default_stream();
+            let s1 = cluster.device(1).default_stream();
+            let s2 = cluster.device(2).default_stream();
+            let s3 = cluster.device(3).default_stream();
+            let streams = [s0, s1, s2, s3];
+            // SAFETY: same as the tp2 arm, scaled to 4 ranks.
+            unsafe { ar.residual_tp4(&hidden, &partial, elem_count, &streams)? };
+        }
+        _ => bail!("ar_residual_prefill: unsupported world {world}"),
+    }
+    Ok(())
+}
+
 /// Shared body for `forward_one_token_tp` (argmax host-side) and
 /// `forward_one_token_tp_logits` (download F32 row to host). When
 /// `logits_out` is `Some`, downloads + returns 0; when `None`, runs
@@ -582,6 +1386,7 @@ fn forward_one_token_tp_inner(
                 ar,
                 layer_caches,
                 il,
+                il, // pure-TP: caches sized to cfg.num_layers (absolute idx).
                 position,
                 world,
             )
@@ -594,6 +1399,7 @@ fn forward_one_token_tp_inner(
                 ar,
                 layer_caches,
                 il,
+                il, // pure-TP: caches sized to cfg.num_layers (absolute idx).
                 world,
             )
             .with_context(|| format!("gdn layer {il}"))?;
@@ -662,13 +1468,21 @@ fn forward_one_token_tp_inner(
 }
 
 /// Per-rank dispatch of one full-attn layer + dense FFN + 2 AllReduces.
-fn forward_full_attn_layer_tp(
+///
+/// `il` is the absolute layer index used to look up weight tensors in
+/// `model.shards[r].layers[il]`. `il_cache` is the index into
+/// `layer_caches[r]`; callers under the pure-TP path pass `il_cache =
+/// il` (caches are sized to `cfg.num_layers`). The AUTO-4d hybrid
+/// driver passes `il_cache = il - layer_range.start` because each
+/// stage allocates only its slice of layer caches.
+pub(crate) fn forward_full_attn_layer_tp(
     model: &Qwen3MoETpModel,
     scratch: &mut ShardedForwardOneTokenScratchTp,
     cluster: &flambeau_backend_hip::HipCluster,
     ar: &BarP2pAllReduce,
     layer_caches: &mut [Vec<LayerCache>],
     il: usize,
+    il_cache: usize,
     position: usize,
     world: u32,
 ) -> anyhow::Result<()> {
@@ -691,7 +1505,7 @@ fn forward_full_attn_layer_tp(
         let attn_q_norm = find_by_suffix(layer_tensors, il, "attn_q_norm.weight")?;
         let attn_k_norm = find_by_suffix(layer_tensors, il, "attn_k_norm.weight")?;
 
-        let kv_cache = match &mut layer_caches[r][il] {
+        let kv_cache = match &mut layer_caches[r][il_cache] {
             LayerCache::FullAttn(kv) => kv,
             _ => bail!("rank {r} layer {il}: expected FullAttn cache (got non-FullAttn variant)"),
         };
@@ -833,16 +1647,29 @@ fn forward_full_attn_layer_tp(
     //     (arch=qwen35) calls forward_dense_ffn_decode_tp; MoE path
     //     (qwen3moe / qwen35moe / qwen36moe) calls
     //     forward_moe_ffn_decode_tp via forward_ffn_block_tp.
+    //
+    // **TP-7-arch** — when the loader had to fall back to Replicated
+    // upload for this layer's MoE expert tensors (K-quant misalignment),
+    // each rank already holds the full MoE weights and computes the
+    // full FFN output. Pass `ffn_world = 1` so the MoE kernels emit a
+    // single-rank result, and skip the post-FFN AR (the per-rank
+    // outputs are already identical full-hidden updates).
+    let ffn_world = if !cfg.is_dense_ffn() && model.moe_replicated_at(il) {
+        1
+    } else {
+        world
+    };
     forward_ffn_block_tp(
-        model, scratch, cluster, &mid_norm_ptrs, il, world, use_q8_1_fused_ar,
+        model, scratch, cluster, &mid_norm_ptrs, il, ffn_world, use_q8_1_fused_ar,
     )?;
     if probe {
         let p = scratch.per_rank[0].partial_ffn_out;
         debug_probe_rank0_named(scratch, cluster, "post-ffn partial", il, p)?;
     }
 
-    // 4. AR-residual on FFN output.
-    if world > 1 {
+    // 4. AR-residual on FFN output. Skipped when the FFN is replicated
+    //    (TP-7-arch); the per-rank partial is already a full update.
+    if ffn_world > 1 {
         ar_residual(ar, scratch, cluster, world, AttnOrFfn::Ffn)?;
     } else {
         for r in 0..cluster.ranks() {
@@ -1382,13 +2209,14 @@ fn find_by_suffix<'a>(
 /// fold the per-rank GDN partial into `hidden_a` via the same
 /// post-attn AR. The post-norm + dense FFN + post-FFN AR mirror the
 /// full-attn path exactly.
-fn forward_gdn_layer_tp(
+pub(crate) fn forward_gdn_layer_tp(
     model: &Qwen3MoETpModel,
     scratch: &mut ShardedForwardOneTokenScratchTp,
     cluster: &flambeau_backend_hip::HipCluster,
     ar: &BarP2pAllReduce,
     layer_caches: &mut [Vec<LayerCache>],
     il: usize,
+    il_cache: usize,
     world: u32,
 ) -> anyhow::Result<()> {
     let probe = std::env::var("FLAMBEAU_TP_PROBE").is_ok();
@@ -1414,7 +2242,7 @@ fn forward_gdn_layer_tp(
         let ssm_norm = find_by_suffix(layer_tensors, il, "ssm_norm.weight")?;
         let ssm_out = find_by_suffix(layer_tensors, il, "ssm_out.weight")?;
 
-        let layer_state = match &mut layer_caches[r][il] {
+        let layer_state = match &mut layer_caches[r][il_cache] {
             LayerCache::Gdn(state) => state,
             _ => bail!("rank {r} layer {il}: expected Gdn cache (got non-Gdn variant)"),
         };
@@ -1557,12 +2385,19 @@ fn forward_gdn_layer_tp(
     }
 
     // 3b. FFN block (dense or MoE — see forward_ffn_block_tp).
+    // **TP-7-arch** — same Replicated-MoE override as the full-attn
+    // layer: pass `ffn_world = 1` and skip the post-FFN AR.
+    let ffn_world = if !cfg.is_dense_ffn() && model.moe_replicated_at(il) {
+        1
+    } else {
+        world
+    };
     forward_ffn_block_tp(
-        model, scratch, cluster, &mid_norm_ptrs, il, world, use_q8_1_fused_ar,
+        model, scratch, cluster, &mid_norm_ptrs, il, ffn_world, use_q8_1_fused_ar,
     )?;
 
-    // 4. AR-residual on FFN output.
-    if world > 1 {
+    // 4. AR-residual on FFN output (skipped when MoE replicated).
+    if ffn_world > 1 {
         ar_residual(ar, scratch, cluster, world, AttnOrFfn::Ffn)?;
     } else {
         for r in 0..cluster.ranks() {
@@ -1583,13 +2418,4 @@ fn forward_gdn_layer_tp(
     Ok(())
 }
 
-/// Build a fresh `OpsRegistry` for `device`. TP-1c's
-/// `Qwen3MoETpRankShard` doesn't store one (intentional — the PP path
-/// stores it in the shard for the existing forward driver, and the TP
-/// path is not yet stable enough to commit to that shape). HipModule's
-/// internal cache still serves the hot path; this is a per-call
-/// allocation that we'll fold into the shard struct in TP-2d-i2.
-fn ops_registry_for(device: &flambeau_backend_hip::HipDevice) -> anyhow::Result<OpsRegistry> {
-    OpsRegistry::new(device).map_err(|e| anyhow!("OpsRegistry::new: {e}"))
-}
 

@@ -1,0 +1,82 @@
+
+running 1 test
+test bench_tp2_any_model ... BENCH_BEGIN model=Qwen3.5-9B-Q4_1.gguf
+  arch=qwen35 layers=32 hidden=4096
+  PROBE embed il=  -  n=4096  nan=    0  zero=    0  min=-0.0610  max=0.0517  mean=-0.0001
+  PROBE entering forward_gdn_layer_tp il=0 world=4
+    F16 gdn x_in                        n= 4096  nan=    0  zero=    0  min=-0.0610  max=0.0517  mean=-0.0001
+    META attn_norm.dtype=F16 dims=[4096] bytes=8192
+    META attn_qkv.dtype=Q4_1 dims=[2048, 4096] bytes=5242880
+    F16 gdn attn_norm.weight            n= 4096  nan=    0  zero=    0  min=0.9360  max=1.3027  mean=1.0331
+    Q8_1 gdn x_q8_1 PRE-rmsnorm          blocks=128  first4_scales=[0.0, 0.0, 0.0, 0.0]  nan=0
+    Q8_1 gdn x_q8_1 POST-rmsnorm         blocks=128  first4_scales=[0.015777588, 0.024261475, 0.019607544, 0.017211914]  nan=0
+    BYTES gdn attn_qkv first 4 rows       bytes=10240  nonzero=10231  first16=[90, 29, 230, 168, 231, 76, 101, 104, 27, 132, 64, 247, 115, 219, 130, 222]
+    F32 gdn qkv_mixed_f32               n= 2048  nan=    0  inf=  0  zero=    0  min=-30.2782  max=48.8560  mean=0.0250
+    F32 gdn z_f32                       n= 1024  nan=    0  inf=  0  zero=    0  min=-11.5402  max=6.4991  mean=-0.0648
+    F32 gdn ssm_out_f32 (pre-cast)      n= 4096  nan=    0  inf=  0  zero=    0  min=-0.1013  max=0.3811  mean=0.0002
+    F16 gdn x_in                        n= 4096  nan=    0  zero=    0  min=-0.0610  max=0.0517  mean=-0.0001
+    META attn_norm.dtype=F16 dims=[4096] bytes=8192
+    META attn_qkv.dtype=Q4_1 dims=[2048, 4096] bytes=5242880
+    F16 gdn attn_norm.weight            n= 4096  nan=    0  zero=    0  min=0.9360  max=1.3027  mean=1.0331
+    Q8_1 gdn x_q8_1 PRE-rmsnorm          blocks=128  first4_scales=[0.0, 0.0, 0.0, 0.0]  nan=0
+    Q8_1 gdn x_q8_1 POST-rmsnorm         blocks=128  first4_scales=[0.015777588, 0.024261475, 0.019607544, 0.017211914]  nan=0
+    BYTES gdn attn_qkv first 4 rows       bytes=10240  nonzero=10234  first16=[113, 28, 213, 168, 119, 159, 162, 76, 88, 112, 217, 125, 206, 117, 214, 91]
+    F32 gdn qkv_mixed_f32               n= 2048  nan=    0  inf=  0  zero=    0  min=-33.3403  max=29.2985  mean=-0.1133
+    F32 gdn z_f32                       n= 1024  nan=    0  inf=  0  zero=    0  min=-10.6943  max=6.5668  mean=0.2778
+    F32 gdn ssm_out_f32 (pre-cast)      n= 4096  nan=    0  inf=  0  zero=    0  min=-0.2012  max=2.2725  mean=0.0008
+    F16 gdn x_in                        n= 4096  nan=    0  zero=    0  min=-0.0610  max=0.0517  mean=-0.0001
+    META attn_norm.dtype=F16 dims=[4096] bytes=8192
+    META attn_qkv.dtype=Q4_1 dims=[2048, 4096] bytes=5242880
+    F16 gdn attn_norm.weight            n= 4096  nan=    0  zero=    0  min=0.9360  max=1.3027  mean=1.0331
+    Q8_1 gdn x_q8_1 PRE-rmsnorm          blocks=128  first4_scales=[0.0, 0.0, 0.0, 0.0]  nan=0
+    Q8_1 gdn x_q8_1 POST-rmsnorm         blocks=128  first4_scales=[0.015777588, 0.024261475, 0.019607544, 0.017211914]  nan=0
+    BYTES gdn attn_qkv first 4 rows       bytes=10240  nonzero=10229  first16=[66, 31, 145, 167, 3, 98, 99, 144, 20, 46, 53, 104, 104, 66, 84, 68]
+    F32 gdn qkv_mixed_f32               n= 2048  nan=    0  inf=  0  zero=    0  min=-35.5259  max=28.1399  mean=0.0006
+    F32 gdn z_f32                       n= 1024  nan=    0  inf=  0  zero=    0  min=-11.4669  max=6.1960  mean=-0.1554
+    F32 gdn ssm_out_f32 (pre-cast)      n= 4096  nan=    0  inf=  0  zero=    0  min=-0.0970  max=1.4323  mean=0.0000
+    F16 gdn x_in                        n= 4096  nan=    0  zero=    0  min=-0.0610  max=0.0517  mean=-0.0001
+    META attn_norm.dtype=F16 dims=[4096] bytes=8192
+    META attn_qkv.dtype=Q4_1 dims=[2048, 4096] bytes=5242880
+    F16 gdn attn_norm.weight            n= 4096  nan=    0  zero=    0  min=0.9360  max=1.3027  mean=1.0331
+    Q8_1 gdn x_q8_1 PRE-rmsnorm          blocks=128  first4_scales=[0.0, 0.0, 0.0, 0.0]  nan=0
+    Q8_1 gdn x_q8_1 POST-rmsnorm         blocks=128  first4_scales=[0.015777588, 0.024261475, 0.019607544, 0.017211914]  nan=0
+    BYTES gdn attn_qkv first 4 rows       bytes=10240  nonzero=10228  first16=[48, 28, 48, 166, 58, 79, 180, 5, 100, 131, 28, 215, 4, 122, 215, 90]
+    F32 gdn qkv_mixed_f32               n= 2048  nan=    0  inf=  0  zero=    0  min=-28.7592  max=34.0140  mean=0.0341
+    F32 gdn z_f32                       n= 1024  nan=    0  inf=  0  zero=    0  min=-10.9537  max=8.6707  mean=0.2225
+    F32 gdn ssm_out_f32 (pre-cast)      n= 4096  nan=    0  inf=  0  zero=    0  min=-0.0796  max=2.5103  mean=0.0004
+  PROBE post-gdn partial rank=0 il=  0  n=4096  nan=    0  min=-0.101318  max=0.381104  mean=0.000183
+  PROBE post-gdn partial rank=1 il=  0  n=4096  nan=    0  min=-0.201172  max=2.273438  mean=0.000776
+  PROBE post-gdn partial rank=2 il=  0  n=4096  nan=    0  min=-0.096924  max=1.432617  mean=0.000031
+  PROBE post-gdn partial rank=3 il=  0  n=4096  nan=    0  min=-0.079590  max=2.509766  mean=0.000413
+  PROBE after-layer hidden_a rank=0 il=  0  n=4096  nan=0  L2=7.879479  min=-0.452881  max=7.347656  mean=0.001234  head=[0.015380859, -0.032104492, 0.025497437, -0.013198853]
+  PROBE after-layer hidden_a rank=1 il=  0  n=4096  nan=0  L2=7.879479  min=-0.452881  max=7.347656  mean=0.001234  head=[0.015380859, -0.032104492, 0.025497437, -0.013198853]
+  PROBE after-layer hidden_a rank=2 il=  0  n=4096  nan=0  L2=7.879479  min=-0.452881  max=7.347656  mean=0.001234  head=[0.015380859, -0.032104492, 0.025497437, -0.013198853]
+  PROBE after-layer hidden_a rank=3 il=  0  n=4096  nan=0  L2=7.879479  min=-0.452881  max=7.347656  mean=0.001234  head=[0.015380859, -0.032104492, 0.025497437, -0.013198853]
+  PROBE entering forward_gdn_layer_tp il=1 world=4
+    F16 gdn x_in                        n= 4096  nan=    0  zero=    0  min=-0.4529  max=7.3477  mean=0.0012
+    META attn_norm.dtype=F16 dims=[4096] bytes=8192
+    META attn_qkv.dtype=Q4_1 dims=[2048, 4096] bytes=5242880
+    F16 gdn attn_norm.weight            n= 4096  nan=    0  zero=    0  min=0.4414  max=1.5156  mean=1.0525
+    Q8_1 gdn x_q8_1 PRE-rmsnorm          blocks=128  first4_scales=[0.015777588, 0.024261475, 0.019607544, 0.017211914]  nan=0
+    Q8_1 gdn x_q8_1 POST-rmsnorm         blocks=128  first4_scales=[0.016906738, 0.006500244, 0.0045661926, 0.0044517517]  nan=0
+    BYTES gdn attn_qkv first 4 rows       bytes=10240  nonzero=10233  first16=[233, 27, 230, 165, 133, 144, 103, 21, 58, 111, 130, 219, 70, 139, 212, 115]
+    F32 gdn qkv_mixed_f32               n= 2048  nan=    0  inf=  0  zero=    0  min=-4.2599  max=3.1364  mean=-0.0008
+    F32 gdn z_f32                       n= 1024  nan=    0  inf=  0  zero=    0  min=-4.5134  max=2.6427  mean=-0.0298
+    F32 gdn ssm_out_f32 (pre-cast)      n= 4096  nan=    0  inf=  0  zero=    0  min=-0.0297  max=0.3520  mean=0.0001
+    F16 gdn x_in                        n= 4096  nan=    0  zero=    0  min=-0.4529  max=7.3477  mean=0.0012
+    META attn_norm.dtype=F16 dims=[4096] bytes=8192
+    META attn_qkv.dtype=Q4_1 dims=[2048, 4096] bytes=5242880
+    F16 gdn attn_norm.weight            n= 4096  nan=    0  zero=    0  min=0.4414  max=1.5156  mean=1.0525
+    Q8_1 gdn x_q8_1 PRE-rmsnorm          blocks=128  first4_scales=[0.015777588, 0.024261475, 0.019607544, 0.017211914]  nan=0
+    Q8_1 gdn x_q8_1 POST-rmsnorm         blocks=128  first4_scales=[0.016906738, 0.006500244, 0.0045661926, 0.0044517517]  nan=0
+    BYTES gdn attn_qkv first 4 rows       bytes=10240  nonzero=10227  first16=[8, 29, 32, 170, 203, 89, 186, 141, 201, 58, 5, 78, 249, 236, 149, 75]
+    F32 gdn qkv_mixed_f32               n= 2048  nan=    0  inf=  0  zero=    0  min=-7.9795  max=6.9048  mean=0.0122
+    F32 gdn z_f32                       n= 1024  nan=    0  inf=  0  zero=    0  min=-2.8713  max=2.3493  mean=0.0608
+    F32 gdn ssm_out_f32 (pre-cast)      n= 4096  nan=    0  inf=  0  zero=    0  min=-0.0458  max=0.1257  mean=0.0000
+:1:rocdevice.cpp            :3332: 0545398749 us:  HW Exception Error
+:1:rocvirtual.hpp           :78  : 0545402362 us:  Device not Stable, while waiting for Signal =(0x7ce24ffbbc00) for 4000000 ns
+BENCH_RESULT model=Qwen3.5-9B-Q4_1.gguf arch=qwen35 weight_gib=9.53 status=warm_forward_failed err=gdn layer 1: cast ssm_out → partial_attn_out (TP): hip device error (719): hipModuleLaunchKernel: unspecified launch failure
+ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 6.88s
+

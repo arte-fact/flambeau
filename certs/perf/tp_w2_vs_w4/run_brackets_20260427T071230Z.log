@@ -1,0 +1,57 @@
+
+====================================================
+== devices=2 ==
+Mon Apr 27 07:12:30 UTC 2026
+
+running 1 test
+test bench_tp2_any_model ... BENCH_BEGIN model=Qwen3.5-9B-Q4_1.gguf
+  arch=qwen35 layers=32 hidden=4096
+BENCH_RESULT model=Qwen3.5-9B-Q4_1.gguf arch=qwen35 layers=32 hidden=4096 weight_gib=5.43 load_s=1.76 ctx_cap=4096 warm_argmax=11 nan=0 tg=64 decode_tok_s=67.43 last_id=30 status=ok
+ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 3.31s
+
+exit=0
+
+====================================================
+== devices=3 ==
+Mon Apr 27 07:12:33 UTC 2026
+
+running 1 test
+test bench_tp2_any_model ... BENCH_BEGIN model=Qwen3.5-9B-Q4_1.gguf
+  arch=qwen35 layers=32 hidden=4096
+BENCH_RESULT model=Qwen3.5-9B-Q4_1.gguf arch=qwen35 layers=32 hidden=4096 weight_gib=5.43 load_s=1.39 ctx_cap=4096 warm_argmax=11 nan=0 tg=64 decode_tok_s=51.24 last_id=30 status=ok
+ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 3.25s
+
+exit=0
+
+====================================================
+== devices=0,2 ==
+Mon Apr 27 07:12:37 UTC 2026
+
+running 1 test
+test bench_tp2_any_model ... BENCH_BEGIN model=Qwen3.5-9B-Q4_1.gguf
+  arch=qwen35 layers=32 hidden=4096
+BENCH_RESULT model=Qwen3.5-9B-Q4_1.gguf arch=qwen35 layers=32 hidden=4096 weight_gib=6.80 load_s=2.31 ctx_cap=4096 warm_argmax=11 nan=0 tg=64 decode_tok_s=70.01 last_id=5286 status=ok
+ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 4.05s
+
+exit=0
+
+====================================================
+== devices=1,3 ==
+Mon Apr 27 07:12:41 UTC 2026
+
+running 1 test
+test bench_tp2_any_model ... BENCH_BEGIN model=Qwen3.5-9B-Q4_1.gguf
+  arch=qwen35 layers=32 hidden=4096
+BENCH_RESULT model=Qwen3.5-9B-Q4_1.gguf arch=qwen35 layers=32 hidden=4096 weight_gib=6.80 load_s=1.84 ctx_cap=4096 warm_argmax=11 nan=0 tg=64 decode_tok_s=69.51 last_id=5286 status=ok
+ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 3.58s
+
+exit=0
+Mon Apr 27 07:12:45 UTC 2026

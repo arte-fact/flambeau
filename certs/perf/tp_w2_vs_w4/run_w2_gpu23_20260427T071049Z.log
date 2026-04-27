@@ -1,0 +1,13 @@
+== world=2 dense+GDN: Qwen3.5-9B-Q4_1 on GPUs 2,3 ==
+Mon Apr 27 07:10:49 UTC 2026
+
+running 1 test
+test bench_tp2_any_model ... BENCH_BEGIN model=Qwen3.5-9B-Q4_1.gguf
+  arch=qwen35 layers=32 hidden=4096
+BENCH_RESULT model=Qwen3.5-9B-Q4_1.gguf arch=qwen35 weight_gib=6.80 status=warm_forward_failed err=full-attn layer 11: hip device error (719): hipModuleLaunchKernel: unspecified launch failure
+ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 5.46s
+
+exit=0
+Mon Apr 27 07:10:56 UTC 2026

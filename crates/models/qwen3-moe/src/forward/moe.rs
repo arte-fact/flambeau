@@ -22,7 +22,6 @@ use anyhow::{bail, Context, Result};
 use flambeau_core::{Device, DevicePtr};
 use flambeau_ops::hip::{
     cast::{cast_f16_to_f32, cast_f32_to_f16},
-    mlp::swiglu_f32,
     moe::{
         indexed_moe_mmq_q4_k_down_tile8, indexed_moe_mmq_q4_k_down_turbo,
         indexed_moe_mmq_q4_k_gate_up_tile8, indexed_moe_mmq_q4_k_gate_up_turbo,
@@ -41,9 +40,8 @@ use flambeau_ops::hip::{
 use flambeau_quant::{BlockQ8_1, GgmlDType};
 
 use super::common::{
-    cast_and_quantize_f32_to_q8_1, mat_shape, run_indexed_moe_down,
-    run_indexed_moe_gate_up, run_mmvq_from_tensor, run_qmatmul_from_tensor, validate_moe_dtypes,
-    QK_K,
+    mat_shape, run_indexed_moe_down, run_indexed_moe_gate_up, run_mmvq_from_tensor,
+    run_qmatmul_from_tensor, validate_moe_dtypes, QK_K,
 };
 use crate::config::Qwen3MoEConfig;
 use crate::weights::DeviceTensor;

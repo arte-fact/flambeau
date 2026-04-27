@@ -9,6 +9,7 @@
 //!   2. Inter-rank spread = 0 bytes (V1 layout is symmetric).
 //!   3. Every shard carries `cfg.num_layers` per-layer entries.
 
+#![cfg(feature = "hip")]
 #![expect(
     clippy::undocumented_unsafe_blocks,
     reason = "test fixture: GGUF load + dispose only; dispose's unsafe \

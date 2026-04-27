@@ -59,6 +59,9 @@ pub mod sweep_causal_conv1d;
 pub mod sweep_gdn_step;
 
 #[cfg(feature = "hip")]
+pub mod sweep_gdn_step_alphabeta;
+
+#[cfg(feature = "hip")]
 pub mod sweep_cast;
 
 #[cfg(feature = "hip")]

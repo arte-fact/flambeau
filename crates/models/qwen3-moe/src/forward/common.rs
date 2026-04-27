@@ -6,19 +6,17 @@
 #![cfg(feature = "hip")]
 
 use anyhow::{bail, Context, Result};
-use flambeau_core::{CopyDirection, Device, DevicePtr, QDtype, Stream};
+use flambeau_core::{DevicePtr, QDtype};
 use flambeau_ops::hip::{
     qmatmul::{mmvq, qmatmul},
-    HipDevice, HipStream, OpsRegistry,
+    HipStream, OpsRegistry,
 };
 use flambeau_quant::GgmlDType;
 
-use flambeau_ops::hip::cast::cast_f32_to_f16;
 use flambeau_ops::hip::moe::{
     indexed_moe_mmvq_q4_0, indexed_moe_mmvq_q4_1, indexed_moe_mmvq_q4_k_gate_up,
     indexed_moe_mmvq_q4_k_r2, indexed_moe_mmvq_q5_k, indexed_moe_mmvq_q6_k, indexed_moe_mmvq_q8_0,
 };
-use flambeau_ops::hip::norm::quantize_f16_q8_1;
 
 use crate::weights::DeviceTensor;
 
@@ -229,54 +227,6 @@ pub(crate) fn run_indexed_moe_down(
         }
         _ => bail!("run_indexed_moe_down: unsupported down dtype {dtype:?} (expected Q4_K / Q5_K / Q6_K / Q8_0 / Q4_0 / Q4_1)"),
     }
-}
-
-/// Cast F32 → F16 then quantize F16 → Q8_1, in that order. The two-kernel
-/// pipeline is used on every MoE + shared-expert down-input path; a fused
-/// F32→Q8_1 kernel was tried (V2.x memory) and regressed by ~1% because the
-/// F32 quantise path lacks the packed fp16 max-reduction.
-///
-/// `label` is a short prefix that propagates into both step's error
-/// contexts so backtraces stay readable.
-///
-/// # Errors
-/// Returns an error if either kernel launch fails.
-pub(crate) fn cast_and_quantize_f32_to_q8_1(
-    ops: &OpsRegistry,
-    stream: &HipStream,
-    src_f32: DevicePtr,
-    tmp_f16: DevicePtr,
-    dst_q8_1: DevicePtr,
-    n_elems: usize,
-    label: &str,
-) -> Result<()> {
-    cast_f32_to_f16(ops, stream, src_f32, tmp_f16, n_elems)
-        .with_context(|| format!("{label}: cast f32 → f16"))?;
-    quantize_f16_q8_1(ops, stream, tmp_f16, dst_q8_1, n_elems)
-        .with_context(|| format!("{label}: quantize f16 → Q8_1"))
-}
-
-/// Write `[position]` as an i32 into the 4-byte `positions` scratch slot.
-/// Used by RoPE to pick the angle per token.
-pub(super) fn upload_position(
-    device: &HipDevice,
-    stream: &HipStream,
-    dst: DevicePtr,
-    position: i32,
-) -> Result<()> {
-    let host = [position];
-    // SAFETY: `dst` has 4 valid bytes; `host` is 4 valid host bytes.
-    unsafe {
-        device.memcpy_async(
-            stream,
-            CopyDirection::HostToDevice,
-            dst,
-            DevicePtr(host.as_ptr() as usize),
-            4,
-        )?;
-    }
-    stream.synchronize()?;
-    Ok(())
 }
 
 /// Map our `GgmlDType` (from GGUF) to the `QDtype` the qmatmul dispatcher

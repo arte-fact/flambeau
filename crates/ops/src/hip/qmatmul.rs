@@ -1148,6 +1148,18 @@ impl Recipe {
                 rows_per_block: 0,
                 mmq_tile: (64, 8),
             },
+            // V1-BENCH-C1: 4-warp LDS-tiled Q4_0 MMQ — port of the Q4_1
+            // 4warp_lds structure with bias-correction in the dot. Closes
+            // the 2.5× dense-prefill gap (27B-Q4_0 73 → ~190 tok/s pp4).
+            // MUST match mmq_q4_0_4warp_lds.cu's MMQ_Y=128, MMQ_X=64.
+            "qmatmul_q4_0_mmq_4warp_lds_gfx906" => Self {
+                kind: RecipeKind::MmqLdsX64,
+                stem: "mmq_q4_0_4warp_lds",
+                entry: "flambeau_mmq_q4_0_4warp_lds_q8_1",
+                threads: 0,
+                rows_per_block: 0,
+                mmq_tile: (128, 64),
+            },
             // V2.30.a: wave64 MMQ for Q5_0. Same tile shape + launch as Q4_0;
             // inner loop adds the 5th-bit `16·bit·y` DP4A term (V2.23's
             // mmvq_q5_0 pattern).

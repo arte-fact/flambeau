@@ -15,7 +15,7 @@ use flambeau_qwen3_moe::{Qwen3MoEConfig, Qwen3MoEShardedModel, Qwen3MoEShardedSe
 use flambeau_runtime::LayerAssignment;
 
 #[test]
-fn prefill_L_sweep() -> Result<()> {
+fn prefill_l_sweep() -> Result<()> {
     let path = std::path::Path::new("/artefact/models/Qwen3.5-27B-Q4_1.gguf");
     if !path.exists() { return Ok(()); }
     if device_count().unwrap_or(0) < 4 { return Ok(()); }

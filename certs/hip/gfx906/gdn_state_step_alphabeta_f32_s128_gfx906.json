@@ -1,0 +1,49 @@
+{
+  "schema_version": 1,
+  "impl_id": "gdn_state_step_alphabeta_f32_s128_gfx906",
+  "backend": "hip",
+  "arch": "gfx906",
+  "op": "gdn_state_step_alphabeta",
+  "dtype_weight": "F32",
+  "dtype_activation": "F32",
+  "tolerance_formula": "|err| <= 1e-5 vs unfused chain (alpha_beta + state_step)",
+  "results": [
+    {
+      "m": 32,
+      "k": 1,
+      "n": 2,
+      "seed": 3237943804,
+      "max_rel_err": 0.0,
+      "tolerance": 0.00001,
+      "pass": true
+    },
+    {
+      "m": 32,
+      "k": 8,
+      "n": 2,
+      "seed": 3237943923,
+      "max_rel_err": 0.0,
+      "tolerance": 0.00001,
+      "pass": true
+    },
+    {
+      "m": 4,
+      "k": 4,
+      "n": 1,
+      "seed": 3237942504,
+      "max_rel_err": 0.0,
+      "tolerance": 0.00001,
+      "pass": true
+    }
+  ],
+  "pass": true,
+  "emitted_at": "2026-04-27T09:56:57Z",
+  "rig": "threadreaper-gfx906",
+  "pmc": {
+    "vgpr_count": 27,
+    "sgpr_count": null,
+    "waves_per_simd": 9,
+    "mem_busy_pct": null,
+    "valu_busy_pct": null
+  }
+}

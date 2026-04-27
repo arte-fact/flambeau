@@ -37,6 +37,9 @@ pub mod sharded;
 pub mod tp_sharded;
 
 #[cfg(feature = "hip")]
+pub mod hybrid;
+
+#[cfg(feature = "hip")]
 pub mod weights;
 
 #[cfg(feature = "hip")]
@@ -49,7 +52,14 @@ pub use sharded::{
 
 #[cfg(feature = "hip")]
 pub use tp_sharded::{
-    Qwen3MoETpModel, Qwen3MoETpRankShard, Qwen3MoETpSession, Topology, TpLayerTensor,
+    Qwen3MoETpModel, Qwen3MoETpRankShard, Qwen3MoETpSession, Topology, TpLayerTensor, TpLoadOpts,
+};
+
+#[cfg(feature = "hip")]
+pub use hybrid::{
+    HybridMeshSpec, Qwen3MoEHybridModel, Qwen3MoEHybridSession, Qwen3MoEHybridStage,
+    Qwen3MoEHybridStageSession, ShardedForwardOneTokenScratchHybrid,
+    ShardedForwardPrefillScratchHybrid,
 };
 
 #[cfg(feature = "hip")]
