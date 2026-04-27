@@ -173,32 +173,30 @@ pub const QMATMUL_GFX906: &[KernelDescriptor] = &[
     },
     KernelDescriptor {
         op_name: "QMatMul",
-        // V2.14.b: llamacpp-turbo 4-warp LDS-tiled Q4_K MMQ port. 256 threads
-        // (4 warps × 64), MMQ_Y=16, MMQ_X=16, double-buffered Y LDS per
-        // super-block. Closes the ~1.4× gap to turbo's pp512=1012.80 identified
-        // in candle/bench/qwen36_3way_findings.md. Never matched by default
-        // dispatch (m_range MAX..MAX); lookup-only until V2.14.d A/B.
-        // Indexed-MoE wrapping lands in V2.14.c.
+        // V2.14.b kernel, promoted V1-BENCH-#112 (2026-04-27): llamacpp-turbo
+        // 4-warp LDS-tiled Q4_K MMQ port. 256 threads (4 warps × 64), MMQ_Y=128,
+        // MMQ_X=16, double-buffered Y LDS per super-block. Owns m >= 128; the
+        // wave64 row below covers m = 32..127. Static dispatch is first-match
+        // — keep this entry ABOVE the wave64 row (V1-BENCH-C1 lesson).
         impl_id: "qmatmul_q4_K_mmq_turbo_gfx906",
         backend: "hip",
         arch: "gfx906",
         dtype_weight: QDtype::Q4_K,
         dtype_activation: QDtype::Q8_1,
-        m_range: (usize::MAX, usize::MAX),
+        m_range: (128, usize::MAX),
         cert_rel_path: "certs/hip/gfx906/qmatmul_q4_K_mmq_turbo_gfx906.json",
     },
     KernelDescriptor {
         op_name: "QMatMul",
-        // V2.3.b.2: wave64 MMQ replaces the V1.4 F32-tile placeholder
-        // (`qmatmul_q4_K_mmq_4warp_lds_gfx906`) at m >= 128. Kernel is the
-        // candle port `mmq_q4_K_wave64.cu`; structural mirror of the V2.2.d
-        // Q5_K wave64 with flat 4-bit nibble decode (no qh merge).
+        // V2.3.b.2 candle port `mmq_q4_K_wave64.cu`; structural mirror of the
+        // V2.2.d Q5_K wave64 with flat 4-bit nibble decode (no qh merge).
+        // Owns m = 32..127 since V1-BENCH-#112 promoted Q4_K turbo to (128, MAX).
         impl_id: "qmatmul_q4_K_mmq_wave64_gfx906",
         backend: "hip",
         arch: "gfx906",
         dtype_weight: QDtype::Q4_K,
         dtype_activation: QDtype::Q8_1,
-        m_range: (128, usize::MAX),
+        m_range: (32, 127),
         cert_rel_path: "certs/hip/gfx906/qmatmul_q4_K_mmq_wave64_gfx906.json",
     },
     KernelDescriptor {

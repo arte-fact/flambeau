@@ -808,6 +808,22 @@ struct Recipe {
     mmq_tile: (u32, u32),
 }
 
+/// MmqLdsX64-only per-recipe constants: weight block elements + dynamic LDS
+/// bytes. Indexed by recipe `stem`. Centralised here (not on Recipe) so the
+/// 30+ MMVQ/MmqWave64 recipes don't carry irrelevant fields.
+fn mmq_lds_x64_params(stem: &str) -> Result<(u32, u32)> {
+    Ok(match stem {
+        // Q4_0 / Q4_1 4warp_lds: MMQ_Y=128, MMQ_X=64, block_elems=32. LDS
+        // budget per V2.2.d.P5 derivation in mmq_lds_x64_launch.
+        "mmq_q4_0_4warp_lds" | "mmq_q4_1_4warp_lds" => (32, 7584 * 4),
+        // Q4_K turbo: MMQ_Y=128, MMQ_X=16, block_elems=256 (QK_K). LDS:
+        // tile_y(MMQ_X*36=576) + x_qs(4224) + x_dm(128 half2=128 ints) +
+        // x_sc(528) = 5456 ints = 21824 B; round up to 22528 B.
+        "mmq_q4_K_turbo" => (256, 22528),
+        other => bail!("mmq_lds_x64_params: no entry for stem {other}"),
+    })
+}
+
 impl Recipe {
     fn from_impl_id(impl_id: &str) -> Result<Self> {
         // A/B variant override: FLAMBEAU_VARIANT=dp4a swaps MMVQ kernels to
@@ -1179,6 +1195,20 @@ impl Recipe {
                 rows_per_block: 0,
                 mmq_tile: (16, 8),
             },
+            // V2.14.b kernel, wired V1-BENCH-#112 (2026-04-27): llamacpp-turbo
+            // 4-warp LDS-tiled Q4_K MMQ with DS4 Q8_1 activation. MMQ_Y=128,
+            // MMQ_X=16, NWARPS=4 → 256 threads per (64, 4, 1) block. Promoted
+            // to default at m≥128 (Q4_K wave64 owns m=32..127 below). Dynamic
+            // LDS = 22528 B; weight block = QK_K = 256 elems.
+            "qmatmul_q4_K_mmq_turbo_gfx906" => Self {
+                kind: RecipeKind::MmqLdsX64,
+                stem: "mmq_q4_K_turbo",
+                entry: "flambeau_mmq_q4_K_turbo_q8_1",
+                threads: 0,  // unused for MmqLdsX64
+                rows_per_block: 0,
+                // MMQ_Y=128, MMQ_X=16 (must match mmq_q4_K_turbo.cu).
+                mmq_tile: (128, 16),
+            },
             "qmatmul_q4_K_mmq_wave64_gfx906" => Self {
                 kind: RecipeKind::MmqWave64,
                 stem: "mmq_q4_K_wave64",
@@ -1311,10 +1341,10 @@ fn mmq_lds_x64_launch(
     //   nrows_x = N (weight rows)
     //   ncols_y = M (batch rows)
     //   stride_col_y = ncols_y (Y is (big_k, col) row-major in blocks)
-    //   stride_row_x = n_blocks_per_row (X row stride in Q4_1 blocks)
+    //   stride_row_x = n_blocks_per_row (X row stride in weight blocks)
     //   nrows_dst    = n_rows
-    const QK4_1: usize = 32;
-    let ncols_x = (n_blocks_per_row * QK4_1) as i32;
+    let (block_elems_w, shared_bytes) = mmq_lds_x64_params(recipe.stem)?;
+    let ncols_x = (n_blocks_per_row * block_elems_w as usize) as i32;
     let nrows_x = n_rows as i32;
     let ncols_y = n_batches as i32;
     let stride_col_y = n_batches as i32;
@@ -1335,19 +1365,9 @@ fn mmq_lds_x64_launch(
     args.push(&stride_row_x);
     args.push(&nrows_dst);
 
-    // Dynamic LDS byte budget. Must match mmq_q4_1_4warp_lds.cu exactly.
-    // Layout (int-addressed):
-    //   tile_y: pad_up(mmq_x * MMQ_TILE_Y_K, MMQ_NWARPS * WARP_SIZE) ints
-    //   x_qs:   MMQ_Y * (MMQ_TILE_NE_K + 1) ints
-    //   x_dm:   (MMQ_Y * (MMQ_TILE_NE_K / QI4_1) + MMQ_Y / QI4_1) half2
-    // With MMQ_Y=128, MMQ_X=64, MMQ_TILE_NE_K=32, QI4_1=4, QI8_1=8,
-    //      MMQ_TILE_Y_K = 32 + 32/8 = 36, MMQ_NWARPS=4, WARP_SIZE=64:
-    //   tile_y = pad_up(64*36, 256) = 2304 ints
-    //   x_qs   = 128 * 33           = 4224 ints
-    //   x_dm   = 128*8 + 32         = 1056 half2 = 1056 ints (4 B each)
-    // Total ints = 7584  →  30_336 B
-    const SHARED_BYTES: u32 = 7584 * 4;
-
+    // Dynamic LDS byte budget — sourced from `mmq_lds_x64_params`. Must match
+    // each kernel's exact `extern __shared__` budget; see that function's
+    // per-stem comment for the derivation.
     let (rows_per_tile, batches_per_tile) = recipe.mmq_tile;
     let grid_x = (n_rows as u32).div_ceil(rows_per_tile);
     let grid_y = (n_batches as u32).div_ceil(batches_per_tile);
@@ -1355,7 +1375,7 @@ fn mmq_lds_x64_launch(
         grid: (grid_x, grid_y, 1),
         // 2D block: (WARP_SIZE, MMQ_NWARPS, 1) = (64, 4, 1).
         block: (64, 4, 1),
-        shared_bytes: SHARED_BYTES,
+        shared_bytes,
     };
     unsafe { kernel.launch(stream, cfg, args)? };
     Ok(())

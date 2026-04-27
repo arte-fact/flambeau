@@ -151,9 +151,17 @@ notes   = "V2.30.a — wave64 MMQ for Q5_0. Same tile shape (MMQ_Y=64, TILE_N=8)
 dtype   = "Q4_K"
 dtype_q = "Q8_1"
 shape   = { m = ">=128", k = "any", n = "any" }
+impl    = "qmatmul_q4_K_mmq_turbo_gfx906"
+cert    = "certs/hip/gfx906/qmatmul_q4_K_mmq_turbo_gfx906.json"
+notes   = "V1-BENCH-#112 (2026-04-27) — promoted V2.14.b llamacpp-turbo 4-warp LDS-tiled Q4_K MMQ to default at m>=128. MMQ_Y=128, MMQ_X=16, NWARPS=4 (256 threads, (64,4,1) block), DS4 Q8_1 activation, 22528 B dynamic LDS, double-buffered Y per half-super-block. Closes the ~1.4× gap to turbo's pp512=1012.80 measured in candle/bench/qwen36_3way_findings.md. Wave64 row below now owns m=32..127."
+
+[[qmatmul_mmq]]
+dtype   = "Q4_K"
+dtype_q = "Q8_1"
+shape   = { m = "32..127", k = "any", n = "any" }
 impl    = "qmatmul_q4_K_mmq_wave64_gfx906"
 cert    = "certs/hip/gfx906/qmatmul_q4_K_mmq_wave64_gfx906.json"
-notes   = "V2.3.b.2 — wave64 MMQ port of candle's `mul_mat_q4_K_gfx906_impl_fast`. Replaces V1.4's F32-tile placeholder. Consumes standard flambeau_block_q8_1 (NOT DS4 MMQ), so no upstream quantise change. 1 warp / 64 rows × 8 cols per tile, DP4A inner — same launch shape as Q5_K wave64."
+notes   = "V2.3.b.2 — wave64 MMQ port of candle's `mul_mat_q4_K_gfx906_impl_fast`. Replaces V1.4's F32-tile placeholder. Consumes standard flambeau_block_q8_1 (NOT DS4 MMQ), so no upstream quantise change. 1 warp / 64 rows × 8 cols per tile, DP4A inner — same launch shape as Q5_K wave64. Owns m=32..127 (Q4_K turbo above takes m>=128)."
 
 [[qmatmul_mmq]]
 dtype   = "Q6_K"
