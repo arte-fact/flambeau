@@ -40,7 +40,7 @@ pub enum Qwen3MoEConfigError {
 /// scaffold: config parser accepts it, but the weight loader + forward path
 /// still assume MoE — a qwen35 GGUF will fail to LOAD until the dense-FFN
 /// paths are wired (see `doc/V2-BACKLOG.md#V2.2`).
-pub const SUPPORTED_ARCHS: &[&str] = &["qwen35moe", "qwen36moe", "qwen35"];
+pub const SUPPORTED_ARCHS: &[&str] = &["qwen35moe", "qwen36moe", "qwen35", "qwen3next"];
 
 /// Which attention family the model uses.
 ///
