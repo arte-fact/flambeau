@@ -12,7 +12,7 @@
 //! `flambeau-backend-hip` and would introduce a circular dep.
 
 use flambeau_core::{CopyDirection, DevicePtr};
-use flambeau_runtime::{F16Contig, KvCache};
+use flambeau_runtime::{CacheLayout, KvCache};
 
 use crate::graph_capture::MemcpySlot;
 use crate::{HipDevice, HipStream};
@@ -36,8 +36,8 @@ use crate::{HipDevice, HipStream};
 /// Same contract as `KvCache::append`: `k_new` and `v_new` must point
 /// to at least `n_new * n_heads * head_dim * 2` valid device bytes on
 /// the same device as the cache.
-pub unsafe fn kv_cache_append_hip_slot(
-    cache: &mut KvCache<F16Contig, HipDevice>,
+pub unsafe fn kv_cache_append_hip_slot<L: CacheLayout>(
+    cache: &mut KvCache<L, HipDevice>,
     device: &HipDevice,
     stream: &HipStream,
     k_new: DevicePtr,

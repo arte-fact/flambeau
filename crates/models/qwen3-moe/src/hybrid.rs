@@ -285,6 +285,7 @@ impl Qwen3MoEHybridStageSession {
             for c in rank_caches {
                 match c {
                     LayerCache::FullAttn(kv) => total += kv.bytes_per_tensor() * 2,
+                    LayerCache::FullAttnQ8(kv) => total += kv.bytes_per_tensor() * 2,
                     LayerCache::Gdn(g) => total += g.state_bytes + g.conv_history_bytes,
                 }
             }

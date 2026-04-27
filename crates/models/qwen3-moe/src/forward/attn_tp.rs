@@ -43,15 +43,15 @@ use anyhow::{bail, Context, Result};
 use flambeau_backend_hip::{HipDevice, HipStream};
 use flambeau_core::{CopyDirection, Device, DevicePtr};
 use flambeau_ops::hip::{
-    attention::{attention_decode_f16_slots, split_q_gate_f16},
+    attention::{attention_decode_f16_slots, attention_decode_q8_kv, split_q_gate_f16},
     cast::cast_f32_to_f16,
     mlp::sigmoid_mul_f16,
-    norm::{quantize_f16_q8_1, rmsnorm_f16, rmsnorm_quant_q8_1},
+    norm::{quantize_f16_q8_0, quantize_f16_q8_1, rmsnorm_f16, rmsnorm_quant_q8_1},
     pe::rope_neox_partial_f16,
     qmatmul::{mmvq, mmvq_q4_0_kv_f16dst},
     OpsRegistry,
 };
-use flambeau_runtime::KvCache;
+use flambeau_runtime::{CacheLayout, KvCache, Q8Contig};
 
 use super::attn::FullAttnScratch;
 use super::common::{mat_shape, qdtype_of};
@@ -84,7 +84,7 @@ use crate::weights::DeviceTensor;
     reason = "matches super::attn::forward_full_attn_decode's flat parameter list — \
               same rationale: avoid struct copies on the decode hot path."
 )]
-pub fn forward_full_attn_decode_tp(
+pub fn forward_full_attn_decode_tp<L: CacheLayout>(
     ops: &OpsRegistry,
     stream: &HipStream,
     device: &HipDevice,
@@ -96,7 +96,7 @@ pub fn forward_full_attn_decode_tp(
     attn_output: &DeviceTensor,
     attn_q_norm: &DeviceTensor,
     attn_k_norm: &DeviceTensor,
-    kv_cache: &mut KvCache<flambeau_runtime::F16Contig, HipDevice>,
+    kv_cache: &mut KvCache<L, HipDevice>,
     scratch: &mut FullAttnScratch,
     x_in: DevicePtr,
     partial_attn_out: DevicePtr,
@@ -295,34 +295,52 @@ pub fn forward_full_attn_decode_tp(
     )
     .context("rope K (TP)")?;
 
-    // 8. Append per-rank K, V to the per-rank KV cache.
+    // 8. Append per-rank K, V to the per-rank KV cache. V1-BENCH-#116
+    // — Q8Contig path quantises K/V (F16) → Q8_0 staging first.
     // SAFETY: scratch.k_f16 / scratch.v_f16 are contiguous F16
     // [local_n_kv_heads, head_dim] and the KV cache was sized for
-    // local_n_kv_heads at construction.
-    unsafe {
-        kv_cache
-            .append(device, stream, scratch.k_f16, scratch.v_f16, 1)
-            .map_err(|e| anyhow::anyhow!("kv_cache.append (TP): {e}"))?;
+    // local_n_kv_heads at construction. For Q8 the staging buffers
+    // hold (local_n_kv_heads * head_dim / 32) Q8_0 blocks.
+    let kv_layout = L::NAME;
+    if kv_layout == Q8Contig::NAME {
+        let kv_elems = local_n_kv_heads * head_dim;
+        quantize_f16_q8_0(ops, stream, scratch.k_f16, scratch.k_q8_0, kv_elems)
+            .context("quantize attn_k → q8_0 (TP)")?;
+        quantize_f16_q8_0(ops, stream, scratch.v_f16, scratch.v_q8_0, kv_elems)
+            .context("quantize attn_v → q8_0 (TP)")?;
+        unsafe {
+            kv_cache
+                .append(device, stream, scratch.k_q8_0, scratch.v_q8_0, 1)
+                .map_err(|e| anyhow::anyhow!("kv_cache.append q8 (TP): {e}"))?;
+        }
+    } else {
+        unsafe {
+            kv_cache
+                .append(device, stream, scratch.k_f16, scratch.v_f16, 1)
+                .map_err(|e| anyhow::anyhow!("kv_cache.append (TP): {e}"))?;
+        }
     }
 
     // 9. Per-rank attention against the local KV slab.
     let n_tokens_kv = kv_cache.current_tokens();
     let scale = (head_dim as f32).sqrt().recip();
-    attention_decode_f16_slots(
-        ops,
-        stream,
-        scratch.q_f16,
-        kv_cache.k_buffer(),
-        kv_cache.v_buffer(),
-        scratch.attn_out_f16,
-        local_n_heads,
-        local_n_kv_heads,
-        head_dim,
-        n_tokens_kv,
-        scale,
-        None,
-    )
-    .context("attention_decode_f16 (TP)")?;
+    if kv_layout == Q8Contig::NAME {
+        attention_decode_q8_kv(
+            ops, stream, scratch.q_f16,
+            kv_cache.k_buffer(), kv_cache.v_buffer(),
+            scratch.attn_out_f16,
+            local_n_heads, local_n_kv_heads, head_dim, n_tokens_kv, scale,
+        )
+        .context("attention_decode_q8_kv (TP)")?;
+    } else {
+        attention_decode_f16_slots(
+            ops, stream, scratch.q_f16,
+            kv_cache.k_buffer(), kv_cache.v_buffer(),
+            scratch.attn_out_f16,
+            local_n_heads, local_n_kv_heads, head_dim, n_tokens_kv, scale, None,
+        )
+        .context("attention_decode_f16 (TP)")?;
+    }
 
     // 10. Sigmoid-gate (NOT SiLU — see V1.7.4.b root-cause note).
     let gated_elems = local_q_width;

@@ -12,17 +12,18 @@ use flambeau_backend_hip::{kv_cache_append_hip_slot, MemcpySlot, ScalarSlot};
 use flambeau_core::{CopyDirection, Device, DevicePtr};
 use flambeau_ops::hip::{
     attention::{
-        attention_decode_f16_slots, attention_prefill_f16_slots, split_q_gate_f16,
+        attention_decode_f16_slots, attention_decode_q8_kv, attention_prefill_f16_slots,
+        split_q_gate_f16,
     },
     cast::cast_f32_to_f16,
     mlp::sigmoid_mul_f16,
-    norm::{quantize_f16_q8_1, quantize_f16_q8_1_mmq, rmsnorm_f16, rmsnorm_quant_q8_1},
+    norm::{quantize_f16_q8_0, quantize_f16_q8_1, quantize_f16_q8_1_mmq, rmsnorm_f16, rmsnorm_quant_q8_1},
     pe::rope_neox_partial_f16,
     qmatmul::{mmvq, mmvq_q8_0_gate_up, qmatmul},
     HipDevice, HipStream, OpsRegistry,
 };
 use flambeau_quant::BlockQ8_1;
-use flambeau_runtime::KvCache;
+use flambeau_runtime::{CacheLayout, F16Contig, KvCache, Q8Contig};
 
 use super::common::{mat_shape, qdtype_of};
 use crate::config::Qwen3MoEConfig;
@@ -41,6 +42,12 @@ pub struct FullAttnScratch {
     pub gate_f16: DevicePtr,       // F16 [n_heads * head_dim]
     pub k_f16: DevicePtr,          // F16 [n_kv_heads * head_dim]
     pub v_f16: DevicePtr,          // F16 [n_kv_heads * head_dim]
+    /// V1-BENCH-#116a — Q8_0 staging for KvCache<Q8Contig>. Sized for
+    /// `n_kv_heads * head_dim / 32` Q8_0 blocks (18 B each). Unused on the
+    /// F16-KV path; tiny relative to the F16 buffers (16× smaller per-row
+    /// since 18 B vs 32 B per block).
+    pub k_q8_0: DevicePtr,         // Q8_0 blocks [n_kv_heads * head_dim / 32]
+    pub v_q8_0: DevicePtr,         // Q8_0 blocks [n_kv_heads * head_dim / 32]
     pub attn_out_f16: DevicePtr,   // F16 [n_heads * head_dim]
     pub gated_out_f16: DevicePtr,  // F16 [n_heads * head_dim]
     pub positions: DevicePtr,      // i32 [1] — position for the current token
@@ -67,6 +74,7 @@ pub struct FullAttnScratch {
     q_fused_bytes: usize,
     qk_bytes: usize,
     kv_bytes: usize,
+    kv_q8_0_bytes: usize,
     attn_bytes: usize,
     positions_bytes: usize,
     splitk_ms_bytes: usize,
@@ -109,6 +117,13 @@ impl FullAttnScratch {
         let q_fused_bytes = q_fused_width * 2;
         let qk_bytes = q_width * 2;
         let kv_bytes = kv_width * 2;
+        // V1-BENCH-#116a — Q8_0 staging for the q8_contig KV path. Each
+        // 32-element block is 18 B (2-byte fp16 scale + 32 int8). Allocated
+        // unconditionally so dispatch on L::NAME can pick the right buffer
+        // without touching scratch construction; the size delta vs F16 is
+        // ~10 % of `kv_bytes`.
+        assert!(kv_width % 32 == 0, "kv_width must be a multiple of QK8_0=32 for Q8 KV staging");
+        let kv_q8_0_bytes = (kv_width / 32) * 18;
         let attn_bytes = q_width * 2;
         let positions_bytes = 4;
         // splitk partials: f32 × [n_heads, MAX_CHUNKS] (m, s) and
@@ -124,6 +139,8 @@ impl FullAttnScratch {
         let gate_f16 = device.alloc(qk_bytes)?;
         let k_f16 = device.alloc(kv_bytes)?;
         let v_f16 = device.alloc(kv_bytes)?;
+        let k_q8_0 = device.alloc(kv_q8_0_bytes)?;
+        let v_q8_0 = device.alloc(kv_q8_0_bytes)?;
         let attn_out_f16 = device.alloc(attn_bytes)?;
         let gated_out_f16 = device.alloc(attn_bytes)?;
         let positions = device.alloc(positions_bytes)?;
@@ -140,6 +157,8 @@ impl FullAttnScratch {
             gate_f16,
             k_f16,
             v_f16,
+            k_q8_0,
+            v_q8_0,
             attn_out_f16,
             gated_out_f16,
             positions,
@@ -153,6 +172,7 @@ impl FullAttnScratch {
             q_fused_bytes,
             qk_bytes,
             kv_bytes,
+            kv_q8_0_bytes,
             attn_bytes,
             positions_bytes,
             splitk_ms_bytes,
@@ -176,6 +196,8 @@ impl FullAttnScratch {
             device.dealloc(self.gate_f16, self.qk_bytes)?;
             device.dealloc(self.k_f16, self.kv_bytes)?;
             device.dealloc(self.v_f16, self.kv_bytes)?;
+            device.dealloc(self.k_q8_0, self.kv_q8_0_bytes)?;
+            device.dealloc(self.v_q8_0, self.kv_q8_0_bytes)?;
             device.dealloc(self.attn_out_f16, self.attn_bytes)?;
             device.dealloc(self.gated_out_f16, self.attn_bytes)?;
             device.dealloc(self.positions, self.positions_bytes)?;
@@ -223,7 +245,7 @@ pub struct AttnDecodeSlots {
     pub v_append_slot: MemcpySlot,
 }
 
-pub fn forward_full_attn_decode(
+pub fn forward_full_attn_decode<L: CacheLayout>(
     ops: &OpsRegistry,
     stream: &HipStream,
     device: &HipDevice,
@@ -231,7 +253,7 @@ pub fn forward_full_attn_decode(
     attn_norm: &DeviceTensor,
     post_attn_norm: Option<&DeviceTensor>,
     weights: &FullAttnWeights,
-    kv_cache: &mut KvCache<flambeau_runtime::F16Contig, HipDevice>,
+    kv_cache: &mut KvCache<L, HipDevice>,
     scratch: &mut FullAttnScratch,
     x_in: DevicePtr,
     delta_out: DevicePtr,
@@ -440,8 +462,20 @@ pub fn forward_full_attn_decode(
     .context("rope K")?;
 
     // 8. Append K, V to the KV cache at the tail slot.
-    // SAFETY: scratch.k_f16 and v_f16 are contiguous F16 `[n_kv_heads, head_dim]`.
+    //
+    // V1-BENCH-#116 — generic over `L: CacheLayout`. F16Contig appends
+    // F16 K/V directly. Q8Contig quantises K/V (F16) → Q8_0 staging
+    // first, then appends 18 B/block. Graph-capture slots are F16-only
+    // (no Q8 capture path yet); Q8 + slots is rejected.
+    let kv_layout = L::NAME;
     if let Some(AttnDecodeSlots { k_append_slot, v_append_slot, .. }) = slots {
+        if kv_layout != F16Contig::NAME {
+            bail!(
+                "forward_full_attn_decode: graph-capture slots are F16-only; \
+                 KV layout {kv_layout} not supported under capture"
+            );
+        }
+        // SAFETY: scratch.k_f16 and v_f16 are contiguous F16 `[n_kv_heads, head_dim]`.
         // V2.27.a-i3 — capture-tagged append so dst can be retargeted
         // per replay via HipGraphExec::set_memcpy_slot.
         unsafe {
@@ -456,7 +490,24 @@ pub fn forward_full_attn_decode(
                 v_append_slot,
             )?;
         }
+    } else if kv_layout == Q8Contig::NAME {
+        let kv_elems = n_kv_heads * head_dim;
+        quantize_f16_q8_0(ops, stream, scratch.k_f16, scratch.k_q8_0, kv_elems)
+            .context("quantize attn_k → q8_0")?;
+        quantize_f16_q8_0(ops, stream, scratch.v_f16, scratch.v_q8_0, kv_elems)
+            .context("quantize attn_v → q8_0")?;
+        // SAFETY: k_q8_0/v_q8_0 hold (n_kv_heads * head_dim / 32) Q8_0
+        // blocks (18 B each). KvCache<Q8Contig>::append expects exactly
+        // `n_new * n_heads * Q8Contig::bytes_per_row(head_dim)` bytes,
+        // which equals `n_new * n_heads * (head_dim/32) * 18` —
+        // matches `kv_q8_0_bytes` for n_new=1.
+        unsafe {
+            kv_cache
+                .append(device, stream, scratch.k_q8_0, scratch.v_q8_0, 1)
+                .map_err(|e| anyhow::anyhow!("kv_cache.append (q8): {e}"))?;
+        }
     } else {
+        // SAFETY: scratch.k_f16 and v_f16 are contiguous F16 `[n_kv_heads, head_dim]`.
         unsafe {
             kv_cache
                 .append(device, stream, scratch.k_f16, scratch.v_f16, 1)
@@ -471,16 +522,13 @@ pub fn forward_full_attn_decode(
     // kernel hits 27 % CU occupancy (16 heads × 1 block on 60 CUs) and
     // serialises over n_tokens_kv per block; at n_tokens=2048 that's 2647 µs
     // vs split-K's 340 µs (7.78×). FLAMBEAU_VARIANT=baseline opts out.
+    //
+    // V1-BENCH-#116 — split-K is F16-only; Q8Contig falls through to the
+    // single-pass `attention_decode_q8_kv` kernel.
     let n_tokens_kv = kv_cache.current_tokens();
     let scale = (head_dim as f32).sqrt().recip();
-    // V2.27.a-i3 — force single-pass when under graph capture. split-K
-    // has per-call chunk_size/n_chunks params that change with
-    // n_tokens_kv, which graph capture can't retarget cleanly. For
-    // capture mode we accept the single-pass perf profile (fine at
-    // short/medium contexts; split-K advantage kicks in past ~256
-    // tokens which is out of scope for the initial decode-capture
-    // validation).
-    let use_splitk = slots.is_none()
+    let use_splitk = kv_layout == F16Contig::NAME
+        && slots.is_none()
         && std::env::var("FLAMBEAU_VARIANT").as_deref() != Ok("baseline")
         && n_tokens_kv > 256;
     if use_splitk {
@@ -508,6 +556,21 @@ pub fn forward_full_attn_decode(
             scale,
         )
         .context("attention_decode_f16_splitk")?;
+    } else if kv_layout == Q8Contig::NAME {
+        attention_decode_q8_kv(
+            ops,
+            stream,
+            scratch.q_f16,
+            kv_cache.k_buffer(),
+            kv_cache.v_buffer(),
+            scratch.attn_out_f16,
+            n_heads,
+            n_kv_heads,
+            head_dim,
+            n_tokens_kv,
+            scale,
+        )
+        .context("attention_decode_q8_kv")?;
     } else {
         let n_tokens_kv_slot = slots.map(|s| s.n_tokens_kv_slot);
         attention_decode_f16_slots(
@@ -581,6 +644,11 @@ pub fn forward_full_attn_decode(
 /// Route a `LayerCache` entry through the full-attn forward, pulling the
 /// correct `KvCache` out of the enum. Fails if the layer is actually a
 /// GDN layer (caller dispatch error).
+///
+/// V1-BENCH-#116 — dispatches on the cache variant (F16Contig or Q8Contig)
+/// to the same generic `forward_full_attn_decode<L>` body; the compiler
+/// monomorphises and the runtime branch in the body picks the right
+/// quantise + attention kernels.
 pub fn forward_full_attn_layer_decode(
     ops: &OpsRegistry,
     stream: &HipStream,
@@ -594,33 +662,28 @@ pub fn forward_full_attn_layer_decode(
     position: usize,
     slots: Option<AttnDecodeSlots>,
 ) -> Result<()> {
-    let LayerCache::FullAttn(kv) = layer_cache else {
-        bail!(
-            "layer {} is not a full-attn layer (cache variant mismatch)",
-            layer_weights.layer_idx
-        );
-    };
     let crate::weights::AttnWeights::FullAttn(fa) = &layer_weights.attn else {
         bail!(
             "layer {} weights are not FullAttn variant",
             layer_weights.layer_idx
         );
     };
-    forward_full_attn_decode(
-        ops,
-        stream,
-        device,
-        cfg,
-        &layer_weights.attn_norm,
-        layer_weights.post_attention_norm.as_ref(),
-        fa,
-        kv,
-        scratch,
-        x_in,
-        delta_out,
-        position,
-        slots,
-    )
+    match layer_cache {
+        LayerCache::FullAttn(kv) => forward_full_attn_decode(
+            ops, stream, device, cfg,
+            &layer_weights.attn_norm, layer_weights.post_attention_norm.as_ref(),
+            fa, kv, scratch, x_in, delta_out, position, slots,
+        ),
+        LayerCache::FullAttnQ8(kv) => forward_full_attn_decode(
+            ops, stream, device, cfg,
+            &layer_weights.attn_norm, layer_weights.post_attention_norm.as_ref(),
+            fa, kv, scratch, x_in, delta_out, position, slots,
+        ),
+        LayerCache::Gdn(_) => bail!(
+            "layer {} is not a full-attn layer (cache variant mismatch)",
+            layer_weights.layer_idx
+        ),
+    }
 }
 
 
@@ -1233,14 +1296,14 @@ pub fn forward_full_attn_prefill(
 // fine at 4.11 GiB/rank for Qwen3-Coder).
 // ---------------------------------------------------------------------------
 
-pub fn forward_dense_attn_decode(
+pub fn forward_dense_attn_decode<L: CacheLayout>(
     ops: &OpsRegistry,
     stream: &HipStream,
     device: &HipDevice,
     cfg: &Qwen3MoEConfig,
     attn_norm: &DeviceTensor,
     weights: &DenseAttnWeights,
-    kv_cache: &mut KvCache<flambeau_runtime::F16Contig, HipDevice>,
+    kv_cache: &mut KvCache<L, HipDevice>,
     scratch: &mut FullAttnScratch,
     x_in: DevicePtr,
     delta_out: DevicePtr,
@@ -1413,14 +1476,32 @@ pub fn forward_dense_attn_decode(
     )
     .context("dense rope K")?;
 
-    // 6. KV append.
+    // 6. KV append. V1-BENCH-#116 — same dispatch as gated full-attn.
+    let kv_layout = L::NAME;
     if let Some(AttnDecodeSlots { k_append_slot, v_append_slot, .. }) = slots {
+        if kv_layout != F16Contig::NAME {
+            bail!(
+                "forward_dense_attn_decode: graph-capture slots are F16-only; \
+                 KV layout {kv_layout} not supported under capture"
+            );
+        }
         unsafe {
             kv_cache_append_hip_slot(
                 kv_cache, device, stream,
                 scratch.k_f16, scratch.v_f16, 1,
                 k_append_slot, v_append_slot,
             )?;
+        }
+    } else if kv_layout == Q8Contig::NAME {
+        let kv_elems = n_kv_heads * head_dim;
+        quantize_f16_q8_0(ops, stream, scratch.k_f16, scratch.k_q8_0, kv_elems)
+            .context("dense quantize attn_k → q8_0")?;
+        quantize_f16_q8_0(ops, stream, scratch.v_f16, scratch.v_q8_0, kv_elems)
+            .context("dense quantize attn_v → q8_0")?;
+        unsafe {
+            kv_cache
+                .append(device, stream, scratch.k_q8_0, scratch.v_q8_0, 1)
+                .map_err(|e| anyhow::anyhow!("dense kv_cache.append (q8): {e}"))?;
         }
     } else {
         unsafe {
@@ -1430,10 +1511,12 @@ pub fn forward_dense_attn_decode(
         }
     }
 
-    // 7. Attention decode. Same kernel as full-attn path (F16Contig KV).
+    // 7. Attention decode. V1-BENCH-#116 — F16: split-K when long, else
+    // single-pass; Q8: single-pass attention_decode_q8_kv.
     let n_tokens_kv = kv_cache.current_tokens();
     let scale = (head_dim as f32).sqrt().recip();
-    let use_splitk = slots.is_none()
+    let use_splitk = kv_layout == F16Contig::NAME
+        && slots.is_none()
         && std::env::var("FLAMBEAU_VARIANT").as_deref() != Ok("baseline")
         && n_tokens_kv > 256;
     if use_splitk {
@@ -1451,6 +1534,14 @@ pub fn forward_dense_attn_decode(
             n_heads, n_kv_heads, head_dim, n_tokens_kv, chunk_size, scale,
         )
         .context("dense attention_decode_f16_splitk")?;
+    } else if kv_layout == Q8Contig::NAME {
+        attention_decode_q8_kv(
+            ops, stream,
+            scratch.q_f16, kv_cache.k_buffer(), kv_cache.v_buffer(),
+            scratch.attn_out_f16,
+            n_heads, n_kv_heads, head_dim, n_tokens_kv, scale,
+        )
+        .context("dense attention_decode_q8_kv")?;
     } else {
         let n_tokens_kv_slot = slots.map(|s| s.n_tokens_kv_slot);
         attention_decode_f16_slots(
@@ -1504,24 +1595,30 @@ pub fn forward_dense_attn_layer_decode(
     position: usize,
     slots: Option<AttnDecodeSlots>,
 ) -> Result<()> {
-    let LayerCache::FullAttn(kv) = layer_cache else {
-        bail!(
-            "layer {} is not a full-attn layer (cache variant mismatch)",
-            layer_weights.layer_idx
-        );
-    };
     let crate::weights::AttnWeights::Dense(d) = &layer_weights.attn else {
         bail!(
             "layer {} weights are not Dense variant (dense attn path)",
             layer_weights.layer_idx
         );
     };
-    forward_dense_attn_decode(
-        ops, stream, device, cfg,
-        &layer_weights.attn_norm,
-        d, kv, scratch, x_in, delta_out,
-        position, slots,
-    )
+    match layer_cache {
+        LayerCache::FullAttn(kv) => forward_dense_attn_decode(
+            ops, stream, device, cfg,
+            &layer_weights.attn_norm,
+            d, kv, scratch, x_in, delta_out,
+            position, slots,
+        ),
+        LayerCache::FullAttnQ8(kv) => forward_dense_attn_decode(
+            ops, stream, device, cfg,
+            &layer_weights.attn_norm,
+            d, kv, scratch, x_in, delta_out,
+            position, slots,
+        ),
+        LayerCache::Gdn(_) => bail!(
+            "layer {} is not a full-attn layer (cache variant mismatch)",
+            layer_weights.layer_idx
+        ),
+    }
 }
 
 pub fn forward_dense_attn_prefill(

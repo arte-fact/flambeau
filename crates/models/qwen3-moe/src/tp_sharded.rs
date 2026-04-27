@@ -729,6 +729,17 @@ impl Qwen3MoETpSession {
         Ok(Self { caches, disposed: false })
     }
 
+    /// V1-BENCH-#116 — true if any rank has a Q8_0 KV cache. Mirrors
+    /// `Qwen3MoESession::is_q8_kv` / `Qwen3MoEShardedSession::is_q8_kv`.
+    /// Used to gate the batched TP prefill path.
+    pub fn is_q8_kv(&self) -> bool {
+        self.caches.iter().any(|caches| {
+            caches.iter().any(|c| {
+                matches!(c, crate::session::LayerCache::FullAttnQ8(_))
+            })
+        })
+    }
+
     /// Total bytes across all ranks. Useful for the perf-cert "session
     /// memory" line.
     pub fn total_bytes(&self) -> usize {
@@ -737,6 +748,9 @@ impl Qwen3MoETpSession {
             for c in rank_caches {
                 match c {
                     crate::session::LayerCache::FullAttn(kv) => {
+                        total += kv.bytes_per_tensor() * 2;
+                    }
+                    crate::session::LayerCache::FullAttnQ8(kv) => {
                         total += kv.bytes_per_tensor() * 2;
                     }
                     crate::session::LayerCache::Gdn(g) => {

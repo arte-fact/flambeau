@@ -720,7 +720,16 @@ pub fn forward_prefill_tp_logits(
     //   * GDN + dense FFN        (Qwen3.5 hybrid)
     //   * full-attn + MoE        (Qwen3-Coder-30B)
     //   * GDN + MoE + shared exp (Qwen3.6-35B-A3B hybrid MoE)
-    let batched_opt_in = std::env::var("FLAMBEAU_TP_BATCHED").as_deref() == Ok("1");
+    // V1-BENCH-#116 — Q8_0 KV has no batched-prefill kernel
+    // (attention_prefill_q8_kv doesn't exist yet). Detect and fall
+    // through to the per-token loop below; each iter goes through
+    // forward_one_token_tp_logits → forward_full_attn_decode_tp<L>
+    // which dispatches the right Q8 attention kernel.
+    let any_q8_kv = layer_caches.iter().any(|cs| {
+        cs.iter().any(|c| matches!(c, LayerCache::FullAttnQ8(_)))
+    });
+    let batched_opt_in = !any_q8_kv
+        && std::env::var("FLAMBEAU_TP_BATCHED").as_deref() == Ok("1");
     if batched_opt_in && prompt_ids.len() >= 8 {
         return forward_prefill_tp_batched_logits(
             model,
@@ -1505,11 +1514,9 @@ pub(crate) fn forward_full_attn_layer_tp(
         let attn_q_norm = find_by_suffix(layer_tensors, il, "attn_q_norm.weight")?;
         let attn_k_norm = find_by_suffix(layer_tensors, il, "attn_k_norm.weight")?;
 
-        let kv_cache = match &mut layer_caches[r][il_cache] {
-            LayerCache::FullAttn(kv) => kv,
-            _ => bail!("rank {r} layer {il}: expected FullAttn cache (got non-FullAttn variant)"),
-        };
-        // Snapshot Copy DevicePtrs before the mutable borrow on `layer`.
+        // V1-BENCH-#116 — dispatch on cache variant; the generic
+        // `forward_full_attn_decode_tp<L>` body picks the right
+        // attention kernel (F16 vs Q8_0) via L::NAME.
         let hidden_a = scratch.per_rank[r].hidden_a;
         let partial_attn_out = scratch.per_rank[r].partial_attn_out;
         let layer_scratch = scratch.per_rank[r]
@@ -1522,26 +1529,19 @@ pub(crate) fn forward_full_attn_layer_tp(
             .ok_or_else(|| anyhow!("rank {r}: missing FullAttnScratch"))?;
 
         let ops = &model.ops[r];
-        forward_full_attn_decode_tp(
-            &ops,
-            stream,
-            device,
-            cfg,
-            attn_norm,
-            attn_q,
-            attn_k,
-            attn_v,
-            attn_output,
-            attn_q_norm,
-            attn_k_norm,
-            kv_cache,
-            full,
-            hidden_a,
-            partial_attn_out,
-            position,
-            world,
-            model.tp.kv_replicated(),
-        )?;
+        match &mut layer_caches[r][il_cache] {
+            LayerCache::FullAttn(kv) => forward_full_attn_decode_tp(
+                &ops, stream, device, cfg,
+                attn_norm, attn_q, attn_k, attn_v, attn_output, attn_q_norm, attn_k_norm,
+                kv, full, hidden_a, partial_attn_out, position, world, model.tp.kv_replicated(),
+            )?,
+            LayerCache::FullAttnQ8(kv) => forward_full_attn_decode_tp(
+                &ops, stream, device, cfg,
+                attn_norm, attn_q, attn_k, attn_v, attn_output, attn_q_norm, attn_k_norm,
+                kv, full, hidden_a, partial_attn_out, position, world, model.tp.kv_replicated(),
+            )?,
+            _ => bail!("rank {r} layer {il}: expected FullAttn cache (got non-FullAttn variant)"),
+        }
     }
     if std::env::var("FLAMBEAU_TP_PROBE").is_ok() {
         let p = scratch.per_rank[0].partial_attn_out;

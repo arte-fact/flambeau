@@ -1446,6 +1446,18 @@ pub struct Qwen3MoEShardedSession {
 }
 
 impl Qwen3MoEShardedSession {
+    /// V1-BENCH-#116 — true if any rank has a Q8_0 KV cache. Mirrors
+    /// `Qwen3MoESession::is_q8_kv`. Used to gate batched-prefill paths
+    /// since Q8 KV has no batched-prefill kernel; prefill loops the
+    /// per-token decode path instead.
+    pub fn is_q8_kv(&self) -> bool {
+        self.per_rank.iter().any(|s| {
+            s.caches
+                .iter()
+                .any(|c| matches!(c, crate::session::LayerCache::FullAttnQ8(_)))
+        })
+    }
+
     /// Allocate caches for every layer, placing each on the rank that
     /// `model.assignment` assigns it to. `cluster.ranks()` must match
     /// `model.shards.len()`.

@@ -19,15 +19,44 @@
 use anyhow::{anyhow, Context, Result};
 use flambeau_core::{Device, DevicePtr, Stream};
 use flambeau_ops::hip::HipDevice;
-use flambeau_runtime::{F16Contig, KvCache};
+use flambeau_runtime::{F16Contig, KvCache, Q8Contig};
 
 use crate::config::Qwen3MoEConfig;
 
-/// Per-layer mutable state. Exactly one of the two fields is populated,
-/// matching the layer's attention family.
+/// Per-layer mutable state. Exactly one of the variants is populated,
+/// matching the layer's attention family + chosen KV layout.
+///
+/// V1-BENCH-#116 — `FullAttnQ8` adds a Q8_0-quantised KV variant. Selected
+/// at session-construction time (env: `FLAMBEAU_KV=q8` or
+/// `kv_layout: KvLayout` ctor param). Per CLAUDE.md rule #6, layouts are
+/// distinct types — the enum here is the dispatch boundary; the inner
+/// `KvCache<L>` is monomorphic and the attention-decode kernel pick is
+/// type-driven via `L::NAME`.
 pub enum LayerCache {
     FullAttn(KvCache<F16Contig, HipDevice>),
+    FullAttnQ8(KvCache<Q8Contig, HipDevice>),
     Gdn(GdnLayerState),
+}
+
+/// V1-BENCH-#116 — runtime selector for the Q8 KV path. Lives at session
+/// construction; once chosen, every full-attn layer in this session uses
+/// that layout (mixed F16/Q8 across layers is not supported).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum KvLayout {
+    F16,
+    Q8,
+}
+
+impl KvLayout {
+    /// Read `FLAMBEAU_KV` env (values: "f16" default, "q8" / "q8_0").
+    /// Used by every Session ctor so the choice propagates through the
+    /// stack without threading another argument.
+    pub fn from_env() -> Self {
+        match std::env::var("FLAMBEAU_KV").as_deref() {
+            Ok("q8") | Ok("q8_0") | Ok("Q8") | Ok("Q8_0") => Self::Q8,
+            _ => Self::F16,
+        }
+    }
 }
 
 /// F32 device buffers for one GDN layer. Shapes keyed off `GdnDims`.
@@ -80,12 +109,23 @@ impl Qwen3MoESession {
         self.device_id
     }
 
+    /// V1-BENCH-#116 — true if any full-attn layer uses the Q8_0 KV layout.
+    /// Callers (forward_prefill_pp, forward_prefill_tp_logits) gate the
+    /// batched prefill paths on this; Q8 KV currently has no batched
+    /// prefill kernel, so prefill falls back to per-token decode.
+    pub fn is_q8_kv(&self) -> bool {
+        self.caches.iter().any(|c| matches!(c, LayerCache::FullAttnQ8(_)))
+    }
+
     /// Total bytes allocated across every per-layer cache.
     pub fn total_bytes(&self) -> usize {
         let mut total = 0usize;
         for c in &self.caches {
             match c {
                 LayerCache::FullAttn(kv) => {
+                    total += kv.bytes_per_tensor() * 2;
+                }
+                LayerCache::FullAttnQ8(kv) => {
                     total += kv.bytes_per_tensor() * 2;
                 }
                 LayerCache::Gdn(g) => {
@@ -176,14 +216,28 @@ pub(crate) fn alloc_layer_cache(
             conv_channels,
         }))
     } else {
-        let kv = KvCache::<F16Contig, HipDevice>::new(
-            device,
-            cfg.num_kv_heads,
-            cfg.head_dim,
-            cfg.context_length,
-        )
-        .map_err(|e| anyhow!("alloc KvCache for layer {il}: {e}"))?;
-        Ok(LayerCache::FullAttn(kv))
+        match KvLayout::from_env() {
+            KvLayout::F16 => {
+                let kv = KvCache::<F16Contig, HipDevice>::new(
+                    device,
+                    cfg.num_kv_heads,
+                    cfg.head_dim,
+                    cfg.context_length,
+                )
+                .map_err(|e| anyhow!("alloc KvCache<F16> for layer {il}: {e}"))?;
+                Ok(LayerCache::FullAttn(kv))
+            }
+            KvLayout::Q8 => {
+                let kv = KvCache::<Q8Contig, HipDevice>::new(
+                    device,
+                    cfg.num_kv_heads,
+                    cfg.head_dim,
+                    cfg.context_length,
+                )
+                .map_err(|e| anyhow!("alloc KvCache<Q8> for layer {il}: {e}"))?;
+                Ok(LayerCache::FullAttnQ8(kv))
+            }
+        }
     }
 }
 
@@ -265,14 +319,28 @@ pub(crate) fn alloc_layer_cache_tp(
         } else {
             cfg.num_kv_heads
         };
-        let kv = KvCache::<F16Contig, HipDevice>::new(
-            device,
-            local_n_kv_heads,
-            cfg.head_dim,
-            cfg.context_length,
-        )
-        .map_err(|e| anyhow!("alloc KvCache (TP) for layer {il}: {e}"))?;
-        Ok(LayerCache::FullAttn(kv))
+        match KvLayout::from_env() {
+            KvLayout::F16 => {
+                let kv = KvCache::<F16Contig, HipDevice>::new(
+                    device,
+                    local_n_kv_heads,
+                    cfg.head_dim,
+                    cfg.context_length,
+                )
+                .map_err(|e| anyhow!("alloc KvCache<F16> (TP) for layer {il}: {e}"))?;
+                Ok(LayerCache::FullAttn(kv))
+            }
+            KvLayout::Q8 => {
+                let kv = KvCache::<Q8Contig, HipDevice>::new(
+                    device,
+                    local_n_kv_heads,
+                    cfg.head_dim,
+                    cfg.context_length,
+                )
+                .map_err(|e| anyhow!("alloc KvCache<Q8> (TP) for layer {il}: {e}"))?;
+                Ok(LayerCache::FullAttnQ8(kv))
+            }
+        }
     }
 }
 
@@ -281,7 +349,10 @@ pub(crate) fn dispose_layer_cache(cache: LayerCache, device: &HipDevice) -> Resu
     match cache {
         LayerCache::FullAttn(kv) => kv
             .dispose(device)
-            .map_err(|e| anyhow!("KvCache dispose: {e}")),
+            .map_err(|e| anyhow!("KvCache<F16> dispose: {e}")),
+        LayerCache::FullAttnQ8(kv) => kv
+            .dispose(device)
+            .map_err(|e| anyhow!("KvCache<Q8> dispose: {e}")),
         LayerCache::Gdn(g) => {
             // SAFETY: both pointers came from `device.alloc(..)` in alloc_layer_cache.
             unsafe {
