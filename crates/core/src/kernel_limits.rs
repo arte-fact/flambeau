@@ -36,7 +36,7 @@
 /// caused by this being hardcoded at 128 (pre-V1.7.4.a), silently discarding
 /// experts 128..255. Do not reduce below **256** without auditing every model
 /// in `certs/parity/`.
-pub const TOPK_MAX_EXPERTS: usize = 256;
+pub const TOPK_MAX_EXPERTS: usize = 512;
 
 /// Compile-time upper bound on `n_experts` for the `moe_sort_by_expert`
 /// kernel family. Matches `#define MOE_SORT_MAX_EXPERTS` (or equivalent)

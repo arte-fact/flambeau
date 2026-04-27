@@ -720,6 +720,135 @@ fn upload_bf16_as_q8_0(
     ))
 }
 
+/// V1.x #120 — Split qwen3next's fused `ssm_ba.weight` `[2*num_v_heads, hidden]`
+/// tensor into two Q8_0 device tensors `ssm_alpha` + `ssm_beta`, each
+/// `[num_v_heads, hidden]`. Top half (rows 0..num_v_heads) = alpha,
+/// bottom half (rows num_v_heads..2*num_v_heads) = beta — matches the
+/// qwen35moe split convention so the existing GDN forward path runs
+/// unchanged.
+///
+/// Source dtype is whatever the GGUF stored (typically Q4_K for Coder-Next):
+/// dequant→F32 host-side, slice rows, re-quantise each half to Q8_0 with
+/// the standard absmax/127 encoder. Output is two `DeviceTensor` with
+/// dtype=Q8_0 ready for `mmvq_q8_0` and the V2.27.c gate+up fusion path.
+fn split_ssm_ba_to_q8_0(
+    file: &GgufFile,
+    r: &ResolvedTensor,
+    device: &HipDevice,
+) -> Result<(DeviceTensor, DeviceTensor)> {
+    if r.dims.len() != 2 {
+        bail!(
+            "split_ssm_ba_to_q8_0: `{}` expected 2D `[2*num_v_heads, hidden]`, got {:?}",
+            r.name, r.dims
+        );
+    }
+    let total_rows = r.dims[0] as usize;
+    let cols = r.dims[1] as usize;
+    if total_rows % 2 != 0 {
+        bail!(
+            "split_ssm_ba_to_q8_0: `{}` rows {total_rows} not even (expected 2*num_v_heads)",
+            r.name
+        );
+    }
+    let num_v_heads = total_rows / 2;
+    let elems_total = total_rows * cols;
+    if cols % QK8_0 != 0 {
+        bail!(
+            "split_ssm_ba_to_q8_0: `{}` cols {cols} not multiple of QK8_0={QK8_0}",
+            r.name
+        );
+    }
+
+    // 1. Dequant whatever source dtype to F32, host-side.
+    let raw = file
+        .tensor_raw(&r.name)
+        .with_context(|| format!("tensor_raw `{}`", r.name))?;
+    let mut f32_buf = vec![0.0f32; elems_total];
+    flambeau_quant::dequantize_into(r.dtype, raw, &mut f32_buf)
+        .with_context(|| format!("dequant `{}` (dtype={:?})", r.name, r.dtype))?;
+
+    // 2. Encode each half as Q8_0 (standard absmax/127 per 32-element block).
+    let q8_block_bytes = 2 + QK8_0; // d_f16 + 32 i8
+    let half_elems = num_v_heads * cols;
+    let half_blocks = half_elems / QK8_0;
+    let half_bytes = half_blocks * q8_block_bytes;
+
+    let encode_half = |slice: &[f32]| -> Vec<u8> {
+        let mut buf: Vec<u8> = Vec::with_capacity(half_bytes);
+        for block in slice.chunks_exact(QK8_0) {
+            let absmax = block.iter().map(|v| v.abs()).fold(0.0f32, f32::max);
+            let d = absmax / 127.0;
+            let id = if d != 0.0 { 1.0 / d } else { 0.0 };
+            let d_f16 = half::f16::from_f32(d);
+            buf.extend_from_slice(&d_f16.to_bits().to_le_bytes());
+            for &v in block {
+                let q = (v * id).round_ties_even() as i32;
+                let q = q.clamp(-127, 127) as i8;
+                buf.push(q as u8);
+            }
+        }
+        debug_assert_eq!(buf.len(), half_bytes);
+        buf
+    };
+
+    let alpha_buf = encode_half(&f32_buf[..half_elems]);
+    let beta_buf = encode_half(&f32_buf[half_elems..]);
+
+    // 3. Upload each half. Strip the `.ssm_ba` suffix and append .ssm_{alpha,beta}.
+    let stem = r.name.strip_suffix(".ssm_ba.weight").ok_or_else(|| {
+        anyhow::anyhow!("split_ssm_ba: name `{}` doesn't end with .ssm_ba.weight", r.name)
+    })?;
+    let alpha_name: std::sync::Arc<str> = format!("{stem}.ssm_alpha.weight").into();
+    let beta_name: std::sync::Arc<str> = format!("{stem}.ssm_beta.weight").into();
+    let half_dims: Vec<u64> = vec![num_v_heads as u64, cols as u64];
+
+    let alpha_ptr = device.alloc(half_bytes)?;
+    unsafe {
+        device
+            .memcpy_async(
+                device.default_stream(),
+                CopyDirection::HostToDevice,
+                alpha_ptr,
+                DevicePtr(alpha_buf.as_ptr() as usize),
+                half_bytes,
+            )
+            .map_err(|e| anyhow::anyhow!("memcpy split-alpha `{}`: {e}", r.name))?;
+    }
+    let beta_ptr = device.alloc(half_bytes)?;
+    unsafe {
+        device
+            .memcpy_async(
+                device.default_stream(),
+                CopyDirection::HostToDevice,
+                beta_ptr,
+                DevicePtr(beta_buf.as_ptr() as usize),
+                half_bytes,
+            )
+            .map_err(|e| anyhow::anyhow!("memcpy split-beta `{}`: {e}", r.name))?;
+    }
+    device.default_stream().synchronize()?;
+    drop(alpha_buf);
+    drop(beta_buf);
+    drop(f32_buf);
+
+    Ok((
+        DeviceTensor {
+            ptr: alpha_ptr,
+            dtype: GgmlDType::Q8_0,
+            dims: half_dims.clone(),
+            bytes: half_bytes,
+            name: alpha_name,
+        },
+        DeviceTensor {
+            ptr: beta_ptr,
+            dtype: GgmlDType::Q8_0,
+            dims: half_dims,
+            bytes: half_bytes,
+            name: beta_name,
+        },
+    ))
+}
+
 /// V1.x #119 — MXFP4 (Microscaling FP4) tensor → Q8_0 on device.
 ///
 /// MXFP4 block layout (17 B):
@@ -1164,26 +1293,43 @@ fn upload_gdn(
     device: &HipDevice,
     total: &mut usize,
 ) -> Result<GdnWeights> {
-    Ok(GdnWeights {
-        attn_qkv: up_raw(file, &g.attn_qkv, device, total)?,
-        attn_gate: up_raw(file, &g.attn_gate, device, total)?,
-        // ssm_alpha / ssm_beta are F32 in Qwen3.6; quantise to Q8_0 on
-        // host at load so the existing mmvq_q8_0 path handles them.
-        ssm_alpha: g
+    // V1.x #120 — qwen3next packs ssm_alpha + ssm_beta as one fused
+    // `ssm_ba.weight` tensor [2*num_v_heads, hidden]. Split rows host-side:
+    // top half = alpha, bottom half = beta. Re-quantise each to Q8_0 so
+    // the V1 GDN forward path (which expects split alpha/beta) sees them
+    // exactly as if the GGUF had shipped them split.
+    let split_ba = g.ssm_alpha.is_none() && g.ssm_beta.is_none() && g.ssm_ba.is_some();
+    let (alpha_dt, beta_dt, ba_dt) = if split_ba {
+        let ba = g.ssm_ba.as_ref().unwrap();
+        let (a, b) = split_ssm_ba_to_q8_0(file, ba, device)?;
+        *total += a.bytes + b.bytes;
+        (Some(a), Some(b), None)
+    } else {
+        let alpha = g
             .ssm_alpha
             .as_ref()
             .map(|t| up_q8_0(file, t, device, total))
-            .transpose()?,
-        ssm_beta: g
+            .transpose()?;
+        let beta = g
             .ssm_beta
             .as_ref()
             .map(|t| up_q8_0(file, t, device, total))
-            .transpose()?,
-        ssm_ba: g
+            .transpose()?;
+        let ba = g
             .ssm_ba
             .as_ref()
             .map(|t| up_raw(file, t, device, total))
-            .transpose()?,
+            .transpose()?;
+        (alpha, beta, ba)
+    };
+    Ok(GdnWeights {
+        attn_qkv: up_raw(file, &g.attn_qkv, device, total)?,
+        attn_gate: up_raw(file, &g.attn_gate, device, total)?,
+        // ssm_alpha / ssm_beta — split from qwen3next's ssm_ba above, or
+        // loaded directly for Qwen3.5/3.6 (F32 → Q8_0 at load).
+        ssm_alpha: alpha_dt,
+        ssm_beta: beta_dt,
+        ssm_ba: ba_dt,
         // ssm_a / ssm_dt / ssm_conv1d / ssm_norm stay F32 — they're
         // consumed by F32-native ops.
         ssm_a: up_raw(file, &g.ssm_a, device, total)?,
