@@ -500,6 +500,48 @@ fn convert_f32_to_f16(src: &[u8], elems: usize) -> Result<Vec<u8>> {
     Ok(out)
 }
 
+/// V1-BENCH-#110 — quantise a BF16 byte slice to Q8_0 host-side.
+/// BF16 is the upper 16 bits of an F32, so widen byte-by-byte then run
+/// the standard per-32-element absmax/127 quantise. Mirrors
+/// `sharded.rs::upload_bf16_as_q8_0` for the TP slicing path; needed
+/// for UD-Q8_K_XL-class GGUFs (Qwen3.6-35B-A3B-UD-Q8_K_XL ships 10
+/// BF16 tensors that no V1 MMVQ/MMQ path consumes).
+fn quantize_bf16_to_q8_0(src: &[u8], elems: usize) -> Result<Vec<u8>> {
+    if src.len() < elems * 2 {
+        bail!(
+            "quantize_bf16_to_q8_0: src {} < elems*2 ({})",
+            src.len(),
+            elems * 2
+        );
+    }
+    if elems % QK8_0 != 0 {
+        bail!(
+            "quantize_bf16_to_q8_0: elems {elems} not multiple of QK8_0={QK8_0}"
+        );
+    }
+    let src_u16: &[u16] = bytemuck::cast_slice(&src[..elems * 2]);
+    let f32s: Vec<f32> = src_u16
+        .iter()
+        .map(|&b| f32::from_bits((b as u32) << 16))
+        .collect();
+    let n_blocks = elems / QK8_0;
+    let block_bytes = 34usize;
+    let mut out = Vec::with_capacity(n_blocks * block_bytes);
+    for block in f32s.chunks_exact(QK8_0) {
+        let absmax = block.iter().map(|v| v.abs()).fold(0.0f32, f32::max);
+        let d = absmax / 127.0;
+        let id = if d != 0.0 { 1.0 / d } else { 0.0 };
+        let d_f16 = half::f16::from_f32(d);
+        out.extend_from_slice(&d_f16.to_bits().to_le_bytes());
+        for &v in block {
+            let q = (v * id).round_ties_even() as i32;
+            let q = q.clamp(-127, 127) as i8;
+            out.push(q as u8);
+        }
+    }
+    Ok(out)
+}
+
 /// Quantise a F32 byte slice to Q8_0 host-side (32-element blocks,
 /// 34 B/block: half scale + 32 i8 quants). Mirrors
 /// `sharded.rs::upload_as_q8_0_inner`.
@@ -600,22 +642,36 @@ fn upload_tp_with_layout(
     let per_rank_dims = compute_per_rank_dims(&info.dims, layout);
     let elems: usize = per_rank_dims.iter().product::<u64>() as usize;
 
-    // Apply per-tensor dtype conversion mirroring `sharded.rs`.
-    let target = tp_target_dtype(name, info.dtype);
-    let (final_bytes_cow, final_dtype): (std::borrow::Cow<'_, [u8]>, GgmlDType) = match target {
-        None => (bytes_cow, info.dtype),
-        Some(GgmlDType::F16) => {
-            let converted = convert_f32_to_f16(&bytes_cow, elems)
-                .with_context(|| format!("convert F32→F16 `{name}` rank={rank}"))?;
-            (std::borrow::Cow::Owned(converted), GgmlDType::F16)
-        }
-        Some(GgmlDType::Q8_0) => {
-            let converted = quantize_f32_to_q8_0(&bytes_cow, elems)
-                .with_context(|| format!("quantize F32→Q8_0 `{name}` rank={rank}"))?;
+    // V1-BENCH-#110 — BF16 → Q8_0 transparent quantise at load. Mirror
+    // of the PP path's `upload_bf16_as_q8_0` (V2.22.a). UD-Q8_K_XL
+    // GGUFs (e.g. Qwen3.6-35B-A3B-UD-Q8_K_XL) ship a handful of BF16
+    // tensors that no V1 MMVQ/MMQ path consumes; without this branch
+    // the TP loader would hand BF16 bytes to a Q8_0-shaped dispatch
+    // and produce garbage. ~0.4 % precision delta vs BF16, dominated
+    // by Q8_0 noise elsewhere in the model.
+    let (final_bytes_cow, final_dtype): (std::borrow::Cow<'_, [u8]>, GgmlDType) =
+        if info.dtype == GgmlDType::BF16 {
+            let converted = quantize_bf16_to_q8_0(&bytes_cow, elems)
+                .with_context(|| format!("quantize BF16→Q8_0 `{name}` rank={rank}"))?;
             (std::borrow::Cow::Owned(converted), GgmlDType::Q8_0)
-        }
-        Some(other) => bail!("tp_target_dtype returned unsupported {other:?} for `{name}`"),
-    };
+        } else {
+            // Apply per-tensor F32→{F16,Q8_0} conversion mirroring `sharded.rs`.
+            let target = tp_target_dtype(name, info.dtype);
+            match target {
+                None => (bytes_cow, info.dtype),
+                Some(GgmlDType::F16) => {
+                    let converted = convert_f32_to_f16(&bytes_cow, elems)
+                        .with_context(|| format!("convert F32→F16 `{name}` rank={rank}"))?;
+                    (std::borrow::Cow::Owned(converted), GgmlDType::F16)
+                }
+                Some(GgmlDType::Q8_0) => {
+                    let converted = quantize_f32_to_q8_0(&bytes_cow, elems)
+                        .with_context(|| format!("quantize F32→Q8_0 `{name}` rank={rank}"))?;
+                    (std::borrow::Cow::Owned(converted), GgmlDType::Q8_0)
+                }
+                Some(other) => bail!("tp_target_dtype returned unsupported {other:?} for `{name}`"),
+            }
+        };
 
     let n = final_bytes_cow.len();
     let ptr = device
