@@ -171,10 +171,20 @@ fn bench_pp(
         .with_context(|| format!("{tag} sharded load"))?;
     let load_secs = load_start.elapsed().as_secs_f64();
 
+    // V1-BENCH-#111 — opt-in scratch sizing. By default sized for the
+    // current L (no chunking). Set FLAMBEAU_BENCH_SCRATCH_TOKENS to a
+    // smaller value to force `forward_prefill_pp` into its
+    // chunked-ubatch path (tight-VRAM regime).
+    let scratch_cap_override: Option<usize> = std::env::var("FLAMBEAU_BENCH_SCRATCH_TOKENS")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .filter(|&n: &usize| n >= 1);
+
     let mut runs: Vec<PhaseRun> = Vec::new();
     for &l in prefill_lengths {
         let mut session = Qwen3MoEShardedSession::new(&model, &cluster)?;
-        let mut scratch = ShardedForwardPrefillScratch::new(&model, &cluster, l)?;
+        let scratch_cap = scratch_cap_override.unwrap_or(l).min(l);
+        let mut scratch = ShardedForwardPrefillScratch::new(&model, &cluster, scratch_cap)?;
         let prompt = build_prompt(l);
         let t = Instant::now();
         forward_prefill_pp(&model, &mut session, &cluster, &mut scratch, &prompt, 0)

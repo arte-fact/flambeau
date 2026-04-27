@@ -322,6 +322,18 @@ fn build_layer(dev: &HipDevice, cfg: &Qwen3MoEConfig, il: usize) -> Result<Layer
 
 #[test]
 fn forward_prefill_pp_synthetic_2rank_l4() -> Result<()> {
+    run_prefill_pp_smoke(/*scratch_max_tokens=*/ 4)
+}
+
+/// V1-BENCH-#111 — chunking smoke: scratch sized below L forces
+/// `forward_prefill_pp` to internally loop over ubatches of
+/// `max_tokens` tokens. Same fixture, same expected argmax.
+#[test]
+fn forward_prefill_pp_synthetic_2rank_l4_chunked() -> Result<()> {
+    run_prefill_pp_smoke(/*scratch_max_tokens=*/ 2)
+}
+
+fn run_prefill_pp_smoke(scratch_max_tokens: usize) -> Result<()> {
     let n = device_count().unwrap_or(0);
     if n < 2 {
         eprintln!("need ≥ 2 HIP devices for PP prefill smoke — got {n}, skipping");
@@ -377,8 +389,9 @@ fn forward_prefill_pp_synthetic_2rank_l4() -> Result<()> {
 
     let model = Qwen3MoEShardedModel::from_parts(cfg.clone(), layout, assignment, vec![shard0, shard1]);
     let mut session = Qwen3MoEShardedSession::new(&model, &cluster)?;
-    // L=4 prefill chunk; max_tokens >= L.
-    let mut scratch = ShardedForwardPrefillScratch::new(&model, &cluster, 4)?;
+    // L=4 prefill; scratch may be sized smaller (=> internal chunking).
+    let mut scratch =
+        ShardedForwardPrefillScratch::new(&model, &cluster, scratch_max_tokens)?;
 
     let tokens = vec![3u32, 5, 7, 11]; // any in-vocab ids
     let next = forward_prefill_pp(

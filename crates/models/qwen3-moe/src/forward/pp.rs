@@ -1047,10 +1047,30 @@ pub fn forward_prefill_pp(
         }
     }
 
+    // V1-BENCH-#111 (2026-04-27) — when scratch is sized below L, transparently
+    // chunk: loop sequentially over ubatches of `max_tokens` tokens each. The
+    // KV cache + GDN state already thread state via `start_position`, so each
+    // recursive call writes its slice into the right cache positions. The
+    // returned argmax is the LAST ubatch's argmax (output head runs every
+    // ubatch — wasteful for non-last, but vocab×hidden is small relative to
+    // a layer chain). Async path (FLAMBEAU_ASYNC_UBATCH) already chunks via
+    // `forward_prefill_pp_async` and was checked above.
     if l > max_tokens {
-        bail!(
-            "forward_prefill_pp: L={l} > scratch.max_tokens={max_tokens}; caller must chunk"
-        );
+        if max_tokens == 0 {
+            bail!("forward_prefill_pp: scratch.max_tokens=0 — invalid");
+        }
+        let mut last_argmax = 0u32;
+        let mut chunk_start = 0usize;
+        while chunk_start < l {
+            let chunk_end = (chunk_start + max_tokens).min(l);
+            last_argmax = forward_prefill_pp(
+                model, session, cluster, scratch,
+                &tokens[chunk_start..chunk_end],
+                start_position + chunk_start,
+            )?;
+            chunk_start = chunk_end;
+        }
+        return Ok(last_argmax);
     }
     let cfg = &model.config;
     let hidden = cfg.hidden_size;
