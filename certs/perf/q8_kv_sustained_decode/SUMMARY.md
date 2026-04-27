@@ -66,10 +66,23 @@ In rough priority order:
    The MMVQ kernel already writes F32 → cast_f32_f16. Adding a
    F32 → Q8_0 epilogue removes the standalone quantize launches.
    Estimate: 1 session.
-3. **Cache the per-block scales in LDS at attention-loop entry.** All
-   threads inside a block read the same `block.d` for a given token —
-   today that's 32× redundant global reads. Single broadcast load to
-   LDS removes the redundancy. Estimate: half a session (kernel-only).
+
+## Already-tried levers — null results
+
+3. **Cache per-block scales in LDS at attention-loop entry**
+   (V1-BENCH-#118a, 2026-04-27). All 32 threads sharing a block read
+   the same `block.d`; the prediction was ~halving global memory
+   traffic on the cache-fetch side. Implemented + correctness sweep
+   green. Measured Δ vs the pre-fix kernel: **null** (within ±3 %
+   rep variance at every ctx point). Reverted because the extra
+   `__syncthreads()` per token slightly hurts in some configs while
+   buying nothing.
+
+   Why null: the GPU's L1 cache absorbs the 32× redundant scale
+   reads at near-zero cost. Global-memory pressure on the scale
+   loads was never the bottleneck. The actual bottleneck remains
+   the absence of split-K parallelism (item 1) and the per-step
+   F16→Q8_0 K/V quantise launches (item 2).
 
 After (1) + (2), Q8 KV should match or beat F16 on long-ctx decode.
 Until then it stays opt-in for VRAM-bound configs.
