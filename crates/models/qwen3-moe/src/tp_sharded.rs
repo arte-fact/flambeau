@@ -339,7 +339,33 @@ impl Qwen3MoETpModel {
                     continue;
                 }
                 let mut layer_tensors: Vec<TpLayerTensor> = Vec::new();
+                let world = tp.world();
                 for name in collect_layer_tensor_names(desc) {
+                    // V1-BENCH-CN-80B-1 — qwen3next packs ssm_alpha+beta as
+                    // one fused `ssm_ba.weight`. Split at load-time so the
+                    // forward path (which expects the split form) sees them
+                    // exactly as if the GGUF had shipped them split. See
+                    // upload_tp_ssm_ba_split for the rank-aware slicing.
+                    if name.ends_with(".ssm_ba.weight") {
+                        let ((alpha_t, alpha_b), (beta_t, beta_b)) =
+                            upload_tp_ssm_ba_split(file, &name, rank_idx, world, device)?;
+                        total_bytes += alpha_b + beta_b;
+                        let alpha_name: Arc<str> = alpha_t.name.clone();
+                        let beta_name: Arc<str> = beta_t.name.clone();
+                        // Both halves are ColParallel{dim=0} on num_v_heads.
+                        let half_layout = WeightLayout::ColParallel { world, dim: 0 };
+                        layer_tensors.push(TpLayerTensor {
+                            name: alpha_name,
+                            layout: half_layout,
+                            tensor: alpha_t,
+                        });
+                        layer_tensors.push(TpLayerTensor {
+                            name: beta_name,
+                            layout: half_layout,
+                            tensor: beta_t,
+                        });
+                        continue;
+                    }
                     let (tensor, b, layout_for) =
                         upload_tp_with_layout(file, &name, &tp, rank_idx, device)?;
                     total_bytes += b;
@@ -577,6 +603,296 @@ fn quantize_f32_to_q8_0(src: &[u8], elems: usize) -> Result<Vec<u8>> {
     Ok(out)
 }
 
+/// V1-BENCH-CN-80B-1 — quantise an F32 buffer to Q8_0 (in-memory variant of
+/// `quantize_f32_to_q8_0` that takes `&[f32]` directly, used by the MXFP4
+/// + ssm_ba paths below where we already hold an F32 Vec).
+fn quantize_f32_slice_to_q8_0(f32s: &[f32]) -> Result<Vec<u8>> {
+    if f32s.len() % QK8_0 != 0 {
+        bail!(
+            "quantize_f32_slice_to_q8_0: elems {} not multiple of QK8_0={QK8_0}",
+            f32s.len()
+        );
+    }
+    let n_blocks = f32s.len() / QK8_0;
+    let mut out = Vec::with_capacity(n_blocks * 34);
+    for block in f32s.chunks_exact(QK8_0) {
+        let absmax = block.iter().map(|v| v.abs()).fold(0.0f32, f32::max);
+        let d = absmax / 127.0;
+        let id = if d != 0.0 { 1.0 / d } else { 0.0 };
+        let d_f16 = half::f16::from_f32(d);
+        out.extend_from_slice(&d_f16.to_bits().to_le_bytes());
+        for &v in block {
+            let q = (v * id).round_ties_even() as i32;
+            let q = q.clamp(-127, 127) as i8;
+            out.push(q as u8);
+        }
+    }
+    Ok(out)
+}
+
+/// V1-BENCH-CN-80B-1 — F32 slicer for the per-rank TP shard.
+///
+/// Applied **after** dequant in the MXFP4 + ssm_ba paths because slicing
+/// pre-dequant would require MXFP4-block-grain (17 B / 32 elems) byte
+/// arithmetic. Operating on F32 is straightforward; the ~4× memory blow-up
+/// for the full F32 buffer is bounded by the largest single tensor we
+/// dequant (Coder-Next shared-expert at hidden×shared_inter ≤ ~64 MiB
+/// before quantise; freed immediately after).
+///
+/// Supported layouts: `Replicated`, `ColParallel{dim=0}`,
+/// `RowParallel{dim=1}`. Returns the per-rank dims alongside the bytes
+/// so the caller can record them on the resulting `DeviceTensor`.
+fn slice_f32_for_tp(
+    f32s: &[f32],
+    dims: &[u64],
+    layout: WeightLayout,
+    rank: u32,
+) -> Result<(Vec<f32>, Vec<u64>)> {
+    let total: usize = dims.iter().product::<u64>() as usize;
+    if f32s.len() != total {
+        bail!(
+            "slice_f32_for_tp: f32s.len={} != prod(dims)={total}",
+            f32s.len()
+        );
+    }
+    match layout {
+        WeightLayout::Replicated => Ok((f32s.to_vec(), dims.to_vec())),
+        WeightLayout::ColParallel { world, dim: 0 } => {
+            if dims.is_empty() {
+                bail!("slice_f32_for_tp ColParallel{{dim=0}}: empty dims");
+            }
+            let rows = dims[0] as usize;
+            if rows % world as usize != 0 {
+                bail!(
+                    "slice_f32_for_tp: rows {rows} not divisible by world {world}"
+                );
+            }
+            let inner: usize = dims[1..].iter().product::<u64>() as usize;
+            let per_rank_rows = rows / world as usize;
+            let r0 = rank as usize * per_rank_rows;
+            let out: Vec<f32> = f32s[r0 * inner..(r0 + per_rank_rows) * inner].to_vec();
+            let mut new_dims = dims.to_vec();
+            new_dims[0] = per_rank_rows as u64;
+            Ok((out, new_dims))
+        }
+        WeightLayout::RowParallel { world, dim: 1 } => {
+            if dims.len() < 2 {
+                bail!("slice_f32_for_tp RowParallel{{dim=1}}: need 2D dims, got {:?}", dims);
+            }
+            let rows = dims[0] as usize;
+            let cols = dims[1] as usize;
+            if cols % world as usize != 0 {
+                bail!(
+                    "slice_f32_for_tp: cols {cols} not divisible by world {world}"
+                );
+            }
+            let per_rank_cols = cols / world as usize;
+            let c0 = rank as usize * per_rank_cols;
+            let mut out = Vec::with_capacity(rows * per_rank_cols);
+            for r in 0..rows {
+                let row_start = r * cols;
+                out.extend_from_slice(&f32s[row_start + c0..row_start + c0 + per_rank_cols]);
+            }
+            let mut new_dims = dims.to_vec();
+            new_dims[1] = per_rank_cols as u64;
+            Ok((out, new_dims))
+        }
+        other => bail!(
+            "slice_f32_for_tp: layout {:?} not supported (only Replicated, \
+             ColParallel{{dim=0}}, RowParallel{{dim=1}})",
+            other
+        ),
+    }
+}
+
+/// V1-BENCH-CN-80B-1 — upload an MXFP4-source tensor through the TP
+/// slicing path. Mirrors `sharded.rs::upload_mxfp4_as_q8_0` (V1.x #119)
+/// but applies the per-rank slice on the F32 intermediate, then
+/// quantises the per-rank slice to Q8_0.
+///
+/// Used for Coder-Next-Q4_0's 96 shared-expert tensors (gate/up/down per
+/// 48 layers — `ffn_*_shexp.weight`) which the GGUF stores as MXFP4.
+/// Without this path the TP loader bails on dtype-mismatch when handing
+/// MXFP4 bytes to a Q8_0-shaped dispatch.
+fn upload_tp_mxfp4_as_q8_0(
+    file: &GgufFile,
+    name: &str,
+    dims: &[u64],
+    layout: WeightLayout,
+    rank: u32,
+    device: &HipDevice,
+) -> Result<(DeviceTensor, usize)> {
+    let total_elems: usize = dims.iter().product::<u64>() as usize;
+    let raw = file
+        .tensor_raw(name)
+        .with_context(|| format!("tensor_raw `{name}`"))?;
+    let mut f32_full = vec![0.0f32; total_elems];
+    flambeau_quant::dequantize_into(GgmlDType::Mxfp4, raw, &mut f32_full)
+        .with_context(|| format!("MXFP4 dequant `{name}` rank={rank}"))?;
+
+    let (f32_slice, per_rank_dims) = slice_f32_for_tp(&f32_full, dims, layout, rank)
+        .with_context(|| format!("slice F32 (post-MXFP4) `{name}` rank={rank}"))?;
+    drop(f32_full);
+
+    let q8_bytes = quantize_f32_slice_to_q8_0(&f32_slice)
+        .with_context(|| format!("quantize F32→Q8_0 (MXFP4 path) `{name}` rank={rank}"))?;
+    let n = q8_bytes.len();
+
+    let ptr = device
+        .alloc(n)
+        .map_err(|e| anyhow!("hipMalloc {n} B `{name}`: {e}"))?;
+    // SAFETY: ptr is a fresh device alloc of n bytes; q8_bytes is a host
+    // Vec we own that lives through the synchronize at the call-site of
+    // `upload_tp_with_layout`'s caller.
+    unsafe {
+        device
+            .memcpy_async(
+                device.default_stream(),
+                CopyDirection::HostToDevice,
+                ptr,
+                DevicePtr(q8_bytes.as_ptr() as usize),
+                n,
+            )
+            .map_err(|e| anyhow!("memcpy MXFP4→Q8_0 `{name}` rank={rank}: {e}"))?;
+    }
+    device.default_stream().synchronize()?;
+
+    let tensor = DeviceTensor {
+        ptr,
+        dtype: GgmlDType::Q8_0,
+        dims: per_rank_dims,
+        bytes: n,
+        name: Arc::from(name),
+    };
+    Ok((tensor, n))
+}
+
+/// V1-BENCH-CN-80B-1 — TP-aware ssm_ba split.
+///
+/// qwen3next packs `ssm_alpha + ssm_beta` as one fused tensor
+/// `ssm_ba.weight [2*num_v_heads, hidden]` (top half = alpha, bottom =
+/// beta). PP loader (`sharded.rs::split_ssm_ba_to_q8_0`) splits at load.
+/// TP needs the same split AND a per-rank slice along the v-heads axis
+/// (`ColParallel{dim=0}` per `tp_layout.rs`).
+///
+/// Crucially, the layout's `ColParallel{dim=0}` on the FUSED 2*num_v_heads
+/// rows would give rank 0 all-alpha and rank 1 all-beta at world=2 —
+/// wrong. So we split first (alpha [num_v_heads, hidden], beta same),
+/// then apply `ColParallel{dim=0}` on each half, so each rank gets its
+/// per-rank num_v_heads/world rows of BOTH alpha and beta.
+///
+/// Returns two TP layer-tensors: `*.ssm_alpha.weight` and
+/// `*.ssm_beta.weight`, dtype Q8_0, ready for `mmvq_q8_0` consumption.
+fn upload_tp_ssm_ba_split(
+    file: &GgufFile,
+    name: &str,
+    rank: u32,
+    world: u32,
+    device: &HipDevice,
+) -> Result<((DeviceTensor, usize), (DeviceTensor, usize))> {
+    let info = file
+        .info(name)
+        .with_context(|| format!("info `{name}`"))?;
+    if info.dims.len() != 2 {
+        bail!(
+            "upload_tp_ssm_ba_split: `{name}` expected 2D [2*num_v_heads, hidden], got {:?}",
+            info.dims
+        );
+    }
+    let total_rows = info.dims[0] as usize;
+    let cols = info.dims[1] as usize;
+    if total_rows % 2 != 0 {
+        bail!(
+            "upload_tp_ssm_ba_split: `{name}` rows {total_rows} not even"
+        );
+    }
+    let num_v_heads = total_rows / 2;
+    if num_v_heads % world as usize != 0 {
+        bail!(
+            "upload_tp_ssm_ba_split: num_v_heads {num_v_heads} not divisible by world {world}"
+        );
+    }
+    if cols % QK8_0 != 0 {
+        bail!(
+            "upload_tp_ssm_ba_split: cols {cols} not multiple of QK8_0={QK8_0}"
+        );
+    }
+
+    let raw = file
+        .tensor_raw(name)
+        .with_context(|| format!("tensor_raw `{name}`"))?;
+    let elems_total = total_rows * cols;
+    let mut f32_full = vec![0.0f32; elems_total];
+    flambeau_quant::dequantize_into(info.dtype, raw, &mut f32_full)
+        .with_context(|| format!("dequant `{name}` (dtype={:?})", info.dtype))?;
+
+    let half_elems = num_v_heads * cols;
+    let alpha_full = &f32_full[..half_elems];
+    let beta_full = &f32_full[half_elems..];
+    let half_dims = vec![num_v_heads as u64, cols as u64];
+
+    let half_layout = WeightLayout::ColParallel { world, dim: 0 };
+    let (alpha_slice, alpha_dims) =
+        slice_f32_for_tp(alpha_full, &half_dims, half_layout, rank)
+            .context("alpha slice")?;
+    let (beta_slice, beta_dims) =
+        slice_f32_for_tp(beta_full, &half_dims, half_layout, rank)
+            .context("beta slice")?;
+    drop(f32_full);
+
+    let alpha_q8 = quantize_f32_slice_to_q8_0(&alpha_slice).context("alpha → Q8_0")?;
+    let beta_q8 = quantize_f32_slice_to_q8_0(&beta_slice).context("beta → Q8_0")?;
+    let alpha_n = alpha_q8.len();
+    let beta_n = beta_q8.len();
+
+    let stem = name.strip_suffix(".ssm_ba.weight").ok_or_else(|| {
+        anyhow!("upload_tp_ssm_ba_split: name `{name}` doesn't end with .ssm_ba.weight")
+    })?;
+    let alpha_name = format!("{stem}.ssm_alpha.weight");
+    let beta_name = format!("{stem}.ssm_beta.weight");
+
+    let alpha_ptr = device.alloc(alpha_n)?;
+    // SAFETY: fresh device alloc of `alpha_n` bytes; host buffer alive through
+    // the synchronize at the load() call site.
+    unsafe {
+        device.memcpy_async(
+            device.default_stream(),
+            CopyDirection::HostToDevice,
+            alpha_ptr,
+            DevicePtr(alpha_q8.as_ptr() as usize),
+            alpha_n,
+        )?;
+    }
+    let beta_ptr = device.alloc(beta_n)?;
+    // SAFETY: same as above.
+    unsafe {
+        device.memcpy_async(
+            device.default_stream(),
+            CopyDirection::HostToDevice,
+            beta_ptr,
+            DevicePtr(beta_q8.as_ptr() as usize),
+            beta_n,
+        )?;
+    }
+    device.default_stream().synchronize()?;
+
+    let alpha_tensor = DeviceTensor {
+        ptr: alpha_ptr,
+        dtype: GgmlDType::Q8_0,
+        dims: alpha_dims,
+        bytes: alpha_n,
+        name: Arc::from(alpha_name.as_str()),
+    };
+    let beta_tensor = DeviceTensor {
+        ptr: beta_ptr,
+        dtype: GgmlDType::Q8_0,
+        dims: beta_dims,
+        bytes: beta_n,
+        name: Arc::from(beta_name.as_str()),
+    };
+    Ok(((alpha_tensor, alpha_n), (beta_tensor, beta_n)))
+}
+
 /// Slice + upload a single tensor for the given rank. Returns the
 /// device tensor (with per-rank dims) and the byte count uploaded.
 ///
@@ -618,6 +934,18 @@ fn upload_tp_with_layout(
     let configured = tp
         .for_tensor(name)
         .ok_or_else(|| anyhow!("no TP layout entry for tensor `{name}`"))?;
+
+    // V1-BENCH-CN-80B-1 — MXFP4 source bypasses the post-slice convert
+    // path (upload_tp_with_layout's normal flow slices raw bytes first
+    // then converts F32→{F16,Q8_0}, which can't address MXFP4's 17-B
+    // 32-elem block stride). Dequant the FULL tensor to F32, slice the
+    // F32, then quantise the per-rank slice to Q8_0.
+    if info.dtype == GgmlDType::Mxfp4 {
+        let layout = configured;
+        let (tensor, n) =
+            upload_tp_mxfp4_as_q8_0(file, name, &info.dims, layout, rank, device)?;
+        return Ok((tensor, n, layout));
+    }
     let (bytes_cow, layout) = match slice_for_tp(file, name, configured, rank) {
         Ok(b) => (b, configured),
         Err(e) if is_moe_block_misalignment(&e, name) => {
