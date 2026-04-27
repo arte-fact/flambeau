@@ -118,12 +118,20 @@ impl FullAttnScratch {
         let qk_bytes = q_width * 2;
         let kv_bytes = kv_width * 2;
         // V1-BENCH-#116a — Q8_0 staging for the q8_contig KV path. Each
-        // 32-element block is 18 B (2-byte fp16 scale + 32 int8). Allocated
-        // unconditionally so dispatch on L::NAME can pick the right buffer
-        // without touching scratch construction; the size delta vs F16 is
-        // ~10 % of `kv_bytes`.
+        // 32-element block is 34 B (2-byte fp16 scale + 32 int8 quants =
+        // `sizeof(flambeau_block_q8_0)`). Allocated unconditionally so
+        // dispatch on L::NAME can pick the right buffer without touching
+        // scratch construction.
+        //
+        // V1-BENCH-#117 fix: was 18 B/block (wrong arithmetic — assumed
+        // 16 int8 quants instead of QK8_0=32). Q8 KV path was OOB-writing
+        // 1088 B into a 576 B staging slab, corrupting the next allocation
+        // and writing only ~17/32 blocks worth of data into the cache.
+        // First-token logits looked plausible because attn_out_f16 is
+        // overwritten by the attention kernel after; from token 1 onward
+        // the cache held mismatched data and logits collapsed to ~0.
         assert!(kv_width % 32 == 0, "kv_width must be a multiple of QK8_0=32 for Q8 KV staging");
-        let kv_q8_0_bytes = (kv_width / 32) * 18;
+        let kv_q8_0_bytes = (kv_width / 32) * flambeau_runtime::Q8_0_BLOCK_BYTES;
         let attn_bytes = q_width * 2;
         let positions_bytes = 4;
         // splitk partials: f32 × [n_heads, MAX_CHUNKS] (m, s) and

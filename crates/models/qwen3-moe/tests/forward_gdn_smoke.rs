@@ -259,7 +259,9 @@ fn forward_gdn_decode_smoke() -> Result<()> {
     let mut session = Qwen3MoESession::new(&cfg, &device)?;
     let state = match &mut session.layers_mut()[0] {
         LayerCache::Gdn(s) => s,
-        LayerCache::FullAttn(_) => anyhow::bail!("layer 0 should be GDN"),
+        LayerCache::FullAttn(_) | LayerCache::FullAttnQ8(_) => {
+            anyhow::bail!("layer 0 should be GDN")
+        }
     };
     // Re-pack so we can pass a mutable reference without fighting the borrow
     // checker across the helper call below — take it out, use, put back.

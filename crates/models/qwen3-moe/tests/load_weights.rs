@@ -122,6 +122,13 @@ fn upload_full_qwen3_moe_model() -> Result<()> {
                 assert_eq!(kv.head_dim(), cfg.head_dim);
                 n_kv += 1;
             }
+            LayerCache::FullAttnQ8(kv) => {
+                assert!(!cfg.is_recurrent(il));
+                assert_eq!(kv.max_tokens(), cfg.context_length);
+                assert_eq!(kv.n_heads(), cfg.num_kv_heads);
+                assert_eq!(kv.head_dim(), cfg.head_dim);
+                n_kv += 1;
+            }
             LayerCache::Gdn(g) => {
                 assert!(cfg.is_recurrent(il));
                 let gdn = cfg.gdn.as_ref().unwrap();

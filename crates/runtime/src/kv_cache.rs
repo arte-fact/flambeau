@@ -59,25 +59,38 @@ impl CacheLayout for F16Contig {
 }
 
 /// Q8_0 quantised KV cache: each `head_dim` vector is stored as Q8_0
-/// blocks (one `f16` scale per 32 elements + 32 int8 values). At
-/// `head_dim=128` that's `128/32 = 4` Q8_0 blocks per (token, head) at
-/// `4 × 18 = 72 B` — ~3.6× HBM saving vs F16's `128 × 2 = 256 B`.
+/// blocks (one `f16` scale per 32 elements + 32 int8 values =
+/// **34 bytes per block**, matching ggml's `block_q8_0` and flambeau's
+/// `BlockQ8_0` Rust struct). At `head_dim=128` that's `128 / 32 = 4`
+/// Q8_0 blocks per (token, head) at `4 × 34 = 136 B` — ~1.9× HBM
+/// saving vs F16's `128 × 2 = 256 B`.
 ///
 /// Roadmap requires a **quality cert** (delta-perplexity ≤ 0.5% on
 /// wikitext-2 + chat smoke) before this layout is dispatched on a given
 /// model. The correctness cert alone (K/V round-trip matches the F16
 /// reference within Q8 quant noise) is what V1.6.6 gates on — the
 /// per-model quality cert comes with the V1.7 model loader.
+///
+/// V1-BENCH-#117 fix: the original impl claimed "18 bytes per block"
+/// (2-byte scale + 16 int8s — wrong; QK8_0 is 32 elements not 16).
+/// `bytes_per_row` was undersized by ~1.9×, which made `KvCache::append`
+/// memcpy a fraction of each token's quantised vector and the
+/// `attention_decode_q8_kv` kernel read at wrong byte offsets. Fixed to
+/// `34` per block to match `sizeof(BlockQ8_0)`.
 #[derive(Debug)]
 pub struct Q8Contig;
+
+/// `sizeof(BlockQ8_0)` — 2-byte fp16 scale + 32 int8 quants. Mirrors
+/// the C `flambeau_block_q8_0` static_assert in
+/// `crates/kernels-shared/include/block_quant.cuh`.
+pub const Q8_0_BLOCK_BYTES: usize = 34;
 
 impl CacheLayout for Q8Contig {
     const NAME: &'static str = "q8_contig";
     fn bytes_per_row(head_dim: usize) -> usize {
         debug_assert_eq!(head_dim % 32, 0, "Q8Contig needs head_dim % 32 == 0");
-        // Each Q8_0 block: 2-byte fp16 scale + 32 int8 values = 18 bytes.
         let n_blocks = head_dim / 32;
-        n_blocks * 18
+        n_blocks * Q8_0_BLOCK_BYTES
     }
     fn head_dim_multiple() -> usize {
         32
@@ -350,9 +363,10 @@ mod tests {
 
     #[test]
     fn q8_contig_row_bytes() {
-        // head_dim=128 → 4 Q8_0 blocks × 18B = 72B per (token, head).
-        assert_eq!(Q8Contig::bytes_per_row(128), 72);
-        assert_eq!(Q8Contig::bytes_per_row(256), 144);
+        // head_dim=128 → 4 Q8_0 blocks × 34 B (= sizeof(BlockQ8_0))
+        //              = 136 B per (token, head).
+        assert_eq!(Q8Contig::bytes_per_row(128), 136);
+        assert_eq!(Q8Contig::bytes_per_row(256), 272);
         assert_eq!(Q8Contig::head_dim_multiple(), 32);
     }
 }

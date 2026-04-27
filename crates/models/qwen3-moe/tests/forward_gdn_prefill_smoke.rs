@@ -259,7 +259,9 @@ fn forward_gdn_prefill_l4_smoke() -> Result<()> {
             conv_kernel: s.conv_kernel,
             conv_channels: s.conv_channels,
         },
-        LayerCache::FullAttn(_) => anyhow::bail!("layer 0 should be GDN"),
+        LayerCache::FullAttn(_) | LayerCache::FullAttnQ8(_) => {
+            anyhow::bail!("layer 0 should be GDN")
+        }
     };
 
     let mut scratch = GdnPrefillScratch::new(&cfg, &device, l)?;
