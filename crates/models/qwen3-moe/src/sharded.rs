@@ -503,6 +503,13 @@ fn upload_one_inner(
     if r.dtype == GgmlDType::BF16 {
         return upload_bf16_as_q8_0(file, r, device);
     }
+    // V1.x #119: MXFP4 (Microscaling FP4, OCP MX) appears in Unsloth Dynamic
+    // Quants on sensitivity-tagged layers (e.g. qwen3next shared experts).
+    // Dequant→Q8_0 at load mirrors the BF16 path; ~0.5% noise vs the FP4
+    // baseline, negligible vs Q8_0 noise downstream.
+    if r.dtype == GgmlDType::Mxfp4 {
+        return upload_mxfp4_as_q8_0(file, r, device);
+    }
     // V2.23.a — 5 Qwen3.6-35B-A3B-Q4_0 layers store `ffn_down_exps` as
     // Q4_1 (scattered among 35 Q4_0 + 5 Q4_1). Rather than author a Q4_1
     // indexed-MoE kernel for 5 tensors, convert them to Q8_0 on host at
@@ -701,6 +708,117 @@ fn upload_bf16_as_q8_0(
     device.default_stream().synchronize()?;
     drop(buf);
     drop(src_f32);
+    Ok((
+        DeviceTensor {
+            ptr,
+            dtype: GgmlDType::Q8_0,
+            dims: r.dims.clone(),
+            bytes: out_bytes,
+            name: std::sync::Arc::from(r.name.as_str()),
+        },
+        out_bytes,
+    ))
+}
+
+/// V1.x #119 — MXFP4 (Microscaling FP4) tensor → Q8_0 on device.
+///
+/// MXFP4 block layout (17 B):
+///   `e: u8`  — shared E8M0 microscale (block scale = 2^(e - 127); e=0 → 0)
+///   `qs[16]: u8` — 32 nibbles of E2M1 FP4 packed low/high
+///
+/// E2M1 nibble lookup (sign << 3 | exp << 1 | mant):
+///   0..=7  →  0, 0.5, 1, 1.5, 2, 3, 4, 6
+///   8..=15 →  -0, -0.5, -1, -1.5, -2, -3, -4, -6
+///
+/// Dequant: `y = MXFP4_LUT[nibble] * 2^(e - 127)`. Then standard absmax/127
+/// Q8_0 encoder (mirror of `upload_bf16_as_q8_0`). ~0.5% additional noise
+/// vs the FP4 baseline (Q8 step bigger than the FP4 LSB), negligible vs the
+/// Q8_0 noise everywhere else in the model.
+///
+/// Used by: Unsloth Dynamic Quants on Qwen3-Coder-Next-Q4_0 shared expert
+/// FFN tensors (per `crates/quant/src/dtype.rs:39`).
+fn upload_mxfp4_as_q8_0(
+    file: &GgufFile,
+    r: &ResolvedTensor,
+    device: &HipDevice,
+) -> Result<(DeviceTensor, usize)> {
+    // OCP MX FP4 lookup: index = nibble ∈ [0, 16). MSB = sign.
+    static MXFP4_LUT: [f32; 16] = [
+         0.0,  0.5,  1.0,  1.5,  2.0,  3.0,  4.0,  6.0,
+        -0.0, -0.5, -1.0, -1.5, -2.0, -3.0, -4.0, -6.0,
+    ];
+    const MXFP4_BLOCK: usize = 1 + QK8_0 / 2; // 1 byte e + 16 bytes nibbles = 17 B
+
+    let elems: usize = r.dims.iter().product::<u64>() as usize;
+    if elems % QK8_0 != 0 {
+        bail!(
+            "upload_mxfp4_as_q8_0: `{}` elem count {elems} not multiple of QK8_0={QK8_0}",
+            r.name
+        );
+    }
+    let raw = file
+        .tensor_raw(&r.name)
+        .with_context(|| format!("tensor_raw `{}`", r.name))?;
+    let n_blocks = elems / QK8_0;
+    let expected_bytes = n_blocks * MXFP4_BLOCK;
+    if raw.len() < expected_bytes {
+        bail!(
+            "upload_mxfp4_as_q8_0: `{}` mmap slice {} < expected {}",
+            r.name, raw.len(), expected_bytes
+        );
+    }
+
+    // Dequant block-by-block to F32 then Q8_0-encode in the same pass.
+    let q8_block_bytes = 2 + QK8_0; // d_f16 + 32 i8
+    let out_bytes = n_blocks * q8_block_bytes;
+    let mut buf: Vec<u8> = Vec::with_capacity(out_bytes);
+    let mut scratch = [0.0f32; QK8_0];
+    for b in 0..n_blocks {
+        let off = b * MXFP4_BLOCK;
+        let e = raw[off];
+        let nibbles = &raw[off + 1..off + 1 + QK8_0 / 2];
+        // Block scale = 2^(e - 127). e=0 → 0 (true zero block, llama.cpp convention).
+        let block_scale = if e == 0 {
+            0.0f32
+        } else {
+            // Construct 2^(e - 127) directly via FP32 bit pattern: exponent
+            // field holds (e - 127 + 127) = e, mantissa 0, sign 0.
+            f32::from_bits((e as u32) << 23)
+        };
+        for (i, &byte) in nibbles.iter().enumerate() {
+            let lo = (byte & 0x0F) as usize;
+            let hi = ((byte >> 4) & 0x0F) as usize;
+            scratch[2 * i]     = MXFP4_LUT[lo] * block_scale;
+            scratch[2 * i + 1] = MXFP4_LUT[hi] * block_scale;
+        }
+        // Q8_0-encode: absmax/127, store d as f16 + 32 i8.
+        let absmax = scratch.iter().map(|v| v.abs()).fold(0.0f32, f32::max);
+        let d = absmax / 127.0;
+        let id = if d != 0.0 { 1.0 / d } else { 0.0 };
+        let d_f16 = half::f16::from_f32(d);
+        buf.extend_from_slice(&d_f16.to_bits().to_le_bytes());
+        for &v in &scratch {
+            let q = (v * id).round_ties_even() as i32;
+            let q = q.clamp(-127, 127) as i8;
+            buf.push(q as u8);
+        }
+    }
+    debug_assert_eq!(buf.len(), out_bytes);
+
+    let ptr = device.alloc(out_bytes)?;
+    unsafe {
+        device
+            .memcpy_async(
+                device.default_stream(),
+                CopyDirection::HostToDevice,
+                ptr,
+                DevicePtr(buf.as_ptr() as usize),
+                out_bytes,
+            )
+            .map_err(|e| anyhow::anyhow!("memcpy (mxfp4→Q8_0) `{}`: {e}", r.name))?;
+    }
+    device.default_stream().synchronize()?;
+    drop(buf);
     Ok((
         DeviceTensor {
             ptr,

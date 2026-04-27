@@ -42,6 +42,13 @@ pub enum GgmlDType {
     Q5K,
     Q6K,
     Q8K,
+    /// Microscaling FP4 (OCP MX). 32 elements per block at E2M1 (1 sign + 2
+    /// exp + 1 mantissa) plus a shared E8M0 (1-byte exponent) microscale.
+    /// Block layout: `[uint8 e, uint8 qs[16]]` = 17 B/block. Used by Unsloth
+    /// Dynamic Quants on sensitivity-tagged layers (e.g. qwen3next shared
+    /// experts in Coder-Next-80B-Q4_0). Not natively supported by V1 kernels;
+    /// the loader transparently dequant→Q8_0 at load (mirrors V2.22 BF16→Q8_0).
+    Mxfp4,
 }
 
 #[derive(Debug, Error)]
@@ -71,10 +78,13 @@ impl GgmlDType {
             14 => Self::Q6K,
             15 => Self::Q8K,
             30 => Self::BF16,
-            // IQ quants + MXFP4 exist in GGUFs in the wild (e.g. Unsloth UD, qwen3next shared
-            // experts, gpt-oss) but are not part of V1 Qwen3.6 Q4_K_M's dtype set. Callers see
-            // a distinct error so loaders can reject cleanly instead of misreading bytes.
-            16..=29 | 31..=39 => return Err(DTypeError::UnsupportedWireId(u)),
+            // MXFP4 (Microscaling FP4) — accepted at parse-time so the loader
+            // can transparently dequant→Q8_0 at upload time. Used by Unsloth
+            // Dynamic Quants in qwen3next shared experts.
+            39 => Self::Mxfp4,
+            // Other IQ quants exist in GGUFs in the wild but are not part of
+            // V1's dtype set. Distinct error so loaders reject cleanly.
+            16..=29 | 31..=38 => return Err(DTypeError::UnsupportedWireId(u)),
             _ => return Err(DTypeError::UnknownWireId(u)),
         })
     }
@@ -96,6 +106,7 @@ impl GgmlDType {
             Self::Q6K => 14,
             Self::Q8K => 15,
             Self::BF16 => 30,
+            Self::Mxfp4 => 39,
         }
     }
 
@@ -117,6 +128,7 @@ impl GgmlDType {
             Self::Q5K => "Q5_K",
             Self::Q6K => "Q6_K",
             Self::Q8K => "Q8_K",
+            Self::Mxfp4 => "MXFP4",
         }
     }
 
@@ -131,6 +143,8 @@ impl GgmlDType {
             Self::Q8_0 => QK8_0,
             Self::Q8_1 => QK8_1,
             Self::Q2K | Self::Q3K | Self::Q4K | Self::Q5K | Self::Q6K | Self::Q8K => QK_K,
+            // MXFP4 uses Q4_0's 32-element block.
+            Self::Mxfp4 => QK4_0,
         }
     }
 
@@ -151,6 +165,8 @@ impl GgmlDType {
             Self::Q5K => std::mem::size_of::<BlockQ5K>(),
             Self::Q6K => std::mem::size_of::<BlockQ6K>(),
             Self::Q8K => std::mem::size_of::<BlockQ8K>(),
+            // MXFP4 block: 1 byte E8M0 microscale + 16 bytes nibbles = 17 B.
+            Self::Mxfp4 => 1 + QK4_0 / 2,
         }
     }
 }
@@ -177,9 +193,37 @@ mod tests {
             GgmlDType::Q5K,
             GgmlDType::Q6K,
             GgmlDType::Q8K,
+            GgmlDType::Mxfp4,
         ] {
             assert_eq!(GgmlDType::from_wire(d.to_wire()).unwrap(), d, "{d:?}");
         }
+    }
+
+    #[test]
+    fn mxfp4_block_size() {
+        assert_eq!(GgmlDType::Mxfp4.block_size(), 32);
+        assert_eq!(GgmlDType::Mxfp4.type_size(), 17);
+    }
+
+    #[test]
+    fn mxfp4_dequant_round_trip() {
+        // One block: e=128 (scale=2^1=2.0), nibbles 0x21 0x43 ... = lo=1,hi=2,lo=3,hi=4,
+        // i.e. elements [0.5, 1.0, 1.5, 2.0, ...]. Scale × 2 → [1.0, 2.0, 3.0, 4.0, ...].
+        let mut raw = vec![0u8; 17];
+        raw[0] = 128; // scale = 2^(128-127) = 2.0
+        // Pack first 4 elements: 0.5(=0x01), 1.0(=0x02), 1.5(=0x03), 2.0(=0x04)
+        // Two nibbles per byte (low first): byte0 = (0x02 << 4) | 0x01 = 0x21
+        //                                    byte1 = (0x04 << 4) | 0x03 = 0x43
+        raw[1] = 0x21;
+        raw[2] = 0x43;
+        // remaining nibbles = 0 → element = 0
+        let mut out = [0.0f32; 32];
+        crate::dequantize_into(GgmlDType::Mxfp4, &raw, &mut out).unwrap();
+        assert!((out[0] - 1.0).abs() < 1e-6);
+        assert!((out[1] - 2.0).abs() < 1e-6);
+        assert!((out[2] - 3.0).abs() < 1e-6);
+        assert!((out[3] - 4.0).abs() < 1e-6);
+        assert_eq!(out[4], 0.0);
     }
 
     #[test]

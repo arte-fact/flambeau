@@ -109,8 +109,32 @@ pub fn dequantize_into(
         GgmlDType::Q5K => dequant_q5_k(bytemuck::cast_slice(raw), out),
         GgmlDType::Q6K => dequant_q6_k(bytemuck::cast_slice(raw), out),
         GgmlDType::Q8K => dequant_q8_k(bytemuck::cast_slice(raw), out),
+        GgmlDType::Mxfp4 => dequant_mxfp4(raw, out),
     }
     Ok(())
+}
+
+// MXFP4 lookup (sign << 3 | exp << 1 | mantissa).
+static MXFP4_LUT: [f32; 16] = [
+     0.0,  0.5,  1.0,  1.5,  2.0,  3.0,  4.0,  6.0,
+    -0.0, -0.5, -1.0, -1.5, -2.0, -3.0, -4.0, -6.0,
+];
+
+fn dequant_mxfp4(raw: &[u8], out: &mut [f32]) {
+    const QK: usize = 32;
+    const BLOCK: usize = 1 + QK / 2; // e + 16 nibbles = 17 B
+    let n_blocks = out.len() / QK;
+    for b in 0..n_blocks {
+        let off = b * BLOCK;
+        let e = raw[off];
+        let scale = if e == 0 { 0.0f32 } else { f32::from_bits((e as u32) << 23) };
+        let nibbles = &raw[off + 1..off + 1 + QK / 2];
+        let dst = &mut out[b * QK..(b + 1) * QK];
+        for (i, &byte) in nibbles.iter().enumerate() {
+            dst[2 * i]     = MXFP4_LUT[(byte & 0x0F) as usize] * scale;
+            dst[2 * i + 1] = MXFP4_LUT[((byte >> 4) & 0x0F) as usize] * scale;
+        }
+    }
 }
 
 // ---- legacy Q*_0 / Q*_1 ----------------------------------------------------
