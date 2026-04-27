@@ -46,28 +46,24 @@ fn config_from_real_qwen3_gguf() -> Result<()> {
     assert!(cfg.rope.freq_base >= 10_000.0);
     assert!(cfg.vocab_size >= 100_000);
 
-    // Hybrid arches must have the full companion of SSM + shared-expert
-    // + full_attention_interval metadata. Dense arches must not.
-    match cfg.family {
-        AttentionFamily::Dense => {
-            assert_eq!(cfg.arch, "qwen3moe");
-            assert!(cfg.gdn.is_none());
-            assert!(cfg.full_attention_interval.is_none());
-            assert!(cfg.shared_expert_intermediate_size.is_none());
-        }
-        AttentionFamily::Hybrid => {
-            assert!(cfg.gdn.is_some(), "hybrid arch must carry SSM dims");
-            let gdn = cfg.gdn.as_ref().unwrap();
-            assert!(gdn.d_inner > 0);
-            assert!(gdn.conv_kernel >= 2);
-            assert!(gdn.num_v_heads > 0);
-            assert!(cfg.full_attention_interval.is_some());
-            assert!(cfg.shared_expert_intermediate_size.is_some());
-            assert!(cfg.rope.rotated_dims <= cfg.head_dim);
-            if cfg.arch == "qwen35moe" {
-                // Qwen3.6 reports sections = [11, 11, 10, 0].
-                assert!(cfg.rope.sections.is_some());
-            }
+    // V1.x — only Hybrid family is supported (qwen3moe Dense arch was dropped
+    // after the V1 bench showed Coder-30B at 0.27× combined; the qwen3moe-
+    // specific forward_dense_attn_* path lacked optimizations qwen35moe got).
+    // qwen35 (dense FFN) still has GDN-style attention layers per metadata.
+    assert_eq!(cfg.family, AttentionFamily::Hybrid);
+    if cfg.arch != "qwen35" {
+        // qwen35moe / qwen36moe — full hybrid (GDN + full-attn + MoE + shared expert).
+        assert!(cfg.gdn.is_some(), "hybrid arch must carry SSM dims");
+        let gdn = cfg.gdn.as_ref().unwrap();
+        assert!(gdn.d_inner > 0);
+        assert!(gdn.conv_kernel >= 2);
+        assert!(gdn.num_v_heads > 0);
+        assert!(cfg.full_attention_interval.is_some());
+        assert!(cfg.shared_expert_intermediate_size.is_some());
+        assert!(cfg.rope.rotated_dims <= cfg.head_dim);
+        if cfg.arch == "qwen35moe" {
+            // Qwen3.6 reports sections = [11, 11, 10, 0].
+            assert!(cfg.rope.sections.is_some());
         }
     }
 
@@ -109,14 +105,10 @@ fn layout_enumerates_every_tensor() -> Result<()> {
     // Layer classification must agree with config on every index.
     let mut num_full_attn = 0usize;
     let mut num_gdn = 0usize;
-    let mut num_dense = 0usize;
     for (i, l) in layout.layers.iter().enumerate() {
-        match (&cfg.family, cfg.is_recurrent(i), &l.attn) {
-            (AttentionFamily::Dense, false, LayerAttnBlock::Dense(_)) => num_dense += 1,
-            (AttentionFamily::Hybrid, true, LayerAttnBlock::Gdn(_)) => num_gdn += 1,
-            (AttentionFamily::Hybrid, false, LayerAttnBlock::FullAttn(_)) => {
-                num_full_attn += 1;
-            }
+        match (cfg.is_recurrent(i), &l.attn) {
+            (true, LayerAttnBlock::Gdn(_)) => num_gdn += 1,
+            (false, LayerAttnBlock::FullAttn(_)) => num_full_attn += 1,
             other => panic!("layer {i} classification mismatch: {other:?}"),
         }
 
@@ -127,34 +119,20 @@ fn layout_enumerates_every_tensor() -> Result<()> {
             "layer {i} shared-expert mismatch"
         );
 
-        // Every layer has an attn_norm; hybrids additionally have
-        // post_attention_norm, denses additionally have ffn_norm.
-        match cfg.family {
-            AttentionFamily::Dense => {
-                assert!(l.post_attention_norm.is_none());
-                assert!(l.ffn_norm.is_some());
-            }
-            AttentionFamily::Hybrid => {
-                assert!(l.post_attention_norm.is_some());
-                assert!(l.ffn_norm.is_none());
-            }
-        }
+        // Every layer has post_attention_norm (Hybrid family only after qwen3moe drop).
+        assert!(l.post_attention_norm.is_some());
+        assert!(l.ffn_norm.is_none());
     }
-    if cfg.family == AttentionFamily::Hybrid {
-        assert_eq!(num_gdn, cfg.num_recurrent_layers());
-        assert_eq!(num_full_attn, cfg.num_full_attn_layers());
-    } else {
-        assert_eq!(num_dense, cfg.num_layers);
-    }
+    assert_eq!(num_gdn, cfg.num_recurrent_layers());
+    assert_eq!(num_full_attn, cfg.num_full_attn_layers());
 
     let total_gb = layout.total_bytes() as f64 / 1e9;
     eprintln!(
-        "layout [{}]: {} layers (full-attn={} / gdn={} / dense={}), total weight bytes = {:.2} GB",
+        "layout [{}]: {} layers (full-attn={} / gdn={}), total weight bytes = {:.2} GB",
         cfg.arch,
         layout.layers.len(),
         num_full_attn,
         num_gdn,
-        num_dense,
         total_gb,
     );
     // Q4_K-quantised Qwen3-class models are in the 15–30 GB range.

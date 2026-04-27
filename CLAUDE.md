@@ -32,7 +32,8 @@ See `doc/ROADMAP-V1-QWEN36-GFX906.md` §Side-tracks for step-by-step T1–T5 and
 
 ## Scope reminder
 
-- **Models:** Mistral/Devstral dense, Gemma-4 dense+gated, Qwen3.5 dense, Qwen3.6 MoE, Qwen3-Coder MoE, Qwen3-Next (GDN hybrid). Nothing else.
+- **Models:** Mistral/Devstral dense, Gemma-4 dense+gated, Qwen3.5 dense, Qwen3.6 MoE, Qwen3-Coder-Next (qwen3next, GDN hybrid). Nothing else.
+  - **Qwen3-Coder-30B (qwen3moe arch) DROPPED V1.x** — V1 bench measured 0.27× combined vs llama.cpp; the qwen3moe-specific `forward_dense_attn_*` path lacked optimizations qwen35moe got. Coder-Next-80B is the surviving Coder target (qwen3next arch = hybrid GDN+full-attn+MoE+shared, same forward path as qwen35moe).
 - **Backends:** HIP + CUDA only. **Metal is out of v1 scope.**
   - HIP test arch: **gfx906 (MI50)** — daily target, wave64, GCN cross-lane.
   - HIP portability canary: **gfx1031 (RX 6750 XT, RDNA2, Navi 22)** — wave32, different DPP, no matrix cores, smaller LDS. Physically available and exercised every Phase 2+ gate. If the abstraction is wave-leaky, gfx1031 is where it surfaces first.

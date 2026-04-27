@@ -20,7 +20,6 @@ Hybrid pp2tp2 uses devices [0,2,1,3] to keep {2,3} out of any TP group.
 | qwen36_27b_ud_q8_k_xl | pp2tp2 | **137.4** | **23.7** (pp2tp2) | 124.7 | 14.8 | 1.10× | 1.60× |
 | qwen36_35b_a3b_ud_q4_k_s | pp4 | **605.7** | **64.5** (pp2tp2) | 675.5 | 58.7 | 0.90× | 1.10× |
 | qwen36_35b_a3b_ud_q8_k_xl | pp4 | **651.7** | **59.6** (pp4) | 400.8 | 59.4 | 1.63× | 1.00× |
-| qwen3_coder_30b_ud_q4_k_xl | pp4 | **488.5** | **38.4** (pp4) | 907.6 | 76.9 | 0.54× | 0.50× |
 
 ## Per-model full sweep
 
@@ -105,12 +104,4 @@ GGUF: `/artefact/models/Qwen3.6-35B-A3B-UD-Q8_K_XL.gguf`
 | topology | pp | tp | load_s | pp8 | pp32 | pp128 | pp512 | pp2048 | tg16 | tg64 | tg256 |
 |---|---|---|---|---|---|---|---|---|---|---|---|
 | pp4 | 4 | 1 | 50.60 | 78.5 | 96.1 | 529.3 | 651.7 | 647.0 | 61.2 | 59.6 | 55.4 |
-
-### qwen3_coder_30b_ud_q4_k_xl
-
-GGUF: `/artefact/models/Qwen3-Coder-30B-A3B-Instruct-UD-Q4_K_XL.gguf`
-
-| topology | pp | tp | load_s | pp8 | pp32 | pp128 | pp512 | pp2048 | tg16 | tg64 | tg256 |
-|---|---|---|---|---|---|---|---|---|---|---|---|
-| pp4 | 4 | 1 | 13.42 | 71.0 | 60.7 | 477.2 | 488.5 | 299.4 | 40.8 | 38.4 | 31.1 |
 

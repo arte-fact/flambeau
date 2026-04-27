@@ -24,7 +24,7 @@ use flambeau_quant::GgufFile;
 
 #[derive(Debug, thiserror::Error)]
 pub enum Qwen3MoEConfigError {
-    #[error("expected a Qwen3-family MoE architecture (qwen3moe / qwen35moe / qwen36moe), got {got:?}")]
+    #[error("expected a Qwen3-family architecture (qwen35 / qwen35moe / qwen36moe), got {got:?}")]
     WrongArchitecture { got: Option<String> },
     #[error("missing GGUF metadata key `{0}`")]
     MissingKey(String),
@@ -40,7 +40,7 @@ pub enum Qwen3MoEConfigError {
 /// scaffold: config parser accepts it, but the weight loader + forward path
 /// still assume MoE — a qwen35 GGUF will fail to LOAD until the dense-FFN
 /// paths are wired (see `doc/V2-BACKLOG.md#V2.2`).
-pub const SUPPORTED_ARCHS: &[&str] = &["qwen3moe", "qwen35moe", "qwen36moe", "qwen35"];
+pub const SUPPORTED_ARCHS: &[&str] = &["qwen35moe", "qwen36moe", "qwen35"];
 
 /// Which attention family the model uses.
 ///
@@ -165,13 +165,13 @@ impl Qwen3MoEConfig {
             return Err(Qwen3MoEConfigError::WrongArchitecture { got: Some(arch) });
         }
 
-        // `qwen35moe` / `qwen36moe` / `qwen35` are hybrid GDN + full-attn.
-        // Pure `qwen3moe` has no SSM tensors and no `full_attention_interval`.
-        let family = if arch == "qwen3moe" {
-            AttentionFamily::Dense
-        } else {
-            AttentionFamily::Hybrid
-        };
+        // V1: `qwen35moe` / `qwen36moe` / `qwen35` — all are Hybrid (GDN + full-attn)
+        // or Hybrid-degenerate (full-attn-only when full_attention_interval=1, which is
+        // how `qwen35` dense looks at the family level). Pure-MoE `qwen3moe` was
+        // dropped — see `project_v1_bench_matrix.md` (Coder-30B was 0.27× combined
+        // and the qwen3moe-specific forward_dense_attn_* path lacked the kernel
+        // optimizations qwen35moe got).
+        let family = AttentionFamily::Hybrid;
         let is_dense_ffn = arch == "qwen35";
 
         let key = |suffix: &str| format!("{arch}.{suffix}");
