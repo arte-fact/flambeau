@@ -125,6 +125,7 @@ pub const KERNEL_STEMS: &[&str] = &[
     "quantize_q8_1_mmq",
     "quantize_f16_q8_1_mmq",
     "quantize_f16_q8_1",
+    "quantize_f16_q8_0",
     "cast_f32_f16",
     "cast_f16_f32",
     // Norm / pointwise.

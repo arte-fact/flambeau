@@ -308,3 +308,30 @@ pub fn quantize_f16_q8_1(
     unsafe { kernel.launch(stream, cfg, args)? };
     Ok(())
 }
+
+/// V1-BENCH-#116a — F16 → Q8_0 row-quantise. Used to convert K/V
+/// projection output (F16) to Q8_0 blocks for `KvCache<Q8Contig>`. Same
+/// shape as [`quantize_f16_q8_1`] but writes 18 B / 32 elems (no `s`
+/// field).
+pub fn quantize_f16_q8_0(
+    reg: &OpsRegistry,
+    stream: &HipStream,
+    x_f16: DevicePtr,
+    y_q8_0: DevicePtr,
+    n_elems: usize,
+) -> Result<()> {
+    assert_eq!(n_elems % 32, 0, "quantize_f16_q8_0 expects n_elems % 32 == 0");
+    let module = reg.expect_module("quantize_f16_q8_0")?;
+    let kernel = module.kernel("flambeau_quantize_row_f16_q8_0")?;
+    let n_i = n_elems as i32;
+    let x_ptr: u64 = x_f16.as_usize() as u64;
+    let y_ptr: u64 = y_q8_0.as_usize() as u64;
+    let mut args = KernelArgs::new();
+    args.push(&x_ptr);
+    args.push(&y_ptr);
+    args.push(&n_i);
+    let n_blocks = (n_elems / 32) as u32;
+    let cfg = LaunchCfg::one_d(n_blocks, 32);
+    unsafe { kernel.launch(stream, cfg, args)? };
+    Ok(())
+}
