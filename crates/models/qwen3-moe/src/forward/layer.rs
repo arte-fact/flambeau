@@ -200,6 +200,13 @@ pub fn forward_layer_decode(
     let hidden = cfg.hidden_size;
     let il = layer_weights.layer_idx;
 
+    // V1-BENCH-CN-80B-6 — intra-layer section markers. No-op when the
+    // thread-local profile timer is disabled (~ns thread_local check).
+    // Boundaries: attn_done, post_norm_done, shared_expert_done,
+    // router_done, moe_ffn_done. Per-layer total = sum of these = the
+    // 0.47 ms/layer wall the iter-2 profile measured.
+    flambeau_backend_hip::profile::mark("layer_start", device, stream)?;
+
     // 1. Attention (full-attn or GDN) → attn_delta in `mid_f16`.
     // We reuse mid_f16 as the delta slot first, then overwrite it with the
     // post-attention residual sum on the next line.
@@ -260,6 +267,11 @@ pub fn forward_layer_decode(
             }
         }
     }
+    flambeau_backend_hip::profile::mark(
+        if cfg.is_recurrent(il) { "layer_attn_gdn" } else { "layer_attn_full" },
+        device,
+        stream,
+    )?;
 
     // 2+3. V2.23.a.1 fused: `mid = x_in + attn_delta; mid_norm = rmsnorm(mid)*w`.
     // Saves one kernel launch per layer per token vs the old add_f16 + rmsnorm
@@ -282,6 +294,7 @@ pub fn forward_layer_decode(
         cfg.rms_norm_eps,
     )
     .context("fused post-attn add+rmsnorm")?;
+    flambeau_backend_hip::profile::mark("layer_post_norm", device, stream)?;
     // B5 bisect — dump PP analogues of TP's "post-AR-attn hidden_a" and
     // "mid_norm_f16" at layer 0. Gated on FLAMBEAU_TP_LAYER0_BISECT (same
     // env as TP) so PP and TP runs can be diffed by the same flag.
@@ -367,6 +380,7 @@ pub fn forward_layer_decode(
             scratch.mid_norm_f16,
             scratch.shared_delta_f16,
         )?;
+        flambeau_backend_hip::profile::mark("layer_shared_expert", device, stream)?;
         (scratch.mid_f16, Some(scratch.shared_delta_f16))
     } else {
         // Dense arch with no shared expert: combine's residual is just mid.
@@ -391,6 +405,7 @@ pub fn forward_layer_decode(
         moe,
         scratch.mid_norm_f16,
     )?;
+    flambeau_backend_hip::profile::mark("layer_router", device, stream)?;
     // B5 router-divergence bisect: dump expert_ids per layer for parity diff.
     // Gated on FLAMBEAU_PARITY_LAYER_DUMP=1 so it composes with the existing
     // PP layer-dump infra. Read on the same stream the kernels just used so
@@ -435,6 +450,7 @@ pub fn forward_layer_decode(
         shared_extra,
         x_out,
     )?;
+    flambeau_backend_hip::profile::mark("layer_moe_ffn", device, stream)?;
 
     Ok(())
 }

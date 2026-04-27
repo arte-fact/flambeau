@@ -50,6 +50,73 @@ pub fn dense_gemv_f32_f16(
     Ok(())
 }
 
+/// V1-BENCH-CN-80B-6 — F16-weight variant of [`dense_gemv_f32_f16`].
+/// Halves HBM weight bandwidth (2 B/elem vs 4 B/elem). Used for the MoE
+/// router on models where the F32→F16 router-weight conversion is
+/// applied at load time (see `sharded.rs::up_router_f16` / equivalent).
+/// Same launch shape and reduction semantics as the F32 variant.
+pub fn dense_gemv_f16_f16(
+    reg: &OpsRegistry,
+    stream: &HipStream,
+    w: DevicePtr,
+    x: DevicePtr,
+    y: DevicePtr,
+    n_rows: usize,
+    k: usize,
+) -> Result<()> {
+    let module = reg.expect_module("dense_gemv_f16_f16")?;
+    let kernel = module.kernel("flambeau_dense_gemv_f16_f16")?;
+    let n_rows_i = n_rows as i32;
+    let k_i = k as i32;
+    let w_ptr: u64 = w.as_usize() as u64;
+    let x_ptr: u64 = x.as_usize() as u64;
+    let y_ptr: u64 = y.as_usize() as u64;
+    let mut args = KernelArgs::new();
+    args.push(&w_ptr);
+    args.push(&x_ptr);
+    args.push(&y_ptr);
+    args.push(&n_rows_i);
+    args.push(&k_i);
+    let cfg = LaunchCfg::one_d(n_rows as u32, 256);
+    unsafe { kernel.launch(stream, cfg, args)? };
+    Ok(())
+}
+
+/// V1-BENCH-CN-80B-6 — F16-weight variant of [`dense_gemv_f32_f16_batched`].
+pub fn dense_gemv_f16_f16_batched(
+    reg: &OpsRegistry,
+    stream: &HipStream,
+    w: DevicePtr,
+    x: DevicePtr,
+    y: DevicePtr,
+    n_rows: usize,
+    k: usize,
+    n_tokens: usize,
+) -> Result<()> {
+    let module = reg.expect_module("dense_gemv_f16_f16_batched")?;
+    let kernel = module.kernel("flambeau_dense_gemv_f16_f16_batched")?;
+    let n_rows_i = n_rows as i32;
+    let k_i = k as i32;
+    let n_tokens_i = n_tokens as i32;
+    let w_ptr: u64 = w.as_usize() as u64;
+    let x_ptr: u64 = x.as_usize() as u64;
+    let y_ptr: u64 = y.as_usize() as u64;
+    let mut args = KernelArgs::new();
+    args.push(&w_ptr);
+    args.push(&x_ptr);
+    args.push(&y_ptr);
+    args.push(&n_rows_i);
+    args.push(&k_i);
+    args.push(&n_tokens_i);
+    let cfg = LaunchCfg {
+        grid: (n_rows as u32, n_tokens as u32, 1),
+        block: (256, 1, 1),
+        shared_bytes: 0,
+    };
+    unsafe { kernel.launch(stream, cfg, args)? };
+    Ok(())
+}
+
 /// V2.31.g — batched dense GEMV: `y[t, n] = Σ_k w[n, k] * (float) x[t, k]`.
 /// Weight F32 `[n_rows, k]`; activation F16 `[n_tokens, k]`; output F32
 /// `[n_tokens, n_rows]`.

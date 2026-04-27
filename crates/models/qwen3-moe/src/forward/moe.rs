@@ -608,9 +608,13 @@ pub fn forward_router_decode(
     let n_experts = cfg.num_experts;
     let top_k = cfg.num_experts_per_tok;
 
-    if ffn_gate_inp.dtype != GgmlDType::F32 {
+    // V1-BENCH-CN-80B-6 — accept either F32 or F16 router weight. F16
+    // is the iter-3 default (loader converts F32→F16 at upload — see
+    // sharded.rs); F32 stays as a fallback when a model legitimately
+    // ships an F32 router (older Qwen3.5 GGUFs predate the conversion).
+    if ffn_gate_inp.dtype != GgmlDType::F32 && ffn_gate_inp.dtype != GgmlDType::F16 {
         bail!(
-            "router expects F32 ffn_gate_inp; got {:?}",
+            "router expects F32 or F16 ffn_gate_inp; got {:?}",
             ffn_gate_inp.dtype
         );
     }
@@ -629,16 +633,29 @@ pub fn forward_router_decode(
         );
     }
 
-    dense_gemv_f32_f16(
-        ops,
-        stream,
-        ffn_gate_inp.ptr,
-        x_norm,
-        scratch.router_logits,
-        n_experts,
-        hidden,
-    )
-    .context("router dense_gemv_f32_f16")?;
+    if ffn_gate_inp.dtype == GgmlDType::F16 {
+        flambeau_ops::hip::router::dense_gemv_f16_f16(
+            ops,
+            stream,
+            ffn_gate_inp.ptr,
+            x_norm,
+            scratch.router_logits,
+            n_experts,
+            hidden,
+        )
+        .context("router dense_gemv_f16_f16")?;
+    } else {
+        dense_gemv_f32_f16(
+            ops,
+            stream,
+            ffn_gate_inp.ptr,
+            x_norm,
+            scratch.router_logits,
+            n_experts,
+            hidden,
+        )
+        .context("router dense_gemv_f32_f16")?;
+    }
 
     topk_f32(
         ops,
@@ -878,8 +895,8 @@ pub fn forward_router_prefill(
     let n_experts = cfg.num_experts;
     let top_k = cfg.num_experts_per_tok;
 
-    if ffn_gate_inp.dtype != GgmlDType::F32 {
-        bail!("router expects F32 ffn_gate_inp; got {:?}", ffn_gate_inp.dtype);
+    if ffn_gate_inp.dtype != GgmlDType::F32 && ffn_gate_inp.dtype != GgmlDType::F16 {
+        bail!("router expects F32 or F16 ffn_gate_inp; got {:?}", ffn_gate_inp.dtype);
     }
     if ffn_gate_inp.dims.len() != 2
         || ffn_gate_inp.dims[0] as usize != n_experts
@@ -895,17 +912,33 @@ pub fn forward_router_prefill(
     // instead of L individual launches. On 35B Mesh<4> prefill L=512 this
     // collapsed 20520 launches per pass (40 layers × 512 tokens) down to
     // 40; profiled 9 % of wall in V2.30.b.
-    flambeau_ops::hip::router::dense_gemv_f32_f16_batched(
-        ops,
-        stream,
-        ffn_gate_inp.ptr,
-        x_norm,
-        scratch.router_logits,
-        n_experts,
-        hidden,
-        n_tokens,
-    )
-    .context("prefill router dense_gemv batched")?;
+    // V1-BENCH-CN-80B-6 — dispatch F16-weight variant when the loader
+    // converted F32→F16 at upload (default path post-iter-3).
+    if ffn_gate_inp.dtype == GgmlDType::F16 {
+        flambeau_ops::hip::router::dense_gemv_f16_f16_batched(
+            ops,
+            stream,
+            ffn_gate_inp.ptr,
+            x_norm,
+            scratch.router_logits,
+            n_experts,
+            hidden,
+            n_tokens,
+        )
+        .context("router dense_gemv_f16_f16_batched (prefill)")?;
+    } else {
+        flambeau_ops::hip::router::dense_gemv_f32_f16_batched(
+            ops,
+            stream,
+            ffn_gate_inp.ptr,
+            x_norm,
+            scratch.router_logits,
+            n_experts,
+            hidden,
+            n_tokens,
+        )
+        .context("prefill router dense_gemv batched")?;
+    }
 
     topk_f32(
         ops,

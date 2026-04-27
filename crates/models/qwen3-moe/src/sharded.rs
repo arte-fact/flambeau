@@ -1349,6 +1349,24 @@ fn upload_ffn(
     let opt_up_raw = |t: &Option<ResolvedTensor>, total: &mut usize| -> Result<Option<DeviceTensor>> {
         t.as_ref().map(|r| up_raw(file, r, device, total)).transpose()
     };
+    // V1-BENCH-CN-80B-6 — convert F32 router weight (`ffn_gate_inp`) to
+    // F16 at load. Halves the per-token HBM weight read inside the
+    // `dense_gemv_*` router kernel; quality impact is negligible (router
+    // is a coarse top-k discriminator over discrete experts). The F16
+    // conversion only fires when the GGUF stored F32; other dtypes
+    // (e.g. already-quantised) pass through up_raw unchanged.
+    let opt_up_router_f16 = |t: &Option<ResolvedTensor>,
+                             total: &mut usize|
+     -> Result<Option<DeviceTensor>> {
+        let Some(r) = t.as_ref() else {
+            return Ok(None);
+        };
+        if r.dtype == GgmlDType::F32 {
+            up_f16(file, r, device, total).map(Some)
+        } else {
+            up_raw(file, r, device, total).map(Some)
+        }
+    };
     let dense = f
         .dense
         .as_ref()
@@ -1361,7 +1379,7 @@ fn upload_ffn(
         })
         .transpose()?;
     Ok(FfnWeights {
-        ffn_gate_inp: opt_up_raw(&f.ffn_gate_inp, total)?,
+        ffn_gate_inp: opt_up_router_f16(&f.ffn_gate_inp, total)?,
         ffn_gate_exps: opt_up_raw(&f.ffn_gate_exps, total)?,
         ffn_up_exps: opt_up_raw(&f.ffn_up_exps, total)?,
         ffn_down_exps: opt_up_raw(&f.ffn_down_exps, total)?,

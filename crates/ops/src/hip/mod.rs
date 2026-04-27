@@ -170,6 +170,8 @@ pub const KERNEL_STEMS: &[&str] = &[
     "moe_combine_no_residual_f16",
     "dense_gemv_f32_f16",
     "dense_gemv_f32_f16_batched",
+    "dense_gemv_f16_f16",
+    "dense_gemv_f16_f16_batched",
 ];
 
 /// Single-session registry of loaded HIP kernel modules. Built once at model
