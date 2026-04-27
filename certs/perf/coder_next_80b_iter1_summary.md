@@ -72,7 +72,31 @@ pp2tp2 L=128: 164.9    L=512:  179.9    L=2048:  181.9    tg64:  46.2
 
 (from `certs/perf/v1_bench_matrix/qwen3_coder_next_80b.json`)
 
+## Bonus A/B: FLAMBEAU_VARIANT=baseline vs default
+
+Single quick experiment that doesn't need rocprofv3: flip the global
+DP4A/fusion variant gate and measure the delta. Tells us whether the
+DP4A-optimised path is on the critical path for this model.
+
+| variant                          | pp512 | tg64  |
+|----------------------------------|------:|------:|
+| `FLAMBEAU_VARIANT=baseline` (no DP4A) | 567.0 | 32.6 |
+| default (DP4A + fusion)          | 537.6 | **41.3** |
+
+- **Decode +27 %** with default (DP4A) vs baseline. DP4A path is the
+  decisive lever for the user-visible chat throughput.
+- **Prefill −5 %** with default vs baseline. Small but real. Some
+  DP4A-flavoured prefill kernel choice is mildly worse for this model's
+  quant mix (Coder-Next-Q4_0 = Q4_0 gate/up + Q4_1 ffn_down_exps + MXFP4
+  shexp + standard attn). One-rep, within typical variance — flagged
+  for iter-3 if it reproduces.
+
+Default (DP4A) stays — net positive, and decode regression matters more
+than 5 % prefill noise.
+
 ## Closes
 
 - CN-80B-4 #130 — filed with the rocprofv3 limitation. No code change,
-  no perf delta. Iter-2 absorbs the remaining "profile" work.
+  no perf delta. Iter-2 absorbs the remaining "profile" work; the
+  FLAMBEAU_VARIANT A/B above is the iter-1 supplementary evidence
+  that informs iter-2/3 priority.
