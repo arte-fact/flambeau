@@ -511,64 +511,156 @@ fn forward_one_token_hybrid_inner(
         // `il - layer_range.start` (each stage's session allocated
         // exactly its slice of caches).
         let range_start = stage.layer_range.start;
-        // CN-80B-22 — per-layer-type wall time for decode profiling on
-        // the hybrid path. Marks fire only when `profile::enable()` was
-        // called on this thread; otherwise a single bool load.
         let stage_dev0 = stage.sub_cluster.device(0);
         let stage_stream0 = stage_dev0.default_stream();
-        for il in stage.layer_range.clone() {
-            let il_cache = il - range_start;
-            let is_full_attn = !cfg.is_recurrent(il);
-            if is_full_attn {
-                forward_full_attn_layer_tp(
-                    &stage.tp_model,
-                    stage_scratch,
-                    &stage.sub_cluster,
-                    stage_ar,
-                    &mut stage_session.caches,
-                    il,
-                    il_cache,
-                    position,
-                    world,
-                )
-                .with_context(|| format!("hybrid stage {s} full-attn layer {il}"))?;
+        // CN-80B-20 iter 1 — per-stage-per-rank graph capture/replay,
+        // gated on FLAMBEAU_DECODE_GRAPH=1. Captures every sub_cluster
+        // rank's stream IN PARALLEL (the layer functions issue cross-
+        // rank kernels and AR event-record/wait, all into the right
+        // captured graph by stream targeting). Replays all rank graphs
+        // simultaneously each subsequent step.
+        //
+        // Iter 1 limitation: NO slot binding. Captured K/V append
+        // destinations and `n_tokens_kv` arg are FROZEN at capture-
+        // time. Replay produces TIMING-MEANINGFUL but INCOHERENT
+        // output. This isolates the wall-time question (is graph
+        // capture worth the implementation cost on hybrid TP?) from
+        // the correctness work (iter 2 — slot binding).
+        let do_graph = std::env::var("FLAMBEAU_DECODE_GRAPH").is_ok();
+        let stage_n_ranks = stage.sub_cluster.ranks();
+        let cache_populated = do_graph
+            && scratch.decode_graphs.get(s).is_some_and(|v| {
+                v.len() == stage_n_ranks && v.iter().all(|g| g.is_some())
+            });
+
+        if cache_populated {
+            // === REPLAY ===
+            for r in 0..stage_n_ranks {
+                let device = stage.sub_cluster.device(r);
+                device.bind()?;
+                let stream = device.default_stream();
+                scratch.decode_graphs[s][r]
+                    .as_ref()
+                    .unwrap()
+                    .launch(stream)
+                    .with_context(|| format!("hybrid stage {s} rank {r} graph replay"))?;
+            }
+            // Sync each rank's stream so the cross-stage hand-off and
+            // per-stage profiling marks see committed state.
+            for r in 0..stage_n_ranks {
+                let device = stage.sub_cluster.device(r);
+                device.bind()?;
+                device.default_stream().synchronize()?;
+            }
+        } else {
+            let run_layer_loop = |stage_scratch: &mut crate::forward::ShardedForwardOneTokenScratchTp,
+                                  stage_session: &mut crate::hybrid::Qwen3MoEHybridStageSession|
+             -> Result<()> {
+                for il in stage.layer_range.clone() {
+                    let il_cache = il - range_start;
+                    let is_full_attn = !cfg.is_recurrent(il);
+                    if is_full_attn {
+                        forward_full_attn_layer_tp(
+                            &stage.tp_model,
+                            stage_scratch,
+                            &stage.sub_cluster,
+                            stage_ar,
+                            &mut stage_session.caches,
+                            il,
+                            il_cache,
+                            position,
+                            world,
+                        )
+                        .with_context(|| format!("hybrid stage {s} full-attn layer {il}"))?;
+                        if flambeau_backend_hip::profile::is_enabled() {
+                            stage_dev0.bind()?;
+                            flambeau_backend_hip::profile::mark(
+                                "hyb_dec_full_attn",
+                                stage_dev0,
+                                stage_stream0,
+                            )?;
+                        }
+                    } else {
+                        forward_gdn_layer_tp(
+                            &stage.tp_model,
+                            stage_scratch,
+                            &stage.sub_cluster,
+                            stage_ar,
+                            &mut stage_session.caches,
+                            il,
+                            il_cache,
+                            world,
+                        )
+                        .with_context(|| format!("hybrid stage {s} gdn layer {il}"))?;
+                        if flambeau_backend_hip::profile::is_enabled() {
+                            stage_dev0.bind()?;
+                            flambeau_backend_hip::profile::mark(
+                                "hyb_dec_gdn",
+                                stage_dev0,
+                                stage_stream0,
+                            )?;
+                        }
+                    }
+                }
                 if flambeau_backend_hip::profile::is_enabled() {
                     stage_dev0.bind()?;
                     flambeau_backend_hip::profile::mark(
-                        "hyb_dec_full_attn",
+                        "hyb_dec_post_stage",
                         stage_dev0,
                         stage_stream0,
                     )?;
+                }
+                Ok(())
+            };
+
+            if do_graph {
+                // === CAPTURE (first decode call on this stage) ===
+                // Capture all sub_cluster ranks' streams in parallel so
+                // cross-rank ops in the layer loop land in the right
+                // graph by target stream.
+                let stream_refs: Vec<&flambeau_backend_hip::HipStream> = (0..stage_n_ranks)
+                    .map(|r| stage.sub_cluster.device(r).default_stream())
+                    .collect();
+                let mut layer_loop_err: Option<anyhow::Error> = None;
+                let execs = flambeau_backend_hip::HipGraphExec::capture_multi_no_slots(
+                    &stream_refs,
+                    || {
+                        // The closure can't return anyhow directly; stash
+                        // any error and surface after capture ends.
+                        if let Err(e) = run_layer_loop(stage_scratch, stage_session) {
+                            layer_loop_err = Some(e);
+                            return Err(flambeau_core::DeviceError::Backend {
+                                backend: "hip",
+                                code: -1,
+                                message: format!("layer loop during capture: stage {s}"),
+                            });
+                        }
+                        Ok(())
+                    },
+                );
+                if let Some(e) = layer_loop_err {
+                    return Err(e);
+                }
+                let execs = execs.with_context(|| {
+                    format!("hybrid stage {s} capture_multi_no_slots")
+                })?;
+                // Launch each captured graph once so this step's output is
+                // produced (the closure already ran the layers eagerly
+                // during capture; the launches above just instantiate the
+                // graphs — no replay needed for THIS step).
+                if scratch.decode_graphs[s].len() != stage_n_ranks {
+                    bail!(
+                        "hybrid stage {s} graph cache len {} != ranks {stage_n_ranks}",
+                        scratch.decode_graphs[s].len()
+                    );
+                }
+                for (r, exec) in execs.into_iter().enumerate() {
+                    scratch.decode_graphs[s][r] = Some(exec);
                 }
             } else {
-                forward_gdn_layer_tp(
-                    &stage.tp_model,
-                    stage_scratch,
-                    &stage.sub_cluster,
-                    stage_ar,
-                    &mut stage_session.caches,
-                    il,
-                    il_cache,
-                    world,
-                )
-                .with_context(|| format!("hybrid stage {s} gdn layer {il}"))?;
-                if flambeau_backend_hip::profile::is_enabled() {
-                    stage_dev0.bind()?;
-                    flambeau_backend_hip::profile::mark(
-                        "hyb_dec_gdn",
-                        stage_dev0,
-                        stage_stream0,
-                    )?;
-                }
+                // === EAGER (env not set) ===
+                run_layer_loop(stage_scratch, stage_session)?;
             }
-        }
-        if flambeau_backend_hip::profile::is_enabled() {
-            stage_dev0.bind()?;
-            flambeau_backend_hip::profile::mark(
-                "hyb_dec_post_stage",
-                stage_dev0,
-                stage_stream0,
-            )?;
         }
 
         // Hand-off: stage s+1's per-rank `hidden_a` ← stage s's rank-0

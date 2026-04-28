@@ -441,6 +441,14 @@ pub struct ShardedForwardOneTokenScratchHybrid {
     pub per_stage: Vec<ShardedForwardOneTokenScratchTp>,
     /// Stage that runs the LM head. V1: `pp_size - 1`.
     pub head_stage: u32,
+    /// CN-80B-20 — per-stage-per-rank captured decode graph. Outer indexes
+    /// stage, inner indexes rank within that stage's sub_cluster. Populated
+    /// lazily on the first decode call when `FLAMBEAU_DECODE_GRAPH=1`.
+    /// Iter 1 stores HipGraphExec only (no slot binding) — captured K/V
+    /// append destinations and `n_tokens_kv` are frozen at capture time, so
+    /// replays produce TIMING-MEANINGFUL but OUTPUT-WRONG results. Iter 2
+    /// adds slot binding to make replay correctness-preserving.
+    pub decode_graphs: Vec<Vec<Option<flambeau_backend_hip::HipGraphExec>>>,
     disposed: bool,
 }
 
@@ -475,9 +483,17 @@ impl ShardedForwardOneTokenScratchHybrid {
                 })?;
             per_stage.push(scratch);
         }
+        // CN-80B-20 — graph cache: outer per stage, inner per rank within
+        // that stage's sub_cluster. Lazy population on first decode call.
+        let decode_graphs: Vec<Vec<Option<flambeau_backend_hip::HipGraphExec>>> = model
+            .stages
+            .iter()
+            .map(|stage| (0..stage.sub_cluster.ranks()).map(|_| None).collect())
+            .collect();
         Ok(Self {
             per_stage,
             head_stage,
+            decode_graphs,
             disposed: false,
         })
     }

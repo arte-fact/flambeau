@@ -541,6 +541,114 @@ impl HipGraphExec {
         })
     }
 
+    /// CN-80B-20 — multi-stream parallel capture without slot machinery.
+    /// Begins capture on every stream in `streams`, runs `f` (which may
+    /// issue work on any subset of those streams plus uncaptured streams),
+    /// then ends capture and instantiates one graph per stream. Streams
+    /// that captured zero ops produce a no-op graph.
+    ///
+    /// Use case: per-stage-per-rank capture in hybrid pp+tp where each
+    /// rank's stream needs its own graph but the layer-loop function
+    /// orchestrates kernels across all of them in interleaved dispatch.
+    /// Separate single-stream capture passes don't work because the layer
+    /// function would re-execute (advancing per-rank state) for each rank.
+    ///
+    /// Iter 1 limitation: returns HipGraphExec instances with EMPTY slot
+    /// maps. `set_slot` / `set_memcpy_slot` will return errors. Use only
+    /// for timing experiments where output coherence is sacrificed for
+    /// fixed K/V append destinations + frozen `n_tokens_kv`.
+    pub fn capture_multi_no_slots<F>(
+        streams: &[&HipStream],
+        f: F,
+    ) -> DeviceResult<Vec<Self>>
+    where
+        F: FnOnce() -> DeviceResult<()>,
+    {
+        if streams.is_empty() {
+            return Ok(Vec::new());
+        }
+        // CaptureScope keeps `record_launch` happy (no-op if missing).
+        // We don't consume the launches into a SlotMap — captures here
+        // are slot-less.
+        let _capture_scope = crate::graph_capture::CaptureScope::begin();
+
+        // Begin capture on every stream first, so all subsequent launches
+        // are recorded into the right graph (one per stream).
+        for stream in streams {
+            check(
+                unsafe {
+                    crate::sys::hipStreamBeginCapture(
+                        stream.raw(),
+                        crate::sys::HIP_STREAM_CAPTURE_MODE_RELAXED,
+                    )
+                },
+                "hipStreamBeginCapture (multi)",
+            )?;
+        }
+
+        let closure_result = f();
+
+        // End capture on each stream, regardless of closure result. Streams
+        // left in capture mode would error on every subsequent submit.
+        let mut graphs: Vec<crate::sys::hipGraph_t> = Vec::with_capacity(streams.len());
+        let mut end_codes: Vec<i32> = Vec::with_capacity(streams.len());
+        for stream in streams {
+            let mut graph: crate::sys::hipGraph_t = ptr::null_mut();
+            let code = unsafe { crate::sys::hipStreamEndCapture(stream.raw(), &raw mut graph) };
+            graphs.push(graph);
+            end_codes.push(code);
+        }
+
+        // Drain the capture-scope launches; we don't use them.
+        let _ = _capture_scope.end();
+
+        closure_result?;
+        for c in end_codes {
+            check(c, "hipStreamEndCapture (multi)")?;
+        }
+
+        // Instantiate each graph. An empty graph (zero captured ops on a
+        // stream) instantiates to a no-op exec — fine.
+        let mut execs: Vec<Self> = Vec::with_capacity(streams.len());
+        for (i, &graph) in graphs.iter().enumerate() {
+            if graph.is_null() {
+                return Err(DeviceError::Backend {
+                    backend: BACKEND,
+                    code: -1,
+                    message: format!(
+                        "capture_multi_no_slots: stream {i} returned null graph from hipStreamEndCapture"
+                    ),
+                });
+            }
+            let mut exec: crate::sys::hipGraphExec_t = ptr::null_mut();
+            let inst_code = unsafe {
+                crate::sys::hipGraphInstantiate(
+                    &raw mut exec,
+                    graph,
+                    ptr::null_mut(),
+                    ptr::null_mut(),
+                    0,
+                )
+            };
+            if inst_code != HIP_SUCCESS {
+                let _ = unsafe { crate::sys::hipGraphDestroy(graph) };
+                check(inst_code, "hipGraphInstantiate (multi)")?;
+            }
+            let (kernel_nodes, memcpy_nodes) = unsafe { collect_nodes_by_type(graph) }?;
+            execs.push(Self {
+                exec,
+                graph,
+                device_id: streams[i].device_id(),
+                kernel_nodes,
+                memcpy_nodes,
+                slot_map: crate::graph_capture::SlotMap::default(),
+                node_shadows: std::cell::RefCell::new(Vec::new()),
+                memcpy_shadows: std::cell::RefCell::new(Vec::new()),
+            });
+        }
+        Ok(execs)
+    }
+
     /// Update a captured memcpy node's dst pointer. Used at replay time
     /// to retarget (typically) KV-cache append memcpys — src and count
     /// stay fixed between replays (the scratch layout is stable), only
