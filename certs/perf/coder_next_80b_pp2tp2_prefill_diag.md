@@ -1,4 +1,18 @@
-# CN-80B-10 — pp2tp2 prefill 3× gap on Coder-Next-80B (diagnosis)
+# CN-80B-10 — pp2tp2 prefill 3× gap on Coder-Next-80B (diagnosis) — **SUPERSEDED**
+
+**This cert was wrong.** The original claim that "PP uses tile8 MMQ
+while TP uses MMVQ" doesn't survive contact with the code: Coder-Next's
+`ffn_down_exps` is Q4_1 and `q4_0_use_tile8` (moe.rs:1056-1058) requires
+`down_dt ∈ {Q4_0, Q8_0}`, so PP also falls through to MMVQ on this
+model. The correct diagnosis (84 % of pp2tp2 prefill wall in
+`forward_moe_ffn_prefill_tp`'s 49 ms-per-layer MoE chain — different
+root cause) lives in `coder_next_80b_pp2tp2_prefill_diag_v2.md`.
+
+The text below is preserved for the audit trail.
+
+---
+
+
 
 ## Numbers
 

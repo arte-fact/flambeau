@@ -933,6 +933,16 @@ pub fn forward_prefill_tp_batched_layers(
     let kv_replicated = model.tp.kv_replicated();
     let hidden = cfg.hidden_size;
     let elem_count_l = (n_tokens * hidden) as u32;
+    // V1-BENCH-CN-80B-11a — mark on rank 0's stream at each section
+    // boundary. The AR (`ar_residual_prefill`) syncs all ranks before
+    // launching, so marks taken AFTER an AR have a clean barrier; marks
+    // taken BEFORE an AR (post-rank-loop, pre-AR) measure rank 0's
+    // local work only — sufficient for relative section comparison
+    // since the per-rank loop is balanced.
+    let dev0 = cluster.device(0);
+    let stream0 = dev0.default_stream();
+    dev0.bind()?;
+    flambeau_backend_hip::profile::mark("ptp_prefill_start", dev0, stream0)?;
     for il in il_range {
         let il_cache = il - il_cache_offset;
         // 3a. Per-rank attn prefill (full-attn or GDN).
@@ -1035,8 +1045,18 @@ pub fn forward_prefill_tp_batched_layers(
                 .with_context(|| format!("gdn prefill TP layer {il}"))?;
             }
         }
+        // V1-BENCH-CN-80B-11a — mark after the attn block (full-attn
+        // or GDN) but before the AR.
+        dev0.bind()?;
+        flambeau_backend_hip::profile::mark(
+            if is_full_attn { "ptp_attn_full" } else { "ptp_attn_gdn" },
+            dev0,
+            stream0,
+        )?;
         // 3b. AR(hidden_a, partial_attn_out, L*hidden).
         ar_residual_prefill(ar, scratch_ref, cluster, world, elem_count_l, AttnOrFfn::Attn)?;
+        dev0.bind()?;
+        flambeau_backend_hip::profile::mark("ptp_attn_ar", dev0, stream0)?;
 
         // 3c. ffn_norm[L] over hidden_a → mid_norm.
         for r in 0..cluster.ranks() {
@@ -1065,6 +1085,8 @@ pub fn forward_prefill_tp_batched_layers(
             )
             .with_context(|| format!("ffn_norm prefill TP layer {il}"))?;
         }
+        dev0.bind()?;
+        flambeau_backend_hip::profile::mark("ptp_ffn_norm", dev0, stream0)?;
 
         // 3d. Per-rank FFN prefill (dense or MoE+optional shared).
         let moe_replicated = !cfg.is_dense_ffn() && model.moe_replicated_at(il);
@@ -1146,6 +1168,13 @@ pub fn forward_prefill_tp_batched_layers(
                     )
                     .with_context(|| format!("router prefill TP layer {il}"))?;
                 }
+                if r == 0 {
+                    flambeau_backend_hip::profile::mark(
+                        "ptp_router",
+                        device,
+                        stream,
+                    )?;
+                }
 
                 // 2. (Optional) shared expert → shared_delta_f16.
                 if has_shared {
@@ -1171,6 +1200,13 @@ pub fn forward_prefill_tp_batched_layers(
                     )
                     .with_context(|| format!("shared expert prefill TP layer {il}"))?;
                 }
+                if r == 0 && has_shared {
+                    flambeau_backend_hip::profile::mark(
+                        "ptp_shared",
+                        device,
+                        stream,
+                    )?;
+                }
 
                 // 3. MoE FFN forward → partial_ffn_out.
                 let moe_scratch = layer_scratch
@@ -1191,6 +1227,13 @@ pub fn forward_prefill_tp_batched_layers(
                     ffn_world,
                 )
                 .with_context(|| format!("moe ffn prefill TP layer {il}"))?;
+                if r == 0 {
+                    flambeau_backend_hip::profile::mark(
+                        "ptp_moe_ffn",
+                        device,
+                        stream,
+                    )?;
+                }
 
                 // 4. Add shared delta to MoE partial in-place.
                 if has_shared {
@@ -1228,6 +1271,8 @@ pub fn forward_prefill_tp_batched_layers(
                 .with_context(|| format!("post-MoE replicated add_f16 layer {il}"))?;
             }
         }
+        dev0.bind()?;
+        flambeau_backend_hip::profile::mark("ptp_ffn_ar", dev0, stream0)?;
     }
     Ok(())
 }
