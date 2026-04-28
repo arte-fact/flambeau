@@ -988,6 +988,19 @@ fn run_completion_blocking_streaming(
     // tokens without surfacing partial codepoints to the client.
     let mut generated: Vec<u32> = Vec::with_capacity(params.max_tokens as usize);
     let mut emitted_text = String::new();
+    // CN-80B-19 — incremental detokenize state. `decode_cursor` is the
+    // index of the first token NOT yet decoded into clean emitted bytes.
+    // `pending_emitted_in_segment` tracks how many bytes of the current
+    // open segment (`generated[decode_cursor..]`) we've already streamed
+    // to the client, so a re-decode after a multi-byte boundary doesn't
+    // re-emit safe bytes. When the segment finishes cleanly (no
+    // trailing U+FFFD), `decode_cursor` advances and the segment resets.
+    //
+    // Reduces per-step decode cost from O(generated.len()) to ~O(1) —
+    // typical "open segment" is 1-3 tokens, only growing when a multi-
+    // byte glyph straddles a BPE-token boundary.
+    let mut decode_cursor: usize = 0;
+    let mut pending_emitted_in_segment: usize = 0;
 
     let mut push_and_emit = |tok: u32,
                              generated: &mut Vec<u32>,
@@ -995,45 +1008,37 @@ fn run_completion_blocking_streaming(
      -> Result<bool> {
         generated.push(tok);
         let stop_hit = is_stop(tok);
-        // Decode the full sequence *without* the trailing stop token so we
-        // never emit the raw stop marker text.
-        let slice: &[u32] = if stop_hit {
-            &generated[..generated.len() - 1]
-        } else {
-            &generated[..]
-        };
-        let raw = state.tokenizer.decode(slice).context("decode")?;
-        // CN-80B-18 — strip trailing U+FFFD replacement chars. The HF
-        // BPE+ByteLevel decoder substitutes `\u{FFFD}` for incomplete
-        // UTF-8 byte runs at the stream tail (e.g. multi-byte glyphs
-        // split across two BPE tokens). Without trimming, the partial
-        // step decodes "...�", the next step decodes "...✅", neither
-        // is a prefix of the other → the non-prefix branch re-emits the
-        // entire response. SSE deltas are append-only, so the chat UI
-        // shows the full text twice.
-        let text: &str = raw.trim_end_matches('\u{FFFD}');
-        if text.len() > emitted_text.len() && text.starts_with(emitted_text.as_str()) {
-            let delta = &text[emitted_text.len()..];
-            if !delta.is_empty() && !emit(delta) {
-                // Receiver dropped — abort early.
+        // Decode only the still-open segment, not the full sequence.
+        // `end` excludes the trailing stop token so its raw text never leaks.
+        let end = if stop_hit { generated.len() - 1 } else { generated.len() };
+        if end <= decode_cursor {
+            return Ok(!stop_hit);
+        }
+        let raw = state
+            .tokenizer
+            .decode(&generated[decode_cursor..end])
+            .context("decode")?;
+        // Trim trailing U+FFFD: the HF BPE+ByteLevel decoder substitutes
+        // it when the byte tail is an incomplete UTF-8 codepoint
+        // (multi-byte glyph straddling two BPE tokens). The trimmed
+        // bytes will resolve once the next token's bytes arrive.
+        let safe = raw.trim_end_matches('\u{FFFD}');
+
+        // Emit anything new within the current open segment.
+        if safe.len() > pending_emitted_in_segment {
+            let delta = &safe[pending_emitted_in_segment..];
+            if !emit(delta) {
                 return Ok(false);
             }
-            emitted_text.clear();
-            emitted_text.push_str(text);
-        } else if text != emitted_text.as_str() {
-            // Non-prefix change (rare — sentencepiece re-normalisation).
-            // SSE deltas are append-only, so a full re-emit duplicates
-            // visually. Emit only the byte suffix relative to the
-            // longest common UTF-8 prefix.
-            let common = common_utf8_prefix_len(emitted_text.as_str(), text);
-            if common < text.len() {
-                let delta = &text[common..];
-                if !emit(delta) {
-                    return Ok(false);
-                }
-            }
-            emitted_text.clear();
-            emitted_text.push_str(text);
+            emitted_text.push_str(delta);
+            pending_emitted_in_segment = safe.len();
+        }
+
+        // If nothing was trimmed, the segment closed cleanly: advance
+        // the cursor and reset segment-local emit accounting.
+        if safe.len() == raw.len() {
+            decode_cursor = end;
+            pending_emitted_in_segment = 0;
         }
         Ok(!stop_hit)
     };
@@ -1133,25 +1138,6 @@ fn now_unix() -> u64 {
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_secs())
         .unwrap_or(0)
-}
-
-/// Length (bytes) of the longest UTF-8 prefix shared by `a` and `b`,
-/// rounded down to a char boundary. Used by the streaming detokeniser
-/// when a re-decode produces a non-prefix change (rare, only happens
-/// with sentencepiece-style re-normalisation): we still want to emit
-/// only the diverging suffix because SSE deltas are append-only.
-fn common_utf8_prefix_len(a: &str, b: &str) -> usize {
-    let bytes_a = a.as_bytes();
-    let bytes_b = b.as_bytes();
-    let limit = bytes_a.len().min(bytes_b.len());
-    let mut i = 0;
-    while i < limit && bytes_a[i] == bytes_b[i] {
-        i += 1;
-    }
-    while i > 0 && !a.is_char_boundary(i) {
-        i -= 1;
-    }
-    i
 }
 
 // ---- error plumbing --------------------------------------------------------
