@@ -37,3 +37,4 @@ venv/
 
 # Claude Code runtime state
 .claude/
+tools/mtp_cache/
