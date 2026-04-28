@@ -640,6 +640,9 @@ fn forward_one_token_hybrid_inner(
         })?;
     let logits_f32 = head_scratch.logits_f32;
     let ops = &last.tp_model.ops[head_rank];
+    if flambeau_backend_hip::profile::is_enabled() {
+        flambeau_backend_hip::profile::mark("hyb_dec_pre_lm_head", device, stream)?;
+    }
     forward_output_head_decode(
         ops,
         stream,
@@ -650,6 +653,9 @@ fn forward_one_token_hybrid_inner(
         hidden_a,
     )
     .context("hybrid forward_output_head_decode")?;
+    if flambeau_backend_hip::profile::is_enabled() {
+        flambeau_backend_hip::profile::mark("hyb_dec_lm_head", device, stream)?;
+    }
 
     if let Some(out) = logits_out {
         out.clear();
@@ -667,10 +673,16 @@ fn forward_one_token_hybrid_inner(
             )?;
         }
         flambeau_core::Stream::synchronize(stream)?;
+        if flambeau_backend_hip::profile::is_enabled() {
+            flambeau_backend_hip::profile::mark("hyb_dec_logits_dtoh", device, stream)?;
+        }
         Ok(0)
     } else {
         let token = argmax_token_host(device, stream, logits_f32, cfg.vocab_size)
             .context("hybrid argmax_token_host")?;
+        if flambeau_backend_hip::profile::is_enabled() {
+            flambeau_backend_hip::profile::mark("hyb_dec_argmax", device, stream)?;
+        }
         Ok(token)
     }
 }
