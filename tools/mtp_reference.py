@@ -209,8 +209,12 @@ def forward_mtp_step(
     attn = attn.reshape(NUM_Q_HEADS * HEAD_DIM)    # [6144]
     interm["attn_pre_gate"] = attn.clone()
 
-    # Output gate: silu(gate) elementwise multiply (output_gate_type="swish").
-    attn = attn * silu(gate_flat)
+    # Output gate: SIGMOID elementwise multiply (NOT silu). This matches the
+    # llama.cpp qwen35moe graph and the V1.7.4.b finding for Qwen3.5/3.6 base
+    # full-attn layers — `output_gate_type="swish"` in config is a misnomer;
+    # actual op is `sigmoid(gate) * attn`. Empirically validated bit-exact
+    # vs llama.cpp for the 35B-A3B base in V1.7.4.b.
+    attn = attn * torch.sigmoid(gate_flat)
     interm["attn_post_gate"] = attn.clone()
 
     # o_proj: [5120, 6144] → projects 6144 down to hidden 5120.

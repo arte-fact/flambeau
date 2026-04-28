@@ -84,13 +84,13 @@ fn mtp_load_smoke() -> Result<()> {
 
     // Dtype check: norms F32, linears Q8_0 (per the converter).
     for (name, expect) in [
-        (&mtp.norm, GgmlDType::F32),
-        (&mtp.pre_fc_norm_hidden, GgmlDType::F32),
-        (&mtp.pre_fc_norm_embedding, GgmlDType::F32),
-        (&b.input_layernorm, GgmlDType::F32),
-        (&b.post_attention_layernorm, GgmlDType::F32),
-        (&b.q_norm, GgmlDType::F32),
-        (&b.k_norm, GgmlDType::F32),
+        (&mtp.norm, GgmlDType::F16),
+        (&mtp.pre_fc_norm_hidden, GgmlDType::F16),
+        (&mtp.pre_fc_norm_embedding, GgmlDType::F16),
+        (&b.input_layernorm, GgmlDType::F16),
+        (&b.post_attention_layernorm, GgmlDType::F16),
+        (&b.q_norm, GgmlDType::F16),
+        (&b.k_norm, GgmlDType::F16),
         (&mtp.fc, GgmlDType::Q8_0),
         (&b.q_proj, GgmlDType::Q8_0),
         (&b.k_proj, GgmlDType::Q8_0),
@@ -106,8 +106,10 @@ fn mtp_load_smoke() -> Result<()> {
     // We loaded all 15.
     let total = mtp.total_bytes();
     eprintln!("MTP loaded: {} bytes ({:.1} MB)", total, total as f64 / 1e6);
-    assert!(total > 400 * 1024 * 1024, "expected >400 MB; got {total}");
-    assert!(total < 500 * 1024 * 1024, "expected <500 MB; got {total}");
+    // Norms are now F16 (cast from F32 at load), so total drops slightly.
+    // Q8_0 linears unchanged. Expect somewhere in the 380-460 MB band.
+    assert!(total > 380 * 1024 * 1024, "expected >380 MB; got {total}");
+    assert!(total < 460 * 1024 * 1024, "expected <460 MB; got {total}");
 
     // MTP_TENSOR_NAMES sanity: 15 entries.
     assert_eq!(MTP_TENSOR_NAMES.len(), 15);
