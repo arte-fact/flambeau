@@ -29,12 +29,12 @@
 use anyhow::{bail, Context, Result};
 use flambeau_core::DevicePtr;
 use flambeau_ops::hip::{
-    cast::cast_f32_to_f16,
+    cast::{cast_f16_to_f32, cast_f32_to_f16},
     moe::{
         indexed_moe_mmq_q4_0_down_tile8, indexed_moe_mmq_q4_0_gate_up_tile8,
         indexed_moe_mmq_q4_1_down_tile8, indexed_moe_mmq_q8_0_down_tile8,
         indexed_moe_mmq_q8_0_gate_up_tile8, moe_combine_no_residual_f16,
-        moe_sort_by_expert_padded, MoeShape,
+        moe_sort_by_expert_padded, shared_expert_scale_f32, MoeShape,
     },
     norm::quantize_f16_q8_1,
     HipStream, OpsRegistry,
@@ -199,6 +199,11 @@ pub fn forward_shared_expert_decode_tp(
     ffn_gate_shexp: &DeviceTensor,
     ffn_up_shexp: &DeviceTensor,
     ffn_down_shexp: &DeviceTensor,
+    // CN-80B-15 — qwen3next gates the shared expert by sigmoid(x_norm·w);
+    // qwen35moe omits this projection (None). Replicated weight, applied
+    // pre-AR (linear in the partial down output, so AR commutes with the
+    // per-token scalar gate).
+    ffn_gate_inp_shexp: Option<&DeviceTensor>,
     scratch: &mut SharedExpertScratch,
     x_norm: DevicePtr,
     shared_delta_out: DevicePtr,
@@ -288,6 +293,18 @@ pub fn forward_shared_expert_decode_tp(
         local_inter,
         "ffn_down_shexp (TP)",
     )?;
+
+    // CN-80B-15 — apply qwen3next's per-token sigmoid gate to the partial
+    // down before AR. Linear in `down`, so commutes with the cross-rank
+    // sum: σ(x·w) · sum_r partial_r = sum_r σ(x·w) · partial_r.
+    if let Some(gate_w) = ffn_gate_inp_shexp {
+        cast_f16_to_f32(ops, stream, x_norm, scratch.x_norm_f32, hidden)
+            .context("shexp (TP) cast x_norm → f32 (gate)")?;
+        shared_expert_scale_f32(
+            ops, stream, scratch.down_f32, scratch.x_norm_f32, gate_w.ptr, 1, hidden,
+        )
+        .context("shexp (TP) shared_expert_scale_f32")?;
+    }
 
     cast_f32_to_f16(ops, stream, scratch.down_f32, shared_delta_out, hidden)
         .context("shexp (TP) cast down → f16")?;
@@ -646,6 +663,10 @@ pub fn forward_shared_expert_prefill_tp(
     ffn_gate_shexp: &DeviceTensor,
     ffn_up_shexp: &DeviceTensor,
     ffn_down_shexp: &DeviceTensor,
+    // CN-80B-15 — qwen3next gates the shared expert by sigmoid(x_norm·w);
+    // qwen35moe omits this projection (None). See decode_tp for the AR
+    // commutativity argument.
+    ffn_gate_inp_shexp: Option<&DeviceTensor>,
     scratch: &mut SharedExpertPrefillScratch,
     x_norm: DevicePtr,
     shared_delta_out: DevicePtr,
@@ -740,6 +761,18 @@ pub fn forward_shared_expert_prefill_tp(
         hidden,
         "ffn_down_shexp (TP) prefill",
     )?;
+
+    // CN-80B-15 — apply qwen3next's per-token sigmoid gate to the partial
+    // down before AR. See decode_tp comment for the linearity argument.
+    if let Some(gate_w) = ffn_gate_inp_shexp {
+        cast_f16_to_f32(ops, stream, x_norm, scratch.x_norm_f32, n_tokens * hidden)
+            .context("shexp (TP) prefill cast x_norm → f32 (gate)")?;
+        shared_expert_scale_f32(
+            ops, stream, scratch.down_f32, scratch.x_norm_f32, gate_w.ptr,
+            n_tokens, hidden,
+        )
+        .context("shexp (TP) prefill shared_expert_scale_f32")?;
+    }
 
     cast_f32_to_f16(
         ops,

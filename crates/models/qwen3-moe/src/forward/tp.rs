@@ -1181,6 +1181,9 @@ pub fn forward_prefill_tp_batched_layers(
                     let shared_w_gate = find_by_suffix(layer_tensors, il, "ffn_gate_shexp.weight")?;
                     let shared_w_up = find_by_suffix(layer_tensors, il, "ffn_up_shexp.weight")?;
                     let shared_w_down = find_by_suffix(layer_tensors, il, "ffn_down_shexp.weight")?;
+                    // CN-80B-15 — qwen3next's sigmoid-gated shared expert
+                    // (qwen35moe lacks this projection).
+                    let shared_w_gate_inp = find_by_suffix(layer_tensors, il, "ffn_gate_inp_shexp.weight").ok();
                     let shared_scratch = layer_scratch
                         .shared
                         .as_mut()
@@ -1192,6 +1195,7 @@ pub fn forward_prefill_tp_batched_layers(
                         shared_w_gate,
                         shared_w_up,
                         shared_w_down,
+                        shared_w_gate_inp,
                         shared_scratch,
                         mid_norm,
                         shared_delta_f16,
@@ -1987,6 +1991,9 @@ fn forward_ffn_block_tp(
                 let shared_w_up = find_by_suffix(layer_tensors, il, "ffn_up_shexp.weight")?;
                 let shared_w_down =
                     find_by_suffix(layer_tensors, il, "ffn_down_shexp.weight")?;
+                // CN-80B-15 — qwen3next's sigmoid-gated shared expert.
+                let shared_w_gate_inp =
+                    find_by_suffix(layer_tensors, il, "ffn_gate_inp_shexp.weight").ok();
                 let shared_scratch = layer_scratch
                     .shared
                     .as_mut()
@@ -1998,6 +2005,7 @@ fn forward_ffn_block_tp(
                     shared_w_gate,
                     shared_w_up,
                     shared_w_down,
+                    shared_w_gate_inp,
                     shared_scratch,
                     mid_norm_f16,
                     shared_delta_f16,
