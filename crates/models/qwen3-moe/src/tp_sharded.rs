@@ -504,6 +504,16 @@ fn tp_target_dtype(name: &str, source_dtype: GgmlDType) -> Option<GgmlDType> {
     if name.ends_with("ssm_alpha.weight") || name.ends_with("ssm_beta.weight") {
         return Some(GgmlDType::Q8_0);
     }
+    // V1-BENCH-CN-80B-9 (mirror of iter-3, sharded.rs::upload_ffn). The
+    // MoE router weight `ffn_gate_inp` is F32 in every Qwen3.x GGUF.
+    // Convert to F16 at upload so the dense_gemv_f16_f16 router kernel
+    // (CN-80B-6) is exercised on the TP path too — pp2tp2 didn't
+    // auto-pick up iter-3's prefill lift because the conversion was
+    // PP-loader-only. Quality preserved (router is a coarse top-k
+    // discriminator; F16 noise can't flip top-1 except on near-tie).
+    if name.ends_with("ffn_gate_inp.weight") {
+        return Some(GgmlDType::F16);
+    }
     None
 }
 
