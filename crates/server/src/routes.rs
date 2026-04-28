@@ -859,14 +859,15 @@ fn run_completion_blocking(
     // no-ops — trust the model on turns where `tools[]` is present.
     const MIN_RESPONSE_TOKENS: usize = 24;
     // Nats subtracted from every stop-token logit beyond MIN_RESPONSE_TOKENS.
-    // CN-80B-17 — was 3.0; that interacts badly with `top_k` sampling: at
-    // `top_k=20` the bias pushes EOS out of the candidate set, so the model
-    // cannot stop and falls into a state-attractor loop. Setting to 0.5
-    // keeps the soft preference for non-stop while leaving EOS reachable.
-    // The original concern (Qwen3.6 argmaxing `<|im_end|>` immediately) is
-    // already covered by the first-token NEG_INFINITY mask + the
-    // `MIN_RESPONSE_TOKENS=24` hard mask above.
-    const STOP_BIAS: f32 = 0.5;
+    // CN-80B-18 — was 0.5 (was 3.0 before that). Even 0.5 is enough to push
+    // EOS below the next-best continuation when the model wants to stop at
+    // the end of a paragraph; under top_k=20 sampling the next-best is
+    // typically "regenerate the paragraph" → whole-block repetition loops
+    // (observed live on Coder-Next acknowledgement responses). The
+    // first-token NEG_INFINITY mask + MIN_RESPONSE_TOKENS=24 hard mask are
+    // sufficient on their own to prevent immediate-EOS failure modes;
+    // beyond that, do not bias the model's natural stopping decision.
+    const STOP_BIAS: f32 = 0.0;
     for step in 1..params.max_tokens as usize {
         let force_mask = step < MIN_RESPONSE_TOKENS && !relax_stop_mask;
         decode_logits(
@@ -1001,7 +1002,16 @@ fn run_completion_blocking_streaming(
         } else {
             &generated[..]
         };
-        let text = state.tokenizer.decode(slice).context("decode")?;
+        let raw = state.tokenizer.decode(slice).context("decode")?;
+        // CN-80B-18 — strip trailing U+FFFD replacement chars. The HF
+        // BPE+ByteLevel decoder substitutes `\u{FFFD}` for incomplete
+        // UTF-8 byte runs at the stream tail (e.g. multi-byte glyphs
+        // split across two BPE tokens). Without trimming, the partial
+        // step decodes "...�", the next step decodes "...✅", neither
+        // is a prefix of the other → the non-prefix branch re-emits the
+        // entire response. SSE deltas are append-only, so the chat UI
+        // shows the full text twice.
+        let text: &str = raw.trim_end_matches('\u{FFFD}');
         if text.len() > emitted_text.len() && text.starts_with(emitted_text.as_str()) {
             let delta = &text[emitted_text.len()..];
             if !delta.is_empty() && !emit(delta) {
@@ -1009,15 +1019,21 @@ fn run_completion_blocking_streaming(
                 return Ok(false);
             }
             emitted_text.clear();
-            emitted_text.push_str(&text);
-        } else if text != *emitted_text {
+            emitted_text.push_str(text);
+        } else if text != emitted_text.as_str() {
             // Non-prefix change (rare — sentencepiece re-normalisation).
-            // Emit full replacement as a single delta.
-            if !emit(&text) {
-                return Ok(false);
+            // SSE deltas are append-only, so a full re-emit duplicates
+            // visually. Emit only the byte suffix relative to the
+            // longest common UTF-8 prefix.
+            let common = common_utf8_prefix_len(emitted_text.as_str(), text);
+            if common < text.len() {
+                let delta = &text[common..];
+                if !emit(delta) {
+                    return Ok(false);
+                }
             }
             emitted_text.clear();
-            emitted_text.push_str(&text);
+            emitted_text.push_str(text);
         }
         Ok(!stop_hit)
     };
@@ -1035,14 +1051,15 @@ fn run_completion_blocking_streaming(
     // See non-streaming path for the MIN_RESPONSE_TOKENS rationale.
     const MIN_RESPONSE_TOKENS: usize = 24;
     // Nats subtracted from every stop-token logit beyond MIN_RESPONSE_TOKENS.
-    // CN-80B-17 — was 3.0; that interacts badly with `top_k` sampling: at
-    // `top_k=20` the bias pushes EOS out of the candidate set, so the model
-    // cannot stop and falls into a state-attractor loop. Setting to 0.5
-    // keeps the soft preference for non-stop while leaving EOS reachable.
-    // The original concern (Qwen3.6 argmaxing `<|im_end|>` immediately) is
-    // already covered by the first-token NEG_INFINITY mask + the
-    // `MIN_RESPONSE_TOKENS=24` hard mask above.
-    const STOP_BIAS: f32 = 0.5;
+    // CN-80B-18 — was 0.5 (was 3.0 before that). Even 0.5 is enough to push
+    // EOS below the next-best continuation when the model wants to stop at
+    // the end of a paragraph; under top_k=20 sampling the next-best is
+    // typically "regenerate the paragraph" → whole-block repetition loops
+    // (observed live on Coder-Next acknowledgement responses). The
+    // first-token NEG_INFINITY mask + MIN_RESPONSE_TOKENS=24 hard mask are
+    // sufficient on their own to prevent immediate-EOS failure modes;
+    // beyond that, do not bias the model's natural stopping decision.
+    const STOP_BIAS: f32 = 0.0;
     for step in 1..params.max_tokens as usize {
         // T4.1: same relax-stop-mask behaviour as the non-streaming path.
         let force_mask = step < MIN_RESPONSE_TOKENS && !relax_stop_mask;
@@ -1116,6 +1133,25 @@ fn now_unix() -> u64 {
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_secs())
         .unwrap_or(0)
+}
+
+/// Length (bytes) of the longest UTF-8 prefix shared by `a` and `b`,
+/// rounded down to a char boundary. Used by the streaming detokeniser
+/// when a re-decode produces a non-prefix change (rare, only happens
+/// with sentencepiece-style re-normalisation): we still want to emit
+/// only the diverging suffix because SSE deltas are append-only.
+fn common_utf8_prefix_len(a: &str, b: &str) -> usize {
+    let bytes_a = a.as_bytes();
+    let bytes_b = b.as_bytes();
+    let limit = bytes_a.len().min(bytes_b.len());
+    let mut i = 0;
+    while i < limit && bytes_a[i] == bytes_b[i] {
+        i += 1;
+    }
+    while i > 0 && !a.is_char_boundary(i) {
+        i -= 1;
+    }
+    i
 }
 
 // ---- error plumbing --------------------------------------------------------

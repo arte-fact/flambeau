@@ -188,9 +188,21 @@ pub fn load_from_gguf(file: &GgufFile) -> Result<GgufTokenizer> {
     if let Some(id) = eos_id {
         stop_ids.push(id);
     }
-    // Chat end-of-turn markers. Qwen's `<|im_end|>` closes a turn even when
-    // eos_id differs; llama3's `<|eot_id|>` plays the same role.
-    for needle in ["<|im_end|>", "<|endoftext|>", "<|eot_id|>"] {
+    // Chat end-of-turn / next-turn markers. Qwen's `<|im_end|>` closes a
+    // turn even when eos_id differs; llama3's `<|eot_id|>` plays the same
+    // role. CN-80B-18 — also stop on `<|im_start|>`: when the assistant
+    // emits the next-turn-start token mid-response (observed live on
+    // Coder-Next under temp=0.7 / top_k=20 — model produces
+    // `<|im_start|><|im_start|>...` repeats, or hallucinates a fake
+    // user-turn-start), the response has gone off the rails and we
+    // should cut it. The model should never legitimately emit the
+    // turn-start marker in its own response.
+    for needle in [
+        "<|im_end|>",
+        "<|im_start|>",
+        "<|endoftext|>",
+        "<|eot_id|>",
+    ] {
         if let Some(id) = find_vocab_id(tokens_arr, needle) {
             if !stop_ids.contains(&id) {
                 stop_ids.push(id);
