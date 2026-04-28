@@ -426,21 +426,21 @@ pub fn forward_mtp_step(
     let down_f16 = alloc(bytes_h_f16)?;
     let h2_f16 = alloc(bytes_h_f16)?;
 
-    // ── 2. Pre-FC norms + concat
-    // Write norm_h directly to fc_in_f16[0..h], norm_e to fc_in_f16[h..2h].
-    // rmsnorm_f16 writes into a destination — we use it twice with offset
-    // dst pointers.
+    // ── 2. Pre-FC norms + concat. Order is [embedding, hidden] per vLLM
+    // Qwen3NextMTP source (concat happens at vllm/.../qwen3_next_mtp.py:86).
+    // Reversing this order silently produces wrong projections — the
+    // fc.weight rows expect [embedding | hidden] in that order.
+    let fc_in_h_offset = fc_in_f16.offset_bytes(h * 2); // F16 = 2 B
     rmsnorm_f16(
-        ops, stream, h_t, mtp.pre_fc_norm_hidden.ptr, fc_in_f16,
+        ops, stream, e_token, mtp.pre_fc_norm_embedding.ptr, fc_in_f16,
         1, h, eps,
     )
-    .context("mtp pre_fc_norm_hidden")?;
-    let fc_in_e_offset = fc_in_f16.offset_bytes(h * 2); // F16 = 2 B
+    .context("mtp pre_fc_norm_embedding (first half)")?;
     rmsnorm_f16(
-        ops, stream, e_token, mtp.pre_fc_norm_embedding.ptr, fc_in_e_offset,
+        ops, stream, h_t, mtp.pre_fc_norm_hidden.ptr, fc_in_h_offset,
         1, h, eps,
     )
-    .context("mtp pre_fc_norm_embedding")?;
+    .context("mtp pre_fc_norm_hidden (second half)")?;
 
     // ── 3. fc matmul (h0 = concat([norm_h, norm_e]) @ fc.T)
     quantize_f16_q8_1(ops, stream, fc_in_f16, fc_in_q8_1, 2 * h)
@@ -650,11 +650,17 @@ pub fn forward_mtp_step(
 /// MTP-4 helper: run `forward_mtp_step` followed by the LM-head
 /// matmul, returning the argmax-predicted token id.
 ///
-/// Composed for use during acceptance-rate measurement: caller has
-/// the base model's pre-`output_norm` hidden state (`hidden_a` from
-/// the standard PP forward), applies `output_norm` to it, embeds the
-/// just-sampled token, runs MTP, and asks the LM head what the next
-/// token should be.
+/// vLLM convention (verified from
+/// `vllm/model_executor/models/qwen3_next.py:531`): the base model's
+/// forward applies `self.norm(hidden, residual)` BEFORE returning the
+/// hidden state to the caller. So when the spec-decode caller
+/// invokes `Qwen3NextMultiTokenPredictor.forward(hidden_states, ...)`,
+/// `hidden_states` is **post-`model.norm`**.
+///
+/// flambeau's existing `forward_one_token_pp` writes the pre-norm
+/// hidden into `scratch.hidden_a` (since output_norm is folded into
+/// `forward_output_head_decode` via `rmsnorm_quant_q8_1`). For MTP we
+/// re-apply `output_norm` standalone here to match vLLM's convention.
 ///
 /// Inputs:
 ///   `output_norm_weight` — base model's `output_norm.weight` (F16,
@@ -664,9 +670,9 @@ pub fn forward_mtp_step(
 ///   `token_embd_row_f16` — F16 [hidden] embedding of the token whose
 ///                          successor we're predicting (caller is
 ///                          responsible for cross-rank copy if needed)
-///   `hidden_pre_norm`    — F16 [hidden] base hidden state before the
-///                          final output_norm (= flambeau's
-///                          scratch.hidden_a after a forward pass)
+///   `hidden_pre_norm`    — F16 [hidden] base hidden state pre-output_norm
+///                          (= flambeau's `scratch.hidden_a` after a
+///                          forward pass)
 ///   `position`           — base-model position (drives MROPE)
 ///
 /// Returns the predicted next-token id.
@@ -690,8 +696,8 @@ pub fn forward_mtp_step_with_lm_head(
     let hidden = cfg.hidden_size;
     let vocab = cfg.vocab_size;
 
-    // 1. Apply base output_norm to the pre-norm hidden so we get
-    //    "h_t after model.norm" — that's what HF's MTP block expects.
+    // 1. Apply base output_norm to get the post-norm hidden vLLM's MTP
+    //    convention expects.
     let h_t_post_norm = device
         .alloc(hidden * 2)
         .map_err(|e| anyhow!("hipMalloc h_t_post_norm: {e}"))?;
@@ -702,7 +708,7 @@ pub fn forward_mtp_step_with_lm_head(
     )
     .context("base output_norm for MTP h_t")?;
 
-    // 2. Allocate MTP output buffer + run the MTP step.
+    // 2. Run MTP on post-norm hidden.
     let mtp_h_final = device
         .alloc(hidden * 2)
         .map_err(|e| anyhow!("hipMalloc mtp_h_final: {e}"))?;

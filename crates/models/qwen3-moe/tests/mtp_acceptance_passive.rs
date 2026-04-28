@@ -50,10 +50,16 @@ use std::path::PathBuf;
 const BASE_PATH: &str = "/artefact/models/Qwen3.6-27B-Q4_0.gguf";
 const MTP_PATH: &str = "/artefact/models/Qwen3.6-27B-mtp.gguf";
 const DEFAULT_STEPS: usize = 8;
-// Token sequence: 4 prompt tokens + N decode steps. token=1 is BOS-adjacent,
-// safe in any tokenizer; using fixed-id list avoids dragging the tokenizer
-// crate into this test.
-const PROMPT_IDS: [u32; 4] = [1, 2, 3, 4];
+// Real Qwen3 tokenization of "The capital of France is" (the V1.7.4
+// canonical parity prompt). The first MTP-4 attempt used [1,2,3,4]
+// arbitrary IDs and got GIGO; with real tokens the base model has
+// signal to predict against.
+//   The     → 760
+//   Ġcapital → 6511
+//   Ġof      → 314
+//   ĠFrance  → 9338
+//   Ġis      → 369
+const PROMPT_IDS: [u32; 5] = [760, 6511, 314, 9338, 369];
 
 #[test]
 fn mtp_acceptance_passive_qwen36_27b() -> Result<()> {
@@ -113,6 +119,10 @@ fn mtp_acceptance_passive_qwen36_27b() -> Result<()> {
         .output
         .as_ref()
         .ok_or_else(|| anyhow!("last rank missing output (lm_head)"))?;
+    // vLLM convention: base model applies self.norm before returning
+    // hidden_states; MTP gets the post-norm value. flambeau's
+    // forward_one_token_pp writes pre-norm to scratch.hidden_a, so we
+    // re-apply output_norm in forward_mtp_step_with_lm_head.
 
     // ── Allocate session + scratch
     let mut session = Qwen3MoEShardedSession::new(&model, &cluster)?;
@@ -147,6 +157,35 @@ fn mtp_acceptance_passive_qwen36_27b() -> Result<()> {
     // Tokens generated, including the prefill's last-emitted one.
     let mut tokens: Vec<u32> = PROMPT_IDS.to_vec();
     tokens.push(last_token);
+
+    // Diagnostic: dump embedding for token 11751 (ĠParis) and compare to
+    // Python ref to verify Q4_0 dequant of token_embd is bit-exact.
+    // Confirmed match (2026-04-28): flambeau's dequant produces identical
+    // F16 values to gguf python's dequant. Embedding lookup ruled out as
+    // the source of the 0% acceptance.
+    // Reference row[:8]:
+    //   [ 0.01465  0.02441  0.00488 -0.01465  0.00488 -0.00488  0.00488  0.0]
+    {
+        rank0_device.bind()?;
+        flambeau_qwen3_moe::forward::forward_embed_decode_host(
+            rank0_device, rank0_device.default_stream(),
+            token_embd, 11751, rank0_embed_buf, hidden,
+        )?;
+        let mut buf = vec![half::f16::from_f32(0.0); hidden];
+        unsafe {
+            rank0_device.memcpy_async(
+                rank0_device.default_stream(),
+                CopyDirection::DeviceToHost,
+                DevicePtr(buf.as_mut_ptr() as usize),
+                rank0_embed_buf,
+                hidden * 2,
+            )?;
+        }
+        rank0_device.default_stream().synchronize()?;
+        let f32_first8: Vec<f32> = buf[..8].iter().map(|x| x.to_f32()).collect();
+        eprintln!("[diag] embed(11751) flambeau first 8: {f32_first8:?}");
+        eprintln!("[diag] embed(11751) python    first 8: [0.01465, 0.02441, 0.00488, -0.01465, 0.00488, -0.00488, 0.00488, 0.0]");
+    }
 
     let mut predicted: Vec<u32> = Vec::with_capacity(n_steps);
     let mut have_h_t = false;

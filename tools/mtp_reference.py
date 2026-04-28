@@ -168,7 +168,13 @@ def forward_mtp_step(
 
     norm_h = rmsnorm(h_t, w["mtp.pre_fc_norm_hidden.weight"], RMS_EPS)
     norm_e = rmsnorm(e_tok, w["mtp.pre_fc_norm_embedding.weight"], RMS_EPS)
-    fc_in = torch.cat([norm_h, norm_e], dim=-1)  # [10240]
+    # CRITICAL: concat order is [embedding, hidden] per vLLM Qwen3NextMTP
+    # source (vllm/model_executor/models/qwen3_next_mtp.py:86):
+    #   `hidden_states = torch.cat([inputs_embeds, hidden_states], dim=-1)`
+    # The fc.weight rows expect this order; reversing it silently produces
+    # wrong projections (verified: position=0 parity passed only because
+    # Python AND Rust were both wrong and cancelled out).
+    fc_in = torch.cat([norm_e, norm_h], dim=-1)  # [10240]
     interm["fc_in"] = fc_in.clone()
 
     # fc.weight is stored as [out=5120, in=10240] (PyTorch nn.Linear convention

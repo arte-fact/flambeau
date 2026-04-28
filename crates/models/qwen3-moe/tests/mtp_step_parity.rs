@@ -44,7 +44,13 @@ const HIDDEN: usize = 5120;
 // Resolve relative to the package's manifest dir so the test runs from
 // any cargo-invocation working directory.
 const REF_DIR_REL: &str = "tests/data/mtp_ref";
-const TEST_POSITION: usize = 0;
+// Match the Python ref's MTP_TEST_POSITION env var.
+fn test_position() -> usize {
+    std::env::var("MTP_TEST_POSITION")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(0)
+}
 const MAX_ABS_TOL: f32 = 0.5;
 const MEAN_ABS_TOL: f32 = 0.1;
 
@@ -147,7 +153,7 @@ fn mtp_step_parity_position_zero() -> Result<()> {
         &mtp,
         h_t_dev,
         e_token_dev,
-        TEST_POSITION,
+        test_position(),
         h_final_dev,
     )?;
 
