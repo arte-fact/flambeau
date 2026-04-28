@@ -647,6 +647,136 @@ pub fn forward_mtp_step(
     Ok(())
 }
 
+/// MTP-4 helper: run `forward_mtp_step` followed by the LM-head
+/// matmul, returning the argmax-predicted token id.
+///
+/// Composed for use during acceptance-rate measurement: caller has
+/// the base model's pre-`output_norm` hidden state (`hidden_a` from
+/// the standard PP forward), applies `output_norm` to it, embeds the
+/// just-sampled token, runs MTP, and asks the LM head what the next
+/// token should be.
+///
+/// Inputs:
+///   `output_norm_weight` — base model's `output_norm.weight` (F16,
+///                          on the same device as MTP)
+///   `lm_head_weight`     — base model's `output.weight` (any
+///                          GGML quant, on the same device as MTP)
+///   `token_embd_row_f16` — F16 [hidden] embedding of the token whose
+///                          successor we're predicting (caller is
+///                          responsible for cross-rank copy if needed)
+///   `hidden_pre_norm`    — F16 [hidden] base hidden state before the
+///                          final output_norm (= flambeau's
+///                          scratch.hidden_a after a forward pass)
+///   `position`           — base-model position (drives MROPE)
+///
+/// Returns the predicted next-token id.
+#[allow(clippy::too_many_arguments)]
+pub fn forward_mtp_step_with_lm_head(
+    ops: &flambeau_ops::OpsRegistry,
+    stream: &flambeau_backend_hip::HipStream,
+    device: &HipDevice,
+    cfg: &crate::Qwen3MoEConfig,
+    mtp: &MtpHeadWeights,
+    output_norm_weight: &DeviceTensor,
+    lm_head_weight: &DeviceTensor,
+    hidden_pre_norm: flambeau_core::DevicePtr,
+    token_embd_row_f16: flambeau_core::DevicePtr,
+    position: usize,
+) -> Result<u32> {
+    use flambeau_core::{Device, DevicePtr, Stream};
+    use flambeau_ops::hip::norm::{quantize_f16_q8_1, rmsnorm_f16};
+
+    device.bind()?;
+    let hidden = cfg.hidden_size;
+    let vocab = cfg.vocab_size;
+
+    // 1. Apply base output_norm to the pre-norm hidden so we get
+    //    "h_t after model.norm" — that's what HF's MTP block expects.
+    let h_t_post_norm = device
+        .alloc(hidden * 2)
+        .map_err(|e| anyhow!("hipMalloc h_t_post_norm: {e}"))?;
+    rmsnorm_f16(
+        ops, stream,
+        hidden_pre_norm, output_norm_weight.ptr, h_t_post_norm,
+        1, hidden, cfg.rms_norm_eps,
+    )
+    .context("base output_norm for MTP h_t")?;
+
+    // 2. Allocate MTP output buffer + run the MTP step.
+    let mtp_h_final = device
+        .alloc(hidden * 2)
+        .map_err(|e| anyhow!("hipMalloc mtp_h_final: {e}"))?;
+    forward_mtp_step(
+        ops, stream, device, cfg, mtp,
+        h_t_post_norm,
+        token_embd_row_f16,
+        position,
+        mtp_h_final,
+    )?;
+
+    // 3. LM head: quantize MTP output → Q8_1 → mmvq → F32 logits → argmax.
+    let q8_1_block_bytes = std::mem::size_of::<flambeau_quant::BlockQ8_1>();
+    let n_blocks = hidden / 32;
+    let x_q8_1 = device
+        .alloc(n_blocks * q8_1_block_bytes)
+        .map_err(|e| anyhow!("hipMalloc x_q8_1: {e}"))?;
+    let logits_f32 = device
+        .alloc(vocab * 4)
+        .map_err(|e| anyhow!("hipMalloc logits_f32: {e}"))?;
+
+    quantize_f16_q8_1(ops, stream, mtp_h_final, x_q8_1, hidden)
+        .context("mtp lm_head quantize")?;
+
+    let dtype = match lm_head_weight.dtype {
+        flambeau_quant::GgmlDType::Q8_0 => flambeau_core::op::QDtype::Q8_0,
+        flambeau_quant::GgmlDType::Q4_0 => flambeau_core::op::QDtype::Q4_0,
+        flambeau_quant::GgmlDType::Q4_1 => flambeau_core::op::QDtype::Q4_1,
+        flambeau_quant::GgmlDType::Q4K  => flambeau_core::op::QDtype::Q4_K,
+        flambeau_quant::GgmlDType::Q5_0 => flambeau_core::op::QDtype::Q5_0,
+        flambeau_quant::GgmlDType::Q5K  => flambeau_core::op::QDtype::Q5_K,
+        flambeau_quant::GgmlDType::Q6K  => flambeau_core::op::QDtype::Q6_K,
+        d => bail!("unsupported lm_head dtype {d:?} for MTP probe"),
+    };
+    flambeau_ops::hip::qmatmul::mmvq(
+        ops, stream, lm_head_weight.ptr, x_q8_1, logits_f32,
+        vocab, hidden, dtype,
+    )
+    .context("mtp lm_head mmvq")?;
+
+    // 4. Argmax host-side (cheap; vocab × 4 bytes = ~1 MB).
+    let mut host = vec![0.0f32; vocab];
+    // SAFETY: logits_f32 has vocab*4 bytes; host has vocab*4 bytes.
+    unsafe {
+        device.memcpy_async(
+            stream,
+            flambeau_core::CopyDirection::DeviceToHost,
+            DevicePtr(host.as_mut_ptr() as usize),
+            logits_f32,
+            vocab * 4,
+        )?;
+    }
+    stream.synchronize()?;
+    let mut best_idx = 0usize;
+    let mut best_val = host[0];
+    for (i, &v) in host.iter().enumerate().skip(1) {
+        if v > best_val {
+            best_val = v;
+            best_idx = i;
+        }
+    }
+
+    // 5. Free per-call scratch.
+    // SAFETY: each alloc is uniquely owned by this call.
+    unsafe {
+        device.dealloc(h_t_post_norm, hidden * 2)?;
+        device.dealloc(mtp_h_final, hidden * 2)?;
+        device.dealloc(x_q8_1, n_blocks * q8_1_block_bytes)?;
+        device.dealloc(logits_f32, vocab * 4)?;
+    }
+
+    Ok(best_idx as u32)
+}
+
 /// Derive the conventional sibling MTP file path from a base GGUF
 /// path: strip the trailing quant suffix and `.gguf` extension, then
 /// append `-mtp.gguf`. Returns the candidate path; the caller checks

@@ -36,6 +36,7 @@ from __future__ import annotations
 
 import json
 import math
+import os
 import struct
 from pathlib import Path
 
@@ -60,8 +61,11 @@ ROPE_DIM_TOTAL = HEAD_DIM
 ROPE_PARTIAL_FACTOR = 0.25  # → first 64 of head_dim get rotated
 ROPE_PARTIAL_DIM = int(HEAD_DIM * ROPE_PARTIAL_FACTOR)  # 64
 
-# Single-MTP-step: position=0 makes MROPE identity, isolating the math.
-TEST_POSITION = 0
+# MTP-4: validate at position != 0 to exercise the MROPE path. The
+# Rust forward should match within the same noise band as position=0
+# (rope is just an in-place rotation of Q/K's first 64 of head_dim,
+# adds negligible numerical noise vs the existing 5 Q8_1 encodes).
+TEST_POSITION = int(os.environ.get("MTP_TEST_POSITION", "0"))
 SEED = 42
 
 
