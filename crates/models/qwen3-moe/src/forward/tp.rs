@@ -709,28 +709,34 @@ pub fn forward_prefill_tp_logits(
     if prompt_ids.is_empty() {
         bail!("forward_prefill_tp_logits: empty prompt");
     }
-    // **AUTO-6b2 / AUTO-6c4** — opt into the L-batched path when:
-    //   * `FLAMBEAU_TP_BATCHED=1` (off by default until AUTO-6d
-    //     verifies the perf gate),
-    //   * `prompt_ids.len() >= 8` (small prompts amortise the
-    //     prefill-scratch allocation poorly).
+    // **AUTO-6b2 / AUTO-6c4** — L-batched prefill is the default for
+    // TP/hybrid topologies on prompts ≥ 8 tokens. Set
+    // `FLAMBEAU_TP_BATCHED=0` to opt out and fall through to the
+    // per-token loop (kept for diagnostics + Q8 KV which has no batched
+    // attention kernel).
+    //
+    // Default-on rationale: bench cert
+    // `coder_next_80b_cn80b_12_topology_summary.md` measures pp512
+    // 801 tok/s (batched) vs the per-token loop at ~36 tok/s — a 22×
+    // gap that left live serving running at ~5% of kernel ceiling.
     //
     // The driver handles all four layer flavors:
     //   * full-attn + dense FFN  (Qwen3.5 9B/27B Q4_1, dense)
     //   * GDN + dense FFN        (Qwen3.5 hybrid)
     //   * full-attn + MoE        (Qwen3-Coder-30B)
-    //   * GDN + MoE + shared exp (Qwen3.6-35B-A3B hybrid MoE)
+    //   * GDN + MoE + shared exp (Qwen3.6-35B-A3B, Coder-Next-80B)
+    //
     // V1-BENCH-#116 — Q8_0 KV has no batched-prefill kernel
     // (attention_prefill_q8_kv doesn't exist yet). Detect and fall
-    // through to the per-token loop below; each iter goes through
+    // through to the per-token loop; each iter goes through
     // forward_one_token_tp_logits → forward_full_attn_decode_tp<L>
     // which dispatches the right Q8 attention kernel.
     let any_q8_kv = layer_caches.iter().any(|cs| {
         cs.iter().any(|c| matches!(c, LayerCache::FullAttnQ8(_)))
     });
-    let batched_opt_in = !any_q8_kv
-        && std::env::var("FLAMBEAU_TP_BATCHED").as_deref() == Ok("1");
-    if batched_opt_in && prompt_ids.len() >= 8 {
+    let batched_opt_out = std::env::var("FLAMBEAU_TP_BATCHED").as_deref() == Ok("0");
+    let use_batched = !any_q8_kv && !batched_opt_out;
+    if use_batched && prompt_ids.len() >= 8 {
         return forward_prefill_tp_batched_logits(
             model,
             cluster,

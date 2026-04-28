@@ -68,12 +68,12 @@ pub fn forward_prefill_hybrid_logits(
     if prompt_ids.is_empty() {
         bail!("forward_prefill_hybrid_logits: empty prompt");
     }
-    // **AUTO-6e** — opt-in batched hybrid prefill. Same env gate as
-    // pure-TP (FLAMBEAU_TP_BATCHED=1), same L≥8 threshold for
-    // prefill-scratch alloc amortisation. Falls back to the per-token
-    // loop on small prompts and when the env flag isn't set.
-    let batched_opt_in = std::env::var("FLAMBEAU_TP_BATCHED").as_deref() == Ok("1");
-    if batched_opt_in && prompt_ids.len() >= 8 {
+    // **AUTO-6e** — batched hybrid prefill is the default for pp+tp
+    // topologies on prompts ≥ 8 tokens. Set FLAMBEAU_TP_BATCHED=0 to
+    // opt out. Falls back to per-token loop on small prompts. See
+    // `tp.rs::forward_prefill_tp_logits` for rationale.
+    let batched_opt_out = std::env::var("FLAMBEAU_TP_BATCHED").as_deref() == Ok("0");
+    if !batched_opt_out && prompt_ids.len() >= 8 {
         return forward_prefill_hybrid_batched_logits(
             model,
             global_cluster,

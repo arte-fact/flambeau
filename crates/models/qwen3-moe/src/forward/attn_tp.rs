@@ -43,7 +43,10 @@ use anyhow::{bail, Context, Result};
 use flambeau_backend_hip::{HipDevice, HipStream};
 use flambeau_core::{CopyDirection, Device, DevicePtr};
 use flambeau_ops::hip::{
-    attention::{attention_decode_f16_slots, attention_decode_q8_kv, split_q_gate_f16},
+    attention::{
+        attention_decode_f16_slots, attention_decode_f16_splitk, attention_decode_q8_kv,
+        split_q_gate_f16, splitk_chunk_size,
+    },
     cast::cast_f32_to_f16,
     mlp::sigmoid_mul_f16,
     norm::{quantize_f16_q8_0, quantize_f16_q8_1, rmsnorm_f16, rmsnorm_quant_q8_1},
@@ -322,9 +325,41 @@ pub fn forward_full_attn_decode_tp<L: CacheLayout>(
     }
 
     // 9. Per-rank attention against the local KV slab.
+    //
+    // CN-80B-18 — F16 long-ctx: switch to split-K (flash-decoding) at
+    // n_tokens_kv > 256, mirroring the non-TP path. The single-pass
+    // kernel hits 27 % CU occupancy and serialises over n_tokens_kv per
+    // block (2647 µs at ctx=2048 vs 340 µs split-K, 7.78×). Without
+    // this branch, pp2tp2 / tp2 decode at 5 K ctx ran ~5× slower than
+    // llama.cpp's F16 attention. `FullAttnScratch.splitk_partials_*` is
+    // already sized for `n_heads` (full count) — over-sized for TP but
+    // correct; we pass `local_n_heads` to the dispatcher.
     let n_tokens_kv = kv_cache.current_tokens();
     let scale = (head_dim as f32).sqrt().recip();
-    if kv_layout == Q8Contig::NAME {
+    let use_splitk = kv_layout != Q8Contig::NAME
+        && std::env::var("FLAMBEAU_VARIANT").as_deref() != Ok("baseline")
+        && n_tokens_kv > 256;
+    if use_splitk {
+        let chunk_size = splitk_chunk_size(n_tokens_kv);
+        attention_decode_f16_splitk(
+            ops,
+            stream,
+            scratch.q_f16,
+            kv_cache.k_buffer(),
+            kv_cache.v_buffer(),
+            scratch.attn_out_f16,
+            scratch.splitk_partials_m,
+            scratch.splitk_partials_s,
+            scratch.splitk_partials_o,
+            local_n_heads,
+            local_n_kv_heads,
+            head_dim,
+            n_tokens_kv,
+            chunk_size,
+            scale,
+        )
+        .context("attention_decode_f16_splitk (TP)")?;
+    } else if kv_layout == Q8Contig::NAME {
         attention_decode_q8_kv(
             ops, stream, scratch.q_f16,
             kv_cache.k_buffer(), kv_cache.v_buffer(),
