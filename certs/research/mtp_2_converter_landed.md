@@ -1,47 +1,48 @@
-# MTP-2 — Integrated MTP converter landed
+# MTP-2 — MTP converter landed (thin sibling-file mode)
 
-**Status:** shipped. `tools/convert_qwen36_mtp.py` produces a single
-augmented GGUF with the Qwen3.6-27B MTP head appended. First output
-verified byte-exact for base tensors.
+**Status:** shipped. `tools/convert_qwen36_mtp.py` emits a small
+standalone `Qwen3.6-27B-mtp.gguf` (431 MB on disk, 451 MB tensor
+content) that the flambeau loader pairs with any base Qwen3.6-27B
+GGUF at runtime. Optional `--integrate-into <base>` mode produces a
+single combined file for users who prefer that.
+
+**Why thin/sibling, not integrated**: integrated mode would
+write a full ~16 GB duplicate per base variant the user owns — across
+7 known variants (Q4_0 / Q4_1 / Q8_0 / UD-Q3_K_XL / UD-Q4_K_XL /
+UD-Q6_K_XL / UD-Q8_K_XL), that's ~3.2 GB of MTP duplication AND
+several minutes of stream-copy I/O per variant. Thin mode is
+**+431 MB on disk total** and **<1s to generate**, paired with all
+variants for free at runtime.
 
 ## What landed
 
 `tools/convert_qwen36_mtp.py` — Python script using `gguf` + `safetensors`
 + `torch` (BF16 read).
 
-Pipeline:
+**Default (thin) pipeline:**
 1. Read MTP shards 13 + 15 from `Qwen/Qwen3.6-27B` (cache dir, ~4.2 GB).
-2. Quantize MTP linears to Q8_0 via `gguf.quants.quantize`; norms stay F32.
-3. Read base GGUF via `GGUFReader`; copy ALL fields and tensors verbatim
-   (no dequant / requant — preserves the original Unsloth quant
-   exactly).
-4. Append 15 `mtp.*` tensor entries + 3 `mtp.*` metadata keys
-   (`mtp.source_repo`, `mtp.num_layers`, `mtp.use_dedicated_embeddings`).
-5. Write to `<basename>+mtp.gguf`.
+2. Quantize MTP linears to Q8_0; norms stay F32.
+3. Write a small standalone GGUF with `general.architecture =
+   "qwen35-mtp"`, the 15 mtp.* tensors, and pairing metadata
+   (`mtp.target_arch`, `mtp.target_hidden_size`,
+   `mtp.target_vocab_size`, `mtp.source_repo`, `mtp.num_layers`,
+   `mtp.use_dedicated_embeddings`).
 
-## First conversion
+**Optional (`--integrate-into <base>`) pipeline:** copy a base GGUF
+verbatim (no dequant of base tensors) and append the MTP entries
+into a single combined file. Produces `<base>+mtp.gguf`. Earlier
+session ran this once on Q4_0 and verified byte-exact base
+preservation across 5 sampled tensors (Q4_0 / Q4_1 / Q6_K / F32);
+deleted to save disk now that thin mode is canonical.
+
+## Output (thin mode)
 
 | | |
 |---|---|
-| Base | `Qwen3.6-27B-Q4_0.gguf` (15.79 GB, 851 tensors) |
-| Output | `Qwen3.6-27B-Q4_0+mtp.gguf` (16.24 GB, 866 tensors) |
-| MTP overhead | +451 MB (Q8_0 linears + F32 norms) |
-| Conversion time | ~32s on warm filesystem (single 16 GB stream-copy + small append) |
-
-## Byte-exact base verification
-
-5 representative base tensors (across dtype + size):
-
-| Tensor | dtype | size | match |
-|---|---|---|---|
-| `output.weight` | Q6_K | 1042.9 MB | ✓ |
-| `token_embd.weight` | Q4_0 | 715.2 MB | ✓ |
-| `blk.0.attn_qkv.weight` | Q4_0 | 29.5 MB | ✓ |
-| `blk.31.ffn_down.weight` | Q4_1 | 50.1 MB | ✓ |
-| `blk.63.attn_norm.weight` | F32 | 0.02 MB | ✓ |
-
-Plus structural check: 0 missing tensors, exactly 15 added (the MTP
-set), all expected names, correct dtypes, expected shapes.
+| File | `/artefact/models/Qwen3.6-27B-mtp.gguf` (431 MB, 15 tensors) |
+| Generation time | <1 s (after the one-time ~4.2 GB shards download) |
+| Pairs with | any `qwen35` base GGUF: Q4_0, Q4_1, Q8_0, UD-Q3/4/6/8_K_XL, … |
+| Disk overhead across all base variants | +431 MB **once** |
 
 ## MTP tensor inventory in the new file
 
@@ -69,15 +70,27 @@ attention: half is Q, half is the gate signal (per the base model's
 `attn_output_gate=true` convention). MTP-3 will need to handle the
 split when wiring forward.
 
-## Reusing the MTP blob across base variants
+## Pairing semantics for the loader (MTP-3)
 
-The expensive step is the BF16 → Q8_0 quantization (~1s for 393 MB).
-For the next run on a different base variant (Q4_1, Q8_0,
-UD-Q4_K_XL, etc.) we re-quantize the same MTP weights —
-deterministic, identical output bytes, ~1s overhead on top of the
-16-30 GB stream-copy. If we cared we could cache the quantized
-blob, but the script is so fast (~30-60s per variant) that it's not
-worth the complexity.
+When loading any qwen35 base GGUF, the flambeau loader looks for a
+sibling MTP file via this rule:
+
+1. If the loader sees `mtp.*` tensors in the base GGUF (integrated
+   mode), use those.
+2. Else, look for `<basename>-mtp.gguf` next to the base. If found,
+   open as a second GGUFReader and verify pairing metadata:
+   - `mtp.target_arch` matches base's `general.architecture`
+   - `mtp.target_hidden_size` matches base's `qwen35.embedding_length`
+   - `mtp.target_vocab_size` matches base's vocab size from
+     `tokenizer.ggml.tokens.count` (or equivalent)
+3. If sibling exists but mismatches, fail loud with a "MTP/base
+   mismatch — re-run convert_qwen36_mtp.py" error rather than load
+   silently with wrong weights.
+4. If neither integrated nor sibling found: load without MTP
+   (spec-decode unavailable; eager decode still works).
+
+The user can also pass `--mtp <path>` to override the auto-pair
+location.
 
 ## What's gitignored
 

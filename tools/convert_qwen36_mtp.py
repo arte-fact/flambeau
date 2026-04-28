@@ -1,26 +1,34 @@
 #!/usr/bin/env python3
 """
-MTP-2: integrated converter — append the Qwen3.6-27B MTP head to an
-existing base GGUF.
+MTP-2: Qwen3.6-27B MTP-head GGUF emitter.
 
-Reads MTP shards 13 + 15 from the Qwen/Qwen3.6-27B BF16 release,
-quantizes the linears to Q8_0 (norms stay F32), and produces a new
-GGUF that:
-  - copies every existing tensor verbatim (no dequant / requant of the
-    base — preserves the original Unsloth quant exactly),
-  - copies every existing metadata field,
-  - appends the 15 mtp.* tensors,
-  - adds `mtp.source_repo` metadata so the file is self-describing.
+Reads MTP shards 13 + 15 from the Qwen/Qwen3.6-27B BF16 release and
+quantizes the 15 mtp.* tensors (linears → Q8_0, norms stay F32).
 
-Pair with any base Qwen3.6-27B GGUF (Q4_0 / Q4_1 / Q8_0 /
-UD-Q4_K_XL / UD-Q6_K_XL / etc.). Each base variant gets its own
-`+mtp` output; the MTP bytes are reused across all variants (they
-are the same Q8_0 blob — only the base bytes change).
+Two output modes:
 
-Usage:
+THIN (default) — emit a small standalone `*-mtp.gguf` (~451 MB)
+that the flambeau loader pairs with ANY existing base Qwen3.6-27B
+GGUF (Q4_0 / Q4_1 / Q8_0 / UD-Q4_K_XL / UD-Q6_K_XL / …) at runtime.
+The pair-up requires a couple of metadata keys (`mtp.target_arch`,
+`mtp.target_hidden_size`, `mtp.target_vocab_size`,
+`mtp.source_repo`) which the loader verifies against the base's own
+metadata. Disk cost across all variants you own is +451 MB ONCE.
+
+INTEGRATE (`--integrate-into <base>`) — emit a `<base>+mtp.gguf` that
+copies the base verbatim and appends the MTP tensors. Useful for
+distribution as a single file but costs ~base_size disk per variant
+(+1 base size if you already have the base — typically wasteful).
+
+Usage (thin, recommended):
     python tools/convert_qwen36_mtp.py \\
-        --base /artefact/models/Qwen3.6-27B-Q4_0.gguf \\
-        --shards-dir /artefact/flambeau/tools/mtp_cache \\
+        --shards-dir tools/mtp_cache \\
+        --out /artefact/models/Qwen3.6-27B-mtp.gguf
+
+Usage (integrated):
+    python tools/convert_qwen36_mtp.py \\
+        --shards-dir tools/mtp_cache \\
+        --integrate-into /artefact/models/Qwen3.6-27B-Q4_0.gguf \\
         --out /artefact/models/Qwen3.6-27B-Q4_0+mtp.gguf
 """
 from __future__ import annotations
@@ -117,77 +125,77 @@ def copy_kv_fields(reader: GGUFReader, writer: GGUFWriter) -> int:
     return n
 
 
-def main() -> int:
-    ap = argparse.ArgumentParser()
-    ap.add_argument("--base", required=True, type=Path,
-                    help="Path to the base Qwen3.6-27B GGUF to augment.")
-    ap.add_argument("--shards-dir", required=True, type=Path,
-                    help="Directory containing shard-13.safetensors and shard-15.safetensors.")
-    ap.add_argument("--out", required=True, type=Path,
-                    help="Output GGUF path. Will be overwritten if it exists.")
-    ap.add_argument("--source-repo", default="Qwen/Qwen3.6-27B",
-                    help="Stamped into mtp.source_repo metadata key.")
-    args = ap.parse_args()
-
-    if not args.base.exists():
-        raise SystemExit(f"base not found: {args.base}")
-    if not args.shards_dir.exists():
-        raise SystemExit(f"shards dir not found: {args.shards_dir}")
-    args.out.parent.mkdir(parents=True, exist_ok=True)
-
-    print(f"reading base: {args.base}")
-    reader = GGUFReader(str(args.base))
-    arch_field = reader.fields["general.architecture"]
-    arch = str(arch_field.contents())
-    print(f"  arch: {arch}")
-    print(f"  base tensors: {len(reader.tensors)}")
-    print(f"  base fields:  {len(reader.fields)}")
-
-    # Sanity check: this converter only knows how to MTP-augment a Qwen3.6-27B
-    # (`qwen35` arch). Other archs (qwen3next, qwen35moe, etc.) would either
-    # not need MTP or have a different head shape.
-    if arch != "qwen35":
-        raise SystemExit(
-            f"this converter is for arch=qwen35 (Qwen3.6-27B); got arch={arch}. "
-            f"Other archs need their own MTP-head sourcing."
-        )
-
-    print(f"loading MTP from: {args.shards_dir}")
-    mtp_fp32 = load_mtp_tensors(args.shards_dir)
+def quantize_all_mtp(
+    shards_dir: Path,
+) -> dict[str, tuple[np.ndarray, GGMLQuantizationType, tuple[int, ...]]]:
+    """Read shards, quantize the 15 MTP tensors, return ready-to-write entries."""
+    print(f"loading MTP from: {shards_dir}")
+    mtp_fp32 = load_mtp_tensors(shards_dir)
     print(f"  MTP tensors loaded: {len(mtp_fp32)}")
 
     print("quantizing MTP tensors...")
-    mtp_quantized: dict[str, tuple[np.ndarray, GGMLQuantizationType, tuple[int, ...]]] = {}
-    total_mtp_bytes = 0
+    out: dict[str, tuple[np.ndarray, GGMLQuantizationType, tuple[int, ...]]] = {}
+    total = 0
     for name, fp32 in mtp_fp32.items():
         q, qtype = quantize_mtp(name, fp32)
-        # GGUFWriter wants the LOGICAL shape (in elements), not byte-packed.
         logical_shape = tuple(int(d) for d in fp32.shape)
-        mtp_quantized[name] = (q, qtype, logical_shape)
-        total_mtp_bytes += q.nbytes
+        out[name] = (q, qtype, logical_shape)
+        total += q.nbytes
         print(f"  {name}: {logical_shape} f32 → {qtype.name} ({q.nbytes/1e6:.2f} MB)")
-    print(f"  MTP total: {total_mtp_bytes/1e6:.2f} MB")
+    print(f"  MTP total: {total/1e6:.2f} MB")
+    return out
 
-    # Free the fp32 source — q-data is what we write.
-    del mtp_fp32
 
-    print(f"writing: {args.out}")
-    writer = GGUFWriter(str(args.out), arch=arch)
+def write_thin_mtp_gguf(
+    out_path: Path,
+    mtp_quantized: dict[str, tuple[np.ndarray, GGMLQuantizationType, tuple[int, ...]]],
+    target_arch: str,
+    target_hidden_size: int,
+    target_vocab_size: int,
+    source_repo: str,
+) -> None:
+    """Emit a small standalone *-mtp.gguf (no base tensors)."""
+    writer = GGUFWriter(str(out_path), arch=f"{target_arch}-mtp")
+    # Pairing metadata — flambeau's loader checks these against the base.
+    writer.add_string("mtp.source_repo", source_repo)
+    writer.add_string("mtp.target_arch", target_arch)
+    writer.add_uint32("mtp.target_hidden_size", target_hidden_size)
+    writer.add_uint32("mtp.target_vocab_size", target_vocab_size)
+    writer.add_uint32("mtp.num_layers", 1)
+    writer.add_bool("mtp.use_dedicated_embeddings", False)
 
-    n_kv = copy_kv_fields(reader, writer)
-    writer.add_string("mtp.source_repo", args.source_repo)
-    writer.add_uint32("mtp.num_layers", 1)  # mtp_num_hidden_layers from config.json
+    for name, (q, qtype, _logical_shape) in mtp_quantized.items():
+        writer.add_tensor(
+            name,
+            q,
+            raw_shape=tuple(int(d) for d in q.shape),
+            raw_dtype=qtype,
+        )
+    print(f"  writing thin MTP GGUF...")
+    writer.write_header_to_file()
+    writer.write_kv_data_to_file()
+    writer.write_tensors_to_file(progress=True)
+    writer.close()
+
+
+def write_integrated_mtp_gguf(
+    out_path: Path,
+    base_reader: GGUFReader,
+    mtp_quantized: dict[str, tuple[np.ndarray, GGMLQuantizationType, tuple[int, ...]]],
+    arch: str,
+    source_repo: str,
+) -> None:
+    """Emit <base>+mtp.gguf — verbatim copy of base + MTP tensors appended."""
+    writer = GGUFWriter(str(out_path), arch=arch)
+
+    n_kv = copy_kv_fields(base_reader, writer)
+    writer.add_string("mtp.source_repo", source_repo)
+    writer.add_uint32("mtp.num_layers", 1)
     writer.add_bool("mtp.use_dedicated_embeddings", False)
     print(f"  KV fields copied: {n_kv} (+ 3 mtp.* fields)")
 
-    # ── Tensor descriptors first (writer requires all add_tensor before write_*) ──
-    # GGUFWriter.add_tensor wants `raw_shape` in BYTE-PACKED form when
-    # `raw_dtype` is a quantized type — it derives the logical shape
-    # internally via quant_shape_from_byte_shape. For F32/F16 the
-    # byte-packed shape equals the logical shape (1 element = 4 or 2
-    # bytes; trailing-dim size unchanged).
     print(f"  adding tensor descriptors...")
-    for t in reader.tensors:
+    for t in base_reader.tensors:
         writer.add_tensor(
             t.name,
             t.data,
@@ -201,18 +209,72 @@ def main() -> int:
             raw_shape=tuple(int(d) for d in q.shape),
             raw_dtype=qtype,
         )
-    print(f"  tensors total: {len(reader.tensors) + len(mtp_quantized)}")
-
-    print("  writing header...")
+    print(f"  tensors total: {len(base_reader.tensors) + len(mtp_quantized)}")
     writer.write_header_to_file()
-    print("  writing kv...")
     writer.write_kv_data_to_file()
-    print("  writing tensors (this may take a while — base bytes are streamed)...")
+    print("  writing tensors (this streams the entire base — may take a minute)...")
     writer.write_tensors_to_file(progress=True)
     writer.close()
 
+
+def main() -> int:
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--shards-dir", required=True, type=Path,
+                    help="Directory containing shard-13.safetensors and shard-15.safetensors.")
+    ap.add_argument("--out", required=True, type=Path,
+                    help="Output GGUF path. Will be overwritten if it exists.")
+    ap.add_argument("--integrate-into", type=Path, default=None,
+                    help="Optional: a base Qwen3.6-27B GGUF to copy verbatim and append MTP into. "
+                         "If omitted, emits a thin standalone MTP-only GGUF (recommended).")
+    ap.add_argument("--source-repo", default="Qwen/Qwen3.6-27B",
+                    help="Stamped into mtp.source_repo metadata.")
+    # For thin mode, these come from the user's base file or are passed manually.
+    ap.add_argument("--target-arch", default="qwen35",
+                    help="(thin mode) target architecture name; pair check at load time.")
+    ap.add_argument("--target-hidden-size", type=int, default=5120,
+                    help="(thin mode) target hidden size; pair check.")
+    ap.add_argument("--target-vocab-size", type=int, default=248320,
+                    help="(thin mode) target vocab size; pair check.")
+    args = ap.parse_args()
+
+    if not args.shards_dir.exists():
+        raise SystemExit(f"shards dir not found: {args.shards_dir}")
+    args.out.parent.mkdir(parents=True, exist_ok=True)
+
+    mtp_quantized = quantize_all_mtp(args.shards_dir)
+    del_mtp_fp32 = None  # keep `mtp_quantized` only
+
+    if args.integrate_into is None:
+        # THIN mode (default).
+        print(f"writing thin MTP-only GGUF: {args.out}")
+        write_thin_mtp_gguf(
+            args.out,
+            mtp_quantized,
+            target_arch=args.target_arch,
+            target_hidden_size=args.target_hidden_size,
+            target_vocab_size=args.target_vocab_size,
+            source_repo=args.source_repo,
+        )
+    else:
+        # INTEGRATE mode.
+        if not args.integrate_into.exists():
+            raise SystemExit(f"--integrate-into not found: {args.integrate_into}")
+        print(f"reading base: {args.integrate_into}")
+        reader = GGUFReader(str(args.integrate_into))
+        arch = str(reader.fields["general.architecture"].contents())
+        print(f"  arch: {arch}, tensors: {len(reader.tensors)}, fields: {len(reader.fields)}")
+        if arch != "qwen35":
+            raise SystemExit(
+                f"this converter is for arch=qwen35 (Qwen3.6-27B); got arch={arch}."
+            )
+        print(f"writing integrated GGUF: {args.out}")
+        write_integrated_mtp_gguf(
+            args.out, reader, mtp_quantized,
+            arch=arch, source_repo=args.source_repo,
+        )
+
     out_size = args.out.stat().st_size
-    print(f"done: {args.out} ({out_size/1e9:.2f} GB)")
+    print(f"done: {args.out} ({out_size/1e6:.2f} MB)")
     return 0
 
 
