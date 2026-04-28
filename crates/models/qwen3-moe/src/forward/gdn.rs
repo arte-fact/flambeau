@@ -280,6 +280,11 @@ pub fn forward_gdn_decode(
         .as_ref()
         .context("V1 GDN forward requires ssm_beta")?;
 
+    // V1-BENCH-CN-80B-7 — intra-GDN section markers. No-op when timer
+    // disabled. Every section's elapsed_ms aggregates across the GDN
+    // layers in a forward pass, surfacing the dominant sub-kernel.
+    flambeau_backend_hip::profile::mark("gdn_start", device, stream)?;
+
     // 1. Fused rmsnorm(x_in) + Q8_1 quantise.
     rmsnorm_quant_q8_1(
         ops,
@@ -292,15 +297,26 @@ pub fn forward_gdn_decode(
         cfg.rms_norm_eps,
     )
     .context("gdn attn_norm + quant")?;
+    flambeau_backend_hip::profile::mark("gdn_norm_quant", device, stream)?;
 
     // 2..5. Four hidden-input projections share the Q8_1 input.
-    // attn_qkv + attn_gate fuse when VARIANT=dp4a_vdr2 — both Q8_0, same K=hidden,
-    // different N (conv_channels vs d_inner). The extended gate_up kernel handles
-    // asymmetric n_rows by grid=max(n1,n2) with per-output early-return.
-    let fuse_qkv_gate = std::env::var("FLAMBEAU_VARIANT").as_deref() != Ok("baseline")
-        && weights.attn_qkv.dtype == flambeau_quant::GgmlDType::Q8_0
-        && weights.attn_gate.dtype == flambeau_quant::GgmlDType::Q8_0;
-    if fuse_qkv_gate {
+    // attn_qkv + attn_gate fuse when both weights match a supported
+    // dtype: Q8_0 (Qwen3.6-x-Q8_0/Q8_K_XL family) or Q4_0 (Qwen3.6-x-
+    // Q4_0 + Coder-Next-Q4_0 — the common GDN case per
+    // mmvq_q4_0_gate_up's own docstring; pre-iter-4 the V1 dispatcher
+    // skipped this branch and ran two separate mmvqs). The extended
+    // gate_up kernel handles asymmetric n_rows by grid=max(n1,n2) with
+    // per-output early-return.
+    let variant_off = std::env::var("FLAMBEAU_VARIANT").as_deref() == Ok("baseline");
+    let qkv_dtype = weights.attn_qkv.dtype;
+    let gate_dtype = weights.attn_gate.dtype;
+    let fuse_qkv_gate_q8_0 = !variant_off
+        && qkv_dtype == flambeau_quant::GgmlDType::Q8_0
+        && gate_dtype == flambeau_quant::GgmlDType::Q8_0;
+    let fuse_qkv_gate_q4_0 = !variant_off
+        && qkv_dtype == flambeau_quant::GgmlDType::Q4_0
+        && gate_dtype == flambeau_quant::GgmlDType::Q4_0;
+    if fuse_qkv_gate_q8_0 {
         mmvq_q8_0_gate_up(
             ops,
             stream,
@@ -314,10 +330,25 @@ pub fn forward_gdn_decode(
             hidden,
         )
         .context("attn_qkv + attn_gate fused mmvq_q8_0")?;
+    } else if fuse_qkv_gate_q4_0 {
+        flambeau_ops::hip::qmatmul::mmvq_q4_0_gate_up(
+            ops,
+            stream,
+            weights.attn_qkv.ptr,
+            weights.attn_gate.ptr,
+            scratch.x_q8_1,
+            scratch.qkv_mixed_f32,
+            scratch.z_f32,
+            conv_channels,
+            d_inner,
+            hidden,
+        )
+        .context("attn_qkv + attn_gate fused mmvq_q4_0 (V1-BENCH-CN-80B-7)")?;
     } else {
         run_mmvq_from_tensor(ops, stream, &weights.attn_qkv, scratch.x_q8_1, scratch.qkv_mixed_f32, conv_channels, hidden, "attn_qkv")?;
         run_mmvq_from_tensor(ops, stream, &weights.attn_gate, scratch.x_q8_1, scratch.z_f32, d_inner, hidden, "attn_gate")?;
     }
+    flambeau_backend_hip::profile::mark("gdn_proj_qkv_gate", device, stream)?;
     // ssm_alpha + ssm_beta fuse when FLAMBEAU_VARIANT=dp4a_vdr2 — both Q8_0,
     // same [num_v_heads, hidden] shape, both read x_q8_1 once. Same pattern
     // as shared-expert gate+up fusion.
@@ -349,6 +380,7 @@ pub fn forward_gdn_decode(
         run_mmvq_from_tensor(ops, stream, ssm_alpha, scratch.x_q8_1, scratch.alpha_f32, num_v_heads, hidden, "ssm_alpha")?;
         run_mmvq_from_tensor(ops, stream, ssm_beta, scratch.x_q8_1, scratch.beta_f32, num_v_heads, hidden, "ssm_beta")?;
     }
+    flambeau_backend_hip::profile::mark("gdn_proj_alpha_beta", device, stream)?;
 
     // 6. Conv1d step — assemble [history_{k-1}, qkv_mixed] into conv_input,
     // run causal conv, then shift history forward. V2.23.d.1 uses a single
@@ -382,10 +414,12 @@ pub fn forward_gdn_decode(
         conv_channels,
         conv_kernel,
     )?;
+    flambeau_backend_hip::profile::mark("gdn_conv1d", device, stream)?;
 
     // 7. silu(conv_out).
     silu_f32(ops, stream, scratch.conv_out, scratch.silu_out, conv_channels)
         .context("silu_f32(conv_out)")?;
+    flambeau_backend_hip::profile::mark("gdn_silu", device, stream)?;
 
     // 8. Slice silu_out into Q|K|V via pointer offsets. Q and K are
     // adjacent `qk_size` blocks; V follows. No kernel.
@@ -426,6 +460,7 @@ pub fn forward_gdn_decode(
         q_scale,
     )
     .context("scale_f32 Q")?;
+    flambeau_backend_hip::profile::mark("gdn_l2norm_qk", device, stream)?;
 
     // 11–12. C10 — fused state-step that absorbs the α/β/gate compute
     // (saves one kernel launch per GDN layer per token). Default-on;
@@ -485,6 +520,7 @@ pub fn forward_gdn_decode(
         )
         .context("gdn_state_step_f32_s128 (baseline)")?;
     }
+    flambeau_backend_hip::profile::mark("gdn_state_step", device, stream)?;
 
     // 13. ssm_norm per-head on the state-step output.
     let ssm_norm_k = weights
@@ -509,6 +545,7 @@ pub fn forward_gdn_decode(
         cfg.rms_norm_eps,
     )
     .context("ssm_norm (rmsnorm_f32)")?;
+    flambeau_backend_hip::profile::mark("gdn_ssm_norm", device, stream)?;
 
     // 14. gated = silu(z) * out_normed.
     if v_size != d_inner {
@@ -522,6 +559,7 @@ pub fn forward_gdn_decode(
     // 15. Quantise gated → Q8_1 for ssm_out mmvq.
     quantize_q8_1(ops, stream, scratch.gated_f32, scratch.gated_q8_1, d_inner)
         .context("quantize gated → Q8_1")?;
+    flambeau_backend_hip::profile::mark("gdn_swiglu_quant", device, stream)?;
 
     // 16. ssm_out projection.
     run_mmvq_from_tensor(
@@ -534,10 +572,12 @@ pub fn forward_gdn_decode(
         d_inner,
         "ssm_out",
     )?;
+    flambeau_backend_hip::profile::mark("gdn_ssm_out", device, stream)?;
 
     // 17. Cast back to F16 for the residual path.
     cast_f32_to_f16(ops, stream, scratch.ssm_out_f32, delta_out, hidden)
         .context("cast ssm_out → f16")?;
+    flambeau_backend_hip::profile::mark("gdn_cast_f16", device, stream)?;
 
     Ok(())
 }
