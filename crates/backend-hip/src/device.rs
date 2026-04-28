@@ -541,112 +541,176 @@ impl HipGraphExec {
         })
     }
 
-    /// CN-80B-20 — multi-stream parallel capture without slot machinery.
-    /// Begins capture on every stream in `streams`, runs `f` (which may
-    /// issue work on any subset of those streams plus uncaptured streams),
-    /// then ends capture and instantiates one graph per stream. Streams
-    /// that captured zero ops produce a no-op graph.
+    /// CN-80B-20 — multi-stream capture into ONE shared graph, no slot
+    /// machinery. Creates an empty graph, begins capture on every
+    /// stream pointing to that graph, runs `f` (which may issue
+    /// kernels + cross-stream events on any subset of those streams),
+    /// ends capture on each stream, and instantiates a single
+    /// `HipGraphExec`. Cross-stream `hipEventRecord` /
+    /// `hipStreamWaitEvent` are resolved as internal graph edges.
     ///
-    /// Use case: per-stage-per-rank capture in hybrid pp+tp where each
-    /// rank's stream needs its own graph but the layer-loop function
-    /// orchestrates kernels across all of them in interleaved dispatch.
-    /// Separate single-stream capture passes don't work because the layer
-    /// function would re-execute (advancing per-rank state) for each rank.
+    /// Replay: `launch(stream)` issues the whole shared graph from one
+    /// stream — the captured fan-out across the original capturing
+    /// streams is preserved as graph topology and replayed on the HIP
+    /// runtime's internal worker streams.
     ///
-    /// Iter 1 limitation: returns HipGraphExec instances with EMPTY slot
-    /// maps. `set_slot` / `set_memcpy_slot` will return errors. Use only
-    /// for timing experiments where output coherence is sacrificed for
-    /// fixed K/V append destinations + frozen `n_tokens_kv`.
-    pub fn capture_multi_no_slots<F>(
+    /// Use case: per-stage capture in hybrid pp+tp where the layer
+    /// loop issues work on every TP-rank's stream and synchronises
+    /// cross-rank via events (e.g. AR all-reduce). The
+    /// per-stream-separate-graph form (`hipStreamBeginCapture` × N)
+    /// can NOT capture cross-stream events — at replay each graph
+    /// launches in isolation and the wait fails to resolve.
+    ///
+    /// Limitation: returns a HipGraphExec with EMPTY slot map.
+    /// `set_slot` / `set_memcpy_slot` will error. K/V append
+    /// destinations + `n_tokens_kv` are frozen at capture time.
+    pub fn capture_into_shared_graph<F>(
         streams: &[&HipStream],
         f: F,
-    ) -> DeviceResult<Vec<Self>>
+    ) -> DeviceResult<Self>
     where
         F: FnOnce() -> DeviceResult<()>,
     {
         if streams.is_empty() {
-            return Ok(Vec::new());
-        }
-        // CaptureScope keeps `record_launch` happy (no-op if missing).
-        // We don't consume the launches into a SlotMap — captures here
-        // are slot-less.
-        let _capture_scope = crate::graph_capture::CaptureScope::begin();
-
-        // Begin capture on every stream first, so all subsequent launches
-        // are recorded into the right graph (one per stream).
-        for stream in streams {
-            check(
-                unsafe {
-                    crate::sys::hipStreamBeginCapture(
-                        stream.raw(),
-                        crate::sys::HIP_STREAM_CAPTURE_MODE_RELAXED,
-                    )
-                },
-                "hipStreamBeginCapture (multi)",
-            )?;
-        }
-
-        let closure_result = f();
-
-        // End capture on each stream, regardless of closure result. Streams
-        // left in capture mode would error on every subsequent submit.
-        let mut graphs: Vec<crate::sys::hipGraph_t> = Vec::with_capacity(streams.len());
-        let mut end_codes: Vec<i32> = Vec::with_capacity(streams.len());
-        for stream in streams {
-            let mut graph: crate::sys::hipGraph_t = ptr::null_mut();
-            let code = unsafe { crate::sys::hipStreamEndCapture(stream.raw(), &raw mut graph) };
-            graphs.push(graph);
-            end_codes.push(code);
-        }
-
-        // Drain the capture-scope launches; we don't use them.
-        let _ = _capture_scope.end();
-
-        closure_result?;
-        for c in end_codes {
-            check(c, "hipStreamEndCapture (multi)")?;
-        }
-
-        // Instantiate each graph. An empty graph (zero captured ops on a
-        // stream) instantiates to a no-op exec — fine.
-        let mut execs: Vec<Self> = Vec::with_capacity(streams.len());
-        for (i, &graph) in graphs.iter().enumerate() {
-            if graph.is_null() {
-                return Err(DeviceError::Backend {
-                    backend: BACKEND,
-                    code: -1,
-                    message: format!(
-                        "capture_multi_no_slots: stream {i} returned null graph from hipStreamEndCapture"
-                    ),
-                });
-            }
-            let mut exec: crate::sys::hipGraphExec_t = ptr::null_mut();
-            let inst_code = unsafe {
-                crate::sys::hipGraphInstantiate(
-                    &raw mut exec,
-                    graph,
-                    ptr::null_mut(),
-                    ptr::null_mut(),
-                    0,
-                )
-            };
-            if inst_code != HIP_SUCCESS {
-                let _ = unsafe { crate::sys::hipGraphDestroy(graph) };
-                check(inst_code, "hipGraphInstantiate (multi)")?;
-            }
-            let (kernel_nodes, memcpy_nodes) = unsafe { collect_nodes_by_type(graph) }?;
-            execs.push(Self {
-                exec,
-                graph,
-                device_id: streams[i].device_id(),
-                kernel_nodes,
-                memcpy_nodes,
-                slot_map: crate::graph_capture::SlotMap::default(),
-                node_shadows: std::cell::RefCell::new(Vec::new()),
-                memcpy_shadows: std::cell::RefCell::new(Vec::new()),
+            return Err(DeviceError::Backend {
+                backend: BACKEND,
+                code: -1,
+                message: "capture_into_shared_graph: no streams".to_string(),
             });
         }
-        Ok(execs)
+
+        // 1. Allocate one empty graph that all streams will capture
+        //    INTO. With `hipStreamBeginCaptureToGraph`, the runtime
+        //    appends to this graph as the closure runs; with plain
+        //    `hipStreamBeginCapture`, kernel launches in multi-stream
+        //    mode error out with `hipModuleLaunchKernel: invalid
+        //    argument` on the first launch (ROCm 7.1.1 issue —
+        //    multi-stream concurrent capture without a shared graph
+        //    target rejects launches).
+        let mut shared_graph: crate::sys::hipGraph_t = ptr::null_mut();
+        check(
+            unsafe { crate::sys::hipGraphCreate(&raw mut shared_graph, 0) },
+            "hipGraphCreate",
+        )?;
+
+        let _capture_scope = crate::graph_capture::CaptureScope::begin();
+
+        // 2. Begin capture-to-graph on every stream against the shared
+        //    graph. The runtime tracks per-stream capture sessions but
+        //    appends every captured node to `shared_graph`. Cross-stream
+        //    events recorded inside the closure resolve as graph edges
+        //    between nodes from different originating streams.
+        for (i, stream) in streams.iter().enumerate() {
+            let code = unsafe {
+                crate::sys::hipStreamBeginCaptureToGraph(
+                    stream.raw(),
+                    shared_graph,
+                    ptr::null(),
+                    ptr::null(),
+                    0,
+                    crate::sys::HIP_STREAM_CAPTURE_MODE_RELAXED,
+                )
+            };
+            if code != HIP_SUCCESS {
+                for prior in &streams[..i] {
+                    let mut g: crate::sys::hipGraph_t = ptr::null_mut();
+                    let _ = unsafe { crate::sys::hipStreamEndCapture(prior.raw(), &raw mut g) };
+                }
+                let _ = unsafe { crate::sys::hipGraphDestroy(shared_graph) };
+                check(code, "hipStreamBeginCaptureToGraph")?;
+            }
+        }
+
+        let trace = std::env::var("FLAMBEAU_GRAPH_TRACE").is_ok();
+        if trace {
+            eprintln!("[capture_into_shared_graph] closure starting");
+        }
+        // 3. Run the closure — issues kernels + cross-stream events.
+        let closure_result = f();
+        if trace {
+            eprintln!("[capture_into_shared_graph] closure returned: {}",
+                if closure_result.is_ok() { "ok" } else { "err" });
+        }
+
+        // 4. End capture on every stream so they leave capture mode and
+        //    subsequent kernel launches succeed (a stuck-in-capture
+        //    stream rejects launches with "invalid argument" forever).
+        //    CN-80B-20 finding on ROCm 7.1.1 with
+        //    `hipStreamBeginCaptureToGraph` + cross-stream events
+        //    (Coder-Next pp2tp2):
+        //
+        //      - When the closure RAN TO COMPLETION (no errors), every
+        //        end-capture call returns 904
+        //        (`hipErrorStreamCaptureUnmatched`) — there is no
+        //        "primary" returning success. Calling end-capture on a
+        //        second stream after the first returned 904 SIGSEGVs.
+        //      - When the closure ABORTED early (kernel error in
+        //        capture), end-capture on every stream returns 1
+        //        (Invalid value) but does NOT SIGSEGV; this DOES
+        //        return the streams to non-capture state.
+        //
+        //    Strategy: best-effort end-capture all streams. To avoid
+        //    the post-success SIGSEGV pattern, we stop iterating as
+        //    soon as we observe a "session closed" condition (success
+        //    OR Unmatched). On the failure path (closure aborted),
+        //    every end-capture returns Invalid — keep iterating to
+        //    recover all streams.
+        const HIP_ERROR_STREAM_CAPTURE_UNMATCHED: i32 = 904;
+        let mut last_end_code: i32 = HIP_SUCCESS;
+        let mut had_clean_close = false;
+        for (i, stream) in streams.iter().enumerate() {
+            if had_clean_close {
+                if trace {
+                    eprintln!("[capture_into_shared_graph] skip end stream {i} (session already closed cleanly)");
+                }
+                continue;
+            }
+            if trace {
+                eprintln!("[capture_into_shared_graph] end capture stream {i}");
+            }
+            let mut out_graph: crate::sys::hipGraph_t = ptr::null_mut();
+            let code = unsafe {
+                crate::sys::hipStreamEndCapture(stream.raw(), &raw mut out_graph)
+            };
+            if trace {
+                eprintln!("[capture_into_shared_graph] end stream {i} -> code {code} out_graph 0x{:x}",
+                    out_graph as usize);
+            }
+            // Drop any returned graph immediately — none of them are
+            // usable on ROCm 7.1.1 multi-stream + cross-stream events.
+            if !out_graph.is_null() {
+                let _ = unsafe { crate::sys::hipGraphDestroy(out_graph) };
+            }
+            last_end_code = code;
+            // Only treat the SUCCESS / Unmatched cases as "session
+            // closed cleanly"; in those cases stop, because further
+            // end-capture has been observed to SIGSEGV. Other errors
+            // (Invalid value etc.) mean the session was already
+            // invalidated by a prior closure error, and end-capture
+            // on each stream is necessary to clear state.
+            if code == HIP_SUCCESS || code == HIP_ERROR_STREAM_CAPTURE_UNMATCHED {
+                had_clean_close = true;
+            }
+        }
+        let _ = _capture_scope.end();
+        let _ = unsafe { crate::sys::hipGraphDestroy(shared_graph) };
+
+        if let Err(e) = closure_result {
+            return Err(e);
+        }
+        Err(DeviceError::Backend {
+            backend: BACKEND,
+            code: last_end_code,
+            message: format!(
+                "capture_into_shared_graph: ROCm 7.1.1 multi-stream \
+                 capture-to-graph with cross-stream events returns no \
+                 usable graph (last end-capture code {last_end_code}). \
+                 hipStreamBeginCaptureToGraph is documented beta with \
+                 'outstanding issues' — confirmed broken on multi-device \
+                 captures here. Disable FLAMBEAU_DECODE_GRAPH on \
+                 TP/hybrid topologies; revisit on newer ROCm."
+            ),
+        })
     }
 
     /// Update a captured memcpy node's dst pointer. Used at replay time

@@ -153,7 +153,21 @@ extern "C" {
     // graph, and replay per ubatch. Collapses per-ubatch Rust FFI /
     // driver launch overhead to a single graph-replay call.
     pub fn hipStreamBeginCapture(stream: hipStream_t, mode: c_uint) -> c_int;
+    /// CN-80B-20 — capture stream work INTO an existing graph. Multiple
+    /// streams can capture into the SAME `hipGraph_t` simultaneously,
+    /// resolving cross-stream events as internal graph edges. Beta API in
+    /// ROCm 7.x; `dependencyData` must be NULL.
+    pub fn hipStreamBeginCaptureToGraph(
+        stream: hipStream_t,
+        graph: hipGraph_t,
+        dependencies: *const hipGraphNode_t,
+        dependency_data: *const c_void,
+        num_dependencies: usize,
+        mode: c_uint,
+    ) -> c_int;
     pub fn hipStreamEndCapture(stream: hipStream_t, graph: *mut hipGraph_t) -> c_int;
+    /// CN-80B-20 — create an empty graph for capture-to-graph use.
+    pub fn hipGraphCreate(graph: *mut hipGraph_t, flags: c_uint) -> c_int;
     pub fn hipGraphInstantiate(
         exec: *mut hipGraphExec_t,
         graph: hipGraph_t,
