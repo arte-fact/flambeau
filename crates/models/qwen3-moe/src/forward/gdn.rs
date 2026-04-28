@@ -466,7 +466,16 @@ pub fn forward_gdn_decode(
     // (saves one kernel launch per GDN layer per token). Default-on;
     // `FLAMBEAU_VARIANT=baseline` opts back to the unfused chain for
     // regression A/B. n_rep = num_v_heads / num_k_heads.
+    //
+    // CN-80B-13/14 — q/k repeat layout differs by arch:
+    //   qwen35moe (Qwen3.6-35B-A3B): rep-OUTER (cyclic ggml_repeat_4d)
+    //     → kernel uses `h_kv = h_idx % H_kv`. rep_inner_layout = false.
+    //   qwen3next (Coder-Next-80B): rep-INNER (reshape-interleave per
+    //     `qwen3next.cpp:418-431`) → kernel uses `h_kv = h_idx / n_rep`.
+    //     rep_inner_layout = true.
+    // Wrong choice produces a degenerate logit attractor; see CN-80B-14.
     let n_rep = num_v_heads / num_k_heads;
+    let rep_inner_layout = cfg.arch == "qwen3next";
     let fuse_state_step = std::env::var("FLAMBEAU_VARIANT").as_deref() != Ok("baseline");
     if fuse_state_step {
         gdn_state_step_alphabeta_f32_s128(
@@ -486,6 +495,7 @@ pub fn forward_gdn_decode(
             num_v_heads,
             1,
             n_rep,
+            rep_inner_layout,
         )
         .context("gdn_state_step_alphabeta_f32_s128 (C10 fused)")?;
     } else {
@@ -517,6 +527,7 @@ pub fn forward_gdn_decode(
             num_v_heads,
             1,
             n_rep,
+            rep_inner_layout,
         )
         .context("gdn_state_step_f32_s128 (baseline)")?;
     }
@@ -1197,7 +1208,10 @@ pub fn forward_gdn_prefill(
     // 11–12. C10 fused state-step (default) absorbs α/β/gate; baseline
     // chain available via FLAMBEAU_VARIANT=baseline. State-step
     // event-ordering preserved across both branches (V2.30.a).
+    // CN-80B-13/14 — q/k repeat layout differs by arch; see decode-path
+    // comment in `forward_gdn_decode` for the explanation.
     let n_rep = num_v_heads / num_k_heads;
+    let rep_inner_layout = cfg.arch == "qwen3next";
     let fuse_state_step = std::env::var("FLAMBEAU_VARIANT").as_deref() != Ok("baseline");
     if let Some(ev) = state_event {
         ev.stream_wait(stream)
@@ -1221,6 +1235,7 @@ pub fn forward_gdn_prefill(
             num_v_heads,
             n_tokens,
             n_rep,
+            rep_inner_layout,
         )
         .context("prefill gdn_state_step_alphabeta_f32_s128 (C10 fused)")?;
     } else {
@@ -1252,6 +1267,7 @@ pub fn forward_gdn_prefill(
             num_v_heads,
             n_tokens,
             n_rep,
+            rep_inner_layout,
         )
         .context("prefill gdn_state_step_f32_s128 (baseline)")?;
     }

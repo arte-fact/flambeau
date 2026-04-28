@@ -54,6 +54,12 @@ pub struct ServerState {
     /// template even though the arch tag says `qwen35moe`. Honoured
     /// when a request omits `tool_call_format` or sets it to "auto".
     pub tool_call_format_default: crate::tool_call_parser::ToolCallFormat,
+    /// Sampling defaults read from the GGUF (`general.sampling.*`).
+    /// Filled into omitted request fields by
+    /// [`crate::state::SamplingParams::from_parts`]. Values that the
+    /// GGUF doesn't carry stay `None`; the OpenAI-shaped fallback in
+    /// `from_parts` then takes effect.
+    pub model_defaults: crate::state::ModelDefaults,
 }
 
 pub type SharedState = Arc<ServerState>;
@@ -153,6 +159,7 @@ pub async fn chat_completions(
         req.frequency_penalty,
         req.max_tokens,
         req.seed,
+        &state.model_defaults,
     );
 
     // T3.2: OpenAI default is `parallel_tool_calls=true`. `false` hard-
@@ -460,6 +467,7 @@ pub async fn completions(
         /*frequency_penalty=*/ None,
         req.max_tokens,
         req.seed,
+        &state.model_defaults,
     );
     // Legacy /v1/completions has no `tools` field — keep the default
     // stop-mask policy unchanged from V1.8.
@@ -850,11 +858,15 @@ fn run_completion_blocking(
     // breaks downstream parsing. `relax_stop_mask` flips both knobs to
     // no-ops — trust the model on turns where `tools[]` is present.
     const MIN_RESPONSE_TOKENS: usize = 24;
-    // Nats subtracted from every stop-token logit beyond MIN_RESPONSE_TOKENS,
-    // so the model is free to stop but strongly disincentivised. The model's
-    // EOS logit on multi-turn prompts sits ~1.3 nats above the next candidate;
-    // -3.0 flips that to a solid discount without banning stop.
-    const STOP_BIAS: f32 = 3.0;
+    // Nats subtracted from every stop-token logit beyond MIN_RESPONSE_TOKENS.
+    // CN-80B-17 — was 3.0; that interacts badly with `top_k` sampling: at
+    // `top_k=20` the bias pushes EOS out of the candidate set, so the model
+    // cannot stop and falls into a state-attractor loop. Setting to 0.5
+    // keeps the soft preference for non-stop while leaving EOS reachable.
+    // The original concern (Qwen3.6 argmaxing `<|im_end|>` immediately) is
+    // already covered by the first-token NEG_INFINITY mask + the
+    // `MIN_RESPONSE_TOKENS=24` hard mask above.
+    const STOP_BIAS: f32 = 0.5;
     for step in 1..params.max_tokens as usize {
         let force_mask = step < MIN_RESPONSE_TOKENS && !relax_stop_mask;
         decode_logits(
@@ -1022,11 +1034,15 @@ fn run_completion_blocking_streaming(
     let mut last_token = first_next;
     // See non-streaming path for the MIN_RESPONSE_TOKENS rationale.
     const MIN_RESPONSE_TOKENS: usize = 24;
-    // Nats subtracted from every stop-token logit beyond MIN_RESPONSE_TOKENS,
-    // so the model is free to stop but strongly disincentivised. The model's
-    // EOS logit on multi-turn prompts sits ~1.3 nats above the next candidate;
-    // -3.0 flips that to a solid discount without banning stop.
-    const STOP_BIAS: f32 = 3.0;
+    // Nats subtracted from every stop-token logit beyond MIN_RESPONSE_TOKENS.
+    // CN-80B-17 — was 3.0; that interacts badly with `top_k` sampling: at
+    // `top_k=20` the bias pushes EOS out of the candidate set, so the model
+    // cannot stop and falls into a state-attractor loop. Setting to 0.5
+    // keeps the soft preference for non-stop while leaving EOS reachable.
+    // The original concern (Qwen3.6 argmaxing `<|im_end|>` immediately) is
+    // already covered by the first-token NEG_INFINITY mask + the
+    // `MIN_RESPONSE_TOKENS=24` hard mask above.
+    const STOP_BIAS: f32 = 0.5;
     for step in 1..params.max_tokens as usize {
         // T4.1: same relax-stop-mask behaviour as the non-streaming path.
         let force_mask = step < MIN_RESPONSE_TOKENS && !relax_stop_mask;
@@ -1117,9 +1133,21 @@ impl ApiError {
         }
     }
     pub fn internal(err: impl std::fmt::Display) -> Self {
+        let chain = format!("{err:#}");
+        let top = err.to_string();
+        // Log the full chain so the operator can see what bailed; only the
+        // topmost context reaches the HTTP client (matches OpenAI surface).
+        // anyhow's `{:#}` walks `.source()`; for non-anyhow Display impls
+        // it's identical to `to_string()`, so this is safe in both cases.
+        tracing::error!(
+            target: "server.api.error",
+            top = %top,
+            chain = %chain,
+            "ApiError::internal",
+        );
         Self {
             status: StatusCode::INTERNAL_SERVER_ERROR,
-            message: err.to_string(),
+            message: top,
         }
     }
 }

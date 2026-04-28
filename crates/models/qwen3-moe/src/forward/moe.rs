@@ -1054,7 +1054,12 @@ pub fn forward_moe_ffn_prefill(
     //   (Q8_0, Q8_0): pure Q8_0 (UD-Q8_K_XL) → Q8_0 gate_up + Q8_0 down tile8
     // MMVQ fallback stays for n_tokens < 32 where tile8 grid overhead dominates.
     let q4_0_use_tile8 = gate_dt_pre == GgmlDType::Q4_0
-        && (down_dt_pre == GgmlDType::Q4_0 || down_dt_pre == GgmlDType::Q8_0)
+        && (down_dt_pre == GgmlDType::Q4_0
+            || down_dt_pre == GgmlDType::Q8_0
+            // V1-BENCH-CN-80B-11c — Q4_1 down tile8 unblocks Coder-Next-Q4_0
+            // (gate/up Q4_0, down Q4_1). Pre-this-kernel both PP and TP fell
+            // through to MMVQ-per-token because Q4_1 down rejected tile8.
+            || down_dt_pre == GgmlDType::Q4_1)
         && n_tokens >= Q4_0_TILE8_THRESHOLD;
     let q8_0_use_tile8 = gate_dt_pre == GgmlDType::Q8_0
         && down_dt_pre == GgmlDType::Q8_0
@@ -1518,10 +1523,37 @@ pub fn forward_moe_ffn_prefill(
             )
             .context("prefill indexed_moe down q8_0 tile8")?;
         }
+        GgmlDType::Q4_1 if moe_variant == "tile8" => {
+            // V1-BENCH-CN-80B-11c — Q4_1 down tile8 for MoE prefill.
+            // Pre-this-kernel Q4_1 down forced MMVQ-per-token even at
+            // L≥32; on Coder-Next-Q4_0 (Q4_0 gate/up + Q4_1 down) that
+            // capped pp4 prefill and made pp2tp2 ~5x slower per layer.
+            // Same launch shape as Q4_0/Q8_0 down tile8; the affine
+            // d·d_y·sumi + m·s_y reconstruction is in the kernel.
+            let padded_total_ub = total_pairs + n_experts * 8;
+            flambeau_ops::hip::moe::indexed_moe_mmq_q4_1_down_tile8(
+                ops,
+                stream,
+                ffn_down_exps.ptr,
+                scratch.activated_q8_1,
+                scratch.expert_ids,
+                scratch.sort_sorted_pair_idx_padded,
+                scratch.sort_padded_offsets,
+                scratch.down_f32,
+                flambeau_ops::hip::moe::MoeShape {
+                    n_rows: hidden,
+                    n_tokens: n_tokens * top_k,
+                    top_k: 1,
+                    n_sb_per_row: inter / 32,
+                    n_experts,
+                    padded_total_upper_bound: padded_total_ub,
+                },
+            )
+            .context("prefill indexed_moe down q4_1 tile8")?;
+        }
         GgmlDType::Q4_1 => {
-            // B6 / V2.35.a — no tile8 MMQ Q4_1 yet; route prefill down through
-            // the plain MMVQ kernel. Slower at large L than tile8 but
-            // unblocks Qwen-published Qwen3.6-35B-A3B-Q4_0 (ffn_down_exps Q4_1).
+            // B6 / V2.35.a — fall-through MMVQ for n_tokens < 32 (tile8 grid
+            // overhead dominates at small L) and for non-tile8 variants.
             flambeau_ops::hip::moe::indexed_moe_mmvq_q4_1(
                 ops,
                 stream,

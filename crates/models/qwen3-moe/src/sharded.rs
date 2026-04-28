@@ -720,21 +720,45 @@ fn upload_bf16_as_q8_0(
     ))
 }
 
-/// V1.x #120 — Split qwen3next's fused `ssm_ba.weight` `[2*num_v_heads, hidden]`
-/// tensor into two Q8_0 device tensors `ssm_alpha` + `ssm_beta`, each
-/// `[num_v_heads, hidden]`. Top half (rows 0..num_v_heads) = alpha,
-/// bottom half (rows num_v_heads..2*num_v_heads) = beta — matches the
-/// qwen35moe split convention so the existing GDN forward path runs
-/// unchanged.
+/// V1.x #120 — Split qwen3next's fused `ssm_ba.weight`
+/// `[2*num_v_heads, hidden]` tensor into two Q8_0 device tensors
+/// `ssm_alpha` + `ssm_beta`, each `[num_v_heads, hidden]`.
 ///
-/// Source dtype is whatever the GGUF stored (typically Q4_K for Coder-Next):
-/// dequant→F32 host-side, slice rows, re-quantise each half to Q8_0 with
-/// the standard absmax/127 encoder. Output is two `DeviceTensor` with
-/// dtype=Q8_0 ready for `mmvq_q8_0` and the V2.27.c gate+up fusion path.
+/// **Layout** (matches `llama.cpp/src/models/qwen3next.cpp`'s
+/// `ssm_beta_alpha` view): the rows are NOT a contiguous `[α | β]`
+/// block — they are interleaved per K-head as
+/// `[β₀..β_{n_rep-1}, α₀..α_{n_rep-1}] × num_k_heads`, where
+/// `n_rep = num_v_heads / num_k_heads`. After matmul against the
+/// hidden activation, llama.cpp does
+/// `reshape_4d(out, ba_dim=2*n_rep, num_k_heads, …)` → `view(b @ off=0,
+/// size=n_rep)` and `view(a @ off=n_rep, size=n_rep)` per K-head, then
+/// reshapes the α slice back to `[num_v_heads]` by merging k-head and
+/// inner dims. The β slice is the FIRST half of every k-head block,
+/// the α slice is the SECOND half — and the names matter (see
+/// `pattern_ssm_beta_alpha = "blk\\.\\d*\\.ssm_ba.weight"` in
+/// `llama-model.cpp:59`).
+///
+/// Pre-fix this routine took
+/// `alpha = rows[..num_v_heads]; beta = rows[num_v_heads..]`, which
+/// (a) names them backwards and (b) takes contiguous halves that mix
+/// β/α across k-heads. The math runs without crashing on any prompt
+/// (shape is preserved) but the GDN recurrence evolves with garbage
+/// scalars, producing a degenerate logit attractor (e.g. always
+/// argmax `**`). 35B-A3B doesn't hit this path because its GGUF
+/// stores `ssm_alpha`/`ssm_beta` separately. CLOSES the
+/// Coder-Next-80B coherence regression observed live on flambeau
+/// serve at curl temp=0 → "** ** ** ** …".
+///
+/// Source dtype is whatever the GGUF stored (Q4_0 for Coder-Next-Q4_0,
+/// Q4_K for Coder-Next-UD-Q4_K_*): dequant→F32 host-side, gather
+/// interleaved rows, re-quantise each half to Q8_0 with the standard
+/// absmax/127 encoder. Output is two `DeviceTensor` with dtype=Q8_0
+/// ready for `mmvq_q8_0` and the V2.27.c gate+up fusion path.
 fn split_ssm_ba_to_q8_0(
     file: &GgufFile,
     r: &ResolvedTensor,
     device: &HipDevice,
+    cfg: &Qwen3MoEConfig,
 ) -> Result<(DeviceTensor, DeviceTensor)> {
     if r.dims.len() != 2 {
         bail!(
@@ -744,13 +768,26 @@ fn split_ssm_ba_to_q8_0(
     }
     let total_rows = r.dims[0] as usize;
     let cols = r.dims[1] as usize;
-    if total_rows % 2 != 0 {
+    let gdn = cfg.gdn.as_ref().ok_or_else(|| {
+        anyhow::anyhow!(
+            "split_ssm_ba_to_q8_0: cfg.gdn is None for arch {:?} — fused ssm_ba.weight present without GDN dims",
+            cfg.arch,
+        )
+    })?;
+    let num_v_heads = gdn.num_v_heads;
+    let num_k_heads = gdn.num_k_heads;
+    if total_rows != 2 * num_v_heads {
         bail!(
-            "split_ssm_ba_to_q8_0: `{}` rows {total_rows} not even (expected 2*num_v_heads)",
-            r.name
+            "split_ssm_ba_to_q8_0: `{}` rows {total_rows} != 2*num_v_heads={}",
+            r.name, 2 * num_v_heads,
         );
     }
-    let num_v_heads = total_rows / 2;
+    if num_v_heads % num_k_heads != 0 {
+        bail!(
+            "split_ssm_ba_to_q8_0: num_v_heads {num_v_heads} not divisible by num_k_heads {num_k_heads}",
+        );
+    }
+    let n_rep = num_v_heads / num_k_heads;
     let elems_total = total_rows * cols;
     if cols % QK8_0 != 0 {
         bail!(
@@ -767,9 +804,38 @@ fn split_ssm_ba_to_q8_0(
     flambeau_quant::dequantize_into(r.dtype, raw, &mut f32_buf)
         .with_context(|| format!("dequant `{}` (dtype={:?})", r.name, r.dtype))?;
 
-    // 2. Encode each half as Q8_0 (standard absmax/127 per 32-element block).
-    let q8_block_bytes = 2 + QK8_0; // d_f16 + 32 i8
+    // 2. Gather interleaved rows. Source layout (row-major):
+    //    rows = [β_{kh=0,r=0}, β_{kh=0,r=1}, …, β_{kh=0,r=n_rep-1},
+    //            α_{kh=0,r=0}, …,           α_{kh=0,r=n_rep-1},
+    //            β_{kh=1,r=0}, …]
+    //    Total rows: 2 * n_rep * num_k_heads = 2 * num_v_heads.
+    //    Beta rows are at row index `kh * 2*n_rep + r` for r ∈ [0, n_rep).
+    //    Alpha rows are at row index `kh * 2*n_rep + n_rep + r` for r ∈ [0, n_rep).
+    //    Outputs:
+    //      alpha_buf[(kh * n_rep + r) * cols + c] = src[(kh*2*n_rep + n_rep + r)*cols + c]
+    //      beta_buf [(kh * n_rep + r) * cols + c] = src[(kh*2*n_rep + r)*cols + c]
+    //    The destination layout `[num_v_heads, hidden]` matches the
+    //    qwen35moe split-tensor convention so the existing GDN forward
+    //    path consumes them unchanged.
     let half_elems = num_v_heads * cols;
+    let mut alpha_f32 = vec![0.0f32; half_elems];
+    let mut beta_f32 = vec![0.0f32; half_elems];
+    for kh in 0..num_k_heads {
+        for r_idx in 0..n_rep {
+            let dst_row = kh * n_rep + r_idx;
+            let src_beta_row = kh * (2 * n_rep) + r_idx;
+            let src_alpha_row = kh * (2 * n_rep) + n_rep + r_idx;
+            let dst_off = dst_row * cols;
+            beta_f32[dst_off..dst_off + cols]
+                .copy_from_slice(&f32_buf[src_beta_row * cols..src_beta_row * cols + cols]);
+            alpha_f32[dst_off..dst_off + cols]
+                .copy_from_slice(&f32_buf[src_alpha_row * cols..src_alpha_row * cols + cols]);
+        }
+    }
+    drop(f32_buf);
+
+    // 3. Encode each half as Q8_0 (standard absmax/127 per 32-element block).
+    let q8_block_bytes = 2 + QK8_0; // d_f16 + 32 i8
     let half_blocks = half_elems / QK8_0;
     let half_bytes = half_blocks * q8_block_bytes;
 
@@ -791,8 +857,10 @@ fn split_ssm_ba_to_q8_0(
         buf
     };
 
-    let alpha_buf = encode_half(&f32_buf[..half_elems]);
-    let beta_buf = encode_half(&f32_buf[half_elems..]);
+    let alpha_buf = encode_half(&alpha_f32);
+    let beta_buf = encode_half(&beta_f32);
+    drop(alpha_f32);
+    drop(beta_f32);
 
     // 3. Upload each half. Strip the `.ssm_ba` suffix and append .ssm_{alpha,beta}.
     let stem = r.name.strip_suffix(".ssm_ba.weight").ok_or_else(|| {
@@ -829,7 +897,6 @@ fn split_ssm_ba_to_q8_0(
     device.default_stream().synchronize()?;
     drop(alpha_buf);
     drop(beta_buf);
-    drop(f32_buf);
 
     Ok((
         DeviceTensor {
@@ -1176,11 +1243,10 @@ fn upload_layer(
             AttnWeights::FullAttn(upload_full(f, file, device, &mut bytes)?)
         }
         LayerAttnBlock::Gdn(g) => {
-            AttnWeights::Gdn(upload_gdn(g, file, device, &mut bytes)?)
+            AttnWeights::Gdn(upload_gdn(g, file, device, &mut bytes, cfg)?)
         }
     };
     let ffn = upload_ffn(&desc.ffn, file, device, &mut bytes)?;
-    let _ = cfg; // cfg is future-proofing — may influence optional uploads.
 
     Ok((
         LayerWeights {
@@ -1292,16 +1358,19 @@ fn upload_gdn(
     file: &GgufFile,
     device: &HipDevice,
     total: &mut usize,
+    cfg: &Qwen3MoEConfig,
 ) -> Result<GdnWeights> {
-    // V1.x #120 — qwen3next packs ssm_alpha + ssm_beta as one fused
-    // `ssm_ba.weight` tensor [2*num_v_heads, hidden]. Split rows host-side:
-    // top half = alpha, bottom half = beta. Re-quantise each to Q8_0 so
-    // the V1 GDN forward path (which expects split alpha/beta) sees them
-    // exactly as if the GGUF had shipped them split.
+    // V1.x #120 / #142 — qwen3next packs ssm_alpha + ssm_beta as one
+    // fused `ssm_ba.weight` tensor `[2*num_v_heads, hidden]`. The on-disk
+    // layout is INTERLEAVED per K-head as `[β..., α...] × num_k_heads`,
+    // matching llama.cpp's `ssm_beta_alpha` view; see
+    // `split_ssm_ba_to_q8_0` for details. Re-quantise each half to Q8_0
+    // so the V1 GDN forward path (which expects split α/β) consumes
+    // them as if the GGUF had shipped them separately.
     let split_ba = g.ssm_alpha.is_none() && g.ssm_beta.is_none() && g.ssm_ba.is_some();
     let (alpha_dt, beta_dt, ba_dt) = if split_ba {
         let ba = g.ssm_ba.as_ref().unwrap();
-        let (a, b) = split_ssm_ba_to_q8_0(file, ba, device)?;
+        let (a, b) = split_ssm_ba_to_q8_0(file, ba, device, cfg)?;
         *total += a.bytes + b.bytes;
         (Some(a), Some(b), None)
     } else {

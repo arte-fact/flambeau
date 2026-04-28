@@ -85,7 +85,7 @@ static __device__ __forceinline__ void gdn_state_step_impl(
     const float * __restrict__ state_in,
     float * __restrict__ state_out,
     float * __restrict__ attn_out,
-    int B, int H, int L, int n_rep)
+    int B, int H, int L, int n_rep, int rep_inner_layout)
 {
     constexpr int warp_size     = WARP_SIZE;
     constexpr int rows_per_lane = S_v / warp_size;
@@ -101,12 +101,29 @@ static __device__ __forceinline__ void gdn_state_step_impl(
     }
 
     // V / state / attn_out / gate / beta are indexed by (b, h_idx).
-    // Q / K are indexed by (b, h_idx % H_kv) — the GQA-shared head.
-    // Candle's caller expanded Q/K via `unsqueeze(1) + expand(rep, h_kv) +
-    // reshape(h_v)`, which places rep OUTER and h_kv INNER. After reshape
-    // the flat h_v index maps to source h_kv as `h_v % h_kv`.
+    // Q / K are indexed by (b, h_kv), the GQA-shared k-head for this
+    // v-head. Two repeat conventions exist in the wild:
+    //   rep-OUTER (rep_inner_layout = 0):  candle / llama.cpp qwen35moe
+    //     uses `ggml_repeat_4d(Q, num_v_heads)` which CYCLES through
+    //     k-heads — v-head h_idx → k-head `h_idx % H_kv`. Pattern at
+    //     n_rep=2: v-heads {0..H_kv-1} cover k-heads {0..H_kv-1}, then
+    //     v-heads {H_kv..2*H_kv-1} cover them again.
+    //   rep-INNER (rep_inner_layout = 1):  llama.cpp qwen3next
+    //     does an `ggml_reshape_4d → repeat_4d → reshape` that
+    //     INTERLEAVES — each k-head is duplicated `n_rep` times in a
+    //     row, giving v-head h_idx → k-head `h_idx / n_rep`. Pattern
+    //     at n_rep=2: v-heads {0,1} share k-head 0, {2,3} share
+    //     k-head 1, etc. (See `qwen3next.cpp:418-431` for the explicit
+    //     reshape-interleave.) This is the natural `kv = v / n_rep`
+    //     mapping used by most modern GQA models.
+    // The two layouts are NOT compatible; using the wrong one produces
+    // a recurrent state that evolves with the wrong q/k for half the
+    // v-heads, manifesting at the model output as a degenerate-token
+    // attractor (e.g. always argmax `**` or `\n`). qwen35moe
+    // (Qwen3.6-35B-A3B) ships rep-OUTER; qwen3next (Coder-Next-80B,
+    // future qwen3 hybrid releases) ships rep-INNER. Caller selects.
     const int H_kv   = H / n_rep;
-    const int h_kv   = h_idx % H_kv;
+    const int h_kv   = (rep_inner_layout != 0) ? (h_idx / n_rep) : (h_idx % H_kv);
     const int bh     = b_idx * H    + h_idx;
     const int bh_kv  = b_idx * H_kv + h_kv;
     // L-outer layout: all inputs are `[B, L, H, S_v]` (or `[B, L, H]` for
@@ -216,7 +233,7 @@ void flambeau_gdn_state_step_f32_s128(
     const float * __restrict__ state_in,
     float * __restrict__ state_out,
     float * __restrict__ attn_out,
-    int B, int H, int L, int n_rep)
+    int B, int H, int L, int n_rep, int rep_inner_layout)
 {
-    gdn_state_step_impl<128>(q, k, v, gate, beta, state_in, state_out, attn_out, B, H, L, n_rep);
+    gdn_state_step_impl<128>(q, k, v, gate, beta, state_in, state_out, attn_out, B, H, L, n_rep, rep_inner_layout);
 }

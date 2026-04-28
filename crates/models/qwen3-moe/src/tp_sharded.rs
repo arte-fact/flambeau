@@ -348,7 +348,7 @@ impl Qwen3MoETpModel {
                     // upload_tp_ssm_ba_split for the rank-aware slicing.
                     if name.ends_with(".ssm_ba.weight") {
                         let ((alpha_t, alpha_b), (beta_t, beta_b)) =
-                            upload_tp_ssm_ba_split(file, &name, rank_idx, world, device)?;
+                            upload_tp_ssm_ba_split(file, &name, rank_idx, world, device, &config)?;
                         total_bytes += alpha_b + beta_b;
                         let alpha_name: Arc<str> = alpha_t.name.clone();
                         let beta_name: Arc<str> = beta_t.name.clone();
@@ -777,19 +777,26 @@ fn upload_tp_mxfp4_as_q8_0(
     Ok((tensor, n))
 }
 
-/// V1-BENCH-CN-80B-1 — TP-aware ssm_ba split.
+/// V1-BENCH-CN-80B-1 / #142 — TP-aware ssm_ba split.
 ///
 /// qwen3next packs `ssm_alpha + ssm_beta` as one fused tensor
-/// `ssm_ba.weight [2*num_v_heads, hidden]` (top half = alpha, bottom =
-/// beta). PP loader (`sharded.rs::split_ssm_ba_to_q8_0`) splits at load.
-/// TP needs the same split AND a per-rank slice along the v-heads axis
-/// (`ColParallel{dim=0}` per `tp_layout.rs`).
+/// `ssm_ba.weight [2*num_v_heads, hidden]`. The on-disk layout is
+/// **interleaved per K-head** as
+/// `[β..., α...] × num_k_heads`, where `n_rep = num_v_heads / num_k_heads`
+/// — see `sharded.rs::split_ssm_ba_to_q8_0` for the full derivation
+/// against llama.cpp's `ssm_beta_alpha` view.
 ///
-/// Crucially, the layout's `ColParallel{dim=0}` on the FUSED 2*num_v_heads
-/// rows would give rank 0 all-alpha and rank 1 all-beta at world=2 —
-/// wrong. So we split first (alpha [num_v_heads, hidden], beta same),
-/// then apply `ColParallel{dim=0}` on each half, so each rank gets its
-/// per-rank num_v_heads/world rows of BOTH alpha and beta.
+/// Pre-fix this routine took `alpha = rows[..num_v_heads]; beta =
+/// rows[num_v_heads..]`, which (a) named them backwards and (b) mixed
+/// β/α across k-heads. Latent on perf benches (synthetic prompts hide
+/// the wrong scalars) but produced a degenerate logit attractor live —
+/// see CN-80B-13 cert.
+///
+/// TP slicing comes after the de-interleave: split first into
+/// `[num_v_heads, hidden]` α and β, then apply `ColParallel{dim=0}`
+/// per rank so each rank gets `num_v_heads/world` rows of BOTH α and β
+/// (vs the broken `ColParallel{dim=0}` on the fused tensor which would
+/// give rank 0 all-α-mixed and rank 1 all-β-mixed at world=2).
 ///
 /// Returns two TP layer-tensors: `*.ssm_alpha.weight` and
 /// `*.ssm_beta.weight`, dtype Q8_0, ready for `mmvq_q8_0` consumption.
@@ -799,6 +806,7 @@ fn upload_tp_ssm_ba_split(
     rank: u32,
     world: u32,
     device: &HipDevice,
+    cfg: &Qwen3MoEConfig,
 ) -> Result<((DeviceTensor, usize), (DeviceTensor, usize))> {
     let info = file
         .info(name)
@@ -811,17 +819,31 @@ fn upload_tp_ssm_ba_split(
     }
     let total_rows = info.dims[0] as usize;
     let cols = info.dims[1] as usize;
-    if total_rows % 2 != 0 {
+    let gdn = cfg.gdn.as_ref().ok_or_else(|| {
+        anyhow!(
+            "upload_tp_ssm_ba_split: cfg.gdn is None for arch {} — fused ssm_ba.weight present without GDN dims",
+            cfg.arch,
+        )
+    })?;
+    let num_v_heads = gdn.num_v_heads;
+    let num_k_heads = gdn.num_k_heads;
+    if total_rows != 2 * num_v_heads {
         bail!(
-            "upload_tp_ssm_ba_split: `{name}` rows {total_rows} not even"
+            "upload_tp_ssm_ba_split: `{name}` rows {total_rows} != 2*num_v_heads={}",
+            2 * num_v_heads,
         );
     }
-    let num_v_heads = total_rows / 2;
     if num_v_heads % world as usize != 0 {
         bail!(
             "upload_tp_ssm_ba_split: num_v_heads {num_v_heads} not divisible by world {world}"
         );
     }
+    if num_v_heads % num_k_heads != 0 {
+        bail!(
+            "upload_tp_ssm_ba_split: num_v_heads {num_v_heads} not divisible by num_k_heads {num_k_heads}",
+        );
+    }
+    let n_rep = num_v_heads / num_k_heads;
     if cols % QK8_0 != 0 {
         bail!(
             "upload_tp_ssm_ba_split: cols {cols} not multiple of QK8_0={QK8_0}"
@@ -836,9 +858,26 @@ fn upload_tp_ssm_ba_split(
     flambeau_quant::dequantize_into(info.dtype, raw, &mut f32_full)
         .with_context(|| format!("dequant `{name}` (dtype={:?})", info.dtype))?;
 
+    // De-interleave per K-head: dst row `kh*n_rep + r` ← src row
+    // `kh*2*n_rep + r` (β) or `kh*2*n_rep + n_rep + r` (α).
     let half_elems = num_v_heads * cols;
-    let alpha_full = &f32_full[..half_elems];
-    let beta_full = &f32_full[half_elems..];
+    let mut alpha_dei = vec![0.0f32; half_elems];
+    let mut beta_dei = vec![0.0f32; half_elems];
+    for kh in 0..num_k_heads {
+        for r_idx in 0..n_rep {
+            let dst_row = kh * n_rep + r_idx;
+            let src_beta_row = kh * (2 * n_rep) + r_idx;
+            let src_alpha_row = kh * (2 * n_rep) + n_rep + r_idx;
+            let dst_off = dst_row * cols;
+            beta_dei[dst_off..dst_off + cols]
+                .copy_from_slice(&f32_full[src_beta_row * cols..src_beta_row * cols + cols]);
+            alpha_dei[dst_off..dst_off + cols]
+                .copy_from_slice(&f32_full[src_alpha_row * cols..src_alpha_row * cols + cols]);
+        }
+    }
+    drop(f32_full);
+    let alpha_full = &alpha_dei[..];
+    let beta_full = &beta_dei[..];
     let half_dims = vec![num_v_heads as u64, cols as u64];
 
     let half_layout = WeightLayout::ColParallel { world, dim: 0 };
@@ -848,7 +887,8 @@ fn upload_tp_ssm_ba_split(
     let (beta_slice, beta_dims) =
         slice_f32_for_tp(beta_full, &half_dims, half_layout, rank)
             .context("beta slice")?;
-    drop(f32_full);
+    drop(alpha_dei);
+    drop(beta_dei);
 
     let alpha_q8 = quantize_f32_slice_to_q8_0(&alpha_slice).context("alpha → Q8_0")?;
     let beta_q8 = quantize_f32_slice_to_q8_0(&beta_slice).context("beta → Q8_0")?;

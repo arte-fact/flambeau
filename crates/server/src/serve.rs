@@ -310,6 +310,15 @@ pub async fn serve(cfg: ServeConfig) -> Result<()> {
         }
     }
 
+    let model_defaults = crate::state::ModelDefaults::from_gguf(&gguf);
+    info!(
+        temperature = ?model_defaults.temperature,
+        top_p = ?model_defaults.top_p,
+        top_k = ?model_defaults.top_k,
+        min_p = ?model_defaults.min_p,
+        "model sampling defaults from GGUF"
+    );
+
     let state: SharedState = Arc::new(ServerState {
         model_id: cfg.model_id.clone(),
         cfg: model_cfg,
@@ -321,6 +330,7 @@ pub async fn serve(cfg: ServeConfig) -> Result<()> {
         remote_tools,
         agent_stats: crate::agent_stats::AgentStatsRing::default(),
         tool_call_format_default,
+        model_defaults,
     });
 
     let app = Router::new()

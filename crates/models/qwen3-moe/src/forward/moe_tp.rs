@@ -30,10 +30,16 @@ use anyhow::{bail, Context, Result};
 use flambeau_core::DevicePtr;
 use flambeau_ops::hip::{
     cast::cast_f32_to_f16,
-    moe::moe_combine_no_residual_f16,
+    moe::{
+        indexed_moe_mmq_q4_0_down_tile8, indexed_moe_mmq_q4_0_gate_up_tile8,
+        indexed_moe_mmq_q4_1_down_tile8, indexed_moe_mmq_q8_0_down_tile8,
+        indexed_moe_mmq_q8_0_gate_up_tile8, moe_combine_no_residual_f16,
+        moe_sort_by_expert_padded, MoeShape,
+    },
     norm::quantize_f16_q8_1,
     HipStream, OpsRegistry,
 };
+use flambeau_quant::GgmlDType;
 
 use super::common::{run_indexed_moe_down, run_indexed_moe_gate_up, validate_moe_dtypes};
 use super::moe::{MoePrefillScratch, MoeScratch, SharedExpertPrefillScratch, SharedExpertScratch};
@@ -357,6 +363,185 @@ pub fn forward_moe_ffn_prefill_tp(
         hidden,
         local_inter,
     )?;
+
+    // V1-BENCH-CN-80B-11c — TP tile8 fast path.
+    //
+    // The non-TP `forward_moe_ffn_prefill` routes Q4_0 / Q8_0 gate/up at
+    // `n_tokens >= 32` through the sort+pad MMQ tile8 kernels (V2.22.b /
+    // V2.28.c). The TP path historically fell through to per-token MMVQ
+    // because (a) the sort scratch wasn't reachable and (b) Q4_1 down
+    // had no tile8 sibling; CN-80B-11a's HipEvent profile attributed
+    // 84 % of pp2tp2 prefill wall to this section on Coder-Next.
+    //
+    // Both gates clear now: `MoePrefillScratch` already carries the
+    // sort+pad buffers (used by the non-TP path), and CN-80B-11c
+    // landed `indexed_moe_mmq_q4_1_down_tile8_dp4a`. The TP layout is
+    // intra-expert (every rank holds all `n_experts` with `local_inter`
+    // sliced), so the expert-id table + sort layout are identical to
+    // the non-TP single-rank case — sort + tile8 just need `local_inter`
+    // wired through `MoeShape::n_rows`.
+    let n_experts = cfg.num_experts;
+    let total_pairs = n_tokens * top_k;
+    const TP_TILE8_THRESHOLD: usize = 32;
+    let tile8_dt_ok = matches!(
+        (ffn_gate_exps.dtype, ffn_down_exps.dtype),
+        (GgmlDType::Q4_0, GgmlDType::Q4_0)
+            | (GgmlDType::Q4_0, GgmlDType::Q8_0)
+            | (GgmlDType::Q4_0, GgmlDType::Q4_1)
+            | (GgmlDType::Q8_0, GgmlDType::Q8_0),
+    );
+    if tile8_dt_ok && n_tokens >= TP_TILE8_THRESHOLD {
+        moe_sort_by_expert_padded(
+            ops,
+            stream,
+            scratch.expert_ids,
+            scratch.sort_counts,
+            scratch.sort_offsets,
+            scratch.sort_cursors,
+            scratch.sort_sorted_pair_idx,
+            scratch.sort_padded_offsets,
+            scratch.sort_sorted_pair_idx_padded,
+            total_pairs,
+            n_experts,
+            scratch.max_tokens,
+            top_k,
+        )
+        .context("moe (TP) prefill moe_sort_by_expert_padded")?;
+        let padded_total_ub = total_pairs + n_experts * 8;
+
+        match ffn_gate_exps.dtype {
+            GgmlDType::Q4_0 => indexed_moe_mmq_q4_0_gate_up_tile8(
+                ops,
+                stream,
+                ffn_gate_exps.ptr,
+                ffn_up_exps.ptr,
+                scratch.x_q8_1,
+                scratch.expert_ids,
+                scratch.sort_sorted_pair_idx_padded,
+                scratch.sort_padded_offsets,
+                scratch.gate_out_f32,
+                scratch.up_out_f32,
+                MoeShape {
+                    n_rows: local_inter,
+                    n_tokens,
+                    top_k,
+                    n_sb_per_row: hidden / 32,
+                    n_experts,
+                    padded_total_upper_bound: padded_total_ub,
+                },
+            )
+            .context("moe (TP) prefill gate+up q4_0 tile8")?,
+            GgmlDType::Q8_0 => indexed_moe_mmq_q8_0_gate_up_tile8(
+                ops,
+                stream,
+                ffn_gate_exps.ptr,
+                ffn_up_exps.ptr,
+                scratch.x_q8_1,
+                scratch.expert_ids,
+                scratch.sort_sorted_pair_idx_padded,
+                scratch.sort_padded_offsets,
+                scratch.gate_out_f32,
+                scratch.up_out_f32,
+                MoeShape {
+                    n_rows: local_inter,
+                    n_tokens,
+                    top_k,
+                    n_sb_per_row: hidden / 32,
+                    n_experts,
+                    padded_total_upper_bound: padded_total_ub,
+                },
+            )
+            .context("moe (TP) prefill gate+up q8_0 tile8")?,
+            _ => unreachable!("tile8_dt_ok already filtered gate dtype"),
+        }
+
+        flambeau_ops::hip::mlp::swiglu_f32_to_f16(
+            ops,
+            stream,
+            scratch.gate_out_f32,
+            scratch.up_out_f32,
+            scratch.activated_f16,
+            n_tokens * top_k * local_inter,
+        )
+        .context("moe (TP) prefill swiglu_f32_to_f16 (tile8)")?;
+        quantize_f16_q8_1(
+            ops,
+            stream,
+            scratch.activated_f16,
+            scratch.activated_q8_1,
+            n_tokens * top_k * local_inter,
+        )
+        .context("moe (TP) prefill quantize activated → Q8_1 (tile8)")?;
+
+        let down_shape = MoeShape {
+            n_rows: hidden,
+            n_tokens: total_pairs,
+            top_k: 1,
+            n_sb_per_row: local_inter / 32,
+            n_experts,
+            padded_total_upper_bound: padded_total_ub,
+        };
+        match ffn_down_exps.dtype {
+            GgmlDType::Q4_0 => indexed_moe_mmq_q4_0_down_tile8(
+                ops,
+                stream,
+                ffn_down_exps.ptr,
+                scratch.activated_q8_1,
+                scratch.expert_ids,
+                scratch.sort_sorted_pair_idx_padded,
+                scratch.sort_padded_offsets,
+                scratch.down_f32,
+                down_shape,
+            )
+            .context("moe (TP) prefill down q4_0 tile8")?,
+            GgmlDType::Q4_1 => indexed_moe_mmq_q4_1_down_tile8(
+                ops,
+                stream,
+                ffn_down_exps.ptr,
+                scratch.activated_q8_1,
+                scratch.expert_ids,
+                scratch.sort_sorted_pair_idx_padded,
+                scratch.sort_padded_offsets,
+                scratch.down_f32,
+                down_shape,
+            )
+            .context("moe (TP) prefill down q4_1 tile8")?,
+            GgmlDType::Q8_0 => indexed_moe_mmq_q8_0_down_tile8(
+                ops,
+                stream,
+                ffn_down_exps.ptr,
+                scratch.activated_q8_1,
+                scratch.expert_ids,
+                scratch.sort_sorted_pair_idx_padded,
+                scratch.sort_padded_offsets,
+                scratch.down_f32,
+                down_shape,
+            )
+            .context("moe (TP) prefill down q8_0 tile8")?,
+            _ => unreachable!("tile8_dt_ok already filtered down dtype"),
+        }
+
+        cast_f32_to_f16(
+            ops,
+            stream,
+            scratch.down_f32,
+            scratch.down_f16,
+            n_tokens * top_k * hidden,
+        )
+        .context("moe (TP) prefill cast down → f16 (tile8)")?;
+        moe_combine_no_residual_f16(
+            ops,
+            stream,
+            scratch.down_f16,
+            scratch.expert_weights,
+            partial_ffn_out,
+            n_tokens,
+            top_k,
+            hidden,
+        )
+        .context("moe (TP) prefill combine_no_residual_f16 (tile8)")?;
+        return Ok(());
+    }
 
     // 3. Fused gate + up matmul on per-rank `local_inter` slabs across L tokens.
     run_indexed_moe_gate_up(

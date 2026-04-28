@@ -469,6 +469,9 @@ pub fn forward_gdn_decode_tp(
     // chain via FLAMBEAU_VARIANT=baseline). ssm_dt_bias / ssm_a are
     // 1-D ColParallel — the local slice is the right per-rank head
     // subset. Operates on local_num_v_heads.
+    // CN-80B-13/14 — q/k repeat layout differs by arch; see decode-path
+    // comment in `super::gdn::forward_gdn_decode` for the explanation.
+    let rep_inner_layout = cfg.arch == "qwen3next";
     let fuse_state_step = std::env::var("FLAMBEAU_VARIANT").as_deref() != Ok("baseline");
     if fuse_state_step {
         gdn_state_step_alphabeta_f32_s128(
@@ -488,6 +491,7 @@ pub fn forward_gdn_decode_tp(
             local_num_v_heads,
             1,
             n_rep,
+            rep_inner_layout,
         )
         .context("gdn_state_step_alphabeta_f32_s128 (TP, C10 fused)")?;
     } else {
@@ -519,6 +523,7 @@ pub fn forward_gdn_decode_tp(
             local_num_v_heads,
             1,
             n_rep,
+            rep_inner_layout,
         )
         .context("gdn_state_step_f32_s128 (TP, baseline)")?;
     }
@@ -1013,6 +1018,9 @@ pub fn forward_gdn_prefill_tp(
     //        chain via FLAMBEAU_VARIANT=baseline. All operands at per-rank
     //        local_num_v_heads; n_tokens = L. Same kernel as decode_tp,
     //        just with n_tokens > 1.
+    // CN-80B-13/14 — q/k repeat layout differs by arch; see decode-path
+    // comment in `super::gdn::forward_gdn_decode` for the explanation.
+    let rep_inner_layout = cfg.arch == "qwen3next";
     let fuse_state_step =
         std::env::var("FLAMBEAU_VARIANT").as_deref() != Ok("baseline");
     if fuse_state_step {
@@ -1033,6 +1041,7 @@ pub fn forward_gdn_prefill_tp(
             local_num_v_heads,
             n_tokens,
             n_rep,
+            rep_inner_layout,
         )
         .context("gdn prefill (TP) gdn_state_step_alphabeta_f32_s128 (C10 fused)")?;
     } else {
@@ -1064,6 +1073,7 @@ pub fn forward_gdn_prefill_tp(
             local_num_v_heads,
             n_tokens,
             n_rep,
+            rep_inner_layout,
         )
         .context("gdn prefill (TP) gdn_state_step_f32_s128 (baseline)")?;
     }

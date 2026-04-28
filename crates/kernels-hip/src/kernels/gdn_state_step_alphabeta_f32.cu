@@ -54,7 +54,7 @@ static __device__ __forceinline__ void gdn_state_step_alphabeta_impl(
     const float * __restrict__ state_in,
     float * __restrict__ state_out,
     float * __restrict__ attn_out,
-    int B, int H, int L, int n_rep)
+    int B, int H, int L, int n_rep, int rep_inner_layout)
 {
     constexpr int warp_size     = WARP_SIZE;
     constexpr int rows_per_lane = S_v / warp_size;
@@ -69,8 +69,12 @@ static __device__ __forceinline__ void gdn_state_step_alphabeta_impl(
         return;
     }
 
+    // GQA k-head mapping. See gdn_state_step_f32.cu for the full
+    // explanation: rep_inner_layout=0 (rep-OUTER, qwen35moe / candle)
+    // uses cyclic `h_idx % H_kv`; rep_inner_layout=1 (rep-INNER,
+    // qwen3next) uses interleaved `h_idx / n_rep`.
     const int H_kv   = H / n_rep;
-    const int h_kv   = h_idx % H_kv;
+    const int h_kv   = (rep_inner_layout != 0) ? (h_idx / n_rep) : (h_idx % H_kv);
     const int bh     = b_idx * H    + h_idx;
     const int64_t q_stride_bl  = (int64_t) L * H_kv * S_v;
     const int64_t v_stride_bl  = (int64_t) L * H    * S_v;
@@ -177,9 +181,9 @@ void flambeau_gdn_state_step_alphabeta_f32_s128(
     const float * __restrict__ state_in,
     float * __restrict__ state_out,
     float * __restrict__ attn_out,
-    int B, int H, int L, int n_rep)
+    int B, int H, int L, int n_rep, int rep_inner_layout)
 {
     gdn_state_step_alphabeta_impl<128>(
         q, k, v, alpha_in, beta_in, ssm_dt_bias, ssm_a,
-        state_in, state_out, attn_out, B, H, L, n_rep);
+        state_in, state_out, attn_out, B, H, L, n_rep, rep_inner_layout);
 }

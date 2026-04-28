@@ -29,7 +29,7 @@ pub use api::{
     CompletionRequest, CompletionResponse, FunctionCall, FunctionDef, ModelObject,
     ModelsListResponse, ToolCall, ToolChoice, ToolChoiceFunction, ToolChoiceNamed, ToolDef, Usage,
 };
-pub use state::SamplingParams;
+pub use state::{ModelDefaults, SamplingParams};
 
 #[cfg(feature = "hip")]
 pub use model::{decode_logits, prefill_logits, Inflight, LoadedModel};

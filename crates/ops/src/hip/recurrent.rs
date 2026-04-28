@@ -50,6 +50,7 @@ pub fn gdn_state_step_f32_s128(
     h_v: usize,
     l: usize,
     n_rep: usize,
+    rep_inner_layout: bool,
 ) -> Result<()> {
     const S_V: u32 = 128;
     const WARP_SIZE: u32 = 64;
@@ -62,6 +63,7 @@ pub fn gdn_state_step_f32_s128(
     let h_i = h_v as i32;
     let l_i = l as i32;
     let n_rep_i = n_rep as i32;
+    let rep_inner_i: i32 = if rep_inner_layout { 1 } else { 0 };
     let q_ptr: u64 = q.as_usize() as u64;
     let k_ptr: u64 = k.as_usize() as u64;
     let v_ptr: u64 = v.as_usize() as u64;
@@ -83,6 +85,7 @@ pub fn gdn_state_step_f32_s128(
     args.push(&h_i);
     args.push(&l_i);
     args.push(&n_rep_i);
+    args.push(&rep_inner_i);
 
     let grid_z = S_V / WARPS_PER_BLOCK;
     let cfg = LaunchCfg {
@@ -181,6 +184,7 @@ pub fn gdn_state_step_alphabeta_f32_s128(
     h_v: usize,
     l: usize,
     n_rep: usize,
+    rep_inner_layout: bool,
 ) -> Result<()> {
     const S_V: u32 = 128;
     const WARP_SIZE: u32 = 64;
@@ -193,6 +197,7 @@ pub fn gdn_state_step_alphabeta_f32_s128(
     let h_i = h_v as i32;
     let l_i = l as i32;
     let n_rep_i = n_rep as i32;
+    let rep_inner_i: i32 = if rep_inner_layout { 1 } else { 0 };
     let q_ptr: u64 = q.as_usize() as u64;
     let k_ptr: u64 = k.as_usize() as u64;
     let v_ptr: u64 = v.as_usize() as u64;
@@ -218,6 +223,7 @@ pub fn gdn_state_step_alphabeta_f32_s128(
     args.push(&h_i);
     args.push(&l_i);
     args.push(&n_rep_i);
+    args.push(&rep_inner_i);
 
     let grid_z = S_V / WARPS_PER_BLOCK;
     let cfg = LaunchCfg {

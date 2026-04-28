@@ -778,6 +778,56 @@ pub fn indexed_moe_mmq_q4_0_down_tile8(
     Ok(())
 }
 
+/// V1-BENCH-CN-80B-11c — Q4_1 down tile8 MoE MMQ sibling of the Q4_0
+/// down tile8. Same launch shape; the kernel's per-block dot uses the
+/// Q4_1 affine `d_x·d_y·sumi + m_x·s_y` instead of Q4_0's bias-corrected
+/// `d_x·(d_y·sumi - 8·s_y)`. Used by Coder-Next-Q4_0 (down=Q4_1).
+pub fn indexed_moe_mmq_q4_1_down_tile8(
+    reg: &OpsRegistry,
+    stream: &HipStream,
+    w: DevicePtr,
+    y: DevicePtr,
+    expert_ids: DevicePtr,
+    sorted_pair_idx_padded: DevicePtr,
+    padded_offsets: DevicePtr,
+    dst: DevicePtr,
+    shape: MoeShape,
+) -> Result<()> {
+    let module = reg.expect_module("indexed_moe_mmq_q4_1_down_tile8_dp4a")?;
+    let kernel = module.kernel("flambeau_indexed_moe_mmq_q4_1_down_tile8_dp4a_q8_1")?;
+    let n_rows_i = shape.n_rows as i32;
+    let n_tokens_i = shape.n_tokens as i32;
+    let top_k_i = shape.top_k as i32;
+    let nb_i = shape.n_sb_per_row as i32;
+    let n_experts_i = shape.n_experts as i32;
+    let w_ptr: u64 = w.as_usize() as u64;
+    let y_ptr: u64 = y.as_usize() as u64;
+    let e_ptr: u64 = expert_ids.as_usize() as u64;
+    let s_ptr: u64 = sorted_pair_idx_padded.as_usize() as u64;
+    let po_ptr: u64 = padded_offsets.as_usize() as u64;
+    let d_ptr: u64 = dst.as_usize() as u64;
+    let mut args = KernelArgs::new();
+    args.push(&w_ptr);
+    args.push(&y_ptr);
+    args.push(&e_ptr);
+    args.push(&s_ptr);
+    args.push(&po_ptr);
+    args.push(&d_ptr);
+    args.push(&n_rows_i);
+    args.push(&n_tokens_i);
+    args.push(&top_k_i);
+    args.push(&nb_i);
+    args.push(&n_experts_i);
+    let grid_y = shape.padded_total_upper_bound.div_ceil(8) as u32;
+    let cfg = LaunchCfg {
+        grid: ((shape.n_rows as u32).div_ceil(64), grid_y, 1),
+        block: (64, 1, 1),
+        shared_bytes: 0,
+    };
+    unsafe { kernel.launch(stream, cfg, args)? };
+    Ok(())
+}
+
 /// V2.22.b — Q8_0 gate+up tile8 MoE MMQ sibling of the Q4_0 and Q4_K tile8
 /// wrappers. Weight dtype is Q8_0 so `n_sb_per_row` in `MoeShape` is
 /// `hidden / 32` (Q8_0 block size), matching the Q4_0 convention. Same
