@@ -1439,9 +1439,21 @@ fn forward_one_token_tp_inner(
     if probe {
         debug_probe_rank0_hidden(scratch, cluster, "embed", usize::MAX)?;
     }
+    // CN-80B-22 — per-layer-type wall time for decode profiling. The mark
+    // is a thread-local check + HipEvent record on rank 0's stream when
+    // `profile::enable()` was called; otherwise it's a single bool load.
+    // Aggregates across the n_run iterations: total/mean per name reveals
+    // whether full-attn or GDN dominates, and at which ctx the curve
+    // bends. See the `profile_tp_decode` test for the harness.
+    let dev0 = cluster.device(0);
+    let stream0 = dev0.default_stream();
     let n_run = layer_limit.min(n_layers);
     for il in 0..n_run {
         let is_full_attn = !cfg.is_recurrent(il);
+        if flambeau_backend_hip::profile::is_enabled() {
+            dev0.bind()?;
+            flambeau_backend_hip::profile::mark("tp_dec_layer_start", dev0, stream0)?;
+        }
         if is_full_attn {
             forward_full_attn_layer_tp(
                 model,
@@ -1455,6 +1467,10 @@ fn forward_one_token_tp_inner(
                 world,
             )
             .with_context(|| format!("full-attn layer {il}"))?;
+            if flambeau_backend_hip::profile::is_enabled() {
+                dev0.bind()?;
+                flambeau_backend_hip::profile::mark("tp_dec_full_attn", dev0, stream0)?;
+            }
         } else {
             forward_gdn_layer_tp(
                 model,
@@ -1467,12 +1483,20 @@ fn forward_one_token_tp_inner(
                 world,
             )
             .with_context(|| format!("gdn layer {il}"))?;
+            if flambeau_backend_hip::profile::is_enabled() {
+                dev0.bind()?;
+                flambeau_backend_hip::profile::mark("tp_dec_gdn", dev0, stream0)?;
+            }
         }
         if probe {
             for r in 0..cluster.ranks() {
                 debug_probe_rank_hidden(scratch, cluster, "after-layer hidden_a", il, r)?;
             }
         }
+    }
+    if flambeau_backend_hip::profile::is_enabled() {
+        dev0.bind()?;
+        flambeau_backend_hip::profile::mark("tp_dec_post_layers", dev0, stream0)?;
     }
 
     // 3. Output head + argmax on head_rank only. LM head + token_embd

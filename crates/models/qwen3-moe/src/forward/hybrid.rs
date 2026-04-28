@@ -511,6 +511,11 @@ fn forward_one_token_hybrid_inner(
         // `il - layer_range.start` (each stage's session allocated
         // exactly its slice of caches).
         let range_start = stage.layer_range.start;
+        // CN-80B-22 — per-layer-type wall time for decode profiling on
+        // the hybrid path. Marks fire only when `profile::enable()` was
+        // called on this thread; otherwise a single bool load.
+        let stage_dev0 = stage.sub_cluster.device(0);
+        let stage_stream0 = stage_dev0.default_stream();
         for il in stage.layer_range.clone() {
             let il_cache = il - range_start;
             let is_full_attn = !cfg.is_recurrent(il);
@@ -527,6 +532,14 @@ fn forward_one_token_hybrid_inner(
                     world,
                 )
                 .with_context(|| format!("hybrid stage {s} full-attn layer {il}"))?;
+                if flambeau_backend_hip::profile::is_enabled() {
+                    stage_dev0.bind()?;
+                    flambeau_backend_hip::profile::mark(
+                        "hyb_dec_full_attn",
+                        stage_dev0,
+                        stage_stream0,
+                    )?;
+                }
             } else {
                 forward_gdn_layer_tp(
                     &stage.tp_model,
@@ -539,7 +552,23 @@ fn forward_one_token_hybrid_inner(
                     world,
                 )
                 .with_context(|| format!("hybrid stage {s} gdn layer {il}"))?;
+                if flambeau_backend_hip::profile::is_enabled() {
+                    stage_dev0.bind()?;
+                    flambeau_backend_hip::profile::mark(
+                        "hyb_dec_gdn",
+                        stage_dev0,
+                        stage_stream0,
+                    )?;
+                }
             }
+        }
+        if flambeau_backend_hip::profile::is_enabled() {
+            stage_dev0.bind()?;
+            flambeau_backend_hip::profile::mark(
+                "hyb_dec_post_stage",
+                stage_dev0,
+                stage_stream0,
+            )?;
         }
 
         // Hand-off: stage s+1's per-rank `hidden_a` ← stage s's rank-0

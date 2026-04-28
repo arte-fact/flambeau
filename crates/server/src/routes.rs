@@ -1065,7 +1065,51 @@ fn run_completion_blocking_streaming(
     // sufficient on their own to prevent immediate-EOS failure modes;
     // beyond that, do not bias the model's natural stopping decision.
     const STOP_BIAS: f32 = 0.0;
+    // CN-80B-22 — env-gated TP-decode profiling. When FLAMBEAU_PROFILE_DECODE
+    // is set, enable HipEvent section recording for `n` warm-up-skipped decode
+    // steps, then flush + dump aggregate per-section ms to stderr. Skips the
+    // first 8 steps (cold-cache effects, allocator warmup).
+    let profile_decode_n: usize = std::env::var("FLAMBEAU_PROFILE_DECODE")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(0);
+    let profile_skip: usize = 8;
     for step in 1..params.max_tokens as usize {
+        if profile_decode_n > 0 {
+            if step == profile_skip + 1 {
+                flambeau_backend_hip::profile::enable();
+                tracing::info!(target: "server.profile", "enabled decode profiling");
+            } else if step == profile_skip + profile_decode_n + 1 {
+                match flambeau_backend_hip::profile::flush() {
+                    Ok(stats) => {
+                        let total: f32 = stats.iter().map(|s| s.total_ms).sum();
+                        let mut msg = String::from(
+                            "\n=== TP decode profile ===\nsection                    total_ms     count    mean_ms  ms/token\n",
+                        );
+                        for s in &stats {
+                            msg.push_str(&format!(
+                                "{:<24}  {:>10.2}  {:>8}  {:>10.4}  {:>9.3}\n",
+                                s.name,
+                                s.total_ms,
+                                s.count,
+                                s.mean_ms,
+                                s.total_ms / profile_decode_n as f32
+                            ));
+                        }
+                        msg.push_str(&format!(
+                            "{:<24}  {:>10.2}  {:>8}  {:>10}  {:>9.3}\n",
+                            "TOTAL_RECORDED",
+                            total,
+                            "-",
+                            "-",
+                            total / profile_decode_n as f32
+                        ));
+                        eprintln!("{}", msg);
+                    }
+                    Err(e) => tracing::error!(target: "server.profile", "flush: {e}"),
+                }
+            }
+        }
         // T4.1: same relax-stop-mask behaviour as the non-streaming path.
         let force_mask = step < MIN_RESPONSE_TOKENS && !relax_stop_mask;
         decode_logits(
