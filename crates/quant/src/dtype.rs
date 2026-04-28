@@ -207,23 +207,27 @@ mod tests {
 
     #[test]
     fn mxfp4_dequant_round_trip() {
-        // One block: e=128 (scale=2^1=2.0), nibbles 0x21 0x43 ... = lo=1,hi=2,lo=3,hi=4,
-        // i.e. elements [0.5, 1.0, 1.5, 2.0, ...]. Scale × 2 → [1.0, 2.0, 3.0, 4.0, ...].
+        // CN-80B-16 — match llama.cpp `dequantize_row_mxfp4` final values:
+        //   layout: lo nibble at byte j → element j; hi → element j + QK/2
+        //   scale: half-LUT × 2^(e-127) ≡ doubled-LUT × 2^(e-128)
+        // One block, e=128 → scale=2^1=2.0. byte0=0x21 (lo=1=0.5, hi=2=1.0),
+        // byte1=0x43 (lo=3=1.5, hi=4=2.0). Scaled: out[0]=1.0, out[1]=3.0,
+        // out[16]=2.0, out[17]=4.0.
         let mut raw = vec![0u8; 17];
         raw[0] = 128; // scale = 2^(128-127) = 2.0
-        // Pack first 4 elements: 0.5(=0x01), 1.0(=0x02), 1.5(=0x03), 2.0(=0x04)
-        // Two nibbles per byte (low first): byte0 = (0x02 << 4) | 0x01 = 0x21
-        //                                    byte1 = (0x04 << 4) | 0x03 = 0x43
         raw[1] = 0x21;
         raw[2] = 0x43;
-        // remaining nibbles = 0 → element = 0
         let mut out = [0.0f32; 32];
         crate::dequantize_into(GgmlDType::Mxfp4, &raw, &mut out).unwrap();
-        assert!((out[0] - 1.0).abs() < 1e-6);
-        assert!((out[1] - 2.0).abs() < 1e-6);
-        assert!((out[2] - 3.0).abs() < 1e-6);
-        assert!((out[3] - 4.0).abs() < 1e-6);
-        assert_eq!(out[4], 0.0);
+        assert!((out[0]  - 1.0).abs() < 1e-6, "out[0]={}", out[0]);
+        assert!((out[1]  - 3.0).abs() < 1e-6, "out[1]={}", out[1]);
+        assert!((out[16] - 2.0).abs() < 1e-6, "out[16]={}", out[16]);
+        assert!((out[17] - 4.0).abs() < 1e-6, "out[17]={}", out[17]);
+        // Other positions should be zero.
+        assert_eq!(out[2], 0.0);
+        assert_eq!(out[15], 0.0);
+        assert_eq!(out[18], 0.0);
+        assert_eq!(out[31], 0.0);
     }
 
     #[test]

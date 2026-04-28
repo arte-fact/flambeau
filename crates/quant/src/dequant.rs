@@ -127,12 +127,19 @@ fn dequant_mxfp4(raw: &[u8], out: &mut [f32]) {
     for b in 0..n_blocks {
         let off = b * BLOCK;
         let e = raw[off];
+        // E8M0 → FP32: scale = 2^(e - 127). Pairs with our half-magnitude
+        // `MXFP4_LUT` (true E2M1 values: 0/0.5/1/.../6); llama.cpp uses
+        // a doubled LUT × half-scale, but the product is identical.
         let scale = if e == 0 { 0.0f32 } else { f32::from_bits((e as u32) << 23) };
         let nibbles = &raw[off + 1..off + 1 + QK / 2];
         let dst = &mut out[b * QK..(b + 1) * QK];
-        for (i, &byte) in nibbles.iter().enumerate() {
-            dst[2 * i]     = MXFP4_LUT[(byte & 0x0F) as usize] * scale;
-            dst[2 * i + 1] = MXFP4_LUT[((byte >> 4) & 0x0F) as usize] * scale;
+        // CN-80B-16 — ggml Q4_0-family layout: lo nibble at byte j → elem j,
+        // hi nibble at byte j → elem j + QK/2. Earlier impl placed them
+        // adjacent (elem 2j / 2j+1) which is the post-shuffle layout and
+        // does not match what GGUFs store.
+        for (j, &byte) in nibbles.iter().enumerate() {
+            dst[j]          = MXFP4_LUT[(byte & 0x0F) as usize] * scale;
+            dst[j + QK / 2] = MXFP4_LUT[((byte >> 4) & 0x0F) as usize] * scale;
         }
     }
 }

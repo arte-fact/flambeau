@@ -973,19 +973,22 @@ fn upload_mxfp4_as_q8_0(
         let off = b * MXFP4_BLOCK;
         let e = raw[off];
         let nibbles = &raw[off + 1..off + 1 + QK8_0 / 2];
-        // Block scale = 2^(e - 127). e=0 → 0 (true zero block, llama.cpp convention).
+        // E8M0 → FP32 scale = 2^(e - 127). Pairs with the half-magnitude
+        // MXFP4_LUT above (true E2M1 values 0/0.5/.../6); llama.cpp's
+        // doubled LUT × half-scale produces the identical product.
         let block_scale = if e == 0 {
             0.0f32
         } else {
-            // Construct 2^(e - 127) directly via FP32 bit pattern: exponent
-            // field holds (e - 127 + 127) = e, mantissa 0, sign 0.
             f32::from_bits((e as u32) << 23)
         };
-        for (i, &byte) in nibbles.iter().enumerate() {
+        // CN-80B-16 — ggml Q4_0-family layout: lo nibble at byte j →
+        // element j; hi nibble at byte j → element j + QK8_0/2. Earlier
+        // impl placed them adjacent (2j, 2j+1), the post-shuffle layout.
+        for (j, &byte) in nibbles.iter().enumerate() {
             let lo = (byte & 0x0F) as usize;
             let hi = ((byte >> 4) & 0x0F) as usize;
-            scratch[2 * i]     = MXFP4_LUT[lo] * block_scale;
-            scratch[2 * i + 1] = MXFP4_LUT[hi] * block_scale;
+            scratch[j]              = MXFP4_LUT[lo] * block_scale;
+            scratch[j + QK8_0 / 2]  = MXFP4_LUT[hi] * block_scale;
         }
         // Q8_0-encode: absmax/127, store d as f16 + 32 i8.
         let absmax = scratch.iter().map(|v| v.abs()).fold(0.0f32, f32::max);
