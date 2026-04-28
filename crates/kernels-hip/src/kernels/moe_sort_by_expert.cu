@@ -104,6 +104,11 @@ extern "C" __global__ void flambeau_moe_sort_scan_offsets(
 // Kernel 3: scatter — atomicAdd on cursors[e] to find the sorted position
 // for each pair, then write pair index there.
 // grid = ((total + 255) / 256, 1, 1), block = (256, 1, 1)
+//
+// CN-80B-18 — non-deterministic across runs (and across ranks under TP)
+// because the atomic race winner determines within-expert ordering. Kept
+// for opt-in via `FLAMBEAU_MOE_SCATTER=race`; the deterministic variant
+// below is the default.
 // ---------------------------------------------------------------------------
 extern "C" __global__ void flambeau_moe_sort_scatter(
     const int* __restrict__ expert_ids,       // [total]
@@ -116,6 +121,32 @@ extern "C" __global__ void flambeau_moe_sort_scatter(
     const int e = expert_ids[i];
     const int pos = atomicAdd(&cursors[e], 1);
     sorted_pair_idx[pos] = i;
+}
+
+// ---------------------------------------------------------------------------
+// Kernel 3-det (CN-80B-18): deterministic scatter — single thread, single
+// block, walks `expert_ids[]` in input order. The within-expert ordering is
+// fixed by input index `i` (lex-stable on `(expert_ids[i], i)`), bit-
+// reproducible across runs and across TP ranks. Per-iteration cost is ~5–10
+// ns once `cursors[]` warms in L1 (cursors is ≤512 ints = 2 KB, fits in
+// MI50's per-CU L1). At N=40960 worst case ~250 µs per layer; at decode
+// (N≈10) ~1 µs. Negligible vs the surrounding MoE matmul.
+//
+// Launch: <<< 1, 1 >>>.
+// ---------------------------------------------------------------------------
+extern "C" __global__ void flambeau_moe_sort_scatter_det(
+    const int* __restrict__ expert_ids,       // [total]
+    int*       __restrict__ cursors,          // [n_experts] — init'd to offsets[e]
+    int*       __restrict__ sorted_pair_idx,  // [total]
+    const int total
+) {
+    if (blockIdx.x != 0 || threadIdx.x != 0) return;
+    for (int i = 0; i < total; ++i) {
+        const int e   = expert_ids[i];
+        const int pos = cursors[e];
+        cursors[e]    = pos + 1;
+        sorted_pair_idx[pos] = i;
+    }
 }
 
 // ---------------------------------------------------------------------------
