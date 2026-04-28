@@ -522,26 +522,41 @@ pub fn forward_shared_expert_decode(
         )?;
     }
 
-    // 4. swiglu(gate, up) → activated_f32.
-    // 4+5. V2.23.b.2 — fused swiglu_f32_to_f16 + quantize (replaces the
-    // swiglu_f32 → cast_f32_to_f16 → quantize_f16_q8_1 chain).
-    flambeau_ops::hip::mlp::swiglu_f32_to_f16(
-        ops,
-        stream,
-        scratch.gate_f32,
-        scratch.up_f32,
-        scratch.activated_f16,
-        inter,
-    )
-    .context("shexp swiglu_f32_to_f16")?;
-    flambeau_ops::hip::norm::quantize_f16_q8_1(
-        ops,
-        stream,
-        scratch.activated_f16,
-        scratch.activated_q8_1,
-        inter,
-    )
-    .context("shexp quantize activated → Q8_1")?;
+    // 4+5. CN-80B-19d — fused swiglu(gate, up) → Q8_1 directly. Skips
+    // both the F16 intermediate (`activated_f16`) and 1 launch vs the
+    // V2.23.b.2 swiglu_f32_to_f16 + quantize_f16_q8_1 chain. Default-on;
+    // FLAMBEAU_VARIANT=baseline opts back to the unfused pair.
+    let fuse_swiglu_quant = std::env::var("FLAMBEAU_VARIANT").as_deref() != Ok("baseline")
+        && inter % 32 == 0;
+    if fuse_swiglu_quant {
+        flambeau_ops::hip::mlp::swiglu_f32_to_q8_1(
+            ops,
+            stream,
+            scratch.gate_f32,
+            scratch.up_f32,
+            scratch.activated_q8_1,
+            inter,
+        )
+        .context("shexp swiglu_f32_to_q8_1 (CN-80B-19d)")?;
+    } else {
+        flambeau_ops::hip::mlp::swiglu_f32_to_f16(
+            ops,
+            stream,
+            scratch.gate_f32,
+            scratch.up_f32,
+            scratch.activated_f16,
+            inter,
+        )
+        .context("shexp swiglu_f32_to_f16")?;
+        flambeau_ops::hip::norm::quantize_f16_q8_1(
+            ops,
+            stream,
+            scratch.activated_f16,
+            scratch.activated_q8_1,
+            inter,
+        )
+        .context("shexp quantize activated → Q8_1")?;
+    }
 
     // 6. Dense down matmul → down_f32 [hidden].
     run_mmvq_from_tensor(

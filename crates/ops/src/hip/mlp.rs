@@ -94,6 +94,41 @@ pub fn swiglu_f32_to_f16(
     Ok(())
 }
 
+/// CN-80B-19c/d — fused `y_q8_1 = quantize_row_q8_1(silu(a) * b)` for F32
+/// inputs. Replaces the unfused chain (swiglu_f32 → quantize_q8_1) used by
+/// the GDN tail (`forward/gdn.rs`), and the swiglu_f32_to_f16 →
+/// quantize_f16_q8_1 chain used by the shared-expert decode
+/// (`forward/moe.rs`). One launch + one HBM round-trip saved per layer
+/// per token.
+///
+/// Grid: one thread block per 32-element Q8_1 block, 32 threads/block.
+/// `n` must be a multiple of 32.
+pub fn swiglu_f32_to_q8_1(
+    reg: &OpsRegistry,
+    stream: &HipStream,
+    a: DevicePtr,
+    b: DevicePtr,
+    y_q8_1: DevicePtr,
+    n: usize,
+) -> Result<()> {
+    assert_eq!(n % 32, 0, "swiglu_f32_to_q8_1 expects n % 32 == 0");
+    let module = reg.expect_module("swiglu_f32_to_q8_1")?;
+    let kernel = module.kernel("flambeau_swiglu_f32_to_q8_1")?;
+    let n_i = n as i32;
+    let a_ptr: u64 = a.as_usize() as u64;
+    let b_ptr: u64 = b.as_usize() as u64;
+    let y_ptr: u64 = y_q8_1.as_usize() as u64;
+    let mut args = KernelArgs::new();
+    args.push(&a_ptr);
+    args.push(&b_ptr);
+    args.push(&y_ptr);
+    args.push(&n_i);
+    let n_blocks = (n / 32) as u32;
+    let cfg = LaunchCfg::one_d(n_blocks, 32);
+    unsafe { kernel.launch(stream, cfg, args)? };
+    Ok(())
+}
+
 /// Pointwise `y[i] = x[i] * scale`. Used by the GDN path to apply the
 /// attention scale `1 / sqrt(head_k_dim)` to Q before the state step.
 pub fn scale_f32(

@@ -117,24 +117,41 @@ pub fn forward_moe_ffn_decode_tp(
         hidden,
     )?;
 
-    // 4+5. Fused SwiGLU + Q8_1 quantise.
-    flambeau_ops::hip::mlp::swiglu_f32_to_f16(
-        ops,
-        stream,
-        scratch.gate_out_f32,
-        scratch.up_out_f32,
-        scratch.activated_f16,
-        top_k * local_inter,
-    )
-    .context("moe (TP) swiglu_f32_to_f16")?;
-    flambeau_ops::hip::norm::quantize_f16_q8_1(
-        ops,
-        stream,
-        scratch.activated_f16,
-        scratch.activated_q8_1,
-        top_k * local_inter,
-    )
-    .context("moe (TP) quantize activated → Q8_1")?;
+    // 4+5. CN-80B-19d — fused SwiGLU + Q8_1 quantise. Default-on;
+    // FLAMBEAU_VARIANT=baseline opts back to the V2.23.b.2 unfused pair
+    // (swiglu_f32_to_f16 + quantize_f16_q8_1).
+    let n_total = top_k * local_inter;
+    let fuse_swiglu_quant = std::env::var("FLAMBEAU_VARIANT").as_deref() != Ok("baseline")
+        && n_total % 32 == 0;
+    if fuse_swiglu_quant {
+        flambeau_ops::hip::mlp::swiglu_f32_to_q8_1(
+            ops,
+            stream,
+            scratch.gate_out_f32,
+            scratch.up_out_f32,
+            scratch.activated_q8_1,
+            n_total,
+        )
+        .context("moe (TP) swiglu_f32_to_q8_1 (CN-80B-19d)")?;
+    } else {
+        flambeau_ops::hip::mlp::swiglu_f32_to_f16(
+            ops,
+            stream,
+            scratch.gate_out_f32,
+            scratch.up_out_f32,
+            scratch.activated_f16,
+            n_total,
+        )
+        .context("moe (TP) swiglu_f32_to_f16")?;
+        flambeau_ops::hip::norm::quantize_f16_q8_1(
+            ops,
+            stream,
+            scratch.activated_f16,
+            scratch.activated_q8_1,
+            n_total,
+        )
+        .context("moe (TP) quantize activated → Q8_1")?;
+    }
 
     // 6. Per-rank down matmul on RowParallel-sliced ffn_down_exps.
     //    Output is [top_k, hidden] full-H rows where each row is THIS
@@ -265,23 +282,38 @@ pub fn forward_shared_expert_decode_tp(
         )?;
     }
 
-    flambeau_ops::hip::mlp::swiglu_f32_to_f16(
-        ops,
-        stream,
-        scratch.gate_f32,
-        scratch.up_f32,
-        scratch.activated_f16,
-        local_inter,
-    )
-    .context("shexp (TP) swiglu_f32_to_f16")?;
-    flambeau_ops::hip::norm::quantize_f16_q8_1(
-        ops,
-        stream,
-        scratch.activated_f16,
-        scratch.activated_q8_1,
-        local_inter,
-    )
-    .context("shexp (TP) quantize activated → Q8_1")?;
+    // CN-80B-19d — fused swiglu + Q8_1 quantise (TP shared expert).
+    let fuse_shexp_swiglu_quant = std::env::var("FLAMBEAU_VARIANT").as_deref() != Ok("baseline")
+        && local_inter % 32 == 0;
+    if fuse_shexp_swiglu_quant {
+        flambeau_ops::hip::mlp::swiglu_f32_to_q8_1(
+            ops,
+            stream,
+            scratch.gate_f32,
+            scratch.up_f32,
+            scratch.activated_q8_1,
+            local_inter,
+        )
+        .context("shexp (TP) swiglu_f32_to_q8_1 (CN-80B-19d)")?;
+    } else {
+        flambeau_ops::hip::mlp::swiglu_f32_to_f16(
+            ops,
+            stream,
+            scratch.gate_f32,
+            scratch.up_f32,
+            scratch.activated_f16,
+            local_inter,
+        )
+        .context("shexp (TP) swiglu_f32_to_f16")?;
+        flambeau_ops::hip::norm::quantize_f16_q8_1(
+            ops,
+            stream,
+            scratch.activated_f16,
+            scratch.activated_q8_1,
+            local_inter,
+        )
+        .context("shexp (TP) quantize activated → Q8_1")?;
+    }
 
     super::common::run_mmvq_from_tensor(
         ops,

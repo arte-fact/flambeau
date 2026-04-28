@@ -549,20 +549,35 @@ pub fn forward_gdn_decode_tp(
     )
     .context("ssm_norm (rmsnorm_f32) (TP)")?;
 
-    // 14. gated = silu(z) * out_normed (per-rank d_inner).
-    swiglu_f32(
-        ops,
-        stream,
-        scratch.z_f32,
-        scratch.out_normed,
-        scratch.gated_f32,
-        local_d_inner,
-    )
-    .context("swiglu_f32(z, out_normed) (TP)")?;
-
-    // 15. Quantise gated → Q8_1 for ssm_out mmvq.
-    quantize_q8_1(ops, stream, scratch.gated_f32, scratch.gated_q8_1, local_d_inner)
-        .context("quantize gated → Q8_1 (TP)")?;
+    // 14+15. CN-80B-19c — fused swiglu(z, out_normed) → Q8_1 directly
+    // (TP variant). Skips the F32 `gated_f32` intermediate buffer + 1
+    // launch. Default-on; FLAMBEAU_VARIANT=baseline opts back to the
+    // unfused pair.
+    let fuse_tail = std::env::var("FLAMBEAU_VARIANT").as_deref() != Ok("baseline")
+        && local_d_inner % 32 == 0;
+    if fuse_tail {
+        flambeau_ops::hip::mlp::swiglu_f32_to_q8_1(
+            ops,
+            stream,
+            scratch.z_f32,
+            scratch.out_normed,
+            scratch.gated_q8_1,
+            local_d_inner,
+        )
+        .context("swiglu_f32_to_q8_1(z, out_normed) (TP) (CN-80B-19c)")?;
+    } else {
+        swiglu_f32(
+            ops,
+            stream,
+            scratch.z_f32,
+            scratch.out_normed,
+            scratch.gated_f32,
+            local_d_inner,
+        )
+        .context("swiglu_f32(z, out_normed) (TP)")?;
+        quantize_q8_1(ops, stream, scratch.gated_f32, scratch.gated_q8_1, local_d_inner)
+            .context("quantize gated → Q8_1 (TP)")?;
+    }
 
     // 16+17. Row-parallel ssm_out projection — weight[hidden, local_d_inner]
     //        × gated[local_d_inner] → partial_attn_out[hidden] (full-H partial).

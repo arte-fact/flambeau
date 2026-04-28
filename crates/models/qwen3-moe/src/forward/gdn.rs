@@ -558,18 +558,32 @@ pub fn forward_gdn_decode(
     .context("ssm_norm (rmsnorm_f32)")?;
     flambeau_backend_hip::profile::mark("gdn_ssm_norm", device, stream)?;
 
-    // 14. gated = silu(z) * out_normed.
+    // 14+15. CN-80B-19c — fused swiglu(z, out_normed) → Q8_1 directly.
+    // Skips the F32 `gated_f32` intermediate buffer + 1 launch. Default-on;
+    // FLAMBEAU_VARIANT=baseline opts back to the unfused pair.
     if v_size != d_inner {
         bail!(
             "GDN layout bug: num_v_heads * head_v_dim ({v_size}) != d_inner ({d_inner})"
         );
     }
-    swiglu_f32(ops, stream, scratch.z_f32, scratch.out_normed, scratch.gated_f32, d_inner)
-        .context("swiglu_f32(z, out_normed)")?;
-
-    // 15. Quantise gated → Q8_1 for ssm_out mmvq.
-    quantize_q8_1(ops, stream, scratch.gated_f32, scratch.gated_q8_1, d_inner)
-        .context("quantize gated → Q8_1")?;
+    let fuse_tail = std::env::var("FLAMBEAU_VARIANT").as_deref() != Ok("baseline")
+        && d_inner % 32 == 0;
+    if fuse_tail {
+        flambeau_ops::hip::mlp::swiglu_f32_to_q8_1(
+            ops,
+            stream,
+            scratch.z_f32,
+            scratch.out_normed,
+            scratch.gated_q8_1,
+            d_inner,
+        )
+        .context("swiglu_f32_to_q8_1(z, out_normed) (CN-80B-19c)")?;
+    } else {
+        swiglu_f32(ops, stream, scratch.z_f32, scratch.out_normed, scratch.gated_f32, d_inner)
+            .context("swiglu_f32(z, out_normed)")?;
+        quantize_q8_1(ops, stream, scratch.gated_f32, scratch.gated_q8_1, d_inner)
+            .context("quantize gated → Q8_1")?;
+    }
     flambeau_backend_hip::profile::mark("gdn_swiglu_quant", device, stream)?;
 
     // 16. ssm_out projection.
