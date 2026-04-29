@@ -28,6 +28,52 @@ use super::OpsRegistry;
 /// requires a different kernel layout (multi-block); not yet wired.
 pub const SAMPLER_K_OUT_MAX: usize = 256;
 
+/// **Sampler-D4 (#212)** — apply repetition / presence / frequency
+/// penalties in place on `[V]` F32 logits. `token_counts` is a flat
+/// device buffer of `n_pairs * 2` u32s laid out as
+/// `[tok0, count0, tok1, count1, ...]`. Caller must dedup the
+/// history before passing — the kernel assumes unique `tok` per
+/// pair (no atomic-add).
+///
+/// # Errors
+/// - `n_pairs == 0` (penalty path should short-circuit on host).
+/// - kernel-launch dispatch failure.
+pub fn apply_penalties_f32(
+    reg: &OpsRegistry,
+    stream: &HipStream,
+    logits: DevicePtr,
+    token_counts: DevicePtr,
+    n_pairs: usize,
+    vocab: usize,
+    repetition_penalty: f32,
+    presence_penalty: f32,
+    frequency_penalty: f32,
+) -> Result<()> {
+    if n_pairs == 0 {
+        bail!("sampler::apply_penalties_f32: n_pairs must be >= 1 — caller should short-circuit");
+    }
+    let module = reg.expect_module("sampler_apply_penalties_f32")?;
+    let kernel = module.kernel("flambeau_sampler_apply_penalties_f32")?;
+
+    let n_pairs_i = n_pairs as i32;
+    let vocab_i = vocab as i32;
+    let l_ptr: u64 = logits.as_usize() as u64;
+    let c_ptr: u64 = token_counts.as_usize() as u64;
+    let mut args = KernelArgs::new();
+    args.push(&l_ptr);
+    args.push(&c_ptr);
+    args.push(&n_pairs_i);
+    args.push(&vocab_i);
+    args.push(&repetition_penalty);
+    args.push(&presence_penalty);
+    args.push(&frequency_penalty);
+    let block: u32 = 256;
+    let grid: u32 = ((n_pairs as u32) + block - 1) / block;
+    let cfg = LaunchCfg::one_d(grid, block);
+    unsafe { kernel.launch(stream, cfg, args)? };
+    Ok(())
+}
+
 /// Block-level top-K + softmax-normalize over a length-`vocab` F32 logit
 /// vector. Single-block kernel: launches one 256-thread block on
 /// `stream` regardless of `vocab` (the kernel grid-strides over the

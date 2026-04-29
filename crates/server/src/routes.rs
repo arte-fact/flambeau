@@ -810,14 +810,13 @@ fn run_completion_blocking(
     // EOS mask regardless of sampling mode.
     let mut logits_buf: Vec<f32> = Vec::with_capacity(vocab);
 
-    // **Sampler-D3 Phase A** — GPU-side top-K sampler hook. Off by
-    // default; `FLAMBEAU_GPU_SAMPLER=1` opts in for TP-topology
-    // non-greedy decode without penalties. Phase A still pays the
-    // 600 KB host-logits DtoH (Phase B will skip it); the win here is
-    // skipping the host-side O(V) softmax + partial-sort.
+    // **Sampler-D3 / D4** — GPU-side top-K sampler. Opts in via
+    // `FLAMBEAU_GPU_SAMPLER=1` for any non-greedy TP request; the
+    // penalty-active path goes through `run_gpu_topk_with_penalties`
+    // (D4 — applies repetition / presence / frequency on device
+    // before topk) instead of `run_gpu_topk` (D3 — bare topk).
     let use_gpu_sampler = std::env::var("FLAMBEAU_GPU_SAMPLER").is_ok()
         && matches!(model, LoadedModel::Tp { .. })
-        && !sampling.has_penalties()
         && !sampling.is_greedy();
     let mut gpu_scratch: Option<GpuSamplerScratch> = if use_gpu_sampler {
         let head_rank = match &inflight {
@@ -994,10 +993,24 @@ fn run_completion_blocking(
                     prompt_ids.len() + step,
                 )
                 .context("decode step keep-on-device")?;
-                gpu_sampler::run_gpu_topk(
-                    model, cluster, &inflight, scratch, inv_temp,
-                )
-                .context("decode-step GPU topk")?;
+                if sampling.has_penalties() {
+                    // D4 — apply penalties on GPU before topk.
+                    gpu_sampler::run_gpu_topk_with_penalties(
+                        model,
+                        cluster,
+                        &inflight,
+                        scratch,
+                        &generated,
+                        sampling,
+                        inv_temp,
+                    )
+                    .context("decode-step GPU topk (with penalties)")?;
+                } else {
+                    gpu_sampler::run_gpu_topk(
+                        model, cluster, &inflight, scratch, inv_temp,
+                    )
+                    .context("decode-step GPU topk")?;
+                }
                 if force_mask && !relax_stop_mask {
                     gpu_sampler::apply_stop_mask(
                         &scratch.host_ids,

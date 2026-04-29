@@ -15,13 +15,23 @@
 use anyhow::{anyhow, bail, Context, Result};
 use flambeau_backend_hip::HipCluster;
 use flambeau_core::{CopyDirection, Device, DevicePtr, Stream};
-use flambeau_ops::hip::sampling::{topk_softmax_f32, SAMPLER_K_OUT_MAX};
+use flambeau_ops::hip::sampling::{apply_penalties_f32, topk_softmax_f32, SAMPLER_K_OUT_MAX};
+use flambeau_runtime::Sampling;
 
 use crate::model::{Inflight, LoadedModel};
 
+/// **Sampler-D4 (#212)** — upper bound on the number of unique tokens
+/// the GPU penalty kernel can apply per call. The deduped history
+/// `(tok, count)` pair count must fit. 8192 covers any realistic chat
+/// turn (max_tokens caps at 8192 already; uniqueness usually pushes
+/// this much lower).
+pub const SAMPLER_HISTORY_MAX: usize = 8192;
+
 /// Per-request scratch for the GPU sampler. Allocates two K-element
-/// buffers on the head rank's device (8 bytes total) reused across
-/// every decode step in the request.
+/// buffers on the head rank's device for the topk output (~2 KB) plus
+/// (lazily, only when penalties are active) a SAMPLER_HISTORY_MAX-sized
+/// `(tok, count)` u32 pair buffer (~64 KB). All buffers are reused
+/// across every decode step in the request.
 pub struct GpuSamplerScratch {
     head_dev_idx: usize,
     d_ids: DevicePtr,
@@ -29,12 +39,24 @@ pub struct GpuSamplerScratch {
     pub k: usize,
     pub host_ids: Vec<u32>,
     pub host_probs: Vec<f32>,
+    /// Sampler-D4 — device buffer for `(tok, count)` u32 pairs,
+    /// 8 bytes each. Allocated only when penalties are active.
+    /// Capacity = SAMPLER_HISTORY_MAX pairs.
+    d_history_counts: Option<DevicePtr>,
+    /// Reused host scratch for sort+dedup (mirrors Sampler-F's
+    /// per-session scratch but lives here so server-side can drive it).
+    host_history_sorted: Vec<u32>,
+    host_history_counts: Vec<(u32, u32)>,
+    /// Pre-flattened upload staging buffer: `[tok0, count0, tok1, ...]`.
+    host_history_pairs: Vec<u32>,
     disposed: bool,
 }
 
 impl GpuSamplerScratch {
     /// Allocate on the head rank of `cluster`. `k` must be in
-    /// `[1, SAMPLER_K_OUT_MAX]`.
+    /// `[1, SAMPLER_K_OUT_MAX]`. The penalty-path device buffer is
+    /// allocated lazily on the first `run_gpu_topk_with_penalties`
+    /// call so penalty-free requests don't pay for the 64 KB.
     pub fn new(cluster: &HipCluster, head_rank: usize, k: usize) -> Result<Self> {
         if k == 0 || k > SAMPLER_K_OUT_MAX {
             bail!(
@@ -52,8 +74,26 @@ impl GpuSamplerScratch {
             k,
             host_ids: vec![0u32; k],
             host_probs: vec![0.0f32; k],
+            d_history_counts: None,
+            host_history_sorted: Vec::new(),
+            host_history_counts: Vec::new(),
+            host_history_pairs: Vec::new(),
             disposed: false,
         })
+    }
+
+    /// Allocate the penalty-path device buffer if not already allocated.
+    fn ensure_history_buffer(&mut self, cluster: &HipCluster) -> Result<DevicePtr> {
+        if let Some(p) = self.d_history_counts {
+            return Ok(p);
+        }
+        let dev = cluster.device(self.head_dev_idx);
+        dev.bind()?;
+        // 2 u32 (tok, count) per pair × SAMPLER_HISTORY_MAX × 4 bytes/u32.
+        let bytes = SAMPLER_HISTORY_MAX * 2 * 4;
+        let p = dev.alloc(bytes)?;
+        self.d_history_counts = Some(p);
+        Ok(p)
     }
 
     /// Free the device buffers. Must pair with `new(cluster, ...)`.
@@ -65,11 +105,15 @@ impl GpuSamplerScratch {
         let dev = cluster.device(self.head_dev_idx);
         dev.bind()?;
         // SAFETY: d_ids / d_probs were allocated by `new` for `k * 4`
-        // bytes each on `dev`; we deallocate the same regions exactly
-        // once (guarded by `disposed`).
+        // bytes each on `dev`; d_history_counts (if Some) was allocated
+        // by ensure_history_buffer for SAMPLER_HISTORY_MAX*8 bytes.
+        // We deallocate the same regions exactly once.
         unsafe {
             dev.dealloc(self.d_ids, self.k * 4)?;
             dev.dealloc(self.d_probs, self.k * 4)?;
+            if let Some(p) = self.d_history_counts.take() {
+                dev.dealloc(p, SAMPLER_HISTORY_MAX * 2 * 4)?;
+            }
         }
         Ok(())
     }
@@ -181,5 +225,150 @@ pub fn apply_stop_mask(
         if stop_ids.contains(&id) {
             host_probs[i] = 0.0;
         }
+    }
+}
+
+/// **Sampler-D4 (#212)** — penalty-aware variant of [`run_gpu_topk`].
+/// Builds `(tok, count)` pairs from `history` via Sampler-F's
+/// sort+dedup, uploads to device, runs the GPU penalty kernel
+/// in-place on the head-rank's `logits_f32`, then runs topk + DtoH
+/// the K-tuple as in [`run_gpu_topk`].
+///
+/// `mode.has_penalties()` MUST be true — caller is responsible for
+/// short-circuiting to [`run_gpu_topk`] otherwise (the penalty kernel
+/// errors on n_pairs=0 and the upload+launch overhead is unwanted).
+///
+/// # Errors
+/// - Topology unsupported (Phase A wires TP only).
+/// - History exceeds [`SAMPLER_HISTORY_MAX`] unique tokens.
+/// - Kernel-launch / DtoH failure.
+pub fn run_gpu_topk_with_penalties(
+    model: &LoadedModel,
+    cluster: &HipCluster,
+    inflight: &Inflight,
+    scratch: &mut GpuSamplerScratch,
+    history: &[u32],
+    mode: &Sampling,
+    inv_temp: f32,
+) -> Result<()> {
+    debug_assert!(
+        mode.has_penalties(),
+        "run_gpu_topk_with_penalties called with no penalties active"
+    );
+    // Build sort+dedup pairs on host.
+    flambeau_runtime::sampling::build_history_counts(
+        history,
+        &mut scratch.host_history_sorted,
+        &mut scratch.host_history_counts,
+    );
+    let n_pairs = scratch.host_history_counts.len();
+    if n_pairs == 0 {
+        // No active penalty entries (history empty after dedup is
+        // impossible — only happens when history is empty, in which
+        // case the caller should route to run_gpu_topk).
+        return run_gpu_topk(model, cluster, inflight, scratch, inv_temp);
+    }
+    if n_pairs > SAMPLER_HISTORY_MAX {
+        bail!(
+            "run_gpu_topk_with_penalties: n_pairs {n_pairs} > SAMPLER_HISTORY_MAX \
+             {SAMPLER_HISTORY_MAX} — bump the constant in gpu_sampler.rs if a longer \
+             chat turn is genuinely expected"
+        );
+    }
+
+    // Flatten (tok, count) into u32 pairs.
+    scratch.host_history_pairs.clear();
+    scratch.host_history_pairs.reserve(n_pairs * 2);
+    for &(t, c) in &scratch.host_history_counts {
+        scratch.host_history_pairs.push(t);
+        scratch.host_history_pairs.push(c);
+    }
+
+    let d_history_counts = scratch.ensure_history_buffer(cluster)?;
+
+    match (model, inflight) {
+        (LoadedModel::Tp { model: m, .. }, Inflight::Tp { decode, .. }) => {
+            let head = decode.head_rank.0 as usize;
+            if head != scratch.head_dev_idx {
+                bail!(
+                    "run_gpu_topk_with_penalties: scratch head_dev_idx={} != decode.head_rank={head}",
+                    scratch.head_dev_idx
+                );
+            }
+            let dev = cluster.device(head);
+            let ops = &m.ops[head];
+            let head_scratch = decode.per_rank[head]
+                .output_head
+                .as_ref()
+                .ok_or_else(|| anyhow!("head rank missing OutputHeadScratch"))?;
+            let logits_f32 = head_scratch.logits_f32;
+            let vocab = m.config.vocab_size;
+            dev.bind()?;
+            let stream = dev.default_stream();
+
+            // 1. Upload (tok, count) pairs HtoD. SAFETY: d_history_counts
+            // was allocated for SAMPLER_HISTORY_MAX*2*4 bytes; we copy
+            // n_pairs*2*4 bytes which is bounded above.
+            unsafe {
+                <flambeau_backend_hip::HipDevice as Device>::memcpy_async(
+                    dev,
+                    stream,
+                    CopyDirection::HostToDevice,
+                    d_history_counts,
+                    DevicePtr(scratch.host_history_pairs.as_ptr() as usize),
+                    n_pairs * 2 * 4,
+                )?;
+            }
+            // 2. Apply penalties in place on logits_f32.
+            apply_penalties_f32(
+                ops,
+                stream,
+                logits_f32,
+                d_history_counts,
+                n_pairs,
+                vocab,
+                mode.repetition_penalty,
+                mode.presence_penalty,
+                mode.frequency_penalty,
+            )
+            .context("GPU apply_penalties_f32")?;
+            // 3. topk + DtoH small tuple — same as run_gpu_topk.
+            topk_softmax_f32(
+                ops,
+                stream,
+                logits_f32,
+                scratch.d_ids,
+                scratch.d_probs,
+                vocab,
+                scratch.k,
+                inv_temp,
+            )
+            .context("GPU topk_softmax_f32 (post-penalty)")?;
+            // SAFETY: same as run_gpu_topk.
+            unsafe {
+                <flambeau_backend_hip::HipDevice as Device>::memcpy_async(
+                    dev,
+                    stream,
+                    CopyDirection::DeviceToHost,
+                    DevicePtr(scratch.host_ids.as_mut_ptr() as usize),
+                    scratch.d_ids,
+                    scratch.k * 4,
+                )?;
+                <flambeau_backend_hip::HipDevice as Device>::memcpy_async(
+                    dev,
+                    stream,
+                    CopyDirection::DeviceToHost,
+                    DevicePtr(scratch.host_probs.as_mut_ptr() as usize),
+                    scratch.d_probs,
+                    scratch.k * 4,
+                )?;
+            }
+            Stream::synchronize(stream)?;
+            Ok(())
+        }
+        _ => bail!(
+            "GPU sampler is wired for TP topology only (got {})",
+            model.topology()
+        ),
     }
 }

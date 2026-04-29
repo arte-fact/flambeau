@@ -509,6 +509,37 @@ fn apply_penalties(logits: &mut [f32], history: &[u32], mode: &Sampling) {
     apply_penalty_kernel(logits, mode, counts.iter().map(|(&t, &c)| (t, c)));
 }
 
+/// **Sampler-F / Sampler-D4** — sort+dedup `history` into `(tok, count)`
+/// pairs in `counts_out`. `sorted_scratch` is a reused per-session
+/// buffer (typically `Sampler::history_sorted`). Public so the GPU
+/// sampler path (`crates/server/src/gpu_sampler.rs`) can build the
+/// same dedup view before uploading to device.
+pub fn build_history_counts(
+    history: &[u32],
+    sorted_scratch: &mut Vec<u32>,
+    counts_out: &mut Vec<(u32, u32)>,
+) {
+    counts_out.clear();
+    if history.is_empty() {
+        return;
+    }
+    sorted_scratch.clear();
+    sorted_scratch.extend_from_slice(history);
+    sorted_scratch.sort_unstable();
+    let mut prev = sorted_scratch[0];
+    let mut run = 1u32;
+    for &tok in &sorted_scratch[1..] {
+        if tok == prev {
+            run += 1;
+        } else {
+            counts_out.push((prev, run));
+            prev = tok;
+            run = 1;
+        }
+    }
+    counts_out.push((prev, run));
+}
+
 /// **Sampler-F (#208)** — penalty path with caller-owned scratch
 /// buffers. Replaces the per-call `HashMap<u32, u32>` build with a
 /// sort+dedup over a reused `Vec<u32>`. Faster than hashing for
@@ -525,22 +556,7 @@ fn apply_penalties_with_scratch(
     if !mode.has_penalties() || history.is_empty() {
         return;
     }
-    sorted.clear();
-    sorted.extend_from_slice(history);
-    sorted.sort_unstable();
-    counts.clear();
-    let mut prev = sorted[0];
-    let mut run = 1u32;
-    for &tok in &sorted[1..] {
-        if tok == prev {
-            run += 1;
-        } else {
-            counts.push((prev, run));
-            prev = tok;
-            run = 1;
-        }
-    }
-    counts.push((prev, run));
+    build_history_counts(history, sorted, counts);
     apply_penalty_kernel(logits, mode, counts.iter().copied());
 }
 

@@ -187,8 +187,9 @@ pub const KERNEL_STEMS: &[&str] = &[
     "dense_gemv_f32_f16_batched",
     "dense_gemv_f16_f16",
     "dense_gemv_f16_f16_batched",
-    // Sampler-D (#211) — GPU-side sampler kernels for the chat hot path.
+    // Sampler-D (#211, #212) — GPU-side sampler kernels for the chat hot path.
     "sampler_topk_softmax_f32",
+    "sampler_apply_penalties_f32",
 ];
 
 /// Single-session registry of loaded HIP kernel modules. Built once at model
