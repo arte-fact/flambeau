@@ -182,6 +182,34 @@ pub fn add_f16(
     Ok(())
 }
 
+/// MTP-4-A — F32 sibling of `add_f16`. `y[i] = a[i] + b[i]` in F32,
+/// no precision loss. Used for the MTP block's residual additions to
+/// keep the residual stream in F32 between matmul output and the next
+/// norm input.
+pub fn add_f32(
+    reg: &OpsRegistry,
+    stream: &HipStream,
+    a: DevicePtr,
+    b: DevicePtr,
+    y: DevicePtr,
+    n: usize,
+) -> Result<()> {
+    let module = reg.expect_module("add_f32")?;
+    let kernel = module.kernel("flambeau_add_f32")?;
+    let n_i = n as i32;
+    let a_ptr: u64 = a.as_usize() as u64;
+    let b_ptr: u64 = b.as_usize() as u64;
+    let y_ptr: u64 = y.as_usize() as u64;
+    let mut args = KernelArgs::new();
+    args.push(&a_ptr);
+    args.push(&b_ptr);
+    args.push(&y_ptr);
+    args.push(&n_i);
+    let cfg = LaunchCfg::one_d((n as u32).div_ceil(256), 256);
+    unsafe { kernel.launch(stream, cfg, args)? };
+    Ok(())
+}
+
 /// `y = silu(gate) * up`, pointwise. All three tensors are F16, flat length
 /// `n` (usually `m * hidden`). In-place-safe if the caller wants `y == gate`
 /// or `y == up` at the cost of the kernel reading before it writes that lane.

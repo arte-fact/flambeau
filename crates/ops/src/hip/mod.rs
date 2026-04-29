@@ -149,6 +149,7 @@ pub const KERNEL_STEMS: &[&str] = &[
     "sigmoid_mul_f16",
     "scale_f32",
     "add_f16",
+    "add_f32",
     "rope_f16",
     "rope_neox_partial_f16",
     "softmax_masked_f16",

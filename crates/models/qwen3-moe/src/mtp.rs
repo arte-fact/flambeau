@@ -399,7 +399,7 @@ pub fn forward_mtp_step_with_kv(
     use flambeau_core::op::QDtype;
     use flambeau_ops::hip::attention::{attention_decode_f16_slots, split_q_gate_f16};
     use flambeau_ops::hip::cast::{cast_f16_to_f32, cast_f32_to_f16};
-    use flambeau_ops::hip::mlp::{add_f16, sigmoid_mul_f16, swiglu_f32_to_q8_1};
+    use flambeau_ops::hip::mlp::{add_f16, add_f32, sigmoid_mul_f16, swiglu_f32_to_q8_1};
     use flambeau_ops::hip::norm::{quantize_f16_q8_1, rmsnorm_f16, rmsnorm_quant_q8_1};
     use flambeau_ops::hip::qmatmul::mmvq;
 
@@ -635,12 +635,17 @@ pub fn forward_mtp_step_with_kv(
         h, n_q * head_dim, qdtype_for(&mtp.block.o_proj)?,
     )
     .context("mtp mmvq o_proj")?;
-    cast_f32_to_f16(ops, stream, attn_proj_f32, attn_proj_f16, h)
-        .context("mtp cast o_proj → F16")?;
-
-    // ── 11. Residual add: h1 = h0 + attn_proj
-    add_f16(ops, stream, h0_f16, attn_proj_f16, h1_f16, h)
-        .context("mtp residual h1")?;
+    // MTP-4-A: residual add in F32. h0_f32 (from fc mmvq) and
+    // attn_proj_f32 (from o_proj mmvq) are both already F32 — keep them
+    // F32 for the add, cast to F16 only for the post-attn norm input.
+    add_f32(ops, stream, h0_f32, attn_proj_f32, attn_proj_f32, h)
+        .context("mtp residual h1 (F32)")?;
+    // attn_proj_f32 now holds h1_f32 = h0 + attn_proj. Reuse buffer.
+    let h1_f32 = attn_proj_f32;
+    cast_f32_to_f16(ops, stream, h1_f32, h1_f16, h)
+        .context("mtp cast h1 F32 → F16 for post_attn norm")?;
+    // (legacy h1=add_f16 + attn_proj_f16 dead — kept allocs; no extra code)
+    let _ = (attn_proj_f16, add_f16); // silence unused-var warnings
 
     // ── 12. post_attention_layernorm + Q8_1 quant for MLP
     rmsnorm_quant_q8_1(
@@ -667,12 +672,15 @@ pub fn forward_mtp_step_with_kv(
         h, inter, qdtype_for(&mtp.block.down_proj)?,
     )
     .context("mtp mmvq down_proj")?;
-    cast_f32_to_f16(ops, stream, down_f32, down_f16, h)
-        .context("mtp cast down → F16")?;
-
-    // ── 14. Residual: h2 = h1 + down
-    add_f16(ops, stream, h1_f16, down_f16, h2_f16, h)
-        .context("mtp residual h2")?;
+    // MTP-4-A: residual add in F32. h1_f32 (= h0 + attn_proj from above)
+    // and down_f32 (from down_proj mmvq) are both F32 — keep F32 through
+    // the add, cast to F16 only for the final mtp.norm input.
+    add_f32(ops, stream, h1_f32, down_f32, down_f32, h)
+        .context("mtp residual h2 (F32)")?;
+    let h2_f32 = down_f32;  // reused buffer holds h2 = h1 + down
+    cast_f32_to_f16(ops, stream, h2_f32, h2_f16, h)
+        .context("mtp cast h2 F32 → F16 for final norm")?;
+    let _ = down_f16;  // keep alloc; unused after F32 path
 
     // ── 15. Final norm: h_final = rmsnorm(h2, mtp.norm)
     rmsnorm_f16(
