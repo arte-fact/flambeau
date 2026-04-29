@@ -340,6 +340,27 @@ pub fn load_mtp_head(mtp_file: &GgufFile, device: &HipDevice) -> Result<MtpHeadW
 /// position 0 — useful for the parity test against the Python ref).
 /// At `position > 0` we apply `rope_neox_partial_f16` with
 /// `cfg.rope.rotated_dims` (matches base full-attn convention).
+/// Optional persistent KV cache for accumulated MTP attention.
+/// `kcache` and `vcache` are F16 [max_tokens, n_kv_heads * head_dim]
+/// buffers owned by the caller. `cache_position` is where the
+/// current step's K/V will be written. `n_tokens_kv` is the count
+/// of valid K/V slots (1..=cache_position+1) the attention call
+/// should attend over.
+///
+/// vLLM/sglang's spec_info.hidden_states flow primes MTP's KV from
+/// every prefill position; passive harnesses without priming get
+/// 0% acceptance because MTP's attention sees only the current
+/// step. Caller is responsible for ensuring the prior positions
+/// (0..cache_position) are populated either via a prefill loop or
+/// from a prior decode step's append.
+#[derive(Clone, Copy)]
+pub struct MtpKvCache {
+    pub kcache: flambeau_core::DevicePtr,   // F16 [max_tokens, n_kv*head_dim]
+    pub vcache: flambeau_core::DevicePtr,   // F16 [max_tokens, n_kv*head_dim]
+    pub cache_position: usize,              // write index for THIS step
+    pub n_tokens_kv: usize,                 // count to attend over (>=1)
+}
+
 pub fn forward_mtp_step(
     ops: &flambeau_ops::OpsRegistry,
     stream: &flambeau_backend_hip::HipStream,
@@ -350,6 +371,28 @@ pub fn forward_mtp_step(
     e_token: flambeau_core::DevicePtr,
     position: usize,
     h_final_out: flambeau_core::DevicePtr,
+) -> Result<()> {
+    forward_mtp_step_with_kv(ops, stream, device, cfg, mtp,
+        h_t, e_token, position, h_final_out, None)
+}
+
+/// Variant that accepts an optional persistent KV cache. When
+/// `kv` is None, behaves like `forward_mtp_step` (transient 1-slot
+/// KV cache; legacy passive-harness behaviour). When Some, appends
+/// new K/V to `kv.cache_position` and runs attention with
+/// `n_tokens_kv = kv.n_tokens_kv`.
+#[allow(clippy::too_many_arguments)]
+pub fn forward_mtp_step_with_kv(
+    ops: &flambeau_ops::OpsRegistry,
+    stream: &flambeau_backend_hip::HipStream,
+    device: &HipDevice,
+    cfg: &crate::Qwen3MoEConfig,
+    mtp: &MtpHeadWeights,
+    h_t: flambeau_core::DevicePtr,
+    e_token: flambeau_core::DevicePtr,
+    position: usize,
+    h_final_out: flambeau_core::DevicePtr,
+    kv: Option<MtpKvCache>,
 ) -> Result<()> {
     use flambeau_backend_hip::HipDevice as _Dev;
     use flambeau_core::{Device, DevicePtr, Stream};
@@ -540,18 +583,39 @@ pub fn forward_mtp_step(
         unsafe { device.dealloc(position_dev, 4)?; }
     }
 
-    // ── 8. Single-token attention. Stage K/V at position 0 of a
-    //     length-1 KV cache and run attention_decode_f16_slots.
+    // ── 8. Attention. Either:
+    //   (transient KV branch, kv=None) — use the local 1-slot
+    //     kcache_f16/vcache_f16 we allocated above.
+    //   (persistent KV branch, kv=Some) — append new K/V to
+    //     caller-provided cache at `cache_position`, run with
+    //     `n_tokens_kv` for accumulated history (this is what
+    //     vLLM/sglang's spec_info flow does — primed by the
+    //     prefill walk).
     use flambeau_core::CopyDirection;
-    // SAFETY: kcache_f16 / vcache_f16 are fresh allocs of n_kv*head_dim*2 B.
-    unsafe {
-        device.memcpy_async(stream, CopyDirection::DeviceToDevice, kcache_f16, k_f16, bytes_kv_f16)?;
-        device.memcpy_async(stream, CopyDirection::DeviceToDevice, vcache_f16, v_f16, bytes_kv_f16)?;
-    }
     let scale = 1.0_f32 / (head_dim as f32).sqrt();
+    let (k_buf, v_buf, n_tokens_kv) = if let Some(c) = kv {
+        // Append new K/V to position `cache_position` in the caller's cache.
+        let row_bytes = bytes_kv_f16; // n_kv * head_dim * 2
+        let k_dst = c.kcache.offset_bytes(c.cache_position * row_bytes);
+        let v_dst = c.vcache.offset_bytes(c.cache_position * row_bytes);
+        // SAFETY: caller asserts cache size ≥ (cache_position+1)*row_bytes;
+        // k_f16/v_f16 are fresh allocs of row_bytes.
+        unsafe {
+            device.memcpy_async(stream, CopyDirection::DeviceToDevice, k_dst, k_f16, row_bytes)?;
+            device.memcpy_async(stream, CopyDirection::DeviceToDevice, v_dst, v_f16, row_bytes)?;
+        }
+        (c.kcache, c.vcache, c.n_tokens_kv)
+    } else {
+        // SAFETY: kcache_f16 / vcache_f16 are fresh allocs of n_kv*head_dim*2 B.
+        unsafe {
+            device.memcpy_async(stream, CopyDirection::DeviceToDevice, kcache_f16, k_f16, bytes_kv_f16)?;
+            device.memcpy_async(stream, CopyDirection::DeviceToDevice, vcache_f16, v_f16, bytes_kv_f16)?;
+        }
+        (kcache_f16, vcache_f16, 1usize)
+    };
     attention_decode_f16_slots(
-        ops, stream, q_f16, kcache_f16, vcache_f16, attn_out_f16,
-        n_q, n_kv, head_dim, /*n_tokens_kv=*/ 1, scale,
+        ops, stream, q_f16, k_buf, v_buf, attn_out_f16,
+        n_q, n_kv, head_dim, n_tokens_kv, scale,
         /*n_tokens_kv_slot=*/ None,
     )
     .context("mtp attention_decode_f16")?;
@@ -697,6 +761,27 @@ pub fn forward_mtp_step_with_lm_head(
     token_embd_row_f16: flambeau_core::DevicePtr,
     position: usize,
 ) -> Result<u32> {
+    forward_mtp_step_with_lm_head_kv(
+        ops, stream, device, cfg, mtp,
+        output_norm_weight, lm_head_weight,
+        hidden_pre_norm, token_embd_row_f16, position, None,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn forward_mtp_step_with_lm_head_kv(
+    ops: &flambeau_ops::OpsRegistry,
+    stream: &flambeau_backend_hip::HipStream,
+    device: &HipDevice,
+    cfg: &crate::Qwen3MoEConfig,
+    mtp: &MtpHeadWeights,
+    output_norm_weight: &DeviceTensor,
+    lm_head_weight: &DeviceTensor,
+    hidden_pre_norm: flambeau_core::DevicePtr,
+    token_embd_row_f16: flambeau_core::DevicePtr,
+    position: usize,
+    kv: Option<MtpKvCache>,
+) -> Result<u32> {
     use flambeau_core::{Device, DevicePtr, Stream};
     use flambeau_ops::hip::norm::{quantize_f16_q8_1, rmsnorm_f16};
 
@@ -720,12 +805,13 @@ pub fn forward_mtp_step_with_lm_head(
     let mtp_h_final = device
         .alloc(hidden * 2)
         .map_err(|e| anyhow!("hipMalloc mtp_h_final: {e}"))?;
-    forward_mtp_step(
+    forward_mtp_step_with_kv(
         ops, stream, device, cfg, mtp,
         h_t_post_norm,
         token_embd_row_f16,
         position,
         mtp_h_final,
+        kv,
     )?;
 
     // 3. LM head: quantize MTP output → Q8_1 → mmvq → F32 logits → argmax.

@@ -40,14 +40,28 @@ use flambeau_qwen3_moe::forward::{
     forward_one_token_pp, forward_prefill_pp, ShardedForwardOneTokenScratch,
     ShardedForwardPrefillScratch,
 };
-use flambeau_qwen3_moe::mtp::{forward_mtp_step_with_lm_head, load_mtp_head};
+use flambeau_qwen3_moe::mtp::{
+    forward_mtp_step_with_lm_head, forward_mtp_step_with_lm_head_kv, load_mtp_head, MtpKvCache,
+};
 use flambeau_qwen3_moe::{
     Qwen3MoEConfig, Qwen3MoEShardedModel, Qwen3MoEShardedSession,
 };
 use flambeau_runtime::LayerAssignment;
 use std::path::PathBuf;
 
-const BASE_PATH: &str = "/artefact/models/Qwen3.6-27B-Q4_0.gguf";
+// Switchable via FLAMBEAU_MTP_BASE env. Default Q4_0 (smaller, faster
+// load). Set FLAMBEAU_MTP_BASE=ud_q8_k_xl to test the precision lever.
+fn base_path() -> std::path::PathBuf {
+    let v = std::env::var("FLAMBEAU_MTP_BASE").unwrap_or_default();
+    let p = match v.as_str() {
+        "ud_q8_k_xl" => "/artefact/models/Qwen3.6-27B-UD-Q8_K_XL.gguf",
+        "q8_0"       => "/artefact/models/Qwen3.6-27B-Q8_0.gguf",
+        "q4_1"       => "/artefact/models/Qwen3.6-27B-Q4_1.gguf",
+        _            => "/artefact/models/Qwen3.6-27B-Q4_0.gguf",
+    };
+    PathBuf::from(p)
+}
+const _UNUSED_BASE_PATH: &str = "/artefact/models/Qwen3.6-27B-Q4_0.gguf";
 const MTP_PATH: &str = "/artefact/models/Qwen3.6-27B-mtp.gguf";
 const DEFAULT_STEPS: usize = 8;
 // Real Qwen3 tokenization of "The capital of France is" (the V1.7.4
@@ -63,10 +77,10 @@ const PROMPT_IDS: [u32; 5] = [760, 6511, 314, 9338, 369];
 
 #[test]
 fn mtp_acceptance_passive_qwen36_27b() -> Result<()> {
-    let base_path = PathBuf::from(BASE_PATH);
+    let base_path = base_path();
     let mtp_path = PathBuf::from(MTP_PATH);
     if !base_path.exists() {
-        eprintln!("skip: {BASE_PATH} not present");
+        eprintln!("skip: {} not present", base_path.display());
         return Ok(());
     }
     if !mtp_path.exists() {
@@ -85,7 +99,7 @@ fn mtp_acceptance_passive_qwen36_27b() -> Result<()> {
         .unwrap_or(DEFAULT_STEPS);
 
     eprintln!("=== MTP-4 passive acceptance ===");
-    eprintln!("base: {BASE_PATH}");
+    eprintln!("base: {}", base_path.display());
     eprintln!("mtp:  {MTP_PATH}");
     eprintln!("decode steps: {n_steps}, prompt prefill: {} tokens", PROMPT_IDS.len());
 
@@ -146,6 +160,24 @@ fn mtp_acceptance_passive_qwen36_27b() -> Result<()> {
     let hidden = cfg.hidden_size;
     let h_t_saved = last_device.alloc(hidden * 2)?;        // F16 [hidden]
     let e_token_dev = last_device.alloc(hidden * 2)?;      // F16 [hidden]
+
+    // Persistent MTP KV cache (accumulates across decode steps).
+    // Sized for prompt prefix + decode steps; 256 slots covers
+    // the smoke test by a wide margin.
+    const MTP_KV_MAX: usize = 256;
+    let kv_row_bytes = cfg.num_kv_heads * cfg.head_dim * 2; // F16
+    let mtp_kcache = last_device.alloc(MTP_KV_MAX * kv_row_bytes)?;
+    let mtp_vcache = last_device.alloc(MTP_KV_MAX * kv_row_bytes)?;
+    let mut mtp_cache_pos: usize = 0;
+    let use_kv_accum = std::env::var("FLAMBEAU_MTP_KV_ACCUM")
+        .as_deref()
+        .map(|s| s != "0" && s != "off")
+        .unwrap_or(true);
+    if use_kv_accum {
+        eprintln!("MTP KV accumulation: ON (persistent cache, {} slots)", MTP_KV_MAX);
+    } else {
+        eprintln!("MTP KV accumulation: OFF (transient 1-slot per call)");
+    }
     // Rank 0 helper buffer for embedding lookup.
     let rank0_device = cluster.device(0);
     let token_embd = model.shards[0]
@@ -274,18 +306,42 @@ fn mtp_acceptance_passive_qwen36_27b() -> Result<()> {
                 hidden_a_after
             };
 
-            let pred_next_next = forward_mtp_step_with_lm_head(
-                last_ops,
-                last_device.default_stream(),
-                last_device,
-                &cfg,
-                &mtp,
-                output_norm,
-                lm_head,
-                h_t_for_mtp,
-                e_token_dev,
-                position + 1,
-            )?;
+            let pred_next_next = if use_kv_accum {
+                let kv = MtpKvCache {
+                    kcache: mtp_kcache,
+                    vcache: mtp_vcache,
+                    cache_position: mtp_cache_pos,
+                    n_tokens_kv: mtp_cache_pos + 1,
+                };
+                let r = forward_mtp_step_with_lm_head_kv(
+                    last_ops,
+                    last_device.default_stream(),
+                    last_device,
+                    &cfg,
+                    &mtp,
+                    output_norm,
+                    lm_head,
+                    h_t_for_mtp,
+                    e_token_dev,
+                    position + 1,
+                    Some(kv),
+                )?;
+                mtp_cache_pos += 1;
+                r
+            } else {
+                forward_mtp_step_with_lm_head(
+                    last_ops,
+                    last_device.default_stream(),
+                    last_device,
+                    &cfg,
+                    &mtp,
+                    output_norm,
+                    lm_head,
+                    h_t_for_mtp,
+                    e_token_dev,
+                    position + 1,
+                )?
+            };
             predicted.push(pred_next_next);
 
             // ── Snapshot h_t = current hidden_a for next iteration.
@@ -325,6 +381,8 @@ fn mtp_acceptance_passive_qwen36_27b() -> Result<()> {
     unsafe {
         last_device.dealloc(h_t_saved, hidden * 2)?;
         last_device.dealloc(e_token_dev, hidden * 2)?;
+        last_device.dealloc(mtp_kcache, MTP_KV_MAX * kv_row_bytes)?;
+        last_device.dealloc(mtp_vcache, MTP_KV_MAX * kv_row_bytes)?;
         rank0_device.dealloc(rank0_embed_buf, hidden * 2)?;
     }
     decode_scratch.dispose(&cluster).ok();
