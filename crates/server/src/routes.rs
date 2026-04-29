@@ -19,6 +19,7 @@ use tokio::sync::{mpsc, Mutex};
 use tokio_stream::wrappers::ReceiverStream;
 
 use crate::api::*;
+use crate::gpu_sampler::{self, GpuSamplerScratch};
 use crate::model::{
     decode_logits, decode_spec_pp, decode_spec_pp_sampling, prefill_logits, Inflight, LoadedModel,
     SpecDecodePp,
@@ -809,6 +810,28 @@ fn run_completion_blocking(
     // EOS mask regardless of sampling mode.
     let mut logits_buf: Vec<f32> = Vec::with_capacity(vocab);
 
+    // **Sampler-D3 Phase A** — GPU-side top-K sampler hook. Off by
+    // default; `FLAMBEAU_GPU_SAMPLER=1` opts in for TP-topology
+    // non-greedy decode without penalties. Phase A still pays the
+    // 600 KB host-logits DtoH (Phase B will skip it); the win here is
+    // skipping the host-side O(V) softmax + partial-sort.
+    let use_gpu_sampler = std::env::var("FLAMBEAU_GPU_SAMPLER").is_ok()
+        && matches!(model, LoadedModel::Tp { .. })
+        && !sampling.has_penalties()
+        && !sampling.is_greedy();
+    let mut gpu_scratch: Option<GpuSamplerScratch> = if use_gpu_sampler {
+        let head_rank = match &inflight {
+            Inflight::Tp { decode, .. } => decode.head_rank.0 as usize,
+            _ => 0,
+        };
+        Some(
+            GpuSamplerScratch::new(cluster, head_rank, 256)
+                .context("alloc GpuSamplerScratch")?,
+        )
+    } else {
+        None
+    };
+
     // Prefill. Always download logits so we can mask stop tokens on the
     // first generated token — Qwen3.6 sometimes argmaxes `<|im_end|>` as
     // the first response token on multi-turn prompts, producing an empty
@@ -821,8 +844,20 @@ fn run_completion_blocking(
             logits_buf[sid as usize] = f32::NEG_INFINITY;
         }
     }
-    // First token: empty history, penalties are no-ops.
-    let first_next = sampler.sample(&logits_buf, sampling, &[]);
+    // First token: GPU sampler path if enabled, else host. Empty history.
+    let inv_temp = if sampling.temperature > 0.0 {
+        1.0 / sampling.temperature
+    } else {
+        1.0
+    };
+    let first_next = if let Some(scratch) = gpu_scratch.as_mut() {
+        gpu_sampler::run_gpu_topk(model, cluster, &inflight, scratch, inv_temp)
+            .context("first-token GPU topk")?;
+        gpu_sampler::apply_stop_mask(&scratch.host_ids, &mut scratch.host_probs, stop_ids);
+        sampler.sample_from_topk(&scratch.host_ids, &scratch.host_probs, sampling)
+    } else {
+        sampler.sample(&logits_buf, sampling, &[])
+    };
     let is_greedy = sampling.is_greedy();
     tracing::info!(
         target: "server.completion.first_token",
@@ -968,7 +1003,32 @@ fn run_completion_blocking(
             // Pass `generated` as history so penalties can fire on repeats
             // / frequent tokens. T4.b.2 — without this, Qwen3.5/3.6 agent
             // loops degrade to long-CoT drift per the Ollama post-mortem.
-            let next = sampler.sample(&logits_buf, sampling, &generated);
+            //
+            // **Sampler-D3 Phase A** — when GPU sampler is enabled (and
+            // !has_penalties() per the gate above), run topk on the
+            // device logits and sample from the K-tuple. Stop-mask is
+            // applied to the K probs after DtoH (matching the host
+            // path: NEG_INFINITY when force_mask, no-op for STOP_BIAS=0).
+            let next = if let Some(scratch) = gpu_scratch.as_mut() {
+                gpu_sampler::run_gpu_topk(
+                    model, cluster, &inflight, scratch, inv_temp,
+                )
+                .context("decode-step GPU topk")?;
+                if force_mask && !relax_stop_mask {
+                    gpu_sampler::apply_stop_mask(
+                        &scratch.host_ids,
+                        &mut scratch.host_probs,
+                        stop_ids,
+                    );
+                }
+                sampler.sample_from_topk(
+                    &scratch.host_ids,
+                    &scratch.host_probs,
+                    sampling,
+                )
+            } else {
+                sampler.sample(&logits_buf, sampling, &generated)
+            };
             generated.push(next);
             last_token = next;
             if is_stop(next) {
@@ -976,6 +1036,12 @@ fn run_completion_blocking(
                 break;
             }
         }
+    }
+
+    // Dispose GPU sampler scratch (if allocated) before tearing down
+    // the inflight session.
+    if let Some(scratch) = gpu_scratch.take() {
+        scratch.dispose(cluster).context("dispose GpuSamplerScratch")?;
     }
 
     // Dispose per-request scratch/session; keep model + cluster alive.

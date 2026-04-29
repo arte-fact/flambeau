@@ -216,6 +216,84 @@ impl Sampler {
         &mut self.rng
     }
 
+    /// **Sampler-D3 (#211)** — sample one token from a pre-computed top-K
+    /// `(id, prob)` distribution. The caller is responsible for
+    /// providing a top-K already softmax-normalised so the K probs sum
+    /// to ≈1 (the GPU `topk_softmax_f32` kernel does exactly this).
+    /// `top_p` and `min_p` filters are applied across the K-tuple here;
+    /// `top_k` is implicit (already the size of the input). Penalties
+    /// are NOT applied — the GPU sampler path requires `!mode.has_penalties()`
+    /// because penalties need full-vocab access on host.
+    ///
+    /// `temperature` is also implicit: the GPU kernel applied it before
+    /// emitting the top-K probs, so the input distribution already
+    /// reflects the chosen temperature.
+    ///
+    /// Returns the multinomial-sampled token id, or `topk_ids[0]` (the
+    /// argmax) when `mode.is_greedy()`.
+    pub fn sample_from_topk(
+        &mut self,
+        topk_ids: &[u32],
+        topk_probs: &[f32],
+        mode: &Sampling,
+    ) -> u32 {
+        debug_assert_eq!(
+            topk_ids.len(),
+            topk_probs.len(),
+            "sample_from_topk: ids/probs length mismatch"
+        );
+        if topk_ids.is_empty() {
+            return 0;
+        }
+        if mode.is_greedy() {
+            return topk_ids[0];
+        }
+        // Reuse pair_scratch for the small K-tuple. We don't need a
+        // sort — the input is already sorted descending by prob from
+        // the GPU kernel.
+        let mut end = topk_ids.len();
+        // Apply top-p over the prefix.
+        if let Some(p) = mode.top_p {
+            if p < 1.0 && p > 0.0 {
+                let mut cum = 0.0f32;
+                let mut prefix_end = 0usize;
+                for &pv in topk_probs.iter().take(end) {
+                    cum += pv;
+                    prefix_end += 1;
+                    if cum >= p {
+                        break;
+                    }
+                }
+                end = prefix_end;
+            }
+        }
+        // Apply min-p (drop entries whose prob < min_p * top_prob).
+        if let Some(min_p) = mode.min_p {
+            if min_p > 0.0 && !topk_probs.is_empty() {
+                let threshold = topk_probs[0] * min_p;
+                for (i, &pv) in topk_probs.iter().take(end).enumerate() {
+                    if pv < threshold {
+                        end = i.max(1);
+                        break;
+                    }
+                }
+            }
+        }
+        // Multinomial pick over [0..end].
+        let kept_probs = &topk_probs[..end];
+        let kept_ids = &topk_ids[..end];
+        let sum: f32 = kept_probs.iter().sum();
+        let mut u = self.rng.next_f32() * sum;
+        for (id, p) in kept_ids.iter().zip(kept_probs.iter()) {
+            u -= *p;
+            if u <= 0.0 {
+                return *id;
+            }
+        }
+        // Numerical-noise fallback.
+        *kept_ids.last().unwrap_or(&topk_ids[0])
+    }
+
     /// Sample one token. `history` is the per-turn generated-token
     /// slice (empty `&[]` is fine for the first token, or when the
     /// request disables penalties). Penalties and filters are applied

@@ -18,6 +18,8 @@ pub mod state;
 pub mod tool_call_parser;
 
 #[cfg(feature = "hip")]
+pub mod gpu_sampler;
+#[cfg(feature = "hip")]
 pub mod model;
 #[cfg(feature = "hip")]
 pub mod routes;
