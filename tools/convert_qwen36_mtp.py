@@ -49,6 +49,20 @@ from gguf import GGMLQuantizationType, GGUFReader, GGUFValueType, GGUFWriter
 SKIP_FIELDS: set[str] = {"GGUF.version", "GGUF.tensor_count", "GGUF.kv_count"}
 
 # Per-tensor target quant for the MTP head.
+def _linear_dtype() -> GGMLQuantizationType:
+    """Linear-weight target. Default F16 (lower precision-loss vs Q8_0; 3.5×
+    larger but the MTP block is only 393M params so the absolute disk cost is
+    ~+800 MB). Set MTP_LINEAR_DTYPE=q8_0 or =f16 to override."""
+    import os
+    v = os.environ.get("MTP_LINEAR_DTYPE", "f16").lower()
+    if v == "q8_0":
+        return GGMLQuantizationType.Q8_0
+    if v == "f16":
+        return GGMLQuantizationType.F16
+    raise SystemExit(f"unsupported MTP_LINEAR_DTYPE={v!r}; use q8_0 or f16")
+
+_LIN = _linear_dtype()
+
 MTP_TENSOR_DTYPES: dict[str, GGMLQuantizationType] = {
     # Norms → F32 (small; norms are precision-sensitive).
     "mtp.norm.weight":                              GGMLQuantizationType.F32,
@@ -58,15 +72,15 @@ MTP_TENSOR_DTYPES: dict[str, GGMLQuantizationType] = {
     "mtp.layers.0.post_attention_layernorm.weight": GGMLQuantizationType.F32,
     "mtp.layers.0.self_attn.q_norm.weight":         GGMLQuantizationType.F32,
     "mtp.layers.0.self_attn.k_norm.weight":         GGMLQuantizationType.F32,
-    # Linears → Q8_0.
-    "mtp.fc.weight":                                GGMLQuantizationType.Q8_0,
-    "mtp.layers.0.self_attn.q_proj.weight":         GGMLQuantizationType.Q8_0,
-    "mtp.layers.0.self_attn.k_proj.weight":         GGMLQuantizationType.Q8_0,
-    "mtp.layers.0.self_attn.v_proj.weight":         GGMLQuantizationType.Q8_0,
-    "mtp.layers.0.self_attn.o_proj.weight":         GGMLQuantizationType.Q8_0,
-    "mtp.layers.0.mlp.gate_proj.weight":            GGMLQuantizationType.Q8_0,
-    "mtp.layers.0.mlp.up_proj.weight":              GGMLQuantizationType.Q8_0,
-    "mtp.layers.0.mlp.down_proj.weight":            GGMLQuantizationType.Q8_0,
+    # Linears → configurable (default F16; was Q8_0 in MTP-3 cert).
+    "mtp.fc.weight":                                _LIN,
+    "mtp.layers.0.self_attn.q_proj.weight":         _LIN,
+    "mtp.layers.0.self_attn.k_proj.weight":         _LIN,
+    "mtp.layers.0.self_attn.v_proj.weight":         _LIN,
+    "mtp.layers.0.self_attn.o_proj.weight":         _LIN,
+    "mtp.layers.0.mlp.gate_proj.weight":            _LIN,
+    "mtp.layers.0.mlp.up_proj.weight":              _LIN,
+    "mtp.layers.0.mlp.down_proj.weight":            _LIN,
 }
 
 
@@ -120,6 +134,8 @@ def quantize_mtp(name: str, fp32: np.ndarray) -> tuple[np.ndarray, GGMLQuantizat
     qtype = MTP_TENSOR_DTYPES[name]
     if qtype is GGMLQuantizationType.F32:
         return np.ascontiguousarray(fp32, dtype=np.float32), qtype
+    if qtype is GGMLQuantizationType.F16:
+        return np.ascontiguousarray(fp32.astype(np.float16)), qtype
     if qtype is GGMLQuantizationType.Q8_0:
         if fp32.shape[-1] % 32 != 0:
             raise SystemExit(f"{name}: last dim {fp32.shape[-1]} not multiple of 32 (Q8_0 block)")

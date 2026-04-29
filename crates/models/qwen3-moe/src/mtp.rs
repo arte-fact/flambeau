@@ -178,7 +178,7 @@ fn upload_mtp_tensor(
     device: &HipDevice,
 ) -> Result<DeviceTensor> {
     let r = resolve_mtp_tensor(file, name)?;
-    if !matches!(r.dtype, GgmlDType::F32 | GgmlDType::Q8_0) {
+    if !matches!(r.dtype, GgmlDType::F32 | GgmlDType::F16 | GgmlDType::Q8_0) {
         bail!("MTP tensor `{name}` has unexpected dtype {:?}", r.dtype);
     }
     use flambeau_core::{CopyDirection, Device, DevicePtr, Stream};
@@ -360,6 +360,14 @@ pub fn forward_mtp_step(
     use flambeau_ops::hip::norm::{quantize_f16_q8_1, rmsnorm_f16, rmsnorm_quant_q8_1};
     use flambeau_ops::hip::qmatmul::mmvq;
 
+    fn qdtype_for(w: &DeviceTensor) -> Result<QDtype> {
+        Ok(match w.dtype {
+            GgmlDType::Q8_0 => QDtype::Q8_0,
+            GgmlDType::F16  => QDtype::F16,
+            d => bail!("MTP linear `{}` has unsupported dtype {d:?}", w.name),
+        })
+    }
+
     let _ = _Dev::new; // silence unused-import warning in some configs
 
     let h = cfg.hidden_size;
@@ -447,7 +455,7 @@ pub fn forward_mtp_step(
         .context("mtp fc_in → Q8_1")?;
     mmvq(
         ops, stream, mtp.fc.ptr, fc_in_q8_1, h0_f32,
-        h, 2 * h, QDtype::Q8_0,
+        h, 2 * h, qdtype_for(&mtp.fc)?,
     )
     .context("mtp mmvq fc")?;
     cast_f32_to_f16(ops, stream, h0_f32, h0_f16, h)
@@ -463,7 +471,7 @@ pub fn forward_mtp_step(
     // ── 5. q/k/v projections from h0n_q8_1
     mmvq(
         ops, stream, mtp.block.q_proj.ptr, h0n_q8_1, q_full_f32,
-        2 * n_q * head_dim, h, QDtype::Q8_0,
+        2 * n_q * head_dim, h, qdtype_for(&mtp.block.q_proj)?,
     )
     .context("mtp mmvq q_proj")?;
     cast_f32_to_f16(ops, stream, q_full_f32, q_full_f16, 2 * n_q * head_dim)
@@ -476,14 +484,14 @@ pub fn forward_mtp_step(
 
     mmvq(
         ops, stream, mtp.block.k_proj.ptr, h0n_q8_1, k_f32,
-        n_kv * head_dim, h, QDtype::Q8_0,
+        n_kv * head_dim, h, qdtype_for(&mtp.block.k_proj)?,
     )
     .context("mtp mmvq k_proj")?;
     cast_f32_to_f16(ops, stream, k_f32, k_f16, n_kv * head_dim)
         .context("mtp cast k → F16")?;
     mmvq(
         ops, stream, mtp.block.v_proj.ptr, h0n_q8_1, v_f32,
-        n_kv * head_dim, h, QDtype::Q8_0,
+        n_kv * head_dim, h, qdtype_for(&mtp.block.v_proj)?,
     )
     .context("mtp mmvq v_proj")?;
     cast_f32_to_f16(ops, stream, v_f32, v_f16, n_kv * head_dim)
@@ -560,7 +568,7 @@ pub fn forward_mtp_step(
         .context("mtp gated → Q8_1")?;
     mmvq(
         ops, stream, mtp.block.o_proj.ptr, gated_q8_1, attn_proj_f32,
-        h, n_q * head_dim, QDtype::Q8_0,
+        h, n_q * head_dim, qdtype_for(&mtp.block.o_proj)?,
     )
     .context("mtp mmvq o_proj")?;
     cast_f32_to_f16(ops, stream, attn_proj_f32, attn_proj_f16, h)
@@ -580,19 +588,19 @@ pub fn forward_mtp_step(
     // ── 13. MLP: gate + up matmuls, swiglu+quant fused, down matmul
     mmvq(
         ops, stream, mtp.block.gate_proj.ptr, h1n_q8_1, gate_mlp_f32,
-        inter, h, QDtype::Q8_0,
+        inter, h, qdtype_for(&mtp.block.gate_proj)?,
     )
     .context("mtp mmvq gate_proj")?;
     mmvq(
         ops, stream, mtp.block.up_proj.ptr, h1n_q8_1, up_mlp_f32,
-        inter, h, QDtype::Q8_0,
+        inter, h, qdtype_for(&mtp.block.up_proj)?,
     )
     .context("mtp mmvq up_proj")?;
     swiglu_f32_to_q8_1(ops, stream, gate_mlp_f32, up_mlp_f32, mlp_q8_1, inter)
         .context("mtp swiglu_f32_to_q8_1")?;
     mmvq(
         ops, stream, mtp.block.down_proj.ptr, mlp_q8_1, down_f32,
-        h, inter, QDtype::Q8_0,
+        h, inter, qdtype_for(&mtp.block.down_proj)?,
     )
     .context("mtp mmvq down_proj")?;
     cast_f32_to_f16(ops, stream, down_f32, down_f16, h)
@@ -734,6 +742,7 @@ pub fn forward_mtp_step_with_lm_head(
         .context("mtp lm_head quantize")?;
 
     let dtype = match lm_head_weight.dtype {
+        flambeau_quant::GgmlDType::F16  => flambeau_core::op::QDtype::F16,
         flambeau_quant::GgmlDType::Q8_0 => flambeau_core::op::QDtype::Q8_0,
         flambeau_quant::GgmlDType::Q4_0 => flambeau_core::op::QDtype::Q4_0,
         flambeau_quant::GgmlDType::Q4_1 => flambeau_core::op::QDtype::Q4_1,
