@@ -12,7 +12,8 @@
 use anyhow::{bail, Context, Result};
 use flambeau_backend_hip::{BarP2pAllReduce, HipCluster};
 use flambeau_qwen3_moe::forward::{
-    forward_one_token_hybrid_logits, forward_one_token_pp_logits, forward_one_token_tp_logits,
+    forward_one_token_hybrid_logits, forward_one_token_pp_logits,
+    forward_one_token_tp_keep_logits_on_device, forward_one_token_tp_logits,
     forward_prefill_hybrid_logits, forward_prefill_pp_logits, forward_prefill_tp_logits,
     forward_speculative_pp_step, ShardedForwardOneTokenScratch,
     ShardedForwardOneTokenScratchHybrid, ShardedForwardOneTokenScratchTp,
@@ -432,4 +433,37 @@ pub fn decode_logits(
         _ => bail!("LoadedModel/Inflight variant mismatch"),
     }
 }
+
+/// **Sampler-D3 Phase B (#211)** — same as [`decode_logits`] but does
+/// NOT DtoH the F32 logits row to host. Logits remain on the head
+/// rank's `output_head.logits_f32` device pointer; the caller (the
+/// GPU sampler hook in `gpu_sampler.rs`) consumes them in place via
+/// `topk_softmax_f32` before the next forward call clobbers the
+/// buffer. TP-only for now (matches Phase A coverage).
+pub fn decode_keep_logits_on_device(
+    model: &LoadedModel,
+    cluster: &HipCluster,
+    inflight: &mut Inflight,
+    token: u32,
+    position: usize,
+) -> Result<()> {
+    match (model, inflight) {
+        (LoadedModel::Tp { model, ar }, Inflight::Tp { session, decode }) => {
+            forward_one_token_tp_keep_logits_on_device(
+                model,
+                decode,
+                cluster,
+                ar,
+                &mut session.caches,
+                token,
+                position,
+            )
+            .context("TP decode_keep_logits_on_device")
+        }
+        _ => bail!(
+            "decode_keep_logits_on_device only wired for TP topology (Phase B)"
+        ),
+    }
+}
+
 

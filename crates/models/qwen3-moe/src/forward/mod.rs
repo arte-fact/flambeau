@@ -82,9 +82,9 @@ pub use pp::{
 
 pub mod tp;
 pub use tp::{
-    forward_one_token_tp, forward_one_token_tp_logits, forward_prefill_tp_logits,
-    RankForwardPrefillScratchTp, RankForwardScratchTp, ShardedForwardOneTokenScratchTp,
-    ShardedForwardPrefillScratchTp,
+    forward_one_token_tp, forward_one_token_tp_keep_logits_on_device,
+    forward_one_token_tp_logits, forward_prefill_tp_logits, RankForwardPrefillScratchTp,
+    RankForwardScratchTp, ShardedForwardOneTokenScratchTp, ShardedForwardPrefillScratchTp,
 };
 
 pub mod hybrid;

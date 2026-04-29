@@ -21,8 +21,8 @@ use tokio_stream::wrappers::ReceiverStream;
 use crate::api::*;
 use crate::gpu_sampler::{self, GpuSamplerScratch};
 use crate::model::{
-    decode_logits, decode_spec_pp, decode_spec_pp_sampling, prefill_logits, Inflight, LoadedModel,
-    SpecDecodePp,
+    decode_keep_logits_on_device, decode_logits, decode_spec_pp, decode_spec_pp_sampling,
+    prefill_logits, Inflight, LoadedModel, SpecDecodePp,
 };
 use crate::state::SamplingParams;
 
@@ -844,20 +844,19 @@ fn run_completion_blocking(
             logits_buf[sid as usize] = f32::NEG_INFINITY;
         }
     }
-    // First token: GPU sampler path if enabled, else host. Empty history.
+    // First token: ALWAYS goes through the host path. Prefill writes
+    // logits to its own local scratch (disposed at end of prefill); the
+    // decode scratch's `output_head.logits_f32` is uninitialised at
+    // this point. The GPU sampler path activates from the SECOND token
+    // onwards once the decode forward populates the right buffer.
+    // (One-shot first token doesn't matter perf-wise; D3 Phase B's
+    // bigger win is the per-step decode DtoH-skip.)
     let inv_temp = if sampling.temperature > 0.0 {
         1.0 / sampling.temperature
     } else {
         1.0
     };
-    let first_next = if let Some(scratch) = gpu_scratch.as_mut() {
-        gpu_sampler::run_gpu_topk(model, cluster, &inflight, scratch, inv_temp)
-            .context("first-token GPU topk")?;
-        gpu_sampler::apply_stop_mask(&scratch.host_ids, &mut scratch.host_probs, stop_ids);
-        sampler.sample_from_topk(&scratch.host_ids, &scratch.host_probs, sampling)
-    } else {
-        sampler.sample(&logits_buf, sampling, &[])
-    };
+    let first_next = sampler.sample(&logits_buf, sampling, &[]);
     let is_greedy = sampling.is_greedy();
     tracing::info!(
         target: "server.completion.first_token",
@@ -980,36 +979,21 @@ fn run_completion_blocking(
     } else {
         for step in 1..params.max_tokens as usize {
             let force_mask = step < MIN_RESPONSE_TOKENS && !relax_stop_mask;
-            decode_logits(
-                model,
-                cluster,
-                &mut inflight,
-                last_token,
-                prompt_ids.len() + step,
-                &mut logits_buf,
-            )
-            .context("decode step logits")?;
-            if !relax_stop_mask {
-                for &sid in stop_ids {
-                    if (sid as usize) < logits_buf.len() {
-                        if force_mask {
-                            logits_buf[sid as usize] = f32::NEG_INFINITY;
-                        } else {
-                            logits_buf[sid as usize] -= STOP_BIAS;
-                        }
-                    }
-                }
-            }
-            // Pass `generated` as history so penalties can fire on repeats
-            // / frequent tokens. T4.b.2 — without this, Qwen3.5/3.6 agent
-            // loops degrade to long-CoT drift per the Ollama post-mortem.
-            //
-            // **Sampler-D3 Phase A** — when GPU sampler is enabled (and
-            // !has_penalties() per the gate above), run topk on the
-            // device logits and sample from the K-tuple. Stop-mask is
-            // applied to the K probs after DtoH (matching the host
-            // path: NEG_INFINITY when force_mask, no-op for STOP_BIAS=0).
+            // **Sampler-D3 Phase B** — GPU sampler path skips the
+            // 600 KB host-logits DtoH entirely; logits stay on device
+            // and `run_gpu_topk` consumes them via topk_softmax_f32.
+            // Host path keeps the existing `decode_logits` DtoH so
+            // penalty / non-TP / fallback callers still get host
+            // logits.
             let next = if let Some(scratch) = gpu_scratch.as_mut() {
+                decode_keep_logits_on_device(
+                    model,
+                    cluster,
+                    &mut inflight,
+                    last_token,
+                    prompt_ids.len() + step,
+                )
+                .context("decode step keep-on-device")?;
                 gpu_sampler::run_gpu_topk(
                     model, cluster, &inflight, scratch, inv_temp,
                 )
@@ -1027,6 +1011,29 @@ fn run_completion_blocking(
                     sampling,
                 )
             } else {
+                decode_logits(
+                    model,
+                    cluster,
+                    &mut inflight,
+                    last_token,
+                    prompt_ids.len() + step,
+                    &mut logits_buf,
+                )
+                .context("decode step logits")?;
+                if !relax_stop_mask {
+                    for &sid in stop_ids {
+                        if (sid as usize) < logits_buf.len() {
+                            if force_mask {
+                                logits_buf[sid as usize] = f32::NEG_INFINITY;
+                            } else {
+                                logits_buf[sid as usize] -= STOP_BIAS;
+                            }
+                        }
+                    }
+                }
+                // Pass `generated` as history so penalties can fire on
+                // repeats / frequent tokens. T4.b.2 — without this,
+                // Qwen3.5/3.6 agent loops degrade to long-CoT drift.
                 sampler.sample(&logits_buf, sampling, &generated)
             };
             generated.push(next);

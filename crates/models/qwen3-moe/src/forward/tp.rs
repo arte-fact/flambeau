@@ -657,7 +657,8 @@ pub fn forward_one_token_tp(
     position: usize,
 ) -> anyhow::Result<u32> {
     forward_one_token_tp_inner(
-        model, scratch, cluster, ar, layer_caches, token_id, position, /*logits_out=*/ None,
+        model, scratch, cluster, ar, layer_caches, token_id, position,
+        LogitsSink::HostArgmax,
     )
 }
 
@@ -677,7 +678,33 @@ pub fn forward_one_token_tp_logits(
     logits_out: &mut Vec<f32>,
 ) -> anyhow::Result<()> {
     forward_one_token_tp_inner(
-        model, scratch, cluster, ar, layer_caches, token_id, position, Some(logits_out),
+        model, scratch, cluster, ar, layer_caches, token_id, position,
+        LogitsSink::HostLogits(logits_out),
+    )
+    .map(|_| ())
+}
+
+/// **Sampler-D3 Phase B (#211)** — runs the same forward as
+/// [`forward_one_token_tp_logits`] but does NOT DtoH the `[vocab]` F32
+/// logits row. After return, the head rank's
+/// `scratch.per_rank[head].output_head.logits_f32` holds valid F32
+/// logits for one token; the caller must consume it (e.g.
+/// `topk_softmax_f32`) before the next forward call clobbers it.
+///
+/// Saves the 600 KB DtoH per token — visible in the chat decode hot
+/// path under FLAMBEAU_GPU_SAMPLER=1.
+pub fn forward_one_token_tp_keep_logits_on_device(
+    model: &Qwen3MoETpModel,
+    scratch: &mut ShardedForwardOneTokenScratchTp,
+    cluster: &flambeau_backend_hip::HipCluster,
+    ar: &BarP2pAllReduce,
+    layer_caches: &mut [Vec<LayerCache>],
+    token_id: u32,
+    position: usize,
+) -> anyhow::Result<()> {
+    forward_one_token_tp_inner(
+        model, scratch, cluster, ar, layer_caches, token_id, position,
+        LogitsSink::KeepOnDevice,
     )
     .map(|_| ())
 }
@@ -1370,10 +1397,29 @@ fn ar_residual_prefill(
     Ok(())
 }
 
+/// What to do with the F32 logits row after the LM head emits it on
+/// the head rank's device.
+///
+/// **Sampler-D3 Phase B (#211)** added the third variant — a "skip
+/// the postlude" mode the server uses when running the GPU top-K
+/// sampler directly on the head-rank's `OutputHeadScratch::logits_f32`.
+pub(crate) enum LogitsSink<'a> {
+    /// Run host-side argmax + return the predicted token. Existing
+    /// behaviour for `forward_one_token_tp` (greedy single-token).
+    HostArgmax,
+    /// DtoH `[vocab]` F32 logits to the caller's `Vec<f32>`. Returns 0.
+    /// Existing behaviour for `forward_one_token_tp_logits` /
+    /// `forward_prefill_tp_logits`.
+    HostLogits(&'a mut Vec<f32>),
+    /// Leave the logits on device — caller is responsible for consuming
+    /// `head_scratch.logits_f32` before the next forward call clobbers
+    /// it. Returns 0. Used by the GPU-side sampler path.
+    KeepOnDevice,
+}
+
 /// Shared body for `forward_one_token_tp` (argmax host-side) and
-/// `forward_one_token_tp_logits` (download F32 row to host). When
-/// `logits_out` is `Some`, downloads + returns 0; when `None`, runs
-/// host argmax and returns the sampled token id.
+/// `forward_one_token_tp_logits` (download F32 row to host) and
+/// `forward_one_token_tp_keep_logits_on_device` (Sampler-D3 Phase B).
 fn forward_one_token_tp_inner(
     model: &Qwen3MoETpModel,
     scratch: &mut ShardedForwardOneTokenScratchTp,
@@ -1382,7 +1428,7 @@ fn forward_one_token_tp_inner(
     layer_caches: &mut [Vec<LayerCache>],
     token_id: u32,
     position: usize,
-    logits_out: Option<&mut Vec<f32>>,
+    sink: LogitsSink<'_>,
 ) -> anyhow::Result<u32> {
     let cfg = &model.config;
     let world = cluster.ranks() as u32;
@@ -1529,30 +1575,40 @@ fn forward_one_token_tp_inner(
     )
     .context("forward_output_head_decode (TP)")?;
 
-    // 4. Either download logits or argmax host-side.
-    if let Some(out) = logits_out {
-        // Download `vocab_size` F32 logits to host. Mirrors PP's
-        // `download_logits_host` shape — caller owns the buffer.
-        out.clear();
-        out.resize(cfg.vocab_size, 0.0f32);
-        // SAFETY: logits_f32 is valid for cfg.vocab_size F32 values
-        // on `device`; out.as_mut_ptr() is host memory of matching size.
-        unsafe {
-            <flambeau_backend_hip::HipDevice as flambeau_core::Device>::memcpy_async(
-                device,
-                stream,
-                flambeau_core::CopyDirection::DeviceToHost,
-                flambeau_core::DevicePtr(out.as_mut_ptr() as usize),
-                logits_f32,
-                cfg.vocab_size * 4,
-            )?;
+    // 4. Dispatch on sink: DtoH, host argmax, or leave on device.
+    match sink {
+        LogitsSink::HostLogits(out) => {
+            // Download `vocab_size` F32 logits to host. Mirrors PP's
+            // `download_logits_host` shape — caller owns the buffer.
+            out.clear();
+            out.resize(cfg.vocab_size, 0.0f32);
+            // SAFETY: logits_f32 is valid for cfg.vocab_size F32 values
+            // on `device`; out.as_mut_ptr() is host memory of matching size.
+            unsafe {
+                <flambeau_backend_hip::HipDevice as flambeau_core::Device>::memcpy_async(
+                    device,
+                    stream,
+                    flambeau_core::CopyDirection::DeviceToHost,
+                    flambeau_core::DevicePtr(out.as_mut_ptr() as usize),
+                    logits_f32,
+                    cfg.vocab_size * 4,
+                )?;
+            }
+            flambeau_core::Stream::synchronize(stream)?;
+            Ok(0)
         }
-        flambeau_core::Stream::synchronize(stream)?;
-        Ok(0)
-    } else {
-        let token = argmax_token_host(device, stream, logits_f32, cfg.vocab_size)
-            .context("argmax_token_host (TP)")?;
-        Ok(token)
+        LogitsSink::HostArgmax => {
+            let token = argmax_token_host(device, stream, logits_f32, cfg.vocab_size)
+                .context("argmax_token_host (TP)")?;
+            Ok(token)
+        }
+        LogitsSink::KeepOnDevice => {
+            // No sync here — the caller's downstream kernel (topk on
+            // the same default_stream) will serialise device-side
+            // against the output_head writes via stream ordering.
+            // CPU-side blocking would just stall the dispatch loop.
+            Ok(0)
+        }
     }
 }
 
