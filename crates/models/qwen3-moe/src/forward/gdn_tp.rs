@@ -113,6 +113,7 @@ pub fn forward_gdn_decode_tp(
     x_in: DevicePtr,
     partial_attn_out: DevicePtr,
     tp_world: u32,
+    kq_replicated: bool,
 ) -> Result<()> {
     if tp_world == 0 {
         bail!("tp_world must be >= 1");
@@ -129,14 +130,21 @@ pub fn forward_gdn_decode_tp(
     if num_v_heads % world != 0 {
         bail!("num_v_heads {num_v_heads} not divisible by tp_world {tp_world}");
     }
-    if num_k_heads % world != 0 {
+    if !kq_replicated && num_k_heads % world != 0 {
         bail!("num_k_heads {num_k_heads} not divisible by tp_world {tp_world}");
     }
     if d_inner % world != 0 {
         bail!("d_inner {d_inner} not divisible by tp_world {tp_world}");
     }
     let local_num_v_heads = num_v_heads / world;
-    let local_num_k_heads = num_k_heads / world;
+    // **TP-4d-i3** — kq_replicated keeps the full K/Q head count
+    // per rank (rep_outer arches: qwen35moe / qwen36moe). See
+    // `WeightLayout::FusedQkvParallel` doc for the rationale.
+    let local_num_k_heads = if kq_replicated {
+        num_k_heads
+    } else {
+        num_k_heads / world
+    };
     let local_d_inner = d_inner / world;
     let local_qk_size = local_num_k_heads * head_k_dim;
     let local_v_size = local_num_v_heads * head_v_dim;
@@ -144,7 +152,12 @@ pub fn forward_gdn_decode_tp(
     if local_v_size != local_d_inner {
         bail!("GDN per-rank dim bug: local_v_size {local_v_size} != local_d_inner {local_d_inner}");
     }
-    let n_rep = num_v_heads / num_k_heads;
+    // n_rep is the V→K ratio the kernel walks. When K is replicated,
+    // each local V head sees its actual matching K head locally:
+    //   - rep_outer + kq_replicated:  H_v_local / H_k = (H_v/world)/H_k
+    //   - rep_inner contiguous:       H_v / H_k (same on local side)
+    // Both reduce to local_num_v_heads / local_num_k_heads.
+    let n_rep = local_num_v_heads / local_num_k_heads;
 
     let probe = std::env::var("FLAMBEAU_TP_PROBE").is_ok();
     macro_rules! probe_f32 {
@@ -812,6 +825,7 @@ pub fn forward_gdn_prefill_tp(
     partial_attn_out: DevicePtr,
     n_tokens: usize,
     tp_world: u32,
+    kq_replicated: bool,
 ) -> Result<()> {
     if tp_world == 0 {
         bail!("tp_world must be >= 1");
@@ -837,14 +851,20 @@ pub fn forward_gdn_prefill_tp(
     if num_v_heads % world != 0 {
         bail!("num_v_heads {num_v_heads} not divisible by tp_world {tp_world}");
     }
-    if num_k_heads % world != 0 {
+    if !kq_replicated && num_k_heads % world != 0 {
         bail!("num_k_heads {num_k_heads} not divisible by tp_world {tp_world}");
     }
     if d_inner % world != 0 {
         bail!("d_inner {d_inner} not divisible by tp_world {tp_world}");
     }
     let local_num_v_heads = num_v_heads / world;
-    let local_num_k_heads = num_k_heads / world;
+    // **TP-4d-i3** — see `forward_gdn_decode_tp` for the kq_replicated
+    // rationale (rep_outer head-mapping + contiguous TP split is broken).
+    let local_num_k_heads = if kq_replicated {
+        num_k_heads
+    } else {
+        num_k_heads / world
+    };
     let local_d_inner = d_inner / world;
     let local_qk_size = local_num_k_heads * head_k_dim;
     let local_v_size = local_num_v_heads * head_v_dim;
@@ -854,7 +874,7 @@ pub fn forward_gdn_prefill_tp(
             "GDN per-rank dim bug: local_v_size {local_v_size} != local_d_inner {local_d_inner}"
         );
     }
-    let n_rep = num_v_heads / num_k_heads;
+    let n_rep = local_num_v_heads / local_num_k_heads;
 
     // 1. rmsnorm + dual Q8_1 quantise (std + DS4 MMQ layouts).
     rmsnorm_f16(

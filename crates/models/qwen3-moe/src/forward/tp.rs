@@ -1047,6 +1047,7 @@ pub fn forward_prefill_tp_batched_layers(
                     partial_attn_out,
                     n_tokens,
                     world,
+                    model.tp.gdn_kq_replicated(),
                 )
                 .with_context(|| format!("gdn prefill TP layer {il}"))?;
             }
@@ -2362,6 +2363,7 @@ pub(crate) fn forward_gdn_layer_tp(
             hidden_a,
             partial_attn_out,
             world,
+            model.tp.gdn_kq_replicated(),
         )?;
     }
     if probe {

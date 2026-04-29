@@ -296,16 +296,22 @@ fn sample_validate_fused_qkv(
     name: &str,
 ) -> Result<()> {
     let layout = tp.for_tensor(name).expect("known tensor");
-    let (world, num_v, num_k, head_v, head_k) = match layout {
+    let (world, num_v, num_k, head_v, head_k, kq_replicated) = match layout {
         WeightLayout::FusedQkvParallel {
             world,
             num_v_heads,
             num_k_heads,
             head_v_dim,
             head_k_dim,
-        } => (world, num_v_heads, num_k_heads, head_v_dim, head_k_dim),
+            kq_replicated,
+        } => (world, num_v_heads, num_k_heads, head_v_dim, head_k_dim, kq_replicated),
         other => panic!("{name} expected FusedQkvParallel, got {other:?}"),
     };
+    // Reconstruction below assumes the contiguous-split case.
+    assert!(
+        !kq_replicated,
+        "{name}: this reconstruction harness is for contiguous-split (kq_replicated=false) only"
+    );
     let info = file.info(name)?;
     let outer_full = info.dims[0] as usize;
     let v_full = (num_v as usize) * (head_v as usize);

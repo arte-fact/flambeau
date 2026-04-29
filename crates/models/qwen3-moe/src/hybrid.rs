@@ -347,6 +347,7 @@ impl Qwen3MoEHybridSession {
         let tp_world = model.spec.tp_size;
         let mut stages: Vec<Qwen3MoEHybridStageSession> = Vec::with_capacity(model.stages.len());
         for stage in &model.stages {
+            let gdn_kq_replicated = stage.tp_model.tp.gdn_kq_replicated();
             let mut per_rank: Vec<Vec<LayerCache>> =
                 Vec::with_capacity(stage.sub_cluster.ranks());
             for rank_idx in 0..stage.sub_cluster.ranks() {
@@ -355,15 +356,15 @@ impl Qwen3MoEHybridSession {
                 let mut layer_caches: Vec<LayerCache> =
                     Vec::with_capacity(stage.layer_range.len());
                 for il in stage.layer_range.clone() {
-                    layer_caches
-                        .push(alloc_layer_cache_tp(cfg, device, il, tp_world).with_context(
-                            || {
+                    layer_caches.push(
+                        alloc_layer_cache_tp(cfg, device, il, tp_world, gdn_kq_replicated)
+                            .with_context(|| {
                                 format!(
                                     "alloc_layer_cache_tp stage={} rank={rank_idx} layer={il}",
                                     stage.stage_idx
                                 )
-                            },
-                        )?);
+                            })?,
+                    );
                 }
                 device.default_stream().synchronize()?;
                 per_rank.push(layer_caches);

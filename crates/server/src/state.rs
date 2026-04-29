@@ -61,10 +61,12 @@ impl SamplingParams {
     ///   into degenerate synonym-spam (verified live). Keep it 0.0;
     ///   callers doing agent loops can opt into a small positive value.
     /// - `frequency_penalty` → `0.0` unless client-supplied.
-    /// - `max_tokens` → `512` when omitted; capped at `8192` to keep a
+    /// - `max_tokens` → `4096` when omitted; capped at `8192` to keep a
     ///   single request from monopolising the server. Earlier 2048 cap
     ///   silently truncated long answers (`finish=length` after exactly
-    ///   2048 tokens regardless of the request).
+    ///   2048 tokens regardless of the request); earlier 512 default
+    ///   was too tight for code-generation requests via curl/clients
+    ///   that don't pass `max_tokens` explicitly.
     #[allow(clippy::too_many_arguments)]
     pub fn from_parts(
         temperature: Option<f32>,
@@ -101,7 +103,7 @@ impl SamplingParams {
         SamplingParams {
             sampling,
             seed: seed.unwrap_or_else(default_seed),
-            max_tokens: max_tokens.unwrap_or(512).min(8192),
+            max_tokens: max_tokens.unwrap_or(4096).min(8192),
         }
     }
 }

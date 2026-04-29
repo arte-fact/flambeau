@@ -1114,13 +1114,27 @@ fn compute_per_rank_dims(full_dims: &[u64], layout: WeightLayout) -> Vec<u64> {
             }
             d
         }
-        WeightLayout::FusedQkvParallel { world, .. } => {
-            // FusedQkv slices outer dim (dim 0) into V/K/Q sub-slabs;
-            // each sub-slab divides by world, so the resulting outer
-            // dim is full_outer / world.
+        WeightLayout::FusedQkvParallel {
+            world,
+            num_v_heads,
+            num_k_heads,
+            head_v_dim,
+            head_k_dim,
+            kq_replicated,
+        } => {
+            // FusedQkv slices outer dim (dim 0). When `kq_replicated`
+            // is false, all of V/K/Q divide by world (per-rank outer =
+            // full_outer / world). When true, only V splits and K/Q
+            // are full per rank, so per-rank outer is asymmetric.
             let mut d = full_dims.to_vec();
             if let Some(slot) = d.get_mut(0) {
-                *slot /= world as u64;
+                if kq_replicated {
+                    let v_part = (num_v_heads as u64) * (head_v_dim as u64);
+                    let k_part = (num_k_heads as u64) * (head_k_dim as u64);
+                    *slot = v_part / (world as u64) + 2 * k_part;
+                } else {
+                    *slot /= world as u64;
+                }
             }
             d
         }
@@ -1148,14 +1162,20 @@ impl Qwen3MoETpSession {
             );
         }
         let cfg = &model.config;
+        let gdn_kq_replicated = model.tp.gdn_kq_replicated();
         let mut caches = Vec::with_capacity(cluster.ranks());
         for rank_idx in 0..cluster.ranks() {
             let device = cluster.device(rank_idx);
             device.bind()?;
             let mut layer_caches = Vec::with_capacity(cfg.num_layers);
             for il in 0..cfg.num_layers {
-                layer_caches
-                    .push(crate::session::alloc_layer_cache_tp(cfg, device, il, world)?);
+                layer_caches.push(crate::session::alloc_layer_cache_tp(
+                    cfg,
+                    device,
+                    il,
+                    world,
+                    gdn_kq_replicated,
+                )?);
             }
             device.default_stream().synchronize()?;
             caches.push(layer_caches);

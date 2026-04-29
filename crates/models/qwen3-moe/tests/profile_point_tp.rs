@@ -64,7 +64,20 @@ fn profile_point_tp() -> Result<()> {
         .ok().and_then(|s| s.parse().ok()).unwrap_or(0);
 
     let file = GgufFile::open(&path)?;
-    let cfg = Qwen3MoEConfig::from_gguf(&file)?;
+    let mut cfg = Qwen3MoEConfig::from_gguf(&file)?;
+    // Honor FLAMBEAU_CTX_CAP so models with multi-100K native ctx don't OOM
+    // KV-cache allocation when only a short profile sweep is wanted.
+    if let Ok(cap_str) = std::env::var("FLAMBEAU_CTX_CAP") {
+        if let Ok(cap) = cap_str.parse::<usize>() {
+            if cap > 0 && cap < cfg.context_length {
+                eprintln!(
+                    "FLAMBEAU_CTX_CAP shrinking cfg.context_length from {} to {cap}",
+                    cfg.context_length
+                );
+                cfg.context_length = cap;
+            }
+        }
+    }
     let cluster: Arc<HipCluster> = Arc::new(HipCluster::new(&devices)?);
     let world = cluster.ranks() as u32;
     let layout = Qwen35DenseTpLayout::new(&cfg, world)?;

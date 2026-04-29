@@ -374,6 +374,7 @@ pub(crate) fn alloc_layer_cache_tp(
     device: &HipDevice,
     il: usize,
     tp_world: u32,
+    gdn_kq_replicated: bool,
 ) -> Result<LayerCache> {
     if tp_world == 0 {
         anyhow::bail!("tp_world must be >= 1");
@@ -390,7 +391,7 @@ pub(crate) fn alloc_layer_cache_tp(
                 gdn.num_v_heads
             );
         }
-        if gdn.num_k_heads % world != 0 {
+        if !gdn_kq_replicated && gdn.num_k_heads % world != 0 {
             anyhow::bail!(
                 "alloc_layer_cache_tp: gdn.num_k_heads {} not divisible by tp_world {tp_world}",
                 gdn.num_k_heads
@@ -398,7 +399,13 @@ pub(crate) fn alloc_layer_cache_tp(
         }
         let head_v_dim = gdn.head_v_dim();
         let local_num_v_heads = gdn.num_v_heads / world;
-        let local_num_k_heads = gdn.num_k_heads / world;
+        // **TP-4d-i3** — replicated K/Q (rep_outer arches) keeps the
+        // full K head count per rank. See `WeightLayout::FusedQkvParallel`.
+        let local_num_k_heads = if gdn_kq_replicated {
+            gdn.num_k_heads
+        } else {
+            gdn.num_k_heads / world
+        };
         let state_elems = local_num_v_heads * gdn.head_k_dim * head_v_dim;
         let state_bytes = state_elems * std::mem::size_of::<f32>();
         let state = device

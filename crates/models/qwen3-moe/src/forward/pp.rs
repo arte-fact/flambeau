@@ -659,6 +659,7 @@ fn forward_one_token_pp_inner(
             .context("per-rank LayerForwardScratch missing")?;
 
         let (mut x_in, mut x_out) = (rank_scratch.hidden_a, rank_scratch.hidden_b);
+        let pp_probe = std::env::var("FLAMBEAU_PP_PROBE").is_ok();
         for (local_idx, layer_weights) in shard.layers.iter().enumerate() {
             let layer_cache = &mut rank_session.caches[local_idx];
             forward_layer_decode(
@@ -687,6 +688,52 @@ fn forward_one_token_pp_inner(
                 )
             })?;
             std::mem::swap(&mut x_in, &mut x_out);
+            // FLAMBEAU_PP_PROBE — dump x_in (this layer's output, post-swap)
+            // for parity comparison vs the TP path (FLAMBEAU_TP_PROBE). Same
+            // format: per-layer min/max/L2/head[0..4]. Disabled by default.
+            if pp_probe {
+                use flambeau_core::CopyDirection;
+                let n = hidden_bytes / 2;
+                let mut host = vec![0u16; n];
+                unsafe {
+                    device.memcpy_async(
+                        device.default_stream(),
+                        CopyDirection::DeviceToHost,
+                        DevicePtr(host.as_mut_ptr() as usize),
+                        x_in,
+                        hidden_bytes,
+                    )?;
+                }
+                device.default_stream().synchronize()?;
+                let mut nan = 0usize;
+                let mut min = f32::INFINITY;
+                let mut max = f32::NEG_INFINITY;
+                let mut sum = 0.0f64;
+                let mut sumsq = 0.0f64;
+                for &b in &host {
+                    let v = half::f16::from_bits(b).to_f32();
+                    if v.is_nan() {
+                        nan += 1;
+                    } else {
+                        if v < min { min = v; }
+                        if v > max { max = v; }
+                        sum += v as f64;
+                        sumsq += (v as f64) * (v as f64);
+                    }
+                }
+                let mean = sum / (n - nan).max(1) as f64;
+                let l2 = sumsq.sqrt();
+                let head: Vec<f32> = host[..host.len().min(4)]
+                    .iter()
+                    .map(|&b| half::f16::from_bits(b).to_f32())
+                    .collect();
+                let il = layer_weights.layer_idx;
+                eprintln!(
+                    "  PP_PROBE after-layer hidden_a rank={rank_idx} il={il:>3} \
+                     n={n} nan={nan} L2={l2:.6} min={min:.6} max={max:.6} \
+                     mean={mean:.6} head={head:?}"
+                );
+            }
         }
         if x_in != rank_scratch.hidden_a {
             unsafe {

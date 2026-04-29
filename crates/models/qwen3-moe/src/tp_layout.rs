@@ -71,6 +71,15 @@ pub struct Qwen35DenseTpLayout {
     /// full `nKV` head outputs (duplicated work) but Q output is still
     /// sharded → AR-fold pattern unchanged.
     kv_replicated: bool,
+    /// **TP-4d-i3** — `true` when GDN K/Q must be replicated (rep_outer
+    /// arches `qwen35moe` / `qwen36moe`). Contiguous TP split of K/Q
+    /// is structurally broken under rep_outer head-mapping
+    /// (`V[v] → K[v % H_k]`); replicating K/Q is the standard fix
+    /// (analogous to `kv_replicated` for the full-attn block). The
+    /// sliced GDN forward then uses full `num_k_heads` and only V is
+    /// per-rank. `false` for `qwen3next` which uses rep_inner mapping
+    /// (`V[v] → K[v / n_rep]`) and is local under contiguous split.
+    gdn_kq_replicated: bool,
 }
 
 /// GDN head dims captured at construction. Used to feed
@@ -157,10 +166,18 @@ impl Qwen35DenseTpLayout {
                 });
             }
         }
+        // **TP-4d-i3** — rep-outer arches (qwen35moe / qwen36moe) need
+        // K/Q replicated across ranks. qwen3next uses rep_inner and is
+        // local under contiguous split. Pure-dense `qwen35` has no GDN
+        // block, so the flag is unobservable there; default false.
+        let gdn_kq_replicated =
+            cfg.arch == "qwen35moe" || cfg.arch == "qwen36moe";
+
         Ok(Self {
             world,
             gdn_dims,
             kv_replicated,
+            gdn_kq_replicated,
         })
     }
 
@@ -169,6 +186,15 @@ impl Qwen35DenseTpLayout {
     /// this to know whether to use full or per-rank K/V head counts.
     pub fn kv_replicated(&self) -> bool {
         self.kv_replicated
+    }
+
+    /// **TP-4d-i3** — `true` iff GDN K/Q are replicated across ranks
+    /// (rep_outer arches: `qwen35moe` / `qwen36moe`). The GDN-TP
+    /// forward kernels read this to know whether to use full or
+    /// per-rank `num_k_heads`. See [`WeightLayout::FusedQkvParallel`]
+    /// for the rationale.
+    pub fn gdn_kq_replicated(&self) -> bool {
+        self.gdn_kq_replicated
     }
 
     /// Mesh size this layout was built for.
@@ -300,6 +326,7 @@ impl Qwen35DenseTpLayout {
                         num_k_heads: d.num_k_heads,
                         head_v_dim: d.head_v_dim,
                         head_k_dim: d.head_k_dim,
+                        kq_replicated: self.gdn_kq_replicated,
                     })
                 },
             ),
@@ -589,6 +616,7 @@ mod tests {
             num_k_heads,
             head_v_dim,
             head_k_dim,
+            kq_replicated,
         } = layout
         {
             assert_eq!(world, 4);
@@ -596,6 +624,9 @@ mod tests {
             assert_eq!(num_k_heads, 16);
             assert_eq!(head_v_dim, 128);
             assert_eq!(head_k_dim, 128);
+            // qwen35_27b_cfg uses arch="qwen35" (rep_inner / dense),
+            // so kq_replicated stays false.
+            assert!(!kq_replicated);
         }
     }
 

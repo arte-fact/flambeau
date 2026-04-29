@@ -180,6 +180,16 @@ pub struct Sampler {
     logit_scratch: Vec<f32>,
     /// Reused for top-k / top-p / min-p filtering.
     pair_scratch: Vec<(u32, f32)>,
+    /// Sampler-F (#208) — reused sorted+dedup history snapshot for the
+    /// penalty path. Replaces the per-call `HashMap<u32, u32>` with a
+    /// `Vec<(u32, u32)>` (token id, count) sorted by id. Build via
+    /// sort_unstable on a copy of `history`, then dedup-with-counter.
+    /// At typical history lengths (≤2k), this beats hashing on cache
+    /// behaviour and avoids the per-call HashMap allocation.
+    history_counts: Vec<(u32, u32)>,
+    /// Sampler-F sort-staging buffer (cleared + filled with history
+    /// each call when penalties active).
+    history_sorted: Vec<u32>,
 }
 
 impl Sampler {
@@ -191,6 +201,8 @@ impl Sampler {
             rng: Rng::from_seed(seed),
             logit_scratch: Vec::new(),
             pair_scratch: Vec::new(),
+            history_counts: Vec::new(),
+            history_sorted: Vec::new(),
         }
     }
 
@@ -207,21 +219,39 @@ impl Sampler {
     /// Sample one token. `history` is the per-turn generated-token
     /// slice (empty `&[]` is fine for the first token, or when the
     /// request disables penalties). Penalties and filters are applied
-    /// to a clone of `logits` — the caller's buffer is untouched.
+    /// to a clone of `logits` only when needed; otherwise the caller's
+    /// buffer is read directly.
     pub fn sample(
         &mut self,
         logits: &[f32],
         mode: &Sampling,
         history: &[u32],
     ) -> u32 {
-        self.logit_scratch.clear();
-        self.logit_scratch.extend_from_slice(logits);
-        apply_penalties(&mut self.logit_scratch, history, mode);
+        // **Sampler-E (#207)** — when no penalty is active we don't
+        // need a writeable copy of `logits`, so skip the 600 KB
+        // `extend_from_slice` and read the caller's buffer directly.
+        // Saves ~150 µs/token on Qwen3.6's V=151424 vocab at default
+        // penalties (the chat-temp+top_p case the user hit).
+        let needs_penalties = mode.has_penalties() && !history.is_empty();
+        let logits_view: &[f32] = if needs_penalties {
+            self.logit_scratch.clear();
+            self.logit_scratch.extend_from_slice(logits);
+            apply_penalties_with_scratch(
+                &mut self.logit_scratch,
+                history,
+                mode,
+                &mut self.history_sorted,
+                &mut self.history_counts,
+            );
+            &self.logit_scratch
+        } else {
+            logits
+        };
         if mode.is_greedy() {
-            return argmax(&self.logit_scratch);
+            return argmax(logits_view);
         }
         sample_stochastic(
-            &self.logit_scratch,
+            logits_view,
             mode,
             &mut self.rng,
             &mut self.pair_scratch,
@@ -382,6 +412,10 @@ fn argmax(logits: &[f32]) -> u32 {
 /// `logits`. All three are no-ops at their default values, so this
 /// returns early when no penalty is active — no history walk at all
 /// on a default-config greedy call.
+///
+/// Allocates a fresh HashMap per call. Prefer
+/// [`apply_penalties_with_scratch`] from the per-session [`Sampler`]
+/// which reuses sort+dedup buffers.
 fn apply_penalties(logits: &mut [f32], history: &[u32], mode: &Sampling) {
     if !mode.has_penalties() || history.is_empty() {
         return;
@@ -394,10 +428,57 @@ fn apply_penalties(logits: &mut [f32], history: &[u32], mode: &Sampling) {
     for &tok in history {
         *counts.entry(tok).or_insert(0) += 1;
     }
+    apply_penalty_kernel(logits, mode, counts.iter().map(|(&t, &c)| (t, c)));
+}
+
+/// **Sampler-F (#208)** — penalty path with caller-owned scratch
+/// buffers. Replaces the per-call `HashMap<u32, u32>` build with a
+/// sort+dedup over a reused `Vec<u32>`. Faster than hashing for
+/// `history.len() ≤ ~2k` (typical chat-decode history at the time
+/// the penalty path runs) because the sort+dedup is O(N log N) but
+/// with much better cache behaviour and no allocator traffic.
+fn apply_penalties_with_scratch(
+    logits: &mut [f32],
+    history: &[u32],
+    mode: &Sampling,
+    sorted: &mut Vec<u32>,
+    counts: &mut Vec<(u32, u32)>,
+) {
+    if !mode.has_penalties() || history.is_empty() {
+        return;
+    }
+    sorted.clear();
+    sorted.extend_from_slice(history);
+    sorted.sort_unstable();
+    counts.clear();
+    let mut prev = sorted[0];
+    let mut run = 1u32;
+    for &tok in &sorted[1..] {
+        if tok == prev {
+            run += 1;
+        } else {
+            counts.push((prev, run));
+            prev = tok;
+            run = 1;
+        }
+    }
+    counts.push((prev, run));
+    apply_penalty_kernel(logits, mode, counts.iter().copied());
+}
+
+/// Inner penalty-application kernel — shared between the one-shot
+/// (`apply_penalties`) and per-session (`apply_penalties_with_scratch`)
+/// entry points so the actual logit math lives in one place.
+#[inline]
+fn apply_penalty_kernel<I>(logits: &mut [f32], mode: &Sampling, counts: I)
+where
+    I: IntoIterator<Item = (u32, u32)>,
+{
     let needs_count = mode.frequency_penalty != 0.0;
-    for (&tok, &c) in counts.iter() {
+    let logits_len = logits.len();
+    for (tok, c) in counts {
         let idx = tok as usize;
-        if idx >= logits.len() {
+        if idx >= logits_len {
             continue;
         }
         let l = &mut logits[idx];
@@ -461,8 +542,35 @@ fn sample_stochastic(
     // Sort by descending prob — needed for top-k / top-p. We always
     // sort when any filter is active; for plain-temperature there's no
     // sort (we go straight to multinomial over the full distribution).
+    //
+    // **Sampler-A** (#206) — when `top_p` (or `min_p`) is set without an
+    // explicit `top_k`, default to `top_k = TOP_K_AUTO_CAP` so the
+    // partial-sort path activates instead of an O(V log V) full sort.
+    // The cap is chosen well above the largest plausible top-p prefix
+    // at any sane temperature × top_p (a flat-ish distribution at
+    // temp=2.0, top_p=0.99 picks ~hundreds of candidates). If a
+    // pathological prompt exceeds this cap, we log + truncate — it's
+    // a faithful approximation of the top-p prefix anyway.
+    const TOP_K_AUTO_CAP: u32 = 2048;
     let any_filter = mode.top_k.is_some() || mode.top_p.is_some() || mode.min_p.is_some();
+    let effective_top_k: Option<u32> = match mode.top_k {
+        Some(k) => Some(k),
+        None if mode.top_p.is_some() || mode.min_p.is_some() => Some(TOP_K_AUTO_CAP),
+        None => None,
+    };
     let kept_end: usize = if any_filter {
+        // Partial-sort to top-K when K < V; full sort otherwise. At
+        // V=151424 vocab this turns the hot path from O(V log V) ≈
+        // 2.6M ops to O(V) + O(K log K) ≈ 150k + 22k = ~7× faster.
+        if let Some(k) = effective_top_k {
+            let k = (k as usize).min(pair_scratch.len());
+            if k > 0 && k < pair_scratch.len() {
+                pair_scratch.select_nth_unstable_by(k - 1, |a, b| {
+                    b.1.partial_cmp(&a.1).unwrap_or(Ordering::Equal)
+                });
+                pair_scratch.truncate(k);
+            }
+        }
         pair_scratch.sort_unstable_by(|a, b| {
             b.1.partial_cmp(&a.1).unwrap_or(Ordering::Equal)
         });
@@ -476,14 +584,33 @@ fn sample_stochastic(
             if p < 1.0 && p > 0.0 {
                 let mut cum = 0.0f32;
                 let mut prefix_end = 0usize;
+                let mut hit_p = false;
                 for (i, &(_, pv)) in pair_scratch.iter().take(end).enumerate() {
                     cum += pv;
                     prefix_end = i + 1;
                     if cum >= p {
+                        hit_p = true;
                         break;
                     }
                 }
                 end = prefix_end;
+                // Sampler-A diagnostic: if the user didn't pass top_k
+                // but the auto-cap truncated the top_p prefix, the
+                // distribution was flatter than expected. The result is
+                // a faithful but not-quite-exact top_p (the missing tail
+                // would carry probability < (1 - cum) · 1/V_tail). Warn
+                // once per call so misconfigured prompts surface.
+                if !hit_p && mode.top_k.is_none() {
+                    tracing::warn!(
+                        target: "flambeau_runtime::sampling",
+                        kept = end,
+                        cap = TOP_K_AUTO_CAP,
+                        top_p = p,
+                        cum_p = cum,
+                        "top_p prefix exceeded TOP_K_AUTO_CAP; distribution flatter than expected — \
+                         increase top_k explicitly if exact top_p mass matters here"
+                    );
+                }
             }
         }
         // Apply min-p: drop entries whose prob < min_p * max_prob. The

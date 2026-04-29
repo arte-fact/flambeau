@@ -121,6 +121,7 @@ pub fn slice_for_tp<'a>(
             num_k_heads,
             head_v_dim,
             head_k_dim,
+            kq_replicated,
         } => slice_fused_qkv_parallel(
             file,
             name,
@@ -130,6 +131,7 @@ pub fn slice_for_tp<'a>(
             num_k_heads,
             head_v_dim,
             head_k_dim,
+            kq_replicated,
         ),
         WeightLayout::ColParallel { dim, .. } => {
             Err(SliceError::UnsupportedAxis {
@@ -158,15 +160,51 @@ pub fn slice_bytes_for_tp(file: &GgufFile, name: &str, layout: WeightLayout) -> 
     let total = info.size_in_bytes() as usize;
     match layout {
         WeightLayout::Replicated => Ok(total),
-        WeightLayout::ColParallel { world, .. }
-        | WeightLayout::RowParallel { world, .. }
-        | WeightLayout::FusedQkvParallel { world, .. } => {
+        WeightLayout::ColParallel { world, .. } | WeightLayout::RowParallel { world, .. } => {
             if total % (world as usize) != 0 {
                 return Err(anyhow!(
                     "tensor `{name}` total bytes {total} not divisible by world {world}"
                 ));
             }
             Ok(total / world as usize)
+        }
+        WeightLayout::FusedQkvParallel {
+            world,
+            num_v_heads,
+            num_k_heads,
+            head_v_dim,
+            head_k_dim,
+            kq_replicated,
+        } => {
+            if !kq_replicated {
+                if total % (world as usize) != 0 {
+                    return Err(anyhow!(
+                        "tensor `{name}` total bytes {total} not divisible by world {world}"
+                    ));
+                }
+                return Ok(total / world as usize);
+            }
+            // kq_replicated: per-rank rows = (V_part / world) + 2·K_part.
+            let v_part_rows = (num_v_heads as usize) * (head_v_dim as usize);
+            let k_part_rows = (num_k_heads as usize) * (head_k_dim as usize);
+            if v_part_rows % (world as usize) != 0 {
+                return Err(anyhow!(
+                    "tensor `{name}` V_part rows {v_part_rows} not divisible by world {world}"
+                ));
+            }
+            let outer_full = v_part_rows + 2 * k_part_rows;
+            // Derive per-rank bytes from row count × bytes-per-row.
+            let row_bytes = total
+                .checked_div(outer_full)
+                .ok_or_else(|| anyhow!("tensor `{name}` outer_full=0"))?;
+            if total != outer_full * row_bytes {
+                return Err(anyhow!(
+                    "tensor `{name}` total bytes {total} not a multiple of outer_full {outer_full} (row_bytes derivation failed)"
+                ));
+            }
+            let v_local_rows = v_part_rows / (world as usize);
+            let per_rank_rows = v_local_rows + 2 * k_part_rows;
+            Ok(per_rank_rows * row_bytes)
         }
     }
 }
@@ -402,6 +440,7 @@ fn slice_fused_qkv_parallel<'a>(
     num_k_heads: u32,
     head_v_dim: u32,
     head_k_dim: u32,
+    kq_replicated: bool,
 ) -> Result<Cow<'a, [u8]>> {
     if rank >= world {
         return Err(SliceError::RankOutOfRange { rank, world }.into());
@@ -411,7 +450,7 @@ fn slice_fused_qkv_parallel<'a>(
             "FusedQkvParallel: num_v_heads {num_v_heads} not divisible by world {world}"
         ));
     }
-    if num_k_heads % world != 0 {
+    if !kq_replicated && num_k_heads % world != 0 {
         return Err(anyhow!(
             "FusedQkvParallel: num_k_heads {num_k_heads} not divisible by world {world}"
         ));
@@ -471,30 +510,44 @@ fn slice_fused_qkv_parallel<'a>(
     // sub-slabs as if on-disk were `[V | K | Q]`, so per-rank slabs at
     // world>1 were filled with bytes from the wrong on-disk regions.
     //
-    // Per-rank row counts within each sub-slab.
-    let v_local_rows = v_part_full / (world as usize);
-    let k_local_rows = k_part_full / (world as usize);
+    // **TP-4d-i3** — `kq_replicated=true` keeps Q and K full per rank
+    // (rep_outer arches qwen35moe / qwen36moe). Only V is split.
     let r = rank as usize;
+    let v_local_rows = v_part_full / (world as usize);
 
-    // On-disk row offsets:
+    // On-disk row offsets (same regardless of kq_replicated):
     //   Q rows live at [0, k_part_full)               (Q has the same shape as K)
     //   K rows live at [k_part_full, 2*k_part_full)
     //   V rows live at [2*k_part_full, outer_full)
-    let q_offset_rows = r * k_local_rows;
-    let k_offset_rows = k_part_full + r * k_local_rows;
+    let (q_rows, k_rows, q_offset_rows, k_offset_rows) = if kq_replicated {
+        // K and Q full per rank.
+        (k_part_full, k_part_full, 0, k_part_full)
+    } else {
+        let k_local_rows = k_part_full / (world as usize);
+        (
+            k_local_rows,
+            k_local_rows,
+            r * k_local_rows,
+            k_part_full + r * k_local_rows,
+        )
+    };
     let v_offset_rows = 2 * k_part_full + r * v_local_rows;
 
-    let q_bytes = k_local_rows * row_bytes;
-    let k_bytes = k_local_rows * row_bytes;
+    let q_bytes = q_rows * row_bytes;
+    let k_bytes = k_rows * row_bytes;
     let v_bytes = v_local_rows * row_bytes;
     let total_local_bytes = q_bytes + k_bytes + v_bytes;
 
     // Pack per-rank slab in `[Q_local | K_local | V_local]` order — the
     // order the GDN forward kernel expects (gdn_tp.rs:289-293).
     let mut packed = Vec::with_capacity(total_local_bytes);
-    packed.extend_from_slice(&raw[q_offset_rows * row_bytes..(q_offset_rows + k_local_rows) * row_bytes]);
-    packed.extend_from_slice(&raw[k_offset_rows * row_bytes..(k_offset_rows + k_local_rows) * row_bytes]);
-    packed.extend_from_slice(&raw[v_offset_rows * row_bytes..(v_offset_rows + v_local_rows) * row_bytes]);
+    packed
+        .extend_from_slice(&raw[q_offset_rows * row_bytes..(q_offset_rows + q_rows) * row_bytes]);
+    packed
+        .extend_from_slice(&raw[k_offset_rows * row_bytes..(k_offset_rows + k_rows) * row_bytes]);
+    packed.extend_from_slice(
+        &raw[v_offset_rows * row_bytes..(v_offset_rows + v_local_rows) * row_bytes],
+    );
     debug_assert_eq!(packed.len(), total_local_bytes);
     Ok(Cow::Owned(packed))
 }

@@ -553,12 +553,21 @@ impl HipCluster {
             )
         };
         check(rc, "peer_copy HtoD")?;
-        // NO post-HtoD sync: downstream kernels on dst_dev's default_stream
-        // will serialize naturally against this memcpy. CPU-waiting here
-        // burns ~200 µs per hand-off with no correctness benefit.
-        // (DtoH sync above IS required — the pinned bounce buffer must be
-        // fully filled before the HtoD reads it, since HtoD is on a different
-        // stream on a different device.)
+        // **TP-4d-i3 followup** — sync the HtoD before returning so the
+        // pinned bounce buffer (shared per src rank) is no longer in
+        // flight. Without this sync, callers that loop this primitive
+        // for fan-out (PP-of-TP hand-off: stage s rank 0 → all
+        // tp_size ranks of stage s+1) race the next iteration's DtoH
+        // against the previous iteration's still-pending HtoD over the
+        // same bounce buffer. Symptom: non-deterministic decode at
+        // temp=0 starting from token 2 (token 1 of the very first
+        // hand-off is correct because nothing competes for the
+        // buffer yet). PP-only is unaffected (single dst per hand-off
+        // ⇒ the loop body runs once per stage). Cost ~50–200 µs per
+        // hand-off; acceptable on the cold path. SAFETY: live stream
+        // handle as above.
+        let rc = unsafe { hipStreamSynchronize(dst_dev.default_stream().raw()) };
+        check(rc, "peer_copy HtoD sync")?;
 
         Ok(())
     }

@@ -51,23 +51,42 @@ pub enum WeightLayout {
     /// **TP-4a** — head-aware permutation slicing for fused-QKV
     /// tensors (GDN's `attn_qkv` and `ssm_conv1d`).
     ///
-    /// Source tensor outer dim is `[V_part | K_part | Q_part]` with
-    /// `V_part = num_v_heads · head_v_dim`,
-    /// `K_part = num_k_heads · head_k_dim`,
-    /// `Q_part = num_k_heads · head_k_dim` (Q and K share head shape
-    /// in GDN). Flat ColParallel along the outer dim cuts across these
-    /// boundaries; this variant slices each sub-slab independently
-    /// and re-concatenates per-rank as `[V_local | K_local | Q_local]`.
+    /// Source tensor outer dim is `[Q_part | K_part | V_part]` (the
+    /// on-disk order, verified empirically; see `qwen3-moe::tp_slice`
+    /// "Bug 4 fix" comment). Per rank, the slicer re-concatenates as
+    /// `[Q_local | K_local | V_local]` — the order the GDN forward
+    /// kernel reads.
     ///
-    /// Divisibility: `num_v_heads % world == 0` and
-    /// `num_k_heads % world == 0`. The slicing function in
-    /// `qwen3-moe::tp_slice` validates these at apply time.
+    /// `kq_replicated` controls whether the K and Q sub-slabs are
+    /// split or replicated across ranks:
+    ///
+    /// - `false` (default, `qwen3next` / `rep_inner` head mapping):
+    ///   contiguous TP split — each rank gets `num_k_heads/world` K
+    ///   heads and `num_v_heads/world` V heads. Local
+    ///   `V[v] → K[v / n_rep]` stays fully on-rank because adjacent V
+    ///   heads share a K head.
+    /// - `true` (`qwen35moe` / `qwen36moe` / `rep_outer` head mapping):
+    ///   contiguous TP split is structurally broken — local
+    ///   `V[v] → K[v % H_k]` would wrap to K heads on other ranks.
+    ///   Workaround (Megatron's standard for incompatible GQA splits):
+    ///   replicate K and Q across ranks (full slabs on every rank),
+    ///   split only V along the v-head axis. Per-rank conv channels
+    ///   become `local_d_inner + 2·full_qk_size`. The downstream
+    ///   `ssm_out` is RowParallel{dim=1} on `local_d_inner` so the
+    ///   AR-fold pattern is unchanged.
+    ///
+    /// Divisibility: `num_v_heads % world == 0` always; `num_k_heads %
+    /// world == 0` only when `kq_replicated == false`. The slicing
+    /// function in `qwen3-moe::tp_slice` validates these at apply time.
     FusedQkvParallel {
         world: u32,
         num_v_heads: u32,
         num_k_heads: u32,
         head_v_dim: u32,
         head_k_dim: u32,
+        /// `true` ⇒ K and Q replicated, only V split (rep_outer fix).
+        /// `false` ⇒ V/K/Q all split contiguously (rep_inner default).
+        kq_replicated: bool,
     },
 }
 
@@ -214,9 +233,10 @@ impl fmt::Display for WeightLayout {
                 num_k_heads,
                 head_v_dim,
                 head_k_dim,
+                kq_replicated,
             } => write!(
                 f,
-                "FusedQkvParallel{{world={world},vH={num_v_heads}/{head_v_dim},kH={num_k_heads}/{head_k_dim}}}"
+                "FusedQkvParallel{{world={world},vH={num_v_heads}/{head_v_dim},kH={num_k_heads}/{head_k_dim},kq_replicated={kq_replicated}}}"
             ),
         }
     }
