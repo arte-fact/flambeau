@@ -7,9 +7,9 @@
   "rms_eps": 1e-06,
   "rope_partial_dim": 64,
   "rope_theta": 10000000.0,
-  "test_position": 100,
+  "test_position": 0,
   "seed": 42,
   "mtp_gguf": "/artefact/models/Qwen3.6-27B-mtp.gguf",
-  "h_final_mean": -0.030583327636122704,
-  "h_final_std": 1.2783907651901245
+  "h_final_mean": -0.011802362278103828,
+  "h_final_std": 2.174067974090576
 }

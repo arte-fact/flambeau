@@ -71,7 +71,21 @@ MTP_TENSOR_DTYPES: dict[str, GGMLQuantizationType] = {
 
 
 def load_mtp_tensors(shards_dir: Path) -> dict[str, np.ndarray]:
-    """Read all `mtp.*` tensors from shards 13+15 as F32 numpy arrays."""
+    """
+    Read all `mtp.*` tensors from shards 13+15 as F32 numpy arrays.
+
+    **GemmaRMSNorm `+1` convention.** Qwen3-Next (and Qwen3.5/3.6) uses
+    GemmaRMSNorm: `output = (1 + weight) * x / rms(x)`. llama.cpp's GGUF
+    convention bakes the `+1` into the stored weight so standard
+    RMSNorm `weight * x / rms(x)` produces the same result. The base
+    model's GGUF has this transformation applied (verified empirically:
+    base norm weights cluster around mean ≈ 1.0). The MTP weights in
+    Qwen/Qwen3.6-27B's safetensors are RAW (mean ≈ 0); we apply the
+    same `+1` here so flambeau's standard RMSNorm consumes them
+    correctly without any model-side change. Without this, MTP forward
+    multiplies activations by ≈ 0 and produces nonsense — confirmed
+    diagnosis 2026-04-29 against base/MTP norm-weight statistics.
+    """
     tensors: dict[str, np.ndarray] = {}
     for shard_name in ("shard-13.safetensors", "shard-15.safetensors"):
         path = shards_dir / shard_name
@@ -83,8 +97,19 @@ def load_mtp_tensors(shards_dir: Path) -> dict[str, np.ndarray]:
                     continue
                 if key not in MTP_TENSOR_DTYPES:
                     raise SystemExit(f"unexpected MTP tensor in safetensors: {key}")
-                t = f.get_tensor(key)
-                tensors[key] = t.to(torch.float32).numpy()
+                t = f.get_tensor(key).to(torch.float32).numpy()
+                # Norm weights → bake +1 (GemmaRMSNorm convention).
+                if MTP_TENSOR_DTYPES[key] is GGMLQuantizationType.F32 and key.endswith(".weight"):
+                    # All MTP norms map to F32 in MTP_TENSOR_DTYPES; this
+                    # key-suffix check is just a belt-and-braces guard.
+                    is_norm = (
+                        "norm" in key
+                        or key.endswith("layernorm.weight")
+                        or key == "mtp.norm.weight"
+                    )
+                    if is_norm:
+                        t = t + 1.0
+                tensors[key] = t
     missing = set(MTP_TENSOR_DTYPES) - set(tensors)
     if missing:
         raise SystemExit(f"missing MTP tensors in shards: {sorted(missing)}")
