@@ -19,7 +19,10 @@ use tokio::sync::{mpsc, Mutex};
 use tokio_stream::wrappers::ReceiverStream;
 
 use crate::api::*;
-use crate::model::{decode_logits, prefill_logits, Inflight, LoadedModel};
+use crate::model::{
+    decode_logits, decode_spec_pp, decode_spec_pp_sampling, prefill_logits, Inflight, LoadedModel,
+    SpecDecodePp,
+};
 use crate::state::SamplingParams;
 
 /// Server-wide shared state — built once at startup.
@@ -868,37 +871,110 @@ fn run_completion_blocking(
     // sufficient on their own to prevent immediate-EOS failure modes;
     // beyond that, do not bias the model's natural stopping decision.
     const STOP_BIAS: f32 = 0.0;
-    for step in 1..params.max_tokens as usize {
-        let force_mask = step < MIN_RESPONSE_TOKENS && !relax_stop_mask;
-        decode_logits(
-            model,
-            cluster,
-            &mut inflight,
-            last_token,
-            prompt_ids.len() + step,
-            &mut logits_buf,
-        )
-        .context("decode step logits")?;
-        if !relax_stop_mask {
-            for &sid in stop_ids {
-                if (sid as usize) < logits_buf.len() {
-                    if force_mask {
-                        logits_buf[sid as usize] = f32::NEG_INFINITY;
-                    } else {
-                        logits_buf[sid as usize] -= STOP_BIAS;
+    // MTP-5d/5g/h: spec-decode fast path. Active when MTP head is loaded
+    // (FLAMBEAU_SPEC_MTP=path at startup). Greedy uses strict-match verify;
+    // non-greedy uses vLLM-canonical rejection sampling. Penalties
+    // (repetition / presence / frequency) are now applied to base AND
+    // MTP distributions inside `build_distribution` via the threaded
+    // `history` slice (MTP-5g/h #194), so penalty-active requests no
+    // longer have to fall through.
+    let spec_available = matches!(model, LoadedModel::Pp { mtp: Some(_), .. });
+    let use_spec = spec_available;
+    if use_spec {
+        // h_for_mtp at first macro step = h@(prompt_len-1), which lives in
+        // the prefill scratch's hidden_a buffer at offset (prompt_len-1)*row_bytes.
+        let last_rank = cluster.ranks() - 1;
+        let row_bytes = state.cfg.hidden_size * 2;
+        let h_initial = match &inflight {
+            Inflight::Pp { prefill, .. } => prefill.per_rank[last_rank]
+                .hidden_a
+                .offset_bytes((prompt_ids.len() - 1) * row_bytes),
+            _ => bail!("spec-decode requires Inflight::Pp"),
+        };
+        let m = match model {
+            LoadedModel::Pp { model, .. } => model,
+            _ => bail!("spec-decode requires LoadedModel::Pp"),
+        };
+        let mut spec_state = SpecDecodePp::new(m, cluster).context("alloc SpecDecodePp")?;
+        spec_state.h_for_mtp = h_initial;
+
+        let mut accept_count = 0usize;
+        let mut macro_count = 0usize;
+        let mut position = prompt_ids.len();
+        'spec_loop: while generated.len() < params.max_tokens as usize {
+            let step = if is_greedy {
+                decode_spec_pp(
+                    model, cluster, &mut inflight, &mut spec_state, last_token, position,
+                )
+                .context("spec macro step (greedy)")?
+            } else {
+                decode_spec_pp_sampling(
+                    model, cluster, &mut inflight, &mut spec_state, last_token, position,
+                    sampling, sampler.rng_mut(), &generated,
+                )
+                .context("spec macro step (sampling)")?
+            };
+            macro_count += 1;
+            if step.accepted { accept_count += 1; }
+            for tok in step.committed.iter().copied() {
+                generated.push(tok);
+                last_token = tok;
+                if is_stop(tok) {
+                    finish_reason = "stop";
+                    break 'spec_loop;
+                }
+                if generated.len() >= params.max_tokens as usize {
+                    break 'spec_loop;
+                }
+            }
+            position = step.new_position;
+        }
+        let accept_pct = if macro_count == 0 {
+            0.0
+        } else {
+            100.0 * accept_count as f64 / macro_count as f64
+        };
+        tracing::info!(
+            target: "server.spec_decode",
+            macro_steps = macro_count,
+            tokens = generated.len() as u32,
+            accept_pct,
+            "spec-decode loop complete"
+        );
+        spec_state.dispose(cluster).ok();
+    } else {
+        for step in 1..params.max_tokens as usize {
+            let force_mask = step < MIN_RESPONSE_TOKENS && !relax_stop_mask;
+            decode_logits(
+                model,
+                cluster,
+                &mut inflight,
+                last_token,
+                prompt_ids.len() + step,
+                &mut logits_buf,
+            )
+            .context("decode step logits")?;
+            if !relax_stop_mask {
+                for &sid in stop_ids {
+                    if (sid as usize) < logits_buf.len() {
+                        if force_mask {
+                            logits_buf[sid as usize] = f32::NEG_INFINITY;
+                        } else {
+                            logits_buf[sid as usize] -= STOP_BIAS;
+                        }
                     }
                 }
             }
-        }
-        // Pass `generated` as history so penalties can fire on repeats
-        // / frequent tokens. T4.b.2 — without this, Qwen3.5/3.6 agent
-        // loops degrade to long-CoT drift per the Ollama post-mortem.
-        let next = sampler.sample(&logits_buf, sampling, &generated);
-        generated.push(next);
-        last_token = next;
-        if is_stop(next) {
-            finish_reason = "stop";
-            break;
+            // Pass `generated` as history so penalties can fire on repeats
+            // / frequent tokens. T4.b.2 — without this, Qwen3.5/3.6 agent
+            // loops degrade to long-CoT drift per the Ollama post-mortem.
+            let next = sampler.sample(&logits_buf, sampling, &generated);
+            generated.push(next);
+            last_token = next;
+            if is_stop(next) {
+                finish_reason = "stop";
+                break;
+            }
         }
     }
 
@@ -1074,6 +1150,96 @@ fn run_completion_blocking_streaming(
         .and_then(|s| s.parse().ok())
         .unwrap_or(0);
     let profile_skip: usize = 8;
+
+    // MTP-5d streaming + 5g/h penalty-aware: spec-decode SSE path. Active
+    // when MTP head is loaded. Penalties applied in build_distribution via
+    // the threaded `&generated` history. Mirrors the non-streaming branch.
+    let spec_available = matches!(model, LoadedModel::Pp { mtp: Some(_), .. });
+    let use_spec = spec_available;
+    if use_spec {
+        let last_rank = cluster.ranks() - 1;
+        let row_bytes = state.cfg.hidden_size * 2;
+        let h_initial = match &inflight {
+            Inflight::Pp { prefill, .. } => prefill.per_rank[last_rank]
+                .hidden_a
+                .offset_bytes((prompt_ids.len() - 1) * row_bytes),
+            _ => bail!("spec-decode requires Inflight::Pp"),
+        };
+        let m = match model {
+            LoadedModel::Pp { model, .. } => model,
+            _ => bail!("spec-decode requires LoadedModel::Pp"),
+        };
+        let mut spec_state = SpecDecodePp::new(m, cluster).context("alloc SpecDecodePp")?;
+        spec_state.h_for_mtp = h_initial;
+
+        let mut accept_count = 0usize;
+        let mut macro_count = 0usize;
+        let mut position = prompt_ids.len();
+        'spec_stream_loop: while generated.len() < params.max_tokens as usize {
+            let step_result = if is_greedy {
+                decode_spec_pp(
+                    model, cluster, &mut inflight, &mut spec_state, last_token, position,
+                )
+                .context("spec macro step (greedy, streaming)")
+            } else {
+                decode_spec_pp_sampling(
+                    model, cluster, &mut inflight, &mut spec_state, last_token, position,
+                    sampling, sampler.rng_mut(), &generated,
+                )
+                .context("spec macro step (sampling, streaming)")
+            };
+            let step = match step_result {
+                Ok(s) => s,
+                Err(e) => {
+                    spec_state.dispose(cluster).ok();
+                    return Err(e);
+                }
+            };
+            macro_count += 1;
+            if step.accepted { accept_count += 1; }
+            for tok in step.committed.iter().copied() {
+                let alive = push_and_emit(tok, &mut generated, &mut emitted_text)?;
+                last_token = tok;
+                if !alive {
+                    finish_reason = "stop";
+                    break 'spec_stream_loop;
+                }
+                if generated.len() >= params.max_tokens as usize {
+                    break 'spec_stream_loop;
+                }
+            }
+            position = step.new_position;
+        }
+        let accept_pct = if macro_count == 0 {
+            0.0
+        } else {
+            100.0 * accept_count as f64 / macro_count as f64
+        };
+        tracing::info!(
+            target: "server.spec_decode",
+            macro_steps = macro_count,
+            tokens = generated.len() as u32,
+            accept_pct,
+            stream = true,
+            "spec-decode SSE loop complete"
+        );
+        spec_state.dispose(cluster).ok();
+
+        inflight
+            .dispose(cluster, model)
+            .context("dispose inflight (stream end)")?;
+        tracing::info!(
+            target: "server.completion.finish",
+            prompt_tokens,
+            completion_tokens = generated.len() as u32,
+            finish_reason,
+            total_ms = request_start.elapsed().as_secs_f64() * 1000.0,
+            stream = true,
+            "streaming completion finished (spec)"
+        );
+        return Ok((finish_reason.into(), prompt_tokens, generated.len() as u32));
+    }
+
     for step in 1..params.max_tokens as usize {
         if profile_decode_n > 0 {
             if step == profile_skip + 1 {

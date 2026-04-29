@@ -105,6 +105,63 @@ pub fn attention_decode_f16_slots(
     Ok(())
 }
 
+/// MTP-4-C-4 — BF16 sibling of [`attention_decode_f16`]. Same math
+/// (online flash-attn-v2 softmax in F32), BF16 storage throughout.
+/// Used by the MTP BF16 forward path.
+///
+/// Shapes (all BF16 unless noted):
+///   q[n_heads_q, head_dim]
+///   k_cache[n_tokens_kv, n_heads_kv, head_dim]
+///   v_cache same as k
+///   out[n_heads_q, head_dim]
+///
+/// Launch: one block per Q head, `head_dim` threads/block. Supports
+/// `head_dim ∈ {64, 128, 256}`; MTP uses 256.
+#[allow(clippy::too_many_arguments)]
+pub fn attention_decode_bf16(
+    reg: &OpsRegistry,
+    stream: &HipStream,
+    q: DevicePtr,
+    k_cache: DevicePtr,
+    v_cache: DevicePtr,
+    out: DevicePtr,
+    n_heads_q: usize,
+    n_heads_kv: usize,
+    head_dim: usize,
+    n_tokens_kv: usize,
+    scale: f32,
+) -> Result<()> {
+    assert!(
+        head_dim == 64 || head_dim == 128 || head_dim == 256,
+        "attention_decode_bf16: head_dim {head_dim} not supported (expected 64, 128, or 256)"
+    );
+    let module = reg.expect_module("attention_decode_bf16")?;
+    let kernel = module.kernel("flambeau_attention_decode_bf16")?;
+
+    let n_heads_q_i = n_heads_q as i32;
+    let n_heads_kv_i = n_heads_kv as i32;
+    let head_dim_i = head_dim as i32;
+    let n_tokens_i = n_tokens_kv as i32;
+    let scale_f = scale;
+    let q_ptr: u64 = q.as_usize() as u64;
+    let k_ptr: u64 = k_cache.as_usize() as u64;
+    let v_ptr: u64 = v_cache.as_usize() as u64;
+    let o_ptr: u64 = out.as_usize() as u64;
+    let mut args = KernelArgs::new();
+    args.push(&q_ptr);
+    args.push(&k_ptr);
+    args.push(&v_ptr);
+    args.push(&o_ptr);
+    args.push(&n_heads_q_i);
+    args.push(&n_heads_kv_i);
+    args.push(&head_dim_i);
+    args.push(&n_tokens_i);
+    args.push(&scale_f);
+    let cfg = LaunchCfg::one_d(n_heads_q as u32, head_dim as u32);
+    unsafe { kernel.launch(stream, cfg, args)? };
+    Ok(())
+}
+
 /// V2.19.b — split-K (flash-decoding) decode attention, F16 KV. Same math
 /// as [`attention_decode_f16`] but partitions the context across grid.y to
 /// attack the single-pass kernel's occupancy starvation on Qwen3.6
@@ -297,6 +354,45 @@ pub fn split_q_gate_f16(
 ) -> Result<()> {
     let module = reg.expect_module("split_q_gate_f16")?;
     let kernel = module.kernel("flambeau_split_q_gate_f16")?;
+
+    let n_tokens_i = n_tokens as i32;
+    let n_heads_i = n_heads as i32;
+    let head_dim_i = head_dim as i32;
+    let f_ptr: u64 = fused_qg.as_usize() as u64;
+    let q_ptr: u64 = q_out.as_usize() as u64;
+    let g_ptr: u64 = gate_out.as_usize() as u64;
+    let mut args = KernelArgs::new();
+    args.push(&f_ptr);
+    args.push(&q_ptr);
+    args.push(&g_ptr);
+    args.push(&n_tokens_i);
+    args.push(&n_heads_i);
+    args.push(&head_dim_i);
+    let threads = 128u32;
+    let grid_z = (head_dim as u32).div_ceil(threads);
+    let cfg = LaunchCfg {
+        grid: (n_tokens as u32, n_heads as u32, grid_z),
+        block: (threads, 1, 1),
+        shared_bytes: 0,
+    };
+    unsafe { kernel.launch(stream, cfg, args)? };
+    Ok(())
+}
+
+/// MTP-4-C-5: BF16 sibling of [`split_q_gate_f16`]. Same launch shape;
+/// no arithmetic, just strided copy.
+pub fn split_q_gate_bf16(
+    reg: &OpsRegistry,
+    stream: &HipStream,
+    fused_qg: DevicePtr,
+    q_out: DevicePtr,
+    gate_out: DevicePtr,
+    n_tokens: usize,
+    n_heads: usize,
+    head_dim: usize,
+) -> Result<()> {
+    let module = reg.expect_module("split_q_gate_bf16")?;
+    let kernel = module.kernel("flambeau_split_q_gate_bf16")?;
 
     let n_tokens_i = n_tokens as i32;
     let n_heads_i = n_heads as i32;

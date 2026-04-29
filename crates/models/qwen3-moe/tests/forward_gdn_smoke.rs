@@ -275,6 +275,8 @@ fn forward_gdn_decode_smoke() -> Result<()> {
         head_v_dim: state.head_v_dim,
         conv_kernel: state.conv_kernel,
         conv_channels: state.conv_channels,
+        snapshot_state: None,
+        snapshot_conv_history: None,
     };
 
     let mut scratch = GdnScratch::new(&cfg, &device)?;

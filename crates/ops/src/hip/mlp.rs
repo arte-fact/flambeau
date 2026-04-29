@@ -94,6 +94,32 @@ pub fn swiglu_f32_to_f16(
     Ok(())
 }
 
+/// MTP-4-C-5: BF16 sibling of [`swiglu_f32_to_f16`]. Same fused
+/// `y_bf16[i] = (bf16)(silu(a[i]) * b[i])` from F32 inputs.
+pub fn swiglu_f32_to_bf16(
+    reg: &OpsRegistry,
+    stream: &HipStream,
+    a: DevicePtr,
+    b: DevicePtr,
+    y: DevicePtr,
+    n: usize,
+) -> Result<()> {
+    let module = reg.expect_module("swiglu_f32_to_bf16")?;
+    let kernel = module.kernel("flambeau_swiglu_f32_to_bf16")?;
+    let n_i = n as i32;
+    let a_ptr: u64 = a.as_usize() as u64;
+    let b_ptr: u64 = b.as_usize() as u64;
+    let y_ptr: u64 = y.as_usize() as u64;
+    let mut args = KernelArgs::new();
+    args.push(&a_ptr);
+    args.push(&b_ptr);
+    args.push(&y_ptr);
+    args.push(&n_i);
+    let cfg = LaunchCfg::one_d((n as u32).div_ceil(256), 256);
+    unsafe { kernel.launch(stream, cfg, args)? };
+    Ok(())
+}
+
 /// CN-80B-19c/d — fused `y_q8_1 = quantize_row_q8_1(silu(a) * b)` for F32
 /// inputs. Replaces the unfused chain (swiglu_f32 → quantize_q8_1) used by
 /// the GDN tail (`forward/gdn.rs`), and the swiglu_f32_to_f16 →
@@ -258,6 +284,34 @@ pub fn sigmoid_mul_f16(
 ) -> Result<()> {
     let module = reg.expect_module("sigmoid_mul_f16")?;
     let kernel = module.kernel("flambeau_sigmoid_mul_f16")?;
+
+    let n_i = n as i32;
+    let g_ptr: u64 = gate.as_usize() as u64;
+    let x_ptr: u64 = x.as_usize() as u64;
+    let y_ptr: u64 = y.as_usize() as u64;
+    let mut args = KernelArgs::new();
+    args.push(&g_ptr);
+    args.push(&x_ptr);
+    args.push(&y_ptr);
+    args.push(&n_i);
+    let cfg = LaunchCfg::one_d((n as u32).div_ceil(256), 256);
+    unsafe { kernel.launch(stream, cfg, args)? };
+    Ok(())
+}
+
+/// MTP-4-C-5: BF16 sibling of [`sigmoid_mul_f16`]. Same numerically-stable
+/// sigmoid (branch on sign so `exp` arg stays ≤ 0). Used for MTP attention
+/// output gate: `attn_gated = attn_out * sigmoid(gate)`.
+pub fn sigmoid_mul_bf16(
+    reg: &OpsRegistry,
+    stream: &HipStream,
+    gate: DevicePtr,
+    x: DevicePtr,
+    y: DevicePtr,
+    n: usize,
+) -> Result<()> {
+    let module = reg.expect_module("sigmoid_mul_bf16")?;
+    let kernel = module.kernel("flambeau_sigmoid_mul_bf16")?;
 
     let n_i = n as i32;
     let g_ptr: u64 = gate.as_usize() as u64;

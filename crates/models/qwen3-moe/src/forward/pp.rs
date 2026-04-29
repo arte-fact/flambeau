@@ -816,7 +816,16 @@ pub struct RankForwardPrefillScratch {
     /// V2.25.c — additional ubatch lanes beyond lane 0 (= the above
     /// hidden_a/hidden_b/layer fields). Used by V2.25.d.
     pub extra_lanes: Vec<UbatchLane>,
+    /// MTP-5h-1 — one device buffer per local layer, holding a single
+    /// hidden row (hidden * 2 bytes). Populated lazily during paired-L=2
+    /// verify with the per-layer GDN input at L=2 batch position 0, for
+    /// use by `Qwen3MoEShardedSession::redo_gdn_only_pp` on spec-decode
+    /// reject. `Some(ptr)` for GDN layers, `None` for full-attn layers.
+    pub gdn_input_snapshots: Vec<Option<DevicePtr>>,
     hidden_bytes: usize,
+    /// Size of one snapshot row = `hidden_size * 2` (F16). Per-rank
+    /// constant; cached for the dispose path.
+    snapshot_row_bytes: usize,
     disposed: bool,
 }
 
@@ -852,6 +861,14 @@ impl RankForwardPrefillScratch {
         unsafe {
             device.dealloc(self.hidden_a, self.hidden_bytes)?;
             device.dealloc(self.hidden_b, self.hidden_bytes)?;
+        }
+        // MTP-5h-1 — release per-GDN-layer snapshot buffers.
+        for snap in self.gdn_input_snapshots.drain(..) {
+            if let Some(ptr) = snap {
+                unsafe {
+                    device.dealloc(ptr, self.snapshot_row_bytes)?;
+                }
+            }
         }
         if let Some(s) = self.layer.take() {
             s.dispose(device)?;
@@ -963,6 +980,22 @@ impl ShardedForwardPrefillScratch {
             } else {
                 None
             };
+            // MTP-5h-1 — one snapshot row per local layer, allocated only
+            // for GDN-bearing layers. Each snapshot holds a single hidden
+            // row (position 0 of the L=2 batch) for the spec-decode reject
+            // path's GDN-only re-step.
+            let snapshot_row_bytes = model.config.hidden_size * 2;
+            let shard = &model.shards[rank_idx];
+            let mut gdn_input_snapshots: Vec<Option<DevicePtr>> =
+                Vec::with_capacity(shard.layers.len());
+            for layer_weights in shard.layers.iter() {
+                if model.config.is_recurrent(layer_weights.layer_idx) {
+                    let ptr = device.alloc(snapshot_row_bytes)?;
+                    gdn_input_snapshots.push(Some(ptr));
+                } else {
+                    gdn_input_snapshots.push(None);
+                }
+            }
             per_rank.push(RankForwardPrefillScratch {
                 rank: flambeau_runtime::RankId(rank_idx as u32),
                 device_id: device.id(),
@@ -972,7 +1005,9 @@ impl ShardedForwardPrefillScratch {
                 layer,
                 output_head,
                 extra_lanes,
+                gdn_input_snapshots,
                 hidden_bytes,
+                snapshot_row_bytes,
                 disposed: false,
             });
         }
@@ -1998,5 +2033,313 @@ pub fn forward_prefill_pp_logits(
         cfg.vocab_size,
         logits_out,
     )
+}
+
+/// MTP-5e — paired-logits L=2 primitive for K=1 spec-decode verify.
+///
+/// Identical body to [`forward_prefill_pp_logits`] except `tokens.len()`
+/// is required to be 2 and the LM-head pass runs **twice** on the last
+/// rank: once on `hidden_a[0]` (predicts token at `start_position+1`),
+/// once on `hidden_a[1]` (predicts token at `start_position+2` given the
+/// draft). On return, `logits_out_pos0` and `logits_out_pos1` each hold
+/// `[vocab]` F32 logits.
+///
+/// This replaces the 2× sequential L=1 fallback in `forward/spec.rs`
+/// — the body of the model only runs once, amortising the per-layer
+/// launch overhead and (more importantly on hybrid arch) only paying
+/// one GDN state-step pair instead of two.
+pub fn forward_prefill_pp_logits_paired_l2(
+    model: &crate::sharded::Qwen3MoEShardedModel,
+    session: &mut crate::sharded::Qwen3MoEShardedSession,
+    cluster: &flambeau_backend_hip::HipCluster,
+    scratch: &mut ShardedForwardPrefillScratch,
+    tokens: &[u32],
+    start_position: usize,
+    logits_out_pos0: &mut Vec<f32>,
+    // MTP-5h-Lever-C — when None, skip the pos1 head + download. Caller
+    // can fetch pos1 logits later via [`forward_output_head_at_pp`] if
+    // accept-path needs them. Eliminates ~3 ms/macro of always-paid head
+    // work on reject paths (saves ~0.4 ms/macro avg at 12.5 % rejects).
+    logits_out_pos1: Option<&mut Vec<f32>>,
+) -> Result<()> {
+    let n_ranks = model.shards.len();
+    if n_ranks == 0 {
+        bail!("forward_prefill_pp_logits_paired_l2: zero-rank cluster");
+    }
+    if tokens.len() != 2 {
+        bail!(
+            "forward_prefill_pp_logits_paired_l2: requires L=2, got L={}",
+            tokens.len()
+        );
+    }
+    let l = 2;
+    let max_tokens = scratch.per_rank[0].max_tokens;
+    if l > max_tokens {
+        bail!(
+            "forward_prefill_pp_logits_paired_l2: L=2 > scratch.max_tokens={max_tokens}"
+        );
+    }
+    let cfg = &model.config;
+    let hidden = cfg.hidden_size;
+    let row_bytes = hidden * 2;
+    let chunk_bytes = l * row_bytes;
+
+    // Embed both tokens on rank 0.
+    {
+        let rank0 = cluster.device(0);
+        rank0.bind()?;
+        flambeau_backend_hip::profile::mark("l2_step_start", rank0, rank0.default_stream())?;
+        let shard0 = &model.shards[0];
+        let scratch0 = &mut scratch.per_rank[0];
+        let token_embd = shard0
+            .token_embd
+            .as_ref()
+            .context("rank 0 shard missing token_embd")?;
+        for (t, &token_id) in tokens.iter().enumerate() {
+            forward_embed_decode_host(
+                rank0,
+                rank0.default_stream(),
+                token_embd,
+                token_id,
+                scratch0.hidden_a.offset_bytes(t * row_bytes),
+                hidden,
+            )?;
+        }
+        flambeau_backend_hip::profile::mark("l2_embed_done", rank0, rank0.default_stream())?;
+    }
+
+    // Per-rank: peer-copy hidden in, run all owned layers at L=2.
+    for rank_idx in 0..n_ranks {
+        let device = cluster.device(rank_idx);
+
+        if rank_idx > 0 {
+            unsafe {
+                cluster.peer_copy_via_host(
+                    scratch.per_rank[rank_idx].hidden_a,
+                    rank_idx,
+                    scratch.per_rank[rank_idx - 1].hidden_a,
+                    rank_idx - 1,
+                    chunk_bytes,
+                )?;
+            }
+        }
+        device.bind()?;
+        flambeau_backend_hip::profile::mark(
+            "l2_stage_start",
+            device,
+            device.default_stream(),
+        )?;
+
+        let shard = &model.shards[rank_idx];
+        let rank_scratch = &mut scratch.per_rank[rank_idx];
+        let rank_session = &mut session.per_rank[rank_idx];
+        // MTP-5h-1 — copy snapshot ptrs out before borrowing the layer
+        // scratch mutably. DevicePtr is Copy, so this is a cheap clone.
+        let gdn_snapshots: Vec<Option<DevicePtr>> = rank_scratch.gdn_input_snapshots.clone();
+        let snapshot_row_bytes = rank_scratch.snapshot_row_bytes;
+        let layer_scratch = rank_scratch
+            .layer
+            .as_mut()
+            .context("per-rank LayerPrefillScratch missing")?;
+
+        let (mut x_in, mut x_out) = (rank_scratch.hidden_a, rank_scratch.hidden_b);
+        for (local_idx, layer_weights) in shard.layers.iter().enumerate() {
+            // MTP-5h-1 — for GDN-bearing layers, save x_in (position 0
+            // only) to the per-layer snapshot buffer for the spec-decode
+            // reject path. DtoD memcpy on this rank's default stream;
+            // ordered before forward_layer_prefill's own kernels.
+            if let Some(snap_ptr) = gdn_snapshots[local_idx] {
+                unsafe {
+                    device.memcpy_async(
+                        device.default_stream(),
+                        CopyDirection::DeviceToDevice,
+                        snap_ptr,
+                        x_in,
+                        snapshot_row_bytes,
+                    )?;
+                }
+            }
+            let layer_cache = &mut rank_session.caches[local_idx];
+            forward_layer_prefill(
+                &shard.ops,
+                device.default_stream(),
+                device,
+                cfg,
+                layer_weights,
+                layer_cache,
+                layer_scratch,
+                x_in,
+                x_out,
+                l,
+                start_position,
+                None,
+                None,
+            )
+            .with_context(|| {
+                format!(
+                    "paired-L2 prefill rank {} layer {} ({})",
+                    rank_idx,
+                    layer_weights.layer_idx,
+                    if cfg.is_recurrent(layer_weights.layer_idx) {
+                        "gdn"
+                    } else {
+                        "full_attn"
+                    },
+                )
+            })?;
+            std::mem::swap(&mut x_in, &mut x_out);
+        }
+        if x_in != rank_scratch.hidden_a {
+            unsafe {
+                device.memcpy_async(
+                    device.default_stream(),
+                    CopyDirection::DeviceToDevice,
+                    rank_scratch.hidden_a,
+                    x_in,
+                    chunk_bytes,
+                )?;
+            }
+            device.default_stream().synchronize()?;
+        }
+        flambeau_backend_hip::profile::mark(
+            "l2_stage_end",
+            device,
+            device.default_stream(),
+        )?;
+    }
+
+    // Last rank: run output head twice and download both logit rows.
+    let last_idx = n_ranks - 1;
+    let last_shard = &model.shards[last_idx];
+    let last_device = cluster.device(last_idx);
+    last_device.bind()?;
+    flambeau_backend_hip::profile::mark(
+        "l2_output_head_start",
+        last_device,
+        last_device.default_stream(),
+    )?;
+    let last_scratch = &mut scratch.per_rank[last_idx];
+    let output_norm = last_shard
+        .output_norm
+        .as_ref()
+        .context("last rank missing output_norm")?;
+    let lm_head = last_shard
+        .output
+        .as_ref()
+        .or(last_shard.token_embd.as_ref())
+        .context("last rank missing both output.weight and tied token_embd")?;
+    let output_head_scratch = last_scratch
+        .output_head
+        .as_mut()
+        .context("last rank missing output_head scratch")?;
+
+    // Position 0 of the L=2 batch.
+    let h_pos0 = last_scratch.hidden_a;
+    forward_output_head_decode(
+        &last_shard.ops,
+        last_device.default_stream(),
+        cfg,
+        output_norm,
+        lm_head,
+        output_head_scratch,
+        h_pos0,
+    )?;
+    download_logits_host(
+        last_device,
+        last_device.default_stream(),
+        output_head_scratch.logits_f32,
+        cfg.vocab_size,
+        logits_out_pos0,
+    )?;
+    flambeau_backend_hip::profile::mark(
+        "l2_output_pos0_done",
+        last_device,
+        last_device.default_stream(),
+    )?;
+
+    // Position 1. Output-head scratch is reused; logits buffer is
+    // overwritten by the next mmvq, so we had to download pos0 first.
+    // MTP-5h-Lever-C — only run pos1 head when caller asks for it; else
+    // skip and let caller defer this work to the accept branch.
+    if let Some(logits_out_pos1) = logits_out_pos1 {
+        let h_pos1 = last_scratch.hidden_a.offset_bytes(row_bytes);
+        forward_output_head_decode(
+            &last_shard.ops,
+            last_device.default_stream(),
+            cfg,
+            output_norm,
+            lm_head,
+            output_head_scratch,
+            h_pos1,
+        )?;
+        download_logits_host(
+            last_device,
+            last_device.default_stream(),
+            output_head_scratch.logits_f32,
+            cfg.vocab_size,
+            logits_out_pos1,
+        )?;
+        flambeau_backend_hip::profile::mark(
+            "l2_output_pos1_done",
+            last_device,
+            last_device.default_stream(),
+        )?;
+    }
+
+    Ok(())
+}
+
+/// MTP-5h-Lever-C — run the LM head on a single hidden row located at
+/// `last_scratch.hidden_a + position * hidden_bytes`. Used by the spec
+/// driver to lazily compute pos1 logits only on accept.
+pub fn forward_output_head_at_pp(
+    model: &crate::sharded::Qwen3MoEShardedModel,
+    cluster: &flambeau_backend_hip::HipCluster,
+    scratch: &mut ShardedForwardPrefillScratch,
+    position_in_l2: usize,
+    logits_out: &mut Vec<f32>,
+) -> Result<()> {
+    let n_ranks = model.shards.len();
+    if n_ranks == 0 {
+        bail!("forward_output_head_at_pp: zero-rank cluster");
+    }
+    let cfg = &model.config;
+    let row_bytes = cfg.hidden_size * 2;
+    let last_idx = n_ranks - 1;
+    let last_shard = &model.shards[last_idx];
+    let last_device = cluster.device(last_idx);
+    last_device.bind()?;
+    let last_scratch = &mut scratch.per_rank[last_idx];
+    let output_norm = last_shard
+        .output_norm
+        .as_ref()
+        .context("last rank missing output_norm")?;
+    let lm_head = last_shard
+        .output
+        .as_ref()
+        .or(last_shard.token_embd.as_ref())
+        .context("last rank missing both output.weight and tied token_embd")?;
+    let output_head_scratch = last_scratch
+        .output_head
+        .as_mut()
+        .context("last rank missing output_head scratch")?;
+    let h_at = last_scratch.hidden_a.offset_bytes(position_in_l2 * row_bytes);
+    forward_output_head_decode(
+        &last_shard.ops,
+        last_device.default_stream(),
+        cfg,
+        output_norm,
+        lm_head,
+        output_head_scratch,
+        h_at,
+    )?;
+    download_logits_host(
+        last_device,
+        last_device.default_stream(),
+        output_head_scratch.logits_f32,
+        cfg.vocab_size,
+        logits_out,
+    )?;
+    Ok(())
 }
 

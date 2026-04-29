@@ -1,0 +1,49 @@
+{
+  "schema_version": 1,
+  "impl_id": "rope_neox_partial_bf16_gfx906",
+  "backend": "hip",
+  "arch": "gfx906",
+  "op": "rope_neox_partial",
+  "dtype_weight": "BF16",
+  "dtype_activation": "BF16",
+  "tolerance_formula": "|err| <= 2e-2 (BF16 in-place + trig round)",
+  "results": [
+    {
+      "m": 1,
+      "k": 24,
+      "n": 256,
+      "seed": 3205943449,
+      "max_rel_err": 0.0,
+      "tolerance": 0.02,
+      "pass": true
+    },
+    {
+      "m": 1,
+      "k": 16,
+      "n": 128,
+      "seed": 3205945345,
+      "max_rel_err": 0.0054644807,
+      "tolerance": 0.02,
+      "pass": true
+    },
+    {
+      "m": 4,
+      "k": 24,
+      "n": 256,
+      "seed": 3205936650,
+      "max_rel_err": 0.0,
+      "tolerance": 0.02,
+      "pass": true
+    }
+  ],
+  "pass": true,
+  "emitted_at": "2026-04-29T08:50:34Z",
+  "rig": "threadreaper-gfx906",
+  "pmc": {
+    "vgpr_count": 20,
+    "sgpr_count": null,
+    "waves_per_simd": 10,
+    "mem_busy_pct": null,
+    "valu_busy_pct": null
+  }
+}

@@ -35,7 +35,7 @@ use flambeau_backend_hip::{device_count, HipDevice};
 use flambeau_core::{CopyDirection, Device, DevicePtr, Stream};
 use flambeau_ops::OpsRegistry;
 use flambeau_quant::GgufFile;
-use flambeau_qwen3_moe::mtp::{forward_mtp_step, load_mtp_head};
+use flambeau_qwen3_moe::mtp::{forward_mtp_step, load_mtp_head, MtpForwardScratch};
 use flambeau_qwen3_moe::Qwen3MoEConfig;
 use half::f16;
 use std::path::PathBuf;
@@ -145,16 +145,19 @@ fn mtp_step_parity_position_zero() -> Result<()> {
 
     // ── Forward
     let ops = OpsRegistry::new(&device)?;
+    let scratch = MtpForwardScratch::new(&device, &cfg)?;
     forward_mtp_step(
         &ops,
         device.default_stream(),
         &device,
         &cfg,
         &mtp,
+        &scratch,
         h_t_dev,
         e_token_dev,
         test_position(),
         h_final_dev,
+        None,
     )?;
 
     // ── Download h_final, cast F16 → F32 for compare
@@ -199,6 +202,7 @@ fn mtp_step_parity_position_zero() -> Result<()> {
         device.dealloc(e_token_dev, HIDDEN * 2)?;
         device.dealloc(h_final_dev, HIDDEN * 2)?;
     }
+    scratch.dispose(&device)?;
 
     assert!(max_abs < MAX_ABS_TOL, "max_abs {max_abs} >= tol {MAX_ABS_TOL}");
     assert!(mean_abs < MEAN_ABS_TOL, "mean_abs {mean_abs} >= tol {MEAN_ABS_TOL}");

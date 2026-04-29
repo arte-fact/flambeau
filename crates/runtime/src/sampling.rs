@@ -229,6 +229,143 @@ impl Sampler {
     }
 }
 
+/// MTP-5g — build the normalized (id, prob) distribution that
+/// [`Sampler::sample`] would draw from, given `logits`, `mode`, and
+/// `history`. Used by the rejection-sampling spec-decode driver to
+/// compare MTP draft `q(·)` against base verify `p(·)`.
+///
+/// Mirrors `sample_stochastic` exactly except the multinomial pick
+/// at the end — temperature, top-k, top-p, min-p, repetition /
+/// presence / frequency penalties (the last three driven by `history`)
+/// are all applied.
+///
+/// For a `mode` whose [`is_greedy`](Sampling::is_greedy) returns
+/// `true`, the returned distribution is one-hot at the argmax of the
+/// **penalty-adjusted** logits (history is still applied so penalty
+/// effects on the argmax are respected).
+pub fn build_distribution(logits: &[f32], mode: &Sampling, history: &[u32]) -> Vec<(u32, f32)> {
+    // MTP-5g/h penalty-aware path. If no penalties active, skip the
+    // O(V)-byte clone and operate on the input slice directly.
+    let needs_penalties = mode.has_penalties() && !history.is_empty();
+    let logits_owned: Vec<f32>;
+    let logits_view: &[f32] = if needs_penalties {
+        let mut scratch: Vec<f32> = logits.to_vec();
+        apply_penalties(&mut scratch, history, mode);
+        logits_owned = scratch;
+        &logits_owned
+    } else {
+        logits
+    };
+    if mode.is_greedy() {
+        let id = argmax(logits_view);
+        return vec![(id, 1.0)];
+    }
+    let inv_t = if mode.temperature <= 0.0 {
+        1.0
+    } else {
+        1.0 / mode.temperature
+    };
+    let mut max_l = f32::NEG_INFINITY;
+    for &v in logits_view {
+        let scaled = v * inv_t;
+        if scaled > max_l {
+            max_l = scaled;
+        }
+    }
+    let mut pairs: Vec<(u32, f32)> = Vec::with_capacity(logits_view.len());
+    let mut sum = 0.0f32;
+    for (i, &v) in logits_view.iter().enumerate() {
+        let p = (v * inv_t - max_l).exp();
+        pairs.push((i as u32, p));
+        sum += p;
+    }
+    if sum > 0.0 {
+        for (_, p) in pairs.iter_mut() {
+            *p /= sum;
+        }
+    }
+
+    let any_filter = mode.top_k.is_some() || mode.top_p.is_some() || mode.min_p.is_some();
+    if !any_filter {
+        return pairs;
+    }
+    // MTP-5g/h — partial-sort optimisation: when `top_k` is active, use
+    // `select_nth_unstable_by` to partition the top-k to the front in
+    // O(V) instead of an O(V log V) full sort, then sort only those k
+    // entries. On Qwen3.6 vocab=151 936 with top_k=40, this drops
+    // build_distribution from ~10 ms to ~1 ms per call.
+    if let Some(k) = mode.top_k {
+        let k = (k as usize).min(pairs.len());
+        if k > 0 && k < pairs.len() {
+            pairs.select_nth_unstable_by(k - 1, |a, b| {
+                b.1.partial_cmp(&a.1).unwrap_or(Ordering::Equal)
+            });
+            pairs.truncate(k);
+        }
+    }
+    pairs.sort_unstable_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(Ordering::Equal));
+    let mut end = pairs.len();
+    if let Some(k) = mode.top_k {
+        end = end.min(k as usize);
+    }
+    if let Some(p) = mode.top_p {
+        if p < 1.0 && p > 0.0 {
+            let mut cum = 0.0f32;
+            let mut prefix_end = 0usize;
+            for (i, &(_, pv)) in pairs.iter().take(end).enumerate() {
+                cum += pv;
+                prefix_end = i + 1;
+                if cum >= p {
+                    break;
+                }
+            }
+            end = prefix_end;
+        }
+    }
+    if let Some(min_p) = mode.min_p {
+        if min_p > 0.0 {
+            let threshold = pairs[0].1 * min_p;
+            let mut drop_from = end;
+            for (i, &(_, pv)) in pairs.iter().take(end).enumerate() {
+                if pv < threshold {
+                    drop_from = i;
+                    break;
+                }
+            }
+            end = drop_from.max(1);
+        }
+    }
+    pairs.truncate(end);
+    let kept_sum: f32 = pairs.iter().map(|(_, p)| *p).sum();
+    if kept_sum > 0.0 {
+        for (_, p) in pairs.iter_mut() {
+            *p /= kept_sum;
+        }
+    }
+    pairs
+}
+
+/// Multinomial pick from a pre-normalized `[(id, prob)]` distribution.
+/// `dist`'s probs must sum to ≈1; the function tolerates small numeric
+/// drift but not arbitrary rescaling.
+pub fn sample_from_distribution(dist: &[(u32, f32)], rng: &mut Rng) -> u32 {
+    if dist.is_empty() {
+        return 0;
+    }
+    if dist.len() == 1 {
+        return dist[0].0;
+    }
+    let sum: f32 = dist.iter().map(|(_, p)| *p).sum();
+    let mut u = rng.next_f32() * sum;
+    for &(id, p) in dist {
+        u -= p;
+        if u <= 0.0 {
+            return id;
+        }
+    }
+    dist.last().map_or(0, |&(id, _)| id)
+}
+
 fn argmax(logits: &[f32]) -> u32 {
     let mut best = 0u32;
     let mut best_v = f32::NEG_INFINITY;

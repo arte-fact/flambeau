@@ -1033,6 +1033,16 @@ pub fn forward_gdn_prefill(
         .as_ref()
         .context("V1 GDN forward requires ssm_beta")?;
 
+    // MTP-5h-2b — intra-prefill section markers, mirror of the L=1
+    // decode marks defined in forward_gdn_decode (gdn_start, gdn_norm_quant,
+    // gdn_proj_qkv_gate, gdn_proj_alpha_beta, gdn_conv1d, gdn_silu,
+    // gdn_l2norm_qk, gdn_state_step, gdn_ssm_norm, gdn_swiglu_quant,
+    // gdn_ssm_out, gdn_cast_f16). All names suffixed `_p` to keep
+    // L=2-prefill marks separable from L=1 decode marks in the same
+    // profile run (e.g. when spec-decode hits a reject and the L=1
+    // redo path also fires gdn_*).
+    flambeau_backend_hip::profile::mark("gdn_start_p", device, stream)?;
+
     // 1. rmsnorm(x_in) → F16 scratch, then quantise to BOTH Q8_1 layouts.
     //    V2.2.d.P8 de-fuses the old rmsnorm_quant_q8_1 so we can emit the
     //    DS4 (BlockQ8_1Mmq) layout consumed by the new Q4_1 MMQ kernel at
@@ -1056,6 +1066,7 @@ pub fn forward_gdn_prefill(
         ops, stream, scratch.x_norm_f16, scratch.x_q8_1_mmq, hidden, n_tokens,
     )
     .context("gdn prefill x_norm → Q8_1 (MMQ DS4)")?;
+    flambeau_backend_hip::profile::mark("gdn_norm_quant_p", device, stream)?;
 
     // 2..5. Hidden-input projections at M = L. attn_qkv / attn_gate are Q4_1
     // on Qwen3.5-9B → route to MmqLdsX64 at m ≥ 128. ssm_alpha / ssm_beta are
@@ -1085,6 +1096,7 @@ pub fn forward_gdn_prefill(
         d_inner,
         "attn_gate",
     )?;
+    flambeau_backend_hip::profile::mark("gdn_proj_qkv_gate_p", device, stream)?;
     run_qmatmul_from_tensor(
         ops,
         stream,
@@ -1109,6 +1121,7 @@ pub fn forward_gdn_prefill(
         num_v_heads,
         "ssm_beta",
     )?;
+    flambeau_backend_hip::profile::mark("gdn_proj_alpha_beta_p", device, stream)?;
 
     // 6. Conv1d across L tokens: assemble [history, qkv_mixed] → conv_input,
     //    run conv, then shift history to the last (K-1) rows.
@@ -1142,6 +1155,7 @@ pub fn forward_gdn_prefill(
         conv_channels,
         conv_kernel,
     )?;
+    flambeau_backend_hip::profile::mark("gdn_conv1d_p", device, stream)?;
 
     // 7. silu(conv_out) → silu_out (F32 [L, conv_channels]).
     silu_f32(
@@ -1152,6 +1166,7 @@ pub fn forward_gdn_prefill(
         n_tokens * conv_channels,
     )
     .context("prefill silu_f32(conv_out)")?;
+    flambeau_backend_hip::profile::mark("gdn_silu_p", device, stream)?;
 
     // 8. Split silu_out into Q / K / V contiguous buffers. V2.4.d fused
     // `gdn_split_qkv_f32` kernel replaces the 3×L memcpy loop (~1500
@@ -1218,6 +1233,7 @@ pub fn forward_gdn_prefill(
         q_scale,
     )
     .context("prefill scale_f32 Q")?;
+    flambeau_backend_hip::profile::mark("gdn_l2norm_qk_p", device, stream)?;
 
     // 11–12. C10 fused state-step (default) absorbs α/β/gate; baseline
     // chain available via FLAMBEAU_VARIANT=baseline. State-step
@@ -1288,6 +1304,7 @@ pub fn forward_gdn_prefill(
     if let Some(ev) = state_event {
         ev.record(stream).context("gdn state_step record")?;
     }
+    flambeau_backend_hip::profile::mark("gdn_state_step_p", device, stream)?;
 
     // 13. ssm_norm per-head over L × num_v_heads rows.
     let ssm_norm_k = weights
@@ -1310,6 +1327,7 @@ pub fn forward_gdn_prefill(
         cfg.rms_norm_eps,
     )
     .context("prefill ssm_norm (rmsnorm_f32)")?;
+    flambeau_backend_hip::profile::mark("gdn_ssm_norm_p", device, stream)?;
 
     // 14. Gated: `gated = silu(z) * out_normed` across [L, d_inner].
     if v_size != d_inner {
@@ -1345,6 +1363,7 @@ pub fn forward_gdn_prefill(
         n_tokens,
     )
     .context("prefill quantise gated → Q8_1 (MMQ DS4)")?;
+    flambeau_backend_hip::profile::mark("gdn_swiglu_quant_p", device, stream)?;
 
     // 16. ssm_out projection at M = L. ssm_out is typically Q5_K / Q8_0 on
     // V1 models and does not route to MmqLdsX64, but we pass the mmq buffer
@@ -1362,6 +1381,7 @@ pub fn forward_gdn_prefill(
         hidden,
         "ssm_out",
     )?;
+    flambeau_backend_hip::profile::mark("gdn_ssm_out_p", device, stream)?;
 
     // 17. Cast back to F16 for the outer residual path.
     cast_f32_to_f16(
@@ -1372,6 +1392,7 @@ pub fn forward_gdn_prefill(
         n_tokens * hidden,
     )
     .context("prefill cast ssm_out → f16")?;
+    flambeau_backend_hip::profile::mark("gdn_cast_f16_p", device, stream)?;
 
     Ok(())
 }

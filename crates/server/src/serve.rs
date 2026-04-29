@@ -148,7 +148,31 @@ pub async fn serve(cfg: ServeConfig) -> Result<()> {
             );
             let m = Qwen3MoEShardedModel::load(&gguf, &cluster, &assignment)
                 .context("Qwen3MoEShardedModel::load")?;
-            (cluster, LoadedModel::Pp(m))
+
+            // MTP-5d: opt-in MTP attachment. Loaded once, lives on
+            // the last rank; per-request scratch allocated on each
+            // chat completion.
+            let mtp = match std::env::var("FLAMBEAU_SPEC_MTP") {
+                Ok(path) if !path.is_empty() && path != "0" && path != "off" => {
+                    let last_rank = (cluster.ranks() - 1) as usize;
+                    let last_device = cluster.device(last_rank);
+                    info!(path = %path, rank = last_rank, "loading MTP head for spec-decode");
+                    let mtp_file = flambeau_quant::GgufFile::open(std::path::Path::new(&path))
+                        .with_context(|| format!("MTP gguf {path}"))?;
+                    let head = flambeau_qwen3_moe::mtp::load_mtp_head(&mtp_file, last_device)
+                        .context("load_mtp_head")?;
+                    info!(
+                        bytes = head.total_bytes(),
+                        "MTP head loaded — spec-decode ENABLED"
+                    );
+                    Some(head)
+                }
+                _ => {
+                    info!("FLAMBEAU_SPEC_MTP not set — spec-decode disabled");
+                    None
+                }
+            };
+            (cluster, LoadedModel::Pp { model: m, mtp })
         }
         MeshMode::Tp { world } => {
             let cluster: Arc<HipCluster> =

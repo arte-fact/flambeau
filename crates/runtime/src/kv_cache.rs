@@ -289,6 +289,22 @@ impl<L: CacheLayout, D: Device> KvCache<L, D> {
         self.current_tokens = 0;
     }
 
+    /// MTP-5b — speculative-decode reject rollback. Truncate the cache
+    /// tail by `n_remove` slots. Like `clear()`, does not zero the
+    /// backing memory — slots beyond `current_tokens()` are
+    /// unobservable to attention. Errors if `n_remove > current_tokens`.
+    pub fn rollback(&mut self, n_remove: usize) -> KvCacheResult<()> {
+        if n_remove > self.current_tokens {
+            return Err(KvCacheError::CapacityExceeded {
+                current: self.current_tokens,
+                add: 0,
+                cap: 0,
+            });
+        }
+        self.current_tokens -= n_remove;
+        Ok(())
+    }
+
     pub fn k_buffer(&self) -> DevicePtr {
         self.k
     }

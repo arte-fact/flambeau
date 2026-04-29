@@ -602,6 +602,12 @@ pub fn forward_layer_prefill(
     let hidden = cfg.hidden_size;
     let il = layer_weights.layer_idx;
 
+    // MTP-5h-2 — intra-layer marks for the L>=2 prefill path. Mirror the
+    // L=1 forward_layer_decode marks but suffixed `_p` so a profile run
+    // that includes BOTH L=2 verify and L=1 redo (spec reject path) keeps
+    // them separable.
+    flambeau_backend_hip::profile::mark("layer_start_p", device, stream)?;
+
     // 1. Attention (full-attn or GDN) → mid_f16 (attn delta).
     if cfg.is_recurrent(il) {
         let LayerCache::Gdn(state) = layer_cache else {
@@ -673,6 +679,11 @@ pub fn forward_layer_prefill(
             _ => bail!("layer {il} expected Dense or FullAttn weights"),
         }
     }
+    flambeau_backend_hip::profile::mark(
+        if cfg.is_recurrent(il) { "layer_attn_gdn_p" } else { "layer_attn_full_p" },
+        device,
+        stream,
+    )?;
 
     // 2. Residual: mid = x_in + attn_delta (in-place on mid_f16).
     add_f16(
@@ -702,6 +713,7 @@ pub fn forward_layer_prefill(
         cfg.rms_norm_eps,
     )
     .context("prefill post-attn rmsnorm")?;
+    flambeau_backend_hip::profile::mark("layer_post_norm_p", device, stream)?;
 
     // 4. FFN. Dense (qwen35) or MoE + optional shared expert.
     if cfg.is_dense_ffn() {
@@ -788,6 +800,7 @@ pub fn forward_layer_prefill(
         x_out,
         n_tokens,
     )?;
+    flambeau_backend_hip::profile::mark("layer_moe_done_p", device, stream)?;
 
     Ok(())
 }

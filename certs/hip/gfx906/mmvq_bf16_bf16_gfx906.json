@@ -1,0 +1,76 @@
+{
+  "schema_version": 1,
+  "impl_id": "mmvq_bf16_bf16_gfx906",
+  "backend": "hip",
+  "arch": "gfx906",
+  "op": "qmatmul_mmvq",
+  "dtype_weight": "BF16",
+  "dtype_activation": "BF16",
+  "tolerance_formula": "|err| <= 3e-2 * max(|ref|, sqrt(k) * 0.01)",
+  "results": [
+    {
+      "m": 1,
+      "k": 256,
+      "n": 256,
+      "seed": 3204991743,
+      "max_rel_err": 0.0000011175871,
+      "tolerance": 0.03,
+      "pass": true
+    },
+    {
+      "m": 1,
+      "k": 10240,
+      "n": 5120,
+      "seed": 3178472703,
+      "max_rel_err": 0.00003092356,
+      "tolerance": 0.03,
+      "pass": true
+    },
+    {
+      "m": 1,
+      "k": 5120,
+      "n": 12288,
+      "seed": 3135108351,
+      "max_rel_err": 0.000013494604,
+      "tolerance": 0.03,
+      "pass": true
+    },
+    {
+      "m": 1,
+      "k": 5120,
+      "n": 1024,
+      "seed": 3211434239,
+      "max_rel_err": 0.000010361454,
+      "tolerance": 0.03,
+      "pass": true
+    },
+    {
+      "m": 1,
+      "k": 6144,
+      "n": 5120,
+      "seed": 3178566911,
+      "max_rel_err": 0.000014600097,
+      "tolerance": 0.03,
+      "pass": true
+    },
+    {
+      "m": 1,
+      "k": 25600,
+      "n": 5120,
+      "seed": 3176863999,
+      "max_rel_err": 0.00003371388,
+      "tolerance": 0.03,
+      "pass": true
+    }
+  ],
+  "pass": true,
+  "emitted_at": "2026-04-29T08:13:13Z",
+  "rig": "threadreaper-gfx906",
+  "pmc": {
+    "vgpr_count": 15,
+    "sgpr_count": null,
+    "waves_per_simd": 10,
+    "mem_busy_pct": null,
+    "valu_busy_pct": null
+  }
+}

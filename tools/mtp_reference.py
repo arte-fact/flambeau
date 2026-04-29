@@ -87,6 +87,18 @@ def load_mtp_weights() -> dict[str, torch.Tensor]:
         if t.tensor_type == GGMLQuantizationType.F32:
             # F32 1D norm — single dim, no reshape needed.
             arr = np.array(t.data, dtype=np.float32, copy=True)
+        elif t.tensor_type == GGMLQuantizationType.F16:
+            # F16 linear — converter default since MTP-4. Reshape from
+            # GGUF's reversed-shape convention to PyTorch [out, in].
+            #
+            # GGUF stores `t.shape = (in_dim, out_dim)` (reversed); the
+            # raw F16 buffer is row-major over the *original* shape
+            # (out_dim, in_dim). Cast as F16 view of bytes, reshape to
+            # PyTorch order, then up-cast to F32.
+            n_elems = int(np.prod(t.shape))
+            f16_view = np.frombuffer(t.data.tobytes(), dtype=np.float16, count=n_elems)
+            shape_pt = tuple(reversed(t.shape))  # (out, in)
+            arr = f16_view.reshape(shape_pt).astype(np.float32, copy=True)
         elif t.tensor_type == GGMLQuantizationType.Q8_0:
             # Dequantize Q8_0 — output is already in PyTorch
             # [out_dim, in_dim] order (does NOT need reshape).
@@ -185,11 +197,20 @@ def forward_mtp_step(
     # ── transformer block ──
     h0n = rmsnorm(h0, w["mtp.layers.0.input_layernorm.weight"], RMS_EPS)
 
-    # q_proj: [12288, 5120] = (Q heads × 256) + (gate × 256) concatenated
-    # along the output dim. Q is first half, gate is second half.
+    # q_proj: [12288, 5120]. The 12288 output dim is laid out
+    # per-head interleaved as `[Q_h0, gate_h0, Q_h1, gate_h1, ...]`,
+    # NOT as contiguous `[Qx24, gatex24]` halves. Verified against
+    # llama.cpp/src/models/qwen35moe.cpp:132-156 — `Qcur` and `gate`
+    # are 3D views with stride `head_dim*2` and offsets 0 / head_dim
+    # respectively. The earlier comment here said "first half / second
+    # half" which produced the wrong gate values for heads 1+ (head 0
+    # accidentally aligned because both layouts have q_full[0..256] as
+    # head-0 Q). MTP-INV-1 caught this via stage-bisect: attn_post_gate
+    # diverged 7.6× from flambeau (which was correct).
     q_full = h0n @ w["mtp.layers.0.self_attn.q_proj.weight"].T  # [12288]
-    q_flat = q_full[:NUM_Q_HEADS * HEAD_DIM]                    # [6144]
-    gate_flat = q_full[NUM_Q_HEADS * HEAD_DIM:]                 # [6144]
+    q_full_v = q_full.view(NUM_Q_HEADS, 2 * HEAD_DIM)
+    q_flat = q_full_v[:, :HEAD_DIM].reshape(-1)        # per-head first half [6144]
+    gate_flat = q_full_v[:, HEAD_DIM:].reshape(-1)     # per-head second half [6144]
 
     k_flat = h0n @ w["mtp.layers.0.self_attn.k_proj.weight"].T  # [1024]
     v_flat = h0n @ w["mtp.layers.0.self_attn.v_proj.weight"].T  # [1024]

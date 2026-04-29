@@ -29,7 +29,7 @@
               level forward_*_decode/prefill caller."
 )]
 
-use anyhow::{bail, Context, Result};
+use anyhow::{anyhow, bail, Context, Result};
 use flambeau_backend_hip::{HipCluster, HipDevice};
 use flambeau_core::{CopyDirection, Device, DevicePtr, Stream};
 use flambeau_ops::hip::OpsRegistry;
@@ -1589,5 +1589,201 @@ impl Qwen3MoEShardedSession {
             }
         }
         first_err.map_or(Ok(()), Err)
+    }
+
+    /// MTP-5b-2 — speculative-decode snapshot across all ranks. Loops
+    /// over each rank's local layers; only GDN layers store data
+    /// (full-attn relies on `rollback_full_attn` for cheaper recovery).
+    pub fn save_gdn_snapshot(&mut self, cluster: &HipCluster) -> Result<()> {
+        for rank_session in &mut self.per_rank {
+            let rank_idx = rank_session.rank.0 as usize;
+            let device = cluster.device(rank_idx);
+            device.bind()?;
+            let stream = device.default_stream();
+            for (il, cache) in rank_session.caches.iter_mut().enumerate() {
+                if let crate::session::LayerCache::Gdn(g) = cache {
+                    if g.snapshot_state.is_none() {
+                        let p = device.alloc(g.state_bytes).map_err(|e| {
+                            anyhow!("alloc GDN snapshot rank={rank_idx} layer={il}: {e}")
+                        })?;
+                        g.snapshot_state = Some(p);
+                    }
+                    if g.snapshot_conv_history.is_none() {
+                        let p = device.alloc(g.conv_history_bytes).map_err(|e| {
+                            anyhow!("alloc GDN snapshot conv rank={rank_idx} layer={il}: {e}")
+                        })?;
+                        g.snapshot_conv_history = Some(p);
+                    }
+                    let snap_state = g.snapshot_state.unwrap();
+                    let snap_conv = g.snapshot_conv_history.unwrap();
+                    // SAFETY: shadow buffers same size as live; D2D memcpy.
+                    unsafe {
+                        device.memcpy_async(
+                            stream, CopyDirection::DeviceToDevice,
+                            snap_state, g.state, g.state_bytes,
+                        )?;
+                        device.memcpy_async(
+                            stream, CopyDirection::DeviceToDevice,
+                            snap_conv, g.conv_history, g.conv_history_bytes,
+                        )?;
+                    }
+                }
+            }
+            stream.synchronize()?;
+        }
+        Ok(())
+    }
+
+    /// MTP-5b-2 — restore GDN state from snapshot across all ranks.
+    pub fn restore_gdn_snapshot(&mut self, cluster: &HipCluster) -> Result<()> {
+        for rank_session in &mut self.per_rank {
+            let rank_idx = rank_session.rank.0 as usize;
+            let device = cluster.device(rank_idx);
+            device.bind()?;
+            let stream = device.default_stream();
+            for (il, cache) in rank_session.caches.iter_mut().enumerate() {
+                if let crate::session::LayerCache::Gdn(g) = cache {
+                    let snap_state = g.snapshot_state.ok_or_else(|| {
+                        anyhow!("restore GDN: rank={rank_idx} layer={il} no snapshot")
+                    })?;
+                    let snap_conv = g.snapshot_conv_history.ok_or_else(|| {
+                        anyhow!("restore GDN conv: rank={rank_idx} layer={il} no snapshot")
+                    })?;
+                    // SAFETY: shadow buffers same size as live; D2D memcpy.
+                    unsafe {
+                        device.memcpy_async(
+                            stream, CopyDirection::DeviceToDevice,
+                            g.state, snap_state, g.state_bytes,
+                        )?;
+                        device.memcpy_async(
+                            stream, CopyDirection::DeviceToDevice,
+                            g.conv_history, snap_conv, g.conv_history_bytes,
+                        )?;
+                    }
+                }
+            }
+            stream.synchronize()?;
+        }
+        Ok(())
+    }
+
+    /// MTP-5b-2 — roll back full-attn K/V tail by `n_remove` slots
+    /// across every rank's full-attn layers.
+    pub fn rollback_full_attn(&mut self, n_remove: usize) -> Result<()> {
+        for rank_session in &mut self.per_rank {
+            let rank_idx = rank_session.rank.0 as usize;
+            for (il, cache) in rank_session.caches.iter_mut().enumerate() {
+                match cache {
+                    crate::session::LayerCache::FullAttn(kv) => kv
+                        .rollback(n_remove)
+                        .map_err(|e| anyhow!("rollback rank={rank_idx} layer={il}: {e}"))?,
+                    crate::session::LayerCache::FullAttnQ8(kv) => kv
+                        .rollback(n_remove)
+                        .map_err(|e| anyhow!("rollback rank={rank_idx} layer={il}: {e}"))?,
+                    crate::session::LayerCache::Gdn(_) => {}
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// MTP-5h-1 — re-advance GDN state by 1 step per recurrent layer
+    /// using the per-layer x_in snapshots saved during a prior
+    /// `forward_prefill_pp_logits_paired_l2` call. Used by the
+    /// spec-decode reject path to replace the full L=1 redo with a
+    /// per-rank-parallel GDN-only re-step (~7 ms vs ~50 ms).
+    ///
+    /// Caller is expected to have already run
+    /// [`Self::restore_gdn_snapshot`] (puts every recurrent layer's
+    /// state back to "after position-1") and
+    /// [`Self::rollback_full_attn`] (drops the L=2 batch's tail K/V
+    /// slots). After this call, the layer caches read as "after
+    /// committing one token at position with last_token's input" —
+    /// the same state a full L=1 redo would have produced, but
+    /// without re-running full-attn / MoE / FFN / output-head.
+    ///
+    /// `decode_scratch` provides per-rank `hidden_b` as a discardable
+    /// delta_out target plus the per-rank `LayerForwardScratch.gdn`
+    /// workspace required by `forward_gdn_layer_decode`.
+    pub fn redo_gdn_only_pp(
+        &mut self,
+        model: &Qwen3MoEShardedModel,
+        cluster: &HipCluster,
+        decode_scratch: &mut crate::forward::pp::ShardedForwardOneTokenScratch,
+        prefill_scratch: &crate::forward::pp::ShardedForwardPrefillScratch,
+    ) -> Result<()> {
+        let cfg = &model.config;
+        let n_ranks = self.per_rank.len();
+        if n_ranks != cluster.ranks() {
+            bail!(
+                "redo_gdn_only_pp: session ranks={} != cluster ranks={}",
+                n_ranks,
+                cluster.ranks()
+            );
+        }
+        // Per-rank: replay each recurrent layer's GDN forward at L=1
+        // against its saved x_in snapshot. Each rank runs on its own
+        // default stream → ranks execute concurrently across devices.
+        for rank_idx in 0..n_ranks {
+            let device = cluster.device(rank_idx);
+            device.bind()?;
+            let stream = device.default_stream();
+            let shard = &model.shards[rank_idx];
+            let rank_scratch = decode_scratch
+                .per_rank
+                .get_mut(rank_idx)
+                .context("decode scratch missing rank")?;
+            let layer_scratch = rank_scratch
+                .layer
+                .as_mut()
+                .context("decode scratch's LayerForwardScratch missing")?;
+            let gdn_scratch = layer_scratch
+                .gdn
+                .as_mut()
+                .context("LayerForwardScratch.gdn missing")?;
+            let delta_out = rank_scratch.hidden_b;
+            let pre_rank = prefill_scratch
+                .per_rank
+                .get(rank_idx)
+                .context("prefill scratch missing rank")?;
+            let rank_session = &mut self.per_rank[rank_idx];
+            for (local_idx, layer_weights) in shard.layers.iter().enumerate() {
+                if !cfg.is_recurrent(layer_weights.layer_idx) {
+                    continue;
+                }
+                let snap_ptr = pre_rank
+                    .gdn_input_snapshots
+                    .get(local_idx)
+                    .and_then(|s| *s)
+                    .ok_or_else(|| anyhow!(
+                        "redo_gdn_only_pp: missing snapshot for rank={rank_idx} \
+                         layer={} (run forward_prefill_pp_logits_paired_l2 first)",
+                        layer_weights.layer_idx
+                    ))?;
+                let layer_cache = &mut rank_session.caches[local_idx];
+                crate::forward::gdn::forward_gdn_layer_decode(
+                    &shard.ops,
+                    stream,
+                    device,
+                    cfg,
+                    layer_weights,
+                    layer_cache,
+                    gdn_scratch,
+                    snap_ptr,
+                    delta_out,
+                )
+                .with_context(|| {
+                    format!(
+                        "redo_gdn_only_pp rank={rank_idx} layer={}",
+                        layer_weights.layer_idx
+                    )
+                })?;
+            }
+            // Stream stays async — caller is expected to either issue
+            // its own sync (e.g. before reading `h_for_next` host-side)
+            // or to run subsequent forward calls on the same stream
+            // which will serialise behind these.
+        }
+        Ok(())
     }
 }

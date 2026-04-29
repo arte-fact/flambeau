@@ -276,6 +276,127 @@ fn upload_mtp_tensor(
     })
 }
 
+/// MTP-4-C-6: BF16 sibling of `upload_mtp_tensor` for the linear
+/// weights. F32 (norms) → F16 unchanged; F16 (linears) → BF16 via
+/// host-side cast. Q8_0 linears would need a dequant pass first and
+/// are rejected — re-run the converter with `MTP_LINEAR_DTYPE=f16`
+/// (the default since MTP-4-C-1) for BF16 forward.
+fn upload_mtp_tensor_bf16(
+    file: &GgufFile,
+    name: &str,
+    device: &HipDevice,
+) -> Result<DeviceTensor> {
+    let r = resolve_mtp_tensor(file, name)?;
+    use flambeau_core::{CopyDirection, Device, DevicePtr, Stream};
+
+    if r.dtype == GgmlDType::F32 {
+        // Norm — same F32 → F16 cast as the F16 path; rmsnorm_bf16
+        // takes F16 weight (decided in MTP-4-C-3).
+        return upload_mtp_tensor(file, name, device);
+    }
+
+    if r.dtype == GgmlDType::F16 {
+        let raw = file
+            .tensor_raw(name)
+            .with_context(|| format!("tensor_raw `{name}`"))?;
+        let n_elems = (r.size_bytes / 2) as usize;
+        if raw.len() < n_elems * 2 {
+            bail!(
+                "MTP tensor `{name}` F16 mmap slice {} < {n_elems}*2 B",
+                raw.len()
+            );
+        }
+        // SAFETY: tensor_raw covers n_elems * 2 bytes; GGUF dtype declares F16.
+        let f16_slice: &[half::f16] = unsafe {
+            std::slice::from_raw_parts(raw.as_ptr() as *const half::f16, n_elems)
+        };
+        // Round-trip via F32 — half::bf16::from_f32 is RNE.
+        let bf16_buf: Vec<half::bf16> = f16_slice
+            .iter()
+            .map(|x| half::bf16::from_f32(x.to_f32()))
+            .collect();
+        let bytes = n_elems * 2;
+        let ptr = device
+            .alloc(bytes)
+            .map_err(|e| anyhow!("hipMalloc {bytes} B `{name}` (F16→BF16): {e}"))?;
+        // SAFETY: ptr is a fresh alloc of `bytes`; bf16_buf lives
+        // through the synchronize() below.
+        unsafe {
+            device
+                .memcpy_async(
+                    device.default_stream(),
+                    CopyDirection::HostToDevice,
+                    ptr,
+                    DevicePtr(bf16_buf.as_ptr() as usize),
+                    bytes,
+                )
+                .map_err(|e| anyhow!("memcpy `{name}` (F16→BF16): {e}"))?;
+        }
+        device
+            .default_stream()
+            .synchronize()
+            .map_err(|e| anyhow!("stream sync after `{name}` (F16→BF16): {e}"))?;
+        return Ok(DeviceTensor {
+            ptr,
+            dtype: GgmlDType::BF16,
+            dims: r.dims,
+            bytes,
+            name: std::sync::Arc::from(name),
+        });
+    }
+
+    bail!(
+        "MTP linear `{name}` dtype {:?} not supported by load_mtp_head_bf16 \
+         (need F16 — re-run convert_qwen36_mtp.py with MTP_LINEAR_DTYPE=f16)",
+        r.dtype
+    );
+}
+
+/// MTP-4-C-6: load MTP head with BF16 linear weights. Norms stay
+/// F16 (matches `rmsnorm_bf16`'s F16-weight signature).
+pub fn load_mtp_head_bf16(
+    mtp_file: &GgufFile,
+    device: &HipDevice,
+) -> Result<MtpHeadWeights> {
+    device.bind()?;
+    let fc = upload_mtp_tensor_bf16(mtp_file, "mtp.fc.weight", device)?;
+    let norm = upload_mtp_tensor_bf16(mtp_file, "mtp.norm.weight", device)?;
+    let pre_fc_norm_hidden =
+        upload_mtp_tensor_bf16(mtp_file, "mtp.pre_fc_norm_hidden.weight", device)?;
+    let pre_fc_norm_embedding =
+        upload_mtp_tensor_bf16(mtp_file, "mtp.pre_fc_norm_embedding.weight", device)?;
+
+    let block = MtpBlockWeights {
+        input_layernorm: upload_mtp_tensor_bf16(
+            mtp_file,
+            "mtp.layers.0.input_layernorm.weight",
+            device,
+        )?,
+        post_attention_layernorm: upload_mtp_tensor_bf16(
+            mtp_file,
+            "mtp.layers.0.post_attention_layernorm.weight",
+            device,
+        )?,
+        q_proj: upload_mtp_tensor_bf16(mtp_file, "mtp.layers.0.self_attn.q_proj.weight", device)?,
+        k_proj: upload_mtp_tensor_bf16(mtp_file, "mtp.layers.0.self_attn.k_proj.weight", device)?,
+        v_proj: upload_mtp_tensor_bf16(mtp_file, "mtp.layers.0.self_attn.v_proj.weight", device)?,
+        o_proj: upload_mtp_tensor_bf16(mtp_file, "mtp.layers.0.self_attn.o_proj.weight", device)?,
+        q_norm: upload_mtp_tensor_bf16(mtp_file, "mtp.layers.0.self_attn.q_norm.weight", device)?,
+        k_norm: upload_mtp_tensor_bf16(mtp_file, "mtp.layers.0.self_attn.k_norm.weight", device)?,
+        gate_proj: upload_mtp_tensor_bf16(mtp_file, "mtp.layers.0.mlp.gate_proj.weight", device)?,
+        up_proj: upload_mtp_tensor_bf16(mtp_file, "mtp.layers.0.mlp.up_proj.weight", device)?,
+        down_proj: upload_mtp_tensor_bf16(mtp_file, "mtp.layers.0.mlp.down_proj.weight", device)?,
+    };
+
+    Ok(MtpHeadWeights {
+        fc,
+        norm,
+        pre_fc_norm_hidden,
+        pre_fc_norm_embedding,
+        block,
+    })
+}
+
 /// Load all 15 MTP tensors from `mtp_file` to `device`.
 ///
 /// The caller is responsible for validating `mtp_file`'s pairing
@@ -320,17 +441,247 @@ pub fn load_mtp_head(mtp_file: &GgufFile, device: &HipDevice) -> Result<MtpHeadW
     })
 }
 
+/// Optional persistent KV cache for accumulated MTP attention.
+/// `kcache` / `vcache` are F16 `[max_tokens, n_kv_heads * head_dim]`
+/// buffers owned by the caller. `cache_position` is where the
+/// current step's K/V will be written; `n_tokens_kv` is the count
+/// (1..=cache_position+1) the attention call should attend over.
+///
+/// vLLM/sglang's `spec_info.hidden_states` flow primes MTP's KV from
+/// every prefill position; passive harnesses without priming get
+/// ~0% acceptance because MTP's attention sees only the current
+/// step. The caller is responsible for ensuring the prior positions
+/// (0..cache_position) are populated, either via a prefill loop or
+/// from a prior decode step's append.
+#[derive(Clone, Copy, Debug)]
+pub struct MtpKvCache {
+    pub kcache: flambeau_core::DevicePtr,
+    pub vcache: flambeau_core::DevicePtr,
+    pub cache_position: usize,
+    pub n_tokens_kv: usize,
+}
+
+/// Reusable per-call scratch for `forward_mtp_step` and
+/// `forward_mtp_step_with_lm_head`.
+///
+/// MTP-4-CLEAN: previously each call did ~28 `hipMalloc` + `hipFree`
+/// pairs. The struct is allocated once at session init and reused
+/// for every MTP step. Sizes are derived from the model config
+/// (`hidden_size`, `num_heads`, `num_kv_heads`, `head_dim`,
+/// `moe_intermediate_size`, `vocab_size`) — re-allocate if any of
+/// these change.
+///
+/// Buffers split into three groups:
+///   1. step buffers — used by the body of `forward_mtp_step`
+///   2. transient KV slot — used only when the caller passes
+///      `kv = None` (legacy 1-slot path)
+///   3. lm-head buffers — used only by `forward_mtp_step_with_lm_head`
+#[derive(Debug)]
+pub struct MtpForwardScratch {
+    // ── Sizes (kept around for `dispose` so it doesn't need cfg).
+    bytes_2h_f16: usize,
+    bytes_h_f16: usize,
+    bytes_h_f32: usize,
+    bytes_qfull_f32: usize,
+    bytes_qfull_f16: usize,
+    bytes_qhalf_f16: usize,
+    bytes_kv_f32: usize,
+    bytes_kv_f16: usize,
+    bytes_2h_q8_1: usize,
+    bytes_h_q8_1: usize,
+    bytes_qhalf_q8_1: usize,
+    bytes_inter_f32: usize,
+    bytes_inter_q8_1: usize,
+    bytes_inter_bf16: usize,
+    bytes_vocab_f32: usize,
+
+    // ── Step buffers.
+    pub fc_in_f16: flambeau_core::DevicePtr,
+    pub fc_in_q8_1: flambeau_core::DevicePtr,
+    pub h0_f32: flambeau_core::DevicePtr,
+    pub h0_f16: flambeau_core::DevicePtr,
+    pub h0n_q8_1: flambeau_core::DevicePtr,
+    pub q_full_f32: flambeau_core::DevicePtr,
+    pub q_full_f16: flambeau_core::DevicePtr,
+    pub q_f16: flambeau_core::DevicePtr,
+    pub gate_f16: flambeau_core::DevicePtr,
+    pub k_f32: flambeau_core::DevicePtr,
+    pub v_f32: flambeau_core::DevicePtr,
+    pub k_f16: flambeau_core::DevicePtr,
+    pub v_f16: flambeau_core::DevicePtr,
+    /// Transient 1-slot KV (used when caller passes `kv = None`).
+    pub kcache_slot_f16: flambeau_core::DevicePtr,
+    pub vcache_slot_f16: flambeau_core::DevicePtr,
+    pub attn_out_f16: flambeau_core::DevicePtr,
+    pub gated_out_f16: flambeau_core::DevicePtr,
+    pub gated_q8_1: flambeau_core::DevicePtr,
+    pub attn_proj_f32: flambeau_core::DevicePtr,
+    pub h1_f16: flambeau_core::DevicePtr,
+    pub h1n_q8_1: flambeau_core::DevicePtr,
+    pub gate_mlp_f32: flambeau_core::DevicePtr,
+    pub up_mlp_f32: flambeau_core::DevicePtr,
+    pub mlp_q8_1: flambeau_core::DevicePtr,
+    /// MTP-4-C-6: BF16 staging buffer for the MLP `silu(gate)*up` →
+    /// down_proj input on the BF16 forward path. Q8_1 buffer is too
+    /// small (`inter * 1.125 B` vs BF16 needs `inter * 2 B`).
+    pub mlp_bf16: flambeau_core::DevicePtr,
+    pub down_f32: flambeau_core::DevicePtr,
+    pub h2_f16: flambeau_core::DevicePtr,
+
+    // ── lm-head wrapper buffers.
+    pub h_t_post_norm: flambeau_core::DevicePtr,
+    pub mtp_h_final: flambeau_core::DevicePtr,
+    pub x_q8_1: flambeau_core::DevicePtr,
+    pub logits_f32: flambeau_core::DevicePtr,
+}
+
+impl MtpForwardScratch {
+    /// Allocate every scratch buffer needed for a forward MTP step
+    /// against the given config.
+    pub fn new(device: &HipDevice, cfg: &crate::Qwen3MoEConfig) -> Result<Self> {
+        use flambeau_core::Device;
+
+        let h = cfg.hidden_size;
+        let inter = cfg.moe_intermediate_size;
+        let n_q = cfg.num_heads;
+        let n_kv = cfg.num_kv_heads;
+        let head_dim = cfg.head_dim;
+        let vocab = cfg.vocab_size;
+
+        // Q8_1 block bytes: F16 d + F16 s + 32 int8 quants = 36 bytes.
+        let q8_1_block_bytes = std::mem::size_of::<flambeau_quant::BlockQ8_1>();
+        let q8_1_blocks = |n_elems: usize| n_elems / 32 * q8_1_block_bytes;
+
+        let bytes_2h_f16 = 2 * h * 2;
+        let bytes_h_f16 = h * 2;
+        let bytes_h_f32 = h * 4;
+        let bytes_qfull_f32 = 2 * n_q * head_dim * 4;
+        let bytes_qfull_f16 = 2 * n_q * head_dim * 2;
+        let bytes_qhalf_f16 = n_q * head_dim * 2;
+        let bytes_kv_f32 = n_kv * head_dim * 4;
+        let bytes_kv_f16 = n_kv * head_dim * 2;
+        let bytes_2h_q8_1 = q8_1_blocks(2 * h);
+        let bytes_h_q8_1 = q8_1_blocks(h);
+        let bytes_qhalf_q8_1 = q8_1_blocks(n_q * head_dim);
+        let bytes_inter_f32 = inter * 4;
+        let bytes_inter_q8_1 = q8_1_blocks(inter);
+        let bytes_inter_bf16 = inter * 2;
+        let bytes_vocab_f32 = vocab * 4;
+
+        let alloc = |bytes: usize| -> Result<flambeau_core::DevicePtr> {
+            device
+                .alloc(bytes)
+                .map_err(|e| anyhow!("hipMalloc {bytes} B: {e}"))
+        };
+
+        Ok(Self {
+            bytes_2h_f16,
+            bytes_h_f16,
+            bytes_h_f32,
+            bytes_qfull_f32,
+            bytes_qfull_f16,
+            bytes_qhalf_f16,
+            bytes_kv_f32,
+            bytes_kv_f16,
+            bytes_2h_q8_1,
+            bytes_h_q8_1,
+            bytes_qhalf_q8_1,
+            bytes_inter_f32,
+            bytes_inter_q8_1,
+            bytes_inter_bf16,
+            bytes_vocab_f32,
+
+            fc_in_f16: alloc(bytes_2h_f16)?,
+            fc_in_q8_1: alloc(bytes_2h_q8_1)?,
+            h0_f32: alloc(bytes_h_f32)?,
+            h0_f16: alloc(bytes_h_f16)?,
+            h0n_q8_1: alloc(bytes_h_q8_1)?,
+            q_full_f32: alloc(bytes_qfull_f32)?,
+            q_full_f16: alloc(bytes_qfull_f16)?,
+            q_f16: alloc(bytes_qhalf_f16)?,
+            gate_f16: alloc(bytes_qhalf_f16)?,
+            k_f32: alloc(bytes_kv_f32)?,
+            v_f32: alloc(bytes_kv_f32)?,
+            k_f16: alloc(bytes_kv_f16)?,
+            v_f16: alloc(bytes_kv_f16)?,
+            kcache_slot_f16: alloc(bytes_kv_f16)?,
+            vcache_slot_f16: alloc(bytes_kv_f16)?,
+            attn_out_f16: alloc(bytes_qhalf_f16)?,
+            gated_out_f16: alloc(bytes_qhalf_f16)?,
+            gated_q8_1: alloc(bytes_qhalf_q8_1)?,
+            attn_proj_f32: alloc(bytes_h_f32)?,
+            h1_f16: alloc(bytes_h_f16)?,
+            h1n_q8_1: alloc(bytes_h_q8_1)?,
+            gate_mlp_f32: alloc(bytes_inter_f32)?,
+            up_mlp_f32: alloc(bytes_inter_f32)?,
+            mlp_q8_1: alloc(bytes_inter_q8_1)?,
+            mlp_bf16: alloc(bytes_inter_bf16)?,
+            down_f32: alloc(bytes_h_f32)?,
+            h2_f16: alloc(bytes_h_f16)?,
+
+            h_t_post_norm: alloc(bytes_h_f16)?,
+            mtp_h_final: alloc(bytes_h_f16)?,
+            x_q8_1: alloc(bytes_h_q8_1)?,
+            logits_f32: alloc(bytes_vocab_f32)?,
+        })
+    }
+
+    /// Free every buffer. Consumes `self` so no use-after-free.
+    pub fn dispose(self, device: &HipDevice) -> Result<()> {
+        use flambeau_core::Device;
+        // SAFETY: every pointer here was returned by `device.alloc`
+        // in `Self::new` and has not been freed since; sizes match.
+        unsafe {
+            device.dealloc(self.fc_in_f16, self.bytes_2h_f16)?;
+            device.dealloc(self.fc_in_q8_1, self.bytes_2h_q8_1)?;
+            device.dealloc(self.h0_f32, self.bytes_h_f32)?;
+            device.dealloc(self.h0_f16, self.bytes_h_f16)?;
+            device.dealloc(self.h0n_q8_1, self.bytes_h_q8_1)?;
+            device.dealloc(self.q_full_f32, self.bytes_qfull_f32)?;
+            device.dealloc(self.q_full_f16, self.bytes_qfull_f16)?;
+            device.dealloc(self.q_f16, self.bytes_qhalf_f16)?;
+            device.dealloc(self.gate_f16, self.bytes_qhalf_f16)?;
+            device.dealloc(self.k_f32, self.bytes_kv_f32)?;
+            device.dealloc(self.v_f32, self.bytes_kv_f32)?;
+            device.dealloc(self.k_f16, self.bytes_kv_f16)?;
+            device.dealloc(self.v_f16, self.bytes_kv_f16)?;
+            device.dealloc(self.kcache_slot_f16, self.bytes_kv_f16)?;
+            device.dealloc(self.vcache_slot_f16, self.bytes_kv_f16)?;
+            device.dealloc(self.attn_out_f16, self.bytes_qhalf_f16)?;
+            device.dealloc(self.gated_out_f16, self.bytes_qhalf_f16)?;
+            device.dealloc(self.gated_q8_1, self.bytes_qhalf_q8_1)?;
+            device.dealloc(self.attn_proj_f32, self.bytes_h_f32)?;
+            device.dealloc(self.h1_f16, self.bytes_h_f16)?;
+            device.dealloc(self.h1n_q8_1, self.bytes_h_q8_1)?;
+            device.dealloc(self.gate_mlp_f32, self.bytes_inter_f32)?;
+            device.dealloc(self.up_mlp_f32, self.bytes_inter_f32)?;
+            device.dealloc(self.mlp_q8_1, self.bytes_inter_q8_1)?;
+            device.dealloc(self.mlp_bf16, self.bytes_inter_bf16)?;
+            device.dealloc(self.down_f32, self.bytes_h_f32)?;
+            device.dealloc(self.h2_f16, self.bytes_h_f16)?;
+
+            device.dealloc(self.h_t_post_norm, self.bytes_h_f16)?;
+            device.dealloc(self.mtp_h_final, self.bytes_h_f16)?;
+            device.dealloc(self.x_q8_1, self.bytes_h_q8_1)?;
+            device.dealloc(self.logits_f32, self.bytes_vocab_f32)?;
+        }
+        Ok(())
+    }
+}
+
 /// MTP-3.5 forward — one MTP step on F16 hidden state.
 ///
-/// Composes existing flambeau ops; no new kernels. Allocates scratch
-/// buffers internally; this is the smoke / parity-test version, not
-/// the spec-decode hot path. MTP-4 wraps this in a reusable scratch
-/// struct.
+/// Composes existing flambeau ops; no new kernels. Caller owns
+/// `scratch` (one alloc per session via `MtpForwardScratch::new`)
+/// and the optional persistent KV cache; passes `kv = None` for the
+/// legacy transient-1-slot path.
 ///
 /// Inputs:
 ///   `h_t` F16 [hidden]      — base model hidden (post `output_norm`)
 ///   `e_token` F16 [hidden]  — embedding of the token sampled from h_t
 ///   `position` usize        — base-model position (drives MROPE)
+///   `kv` Option             — Some = persistent multi-slot cache
+///                             (vLLM/sglang flow); None = transient
 /// Output:
 ///   `h_final_out` F16 [hidden] — pre-LM-head MTP-block output. Caller
 ///                                runs the (shared) lm_head matmul to
@@ -340,66 +691,25 @@ pub fn load_mtp_head(mtp_file: &GgufFile, device: &HipDevice) -> Result<MtpHeadW
 /// position 0 — useful for the parity test against the Python ref).
 /// At `position > 0` we apply `rope_neox_partial_f16` with
 /// `cfg.rope.rotated_dims` (matches base full-attn convention).
-/// Optional persistent KV cache for accumulated MTP attention.
-/// `kcache` and `vcache` are F16 [max_tokens, n_kv_heads * head_dim]
-/// buffers owned by the caller. `cache_position` is where the
-/// current step's K/V will be written. `n_tokens_kv` is the count
-/// of valid K/V slots (1..=cache_position+1) the attention call
-/// should attend over.
-///
-/// vLLM/sglang's spec_info.hidden_states flow primes MTP's KV from
-/// every prefill position; passive harnesses without priming get
-/// 0% acceptance because MTP's attention sees only the current
-/// step. Caller is responsible for ensuring the prior positions
-/// (0..cache_position) are populated either via a prefill loop or
-/// from a prior decode step's append.
-#[derive(Clone, Copy)]
-pub struct MtpKvCache {
-    pub kcache: flambeau_core::DevicePtr,   // F16 [max_tokens, n_kv*head_dim]
-    pub vcache: flambeau_core::DevicePtr,   // F16 [max_tokens, n_kv*head_dim]
-    pub cache_position: usize,              // write index for THIS step
-    pub n_tokens_kv: usize,                 // count to attend over (>=1)
-}
-
+#[allow(clippy::too_many_arguments)]
 pub fn forward_mtp_step(
     ops: &flambeau_ops::OpsRegistry,
     stream: &flambeau_backend_hip::HipStream,
     device: &HipDevice,
     cfg: &crate::Qwen3MoEConfig,
     mtp: &MtpHeadWeights,
-    h_t: flambeau_core::DevicePtr,
-    e_token: flambeau_core::DevicePtr,
-    position: usize,
-    h_final_out: flambeau_core::DevicePtr,
-) -> Result<()> {
-    forward_mtp_step_with_kv(ops, stream, device, cfg, mtp,
-        h_t, e_token, position, h_final_out, None)
-}
-
-/// Variant that accepts an optional persistent KV cache. When
-/// `kv` is None, behaves like `forward_mtp_step` (transient 1-slot
-/// KV cache; legacy passive-harness behaviour). When Some, appends
-/// new K/V to `kv.cache_position` and runs attention with
-/// `n_tokens_kv = kv.n_tokens_kv`.
-#[allow(clippy::too_many_arguments)]
-pub fn forward_mtp_step_with_kv(
-    ops: &flambeau_ops::OpsRegistry,
-    stream: &flambeau_backend_hip::HipStream,
-    device: &HipDevice,
-    cfg: &crate::Qwen3MoEConfig,
-    mtp: &MtpHeadWeights,
+    scratch: &MtpForwardScratch,
     h_t: flambeau_core::DevicePtr,
     e_token: flambeau_core::DevicePtr,
     position: usize,
     h_final_out: flambeau_core::DevicePtr,
     kv: Option<MtpKvCache>,
 ) -> Result<()> {
-    use flambeau_backend_hip::HipDevice as _Dev;
     use flambeau_core::{Device, DevicePtr, Stream};
     use flambeau_core::op::QDtype;
     use flambeau_ops::hip::attention::{attention_decode_f16_slots, split_q_gate_f16};
-    use flambeau_ops::hip::cast::{cast_f16_to_f32, cast_f32_to_f16};
-    use flambeau_ops::hip::mlp::{add_f16, add_f32, sigmoid_mul_f16, swiglu_f32_to_q8_1};
+    use flambeau_ops::hip::cast::cast_f32_to_f16;
+    use flambeau_ops::hip::mlp::{add_f32, sigmoid_mul_f16, swiglu_f32_to_q8_1};
     use flambeau_ops::hip::norm::{quantize_f16_q8_1, rmsnorm_f16, rmsnorm_quant_q8_1};
     use flambeau_ops::hip::qmatmul::mmvq;
 
@@ -411,8 +721,6 @@ pub fn forward_mtp_step_with_kv(
         })
     }
 
-    let _ = _Dev::new; // silence unused-import warning in some configs
-
     let h = cfg.hidden_size;
     let inter = cfg.moe_intermediate_size; // dense FFN size (set from feed_forward_length for qwen35 dense)
     let n_q = cfg.num_heads;
@@ -421,61 +729,34 @@ pub fn forward_mtp_step_with_kv(
     let eps = cfg.rms_norm_eps;
     let rope = &cfg.rope;
 
-    // Q8_1 block bytes: F16 d + F16 s + 32 int8 quants = 36 bytes.
-    let q8_1_block_bytes = std::mem::size_of::<flambeau_quant::BlockQ8_1>();
-    let q8_1_blocks = |n_elems: usize| n_elems / 32 * q8_1_block_bytes;
+    let bytes_kv_f16 = scratch.bytes_kv_f16;
 
-    // ── 1. Allocate scratch (released at end of function via Drop).
-    // Sizes for all the intermediate buffers. F16 = 2 B, F32 = 4 B.
-    let bytes_2h_f16 = 2 * h * 2;
-    let bytes_h_f16 = h * 2;
-    let bytes_h_f32 = h * 4;
-    let bytes_qfull_f32 = 2 * n_q * head_dim * 4;
-    let bytes_qfull_f16 = 2 * n_q * head_dim * 2;
-    let bytes_qhalf_f16 = n_q * head_dim * 2;
-    let bytes_kv_f32 = n_kv * head_dim * 4;
-    let bytes_kv_f16 = n_kv * head_dim * 2;
-    let bytes_2h_q8_1 = q8_1_blocks(2 * h);
-    let bytes_h_q8_1 = q8_1_blocks(h);
-    let bytes_qhalf_q8_1 = q8_1_blocks(n_q * head_dim);
-    let bytes_inter_f32 = inter * 4;
-    let bytes_inter_q8_1 = q8_1_blocks(inter);
-
-    let alloc = |bytes: usize| -> Result<DevicePtr> {
-        device
-            .alloc(bytes)
-            .map_err(|e| anyhow!("hipMalloc {bytes} B: {e}"))
-    };
-
-    let fc_in_f16 = alloc(bytes_2h_f16)?;            // [norm_h ‖ norm_e] F16 [10240]
-    let fc_in_q8_1 = alloc(bytes_2h_q8_1)?;          // Q8_1 input to fc matmul
-    let h0_f32 = alloc(bytes_h_f32)?;                // fc output
-    let h0_f16 = alloc(bytes_h_f16)?;                // cast to F16
-    let h0n_q8_1 = alloc(bytes_h_q8_1)?;             // norm + quant for q/k/v matmuls
-    let q_full_f32 = alloc(bytes_qfull_f32)?;        // q_proj output [12288]
-    let q_full_f16 = alloc(bytes_qfull_f16)?;        // cast to F16
-    let q_f16 = alloc(bytes_qhalf_f16)?;             // Q half of q_full
-    let gate_f16 = alloc(bytes_qhalf_f16)?;          // gate half of q_full
-    let k_f32 = alloc(bytes_kv_f32)?;                // k_proj output
-    let v_f32 = alloc(bytes_kv_f32)?;                // v_proj output
-    let k_f16 = alloc(bytes_kv_f16)?;                // cast to F16
-    let v_f16 = alloc(bytes_kv_f16)?;                // cast to F16
-    // 1-token KV cache: just stages K/V for the single attention call.
-    let kcache_f16 = alloc(bytes_kv_f16)?;
-    let vcache_f16 = alloc(bytes_kv_f16)?;
-    let attn_out_f16 = alloc(bytes_qhalf_f16)?;
-    let gated_out_f16 = alloc(bytes_qhalf_f16)?;
-    let gated_q8_1 = alloc(bytes_qhalf_q8_1)?;
-    let attn_proj_f32 = alloc(bytes_h_f32)?;
-    let attn_proj_f16 = alloc(bytes_h_f16)?;
-    let h1_f16 = alloc(bytes_h_f16)?;
-    let h1n_q8_1 = alloc(bytes_h_q8_1)?;
-    let gate_mlp_f32 = alloc(bytes_inter_f32)?;
-    let up_mlp_f32 = alloc(bytes_inter_f32)?;
-    let mlp_q8_1 = alloc(bytes_inter_q8_1)?;
-    let down_f32 = alloc(bytes_h_f32)?;
-    let down_f16 = alloc(bytes_h_f16)?;
-    let h2_f16 = alloc(bytes_h_f16)?;
+    let fc_in_f16 = scratch.fc_in_f16;
+    let fc_in_q8_1 = scratch.fc_in_q8_1;
+    let h0_f32 = scratch.h0_f32;
+    let h0_f16 = scratch.h0_f16;
+    let h0n_q8_1 = scratch.h0n_q8_1;
+    let q_full_f32 = scratch.q_full_f32;
+    let q_full_f16 = scratch.q_full_f16;
+    let q_f16 = scratch.q_f16;
+    let gate_f16 = scratch.gate_f16;
+    let k_f32 = scratch.k_f32;
+    let v_f32 = scratch.v_f32;
+    let k_f16 = scratch.k_f16;
+    let v_f16 = scratch.v_f16;
+    let kcache_slot_f16 = scratch.kcache_slot_f16;
+    let vcache_slot_f16 = scratch.vcache_slot_f16;
+    let attn_out_f16 = scratch.attn_out_f16;
+    let gated_out_f16 = scratch.gated_out_f16;
+    let gated_q8_1 = scratch.gated_q8_1;
+    let attn_proj_f32 = scratch.attn_proj_f32;
+    let h1_f16 = scratch.h1_f16;
+    let h1n_q8_1 = scratch.h1n_q8_1;
+    let gate_mlp_f32 = scratch.gate_mlp_f32;
+    let up_mlp_f32 = scratch.up_mlp_f32;
+    let mlp_q8_1 = scratch.mlp_q8_1;
+    let down_f32 = scratch.down_f32;
+    let h2_f16 = scratch.h2_f16;
 
     // ── 2. Pre-FC norms + concat. Order is [embedding, hidden] per vLLM
     // Qwen3NextMTP source (concat happens at vllm/.../qwen3_next_mtp.py:86).
@@ -556,7 +837,9 @@ pub fn forward_mtp_step_with_kv(
     if position != 0 {
         // Stack-buffered position; sync after copy.
         let position_host: [i32; 1] = [position as i32];
-        let position_dev = alloc(4)?;
+        let position_dev = device
+            .alloc(4)
+            .map_err(|e| anyhow!("hipMalloc 4 B (position): {e}"))?;
         // SAFETY: position_dev is fresh alloc of 4 bytes; position_host
         // lives on stack across the synchronize() below.
         unsafe {
@@ -584,8 +867,7 @@ pub fn forward_mtp_step_with_kv(
     }
 
     // ── 8. Attention. Either:
-    //   (transient KV branch, kv=None) — use the local 1-slot
-    //     kcache_f16/vcache_f16 we allocated above.
+    //   (transient KV branch, kv=None) — use the scratch 1-slot KV.
     //   (persistent KV branch, kv=Some) — append new K/V to
     //     caller-provided cache at `cache_position`, run with
     //     `n_tokens_kv` for accumulated history (this is what
@@ -599,19 +881,19 @@ pub fn forward_mtp_step_with_kv(
         let k_dst = c.kcache.offset_bytes(c.cache_position * row_bytes);
         let v_dst = c.vcache.offset_bytes(c.cache_position * row_bytes);
         // SAFETY: caller asserts cache size ≥ (cache_position+1)*row_bytes;
-        // k_f16/v_f16 are fresh allocs of row_bytes.
+        // k_f16/v_f16 are scratch allocs of row_bytes.
         unsafe {
             device.memcpy_async(stream, CopyDirection::DeviceToDevice, k_dst, k_f16, row_bytes)?;
             device.memcpy_async(stream, CopyDirection::DeviceToDevice, v_dst, v_f16, row_bytes)?;
         }
         (c.kcache, c.vcache, c.n_tokens_kv)
     } else {
-        // SAFETY: kcache_f16 / vcache_f16 are fresh allocs of n_kv*head_dim*2 B.
+        // SAFETY: scratch slot KV buffers each hold n_kv*head_dim*2 B.
         unsafe {
-            device.memcpy_async(stream, CopyDirection::DeviceToDevice, kcache_f16, k_f16, bytes_kv_f16)?;
-            device.memcpy_async(stream, CopyDirection::DeviceToDevice, vcache_f16, v_f16, bytes_kv_f16)?;
+            device.memcpy_async(stream, CopyDirection::DeviceToDevice, kcache_slot_f16, k_f16, bytes_kv_f16)?;
+            device.memcpy_async(stream, CopyDirection::DeviceToDevice, vcache_slot_f16, v_f16, bytes_kv_f16)?;
         }
-        (kcache_f16, vcache_f16, 1usize)
+        (kcache_slot_f16, vcache_slot_f16, 1usize)
     };
     attention_decode_f16_slots(
         ops, stream, q_f16, k_buf, v_buf, attn_out_f16,
@@ -644,8 +926,6 @@ pub fn forward_mtp_step_with_kv(
     let h1_f32 = attn_proj_f32;
     cast_f32_to_f16(ops, stream, h1_f32, h1_f16, h)
         .context("mtp cast h1 F32 → F16 for post_attn norm")?;
-    // (legacy h1=add_f16 + attn_proj_f16 dead — kept allocs; no extra code)
-    let _ = (attn_proj_f16, add_f16); // silence unused-var warnings
 
     // ── 12. post_attention_layernorm + Q8_1 quant for MLP
     rmsnorm_quant_q8_1(
@@ -680,7 +960,6 @@ pub fn forward_mtp_step_with_kv(
     let h2_f32 = down_f32;  // reused buffer holds h2 = h1 + down
     cast_f32_to_f16(ops, stream, h2_f32, h2_f16, h)
         .context("mtp cast h2 F32 → F16 for final norm")?;
-    let _ = down_f16;  // keep alloc; unused after F32 path
 
     // ── 15. Final norm: h_final = rmsnorm(h2, mtp.norm)
     rmsnorm_f16(
@@ -690,44 +969,271 @@ pub fn forward_mtp_step_with_kv(
     .context("mtp final norm")?;
 
     stream.synchronize()?;
-
-    // ── Free scratch
-    let _ = cast_f16_to_f32; // silence unused (kept for future debug)
-    // SAFETY: each allocation is uniquely owned by this scope.
-    unsafe {
-        device.dealloc(fc_in_f16, bytes_2h_f16)?;
-        device.dealloc(fc_in_q8_1, bytes_2h_q8_1)?;
-        device.dealloc(h0_f32, bytes_h_f32)?;
-        device.dealloc(h0_f16, bytes_h_f16)?;
-        device.dealloc(h0n_q8_1, bytes_h_q8_1)?;
-        device.dealloc(q_full_f32, bytes_qfull_f32)?;
-        device.dealloc(q_full_f16, bytes_qfull_f16)?;
-        device.dealloc(q_f16, bytes_qhalf_f16)?;
-        device.dealloc(gate_f16, bytes_qhalf_f16)?;
-        device.dealloc(k_f32, bytes_kv_f32)?;
-        device.dealloc(v_f32, bytes_kv_f32)?;
-        device.dealloc(k_f16, bytes_kv_f16)?;
-        device.dealloc(v_f16, bytes_kv_f16)?;
-        device.dealloc(kcache_f16, bytes_kv_f16)?;
-        device.dealloc(vcache_f16, bytes_kv_f16)?;
-        device.dealloc(attn_out_f16, bytes_qhalf_f16)?;
-        device.dealloc(gated_out_f16, bytes_qhalf_f16)?;
-        device.dealloc(gated_q8_1, bytes_qhalf_q8_1)?;
-        device.dealloc(attn_proj_f32, bytes_h_f32)?;
-        device.dealloc(attn_proj_f16, bytes_h_f16)?;
-        device.dealloc(h1_f16, bytes_h_f16)?;
-        device.dealloc(h1n_q8_1, bytes_h_q8_1)?;
-        device.dealloc(gate_mlp_f32, bytes_inter_f32)?;
-        device.dealloc(up_mlp_f32, bytes_inter_f32)?;
-        device.dealloc(mlp_q8_1, bytes_inter_q8_1)?;
-        device.dealloc(down_f32, bytes_h_f32)?;
-        device.dealloc(down_f16, bytes_h_f16)?;
-        device.dealloc(h2_f16, bytes_h_f16)?;
-    }
     Ok(())
 }
 
-/// MTP-4 helper: run `forward_mtp_step` followed by the LM-head
+/// MTP-4-C-6: BF16-throughout MTP forward.
+///
+/// Same residual/attention/MLP structure as `forward_mtp_step`, but
+/// activations stay BF16 across matmul → matmul (no Q8_1 activation
+/// quantize). F32 mmvq accumulators are cast to BF16 directly. The
+/// dominant per-mmvq Q8_1 noise (~0.78 % per-block-of-32, compounded
+/// across 8 sequential matmuls) is eliminated.
+///
+/// `mtp` weights must be loaded via `load_mtp_head_bf16` so the
+/// linears are BF16 (`mmvq_bf16_bf16` requires BF16 weight). Norms
+/// stay F16 (small + needs more mantissa than BF16).
+///
+/// `h_t` / `e_token` are F16 (caller convention from
+/// `forward_one_token_pp` / token_embd lookup); cast to BF16 at
+/// entry. `h_final_out` is F16 (caller's convention into the LM
+/// head); cast back at exit.
+///
+/// Scratch reuse: every "_f16" buffer in `MtpForwardScratch` is the
+/// same byte size as its BF16 counterpart, so the existing scratch
+/// is reused without growth. The Q8_1 buffers go unused on this
+/// path (harmless).
+#[allow(clippy::too_many_arguments)]
+pub fn forward_mtp_step_bf16(
+    ops: &flambeau_ops::OpsRegistry,
+    stream: &flambeau_backend_hip::HipStream,
+    device: &HipDevice,
+    cfg: &crate::Qwen3MoEConfig,
+    mtp: &MtpHeadWeights,
+    scratch: &MtpForwardScratch,
+    h_t_f16: flambeau_core::DevicePtr,
+    e_token_f16: flambeau_core::DevicePtr,
+    position: usize,
+    h_final_out_f16: flambeau_core::DevicePtr,
+    kv: Option<MtpKvCache>,
+) -> Result<()> {
+    use flambeau_core::{Device, DevicePtr, Stream};
+    use flambeau_ops::hip::attention::{
+        attention_decode_bf16, split_q_gate_bf16,
+    };
+    use flambeau_ops::hip::cast::{
+        cast_bf16_to_f16, cast_f16_to_bf16, cast_f32_to_bf16,
+    };
+    use flambeau_ops::hip::mlp::{
+        add_f32, sigmoid_mul_bf16, swiglu_f32_to_bf16,
+    };
+    use flambeau_ops::hip::norm::rmsnorm_bf16;
+    use flambeau_ops::hip::pe::rope_neox_partial_bf16;
+    use flambeau_ops::hip::qmatmul::mmvq_bf16_bf16;
+
+    let h = cfg.hidden_size;
+    let inter = cfg.moe_intermediate_size;
+    let n_q = cfg.num_heads;
+    let n_kv = cfg.num_kv_heads;
+    let head_dim = cfg.head_dim;
+    let eps = cfg.rms_norm_eps;
+    let rope = &cfg.rope;
+
+    // Buffer aliases — every "_f16" scratch ptr is reused as BF16
+    // (same 2 B/elem footprint). Comment notes the BF16 role.
+    let fc_in_bf16     = scratch.fc_in_f16;     // [2*h] BF16
+    let h0_f32         = scratch.h0_f32;        // mmvq accumulator
+    let h0_bf16        = scratch.h0_f16;        // [h] BF16
+    let q_full_f32     = scratch.q_full_f32;
+    let q_full_bf16    = scratch.q_full_f16;    // [2*n_q*head_dim] BF16
+    let q_bf16         = scratch.q_f16;         // [n_q*head_dim] BF16
+    let gate_bf16      = scratch.gate_f16;      // [n_q*head_dim] BF16
+    let k_f32          = scratch.k_f32;
+    let v_f32          = scratch.v_f32;
+    let k_bf16         = scratch.k_f16;         // [n_kv*head_dim] BF16
+    let v_bf16         = scratch.v_f16;         // [n_kv*head_dim] BF16
+    let kcache_slot    = scratch.kcache_slot_f16;
+    let vcache_slot    = scratch.vcache_slot_f16;
+    let attn_out_bf16  = scratch.attn_out_f16;
+    let gated_out_bf16 = scratch.gated_out_f16;
+    let attn_proj_f32  = scratch.attn_proj_f32;
+    let h1_bf16        = scratch.h1_f16;        // [h] BF16
+    let gate_mlp_f32   = scratch.gate_mlp_f32;
+    let up_mlp_f32     = scratch.up_mlp_f32;
+    let mlp_bf16       = scratch.mlp_bf16;      // [inter] BF16 (dedicated; Q8_1 buf too small)
+    let down_f32       = scratch.down_f32;
+    let h2_bf16        = scratch.h2_f16;        // [h] BF16
+
+    debug_assert_eq!(
+        scratch.bytes_inter_bf16,
+        inter * 2,
+        "MtpForwardScratch.mlp_bf16 was allocated for a different inter"
+    );
+
+    // ── 1. Cast h_t and e_token (F16) → BF16 into the fc input slots
+    // (concat order: [embedding, hidden] per vLLM source).
+    let fc_in_h_offset = fc_in_bf16.offset_bytes(h * 2); // BF16 = 2 B
+    cast_f16_to_bf16(ops, stream, e_token_f16, fc_in_bf16, h)
+        .context("mtp bf16 cast e_token F16→BF16")?;
+    cast_f16_to_bf16(ops, stream, h_t_f16, fc_in_h_offset, h)
+        .context("mtp bf16 cast h_t F16→BF16")?;
+
+    // ── 2. pre_fc norms (BF16). Read each half, write to its half.
+    // rmsnorm_bf16 normalises in-place over [m, k]; we run two 1-row calls,
+    // one per half, with the corresponding norm weight.
+    rmsnorm_bf16(
+        ops, stream, fc_in_bf16, mtp.pre_fc_norm_embedding.ptr, fc_in_bf16,
+        1, h, eps,
+    )
+    .context("mtp bf16 pre_fc_norm_embedding (first half)")?;
+    rmsnorm_bf16(
+        ops, stream, fc_in_h_offset, mtp.pre_fc_norm_hidden.ptr, fc_in_h_offset,
+        1, h, eps,
+    )
+    .context("mtp bf16 pre_fc_norm_hidden (second half)")?;
+
+    // ── 3. fc matmul: BF16 weight × BF16 act → F32.
+    mmvq_bf16_bf16(ops, stream, mtp.fc.ptr, fc_in_bf16, h0_f32, h, 2 * h)
+        .context("mtp bf16 mmvq fc")?;
+    cast_f32_to_bf16(ops, stream, h0_f32, h0_bf16, h)
+        .context("mtp bf16 cast h0 F32→BF16")?;
+
+    // ── 4. input_layernorm (BF16, in-place into h0_bf16).
+    rmsnorm_bf16(
+        ops, stream, h0_bf16, mtp.block.input_layernorm.ptr, h0_bf16,
+        1, h, eps,
+    )
+    .context("mtp bf16 input_layernorm")?;
+
+    // ── 5. q/k/v projections — BF16 weight × BF16 act → F32; cast → BF16.
+    mmvq_bf16_bf16(ops, stream, mtp.block.q_proj.ptr, h0_bf16, q_full_f32, 2 * n_q * head_dim, h)
+        .context("mtp bf16 mmvq q_proj")?;
+    cast_f32_to_bf16(ops, stream, q_full_f32, q_full_bf16, 2 * n_q * head_dim)
+        .context("mtp bf16 cast q_full F32→BF16")?;
+    split_q_gate_bf16(ops, stream, q_full_bf16, q_bf16, gate_bf16, 1, n_q, head_dim)
+        .context("mtp bf16 split q_gate")?;
+
+    mmvq_bf16_bf16(ops, stream, mtp.block.k_proj.ptr, h0_bf16, k_f32, n_kv * head_dim, h)
+        .context("mtp bf16 mmvq k_proj")?;
+    cast_f32_to_bf16(ops, stream, k_f32, k_bf16, n_kv * head_dim)
+        .context("mtp bf16 cast k F32→BF16")?;
+    mmvq_bf16_bf16(ops, stream, mtp.block.v_proj.ptr, h0_bf16, v_f32, n_kv * head_dim, h)
+        .context("mtp bf16 mmvq v_proj")?;
+    cast_f32_to_bf16(ops, stream, v_f32, v_bf16, n_kv * head_dim)
+        .context("mtp bf16 cast v F32→BF16")?;
+
+    // ── 6. q/k_norm per head (BF16).
+    rmsnorm_bf16(ops, stream, q_bf16, mtp.block.q_norm.ptr, q_bf16, n_q, head_dim, eps)
+        .context("mtp bf16 q_norm")?;
+    rmsnorm_bf16(ops, stream, k_bf16, mtp.block.k_norm.ptr, k_bf16, n_kv, head_dim, eps)
+        .context("mtp bf16 k_norm")?;
+
+    // ── 7. Partial RoPE (skipped at position 0).
+    if position != 0 {
+        let position_host: [i32; 1] = [position as i32];
+        let position_dev = device
+            .alloc(4)
+            .map_err(|e| anyhow!("hipMalloc 4 B (position): {e}"))?;
+        // SAFETY: position_dev is fresh alloc; position_host outlives sync.
+        unsafe {
+            device.memcpy_async(
+                stream,
+                flambeau_core::CopyDirection::HostToDevice,
+                position_dev,
+                DevicePtr(position_host.as_ptr() as usize),
+                4,
+            )?;
+        }
+        stream.synchronize()?;
+        rope_neox_partial_bf16(
+            ops, stream, q_bf16, position_dev, rope.freq_base,
+            1, n_q, head_dim, rope.rotated_dims,
+        )
+        .context("mtp bf16 rope Q")?;
+        rope_neox_partial_bf16(
+            ops, stream, k_bf16, position_dev, rope.freq_base,
+            1, n_kv, head_dim, rope.rotated_dims,
+        )
+        .context("mtp bf16 rope K")?;
+        // SAFETY: position_dev is uniquely owned by this scope.
+        unsafe { device.dealloc(position_dev, 4)?; }
+    }
+
+    // ── 8. Attention. Either persistent (kv=Some) or transient slot.
+    use flambeau_core::CopyDirection;
+    let scale = 1.0_f32 / (head_dim as f32).sqrt();
+    let bytes_kv = scratch.bytes_kv_f16;
+    let (k_buf, v_buf, n_tokens_kv) = if let Some(c) = kv {
+        let k_dst = c.kcache.offset_bytes(c.cache_position * bytes_kv);
+        let v_dst = c.vcache.offset_bytes(c.cache_position * bytes_kv);
+        // SAFETY: caller asserts cache size; k_bf16/v_bf16 hold bytes_kv each.
+        unsafe {
+            device.memcpy_async(stream, CopyDirection::DeviceToDevice, k_dst, k_bf16, bytes_kv)?;
+            device.memcpy_async(stream, CopyDirection::DeviceToDevice, v_dst, v_bf16, bytes_kv)?;
+        }
+        (c.kcache, c.vcache, c.n_tokens_kv)
+    } else {
+        // SAFETY: scratch slot KV buffers each hold bytes_kv.
+        unsafe {
+            device.memcpy_async(stream, CopyDirection::DeviceToDevice, kcache_slot, k_bf16, bytes_kv)?;
+            device.memcpy_async(stream, CopyDirection::DeviceToDevice, vcache_slot, v_bf16, bytes_kv)?;
+        }
+        (kcache_slot, vcache_slot, 1usize)
+    };
+    attention_decode_bf16(
+        ops, stream, q_bf16, k_buf, v_buf, attn_out_bf16,
+        n_q, n_kv, head_dim, n_tokens_kv, scale,
+    )
+    .context("mtp bf16 attention_decode")?;
+
+    // ── 9. Output gate: sigmoid(gate) * attn_out (V1.7.4.b math).
+    sigmoid_mul_bf16(ops, stream, gate_bf16, attn_out_bf16, gated_out_bf16, n_q * head_dim)
+        .context("mtp bf16 sigmoid_mul")?;
+
+    // ── 10. o_proj: BF16 → F32 attn_proj.
+    mmvq_bf16_bf16(
+        ops, stream, mtp.block.o_proj.ptr, gated_out_bf16, attn_proj_f32,
+        h, n_q * head_dim,
+    )
+    .context("mtp bf16 mmvq o_proj")?;
+
+    // ── 11. F32 residual (h0_f32 + attn_proj_f32 → attn_proj_f32).
+    add_f32(ops, stream, h0_f32, attn_proj_f32, attn_proj_f32, h)
+        .context("mtp bf16 residual h1 (F32)")?;
+    let h1_f32 = attn_proj_f32;
+    cast_f32_to_bf16(ops, stream, h1_f32, h1_bf16, h)
+        .context("mtp bf16 cast h1 F32→BF16")?;
+
+    // ── 12. post_attention_layernorm in BF16.
+    rmsnorm_bf16(
+        ops, stream, h1_bf16, mtp.block.post_attention_layernorm.ptr, h1_bf16,
+        1, h, eps,
+    )
+    .context("mtp bf16 post_attention_layernorm")?;
+
+    // ── 13. MLP — BF16 mmvq for gate/up; fused swiglu+cast to BF16 mlp; BF16 mmvq down.
+    mmvq_bf16_bf16(ops, stream, mtp.block.gate_proj.ptr, h1_bf16, gate_mlp_f32, inter, h)
+        .context("mtp bf16 mmvq gate_proj")?;
+    mmvq_bf16_bf16(ops, stream, mtp.block.up_proj.ptr, h1_bf16, up_mlp_f32, inter, h)
+        .context("mtp bf16 mmvq up_proj")?;
+    swiglu_f32_to_bf16(ops, stream, gate_mlp_f32, up_mlp_f32, mlp_bf16, inter)
+        .context("mtp bf16 swiglu_f32_to_bf16")?;
+    mmvq_bf16_bf16(ops, stream, mtp.block.down_proj.ptr, mlp_bf16, down_f32, h, inter)
+        .context("mtp bf16 mmvq down_proj")?;
+
+    // ── 14. F32 residual h2 = h1 + down.
+    add_f32(ops, stream, h1_f32, down_f32, down_f32, h)
+        .context("mtp bf16 residual h2 (F32)")?;
+    let h2_f32 = down_f32;
+    cast_f32_to_bf16(ops, stream, h2_f32, h2_bf16, h)
+        .context("mtp bf16 cast h2 F32→BF16")?;
+
+    // ── 15. Final norm (BF16).
+    rmsnorm_bf16(
+        ops, stream, h2_bf16, mtp.norm.ptr, h2_bf16,
+        1, h, eps,
+    )
+    .context("mtp bf16 final norm")?;
+
+    // ── 16. Cast BF16 → F16 for caller-visible h_final_out.
+    cast_bf16_to_f16(ops, stream, h2_bf16, h_final_out_f16, h)
+        .context("mtp bf16 cast h_final BF16→F16")?;
+
+    stream.synchronize()?;
+    Ok(())
+}
+
+/// MTP helper: run `forward_mtp_step` followed by the LM-head
 /// matmul, returning the argmax-predicted token id.
 ///
 /// vLLM convention (verified from
@@ -743,17 +1249,14 @@ pub fn forward_mtp_step_with_kv(
 /// re-apply `output_norm` standalone here to match vLLM's convention.
 ///
 /// Inputs:
-///   `output_norm_weight` — base model's `output_norm.weight` (F16,
-///                          on the same device as MTP)
-///   `lm_head_weight`     — base model's `output.weight` (any
-///                          GGML quant, on the same device as MTP)
-///   `token_embd_row_f16` — F16 [hidden] embedding of the token whose
-///                          successor we're predicting (caller is
-///                          responsible for cross-rank copy if needed)
-///   `hidden_pre_norm`    — F16 [hidden] base hidden state pre-output_norm
-///                          (= flambeau's `scratch.hidden_a` after a
-///                          forward pass)
-///   `position`           — base-model position (drives MROPE)
+///   `scratch`              — reusable per-session scratch buffers
+///   `output_norm_weight`   — base model's `output_norm.weight`
+///   `lm_head_weight`       — base model's `output.weight` (any GGML quant)
+///   `token_embd_row_f16`   — F16 [hidden] embedding of the token whose
+///                            successor we're predicting
+///   `hidden_pre_norm`      — F16 [hidden] base hidden state pre-output_norm
+///   `position`             — base-model position (drives MROPE)
+///   `kv`                   — Some = persistent multi-slot cache; None = transient
 ///
 /// Returns the predicted next-token id.
 #[allow(clippy::too_many_arguments)]
@@ -763,26 +1266,7 @@ pub fn forward_mtp_step_with_lm_head(
     device: &HipDevice,
     cfg: &crate::Qwen3MoEConfig,
     mtp: &MtpHeadWeights,
-    output_norm_weight: &DeviceTensor,
-    lm_head_weight: &DeviceTensor,
-    hidden_pre_norm: flambeau_core::DevicePtr,
-    token_embd_row_f16: flambeau_core::DevicePtr,
-    position: usize,
-) -> Result<u32> {
-    forward_mtp_step_with_lm_head_kv(
-        ops, stream, device, cfg, mtp,
-        output_norm_weight, lm_head_weight,
-        hidden_pre_norm, token_embd_row_f16, position, None,
-    )
-}
-
-#[allow(clippy::too_many_arguments)]
-pub fn forward_mtp_step_with_lm_head_kv(
-    ops: &flambeau_ops::OpsRegistry,
-    stream: &flambeau_backend_hip::HipStream,
-    device: &HipDevice,
-    cfg: &crate::Qwen3MoEConfig,
-    mtp: &MtpHeadWeights,
+    scratch: &MtpForwardScratch,
     output_norm_weight: &DeviceTensor,
     lm_head_weight: &DeviceTensor,
     hidden_pre_norm: flambeau_core::DevicePtr,
@@ -799,40 +1283,41 @@ pub fn forward_mtp_step_with_lm_head_kv(
 
     // 1. Apply base output_norm to get the post-norm hidden vLLM's MTP
     //    convention expects.
-    let h_t_post_norm = device
-        .alloc(hidden * 2)
-        .map_err(|e| anyhow!("hipMalloc h_t_post_norm: {e}"))?;
     rmsnorm_f16(
         ops, stream,
-        hidden_pre_norm, output_norm_weight.ptr, h_t_post_norm,
+        hidden_pre_norm, output_norm_weight.ptr, scratch.h_t_post_norm,
         1, hidden, cfg.rms_norm_eps,
     )
     .context("base output_norm for MTP h_t")?;
 
-    // 2. Run MTP on post-norm hidden.
-    let mtp_h_final = device
-        .alloc(hidden * 2)
-        .map_err(|e| anyhow!("hipMalloc mtp_h_final: {e}"))?;
-    forward_mtp_step_with_kv(
-        ops, stream, device, cfg, mtp,
-        h_t_post_norm,
-        token_embd_row_f16,
-        position,
-        mtp_h_final,
-        kv,
-    )?;
+    // 2. Run MTP on post-norm hidden. MTP-4-C-6: `FLAMBEAU_MTP_BF16=1`
+    //    routes to the BF16 forward; default stays on F16/Q8_1 for
+    //    behaviour preservation.
+    let use_bf16 = std::env::var("FLAMBEAU_MTP_BF16")
+        .map(|v| !matches!(v.as_str(), "" | "0" | "off" | "false"))
+        .unwrap_or(false);
+    if use_bf16 {
+        forward_mtp_step_bf16(
+            ops, stream, device, cfg, mtp, scratch,
+            scratch.h_t_post_norm,
+            token_embd_row_f16,
+            position,
+            scratch.mtp_h_final,
+            kv,
+        )?;
+    } else {
+        forward_mtp_step(
+            ops, stream, device, cfg, mtp, scratch,
+            scratch.h_t_post_norm,
+            token_embd_row_f16,
+            position,
+            scratch.mtp_h_final,
+            kv,
+        )?;
+    }
 
     // 3. LM head: quantize MTP output → Q8_1 → mmvq → F32 logits → argmax.
-    let q8_1_block_bytes = std::mem::size_of::<flambeau_quant::BlockQ8_1>();
-    let n_blocks = hidden / 32;
-    let x_q8_1 = device
-        .alloc(n_blocks * q8_1_block_bytes)
-        .map_err(|e| anyhow!("hipMalloc x_q8_1: {e}"))?;
-    let logits_f32 = device
-        .alloc(vocab * 4)
-        .map_err(|e| anyhow!("hipMalloc logits_f32: {e}"))?;
-
-    quantize_f16_q8_1(ops, stream, mtp_h_final, x_q8_1, hidden)
+    quantize_f16_q8_1(ops, stream, scratch.mtp_h_final, scratch.x_q8_1, hidden)
         .context("mtp lm_head quantize")?;
 
     let dtype = match lm_head_weight.dtype {
@@ -847,20 +1332,20 @@ pub fn forward_mtp_step_with_lm_head_kv(
         d => bail!("unsupported lm_head dtype {d:?} for MTP probe"),
     };
     flambeau_ops::hip::qmatmul::mmvq(
-        ops, stream, lm_head_weight.ptr, x_q8_1, logits_f32,
+        ops, stream, lm_head_weight.ptr, scratch.x_q8_1, scratch.logits_f32,
         vocab, hidden, dtype,
     )
     .context("mtp lm_head mmvq")?;
 
-    // 4. Argmax host-side (cheap; vocab × 4 bytes = ~1 MB).
+    // 4. Argmax host-side (cheap; vocab × 4 bytes ≈ 1 MB).
     let mut host = vec![0.0f32; vocab];
-    // SAFETY: logits_f32 has vocab*4 bytes; host has vocab*4 bytes.
+    // SAFETY: logits_f32 holds vocab*4 bytes; host has vocab*4 bytes.
     unsafe {
         device.memcpy_async(
             stream,
             flambeau_core::CopyDirection::DeviceToHost,
             DevicePtr(host.as_mut_ptr() as usize),
-            logits_f32,
+            scratch.logits_f32,
             vocab * 4,
         )?;
     }
@@ -873,16 +1358,216 @@ pub fn forward_mtp_step_with_lm_head_kv(
             best_idx = i;
         }
     }
+    Ok(best_idx as u32)
+}
 
-    // 5. Free per-call scratch.
-    // SAFETY: each alloc is uniquely owned by this call.
-    unsafe {
-        device.dealloc(h_t_post_norm, hidden * 2)?;
-        device.dealloc(mtp_h_final, hidden * 2)?;
-        device.dealloc(x_q8_1, n_blocks * q8_1_block_bytes)?;
-        device.dealloc(logits_f32, vocab * 4)?;
+/// MTP-5h-Lever-B — async variant of [`forward_mtp_step_with_lm_head`]
+/// that issues every device-side kernel (output_norm, MTP forward, LM
+/// head quant + mmvq) on the supplied `stream` but does NOT download
+/// logits or host-argmax. Returns once kernels are queued; logits live
+/// in `scratch.logits_f32` on device until the caller pairs this with
+/// [`mtp_logits_argmax_host`].
+///
+/// Used by the spec-decode driver to overlap the MTP draft with
+/// `save_gdn_snapshot` on per-rank default streams (run on a different
+/// stream of the head device, executes concurrently with the snap
+/// memcpys).
+#[allow(clippy::too_many_arguments)]
+pub fn forward_mtp_step_with_lm_head_async(
+    ops: &flambeau_ops::OpsRegistry,
+    stream: &flambeau_backend_hip::HipStream,
+    device: &HipDevice,
+    cfg: &crate::Qwen3MoEConfig,
+    mtp: &MtpHeadWeights,
+    scratch: &MtpForwardScratch,
+    output_norm_weight: &DeviceTensor,
+    lm_head_weight: &DeviceTensor,
+    hidden_pre_norm: flambeau_core::DevicePtr,
+    token_embd_row_f16: flambeau_core::DevicePtr,
+    position: usize,
+    kv: Option<MtpKvCache>,
+) -> Result<()> {
+    use flambeau_ops::hip::norm::{quantize_f16_q8_1, rmsnorm_f16};
+
+    device.bind()?;
+    let hidden = cfg.hidden_size;
+    let vocab = cfg.vocab_size;
+
+    rmsnorm_f16(
+        ops, stream,
+        hidden_pre_norm, output_norm_weight.ptr, scratch.h_t_post_norm,
+        1, hidden, cfg.rms_norm_eps,
+    )
+    .context("base output_norm for MTP h_t (async)")?;
+
+    let use_bf16 = std::env::var("FLAMBEAU_MTP_BF16")
+        .map(|v| !matches!(v.as_str(), "" | "0" | "off" | "false"))
+        .unwrap_or(false);
+    if use_bf16 {
+        forward_mtp_step_bf16(
+            ops, stream, device, cfg, mtp, scratch,
+            scratch.h_t_post_norm, token_embd_row_f16, position,
+            scratch.mtp_h_final, kv,
+        )?;
+    } else {
+        forward_mtp_step(
+            ops, stream, device, cfg, mtp, scratch,
+            scratch.h_t_post_norm, token_embd_row_f16, position,
+            scratch.mtp_h_final, kv,
+        )?;
     }
 
+    quantize_f16_q8_1(ops, stream, scratch.mtp_h_final, scratch.x_q8_1, hidden)
+        .context("mtp lm_head quantize (async)")?;
+
+    let dtype = match lm_head_weight.dtype {
+        flambeau_quant::GgmlDType::F16  => flambeau_core::op::QDtype::F16,
+        flambeau_quant::GgmlDType::Q8_0 => flambeau_core::op::QDtype::Q8_0,
+        flambeau_quant::GgmlDType::Q4_0 => flambeau_core::op::QDtype::Q4_0,
+        flambeau_quant::GgmlDType::Q4_1 => flambeau_core::op::QDtype::Q4_1,
+        flambeau_quant::GgmlDType::Q4K  => flambeau_core::op::QDtype::Q4_K,
+        flambeau_quant::GgmlDType::Q5_0 => flambeau_core::op::QDtype::Q5_0,
+        flambeau_quant::GgmlDType::Q5K  => flambeau_core::op::QDtype::Q5_K,
+        flambeau_quant::GgmlDType::Q6K  => flambeau_core::op::QDtype::Q6_K,
+        d => bail!("unsupported lm_head dtype {d:?} for MTP probe"),
+    };
+    flambeau_ops::hip::qmatmul::mmvq(
+        ops, stream, lm_head_weight.ptr, scratch.x_q8_1, scratch.logits_f32,
+        vocab, hidden, dtype,
+    )
+    .context("mtp lm_head mmvq (async)")?;
+
+    Ok(())
+}
+
+/// MTP-5h-Lever-B — host-side download + argmax pair for
+/// [`forward_mtp_step_with_lm_head_async`]. Syncs `stream` (waits for
+/// the queued lm-head mmvq to complete), downloads
+/// `scratch.logits_f32` to host, and returns the argmax token id.
+pub fn mtp_logits_argmax_host(
+    device: &HipDevice,
+    stream: &flambeau_backend_hip::HipStream,
+    scratch: &MtpForwardScratch,
+    vocab: usize,
+) -> Result<u32> {
+    use flambeau_core::{Device, DevicePtr, Stream};
+
+    let mut host = vec![0.0f32; vocab];
+    // SAFETY: logits_f32 holds vocab*4 bytes; host has vocab*4 bytes.
+    unsafe {
+        device.memcpy_async(
+            stream,
+            flambeau_core::CopyDirection::DeviceToHost,
+            DevicePtr(host.as_mut_ptr() as usize),
+            scratch.logits_f32,
+            vocab * 4,
+        )?;
+    }
+    stream.synchronize()?;
+    let mut best_idx = 0usize;
+    let mut best_val = host[0];
+    for (i, &v) in host.iter().enumerate().skip(1) {
+        if v > best_val {
+            best_val = v;
+            best_idx = i;
+        }
+    }
+    Ok(best_idx as u32)
+}
+
+/// Variant of [`forward_mtp_step_with_lm_head`] that returns the full
+/// F32 logit row instead of just the argmax token. Used by the
+/// rejection-sampling spec-decode path (MTP-5g) which needs MTP's
+/// distribution `q(·)` to compute `min(1, p(t)/q(t))` against the
+/// base verifier's `p(·)`.
+#[allow(clippy::too_many_arguments)]
+pub fn forward_mtp_step_with_lm_head_logits(
+    ops: &flambeau_ops::OpsRegistry,
+    stream: &flambeau_backend_hip::HipStream,
+    device: &HipDevice,
+    cfg: &crate::Qwen3MoEConfig,
+    mtp: &MtpHeadWeights,
+    scratch: &MtpForwardScratch,
+    output_norm_weight: &DeviceTensor,
+    lm_head_weight: &DeviceTensor,
+    hidden_pre_norm: flambeau_core::DevicePtr,
+    token_embd_row_f16: flambeau_core::DevicePtr,
+    position: usize,
+    kv: Option<MtpKvCache>,
+    logits_out: &mut Vec<f32>,
+) -> Result<u32> {
+    use flambeau_core::{Device, DevicePtr, Stream};
+    use flambeau_ops::hip::norm::{quantize_f16_q8_1, rmsnorm_f16};
+
+    device.bind()?;
+    let hidden = cfg.hidden_size;
+    let vocab = cfg.vocab_size;
+
+    rmsnorm_f16(
+        ops, stream,
+        hidden_pre_norm, output_norm_weight.ptr, scratch.h_t_post_norm,
+        1, hidden, cfg.rms_norm_eps,
+    )
+    .context("base output_norm for MTP h_t (logits variant)")?;
+
+    let use_bf16 = std::env::var("FLAMBEAU_MTP_BF16")
+        .map(|v| !matches!(v.as_str(), "" | "0" | "off" | "false"))
+        .unwrap_or(false);
+    if use_bf16 {
+        forward_mtp_step_bf16(
+            ops, stream, device, cfg, mtp, scratch,
+            scratch.h_t_post_norm, token_embd_row_f16, position,
+            scratch.mtp_h_final, kv,
+        )?;
+    } else {
+        forward_mtp_step(
+            ops, stream, device, cfg, mtp, scratch,
+            scratch.h_t_post_norm, token_embd_row_f16, position,
+            scratch.mtp_h_final, kv,
+        )?;
+    }
+
+    quantize_f16_q8_1(ops, stream, scratch.mtp_h_final, scratch.x_q8_1, hidden)
+        .context("mtp lm_head quantize (logits variant)")?;
+
+    let dtype = match lm_head_weight.dtype {
+        flambeau_quant::GgmlDType::F16  => flambeau_core::op::QDtype::F16,
+        flambeau_quant::GgmlDType::Q8_0 => flambeau_core::op::QDtype::Q8_0,
+        flambeau_quant::GgmlDType::Q4_0 => flambeau_core::op::QDtype::Q4_0,
+        flambeau_quant::GgmlDType::Q4_1 => flambeau_core::op::QDtype::Q4_1,
+        flambeau_quant::GgmlDType::Q4K  => flambeau_core::op::QDtype::Q4_K,
+        flambeau_quant::GgmlDType::Q5_0 => flambeau_core::op::QDtype::Q5_0,
+        flambeau_quant::GgmlDType::Q5K  => flambeau_core::op::QDtype::Q5_K,
+        flambeau_quant::GgmlDType::Q6K  => flambeau_core::op::QDtype::Q6_K,
+        d => bail!("unsupported lm_head dtype {d:?} for MTP probe"),
+    };
+    flambeau_ops::hip::qmatmul::mmvq(
+        ops, stream, lm_head_weight.ptr, scratch.x_q8_1, scratch.logits_f32,
+        vocab, hidden, dtype,
+    )
+    .context("mtp lm_head mmvq (logits variant)")?;
+
+    logits_out.clear();
+    logits_out.resize(vocab, 0.0);
+    // SAFETY: logits_f32 holds vocab*4 bytes; logits_out has vocab*4 bytes.
+    unsafe {
+        device.memcpy_async(
+            stream,
+            flambeau_core::CopyDirection::DeviceToHost,
+            DevicePtr(logits_out.as_mut_ptr() as usize),
+            scratch.logits_f32,
+            vocab * 4,
+        )?;
+    }
+    stream.synchronize()?;
+    let mut best_idx = 0usize;
+    let mut best_val = logits_out[0];
+    for (i, &v) in logits_out.iter().enumerate().skip(1) {
+        if v > best_val {
+            best_val = v;
+            best_idx = i;
+        }
+    }
     Ok(best_idx as u32)
 }
 

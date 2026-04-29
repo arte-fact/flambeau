@@ -75,7 +75,8 @@ pub use single_device::{
 pub mod pp;
 pub use pp::{
     forward_one_token_pp, forward_one_token_pp_logits, forward_prefill_pp,
-    forward_prefill_pp_async, forward_prefill_pp_logits, RankForwardPrefillScratch,
+    forward_prefill_pp_async, forward_prefill_pp_logits, forward_prefill_pp_logits_paired_l2,
+    RankForwardPrefillScratch,
     RankForwardScratch, ShardedForwardOneTokenScratch, ShardedForwardPrefillScratch, UbatchLane,
 };
 
@@ -97,6 +98,12 @@ pub use hybrid::{
 
 pub mod attn_tp;
 pub use attn_tp::forward_full_attn_decode_tp;
+
+pub mod spec;
+pub use spec::{
+    forward_speculative_pp_step, forward_speculative_pp_step_sampling,
+    forward_speculative_tp_step, SpecStep, SpecTimings,
+};
 
 pub mod dense_ffn_tp;
 pub use dense_ffn_tp::forward_dense_ffn_decode_tp;

@@ -10,6 +10,6 @@
   "test_position": 0,
   "seed": 42,
   "mtp_gguf": "/artefact/models/Qwen3.6-27B-mtp.gguf",
-  "h_final_mean": -0.011802362278103828,
-  "h_final_std": 2.174067974090576
+  "h_final_mean": -0.03422098979353905,
+  "h_final_std": 2.2515811920166016
 }

@@ -1196,6 +1196,106 @@ impl Qwen3MoETpSession {
         total
     }
 
+    /// MTP-5f-tp2 — save GDN state across all ranks. TP analog of
+    /// [`crate::sharded::Qwen3MoEShardedSession::save_gdn_snapshot`].
+    pub fn save_gdn_snapshot(&mut self, cluster: &HipCluster) -> Result<()> {
+        for (rank_idx, rank_caches) in self.caches.iter_mut().enumerate() {
+            let device = cluster.device(rank_idx);
+            device.bind()?;
+            let stream = device.default_stream();
+            for (il, cache) in rank_caches.iter_mut().enumerate() {
+                if let crate::session::LayerCache::Gdn(g) = cache {
+                    if g.snapshot_state.is_none() {
+                        let p = device.alloc(g.state_bytes).map_err(|e| {
+                            anyhow::anyhow!("alloc GDN snap rank={rank_idx} layer={il}: {e}")
+                        })?;
+                        g.snapshot_state = Some(p);
+                    }
+                    if g.snapshot_conv_history.is_none() {
+                        let p = device.alloc(g.conv_history_bytes).map_err(|e| {
+                            anyhow::anyhow!(
+                                "alloc GDN snap conv rank={rank_idx} layer={il}: {e}"
+                            )
+                        })?;
+                        g.snapshot_conv_history = Some(p);
+                    }
+                    let snap_state = g.snapshot_state.unwrap();
+                    let snap_conv = g.snapshot_conv_history.unwrap();
+                    // SAFETY: shadow buffers same size as live; D2D memcpy.
+                    unsafe {
+                        device.memcpy_async(
+                            stream, CopyDirection::DeviceToDevice,
+                            snap_state, g.state, g.state_bytes,
+                        )?;
+                        device.memcpy_async(
+                            stream, CopyDirection::DeviceToDevice,
+                            snap_conv, g.conv_history, g.conv_history_bytes,
+                        )?;
+                    }
+                }
+            }
+            <flambeau_backend_hip::HipStream as flambeau_core::Stream>::synchronize(stream)?;
+        }
+        Ok(())
+    }
+
+    /// MTP-5f-tp2 — restore GDN state from snapshot across all ranks.
+    pub fn restore_gdn_snapshot(&mut self, cluster: &HipCluster) -> Result<()> {
+        for (rank_idx, rank_caches) in self.caches.iter_mut().enumerate() {
+            let device = cluster.device(rank_idx);
+            device.bind()?;
+            let stream = device.default_stream();
+            for (il, cache) in rank_caches.iter_mut().enumerate() {
+                if let crate::session::LayerCache::Gdn(g) = cache {
+                    let snap_state = g.snapshot_state.ok_or_else(|| {
+                        anyhow::anyhow!("restore GDN: rank={rank_idx} layer={il} no snap")
+                    })?;
+                    let snap_conv = g.snapshot_conv_history.ok_or_else(|| {
+                        anyhow::anyhow!(
+                            "restore GDN conv: rank={rank_idx} layer={il} no snap"
+                        )
+                    })?;
+                    // SAFETY: shadow buffers same size as live; D2D memcpy.
+                    unsafe {
+                        device.memcpy_async(
+                            stream, CopyDirection::DeviceToDevice,
+                            g.state, snap_state, g.state_bytes,
+                        )?;
+                        device.memcpy_async(
+                            stream, CopyDirection::DeviceToDevice,
+                            g.conv_history, snap_conv, g.conv_history_bytes,
+                        )?;
+                    }
+                }
+            }
+            <flambeau_backend_hip::HipStream as flambeau_core::Stream>::synchronize(stream)?;
+        }
+        Ok(())
+    }
+
+    /// MTP-5f-tp2 — roll back full-attn K/V tail by `n_remove` slots
+    /// across every rank's full-attn layers.
+    pub fn rollback_full_attn(&mut self, n_remove: usize) -> Result<()> {
+        for (rank_idx, rank_caches) in self.caches.iter_mut().enumerate() {
+            for (il, cache) in rank_caches.iter_mut().enumerate() {
+                match cache {
+                    crate::session::LayerCache::FullAttn(kv) => kv
+                        .rollback(n_remove)
+                        .map_err(|e| anyhow::anyhow!(
+                            "rollback rank={rank_idx} layer={il}: {e}"
+                        ))?,
+                    crate::session::LayerCache::FullAttnQ8(kv) => kv
+                        .rollback(n_remove)
+                        .map_err(|e| anyhow::anyhow!(
+                            "rollback rank={rank_idx} layer={il}: {e}"
+                        ))?,
+                    crate::session::LayerCache::Gdn(_) => {}
+                }
+            }
+        }
+        Ok(())
+    }
+
     /// Free every rank's caches.
     pub fn dispose(mut self, cluster: &HipCluster) -> Result<()> {
         if self.disposed {

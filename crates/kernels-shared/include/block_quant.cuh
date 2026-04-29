@@ -26,6 +26,30 @@
 // from hip/amd_hip_fp16.h's heavier wrapper class for pointer casts.
 typedef _Float16 fb_fp16_t;
 
+// bf16 — Brain Float 16: 1 sign + 8 exponent + 7 mantissa bits, byte-
+// compatible with the upper half of an IEEE-754 F32. gfx906 has no
+// native BF16 arithmetic (CDNA2/MI200+ only), so storage is uint16_t
+// and arithmetic routes through F32 via bit-shift conversion.
+typedef unsigned short fb_bf16_t;
+
+__device__ static inline fb_bf16_t fb_f32_to_bf16(float x) {
+    // Round-to-nearest-even truncation of the lower 16 bits.
+    // NaN inputs are preserved as NaN: the test forces a quiet-NaN
+    // mantissa bit so the truncated result still satisfies isnan.
+    unsigned int u = __builtin_bit_cast(unsigned int, x);
+    if ((u & 0x7F800000u) == 0x7F800000u && (u & 0x007FFFFFu) != 0u) {
+        return (fb_bf16_t) ((u >> 16) | 0x0040u);
+    }
+    unsigned int lsb  = (u >> 16) & 1u;
+    unsigned int bias = 0x7FFFu + lsb;
+    return (fb_bf16_t) ((u + bias) >> 16);
+}
+
+__device__ static inline float fb_bf16_to_f32(fb_bf16_t b) {
+    unsigned int u = ((unsigned int) b) << 16;
+    return __builtin_bit_cast(float, u);
+}
+
 typedef struct {
     fb_fp16_t d;             // scale
     int8_t    qs[QK8_0];     // signed quants

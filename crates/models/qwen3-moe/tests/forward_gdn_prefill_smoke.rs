@@ -258,6 +258,8 @@ fn forward_gdn_prefill_l4_smoke() -> Result<()> {
             head_v_dim: s.head_v_dim,
             conv_kernel: s.conv_kernel,
             conv_channels: s.conv_channels,
+            snapshot_state: None,
+            snapshot_conv_history: None,
         },
         LayerCache::FullAttn(_) | LayerCache::FullAttnQ8(_) => {
             anyhow::bail!("layer 0 should be GDN")

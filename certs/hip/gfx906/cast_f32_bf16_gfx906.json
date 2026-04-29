@@ -1,0 +1,67 @@
+{
+  "schema_version": 1,
+  "impl_id": "cast_f32_bf16_gfx906",
+  "backend": "hip",
+  "arch": "gfx906",
+  "op": "cast_f32_bf16",
+  "dtype_weight": "F32",
+  "dtype_activation": "BF16",
+  "tolerance_formula": "exact bit match vs half::bf16::from_f32",
+  "results": [
+    {
+      "m": 64,
+      "k": 1,
+      "n": 1,
+      "seed": 3205941048,
+      "max_rel_err": 0.0,
+      "tolerance": 0.0,
+      "pass": true
+    },
+    {
+      "m": 1024,
+      "k": 1,
+      "n": 1,
+      "seed": 3205938424,
+      "max_rel_err": 0.0,
+      "tolerance": 0.0,
+      "pass": true
+    },
+    {
+      "m": 2048,
+      "k": 1,
+      "n": 1,
+      "seed": 3205904632,
+      "max_rel_err": 0.0,
+      "tolerance": 0.0,
+      "pass": true
+    },
+    {
+      "m": 4096,
+      "k": 1,
+      "n": 1,
+      "seed": 3205968120,
+      "max_rel_err": 0.0,
+      "tolerance": 0.0,
+      "pass": true
+    },
+    {
+      "m": 8192,
+      "k": 1,
+      "n": 1,
+      "seed": 3205832952,
+      "max_rel_err": 0.0,
+      "tolerance": 0.0,
+      "pass": true
+    }
+  ],
+  "pass": true,
+  "emitted_at": "2026-04-29T07:59:48Z",
+  "rig": "threadreaper-gfx906",
+  "pmc": {
+    "vgpr_count": 5,
+    "sgpr_count": null,
+    "waves_per_simd": 10,
+    "mem_busy_pct": null,
+    "valu_busy_pct": null
+  }
+}

@@ -76,6 +76,11 @@ pub struct GdnLayerState {
     pub head_v_dim: usize,
     pub conv_kernel: usize,
     pub conv_channels: usize,
+    /// MTP-5b-2 — speculative-decode snapshot buffers. Lazy-allocated on
+    /// the first `save_snapshot` call so non-speculative sessions don't
+    /// pay the ~150 MiB session-wide memory cost. None until first save.
+    pub snapshot_state: Option<DevicePtr>,
+    pub snapshot_conv_history: Option<DevicePtr>,
 }
 
 /// All per-sequence mutable state. One instance per active request on the
@@ -142,6 +147,118 @@ impl Qwen3MoESession {
 
     pub fn layers_mut(&mut self) -> &mut [LayerCache] {
         &mut self.caches
+    }
+
+    /// MTP-5b-2 — speculative-decode snapshot. Saves every GDN layer's
+    /// recurrent state + conv-history into shadow buffers (lazy-allocated
+    /// on first call). Full-attention K/V and current_tokens are NOT
+    /// snapshotted — those are recovered via `KvCache::rollback(n)`,
+    /// which is much cheaper since we only need to discard slots, not
+    /// restore them. Cost: ~150 MiB session-wide D2D memcpy on first
+    /// call (alloc + copy), ~75 µs subsequent calls (copy only).
+    pub fn save_gdn_snapshot(
+        &mut self,
+        device: &HipDevice,
+        stream: &flambeau_backend_hip::HipStream,
+    ) -> Result<()> {
+        use flambeau_core::CopyDirection;
+        device.bind()?;
+        for (il, cache) in self.caches.iter_mut().enumerate() {
+            if let LayerCache::Gdn(g) = cache {
+                if g.snapshot_state.is_none() {
+                    let p = device
+                        .alloc(g.state_bytes)
+                        .map_err(|e| anyhow!("alloc GDN snapshot state layer {il}: {e}"))?;
+                    g.snapshot_state = Some(p);
+                }
+                if g.snapshot_conv_history.is_none() {
+                    let p = device
+                        .alloc(g.conv_history_bytes)
+                        .map_err(|e| anyhow!("alloc GDN snapshot conv layer {il}: {e}"))?;
+                    g.snapshot_conv_history = Some(p);
+                }
+                let snap_state = g.snapshot_state.unwrap();
+                let snap_conv = g.snapshot_conv_history.unwrap();
+                // SAFETY: both src and dst are device buffers of the same size,
+                // owned by this layer; D2D async copy.
+                unsafe {
+                    device.memcpy_async(
+                        stream,
+                        CopyDirection::DeviceToDevice,
+                        snap_state,
+                        g.state,
+                        g.state_bytes,
+                    )?;
+                    device.memcpy_async(
+                        stream,
+                        CopyDirection::DeviceToDevice,
+                        snap_conv,
+                        g.conv_history,
+                        g.conv_history_bytes,
+                    )?;
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// MTP-5b-2 — restore GDN state from the most recent snapshot.
+    /// `save_gdn_snapshot` must have been called previously, otherwise
+    /// errors out per layer. Pair with `KvCache::rollback(n)` for the
+    /// full-attn side.
+    pub fn restore_gdn_snapshot(
+        &mut self,
+        device: &HipDevice,
+        stream: &flambeau_backend_hip::HipStream,
+    ) -> Result<()> {
+        use flambeau_core::CopyDirection;
+        device.bind()?;
+        for (il, cache) in self.caches.iter_mut().enumerate() {
+            if let LayerCache::Gdn(g) = cache {
+                let snap_state = g.snapshot_state.ok_or_else(|| {
+                    anyhow!("restore_gdn_snapshot: layer {il} has no saved snapshot")
+                })?;
+                let snap_conv = g.snapshot_conv_history.ok_or_else(|| {
+                    anyhow!("restore_gdn_snapshot: layer {il} has no saved conv snapshot")
+                })?;
+                // SAFETY: both src and dst are device buffers of the same size.
+                unsafe {
+                    device.memcpy_async(
+                        stream,
+                        CopyDirection::DeviceToDevice,
+                        g.state,
+                        snap_state,
+                        g.state_bytes,
+                    )?;
+                    device.memcpy_async(
+                        stream,
+                        CopyDirection::DeviceToDevice,
+                        g.conv_history,
+                        snap_conv,
+                        g.conv_history_bytes,
+                    )?;
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// MTP-5b-2 — roll back full-attention K/V tail by `n_remove` slots
+    /// across every full-attn layer. Pair with `restore_gdn_snapshot`
+    /// to undo a complete speculative step on reject.
+    pub fn rollback_full_attn(&mut self, n_remove: usize) -> Result<()> {
+        for (il, cache) in self.caches.iter_mut().enumerate() {
+            match cache {
+                LayerCache::FullAttn(kv) => kv
+                    .rollback(n_remove)
+                    .map_err(|e| anyhow!("rollback layer {il}: {e}"))?,
+                LayerCache::FullAttnQ8(kv) => kv
+                    .rollback(n_remove)
+                    .map_err(|e| anyhow!("rollback layer {il}: {e}"))?,
+                LayerCache::Gdn(_) => {} // GDN handled by restore_gdn_snapshot
+            }
+        }
+        Ok(())
     }
 
     /// Free every per-layer allocation. Required — see [`ModelWeights::dispose`].
@@ -214,6 +331,8 @@ pub(crate) fn alloc_layer_cache(
             head_v_dim,
             conv_kernel: gdn.conv_kernel,
             conv_channels,
+            snapshot_state: None,
+            snapshot_conv_history: None,
         }))
     } else {
         match KvLayout::from_env() {
@@ -308,6 +427,8 @@ pub(crate) fn alloc_layer_cache_tp(
             head_v_dim,
             conv_kernel: gdn.conv_kernel,
             conv_channels: local_conv_channels,
+            snapshot_state: None,
+            snapshot_conv_history: None,
         }))
     } else {
         // **TP-4d-i2** — KV-replication fallback: when nKV doesn't
@@ -355,6 +476,8 @@ pub(crate) fn dispose_layer_cache(cache: LayerCache, device: &HipDevice) -> Resu
             .map_err(|e| anyhow!("KvCache<Q8> dispose: {e}")),
         LayerCache::Gdn(g) => {
             // SAFETY: both pointers came from `device.alloc(..)` in alloc_layer_cache.
+            // Snapshot pointers were lazy-allocated by save_gdn_snapshot; if
+            // present, free them too.
             unsafe {
                 device
                     .dealloc(g.state, g.state_bytes)
@@ -362,6 +485,16 @@ pub(crate) fn dispose_layer_cache(cache: LayerCache, device: &HipDevice) -> Resu
                 device
                     .dealloc(g.conv_history, g.conv_history_bytes)
                     .map_err(|e| anyhow!("hipFree GDN conv-history: {e}"))?;
+                if let Some(p) = g.snapshot_state {
+                    device
+                        .dealloc(p, g.state_bytes)
+                        .map_err(|e| anyhow!("hipFree GDN snapshot state: {e}"))?;
+                }
+                if let Some(p) = g.snapshot_conv_history {
+                    device
+                        .dealloc(p, g.conv_history_bytes)
+                        .map_err(|e| anyhow!("hipFree GDN snapshot conv: {e}"))?;
+                }
             }
             Ok(())
         }

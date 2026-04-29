@@ -50,11 +50,15 @@ SKIP_FIELDS: set[str] = {"GGUF.version", "GGUF.tensor_count", "GGUF.kv_count"}
 
 # Per-tensor target quant for the MTP head.
 def _linear_dtype() -> GGMLQuantizationType:
-    """Linear-weight target. Default F16 (lower precision-loss vs Q8_0; 3.5×
-    larger but the MTP block is only 393M params so the absolute disk cost is
-    ~+800 MB). Set MTP_LINEAR_DTYPE=q8_0 or =f16 to override."""
+    """Linear-weight target. Default Q8_0: faster on gfx906 (DP4A int8
+    hardware) and acceptance-equivalent to F16 with the post-MTP-INV-1
+    stack (parity-fixed forward + KV accumulation). Session 4's earlier
+    Q8_0/F16 +6.3 pp gap was a Python-ref bug, not a real precision drag.
+    See certs/research/mtp_inv_4_q8_0_weights_win.md.
+
+    Override via MTP_LINEAR_DTYPE=f16 (precision floor, slower) or q8_0."""
     import os
-    v = os.environ.get("MTP_LINEAR_DTYPE", "f16").lower()
+    v = os.environ.get("MTP_LINEAR_DTYPE", "q8_0").lower()
     if v == "q8_0":
         return GGMLQuantizationType.Q8_0
     if v == "f16":

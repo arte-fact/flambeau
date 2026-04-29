@@ -50,6 +50,41 @@ pub fn rmsnorm_f16(
     Ok(())
 }
 
+/// MTP-4-C-3 — BF16 RMSNorm. Same math as `rmsnorm_f16`, but x/y are
+/// BF16. Weight stays F16 because it's small (`[k]`), loaded once per
+/// row, and F16 has more mantissa bits than BF16 — no benefit to
+/// widening. Internal arithmetic is F32.
+pub fn rmsnorm_bf16(
+    reg: &OpsRegistry,
+    stream: &HipStream,
+    x_bf16: DevicePtr,
+    weight_f16: DevicePtr,
+    y_bf16: DevicePtr,
+    m: usize,
+    k: usize,
+    eps: f32,
+) -> Result<()> {
+    let module = reg.expect_module("rmsnorm_bf16")?;
+    let kernel = module.kernel("flambeau_rmsnorm_bf16")?;
+
+    let m_i = m as i32;
+    let k_i = k as i32;
+    let eps_f = eps;
+    let x_ptr: u64 = x_bf16.as_usize() as u64;
+    let w_ptr: u64 = weight_f16.as_usize() as u64;
+    let y_ptr: u64 = y_bf16.as_usize() as u64;
+    let mut args = KernelArgs::new();
+    args.push(&x_ptr);
+    args.push(&w_ptr);
+    args.push(&y_ptr);
+    args.push(&m_i);
+    args.push(&k_i);
+    args.push(&eps_f);
+    let cfg = LaunchCfg::one_d(m as u32, 256);
+    unsafe { kernel.launch(stream, cfg, args)? };
+    Ok(())
+}
+
 /// V2.23.a.1 — fused `mid = x_in + delta; mid_norm = rmsnorm(mid) * weight`.
 /// Replaces `add_f16` + `rmsnorm_f16` pair at the attention-residual epilogue.
 /// Both `mid` and `mid_norm` are needed downstream.
