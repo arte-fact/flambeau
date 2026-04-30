@@ -252,6 +252,11 @@ pub struct RankForwardPrefillScratchTp {
     pub partial_ffn_out: DevicePtr,
     pub layer: Option<super::layer::LayerPrefillScratch>,
     pub output_head: Option<super::io::OutputHeadScratch>,
+    /// **P2.9b-i2-C-wire** — single shared `GdnScratch` (single-token
+    /// decode workspace) for the batched-decode driver's per-slot GDN
+    /// loop on this rank. None on archs without GDN. Sibling of the
+    /// PP `RankForwardPrefillScratch.gdn_decode`.
+    pub gdn_decode: Option<super::gdn::GdnScratch>,
     hidden_bytes: usize,
     partial_bytes: usize,
     disposed: bool,
@@ -277,6 +282,9 @@ impl RankForwardPrefillScratchTp {
             s.dispose(device)?;
         }
         if let Some(s) = self.output_head.take() {
+            s.dispose(device)?;
+        }
+        if let Some(s) = self.gdn_decode.take() {
             s.dispose(device)?;
         }
         Ok(())
@@ -361,6 +369,14 @@ impl ShardedForwardPrefillScratchTp {
             } else {
                 None
             };
+            // **P2.9b-i2-C-wire** — shared single-token GDN decode scratch
+            // for the batched-decode driver's per-slot GDN loop. Allocated
+            // only when arch has GDN.
+            let gdn_decode = if cfg.gdn.is_some() {
+                Some(super::gdn::GdnScratch::new(cfg, device)?)
+            } else {
+                None
+            };
             per_rank.push(RankForwardPrefillScratchTp {
                 rank: RankId(rank_idx as u32),
                 device_id: device.id(),
@@ -371,6 +387,7 @@ impl ShardedForwardPrefillScratchTp {
                 partial_ffn_out,
                 layer,
                 output_head,
+                gdn_decode,
                 hidden_bytes,
                 partial_bytes,
                 disposed: false,
@@ -2559,4 +2576,493 @@ pub(crate) fn forward_gdn_layer_tp(
     Ok(())
 }
 
+
+
+// ---------------------------------------------------------------------------
+// **P2.9b-i2-C-wire** — batched-decode driver for TP topology.
+// ---------------------------------------------------------------------------
+
+/// Drive `slots.len()` concurrent decode steps through the TP topology
+/// with real per-layer batching, returning per-slot `[vocab]` F32 logits.
+///
+/// Mirrors [`super::pp::forward_decode_batched_pp`] but with all-rank
+/// participation per layer + AllReduce. Each slot has its own per-rank
+/// KV caches (in `sessions[s].caches[rank][layer]`); the layer body
+/// runs once per layer with N inputs/outputs in the per-rank batched
+/// scratch.
+///
+/// `sessions` parallel array — `sessions[s]` is the slot for
+/// `BatchSlot { idx: s, .. }` (caller indexes via `BatchSlot.idx`).
+///
+/// `scratch` is the shared per-rank batched workspace, sized for
+/// `>= slots.len()` tokens.
+///
+/// PP-i2-A1-wire pattern adapted for TP:
+/// - Embed N tokens replicated on every rank.
+/// - Per layer:
+///   * full-attn → `forward_full_attn_layer_decode_batched_tp`,
+///     writes per-rank partial; AR sums to replicated `hidden_a`.
+///   * GDN → per-slot loop calling `forward_gdn_decode_tp` (recurrent;
+///     not batchable across slots without kernel rewrite). Writes
+///     partial; AR.
+///   * post-attn add+rmsnorm batched at n_tokens=N (replicated).
+///   * Per-rank FFN/MoE batched at n_tokens=N (existing prefill TP
+///     kernels). AR.
+/// - Output head per-slot on `head_rank`.
+pub fn forward_decode_batched_tp(
+    model: &Qwen3MoETpModel,
+    sessions: &mut [&mut crate::tp_sharded::Qwen3MoETpSession],
+    cluster: &flambeau_backend_hip::HipCluster,
+    ar: &BarP2pAllReduce,
+    scratch: &mut ShardedForwardPrefillScratchTp,
+    slots: &[super::batched::BatchSlot],
+    logits_out: &mut [&mut Vec<f32>],
+) -> Result<()> {
+    let n = slots.len();
+    if n == 0 {
+        bail!("forward_decode_batched_tp: empty slot list");
+    }
+    if sessions.len() != logits_out.len() {
+        bail!(
+            "forward_decode_batched_tp: sessions({}) != logits_out({})",
+            sessions.len(),
+            logits_out.len(),
+        );
+    }
+    for s in slots {
+        if s.idx >= sessions.len() {
+            bail!(
+                "forward_decode_batched_tp: BatchSlot.idx {} OOB (n={})",
+                s.idx,
+                sessions.len()
+            );
+        }
+    }
+    let world = cluster.ranks() as u32;
+    if world != 1 && world != 2 && world != 4 {
+        bail!("forward_decode_batched_tp: world ∈ {{1, 2, 4}} (got {world})");
+    }
+    let cfg = &model.config;
+    let hidden = cfg.hidden_size;
+    let row_bytes = hidden * 2;
+    let elem_count_l = (n * hidden) as u32;
+    let kv_replicated = model.tp.kv_replicated();
+    let kq_replicated = model.tp.gdn_kq_replicated();
+
+    // Sanity: per-rank scratch must be sized for >= n tokens.
+    for (r, rs) in scratch.per_rank.iter().enumerate() {
+        if rs.max_tokens < n {
+            bail!(
+                "forward_decode_batched_tp: rank {r} scratch.max_tokens={} < n={n}",
+                rs.max_tokens
+            );
+        }
+    }
+
+    // 1. Embed N tokens replicated on every rank. token_embd is
+    //    Replicated (each rank's shard has the full embedding); each
+    //    rank dequant/uploads its own copy bit-identically.
+    for r in 0..cluster.ranks() {
+        let device = cluster.device(r);
+        device.bind()?;
+        let stream = device.default_stream();
+        let token_embd = &model.shards[r].token_embd;
+        for (s_pos, slot) in slots.iter().enumerate() {
+            super::io::forward_embed_decode_host(
+                device,
+                stream,
+                token_embd,
+                slot.token_id,
+                scratch.per_rank[r].hidden_a.offset_bytes(s_pos * row_bytes),
+                hidden,
+            )?;
+        }
+    }
+
+    // Per-slot positions (same across ranks since each slot's per-rank
+    // caches share the same tail per layer).
+    let slot_positions: Vec<usize> = slots.iter().map(|s| s.position).collect();
+
+    // 2. Layer loop.
+    let n_layers = cfg.num_layers;
+    for il in 0..n_layers {
+        let is_full_attn = !cfg.is_recurrent(il);
+
+        // 3a. Per-rank attention forward. Full-attn uses the new
+        //     batched-decode TP function; GDN loops slots with the
+        //     existing per-token decode kernel.
+        for r in 0..cluster.ranks() {
+            let device = cluster.device(r);
+            device.bind()?;
+            let stream = device.default_stream();
+            let layer_tensors = &model.shards[r].layers[il];
+            let hidden_a = scratch.per_rank[r].hidden_a;
+            let partial_attn_out = scratch.per_rank[r].partial_attn_out;
+            let layer_scratch = scratch.per_rank[r]
+                .layer
+                .as_mut()
+                .ok_or_else(|| anyhow!("rank {r}: missing LayerPrefillScratch"))?;
+            let ops = &model.ops[r];
+            if is_full_attn {
+                let attn_norm = find_by_suffix(layer_tensors, il, "attn_norm.weight")?;
+                let attn_q = find_by_suffix(layer_tensors, il, "attn_q.weight")?;
+                let attn_k = find_by_suffix(layer_tensors, il, "attn_k.weight")?;
+                let attn_v = find_by_suffix(layer_tensors, il, "attn_v.weight")?;
+                let attn_output = find_by_suffix(layer_tensors, il, "attn_output.weight")?;
+                let attn_q_norm = find_by_suffix(layer_tensors, il, "attn_q_norm.weight")?;
+                let attn_k_norm = find_by_suffix(layer_tensors, il, "attn_k_norm.weight")?;
+                let full = layer_scratch
+                    .full_attn
+                    .as_mut()
+                    .ok_or_else(|| anyhow!("rank {r}: missing FullAttnPrefillScratch"))?;
+                // Gather per-slot KV caches for THIS layer on THIS rank.
+                // SAFETY rationale: each session is unique in `sessions[]`;
+                // we form one disjoint &mut to each session's
+                // `caches[r][il]`. Use raw-pointer split to satisfy the
+                // borrow checker — the gathered guards alias only their
+                // respective sessions' per-rank-per-layer cache and don't
+                // overlap.
+                let sessions_ptr = sessions.as_mut_ptr();
+                let mut slot_kv_caches: Vec<
+                    &mut flambeau_runtime::KvCache<flambeau_runtime::F16Contig, HipDevice>,
+                > = Vec::with_capacity(n);
+                for s in 0..n {
+                    // SAFETY: indices 0..n are distinct; each session
+                    // contributes one cache that doesn't alias others.
+                    unsafe {
+                        let session_ref: &mut crate::tp_sharded::Qwen3MoETpSession =
+                            &mut **sessions_ptr.add(s);
+                        match &mut session_ref.caches[r][il] {
+                            LayerCache::FullAttn(kv) => slot_kv_caches.push(kv),
+                            _ => bail!(
+                                "TP batched decode: slot {s} rank {r} layer {il} \
+                                 expected FullAttn cache (Q8 KV is V2)"
+                            ),
+                        }
+                    }
+                }
+                super::attn_tp::forward_full_attn_layer_decode_batched_tp(
+                    ops,
+                    stream,
+                    device,
+                    cfg,
+                    attn_norm,
+                    attn_q,
+                    attn_k,
+                    attn_v,
+                    attn_output,
+                    attn_q_norm,
+                    attn_k_norm,
+                    &mut slot_kv_caches,
+                    full,
+                    hidden_a,
+                    partial_attn_out,
+                    &slot_positions,
+                    world,
+                    kv_replicated,
+                )
+                .with_context(|| format!("TP batched-decode full-attn layer {il} rank {r}"))?;
+            } else {
+                // GDN — per-slot loop. Each slot has its own per-rank
+                // GdnLayerState in caches[r][il]. The driver shares the
+                // single `gdn_decode` scratch on this rank across slots
+                // (sequential calls don't conflict on scratch buffers).
+                let attn_norm = find_by_suffix(layer_tensors, il, "attn_norm.weight")?;
+                let attn_qkv = find_by_suffix(layer_tensors, il, "attn_qkv.weight")?;
+                let attn_gate = find_by_suffix(layer_tensors, il, "attn_gate.weight")?;
+                let ssm_alpha = find_by_suffix(layer_tensors, il, "ssm_alpha.weight")?;
+                let ssm_beta = find_by_suffix(layer_tensors, il, "ssm_beta.weight")?;
+                let ssm_a = find_by_suffix(layer_tensors, il, "ssm_a")?;
+                let ssm_dt_bias = find_by_suffix(layer_tensors, il, "ssm_dt.bias")?;
+                let ssm_conv1d = find_by_suffix(layer_tensors, il, "ssm_conv1d.weight")?;
+                let ssm_norm = find_by_suffix(layer_tensors, il, "ssm_norm.weight")?;
+                let ssm_out = find_by_suffix(layer_tensors, il, "ssm_out.weight")?;
+                // Pull the rank's shared GdnScratch out via a separate
+                // borrow to avoid aliasing with layer_scratch above.
+                // Safe split-borrow: gdn_decode and layer are disjoint
+                // fields of RankForwardPrefillScratchTp.
+                let sessions_ptr = sessions.as_mut_ptr();
+                let rank_scratch_ptr: *mut RankForwardPrefillScratchTp =
+                    &mut scratch.per_rank[r];
+                // SAFETY: gdn_decode and layer fields are disjoint within
+                // RankForwardPrefillScratchTp; we already borrowed `layer`
+                // via `layer_scratch` above and are now reaching into
+                // `gdn_decode` through the same struct's raw pointer.
+                let gdn = unsafe {
+                    (*rank_scratch_ptr)
+                        .gdn_decode
+                        .as_mut()
+                        .ok_or_else(|| anyhow!("rank {r}: missing gdn_decode scratch"))?
+                };
+                for s in 0..n {
+                    // SAFETY: indices 0..n distinct; each session's GDN
+                    // state at caches[r][il] is unique.
+                    let layer_state = unsafe {
+                        let session_ref: &mut crate::tp_sharded::Qwen3MoETpSession =
+                            &mut **sessions_ptr.add(s);
+                        match &mut session_ref.caches[r][il] {
+                            LayerCache::Gdn(state) => state,
+                            _ => bail!(
+                                "TP batched decode: slot {s} rank {r} layer {il} \
+                                 expected Gdn cache"
+                            ),
+                        }
+                    };
+                    let slot_x_in = hidden_a.offset_bytes(s * row_bytes);
+                    let slot_partial = partial_attn_out.offset_bytes(s * row_bytes);
+                    super::gdn_tp::forward_gdn_decode_tp(
+                        ops,
+                        stream,
+                        device,
+                        cfg,
+                        attn_norm,
+                        attn_qkv,
+                        attn_gate,
+                        ssm_alpha,
+                        ssm_beta,
+                        ssm_a,
+                        ssm_dt_bias,
+                        ssm_conv1d,
+                        ssm_norm,
+                        ssm_out,
+                        layer_state,
+                        gdn,
+                        slot_x_in,
+                        slot_partial,
+                        world,
+                        kq_replicated,
+                    )
+                    .with_context(|| {
+                        format!("TP batched-decode GDN slot {s} layer {il} rank {r}")
+                    })?;
+                }
+            }
+        }
+
+        // 3b. AR(hidden_a, partial_attn_out, N*hidden).
+        ar_residual_prefill(ar, scratch, cluster, world, elem_count_l, AttnOrFfn::Attn)?;
+
+        // 3c. ffn_norm[N] over hidden_a → mid_norm (per-rank, replicated).
+        for r in 0..cluster.ranks() {
+            let device = cluster.device(r);
+            device.bind()?;
+            let stream = device.default_stream();
+            let layer_tensors = &model.shards[r].layers[il];
+            let ffn_norm = find_by_suffix(layer_tensors, il, "ffn_norm.weight")
+                .or_else(|_| find_by_suffix(layer_tensors, il, "post_attention_norm.weight"))?;
+            let hidden_a = scratch.per_rank[r].hidden_a;
+            let layer_scratch = scratch.per_rank[r]
+                .layer
+                .as_mut()
+                .ok_or_else(|| anyhow!("rank {r}: missing LayerPrefillScratch"))?;
+            let mid_norm = layer_scratch.mid_norm_f16;
+            let ops = &model.ops[r];
+            rmsnorm_f16(
+                ops,
+                stream,
+                hidden_a,
+                ffn_norm.ptr,
+                mid_norm,
+                n,
+                hidden,
+                cfg.rms_norm_eps,
+            )
+            .with_context(|| format!("TP batched-decode ffn_norm layer {il}"))?;
+        }
+
+        // 3d. Per-rank FFN forward (dense or MoE). Reuse prefill TP
+        //     functions — they accept arbitrary n_tokens at fixed
+        //     [N, hidden] mid_norm.
+        let moe_replicated = !cfg.is_dense_ffn() && model.moe_replicated_at(il);
+        let ffn_world = if moe_replicated { 1 } else { world };
+        if cfg.is_dense_ffn() {
+            for r in 0..cluster.ranks() {
+                let device = cluster.device(r);
+                device.bind()?;
+                let stream = device.default_stream();
+                let layer_tensors = &model.shards[r].layers[il];
+                let ffn_gate = find_by_suffix(layer_tensors, il, "ffn_gate.weight")?;
+                let ffn_up = find_by_suffix(layer_tensors, il, "ffn_up.weight")?;
+                let ffn_down = find_by_suffix(layer_tensors, il, "ffn_down.weight")?;
+                let partial_ffn_out = scratch.per_rank[r].partial_ffn_out;
+                let layer_scratch = scratch.per_rank[r]
+                    .layer
+                    .as_mut()
+                    .ok_or_else(|| anyhow!("rank {r}: missing LayerPrefillScratch"))?;
+                let mid_norm = layer_scratch.mid_norm_f16;
+                let dense_scratch = layer_scratch
+                    .dense_ffn
+                    .as_mut()
+                    .ok_or_else(|| anyhow!("rank {r}: missing DenseFfnPrefillScratch"))?;
+                let ops = &model.ops[r];
+                super::dense_ffn_tp::forward_dense_ffn_prefill_tp(
+                    ops,
+                    stream,
+                    cfg,
+                    ffn_gate,
+                    ffn_up,
+                    ffn_down,
+                    dense_scratch,
+                    mid_norm,
+                    partial_ffn_out,
+                    n,
+                    world,
+                )
+                .with_context(|| format!("TP batched-decode dense ffn layer {il}"))?;
+            }
+        } else {
+            let has_shared = cfg.shared_expert_intermediate_size.is_some()
+                && std::env::var("FLAMBEAU_TP_SKIP_SHARED").is_err();
+            for r in 0..cluster.ranks() {
+                let device = cluster.device(r);
+                device.bind()?;
+                let stream = device.default_stream();
+                let layer_tensors = &model.shards[r].layers[il];
+                let ffn_gate_inp = find_by_suffix(layer_tensors, il, "ffn_gate_inp.weight")?;
+                let ffn_gate_exps = find_by_suffix(layer_tensors, il, "ffn_gate_exps.weight")?;
+                let ffn_up_exps = find_by_suffix(layer_tensors, il, "ffn_up_exps.weight")?;
+                let ffn_down_exps = find_by_suffix(layer_tensors, il, "ffn_down_exps.weight")?;
+                let partial_ffn_out = scratch.per_rank[r].partial_ffn_out;
+                let shared_delta_f16 = scratch.per_rank[r]
+                    .layer
+                    .as_ref()
+                    .map(|l| l.shared_delta_f16)
+                    .unwrap_or(DevicePtr(0));
+                let layer_scratch = scratch.per_rank[r]
+                    .layer
+                    .as_mut()
+                    .ok_or_else(|| anyhow!("rank {r}: missing LayerPrefillScratch"))?;
+                let mid_norm = layer_scratch.mid_norm_f16;
+                let ops = &model.ops[r];
+
+                {
+                    let moe_scratch = layer_scratch
+                        .moe
+                        .as_mut()
+                        .ok_or_else(|| anyhow!("rank {r}: missing MoePrefillScratch"))?;
+                    super::moe::forward_router_prefill(
+                        ops, stream, cfg, ffn_gate_inp, moe_scratch, mid_norm, n,
+                    )
+                    .with_context(|| format!("TP batched-decode router layer {il}"))?;
+                }
+                if has_shared {
+                    let shared_w_gate = find_by_suffix(layer_tensors, il, "ffn_gate_shexp.weight")?;
+                    let shared_w_up = find_by_suffix(layer_tensors, il, "ffn_up_shexp.weight")?;
+                    let shared_w_down = find_by_suffix(layer_tensors, il, "ffn_down_shexp.weight")?;
+                    let shared_w_gate_inp =
+                        find_by_suffix(layer_tensors, il, "ffn_gate_inp_shexp.weight").ok();
+                    let shared_scratch = layer_scratch
+                        .shared
+                        .as_mut()
+                        .ok_or_else(|| anyhow!("rank {r}: missing SharedExpertPrefillScratch"))?;
+                    super::moe_tp::forward_shared_expert_prefill_tp(
+                        ops,
+                        stream,
+                        cfg,
+                        shared_w_gate,
+                        shared_w_up,
+                        shared_w_down,
+                        shared_w_gate_inp,
+                        shared_scratch,
+                        mid_norm,
+                        shared_delta_f16,
+                        n,
+                        ffn_world,
+                    )
+                    .with_context(|| format!("TP batched-decode shared expert layer {il}"))?;
+                }
+                let moe_scratch = layer_scratch
+                    .moe
+                    .as_mut()
+                    .ok_or_else(|| anyhow!("rank {r}: missing MoePrefillScratch"))?;
+                super::moe_tp::forward_moe_ffn_prefill_tp(
+                    ops,
+                    stream,
+                    cfg,
+                    ffn_gate_exps,
+                    ffn_up_exps,
+                    ffn_down_exps,
+                    moe_scratch,
+                    mid_norm,
+                    partial_ffn_out,
+                    n,
+                    ffn_world,
+                )
+                .with_context(|| format!("TP batched-decode moe ffn layer {il}"))?;
+
+                if has_shared {
+                    flambeau_ops::hip::mlp::add_f16(
+                        ops,
+                        stream,
+                        partial_ffn_out,
+                        shared_delta_f16,
+                        partial_ffn_out,
+                        n * hidden,
+                    )
+                    .with_context(|| {
+                        format!("TP batched-decode + shared expert add layer {il}")
+                    })?;
+                }
+            }
+        }
+
+        // 3e. AR-residual on FFN output (or replicated add_f16 fallback).
+        if ffn_world > 1 {
+            ar_residual_prefill(ar, scratch, cluster, world, elem_count_l, AttnOrFfn::Ffn)?;
+        } else {
+            for r in 0..cluster.ranks() {
+                let device = cluster.device(r);
+                device.bind()?;
+                let stream = device.default_stream();
+                let ops = &model.ops[r];
+                flambeau_ops::hip::mlp::add_f16(
+                    ops,
+                    stream,
+                    scratch.per_rank[r].hidden_a,
+                    scratch.per_rank[r].partial_ffn_out,
+                    scratch.per_rank[r].hidden_a,
+                    n * hidden,
+                )
+                .with_context(|| format!("TP batched-decode replicated ffn add layer {il}"))?;
+            }
+        }
+    }
+
+    // 4. Output head per slot on head_rank.
+    let head_rank = scratch.head_rank.0 as usize;
+    let head_device = cluster.device(head_rank);
+    head_device.bind()?;
+    let head_shard = &model.shards[head_rank];
+    let output_norm = &head_shard.output_norm;
+    let lm_head = head_shard.output.as_ref().unwrap_or(&head_shard.token_embd);
+    let head_hidden_a = scratch.per_rank[head_rank].hidden_a;
+    let head_scratch = scratch.per_rank[head_rank]
+        .output_head
+        .as_mut()
+        .ok_or_else(|| anyhow!("head rank missing output_head scratch"))?;
+    let ops = &model.ops[head_rank];
+    for (s_pos, slot) in slots.iter().enumerate() {
+        let x_final_row = head_hidden_a.offset_bytes(s_pos * row_bytes);
+        super::io::forward_output_head_decode(
+            ops,
+            head_device.default_stream(),
+            cfg,
+            output_norm,
+            lm_head,
+            head_scratch,
+            x_final_row,
+        )
+        .with_context(|| format!("TP batched-decode output head slot {}", slot.idx))?;
+        super::io::download_logits_host(
+            head_device,
+            head_device.default_stream(),
+            head_scratch.logits_f32,
+            cfg.vocab_size,
+            logits_out[slot.idx],
+        )
+        .with_context(|| format!("TP batched-decode logits download slot {}", slot.idx))?;
+    }
+
+    Ok(())
+}
 

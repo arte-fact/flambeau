@@ -79,6 +79,14 @@ pub struct ServerState {
     /// ⇒ blocking_lock the relevant slots ⇒ batched forward ⇒
     /// distribute responses ⇒ unlock).
     pub batched_dispatcher: std::sync::Mutex<()>,
+    /// **P2.9b-i2-C-wire** — shared TP batched-decode workspace,
+    /// lazy-initialized on first TP scheduler dispatch. Sized for
+    /// max_inflight_slots (small relative to prefill ubatch =>
+    /// negligible VRAM). Only the dispatcher leader touches it (gated
+    /// by `batched_dispatcher`); the inner Mutex is just for safe
+    /// lazy-init, not contended.
+    pub tp_batched_scratch:
+        std::sync::Mutex<Option<flambeau_qwen3_moe::forward::ShardedForwardPrefillScratchTp>>,
     /// Tools discovered on the `--mcp <url>` upstreams at startup
     /// (ROADMAP-V2 §M2.1). Merged into each request's `tools[]` before
     /// rendering the Jinja template, so the model sees them alongside
@@ -262,7 +270,9 @@ impl ServerState {
         &self,
         pending: &[PendingDecode],
     ) -> anyhow::Result<()> {
-        use flambeau_qwen3_moe::forward::{forward_decode_batched_pp, BatchSlot};
+        use flambeau_qwen3_moe::forward::{
+            forward_decode_batched_pp, forward_decode_batched_tp, BatchSlot,
+        };
         // Acquire each referenced slot's mutex. blocking_lock here is
         // safe — the request handlers have *released* the mutex
         // before pushing pending (their long-term claim is
@@ -272,65 +282,15 @@ impl ServerState {
             .map(|p| self.inflight_pool[p.slot_idx].blocking_lock())
             .collect();
 
-        // Extract per-slot &mut Session + identify the leader's
-        // ShardedForwardPrefillScratch (used as the batched workspace).
-        // PP-only — TP / Hybrid bail.
-        let model = match &self.model {
-            LoadedModel::Pp { model, .. } => model,
-            _ => bail!(
-                "dispatch_batched_pending: scheduler is PP-only (TP=#264, Hybrid=#265)"
-            ),
-        };
         let cluster: &flambeau_backend_hip::HipCluster = &self.cluster;
 
-        // Split the guards into (&mut Session, &mut ShardedForwardPrefillScratch)
-        // pairs. Use the first guard's prefill scratch as the shared
-        // batched workspace; the rest of the slots only contribute
-        // their sessions.
         let n = pending.len();
         // SAFETY rationale: `guards` is a Vec of distinct MutexGuards,
         // each pointing at a unique `Inflight` in `self.inflight_pool`.
-        // We need disjoint &mut borrows to each guard's interior. We
-        // do this via raw-pointer split because the borrow checker
-        // can't see that the guards are disjoint by index.
+        // We form disjoint &mut borrows to each guard's interior via
+        // raw-pointer split (the borrow checker can't see indices are
+        // distinct).
         let guards_ptr = guards.as_mut_ptr();
-
-        let mut sessions: Vec<&mut flambeau_qwen3_moe::Qwen3MoEShardedSession> =
-            Vec::with_capacity(n);
-        // The shared batched scratch is the first guard's prefill scratch.
-        // We borrow it via the same raw-pointer split, taking care that
-        // it doesn't alias any of the session borrows we form below
-        // (sessions and prefill are distinct fields of Inflight::Pp).
-        let prefill_scratch: &mut flambeau_qwen3_moe::forward::ShardedForwardPrefillScratch = {
-            // SAFETY: index 0 is in bounds (n >= 1 since pending is
-            // non-empty). The reborrow forms a unique &mut to the
-            // first guard's `prefill` field; the loop below only
-            // touches each guard's `session` field, which is disjoint.
-            unsafe {
-                let g0: &mut Inflight = &mut **guards_ptr;
-                match g0 {
-                    Inflight::Pp { prefill, .. } => prefill,
-                    _ => bail!(
-                        "dispatch_batched_pending: leader slot is not Inflight::Pp"
-                    ),
-                }
-            }
-        };
-
-        for s in 0..n {
-            // SAFETY: s in 0..n; each guard is unique; we extract
-            // &mut session from each guard (disjoint from the prefill
-            // scratch we already split off above).
-            unsafe {
-                let g: &mut Inflight = &mut **guards_ptr.add(s);
-                match g {
-                    Inflight::Pp { session, .. } => sessions.push(session),
-                    _ => bail!(
-                        "dispatch_batched_pending: slot {s} is not Inflight::Pp"
-                    ),
-                }
-            }
-        }
 
         let slots: Vec<BatchSlot> = pending
             .iter()
@@ -342,8 +302,6 @@ impl ServerState {
             })
             .collect();
 
-        // Allocate per-slot logits buffers locally and attach mutable
-        // slice references for the call.
         let vocab = self.cfg.vocab_size;
         let mut logits_owned: Vec<Vec<f32>> = (0..n)
             .map(|_| Vec::with_capacity(vocab))
@@ -351,18 +309,106 @@ impl ServerState {
         let mut logits_refs: Vec<&mut Vec<f32>> =
             logits_owned.iter_mut().collect();
 
-        forward_decode_batched_pp(
-            model,
-            sessions.as_mut_slice(),
-            cluster,
-            prefill_scratch,
-            &slots,
-            logits_refs.as_mut_slice(),
-        )
-        .context("forward_decode_batched_pp under scheduler")?;
+        match &self.model {
+            LoadedModel::Pp { model, .. } => {
+                let mut sessions: Vec<&mut flambeau_qwen3_moe::Qwen3MoEShardedSession> =
+                    Vec::with_capacity(n);
+                // Use the first guard's prefill scratch as the batched
+                // workspace; loop below only touches each guard's
+                // `session` field (disjoint from `prefill`).
+                let prefill_scratch: &mut flambeau_qwen3_moe::forward::ShardedForwardPrefillScratch = {
+                    // SAFETY: n >= 1; reborrow guards[0]'s `prefill`
+                    // field, disjoint from the `session` borrows below.
+                    unsafe {
+                        let g0: &mut Inflight = &mut **guards_ptr;
+                        match g0 {
+                            Inflight::Pp { prefill, .. } => prefill,
+                            _ => bail!(
+                                "dispatch_batched_pending: leader slot is not Inflight::Pp"
+                            ),
+                        }
+                    }
+                };
+                for s in 0..n {
+                    // SAFETY: s in 0..n; guards distinct by index.
+                    unsafe {
+                        let g: &mut Inflight = &mut **guards_ptr.add(s);
+                        match g {
+                            Inflight::Pp { session, .. } => sessions.push(session),
+                            _ => bail!(
+                                "dispatch_batched_pending: slot {s} is not Inflight::Pp"
+                            ),
+                        }
+                    }
+                }
+                forward_decode_batched_pp(
+                    model,
+                    sessions.as_mut_slice(),
+                    cluster,
+                    prefill_scratch,
+                    &slots,
+                    logits_refs.as_mut_slice(),
+                )
+                .context("forward_decode_batched_pp under scheduler")?;
+            }
+            LoadedModel::Tp { model, ar } => {
+                // **P2.9b-i2-C-wire** — TP uses a shared per-server batched
+                // scratch (sized for max_inflight_slots, lazy-init).
+                let mut sessions: Vec<&mut flambeau_qwen3_moe::Qwen3MoETpSession> =
+                    Vec::with_capacity(n);
+                for s in 0..n {
+                    // SAFETY: s in 0..n; guards distinct.
+                    unsafe {
+                        let g: &mut Inflight = &mut **guards_ptr.add(s);
+                        match g {
+                            Inflight::Tp { session, .. } => sessions.push(session),
+                            _ => bail!(
+                                "dispatch_batched_pending: slot {s} is not Inflight::Tp"
+                            ),
+                        }
+                    }
+                }
+                // Lazy-allocate the shared batched scratch on first
+                // dispatch. Sized for `inflight_pool.len()` slots — a
+                // tight upper bound, much smaller than the prefill
+                // ubatch, so VRAM cost is negligible (~80 KB / rank /
+                // layer).
+                let mut scratch_guard = self
+                    .tp_batched_scratch
+                    .lock()
+                    .expect("tp_batched_scratch poisoned");
+                if scratch_guard.is_none() {
+                    let max_slots = self.inflight_pool.len().max(n);
+                    let s = flambeau_qwen3_moe::forward::ShardedForwardPrefillScratchTp::new(
+                        &model.config,
+                        cluster,
+                        max_slots,
+                    )
+                    .context("alloc tp_batched_scratch")?;
+                    *scratch_guard = Some(s);
+                }
+                let scratch = scratch_guard
+                    .as_mut()
+                    .expect("just initialised");
+                forward_decode_batched_tp(
+                    model,
+                    sessions.as_mut_slice(),
+                    cluster,
+                    ar,
+                    scratch,
+                    &slots,
+                    logits_refs.as_mut_slice(),
+                )
+                .context("forward_decode_batched_tp under scheduler")?;
+            }
+            LoadedModel::Hybrid { .. } => {
+                bail!(
+                    "dispatch_batched_pending: Hybrid topology not yet \
+                     wired (P2.9b-i2-D-wire)"
+                );
+            }
+        }
 
-        // Dispatch results back to each pending entry. Drop guards
-        // *after* sending so handlers can't observe a stale state.
         for (s, p) in pending.iter().enumerate() {
             let logits = std::mem::take(&mut logits_owned[s]);
             let _ = p.response.send(Ok(logits));
@@ -2184,11 +2230,13 @@ fn scheduler_can_engage(state: &ServerState, params: &SamplingParams) -> bool {
     if std::env::var("FLAMBEAU_BATCHED_DECODE").is_err() {
         return false;
     }
-    let pp_no_mtp = matches!(
-        &state.model,
-        LoadedModel::Pp { mtp: None, .. }
-    );
-    if !pp_no_mtp {
+    // PP (no MTP) and TP both supported. Hybrid wires up in i2-D-wire.
+    let topo_ok = match &state.model {
+        LoadedModel::Pp { mtp: None, .. } => true,
+        LoadedModel::Tp { .. } => true,
+        _ => false,
+    };
+    if !topo_ok {
         return false;
     }
     let s = &params.sampling;
