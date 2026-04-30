@@ -33,7 +33,8 @@ mod common;
 
 pub mod attn;
 pub use attn::{
-    forward_full_attn_decode, forward_full_attn_layer_decode, forward_full_attn_prefill,
+    forward_full_attn_decode, forward_full_attn_layer_decode,
+    forward_full_attn_layer_decode_batched, forward_full_attn_prefill,
     FullAttnPrefillScratch, FullAttnScratch,
 };
 

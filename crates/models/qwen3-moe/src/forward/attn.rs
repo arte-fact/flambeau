@@ -1286,6 +1286,319 @@ pub fn forward_full_attn_prefill(
     Ok(())
 }
 
+/// **P2.9b-i2-A1** — upload arbitrary per-slot positions into
+/// `scratch.positions`. Sibling of `upload_positions_range` for the
+/// continuous-batching path where each batched row decodes at its own
+/// cache offset.
+pub(crate) fn upload_positions_arbitrary(
+    device: &HipDevice,
+    stream: &HipStream,
+    scratch: &mut FullAttnPrefillScratch,
+    slot_positions: &[usize],
+) -> Result<()> {
+    let n = slot_positions.len();
+    if n > scratch.max_tokens {
+        anyhow::bail!(
+            "upload_positions_arbitrary: n={n} > scratch.max_tokens={}",
+            scratch.max_tokens
+        );
+    }
+    for (i, &p) in slot_positions.iter().enumerate() {
+        scratch.positions_host[i] = p as i32;
+    }
+    unsafe {
+        device.memcpy_async(
+            stream,
+            CopyDirection::HostToDevice,
+            scratch.positions,
+            DevicePtr(scratch.positions_host.as_ptr() as usize),
+            n * 4,
+        )?;
+    }
+    Ok(())
+}
+
+/// **P2.9b-i2-A1** — batched decode for one full-attention layer.
+///
+/// Mirrors [`forward_full_attn_prefill`] for the input-side ops
+/// (rmsnorm, Q|gate / K / V projections, per-head Q/K rmsnorm, RoPE)
+/// at `n_tokens = slot_positions.len()`, so those kernel launches are
+/// shared across slots. The KV-append (step 7) and attention (step 8)
+/// are split per slot because each slot owns its own KV cache and
+/// query history.
+///
+/// Layout:
+///   - `x_in` / `delta_out` are F16 `[N, hidden]`, row `s` belongs to
+///     slot `s` whose index in the per-rank session/cache arrays is
+///     also `s`.
+///   - `slot_caches[s]` is the layer-local KV cache for slot `s`. All
+///     must be `LayerCache::FullAttn` with identical `n_kv_heads`
+///     and `head_dim`.
+///   - `slot_positions[s]` is the cache tail for slot `s` *before* this
+///     token is appended (i.e. the position the new K/V row writes to).
+///   - `scratch` is a single shared per-rank `FullAttnPrefillScratch`
+///     sized for `max_tokens >= N` — the same buffers that prefill uses,
+///     reused as the [N, *] batched workspace.
+pub fn forward_full_attn_layer_decode_batched(
+    ops: &OpsRegistry,
+    stream: &HipStream,
+    device: &HipDevice,
+    cfg: &Qwen3MoEConfig,
+    layer_weights: &crate::weights::LayerWeights,
+    slot_caches: &mut [&mut LayerCache],
+    scratch: &mut FullAttnPrefillScratch,
+    x_in: DevicePtr,
+    delta_out: DevicePtr,
+    slot_positions: &[usize],
+) -> Result<()> {
+    let n_tokens = slot_positions.len();
+    if n_tokens == 0 {
+        bail!("forward_full_attn_layer_decode_batched called with 0 slots");
+    }
+    if n_tokens != slot_caches.len() {
+        bail!(
+            "slot count mismatch: positions={n_tokens}, caches={}",
+            slot_caches.len()
+        );
+    }
+    if n_tokens > scratch.max_tokens {
+        bail!(
+            "n_tokens={n_tokens} > scratch.max_tokens={}; size scratch for ≥N",
+            scratch.max_tokens
+        );
+    }
+
+    let crate::weights::AttnWeights::FullAttn(weights) = &layer_weights.attn else {
+        bail!(
+            "layer {} weights are not FullAttn (i2-A1 only handles gated full-attn)",
+            layer_weights.layer_idx
+        );
+    };
+
+    let hidden = cfg.hidden_size;
+    let head_dim = cfg.head_dim;
+    let n_heads = cfg.num_heads;
+    let n_kv_heads = cfg.num_kv_heads;
+    let q_width = n_heads * head_dim;
+    let kv_width = n_kv_heads * head_dim;
+    let rope = &cfg.rope;
+    let attn_norm = &layer_weights.attn_norm;
+
+    // Steps 1-6: identical to forward_full_attn_prefill body. These all
+    // operate on [N, hidden] / [N, q_width] / [N, kv_width] and don't
+    // depend on a single contiguous KV cache, so the existing kernels
+    // batch across slots naturally.
+
+    // 1. rmsnorm + Q8_1 quantise (both layouts).
+    rmsnorm_f16(
+        ops, stream, x_in, attn_norm.ptr, scratch.x_norm_f16,
+        n_tokens, hidden, cfg.rms_norm_eps,
+    )
+    .context("batched-decode attn_norm")?;
+    quantize_f16_q8_1(
+        ops, stream, scratch.x_norm_f16, scratch.x_q8_1, n_tokens * hidden,
+    )
+    .context("batched-decode x_norm → Q8_1 (std)")?;
+    quantize_f16_q8_1_mmq(
+        ops, stream, scratch.x_norm_f16, scratch.x_q8_1_mmq, hidden, n_tokens,
+    )
+    .context("batched-decode x_norm → Q8_1 (MMQ DS4)")?;
+
+    // 2. Q|gate fused projection.
+    let dtype_q = qdtype_of(weights.attn_q.dtype)?;
+    let (q_rows, q_k) = mat_shape(&weights.attn_q)?;
+    if q_rows != 2 * n_heads * head_dim || q_k != hidden {
+        bail!(
+            "attn_q shape [{q_rows}, {q_k}] != expected [{}, {}]",
+            2 * n_heads * head_dim, hidden
+        );
+    }
+    qmatmul(
+        ops, stream, weights.attn_q.ptr,
+        scratch.x_q8_1, scratch.x_q8_1_mmq, scratch.mmvq_f32,
+        n_tokens, q_k, q_rows, dtype_q,
+    )
+    .context("batched-decode qmatmul attn_q")?;
+    cast_f32_to_f16(
+        ops, stream, scratch.mmvq_f32, scratch.q_fused_f16, n_tokens * q_rows,
+    )
+    .context("batched-decode cast attn_q → f16")?;
+
+    // 3. Split Q | gate.
+    split_q_gate_f16(
+        ops, stream, scratch.q_fused_f16,
+        scratch.q_f16, scratch.gate_f16,
+        n_tokens, n_heads, head_dim,
+    )
+    .context("batched-decode split_q_gate")?;
+
+    // 4. K / V projections.
+    let dtype_k = qdtype_of(weights.attn_k.dtype)?;
+    let (k_rows, k_k) = mat_shape(&weights.attn_k)?;
+    if k_rows != kv_width || k_k != hidden {
+        bail!(
+            "attn_k shape [{k_rows}, {k_k}] != expected [{kv_width}, {hidden}]"
+        );
+    }
+    qmatmul(
+        ops, stream, weights.attn_k.ptr,
+        scratch.x_q8_1, scratch.x_q8_1_mmq, scratch.mmvq_f32,
+        n_tokens, k_k, k_rows, dtype_k,
+    )
+    .context("batched-decode qmatmul attn_k")?;
+    cast_f32_to_f16(
+        ops, stream, scratch.mmvq_f32, scratch.k_f16, n_tokens * k_rows,
+    )
+    .context("batched-decode cast attn_k → f16")?;
+
+    let dtype_v = qdtype_of(weights.attn_v.dtype)?;
+    let (v_rows, v_k) = mat_shape(&weights.attn_v)?;
+    if v_rows != kv_width || v_k != hidden {
+        bail!(
+            "attn_v shape [{v_rows}, {v_k}] != expected [{kv_width}, {hidden}]"
+        );
+    }
+    qmatmul(
+        ops, stream, weights.attn_v.ptr,
+        scratch.x_q8_1, scratch.x_q8_1_mmq, scratch.mmvq_f32,
+        n_tokens, v_k, v_rows, dtype_v,
+    )
+    .context("batched-decode qmatmul attn_v")?;
+    cast_f32_to_f16(
+        ops, stream, scratch.mmvq_f32, scratch.v_f16, n_tokens * v_rows,
+    )
+    .context("batched-decode cast attn_v → f16")?;
+
+    // 5. Per-head Q/K rmsnorm.
+    let q_norm_dim = weights
+        .attn_q_norm.dims.first().copied()
+        .context("attn_q_norm missing dim")? as usize;
+    if q_norm_dim != head_dim {
+        bail!("attn_q_norm dim {q_norm_dim} != head_dim {head_dim}");
+    }
+    rmsnorm_f16(
+        ops, stream, scratch.q_f16, weights.attn_q_norm.ptr, scratch.q_f16,
+        n_tokens * n_heads, head_dim, cfg.rms_norm_eps,
+    )
+    .context("batched-decode attn_q_norm")?;
+    rmsnorm_f16(
+        ops, stream, scratch.k_f16, weights.attn_k_norm.ptr, scratch.k_f16,
+        n_tokens * n_kv_heads, head_dim, cfg.rms_norm_eps,
+    )
+    .context("batched-decode attn_k_norm")?;
+
+    // 6. RoPE on Q / K with per-slot positions.
+    upload_positions_arbitrary(device, stream, scratch, slot_positions)?;
+    rope_neox_partial_f16(
+        ops, stream, scratch.q_f16, scratch.positions, rope.freq_base,
+        n_tokens, n_heads, head_dim, rope.rotated_dims,
+    )
+    .context("batched-decode rope Q")?;
+    rope_neox_partial_f16(
+        ops, stream, scratch.k_f16, scratch.positions, rope.freq_base,
+        n_tokens, n_kv_heads, head_dim, rope.rotated_dims,
+    )
+    .context("batched-decode rope K")?;
+
+    // 7. Per-slot KV append. Each slot writes ITS row of K/V into ITS
+    //    own cache at slot_positions[s]. F16-only path for V1
+    //    (LayerCache::FullAttn); Q8 KV slots fall back via the loop.
+    let kv_per_token_bytes = kv_width * 2; // F16
+    for (s, cache) in slot_caches.iter_mut().enumerate() {
+        let LayerCache::FullAttn(kv) = cache else {
+            bail!(
+                "i2-A1 batched decode: slot {s} cache is not FullAttn \
+                 (Q8 KV path uses sequential single-slot decode)"
+            );
+        };
+        let pos = slot_positions[s];
+        let k_src = scratch.k_f16.offset_bytes(s * kv_per_token_bytes);
+        let v_src = scratch.v_f16.offset_bytes(s * kv_per_token_bytes);
+        let k_dst = kv.k_buffer().offset_bytes(pos * kv_per_token_bytes);
+        let v_dst = kv.v_buffer().offset_bytes(pos * kv_per_token_bytes);
+        // SAFETY: src buffers are scratch.k_f16/v_f16 each ≥ N rows of
+        // kv_per_token_bytes; dst is the slot's KV cache K/V buffer
+        // sized to ≥ (max_seq_len * kv_per_token_bytes); pos < max_seq_len
+        // is enforced by the caller.
+        unsafe {
+            device.memcpy_async(
+                stream, CopyDirection::DeviceToDevice,
+                k_dst, k_src, kv_per_token_bytes,
+            )?;
+            device.memcpy_async(
+                stream, CopyDirection::DeviceToDevice,
+                v_dst, v_src, kv_per_token_bytes,
+            )?;
+        }
+        kv.bump_tail(1)
+            .map_err(|e| anyhow::anyhow!("slot {s} bump_tail: {e}"))?;
+    }
+
+    // 8. Per-slot attention decode. Each slot reads its own cache up to
+    //    slot_positions[s] + 1 K/V rows. attention_decode_f16 expects
+    //    one Q row at a time; we offset Q / out per slot.
+    let q_per_token_bytes = q_width * 2; // F16
+    let scale = (head_dim as f32).sqrt().recip();
+    for (s, cache) in slot_caches.iter().enumerate() {
+        let LayerCache::FullAttn(kv) = cache else {
+            bail!("layer cache for slot {s} not FullAttn (verified above)");
+        };
+        let q_row = scratch.q_f16.offset_bytes(s * q_per_token_bytes);
+        let out_row = scratch
+            .attn_out_f16
+            .offset_bytes(s * q_per_token_bytes);
+        let n_k_tokens = slot_positions[s] + 1;
+        attention_decode_f16_slots(
+            ops, stream,
+            q_row, kv.k_buffer(), kv.v_buffer(), out_row,
+            n_heads, n_kv_heads, head_dim, n_k_tokens, scale,
+            None,
+        )
+        .with_context(|| format!("batched-decode attention slot {s}"))?;
+    }
+
+    // 9. Sigmoid-gate over [N, q_width].
+    sigmoid_mul_f16(
+        ops, stream,
+        scratch.gate_f16, scratch.attn_out_f16, scratch.gated_out_f16,
+        n_tokens * q_width,
+    )
+    .context("batched-decode post-attn sigmoid-gate")?;
+
+    // 10. Quantise gated_out to both Q8_1 layouts for output proj.
+    quantize_f16_q8_1(
+        ops, stream,
+        scratch.gated_out_f16, scratch.gated_q8_1, n_tokens * q_width,
+    )
+    .context("batched-decode quantise gated → Q8_1 (std)")?;
+    quantize_f16_q8_1_mmq(
+        ops, stream,
+        scratch.gated_out_f16, scratch.gated_q8_1_mmq, q_width, n_tokens,
+    )
+    .context("batched-decode quantise gated → Q8_1 (MMQ DS4)")?;
+
+    // 11. Output projection over [N, hidden].
+    let dtype_o = qdtype_of(weights.attn_output.dtype)?;
+    let (o_rows, o_k) = mat_shape(&weights.attn_output)?;
+    if o_rows != hidden || o_k != q_width {
+        bail!(
+            "attn_output shape [{o_rows}, {o_k}] != expected [{hidden}, {q_width}]"
+        );
+    }
+    qmatmul(
+        ops, stream, weights.attn_output.ptr,
+        scratch.gated_q8_1, scratch.gated_q8_1_mmq, scratch.mmvq_f32,
+        n_tokens, o_k, o_rows, dtype_o,
+    )
+    .context("batched-decode qmatmul attn_output")?;
+    cast_f32_to_f16(
+        ops, stream, scratch.mmvq_f32, delta_out, n_tokens * hidden,
+    )
+    .context("batched-decode cast attn_output → f16")?;
+
+    Ok(())
+}
+
 // ---------------------------------------------------------------------------
 // V2.28.b-i1 — dense attention (qwen3moe family).
 //
