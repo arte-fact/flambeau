@@ -1572,25 +1572,62 @@ fn run_completion_blocking_ids(
     // EOS mask regardless of sampling mode.
     let mut logits_buf: Vec<f32> = Vec::with_capacity(vocab);
 
-    // **Sampler-D3 / D4** — GPU-side top-K sampler. Opts in via
-    // `FLAMBEAU_GPU_SAMPLER=1` for any non-greedy TP request; the
-    // penalty-active path goes through `run_gpu_topk_with_penalties`
-    // (D4 — applies repetition / presence / frequency on device
-    // before topk) instead of `run_gpu_topk` (D3 — bare topk).
+    // **Sampler-D3 / D4 / Hybrid** — GPU-side top-K sampler. Opts in
+    // via `FLAMBEAU_GPU_SAMPLER=1` for any non-greedy TP or Hybrid
+    // request; the penalty-active path goes through
+    // `run_gpu_topk_with_penalties` (D4 — applies repetition /
+    // presence / frequency on device before topk) instead of
+    // `run_gpu_topk` (D3 — bare topk). Resolves the head device
+    // differently per topology:
+    //   - TP:     global cluster's `decode.head_rank` device
+    //   - Hybrid: head stage's sub_cluster's head TP-rank device
+    //             (head_stage = pp_size - 1; head_rank within stage
+    //             defaults to 0 per ShardedForwardOneTokenScratchHybrid).
     let use_gpu_sampler = std::env::var("FLAMBEAU_GPU_SAMPLER").is_ok()
-        && matches!(model, LoadedModel::Tp { .. })
+        && matches!(
+            model,
+            LoadedModel::Tp { .. } | LoadedModel::Hybrid { .. }
+        )
         && !sampling.is_greedy();
     let mut gpu_scratch: Option<GpuSamplerScratch> = if use_gpu_sampler {
-        let head_rank = match &inflight {
-            Inflight::Tp { decode, .. } => decode.head_rank.0 as usize,
-            _ => 0,
+        // Resolve the head device for whichever topology is active.
+        let head_device = match (model, &inflight) {
+            (LoadedModel::Tp { .. }, Inflight::Tp { decode, .. }) => {
+                let head_rank = decode.head_rank.0 as usize;
+                if head_rank >= cluster.ranks() {
+                    bail!(
+                        "GPU sampler: TP head_rank={head_rank} >= cluster ranks {}",
+                        cluster.ranks()
+                    );
+                }
+                cluster.device(head_rank)
+            }
+            (LoadedModel::Hybrid { model: hm, .. }, Inflight::Hybrid { decode, .. }) => {
+                let head_stage = decode.head_stage as usize;
+                let stage_model = hm.stages.get(head_stage).ok_or_else(|| {
+                    anyhow!("GPU sampler: hybrid head_stage {head_stage} out of range")
+                })?;
+                let stage_scratch = decode
+                    .per_stage
+                    .get(head_stage)
+                    .ok_or_else(|| anyhow!("GPU sampler: hybrid decode missing head_stage"))?;
+                let head_rank = stage_scratch.head_rank.0 as usize;
+                if head_rank >= stage_model.sub_cluster.ranks() {
+                    bail!(
+                        "GPU sampler: hybrid head_rank={head_rank} >= stage sub-cluster ranks {}",
+                        stage_model.sub_cluster.ranks()
+                    );
+                }
+                stage_model.sub_cluster.device(head_rank)
+            }
+            _ => bail!("GPU sampler: unsupported (model, inflight) combination"),
         };
         Some(
             // K=2048 matches Sampler-A's `effective_top_k` default
             // for `top_p`/`min_p` callers without explicit `top_k`.
             // Smaller K caused the GPU sampler to bias multinomial
             // toward EOS at natural-endpoint positions.
-            GpuSamplerScratch::new(cluster, head_rank, 2048)
+            GpuSamplerScratch::new(head_device, 2048)
                 .context("alloc GpuSamplerScratch")?,
         )
     } else {
@@ -1964,9 +2001,32 @@ fn run_completion_blocking_ids(
     }
 
     // Dispose GPU sampler scratch (if allocated) before tearing down
-    // the inflight session.
+    // the inflight session. The dispose device must match the device
+    // the scratch was allocated on (recorded at construction time);
+    // resolve it the same way the constructor did, depending on
+    // topology.
     if let Some(scratch) = gpu_scratch.take() {
-        scratch.dispose(cluster).context("dispose GpuSamplerScratch")?;
+        let head_device = match (model, &inflight) {
+            (LoadedModel::Tp { .. }, Inflight::Tp { decode, .. }) => {
+                cluster.device(decode.head_rank.0 as usize)
+            }
+            (LoadedModel::Hybrid { model: hm, .. }, Inflight::Hybrid { decode, .. }) => {
+                let head_stage = decode.head_stage as usize;
+                let stage_model = hm.stages.get(head_stage).ok_or_else(|| {
+                    anyhow!("dispose GpuSamplerScratch: hybrid head_stage out of range")
+                })?;
+                let stage_scratch = decode.per_stage.get(head_stage).ok_or_else(|| {
+                    anyhow!("dispose GpuSamplerScratch: hybrid decode missing head_stage")
+                })?;
+                stage_model
+                    .sub_cluster
+                    .device(stage_scratch.head_rank.0 as usize)
+            }
+            _ => bail!("dispose GpuSamplerScratch: unsupported topology"),
+        };
+        scratch
+            .dispose(head_device)
+            .context("dispose GpuSamplerScratch")?;
     }
 
     // Dispose per-request scratch/session; keep model + cluster alive.

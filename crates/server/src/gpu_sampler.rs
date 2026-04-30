@@ -13,7 +13,7 @@
 #![cfg(feature = "hip")]
 
 use anyhow::{anyhow, bail, Context, Result};
-use flambeau_backend_hip::HipCluster;
+use flambeau_backend_hip::{HipCluster, HipDevice};
 use flambeau_core::{CopyDirection, Device, DevicePtr, Stream};
 use flambeau_ops::hip::sampling::{apply_penalties_f32, topk_softmax_f32, SAMPLER_K_OUT_MAX};
 use flambeau_runtime::Sampling;
@@ -53,22 +53,27 @@ pub struct GpuSamplerScratch {
 }
 
 impl GpuSamplerScratch {
-    /// Allocate on the head rank of `cluster`. `k` must be in
-    /// `[1, SAMPLER_K_OUT_MAX]`. The penalty-path device buffer is
-    /// allocated lazily on the first `run_gpu_topk_with_penalties`
-    /// call so penalty-free requests don't pay for the 64 KB.
-    pub fn new(cluster: &HipCluster, head_rank: usize, k: usize) -> Result<Self> {
+    /// Allocate on `device`. `k` must be in `[1, SAMPLER_K_OUT_MAX]`.
+    /// The penalty-path device buffer is allocated lazily on the first
+    /// `run_gpu_topk_with_penalties` call so penalty-free requests
+    /// don't pay for the 64 KB.
+    ///
+    /// The caller picks the device — TP path passes the global cluster's
+    /// `head_rank` device; Hybrid passes the head stage's sub_cluster's
+    /// `head_rank` device. The scratch records the device's HIP id so
+    /// dispose / penalty-buffer ensure can rebind without re-resolving
+    /// from a cluster handle.
+    pub fn new(device: &HipDevice, k: usize) -> Result<Self> {
         if k == 0 || k > SAMPLER_K_OUT_MAX {
             bail!(
                 "GpuSamplerScratch::new: k={k} must be in [1, {SAMPLER_K_OUT_MAX}]"
             );
         }
-        let dev = cluster.device(head_rank);
-        dev.bind()?;
-        let d_ids = dev.alloc(k * 4)?;
-        let d_probs = dev.alloc(k * 4)?;
+        device.bind()?;
+        let d_ids = device.alloc(k * 4)?;
+        let d_probs = device.alloc(k * 4)?;
         Ok(Self {
-            head_dev_idx: head_rank,
+            head_dev_idx: device.id() as usize,
             d_ids,
             d_probs,
             k,
@@ -82,37 +87,41 @@ impl GpuSamplerScratch {
         })
     }
 
+    /// HIP device id this scratch was allocated on.
+    pub fn device_id(&self) -> i32 {
+        self.head_dev_idx as i32
+    }
+
     /// Allocate the penalty-path device buffer if not already allocated.
-    fn ensure_history_buffer(&mut self, cluster: &HipCluster) -> Result<DevicePtr> {
+    fn ensure_history_buffer(&mut self, device: &HipDevice) -> Result<DevicePtr> {
         if let Some(p) = self.d_history_counts {
             return Ok(p);
         }
-        let dev = cluster.device(self.head_dev_idx);
-        dev.bind()?;
+        device.bind()?;
         // 2 u32 (tok, count) per pair × SAMPLER_HISTORY_MAX × 4 bytes/u32.
         let bytes = SAMPLER_HISTORY_MAX * 2 * 4;
-        let p = dev.alloc(bytes)?;
+        let p = device.alloc(bytes)?;
         self.d_history_counts = Some(p);
         Ok(p)
     }
 
-    /// Free the device buffers. Must pair with `new(cluster, ...)`.
-    pub fn dispose(mut self, cluster: &HipCluster) -> Result<()> {
+    /// Free the device buffers. Caller must pass the same device the
+    /// scratch was allocated on (same HIP id).
+    pub fn dispose(mut self, device: &HipDevice) -> Result<()> {
         if self.disposed {
             return Ok(());
         }
         self.disposed = true;
-        let dev = cluster.device(self.head_dev_idx);
-        dev.bind()?;
+        device.bind()?;
         // SAFETY: d_ids / d_probs were allocated by `new` for `k * 4`
-        // bytes each on `dev`; d_history_counts (if Some) was allocated
-        // by ensure_history_buffer for SAMPLER_HISTORY_MAX*8 bytes.
-        // We deallocate the same regions exactly once.
+        // bytes each on `device`; d_history_counts (if Some) was
+        // allocated by ensure_history_buffer for SAMPLER_HISTORY_MAX*8
+        // bytes. We deallocate the same regions exactly once.
         unsafe {
-            dev.dealloc(self.d_ids, self.k * 4)?;
-            dev.dealloc(self.d_probs, self.k * 4)?;
+            device.dealloc(self.d_ids, self.k * 4)?;
+            device.dealloc(self.d_probs, self.k * 4)?;
             if let Some(p) = self.d_history_counts.take() {
-                dev.dealloc(p, SAMPLER_HISTORY_MAX * 2 * 4)?;
+                device.dealloc(p, SAMPLER_HISTORY_MAX * 2 * 4)?;
             }
         }
         Ok(())
@@ -148,62 +157,135 @@ pub fn run_gpu_topk(
     scratch: &mut GpuSamplerScratch,
     inv_temp: f32,
 ) -> Result<()> {
+    let (dev, ops, logits_f32, vocab) = resolve_head_logits(model, cluster, inflight, scratch)?;
+    dev.bind()?;
+    let stream = dev.default_stream();
+    topk_softmax_f32(
+        ops,
+        stream,
+        logits_f32,
+        scratch.d_ids,
+        scratch.d_probs,
+        vocab,
+        scratch.k,
+        inv_temp,
+    )
+    .context("GPU topk_softmax_f32")?;
+    // SAFETY: d_ids/d_probs were allocated by GpuSamplerScratch::new
+    // for `k * 4` bytes each on this device; host_ids/host_probs
+    // are vecs of matching capacity.
+    unsafe {
+        <flambeau_backend_hip::HipDevice as Device>::memcpy_async(
+            dev,
+            stream,
+            CopyDirection::DeviceToHost,
+            DevicePtr(scratch.host_ids.as_mut_ptr() as usize),
+            scratch.d_ids,
+            scratch.k * 4,
+        )?;
+        <flambeau_backend_hip::HipDevice as Device>::memcpy_async(
+            dev,
+            stream,
+            CopyDirection::DeviceToHost,
+            DevicePtr(scratch.host_probs.as_mut_ptr() as usize),
+            scratch.d_probs,
+            scratch.k * 4,
+        )?;
+    }
+    Stream::synchronize(stream)?;
+    Ok(())
+}
+
+/// Resolve `(device, ops, logits_f32_ptr, vocab_size)` for either TP or
+/// Hybrid topologies. Centralises the head-rank lookup. The TP arm
+/// pulls the device from the global cluster; the Hybrid arm pulls it
+/// from the head stage's sub_cluster (the global cluster is unused).
+///
+/// All Option/Result branches use `ok_or_else` rather than `.unwrap()`
+/// — a missing scratch field is a real configuration mismatch and
+/// must error rather than panic.
+fn resolve_head_logits<'a>(
+    model: &'a LoadedModel,
+    cluster: &'a HipCluster,
+    inflight: &'a Inflight,
+    scratch: &GpuSamplerScratch,
+) -> Result<(
+    &'a flambeau_backend_hip::HipDevice,
+    &'a flambeau_ops::hip::OpsRegistry,
+    DevicePtr,
+    usize,
+)> {
     match (model, inflight) {
         (LoadedModel::Tp { model: m, .. }, Inflight::Tp { decode, .. }) => {
             let head = decode.head_rank.0 as usize;
-            if head != scratch.head_dev_idx {
+            if head >= cluster.ranks() {
                 bail!(
-                    "run_gpu_topk: scratch head_dev_idx={} != decode.head_rank={head}",
-                    scratch.head_dev_idx
+                    "run_gpu_topk: TP head_rank={head} >= cluster ranks {}",
+                    cluster.ranks()
                 );
             }
             let dev = cluster.device(head);
-            let ops = &m.ops[head];
-            let head_scratch = decode.per_rank[head]
+            if dev.id() != scratch.device_id() {
+                bail!(
+                    "run_gpu_topk: scratch device_id={} != TP head device id={}",
+                    scratch.device_id(),
+                    dev.id()
+                );
+            }
+            let ops = m
+                .ops
+                .get(head)
+                .ok_or_else(|| anyhow!("TP ops registry missing rank {head}"))?;
+            let head_scratch = decode
+                .per_rank
+                .get(head)
+                .ok_or_else(|| anyhow!("TP scratch per_rank missing rank {head}"))?
                 .output_head
                 .as_ref()
-                .ok_or_else(|| anyhow!("head rank missing OutputHeadScratch"))?;
-            let logits_f32 = head_scratch.logits_f32;
-            let vocab = m.config.vocab_size;
-            dev.bind()?;
-            let stream = dev.default_stream();
-            topk_softmax_f32(
-                ops,
-                stream,
-                logits_f32,
-                scratch.d_ids,
-                scratch.d_probs,
-                vocab,
-                scratch.k,
-                inv_temp,
-            )
-            .context("GPU topk_softmax_f32")?;
-            // SAFETY: d_ids/d_probs were allocated by GpuSamplerScratch::new
-            // for `k * 4` bytes each on this device; host_ids/host_probs
-            // are vecs of matching capacity.
-            unsafe {
-                <flambeau_backend_hip::HipDevice as Device>::memcpy_async(
-                    dev,
-                    stream,
-                    CopyDirection::DeviceToHost,
-                    DevicePtr(scratch.host_ids.as_mut_ptr() as usize),
-                    scratch.d_ids,
-                    scratch.k * 4,
-                )?;
-                <flambeau_backend_hip::HipDevice as Device>::memcpy_async(
-                    dev,
-                    stream,
-                    CopyDirection::DeviceToHost,
-                    DevicePtr(scratch.host_probs.as_mut_ptr() as usize),
-                    scratch.d_probs,
-                    scratch.k * 4,
-                )?;
+                .ok_or_else(|| anyhow!("TP head rank missing OutputHeadScratch"))?;
+            Ok((dev, ops, head_scratch.logits_f32, m.config.vocab_size))
+        }
+        (LoadedModel::Hybrid { model: hm, .. }, Inflight::Hybrid { decode, .. }) => {
+            let head_stage = decode.head_stage as usize;
+            let stage_model = hm
+                .stages
+                .get(head_stage)
+                .ok_or_else(|| anyhow!("Hybrid model missing head_stage {head_stage}"))?;
+            let stage_scratch = decode
+                .per_stage
+                .get(head_stage)
+                .ok_or_else(|| anyhow!("Hybrid decode missing head_stage {head_stage}"))?;
+            let head_rank = stage_scratch.head_rank.0 as usize;
+            if head_rank >= stage_model.sub_cluster.ranks() {
+                bail!(
+                    "run_gpu_topk: hybrid head_rank={head_rank} >= stage sub-cluster ranks {}",
+                    stage_model.sub_cluster.ranks()
+                );
             }
-            Stream::synchronize(stream)?;
-            Ok(())
+            let dev = stage_model.sub_cluster.device(head_rank);
+            if dev.id() != scratch.device_id() {
+                bail!(
+                    "run_gpu_topk: scratch device_id={} != hybrid head device id={}",
+                    scratch.device_id(),
+                    dev.id()
+                );
+            }
+            let ops = stage_model
+                .tp_model
+                .ops
+                .get(head_rank)
+                .ok_or_else(|| anyhow!("Hybrid stage ops missing rank {head_rank}"))?;
+            let head_scratch = stage_scratch
+                .per_rank
+                .get(head_rank)
+                .ok_or_else(|| anyhow!("Hybrid scratch per_rank missing rank {head_rank}"))?
+                .output_head
+                .as_ref()
+                .ok_or_else(|| anyhow!("Hybrid head rank missing OutputHeadScratch"))?;
+            Ok((dev, ops, head_scratch.logits_f32, hm.config.vocab_size))
         }
         _ => bail!(
-            "GPU sampler is wired for TP topology only in Phase A (got {})",
+            "GPU sampler is wired for TP and Hybrid topologies (got {})",
             model.topology()
         ),
     }
@@ -331,91 +413,68 @@ pub fn run_gpu_topk_with_penalties(
         scratch.host_history_pairs.push(c);
     }
 
-    let d_history_counts = scratch.ensure_history_buffer(cluster)?;
+    let (dev, ops, logits_f32, vocab) = resolve_head_logits(model, cluster, inflight, scratch)?;
+    let d_history_counts = scratch.ensure_history_buffer(dev)?;
+    dev.bind()?;
+    let stream = dev.default_stream();
 
-    match (model, inflight) {
-        (LoadedModel::Tp { model: m, .. }, Inflight::Tp { decode, .. }) => {
-            let head = decode.head_rank.0 as usize;
-            if head != scratch.head_dev_idx {
-                bail!(
-                    "run_gpu_topk_with_penalties: scratch head_dev_idx={} != decode.head_rank={head}",
-                    scratch.head_dev_idx
-                );
-            }
-            let dev = cluster.device(head);
-            let ops = &m.ops[head];
-            let head_scratch = decode.per_rank[head]
-                .output_head
-                .as_ref()
-                .ok_or_else(|| anyhow!("head rank missing OutputHeadScratch"))?;
-            let logits_f32 = head_scratch.logits_f32;
-            let vocab = m.config.vocab_size;
-            dev.bind()?;
-            let stream = dev.default_stream();
-
-            // 1. Upload (tok, count) pairs HtoD. SAFETY: d_history_counts
-            // was allocated for SAMPLER_HISTORY_MAX*2*4 bytes; we copy
-            // n_pairs*2*4 bytes which is bounded above.
-            unsafe {
-                <flambeau_backend_hip::HipDevice as Device>::memcpy_async(
-                    dev,
-                    stream,
-                    CopyDirection::HostToDevice,
-                    d_history_counts,
-                    DevicePtr(scratch.host_history_pairs.as_ptr() as usize),
-                    n_pairs * 2 * 4,
-                )?;
-            }
-            // 2. Apply penalties in place on logits_f32.
-            apply_penalties_f32(
-                ops,
-                stream,
-                logits_f32,
-                d_history_counts,
-                n_pairs,
-                vocab,
-                mode.repetition_penalty,
-                mode.presence_penalty,
-                mode.frequency_penalty,
-            )
-            .context("GPU apply_penalties_f32")?;
-            // 3. topk + DtoH small tuple — same as run_gpu_topk.
-            topk_softmax_f32(
-                ops,
-                stream,
-                logits_f32,
-                scratch.d_ids,
-                scratch.d_probs,
-                vocab,
-                scratch.k,
-                inv_temp,
-            )
-            .context("GPU topk_softmax_f32 (post-penalty)")?;
-            // SAFETY: same as run_gpu_topk.
-            unsafe {
-                <flambeau_backend_hip::HipDevice as Device>::memcpy_async(
-                    dev,
-                    stream,
-                    CopyDirection::DeviceToHost,
-                    DevicePtr(scratch.host_ids.as_mut_ptr() as usize),
-                    scratch.d_ids,
-                    scratch.k * 4,
-                )?;
-                <flambeau_backend_hip::HipDevice as Device>::memcpy_async(
-                    dev,
-                    stream,
-                    CopyDirection::DeviceToHost,
-                    DevicePtr(scratch.host_probs.as_mut_ptr() as usize),
-                    scratch.d_probs,
-                    scratch.k * 4,
-                )?;
-            }
-            Stream::synchronize(stream)?;
-            Ok(())
-        }
-        _ => bail!(
-            "GPU sampler is wired for TP topology only (got {})",
-            model.topology()
-        ),
+    // 1. Upload (tok, count) pairs HtoD. SAFETY: d_history_counts was
+    // allocated for SAMPLER_HISTORY_MAX*2*4 bytes; we copy n_pairs*2*4
+    // bytes which is bounded above.
+    unsafe {
+        <flambeau_backend_hip::HipDevice as Device>::memcpy_async(
+            dev,
+            stream,
+            CopyDirection::HostToDevice,
+            d_history_counts,
+            DevicePtr(scratch.host_history_pairs.as_ptr() as usize),
+            n_pairs * 2 * 4,
+        )?;
     }
+    // 2. Apply penalties in place on logits_f32.
+    apply_penalties_f32(
+        ops,
+        stream,
+        logits_f32,
+        d_history_counts,
+        n_pairs,
+        vocab,
+        mode.repetition_penalty,
+        mode.presence_penalty,
+        mode.frequency_penalty,
+    )
+    .context("GPU apply_penalties_f32")?;
+    // 3. topk + DtoH small tuple.
+    topk_softmax_f32(
+        ops,
+        stream,
+        logits_f32,
+        scratch.d_ids,
+        scratch.d_probs,
+        vocab,
+        scratch.k,
+        inv_temp,
+    )
+    .context("GPU topk_softmax_f32 (post-penalty)")?;
+    // SAFETY: d_ids/d_probs sized for k*4 each on `dev`; host vecs match.
+    unsafe {
+        <flambeau_backend_hip::HipDevice as Device>::memcpy_async(
+            dev,
+            stream,
+            CopyDirection::DeviceToHost,
+            DevicePtr(scratch.host_ids.as_mut_ptr() as usize),
+            scratch.d_ids,
+            scratch.k * 4,
+        )?;
+        <flambeau_backend_hip::HipDevice as Device>::memcpy_async(
+            dev,
+            stream,
+            CopyDirection::DeviceToHost,
+            DevicePtr(scratch.host_probs.as_mut_ptr() as usize),
+            scratch.d_probs,
+            scratch.k * 4,
+        )?;
+    }
+    Stream::synchronize(stream)?;
+    Ok(())
 }

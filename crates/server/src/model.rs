@@ -602,10 +602,10 @@ pub fn decode_keep_logits_on_device(
     token: u32,
     position: usize,
 ) -> Result<()> {
-    match (model, inflight) {
-        (LoadedModel::Tp { model, ar }, Inflight::Tp { session, decode }) => {
-            forward_one_token_tp_keep_logits_on_device(
-                model,
+    match model {
+        LoadedModel::Tp { model: m, ar } => match inflight {
+            Inflight::Tp { session, decode } => forward_one_token_tp_keep_logits_on_device(
+                m,
                 decode,
                 cluster,
                 ar,
@@ -613,10 +613,25 @@ pub fn decode_keep_logits_on_device(
                 token,
                 position,
             )
-            .context("TP decode_keep_logits_on_device")
+            .context("TP decode_keep_logits_on_device"),
+            _ => bail!("Inflight variant doesn't match LoadedModel::Tp"),
+        },
+        // **Hybrid GPU-sampler fallback (#258)** — there's no
+        // forward_one_token_hybrid_keep_logits_on_device yet, so we
+        // run the regular decode_logits (which does the host DtoH of
+        // ~600 KB) and let the GPU sampler read logits_f32 from the
+        // head stage's OutputHeadScratch on device anyway. The DtoH
+        // is wasted bandwidth but the device buffer is still
+        // correctly populated for the GPU topk kernel to consume.
+        // A proper hybrid keep-on-device variant is a perf-only
+        // follow-up.
+        LoadedModel::Hybrid { .. } => {
+            let mut sink: Vec<f32> = Vec::new();
+            decode_logits(model, cluster, inflight, token, position, &mut sink)
+                .context("Hybrid decode_keep_logits_on_device (decode_logits fallback)")
         }
         _ => bail!(
-            "decode_keep_logits_on_device only wired for TP topology (Phase B)"
+            "decode_keep_logits_on_device only wired for TP and Hybrid topologies"
         ),
     }
 }
