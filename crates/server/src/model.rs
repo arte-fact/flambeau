@@ -317,15 +317,14 @@ pub fn prefill_logits(
             }
         }
         (LoadedModel::Tp { model, ar }, Inflight::Tp { session, decode }) => {
+            // **TP chunked prefill is broken** (#237 follow-up). Same
+            // dispatcher-level fix as PP (B1) works for kernel choice,
+            // but cross-call state in TP's AllReduce path produces
+            // incoherent output. Stick with single-shot prefill — TP
+            // prompts must fit in scratch.
             forward_prefill_tp_logits(
-                model,
-                decode,
-                cluster,
-                ar,
-                &mut session.caches,
-                prompt_ids,
-                0,
-                logits_out,
+                model, decode, cluster, ar, &mut session.caches,
+                prompt_ids, 0, logits_out,
             )
             .context("TP prefill_logits")
         }
@@ -346,6 +345,8 @@ pub fn prefill_logits(
             logits_out,
         )
         .context("hybrid prefill_logits"),
+        // **Hybrid chunked prefill is broken** for the same reason
+        // as TP — single-shot only.
         _ => bail!("LoadedModel/Inflight variant mismatch"),
     }
 }
