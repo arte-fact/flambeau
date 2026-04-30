@@ -492,6 +492,118 @@ pub(crate) fn alloc_layer_cache_tp(
     }
 }
 
+/// **Phase A1 (test/diagnostic)** — flat per-layer KV snapshot of one
+/// session, copied device→host. Used by chunked-vs-single-shot KV
+/// parity tests in `tests/chunked_prefill_kv_parity.rs`.
+///
+/// Each entry is one layer: full-attn layers carry K and V byte
+/// buffers (sized `bytes_per_tensor`); GDN layers carry the recurrent
+/// `state` + `conv_history` byte buffers. The byte representation is
+/// raw on-device bytes — exact bit-equality between two snapshots is
+/// the strongest possible cross-chunk parity check.
+#[derive(Debug, Clone)]
+pub enum LayerCacheSnapshot {
+    FullAttn { k: Vec<u8>, v: Vec<u8>, current_tokens: usize },
+    Gdn { state: Vec<u8>, conv_history: Vec<u8> },
+}
+
+/// **Phase A1** — read a slice of layer caches' KV state from device
+/// into host. Synchronises the default stream before reading. Generic
+/// over session shape: single-device PP rank, TP rank, hybrid stage.
+/// Caller passes the device that owns the slice.
+pub fn snapshot_layer_caches_to_host(
+    caches: &[LayerCache],
+    device: &HipDevice,
+) -> Result<Vec<LayerCacheSnapshot>> {
+    use flambeau_core::CopyDirection;
+    device.bind()?;
+    let stream = device.default_stream();
+    let mut out = Vec::with_capacity(caches.len());
+    for cache in caches.iter() {
+        match cache {
+            LayerCache::FullAttn(kv) => {
+                let bytes = kv.bytes_per_tensor();
+                let mut k = vec![0u8; bytes];
+                let mut v = vec![0u8; bytes];
+                // SAFETY: device buffers are alloc'd to `bytes` each;
+                // host buffers same. D→H async then sync.
+                unsafe {
+                    device.memcpy_async(
+                        stream,
+                        CopyDirection::DeviceToHost,
+                        DevicePtr(k.as_mut_ptr() as usize),
+                        kv.k_buffer(),
+                        bytes,
+                    )?;
+                    device.memcpy_async(
+                        stream,
+                        CopyDirection::DeviceToHost,
+                        DevicePtr(v.as_mut_ptr() as usize),
+                        kv.v_buffer(),
+                        bytes,
+                    )?;
+                }
+                stream.synchronize()?;
+                out.push(LayerCacheSnapshot::FullAttn {
+                    k,
+                    v,
+                    current_tokens: kv.current_tokens(),
+                });
+            }
+            LayerCache::FullAttnQ8(kv) => {
+                let bytes = kv.bytes_per_tensor();
+                let mut k = vec![0u8; bytes];
+                let mut v = vec![0u8; bytes];
+                unsafe {
+                    device.memcpy_async(
+                        stream,
+                        CopyDirection::DeviceToHost,
+                        DevicePtr(k.as_mut_ptr() as usize),
+                        kv.k_buffer(),
+                        bytes,
+                    )?;
+                    device.memcpy_async(
+                        stream,
+                        CopyDirection::DeviceToHost,
+                        DevicePtr(v.as_mut_ptr() as usize),
+                        kv.v_buffer(),
+                        bytes,
+                    )?;
+                }
+                stream.synchronize()?;
+                out.push(LayerCacheSnapshot::FullAttn {
+                    k,
+                    v,
+                    current_tokens: kv.current_tokens(),
+                });
+            }
+            LayerCache::Gdn(g) => {
+                let mut state = vec![0u8; g.state_bytes];
+                let mut conv = vec![0u8; g.conv_history_bytes];
+                unsafe {
+                    device.memcpy_async(
+                        stream,
+                        CopyDirection::DeviceToHost,
+                        DevicePtr(state.as_mut_ptr() as usize),
+                        g.state,
+                        g.state_bytes,
+                    )?;
+                    device.memcpy_async(
+                        stream,
+                        CopyDirection::DeviceToHost,
+                        DevicePtr(conv.as_mut_ptr() as usize),
+                        g.conv_history,
+                        g.conv_history_bytes,
+                    )?;
+                }
+                stream.synchronize()?;
+                out.push(LayerCacheSnapshot::Gdn { state, conv_history: conv });
+            }
+        }
+    }
+    Ok(out)
+}
+
 /// Free a single `LayerCache` on `device`. Mirrors `alloc_layer_cache`.
 pub(crate) fn dispose_layer_cache(cache: LayerCache, device: &HipDevice) -> Result<()> {
     match cache {

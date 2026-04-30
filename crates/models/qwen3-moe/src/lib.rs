@@ -66,7 +66,10 @@ pub use hybrid::{
 };
 
 #[cfg(feature = "hip")]
-pub use session::{GdnLayerState, LayerCache, Qwen3MoESession};
+pub use session::{
+    snapshot_layer_caches_to_host, GdnLayerState, LayerCache, LayerCacheSnapshot,
+    Qwen3MoESession,
+};
 
 #[cfg(feature = "hip")]
 pub use weights::{
