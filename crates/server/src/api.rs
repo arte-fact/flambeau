@@ -287,6 +287,62 @@ pub struct CompletionRequest {
     pub stop: Option<serde_json::Value>,
 }
 
+// ---- /infill (P1.6b — llama.cpp-compat fill-in-the-middle) ----------------
+
+/// llama.cpp-compatible `/infill` request body. The endpoint composes a
+/// FIM prompt of the form `<|fim_prefix|>{prefix}<|fim_suffix|>{suffix}<|fim_middle|>`
+/// (PSM = prefix-suffix-middle, the canonical Qwen-Coder / StarCoder
+/// layout) and decodes a completion. Optional `input_extra` carries
+/// repo-context files; when present they are inlined ahead of the FIM
+/// block via `<|repo_name|>…<|file_sep|>…`, the Qwen-Coder PSM extension.
+#[derive(Debug, Clone, Deserialize)]
+pub struct InfillRequest {
+    #[serde(default)]
+    pub model: Option<String>,
+    /// Code BEFORE the cursor.
+    #[serde(default)]
+    pub input_prefix: String,
+    /// Code AFTER the cursor.
+    #[serde(default)]
+    pub input_suffix: String,
+    /// Optional middle prefix — text that the model should treat as
+    /// already-emitted at the cursor. llama.cpp accepts this as
+    /// `prompt`; we honour both names so OpenWebUI / Continue / Cursor
+    /// configurations can target the same endpoint.
+    #[serde(default, alias = "middle")]
+    pub prompt: Option<String>,
+    /// Repo-context files (Qwen-Coder PSM). Each carries a `filename`
+    /// and `text`; emitted ahead of the FIM block in the order given.
+    /// Ignored when the model's vocab lacks `<|repo_name|>` or
+    /// `<|file_sep|>`.
+    #[serde(default)]
+    pub input_extra: Vec<InfillExtra>,
+    #[serde(default)]
+    pub temperature: Option<f32>,
+    #[serde(default)]
+    pub top_p: Option<f32>,
+    #[serde(default)]
+    pub top_k: Option<u32>,
+    /// llama.cpp uses `n_predict`; we also accept the OpenAI-style
+    /// `max_tokens` for client convenience.
+    #[serde(default, alias = "max_tokens")]
+    pub n_predict: Option<u32>,
+    #[serde(default)]
+    pub seed: Option<u64>,
+    #[serde(default)]
+    pub stream: bool,
+    #[serde(default)]
+    pub stop: Option<serde_json::Value>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct InfillExtra {
+    #[serde(default)]
+    pub filename: String,
+    #[serde(default)]
+    pub text: String,
+}
+
 #[derive(Debug, Clone, Serialize)]
 pub struct CompletionResponse {
     pub id: String,
@@ -376,6 +432,42 @@ mod tests {
             }
             _ => panic!("expected named tool choice"),
         }
+    }
+
+    #[test]
+    fn infill_request_llamacpp_shape() {
+        let wire = r##"{
+            "input_prefix":"def fizzbuzz(n):\n    ",
+            "input_suffix":"    return result\n",
+            "n_predict":64,
+            "stop":["\n\n"],
+            "input_extra":[{"filename":"main.py","text":"# entry"}]
+        }"##;
+        let req: InfillRequest = serde_json::from_str(wire).unwrap();
+        assert_eq!(req.input_prefix, "def fizzbuzz(n):\n    ");
+        assert_eq!(req.input_suffix, "    return result\n");
+        assert_eq!(req.n_predict, Some(64));
+        assert_eq!(req.input_extra.len(), 1);
+        assert_eq!(req.input_extra[0].filename, "main.py");
+    }
+
+    #[test]
+    fn infill_request_max_tokens_alias_works() {
+        // OpenAI-style clients send `max_tokens`, not `n_predict`.
+        let wire = r#"{
+            "input_prefix":"a","input_suffix":"b","max_tokens":32
+        }"#;
+        let req: InfillRequest = serde_json::from_str(wire).unwrap();
+        assert_eq!(req.n_predict, Some(32));
+    }
+
+    #[test]
+    fn infill_request_middle_alias_works() {
+        let wire = r#"{
+            "input_prefix":"a","input_suffix":"b","middle":"x"
+        }"#;
+        let req: InfillRequest = serde_json::from_str(wire).unwrap();
+        assert_eq!(req.prompt.as_deref(), Some("x"));
     }
 
     #[test]

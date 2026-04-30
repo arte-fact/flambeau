@@ -623,6 +623,127 @@ pub async fn completions(
     }))
 }
 
+/// POST /infill — llama.cpp-compatible Fill-in-the-Middle endpoint.
+///
+/// Composes a PSM-shaped FIM prompt of the form
+/// `[<|repo_name|>name<|file_sep|>body…]<|fim_prefix|>{prefix}<|fim_suffix|>{suffix}<|fim_middle|>{prompt}`
+/// using the FIM specials detected at boot (P1.6a). The leading repo
+/// block is omitted when `input_extra` is empty or the vocab lacks
+/// `<|repo_name|>` / `<|file_sep|>`.
+///
+/// The `text` returned in the OpenAI-shaped response carries ONLY the
+/// generated middle — caller is expected to splice it back at the
+/// cursor between `input_prefix` and `input_suffix`.
+#[tracing::instrument(name = "server.infill", skip_all, fields(stream = req.stream))]
+pub async fn infill(
+    State(state): State<SharedState>,
+    Json(req): Json<InfillRequest>,
+) -> Result<Json<CompletionResponse>, ApiError> {
+    if req.stream {
+        return Err(ApiError::bad_request(
+            "SSE streaming for /infill is not yet implemented. Retry with stream=false.",
+        ));
+    }
+    let Some(fim) = state.tokenizer.fim else {
+        return Err(ApiError::bad_request(
+            "this model does not carry FIM tokens — /infill is only supported for code-completion models",
+        ));
+    };
+
+    // P1.6b — assemble FIM token-id stream directly. We bypass string
+    // tokenization for the special tokens because StarCoder-style
+    // `<fim_prefix>` (no ASCII pipes) is not registered by the
+    // tokenizer's `<|...|>` special-token sweep, and would otherwise
+    // BPE-split into multi-token fragments.
+    let tok = &state.tokenizer;
+    let mut prompt_ids: Vec<u32> = Vec::new();
+
+    // Optional repo-context block (Qwen-Coder PSM extension).
+    if !req.input_extra.is_empty() {
+        match (fim.repo_name, fim.file_sep) {
+            (Some(repo_tok), Some(sep_tok)) => {
+                for f in &req.input_extra {
+                    prompt_ids.push(repo_tok);
+                    prompt_ids.extend(
+                        tok.encode(&f.filename)
+                            .map_err(ApiError::internal)?,
+                    );
+                    prompt_ids.push(sep_tok);
+                    prompt_ids.extend(
+                        tok.encode(&f.text).map_err(ApiError::internal)?,
+                    );
+                }
+            }
+            _ => {
+                tracing::warn!(
+                    target: "server.infill",
+                    "input_extra ignored: model lacks <|repo_name|> / <|file_sep|>"
+                );
+            }
+        }
+    }
+
+    // Core FIM PSM block.
+    prompt_ids.push(fim.prefix);
+    prompt_ids.extend(
+        tok.encode(&req.input_prefix)
+            .map_err(ApiError::internal)?,
+    );
+    prompt_ids.push(fim.suffix);
+    prompt_ids.extend(
+        tok.encode(&req.input_suffix)
+            .map_err(ApiError::internal)?,
+    );
+    prompt_ids.push(fim.middle);
+    if let Some(mid_prefix) = req.prompt.as_deref().filter(|s| !s.is_empty()) {
+        prompt_ids.extend(
+            tok.encode(mid_prefix).map_err(ApiError::internal)?,
+        );
+    }
+
+    let stop_strings = parse_stop(req.stop.as_ref());
+    let params = SamplingParams::from_parts(
+        req.temperature,
+        req.top_p,
+        req.top_k,
+        /*min_p=*/ None,
+        /*repetition_penalty=*/ None,
+        /*presence_penalty=*/ None,
+        /*frequency_penalty=*/ None,
+        req.n_predict,
+        req.seed,
+        /*json_mode=*/ false,
+        stop_strings,
+        &state.model_defaults,
+    );
+
+    // FIM completions live entirely outside the chat template — there
+    // are no `<|im_end|>` markers to mask early. Pass relax_stop_mask
+    // so the engine doesn't apply chat-flavoured biases.
+    let prompt_tokens = prompt_ids.len() as u32;
+    let (text, _, completion_tokens, finish) =
+        run_completion_ids(state.clone(), prompt_ids, params, /*relax_stop_mask=*/ true)
+            .await
+            .map_err(ApiError::internal)?;
+
+    Ok(Json(CompletionResponse {
+        id: request_id("infill"),
+        object: "text_completion",
+        created: now_unix(),
+        model: state.model_id.clone(),
+        choices: vec![CompletionChoice {
+            index: 0,
+            text,
+            finish_reason: finish,
+        }],
+        usage: Usage {
+            prompt_tokens,
+            completion_tokens,
+            total_tokens: prompt_tokens + completion_tokens,
+        },
+    }))
+}
+
 /// Merge client-supplied tools with any registered via `--mcp <url>`.
 /// Returns `None` when both are empty so the Jinja template takes the
 /// no-tools branch (same byte-for-byte output as V1.8). Returns a
@@ -926,15 +1047,37 @@ async fn run_completion(
 ) -> Result<(String, u32, u32, String)> {
     let prompt = prompt.to_owned();
     tokio::task::spawn_blocking(move || {
-        run_completion_blocking(state, prompt, params, relax_stop_mask)
+        let ids = state
+            .tokenizer
+            .encode(&prompt)
+            .context("tokenize prompt")?;
+        run_completion_blocking_ids(state, ids, params, relax_stop_mask)
     })
     .await
     .map_err(|e| anyhow!("spawn_blocking join failed: {e}"))?
 }
 
-fn run_completion_blocking(
+/// **P1.6b** — token-id entry point used by the FIM `/infill` route.
+/// Skips the tokenizer string round-trip so callers that build prompts
+/// directly out of pre-tokenized fragments (e.g., FIM specials wrapping
+/// user prefix/suffix) don't depend on the tokenizer's special-token
+/// auto-registration heuristic.
+async fn run_completion_ids(
     state: SharedState,
-    prompt: String,
+    prompt_ids: Vec<u32>,
+    params: SamplingParams,
+    relax_stop_mask: bool,
+) -> Result<(String, u32, u32, String)> {
+    tokio::task::spawn_blocking(move || {
+        run_completion_blocking_ids(state, prompt_ids, params, relax_stop_mask)
+    })
+    .await
+    .map_err(|e| anyhow!("spawn_blocking join failed: {e}"))?
+}
+
+fn run_completion_blocking_ids(
+    state: SharedState,
+    prompt_ids: Vec<u32>,
     params: SamplingParams,
     relax_stop_mask: bool,
 ) -> Result<(String, u32, u32, String)> {
@@ -945,8 +1088,6 @@ fn run_completion_blocking(
         .inflight
         .blocking_lock();
 
-    // Tokenize prompt.
-    let prompt_ids = state.tokenizer.encode(&prompt).context("tokenize prompt")?;
     if prompt_ids.is_empty() {
         bail!("prompt tokenized to 0 tokens");
     }

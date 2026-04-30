@@ -19,7 +19,7 @@ use tracing::info;
 
 use crate::model::LoadedModel;
 use crate::routes::{
-    agent_stats, chat_completions, completions, health, index, models, tools_endpoint,
+    agent_stats, chat_completions, completions, health, index, infill, models, tools_endpoint,
     ServerState, SharedState,
 };
 
@@ -377,6 +377,12 @@ pub async fn serve(cfg: ServeConfig) -> Result<()> {
         .route("/v1/models", get(models))
         .route("/v1/chat/completions", post(chat_completions))
         .route("/v1/completions", post(completions))
+        // P1.6b — llama.cpp-compatible Fill-in-the-Middle. Both
+        // top-level (`/infill`, llama.cpp + Continue) and
+        // namespaced (`/v1/infill`) for clients that expect API-
+        // versioned routes.
+        .route("/infill", post(infill))
+        .route("/v1/infill", post(infill))
         // M2.3 — read-only agent-loop telemetry snapshot.
         .route("/v1/agent/stats", get(agent_stats))
         // C4.1 — read-only introspection of `--mcp`-registered remote
