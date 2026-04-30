@@ -275,6 +275,13 @@ pub async fn chat_completions(
                 prompt
             );
         }
+        // P0.3 — `stream_options.include_usage=true` opts the client in
+        // to the canonical OpenAI separate `usage` final chunk.
+        let include_usage = req
+            .stream_options
+            .as_ref()
+            .and_then(|s| s.include_usage)
+            .unwrap_or(false);
         return Ok(stream_completion_sse(
             state,
             prompt,
@@ -282,6 +289,7 @@ pub async fn chat_completions(
             req.tool_call_format.clone(),
             parallel_tool_calls,
             relax_stop_mask,
+            include_usage,
         )
         .into_response());
     }
@@ -637,6 +645,7 @@ fn stream_completion_sse(
     tool_call_format: Option<String>,
     parallel_tool_calls: bool,
     relax_stop_mask: bool,
+    include_usage: bool,
 ) -> Sse<ReceiverStream<Result<Event, Infallible>>> {
     use crate::tool_call_parser::{dispatcher, ParserEvent};
 
@@ -795,23 +804,65 @@ fn stream_completion_sse(
             Ok((_, p, c)) => (*p, *c),
             Err(_) => (0u32, 0u32),
         };
-        let done_frame = json!({
-            "id": id_clone,
-            "object": "chat.completion.chunk",
-            "created": created,
-            "model": model_clone,
-            "choices": [{
-                "index": 0,
-                "delta": {},
-                "finish_reason": finish_reason,
-            }],
-            "usage": {
-                "prompt_tokens": prompt_tokens,
-                "completion_tokens": completion_tokens,
-                "total_tokens": prompt_tokens.saturating_add(completion_tokens),
-            },
-        });
+        // Finish chunk. When `include_usage=true`, the canonical OpenAI
+        // shape carries `usage: null` here and ships the real usage on
+        // the next (choices=[]) chunk; that's the form expected by the
+        // openai-python SDK and LangChain. When false, embed `usage`
+        // inline so existing clients that only watch the finish chunk
+        // still get token counts.
+        let done_frame = if include_usage {
+            json!({
+                "id": id_clone,
+                "object": "chat.completion.chunk",
+                "created": created,
+                "model": model_clone,
+                "choices": [{
+                    "index": 0,
+                    "delta": {},
+                    "finish_reason": finish_reason,
+                }],
+                "usage": serde_json::Value::Null,
+            })
+        } else {
+            json!({
+                "id": id_clone,
+                "object": "chat.completion.chunk",
+                "created": created,
+                "model": model_clone,
+                "choices": [{
+                    "index": 0,
+                    "delta": {},
+                    "finish_reason": finish_reason,
+                }],
+                "usage": {
+                    "prompt_tokens": prompt_tokens,
+                    "completion_tokens": completion_tokens,
+                    "total_tokens": prompt_tokens.saturating_add(completion_tokens),
+                },
+            })
+        };
         let _ = tx_clone.blocking_send(Ok(Event::default().data(done_frame.to_string())));
+
+        // P0.3 — canonical separate usage chunk. Emitted strictly after
+        // the finish chunk and strictly before [DONE], with choices=[]
+        // so clients that match on `choices[0].finish_reason` don't
+        // double-fire.
+        if include_usage {
+            let usage_frame = json!({
+                "id": id_clone,
+                "object": "chat.completion.chunk",
+                "created": created,
+                "model": model_clone,
+                "choices": [],
+                "usage": {
+                    "prompt_tokens": prompt_tokens,
+                    "completion_tokens": completion_tokens,
+                    "total_tokens": prompt_tokens.saturating_add(completion_tokens),
+                },
+            });
+            let _ = tx_clone.blocking_send(Ok(Event::default().data(usage_frame.to_string())));
+        }
+
         if let Err(e) = res {
             let err = json!({ "error": { "message": e.to_string() } });
             let _ = tx_clone.blocking_send(Ok(Event::default().data(err.to_string())));

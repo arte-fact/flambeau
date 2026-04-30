@@ -101,6 +101,25 @@ pub struct ChatCompletionRequest {
     /// tags) and by Aider/Continue/LangChain JSON modes.
     #[serde(default)]
     pub response_format: Option<ResponseFormat>,
+
+    // ---- Streaming options (P0.3) ------------------------------------
+    /// OpenAI `stream_options`. When `include_usage=true`, the server
+    /// emits a final `choices=[]` SSE chunk carrying the `usage` block
+    /// after the finish-reason chunk. This is the canonical OpenAI
+    /// shape that the openai-python SDK and LangChain expect; without
+    /// it, some clients silently drop the `usage` field embedded in
+    /// the finish chunk. Default `None` (no extra chunk).
+    #[serde(default)]
+    pub stream_options: Option<StreamOptions>,
+}
+
+/// OpenAI streaming-options envelope. Today only `include_usage` is
+/// honoured; future fields (e.g., `include_logprobs`) plug in here
+/// without a wire break.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct StreamOptions {
+    #[serde(default)]
+    pub include_usage: Option<bool>,
 }
 
 /// OpenAI-spec response format selector.
@@ -357,6 +376,29 @@ mod tests {
             }
             _ => panic!("expected named tool choice"),
         }
+    }
+
+    #[test]
+    fn stream_options_include_usage_roundtrip() {
+        let wire = r#"{
+            "model":"qwen3.6",
+            "messages":[{"role":"user","content":"hi"}],
+            "stream":true,
+            "stream_options":{"include_usage":true}
+        }"#;
+        let req: ChatCompletionRequest = serde_json::from_str(wire).unwrap();
+        assert!(req.stream);
+        assert_eq!(
+            req.stream_options.as_ref().and_then(|o| o.include_usage),
+            Some(true)
+        );
+    }
+
+    #[test]
+    fn stream_options_missing_is_none() {
+        let wire = r#"{"model":"x","messages":[{"role":"user","content":"hi"}]}"#;
+        let req: ChatCompletionRequest = serde_json::from_str(wire).unwrap();
+        assert!(req.stream_options.is_none());
     }
 
     #[test]
