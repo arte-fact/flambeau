@@ -47,6 +47,32 @@ pub struct GgufTokenizer {
     /// model emits `</think>` after a short answer and then duplicates
     /// the response in a confused-reasoning loop.
     pub always_stop_ids: Vec<u32>,
+    /// **P1.6a** — Fill-in-the-Middle special-token ids, when the
+    /// vocab carries them. `None` for chat-only models. Populated from
+    /// the vocab sweep at load time using each FIM family's canonical
+    /// surface form (Qwen-Coder `<|fim_prefix|>`, StarCoder
+    /// `<fim_prefix>`, DeepSeek `<｜fim▁begin｜>`).
+    pub fim: Option<FimTokens>,
+}
+
+/// Fill-in-the-Middle (FIM) special-token ids for code-completion
+/// models. Convention is: prompt is composed as
+/// `prefix_tok + prefix_text + suffix_tok + suffix_text + middle_tok`
+/// and the model emits the missing middle text terminated by an EOS
+/// token (or, for some models, `<|file_sep|>`).
+///
+/// The optional fields are populated when the vocab carries them and
+/// stay `None` otherwise. `prefix`, `suffix`, `middle` are the only
+/// fields the basic `/infill` flow needs; `pad`, `repo_name`,
+/// `file_sep` are required for repo-aware FIM (Qwen-Coder PSM).
+#[derive(Debug, Clone, Copy)]
+pub struct FimTokens {
+    pub prefix: u32,
+    pub suffix: u32,
+    pub middle: u32,
+    pub pad: Option<u32>,
+    pub repo_name: Option<u32>,
+    pub file_sep: Option<u32>,
 }
 
 impl GgufTokenizer {
@@ -246,6 +272,8 @@ pub fn load_from_gguf(file: &GgufFile) -> Result<GgufTokenizer> {
         }
     }
 
+    let fim = detect_fim_tokens(tokens_arr);
+
     Ok(GgufTokenizer {
         inner: wrapped,
         bos_id,
@@ -254,6 +282,55 @@ pub fn load_from_gguf(file: &GgufFile) -> Result<GgufTokenizer> {
         vocab_size: tokens_arr.len() as u32,
         stop_ids,
         always_stop_ids,
+        fim,
+    })
+}
+
+/// Probe the vocab for FIM special tokens. Returns `None` unless all
+/// three required roles (prefix/suffix/middle) are present.
+///
+/// Surface-form aliases per role cover the families we target:
+/// - Qwen-Coder: `<|fim_prefix|>` / `<|fim_suffix|>` / `<|fim_middle|>`
+/// - StarCoder / Code Llama: `<fim_prefix>` / `<fim_suffix>` / `<fim_middle>`
+/// - DeepSeek-Coder: `<｜fim▁begin｜>` / `<｜fim▁hole｜>` / `<｜fim▁end｜>`
+///   (the pipe is U+FF5C, the separator U+2581).
+fn detect_fim_tokens(tokens_arr: &[crate::gguf::Value]) -> Option<FimTokens> {
+    let first = |aliases: &[&str]| -> Option<u32> {
+        aliases.iter().find_map(|a| find_vocab_id(tokens_arr, a))
+    };
+    let prefix = first(&[
+        "<|fim_prefix|>",
+        "<fim_prefix>",
+        "<｜fim▁begin｜>",
+        "<|fim_begin|>",
+    ])?;
+    let suffix = first(&[
+        "<|fim_suffix|>",
+        "<fim_suffix>",
+        "<｜fim▁hole｜>",
+        "<|fim_hole|>",
+    ])?;
+    let middle = first(&[
+        "<|fim_middle|>",
+        "<fim_middle>",
+        "<｜fim▁end｜>",
+        "<|fim_end|>",
+    ])?;
+    let pad = first(&["<|fim_pad|>", "<fim_pad>"]);
+    let repo_name = first(&["<|repo_name|>", "<reponame>"]);
+    let file_sep = first(&[
+        "<|file_sep|>",
+        "<|file_separator|>",
+        "<file_sep>",
+        "<filename>",
+    ]);
+    Some(FimTokens {
+        prefix,
+        suffix,
+        middle,
+        pad,
+        repo_name,
+        file_sep,
     })
 }
 
@@ -261,6 +338,77 @@ fn find_vocab_id(tokens_arr: &[crate::gguf::Value], needle: &str) -> Option<u32>
     tokens_arr.iter().position(|v| {
         v.as_str().is_some_and(|s| s == needle)
     }).map(|i| i as u32)
+}
+
+#[cfg(test)]
+mod fim_tests {
+    use super::*;
+    use crate::gguf::Value;
+
+    fn vocab(words: &[&str]) -> Vec<Value> {
+        words.iter().map(|w| Value::String((*w).to_string())).collect()
+    }
+
+    #[test]
+    fn detects_qwen_coder_set() {
+        let v = vocab(&[
+            "a", "<|fim_prefix|>", "b", "<|fim_suffix|>", "<|fim_middle|>",
+            "<|fim_pad|>", "<|repo_name|>", "<|file_sep|>",
+        ]);
+        let fim = detect_fim_tokens(&v).expect("fim present");
+        assert_eq!(fim.prefix, 1);
+        assert_eq!(fim.suffix, 3);
+        assert_eq!(fim.middle, 4);
+        assert_eq!(fim.pad, Some(5));
+        assert_eq!(fim.repo_name, Some(6));
+        assert_eq!(fim.file_sep, Some(7));
+    }
+
+    #[test]
+    fn detects_starcoder_set() {
+        let v = vocab(&["<fim_prefix>", "<fim_suffix>", "<fim_middle>", "x"]);
+        let fim = detect_fim_tokens(&v).expect("fim present");
+        assert_eq!((fim.prefix, fim.suffix, fim.middle), (0, 1, 2));
+        assert_eq!(fim.pad, None);
+    }
+
+    #[test]
+    fn detects_deepseek_set() {
+        let v = vocab(&["<｜fim▁begin｜>", "<｜fim▁hole｜>", "<｜fim▁end｜>"]);
+        let fim = detect_fim_tokens(&v).expect("fim present");
+        assert_eq!((fim.prefix, fim.suffix, fim.middle), (0, 1, 2));
+    }
+
+    #[test]
+    fn missing_required_role_yields_none() {
+        let v = vocab(&["<|fim_prefix|>", "<|fim_middle|>"]); // no suffix
+        assert!(detect_fim_tokens(&v).is_none());
+    }
+
+    #[test]
+    fn chat_only_vocab_yields_none() {
+        let v = vocab(&["<|im_start|>", "<|im_end|>", "<|endoftext|>"]);
+        assert!(detect_fim_tokens(&v).is_none());
+    }
+
+    #[test]
+    fn first_alias_wins_within_role() {
+        // Both Qwen-Coder and StarCoder forms present — Qwen wins (listed
+        // first in alias array). Stable selection prevents drift if a
+        // GGUF carries duplicate forms.
+        let v = vocab(&[
+            "<fim_prefix>",
+            "<fim_suffix>",
+            "<fim_middle>",
+            "<|fim_prefix|>",
+            "<|fim_suffix|>",
+            "<|fim_middle|>",
+        ]);
+        let fim = detect_fim_tokens(&v).expect("fim present");
+        assert_eq!(fim.prefix, 3);
+        assert_eq!(fim.suffix, 4);
+        assert_eq!(fim.middle, 5);
+    }
 }
 
 /// Map GGUF `tokenizer.ggml.pre` → concrete pretokenizer. llama.cpp supports

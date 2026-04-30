@@ -29,5 +29,5 @@ pub use dtype::{
 };
 pub use error::{QuantError, Result};
 pub use gguf::{GgufFile, GgufVersion, TensorInfo, Value, ValueType, DEFAULT_ALIGNMENT};
-pub use tokenizer::{load_from_gguf, GgufTokenizer};
+pub use tokenizer::{load_from_gguf, FimTokens, GgufTokenizer};
 pub use chat_template::{ChatMessage, ChatTemplate};
