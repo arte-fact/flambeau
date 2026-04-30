@@ -265,6 +265,16 @@ pub async fn chat_completions(
     );
     // P0.2: parse OpenAI `stop` (string-or-array-of-strings, max 4).
     let stop_strings = parse_stop(req.stop.as_ref());
+    // P1.7 — collect_logprobs is `Some(n)` when the request opts in.
+    // `top_logprobs` implies `logprobs=true`. `logprobs=true` without
+    // an explicit `top_logprobs` defaults to 0 (chosen-token only).
+    let collect_logprobs: Option<u32> = if req.logprobs.unwrap_or(false)
+        || req.top_logprobs.is_some()
+    {
+        Some(req.top_logprobs.unwrap_or(0))
+    } else {
+        None
+    };
     let params = SamplingParams::from_parts(
         req.temperature,
         req.top_p,
@@ -277,6 +287,7 @@ pub async fn chat_completions(
         req.seed,
         json_mode,
         stop_strings,
+        collect_logprobs,
         &state.model_defaults,
     );
 
@@ -348,6 +359,10 @@ pub async fn chat_completions(
     let mut final_content = String::new();
     let mut final_tool_calls: Vec<crate::api::ToolCall> = Vec::new();
     let mut final_finish: String = "stop".into();
+    // P1.7 — logprobs of the FINAL iteration (the one whose text is
+    // surfaced as `choices[0].message.content`). Only populated when
+    // the request opted in.
+    let mut final_logprobs: Option<Vec<ChatLogProbContent>> = None;
     let session_id = request_id("chatcmpl");
 
     for iter in 0..MAX_TOOL_ITERATIONS {
@@ -369,7 +384,7 @@ pub async fn chat_completions(
             );
         }
 
-        let (text, iter_prompt_tokens, iter_completion_tokens, iter_finish) =
+        let (text, iter_prompt_tokens, iter_completion_tokens, iter_finish, iter_logprobs) =
             run_completion(state.clone(), &prompt, params.clone(), relax_stop_mask)
                 .await
                 .map_err(ApiError::internal)?;
@@ -435,6 +450,11 @@ pub async fn chat_completions(
             record_stat(&iter_finish);
             final_content = content;
             final_finish = iter_finish;
+            // P1.7 — only this break path surfaces user-visible text;
+            // the tool-call paths emit JSON tool args without
+            // user-visible content. Logprobs are most useful for the
+            // text path so attach here.
+            final_logprobs = iter_logprobs;
             break;
         }
         if !client_calls.is_empty() {
@@ -538,6 +558,7 @@ pub async fn chat_completions(
                 },
             },
             finish_reason: final_finish,
+            logprobs: final_logprobs.map(|content| ChatLogProbs { content }),
         }],
         usage: Usage {
             prompt_tokens: sum_prompt_tokens,
@@ -596,6 +617,7 @@ pub async fn completions(
         req.seed,
         /*json_mode=*/ false,
         stop_strings,
+        /*collect_logprobs=*/ None,
         &state.model_defaults,
     );
 
@@ -618,7 +640,7 @@ pub async fn completions(
         .map_err(ApiError::internal)?;
         let prompt_tokens = prompt_ids.len() as u32;
         // FIM has no chat template — bypass chat-flavoured stop-mask.
-        let (text, _, completion_tokens, finish) = run_completion_ids(
+        let (text, _, completion_tokens, finish, _) = run_completion_ids(
             state.clone(),
             prompt_ids,
             params,
@@ -635,9 +657,11 @@ pub async fn completions(
             );
         }
         // Legacy path: text-only prompt, chat stop-mask policy.
-        run_completion(state.clone(), &req.prompt, params, /*relax_stop_mask=*/ false)
-            .await
-            .map_err(ApiError::internal)?
+        let (t, p, c, f, _) =
+            run_completion(state.clone(), &req.prompt, params, /*relax_stop_mask=*/ false)
+                .await
+                .map_err(ApiError::internal)?;
+        (t, p, c, f)
     };
 
     Ok(Json(CompletionResponse {
@@ -656,6 +680,90 @@ pub async fn completions(
             total_tokens: prompt_tokens + completion_tokens,
         },
     }))
+}
+
+/// **P1.7** — build one `ChatLogProbContent` entry for a single decoded
+/// step. Calls [`flambeau_runtime::sampling::build_distribution`] to
+/// reproduce the same penalty + temperature + top-k/top-p/min-p
+/// transforms the sampler applied, then extracts the chosen token's
+/// log-probability and the top-`top_n` alternatives.
+///
+/// Returns `None` if the chosen token is outside the post-filter
+/// distribution (defensive — shouldn't happen because the sampler
+/// drew from the same distribution). Logprobs below -100 are clamped
+/// to -100, matching OpenAI's surface.
+fn build_logprob_entry(
+    tokenizer: &flambeau_quant::GgufTokenizer,
+    logits: &[f32],
+    sampling: &flambeau_runtime::Sampling,
+    history: &[u32],
+    chosen: u32,
+    top_n: usize,
+) -> Option<ChatLogProbContent> {
+    use flambeau_runtime::sampling::build_distribution;
+    let dist = build_distribution(logits, sampling, history);
+    if dist.is_empty() {
+        return None;
+    }
+    // Locate the chosen token's prob; if missing (filtered out), the
+    // sampler couldn't have picked it, so skip the entry.
+    let chosen_prob = dist
+        .iter()
+        .find(|(id, _)| *id == chosen)
+        .map(|(_, p)| *p)?;
+    let chosen_logprob = log_clamped(chosen_prob);
+
+    // Top alternatives are already in the front of `dist` if it was
+    // sorted (when filters were active). When filters are off,
+    // `build_distribution` returns an unsorted full-vocab list — sort
+    // a partial copy. Skip the chosen token from the alternatives;
+    // OpenAI-spec lists only OTHER candidates here.
+    let mut alts: Vec<(u32, f32)> = dist
+        .iter()
+        .filter(|(id, _)| *id != chosen)
+        .copied()
+        .collect();
+    if alts.len() > top_n {
+        alts.select_nth_unstable_by(top_n, |a, b| {
+            b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal)
+        });
+        alts.truncate(top_n);
+    }
+    alts.sort_unstable_by(|a, b| {
+        b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal)
+    });
+
+    let chosen_text = tokenizer.decode(&[chosen]).unwrap_or_default();
+    let chosen_bytes = chosen_text.as_bytes().to_vec();
+
+    let top_logprobs: Vec<TopLogProb> = alts
+        .into_iter()
+        .map(|(id, p)| {
+            let t = tokenizer.decode(&[id]).unwrap_or_default();
+            let bytes = t.as_bytes().to_vec();
+            TopLogProb {
+                token: t,
+                logprob: log_clamped(p),
+                bytes,
+            }
+        })
+        .collect();
+
+    Some(ChatLogProbContent {
+        token: chosen_text,
+        logprob: chosen_logprob,
+        bytes: chosen_bytes,
+        top_logprobs,
+    })
+}
+
+/// log(p) clamped to OpenAI's [-100, 0] surface. Zero-prob → -100.
+fn log_clamped(p: f32) -> f32 {
+    if p <= 0.0 {
+        -100.0
+    } else {
+        p.ln().max(-100.0)
+    }
 }
 
 /// Assemble a PSM-shaped FIM token stream from prefix / suffix / middle
@@ -752,6 +860,7 @@ pub async fn infill(
         req.seed,
         /*json_mode=*/ false,
         stop_strings,
+        /*collect_logprobs=*/ None,
         &state.model_defaults,
     );
 
@@ -759,7 +868,7 @@ pub async fn infill(
     // are no `<|im_end|>` markers to mask early. Pass relax_stop_mask
     // so the engine doesn't apply chat-flavoured biases.
     let prompt_tokens = prompt_ids.len() as u32;
-    let (text, _, completion_tokens, finish) =
+    let (text, _, completion_tokens, finish, _) =
         run_completion_ids(state.clone(), prompt_ids, params, /*relax_stop_mask=*/ true)
             .await
             .map_err(ApiError::internal)?;
@@ -1077,12 +1186,16 @@ fn stream_completion_sse(
 /// supplied `tools[]` (T4.1). Tool-call responses are legitimately short
 /// (a JSON blob fits in ~20 tokens); injecting the stop mask forces the
 /// model to pad before emitting `</tool_call>`.
+/// Engine return shape: text, prompt_tokens, completion_tokens,
+/// finish_reason, optional per-token logprobs (P1.7).
+type CompletionOutput = (String, u32, u32, String, Option<Vec<ChatLogProbContent>>);
+
 async fn run_completion(
     state: SharedState,
     prompt: &str,
     params: SamplingParams,
     relax_stop_mask: bool,
-) -> Result<(String, u32, u32, String)> {
+) -> Result<CompletionOutput> {
     let prompt = prompt.to_owned();
     tokio::task::spawn_blocking(move || {
         let ids = state
@@ -1105,7 +1218,7 @@ async fn run_completion_ids(
     prompt_ids: Vec<u32>,
     params: SamplingParams,
     relax_stop_mask: bool,
-) -> Result<(String, u32, u32, String)> {
+) -> Result<CompletionOutput> {
     tokio::task::spawn_blocking(move || {
         run_completion_blocking_ids(state, prompt_ids, params, relax_stop_mask)
     })
@@ -1118,7 +1231,7 @@ fn run_completion_blocking_ids(
     prompt_ids: Vec<u32>,
     params: SamplingParams,
     relax_stop_mask: bool,
-) -> Result<(String, u32, u32, String)> {
+) -> Result<CompletionOutput> {
     let request_start = Instant::now();
 
     // Serialise: one forward at a time through this server instance.
@@ -1218,6 +1331,35 @@ fn run_completion_blocking_ids(
         "first token produced (time-to-first-token)"
     );
 
+    // **P1.7** — accumulate logprobs when the request opted in AND
+    // the path supports it (host sampler only; GPU sampler / spec-
+    // decode silently disable). `top_logprobs` may be 0 → just the
+    // chosen token's logprob.
+    let mut logprobs_acc: Option<Vec<ChatLogProbContent>> =
+        if params.collect_logprobs.is_some() && !use_gpu_sampler {
+            Some(Vec::with_capacity(params.max_tokens as usize))
+        } else {
+            if params.collect_logprobs.is_some() {
+                tracing::warn!(
+                    target: "server.logprobs",
+                    "logprobs requested but path is GPU sampler — returning null logprobs"
+                );
+            }
+            None
+        };
+    if let Some(lp) = logprobs_acc.as_mut() {
+        if let Some(entry) = build_logprob_entry(
+            &state.tokenizer,
+            &logits_buf,
+            sampling,
+            &[],
+            first_next,
+            params.collect_logprobs.unwrap_or(0) as usize,
+        ) {
+            lp.push(entry);
+        }
+    }
+
     let mut generated: Vec<u32> = Vec::with_capacity(params.max_tokens as usize);
     let is_stop = |t: u32| stop_ids.contains(&t);
 
@@ -1241,7 +1383,7 @@ fn run_completion_blocking_ids(
         inflight
             .dispose(cluster, model)
             .context("dispose inflight (early-stop)")?;
-        return finalise(&state, prompt_tokens, generated, "stop", &params.stop_strings);
+        return finalise(&state, prompt_tokens, generated, "stop", &params.stop_strings, logprobs_acc);
     }
 
     let mut finish_reason = "length";
@@ -1449,7 +1591,21 @@ fn run_completion_blocking_ids(
                 // Pass `generated` as history so penalties can fire on
                 // repeats / frequent tokens. T4.b.2 — without this,
                 // Qwen3.5/3.6 agent loops degrade to long-CoT drift.
-                sampler.sample(&logits_buf, sampling, &generated)
+                let next = sampler.sample(&logits_buf, sampling, &generated);
+                // P1.7 — collect per-token logprobs (host path only).
+                if let Some(lp) = logprobs_acc.as_mut() {
+                    if let Some(entry) = build_logprob_entry(
+                        &state.tokenizer,
+                        &logits_buf,
+                        sampling,
+                        &generated,
+                        next,
+                        params.collect_logprobs.unwrap_or(0) as usize,
+                    ) {
+                        lp.push(entry);
+                    }
+                }
+                next
             };
             // P0.1 — advance JSON state with the chosen token's bytes.
             if let Some(js) = json_state.as_mut() {
@@ -1524,7 +1680,14 @@ fn run_completion_blocking_ids(
         "completion request finished"
     );
 
-    let result = finalise(&state, prompt_tokens, generated, finish_reason, &params.stop_strings)?;
+    let result = finalise(
+        &state,
+        prompt_tokens,
+        generated,
+        finish_reason,
+        &params.stop_strings,
+        logprobs_acc,
+    )?;
     // Sampler-G debug — emit the completed response text (head + tail
     // preview) so we can correlate request shape with what the model
     // actually produced. Truncated to 240 chars on each end so the
@@ -1967,13 +2130,40 @@ fn finalise(
     mut generated: Vec<u32>,
     reason: &str,
     stop_strings: &[String],
-) -> Result<(String, u32, u32, String)> {
+    mut logprobs: Option<Vec<ChatLogProbContent>>,
+) -> Result<CompletionOutput> {
     // Strip ALL stop tokens (eos, <|im_end|>, etc.) from decoded text so the
     // client sees clean content. Raw count preserved for `usage` honesty.
     // C6: `retain` mutates in place instead of allocating a second Vec.
     let stop_ids = &state.tokenizer.stop_ids;
     let completion_tokens = generated.len() as u32;
-    generated.retain(|t| !stop_ids.contains(t));
+    // P1.7 — when logprobs were collected, drop entries that line up
+    // with stop-token positions so the per-token list mirrors the
+    // text-content `retain` filter.
+    if let Some(lp) = logprobs.as_mut() {
+        if lp.len() == generated.len() {
+            let mut idx = 0;
+            generated.retain(|t| {
+                let keep = !stop_ids.contains(t);
+                if !keep {
+                    if idx < lp.len() {
+                        lp.remove(idx);
+                    }
+                } else {
+                    idx += 1;
+                }
+                keep
+            });
+        } else {
+            // Length mismatch — keep the original retain semantics for
+            // text and clear logprobs to avoid a misleading partial
+            // mapping (should never happen in practice).
+            generated.retain(|t| !stop_ids.contains(t));
+            lp.clear();
+        }
+    } else {
+        generated.retain(|t| !stop_ids.contains(t));
+    }
     let mut text = state.tokenizer.decode(&generated).context("decode")?;
     // **Sampler-G** — truncate at any leaked reasoning marker. The
     // string-level stop in the decode loop catches these mid-flight,
@@ -2000,7 +2190,7 @@ fn finalise(
     // Trim trailing whitespace introduced by the now-removed marker.
     let trimmed_len = text.trim_end().len();
     text.truncate(trimmed_len);
-    Ok((text, prompt_tokens, completion_tokens, reason.to_owned()))
+    Ok((text, prompt_tokens, completion_tokens, reason.to_owned(), logprobs))
 }
 
 fn request_id(prefix: &str) -> String {

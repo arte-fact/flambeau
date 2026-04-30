@@ -102,6 +102,20 @@ pub struct ChatCompletionRequest {
     #[serde(default)]
     pub response_format: Option<ResponseFormat>,
 
+    // ---- Logprobs (P1.7) ---------------------------------------------
+    /// OpenAI `logprobs`: when `true`, the response carries the
+    /// per-token log-probability of every generated token. Default
+    /// `false`. V1 implementation is non-streaming, host-path-only:
+    /// requests on the GPU sampler path or spec-decode path silently
+    /// return `null` with a warn-once log.
+    #[serde(default)]
+    pub logprobs: Option<bool>,
+    /// OpenAI `top_logprobs`: number of top alternative tokens to
+    /// return per generated step. 0..20. Capped at 20 by OpenAI; we
+    /// cap at the same value. Implies `logprobs=true`.
+    #[serde(default)]
+    pub top_logprobs: Option<u32>,
+
     // ---- Streaming options (P0.3) ------------------------------------
     /// OpenAI `stream_options`. When `include_usage=true`, the server
     /// emits a final `choices=[]` SSE chunk carrying the `usage` block
@@ -264,6 +278,36 @@ pub struct ChatChoice {
     /// OpenAI `finish_reason`. Valid values today: `"stop"`, `"length"`,
     /// and — with T2.5 wired — `"tool_calls"`.
     pub finish_reason: String,
+    /// **P1.7** — per-token log-probabilities. `None` when the request
+    /// did not enable logprobs, or when the path didn't support them
+    /// (GPU sampler, spec-decode). Skipped from JSON when `None`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub logprobs: Option<ChatLogProbs>,
+}
+
+/// OpenAI `choices[*].logprobs` envelope.
+#[derive(Debug, Clone, Serialize)]
+pub struct ChatLogProbs {
+    pub content: Vec<ChatLogProbContent>,
+}
+
+/// One entry per generated token. `bytes` carries the UTF-8 byte
+/// sequence of the token (or the byte-fallback bytes for unrenderable
+/// tokens — same shape OpenAI emits for tiktoken's byte-level BPE).
+#[derive(Debug, Clone, Serialize)]
+pub struct ChatLogProbContent {
+    pub token: String,
+    pub logprob: f32,
+    pub bytes: Vec<u8>,
+    pub top_logprobs: Vec<TopLogProb>,
+}
+
+/// One alternative token at a generation step.
+#[derive(Debug, Clone, Serialize)]
+pub struct TopLogProb {
+    pub token: String,
+    pub logprob: f32,
+    pub bytes: Vec<u8>,
 }
 
 // ---- /v1/completions -------------------------------------------------------
@@ -496,6 +540,72 @@ mod tests {
         }"#;
         let req: InfillRequest = serde_json::from_str(wire).unwrap();
         assert_eq!(req.prompt.as_deref(), Some("x"));
+    }
+
+    #[test]
+    fn logprobs_request_fields_parse() {
+        let wire = r#"{
+            "model":"x","messages":[{"role":"user","content":"hi"}],
+            "logprobs":true,"top_logprobs":5
+        }"#;
+        let req: ChatCompletionRequest = serde_json::from_str(wire).unwrap();
+        assert_eq!(req.logprobs, Some(true));
+        assert_eq!(req.top_logprobs, Some(5));
+    }
+
+    #[test]
+    fn logprobs_omitted_means_off() {
+        let wire = r#"{"messages":[{"role":"user","content":"hi"}]}"#;
+        let req: ChatCompletionRequest = serde_json::from_str(wire).unwrap();
+        assert_eq!(req.logprobs, None);
+        assert_eq!(req.top_logprobs, None);
+    }
+
+    #[test]
+    fn chat_choice_omits_logprobs_when_none() {
+        let choice = ChatChoice {
+            index: 0,
+            message: ChatMessage {
+                role: "assistant".into(),
+                content: Some("hi".into()),
+                tool_call_id: None,
+                tool_calls: None,
+            },
+            finish_reason: "stop".into(),
+            logprobs: None,
+        };
+        let s = serde_json::to_string(&choice).unwrap();
+        assert!(!s.contains("logprobs"));
+    }
+
+    #[test]
+    fn chat_choice_serialises_logprobs_when_present() {
+        let choice = ChatChoice {
+            index: 0,
+            message: ChatMessage {
+                role: "assistant".into(),
+                content: Some("hi".into()),
+                tool_call_id: None,
+                tool_calls: None,
+            },
+            finish_reason: "stop".into(),
+            logprobs: Some(ChatLogProbs {
+                content: vec![ChatLogProbContent {
+                    token: "h".into(),
+                    logprob: -0.5,
+                    bytes: vec![104],
+                    top_logprobs: vec![TopLogProb {
+                        token: "H".into(),
+                        logprob: -1.2,
+                        bytes: vec![72],
+                    }],
+                }],
+            }),
+        };
+        let s = serde_json::to_string(&choice).unwrap();
+        assert!(s.contains("\"logprobs\""));
+        assert!(s.contains("\"token\":\"h\""));
+        assert!(s.contains("\"top_logprobs\""));
     }
 
     #[test]

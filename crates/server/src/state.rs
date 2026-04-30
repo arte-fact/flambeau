@@ -22,6 +22,12 @@ pub struct SamplingParams {
     /// reasoning-marker stop) and cut decoding when matched. The stop
     /// sequence itself is stripped from the final text in `finalise`.
     pub stop_strings: Vec<String>,
+    /// **P1.7** — when `Some(n)`, the decode loop collects per-token
+    /// log-probabilities + the top-`n` alternatives. `None` means no
+    /// collection (the OpenAI default). Range 0..=20, capped at the
+    /// boundary. V1 implementation is non-streaming, host-sampler-only;
+    /// other paths silently return `None` with a warn-once log.
+    pub collect_logprobs: Option<u32>,
 }
 
 /// Model-side recommended sampling defaults read from GGUF metadata
@@ -93,6 +99,7 @@ impl SamplingParams {
         seed: Option<u64>,
         json_mode: bool,
         stop_strings: Vec<String>,
+        collect_logprobs: Option<u32>,
         defaults: &ModelDefaults,
     ) -> Self {
         // Resolution order: explicit OpenAI request → GGUF model
@@ -134,6 +141,7 @@ impl SamplingParams {
             max_tokens: max_tokens.unwrap_or(4096).min(8192),
             json_mode,
             stop_strings,
+            collect_logprobs: collect_logprobs.map(|n| n.min(20)),
         }
     }
 }
@@ -211,7 +219,7 @@ mod tests {
     fn p04_json_mode_no_explicit_temp_clamps_to_low() {
         let p = SamplingParams::from_parts(
             None, None, None, None, None, None, None, None, None,
-            /*json_mode=*/ true, vec![], &defaults_none(),
+            /*json_mode=*/ true, vec![], None, &defaults_none(),
         );
         assert!((p.sampling.temperature - 0.2).abs() < 1e-6);
     }
@@ -220,7 +228,7 @@ mod tests {
     fn p04_json_mode_explicit_temp_wins() {
         let p = SamplingParams::from_parts(
             Some(0.9), None, None, None, None, None, None, None, None,
-            /*json_mode=*/ true, vec![], &defaults_none(),
+            /*json_mode=*/ true, vec![], None, &defaults_none(),
         );
         assert!((p.sampling.temperature - 0.9).abs() < 1e-6);
     }
@@ -229,7 +237,7 @@ mod tests {
     fn p04_non_json_mode_keeps_default() {
         let p = SamplingParams::from_parts(
             None, None, None, None, None, None, None, None, None,
-            /*json_mode=*/ false, vec![], &defaults_none(),
+            /*json_mode=*/ false, vec![], None, &defaults_none(),
         );
         assert!((p.sampling.temperature - 1.0).abs() < 1e-6);
     }
@@ -238,7 +246,7 @@ mod tests {
     fn p04_json_mode_explicit_zero_temp_stays_greedy() {
         let p = SamplingParams::from_parts(
             Some(0.0), None, None, None, None, None, None, None, None,
-            /*json_mode=*/ true, vec![], &defaults_none(),
+            /*json_mode=*/ true, vec![], None, &defaults_none(),
         );
         assert!(p.sampling.temperature.abs() < 1e-6);
     }
