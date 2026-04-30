@@ -775,6 +775,17 @@ pub async fn chat_completions(
 
         let (content, mut tool_calls) = {
             use crate::tool_call_parser::{dispatcher, split_events, ParserEvent};
+            // Debug: dump raw model text when FLAMBEAU_DEBUG_TOOL_RAW=1, so we
+            // can see what the parser is consuming. Useful for diagnosing
+            // parser-vs-model issues on multi-tool prompts.
+            if std::env::var("FLAMBEAU_DEBUG_TOOL_RAW").is_ok() {
+                tracing::info!(
+                    target: "server.tool_raw",
+                    bytes = text.len(),
+                    text_dbg = ?text,
+                    "raw model text before tool-call parser"
+                );
+            }
             let mut parser = dispatcher(
                 req.tool_call_format.as_deref(),
                 state.tool_call_format_default,

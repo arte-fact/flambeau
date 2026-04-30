@@ -340,25 +340,89 @@ impl QwenCoderXmlParser {
     }
 
     fn step_awaiting_close(&mut self, out: &mut Vec<ParserEvent>) -> bool {
-        let Some(pos) = self.buf.find("</tool_call>") else {
+        // Find the earliest of: `</tool_call>`, `<function=`, or
+        // `<parameter=`. Well-formed input has `</tool_call>` first;
+        // the latter two are forgiveness for malformed multi-call
+        // outputs that Qwen3.6-35B-A3B emits when asked for parallel
+        // calls — it forgets to close `</tool_call>` between them
+        // (sometimes also forgetting to re-emit `<function=NAME>`
+        // and just running new `<parameter=...>` blocks).
+        let close_pos = self.buf.find("</tool_call>");
+        let func_pos = self.buf.find("<function=");
+        let param_pos = self.buf.find("<parameter=");
+        // Pick the earliest tag.
+        let earliest = [
+            close_pos.map(|p| (p, "close")),
+            func_pos.map(|p| (p, "func")),
+            param_pos.map(|p| (p, "param")),
+        ]
+        .into_iter()
+        .flatten()
+        .min_by_key(|(p, _)| *p);
+        let Some((pos, kind)) = earliest else {
             return false;
         };
         if pos > 0 {
-            // Whitespace between `</function>` and `</tool_call>` —
+            // Whitespace between `</function>` and the next tag —
             // silent drain.
             self.buf.drain(..pos);
         }
-        self.buf.drain(.."</tool_call>".len());
-        // No speculative `\n` drain: any `\n` after `</tool_call>`
-        // surfaces as a `TextDelta("\n")` in Text state. Same behaviour
-        // in one-shot and byte-by-byte (load-bearing streaming-
-        // equivalence invariant).
-        out.push(ParserEvent::ToolCallClose {
-            index: self.next_index,
-        });
-        self.next_index += 1;
-        self.state = State::Text;
-        true
+        match kind {
+            "close" => {
+                self.buf.drain(.."</tool_call>".len());
+                // No speculative `\n` drain: any `\n` after `</tool_call>`
+                // surfaces as a `TextDelta("\n")` in Text state. Same
+                // behaviour in one-shot and byte-by-byte (load-bearing
+                // streaming-equivalence invariant).
+                out.push(ParserEvent::ToolCallClose {
+                    index: self.next_index,
+                });
+                self.next_index += 1;
+                self.state = State::Text;
+                true
+            }
+            "func" => {
+                // **Forgiveness**: model forgot `</tool_call>` and went
+                // straight into another `<function=NAME>`. Implicit close
+                // of the prior call, then transition into `InToolCall`
+                // (which expects `<function=NAME>`).
+                out.push(ParserEvent::ToolCallClose {
+                    index: self.next_index,
+                });
+                self.next_index += 1;
+                // Don't drain `<function=` — `step_in_tool_call` does it.
+                self.state = State::InToolCall;
+                true
+            }
+            "param" => {
+                // **Forgiveness**: model forgot both `</tool_call>` and
+                // `<function=NAME>`, just emitted another
+                // `<parameter=...>` block. Treat as a continuation call
+                // with the SAME function name as the prior call. Implicit
+                // close + reopen with same name.
+                out.push(ParserEvent::ToolCallClose {
+                    index: self.next_index,
+                });
+                self.next_index += 1;
+                let name = self.current_name.clone();
+                if name.is_empty() {
+                    // Defensive: we shouldn't reach `AwaitingToolCallClose`
+                    // without `current_name` set (it's set by
+                    // `step_in_tool_call`). If somehow empty, drop the
+                    // continuation as text.
+                    return false;
+                }
+                out.push(ParserEvent::ToolCallOpen {
+                    index: self.next_index,
+                    name,
+                });
+                // Don't drain `<parameter=` — `step_in_function_body`
+                // handles it from `InFunctionBody`.
+                self.state = State::InFunctionBody;
+                true
+            }
+            _ => unreachable!("kind comes from a fixed set"),
+        }
     }
 }
 
@@ -783,6 +847,58 @@ mod tests {
             collect_think(&evts).contains("partial reasoning with no close"),
             "evts={evts:?}"
         );
+    }
+
+    #[test]
+    fn forgiving_continuation_implicit_function_reopen() {
+        // **Real Qwen3.6-35B-A3B output**: model declares the
+        // function ONCE then runs `<parameter></function>` blocks for
+        // each successive call without re-emitting `<function=NAME>`
+        // and without `</tool_call>` between them. Parser leniency:
+        // treat each subsequent `<parameter=...>` after `</function>`
+        // as a continuation call with the SAME function name.
+        let input = concat!(
+            "<tool_call>\n",
+            "<function=get_weather>\n",
+            "<parameter=city>\nParis\n</parameter>\n</function>\n",
+            "<parameter=city>\nTokyo\n</parameter>\n</function>\n",
+            "<parameter=city>\nLondon\n</parameter>\n</function>",
+        );
+        let evts = parse_all(input);
+        let opens = collect_opens(&evts);
+        assert_eq!(opens.len(), 3, "expected 3 calls (Paris/Tokyo/London), got opens={opens:?}");
+        for (i, (_, name)) in opens.iter().enumerate() {
+            assert_eq!(name, "get_weather", "open #{i} name should be get_weather");
+        }
+        let args = collect_args_strings(&evts);
+        assert_eq!(args.len(), 3);
+        assert_eq!(args[0].1, r#"{"city":"Paris"}"#);
+        assert_eq!(args[1].1, r#"{"city":"Tokyo"}"#);
+        assert_eq!(args[2].1, r#"{"city":"London"}"#);
+    }
+
+    #[test]
+    fn forgiving_continuation_implicit_tool_call_close_with_new_function() {
+        // Variant: model emits multiple `<function=NAME>` blocks inside
+        // a single `<tool_call>` (forgetting `</tool_call>` between).
+        // Parser should treat each new `<function=NAME>` as an implicit
+        // close + reopen.
+        let input = concat!(
+            "<tool_call>\n",
+            "<function=get_weather>\n<parameter=city>\nParis\n</parameter>\n</function>\n",
+            "<function=get_population>\n<parameter=city>\nTokyo\n</parameter>\n</function>\n",
+            "</tool_call>",
+        );
+        let evts = parse_all(input);
+        let opens = collect_opens(&evts);
+        assert_eq!(
+            opens,
+            vec![(0, "get_weather".into()), (1, "get_population".into())],
+            "evts={evts:?}"
+        );
+        let args = collect_args_strings(&evts);
+        assert_eq!(args[0].1, r#"{"city":"Paris"}"#);
+        assert_eq!(args[1].1, r#"{"city":"Tokyo"}"#);
     }
 
     #[test]
