@@ -116,14 +116,37 @@ impl Inflight {
     /// `prompt_len` sizes the PP prefill scratch; ignored for TP (TP
     /// loops `forward_one_token_tp` over the prompt instead).
     pub fn new(model: &LoadedModel, cluster: &HipCluster, prompt_len: usize) -> Result<Self> {
+        // **leak fix** — every alloc step here that ships a fresh GPU
+        // resource must roll back the prior steps' GPU resources on
+        // failure. Without this, an OOM in a downstream alloc (the
+        // common case under long-context prompts) drops the
+        // already-built earlier resource via its `Drop` impl, which
+        // only WARNS and leaves the device buffers pinned until
+        // process exit. One failed request used to lose ~3 GB of
+        // VRAM on each rank.
         match model {
             LoadedModel::Pp { model: m, .. } => {
                 let session =
                     Qwen3MoEShardedSession::new(m, cluster).context("create PP session")?;
-                let prefill = ShardedForwardPrefillScratch::new(m, cluster, prompt_len.max(1))
-                    .context("PP prefill scratch")?;
-                let decode = ShardedForwardOneTokenScratch::new(m, cluster)
-                    .context("PP decode scratch")?;
+                let prefill = match ShardedForwardPrefillScratch::new(
+                    m,
+                    cluster,
+                    prompt_len.max(1),
+                ) {
+                    Ok(s) => s,
+                    Err(e) => {
+                        let _ = session.dispose(cluster);
+                        return Err(e).context("PP prefill scratch");
+                    }
+                };
+                let decode = match ShardedForwardOneTokenScratch::new(m, cluster) {
+                    Ok(s) => s,
+                    Err(e) => {
+                        let _ = prefill.dispose(cluster);
+                        let _ = session.dispose(cluster);
+                        return Err(e).context("PP decode scratch");
+                    }
+                };
                 Ok(Inflight::Pp {
                     session,
                     prefill,
@@ -133,8 +156,16 @@ impl Inflight {
             LoadedModel::Tp { model, .. } => {
                 let session =
                     Qwen3MoETpSession::new(model, cluster).context("create TP session")?;
-                let decode = ShardedForwardOneTokenScratchTp::new(&model.config, cluster)
-                    .context("TP decode scratch")?;
+                let decode = match ShardedForwardOneTokenScratchTp::new(
+                    &model.config,
+                    cluster,
+                ) {
+                    Ok(s) => s,
+                    Err(e) => {
+                        let _ = session.dispose(cluster);
+                        return Err(e).context("TP decode scratch");
+                    }
+                };
                 Ok(Inflight::Tp { session, decode })
             }
             LoadedModel::Hybrid { model, .. } => {
@@ -144,8 +175,13 @@ impl Inflight {
                 // needed — sub-clusters live inside `model.stages`).
                 let session = Qwen3MoEHybridSession::new(model)
                     .context("create hybrid session")?;
-                let decode = ShardedForwardOneTokenScratchHybrid::new(model)
-                    .context("hybrid decode scratch")?;
+                let decode = match ShardedForwardOneTokenScratchHybrid::new(model) {
+                    Ok(s) => s,
+                    Err(e) => {
+                        let _ = session.dispose(model);
+                        return Err(e).context("hybrid decode scratch");
+                    }
+                };
                 Ok(Inflight::Hybrid { session, decode })
             }
         }
