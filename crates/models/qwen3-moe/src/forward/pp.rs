@@ -23,8 +23,8 @@ use flambeau_ops::hip::HipDevice;
 
 use super::{
     argmax_token_host, download_logits_host, forward_embed_decode_host, forward_layer_decode,
-    forward_layer_prefill, forward_output_head_decode, LayerForwardScratch, LayerPrefillScratch,
-    OutputHeadScratch,
+    forward_layer_prefill, forward_output_head_decode, GdnScratch, LayerForwardScratch,
+    LayerPrefillScratch, OutputHeadScratch,
 };
 use crate::session::LayerCache;
 
@@ -869,6 +869,15 @@ pub struct RankForwardPrefillScratch {
     /// use by `Qwen3MoEShardedSession::redo_gdn_only_pp` on spec-decode
     /// reject. `Some(ptr)` for GDN layers, `None` for full-attn layers.
     pub gdn_input_snapshots: Vec<Option<DevicePtr>>,
+    /// **P2.9b-i2-A1-wire** — one shared `GdnScratch` (single-token decode
+    /// workspace) for the batched-decode driver's per-slot GDN loop. GDN
+    /// is recurrent so it can't be batched across slots; the batched
+    /// driver loops slots calling `forward_gdn_layer_decode` and reusing
+    /// this single scratch sequentially. `None` on archs without GDN.
+    /// Only populated when `cfg.gdn.is_some()`; carried alongside the
+    /// `LayerPrefillScratch.gdn` (which is the prefill workspace for one
+    /// state evolving through L tokens — different shape).
+    pub gdn_decode: Option<GdnScratch>,
     hidden_bytes: usize,
     /// Size of one snapshot row = `hidden_size * 2` (F16). Per-rank
     /// constant; cached for the dispose path.
@@ -924,6 +933,9 @@ impl RankForwardPrefillScratch {
             lane.dispose(device)?;
         }
         if let Some(s) = self.output_head.take() {
+            s.dispose(device)?;
+        }
+        if let Some(s) = self.gdn_decode.take() {
             s.dispose(device)?;
         }
         Ok(())
@@ -1043,6 +1055,15 @@ impl ShardedForwardPrefillScratch {
                     gdn_input_snapshots.push(None);
                 }
             }
+            // **P2.9b-i2-A1-wire** — shared single-token GDN decode scratch
+            // for the batched-decode driver's per-slot GDN loop. Allocated
+            // only on archs with GDN (qwen35moe / qwen36moe hybrids); pure
+            // full-attn arches (qwen3moe) leave it `None`.
+            let gdn_decode = if model.config.gdn.is_some() {
+                Some(GdnScratch::new(&model.config, device)?)
+            } else {
+                None
+            };
             per_rank.push(RankForwardPrefillScratch {
                 rank: flambeau_runtime::RankId(rank_idx as u32),
                 device_id: device.id(),
@@ -1053,6 +1074,7 @@ impl ShardedForwardPrefillScratch {
                 output_head,
                 extra_lanes,
                 gdn_input_snapshots,
+                gdn_decode,
                 hidden_bytes,
                 snapshot_row_bytes,
                 disposed: false,

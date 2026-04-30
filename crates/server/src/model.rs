@@ -574,6 +574,19 @@ pub fn decode_logits(
     position: usize,
     logits_out: &mut Vec<f32>,
 ) -> Result<()> {
+    // **P2.9b-i2-A1-wire** — opt-in batched decode path. PP-only for
+    // now; falls through to the legacy single-slot path on TP / Hybrid.
+    // i2-B's scheduler will dispatch this with N>1 slots; here it runs
+    // the new code path at N=1 to validate end-to-end.
+    if std::env::var("FLAMBEAU_BATCHED_DECODE").is_ok() {
+        if let LoadedModel::Pp { .. } = model {
+            return decode_logits_batched_single(
+                model, cluster, inflight, token, position, logits_out,
+            );
+        }
+        // TP / Hybrid: fall through to legacy decode (i2-C / i2-D
+        // extend the batched path to those topologies).
+    }
     match (model, inflight) {
         (
             LoadedModel::Pp { model: m, .. },
@@ -613,6 +626,51 @@ pub fn decode_logits(
         )
         .context("hybrid decode_logits"),
         _ => bail!("LoadedModel/Inflight variant mismatch"),
+    }
+}
+
+/// **P2.9b-i2-A1-wire** — single-slot batched-decode entry point.
+///
+/// Routes one decode token through `forward_decode_batched_pp` (the new
+/// per-layer batched driver) instead of `forward_one_token_pp_logits`
+/// (the legacy per-slot path). Used by the server when
+/// `FLAMBEAU_BATCHED_DECODE=1` to validate the batched code path on
+/// single-user traffic before the i2-B scheduler ships multi-slot
+/// aggregation.
+///
+/// PP only — TP / Hybrid extensions are tracked as i2-C / i2-D.
+pub fn decode_logits_batched_single(
+    model: &LoadedModel,
+    cluster: &HipCluster,
+    inflight: &mut Inflight,
+    token: u32,
+    position: usize,
+    logits_out: &mut Vec<f32>,
+) -> Result<()> {
+    use flambeau_qwen3_moe::forward::{forward_decode_batched_pp, BatchSlot};
+    match (model, inflight) {
+        (
+            LoadedModel::Pp { model: m, .. },
+            Inflight::Pp { session, prefill, .. },
+        ) => {
+            let slots = [BatchSlot {
+                idx: 0,
+                token_id: token,
+                position,
+            }];
+            // Single mutable session reborrowed into a 1-element slice.
+            let sessions: &mut [&mut flambeau_qwen3_moe::Qwen3MoEShardedSession] =
+                &mut [&mut *session];
+            // Single mutable logits buffer reborrowed into a 1-element
+            // slice — same pattern as `sessions`.
+            let logits: &mut [&mut Vec<f32>] = &mut [logits_out];
+            forward_decode_batched_pp(m, sessions, cluster, prefill, &slots, logits)
+                .context("PP decode_logits_batched_single")
+        }
+        _ => bail!(
+            "decode_logits_batched_single: only PP topology supported in i2-A1-wire \
+             (TP=#264, Hybrid=#265)"
+        ),
     }
 }
 
