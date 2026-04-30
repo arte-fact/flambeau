@@ -100,9 +100,22 @@ impl SamplingParams {
         // is a documented greedy override and must NOT fall back to
         // the model default — that would surprise a caller who
         // explicitly asked for greedy.
-        let temperature = temperature
-            .or(defaults.temperature)
-            .unwrap_or(1.0);
+        //
+        // **P0.4** — auto-low-temp for tool-router / structured-output
+        // meta-prompts. OpenWebUI's auto-prompts (search-query-gen,
+        // follow-ups, title, tags) and Aider/Continue/LangChain JSON
+        // modes all set `response_format`. At default temperature
+        // these reliably hallucinate (non-existent search hits, made-
+        // up file names, fake tool args). Clamp to 0.2 for JSON-mode
+        // turns where the caller did NOT set temperature explicitly;
+        // an explicit request value always wins so a power user can
+        // opt out per-call by passing any temperature.
+        let request_set_temp = temperature.is_some();
+        let temperature = if json_mode && !request_set_temp {
+            0.2
+        } else {
+            temperature.or(defaults.temperature).unwrap_or(1.0)
+        };
         let top_p = top_p.or(defaults.top_p).filter(|p| *p < 1.0 && *p > 0.0);
         let top_k = top_k.or(defaults.top_k).filter(|k| *k > 0);
         let min_p = min_p.or(defaults.min_p).filter(|m| *m > 0.0);
@@ -188,6 +201,46 @@ mod tests {
     fn parse_stop_other_kinds_yield_empty() {
         assert!(parse_stop(Some(&json!(42))).is_empty());
         assert!(parse_stop(Some(&json!({"k": "v"}))).is_empty());
+    }
+
+    fn defaults_none() -> ModelDefaults {
+        ModelDefaults::default()
+    }
+
+    #[test]
+    fn p04_json_mode_no_explicit_temp_clamps_to_low() {
+        let p = SamplingParams::from_parts(
+            None, None, None, None, None, None, None, None, None,
+            /*json_mode=*/ true, vec![], &defaults_none(),
+        );
+        assert!((p.sampling.temperature - 0.2).abs() < 1e-6);
+    }
+
+    #[test]
+    fn p04_json_mode_explicit_temp_wins() {
+        let p = SamplingParams::from_parts(
+            Some(0.9), None, None, None, None, None, None, None, None,
+            /*json_mode=*/ true, vec![], &defaults_none(),
+        );
+        assert!((p.sampling.temperature - 0.9).abs() < 1e-6);
+    }
+
+    #[test]
+    fn p04_non_json_mode_keeps_default() {
+        let p = SamplingParams::from_parts(
+            None, None, None, None, None, None, None, None, None,
+            /*json_mode=*/ false, vec![], &defaults_none(),
+        );
+        assert!((p.sampling.temperature - 1.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn p04_json_mode_explicit_zero_temp_stays_greedy() {
+        let p = SamplingParams::from_parts(
+            Some(0.0), None, None, None, None, None, None, None, None,
+            /*json_mode=*/ true, vec![], &defaults_none(),
+        );
+        assert!(p.sampling.temperature.abs() < 1e-6);
     }
 }
 
