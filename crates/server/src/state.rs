@@ -15,6 +15,13 @@ pub struct SamplingParams {
     /// by the OpenAI `response_format: {"type":"json_object"}` request
     /// field. Default `false` (free-form text).
     pub json_mode: bool,
+    /// **P0.2** — caller-provided stop sequences. OpenAI accepts a
+    /// string or an array of up to 4 strings; parsed at the request
+    /// boundary into a `Vec<String>`. Decode loops detect each on the
+    /// running emitted text (string-level, identical mechanism to the
+    /// reasoning-marker stop) and cut decoding when matched. The stop
+    /// sequence itself is stripped from the final text in `finalise`.
+    pub stop_strings: Vec<String>,
 }
 
 /// Model-side recommended sampling defaults read from GGUF metadata
@@ -85,6 +92,7 @@ impl SamplingParams {
         max_tokens: Option<u32>,
         seed: Option<u64>,
         json_mode: bool,
+        stop_strings: Vec<String>,
         defaults: &ModelDefaults,
     ) -> Self {
         // Resolution order: explicit OpenAI request → GGUF model
@@ -112,7 +120,74 @@ impl SamplingParams {
             seed: seed.unwrap_or_else(default_seed),
             max_tokens: max_tokens.unwrap_or(4096).min(8192),
             json_mode,
+            stop_strings,
         }
+    }
+}
+
+/// Parse the OpenAI `stop` field. Accepts:
+/// - `null` / missing → empty
+/// - a single string → one-element vec
+/// - an array of strings → first 4 non-empty entries
+///
+/// OpenAI caps the array at 4 entries; longer arrays are truncated rather
+/// than rejected so a misconfigured client gets a usable response.
+pub fn parse_stop(stop: Option<&serde_json::Value>) -> Vec<String> {
+    let Some(v) = stop else { return Vec::new() };
+    match v {
+        serde_json::Value::String(s) if !s.is_empty() => vec![s.clone()],
+        serde_json::Value::Array(arr) => arr
+            .iter()
+            .filter_map(|x| x.as_str())
+            .filter(|s| !s.is_empty())
+            .take(4)
+            .map(str::to_owned)
+            .collect(),
+        _ => Vec::new(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn parse_stop_missing_is_empty() {
+        assert!(parse_stop(None).is_empty());
+        assert!(parse_stop(Some(&json!(null))).is_empty());
+    }
+
+    #[test]
+    fn parse_stop_single_string() {
+        let v = json!("</done>");
+        let expected: Vec<String> = vec!["</done>".to_string()];
+        assert_eq!(parse_stop(Some(&v)), expected);
+    }
+
+    #[test]
+    fn parse_stop_empty_string_dropped() {
+        assert!(parse_stop(Some(&json!(""))).is_empty());
+    }
+
+    #[test]
+    fn parse_stop_array_caps_at_four() {
+        let v = json!(["a", "b", "c", "d", "e", "f"]);
+        let expected: Vec<String> = ["a", "b", "c", "d"].iter().map(|s| s.to_string()).collect();
+        assert_eq!(parse_stop(Some(&v)), expected);
+    }
+
+    #[test]
+    fn parse_stop_array_filters_non_strings_and_empty() {
+        let v = json!(["", "x", 42, null, "y"]);
+        let expected: Vec<String> = ["x", "y"].iter().map(|s| s.to_string()).collect();
+        assert_eq!(parse_stop(Some(&v)), expected);
+    }
+
+    #[test]
+    fn parse_stop_other_kinds_yield_empty() {
+        assert!(parse_stop(Some(&json!(42))).is_empty());
+        assert!(parse_stop(Some(&json!({"k": "v"}))).is_empty());
     }
 }
 

@@ -25,7 +25,7 @@ use crate::model::{
     decode_keep_logits_on_device, decode_logits, decode_spec_pp, decode_spec_pp_sampling,
     prefill_logits, Inflight, LoadedModel, SpecDecodePp,
 };
-use crate::state::SamplingParams;
+use crate::state::{parse_stop, SamplingParams};
 
 /// Server-wide shared state — built once at startup.
 pub struct ServerState {
@@ -227,6 +227,8 @@ pub async fn chat_completions(
         Some(crate::api::ResponseFormat::JsonObject)
             | Some(crate::api::ResponseFormat::JsonSchema { .. }),
     );
+    // P0.2: parse OpenAI `stop` (string-or-array-of-strings, max 4).
+    let stop_strings = parse_stop(req.stop.as_ref());
     let params = SamplingParams::from_parts(
         req.temperature,
         req.top_p,
@@ -238,6 +240,7 @@ pub async fn chat_completions(
         req.max_tokens,
         req.seed,
         json_mode,
+        stop_strings,
         &state.model_defaults,
     );
 
@@ -536,6 +539,7 @@ pub async fn completions(
     // knobs — only temperature/top_p/max_tokens/seed/stop. Pass None for
     // the penalty + top_k/min_p fields; `from_parts` applies Qwen3.5
     // published defaults.
+    let stop_strings = parse_stop(req.stop.as_ref());
     let params = SamplingParams::from_parts(
         req.temperature,
         req.top_p,
@@ -547,6 +551,7 @@ pub async fn completions(
         req.max_tokens,
         req.seed,
         /*json_mode=*/ false,
+        stop_strings,
         &state.model_defaults,
     );
     // Legacy /v1/completions has no `tools` field — keep the default
@@ -970,7 +975,7 @@ fn run_completion_blocking(
         inflight
             .dispose(cluster, model)
             .context("dispose inflight (early-stop)")?;
-        return finalise(&state, prompt_tokens, generated, "stop");
+        return finalise(&state, prompt_tokens, generated, "stop", &params.stop_strings);
     }
 
     let mut finish_reason = "length";
@@ -1197,15 +1202,36 @@ fn run_completion_blocking(
             // mask by emitting the multi-token text form. Detokenize
             // the recent tail and stop if a leak is present. Final
             // response cleanup happens in `finalise`.
-            if !relax_stop_mask && (step % 4 == 0 || step >= MIN_RESPONSE_TOKENS) {
+            //
+            // **P0.2** — same mechanism extended to the per-request
+            // `stop` strings. Tail window grows with the longest
+            // user stop so multi-token caller stops are catchable.
+            let user_stop_max = params
+                .stop_strings
+                .iter()
+                .map(|s| s.len())
+                .max()
+                .unwrap_or(0);
+            let need_user_check = !params.stop_strings.is_empty();
+            if (need_user_check || !relax_stop_mask)
+                && (step % 4 == 0 || step >= MIN_RESPONSE_TOKENS)
+            {
                 let n = generated.len();
-                let from = n.saturating_sub(16);
+                // 16 tokens covers ≥48 chars typical; widen if a user
+                // stop string is longer than ~32 chars.
+                let token_window = 16.max((user_stop_max / 2).min(64));
+                let from = n.saturating_sub(token_window);
                 if let Ok(tail) = state.tokenizer.decode(&generated[from..]) {
-                    if tail.contains("</think>")
-                        || tail.contains("<end_thought>")
-                        || tail.contains("<end_think>")
-                        || tail.contains("</thought>")
-                    {
+                    let marker_hit = !relax_stop_mask
+                        && (tail.contains("</think>")
+                            || tail.contains("<end_thought>")
+                            || tail.contains("<end_think>")
+                            || tail.contains("</thought>"));
+                    let user_hit = params
+                        .stop_strings
+                        .iter()
+                        .any(|s| tail.contains(s.as_str()));
+                    if marker_hit || user_hit {
                         finish_reason = "stop";
                         break;
                     }
@@ -1232,7 +1258,7 @@ fn run_completion_blocking(
         "completion request finished"
     );
 
-    let result = finalise(&state, prompt_tokens, generated, finish_reason)?;
+    let result = finalise(&state, prompt_tokens, generated, finish_reason, &params.stop_strings)?;
     // Sampler-G debug — emit the completed response text (head + tail
     // preview) so we can correlate request shape with what the model
     // actually produced. Truncated to 240 chars on each end so the
@@ -1602,9 +1628,19 @@ fn run_completion_blocking_streaming(
         // char-safe slice — `emitted_text.len() - 64` can land inside
         // a multi-byte UTF-8 codepoint (e.g. `’` at byte 805..808),
         // which would panic. Walk back to the nearest char boundary.
-        if !relax_stop_mask {
-            let tail_window = if emitted_text.len() > 64 {
-                let mut start = emitted_text.len() - 64;
+        // P0.2 — user-supplied stop sequences also use this tail-window
+        // detector. Window size grows with the longest user stop so
+        // multi-codepoint caller stops are catchable.
+        let user_stop_max = params
+            .stop_strings
+            .iter()
+            .map(|s| s.len())
+            .max()
+            .unwrap_or(0);
+        if !relax_stop_mask || !params.stop_strings.is_empty() {
+            let window_bytes = 64.max(user_stop_max + 16);
+            let tail_window = if emitted_text.len() > window_bytes {
+                let mut start = emitted_text.len() - window_bytes;
                 while start < emitted_text.len() && !emitted_text.is_char_boundary(start) {
                     start += 1;
                 }
@@ -1612,15 +1648,21 @@ fn run_completion_blocking_streaming(
             } else {
                 emitted_text.as_str()
             };
-            if tail_window.contains("</think>")
-                || tail_window.contains("<end_thought>")
-                || tail_window.contains("<end_think>")
-                || tail_window.contains("</thought>")
-            {
+            let marker_hit = !relax_stop_mask
+                && (tail_window.contains("</think>")
+                    || tail_window.contains("<end_thought>")
+                    || tail_window.contains("<end_think>")
+                    || tail_window.contains("</thought>"));
+            let user_hit = params
+                .stop_strings
+                .iter()
+                .any(|s| tail_window.contains(s.as_str()));
+            if marker_hit || user_hit {
                 finish_reason = "stop";
                 tracing::info!(
                     target: "server.completion.string_stop",
-                    "string-level stop on reasoning-marker leak"
+                    user_stop = user_hit,
+                    "string-level stop on reasoning-marker or user-stop leak"
                 );
                 break;
             }
@@ -1658,6 +1700,7 @@ fn finalise(
     prompt_tokens: u32,
     mut generated: Vec<u32>,
     reason: &str,
+    stop_strings: &[String],
 ) -> Result<(String, u32, u32, String)> {
     // Strip ALL stop tokens (eos, <|im_end|>, etc.) from decoded text so the
     // client sees clean content. Raw count preserved for `usage` honesty.
@@ -1675,6 +1718,19 @@ fn finalise(
             text.truncate(idx);
         }
     }
+    // **P0.2** — same treatment for caller-supplied stop sequences.
+    // OpenAI semantics: the stop sequence itself is not part of the
+    // returned content. Truncate at the earliest match across all
+    // user stops.
+    let mut earliest = text.len();
+    for s in stop_strings {
+        if let Some(idx) = text.find(s.as_str()) {
+            if idx < earliest {
+                earliest = idx;
+            }
+        }
+    }
+    text.truncate(earliest);
     // Trim trailing whitespace introduced by the now-removed marker.
     let trimmed_len = text.trim_end().len();
     text.truncate(trimmed_len);
