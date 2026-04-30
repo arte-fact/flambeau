@@ -810,6 +810,129 @@ fn build_fim_prompt_ids(
     Ok(prompt_ids)
 }
 
+/// **P1.8c** — translate one Anthropic message into 0+ OpenAI
+/// ChatMessages, appending to `out`. Splits on content-block boundary:
+/// - text + tool_use blocks at the same role go into a single
+///   ChatMessage carrying both (text becomes `content`; tool_use
+///   blocks become `tool_calls`).
+/// - tool_result blocks (only legal on `role="user"` per the spec) are
+///   converted to `role="tool"` ChatMessages with `tool_call_id`. They
+///   are emitted independently from the surrounding text, in document
+///   order, since the OpenAI shape doesn't carry tool replies inside
+///   user turns.
+/// - image blocks (vision) are dropped; flambeau is text-only in V1.
+fn translate_anthropic_message(m: &AnthropicMessage, out: &mut Vec<ChatMessage>) {
+    let blocks: Vec<&AnthropicContentBlock> = match &m.content {
+        AnthropicContent::Plain(s) => {
+            out.push(ChatMessage {
+                role: m.role.clone(),
+                content: Some(s.clone()),
+                tool_call_id: None,
+                tool_calls: None,
+            });
+            return;
+        }
+        AnthropicContent::Blocks(bs) => bs.iter().collect(),
+    };
+
+    let mut text_buf = String::new();
+    let mut tool_calls: Vec<ToolCall> = Vec::new();
+    for block in blocks {
+        match block {
+            AnthropicContentBlock::Text { text } => text_buf.push_str(text),
+            AnthropicContentBlock::Image { .. } => { /* drop */ }
+            AnthropicContentBlock::ToolUse { id, name, input } => {
+                tool_calls.push(ToolCall {
+                    id: id.clone(),
+                    kind: "function".into(),
+                    function: FunctionCall {
+                        name: name.clone(),
+                        arguments: input.to_string(),
+                    },
+                });
+            }
+            AnthropicContentBlock::ToolResult {
+                tool_use_id,
+                content,
+                is_error: _,
+            } => {
+                // Flush any text/tool_use accumulated for this turn
+                // BEFORE the tool message, preserving document order.
+                if !text_buf.is_empty() || !tool_calls.is_empty() {
+                    out.push(ChatMessage {
+                        role: m.role.clone(),
+                        content: if text_buf.is_empty() {
+                            None
+                        } else {
+                            Some(std::mem::take(&mut text_buf))
+                        },
+                        tool_call_id: None,
+                        tool_calls: if tool_calls.is_empty() {
+                            None
+                        } else {
+                            Some(std::mem::take(&mut tool_calls))
+                        },
+                    });
+                }
+                // Tool result content can be a string or a list of
+                // text blocks. Flatten.
+                let body = match content {
+                    serde_json::Value::String(s) => s.clone(),
+                    serde_json::Value::Array(arr) => arr
+                        .iter()
+                        .filter_map(|v| {
+                            v.get("text").and_then(|t| t.as_str()).map(str::to_owned)
+                        })
+                        .collect::<Vec<_>>()
+                        .join(""),
+                    other => other.to_string(),
+                };
+                out.push(ChatMessage {
+                    role: "tool".into(),
+                    content: Some(body),
+                    tool_call_id: Some(tool_use_id.clone()),
+                    tool_calls: None,
+                });
+            }
+        }
+    }
+    // Flush trailing text + tool_use accumulated after any
+    // tool_result, or the entire message if no tool_result was seen.
+    if !text_buf.is_empty() || !tool_calls.is_empty() {
+        out.push(ChatMessage {
+            role: m.role.clone(),
+            content: if text_buf.is_empty() {
+                None
+            } else {
+                Some(text_buf)
+            },
+            tool_call_id: None,
+            tool_calls: if tool_calls.is_empty() {
+                None
+            } else {
+                Some(tool_calls)
+            },
+        });
+    }
+}
+
+/// **P1.8c** — translate Anthropic tool definitions into the OpenAI
+/// ToolDef shape that the chat-template Jinja renderer consumes. The
+/// input_schema field is opaque (JSON Schema); we pass it through.
+fn anthropic_tools_to_openai(tools: &[AnthropicTool]) -> Vec<ToolDef> {
+    tools
+        .iter()
+        .map(|t| ToolDef {
+            kind: "function".into(),
+            function: FunctionDef {
+                name: t.name.clone(),
+                description: t.description.clone(),
+                parameters: t.input_schema.clone(),
+            },
+        })
+        .collect()
+}
+
 /// POST /v1/messages — Anthropic-compatible Messages API (P1.8a).
 ///
 /// Translates the Anthropic envelope into our existing chat path:
@@ -818,15 +941,18 @@ fn build_fim_prompt_ids(
 /// - `stop_sequences[]` → SamplingParams.stop_strings
 /// - `max_tokens` (required by Anthropic) → SamplingParams.max_tokens
 ///
-/// V1 scope: text-only content blocks. Image blocks are dropped
-/// silently. Tool-use / tool-result blocks parse but are not honoured
-/// here; P1.8c lifts them. Streaming events shipped in P1.8b.
+/// V1 scope: text + tool_use/tool_result content blocks (P1.8c).
+/// Image blocks are dropped silently. Streaming events shipped in P1.8b.
 #[tracing::instrument(name = "server.messages", skip_all, fields(stream = req.stream))]
 pub async fn messages_anthropic(
     State(state): State<SharedState>,
     Json(req): Json<AnthropicMessagesRequest>,
 ) -> Result<Response, ApiError> {
-    // Map system + messages into OpenAI ChatMessage list.
+    // Map system + messages into OpenAI ChatMessage list. Each
+    // Anthropic message expands into 1+ ChatMessages depending on
+    // its content blocks (tool_result blocks become role="tool"
+    // turns; tool_use blocks attach to the assistant turn's
+    // `tool_calls`).
     let mut messages: Vec<ChatMessage> = Vec::with_capacity(req.messages.len() + 1);
     if let Some(sys) = req.system.as_ref() {
         let body = sys.to_plain();
@@ -840,17 +966,23 @@ pub async fn messages_anthropic(
         }
     }
     for m in &req.messages {
-        messages.push(ChatMessage {
-            role: m.role.clone(),
-            content: Some(m.content.to_plain()),
-            tool_call_id: None,
-            tool_calls: None,
-        });
+        translate_anthropic_message(m, &mut messages);
     }
     // Apply the same `<think>\n\n</think>\n\n` normalisation our
     // chat_completions handler runs — Qwen3.6's template needs prior
-    // assistant turns wrapped that way to stay in-distribution.
-    let messages: Vec<ChatMessage> = messages.iter().map(normalise_message).collect();
+    // assistant turns wrapped that way to stay in-distribution. Skip
+    // assistant turns that already carry tool_calls (those have no
+    // free-text content to wrap).
+    let messages: Vec<ChatMessage> = messages
+        .iter()
+        .map(|m| {
+            if m.tool_calls.is_some() {
+                m.clone()
+            } else {
+                normalise_message(m)
+            }
+        })
+        .collect();
 
     // P0.5 — default system prompt fallback when none supplied.
     let messages = if !messages.iter().any(|m| {
@@ -892,17 +1024,31 @@ pub async fn messages_anthropic(
         &state.model_defaults,
     );
 
-    // Render through the model's chat template. No tools wired in
-    // P1.8a; merging arrives with P1.8c.
+    // **P1.8c** — render tools into the prompt via the same chat
+    // template path the OpenAI handler uses. Anthropic tool defs map
+    // 1:1 to OpenAI ToolDef (different field names but identical
+    // semantics: name, description, JSON-schema parameters).
+    let openai_tools: Option<Vec<ToolDef>> = req
+        .tools
+        .as_deref()
+        .map(anthropic_tools_to_openai)
+        .filter(|v| !v.is_empty());
+    let merged_tools =
+        merge_request_and_remote_tools(openai_tools.as_deref(), &state.remote_tools);
+
     let prompt = state
         .chat_template
-        .render_with_tools::<ChatMessage, ()>(
+        .render_with_tools(
             &messages,
-            None,
+            merged_tools.as_deref(),
             /*add_generation_prompt=*/ true,
             /*enable_thinking=*/ Some(false),
         )
         .map_err(ApiError::internal)?;
+    // Tool-bearing requests bypass the early-stop mask: a 5-token
+    // tool-call body is a legal short response.
+    let has_tools = merged_tools.is_some();
+    let relax_stop_mask = has_tools;
 
     // P1.8b — streaming branch. Returns SSE stream with the canonical
     // Anthropic event sequence: message_start → content_block_start →
@@ -910,45 +1056,80 @@ pub async fn messages_anthropic(
     // message_stop. Stream `[DONE]` sentinel is OpenAI-only; Anthropic
     // closes the connection after `message_stop`.
     if req.stream {
-        return Ok(stream_messages_anthropic_sse(state, prompt, params).into_response());
+        let tcf = state.tool_call_format_default;
+        return Ok(
+            stream_messages_anthropic_sse(state, prompt, params, relax_stop_mask, tcf)
+                .into_response(),
+        );
     }
 
     let (text, prompt_tokens, completion_tokens, finish, _) =
-        run_completion(state.clone(), &prompt, params, /*relax_stop_mask=*/ false)
+        run_completion(state.clone(), &prompt, params, relax_stop_mask)
             .await
             .map_err(ApiError::internal)?;
 
-    // Map OpenAI `finish_reason` → Anthropic `stop_reason`. The
-    // tool-call branch (P1.8c) lands later; for now we never produce
-    // `finish="tool_calls"` here because no tools are forwarded.
-    let stop_reason: &str = match finish.as_str() {
-        "stop" => "end_turn",
-        "length" => "max_tokens",
-        "tool_calls" => "tool_use",
-        other => other,
+    // **P1.8c** — parse the model's text output into ParserEvents,
+    // split into (free_text, tool_calls). Same pipeline the OpenAI
+    // chat handler uses. ToolUse blocks become AnthropicResponseBlock
+    // entries; remaining text becomes a single Text block.
+    let (text_out, tool_calls) = if has_tools {
+        use crate::tool_call_parser::{dispatcher, split_events, ParserEvent};
+        let mut parser = dispatcher(None, state.tool_call_format_default)
+            .map_err(|e| ApiError::bad_request(e.to_string()))?;
+        let mut events = parser.push(&text);
+        events.extend(parser.finish());
+        split_events(ParserEvent::coalesce(events))
+    } else {
+        (text, Vec::new())
     };
 
-    // If the model stopped on a user-supplied stop sequence, surface
-    // it. Best-effort match — we use the trailing-window approach
-    // already proven on the chat path.
-    let stop_sequence: Option<String> = if stop_reason == "end_turn"
-        && !stop_strings.is_empty()
-    {
-        // Rough match: the engine truncated at the earliest hit, so
-        // the matched sequence is the one whose presence in the
-        // pre-truncation tail came first. Without that info plumbed,
-        // we surface the first sequence that the post-truncation text
-        // ends near. Returning `None` is spec-allowed when uncertain.
-        None
+    // Map OpenAI finish_reason → Anthropic stop_reason. If the parser
+    // surfaced any tool_calls we OVERRIDE to "tool_use" since the
+    // engine's finish_reason was "stop" / "length" (it doesn't know
+    // about parser-detected tool calls).
+    let stop_reason: &str = if !tool_calls.is_empty() {
+        "tool_use"
     } else {
-        None
+        match finish.as_str() {
+            "stop" => "end_turn",
+            "length" => "max_tokens",
+            "tool_calls" => "tool_use",
+            other => other,
+        }
     };
+    let stop_sequence: Option<String> = None;
+
+    // Build Anthropic content blocks: optional Text + ToolUse blocks.
+    let mut content: Vec<AnthropicResponseBlock> = Vec::new();
+    if !text_out.is_empty() {
+        content.push(AnthropicResponseBlock::Text { text: text_out });
+    }
+    for tc in &tool_calls {
+        // ToolCall.arguments is a JSON-encoded string per OpenAI spec
+        // (guard against issue #20198). Parse back into a JSON value
+        // for Anthropic's `input` field. If the parse fails, surface
+        // the raw string under a `_raw` key so the caller can debug.
+        let input: serde_json::Value =
+            serde_json::from_str(&tc.function.arguments).unwrap_or_else(|_| {
+                serde_json::json!({ "_raw": tc.function.arguments })
+            });
+        content.push(AnthropicResponseBlock::ToolUse {
+            id: tc.id.clone(),
+            name: tc.function.name.clone(),
+            input,
+        });
+    }
+    // Empty content is invalid in the Anthropic shape; emit an empty
+    // text block as a fallback.
+    if content.is_empty() {
+        content.push(AnthropicResponseBlock::Text { text: String::new() });
+    }
 
     Ok(Json(AnthropicMessagesResponse {
         id: request_id("msg"),
         kind: "message",
         role: "assistant",
-        content: vec![AnthropicResponseBlock::Text { text }],
+        content,
         model: state.model_id.clone(),
         stop_reason: stop_reason.to_owned(),
         stop_sequence,
@@ -978,6 +1159,8 @@ fn stream_messages_anthropic_sse(
     state: SharedState,
     prompt: String,
     params: SamplingParams,
+    relax_stop_mask: bool,
+    tool_call_format_default: crate::tool_call_parser::ToolCallFormat,
 ) -> Sse<ReceiverStream<Result<Event, Infallible>>> {
     let (tx, rx) = mpsc::channel::<Result<Event, Infallible>>(32);
     let id = request_id("msg");
@@ -1017,54 +1200,223 @@ fn stream_messages_anthropic_sse(
         .event("message_start")
         .data(message_start.to_string())));
 
-    // 2. content_block_start — single text block at index 0.
-    let cbs = json!({
-        "type": "content_block_start",
-        "index": 0,
-        "content_block": {"type": "text", "text": ""},
-    });
-    let _ = tx.try_send(Ok(Event::default().event("content_block_start").data(cbs.to_string())));
-
+    // **P1.8c streaming** — content_block_start / _delta / _stop are
+    // emitted PER BLOCK, so we don't pre-open a text block here. The
+    // parser drives the events: each ToolCallOpen opens a new
+    // tool_use block; ToolCallArgumentsDelta emits input_json_delta;
+    // TextDelta opens (lazily) and continues a single text block.
     let state_clone = state.clone();
     let id_clone = id.clone();
     let tx_clone = tx.clone();
     tokio::task::spawn_blocking(move || {
-        // Per-delta emission: each text fragment becomes one
-        // content_block_delta event.
-        let emit_delta = |text: &str| -> bool {
-            if text.is_empty() {
+        use crate::tool_call_parser::{dispatcher, ParserEvent};
+        let mut parser = match dispatcher(None, tool_call_format_default) {
+            Ok(p) => p,
+            Err(e) => {
+                let err = json!({
+                    "type": "error",
+                    "error": {"type": "invalid_request_error", "message": e.to_string()},
+                });
+                let _ = tx_clone
+                    .blocking_send(Ok(Event::default().event("error").data(err.to_string())));
+                return;
+            }
+        };
+
+        // Block bookkeeping. text_open tracks whether index 0 (the
+        // text block) is currently open; tool_open tracks per-tool
+        // block-open state keyed by tool index. Anthropic indexes
+        // content blocks contiguously, so text occupies index 0 and
+        // each tool occupies index 1, 2, ...
+        let mut text_open = false;
+        let mut tool_open: std::collections::HashMap<u32, u32> =
+            std::collections::HashMap::new();
+        let mut next_block_index: u32 = 1; // 0 reserved for text
+        let mut emitted_any = false;
+        let mut has_tool_calls = false;
+
+        let mut emit_block_start_text = |tx: &mpsc::Sender<Result<Event, Infallible>>,
+                                         text_open: &mut bool|
+         -> bool {
+            if *text_open {
                 return true;
             }
+            *text_open = true;
             let frame = json!({
-                "type": "content_block_delta",
+                "type": "content_block_start",
                 "index": 0,
-                "delta": {"type": "text_delta", "text": text},
+                "content_block": {"type": "text", "text": ""},
             });
-            tx_clone
-                .blocking_send(Ok(Event::default()
-                    .event("content_block_delta")
-                    .data(frame.to_string())))
+            tx.blocking_send(Ok(Event::default()
+                .event("content_block_start")
+                .data(frame.to_string())))
                 .is_ok()
         };
 
-        // Reuse the existing OpenAI streaming engine — it already
-        // produces text deltas via the `emit` closure. Anthropic's
-        // surface differs only in the framing.
-        let mut emit = emit_delta;
+        let drain_events = |events: Vec<ParserEvent>,
+                            text_open: &mut bool,
+                            tool_open: &mut std::collections::HashMap<u32, u32>,
+                            next_block_index: &mut u32,
+                            emitted_any: &mut bool,
+                            has_tool_calls: &mut bool|
+         -> bool {
+            for ev in events {
+                match ev {
+                    ParserEvent::TextDelta(s) => {
+                        if s.is_empty() {
+                            continue;
+                        }
+                        if !emit_block_start_text(&tx_clone, text_open) {
+                            return false;
+                        }
+                        *emitted_any = true;
+                        let frame = json!({
+                            "type": "content_block_delta",
+                            "index": 0,
+                            "delta": {"type": "text_delta", "text": s},
+                        });
+                        if tx_clone
+                            .blocking_send(Ok(Event::default()
+                                .event("content_block_delta")
+                                .data(frame.to_string())))
+                            .is_err()
+                        {
+                            return false;
+                        }
+                    }
+                    ParserEvent::ThinkDelta(_) => { /* drop */ }
+                    ParserEvent::ToolCallOpen { index, name } => {
+                        *has_tool_calls = true;
+                        let block_idx = *next_block_index;
+                        *next_block_index += 1;
+                        tool_open.insert(index, block_idx);
+                        let frame = json!({
+                            "type": "content_block_start",
+                            "index": block_idx,
+                            "content_block": {
+                                "type": "tool_use",
+                                "id": format!("toolu_{block_idx:08x}"),
+                                "name": name,
+                                "input": {},
+                            },
+                        });
+                        if tx_clone
+                            .blocking_send(Ok(Event::default()
+                                .event("content_block_start")
+                                .data(frame.to_string())))
+                            .is_err()
+                        {
+                            return false;
+                        }
+                    }
+                    ParserEvent::ToolCallArgumentsDelta { index, arguments } => {
+                        let Some(&block_idx) = tool_open.get(&index) else {
+                            continue;
+                        };
+                        let frame = json!({
+                            "type": "content_block_delta",
+                            "index": block_idx,
+                            "delta": {"type": "input_json_delta", "partial_json": arguments},
+                        });
+                        if tx_clone
+                            .blocking_send(Ok(Event::default()
+                                .event("content_block_delta")
+                                .data(frame.to_string())))
+                            .is_err()
+                        {
+                            return false;
+                        }
+                    }
+                    ParserEvent::ToolCallClose { index } => {
+                        let Some(block_idx) = tool_open.remove(&index) else {
+                            continue;
+                        };
+                        let frame = json!({
+                            "type": "content_block_stop",
+                            "index": block_idx,
+                        });
+                        if tx_clone
+                            .blocking_send(Ok(Event::default()
+                                .event("content_block_stop")
+                                .data(frame.to_string())))
+                            .is_err()
+                        {
+                            return false;
+                        }
+                    }
+                }
+            }
+            true
+        };
+
+        // Token-level text feed: push each engine-emitted text
+        // fragment through the parser, drain the parser's events into
+        // SSE blocks. Same shape as the OpenAI streamer.
+        let mut emit_delta = |text: &str| -> bool {
+            let events = parser.push(text);
+            drain_events(
+                events,
+                &mut text_open,
+                &mut tool_open,
+                &mut next_block_index,
+                &mut emitted_any,
+                &mut has_tool_calls,
+            )
+        };
+
         let res = run_completion_blocking_streaming(
             state_clone,
             prompt,
             params,
-            /*relax_stop_mask=*/ false,
-            &mut emit,
+            relax_stop_mask,
+            &mut emit_delta,
         );
 
-        // 4. content_block_stop.
-        let cbst = json!({"type": "content_block_stop", "index": 0});
-        let _ = tx_clone
-            .blocking_send(Ok(Event::default().event("content_block_stop").data(cbst.to_string())));
+        // Flush parser tail.
+        let tail = parser.finish();
+        let _ = drain_events(
+            tail,
+            &mut text_open,
+            &mut tool_open,
+            &mut next_block_index,
+            &mut emitted_any,
+            &mut has_tool_calls,
+        );
 
-        // 5. message_delta — final stop reason + cumulative output_tokens.
+        // Close any blocks still open. Order: text (index 0) last so
+        // its index doesn't conflict with later tool blocks (already
+        // closed via ToolCallClose). For unclosed tool blocks (parser
+        // didn't see a Close — shouldn't happen on success but
+        // possible on early-exit), close them with a stop event.
+        for (_idx, block_idx) in tool_open.drain() {
+            let frame = json!({"type": "content_block_stop", "index": block_idx});
+            let _ = tx_clone
+                .blocking_send(Ok(Event::default()
+                    .event("content_block_stop")
+                    .data(frame.to_string())));
+        }
+        if !text_open && !emitted_any {
+            // Anthropic clients expect at least one block. Open + close
+            // an empty text block.
+            let cbs = json!({
+                "type": "content_block_start",
+                "index": 0,
+                "content_block": {"type": "text", "text": ""},
+            });
+            let _ = tx_clone.blocking_send(Ok(Event::default()
+                .event("content_block_start")
+                .data(cbs.to_string())));
+            text_open = true;
+        }
+        if text_open {
+            let frame = json!({"type": "content_block_stop", "index": 0});
+            let _ = tx_clone
+                .blocking_send(Ok(Event::default()
+                    .event("content_block_stop")
+                    .data(frame.to_string())));
+        }
+
+        // message_delta — final stop reason + cumulative output_tokens.
         let (finish, _, output_tokens) = match &res {
             Ok(t) => (t.0.clone(), t.1, t.2),
             Err(e) => {
@@ -1075,11 +1427,15 @@ fn stream_messages_anthropic_sse(
                 ("error".to_string(), 0u32, 0u32)
             }
         };
-        let stop_reason: &str = match finish.as_str() {
-            "stop" => "end_turn",
-            "length" => "max_tokens",
-            "tool_calls" => "tool_use",
-            other => other,
+        let stop_reason: &str = if has_tool_calls {
+            "tool_use"
+        } else {
+            match finish.as_str() {
+                "stop" => "end_turn",
+                "length" => "max_tokens",
+                "tool_calls" => "tool_use",
+                other => other,
+            }
         };
         let mdelta = json!({
             "type": "message_delta",
@@ -1089,15 +1445,13 @@ fn stream_messages_anthropic_sse(
         let _ = tx_clone
             .blocking_send(Ok(Event::default().event("message_delta").data(mdelta.to_string())));
 
-        // 6. message_stop. Anthropic does NOT send a [DONE] sentinel;
+        // message_stop. Anthropic does NOT send a [DONE] sentinel;
         // closing the channel is the EOF signal.
         let mstop = json!({"type": "message_stop"});
         let _ = tx_clone
             .blocking_send(Ok(Event::default().event("message_stop").data(mstop.to_string())));
 
         if let Err(e) = res {
-            // Spec-compliant: an `error` event after message_stop is
-            // valid; clients log + drop the partial response.
             let err = json!({
                 "type": "error",
                 "error": {"type": "internal_error", "message": e.to_string()},
@@ -1105,7 +1459,7 @@ fn stream_messages_anthropic_sse(
             let _ = tx_clone
                 .blocking_send(Ok(Event::default().event("error").data(err.to_string())));
         }
-        let _ = id_clone; // keep clone live for borrow-check parity; intentional no-op
+        let _ = id_clone; // keep clone live for borrow-check parity
     });
 
     Sse::new(ReceiverStream::new(rx)).keep_alive(KeepAlive::default())

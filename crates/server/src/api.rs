@@ -451,6 +451,39 @@ pub struct AnthropicMessagesRequest {
     pub stop_sequences: Option<Vec<String>>,
     #[serde(default)]
     pub stream: bool,
+    /// **P1.8c** — tool definitions exposed to the model. Each carries
+    /// `name`, `description`, and an `input_schema` (JSON Schema). The
+    /// shape mirrors Anthropic's spec; the handler translates them
+    /// into the OpenAI `ToolDef` shape that the chat-template Jinja
+    /// renderer already consumes.
+    #[serde(default)]
+    pub tools: Option<Vec<AnthropicTool>>,
+    /// **P1.8c** — Anthropic `tool_choice`. Forms:
+    /// - `{"type":"auto"}` (default) — model decides
+    /// - `{"type":"any"}` — model must use a tool
+    /// - `{"type":"tool","name":"..."}` — force a specific tool
+    /// - `{"type":"none"}` — model must not use tools
+    #[serde(default)]
+    pub tool_choice: Option<AnthropicToolChoice>,
+}
+
+/// One Anthropic tool definition. `input_schema` is opaque JSON Schema.
+#[derive(Debug, Clone, Deserialize)]
+pub struct AnthropicTool {
+    pub name: String,
+    #[serde(default)]
+    pub description: Option<String>,
+    pub input_schema: serde_json::Value,
+}
+
+/// Anthropic `tool_choice`. Tagged on `type`.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum AnthropicToolChoice {
+    Auto,
+    Any,
+    Tool { name: String },
+    None,
 }
 
 /// Anthropic system block — string or content-array.
@@ -567,7 +600,17 @@ pub struct AnthropicMessagesResponse {
 #[derive(Debug, Clone, Serialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum AnthropicResponseBlock {
-    Text { text: String },
+    Text {
+        text: String,
+    },
+    /// **P1.8c** — model-emitted tool call. `id` is the call id the
+    /// caller will echo back on the corresponding `tool_result` block.
+    /// `input` is the parsed JSON object the caller passes to its tool.
+    ToolUse {
+        id: String,
+        name: String,
+        input: serde_json::Value,
+    },
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -791,6 +834,71 @@ mod tests {
         assert!(s.contains("\"input_tokens\":5"));
         assert!(s.contains("\"output_tokens\":1"));
         assert!(s.contains("\"stop_reason\":\"end_turn\""));
+    }
+
+    #[test]
+    fn anthropic_request_tools_field_parses() {
+        let wire = r#"{
+            "model":"x","max_tokens":10,
+            "messages":[{"role":"user","content":"do something"}],
+            "tools":[
+                {"name":"get_weather","description":"Get weather",
+                 "input_schema":{"type":"object","properties":{"loc":{"type":"string"}}}}
+            ],
+            "tool_choice":{"type":"auto"}
+        }"#;
+        let req: AnthropicMessagesRequest = serde_json::from_str(wire).unwrap();
+        let tools = req.tools.as_ref().expect("tools field present");
+        assert_eq!(tools.len(), 1);
+        assert_eq!(tools[0].name, "get_weather");
+        assert_eq!(tools[0].description.as_deref(), Some("Get weather"));
+        assert!(matches!(req.tool_choice, Some(AnthropicToolChoice::Auto)));
+    }
+
+    #[test]
+    fn anthropic_tool_choice_variants() {
+        let auto: AnthropicToolChoice =
+            serde_json::from_str(r#"{"type":"auto"}"#).unwrap();
+        assert!(matches!(auto, AnthropicToolChoice::Auto));
+        let any: AnthropicToolChoice =
+            serde_json::from_str(r#"{"type":"any"}"#).unwrap();
+        assert!(matches!(any, AnthropicToolChoice::Any));
+        let none: AnthropicToolChoice =
+            serde_json::from_str(r#"{"type":"none"}"#).unwrap();
+        assert!(matches!(none, AnthropicToolChoice::None));
+        let named: AnthropicToolChoice =
+            serde_json::from_str(r#"{"type":"tool","name":"weather"}"#).unwrap();
+        match named {
+            AnthropicToolChoice::Tool { name } => assert_eq!(name, "weather"),
+            _ => panic!("expected Tool variant"),
+        }
+    }
+
+    #[test]
+    fn anthropic_response_serialises_tool_use_block() {
+        let r = AnthropicMessagesResponse {
+            id: "msg_x".into(),
+            kind: "message",
+            role: "assistant",
+            content: vec![
+                AnthropicResponseBlock::Text { text: "Calling tool".into() },
+                AnthropicResponseBlock::ToolUse {
+                    id: "toolu_abc".into(),
+                    name: "get_weather".into(),
+                    input: serde_json::json!({"loc": "SF"}),
+                },
+            ],
+            model: "flambeau".into(),
+            stop_reason: "tool_use".into(),
+            stop_sequence: None,
+            usage: AnthropicUsage { input_tokens: 5, output_tokens: 12 },
+        };
+        let s = serde_json::to_string(&r).unwrap();
+        assert!(s.contains("\"type\":\"tool_use\""));
+        assert!(s.contains("\"id\":\"toolu_abc\""));
+        assert!(s.contains("\"name\":\"get_weather\""));
+        assert!(s.contains("\"loc\":\"SF\""));
+        assert!(s.contains("\"stop_reason\":\"tool_use\""));
     }
 
     #[test]
