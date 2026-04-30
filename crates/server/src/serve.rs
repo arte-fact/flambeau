@@ -356,19 +356,35 @@ pub async fn serve(cfg: ServeConfig) -> Result<()> {
         );
     }
 
-    // **P2.9a (slot pool)** — pre-allocate the single inflight slot
-    // sized to FLAMBEAU_PREFILL_UBATCH (default 512). Subsequent
-    // requests reuse this Inflight via reset_for_next_request,
-    // avoiding ~ms of session/scratch alloc-dispose per request.
-    // P2.9b extends this to N>1 slots for continuous batching.
+    // **P2.9b-i1 (multi-slot pool)** — pre-allocate N inflight slots
+    // sized to FLAMBEAU_PREFILL_UBATCH (default 512). Each slot owns
+    // its own session (KV cache, GDN state) and scratch buffers; a
+    // request acquires any free slot via try-lock round-robin and
+    // returns it to the pool on response. N defaults to 1 (P2.9a
+    // behaviour); N>1 enables request-level concurrency. Decode
+    // kernels still serialise on the GPU stream — true batched
+    // throughput lands in P2.9b-i2.
     let prefill_ubatch: usize = std::env::var("FLAMBEAU_PREFILL_UBATCH")
         .ok()
         .and_then(|s| s.parse().ok())
         .filter(|n: &usize| *n >= 128)
         .unwrap_or(512);
-    info!(prefill_ubatch, "pre-allocating inflight slot");
-    let inflight = crate::model::Inflight::new(&model, &cluster, prefill_ubatch)
-        .context("pre-alloc Inflight slot at boot")?;
+    let inflight_slots: usize = std::env::var("FLAMBEAU_INFLIGHT_SLOTS")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .filter(|n: &usize| *n >= 1 && *n <= 32)
+        .unwrap_or(1);
+    info!(
+        prefill_ubatch,
+        inflight_slots, "pre-allocating inflight slot pool"
+    );
+    let mut inflight_pool: Vec<Mutex<crate::model::Inflight>> =
+        Vec::with_capacity(inflight_slots);
+    for slot_idx in 0..inflight_slots {
+        let slot = crate::model::Inflight::new(&model, &cluster, prefill_ubatch)
+            .with_context(|| format!("pre-alloc Inflight slot {slot_idx} at boot"))?;
+        inflight_pool.push(Mutex::new(slot));
+    }
 
     let state: SharedState = Arc::new(ServerState {
         model_id: cfg.model_id.clone(),
@@ -377,7 +393,7 @@ pub async fn serve(cfg: ServeConfig) -> Result<()> {
         cluster,
         tokenizer,
         chat_template,
-        inflight: Mutex::new(inflight),
+        inflight_pool,
         remote_tools,
         agent_stats: crate::agent_stats::AgentStatsRing::default(),
         tool_call_format_default,

@@ -41,12 +41,14 @@ pub struct ServerState {
     pub cluster: Arc<HipCluster>,
     pub tokenizer: GgufTokenizer,
     pub chat_template: ChatTemplate,
-    /// **P2.9a (slot pool)** — single-slot pool: a pre-allocated
-    /// `Inflight` reused across requests. Holding the mutex means
-    /// "this request owns the inflight slot"; releasing the lock
-    /// (after `reset_for_next_request`) returns the slot to the
-    /// pool. Continuous batching with N>1 slots is P2.9b.
-    pub inflight: Mutex<Inflight>,
+    /// **P2.9b-i1 (multi-slot pool)** — N pre-allocated `Inflight`
+    /// slots sized to `FLAMBEAU_INFLIGHT_SLOTS` (default 1). A request
+    /// acquires any free slot via `acquire_inflight_blocking()` (try-
+    /// lock round-robin, then block on slot 0 if all busy). Holding
+    /// the guard means "this request owns the slot"; releasing it
+    /// returns the slot to the pool. Decode kernels still serialise
+    /// on the GPU stream — true batched throughput is P2.9b-i2.
+    pub inflight_pool: Vec<Mutex<Inflight>>,
     /// Tools discovered on the `--mcp <url>` upstreams at startup
     /// (ROADMAP-V2 §M2.1). Merged into each request's `tools[]` before
     /// rendering the Jinja template, so the model sees them alongside
@@ -80,6 +82,30 @@ pub struct ServerState {
 }
 
 pub type SharedState = Arc<ServerState>;
+
+impl ServerState {
+    /// **P2.9b-i1** — acquire an idle inflight slot, blocking until one
+    /// is available. Iterates the pool with `try_lock` first; if every
+    /// slot is busy, blocks on slot 0 (head-of-line, but bounded by
+    /// the longest in-flight decode). The returned guard ties the slot
+    /// to the request scope — dropping it returns the slot to the pool.
+    /// Returns `(slot_idx, guard)` so callers can log which slot served
+    /// the request.
+    pub fn acquire_inflight_blocking(
+        &self,
+    ) -> (usize, tokio::sync::MutexGuard<'_, Inflight>) {
+        for (idx, slot) in self.inflight_pool.iter().enumerate() {
+            if let Ok(g) = slot.try_lock() {
+                return (idx, g);
+            }
+        }
+        // All busy — fall back to slot 0. tokio fairness guarantees
+        // FIFO on contended `lock()`/`blocking_lock()` so this approximates
+        // a single-queue head-of-line.
+        let g = self.inflight_pool[0].blocking_lock();
+        (0, g)
+    }
+}
 
 /// GET /health — constant, no locks.
 pub async fn health() -> impl IntoResponse {
@@ -1892,10 +1918,12 @@ fn run_completion_blocking_ids(
 ) -> Result<CompletionOutput> {
     let request_start = Instant::now();
 
-    // **P2.9a (slot pool)** — claim the pre-allocated inflight slot.
-    // Holding the mutex serialises forward traffic through the
-    // server (continuous batching ships in P2.9b).
-    let mut inflight_guard = state.inflight.blocking_lock();
+    // **P2.9b-i1 (multi-slot pool)** — acquire an idle inflight slot.
+    // With N=1 (default) this is identical to P2.9a; with N>1 distinct
+    // requests can hold separate slots and run their forwards through
+    // the same GPU stream concurrently (kernel-serialised; true batched
+    // throughput is P2.9b-i2).
+    let (slot_idx, mut inflight_guard) = state.acquire_inflight_blocking();
 
     if prompt_ids.is_empty() {
         bail!("prompt tokenized to 0 tokens");
@@ -1906,6 +1934,7 @@ fn run_completion_blocking_ids(
         target: "server.completion.start",
         prompt_tokens,
         max_tokens = params.max_tokens,
+        slot_idx,
         "completion request accepted after queue wait"
     );
 
@@ -2456,9 +2485,9 @@ fn run_completion_blocking_streaming(
 ) -> Result<(String, u32, u32)> {
     let request_start = Instant::now();
 
-    // **P2.9a (slot pool)** — claim and reset the pre-allocated
-    // inflight slot. Same lifecycle as run_completion_blocking_ids.
-    let mut inflight_guard = state.inflight.blocking_lock();
+    // **P2.9b-i1 (multi-slot pool)** — acquire an idle inflight slot.
+    // Same lifecycle as run_completion_blocking_ids.
+    let (slot_idx, mut inflight_guard) = state.acquire_inflight_blocking();
 
     let prompt_ids = state.tokenizer.encode(&prompt).context("tokenize prompt")?;
     if prompt_ids.is_empty() {
@@ -2471,6 +2500,7 @@ fn run_completion_blocking_streaming(
         prompt_tokens,
         max_tokens = params.max_tokens,
         stream = true,
+        slot_idx,
         "streaming completion accepted"
     );
 
