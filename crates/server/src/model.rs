@@ -317,16 +317,46 @@ pub fn prefill_logits(
             }
         }
         (LoadedModel::Tp { model, ar }, Inflight::Tp { session, decode }) => {
-            // **TP chunked prefill is broken** (#237 follow-up). Same
-            // dispatcher-level fix as PP (B1) works for kernel choice,
-            // but cross-call state in TP's AllReduce path produces
-            // incoherent output. Stick with single-shot prefill — TP
-            // prompts must fit in scratch.
-            forward_prefill_tp_logits(
-                model, decode, cluster, ar, &mut session.caches,
-                prompt_ids, 0, logits_out,
-            )
-            .context("TP prefill_logits")
+            // Chunked TP prefill (Phase B3a-TP). Phase A2-TP parity
+            // test verified bit-exact KV at L=4096 chunk=512 (8 chunks),
+            // so chunking is safe at chunk>=128. forward_prefill_tp_logits
+            // (and its batched delegate) allocates per-call scratch,
+            // bounded by chunk_size.
+            let chunk: usize = std::env::var("FLAMBEAU_PREFILL_UBATCH")
+                .ok()
+                .and_then(|s| s.parse().ok())
+                .filter(|n: &usize| *n >= 128)
+                .unwrap_or(512);
+            let l = prompt_ids.len();
+            if l <= chunk {
+                forward_prefill_tp_logits(
+                    model, decode, cluster, ar, &mut session.caches,
+                    prompt_ids, 0, logits_out,
+                )
+                .context("TP prefill_logits")
+            } else {
+                tracing::debug!(
+                    target: "server.prefill",
+                    prompt_len = l,
+                    chunk,
+                    "chunked TP prefill"
+                );
+                let mut start = 0usize;
+                let mut sink: Vec<f32> = Vec::new();
+                while start < l {
+                    let end = (start + chunk).min(l);
+                    let is_last = end == l;
+                    let dst: &mut Vec<f32> =
+                        if is_last { &mut *logits_out } else { &mut sink };
+                    forward_prefill_tp_logits(
+                        model, decode, cluster, ar, &mut session.caches,
+                        &prompt_ids[start..end], start, dst,
+                    )
+                    .with_context(|| format!("TP prefill_logits chunk [{start}..{end})"))?;
+                    start = end;
+                }
+                Ok(())
+            }
         }
         (
             LoadedModel::Hybrid {
@@ -334,19 +364,46 @@ pub fn prefill_logits(
                 stage_ars,
             },
             Inflight::Hybrid { session, decode },
-        ) => forward_prefill_hybrid_logits(
-            hmodel,
-            decode,
-            cluster,
-            stage_ars,
-            session,
-            prompt_ids,
-            0,
-            logits_out,
-        )
-        .context("hybrid prefill_logits"),
-        // **Hybrid chunked prefill is broken** for the same reason
-        // as TP — single-shot only.
+        ) => {
+            // Chunked Hybrid prefill (Phase B4a-Hybrid). Parity
+            // verified bit-exact at L=4096 chunk=512 (8 chunks).
+            let chunk: usize = std::env::var("FLAMBEAU_PREFILL_UBATCH")
+                .ok()
+                .and_then(|s| s.parse().ok())
+                .filter(|n: &usize| *n >= 128)
+                .unwrap_or(512);
+            let l = prompt_ids.len();
+            if l <= chunk {
+                forward_prefill_hybrid_logits(
+                    hmodel, decode, cluster, stage_ars, session, prompt_ids, 0, logits_out,
+                )
+                .context("hybrid prefill_logits")
+            } else {
+                tracing::debug!(
+                    target: "server.prefill",
+                    prompt_len = l,
+                    chunk,
+                    "chunked hybrid prefill"
+                );
+                let mut start = 0usize;
+                let mut sink: Vec<f32> = Vec::new();
+                while start < l {
+                    let end = (start + chunk).min(l);
+                    let is_last = end == l;
+                    let dst: &mut Vec<f32> =
+                        if is_last { &mut *logits_out } else { &mut sink };
+                    forward_prefill_hybrid_logits(
+                        hmodel, decode, cluster, stage_ars, session,
+                        &prompt_ids[start..end], start, dst,
+                    )
+                    .with_context(|| {
+                        format!("hybrid prefill_logits chunk [{start}..{end})")
+                    })?;
+                    start = end;
+                }
+                Ok(())
+            }
+        }
         _ => bail!("LoadedModel/Inflight variant mismatch"),
     }
 }
