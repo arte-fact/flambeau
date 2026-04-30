@@ -116,6 +116,48 @@ impl Inflight {
     /// `prompt_len` sizes the PP prefill scratch; ignored for TP (TP
     /// loops `forward_one_token_tp` over the prompt instead).
     pub fn new(model: &LoadedModel, cluster: &HipCluster, prompt_len: usize) -> Result<Self> {
+        // **early reject** — naive prefill materialises the full
+        // attention matrix (Q×Kᵀ at L×L per head) on a single rank;
+        // there is no chunked-prefill or flash-attention path yet.
+        // Reject prompts that would obviously OOM before the alloc
+        // sequence below leaks gigabytes of VRAM mid-loop. The cap is
+        // intentionally generous (estimated peak per-rank scratch ≤
+        // 12 GB on a 16 GB MI50, leaving headroom for weights + KV);
+        // chunked prefill is the proper fix.
+        let cfg = match model {
+            LoadedModel::Pp { model, .. } => &model.config,
+            LoadedModel::Tp { model, .. } => &model.config,
+            LoadedModel::Hybrid { model, .. } => &model.config,
+        };
+        // Rough estimate: hidden ping-pong (2 × L × hidden × 2B) +
+        // attention scores (heads × L² × 2B). The L² term dominates
+        // past ~4k tokens.
+        let hidden_bytes = 2 * prompt_len * cfg.hidden_size * 2;
+        let attn_bytes = cfg.num_heads * prompt_len * prompt_len * 2;
+        let est_peak: u64 = (hidden_bytes + attn_bytes) as u64;
+        // Allow override; default cap = 12 GB (well below MI50's 16 GB
+        // minus weights + KV headroom).
+        let cap_bytes: u64 = std::env::var("FLAMBEAU_MAX_PREFILL_BYTES")
+            .ok()
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(12 * 1024 * 1024 * 1024);
+        if est_peak > cap_bytes {
+            tracing::warn!(
+                target: "server.inflight",
+                prompt_len,
+                est_peak_bytes = est_peak,
+                cap_bytes,
+                "rejecting request: estimated prefill scratch exceeds cap (no chunked-prefill yet)"
+            );
+            bail!(
+                "prompt too long for this server build: prompt_len={prompt_len} would need ~{:.1} GB \
+                 of prefill scratch (cap {:.1} GB). Lower the prompt length or set \
+                 FLAMBEAU_MAX_PREFILL_BYTES to override (will likely OOM).",
+                est_peak as f64 / 1e9,
+                cap_bytes as f64 / 1e9,
+            );
+        }
+
         // **leak fix** — every alloc step here that ships a fresh GPU
         // resource must roll back the prior steps' GPU resources on
         // failure. Without this, an OOM in a downstream alloc (the
