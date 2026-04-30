@@ -598,12 +598,47 @@ pub async fn completions(
         stop_strings,
         &state.model_defaults,
     );
-    // Legacy /v1/completions has no `tools` field — keep the default
-    // stop-mask policy unchanged from V1.8.
-    let (text, prompt_tokens, completion_tokens, finish) =
+
+    // P1.6c — OpenAI suffix-style FIM. When the request carries a
+    // `suffix` AND the model has FIM specials, route through the
+    // shared FIM-id assembly used by /infill. Without `suffix` the
+    // path is unchanged.
+    let suffix_fim = req.suffix.as_deref().filter(|s| !s.is_empty());
+    let (text, prompt_tokens, completion_tokens, finish) = if let (Some(suffix), Some(fim)) =
+        (suffix_fim, state.tokenizer.fim)
+    {
+        let prompt_ids = build_fim_prompt_ids(
+            &state.tokenizer,
+            fim,
+            &req.prompt,
+            suffix,
+            None,
+            &[],
+        )
+        .map_err(ApiError::internal)?;
+        let prompt_tokens = prompt_ids.len() as u32;
+        // FIM has no chat template — bypass chat-flavoured stop-mask.
+        let (text, _, completion_tokens, finish) = run_completion_ids(
+            state.clone(),
+            prompt_ids,
+            params,
+            /*relax_stop_mask=*/ true,
+        )
+        .await
+        .map_err(ApiError::internal)?;
+        (text, prompt_tokens, completion_tokens, finish)
+    } else {
+        if suffix_fim.is_some() {
+            tracing::warn!(
+                target: "server.completions",
+                "`suffix` provided but model carries no FIM tokens — falling back to non-FIM completion"
+            );
+        }
+        // Legacy path: text-only prompt, chat stop-mask policy.
         run_completion(state.clone(), &req.prompt, params, /*relax_stop_mask=*/ false)
             .await
-            .map_err(ApiError::internal)?;
+            .map_err(ApiError::internal)?
+    };
 
     Ok(Json(CompletionResponse {
         id: request_id("cmpl"),
@@ -621,6 +656,50 @@ pub async fn completions(
             total_tokens: prompt_tokens + completion_tokens,
         },
     }))
+}
+
+/// Assemble a PSM-shaped FIM token stream from prefix / suffix / middle
+/// fragments. Returns the full prompt-id vector ready for the engine.
+///
+/// Shared by `/infill` (P1.6b) and `/v1/completions?suffix=…` (P1.6c).
+/// `extra` carries optional repo-context files (Qwen-Coder PSM); silently
+/// skipped when the vocab lacks `<|repo_name|>` / `<|file_sep|>`.
+fn build_fim_prompt_ids(
+    tok: &flambeau_quant::GgufTokenizer,
+    fim: flambeau_quant::FimTokens,
+    prefix: &str,
+    suffix: &str,
+    middle: Option<&str>,
+    extra: &[crate::api::InfillExtra],
+) -> Result<Vec<u32>> {
+    let mut prompt_ids: Vec<u32> = Vec::new();
+    if !extra.is_empty() {
+        match (fim.repo_name, fim.file_sep) {
+            (Some(repo_tok), Some(sep_tok)) => {
+                for f in extra {
+                    prompt_ids.push(repo_tok);
+                    prompt_ids.extend(tok.encode(&f.filename)?);
+                    prompt_ids.push(sep_tok);
+                    prompt_ids.extend(tok.encode(&f.text)?);
+                }
+            }
+            _ => {
+                tracing::warn!(
+                    target: "server.fim",
+                    "input_extra ignored: model lacks <|repo_name|> / <|file_sep|>"
+                );
+            }
+        }
+    }
+    prompt_ids.push(fim.prefix);
+    prompt_ids.extend(tok.encode(prefix)?);
+    prompt_ids.push(fim.suffix);
+    prompt_ids.extend(tok.encode(suffix)?);
+    prompt_ids.push(fim.middle);
+    if let Some(mid) = middle.filter(|s| !s.is_empty()) {
+        prompt_ids.extend(tok.encode(mid)?);
+    }
+    Ok(prompt_ids)
 }
 
 /// POST /infill — llama.cpp-compatible Fill-in-the-Middle endpoint.
@@ -650,56 +729,15 @@ pub async fn infill(
         ));
     };
 
-    // P1.6b — assemble FIM token-id stream directly. We bypass string
-    // tokenization for the special tokens because StarCoder-style
-    // `<fim_prefix>` (no ASCII pipes) is not registered by the
-    // tokenizer's `<|...|>` special-token sweep, and would otherwise
-    // BPE-split into multi-token fragments.
-    let tok = &state.tokenizer;
-    let mut prompt_ids: Vec<u32> = Vec::new();
-
-    // Optional repo-context block (Qwen-Coder PSM extension).
-    if !req.input_extra.is_empty() {
-        match (fim.repo_name, fim.file_sep) {
-            (Some(repo_tok), Some(sep_tok)) => {
-                for f in &req.input_extra {
-                    prompt_ids.push(repo_tok);
-                    prompt_ids.extend(
-                        tok.encode(&f.filename)
-                            .map_err(ApiError::internal)?,
-                    );
-                    prompt_ids.push(sep_tok);
-                    prompt_ids.extend(
-                        tok.encode(&f.text).map_err(ApiError::internal)?,
-                    );
-                }
-            }
-            _ => {
-                tracing::warn!(
-                    target: "server.infill",
-                    "input_extra ignored: model lacks <|repo_name|> / <|file_sep|>"
-                );
-            }
-        }
-    }
-
-    // Core FIM PSM block.
-    prompt_ids.push(fim.prefix);
-    prompt_ids.extend(
-        tok.encode(&req.input_prefix)
-            .map_err(ApiError::internal)?,
-    );
-    prompt_ids.push(fim.suffix);
-    prompt_ids.extend(
-        tok.encode(&req.input_suffix)
-            .map_err(ApiError::internal)?,
-    );
-    prompt_ids.push(fim.middle);
-    if let Some(mid_prefix) = req.prompt.as_deref().filter(|s| !s.is_empty()) {
-        prompt_ids.extend(
-            tok.encode(mid_prefix).map_err(ApiError::internal)?,
-        );
-    }
+    let prompt_ids = build_fim_prompt_ids(
+        &state.tokenizer,
+        fim,
+        &req.input_prefix,
+        &req.input_suffix,
+        req.prompt.as_deref(),
+        &req.input_extra,
+    )
+    .map_err(ApiError::internal)?;
 
     let stop_strings = parse_stop(req.stop.as_ref());
     let params = SamplingParams::from_parts(

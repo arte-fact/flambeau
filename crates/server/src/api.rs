@@ -285,6 +285,13 @@ pub struct CompletionRequest {
     pub stream: bool,
     #[serde(default)]
     pub stop: Option<serde_json::Value>,
+    /// **P1.6c** — OpenAI suffix-style Fill-in-the-Middle. When set
+    /// (and the model carries FIM tokens), `/v1/completions` switches
+    /// to the same PSM-token assembly used by `/infill`: `prompt` is
+    /// the prefix and `suffix` is the suffix, the model fills the gap.
+    /// Without `suffix` the endpoint behaves exactly as before.
+    #[serde(default)]
+    pub suffix: Option<String>,
 }
 
 // ---- /infill (P1.6b — llama.cpp-compat fill-in-the-middle) ----------------
@@ -459,6 +466,27 @@ mod tests {
         }"#;
         let req: InfillRequest = serde_json::from_str(wire).unwrap();
         assert_eq!(req.n_predict, Some(32));
+    }
+
+    #[test]
+    fn completion_request_with_suffix_for_fim() {
+        let wire = r#"{
+            "model":"qwen3-coder",
+            "prompt":"def fizzbuzz(n):\n    ",
+            "suffix":"    return result\n",
+            "max_tokens":64
+        }"#;
+        let req: CompletionRequest = serde_json::from_str(wire).unwrap();
+        assert_eq!(req.prompt, "def fizzbuzz(n):\n    ");
+        assert_eq!(req.suffix.as_deref(), Some("    return result\n"));
+        assert_eq!(req.max_tokens, Some(64));
+    }
+
+    #[test]
+    fn completion_request_without_suffix() {
+        let wire = r#"{"prompt":"hello"}"#;
+        let req: CompletionRequest = serde_json::from_str(wire).unwrap();
+        assert!(req.suffix.is_none());
     }
 
     #[test]
