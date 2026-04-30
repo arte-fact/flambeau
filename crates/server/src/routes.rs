@@ -65,6 +65,15 @@ pub struct ServerState {
     /// GGUF doesn't carry stay `None`; the OpenAI-shaped fallback in
     /// `from_parts` then takes effect.
     pub model_defaults: crate::state::ModelDefaults,
+    /// **P0.5** — fallback system prompt injected when the request
+    /// carries no `role: "system"` message. Sourced at boot from
+    /// `FLAMBEAU_DEFAULT_SYSTEM` (env), or `None` if unset. Some clients
+    /// (Aider, plain `curl`, the embedded UI) routinely send only a
+    /// `user` message, and Qwen3.6 then degrades into terse one-line
+    /// replies because the chat template's neutral default doesn't
+    /// frame the assistant role. Operator-controlled — never derived
+    /// from request fields.
+    pub default_system: Option<String>,
 }
 
 pub type SharedState = Arc<ServerState>;
@@ -202,6 +211,31 @@ pub async fn chat_completions(
         "chat_completions request"
     );
 
+    // P0.5 — inject the operator-configured default system prompt when
+    // the request carries no system turn. Single source of truth lives
+    // on `ServerState`; per-request override is a system message in
+    // the request, which silently wins (we never overwrite). Empty
+    // body or whitespace-only content is treated as "no system turn"
+    // so a client passing `[{"role":"system","content":""}, …]` still
+    // gets the default.
+    let has_real_system = req.messages.iter().any(|m| {
+        m.role == "system" && !m.content_str().trim().is_empty()
+    });
+    let injected_system: Option<ChatMessage> =
+        if !has_real_system {
+            state
+                .default_system
+                .as_deref()
+                .map(|sys| ChatMessage {
+                    role: "system".into(),
+                    content: Some(sys.to_owned()),
+                    tool_call_id: None,
+                    tool_calls: None,
+                })
+        } else {
+            None
+        };
+
     // Qwen3.6's chat template prepends `<think>\n\n</think>\n\n` to the
     // current-turn assistant prefix (the "no-thinking" delimiter). Prior
     // assistant turns sent by the client are stored as plain content and,
@@ -209,8 +243,10 @@ pub async fn chat_completions(
     // model greedy-stops on the first token. Normalise every assistant
     // message that lacks `</think>` by wrapping its content the same way
     // the template would for the current turn.
-    let mut messages: Vec<ChatMessage> =
-        req.messages.iter().map(normalise_message).collect();
+    let mut messages: Vec<ChatMessage> = injected_system
+        .into_iter()
+        .chain(req.messages.iter().map(normalise_message))
+        .collect();
 
     // T1.2 + M2.1: thread client tools + `--mcp`-discovered remote
     // tools into the Jinja render. Both visible to the model under one

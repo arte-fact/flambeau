@@ -343,6 +343,19 @@ pub async fn serve(cfg: ServeConfig) -> Result<()> {
         "model sampling defaults from GGUF"
     );
 
+    // P0.5 — boot-time default system prompt. Empty string treated as
+    // unset so an operator can clear a system-level config by exporting
+    // `FLAMBEAU_DEFAULT_SYSTEM=`.
+    let default_system = std::env::var("FLAMBEAU_DEFAULT_SYSTEM")
+        .ok()
+        .filter(|s| !s.is_empty());
+    if let Some(s) = default_system.as_deref() {
+        info!(
+            len = s.len(),
+            "default system prompt loaded from FLAMBEAU_DEFAULT_SYSTEM"
+        );
+    }
+
     let state: SharedState = Arc::new(ServerState {
         model_id: cfg.model_id.clone(),
         cfg: model_cfg,
@@ -355,6 +368,7 @@ pub async fn serve(cfg: ServeConfig) -> Result<()> {
         agent_stats: crate::agent_stats::AgentStatsRing::default(),
         tool_call_format_default,
         model_defaults,
+        default_system,
     });
 
     let app = Router::new()
