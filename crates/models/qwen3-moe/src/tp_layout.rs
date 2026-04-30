@@ -166,12 +166,22 @@ impl Qwen35DenseTpLayout {
                 });
             }
         }
-        // **TP-4d-i3** — rep-outer arches (qwen35moe / qwen36moe) need
-        // K/Q replicated across ranks. qwen3next uses rep_inner and is
-        // local under contiguous split. Pure-dense `qwen35` has no GDN
-        // block, so the flag is unobservable there; default false.
-        let gdn_kq_replicated =
-            cfg.arch == "qwen35moe" || cfg.arch == "qwen36moe";
+        // **TP-4d-i3 + #253** — rep-outer arches (qwen35 / qwen35moe /
+        // qwen36moe) need K/Q replicated across ranks. qwen3next uses
+        // rep_inner mapping and is local under contiguous split.
+        //
+        // The earlier "pure-dense qwen35 has no GDN" comment was wrong —
+        // Qwen3.5-9B (`arch=qwen35`) IS hybrid (GDN every 3 of 4 layers
+        // per `full_attention_interval=4`) and the GDN forward
+        // dispatches on `cfg.arch != "qwen3next"` → rep_outer. Without
+        // replication, qwen35 on TP/Hybrid degenerated into a `</think>`
+        // loop on chat (task #253). This includes the `qwen35`
+        // architecture in the replicated list to match the rep_outer
+        // dispatch. When `cfg.gdn == None` the flag is harmless (the
+        // GDN forward path is never taken).
+        let gdn_kq_replicated = cfg.arch == "qwen35"
+            || cfg.arch == "qwen35moe"
+            || cfg.arch == "qwen36moe";
 
         Ok(Self {
             world,
