@@ -80,6 +80,9 @@ pub use pp::{
     RankForwardScratch, ShardedForwardOneTokenScratch, ShardedForwardPrefillScratch, UbatchLane,
 };
 
+pub mod batched;
+pub use batched::{forward_decode_batched_pp, BatchSlot};
+
 pub mod tp;
 pub use tp::{
     forward_one_token_tp, forward_one_token_tp_keep_logits_on_device,
