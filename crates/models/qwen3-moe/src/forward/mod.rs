@@ -97,7 +97,7 @@ pub use crate::hybrid::{
     ShardedForwardOneTokenScratchHybrid, ShardedForwardPrefillScratchHybrid,
 };
 pub use hybrid::{
-    forward_one_token_hybrid, forward_one_token_hybrid_logits,
+    forward_decode_batched_hybrid, forward_one_token_hybrid, forward_one_token_hybrid_logits,
     forward_prefill_hybrid_batched_logits, forward_prefill_hybrid_logits,
 };
 

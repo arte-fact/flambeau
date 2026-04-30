@@ -1849,6 +1849,34 @@ enum AttnOrFfn {
     Ffn,
 }
 
+/// **P2.9b-i2-D-wire** — public re-export of [`AttnOrFfn`] so the
+/// hybrid batched-decode driver can call [`ar_residual_prefill_pub`].
+#[derive(Clone, Copy)]
+pub enum AttnOrFfnPub {
+    Attn,
+    Ffn,
+}
+
+/// **P2.9b-i2-D-wire** — public wrapper around the private
+/// `ar_residual_prefill` helper, used by the hybrid batched-decode
+/// driver (sibling of this `forward_decode_batched_tp` driver) to
+/// schedule per-stage `BarP2pAllReduce` calls on `[N, hidden]`
+/// partials.
+pub fn ar_residual_prefill_pub(
+    ar: &BarP2pAllReduce,
+    scratch: &mut ShardedForwardPrefillScratchTp,
+    cluster: &flambeau_backend_hip::HipCluster,
+    world: u32,
+    elem_count: u32,
+    kind: AttnOrFfnPub,
+) -> Result<()> {
+    let kind_priv = match kind {
+        AttnOrFfnPub::Attn => AttnOrFfn::Attn,
+        AttnOrFfnPub::Ffn => AttnOrFfn::Ffn,
+    };
+    ar_residual_prefill(ar, scratch, cluster, world, elem_count, kind_priv)
+}
+
 /// **TP-3a** — async AR via HIP events. Replaces TP-2d's per-rank
 /// host `Stream::synchronize` with driver-side cross-stream waits.
 ///

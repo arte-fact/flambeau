@@ -87,6 +87,11 @@ pub struct ServerState {
     /// lazy-init, not contended.
     pub tp_batched_scratch:
         std::sync::Mutex<Option<flambeau_qwen3_moe::forward::ShardedForwardPrefillScratchTp>>,
+    /// **P2.9b-i2-D-wire** — shared Hybrid (PP+TP) batched-decode
+    /// workspace. Same lazy-init contract as `tp_batched_scratch`;
+    /// holds per-stage TP scratches sized for max_inflight_slots.
+    pub hybrid_batched_scratch:
+        std::sync::Mutex<Option<flambeau_qwen3_moe::ShardedForwardPrefillScratchHybrid>>,
     /// Tools discovered on the `--mcp <url>` upstreams at startup
     /// (ROADMAP-V2 §M2.1). Merged into each request's `tools[]` before
     /// rendering the Jinja template, so the model sees them alongside
@@ -401,11 +406,48 @@ impl ServerState {
                 )
                 .context("forward_decode_batched_tp under scheduler")?;
             }
-            LoadedModel::Hybrid { .. } => {
-                bail!(
-                    "dispatch_batched_pending: Hybrid topology not yet \
-                     wired (P2.9b-i2-D-wire)"
-                );
+            LoadedModel::Hybrid { model, stage_ars } => {
+                use flambeau_qwen3_moe::forward::forward_decode_batched_hybrid;
+                let mut sessions: Vec<&mut flambeau_qwen3_moe::Qwen3MoEHybridSession> =
+                    Vec::with_capacity(n);
+                for s in 0..n {
+                    // SAFETY: s in 0..n; guards distinct.
+                    unsafe {
+                        let g: &mut Inflight = &mut **guards_ptr.add(s);
+                        match g {
+                            Inflight::Hybrid { session, .. } => sessions.push(session),
+                            _ => bail!(
+                                "dispatch_batched_pending: slot {s} is not Inflight::Hybrid"
+                            ),
+                        }
+                    }
+                }
+                // Lazy-allocate the shared Hybrid batched scratch.
+                let mut scratch_guard = self
+                    .hybrid_batched_scratch
+                    .lock()
+                    .expect("hybrid_batched_scratch poisoned");
+                if scratch_guard.is_none() {
+                    let max_slots = self.inflight_pool.len().max(n);
+                    let s = flambeau_qwen3_moe::ShardedForwardPrefillScratchHybrid::new(
+                        model, max_slots,
+                    )
+                    .context("alloc hybrid_batched_scratch")?;
+                    *scratch_guard = Some(s);
+                }
+                let scratch = scratch_guard
+                    .as_mut()
+                    .expect("just initialised");
+                forward_decode_batched_hybrid(
+                    model,
+                    sessions.as_mut_slice(),
+                    cluster,
+                    stage_ars,
+                    scratch,
+                    &slots,
+                    logits_refs.as_mut_slice(),
+                )
+                .context("forward_decode_batched_hybrid under scheduler")?;
             }
         }
 
@@ -2230,10 +2272,11 @@ fn scheduler_can_engage(state: &ServerState, params: &SamplingParams) -> bool {
     if std::env::var("FLAMBEAU_BATCHED_DECODE").is_err() {
         return false;
     }
-    // PP (no MTP) and TP both supported. Hybrid wires up in i2-D-wire.
+    // PP (no MTP), TP, and Hybrid all supported.
     let topo_ok = match &state.model {
         LoadedModel::Pp { mtp: None, .. } => true,
         LoadedModel::Tp { .. } => true,
+        LoadedModel::Hybrid { .. } => true,
         _ => false,
     };
     if !topo_ok {
