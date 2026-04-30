@@ -10,8 +10,16 @@
 //   K          int                       top-K to return (must satisfy 1 <= K <= 256)
 // Outputs (only first K entries written, sorted by descending prob):
 //   out_ids    [K] i32                   token ids, sorted descending by prob
-//   out_probs  [K] F32                   softmax-normalised probabilities,
-//                                        renormalised to sum to ~1 over the K kept
+//   out_probs  [K] F32                   softmax-normalised probabilities OVER THE
+//                                        FULL VOCAB (NOT renormalised to sum to 1
+//                                        over the K kept). The K probs sum to
+//                                        sum_topk ≤ 1, which is a small fraction
+//                                        of total mass. This is the right shape
+//                                        for the host-side top_p filter — top_p
+//                                        applied to renormalised-over-K probs
+//                                        gives a SHARPER effective cutoff than
+//                                        top_p over the full distribution
+//                                        (the original chat-truncation bug).
 //
 // Launch shape:
 //   blockDim = 256, gridDim = 1
@@ -52,8 +60,19 @@
 #define SAMPLER_WARPS (SAMPLER_THREADS / 64)
 #define SAMPLER_K_PER_THREAD 16
 #define SAMPLER_K_MAX (SAMPLER_THREADS * SAMPLER_K_PER_THREAD)  // 4096
-// Caller-visible upper bound on K. Higher K would need a different layout.
-#define SAMPLER_K_OUT_MAX 256
+// Caller-visible upper bound on K. Bumped from 256 to 2048 to match
+// Sampler-A's host-side `effective_top_k = mode.top_k.unwrap_or(2048)`
+// — at K=256 the GPU sampler restricts candidates more aggressively
+// than the host path, biasing the multinomial toward the small handful
+// of highest-prob tokens (often `<|im_end|>` at "natural endpoint"
+// positions). The chat-decode truncation bug (#211 follow-up) where
+// the model would emit a one-sentence answer + EOS instead of the
+// requested longer response was caused by this K=256 cap.
+//
+// SAMPLER_K_MAX=4096 still bounds total candidates; the kernel sorts
+// 4096 then writes the first 2048. Per-thread loop in the output
+// phase handles the 2048-entry write with 256 threads.
+#define SAMPLER_K_OUT_MAX 2048
 
 // Encode (val, idx) into a single u64 such that ASCENDING uint64 compare
 // matches ASCENDING float-value compare, with TIES on value broken by
@@ -245,46 +264,21 @@ extern "C" __global__ void flambeau_sampler_topk_softmax_f32(
     // packed keys, i.e., the K largest float values.
 
     // ------------------------------------------------------------------
-    // Phase 5: compute renormalised probs over the kept K.
+    // Phase 5: write top-K (id, full-vocab softmax prob) — NOT
+    //          renormalised over the kept K. The host-side top_p filter
+    //          then treats these as a faithful subset of the full
+    //          softmax (sums to sum_topk ≤ 1) so top_p semantics match
+    //          the host's full-vocab path. Renormalising over K here
+    //          would make top_p a sharper cutoff than the user asked
+    //          for and over-collapses to the argmax — caused
+    //          inappropriate early EOS during chat decoding.
+    //          K can exceed blockDim (=256), so loop with stride.
     // ------------------------------------------------------------------
-    // First pass: each thread computes its own kept-token's exp share and
-    // we reduce the sum across threads.
-    float my_share = 0.0f;
-    if (tid < K) {
-        const unsigned long long key = s_keys[tid];
-        const float v = unpack_val(key);
-        my_share = __expf(v - row_max) / row_sum;
-    }
-    // Warp + block reduce sum of `my_share`.
-    float kept_sum = my_share;
-    #pragma unroll
-    for (int off = 32; off > 0; off >>= 1) {
-        kept_sum += __shfl_xor(kept_sum, off, 64);
-    }
-    __shared__ float s_kept_sum[SAMPLER_WARPS];
-    if (lane == 0) {
-        s_kept_sum[warp] = kept_sum;
-    }
-    __syncthreads();
-    if (warp == 0) {
-        float ws = (lane < SAMPLER_WARPS) ? s_kept_sum[lane] : 0.0f;
-        #pragma unroll
-        for (int off = SAMPLER_WARPS / 2; off > 0; off >>= 1) {
-            ws += __shfl_xor(ws, off, 64);
-        }
-        if (lane == 0) {
-            s_kept_sum[0] = ws;
-        }
-    }
-    __syncthreads();
-    const float inv_kept = 1.0f / s_kept_sum[0];
-
-    if (tid < K) {
-        const unsigned long long key = s_keys[tid];
+    for (int slot = tid; slot < K; slot += SAMPLER_THREADS) {
+        const unsigned long long key = s_keys[slot];
         const int idx = unpack_idx(key);
         const float v = unpack_val(key);
-        const float p = __expf(v - row_max) / row_sum;
-        out_ids[tid]   = idx;
-        out_probs[tid] = p * inv_kept;
+        out_ids[slot]   = idx;
+        out_probs[slot] = __expf(v - row_max) / row_sum;
     }
 }

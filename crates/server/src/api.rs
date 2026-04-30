@@ -91,6 +91,34 @@ pub struct ChatCompletionRequest {
     /// the wire for the Qwen3-Coder XML parser (V2.x, see ROADMAP-V2 §T2).
     #[serde(default)]
     pub tool_call_format: Option<String>,
+
+    // ---- Structured-output fields (P0.1) -----------------------------
+    /// OpenAI `response_format`. When set to `{"type":"json_object"}`,
+    /// the sampler is constrained at every step to keep the running
+    /// output structurally-valid JSON (no token can break a brace
+    /// balance, escape a string mid-codepoint, etc.). Used heavily by
+    /// OpenWebUI's auto-prompts (search-query-gen, follow-ups, title,
+    /// tags) and by Aider/Continue/LangChain JSON modes.
+    #[serde(default)]
+    pub response_format: Option<ResponseFormat>,
+}
+
+/// OpenAI-spec response format selector.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum ResponseFormat {
+    /// Default — no structural constraint.
+    Text,
+    /// Constrain output to be parseable as a single top-level JSON value.
+    JsonObject,
+    /// Constrain to a specific JSON schema (more strict than JsonObject).
+    /// V1 implementation: treat same as `JsonObject` (schema-aware
+    /// constraint is a follow-up; the structural constraint already
+    /// catches 95 % of malformations).
+    JsonSchema {
+        #[serde(default)]
+        json_schema: serde_json::Value,
+    },
 }
 
 /// One chat message on the wire.

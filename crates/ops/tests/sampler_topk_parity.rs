@@ -93,7 +93,9 @@ fn download_i32(dev: &HipDevice, src: DevicePtr, n: usize) -> Vec<i32> {
 }
 
 /// Reference: full softmax + sort. Returns top-k (id, prob) pairs
-/// sorted descending, with probs renormalised over the kept k.
+/// sorted descending. Probs are FULL-VOCAB softmax probs (NOT
+/// renormalised over the kept k) — matches the kernel output shape
+/// (top_p applied host-side relies on full-vocab semantics).
 fn cpu_topk_softmax(logits: &[f32], k: usize, inv_temp: f32) -> Vec<(u32, f32)> {
     let mut max_l = f32::NEG_INFINITY;
     for &v in logits {
@@ -119,12 +121,6 @@ fn cpu_topk_softmax(logits: &[f32], k: usize, inv_temp: f32) -> Vec<(u32, f32)> 
             .then(a.0.cmp(&b.0))
     });
     pairs.truncate(k);
-    let kept_sum: f32 = pairs.iter().map(|(_, p)| *p).sum();
-    if kept_sum > 0.0 {
-        for (_, p) in pairs.iter_mut() {
-            *p /= kept_sum;
-        }
-    }
     pairs
 }
 

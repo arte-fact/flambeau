@@ -9,6 +9,12 @@ pub struct SamplingParams {
     pub sampling: Sampling,
     pub seed: u64,
     pub max_tokens: u32,
+    /// **P0.1** — when `true`, the decode loop applies a per-step JSON
+    /// structural mask: candidate tokens are filtered against a small
+    /// JSON state machine (object/array/string/number balance). Driven
+    /// by the OpenAI `response_format: {"type":"json_object"}` request
+    /// field. Default `false` (free-form text).
+    pub json_mode: bool,
 }
 
 /// Model-side recommended sampling defaults read from GGUF metadata
@@ -78,6 +84,7 @@ impl SamplingParams {
         frequency_penalty: Option<f32>,
         max_tokens: Option<u32>,
         seed: Option<u64>,
+        json_mode: bool,
         defaults: &ModelDefaults,
     ) -> Self {
         // Resolution order: explicit OpenAI request → GGUF model
@@ -104,6 +111,7 @@ impl SamplingParams {
             sampling,
             seed: seed.unwrap_or_else(default_seed),
             max_tokens: max_tokens.unwrap_or(4096).min(8192),
+            json_mode,
         }
     }
 }

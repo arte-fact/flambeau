@@ -228,6 +228,53 @@ pub fn apply_stop_mask(
     }
 }
 
+/// **P0.1** — apply a JSON-grammar mask to `(host_ids, host_probs)`.
+/// For each candidate, simulate `state.feed_slice(decoded_bytes(id))`
+/// on a *clone*; zero out probs for candidates that would invalidate
+/// the running JSON. The token finally sampled gets fed into the
+/// caller's actual `state` after the multinomial draw.
+///
+/// Decoding 2048 candidates per token is non-trivial — only call this
+/// when `params.json_mode == true`. At top_k=2048, vocab=151424,
+/// the cost is dominated by the BPE decode loop on the JSON-relevant
+/// subset (~1-2 ms/token typical).
+pub fn apply_json_mask(
+    state: &flambeau_runtime::json_grammar::JsonState,
+    tokenizer: &flambeau_quant::GgufTokenizer,
+    host_ids: &[u32],
+    host_probs: &mut [f32],
+) {
+    for (i, &id) in host_ids.iter().enumerate() {
+        if host_probs[i] <= 0.0 {
+            continue;
+        }
+        // Decode just this single token. Stop tokens & specials get
+        // empty bytes from the BPE decoder; treat empty bytes as
+        // "always allowed" so the model can still pick `<|im_end|>`
+        // when the running JSON is `is_complete()`.
+        let bytes = match tokenizer.decode(&[id]) {
+            Ok(s) => s,
+            Err(_) => {
+                host_probs[i] = 0.0;
+                continue;
+            }
+        };
+        if bytes.is_empty() {
+            // Specials/EOS — only allow if the JSON is currently
+            // structurally complete; otherwise the model would emit
+            // EOS mid-value and the response would be invalid.
+            if !state.is_complete() {
+                host_probs[i] = 0.0;
+            }
+            continue;
+        }
+        let mut probe = state.clone();
+        if !probe.feed_slice(bytes.as_bytes()) {
+            host_probs[i] = 0.0;
+        }
+    }
+}
+
 /// **Sampler-D4 (#212)** — penalty-aware variant of [`run_gpu_topk`].
 /// Builds `(tok, count)` pairs from `history` via Sampler-F's
 /// sort+dedup, uploads to device, runs the GPU penalty kernel

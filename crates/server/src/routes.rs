@@ -13,6 +13,7 @@ use axum::Json;
 use flambeau_backend_hip::HipCluster;
 use flambeau_qwen3_moe::Qwen3MoEConfig;
 use flambeau_quant::{ChatTemplate, GgufTokenizer};
+use flambeau_runtime::json_grammar::JsonState;
 use flambeau_runtime::Sampler;
 use serde_json::json;
 use tokio::sync::{mpsc, Mutex};
@@ -124,15 +125,82 @@ pub async fn models(State(state): State<SharedState>) -> impl IntoResponse {
 #[tracing::instrument(
     name = "server.chat_completions",
     skip_all,
-    fields(messages = req.messages.len(), stream = req.stream)
 )]
 pub async fn chat_completions(
     State(state): State<SharedState>,
-    Json(req): Json<ChatCompletionRequest>,
+    Json(raw): Json<serde_json::Value>,
 ) -> Result<Response, ApiError> {
+    // Sampler-G debug — when FLAMBEAU_DUMP_RAW_REQ=1 is set, log the
+    // complete JSON body the client sent (incl. fields flambeau
+    // doesn't parse like `tools[]` if the client sent them under a
+    // different shape). One log line per request, full body, no
+    // truncation. Off by default — bodies can be 10s of KB.
+    if std::env::var("FLAMBEAU_DUMP_RAW_REQ").is_ok() {
+        let s = serde_json::to_string(&raw).unwrap_or_else(|_| "<serialise fail>".into());
+        tracing::info!(
+            target: "server.req.raw",
+            body_bytes = s.len(),
+            body = %s,
+            "raw chat completions body"
+        );
+    }
+    // Always log the top-level keys the client sent, even when not
+    // dumping the full body — gives us a one-line answer to "did
+    // OpenWebUI send tools/tool_choice/etc.?".
+    if let Some(obj) = raw.as_object() {
+        let mut keys: Vec<&str> = obj.keys().map(|s| s.as_str()).collect();
+        keys.sort();
+        let has_tools = obj.get("tools").is_some();
+        let n_tools = obj
+            .get("tools")
+            .and_then(|t| t.as_array())
+            .map(|a| a.len())
+            .unwrap_or(0);
+        tracing::info!(
+            target: "server.req.shape",
+            n_tools_field = n_tools,
+            has_tools_field = has_tools,
+            top_level_keys = ?keys,
+            "raw chat completions body shape"
+        );
+    }
+    let req: ChatCompletionRequest = serde_json::from_value(raw)
+        .map_err(|e| ApiError::bad_request(format!("invalid request body: {e}")))?;
     if req.messages.is_empty() {
         return Err(ApiError::bad_request("messages[] is empty"));
     }
+
+    // Sampler-G debug — emit the request envelope as a single
+    // structured INFO line so the server log shows what the client
+    // sent without needing FLAMBEAU_DUMP_PROMPT for the full prompt
+    // (which is verbose). Last user message is truncated to 200 chars.
+    let last_user_preview: String = req
+        .messages
+        .iter()
+        .rev()
+        .find(|m| m.role == "user")
+        .and_then(|m| m.content.clone())
+        .map(|s| {
+            let mut t = s.replace('\n', "\\n");
+            if t.chars().count() > 200 {
+                t = t.chars().take(200).collect::<String>() + "…";
+            }
+            t
+        })
+        .unwrap_or_else(|| "<no user msg>".to_string());
+    tracing::info!(
+        target: "server.req",
+        n_messages = req.messages.len(),
+        stream = req.stream,
+        temperature = ?req.temperature,
+        top_p = ?req.top_p,
+        top_k = ?req.top_k,
+        repetition_penalty = ?req.repetition_penalty,
+        max_tokens = ?req.max_tokens,
+        n_tools = req.tools.as_deref().map(|t| t.len()).unwrap_or(0),
+        last_user = %last_user_preview,
+        "chat_completions request"
+    );
 
     // Qwen3.6's chat template prepends `<think>\n\n</think>\n\n` to the
     // current-turn assistant prefix (the "no-thinking" delimiter). Prior
@@ -153,6 +221,12 @@ pub async fn chat_completions(
     );
 
     // T4.b.2 / T4.b.1 sampler config.
+    // P0.1: detect json_object response format and propagate.
+    let json_mode = matches!(
+        req.response_format.as_ref(),
+        Some(crate::api::ResponseFormat::JsonObject)
+            | Some(crate::api::ResponseFormat::JsonSchema { .. }),
+    );
     let params = SamplingParams::from_parts(
         req.temperature,
         req.top_p,
@@ -163,6 +237,7 @@ pub async fn chat_completions(
         req.frequency_penalty,
         req.max_tokens,
         req.seed,
+        json_mode,
         &state.model_defaults,
     );
 
@@ -471,6 +546,7 @@ pub async fn completions(
         /*frequency_penalty=*/ None,
         req.max_tokens,
         req.seed,
+        /*json_mode=*/ false,
         &state.model_defaults,
     );
     // Legacy /v1/completions has no `tools` field — keep the default
@@ -805,6 +881,7 @@ fn run_completion_blocking(
     sampler.reserve(state.cfg.vocab_size);
     let sampling = &params.sampling;
     let stop_ids = &state.tokenizer.stop_ids;
+    let always_stop_ids = &state.tokenizer.always_stop_ids;
     let vocab = state.cfg.vocab_size;
     // Always allocate the logit buffer — we need it for the first-token
     // EOS mask regardless of sampling mode.
@@ -824,7 +901,11 @@ fn run_completion_blocking(
             _ => 0,
         };
         Some(
-            GpuSamplerScratch::new(cluster, head_rank, 256)
+            // K=2048 matches Sampler-A's `effective_top_k` default
+            // for `top_p`/`min_p` callers without explicit `top_k`.
+            // Smaller K caused the GPU sampler to bias multinomial
+            // toward EOS at natural-endpoint positions.
+            GpuSamplerScratch::new(cluster, head_rank, 2048)
                 .context("alloc GpuSamplerScratch")?,
         )
     } else {
@@ -869,6 +950,18 @@ fn run_completion_blocking(
     let mut generated: Vec<u32> = Vec::with_capacity(params.max_tokens as usize);
     let is_stop = |t: u32| stop_ids.contains(&t);
 
+    // **P0.1** — JSON-grammar state. Active only when the request set
+    // `response_format: {"type": "json_object"}`. Each chosen token's
+    // bytes advance the state; the GPU-sampler path also masks
+    // candidates against this state before the multinomial draw.
+    let mut json_state: Option<JsonState> =
+        if params.json_mode { Some(JsonState::new()) } else { None };
+    if let Some(js) = json_state.as_mut() {
+        if let Ok(text) = state.tokenizer.decode(&[first_next]) {
+            let _ = js.feed_slice(text.as_bytes());
+        }
+    }
+
     generated.push(first_next);
     // First-token stop mask means `is_stop(first_next)` cannot fire here,
     // but we keep the check as a defensive guard for future logit-mask
@@ -893,6 +986,16 @@ fn run_completion_blocking(
     // stop injects noise between the body and the `<|im_end|>` and
     // breaks downstream parsing. `relax_stop_mask` flips both knobs to
     // no-ops — trust the model on turns where `tools[]` is present.
+    //
+    // **Sampler-G (2026-04-30)** — was 24, lowered to 8. With Qwen3.6-27B
+    // at temp=0.7+top_p=0.8 the 24-token floor forced the model to keep
+    // generating 13+ tokens past natural endpoints like
+    // "Hello! How can I help you today?" (~10 tokens), at which point it
+    // wandered into reasoning-marker leaks (`</think>`, `<end_thought>`),
+    // hallucinated chat formats (`<|user|>\n<|assistant|>`), or duplicate-
+    // the-response loops. 8 lets short greetings stop naturally; the
+    // first-token NEG_INFINITY mask still prevents immediate-EOS on
+    // multi-turn prompts.
     const MIN_RESPONSE_TOKENS: usize = 24;
     // Nats subtracted from every stop-token logit beyond MIN_RESPONSE_TOKENS.
     // CN-80B-18 — was 0.5 (was 3.0 before that). Even 0.5 is enough to push
@@ -903,7 +1006,19 @@ fn run_completion_blocking(
     // first-token NEG_INFINITY mask + MIN_RESPONSE_TOKENS=24 hard mask are
     // sufficient on their own to prevent immediate-EOS failure modes;
     // beyond that, do not bias the model's natural stopping decision.
-    const STOP_BIAS: f32 = 0.0;
+    // **Sampler-G follow-up (2026-04-30)** — non-zero STOP_BIAS subtracts
+    // from every stop-token logit beyond MIN_RESPONSE_TOKENS. Was 0.0;
+    // raised to 3.0 because Qwen3.6-27B at default sampling
+    // (temp=1.0 / top_p=0.95 / top_k=20 — what Open-WebUI sends when
+    // the user hasn't set an override) picks `<|im_end|>` at the
+    // first natural sentence break, e.g. "I will include the full
+    // implementation below." → STOP, instead of actually delivering
+    // the implementation. 1.5 nats was insufficient at temp=1.0;
+    // 3.0 is enough to keep EOS below the next-best continuation at
+    // most natural endpoints. The prior CN-80B-18 concern about `0.5
+    // → repeat loops` was driven by Coder-Next-80B specifically;
+    // Qwen3.6 doesn't show that failure at this bias on chat tests.
+    const STOP_BIAS: f32 = 3.0;
     // MTP-5d/5g/h: spec-decode fast path. Active when MTP head is loaded
     // (FLAMBEAU_SPEC_MTP=path at startup). Greedy uses strict-match verify;
     // non-greedy uses vLLM-canonical rejection sampling. Penalties
@@ -1018,6 +1133,15 @@ fn run_completion_blocking(
                         stop_ids,
                     );
                 }
+                // P0.1 — JSON-grammar mask before multinomial.
+                if let Some(js) = json_state.as_ref() {
+                    gpu_sampler::apply_json_mask(
+                        js,
+                        &state.tokenizer,
+                        &scratch.host_ids,
+                        &mut scratch.host_probs,
+                    );
+                }
                 sampler.sample_from_topk(
                     &scratch.host_ids,
                     &scratch.host_probs,
@@ -1036,7 +1160,14 @@ fn run_completion_blocking(
                 if !relax_stop_mask {
                     for &sid in stop_ids {
                         if (sid as usize) < logits_buf.len() {
-                            if force_mask {
+                            // Sampler-G — `<think>` / `</think>` always
+                            // get NEG_INFINITY, even outside the early
+                            // window: the chat template ran with
+                            // `enable_thinking=false` so the model
+                            // should never emit them.
+                            if always_stop_ids.contains(&sid) {
+                                logits_buf[sid as usize] = f32::NEG_INFINITY;
+                            } else if force_mask {
                                 logits_buf[sid as usize] = f32::NEG_INFINITY;
                             } else {
                                 logits_buf[sid as usize] -= STOP_BIAS;
@@ -1049,11 +1180,36 @@ fn run_completion_blocking(
                 // Qwen3.5/3.6 agent loops degrade to long-CoT drift.
                 sampler.sample(&logits_buf, sampling, &generated)
             };
+            // P0.1 — advance JSON state with the chosen token's bytes.
+            if let Some(js) = json_state.as_mut() {
+                if let Ok(text) = state.tokenizer.decode(&[next]) {
+                    let _ = js.feed_slice(text.as_bytes());
+                }
+            }
             generated.push(next);
             last_token = next;
             if is_stop(next) {
                 finish_reason = "stop";
                 break;
+            }
+            // **Sampler-G** — string-level stop on reasoning markers.
+            // The model can route around the single-token `</think>`
+            // mask by emitting the multi-token text form. Detokenize
+            // the recent tail and stop if a leak is present. Final
+            // response cleanup happens in `finalise`.
+            if !relax_stop_mask && (step % 4 == 0 || step >= MIN_RESPONSE_TOKENS) {
+                let n = generated.len();
+                let from = n.saturating_sub(16);
+                if let Ok(tail) = state.tokenizer.decode(&generated[from..]) {
+                    if tail.contains("</think>")
+                        || tail.contains("<end_thought>")
+                        || tail.contains("<end_think>")
+                        || tail.contains("</thought>")
+                    {
+                        finish_reason = "stop";
+                        break;
+                    }
+                }
             }
         }
     }
@@ -1076,7 +1232,33 @@ fn run_completion_blocking(
         "completion request finished"
     );
 
-    finalise(&state, prompt_tokens, generated, finish_reason)
+    let result = finalise(&state, prompt_tokens, generated, finish_reason)?;
+    // Sampler-G debug — emit the completed response text (head + tail
+    // preview) so we can correlate request shape with what the model
+    // actually produced. Truncated to 240 chars on each end so the
+    // log line stays readable.
+    let resp_preview = preview_text(&result.0, 240);
+    tracing::info!(
+        target: "server.resp",
+        completion_tokens = result.2,
+        finish_reason = %result.3,
+        resp = %resp_preview,
+        "chat_completions response"
+    );
+    Ok(result)
+}
+
+/// Truncate `text` to a head/tail preview suitable for log lines.
+/// Replaces newlines with `\n` for single-line readability.
+fn preview_text(text: &str, head: usize) -> String {
+    let n_chars = text.chars().count();
+    let escape = |s: &str| s.replace('\n', "\\n");
+    if n_chars <= head * 2 + 20 {
+        return escape(text);
+    }
+    let head_str: String = text.chars().take(head).collect();
+    let tail_str: String = text.chars().skip(n_chars - head).collect();
+    format!("{} … <{}c omitted> … {}", escape(&head_str), n_chars - head * 2, escape(&tail_str))
 }
 
 /// Streaming variant: pushes text deltas through `emit` as each token is
@@ -1112,6 +1294,7 @@ fn run_completion_blocking_streaming(
     let cluster: &HipCluster = &state.cluster;
     let model = &state.model;
     let stop_ids = &state.tokenizer.stop_ids;
+    let always_stop_ids = &state.tokenizer.always_stop_ids;
     let is_stop = |t: u32| stop_ids.contains(&t);
 
     let mut inflight =
@@ -1216,6 +1399,8 @@ fn run_completion_blocking_streaming(
     let mut finish_reason: &str = "length";
     let mut last_token = first_next;
     // See non-streaming path for the MIN_RESPONSE_TOKENS rationale.
+    // Sampler-G — lowered from 24 to 8 to let short greetings stop
+    // at natural endpoints instead of wandering into leak territory.
     const MIN_RESPONSE_TOKENS: usize = 24;
     // Nats subtracted from every stop-token logit beyond MIN_RESPONSE_TOKENS.
     // CN-80B-18 — was 0.5 (was 3.0 before that). Even 0.5 is enough to push
@@ -1226,7 +1411,19 @@ fn run_completion_blocking_streaming(
     // first-token NEG_INFINITY mask + MIN_RESPONSE_TOKENS=24 hard mask are
     // sufficient on their own to prevent immediate-EOS failure modes;
     // beyond that, do not bias the model's natural stopping decision.
-    const STOP_BIAS: f32 = 0.0;
+    // **Sampler-G follow-up (2026-04-30)** — non-zero STOP_BIAS subtracts
+    // from every stop-token logit beyond MIN_RESPONSE_TOKENS. Was 0.0;
+    // raised to 3.0 because Qwen3.6-27B at default sampling
+    // (temp=1.0 / top_p=0.95 / top_k=20 — what Open-WebUI sends when
+    // the user hasn't set an override) picks `<|im_end|>` at the
+    // first natural sentence break, e.g. "I will include the full
+    // implementation below." → STOP, instead of actually delivering
+    // the implementation. 1.5 nats was insufficient at temp=1.0;
+    // 3.0 is enough to keep EOS below the next-best continuation at
+    // most natural endpoints. The prior CN-80B-18 concern about `0.5
+    // → repeat loops` was driven by Coder-Next-80B specifically;
+    // Qwen3.6 doesn't show that failure at this bias on chat tests.
+    const STOP_BIAS: f32 = 3.0;
     // CN-80B-22 — env-gated TP-decode profiling. When FLAMBEAU_PROFILE_DECODE
     // is set, enable HipEvent section recording for `n` warm-up-skipped decode
     // steps, then flush + dump aggregate per-section ms to stderr. Skips the
@@ -1376,7 +1573,13 @@ fn run_completion_blocking_streaming(
         if !relax_stop_mask {
             for &sid in stop_ids {
                 if (sid as usize) < logits_buf.len() {
-                    if force_mask {
+                    // Sampler-G — always_stop_ids (`<think>`/`</think>`)
+                    // get NEG_INFINITY in every step, even outside the
+                    // early-window mask. The model should never emit
+                    // them when `enable_thinking=false`.
+                    if always_stop_ids.contains(&sid) {
+                        logits_buf[sid as usize] = f32::NEG_INFINITY;
+                    } else if force_mask {
                         logits_buf[sid as usize] = f32::NEG_INFINITY;
                     } else {
                         logits_buf[sid as usize] -= STOP_BIAS;
@@ -1391,6 +1594,37 @@ fn run_completion_blocking_streaming(
             finish_reason = "stop";
             break;
         }
+        // **Sampler-G** string-level stop. The model can route around
+        // single-token `</think>` masks by emitting the multi-token
+        // text form (`</`, `think`, `>` or `<end`, `_thought`, `>`).
+        // Detect on the running emitted text and cut cleanly. Cheap:
+        // string contains check on the trailing window only. Use a
+        // char-safe slice — `emitted_text.len() - 64` can land inside
+        // a multi-byte UTF-8 codepoint (e.g. `’` at byte 805..808),
+        // which would panic. Walk back to the nearest char boundary.
+        if !relax_stop_mask {
+            let tail_window = if emitted_text.len() > 64 {
+                let mut start = emitted_text.len() - 64;
+                while start < emitted_text.len() && !emitted_text.is_char_boundary(start) {
+                    start += 1;
+                }
+                &emitted_text[start..]
+            } else {
+                emitted_text.as_str()
+            };
+            if tail_window.contains("</think>")
+                || tail_window.contains("<end_thought>")
+                || tail_window.contains("<end_think>")
+                || tail_window.contains("</thought>")
+            {
+                finish_reason = "stop";
+                tracing::info!(
+                    target: "server.completion.string_stop",
+                    "string-level stop on reasoning-marker leak"
+                );
+                break;
+            }
+        }
     }
 
     inflight
@@ -1404,6 +1638,16 @@ fn run_completion_blocking_streaming(
         finish_reason,
         total_ms = request_start.elapsed().as_secs_f64() * 1000.0,
         "streaming completion finished"
+    );
+
+    // Sampler-G debug — preview of what we actually streamed.
+    let resp_preview = preview_text(&emitted_text, 240);
+    tracing::info!(
+        target: "server.resp",
+        completion_tokens = generated.len() as u32,
+        finish_reason = %finish_reason,
+        resp = %resp_preview,
+        "streaming chat_completions response"
     );
 
     Ok((finish_reason.to_owned(), prompt_tokens, generated.len() as u32))
@@ -1421,7 +1665,19 @@ fn finalise(
     let stop_ids = &state.tokenizer.stop_ids;
     let completion_tokens = generated.len() as u32;
     generated.retain(|t| !stop_ids.contains(t));
-    let text = state.tokenizer.decode(&generated).context("decode")?;
+    let mut text = state.tokenizer.decode(&generated).context("decode")?;
+    // **Sampler-G** — truncate at any leaked reasoning marker. The
+    // string-level stop in the decode loop catches these mid-flight,
+    // but the marker itself is already in `text`; cut before its
+    // first occurrence so the client sees a clean response.
+    for marker in ["</think>", "<end_thought>", "<end_think>", "</thought>"] {
+        if let Some(idx) = text.find(marker) {
+            text.truncate(idx);
+        }
+    }
+    // Trim trailing whitespace introduced by the now-removed marker.
+    let trimmed_len = text.trim_end().len();
+    text.truncate(trimmed_len);
     Ok((text, prompt_tokens, completion_tokens, reason.to_owned()))
 }
 

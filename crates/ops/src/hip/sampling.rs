@@ -24,9 +24,12 @@ use flambeau_core::DevicePtr;
 use super::OpsRegistry;
 
 /// Caller-visible upper bound on `K`. Must match `SAMPLER_K_OUT_MAX` in
-/// `kernels-hip/src/kernels/sampler_topk_softmax_f32.cu`. Higher K
-/// requires a different kernel layout (multi-block); not yet wired.
-pub const SAMPLER_K_OUT_MAX: usize = 256;
+/// `kernels-hip/src/kernels/sampler_topk_softmax_f32.cu`. Bumped from
+/// 256 to 2048 to match Sampler-A's host-side
+/// `effective_top_k = mode.top_k.unwrap_or(2048)`; smaller K caused
+/// the GPU sampler to bias multinomial toward EOS at natural-endpoint
+/// positions (one-sentence-then-stop chat-truncation bug).
+pub const SAMPLER_K_OUT_MAX: usize = 2048;
 
 /// **Sampler-D4 (#212)** — apply repetition / presence / frequency
 /// penalties in place on `[V]` F32 logits. `token_counts` is a flat

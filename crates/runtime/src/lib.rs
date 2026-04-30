@@ -10,6 +10,7 @@
 #![forbid(unsafe_op_in_unsafe_fn)]
 
 pub mod collective;
+pub mod json_grammar;
 pub mod kv_cache;
 pub mod mesh;
 pub mod sampling;

@@ -36,6 +36,17 @@ pub struct GgufTokenizer {
     /// plus template-specific end-of-turn markers (e.g. Qwen's `<|im_end|>`).
     /// The server's stop-check loop uses this instead of `eos_id` alone.
     pub stop_ids: Vec<u32>,
+    /// **Sampler-G** — subset of `stop_ids` that should ALWAYS stop
+    /// generation, even within the early-tokens MIN_RESPONSE_TOKENS
+    /// window. Currently `<think>` and `</think>` (Qwen3.6 reasoning
+    /// markers) — these should never be emitted by the model when the
+    /// chat template ran with `enable_thinking=false`. The early-window
+    /// mask was designed to prevent immediate `<|im_end|>`, not to give
+    /// the model a chance to leak reasoning artefacts. Treating these
+    /// as always-stop kills the chat-truncation pattern where the
+    /// model emits `</think>` after a short answer and then duplicates
+    /// the response in a confused-reasoning loop.
+    pub always_stop_ids: Vec<u32>,
 }
 
 impl GgufTokenizer {
@@ -197,15 +208,40 @@ pub fn load_from_gguf(file: &GgufFile) -> Result<GgufTokenizer> {
     // user-turn-start), the response has gone off the rails and we
     // should cut it. The model should never legitimately emit the
     // turn-start marker in its own response.
+    //
+    // **Sampler-G (2026-04-30)** — also stop on `<think>` and `</think>`.
+    // The server renders chat templates with `enable_thinking=false`,
+    // which puts a CLOSED `<think>\n\n</think>\n\n` block in the prompt
+    // before the assistant content. Qwen3.6 (especially 27B) sometimes
+    // hallucinates a fresh `</think>` mid-response and then re-emits its
+    // answer (a confused-reasoning-mode leakage where the model treats
+    // its own content as "thinking"). Live-observed on `Hello` →
+    // `Hello! How can I help you today?\n</think>\n\nHello! How can I
+    // help...` repeating until eventual `<|im_end|>`. Treating
+    // `<think>` / `</think>` as stop markers cuts the response cleanly
+    // at the first leak. If a future caller needs explicit reasoning
+    // mode, opt in via `enable_thinking=true` AND filter these from
+    // stop_ids at the server layer.
+    let mut always_stop_ids: Vec<u32> = Vec::new();
     for needle in [
         "<|im_end|>",
         "<|im_start|>",
         "<|endoftext|>",
         "<|eot_id|>",
+        "<think>",
+        "</think>",
     ] {
         if let Some(id) = find_vocab_id(tokens_arr, needle) {
             if !stop_ids.contains(&id) {
                 stop_ids.push(id);
+            }
+            // `<think>` / `</think>` (and their open variants) bypass
+            // the server's MIN_RESPONSE_TOKENS early-window mask. See
+            // `always_stop_ids` doc on `GgufTokenizer`.
+            if (needle == "<think>" || needle == "</think>")
+                && !always_stop_ids.contains(&id)
+            {
+                always_stop_ids.push(id);
             }
         }
     }
@@ -217,6 +253,7 @@ pub fn load_from_gguf(file: &GgufFile) -> Result<GgufTokenizer> {
         pad_id,
         vocab_size: tokens_arr.len() as u32,
         stop_ids,
+        always_stop_ids,
     })
 }
 
