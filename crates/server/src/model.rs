@@ -116,41 +116,43 @@ impl Inflight {
     /// `prompt_len` sizes the PP prefill scratch; ignored for TP (TP
     /// loops `forward_one_token_tp` over the prompt instead).
     pub fn new(model: &LoadedModel, cluster: &HipCluster, prompt_len: usize) -> Result<Self> {
-        // **early reject for over-cap prompts** — naive prefill
-        // materialises the full attention matrix (heads × L² per layer)
-        // on a single rank. There is no working chunked-prefill path
-        // yet (a wired-up attempt produced HIP error 700 on the first
-        // decode step — KV state from chunked writes is incompatible
-        // with the decode kernel; a real fix needs deeper investigation
-        // and lives as V2 work). Reject prompts that would obviously
-        // OOM before the alloc loop leaks gigabytes of VRAM.
+        // **early reject for non-chunked paths only.** Hybrid (pp+tp)
+        // routes prefill_logits through `forward_prefill_hybrid_logits`
+        // which we now drive in chunks of FLAMBEAU_PREFILL_UBATCH; each
+        // call allocates a *fresh* scratch sized to the chunk, so the
+        // peak per-rank scratch is bounded by chunk_size, not
+        // prompt_len. PP and TP routes still use single-shot prefill
+        // (chunked PP+decode tripped HIP 700 — task #237), so they
+        // still need the cap.
         let cfg = match model {
             LoadedModel::Pp { model, .. } => &model.config,
             LoadedModel::Tp { model, .. } => &model.config,
             LoadedModel::Hybrid { model, .. } => &model.config,
         };
-        let hidden_bytes = 2 * prompt_len * cfg.hidden_size * 2;
-        let attn_bytes = cfg.num_heads * prompt_len * prompt_len * 2;
-        let est_peak: u64 = (hidden_bytes + attn_bytes) as u64;
-        let cap_bytes: u64 = std::env::var("FLAMBEAU_MAX_PREFILL_BYTES")
-            .ok()
-            .and_then(|s| s.parse().ok())
-            .unwrap_or(12 * 1024 * 1024 * 1024);
-        if est_peak > cap_bytes {
-            tracing::warn!(
-                target: "server.inflight",
-                prompt_len,
-                est_peak_bytes = est_peak,
-                cap_bytes,
-                "rejecting request: estimated prefill scratch exceeds cap (no chunked-prefill yet)"
-            );
-            bail!(
-                "prompt too long for this server build: prompt_len={prompt_len} would need ~{:.1} GB \
-                 of prefill scratch (cap {:.1} GB). Lower the prompt length or set \
-                 FLAMBEAU_MAX_PREFILL_BYTES to override (will likely OOM).",
-                est_peak as f64 / 1e9,
-                cap_bytes as f64 / 1e9,
-            );
+        let is_hybrid = matches!(model, LoadedModel::Hybrid { .. });
+        if !is_hybrid {
+            let hidden_bytes = 2 * prompt_len * cfg.hidden_size * 2;
+            let attn_bytes = cfg.num_heads * prompt_len * prompt_len * 2;
+            let est_peak: u64 = (hidden_bytes + attn_bytes) as u64;
+            let cap_bytes: u64 = std::env::var("FLAMBEAU_MAX_PREFILL_BYTES")
+                .ok()
+                .and_then(|s| s.parse().ok())
+                .unwrap_or(12 * 1024 * 1024 * 1024);
+            if est_peak > cap_bytes {
+                tracing::warn!(
+                    target: "server.inflight",
+                    prompt_len,
+                    est_peak_bytes = est_peak,
+                    cap_bytes,
+                    "rejecting non-hybrid request: estimated prefill scratch exceeds cap (chunked PP+decode broken — task #237; use pp+tp for long prompts)"
+                );
+                bail!(
+                    "prompt too long for this topology: prompt_len={prompt_len} would need ~{:.1} GB \
+                     of prefill scratch (cap {:.1} GB). Use --mesh-mode pp+tp for chunked prefill.",
+                    est_peak as f64 / 1e9,
+                    cap_bytes as f64 / 1e9,
+                );
+            }
         }
         let scratch_tokens = prompt_len.max(1);
 
@@ -312,17 +314,54 @@ pub fn prefill_logits(
                 stage_ars,
             },
             Inflight::Hybrid { session, decode },
-        ) => forward_prefill_hybrid_logits(
-            hmodel,
-            decode,
-            cluster,
-            stage_ars,
-            session,
-            prompt_ids,
-            0,
-            logits_out,
-        )
-        .context("hybrid prefill_logits"),
+        ) => {
+            // Chunked hybrid prefill (pp+tp). The hybrid path's batched
+            // entry allocates a *fresh* ShardedForwardPrefillScratchHybrid
+            // per call and disposes on exit (forward/hybrid.rs:138),
+            // which gives each chunk a clean scratch state — the
+            // suspected reason hybrid handles cross-chunk KV correctly
+            // where the PP-recursive scratch reuse doesn't (task #237).
+            // Chunk size is FLAMBEAU_PREFILL_UBATCH (default 1024).
+            let chunk: usize = std::env::var("FLAMBEAU_PREFILL_UBATCH")
+                .ok()
+                .and_then(|s| s.parse().ok())
+                .filter(|n: &usize| *n > 0)
+                .unwrap_or(1024);
+            let l = prompt_ids.len();
+            if l <= chunk {
+                forward_prefill_hybrid_logits(
+                    hmodel, decode, cluster, stage_ars, session, prompt_ids, 0, logits_out,
+                )
+                .context("hybrid prefill_logits")
+            } else {
+                tracing::debug!(
+                    target: "server.prefill",
+                    prompt_len = l,
+                    chunk,
+                    "chunked hybrid prefill"
+                );
+                let mut start = 0usize;
+                let mut sink: Vec<f32> = Vec::new();
+                while start < l {
+                    let end = (start + chunk).min(l);
+                    let is_last = end == l;
+                    let dst: &mut Vec<f32> = if is_last { &mut *logits_out } else { &mut sink };
+                    forward_prefill_hybrid_logits(
+                        hmodel,
+                        decode,
+                        cluster,
+                        stage_ars,
+                        session,
+                        &prompt_ids[start..end],
+                        start,
+                        dst,
+                    )
+                    .with_context(|| format!("hybrid prefill_logits chunk [{start}..{end})"))?;
+                    start = end;
+                }
+                Ok(())
+            }
+        }
         _ => bail!("LoadedModel/Inflight variant mismatch"),
     }
 }
