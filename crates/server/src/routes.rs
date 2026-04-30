@@ -213,11 +213,16 @@ impl ServerState {
         // Try to become the dispatch leader for this round.
         if let Ok(_dispatch_lock) = self.batched_dispatcher.try_lock() {
             // Brief wait to let other handlers push their pending
-            // decode entries — this is the batching window. 200 µs is
-            // small relative to a per-step decode wall (10-30 ms on
-            // 9B/27B/35B PP4) so the latency cost is negligible
-            // while letting concurrent requests join the batch.
-            std::thread::sleep(std::time::Duration::from_micros(200));
+            // decode entries — this is the batching window. Tuned via
+            // `FLAMBEAU_BATCH_WINDOW_US` (default 1500 µs). Small
+            // relative to a per-step decode wall (15-30 ms on
+            // 9B/27B/35B PP4) so the latency cost is < 10 % of one
+            // step, while giving concurrent handlers time to push.
+            let window_us: u64 = std::env::var("FLAMBEAU_BATCH_WINDOW_US")
+                .ok()
+                .and_then(|s| s.parse().ok())
+                .unwrap_or(1500);
+            std::thread::sleep(std::time::Duration::from_micros(window_us));
 
             // Drain the queue.
             let pending: Vec<PendingDecode> = {
@@ -2170,12 +2175,225 @@ async fn run_completion_ids(
     .map_err(|e| anyhow!("spawn_blocking join failed: {e}"))?
 }
 
+/// **P2.9b-i2-B-wire** — gate predicate for the scheduler-aware
+/// chat handler. The scheduler path is a focused subset of the full
+/// `run_completion_blocking_ids` flow: greedy, PP topology, no
+/// spec-decode, no GPU sampler, no JSON mode, no logprobs, no tools.
+/// All other configurations fall through to the legacy handler.
+fn scheduler_can_engage(state: &ServerState, params: &SamplingParams) -> bool {
+    if std::env::var("FLAMBEAU_BATCHED_DECODE").is_err() {
+        return false;
+    }
+    let pp_no_mtp = matches!(
+        &state.model,
+        LoadedModel::Pp { mtp: None, .. }
+    );
+    if !pp_no_mtp {
+        return false;
+    }
+    let s = &params.sampling;
+    s.is_greedy() && !params.json_mode && params.collect_logprobs.is_none()
+}
+
+/// **P2.9b-i2-B-wire** — focused chat handler that uses the scheduler.
+/// Engaged when [`scheduler_can_engage`] returns true. Releases the
+/// slot's mutex during the decode loop so the scheduler-leader can
+/// `blocking_lock` other slots' mutexes for batched dispatch.
+///
+/// Subset of `run_completion_blocking_ids`'s feature set: greedy
+/// argmax with the same stop-mask + stop-bias as the legacy host
+/// path. No spec / GPU sampler / JSON / logprobs / tools.
+fn run_completion_scheduler_pp_blocking(
+    state: SharedState,
+    prompt_ids: Vec<u32>,
+    params: SamplingParams,
+    relax_stop_mask: bool,
+) -> Result<CompletionOutput> {
+    let request_start = Instant::now();
+    let slot_idx = state.claim_slot_blocking();
+    // Wrap the body in a closure so any error path runs `release_slot`.
+    let result = (|| -> Result<CompletionOutput> {
+        if prompt_ids.is_empty() {
+            bail!("prompt tokenized to 0 tokens");
+        }
+        let prompt_tokens = prompt_ids.len() as u32;
+
+        tracing::info!(
+            target: "server.completion.start",
+            prompt_tokens,
+            max_tokens = params.max_tokens,
+            slot_idx,
+            scheduler = true,
+            "completion request accepted (scheduler path)"
+        );
+
+        let cluster: &flambeau_backend_hip::HipCluster = &state.cluster;
+        let model = &state.model;
+        let stop_ids = &state.tokenizer.stop_ids;
+        let always_stop_ids = &state.tokenizer.always_stop_ids;
+        let is_stop = |t: u32| stop_ids.contains(&t);
+        let vocab = state.cfg.vocab_size;
+
+        // ---------- Stage 1: brief mutex hold for prefill + first-token sample.
+        let first_next = {
+            let mut guard = state.inflight_pool[slot_idx].blocking_lock();
+            guard
+                .reset_for_next_request(cluster, model)
+                .context("reset inflight for new request")?;
+            let mut logits_buf: Vec<f32> = Vec::with_capacity(vocab);
+            crate::model::prefill_logits(
+                model,
+                cluster,
+                &mut *guard,
+                &prompt_ids,
+                &mut logits_buf,
+            )
+            .context("scheduler-path prefill")?;
+            // First-token stop mask: NEG_INFINITY all stop ids so the
+            // model is forced to emit a content token first.
+            if !relax_stop_mask {
+                for &sid in stop_ids {
+                    if (sid as usize) < logits_buf.len() {
+                        logits_buf[sid as usize] = f32::NEG_INFINITY;
+                    }
+                }
+            }
+            // Greedy argmax.
+            let mut best_idx = 0usize;
+            let mut best_val = f32::NEG_INFINITY;
+            for (i, &v) in logits_buf.iter().enumerate() {
+                if v > best_val {
+                    best_val = v;
+                    best_idx = i;
+                }
+            }
+            best_idx as u32
+        }; // mutex drops here
+
+        let mut generated: Vec<u32> = Vec::with_capacity(params.max_tokens as usize);
+        generated.push(first_next);
+        if is_stop(first_next) {
+            return finalise(
+                &state,
+                prompt_tokens,
+                generated,
+                "stop",
+                &params.stop_strings,
+                None,
+            );
+        }
+
+        let mut last_token = first_next;
+        let mut finish_reason = "length";
+        const MIN_RESPONSE_TOKENS: usize = 24;
+        const STOP_BIAS: f32 = 3.0;
+        let user_stop_max = params
+            .stop_strings
+            .iter()
+            .map(|s| s.len())
+            .max()
+            .unwrap_or(0);
+
+        // ---------- Stage 2: decode loop via scheduler. NO mutex held.
+        for step in 1..params.max_tokens as usize {
+            let force_mask = step < MIN_RESPONSE_TOKENS && !relax_stop_mask;
+            let mut logits = state
+                .decode_via_scheduler(slot_idx, last_token, prompt_ids.len() + step)
+                .context("scheduler-path decode step")?;
+            if !relax_stop_mask {
+                for &sid in stop_ids {
+                    if (sid as usize) < logits.len() {
+                        if always_stop_ids.contains(&sid) {
+                            logits[sid as usize] = f32::NEG_INFINITY;
+                        } else if force_mask {
+                            logits[sid as usize] = f32::NEG_INFINITY;
+                        } else {
+                            logits[sid as usize] -= STOP_BIAS;
+                        }
+                    }
+                }
+            }
+            // Greedy argmax.
+            let mut best_idx = 0usize;
+            let mut best_val = f32::NEG_INFINITY;
+            for (i, &v) in logits.iter().enumerate() {
+                if v > best_val {
+                    best_val = v;
+                    best_idx = i;
+                }
+            }
+            let next = best_idx as u32;
+            if is_stop(next) {
+                finish_reason = "stop";
+                break;
+            }
+            generated.push(next);
+            last_token = next;
+            if generated.len() >= params.max_tokens as usize {
+                break;
+            }
+            // Stop-string detection on the recent decoded window
+            // (mirrors the legacy handler).
+            let need_user_check = !params.stop_strings.is_empty();
+            if (need_user_check || !relax_stop_mask)
+                && (step % 4 == 0 || step >= MIN_RESPONSE_TOKENS)
+            {
+                let n = generated.len();
+                let token_window = 16.max((user_stop_max / 2).min(64));
+                let from = n.saturating_sub(token_window);
+                if let Ok(tail) = state.tokenizer.decode(&generated[from..]) {
+                    let marker_hit = !relax_stop_mask
+                        && (tail.contains("</think>")
+                            || tail.contains("<end_thought>")
+                            || tail.contains("<end_think>")
+                            || tail.contains("</thought>"));
+                    let user_hit = params
+                        .stop_strings
+                        .iter()
+                        .any(|s| tail.contains(s.as_str()));
+                    if marker_hit || user_hit {
+                        finish_reason = "stop";
+                        break;
+                    }
+                }
+            }
+        }
+
+        tracing::info!(
+            target: "server.completion.finish",
+            prompt_tokens,
+            completion_tokens = generated.len() as u32,
+            finish_reason,
+            total_ms = request_start.elapsed().as_secs_f64() * 1000.0,
+            scheduler = true,
+            "completion request finished (scheduler path)"
+        );
+
+        finalise(
+            &state,
+            prompt_tokens,
+            generated,
+            finish_reason,
+            &params.stop_strings,
+            None,
+        )
+    })();
+    state.release_slot(slot_idx);
+    result
+}
+
 fn run_completion_blocking_ids(
     state: SharedState,
     prompt_ids: Vec<u32>,
     params: SamplingParams,
     relax_stop_mask: bool,
 ) -> Result<CompletionOutput> {
+    // **P2.9b-i2-B-wire** — opt into the scheduler path when
+    // conditions allow. Greedy + PP + no MTP + no JSON + no logprobs.
+    if scheduler_can_engage(&state, &params) {
+        return run_completion_scheduler_pp_blocking(state, prompt_ids, params, relax_stop_mask);
+    }
+
     let request_start = Instant::now();
 
     // **P2.9b-i1 (multi-slot pool)** — acquire an idle inflight slot.
