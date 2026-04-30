@@ -386,6 +386,14 @@ pub async fn serve(cfg: ServeConfig) -> Result<()> {
         inflight_pool.push(Mutex::new(slot));
     }
 
+    // **P2.9b-i2-B (scheduler)** — request-lifetime claim flags +
+    // empty pending queue + leader gate. These are used by the
+    // scheduler-aware decode path (`FLAMBEAU_BATCHED_DECODE=1`)
+    // to aggregate concurrent decode requests into batched dispatches.
+    let slot_in_use: Vec<std::sync::atomic::AtomicBool> = (0..inflight_slots)
+        .map(|_| std::sync::atomic::AtomicBool::new(false))
+        .collect();
+
     let state: SharedState = Arc::new(ServerState {
         model_id: cfg.model_id.clone(),
         cfg: model_cfg,
@@ -394,6 +402,9 @@ pub async fn serve(cfg: ServeConfig) -> Result<()> {
         tokenizer,
         chat_template,
         inflight_pool,
+        slot_in_use,
+        batched_pending: std::sync::Mutex::new(Vec::new()),
+        batched_dispatcher: std::sync::Mutex::new(()),
         remote_tools,
         agent_stats: crate::agent_stats::AgentStatsRing::default(),
         tool_call_format_default,

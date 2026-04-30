@@ -47,8 +47,38 @@ pub struct ServerState {
     /// lock round-robin, then block on slot 0 if all busy). Holding
     /// the guard means "this request owns the slot"; releasing it
     /// returns the slot to the pool. Decode kernels still serialise
-    /// on the GPU stream — true batched throughput is P2.9b-i2.
+    /// on the GPU stream — true batched throughput is P2.9b-i2-B
+    /// (the scheduler below).
     pub inflight_pool: Vec<Mutex<Inflight>>,
+    /// **P2.9b-i2-B (scheduler)** — request-lifetime claim flag for
+    /// each slot. Distinct from `inflight_pool`'s mutex: the mutex
+    /// guards short-term *exclusive access* to the `Inflight`; this
+    /// `AtomicBool` records the *long-term ownership* of the slot
+    /// across one whole HTTP request. Handlers `claim_slot_blocking`
+    /// at request entry, perform prefill while holding the slot's
+    /// mutex briefly, then *release the mutex* during the decode loop
+    /// so the scheduler-leader can `blocking_lock` the slot
+    /// alongside other slots' mutexes for batched dispatch. The
+    /// claim is released only at request exit. Sized parallel to
+    /// `inflight_pool`. Active when `FLAMBEAU_BATCHED_DECODE=1`;
+    /// otherwise the legacy decode path holds the mutex for the full
+    /// request lifetime and this field is ignored.
+    pub slot_in_use: Vec<std::sync::atomic::AtomicBool>,
+    /// **P2.9b-i2-B** — pending-decode queue. Each handler in the
+    /// scheduler-aware decode loop pushes a `PendingDecode` carrying
+    /// `(slot_idx, token, position, response_tx)`. The leader (the
+    /// handler that wins `batched_dispatcher`) drains the queue,
+    /// locks each referenced slot, runs `forward_decode_batched_pp`
+    /// across the batch, and sends per-slot logits back via the
+    /// `response_tx` channels. Non-leader handlers just wait on
+    /// their `rx`.
+    pub batched_pending: std::sync::Mutex<Vec<PendingDecode>>,
+    /// **P2.9b-i2-B** — single-leader gate. The handler that
+    /// `try_lock`s this becomes the dispatch leader for the next
+    /// batched call. Held only during dispatch (lock ⇒ drain queue
+    /// ⇒ blocking_lock the relevant slots ⇒ batched forward ⇒
+    /// distribute responses ⇒ unlock).
+    pub batched_dispatcher: std::sync::Mutex<()>,
     /// Tools discovered on the `--mcp <url>` upstreams at startup
     /// (ROADMAP-V2 §M2.1). Merged into each request's `tools[]` before
     /// rendering the Jinja template, so the model sees them alongside
@@ -83,6 +113,17 @@ pub struct ServerState {
 
 pub type SharedState = Arc<ServerState>;
 
+/// **P2.9b-i2-B** — one queued decode request awaiting batched dispatch.
+/// Pushed by the scheduler-aware decode loop (`decode_via_scheduler`)
+/// and drained by the leader (the first handler to acquire
+/// `batched_dispatcher`).
+pub struct PendingDecode {
+    pub slot_idx: usize,
+    pub token_id: u32,
+    pub position: usize,
+    pub response: std::sync::mpsc::Sender<anyhow::Result<Vec<f32>>>,
+}
+
 impl ServerState {
     /// **P2.9b-i1** — acquire an idle inflight slot, blocking until one
     /// is available. Iterates the pool with `try_lock` first; if every
@@ -104,6 +145,225 @@ impl ServerState {
         // a single-queue head-of-line.
         let g = self.inflight_pool[0].blocking_lock();
         (0, g)
+    }
+
+    /// **P2.9b-i2-B** — claim a slot for the lifetime of a request via
+    /// `slot_in_use[idx]` CAS. Distinct from `acquire_inflight_blocking`,
+    /// which holds the slot's mutex; the claim records *long-term
+    /// ownership* of the slot across the full request, while the
+    /// mutex is acquired only briefly within prefill / scheduler
+    /// dispatch / sampler-sandwich. Spins with a short backoff if no
+    /// slot is free.
+    pub fn claim_slot_blocking(&self) -> usize {
+        use std::sync::atomic::Ordering::{Acquire, Relaxed};
+        loop {
+            for (idx, taken) in self.slot_in_use.iter().enumerate() {
+                if taken
+                    .compare_exchange(false, true, Acquire, Relaxed)
+                    .is_ok()
+                {
+                    return idx;
+                }
+            }
+            std::thread::sleep(std::time::Duration::from_micros(100));
+        }
+    }
+
+    /// **P2.9b-i2-B** — release a request-lifetime slot claim. Pair
+    /// with [`claim_slot_blocking`].
+    pub fn release_slot(&self, idx: usize) {
+        self.slot_in_use[idx].store(false, std::sync::atomic::Ordering::Release);
+    }
+
+    /// **P2.9b-i2-B** — push one decode request into the batched
+    /// queue and wait for the leader to dispatch.
+    ///
+    /// Caller must NOT be holding `inflight_pool[slot_idx]`'s mutex —
+    /// the leader needs to `blocking_lock` it during dispatch.
+    ///
+    /// If we win `batched_dispatcher`, we become the leader: brief
+    /// 200 µs sleep to allow other handlers to push, then drain the
+    /// queue, lock each referenced slot's `Inflight`, run
+    /// `forward_decode_batched_pp` across the batch, and fire each
+    /// pending entry's response sender. The leader then awaits its
+    /// own response on the same channel as the others.
+    ///
+    /// Errors propagate through the response channel; PP-only
+    /// (TP/Hybrid still go through legacy `decode_logits`).
+    pub fn decode_via_scheduler(
+        &self,
+        slot_idx: usize,
+        token: u32,
+        position: usize,
+    ) -> anyhow::Result<Vec<f32>> {
+        let (tx, rx) = std::sync::mpsc::channel::<anyhow::Result<Vec<f32>>>();
+        {
+            let mut q = self
+                .batched_pending
+                .lock()
+                .expect("batched_pending mutex poisoned");
+            q.push(PendingDecode {
+                slot_idx,
+                token_id: token,
+                position,
+                response: tx,
+            });
+        }
+
+        // Try to become the dispatch leader for this round.
+        if let Ok(_dispatch_lock) = self.batched_dispatcher.try_lock() {
+            // Brief wait to let other handlers push their pending
+            // decode entries — this is the batching window. 200 µs is
+            // small relative to a per-step decode wall (10-30 ms on
+            // 9B/27B/35B PP4) so the latency cost is negligible
+            // while letting concurrent requests join the batch.
+            std::thread::sleep(std::time::Duration::from_micros(200));
+
+            // Drain the queue.
+            let pending: Vec<PendingDecode> = {
+                let mut q = self
+                    .batched_pending
+                    .lock()
+                    .expect("batched_pending mutex poisoned");
+                std::mem::take(&mut *q)
+            };
+
+            if !pending.is_empty() {
+                if let Err(e) = self.dispatch_batched_pending(&pending) {
+                    // Fan the error out to all waiters so none stall.
+                    for p in &pending {
+                        let _ = p.response.send(Err(anyhow!(
+                            "batched dispatch failed: {e}"
+                        )));
+                    }
+                }
+            }
+            // Dispatcher lock drops here.
+        }
+
+        // Wait for our response (whether we were leader or not).
+        rx.recv()
+            .map_err(|e| anyhow!("decode_via_scheduler recv: {e}"))?
+    }
+
+    /// **P2.9b-i2-B** — leader's dispatch step. Locks each referenced
+    /// slot's `Inflight`, builds the `BatchSlot` list, runs
+    /// `forward_decode_batched_pp`, and sends per-slot logits via
+    /// the response senders.
+    ///
+    /// Returns Err on dispatch failure; caller fans the error to all
+    /// pending senders.
+    fn dispatch_batched_pending(
+        &self,
+        pending: &[PendingDecode],
+    ) -> anyhow::Result<()> {
+        use flambeau_qwen3_moe::forward::{forward_decode_batched_pp, BatchSlot};
+        // Acquire each referenced slot's mutex. blocking_lock here is
+        // safe — the request handlers have *released* the mutex
+        // before pushing pending (their long-term claim is
+        // `slot_in_use`, not the mutex).
+        let mut guards: Vec<tokio::sync::MutexGuard<'_, Inflight>> = pending
+            .iter()
+            .map(|p| self.inflight_pool[p.slot_idx].blocking_lock())
+            .collect();
+
+        // Extract per-slot &mut Session + identify the leader's
+        // ShardedForwardPrefillScratch (used as the batched workspace).
+        // PP-only — TP / Hybrid bail.
+        let model = match &self.model {
+            LoadedModel::Pp { model, .. } => model,
+            _ => bail!(
+                "dispatch_batched_pending: scheduler is PP-only (TP=#264, Hybrid=#265)"
+            ),
+        };
+        let cluster: &flambeau_backend_hip::HipCluster = &self.cluster;
+
+        // Split the guards into (&mut Session, &mut ShardedForwardPrefillScratch)
+        // pairs. Use the first guard's prefill scratch as the shared
+        // batched workspace; the rest of the slots only contribute
+        // their sessions.
+        let n = pending.len();
+        // SAFETY rationale: `guards` is a Vec of distinct MutexGuards,
+        // each pointing at a unique `Inflight` in `self.inflight_pool`.
+        // We need disjoint &mut borrows to each guard's interior. We
+        // do this via raw-pointer split because the borrow checker
+        // can't see that the guards are disjoint by index.
+        let guards_ptr = guards.as_mut_ptr();
+
+        let mut sessions: Vec<&mut flambeau_qwen3_moe::Qwen3MoEShardedSession> =
+            Vec::with_capacity(n);
+        // The shared batched scratch is the first guard's prefill scratch.
+        // We borrow it via the same raw-pointer split, taking care that
+        // it doesn't alias any of the session borrows we form below
+        // (sessions and prefill are distinct fields of Inflight::Pp).
+        let prefill_scratch: &mut flambeau_qwen3_moe::forward::ShardedForwardPrefillScratch = {
+            // SAFETY: index 0 is in bounds (n >= 1 since pending is
+            // non-empty). The reborrow forms a unique &mut to the
+            // first guard's `prefill` field; the loop below only
+            // touches each guard's `session` field, which is disjoint.
+            unsafe {
+                let g0: &mut Inflight = &mut **guards_ptr;
+                match g0 {
+                    Inflight::Pp { prefill, .. } => prefill,
+                    _ => bail!(
+                        "dispatch_batched_pending: leader slot is not Inflight::Pp"
+                    ),
+                }
+            }
+        };
+
+        for s in 0..n {
+            // SAFETY: s in 0..n; each guard is unique; we extract
+            // &mut session from each guard (disjoint from the prefill
+            // scratch we already split off above).
+            unsafe {
+                let g: &mut Inflight = &mut **guards_ptr.add(s);
+                match g {
+                    Inflight::Pp { session, .. } => sessions.push(session),
+                    _ => bail!(
+                        "dispatch_batched_pending: slot {s} is not Inflight::Pp"
+                    ),
+                }
+            }
+        }
+
+        let slots: Vec<BatchSlot> = pending
+            .iter()
+            .enumerate()
+            .map(|(s, p)| BatchSlot {
+                idx: s,
+                token_id: p.token_id,
+                position: p.position,
+            })
+            .collect();
+
+        // Allocate per-slot logits buffers locally and attach mutable
+        // slice references for the call.
+        let vocab = self.cfg.vocab_size;
+        let mut logits_owned: Vec<Vec<f32>> = (0..n)
+            .map(|_| Vec::with_capacity(vocab))
+            .collect();
+        let mut logits_refs: Vec<&mut Vec<f32>> =
+            logits_owned.iter_mut().collect();
+
+        forward_decode_batched_pp(
+            model,
+            sessions.as_mut_slice(),
+            cluster,
+            prefill_scratch,
+            &slots,
+            logits_refs.as_mut_slice(),
+        )
+        .context("forward_decode_batched_pp under scheduler")?;
+
+        // Dispatch results back to each pending entry. Drop guards
+        // *after* sending so handlers can't observe a stale state.
+        for (s, p) in pending.iter().enumerate() {
+            let logits = std::mem::take(&mut logits_owned[s]);
+            let _ = p.response.send(Ok(logits));
+        }
+        drop(guards);
+        Ok(())
     }
 }
 
