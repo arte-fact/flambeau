@@ -669,6 +669,301 @@ pub fn forward_full_attn_prefill_tp(
     Ok(())
 }
 
+/// **P2.9b-i2-C** — batched decode for one full-attention layer on a
+/// `tp_world`-rank TP mesh.
+///
+/// Mirrors [`forward_full_attn_prefill_tp`] for the front-end ops
+/// (rmsnorm, Q|gate / K / V projection, per-head Q/K rmsnorm, RoPE) at
+/// `n_tokens = slot_positions.len()` — those steps batch across slots
+/// at fixed N. Steps 8 (KV-append) and 9 (attention) split per-slot
+/// because each slot owns its own per-rank KV cache and query history.
+///
+/// Output is a per-rank partial `[N, hidden]` F16 in `partial_attn_out`;
+/// the caller AllReduces across ranks (BarP2pAllReduce) to produce the
+/// replicated `[N, hidden]` attention contribution.
+///
+/// Layout:
+/// - `slot_kv_caches[s]` is the **rank-local** KV cache for slot `s`
+///   (sized for `local_n_kv_heads`). All N caches must be FullAttn
+///   F16Contig. Q8 KV is V2.
+/// - `slot_positions[s]` is the cache tail for slot `s` *before* this
+///   token is appended.
+/// - `scratch` is a single shared per-rank `FullAttnPrefillScratch`
+///   sized for `max_tokens >= N`.
+///
+/// **What this function does NOT do**: AllReduce. Caller schedules
+/// `BarP2pAllReduce::residual_*` on `partial_attn_out` immediately
+/// after this returns.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "matches forward_full_attn_prefill_tp's flat parameter list — \
+              scheduler hot path; struct copies regress measurable wall."
+)]
+pub fn forward_full_attn_layer_decode_batched_tp(
+    ops: &OpsRegistry,
+    stream: &HipStream,
+    device: &HipDevice,
+    cfg: &Qwen3MoEConfig,
+    attn_norm: &DeviceTensor,
+    attn_q: &DeviceTensor,
+    attn_k: &DeviceTensor,
+    attn_v: &DeviceTensor,
+    attn_output: &DeviceTensor,
+    attn_q_norm: &DeviceTensor,
+    attn_k_norm: &DeviceTensor,
+    slot_kv_caches: &mut [&mut KvCache<flambeau_runtime::F16Contig, HipDevice>],
+    scratch: &mut super::attn::FullAttnPrefillScratch,
+    x_in: DevicePtr,
+    partial_attn_out: DevicePtr,
+    slot_positions: &[usize],
+    tp_world: u32,
+    kv_replicated: bool,
+) -> Result<()> {
+    use flambeau_ops::hip::norm::quantize_f16_q8_1_mmq;
+    use flambeau_ops::hip::qmatmul::qmatmul;
+
+    if tp_world == 0 {
+        bail!("tp_world must be >= 1");
+    }
+    let n_tokens = slot_positions.len();
+    if n_tokens == 0 {
+        bail!("forward_full_attn_layer_decode_batched_tp called with 0 slots");
+    }
+    if n_tokens != slot_kv_caches.len() {
+        bail!(
+            "slot count mismatch: positions={n_tokens}, caches={}",
+            slot_kv_caches.len()
+        );
+    }
+    if n_tokens > scratch.max_tokens {
+        bail!(
+            "n_tokens={n_tokens} > scratch.max_tokens={}",
+            scratch.max_tokens
+        );
+    }
+    let world = tp_world as usize;
+    let hidden = cfg.hidden_size;
+    let head_dim = cfg.head_dim;
+    let n_heads = cfg.num_heads;
+    let n_kv_heads = cfg.num_kv_heads;
+    if n_heads % world != 0 {
+        bail!("num_heads {n_heads} not divisible by tp_world {tp_world}");
+    }
+    let local_n_heads = n_heads / world;
+    let local_n_kv_heads = if kv_replicated {
+        n_kv_heads
+    } else {
+        if n_kv_heads % world != 0 {
+            bail!(
+                "num_kv_heads {n_kv_heads} not divisible by tp_world {tp_world} \
+                 and kv_replicated=false"
+            );
+        }
+        n_kv_heads / world
+    };
+    let local_q_width = local_n_heads * head_dim;
+    let local_kv_width = local_n_kv_heads * head_dim;
+    let rope = &cfg.rope;
+
+    // Steps 1-7: identical to forward_full_attn_prefill_tp body. Operate
+    // on [N, hidden] / [N, local_q_width] / [N, local_kv_width] and don't
+    // depend on a single contiguous KV cache.
+
+    // 1. RMSNorm + Q8_1 quantise (both layouts).
+    rmsnorm_f16(
+        ops, stream, x_in, attn_norm.ptr, scratch.x_norm_f16,
+        n_tokens, hidden, cfg.rms_norm_eps,
+    )
+    .context("batched-decode attn_norm (TP)")?;
+    quantize_f16_q8_1(
+        ops, stream, scratch.x_norm_f16, scratch.x_q8_1, n_tokens * hidden,
+    )
+    .context("batched-decode x_norm → Q8_1 std (TP)")?;
+    quantize_f16_q8_1_mmq(
+        ops, stream, scratch.x_norm_f16, scratch.x_q8_1_mmq, hidden, n_tokens,
+    )
+    .context("batched-decode x_norm → Q8_1 MMQ (TP)")?;
+
+    // 2. Q|gate fused projection.
+    let dtype_q = qdtype_of(attn_q.dtype)?;
+    let (q_rows, q_k) = mat_shape(attn_q)?;
+    let expect_q_rows = 2 * local_n_heads * head_dim;
+    if q_rows != expect_q_rows || q_k != hidden {
+        bail!(
+            "attn_q (TP batched-decode) shape [{q_rows}, {q_k}] != [{expect_q_rows}, {hidden}]"
+        );
+    }
+    qmatmul(
+        ops, stream, attn_q.ptr,
+        scratch.x_q8_1, scratch.x_q8_1_mmq, scratch.mmvq_f32,
+        n_tokens, q_k, q_rows, dtype_q,
+    )
+    .context("batched-decode qmatmul attn_q (TP)")?;
+    cast_f32_to_f16(
+        ops, stream, scratch.mmvq_f32, scratch.q_fused_f16, n_tokens * q_rows,
+    )
+    .context("batched-decode cast attn_q → f16 (TP)")?;
+
+    // 3. Split Q | gate.
+    split_q_gate_f16(
+        ops, stream,
+        scratch.q_fused_f16, scratch.q_f16, scratch.gate_f16,
+        n_tokens, local_n_heads, head_dim,
+    )
+    .context("batched-decode split_q_gate (TP)")?;
+
+    // 4. K projection.
+    let dtype_k = qdtype_of(attn_k.dtype)?;
+    let (k_rows, k_k) = mat_shape(attn_k)?;
+    let expect_kv_rows = local_kv_width;
+    if k_rows != expect_kv_rows || k_k != hidden {
+        bail!("attn_k (TP batched-decode) shape [{k_rows}, {k_k}] != [{expect_kv_rows}, {hidden}]");
+    }
+    qmatmul(
+        ops, stream, attn_k.ptr,
+        scratch.x_q8_1, scratch.x_q8_1_mmq, scratch.mmvq_f32,
+        n_tokens, k_k, k_rows, dtype_k,
+    )
+    .context("batched-decode qmatmul attn_k (TP)")?;
+    cast_f32_to_f16(
+        ops, stream, scratch.mmvq_f32, scratch.k_f16, n_tokens * k_rows,
+    )
+    .context("batched-decode cast attn_k → f16 (TP)")?;
+
+    // 5. V projection.
+    let dtype_v = qdtype_of(attn_v.dtype)?;
+    let (v_rows, v_k) = mat_shape(attn_v)?;
+    if v_rows != expect_kv_rows || v_k != hidden {
+        bail!("attn_v (TP batched-decode) shape [{v_rows}, {v_k}] != [{expect_kv_rows}, {hidden}]");
+    }
+    qmatmul(
+        ops, stream, attn_v.ptr,
+        scratch.x_q8_1, scratch.x_q8_1_mmq, scratch.mmvq_f32,
+        n_tokens, v_k, v_rows, dtype_v,
+    )
+    .context("batched-decode qmatmul attn_v (TP)")?;
+    cast_f32_to_f16(
+        ops, stream, scratch.mmvq_f32, scratch.v_f16, n_tokens * v_rows,
+    )
+    .context("batched-decode cast attn_v → f16 (TP)")?;
+
+    // 6. Per-head Q/K rmsnorm.
+    rmsnorm_f16(
+        ops, stream,
+        scratch.q_f16, attn_q_norm.ptr, scratch.q_f16,
+        n_tokens * local_n_heads, head_dim, cfg.rms_norm_eps,
+    )
+    .context("batched-decode attn_q_norm (TP)")?;
+    rmsnorm_f16(
+        ops, stream,
+        scratch.k_f16, attn_k_norm.ptr, scratch.k_f16,
+        n_tokens * local_n_kv_heads, head_dim, cfg.rms_norm_eps,
+    )
+    .context("batched-decode attn_k_norm (TP)")?;
+
+    // 7. RoPE on Q / K with per-slot positions.
+    super::attn::upload_positions_arbitrary(device, stream, scratch, slot_positions)?;
+    rope_neox_partial_f16(
+        ops, stream, scratch.q_f16, scratch.positions, rope.freq_base,
+        n_tokens, local_n_heads, head_dim, rope.rotated_dims,
+    )
+    .context("batched-decode rope Q (TP)")?;
+    rope_neox_partial_f16(
+        ops, stream, scratch.k_f16, scratch.positions, rope.freq_base,
+        n_tokens, local_n_kv_heads, head_dim, rope.rotated_dims,
+    )
+    .context("batched-decode rope K (TP)")?;
+
+    // 8. Per-slot KV append. Each slot writes ITS row of K/V into ITS
+    //    own per-rank cache at slot_positions[s]. F16-only path.
+    let kv_per_token_bytes = local_kv_width * 2;
+    for s in 0..n_tokens {
+        let pos = slot_positions[s];
+        let k_src = scratch.k_f16.offset_bytes(s * kv_per_token_bytes);
+        let v_src = scratch.v_f16.offset_bytes(s * kv_per_token_bytes);
+        let kv = &mut *slot_kv_caches[s];
+        let k_dst = kv.k_buffer().offset_bytes(pos * kv_per_token_bytes);
+        let v_dst = kv.v_buffer().offset_bytes(pos * kv_per_token_bytes);
+        // SAFETY: src buffers are scratch.k_f16/v_f16 each ≥ N rows of
+        // kv_per_token_bytes; dst is the slot's per-rank KV cache buffer
+        // sized to ≥ (max_seq_len * kv_per_token_bytes); pos < max_seq_len
+        // is enforced by the caller.
+        unsafe {
+            device.memcpy_async(
+                stream, CopyDirection::DeviceToDevice,
+                k_dst, k_src, kv_per_token_bytes,
+            )?;
+            device.memcpy_async(
+                stream, CopyDirection::DeviceToDevice,
+                v_dst, v_src, kv_per_token_bytes,
+            )?;
+        }
+        kv.bump_tail(1)
+            .map_err(|e| anyhow::anyhow!("slot {s} bump_tail (TP): {e}"))?;
+    }
+
+    // 9. Per-slot attention decode. Each slot reads its own per-rank
+    //    cache up to slot_positions[s] + 1 K/V rows. Output offset
+    //    per slot into scratch.attn_out_f16.
+    let q_per_token_bytes = local_q_width * 2;
+    let scale = (head_dim as f32).sqrt().recip();
+    for s in 0..n_tokens {
+        let q_row = scratch.q_f16.offset_bytes(s * q_per_token_bytes);
+        let out_row = scratch.attn_out_f16.offset_bytes(s * q_per_token_bytes);
+        let n_k_tokens = slot_positions[s] + 1;
+        let kv = &slot_kv_caches[s];
+        attention_decode_f16_slots(
+            ops, stream,
+            q_row, kv.k_buffer(), kv.v_buffer(), out_row,
+            local_n_heads, local_n_kv_heads, head_dim,
+            n_k_tokens, scale, None,
+        )
+        .with_context(|| format!("batched-decode attention slot {s} (TP)"))?;
+    }
+
+    // 10. Sigmoid-gate over [N, local_q_width].
+    let gated_elems = n_tokens * local_q_width;
+    sigmoid_mul_f16(
+        ops, stream,
+        scratch.gate_f16, scratch.attn_out_f16, scratch.gated_out_f16,
+        gated_elems,
+    )
+    .context("batched-decode post-attn sigmoid-gate (TP)")?;
+
+    // 11. Quantise gated_out → both Q8_1 layouts for output projection.
+    quantize_f16_q8_1(
+        ops, stream, scratch.gated_out_f16, scratch.gated_q8_1, gated_elems,
+    )
+    .context("batched-decode gated → Q8_1 std (TP)")?;
+    quantize_f16_q8_1_mmq(
+        ops, stream, scratch.gated_out_f16, scratch.gated_q8_1_mmq,
+        local_q_width, n_tokens,
+    )
+    .context("batched-decode gated → Q8_1 MMQ (TP)")?;
+
+    // 12. Row-parallel output projection. Per-rank weight rows = hidden,
+    //     per-rank cols = local_q_width. Result is per-rank partial
+    //     written into partial_attn_out for the AR that follows.
+    let dtype_o = qdtype_of(attn_output.dtype)?;
+    let (o_rows, o_k) = mat_shape(attn_output)?;
+    if o_rows != hidden || o_k != local_q_width {
+        bail!(
+            "attn_output (TP batched-decode) shape [{o_rows}, {o_k}] != [{hidden}, {local_q_width}]"
+        );
+    }
+    qmatmul(
+        ops, stream, attn_output.ptr,
+        scratch.gated_q8_1, scratch.gated_q8_1_mmq,
+        scratch.mmvq_f32, n_tokens, o_k, o_rows, dtype_o,
+    )
+    .context("batched-decode qmatmul attn_output (TP)")?;
+    cast_f32_to_f16(
+        ops, stream, scratch.mmvq_f32, partial_attn_out, n_tokens * hidden,
+    )
+    .context("batched-decode cast attn_output → f16 (TP)")?;
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     // Substantive tests are GPU-gated and live in TP-2d's parity smoke.
