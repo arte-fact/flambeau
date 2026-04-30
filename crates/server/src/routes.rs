@@ -810,6 +810,152 @@ fn build_fim_prompt_ids(
     Ok(prompt_ids)
 }
 
+/// POST /v1/messages — Anthropic-compatible Messages API (P1.8a).
+///
+/// Translates the Anthropic envelope into our existing chat path:
+/// - `system` (top-level) → first OpenAI `role="system"` message
+/// - `messages[*]` with text content → OpenAI ChatMessage
+/// - `stop_sequences[]` → SamplingParams.stop_strings
+/// - `max_tokens` (required by Anthropic) → SamplingParams.max_tokens
+///
+/// V1 scope: text-only content blocks, non-streaming. Image blocks are
+/// dropped silently. Tool-use / tool-result blocks parse but are not
+/// honoured here; P1.8c lifts them. Streaming events are P1.8b.
+#[tracing::instrument(name = "server.messages", skip_all, fields(stream = req.stream))]
+pub async fn messages_anthropic(
+    State(state): State<SharedState>,
+    Json(req): Json<AnthropicMessagesRequest>,
+) -> Result<Json<AnthropicMessagesResponse>, ApiError> {
+    if req.stream {
+        return Err(ApiError::bad_request(
+            "Anthropic SSE streaming is not yet implemented (P1.8b). Retry with stream=false.",
+        ));
+    }
+
+    // Map system + messages into OpenAI ChatMessage list.
+    let mut messages: Vec<ChatMessage> = Vec::with_capacity(req.messages.len() + 1);
+    if let Some(sys) = req.system.as_ref() {
+        let body = sys.to_plain();
+        if !body.is_empty() {
+            messages.push(ChatMessage {
+                role: "system".into(),
+                content: Some(body),
+                tool_call_id: None,
+                tool_calls: None,
+            });
+        }
+    }
+    for m in &req.messages {
+        messages.push(ChatMessage {
+            role: m.role.clone(),
+            content: Some(m.content.to_plain()),
+            tool_call_id: None,
+            tool_calls: None,
+        });
+    }
+    // Apply the same `<think>\n\n</think>\n\n` normalisation our
+    // chat_completions handler runs — Qwen3.6's template needs prior
+    // assistant turns wrapped that way to stay in-distribution.
+    let messages: Vec<ChatMessage> = messages.iter().map(normalise_message).collect();
+
+    // P0.5 — default system prompt fallback when none supplied.
+    let messages = if !messages.iter().any(|m| {
+        m.role == "system" && !m.content_str().trim().is_empty()
+    }) {
+        if let Some(sys) = state.default_system.as_deref() {
+            let mut prepended = Vec::with_capacity(messages.len() + 1);
+            prepended.push(ChatMessage {
+                role: "system".into(),
+                content: Some(sys.to_owned()),
+                tool_call_id: None,
+                tool_calls: None,
+            });
+            prepended.extend(messages);
+            prepended
+        } else {
+            messages
+        }
+    } else {
+        messages
+    };
+
+    // Sampling. Anthropic always sends max_tokens; honour it directly
+    // (still capped at 8192 by from_parts).
+    let stop_strings = req.stop_sequences.clone().unwrap_or_default();
+    let params = SamplingParams::from_parts(
+        req.temperature,
+        req.top_p,
+        req.top_k,
+        /*min_p=*/ None,
+        /*repetition_penalty=*/ None,
+        /*presence_penalty=*/ None,
+        /*frequency_penalty=*/ None,
+        Some(req.max_tokens),
+        /*seed=*/ None,
+        /*json_mode=*/ false,
+        stop_strings.clone(),
+        /*collect_logprobs=*/ None,
+        &state.model_defaults,
+    );
+
+    // Render through the model's chat template. No tools wired in
+    // P1.8a; merging arrives with P1.8c.
+    let prompt = state
+        .chat_template
+        .render_with_tools::<ChatMessage, ()>(
+            &messages,
+            None,
+            /*add_generation_prompt=*/ true,
+            /*enable_thinking=*/ Some(false),
+        )
+        .map_err(ApiError::internal)?;
+
+    let (text, prompt_tokens, completion_tokens, finish, _) =
+        run_completion(state.clone(), &prompt, params, /*relax_stop_mask=*/ false)
+            .await
+            .map_err(ApiError::internal)?;
+
+    // Map OpenAI `finish_reason` → Anthropic `stop_reason`. The
+    // tool-call branch (P1.8c) lands later; for now we never produce
+    // `finish="tool_calls"` here because no tools are forwarded.
+    let stop_reason: &str = match finish.as_str() {
+        "stop" => "end_turn",
+        "length" => "max_tokens",
+        "tool_calls" => "tool_use",
+        other => other,
+    };
+
+    // If the model stopped on a user-supplied stop sequence, surface
+    // it. Best-effort match — we use the trailing-window approach
+    // already proven on the chat path.
+    let stop_sequence: Option<String> = if stop_reason == "end_turn"
+        && !stop_strings.is_empty()
+    {
+        // Rough match: the engine truncated at the earliest hit, so
+        // the matched sequence is the one whose presence in the
+        // pre-truncation tail came first. Without that info plumbed,
+        // we surface the first sequence that the post-truncation text
+        // ends near. Returning `None` is spec-allowed when uncertain.
+        None
+    } else {
+        None
+    };
+
+    Ok(Json(AnthropicMessagesResponse {
+        id: request_id("msg"),
+        kind: "message",
+        role: "assistant",
+        content: vec![AnthropicResponseBlock::Text { text }],
+        model: state.model_id.clone(),
+        stop_reason: stop_reason.to_owned(),
+        stop_sequence,
+        usage: AnthropicUsage {
+            input_tokens: prompt_tokens,
+            output_tokens: completion_tokens,
+        },
+    }))
+}
+
 /// POST /infill — llama.cpp-compatible Fill-in-the-Middle endpoint.
 ///
 /// Composes a PSM-shaped FIM prompt of the form

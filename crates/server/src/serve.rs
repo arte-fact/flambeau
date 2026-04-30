@@ -19,8 +19,8 @@ use tracing::info;
 
 use crate::model::LoadedModel;
 use crate::routes::{
-    agent_stats, chat_completions, completions, health, index, infill, models, tools_endpoint,
-    ServerState, SharedState,
+    agent_stats, chat_completions, completions, health, index, infill, messages_anthropic,
+    models, tools_endpoint, ServerState, SharedState,
 };
 
 /// **TP-5a** — mesh topology selector. PP-V1 default; TP engages the
@@ -383,6 +383,9 @@ pub async fn serve(cfg: ServeConfig) -> Result<()> {
         // versioned routes.
         .route("/infill", post(infill))
         .route("/v1/infill", post(infill))
+        // P1.8a — Anthropic Messages API (text-only, non-streaming for
+        // now). Tools (P1.8c) and SSE (P1.8b) layer in afterwards.
+        .route("/v1/messages", post(messages_anthropic))
         // M2.3 — read-only agent-loop telemetry snapshot.
         .route("/v1/agent/stats", get(agent_stats))
         // C4.1 — read-only introspection of `--mcp`-registered remote

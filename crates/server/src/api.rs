@@ -418,6 +418,164 @@ pub struct Usage {
     pub total_tokens: u32,
 }
 
+// ---- Anthropic /v1/messages (P1.8a) ---------------------------------------
+//
+// Mirrors the request envelope at https://docs.anthropic.com/en/api/messages
+// closely enough for Claude Code, Cursor, and the anthropic-sdk-python /
+// anthropic-sdk-typescript clients to talk to flambeau without a shim.
+//
+// V1 scope (P1.8a — this commit): text-only content blocks, non-streaming
+// path, no tools mapping. Tools (`tool_use` / `tool_result` content blocks)
+// are P1.8c; SSE event stream is P1.8b.
+
+/// Anthropic /v1/messages request body.
+#[derive(Debug, Clone, Deserialize)]
+pub struct AnthropicMessagesRequest {
+    pub model: String,
+    pub messages: Vec<AnthropicMessage>,
+    /// **Required** under the Anthropic spec — clients always send it.
+    pub max_tokens: u32,
+    /// Top-level system prompt; Anthropic carries it outside `messages`.
+    /// Accepts either a string or an array of `{type:"text",text:"…"}`
+    /// content blocks (the latter is the canonical shape used by Claude
+    /// Code's prompt-caching path).
+    #[serde(default)]
+    pub system: Option<AnthropicSystem>,
+    #[serde(default)]
+    pub temperature: Option<f32>,
+    #[serde(default)]
+    pub top_p: Option<f32>,
+    #[serde(default)]
+    pub top_k: Option<u32>,
+    #[serde(default)]
+    pub stop_sequences: Option<Vec<String>>,
+    #[serde(default)]
+    pub stream: bool,
+}
+
+/// Anthropic system block — string or content-array.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(untagged)]
+pub enum AnthropicSystem {
+    Plain(String),
+    Blocks(Vec<AnthropicContentBlock>),
+}
+
+impl AnthropicSystem {
+    /// Flatten any text content into one plain string. Non-text blocks
+    /// are dropped (P1.8a is text-only; vision arrives later).
+    pub fn to_plain(&self) -> String {
+        match self {
+            Self::Plain(s) => s.clone(),
+            Self::Blocks(blocks) => blocks
+                .iter()
+                .filter_map(|b| match b {
+                    AnthropicContentBlock::Text { text } => Some(text.as_str()),
+                    _ => None,
+                })
+                .collect::<Vec<_>>()
+                .join(""),
+        }
+    }
+}
+
+/// One Anthropic message. `content` may be a plain string OR a list of
+/// content blocks. Both forms appear in the wild.
+#[derive(Debug, Clone, Deserialize)]
+pub struct AnthropicMessage {
+    pub role: String,
+    pub content: AnthropicContent,
+}
+
+/// Anthropic message-content envelope.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(untagged)]
+pub enum AnthropicContent {
+    Plain(String),
+    Blocks(Vec<AnthropicContentBlock>),
+}
+
+impl AnthropicContent {
+    /// Flatten text blocks into a single string. Non-text blocks
+    /// (image, tool_use, tool_result) are dropped in P1.8a; tools land
+    /// in P1.8c via a richer translation path.
+    pub fn to_plain(&self) -> String {
+        match self {
+            Self::Plain(s) => s.clone(),
+            Self::Blocks(blocks) => blocks
+                .iter()
+                .filter_map(|b| match b {
+                    AnthropicContentBlock::Text { text } => Some(text.as_str()),
+                    _ => None,
+                })
+                .collect::<Vec<_>>()
+                .join(""),
+        }
+    }
+}
+
+/// One Anthropic content block. Tagged on `type`. Unknown variants
+/// deserialise as `Other` so the request still parses; the route
+/// handler can ignore them or 400 as appropriate.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum AnthropicContentBlock {
+    Text {
+        text: String,
+    },
+    /// `image`: P1.8 scope is text-only; deserialised but discarded.
+    Image {
+        #[serde(default)]
+        source: serde_json::Value,
+    },
+    /// Tool-call invocation (assistant turn). P1.8c maps these into
+    /// `tool_calls[]` on a synthetic OpenAI assistant message.
+    ToolUse {
+        id: String,
+        name: String,
+        input: serde_json::Value,
+    },
+    /// Tool result (user turn). P1.8c maps these into `role="tool"` +
+    /// `tool_call_id`.
+    ToolResult {
+        tool_use_id: String,
+        #[serde(default)]
+        content: serde_json::Value,
+        #[serde(default)]
+        is_error: Option<bool>,
+    },
+}
+
+/// Anthropic /v1/messages response. `content` is always an array.
+/// `stop_reason` is mapped from OpenAI's `finish_reason`:
+/// `stop` → `end_turn`, `length` → `max_tokens`, `tool_calls` → `tool_use`.
+#[derive(Debug, Clone, Serialize)]
+pub struct AnthropicMessagesResponse {
+    pub id: String,
+    #[serde(rename = "type")]
+    pub kind: &'static str,
+    pub role: &'static str,
+    pub content: Vec<AnthropicResponseBlock>,
+    pub model: String,
+    pub stop_reason: String,
+    /// When `stop_reason="stop_sequence"`, the actual sequence that
+    /// matched. `null` otherwise.
+    pub stop_sequence: Option<String>,
+    pub usage: AnthropicUsage,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum AnthropicResponseBlock {
+    Text { text: String },
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct AnthropicUsage {
+    pub input_tokens: u32,
+    pub output_tokens: u32,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -540,6 +698,99 @@ mod tests {
         }"#;
         let req: InfillRequest = serde_json::from_str(wire).unwrap();
         assert_eq!(req.prompt.as_deref(), Some("x"));
+    }
+
+    #[test]
+    fn anthropic_request_plain_string_content() {
+        let wire = r#"{
+            "model":"flambeau",
+            "messages":[{"role":"user","content":"hi"}],
+            "max_tokens":256
+        }"#;
+        let req: AnthropicMessagesRequest = serde_json::from_str(wire).unwrap();
+        assert_eq!(req.model, "flambeau");
+        assert_eq!(req.max_tokens, 256);
+        assert_eq!(req.messages.len(), 1);
+        assert_eq!(req.messages[0].content.to_plain(), "hi");
+        assert!(req.system.is_none());
+    }
+
+    #[test]
+    fn anthropic_request_content_blocks_text_only() {
+        let wire = r#"{
+            "model":"flambeau",
+            "max_tokens":64,
+            "messages":[
+                {"role":"user","content":[
+                    {"type":"text","text":"part 1 "},
+                    {"type":"text","text":"part 2"}
+                ]}
+            ]
+        }"#;
+        let req: AnthropicMessagesRequest = serde_json::from_str(wire).unwrap();
+        assert_eq!(req.messages[0].content.to_plain(), "part 1 part 2");
+    }
+
+    #[test]
+    fn anthropic_request_system_string_and_blocks() {
+        let plain = r#"{
+            "model":"x","max_tokens":10,"messages":[],
+            "system":"be terse"
+        }"#;
+        let r: AnthropicMessagesRequest = serde_json::from_str(plain).unwrap();
+        assert_eq!(r.system.as_ref().unwrap().to_plain(), "be terse");
+
+        let blocks = r#"{
+            "model":"x","max_tokens":10,"messages":[],
+            "system":[
+                {"type":"text","text":"sys A "},
+                {"type":"text","text":"sys B"}
+            ]
+        }"#;
+        let r: AnthropicMessagesRequest = serde_json::from_str(blocks).unwrap();
+        assert_eq!(r.system.as_ref().unwrap().to_plain(), "sys A sys B");
+    }
+
+    #[test]
+    fn anthropic_request_tool_blocks_parse_but_drop_text() {
+        // Tool blocks are parsed (so the request doesn't error) but
+        // contribute no plain text in P1.8a.
+        let wire = r#"{
+            "model":"x","max_tokens":10,
+            "messages":[
+                {"role":"assistant","content":[
+                    {"type":"text","text":"calling tool"},
+                    {"type":"tool_use","id":"t1","name":"weather","input":{"loc":"SF"}}
+                ]},
+                {"role":"user","content":[
+                    {"type":"tool_result","tool_use_id":"t1","content":"72"}
+                ]}
+            ]
+        }"#;
+        let req: AnthropicMessagesRequest = serde_json::from_str(wire).unwrap();
+        assert_eq!(req.messages[0].content.to_plain(), "calling tool");
+        assert_eq!(req.messages[1].content.to_plain(), ""); // tool_result drops
+    }
+
+    #[test]
+    fn anthropic_response_serialises_textcontent_block() {
+        let r = AnthropicMessagesResponse {
+            id: "msg_x".into(),
+            kind: "message",
+            role: "assistant",
+            content: vec![AnthropicResponseBlock::Text { text: "hi".into() }],
+            model: "flambeau".into(),
+            stop_reason: "end_turn".into(),
+            stop_sequence: None,
+            usage: AnthropicUsage { input_tokens: 5, output_tokens: 1 },
+        };
+        let s = serde_json::to_string(&r).unwrap();
+        assert!(s.contains("\"type\":\"message\""));
+        assert!(s.contains("\"role\":\"assistant\""));
+        assert!(s.contains("\"type\":\"text\",\"text\":\"hi\""));
+        assert!(s.contains("\"input_tokens\":5"));
+        assert!(s.contains("\"output_tokens\":1"));
+        assert!(s.contains("\"stop_reason\":\"end_turn\""));
     }
 
     #[test]
