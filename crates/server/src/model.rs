@@ -253,6 +253,33 @@ impl Inflight {
             }
         }
     }
+
+    /// **P2.9a (slot pool)** — reset KV state for the next request
+    /// without freeing scratch / KV buffers. Cheap O(num_layers)
+    /// walk + a single sync per device. Lets the slot pool reuse the
+    /// same Inflight across requests instead of paying the
+    /// alloc/dispose cycle every time.
+    pub fn reset_for_next_request(
+        &mut self,
+        cluster: &HipCluster,
+        model: &LoadedModel,
+    ) -> Result<()> {
+        match (self, model) {
+            (Inflight::Pp { session, .. }, LoadedModel::Pp { .. }) => session
+                .reset_for_next_request(cluster)
+                .context("reset PP session"),
+            (Inflight::Tp { session, .. }, LoadedModel::Tp { .. }) => session
+                .reset_for_next_request(cluster)
+                .context("reset TP session"),
+            (
+                Inflight::Hybrid { session, .. },
+                LoadedModel::Hybrid { model: hm, .. },
+            ) => session
+                .reset_for_next_request(hm)
+                .context("reset Hybrid session"),
+            _ => bail!("Inflight / LoadedModel variant mismatch in reset_for_next_request"),
+        }
+    }
 }
 
 /// Ingest the full prompt and write the logits row for the **last**

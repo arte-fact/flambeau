@@ -41,7 +41,7 @@ use crate::layout::{
     DenseAttnTensors, FullAttnTensors, GdnTensors, LayerAttnBlock, LayerDescriptor, ModelLayout,
     MoeFfnTensors, ResolvedTensor, SharedExpertTensors,
 };
-use crate::session::{alloc_layer_cache, dispose_layer_cache, LayerCache};
+use crate::session::{alloc_layer_cache, dispose_layer_cache, zero_gdn_layer_state, LayerCache};
 use crate::weights::{
     AttnWeights, DenseAttnWeights, DeviceTensor, FfnWeights, FullAttnWeights, GdnWeights,
     LayerWeights, SharedExpertWeights,
@@ -1576,6 +1576,30 @@ impl Qwen3MoEShardedSession {
             });
         }
         Ok(Self { per_rank })
+    }
+
+    /// **P2.9a (slot pool)** — reset KV state across every rank for
+    /// reuse on the next request. Mirrors
+    /// [`Qwen3MoESession::reset_for_next_request`] but walks the
+    /// per-rank vector. Cheap O(num_layers) — just zeros GDN state +
+    /// conv_history (recurrent) and clears full-attn `current_tokens`.
+    pub fn reset_for_next_request(&mut self, cluster: &HipCluster) -> Result<()> {
+        for rank_session in self.per_rank.iter_mut() {
+            let rank_idx = rank_session.rank.0 as usize;
+            let device = cluster.device(rank_idx);
+            device.bind()?;
+            for cache in rank_session.caches.iter_mut() {
+                match cache {
+                    crate::session::LayerCache::FullAttn(kv) => kv.clear(),
+                    crate::session::LayerCache::FullAttnQ8(kv) => kv.clear(),
+                    crate::session::LayerCache::Gdn(g) => {
+                        zero_gdn_layer_state(device, g)?;
+                    }
+                }
+            }
+            device.default_stream().synchronize()?;
+        }
+        Ok(())
     }
 
     pub fn dispose(mut self, cluster: &HipCluster) -> Result<()> {

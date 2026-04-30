@@ -1316,6 +1316,29 @@ impl Qwen3MoETpSession {
         Ok(())
     }
 
+    /// **P2.9a (slot pool)** — reset every rank's KV state for reuse
+    /// on the next request. Same pattern as
+    /// [`crate::sharded::Qwen3MoEShardedSession::reset_for_next_request`]
+    /// but the per-rank vector is over `Vec<Vec<LayerCache>>` (TP
+    /// fans every layer across every rank).
+    pub fn reset_for_next_request(&mut self, cluster: &HipCluster) -> Result<()> {
+        for (rank, layer_caches) in self.caches.iter_mut().enumerate() {
+            let device = cluster.device(rank);
+            device.bind()?;
+            for cache in layer_caches.iter_mut() {
+                match cache {
+                    crate::session::LayerCache::FullAttn(kv) => kv.clear(),
+                    crate::session::LayerCache::FullAttnQ8(kv) => kv.clear(),
+                    crate::session::LayerCache::Gdn(g) => {
+                        crate::session::zero_gdn_layer_state(device, g)?;
+                    }
+                }
+            }
+            device.default_stream().synchronize()?;
+        }
+        Ok(())
+    }
+
     /// Free every rank's caches.
     pub fn dispose(mut self, cluster: &HipCluster) -> Result<()> {
         if self.disposed {

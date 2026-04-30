@@ -41,9 +41,12 @@ pub struct ServerState {
     pub cluster: Arc<HipCluster>,
     pub tokenizer: GgufTokenizer,
     pub chat_template: ChatTemplate,
-    /// Serialises all forward traffic through the model. Continuous batching
-    /// is V2 — for now one request at a time.
-    pub inflight: Mutex<()>,
+    /// **P2.9a (slot pool)** — single-slot pool: a pre-allocated
+    /// `Inflight` reused across requests. Holding the mutex means
+    /// "this request owns the inflight slot"; releasing the lock
+    /// (after `reset_for_next_request`) returns the slot to the
+    /// pool. Continuous batching with N>1 slots is P2.9b.
+    pub inflight: Mutex<Inflight>,
     /// Tools discovered on the `--mcp <url>` upstreams at startup
     /// (ROADMAP-V2 §M2.1). Merged into each request's `tools[]` before
     /// rendering the Jinja template, so the model sees them alongside
@@ -1889,10 +1892,10 @@ fn run_completion_blocking_ids(
 ) -> Result<CompletionOutput> {
     let request_start = Instant::now();
 
-    // Serialise: one forward at a time through this server instance.
-    let _guard = state
-        .inflight
-        .blocking_lock();
+    // **P2.9a (slot pool)** — claim the pre-allocated inflight slot.
+    // Holding the mutex serialises forward traffic through the
+    // server (continuous batching ships in P2.9b).
+    let mut inflight_guard = state.inflight.blocking_lock();
 
     if prompt_ids.is_empty() {
         bail!("prompt tokenized to 0 tokens");
@@ -1909,9 +1912,15 @@ fn run_completion_blocking_ids(
     let cluster: &HipCluster = &state.cluster;
     let model = &state.model;
 
-    // Fresh session per request (no conversation state reuse in V1).
-    let mut inflight =
-        Inflight::new(model, cluster, prompt_ids.len()).context("create inflight session")?;
+    // Reset KV state on the pooled inflight before this request's
+    // prefill — clears full-attn `current_tokens` and zeros GDN
+    // recurrent state without freeing scratch buffers.
+    inflight_guard
+        .reset_for_next_request(cluster, model)
+        .context("reset inflight for new request")?;
+    // Shadow with a reborrow so existing `&mut inflight` / `&inflight`
+    // call-site syntax works unchanged.
+    let mut inflight: &mut Inflight = &mut *inflight_guard;
 
     // Sampler holds vocab-sized scratch reused across all decode steps
     // (C2 in RUST-PERF-CORRECTIONS.md). Reserve upfront to avoid the
@@ -2072,9 +2081,7 @@ fn run_completion_blocking_ids(
     // but we keep the check as a defensive guard for future logit-mask
     // changes.
     if is_stop(first_next) {
-        inflight
-            .dispose(cluster, model)
-            .context("dispose inflight (early-stop)")?;
+        // Slot stays pooled; mutex releases on function return.
         return finalise(&state, prompt_tokens, generated, "stop", &params.stop_strings, logprobs_acc);
     }
 
@@ -2383,8 +2390,12 @@ fn run_completion_blocking_ids(
             .context("dispose GpuSamplerScratch")?;
     }
 
-    // Dispose per-request scratch/session; keep model + cluster alive.
-    inflight.dispose(cluster, model).context("dispose inflight")?;
+    // **P2.9a (slot pool)** — no dispose. The pooled inflight stays
+    // allocated; releasing the mutex returns the slot to the pool
+    // for the next request, which will reset_for_next_request on
+    // claim. Removing per-request dispose saves the ~ms cost of
+    // session/scratch teardown + re-alloc.
+    let _ = inflight; // silence unused-warn after removing dispose
 
     tracing::info!(
         target: "server.completion.finish",
@@ -2445,7 +2456,9 @@ fn run_completion_blocking_streaming(
 ) -> Result<(String, u32, u32)> {
     let request_start = Instant::now();
 
-    let _guard = state.inflight.blocking_lock();
+    // **P2.9a (slot pool)** — claim and reset the pre-allocated
+    // inflight slot. Same lifecycle as run_completion_blocking_ids.
+    let mut inflight_guard = state.inflight.blocking_lock();
 
     let prompt_ids = state.tokenizer.encode(&prompt).context("tokenize prompt")?;
     if prompt_ids.is_empty() {
@@ -2467,8 +2480,10 @@ fn run_completion_blocking_streaming(
     let always_stop_ids = &state.tokenizer.always_stop_ids;
     let is_stop = |t: u32| stop_ids.contains(&t);
 
-    let mut inflight =
-        Inflight::new(model, cluster, prompt_ids.len()).context("create inflight session")?;
+    inflight_guard
+        .reset_for_next_request(cluster, model)
+        .context("reset inflight for new streaming request")?;
+    let mut inflight: &mut Inflight = &mut *inflight_guard;
 
     let mut sampler = Sampler::from_seed(params.seed);
     sampler.reserve(state.cfg.vocab_size);
@@ -2560,9 +2575,7 @@ fn run_completion_blocking_streaming(
 
     let alive = push_and_emit(first_next, &mut generated, &mut emitted_text)?;
     if !alive {
-        inflight
-            .dispose(cluster, model)
-            .context("dispose inflight (stream early-stop)")?;
+        // Slot stays pooled; mutex releases on function return.
         return Ok(("stop".into(), prompt_tokens, generated.len() as u32));
     }
 
@@ -2678,9 +2691,7 @@ fn run_completion_blocking_streaming(
         );
         spec_state.dispose(cluster).ok();
 
-        inflight
-            .dispose(cluster, model)
-            .context("dispose inflight (stream end)")?;
+        // Slot stays pooled; mutex releases on function return.
         tracing::info!(
             target: "server.completion.finish",
             prompt_tokens,
@@ -2813,9 +2824,7 @@ fn run_completion_blocking_streaming(
         }
     }
 
-    inflight
-        .dispose(cluster, model)
-        .context("dispose inflight (stream end)")?;
+    // Slot stays pooled; mutex releases on function return.
 
     tracing::info!(
         target: "server.completion.finish",

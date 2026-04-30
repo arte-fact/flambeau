@@ -281,6 +281,30 @@ impl Qwen3MoESession {
         Ok(())
     }
 
+    /// **P2.9a (slot pool)** — reset every layer's KV state to empty
+    /// without freeing the backing memory. Cheap O(num_layers) walk:
+    /// full-attn KvCaches just zero their `current_tokens` counter
+    /// (kernels gate on it, so the unobservable slots beyond it can
+    /// stay dirty); GDN layers explicitly zero their recurrent state
+    /// + conv_history because the next request must start the
+    /// recurrence from scratch.
+    pub fn reset_for_next_request(
+        &mut self,
+        device: &HipDevice,
+    ) -> Result<()> {
+        device.bind()?;
+        let stream = device.default_stream();
+        for cache in self.caches.iter_mut() {
+            match cache {
+                LayerCache::FullAttn(kv) => kv.clear(),
+                LayerCache::FullAttnQ8(kv) => kv.clear(),
+                LayerCache::Gdn(g) => zero_gdn_layer_state(device, g)?,
+            }
+        }
+        stream.synchronize()?;
+        Ok(())
+    }
+
     /// Free every per-layer allocation. Required — see [`ModelWeights::dispose`].
     pub fn dispose(mut self, device: &HipDevice) -> Result<()> {
         if self.disposed {
@@ -644,6 +668,19 @@ pub(crate) fn dispose_layer_cache(cache: LayerCache, device: &HipDevice) -> Resu
 /// and `memcpy_async` — the V1 HIP backend doesn't expose `hipMemset` through
 /// its `Device` trait yet, and this path is on the cold (session-init) path
 /// so a ~2 MB staging buffer is not a concern.
+/// **P2.9a (slot pool)** — zero one GDN layer's recurrent state + conv
+/// history. Used by [`Qwen3MoESession::reset_for_next_request`] and
+/// the sharded sessions' equivalents to give the next request a clean
+/// recurrence start without freeing the backing buffers.
+pub(crate) fn zero_gdn_layer_state(
+    device: &HipDevice,
+    g: &GdnLayerState,
+) -> Result<()> {
+    zero_f32(device, g.state, g.state_bytes)?;
+    zero_f32(device, g.conv_history, g.conv_history_bytes)?;
+    Ok(())
+}
+
 fn zero_f32(device: &HipDevice, ptr: DevicePtr, bytes: usize) -> Result<()> {
     if bytes == 0 {
         return Ok(());

@@ -387,6 +387,41 @@ impl Qwen3MoEHybridSession {
         self.stages.iter().map(|s| s.total_bytes()).sum()
     }
 
+    /// **P2.9a (slot pool)** — reset every stage's per-rank KV state
+    /// for reuse on the next request. Walks
+    /// `stages[*].caches[rank][layer]` and clears full-attn KV /
+    /// zeroes GDN recurrent state. Each stage uses its own
+    /// sub_cluster for device handles.
+    pub fn reset_for_next_request(
+        &mut self,
+        model: &Qwen3MoEHybridModel,
+    ) -> Result<()> {
+        if self.stages.len() != model.stages.len() {
+            bail!(
+                "Qwen3MoEHybridSession::reset_for_next_request: session has {} stages but model has {}",
+                self.stages.len(),
+                model.stages.len()
+            );
+        }
+        for (stage_session, stage) in self.stages.iter_mut().zip(model.stages.iter()) {
+            for (rank_idx, layer_caches) in stage_session.caches.iter_mut().enumerate() {
+                let device = stage.sub_cluster.device(rank_idx);
+                device.bind()?;
+                for cache in layer_caches.iter_mut() {
+                    match cache {
+                        crate::session::LayerCache::FullAttn(kv) => kv.clear(),
+                        crate::session::LayerCache::FullAttnQ8(kv) => kv.clear(),
+                        crate::session::LayerCache::Gdn(g) => {
+                            crate::session::zero_gdn_layer_state(device, g)?;
+                        }
+                    }
+                }
+                device.default_stream().synchronize()?;
+            }
+        }
+        Ok(())
+    }
+
     /// Dispose every stage's caches. Each stage disposes against its
     /// owning [`Qwen3MoEHybridStage::sub_cluster`]; the model is passed
     /// in so the session can find them.
