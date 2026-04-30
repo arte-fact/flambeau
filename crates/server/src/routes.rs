@@ -818,20 +818,14 @@ fn build_fim_prompt_ids(
 /// - `stop_sequences[]` → SamplingParams.stop_strings
 /// - `max_tokens` (required by Anthropic) → SamplingParams.max_tokens
 ///
-/// V1 scope: text-only content blocks, non-streaming. Image blocks are
-/// dropped silently. Tool-use / tool-result blocks parse but are not
-/// honoured here; P1.8c lifts them. Streaming events are P1.8b.
+/// V1 scope: text-only content blocks. Image blocks are dropped
+/// silently. Tool-use / tool-result blocks parse but are not honoured
+/// here; P1.8c lifts them. Streaming events shipped in P1.8b.
 #[tracing::instrument(name = "server.messages", skip_all, fields(stream = req.stream))]
 pub async fn messages_anthropic(
     State(state): State<SharedState>,
     Json(req): Json<AnthropicMessagesRequest>,
-) -> Result<Json<AnthropicMessagesResponse>, ApiError> {
-    if req.stream {
-        return Err(ApiError::bad_request(
-            "Anthropic SSE streaming is not yet implemented (P1.8b). Retry with stream=false.",
-        ));
-    }
-
+) -> Result<Response, ApiError> {
     // Map system + messages into OpenAI ChatMessage list.
     let mut messages: Vec<ChatMessage> = Vec::with_capacity(req.messages.len() + 1);
     if let Some(sys) = req.system.as_ref() {
@@ -910,6 +904,15 @@ pub async fn messages_anthropic(
         )
         .map_err(ApiError::internal)?;
 
+    // P1.8b — streaming branch. Returns SSE stream with the canonical
+    // Anthropic event sequence: message_start → content_block_start →
+    // content_block_delta* → content_block_stop → message_delta →
+    // message_stop. Stream `[DONE]` sentinel is OpenAI-only; Anthropic
+    // closes the connection after `message_stop`.
+    if req.stream {
+        return Ok(stream_messages_anthropic_sse(state, prompt, params).into_response());
+    }
+
     let (text, prompt_tokens, completion_tokens, finish, _) =
         run_completion(state.clone(), &prompt, params, /*relax_stop_mask=*/ false)
             .await
@@ -953,7 +956,159 @@ pub async fn messages_anthropic(
             input_tokens: prompt_tokens,
             output_tokens: completion_tokens,
         },
-    }))
+    })
+    .into_response())
+}
+
+/// Anthropic SSE streaming engine (P1.8b).
+///
+/// Emits the canonical Anthropic event sequence:
+///   1. `message_start`         — full message envelope, content=[], usage{input_tokens, output_tokens=0}
+///   2. `content_block_start`   — `{type:"text",text:""}` at index 0
+///   3. `content_block_delta`*  — one per emitted text fragment
+///   4. `content_block_stop`    — index 0
+///   5. `message_delta`         — `{stop_reason, stop_sequence}` + cumulative `output_tokens`
+///   6. `message_stop`
+///
+/// Each frame uses both `event:` and `data:` SSE fields per Anthropic
+/// spec — the openai-style single-`data:`-line is not enough. Anthropic
+/// does NOT terminate with `[DONE]`; the stream simply closes after
+/// `message_stop`.
+fn stream_messages_anthropic_sse(
+    state: SharedState,
+    prompt: String,
+    params: SamplingParams,
+) -> Sse<ReceiverStream<Result<Event, Infallible>>> {
+    let (tx, rx) = mpsc::channel::<Result<Event, Infallible>>(32);
+    let id = request_id("msg");
+    let model = state.model_id.clone();
+
+    // Tokenise once so we can populate `message_start.message.usage.input_tokens`
+    // before kicking off the blocking decode. Failure → emit a single
+    // `error` event and close.
+    let prompt_ids = match state.tokenizer.encode(&prompt) {
+        Ok(ids) if !ids.is_empty() => ids,
+        Ok(_) | Err(_) => {
+            let err = json!({"type":"error","error":{"type":"invalid_request_error","message":"prompt tokenized to 0 tokens"}});
+            let _ = tx.try_send(Ok(Event::default().event("error").data(err.to_string())));
+            return Sse::new(ReceiverStream::new(rx)).keep_alive(KeepAlive::default());
+        }
+    };
+    let input_tokens = prompt_ids.len() as u32;
+
+    // 1. message_start — empty content, usage.output_tokens=0 per spec.
+    let message_start = json!({
+        "type": "message_start",
+        "message": {
+            "id": id,
+            "type": "message",
+            "role": "assistant",
+            "content": [],
+            "model": model,
+            "stop_reason": serde_json::Value::Null,
+            "stop_sequence": serde_json::Value::Null,
+            "usage": {
+                "input_tokens": input_tokens,
+                "output_tokens": 0,
+            },
+        },
+    });
+    let _ = tx.try_send(Ok(Event::default()
+        .event("message_start")
+        .data(message_start.to_string())));
+
+    // 2. content_block_start — single text block at index 0.
+    let cbs = json!({
+        "type": "content_block_start",
+        "index": 0,
+        "content_block": {"type": "text", "text": ""},
+    });
+    let _ = tx.try_send(Ok(Event::default().event("content_block_start").data(cbs.to_string())));
+
+    let state_clone = state.clone();
+    let id_clone = id.clone();
+    let tx_clone = tx.clone();
+    tokio::task::spawn_blocking(move || {
+        // Per-delta emission: each text fragment becomes one
+        // content_block_delta event.
+        let emit_delta = |text: &str| -> bool {
+            if text.is_empty() {
+                return true;
+            }
+            let frame = json!({
+                "type": "content_block_delta",
+                "index": 0,
+                "delta": {"type": "text_delta", "text": text},
+            });
+            tx_clone
+                .blocking_send(Ok(Event::default()
+                    .event("content_block_delta")
+                    .data(frame.to_string())))
+                .is_ok()
+        };
+
+        // Reuse the existing OpenAI streaming engine — it already
+        // produces text deltas via the `emit` closure. Anthropic's
+        // surface differs only in the framing.
+        let mut emit = emit_delta;
+        let res = run_completion_blocking_streaming(
+            state_clone,
+            prompt,
+            params,
+            /*relax_stop_mask=*/ false,
+            &mut emit,
+        );
+
+        // 4. content_block_stop.
+        let cbst = json!({"type": "content_block_stop", "index": 0});
+        let _ = tx_clone
+            .blocking_send(Ok(Event::default().event("content_block_stop").data(cbst.to_string())));
+
+        // 5. message_delta — final stop reason + cumulative output_tokens.
+        let (finish, _, output_tokens) = match &res {
+            Ok(t) => (t.0.clone(), t.1, t.2),
+            Err(e) => {
+                tracing::warn!(
+                    target: "server.messages",
+                    "stream decode failed: {e:#}"
+                );
+                ("error".to_string(), 0u32, 0u32)
+            }
+        };
+        let stop_reason: &str = match finish.as_str() {
+            "stop" => "end_turn",
+            "length" => "max_tokens",
+            "tool_calls" => "tool_use",
+            other => other,
+        };
+        let mdelta = json!({
+            "type": "message_delta",
+            "delta": {"stop_reason": stop_reason, "stop_sequence": serde_json::Value::Null},
+            "usage": {"output_tokens": output_tokens},
+        });
+        let _ = tx_clone
+            .blocking_send(Ok(Event::default().event("message_delta").data(mdelta.to_string())));
+
+        // 6. message_stop. Anthropic does NOT send a [DONE] sentinel;
+        // closing the channel is the EOF signal.
+        let mstop = json!({"type": "message_stop"});
+        let _ = tx_clone
+            .blocking_send(Ok(Event::default().event("message_stop").data(mstop.to_string())));
+
+        if let Err(e) = res {
+            // Spec-compliant: an `error` event after message_stop is
+            // valid; clients log + drop the partial response.
+            let err = json!({
+                "type": "error",
+                "error": {"type": "internal_error", "message": e.to_string()},
+            });
+            let _ = tx_clone
+                .blocking_send(Ok(Event::default().event("error").data(err.to_string())));
+        }
+        let _ = id_clone; // keep clone live for borrow-check parity; intentional no-op
+    });
+
+    Sse::new(ReceiverStream::new(rx)).keep_alive(KeepAlive::default())
 }
 
 /// POST /infill — llama.cpp-compatible Fill-in-the-Middle endpoint.

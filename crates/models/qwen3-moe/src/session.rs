@@ -97,9 +97,29 @@ impl Qwen3MoESession {
     /// get zero-initialised GDN state + conv-history buffers.
     pub fn new(cfg: &Qwen3MoEConfig, device: &HipDevice) -> Result<Self> {
         device.bind()?;
-        let mut caches = Vec::with_capacity(cfg.num_layers);
+        let mut caches: Vec<LayerCache> = Vec::with_capacity(cfg.num_layers);
         for il in 0..cfg.num_layers {
-            caches.push(alloc_layer_cache(cfg, device, il)?);
+            match alloc_layer_cache(cfg, device, il) {
+                Ok(c) => caches.push(c),
+                Err(e) => {
+                    // **leak fix** — partial allocs from the loop must be
+                    // disposed explicitly, otherwise their `Drop` impls
+                    // only emit a warning and the device buffer leaks
+                    // (Drop has no &device handle to free against). One
+                    // bad request used to lose 5–8 GB of VRAM on the
+                    // failing card; this restores it on the way out.
+                    for partial in caches.drain(..) {
+                        if let Err(disp_err) = dispose_layer_cache(partial, device) {
+                            tracing::warn!(
+                                target: "flambeau_qwen3_moe::session",
+                                err = %disp_err,
+                                "dispose partial LayerCache failed during error cleanup"
+                            );
+                        }
+                    }
+                    return Err(e);
+                }
+            }
         }
         device.default_stream().synchronize()?;
         Ok(Self {
