@@ -14,7 +14,8 @@ use flambeau_backend_hip::{BarP2pAllReduce, HipCluster};
 use flambeau_qwen3_moe::forward::{
     forward_one_token_hybrid_logits, forward_one_token_pp_logits,
     forward_one_token_tp_keep_logits_on_device, forward_one_token_tp_logits,
-    forward_prefill_hybrid_logits, forward_prefill_pp_logits, forward_prefill_tp_logits,
+    forward_prefill_hybrid_logits, forward_prefill_pp, forward_prefill_pp_logits,
+    forward_prefill_tp_logits,
     forward_speculative_pp_step, ShardedForwardOneTokenScratch,
     ShardedForwardOneTokenScratchHybrid, ShardedForwardOneTokenScratchTp,
     ShardedForwardPrefillScratch, SpecStep,
@@ -116,42 +117,27 @@ impl Inflight {
     /// `prompt_len` sizes the PP prefill scratch; ignored for TP (TP
     /// loops `forward_one_token_tp` over the prompt instead).
     pub fn new(model: &LoadedModel, cluster: &HipCluster, prompt_len: usize) -> Result<Self> {
-        // **early reject for non-chunked paths only.** Hybrid (pp+tp)
-        // routes prefill_logits through `forward_prefill_hybrid_logits`
-        // which we now drive in chunks of FLAMBEAU_PREFILL_UBATCH; each
-        // call allocates a *fresh* scratch sized to the chunk, so the
-        // peak per-rank scratch is bounded by chunk_size, not
-        // prompt_len. PP and TP routes still use single-shot prefill
-        // (chunked PP+decode tripped HIP 700 — task #237), so they
-        // still need the cap.
-        let cfg = match model {
-            LoadedModel::Pp { model, .. } => &model.config,
-            LoadedModel::Tp { model, .. } => &model.config,
-            LoadedModel::Hybrid { model, .. } => &model.config,
-        };
-        let hidden_bytes = 2 * prompt_len * cfg.hidden_size * 2;
-        let attn_bytes = cfg.num_heads * prompt_len * prompt_len * 2;
-        let est_peak: u64 = (hidden_bytes + attn_bytes) as u64;
-        let cap_bytes: u64 = std::env::var("FLAMBEAU_MAX_PREFILL_BYTES")
+        // **chunked prefill** (Phase B / task #237). The per-layer
+        // attention scratch is O(heads × L²) and OOMs past ~5k tokens
+        // on a 16 GB MI50. forward_prefill_pp recursively chunks when
+        // L > scratch.max_tokens. Cap scratch ubatch to
+        // FLAMBEAU_PREFILL_UBATCH (default 512).
+        //
+        // **Critical:** chunk size MUST stay in the same MMQ-dispatch
+        // bucket as the model expects. On gfx906 / Q4_1 the boundary
+        // is m=128: m<128 routes to MMVQ, m>=128 routes to MMQ-4warp;
+        // mixing them across calls writes numerically-different K
+        // bytes for the same input token (Phase A parity test
+        // verified bit-equality only when chunks stay in one bucket).
+        // 512 gives generous headroom past the 128 boundary;
+        // override-floor is enforced at 128.
+        let prefill_ubatch: usize = std::env::var("FLAMBEAU_PREFILL_UBATCH")
             .ok()
             .and_then(|s| s.parse().ok())
-            .unwrap_or(12 * 1024 * 1024 * 1024);
-        if est_peak > cap_bytes {
-            tracing::warn!(
-                target: "server.inflight",
-                prompt_len,
-                est_peak_bytes = est_peak,
-                cap_bytes,
-                "rejecting request: estimated prefill scratch exceeds cap (chunked-prefill+decode broken — task #237)"
-            );
-            bail!(
-                "prompt too long for this server build: prompt_len={prompt_len} would need ~{:.1} GB \
-                 of prefill scratch (cap {:.1} GB).",
-                est_peak as f64 / 1e9,
-                cap_bytes as f64 / 1e9,
-            );
-        }
-        let scratch_tokens = prompt_len.max(1);
+            .filter(|n: &usize| *n >= 128)
+            .unwrap_or(512);
+        let scratch_tokens = prompt_len.min(prefill_ubatch).max(1);
+        let _ = model; // cfg lookups no longer needed; chunking handles size
 
         // **leak fix** — every alloc step here that ships a fresh GPU
         // resource must roll back the prior steps' GPU resources on
@@ -290,8 +276,46 @@ pub fn prefill_logits(
             Inflight::Pp {
                 session, prefill, ..
             },
-        ) => forward_prefill_pp_logits(m, session, cluster, prefill, prompt_ids, 0, logits_out)
-            .context("PP prefill_logits"),
+        ) => {
+            // Chunked PP prefill. forward_prefill_pp recursively chunks
+            // internally when L > scratch.max_tokens. Drive all-but-last
+            // chunk through it (no logits needed), then a final
+            // forward_prefill_pp_logits call on the last chunk to
+            // harvest logits for sampling. KV / GDN state thread via
+            // start_position. Verified bit-exact in Phase A.
+            let chunk = prefill.per_rank[0].max_tokens;
+            let l = prompt_ids.len();
+            if l <= chunk {
+                forward_prefill_pp_logits(
+                    m, session, cluster, prefill, prompt_ids, 0, logits_out,
+                )
+                .context("PP prefill_logits")
+            } else {
+                let last = chunk.min(l);
+                let split = l - last;
+                tracing::debug!(
+                    target: "server.prefill",
+                    prompt_len = l,
+                    chunk,
+                    split,
+                    "chunked PP prefill (prefix via forward_prefill_pp, final chunk via _logits)"
+                );
+                let _ = forward_prefill_pp(
+                    m, session, cluster, prefill, &prompt_ids[..split], 0,
+                )
+                .context("PP prefill (prefix chunks)")?;
+                forward_prefill_pp_logits(
+                    m,
+                    session,
+                    cluster,
+                    prefill,
+                    &prompt_ids[split..],
+                    split,
+                    logits_out,
+                )
+                .context("PP prefill_logits (final chunk)")
+            }
+        }
         (LoadedModel::Tp { model, ar }, Inflight::Tp { session, decode }) => {
             forward_prefill_tp_logits(
                 model,
