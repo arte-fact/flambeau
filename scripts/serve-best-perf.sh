@@ -11,7 +11,7 @@
 set -euo pipefail
 
 # ---- knobs --------------------------------------------------------------
-MODEL="${MODEL:-/artefact/models/Qwen3.5-9B-Q4_1.gguf}"
+MODEL="${MODEL:-/artefact/models/Qwen3.6-27B-Q4_1.gguf}"
 PORT="${PORT:-8081}"
 # 32k stays comfortably inside 16 GB / rank for 9B-Q4_1 on pp2tp2 KV.
 # Bump to 65536 / 131072 if you have headroom; reduce to 8192 if loading
@@ -27,11 +27,16 @@ DEVICES="${DEVICES:-hip:0,2,1,3}"
 # Cap context above the model's architectural max (qwen3.5/3.6: 131072).
 export FLAMBEAU_CTX_CAP="${CTX}"
 
-# Multi-slot inflight pool + scheduler-aggregated batched decode.
-# Engages run_completion_scheduler_pp_blocking for greedy chat (P2.9b-i2-D-wire).
-export FLAMBEAU_BATCHED_DECODE=1
+# Multi-slot inflight pool. Even without batched decode, having N>1
+# slots lets concurrent /v1/chat requests overlap host-side work
+# (tokenize, sampler, response build) — that alone gave 1.30x at
+# N=2 in P2.9b-i1's live test. Default 1 = no concurrency.
 export FLAMBEAU_INFLIGHT_SLOTS="${SLOTS}"
-export FLAMBEAU_BATCH_WINDOW_US="${BATCH_WINDOW_US:-1500}"
+
+# Scheduler-aggregated batched decode is OFF by default — it's the
+# P2.9b-i2-D-wire path. Set FLAMBEAU_BATCHED_DECODE=1 in the env
+# explicitly when testing the scheduler. The legacy decode path is
+# the proven daily-driver default.
 
 # GPU-side topk + penalty sampler (TP/Hybrid only; engages on this hybrid).
 # Skips the 600 KB host-logits DtoH per token.
@@ -54,7 +59,7 @@ fi
 
 echo "MODEL=${MODEL}"
 echo "PORT=${PORT}  CTX_CAP=${CTX}  SLOTS=${SLOTS}  DEVICES=${DEVICES}"
-echo "BATCHED_DECODE=1  GPU_SAMPLER=1  BATCH_WINDOW_US=${FLAMBEAU_BATCH_WINDOW_US}"
+echo "GPU_SAMPLER=1  BATCHED_DECODE=${FLAMBEAU_BATCHED_DECODE:-0}"
 echo
 
 exec "$BIN" serve \

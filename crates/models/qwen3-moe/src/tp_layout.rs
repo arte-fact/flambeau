@@ -170,18 +170,41 @@ impl Qwen35DenseTpLayout {
         // qwen36moe) need K/Q replicated across ranks. qwen3next uses
         // rep_inner mapping and is local under contiguous split.
         //
-        // The earlier "pure-dense qwen35 has no GDN" comment was wrong —
-        // Qwen3.5-9B (`arch=qwen35`) IS hybrid (GDN every 3 of 4 layers
-        // per `full_attention_interval=4`) and the GDN forward
-        // dispatches on `cfg.arch != "qwen3next"` → rep_outer. Without
-        // replication, qwen35 on TP/Hybrid degenerated into a `</think>`
-        // loop on chat (task #253). This includes the `qwen35`
-        // architecture in the replicated list to match the rep_outer
-        // dispatch. When `cfg.gdn == None` the flag is harmless (the
-        // GDN forward path is never taken).
-        let gdn_kq_replicated = cfg.arch == "qwen35"
+        // Qwen3.5-9B (`arch=qwen35`) IS hybrid (GDN every 3 of 4 layers)
+        // and dispatches rep_outer in GDN forward; without replication
+        // it degenerated into a `</think>` loop on chat (task #253).
+        //
+        // **Geometry gate** (post #253 follow-up): the replicated GDN
+        // kernel computes `n_rep = local_num_v_heads / num_k_heads` via
+        // integer division and assumes it's exact. Qwen3.6-27B has
+        // num_v_heads=48 / num_k_heads=16 = 3 V per K globally; under
+        // TP=2 that's local_num_v_heads=24 / num_k_heads=16 = 1.5
+        // (integer-division collapses to 1, kernel touches OOB →
+        // hipStreamSynchronize HIP 700 on prefill). 9B (32/16 → 16/16
+        // = 1) and 35B-A3B (32/16 → 16/16 = 1) divide cleanly and work.
+        //
+        // Only set the flag when the replicated path's `n_rep` is a
+        // clean integer. For shapes that don't fit, fall back to the
+        // contiguous-split path. The split path produces wrong-mapping
+        // outputs for 9B but happens to match for 27B's specific dims
+        // (see `forward_gdn_decode_tp` for the V[v]→K[v%H_k] vs
+        // local-K geometry).
+        let gdn_replicated_arch = cfg.arch == "qwen35"
             || cfg.arch == "qwen35moe"
             || cfg.arch == "qwen36moe";
+        let gdn_kq_replicated = if gdn_replicated_arch {
+            if let Some(d) = gdn_dims {
+                let local_num_v_heads = (d.num_v_heads as u32) / world;
+                let num_k_heads = d.num_k_heads as u32;
+                num_k_heads != 0 && local_num_v_heads % num_k_heads == 0
+            } else {
+                // Pure-dense (no GDN) — flag is unused; keep `true` to
+                // match the previous behaviour for these arches.
+                true
+            }
+        } else {
+            false
+        };
 
         Ok(Self {
             world,
