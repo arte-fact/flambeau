@@ -209,6 +209,55 @@ impl ServerState {
         token: u32,
         position: usize,
     ) -> anyhow::Result<Vec<f32>> {
+        let mut buf: Vec<f32> = Vec::with_capacity(self.cfg.vocab_size);
+        self.decode_via_scheduler_into(slot_idx, token, position, &mut buf)?;
+        Ok(buf)
+    }
+
+    /// **Cycle 3** — sibling of [`decode_via_scheduler`] that fills a
+    /// caller-provided buffer instead of allocating a fresh `Vec` per
+    /// step. Used by the scheduler-aware handler's decode loop to
+    /// recycle one ~600 KB logits buffer across all decode steps
+    /// (vocab=151424 F32 = 591 KB on Qwen3.6).
+    pub fn decode_via_scheduler_into(
+        &self,
+        slot_idx: usize,
+        token: u32,
+        position: usize,
+        logits_out: &mut Vec<f32>,
+    ) -> anyhow::Result<()> {
+        // **Cycle 2 optimisation (single-user fast path)** — when no
+        // other slot is active, aggregation is structurally impossible.
+        // Fall through to the legacy `decode_logits` path which uses
+        // decode-flavoured kernels (fused rmsnorm+quant_q8_1, per-step
+        // mmvq) and skips the scheduler's queue + mpsc round-trip.
+        // The batched code path (`forward_decode_batched_*`) replays
+        // prefill-flavoured kernels which add a few extra launches per
+        // layer (separate rmsnorm + 2 quant variants); at N=1 those
+        // launches are pure overhead vs the fused decode form.
+        let n_others_active = self
+            .slot_in_use
+            .iter()
+            .enumerate()
+            .filter(|(idx, taken)| {
+                *idx != slot_idx
+                    && taken.load(std::sync::atomic::Ordering::Relaxed)
+            })
+            .count();
+        if n_others_active == 0 {
+            let mut guard = self.inflight_pool[slot_idx].blocking_lock();
+            crate::model::decode_logits(
+                &self.model,
+                &self.cluster,
+                &mut *guard,
+                token,
+                position,
+                logits_out,
+            )
+            .context("decode_via_scheduler single-user fast path")?;
+            return Ok(());
+        }
+
         let (tx, rx) = std::sync::mpsc::channel::<anyhow::Result<Vec<f32>>>();
         {
             let mut q = self
@@ -225,17 +274,32 @@ impl ServerState {
 
         // Try to become the dispatch leader for this round.
         if let Ok(_dispatch_lock) = self.batched_dispatcher.try_lock() {
-            // Brief wait to let other handlers push their pending
-            // decode entries — this is the batching window. Tuned via
-            // `FLAMBEAU_BATCH_WINDOW_US` (default 1500 µs). Small
-            // relative to a per-step decode wall (15-30 ms on
-            // 9B/27B/35B PP4) so the latency cost is < 10 % of one
-            // step, while giving concurrent handlers time to push.
+            // **Cycle 1 optimisation (single-user fast path)** — only
+            // sleep on the batching window when there's actually an
+            // active OTHER slot that could plausibly join the batch.
+            // Counts other slots whose request-lifetime claim is set.
+            // If zero, no one else can push more entries, so the sleep
+            // is pure latency cost. With FLAMBEAU_INFLIGHT_SLOTS=1 the
+            // count is structurally always 0 → never sleep.
+            //
+            // Tuned via `FLAMBEAU_BATCH_WINDOW_US` (default 1500 µs).
+            // Set to 0 to disable the wait unconditionally.
             let window_us: u64 = std::env::var("FLAMBEAU_BATCH_WINDOW_US")
                 .ok()
                 .and_then(|s| s.parse().ok())
                 .unwrap_or(1500);
-            std::thread::sleep(std::time::Duration::from_micros(window_us));
+            let n_others_active = self
+                .slot_in_use
+                .iter()
+                .enumerate()
+                .filter(|(idx, taken)| {
+                    *idx != slot_idx
+                        && taken.load(std::sync::atomic::Ordering::Relaxed)
+                })
+                .count();
+            if window_us > 0 && n_others_active > 0 {
+                std::thread::sleep(std::time::Duration::from_micros(window_us));
+            }
 
             // Drain the queue.
             let pending: Vec<PendingDecode> = {
@@ -278,8 +342,11 @@ impl ServerState {
         }
 
         // Wait for our response (whether we were leader or not).
-        rx.recv()
-            .map_err(|e| anyhow!("decode_via_scheduler recv: {e}"))?
+        let recv_buf = rx
+            .recv()
+            .map_err(|e| anyhow!("decode_via_scheduler recv: {e}"))??;
+        *logits_out = recv_buf;
+        Ok(())
     }
 
     /// **P2.9b-i2-B** — leader's dispatch step. Locks each referenced
@@ -2417,10 +2484,18 @@ fn run_completion_scheduler_pp_blocking(
             .unwrap_or(0);
 
         // ---------- Stage 2: decode loop via scheduler. NO mutex held.
+        // **Cycle 3** — reuse one logits buffer across the whole decode
+        // loop instead of allocating a fresh ~600 KB Vec per step.
+        let mut logits: Vec<f32> = Vec::with_capacity(vocab);
         for step in 1..params.max_tokens as usize {
             let force_mask = step < MIN_RESPONSE_TOKENS && !relax_stop_mask;
-            let mut logits = state
-                .decode_via_scheduler(slot_idx, last_token, prompt_ids.len() + step)
+            state
+                .decode_via_scheduler_into(
+                    slot_idx,
+                    last_token,
+                    prompt_ids.len() + step,
+                    &mut logits,
+                )
                 .context("scheduler-path decode step")?;
             if !relax_stop_mask {
                 for &sid in stop_ids {
