@@ -915,6 +915,39 @@ pub fn forward_decode_batched_hybrid(
         let stage_ar = &stage_ars[stage_idx];
         let stage_model = &stage.tp_model;
         let sub_cluster = &stage.sub_cluster;
+
+        // **#275 cycle 6 debug** — `FLAMBEAU_STAGE_ENTRY_DUMP=1` dumps
+        // hidden_a row 0 L2 at the START of each stage (post-peer_copy
+        // from previous stage). Used to verify stage handoff at N=2.
+        if std::env::var("FLAMBEAU_STAGE_ENTRY_DUMP").is_ok() {
+            let entry_dev = sub_cluster.device(0);
+            entry_dev.bind()?;
+            entry_dev.default_stream().synchronize()?;
+            let mut host = vec![half::f16::from_f32(0.0); n * hidden];
+            unsafe {
+                entry_dev.memcpy_async(
+                    entry_dev.default_stream(),
+                    flambeau_core::CopyDirection::DeviceToHost,
+                    flambeau_core::DevicePtr(host.as_mut_ptr() as usize),
+                    stage_scratch.per_rank[0].hidden_a,
+                    n * hidden * 2,
+                )?;
+            }
+            entry_dev.default_stream().synchronize()?;
+            for s in 0..n {
+                let row = &host[s * hidden..(s + 1) * hidden];
+                let l2: f64 = row
+                    .iter()
+                    .map(|v| (v.to_f32() as f64).powi(2))
+                    .sum::<f64>()
+                    .sqrt();
+                let head: Vec<f32> =
+                    row[..4.min(row.len())].iter().map(|v| v.to_f32()).collect();
+                eprintln!(
+                    "[STAGE-ENTRY-DUMP] N={n} stage={stage_idx} slot={s} L2={l2:.4} head={head:?}"
+                );
+            }
+        }
         let il_cache_offset = stage.layer_range.start;
         let kv_replicated = stage_model.tp.kv_replicated();
         let kq_replicated = stage_model.tp.gdn_kq_replicated();
@@ -1336,9 +1369,20 @@ pub fn forward_decode_batched_hybrid(
                 let global_il = stage.layer_range.start + li;
                 match cache {
                     LayerCache::FullAttn(kv) => {
-                        let bytes = kv.bytes_per_tensor();
-                        let mut k_host = vec![0u8; bytes];
-                        let mut v_host = vec![0u8; bytes];
+                        // Only dump the VALID portion (positions 0..current_tokens).
+                        // Uninitialized memory beyond that pollutes L2 with stale
+                        // per-session noise that has nothing to do with kernel bugs.
+                        let valid_tokens = kv.current_tokens();
+                        let per_token_bytes = kv.n_heads() * kv.head_dim() * 2;
+                        let valid_bytes = valid_tokens * per_token_bytes;
+                        if valid_bytes == 0 {
+                            eprintln!(
+                                "[STATE-DUMP] N={n} stage={stage_idx} layer={global_il} type=fullattn current_tokens=0 (empty)"
+                            );
+                            continue;
+                        }
+                        let mut k_host = vec![0u8; valid_bytes];
+                        let mut v_host = vec![0u8; valid_bytes];
                         unsafe {
                             stage_dev.memcpy_async(
                                 stage_dev.default_stream(),
@@ -1347,7 +1391,7 @@ pub fn forward_decode_batched_hybrid(
                                     k_host.as_mut_ptr() as usize,
                                 ),
                                 kv.k_buffer(),
-                                bytes,
+                                valid_bytes,
                             )?;
                             stage_dev.memcpy_async(
                                 stage_dev.default_stream(),
@@ -1356,42 +1400,42 @@ pub fn forward_decode_batched_hybrid(
                                     v_host.as_mut_ptr() as usize,
                                 ),
                                 kv.v_buffer(),
-                                bytes,
+                                valid_bytes,
                             )?;
                         }
                         stage_dev.default_stream().synchronize()?;
-                        // Interpret as F16 (2 bytes/element).
                         let k_f16: &[half::f16] = unsafe {
                             std::slice::from_raw_parts(
                                 k_host.as_ptr() as *const half::f16,
-                                bytes / 2,
+                                valid_bytes / 2,
                             )
                         };
                         let v_f16: &[half::f16] = unsafe {
                             std::slice::from_raw_parts(
                                 v_host.as_ptr() as *const half::f16,
-                                bytes / 2,
+                                valid_bytes / 2,
                             )
                         };
                         let k_l2: f64 = k_f16
                             .iter()
-                            .map(|x| {
-                                let f = x.to_f32() as f64;
-                                f * f
-                            })
+                            .map(|x| (x.to_f32() as f64).powi(2))
                             .sum::<f64>()
                             .sqrt();
                         let v_l2: f64 = v_f16
                             .iter()
-                            .map(|x| {
-                                let f = x.to_f32() as f64;
-                                f * f
-                            })
+                            .map(|x| (x.to_f32() as f64).powi(2))
+                            .sum::<f64>()
+                            .sqrt();
+                        // Also dump LAST-token K row L2 (= the just-appended row)
+                        // as a separate metric to detect off-by-one bugs.
+                        let last_off = (valid_tokens - 1) * per_token_bytes / 2;
+                        let last_k_l2: f64 = k_f16[last_off..last_off + per_token_bytes / 2]
+                            .iter()
+                            .map(|x| (x.to_f32() as f64).powi(2))
                             .sum::<f64>()
                             .sqrt();
                         eprintln!(
-                            "[STATE-DUMP] N={n} stage={stage_idx} layer={global_il} type=fullattn current_tokens={} k_l2={k_l2:.4} v_l2={v_l2:.4}",
-                            kv.current_tokens()
+                            "[STATE-DUMP] N={n} stage={stage_idx} layer={global_il} type=fullattn current_tokens={valid_tokens} k_l2={k_l2:.4} v_l2={v_l2:.4} last_k_l2={last_k_l2:.4}"
                         );
                     }
                     LayerCache::Gdn(g) => {
