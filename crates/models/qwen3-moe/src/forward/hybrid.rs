@@ -1316,6 +1316,144 @@ pub fn forward_decode_batched_hybrid(
             }
         }
 
+        // **#275 cycle 4 debug** — `FLAMBEAU_LAYER_STATE_DUMP=1` dumps
+        // per-layer KV cache + GDN state L2 norms for slot 0 on rank 0
+        // at the END OF EACH STAGE. Used to find the first layer whose
+        // state differs between N=1 and N=2 dispatch (since hidden_a
+        // matches at step 1 but step 2 diverges, the corruption is
+        // INSIDE a layer's cache or state, invisible to the visible
+        // hidden output).
+        if std::env::var("FLAMBEAU_LAYER_STATE_DUMP").is_ok() {
+            // SAFETY: same disjointness as the other unsafe split above.
+            let sessions_ptr = sessions.as_mut_ptr();
+            let session0: &mut Qwen3MoEHybridSession =
+                unsafe { &mut **sessions_ptr };
+            let stage_caches = &session0.stages[stage_idx].caches[0];
+            let stage_dev = stage.sub_cluster.device(0);
+            stage_dev.bind()?;
+            stage_dev.default_stream().synchronize()?;
+            for (li, cache) in stage_caches.iter().enumerate() {
+                let global_il = stage.layer_range.start + li;
+                match cache {
+                    LayerCache::FullAttn(kv) => {
+                        let bytes = kv.bytes_per_tensor();
+                        let mut k_host = vec![0u8; bytes];
+                        let mut v_host = vec![0u8; bytes];
+                        unsafe {
+                            stage_dev.memcpy_async(
+                                stage_dev.default_stream(),
+                                flambeau_core::CopyDirection::DeviceToHost,
+                                flambeau_core::DevicePtr(
+                                    k_host.as_mut_ptr() as usize,
+                                ),
+                                kv.k_buffer(),
+                                bytes,
+                            )?;
+                            stage_dev.memcpy_async(
+                                stage_dev.default_stream(),
+                                flambeau_core::CopyDirection::DeviceToHost,
+                                flambeau_core::DevicePtr(
+                                    v_host.as_mut_ptr() as usize,
+                                ),
+                                kv.v_buffer(),
+                                bytes,
+                            )?;
+                        }
+                        stage_dev.default_stream().synchronize()?;
+                        // Interpret as F16 (2 bytes/element).
+                        let k_f16: &[half::f16] = unsafe {
+                            std::slice::from_raw_parts(
+                                k_host.as_ptr() as *const half::f16,
+                                bytes / 2,
+                            )
+                        };
+                        let v_f16: &[half::f16] = unsafe {
+                            std::slice::from_raw_parts(
+                                v_host.as_ptr() as *const half::f16,
+                                bytes / 2,
+                            )
+                        };
+                        let k_l2: f64 = k_f16
+                            .iter()
+                            .map(|x| {
+                                let f = x.to_f32() as f64;
+                                f * f
+                            })
+                            .sum::<f64>()
+                            .sqrt();
+                        let v_l2: f64 = v_f16
+                            .iter()
+                            .map(|x| {
+                                let f = x.to_f32() as f64;
+                                f * f
+                            })
+                            .sum::<f64>()
+                            .sqrt();
+                        eprintln!(
+                            "[STATE-DUMP] N={n} stage={stage_idx} layer={global_il} type=fullattn current_tokens={} k_l2={k_l2:.4} v_l2={v_l2:.4}",
+                            kv.current_tokens()
+                        );
+                    }
+                    LayerCache::Gdn(g) => {
+                        let mut state_host = vec![0u8; g.state_bytes];
+                        let mut conv_host = vec![0u8; g.conv_history_bytes];
+                        unsafe {
+                            stage_dev.memcpy_async(
+                                stage_dev.default_stream(),
+                                flambeau_core::CopyDirection::DeviceToHost,
+                                flambeau_core::DevicePtr(
+                                    state_host.as_mut_ptr() as usize,
+                                ),
+                                g.state,
+                                g.state_bytes,
+                            )?;
+                            stage_dev.memcpy_async(
+                                stage_dev.default_stream(),
+                                flambeau_core::CopyDirection::DeviceToHost,
+                                flambeau_core::DevicePtr(
+                                    conv_host.as_mut_ptr() as usize,
+                                ),
+                                g.conv_history,
+                                g.conv_history_bytes,
+                            )?;
+                        }
+                        stage_dev.default_stream().synchronize()?;
+                        // GDN state is F32, conv_history is F32.
+                        let state_f32: &[f32] = unsafe {
+                            std::slice::from_raw_parts(
+                                state_host.as_ptr() as *const f32,
+                                g.state_bytes / 4,
+                            )
+                        };
+                        let conv_f32: &[f32] = unsafe {
+                            std::slice::from_raw_parts(
+                                conv_host.as_ptr() as *const f32,
+                                g.conv_history_bytes / 4,
+                            )
+                        };
+                        let state_l2: f64 = state_f32
+                            .iter()
+                            .map(|x| (*x as f64).powi(2))
+                            .sum::<f64>()
+                            .sqrt();
+                        let conv_l2: f64 = conv_f32
+                            .iter()
+                            .map(|x| (*x as f64).powi(2))
+                            .sum::<f64>()
+                            .sqrt();
+                        eprintln!(
+                            "[STATE-DUMP] N={n} stage={stage_idx} layer={global_il} type=gdn state_l2={state_l2:.4} conv_l2={conv_l2:.4}"
+                        );
+                    }
+                    LayerCache::FullAttnQ8(_) => {
+                        eprintln!(
+                            "[STATE-DUMP] N={n} stage={stage_idx} layer={global_il} type=fullattn_q8 (skipped)"
+                        );
+                    }
+                }
+            }
+        }
+
         // 4. Stage-boundary hand-off: peer_copy stage_idx rank 0's
         //    hidden_a to every rank of stage_idx+1.
         if stage_idx + 1 < n_stages {
