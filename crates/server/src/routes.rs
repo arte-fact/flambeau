@@ -247,12 +247,30 @@ impl ServerState {
             };
 
             if !pending.is_empty() {
-                if let Err(e) = self.dispatch_batched_pending(&pending) {
-                    // Fan the error out to all waiters so none stall.
-                    for p in &pending {
-                        let _ = p.response.send(Err(anyhow!(
-                            "batched dispatch failed: {e}"
-                        )));
+                // **Debug knob FLAMBEAU_BATCH_MAX** — cap per-dispatch
+                // batch size. Default unset = no cap (full N at once).
+                // Set to 1 to serialise (run each pending entry as its
+                // own N=1 batched call) — used to isolate "is the bug
+                // in N>1 forward, or in scheduler infra?".
+                let batch_max: usize = std::env::var("FLAMBEAU_BATCH_MAX")
+                    .ok()
+                    .and_then(|s| s.parse().ok())
+                    .unwrap_or(usize::MAX);
+                let chunk_size = batch_max.max(1).min(pending.len());
+                tracing::info!(
+                    target: "server.scheduler",
+                    pending = pending.len(),
+                    batch_max = if batch_max == usize::MAX { 0 } else { batch_max },
+                    chunk_size,
+                    "scheduler dispatch"
+                );
+                for chunk in pending.chunks(chunk_size) {
+                    if let Err(e) = self.dispatch_batched_pending(chunk) {
+                        for p in chunk {
+                            let _ = p.response.send(Err(anyhow!(
+                                "batched dispatch failed: {e}"
+                            )));
+                        }
                     }
                 }
             }
@@ -2283,7 +2301,11 @@ fn scheduler_can_engage(state: &ServerState, params: &SamplingParams) -> bool {
     if std::env::var("FLAMBEAU_BATCHED_DECODE").is_err() {
         return false;
     }
-    // PP (no MTP), TP, and Hybrid all supported.
+    // PP (no MTP), TP, and Hybrid all supported. MTP-spec / JSON /
+    // logprobs paths still go through the legacy handler — those
+    // features carry extra device-side state (MTP head, JSON DFA,
+    // top-K logprobs grab) that isn't yet plumbed through the
+    // scheduler-aware handler.
     let topo_ok = match &state.model {
         LoadedModel::Pp { mtp: None, .. } => true,
         LoadedModel::Tp { .. } => true,
@@ -2293,18 +2315,19 @@ fn scheduler_can_engage(state: &ServerState, params: &SamplingParams) -> bool {
     if !topo_ok {
         return false;
     }
-    let s = &params.sampling;
-    s.is_greedy() && !params.json_mode && params.collect_logprobs.is_none()
+    !params.json_mode && params.collect_logprobs.is_none()
 }
 
-/// **P2.9b-i2-B-wire** — focused chat handler that uses the scheduler.
-/// Engaged when [`scheduler_can_engage`] returns true. Releases the
-/// slot's mutex during the decode loop so the scheduler-leader can
-/// `blocking_lock` other slots' mutexes for batched dispatch.
+/// **P2.9b-i2-B-wire (cleanup 2026-05-03)** — chat handler that uses
+/// the scheduler. Engaged when [`scheduler_can_engage`] returns true.
+/// Releases the slot's mutex during the decode loop so the scheduler-
+/// leader can `blocking_lock` other slots' mutexes for batched dispatch.
 ///
-/// Subset of `run_completion_blocking_ids`'s feature set: greedy
-/// argmax with the same stop-mask + stop-bias as the legacy host
-/// path. No spec / GPU sampler / JSON / logprobs / tools.
+/// Supports the full host-sampler feature set: greedy or temp/top_k/
+/// top_p/min_p sampling, repetition / presence / frequency penalties.
+/// Does NOT (yet) support: spec-decode (MTP), JSON-grammar masking,
+/// logprobs, GPU sampler. Those still go through the legacy
+/// `run_completion_blocking_ids`.
 fn run_completion_scheduler_pp_blocking(
     state: SharedState,
     prompt_ids: Vec<u32>,
@@ -2335,6 +2358,12 @@ fn run_completion_scheduler_pp_blocking(
         let always_stop_ids = &state.tokenizer.always_stop_ids;
         let is_stop = |t: u32| stop_ids.contains(&t);
         let vocab = state.cfg.vocab_size;
+        let sampling = &params.sampling;
+
+        // Sampler shared across first-token + decode loop. Mirrors the
+        // legacy handler's setup.
+        let mut sampler = Sampler::from_seed(params.seed);
+        sampler.reserve(vocab);
 
         // ---------- Stage 1: brief mutex hold for prefill + first-token sample.
         let first_next = {
@@ -2360,16 +2389,7 @@ fn run_completion_scheduler_pp_blocking(
                     }
                 }
             }
-            // Greedy argmax.
-            let mut best_idx = 0usize;
-            let mut best_val = f32::NEG_INFINITY;
-            for (i, &v) in logits_buf.iter().enumerate() {
-                if v > best_val {
-                    best_val = v;
-                    best_idx = i;
-                }
-            }
-            best_idx as u32
+            sampler.sample(&logits_buf, sampling, &[])
         }; // mutex drops here
 
         let mut generated: Vec<u32> = Vec::with_capacity(params.max_tokens as usize);
@@ -2415,16 +2435,7 @@ fn run_completion_scheduler_pp_blocking(
                     }
                 }
             }
-            // Greedy argmax.
-            let mut best_idx = 0usize;
-            let mut best_val = f32::NEG_INFINITY;
-            for (i, &v) in logits.iter().enumerate() {
-                if v > best_val {
-                    best_val = v;
-                    best_idx = i;
-                }
-            }
-            let next = best_idx as u32;
+            let next = sampler.sample(&logits, sampling, &generated);
             if is_stop(next) {
                 finish_reason = "stop";
                 break;
