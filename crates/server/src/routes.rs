@@ -235,6 +235,11 @@ impl ServerState {
         // prefill-flavoured kernels which add a few extra launches per
         // layer (separate rmsnorm + 2 quant variants); at N=1 those
         // launches are pure overhead vs the fused decode form.
+        //
+        // **#275 debug** — `FLAMBEAU_NO_FAST_PATH=1` disables this
+        // shortcut so single-user dispatches still go through
+        // `forward_decode_batched_*`. Used to capture per-stage activation
+        // dumps that compare N=1 vs N=2 for the kernel-correctness bug.
         let n_others_active = self
             .slot_in_use
             .iter()
@@ -244,7 +249,8 @@ impl ServerState {
                     && taken.load(std::sync::atomic::Ordering::Relaxed)
             })
             .count();
-        if n_others_active == 0 {
+        let no_fast_path = std::env::var("FLAMBEAU_NO_FAST_PATH").is_ok();
+        if n_others_active == 0 && !no_fast_path {
             let mut guard = self.inflight_pool[slot_idx].blocking_lock();
             crate::model::decode_logits(
                 &self.model,
