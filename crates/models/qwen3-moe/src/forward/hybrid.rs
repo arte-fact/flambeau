@@ -1120,6 +1120,44 @@ pub fn forward_decode_batched_hybrid(
                 }
             }
 
+            // **#275 cycle 7 debug** — dump partial_attn_out row 0 BEFORE AR
+            // and hidden_a row 0 AFTER AR for the first layer of stage 1.
+            // Compares "GDN call wrote wrong row 0" vs "AR mangled row 0
+            // at n_tokens=N>1" across N=1 and N=2 dispatches.
+            // Dump only layer 32 (first GDN of stage 1) on rank 0.
+            let do_pre_ar_dump = std::env::var("FLAMBEAU_AR_DUMP").is_ok()
+                && stage_idx == 1
+                && il == 32;
+            if do_pre_ar_dump {
+                let dump_dev = sub_cluster.device(0);
+                dump_dev.bind()?;
+                dump_dev.default_stream().synchronize()?;
+                let mut host = vec![half::f16::from_f32(0.0); n * hidden];
+                unsafe {
+                    dump_dev.memcpy_async(
+                        dump_dev.default_stream(),
+                        flambeau_core::CopyDirection::DeviceToHost,
+                        flambeau_core::DevicePtr(host.as_mut_ptr() as usize),
+                        stage_scratch.per_rank[0].partial_attn_out,
+                        n * hidden * 2,
+                    )?;
+                }
+                dump_dev.default_stream().synchronize()?;
+                for s in 0..n {
+                    let row = &host[s * hidden..(s + 1) * hidden];
+                    let l2: f64 = row
+                        .iter()
+                        .map(|v| (v.to_f32() as f64).powi(2))
+                        .sum::<f64>()
+                        .sqrt();
+                    let head: Vec<f32> =
+                        row[..4.min(row.len())].iter().map(|v| v.to_f32()).collect();
+                    eprintln!(
+                        "[AR-DUMP] N={n} il={il} when=PRE-AR slot={s} L2={l2:.4} head={head:?}"
+                    );
+                }
+            }
+
             // 3b. Stage-internal AR(hidden_a, partial_attn_out, N*hidden).
             super::tp::ar_residual_prefill_pub(
                 stage_ar,
@@ -1129,6 +1167,37 @@ pub fn forward_decode_batched_hybrid(
                 elem_count_l,
                 super::tp::AttnOrFfnPub::Attn,
             )?;
+
+            // **#275 cycle 7 debug** — post-AR dump.
+            if do_pre_ar_dump {
+                let dump_dev = sub_cluster.device(0);
+                dump_dev.bind()?;
+                dump_dev.default_stream().synchronize()?;
+                let mut host = vec![half::f16::from_f32(0.0); n * hidden];
+                unsafe {
+                    dump_dev.memcpy_async(
+                        dump_dev.default_stream(),
+                        flambeau_core::CopyDirection::DeviceToHost,
+                        flambeau_core::DevicePtr(host.as_mut_ptr() as usize),
+                        stage_scratch.per_rank[0].hidden_a,
+                        n * hidden * 2,
+                    )?;
+                }
+                dump_dev.default_stream().synchronize()?;
+                for s in 0..n {
+                    let row = &host[s * hidden..(s + 1) * hidden];
+                    let l2: f64 = row
+                        .iter()
+                        .map(|v| (v.to_f32() as f64).powi(2))
+                        .sum::<f64>()
+                        .sqrt();
+                    let head: Vec<f32> =
+                        row[..4.min(row.len())].iter().map(|v| v.to_f32()).collect();
+                    eprintln!(
+                        "[AR-DUMP] N={n} il={il} when=POST-AR slot={s} L2={l2:.4} head={head:?}"
+                    );
+                }
+            }
 
             // 3c. ffn_norm[N] over hidden_a → mid_norm.
             for r in 0..sub_cluster.ranks() {
