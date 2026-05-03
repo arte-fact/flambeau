@@ -1277,6 +1277,45 @@ pub fn forward_decode_batched_hybrid(
             }
         }
 
+        // **#275 cycle 2 debug** — per-stage post-FFN hidden L2 dump
+        // gated by FLAMBEAU_BATCHED_DECODE_DUMP=1. Compares N=1 vs N=2
+        // dispatch trace to find the first divergent stage. Dumps from
+        // stage rank 0's hidden_a (where the AR result lives).
+        if std::env::var("FLAMBEAU_BATCHED_DECODE_DUMP").is_ok() {
+            let dump_dev = stage.sub_cluster.device(0);
+            dump_dev.bind()?;
+            dump_dev.default_stream().synchronize()?;
+            let mut host = vec![half::f16::from_f32(0.0); n * hidden];
+            let dump_ptr = scratch.per_stage[stage_idx].per_rank[0].hidden_a;
+            // SAFETY: dump_ptr is [N, hidden] F16 on dump_dev; sync above.
+            unsafe {
+                dump_dev.memcpy_async(
+                    dump_dev.default_stream(),
+                    flambeau_core::CopyDirection::DeviceToHost,
+                    flambeau_core::DevicePtr(host.as_mut_ptr() as usize),
+                    dump_ptr,
+                    n * hidden * 2,
+                )?;
+            }
+            dump_dev.default_stream().synchronize()?;
+            for s in 0..n {
+                let row = &host[s * hidden..(s + 1) * hidden];
+                let l2: f64 = row
+                    .iter()
+                    .map(|v| {
+                        let f = v.to_f32() as f64;
+                        f * f
+                    })
+                    .sum::<f64>()
+                    .sqrt();
+                let head: Vec<f32> =
+                    row[..4.min(row.len())].iter().map(|v| v.to_f32()).collect();
+                eprintln!(
+                    "[BATCHED-DECODE-DUMP] N={n} stage={stage_idx} slot={s} L2={l2:.4} head={head:?}"
+                );
+            }
+        }
+
         // 4. Stage-boundary hand-off: peer_copy stage_idx rank 0's
         //    hidden_a to every rank of stage_idx+1.
         if stage_idx + 1 < n_stages {
