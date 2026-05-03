@@ -1007,13 +1007,23 @@ pub fn forward_decode_batched_hybrid(
                     // layer_scratch we already hold above).
                     let rank_scratch_ptr: *mut super::tp::RankForwardPrefillScratchTp =
                         &mut stage_scratch.per_rank[r];
-                    // SAFETY: gdn_decode and layer fields disjoint.
-                    let gdn = unsafe {
-                        (*rank_scratch_ptr)
-                            .gdn_decode
-                            .as_mut()
-                            .ok_or_else(|| anyhow!("rank {r}: missing gdn_decode scratch"))?
-                    };
+                    // **#275 debug** — `FLAMBEAU_GDN_PER_SLOT_SCRATCH=1`
+                    // allocates a fresh `GdnScratch` for each slot
+                    // iteration instead of reusing the rank-shared one.
+                    // Used to validate the hypothesis that the per-slot
+                    // GDN loop has a scratch-reuse hazard on the split
+                    // path (n_rep != 1, e.g. Qwen3.6-27B at TP=2).
+                    // Allocates / disposes O(60 KB) per slot per layer
+                    // — slow, debug-only.
+                    let per_slot_scratch =
+                        std::env::var("FLAMBEAU_GDN_PER_SLOT_SCRATCH").is_ok();
+                    let mut transient_scratches: Vec<super::GdnScratch> =
+                        Vec::with_capacity(if per_slot_scratch { n } else { 0 });
+                    if per_slot_scratch {
+                        for _ in 0..n {
+                            transient_scratches.push(super::GdnScratch::new(cfg, device)?);
+                        }
+                    }
                     let sessions_ptr = sessions.as_mut_ptr();
                     for s in 0..n {
                         // SAFETY: indices 0..n distinct.
@@ -1031,6 +1041,17 @@ pub fn forward_decode_batched_hybrid(
                         let slot_x_in = DevicePtr(hidden_a.as_usize() + s * row_bytes);
                         let slot_partial =
                             DevicePtr(partial_attn_out.as_usize() + s * row_bytes);
+                        // Pick scratch: per-slot transient (debug) or
+                        // rank-shared (default).
+                        let gdn: &mut super::GdnScratch = if per_slot_scratch {
+                            &mut transient_scratches[s]
+                        } else {
+                            unsafe {
+                                (*rank_scratch_ptr).gdn_decode.as_mut().ok_or_else(
+                                    || anyhow!("rank {r}: missing gdn_decode scratch"),
+                                )?
+                            }
+                        };
                         super::gdn_tp::forward_gdn_decode_tp(
                             ops,
                             stream,
@@ -1058,6 +1079,10 @@ pub fn forward_decode_batched_hybrid(
                                 "hybrid GDN slot {s} stage {stage_idx} layer {il} rank {r}"
                             )
                         })?;
+                    }
+                    // Dispose any transient scratches allocated this layer.
+                    for sc in transient_scratches.drain(..) {
+                        sc.dispose(device).ok();
                     }
                 }
             }
