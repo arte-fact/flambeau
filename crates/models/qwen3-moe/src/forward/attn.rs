@@ -1500,10 +1500,11 @@ pub fn forward_full_attn_layer_decode_batched(
     )
     .context("batched-decode rope K")?;
 
-    // 7. Per-slot KV append. Each slot writes ITS row of K/V into ITS
-    //    own cache at slot_positions[s]. F16-only path for V1
-    //    (LayerCache::FullAttn); Q8 KV slots fall back via the loop.
-    let kv_per_token_bytes = kv_width * 2; // F16
+    // 7. Per-slot KV append. **#275 fix**: write at `current_tokens`
+    //    (the cache tail) rather than `slot_positions[s]` (which is
+    //    `prompt_ids.len() + step` = off by 1). Matches legacy
+    //    `kv_cache.append()` semantics. F16-only (FullAttn cache).
+    let kv_per_token_bytes = kv_width * 2;
     for (s, cache) in slot_caches.iter_mut().enumerate() {
         let LayerCache::FullAttn(kv) = cache else {
             bail!(
@@ -1511,15 +1512,13 @@ pub fn forward_full_attn_layer_decode_batched(
                  (Q8 KV path uses sequential single-slot decode)"
             );
         };
-        let pos = slot_positions[s];
+        let write_pos = kv.current_tokens();
         let k_src = scratch.k_f16.offset_bytes(s * kv_per_token_bytes);
         let v_src = scratch.v_f16.offset_bytes(s * kv_per_token_bytes);
-        let k_dst = kv.k_buffer().offset_bytes(pos * kv_per_token_bytes);
-        let v_dst = kv.v_buffer().offset_bytes(pos * kv_per_token_bytes);
-        // SAFETY: src buffers are scratch.k_f16/v_f16 each ≥ N rows of
-        // kv_per_token_bytes; dst is the slot's KV cache K/V buffer
-        // sized to ≥ (max_seq_len * kv_per_token_bytes); pos < max_seq_len
-        // is enforced by the caller.
+        let k_dst = kv.k_buffer().offset_bytes(write_pos * kv_per_token_bytes);
+        let v_dst = kv.v_buffer().offset_bytes(write_pos * kv_per_token_bytes);
+        // SAFETY: src/dst are valid; write_pos < max_seq_len is bounded
+        // by the cache.
         unsafe {
             device.memcpy_async(
                 stream, CopyDirection::DeviceToDevice,
@@ -1534,10 +1533,9 @@ pub fn forward_full_attn_layer_decode_batched(
             .map_err(|e| anyhow::anyhow!("slot {s} bump_tail: {e}"))?;
     }
 
-    // 8. Per-slot attention decode. Each slot reads its own cache up to
-    //    slot_positions[s] + 1 K/V rows. attention_decode_f16 expects
-    //    one Q row at a time; we offset Q / out per slot.
-    let q_per_token_bytes = q_width * 2; // F16
+    // 8. Per-slot attention decode. **#275 fix**: n_k_tokens reads
+    //    `current_tokens` post-bump (= the just-written K row included).
+    let q_per_token_bytes = q_width * 2;
     let scale = (head_dim as f32).sqrt().recip();
     for (s, cache) in slot_caches.iter().enumerate() {
         let LayerCache::FullAttn(kv) = cache else {
@@ -1547,7 +1545,7 @@ pub fn forward_full_attn_layer_decode_batched(
         let out_row = scratch
             .attn_out_f16
             .offset_bytes(s * q_per_token_bytes);
-        let n_k_tokens = slot_positions[s] + 1;
+        let n_k_tokens = kv.current_tokens();
         attention_decode_f16_slots(
             ops, stream,
             q_row, kv.k_buffer(), kv.v_buffer(), out_row,

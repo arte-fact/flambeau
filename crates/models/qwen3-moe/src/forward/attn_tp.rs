@@ -41,7 +41,7 @@
 
 use anyhow::{bail, Context, Result};
 use flambeau_backend_hip::{HipDevice, HipStream};
-use flambeau_core::{CopyDirection, Device, DevicePtr};
+use flambeau_core::{CopyDirection, Device, DevicePtr, Stream};
 use flambeau_ops::hip::{
     attention::{
         attention_decode_f16_slots, attention_decode_f16_splitk, attention_decode_q8_kv,
@@ -861,6 +861,55 @@ pub fn forward_full_attn_layer_decode_batched_tp(
     )
     .context("batched-decode attn_k_norm (TP)")?;
 
+    // **#275 cycle 5 debug** — `FLAMBEAU_KV_PROJ_DUMP=1` dumps L2 of
+    // post-rmsnorm K-row-0 from scratch.k_f16. Compares projection
+    // outputs between N=1 and N=2 dispatches at the same layer call.
+    // If row 0's K differs, the bug is in Q/K/V projection at small
+    // n_tokens. If row 0's K matches, the bug is downstream
+    // (KV-append, RoPE, or attention).
+    if std::env::var("FLAMBEAU_KV_PROJ_DUMP").is_ok() {
+        // SAFETY: scratch.k_f16 has at least n_tokens rows of
+        // local_kv_width F16 each; sync the stream then DtoH.
+        stream.synchronize()?;
+        let row_bytes_kv = local_kv_width * 2;
+        let mut host_k = vec![half::f16::from_f32(0.0); local_kv_width];
+        let mut host_q = vec![half::f16::from_f32(0.0); local_q_width];
+        unsafe {
+            device.memcpy_async(
+                stream,
+                CopyDirection::DeviceToHost,
+                DevicePtr(host_k.as_mut_ptr() as usize),
+                scratch.k_f16,
+                row_bytes_kv,
+            )?;
+            device.memcpy_async(
+                stream,
+                CopyDirection::DeviceToHost,
+                DevicePtr(host_q.as_mut_ptr() as usize),
+                scratch.q_f16,
+                local_q_width * 2,
+            )?;
+        }
+        stream.synchronize()?;
+        let k_l2: f64 = host_k
+            .iter()
+            .map(|v| (v.to_f32() as f64).powi(2))
+            .sum::<f64>()
+            .sqrt();
+        let q_l2: f64 = host_q
+            .iter()
+            .map(|v| (v.to_f32() as f64).powi(2))
+            .sum::<f64>()
+            .sqrt();
+        let k_head: Vec<f32> =
+            host_k[..4.min(host_k.len())].iter().map(|v| v.to_f32()).collect();
+        let q_head: Vec<f32> =
+            host_q[..4.min(host_q.len())].iter().map(|v| v.to_f32()).collect();
+        eprintln!(
+            "[KV-PROJ-DUMP] N={n_tokens} row=0 q_l2={q_l2:.4} q_head={q_head:?} k_l2={k_l2:.4} k_head={k_head:?}"
+        );
+    }
+
     // 7. RoPE on Q / K with per-slot positions.
     super::attn::upload_positions_arbitrary(device, stream, scratch, slot_positions)?;
     rope_neox_partial_f16(
@@ -874,20 +923,73 @@ pub fn forward_full_attn_layer_decode_batched_tp(
     )
     .context("batched-decode rope K (TP)")?;
 
+    // **#275 cycle 5b** — `FLAMBEAU_KV_ROPE_DUMP=1` dumps row-0 Q/K
+    // L2 + heads AFTER RoPE. Compares post-RoPE K (about to be
+    // written to cache) between N=1 and N=2.
+    if std::env::var("FLAMBEAU_KV_ROPE_DUMP").is_ok() {
+        stream.synchronize()?;
+        let row_bytes_kv = local_kv_width * 2;
+        let mut host_k = vec![half::f16::from_f32(0.0); local_kv_width];
+        let mut host_q = vec![half::f16::from_f32(0.0); local_q_width];
+        unsafe {
+            device.memcpy_async(
+                stream,
+                CopyDirection::DeviceToHost,
+                DevicePtr(host_k.as_mut_ptr() as usize),
+                scratch.k_f16,
+                row_bytes_kv,
+            )?;
+            device.memcpy_async(
+                stream,
+                CopyDirection::DeviceToHost,
+                DevicePtr(host_q.as_mut_ptr() as usize),
+                scratch.q_f16,
+                local_q_width * 2,
+            )?;
+        }
+        stream.synchronize()?;
+        let k_l2: f64 = host_k
+            .iter()
+            .map(|v| (v.to_f32() as f64).powi(2))
+            .sum::<f64>()
+            .sqrt();
+        let q_l2: f64 = host_q
+            .iter()
+            .map(|v| (v.to_f32() as f64).powi(2))
+            .sum::<f64>()
+            .sqrt();
+        let k_head: Vec<f32> =
+            host_k[..4.min(host_k.len())].iter().map(|v| v.to_f32()).collect();
+        let q_head: Vec<f32> =
+            host_q[..4.min(host_q.len())].iter().map(|v| v.to_f32()).collect();
+        eprintln!(
+            "[KV-ROPE-DUMP] N={n_tokens} pos={} row=0 q_l2={q_l2:.4} q_head={q_head:?} k_l2={k_l2:.4} k_head={k_head:?}",
+            slot_positions[0]
+        );
+    }
+
     // 8. Per-slot KV append. Each slot writes ITS row of K/V into ITS
-    //    own per-rank cache at slot_positions[s]. F16-only path.
+    //    own per-rank cache. **#275 fix**: write at `current_tokens`
+    //    (the cache tail) rather than `slot_positions[s]` (which is
+    //    `prompt_ids.len() + step` = off by 1). This matches legacy
+    //    `kv_cache.append()` semantics. Without this fix, decode step 1
+    //    writes K/V at slot N+1 instead of slot N → slot N stays
+    //    uninitialised and contaminates attention from step 2 onward.
+    //    F16-only path; Q8 KV slots fall back via the loop.
     let kv_per_token_bytes = local_kv_width * 2;
+    let mut write_positions: Vec<usize> = Vec::with_capacity(n_tokens);
     for s in 0..n_tokens {
-        let pos = slot_positions[s];
+        let kv = &mut *slot_kv_caches[s];
+        let write_pos = kv.current_tokens();
+        write_positions.push(write_pos);
         let k_src = scratch.k_f16.offset_bytes(s * kv_per_token_bytes);
         let v_src = scratch.v_f16.offset_bytes(s * kv_per_token_bytes);
-        let kv = &mut *slot_kv_caches[s];
-        let k_dst = kv.k_buffer().offset_bytes(pos * kv_per_token_bytes);
-        let v_dst = kv.v_buffer().offset_bytes(pos * kv_per_token_bytes);
+        let k_dst = kv.k_buffer().offset_bytes(write_pos * kv_per_token_bytes);
+        let v_dst = kv.v_buffer().offset_bytes(write_pos * kv_per_token_bytes);
         // SAFETY: src buffers are scratch.k_f16/v_f16 each ≥ N rows of
         // kv_per_token_bytes; dst is the slot's per-rank KV cache buffer
-        // sized to ≥ (max_seq_len * kv_per_token_bytes); pos < max_seq_len
-        // is enforced by the caller.
+        // sized to ≥ (max_seq_len * kv_per_token_bytes); write_pos <
+        // max_seq_len is enforced by the cache's bounds check.
         unsafe {
             device.memcpy_async(
                 stream, CopyDirection::DeviceToDevice,
@@ -903,15 +1005,17 @@ pub fn forward_full_attn_layer_decode_batched_tp(
     }
 
     // 9. Per-slot attention decode. Each slot reads its own per-rank
-    //    cache up to slot_positions[s] + 1 K/V rows. Output offset
+    //    cache up to current_tokens K/V rows (post-bump). Output offset
     //    per slot into scratch.attn_out_f16.
     let q_per_token_bytes = local_q_width * 2;
     let scale = (head_dim as f32).sqrt().recip();
     for s in 0..n_tokens {
         let q_row = scratch.q_f16.offset_bytes(s * q_per_token_bytes);
         let out_row = scratch.attn_out_f16.offset_bytes(s * q_per_token_bytes);
-        let n_k_tokens = slot_positions[s] + 1;
+        // **#275 fix**: n_k_tokens reads from current_tokens
+        // (post-append, includes the just-written row).
         let kv = &slot_kv_caches[s];
+        let n_k_tokens = kv.current_tokens();
         attention_decode_f16_slots(
             ops, stream,
             q_row, kv.k_buffer(), kv.v_buffer(), out_row,
