@@ -35,6 +35,7 @@ use crate::hybrid::{
     Qwen3MoEHybridModel, Qwen3MoEHybridSession, ShardedForwardOneTokenScratchHybrid,
     ShardedForwardPrefillScratchHybrid,
 };
+use crate::Qwen3MoEConfig;
 
 use super::io::{argmax_token_host, forward_embed_decode_host, forward_output_head_decode};
 use super::tp::{
@@ -1694,3 +1695,548 @@ fn find_tensor_in_layer<'a>(
         .map(|t| &t.tensor)
         .ok_or_else(|| anyhow!("hybrid layer {il}: missing tensor `{suffix}`"))
 }
+
+// ---------------------------------------------------------------------------
+// **#290 PP-pipelined batched-decode** — `forward_decode_pipelined_hybrid`
+// ---------------------------------------------------------------------------
+//
+// Same shape as `forward_decode_batched_hybrid` but pipelines stages: at
+// PP=2, slot k+1's stage_0 work runs concurrently with slot k's stage_1
+// work on disjoint physical GPUs (sub_clusters). Wall-clock ceiling at
+// PP=2 / N=4 is 1.6× over `forward_decode_batched_hybrid` (see
+// `doc/V1.x/pipelined_decode.md` for the speedup table + design).
+//
+// Two-phase enqueue (PP=2 only):
+// 1. Phase A: for each slot, embed + all stage_0 layers at n_tokens=1
+//    + AR-residuals + async peer_copy fan-out to every stage_1 rank
+//    (using `bridge_events[slot_idx]` as the cross-stream wait). All
+//    issued on stage_0's sub_cluster default streams.
+// 2. Phase B: for each slot, all stage_1 layers at n_tokens=1 +
+//    AR-residuals + output_head + DtoH of logits. The HtoD into stage_1
+//    hidden_a was already queued by Phase A's `peer_copy_via_host_async`,
+//    so subsequent ops on stage_1 default streams stack naturally.
+//
+// PP > 2 / PP=1 are NOT covered by this function — caller falls back to
+// `forward_decode_batched_hybrid`.
+
+/// Run all layers of `stage_idx` for a single slot at n_tokens=1 (row 0
+/// of stage's per-rank scratch). Includes attn-AR + ffn_norm + FFN/MoE +
+/// ffn-AR. Pre-condition: row 0 of every rank's `hidden_a` holds the
+/// slot's input hidden vector. Post-condition: row 0 of every rank's
+/// `hidden_a` holds the post-stage hidden (replicated across ranks).
+#[allow(clippy::too_many_arguments)]
+fn pipelined_run_slot_through_stage(
+    model: &Qwen3MoEHybridModel,
+    cfg: &Qwen3MoEConfig,
+    sessions: &mut [&mut Qwen3MoEHybridSession],
+    scratch: &mut ShardedForwardPrefillScratchHybrid,
+    stage_ars: &[BarP2pAllReduce],
+    stage_idx: usize,
+    slot_idx: usize,
+    slot_pos: usize,
+    world: u32,
+) -> Result<()> {
+    use crate::session::LayerCache;
+    use flambeau_backend_hip::HipDevice;
+    use flambeau_ops::hip::norm::rmsnorm_f16;
+
+    let stage = &model.stages[stage_idx];
+    let stage_scratch = &mut scratch.per_stage[stage_idx];
+    let stage_ar = &stage_ars[stage_idx];
+    let stage_model = &stage.tp_model;
+    let sub_cluster = &stage.sub_cluster;
+    let il_cache_offset = stage.layer_range.start;
+    let kv_replicated = stage_model.tp.kv_replicated();
+    let kq_replicated = stage_model.tp.gdn_kq_replicated();
+    let hidden = cfg.hidden_size;
+    let elem_count_l = hidden as u32; // n_tokens=1 per slot
+    let pos_slice = std::slice::from_ref(&slot_pos);
+
+    for il in stage.layer_range.clone() {
+        let il_local = il - il_cache_offset;
+        let is_full_attn = !cfg.is_recurrent(il);
+
+        // Per-rank attn or GDN at n_tokens=1.
+        for r in 0..sub_cluster.ranks() {
+            let device = sub_cluster.device(r);
+            device.bind()?;
+            let stream = device.default_stream();
+            let layer_tensors = &stage_model.shards[r].layers[il];
+            let hidden_a = stage_scratch.per_rank[r].hidden_a;
+            let partial_attn_out = stage_scratch.per_rank[r].partial_attn_out;
+            let layer_scratch = stage_scratch.per_rank[r]
+                .layer
+                .as_mut()
+                .ok_or_else(|| anyhow!("rank {r}: missing LayerPrefillScratch"))?;
+            let ops = &stage_model.ops[r];
+
+            if is_full_attn {
+                let attn_norm = find_tensor_in_layer(layer_tensors, il, "attn_norm.weight")?;
+                let attn_q = find_tensor_in_layer(layer_tensors, il, "attn_q.weight")?;
+                let attn_k = find_tensor_in_layer(layer_tensors, il, "attn_k.weight")?;
+                let attn_v = find_tensor_in_layer(layer_tensors, il, "attn_v.weight")?;
+                let attn_output = find_tensor_in_layer(layer_tensors, il, "attn_output.weight")?;
+                let attn_q_norm = find_tensor_in_layer(layer_tensors, il, "attn_q_norm.weight")?;
+                let attn_k_norm = find_tensor_in_layer(layer_tensors, il, "attn_k_norm.weight")?;
+                let full = layer_scratch
+                    .full_attn
+                    .as_mut()
+                    .ok_or_else(|| anyhow!("rank {r}: missing FullAttnPrefillScratch"))?;
+                let session = &mut *sessions[slot_idx];
+                let kv = match &mut session.stages[stage_idx].caches[r][il_local] {
+                    LayerCache::FullAttn(kv) => kv,
+                    _ => bail!(
+                        "pipelined hybrid: slot {slot_idx} stage {stage_idx} rank {r} \
+                         layer {il} expected FullAttn cache"
+                    ),
+                };
+                let mut slot_kvs: Vec<
+                    &mut flambeau_runtime::KvCache<flambeau_runtime::F16Contig, HipDevice>,
+                > = vec![kv];
+                super::attn_tp::forward_full_attn_layer_decode_batched_tp(
+                    ops, stream, device, cfg, attn_norm, attn_q, attn_k, attn_v,
+                    attn_output, attn_q_norm, attn_k_norm, &mut slot_kvs, full,
+                    hidden_a, partial_attn_out, pos_slice, world, kv_replicated,
+                )
+                .with_context(|| {
+                    format!(
+                        "pipelined full-attn slot {slot_idx} stage {stage_idx} layer {il} rank {r}"
+                    )
+                })?;
+            } else {
+                let attn_norm = find_tensor_in_layer(layer_tensors, il, "attn_norm.weight")?;
+                let attn_qkv = find_tensor_in_layer(layer_tensors, il, "attn_qkv.weight")?;
+                let attn_gate = find_tensor_in_layer(layer_tensors, il, "attn_gate.weight")?;
+                let ssm_alpha = find_tensor_in_layer(layer_tensors, il, "ssm_alpha.weight")?;
+                let ssm_beta = find_tensor_in_layer(layer_tensors, il, "ssm_beta.weight")?;
+                let ssm_a = find_tensor_in_layer(layer_tensors, il, "ssm_a")?;
+                let ssm_dt_bias = find_tensor_in_layer(layer_tensors, il, "ssm_dt.bias")?;
+                let ssm_conv1d = find_tensor_in_layer(layer_tensors, il, "ssm_conv1d.weight")?;
+                let ssm_norm = find_tensor_in_layer(layer_tensors, il, "ssm_norm.weight")?;
+                let ssm_out = find_tensor_in_layer(layer_tensors, il, "ssm_out.weight")?;
+                let session = &mut *sessions[slot_idx];
+                let layer_state = match &mut session.stages[stage_idx].caches[r][il_local] {
+                    LayerCache::Gdn(state) => state,
+                    _ => bail!(
+                        "pipelined hybrid: slot {slot_idx} stage {stage_idx} rank {r} \
+                         layer {il} expected Gdn cache"
+                    ),
+                };
+                let gdn = stage_scratch.per_rank[r]
+                    .gdn_decode
+                    .as_mut()
+                    .ok_or_else(|| anyhow!("rank {r}: missing gdn_decode scratch"))?;
+                super::gdn_tp::forward_gdn_decode_tp(
+                    ops, stream, device, cfg, attn_norm, attn_qkv, attn_gate,
+                    ssm_alpha, ssm_beta, ssm_a, ssm_dt_bias, ssm_conv1d, ssm_norm,
+                    ssm_out, layer_state, gdn, hidden_a, partial_attn_out,
+                    world, kq_replicated,
+                )
+                .with_context(|| {
+                    format!(
+                        "pipelined GDN slot {slot_idx} stage {stage_idx} layer {il} rank {r}"
+                    )
+                })?;
+            }
+        }
+
+        // AR-residual on attn output.
+        super::tp::ar_residual_prefill_pub(
+            stage_ar, stage_scratch, sub_cluster, world, elem_count_l,
+            super::tp::AttnOrFfnPub::Attn,
+        )?;
+
+        // ffn_norm + per-rank FFN/MoE at n_tokens=1.
+        for r in 0..sub_cluster.ranks() {
+            let device = sub_cluster.device(r);
+            device.bind()?;
+            let stream = device.default_stream();
+            let layer_tensors = &stage_model.shards[r].layers[il];
+            let ffn_norm = find_tensor_in_layer(layer_tensors, il, "ffn_norm.weight")
+                .or_else(|_| find_tensor_in_layer(layer_tensors, il, "post_attention_norm.weight"))?;
+            let hidden_a = stage_scratch.per_rank[r].hidden_a;
+            let layer_scratch = stage_scratch.per_rank[r]
+                .layer
+                .as_mut()
+                .ok_or_else(|| anyhow!("rank {r}: missing LayerPrefillScratch"))?;
+            let mid_norm = layer_scratch.mid_norm_f16;
+            let ops = &stage_model.ops[r];
+            rmsnorm_f16(ops, stream, hidden_a, ffn_norm.ptr, mid_norm, 1, hidden, cfg.rms_norm_eps)
+                .with_context(|| format!("pipelined ffn_norm stage {stage_idx} layer {il}"))?;
+        }
+
+        let moe_replicated = !cfg.is_dense_ffn() && stage_model.moe_replicated_at(il);
+        let ffn_world = if moe_replicated { 1 } else { world };
+        if cfg.is_dense_ffn() {
+            for r in 0..sub_cluster.ranks() {
+                let device = sub_cluster.device(r);
+                device.bind()?;
+                let stream = device.default_stream();
+                let layer_tensors = &stage_model.shards[r].layers[il];
+                let ffn_gate = find_tensor_in_layer(layer_tensors, il, "ffn_gate.weight")?;
+                let ffn_up = find_tensor_in_layer(layer_tensors, il, "ffn_up.weight")?;
+                let ffn_down = find_tensor_in_layer(layer_tensors, il, "ffn_down.weight")?;
+                let partial_ffn_out = stage_scratch.per_rank[r].partial_ffn_out;
+                let layer_scratch = stage_scratch.per_rank[r]
+                    .layer
+                    .as_mut()
+                    .ok_or_else(|| anyhow!("rank {r}: missing LayerPrefillScratch"))?;
+                let mid_norm = layer_scratch.mid_norm_f16;
+                let dense_scratch = layer_scratch
+                    .dense_ffn
+                    .as_mut()
+                    .ok_or_else(|| anyhow!("rank {r}: missing DenseFfnPrefillScratch"))?;
+                let ops = &stage_model.ops[r];
+                super::dense_ffn_tp::forward_dense_ffn_prefill_tp(
+                    ops, stream, cfg, ffn_gate, ffn_up, ffn_down, dense_scratch,
+                    mid_norm, partial_ffn_out, 1, world,
+                )
+                .with_context(|| format!("pipelined dense ffn stage {stage_idx} layer {il}"))?;
+            }
+        } else {
+            let has_shared = cfg.shared_expert_intermediate_size.is_some()
+                && std::env::var("FLAMBEAU_TP_SKIP_SHARED").is_err();
+            for r in 0..sub_cluster.ranks() {
+                let device = sub_cluster.device(r);
+                device.bind()?;
+                let stream = device.default_stream();
+                let layer_tensors = &stage_model.shards[r].layers[il];
+                let ffn_gate_inp = find_tensor_in_layer(layer_tensors, il, "ffn_gate_inp.weight")?;
+                let ffn_gate_exps = find_tensor_in_layer(layer_tensors, il, "ffn_gate_exps.weight")?;
+                let ffn_up_exps = find_tensor_in_layer(layer_tensors, il, "ffn_up_exps.weight")?;
+                let ffn_down_exps = find_tensor_in_layer(layer_tensors, il, "ffn_down_exps.weight")?;
+                let partial_ffn_out = stage_scratch.per_rank[r].partial_ffn_out;
+                let shared_delta_f16 = stage_scratch.per_rank[r]
+                    .layer
+                    .as_ref()
+                    .map(|l| l.shared_delta_f16)
+                    .unwrap_or(flambeau_core::DevicePtr(0));
+                let layer_scratch = stage_scratch.per_rank[r]
+                    .layer
+                    .as_mut()
+                    .ok_or_else(|| anyhow!("rank {r}: missing LayerPrefillScratch"))?;
+                let mid_norm = layer_scratch.mid_norm_f16;
+                let ops = &stage_model.ops[r];
+                {
+                    let moe_scratch = layer_scratch
+                        .moe
+                        .as_mut()
+                        .ok_or_else(|| anyhow!("rank {r}: missing MoePrefillScratch"))?;
+                    super::moe::forward_router_prefill(ops, stream, cfg, ffn_gate_inp, moe_scratch, mid_norm, 1)
+                        .with_context(|| format!("pipelined router stage {stage_idx} layer {il}"))?;
+                }
+                if has_shared {
+                    let shared_w_gate = find_tensor_in_layer(layer_tensors, il, "ffn_gate_shexp.weight")?;
+                    let shared_w_up = find_tensor_in_layer(layer_tensors, il, "ffn_up_shexp.weight")?;
+                    let shared_w_down = find_tensor_in_layer(layer_tensors, il, "ffn_down_shexp.weight")?;
+                    let shared_w_gate_inp =
+                        find_tensor_in_layer(layer_tensors, il, "ffn_gate_inp_shexp.weight").ok();
+                    let shared_scratch = layer_scratch
+                        .shared
+                        .as_mut()
+                        .ok_or_else(|| anyhow!("rank {r}: missing SharedExpertPrefillScratch"))?;
+                    super::moe_tp::forward_shared_expert_prefill_tp(
+                        ops, stream, cfg, shared_w_gate, shared_w_up, shared_w_down,
+                        shared_w_gate_inp, shared_scratch, mid_norm, shared_delta_f16,
+                        1, ffn_world,
+                    )
+                    .with_context(|| format!("pipelined shared expert stage {stage_idx} layer {il}"))?;
+                }
+                let moe_scratch = layer_scratch
+                    .moe
+                    .as_mut()
+                    .ok_or_else(|| anyhow!("rank {r}: missing MoePrefillScratch"))?;
+                super::moe_tp::forward_moe_ffn_prefill_tp(
+                    ops, stream, cfg, ffn_gate_exps, ffn_up_exps, ffn_down_exps,
+                    moe_scratch, mid_norm, partial_ffn_out, 1, ffn_world,
+                )
+                .with_context(|| format!("pipelined moe ffn stage {stage_idx} layer {il}"))?;
+                if has_shared {
+                    flambeau_ops::hip::mlp::add_f16(
+                        ops, stream, partial_ffn_out, shared_delta_f16,
+                        partial_ffn_out, hidden,
+                    )
+                    .with_context(|| format!("pipelined + shared add stage {stage_idx} layer {il}"))?;
+                }
+            }
+        }
+
+        // AR-residual on FFN output (or replicated add).
+        if ffn_world > 1 {
+            super::tp::ar_residual_prefill_pub(
+                stage_ar, stage_scratch, sub_cluster, world, elem_count_l,
+                super::tp::AttnOrFfnPub::Ffn,
+            )?;
+        } else {
+            for r in 0..sub_cluster.ranks() {
+                let device = sub_cluster.device(r);
+                device.bind()?;
+                let stream = device.default_stream();
+                let ops = &stage_model.ops[r];
+                flambeau_ops::hip::mlp::add_f16(
+                    ops, stream, stage_scratch.per_rank[r].hidden_a,
+                    stage_scratch.per_rank[r].partial_ffn_out,
+                    stage_scratch.per_rank[r].hidden_a, hidden,
+                )
+                .with_context(|| format!("pipelined replicated ffn add stage {stage_idx} layer {il}"))?;
+            }
+        }
+    }
+    Ok(())
+}
+
+/// **#290** PP-pipelined batched-decode for hybrid PP+TP topologies at PP=2.
+///
+/// Pre-condition: caller drove a successful `prefill_pp_blocking` /
+/// `prefill_tp_blocking` for every slot's session. KV caches + GDN
+/// states are at `slot.position`. Pipelined decode appends one token
+/// to each slot at its position and writes per-slot logits to
+/// `logits_out[slot.idx]`.
+///
+/// Pipelining produces ~1.6× speedup over `forward_decode_batched_hybrid`
+/// at PP=2 / N=4 (see `doc/V1.x/pipelined_decode.md`). For PP=1 or N=1
+/// the caller should use `forward_decode_batched_hybrid` directly —
+/// pipelining has nothing to interleave there.
+#[allow(clippy::too_many_arguments)]
+pub fn forward_decode_pipelined_hybrid(
+    model: &Qwen3MoEHybridModel,
+    sessions: &mut [&mut Qwen3MoEHybridSession],
+    global_cluster: &flambeau_backend_hip::HipCluster,
+    stage_ars: &[BarP2pAllReduce],
+    scratch: &mut ShardedForwardPrefillScratchHybrid,
+    slots: &[super::batched::BatchSlot],
+    logits_out: &mut [&mut Vec<f32>],
+) -> Result<()> {
+    // ── Validation ────────────────────────────────────────────────
+    let n = slots.len();
+    if n == 0 {
+        bail!("forward_decode_pipelined_hybrid: empty slot list");
+    }
+    if sessions.len() != logits_out.len() {
+        bail!(
+            "forward_decode_pipelined_hybrid: sessions({}) != logits_out({})",
+            sessions.len(),
+            logits_out.len(),
+        );
+    }
+    for s in slots {
+        if s.idx >= sessions.len() {
+            bail!(
+                "forward_decode_pipelined_hybrid: BatchSlot.idx {} OOB (n={})",
+                s.idx,
+                sessions.len()
+            );
+        }
+    }
+
+    let cfg = &model.config;
+    let n_stages = model.stages.len();
+    let tp_size = model.spec.tp_size as usize;
+    if n_stages != 2 {
+        bail!(
+            "forward_decode_pipelined_hybrid: only PP=2 supported (n_stages={n_stages}); \
+             use forward_decode_batched_hybrid for PP=1 or PP>2"
+        );
+    }
+    if stage_ars.len() != n_stages {
+        bail!("stage_ars.len()={} != n_stages={n_stages}", stage_ars.len());
+    }
+    let world = tp_size as u32;
+    if world != 1 && world != 2 && world != 4 {
+        bail!("hybrid pipelined-decode: per-stage tp_size ∈ {{1, 2, 4}} (got {world})");
+    }
+    let hidden = cfg.hidden_size;
+    let bridge_bytes = hidden * 2; // single slot row, F16
+    let head_stage_idx = scratch.head_stage as usize;
+    if head_stage_idx + 1 != n_stages {
+        bail!(
+            "hybrid pipelined-decode: head_stage={head_stage_idx} but expected last = {}",
+            n_stages - 1
+        );
+    }
+
+    // ── #275 entry-time stream drain (every stage's sub_cluster) ──
+    for stage in &model.stages {
+        for r in 0..stage.sub_cluster.ranks() {
+            let device = stage.sub_cluster.device(r);
+            device.bind()?;
+            Stream::synchronize(device.default_stream())?;
+        }
+    }
+
+    // ── Lazy bridge-event init on stage_0 rank 0 ──────────────────
+    // One event per slot. Bridge events live on the SOURCE device
+    // (stage_0 rank 0) — `stream_wait` works cross-device, so any
+    // stage_1 rank's stream can wait on the same event handle.
+    {
+        let stage0_dev0 = model.stages[0].sub_cluster.device(0);
+        stage0_dev0.bind()?;
+        let st0r0 = &mut scratch.per_stage[0].per_rank[0];
+        for _ in st0r0.pipeline_bridge_events.len()..n {
+            st0r0
+                .pipeline_bridge_events
+                .push(flambeau_backend_hip::HipEvent::new(stage0_dev0.id())?);
+        }
+    }
+
+    // ── Reserve per-lane bounce buffers for the TP fan-out ────────
+    // Stage 0 rank 0 fans out to `tp_size` stage_1 ranks per slot.
+    // Without per-lane bounces, the shared-bounce reuse races across
+    // dst ranks (lane 0's HtoD reads the bounce while lane 1's DtoH
+    // overwrites it). Per-lane bounces give each peer-copy call its
+    // own pinned slab. Idempotent across decode steps.
+    let global_src_rank0 = 0usize; // stage 0, local rank 0
+    global_cluster.reserve_lane_bounces(tp_size.max(1), bridge_bytes)?;
+
+    // Per-slot positions (same value across stages).
+    let slot_positions: Vec<usize> = slots.iter().map(|s| s.position).collect();
+
+    // ════════════════════════════════════════════════════════════════
+    // PHASE A — stage_0 work + async fan-out
+    // ════════════════════════════════════════════════════════════════
+    {
+        let stage0 = &model.stages[0];
+        if !stage0.tp_model.has_token_embd {
+            bail!("hybrid stage 0 missing token_embd");
+        }
+        let stage0_sub = &stage0.sub_cluster;
+        let stage0_model = &stage0.tp_model;
+
+        for slot_idx in 0..n {
+            let slot = &slots[slot_idx];
+            let slot_pos = slot_positions[slot_idx];
+
+            // 1. Embed slot's token into ROW 0 of every rank's hidden_a.
+            for r in 0..stage0_sub.ranks() {
+                let device = stage0_sub.device(r);
+                device.bind()?;
+                let stream = device.default_stream();
+                let dst_base = scratch.per_stage[0].per_rank[r].hidden_a;
+                super::io::forward_embed_decode_host(
+                    device, stream,
+                    &stage0_model.shards[r].token_embd,
+                    slot.token_id,
+                    dst_base, // row 0
+                    hidden,
+                )
+                .with_context(|| format!("pipelined embed slot {slot_idx} rank {r}"))?;
+            }
+
+            // 2. Run all stage_0 layers + AR-residuals + FFN at n_tokens=1.
+            pipelined_run_slot_through_stage(
+                model, cfg, sessions, scratch, stage_ars,
+                /* stage_idx = */ 0, slot_idx, slot_pos, world,
+            )?;
+
+            // 3. Async peer_copy fan-out: stage_0 rank 0 → every stage_1 rank.
+            //    Single bridge event per slot; per-lane bounce keeps the
+            //    fan-out non-racing.
+            let src_dev = stage0_sub.device(0);
+            src_dev.bind()?;
+            let src_stream = src_dev.default_stream();
+            let src_ptr = scratch.per_stage[0].per_rank[0].hidden_a; // row 0
+            // SAFETY: pipeline_bridge_events[slot_idx] was lazily allocated
+            // above with len ≥ n; lifetime tied to per-rank scratch.
+            let bridge_event_ptr: *const flambeau_backend_hip::HipEvent =
+                &scratch.per_stage[0].per_rank[0].pipeline_bridge_events[slot_idx];
+
+            for dst_local in 0..tp_size {
+                let dst_global_rank = tp_size + dst_local; // stage 1
+                let dst_dev = model.stages[1].sub_cluster.device(dst_local);
+                let dst_stream = dst_dev.default_stream();
+                let dst_ptr = scratch.per_stage[1].per_rank[dst_local].hidden_a; // row 0
+                // SAFETY:
+                // - src_ptr/dst_ptr each point to ≥ bridge_bytes valid F16
+                //   on their respective devices (allocated by
+                //   ShardedForwardPrefillScratchTp::new sized for max_tokens).
+                // - src_stream / dst_stream are global_cluster default streams
+                //   (each HipCluster::new constructs its own per-device stream
+                //   pair — these are NOT the same handles as
+                //   sub_cluster.default_stream(), but the entry-time drain
+                //   above synced ALL stage sub_cluster streams, so no kernel
+                //   on the sub-cluster handle aliases this src_ptr/dst_ptr).
+                // - bridge_event lives on src_dev's id; HIP allows
+                //   stream_wait(event) on any device.
+                // - Per-lane bounce (lane=dst_local) prevents the inter-call
+                //   bounce-buffer race that the blocking variant avoids by
+                //   syncing.
+                unsafe {
+                    let bridge_event: &flambeau_backend_hip::HipEvent = &*bridge_event_ptr;
+                    global_cluster
+                        .peer_copy_via_host_async_laned(
+                            dst_ptr,
+                            dst_global_rank,
+                            src_ptr,
+                            global_src_rank0,
+                            bridge_bytes,
+                            src_stream,
+                            dst_stream,
+                            bridge_event,
+                            None,
+                            Some(dst_local),
+                        )
+                        .with_context(|| {
+                            format!(
+                                "pipelined peer_copy_async slot {slot_idx} dst_local {dst_local}"
+                            )
+                        })?;
+                }
+            }
+        }
+    }
+
+    // ════════════════════════════════════════════════════════════════
+    // PHASE B — stage_1 work + output_head
+    // ════════════════════════════════════════════════════════════════
+    {
+        let stage1 = &model.stages[1];
+        let stage1_sub = &stage1.sub_cluster;
+        let head_rank = scratch.per_stage[1].head_rank.0 as usize;
+        if !stage1.tp_model.has_output_head {
+            bail!("hybrid last stage missing output head");
+        }
+
+        for slot_idx in 0..n {
+            let slot = &slots[slot_idx];
+            let slot_pos = slot_positions[slot_idx];
+
+            // The HtoD into stage_1.hidden_a was queued by Phase A's
+            // peer_copy_via_host_async_laned with a stream_wait on the
+            // bridge event; subsequent ops on stage_1's default stream
+            // implicitly stack behind it, so no extra stream_wait is
+            // needed here.
+
+            // 1. Run all stage_1 layers + AR-residuals + FFN at n_tokens=1.
+            pipelined_run_slot_through_stage(
+                model, cfg, sessions, scratch, stage_ars,
+                /* stage_idx = */ 1, slot_idx, slot_pos, world,
+            )?;
+
+            // 2. Output head + DtoH for slot's logits.
+            let device = stage1_sub.device(head_rank);
+            device.bind()?;
+            let stream = device.default_stream();
+            let head_shard = &stage1.tp_model.shards[head_rank];
+            let lm_head = head_shard.output.as_ref().unwrap_or(&head_shard.token_embd);
+            let head_hidden = scratch.per_stage[1].per_rank[head_rank].hidden_a; // row 0
+            let head_scratch = scratch.per_stage[1].per_rank[head_rank]
+                .output_head
+                .as_mut()
+                .ok_or_else(|| anyhow!("hybrid pipelined: head_rank missing OutputHeadScratch"))?;
+            let ops = &stage1.tp_model.ops[head_rank];
+
+            super::io::forward_output_head_decode(
+                ops, stream, cfg, &head_shard.output_norm, lm_head, head_scratch, head_hidden,
+            )
+            .with_context(|| format!("pipelined output head slot {}", slot.idx))?;
+            super::io::download_logits_host(
+                device, stream, head_scratch.logits_f32, cfg.vocab_size,
+                logits_out[slot.idx],
+            )
+            .with_context(|| format!("pipelined logits download slot {}", slot.idx))?;
+        }
+    }
+
+    Ok(())
+}
+
