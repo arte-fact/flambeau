@@ -3431,6 +3431,19 @@ fn run_completion_blocking_streaming(
         .unwrap_or(0);
     let profile_skip: usize = 8;
 
+    // **Lever B (host profile)** — per-section host wall accumulator,
+    // gated by FLAMBEAU_HOST_PROFILE=1. Skips the first 8 decode
+    // steps to dodge cold-cache effects, accumulates ms-per-section
+    // over the rest, dumps a one-line summary at end-of-loop.
+    let host_profile_on = std::env::var("FLAMBEAU_HOST_PROFILE").is_ok();
+    let mut hp_n: usize = 0;
+    let mut hp_decode_us: u128 = 0;
+    let mut hp_mask_us: u128 = 0;
+    let mut hp_sample_us: u128 = 0;
+    let mut hp_emit_us: u128 = 0;
+    let mut hp_stopstr_us: u128 = 0;
+    let mut hp_step_us: u128 = 0;
+
     // MTP-5d streaming + 5g/h penalty-aware: spec-decode SSE path. Active
     // when MTP head is loaded. Penalties applied in build_distribution via
     // the threaded `&generated` history. Mirrors the non-streaming branch.
@@ -3556,6 +3569,8 @@ fn run_completion_blocking_streaming(
         }
         // T4.1: same relax-stop-mask behaviour as the non-streaming path.
         let force_mask = step < MIN_RESPONSE_TOKENS && !relax_stop_mask;
+        let hp_step_t0 = if host_profile_on { Some(Instant::now()) } else { None };
+        let hp_decode_t0 = hp_step_t0;
         decode_logits(
             model,
             cluster,
@@ -3565,6 +3580,7 @@ fn run_completion_blocking_streaming(
             &mut logits_buf,
         )
         .context("decode step logits")?;
+        let hp_after_decode = if host_profile_on { Some(Instant::now()) } else { None };
         if !relax_stop_mask {
             for &sid in stop_ids {
                 if (sid as usize) < logits_buf.len() {
@@ -3582,8 +3598,11 @@ fn run_completion_blocking_streaming(
                 }
             }
         }
+        let hp_after_mask = if host_profile_on { Some(Instant::now()) } else { None };
         let next = sampler.sample(&logits_buf, sampling, &generated);
+        let hp_after_sample = if host_profile_on { Some(Instant::now()) } else { None };
         let alive = push_and_emit(next, &mut generated, &mut emitted_text)?;
+        let hp_after_emit = if host_profile_on { Some(Instant::now()) } else { None };
         last_token = next;
         if !alive {
             finish_reason = "stop";
@@ -3636,6 +3655,35 @@ fn run_completion_blocking_streaming(
                 break;
             }
         }
+        // **Lever B (host profile)** — accumulate per-section wall.
+        // Skip first 8 steps (cold cache / allocator warmup).
+        if host_profile_on && step > profile_skip {
+            let t_step_end = Instant::now();
+            if let (Some(t0), Some(td), Some(tm), Some(ts), Some(te)) =
+                (hp_step_t0, hp_after_decode, hp_after_mask, hp_after_sample, hp_after_emit)
+            {
+                hp_n += 1;
+                hp_decode_us += (td - t0).as_micros();
+                hp_mask_us += (tm - td).as_micros();
+                hp_sample_us += (ts - tm).as_micros();
+                hp_emit_us += (te - ts).as_micros();
+                hp_stopstr_us += (t_step_end - te).as_micros();
+                hp_step_us += (t_step_end - t0).as_micros();
+            }
+        }
+    }
+
+    if host_profile_on && hp_n > 0 {
+        let f = hp_n as f64;
+        eprintln!(
+            "\n=== HOST decode profile (n={hp_n}, post-warmup) ===\n  decode_logits  : {:>7.3} ms/tok\n  stop-mask      : {:>7.3} ms/tok\n  sampler.sample : {:>7.3} ms/tok\n  push_and_emit  : {:>7.3} ms/tok\n  stopstr_check  : {:>7.3} ms/tok\n  TOTAL_per_step : {:>7.3} ms/tok\n",
+            hp_decode_us as f64 / f / 1000.0,
+            hp_mask_us as f64 / f / 1000.0,
+            hp_sample_us as f64 / f / 1000.0,
+            hp_emit_us as f64 / f / 1000.0,
+            hp_stopstr_us as f64 / f / 1000.0,
+            hp_step_us as f64 / f / 1000.0,
+        );
     }
 
     // Slot stays pooled; mutex releases on function return.
