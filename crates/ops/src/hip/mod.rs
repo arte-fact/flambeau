@@ -63,6 +63,7 @@ pub const KERNEL_STEMS: &[&str] = &[
     "mmvq_q5_k_r2_f16dst",
     "mmvq_q4_k",
     "mmvq_q4_1",
+    "mmvq_q4_1_batched",
     "mmvq_q4_1_r2",
     "mmvq_q4_1_r2_dp4a",
     "mmvq_q4_1_t128",
