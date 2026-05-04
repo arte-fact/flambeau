@@ -262,6 +262,15 @@ pub struct RankForwardPrefillScratchTp {
     /// for the batched-decode driver is `INFLIGHT_SLOTS`). None on
     /// archs without GDN.
     pub gdn_decode_batched: Option<super::gdn::GdnPrefillScratch>,
+    /// **#290 PP-pipelined decode** — bridge events for the cross-stage
+    /// `peer_copy_via_host_async` in `forward_decode_pipelined_hybrid`.
+    /// One event per slot (max_tokens), per dst-rank in the next stage's
+    /// sub_cluster. Allocated lazily in the pipelined driver and reused
+    /// across decode steps; `hipEventRecord` overwrites the prior record.
+    /// Only used when this rank lives in a non-final pipeline stage
+    /// (i.e., the rank's stage_idx + 1 < n_stages); inner Vec stays
+    /// empty otherwise.
+    pub pipeline_bridge_events: Vec<flambeau_backend_hip::HipEvent>,
     hidden_bytes: usize,
     partial_bytes: usize,
     disposed: bool,
@@ -404,6 +413,7 @@ impl ShardedForwardPrefillScratchTp {
                 output_head,
                 gdn_decode,
                 gdn_decode_batched,
+                pipeline_bridge_events: Vec::new(),
                 hidden_bytes,
                 partial_bytes,
                 disposed: false,
