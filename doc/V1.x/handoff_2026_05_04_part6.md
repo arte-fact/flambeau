@@ -43,115 +43,106 @@
        prefill_final_logits_out: Option<&mut Vec<f32>>,
    ) -> Result<()>
    ```
-   When `prefill_chunk = None`: delegates to existing
-   `forward_decode_batched_hybrid` (zero regression). When `Some`:
-   currently bails — **the layer-body K|N split is the next work item.**
+
+4. **#304 layer-body K|N split landed (commit `ddc0e9b`).** Full
+   driver implementation:
+   - When `prefill_chunk = None`: delegates to
+     `forward_decode_batched_hybrid` (zero regression).
+   - When `prefill_chunk = Some(chunk)`:
+     - Stage 0 embed K prefill rows + N decode rows.
+     - Per layer: full-attn split → `forward_full_attn_prefill_tp` on
+       `[0..K]` rows + chunk's KV cache, then
+       `forward_full_attn_layer_decode_batched_tp` on `[K..T]` rows +
+       N slot KVs. GDN split → `forward_gdn_prefill_tp` on `[0..K]` +
+       chunk's GDN state, then `forward_gdn_decode_batched_tp` on
+       `[K..T]` + N slot states.
+     - AR over T rows; ffn_norm / router / shared / MoE / FFN at
+       `n_tokens=T` (the co-batching point — one weight read for K+N
+       rows).
+     - Stage handoff: peer_copy `chunk_bytes = T * row_bytes`.
+     - Output head: optional `K-1` row → `prefill_final_logits_out`,
+       N rows → `decode_logits_out`.
+   - Compiles clean; runtime validation pending.
 
 ## Next step (resume here)
 
-**Implement the layer-body K|N split inside
-`forward_decode_mixed_hybrid`.** Strategy: clone
-`forward_decode_batched_hybrid` to a new private impl
-`forward_decode_batched_hybrid_inner(prefill_chunk: Option<...>, ...)`.
-Make both public functions thin wrappers around the inner.
+**Validation + wiring**, in order:
 
-Inside the inner, with `T = K + N` where `K = chunk.map_or(0,
-|c|c.len())`:
+### A. Parity test (#307) — run first
 
-1. **Embed (stage 0)**:
-   - Rows `[0..K]` from `chunk.tokens[0..K]`.
-   - Rows `[K..T]` from `slots[i].token_id` (current code).
+Write `crates/models/qwen3-moe/tests/mixed_batch_parity.rs` modeled
+on `chunked_prefill_kv_parity_hybrid.rs`. Two parallel runs, compare
+logits:
 
-2. **Per-stage layer loop** (lines 933-1685): each layer body
-   currently dispatches with `n_tokens = N`. Change to `n_tokens = T`
-   for these subsystems (no other change needed):
-   - RMSNorm + add residual
-   - Q/K/V projection
-   - Output projection
-   - MoE router + experts + shared expert
-   - Dense FFN (qwen35 dense layers)
+```
+// Reference: two independent sessions
+sess_A_ref: prefill prompt_A, decode 1 step → logits_A_dec_ref
+sess_B_ref: prefill prompt_B → logits_B_pre_ref (last-row from
+                              forward_prefill_hybrid_logits)
 
-3. **RoPE positions**: existing `slot_positions: Vec<usize>` becomes
-   `token_positions: Vec<usize>`:
-   ```rust
-   let mut token_positions = Vec::with_capacity(T);
-   if let Some(chunk) = prefill_chunk {
-       for i in 0..chunk.len() {
-           token_positions.push(chunk.chunk_start + i);
-       }
-   }
-   for s in slots {
-       token_positions.push(s.position);
-   }
-   ```
-   The existing `forward_full_attn_layer_decode_batched_tp` accepts
-   `slot_positions` already; pass `token_positions[K..T]` for the
-   decode slice.
+// Mixed: same end-state via one mixed call
+sess_A_mix: prefill prompt_A normally
+sess_B_mix: (fresh)
+forward_decode_mixed_hybrid(
+    chunk = Some({tokens: prompt_B, chunk_start: 0,
+                  is_final_chunk: true, idx: B-index}),
+    slots = [BatchSlot{idx: A-index, token_id: A.last,
+                       position: A.len}],
+    decode_logits_out, prefill_final_logits_out,
+)?;
 
-4. **Full-attn layer (lines 994-1047)**: SPLIT the kernel call.
-   - Prefill rows `[0..K]`: call
-     `super::attn_tp::forward_full_attn_prefill_tp_layer` (or
-     equivalent — check the name in `attn_tp.rs`) on a Q/K/V slice
-     view of rows `[0..K]`, with the chunk's KV cache from
-     `sessions[chunk.idx].stages[stage_idx].caches[r][il_local]`.
-     Use `chunk.chunk_start` as `start_position`.
-   - Decode rows `[K..T]`: existing
-     `forward_full_attn_layer_decode_batched_tp` call but pass only
-     the N-slot subset (slot KVs unchanged from current code).
+assert!(close(logits_B_pre_ref,  prefill_final_logits_out));
+assert!(close(logits_A_dec_ref,  decode_logits_out[A-index]));
+```
 
-   Note: full-attn QKV proj is already done in step 2 over T rows.
-   The split happens after RoPE — slice the Q/K/V tensors for the
-   two attn calls. Currently RoPE is fused into
-   `forward_full_attn_layer_decode_batched_tp`; for v1 may need to
-   split RoPE call too. Check the function body before deciding.
+F16 rounding tolerance ~1e-3 relative. Top-1 token-id parity is the
+stricter secondary check.
 
-5. **GDN layer (lines 1048-1685)**: SPLIT.
-   - Prefill rows `[0..K]`: call
-     `super::gdn_tp::forward_gdn_prefill_tp_layer` (or equivalent)
-     with `n_tokens = K` on the chunk request's GdnLayerState
-     (`sessions[chunk.idx].stages[stage_idx].caches[r][il_local]`).
-   - Decode rows `[K..T]`: existing
-     `forward_gdn_decode_batched_tp` (or per-slot loop) over the N
-     slot states — current code already handles this.
+Initial config: Qwen3.5-9B-Q4_1 / pp2tp2 / [0,2,1,3]. K=32, N=1.
 
-6. **Stage boundary peer_copy**: T rows transferred instead of N.
-   `chunk_bytes = T * row_bytes`. The existing peer_copy logic
-   should handle the increased size with no other change.
+Likely failure modes (where to debug if it fails):
+- **FullAttnPrefillScratch reuse between prefill K-call and
+  decode N-call on same stream**: the prefill writes scratch tensors
+  the decode then overwrites. They run sequentially on the same
+  rank's default_stream so this should be safe — but if logits are
+  garbled, this is suspect #1. Check via two sequential calls each
+  storing intermediate via `FLAMBEAU_AR_DUMP=1` style env.
+- **Scratch sizing**: `scratch.max_tokens >= T` is checked at entry.
+  If unit test sizes via `ShardedForwardPrefillScratchHybrid::new(model, T)`
+  before calling, it's fine.
+- **shared_delta_f16 buffer sizing**: it's allocated based on
+  `LayerPrefillScratch::new`'s n_tokens; sizing is downstream of
+  scratch.max_tokens.
+- **kv_replicated / kq_replicated mismatch**: chunk session and
+  decode sessions share the same model so flags should agree;
+  print and verify if logits diverge.
 
-7. **Output head**:
-   - If `chunk.is_final_chunk`: call `forward_output_head_decode` on
-     row `K - 1` of the final hidden activation, write to
-     `prefill_final_logits_out`.
-   - For each decode slot `s` in `0..N`: call output_head on row
-     `K + s`, write to `decode_logits_out[s]`.
+### B. Scheduler + server wiring (#305 / #306)
 
-8. **Sessions parallel array**: `chunk.idx` and `slots[i].idx` index
-   into the same `sessions` array; the chunk request's session
-   provides KV/GDN state for the prefill rows, distinct from any
-   decode slots' sessions. The borrow-disjoint `sessions_ptr.add(s)`
-   pattern at lines 1009-1024 needs to extend to also borrow
-   `sessions[chunk.idx]` if `chunk` is set.
-
-## Validation steps after #304 lands
-
-- **#307**: parity test — run a 100-token prompt as
-  (a) chunked-prefill-then-decode (existing path), output 32 tokens;
-  (b) the same prompt+decode sequence via mixed dispatch, with K
-  chunking that matches (a) exactly, and 0 co-batched decodes during
-  prefill (legacy mode). Output token IDs should match bit-exact.
-- **#308**: throughput cert — pp2tp2 / Qwen3.6-27B / mixed traffic
-  (one prefill-512 + 4 decodes per iteration, run 20 iterations)
-  vs baseline (sequential prefill then 4 decodes). 3× wall ratio is
-  the gate; v2 cert recorded 0.92× pp2tp2, so target is 2.7× lift.
-
-## Open scheduler/server work (#305/#306)
-
-Independent of the driver. Can start once driver is correct:
+Once parity passes, wire it through:
 - `#305`: `build_mixed_iteration` builder picks one pending prefill,
   fills with decodes up to budget. State machine for chunked-in-
-  progress prefills.
+  progress prefills (request can have multiple chunks before
+  is_final_chunk fires).
 - `#306`: routes.rs replaces separate prefill+decode dispatch with
-  mixed dispatch when `FLAMBEAU_MIXED_BATCH=1`.
+  mixed dispatch when `FLAMBEAU_MIXED_BATCH=1`. **Important**:
+  scratch sizing — `ShardedForwardPrefillScratchHybrid::new(model,
+  max_slots)` must use `max_tokens >= chunk_budget + max_slots`,
+  not just `max_slots` like today's batched-decode does. Current
+  routes.rs:585 passes `max_slots = inflight_pool.len().max(n)`;
+  needs an env-driven chunk budget added.
+
+### C. Throughput cert (#308)
+
+- pp2tp2 / Qwen3.6-27B / mixed traffic harness: one prefill-512 +
+  4 decodes per iteration × 20 iterations vs baseline (sequential
+  prefill-then-decode). The relevant metric is **aggregate
+  throughput** (prefill_tokens + decode_tokens) / wall_time, not
+  decode-wall-only.
+- Pure-decode wall may slightly regress under mixed batching (we
+  add prefill cost to each step). The win shows up on **mixed
+  traffic** where prefill amortises over decode steps that would
+  otherwise have been blocked.
 
 ## Untouched
 
