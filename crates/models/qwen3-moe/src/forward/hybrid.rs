@@ -877,6 +877,26 @@ pub fn forward_decode_batched_hybrid(
     let chunk_bytes = n * row_bytes;
     let elem_count_l = (n * hidden) as u32;
 
+    // **#275** — drain every stage sub_cluster's per-rank default streams
+    // at function entry. The prior call's last `ar_residual_prefill_pub`
+    // launched its kernel on the *stage*'s sub_cluster default stream
+    // (e.g. stage 1 dev 3). The upcoming `peer_copy_via_host` uses the
+    // *global_cluster*'s default stream for the same physical device —
+    // they are different `HipStream` handles since each `HipCluster::new`
+    // constructs its own `HipDevice` / default-stream pair. Without this
+    // sync the prior step's queued AR-residual kernel races the
+    // peer_copy HtoD and clobbers `hidden_a` *after* the HtoD lands,
+    // producing garbled output from token 3 onwards on N≥2 batched
+    // hybrid (pp2tp2) decode.
+    use flambeau_core::Stream;
+    for stage in &model.stages {
+        for r in 0..stage.sub_cluster.ranks() {
+            let device = stage.sub_cluster.device(r);
+            device.bind()?;
+            Stream::synchronize(device.default_stream())?;
+        }
+    }
+
     // Per-slot positions (same across stages: each slot's per-stage
     // KV caches share the same tail per layer).
     let slot_positions: Vec<usize> = slots.iter().map(|s| s.position).collect();
