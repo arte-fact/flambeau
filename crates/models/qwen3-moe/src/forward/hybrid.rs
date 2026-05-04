@@ -1997,6 +1997,38 @@ fn pipelined_run_slot_through_stage(
 /// at PP=2 / N=4 (see `doc/V1.x/pipelined_decode.md`). For PP=1 or N=1
 /// the caller should use `forward_decode_batched_hybrid` directly —
 /// pipelining has nothing to interleave there.
+///
+/// **STATUS (2026-05-04 live test on Qwen3.6-27B / pp2tp2)**: function
+/// compiles + dispatches but produces output that DIFFERS from
+/// `forward_decode_batched_hybrid` at N=2 (which is bit-identical to
+/// N=1). Output is coherent but the token sequence diverges at the
+/// first decode token.
+///
+/// Bisect findings:
+/// - With `FLAMBEAU_PIPELINE_BLOCKING_COPY=1` (use blocking
+///   peer_copy_via_host instead of async): SAME divergent output → bug
+///   is NOT in async event coordination.
+/// - Wall time at N=2: 6.82s vs batched 6.04s = 0.85× (regression).
+///
+/// Most likely culprits (not yet bisected):
+/// - `forward_gdn_decode_tp` (single-slot path, what we call) vs
+///   `forward_gdn_decode_batched_tp` at N=1 (what batched calls): may
+///   produce numerically different row-0 outputs even at the same
+///   layer state. The cert (`certs/perf/p29b_i2_F_throughput/...`)
+///   notes the no-batched-GDN fallback differs slightly from the
+///   batched-GDN path; pipelined uses the no-batched-GDN equivalent.
+/// - Per-slot scratch reuse pattern across slot iterations (gdn_decode
+///   workspace) — should overwrite per call but may have a subtle
+///   stale-state path.
+/// - The single-token `forward_dense_ffn_prefill_tp(n=1)` /
+///   `forward_moe_ffn_prefill_tp(n=1)` may differ from row-0 of
+///   batched-N=2 — though row-0 should be independent of batching.
+///
+/// The function is gated by `FLAMBEAU_DECODE_PIPELINE=1` in the
+/// scheduler — default OFF, so this divergence does not affect the
+/// production path. FIXME #292: bisect by replacing
+/// `forward_gdn_decode_tp` with `forward_gdn_decode_batched_tp` at N=1
+/// inside `pipelined_run_slot_through_stage`.
 #[allow(clippy::too_many_arguments)]
 pub fn forward_decode_pipelined_hybrid(
     model: &Qwen3MoEHybridModel,
@@ -2158,6 +2190,38 @@ pub fn forward_decode_pipelined_hybrid(
         )?;
 
         // 3. Async peer_copy fan-out: stage_0 rank 0 → every stage_1 rank.
+        //    DEBUG MODE (`FLAMBEAU_PIPELINE_BLOCKING_COPY=1`): use the
+        //    BLOCKING `peer_copy_via_host` instead of the async variant.
+        //    If this fixes output divergence vs `forward_decode_batched_hybrid`,
+        //    the bug is in the async event/stream coordination, not the
+        //    per-slot loop structure itself.
+        let use_blocking_copy =
+            std::env::var("FLAMBEAU_PIPELINE_BLOCKING_COPY").is_ok();
+        if use_blocking_copy {
+            let src_dev = stage0.sub_cluster.device(0);
+            src_dev.bind()?;
+            // Drain stage_0 sub_cluster stream so DtoH sees all stage_0
+            // kernel writes for this slot.
+            Stream::synchronize(src_dev.default_stream())?;
+            let src_ptr = scratch.per_stage[0].per_rank[0].hidden_a;
+            for dst_local in 0..tp_size {
+                let dst_global_rank = tp_size + dst_local;
+                let dst_ptr = scratch.per_stage[1].per_rank[dst_local].hidden_a;
+                unsafe {
+                    global_cluster
+                        .peer_copy_via_host(
+                            dst_ptr,
+                            dst_global_rank,
+                            src_ptr,
+                            global_src_rank0,
+                            bridge_bytes,
+                        )
+                        .with_context(|| {
+                            format!("pipelined blocking peer_copy slot {slot_idx} dst {dst_local}")
+                        })?;
+                }
+            }
+        } else {
         //    Single bridge event per slot; per-lane bounce keeps the
         //    fan-out non-racing.
         //
@@ -2225,6 +2289,7 @@ pub fn forward_decode_pipelined_hybrid(
                 }
             }
         }
+        } // end else branch (async peer_copy)
 
         // 4. Run all stage_1 layers + AR-residuals + FFN at n_tokens=1.
         //    The HtoD on each stage_1 rank's default stream is already
