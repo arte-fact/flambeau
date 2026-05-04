@@ -1849,11 +1849,31 @@ fn pipelined_run_slot_through_stage(
             }
         }
 
-        // AR-residual on attn output.
-        super::tp::ar_residual_prefill_pub(
-            stage_ar, stage_scratch, sub_cluster, world, elem_count_l,
-            super::tp::AttnOrFfnPub::Attn,
-        )?;
+        // AR-residual on attn output. **#295** at world=1 the existing
+        // `ar_residual_prefill` rebuilds `OpsRegistry::new()` per call,
+        // which dwarfs the actual add_f16 work — measured 18.8 s per
+        // decode step at PP=4/TP=1 (~512 OpsRegistry rebuilds × ~30 ms).
+        // Short-circuit using the cached per-rank ops to do the
+        // degenerate add_f16 directly.
+        if world == 1 {
+            let device = sub_cluster.device(0);
+            device.bind()?;
+            let stream = device.default_stream();
+            let ops = &stage_model.ops[0];
+            flambeau_ops::hip::mlp::add_f16(
+                ops, stream,
+                stage_scratch.per_rank[0].hidden_a,
+                stage_scratch.per_rank[0].partial_attn_out,
+                stage_scratch.per_rank[0].hidden_a,
+                elem_count_l as usize,
+            )
+            .with_context(|| format!("pipelined attn AR (world=1) stage {stage_idx} layer {il}"))?;
+        } else {
+            super::tp::ar_residual_prefill_pub(
+                stage_ar, stage_scratch, sub_cluster, world, elem_count_l,
+                super::tp::AttnOrFfnPub::Attn,
+            )?;
+        }
 
         // ffn_norm + per-rank FFN/MoE at n_tokens=1.
         for r in 0..sub_cluster.ranks() {
