@@ -250,8 +250,23 @@ impl ServerState {
             })
             .count();
         let no_fast_path = std::env::var("FLAMBEAU_NO_FAST_PATH").is_ok();
+        let trace = std::env::var("FLAMBEAU_TRACE_BATCH").is_ok();
+        macro_rules! tr {
+            ($($arg:tt)*) => {
+                if trace {
+                    let now = std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .map(|d| d.as_millis() % 1_000_000)
+                        .unwrap_or(0);
+                    eprintln!("[TRACE-BATCH t={:06}ms slot={} pos={}] {}", now, slot_idx, position, format_args!($($arg)*));
+                }
+            };
+        }
+        tr!("entry n_others_active={} no_fast={}", n_others_active, no_fast_path);
         if n_others_active == 0 && !no_fast_path {
+            tr!("FAST_PATH lock_inflight start");
             let mut guard = self.inflight_pool[slot_idx].blocking_lock();
+            tr!("FAST_PATH lock_inflight done; decode_logits start");
             crate::model::decode_logits(
                 &self.model,
                 &self.cluster,
@@ -261,6 +276,7 @@ impl ServerState {
                 logits_out,
             )
             .context("decode_via_scheduler single-user fast path")?;
+            tr!("FAST_PATH decode_logits done; return");
             return Ok(());
         }
 
@@ -276,20 +292,19 @@ impl ServerState {
                 position,
                 response: tx,
             });
+            tr!("PUSH pending q_len_now={}", q.len());
         }
 
-        // Try to become the dispatch leader for this round.
-        if let Ok(_dispatch_lock) = self.batched_dispatcher.try_lock() {
+        // Try to become the dispatch leader for this round. Stored in an
+        // Option so we can deterministically drop it *while holding*
+        // `batched_pending` to close the post-dispatch race (see #276 fix).
+        let mut dispatch_lock_opt: Option<_> =
+            self.batched_dispatcher.try_lock().ok();
+        tr!("LEADER try_lock={}", dispatch_lock_opt.is_some());
+        if dispatch_lock_opt.is_some() {
             // **Cycle 1 optimisation (single-user fast path)** — only
             // sleep on the batching window when there's actually an
             // active OTHER slot that could plausibly join the batch.
-            // Counts other slots whose request-lifetime claim is set.
-            // If zero, no one else can push more entries, so the sleep
-            // is pure latency cost. With FLAMBEAU_INFLIGHT_SLOTS=1 the
-            // count is structurally always 0 → never sleep.
-            //
-            // Tuned via `FLAMBEAU_BATCH_WINDOW_US` (default 1500 µs).
-            // Set to 0 to disable the wait unconditionally.
             let window_us: u64 = std::env::var("FLAMBEAU_BATCH_WINDOW_US")
                 .ok()
                 .and_then(|s| s.parse().ok())
@@ -303,36 +318,54 @@ impl ServerState {
                         && taken.load(std::sync::atomic::Ordering::Relaxed)
                 })
                 .count();
-            // **#275 debug** — `FLAMBEAU_FORCE_BATCH_WINDOW=1` forces
-            // the leader to sleep even when no other slot is currently
-            // claimed. Used to give a concurrent request time to claim
-            // its slot and push a pending entry → leader sees N>=2 in
-            // the queue → dispatch at N=2 (instead of N=1 racing first).
             let force_sleep =
                 std::env::var("FLAMBEAU_FORCE_BATCH_WINDOW").is_ok();
             if window_us > 0 && (n_others_active > 0 || force_sleep) {
                 std::thread::sleep(std::time::Duration::from_micros(window_us));
             }
 
-            // Drain the queue.
-            let pending: Vec<PendingDecode> = {
+            // **#276 fix** — drain-dispatch-loop with atomic empty-drop.
+            //
+            // Without this restructure, late-arriving pending entries
+            // could be stranded by a two-step race:
+            //   1. Leader L drains queue (perhaps empty). Releases
+            //      `batched_pending`.
+            //   2. Thread T2 takes `batched_pending`, pushes its entry,
+            //      releases.
+            //   3. T2 try_locks `batched_dispatcher` — STILL HELD by L
+            //      (which is mid-dispatch or mid-cleanup). Returns Err.
+            //      T2 falls through to `rx.recv()`.
+            //   4. L releases `batched_dispatcher`, returns from
+            //      `decode_via_scheduler_into`. L's request finishes
+            //      (max_tokens / stop) without re-entering the scheduler.
+            //   5. T2's pending entry never drained → forever blocked on
+            //      `rx.recv()`.
+            //
+            // Fix: when L sees an empty queue, it must release
+            // `batched_dispatcher` *while still holding `batched_pending`*.
+            // After that, any T2 push observes a clean dispatch lock and
+            // its `try_lock` succeeds, making T2 the next leader.
+            let batch_max: usize = std::env::var("FLAMBEAU_BATCH_MAX")
+                .ok()
+                .and_then(|s| s.parse().ok())
+                .unwrap_or(usize::MAX);
+            loop {
                 let mut q = self
                     .batched_pending
                     .lock()
                     .expect("batched_pending mutex poisoned");
-                std::mem::take(&mut *q)
-            };
-
-            if !pending.is_empty() {
-                // **Debug knob FLAMBEAU_BATCH_MAX** — cap per-dispatch
-                // batch size. Default unset = no cap (full N at once).
-                // Set to 1 to serialise (run each pending entry as its
-                // own N=1 batched call) — used to isolate "is the bug
-                // in N>1 forward, or in scheduler infra?".
-                let batch_max: usize = std::env::var("FLAMBEAU_BATCH_MAX")
-                    .ok()
-                    .and_then(|s| s.parse().ok())
-                    .unwrap_or(usize::MAX);
+                if q.is_empty() {
+                    // Drop dispatch_lock *while holding `q`* (atomic
+                    // wrt future pushers). After q drops, any T2 push
+                    // will see dispatch_lock free.
+                    drop(dispatch_lock_opt.take());
+                    tr!("DRAIN drained=0 (release-leader-while-holding-q)");
+                    drop(q);
+                    break;
+                }
+                let pending: Vec<PendingDecode> = std::mem::take(&mut *q);
+                drop(q);
+                tr!("DRAIN drained={}", pending.len());
                 let chunk_size = batch_max.max(1).min(pending.len());
                 tracing::info!(
                     target: "server.scheduler",
@@ -342,6 +375,8 @@ impl ServerState {
                     "scheduler dispatch"
                 );
                 for chunk in pending.chunks(chunk_size) {
+                    let ids: Vec<usize> = chunk.iter().map(|p| p.slot_idx).collect();
+                    tr!("DISPATCH start slots={:?}", ids);
                     if let Err(e) = self.dispatch_batched_pending(chunk) {
                         for p in chunk {
                             let _ = p.response.send(Err(anyhow!(
@@ -349,15 +384,19 @@ impl ServerState {
                             )));
                         }
                     }
+                    tr!("DISPATCH done slots={:?}", ids);
                 }
             }
-            // Dispatcher lock drops here.
+            // dispatch_lock_opt is None here; explicit release happened
+            // inside the loop while holding `batched_pending`.
         }
 
         // Wait for our response (whether we were leader or not).
+        tr!("WAIT recv start");
         let recv_buf = rx
             .recv()
             .map_err(|e| anyhow!("decode_via_scheduler recv: {e}"))??;
+        tr!("WAIT recv done");
         *logits_out = recv_buf;
         Ok(())
     }
@@ -376,14 +415,28 @@ impl ServerState {
         use flambeau_qwen3_moe::forward::{
             forward_decode_batched_pp, forward_decode_batched_tp, BatchSlot,
         };
+        let trace = std::env::var("FLAMBEAU_TRACE_BATCH").is_ok();
+        macro_rules! tr_d {
+            ($($arg:tt)*) => {
+                if trace {
+                    let now = std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .map(|d| d.as_millis() % 1_000_000)
+                        .unwrap_or(0);
+                    eprintln!("[TRACE-BATCH t={:06}ms DISPATCH] {}", now, format_args!($($arg)*));
+                }
+            };
+        }
         // Acquire each referenced slot's mutex. blocking_lock here is
         // safe — the request handlers have *released* the mutex
         // before pushing pending (their long-term claim is
         // `slot_in_use`, not the mutex).
-        let mut guards: Vec<tokio::sync::MutexGuard<'_, Inflight>> = pending
-            .iter()
-            .map(|p| self.inflight_pool[p.slot_idx].blocking_lock())
-            .collect();
+        let mut guards: Vec<tokio::sync::MutexGuard<'_, Inflight>> = Vec::with_capacity(pending.len());
+        for p in pending {
+            tr_d!("locking inflight slot={}", p.slot_idx);
+            guards.push(self.inflight_pool[p.slot_idx].blocking_lock());
+            tr_d!("locked  inflight slot={}", p.slot_idx);
+        }
 
         let cluster: &flambeau_backend_hip::HipCluster = &self.cluster;
 
@@ -551,8 +604,10 @@ impl ServerState {
 
         for (s, p) in pending.iter().enumerate() {
             let logits = std::mem::take(&mut logits_owned[s]);
+            tr_d!("send response slot={} logits_len={}", p.slot_idx, logits.len());
             let _ = p.response.send(Ok(logits));
         }
+        tr_d!("dispatch_done dropping guards");
         drop(guards);
         Ok(())
     }
