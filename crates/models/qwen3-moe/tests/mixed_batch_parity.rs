@@ -15,6 +15,14 @@
 //!
 //! Skips when GGUF missing or fewer than 4 HIP devices. Defaults to
 //! Qwen3.5-9B-Q4_1 on pp2tp2 over devices [0,2,1,3].
+//!
+//! **Known constraint**: each test reloads the model + cluster +
+//! BarP2pAllReduce. Running multiple tests in the same process can hit
+//! a stale BAR P2P matrix on the second test (`BarP2pAllReduce::new`
+//! requires fully-connected peer access; ROCm doesn't fully reset it
+//! across cluster lifecycles). Run tests one at a time:
+//!     cargo test ... --test mixed_batch_parity mixed_batch_parity_pp2tp2_k32_n1 -- --nocapture
+//! or use --test-threads=1 with each test in its own cargo invocation.
 
 #![cfg(feature = "hip")]
 #![expect(
@@ -49,31 +57,39 @@ fn gguf_path() -> Option<PathBuf> {
         .filter(|p| p.exists())
 }
 
-/// Relative-error check on F16-rounded logits.
-fn close_enough(label: &str, a: &[f32], b: &[f32], rel_tol: f32) -> Result<()> {
+/// Hybrid abs+rel error check on F16-rounded logits.
+///
+/// Element passes if `|a-b| <= abs_tol` OR `|a-b| / max(|a|,|b|) <= rel_tol`.
+/// Pure-relative is brittle for logits near zero (denominator → 0).
+fn close_enough(label: &str, a: &[f32], b: &[f32], abs_tol: f32, rel_tol: f32) -> Result<()> {
     if a.len() != b.len() {
         anyhow::bail!("{label}: len mismatch {} vs {}", a.len(), b.len());
     }
     let mut max_abs = 0f32;
     let mut max_rel = 0f32;
     let mut max_idx = 0usize;
+    let mut violations = 0usize;
     for (i, (x, y)) in a.iter().zip(b.iter()).enumerate() {
         let d = (x - y).abs();
         let s = x.abs().max(y.abs()).max(1e-6);
         let r = d / s;
-        if r > max_rel {
-            max_rel = r;
+        if d > abs_tol && r > rel_tol {
+            violations += 1;
+        }
+        if d > max_abs {
             max_abs = d;
+            max_rel = r;
             max_idx = i;
         }
     }
     eprintln!(
-        "[{label}] max_rel={max_rel:.3e} (abs={max_abs:.3e}) at idx={max_idx} (a={}, b={})",
+        "[{label}] max_abs={max_abs:.3e} (rel={max_rel:.3e}) at idx={max_idx} (a={}, b={}); \
+         violations={violations}",
         a[max_idx], b[max_idx]
     );
-    if max_rel > rel_tol {
+    if violations > 0 {
         anyhow::bail!(
-            "{label}: max_rel {max_rel:.3e} exceeds tol {rel_tol:.1e}",
+            "{label}: {violations} elements exceed abs_tol={abs_tol:.1e} AND rel_tol={rel_tol:.1e}",
         );
     }
     Ok(())
@@ -88,27 +104,36 @@ fn argmax(v: &[f32]) -> u32 {
         .0 as u32
 }
 
-#[test]
-fn mixed_batch_parity_pp2tp2() -> Result<()> {
+struct ParityCfg {
+    label: &'static str,
+    /// K — prefill chunk length.
+    chunk_k: usize,
+    /// N decode-slot count.
+    n_decode: usize,
+    /// Per-slot pre-decode prompt length.
+    decode_prompt_len: usize,
+}
+
+fn run_parity(cfg: &ParityCfg) -> Result<()> {
     let Some(path) = gguf_path() else {
-        eprintln!("skip — Qwen3.5-9B GGUF not present");
+        eprintln!("skip [{}] — Qwen3.5-9B GGUF not present", cfg.label);
         return Ok(());
     };
     let dev_ids = vec![0i32, 2, 1, 3];
     let n_avail: i32 = device_count().unwrap_or(0);
     if (n_avail as usize) < dev_ids.len() {
-        eprintln!("skip — need 4 HIP devices, have {n_avail}");
+        eprintln!("skip [{}] — need 4 HIP devices, have {n_avail}", cfg.label);
         return Ok(());
     }
 
     std::env::set_var("FLAMBEAU_MAX_CTX", "4096");
 
     let file = GgufFile::open(&path)?;
-    let cfg = Qwen3MoEConfig::from_gguf(&file)?;
-    assert_eq!(cfg.arch, "qwen35");
+    let model_cfg = Qwen3MoEConfig::from_gguf(&file)?;
+    assert_eq!(model_cfg.arch, "qwen35");
 
     let spec = HybridMeshSpec { pp_size: 2, tp_size: 2 };
-    spec.validate(cfg.num_layers, dev_ids.len())?;
+    spec.validate(model_cfg.num_layers, dev_ids.len())?;
 
     let model = Qwen3MoEHybridModel::load(&file, &dev_ids, spec)?;
     let global_cluster: Arc<HipCluster> = Arc::new(HipCluster::new(&dev_ids)?);
@@ -120,77 +145,86 @@ fn mixed_batch_parity_pp2tp2() -> Result<()> {
         stage_ars.push(ar);
     }
 
-    // Test config: K = 32 prefill tokens for chunk B; A's prompt is 24
-    // tokens (different length, exercises per-token positions).
-    let prompt_a: Vec<u32> = (0..24u32).map(|i| (5 + i * 41) % 151000).collect();
-    let prompt_b: Vec<u32> = (0..32u32).map(|i| (11 + i * 53) % 151000).collect();
-    let k = prompt_b.len();
-    let n_dec = 1usize;
+    let k = cfg.chunk_k;
+    let n_dec = cfg.n_decode;
     let t = k + n_dec;
-    // Decode token for slot A — choose any in-vocab id.
-    let decode_token_a: u32 = 17;
-    let pos_a = prompt_a.len();
+
+    // Build N decode-session prompts (each length cfg.decode_prompt_len, shifted seeds).
+    // Sessions are 0..n_dec (decoders), n_dec (chunk owner B). Layout matches the test below.
+    let decode_prompts: Vec<Vec<u32>> = (0..n_dec)
+        .map(|s| {
+            (0..cfg.decode_prompt_len as u32)
+                .map(move |i| ((s as u32 * 37 + 5) + i * 41) % 151000)
+                .collect::<Vec<u32>>()
+        })
+        .collect();
+    let prompt_b: Vec<u32> = (0..k as u32).map(|i| (11 + i * 53) % 151000).collect();
+    let decode_tokens: Vec<u32> = (0..n_dec).map(|s| (17 + s as u32 * 19) % 151000).collect();
+    let pos_per_slot: Vec<usize> = (0..n_dec).map(|_| cfg.decode_prompt_len).collect();
 
     eprintln!(
-        "mixed-batch parity: K={k} N={n_dec} T={t} | A.prompt={} B.prompt={}",
-        prompt_a.len(),
-        prompt_b.len()
+        "mixed-batch parity [{}]: K={k} N={n_dec} T={t} | decode-prompt-len={}",
+        cfg.label, cfg.decode_prompt_len
     );
 
     // ── REFERENCE PATH ────────────────────────────────────────────
-    // sess_A_ref: prefill prompt_A; one decode step → logits_a_dec_ref
-    // sess_B_ref: prefill prompt_B → logits_b_pre_ref (last-row)
-
-    let mut sess_a_ref = Qwen3MoEHybridSession::new(&model)?;
-    let mut sess_b_ref = Qwen3MoEHybridSession::new(&model)?;
+    let mut sessions_ref: Vec<Qwen3MoEHybridSession> = (0..(n_dec + 1))
+        .map(|_| Qwen3MoEHybridSession::new(&model))
+        .collect::<Result<_>>()?;
     let mut prefill_scratch_ref = ShardedForwardOneTokenScratchHybrid::new(&model)?;
-    // Decode scratch sized for max_tokens >= max(K_b, T) = T
     let mut decode_scratch_ref = ShardedForwardPrefillScratchHybrid::new(&model, t)?;
 
-    // (R1) prefill A
-    let mut sink_a: Vec<f32> = Vec::new();
-    forward_prefill_hybrid_logits(
-        &model,
-        &mut prefill_scratch_ref,
-        &global_cluster,
-        &stage_ars,
-        &mut sess_a_ref,
-        &prompt_a,
-        0,
-        &mut sink_a,
-    )
-    .context("ref: prefill A")?;
+    // (R1) prefill each decode session.
+    for s in 0..n_dec {
+        let mut sink: Vec<f32> = Vec::new();
+        forward_prefill_hybrid_logits(
+            &model,
+            &mut prefill_scratch_ref,
+            &global_cluster,
+            &stage_ars,
+            &mut sessions_ref[s],
+            &decode_prompts[s],
+            0,
+            &mut sink,
+        )
+        .with_context(|| format!("ref: prefill decode-session {s}"))?;
+    }
 
-    // (R2) decode A one step → logits_a_dec_ref
-    let mut logits_a_dec_ref: Vec<f32> = Vec::new();
+    // (R2) batched decode of all N decode-slots in one call.
+    let mut logits_decode_ref: Vec<Vec<f32>> = (0..(n_dec + 1)).map(|_| Vec::new()).collect();
     {
-        let mut sessions: Vec<&mut Qwen3MoEHybridSession> = vec![&mut sess_a_ref];
-        let mut logits_refs: Vec<&mut Vec<f32>> = vec![&mut logits_a_dec_ref];
+        let mut sess_refs: Vec<&mut Qwen3MoEHybridSession> =
+            sessions_ref.iter_mut().collect();
+        let slots_ref: Vec<BatchSlot> = (0..n_dec)
+            .map(|s| BatchSlot {
+                idx: s,
+                token_id: decode_tokens[s],
+                position: pos_per_slot[s],
+            })
+            .collect();
+        let mut logits_refs: Vec<&mut Vec<f32>> = logits_decode_ref.iter_mut().collect();
         forward_decode_batched_hybrid(
             &model,
-            sessions.as_mut_slice(),
+            sess_refs.as_mut_slice(),
             &global_cluster,
             &stage_ars,
             &mut decode_scratch_ref,
-            &[BatchSlot {
-                idx: 0,
-                token_id: decode_token_a,
-                position: pos_a,
-            }],
+            &slots_ref,
             logits_refs.as_mut_slice(),
         )
-        .context("ref: decode A")?;
+        .context("ref: decode batch")?;
     }
-    let argmax_a_dec_ref = argmax(&logits_a_dec_ref);
+    let argmax_decode_ref: Vec<u32> =
+        (0..n_dec).map(|s| argmax(&logits_decode_ref[s])).collect();
 
-    // (R3) prefill B → logits_b_pre_ref (last-row)
+    // (R3) prefill B → last-row logits.
     let mut logits_b_pre_ref: Vec<f32> = Vec::new();
     forward_prefill_hybrid_logits(
         &model,
         &mut prefill_scratch_ref,
         &global_cluster,
         &stage_ars,
-        &mut sess_b_ref,
+        &mut sessions_ref[n_dec],
         &prompt_b,
         0,
         &mut logits_b_pre_ref,
@@ -199,67 +233,68 @@ fn mixed_batch_parity_pp2tp2() -> Result<()> {
     let argmax_b_pre_ref = argmax(&logits_b_pre_ref);
 
     // ── MIXED PATH ────────────────────────────────────────────────
-    let mut sess_a_mix = Qwen3MoEHybridSession::new(&model)?;
-    let mut sess_b_mix = Qwen3MoEHybridSession::new(&model)?;
+    let mut sessions_mix: Vec<Qwen3MoEHybridSession> = (0..(n_dec + 1))
+        .map(|_| Qwen3MoEHybridSession::new(&model))
+        .collect::<Result<_>>()?;
     let mut prefill_scratch_mix = ShardedForwardOneTokenScratchHybrid::new(&model)?;
     let mut mixed_scratch = ShardedForwardPrefillScratchHybrid::new(&model, t)?;
 
-    // (M1) prefill A — same as R1 on the mix copy of A.
-    let mut sink_a_mix: Vec<f32> = Vec::new();
-    forward_prefill_hybrid_logits(
-        &model,
-        &mut prefill_scratch_mix,
-        &global_cluster,
-        &stage_ars,
-        &mut sess_a_mix,
-        &prompt_a,
-        0,
-        &mut sink_a_mix,
-    )
-    .context("mix: prefill A")?;
+    // (M1) prefill each decode session (same as R1).
+    for s in 0..n_dec {
+        let mut sink: Vec<f32> = Vec::new();
+        forward_prefill_hybrid_logits(
+            &model,
+            &mut prefill_scratch_mix,
+            &global_cluster,
+            &stage_ars,
+            &mut sessions_mix[s],
+            &decode_prompts[s],
+            0,
+            &mut sink,
+        )
+        .with_context(|| format!("mix: prefill decode-session {s}"))?;
+    }
 
-    // (M2) mixed call: chunk = prompt_B (final), slots = [decode A].
+    // (M2) one mixed call: chunk B + N decodes.
     let chunk = MixedPrefillChunk {
-        idx: 1,
+        idx: n_dec,
         tokens: prompt_b.clone(),
         chunk_start: 0,
         is_final_chunk: true,
     };
-    let slots = [BatchSlot {
-        idx: 0,
-        token_id: decode_token_a,
-        position: pos_a,
-    }];
-    let mut decode_logits_a_mix: Vec<f32> = Vec::new();
-    let mut decode_logits_b_unused: Vec<f32> = Vec::new();
+    let slots_mix: Vec<BatchSlot> = (0..n_dec)
+        .map(|s| BatchSlot {
+            idx: s,
+            token_id: decode_tokens[s],
+            position: pos_per_slot[s],
+        })
+        .collect();
+    let mut logits_decode_mix: Vec<Vec<f32>> = (0..(n_dec + 1)).map(|_| Vec::new()).collect();
     let mut prefill_final_b_mix: Vec<f32> = Vec::new();
     {
-        let mut sessions: Vec<&mut Qwen3MoEHybridSession> =
-            vec![&mut sess_a_mix, &mut sess_b_mix];
-        // decode_logits_out is parallel to sessions; only slot.idx
-        // entries are written. B has no decode slot in this dispatch
-        // so its entry stays untouched.
-        let mut logits_refs: Vec<&mut Vec<f32>> =
-            vec![&mut decode_logits_a_mix, &mut decode_logits_b_unused];
+        let mut sess_refs: Vec<&mut Qwen3MoEHybridSession> =
+            sessions_mix.iter_mut().collect();
+        let mut logits_refs: Vec<&mut Vec<f32>> = logits_decode_mix.iter_mut().collect();
         forward_decode_mixed_hybrid(
             &model,
-            sessions.as_mut_slice(),
+            sess_refs.as_mut_slice(),
             &global_cluster,
             &stage_ars,
             &mut mixed_scratch,
             Some(&chunk),
-            &slots,
+            &slots_mix,
             logits_refs.as_mut_slice(),
             Some(&mut prefill_final_b_mix),
         )
         .context("mix: forward_decode_mixed_hybrid")?;
     }
-    let argmax_a_dec_mix = argmax(&decode_logits_a_mix);
+    let argmax_decode_mix: Vec<u32> =
+        (0..n_dec).map(|s| argmax(&logits_decode_mix[s])).collect();
     let argmax_b_pre_mix = argmax(&prefill_final_b_mix);
 
     eprintln!(
-        "argmax: A.dec ref={argmax_a_dec_ref} mix={argmax_a_dec_mix} | \
-         B.pre ref={argmax_b_pre_ref} mix={argmax_b_pre_mix}"
+        "[{}] argmax: decode ref={:?} mix={:?} | B.pre ref={argmax_b_pre_ref} mix={argmax_b_pre_mix}",
+        cfg.label, argmax_decode_ref, argmax_decode_mix
     );
 
     // ── DISPOSE ──────────────────────────────────────────────────
@@ -267,38 +302,75 @@ fn mixed_batch_parity_pp2tp2() -> Result<()> {
     let _ = decode_scratch_ref.dispose(&model);
     let _ = prefill_scratch_mix.dispose(&model);
     let _ = mixed_scratch.dispose(&model);
-    let _ = sess_a_ref.dispose(&model);
-    let _ = sess_b_ref.dispose(&model);
-    let _ = sess_a_mix.dispose(&model);
-    let _ = sess_b_mix.dispose(&model);
+    for s in sessions_ref {
+        let _ = s.dispose(&model);
+    }
+    for s in sessions_mix {
+        let _ = s.dispose(&model);
+    }
     let _ = model.dispose();
 
     // ── ASSERT ───────────────────────────────────────────────────
-    // F16 rounding tolerance ~1e-2 relative, somewhat loose. Pure
-    // bit-id parity is unlikely (FMA contraction differs across two
-    // attn calls vs one). Top-1 argmax match is the strict gate.
+    for s in 0..n_dec {
+        close_enough(
+            &format!("[{}] decode-{s} logits", cfg.label),
+            &logits_decode_ref[s],
+            &logits_decode_mix[s],
+            0.5,  // abs_tol — F16 logit-magnitude noise budget
+            1e-2, // rel_tol — for large-magnitude logits
+        )?;
+        if argmax_decode_ref[s] != argmax_decode_mix[s] {
+            anyhow::bail!(
+                "[{}] decode-{s} top-1 mismatch: ref={} mix={}",
+                cfg.label,
+                argmax_decode_ref[s],
+                argmax_decode_mix[s],
+            );
+        }
+    }
     close_enough(
-        "decode-A logits",
-        &logits_a_dec_ref,
-        &decode_logits_a_mix,
-        1e-2,
-    )?;
-    close_enough(
-        "prefill-B last-row logits",
+        &format!("[{}] prefill-B last-row logits", cfg.label),
         &logits_b_pre_ref,
         &prefill_final_b_mix,
+        0.5,
         1e-2,
     )?;
-    if argmax_a_dec_ref != argmax_a_dec_mix {
-        anyhow::bail!(
-            "decode-A top-1 mismatch: ref={argmax_a_dec_ref} mix={argmax_a_dec_mix}",
-        );
-    }
     if argmax_b_pre_ref != argmax_b_pre_mix {
         anyhow::bail!(
-            "prefill-B top-1 mismatch: ref={argmax_b_pre_ref} mix={argmax_b_pre_mix}",
+            "[{}] prefill-B top-1 mismatch: ref={argmax_b_pre_ref} mix={argmax_b_pre_mix}",
+            cfg.label,
         );
     }
-    eprintln!("OK: mixed-batch parity matches reference (per-element + top-1)");
+    eprintln!("OK [{}]: parity matches reference (per-element + top-1)", cfg.label);
     Ok(())
+}
+
+#[test]
+fn mixed_batch_parity_pp2tp2_k32_n1() -> Result<()> {
+    run_parity(&ParityCfg {
+        label: "K=32/N=1",
+        chunk_k: 32,
+        n_decode: 1,
+        decode_prompt_len: 24,
+    })
+}
+
+#[test]
+fn mixed_batch_parity_pp2tp2_k32_n2() -> Result<()> {
+    run_parity(&ParityCfg {
+        label: "K=32/N=2",
+        chunk_k: 32,
+        n_decode: 2,
+        decode_prompt_len: 24,
+    })
+}
+
+#[test]
+fn mixed_batch_parity_pp2tp2_k128_n4() -> Result<()> {
+    run_parity(&ParityCfg {
+        label: "K=128/N=4",
+        chunk_k: 128,
+        n_decode: 4,
+        decode_prompt_len: 32,
+    })
 }
