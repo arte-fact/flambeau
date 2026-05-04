@@ -2674,3 +2674,63 @@ pub fn forward_decode_1f1b_hybrid(
     Ok(())
 }
 
+
+// ---------------------------------------------------------------------------
+// **#304 / Sarathi mixed-batch** — co-batch one prefill chunk with N decode
+// slots in a single forward pass.
+// ---------------------------------------------------------------------------
+//
+// **Status: scaffold only.** This signature locks in the API; the layer-body
+// K|N split is the next implementation step. Design:
+// `doc/V1.x/sarathi_mixed_batch_design.md`.
+//
+// When `prefill_chunk = None`, this delegates to
+// `forward_decode_batched_hybrid` and matches its behaviour bit-identically.
+//
+// When `prefill_chunk = Some(chunk)`:
+// - Embed K = chunk.tokens.len() prefill rows + N = slots.len() decode
+//   rows into stage-0 hidden activation `[K+N, hidden]`.
+// - Per layer: call existing kernels with n_tokens = T = K + N for the
+//   subsystems that take arbitrary T (RMSNorm, QKV proj, MoE router,
+//   MoE experts, FFN, post-attn add). For RoPE + attention + GDN, split
+//   Q/K/V at the K|N boundary and dispatch:
+//     * full-attn: forward_full_attn_prefill on rows [0..K] vs the
+//       chunk's KV cache; forward_full_attn_layer_decode_batched on
+//       rows [K..T] vs slot KVs.
+//     * GDN: forward_gdn_prefill on rows [0..K] + chunk GDN state;
+//       per-slot loop forward_gdn_layer_decode on rows [K..T].
+// - Output head: only the last K row (if `chunk.is_final_chunk`) + N
+//   decode rows.
+/// **#304 stub** — Sarathi mixed-batch dispatch entry point. Currently
+/// delegates to pure-decode when no prefill chunk is attached; bails
+/// when one is present. Layer-body split is the next implementation
+/// step queued behind this signature.
+#[allow(clippy::too_many_arguments)]
+pub fn forward_decode_mixed_hybrid(
+    model: &Qwen3MoEHybridModel,
+    sessions: &mut [&mut Qwen3MoEHybridSession],
+    global_cluster: &flambeau_backend_hip::HipCluster,
+    stage_ars: &[BarP2pAllReduce],
+    scratch: &mut ShardedForwardPrefillScratchHybrid,
+    prefill_chunk: Option<&super::batched::MixedPrefillChunk>,
+    slots: &[super::batched::BatchSlot],
+    decode_logits_out: &mut [&mut Vec<f32>],
+    prefill_final_logits_out: Option<&mut Vec<f32>>,
+) -> Result<()> {
+    if prefill_chunk.is_some() {
+        let _ = prefill_final_logits_out;
+        bail!(
+            "forward_decode_mixed_hybrid: mixed-batch K|N layer split is queued (#304); \
+             call with prefill_chunk = None to delegate to forward_decode_batched_hybrid"
+        );
+    }
+    forward_decode_batched_hybrid(
+        model,
+        sessions,
+        global_cluster,
+        stage_ars,
+        scratch,
+        slots,
+        decode_logits_out,
+    )
+}

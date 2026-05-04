@@ -62,6 +62,42 @@ pub struct BatchSlot {
     pub position: usize,
 }
 
+/// **#304 / Sarathi mixed-batch** — one prefill chunk co-batched with
+/// decode slots in a single forward pass.
+///
+/// The chunk is a contiguous slice `[chunk_start..chunk_start + len]`
+/// of the request's tokenized prompt. The request's KV / GDN state
+/// already contains positions `0..chunk_start`; this dispatch appends
+/// `len` more positions to that state.
+///
+/// `is_final_chunk = true` means the next decode step will need a
+/// logit row for `prompt[chunk_start + len - 1]` — the output head
+/// runs over the last K row in that case.
+#[derive(Debug, Clone)]
+pub struct MixedPrefillChunk {
+    /// Index into the caller's `sessions` parallel array (the request
+    /// owning this prefill).
+    pub idx: usize,
+    /// Token IDs for the K rows of this chunk
+    /// (`tokens[i] = prompt[chunk_start + i]`).
+    pub tokens: Vec<u32>,
+    /// Global position of `tokens[0]` in the request's KV.
+    pub chunk_start: usize,
+    /// `true` if this chunk consumes the last tokens of the prompt;
+    /// triggers an output-head call for the last K row to seed the
+    /// first decode token.
+    pub is_final_chunk: bool,
+}
+
+impl MixedPrefillChunk {
+    pub fn len(&self) -> usize {
+        self.tokens.len()
+    }
+    pub fn is_empty(&self) -> bool {
+        self.tokens.is_empty()
+    }
+}
+
 /// **P2.9b-i2-A1-wire** — drive `slots.len()` concurrent decode steps
 /// through the PP topology with real per-layer batching, returning
 /// per-slot `[vocab]` F32 logits.

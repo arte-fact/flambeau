@@ -82,7 +82,7 @@ pub use pp::{
 };
 
 pub mod batched;
-pub use batched::{forward_decode_batched_pp, BatchSlot};
+pub use batched::{forward_decode_batched_pp, BatchSlot, MixedPrefillChunk};
 
 pub mod tp;
 pub use tp::{
@@ -97,8 +97,8 @@ pub use crate::hybrid::{
     ShardedForwardOneTokenScratchHybrid, ShardedForwardPrefillScratchHybrid,
 };
 pub use hybrid::{
-    forward_decode_1f1b_hybrid, forward_decode_batched_hybrid, forward_decode_pipelined_hybrid,
-    forward_one_token_hybrid, forward_one_token_hybrid_logits,
+    forward_decode_1f1b_hybrid, forward_decode_batched_hybrid, forward_decode_mixed_hybrid,
+    forward_decode_pipelined_hybrid, forward_one_token_hybrid, forward_one_token_hybrid_logits,
     forward_prefill_hybrid_batched_logits, forward_prefill_hybrid_logits,
 };
 
