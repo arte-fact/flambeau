@@ -14,7 +14,6 @@
 pub mod agent_stats;
 pub mod api;
 pub mod mcp_client;
-pub mod mixed_scheduler;
 pub mod state;
 pub mod tool_call_parser;
 

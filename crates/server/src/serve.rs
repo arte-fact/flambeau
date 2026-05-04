@@ -20,7 +20,7 @@ use tracing::info;
 use crate::model::LoadedModel;
 use crate::routes::{
     agent_stats, chat_completions, completions, health, index, infill, messages_anthropic,
-    models, tools_endpoint, MixedBatchCtx, ServerState, SharedState,
+    models, tools_endpoint, ServerState, SharedState,
 };
 
 /// **TP-5a** — mesh topology selector. PP-V1 default; TP engages the
@@ -403,40 +403,6 @@ pub async fn serve(cfg: ServeConfig) -> Result<()> {
         .map(|_| std::sync::atomic::AtomicBool::new(false))
         .collect();
 
-    // **#306** — opt-in Sarathi mixed-batch context. Engaged when
-    // FLAMBEAU_MIXED_BATCH=1 and the loaded model is hybrid (the only
-    // topology with the forward_decode_mixed_hybrid driver shipped at v1).
-    let mixed_batch = if std::env::var("FLAMBEAU_MIXED_BATCH").is_ok()
-        && matches!(&model, LoadedModel::Hybrid { .. })
-    {
-        let token_budget: usize = std::env::var("FLAMBEAU_MIXED_BUDGET")
-            .ok()
-            .and_then(|s| s.parse().ok())
-            .unwrap_or(512);
-        let max_chunk_size: usize = std::env::var("FLAMBEAU_MIXED_CHUNK")
-            .ok()
-            .and_then(|s| s.parse().ok())
-            .unwrap_or(256);
-        tracing::info!(
-            target: "server.mixed_batch",
-            token_budget,
-            max_chunk_size,
-            "FLAMBEAU_MIXED_BATCH engaged — chunk-budget scheduler active for hybrid topology"
-        );
-        Some(MixedBatchCtx {
-            scheduler: std::sync::Mutex::new(
-                crate::mixed_scheduler::MixedScheduler::new(token_budget, max_chunk_size),
-            ),
-            prefill_channels: std::sync::Mutex::new(std::collections::HashMap::new()),
-            decode_channels: std::sync::Mutex::new(std::collections::HashMap::new()),
-            dispatcher: std::sync::Mutex::new(()),
-            scratch: std::sync::Mutex::new(None),
-            token_budget,
-        })
-    } else {
-        None
-    };
-
     let state: SharedState = Arc::new(ServerState {
         model_id: cfg.model_id.clone(),
         cfg: model_cfg,
@@ -452,7 +418,6 @@ pub async fn serve(cfg: ServeConfig) -> Result<()> {
         hybrid_batched_scratch: std::sync::Mutex::new(None),
         remote_tools,
         agent_stats: crate::agent_stats::AgentStatsRing::default(),
-        mixed_batch,
         tool_call_format_default,
         model_defaults,
         default_system,
