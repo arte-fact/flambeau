@@ -558,7 +558,9 @@ impl ServerState {
                 .context("forward_decode_batched_tp under scheduler")?;
             }
             LoadedModel::Hybrid { model, stage_ars } => {
-                use flambeau_qwen3_moe::forward::forward_decode_batched_hybrid;
+                use flambeau_qwen3_moe::forward::{
+                    forward_decode_batched_hybrid, forward_decode_pipelined_hybrid,
+                };
                 let mut sessions: Vec<&mut flambeau_qwen3_moe::Qwen3MoEHybridSession> =
                     Vec::with_capacity(n);
                 for s in 0..n {
@@ -589,16 +591,41 @@ impl ServerState {
                 let scratch = scratch_guard
                     .as_mut()
                     .expect("just initialised");
-                forward_decode_batched_hybrid(
-                    model,
-                    sessions.as_mut_slice(),
-                    cluster,
-                    stage_ars,
-                    scratch,
-                    &slots,
-                    logits_refs.as_mut_slice(),
-                )
-                .context("forward_decode_batched_hybrid under scheduler")?;
+                // **#290 / #291** — opt-in PP-pipelined dispatch when
+                // topology has PP=2 AND we have ≥ 2 active slots. The
+                // PP=2 / N=1 case has nothing to interleave (one slot,
+                // one stage in flight at a time) → falls through. PP>2
+                // / PP=1 / TP-only also fall through. Default OFF; gate
+                // is `FLAMBEAU_DECODE_PIPELINE=1`.
+                let pipeline_enabled =
+                    std::env::var("FLAMBEAU_DECODE_PIPELINE").is_ok();
+                let n_stages = model.stages.len();
+                let use_pipeline = pipeline_enabled && n_stages == 2 && n >= 2;
+                if use_pipeline {
+                    tr_d!("dispatch hybrid pipelined N={n}");
+                    forward_decode_pipelined_hybrid(
+                        model,
+                        sessions.as_mut_slice(),
+                        cluster,
+                        stage_ars,
+                        scratch,
+                        &slots,
+                        logits_refs.as_mut_slice(),
+                    )
+                    .context("forward_decode_pipelined_hybrid under scheduler")?;
+                } else {
+                    tr_d!("dispatch hybrid batched N={n}");
+                    forward_decode_batched_hybrid(
+                        model,
+                        sessions.as_mut_slice(),
+                        cluster,
+                        stage_ars,
+                        scratch,
+                        &slots,
+                        logits_refs.as_mut_slice(),
+                    )
+                    .context("forward_decode_batched_hybrid under scheduler")?;
+                }
             }
         }
 
