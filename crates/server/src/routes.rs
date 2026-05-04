@@ -559,7 +559,8 @@ impl ServerState {
             }
             LoadedModel::Hybrid { model, stage_ars } => {
                 use flambeau_qwen3_moe::forward::{
-                    forward_decode_batched_hybrid, forward_decode_pipelined_hybrid,
+                    forward_decode_1f1b_hybrid, forward_decode_batched_hybrid,
+                    forward_decode_pipelined_hybrid,
                 };
                 let mut sessions: Vec<&mut flambeau_qwen3_moe::Qwen3MoEHybridSession> =
                     Vec::with_capacity(n);
@@ -610,9 +611,30 @@ impl ServerState {
                 // `FLAMBEAU_DECODE_PIPELINE=1`.
                 let pipeline_enabled =
                     std::env::var("FLAMBEAU_DECODE_PIPELINE").is_ok();
+                // **#298 / #299 / Lever 2** — opt-in 1F1B PP dispatch.
+                // Stage-major timestep loop fills all PP stages' GPUs
+                // at steady state. Higher priority than the slot-major
+                // pipelined dispatch when both env vars are set.
+                // Engages at n_stages >= 2 + n >= n_stages (otherwise
+                // ramp-up dominates the unavailable steady state).
+                let f1b1_enabled =
+                    std::env::var("FLAMBEAU_DECODE_1F1B").is_ok();
                 let n_stages = model.stages.len();
+                let use_1f1b = f1b1_enabled && n_stages >= 2 && n >= n_stages;
                 let use_pipeline = pipeline_enabled && n_stages >= 2 && n >= 4;
-                if use_pipeline {
+                if use_1f1b {
+                    tr_d!("dispatch hybrid 1F1B N={n} stages={n_stages}");
+                    forward_decode_1f1b_hybrid(
+                        model,
+                        sessions.as_mut_slice(),
+                        cluster,
+                        stage_ars,
+                        scratch,
+                        &slots,
+                        logits_refs.as_mut_slice(),
+                    )
+                    .context("forward_decode_1f1b_hybrid under scheduler")?;
+                } else if use_pipeline {
                     tr_d!("dispatch hybrid pipelined N={n}");
                     forward_decode_pipelined_hybrid(
                         model,

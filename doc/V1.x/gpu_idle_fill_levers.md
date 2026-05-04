@@ -201,11 +201,33 @@ state").
 Estimated effort: 1–2 sessions (the V2.25.h prefill template gives
 most of the structure).
 
-### Projected win
+### Projected win — and what we actually measured
 
-PP=4/N=4 actual ceiling is 2.3× per the design table. Current 1.0×.
-Closing this delta would lift the v2 cert from 1.34× (PP=4 batched) to
-~3.0× — **alone clears the 3× gate on PP=4**.
+Projection: PP=4/N=4 ceiling 2.3× per the design table. Combined with
+batched-decode 1.34×, this would lift the v2 cert to ~3.0× —
+projected to alone clear the 3× gate on PP=4.
+
+**Live measurement (2026-05-04, cert
+`certs/perf/p29b_i2_F_throughput/qwen36_27b_pp4_1f1b_2026_05_04.md`):
+1F1B delivers 1.0× (no speedup) at PP=4/N=4.** Output bit-identical
+to slot-major and batched-decode. Same wall (~26 s).
+
+Diagnosis: the 1F1B *projection* assumes per-stage work is large
+enough that filling all stages concurrently dominates host issue
+cost. At decode-n_tokens=1 on hybrid GDN+attn+MoE, each stage's
+per-slot work is ~6 ms (HBM-bound weight-stream); host issue cost
+across 4 streams is ~400 µs, but **batched-decode at N=4 already
+amortizes the same HBM read across 4 slots in one call** — and
+that's the lever 1F1B *gives up* by going back to N=1 over k stages.
+
+**Net: 1F1B is the right pattern for prefill (compute-bound
+microbatches), wrong for decode (HBM-bound, where N-batching on a
+single stage is the dominant amortization).** Shipped as opt-in
+(`FLAMBEAU_DECODE_1F1B=1`) for completeness; not on the critical
+path.
+
+The 3× gate cannot be closed on PP-only re-pipelining. The
+remaining lever is Lever 1.
 
 ## Lever 3 (out of scope for this rig): prefill-decode disaggregation
 
@@ -217,23 +239,34 @@ between pools at handoff. Eliminates interference entirely.
 Requires: ≥ 8 GPUs, fast interconnect (xGMI / NVLink) for the cache
 transfer. On our 4×MI50 PCIe-only rig: not applicable.
 
-## Recommendation: Lever 1 first
+## Recommendation: Lever 1 (revised after Lever 2 measurement)
 
 | | Lever 1 (Sarathi mixed) | Lever 2 (true 1F1B PP) |
 |---|---|---|
 | **Projected win** | 1.5–2.5× (full GPU% saturation) | 2.3× ceiling at PP=4/N=4 |
-| **Topology applicability** | All (especially TP / hybrid) | PP only (we already have hybrid PP=2 baseline) |
+| **Measured win** | not yet implemented | **1.0× (null)** — see cert |
+| **Topology applicability** | All (especially TP / hybrid) | PP only |
 | **Engineering** | 3–5 sessions: scheduler + varlen attn + mixed forward | 1–2 sessions: stage-major loop refactor |
 | **Risk** | Touch attention kernel — correctness work | Mostly host-side loop refactor |
-| **Hits cert gate?** | Maybe (combined with current pipelining: ~3×) | Yes, alone on PP=4 (1.34 × 2.3 ≈ 3.1×) |
+| **Hits cert gate?** | Yes, projected (only remaining lever) | **No, measured null** |
 
-**Lever 2 is the smaller engineering bet** with directly-projected
-clearance of the 3× gate on PP=4. Recommended first.
+**Original recommendation was Lever 2 first** (smaller bet, projected to
+clear gate alone). Live measurement falsified the projection: 1F1B at
+decode is null because the projection assumed compute-bound per-stage
+work, but decode at n_tokens=1 is HBM-bound and batched-decode at
+N=4 already amortizes that HBM in one call.
 
-**Lever 1 is the bigger lift** but applies across all topologies and
-gives the dramatic GPU% utilisation win the v2 cert pointed at. Should
-follow Lever 2 if we want pp2tp2 / tp2 to also clear 3× (currently
-0.92–0.95×).
+**Revised recommendation: pivot to Lever 1.** It is the only remaining
+lever projected to fill the 50–75 % silicon idle the v2 cert exposed.
+It is the bigger lift (varlen attention is real kernel work) but
+applies across all topologies and is structurally aligned with the
+bottleneck:
+
+- prefill chunk = compute-bound → fills tensor-core idle
+- co-batched decodes = HBM-bound → fills HBM idle
+- both subsystems saturate in the same forward pass
+
+This is where the GPU% gap actually lives.
 
 ## References
 
