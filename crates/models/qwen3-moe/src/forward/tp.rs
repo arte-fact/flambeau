@@ -257,6 +257,11 @@ pub struct RankForwardPrefillScratchTp {
     /// loop on this rank. None on archs without GDN. Sibling of the
     /// PP `RankForwardPrefillScratch.gdn_decode`.
     pub gdn_decode: Option<super::gdn::GdnScratch>,
+    /// **#285 batched-GDN** — n_tokens=N workspace for
+    /// `forward_gdn_decode_batched_tp`. Sized for `max_tokens` (which
+    /// for the batched-decode driver is `INFLIGHT_SLOTS`). None on
+    /// archs without GDN.
+    pub gdn_decode_batched: Option<super::gdn::GdnPrefillScratch>,
     hidden_bytes: usize,
     partial_bytes: usize,
     disposed: bool,
@@ -285,6 +290,9 @@ impl RankForwardPrefillScratchTp {
             s.dispose(device)?;
         }
         if let Some(s) = self.gdn_decode.take() {
+            s.dispose(device)?;
+        }
+        if let Some(s) = self.gdn_decode_batched.take() {
             s.dispose(device)?;
         }
         Ok(())
@@ -377,6 +385,13 @@ impl ShardedForwardPrefillScratchTp {
             } else {
                 None
             };
+            // **#285 batched-GDN** — n_tokens=N workspace sized for
+            // max_tokens (= INFLIGHT_SLOTS in the batched-decode caller).
+            let gdn_decode_batched = if cfg.gdn.is_some() {
+                Some(super::gdn::GdnPrefillScratch::new(cfg, device, max_tokens)?)
+            } else {
+                None
+            };
             per_rank.push(RankForwardPrefillScratchTp {
                 rank: RankId(rank_idx as u32),
                 device_id: device.id(),
@@ -388,6 +403,7 @@ impl ShardedForwardPrefillScratchTp {
                 layer,
                 output_head,
                 gdn_decode,
+                gdn_decode_batched,
                 hidden_bytes,
                 partial_bytes,
                 disposed: false,

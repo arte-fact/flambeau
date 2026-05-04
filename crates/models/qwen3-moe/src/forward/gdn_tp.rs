@@ -1193,6 +1193,338 @@ pub fn forward_gdn_prefill_tp(
     Ok(())
 }
 
+/// **#285 batched-GDN decode** — single GDN-layer forward over N
+/// (slot, layer-state) pairs. Replaces the per-slot loop in
+/// `forward_decode_batched_hybrid`'s GDN branch (and PP twin).
+///
+/// Shape map (mirrors `forward_gdn_prefill_tp`, with the per-slot
+/// state mutation factored into a per-slot inner loop):
+/// - **Stages A–C** (rmsnorm + dual Q8_1 quant + attn_qkv proj +
+///   attn_gate proj + ssm_alpha proj + ssm_beta proj): batched
+///   over n_tokens=N via the prefill kernels. Same launches as the
+///   prefill path; one launch per kernel regardless of N.
+/// - **Stage D** (per-slot conv1d + silu + split_qkv + l2_norm +
+///   scale + state-step + ssm_norm): looped per slot. Each slot's
+///   conv_history and recurrent state mutate in place. Conv-input
+///   scratch (`scratch.conv_input`) is REUSED per iteration —
+///   each slot's K-row temp lives there only during its loop body.
+///   conv_out / silu_out / Q/K/V / state_out / out_normed are
+///   indexed per-slot via base+s*stride pointers.
+/// - **Stages E–F** (swiglu+quant + ssm_out proj + cast → F16):
+///   batched over N. Same launches as prefill.
+///
+/// `layer_states.len()` must equal `n_tokens`; each entry's per-rank
+/// `state` and `conv_history` are mutated in place.
+///
+/// `n_tokens` ≤ `scratch.max_tokens` (= INFLIGHT_SLOTS in the
+/// batched-decode caller).
+///
+/// `kq_replicated` must match the caller's TP layout — same rule as
+/// `forward_gdn_decode_tp`.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "matches forward_gdn_prefill_tp arg shape; the per-slot state \
+              slice is passed alongside the prefill scratch."
+)]
+pub fn forward_gdn_decode_batched_tp(
+    ops: &OpsRegistry,
+    stream: &HipStream,
+    device: &HipDevice,
+    cfg: &Qwen3MoEConfig,
+    attn_norm: &DeviceTensor,
+    attn_qkv: &DeviceTensor,
+    attn_gate: &DeviceTensor,
+    ssm_alpha: &DeviceTensor,
+    ssm_beta: &DeviceTensor,
+    ssm_a: &DeviceTensor,
+    ssm_dt_bias: &DeviceTensor,
+    ssm_conv1d: &DeviceTensor,
+    ssm_norm: &DeviceTensor,
+    ssm_out: &DeviceTensor,
+    layer_states: &mut [&mut GdnLayerState],
+    scratch: &mut GdnPrefillScratch,
+    x_in: DevicePtr,
+    partial_attn_out: DevicePtr,
+    n_tokens: usize,
+    tp_world: u32,
+    kq_replicated: bool,
+) -> Result<()> {
+    if tp_world == 0 {
+        bail!("tp_world must be >= 1");
+    }
+    if n_tokens == 0 {
+        bail!("forward_gdn_decode_batched_tp called with n_tokens = 0");
+    }
+    if n_tokens > scratch.max_tokens {
+        bail!(
+            "forward_gdn_decode_batched_tp: n_tokens={n_tokens} > scratch.max_tokens={}",
+            scratch.max_tokens
+        );
+    }
+    if layer_states.len() != n_tokens {
+        bail!(
+            "forward_gdn_decode_batched_tp: layer_states.len()={} != n_tokens={n_tokens}",
+            layer_states.len()
+        );
+    }
+
+    let world = tp_world as usize;
+    let gdn = cfg
+        .gdn
+        .as_ref()
+        .context("forward_gdn_decode_batched_tp requires cfg.gdn")?;
+    let hidden = cfg.hidden_size;
+    let d_inner = gdn.d_inner;
+    let num_v_heads = gdn.num_v_heads;
+    let num_k_heads = gdn.num_k_heads;
+    let head_k_dim = gdn.head_k_dim;
+    let head_v_dim = gdn.head_v_dim();
+    let conv_kernel = gdn.conv_kernel;
+    if num_v_heads % world != 0 {
+        bail!("num_v_heads {num_v_heads} not divisible by tp_world {tp_world}");
+    }
+    if !kq_replicated && num_k_heads % world != 0 {
+        bail!("num_k_heads {num_k_heads} not divisible by tp_world {tp_world}");
+    }
+    if d_inner % world != 0 {
+        bail!("d_inner {d_inner} not divisible by tp_world {tp_world}");
+    }
+    let local_num_v_heads = num_v_heads / world;
+    let local_num_k_heads = if kq_replicated {
+        num_k_heads
+    } else {
+        num_k_heads / world
+    };
+    let local_d_inner = d_inner / world;
+    let local_qk_size = local_num_k_heads * head_k_dim;
+    let local_v_size = local_num_v_heads * head_v_dim;
+    let local_conv_channels = local_d_inner + 2 * local_qk_size;
+    if local_v_size != local_d_inner {
+        bail!(
+            "GDN per-rank dim bug: local_v_size {local_v_size} != local_d_inner {local_d_inner}"
+        );
+    }
+    let n_rep = local_num_v_heads / local_num_k_heads;
+
+    // === Stage A: rmsnorm + dual Q8_1 quantise (n_tokens=N) ===
+    rmsnorm_f16(
+        ops, stream, x_in, attn_norm.ptr, scratch.x_norm_f16,
+        n_tokens, hidden, cfg.rms_norm_eps,
+    )
+    .context("gdn batched-decode (TP) attn_norm")?;
+    quantize_f16_q8_1(
+        ops, stream, scratch.x_norm_f16, scratch.x_q8_1, n_tokens * hidden,
+    )
+    .context("gdn batched-decode (TP) x_norm → Q8_1 (std)")?;
+    quantize_f16_q8_1_mmq(
+        ops, stream, scratch.x_norm_f16, scratch.x_q8_1_mmq, hidden, n_tokens,
+    )
+    .context("gdn batched-decode (TP) x_norm → Q8_1 (MMQ DS4)")?;
+
+    // === Stages B + C: 4 projections at n_tokens=N ===
+    run_qmatmul_from_tensor(
+        ops, stream, attn_qkv,
+        scratch.x_q8_1, scratch.x_q8_1_mmq, scratch.qkv_mixed_f32,
+        n_tokens, hidden, local_conv_channels, "attn_qkv (TP batched-decode)",
+    )?;
+    run_qmatmul_from_tensor(
+        ops, stream, attn_gate,
+        scratch.x_q8_1, scratch.x_q8_1_mmq, scratch.z_f32,
+        n_tokens, hidden, local_d_inner, "attn_gate (TP batched-decode)",
+    )?;
+    run_qmatmul_from_tensor(
+        ops, stream, ssm_alpha,
+        scratch.x_q8_1, scratch.x_q8_1_mmq, scratch.alpha_f32,
+        n_tokens, hidden, local_num_v_heads, "ssm_alpha (TP batched-decode)",
+    )?;
+    run_qmatmul_from_tensor(
+        ops, stream, ssm_beta,
+        scratch.x_q8_1, scratch.x_q8_1_mmq, scratch.beta_f32,
+        n_tokens, hidden, local_num_v_heads, "ssm_beta (TP batched-decode)",
+    )?;
+
+    // === Stage D: per-slot conv1d + silu + split_qkv + l2_norm + scale +
+    //              state-step + ssm_norm.
+    //
+    // Each slot has its own `conv_history` and recurrent `state` to
+    // mutate. The conv/SSM kernels themselves are SMALL (head_dim=128
+    // tiles, N=4 → ~50 µs each); the wins from batching come from the
+    // big MMVQ stages (A–C, E–F) — Stage D's 6× per-slot launches
+    // are an acceptable cost vs running the full GDN N times.
+    let row_qkv_bytes = local_conv_channels * 4;
+    let row_z_bytes = local_d_inner * 4;
+    let row_alpha_bytes = local_num_v_heads * 4;
+    let row_qk_bytes = local_qk_size * 4;
+    let row_v_bytes = local_v_size * 4;
+    let row_state_out_bytes = local_num_v_heads * head_v_dim * 4;
+    let row_out_normed_bytes = row_state_out_bytes;
+    let q_scale = 1.0f32 / (head_k_dim as f32).sqrt();
+    let rep_inner_layout = cfg.arch == "qwen3next";
+    let fuse_state_step =
+        std::env::var("FLAMBEAU_VARIANT").as_deref() != Ok("baseline");
+
+    for s in 0..n_tokens {
+        // Slot pointers into the batched scratch.
+        let slot_qkv =
+            DevicePtr(scratch.qkv_mixed_f32.as_usize() + s * row_qkv_bytes);
+        let slot_conv_out =
+            DevicePtr(scratch.conv_out.as_usize() + s * row_qkv_bytes);
+        let slot_silu_out =
+            DevicePtr(scratch.silu_out.as_usize() + s * row_qkv_bytes);
+        let slot_q_norm =
+            DevicePtr(scratch.q_norm_f32.as_usize() + s * row_qk_bytes);
+        let slot_k_norm =
+            DevicePtr(scratch.k_norm_f32.as_usize() + s * row_qk_bytes);
+        let slot_v =
+            DevicePtr(scratch.v_f32.as_usize() + s * row_v_bytes);
+        let slot_alpha =
+            DevicePtr(scratch.alpha_f32.as_usize() + s * row_alpha_bytes);
+        let slot_beta =
+            DevicePtr(scratch.beta_f32.as_usize() + s * row_alpha_bytes);
+        let slot_state_out =
+            DevicePtr(scratch.state_out.as_usize() + s * row_state_out_bytes);
+        let slot_out_normed =
+            DevicePtr(scratch.out_normed.as_usize() + s * row_out_normed_bytes);
+        let _ = row_z_bytes; // z_f32 read in Stage E batched; row stride for slicing not needed here.
+
+        // 6a. Assemble conv_input from slot's history + slot's qkv_mixed
+        //     (n_tokens=1 per slot).
+        assemble_conv_input_prefill(
+            device, stream,
+            layer_states[s].conv_history,
+            slot_qkv,
+            scratch.conv_input,
+            1, local_conv_channels, conv_kernel,
+        )?;
+        // 6b. Conv1d: K-row input → 1-row output for this slot.
+        causal_conv1d_f32(
+            ops, stream,
+            scratch.conv_input, ssm_conv1d.ptr, slot_conv_out,
+            1, local_conv_channels, conv_kernel,
+        )
+        .context("gdn batched-decode (TP) causal_conv1d_f32 slot")?;
+        // 6c. Update slot's conv_history with the new row.
+        shift_conv_history_prefill(
+            device, stream,
+            scratch.conv_input,
+            layer_states[s].conv_history,
+            1, local_conv_channels, conv_kernel,
+        )?;
+
+        // 7. silu(conv_out) on this slot's row.
+        silu_f32(
+            ops, stream, slot_conv_out, slot_silu_out, local_conv_channels,
+        )
+        .context("gdn batched-decode (TP) silu_f32(conv_out) slot")?;
+
+        // 8. Split silu_out → Q | K | V at local sizes (1-row).
+        gdn_split_qkv_f32(
+            ops, stream,
+            slot_silu_out, slot_q_norm, slot_k_norm, slot_v,
+            1, local_qk_size, local_v_size,
+        )
+        .context("gdn batched-decode (TP) gdn_split_qkv_f32 slot")?;
+
+        // 9. L2-normalise Q and K per local head.
+        l2_norm_f32(
+            ops, stream, slot_q_norm, slot_q_norm,
+            local_num_k_heads, head_k_dim, cfg.rms_norm_eps,
+        )
+        .context("gdn batched-decode (TP) l2_norm Q slot")?;
+        l2_norm_f32(
+            ops, stream, slot_k_norm, slot_k_norm,
+            local_num_k_heads, head_k_dim, cfg.rms_norm_eps,
+        )
+        .context("gdn batched-decode (TP) l2_norm K slot")?;
+
+        // 10. Scale Q by 1/sqrt(head_k_dim).
+        scale_f32(
+            ops, stream, slot_q_norm, slot_q_norm,
+            local_qk_size, q_scale,
+        )
+        .context("gdn batched-decode (TP) scale_f32 Q slot")?;
+
+        // 11–12. Per-slot state-step. n_tokens=1 update on slot's state.
+        if fuse_state_step {
+            gdn_state_step_alphabeta_f32_s128(
+                ops, stream,
+                slot_q_norm, slot_k_norm, slot_v,
+                slot_alpha, slot_beta,
+                ssm_dt_bias.ptr, ssm_a.ptr,
+                layer_states[s].state, layer_states[s].state, slot_state_out,
+                1, local_num_v_heads, 1, n_rep, rep_inner_layout,
+            )
+            .context("gdn batched-decode (TP) gdn_state_step_alphabeta_f32_s128 slot")?;
+        } else {
+            // The baseline split-path needs gate_device/beta_device
+            // sized for a single row; reuse the per-slot offsets into
+            // the prefill scratch's `gate_device`/`beta_device` buffers.
+            let row_gate_bytes = local_num_v_heads * 4;
+            let slot_gate =
+                DevicePtr(scratch.gate_device.as_usize() + s * row_gate_bytes);
+            let slot_beta_dev =
+                DevicePtr(scratch.beta_device.as_usize() + s * row_gate_bytes);
+            gdn_alpha_beta_f32(
+                ops, stream,
+                slot_alpha, slot_beta,
+                ssm_dt_bias.ptr, ssm_a.ptr,
+                slot_gate, slot_beta_dev,
+                local_num_v_heads, 1,
+            )
+            .context("gdn batched-decode (TP) gdn_alpha_beta_f32 slot")?;
+            gdn_state_step_f32_s128(
+                ops, stream,
+                slot_q_norm, slot_k_norm, slot_v,
+                slot_gate, slot_beta_dev,
+                layer_states[s].state, layer_states[s].state, slot_state_out,
+                1, local_num_v_heads, 1, n_rep, rep_inner_layout,
+            )
+            .context("gdn batched-decode (TP) gdn_state_step_f32_s128 slot")?;
+        }
+
+        // 13. ssm_norm per-(local) head over this slot's [num_v_heads, head_v_dim].
+        rmsnorm_f32(
+            ops, stream,
+            slot_state_out, ssm_norm.ptr, slot_out_normed,
+            local_num_v_heads, head_v_dim, cfg.rms_norm_eps,
+        )
+        .context("gdn batched-decode (TP) ssm_norm slot")?;
+    }
+
+    // === Stage E: swiglu(z, out_normed) → gated_f32 (batched) ===
+    swiglu_f32(
+        ops, stream,
+        scratch.z_f32, scratch.out_normed, scratch.gated_f32,
+        n_tokens * local_d_inner,
+    )
+    .context("gdn batched-decode (TP) swiglu_f32(z, out_normed)")?;
+
+    // 15. Quantise gated → both Q8_1 layouts.
+    quantize_q8_1(
+        ops, stream,
+        scratch.gated_f32, scratch.gated_q8_1, n_tokens * local_d_inner,
+    )
+    .context("gdn batched-decode (TP) quantise gated → Q8_1 (std)")?;
+    quantize_q8_1_mmq(
+        ops, stream,
+        scratch.gated_f32, scratch.gated_q8_1_mmq, local_d_inner, n_tokens,
+    )
+    .context("gdn batched-decode (TP) quantise gated → Q8_1 (MMQ DS4)")?;
+
+    // === Stage F: ssm_out projection (batched) → partial_attn_out[N, hidden] ===
+    run_qmatmul_from_tensor(
+        ops, stream, ssm_out,
+        scratch.gated_q8_1, scratch.gated_q8_1_mmq, scratch.ssm_out_f32,
+        n_tokens, local_d_inner, hidden, "ssm_out (TP batched-decode)",
+    )?;
+    cast_f32_to_f16(
+        ops, stream, scratch.ssm_out_f32, partial_attn_out, n_tokens * hidden,
+    )
+    .context("gdn batched-decode (TP) cast ssm_out → f16")?;
+
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     // Substantive validation needs GPU + per-rank GdnLayerState

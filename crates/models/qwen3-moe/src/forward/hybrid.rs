@@ -1045,7 +1045,13 @@ pub fn forward_decode_batched_hybrid(
                     )
                     .with_context(|| format!("hybrid full-attn stage {stage_idx} layer {il} rank {r}"))?;
                 } else {
-                    // GDN per-slot loop.
+                    // GDN forward. **#286 batched-GDN**: by default
+                    // dispatches a single `forward_gdn_decode_batched_tp`
+                    // call over all N slots (matmul-heavy stages
+                    // batched at n_tokens=N; per-slot inner loop only
+                    // for conv1d + state-step). Set
+                    // `FLAMBEAU_GDN_NO_BATCHED=1` to fall back to the
+                    // legacy per-slot loop for A/B regression checks.
                     let attn_norm = find_tensor_in_layer(layer_tensors, il, "attn_norm.weight")?;
                     let attn_qkv = find_tensor_in_layer(layer_tensors, il, "attn_qkv.weight")?;
                     let attn_gate = find_tensor_in_layer(layer_tensors, il, "attn_gate.weight")?;
@@ -1056,86 +1062,86 @@ pub fn forward_decode_batched_hybrid(
                     let ssm_conv1d = find_tensor_in_layer(layer_tensors, il, "ssm_conv1d.weight")?;
                     let ssm_norm = find_tensor_in_layer(layer_tensors, il, "ssm_norm.weight")?;
                     let ssm_out = find_tensor_in_layer(layer_tensors, il, "ssm_out.weight")?;
-                    // Borrow gdn_decode through raw ptr (disjoint from
-                    // layer_scratch we already hold above).
-                    let rank_scratch_ptr: *mut super::tp::RankForwardPrefillScratchTp =
-                        &mut stage_scratch.per_rank[r];
-                    // **#275 debug** — `FLAMBEAU_GDN_PER_SLOT_SCRATCH=1`
-                    // allocates a fresh `GdnScratch` for each slot
-                    // iteration instead of reusing the rank-shared one.
-                    // Used to validate the hypothesis that the per-slot
-                    // GDN loop has a scratch-reuse hazard on the split
-                    // path (n_rep != 1, e.g. Qwen3.6-27B at TP=2).
-                    // Allocates / disposes O(60 KB) per slot per layer
-                    // — slow, debug-only.
-                    let per_slot_scratch =
-                        std::env::var("FLAMBEAU_GDN_PER_SLOT_SCRATCH").is_ok();
-                    let mut transient_scratches: Vec<super::GdnScratch> =
-                        Vec::with_capacity(if per_slot_scratch { n } else { 0 });
-                    if per_slot_scratch {
-                        for _ in 0..n {
-                            transient_scratches.push(super::GdnScratch::new(cfg, device)?);
-                        }
-                    }
+
+                    // Gather per-slot &mut GdnLayerState. Indices 0..n
+                    // are distinct so the &mut borrows are disjoint.
                     let sessions_ptr = sessions.as_mut_ptr();
+                    let mut layer_states: Vec<&mut crate::session::GdnLayerState> =
+                        Vec::with_capacity(n);
                     for s in 0..n {
-                        // SAFETY: indices 0..n distinct.
-                        let layer_state = unsafe {
+                        // SAFETY: indices 0..n distinct; each session is unique.
+                        unsafe {
                             let session_ref: &mut Qwen3MoEHybridSession =
                                 &mut **sessions_ptr.add(s);
                             match &mut session_ref.stages[stage_idx].caches[r][il_local] {
-                                LayerCache::Gdn(state) => state,
+                                LayerCache::Gdn(state) => layer_states.push(state),
                                 _ => bail!(
                                     "Hybrid batched-decode: slot {s} stage {stage_idx} rank {r} \
                                      layer {il} expected Gdn cache"
                                 ),
                             }
-                        };
-                        let slot_x_in = DevicePtr(hidden_a.as_usize() + s * row_bytes);
-                        let slot_partial =
-                            DevicePtr(partial_attn_out.as_usize() + s * row_bytes);
-                        // Pick scratch: per-slot transient (debug) or
-                        // rank-shared (default).
-                        let gdn: &mut super::GdnScratch = if per_slot_scratch {
-                            &mut transient_scratches[s]
-                        } else {
-                            unsafe {
+                        }
+                    }
+
+                    let no_batched_gdn =
+                        std::env::var("FLAMBEAU_GDN_NO_BATCHED").is_ok();
+                    if no_batched_gdn {
+                        // Legacy per-slot fallback (kept for A/B regression).
+                        let rank_scratch_ptr: *mut super::tp::RankForwardPrefillScratchTp =
+                            &mut stage_scratch.per_rank[r];
+                        for (s, layer_state) in
+                            layer_states.iter_mut().enumerate()
+                        {
+                            let slot_x_in =
+                                DevicePtr(hidden_a.as_usize() + s * row_bytes);
+                            let slot_partial =
+                                DevicePtr(partial_attn_out.as_usize() + s * row_bytes);
+                            let gdn = unsafe {
                                 (*rank_scratch_ptr).gdn_decode.as_mut().ok_or_else(
                                     || anyhow!("rank {r}: missing gdn_decode scratch"),
                                 )?
-                            }
-                        };
-                        super::gdn_tp::forward_gdn_decode_tp(
-                            ops,
-                            stream,
-                            device,
-                            cfg,
-                            attn_norm,
-                            attn_qkv,
-                            attn_gate,
-                            ssm_alpha,
-                            ssm_beta,
-                            ssm_a,
-                            ssm_dt_bias,
-                            ssm_conv1d,
-                            ssm_norm,
-                            ssm_out,
-                            layer_state,
-                            gdn,
-                            slot_x_in,
-                            slot_partial,
-                            world,
-                            kq_replicated,
+                            };
+                            super::gdn_tp::forward_gdn_decode_tp(
+                                ops, stream, device, cfg,
+                                attn_norm, attn_qkv, attn_gate,
+                                ssm_alpha, ssm_beta, ssm_a, ssm_dt_bias,
+                                ssm_conv1d, ssm_norm, ssm_out,
+                                *layer_state, gdn,
+                                slot_x_in, slot_partial,
+                                world, kq_replicated,
+                            )
+                            .with_context(|| {
+                                format!(
+                                    "hybrid GDN (no-batched fallback) slot {s} stage {stage_idx} layer {il} rank {r}"
+                                )
+                            })?;
+                        }
+                    } else {
+                        let gdn_batched = stage_scratch.per_rank[r]
+                            .gdn_decode_batched
+                            .as_mut()
+                            .ok_or_else(|| {
+                                anyhow!(
+                                    "rank {r}: missing gdn_decode_batched scratch \
+                                     (cfg.gdn was Some at scratch alloc time?)"
+                                )
+                            })?;
+                        super::gdn_tp::forward_gdn_decode_batched_tp(
+                            ops, stream, device, cfg,
+                            attn_norm, attn_qkv, attn_gate,
+                            ssm_alpha, ssm_beta, ssm_a, ssm_dt_bias,
+                            ssm_conv1d, ssm_norm, ssm_out,
+                            layer_states.as_mut_slice(),
+                            gdn_batched,
+                            hidden_a, partial_attn_out,
+                            n,
+                            world, kq_replicated,
                         )
                         .with_context(|| {
                             format!(
-                                "hybrid GDN slot {s} stage {stage_idx} layer {il} rank {r}"
+                                "hybrid GDN batched stage {stage_idx} layer {il} rank {r}"
                             )
                         })?;
-                    }
-                    // Dispose any transient scratches allocated this layer.
-                    for sc in transient_scratches.drain(..) {
-                        sc.dispose(device).ok();
                     }
                 }
             }
