@@ -817,6 +817,22 @@ impl ServerState {
             .as_ref()
             .ok_or_else(|| anyhow!("mixed-batch not configured"))?;
 
+        // **#306 fast path** — if there are no pending prefills in the
+        // mixed scheduler, the mixed dispatch has no co-batching
+        // advantage over the legacy batched-decode path. Delegate.
+        // Legacy avoids per-iteration channel-map ops + scratch swap +
+        // pool→vec remap that dominate at decode-only workloads (live-
+        // measured 64% slower than legacy at N=3 decode-only).
+        let any_pending_prefill = mb
+            .scheduler
+            .lock()
+            .expect("mixed_scheduler mutex poisoned")
+            .pending_prefill_count()
+            > 0;
+        if !any_pending_prefill {
+            return self.decode_via_scheduler_into(slot_idx, token, position, logits_out);
+        }
+
         // 1. Allocate per-step request id + channel.
         let request_id = mb
             .scheduler
@@ -860,9 +876,13 @@ impl ServerState {
         let Some(mb) = self.mixed_batch.as_ref() else {
             return;
         };
-        let Ok(_dispatcher_guard) = mb.dispatcher.try_lock() else {
+        let Ok(g) = mb.dispatcher.try_lock() else {
             return;
         };
+        // Hold the dispatcher guard in an Option so we can drop it
+        // *inside* the scheduler lock on the empty-queue branch
+        // (race fix — see comment in the loop body).
+        let mut dispatcher_guard_opt = Some(g);
 
         // Optional batching window — wait briefly so concurrently-
         // arriving submissions can land in the same iteration.
@@ -871,8 +891,6 @@ impl ServerState {
             .and_then(|s| s.parse().ok())
             .unwrap_or(1500);
         if window_us > 0 {
-            // Only sleep if there's at least one ready item and at
-            // least one *other* slot that could plausibly be enqueued.
             let any_ready = {
                 let s = mb.scheduler.lock().expect("scheduler mutex poisoned");
                 s.pending_prefill_count() + s.ready_decode_count() > 0
@@ -883,21 +901,41 @@ impl ServerState {
         }
 
         loop {
-            let plan = {
-                let mut s = mb.scheduler.lock().expect("scheduler mutex poisoned");
-                let Some(plan) = s.next_iteration() else {
+            // **Race fix (mirrors legacy #276)** — the leader-release
+            // race: if `next_iteration()` returned None and we drop the
+            // scheduler lock *before* the dispatcher lock, a pusher
+            // landing in that window will:
+            //   1. push to scheduler queue,
+            //   2. try_lock dispatcher → STILL HELD by us → Err,
+            //   3. fall through to wait on rx.
+            // Then we drop dispatcher; the pusher's entry is stranded
+            // until *some other* thread submits next and picks it up.
+            // Symptom: one slot occasionally lags by ~tens-of-seconds
+            // in production-staggered traffic.
+            //
+            // Fix: on empty-plan branch, drop the dispatcher guard
+            // *while still holding the scheduler lock*. Any pusher then
+            // sees: scheduler-empty (we just confirmed) AND dispatcher-
+            // free (we just released). Their try_lock succeeds and they
+            // become the new leader.
+            let mut s = mb.scheduler.lock().expect("scheduler mutex poisoned");
+            let plan = s.next_iteration();
+            match plan {
+                None => {
+                    drop(dispatcher_guard_opt.take());
+                    drop(s);
                     break;
-                };
-                plan
-            };
-            // Dispatch outside the scheduler lock (long GPU work).
-            if let Err(e) = self.dispatch_mixed_iteration(&plan) {
-                // Send the error to all waiters in this plan.
-                self.fail_mixed_iteration(plan, e);
-                continue;
+                }
+                Some(plan) => {
+                    drop(s);
+                    if let Err(e) = self.dispatch_mixed_iteration(&plan) {
+                        self.fail_mixed_iteration(plan, e);
+                    }
+                }
             }
         }
-        // dispatcher_guard drops here.
+        // dispatcher_guard_opt is None here; release happened atomically
+        // with the empty-scheduler observation above.
     }
 
     /// Dispatch one iteration plan via `forward_decode_mixed_hybrid`
