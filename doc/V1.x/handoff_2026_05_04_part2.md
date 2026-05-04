@@ -16,7 +16,15 @@ as the next-highest-leverage task.
 The function is wired and dispatches under
 `FLAMBEAU_DECODE_PIPELINE=1` + `n_stages==2` + `n>=2`. Default OFF.
 
-## Live test result — function is BUGGY (correctness + perf regression)
+## Live test result — fixed correctness, perf regression at N=2 only
+
+> **UPDATE (end of session):** the GDN-batched-at-N=1 fix landed and
+> restored bit-identical output. Pipelined N=2 now md5-matches batched
+> N=2 (= matches N=1). Wall regression remains 0.82× at N=2; the
+> scheduler gate is raised to N≥4 where the pipelining ceiling (1.6×)
+> can plausibly beat the per-slot host overhead. 27B Q4_1 OOMs at
+> INFLIGHT_SLOTS=4 so the N≥4 case is unvalidated. The text below
+> captures the original buggy state for context.
 
 See `certs/perf/p29b_i2_F_throughput/qwen36_27b_pp2tp2_pipeline_attempt_2026_05_04.md`.
 

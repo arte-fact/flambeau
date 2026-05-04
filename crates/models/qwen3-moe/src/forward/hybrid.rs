@@ -1822,19 +1822,28 @@ fn pipelined_run_slot_through_stage(
                          layer {il} expected Gdn cache"
                     ),
                 };
-                let gdn = stage_scratch.per_rank[r]
-                    .gdn_decode
+                // **#292 fix attempt**: use the batched-GDN helper at
+                // N=1 (same code path as `forward_decode_batched_hybrid`
+                // at N=2 row 0) instead of the single-slot
+                // `forward_gdn_decode_tp`, which goes through a
+                // different qmatmul / scratch route. The batched-GDN
+                // path is what produces md5 59f23a62 in the reference.
+                let gdn_batched = stage_scratch.per_rank[r]
+                    .gdn_decode_batched
                     .as_mut()
-                    .ok_or_else(|| anyhow!("rank {r}: missing gdn_decode scratch"))?;
-                super::gdn_tp::forward_gdn_decode_tp(
+                    .ok_or_else(|| anyhow!("rank {r}: missing gdn_decode_batched scratch"))?;
+                let mut layer_states_arr: [&mut crate::session::GdnLayerState; 1] =
+                    [layer_state];
+                super::gdn_tp::forward_gdn_decode_batched_tp(
                     ops, stream, device, cfg, attn_norm, attn_qkv, attn_gate,
                     ssm_alpha, ssm_beta, ssm_a, ssm_dt_bias, ssm_conv1d, ssm_norm,
-                    ssm_out, layer_state, gdn, hidden_a, partial_attn_out,
+                    ssm_out, &mut layer_states_arr, gdn_batched,
+                    hidden_a, partial_attn_out, /* n_tokens = */ 1,
                     world, kq_replicated,
                 )
                 .with_context(|| {
                     format!(
-                        "pipelined GDN slot {slot_idx} stage {stage_idx} layer {il} rank {r}"
+                        "pipelined GDN-batched slot {slot_idx} stage {stage_idx} layer {il} rank {r}"
                     )
                 })?;
             }
@@ -1998,37 +2007,31 @@ fn pipelined_run_slot_through_stage(
 /// the caller should use `forward_decode_batched_hybrid` directly —
 /// pipelining has nothing to interleave there.
 ///
-/// **STATUS (2026-05-04 live test on Qwen3.6-27B / pp2tp2)**: function
-/// compiles + dispatches but produces output that DIFFERS from
-/// `forward_decode_batched_hybrid` at N=2 (which is bit-identical to
-/// N=1). Output is coherent but the token sequence diverges at the
-/// first decode token.
+/// **STATUS (2026-05-04 live test on Qwen3.6-27B / pp2tp2)**: CORRECT
+/// but PERF-NEGATIVE at N=2.
 ///
-/// Bisect findings:
-/// - With `FLAMBEAU_PIPELINE_BLOCKING_COPY=1` (use blocking
-///   peer_copy_via_host instead of async): SAME divergent output → bug
-///   is NOT in async event coordination.
-/// - Wall time at N=2: 6.82s vs batched 6.04s = 0.85× (regression).
+/// - Correctness: pipelined N=2 produces output **bit-identical** to
+///   `forward_decode_batched_hybrid` at N=2 (= identical to N=1).
+///   md5 59f23a62 across all three modes. Achieved by using
+///   `forward_gdn_decode_batched_tp` at N=1 (NOT the single-slot
+///   `forward_gdn_decode_tp`) — the two paths dispatch through
+///   different qmatmul code paths at small m and produce numerically
+///   different row-0 output despite identical inputs.
+/// - Perf: 7.09s wall vs 6.04s batched at N=2 = 0.85× regression.
+///   The PP=2/N=2 pipelining ceiling is only 1.33×, and host-side
+///   per-slot launch overhead (~1000 launches per slot vs 512 for
+///   batched) eats the ceiling. **Pipelining only wins at N≥4 on PP=2
+///   where the ceiling rises to 1.6×+.**
 ///
-/// Most likely culprits (not yet bisected):
-/// - `forward_gdn_decode_tp` (single-slot path, what we call) vs
-///   `forward_gdn_decode_batched_tp` at N=1 (what batched calls): may
-///   produce numerically different row-0 outputs even at the same
-///   layer state. The cert (`certs/perf/p29b_i2_F_throughput/...`)
-///   notes the no-batched-GDN fallback differs slightly from the
-///   batched-GDN path; pipelined uses the no-batched-GDN equivalent.
-/// - Per-slot scratch reuse pattern across slot iterations (gdn_decode
-///   workspace) — should overwrite per call but may have a subtle
-///   stale-state path.
-/// - The single-token `forward_dense_ffn_prefill_tp(n=1)` /
-///   `forward_moe_ffn_prefill_tp(n=1)` may differ from row-0 of
-///   batched-N=2 — though row-0 should be independent of batching.
+/// Therefore the `FLAMBEAU_DECODE_PIPELINE=1` gate in `routes.rs`
+/// should also require N≥4 — not just N≥2 — to actually deliver a
+/// win. At N=2 the existing `forward_decode_batched_hybrid` is
+/// strictly better.
 ///
-/// The function is gated by `FLAMBEAU_DECODE_PIPELINE=1` in the
-/// scheduler — default OFF, so this divergence does not affect the
-/// production path. FIXME #292: bisect by replacing
-/// `forward_gdn_decode_tp` with `forward_gdn_decode_batched_tp` at N=1
-/// inside `pipelined_run_slot_through_stage`.
+/// 27B-Q4_1 cannot fit INFLIGHT_SLOTS=4 KV caches on 4×MI50 16GB
+/// (validated empirically: OOM at boot). Validating the N≥4 case
+/// requires either a smaller model (e.g., 9B dense FFN, but no GDN to
+/// stress this path) or context-length reduction.
 #[allow(clippy::too_many_arguments)]
 pub fn forward_decode_pipelined_hybrid(
     model: &Qwen3MoEHybridModel,

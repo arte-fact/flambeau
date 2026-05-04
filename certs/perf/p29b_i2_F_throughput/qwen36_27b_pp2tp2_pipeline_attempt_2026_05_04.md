@@ -1,104 +1,96 @@
-# P2.9b-i2-F throughput cert RE-RUN — post-#290+#291 pipelined attempt
+# P2.9b-i2-F throughput cert RE-RUN — post-#290+#291+#292 pipelined attempt
 
 **Date**: 2026-05-04
 **Model**: Qwen3.6-27B-Q4_1
 **Topology**: pp2tp2 — `--devices hip:0,2,1,3 --pp-size 2 --tp-size 2`
 **Build**: post-#290 (`forward_decode_pipelined_hybrid` written), post-#291
-(scheduler dispatches to it under `FLAMBEAU_DECODE_PIPELINE=1` + `n_stages==2`
-+ `n>=2`).
+(scheduler dispatches under `FLAMBEAU_DECODE_PIPELINE=1` + `n_stages==2`
++ `n>=4`), post-#292 (correctness fix: use `forward_gdn_decode_batched_tp`
+at N=1 instead of `forward_gdn_decode_tp`).
 
-## Result: pipelined-N=2 produces DIVERGENT output AND wall regression
+## Result: pipelined N=2 is CORRECT but PERF-NEGATIVE — gate at N≥4
 
-### Output divergence
+### Output divergence (RESOLVED)
 
 Same prompt ("Write a short poem about the sea (8 lines).", temp=0.0,
-max_tokens=64) across three modes:
+max_tokens=64) across modes after the GDN-batched fix:
 
-| mode                                 | md5      | first 60 chars |
-|--------------------------------------|----------|----------------|
-| N=1 single                           | 59f23a62 | "The waves crash down with thunderous sound,\nAcross the shore" |
-| N=2 batched (no pipeline)            | 59f23a62 | "The waves crash down with thunderous sound,\nAcross the shore" |
-| N=2 pipelined (async peer_copy)      | c2547432 | "The waves crash down on the rocky shore,\nSalt spray dances i" |
-| N=2 pipelined (blocking peer_copy)   | c2547432 | "The waves crash down on the rocky shore,\nSalt spray dances i" |
+| mode                                                | md5      | first 60 chars |
+|-----------------------------------------------------|----------|----------------|
+| N=1 single                                          | 59f23a62 | "The waves crash down with thunderous sound,..." |
+| N=2 batched (no pipeline)                           | 59f23a62 | (identical to N=1) |
+| **N=2 pipelined (post-#292 GDN-batched fix)**       | **59f23a62** | **(bit-identical to N=1!)** |
 
-- Both pipelined slots produce md5-identical-within-batch output
-  (scheduler + slot-pool work).
-- Pipelined diverges from batched/single at the **first decode token**
-  (poem text branches starting from token 1 of the response).
-- The divergence is NOT in the async event coordination —
-  `FLAMBEAU_PIPELINE_BLOCKING_COPY=1` produces the same divergent output.
+Pre-fix, pipelined produced md5 c2547432 ("rocky shore...") because it
+called `forward_gdn_decode_tp` (single-slot path, equivalent to
+`FLAMBEAU_GDN_NO_BATCHED=1`) which dispatches through a different
+qmatmul code path than `forward_gdn_decode_batched_tp` at N=1 and
+produces numerically different row-0 output. Swapping to the batched-N=1
+helper restores bit-identical output across all three modes.
 
-### Wall-clock regression
+### Wall-clock
 
 | mode                         | concurrent wall | speedup vs sequential |
 |------------------------------|-----------------|-----------------------|
 | N=2 batched (no pipeline)    | 6.04 s          | 0.96× (sequential = 5.80 s) |
-| N=2 pipelined                | 6.82 s          | 0.85× (regression)    |
-| N=2 pipelined-blocking       | 6.92 s          | 0.84× (regression)    |
+| N=2 pipelined (post-fix)     | 7.09 s          | **0.82× (regression)** |
 
-Even ignoring correctness, pipelined adds ~0.8s wall over batched at N=2.
-At PP=2/N=2 the design ceiling is 1.33× — pipelined is delivering 0.88× of
-batched, so something is eating ~50% of the would-be win.
+Pipelining at PP=2/N=2 has a design ceiling of 1.33× (from
+`pipelined_decode.md` speedup table). The per-slot host launch overhead
+(~1000 launches per slot serialised vs ~512 for batched at N=2) eats
+through that ceiling, leaving a net regression.
 
-## Root cause hypothesis (not yet bisected)
+The win curve crosses zero around N=4 where the ceiling rises to 1.6×.
 
-`pipelined_run_slot_through_stage` runs each slot at `n_tokens=1` through
-the SINGLE-slot decode helpers:
+### Memory budget at INFLIGHT_SLOTS=4
 
-- `forward_full_attn_layer_decode_batched_tp(slots=&[single])` — same as
-  what the batched driver calls at N=2 row 0 (should be bit-identical).
-- `forward_gdn_decode_tp` — the **single-slot** GDN path
-  (FLAMBEAU_GDN_NO_BATCHED=1 equivalent). Differs from
-  `forward_gdn_decode_batched_tp` at N=1 in the matmul wrapping. The
-  `feedback_qmatmul_small_m_no_amortize` memory note documents that
-  `qmatmul(m=1)` and `qmatmul(m=N)` at small m both dispatch to per-row
-  MMVQ but through different code paths — potential numerical difference
-  from kernel ordering inside `dispatch_qmatmul`.
-- `forward_dense_ffn_prefill_tp(n=1)` / `forward_moe_ffn_prefill_tp(n=1)`
-  — same kernels at n=N row 0 should produce identical output, but the
-  router / expert dispatch path may have n-dependent buffer aliasing.
+OOM at slot-pool boot:
+```
+Error: pre-alloc Inflight slot 2 at boot
+Caused by: alloc KvCache<F16> (TP) for layer 27: out of memory
+```
 
-Since blocking-copy variant has the SAME divergent output, the bug is in
-the per-slot loop body, NOT in the async stream coordination.
+27B Q4_1 model + 4 KV slots over 64 layers × 16 heads × 128 head_dim ×
+F16 × pp_stage=2 exceeds the gfx906 16GB budget. Validating pipelining
+at N=4 on the 27B Q4_1 needs:
 
-## Most likely fix path
+- A smaller KV ctx (default 4096 → 1024).
+- A smaller weight quant (e.g., Q4_0 at 14.7 GB instead of Q4_1 at 16.1 GB).
+- A different model that exercises the GDN+MoE path on smaller weights.
 
-Replace `forward_gdn_decode_tp` in `pipelined_run_slot_through_stage`
-with `forward_gdn_decode_batched_tp` at N=1 (using the
-`gdn_decode_batched` scratch field, which is already present on the
-prefill scratch). If output then matches `forward_decode_batched_hybrid`
-at N=2, the bug is the GDN single-slot path at n=1 (and the design
-should explicitly note "use batched-GDN at N=1 in pipelined mode").
+## Decisions
 
-If still divergent, bisect by:
-1. Disabling pipelining in the scheduler (`FLAMBEAU_DECODE_PIPELINE=0`)
-   and verifying batched N=2 reproduces md5 59f23a62 — confirms the
-   reference output.
-2. Modifying `pipelined_run_slot_through_stage` to skip the GDN/Attn
-   alternation by overriding `cfg.is_recurrent(il)` to a fixed value
-   per A/B run, narrowing which layer kind diverges.
+1. **Scheduler gate raised to N≥4** (`crates/server/src/routes.rs`):
+   previously `pipeline_enabled && n_stages == 2 && n >= 2`, now
+   `n >= 4`. At N=2, pipelining is strictly worse than batched on
+   PP=2.
 
-## Path forward
+2. **Function uses batched-GDN at N=1** internally
+   (`forward_gdn_decode_batched_tp` with `layer_states=&mut [s]`,
+   `n=1`). This is the correctness-critical change to ship.
 
-The function is gated by `FLAMBEAU_DECODE_PIPELINE=1` + `n_stages==2` +
-`n>=2`, so the production path (`forward_decode_batched_hybrid`) is
-unaffected. The 3× cert gate **stays open**; #292 is reopened pending
-the bisect above.
+3. **The 3× cert gate stays open**. Pipelining was projected to deliver
+   1.6× at PP=2/N=4 (per the design table), combined with batched-attn
+   (1.05×) and a future batched-MMVQ (1.5–2× per #288). Until we can
+   validate N≥4 on memory-constrained 27B, the projected combined
+   benefit is unverified. #288 (batched-MMVQ kernels) remains the
+   highest-leverage path to the gate.
 
 ## Reproduce
 
 ```bash
-# Server (pipelined):
-FLAMBEAU_BATCHED_DECODE=1 FLAMBEAU_INFLIGHT_SLOTS=2 FLAMBEAU_DECODE_PIPELINE=1 \
+# Server (pipelined, requires N≥4 to engage):
+FLAMBEAU_BATCHED_DECODE=1 FLAMBEAU_INFLIGHT_SLOTS=4 FLAMBEAU_DECODE_PIPELINE=1 \
   ./target/release/flambeau serve \
   --model /artefact/models/Qwen3.6-27B-Q4_1.gguf \
   --devices hip:0,2,1,3 --mesh-mode pp+tp --pp-size 2 --tp-size 2 --port 8080
+# (currently OOMs at INFLIGHT_SLOTS=4; reduce ctx or model)
 
-# Server (no pipeline, reference):
+# Server (no pipeline, reference at N=2):
 FLAMBEAU_BATCHED_DECODE=1 FLAMBEAU_INFLIGHT_SLOTS=2 \
   ./target/release/flambeau serve [...]
 
-# Server (pipelined with blocking-copy bisect):
+# Bisect debug: blocking peer_copy variant (rules out async issues):
 FLAMBEAU_BATCHED_DECODE=1 FLAMBEAU_INFLIGHT_SLOTS=2 FLAMBEAU_DECODE_PIPELINE=1 \
   FLAMBEAU_PIPELINE_BLOCKING_COPY=1 \
   ./target/release/flambeau serve [...]
