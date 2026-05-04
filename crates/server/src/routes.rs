@@ -27,6 +27,45 @@ use crate::model::{
 };
 use crate::state::{parse_stop, SamplingParams};
 
+/// **#306** — runtime context for the Sarathi mixed-batch dispatch
+/// path. Optional on [`ServerState`]; constructed once at boot if
+/// `FLAMBEAU_MIXED_BATCH=1` AND model is hybrid (PP+TP) qwen35moe-arch.
+///
+/// Mixed-batch dispatch runs in its own dispatcher lock and own
+/// scratch, parallel to the legacy `batched_pending` path. When
+/// engaged, both `prefill_via_mixed_scheduler` and
+/// `decode_via_mixed_scheduler` push into `scheduler` and the leader
+/// drains via `MixedScheduler::next_iteration` → calls
+/// `forward_decode_mixed_hybrid`.
+pub struct MixedBatchCtx {
+    pub scheduler: std::sync::Mutex<crate::mixed_scheduler::MixedScheduler>,
+    /// Per-request long-lived channel: receives the final-chunk last-row
+    /// logits (the prefill request's "first decode token logits").
+    /// Inserted at submit_prefill, removed when is_final_chunk fires.
+    pub prefill_channels: std::sync::Mutex<
+        std::collections::HashMap<
+            crate::mixed_scheduler::MixedRequestId,
+            std::sync::mpsc::Sender<anyhow::Result<Vec<f32>>>,
+        >,
+    >,
+    /// Per-step short-lived channel: each `decode_via_mixed_scheduler`
+    /// call inserts a fresh sender; leader sends + removes after dispatch.
+    pub decode_channels: std::sync::Mutex<
+        std::collections::HashMap<
+            crate::mixed_scheduler::MixedRequestId,
+            std::sync::mpsc::Sender<anyhow::Result<Vec<f32>>>,
+        >,
+    >,
+    pub dispatcher: std::sync::Mutex<()>,
+    pub scratch: std::sync::Mutex<
+        Option<flambeau_qwen3_moe::ShardedForwardPrefillScratchHybrid>,
+    >,
+    /// Token-budget knob (`FLAMBEAU_MIXED_BUDGET`, default 512). Cap on
+    /// K + N per iteration. Also used to size [`MixedBatchCtx::scratch`]
+    /// at first dispatch.
+    pub token_budget: usize,
+}
+
 /// Server-wide shared state — built once at startup.
 pub struct ServerState {
     pub model_id: String,
@@ -101,6 +140,14 @@ pub struct ServerState {
     /// Per-iteration agent-loop telemetry (M2.3). Ring buffer; surfaced
     /// read-only at `GET /v1/agent/stats`.
     pub agent_stats: crate::agent_stats::AgentStatsRing,
+    /// **#306 / Sarathi mixed-batch** — opt-in chunk-budget scheduler.
+    /// `None` = mixed-batch disabled; `Some` = each per-request prefill
+    /// goes through the scheduler so chunks can co-batch with concurrent
+    /// decodes via [`forward_decode_mixed_hybrid`]. Engaged when
+    /// `FLAMBEAU_MIXED_BATCH=1` AND topology is `LoadedModel::Hybrid`.
+    /// Independent dispatcher lock + scratch from the legacy batched
+    /// path so mixed and legacy can coexist (controlled per-request).
+    pub mixed_batch: Option<MixedBatchCtx>,
     /// L3 — tool-call format detected at boot from the GGUF chat
     /// template. `general.architecture=qwen35moe` alone is not enough
     /// to decide: the Unsloth UD Qwen3.6 GGUFs ship a Coder-XML
@@ -670,6 +717,386 @@ impl ServerState {
         tr_d!("dispatch_done dropping guards");
         drop(guards);
         Ok(())
+    }
+
+    // ─────────────────────────────────────────────────────────────────
+    // **#306** — Sarathi mixed-batch dispatch entry points.
+    //
+    // Independent of the legacy `decode_via_scheduler_into` /
+    // `dispatch_batched_pending` path. Uses its own dispatcher lock,
+    // its own scratch, and its own pending channels so mixed-batch can
+    // coexist with legacy batched-decode (for non-eligible
+    // requests) without deadlock.
+    //
+    // Entry points:
+    //   * `prefill_via_mixed_scheduler` — submit prefill, drive
+    //     leader iterations until is_final_chunk fires, return logits.
+    //   * `decode_via_mixed_scheduler` — submit one decode step,
+    //     drive leader iterations once, block on per-step channel.
+    // ─────────────────────────────────────────────────────────────────
+
+    /// Returns true when the mixed-batch dispatch path is engaged for
+    /// this server (env + topology check, decided once at boot).
+    #[inline]
+    pub fn mixed_batch_enabled(&self) -> bool {
+        self.mixed_batch.is_some()
+    }
+
+    /// **#306 prefill entry** — register the request with the mixed
+    /// scheduler and block until its is_final_chunk dispatch delivers
+    /// the last-row logits (used as the "prefill final logits", which
+    /// the request handler samples to get the first decode token).
+    pub fn prefill_via_mixed_scheduler(
+        &self,
+        slot_idx: usize,
+        prompt_ids: &[u32],
+    ) -> anyhow::Result<Vec<f32>> {
+        let mb = self
+            .mixed_batch
+            .as_ref()
+            .ok_or_else(|| anyhow!("mixed-batch not configured"))?;
+        if prompt_ids.is_empty() {
+            bail!("prefill_via_mixed_scheduler: empty prompt");
+        }
+
+        // 1. Reset the inflight slot for a new request (KV/state
+        //    zeroed). Brief mutex hold — just session reset.
+        {
+            let mut guard = self.inflight_pool[slot_idx].blocking_lock();
+            guard
+                .reset_for_next_request(&self.cluster, &self.model)
+                .context("mixed: reset inflight for new request")?;
+        }
+
+        // 2. Allocate request id + per-request channel.
+        let request_id = mb
+            .scheduler
+            .lock()
+            .expect("mixed_scheduler mutex poisoned")
+            .allocate_request_id();
+        let (tx, rx) = std::sync::mpsc::channel::<anyhow::Result<Vec<f32>>>();
+        mb.prefill_channels
+            .lock()
+            .expect("prefill_channels mutex poisoned")
+            .insert(request_id, tx);
+
+        // 3. Submit to the scheduler queue.
+        mb.scheduler
+            .lock()
+            .expect("mixed_scheduler mutex poisoned")
+            .submit_prefill(crate::mixed_scheduler::PendingPrefillReq {
+                request_id,
+                slot_idx,
+                tokens: prompt_ids.to_vec(),
+                chunk_start: 0,
+            });
+
+        // 4. Try to be the leader. If we are, drive iterations until
+        //    the queue is empty. Whether or not we are, block on the
+        //    per-request channel for the final-chunk logits.
+        self.try_drive_mixed_dispatch();
+
+        // 5. Block on result.
+        let logits = rx
+            .recv()
+            .map_err(|_| anyhow!("mixed prefill channel closed (request_id={request_id:?})"))?;
+        logits
+    }
+
+    /// **#306 decode entry** — submit one decode step, block on the
+    /// step's per-request channel for logits.
+    pub fn decode_via_mixed_scheduler(
+        &self,
+        slot_idx: usize,
+        token: u32,
+        position: usize,
+        logits_out: &mut Vec<f32>,
+    ) -> anyhow::Result<()> {
+        let mb = self
+            .mixed_batch
+            .as_ref()
+            .ok_or_else(|| anyhow!("mixed-batch not configured"))?;
+
+        // 1. Allocate per-step request id + channel.
+        let request_id = mb
+            .scheduler
+            .lock()
+            .expect("mixed_scheduler mutex poisoned")
+            .allocate_request_id();
+        let (tx, rx) = std::sync::mpsc::channel::<anyhow::Result<Vec<f32>>>();
+        mb.decode_channels
+            .lock()
+            .expect("decode_channels mutex poisoned")
+            .insert(request_id, tx);
+
+        // 2. Submit to the scheduler queue.
+        mb.scheduler
+            .lock()
+            .expect("mixed_scheduler mutex poisoned")
+            .submit_decode(crate::mixed_scheduler::ReadyDecode {
+                request_id,
+                slot_idx,
+                token_id: token,
+                position,
+            });
+
+        // 3. Drive leader if we can.
+        self.try_drive_mixed_dispatch();
+
+        // 4. Block on result.
+        let logits_res = rx
+            .recv()
+            .map_err(|_| anyhow!("mixed decode channel closed (request_id={request_id:?})"))?;
+        let logits = logits_res?;
+        *logits_out = logits;
+        Ok(())
+    }
+
+    /// Try to acquire the mixed-dispatch leader lock. If acquired,
+    /// drain the scheduler iteration-by-iteration and dispatch via
+    /// `forward_decode_mixed_hybrid` until empty. If not acquired,
+    /// returns immediately (some other thread is the leader).
+    fn try_drive_mixed_dispatch(&self) {
+        let Some(mb) = self.mixed_batch.as_ref() else {
+            return;
+        };
+        let Ok(_dispatcher_guard) = mb.dispatcher.try_lock() else {
+            return;
+        };
+
+        // Optional batching window — wait briefly so concurrently-
+        // arriving submissions can land in the same iteration.
+        let window_us: u64 = std::env::var("FLAMBEAU_MIXED_WINDOW_US")
+            .ok()
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(1500);
+        if window_us > 0 {
+            // Only sleep if there's at least one ready item and at
+            // least one *other* slot that could plausibly be enqueued.
+            let any_ready = {
+                let s = mb.scheduler.lock().expect("scheduler mutex poisoned");
+                s.pending_prefill_count() + s.ready_decode_count() > 0
+            };
+            if any_ready {
+                std::thread::sleep(std::time::Duration::from_micros(window_us));
+            }
+        }
+
+        loop {
+            let plan = {
+                let mut s = mb.scheduler.lock().expect("scheduler mutex poisoned");
+                let Some(plan) = s.next_iteration() else {
+                    break;
+                };
+                plan
+            };
+            // Dispatch outside the scheduler lock (long GPU work).
+            if let Err(e) = self.dispatch_mixed_iteration(&plan) {
+                // Send the error to all waiters in this plan.
+                self.fail_mixed_iteration(plan, e);
+                continue;
+            }
+        }
+        // dispatcher_guard drops here.
+    }
+
+    /// Dispatch one iteration plan via `forward_decode_mixed_hybrid`
+    /// and forward results to the corresponding channels.
+    fn dispatch_mixed_iteration(
+        &self,
+        plan: &crate::mixed_scheduler::MixedIterationPlan,
+    ) -> anyhow::Result<()> {
+        let mb = self
+            .mixed_batch
+            .as_ref()
+            .ok_or_else(|| anyhow!("mixed-batch not configured"))?;
+
+        // Topology guard — currently hybrid only.
+        let (model, stage_ars) = match &self.model {
+            LoadedModel::Hybrid { model, stage_ars } => (model, stage_ars),
+            _ => bail!("mixed-batch dispatch requires LoadedModel::Hybrid"),
+        };
+
+        // Collect all referenced pool slot indices (chunk + decodes,
+        // pairwise distinct per MixedScheduler::next_iteration's
+        // collision-defer logic). Sort for deterministic lock-acquire
+        // order.
+        let mut pool_indices: Vec<usize> = plan.decodes.iter().map(|d| d.slot_idx).collect();
+        if let Some(c) = plan.chunk.as_ref() {
+            pool_indices.push(c.slot_idx);
+        }
+        pool_indices.sort_unstable();
+        pool_indices.dedup();
+
+        // Lock the inflight slots in deterministic order.
+        let mut guards: Vec<tokio::sync::MutexGuard<'_, crate::model::Inflight>> =
+            Vec::with_capacity(pool_indices.len());
+        for &sidx in &pool_indices {
+            guards.push(self.inflight_pool[sidx].blocking_lock());
+        }
+
+        // Build a compact sessions vec of length `pool_indices.len()`.
+        // The driver indexes by chunk.idx + slot.idx — these are
+        // *vec indices*, not pool indices — so we remap pool→vec.
+        let pool_to_vec: std::collections::HashMap<usize, usize> = pool_indices
+            .iter()
+            .enumerate()
+            .map(|(i, &p)| (p, i))
+            .collect();
+
+        // Extract &mut Qwen3MoEHybridSession from each guard. The
+        // borrows are pairwise disjoint (one guard per pool index,
+        // pool_indices are unique). Use raw-pointer rebinding so the
+        // lifetime is tied to `guards` rather than each loop iteration.
+        let mut sessions_vec: Vec<&mut flambeau_qwen3_moe::Qwen3MoEHybridSession> =
+            Vec::with_capacity(pool_indices.len());
+        for (i, &pidx) in pool_indices.iter().enumerate() {
+            let guard_ref: &mut crate::model::Inflight = &mut *guards[i];
+            let session: &mut flambeau_qwen3_moe::Qwen3MoEHybridSession = match guard_ref {
+                crate::model::Inflight::Hybrid { session, .. } => session,
+                _ => bail!("mixed dispatch: slot {pidx} is not Inflight::Hybrid"),
+            };
+            // SAFETY: guards[i] uniquely owns pidx's Inflight; pool
+            // indices are unique, so all derived &mut refs are
+            // pairwise disjoint and live for the duration of `guards`.
+            let session_ptr: *mut flambeau_qwen3_moe::Qwen3MoEHybridSession = session;
+            sessions_vec.push(unsafe { &mut *session_ptr });
+        }
+
+        // Lazy-init scratch sized for the configured token_budget.
+        {
+            let mut scratch_guard = mb
+                .scratch
+                .lock()
+                .expect("mixed scratch mutex poisoned");
+            if scratch_guard.is_none() {
+                let s = flambeau_qwen3_moe::ShardedForwardPrefillScratchHybrid::new(
+                    model,
+                    mb.token_budget,
+                )
+                .context("alloc mixed_batched_scratch")?;
+                *scratch_guard = Some(s);
+            }
+        }
+
+        // Build driver inputs — remap pool indices to compact vec
+        // indices used by the mixed driver.
+        let chunk = plan
+            .chunk
+            .as_ref()
+            .map(|c| flambeau_qwen3_moe::forward::MixedPrefillChunk {
+                idx: *pool_to_vec.get(&c.slot_idx).expect("chunk slot acquired above"),
+                tokens: c.tokens.clone(),
+                chunk_start: c.chunk_start,
+                is_final_chunk: c.is_final_chunk,
+            });
+        let slots: Vec<flambeau_qwen3_moe::forward::BatchSlot> = plan
+            .decodes
+            .iter()
+            .map(|d| flambeau_qwen3_moe::forward::BatchSlot {
+                idx: *pool_to_vec.get(&d.slot_idx).expect("decode slot acquired above"),
+                token_id: d.token_id,
+                position: d.position,
+            })
+            .collect();
+
+        // Per-vec-slot logits buffers (parallel to sessions_vec).
+        let n_vec = sessions_vec.len();
+        let mut decode_logits: Vec<Vec<f32>> = (0..n_vec).map(|_| Vec::new()).collect();
+        let mut prefill_final: Vec<f32> = Vec::new();
+        let prefill_final_out = if chunk.as_ref().is_some_and(|c| c.is_final_chunk) {
+            Some(&mut prefill_final)
+        } else {
+            None
+        };
+
+        let mut logits_refs: Vec<&mut Vec<f32>> = decode_logits.iter_mut().collect();
+
+        let mut scratch_guard = mb
+            .scratch
+            .lock()
+            .expect("mixed scratch mutex poisoned");
+        let scratch = scratch_guard.as_mut().expect("scratch initialised above");
+
+        flambeau_qwen3_moe::forward::forward_decode_mixed_hybrid(
+            model,
+            sessions_vec.as_mut_slice(),
+            &self.cluster,
+            stage_ars,
+            scratch,
+            chunk.as_ref(),
+            &slots,
+            logits_refs.as_mut_slice(),
+            prefill_final_out,
+        )
+        .context("forward_decode_mixed_hybrid (mixed dispatch)")?;
+        drop(scratch_guard);
+
+        // Send results to channels.
+        // Decodes: per-step channels, removed. Indexed via remapped vec idx.
+        for d in &plan.decodes {
+            let vec_idx = *pool_to_vec.get(&d.slot_idx).expect("decode pool→vec");
+            let logits = std::mem::take(&mut decode_logits[vec_idx]);
+            let tx = mb
+                .decode_channels
+                .lock()
+                .expect("decode_channels mutex poisoned")
+                .remove(&d.request_id);
+            if let Some(tx) = tx {
+                let _ = tx.send(Ok(logits));
+            }
+        }
+        // Prefill final: long-lived channel, removed only on is_final_chunk.
+        if let Some(c) = plan.chunk.as_ref() {
+            if c.is_final_chunk {
+                let tx = mb
+                    .prefill_channels
+                    .lock()
+                    .expect("prefill_channels mutex poisoned")
+                    .remove(&c.request_id);
+                if let Some(tx) = tx {
+                    let _ = tx.send(Ok(prefill_final));
+                }
+            }
+        }
+
+        drop(guards);
+        Ok(())
+    }
+
+    /// On dispatch failure, send the error to every waiter referenced
+    /// in the plan and clean up channel-map entries.
+    fn fail_mixed_iteration(
+        &self,
+        plan: crate::mixed_scheduler::MixedIterationPlan,
+        err: anyhow::Error,
+    ) {
+        let Some(mb) = self.mixed_batch.as_ref() else {
+            return;
+        };
+        let err_str = format!("{err:#}");
+        for d in &plan.decodes {
+            if let Some(tx) = mb
+                .decode_channels
+                .lock()
+                .expect("decode_channels mutex poisoned")
+                .remove(&d.request_id)
+            {
+                let _ = tx.send(Err(anyhow!("mixed dispatch failed: {}", err_str)));
+            }
+        }
+        if let Some(c) = plan.chunk.as_ref() {
+            if c.is_final_chunk {
+                if let Some(tx) = mb
+                    .prefill_channels
+                    .lock()
+                    .expect("prefill_channels mutex poisoned")
+                    .remove(&c.request_id)
+                {
+                    let _ = tx.send(Err(anyhow!("mixed dispatch failed: {}", err_str)));
+                }
+            }
+        }
     }
 }
 
@@ -2560,8 +2987,24 @@ fn run_completion_scheduler_pp_blocking(
         let mut sampler = Sampler::from_seed(params.seed);
         sampler.reserve(vocab);
 
-        // ---------- Stage 1: brief mutex hold for prefill + first-token sample.
-        let first_next = {
+        // ---------- Stage 1: prefill (mixed-batch path or legacy).
+        let first_next = if state.mixed_batch_enabled() {
+            // **#306** — prefill via Sarathi scheduler. Releases the
+            // inflight mutex while scheduler iterations run, so other
+            // concurrent decodes can co-batch with our prefill chunks.
+            let mut logits_buf = state
+                .prefill_via_mixed_scheduler(slot_idx, &prompt_ids)
+                .context("scheduler-path mixed prefill")?;
+            if !relax_stop_mask {
+                for &sid in stop_ids {
+                    if (sid as usize) < logits_buf.len() {
+                        logits_buf[sid as usize] = f32::NEG_INFINITY;
+                    }
+                }
+            }
+            sampler.sample(&logits_buf, sampling, &[])
+        } else {
+            // Legacy path: brief mutex hold for prefill + first-token sample.
             let mut guard = state.inflight_pool[slot_idx].blocking_lock();
             guard
                 .reset_for_next_request(cluster, model)
@@ -2585,7 +3028,7 @@ fn run_completion_scheduler_pp_blocking(
                 }
             }
             sampler.sample(&logits_buf, sampling, &[])
-        }; // mutex drops here
+        };
 
         let mut generated: Vec<u32> = Vec::with_capacity(params.max_tokens as usize);
         generated.push(first_next);
@@ -2617,14 +3060,25 @@ fn run_completion_scheduler_pp_blocking(
         let mut logits: Vec<f32> = Vec::with_capacity(vocab);
         for step in 1..params.max_tokens as usize {
             let force_mask = step < MIN_RESPONSE_TOKENS && !relax_stop_mask;
-            state
-                .decode_via_scheduler_into(
-                    slot_idx,
-                    last_token,
-                    prompt_ids.len() + step,
-                    &mut logits,
-                )
-                .context("scheduler-path decode step")?;
+            if state.mixed_batch_enabled() {
+                state
+                    .decode_via_mixed_scheduler(
+                        slot_idx,
+                        last_token,
+                        prompt_ids.len() + step,
+                        &mut logits,
+                    )
+                    .context("scheduler-path mixed decode step")?;
+            } else {
+                state
+                    .decode_via_scheduler_into(
+                        slot_idx,
+                        last_token,
+                        prompt_ids.len() + step,
+                        &mut logits,
+                    )
+                    .context("scheduler-path decode step")?;
+            }
             if !relax_stop_mask {
                 for &sid in stop_ids {
                     if (sid as usize) < logits.len() {
