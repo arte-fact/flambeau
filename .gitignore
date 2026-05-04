@@ -38,3 +38,6 @@ venv/
 # Claude Code runtime state
 .claude/
 tools/mtp_cache/
+
+# Bench harness logs
+scripts/bench/logs/
