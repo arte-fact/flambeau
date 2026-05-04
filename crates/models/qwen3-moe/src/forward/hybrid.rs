@@ -2703,8 +2703,7 @@ pub fn forward_decode_1f1b_hybrid(
 //   decode rows.
 /// **#304 stub** — Sarathi mixed-batch dispatch entry point. Currently
 /// delegates to pure-decode when no prefill chunk is attached; bails
-/// when one is present. Layer-body split is the next implementation
-/// step queued behind this signature.
+/// when one is present.
 #[allow(clippy::too_many_arguments)]
 pub fn forward_decode_mixed_hybrid(
     model: &Qwen3MoEHybridModel,
@@ -2717,20 +2716,747 @@ pub fn forward_decode_mixed_hybrid(
     decode_logits_out: &mut [&mut Vec<f32>],
     prefill_final_logits_out: Option<&mut Vec<f32>>,
 ) -> Result<()> {
-    if prefill_chunk.is_some() {
-        let _ = prefill_final_logits_out;
-        bail!(
-            "forward_decode_mixed_hybrid: mixed-batch K|N layer split is queued (#304); \
-             call with prefill_chunk = None to delegate to forward_decode_batched_hybrid"
-        );
-    }
-    forward_decode_batched_hybrid(
+    let chunk = match prefill_chunk {
+        None => {
+            let _ = prefill_final_logits_out;
+            return forward_decode_batched_hybrid(
+                model,
+                sessions,
+                global_cluster,
+                stage_ars,
+                scratch,
+                slots,
+                decode_logits_out,
+            );
+        }
+        Some(c) => c,
+    };
+    forward_decode_mixed_hybrid_impl(
         model,
         sessions,
         global_cluster,
         stage_ars,
         scratch,
+        chunk,
         slots,
         decode_logits_out,
+        prefill_final_logits_out,
     )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn forward_decode_mixed_hybrid_impl(
+    model: &Qwen3MoEHybridModel,
+    sessions: &mut [&mut Qwen3MoEHybridSession],
+    global_cluster: &flambeau_backend_hip::HipCluster,
+    stage_ars: &[BarP2pAllReduce],
+    scratch: &mut ShardedForwardPrefillScratchHybrid,
+    chunk: &super::batched::MixedPrefillChunk,
+    slots: &[super::batched::BatchSlot],
+    decode_logits_out: &mut [&mut Vec<f32>],
+    prefill_final_logits_out: Option<&mut Vec<f32>>,
+) -> Result<()> {
+    use crate::session::LayerCache;
+    use flambeau_backend_hip::HipDevice;
+    use flambeau_core::DevicePtr;
+    use flambeau_ops::hip::norm::rmsnorm_f16;
+
+    // ── Validation ────────────────────────────────────────────────
+    let k = chunk.len();
+    let n = slots.len();
+    let t = k + n;
+    if k == 0 {
+        bail!("forward_decode_mixed_hybrid: chunk has zero tokens — caller should pass None");
+    }
+    if t == 0 {
+        bail!("forward_decode_mixed_hybrid: nothing to dispatch (k=n=0)");
+    }
+    if chunk.idx >= sessions.len() {
+        bail!(
+            "forward_decode_mixed_hybrid: chunk.idx {} OOB (sessions.len()={})",
+            chunk.idx,
+            sessions.len()
+        );
+    }
+    if sessions.len() != decode_logits_out.len() {
+        bail!(
+            "forward_decode_mixed_hybrid: sessions({}) != decode_logits_out({})",
+            sessions.len(),
+            decode_logits_out.len(),
+        );
+    }
+    for s in slots {
+        if s.idx >= sessions.len() {
+            bail!(
+                "forward_decode_mixed_hybrid: BatchSlot.idx {} OOB (sessions.len()={})",
+                s.idx,
+                sessions.len()
+            );
+        }
+        if s.idx == chunk.idx {
+            bail!(
+                "forward_decode_mixed_hybrid: slot.idx={} collides with chunk.idx — \
+                 a request cannot be both prefilling and decoding in the same step",
+                s.idx
+            );
+        }
+    }
+    if chunk.is_final_chunk && prefill_final_logits_out.is_none() {
+        bail!(
+            "forward_decode_mixed_hybrid: chunk.is_final_chunk=true requires \
+             prefill_final_logits_out = Some(&mut Vec<f32>)"
+        );
+    }
+
+    let cfg = &model.config;
+    let n_stages = model.stages.len();
+    let tp_size = model.spec.tp_size as usize;
+    if stage_ars.len() != n_stages {
+        bail!("stage_ars.len()={} != n_stages={n_stages}", stage_ars.len());
+    }
+    let world = tp_size as u32;
+    if world != 1 && world != 2 && world != 4 {
+        bail!("hybrid mixed-decode: per-stage tp_size ∈ {{1, 2, 4}} (got {world})");
+    }
+    let hidden = cfg.hidden_size;
+    let row_bytes = hidden * 2;
+    let chunk_bytes = t * row_bytes;
+    let elem_count_l = (t * hidden) as u32;
+
+    // Scratch sizing — every stage's per-rank scratch must accommodate T.
+    for stage_idx in 0..n_stages {
+        for r in 0..model.stages[stage_idx].sub_cluster.ranks() {
+            let mt = scratch.per_stage[stage_idx].per_rank[r].max_tokens;
+            if t > mt {
+                bail!(
+                    "forward_decode_mixed_hybrid: T = K+N = {k}+{n} = {t} > scratch.max_tokens={mt} \
+                     (stage={stage_idx}, rank={r}); caller must size with max_tokens >= K+N"
+                );
+            }
+        }
+    }
+
+    // ── #275 stream drain ────────────────────────────────────────
+    use flambeau_core::Stream;
+    for stage in &model.stages {
+        for r in 0..stage.sub_cluster.ranks() {
+            let device = stage.sub_cluster.device(r);
+            device.bind()?;
+            Stream::synchronize(device.default_stream())?;
+        }
+    }
+
+    // ── Per-token positions ──────────────────────────────────────
+    // token_positions[0..k]    = chunk.chunk_start + i (prefill)
+    // token_positions[k..k+n]  = slots[s].position    (decode)
+    let mut token_positions: Vec<usize> = Vec::with_capacity(t);
+    for i in 0..k {
+        token_positions.push(chunk.chunk_start + i);
+    }
+    for s in slots {
+        token_positions.push(s.position);
+    }
+    let slot_positions: &[usize] = &token_positions[k..t];
+
+    // ── Stage 0 embed: K prefill rows + N decode rows ────────────
+    {
+        let stage0 = &model.stages[0];
+        if !stage0.tp_model.has_token_embd {
+            bail!("hybrid mixed: stage 0 missing token_embd");
+        }
+        let stage_scratch = &mut scratch.per_stage[0];
+        for r in 0..stage0.sub_cluster.ranks() {
+            let device = stage0.sub_cluster.device(r);
+            device.bind()?;
+            let stream = device.default_stream();
+            let dst_base = stage_scratch.per_rank[r].hidden_a;
+            // K prefill rows.
+            for (i, &tok) in chunk.tokens.iter().enumerate() {
+                super::io::forward_embed_decode_host(
+                    device,
+                    stream,
+                    &stage0.tp_model.shards[r].token_embd,
+                    tok,
+                    DevicePtr(dst_base.as_usize() + i * row_bytes),
+                    hidden,
+                )
+                .with_context(|| format!("hybrid mixed embed prefill row {i} rank {r}"))?;
+            }
+            // N decode rows at offset K.
+            for (s_pos, slot) in slots.iter().enumerate() {
+                super::io::forward_embed_decode_host(
+                    device,
+                    stream,
+                    &stage0.tp_model.shards[r].token_embd,
+                    slot.token_id,
+                    DevicePtr(dst_base.as_usize() + (k + s_pos) * row_bytes),
+                    hidden,
+                )
+                .with_context(|| format!("hybrid mixed embed decode slot {s_pos} rank {r}"))?;
+            }
+        }
+    }
+
+    // ── Per-stage layer loop ─────────────────────────────────────
+    for stage_idx in 0..n_stages {
+        let stage = &model.stages[stage_idx];
+        let stage_scratch = &mut scratch.per_stage[stage_idx];
+        let stage_ar = &stage_ars[stage_idx];
+        let stage_model = &stage.tp_model;
+        let sub_cluster = &stage.sub_cluster;
+        let il_cache_offset = stage.layer_range.start;
+        let kv_replicated = stage_model.tp.kv_replicated();
+        let kq_replicated = stage_model.tp.gdn_kq_replicated();
+
+        for il in stage.layer_range.clone() {
+            let il_local = il - il_cache_offset;
+            let is_full_attn = !cfg.is_recurrent(il);
+
+            // 3a. Per-rank attention forward — TWO calls: prefill on
+            //     rows [0..K] vs chunk's per-layer cache, then batched-
+            //     decode on rows [K..T] vs N slot caches.
+            for r in 0..sub_cluster.ranks() {
+                let device = sub_cluster.device(r);
+                device.bind()?;
+                let stream = device.default_stream();
+                let layer_tensors = &stage_model.shards[r].layers[il];
+                let hidden_a = stage_scratch.per_rank[r].hidden_a;
+                let partial_attn_out = stage_scratch.per_rank[r].partial_attn_out;
+                let layer_scratch = stage_scratch.per_rank[r]
+                    .layer
+                    .as_mut()
+                    .ok_or_else(|| anyhow!("rank {r}: missing LayerPrefillScratch"))?;
+                let ops = &stage_model.ops[r];
+
+                // Row-offset device pointers.
+                let hidden_pre = hidden_a;
+                let hidden_dec = DevicePtr(hidden_a.as_usize() + k * row_bytes);
+                let partial_pre = partial_attn_out;
+                let partial_dec = DevicePtr(partial_attn_out.as_usize() + k * row_bytes);
+
+                if is_full_attn {
+                    let attn_norm = find_tensor_in_layer(layer_tensors, il, "attn_norm.weight")?;
+                    let attn_q = find_tensor_in_layer(layer_tensors, il, "attn_q.weight")?;
+                    let attn_k = find_tensor_in_layer(layer_tensors, il, "attn_k.weight")?;
+                    let attn_v = find_tensor_in_layer(layer_tensors, il, "attn_v.weight")?;
+                    let attn_output = find_tensor_in_layer(layer_tensors, il, "attn_output.weight")?;
+                    let attn_q_norm = find_tensor_in_layer(layer_tensors, il, "attn_q_norm.weight")?;
+                    let attn_k_norm = find_tensor_in_layer(layer_tensors, il, "attn_k_norm.weight")?;
+                    let full = layer_scratch
+                        .full_attn
+                        .as_mut()
+                        .ok_or_else(|| anyhow!("rank {r}: missing FullAttnPrefillScratch"))?;
+
+                    // ── (1) Prefill chunk K rows vs chunk's KV cache.
+                    {
+                        let chunk_session: &mut Qwen3MoEHybridSession = unsafe {
+                            &mut **(sessions.as_mut_ptr().add(chunk.idx))
+                        };
+                        let chunk_kv = match &mut chunk_session.stages[stage_idx].caches[r][il_local] {
+                            LayerCache::FullAttn(kv) => kv,
+                            _ => bail!(
+                                "Hybrid mixed: chunk.idx={} stage {stage_idx} rank {r} layer {il} \
+                                 expected FullAttn cache",
+                                chunk.idx
+                            ),
+                        };
+                        super::attn_tp::forward_full_attn_prefill_tp(
+                            ops,
+                            stream,
+                            device,
+                            cfg,
+                            attn_norm,
+                            attn_q,
+                            attn_k,
+                            attn_v,
+                            attn_output,
+                            attn_q_norm,
+                            attn_k_norm,
+                            chunk_kv,
+                            full,
+                            hidden_pre,
+                            partial_pre,
+                            k,
+                            chunk.chunk_start,
+                            world,
+                            kv_replicated,
+                        )
+                        .with_context(|| {
+                            format!(
+                                "hybrid mixed full-attn PREFILL stage {stage_idx} layer {il} rank {r}"
+                            )
+                        })?;
+                    }
+
+                    // ── (2) Decode N rows vs slot KV caches.
+                    if n > 0 {
+                        let sessions_ptr = sessions.as_mut_ptr();
+                        let mut slot_kv_caches: Vec<
+                            &mut flambeau_runtime::KvCache<flambeau_runtime::F16Contig, HipDevice>,
+                        > = Vec::with_capacity(n);
+                        for s in 0..n {
+                            let slot_idx = slots[s].idx;
+                            // SAFETY: slot.idx are pairwise distinct (validated above)
+                            // and distinct from chunk.idx (validated above), so &muts are disjoint.
+                            unsafe {
+                                let session_ref: &mut Qwen3MoEHybridSession =
+                                    &mut **sessions_ptr.add(slot_idx);
+                                match &mut session_ref.stages[stage_idx].caches[r][il_local] {
+                                    LayerCache::FullAttn(kv) => slot_kv_caches.push(kv),
+                                    _ => bail!(
+                                        "Hybrid mixed: slot {s} (idx={slot_idx}) stage \
+                                         {stage_idx} rank {r} layer {il} expected FullAttn cache"
+                                    ),
+                                }
+                            }
+                        }
+                        super::attn_tp::forward_full_attn_layer_decode_batched_tp(
+                            ops,
+                            stream,
+                            device,
+                            cfg,
+                            attn_norm,
+                            attn_q,
+                            attn_k,
+                            attn_v,
+                            attn_output,
+                            attn_q_norm,
+                            attn_k_norm,
+                            &mut slot_kv_caches,
+                            full,
+                            hidden_dec,
+                            partial_dec,
+                            slot_positions,
+                            world,
+                            kv_replicated,
+                        )
+                        .with_context(|| {
+                            format!(
+                                "hybrid mixed full-attn DECODE stage {stage_idx} layer {il} rank {r}"
+                            )
+                        })?;
+                    }
+                } else {
+                    // GDN layer.
+                    let attn_norm = find_tensor_in_layer(layer_tensors, il, "attn_norm.weight")?;
+                    let attn_qkv = find_tensor_in_layer(layer_tensors, il, "attn_qkv.weight")?;
+                    let attn_gate = find_tensor_in_layer(layer_tensors, il, "attn_gate.weight")?;
+                    let ssm_alpha = find_tensor_in_layer(layer_tensors, il, "ssm_alpha.weight")?;
+                    let ssm_beta = find_tensor_in_layer(layer_tensors, il, "ssm_beta.weight")?;
+                    let ssm_a = find_tensor_in_layer(layer_tensors, il, "ssm_a")?;
+                    let ssm_dt_bias = find_tensor_in_layer(layer_tensors, il, "ssm_dt.bias")?;
+                    let ssm_conv1d = find_tensor_in_layer(layer_tensors, il, "ssm_conv1d.weight")?;
+                    let ssm_norm = find_tensor_in_layer(layer_tensors, il, "ssm_norm.weight")?;
+                    let ssm_out = find_tensor_in_layer(layer_tensors, il, "ssm_out.weight")?;
+
+                    // ── (1) Prefill chunk K rows on chunk's GDN state.
+                    {
+                        let chunk_session: &mut Qwen3MoEHybridSession = unsafe {
+                            &mut **(sessions.as_mut_ptr().add(chunk.idx))
+                        };
+                        let chunk_state = match &mut chunk_session.stages[stage_idx].caches[r][il_local] {
+                            LayerCache::Gdn(state) => state,
+                            _ => bail!(
+                                "Hybrid mixed: chunk.idx={} stage {stage_idx} rank {r} layer {il} \
+                                 expected Gdn cache",
+                                chunk.idx
+                            ),
+                        };
+                        let gdn_pre = stage_scratch.per_rank[r]
+                            .gdn_decode_batched
+                            .as_mut()
+                            .ok_or_else(|| {
+                                anyhow!(
+                                    "rank {r}: missing gdn_decode_batched scratch for prefill K rows"
+                                )
+                            })?;
+                        super::gdn_tp::forward_gdn_prefill_tp(
+                            ops,
+                            stream,
+                            device,
+                            cfg,
+                            attn_norm,
+                            attn_qkv,
+                            attn_gate,
+                            ssm_alpha,
+                            ssm_beta,
+                            ssm_a,
+                            ssm_dt_bias,
+                            ssm_conv1d,
+                            ssm_norm,
+                            ssm_out,
+                            chunk_state,
+                            gdn_pre,
+                            hidden_pre,
+                            partial_pre,
+                            k,
+                            world,
+                            kq_replicated,
+                        )
+                        .with_context(|| {
+                            format!(
+                                "hybrid mixed GDN PREFILL stage {stage_idx} layer {il} rank {r}"
+                            )
+                        })?;
+                    }
+
+                    // ── (2) Decode N rows on slot GDN states (batched).
+                    if n > 0 {
+                        let sessions_ptr = sessions.as_mut_ptr();
+                        let mut layer_states: Vec<&mut crate::session::GdnLayerState> =
+                            Vec::with_capacity(n);
+                        for s in 0..n {
+                            let slot_idx = slots[s].idx;
+                            // SAFETY: slot.idx pairwise distinct, distinct from chunk.idx.
+                            unsafe {
+                                let session_ref: &mut Qwen3MoEHybridSession =
+                                    &mut **sessions_ptr.add(slot_idx);
+                                match &mut session_ref.stages[stage_idx].caches[r][il_local] {
+                                    LayerCache::Gdn(state) => layer_states.push(state),
+                                    _ => bail!(
+                                        "Hybrid mixed: slot {s} (idx={slot_idx}) stage \
+                                         {stage_idx} rank {r} layer {il} expected Gdn cache"
+                                    ),
+                                }
+                            }
+                        }
+                        let gdn_dec = stage_scratch.per_rank[r]
+                            .gdn_decode_batched
+                            .as_mut()
+                            .ok_or_else(|| {
+                                anyhow!("rank {r}: missing gdn_decode_batched scratch for N decode rows")
+                            })?;
+                        super::gdn_tp::forward_gdn_decode_batched_tp(
+                            ops,
+                            stream,
+                            device,
+                            cfg,
+                            attn_norm,
+                            attn_qkv,
+                            attn_gate,
+                            ssm_alpha,
+                            ssm_beta,
+                            ssm_a,
+                            ssm_dt_bias,
+                            ssm_conv1d,
+                            ssm_norm,
+                            ssm_out,
+                            layer_states.as_mut_slice(),
+                            gdn_dec,
+                            hidden_dec,
+                            partial_dec,
+                            n,
+                            world,
+                            kq_replicated,
+                        )
+                        .with_context(|| {
+                            format!(
+                                "hybrid mixed GDN DECODE stage {stage_idx} layer {il} rank {r}"
+                            )
+                        })?;
+                    }
+                }
+            } // per-rank attn
+
+            // 3b. Stage-internal AR over T rows (Attn).
+            super::tp::ar_residual_prefill_pub(
+                stage_ar,
+                stage_scratch,
+                sub_cluster,
+                world,
+                elem_count_l,
+                super::tp::AttnOrFfnPub::Attn,
+            )?;
+
+            // 3c. ffn_norm over T rows.
+            for r in 0..sub_cluster.ranks() {
+                let device = sub_cluster.device(r);
+                device.bind()?;
+                let stream = device.default_stream();
+                let layer_tensors = &stage_model.shards[r].layers[il];
+                let ffn_norm = find_tensor_in_layer(layer_tensors, il, "ffn_norm.weight")
+                    .or_else(|_| find_tensor_in_layer(layer_tensors, il, "post_attention_norm.weight"))?;
+                let hidden_a = stage_scratch.per_rank[r].hidden_a;
+                let layer_scratch = stage_scratch.per_rank[r]
+                    .layer
+                    .as_mut()
+                    .ok_or_else(|| anyhow!("rank {r}: missing LayerPrefillScratch"))?;
+                let mid_norm = layer_scratch.mid_norm_f16;
+                let ops = &stage_model.ops[r];
+                rmsnorm_f16(
+                    ops,
+                    stream,
+                    hidden_a,
+                    ffn_norm.ptr,
+                    mid_norm,
+                    t,
+                    hidden,
+                    cfg.rms_norm_eps,
+                )
+                .with_context(|| format!("hybrid mixed ffn_norm stage {stage_idx} layer {il}"))?;
+            }
+
+            // 3d. Per-rank FFN forward at n_tokens=T.
+            //     This is the Sarathi co-batching point: prefill chunk K
+            //     tokens + N decode tokens go through ONE FFN/MoE call,
+            //     amortising the weight read.
+            let moe_replicated = !cfg.is_dense_ffn() && stage_model.moe_replicated_at(il);
+            let ffn_world = if moe_replicated { 1 } else { world };
+            if cfg.is_dense_ffn() {
+                for r in 0..sub_cluster.ranks() {
+                    let device = sub_cluster.device(r);
+                    device.bind()?;
+                    let stream = device.default_stream();
+                    let layer_tensors = &stage_model.shards[r].layers[il];
+                    let ffn_gate = find_tensor_in_layer(layer_tensors, il, "ffn_gate.weight")?;
+                    let ffn_up = find_tensor_in_layer(layer_tensors, il, "ffn_up.weight")?;
+                    let ffn_down = find_tensor_in_layer(layer_tensors, il, "ffn_down.weight")?;
+                    let partial_ffn_out = stage_scratch.per_rank[r].partial_ffn_out;
+                    let layer_scratch = stage_scratch.per_rank[r]
+                        .layer
+                        .as_mut()
+                        .ok_or_else(|| anyhow!("rank {r}: missing LayerPrefillScratch"))?;
+                    let mid_norm = layer_scratch.mid_norm_f16;
+                    let dense_scratch = layer_scratch
+                        .dense_ffn
+                        .as_mut()
+                        .ok_or_else(|| anyhow!("rank {r}: missing DenseFfnPrefillScratch"))?;
+                    let ops = &stage_model.ops[r];
+                    super::dense_ffn_tp::forward_dense_ffn_prefill_tp(
+                        ops, stream, cfg, ffn_gate, ffn_up, ffn_down, dense_scratch,
+                        mid_norm, partial_ffn_out, t, world,
+                    )
+                    .with_context(|| format!("hybrid mixed dense ffn stage {stage_idx} layer {il}"))?;
+                }
+            } else {
+                let has_shared = cfg.shared_expert_intermediate_size.is_some()
+                    && std::env::var("FLAMBEAU_TP_SKIP_SHARED").is_err();
+                for r in 0..sub_cluster.ranks() {
+                    let device = sub_cluster.device(r);
+                    device.bind()?;
+                    let stream = device.default_stream();
+                    let layer_tensors = &stage_model.shards[r].layers[il];
+                    let ffn_gate_inp = find_tensor_in_layer(layer_tensors, il, "ffn_gate_inp.weight")?;
+                    let ffn_gate_exps = find_tensor_in_layer(layer_tensors, il, "ffn_gate_exps.weight")?;
+                    let ffn_up_exps = find_tensor_in_layer(layer_tensors, il, "ffn_up_exps.weight")?;
+                    let ffn_down_exps = find_tensor_in_layer(layer_tensors, il, "ffn_down_exps.weight")?;
+                    let partial_ffn_out = stage_scratch.per_rank[r].partial_ffn_out;
+                    let shared_delta_f16 = stage_scratch.per_rank[r]
+                        .layer
+                        .as_ref()
+                        .map(|l| l.shared_delta_f16)
+                        .unwrap_or(DevicePtr(0));
+                    let layer_scratch = stage_scratch.per_rank[r]
+                        .layer
+                        .as_mut()
+                        .ok_or_else(|| anyhow!("rank {r}: missing LayerPrefillScratch"))?;
+                    let mid_norm = layer_scratch.mid_norm_f16;
+                    let ops = &stage_model.ops[r];
+
+                    // Router over T rows (writes expert assignments to moe_scratch).
+                    {
+                        let moe_scratch = layer_scratch
+                            .moe
+                            .as_mut()
+                            .ok_or_else(|| anyhow!("rank {r}: missing MoePrefillScratch"))?;
+                        super::moe::forward_router_prefill(
+                            ops, stream, cfg, ffn_gate_inp, moe_scratch, mid_norm, t,
+                        )
+                        .with_context(|| {
+                            format!("hybrid mixed router stage {stage_idx} layer {il}")
+                        })?;
+                    }
+
+                    // Shared expert → shared_delta_f16 (if present).
+                    if has_shared {
+                        let shared_w_gate =
+                            find_tensor_in_layer(layer_tensors, il, "ffn_gate_shexp.weight")?;
+                        let shared_w_up =
+                            find_tensor_in_layer(layer_tensors, il, "ffn_up_shexp.weight")?;
+                        let shared_w_down =
+                            find_tensor_in_layer(layer_tensors, il, "ffn_down_shexp.weight")?;
+                        let shared_w_gate_inp =
+                            find_tensor_in_layer(layer_tensors, il, "ffn_gate_inp_shexp.weight")
+                                .ok();
+                        let shared_scratch = layer_scratch.shared.as_mut().ok_or_else(|| {
+                            anyhow!("rank {r}: missing SharedExpertPrefillScratch")
+                        })?;
+                        super::moe_tp::forward_shared_expert_prefill_tp(
+                            ops, stream, cfg, shared_w_gate, shared_w_up, shared_w_down,
+                            shared_w_gate_inp, shared_scratch, mid_norm, shared_delta_f16,
+                            t, ffn_world,
+                        )
+                        .with_context(|| {
+                            format!("hybrid mixed shared expert stage {stage_idx} layer {il}")
+                        })?;
+                    }
+
+                    // Routed experts → partial_ffn_out.
+                    let moe_scratch = layer_scratch
+                        .moe
+                        .as_mut()
+                        .ok_or_else(|| anyhow!("rank {r}: missing MoePrefillScratch"))?;
+                    super::moe_tp::forward_moe_ffn_prefill_tp(
+                        ops, stream, cfg, ffn_gate_exps, ffn_up_exps, ffn_down_exps,
+                        moe_scratch, mid_norm, partial_ffn_out, t, ffn_world,
+                    )
+                    .with_context(|| {
+                        format!("hybrid mixed moe ffn stage {stage_idx} layer {il}")
+                    })?;
+
+                    if has_shared {
+                        flambeau_ops::hip::mlp::add_f16(
+                            ops,
+                            stream,
+                            partial_ffn_out,
+                            shared_delta_f16,
+                            partial_ffn_out,
+                            t * hidden,
+                        )
+                        .with_context(|| {
+                            format!("hybrid mixed + shared add stage {stage_idx} layer {il}")
+                        })?;
+                    }
+                }
+            }
+
+            // 3e. AR-residual on FFN output (or local replicated add).
+            if ffn_world > 1 {
+                super::tp::ar_residual_prefill_pub(
+                    stage_ar,
+                    stage_scratch,
+                    sub_cluster,
+                    world,
+                    elem_count_l,
+                    super::tp::AttnOrFfnPub::Ffn,
+                )?;
+            } else {
+                for r in 0..sub_cluster.ranks() {
+                    let device = sub_cluster.device(r);
+                    device.bind()?;
+                    let stream = device.default_stream();
+                    let ops = &stage_model.ops[r];
+                    flambeau_ops::hip::mlp::add_f16(
+                        ops,
+                        stream,
+                        stage_scratch.per_rank[r].hidden_a,
+                        stage_scratch.per_rank[r].partial_ffn_out,
+                        stage_scratch.per_rank[r].hidden_a,
+                        t * hidden,
+                    )
+                    .with_context(|| {
+                        format!("hybrid mixed replicated ffn add stage {stage_idx} layer {il}")
+                    })?;
+                }
+            }
+        } // per-layer
+
+        // 4. Stage-boundary hand-off: peer_copy stage rank-0's hidden_a
+        //    to every rank of stage+1 (T rows).
+        if stage_idx + 1 < n_stages {
+            let prod_dev = model.stages[stage_idx].sub_cluster.device(0);
+            prod_dev.bind()?;
+            prod_dev.default_stream().synchronize()?;
+            let src_global_rank = stage_idx * tp_size;
+            let src_ptr = scratch.per_stage[stage_idx].per_rank[0].hidden_a;
+            for dst_local in 0..tp_size {
+                let dst_global_rank = (stage_idx + 1) * tp_size + dst_local;
+                let dst_ptr = scratch.per_stage[stage_idx + 1].per_rank[dst_local].hidden_a;
+                // SAFETY: src/dst are [T, hidden] F16 buffers; producer-side stream synced.
+                unsafe {
+                    global_cluster
+                        .peer_copy_via_host(
+                            dst_ptr,
+                            dst_global_rank,
+                            src_ptr,
+                            src_global_rank,
+                            chunk_bytes,
+                        )
+                        .with_context(|| {
+                            format!(
+                                "hybrid mixed stage {stage_idx} → {} hand-off",
+                                stage_idx + 1
+                            )
+                        })?;
+                }
+            }
+        }
+    }
+
+    // ── Output head ──────────────────────────────────────────────
+    let head_stage_idx = scratch.head_stage as usize;
+    if head_stage_idx + 1 != n_stages {
+        bail!(
+            "hybrid mixed: head_stage={head_stage_idx} but expected last = {}",
+            n_stages - 1
+        );
+    }
+    let last_stage = &model.stages[head_stage_idx];
+    if !last_stage.tp_model.has_output_head {
+        bail!("hybrid mixed: last stage missing output head");
+    }
+    let last_scratch = &mut scratch.per_stage[head_stage_idx];
+    let head_rank = last_scratch.head_rank.0 as usize;
+    let device = last_stage.sub_cluster.device(head_rank);
+    device.bind()?;
+    let stream = device.default_stream();
+    let head_shard = &last_stage.tp_model.shards[head_rank];
+    let lm_head = head_shard.output.as_ref().unwrap_or(&head_shard.token_embd);
+    let head_hidden_base = last_scratch.per_rank[head_rank].hidden_a;
+    let head_scratch = last_scratch.per_rank[head_rank]
+        .output_head
+        .as_mut()
+        .ok_or_else(|| anyhow!("hybrid mixed: head_rank missing OutputHeadScratch"))?;
+    let ops = &last_stage.tp_model.ops[head_rank];
+
+    // (a) Optional last-K-row logits for the prefill chunk.
+    if chunk.is_final_chunk {
+        let prefill_out = prefill_final_logits_out
+            .expect("validated above: is_final_chunk => prefill_final_logits_out is Some");
+        let last_pre_row = DevicePtr(head_hidden_base.as_usize() + (k - 1) * row_bytes);
+        super::io::forward_output_head_decode(
+            ops,
+            stream,
+            cfg,
+            &head_shard.output_norm,
+            lm_head,
+            head_scratch,
+            last_pre_row,
+        )
+        .context("hybrid mixed prefill-final output head")?;
+        super::io::download_logits_host(
+            device,
+            stream,
+            head_scratch.logits_f32,
+            cfg.vocab_size,
+            prefill_out,
+        )
+        .context("hybrid mixed prefill-final logits download")?;
+    }
+
+    // (b) N decode-slot logits.
+    for (s_pos, slot) in slots.iter().enumerate() {
+        let row_idx = k + s_pos;
+        let x_final_row = DevicePtr(head_hidden_base.as_usize() + row_idx * row_bytes);
+        super::io::forward_output_head_decode(
+            ops,
+            stream,
+            cfg,
+            &head_shard.output_norm,
+            lm_head,
+            head_scratch,
+            x_final_row,
+        )
+        .with_context(|| format!("hybrid mixed output head slot {}", slot.idx))?;
+        super::io::download_logits_host(
+            device,
+            stream,
+            head_scratch.logits_f32,
+            cfg.vocab_size,
+            decode_logits_out[slot.idx],
+        )
+        .with_context(|| format!("hybrid mixed logits download slot {}", slot.idx))?;
+    }
+
+    Ok(())
 }
