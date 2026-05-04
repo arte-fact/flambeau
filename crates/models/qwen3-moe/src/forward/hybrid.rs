@@ -1994,7 +1994,7 @@ fn pipelined_run_slot_through_stage(
     Ok(())
 }
 
-/// **#290** PP-pipelined batched-decode for hybrid PP+TP topologies at PP=2.
+/// **#290 / #294** PP-pipelined batched-decode for hybrid PP+TP at PP ≥ 2.
 ///
 /// Pre-condition: caller drove a successful `prefill_pp_blocking` /
 /// `prefill_tp_blocking` for every slot's session. KV caches + GDN
@@ -2067,10 +2067,10 @@ pub fn forward_decode_pipelined_hybrid(
     let cfg = &model.config;
     let n_stages = model.stages.len();
     let tp_size = model.spec.tp_size as usize;
-    if n_stages != 2 {
+    if n_stages < 2 {
         bail!(
-            "forward_decode_pipelined_hybrid: only PP=2 supported (n_stages={n_stages}); \
-             use forward_decode_batched_hybrid for PP=1 or PP>2"
+            "forward_decode_pipelined_hybrid: requires PP ≥ 2 (n_stages={n_stages}); \
+             use forward_decode_batched_hybrid for PP=1"
         );
     }
     if stage_ars.len() != n_stages {
@@ -2099,68 +2099,70 @@ pub fn forward_decode_pipelined_hybrid(
         }
     }
 
-    // ── Lazy bridge-event init on stage_0 rank 0 ──────────────────
-    // One event per slot. Bridge events live on the SOURCE device
-    // (stage_0 rank 0) — `stream_wait` works cross-device, so any
-    // stage_1 rank's stream can wait on the same event handle.
-    {
-        let stage0_dev0 = model.stages[0].sub_cluster.device(0);
-        stage0_dev0.bind()?;
-        let st0r0 = &mut scratch.per_stage[0].per_rank[0];
-        for _ in st0r0.pipeline_bridge_events.len()..n {
-            st0r0
+    // ── Lazy bridge-event init on every non-final stage's rank 0 ──
+    // For PP=k there are k-1 stage boundaries; each non-final stage's
+    // rank 0 holds N bridge events (one per slot). `stream_wait` works
+    // cross-device, so any next-stage rank's stream can wait on the
+    // event handle stored on the producer rank.
+    for src_stage in 0..n_stages.saturating_sub(1) {
+        let src_dev0 = model.stages[src_stage].sub_cluster.device(0);
+        src_dev0.bind()?;
+        let src_scratch = &mut scratch.per_stage[src_stage].per_rank[0];
+        for _ in src_scratch.pipeline_bridge_events.len()..n {
+            src_scratch
                 .pipeline_bridge_events
-                .push(flambeau_backend_hip::HipEvent::new(stage0_dev0.id())?);
+                .push(flambeau_backend_hip::HipEvent::new(src_dev0.id())?);
         }
     }
 
     // ── Reserve per-lane bounce buffers for the TP fan-out ────────
-    // Stage 0 rank 0 fans out to `tp_size` stage_1 ranks per slot.
-    // Without per-lane bounces, the shared-bounce reuse races across
-    // dst ranks (lane 0's HtoD reads the bounce while lane 1's DtoH
-    // overwrites it). Per-lane bounces give each peer-copy call its
-    // own pinned slab. Idempotent across decode steps.
-    let global_src_rank0 = 0usize; // stage 0, local rank 0
+    // Each non-final stage's rank 0 fans out to `tp_size` next-stage
+    // ranks per slot. Per-lane bounces (one per `dst_local`) keep the
+    // fan-out non-racing — without them, lane 0's HtoD reads the
+    // bounce while lane 1's DtoH overwrites it. Idempotent.
     global_cluster.reserve_lane_bounces(tp_size.max(1), bridge_bytes)?;
 
     // Per-slot positions (same value across stages).
     let slot_positions: Vec<usize> = slots.iter().map(|s| s.position).collect();
 
     // ════════════════════════════════════════════════════════════════
-    // INTERLEAVED PER-SLOT LOOP — for each slot k:
-    //   1. embed + stage_0 layers (queues on stage_0 streams)
-    //   2. async peer_copy fan-out (DtoH on stage_0, HtoD on stage_1
-    //      with bridge[k])
-    //   3. stage_1 layers + AR (queues on stage_1 streams, implicitly
-    //      after the HtoD which is already on the same default stream)
-    //   4. output_head + ASYNC DtoH of logits (no per-slot sync)
+    // INTERLEAVED PER-SLOT LOOP — for each slot k, generic over PP ≥ 2:
+    //   1. embed (stage 0)
+    //   2. for s in 0..n_stages:
+    //        - run stage s layers (queues on stage s streams)
+    //        - if s + 1 < n_stages: async peer_copy fan-out
+    //          (DtoH on stage s, HtoD on stage s+1 with bridge[s, k])
+    //   3. output_head + ASYNC DtoH of logits (no per-slot sync)
     //
     // Pipelining: at iteration k, while host enqueues slot k's stage_0
     // work, the GPU on stage_1 is still running slot k-1's stage_1
-    // layers + head. Stage_0 and stage_1 GPU subsystems are disjoint
-    // (different physical devices), so they execute concurrently.
+    // layers; stage_2 GPUs are running slot k-2's stage_2 layers; etc.
+    // All stage subsystems are disjoint physical GPUs and execute
+    // concurrently.
     //
     // Why interleave instead of two-phase: with shared row-0 hidden_a,
     // a "Phase A: all peer_copies, Phase B: all stage_1 work" split
-    // would queue all N HtoDs serially on stage_1 streams BEFORE any
-    // stage_1 layer kernel — the last HtoD wins and slot 0's stage_1
-    // input is corrupted. Interleaving puts each slot's HtoD before
-    // ITS OWN stage_1 work (not after slot k+1's HtoD).
+    // would queue all N HtoDs serially on each stage's streams BEFORE
+    // any layer kernel of that stage — the last HtoD wins and earlier
+    // slots' inputs are corrupted. Interleaving puts each slot's HtoD
+    // before ITS OWN next-stage work (not after slot k+1's HtoD).
     // ════════════════════════════════════════════════════════════════
     let stage0 = &model.stages[0];
     if !stage0.tp_model.has_token_embd {
         bail!("hybrid stage 0 missing token_embd");
     }
-    if !model.stages[1].tp_model.has_output_head {
+    let last_stage = &model.stages[n_stages - 1];
+    if !last_stage.tp_model.has_output_head {
         bail!("hybrid last stage missing output head");
     }
-    let head_rank = scratch.per_stage[1].head_rank.0 as usize;
+    let head_rank = scratch.per_stage[n_stages - 1].head_rank.0 as usize;
+    let global_src_rank0_of = |src_stage: usize| src_stage * tp_size; // global rank 0 of stage src_stage
 
-    // To avoid blocking the host on every slot's logits DtoH, we keep
-    // track of which slots need their final stream sync at the end and
-    // do them all in one shot. The DtoH itself happens on the head
-    // rank's default stream inside the loop; we just defer the sync.
-    let head_dev_id = model.stages[1].sub_cluster.device(head_rank).id();
+    // DEBUG: `FLAMBEAU_PIPELINE_BLOCKING_COPY=1` swaps async peer_copy
+    // for blocking (used to bisect async-coordination bugs). Slower,
+    // but rules out async issues in correctness investigations.
+    let use_blocking_copy =
+        std::env::var("FLAMBEAU_PIPELINE_BLOCKING_COPY").is_ok();
 
     for slot_idx in 0..n {
         let slot = &slots[slot_idx];
@@ -2186,154 +2188,136 @@ pub fn forward_decode_pipelined_hybrid(
             }
         }
 
-        // 2. Run all stage_0 layers + AR-residuals + FFN at n_tokens=1.
-        pipelined_run_slot_through_stage(
-            model, cfg, sessions, scratch, stage_ars,
-            /* stage_idx = */ 0, slot_idx, slot_pos, world,
-        )?;
+        // 2. For each stage: run layers, then peer_copy to next stage.
+        for src_stage in 0..n_stages {
+            // 2a. Run all stage layers + AR-residuals + FFN at n_tokens=1.
+            pipelined_run_slot_through_stage(
+                model, cfg, sessions, scratch, stage_ars,
+                src_stage, slot_idx, slot_pos, world,
+            )?;
 
-        // 3. Async peer_copy fan-out: stage_0 rank 0 → every stage_1 rank.
-        //    DEBUG MODE (`FLAMBEAU_PIPELINE_BLOCKING_COPY=1`): use the
-        //    BLOCKING `peer_copy_via_host` instead of the async variant.
-        //    If this fixes output divergence vs `forward_decode_batched_hybrid`,
-        //    the bug is in the async event/stream coordination, not the
-        //    per-slot loop structure itself.
-        let use_blocking_copy =
-            std::env::var("FLAMBEAU_PIPELINE_BLOCKING_COPY").is_ok();
-        if use_blocking_copy {
-            let src_dev = stage0.sub_cluster.device(0);
-            src_dev.bind()?;
-            // Drain stage_0 sub_cluster stream so DtoH sees all stage_0
-            // kernel writes for this slot.
-            Stream::synchronize(src_dev.default_stream())?;
-            let src_ptr = scratch.per_stage[0].per_rank[0].hidden_a;
-            for dst_local in 0..tp_size {
-                let dst_global_rank = tp_size + dst_local;
-                let dst_ptr = scratch.per_stage[1].per_rank[dst_local].hidden_a;
-                unsafe {
-                    global_cluster
-                        .peer_copy_via_host(
-                            dst_ptr,
-                            dst_global_rank,
-                            src_ptr,
-                            global_src_rank0,
-                            bridge_bytes,
-                        )
-                        .with_context(|| {
-                            format!("pipelined blocking peer_copy slot {slot_idx} dst {dst_local}")
-                        })?;
-                }
+            // 2b. If not last stage: peer_copy fan-out to next stage.
+            if src_stage + 1 >= n_stages {
+                continue;
             }
-        } else {
-        //    Single bridge event per slot; per-lane bounce keeps the
-        //    fan-out non-racing.
-        //
-        //    **Stream selection** (`feedback_hipcluster_stream_handles`):
-        //    we pass the SUB_CLUSTER default streams as src_stream /
-        //    dst_stream — NOT the global_cluster streams (which point
-        //    to different driver handles for the same physical device).
-        //    Using sub_cluster streams ensures the DtoH stacks behind
-        //    the previous slot's stage_0 last kernel (also on
-        //    sub_cluster stream) and the HtoD stacks ahead of this
-        //    slot's stage_1 first kernel (also on sub_cluster stream).
-        //    `peer_copy_via_host_async_laned` doesn't care which stream
-        //    handle it gets — bounce buffer + bridge event work
-        //    cross-stream.
-        {
-            let src_dev = stage0.sub_cluster.device(0);
-            src_dev.bind()?;
-            let src_stream = src_dev.default_stream();
-            let src_ptr = scratch.per_stage[0].per_rank[0].hidden_a; // row 0
+            let dst_stage = src_stage + 1;
+            let src_global_rank = global_src_rank0_of(src_stage);
             // SAFETY: pipeline_bridge_events[slot_idx] was lazily
-            // allocated with len ≥ n. Raw pointer escapes the borrow
-            // checker since per_stage[0] (event) and per_stage[1]
+            // allocated with len ≥ n above (for every non-final stage's
+            // rank 0). Raw pointer escapes the borrow checker since
+            // per_stage[src_stage] (event) and per_stage[dst_stage]
             // (dst_ptr) are disjoint Vec elements.
             let bridge_event_ptr: *const flambeau_backend_hip::HipEvent =
-                &scratch.per_stage[0].per_rank[0].pipeline_bridge_events[slot_idx];
+                &scratch.per_stage[src_stage].per_rank[0].pipeline_bridge_events[slot_idx];
 
-            for dst_local in 0..tp_size {
-                let dst_global_rank = tp_size + dst_local; // stage 1
-                let dst_sub_dev = model.stages[1].sub_cluster.device(dst_local);
-                let dst_stream = dst_sub_dev.default_stream();
-                let dst_ptr = scratch.per_stage[1].per_rank[dst_local].hidden_a; // row 0
-                // SAFETY:
-                // - src_ptr/dst_ptr point to ≥ bridge_bytes valid F16 on
-                //   their respective devices.
-                // - src_stream / dst_stream are sub_cluster default
-                //   streams: stage_0 layer kernels also queue on
-                //   src_stream, stage_1 layer kernels queue on
-                //   dst_stream — both serialise correctly without
-                //   needing a cross-handle drain.
-                // - bridge_event lives on src_dev's id; HIP allows
-                //   stream_wait(event) on any device.
-                // - Per-lane bounce (lane=dst_local) prevents the
-                //   inter-call bounce race the blocking variant
-                //   avoids by host-syncing.
-                unsafe {
-                    let bridge_event: &flambeau_backend_hip::HipEvent = &*bridge_event_ptr;
-                    global_cluster
-                        .peer_copy_via_host_async_laned(
-                            dst_ptr,
-                            dst_global_rank,
-                            src_ptr,
-                            global_src_rank0,
-                            bridge_bytes,
-                            src_stream,
-                            dst_stream,
-                            bridge_event,
-                            None,
-                            Some(dst_local),
-                        )
-                        .with_context(|| {
-                            format!(
-                                "pipelined peer_copy_async slot {slot_idx} dst_local {dst_local}"
+            if use_blocking_copy {
+                // Blocking peer_copy bisect path — drain the source
+                // sub_cluster stream so DtoH sees all stage layer
+                // writes, then issue blocking fan-out.
+                let src_dev = model.stages[src_stage].sub_cluster.device(0);
+                src_dev.bind()?;
+                Stream::synchronize(src_dev.default_stream())?;
+                let src_ptr = scratch.per_stage[src_stage].per_rank[0].hidden_a;
+                for dst_local in 0..tp_size {
+                    let dst_global_rank = global_src_rank0_of(dst_stage) + dst_local;
+                    let dst_ptr = scratch.per_stage[dst_stage].per_rank[dst_local].hidden_a;
+                    unsafe {
+                        global_cluster
+                            .peer_copy_via_host(
+                                dst_ptr,
+                                dst_global_rank,
+                                src_ptr,
+                                src_global_rank,
+                                bridge_bytes,
                             )
-                        })?;
+                            .with_context(|| {
+                                format!(
+                                    "pipelined blocking peer_copy slot {slot_idx} \
+                                     {src_stage}→{dst_stage} dst {dst_local}"
+                                )
+                            })?;
+                    }
+                }
+            } else {
+                // Async peer_copy fan-out (production path).
+                //
+                // **Stream selection** (`feedback_hipcluster_stream_handles`):
+                // pass SUB_CLUSTER default streams as src/dst streams.
+                // The src sub_cluster stream is the same handle stage
+                // src layer kernels queued on; the dst sub_cluster
+                // stream is what stage dst layer kernels will queue
+                // on. So the DtoH stacks behind src's last kernel and
+                // the HtoD stacks ahead of dst's first kernel — no
+                // cross-handle drain needed.
+                let src_dev = model.stages[src_stage].sub_cluster.device(0);
+                src_dev.bind()?;
+                let src_stream = src_dev.default_stream();
+                let src_ptr = scratch.per_stage[src_stage].per_rank[0].hidden_a; // row 0
+
+                for dst_local in 0..tp_size {
+                    let dst_global_rank = global_src_rank0_of(dst_stage) + dst_local;
+                    let dst_sub_dev = model.stages[dst_stage].sub_cluster.device(dst_local);
+                    let dst_stream = dst_sub_dev.default_stream();
+                    let dst_ptr =
+                        scratch.per_stage[dst_stage].per_rank[dst_local].hidden_a;
+                    // SAFETY: src_ptr/dst_ptr each point to bridge_bytes
+                    // valid F16 on their respective devices; per-lane
+                    // bounces (lane=dst_local) prevent inter-call bounce
+                    // race; bridge_event lives on src_dev's id and HIP
+                    // allows cross-device stream_wait.
+                    unsafe {
+                        let bridge_event: &flambeau_backend_hip::HipEvent =
+                            &*bridge_event_ptr;
+                        global_cluster
+                            .peer_copy_via_host_async_laned(
+                                dst_ptr,
+                                dst_global_rank,
+                                src_ptr,
+                                src_global_rank,
+                                bridge_bytes,
+                                src_stream,
+                                dst_stream,
+                                bridge_event,
+                                None,
+                                Some(dst_local),
+                            )
+                            .with_context(|| {
+                                format!(
+                                    "pipelined peer_copy_async slot {slot_idx} \
+                                     {src_stage}→{dst_stage} dst_local {dst_local}"
+                                )
+                            })?;
+                    }
                 }
             }
         }
-        } // end else branch (async peer_copy)
 
-        // 4. Run all stage_1 layers + AR-residuals + FFN at n_tokens=1.
-        //    The HtoD on each stage_1 rank's default stream is already
-        //    queued (with stream_wait on bridge_event); the layer
-        //    kernels stack behind it implicitly via stream order.
-        pipelined_run_slot_through_stage(
-            model, cfg, sessions, scratch, stage_ars,
-            /* stage_idx = */ 1, slot_idx, slot_pos, world,
-        )?;
-
-        // 5. Output head + ASYNC DtoH of logits. Bypass the
-        //    `download_logits_host` helper because it host-syncs at
-        //    end-of-call, which would serialise stage_1 across slots
-        //    and defeat pipelining. Sync once at function tail.
+        // 3. Output head + ASYNC DtoH of logits.
         {
-            let stage1 = &model.stages[1];
-            let device = stage1.sub_cluster.device(head_rank);
+            let last = &model.stages[n_stages - 1];
+            let device = last.sub_cluster.device(head_rank);
             device.bind()?;
             let stream = device.default_stream();
-            let head_shard = &stage1.tp_model.shards[head_rank];
+            let head_shard = &last.tp_model.shards[head_rank];
             let lm_head = head_shard.output.as_ref().unwrap_or(&head_shard.token_embd);
-            let head_hidden = scratch.per_stage[1].per_rank[head_rank].hidden_a; // row 0
-            let head_scratch = scratch.per_stage[1].per_rank[head_rank]
+            let head_hidden = scratch.per_stage[n_stages - 1].per_rank[head_rank].hidden_a;
+            let head_scratch = scratch.per_stage[n_stages - 1].per_rank[head_rank]
                 .output_head
                 .as_mut()
                 .ok_or_else(|| anyhow!("hybrid pipelined: head_rank missing OutputHeadScratch"))?;
-            let ops = &stage1.tp_model.ops[head_rank];
+            let ops = &last.tp_model.ops[head_rank];
 
             super::io::forward_output_head_decode(
                 ops, stream, cfg, &head_shard.output_norm, lm_head, head_scratch, head_hidden,
             )
             .with_context(|| format!("pipelined output head slot {}", slot.idx))?;
 
-            // Async DtoH of logits to the host buffer. The host buffer
-            // is resized + zeroed by the caller (or here below).
             let out = &mut *logits_out[slot.idx];
             out.clear();
             out.resize(cfg.vocab_size, 0.0f32);
-            // SAFETY: logits_f32 is valid for cfg.vocab_size F32 values
-            // on `device`; out.as_mut_ptr() is host memory of matching
-            // size; both stay live until the tail sync below.
+            // SAFETY: logits_f32 is valid for cfg.vocab_size F32 on
+            // `device`; out.as_mut_ptr() is host memory of matching
+            // size; both live until the tail sync below.
             unsafe {
                 <flambeau_backend_hip::HipDevice as flambeau_core::Device>::memcpy_async(
                     device,
@@ -2347,16 +2331,14 @@ pub fn forward_decode_pipelined_hybrid(
         }
     }
 
-    // ── Tail sync: wait for all per-slot logits DtoHs to complete
-    //    before returning. Sync the head_rank stream — all DtoHs were
-    //    queued there. Also sync stage_0 default streams to ensure
-    //    the last slot's peer_copy DtoH cleared the bounce, in case
-    //    the next pipelined call reuses lane bounces (idempotent).
+    // ── Tail sync: wait for per-slot logits DtoHs (queued on the
+    //    head_rank stream) and drain stage_0 streams (so any in-flight
+    //    DtoH on the lane bounces is done before the next call reuses
+    //    them). Idempotent across decode steps.
     {
-        let head_dev = model.stages[1].sub_cluster.device(head_rank);
+        let head_dev = model.stages[n_stages - 1].sub_cluster.device(head_rank);
         head_dev.bind()?;
         Stream::synchronize(head_dev.default_stream())?;
-        let _ = head_dev_id; // currently unused but kept for diagnostic clarity
 
         for r in 0..model.stages[0].sub_cluster.ranks() {
             let device = model.stages[0].sub_cluster.device(r);

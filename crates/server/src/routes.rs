@@ -591,25 +591,27 @@ impl ServerState {
                 let scratch = scratch_guard
                     .as_mut()
                     .expect("just initialised");
-                // **#290 / #291 / #292** — opt-in PP-pipelined dispatch.
+                // **#290 / #291 / #292 / #294** — opt-in PP-pipelined dispatch.
                 // Requires:
-                //   * topology PP=2 (n_stages == 2): only PP=2 is
-                //     supported by `forward_decode_pipelined_hybrid`
-                //     (the function bails on PP != 2).
-                //   * N ≥ 4: at PP=2/N=2 the pipelining ceiling is only
-                //     1.33×, swamped by the per-slot host launch
-                //     overhead vs the existing batched driver (live-
-                //     validated 0.85× at N=2; see
+                //   * topology PP ≥ 2 (n_stages ≥ 2): PP=1 has nothing
+                //     to interleave; PP=2..k all share the same
+                //     interleaved-per-slot loop in
+                //     `forward_decode_pipelined_hybrid`. Pipelining
+                //     ceiling at PP=2/N=4 is 1.6×; at PP=4/N=4 is 2.3×.
+                //   * N ≥ 4: at PP=2/N=2 the pipelining ceiling (1.33×)
+                //     is swamped by per-slot host-launch overhead
+                //     (live-validated 0.82× at PP=2/N=2 — see
                 //     `certs/perf/p29b_i2_F_throughput/qwen36_27b_pp2tp2_pipeline_attempt_2026_05_04.md`).
-                //     At N≥4 the ceiling rises to 1.6×, where the win
-                //     is expected to materialise.
-                // PP=1 / PP>2 / TP-only / N<4 fall through to
+                //     At N≥4 the ceiling rises and the win is expected
+                //     to materialise; pure-PP=4 in particular projects
+                //     ~3.5× combined with #266c + #288-v2.
+                // PP=1 / TP-only / N<4 fall through to
                 // `forward_decode_batched_hybrid`. Default OFF; gate is
                 // `FLAMBEAU_DECODE_PIPELINE=1`.
                 let pipeline_enabled =
                     std::env::var("FLAMBEAU_DECODE_PIPELINE").is_ok();
                 let n_stages = model.stages.len();
-                let use_pipeline = pipeline_enabled && n_stages == 2 && n >= 4;
+                let use_pipeline = pipeline_enabled && n_stages >= 2 && n >= 4;
                 if use_pipeline {
                     tr_d!("dispatch hybrid pipelined N={n}");
                     forward_decode_pipelined_hybrid(
