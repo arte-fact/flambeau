@@ -303,7 +303,14 @@ impl ServerState {
                         && taken.load(std::sync::atomic::Ordering::Relaxed)
                 })
                 .count();
-            if window_us > 0 && n_others_active > 0 {
+            // **#275 debug** — `FLAMBEAU_FORCE_BATCH_WINDOW=1` forces
+            // the leader to sleep even when no other slot is currently
+            // claimed. Used to give a concurrent request time to claim
+            // its slot and push a pending entry → leader sees N>=2 in
+            // the queue → dispatch at N=2 (instead of N=1 racing first).
+            let force_sleep =
+                std::env::var("FLAMBEAU_FORCE_BATCH_WINDOW").is_ok();
+            if window_us > 0 && (n_others_active > 0 || force_sleep) {
                 std::thread::sleep(std::time::Duration::from_micros(window_us));
             }
 
