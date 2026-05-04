@@ -105,6 +105,95 @@ pub fn attention_decode_f16_slots(
     Ok(())
 }
 
+/// **#266b** — single-launch batched-decode attention over `n_slots`
+/// (Q-row, per-slot KV-cache) pairs. Replaces the per-slot loop in
+/// `forward_full_attn_layer_decode_batched_*`, which structurally caps
+/// hybrid throughput at ~1.0× (per #267 cert).
+///
+/// Each grid block owns one `(q_head, slot)` pair and runs the same
+/// flash-attn-v2 online-softmax body as [`attention_decode_f16`]. Slot
+/// addressing comes from device-side tables built once per call by the
+/// dispatcher:
+///
+/// - `k_cache_ptrs[n_slots]`: device addresses of each slot's K cache.
+/// - `v_cache_ptrs[n_slots]`: device addresses of each slot's V cache.
+/// - `n_tokens_kv[n_slots]`: per-slot KV-tail length (post-append).
+///
+/// Q and out are contiguous batched layouts:
+///   `q[n_slots, n_heads_q, head_dim]` F16
+///   `out[n_slots, n_heads_q, head_dim]` F16
+///
+/// Per-slot K/V layouts (pointed-to memory) match
+/// [`attention_decode_f16`]: `[n_tokens, n_heads_kv, head_dim]` F16.
+///
+/// Launch: `gridDim = (n_heads_q, n_slots)`, `blockDim = (head_dim,)`.
+/// At `n_slots = 1` the kernel produces output bit-identical to
+/// [`attention_decode_f16_slots`] for the same inputs (regression guard
+/// for the wiring task #266c).
+///
+/// # Safety
+/// All device pointers must outlive the kernel launch and remain valid
+/// on the stream's device. `k_cache_ptrs` / `v_cache_ptrs` / `n_tokens_kv`
+/// must each point at device buffers of length ≥ `n_slots`. Each
+/// `k_cache_ptrs[s]` and `v_cache_ptrs[s]` must point at ≥ `n_tokens_kv[s] *
+/// n_heads_kv * head_dim` F16 elements. `q` / `out` must each point at
+/// ≥ `n_slots * n_heads_q * head_dim` F16 elements.
+#[allow(clippy::too_many_arguments)]
+pub fn attention_decode_f16_batched(
+    reg: &OpsRegistry,
+    stream: &HipStream,
+    q_batched: DevicePtr,
+    k_cache_ptrs: DevicePtr,
+    v_cache_ptrs: DevicePtr,
+    out_batched: DevicePtr,
+    n_tokens_kv: DevicePtr,
+    n_heads_q: usize,
+    n_heads_kv: usize,
+    head_dim: usize,
+    n_slots: usize,
+    scale: f32,
+) -> Result<()> {
+    assert!(
+        head_dim == 64 || head_dim == 128 || head_dim == 256,
+        "attention_decode_f16_batched: head_dim {head_dim} not supported (expected 64, 128, or 256)"
+    );
+    assert!(
+        n_slots >= 1 && n_slots <= 32,
+        "attention_decode_f16_batched: n_slots {n_slots} out of supported range [1, 32]"
+    );
+    let module = reg.expect_module("attention_decode_f16_batched")?;
+    let kernel = module.kernel("flambeau_attention_decode_f16_batched")?;
+
+    let n_heads_q_i = n_heads_q as i32;
+    let n_heads_kv_i = n_heads_kv as i32;
+    let head_dim_i = head_dim as i32;
+    let n_slots_i = n_slots as i32;
+    let scale_f = scale;
+    let q_ptr: u64 = q_batched.as_usize() as u64;
+    let k_ptrs_ptr: u64 = k_cache_ptrs.as_usize() as u64;
+    let v_ptrs_ptr: u64 = v_cache_ptrs.as_usize() as u64;
+    let o_ptr: u64 = out_batched.as_usize() as u64;
+    let n_kv_ptr: u64 = n_tokens_kv.as_usize() as u64;
+    let mut args = KernelArgs::new();
+    args.push(&q_ptr);
+    args.push(&k_ptrs_ptr);
+    args.push(&v_ptrs_ptr);
+    args.push(&o_ptr);
+    args.push(&n_kv_ptr);
+    args.push(&n_heads_q_i);
+    args.push(&n_heads_kv_i);
+    args.push(&head_dim_i);
+    args.push(&n_slots_i);
+    args.push(&scale_f);
+    let cfg = LaunchCfg {
+        grid: (n_heads_q as u32, n_slots as u32, 1),
+        block: (head_dim as u32, 1, 1),
+        shared_bytes: 0,
+    };
+    unsafe { kernel.launch(stream, cfg, args)? };
+    Ok(())
+}
+
 /// MTP-4-C-4 — BF16 sibling of [`attention_decode_f16`]. Same math
 /// (online flash-attn-v2 softmax in F32), BF16 storage throughout.
 /// Used by the MTP BF16 forward path.

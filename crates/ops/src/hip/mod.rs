@@ -166,6 +166,7 @@ pub const KERNEL_STEMS: &[&str] = &[
     "softmax_masked_f16",
     // Attention.
     "attention_decode_f16",
+    "attention_decode_f16_batched",
     "attention_decode_f16_splitk",
     "attention_decode_q8_kv",
     "attention_decode_bf16",
