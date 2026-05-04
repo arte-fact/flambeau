@@ -1001,22 +1001,6 @@ impl ServerState {
             sessions_vec.push(unsafe { &mut *session_ptr });
         }
 
-        // Lazy-init scratch sized for the configured token_budget.
-        {
-            let mut scratch_guard = mb
-                .scratch
-                .lock()
-                .expect("mixed scratch mutex poisoned");
-            if scratch_guard.is_none() {
-                let s = flambeau_qwen3_moe::ShardedForwardPrefillScratchHybrid::new(
-                    model,
-                    mb.token_budget,
-                )
-                .context("alloc mixed_batched_scratch")?;
-                *scratch_guard = Some(s);
-            }
-        }
-
         // Build driver inputs — remap pool indices to compact vec
         // indices used by the mixed driver.
         let chunk = plan
@@ -1050,10 +1034,20 @@ impl ServerState {
 
         let mut logits_refs: Vec<&mut Vec<f32>> = decode_logits.iter_mut().collect();
 
+        // Lazy-init + use scratch in one lock scope (one acquire per
+        // iteration vs the previous two — saves a lock round-trip).
         let mut scratch_guard = mb
             .scratch
             .lock()
             .expect("mixed scratch mutex poisoned");
+        if scratch_guard.is_none() {
+            let s = flambeau_qwen3_moe::ShardedForwardPrefillScratchHybrid::new(
+                model,
+                mb.token_budget,
+            )
+            .context("alloc mixed_batched_scratch")?;
+            *scratch_guard = Some(s);
+        }
         let scratch = scratch_guard.as_mut().expect("scratch initialised above");
 
         flambeau_qwen3_moe::forward::forward_decode_mixed_hybrid(
@@ -1070,32 +1064,41 @@ impl ServerState {
         .context("forward_decode_mixed_hybrid (mixed dispatch)")?;
         drop(scratch_guard);
 
-        // Send results to channels.
-        // Decodes: per-step channels, removed. Indexed via remapped vec idx.
-        for d in &plan.decodes {
-            let vec_idx = *pool_to_vec.get(&d.slot_idx).expect("decode pool→vec");
-            let logits = std::mem::take(&mut decode_logits[vec_idx]);
-            let tx = mb
+        // Batch-collect channels under a single lock then send outside.
+        // Was: N+1 separate channel-map locks per iteration. Now: one.
+        let prefill_final_tx = if let Some(c) = plan.chunk.as_ref() {
+            if c.is_final_chunk {
+                mb.prefill_channels
+                    .lock()
+                    .expect("prefill_channels mutex poisoned")
+                    .remove(&c.request_id)
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+        let decode_txs: Vec<Option<std::sync::mpsc::Sender<anyhow::Result<Vec<f32>>>>> = {
+            let mut map = mb
                 .decode_channels
                 .lock()
-                .expect("decode_channels mutex poisoned")
-                .remove(&d.request_id);
-            if let Some(tx) = tx {
+                .expect("decode_channels mutex poisoned");
+            plan.decodes
+                .iter()
+                .map(|d| map.remove(&d.request_id))
+                .collect()
+        };
+
+        // Send results — outside any mutex.
+        for (d, tx_opt) in plan.decodes.iter().zip(decode_txs) {
+            if let Some(tx) = tx_opt {
+                let vec_idx = *pool_to_vec.get(&d.slot_idx).expect("decode pool→vec");
+                let logits = std::mem::take(&mut decode_logits[vec_idx]);
                 let _ = tx.send(Ok(logits));
             }
         }
-        // Prefill final: long-lived channel, removed only on is_final_chunk.
-        if let Some(c) = plan.chunk.as_ref() {
-            if c.is_final_chunk {
-                let tx = mb
-                    .prefill_channels
-                    .lock()
-                    .expect("prefill_channels mutex poisoned")
-                    .remove(&c.request_id);
-                if let Some(tx) = tx {
-                    let _ = tx.send(Ok(prefill_final));
-                }
-            }
+        if let Some(tx) = prefill_final_tx {
+            let _ = tx.send(Ok(prefill_final));
         }
 
         drop(guards);
