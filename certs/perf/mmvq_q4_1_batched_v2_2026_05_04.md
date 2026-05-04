@@ -9,12 +9,35 @@
 
 ## Result
 
-### Correctness — PASS
+### Correctness — IEEE-correct, but breaks bit-identical-within-batch
 
-Both `mmvq_q4_1_batched_parity` (v1) and `mmvq_q4_1_wave64_small_n_parity`
-(v2) pass at 1e-5 abs-err. Wave64 max drift 5.2e-6 at n_rows=14336/N=8
-(slightly more than v1's 1.9e-6 since wave64 uses different
-DP4A-accumulation order, but still well within tolerance).
+Two parity facets to track:
+
+1. **vs single-row baseline** (`mmvq_q4_1_wave64_small_n_parity`): pass
+   at 1e-5 abs-err. Max drift 5.2e-6 at n_rows=14336/N=8.
+2. **across slots with identical activation**
+   (`mmvq_q4_1_wave64_identical_slots`): wave64 produces slightly
+   different output for slot 0 vs slot 1 even when their activations
+   are bit-identical. Max diff 3.3e-6 (f32 LSB scale); 78% of outputs
+   differ in `to_bits()`. Root cause: compiler FMA-contraction
+   asymmetry inside the per-col unrolled loop in `mmq_q4_1_wave64.cu`
+   — hipcc emits slightly different FP code for c=0 vs c=1.
+
+Live impact on Qwen3.6-27B chat decode (greedy, temp=0):
+  - Baseline (no wave64), 2 concurrent: BOTH slots md5 59f23a62 (= N=1).
+  - Wave64 path, 2 concurrent: slot 0 md5 59f23a62, slot 1 md5 c2547432
+    ("rocky shore..." vs "thunderous sound..."). Both coherent poems,
+    but the LSB-scale per-slot drift compounds across 64 layers and
+    flips greedy argmax decisions.
+
+The kernel is correct in the IEEE-754 sense — every individual element
+is within tolerance of the per-row reference. But callers who depend
+on **bit-identical-within-batch output** (the existing batched-decode
+invariant) will see that broken when wave64 is engaged.
+
+Identical-slots test asserts max_abs < 1e-5 (tolerance) rather than
+`n_diff == 0` so it captures regression boundary while documenting the
+known LSB asymmetry.
 
 ### Perf — wave64 wins at GDN-out shape
 
