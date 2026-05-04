@@ -725,6 +725,19 @@ pub struct FullAttnPrefillScratch {
     pub positions: DevicePtr,       // i32 [max_L]
     pub gated_q8_1: DevicePtr,      // Q8_1 [max_L, n_heads*head_dim/32]
     pub gated_q8_1_mmq: DevicePtr,  // BlockQ8_1Mmq [q_width/128, max_L] — DS4 layout
+    /// **#266c** — per-slot K-cache base pointers, uploaded HtoD once
+    /// per `forward_full_attn_layer_decode_batched_*` call so the
+    /// batched-attention kernel can address each slot's KV. u64 [max_L].
+    pub slot_k_ptrs: DevicePtr,
+    /// **#266c** — per-slot V-cache base pointers. u64 [max_L].
+    pub slot_v_ptrs: DevicePtr,
+    /// **#266c** — per-slot KV-tail length post-append. i32 [max_L].
+    pub slot_n_tokens_kv: DevicePtr,
+    /// Persistent host-side staging for the slot tables. Same lifetime
+    /// rationale as `positions_host`: stable address for HtoD memcpy.
+    pub(crate) slot_k_ptrs_host: Vec<u64>,
+    pub(crate) slot_v_ptrs_host: Vec<u64>,
+    pub(crate) slot_n_tokens_kv_host: Vec<i32>,
     /// V2.26.a-i5a — persistent host-side position buffer. `positions`
     /// on the device is filled each prefill call via a HtoD memcpy
     /// whose *source* is this Vec's stable address. Keeping it on the
@@ -748,6 +761,9 @@ pub struct FullAttnPrefillScratch {
     positions_bytes: usize,
     gated_q8_1_bytes: usize,
     gated_q8_1_mmq_bytes: usize,
+    slot_k_ptrs_bytes: usize,
+    slot_v_ptrs_bytes: usize,
+    slot_n_tokens_kv_bytes: usize,
     disposed: bool,
 }
 
@@ -791,6 +807,9 @@ impl FullAttnPrefillScratch {
         let gated_q8_1_bytes =
             max_tokens * (q_width / 32) * std::mem::size_of::<BlockQ8_1>();
         let gated_q8_1_mmq_bytes = max_tokens * (q_width / 128) * mmq_block;
+        let slot_k_ptrs_bytes = max_tokens * 8;
+        let slot_v_ptrs_bytes = max_tokens * 8;
+        let slot_n_tokens_kv_bytes = max_tokens * 4;
 
         let x_norm_f16 = device.alloc(x_norm_f16_bytes)?;
         let x_q8_1 = device.alloc(x_q8_1_bytes)?;
@@ -806,6 +825,9 @@ impl FullAttnPrefillScratch {
         let positions = device.alloc(positions_bytes)?;
         let gated_q8_1 = device.alloc(gated_q8_1_bytes)?;
         let gated_q8_1_mmq = device.alloc(gated_q8_1_mmq_bytes)?;
+        let slot_k_ptrs = device.alloc(slot_k_ptrs_bytes)?;
+        let slot_v_ptrs = device.alloc(slot_v_ptrs_bytes)?;
+        let slot_n_tokens_kv = device.alloc(slot_n_tokens_kv_bytes)?;
 
         Ok(Self {
             max_tokens,
@@ -823,6 +845,12 @@ impl FullAttnPrefillScratch {
             positions,
             gated_q8_1,
             gated_q8_1_mmq,
+            slot_k_ptrs,
+            slot_v_ptrs,
+            slot_n_tokens_kv,
+            slot_k_ptrs_host: vec![0u64; max_tokens],
+            slot_v_ptrs_host: vec![0u64; max_tokens],
+            slot_n_tokens_kv_host: vec![0i32; max_tokens],
             positions_host: vec![0i32; max_tokens],
             x_norm_f16_bytes,
             x_q8_1_bytes,
@@ -835,6 +863,9 @@ impl FullAttnPrefillScratch {
             positions_bytes,
             gated_q8_1_bytes,
             gated_q8_1_mmq_bytes,
+            slot_k_ptrs_bytes,
+            slot_v_ptrs_bytes,
+            slot_n_tokens_kv_bytes,
             disposed: false,
         })
     }
@@ -860,6 +891,9 @@ impl FullAttnPrefillScratch {
             device.dealloc(self.positions, self.positions_bytes)?;
             device.dealloc(self.gated_q8_1, self.gated_q8_1_bytes)?;
             device.dealloc(self.gated_q8_1_mmq, self.gated_q8_1_mmq_bytes)?;
+            device.dealloc(self.slot_k_ptrs, self.slot_k_ptrs_bytes)?;
+            device.dealloc(self.slot_v_ptrs, self.slot_v_ptrs_bytes)?;
+            device.dealloc(self.slot_n_tokens_kv, self.slot_n_tokens_kv_bytes)?;
         }
         Ok(())
     }
@@ -1504,6 +1538,9 @@ pub fn forward_full_attn_layer_decode_batched(
     //    (the cache tail) rather than `slot_positions[s]` (which is
     //    `prompt_ids.len() + step` = off by 1). Matches legacy
     //    `kv_cache.append()` semantics. F16-only (FullAttn cache).
+    //
+    //    **#266c**: in the same pass, populate the per-slot pointer/
+    //    length tables consumed by `attention_decode_f16_batched`.
     let kv_per_token_bytes = kv_width * 2;
     for (s, cache) in slot_caches.iter_mut().enumerate() {
         let LayerCache::FullAttn(kv) = cache else {
@@ -1531,29 +1568,54 @@ pub fn forward_full_attn_layer_decode_batched(
         }
         kv.bump_tail(1)
             .map_err(|e| anyhow::anyhow!("slot {s} bump_tail: {e}"))?;
+        // Populate the slot tables for the batched-attention launch
+        // below. n_tokens_kv reads post-bump (= includes just-written row).
+        scratch.slot_k_ptrs_host[s] = kv.k_buffer().as_usize() as u64;
+        scratch.slot_v_ptrs_host[s] = kv.v_buffer().as_usize() as u64;
+        scratch.slot_n_tokens_kv_host[s] = kv.current_tokens() as i32;
     }
 
-    // 8. Per-slot attention decode. **#275 fix**: n_k_tokens reads
-    //    `current_tokens` post-bump (= the just-written K row included).
-    let q_per_token_bytes = q_width * 2;
+    // 8. Single-launch batched attention over all N slots
+    //    (**#266c** — replaces the per-slot loop).
     let scale = (head_dim as f32).sqrt().recip();
-    for (s, cache) in slot_caches.iter().enumerate() {
-        let LayerCache::FullAttn(kv) = cache else {
-            bail!("layer cache for slot {s} not FullAttn (verified above)");
-        };
-        let q_row = scratch.q_f16.offset_bytes(s * q_per_token_bytes);
-        let out_row = scratch
-            .attn_out_f16
-            .offset_bytes(s * q_per_token_bytes);
-        let n_k_tokens = kv.current_tokens();
-        attention_decode_f16_slots(
-            ops, stream,
-            q_row, kv.k_buffer(), kv.v_buffer(), out_row,
-            n_heads, n_kv_heads, head_dim, n_k_tokens, scale,
-            None,
-        )
-        .with_context(|| format!("batched-decode attention slot {s}"))?;
+    // SAFETY: each `slot_*_host[..n_tokens]` is a Vec<u64|i32> with
+    // stable address; the corresponding device buffer is sized to
+    // `max_tokens` ≥ n_tokens; HtoD bytes are bounded by the slice.
+    unsafe {
+        device.memcpy_async(
+            stream, CopyDirection::HostToDevice,
+            scratch.slot_k_ptrs,
+            DevicePtr(scratch.slot_k_ptrs_host.as_ptr() as usize),
+            n_tokens * 8,
+        )?;
+        device.memcpy_async(
+            stream, CopyDirection::HostToDevice,
+            scratch.slot_v_ptrs,
+            DevicePtr(scratch.slot_v_ptrs_host.as_ptr() as usize),
+            n_tokens * 8,
+        )?;
+        device.memcpy_async(
+            stream, CopyDirection::HostToDevice,
+            scratch.slot_n_tokens_kv,
+            DevicePtr(scratch.slot_n_tokens_kv_host.as_ptr() as usize),
+            n_tokens * 4,
+        )?;
     }
+    flambeau_ops::hip::attention::attention_decode_f16_batched(
+        ops,
+        stream,
+        scratch.q_f16,
+        scratch.slot_k_ptrs,
+        scratch.slot_v_ptrs,
+        scratch.attn_out_f16,
+        scratch.slot_n_tokens_kv,
+        n_heads,
+        n_kv_heads,
+        head_dim,
+        n_tokens,
+        scale,
+    )
+    .context("batched-decode attention (i2-E #266c)")?;
 
     // 9. Sigmoid-gate over [N, q_width].
     sigmoid_mul_f16(

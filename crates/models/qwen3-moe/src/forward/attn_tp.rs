@@ -977,11 +977,9 @@ pub fn forward_full_attn_layer_decode_batched_tp(
     //    uninitialised and contaminates attention from step 2 onward.
     //    F16-only path; Q8 KV slots fall back via the loop.
     let kv_per_token_bytes = local_kv_width * 2;
-    let mut write_positions: Vec<usize> = Vec::with_capacity(n_tokens);
     for s in 0..n_tokens {
         let kv = &mut *slot_kv_caches[s];
         let write_pos = kv.current_tokens();
-        write_positions.push(write_pos);
         let k_src = scratch.k_f16.offset_bytes(s * kv_per_token_bytes);
         let v_src = scratch.v_f16.offset_bytes(s * kv_per_token_bytes);
         let k_dst = kv.k_buffer().offset_bytes(write_pos * kv_per_token_bytes);
@@ -1002,28 +1000,54 @@ pub fn forward_full_attn_layer_decode_batched_tp(
         }
         kv.bump_tail(1)
             .map_err(|e| anyhow::anyhow!("slot {s} bump_tail (TP): {e}"))?;
+        // **#266c**: populate the per-slot tables for the batched
+        // attention launch below. n_tokens_kv reads post-bump.
+        scratch.slot_k_ptrs_host[s] = kv.k_buffer().as_usize() as u64;
+        scratch.slot_v_ptrs_host[s] = kv.v_buffer().as_usize() as u64;
+        scratch.slot_n_tokens_kv_host[s] = kv.current_tokens() as i32;
     }
 
-    // 9. Per-slot attention decode. Each slot reads its own per-rank
-    //    cache up to current_tokens K/V rows (post-bump). Output offset
-    //    per slot into scratch.attn_out_f16.
-    let q_per_token_bytes = local_q_width * 2;
+    // 9. Single-launch batched attention over all N slots
+    //    (**#266c** — replaces the per-slot loop).
     let scale = (head_dim as f32).sqrt().recip();
-    for s in 0..n_tokens {
-        let q_row = scratch.q_f16.offset_bytes(s * q_per_token_bytes);
-        let out_row = scratch.attn_out_f16.offset_bytes(s * q_per_token_bytes);
-        // **#275 fix**: n_k_tokens reads from current_tokens
-        // (post-append, includes the just-written row).
-        let kv = &slot_kv_caches[s];
-        let n_k_tokens = kv.current_tokens();
-        attention_decode_f16_slots(
-            ops, stream,
-            q_row, kv.k_buffer(), kv.v_buffer(), out_row,
-            local_n_heads, local_n_kv_heads, head_dim,
-            n_k_tokens, scale, None,
-        )
-        .with_context(|| format!("batched-decode attention slot {s} (TP)"))?;
+    // SAFETY: each `slot_*_host[..n_tokens]` is a Vec with stable
+    // address; the corresponding device buffer is sized to `max_tokens`
+    // ≥ n_tokens; HtoD bytes are bounded by the slice.
+    unsafe {
+        device.memcpy_async(
+            stream, CopyDirection::HostToDevice,
+            scratch.slot_k_ptrs,
+            DevicePtr(scratch.slot_k_ptrs_host.as_ptr() as usize),
+            n_tokens * 8,
+        )?;
+        device.memcpy_async(
+            stream, CopyDirection::HostToDevice,
+            scratch.slot_v_ptrs,
+            DevicePtr(scratch.slot_v_ptrs_host.as_ptr() as usize),
+            n_tokens * 8,
+        )?;
+        device.memcpy_async(
+            stream, CopyDirection::HostToDevice,
+            scratch.slot_n_tokens_kv,
+            DevicePtr(scratch.slot_n_tokens_kv_host.as_ptr() as usize),
+            n_tokens * 4,
+        )?;
     }
+    flambeau_ops::hip::attention::attention_decode_f16_batched(
+        ops,
+        stream,
+        scratch.q_f16,
+        scratch.slot_k_ptrs,
+        scratch.slot_v_ptrs,
+        scratch.attn_out_f16,
+        scratch.slot_n_tokens_kv,
+        local_n_heads,
+        local_n_kv_heads,
+        head_dim,
+        n_tokens,
+        scale,
+    )
+    .context("batched-decode attention (TP, i2-E #266c)")?;
 
     // 10. Sigmoid-gate over [N, local_q_width].
     let gated_elems = n_tokens * local_q_width;
