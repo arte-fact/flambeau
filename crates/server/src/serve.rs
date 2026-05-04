@@ -146,8 +146,17 @@ pub async fn serve(cfg: ServeConfig) -> Result<()> {
                 topology = "pp",
                 "loading model weights"
             );
-            let m = Qwen3MoEShardedModel::load(&gguf, &cluster, &assignment)
+            let mut m = Qwen3MoEShardedModel::load(&gguf, &cluster, &assignment)
                 .context("Qwen3MoEShardedModel::load")?;
+            // Re-apply the FLAMBEAU_CTX_CAP clamp on the model-owned
+            // cfg (mirrors the TP / Hybrid arms below). Without this,
+            // the PP loader keeps the GGUF-embedded context_length
+            // (often 128k+ on Qwen3.x), which OOMs SLOTS≥2 on
+            // consumer-VRAM rigs at TP=1 (~512 MB/layer/slot KV at the
+            // GGUF-default ctx).
+            if m.config.context_length > model_cfg.context_length {
+                m.config.context_length = model_cfg.context_length;
+            }
 
             // MTP-5d: opt-in MTP attachment. Loaded once, lives on
             // the last rank; per-request scratch allocated on each
