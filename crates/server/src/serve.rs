@@ -416,6 +416,7 @@ pub async fn serve(cfg: ServeConfig) -> Result<()> {
         batched_dispatcher: std::sync::Mutex::new(()),
         tp_batched_scratch: std::sync::Mutex::new(None),
         hybrid_batched_scratch: std::sync::Mutex::new(None),
+        prefill_serialiser: std::sync::Mutex::new(()),
         remote_tools,
         agent_stats: crate::agent_stats::AgentStatsRing::default(),
         tool_call_format_default,

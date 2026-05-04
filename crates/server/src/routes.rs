@@ -93,6 +93,19 @@ pub struct ServerState {
     /// holds per-stage TP scratches sized for max_inflight_slots.
     pub hybrid_batched_scratch:
         std::sync::Mutex<Option<flambeau_qwen3_moe::ShardedForwardPrefillScratchHybrid>>,
+    /// **#321** — TP / Hybrid prefill serialiser. The TP batched-prefill
+    /// driver (`forward_prefill_tp_batched_logits`) currently allocates
+    /// `ShardedForwardPrefillScratchTp` per call (~35 MB at chunk=512
+    /// for Qwen3.6-27B). On TP=2 with a dense 27B model the per-rank
+    /// VRAM headroom after weights + KV is ~7.5 GB; N concurrent
+    /// prefills race for the same allocator and the second/third get
+    /// `out of memory`. Holding this mutex across `prefill_logits`
+    /// caps peak alloc at one scratch instance regardless of N.
+    /// Negligible perf impact: the GPU stream is serial anyway, the
+    /// only thing serialised here is the host-side launch + alloc.
+    /// PP-only path doesn't use this (its prefill scratches are
+    /// pre-allocated on the inflight session).
+    pub prefill_serialiser: std::sync::Mutex<()>,
     /// Tools discovered on the `--mcp <url>` upstreams at startup
     /// (ROADMAP-V2 §M2.1). Merged into each request's `tools[]` before
     /// rendering the Jinja template, so the model sees them alongside
@@ -2372,7 +2385,12 @@ fn stream_completion_sse(
         }
 
         if let Err(e) = res {
-            let err = json!({ "error": { "message": e.to_string() } });
+            tracing::error!(
+                target: "server.completion.error",
+                err = format!("{e:#}"),
+                "streaming chat error (full chain)"
+            );
+            let err = json!({ "error": { "message": format!("{e:#}") } });
             let _ = tx_clone.blocking_send(Ok(Event::default().data(err.to_string())));
         }
         let _ = tx_clone.blocking_send(Ok(Event::default().data("[DONE]")));
@@ -2510,6 +2528,15 @@ fn run_completion_scheduler_pp_blocking(
                 .reset_for_next_request(cluster, model)
                 .context("reset inflight for new request")?;
             let mut logits_buf: Vec<f32> = Vec::with_capacity(vocab);
+            // **#321** — TP/Hybrid prefill alloc serialiser. See field
+            // doc on ServerState::prefill_serialiser.
+            let _prefill_lock = if matches!(model,
+                LoadedModel::Tp { .. } | LoadedModel::Hybrid { .. }
+            ) {
+                Some(state.prefill_serialiser.lock().unwrap())
+            } else {
+                None
+            };
             crate::model::prefill_logits(
                 model,
                 cluster,
@@ -2768,8 +2795,18 @@ fn run_completion_blocking_ids(
     // the first response token on multi-turn prompts, producing an empty
     // reply. Suppress it until at least one content token is emitted.
     let prefill_start = Instant::now();
+    // **#321** — TP/Hybrid prefill alloc serialiser. See field
+    // doc on ServerState::prefill_serialiser.
+    let _prefill_lock = if matches!(model,
+        LoadedModel::Tp { .. } | LoadedModel::Hybrid { .. }
+    ) {
+        Some(state.prefill_serialiser.lock().unwrap())
+    } else {
+        None
+    };
     prefill_logits(model, cluster, &mut inflight, &prompt_ids, &mut logits_buf)
         .context("prefill logits")?;
+    drop(_prefill_lock);
     for &sid in stop_ids {
         if (sid as usize) < logits_buf.len() {
             logits_buf[sid as usize] = f32::NEG_INFINITY;
@@ -3263,8 +3300,18 @@ fn run_completion_blocking_streaming(
     // non-streaming path for the rationale (multi-turn Qwen3.6 argmaxes
     // `<|im_end|>` immediately otherwise).
     let prefill_start = Instant::now();
+    // **#321** — TP/Hybrid prefill alloc serialiser. See field
+    // doc on ServerState::prefill_serialiser.
+    let _prefill_lock = if matches!(model,
+        LoadedModel::Tp { .. } | LoadedModel::Hybrid { .. }
+    ) {
+        Some(state.prefill_serialiser.lock().unwrap())
+    } else {
+        None
+    };
     prefill_logits(model, cluster, &mut inflight, &prompt_ids, &mut logits_buf)
         .context("prefill logits")?;
+    drop(_prefill_lock);
     for &sid in stop_ids {
         if (sid as usize) < logits_buf.len() {
             logits_buf[sid as usize] = f32::NEG_INFINITY;
