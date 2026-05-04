@@ -73,22 +73,53 @@ pub fn qmatmul(
     // V2.30.a — Q5_0 at m >= 32 routes through the wave64 tile via
     // dispatch_qmatmul; m < 32 stays on the MMVQ short-circuit. Q5_1 has no
     // tile kernel yet, still MMVQ row-by-row.
-    // **#288** — Q4_1 batched-MMVQ short-circuit at m ∈ [2, MAX_N]. Single
-    // launch handles N activation rows with one weight HBM read.
+    // **#288** — Q4_1 batched-MMVQ short-circuit at m ∈ [2, MAX_N].
     //
-    // **OPT-IN** via `FLAMBEAU_BATCHED_MMVQ=1`: the v1 kernel delivers
-    // 1.29× over per-row at n_rows=3584 / N=8 but regresses to 0.84× at
-    // n_rows=14336 / N=8 (activation HBM reads compound per output row,
-    // dominating weight amortization). A row-tiled variant (1 block ×
-    // R rows × N slots, weight tile read once per R-row) is the
-    // follow-on lever; until that lands the short-circuit stays opt-in.
-    // See `certs/perf/mmvq_q4_1_batched_v1_2026_05_04.md`.
+    // **OPT-IN** via `FLAMBEAU_BATCHED_MMVQ=1`. Shape-aware dispatch:
+    //   - n_rows ≥ N_ROWS_WAVE64_THRESHOLD: route through the prefill
+    //     `mmq_q4_1_wave64` kernel (gridDim=(n_rows/64, n_cols/8),
+    //     row-tiled MMQ_Y=64 / TILE_N=8). Wins 1.27× at the GDN ssm_out
+    //     shape (n_rows=14336 / N=8) over per-row MMVQ.
+    //   - n_rows < threshold: stay on the per-row MMVQ loop. Wave64
+    //     loses at small n_rows (0.54× at n_rows=3584 / N=8) because
+    //     few thread-blocks for the GPU to schedule.
+    //
+    // Override modes:
+    //   - `FLAMBEAU_BATCHED_MMVQ=v1`: force the v1 batched kernel
+    //     (per-output-row, slot loop inside K-iter). For A/B; v1 is
+    //     activation-HBM-bound at GDN-out shapes (#288 v1 cert).
+    //   - `FLAMBEAU_BATCHED_MMVQ=wave64`: force wave64 unconditionally.
+    //
+    // Certs:
+    //   - `certs/perf/mmvq_q4_1_batched_v1_2026_05_04.md` — v1 diag.
+    //   - `certs/perf/mmvq_q4_1_batched_v2_2026_05_04.md` — wave64 routing.
+    const N_ROWS_WAVE64_THRESHOLD: usize = 8192;
     if dtype_weight == QDtype::Q4_1
         && (2..=MMVQ_Q4_1_BATCHED_MAX_N).contains(&m)
-        && std::env::var("FLAMBEAU_BATCHED_MMVQ").is_ok()
     {
-        let _ = act_q8_1_mmq;
-        return mmvq_q4_1_batched_launch(reg, stream, weights, act_q8_1, dst, n, k, m);
+        match std::env::var("FLAMBEAU_BATCHED_MMVQ").as_deref() {
+            Ok("v1") => {
+                let _ = act_q8_1_mmq;
+                return mmvq_q4_1_batched_launch(reg, stream, weights, act_q8_1, dst, n, k, m);
+            }
+            Ok("wave64") => {
+                let _ = act_q8_1_mmq;
+                let recipe = Recipe::from_impl_id("qmatmul_q4_1_mmq_wave64_gfx906")?;
+                return mmq_wave64_launch(reg, stream, recipe, weights, act_q8_1, dst, n, m, k);
+            }
+            Ok(_) => {
+                // Default opt-in (`FLAMBEAU_BATCHED_MMVQ=1` or any other
+                // truthy value): shape-aware. Big shapes → wave64;
+                // small shapes → fall through to per-row MMVQ loop.
+                if n >= N_ROWS_WAVE64_THRESHOLD {
+                    let _ = act_q8_1_mmq;
+                    let recipe = Recipe::from_impl_id("qmatmul_q4_1_mmq_wave64_gfx906")?;
+                    return mmq_wave64_launch(reg, stream, recipe, weights, act_q8_1, dst, n, m, k);
+                }
+                // Else: fall through to dispatch_qmatmul (per-row MMVQ loop).
+            }
+            Err(_) => {} // not set: per-row MMVQ loop (production default)
+        }
     }
     if dtype_weight == QDtype::Q5_1
         || (dtype_weight == QDtype::Q4_0 && m < 32)

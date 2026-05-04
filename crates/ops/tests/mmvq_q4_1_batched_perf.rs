@@ -149,9 +149,20 @@ fn mmvq_q4_1_batched_perf_sweep() -> Result<()> {
     let slot_counts: &[usize] = &[1, 2, 4, 8];
     let iters = 50;
 
+    // Bench three paths: per-row mmvq (baseline), v1 batched-MMVQ
+    // (new kernel), wave64 (existing prefill kernel reused at small N).
+    // FLAMBEAU_BATCHED_MMVQ env routes the qmatmul short-circuit:
+    //   unset → per-row MMVQ loop (baseline)
+    //   "v1"  → mmvq_q4_1_q8_1_batched (this session's new kernel)
+    //   any other → mmq_q4_1_wave64 (existing prefill kernel)
+    let modes: &[(&str, Option<&str>)] = &[
+        ("baseline (per-row MMVQ loop)", None),
+        ("v1 batched", Some("v1")),
+        ("wave64 (prefill kernel)", Some("1")),
+    ];
+
     eprintln!("# mmvq_q4_1_batched perf sweep — Qwen3.6-27B GDN matmul shapes");
     eprintln!("# Wall time per call (µs), 50 iters after 3 warm-up.");
-    eprintln!("# n_rows × k          | N=1 (single)  | N=2 batched  | N=4 batched  | N=8 batched");
 
     for &(n_rows, k, label) in shapes {
         let n_blocks_per_row = k / 32;
@@ -177,7 +188,11 @@ fn mmvq_q4_1_batched_perf_sweep() -> Result<()> {
         let dst_bytes = max_n * n_rows * 4;
         let d_dst = alloc_zeroed(&dev, dst_bytes);
 
-        // N=1 single-row baseline (single qmatmul call, m=1).
+        // N=1 single-row baseline (no env override needed — m=1 always
+        // hits per-row MMVQ regardless of FLAMBEAU_BATCHED_MMVQ).
+        // SAFETY: the env mutation/restore is single-threaded inside the
+        // test; no other thread reads FLAMBEAU_BATCHED_MMVQ here.
+        unsafe { std::env::remove_var("FLAMBEAU_BATCHED_MMVQ"); }
         let single_us = time_us(stream, iters, || {
             qmatmul(
                 &reg, stream, d_w, d_act_q8_1, DevicePtr(0), d_dst,
@@ -185,24 +200,33 @@ fn mmvq_q4_1_batched_perf_sweep() -> Result<()> {
             )
         })?;
 
-        // Batched at each N. N=1 also exercises the batched path's
-        // trivial case (won't actually go through the short-circuit
-        // since the gate is m≥2; keep separate for completeness).
-        let mut row_strs = vec![format!("{:>9.1}µs", single_us)];
-        for &n in &slot_counts[1..] {
-            let us = time_us(stream, iters, || {
-                qmatmul(
-                    &reg, stream, d_w, d_act_q8_1, DevicePtr(0), d_dst,
-                    n, k, n_rows, QDtype::Q4_1,
-                )
-            })?;
-            row_strs.push(format!("{:>9.1}µs ({:.2}×)", us, single_us * n as f64 / us));
-        }
         eprintln!(
-            "  {n_rows:>5} × {k:<5} {:<24} | {}",
-            label,
-            row_strs.join(" | ")
+            "  {n_rows:>5} × {k:<5}   {label:<22}   N=1: {:>8.1}µs",
+            single_us
         );
+
+        // Sweep batched paths × N.
+        for (mode_name, env_val) in modes {
+            // SAFETY: env var change is local to test thread.
+            unsafe {
+                match env_val {
+                    Some(v) => std::env::set_var("FLAMBEAU_BATCHED_MMVQ", v),
+                    None => std::env::remove_var("FLAMBEAU_BATCHED_MMVQ"),
+                }
+            }
+            let mut bits = vec![format!("{:<32}", mode_name)];
+            for &n in &slot_counts[1..] {
+                let us = time_us(stream, iters, || {
+                    qmatmul(
+                        &reg, stream, d_w, d_act_q8_1, DevicePtr(0), d_dst,
+                        n, k, n_rows, QDtype::Q4_1,
+                    )
+                })?;
+                bits.push(format!("N={n}: {:>7.1}µs ({:.2}×)", us, single_us * n as f64 / us));
+            }
+            eprintln!("    {}", bits.join("  "));
+        }
+        unsafe { std::env::remove_var("FLAMBEAU_BATCHED_MMVQ"); }
 
         // Cleanup.
         unsafe {
