@@ -28,6 +28,13 @@ pub struct SamplingParams {
     /// boundary. V1 implementation is non-streaming, host-sampler-only;
     /// other paths silently return `None` with a warn-once log.
     pub collect_logprobs: Option<u32>,
+    /// **#233 P3.13** — opt-in for Qwen3.6 reasoning mode. `true` ⇒
+    /// the chat template is rendered with `enable_thinking=true`, the
+    /// `<think>` / `</think>` reasoning-marker stop logic is
+    /// disabled in the decode loop, and `finalise` splits the
+    /// generated text at the closing tag into
+    /// `(reasoning_content, content)` for the response body.
+    pub enable_thinking: bool,
 }
 
 /// Model-side recommended sampling defaults read from GGUF metadata
@@ -100,6 +107,7 @@ impl SamplingParams {
         json_mode: bool,
         stop_strings: Vec<String>,
         collect_logprobs: Option<u32>,
+        enable_thinking: bool,
         defaults: &ModelDefaults,
     ) -> Self {
         // Resolution order: explicit OpenAI request → GGUF model
@@ -142,6 +150,7 @@ impl SamplingParams {
             json_mode,
             stop_strings,
             collect_logprobs: collect_logprobs.map(|n| n.min(20)),
+            enable_thinking,
         }
     }
 }

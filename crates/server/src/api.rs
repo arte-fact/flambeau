@@ -125,6 +125,21 @@ pub struct ChatCompletionRequest {
     /// the finish chunk. Default `None` (no extra chunk).
     #[serde(default)]
     pub stream_options: Option<StreamOptions>,
+
+    // ---- Reasoning mode (P3.13) --------------------------------------
+    /// **#233 P3.13** — opt into Qwen3.6 reasoning / extended-thinking
+    /// mode. When `Some(true)`, the chat template renders without the
+    /// suppression block, the model emits
+    /// `<think>{cot}</think>{answer}`, and the server splits the two:
+    /// `{cot}` returns in `message.reasoning_content`, `{answer}` in
+    /// `message.content`. Default `None` ⇒ thinking suppressed
+    /// (legacy behaviour: server passes `enable_thinking=false` to
+    /// the chat template). Mirrors HF Transformers `chat_template`
+    /// kwarg; OpenAI's o-series + Anthropic extended-thinking surface
+    /// the same toggle via different field names — this is the
+    /// OpenAI-compat shape.
+    #[serde(default)]
+    pub enable_thinking: Option<bool>,
 }
 
 /// OpenAI streaming-options envelope. Today only `include_usage` is
@@ -175,6 +190,15 @@ pub struct ChatMessage {
     /// Set on `role="assistant"` messages that invoked one or more tools.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tool_calls: Option<Vec<ToolCall>>,
+    /// **#233 P3.13** — chain-of-thought returned separately when the
+    /// request set `enable_thinking=true` and the model emitted a
+    /// `<think>{cot}</think>` block. Mirrors the de-facto convention
+    /// shared by DeepSeek-R1 / vLLM / sglang / OpenWebUI for
+    /// reasoning models: same shape as `content` but in a sibling
+    /// field so clients can render it collapsibly. Always `None`
+    /// when thinking was suppressed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reasoning_content: Option<String>,
 }
 
 impl ChatMessage {

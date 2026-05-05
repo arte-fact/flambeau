@@ -1437,6 +1437,7 @@ pub async fn chat_completions(
                     content: Some(sys.to_owned()),
                     tool_call_id: None,
                     tool_calls: None,
+                    reasoning_content: None,
                 })
         } else {
             None
@@ -1494,6 +1495,7 @@ pub async fn chat_completions(
         json_mode,
         stop_strings,
         collect_logprobs,
+        req.enable_thinking.unwrap_or(false),
         &state.model_defaults,
     );
 
@@ -1518,7 +1520,7 @@ pub async fn chat_completions(
                 &messages,
                 merged_tools.as_deref(),
                 /*add_generation_prompt=*/ true,
-                /*enable_thinking=*/ Some(false),
+                Some(params.enable_thinking),
             )
             .map_err(ApiError::internal)?;
         if std::env::var("FLAMBEAU_DUMP_PROMPT").is_ok() {
@@ -1569,6 +1571,10 @@ pub async fn chat_completions(
     // surfaced as `choices[0].message.content`). Only populated when
     // the request opted in.
     let mut final_logprobs: Option<Vec<ChatLogProbContent>> = None;
+    // **#233** — reasoning_content of the FINAL iteration. Populated
+    // by `finalise` when `enable_thinking=true` and the model emitted
+    // a `<think>...</think>` block.
+    let mut final_reasoning_content: Option<String> = None;
     let session_id = request_id("chatcmpl");
 
     for iter in 0..MAX_TOOL_ITERATIONS {
@@ -1579,7 +1585,7 @@ pub async fn chat_completions(
                 &messages,
                 merged_tools.as_deref(),
                 /*add_generation_prompt=*/ true,
-                /*enable_thinking=*/ Some(false),
+                Some(params.enable_thinking),
             )
             .map_err(ApiError::internal)?;
         if iter == 0 && std::env::var("FLAMBEAU_DUMP_PROMPT").is_ok() {
@@ -1590,10 +1596,16 @@ pub async fn chat_completions(
             );
         }
 
-        let (text, iter_prompt_tokens, iter_completion_tokens, iter_finish, iter_logprobs) =
-            run_completion(state.clone(), &prompt, params.clone(), relax_stop_mask)
-                .await
-                .map_err(ApiError::internal)?;
+        let (
+            text,
+            iter_prompt_tokens,
+            iter_completion_tokens,
+            iter_finish,
+            iter_logprobs,
+            iter_reasoning,
+        ) = run_completion(state.clone(), &prompt, params.clone(), relax_stop_mask)
+            .await
+            .map_err(ApiError::internal)?;
         sum_prompt_tokens = sum_prompt_tokens.saturating_add(iter_prompt_tokens);
         sum_completion_tokens = sum_completion_tokens.saturating_add(iter_completion_tokens);
 
@@ -1672,6 +1684,11 @@ pub async fn chat_completions(
             // user-visible content. Logprobs are most useful for the
             // text path so attach here.
             final_logprobs = iter_logprobs;
+            // **#233** — reasoning_content rides with the user-visible
+            // text. Tool-call iterations don't return reasoning since
+            // the model is producing JSON tool args, not chain-of-
+            // thought we want to surface.
+            final_reasoning_content = iter_reasoning;
             break;
         }
         if !client_calls.is_empty() {
@@ -1717,6 +1734,7 @@ pub async fn chat_completions(
             },
             tool_call_id: None,
             tool_calls: Some(remote_calls.clone()),
+            reasoning_content: None,
         });
         for tc in &remote_calls {
             let Some(rt) = crate::mcp_client::find_by_prefixed_name(
@@ -1746,6 +1764,7 @@ pub async fn chat_completions(
                 content: Some(tool_output),
                 tool_call_id: Some(tc.id.clone()),
                 tool_calls: None,
+                reasoning_content: None,
             });
         }
         // continue the loop
@@ -1773,6 +1792,7 @@ pub async fn chat_completions(
                 } else {
                     Some(final_tool_calls)
                 },
+                reasoning_content: final_reasoning_content,
             },
             finish_reason: final_finish,
             logprobs: final_logprobs.map(|content| ChatLogProbs { content }),
@@ -1796,6 +1816,7 @@ fn normalise_message(m: &ChatMessage) -> ChatMessage {
             content: Some(format!("<think>\n\n</think>\n\n{}", body)),
             tool_call_id: m.tool_call_id.clone(),
             tool_calls: m.tool_calls.clone(),
+            reasoning_content: m.reasoning_content.clone(),
         }
     } else {
         m.clone()
@@ -1836,6 +1857,7 @@ pub async fn completions(
         /*json_mode=*/ false,
         stop_strings,
         /*collect_logprobs=*/ None,
+        /*enable_thinking=*/ false,
         &state.model_defaults,
     );
 
@@ -1858,7 +1880,7 @@ pub async fn completions(
         .map_err(ApiError::internal)?;
         let prompt_tokens = prompt_ids.len() as u32;
         // FIM has no chat template — bypass chat-flavoured stop-mask.
-        let (text, _, completion_tokens, finish, _) = run_completion_ids(
+        let (text, _, completion_tokens, finish, _, _) = run_completion_ids(
             state.clone(),
             prompt_ids,
             params,
@@ -1875,7 +1897,7 @@ pub async fn completions(
             );
         }
         // Legacy path: text-only prompt, chat stop-mask policy.
-        let (t, p, c, f, _) =
+        let (t, p, c, f, _, _) =
             run_completion(state.clone(), &req.prompt, params, /*relax_stop_mask=*/ false)
                 .await
                 .map_err(ApiError::internal)?;
@@ -2047,6 +2069,7 @@ fn translate_anthropic_message(m: &AnthropicMessage, out: &mut Vec<ChatMessage>)
                 content: Some(s.clone()),
                 tool_call_id: None,
                 tool_calls: None,
+                reasoning_content: None,
             });
             return;
         }
@@ -2090,6 +2113,7 @@ fn translate_anthropic_message(m: &AnthropicMessage, out: &mut Vec<ChatMessage>)
                         } else {
                             Some(std::mem::take(&mut tool_calls))
                         },
+                        reasoning_content: None,
                     });
                 }
                 // Tool result content can be a string or a list of
@@ -2110,6 +2134,7 @@ fn translate_anthropic_message(m: &AnthropicMessage, out: &mut Vec<ChatMessage>)
                     content: Some(body),
                     tool_call_id: Some(tool_use_id.clone()),
                     tool_calls: None,
+                    reasoning_content: None,
                 });
             }
         }
@@ -2130,6 +2155,7 @@ fn translate_anthropic_message(m: &AnthropicMessage, out: &mut Vec<ChatMessage>)
             } else {
                 Some(tool_calls)
             },
+            reasoning_content: None,
         });
     }
 }
@@ -2181,6 +2207,7 @@ pub async fn messages_anthropic(
                 content: Some(body),
                 tool_call_id: None,
                 tool_calls: None,
+                reasoning_content: None,
             });
         }
     }
@@ -2214,6 +2241,7 @@ pub async fn messages_anthropic(
                 content: Some(sys.to_owned()),
                 tool_call_id: None,
                 tool_calls: None,
+                reasoning_content: None,
             });
             prepended.extend(messages);
             prepended
@@ -2240,6 +2268,12 @@ pub async fn messages_anthropic(
         /*json_mode=*/ false,
         stop_strings.clone(),
         /*collect_logprobs=*/ None,
+        // **#233** — Anthropic surfaces extended-thinking via
+        // `thinking: {type: "enabled"}` in the request body. V1
+        // doesn't parse that yet (separate field, separate response
+        // shape with content blocks), so default off here. Wire-up
+        // is a #233b follow-up.
+        /*enable_thinking=*/ false,
         &state.model_defaults,
     );
 
@@ -2282,7 +2316,7 @@ pub async fn messages_anthropic(
         );
     }
 
-    let (text, prompt_tokens, completion_tokens, finish, _) =
+    let (text, prompt_tokens, completion_tokens, finish, _, _) =
         run_completion(state.clone(), &prompt, params, relax_stop_mask)
             .await
             .map_err(ApiError::internal)?;
@@ -2299,7 +2333,7 @@ pub async fn messages_anthropic(
         events.extend(parser.finish());
         split_events(ParserEvent::coalesce(events))
     } else {
-        (text, Vec::new())
+        (text, Vec::<ToolCall>::new())
     };
 
     // Map OpenAI finish_reason → Anthropic stop_reason. If the parser
@@ -2736,6 +2770,7 @@ pub async fn infill(
         /*json_mode=*/ false,
         stop_strings,
         /*collect_logprobs=*/ None,
+        /*enable_thinking=*/ false,
         &state.model_defaults,
     );
 
@@ -2743,7 +2778,7 @@ pub async fn infill(
     // are no `<|im_end|>` markers to mask early. Pass relax_stop_mask
     // so the engine doesn't apply chat-flavoured biases.
     let prompt_tokens = prompt_ids.len() as u32;
-    let (text, _, completion_tokens, finish, _) =
+    let (text, _, completion_tokens, finish, _, _) =
         run_completion_ids(state.clone(), prompt_ids, params, /*relax_stop_mask=*/ true)
             .await
             .map_err(ApiError::internal)?;
@@ -3067,8 +3102,19 @@ fn stream_completion_sse(
 /// (a JSON blob fits in ~20 tokens); injecting the stop mask forces the
 /// model to pad before emitting `</tool_call>`.
 /// Engine return shape: text, prompt_tokens, completion_tokens,
-/// finish_reason, optional per-token logprobs (P1.7).
-type CompletionOutput = (String, u32, u32, String, Option<Vec<ChatLogProbContent>>);
+/// finish_reason, optional per-token logprobs (P1.7), optional
+/// reasoning_content (#233 — populated when the request set
+/// `enable_thinking=true` and the model emitted a `<think>...</think>`
+/// block; the leading reasoning is split off and returned here while
+/// `text` keeps only the post-think answer).
+type CompletionOutput = (
+    String,
+    u32,
+    u32,
+    String,
+    Option<Vec<ChatLogProbContent>>,
+    Option<String>,
+);
 
 async fn run_completion(
     state: SharedState,
@@ -3293,6 +3339,7 @@ fn run_completion_scheduler_pp_blocking(
                 "stop",
                 &params.stop_strings,
                 None,
+                params.enable_thinking,
             );
         }
 
@@ -3355,6 +3402,7 @@ fn run_completion_scheduler_pp_blocking(
                 let from = n.saturating_sub(token_window);
                 if let Ok(tail) = state.tokenizer.decode(&generated[from..]) {
                     let marker_hit = !relax_stop_mask
+                        && !params.enable_thinking
                         && (tail.contains("</think>")
                             || tail.contains("<end_thought>")
                             || tail.contains("<end_think>")
@@ -3388,6 +3436,7 @@ fn run_completion_scheduler_pp_blocking(
             finish_reason,
             &params.stop_strings,
             None,
+            params.enable_thinking,
         )
     })();
     state.release_slot(slot_idx);
@@ -3675,7 +3724,7 @@ fn run_completion_blocking_ids(
     // changes.
     if is_stop(first_next) {
         // Slot stays pooled; mutex releases on function return.
-        return finalise(&state, prompt_tokens, generated, "stop", &params.stop_strings, logprobs_acc);
+        return finalise(&state, prompt_tokens, generated, "stop", &params.stop_strings, logprobs_acc, params.enable_thinking);
     }
 
     let mut finish_reason = "length";
@@ -3937,6 +3986,7 @@ fn run_completion_blocking_ids(
                 let from = n.saturating_sub(token_window);
                 if let Ok(tail) = state.tokenizer.decode(&generated[from..]) {
                     let marker_hit = !relax_stop_mask
+                        && !params.enable_thinking
                         && (tail.contains("</think>")
                             || tail.contains("<end_thought>")
                             || tail.contains("<end_think>")
@@ -4006,6 +4056,7 @@ fn run_completion_blocking_ids(
         finish_reason,
         &params.stop_strings,
         logprobs_acc,
+        params.enable_thinking,
     )?;
     // Sampler-G debug — emit the completed response text (head + tail
     // preview) so we can correlate request shape with what the model
@@ -4482,6 +4533,7 @@ fn run_completion_blocking_streaming(
                 emitted_text.as_str()
             };
             let marker_hit = !relax_stop_mask
+                && !params.enable_thinking
                 && (tail_window.contains("</think>")
                     || tail_window.contains("<end_thought>")
                     || tail_window.contains("<end_think>")
@@ -4562,6 +4614,7 @@ fn finalise(
     reason: &str,
     stop_strings: &[String],
     mut logprobs: Option<Vec<ChatLogProbContent>>,
+    enable_thinking: bool,
 ) -> Result<CompletionOutput> {
     // Strip ALL stop tokens (eos, <|im_end|>, etc.) from decoded text so the
     // client sees clean content. Raw count preserved for `usage` honesty.
@@ -4596,15 +4649,57 @@ fn finalise(
         generated.retain(|t| !stop_ids.contains(t));
     }
     let mut text = state.tokenizer.decode(&generated).context("decode")?;
-    // **Sampler-G** — truncate at any leaked reasoning marker. The
-    // string-level stop in the decode loop catches these mid-flight,
-    // but the marker itself is already in `text`; cut before its
-    // first occurrence so the client sees a clean response.
-    for marker in ["</think>", "<end_thought>", "<end_think>", "</thought>"] {
-        if let Some(idx) = text.find(marker) {
-            text.truncate(idx);
+    // **#233** — split out the reasoning block when thinking was
+    // enabled. The model emits `<think>{cot}</think>{answer}`; in
+    // legacy (`enable_thinking=false`) mode, the chat template
+    // suppresses the block and any leaked marker is treated as a
+    // stop. In thinking mode, capture the cot and let the answer
+    // through. The opening `<think>` is the very first token Qwen3.6
+    // emits in this mode; we still defensively look for it before
+    // splitting on `</think>`.
+    let reasoning_content: Option<String> = if enable_thinking {
+        if let Some(end_idx) = text.find("</think>") {
+            let cot_raw = &text[..end_idx];
+            let cot = cot_raw
+                .trim_start_matches("<think>")
+                .trim()
+                .to_string();
+            let answer_start = end_idx + "</think>".len();
+            let answer = text[answer_start..].trim_start().to_string();
+            text = answer;
+            if cot.is_empty() {
+                None
+            } else {
+                Some(cot)
+            }
+        } else {
+            // Model didn't close the block — the entire generation is
+            // still chain-of-thought (typically because we hit the
+            // max_tokens cap before the answer started). Surface the
+            // raw text as reasoning_content and leave content empty
+            // so clients distinguish "no answer yet" from "empty
+            // answer".
+            let cot = text.trim_start_matches("<think>").trim().to_string();
+            text = String::new();
+            if cot.is_empty() {
+                None
+            } else {
+                Some(cot)
+            }
         }
-    }
+    } else {
+        // **Sampler-G** — truncate at any leaked reasoning marker.
+        // The string-level stop in the decode loop catches these
+        // mid-flight, but the marker itself is already in `text`;
+        // cut before its first occurrence so the client sees a
+        // clean response.
+        for marker in ["</think>", "<end_thought>", "<end_think>", "</thought>"] {
+            if let Some(idx) = text.find(marker) {
+                text.truncate(idx);
+            }
+        }
+        None
+    };
     // **P0.2** — same treatment for caller-supplied stop sequences.
     // OpenAI semantics: the stop sequence itself is not part of the
     // returned content. Truncate at the earliest match across all
@@ -4621,7 +4716,14 @@ fn finalise(
     // Trim trailing whitespace introduced by the now-removed marker.
     let trimmed_len = text.trim_end().len();
     text.truncate(trimmed_len);
-    Ok((text, prompt_tokens, completion_tokens, reason.to_owned(), logprobs))
+    Ok((
+        text,
+        prompt_tokens,
+        completion_tokens,
+        reason.to_owned(),
+        logprobs,
+        reasoning_content,
+    ))
 }
 
 fn request_id(prefix: &str) -> String {
@@ -4708,4 +4810,5 @@ impl IntoResponse for ApiError {
         resp
     }
 }
+
 
