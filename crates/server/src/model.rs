@@ -15,10 +15,10 @@ use flambeau_qwen3_moe::forward::{
     forward_one_token_hybrid_logits, forward_one_token_pp_logits,
     forward_one_token_tp_keep_logits_on_device, forward_one_token_tp_logits,
     forward_prefill_hybrid_logits, forward_prefill_pp, forward_prefill_pp_logits,
-    forward_prefill_tp_logits,
+    forward_prefill_tp_logits, forward_prefill_tp_logits_pooled,
     forward_speculative_pp_step, ShardedForwardOneTokenScratch,
     ShardedForwardOneTokenScratchHybrid, ShardedForwardOneTokenScratchTp,
-    ShardedForwardPrefillScratch, SpecStep,
+    ShardedForwardPrefillScratch, ShardedForwardPrefillScratchTp, SpecStep,
 };
 use flambeau_qwen3_moe::mtp::{MtpForwardScratch, MtpHeadWeights};
 use flambeau_qwen3_moe::{
@@ -287,12 +287,18 @@ impl Inflight {
 /// its own `forward_prefill_*_logits` entry point; the TP path is a
 /// per-token loop today (AUTO-6a) and gets batched-across-L kernels
 /// in AUTO-6b/c.
+/// `tp_pool_prefill`: when `Some` and topology is TP, the pooled
+/// `forward_prefill_tp_logits_pooled` is used, skipping per-call
+/// alloc/dispose. Callers must already hold `prefill_serialiser`
+/// (the TP/Hybrid chat handlers do for #321) — the scratch isn't
+/// safe for parallel use. `None` falls back to alloc-per-call.
 pub fn prefill_logits(
     model: &LoadedModel,
     cluster: &HipCluster,
     inflight: &mut Inflight,
     prompt_ids: &[u32],
     logits_out: &mut Vec<f32>,
+    tp_pool_prefill: Option<&mut ShardedForwardPrefillScratchTp>,
 ) -> Result<()> {
     if prompt_ids.is_empty() {
         bail!("prefill_logits: empty prompt");
@@ -346,16 +352,55 @@ pub fn prefill_logits(
         (LoadedModel::Tp { model, ar }, Inflight::Tp { session, decode }) => {
             // Chunked TP prefill (Phase B3a-TP). Phase A2-TP parity
             // test verified bit-exact KV at L=4096 chunk=512 (8 chunks),
-            // so chunking is safe at chunk>=128. forward_prefill_tp_logits
-            // (and its batched delegate) allocates per-call scratch,
-            // bounded by chunk_size.
+            // so chunking is safe at chunk>=128. **#324** — when
+            // `tp_pool_prefill` is `Some`, the caller (chat handler
+            // holding `ServerState::prefill_serialiser`) hands us a
+            // shared pre-allocated scratch and we skip per-call alloc.
+            // When `None`, fall back to the legacy alloc-per-call
+            // path inside `forward_prefill_tp_logits`.
             let chunk: usize = std::env::var("FLAMBEAU_PREFILL_UBATCH")
                 .ok()
                 .and_then(|s| s.parse().ok())
                 .filter(|n: &usize| *n >= 128)
                 .unwrap_or(512);
             let l = prompt_ids.len();
-            if l <= chunk {
+            // We can't reuse `&mut tp_pool_prefill` across loop iterations
+            // because the pooled call holds a reborrow; instead, take()
+            // a local Option and re-store at end. But for the simple
+            // single-chunk path we can just pass the &mut directly.
+            if let Some(pool) = tp_pool_prefill {
+                if l <= chunk {
+                    forward_prefill_tp_logits_pooled(
+                        model, decode, pool, cluster, ar, &mut session.caches,
+                        prompt_ids, 0, logits_out,
+                    )
+                    .context("TP prefill_logits (pooled)")
+                } else {
+                    tracing::debug!(
+                        target: "server.prefill",
+                        prompt_len = l,
+                        chunk,
+                        "chunked TP prefill (pooled)"
+                    );
+                    let mut start = 0usize;
+                    let mut sink: Vec<f32> = Vec::new();
+                    while start < l {
+                        let end = (start + chunk).min(l);
+                        let is_last = end == l;
+                        let dst: &mut Vec<f32> =
+                            if is_last { &mut *logits_out } else { &mut sink };
+                        forward_prefill_tp_logits_pooled(
+                            model, decode, pool, cluster, ar, &mut session.caches,
+                            &prompt_ids[start..end], start, dst,
+                        )
+                        .with_context(|| {
+                            format!("TP prefill_logits chunk [{start}..{end}) (pooled)")
+                        })?;
+                        start = end;
+                    }
+                    Ok(())
+                }
+            } else if l <= chunk {
                 forward_prefill_tp_logits(
                     model, decode, cluster, ar, &mut session.caches,
                     prompt_ids, 0, logits_out,

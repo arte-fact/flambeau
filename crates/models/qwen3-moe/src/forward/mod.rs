@@ -88,7 +88,8 @@ pub mod tp;
 pub use tp::{
     forward_decode_batched_tp, forward_one_token_tp,
     forward_one_token_tp_keep_logits_on_device, forward_one_token_tp_logits,
-    forward_prefill_tp_logits, RankForwardPrefillScratchTp, RankForwardScratchTp,
+    forward_prefill_tp_logits, forward_prefill_tp_logits_pooled,
+    RankForwardPrefillScratchTp, RankForwardScratchTp,
     ShardedForwardOneTokenScratchTp, ShardedForwardPrefillScratchTp,
 };
 

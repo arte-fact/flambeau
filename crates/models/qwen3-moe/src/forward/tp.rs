@@ -766,6 +766,59 @@ pub fn forward_one_token_tp_keep_logits_on_device(
 /// then GDN + MoE). `start_position` is the position the *first*
 /// prompt token lands at — non-zero when this prefill is appending to
 /// a session that already saw earlier tokens.
+/// **#324** — pooled-scratch variant of [`forward_prefill_tp_logits`].
+///
+/// Uses the caller-supplied `pool_prefill` scratch instead of
+/// allocating one inside the batched driver. Caller must size
+/// `pool_prefill` for at least `prompt_ids.len()` tokens (typically
+/// the per-slot scratch is sized for `FLAMBEAU_PREFILL_UBATCH`,
+/// matching the chunk size used in `prefill_logits`).
+///
+/// Falls through to the per-token loop when the prompt is short
+/// (<8 tokens) or KV is Q8 — the pooled scratch is unused on those
+/// paths since they go through `forward_one_token_tp_logits`.
+pub fn forward_prefill_tp_logits_pooled(
+    model: &Qwen3MoETpModel,
+    scratch: &mut ShardedForwardOneTokenScratchTp,
+    pool_prefill: &mut ShardedForwardPrefillScratchTp,
+    cluster: &flambeau_backend_hip::HipCluster,
+    ar: &BarP2pAllReduce,
+    layer_caches: &mut [Vec<LayerCache>],
+    prompt_ids: &[u32],
+    start_position: usize,
+    logits_out: &mut Vec<f32>,
+) -> anyhow::Result<()> {
+    if prompt_ids.is_empty() {
+        bail!("forward_prefill_tp_logits_pooled: empty prompt");
+    }
+    let any_q8_kv = layer_caches.iter().any(|cs| {
+        cs.iter().any(|c| matches!(c, LayerCache::FullAttnQ8(_)))
+    });
+    let batched_opt_out = std::env::var("FLAMBEAU_TP_BATCHED").as_deref() == Ok("0");
+    let use_batched = !any_q8_kv && !batched_opt_out;
+    if use_batched && prompt_ids.len() >= 8 {
+        return forward_prefill_tp_batched_logits(
+            model,
+            cluster,
+            ar,
+            layer_caches,
+            prompt_ids,
+            start_position,
+            logits_out,
+            Some(pool_prefill),
+        )
+        .context("TP batched prefill pooled (#324)");
+    }
+    for (i, &tok) in prompt_ids.iter().enumerate() {
+        let pos = start_position + i;
+        forward_one_token_tp_logits(
+            model, scratch, cluster, ar, layer_caches, tok, pos, logits_out,
+        )
+        .with_context(|| format!("TP prefill loop @ pos {pos} (pooled)"))?;
+    }
+    Ok(())
+}
+
 pub fn forward_prefill_tp_logits(
     model: &Qwen3MoETpModel,
     scratch: &mut ShardedForwardOneTokenScratchTp,
@@ -815,6 +868,7 @@ pub fn forward_prefill_tp_logits(
             prompt_ids,
             start_position,
             logits_out,
+            None,
         )
         .context("TP batched prefill (AUTO-6b2 / AUTO-6c4)");
     }
@@ -846,6 +900,7 @@ fn forward_prefill_tp_batched_logits(
     prompt_ids: &[u32],
     start_position: usize,
     logits_out: &mut Vec<f32>,
+    pooled: Option<&mut ShardedForwardPrefillScratchTp>,
 ) -> Result<()> {
     use flambeau_core::Stream;
 
@@ -856,12 +911,18 @@ fn forward_prefill_tp_batched_logits(
     }
     let n_tokens = prompt_ids.len();
 
-    // 1. Allocate a prefill scratch sized to this prompt. Disposed at
-    //    the end of the call.
-    let prefill = ShardedForwardPrefillScratchTp::new(cfg, cluster, n_tokens)
-        .context("alloc TP prefill scratch")?;
+    // **#324** — caller-provided pooled scratch path. When `pooled` is
+    // `Some`, we reuse the inflight session's pre-allocated scratch
+    // (sized for `prefill_ubatch`), skipping the ~35 MB alloc/dispose
+    // each call. The scratch must be sized for at least `n_tokens`;
+    // we bail loudly if the caller violated that invariant.
+    //
+    // When `pooled` is `None`, we fall back to the legacy per-call
+    // alloc with a RAII dispose guard — kept for tests and any future
+    // caller that hasn't wired pooling.
 
-    // RAII guard so the scratch is disposed on every exit path.
+    // RAII guard so the scratch is disposed on every exit path
+    // (only used in the alloc-per-call branch).
     struct PrefillGuard<'c> {
         scratch: Option<ShardedForwardPrefillScratchTp>,
         cluster: &'c flambeau_backend_hip::HipCluster,
@@ -873,11 +934,33 @@ fn forward_prefill_tp_batched_logits(
             }
         }
     }
-    let mut guard = PrefillGuard {
-        scratch: Some(prefill),
-        cluster,
+
+    let mut owned_guard: Option<PrefillGuard<'_>> = None;
+    let scratch_ref: &mut ShardedForwardPrefillScratchTp = match pooled {
+        Some(s) => {
+            // Caller-provided scratch must fit n_tokens.
+            if s.per_rank[0].max_tokens < n_tokens {
+                bail!(
+                    "pooled TP prefill scratch sized {} < n_tokens {}",
+                    s.per_rank[0].max_tokens,
+                    n_tokens
+                );
+            }
+            s
+        }
+        None => {
+            let prefill = ShardedForwardPrefillScratchTp::new(cfg, cluster, n_tokens)
+                .context("alloc TP prefill scratch")?;
+            owned_guard = Some(PrefillGuard {
+                scratch: Some(prefill),
+                cluster,
+            });
+            owned_guard
+                .as_mut()
+                .and_then(|g| g.scratch.as_mut())
+                .expect("scratch present until drop")
+        }
     };
-    let scratch_ref = guard.scratch.as_mut().expect("scratch present until drop");
 
     // 2. Embed all L tokens on every rank. Token_embd is Replicated
     //    so each rank writes the same F16 [L, hidden] into its own

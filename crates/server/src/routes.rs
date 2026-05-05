@@ -106,6 +106,17 @@ pub struct ServerState {
     /// PP-only path doesn't use this (its prefill scratches are
     /// pre-allocated on the inflight session).
     pub prefill_serialiser: std::sync::Mutex<()>,
+    /// **#324** — shared TP prefill scratch, lazy-initialised on first
+    /// TP prefill. Sized for `FLAMBEAU_PREFILL_UBATCH` (default 512).
+    /// Reused across every TP prefill call in the server's lifetime,
+    /// eliminating the ~35 MB alloc/dispose churn that motivated #321.
+    /// Access is gated by `prefill_serialiser`: the chat handler holds
+    /// that across `prefill_logits`, and only one prefill can use the
+    /// scratch at a time, which is fine because the GPU stream is
+    /// serial anyway. Hybrid (pp+tp) doesn't use this — it has its
+    /// own per-stage scratch story which is V2 work.
+    pub tp_prefill_scratch:
+        std::sync::Mutex<Option<flambeau_qwen3_moe::forward::ShardedForwardPrefillScratchTp>>,
     /// Tools discovered on the `--mcp <url>` upstreams at startup
     /// (ROADMAP-V2 §M2.1). Merged into each request's `tools[]` before
     /// rendering the Jinja template, so the model sees them alongside
@@ -152,6 +163,50 @@ pub struct PendingDecode {
 }
 
 impl ServerState {
+    /// **#324** — lock the shared TP prefill scratch, lazy-initialising
+    /// on first call. Caller MUST already hold `prefill_serialiser` to
+    /// avoid concurrent init races and concurrent kernel writes (the
+    /// scratch buffers are not safe for parallel use).
+    ///
+    /// Sized for `FLAMBEAU_PREFILL_UBATCH` (default 512). Returns the
+    /// locked option as a guard so the caller can borrow `&mut` for
+    /// the duration of `prefill_logits`. PP-only models don't call
+    /// this; Hybrid currently doesn't use it either (V2 follow-up).
+    pub fn lock_tp_prefill_scratch(
+        &self,
+    ) -> anyhow::Result<
+        std::sync::MutexGuard<
+            '_,
+            Option<flambeau_qwen3_moe::forward::ShardedForwardPrefillScratchTp>,
+        >,
+    > {
+        let mut guard = self.tp_prefill_scratch.lock().unwrap();
+        if guard.is_none() {
+            let prefill_ubatch: usize = std::env::var("FLAMBEAU_PREFILL_UBATCH")
+                .ok()
+                .and_then(|s| s.parse().ok())
+                .filter(|n: &usize| *n >= 128)
+                .unwrap_or(512);
+            let cfg = match &self.model {
+                LoadedModel::Tp { model, .. } => &model.config,
+                _ => bail!("lock_tp_prefill_scratch on non-TP model"),
+            };
+            let scratch = flambeau_qwen3_moe::forward::ShardedForwardPrefillScratchTp::new(
+                cfg,
+                &self.cluster,
+                prefill_ubatch,
+            )
+            .context("lazy-init shared TP prefill scratch")?;
+            tracing::info!(
+                target: "server.prefill",
+                prefill_ubatch,
+                "lazy-init shared TP prefill scratch (#324)"
+            );
+            *guard = Some(scratch);
+        }
+        Ok(guard)
+    }
+
     /// **P2.9b-i1** — acquire an idle inflight slot, blocking until one
     /// is available. Iterates the pool with `try_lock` first; if every
     /// slot is busy, blocks on slot 0 (head-of-line, but bounded by
@@ -2537,12 +2592,23 @@ fn run_completion_scheduler_pp_blocking(
             } else {
                 None
             };
+            // **#324** — for TP, hand the shared pre-allocated scratch
+            // through so prefill_logits skips the per-call alloc.
+            let mut tp_scratch_g = if matches!(model, LoadedModel::Tp { .. }) {
+                Some(state.lock_tp_prefill_scratch()?)
+            } else {
+                None
+            };
+            let tp_pool: Option<
+                &mut flambeau_qwen3_moe::forward::ShardedForwardPrefillScratchTp,
+            > = tp_scratch_g.as_mut().and_then(|g| g.as_mut());
             crate::model::prefill_logits(
                 model,
                 cluster,
                 &mut *guard,
                 &prompt_ids,
                 &mut logits_buf,
+                tp_pool,
             )
             .context("scheduler-path prefill")?;
             // First-token stop mask: NEG_INFINITY all stop ids so the
@@ -2804,8 +2870,25 @@ fn run_completion_blocking_ids(
     } else {
         None
     };
-    prefill_logits(model, cluster, &mut inflight, &prompt_ids, &mut logits_buf)
-        .context("prefill logits")?;
+    // **#324** — for TP, hand the shared pre-allocated scratch through.
+    let mut tp_scratch_g = if matches!(model, LoadedModel::Tp { .. }) {
+        Some(state.lock_tp_prefill_scratch()?)
+    } else {
+        None
+    };
+    let tp_pool: Option<
+        &mut flambeau_qwen3_moe::forward::ShardedForwardPrefillScratchTp,
+    > = tp_scratch_g.as_mut().and_then(|g| g.as_mut());
+    prefill_logits(
+        model,
+        cluster,
+        &mut inflight,
+        &prompt_ids,
+        &mut logits_buf,
+        tp_pool,
+    )
+    .context("prefill logits")?;
+    drop(tp_scratch_g);
     drop(_prefill_lock);
     for &sid in stop_ids {
         if (sid as usize) < logits_buf.len() {
@@ -3309,8 +3392,25 @@ fn run_completion_blocking_streaming(
     } else {
         None
     };
-    prefill_logits(model, cluster, &mut inflight, &prompt_ids, &mut logits_buf)
-        .context("prefill logits")?;
+    // **#324** — for TP, hand the shared pre-allocated scratch through.
+    let mut tp_scratch_g = if matches!(model, LoadedModel::Tp { .. }) {
+        Some(state.lock_tp_prefill_scratch()?)
+    } else {
+        None
+    };
+    let tp_pool: Option<
+        &mut flambeau_qwen3_moe::forward::ShardedForwardPrefillScratchTp,
+    > = tp_scratch_g.as_mut().and_then(|g| g.as_mut());
+    prefill_logits(
+        model,
+        cluster,
+        &mut inflight,
+        &prompt_ids,
+        &mut logits_buf,
+        tp_pool,
+    )
+    .context("prefill logits")?;
+    drop(tp_scratch_g);
     drop(_prefill_lock);
     for &sid in stop_ids {
         if (sid as usize) < logits_buf.len() {
