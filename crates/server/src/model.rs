@@ -283,6 +283,58 @@ impl Inflight {
     }
 }
 
+/// **#229 GDN-at-chunk-boundary** — callback fired after each
+/// internal chunk completes during chunked prefill. Receives a
+/// host-side KV+GDN snapshot of the session at that boundary and the
+/// absolute token-count that the snapshot covers (= `start_position +
+/// chunk_end`, always a `chunk_tokens`-aligned multiple). Used by the
+/// prefix cache to populate intermediate (prefix-only, no-logits)
+/// entries during a fresh prefill so future requests with shared
+/// prefixes can restore at any chunk boundary. Callback is NOT fired
+/// for the final chunk (which terminates at the prompt end and may
+/// be partial-tail-aligned); the caller's full-prompt capture handles
+/// that case via `prefix_cache_try_capture_full`. Hybrid topology
+/// doesn't fire the callback — its per-stage per-rank snapshot
+/// shape is V2 work.
+pub type BoundaryCallback<'a> =
+    &'a mut dyn FnMut(Vec<Vec<LayerCacheSnapshot>>, usize) -> Result<()>;
+
+/// Capture a host-side KV/GDN snapshot of every rank in a PP session.
+/// Mirrors the per-rank loop inside `capture_kv_from_inflight`'s PP
+/// arm but takes the session directly (so it can be called from
+/// inside `prefill_logits`'s match arm where the inflight is
+/// destructured).
+fn snapshot_pp_session(
+    session: &Qwen3MoEShardedSession,
+    cluster: &HipCluster,
+) -> Result<Vec<Vec<LayerCacheSnapshot>>> {
+    use flambeau_qwen3_moe::session::snapshot_layer_caches_to_host;
+    let mut out = Vec::with_capacity(session.per_rank.len());
+    for (rank_idx, rank) in session.per_rank.iter().enumerate() {
+        let device = cluster.device(rank_idx);
+        let s = snapshot_layer_caches_to_host(&rank.caches, device)
+            .with_context(|| format!("PP snapshot rank {rank_idx}"))?;
+        out.push(s);
+    }
+    Ok(out)
+}
+
+/// Capture a host-side KV/GDN snapshot of every rank in a TP session.
+fn snapshot_tp_caches(
+    caches: &[Vec<flambeau_qwen3_moe::session::LayerCache>],
+    cluster: &HipCluster,
+) -> Result<Vec<Vec<LayerCacheSnapshot>>> {
+    use flambeau_qwen3_moe::session::snapshot_layer_caches_to_host;
+    let mut out = Vec::with_capacity(caches.len());
+    for (rank_idx, c) in caches.iter().enumerate() {
+        let device = cluster.device(rank_idx);
+        let s = snapshot_layer_caches_to_host(c, device)
+            .with_context(|| format!("TP snapshot rank {rank_idx}"))?;
+        out.push(s);
+    }
+    Ok(out)
+}
+
 /// Ingest the full prompt and write the logits row for the **last**
 /// prompt position into `logits_out`. Each topology dispatches through
 /// its own `forward_prefill_*_logits` entry point; the TP path is a
@@ -301,6 +353,13 @@ impl Inflight {
 /// prefix-cache snapshot covering `[0..start_position)` and is now
 /// prefilling only the tail; the per-layer `current_tokens` is already
 /// set to `start_position` by the restore step.
+///
+/// **#229 GDN-boundary** — `on_boundary`, when set, is invoked after
+/// every internal chunk completes (PP/TP only — Hybrid ignores). The
+/// callback receives a host-side snapshot at that boundary and the
+/// absolute token count covered. Use this to populate prefix-cache
+/// entries at every chunk boundary, enabling prefix-match hits on
+/// future requests that share an extending prefix.
 pub fn prefill_logits(
     model: &LoadedModel,
     cluster: &HipCluster,
@@ -309,6 +368,7 @@ pub fn prefill_logits(
     start_position: usize,
     logits_out: &mut Vec<f32>,
     tp_pool_prefill: Option<&mut ShardedForwardPrefillScratchTp>,
+    mut on_boundary: Option<BoundaryCallback<'_>>,
 ) -> Result<()> {
     if prompt_ids.is_empty() {
         bail!("prefill_logits: empty prompt");
@@ -320,45 +380,68 @@ pub fn prefill_logits(
                 session, prefill, ..
             },
         ) => {
-            // Chunked PP prefill. forward_prefill_pp recursively chunks
-            // internally when L > scratch.max_tokens. Drive all-but-last
-            // chunk through it (no logits needed), then a final
-            // forward_prefill_pp_logits call on the last chunk to
-            // harvest logits for sampling. KV / GDN state thread via
-            // start_position. Verified bit-exact in Phase A.
+            // **#229 GDN-boundary** — explicit per-chunk loop (mirrors
+            // TP/Hybrid below). Earlier this arm relied on
+            // `forward_prefill_pp`'s internal recursion for non-final
+            // chunks, but that hides chunk boundaries from the caller.
+            // Iterating explicitly lets us fire `on_boundary` after
+            // each non-final chunk so the prefix cache can record
+            // intermediate KV+GDN snapshots. KV/GDN parity at chunk
+            // boundaries is verified in Phase A.
             let chunk = prefill.per_rank[0].max_tokens;
             let l = prompt_ids.len();
             if l <= chunk {
                 forward_prefill_pp_logits(
                     m, session, cluster, prefill, prompt_ids, start_position, logits_out,
                 )
-                .context("PP prefill_logits")
+                .context("PP prefill_logits")?;
             } else {
-                let last = chunk.min(l);
-                let split = l - last;
                 tracing::debug!(
                     target: "server.prefill",
                     prompt_len = l,
                     chunk,
-                    split,
                     start_position,
-                    "chunked PP prefill (prefix via forward_prefill_pp, final chunk via _logits)"
+                    "chunked PP prefill (explicit per-chunk)"
                 );
-                let _ = forward_prefill_pp(
-                    m, session, cluster, prefill, &prompt_ids[..split], start_position,
-                )
-                .context("PP prefill (prefix chunks)")?;
-                forward_prefill_pp_logits(
-                    m,
-                    session,
-                    cluster,
-                    prefill,
-                    &prompt_ids[split..],
-                    start_position + split,
-                    logits_out,
-                )
-                .context("PP prefill_logits (final chunk)")
+                let mut start = 0usize;
+                while start < l {
+                    let end = (start + chunk).min(l);
+                    let is_last = end == l;
+                    if is_last {
+                        forward_prefill_pp_logits(
+                            m,
+                            session,
+                            cluster,
+                            prefill,
+                            &prompt_ids[start..end],
+                            start_position + start,
+                            logits_out,
+                        )
+                        .with_context(|| {
+                            format!("PP prefill_logits chunk [{start}..{end}) (final)")
+                        })?;
+                    } else {
+                        forward_prefill_pp(
+                            m,
+                            session,
+                            cluster,
+                            prefill,
+                            &prompt_ids[start..end],
+                            start_position + start,
+                        )
+                        .with_context(|| {
+                            format!("PP prefill chunk [{start}..{end})")
+                        })?;
+                        if let Some(cb) = on_boundary.as_mut() {
+                            let snap = snapshot_pp_session(session, cluster)
+                                .context("PP boundary snapshot")?;
+                            cb(snap, start_position + end)?;
+                        }
+                    }
+                    start = end;
+                }
             }
+            Ok(())
         }
         (LoadedModel::Tp { model, ar }, Inflight::Tp { session, decode }) => {
             // Chunked TP prefill (Phase B3a-TP). Phase A2-TP parity
@@ -385,7 +468,7 @@ pub fn prefill_logits(
                         model, decode, pool, cluster, ar, &mut session.caches,
                         prompt_ids, start_position, logits_out,
                     )
-                    .context("TP prefill_logits (pooled)")
+                    .context("TP prefill_logits (pooled)")?;
                 } else {
                     tracing::debug!(
                         target: "server.prefill",
@@ -408,16 +491,22 @@ pub fn prefill_logits(
                         .with_context(|| {
                             format!("TP prefill_logits chunk [{start}..{end}) (pooled)")
                         })?;
+                        if !is_last {
+                            if let Some(cb) = on_boundary.as_mut() {
+                                let snap = snapshot_tp_caches(&session.caches, cluster)
+                                    .context("TP boundary snapshot (pooled)")?;
+                                cb(snap, start_position + end)?;
+                            }
+                        }
                         start = end;
                     }
-                    Ok(())
                 }
             } else if l <= chunk {
                 forward_prefill_tp_logits(
                     model, decode, cluster, ar, &mut session.caches,
                     prompt_ids, start_position, logits_out,
                 )
-                .context("TP prefill_logits")
+                .context("TP prefill_logits")?;
             } else {
                 tracing::debug!(
                     target: "server.prefill",
@@ -438,10 +527,17 @@ pub fn prefill_logits(
                         &prompt_ids[start..end], start_position + start, dst,
                     )
                     .with_context(|| format!("TP prefill_logits chunk [{start}..{end})"))?;
+                    if !is_last {
+                        if let Some(cb) = on_boundary.as_mut() {
+                            let snap = snapshot_tp_caches(&session.caches, cluster)
+                                .context("TP boundary snapshot")?;
+                            cb(snap, start_position + end)?;
+                        }
+                    }
                     start = end;
                 }
-                Ok(())
             }
+            Ok(())
         }
         (
             LoadedModel::Hybrid {
@@ -746,27 +842,12 @@ pub fn capture_kv_from_inflight(
     cluster: &HipCluster,
     model: &LoadedModel,
 ) -> Result<Vec<Vec<LayerCacheSnapshot>>> {
-    use flambeau_qwen3_moe::session::snapshot_layer_caches_to_host;
     match (inflight, model) {
         (Inflight::Pp { session, .. }, LoadedModel::Pp { .. }) => {
-            let mut out = Vec::with_capacity(session.per_rank.len());
-            for (rank_idx, rank_session) in session.per_rank.iter().enumerate() {
-                let device = cluster.device(rank_idx);
-                let snap = snapshot_layer_caches_to_host(&rank_session.caches, device)
-                    .with_context(|| format!("PP capture rank {rank_idx}"))?;
-                out.push(snap);
-            }
-            Ok(out)
+            snapshot_pp_session(session, cluster)
         }
         (Inflight::Tp { session, .. }, LoadedModel::Tp { .. }) => {
-            let mut out = Vec::with_capacity(session.caches.len());
-            for (rank_idx, rank_caches) in session.caches.iter().enumerate() {
-                let device = cluster.device(rank_idx);
-                let snap = snapshot_layer_caches_to_host(rank_caches, device)
-                    .with_context(|| format!("TP capture rank {rank_idx}"))?;
-                out.push(snap);
-            }
-            Ok(out)
+            snapshot_tp_caches(&session.caches, cluster)
         }
         (Inflight::Hybrid { .. }, LoadedModel::Hybrid { .. }) => {
             bail!(

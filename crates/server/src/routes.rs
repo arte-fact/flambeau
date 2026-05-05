@@ -27,6 +27,22 @@ use crate::model::{
     LoadedModel, SpecDecodePp,
 };
 use crate::prefix_cache::{PrefixCache, PrefixKeys, TopologyTag};
+
+/// **#229 V1.1** — outcome of `ServerState::prefix_cache_try_restore`.
+/// Distinguishes the three actionable states for the prefill phase.
+#[derive(Debug)]
+pub enum PrefixCacheRestore {
+    /// No useful entry; caller does fresh full prefill.
+    Miss,
+    /// Full-prompt match. KV+GDN restored into inflight; caller skips
+    /// `prefill_logits` entirely and samples first decode token from
+    /// `logits`.
+    FullHit { logits: std::sync::Arc<Vec<f32>> },
+    /// Chunk-aligned prefix match. KV+GDN restored at boundary
+    /// `n_matched`; caller does a partial prefill of `prompt_ids[n_matched..]`
+    /// with `start_position = n_matched` to advance to prompt end.
+    PrefixHit { n_matched: usize },
+}
 use crate::state::{parse_stop, SamplingParams};
 
 
@@ -223,26 +239,24 @@ impl ServerState {
         Ok(guard)
     }
 
-    /// **#229 V1 P2.10c** — look up the prefix cache for the given
-    /// prompt and, on full-prompt match, restore the cached KV+GDN
-    /// state into `inflight` and return the cached last-position
-    /// logits row. Returning `Ok(Some(_))` means the caller MUST skip
-    /// `prefill_logits` entirely and sample first decode token from
-    /// the returned logits.
+    /// **#229 V1.1 P2.10c** — look up the prefix cache for the given
+    /// prompt. On a hit, restore the cached KV+GDN state into
+    /// `inflight` and report whether it covers the FULL prompt (with
+    /// cached logits, prefill skipped) or just a chunk-aligned PREFIX
+    /// (caller must run a partial tail prefill).
     ///
-    /// Returns `Ok(None)` (caller proceeds with fresh prefill) when:
+    /// Returns `Ok(Miss)` (caller does fresh full prefill) when:
     /// - `FLAMBEAU_PREFIX_CACHE` is unset (default OFF).
-    /// - Prompt has zero complete chunks (< chunk_tokens).
+    /// - Prompt is shorter than one chunk (< chunk_tokens).
     /// - Topology is `Hybrid` (per-stage per-rank shape unsupported).
-    /// - No full-prompt match (only prefix match — V1 doesn't restore
-    ///   prefix matches because GDN can't be chunk-truncated).
-    /// - Matched entry lacks KV or last_logits (index-only / partial).
+    /// - No matching chain in the cache.
+    /// - Matched entry lacks a KV snapshot.
     /// - Restore fails (logged + downgraded to miss).
     pub fn prefix_cache_try_restore(
         &self,
         inflight: &mut Inflight,
         prompt_ids: &[u32],
-    ) -> anyhow::Result<Option<std::sync::Arc<Vec<f32>>>> {
+    ) -> anyhow::Result<PrefixCacheRestore> {
         tracing::debug!(
             target: "server.prefix_cache",
             prompt_tokens = prompt_ids.len(),
@@ -251,18 +265,18 @@ impl ServerState {
             "prefix_cache_try_restore called"
         );
         if !PrefixCache::enabled() {
-            return Ok(None);
+            return Ok(PrefixCacheRestore::Miss);
         }
         if matches!(self.model, LoadedModel::Hybrid { .. }) {
-            return Ok(None);
+            return Ok(PrefixCacheRestore::Miss);
         }
         let chunk_tokens = self.prefix_cache_chunk_tokens;
         if prompt_ids.len() < chunk_tokens {
-            return Ok(None);
+            return Ok(PrefixCacheRestore::Miss);
         }
         let keys = PrefixKeys::from_prompt(prompt_ids, chunk_tokens);
         if keys.n_chunks() == 0 {
-            return Ok(None);
+            return Ok(PrefixCacheRestore::Miss);
         }
         let topology = self.topology_tag;
         let info = self
@@ -270,26 +284,21 @@ impl ServerState {
             .longest_match(&keys, topology, |_terminal| {});
         let info = match info {
             Some(m) => m,
-            None => return Ok(None),
+            None => return Ok(PrefixCacheRestore::Miss),
         };
-        // V1: only act on FULL-PROMPT matches (prefix matches require
-        // GDN-at-chunk-boundary support, which is V2 work).
-        if info.n_tokens != prompt_ids.len() {
-            tracing::debug!(
-                target: "server.prefix_cache",
-                n_matched_tokens = info.n_tokens,
-                prompt_tokens = prompt_ids.len(),
-                "prefix-only match (V1 skips — needs GDN chunk-boundary support)"
-            );
-            return Ok(None);
-        }
         let snapshot = match self.prefix_cache.snapshot_for(info.terminal) {
             Some(arc) => arc,
-            None => return Ok(None),
+            None => return Ok(PrefixCacheRestore::Miss),
         };
-        let logits = match self.prefix_cache.logits_for(info.terminal) {
-            Some(arc) => arc,
-            None => return Ok(None),
+        let is_full = info.n_tokens == prompt_ids.len();
+        // For full-prompt match we need cached logits to skip prefill.
+        // If the entry was inserted at a chunk boundary (intermediate)
+        // there are no logits — degrade to partial-prefill at that
+        // boundary (still saves work).
+        let logits = if is_full {
+            self.prefix_cache.logits_for(info.terminal)
+        } else {
+            None
         };
         let restore_start = std::time::Instant::now();
         if let Err(e) = restore_kv_into_inflight(
@@ -303,19 +312,90 @@ impl ServerState {
                 error = %e,
                 "restore failed — falling through to fresh prefill"
             );
-            return Ok(None);
+            return Ok(PrefixCacheRestore::Miss);
         }
         let restore_ms = restore_start.elapsed().as_secs_f64() * 1000.0;
+        match logits {
+            Some(arc) => {
+                tracing::info!(
+                    target: "server.prefix_cache",
+                    event = "full_hit",
+                    n_matched_tokens = info.n_tokens,
+                    n_matched_chunks = info.n_chunks,
+                    prompt_tokens = prompt_ids.len(),
+                    restore_ms,
+                    "prefix-cache full hit — KV restored, prefill skipped"
+                );
+                Ok(PrefixCacheRestore::FullHit { logits: arc })
+            }
+            None => {
+                tracing::info!(
+                    target: "server.prefix_cache",
+                    event = "prefix_hit",
+                    n_matched_tokens = info.n_tokens,
+                    n_matched_chunks = info.n_chunks,
+                    prompt_tokens = prompt_ids.len(),
+                    restore_ms,
+                    "prefix-cache prefix hit — KV restored, partial prefill of tail"
+                );
+                Ok(PrefixCacheRestore::PrefixHit {
+                    n_matched: info.n_tokens,
+                })
+            }
+        }
+    }
+
+    /// **#229 V1.1** — insert an intermediate (chunk-boundary) cache
+    /// entry produced during a fresh prefill's per-chunk loop. No
+    /// logits are stored (callers can't sample mid-prefill); future
+    /// requests that hit this entry restore at the boundary and
+    /// proceed with a partial-tail prefill via `prefill_logits`.
+    pub fn prefix_cache_insert_intermediate(
+        &self,
+        prompt_ids: &[u32],
+        n_tokens_completed: usize,
+        snap: Vec<Vec<flambeau_qwen3_moe::session::LayerCacheSnapshot>>,
+    ) {
+        if !PrefixCache::enabled() {
+            return;
+        }
+        if matches!(self.model, LoadedModel::Hybrid { .. }) {
+            return;
+        }
+        let chunk_tokens = self.prefix_cache_chunk_tokens;
+        if n_tokens_completed == 0 || n_tokens_completed % chunk_tokens != 0 {
+            return;
+        }
+        let n_full_chunks = n_tokens_completed / chunk_tokens;
+        if n_full_chunks == 0 {
+            return;
+        }
+        let keys = PrefixKeys::from_prompt(prompt_ids, chunk_tokens);
+        if n_full_chunks > keys.chunk_keys.len() {
+            return;
+        }
+        let chain = keys.chunk_keys[..n_full_chunks].to_vec();
+        let bytes = snapshot_bytes(&snap);
+        let snap_arc = std::sync::Arc::new(snap);
+        self.prefix_cache.insert_with_kv(
+            chain,
+            self.topology_tag,
+            chunk_tokens,
+            n_tokens_completed,
+            snap_arc,
+            None,
+            bytes,
+        );
         tracing::info!(
             target: "server.prefix_cache",
-            event = "hit",
-            n_matched_tokens = info.n_tokens,
-            n_matched_chunks = info.n_chunks,
-            prompt_tokens = prompt_ids.len(),
-            restore_ms,
-            "prefix-cache full hit — KV restored, prefill skipped"
+            event = "insert_intermediate",
+            n_chunks = n_full_chunks,
+            n_tokens = n_tokens_completed,
+            kv_bytes = bytes,
+            used_bytes = self.prefix_cache.used_bytes(),
+            entries = self.prefix_cache.len(),
+            "prefix-cache write — intermediate boundary entry"
         );
-        Ok(Some(logits))
     }
 
     /// **#229 P2.10c** — best-effort capture of the post-prefill KV
@@ -408,7 +488,7 @@ impl ServerState {
             chunk_tokens,
             prompt_ids.len(),
             snap_arc,
-            logits_arc,
+            Some(logits_arc),
             total_bytes,
         );
         tracing::info!(
@@ -2820,31 +2900,71 @@ fn run_completion_scheduler_pp_blocking(
             let tp_pool: Option<
                 &mut flambeau_qwen3_moe::forward::ShardedForwardPrefillScratchTp,
             > = tp_scratch_g.as_mut().and_then(|g| g.as_mut());
-            // **#229 V1** — prefix-cache full-prompt lookup. On hit:
-            // KV+GDN restored, prefill skipped entirely, logits served
-            // from cache. On miss: fall through to fresh prefill, then
-            // capture for next time.
-            let cached_logits =
+            // **#229 V1.1** — prefix-cache lookup. Three outcomes:
+            //   FullHit: KV+GDN restored, logits cached → skip prefill.
+            //   PrefixHit: KV+GDN restored at chunk boundary → partial
+            //              prefill of the tail starting at n_matched.
+            //   Miss: full fresh prefill, capture both intermediate
+            //         (chunk-boundary) and final (full prompt) entries.
+            let restore =
                 state.prefix_cache_try_restore(&mut *guard, &prompt_ids)?;
-            if let Some(arc) = cached_logits {
-                logits_buf.clear();
-                logits_buf.extend_from_slice(arc.as_ref());
-            } else {
-                crate::model::prefill_logits(
-                    model,
-                    cluster,
-                    &mut *guard,
-                    &prompt_ids,
-                    0,
-                    &mut logits_buf,
-                    tp_pool,
-                )
-                .context("scheduler-path prefill")?;
-                state.prefix_cache_try_capture_full(
-                    &*guard,
-                    &prompt_ids,
-                    &logits_buf,
-                );
+            match restore {
+                PrefixCacheRestore::FullHit { logits } => {
+                    logits_buf.clear();
+                    logits_buf.extend_from_slice(logits.as_ref());
+                }
+                PrefixCacheRestore::PrefixHit { n_matched } => {
+                    crate::model::prefill_logits(
+                        model,
+                        cluster,
+                        &mut *guard,
+                        &prompt_ids[n_matched..],
+                        n_matched,
+                        &mut logits_buf,
+                        tp_pool,
+                        None,
+                    )
+                    .context("scheduler-path tail prefill (after prefix-hit)")?;
+                    // After tail prefill we have full state — capture
+                    // the FULL entry (with logits) for future requests.
+                    state.prefix_cache_try_capture_full(
+                        &*guard,
+                        &prompt_ids,
+                        &logits_buf,
+                    );
+                }
+                PrefixCacheRestore::Miss => {
+                    let mut boundary_cb = |snap, n_tok| {
+                        state.prefix_cache_insert_intermediate(
+                            &prompt_ids,
+                            n_tok,
+                            snap,
+                        );
+                        Ok(())
+                    };
+                    let cb_opt: Option<crate::model::BoundaryCallback<'_>> =
+                        if PrefixCache::enabled() {
+                            Some(&mut boundary_cb)
+                        } else {
+                            None
+                        };
+                    crate::model::prefill_logits(
+                        model,
+                        cluster,
+                        &mut *guard,
+                        &prompt_ids,
+                        0,
+                        &mut logits_buf,
+                        tp_pool,
+                        cb_opt,
+                    )
+                    .context("scheduler-path prefill")?;
+                    state.prefix_cache_try_capture_full(
+                        &*guard,
+                        &prompt_ids,
+                        &logits_buf,
+                    );
+                }
             }
             // First-token stop mask: NEG_INFINITY all stop ids so the
             // model is forced to emit a content token first.
@@ -3114,33 +3234,60 @@ fn run_completion_blocking_ids(
     let tp_pool: Option<
         &mut flambeau_qwen3_moe::forward::ShardedForwardPrefillScratchTp,
     > = tp_scratch_g.as_mut().and_then(|g| g.as_mut());
-    // **#229 V1** — prefix-cache full-prompt lookup. Bypassed when the
-    // request will collect logprobs (cache doesn't store per-token
-    // logprobs) or when MTP spec-decode is engaged (cached entries
-    // don't include MTP head state).
+    // **#229 V1.1** — prefix-cache restore (legacy path). Three
+    // outcomes per `prefix_cache_try_restore`. Bypass when logprobs
+    // or MTP spec-decode active.
     let cache_eligible = params.collect_logprobs.is_none()
         && !matches!(model, LoadedModel::Pp { mtp: Some(_), .. });
-    let cached_logits = if cache_eligible {
+    let restore = if cache_eligible {
         state.prefix_cache_try_restore(&mut inflight, &prompt_ids)?
     } else {
-        None
+        PrefixCacheRestore::Miss
     };
-    if let Some(arc) = cached_logits {
-        logits_buf.clear();
-        logits_buf.extend_from_slice(arc.as_ref());
-    } else {
-        prefill_logits(
-            model,
-            cluster,
-            &mut inflight,
-            &prompt_ids,
-            0,
-            &mut logits_buf,
-            tp_pool,
-        )
-        .context("prefill logits")?;
-        if cache_eligible {
+    match restore {
+        PrefixCacheRestore::FullHit { logits } => {
+            logits_buf.clear();
+            logits_buf.extend_from_slice(logits.as_ref());
+        }
+        PrefixCacheRestore::PrefixHit { n_matched } => {
+            prefill_logits(
+                model,
+                cluster,
+                &mut inflight,
+                &prompt_ids[n_matched..],
+                n_matched,
+                &mut logits_buf,
+                tp_pool,
+                None,
+            )
+            .context("legacy-path tail prefill (after prefix-hit)")?;
             state.prefix_cache_try_capture_full(&inflight, &prompt_ids, &logits_buf);
+        }
+        PrefixCacheRestore::Miss => {
+            let mut boundary_cb = |snap, n_tok| {
+                state.prefix_cache_insert_intermediate(&prompt_ids, n_tok, snap);
+                Ok(())
+            };
+            let cb_opt: Option<crate::model::BoundaryCallback<'_>> =
+                if cache_eligible && PrefixCache::enabled() {
+                    Some(&mut boundary_cb)
+                } else {
+                    None
+                };
+            prefill_logits(
+                model,
+                cluster,
+                &mut inflight,
+                &prompt_ids,
+                0,
+                &mut logits_buf,
+                tp_pool,
+                cb_opt,
+            )
+            .context("prefill logits")?;
+            if cache_eligible {
+                state.prefix_cache_try_capture_full(&inflight, &prompt_ids, &logits_buf);
+            }
         }
     }
     drop(tp_scratch_g);
@@ -3656,24 +3803,52 @@ fn run_completion_blocking_streaming(
     let tp_pool: Option<
         &mut flambeau_qwen3_moe::forward::ShardedForwardPrefillScratchTp,
     > = tp_scratch_g.as_mut().and_then(|g| g.as_mut());
-    // **#229 V1** — prefix-cache restore (streaming path).
-    let cached_logits_stream =
+    // **#229 V1.1** — prefix-cache restore (streaming path).
+    let restore_stream =
         state.prefix_cache_try_restore(&mut inflight, &prompt_ids)?;
-    if let Some(arc) = cached_logits_stream {
-        logits_buf.clear();
-        logits_buf.extend_from_slice(arc.as_ref());
-    } else {
-        prefill_logits(
-            model,
-            cluster,
-            &mut inflight,
-            &prompt_ids,
-            0,
-            &mut logits_buf,
-            tp_pool,
-        )
-        .context("prefill logits")?;
-        state.prefix_cache_try_capture_full(&inflight, &prompt_ids, &logits_buf);
+    match restore_stream {
+        PrefixCacheRestore::FullHit { logits } => {
+            logits_buf.clear();
+            logits_buf.extend_from_slice(logits.as_ref());
+        }
+        PrefixCacheRestore::PrefixHit { n_matched } => {
+            prefill_logits(
+                model,
+                cluster,
+                &mut inflight,
+                &prompt_ids[n_matched..],
+                n_matched,
+                &mut logits_buf,
+                tp_pool,
+                None,
+            )
+            .context("streaming-path tail prefill (after prefix-hit)")?;
+            state.prefix_cache_try_capture_full(&inflight, &prompt_ids, &logits_buf);
+        }
+        PrefixCacheRestore::Miss => {
+            let mut boundary_cb = |snap, n_tok| {
+                state.prefix_cache_insert_intermediate(&prompt_ids, n_tok, snap);
+                Ok(())
+            };
+            let cb_opt: Option<crate::model::BoundaryCallback<'_>> =
+                if PrefixCache::enabled() {
+                    Some(&mut boundary_cb)
+                } else {
+                    None
+                };
+            prefill_logits(
+                model,
+                cluster,
+                &mut inflight,
+                &prompt_ids,
+                0,
+                &mut logits_buf,
+                tp_pool,
+                cb_opt,
+            )
+            .context("prefill logits")?;
+            state.prefix_cache_try_capture_full(&inflight, &prompt_ids, &logits_buf);
+        }
     }
     drop(tp_scratch_g);
     drop(_prefill_lock);

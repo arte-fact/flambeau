@@ -411,7 +411,7 @@ impl PrefixCache {
         chunk_tokens: usize,
         n_tokens: usize,
         kv: std::sync::Arc<KvSnapshot>,
-        last_logits: std::sync::Arc<Vec<f32>>,
+        last_logits: Option<std::sync::Arc<Vec<f32>>>,
         bytes: usize,
     ) {
         let Some(&terminal) = chain.last() else {
@@ -432,7 +432,7 @@ impl PrefixCache {
                 replaced_bytes += prior_lp.len() * std::mem::size_of::<f32>();
             }
             existing[idx].kv = Some(std::sync::Arc::clone(&kv));
-            existing[idx].last_logits = Some(std::sync::Arc::clone(&last_logits));
+            existing[idx].last_logits = last_logits.as_ref().map(std::sync::Arc::clone);
         } else {
             existing.push(CacheEntry {
                 topology,
@@ -440,7 +440,7 @@ impl PrefixCache {
                 n_tokens,
                 chain,
                 kv: Some(std::sync::Arc::clone(&kv)),
-                last_logits: Some(std::sync::Arc::clone(&last_logits)),
+                last_logits: last_logits.as_ref().map(std::sync::Arc::clone),
             });
         }
         inner.used_bytes = inner.used_bytes.saturating_sub(replaced_bytes) + bytes;
