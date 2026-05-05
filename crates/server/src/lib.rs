@@ -14,6 +14,7 @@
 pub mod agent_stats;
 pub mod api;
 pub mod mcp_client;
+pub mod prefix_cache;
 pub mod state;
 pub mod tool_call_parser;
 
