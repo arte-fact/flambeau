@@ -108,6 +108,40 @@ pub async fn serve(cfg: ServeConfig) -> Result<()> {
         "tool-call format detected from chat template"
     );
 
+    // **#235 P3.15** — `enable_thinking` Jinja variable detection.
+    // Qwen3.6 templates render `<think>` blocks when this is true; the
+    // bool feeds the `/v1/models` `"thinking"` capability so clients
+    // can choose whether to expose the request flag (#233).
+    let supports_thinking = tpl_src.contains("enable_thinking");
+
+    // **#235 P3.15** — quantization label from GGUF `general.file_type`.
+    // The integer enum mirrors llama.cpp's LLAMA_FTYPE; we only label
+    // the families we actually load. Unknown values surface as
+    // `"type=N"` rather than `None` so a new quant doesn't go silent.
+    let quantization: Option<String> = gguf
+        .metadata_u32("general.file_type")
+        .map(|ft| match ft {
+            0 => "F32".to_string(),
+            1 => "F16".to_string(),
+            2 => "Q4_0".to_string(),
+            3 => "Q4_1".to_string(),
+            6 => "Q5_0".to_string(),
+            7 => "Q5_1".to_string(),
+            8 => "Q8_0".to_string(),
+            9 => "Q8_1".to_string(),
+            10 => "Q2_K".to_string(),
+            11 => "Q3_K_S".to_string(),
+            12 => "Q3_K_M".to_string(),
+            13 => "Q3_K_L".to_string(),
+            14 => "Q4_K_S".to_string(),
+            15 => "Q4_K_M".to_string(),
+            16 => "Q5_K_S".to_string(),
+            17 => "Q5_K_M".to_string(),
+            18 => "Q6_K".to_string(),
+            32 => "BF16".to_string(),
+            other => format!("type={other}"),
+        });
+
     // Sanity: device_ids must be valid.
     let n_available = device_count().unwrap_or(0);
     for d in &cfg.device_ids {
@@ -571,6 +605,8 @@ pub async fn serve(cfg: ServeConfig) -> Result<()> {
         remote_tools,
         agent_stats: crate::agent_stats::AgentStatsRing::default(),
         tool_call_format_default,
+        supports_thinking,
+        quantization,
         model_defaults,
         default_system,
     });

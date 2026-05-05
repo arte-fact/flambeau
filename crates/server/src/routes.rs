@@ -203,6 +203,18 @@ pub struct ServerState {
     /// template even though the arch tag says `qwen35moe`. Honoured
     /// when a request omits `tool_call_format` or sets it to "auto".
     pub tool_call_format_default: crate::tool_call_parser::ToolCallFormat,
+    /// **#235 P3.15** — `true` when the chat template carries the
+    /// `enable_thinking` Jinja variable (Qwen3.6 reasoning mode).
+    /// Surfaced as the `"thinking"` capability in `/v1/models` so
+    /// clients know whether to expose the request-side
+    /// `enable_thinking` flag (#233). Detected once at boot by
+    /// substring-matching the raw template source.
+    pub supports_thinking: bool,
+    /// **#235 P3.15** — human-readable quantization label derived
+    /// from the GGUF `general.file_type` integer (`"Q4_0"`,
+    /// `"Q4_K_M"`, `"F16"`, etc). `None` when the GGUF lacks the
+    /// field. Surfaced in `/v1/models`.
+    pub quantization: Option<String>,
     /// Sampling defaults read from the GGUF (`general.sampling.*`).
     /// Filled into omitted request fields by
     /// [`crate::state::SamplingParams::from_parts`]. Values that the
@@ -1380,8 +1392,34 @@ pub async fn embeddings(
     Json(resp).into_response()
 }
 
-/// GET /v1/models — lists just the loaded model.
+/// GET /v1/models — lists the loaded chat model with **#235 P3.15**
+/// extension fields: operational `context_length`, `max_output_tokens`,
+/// `architecture`, `quantization`, `capabilities`, and
+/// `tool_call_format`. The OpenAI-required fields (`id`, `object`,
+/// `created`, `owned_by`) come first; extra fields are ignored by
+/// strict OpenAI clients.
 pub async fn models(State(state): State<SharedState>) -> impl IntoResponse {
+    let mut capabilities: Vec<&'static str> = vec!["chat", "completion"];
+    if state.tokenizer.fim.is_some() {
+        capabilities.push("infill");
+    }
+    if state.embedding_model.is_some() {
+        // Server-level capability surfaced on the chat model entry —
+        // a client checking `/v1/models` for "embeddings" support
+        // doesn't need to enumerate every loaded model. The embedding
+        // model has its own id (#230) but isn't itself listed here.
+        capabilities.push("embeddings");
+    }
+    capabilities.push("tools");
+    if state.supports_thinking {
+        capabilities.push("thinking");
+    }
+
+    let tool_call_format = match state.tool_call_format_default {
+        crate::tool_call_parser::ToolCallFormat::Hermes => "hermes",
+        crate::tool_call_parser::ToolCallFormat::QwenCoder => "qwen_coder",
+    };
+
     Json(ModelsListResponse {
         object: "list",
         data: vec![ModelObject {
@@ -1389,6 +1427,14 @@ pub async fn models(State(state): State<SharedState>) -> impl IntoResponse {
             object: "model",
             created: 0,
             owned_by: "flambeau",
+            context_length: state.cfg.context_length as u32,
+            // Mirror the server-side cap in `SamplingParams::from_parts`
+            // so clients sizing requests don't have to guess.
+            max_output_tokens: 8192,
+            architecture: state.cfg.arch.clone(),
+            quantization: state.quantization.clone(),
+            capabilities,
+            tool_call_format,
         }],
     })
 }

@@ -25,6 +25,35 @@ pub struct ModelObject {
     pub object: &'static str,
     pub created: u64,
     pub owned_by: &'static str,
+    /// **#235 P3.15** — operational context window in tokens (already
+    /// reflects the `FLAMBEAU_CTX_CAP` shrink, not the architectural
+    /// max from the GGUF). Surfaced so clients can size prompts
+    /// without a separate `/v1/models/<id>/details` round-trip.
+    pub context_length: u32,
+    /// **#235 P3.15** — server-enforced ceiling on `max_tokens` per
+    /// request (`SamplingParams::from_parts` clamps at this value).
+    pub max_output_tokens: u32,
+    /// **#235 P3.15** — model architecture tag from the GGUF
+    /// `general.architecture` key (`qwen35moe`, `qwen36moe`,
+    /// `qwen3next`, etc). flambeau-only field; OpenAI clients ignore.
+    pub architecture: String,
+    /// **#235 P3.15** — quantization label derived from the GGUF
+    /// `general.file_type` integer. `None` when the GGUF doesn't
+    /// carry the field (rare; older converters).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub quantization: Option<String>,
+    /// **#235 P3.15** — feature surface this model + server combo
+    /// supports. Each entry is a stable token (`"chat"`,
+    /// `"completion"`, `"infill"`, `"embeddings"`, `"tools"`,
+    /// `"thinking"`). Clients can use `.includes("thinking")` to
+    /// know whether to expose the `enable_thinking` request flag in
+    /// their UI.
+    pub capabilities: Vec<&'static str>,
+    /// **#235 P3.15** — wire shape the parser expects for tool-call
+    /// model output (`"hermes"`, `"qwen_coder"`). Set even when the
+    /// caller doesn't pass `tool_call_format`; matches the boot-time
+    /// detection from the chat template.
+    pub tool_call_format: &'static str,
 }
 
 // ---- /v1/chat/completions --------------------------------------------------
