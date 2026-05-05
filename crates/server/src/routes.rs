@@ -267,9 +267,6 @@ impl ServerState {
         if !PrefixCache::enabled() {
             return Ok(PrefixCacheRestore::Miss);
         }
-        if matches!(self.model, LoadedModel::Hybrid { .. }) {
-            return Ok(PrefixCacheRestore::Miss);
-        }
         let chunk_tokens = self.prefix_cache_chunk_tokens;
         if prompt_ids.len() < chunk_tokens {
             return Ok(PrefixCacheRestore::Miss);
@@ -359,9 +356,6 @@ impl ServerState {
         if !PrefixCache::enabled() {
             return;
         }
-        if matches!(self.model, LoadedModel::Hybrid { .. }) {
-            return;
-        }
         let chunk_tokens = self.prefix_cache_chunk_tokens;
         if n_tokens_completed == 0 || n_tokens_completed % chunk_tokens != 0 {
             return;
@@ -441,9 +435,6 @@ impl ServerState {
             "prefix_cache_try_capture_full called"
         );
         if !PrefixCache::enabled() {
-            return;
-        }
-        if matches!(self.model, LoadedModel::Hybrid { .. }) {
             return;
         }
         const MIN_PROMPT_TOKENS: usize = 50;

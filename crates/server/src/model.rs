@@ -335,6 +335,76 @@ fn snapshot_tp_caches(
     Ok(out)
 }
 
+/// **#229 Hybrid** — capture a host-side KV/GDN snapshot of every
+/// (stage, tp_rank) pair in a Hybrid (PP+TP) session. Returned as a
+/// flat `Vec<Vec<LayerCacheSnapshot>>` indexed by global rank
+/// `g = stage_idx * tp_size + tp_rank`. Each stage's
+/// `caches[tp_rank]` holds only the layers in that stage's
+/// `layer_range`, so the inner `Vec<LayerCacheSnapshot>` lengths
+/// vary across global-rank entries (one entry's inner length equals
+/// the owning stage's layer_range size). The cache's TopologyTag
+/// carries `pp_size`/`tp_size`, so the consumer can unpack the flat
+/// vector unambiguously.
+fn snapshot_hybrid_session(
+    session: &flambeau_qwen3_moe::Qwen3MoEHybridSession,
+    model: &flambeau_qwen3_moe::Qwen3MoEHybridModel,
+) -> Result<Vec<Vec<LayerCacheSnapshot>>> {
+    use flambeau_qwen3_moe::session::snapshot_layer_caches_to_host;
+    let mut out: Vec<Vec<LayerCacheSnapshot>> = Vec::with_capacity(
+        session
+            .stages
+            .iter()
+            .map(|s| s.caches.len())
+            .sum::<usize>(),
+    );
+    for (stage_idx, stage_session) in session.stages.iter().enumerate() {
+        let stage_model = model
+            .stages
+            .get(stage_idx)
+            .ok_or_else(|| anyhow::anyhow!("hybrid snapshot: stage {stage_idx} missing in model"))?;
+        for (tp_rank, layer_caches) in stage_session.caches.iter().enumerate() {
+            let device = stage_model.sub_cluster.device(tp_rank);
+            let s = snapshot_layer_caches_to_host(layer_caches, device)
+                .with_context(|| format!("Hybrid snapshot stage {stage_idx} rank {tp_rank}"))?;
+            out.push(s);
+        }
+    }
+    Ok(out)
+}
+
+/// **#229 Hybrid** — inverse of `snapshot_hybrid_session`. Walks the
+/// flat `Vec<Vec<LayerCacheSnapshot>>` in stage-major order
+/// (`g = stage_idx * tp_size + tp_rank`) and writes each inner
+/// snapshot back into the matching `(stage, tp_rank)` device.
+fn restore_hybrid_session(
+    snapshot: &[Vec<LayerCacheSnapshot>],
+    session: &mut flambeau_qwen3_moe::Qwen3MoEHybridSession,
+    model: &flambeau_qwen3_moe::Qwen3MoEHybridModel,
+) -> Result<()> {
+    let total_ranks: usize = session.stages.iter().map(|s| s.caches.len()).sum();
+    if snapshot.len() != total_ranks {
+        bail!(
+            "Hybrid restore: snapshot global-rank count {} != session total ranks {}",
+            snapshot.len(),
+            total_ranks
+        );
+    }
+    let mut g = 0usize;
+    for (stage_idx, stage_session) in session.stages.iter_mut().enumerate() {
+        let stage_model = model
+            .stages
+            .get(stage_idx)
+            .ok_or_else(|| anyhow::anyhow!("hybrid restore: stage {stage_idx} missing in model"))?;
+        for (tp_rank, layer_caches) in stage_session.caches.iter_mut().enumerate() {
+            let device = stage_model.sub_cluster.device(tp_rank);
+            restore_layer_caches_from_host(&snapshot[g], layer_caches, device)
+                .with_context(|| format!("Hybrid restore stage {stage_idx} rank {tp_rank}"))?;
+            g += 1;
+        }
+    }
+    Ok(())
+}
+
 /// Ingest the full prompt and write the logits row for the **last**
 /// prompt position into `logits_out`. Each topology dispatches through
 /// its own `forward_prefill_*_logits` entry point; the TP path is a
@@ -558,7 +628,7 @@ pub fn prefill_logits(
                 forward_prefill_hybrid_logits(
                     hmodel, decode, cluster, stage_ars, session, prompt_ids, start_position, logits_out,
                 )
-                .context("hybrid prefill_logits")
+                .context("hybrid prefill_logits")?;
             } else {
                 tracing::debug!(
                     target: "server.prefill",
@@ -581,10 +651,17 @@ pub fn prefill_logits(
                     .with_context(|| {
                         format!("hybrid prefill_logits chunk [{start}..{end})")
                     })?;
+                    if !is_last {
+                        if let Some(cb) = on_boundary.as_mut() {
+                            let snap = snapshot_hybrid_session(session, hmodel)
+                                .context("Hybrid boundary snapshot")?;
+                            cb(snap, start_position + end)?;
+                        }
+                    }
                     start = end;
                 }
-                Ok(())
             }
+            Ok(())
         }
         _ => bail!("LoadedModel/Inflight variant mismatch"),
     }
@@ -842,6 +919,7 @@ pub fn capture_kv_from_inflight(
     cluster: &HipCluster,
     model: &LoadedModel,
 ) -> Result<Vec<Vec<LayerCacheSnapshot>>> {
+    let _ = cluster; // unused for Hybrid (uses per-stage sub_clusters)
     match (inflight, model) {
         (Inflight::Pp { session, .. }, LoadedModel::Pp { .. }) => {
             snapshot_pp_session(session, cluster)
@@ -849,12 +927,10 @@ pub fn capture_kv_from_inflight(
         (Inflight::Tp { session, .. }, LoadedModel::Tp { .. }) => {
             snapshot_tp_caches(&session.caches, cluster)
         }
-        (Inflight::Hybrid { .. }, LoadedModel::Hybrid { .. }) => {
-            bail!(
-                "Hybrid prefix-cache capture not yet wired (see \
-                 restore_kv_into_inflight — V2 follow-up)"
-            );
-        }
+        (
+            Inflight::Hybrid { session, .. },
+            LoadedModel::Hybrid { model: hmodel, .. },
+        ) => snapshot_hybrid_session(session, hmodel),
         _ => bail!("capture_kv_from_inflight: model/inflight variant mismatch"),
     }
 }
@@ -985,12 +1061,10 @@ pub fn restore_kv_into_inflight(
             }
             Ok(())
         }
-        (Inflight::Hybrid { .. }, LoadedModel::Hybrid { .. }) => {
-            bail!(
-                "Hybrid prefix-cache restore not yet wired (per-stage per-rank \
-                 layout doesn't match the flat snapshot type — V2 follow-up)"
-            );
-        }
+        (
+            Inflight::Hybrid { session, .. },
+            LoadedModel::Hybrid { model: hmodel, .. },
+        ) => restore_hybrid_session(snapshot, session, hmodel),
         _ => bail!("restore_kv_into_inflight: model/inflight variant mismatch"),
     }
 }
