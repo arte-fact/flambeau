@@ -170,6 +170,24 @@ pub struct ServerState {
     /// `cluster.device(rank)` to get a `&HipDevice` for the forward
     /// call. `None` mirrors `embedding_model = None`.
     pub embedding_rank: Option<usize>,
+    /// **#232 P2.12** — admission-control counter. Incremented at
+    /// request entry, decremented at response. When this exceeds
+    /// `inflight_slots + max_queue_depth`, new requests get 503 +
+    /// `Retry-After: 2` instead of queueing on the slot mutex.
+    /// Without this, a 100-request flood pile-ups against the slot
+    /// pool's blocking_lock, holding tokio runtime threads + per-
+    /// request memory until the GPU drains, eventually OOMing the
+    /// host. The counter is a cheap atomic; `AdmissionGuard` makes
+    /// the decrement RAII-safe across early returns.
+    pub in_flight: std::sync::atomic::AtomicUsize,
+    /// **#232** — max queued requests beyond the inflight slot pool.
+    /// `0` disables the check (legacy behaviour). Default 16 means
+    /// `inflight_slots + 16` admitted requests at any time; further
+    /// requests get 503. Sized so the queue empties in a few seconds
+    /// even on long generations: at 16 slots × ~5s avg request, the
+    /// queue takes ~80s to drain, which is the upper bound a
+    /// well-behaved client should retry over.
+    pub max_queue_depth: usize,
     /// Tools discovered on the `--mcp <url>` upstreams at startup
     /// (ROADMAP-V2 §M2.1). Merged into each request's `tools[]` before
     /// rendering the Jinja template, so the model sees them alongside
@@ -213,6 +231,46 @@ pub struct PendingDecode {
     pub token_id: u32,
     pub position: usize,
     pub response: std::sync::mpsc::Sender<anyhow::Result<Vec<f32>>>,
+}
+
+/// **#232 P2.12** — RAII guard for admission control. Holding one
+/// of these means the request is counted against
+/// `ServerState.in_flight`; dropping it decrements the counter on
+/// every exit path (success, error, panic-unwind).
+pub struct AdmissionGuard {
+    /// `None` when admission control is disabled
+    /// (`max_queue_depth = 0`); the guard then becomes a no-op.
+    state: Option<Arc<ServerState>>,
+}
+
+impl Drop for AdmissionGuard {
+    fn drop(&mut self) {
+        if let Some(state) = self.state.take() {
+            state
+                .in_flight
+                .fetch_sub(1, std::sync::atomic::Ordering::AcqRel);
+        }
+    }
+}
+
+/// **#232 P2.12** — canned 503 response when the queue is full.
+/// Mirrors OpenAI's overloaded-error shape; `Retry-After: 2` tells
+/// well-behaved clients to back off briefly. Used by every endpoint
+/// whose body acquires an inflight slot.
+pub fn queue_full_response() -> Response {
+    let body = Json(json!({
+        "error": {
+            "message": "server queue full — too many concurrent requests",
+            "type": "overloaded",
+            "code": "queue_full"
+        }
+    }));
+    let mut resp = (StatusCode::SERVICE_UNAVAILABLE, body).into_response();
+    resp.headers_mut().insert(
+        axum::http::header::RETRY_AFTER,
+        axum::http::HeaderValue::from_static("2"),
+    );
+    resp
 }
 
 impl ServerState {
@@ -515,6 +573,38 @@ impl ServerState {
             entries = self.prefix_cache.len(),
             "prefix-cache write — full-prompt entry inserted"
         );
+    }
+
+    /// **#232 P2.12** — try to admit a new request. Bumps `in_flight`
+    /// if under cap (`inflight_slots + max_queue_depth`); returns
+    /// `None` when the cap is hit (caller should respond with 503).
+    /// `max_queue_depth = 0` disables admission control.
+    pub fn try_admit(self: &Arc<Self>) -> Option<AdmissionGuard> {
+        if self.max_queue_depth == 0 {
+            // Disabled — pass through without counting.
+            return Some(AdmissionGuard {
+                state: None,
+            });
+        }
+        let cap = self.inflight_pool.len() + self.max_queue_depth;
+        let prev = self
+            .in_flight
+            .fetch_add(1, std::sync::atomic::Ordering::AcqRel);
+        if prev >= cap {
+            // Roll back the bump and reject.
+            self.in_flight
+                .fetch_sub(1, std::sync::atomic::Ordering::AcqRel);
+            tracing::warn!(
+                target: "server.admission",
+                in_flight = prev,
+                cap,
+                "queue full — rejecting with 503"
+            );
+            return None;
+        }
+        Some(AdmissionGuard {
+            state: Some(Arc::clone(self)),
+        })
     }
 
     /// **P2.9b-i1** — acquire an idle inflight slot, blocking until one
@@ -1047,6 +1137,12 @@ pub async fn embeddings(
     State(state): State<SharedState>,
     Json(req): Json<EmbeddingsRequest>,
 ) -> Response {
+    // **#232** — admission control. Cheap atomic check; rejecting
+    // here keeps the 100-request flood from piling against the
+    // embedding model's mutex + tokio worker threads.
+    let Some(_admission) = state.try_admit() else {
+        return queue_full_response();
+    };
     let Some(em_arc) = state.embedding_model.as_ref().cloned() else {
         return (
             StatusCode::SERVICE_UNAVAILABLE,
@@ -1242,6 +1338,13 @@ pub async fn chat_completions(
     State(state): State<SharedState>,
     Json(raw): Json<serde_json::Value>,
 ) -> Result<Response, ApiError> {
+    // **#232** — admission control. Cheap atomic; rejects here keep
+    // the slot pool from being trampled by a concurrent flood. Guard
+    // is held by the function's local stack so it auto-decrements on
+    // every return path (success, error, panic-unwind).
+    let Some(_admission) = state.try_admit() else {
+        return Ok(queue_full_response());
+    };
     // Sampler-G debug — when FLAMBEAU_DUMP_RAW_REQ=1 is set, log the
     // complete JSON body the client sent (incl. fields flambeau
     // doesn't parse like `tools[]` if the client sent them under a
@@ -1709,6 +1812,7 @@ pub async fn completions(
     State(state): State<SharedState>,
     Json(req): Json<CompletionRequest>,
 ) -> Result<Json<CompletionResponse>, ApiError> {
+    let _admission = state.try_admit().ok_or_else(ApiError::queue_full)?;
     if req.stream {
         return Err(ApiError::bad_request(
             "SSE streaming is not yet implemented (V1.8.C). Retry with stream=false.",
@@ -2062,6 +2166,7 @@ pub async fn messages_anthropic(
     State(state): State<SharedState>,
     Json(req): Json<AnthropicMessagesRequest>,
 ) -> Result<Response, ApiError> {
+    let _admission = state.try_admit().ok_or_else(ApiError::queue_full)?;
     // Map system + messages into OpenAI ChatMessage list. Each
     // Anthropic message expands into 1+ ChatMessages depending on
     // its content blocks (tool_result blocks become role="tool"
@@ -2595,6 +2700,7 @@ pub async fn infill(
     State(state): State<SharedState>,
     Json(req): Json<InfillRequest>,
 ) -> Result<Json<CompletionResponse>, ApiError> {
+    let _admission = state.try_admit().ok_or_else(ApiError::queue_full)?;
     if req.stream {
         return Err(ApiError::bad_request(
             "SSE streaming for /infill is not yet implemented. Retry with stream=false.",
@@ -4543,6 +4649,16 @@ impl ApiError {
             message: msg.into(),
         }
     }
+    /// **#232** — 503 + queue-full payload. Same shape as
+    /// `queue_full_response()` but for handlers whose return type is
+    /// `Result<_, ApiError>`. The IntoResponse impl below adds
+    /// `Retry-After: 2` automatically when status == 503.
+    pub fn queue_full() -> Self {
+        Self {
+            status: StatusCode::SERVICE_UNAVAILABLE,
+            message: "server queue full — too many concurrent requests".into(),
+        }
+    }
     pub fn internal(err: impl std::fmt::Display) -> Self {
         let chain = format!("{err:#}");
         let top = err.to_string();
@@ -4565,15 +4681,31 @@ impl ApiError {
 
 impl IntoResponse for ApiError {
     fn into_response(self) -> axum::response::Response {
-        (
+        let is_overloaded = self.status == StatusCode::SERVICE_UNAVAILABLE;
+        let err_type = if is_overloaded {
+            "overloaded"
+        } else {
+            "invalid_request_error"
+        };
+        let mut resp = (
             self.status,
             Json(json!({
                 "error": {
                     "message": self.message,
-                    "type": "invalid_request_error",
+                    "type": err_type,
                 }
             })),
         )
-            .into_response()
+            .into_response();
+        if is_overloaded {
+            // **#232** — clients should retry after a short backoff
+            // rather than hammering us during the queue drain.
+            resp.headers_mut().insert(
+                axum::http::header::RETRY_AFTER,
+                axum::http::HeaderValue::from_static("2"),
+            );
+        }
+        resp
     }
 }
+

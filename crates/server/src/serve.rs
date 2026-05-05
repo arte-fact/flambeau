@@ -392,9 +392,18 @@ pub async fn serve(cfg: ServeConfig) -> Result<()> {
         .and_then(|s| s.parse().ok())
         .filter(|n: &usize| *n >= 1 && *n <= 32)
         .unwrap_or(1);
+    // **#232 P2.12** — admission control. Cap at `inflight_slots +
+    // max_queue_depth`; new requests beyond that get 503 +
+    // Retry-After: 2. `0` disables (legacy behaviour). Default 16.
+    let max_queue_depth: usize = std::env::var("FLAMBEAU_MAX_QUEUE_DEPTH")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(16);
     info!(
         prefill_ubatch,
-        inflight_slots, "pre-allocating inflight slot pool"
+        inflight_slots,
+        max_queue_depth,
+        "pre-allocating inflight slot pool"
     );
     let mut inflight_pool: Vec<Mutex<crate::model::Inflight>> =
         Vec::with_capacity(inflight_slots);
@@ -557,6 +566,8 @@ pub async fn serve(cfg: ServeConfig) -> Result<()> {
         embedding_model,
         embedding_tokenizer,
         embedding_rank,
+        in_flight: std::sync::atomic::AtomicUsize::new(0),
+        max_queue_depth,
         remote_tools,
         agent_stats: crate::agent_stats::AgentStatsRing::default(),
         tool_call_format_default,
