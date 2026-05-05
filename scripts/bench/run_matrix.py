@@ -169,8 +169,13 @@ class TopoSpec:
 
 TOPOLOGIES = [
     TopoSpec("single",  "hip:0",         "pp",    0, 0, 1),
-    TopoSpec("pp2",     "hip:0,1",       "pp",    0, 0, 2),
-    TopoSpec("tp2",     "hip:0,1",       "tp",    0, 2, 2),
+    # **2026-05-05** — pp2/tp2 use cross-die hip:0,2 (one GPU per die)
+    # for two reasons: (a) memory note `project_rig_whitehaven_topology`
+    # says Mesh<2> should prefer {0,1} intra-die-0 OR cross-die {0,2},
+    # and (b) cross-die spreads thermal load between dies so a sustained
+    # bench doesn't cook one die while the other idles.
+    TopoSpec("pp2",     "hip:0,2",       "pp",    0, 0, 2),
+    TopoSpec("tp2",     "hip:0,2",       "tp",    0, 2, 2),
     TopoSpec("pp4",     "hip:0,1,2,3",   "pp",    0, 0, 4),
     TopoSpec("pp2tp2",  "hip:0,2,1,3",   "pp+tp", 2, 2, 4),
 ]
@@ -405,7 +410,8 @@ def run_matrix(out_path: Path, max_tokens: int, only_models=None,
                only_topos=None, only_paths=None, only_concs=None,
                warmup_tokens: int = 32,
                cooldown_threshold_c: float = 85.0,
-               cooldown_max_wait_s: float = 300.0) -> None:
+               cooldown_max_wait_s: float = 300.0,
+               resume: bool = False) -> None:
     log_dir = ROOT / "scripts" / "bench" / "logs"
     log_dir.mkdir(parents=True, exist_ok=True)
 
@@ -424,13 +430,37 @@ def run_matrix(out_path: Path, max_tokens: int, only_models=None,
                     continue
                 cells.append({"model": model.id, "topo": topo.id, "path": path})
 
-    started = dt.datetime.now(dt.timezone.utc).isoformat()
-    out = {
-        "started": started,
-        "max_tokens": max_tokens,
-        "concurrencies": only_concs or CONCURRENCIES,
-        "cells": [],
-    }
+    # **--resume** — if the JSON already exists, load completed cells
+    # and skip them. A cell counts as complete when it has at least
+    # one entry in `concurrency_results` (any partial cells are
+    # re-run from scratch — we don't merge mid-cell). Skipped/
+    # infeasible cells preserved as-is.
+    completed_keys: set[tuple[str, str, str]] = set()
+    out: dict
+    if resume and out_path.exists():
+        try:
+            existing = json.loads(out_path.read_text())
+            for c in existing.get("cells", []):
+                if "skipped" in c:
+                    completed_keys.add((c["model"], c["topo"], "_skipped"))
+                elif c.get("concurrency_results"):
+                    completed_keys.add((c["model"], c["topo"], c["path"]))
+            out = existing
+            print(f"resuming: {len(completed_keys)} cells already done", flush=True)
+        except Exception as e:
+            print(f"resume: ignoring unreadable {out_path}: {e}", flush=True)
+            out = None
+    else:
+        out = None
+
+    if out is None:
+        started = dt.datetime.now(dt.timezone.utc).isoformat()
+        out = {
+            "started": started,
+            "max_tokens": max_tokens,
+            "concurrencies": only_concs or CONCURRENCIES,
+            "cells": [],
+        }
     out_path.parent.mkdir(parents=True, exist_ok=True)
 
     # Pre-write so partial results survive a crash.
@@ -438,8 +468,15 @@ def run_matrix(out_path: Path, max_tokens: int, only_models=None,
 
     for cell in cells:
         if "skipped" in cell:
-            out["cells"].append(cell)
-            out_path.write_text(json.dumps(out, indent=2))
+            if (cell["model"], cell["topo"], "_skipped") not in completed_keys:
+                out["cells"].append(cell)
+                out_path.write_text(json.dumps(out, indent=2))
+            continue
+        if (cell["model"], cell["topo"], cell["path"]) in completed_keys:
+            print(
+                f"\n=== SKIP (resume) {cell['model']} / {cell['topo']} / {cell['path']} ===",
+                flush=True,
+            )
             continue
         model = next(m for m in MODELS if m.id == cell["model"])
         topo = next(t for t in TOPOLOGIES if t.id == cell["topo"])
@@ -480,7 +517,13 @@ def run_matrix(out_path: Path, max_tokens: int, only_models=None,
                 "err": warm.get("err"),
             }
 
-            for n in (only_concs or CONCURRENCIES):
+            for n_idx, n in enumerate(only_concs or CONCURRENCIES):
+                # **2026-05-05** — temp gate between N variants too. Server
+                # stays up across N=1,2,4,8 within a cell; without this,
+                # GPUs heat across the cell and later N values measure on
+                # a hotter (potentially throttled) chip than earlier N.
+                if n_idx > 0 and cooldown_threshold_c > 0:
+                    cooldown_until_safe(cooldown_threshold_c, cooldown_max_wait_s)
                 print(f"   N={n}", end=" ", flush=True)
                 t0 = time.perf_counter()
                 res = run_cell(port, n, max_tokens)
@@ -528,10 +571,12 @@ def main():
     ap.add_argument("--topos", help="comma-separated subset of topo ids")
     ap.add_argument("--paths", help="comma-separated subset of paths")
     ap.add_argument("--concs", help="comma-separated subset of concurrencies")
-    ap.add_argument("--cooldown-threshold-c", type=float, default=85.0,
-                    help="°C — wait between cells until max GPU temp drops below this (default 85)")
+    ap.add_argument("--cooldown-threshold-c", type=float, default=70.0,
+                    help="°C — wait between cells until max GPU temp drops below this (default 70)")
     ap.add_argument("--cooldown-max-wait-s", type=float, default=300.0,
                     help="cap the cooldown wait per cell (default 300s)")
+    ap.add_argument("--resume", action="store_true",
+                    help="if --out already exists, skip cells that are already complete")
     args = ap.parse_args()
 
     only_models = set(args.models.split(",")) if args.models else None
@@ -547,7 +592,8 @@ def main():
     run_matrix(Path(args.out), args.max_tokens, only_models, only_topos,
                only_paths, only_concs,
                cooldown_threshold_c=args.cooldown_threshold_c,
-               cooldown_max_wait_s=args.cooldown_max_wait_s)
+               cooldown_max_wait_s=args.cooldown_max_wait_s,
+               resume=args.resume)
 
 
 if __name__ == "__main__":
