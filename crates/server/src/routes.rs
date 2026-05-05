@@ -1123,6 +1123,70 @@ pub async fn tools_endpoint(State(state): State<SharedState>) -> impl IntoRespon
     }))
 }
 
+/// **#234 P3.14** — POST /tokenize (llama.cpp-compat).
+///
+/// Returns `{"tokens": [int, ...]}` for the given `content`. When
+/// `add_special=true`, BOS/EOS are inserted by the underlying
+/// tokenizer (the default `false` matches the chat-completion path,
+/// which delegates specials to the chat template). When
+/// `with_pieces=true`, each token is emitted as `{"id", "piece"}`
+/// so a UI can render the surface form alongside the id.
+///
+/// 400 on tokenizer failure (typically a normaliser bug or invalid
+/// UTF-8 in `content`). No GPU work — runs on the tokio worker.
+pub async fn tokenize(
+    State(state): State<SharedState>,
+    Json(req): Json<TokenizeRequest>,
+) -> Response {
+    let tokens = match state
+        .tokenizer
+        .inner
+        .encode(req.content.as_str(), req.add_special)
+    {
+        Ok(enc) => enc.get_ids().to_vec(),
+        Err(e) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(json!({ "error": format!("tokenize failed: {e}") })),
+            )
+                .into_response();
+        }
+    };
+
+    if req.with_pieces {
+        let pieces: Vec<serde_json::Value> = tokens
+            .iter()
+            .map(|&id| {
+                let piece = state.tokenizer.decode(&[id]).unwrap_or_default();
+                json!({ "id": id, "piece": piece })
+            })
+            .collect();
+        Json(json!({ "tokens": pieces })).into_response()
+    } else {
+        Json(json!({ "tokens": tokens })).into_response()
+    }
+}
+
+/// **#234 P3.14** — POST /detokenize (llama.cpp-compat).
+///
+/// Returns `{"content": "..."}` for the given `tokens` array. Special
+/// tokens are NOT skipped — clients sending a stop-id back through
+/// detokenize see its surface form (`<|im_end|>`, `<|endoftext|>`).
+/// 400 on decode failure (out-of-vocab id, invalid UTF-8 byte stream).
+pub async fn detokenize(
+    State(state): State<SharedState>,
+    Json(req): Json<DetokenizeRequest>,
+) -> Response {
+    match state.tokenizer.decode(&req.tokens) {
+        Ok(content) => Json(json!({ "content": content })).into_response(),
+        Err(e) => (
+            StatusCode::BAD_REQUEST,
+            Json(json!({ "error": format!("detokenize failed: {e}") })),
+        )
+            .into_response(),
+    }
+}
+
 /// **#231 P2.11b** — POST /v1/embeddings.
 ///
 /// Tokenises each input string with the chat tokenizer (Qwen3 family

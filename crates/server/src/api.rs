@@ -1104,3 +1104,28 @@ pub struct EmbeddingsResponse {
     pub model: String,
     pub usage: EmbeddingsUsage,
 }
+
+// ---- /tokenize, /detokenize -----------------------------------------------
+
+/// **#234 P3.14** — llama.cpp-compatible tokenize endpoint body.
+///
+/// Mirrors `llama.cpp` server: `content` is the text to tokenize,
+/// `add_special` toggles BOS/EOS injection (default `false` — the
+/// chat template handles specials for actual chat turns), and
+/// `with_pieces` switches the response from a flat `[id, ...]` to
+/// a list of `{id, piece}` objects so clients can render the
+/// per-token surface form (token highlighter UIs).
+#[derive(Debug, Clone, Deserialize)]
+pub struct TokenizeRequest {
+    pub content: String,
+    #[serde(default)]
+    pub add_special: bool,
+    #[serde(default)]
+    pub with_pieces: bool,
+}
+
+/// **#234 P3.14** — llama.cpp-compatible detokenize endpoint body.
+#[derive(Debug, Clone, Deserialize)]
+pub struct DetokenizeRequest {
+    pub tokens: Vec<u32>,
+}
