@@ -22,6 +22,7 @@ import dataclasses
 import datetime as dt
 import json
 import os
+import re
 import shutil
 import signal
 import socket
@@ -33,6 +34,38 @@ from pathlib import Path
 from typing import Callable
 
 import httpx
+
+ROCM_SMI = "/opt/rocm-7.1.1/core-7.13/bin/rocm-smi"
+TEMP_RE = re.compile(r"Temperature.*?:\s*([\d.]+)")
+
+
+def gpu_max_temp_c() -> float:
+    """Return the max GPU temperature (any sensor, any GPU) in °C, or 0 on failure."""
+    try:
+        out = subprocess.run(
+            [ROCM_SMI, "--showtemp"],
+            capture_output=True, text=True, timeout=5.0,
+        ).stdout
+    except Exception:
+        return 0.0
+    temps = [float(m.group(1)) for m in TEMP_RE.finditer(out)]
+    return max(temps) if temps else 0.0
+
+
+def cooldown_until_safe(threshold_c: float, max_wait_s: float, poll_s: float = 10.0) -> float:
+    """Block until max GPU temp < threshold, or max_wait elapses. Returns seconds slept."""
+    t0 = time.perf_counter()
+    while True:
+        t = gpu_max_temp_c()
+        elapsed = time.perf_counter() - t0
+        if t == 0.0:  # rocm-smi unavailable; skip cooldown entirely
+            return elapsed
+        if t < threshold_c or elapsed >= max_wait_s:
+            print(f"   cooldown: {t:.0f}°C, slept {elapsed:.0f}s", flush=True)
+            return elapsed
+        if elapsed == 0.0 or int(elapsed) % 30 == 0:
+            print(f"   cooldown: {t:.0f}°C ≥ {threshold_c:.0f}°C, waiting...", flush=True)
+        time.sleep(poll_s)
 
 ROOT = Path(__file__).resolve().parents[2]
 BIN = ROOT / "target" / "release" / "flambeau"
@@ -118,7 +151,10 @@ class ModelSpec:
 
 MODELS = [
     ModelSpec("qwen35_9B_q4_1",  "/artefact/models/Qwen3.5-9B-Q4_1.gguf",       16384, 512),
-    ModelSpec("qwen36_27B_q4_1", "/artefact/models/Qwen3.6-27B-Q4_1.gguf",      16384, 512),
+    # **2026-05-05** — 27B context dropped from 16384 to 4096 so PP2
+    # (2 GPUs × 32 layers per rank × 8 inflight slots) fits in VRAM.
+    # Long-prompt characterisation is still meaningful at ctx=4096.
+    ModelSpec("qwen36_27B_q4_1", "/artefact/models/Qwen3.6-27B-Q4_1.gguf",      4096, 512),
     ModelSpec("qwen36_35B_a3b_q4_0", "/artefact/models/Qwen_Qwen3.6-35B-A3B-Q4_0.gguf", 16384, 512),
 ]
 
@@ -133,6 +169,7 @@ class TopoSpec:
 
 TOPOLOGIES = [
     TopoSpec("single",  "hip:0",         "pp",    0, 0, 1),
+    TopoSpec("pp2",     "hip:0,1",       "pp",    0, 0, 2),
     TopoSpec("tp2",     "hip:0,1",       "tp",    0, 2, 2),
     TopoSpec("pp4",     "hip:0,1,2,3",   "pp",    0, 0, 4),
     TopoSpec("pp2tp2",  "hip:0,2,1,3",   "pp+tp", 2, 2, 4),
@@ -366,7 +403,9 @@ def run_cell(port: int, n_concurrent: int, max_tokens: int) -> dict:
 
 def run_matrix(out_path: Path, max_tokens: int, only_models=None,
                only_topos=None, only_paths=None, only_concs=None,
-               warmup_tokens: int = 32) -> None:
+               warmup_tokens: int = 32,
+               cooldown_threshold_c: float = 85.0,
+               cooldown_max_wait_s: float = 300.0) -> None:
     log_dir = ROOT / "scripts" / "bench" / "logs"
     log_dir.mkdir(parents=True, exist_ok=True)
 
@@ -446,12 +485,19 @@ def run_matrix(out_path: Path, max_tokens: int, only_models=None,
                 t0 = time.perf_counter()
                 res = run_cell(port, n, max_tokens)
                 dur = time.perf_counter() - t0
-                tps = res.get("decode_tps_aggregate", 0.0)
+                agg = res.get("decode_tps_aggregate", 0.0)
+                per = res.get("decode_tps_per_stream_mean", 0.0)
                 pref = res.get("prefill_ms_mean", 0.0)
                 ok = res.get("n_ok", 0)
                 err = res.get("n_err", 0)
-                print(f"-> ok={ok} err={err} prefill_ms_mean={pref:.0f} agg_tps={tps:.1f} ({dur:.1f}s)",
-                      flush=True)
+                # Cumulative tps = aggregate (server's view, all streams).
+                # Per-stream tps = what one user perceives (slower the more
+                # concurrent users there are unless the path actually batches).
+                print(
+                    f"-> ok={ok} err={err} prefill_ms={pref:.0f} "
+                    f"cum_tps={agg:.1f} per_stream_tps={per:.1f} ({dur:.1f}s)",
+                    flush=True,
+                )
                 cell["concurrency_results"].append(res)
         finally:
             print("   killing server...", flush=True)
@@ -460,6 +506,14 @@ def run_matrix(out_path: Path, max_tokens: int, only_models=None,
 
         out["cells"].append(cell)
         out_path.write_text(json.dumps(out, indent=2))
+
+        # **2026-05-05** — temperature-gated GPU cooldown. MI50s under
+        # sustained load climb 80→90+°C and start thermal-throttling,
+        # which contaminates later cells. Block until any-GPU max temp
+        # drops below `cooldown_threshold_c`, capped at
+        # `cooldown_max_wait_s`. No sleep when temps are already cool.
+        if cooldown_threshold_c > 0:
+            cooldown_until_safe(cooldown_threshold_c, cooldown_max_wait_s)
 
     out["finished"] = dt.datetime.now(dt.timezone.utc).isoformat()
     out_path.write_text(json.dumps(out, indent=2))
@@ -474,6 +528,10 @@ def main():
     ap.add_argument("--topos", help="comma-separated subset of topo ids")
     ap.add_argument("--paths", help="comma-separated subset of paths")
     ap.add_argument("--concs", help="comma-separated subset of concurrencies")
+    ap.add_argument("--cooldown-threshold-c", type=float, default=85.0,
+                    help="°C — wait between cells until max GPU temp drops below this (default 85)")
+    ap.add_argument("--cooldown-max-wait-s", type=float, default=300.0,
+                    help="cap the cooldown wait per cell (default 300s)")
     args = ap.parse_args()
 
     only_models = set(args.models.split(",")) if args.models else None
@@ -487,7 +545,9 @@ def main():
         sys.exit(2)
 
     run_matrix(Path(args.out), args.max_tokens, only_models, only_topos,
-               only_paths, only_concs)
+               only_paths, only_concs,
+               cooldown_threshold_c=args.cooldown_threshold_c,
+               cooldown_max_wait_s=args.cooldown_max_wait_s)
 
 
 if __name__ == "__main__":
