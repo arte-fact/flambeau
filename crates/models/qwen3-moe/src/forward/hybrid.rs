@@ -360,6 +360,21 @@ pub fn forward_prefill_hybrid_batched_logits(
     Ok(())
 }
 
+/// **#258 Sampler-D3 Phase B (Hybrid)** — what to do with the F32
+/// logits row after the LM head emits it on the head stage's
+/// `head_rank` device. Mirrors `tp::LogitsSink`.
+pub(crate) enum HybridLogitsSink<'a> {
+    /// Run host-side argmax + return the predicted token (greedy).
+    HostArgmax,
+    /// DtoH `[vocab]` F32 logits into the caller's `Vec<f32>`. Returns 0.
+    HostLogits(&'a mut Vec<f32>),
+    /// Leave the logits on the head stage's `head_rank` device — caller
+    /// consumes `head_scratch.logits_f32` in place via the GPU top-K
+    /// sampler before the next forward call clobbers it. Returns 0.
+    /// Saves the 600 KB DtoH per token — same lever as the TP path.
+    KeepOnDevice,
+}
+
 /// One-token hybrid PP-of-TP decode that returns the greedy argmax.
 /// See [`forward_one_token_hybrid_logits`] for the variant that
 /// downloads the F32 logits row instead.
@@ -380,7 +395,7 @@ pub fn forward_one_token_hybrid(
         session,
         token_id,
         position,
-        /* logits_out = */ None,
+        HybridLogitsSink::HostArgmax,
     )
 }
 
@@ -406,7 +421,39 @@ pub fn forward_one_token_hybrid_logits(
         session,
         token_id,
         position,
-        Some(logits_out),
+        HybridLogitsSink::HostLogits(logits_out),
+    )
+    .map(|_| ())
+}
+
+/// **#258 Sampler-D3 Phase B (Hybrid)** — variant of
+/// [`forward_one_token_hybrid_logits`] that leaves the F32 logits row
+/// on the head stage's `head_rank` device for in-place GPU-side
+/// sampling. The caller MUST consume
+/// `scratch.per_stage[head_stage].per_rank[head_rank].output_head.logits_f32`
+/// (e.g. via `topk_softmax_f32` on the same default stream) before
+/// the next forward call clobbers it.
+///
+/// Saves the 600 KB DtoH per token under `FLAMBEAU_GPU_SAMPLER=1`,
+/// matching the TP path's improvement.
+pub fn forward_one_token_hybrid_keep_logits_on_device(
+    model: &Qwen3MoEHybridModel,
+    scratch: &mut ShardedForwardOneTokenScratchHybrid,
+    global_cluster: &HipCluster,
+    stage_ars: &[BarP2pAllReduce],
+    session: &mut Qwen3MoEHybridSession,
+    token_id: u32,
+    position: usize,
+) -> Result<()> {
+    forward_one_token_hybrid_inner(
+        model,
+        scratch,
+        global_cluster,
+        stage_ars,
+        session,
+        token_id,
+        position,
+        HybridLogitsSink::KeepOnDevice,
     )
     .map(|_| ())
 }
@@ -419,7 +466,7 @@ fn forward_one_token_hybrid_inner(
     session: &mut Qwen3MoEHybridSession,
     token_id: u32,
     position: usize,
-    logits_out: Option<&mut Vec<f32>>,
+    sink: HybridLogitsSink<'_>,
 ) -> Result<u32> {
     let cfg = &model.config;
     let n_stages = model.stages.len();
@@ -776,33 +823,45 @@ fn forward_one_token_hybrid_inner(
         flambeau_backend_hip::profile::mark("hyb_dec_lm_head", device, stream)?;
     }
 
-    if let Some(out) = logits_out {
-        out.clear();
-        out.resize(cfg.vocab_size, 0.0f32);
-        // SAFETY: logits_f32 is valid for cfg.vocab_size F32 values on
-        // `device`; out.as_mut_ptr() is host memory of matching size.
-        unsafe {
-            <flambeau_backend_hip::HipDevice as flambeau_core::Device>::memcpy_async(
-                device,
-                stream,
-                flambeau_core::CopyDirection::DeviceToHost,
-                flambeau_core::DevicePtr(out.as_mut_ptr() as usize),
-                logits_f32,
-                cfg.vocab_size * 4,
-            )?;
+    match sink {
+        HybridLogitsSink::HostLogits(out) => {
+            out.clear();
+            out.resize(cfg.vocab_size, 0.0f32);
+            // SAFETY: logits_f32 is valid for cfg.vocab_size F32 values on
+            // `device`; out.as_mut_ptr() is host memory of matching size.
+            unsafe {
+                <flambeau_backend_hip::HipDevice as flambeau_core::Device>::memcpy_async(
+                    device,
+                    stream,
+                    flambeau_core::CopyDirection::DeviceToHost,
+                    flambeau_core::DevicePtr(out.as_mut_ptr() as usize),
+                    logits_f32,
+                    cfg.vocab_size * 4,
+                )?;
+            }
+            flambeau_core::Stream::synchronize(stream)?;
+            if flambeau_backend_hip::profile::is_enabled() {
+                flambeau_backend_hip::profile::mark("hyb_dec_logits_dtoh", device, stream)?;
+            }
+            Ok(0)
         }
-        flambeau_core::Stream::synchronize(stream)?;
-        if flambeau_backend_hip::profile::is_enabled() {
-            flambeau_backend_hip::profile::mark("hyb_dec_logits_dtoh", device, stream)?;
+        HybridLogitsSink::HostArgmax => {
+            let token = argmax_token_host(device, stream, logits_f32, cfg.vocab_size)
+                .context("hybrid argmax_token_host")?;
+            if flambeau_backend_hip::profile::is_enabled() {
+                flambeau_backend_hip::profile::mark("hyb_dec_argmax", device, stream)?;
+            }
+            Ok(token)
         }
-        Ok(0)
-    } else {
-        let token = argmax_token_host(device, stream, logits_f32, cfg.vocab_size)
-            .context("hybrid argmax_token_host")?;
-        if flambeau_backend_hip::profile::is_enabled() {
-            flambeau_backend_hip::profile::mark("hyb_dec_argmax", device, stream)?;
+        HybridLogitsSink::KeepOnDevice => {
+            // **#258** — no DtoH, no host argmax, no sync. The next
+            // call (gpu_sampler::run_gpu_topk on the same
+            // default_stream) will serialise device-side against the
+            // output_head writes via stream ordering, exactly like the
+            // TP path. CPU-side syncing here would just stall the
+            // dispatch loop without benefit.
+            Ok(0)
         }
-        Ok(token)
     }
 }
 

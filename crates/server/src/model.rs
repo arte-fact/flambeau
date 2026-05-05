@@ -12,10 +12,10 @@
 use anyhow::{bail, Context, Result};
 use flambeau_backend_hip::{BarP2pAllReduce, HipCluster};
 use flambeau_qwen3_moe::forward::{
-    forward_one_token_hybrid_logits, forward_one_token_pp_logits,
-    forward_one_token_tp_keep_logits_on_device, forward_one_token_tp_logits,
-    forward_prefill_hybrid_logits, forward_prefill_pp, forward_prefill_pp_logits,
-    forward_prefill_tp_logits, forward_prefill_tp_logits_pooled,
+    forward_one_token_hybrid_keep_logits_on_device, forward_one_token_hybrid_logits,
+    forward_one_token_pp_logits, forward_one_token_tp_keep_logits_on_device,
+    forward_one_token_tp_logits, forward_prefill_hybrid_logits, forward_prefill_pp,
+    forward_prefill_pp_logits, forward_prefill_tp_logits, forward_prefill_tp_logits_pooled,
     forward_speculative_pp_step, ShardedForwardOneTokenScratch,
     ShardedForwardOneTokenScratchHybrid, ShardedForwardOneTokenScratchTp,
     ShardedForwardPrefillScratch, ShardedForwardPrefillScratchTp, SpecStep,
@@ -861,7 +861,14 @@ pub fn decode_logits(
 /// rank's `output_head.logits_f32` device pointer; the caller (the
 /// GPU sampler hook in `gpu_sampler.rs`) consumes them in place via
 /// `topk_softmax_f32` before the next forward call clobbers the
-/// buffer. TP-only for now (matches Phase A coverage).
+/// buffer.
+///
+/// **#258** — Hybrid path now uses
+/// `forward_one_token_hybrid_keep_logits_on_device`, removing the
+/// 600 KB DtoH per token that the prior fallback wasted. PP-only path
+/// still bails — the GPU sampler isn't wired for PP topologies (the
+/// TP and Hybrid head ranks expose the head-rank `OutputHeadScratch`
+/// uniformly; PP would need a separate plumbing pass).
 pub fn decode_keep_logits_on_device(
     model: &LoadedModel,
     cluster: &HipCluster,
@@ -883,20 +890,24 @@ pub fn decode_keep_logits_on_device(
             .context("TP decode_keep_logits_on_device"),
             _ => bail!("Inflight variant doesn't match LoadedModel::Tp"),
         },
-        // **Hybrid GPU-sampler fallback (#258)** — there's no
-        // forward_one_token_hybrid_keep_logits_on_device yet, so we
-        // run the regular decode_logits (which does the host DtoH of
-        // ~600 KB) and let the GPU sampler read logits_f32 from the
-        // head stage's OutputHeadScratch on device anyway. The DtoH
-        // is wasted bandwidth but the device buffer is still
-        // correctly populated for the GPU topk kernel to consume.
-        // A proper hybrid keep-on-device variant is a perf-only
-        // follow-up.
-        LoadedModel::Hybrid { .. } => {
-            let mut sink: Vec<f32> = Vec::new();
-            decode_logits(model, cluster, inflight, token, position, &mut sink)
-                .context("Hybrid decode_keep_logits_on_device (decode_logits fallback)")
-        }
+        LoadedModel::Hybrid {
+            model: hmodel,
+            stage_ars,
+        } => match inflight {
+            Inflight::Hybrid { session, decode } => {
+                forward_one_token_hybrid_keep_logits_on_device(
+                    hmodel,
+                    decode,
+                    cluster,
+                    stage_ars,
+                    session,
+                    token,
+                    position,
+                )
+                .context("Hybrid decode_keep_logits_on_device")
+            }
+            _ => bail!("Inflight variant doesn't match LoadedModel::Hybrid"),
+        },
         _ => bail!(
             "decode_keep_logits_on_device only wired for TP and Hybrid topologies"
         ),
