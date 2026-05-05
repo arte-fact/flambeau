@@ -717,6 +717,71 @@ pub fn decode_keep_logits_on_device(
     }
 }
 
+/// **#229 P2.10c** — capture the active inflight session's KV state
+/// into a host-side snapshot, sized for the current `current_tokens`
+/// of every layer.
+///
+/// Layout: `result[r]` covers rank `r`'s full layer set. PP and TP
+/// supported; Hybrid bails (V2 follow-up — see `restore_kv_into_inflight`).
+///
+/// **Cost**: D→H copy of `total_bytes()` per rank. On 27B/TP2/ctx=4096
+/// that's ~1 GB across 2 ranks, ~150 ms over PCIe 3.0 x16. On hit the
+/// inverse H→D pays the same — still a net win vs the ~2-3 s prefill
+/// it replaces.
+pub fn capture_kv_from_inflight(
+    inflight: &Inflight,
+    cluster: &HipCluster,
+    model: &LoadedModel,
+) -> Result<Vec<Vec<LayerCacheSnapshot>>> {
+    use flambeau_qwen3_moe::session::snapshot_layer_caches_to_host;
+    match (inflight, model) {
+        (Inflight::Pp { session, .. }, LoadedModel::Pp { .. }) => {
+            let mut out = Vec::with_capacity(session.per_rank.len());
+            for (rank_idx, rank_session) in session.per_rank.iter().enumerate() {
+                let device = cluster.device(rank_idx);
+                let snap = snapshot_layer_caches_to_host(&rank_session.caches, device)
+                    .with_context(|| format!("PP capture rank {rank_idx}"))?;
+                out.push(snap);
+            }
+            Ok(out)
+        }
+        (Inflight::Tp { session, .. }, LoadedModel::Tp { .. }) => {
+            let mut out = Vec::with_capacity(session.caches.len());
+            for (rank_idx, rank_caches) in session.caches.iter().enumerate() {
+                let device = cluster.device(rank_idx);
+                let snap = snapshot_layer_caches_to_host(rank_caches, device)
+                    .with_context(|| format!("TP capture rank {rank_idx}"))?;
+                out.push(snap);
+            }
+            Ok(out)
+        }
+        (Inflight::Hybrid { .. }, LoadedModel::Hybrid { .. }) => {
+            bail!(
+                "Hybrid prefix-cache capture not yet wired (see \
+                 restore_kv_into_inflight — V2 follow-up)"
+            );
+        }
+        _ => bail!("capture_kv_from_inflight: model/inflight variant mismatch"),
+    }
+}
+
+/// **#229** — total host-RAM bytes a snapshot occupies. Used by the
+/// LRU's VRAM budget accounting (despite the name, the backing store
+/// is host RAM in V1; #229 reuses the same field for host-RAM
+/// accounting and renames are V2).
+pub fn snapshot_bytes(snapshot: &[Vec<LayerCacheSnapshot>]) -> usize {
+    snapshot
+        .iter()
+        .flat_map(|rank| rank.iter())
+        .map(|s| match s {
+            LayerCacheSnapshot::FullAttn { k, v, .. } => k.len() + v.len(),
+            LayerCacheSnapshot::Gdn { state, conv_history } => {
+                state.len() + conv_history.len()
+            }
+        })
+        .sum()
+}
+
 /// **#228 P2.10b** — restore a host-side KV snapshot into the active
 /// inflight session.
 ///

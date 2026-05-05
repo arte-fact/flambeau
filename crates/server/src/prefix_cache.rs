@@ -345,6 +345,89 @@ impl PrefixCache {
             .find_map(|e| e.kv.as_ref().map(std::sync::Arc::clone))
     }
 
+    /// **#229 P2.10c** — insert an entry with its KV snapshot, account
+    /// the bytes against the budget, evict LRU until under cap.
+    ///
+    /// Caller passes `bytes` (size of the snapshot in host RAM).
+    /// Touches the entry's terminal as MRU. Idempotent: re-inserting
+    /// the same chain replaces the prior entry's `kv` field.
+    #[cfg(feature = "hip")]
+    pub fn insert_with_kv(
+        &self,
+        chain: Vec<ChunkKey>,
+        topology: TopologyTag,
+        chunk_tokens: usize,
+        kv: std::sync::Arc<KvSnapshot>,
+        bytes: usize,
+    ) {
+        let Some(&terminal) = chain.last() else {
+            return;
+        };
+        let mut inner = self.inner.write().unwrap();
+        // Replace if a same-chain entry already exists; else push new.
+        let existing = inner.by_terminal.entry(terminal).or_default();
+        let mut replaced_bytes = 0usize;
+        if let Some(idx) = existing.iter().position(|e| {
+            e.topology == topology && e.chunk_tokens == chunk_tokens && e.chain == chain
+        }) {
+            // Replace — release prior accounting.
+            if let Some(prior) = existing[idx].kv.as_ref() {
+                replaced_bytes = snapshot_bytes_arc(prior);
+            }
+            existing[idx].kv = Some(std::sync::Arc::clone(&kv));
+        } else {
+            existing.push(CacheEntry {
+                topology,
+                chunk_tokens,
+                n_tokens: chain.len() * chunk_tokens,
+                chain,
+                kv: Some(std::sync::Arc::clone(&kv)),
+            });
+        }
+        inner.used_bytes = inner.used_bytes.saturating_sub(replaced_bytes) + bytes;
+        // Move to MRU.
+        inner.lru_order.retain(|k| *k != terminal);
+        inner.lru_order.push_front(terminal);
+        // Evict LRU until under budget.
+        while inner.used_bytes > self.vram_budget_bytes {
+            let Some(victim) = inner.lru_order.pop_back() else {
+                break;
+            };
+            if let Some(victim_entries) = inner.by_terminal.remove(&victim) {
+                for e in victim_entries {
+                    if let Some(arc) = e.kv {
+                        inner.used_bytes = inner
+                            .used_bytes
+                            .saturating_sub(snapshot_bytes_arc(&arc));
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// **#229** — sum bytes of one snapshot held by `Arc<KvSnapshot>` for
+/// LRU accounting. Mirrors `model::snapshot_bytes` but takes the Arc
+/// view (avoids importing the model crate's helper into this module).
+#[cfg(feature = "hip")]
+fn snapshot_bytes_arc(snap: &KvSnapshot) -> usize {
+    use flambeau_qwen3_moe::session::LayerCacheSnapshot;
+    snap.iter()
+        .flat_map(|rank| rank.iter())
+        .map(|s| match s {
+            LayerCacheSnapshot::FullAttn { k, v, .. } => k.len() + v.len(),
+            LayerCacheSnapshot::Gdn { state, conv_history } => {
+                state.len() + conv_history.len()
+            }
+        })
+        .sum()
+}
+
+/// Standalone helpers don't need to live in `impl PrefixCache` — keeping
+/// them here avoids forcing callers to construct an instance just to
+/// hash a prompt.
+impl PrefixCache {
+
     /// Number of stored entries (sum across all terminal keys).
     pub fn len(&self) -> usize {
         self.inner
