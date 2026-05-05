@@ -67,6 +67,7 @@ fn cfg() -> Qwen3MoEConfig {
             conv_kernel: 4,
         }),
         tied_lm_head: false,
+            pooling_type: None,
     }
 }
 

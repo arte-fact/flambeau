@@ -466,6 +466,7 @@ mod tests {
             full_attention_interval: None,
             gdn: None,
             tied_lm_head: false,
+            pooling_type: None,
         }
     }
 

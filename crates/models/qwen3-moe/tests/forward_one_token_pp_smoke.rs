@@ -68,6 +68,7 @@ fn cfg() -> Qwen3MoEConfig {
             conv_kernel: 4,
         }),
         tied_lm_head: false, // explicit Q8_0 LM head → zero logits → argmax 0
+        pooling_type: None,
     }
 }
 

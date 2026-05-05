@@ -62,6 +62,7 @@ fn tiny_gdn_cfg() -> Qwen3MoEConfig {
             conv_kernel: 4,
         }),
         tied_lm_head: true,
+            pooling_type: None,
     }
 }
 

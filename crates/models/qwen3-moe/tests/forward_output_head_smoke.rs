@@ -61,6 +61,7 @@ fn tiny_cfg(hidden: usize, vocab: usize) -> Qwen3MoEConfig {
             conv_kernel: 4,
         }),
         tied_lm_head: true,
+            pooling_type: None,
     }
 }
 

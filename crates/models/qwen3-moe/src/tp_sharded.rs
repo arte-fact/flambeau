@@ -1510,6 +1510,7 @@ mod tests {
             full_attention_interval: Some(4),
             gdn: None,
             tied_lm_head: false,
+            pooling_type: None,
         };
         let tp = Qwen35DenseTpLayout::new(&cfg, 4).unwrap();
         let topo = Topology::Tp(tp);
