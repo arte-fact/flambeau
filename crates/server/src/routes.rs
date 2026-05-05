@@ -265,6 +265,30 @@ impl Drop for AdmissionGuard {
     }
 }
 
+/// **#236 P0.1b** — strip the chat-template-emitted assistant
+/// terminator from a rendered prompt so the model continues the
+/// assistant prefill content rather than seeing a closed turn.
+///
+/// Qwen-family templates emit `<|im_end|>` followed by a newline at
+/// the end of every closed turn; `add_generation_prompt=false` keeps
+/// that terminator on the in-progress assistant turn. For prefill /
+/// continue-the-message semantics we want to delete it so the model's
+/// next-token distribution is conditioned on the partial assistant
+/// content, not on "another turn finished, what's next".
+///
+/// Conservative: trim trailing whitespace, then a single `<|im_end|>`
+/// substring, then more trailing whitespace. Does nothing if the
+/// terminator isn't found (works as a no-op for templates that
+/// already rendered without one).
+fn strip_trailing_assistant_terminator(prompt: &str) -> String {
+    let trimmed = prompt.trim_end();
+    if let Some(stripped) = trimmed.strip_suffix("<|im_end|>") {
+        stripped.trim_end().to_string()
+    } else {
+        prompt.to_string()
+    }
+}
+
 /// **#232 P2.12** — canned 503 response when the queue is full.
 /// Mirrors OpenAI's overloaded-error shape; `Retry-After: 2` tells
 /// well-behaved clients to back off briefly. Used by every endpoint
@@ -1592,6 +1616,34 @@ pub async fn chat_completions(
     } else {
         None
     };
+    // **#236 P0.1b** — assistant-prefill detection. When the LAST
+    // request message is `role: "assistant"` AND json_mode is on, the
+    // OpenAI convention is that the model continues from the prefill
+    // content rather than starting a fresh assistant turn. The chat
+    // template renders with `add_generation_prompt=false` for that
+    // message at iter=0; the same content bytes are also fed into the
+    // JSON state machine before the first decoded token so the mask
+    // tracks the model's actual position. Outside json_mode we leave
+    // the prime empty (no behavioural change for non-JSON requests).
+    let assistant_prefill: Option<String> = if json_mode {
+        req.messages
+            .last()
+            .filter(|m| m.role == "assistant")
+            .and_then(|m| {
+                let s = m.content_str();
+                if s.is_empty() {
+                    None
+                } else {
+                    Some(s.to_string())
+                }
+            })
+    } else {
+        None
+    };
+    let json_prime_bytes: Vec<u8> = assistant_prefill
+        .as_deref()
+        .map(|s| s.as_bytes().to_vec())
+        .unwrap_or_default();
     let params = SamplingParams::from_parts(
         req.temperature,
         req.top_p,
@@ -1606,8 +1658,10 @@ pub async fn chat_completions(
         stop_strings,
         collect_logprobs,
         req.enable_thinking.unwrap_or(false),
+        json_prime_bytes,
         &state.model_defaults,
     );
+    let assistant_prefill_active = assistant_prefill.is_some();
 
     // T3.2: OpenAI default is `parallel_tool_calls=true`. `false` hard-
     // terminates decode at the first tool-call close (streaming) or
@@ -1624,15 +1678,30 @@ pub async fn chat_completions(
     // the streaming path returns whatever the model emits as-is,
     // without executing remote tool_calls server-side.
     if req.stream {
-        let prompt = state
+        // **#236 P0.1b** — assistant prefill: render with
+        // `add_generation_prompt=false` so the model continues from
+        // the prefill content rather than opening a fresh assistant
+        // turn. Only applies on the request as it arrived; the
+        // streaming path doesn't have an agent loop, so there's no
+        // iter>0 case to worry about.
+        let add_generation_prompt = !assistant_prefill_active;
+        let mut prompt = state
             .chat_template
             .render_with_tools(
                 &messages,
                 merged_tools.as_deref(),
-                /*add_generation_prompt=*/ true,
+                add_generation_prompt,
                 Some(params.enable_thinking),
             )
             .map_err(ApiError::internal)?;
+        // Strip the trailing `<|im_end|>...` that Qwen-family
+        // templates emit at the end of the assistant turn under
+        // `add_generation_prompt=false`. Without this the model
+        // sees a *closed* prefill turn and starts a fresh response;
+        // we want it to *continue* the prefill content.
+        if assistant_prefill_active {
+            prompt = strip_trailing_assistant_terminator(&prompt);
+        }
         if std::env::var("FLAMBEAU_DUMP_PROMPT").is_ok() {
             eprintln!(
                 "--- rendered prompt ({} bytes) ---\n{}\n--- end prompt ---",
@@ -1689,15 +1758,24 @@ pub async fn chat_completions(
 
     for iter in 0..MAX_TOOL_ITERATIONS {
         let iter_start = Instant::now();
-        let prompt = state
+        // **#236 P0.1b** — assistant prefill applies only on iter=0 (the
+        // user-supplied messages). On subsequent iterations the agent
+        // loop has appended fresh assistant + tool turns, and we want
+        // the standard `add_generation_prompt=true` behaviour.
+        let prefill_this_iter = iter == 0 && assistant_prefill_active;
+        let add_generation_prompt = !prefill_this_iter;
+        let mut prompt = state
             .chat_template
             .render_with_tools(
                 &messages,
                 merged_tools.as_deref(),
-                /*add_generation_prompt=*/ true,
+                add_generation_prompt,
                 Some(params.enable_thinking),
             )
             .map_err(ApiError::internal)?;
+        if prefill_this_iter {
+            prompt = strip_trailing_assistant_terminator(&prompt);
+        }
         if iter == 0 && std::env::var("FLAMBEAU_DUMP_PROMPT").is_ok() {
             eprintln!(
                 "--- rendered prompt ({} bytes) ---\n{}\n--- end prompt ---",
@@ -1968,6 +2046,7 @@ pub async fn completions(
         stop_strings,
         /*collect_logprobs=*/ None,
         /*enable_thinking=*/ false,
+        /*json_prime_bytes=*/ vec![],
         &state.model_defaults,
     );
 
@@ -2384,6 +2463,7 @@ pub async fn messages_anthropic(
         // shape with content blocks), so default off here. Wire-up
         // is a #233b follow-up.
         /*enable_thinking=*/ false,
+        /*json_prime_bytes=*/ vec![],
         &state.model_defaults,
     );
 
@@ -2881,6 +2961,7 @@ pub async fn infill(
         stop_strings,
         /*collect_logprobs=*/ None,
         /*enable_thinking=*/ false,
+        /*json_prime_bytes=*/ vec![],
         &state.model_defaults,
     );
 
@@ -3773,6 +3854,39 @@ fn run_completion_blocking_ids(
     } else {
         1.0
     };
+    // **#236 P0.1b** — JSON state primed BEFORE first_next. When the
+    // request is in json_mode AND the chat handler detected an
+    // assistant prefill (last message had `role: "assistant"`),
+    // `params.json_prime_bytes` carries those bytes; the JSON state
+    // machine advances through them before the first decoded token,
+    // so the mask honours the model's actual continuation position.
+    // For non-prefill json_mode requests the prime is empty and the
+    // state starts at `JsonState::new()`. Created here (rather than
+    // post-first_next as before) so the mask can apply to the very
+    // first sampled token.
+    let mut json_state: Option<JsonState> = if params.json_mode {
+        let mut js = JsonState::new();
+        if !params.json_prime_bytes.is_empty() {
+            let _ = js.feed_slice(&params.json_prime_bytes);
+        }
+        Some(js)
+    } else {
+        None
+    };
+    // **#236 P0.1b** — mask first-token logits when json_mode is
+    // active. Without this the very first sampled token can violate
+    // the grammar (e.g. emit `Hello` before `{`), and the existing
+    // post-sample feed_slice would silently advance into a doomed
+    // state. Top-K=2048 candidate cap keeps this cheap (~1–2 ms) on
+    // a 151 k Qwen vocab.
+    if let Some(js) = json_state.as_ref() {
+        gpu_sampler::apply_json_mask_to_logits(
+            js,
+            &state.tokenizer,
+            &mut logits_buf,
+            /*max_candidates=*/ 2048,
+        );
+    }
     let first_next = sampler.sample(&logits_buf, sampling, &[]);
     let is_greedy = sampling.is_greedy();
     tracing::info!(
@@ -3816,12 +3930,10 @@ fn run_completion_blocking_ids(
     let mut generated: Vec<u32> = Vec::with_capacity(params.max_tokens as usize);
     let is_stop = |t: u32| stop_ids.contains(&t);
 
-    // **P0.1** — JSON-grammar state. Active only when the request set
-    // `response_format: {"type": "json_object"}`. Each chosen token's
-    // bytes advance the state; the GPU-sampler path also masks
-    // candidates against this state before the multinomial draw.
-    let mut json_state: Option<JsonState> =
-        if params.json_mode { Some(JsonState::new()) } else { None };
+    // **P0.1** — advance JSON state by first_next's bytes (the
+    // pre-sample mask above already filtered candidates that would
+    // invalidate the running JSON, so this should always succeed
+    // when the mask was active).
     if let Some(js) = json_state.as_mut() {
         if let Ok(text) = state.tokenizer.decode(&[first_next]) {
             let _ = js.feed_slice(text.as_bytes());
@@ -4038,6 +4150,21 @@ fn run_completion_blocking_ids(
                             }
                         }
                     }
+                }
+                // **#236 P0.1b** — host-path JSON mask. Mirrors the
+                // GPU-path mask above (line ~4001): set logit of any
+                // top-K candidate that would invalidate the running
+                // JSON to NEG_INFINITY before the sampler picks. Only
+                // active when the request set `response_format=
+                // json_object`. Top-K=2048 cap keeps the per-token
+                // cost in the low-ms range.
+                if let Some(js) = json_state.as_ref() {
+                    gpu_sampler::apply_json_mask_to_logits(
+                        js,
+                        &state.tokenizer,
+                        &mut logits_buf,
+                        /*max_candidates=*/ 2048,
+                    );
                 }
                 // Pass `generated` as history so penalties can fire on
                 // repeats / frequent tokens. T4.b.2 — without this,

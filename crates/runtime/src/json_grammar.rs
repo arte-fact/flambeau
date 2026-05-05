@@ -111,6 +111,17 @@ impl JsonState {
         !self.invalid && self.finished && self.stack.is_empty()
     }
 
+    /// **#236 P0.1b** — `true` once a top-level JSON value has been
+    /// opened (any `{`, `[`, string-quote, number digit, or literal
+    /// keyword). Stays `true` for the rest of the parse, even after
+    /// the value closes (`is_complete()` then also returns `true`).
+    /// Used by the host-sampler-path JSON mask to forbid the
+    /// "infinite leading whitespace" failure mode where the model
+    /// emits `\n` / ` ` tokens forever instead of starting the value.
+    pub fn has_started(&self) -> bool {
+        !self.stack.is_empty() || self.finished
+    }
+
     /// Feed one byte. Returns `true` if it was accepted, `false` if
     /// the state turned invalid (stays invalid forever after).
     pub fn feed(&mut self, b: u8) -> bool {

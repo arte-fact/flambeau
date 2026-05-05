@@ -357,6 +357,99 @@ pub fn apply_json_mask(
     }
 }
 
+/// **#236 P0.1b** — host-sampler-path JSON mask. Operates directly on
+/// a full-vocab logits buffer, NOT on a top-K extract. Bounded by
+/// `max_candidates` (default 2048): the function picks the top-N
+/// candidates by logit, decodes each, probes the JSON state, and
+/// sets the logit of any candidate that would invalidate the running
+/// JSON to `f32::NEG_INFINITY`. Tokens outside the top-N stay
+/// untouched — they're below the threshold any sane sampler will
+/// pick from anyway.
+///
+/// Differs from [`apply_json_mask`] (which masks an *already extracted*
+/// `(host_ids, host_probs)` top-K from the GPU-sampler path) in that
+/// it does the candidate selection itself. Cost is dominated by the
+/// per-candidate `tokenizer.decode` (BPE byte reconstruction); ~1–2 ms
+/// at `max_candidates=2048` on a 151 k-vocab Qwen tokenizer.
+///
+/// Caller must ensure `state` reflects the bytes already emitted /
+/// primed; this function does not mutate `state`.
+pub fn apply_json_mask_to_logits(
+    state: &flambeau_runtime::json_grammar::JsonState,
+    tokenizer: &flambeau_quant::GgufTokenizer,
+    logits: &mut [f32],
+    max_candidates: usize,
+) {
+    if logits.is_empty() {
+        return;
+    }
+    let k = max_candidates.min(logits.len());
+    if k == 0 {
+        return;
+    }
+
+    // Pick top-K candidate ids by logit value via partial sort
+    // (`select_nth_unstable_by`). O(V) per call — same trick as
+    // `runtime::sampling::build_distribution`.
+    let mut pairs: Vec<(u32, f32)> = (0..logits.len() as u32)
+        .map(|i| (i, logits[i as usize]))
+        .collect();
+    if k < pairs.len() {
+        pairs.select_nth_unstable_by(k - 1, |a, b| {
+            b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal)
+        });
+        pairs.truncate(k);
+    }
+
+    let complete = state.is_complete();
+    let already_started = state.has_started();
+    for &(id, _) in pairs.iter() {
+        let bytes = match tokenizer.decode(&[id]) {
+            Ok(s) => s,
+            Err(_) => {
+                logits[id as usize] = f32::NEG_INFINITY;
+                continue;
+            }
+        };
+        if bytes.is_empty() {
+            // Specials / EOS — only allowed once the JSON is
+            // structurally closed; otherwise the model would emit EOS
+            // mid-value and the response would be invalid.
+            if !complete {
+                logits[id as usize] = f32::NEG_INFINITY;
+            }
+            continue;
+        }
+        let mut probe = state.clone();
+        if !probe.feed_slice(bytes.as_bytes()) {
+            logits[id as usize] = f32::NEG_INFINITY;
+            continue;
+        }
+        // **#236 P0.1b** — when the response hasn't started yet, the
+        // OpenAI `response_format: json_object` contract requires the
+        // top-level value to be an object. Reject any candidate that
+        // doesn't drive the state into an object frame: this kills
+        // both the infinite-leading-whitespace stall (model picks
+        // `\n` forever) AND the dead-end-number stall (model picks
+        // `1`, then nothing in the top-K can extend the number
+        // legally and the rest of decode burns tokens on masked
+        // junk).
+        if !already_started && !probe.has_started() {
+            logits[id as usize] = f32::NEG_INFINITY;
+            continue;
+        }
+        if !already_started
+            && probe.has_started()
+            && bytes.as_bytes().iter().all(|&b| b != b'{')
+        {
+            // First token started a non-object top-level (a number,
+            // string, array, or `true`/`false`/`null`). That's valid
+            // JSON but invalid `json_object`.
+            logits[id as usize] = f32::NEG_INFINITY;
+        }
+    }
+}
+
 /// **Sampler-D4 (#212)** — penalty-aware variant of [`run_gpu_topk`].
 /// Builds `(tok, count)` pairs from `history` via Sampler-F's
 /// sort+dedup, uploads to device, runs the GPU penalty kernel

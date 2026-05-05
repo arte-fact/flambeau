@@ -982,6 +982,7 @@ mod tests {
                 content: Some("hi".into()),
                 tool_call_id: None,
                 tool_calls: None,
+                reasoning_content: None,
             },
             finish_reason: "stop".into(),
             logprobs: None,
@@ -999,6 +1000,7 @@ mod tests {
                 content: Some("hi".into()),
                 tool_call_id: None,
                 tool_calls: None,
+                reasoning_content: None,
             },
             finish_reason: "stop".into(),
             logprobs: Some(ChatLogProbs {
