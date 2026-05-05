@@ -198,6 +198,14 @@ pub fn forward_full_attn_decode_tp<L: CacheLayout>(
     // are Q4_0 and shapes match. Saves 1 MMVQ launch + 2 cast launches
     // per full-attn layer per rank. Falls back to the 4-launch path for
     // any non-Q4_0 dtype (e.g. Q8_0 K/V on other models).
+    //
+    // Q4_1 sibling tried in L1 (post-pp2tp2-profile lever) — confirmed
+    // **null** on gfx906: kernel-trace +1 % to +3 %, wall ~−2 % on
+    // 9B/27B at pp2tp2/N=1. Diagnosis: weight HBM bytes are 99 % of the
+    // traffic and they don't change; activation re-read saving (~8 MB
+    // per request) is dwarfed by the kernel's per-call work doubling
+    // (52 µs fused vs 2×22 µs unfused). Don't re-attempt without a
+    // bandwidth-changing structural redesign.
     let kv_q4_0_fused = std::env::var("FLAMBEAU_VARIANT").as_deref() != Ok("baseline")
         && std::env::var("FLAMBEAU_KV_F16_DST").as_deref() != Ok("off")
         && attn_k.dtype == flambeau_quant::GgmlDType::Q4_0

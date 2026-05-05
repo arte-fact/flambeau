@@ -1,0 +1,1432 @@
+{
+  "summary": [
+    {
+      "wall_ms": 1599.3751639907714,
+      "prompt_tokens": 1313,
+      "completion_tokens": 64,
+      "load_s": 4.145435322003323,
+      "id": "qwen35_9B_q4_1"
+    },
+    {
+      "wall_ms": 3082.588603007025,
+      "prompt_tokens": 1313,
+      "completion_tokens": 64,
+      "load_s": 10.256964264000999,
+      "id": "qwen36_27B_q4_1"
+    },
+    {
+      "wall_ms": 2285.088218006422,
+      "prompt_tokens": 1313,
+      "completion_tokens": 64,
+      "load_s": 42.96009213899379,
+      "id": "qwen36_35B_a3b_q4_0"
+    },
+    {
+      "wall_ms": 2899.105201999191,
+      "prompt_tokens": 1311,
+      "completion_tokens": 64,
+      "load_s": 100.1757304979983,
+      "id": "qwen3_coder_next_q4_0"
+    }
+  ],
+  "per_model_top": {
+    "qwen35_9B_q4_1": [
+      {
+        "name": "flambeau_mmq_q4_1_4warp_lds_q8_1",
+        "calls": 1056,
+        "total_ns": 1313454477,
+        "avg_ns": 1243801
+      },
+      {
+        "name": "flambeau_attention_decode_f16_splitk_chunk",
+        "calls": 2016,
+        "total_ns": 709437662,
+        "avg_ns": 351903
+      },
+      {
+        "name": "flambeau_mmvq_q4_1_t128_q8_1",
+        "calls": 28224,
+        "total_ns": 633805018,
+        "avg_ns": 22456
+      },
+      {
+        "name": "flambeau_mmvq_q4_1_gate_up_dp4a_q8_1",
+        "calls": 8064,
+        "total_ns": 520378766,
+        "avg_ns": 64531
+      },
+      {
+        "name": "flambeau_gdn_state_step_alphabeta_f32_s128",
+        "calls": 6192,
+        "total_ns": 494813623,
+        "avg_ns": 79911
+      },
+      {
+        "name": "flambeau_mmvq_q5_k_r2_q8_1",
+        "calls": 6048,
+        "total_ns": 356741789,
+        "avg_ns": 58985
+      },
+      {
+        "name": "flambeau_p2p_allreduce_residual_tp2",
+        "calls": 8448,
+        "total_ns": 352148012,
+        "avg_ns": 41684
+      },
+      {
+        "name": "flambeau_mmq_q5_K_wave64_q8_1",
+        "calls": 144,
+        "total_ns": 226283213,
+        "avg_ns": 1571411
+      },
+      {
+        "name": "flambeau_rmsnorm_q8_1_fused",
+        "calls": 8193,
+        "total_ns": 198648652,
+        "avg_ns": 24246
+      },
+      {
+        "name": "flambeau_quantize_row_f16_q8_1",
+        "calls": 18768,
+        "total_ns": 193027682,
+        "avg_ns": 10284
+      },
+      {
+        "name": "flambeau_mmvq_q6_k_dp4a_q8_1",
+        "calls": 129,
+        "total_ns": 171133509,
+        "avg_ns": 1326616
+      },
+      {
+        "name": "flambeau_p2p_allreduce_residual_rmsnorm_tp2",
+        "calls": 8064,
+        "total_ns": 162652973,
+        "avg_ns": 20170
+      },
+      {
+        "name": "flambeau_mmq_q8_0_wave64_tile16_q8_1",
+        "calls": 288,
+        "total_ns": 161319201,
+        "avg_ns": 560136
+      },
+      {
+        "name": "flambeau_cast_f32_f16",
+        "calls": 22704,
+        "total_ns": 119546087,
+        "avg_ns": 5265
+      },
+      {
+        "name": "flambeau_attention_prefill_flash_tile_d256_br8_f16",
+        "calls": 48,
+        "total_ns": 110026085,
+        "avg_ns": 2292210
+      },
+      {
+        "name": "__amd_rocclr_copyBuffer",
+        "calls": 19238,
+        "total_ns": 77040317,
+        "avg_ns": 4004
+      },
+      {
+        "name": "flambeau_l2_norm_f32",
+        "calls": 12384,
+        "total_ns": 58920632,
+        "avg_ns": 4757
+      },
+      {
+        "name": "flambeau_swiglu_f32_to_f16",
+        "calls": 8256,
+        "total_ns": 55885445,
+        "avg_ns": 6769
+      },
+      {
+        "name": "flambeau_mmvq_q8_0_gate_up_t128_vdr2_q8_1",
+        "calls": 6048,
+        "total_ns": 52934873,
+        "avg_ns": 8752
+      },
+      {
+        "name": "flambeau_causal_conv1d_f32",
+        "calls": 6192,
+        "total_ns": 36733758,
+        "avg_ns": 5932
+      },
+      {
+        "name": "flambeau_rmsnorm_f16",
+        "calls": 4512,
+        "total_ns": 35118400,
+        "avg_ns": 7783
+      },
+      {
+        "name": "flambeau_rmsnorm_f32",
+        "calls": 6192,
+        "total_ns": 33480322,
+        "avg_ns": 5407
+      },
+      {
+        "name": "flambeau_silu_f32",
+        "calls": 6192,
+        "total_ns": 31236646,
+        "avg_ns": 5044
+      },
+      {
+        "name": "flambeau_quantize_f16_q8_1_mmq",
+        "calls": 624,
+        "total_ns": 30008326,
+        "avg_ns": 48090
+      },
+      {
+        "name": "flambeau_gdn_assemble_conv_input_f32",
+        "calls": 6048,
+        "total_ns": 27240645,
+        "avg_ns": 4504
+      },
+      {
+        "name": "flambeau_swiglu_f32_to_q8_1",
+        "calls": 6048,
+        "total_ns": 27153118,
+        "avg_ns": 4489
+      },
+      {
+        "name": "flambeau_scale_f32",
+        "calls": 6192,
+        "total_ns": 24622403,
+        "avg_ns": 3976
+      },
+      {
+        "name": "flambeau_rope_neox_partial_f16",
+        "calls": 4128,
+        "total_ns": 15387520,
+        "avg_ns": 3727
+      },
+      {
+        "name": "flambeau_sigmoid_mul_f16",
+        "calls": 2064,
+        "total_ns": 13471845,
+        "avg_ns": 6527
+      },
+      {
+        "name": "flambeau_quantize_row_q8_1",
+        "calls": 144,
+        "total_ns": 11817597,
+        "avg_ns": 82066
+      },
+      {
+        "name": "flambeau_split_q_gate_f16",
+        "calls": 2064,
+        "total_ns": 10952801,
+        "avg_ns": 5306
+      },
+      {
+        "name": "flambeau_attention_decode_f16_splitk_combine",
+        "calls": 2016,
+        "total_ns": 10570720,
+        "avg_ns": 5243
+      },
+      {
+        "name": "flambeau_gdn_split_qkv_f32",
+        "calls": 144,
+        "total_ns": 5942880,
+        "avg_ns": 41270
+      },
+      {
+        "name": "flambeau_quantize_q8_1_mmq",
+        "calls": 144,
+        "total_ns": 3302720,
+        "avg_ns": 22935
+      },
+      {
+        "name": "flambeau_swiglu_f32",
+        "calls": 144,
+        "total_ns": 2740802,
+        "avg_ns": 19033
+      }
+    ],
+    "qwen36_27B_q4_1": [
+      {
+        "name": "flambeau_mmq_q4_1_4warp_lds_q8_1",
+        "calls": 2112,
+        "total_ns": 4380327623,
+        "avg_ns": 2074018
+      },
+      {
+        "name": "flambeau_mmvq_q4_1_gate_up_dp4a_q8_1",
+        "calls": 16128,
+        "total_ns": 1701106052,
+        "avg_ns": 105475
+      },
+      {
+        "name": "flambeau_mmvq_q4_1_t128_q8_1",
+        "calls": 56448,
+        "total_ns": 1648895688,
+        "avg_ns": 29210
+      },
+      {
+        "name": "flambeau_attention_decode_f16_splitk_chunk",
+        "calls": 4032,
+        "total_ns": 1349607165,
+        "avg_ns": 334723
+      },
+      {
+        "name": "flambeau_mmvq_q5_k_r2_q8_1",
+        "calls": 12096,
+        "total_ns": 1344262199,
+        "avg_ns": 111132
+      },
+      {
+        "name": "flambeau_mmq_q5_K_wave64_q8_1",
+        "calls": 288,
+        "total_ns": 865316053,
+        "avg_ns": 3004569
+      },
+      {
+        "name": "flambeau_p2p_allreduce_residual_tp2",
+        "calls": 16896,
+        "total_ns": 864087373,
+        "avg_ns": 51141
+      },
+      {
+        "name": "flambeau_gdn_state_step_alphabeta_f32_s128",
+        "calls": 12384,
+        "total_ns": 713651724,
+        "avg_ns": 57626
+      },
+      {
+        "name": "flambeau_quantize_row_f16_q8_1",
+        "calls": 37536,
+        "total_ns": 461870105,
+        "avg_ns": 12304
+      },
+      {
+        "name": "flambeau_rmsnorm_q8_1_fused",
+        "calls": 16257,
+        "total_ns": 432930441,
+        "avg_ns": 26630
+      },
+      {
+        "name": "flambeau_mmq_q8_0_wave64_tile16_q8_1",
+        "calls": 576,
+        "total_ns": 409735707,
+        "avg_ns": 711346
+      },
+      {
+        "name": "flambeau_p2p_allreduce_residual_rmsnorm_tp2",
+        "calls": 16128,
+        "total_ns": 351016825,
+        "avg_ns": 21764
+      },
+      {
+        "name": "flambeau_attention_prefill_flash_tile_d256_br8_f16",
+        "calls": 96,
+        "total_ns": 315805297,
+        "avg_ns": 3289638
+      },
+      {
+        "name": "flambeau_cast_f32_f16",
+        "calls": 45408,
+        "total_ns": 243241935,
+        "avg_ns": 5356
+      },
+      {
+        "name": "flambeau_mmvq_q6_k_dp4a_q8_1",
+        "calls": 129,
+        "total_ns": 239113221,
+        "avg_ns": 1853590
+      },
+      {
+        "name": "__amd_rocclr_copyBuffer",
+        "calls": 32214,
+        "total_ns": 127008632,
+        "avg_ns": 3942
+      },
+      {
+        "name": "flambeau_swiglu_f32_to_f16",
+        "calls": 16512,
+        "total_ns": 123372153,
+        "avg_ns": 7471
+      },
+      {
+        "name": "flambeau_mmvq_q8_0_gate_up_t128_vdr2_q8_1",
+        "calls": 12096,
+        "total_ns": 113430264,
+        "avg_ns": 9377
+      },
+      {
+        "name": "flambeau_l2_norm_f32",
+        "calls": 24768,
+        "total_ns": 101475854,
+        "avg_ns": 4097
+      },
+      {
+        "name": "flambeau_rmsnorm_f32",
+        "calls": 12384,
+        "total_ns": 82614078,
+        "avg_ns": 6671
+      },
+      {
+        "name": "flambeau_quantize_f16_q8_1_mmq",
+        "calls": 1248,
+        "total_ns": 80372015,
+        "avg_ns": 64400
+      },
+      {
+        "name": "flambeau_rmsnorm_f16",
+        "calls": 9024,
+        "total_ns": 71617120,
+        "avg_ns": 7936
+      },
+      {
+        "name": "flambeau_causal_conv1d_f32",
+        "calls": 12384,
+        "total_ns": 60531524,
+        "avg_ns": 4887
+      },
+      {
+        "name": "flambeau_silu_f32",
+        "calls": 12384,
+        "total_ns": 57042731,
+        "avg_ns": 4606
+      },
+      {
+        "name": "flambeau_gdn_assemble_conv_input_f32",
+        "calls": 12096,
+        "total_ns": 49471682,
+        "avg_ns": 4089
+      },
+      {
+        "name": "flambeau_scale_f32",
+        "calls": 12384,
+        "total_ns": 44168641,
+        "avg_ns": 3566
+      },
+      {
+        "name": "flambeau_swiglu_f32_to_q8_1",
+        "calls": 12096,
+        "total_ns": 43719214,
+        "avg_ns": 3614
+      },
+      {
+        "name": "flambeau_quantize_row_q8_1",
+        "calls": 288,
+        "total_ns": 37960644,
+        "avg_ns": 131807
+      },
+      {
+        "name": "flambeau_rope_neox_partial_f16",
+        "calls": 8256,
+        "total_ns": 31271198,
+        "avg_ns": 3787
+      },
+      {
+        "name": "flambeau_sigmoid_mul_f16",
+        "calls": 4128,
+        "total_ns": 26251515,
+        "avg_ns": 6359
+      },
+      {
+        "name": "flambeau_split_q_gate_f16",
+        "calls": 4128,
+        "total_ns": 21497602,
+        "avg_ns": 5207
+      },
+      {
+        "name": "flambeau_attention_decode_f16_splitk_combine",
+        "calls": 4032,
+        "total_ns": 20382079,
+        "avg_ns": 5055
+      },
+      {
+        "name": "flambeau_quantize_q8_1_mmq",
+        "calls": 288,
+        "total_ns": 10137603,
+        "avg_ns": 35200
+      },
+      {
+        "name": "flambeau_gdn_split_qkv_f32",
+        "calls": 288,
+        "total_ns": 10075040,
+        "avg_ns": 34982
+      },
+      {
+        "name": "flambeau_swiglu_f32",
+        "calls": 288,
+        "total_ns": 7788160,
+        "avg_ns": 27042
+      }
+    ],
+    "qwen36_35B_a3b_q4_0": [
+      {
+        "name": "flambeau_attention_decode_f16_splitk_chunk",
+        "calls": 2520,
+        "total_ns": 920250309,
+        "avg_ns": 365178
+      },
+      {
+        "name": "flambeau_gdn_state_step_alphabeta_f32_s128",
+        "calls": 7740,
+        "total_ns": 652743688,
+        "avg_ns": 84333
+      },
+      {
+        "name": "flambeau_indexed_moe_mmvq_q4_0_q8_1",
+        "calls": 8820,
+        "total_ns": 518234134,
+        "avg_ns": 58756
+      },
+      {
+        "name": "flambeau_indexed_moe_mmq_q4_0_gate_up_tile8_dp4a_q8_1",
+        "calls": 240,
+        "total_ns": 340538586,
+        "avg_ns": 1418910
+      },
+      {
+        "name": "flambeau_mmvq_q4_0_gate_up_dp4a_q8_1",
+        "calls": 7560,
+        "total_ns": 258381257,
+        "avg_ns": 34177
+      },
+      {
+        "name": "flambeau_mmq_q8_0_wave64_tile16_q8_1",
+        "calls": 924,
+        "total_ns": 255306881,
+        "avg_ns": 276306
+      },
+      {
+        "name": "flambeau_mmq_q4_0_4warp_lds_q8_1",
+        "calls": 546,
+        "total_ns": 255246233,
+        "avg_ns": 467483
+      },
+      {
+        "name": "flambeau_moe_sort_scatter_det",
+        "calls": 240,
+        "total_ns": 248286258,
+        "avg_ns": 1034526
+      },
+      {
+        "name": "flambeau_p2p_allreduce_residual_tp2",
+        "calls": 10560,
+        "total_ns": 241706742,
+        "avg_ns": 22888
+      },
+      {
+        "name": "flambeau_topk_softmax_f32",
+        "calls": 10320,
+        "total_ns": 177741121,
+        "avg_ns": 17222
+      },
+      {
+        "name": "flambeau_quantize_row_f16_q8_1",
+        "calls": 23940,
+        "total_ns": 172520951,
+        "avg_ns": 7206
+      },
+      {
+        "name": "flambeau_cast_f32_f16",
+        "calls": 38700,
+        "total_ns": 169576965,
+        "avg_ns": 4381
+      },
+      {
+        "name": "flambeau_indexed_moe_mmvq_q4_0_gate_up_dp4a_q8_1",
+        "calls": 10080,
+        "total_ns": 158205939,
+        "avg_ns": 15695
+      },
+      {
+        "name": "flambeau_rmsnorm_q8_1_fused",
+        "calls": 10209,
+        "total_ns": 150757612,
+        "avg_ns": 14767
+      },
+      {
+        "name": "flambeau_attention_prefill_flash_tile_d256_br8_f16",
+        "calls": 60,
+        "total_ns": 137238404,
+        "avg_ns": 2287306
+      },
+      {
+        "name": "flambeau_p2p_allreduce_residual_rmsnorm_tp2",
+        "calls": 10080,
+        "total_ns": 134337295,
+        "avg_ns": 13327
+      },
+      {
+        "name": "flambeau_dense_gemv_f16_f16_batched",
+        "calls": 240,
+        "total_ns": 126038577,
+        "avg_ns": 525160
+      },
+      {
+        "name": "flambeau_indexed_moe_mmq_q4_0_down_tile8_dp4a_q8_1",
+        "calls": 210,
+        "total_ns": 124600964,
+        "avg_ns": 593337
+      },
+      {
+        "name": "flambeau_mmvq_q6_k_dp4a_q8_1",
+        "calls": 1389,
+        "total_ns": 114721163,
+        "avg_ns": 82592
+      },
+      {
+        "name": "flambeau_swiglu_f32_to_q8_1",
+        "calls": 27720,
+        "total_ns": 114149444,
+        "avg_ns": 4117
+      },
+      {
+        "name": "flambeau_mmvq_q8_0_t128_vdr2_q8_1",
+        "calls": 13608,
+        "total_ns": 109356343,
+        "avg_ns": 8036
+      },
+      {
+        "name": "flambeau_mmvq_q5_0_q8_1",
+        "calls": 15120,
+        "total_ns": 98129922,
+        "avg_ns": 6490
+      },
+      {
+        "name": "flambeau_mmvq_q4_0_q8_1",
+        "calls": 7812,
+        "total_ns": 90942877,
+        "avg_ns": 11641
+      },
+      {
+        "name": "__amd_rocclr_copyBuffer",
+        "calls": 22562,
+        "total_ns": 89703042,
+        "avg_ns": 3975
+      },
+      {
+        "name": "flambeau_mmvq_q8_0_gate_up_t128_vdr2_q8_1",
+        "calls": 12600,
+        "total_ns": 80375675,
+        "avg_ns": 6379
+      },
+      {
+        "name": "flambeau_indexed_moe_mmvq_q4_1_q8_1",
+        "calls": 1260,
+        "total_ns": 75438215,
+        "avg_ns": 59871
+      },
+      {
+        "name": "flambeau_mmq_q6_K_wave64_q8_1",
+        "calls": 30,
+        "total_ns": 70825930,
+        "avg_ns": 2360864
+      },
+      {
+        "name": "flambeau_l2_norm_f32",
+        "calls": 15480,
+        "total_ns": 69931839,
+        "avg_ns": 4517
+      },
+      {
+        "name": "flambeau_shared_expert_scale_f32",
+        "calls": 10320,
+        "total_ns": 68135045,
+        "avg_ns": 6602
+      },
+      {
+        "name": "flambeau_dense_gemv_f16_f16",
+        "calls": 10080,
+        "total_ns": 62286896,
+        "avg_ns": 6179
+      },
+      {
+        "name": "flambeau_moe_combine_no_residual_f16",
+        "calls": 10320,
+        "total_ns": 54103194,
+        "avg_ns": 5242
+      },
+      {
+        "name": "flambeau_mmq_q5_0_wave64_q8_1",
+        "calls": 360,
+        "total_ns": 49293913,
+        "avg_ns": 136927
+      },
+      {
+        "name": "flambeau_causal_conv1d_f32",
+        "calls": 7740,
+        "total_ns": 45818240,
+        "avg_ns": 5919
+      },
+      {
+        "name": "flambeau_rmsnorm_f16",
+        "calls": 5640,
+        "total_ns": 45302565,
+        "avg_ns": 8032
+      },
+      {
+        "name": "flambeau_rmsnorm_f32",
+        "calls": 7740,
+        "total_ns": 43706404,
+        "avg_ns": 5646
+      },
+      {
+        "name": "flambeau_add_f16",
+        "calls": 10320,
+        "total_ns": 39010390,
+        "avg_ns": 3780
+      },
+      {
+        "name": "flambeau_silu_f32",
+        "calls": 7740,
+        "total_ns": 37171035,
+        "avg_ns": 4802
+      },
+      {
+        "name": "flambeau_cast_f16_f32",
+        "calls": 10320,
+        "total_ns": 37155999,
+        "avg_ns": 3600
+      },
+      {
+        "name": "flambeau_gdn_assemble_conv_input_f32",
+        "calls": 7560,
+        "total_ns": 34039996,
+        "avg_ns": 4502
+      },
+      {
+        "name": "flambeau_scale_f32",
+        "calls": 7740,
+        "total_ns": 24999995,
+        "avg_ns": 3229
+      },
+      {
+        "name": "flambeau_rope_neox_partial_f16",
+        "calls": 5160,
+        "total_ns": 19816002,
+        "avg_ns": 3840
+      },
+      {
+        "name": "flambeau_indexed_moe_mmq_q4_1_down_tile8_dp4a_q8_1",
+        "calls": 30,
+        "total_ns": 19286232,
+        "avg_ns": 642874
+      },
+      {
+        "name": "flambeau_moe_sort_scan_padded_offsets",
+        "calls": 240,
+        "total_ns": 18442561,
+        "avg_ns": 76844
+      },
+      {
+        "name": "flambeau_sigmoid_mul_f16",
+        "calls": 2580,
+        "total_ns": 16902557,
+        "avg_ns": 6551
+      },
+      {
+        "name": "flambeau_quantize_row_q8_1",
+        "calls": 180,
+        "total_ns": 15383360,
+        "avg_ns": 85463
+      },
+      {
+        "name": "flambeau_split_q_gate_f16",
+        "calls": 2580,
+        "total_ns": 13820482,
+        "avg_ns": 5356
+      },
+      {
+        "name": "flambeau_attention_decode_f16_splitk_combine",
+        "calls": 2520,
+        "total_ns": 13735199,
+        "avg_ns": 5450
+      },
+      {
+        "name": "flambeau_gdn_split_qkv_f32",
+        "calls": 180,
+        "total_ns": 7241598,
+        "avg_ns": 40231
+      },
+      {
+        "name": "flambeau_quantize_f16_q8_1_mmq",
+        "calls": 300,
+        "total_ns": 6854880,
+        "avg_ns": 22849
+      },
+      {
+        "name": "flambeau_moe_sort_scan_offsets",
+        "calls": 240,
+        "total_ns": 5688002,
+        "avg_ns": 23700
+      },
+      {
+        "name": "flambeau_swiglu_f32_to_f16",
+        "calls": 480,
+        "total_ns": 4832318,
+        "avg_ns": 10067
+      },
+      {
+        "name": "flambeau_quantize_q8_1_mmq",
+        "calls": 180,
+        "total_ns": 4231839,
+        "avg_ns": 23510
+      },
+      {
+        "name": "flambeau_moe_sort_pad_copy",
+        "calls": 240,
+        "total_ns": 3243200,
+        "avg_ns": 13513
+      },
+      {
+        "name": "flambeau_swiglu_f32",
+        "calls": 180,
+        "total_ns": 3225600,
+        "avg_ns": 17920
+      },
+      {
+        "name": "flambeau_moe_sort_count",
+        "calls": 240,
+        "total_ns": 1185121,
+        "avg_ns": 4938
+      },
+      {
+        "name": "flambeau_moe_sort_zero_counts",
+        "calls": 240,
+        "total_ns": 1184800,
+        "avg_ns": 4936
+      }
+    ],
+    "qwen3_coder_next_q4_0": [
+      {
+        "name": "flambeau_attention_decode_f16_splitk_chunk",
+        "calls": 3024,
+        "total_ns": 1088997003,
+        "avg_ns": 360118
+      },
+      {
+        "name": "flambeau_gdn_state_step_alphabeta_f32_s128",
+        "calls": 9288,
+        "total_ns": 768435829,
+        "avg_ns": 82734
+      },
+      {
+        "name": "flambeau_indexed_moe_mmvq_q4_0_q8_1",
+        "calls": 10584,
+        "total_ns": 754277939,
+        "avg_ns": 71265
+      },
+      {
+        "name": "flambeau_dense_gemv_f16_f16",
+        "calls": 12096,
+        "total_ns": 623875205,
+        "avg_ns": 51576
+      },
+      {
+        "name": "flambeau_indexed_moe_mmq_q4_0_gate_up_tile8_dp4a_q8_1",
+        "calls": 288,
+        "total_ns": 550253303,
+        "avg_ns": 1910601
+      },
+      {
+        "name": "flambeau_mmvq_q5_k_r2_q8_1",
+        "calls": 9072,
+        "total_ns": 402167412,
+        "avg_ns": 44330
+      },
+      {
+        "name": "flambeau_moe_sort_scatter_det",
+        "calls": 288,
+        "total_ns": 377581828,
+        "avg_ns": 1311048
+      },
+      {
+        "name": "flambeau_topk_softmax_f32",
+        "calls": 12384,
+        "total_ns": 321314613,
+        "avg_ns": 25945
+      },
+      {
+        "name": "flambeau_dense_gemv_f16_f16_batched",
+        "calls": 288,
+        "total_ns": 302379282,
+        "avg_ns": 1049928
+      },
+      {
+        "name": "flambeau_p2p_allreduce_residual_tp2",
+        "calls": 12672,
+        "total_ns": 288307915,
+        "avg_ns": 22751
+      },
+      {
+        "name": "flambeau_mmq_q4_0_4warp_lds_q8_1",
+        "calls": 720,
+        "total_ns": 286762806,
+        "avg_ns": 398281
+      },
+      {
+        "name": "flambeau_mmq_q8_0_wave64_tile16_q8_1",
+        "calls": 1008,
+        "total_ns": 280378659,
+        "avg_ns": 278153
+      },
+      {
+        "name": "flambeau_quantize_row_f16_q8_1",
+        "calls": 28728,
+        "total_ns": 232029850,
+        "avg_ns": 8076
+      },
+      {
+        "name": "flambeau_mmvq_q4_0_gate_up_dp4a_q8_1",
+        "calls": 9072,
+        "total_ns": 227924574,
+        "avg_ns": 25123
+      },
+      {
+        "name": "flambeau_indexed_moe_mmvq_q4_0_gate_up_dp4a_q8_1",
+        "calls": 12096,
+        "total_ns": 220897042,
+        "avg_ns": 18261
+      },
+      {
+        "name": "flambeau_indexed_moe_mmq_q4_0_down_tile8_dp4a_q8_1",
+        "calls": 252,
+        "total_ns": 211538046,
+        "avg_ns": 839436
+      },
+      {
+        "name": "flambeau_cast_f32_f16",
+        "calls": 40392,
+        "total_ns": 207708256,
+        "avg_ns": 5142
+      },
+      {
+        "name": "flambeau_rmsnorm_q8_1_fused",
+        "calls": 12225,
+        "total_ns": 176556927,
+        "avg_ns": 14442
+      },
+      {
+        "name": "flambeau_mmq_q5_K_wave64_q8_1",
+        "calls": 216,
+        "total_ns": 174569557,
+        "avg_ns": 808192
+      },
+      {
+        "name": "flambeau_attention_prefill_flash_tile_d256_br8_f16",
+        "calls": 72,
+        "total_ns": 164074034,
+        "avg_ns": 2278806
+      },
+      {
+        "name": "flambeau_p2p_allreduce_residual_rmsnorm_tp2",
+        "calls": 12096,
+        "total_ns": 157493871,
+        "avg_ns": 13020
+      },
+      {
+        "name": "flambeau_mmvq_q6_k_dp4a_q8_1",
+        "calls": 12225,
+        "total_ns": 145343006,
+        "avg_ns": 11888
+      },
+      {
+        "name": "flambeau_swiglu_f32_to_q8_1",
+        "calls": 33264,
+        "total_ns": 144382356,
+        "avg_ns": 4340
+      },
+      {
+        "name": "flambeau_mmvq_q8_0_gate_up_t128_vdr2_q8_1",
+        "calls": 21168,
+        "total_ns": 138226678,
+        "avg_ns": 6529
+      },
+      {
+        "name": "flambeau_indexed_moe_mmvq_q4_1_q8_1",
+        "calls": 1512,
+        "total_ns": 114831745,
+        "avg_ns": 75946
+      },
+      {
+        "name": "__amd_rocclr_copyBuffer",
+        "calls": 25814,
+        "total_ns": 97231321,
+        "avg_ns": 3766
+      },
+      {
+        "name": "flambeau_shared_expert_scale_f32",
+        "calls": 12384,
+        "total_ns": 85523172,
+        "avg_ns": 6905
+      },
+      {
+        "name": "flambeau_mmvq_q4_0_q8_1",
+        "calls": 6048,
+        "total_ns": 80317731,
+        "avg_ns": 13280
+      },
+      {
+        "name": "flambeau_l2_norm_f32",
+        "calls": 18576,
+        "total_ns": 75031020,
+        "avg_ns": 4039
+      },
+      {
+        "name": "flambeau_moe_combine_no_residual_f16",
+        "calls": 12384,
+        "total_ns": 67639981,
+        "avg_ns": 5461
+      },
+      {
+        "name": "flambeau_cast_f16_f32",
+        "calls": 12384,
+        "total_ns": 57070219,
+        "avg_ns": 4608
+      },
+      {
+        "name": "flambeau_rmsnorm_f16",
+        "calls": 6768,
+        "total_ns": 54183977,
+        "avg_ns": 8005
+      },
+      {
+        "name": "flambeau_rmsnorm_f32",
+        "calls": 9288,
+        "total_ns": 51091181,
+        "avg_ns": 5500
+      },
+      {
+        "name": "flambeau_mmq_q6_K_wave64_q8_1",
+        "calls": 288,
+        "total_ns": 47112141,
+        "avg_ns": 163583
+      },
+      {
+        "name": "flambeau_causal_conv1d_f32",
+        "calls": 9288,
+        "total_ns": 46968629,
+        "avg_ns": 5056
+      },
+      {
+        "name": "flambeau_add_f16",
+        "calls": 12384,
+        "total_ns": 45885103,
+        "avg_ns": 3705
+      },
+      {
+        "name": "flambeau_gdn_assemble_conv_input_f32",
+        "calls": 9072,
+        "total_ns": 37884154,
+        "avg_ns": 4175
+      },
+      {
+        "name": "flambeau_silu_f32",
+        "calls": 9288,
+        "total_ns": 36189907,
+        "avg_ns": 3896
+      },
+      {
+        "name": "flambeau_indexed_moe_mmq_q4_1_down_tile8_dp4a_q8_1",
+        "calls": 36,
+        "total_ns": 31218861,
+        "avg_ns": 867190
+      },
+      {
+        "name": "flambeau_scale_f32",
+        "calls": 9288,
+        "total_ns": 27488625,
+        "avg_ns": 2959
+      },
+      {
+        "name": "flambeau_moe_sort_scan_padded_offsets",
+        "calls": 288,
+        "total_ns": 26622223,
+        "avg_ns": 92438
+      },
+      {
+        "name": "flambeau_rope_neox_partial_f16",
+        "calls": 6192,
+        "total_ns": 25914546,
+        "avg_ns": 4185
+      },
+      {
+        "name": "flambeau_sigmoid_mul_f16",
+        "calls": 3096,
+        "total_ns": 20078229,
+        "avg_ns": 6485
+      },
+      {
+        "name": "flambeau_quantize_row_q8_1",
+        "calls": 216,
+        "total_ns": 18259197,
+        "avg_ns": 84533
+      },
+      {
+        "name": "flambeau_attention_decode_f16_splitk_combine",
+        "calls": 3024,
+        "total_ns": 16419192,
+        "avg_ns": 5429
+      },
+      {
+        "name": "flambeau_split_q_gate_f16",
+        "calls": 3096,
+        "total_ns": 16108474,
+        "avg_ns": 5202
+      },
+      {
+        "name": "flambeau_mmvq_q4_0_kv_f16dst_dp4a_q8_1",
+        "calls": 3024,
+        "total_ns": 14608478,
+        "avg_ns": 4830
+      },
+      {
+        "name": "flambeau_moe_sort_scan_offsets",
+        "calls": 288,
+        "total_ns": 13106075,
+        "avg_ns": 45507
+      },
+      {
+        "name": "flambeau_quantize_f16_q8_1_mmq",
+        "calls": 360,
+        "total_ns": 8642720,
+        "avg_ns": 24007
+      },
+      {
+        "name": "flambeau_moe_sort_pad_copy",
+        "calls": 288,
+        "total_ns": 8622558,
+        "avg_ns": 29939
+      },
+      {
+        "name": "flambeau_swiglu_f32_to_f16",
+        "calls": 576,
+        "total_ns": 7008949,
+        "avg_ns": 12168
+      },
+      {
+        "name": "flambeau_gdn_split_qkv_f32",
+        "calls": 216,
+        "total_ns": 6092960,
+        "avg_ns": 28208
+      },
+      {
+        "name": "flambeau_quantize_q8_1_mmq",
+        "calls": 216,
+        "total_ns": 5040320,
+        "avg_ns": 23334
+      },
+      {
+        "name": "flambeau_swiglu_f32",
+        "calls": 216,
+        "total_ns": 3908479,
+        "avg_ns": 18094
+      },
+      {
+        "name": "flambeau_moe_sort_zero_counts",
+        "calls": 288,
+        "total_ns": 1488479,
+        "avg_ns": 5168
+      },
+      {
+        "name": "flambeau_moe_sort_count",
+        "calls": 288,
+        "total_ns": 1481919,
+        "avg_ns": 5145
+      }
+    ]
+  },
+  "per_model_families": {
+    "qwen35_9B_q4_1": {
+      "attn_decode": {
+        "total_ns": 720008382,
+        "calls": 4032
+      },
+      "attn_prefill": {
+        "total_ns": 110026085,
+        "calls": 48
+      },
+      "gdn": {
+        "total_ns": 527997148,
+        "calls": 12384
+      },
+      "mmvq_q4": {
+        "total_ns": 1154183784,
+        "calls": 36288
+      },
+      "mmvq_q5": {
+        "total_ns": 356741789,
+        "calls": 6048
+      },
+      "mmvq_q6_q8": {
+        "total_ns": 224068382,
+        "calls": 6177
+      },
+      "mmq_4warp_lds": {
+        "total_ns": 1701056891,
+        "calls": 1488
+      },
+      "moe_mmq_prefill": {
+        "total_ns": 0,
+        "calls": 0
+      },
+      "moe_mmvq_decode": {
+        "total_ns": 0,
+        "calls": 0
+      },
+      "rmsnorm": {
+        "total_ns": 429900347,
+        "calls": 26961
+      },
+      "rope": {
+        "total_ns": 15387520,
+        "calls": 4128
+      },
+      "quantize": {
+        "total_ns": 231998397,
+        "calls": 24960
+      },
+      "cast": {
+        "total_ns": 119546087,
+        "calls": 22704
+      },
+      "p2p_allreduce": {
+        "total_ns": 352148012,
+        "calls": 8448
+      },
+      "topk_softmax": {
+        "total_ns": 0,
+        "calls": 0
+      },
+      "dense_gemv": {
+        "total_ns": 0,
+        "calls": 0
+      },
+      "output_head": {
+        "total_ns": 0,
+        "calls": 0
+      },
+      "misc": {
+        "total_ns": 344915695,
+        "calls": 63494
+      }
+    },
+    "qwen36_27B_q4_1": {
+      "attn_decode": {
+        "total_ns": 1369989244,
+        "calls": 8064
+      },
+      "attn_prefill": {
+        "total_ns": 315805297,
+        "calls": 96
+      },
+      "gdn": {
+        "total_ns": 773198446,
+        "calls": 24768
+      },
+      "mmvq_q4": {
+        "total_ns": 3350001740,
+        "calls": 72576
+      },
+      "mmvq_q5": {
+        "total_ns": 1344262199,
+        "calls": 12096
+      },
+      "mmvq_q6_q8": {
+        "total_ns": 352543485,
+        "calls": 12225
+      },
+      "mmq_4warp_lds": {
+        "total_ns": 5655379383,
+        "calls": 2976
+      },
+      "moe_mmq_prefill": {
+        "total_ns": 0,
+        "calls": 0
+      },
+      "moe_mmvq_decode": {
+        "total_ns": 0,
+        "calls": 0
+      },
+      "rmsnorm": {
+        "total_ns": 938178464,
+        "calls": 53793
+      },
+      "rope": {
+        "total_ns": 31271198,
+        "calls": 8256
+      },
+      "quantize": {
+        "total_ns": 543549963,
+        "calls": 49920
+      },
+      "cast": {
+        "total_ns": 243241935,
+        "calls": 45408
+      },
+      "p2p_allreduce": {
+        "total_ns": 864087373,
+        "calls": 16896
+      },
+      "topk_softmax": {
+        "total_ns": 0,
+        "calls": 0
+      },
+      "dense_gemv": {
+        "total_ns": 0,
+        "calls": 0
+      },
+      "output_head": {
+        "total_ns": 0,
+        "calls": 0
+      },
+      "misc": {
+        "total_ns": 659646430,
+        "calls": 120726
+      }
+    },
+    "qwen36_35B_a3b_q4_0": {
+      "attn_decode": {
+        "total_ns": 933985508,
+        "calls": 5040
+      },
+      "attn_prefill": {
+        "total_ns": 137238404,
+        "calls": 60
+      },
+      "gdn": {
+        "total_ns": 694025282,
+        "calls": 15480
+      },
+      "mmvq_q4": {
+        "total_ns": 1101202422,
+        "calls": 35532
+      },
+      "mmvq_q5": {
+        "total_ns": 98129922,
+        "calls": 15120
+      },
+      "mmvq_q6_q8": {
+        "total_ns": 304453181,
+        "calls": 27597
+      },
+      "mmq_4warp_lds": {
+        "total_ns": 630672957,
+        "calls": 1860
+      },
+      "moe_mmq_prefill": {
+        "total_ns": 732712040,
+        "calls": 720
+      },
+      "moe_mmvq_decode": {
+        "total_ns": 0,
+        "calls": 0
+      },
+      "rmsnorm": {
+        "total_ns": 374103876,
+        "calls": 33669
+      },
+      "rope": {
+        "total_ns": 19816002,
+        "calls": 5160
+      },
+      "quantize": {
+        "total_ns": 302053755,
+        "calls": 51840
+      },
+      "cast": {
+        "total_ns": 206732964,
+        "calls": 49020
+      },
+      "p2p_allreduce": {
+        "total_ns": 241706742,
+        "calls": 10560
+      },
+      "topk_softmax": {
+        "total_ns": 177741121,
+        "calls": 10320
+      },
+      "dense_gemv": {
+        "total_ns": 188325473,
+        "calls": 10320
+      },
+      "output_head": {
+        "total_ns": 0,
+        "calls": 0
+      },
+      "misc": {
+        "total_ns": 508484140,
+        "calls": 99722
+      }
+    },
+    "qwen3_coder_next_q4_0": {
+      "attn_decode": {
+        "total_ns": 1105416195,
+        "calls": 6048
+      },
+      "attn_prefill": {
+        "total_ns": 164074034,
+        "calls": 72
+      },
+      "gdn": {
+        "total_ns": 812412943,
+        "calls": 18576
+      },
+      "mmvq_q4": {
+        "total_ns": 1412857509,
+        "calls": 42336
+      },
+      "mmvq_q5": {
+        "total_ns": 402167412,
+        "calls": 9072
+      },
+      "mmvq_q6_q8": {
+        "total_ns": 283569684,
+        "calls": 33393
+      },
+      "mmq_4warp_lds": {
+        "total_ns": 788823163,
+        "calls": 2232
+      },
+      "moe_mmq_prefill": {
+        "total_ns": 1170592038,
+        "calls": 864
+      },
+      "moe_mmvq_decode": {
+        "total_ns": 0,
+        "calls": 0
+      },
+      "rmsnorm": {
+        "total_ns": 439325956,
+        "calls": 40377
+      },
+      "rope": {
+        "total_ns": 25914546,
+        "calls": 6192
+      },
+      "quantize": {
+        "total_ns": 394671403,
+        "calls": 62208
+      },
+      "cast": {
+        "total_ns": 264778475,
+        "calls": 52776
+      },
+      "p2p_allreduce": {
+        "total_ns": 288307915,
+        "calls": 12672
+      },
+      "topk_softmax": {
+        "total_ns": 321314613,
+        "calls": 12384
+      },
+      "dense_gemv": {
+        "total_ns": 926254487,
+        "calls": 12384
+      },
+      "output_head": {
+        "total_ns": 0,
+        "calls": 0
+      },
+      "misc": {
+        "total_ns": 594066183,
+        "calls": 118406
+      }
+    }
+  }
+}
