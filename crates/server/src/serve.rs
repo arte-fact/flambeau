@@ -65,6 +65,15 @@ pub struct ServeConfig {
     /// on each chat completion. The agent loop that actually invokes
     /// the remote tools is M2.2.
     pub mcp_urls: Vec<String>,
+    /// **#230 P2.11a** — optional path to a `qwen3` arch embedding
+    /// GGUF loaded alongside the chat model. `None` disables the
+    /// embedding subsystem; `/v1/embeddings` (#231) returns 503 when
+    /// unset.
+    pub embedding_gguf_path: Option<PathBuf>,
+    /// **#230 P2.11a** — HIP device id for the embedding model. Must
+    /// be one of `device_ids`; the embedding model reuses the
+    /// chat-cluster's `HipDevice` handle for the matching rank.
+    pub embedding_device_id: Option<i32>,
 }
 
 impl Default for MeshMode {
@@ -441,6 +450,52 @@ pub async fn serve(cfg: ServeConfig) -> Result<()> {
         info!("prefix cache disabled (set FLAMBEAU_PREFIX_CACHE=1 to enable)");
     }
 
+    // **#230 P2.11a** — optional embedding model. Loaded after the
+    // chat model + inflight pool so any boot-time OOM lands here
+    // (where it's clearly an embedding-specific failure) rather than
+    // mid-request. Reuses the chat cluster's per-device handle: we
+    // resolve the requested embedding device id back to its rank in
+    // the cluster, then pass the matching `&HipDevice`. Errors abort
+    // the server boot — operator can omit `--embedding-model` to
+    // disable.
+    let embedding_model: Option<Arc<flambeau_qwen3_moe::EmbeddingModel>> =
+        if let Some(path) = cfg.embedding_gguf_path.as_ref() {
+            let device_id = cfg.embedding_device_id.unwrap_or(cfg.device_ids[0]);
+            let rank = cfg
+                .device_ids
+                .iter()
+                .position(|d| *d == device_id)
+                .ok_or_else(|| anyhow::anyhow!(
+                    "embedding device {device_id} not in --devices {:?}",
+                    cfg.device_ids
+                ))?;
+            let device = cluster.device(rank);
+            info!(
+                path = %path.display(),
+                device_id,
+                rank,
+                "loading embedding model"
+            );
+            let efile = GgufFile::open(path)
+                .with_context(|| format!("open embedding GGUF at {}", path.display()))?;
+            let em = flambeau_qwen3_moe::EmbeddingModel::load(&efile, device, device_id)
+                .context("EmbeddingModel::load")?;
+            info!(
+                arch = %em.config.arch,
+                num_layers = em.config.num_layers,
+                hidden_size = em.config.hidden_size,
+                vocab_size = em.config.vocab_size,
+                pooling_type = em.config.pooling_type,
+                bytes = em.total_bytes,
+                device_id,
+                "embedding model loaded"
+            );
+            Some(Arc::new(em))
+        } else {
+            info!("embedding model not configured (--embedding-model unset)");
+            None
+        };
+
     let state: SharedState = Arc::new(ServerState {
         model_id: cfg.model_id.clone(),
         cfg: model_cfg,
@@ -459,6 +514,7 @@ pub async fn serve(cfg: ServeConfig) -> Result<()> {
         prefix_cache,
         prefix_cache_chunk_tokens: prefill_ubatch,
         topology_tag,
+        embedding_model,
         remote_tools,
         agent_stats: crate::agent_stats::AgentStatsRing::default(),
         tool_call_format_default,

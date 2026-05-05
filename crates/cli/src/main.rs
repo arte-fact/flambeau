@@ -91,6 +91,19 @@ enum Cmd {
         /// prefixed with a per-server alias to avoid collisions.
         #[arg(long = "mcp")]
         mcp_urls: Vec<String>,
+        /// **#230 P2.11a** — optional path to a `qwen3` arch embedding
+        /// GGUF (e.g. `Qwen3-Embedding-0.6B-Q8_0.gguf`). Loaded
+        /// alongside the chat model on a single device; powers the
+        /// `/v1/embeddings` endpoint (#231). Omit to disable embeddings.
+        #[arg(long = "embedding-model")]
+        embedding_model: Option<String>,
+        /// **#230 P2.11a** — HIP device for the embedding model
+        /// (numeric, e.g. `0`). Defaults to the first device in
+        /// `--devices`. The embedding model shares VRAM with whatever
+        /// chat-model rank lives on the same device; a 600 M / 4 B
+        /// embedding fits alongside a 27 B chat shard on 16 GB MI50.
+        #[arg(long = "embedding-device")]
+        embedding_device: Option<i32>,
     },
     /// T-track warmup-tuner (V1.x side-track).
     Tune {
@@ -181,9 +194,27 @@ fn main() -> Result<()> {
         Cmd::ExtractChatTemplate { path, out } => extract_chat_template(&path, out.as_deref())?,
         Cmd::InspectHsaco { path } => todo!("V1.3+: implement inspect-hsaco for {path}"),
         Cmd::Infer { model, .. } => todo!("V1.7: implement infer for {model}"),
-        Cmd::Serve { model, devices, port, mesh_mode, tp_size, pp_size, mcp_urls } => {
-            serve_cmd(&model, &devices, port, &mesh_mode, tp_size, pp_size, mcp_urls)?
-        }
+        Cmd::Serve {
+            model,
+            devices,
+            port,
+            mesh_mode,
+            tp_size,
+            pp_size,
+            mcp_urls,
+            embedding_model,
+            embedding_device,
+        } => serve_cmd(
+            &model,
+            &devices,
+            port,
+            &mesh_mode,
+            tp_size,
+            pp_size,
+            mcp_urls,
+            embedding_model,
+            embedding_device,
+        )?,
         Cmd::Tune { model, .. } => todo!("T-track: implement tune for {model}"),
         Cmd::Mcp { stdio, port } => mcp_cmd(stdio, port)?,
         Cmd::Sweep { arch, op, dtype } => sweep(&arch, op.as_deref(), &dtype)?,
@@ -204,6 +235,8 @@ fn serve_cmd(
     _tp_size: u32,
     _pp_size: u32,
     _mcp_urls: Vec<String>,
+    _embedding_model: Option<String>,
+    _embedding_device: Option<i32>,
 ) -> Result<()> {
     anyhow::bail!(
         "`flambeau serve` requires building with --features hip_serve (needs ROCm + HIP devices)"
@@ -219,6 +252,8 @@ fn serve_cmd(
     tp_size: u32,
     pp_size: u32,
     mcp_urls: Vec<String>,
+    embedding_model: Option<String>,
+    embedding_device: Option<i32>,
 ) -> Result<()> {
     use std::net::SocketAddr;
     use std::path::PathBuf;
@@ -277,6 +312,22 @@ fn serve_cmd(
     };
 
     let bind_addr: SocketAddr = format!("0.0.0.0:{port}").parse()?;
+    // **#230** — resolve embedding device. Default to the first chat
+    // device; reject explicit IDs that aren't already in `--devices`
+    // (the cluster's HipDevice handles cover only those).
+    let resolved_embedding_device = if embedding_model.is_some() {
+        let chosen = embedding_device.unwrap_or(device_ids[0]);
+        if !device_ids.contains(&chosen) {
+            anyhow::bail!(
+                "--embedding-device {chosen} must be one of --devices ({:?}); \
+                 the embedding model reuses the chat-cluster's HipDevice handle",
+                device_ids
+            );
+        }
+        Some(chosen)
+    } else {
+        None
+    };
     let cfg = flambeau_server::ServeConfig {
         gguf_path: PathBuf::from(model),
         device_ids,
@@ -287,6 +338,8 @@ fn serve_cmd(
             .unwrap_or_else(|| "flambeau".to_string()),
         mesh_mode: mesh_mode_parsed,
         mcp_urls,
+        embedding_gguf_path: embedding_model.map(PathBuf::from),
+        embedding_device_id: resolved_embedding_device,
     };
 
     let rt = tokio::runtime::Builder::new_multi_thread()

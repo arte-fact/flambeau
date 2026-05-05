@@ -43,6 +43,9 @@ pub mod hybrid;
 pub mod mtp;
 
 #[cfg(feature = "hip")]
+pub mod embedding;
+
+#[cfg(feature = "hip")]
 pub mod weights;
 
 #[cfg(feature = "hip")]
@@ -76,6 +79,9 @@ pub use weights::{
     AttnWeights, DenseAttnWeights, DeviceTensor, FfnWeights, FullAttnWeights, GdnWeights,
     LayerWeights, ModelWeights, SharedExpertWeights,
 };
+
+#[cfg(feature = "hip")]
+pub use embedding::{EmbeddingConfig, EmbeddingLayer, EmbeddingModel};
 
 pub use config::{
     AttentionFamily, GdnDims, Qwen3MoEConfig, Qwen3MoEConfigError, RopeSpec, SUPPORTED_ARCHS,

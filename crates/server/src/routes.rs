@@ -149,6 +149,12 @@ pub struct ServerState {
     /// **#229** — topology fingerprint stored on every cache entry.
     /// Defensive guard against cross-topology pollution.
     pub topology_tag: TopologyTag,
+    /// **#230 P2.11a** — optional embedding model for the
+    /// `/v1/embeddings` endpoint. `None` when the server was started
+    /// without `--embedding-model`; the endpoint (#231) returns 503
+    /// in that case. Single-device PP/TP is V2; the V1 model lives
+    /// on one HIP device shared with the chat cluster.
+    pub embedding_model: Option<Arc<flambeau_qwen3_moe::EmbeddingModel>>,
     /// Tools discovered on the `--mcp <url>` upstreams at startup
     /// (ROADMAP-V2 §M2.1). Merged into each request's `tools[]` before
     /// rendering the Jinja template, so the model sees them alongside
