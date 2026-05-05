@@ -159,6 +159,12 @@ pub struct ServerState {
     /// 0.6B model that V1 doesn't bother with multi-slot pooling.
     pub embedding_model:
         Option<Arc<tokio::sync::Mutex<flambeau_qwen3_moe::EmbeddingModel>>>,
+    /// **#231 quality fix** — embedding model's own tokenizer.
+    /// Qwen3-Embedding ships a vocab (151669) that diverges from
+    /// chat-side tokenizers (151424 on Qwen3.5-9B); reusing the chat
+    /// tokenizer feeds wrong token ids into the embedding model's
+    /// `token_embd`. `None` mirrors `embedding_model = None`.
+    pub embedding_tokenizer: Option<Arc<flambeau_quant::GgufTokenizer>>,
     /// **#231** — HIP rank index for the embedding device, derived at
     /// boot from `--embedding-device`. The endpoint uses
     /// `cluster.device(rank)` to get a `&HipDevice` for the forward
@@ -1090,12 +1096,19 @@ pub async fn embeddings(
         .clone()
         .unwrap_or_else(|| state.model_id.clone());
 
-    // Tokenise each input. Reuses the chat tokenizer because Qwen3-
-    // Embedding ships the same tokenizer as Qwen3 chat models.
+    // **#231 quality fix** — use the embedding model's OWN tokenizer.
+    // Qwen3-Embedding ships a 151669-token vocab; Qwen3.5-9B's chat
+    // tokenizer is 151424. Different vocabs → token ids index different
+    // rows of the embedding model's token_embd → semantic garbage.
+    let tokenizer = state
+        .embedding_tokenizer
+        .as_ref()
+        .cloned()
+        .expect("embedding_model present without embedding_tokenizer");
     let mut all_tokens: Vec<Vec<u32>> = Vec::with_capacity(inputs.len());
     let mut total_prompt_tokens: u32 = 0;
     for (i, s) in inputs.iter().enumerate() {
-        let toks = match state.tokenizer.encode(s) {
+        let toks = match tokenizer.encode(s) {
             Ok(t) => t,
             Err(e) => {
                 return (

@@ -29,7 +29,9 @@ use flambeau_core::{CopyDirection, Device, DevicePtr, Stream};
 use flambeau_ops::hip::cast::cast_f16_to_f32;
 use flambeau_ops::hip::norm::{l2_norm_f32, rmsnorm_f16};
 use flambeau_ops::hip::{HipDevice, HipStream};
-use flambeau_quant::GgufFile;
+use flambeau_quant::{GgmlDType, GgufFile};
+
+use crate::weights::DeviceTensor;
 
 use crate::forward::{
     forward_embed_decode_host, forward_layer_prefill, ForwardPrefillScratch,
@@ -193,7 +195,20 @@ impl EmbeddingModel {
         max_tokens: usize,
     ) -> Result<Self> {
         device.bind()?;
-        let inner = Qwen3MoEModel::load(file, device).context("Qwen3MoEModel::load (embedding)")?;
+        let mut inner =
+            Qwen3MoEModel::load(file, device).context("Qwen3MoEModel::load (embedding)")?;
+        // **#231 quality fix** — `Qwen3MoEModel::load` (the single-
+        // device loader) uploads norm weights verbatim, but
+        // `rmsnorm_f16` reinterprets the buffer as F16. Qwen3-Embedding
+        // GGUFs ship every norm as F32; without the cast, byte-level
+        // reinterpret turns half the F16 lookups into 0.0 and the
+        // model's output picks up an alternating-zeros pattern (every
+        // other dim ends up exactly 0). The chat path's sharded loader
+        // (`upload_as_f16` in sharded.rs) handles this; the single-
+        // device loader doesn't. Mirror that cast post-load here.
+        cast_f32_norms_to_f16(&mut inner.weights, file, device).context(
+            "embedding load: cast F32 norm weights to F16 (matches sharded loader's up_f16)",
+        )?;
         if inner.config.arch != "qwen3" {
             // Defensive: the embedding API is only useful on a
             // qwen3-arch model. A chat GGUF (qwen35moe / etc) would
@@ -422,4 +437,111 @@ impl Drop for EmbeddingModel {
             );
         }
     }
+}
+
+/// **#231** — re-upload every F32 norm weight as F16 in place. The
+/// single-device `Qwen3MoEModel::load` skips this cast (the sharded
+/// loader doesn't), but `rmsnorm_f16` byte-reinterprets the buffer
+/// as F16 and silently corrupts every other lookup when the source
+/// is F32. Walks: `output_norm`, per-layer `attn_norm`, `ffn_norm`,
+/// `attn.Dense.{attn_q_norm, attn_k_norm}`. No-op for tensors already
+/// F16.
+fn cast_f32_norms_to_f16(
+    weights: &mut crate::weights::ModelWeights,
+    file: &GgufFile,
+    device: &HipDevice,
+) -> Result<()> {
+    device.bind()?;
+    let stream = device.default_stream();
+    cast_one_norm(&mut weights.output_norm, file, device, stream)
+        .context("output_norm")?;
+    for (il, layer) in weights.layers.iter_mut().enumerate() {
+        cast_one_norm(&mut layer.attn_norm, file, device, stream)
+            .with_context(|| format!("layer {il} attn_norm"))?;
+        if let Some(t) = layer.ffn_norm.as_mut() {
+            cast_one_norm(t, file, device, stream)
+                .with_context(|| format!("layer {il} ffn_norm"))?;
+        }
+        if let Some(t) = layer.post_attention_norm.as_mut() {
+            cast_one_norm(t, file, device, stream)
+                .with_context(|| format!("layer {il} post_attention_norm"))?;
+        }
+        if let crate::weights::AttnWeights::Dense(d) = &mut layer.attn {
+            cast_one_norm(&mut d.attn_q_norm, file, device, stream)
+                .with_context(|| format!("layer {il} attn_q_norm"))?;
+            cast_one_norm(&mut d.attn_k_norm, file, device, stream)
+                .with_context(|| format!("layer {il} attn_k_norm"))?;
+        }
+    }
+    stream
+        .synchronize()
+        .context("sync after norm F32→F16 fixup")?;
+    Ok(())
+}
+
+/// Cast one F32 `DeviceTensor` to F16 in place: alloc fresh F16
+/// buffer, host-side convert, upload, free old buffer, swap pointers.
+/// Pass-through on F16/non-F32 tensors.
+fn cast_one_norm(
+    t: &mut DeviceTensor,
+    file: &GgufFile,
+    device: &HipDevice,
+    stream: &HipStream,
+) -> Result<()> {
+    if t.dtype != GgmlDType::F32 {
+        return Ok(());
+    }
+    let raw = file
+        .tensor_raw(&t.name)
+        .with_context(|| format!("tensor_raw `{}`", t.name))?;
+    let elems: usize = t.dims.iter().product::<u64>() as usize;
+    if raw.len() < elems * 4 {
+        bail!(
+            "cast_one_norm: `{}` mmap slice {} < expected {}",
+            t.name,
+            raw.len(),
+            elems * 4
+        );
+    }
+    // SAFETY: tensor.dtype == F32 means the GGUF metadata declares F32
+    // bytes; bytemuck::cast_slice will only reinterpret if alignment
+    // is satisfied. The mmap is page-aligned which exceeds 4-byte
+    // alignment.
+    let src: &[f32] = bytemuck::cast_slice(&raw[..elems * 4]);
+    let host: Vec<half::f16> = src.iter().map(|&v| half::f16::from_f32(v)).collect();
+    let new_bytes = elems * 2;
+    let new_ptr = device
+        .alloc(new_bytes)
+        .map_err(|e| anyhow!("alloc F16 norm `{}`: {e}", t.name))?;
+    // SAFETY: `new_ptr` is a fresh device alloc of `new_bytes`; `host`
+    // owns `new_bytes` host bytes for the duration of memcpy + the
+    // outer caller's stream sync.
+    unsafe {
+        device
+            .memcpy_async(
+                stream,
+                CopyDirection::HostToDevice,
+                new_ptr,
+                DevicePtr(host.as_ptr() as usize),
+                new_bytes,
+            )
+            .map_err(|e| anyhow!("memcpy F32→F16 `{}`: {e}", t.name))?;
+    }
+    stream.synchronize()?;
+    drop(host);
+    // Free the old F32 buffer.
+    let old_ptr = t.ptr;
+    let old_bytes = t.bytes;
+    // SAFETY: `old_ptr` came from `device.alloc` in the original load;
+    // we've owned exclusive access since.
+    unsafe {
+        device
+            .dealloc(old_ptr, old_bytes)
+            .map_err(|e| anyhow!("dealloc F32 norm `{}`: {e}", t.name))?;
+    }
+    // Replace pointer + dtype + bytes — dims unchanged.
+    t.ptr = new_ptr;
+    t.dtype = GgmlDType::F16;
+    t.bytes = new_bytes;
+    Ok(())
 }

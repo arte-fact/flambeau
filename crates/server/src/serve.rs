@@ -459,7 +459,10 @@ pub async fn serve(cfg: ServeConfig) -> Result<()> {
     // the server boot — operator can omit `--embedding-model` to
     // disable.
     let mut embedding_rank: Option<usize> = None;
-    let embedding_model: Option<Arc<tokio::sync::Mutex<flambeau_qwen3_moe::EmbeddingModel>>> =
+    let embedding_model: Option<(
+        Arc<tokio::sync::Mutex<flambeau_qwen3_moe::EmbeddingModel>>,
+        Arc<flambeau_quant::GgufTokenizer>,
+    )> =
         if let Some(path) = cfg.embedding_gguf_path.as_ref() {
             let device_id = cfg.embedding_device_id.unwrap_or(cfg.device_ids[0]);
             let rank = cfg
@@ -480,6 +483,15 @@ pub async fn serve(cfg: ServeConfig) -> Result<()> {
             );
             let efile = GgufFile::open(path)
                 .with_context(|| format!("open embedding GGUF at {}", path.display()))?;
+            // **#231 quality fix** — load the embedding model's own
+            // tokenizer (vocab_size differs from chat tokenizer:
+            // Qwen3-Embedding ships 151669, Qwen3.5-9B ships 151424).
+            // Token ids from the chat tokenizer dereference into the
+            // wrong rows of the embedding model's `token_embd`,
+            // producing non-discriminating output vectors.
+            let embedding_tokenizer =
+                flambeau_quant::load_from_gguf(&efile)
+                    .context("load embedding tokenizer from GGUF")?;
             // **#231** — `max_tokens` caps the longest input the
             // `/v1/embeddings` endpoint will accept. 4096 covers the
             // realistic RAG / memory chunking patterns (most clients
@@ -508,11 +520,21 @@ pub async fn serve(cfg: ServeConfig) -> Result<()> {
                 device_id,
                 "embedding model loaded"
             );
-            Some(Arc::new(tokio::sync::Mutex::new(em)))
+            Some((
+                Arc::new(tokio::sync::Mutex::new(em)),
+                Arc::new(embedding_tokenizer),
+            ))
         } else {
             info!("embedding model not configured (--embedding-model unset)");
             None
         };
+    let (embedding_model, embedding_tokenizer): (
+        Option<Arc<tokio::sync::Mutex<flambeau_qwen3_moe::EmbeddingModel>>>,
+        Option<Arc<flambeau_quant::GgufTokenizer>>,
+    ) = match embedding_model {
+        Some((m, t)) => (Some(m), Some(t)),
+        None => (None, None),
+    };
 
     let state: SharedState = Arc::new(ServerState {
         model_id: cfg.model_id.clone(),
@@ -533,6 +555,7 @@ pub async fn serve(cfg: ServeConfig) -> Result<()> {
         prefix_cache_chunk_tokens: prefill_ubatch,
         topology_tag,
         embedding_model,
+        embedding_tokenizer,
         embedding_rank,
         remote_tools,
         agent_stats: crate::agent_stats::AgentStatsRing::default(),
