@@ -19,8 +19,8 @@ use tracing::info;
 
 use crate::model::LoadedModel;
 use crate::routes::{
-    agent_stats, chat_completions, completions, health, index, infill, messages_anthropic,
-    models, tools_endpoint, ServerState, SharedState,
+    agent_stats, chat_completions, completions, embeddings, health, index, infill,
+    messages_anthropic, models, tools_endpoint, ServerState, SharedState,
 };
 
 /// **TP-5a** — mesh topology selector. PP-V1 default; TP engages the
@@ -458,7 +458,8 @@ pub async fn serve(cfg: ServeConfig) -> Result<()> {
     // the cluster, then pass the matching `&HipDevice`. Errors abort
     // the server boot — operator can omit `--embedding-model` to
     // disable.
-    let embedding_model: Option<Arc<flambeau_qwen3_moe::EmbeddingModel>> =
+    let mut embedding_rank: Option<usize> = None;
+    let embedding_model: Option<Arc<tokio::sync::Mutex<flambeau_qwen3_moe::EmbeddingModel>>> =
         if let Some(path) = cfg.embedding_gguf_path.as_ref() {
             let device_id = cfg.embedding_device_id.unwrap_or(cfg.device_ids[0]);
             let rank = cfg
@@ -469,6 +470,7 @@ pub async fn serve(cfg: ServeConfig) -> Result<()> {
                     "embedding device {device_id} not in --devices {:?}",
                     cfg.device_ids
                 ))?;
+            embedding_rank = Some(rank);
             let device = cluster.device(rank);
             info!(
                 path = %path.display(),
@@ -478,19 +480,35 @@ pub async fn serve(cfg: ServeConfig) -> Result<()> {
             );
             let efile = GgufFile::open(path)
                 .with_context(|| format!("open embedding GGUF at {}", path.display()))?;
-            let em = flambeau_qwen3_moe::EmbeddingModel::load(&efile, device, device_id)
-                .context("EmbeddingModel::load")?;
+            // **#231** — `max_tokens` caps the longest input the
+            // `/v1/embeddings` endpoint will accept. 4096 covers the
+            // realistic RAG / memory chunking patterns (most clients
+            // chunk at 512–2048 tokens). Operator override hook is
+            // V2; the env knob `FLAMBEAU_EMBEDDING_MAX_TOKENS` provides
+            // a quick escape valve in the meantime.
+            let max_emb_tokens: usize = std::env::var("FLAMBEAU_EMBEDDING_MAX_TOKENS")
+                .ok()
+                .and_then(|s| s.parse().ok())
+                .filter(|n: &usize| *n >= 16 && *n <= 32768)
+                .unwrap_or(4096);
+            let em = flambeau_qwen3_moe::EmbeddingModel::load(
+                &efile,
+                device,
+                device_id,
+                max_emb_tokens,
+            )
+            .context("EmbeddingModel::load")?;
             info!(
-                arch = %em.config.arch,
-                num_layers = em.config.num_layers,
-                hidden_size = em.config.hidden_size,
-                vocab_size = em.config.vocab_size,
-                pooling_type = em.config.pooling_type,
-                bytes = em.total_bytes,
+                arch = em.arch(),
+                hidden_size = em.hidden_size(),
+                vocab_size = em.vocab_size(),
+                pooling_type = em.pooling_type(),
+                max_tokens = em.max_tokens,
+                bytes = em.total_bytes(),
                 device_id,
                 "embedding model loaded"
             );
-            Some(Arc::new(em))
+            Some(Arc::new(tokio::sync::Mutex::new(em)))
         } else {
             info!("embedding model not configured (--embedding-model unset)");
             None
@@ -515,6 +533,7 @@ pub async fn serve(cfg: ServeConfig) -> Result<()> {
         prefix_cache_chunk_tokens: prefill_ubatch,
         topology_tag,
         embedding_model,
+        embedding_rank,
         remote_tools,
         agent_stats: crate::agent_stats::AgentStatsRing::default(),
         tool_call_format_default,
@@ -528,6 +547,9 @@ pub async fn serve(cfg: ServeConfig) -> Result<()> {
         .route("/v1/models", get(models))
         .route("/v1/chat/completions", post(chat_completions))
         .route("/v1/completions", post(completions))
+        // **#231 P2.11b** — OpenAI-compat embeddings endpoint. 503
+        // when the server was started without `--embedding-model`.
+        .route("/v1/embeddings", post(embeddings))
         // P1.6b — llama.cpp-compatible Fill-in-the-Middle. Both
         // top-level (`/infill`, llama.cpp + Continue) and
         // namespaced (`/v1/infill`) for clients that expect API-

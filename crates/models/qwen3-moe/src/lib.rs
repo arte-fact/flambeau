@@ -81,7 +81,7 @@ pub use weights::{
 };
 
 #[cfg(feature = "hip")]
-pub use embedding::{EmbeddingConfig, EmbeddingLayer, EmbeddingModel};
+pub use embedding::{EmbeddingModel, EmbeddingScratch};
 
 pub use config::{
     AttentionFamily, GdnDims, Qwen3MoEConfig, Qwen3MoEConfigError, RopeSpec, SUPPORTED_ARCHS,

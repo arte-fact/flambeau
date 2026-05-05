@@ -29,7 +29,8 @@ pub mod serve;
 
 pub use api::{
     ChatChoice, ChatCompletionRequest, ChatCompletionResponse, ChatMessage, CompletionChoice,
-    CompletionRequest, CompletionResponse, FunctionCall, FunctionDef, ModelObject,
+    CompletionRequest, CompletionResponse, EmbeddingData, EmbeddingsInput, EmbeddingsRequest,
+    EmbeddingsResponse, EmbeddingsUsage, FunctionCall, FunctionDef, ModelObject,
     ModelsListResponse, ToolCall, ToolChoice, ToolChoiceFunction, ToolChoiceNamed, ToolDef, Usage,
 };
 pub use state::{ModelDefaults, SamplingParams};

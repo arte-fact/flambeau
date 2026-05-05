@@ -1013,3 +1013,70 @@ mod tests {
         assert_eq!(req.top_k, Some(20));
     }
 }
+
+// ============================================================================
+// **#231 P2.11b** — `/v1/embeddings` types.
+// ============================================================================
+
+/// Inputs for `POST /v1/embeddings`. OpenAI accepts:
+/// - a single string,
+/// - an array of strings (batch),
+/// - a single token id array,
+/// - an array of token id arrays.
+///
+/// V1 only handles strings; integer-array forms return 400.
+#[derive(Debug, Clone, serde::Deserialize)]
+#[serde(untagged)]
+pub enum EmbeddingsInput {
+    Single(String),
+    Batch(Vec<String>),
+}
+
+/// Embeddings request body. Mirrors the OpenAI shape; unsupported
+/// fields (`encoding_format = base64`, `dimensions`, `user`) are
+/// accepted and ignored in V1 — we always return raw F32.
+#[derive(Debug, Clone, serde::Deserialize)]
+pub struct EmbeddingsRequest {
+    pub input: EmbeddingsInput,
+    /// Echoed in the response for compatibility — not actually
+    /// dispatched to a different model since V1 ships exactly one
+    /// embedding head.
+    #[serde(default)]
+    pub model: Option<String>,
+    /// V1 only emits `"float"`. Reserved for compat.
+    #[serde(default)]
+    pub encoding_format: Option<String>,
+    /// V1 returns the model's native hidden size; the OpenAI
+    /// truncation-at-`dimensions` feature is V2.
+    #[serde(default)]
+    pub dimensions: Option<usize>,
+    #[serde(default)]
+    pub user: Option<String>,
+}
+
+/// Single-input response data slot.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct EmbeddingData {
+    /// Always `"embedding"`.
+    pub object: &'static str,
+    pub embedding: Vec<f32>,
+    pub index: u32,
+}
+
+/// Token usage block for `/v1/embeddings`. Mirrors OpenAI's shape
+/// (no `completion_tokens`).
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct EmbeddingsUsage {
+    pub prompt_tokens: u32,
+    pub total_tokens: u32,
+}
+
+/// Top-level `/v1/embeddings` response.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct EmbeddingsResponse {
+    /// Always `"list"`.
+    pub object: &'static str,
+    pub data: Vec<EmbeddingData>,
+    pub model: String,
+    pub usage: EmbeddingsUsage,
+}

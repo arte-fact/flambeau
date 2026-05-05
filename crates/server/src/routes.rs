@@ -11,6 +11,7 @@ use axum::response::sse::{Event, KeepAlive, Sse};
 use axum::response::{IntoResponse, Response};
 use axum::Json;
 use flambeau_backend_hip::HipCluster;
+use flambeau_core::Device;
 use flambeau_qwen3_moe::Qwen3MoEConfig;
 use flambeau_quant::{ChatTemplate, GgufTokenizer};
 use flambeau_runtime::json_grammar::JsonState;
@@ -149,12 +150,20 @@ pub struct ServerState {
     /// **#229** — topology fingerprint stored on every cache entry.
     /// Defensive guard against cross-topology pollution.
     pub topology_tag: TopologyTag,
-    /// **#230 P2.11a** — optional embedding model for the
+    /// **#230 / #231** — optional embedding model for the
     /// `/v1/embeddings` endpoint. `None` when the server was started
-    /// without `--embedding-model`; the endpoint (#231) returns 503
-    /// in that case. Single-device PP/TP is V2; the V1 model lives
-    /// on one HIP device shared with the chat cluster.
-    pub embedding_model: Option<Arc<flambeau_qwen3_moe::EmbeddingModel>>,
+    /// without `--embedding-model`; the endpoint returns 503 in that
+    /// case. Wrapped in `tokio::sync::Mutex` because forward state
+    /// (per-layer scratch + KV) is shared and concurrent requests
+    /// must serialise — embedding inference is fast enough on a
+    /// 0.6B model that V1 doesn't bother with multi-slot pooling.
+    pub embedding_model:
+        Option<Arc<tokio::sync::Mutex<flambeau_qwen3_moe::EmbeddingModel>>>,
+    /// **#231** — HIP rank index for the embedding device, derived at
+    /// boot from `--embedding-device`. The endpoint uses
+    /// `cluster.device(rank)` to get a `&HipDevice` for the forward
+    /// call. `None` mirrors `embedding_model = None`.
+    pub embedding_rank: Option<usize>,
     /// Tools discovered on the `--mcp <url>` upstreams at startup
     /// (ROADMAP-V2 §M2.1). Merged into each request's `tools[]` before
     /// rendering the Jinja template, so the model sees them alongside
@@ -1016,6 +1025,186 @@ pub async fn tools_endpoint(State(state): State<SharedState>) -> impl IntoRespon
         "remote_tools": &state.remote_tools,
         "count": state.remote_tools.len(),
     }))
+}
+
+/// **#231 P2.11b** — POST /v1/embeddings.
+///
+/// Tokenises each input string with the chat tokenizer (Qwen3 family
+/// shares a tokenizer between chat and embedding models), then runs
+/// the loaded embedding model's pooled forward and returns the L2-
+/// normalised F32 vector. OpenAI-compatible response shape.
+///
+/// Returns 503 when the server was started without
+/// `--embedding-model`. Returns 400 on integer-array inputs (V1 only
+/// handles strings — OpenAI clients we care about always send strings).
+pub async fn embeddings(
+    State(state): State<SharedState>,
+    Json(req): Json<EmbeddingsRequest>,
+) -> Response {
+    let Some(em_arc) = state.embedding_model.as_ref().cloned() else {
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(json!({
+                "error": {
+                    "message": "embedding model not configured (server started without --embedding-model)",
+                    "type": "invalid_request_error",
+                    "code": "embedding_model_not_loaded"
+                }
+            })),
+        )
+            .into_response();
+    };
+    let Some(rank) = state.embedding_rank else {
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({
+                "error": {
+                    "message": "embedding model present but rank unset",
+                    "type": "internal_error"
+                }
+            })),
+        )
+            .into_response();
+    };
+
+    let inputs: Vec<String> = match req.input {
+        EmbeddingsInput::Single(s) => vec![s],
+        EmbeddingsInput::Batch(xs) => xs,
+    };
+    if inputs.is_empty() {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({
+                "error": {
+                    "message": "input must be a non-empty string or array of strings",
+                    "type": "invalid_request_error"
+                }
+            })),
+        )
+            .into_response();
+    }
+
+    let req_start = Instant::now();
+    let model_id = req
+        .model
+        .clone()
+        .unwrap_or_else(|| state.model_id.clone());
+
+    // Tokenise each input. Reuses the chat tokenizer because Qwen3-
+    // Embedding ships the same tokenizer as Qwen3 chat models.
+    let mut all_tokens: Vec<Vec<u32>> = Vec::with_capacity(inputs.len());
+    let mut total_prompt_tokens: u32 = 0;
+    for (i, s) in inputs.iter().enumerate() {
+        let toks = match state.tokenizer.encode(s) {
+            Ok(t) => t,
+            Err(e) => {
+                return (
+                    StatusCode::BAD_REQUEST,
+                    Json(json!({
+                        "error": {
+                            "message": format!("tokenize input[{i}]: {e}"),
+                            "type": "invalid_request_error"
+                        }
+                    })),
+                )
+                    .into_response();
+            }
+        };
+        if toks.is_empty() {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(json!({
+                    "error": {
+                        "message": format!("input[{i}] tokenised to 0 tokens"),
+                        "type": "invalid_request_error"
+                    }
+                })),
+            )
+                .into_response();
+        }
+        total_prompt_tokens = total_prompt_tokens.saturating_add(toks.len() as u32);
+        all_tokens.push(toks);
+    }
+
+    // Acquire the embedding model's mutex (V1 single-tenant: serial).
+    // Serialise across a tokio task so we don't block the runtime
+    // worker on the (potentially multi-second) GPU forward.
+    let cluster = state.cluster.clone();
+    let result: Result<Vec<Vec<f32>>> = tokio::task::spawn_blocking(move || {
+        let mut em = em_arc.blocking_lock();
+        let device = cluster.device(rank);
+        let stream = device.default_stream();
+        let mut out: Vec<Vec<f32>> = Vec::with_capacity(all_tokens.len());
+        for toks in &all_tokens {
+            let max = em.max_tokens;
+            let slice: &[u32] = if toks.len() > max {
+                tracing::warn!(
+                    target: "server.embeddings",
+                    L = toks.len(),
+                    max,
+                    "input truncated to embedding max_tokens"
+                );
+                &toks[..max]
+            } else {
+                &toks[..]
+            };
+            let v = em
+                .compute_pooled_embedding(device, stream, slice)
+                .context("compute_pooled_embedding")?;
+            out.push(v);
+        }
+        Ok(out)
+    })
+    .await
+    .unwrap_or_else(|join_err| Err(anyhow!("embeddings join error: {join_err}")));
+
+    let vectors = match result {
+        Ok(v) => v,
+        Err(e) => {
+            tracing::error!(
+                target: "server.embeddings",
+                error = %e,
+                "embeddings forward failed"
+            );
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({
+                    "error": {
+                        "message": format!("embedding forward failed: {e}"),
+                        "type": "internal_error"
+                    }
+                })),
+            )
+                .into_response();
+        }
+    };
+
+    let data: Vec<EmbeddingData> = vectors
+        .into_iter()
+        .enumerate()
+        .map(|(i, v)| EmbeddingData {
+            object: "embedding",
+            embedding: v,
+            index: i as u32,
+        })
+        .collect();
+    let resp = EmbeddingsResponse {
+        object: "list",
+        data,
+        model: model_id,
+        usage: EmbeddingsUsage {
+            prompt_tokens: total_prompt_tokens,
+            total_tokens: total_prompt_tokens,
+        },
+    };
+    tracing::info!(
+        target: "server.embeddings",
+        n_inputs = resp.data.len(),
+        prompt_tokens = total_prompt_tokens,
+        elapsed_ms = req_start.elapsed().as_secs_f64() * 1000.0,
+        "embeddings response"
+    );
+    Json(resp).into_response()
 }
 
 /// GET /v1/models — lists just the loaded model.

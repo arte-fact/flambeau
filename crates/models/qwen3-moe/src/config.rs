@@ -40,7 +40,8 @@ pub enum Qwen3MoEConfigError {
 /// scaffold: config parser accepts it, but the weight loader + forward path
 /// still assume MoE — a qwen35 GGUF will fail to LOAD until the dense-FFN
 /// paths are wired (see `doc/V2-BACKLOG.md#V2.2`).
-pub const SUPPORTED_ARCHS: &[&str] = &["qwen35moe", "qwen36moe", "qwen35", "qwen3next"];
+pub const SUPPORTED_ARCHS: &[&str] =
+    &["qwen35moe", "qwen36moe", "qwen35", "qwen3next", "qwen3"];
 
 /// Which attention family the model uses.
 ///
@@ -144,6 +145,12 @@ pub struct Qwen3MoEConfig {
 
     /// `output.weight` absent → LM head tied to `token_embd.weight`.
     pub tied_lm_head: bool,
+
+    /// **#231** — pooling-type tag from `{arch}.pooling_type` (only
+    /// emitted by embedding GGUFs). llama.cpp convention:
+    /// `0`=none, `1`=mean, `2`=cls, `3`=last. `None` on chat models;
+    /// `Some(3)` on Qwen3-Embedding which uses last-token pooling.
+    pub pooling_type: Option<u32>,
 }
 
 impl Qwen3MoEConfig {
@@ -171,8 +178,20 @@ impl Qwen3MoEConfig {
         // dropped — see `project_v1_bench_matrix.md` (Coder-30B was 0.27× combined
         // and the qwen3moe-specific forward_dense_attn_* path lacked the kernel
         // optimizations qwen35moe got).
-        let family = AttentionFamily::Hybrid;
-        let is_dense_ffn = arch == "qwen35";
+        //
+        // **#231** — `qwen3` is the dense-attention non-MoE arch carried by
+        // Qwen3-Embedding GGUFs (and any future Qwen3 dense chat model).
+        // No `ssm.*` keys, no expert keys, full-attention every layer.
+        // Maps to `AttentionFamily::Dense` which the layout / loader /
+        // forward stack already supports for the dense-attn + dense-ffn
+        // path; chat path stays unaffected (qwen35moe / qwen36moe still
+        // resolve to Hybrid).
+        let family = if arch == "qwen3" {
+            AttentionFamily::Dense
+        } else {
+            AttentionFamily::Hybrid
+        };
+        let is_dense_ffn = arch == "qwen35" || arch == "qwen3";
 
         let key = |suffix: &str| format!("{arch}.{suffix}");
         let mk_missing = |suffix: &str| Qwen3MoEConfigError::MissingKey(key(suffix));
@@ -271,6 +290,7 @@ impl Qwen3MoEConfig {
                 Qwen3MoEConfigError::MissingKey("tensor token_embd.weight".into())
             })?;
         let tied_lm_head = file.info("output.weight").is_err();
+        let pooling_type = file.metadata_u32(&key("pooling_type"));
 
         Ok(Self {
             arch,
@@ -291,6 +311,7 @@ impl Qwen3MoEConfig {
             full_attention_interval,
             gdn,
             tied_lm_head,
+            pooling_type,
         })
     }
 

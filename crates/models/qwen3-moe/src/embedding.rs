@@ -1,296 +1,423 @@
-//! **#230 P2.11a** — minimal Qwen3 dense-architecture embedding-model
-//! loader. Hosts a single `general.architecture = "qwen3"` GGUF on a
-//! single HIP device for use by the `/v1/embeddings` endpoint
-//! (#231 wires the forward path).
+//! **#230 P2.11a / #231 P2.11b** — embedding model loader + pooled
+//! forward for `general.architecture = "qwen3"` GGUFs (Qwen3-Embedding
+//! family: 0.6B / 4B / 8B).
 //!
-//! Scope (V1):
-//! - Single-device only (TP / PP for the embedding head is V2 work; a
-//!   600 M / 4 B / 8 B Qwen3-Embedding fits on one MI50 even alongside
-//!   a 27 B chat model).
-//! - `qwen3` arch only (no Qwen3.5/3.6 hybrid GDN; no MoE).
-//! - Tensors uploaded verbatim (Q8_0 stays Q8_0; F32 norms stay F32 —
-//!   downstream forward casts to F16 in scratch).
+//! Architectural reuse: the qwen3 dense arch maps cleanly to the
+//! existing `AttentionFamily::Dense` + dense-FFN path that the
+//! layout / loader / forward stack already supports. `qwen35moe` and
+//! `qwen36moe` (Hybrid GDN) chat models stay on the `Hybrid` family
+//! and are unaffected. We just thread `qwen3` as a third arch in
+//! `Qwen3MoEConfig::from_gguf` and reuse `Qwen3MoEModel` end-to-end
+//! for storage. The piece this module owns is the pooled-embedding
+//! forward (`compute_pooled_embedding`): mirrors `forward_prefill`
+//! through the per-layer loop, then replaces the lm-head with a
+//! final RMSNorm + L2-normalize on the LAST token's hidden vector
+//! and downloads the result as `Vec<f32>`.
 //!
-//! Scope is intentionally narrow: the existing `Qwen3MoEShardedModel`
-//! loader assumes `family == Hybrid` with `ssm.*` keys present, which
-//! Qwen3-Embedding GGUFs do not carry. Forking the loader is cheaper
-//! than threading "no GDN, no MoE, no full_attention_interval" through
-//! every call site of the existing code.
+//! V1 scope:
+//! - Single-device only. Qwen3-Embedding-0.6B fits trivially next to
+//!   a 27B chat shard on 16 GB MI50; multi-device sharding is V2.
+//! - Single text per request — batch over multiple inputs is V2.
+//! - Last-token pooling (`pooling_type = 3`, what Qwen3-Embedding ships
+//!   with). Mean / CLS pooling are V2.
+//! - Output is L2-normalised F32 (the canonical embedding format).
 
 #![cfg(feature = "hip")]
 
-use std::sync::Arc;
-
 use anyhow::{anyhow, bail, Context, Result};
 use flambeau_core::{CopyDirection, Device, DevicePtr, Stream};
-use flambeau_ops::hip::HipDevice;
+use flambeau_ops::hip::cast::cast_f16_to_f32;
+use flambeau_ops::hip::norm::{l2_norm_f32, rmsnorm_f16};
+use flambeau_ops::hip::{HipDevice, HipStream};
 use flambeau_quant::GgufFile;
 
-use crate::weights::DeviceTensor;
+use crate::forward::{
+    forward_embed_decode_host, forward_layer_prefill, ForwardPrefillScratch,
+};
+use crate::model::Qwen3MoEModel;
+use crate::session::Qwen3MoESession;
 
-/// Lightweight config for an embedding model. Read from
-/// `general.architecture = "qwen3"` GGUF metadata; intentionally a
-/// subset of the full `Qwen3MoEConfig` since embedding models don't
-/// carry MoE / GDN keys.
-#[derive(Debug, Clone)]
-pub struct EmbeddingConfig {
-    /// `general.architecture` — must be `"qwen3"` in V1.
-    pub arch: String,
-    /// `qwen3.embedding_length`.
-    pub hidden_size: usize,
-    /// Outer dim of `token_embd.weight`.
-    pub vocab_size: usize,
-    /// `qwen3.block_count`.
-    pub num_layers: usize,
-    /// `qwen3.attention.head_count`.
-    pub num_heads: usize,
-    /// `qwen3.attention.head_count_kv`.
-    pub num_kv_heads: usize,
-    /// `qwen3.attention.key_length`, falling back to `hidden / heads`.
-    pub head_dim: usize,
-    /// `qwen3.context_length`.
-    pub context_length: usize,
-    /// `qwen3.attention.layer_norm_rms_epsilon`.
-    pub rms_norm_eps: f32,
-    /// `qwen3.feed_forward_length` — dense GLU FFN width.
-    pub ffn_inner: usize,
-    /// `qwen3.rope.freq_base`, default 10_000.
-    pub rope_freq_base: f32,
-    /// `qwen3.pooling_type` (llama.cpp convention): 0=none, 1=mean,
-    /// 2=cls, 3=last. Qwen3-Embedding ships with `3` (last-token
-    /// pooling). Stored for #231; loader doesn't act on it.
-    pub pooling_type: u32,
-}
-
-impl EmbeddingConfig {
-    /// Parse from an opened embedding GGUF. Errors when the arch tag
-    /// isn't `qwen3` or when a required metadata key is missing.
-    pub fn from_gguf(file: &GgufFile) -> Result<Self> {
-        let arch = file
-            .architecture()
-            .ok_or_else(|| anyhow!("missing general.architecture"))?
-            .to_string();
-        if arch != "qwen3" {
-            bail!(
-                "embedding loader supports `qwen3` arch only (got `{arch}`); \
-                 see #230 design doc for the V1 scope decision"
-            );
-        }
-        let key = |suffix: &str| format!("{arch}.{suffix}");
-        let req_u32 = |suffix: &str| -> Result<usize> {
-            file.metadata_u32(&key(suffix))
-                .map(|v| v as usize)
-                .ok_or_else(|| anyhow!("missing key `{}`", key(suffix)))
-        };
-        let opt_u32 = |suffix: &str| file.metadata_u32(&key(suffix)).map(|v| v as usize);
-        let req_f32 = |suffix: &str| -> Result<f32> {
-            file.metadata_f32(&key(suffix))
-                .ok_or_else(|| anyhow!("missing key `{}`", key(suffix)))
-        };
-        let opt_f32 = |suffix: &str| file.metadata_f32(&key(suffix));
-
-        let hidden_size = req_u32("embedding_length")?;
-        let num_heads = req_u32("attention.head_count")?;
-        let num_kv_heads = req_u32("attention.head_count_kv")?;
-        let head_dim = opt_u32("attention.key_length").unwrap_or(hidden_size / num_heads);
-        let num_layers = req_u32("block_count")?;
-        let context_length = req_u32("context_length")?;
-        let rms_norm_eps = req_f32("attention.layer_norm_rms_epsilon")?;
-        let ffn_inner = req_u32("feed_forward_length")?;
-        let rope_freq_base = opt_f32("rope.freq_base").unwrap_or(10_000.0);
-        let pooling_type = file.metadata_u32(&key("pooling_type")).unwrap_or(0);
-        let vocab_size = file
-            .info("token_embd.weight")
-            .ok()
-            .and_then(|ti| ti.dims.first().copied())
-            .map(|v| v as usize)
-            .ok_or_else(|| anyhow!("missing tensor `token_embd.weight`"))?;
-
-        Ok(Self {
-            arch,
-            hidden_size,
-            vocab_size,
-            num_layers,
-            num_heads,
-            num_kv_heads,
-            head_dim,
-            context_length,
-            rms_norm_eps,
-            ffn_inner,
-            rope_freq_base,
-            pooling_type,
-        })
-    }
-}
-
-/// Per-layer device-resident weights for one transformer block of a
-/// Qwen3-style dense embedding model. Mirrors the tensor naming
-/// produced by llama.cpp's GGUF converter for `qwen3` arch:
-/// `blk.{L}.attn_{q,k,v,output,norm,q_norm,k_norm}.weight` and
-/// `blk.{L}.ffn_{gate,up,down,norm}.weight`.
-#[derive(Debug, Clone)]
-pub struct EmbeddingLayer {
-    pub attn_q: DeviceTensor,
-    pub attn_k: DeviceTensor,
-    pub attn_v: DeviceTensor,
-    pub attn_output: DeviceTensor,
-    pub attn_norm: DeviceTensor,
-    pub attn_q_norm: DeviceTensor,
-    pub attn_k_norm: DeviceTensor,
-    pub ffn_gate: DeviceTensor,
-    pub ffn_up: DeviceTensor,
-    pub ffn_down: DeviceTensor,
-    pub ffn_norm: DeviceTensor,
-}
-
-/// Loaded embedding model + per-tensor device pointers. Owns all
-/// allocations; teardown via `dispose`.
-#[derive(Debug)]
+/// Loaded embedding model, single-device.
+///
+/// Wraps a `Qwen3MoEModel` (which handles `qwen3` arch via
+/// `AttentionFamily::Dense` after the #231 config extension) plus
+/// per-request session + scratch state allocated lazily on the first
+/// inference call.
+///
+/// Concurrent requests must serialise externally — the inner session
+/// + scratch are not thread-safe and one call mutates KV cache
+/// counters during the per-layer loop (we discard the cache between
+/// requests, but the slots themselves are shared scratch).
 pub struct EmbeddingModel {
-    pub config: EmbeddingConfig,
-    /// Logical device ID this model lives on (caller-supplied; just
-    /// echoed back for diagnostics).
+    /// Inner model is `Option` so dispose can move it out without
+    /// fighting `Drop`. Always `Some` outside of `dispose()`.
+    inner: Option<Qwen3MoEModel>,
+    /// Logical device id this model lives on; echoed in logs.
     pub device_id: i32,
-    pub token_embd: DeviceTensor,
-    pub output_norm: DeviceTensor,
-    pub layers: Vec<EmbeddingLayer>,
-    /// Total bytes uploaded to the device. Logged at boot.
-    pub total_bytes: usize,
+    /// Reusable pooled-forward scratch sized for `max_tokens` input
+    /// length. Lazy on first `compute_pooled_embedding` to avoid
+    /// up-front VRAM cost when the operator loaded the model but
+    /// hasn't called the endpoint yet.
+    scratch: Option<EmbeddingScratch>,
+    /// Reusable session — KV cache is unused (we reset between
+    /// requests) but the per-layer `LayerCache` allocations are
+    /// needed for the `forward_layer_prefill` signature.
+    session: Option<Qwen3MoESession>,
+    /// Maximum input tokens accepted by `compute_pooled_embedding`.
+    /// Sized at construction; `compute` errors if exceeded.
+    pub max_tokens: usize,
     disposed: bool,
 }
 
 impl EmbeddingModel {
-    /// Load all weights from `file` onto `device`. One synchronise at
-    /// the end covers the whole upload; per-tensor synchronises are
-    /// unnecessary for a one-shot batched HtoD copy.
-    pub fn load(file: &GgufFile, device: &HipDevice, device_id: i32) -> Result<Self> {
-        device.bind()?;
-        let stream = device.default_stream();
-        let config = EmbeddingConfig::from_gguf(file).context("parse embedding config")?;
+    pub fn inner(&self) -> &Qwen3MoEModel {
+        self.inner
+            .as_ref()
+            .expect("EmbeddingModel.inner is None — dispose() called")
+    }
 
-        let mut total_bytes: usize = 0;
-        let mut upload = |name: &str| -> Result<DeviceTensor> {
-            let info = file
-                .info(name)
-                .with_context(|| format!("tensor info `{name}`"))?
-                .clone();
-            let bytes = info.size_in_bytes() as usize;
-            let raw = file
-                .tensor_raw(name)
-                .with_context(|| format!("tensor_raw `{name}`"))?;
-            if raw.len() < bytes {
-                bail!(
-                    "embedding tensor `{name}` mmap slice {} < declared {bytes}",
-                    raw.len()
-                );
-            }
-            let ptr = device
-                .alloc(bytes)
-                .map_err(|e| anyhow!("hipMalloc {bytes} B `{name}`: {e}"))?;
-            // SAFETY: `ptr` is a fresh device allocation of `bytes` bytes;
-            // `raw` is an mmap view of at least `bytes` host bytes.
-            unsafe {
-                device
-                    .memcpy_async(
-                        stream,
-                        CopyDirection::HostToDevice,
-                        ptr,
-                        DevicePtr(raw.as_ptr() as usize),
-                        bytes,
-                    )
-                    .map_err(|e| anyhow!("memcpy `{name}`: {e}"))?;
-            }
-            total_bytes += bytes;
-            Ok(DeviceTensor {
-                ptr,
-                dtype: info.dtype,
-                dims: info.dims,
-                bytes,
-                name: Arc::from(name),
-            })
-        };
+    /// Bytes uploaded to the device — reads from the inner model's
+    /// weights total. Logged at boot for diagnostics.
+    pub fn total_bytes(&self) -> usize {
+        self.inner().weights.total_bytes()
+    }
 
-        let token_embd = upload("token_embd.weight")?;
-        let output_norm = upload("output_norm.weight")?;
+    /// Architecture string from the GGUF (`qwen3`).
+    pub fn arch(&self) -> &str {
+        &self.inner().config.arch
+    }
 
-        let mut layers = Vec::with_capacity(config.num_layers);
-        for il in 0..config.num_layers {
-            let l = EmbeddingLayer {
-                attn_q: upload(&format!("blk.{il}.attn_q.weight"))?,
-                attn_k: upload(&format!("blk.{il}.attn_k.weight"))?,
-                attn_v: upload(&format!("blk.{il}.attn_v.weight"))?,
-                attn_output: upload(&format!("blk.{il}.attn_output.weight"))?,
-                attn_norm: upload(&format!("blk.{il}.attn_norm.weight"))?,
-                attn_q_norm: upload(&format!("blk.{il}.attn_q_norm.weight"))?,
-                attn_k_norm: upload(&format!("blk.{il}.attn_k_norm.weight"))?,
-                ffn_gate: upload(&format!("blk.{il}.ffn_gate.weight"))?,
-                ffn_up: upload(&format!("blk.{il}.ffn_up.weight"))?,
-                ffn_down: upload(&format!("blk.{il}.ffn_down.weight"))?,
-                ffn_norm: upload(&format!("blk.{il}.ffn_norm.weight"))?,
-            };
-            layers.push(l);
-        }
+    /// Hidden size = embedding dimension returned to the client.
+    pub fn hidden_size(&self) -> usize {
+        self.inner().config.hidden_size
+    }
 
-        stream.synchronize().context("stream sync after embedding upload")?;
+    /// Vocabulary size — informational; the tokenizer for a separate
+    /// embedding model lives in the GGUF itself but #231 reuses the
+    /// chat tokenizer (Qwen3-Embedding shares the Qwen3 tokenizer).
+    pub fn vocab_size(&self) -> usize {
+        self.inner().config.vocab_size
+    }
 
+    /// Pooling type tag from the GGUF (`qwen3.pooling_type`). 3 =
+    /// last-token pooling, which is what `compute_pooled_embedding`
+    /// implements. Other values currently fall through to last-token
+    /// behaviour with a warn.
+    pub fn pooling_type(&self) -> u32 {
+        self.inner().config.pooling_type.unwrap_or(3)
+    }
+}
+
+/// Reusable scratch for pooled-embedding inference.
+pub struct EmbeddingScratch {
+    /// `Option` so dispose can move it out without leaving a half-
+    /// disposed value that triggers `ForwardPrefillScratch::Drop`'s
+    /// warn.
+    prefill: Option<ForwardPrefillScratch>,
+    /// F16 [hidden] — RMSNorm output for the last-token hidden state.
+    pooled_norm_f16: DevicePtr,
+    /// F32 [hidden] — `cast_f16_to_f32` of the above.
+    pooled_f32: DevicePtr,
+    /// F32 [hidden] — L2-normalised result (DtoH'd to the response).
+    pooled_normed_f32: DevicePtr,
+    hidden_bytes_f16: usize,
+    hidden_bytes_f32: usize,
+    disposed: bool,
+}
+
+impl EmbeddingScratch {
+    pub fn new(model: &Qwen3MoEModel, device: &HipDevice, max_tokens: usize) -> Result<Self> {
+        let hidden = model.config.hidden_size;
+        let prefill = ForwardPrefillScratch::new(&model.config, device, max_tokens)
+            .context("EmbeddingScratch: alloc ForwardPrefillScratch")?;
+        let hidden_bytes_f16 = hidden * 2;
+        let hidden_bytes_f32 = hidden * 4;
+        let pooled_norm_f16 = device
+            .alloc(hidden_bytes_f16)
+            .map_err(|e| anyhow!("alloc pooled_norm_f16: {e}"))?;
+        let pooled_f32 = device
+            .alloc(hidden_bytes_f32)
+            .map_err(|e| anyhow!("alloc pooled_f32: {e}"))?;
+        let pooled_normed_f32 = device
+            .alloc(hidden_bytes_f32)
+            .map_err(|e| anyhow!("alloc pooled_normed_f32: {e}"))?;
         Ok(Self {
-            config,
-            device_id,
-            token_embd,
-            output_norm,
-            layers,
-            total_bytes,
+            prefill: Some(prefill),
+            pooled_norm_f16,
+            pooled_f32,
+            pooled_normed_f32,
+            hidden_bytes_f16,
+            hidden_bytes_f32,
             disposed: false,
         })
     }
 
-    /// Free all device allocations. Pair with a `&HipDevice` that
-    /// addresses the same physical card the model was loaded onto.
+    pub fn dispose(mut self, device: &HipDevice) -> Result<()> {
+        if self.disposed {
+            return Ok(());
+        }
+        self.disposed = true;
+        unsafe {
+            device.dealloc(self.pooled_norm_f16, self.hidden_bytes_f16)?;
+            device.dealloc(self.pooled_f32, self.hidden_bytes_f32)?;
+            device.dealloc(self.pooled_normed_f32, self.hidden_bytes_f32)?;
+        }
+        if let Some(prefill) = self.prefill.take() {
+            prefill.dispose(device)?;
+        }
+        Ok(())
+    }
+}
+
+impl Drop for EmbeddingScratch {
+    fn drop(&mut self) {
+        if !self.disposed {
+            tracing::warn!(
+                target: "flambeau_qwen3_moe::embedding",
+                "EmbeddingScratch dropped without dispose(device); device buffers leaked"
+            );
+        }
+    }
+}
+
+impl EmbeddingModel {
+    /// Load all weights from `file` onto `device`.
+    ///
+    /// `max_tokens` caps the input length the scratch will support;
+    /// the scratch + session are allocated lazily on first inference,
+    /// so this method just uploads weights + builds the OpsRegistry.
+    pub fn load(
+        file: &GgufFile,
+        device: &HipDevice,
+        device_id: i32,
+        max_tokens: usize,
+    ) -> Result<Self> {
+        device.bind()?;
+        let inner = Qwen3MoEModel::load(file, device).context("Qwen3MoEModel::load (embedding)")?;
+        if inner.config.arch != "qwen3" {
+            // Defensive: the embedding API is only useful on a
+            // qwen3-arch model. A chat GGUF (qwen35moe / etc) would
+            // technically load (post #231 the Hybrid family path
+            // handles it) but semantically isn't an embedding model.
+            let arch = inner.config.arch.clone();
+            inner.dispose(device).ok();
+            bail!(
+                "embedding model rejected: arch `{arch}` is not `qwen3`. \
+                 Use a Qwen3-Embedding GGUF (general.architecture=qwen3) here."
+            );
+        }
+        Ok(Self {
+            inner: Some(inner),
+            device_id,
+            scratch: None,
+            session: None,
+            max_tokens,
+            disposed: false,
+        })
+    }
+
+    /// Lazy-init or reuse the scratch + session on `device`. Both
+    /// must live on the same device the model was loaded on (the
+    /// chat cluster's HipDevice handle, in the server's case).
+    fn ensure_scratch(&mut self, device: &HipDevice) -> Result<()> {
+        if self.scratch.is_none() {
+            let model = self.inner();
+            self.scratch = Some(EmbeddingScratch::new(model, device, self.max_tokens)?);
+        }
+        if self.session.is_none() {
+            let mut cfg_for_session = self.inner().config.clone();
+            // Cap session ctx at max_tokens — saves VRAM vs the
+            // GGUF-native 32k.
+            if cfg_for_session.context_length > self.max_tokens {
+                cfg_for_session.context_length = self.max_tokens;
+            }
+            let session = Qwen3MoESession::new(&cfg_for_session, device)
+                .context("EmbeddingModel::ensure_scratch: alloc Qwen3MoESession")?;
+            self.session = Some(session);
+        }
+        Ok(())
+    }
+
+    /// **#231** — run pooled-embedding inference on a single sequence
+    /// of token ids. Returns an L2-normalised F32 vector of length
+    /// `hidden_size`.
+    ///
+    /// Errors when `tokens.len() > max_tokens` or `tokens` is empty.
+    ///
+    /// Implementation:
+    /// 1. Reset session (clear KV `current_tokens`).
+    /// 2. Embed L tokens row-by-row into `prefill.hidden_a`.
+    /// 3. Per-layer loop: `forward_layer_prefill` ping-ponging
+    ///    `(hidden_a, hidden_b)`.
+    /// 4. Take the LAST token's F16 hidden vector (offset
+    ///    `(L-1) * hidden * 2` into the final ping-pong buffer).
+    /// 5. RMSNorm with `output_norm` → `pooled_norm_f16`.
+    /// 6. `cast_f16_to_f32` → `pooled_f32`.
+    /// 7. `l2_norm_f32` → `pooled_normed_f32`.
+    /// 8. DtoH the F32 vector and return.
+    pub fn compute_pooled_embedding(
+        &mut self,
+        device: &HipDevice,
+        stream: &HipStream,
+        tokens: &[u32],
+    ) -> Result<Vec<f32>> {
+        if tokens.is_empty() {
+            bail!("compute_pooled_embedding: empty tokens");
+        }
+        if tokens.len() > self.max_tokens {
+            bail!(
+                "compute_pooled_embedding: L={} > max_tokens={}",
+                tokens.len(),
+                self.max_tokens
+            );
+        }
+        device.bind()?;
+        self.ensure_scratch(device)?;
+
+        // Take immutable handles to the inner model first so we don't
+        // double-borrow `self` when destructuring scratch + session.
+        let inner_ref = self
+            .inner
+            .as_ref()
+            .expect("compute_pooled_embedding called after dispose");
+        let cfg = inner_ref.config.clone();
+        let hidden = cfg.hidden_size;
+        let row_bytes = hidden * 2;
+        let l = tokens.len();
+
+        let scratch = self
+            .scratch
+            .as_mut()
+            .context("ensure_scratch left scratch=None")?;
+        let session = self
+            .session
+            .as_mut()
+            .context("ensure_scratch left session=None")?;
+
+        // 1. Reset session.
+        session
+            .reset_for_next_request(device)
+            .context("reset session for embedding request")?;
+
+        let prefill = scratch
+            .prefill
+            .as_mut()
+            .context("EmbeddingScratch.prefill missing (disposed?)")?;
+
+        // 2. Embed L tokens row-by-row.
+        for (t, &token_id) in tokens.iter().enumerate() {
+            forward_embed_decode_host(
+                device,
+                stream,
+                &inner_ref.weights.token_embd,
+                token_id,
+                prefill.hidden_a.offset_bytes(t * row_bytes),
+                hidden,
+            )?;
+        }
+
+        // 3. Per-layer loop with ping-pong.
+        let layer_scratch = prefill
+            .layer
+            .as_mut()
+            .context("ForwardPrefillScratch.layer missing")?;
+        let (mut x_in, mut x_out) = (prefill.hidden_a, prefill.hidden_b);
+        for (il, layer_weights) in inner_ref.weights.layers.iter().enumerate() {
+            let layer_cache = &mut session.layers_mut()[il];
+            forward_layer_prefill(
+                &inner_ref.ops,
+                stream,
+                device,
+                &cfg,
+                layer_weights,
+                layer_cache,
+                layer_scratch,
+                x_in,
+                x_out,
+                l,
+                0,    // start_position
+                None, // no per-position-id override
+                None, // no GDN-state event (Dense family has no GDN)
+            )?;
+            std::mem::swap(&mut x_in, &mut x_out);
+            let _ = il;
+        }
+        // x_in now holds the final F16 [L, hidden].
+
+        // 4-7. Last-token slice → RMSNorm → cast → L2 norm.
+        let last_token_hidden = x_in.offset_bytes((l - 1) * row_bytes);
+        rmsnorm_f16(
+            &inner_ref.ops,
+            stream,
+            last_token_hidden,
+            inner_ref.weights.output_norm.ptr,
+            scratch.pooled_norm_f16,
+            1,
+            hidden,
+            cfg.rms_norm_eps,
+        )
+        .context("output_norm rmsnorm on pooled hidden")?;
+        cast_f16_to_f32(
+            &inner_ref.ops,
+            stream,
+            scratch.pooled_norm_f16,
+            scratch.pooled_f32,
+            hidden,
+        )
+        .context("cast pooled F16 -> F32")?;
+        l2_norm_f32(
+            &inner_ref.ops,
+            stream,
+            scratch.pooled_f32,
+            scratch.pooled_normed_f32,
+            1,
+            hidden,
+            1e-12,
+        )
+        .context("l2_norm_f32 pooled vector")?;
+
+        // 8. DtoH.
+        let mut host = vec![0f32; hidden];
+        // SAFETY: device buffer sized to `hidden * 4` bytes (F32);
+        // host buffer sized to match. DtoH async + sync.
+        unsafe {
+            device.memcpy_async(
+                stream,
+                CopyDirection::DeviceToHost,
+                DevicePtr(host.as_mut_ptr() as usize),
+                scratch.pooled_normed_f32,
+                hidden * 4,
+            )?;
+        }
+        stream.synchronize()?;
+        Ok(host)
+    }
+
+    /// Free device weights + scratch + session.
     pub fn dispose(mut self, device: &HipDevice) -> Result<()> {
         if self.disposed {
             return Ok(());
         }
         self.disposed = true;
         device.bind()?;
-        let mut first_err: Option<anyhow::Error> = None;
-        let mut free = |t: &DeviceTensor| {
-            // SAFETY: pointer came from `device.alloc` in `load` and
-            // hasn't been aliased.
-            unsafe {
-                if let Err(e) = device.dealloc(t.ptr, t.bytes) {
-                    if first_err.is_none() {
-                        first_err = Some(anyhow!("dealloc `{}`: {e}", t.name));
-                    }
-                }
-            }
-        };
-        free(&self.token_embd);
-        free(&self.output_norm);
-        for l in self.layers.drain(..) {
-            free(&l.attn_q);
-            free(&l.attn_k);
-            free(&l.attn_v);
-            free(&l.attn_output);
-            free(&l.attn_norm);
-            free(&l.attn_q_norm);
-            free(&l.attn_k_norm);
-            free(&l.ffn_gate);
-            free(&l.ffn_up);
-            free(&l.ffn_down);
-            free(&l.ffn_norm);
+        if let Some(s) = self.scratch.take() {
+            s.dispose(device)?;
         }
-        first_err.map_or(Ok(()), Err)
+        if let Some(s) = self.session.take() {
+            s.dispose(device)?;
+        }
+        if let Some(inner) = self.inner.take() {
+            inner.dispose(device)?;
+        }
+        Ok(())
     }
 }
 
 impl Drop for EmbeddingModel {
     fn drop(&mut self) {
-        if !self.disposed && !self.layers.is_empty() {
+        if !self.disposed && self.inner.is_some() {
             tracing::warn!(
                 target: "flambeau_qwen3_moe::embedding",
-                arch = %self.config.arch,
-                layers = self.layers.len(),
-                bytes = self.total_bytes,
                 "EmbeddingModel dropped without dispose(device); device buffers leaked"
             );
         }
