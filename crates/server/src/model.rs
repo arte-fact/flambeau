@@ -20,6 +20,7 @@ use flambeau_qwen3_moe::forward::{
     ShardedForwardOneTokenScratchHybrid, ShardedForwardOneTokenScratchTp,
     ShardedForwardPrefillScratch, ShardedForwardPrefillScratchTp, SpecStep,
 };
+use flambeau_qwen3_moe::session::{restore_layer_caches_from_host, LayerCacheSnapshot};
 use flambeau_qwen3_moe::mtp::{MtpForwardScratch, MtpHeadWeights};
 use flambeau_qwen3_moe::{
     Qwen3MoEConfig, Qwen3MoEHybridModel, Qwen3MoEHybridSession, Qwen3MoEShardedModel,
@@ -713,6 +714,73 @@ pub fn decode_keep_logits_on_device(
         _ => bail!(
             "decode_keep_logits_on_device only wired for TP and Hybrid topologies"
         ),
+    }
+}
+
+/// **#228 P2.10b** — restore a host-side KV snapshot into the active
+/// inflight session.
+///
+/// `snapshot[r]` covers rank `r`'s full layer set (the same layout
+/// `snapshot_layer_caches_to_host` produces). The caller is responsible
+/// for ensuring the snapshot was captured under the same topology and
+/// chunk size — the `PrefixCache::longest_match` lookup checks this
+/// before this function is called.
+///
+/// Errors when the topology is `Hybrid` (V2 follow-up — the per-stage
+/// per-rank shape doesn't match the flat `Vec<RankSnapshot>` layout).
+/// Callers should skip prefix-cache restore for hybrid models in V1.
+pub fn restore_kv_into_inflight(
+    inflight: &mut Inflight,
+    cluster: &HipCluster,
+    snapshot: &[Vec<LayerCacheSnapshot>],
+    model: &LoadedModel,
+) -> Result<()> {
+    match (inflight, model) {
+        (Inflight::Pp { session, .. }, LoadedModel::Pp { .. }) => {
+            if snapshot.len() != session.per_rank.len() {
+                bail!(
+                    "PP restore: snapshot rank count {} != session ranks {}",
+                    snapshot.len(),
+                    session.per_rank.len()
+                );
+            }
+            for (rank_idx, rank_session) in session.per_rank.iter_mut().enumerate() {
+                let device = cluster.device(rank_idx);
+                restore_layer_caches_from_host(
+                    &snapshot[rank_idx],
+                    rank_session.caches_mut(),
+                    device,
+                )
+                .with_context(|| format!("PP restore rank {rank_idx}"))?;
+            }
+            Ok(())
+        }
+        (Inflight::Tp { session, .. }, LoadedModel::Tp { .. }) => {
+            if snapshot.len() != session.caches.len() {
+                bail!(
+                    "TP restore: snapshot rank count {} != session ranks {}",
+                    snapshot.len(),
+                    session.caches.len()
+                );
+            }
+            for (rank_idx, rank_caches) in session.caches.iter_mut().enumerate() {
+                let device = cluster.device(rank_idx);
+                restore_layer_caches_from_host(
+                    &snapshot[rank_idx],
+                    rank_caches,
+                    device,
+                )
+                .with_context(|| format!("TP restore rank {rank_idx}"))?;
+            }
+            Ok(())
+        }
+        (Inflight::Hybrid { .. }, LoadedModel::Hybrid { .. }) => {
+            bail!(
+                "Hybrid prefix-cache restore not yet wired (per-stage per-rank \
+                 layout doesn't match the flat snapshot type — V2 follow-up)"
+            );
+        }
+        _ => bail!("restore_kv_into_inflight: model/inflight variant mismatch"),
     }
 }
 

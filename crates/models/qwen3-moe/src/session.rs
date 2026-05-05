@@ -628,6 +628,154 @@ pub fn snapshot_layer_caches_to_host(
     Ok(out)
 }
 
+/// **#228 P2.10b** — inverse of `snapshot_layer_caches_to_host`: restore
+/// host-side `LayerCacheSnapshot` byte buffers into device-side
+/// `LayerCache` slots. Caller owns the matching pair (one snapshot per
+/// cache entry, in order) and the device that owns the slice.
+///
+/// Errors if the snapshot variant doesn't match the cache variant
+/// (e.g. trying to restore a `FullAttn` snapshot into a `Gdn` slot —
+/// the prefix cache key chain prevents this in practice but the check
+/// is defensive). Each cache's `current_tokens` is reset to the
+/// snapshot's recorded value.
+pub fn restore_layer_caches_from_host(
+    snapshots: &[LayerCacheSnapshot],
+    caches: &mut [LayerCache],
+    device: &HipDevice,
+) -> Result<()> {
+    use flambeau_core::CopyDirection;
+    if snapshots.len() != caches.len() {
+        anyhow::bail!(
+            "restore_layer_caches_from_host: snapshot count {} != cache count {}",
+            snapshots.len(),
+            caches.len()
+        );
+    }
+    device.bind()?;
+    let stream = device.default_stream();
+    for (il, (snap, cache)) in snapshots.iter().zip(caches.iter_mut()).enumerate() {
+        match (snap, &mut *cache) {
+            (
+                LayerCacheSnapshot::FullAttn { k, v, current_tokens },
+                LayerCache::FullAttn(kv),
+            ) => {
+                let bytes = kv.bytes_per_tensor();
+                if k.len() != bytes || v.len() != bytes {
+                    anyhow::bail!(
+                        "restore layer {il}: snapshot bytes ({}/{}) != device bytes ({})",
+                        k.len(),
+                        v.len(),
+                        bytes
+                    );
+                }
+                // SAFETY: device buffers sized to `bytes`; host snapshot
+                // pre-checked above. H→D async then sync.
+                unsafe {
+                    device.memcpy_async(
+                        stream,
+                        CopyDirection::HostToDevice,
+                        kv.k_buffer(),
+                        DevicePtr(k.as_ptr() as usize),
+                        bytes,
+                    )?;
+                    device.memcpy_async(
+                        stream,
+                        CopyDirection::HostToDevice,
+                        kv.v_buffer(),
+                        DevicePtr(v.as_ptr() as usize),
+                        bytes,
+                    )?;
+                }
+                kv.clear();
+                kv.bump_tail(*current_tokens)
+                    .map_err(|e| anyhow!("layer {il} bump_tail({current_tokens}): {e}"))?;
+            }
+            (
+                LayerCacheSnapshot::FullAttn { k, v, current_tokens },
+                LayerCache::FullAttnQ8(kv),
+            ) => {
+                let bytes = kv.bytes_per_tensor();
+                if k.len() != bytes || v.len() != bytes {
+                    anyhow::bail!(
+                        "restore layer {il} (Q8): snapshot bytes ({}/{}) != device bytes ({})",
+                        k.len(),
+                        v.len(),
+                        bytes
+                    );
+                }
+                unsafe {
+                    device.memcpy_async(
+                        stream,
+                        CopyDirection::HostToDevice,
+                        kv.k_buffer(),
+                        DevicePtr(k.as_ptr() as usize),
+                        bytes,
+                    )?;
+                    device.memcpy_async(
+                        stream,
+                        CopyDirection::HostToDevice,
+                        kv.v_buffer(),
+                        DevicePtr(v.as_ptr() as usize),
+                        bytes,
+                    )?;
+                }
+                kv.clear();
+                kv.bump_tail(*current_tokens)
+                    .map_err(|e| anyhow!("layer {il} (Q8) bump_tail({current_tokens}): {e}"))?;
+            }
+            (LayerCacheSnapshot::Gdn { state, conv_history }, LayerCache::Gdn(g)) => {
+                if state.len() != g.state_bytes || conv_history.len() != g.conv_history_bytes {
+                    anyhow::bail!(
+                        "restore layer {il} (GDN): snapshot bytes (state={}, conv={}) \
+                         != device bytes (state={}, conv={})",
+                        state.len(),
+                        conv_history.len(),
+                        g.state_bytes,
+                        g.conv_history_bytes
+                    );
+                }
+                unsafe {
+                    device.memcpy_async(
+                        stream,
+                        CopyDirection::HostToDevice,
+                        g.state,
+                        DevicePtr(state.as_ptr() as usize),
+                        g.state_bytes,
+                    )?;
+                    device.memcpy_async(
+                        stream,
+                        CopyDirection::HostToDevice,
+                        g.conv_history,
+                        DevicePtr(conv_history.as_ptr() as usize),
+                        g.conv_history_bytes,
+                    )?;
+                }
+                // GDN has no current_tokens — recurrent state is
+                // self-describing.
+            }
+            (LayerCacheSnapshot::FullAttn { .. }, LayerCache::Gdn(_))
+            | (LayerCacheSnapshot::Gdn { .. }, LayerCache::FullAttn(_))
+            | (LayerCacheSnapshot::Gdn { .. }, LayerCache::FullAttnQ8(_)) => {
+                anyhow::bail!(
+                    "restore layer {il}: snapshot/cache variant mismatch \
+                     (snapshot={}, cache={})",
+                    match snap {
+                        LayerCacheSnapshot::FullAttn { .. } => "FullAttn",
+                        LayerCacheSnapshot::Gdn { .. } => "Gdn",
+                    },
+                    match cache {
+                        LayerCache::FullAttn(_) => "FullAttn",
+                        LayerCache::FullAttnQ8(_) => "FullAttnQ8",
+                        LayerCache::Gdn(_) => "Gdn",
+                    }
+                );
+            }
+        }
+    }
+    stream.synchronize()?;
+    Ok(())
+}
+
 /// Free a single `LayerCache` on `device`. Mirrors `alloc_layer_cache`.
 pub(crate) fn dispose_layer_cache(cache: LayerCache, device: &HipDevice) -> Result<()> {
     match cache {

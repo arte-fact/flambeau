@@ -121,9 +121,31 @@ pub struct TopologyTag {
     pub tp_size: u32,
 }
 
-/// One cache entry. **Stub for #227** — the actual KV-snapshot device
-/// pointers land in #228. Today this just records what would be cached
-/// so the lookup path can be wired and unit-tested.
+/// Host-side KV snapshot covering one rank's full layer set at a given
+/// prefix length.
+///
+/// V1 stores the snapshot in host RAM rather than device VRAM — the
+/// per-snapshot footprint is too big to keep many on-device, but host
+/// RAM is plentiful (64+ GB). The DtoH→HtoD round-trip on hit is
+/// ~700 ms at 6 GB/s for a 4 GB snapshot — still a net win vs the
+/// 2-3 s prefill it replaces.
+///
+/// Hidden behind a feature gate at the type level: when `hip` is off
+/// (CPU-only build of the server crate) this module compiles, but
+/// the snapshot type is feature-gated since it carries
+/// `LayerCacheSnapshot` from the qwen3-moe crate which itself is
+/// `#[cfg(feature = "hip")]`.
+#[cfg(feature = "hip")]
+pub type RankSnapshot = Vec<flambeau_qwen3_moe::session::LayerCacheSnapshot>;
+
+/// Full multi-rank KV snapshot — one [`RankSnapshot`] per rank in the
+/// captured topology.
+#[cfg(feature = "hip")]
+pub type KvSnapshot = Vec<RankSnapshot>;
+
+/// One cache entry. **#228** adds the optional `kv` snapshot field;
+/// `kv = None` means the entry exists in the index for lookup-only
+/// purposes (e.g. tests, future write-deferred state).
 ///
 /// `n_chunks` is the number of chunks this entry covers (so the matched
 /// prefix is `n_chunks * chunk_tokens` tokens). The entry's chain is
@@ -142,9 +164,11 @@ pub struct CacheEntry {
     /// Prompt-token-position the entry covers (= `chain.len() * chunk_tokens`).
     /// Convenience for callers that want to slice the input prompt.
     pub n_tokens: usize,
-    // **#228** — fields landed in the next task:
-    //   pub kv_per_rank: Vec<Vec<DevicePtr>>,  // [rank][layer] K+V buffers
-    //   pub gdn_state_per_rank: Vec<Vec<...>>, // for hybrid models
+    /// **#228** — host-side KV snapshot covering every rank's layers at
+    /// `n_tokens`. `None` = index-only entry (lookup hits, restore
+    /// no-ops).
+    #[cfg(feature = "hip")]
+    pub kv: Option<std::sync::Arc<KvSnapshot>>,
 }
 
 impl CacheEntry {
@@ -280,9 +304,9 @@ impl PrefixCache {
         None
     }
 
-    /// **#229 stub** — insert an entry. `kv` field will be added to
-    /// `CacheEntry` in #228; for #227 we accept the (chain, topology,
-    /// chunk_tokens) skeleton so the index can be exercised in tests.
+    /// **#229 stub** — insert an index-only entry (no KV). Used by tests
+    /// and as a fallback path when capture is disabled. The hit path
+    /// no-ops on entries without a `kv` snapshot.
     pub fn insert_skeleton(
         &self,
         chain: Vec<ChunkKey>,
@@ -297,6 +321,8 @@ impl PrefixCache {
             chunk_tokens,
             n_tokens: chain.len() * chunk_tokens,
             chain,
+            #[cfg(feature = "hip")]
+            kv: None,
         };
         let mut inner = self.inner.write().unwrap();
         inner
@@ -304,6 +330,19 @@ impl PrefixCache {
             .entry(terminal)
             .or_default()
             .push(entry);
+    }
+
+    /// **#228** — clone out the `Arc<KvSnapshot>` for a hit terminal so
+    /// the caller can drop the read lock before doing the (slow)
+    /// host→device restore. Returns `None` when the entry has no
+    /// snapshot attached (index-only).
+    #[cfg(feature = "hip")]
+    pub fn snapshot_for(&self, terminal: ChunkKey) -> Option<std::sync::Arc<KvSnapshot>> {
+        let inner = self.inner.read().unwrap();
+        let entries = inner.by_terminal.get(&terminal)?;
+        entries
+            .iter()
+            .find_map(|e| e.kv.as_ref().map(std::sync::Arc::clone))
     }
 
     /// Number of stored entries (sum across all terminal keys).
