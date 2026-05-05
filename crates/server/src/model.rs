@@ -293,11 +293,20 @@ impl Inflight {
 /// alloc/dispose. Callers must already hold `prefill_serialiser`
 /// (the TP/Hybrid chat handlers do for #321) — the scratch isn't
 /// safe for parallel use. `None` falls back to alloc-per-call.
+///
+/// **#229** — `start_position` is the position-offset of the first
+/// token in `prompt_ids` within the *original* full prompt. `0` means
+/// the entire prompt is being prefilled from scratch (today's behaviour
+/// for first turn / cache miss). `> 0` means the caller restored a
+/// prefix-cache snapshot covering `[0..start_position)` and is now
+/// prefilling only the tail; the per-layer `current_tokens` is already
+/// set to `start_position` by the restore step.
 pub fn prefill_logits(
     model: &LoadedModel,
     cluster: &HipCluster,
     inflight: &mut Inflight,
     prompt_ids: &[u32],
+    start_position: usize,
     logits_out: &mut Vec<f32>,
     tp_pool_prefill: Option<&mut ShardedForwardPrefillScratchTp>,
 ) -> Result<()> {
@@ -321,7 +330,7 @@ pub fn prefill_logits(
             let l = prompt_ids.len();
             if l <= chunk {
                 forward_prefill_pp_logits(
-                    m, session, cluster, prefill, prompt_ids, 0, logits_out,
+                    m, session, cluster, prefill, prompt_ids, start_position, logits_out,
                 )
                 .context("PP prefill_logits")
             } else {
@@ -332,10 +341,11 @@ pub fn prefill_logits(
                     prompt_len = l,
                     chunk,
                     split,
+                    start_position,
                     "chunked PP prefill (prefix via forward_prefill_pp, final chunk via _logits)"
                 );
                 let _ = forward_prefill_pp(
-                    m, session, cluster, prefill, &prompt_ids[..split], 0,
+                    m, session, cluster, prefill, &prompt_ids[..split], start_position,
                 )
                 .context("PP prefill (prefix chunks)")?;
                 forward_prefill_pp_logits(
@@ -344,7 +354,7 @@ pub fn prefill_logits(
                     cluster,
                     prefill,
                     &prompt_ids[split..],
-                    split,
+                    start_position + split,
                     logits_out,
                 )
                 .context("PP prefill_logits (final chunk)")
@@ -373,7 +383,7 @@ pub fn prefill_logits(
                 if l <= chunk {
                     forward_prefill_tp_logits_pooled(
                         model, decode, pool, cluster, ar, &mut session.caches,
-                        prompt_ids, 0, logits_out,
+                        prompt_ids, start_position, logits_out,
                     )
                     .context("TP prefill_logits (pooled)")
                 } else {
@@ -381,6 +391,7 @@ pub fn prefill_logits(
                         target: "server.prefill",
                         prompt_len = l,
                         chunk,
+                        start_position,
                         "chunked TP prefill (pooled)"
                     );
                     let mut start = 0usize;
@@ -392,7 +403,7 @@ pub fn prefill_logits(
                             if is_last { &mut *logits_out } else { &mut sink };
                         forward_prefill_tp_logits_pooled(
                             model, decode, pool, cluster, ar, &mut session.caches,
-                            &prompt_ids[start..end], start, dst,
+                            &prompt_ids[start..end], start_position + start, dst,
                         )
                         .with_context(|| {
                             format!("TP prefill_logits chunk [{start}..{end}) (pooled)")
@@ -404,7 +415,7 @@ pub fn prefill_logits(
             } else if l <= chunk {
                 forward_prefill_tp_logits(
                     model, decode, cluster, ar, &mut session.caches,
-                    prompt_ids, 0, logits_out,
+                    prompt_ids, start_position, logits_out,
                 )
                 .context("TP prefill_logits")
             } else {
@@ -412,6 +423,7 @@ pub fn prefill_logits(
                     target: "server.prefill",
                     prompt_len = l,
                     chunk,
+                    start_position,
                     "chunked TP prefill"
                 );
                 let mut start = 0usize;
@@ -423,7 +435,7 @@ pub fn prefill_logits(
                         if is_last { &mut *logits_out } else { &mut sink };
                     forward_prefill_tp_logits(
                         model, decode, cluster, ar, &mut session.caches,
-                        &prompt_ids[start..end], start, dst,
+                        &prompt_ids[start..end], start_position + start, dst,
                     )
                     .with_context(|| format!("TP prefill_logits chunk [{start}..{end})"))?;
                     start = end;
@@ -448,7 +460,7 @@ pub fn prefill_logits(
             let l = prompt_ids.len();
             if l <= chunk {
                 forward_prefill_hybrid_logits(
-                    hmodel, decode, cluster, stage_ars, session, prompt_ids, 0, logits_out,
+                    hmodel, decode, cluster, stage_ars, session, prompt_ids, start_position, logits_out,
                 )
                 .context("hybrid prefill_logits")
             } else {
@@ -456,6 +468,7 @@ pub fn prefill_logits(
                     target: "server.prefill",
                     prompt_len = l,
                     chunk,
+                    start_position,
                     "chunked hybrid prefill"
                 );
                 let mut start = 0usize;
@@ -467,7 +480,7 @@ pub fn prefill_logits(
                         if is_last { &mut *logits_out } else { &mut sink };
                     forward_prefill_hybrid_logits(
                         hmodel, decode, cluster, stage_ars, session,
-                        &prompt_ids[start..end], start, dst,
+                        &prompt_ids[start..end], start_position + start, dst,
                     )
                     .with_context(|| {
                         format!("hybrid prefill_logits chunk [{start}..{end})")
@@ -780,6 +793,58 @@ pub fn snapshot_bytes(snapshot: &[Vec<LayerCacheSnapshot>]) -> usize {
             }
         })
         .sum()
+}
+
+/// **#229** — true if any layer in the snapshot is a `Gdn` recurrent
+/// state. GDN state is a single-step recurrent matrix (not
+/// position-indexed), so it cannot be cleanly truncated to a chunk
+/// boundary the way KV slabs can. Callers gate the prefix cache off
+/// for snapshots containing GDN layers in V1; chunk-boundary GDN
+/// snapshotting is V2 work.
+pub fn snapshot_has_gdn(snapshot: &[Vec<LayerCacheSnapshot>]) -> bool {
+    snapshot
+        .iter()
+        .flat_map(|rank| rank.iter())
+        .any(|s| matches!(s, LayerCacheSnapshot::Gdn { .. }))
+}
+
+/// **#229** — truncate a freshly-captured snapshot down to
+/// `n_target_tokens` of FullAttn KV state. Used at insert time to
+/// store only the chunk-boundary prefix (the post-prefill snapshot
+/// covers the full prompt, but the cache key chain identifies a
+/// shorter prefix).
+///
+/// Each FullAttn layer's K/V byte buffer is truncated to
+/// `n_target_tokens * bytes_per_token` (where `bytes_per_token =
+/// existing_bytes / current_tokens`). `current_tokens` is updated to
+/// `n_target_tokens`. GDN layers cannot be truncated and are passed
+/// through unchanged — callers should bail before reaching here when
+/// any layer is GDN. (`snapshot_has_gdn` is the gate.)
+pub fn truncate_snapshot_to_tokens(
+    snapshot: &mut [Vec<LayerCacheSnapshot>],
+    n_target_tokens: usize,
+) {
+    for rank in snapshot.iter_mut() {
+        for layer in rank.iter_mut() {
+            if let LayerCacheSnapshot::FullAttn {
+                k,
+                v,
+                current_tokens,
+            } = layer
+            {
+                if *current_tokens <= n_target_tokens {
+                    continue;
+                }
+                let bytes_per_token = k.len() / (*current_tokens).max(1);
+                let new_bytes = bytes_per_token * n_target_tokens;
+                k.truncate(new_bytes);
+                v.truncate(new_bytes);
+                k.shrink_to_fit();
+                v.shrink_to_fit();
+                *current_tokens = n_target_tokens;
+            }
+        }
+    }
 }
 
 /// **#228 P2.10b** — restore a host-side KV snapshot into the active

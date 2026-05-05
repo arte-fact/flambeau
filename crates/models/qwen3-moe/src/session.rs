@@ -546,26 +546,37 @@ pub fn snapshot_layer_caches_to_host(
     for cache in caches.iter() {
         match cache {
             LayerCache::FullAttn(kv) => {
-                let bytes = kv.bytes_per_tensor();
-                let mut k = vec![0u8; bytes];
-                let mut v = vec![0u8; bytes];
-                // SAFETY: device buffers are alloc'd to `bytes` each;
-                // host buffers same. D→H async then sync.
-                unsafe {
-                    device.memcpy_async(
-                        stream,
-                        CopyDirection::DeviceToHost,
-                        DevicePtr(k.as_mut_ptr() as usize),
-                        kv.k_buffer(),
-                        bytes,
-                    )?;
-                    device.memcpy_async(
-                        stream,
-                        CopyDirection::DeviceToHost,
-                        DevicePtr(v.as_mut_ptr() as usize),
-                        kv.v_buffer(),
-                        bytes,
-                    )?;
+                // **#229** — only snapshot the first `current_tokens`
+                // rows. K/V layout is row-major `[max_tokens, n_heads,
+                // head_dim]`, so the in-use portion is the first
+                // `current_tokens * bytes_per_token` bytes. Snapshotting
+                // the full `bytes_per_tensor` slab wastes 60-99% on
+                // typical chunked prefills (e.g. 512-token chunk in a
+                // 32k-token slab = 1.5%).
+                let bytes_per_token = kv.bytes_per_tensor() / kv.max_tokens().max(1);
+                let live_bytes = bytes_per_token * kv.current_tokens();
+                let mut k = vec![0u8; live_bytes];
+                let mut v = vec![0u8; live_bytes];
+                if live_bytes > 0 {
+                    // SAFETY: device buffers alloc'd to bytes_per_tensor
+                    // (≥ live_bytes); host buffers sized exactly. D→H
+                    // async then sync.
+                    unsafe {
+                        device.memcpy_async(
+                            stream,
+                            CopyDirection::DeviceToHost,
+                            DevicePtr(k.as_mut_ptr() as usize),
+                            kv.k_buffer(),
+                            live_bytes,
+                        )?;
+                        device.memcpy_async(
+                            stream,
+                            CopyDirection::DeviceToHost,
+                            DevicePtr(v.as_mut_ptr() as usize),
+                            kv.v_buffer(),
+                            live_bytes,
+                        )?;
+                    }
                 }
                 stream.synchronize()?;
                 out.push(LayerCacheSnapshot::FullAttn {
@@ -575,24 +586,27 @@ pub fn snapshot_layer_caches_to_host(
                 });
             }
             LayerCache::FullAttnQ8(kv) => {
-                let bytes = kv.bytes_per_tensor();
-                let mut k = vec![0u8; bytes];
-                let mut v = vec![0u8; bytes];
-                unsafe {
-                    device.memcpy_async(
-                        stream,
-                        CopyDirection::DeviceToHost,
-                        DevicePtr(k.as_mut_ptr() as usize),
-                        kv.k_buffer(),
-                        bytes,
-                    )?;
-                    device.memcpy_async(
-                        stream,
-                        CopyDirection::DeviceToHost,
-                        DevicePtr(v.as_mut_ptr() as usize),
-                        kv.v_buffer(),
-                        bytes,
-                    )?;
+                let bytes_per_token = kv.bytes_per_tensor() / kv.max_tokens().max(1);
+                let live_bytes = bytes_per_token * kv.current_tokens();
+                let mut k = vec![0u8; live_bytes];
+                let mut v = vec![0u8; live_bytes];
+                if live_bytes > 0 {
+                    unsafe {
+                        device.memcpy_async(
+                            stream,
+                            CopyDirection::DeviceToHost,
+                            DevicePtr(k.as_mut_ptr() as usize),
+                            kv.k_buffer(),
+                            live_bytes,
+                        )?;
+                        device.memcpy_async(
+                            stream,
+                            CopyDirection::DeviceToHost,
+                            DevicePtr(v.as_mut_ptr() as usize),
+                            kv.v_buffer(),
+                            live_bytes,
+                        )?;
+                    }
                 }
                 stream.synchronize()?;
                 out.push(LayerCacheSnapshot::FullAttn {
@@ -659,32 +673,44 @@ pub fn restore_layer_caches_from_host(
                 LayerCacheSnapshot::FullAttn { k, v, current_tokens },
                 LayerCache::FullAttn(kv),
             ) => {
-                let bytes = kv.bytes_per_tensor();
-                if k.len() != bytes || v.len() != bytes {
+                // **#229** — accept truncated snapshots: snapshots now
+                // store `current_tokens * bytes_per_token` bytes (the
+                // in-use head of the slab), not the full
+                // `bytes_per_tensor` slab. The expected host length is
+                // `current_tokens * bytes_per_token` in either case
+                // (truncated snapshot ⇒ ct = stored ct; full-slab
+                // legacy ⇒ ct = max_tokens, k.len() = bytes_per_tensor).
+                let bytes_per_token =
+                    kv.bytes_per_tensor() / kv.max_tokens().max(1);
+                let expected = bytes_per_token * (*current_tokens);
+                if k.len() != expected || v.len() != expected {
                     anyhow::bail!(
-                        "restore layer {il}: snapshot bytes ({}/{}) != device bytes ({})",
+                        "restore layer {il}: snapshot bytes ({}/{}) != \
+                         expected ({expected} = {current_tokens} tokens × {bytes_per_token} \
+                         bytes/token)",
                         k.len(),
                         v.len(),
-                        bytes
                     );
                 }
-                // SAFETY: device buffers sized to `bytes`; host snapshot
-                // pre-checked above. H→D async then sync.
-                unsafe {
-                    device.memcpy_async(
-                        stream,
-                        CopyDirection::HostToDevice,
-                        kv.k_buffer(),
-                        DevicePtr(k.as_ptr() as usize),
-                        bytes,
-                    )?;
-                    device.memcpy_async(
-                        stream,
-                        CopyDirection::HostToDevice,
-                        kv.v_buffer(),
-                        DevicePtr(v.as_ptr() as usize),
-                        bytes,
-                    )?;
+                if expected > 0 {
+                    // SAFETY: device buffers sized to `bytes_per_tensor`
+                    // (≥ expected); host snapshot pre-checked above.
+                    unsafe {
+                        device.memcpy_async(
+                            stream,
+                            CopyDirection::HostToDevice,
+                            kv.k_buffer(),
+                            DevicePtr(k.as_ptr() as usize),
+                            expected,
+                        )?;
+                        device.memcpy_async(
+                            stream,
+                            CopyDirection::HostToDevice,
+                            kv.v_buffer(),
+                            DevicePtr(v.as_ptr() as usize),
+                            expected,
+                        )?;
+                    }
                 }
                 kv.clear();
                 kv.bump_tail(*current_tokens)
@@ -694,30 +720,35 @@ pub fn restore_layer_caches_from_host(
                 LayerCacheSnapshot::FullAttn { k, v, current_tokens },
                 LayerCache::FullAttnQ8(kv),
             ) => {
-                let bytes = kv.bytes_per_tensor();
-                if k.len() != bytes || v.len() != bytes {
+                let bytes_per_token =
+                    kv.bytes_per_tensor() / kv.max_tokens().max(1);
+                let expected = bytes_per_token * (*current_tokens);
+                if k.len() != expected || v.len() != expected {
                     anyhow::bail!(
-                        "restore layer {il} (Q8): snapshot bytes ({}/{}) != device bytes ({})",
+                        "restore layer {il} (Q8): snapshot bytes ({}/{}) != \
+                         expected ({expected} = {current_tokens} tokens × {bytes_per_token} \
+                         bytes/token)",
                         k.len(),
                         v.len(),
-                        bytes
                     );
                 }
-                unsafe {
-                    device.memcpy_async(
-                        stream,
-                        CopyDirection::HostToDevice,
-                        kv.k_buffer(),
-                        DevicePtr(k.as_ptr() as usize),
-                        bytes,
-                    )?;
-                    device.memcpy_async(
-                        stream,
-                        CopyDirection::HostToDevice,
-                        kv.v_buffer(),
-                        DevicePtr(v.as_ptr() as usize),
-                        bytes,
-                    )?;
+                if expected > 0 {
+                    unsafe {
+                        device.memcpy_async(
+                            stream,
+                            CopyDirection::HostToDevice,
+                            kv.k_buffer(),
+                            DevicePtr(k.as_ptr() as usize),
+                            expected,
+                        )?;
+                        device.memcpy_async(
+                            stream,
+                            CopyDirection::HostToDevice,
+                            kv.v_buffer(),
+                            DevicePtr(v.as_ptr() as usize),
+                            expected,
+                        )?;
+                    }
                 }
                 kv.clear();
                 kv.bump_tail(*current_tokens)

@@ -403,6 +403,44 @@ pub async fn serve(cfg: ServeConfig) -> Result<()> {
         .map(|_| std::sync::atomic::AtomicBool::new(false))
         .collect();
 
+    // **#229 P2.10c** — process-local prefix cache. Always constructed;
+    // `PrefixCache::enabled()` (gated by `FLAMBEAU_PREFIX_CACHE`)
+    // controls whether request handlers actually consult it. Empty
+    // index + zero-byte LRU at boot.
+    let prefix_cache = Arc::new(crate::prefix_cache::PrefixCache::new(
+        crate::prefix_cache::PrefixCache::budget_from_env(),
+    ));
+    let topology_tag = match cfg.mesh_mode {
+        MeshMode::Pp => crate::prefix_cache::TopologyTag {
+            mesh_kind: "pp",
+            ranks: cfg.device_ids.len() as u32,
+            pp_size: cfg.device_ids.len() as u32,
+            tp_size: 1,
+        },
+        MeshMode::Tp { world } => crate::prefix_cache::TopologyTag {
+            mesh_kind: "tp",
+            ranks: world,
+            pp_size: 1,
+            tp_size: world,
+        },
+        MeshMode::Hybrid { pp_size, tp_size } => crate::prefix_cache::TopologyTag {
+            mesh_kind: "pp+tp",
+            ranks: pp_size * tp_size,
+            pp_size,
+            tp_size,
+        },
+    };
+    if crate::prefix_cache::PrefixCache::enabled() {
+        info!(
+            chunk_tokens = prefill_ubatch,
+            budget_bytes = prefix_cache.vram_budget_bytes,
+            mesh = topology_tag.mesh_kind,
+            "prefix cache ENABLED (FLAMBEAU_PREFIX_CACHE=1)"
+        );
+    } else {
+        info!("prefix cache disabled (set FLAMBEAU_PREFIX_CACHE=1 to enable)");
+    }
+
     let state: SharedState = Arc::new(ServerState {
         model_id: cfg.model_id.clone(),
         cfg: model_cfg,
@@ -418,6 +456,9 @@ pub async fn serve(cfg: ServeConfig) -> Result<()> {
         hybrid_batched_scratch: std::sync::Mutex::new(None),
         prefill_serialiser: std::sync::Mutex::new(()),
         tp_prefill_scratch: std::sync::Mutex::new(None),
+        prefix_cache,
+        prefix_cache_chunk_tokens: prefill_ubatch,
+        topology_tag,
         remote_tools,
         agent_stats: crate::agent_stats::AgentStatsRing::default(),
         tool_call_format_default,

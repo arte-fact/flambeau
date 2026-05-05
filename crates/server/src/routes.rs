@@ -22,9 +22,11 @@ use tokio_stream::wrappers::ReceiverStream;
 use crate::api::*;
 use crate::gpu_sampler::{self, GpuSamplerScratch};
 use crate::model::{
-    decode_keep_logits_on_device, decode_logits, decode_spec_pp, decode_spec_pp_sampling,
-    prefill_logits, Inflight, LoadedModel, SpecDecodePp,
+    capture_kv_from_inflight, decode_keep_logits_on_device, decode_logits, decode_spec_pp,
+    decode_spec_pp_sampling, prefill_logits, restore_kv_into_inflight, snapshot_bytes, Inflight,
+    LoadedModel, SpecDecodePp,
 };
+use crate::prefix_cache::{PrefixCache, PrefixKeys, TopologyTag};
 use crate::state::{parse_stop, SamplingParams};
 
 
@@ -117,6 +119,20 @@ pub struct ServerState {
     /// own per-stage scratch story which is V2 work.
     pub tp_prefill_scratch:
         std::sync::Mutex<Option<flambeau_qwen3_moe::forward::ShardedForwardPrefillScratchTp>>,
+    /// **#229 P2.10c** — process-local prompt prefix cache. Always
+    /// constructed; methods short-circuit when `PrefixCache::enabled()`
+    /// is false (default OFF; flip via `FLAMBEAU_PREFIX_CACHE=1`).
+    /// Stores host-RAM KV snapshots keyed by chained chunk hashes;
+    /// LRU-evicts under `FLAMBEAU_PREFIX_CACHE_MAX_GB` (default 2 GB).
+    /// PP and TP supported; Hybrid bails on capture/restore in V1.
+    pub prefix_cache: Arc<PrefixCache>,
+    /// **#229** — chunk size used by every cache entry in this server's
+    /// lifetime (snapshot of `FLAMBEAU_PREFILL_UBATCH` at boot). Cache
+    /// rejects lookups with a different chunk size. Default 512.
+    pub prefix_cache_chunk_tokens: usize,
+    /// **#229** — topology fingerprint stored on every cache entry.
+    /// Defensive guard against cross-topology pollution.
+    pub topology_tag: TopologyTag,
     /// Tools discovered on the `--mcp <url>` upstreams at startup
     /// (ROADMAP-V2 §M2.1). Merged into each request's `tools[]` before
     /// rendering the Jinja template, so the model sees them alongside
@@ -205,6 +221,208 @@ impl ServerState {
             *guard = Some(scratch);
         }
         Ok(guard)
+    }
+
+    /// **#229 V1 P2.10c** — look up the prefix cache for the given
+    /// prompt and, on full-prompt match, restore the cached KV+GDN
+    /// state into `inflight` and return the cached last-position
+    /// logits row. Returning `Ok(Some(_))` means the caller MUST skip
+    /// `prefill_logits` entirely and sample first decode token from
+    /// the returned logits.
+    ///
+    /// Returns `Ok(None)` (caller proceeds with fresh prefill) when:
+    /// - `FLAMBEAU_PREFIX_CACHE` is unset (default OFF).
+    /// - Prompt has zero complete chunks (< chunk_tokens).
+    /// - Topology is `Hybrid` (per-stage per-rank shape unsupported).
+    /// - No full-prompt match (only prefix match — V1 doesn't restore
+    ///   prefix matches because GDN can't be chunk-truncated).
+    /// - Matched entry lacks KV or last_logits (index-only / partial).
+    /// - Restore fails (logged + downgraded to miss).
+    pub fn prefix_cache_try_restore(
+        &self,
+        inflight: &mut Inflight,
+        prompt_ids: &[u32],
+    ) -> anyhow::Result<Option<std::sync::Arc<Vec<f32>>>> {
+        tracing::debug!(
+            target: "server.prefix_cache",
+            prompt_tokens = prompt_ids.len(),
+            enabled = PrefixCache::enabled(),
+            hybrid = matches!(self.model, LoadedModel::Hybrid { .. }),
+            "prefix_cache_try_restore called"
+        );
+        if !PrefixCache::enabled() {
+            return Ok(None);
+        }
+        if matches!(self.model, LoadedModel::Hybrid { .. }) {
+            return Ok(None);
+        }
+        let chunk_tokens = self.prefix_cache_chunk_tokens;
+        if prompt_ids.len() < chunk_tokens {
+            return Ok(None);
+        }
+        let keys = PrefixKeys::from_prompt(prompt_ids, chunk_tokens);
+        if keys.n_chunks() == 0 {
+            return Ok(None);
+        }
+        let topology = self.topology_tag;
+        let info = self
+            .prefix_cache
+            .longest_match(&keys, topology, |_terminal| {});
+        let info = match info {
+            Some(m) => m,
+            None => return Ok(None),
+        };
+        // V1: only act on FULL-PROMPT matches (prefix matches require
+        // GDN-at-chunk-boundary support, which is V2 work).
+        if info.n_tokens != prompt_ids.len() {
+            tracing::debug!(
+                target: "server.prefix_cache",
+                n_matched_tokens = info.n_tokens,
+                prompt_tokens = prompt_ids.len(),
+                "prefix-only match (V1 skips — needs GDN chunk-boundary support)"
+            );
+            return Ok(None);
+        }
+        let snapshot = match self.prefix_cache.snapshot_for(info.terminal) {
+            Some(arc) => arc,
+            None => return Ok(None),
+        };
+        let logits = match self.prefix_cache.logits_for(info.terminal) {
+            Some(arc) => arc,
+            None => return Ok(None),
+        };
+        let restore_start = std::time::Instant::now();
+        if let Err(e) = restore_kv_into_inflight(
+            inflight,
+            &self.cluster,
+            snapshot.as_ref(),
+            &self.model,
+        ) {
+            tracing::warn!(
+                target: "server.prefix_cache",
+                error = %e,
+                "restore failed — falling through to fresh prefill"
+            );
+            return Ok(None);
+        }
+        let restore_ms = restore_start.elapsed().as_secs_f64() * 1000.0;
+        tracing::info!(
+            target: "server.prefix_cache",
+            event = "hit",
+            n_matched_tokens = info.n_tokens,
+            n_matched_chunks = info.n_chunks,
+            prompt_tokens = prompt_ids.len(),
+            restore_ms,
+            "prefix-cache full hit — KV restored, prefill skipped"
+        );
+        Ok(Some(logits))
+    }
+
+    /// **#229 P2.10c** — best-effort capture of the post-prefill KV
+    /// state into the prefix cache. Inserts under the chunk-key chain
+    /// for the full prompt, replacing any prior entry with the same
+    /// chain (idempotent). Eligibility filter:
+    /// - `FLAMBEAU_PREFIX_CACHE` must be set.
+    /// - Topology must be PP or TP (Hybrid bails).
+    /// - Prompt must have at least one new complete chunk past
+    ///   `n_already_matched`.
+    /// - Prompt must be at least 50 tokens (cache-hit savings won't
+    ///   justify the host-RAM cost on tiny prompts).
+    ///
+    /// Errors are logged and swallowed — capture is opportunistic; a
+    /// failed snapshot must not break the caller's request.
+    /// **#229 V1** — capture the post-prefill KV+GDN state plus the
+    /// last-position logits row into the prefix cache. V1 only inserts
+    /// full-prompt entries — partial-chunk-boundary captures need
+    /// GDN-at-position snapshotting (V2). Keyed by the full chain
+    /// (chunk-keys including partial tail) so future identical
+    /// prompts hit and can skip prefill entirely.
+    ///
+    /// `last_logits` is the prefill's last-position F32 vocab row,
+    /// the same one the caller is about to feed into the first-token
+    /// sampler. Cloned into the cache entry; ~600 KB on Qwen3.6.
+    ///
+    /// Eligibility:
+    /// - `FLAMBEAU_PREFIX_CACHE` set.
+    /// - Topology PP or TP (Hybrid bails).
+    /// - Prompt ≥ 50 tokens AND at least one full chunk in the chain.
+    pub fn prefix_cache_try_capture_full(
+        &self,
+        inflight: &Inflight,
+        prompt_ids: &[u32],
+        last_logits: &[f32],
+    ) {
+        tracing::debug!(
+            target: "server.prefix_cache",
+            prompt_tokens = prompt_ids.len(),
+            logits_len = last_logits.len(),
+            enabled = PrefixCache::enabled(),
+            hybrid = matches!(self.model, LoadedModel::Hybrid { .. }),
+            "prefix_cache_try_capture_full called"
+        );
+        if !PrefixCache::enabled() {
+            return;
+        }
+        if matches!(self.model, LoadedModel::Hybrid { .. }) {
+            return;
+        }
+        const MIN_PROMPT_TOKENS: usize = 50;
+        if prompt_ids.len() < MIN_PROMPT_TOKENS {
+            tracing::debug!(target: "server.prefix_cache", "skip: prompt < MIN_PROMPT_TOKENS");
+            return;
+        }
+        let chunk_tokens = self.prefix_cache_chunk_tokens;
+        if prompt_ids.len() < chunk_tokens {
+            tracing::debug!(target: "server.prefix_cache", "skip: prompt < chunk_tokens");
+            return;
+        }
+        let keys = PrefixKeys::from_prompt(prompt_ids, chunk_tokens);
+        if keys.n_chunks() == 0 || last_logits.is_empty() {
+            tracing::debug!(target: "server.prefix_cache", "skip: 0 chunks or empty logits");
+            return;
+        }
+        let snap = match capture_kv_from_inflight(inflight, &self.cluster, &self.model) {
+            Ok(s) => s,
+            Err(e) => {
+                tracing::warn!(
+                    target: "server.prefix_cache",
+                    error = %e,
+                    "capture failed — entry not inserted"
+                );
+                return;
+            }
+        };
+        // **#229 V1** — capture the FULL post-prefill state (no
+        // truncation). Pair it with the last-position logits so the
+        // hit path skips prefill entirely. GDN is captured as the
+        // post-prompt-end state; future identical-prompt hit gets
+        // bit-equivalent state restored.
+        let kv_bytes = snapshot_bytes(&snap);
+        let logits_bytes = last_logits.len() * std::mem::size_of::<f32>();
+        let total_bytes = kv_bytes + logits_bytes;
+        let snap_arc = std::sync::Arc::new(snap);
+        let logits_arc = std::sync::Arc::new(last_logits.to_vec());
+        self.prefix_cache.insert_with_kv(
+            keys.chunk_keys.clone(),
+            self.topology_tag,
+            chunk_tokens,
+            prompt_ids.len(),
+            snap_arc,
+            logits_arc,
+            total_bytes,
+        );
+        tracing::info!(
+            target: "server.prefix_cache",
+            event = "insert",
+            n_chunks = keys.n_chunks(),
+            n_tokens = prompt_ids.len(),
+            kv_bytes,
+            logits_bytes,
+            used_bytes = self.prefix_cache.used_bytes(),
+            budget_bytes = self.prefix_cache.vram_budget_bytes,
+            entries = self.prefix_cache.len(),
+            "prefix-cache write — full-prompt entry inserted"
+        );
     }
 
     /// **P2.9b-i1** — acquire an idle inflight slot, blocking until one
@@ -2602,15 +2820,32 @@ fn run_completion_scheduler_pp_blocking(
             let tp_pool: Option<
                 &mut flambeau_qwen3_moe::forward::ShardedForwardPrefillScratchTp,
             > = tp_scratch_g.as_mut().and_then(|g| g.as_mut());
-            crate::model::prefill_logits(
-                model,
-                cluster,
-                &mut *guard,
-                &prompt_ids,
-                &mut logits_buf,
-                tp_pool,
-            )
-            .context("scheduler-path prefill")?;
+            // **#229 V1** — prefix-cache full-prompt lookup. On hit:
+            // KV+GDN restored, prefill skipped entirely, logits served
+            // from cache. On miss: fall through to fresh prefill, then
+            // capture for next time.
+            let cached_logits =
+                state.prefix_cache_try_restore(&mut *guard, &prompt_ids)?;
+            if let Some(arc) = cached_logits {
+                logits_buf.clear();
+                logits_buf.extend_from_slice(arc.as_ref());
+            } else {
+                crate::model::prefill_logits(
+                    model,
+                    cluster,
+                    &mut *guard,
+                    &prompt_ids,
+                    0,
+                    &mut logits_buf,
+                    tp_pool,
+                )
+                .context("scheduler-path prefill")?;
+                state.prefix_cache_try_capture_full(
+                    &*guard,
+                    &prompt_ids,
+                    &logits_buf,
+                );
+            }
             // First-token stop mask: NEG_INFINITY all stop ids so the
             // model is forced to emit a content token first.
             if !relax_stop_mask {
@@ -2879,15 +3114,35 @@ fn run_completion_blocking_ids(
     let tp_pool: Option<
         &mut flambeau_qwen3_moe::forward::ShardedForwardPrefillScratchTp,
     > = tp_scratch_g.as_mut().and_then(|g| g.as_mut());
-    prefill_logits(
-        model,
-        cluster,
-        &mut inflight,
-        &prompt_ids,
-        &mut logits_buf,
-        tp_pool,
-    )
-    .context("prefill logits")?;
+    // **#229 V1** — prefix-cache full-prompt lookup. Bypassed when the
+    // request will collect logprobs (cache doesn't store per-token
+    // logprobs) or when MTP spec-decode is engaged (cached entries
+    // don't include MTP head state).
+    let cache_eligible = params.collect_logprobs.is_none()
+        && !matches!(model, LoadedModel::Pp { mtp: Some(_), .. });
+    let cached_logits = if cache_eligible {
+        state.prefix_cache_try_restore(&mut inflight, &prompt_ids)?
+    } else {
+        None
+    };
+    if let Some(arc) = cached_logits {
+        logits_buf.clear();
+        logits_buf.extend_from_slice(arc.as_ref());
+    } else {
+        prefill_logits(
+            model,
+            cluster,
+            &mut inflight,
+            &prompt_ids,
+            0,
+            &mut logits_buf,
+            tp_pool,
+        )
+        .context("prefill logits")?;
+        if cache_eligible {
+            state.prefix_cache_try_capture_full(&inflight, &prompt_ids, &logits_buf);
+        }
+    }
     drop(tp_scratch_g);
     drop(_prefill_lock);
     for &sid in stop_ids {
@@ -3401,15 +3656,25 @@ fn run_completion_blocking_streaming(
     let tp_pool: Option<
         &mut flambeau_qwen3_moe::forward::ShardedForwardPrefillScratchTp,
     > = tp_scratch_g.as_mut().and_then(|g| g.as_mut());
-    prefill_logits(
-        model,
-        cluster,
-        &mut inflight,
-        &prompt_ids,
-        &mut logits_buf,
-        tp_pool,
-    )
-    .context("prefill logits")?;
+    // **#229 V1** — prefix-cache restore (streaming path).
+    let cached_logits_stream =
+        state.prefix_cache_try_restore(&mut inflight, &prompt_ids)?;
+    if let Some(arc) = cached_logits_stream {
+        logits_buf.clear();
+        logits_buf.extend_from_slice(arc.as_ref());
+    } else {
+        prefill_logits(
+            model,
+            cluster,
+            &mut inflight,
+            &prompt_ids,
+            0,
+            &mut logits_buf,
+            tp_pool,
+        )
+        .context("prefill logits")?;
+        state.prefix_cache_try_capture_full(&inflight, &prompt_ids, &logits_buf);
+    }
     drop(tp_scratch_g);
     drop(_prefill_lock);
     for &sid in stop_ids {

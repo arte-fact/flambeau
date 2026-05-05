@@ -81,14 +81,29 @@ pub struct PrefixKeys {
 
 impl PrefixKeys {
     /// Compute the chunk-key chain for a prompt at the given chunk size.
+    ///
+    /// **#229 V1**: the chain includes a final partial-tail chunk when
+    /// `prompt.len() % chunk_tokens != 0`, so the last `chunk_keys` entry
+    /// always uniquely identifies the *full* prompt. Prefix-only matches
+    /// at chunk boundaries are still expressible (callers can probe the
+    /// shorter-chain entries) but are not used in V1 because GDN
+    /// recurrent state isn't snapshotted at chunk boundaries — we only
+    /// hit on full-prompt match.
     pub fn from_prompt(prompt: &[u32], chunk_tokens: usize) -> PrefixKeys {
         assert!(chunk_tokens > 0, "chunk_tokens must be > 0");
         let n_full = prompt.len() / chunk_tokens;
-        let mut chunk_keys = Vec::with_capacity(n_full);
+        let has_tail = prompt.len() % chunk_tokens != 0;
+        let n_chunks = n_full + (has_tail as usize);
+        let mut chunk_keys = Vec::with_capacity(n_chunks);
         let mut prev = ChunkKey::SEED;
         for i in 0..n_full {
             let chunk = &prompt[i * chunk_tokens..(i + 1) * chunk_tokens];
             prev = prev.extend(chunk);
+            chunk_keys.push(prev);
+        }
+        if has_tail {
+            let tail = &prompt[n_full * chunk_tokens..];
+            prev = prev.extend(tail);
             chunk_keys.push(prev);
         }
         PrefixKeys {
@@ -96,6 +111,14 @@ impl PrefixKeys {
             chunk_tokens,
             prompt_tokens: prompt.len(),
         }
+    }
+
+    /// **#229** — token count covered by the i-th chunk key (1-based).
+    /// Mostly returns `(i+1) * chunk_tokens` but the last chunk in a
+    /// prompt with a partial tail covers `prompt_tokens` total.
+    pub fn tokens_for_chunk_index(&self, idx: usize) -> usize {
+        let candidate = (idx + 1) * self.chunk_tokens;
+        candidate.min(self.prompt_tokens)
     }
 
     /// Number of complete chunks in this prompt (= `chunk_keys.len()`).
@@ -161,14 +184,22 @@ pub struct CacheEntry {
     /// for the lookup integrity check (a probe matches only when the
     /// full chain agrees, not just the terminal key).
     pub chain: Vec<ChunkKey>,
-    /// Prompt-token-position the entry covers (= `chain.len() * chunk_tokens`).
-    /// Convenience for callers that want to slice the input prompt.
+    /// Total prompt-token count this entry covers — equals the original
+    /// prompt length (chain may include a partial-tail chunk).
     pub n_tokens: usize,
     /// **#228** — host-side KV snapshot covering every rank's layers at
     /// `n_tokens`. `None` = index-only entry (lookup hits, restore
     /// no-ops).
     #[cfg(feature = "hip")]
     pub kv: Option<std::sync::Arc<KvSnapshot>>,
+    /// **#229 V1** — host-copy of the LAST-position logits row from the
+    /// originating prefill (one F32 per vocab entry, ~600 KB on
+    /// Qwen3.6). Returned to the caller on full-prompt hit so it can
+    /// sample the first decode token without re-running prefill. None
+    /// means index-only / pre-#229 entry; a full hit with `None`
+    /// degrades to "restore + re-prefill last token" which doesn't
+    /// work on GDN topologies, so callers treat None as a miss in V1.
+    pub last_logits: Option<std::sync::Arc<Vec<f32>>>,
 }
 
 impl CacheEntry {
@@ -218,9 +249,8 @@ struct PrefixCacheInner {
     /// terminal key but different chains can exist (rare; resolved by
     /// the chain-equality check at lookup).
     by_terminal: HashMap<ChunkKey, Vec<CacheEntry>>,
-    /// LRU order: front = most recently touched. **#229** populates
-    /// this; #227 leaves it empty.
-    #[expect(dead_code, reason = "wired in #229 (write path + eviction)")]
+    /// LRU order: front = most recently touched. Populated by
+    /// `insert_with_kv` (#229).
     lru_order: std::collections::VecDeque<ChunkKey>,
     /// Total VRAM used by all entries.
     used_bytes: usize,
@@ -294,9 +324,13 @@ impl PrefixCache {
                 }
                 // Hit — caller updates LRU outside the read lock.
                 on_hit_touch_lru(terminal);
+                // n_tokens uses the entry's stored count, not a
+                // chunk-aligned multiple, so partial-tail prompts
+                // (where the last chunk covers < chunk_tokens) round-
+                // trip correctly.
                 return Some(MatchInfo {
                     n_chunks: n,
-                    n_tokens: n * keys.chunk_tokens,
+                    n_tokens: entry.n_tokens,
                     terminal,
                 });
             }
@@ -304,14 +338,19 @@ impl PrefixCache {
         None
     }
 
-    /// **#229 stub** — insert an index-only entry (no KV). Used by tests
-    /// and as a fallback path when capture is disabled. The hit path
-    /// no-ops on entries without a `kv` snapshot.
+    /// **#229 stub** — insert an index-only entry (no KV, no logits).
+    /// Used by tests and as a fallback path when capture is disabled.
+    /// The hit path no-ops on entries without a `kv` snapshot.
+    /// `n_tokens` is the prompt-token count this entry covers; for
+    /// chunk-aligned prompts that's `chain.len() * chunk_tokens`, but
+    /// the caller must pass it explicitly because partial-tail prompts
+    /// have a final chunk covering < `chunk_tokens` tokens.
     pub fn insert_skeleton(
         &self,
         chain: Vec<ChunkKey>,
         topology: TopologyTag,
         chunk_tokens: usize,
+        n_tokens: usize,
     ) {
         let Some(&terminal) = chain.last() else {
             return;
@@ -319,10 +358,11 @@ impl PrefixCache {
         let entry = CacheEntry {
             topology,
             chunk_tokens,
-            n_tokens: chain.len() * chunk_tokens,
+            n_tokens,
             chain,
             #[cfg(feature = "hip")]
             kv: None,
+            last_logits: None,
         };
         let mut inner = self.inner.write().unwrap();
         inner
@@ -345,6 +385,18 @@ impl PrefixCache {
             .find_map(|e| e.kv.as_ref().map(std::sync::Arc::clone))
     }
 
+    /// **#229 V1** — clone out the cached last-position logits for a
+    /// hit terminal. Pair with `snapshot_for`; on full-prompt match the
+    /// caller restores KV/GDN, then samples first decode token from
+    /// these logits without re-running prefill.
+    pub fn logits_for(&self, terminal: ChunkKey) -> Option<std::sync::Arc<Vec<f32>>> {
+        let inner = self.inner.read().unwrap();
+        let entries = inner.by_terminal.get(&terminal)?;
+        entries
+            .iter()
+            .find_map(|e| e.last_logits.as_ref().map(std::sync::Arc::clone))
+    }
+
     /// **#229 P2.10c** — insert an entry with its KV snapshot, account
     /// the bytes against the budget, evict LRU until under cap.
     ///
@@ -357,7 +409,9 @@ impl PrefixCache {
         chain: Vec<ChunkKey>,
         topology: TopologyTag,
         chunk_tokens: usize,
+        n_tokens: usize,
         kv: std::sync::Arc<KvSnapshot>,
+        last_logits: std::sync::Arc<Vec<f32>>,
         bytes: usize,
     ) {
         let Some(&terminal) = chain.last() else {
@@ -374,14 +428,19 @@ impl PrefixCache {
             if let Some(prior) = existing[idx].kv.as_ref() {
                 replaced_bytes = snapshot_bytes_arc(prior);
             }
+            if let Some(prior_lp) = existing[idx].last_logits.as_ref() {
+                replaced_bytes += prior_lp.len() * std::mem::size_of::<f32>();
+            }
             existing[idx].kv = Some(std::sync::Arc::clone(&kv));
+            existing[idx].last_logits = Some(std::sync::Arc::clone(&last_logits));
         } else {
             existing.push(CacheEntry {
                 topology,
                 chunk_tokens,
-                n_tokens: chain.len() * chunk_tokens,
+                n_tokens,
                 chain,
                 kv: Some(std::sync::Arc::clone(&kv)),
+                last_logits: Some(std::sync::Arc::clone(&last_logits)),
             });
         }
         inner.used_bytes = inner.used_bytes.saturating_sub(replaced_bytes) + bytes;
@@ -399,6 +458,11 @@ impl PrefixCache {
                         inner.used_bytes = inner
                             .used_bytes
                             .saturating_sub(snapshot_bytes_arc(&arc));
+                    }
+                    if let Some(lp) = e.last_logits {
+                        inner.used_bytes = inner.used_bytes.saturating_sub(
+                            lp.len() * std::mem::size_of::<f32>(),
+                        );
                     }
                 }
             }
@@ -479,8 +543,13 @@ mod tests {
         let a = PrefixKeys::from_prompt(&prompt, 512);
         let b = PrefixKeys::from_prompt(&prompt, 512);
         assert_eq!(a.chunk_keys, b.chunk_keys);
-        assert_eq!(a.n_chunks(), 2); // 1100 / 512 = 2 (floor)
+        // 1100 / 512 = 2 full chunks + 1 partial tail (76 tokens)
+        assert_eq!(a.n_chunks(), 3);
         assert_ne!(a.chunk_keys[0], a.chunk_keys[1]);
+        assert_ne!(a.chunk_keys[1], a.chunk_keys[2]);
+        assert_eq!(a.tokens_for_chunk_index(0), 512);
+        assert_eq!(a.tokens_for_chunk_index(1), 1024);
+        assert_eq!(a.tokens_for_chunk_index(2), 1100);
     }
 
     #[test]
@@ -499,11 +568,12 @@ mod tests {
     #[test]
     fn longest_match_walks_longest_first() {
         let cache = PrefixCache::new(0);
-        // Prompt of 3 chunks. Insert two cached entries: 2 chunks, 3 chunks.
+        // 1536-token prompt at chunk=512 = 3 full chunks, no tail.
         let prompt: Vec<u32> = (0..1536).collect();
         let keys = PrefixKeys::from_prompt(&prompt, 512);
-        cache.insert_skeleton(keys.chunk_keys[..2].to_vec(), topo(), 512);
-        cache.insert_skeleton(keys.chunk_keys[..3].to_vec(), topo(), 512);
+        assert_eq!(keys.n_chunks(), 3);
+        cache.insert_skeleton(keys.chunk_keys[..2].to_vec(), topo(), 512, 1024);
+        cache.insert_skeleton(keys.chunk_keys[..3].to_vec(), topo(), 512, 1536);
 
         let m = cache
             .longest_match(&keys, topo(), |_| {})
@@ -518,7 +588,7 @@ mod tests {
         let prompt: Vec<u32> = (0..1536).collect();
         let keys = PrefixKeys::from_prompt(&prompt, 512);
         // Cache only the first 2 chunks.
-        cache.insert_skeleton(keys.chunk_keys[..2].to_vec(), topo(), 512);
+        cache.insert_skeleton(keys.chunk_keys[..2].to_vec(), topo(), 512, 1024);
 
         let m = cache
             .longest_match(&keys, topo(), |_| {})
@@ -538,7 +608,7 @@ mod tests {
             pp_size: 4,
             tp_size: 1,
         };
-        cache.insert_skeleton(keys.chunk_keys.clone(), other, 512);
+        cache.insert_skeleton(keys.chunk_keys.clone(), other, 512, 1024);
 
         let hit = cache.longest_match(&keys, topo(), |_| {});
         assert!(hit.is_none(), "topology mismatch should reject");
@@ -552,11 +622,14 @@ mod tests {
     }
 
     #[test]
-    fn partial_final_chunk_excluded_from_chain() {
-        // 700-token prompt at chunk=512 → only 1 complete chunk.
+    fn partial_final_chunk_included_in_chain() {
+        // **#229 V1**: 700-token prompt at chunk=512 → 1 full chunk +
+        // 1 partial-tail chunk = 2 entries, last covering 700 tokens.
         let prompt: Vec<u32> = (0..700).collect();
         let keys = PrefixKeys::from_prompt(&prompt, 512);
-        assert_eq!(keys.n_chunks(), 1);
+        assert_eq!(keys.n_chunks(), 2);
         assert_eq!(keys.prompt_tokens, 700);
+        assert_eq!(keys.tokens_for_chunk_index(0), 512);
+        assert_eq!(keys.tokens_for_chunk_index(1), 700);
     }
 }
