@@ -1,0 +1,490 @@
+# Environment-variable impact audit spec.
+#
+# Each [var.NAME] block defines a measurement plan for one env var:
+#   - which models / topologies actually exercise the code path
+#   - which values to compare (default vs alternates)
+#   - which metrics to capture (perf, VRAM, correctness)
+#
+# The harness (`cargo run -p bench -- env-impact`) emits one cert
+# per var under `certs/env_impact/<NAME>.md` with the measured deltas.
+# Triage decision (delete / migrate-to-dispatch / keep-as-flag /
+# promote-to-default) is recorded in the cert and rolls into MEMORY.md.
+#
+# Class taxonomy (inherited from the env-purge plan):
+#   A = dead / experiment-finished       -> verify-then-delete
+#   B = kernel variant / fusion gate     -> migrate to dispatch table
+#   C = server runtime config            -> migrate to ServeConfig + clap
+#   D = debug / tracing                  -> migrate to tracing crate
+#
+# Vars already covered by an existing cert or memory entry are NOT
+# re-listed here. See `certs/perf/`, `certs/hip/gfx906/`, and
+# MEMORY.md (entries citing FLAMBEAU_*) for prior measurements.
+
+[meta]
+output_dir          = "certs/env_impact"
+runs_per_cell       = 3        # post-warmup samples; cert reports median + spread
+warmup_runs         = 2
+noise_floor_pct     = 2.0      # |delta| below this is reported as "null"
+prompt_len          = 512      # pp512 — same as bench matrix convention
+tg_len              = 64       # tg64
+seed                = 0
+correctness_check   = "first_8_tokens_bit_identical"  # falsifies non-perf-only changes
+ctx_cap             = 4096     # bench prompt is ~3313 tokens + 64 max_tokens; ctx<3500 OOMs the KV cache
+                                # 9B / 36 layers / 4 KV heads / 128 head_dim @ ctx=4096 = ~295 MB/slot;
+                                # 8 slots ≈ 2.4 GB total split across 4× MI50 (pp2tp2) — fine.
+sample_vram         = true     # rocm-smi sample after server ready; record peak per GPU + total
+
+# Logical model labels -> GGUF paths. The harness resolves at run time.
+[meta.models]
+"qwen35-9b-q4_1"            = "/artefact/models/Qwen3.5-9B-Q4_1.gguf"
+"qwen36-27b-q4_0"           = "/artefact/models/Qwen3.6-27B-Q4_0.gguf"
+"qwen36-27b-q4_1"           = "/artefact/models/Qwen3.6-27B-Q4_1.gguf"
+"qwen36-27b-q8_0"           = "/artefact/models/Qwen3.6-27B-Q8_0.gguf"
+"qwen36-35b-a3b-q4_0"       = "/artefact/models/Qwen_Qwen3.6-35B-A3B-Q4_0.gguf"
+"qwen36-35b-a3b-q4ks"       = "/artefact/models/Qwen3.6-35B-A3B-UD-Q4_K_S.gguf"
+
+[meta.topologies]
+# mesh_mode strings are passed directly to `--mesh-mode` (CLI expects
+# "pp" | "tp" | "pp+tp"). Device ordering matches scripts/bench/run_matrix.py
+# defaults: cross-die {0,2} for pp2/tp2 to spread thermal load.
+"pp4"     = { devices = "0,1,2,3", mesh_mode = "pp" }
+"tp2"     = { devices = "0,2",     mesh_mode = "tp",    tp_size = 2 }
+"pp2tp2"  = { devices = "0,2,1,3", mesh_mode = "pp+tp", pp_size = 2, tp_size = 2 }
+
+
+# ─────────────────────────────────────────────────────────────────────
+# Class X — pure baseline characterization (no var under test).
+# Iterates concurrencies under the optimized profile to map the
+# throughput / TTFT-p99 / VRAM curve. Single test_value `"unset"` =
+# no env override, just measure default behavior at each N.
+# ─────────────────────────────────────────────────────────────────────
+
+[var.FLAMBEAU_BASELINE_9B_PP2TP2]
+class           = "X"
+description     = "Baseline characterization of Qwen3.5-9B on pp2tp2 across N=[1,2,4,8]"
+default_state   = "n/a"
+test_values     = ["unset"]
+models          = ["qwen35-9b-q4_1"]
+topologies      = ["pp2tp2"]
+concurrencies   = [1, 2, 4, 8]
+metrics         = ["agg_tps", "ttft_p99_ms", "vram_peak_gb"]
+preconditions   = { FLAMBEAU_INFLIGHT_SLOTS = "8" }   # 8 slots so N≤8 always fits
+notes           = """
+Measures aggregate throughput + TTFT p99 + peak VRAM at each
+concurrency level on Qwen3.5-9B / pp2tp2 against the optimized
+profile baseline. The environment variable name is a placeholder
+(no actual var read in code); the harness still exercises every
+booth/measurement path the way real env-var tests do, including
+sample_vram=true.
+
+Result curve answers:
+  - Where does aggregate throughput saturate (does N=8 plateau or grow)?
+  - How does TTFT p99 evolve with N (head-of-line blocking?)
+  - VRAM scaling: linear in N? plateaus once KV cache + scratch are
+    sized at INFLIGHT_SLOTS=8?
+"""
+
+
+# ─────────────────────────────────────────────────────────────────────
+# Class B — kernel variant / fusion gates  (migrate to dispatch table)
+# ─────────────────────────────────────────────────────────────────────
+
+[var.FLAMBEAU_QKV_FUSED]
+class           = "B"
+description     = "Fused QKV projection in full-attn layers (default fused)"
+default_state   = "fused"               # unset = fused
+test_values     = ["unset", "0"]        # 0 = revert to unfused
+applies_to_arch = ["qwen35moe", "qwen36moe", "qwen35dense"]
+models          = ["qwen35-9b-q4_1", "qwen36-27b-q4_0", "qwen36-35b-a3b-q4_0"]
+topologies      = ["pp4", "tp2", "pp2tp2"]
+metrics         = ["pp512_tok_s", "tg64_tok_s"]
+notes           = """
+Read in models/gdn.rs:1175. Last cert is TP-4d (2026-04-29). If fused
+wins ≥ noise_floor on every cell, default-bake and delete the var.
+"""
+
+[var.FLAMBEAU_DENSE_GATE_UP]
+class           = "B"
+description     = "Fused gate+up projection in dense FFN layers"
+default_state   = "fused"
+test_values     = ["unset", "unfused"]
+applies_to_arch = ["qwen35dense", "qwen35moe"]   # MoE has its own MoE-fused path
+models          = ["qwen35-9b-q4_1", "qwen36-27b-q4_0"]
+topologies      = ["pp4", "tp2"]
+metrics         = ["pp512_tok_s", "tg64_tok_s"]
+notes           = """
+Read in models/dense_ffn.rs:165. C8 fusion cert exists; this re-confirms
+default-ON is still winning post-recent commits. Skip MoE-only models.
+"""
+
+[var.FLAMBEAU_GDN_QKV_FUSE_Q8_0]
+class           = "B"
+description     = "Q8_0 QKV fusion in TP-GDN path (hybrid arch only)"
+default_state   = "fused"
+test_values     = ["unset", "off"]
+applies_to_arch = ["qwen36moe"]                 # GDN-bearing arch
+models          = ["qwen36-27b-q4_0", "qwen36-35b-a3b-q4_0"]
+topologies      = ["tp2", "pp2tp2"]
+metrics         = ["tg64_tok_s"]                # GDN is decode-dominant
+notes           = "Read in models/gdn_tp.rs:229. Standalone delta unknown."
+
+[var.FLAMBEAU_KV_F16_DST]
+class           = "B"
+description     = "Fused Q4_0 KV-quantize with F16 destination"
+default_state   = "on"
+test_values     = ["unset", "off"]
+applies_to_arch = ["qwen35moe", "qwen36moe"]
+applies_to_dtype = ["Q4_0"]                     # NOT Q4_1 — known null on that path
+models          = ["qwen36-27b-q4_0", "qwen36-35b-a3b-q4_0"]
+topologies      = ["tp2", "pp2tp2"]
+metrics         = ["tg64_tok_s"]
+known_result    = "Q4_1 path: NULL (project_l1_q4_1_kv_fusion_null memory)"
+notes           = "This run measures Q4_0 only — the Q4_1 cell is already certed null."
+
+[var.FLAMBEAU_AR_FUSE_Q8_1]
+class           = "B"
+description     = "AllReduce + fused Q8_1 KV quantize on TP boundary"
+default_state   = "off"                         # opt-in
+test_values     = ["unset", "on"]
+applies_to_arch = ["qwen35moe", "qwen36moe"]
+models          = ["qwen36-27b-q4_0", "qwen36-35b-a3b-q4_0"]
+topologies      = ["tp2", "pp2tp2"]             # PP-only never crosses AR
+metrics         = ["tg64_tok_s"]
+notes           = """
+Read in models/tp.rs:1840,2610. If on >> off, promote to default.
+If shape-dependent across (model, topology), candidate for dispatch-table
+row. If null, delete.
+"""
+
+[var.FLAMBEAU_SSM_OUT_F16_DST]
+class           = "B"
+description     = "F16-dest fusion on SSM output (GDN path, requires VARIANT != baseline)"
+default_state   = "off"
+test_values     = ["unset", "on"]
+applies_to_arch = ["qwen36moe"]
+models          = ["qwen36-27b-q4_0", "qwen36-35b-a3b-q4_0"]
+topologies      = ["tp2", "pp2tp2"]
+metrics         = ["tg64_tok_s"]
+preconditions   = { FLAMBEAU_VARIANT = "fused" }   # gated lever
+notes           = "Read in models/gdn_tp.rs:609. Conditional — the precondition matters."
+
+[var.FLAMBEAU_Q4_0_GU_T128]
+class           = "B"
+description     = "Q4_0 gate_up tile size (T=128 vs T=256)"
+default_state   = "T256"
+test_values     = ["unset", "on"]               # on => T=128
+applies_to_dtype = ["Q4_0"]
+models          = ["qwen36-27b-q4_0", "qwen36-35b-a3b-q4_0"]
+topologies      = ["tp2", "pp2tp2"]
+metrics         = ["pp512_tok_s", "tg64_tok_s"]
+notes           = "Read in models/dense_ffn_tp.rs:165. C6 cert exists; re-measure."
+
+[var.FLAMBEAU_Q4_0_GU_WARPCOOP]
+class           = "B"
+description     = "Q4_0 gate_up wave64 warpcoop variant (C6 opt-in)"
+default_state   = "off"
+test_values     = ["unset", "on"]
+applies_to_dtype = ["Q4_0"]
+models          = ["qwen36-27b-q4_0", "qwen36-35b-a3b-q4_0"]
+topologies      = ["tp2", "pp2tp2"]
+metrics         = ["pp512_tok_s", "tg64_tok_s"]
+notes           = "Read in models/dense_ffn_tp.rs:163."
+
+[var.FLAMBEAU_Q8_0_MMVQ_T128]
+class           = "B"
+description     = "Q8_0 MMVQ tile T=128 (latency-hiding variant)"
+default_state   = "T256"
+test_values     = ["unset", "on"]
+applies_to_dtype = ["Q8_0"]
+models          = ["qwen36-27b-q8_0"]
+topologies      = ["pp4", "tp2"]
+metrics         = ["tg64_tok_s"]
+notes           = "Read in ops/qmatmul.rs:988. C9 cert exists; re-measure post-recent commits."
+
+[var.FLAMBEAU_Q8_0_MMVQ_T128_VDR2]
+class           = "B"
+description     = "Q8_0 MMVQ T=128 + VDR2 inner"
+default_state   = "off"
+test_values     = ["unset", "off", "on"]        # explicit off vs unset to surface 3-way
+applies_to_dtype = ["Q8_0"]
+models          = ["qwen36-27b-q8_0"]
+topologies      = ["pp4", "tp2"]
+metrics         = ["tg64_tok_s"]
+notes           = "Read in ops/qmatmul.rs:548,995. Known partial cert (c9_followup)."
+
+[var.FLAMBEAU_Q8_0_GU_T128_VDR2]
+class           = "B"
+description     = "Q8_0 gate_up T=128 + VDR2 (decoder MoE up/down path)"
+default_state   = "off"
+test_values     = ["unset", "on"]
+applies_to_dtype = ["Q8_0"]
+models          = ["qwen36-27b-q8_0"]
+topologies      = ["tp2", "pp2tp2"]
+metrics         = ["tg64_tok_s"]
+notes           = "Read in ops/qmatmul.rs (within GU dispatch). c9_followup2 cert exists."
+
+[var.FLAMBEAU_TP_BATCHED]
+class           = "B"
+description     = "Batched TP forward (default ON; opt-out gate)"
+default_state   = "on"
+test_values     = ["unset", "0"]
+applies_to_arch = ["qwen35moe", "qwen36moe"]
+models          = ["qwen36-27b-q4_0"]               # 27b/tp2 already showed 13× regression at N=1
+topologies      = ["tp2"]                           # narrow to one cell — finding is conclusive
+concurrencies   = [4]                               # only N=4 — single-stream already certed
+metrics         = ["pp512_tok_s", "tg64_tok_s"]
+known_result    = "N=1 partial cert: 13× prefill regression, decode unchanged. See FLAMBEAU_TP_BATCHED.md."
+notes           = """
+Re-test the opt-out at N=4 to see if the batching path's absence still
+hurts under concurrent load (it should be even worse — batched-decode
+needs the batched-TP forward to coalesce). Confirms whether the gate
+can be deleted entirely vs kept for fall-back.
+"""
+
+
+# ─────────────────────────────────────────────────────────────────────
+# Class B (unknowns) — likely null but never confirmed
+# ─────────────────────────────────────────────────────────────────────
+
+[var.FLAMBEAU_GDN_NO_BATCHED]
+class           = "B"
+description     = "Force per-token GDN (disable batched-GDN inner loop)"
+default_state   = "batched"
+test_values     = ["unset", "1"]
+applies_to_arch = ["qwen36moe"]                                     # qwen35 dense has no GDN
+models          = ["qwen36-27b-q4_0", "qwen36-35b-a3b-q4_0"]
+topologies      = ["pp2tp2"]
+concurrencies   = [1, 2, 4, 8]
+metrics         = ["tg64_tok_s", "vram_peak_gb"]
+preconditions   = { FLAMBEAU_INFLIGHT_SLOTS = "$N" }                # slots scales with N (see harness expansion)
+known_result    = "Prior N=2 cert (FLAMBEAU_GDN_NO_BATCHED_N2.md) showed HALT-DIVERGENT on 35B-A3B. Re-cert at full N range."
+notes           = """
+The N=2 cert flagged a divergent-output bug on 35B-A3B/pp2tp2 with =1
+(per-token GDN). Full N sweep checks if the bug is N-dependent and
+characterizes the perf delta vs default across the concurrency curve.
+"""
+
+[var.FLAMBEAU_MBATCH]
+class           = "B"
+description     = "MoE batched dispatch gate"
+default_state   = "off"
+test_values     = ["unset", "1"]
+applies_to_arch = ["qwen35moe", "qwen36moe"]                        # 9B is dense (no MoE) → control
+models          = ["qwen36-27b-q4_0", "qwen36-35b-a3b-q4_0"]
+topologies      = ["pp2tp2"]
+concurrencies   = [1, 2, 4, 8]
+metrics         = ["tg64_tok_s", "vram_peak_gb"]
+# slots=N scales VRAM with the workload size; the harness sets
+# FLAMBEAU_INFLIGHT_SLOTS = current N at cell-spawn time when the spec's
+# precondition value is the literal string "$N" (see harness $N expansion).
+preconditions   = { FLAMBEAU_INFLIGHT_SLOTS = "$N" }
+known_result    = "9B has no MoE → expected NO-OP across N. Cert is a control."
+notes           = "Real MoE test deferred until 35B-A3B/pp2tp2 fits with INFLIGHT_SLOTS≥4."
+
+[var.FLAMBEAU_MOE_VARIANT]
+class           = "B"   # reclassified after code-read 2026-05-05
+description     = "MoE prefill kernel selector — picks completely different code paths"
+default_state   = "tile8"
+test_values     = ["unset", "tile8", "sorted", "r4", "turbo"]
+applies_to_arch = ["qwen35moe", "qwen36moe"]
+models          = ["qwen36-35b-a3b-q4_0", "qwen36-35b-a3b-q4ks"]   # MoE only
+topologies      = ["tp2", "pp2tp2"]
+metrics         = ["pp512_tok_s", "tg64_tok_s"]
+notes           = """
+Read in moe.rs:984. 4-way selector: tile8 (default, MMQ 4-warp LDS-tiled)
+| sorted (MMVQ r2 sorted-block) | r4 (raw MMVQ) | turbo (DS4 Q8_1 + MMQ
+turbo). Each is a distinct kernel pipeline with different VRAM (Q8_1 vs
+Q8_1_MMQ activation packing). Migration target: dispatch table row per
+(dtype, n_tokens) shape — likely tile8 for prefill, sorted for some
+decode paths. Q4_K only supports tile8 + sorted + turbo for some sub-ops;
+Q4_0/Q5_0/Q5_1/Q8_0 only support tile8 in current code.
+"""
+
+[var.FLAMBEAU_MOE_SORTED]
+class           = "A"   # legacy compat shortcut for MOE_VARIANT=r4
+description     = "Legacy 0-or-unset gate that maps to MOE_VARIANT=r4 when MOE_VARIANT is unset"
+default_state   = "unset"
+test_values     = []    # NO BENCH: redundant by inspection
+models          = []
+topologies      = []
+metrics         = []
+known_result    = """
+Read once in moe.rs:985 inside the MOE_VARIANT fallback branch. Has zero
+effect when MOE_VARIANT is set. The only behavior is `=0` → forces r4
+variant, which MOE_VARIANT=r4 also achieves. Deletion is safe after one
+deprecation cycle: log a warning when MOE_SORTED=0 is read and tell the
+user to switch to MOE_VARIANT=r4.
+"""
+notes           = "Delete after MOE_VARIANT migration to dispatch table."
+
+
+# ─────────────────────────────────────────────────────────────────────
+# Class C — server runtime config (calibrate defaults, then move to ServeConfig)
+# ─────────────────────────────────────────────────────────────────────
+
+[var.FLAMBEAU_FORCE_BATCH_WINDOW]
+class           = "C"
+description     = "Force batch-window timeout even when batch is empty"
+default_state   = "off"
+test_values     = ["unset", "1"]
+models          = ["qwen36-27b-q4_0", "qwen36-35b-a3b-q4_0"]
+topologies      = ["pp2tp2"]
+concurrencies   = [1, 2, 4, 8]
+metrics         = ["tg64_tok_s", "vram_peak_gb"]
+preconditions   = { FLAMBEAU_INFLIGHT_SLOTS = "$N", FLAMBEAU_BATCH_WINDOW_US = "1500" }
+known_result    = "N=1: NULL (cert: FLAMBEAU_FORCE_BATCH_WINDOW.md). Re-cert at full N=[1,2,4,8] sweep."
+notes           = """
+At N=1 the empty-batch timeout never fires. At N=2/4/8 the window gates
+how aggressively the scheduler coalesces — if forcing the timeout
+helps tail latency or hurts throughput, the gate is real. Watch for
+non-monotonic scaling across N (e.g. =1 might help at N=8 but hurt at N=2).
+"""
+
+[var.FLAMBEAU_BATCH_MAX]
+class           = "C"
+description     = "Max batch size cap on scheduler dispatch"
+default_state   = "unbounded"
+test_values     = ["unset", "2", "4", "8"]          # full cap range against slots=8
+models          = ["qwen36-27b-q4_0", "qwen36-35b-a3b-q4_0"]
+topologies      = ["pp2tp2"]
+concurrencies   = [1, 2, 4, 8]
+metrics         = ["tg64_tok_s", "vram_peak_gb"]
+# slots=N scales VRAM with the workload size; the harness sets
+# FLAMBEAU_INFLIGHT_SLOTS = current N at cell-spawn time when the spec's
+# precondition value is the literal string "$N" (see harness $N expansion).
+preconditions   = { FLAMBEAU_INFLIGHT_SLOTS = "$N" } # cap effect requires slots ≥ test_values max
+known_result    = "N=1: NULL (cert: FLAMBEAU_BATCH_MAX.md). Re-cert at full N=[1,2,4,8]."
+notes           = """
+At N=1 the cap never engages. At N=8/slots=8: cap=2 forces 4 separate
+scheduler dispatches per round; cap=8 = one round. Identifies the
+per-dispatch overhead inflection point (where bigger cap stops helping).
+"""
+
+[var.FLAMBEAU_NO_FAST_PATH]
+class           = "D"   # debug toggle, not a user-facing config
+description     = "Disable scheduler fast path (force full coalescing logic)"
+default_state   = "fast-path-on"
+test_values     = ["unset", "1"]
+models          = ["qwen36-27b-q4_0", "qwen36-35b-a3b-q4_0"]
+topologies      = ["pp2tp2"]
+concurrencies   = [1, 2, 4, 8]
+metrics         = ["tg64_tok_s", "vram_peak_gb"]
+# slots=N scales VRAM with the workload size; the harness sets
+# FLAMBEAU_INFLIGHT_SLOTS = current N at cell-spawn time when the spec's
+# precondition value is the literal string "$N" (see harness $N expansion).
+preconditions   = { FLAMBEAU_INFLIGHT_SLOTS = "$N" }
+known_result    = "N=1: -2.0% loss (cert: FLAMBEAU_NO_FAST_PATH.md). Re-cert at full N=[1,2,4,8]."
+notes           = """
+At higher N the fast-path skip likely costs more (coalescing work
+amplifies per dispatch). Verify the gate's slow path scales worse
+under load — if so, dead path; if it actually helps at N=8, keep.
+"""
+
+
+# ─────────────────────────────────────────────────────────────────────
+# Class B — graph capture (CLAUDE.md memory: null-to-negative on gfx906)
+# ─────────────────────────────────────────────────────────────────────
+
+[var.FLAMBEAU_DECODE_GRAPH]
+class           = "B"
+description     = "Capture decode loop into HIP graph"
+default_state   = "off"
+test_values     = ["unset", "1"]
+models          = ["qwen35-9b-q4_1", "qwen36-27b-q4_0", "qwen36-35b-a3b-q4_0"]
+topologies      = ["pp4", "tp2", "pp2tp2"]
+metrics         = ["tg64_tok_s"]
+known_result    = "Hip-graph capture on gfx906 = null to slightly negative (CLAUDE.md memory)"
+notes           = """
+Single confirmation cert across the live model/topology matrix, then
+delete the var. Memory says don't propose this as a perf win on MI50.
+"""
+
+[var.FLAMBEAU_ASYNC_GRAPH]
+class           = "B"
+description     = "Async graph capture (V2.26.a-i5c experiment)"
+default_state   = "off"
+test_values     = ["unset", "1"]
+models          = ["qwen36-27b-q4_0", "qwen36-35b-a3b-q4_0"]
+topologies      = ["pp4", "pp2tp2"]
+metrics         = ["tg64_tok_s"]
+notes           = "Same expected outcome as DECODE_GRAPH. Confirm null and delete."
+
+[var.FLAMBEAU_ASYNC_UBATCH]
+class           = "B"
+description     = "Async ubatch in PP forward"
+default_state   = "off"
+test_values     = ["unset", "1"]
+models          = ["qwen36-27b-q4_0", "qwen36-35b-a3b-q4_0"]
+topologies      = ["pp2tp2"]
+concurrencies   = [1, 2, 4, 8]
+metrics         = ["tg64_tok_s", "vram_peak_gb"]
+# slots=N scales VRAM with the workload size; the harness sets
+# FLAMBEAU_INFLIGHT_SLOTS = current N at cell-spawn time when the spec's
+# precondition value is the literal string "$N" (see harness $N expansion).
+preconditions   = { FLAMBEAU_INFLIGHT_SLOTS = "$N" }
+known_result    = "N=1: NULL on 27b/35b (cert: FLAMBEAU_ASYNC_UBATCH.md). Re-cert on 9B at full N."
+notes           = "Async ubatch overlaps PP stages — win shows up under concurrent prefill load."
+
+
+# ─────────────────────────────────────────────────────────────────────
+# Class A — suspect dead (verify-then-delete)
+# ─────────────────────────────────────────────────────────────────────
+
+[var.FLAMBEAU_KV]
+class           = "C"   # reclassified after code-read 2026-05-05
+description     = "KV layout selector — Q8 vs F16 KV cache at session ctor"
+default_state   = "f16"
+test_values     = []    # NO BENCH: already certed (quality cert + perf in MEMORY)
+models          = []
+topologies      = []
+metrics         = []
+known_result    = """
+Live production gate. Read at every Session ctor (session.rs:382, 494).
+Q8 KV quality certed for Qwen3.6-35B-A3B (certs/quality/...q8_kv.json).
+~2× HBM saving on decode. This is NOT a debug var — it's a runtime
+layout choice that should migrate to a typed ServeConfig::kv_layout:
+KvLayout enum with --kv-layout {f16|q8} CLI flag.
+"""
+notes           = """
+Migration: keep KvLayout enum; replace KvLayout::from_env() with ctor
+parameter threaded from ServeConfig. Doc-comment at session.rs:50 already
+flags 'env: FLAMBEAU_KV=q8 or kv_layout: KvLayout ctor param' — ctor-param
+path was always the intended endgame.
+"""
+
+
+# ─────────────────────────────────────────────────────────────────────
+# Skipped — already covered or trivial
+# ─────────────────────────────────────────────────────────────────────
+#
+# - FLAMBEAU_VARIANT, FLAMBEAU_BATCHED_DECODE, FLAMBEAU_BATCHED_MMVQ,
+#   FLAMBEAU_GPU_SAMPLER, FLAMBEAU_SPEC_MTP, FLAMBEAU_MTP_BF16,
+#   FLAMBEAU_MOE_SORTED, FLAMBEAU_INFLIGHT_SLOTS, FLAMBEAU_BATCH_WINDOW_US,
+#   FLAMBEAU_TRACE_BATCH, FLAMBEAU_PREFIX_CACHE, FLAMBEAU_PREFIX_CACHE_MAX_GB
+#   -> measured in MEMORY.md / certs/perf/. Reference, do not re-run.
+#
+# - All *_DUMP / *_PROBE / DEBUG_TOOL_RAW / HOST_PROFILE / PROFILE_DECODE /
+#   GRAPH_TRACE / LOAD_TRACE / DUMP_RAW_REQ / DUMP_PROMPT /
+#   PARITY_LAYER_DUMP / PARITY_TOPK_LOGITS / KV_PROJ_DUMP / KV_ROPE_DUMP /
+#   AR_DUMP / STAGE_ENTRY_DUMP / BATCHED_DECODE_DUMP / LAYER_STATE_DUMP /
+#   PP_PROBE / TP_PROBE / TP_LAYER0_BISECT / TP_LAYER_LIMIT
+#   -> Class D, zero-impact-when-unset. No measurement; migrate to
+#      `tracing` + single FLAMBEAU_DEBUG_DUMP_DIR under `dev-trace` feature.
+#
+# - All *_GGUF, BENCH_*, PROFILE_*, A_*, B_*, AB_*, RESULT_JSON,
+#   MTP_TEST_*, LOB_*, FUSE_AB_ONLY, AB_ONLY, PERF_AB_TOKENS, TG_LEN,
+#   TOPOLOGY_*, TEST_*, PREFILL_L, PREFILL_ONLY, DECODE_ONLY, LONG_TEXT,
+#   PP_LAYERS, PP_RANKS, TP_RANKS, TP_DEVICES, MESH_RANKS, U_LANES,
+#   HYBRID, HYBRID_DEVICES, MTP_BASE, MTP_HEAD, MTP_PROMPT,
+#   MTP_ACCEPT_STEPS, MTP_KV_ACCUM, MTP_PREFILL_PRIME
+#   -> test/bench/example harness inputs. Move into cfg(test) helpers
+#      or a bench-config struct; not part of runtime API surface.
+#
+# - ROCM_PATH, HIP_OFFLOAD_ARCH, HIP_SKIP_BUILD, ROCPROFV3
+#   -> external toolchain pointers. Keep as-is.
+#
+# - FLAMBEAU_CTX_CAP, FLAMBEAU_MAX_CTX, FLAMBEAU_DEFAULT_SYSTEM,
+#   FLAMBEAU_PREFILL_UBATCH, FLAMBEAU_MAX_QUEUE_DEPTH,
+#   FLAMBEAU_EMBEDDING_MAX_TOKENS
+#   -> Class C, calculable VRAM/perf relationships. No bench needed;
+#      migrate directly to ServeConfig fields with documented defaults.

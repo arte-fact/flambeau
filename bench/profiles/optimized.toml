@@ -1,0 +1,225 @@
+# Optimized server-config profile — best-known FLAMBEAU_* env baseline
+# for `flambeau serve`, derived ENTIRELY from measured certs and
+# accumulated memory entries. Each setting in [env] cites its
+# evidence in [provenance].
+#
+# This file has two purposes:
+#   1. **Production reference** — the canonical "run flambeau like this"
+#      env. Source it before `flambeau serve` and you're at the
+#      best-known config we have data for.
+#   2. **Bench baseline** — `scripts/bench/run_env_impact.py --profile`
+#      uses this as the cell baseline so subsequent var sweeps measure
+#      against a known-good config rather than arbitrary defaults.
+#      Critical for scheduler/batching vars whose effect only appears
+#      under N>1 concurrent load + INFLIGHT_SLOTS≥2 + BATCHED_DECODE=1.
+#
+# When this profile is updated, every cert in certs/env_impact/ that
+# was measured against the previous profile becomes potentially stale.
+# Re-run affected sweeps before relying on old verdicts.
+#
+# **Limitations:** measured on Qwen3.5/Qwen3.6 family on gfx906 (MI50),
+# pp4 / tp2 / pp2tp2 topologies. Other archs / topologies may want
+# different settings; treat this as the gfx906 baseline, not universal.
+
+# ---------------------------------------------------------------------
+# [env] — the env vars to set when invoking `flambeau serve`.
+# Comment out a key to leave the var unset (system default).
+# ---------------------------------------------------------------------
+[env]
+
+# GPU sampler — runs top-K + softmax + apply-penalties on device.
+# **Win on every cell measured.** Drops chat sampler cost from
+# ~12 ms/token (CPU O(V log V) sort) to ~0 ms/token.
+FLAMBEAU_GPU_SAMPLER = "1"
+
+# Batched-decode scheduler — co-batches concurrent decode steps via
+# the scheduler. Required for N>1 concurrent throughput; null overhead
+# at N=1. Together with FLAMBEAU_INFLIGHT_SLOTS, governs concurrency.
+FLAMBEAU_BATCHED_DECODE = "1"
+
+# Inflight slot pool — number of concurrently-active sessions the
+# server tracks. 4 is a reasonable serving default. Lower (1–2) for
+# single-user / interactive; higher (8) for multi-tenant prod.
+# **VRAM-linear** with this value: each slot allocates its own
+# KV cache + decode scratch. Pick lowest value that meets your
+# expected concurrent-user count.
+FLAMBEAU_INFLIGHT_SLOTS = "4"
+
+# Prefill chunk size — tokens per forward in chunked prefill. 512 is
+# the default and is adequate for prompts up to ~16k. Smaller values
+# (256) reduce TTFT for short prompts at slight throughput cost.
+FLAMBEAU_PREFILL_UBATCH = "512"
+
+# Tracing level — INFO is verbose for serving; WARN keeps the log
+# readable. The harness flips this to INFO during the sweep so cert
+# logs capture per-call telemetry.
+RUST_LOG = "warn"
+
+
+# ---------------------------------------------------------------------
+# [provenance] — evidence trail per env-key. Each setting in [env]
+# above must have an entry here, citing the cert(s) or memory entry
+# that justifies the choice.
+# ---------------------------------------------------------------------
+[provenance]
+FLAMBEAU_GPU_SAMPLER = """
+Sampler-D3 Phase A+B (memory): 35.6 → 58 t/s sampled chat = 1.63×
+on Qwen3.6-35B-A3B / TP2 / 4×MI50, output coherent, no quality
+regression. Sampler-D4 (penalty kernel): penalty-active sampled chat
+matches no-penalty speed (57.3 ≈ 57.2 t/s). On a chat-style request
+mix the gain is large; on greedy decode it's a no-op (no-op cost).
+"""
+FLAMBEAU_BATCHED_DECODE = """
+P2.9b (memory, 2026-04-30): full continuous-batching slice.
+Live tested 9B/N=2: PP 1.18× / TP2 1.21× / pp2tp2 1.15×.
+35B-A3B Q4_0 / pp2tp2 / N=2: 1.30× speedup vs serial.
+Zero overhead at N=1 (the path engages only when ≥1 inflight slot
+is busy). Always-on is safe.
+"""
+FLAMBEAU_INFLIGHT_SLOTS = """
+Multi-slot pool shipped P2.9b-i1 (memory, 2026-04-30): pool sized
+by FLAMBEAU_INFLIGHT_SLOTS, each slot is its own session +
+KvCache + scratch. 4 = serving default. VRAM scales linearly with
+this knob — for a 35B-A3B model on 4×16GB, INFLIGHT_SLOTS=4 fits;
+INFLIGHT_SLOTS=8 may OOM at long contexts.
+"""
+FLAMBEAU_PREFILL_UBATCH = """
+Default in scripts/bench/run_matrix.py and existing bench/server_smoke.sh
+configs. Not yet impact-audited; flagged for future env-impact run.
+512 = reasonable balance of TTFT vs throughput for prompts ≤16k.
+"""
+
+
+# ---------------------------------------------------------------------
+# [opt_in] — settings that pay off only under specific conditions.
+# Don't enable globally; flip per-deployment when the condition matches.
+# ---------------------------------------------------------------------
+[opt_in]
+FLAMBEAU_KV = """
+Set to "q8" when memory-pressured. ~2× HBM saving on KV cache during
+decode. Quality cert exists for Qwen3.6-35B-A3B-UD-Q4_K_S
+(certs/quality/Qwen3.6-35B-A3B-UD-Q4_K_S_q8_kv.json): delta-perplexity
+≤ 0.5%. Default ("f16") gives the canonical reference quality.
+"""
+FLAMBEAU_PREFIX_CACHE = """
+Set to "1" for chat-style workloads (multi-turn same-system-prompt).
+Caches prompt-prefix KV across requests. Off by default; not yet
+impact-audited under concurrent load.
+"""
+FLAMBEAU_PREFIX_CACHE_MAX_GB = """
+Cap on the prefix-cache LRU size, in GB. Default 2 (set when
+FLAMBEAU_PREFIX_CACHE=1 is enabled). Tune to free VRAM minus model + KV.
+"""
+
+
+# ---------------------------------------------------------------------
+# [do_not_set] — these were measured net-negative or broken on this
+# rig. Leave UNSET. Each entry cites the cert that disqualifies it.
+# ---------------------------------------------------------------------
+[do_not_set]
+FLAMBEAU_DECODE_GRAPH = """
+HALT-BROKEN. 3/9 cells crash on hybrid (pp2tp2) topology, every
+model size: hipModuleLaunchKernel: invalid argument inside
+gdn (TP) attn_norm + quant. Other 6 cells null at best.
+Cert: certs/env_impact/FLAMBEAU_DECODE_GRAPH.md
+"""
+FLAMBEAU_TP_BATCHED = """
+KEEP-DEFAULT (already ON when unset). The =0 opt-out is a 13×
+prefill regression (149s vs 11s on Qwen3.6-27B-Q4_0/tp2) with
+unchanged decode rate and bit-identical output text. The slow
+fall-back path is purely dead.
+Cert: certs/env_impact/FLAMBEAU_TP_BATCHED.md
+"""
+FLAMBEAU_Q8_0_MMVQ_T128 = """
+KEEP-DEFAULT. =on is -4.8% / -7.0% on Q8_0 across pp4 / tp2.
+The T=128 latency-hiding lever (was a perf claim per c9 cert) is
+now net-negative on Qwen3.6-27B-Q8_0.
+Cert: certs/env_impact/FLAMBEAU_Q8_0_MMVQ_T128.md
+"""
+FLAMBEAU_NO_FAST_PATH = """
+Debug-only. =1 is -2.0% with bit-identical output. The slow path
+is purely a debug branch.
+Cert: certs/env_impact/FLAMBEAU_NO_FAST_PATH.md
+"""
+FLAMBEAU_DENSE_GATE_UP = """
+Don't set =unfused. HALT-DIVERGENT: produces different output text
+at greedy/seed=0 on qwen36-27b-q4_0/tp2 (correctness bug in unfused
+TP2 path). Other 3 cells null. Default (fused) is correct.
+Cert: certs/env_impact/FLAMBEAU_DENSE_GATE_UP.md
+"""
+
+
+# ---------------------------------------------------------------------
+# [delete_candidates] — gates confirmed zero-impact across all
+# measured cells (ALL cells null in their cert). Default behavior is
+# correct; the gate exists in code but delivers nothing. Input list
+# for the env-purge refactor: bake default and remove the
+# FLAMBEAU_* read site.
+# ---------------------------------------------------------------------
+[delete_candidates]
+gates = [
+    "FLAMBEAU_MBATCH",
+    "FLAMBEAU_BATCH_MAX",
+    "FLAMBEAU_AR_FUSE_Q8_1",
+    "FLAMBEAU_ASYNC_UBATCH",
+    "FLAMBEAU_Q4_0_GU_T128",
+    "FLAMBEAU_GDN_NO_BATCHED",
+    "FLAMBEAU_SSM_OUT_F16_DST",
+    "FLAMBEAU_Q4_0_GU_WARPCOOP",
+    "FLAMBEAU_GDN_QKV_FUSE_Q8_0",
+    "FLAMBEAU_Q8_0_GU_T128_VDR2",
+    "FLAMBEAU_FORCE_BATCH_WINDOW",
+    "FLAMBEAU_MOE_SORTED",          # legacy compat shortcut for MOE_VARIANT=r4 (a confirmed loser)
+]
+caveat = """
+Several of these (MBATCH, BATCH_MAX, FORCE_BATCH_WINDOW,
+GDN_NO_BATCHED) are scheduler-class vars and were only measured at
+N=1 single-stream load in the 2026-05-05 sweep. If a future
+concurrent-N sweep against this profile shows non-null behavior,
+move them out of this list.
+"""
+
+
+# ---------------------------------------------------------------------
+# [dispatch_table_candidates] — measured win/loss varies by
+# (model, topology); not safe to default-bake. Belongs in
+# `dispatch/<backend>/<arch>.toml` as per-shape rows or in
+# `.local.toml` autotuner output (T-track). NOT in the env layer.
+# ---------------------------------------------------------------------
+[dispatch_table_candidates]
+QKV_FUSED = """
+Wins +2.1% on qwen35-9b-q4_1/pp2tp2, loses -3.6% on
+qwen35-9b-q4_1/pp4. Null on the other 7 cells.
+Cert: certs/env_impact/FLAMBEAU_QKV_FUSED.md
+"""
+KV_F16_DST = """
+Loses -2.8% on qwen36-27b-q4_0/tp2 when fusion off; null elsewhere.
+Default (on) is correct global. Possible TP2-only dispatch row.
+Cert: certs/env_impact/FLAMBEAU_KV_F16_DST.md
+"""
+ASYNC_GRAPH = """
+Loses -2.4% on qwen36-35b-a3b-q4_0/pp4; null elsewhere. Doesn't
+crash like DECODE_GRAPH but never wins.
+Cert: certs/env_impact/FLAMBEAU_ASYNC_GRAPH.md
+"""
+Q8_0_MMVQ_T128_VDR2 = """
+3-way [unset, off, on] test: =off is -5.1% on 27b-q8_0/tp2 vs
+=unset, =on is null. Implies a hidden branch divergence between
+unset and explicit-off; investigate before deleting either.
+Cert: certs/env_impact/FLAMBEAU_Q8_0_MMVQ_T128_VDR2.md
+"""
+MOE_VARIANT = """
+4 alternates [tile8, sorted, r4, turbo] tested across 16 cells; none
+wins anywhere on Qwen3.6-35B-A3B (Q4_0 or Q4_K_S). tile8 (default)
+is correct global. Deleting all 4 alternates is fine; the gate can
+collapse to a no-op once the dispatch table absorbs the variants.
+Cert: certs/env_impact/FLAMBEAU_MOE_VARIANT.md
+"""
+
+
+# ---------------------------------------------------------------------
+# [bash_invocation] — convenience template for sourcing this profile
+# into a shell session before `flambeau serve`. Generate with:
+#   python3 -c "import tomllib; print('\n'.join(f'export {k}={v!r}' \
+#     for k,v in tomllib.loads(open('bench/profiles/optimized.toml').read())['env'].items()))"
+# ---------------------------------------------------------------------
