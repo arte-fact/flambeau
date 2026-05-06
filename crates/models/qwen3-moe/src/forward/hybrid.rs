@@ -1505,18 +1505,21 @@ pub fn forward_decode_batched_hybrid(
         }
 
         // **#275 cycle 4 debug** — `FLAMBEAU_LAYER_STATE_DUMP=1` dumps
-        // per-layer KV cache + GDN state L2 norms for slot 0 on rank 0
-        // at the END OF EACH STAGE. Used to find the first layer whose
-        // state differs between N=1 and N=2 dispatch (since hidden_a
-        // matches at step 1 but step 2 diverges, the corruption is
-        // INSIDE a layer's cache or state, invisible to the visible
-        // hidden output).
+        // per-layer KV cache + GDN state L2 norms for **every slot** on
+        // rank 0 at the END OF EACH STAGE. Used to find the first
+        // (layer, slot) pair whose state differs across N>=2 dispatches
+        // (#16 35B-A3B/pp2tp2 multi-slot race investigation: slot 0 is
+        // bit-deterministic across boots, slot 1 differs — extending
+        // the per-slot dump localises which layer first deviates on
+        // slot 1 between two boots).
         if std::env::var("FLAMBEAU_LAYER_STATE_DUMP").is_ok() {
-            // SAFETY: same disjointness as the other unsafe split above.
-            let sessions_ptr = sessions.as_mut_ptr();
-            let session0: &mut Qwen3MoEHybridSession =
-                unsafe { &mut **sessions_ptr };
-            let stage_caches = &session0.stages[stage_idx].caches[0];
+          // SAFETY: same disjointness as the other unsafe split above —
+          // indices 0..n are distinct so the &mut borrows stay disjoint.
+          let sessions_ptr = sessions.as_mut_ptr();
+          for slot_idx in 0..n {
+            let session_s: &mut Qwen3MoEHybridSession =
+                unsafe { &mut **sessions_ptr.add(slot_idx) };
+            let stage_caches = &session_s.stages[stage_idx].caches[0];
             let stage_dev = stage.sub_cluster.device(0);
             stage_dev.bind()?;
             stage_dev.default_stream().synchronize()?;
@@ -1532,7 +1535,7 @@ pub fn forward_decode_batched_hybrid(
                         let valid_bytes = valid_tokens * per_token_bytes;
                         if valid_bytes == 0 {
                             eprintln!(
-                                "[STATE-DUMP] N={n} stage={stage_idx} layer={global_il} type=fullattn current_tokens=0 (empty)"
+                                "[STATE-DUMP] N={n} slot={slot_idx} stage={stage_idx} layer={global_il} type=fullattn current_tokens=0 (empty)"
                             );
                             continue;
                         }
@@ -1590,7 +1593,7 @@ pub fn forward_decode_batched_hybrid(
                             .sum::<f64>()
                             .sqrt();
                         eprintln!(
-                            "[STATE-DUMP] N={n} stage={stage_idx} layer={global_il} type=fullattn current_tokens={valid_tokens} k_l2={k_l2:.4} v_l2={v_l2:.4} last_k_l2={last_k_l2:.4}"
+                            "[STATE-DUMP] N={n} slot={slot_idx} stage={stage_idx} layer={global_il} type=fullattn current_tokens={valid_tokens} k_l2={k_l2:.4} v_l2={v_l2:.4} last_k_l2={last_k_l2:.4}"
                         );
                     }
                     LayerCache::Gdn(g) => {
@@ -1641,16 +1644,17 @@ pub fn forward_decode_batched_hybrid(
                             .sum::<f64>()
                             .sqrt();
                         eprintln!(
-                            "[STATE-DUMP] N={n} stage={stage_idx} layer={global_il} type=gdn state_l2={state_l2:.4} conv_l2={conv_l2:.4}"
+                            "[STATE-DUMP] N={n} slot={slot_idx} stage={stage_idx} layer={global_il} type=gdn state_l2={state_l2:.4} conv_l2={conv_l2:.4}"
                         );
                     }
                     LayerCache::FullAttnQ8(_) => {
                         eprintln!(
-                            "[STATE-DUMP] N={n} stage={stage_idx} layer={global_il} type=fullattn_q8 (skipped)"
+                            "[STATE-DUMP] N={n} slot={slot_idx} stage={stage_idx} layer={global_il} type=fullattn_q8 (skipped)"
                         );
                     }
                 }
             }
+          } // end per-slot dump loop (FLAMBEAU_LAYER_STATE_DUMP)
         }
 
         // 4. Stage-boundary hand-off: peer_copy stage_idx rank 0's
