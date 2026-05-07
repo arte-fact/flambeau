@@ -425,6 +425,22 @@ impl Qwen3MoEHybridSession {
         Ok(())
     }
 
+    /// Mirror of [`crate::session::Qwen3MoESession::is_q8_kv`] — true
+    /// when any layer cache is `LayerCache::FullAttnQ8`. The hybrid
+    /// batched-prefill driver bails on Q8 KV (`forward_full_attn_layer_tp`
+    /// expects FullAttn; the kernel side has no Q8-prefill variant);
+    /// callers route through the per-token fallback when this returns
+    /// true. Same `--kv q8` rationale as the PP path.
+    pub fn is_q8_kv(&self) -> bool {
+        self.stages.iter().any(|stage| {
+            stage
+                .caches
+                .iter()
+                .flatten()
+                .any(|c| matches!(c, crate::session::LayerCache::FullAttnQ8(_)))
+        })
+    }
+
     /// Dispose every stage's caches. Each stage disposes against its
     /// owning [`Qwen3MoEHybridStage::sub_cluster`]; the model is passed
     /// in so the session can find them.

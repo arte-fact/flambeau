@@ -322,16 +322,19 @@ pub fn forward_full_attn_decode_tp<L: CacheLayout>(
     // hold (local_n_kv_heads * head_dim / 32) Q8_0 blocks.
     let kv_layout = L::NAME;
     if kv_layout == Q8Contig::NAME {
+        // Quantize directly into the cache slot — saves the staged path's
+        // DtoD memcpy (4 launches/layer → 2).
         let kv_elems = local_n_kv_heads * head_dim;
-        quantize_f16_q8_0(ops, stream, scratch.k_f16, scratch.k_q8_0, kv_elems)
-            .context("quantize attn_k → q8_0 (TP)")?;
-        quantize_f16_q8_0(ops, stream, scratch.v_f16, scratch.v_q8_0, kv_elems)
-            .context("quantize attn_v → q8_0 (TP)")?;
-        unsafe {
-            kv_cache
-                .append(device, stream, scratch.k_q8_0, scratch.v_q8_0, 1)
-                .map_err(|e| anyhow::anyhow!("kv_cache.append q8 (TP): {e}"))?;
-        }
+        let (k_dst, v_dst, _) = kv_cache
+            .compute_append_dsts(1)
+            .map_err(|e| anyhow::anyhow!("kv_cache.compute_append_dsts q8 (TP): {e}"))?;
+        quantize_f16_q8_0(ops, stream, scratch.k_f16, k_dst, kv_elems)
+            .context("quantize attn_k → q8_0 in-place (TP)")?;
+        quantize_f16_q8_0(ops, stream, scratch.v_f16, v_dst, kv_elems)
+            .context("quantize attn_v → q8_0 in-place (TP)")?;
+        kv_cache
+            .bump_tail(1)
+            .map_err(|e| anyhow::anyhow!("kv_cache.bump_tail q8 (TP): {e}"))?;
     } else {
         unsafe {
             kv_cache
