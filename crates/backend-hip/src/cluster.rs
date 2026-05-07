@@ -111,6 +111,14 @@ pub struct HipCluster {
     /// to decide whether to engage the BAR1 AllReduce kernel or fall back
     /// to the host-bounce path on a per-rank-pair basis.
     peer_access: Vec<Vec<bool>>,
+    /// Per-rank serialiser around `peer_copy_via_host`. The blocking
+    /// peer-copy uses the shared `bounces[src_rank]` host buffer; two
+    /// concurrent host threads racing through it (e.g. two streaming
+    /// decode requests in pp+tp during their stage-boundary hand-off)
+    /// would clobber each other's data in the bounce. One mutex per
+    /// src_rank keeps cross-rank parallelism while serialising same-rank
+    /// access. Cheap: peer_copy is ~100 µs per stage transition.
+    peer_copy_lock: Vec<std::sync::Mutex<()>>,
 }
 
 impl HipCluster {
@@ -144,12 +152,16 @@ impl HipCluster {
             .map(|_| std::sync::Mutex::new(Vec::new()))
             .collect();
         let peer_access = probe_and_enable_peer_access(&devices)?;
+        let peer_copy_lock = (0..device_ids.len())
+            .map(|_| std::sync::Mutex::new(()))
+            .collect();
         Ok(Self {
             devices,
             bounces,
             aux_streams,
             lane_bounces,
             peer_access,
+            peer_copy_lock,
         })
     }
 
@@ -510,6 +522,19 @@ impl HipCluster {
             <HipDevice as Device>::synchronize(device)?;
             return Ok(());
         }
+
+        // Serialise concurrent peer_copy_via_host calls on the same
+        // src_rank — they share `bounces[src_rank]`. Two host threads
+        // racing here would clobber each other's pinned buffer.
+        // Held across DtoH+sync+HtoD+sync; total ~100 µs per stage
+        // transition. See `peer_copy_lock` field doc.
+        let _bounce_guard = self.peer_copy_lock[src_rank].lock().map_err(|_| {
+            DeviceError::Backend {
+                backend: "hip",
+                code: -1,
+                message: format!("peer_copy_lock[{src_rank}] poisoned"),
+            }
+        })?;
 
         let buf = self.ensure_bounce(src_rank, bytes)?;
 
