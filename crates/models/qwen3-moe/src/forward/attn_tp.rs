@@ -45,7 +45,7 @@ use flambeau_core::{CopyDirection, Device, DevicePtr, Stream};
 use flambeau_ops::hip::{
     attention::{
         attention_decode_f16_slots, attention_decode_f16_splitk, attention_decode_q8_kv,
-        split_q_gate_f16, splitk_chunk_size,
+        attention_decode_q8_kv_splitk, split_q_gate_f16, splitk_chunk_size,
     },
     cast::cast_f32_to_f16,
     mlp::sigmoid_mul_f16,
@@ -345,38 +345,61 @@ pub fn forward_full_attn_decode_tp<L: CacheLayout>(
 
     // 9. Per-rank attention against the local KV slab.
     //
-    // CN-80B-18 — F16 long-ctx: switch to split-K (flash-decoding) at
-    // n_tokens_kv > 256, mirroring the non-TP path. The single-pass
-    // kernel hits 27 % CU occupancy and serialises over n_tokens_kv per
-    // block (2647 µs at ctx=2048 vs 340 µs split-K, 7.78×). Without
+    // CN-80B-18 — long-ctx: switch to split-K (flash-decoding) at
+    // n_tokens_kv > 256. The single-pass kernel hits 27 % CU occupancy
+    // and serialises over n_tokens_kv per block (2647 µs at ctx=2048 vs
+    // 340 µs split-K, 7.78×). Both F16 and Q8 KV layouts have a split-K
+    // variant; partials buffers are layout-independent f32. Without
     // this branch, pp2tp2 / tp2 decode at 5 K ctx ran ~5× slower than
-    // llama.cpp's F16 attention. `FullAttnScratch.splitk_partials_*` is
-    // already sized for `n_heads` (full count) — over-sized for TP but
-    // correct; we pass `local_n_heads` to the dispatcher.
+    // llama.cpp on F16, and Q8 KV stayed on single-pass at every ctx
+    // length (V1-BENCH-#116 follow-up — split-K Q8_0 dequants on the
+    // fly during the chunk pass; combine pass is identical math).
+    // `FullAttnScratch.splitk_partials_*` is sized for `n_heads` (full
+    // count) — over-sized for TP but correct; we pass `local_n_heads`.
     let n_tokens_kv = kv_cache.current_tokens();
     let scale = (head_dim as f32).sqrt().recip();
-    let use_splitk = kv_layout != Q8Contig::NAME
-        && n_tokens_kv > 256;
+    let use_splitk = n_tokens_kv > 256;
     if use_splitk {
         let chunk_size = splitk_chunk_size(n_tokens_kv);
-        attention_decode_f16_splitk(
-            ops,
-            stream,
-            scratch.q_f16,
-            kv_cache.k_buffer(),
-            kv_cache.v_buffer(),
-            scratch.attn_out_f16,
-            scratch.splitk_partials_m,
-            scratch.splitk_partials_s,
-            scratch.splitk_partials_o,
-            local_n_heads,
-            local_n_kv_heads,
-            head_dim,
-            n_tokens_kv,
-            chunk_size,
-            scale,
-        )
-        .context("attention_decode_f16_splitk (TP)")?;
+        if kv_layout == Q8Contig::NAME {
+            attention_decode_q8_kv_splitk(
+                ops,
+                stream,
+                scratch.q_f16,
+                kv_cache.k_buffer(),
+                kv_cache.v_buffer(),
+                scratch.attn_out_f16,
+                scratch.splitk_partials_m,
+                scratch.splitk_partials_s,
+                scratch.splitk_partials_o,
+                local_n_heads,
+                local_n_kv_heads,
+                head_dim,
+                n_tokens_kv,
+                chunk_size,
+                scale,
+            )
+            .context("attention_decode_q8_kv_splitk (TP)")?;
+        } else {
+            attention_decode_f16_splitk(
+                ops,
+                stream,
+                scratch.q_f16,
+                kv_cache.k_buffer(),
+                kv_cache.v_buffer(),
+                scratch.attn_out_f16,
+                scratch.splitk_partials_m,
+                scratch.splitk_partials_s,
+                scratch.splitk_partials_o,
+                local_n_heads,
+                local_n_kv_heads,
+                head_dim,
+                n_tokens_kv,
+                chunk_size,
+                scale,
+            )
+            .context("attention_decode_f16_splitk (TP)")?;
+        }
     } else if kv_layout == Q8Contig::NAME {
         attention_decode_q8_kv(
             ops, stream, scratch.q_f16,

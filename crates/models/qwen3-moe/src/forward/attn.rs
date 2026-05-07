@@ -530,13 +530,12 @@ pub fn forward_full_attn_decode<L: CacheLayout>(
     // serialises over n_tokens_kv per block; at n_tokens=2048 that's 2647 µs
     // vs split-K's 340 µs (7.78×). FLAMBEAU_VARIANT=baseline opts out.
     //
-    // V1-BENCH-#116 — split-K is F16-only; Q8Contig falls through to the
-    // single-pass `attention_decode_q8_kv` kernel.
+    // V1-BENCH-#116 follow-up — split-K now exists for both F16 and Q8 KV.
+    // The Q8 variant dequants on the fly during the chunk pass; combine
+    // pass is layout-agnostic (operates on f32 partials).
     let n_tokens_kv = kv_cache.current_tokens();
     let scale = (head_dim as f32).sqrt().recip();
-    let use_splitk = kv_layout == F16Contig::NAME
-        && slots.is_none()
-        && n_tokens_kv > 256;
+    let use_splitk = slots.is_none() && n_tokens_kv > 256;
     if use_splitk {
         let chunk_size = flambeau_ops::hip::attention::splitk_chunk_size(n_tokens_kv);
         let n_chunks = n_tokens_kv.div_ceil(chunk_size);
@@ -544,24 +543,45 @@ pub fn forward_full_attn_decode<L: CacheLayout>(
             n_chunks <= MAX_SPLITK_CHUNKS,
             "split-K n_chunks={n_chunks} exceeds scratch budget MAX={MAX_SPLITK_CHUNKS}"
         );
-        flambeau_ops::hip::attention::attention_decode_f16_splitk(
-            ops,
-            stream,
-            scratch.q_f16,
-            kv_cache.k_buffer(),
-            kv_cache.v_buffer(),
-            scratch.attn_out_f16,
-            scratch.splitk_partials_m,
-            scratch.splitk_partials_s,
-            scratch.splitk_partials_o,
-            n_heads,
-            n_kv_heads,
-            head_dim,
-            n_tokens_kv,
-            chunk_size,
-            scale,
-        )
-        .context("attention_decode_f16_splitk")?;
+        if kv_layout == Q8Contig::NAME {
+            flambeau_ops::hip::attention::attention_decode_q8_kv_splitk(
+                ops,
+                stream,
+                scratch.q_f16,
+                kv_cache.k_buffer(),
+                kv_cache.v_buffer(),
+                scratch.attn_out_f16,
+                scratch.splitk_partials_m,
+                scratch.splitk_partials_s,
+                scratch.splitk_partials_o,
+                n_heads,
+                n_kv_heads,
+                head_dim,
+                n_tokens_kv,
+                chunk_size,
+                scale,
+            )
+            .context("attention_decode_q8_kv_splitk")?;
+        } else {
+            flambeau_ops::hip::attention::attention_decode_f16_splitk(
+                ops,
+                stream,
+                scratch.q_f16,
+                kv_cache.k_buffer(),
+                kv_cache.v_buffer(),
+                scratch.attn_out_f16,
+                scratch.splitk_partials_m,
+                scratch.splitk_partials_s,
+                scratch.splitk_partials_o,
+                n_heads,
+                n_kv_heads,
+                head_dim,
+                n_tokens_kv,
+                chunk_size,
+                scale,
+            )
+            .context("attention_decode_f16_splitk")?;
+        }
     } else if kv_layout == Q8Contig::NAME {
         attention_decode_q8_kv(
             ops,
@@ -1889,13 +1909,12 @@ pub fn forward_dense_attn_decode<L: CacheLayout>(
         }
     }
 
-    // 7. Attention decode. V1-BENCH-#116 — F16: split-K when long, else
-    // single-pass; Q8: single-pass attention_decode_q8_kv.
+    // 7. Attention decode. V1-BENCH-#116 follow-up — both F16 and Q8 KV
+    // layouts have a split-K (flash-decoding) variant; combine pass is
+    // f32 partials, layout-agnostic.
     let n_tokens_kv = kv_cache.current_tokens();
     let scale = (head_dim as f32).sqrt().recip();
-    let use_splitk = kv_layout == F16Contig::NAME
-        && slots.is_none()
-        && n_tokens_kv > 256;
+    let use_splitk = slots.is_none() && n_tokens_kv > 256;
     if use_splitk {
         let chunk_size = flambeau_ops::hip::attention::splitk_chunk_size(n_tokens_kv);
         let n_chunks = n_tokens_kv.div_ceil(chunk_size);
@@ -1903,14 +1922,25 @@ pub fn forward_dense_attn_decode<L: CacheLayout>(
             n_chunks <= MAX_SPLITK_CHUNKS,
             "split-K n_chunks={n_chunks} exceeds scratch budget MAX={MAX_SPLITK_CHUNKS}"
         );
-        flambeau_ops::hip::attention::attention_decode_f16_splitk(
-            ops, stream,
-            scratch.q_f16, kv_cache.k_buffer(), kv_cache.v_buffer(),
-            scratch.attn_out_f16,
-            scratch.splitk_partials_m, scratch.splitk_partials_s, scratch.splitk_partials_o,
-            n_heads, n_kv_heads, head_dim, n_tokens_kv, chunk_size, scale,
-        )
-        .context("dense attention_decode_f16_splitk")?;
+        if kv_layout == Q8Contig::NAME {
+            flambeau_ops::hip::attention::attention_decode_q8_kv_splitk(
+                ops, stream,
+                scratch.q_f16, kv_cache.k_buffer(), kv_cache.v_buffer(),
+                scratch.attn_out_f16,
+                scratch.splitk_partials_m, scratch.splitk_partials_s, scratch.splitk_partials_o,
+                n_heads, n_kv_heads, head_dim, n_tokens_kv, chunk_size, scale,
+            )
+            .context("dense attention_decode_q8_kv_splitk")?;
+        } else {
+            flambeau_ops::hip::attention::attention_decode_f16_splitk(
+                ops, stream,
+                scratch.q_f16, kv_cache.k_buffer(), kv_cache.v_buffer(),
+                scratch.attn_out_f16,
+                scratch.splitk_partials_m, scratch.splitk_partials_s, scratch.splitk_partials_o,
+                n_heads, n_kv_heads, head_dim, n_tokens_kv, chunk_size, scale,
+            )
+            .context("dense attention_decode_f16_splitk")?;
+        }
     } else if kv_layout == Q8Contig::NAME {
         attention_decode_q8_kv(
             ops, stream,

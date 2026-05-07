@@ -424,6 +424,94 @@ pub fn attention_decode_q8_kv(
     Ok(())
 }
 
+/// Split-K (flash-decoding) decode attention with Q8_0 KV. Same shape as
+/// [`attention_decode_f16_splitk`] but K and V come from a `KvCache<Q8Contig>`
+/// — dequantised on the fly during the dot product and the V-accumulate.
+/// Closes the long-context Q8↔F16 gap (single-pass `attention_decode_q8_kv`
+/// is the same shape as the single-pass F16 kernel and pays the same 7.78×
+/// occupancy penalty past 256 KV tokens).
+pub fn attention_decode_q8_kv_splitk(
+    reg: &OpsRegistry,
+    stream: &HipStream,
+    q: DevicePtr,
+    k_cache: DevicePtr,
+    v_cache: DevicePtr,
+    out: DevicePtr,
+    partials_m: DevicePtr,
+    partials_s: DevicePtr,
+    partials_o: DevicePtr,
+    n_heads_q: usize,
+    n_heads_kv: usize,
+    head_dim: usize,
+    n_tokens_kv: usize,
+    chunk_size: usize,
+    scale: f32,
+) -> Result<()> {
+    assert!(
+        head_dim == 64 || head_dim == 128 || head_dim == 256,
+        "attention_decode_q8_kv_splitk: head_dim {head_dim} not supported"
+    );
+    assert!(chunk_size > 0);
+
+    let module = reg.expect_module("attention_decode_q8_kv_splitk")?;
+    let k_chunk = module.kernel("flambeau_attention_decode_q8_kv_splitk_chunk")?;
+    let k_combine = module.kernel("flambeau_attention_decode_q8_kv_splitk_combine")?;
+
+    let n_chunks = n_tokens_kv.div_ceil(chunk_size);
+    let n_heads_q_i = n_heads_q as i32;
+    let n_heads_kv_i = n_heads_kv as i32;
+    let head_dim_i = head_dim as i32;
+    let n_tokens_i = n_tokens_kv as i32;
+    let n_chunks_i = n_chunks as i32;
+    let chunk_size_i = chunk_size as i32;
+    let q_ptr: u64 = q.as_usize() as u64;
+    let k_ptr: u64 = k_cache.as_usize() as u64;
+    let v_ptr: u64 = v_cache.as_usize() as u64;
+    let o_ptr: u64 = out.as_usize() as u64;
+    let m_ptr: u64 = partials_m.as_usize() as u64;
+    let s_ptr: u64 = partials_s.as_usize() as u64;
+    let po_ptr: u64 = partials_o.as_usize() as u64;
+    let scale_f = scale;
+
+    let mut a1 = KernelArgs::new();
+    a1.push(&q_ptr);
+    a1.push(&k_ptr);
+    a1.push(&v_ptr);
+    a1.push(&m_ptr);
+    a1.push(&s_ptr);
+    a1.push(&po_ptr);
+    a1.push(&n_heads_q_i);
+    a1.push(&n_heads_kv_i);
+    a1.push(&head_dim_i);
+    a1.push(&n_tokens_i);
+    a1.push(&n_chunks_i);
+    a1.push(&chunk_size_i);
+    a1.push(&scale_f);
+    let cfg1 = LaunchCfg {
+        grid: (n_heads_q as u32, n_chunks as u32, 1),
+        block: (head_dim as u32, 1, 1),
+        shared_bytes: 0,
+    };
+    unsafe { k_chunk.launch(stream, cfg1, a1)? };
+
+    let mut a2 = KernelArgs::new();
+    a2.push(&m_ptr);
+    a2.push(&s_ptr);
+    a2.push(&po_ptr);
+    a2.push(&o_ptr);
+    a2.push(&n_heads_q_i);
+    a2.push(&n_chunks_i);
+    a2.push(&head_dim_i);
+    let cfg2 = LaunchCfg {
+        grid: (n_heads_q as u32, 1, 1),
+        block: (head_dim as u32, 1, 1),
+        shared_bytes: 0,
+    };
+    unsafe { k_combine.launch(stream, cfg2, a2)? };
+
+    Ok(())
+}
+
 /// Split the interleaved `(Q, gate)` output of a gated-attention query
 /// projection into two contiguous F16 tensors. Used by Qwen3.5/3.6 full-attn
 /// layers, where the `attn_q` weight projects to `2 * head_dim` per head —
