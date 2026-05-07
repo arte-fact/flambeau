@@ -58,8 +58,8 @@ use flambeau_ops::hip::{
         rmsnorm_f16, rmsnorm_f32, rmsnorm_quant_q8_1,
     },
     qmatmul::{
-        mmvq_q4_0_gate_up, mmvq_q4_0_gate_up_t128, mmvq_q4_0_gate_up_warpcoop64,
-        mmvq_q5_k_r2_f16dst, mmvq_q8_0_gate_up,
+        mmvq_q4_0_gate_up, mmvq_q4_0_gate_up_t128,
+        mmvq_q8_0_gate_up,
     },
     recurrent::{
         gdn_alpha_beta_f32, gdn_split_qkv_f32, gdn_state_step_alphabeta_f32_s128,
@@ -222,13 +222,7 @@ pub fn forward_gdn_decode_tp(
     let baseline = std::env::var("FLAMBEAU_VARIANT").as_deref() == Ok("baseline");
     let dt_q = attn_qkv.dtype;
     let dt_g = attn_gate.dtype;
-    // B5 bisect — FLAMBEAU_GDN_QKV_FUSE_Q8_0=off disables only the fused
-    // attn_qkv+attn_gate Q8_0 kernel path (asymmetric rows). Used to check
-    // whether the bug is in the fused gate+up Q8_0 GDN kernel.
-    let gdn_fuse_q8_0_off =
-        std::env::var("FLAMBEAU_GDN_QKV_FUSE_Q8_0").as_deref() == Ok("off");
     let fuse_qkv_gate_q8_0 = !baseline
-        && !gdn_fuse_q8_0_off
         && dt_q == flambeau_quant::GgmlDType::Q8_0
         && dt_g == flambeau_quant::GgmlDType::Q8_0;
     let fuse_qkv_gate_q4_0 = !baseline
@@ -261,34 +255,7 @@ pub fn forward_gdn_decode_tp(
         // (n_rows_gate == n_rows_up) — symmetric → t128, asymmetric → 256t.
         // GDN's attn_qkv (`local_conv_channels`) ≠ attn_gate
         // (`local_d_inner`) → asymmetric → 256t default.
-        //
-        //   FLAMBEAU_Q4_0_GU_WARPCOOP=on  → 64 t/block (C6 opt-in)
-        //   FLAMBEAU_Q4_0_GU_T128=on      → force 128 t/block
-        //   FLAMBEAU_Q4_0_GU_T128=off     → force 256 t/block
-        //   default                       → shape-aware (above)
-        let use_warpcoop =
-            std::env::var("FLAMBEAU_Q4_0_GU_WARPCOOP").as_deref() == Ok("on");
-        let symmetric = local_conv_channels == local_d_inner;
-        let use_t128 = match std::env::var("FLAMBEAU_Q4_0_GU_T128").as_deref() {
-            Ok("on") => true,
-            Ok("off") => false,
-            _ => symmetric,
-        };
-        if use_warpcoop {
-            mmvq_q4_0_gate_up_warpcoop64(
-                ops,
-                stream,
-                attn_qkv.ptr,
-                attn_gate.ptr,
-                scratch.x_q8_1,
-                scratch.qkv_mixed_f32,
-                scratch.z_f32,
-                local_conv_channels,
-                local_d_inner,
-                hidden,
-            )
-            .context("attn_qkv + attn_gate (TP) fused mmvq_q4_0_warpcoop64")?;
-        } else if use_t128 {
+        if local_conv_channels == local_d_inner {
             mmvq_q4_0_gate_up_t128(
                 ops,
                 stream,
@@ -605,35 +572,19 @@ pub fn forward_gdn_decode_tp(
     // per GDN layer per rank → 48 calls saved doesn't move the needle.
     // Default OFF; opt in via `FLAMBEAU_SSM_OUT_F16_DST=on` to A/B on
     // other models.
-    let ssm_out_f16dst = std::env::var("FLAMBEAU_VARIANT").as_deref() != Ok("baseline")
-        && std::env::var("FLAMBEAU_SSM_OUT_F16_DST").as_deref() == Ok("on")
-        && ssm_out.dtype == flambeau_quant::GgmlDType::Q5K;
-    if ssm_out_f16dst {
-        mmvq_q5_k_r2_f16dst(
-            ops,
-            stream,
-            ssm_out.ptr,
-            scratch.gated_q8_1,
-            partial_attn_out,
-            hidden,
-            local_d_inner,
-        )
-        .context("mmvq_q5_k_r2_f16dst ssm_out (TP)")?;
-    } else {
-        run_mmvq_from_tensor(
-            ops,
-            stream,
-            ssm_out,
-            scratch.gated_q8_1,
-            scratch.ssm_out_f32,
-            hidden,
-            local_d_inner,
-            "ssm_out (TP)",
-        )?;
-        probe_f32!("gdn ssm_out_f32 (pre-cast)", scratch.ssm_out_f32, hidden);
-        cast_f32_to_f16(ops, stream, scratch.ssm_out_f32, partial_attn_out, hidden)
-            .context("cast ssm_out → partial_attn_out (TP)")?;
-    }
+    run_mmvq_from_tensor(
+        ops,
+        stream,
+        ssm_out,
+        scratch.gated_q8_1,
+        scratch.ssm_out_f32,
+        hidden,
+        local_d_inner,
+        "ssm_out (TP)",
+    )?;
+    probe_f32!("gdn ssm_out_f32 (pre-cast)", scratch.ssm_out_f32, hidden);
+    cast_f32_to_f16(ops, stream, scratch.ssm_out_f32, partial_attn_out, hidden)
+        .context("cast ssm_out → partial_attn_out (TP)")?;
 
     Ok(())
 }

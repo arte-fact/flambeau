@@ -1832,34 +1832,7 @@ pub(crate) fn forward_full_attn_layer_tp(
         })
         .collect::<anyhow::Result<_>>()?;
     let probe = std::env::var("FLAMBEAU_TP_PROBE").is_ok();
-    // **TP-perf-c2** — fused AR+RMSNorm+Q8_1 path. NULL on Qwen3.6-27B-Q4_0
-    // (−1.1% vs unfused AR+norm + separate quantize). Default OFF; opt
-    // in via `FLAMBEAU_AR_FUSE_Q8_1=on` to A/B on other models.
-    let use_q8_1_fused_ar = world > 1
-        && cfg.is_dense_ffn()
-        && std::env::var("FLAMBEAU_AR_FUSE_Q8_1").as_deref() == Ok("on");
-    if use_q8_1_fused_ar {
-        let ffn_x_q8_1_ptrs: Vec<DevicePtr> = (0..cluster.ranks())
-            .map(|r| {
-                scratch.per_rank[r]
-                    .layer
-                    .as_ref()
-                    .and_then(|l| l.dense_ffn.as_ref())
-                    .map(|d| d.x_q8_1)
-                    .ok_or_else(|| anyhow!("rank {r}: missing DenseFfnScratch.x_q8_1"))
-            })
-            .collect::<anyhow::Result<_>>()?;
-        ar_residual_rmsnorm_q8_1(
-            ar,
-            scratch,
-            cluster,
-            world,
-            AttnOrFfn::Attn,
-            &post_norm_ptrs,
-            &ffn_x_q8_1_ptrs,
-            cfg.rms_norm_eps,
-        )?;
-    } else if world > 1 {
+    if world > 1 {
         ar_residual_rmsnorm(
             ar,
             scratch,
@@ -1922,7 +1895,7 @@ pub(crate) fn forward_full_attn_layer_tp(
         world
     };
     forward_ffn_block_tp(
-        model, scratch, cluster, &mid_norm_ptrs, il, ffn_world, use_q8_1_fused_ar,
+        model, scratch, cluster, &mid_norm_ptrs, il, ffn_world, false,
     )?;
     if probe {
         let p = scratch.per_rank[0].partial_ffn_out;
@@ -2602,34 +2575,7 @@ pub(crate) fn forward_gdn_layer_tp(
                 .ok_or_else(|| anyhow!("rank {r}: missing LayerForwardScratch"))
         })
         .collect::<anyhow::Result<_>>()?;
-    // **TP-perf-c2** — same dense-FFN gate as the full-attn driver above.
-    // NULL result on Qwen3.6-27B-Q4_0 TP w=2 (-1.1% vs unfused); default
-    // is OFF, opt in via `FLAMBEAU_AR_FUSE_Q8_1=on` to A/B on other models.
-    let use_q8_1_fused_ar = world > 1
-        && cfg.is_dense_ffn()
-        && std::env::var("FLAMBEAU_AR_FUSE_Q8_1").as_deref() == Ok("on");
-    if use_q8_1_fused_ar {
-        let ffn_x_q8_1_ptrs: Vec<DevicePtr> = (0..cluster.ranks())
-            .map(|r| {
-                scratch.per_rank[r]
-                    .layer
-                    .as_ref()
-                    .and_then(|l| l.dense_ffn.as_ref())
-                    .map(|d| d.x_q8_1)
-                    .ok_or_else(|| anyhow!("rank {r}: missing DenseFfnScratch.x_q8_1"))
-            })
-            .collect::<anyhow::Result<_>>()?;
-        ar_residual_rmsnorm_q8_1(
-            ar,
-            scratch,
-            cluster,
-            world,
-            AttnOrFfn::Attn,
-            &post_norm_ptrs,
-            &ffn_x_q8_1_ptrs,
-            cfg.rms_norm_eps,
-        )?;
-    } else if world > 1 {
+    if world > 1 {
         ar_residual_rmsnorm(
             ar,
             scratch,
@@ -2688,7 +2634,7 @@ pub(crate) fn forward_gdn_layer_tp(
         world
     };
     forward_ffn_block_tp(
-        model, scratch, cluster, &mid_norm_ptrs, il, ffn_world, use_q8_1_fused_ar,
+        model, scratch, cluster, &mid_norm_ptrs, il, ffn_world, false,
     )?;
 
     // 4. AR-residual on FFN output (skipped when MoE replicated).

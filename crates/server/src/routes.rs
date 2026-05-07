@@ -816,10 +816,6 @@ impl ServerState {
             // **Cycle 1 optimisation (single-user fast path)** — only
             // sleep on the batching window when there's actually an
             // active OTHER slot that could plausibly join the batch.
-            let window_us: u64 = std::env::var("FLAMBEAU_BATCH_WINDOW_US")
-                .ok()
-                .and_then(|s| s.parse().ok())
-                .unwrap_or(1500);
             let n_others_active = self
                 .slot_in_use
                 .iter()
@@ -829,10 +825,8 @@ impl ServerState {
                         && taken.load(std::sync::atomic::Ordering::Relaxed)
                 })
                 .count();
-            let force_sleep =
-                std::env::var("FLAMBEAU_FORCE_BATCH_WINDOW").is_ok();
-            if window_us > 0 && (n_others_active > 0 || force_sleep) {
-                std::thread::sleep(std::time::Duration::from_micros(window_us));
+            if n_others_active > 0 {
+                std::thread::sleep(std::time::Duration::from_micros(1500));
             }
 
             // **#276 fix** — drain-dispatch-loop with atomic empty-drop.
@@ -856,10 +850,6 @@ impl ServerState {
             // `batched_dispatcher` *while still holding `batched_pending`*.
             // After that, any T2 push observes a clean dispatch lock and
             // its `try_lock` succeeds, making T2 the next leader.
-            let batch_max: usize = std::env::var("FLAMBEAU_BATCH_MAX")
-                .ok()
-                .and_then(|s| s.parse().ok())
-                .unwrap_or(usize::MAX);
             loop {
                 let mut q = self
                     .batched_pending
@@ -877,26 +867,21 @@ impl ServerState {
                 let pending: Vec<PendingDecode> = std::mem::take(&mut *q);
                 drop(q);
                 tr!("DRAIN drained={}", pending.len());
-                let chunk_size = batch_max.max(1).min(pending.len());
                 tracing::info!(
                     target: "server.scheduler",
                     pending = pending.len(),
-                    batch_max = if batch_max == usize::MAX { 0 } else { batch_max },
-                    chunk_size,
                     "scheduler dispatch"
                 );
-                for chunk in pending.chunks(chunk_size) {
-                    let ids: Vec<usize> = chunk.iter().map(|p| p.slot_idx).collect();
-                    tr!("DISPATCH start slots={:?}", ids);
-                    if let Err(e) = self.dispatch_batched_pending(chunk) {
-                        for p in chunk {
-                            let _ = p.response.send(Err(anyhow!(
-                                "batched dispatch failed: {e}"
-                            )));
-                        }
+                let ids: Vec<usize> = pending.iter().map(|p| p.slot_idx).collect();
+                tr!("DISPATCH start slots={:?}", ids);
+                if let Err(e) = self.dispatch_batched_pending(&pending) {
+                    for p in &pending {
+                        let _ = p.response.send(Err(anyhow!(
+                            "batched dispatch failed: {e}"
+                        )));
                     }
-                    tr!("DISPATCH done slots={:?}", ids);
                 }
+                tr!("DISPATCH done slots={:?}", ids);
             }
             // dispatch_lock_opt is None here; explicit release happened
             // inside the loop while holding `batched_pending`.

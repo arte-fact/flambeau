@@ -542,19 +542,11 @@ pub fn mmvq_q8_0_gate_up(
     n_rows_up: usize,
     k: usize,
 ) -> Result<()> {
-    // C9-followup-2: default to t128_vdr2 schedule (same combined lever
-    // that wins +3% on Q8_0 single-row). FLAMBEAU_Q8_0_GU_T128_VDR2=off
-    // reverts to the 256t baseline.
-    let opt_out = std::env::var("FLAMBEAU_Q8_0_GU_T128_VDR2").as_deref() == Ok("off");
-    let (stem, entry, threads) = if opt_out {
-        ("mmvq_q8_0_gate_up_dp4a", "flambeau_mmvq_q8_0_gate_up_dp4a_q8_1", 256u32)
-    } else {
-        (
-            "mmvq_q8_0_gate_up_t128_vdr2",
-            "flambeau_mmvq_q8_0_gate_up_t128_vdr2_q8_1",
-            128u32,
-        )
-    };
+    let (stem, entry, threads) = (
+        "mmvq_q8_0_gate_up_t128_vdr2",
+        "flambeau_mmvq_q8_0_gate_up_t128_vdr2_q8_1",
+        128u32,
+    );
     let module = reg.expect_module(stem)?;
     let kernel = module.kernel(entry)?;
     let n_rows_g = n_rows_gate as i32;

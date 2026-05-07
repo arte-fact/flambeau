@@ -972,24 +972,12 @@ pub fn forward_router_prefill(
 
 /// Routed MoE FFN prefill. Mirrors `forward_moe_ffn_decode` but parametrised
 /// by `n_tokens`; every indexed-MoE op already takes an `n_tokens` arg.
-/// Resolve `FLAMBEAU_MOE_VARIANT` (falling back to `FLAMBEAU_MOE_SORTED=0 → r4`,
-/// else `tile8`). Cached on first call for the lifetime of the process —
-/// env vars don't change under our runtime, and the prefill hot path hit
-/// this twice per layer per token.
+/// MoE prefill variant. Default-baked to `tile8` (the production
+/// winner across every certified cell). Alt variants (`turbo` /
+/// `sorted` / `r4`) and their kernels are slated for deletion in
+/// slice S2; this returns a constant so the dead branches DCE.
 fn moe_variant_cached() -> &'static str {
-    use std::sync::OnceLock;
-    static CACHED: OnceLock<String> = OnceLock::new();
-    CACHED
-        .get_or_init(|| {
-            std::env::var("FLAMBEAU_MOE_VARIANT").ok().unwrap_or_else(|| {
-                if std::env::var("FLAMBEAU_MOE_SORTED").as_deref() == Ok("0") {
-                    "r4".to_string()
-                } else {
-                    "tile8".to_string()
-                }
-            })
-        })
-        .as_str()
+    "tile8"
 }
 
 pub fn forward_moe_ffn_prefill(

@@ -41,7 +41,7 @@ use flambeau_ops::hip::{
     cast::cast_f32_to_f16,
     norm::quantize_f16_q8_1,
     qmatmul::{
-        mmvq_q4_0_gate_up, mmvq_q4_0_gate_up_t128, mmvq_q4_0_gate_up_warpcoop64,
+        mmvq_q4_0_gate_up_t128,
         mmvq_q4_1_gate_up, mmvq_q8_0_gate_up, qmatmul,
     },
     HipStream, OpsRegistry,
@@ -157,59 +157,20 @@ pub fn forward_dense_ffn_decode_tp(
         .context("dense ffn (TP) gate+up fused mmvq_q8_0")?;
     } else if fuse_q4 {
         // Dense FFN gate+up is always symmetric (n_rows_gate == n_rows_up
-        // == local_inter), so the shape-aware default still picks t128
-        // (the cycle-5 win). The env toggles match gdn_tp.rs.
-        let use_warpcoop =
-            std::env::var("FLAMBEAU_Q4_0_GU_WARPCOOP").as_deref() == Ok("on");
-        let symmetric = true; // dense FFN: n_rows_gate == n_rows_up == local_inter
-        let use_t128 = match std::env::var("FLAMBEAU_Q4_0_GU_T128").as_deref() {
-            Ok("on") => true,
-            Ok("off") => false,
-            _ => symmetric,
-        };
-        if use_warpcoop {
-            mmvq_q4_0_gate_up_warpcoop64(
-                ops,
-                stream,
-                ffn_gate.ptr,
-                ffn_up.ptr,
-                scratch.x_q8_1,
-                scratch.gate_f32,
-                scratch.up_f32,
-                local_inter,
-                local_inter,
-                hidden,
-            )
-            .context("dense ffn (TP) gate+up fused mmvq_q4_0_warpcoop64")?;
-        } else if use_t128 {
-            mmvq_q4_0_gate_up_t128(
-                ops,
-                stream,
-                ffn_gate.ptr,
-                ffn_up.ptr,
-                scratch.x_q8_1,
-                scratch.gate_f32,
-                scratch.up_f32,
-                local_inter,
-                local_inter,
-                hidden,
-            )
-            .context("dense ffn (TP) gate+up fused mmvq_q4_0_t128")?;
-        } else {
-            mmvq_q4_0_gate_up(
-                ops,
-                stream,
-                ffn_gate.ptr,
-                ffn_up.ptr,
-                scratch.x_q8_1,
-                scratch.gate_f32,
-                scratch.up_f32,
-                local_inter,
-                local_inter,
-                hidden,
-            )
-            .context("dense ffn (TP) gate+up fused mmvq_q4_0")?;
-        }
+        // == local_inter), so the shape-aware default picks t128.
+        mmvq_q4_0_gate_up_t128(
+            ops,
+            stream,
+            ffn_gate.ptr,
+            ffn_up.ptr,
+            scratch.x_q8_1,
+            scratch.gate_f32,
+            scratch.up_f32,
+            local_inter,
+            local_inter,
+            hidden,
+        )
+        .context("dense ffn (TP) gate+up fused mmvq_q4_0_t128")?;
     } else if fuse_q4_1 {
         // C8-i1 — Q4_1 dense FFN gate+up fusion. Symmetric (both rows =
         // local_inter). One launch instead of two, single Q8_1 activation

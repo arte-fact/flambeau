@@ -1241,23 +1241,16 @@ pub fn indexed_moe_mmvq_q4_k_gate_up(
     //   FLAMBEAU_VARIANT=baseline → unfused scalar
     //   FLAMBEAU_VARIANT=dp4a_r1  → single-row DP4A (prior default)
     //   FLAMBEAU_VARIANT=dp4a_r2  → r2 (half-warp per row)
-    //   FLAMBEAU_MBATCH=1         → llama.cpp-style top_k-warps mbatch (null)
     let variant = std::env::var("FLAMBEAU_VARIANT").ok();
     let force_baseline = variant.as_deref() == Some("baseline");
     let force_dp4a_r1 = variant.as_deref() == Some("dp4a_r1");
     let force_dp4a_r2 = variant.as_deref() == Some("dp4a_r2");
     let force_dp4a_r4 = variant.as_deref() == Some("dp4a_r4");
     let force_dp4a_r8 = variant.as_deref() == Some("dp4a_r8");
-    let mbatch = std::env::var("FLAMBEAU_MBATCH").is_ok();
     let (stem, entry) = if force_baseline {
         (
             "indexed_moe_mmvq_q4_k_gate_up",
             "flambeau_indexed_moe_mmvq_q4_k_gate_up_q8_1",
-        )
-    } else if mbatch {
-        (
-            "indexed_moe_mmvq_q4_k_gate_up_mbatch",
-            "flambeau_indexed_moe_mmvq_q4_k_gate_up_mbatch_q8_1",
         )
     } else if force_dp4a_r1 {
         (
@@ -1310,13 +1303,7 @@ pub fn indexed_moe_mmvq_q4_k_gate_up(
     args.push(&n_tokens_i);
     args.push(&top_k_i);
     args.push(&nb_i);
-    let cfg = if mbatch {
-        LaunchCfg {
-            grid: (n_rows as u32, n_tokens as u32, 1),
-            block: (64, top_k as u32, 1),
-            shared_bytes: 0,
-        }
-    } else if force_dp4a_r8 {
+    let cfg = if force_dp4a_r8 {
         // r8: 8 rows per block via eighth-wave-per-row; grid.x /= 8.
         LaunchCfg {
             grid: ((n_rows as u32).div_ceil(8), (n_tokens * top_k) as u32, 1),

@@ -1172,24 +1172,6 @@ pub fn forward_prefill_pp(
     }
     let max_tokens = scratch.per_rank[0].max_tokens;
 
-    // V2.25.d — opt-in async ubatch path. Requires scratch with
-    // `u_lanes >= 2` (from `new_with_lanes`) and `FLAMBEAU_ASYNC_UBATCH`
-    // set. `FLAMBEAU_UBATCH` controls the ubatch size (defaults to
-    // scratch.max_tokens which keeps behaviour equivalent to sync path).
-    let async_enabled = std::env::var("FLAMBEAU_ASYNC_UBATCH").is_ok();
-    let u_lanes = scratch.per_rank[0].u_lanes();
-    if async_enabled && u_lanes >= 2 {
-        let ubatch_size: usize = std::env::var("FLAMBEAU_UBATCH")
-            .ok()
-            .and_then(|s| s.parse().ok())
-            .unwrap_or(max_tokens);
-        if l > ubatch_size {
-            return forward_prefill_pp_async(
-                model, session, cluster, scratch, tokens, start_position, ubatch_size,
-            );
-        }
-    }
-
     // V1-BENCH-#116 — Q8 KV cache has no batched-prefill kernel
     // (attention_prefill_q8_kv doesn't exist; would need a new flash-tile
     // kernel). For the Q8 path we fall back to driving the prompt one

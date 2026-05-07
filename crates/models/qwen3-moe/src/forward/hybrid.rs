@@ -1143,66 +1143,31 @@ pub fn forward_decode_batched_hybrid(
                         }
                     }
 
-                    let no_batched_gdn =
-                        std::env::var("FLAMBEAU_GDN_NO_BATCHED").is_ok();
-                    if no_batched_gdn {
-                        // Legacy per-slot fallback (kept for A/B regression).
-                        let rank_scratch_ptr: *mut super::tp::RankForwardPrefillScratchTp =
-                            &mut stage_scratch.per_rank[r];
-                        for (s, layer_state) in
-                            layer_states.iter_mut().enumerate()
-                        {
-                            let slot_x_in =
-                                DevicePtr(hidden_a.as_usize() + s * row_bytes);
-                            let slot_partial =
-                                DevicePtr(partial_attn_out.as_usize() + s * row_bytes);
-                            let gdn = unsafe {
-                                (*rank_scratch_ptr).gdn_decode.as_mut().ok_or_else(
-                                    || anyhow!("rank {r}: missing gdn_decode scratch"),
-                                )?
-                            };
-                            super::gdn_tp::forward_gdn_decode_tp(
-                                ops, stream, device, cfg,
-                                attn_norm, attn_qkv, attn_gate,
-                                ssm_alpha, ssm_beta, ssm_a, ssm_dt_bias,
-                                ssm_conv1d, ssm_norm, ssm_out,
-                                *layer_state, gdn,
-                                slot_x_in, slot_partial,
-                                world, kq_replicated,
-                            )
-                            .with_context(|| {
-                                format!(
-                                    "hybrid GDN (no-batched fallback) slot {s} stage {stage_idx} layer {il} rank {r}"
-                                )
-                            })?;
-                        }
-                    } else {
-                        let gdn_batched = stage_scratch.per_rank[r]
-                            .gdn_decode_batched
-                            .as_mut()
-                            .ok_or_else(|| {
-                                anyhow!(
-                                    "rank {r}: missing gdn_decode_batched scratch \
-                                     (cfg.gdn was Some at scratch alloc time?)"
-                                )
-                            })?;
-                        super::gdn_tp::forward_gdn_decode_batched_tp(
-                            ops, stream, device, cfg,
-                            attn_norm, attn_qkv, attn_gate,
-                            ssm_alpha, ssm_beta, ssm_a, ssm_dt_bias,
-                            ssm_conv1d, ssm_norm, ssm_out,
-                            layer_states.as_mut_slice(),
-                            gdn_batched,
-                            hidden_a, partial_attn_out,
-                            n,
-                            world, kq_replicated,
-                        )
-                        .with_context(|| {
-                            format!(
-                                "hybrid GDN batched stage {stage_idx} layer {il} rank {r}"
+                    let gdn_batched = stage_scratch.per_rank[r]
+                        .gdn_decode_batched
+                        .as_mut()
+                        .ok_or_else(|| {
+                            anyhow!(
+                                "rank {r}: missing gdn_decode_batched scratch \
+                                 (cfg.gdn was Some at scratch alloc time?)"
                             )
                         })?;
-                    }
+                    super::gdn_tp::forward_gdn_decode_batched_tp(
+                        ops, stream, device, cfg,
+                        attn_norm, attn_qkv, attn_gate,
+                        ssm_alpha, ssm_beta, ssm_a, ssm_dt_bias,
+                        ssm_conv1d, ssm_norm, ssm_out,
+                        layer_states.as_mut_slice(),
+                        gdn_batched,
+                        hidden_a, partial_attn_out,
+                        n,
+                        world, kq_replicated,
+                    )
+                    .with_context(|| {
+                        format!(
+                            "hybrid GDN batched stage {stage_idx} layer {il} rank {r}"
+                        )
+                    })?;
                 }
             }
 
