@@ -80,17 +80,7 @@ pub fn forward_prefill_hybrid_logits(
     }
     // **AUTO-6e** — batched hybrid prefill for prompts ≥ 8 tokens.
     // Per-token fallback (FLAMBEAU_TP_BATCHED=0) was 13× slower; deleted in S3.
-    //
-    // V1-BENCH-#116 (Phase 3 follow-up) — Q8 KV bypasses batched
-    // prefill: the hybrid batched-prefill kernel chain
-    // (`forward_prefill_tp_batched_layers` → `forward_full_attn_layer_tp`)
-    // has no Q8-aware path. Mirrors the PP fallback at
-    // `pp.rs::is_q8_kv()` — drive the prompt one token at a time
-    // through the decode path, which is layout-generic via
-    // `forward_full_attn_decode_tp::<L: CacheLayout>`. ~10× slower than
-    // batched prefill but correct on `--kv q8 / pp2tp2`. Replace with
-    // a real Q8 batched-prefill kernel under #116 follow-up.
-    if !session.is_q8_kv() && prompt_ids.len() >= 8 {
+    if prompt_ids.len() >= 8 {
         return forward_prefill_hybrid_batched_logits(
             model,
             global_cluster,

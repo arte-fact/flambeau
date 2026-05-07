@@ -512,6 +512,72 @@ pub fn attention_decode_q8_kv_splitk(
     Ok(())
 }
 
+/// Prefill attention with Q8_0 KV cache (oracle path). GQA shape, F16 Q,
+/// Q8_0 K/V, F16 out. Same control flow as [`attention_prefill_f16_slots`]'s
+/// oracle branch (n_q < 4); K/V dequant on the fly during the score and
+/// V-accumulate. Used by the batched-Q8-prefill driver — replaces the
+/// per-token Q8 prefill fallback (~50 ms × n_prompt) with one launch
+/// per layer per ubatch chunk.
+///
+/// Flash-tile-Q8 (BR-tiled, n_q ≥ 4 fast path) is V2 follow-up; this
+/// oracle handles any `n_q_tokens` correctly.
+#[allow(clippy::too_many_arguments)]
+pub fn attention_prefill_q8_kv(
+    reg: &OpsRegistry,
+    stream: &HipStream,
+    q: DevicePtr,
+    k_cache: DevicePtr,
+    v_cache: DevicePtr,
+    out: DevicePtr,
+    n_q_tokens: usize,
+    n_heads_q: usize,
+    n_heads_kv: usize,
+    head_dim: usize,
+    n_k_tokens: usize,
+    q_offset: usize,
+    scale: f32,
+) -> Result<()> {
+    assert!(
+        head_dim == 64 || head_dim == 128 || head_dim == 256,
+        "attention_prefill_q8_kv: head_dim {head_dim} not supported"
+    );
+
+    let module = reg.expect_module("attention_prefill_q8_kv")?;
+    let kernel = module.kernel("flambeau_attention_prefill_q8_kv")?;
+
+    let n_q_i = n_q_tokens as i32;
+    let n_heads_q_i = n_heads_q as i32;
+    let n_heads_kv_i = n_heads_kv as i32;
+    let head_dim_i = head_dim as i32;
+    let n_k_i = n_k_tokens as i32;
+    let q_off_i = q_offset as i32;
+    let scale_f = scale;
+    let q_ptr: u64 = q.as_usize() as u64;
+    let k_ptr: u64 = k_cache.as_usize() as u64;
+    let v_ptr: u64 = v_cache.as_usize() as u64;
+    let o_ptr: u64 = out.as_usize() as u64;
+
+    let mut args = KernelArgs::new();
+    args.push(&q_ptr);
+    args.push(&k_ptr);
+    args.push(&v_ptr);
+    args.push(&o_ptr);
+    args.push(&n_q_i);
+    args.push(&n_heads_q_i);
+    args.push(&n_heads_kv_i);
+    args.push(&head_dim_i);
+    args.push(&n_k_i);
+    args.push(&q_off_i);
+    args.push(&scale_f);
+    let cfg = LaunchCfg {
+        grid: (n_q_tokens as u32, n_heads_q as u32, 1),
+        block: (head_dim as u32, 1, 1),
+        shared_bytes: 0,
+    };
+    unsafe { kernel.launch(stream, cfg, args)? };
+    Ok(())
+}
+
 /// Split the interleaved `(Q, gate)` output of a gated-attention query
 /// projection into two contiguous F16 tensors. Used by Qwen3.5/3.6 full-attn
 /// layers, where the `attn_q` weight projects to `2 * head_dim` per head —

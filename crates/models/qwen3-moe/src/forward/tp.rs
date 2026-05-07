@@ -1150,38 +1150,35 @@ pub fn forward_prefill_tp_batched_layers(
                 let attn_output = find_by_suffix(layer_tensors, il, "attn_output.weight")?;
                 let attn_q_norm = find_by_suffix(layer_tensors, il, "attn_q_norm.weight")?;
                 let attn_k_norm = find_by_suffix(layer_tensors, il, "attn_k_norm.weight")?;
-                let kv_cache = match &mut layer_caches[r][il_cache] {
-                    LayerCache::FullAttn(kv) => kv,
-                    _ => bail!(
-                        "rank {r} layer {il}: full-attn path expects FullAttn cache (got non-FullAttn)"
-                    ),
-                };
                 let full = layer_scratch
                     .full_attn
                     .as_mut()
                     .ok_or_else(|| anyhow!("rank {r}: missing FullAttnPrefillScratch"))?;
-                super::attn_tp::forward_full_attn_prefill_tp(
-                    ops,
-                    stream,
-                    device,
-                    cfg,
-                    attn_norm,
-                    attn_q,
-                    attn_k,
-                    attn_v,
-                    attn_output,
-                    attn_q_norm,
-                    attn_k_norm,
-                    kv_cache,
-                    full,
-                    hidden_a,
-                    partial_attn_out,
-                    n_tokens,
-                    start_position,
-                    world,
-                    kv_replicated,
-                )
-                .with_context(|| format!("full-attn prefill TP layer {il}"))?;
+                match &mut layer_caches[r][il_cache] {
+                    LayerCache::FullAttn(kv) => {
+                        super::attn_tp::forward_full_attn_prefill_tp(
+                            ops, stream, device, cfg,
+                            attn_norm, attn_q, attn_k, attn_v, attn_output,
+                            attn_q_norm, attn_k_norm,
+                            kv, full, hidden_a, partial_attn_out,
+                            n_tokens, start_position, world, kv_replicated,
+                        )
+                        .with_context(|| format!("full-attn prefill TP layer {il}"))?;
+                    }
+                    LayerCache::FullAttnQ8(kv) => {
+                        super::attn_tp::forward_full_attn_prefill_tp(
+                            ops, stream, device, cfg,
+                            attn_norm, attn_q, attn_k, attn_v, attn_output,
+                            attn_q_norm, attn_k_norm,
+                            kv, full, hidden_a, partial_attn_out,
+                            n_tokens, start_position, world, kv_replicated,
+                        )
+                        .with_context(|| format!("full-attn prefill TP layer {il} (q8)"))?;
+                    }
+                    _ => bail!(
+                        "rank {r} layer {il}: full-attn path expects FullAttn or FullAttnQ8 cache"
+                    ),
+                }
             } else {
                 let attn_norm = find_by_suffix(layer_tensors, il, "attn_norm.weight")?;
                 let attn_qkv = find_by_suffix(layer_tensors, il, "attn_qkv.weight")?;

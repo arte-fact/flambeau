@@ -1012,14 +1012,14 @@ pub struct AttnPrefillSlots {
     pub v_append_slot: MemcpySlot,
 }
 
-pub fn forward_full_attn_prefill(
+pub fn forward_full_attn_prefill<L: flambeau_runtime::CacheLayout>(
     ops: &OpsRegistry,
     stream: &HipStream,
     device: &HipDevice,
     cfg: &Qwen3MoEConfig,
     attn_norm: &DeviceTensor,
     weights: &FullAttnWeights,
-    kv_cache: &mut KvCache<flambeau_runtime::F16Contig, HipDevice>,
+    kv_cache: &mut KvCache<L, HipDevice>,
     scratch: &mut FullAttnPrefillScratch,
     x_in: DevicePtr,
     delta_out: DevicePtr,
@@ -1221,7 +1221,25 @@ pub fn forward_full_attn_prefill(
 
     // 7. Append all L tokens to the KV cache.
     // SAFETY: scratch.k_f16 / v_f16 hold `n_tokens * n_kv_heads * head_dim` F16s.
-    if let Some(AttnPrefillSlots { k_append_slot, v_append_slot, .. }) = slots {
+    let kv_layout = L::NAME;
+    if kv_layout == Q8Contig::NAME {
+        // Q8 path: quantise directly into the cache slot. Slots variant
+        // (graph-captured kv_cache_append_hip_slot) is F16-only — Q8
+        // path bypasses graph capture for now (would need a slot-aware
+        // quantize launch).
+        let kv_elems_per_token = n_kv_heads * head_dim;
+        let total_elems = n_tokens * kv_elems_per_token;
+        let (k_dst, v_dst, _) = kv_cache
+            .compute_append_dsts(n_tokens)
+            .map_err(|e| anyhow::anyhow!("kv_cache.compute_append_dsts q8 (PP prefill): {e}"))?;
+        flambeau_ops::hip::norm::quantize_f16_q8_0(ops, stream, scratch.k_f16, k_dst, total_elems)
+            .context("quantize prefill K → q8_0 in-place (PP)")?;
+        flambeau_ops::hip::norm::quantize_f16_q8_0(ops, stream, scratch.v_f16, v_dst, total_elems)
+            .context("quantize prefill V → q8_0 in-place (PP)")?;
+        kv_cache
+            .bump_tail(n_tokens)
+            .map_err(|e| anyhow::anyhow!("kv_cache.bump_tail q8 (PP prefill): {e}"))?;
+    } else if let Some(AttnPrefillSlots { k_append_slot, v_append_slot, .. }) = slots {
         // V2.26.a-i5b — captureable variant: tag each memcpy so dst can
         // be retargeted per-replay via HipGraphExec::set_memcpy_slot.
         unsafe {
@@ -1249,28 +1267,47 @@ pub fn forward_full_attn_prefill(
     // K rows `0..start_position + i + 1`.
     let n_k_tokens = kv_cache.current_tokens();
     let scale = (head_dim as f32).sqrt().recip();
-    let (n_k_slot_opt, q_off_slot_opt) = match slots {
-        Some(s) => (Some(s.n_k_slot), Some(s.q_off_slot)),
-        None => (None, None),
-    };
-    attention_prefill_f16_slots(
-        ops,
-        stream,
-        scratch.q_f16,
-        kv_cache.k_buffer(),
-        kv_cache.v_buffer(),
-        scratch.attn_out_f16,
-        n_tokens,
-        n_heads,
-        n_kv_heads,
-        head_dim,
-        n_k_tokens,
-        start_position,
-        scale,
-        n_k_slot_opt,
-        q_off_slot_opt,
-    )
-    .context("attention_prefill_f16")?;
+    if kv_layout == Q8Contig::NAME {
+        flambeau_ops::hip::attention::attention_prefill_q8_kv(
+            ops,
+            stream,
+            scratch.q_f16,
+            kv_cache.k_buffer(),
+            kv_cache.v_buffer(),
+            scratch.attn_out_f16,
+            n_tokens,
+            n_heads,
+            n_kv_heads,
+            head_dim,
+            n_k_tokens,
+            start_position,
+            scale,
+        )
+        .context("attention_prefill_q8_kv (PP)")?;
+    } else {
+        let (n_k_slot_opt, q_off_slot_opt) = match slots {
+            Some(s) => (Some(s.n_k_slot), Some(s.q_off_slot)),
+            None => (None, None),
+        };
+        attention_prefill_f16_slots(
+            ops,
+            stream,
+            scratch.q_f16,
+            kv_cache.k_buffer(),
+            kv_cache.v_buffer(),
+            scratch.attn_out_f16,
+            n_tokens,
+            n_heads,
+            n_kv_heads,
+            head_dim,
+            n_k_tokens,
+            start_position,
+            scale,
+            n_k_slot_opt,
+            q_off_slot_opt,
+        )
+        .context("attention_prefill_f16")?;
+    }
 
     // 9. Post-attention sigmoid-gate: gated_out = sigmoid(gate) * attn_out,
     // per token. See V1.7.4.b note in the decode path — Qwen3.5/3.6 uses

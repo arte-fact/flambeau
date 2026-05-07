@@ -999,25 +999,6 @@ pub fn forward_prefill_pp(
     }
     let max_tokens = scratch.per_rank[0].max_tokens;
 
-    // V1-BENCH-#116 — Q8 KV cache has no batched-prefill kernel
-    // (attention_prefill_q8_kv doesn't exist; would need a new flash-tile
-    // kernel). For the Q8 path we fall back to driving the prompt one
-    // token at a time through the decode path, which already supports
-    // L: CacheLayout via `forward_full_attn_decode<L>`. Slow (~10× slower
-    // than batched prefill) but correct; lets the chat-slowdown user
-    // flow run end-to-end on Q8 KV. Replace with a real prefill_q8_kv
-    // kernel under #116 follow-up.
-    if session.is_q8_kv() {
-        let mut last_argmax = 0u32;
-        for (i, &tok) in tokens.iter().enumerate() {
-            let pos = start_position + i;
-            let mut decode_scratch = crate::forward::ShardedForwardOneTokenScratch::new(model, cluster)?;
-            last_argmax = forward_one_token_pp(model, session, cluster, &mut decode_scratch, tok, pos)?;
-            decode_scratch.dispose(cluster).ok();
-        }
-        return Ok(last_argmax);
-    }
-
     // V1-BENCH-#111 (2026-04-27) — when scratch is sized below L, transparently
     // chunk: loop sequentially over ubatches of `max_tokens` tokens each. The
     // KV cache + GDN state already thread state via `start_position`, so each

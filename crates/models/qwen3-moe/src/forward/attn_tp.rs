@@ -45,7 +45,8 @@ use flambeau_core::{CopyDirection, Device, DevicePtr, Stream};
 use flambeau_ops::hip::{
     attention::{
         attention_decode_f16_slots, attention_decode_f16_splitk, attention_decode_q8_kv,
-        attention_decode_q8_kv_splitk, split_q_gate_f16, splitk_chunk_size,
+        attention_decode_q8_kv_splitk, attention_prefill_q8_kv, split_q_gate_f16,
+        splitk_chunk_size,
     },
     cast::cast_f32_to_f16,
     mlp::sigmoid_mul_f16,
@@ -480,7 +481,7 @@ pub fn forward_full_attn_decode_tp<L: CacheLayout>(
     reason = "matches super::attn::forward_full_attn_prefill — flat parameter list \
               avoids struct copies on the prefill path."
 )]
-pub fn forward_full_attn_prefill_tp(
+pub fn forward_full_attn_prefill_tp<L: flambeau_runtime::CacheLayout>(
     ops: &OpsRegistry,
     stream: &HipStream,
     device: &HipDevice,
@@ -492,7 +493,7 @@ pub fn forward_full_attn_prefill_tp(
     attn_output: &DeviceTensor,
     attn_q_norm: &DeviceTensor,
     attn_k_norm: &DeviceTensor,
-    kv_cache: &mut KvCache<flambeau_runtime::F16Contig, HipDevice>,
+    kv_cache: &mut KvCache<L, HipDevice>,
     scratch: &mut super::attn::FullAttnPrefillScratch,
     x_in: DevicePtr,
     partial_attn_out: DevicePtr,
@@ -644,13 +645,31 @@ pub fn forward_full_attn_prefill_tp(
     )
     .context("prefill rope K (TP)")?;
 
-    // 8. Append all L tokens to the per-rank KV cache.
-    // SAFETY: scratch.k_f16/v_f16 hold n_tokens * local_n_kv_heads * head_dim F16s;
-    // KV cache was sized for local_n_kv_heads at construction.
-    unsafe {
+    // 8. Append all L tokens to the per-rank KV cache. SAFETY:
+    // scratch.k_f16/v_f16 hold n_tokens * local_n_kv_heads * head_dim F16s;
+    // KV cache was sized for local_n_kv_heads at construction. Q8 path
+    // quantises directly into the cache slot (saves the staged DtoD
+    // memcpy, mirroring the decode path's fused quantize-into-cache).
+    let kv_layout = L::NAME;
+    if kv_layout == Q8Contig::NAME {
+        let kv_elems_per_token = local_n_kv_heads * head_dim;
+        let total_elems = n_tokens * kv_elems_per_token;
+        let (k_dst, v_dst, _) = kv_cache
+            .compute_append_dsts(n_tokens)
+            .map_err(|e| anyhow::anyhow!("kv_cache.compute_append_dsts q8 (TP prefill): {e}"))?;
+        quantize_f16_q8_0(ops, stream, scratch.k_f16, k_dst, total_elems)
+            .context("quantize prefill K → q8_0 in-place (TP)")?;
+        quantize_f16_q8_0(ops, stream, scratch.v_f16, v_dst, total_elems)
+            .context("quantize prefill V → q8_0 in-place (TP)")?;
         kv_cache
-            .append(device, stream, scratch.k_f16, scratch.v_f16, n_tokens)
-            .map_err(|e| anyhow::anyhow!("kv_cache.append (TP prefill, L={n_tokens}): {e}"))?;
+            .bump_tail(n_tokens)
+            .map_err(|e| anyhow::anyhow!("kv_cache.bump_tail q8 (TP prefill): {e}"))?;
+    } else {
+        unsafe {
+            kv_cache
+                .append(device, stream, scratch.k_f16, scratch.v_f16, n_tokens)
+                .map_err(|e| anyhow::anyhow!("kv_cache.append (TP prefill, L={n_tokens}): {e}"))?;
+        }
     }
 
     // 9. Causal prefill attention. n_k_tokens = start_position + L (after
@@ -658,15 +677,26 @@ pub fn forward_full_attn_prefill_tp(
     //    [0..start_position + i + 1].
     let n_k_tokens = kv_cache.current_tokens();
     let scale = (head_dim as f32).sqrt().recip();
-    attention_prefill_f16_slots(
-        ops, stream,
-        scratch.q_f16, kv_cache.k_buffer(), kv_cache.v_buffer(),
-        scratch.attn_out_f16,
-        n_tokens, local_n_heads, local_n_kv_heads, head_dim,
-        n_k_tokens, start_position, scale,
-        None, None,
-    )
-    .context("attention_prefill_f16 (TP)")?;
+    if kv_layout == Q8Contig::NAME {
+        attention_prefill_q8_kv(
+            ops, stream,
+            scratch.q_f16, kv_cache.k_buffer(), kv_cache.v_buffer(),
+            scratch.attn_out_f16,
+            n_tokens, local_n_heads, local_n_kv_heads, head_dim,
+            n_k_tokens, start_position, scale,
+        )
+        .context("attention_prefill_q8_kv (TP)")?;
+    } else {
+        attention_prefill_f16_slots(
+            ops, stream,
+            scratch.q_f16, kv_cache.k_buffer(), kv_cache.v_buffer(),
+            scratch.attn_out_f16,
+            n_tokens, local_n_heads, local_n_kv_heads, head_dim,
+            n_k_tokens, start_position, scale,
+            None, None,
+        )
+        .context("attention_prefill_f16 (TP)")?;
+    }
 
     // 10. Sigmoid-gate (V1.7.4.b — Qwen3.5/3.6 use sigmoid, not SiLU).
     let gated_elems = n_tokens * local_q_width;

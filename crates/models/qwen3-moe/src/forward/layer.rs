@@ -642,51 +642,47 @@ pub fn forward_layer_prefill(
             gdn_state_event,
         )?;
     } else {
-        let LayerCache::FullAttn(kv) = layer_cache else {
-            bail!("layer {il} expected FullAttn cache");
-        };
         let full_attn = scratch
             .full_attn
             .as_mut()
             .context("LayerPrefillScratch.full_attn missing")?;
         // V2.28.b — dispatch on attn variant: Dense (qwen3moe) vs
-        // FullAttn (qwen35moe gated full-attn).
-        match &layer_weights.attn {
-            crate::weights::AttnWeights::Dense(d) => {
+        // FullAttn (qwen35moe gated full-attn). V1-BENCH-#116 follow-up:
+        // FullAttnQ8 cache routes through the same generic `<L>` prefill
+        // function — branches on layout internally.
+        match (&layer_weights.attn, &mut *layer_cache) {
+            (crate::weights::AttnWeights::Dense(d), LayerCache::FullAttn(kv)) => {
                 forward_dense_attn_prefill(
-                    ops,
-                    stream,
-                    device,
-                    cfg,
-                    &layer_weights.attn_norm,
-                    d,
-                    kv,
-                    full_attn,
-                    x_in,
-                    scratch.mid_f16,
-                    n_tokens,
-                    start_position,
+                    ops, stream, device, cfg,
+                    &layer_weights.attn_norm, d, kv, full_attn,
+                    x_in, scratch.mid_f16,
+                    n_tokens, start_position,
                     slots.map(|s| s.full_attn),
                 )?;
             }
-            crate::weights::AttnWeights::FullAttn(fa) => {
+            (crate::weights::AttnWeights::FullAttn(fa), LayerCache::FullAttn(kv)) => {
                 forward_full_attn_prefill(
-                    ops,
-                    stream,
-                    device,
-                    cfg,
-                    &layer_weights.attn_norm,
-                    fa,
-                    kv,
-                    full_attn,
-                    x_in,
-                    scratch.mid_f16,
-                    n_tokens,
-                    start_position,
+                    ops, stream, device, cfg,
+                    &layer_weights.attn_norm, fa, kv, full_attn,
+                    x_in, scratch.mid_f16,
+                    n_tokens, start_position,
                     slots.map(|s| s.full_attn),
                 )?;
             }
-            _ => bail!("layer {il} expected Dense or FullAttn weights"),
+            (crate::weights::AttnWeights::FullAttn(fa), LayerCache::FullAttnQ8(kv)) => {
+                // Q8 path: same fn, monomorphised on Q8Contig. Slots
+                // bypassed — graph capture not yet wired for Q8 append.
+                forward_full_attn_prefill(
+                    ops, stream, device, cfg,
+                    &layer_weights.attn_norm, fa, kv, full_attn,
+                    x_in, scratch.mid_f16,
+                    n_tokens, start_position,
+                    None,
+                )?;
+            }
+            _ => bail!(
+                "layer {il}: weights/cache mismatch (Dense expects FullAttn, FullAttn expects FullAttn or FullAttnQ8)"
+            ),
         }
     }
     flambeau_backend_hip::profile::mark(
