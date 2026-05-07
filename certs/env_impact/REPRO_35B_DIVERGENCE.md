@@ -1,12 +1,12 @@
 # 35B-A3B-Q4_0 / pp2tp2 multi-slot divergence — reproduction
 
-- **Generated:** 2026-05-06T15:11:55+00:00
+- **Generated:** 2026-05-07T08:11:45+00:00
 - **Model:** qwen36-35b-a3b-q4_0 on 0,2,1,3 (pp+tp)
 - **Slots:** 2 | **Concurrent:** 2 | **ctx_cap:** 4096 | **tg_len:** 64 | seed=0
 
 ## Verdict
 
-- **H1-RACE confirmed** — same env, two boots produce different text. There is a true within-env race in the multi-slot decode path.
+- **NO-DIVERGENCE** — could not reproduce. Possible causes: rig state changed, harness cooldown affected FP precision, or the original divergence was an intermittent race.
 
 ## H1 test (same env, two boots)
 
@@ -15,10 +15,10 @@
 | A baseline v1 | 0 | `02a16e1143bcea1f` |  |
 | A baseline v1 | 1 | `02a16e1143bcea1f` |  |
 | B baseline v2 | 0 | `02a16e1143bcea1f` |  |
-| B baseline v2 | 1 | `62b05162c5157215` |  |
+| B baseline v2 | 1 | `02a16e1143bcea1f` |  |
 
 - **A vs B (seed 0) text equal:** `True`
-- **A vs B (seed 1) text equal:** `False`
+- **A vs B (seed 1) text equal:** `True`
 
 ## H2 test (default batched-GDN vs per-token GDN)
 
@@ -72,11 +72,11 @@ At the heart of the scheduler is the `
 **seed=1:**
 
 ```
-The Linux kernel scheduler is a complex subsystem designed to manage the execution of threads across multiple CPU cores efficiently. It operates through a combination of data structures, trigger events, and algorithms that balance fairness, throughput, and power consumption.
+The Linux kernel scheduler is a complex subsystem designed to manage the execution of threads across multiple CPU cores efficiently. It operates through a combination of data structures, trigger events, and algorithms that balance fairness, throughput, and real-time requirements.
 
 ### Data Structures and Run Queues
 
-At the heart of the scheduler is the `struct
+At the heart of the scheduler is the `
 ```
 
 ### C_per_token_gdn  env_extras={'FLAMBEAU_GDN_NO_BATCHED': '1'}
@@ -94,9 +94,9 @@ At the heart of the scheduler is the `
 **seed=1:**
 
 ```
-The Linux kernel scheduler is a complex subsystem designed to manage the execution of threads across multiple CPU cores efficiently. It operates through a combination of data structures, trigger events, and algorithms that balance fairness, throughput, and real-time requirements.
+The Linux kernel scheduler is a complex subsystem designed to manage the executionuser space threads across multiple CPU cores efficiently. It operates through a combination of data structures, trigger events, and algorithms that balance fairness, throughput, and real-time requirements.
 
 ### Data Structures and Run Queues
 
-At the heart of the scheduler is the `
+At the core of the scheduler is the
 ```

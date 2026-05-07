@@ -769,6 +769,12 @@ impl ServerState {
         }
         tr!("entry n_others_active={} no_fast={}", n_others_active, no_fast_path);
         if n_others_active == 0 && !no_fast_path {
+            // #16 race-safe fast-path: hold prefill_serialiser across
+            // decode_logits so a concurrent prefill on a sibling slot
+            // can't race shared HipCluster scratch mid-decode. Cheap
+            // (microseconds) on the fast-path; the lock is uncontended
+            // when n_others_active==0.
+            let _prefill_lock = self.prefill_serialiser.lock().unwrap();
             tr!("FAST_PATH lock_inflight start");
             let mut guard = self.inflight_pool[slot_idx].blocking_lock();
             tr!("FAST_PATH lock_inflight done; decode_logits start");
