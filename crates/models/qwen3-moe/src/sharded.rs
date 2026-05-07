@@ -47,6 +47,16 @@ use crate::weights::{
     LayerWeights, SharedExpertWeights,
 };
 
+#[cfg(feature = "dev_trace")]
+fn dev_flag(name: &str) -> bool {
+    std::env::var(name).is_ok()
+}
+#[cfg(not(feature = "dev_trace"))]
+#[inline(always)]
+fn dev_flag(_name: &str) -> bool {
+    false
+}
+
 /// One rank's slice of the sharded model. Owns the device memory for the
 /// layers assigned to this rank + the globals this rank uses.
 pub struct Qwen3MoERankShard {
@@ -478,7 +488,7 @@ fn upload_one(
     r: &ResolvedTensor,
     device: &HipDevice,
 ) -> Result<(DeviceTensor, usize)> {
-    if std::env::var("FLAMBEAU_LOAD_TRACE").is_ok() {
+    if dev_flag("FLAMBEAU_LOAD_TRACE") {
         let t0 = std::time::Instant::now();
         let out = upload_one_inner(file, r, device);
         eprintln!("  [load] upload_one {:<50} {:?} {:>7.1} MB {:>6.1} ms",
@@ -1123,7 +1133,7 @@ fn upload_as_q8_0(
     r: &ResolvedTensor,
     device: &HipDevice,
 ) -> Result<(DeviceTensor, usize)> {
-    if std::env::var("FLAMBEAU_LOAD_TRACE").is_ok() {
+    if dev_flag("FLAMBEAU_LOAD_TRACE") {
         let t0 = std::time::Instant::now();
         let out = upload_as_q8_0_inner(file, r, device);
         eprintln!("  [load] as_q8_0    {:<50} {:?} {:>7.1} MB {:>6.1} ms",

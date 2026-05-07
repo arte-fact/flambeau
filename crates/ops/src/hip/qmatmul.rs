@@ -72,55 +72,14 @@ pub fn qmatmul(
     // V2.23.a — Q5_0 / Q5_1 still MMVQ row-by-row (no tile kernel yet).
     // V2.30.a — Q5_0 at m >= 32 routes through the wave64 tile via
     // dispatch_qmatmul; m < 32 stays on the MMVQ short-circuit. Q5_1 has no
-    // tile kernel yet, still MMVQ row-by-row.
-    // **#288** — Q4_1 batched-MMVQ short-circuit at m ∈ [2, MAX_N].
-    //
-    // **OPT-IN** via `FLAMBEAU_BATCHED_MMVQ=1`. Shape-aware dispatch:
-    //   - n_rows ≥ N_ROWS_WAVE64_THRESHOLD: route through the prefill
-    //     `mmq_q4_1_wave64` kernel (gridDim=(n_rows/64, n_cols/8),
-    //     row-tiled MMQ_Y=64 / TILE_N=8). Wins 1.27× at the GDN ssm_out
-    //     shape (n_rows=14336 / N=8) over per-row MMVQ.
-    //   - n_rows < threshold: stay on the per-row MMVQ loop. Wave64
-    //     loses at small n_rows (0.54× at n_rows=3584 / N=8) because
-    //     few thread-blocks for the GPU to schedule.
-    //
-    // Override modes:
-    //   - `FLAMBEAU_BATCHED_MMVQ=v1`: force the v1 batched kernel
-    //     (per-output-row, slot loop inside K-iter). For A/B; v1 is
-    //     activation-HBM-bound at GDN-out shapes (#288 v1 cert).
-    //   - `FLAMBEAU_BATCHED_MMVQ=wave64`: force wave64 unconditionally.
+    // **#288** — Q4_1 batched-MMVQ. Production default is the per-row
+    // MMVQ loop (the path we fall through to below). The v1 / wave64 /
+    // shape-aware opt-ins were measured null-to-loss on every anchor
+    // cell and removed from the env surface in S6.
     //
     // Certs:
     //   - `certs/perf/mmvq_q4_1_batched_v1_2026_05_04.md` — v1 diag.
     //   - `certs/perf/mmvq_q4_1_batched_v2_2026_05_04.md` — wave64 routing.
-    const N_ROWS_WAVE64_THRESHOLD: usize = 8192;
-    if dtype_weight == QDtype::Q4_1
-        && (2..=MMVQ_Q4_1_BATCHED_MAX_N).contains(&m)
-    {
-        match std::env::var("FLAMBEAU_BATCHED_MMVQ").as_deref() {
-            Ok("v1") => {
-                let _ = act_q8_1_mmq;
-                return mmvq_q4_1_batched_launch(reg, stream, weights, act_q8_1, dst, n, k, m);
-            }
-            Ok("wave64") => {
-                let _ = act_q8_1_mmq;
-                let recipe = Recipe::from_impl_id("qmatmul_q4_1_mmq_wave64_gfx906")?;
-                return mmq_wave64_launch(reg, stream, recipe, weights, act_q8_1, dst, n, m, k);
-            }
-            Ok(_) => {
-                // Default opt-in (`FLAMBEAU_BATCHED_MMVQ=1` or any other
-                // truthy value): shape-aware. Big shapes → wave64;
-                // small shapes → fall through to per-row MMVQ loop.
-                if n >= N_ROWS_WAVE64_THRESHOLD {
-                    let _ = act_q8_1_mmq;
-                    let recipe = Recipe::from_impl_id("qmatmul_q4_1_mmq_wave64_gfx906")?;
-                    return mmq_wave64_launch(reg, stream, recipe, weights, act_q8_1, dst, n, m, k);
-                }
-                // Else: fall through to dispatch_qmatmul (per-row MMVQ loop).
-            }
-            Err(_) => {} // not set: per-row MMVQ loop (production default)
-        }
-    }
     if dtype_weight == QDtype::Q5_1
         || (dtype_weight == QDtype::Q4_0 && m < 32)
         || (dtype_weight == QDtype::Q5_0 && m < 32)
@@ -555,57 +514,6 @@ pub fn mmvq(
     }
     let nb_per_row = k / block_elems(dtype_weight);
     mmvq_launch(reg, stream, recipe, weights, act_q8_1, dst, n_rows, nb_per_row)
-}
-
-/// **#288** Maximum batch size supported by `mmvq_q4_1_batched`. Mirrors
-/// the kernel's `MMVQ_Q4_1_BATCHED_MAX_N` define. Caller must validate.
-pub const MMVQ_Q4_1_BATCHED_MAX_N: usize = 8;
-
-/// **#288** — Launch the Q4_1 batched MMVQ kernel: one launch handles
-/// `n_slots` activation rows against the same weight tile. Reads weight
-/// HBM once across N slots — closes the per-row launch HBM amortization
-/// gap that `qmatmul(m=N)` opens (see `feedback_qmatmul_small_m_no_amortize`).
-///
-/// Output layout matches `qmatmul`'s `[m, n] = [batch, output]` convention:
-/// `dst` is `[n_slots, n_rows]` F32 slot-major.
-///
-/// Shapes:
-/// - `weights`: `n_rows * n_blocks_per_row` Q4_1 blocks (= `n_rows * k / 32`).
-/// - `act_q8_1`: `n_slots * n_blocks_per_row` Q8_1 blocks (slot-major).
-/// - `dst`: `n_slots * n_rows` F32 (slot-major).
-fn mmvq_q4_1_batched_launch(
-    reg: &OpsRegistry,
-    stream: &HipStream,
-    weights: DevicePtr,
-    act_q8_1: DevicePtr,
-    dst: DevicePtr,
-    n_rows: usize,
-    k: usize,
-    n_slots: usize,
-) -> Result<()> {
-    assert_eq!(k % 32, 0, "mmvq_q4_1_batched requires k % 32 == 0");
-    assert!(
-        n_slots >= 1 && n_slots <= MMVQ_Q4_1_BATCHED_MAX_N,
-        "mmvq_q4_1_batched: n_slots {n_slots} out of range [1, {MMVQ_Q4_1_BATCHED_MAX_N}]"
-    );
-    let module = reg.expect_module("mmvq_q4_1_batched")?;
-    let kernel = module.kernel("flambeau_mmvq_q4_1_q8_1_batched")?;
-    let n_rows_i = n_rows as i32;
-    let n_blocks_i = (k / 32) as i32;
-    let n_slots_i = n_slots as i32;
-    let w_ptr: u64 = weights.as_usize() as u64;
-    let y_ptr: u64 = act_q8_1.as_usize() as u64;
-    let d_ptr: u64 = dst.as_usize() as u64;
-    let mut args = KernelArgs::new();
-    args.push(&w_ptr);
-    args.push(&y_ptr);
-    args.push(&d_ptr);
-    args.push(&n_rows_i);
-    args.push(&n_blocks_i);
-    args.push(&n_slots_i);
-    let cfg = LaunchCfg::one_d(n_rows as u32, 256);
-    unsafe { kernel.launch(stream, cfg, args)? };
-    Ok(())
 }
 
 /// V2.23.a — common launch path for single-block-per-row Q-weight MMVQ

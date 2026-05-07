@@ -22,6 +22,9 @@ default = []
 # Session allocation + weight upload require a HIP device; gate so non-HIP
 # builds (CI lint, sandbox `cargo check`) stay green.
 hip = ["flambeau-ops/hip", "dep:flambeau-backend-hip"]
+# Enables FLAMBEAU_*_PROBE / *_DUMP / TRACE env-var reads in release
+# builds. Off by default; production binaries elide them.
+dev_trace = []
 
 [dependencies.flambeau-backend-hip]
 path = "../../backend-hip"

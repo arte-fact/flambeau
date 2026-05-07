@@ -820,58 +820,6 @@ impl Drop for GdnPrefillScratch {
     }
 }
 
-/// Gather Q / K / V rows out of a packed `silu_out[L, 2*qk_size + v_size]`
-/// tensor into separate contiguous `[L, qk_size]` / `[L, v_size]` buffers.
-/// Uses L stream-ordered `memcpy_async(DeviceToDevice)` per output — 3 × L
-/// copies per layer per prefill. For Qwen3.6 at L = 128 that's ~400 copies,
-/// each ~8 KB — stream-pipelined so no sync penalty. Future fusion: a
-/// single `gdn_split_qkv_f32` kernel.
-fn gather_qkv_strided(
-    device: &HipDevice,
-    stream: &HipStream,
-    silu_out: DevicePtr,
-    q_out: DevicePtr,
-    k_out: DevicePtr,
-    v_out: DevicePtr,
-    n_tokens: usize,
-    qk_size: usize,
-    v_size: usize,
-) -> Result<()> {
-    let conv_channels = 2 * qk_size + v_size;
-    let row_bytes_in = conv_channels * 4;
-    let q_row_bytes = qk_size * 4;
-    let v_row_bytes = v_size * 4;
-    for t in 0..n_tokens {
-        let row_ptr = silu_out.offset_bytes(t * row_bytes_in);
-        // SAFETY: silu_out has n_tokens * conv_channels F32s; the three
-        // sub-ranges fit inside one row.
-        unsafe {
-            device.memcpy_async(
-                stream,
-                CopyDirection::DeviceToDevice,
-                q_out.offset_bytes(t * q_row_bytes),
-                row_ptr,
-                q_row_bytes,
-            )?;
-            device.memcpy_async(
-                stream,
-                CopyDirection::DeviceToDevice,
-                k_out.offset_bytes(t * q_row_bytes),
-                row_ptr.offset_bytes(qk_size * 4),
-                q_row_bytes,
-            )?;
-            device.memcpy_async(
-                stream,
-                CopyDirection::DeviceToDevice,
-                v_out.offset_bytes(t * v_row_bytes),
-                row_ptr.offset_bytes(2 * qk_size * 4),
-                v_row_bytes,
-            )?;
-        }
-    }
-    Ok(())
-}
-
 /// Assemble `conv_input[(K-1) + L, conv_channels]` from the layer's
 /// `conv_history[(K-1), conv_channels]` + the fresh `qkv_mixed[L, conv_channels]`.
 pub(super) fn assemble_conv_input_prefill(
@@ -1127,35 +1075,21 @@ pub fn forward_gdn_prefill(
 
     // 8. Split silu_out into Q / K / V contiguous buffers. V2.4.d fused
     // `gdn_split_qkv_f32` kernel replaces the 3×L memcpy loop (~1500
-    // driver calls per layer at L=512). FLAMBEAU_QKV_FUSED=0 reverts
-    // to the memcpy loop for regression comparison.
-    if std::env::var("FLAMBEAU_QKV_FUSED").as_deref() == Ok("0") {
-        let _ = device; // unused in fused path
-        gather_qkv_strided(
-            device,
-            stream,
-            scratch.silu_out,
-            scratch.q_norm_f32,
-            scratch.k_norm_f32,
-            scratch.v_f32,
-            n_tokens,
-            qk_size,
-            v_size,
-        )?;
-    } else {
-        gdn_split_qkv_f32(
-            ops,
-            stream,
-            scratch.silu_out,
-            scratch.q_norm_f32,
-            scratch.k_norm_f32,
-            scratch.v_f32,
-            n_tokens,
-            qk_size,
-            v_size,
-        )
-        .context("prefill gdn_split_qkv_f32")?;
-    }
+    // driver calls per layer at L=512). The unfused fallback was kept
+    // as `FLAMBEAU_QKV_FUSED=0` regression A/B; deleted in S6 — null
+    // on every anchor cell.
+    gdn_split_qkv_f32(
+        ops,
+        stream,
+        scratch.silu_out,
+        scratch.q_norm_f32,
+        scratch.k_norm_f32,
+        scratch.v_f32,
+        n_tokens,
+        qk_size,
+        v_size,
+    )
+    .context("prefill gdn_split_qkv_f32")?;
 
     // 9. L2-normalise Q and K per head (row = head, k = head_k_dim).
     l2_norm_f32(

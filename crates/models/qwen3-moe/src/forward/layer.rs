@@ -41,6 +41,16 @@ use super::moe::{
 use crate::config::Qwen3MoEConfig;
 use crate::session::LayerCache;
 
+#[cfg(feature = "dev_trace")]
+fn dev_flag(name: &str) -> bool {
+    std::env::var(name).is_ok()
+}
+#[cfg(not(feature = "dev_trace"))]
+#[inline(always)]
+fn dev_flag(_name: &str) -> bool {
+    false
+}
+
 // ---------------------------------------------------------------------------
 // V1.7.3-e4 — per-layer composition (residual sums + ffn/post-attn norm +
 // routed/shared fan-in).
@@ -298,7 +308,7 @@ pub fn forward_layer_decode(
     // B5 bisect — dump PP analogues of TP's "post-AR-attn hidden_a" and
     // "mid_norm_f16" at layer 0. Gated on FLAMBEAU_TP_LAYER0_BISECT (same
     // env as TP) so PP and TP runs can be diffed by the same flag.
-    if std::env::var("FLAMBEAU_TP_LAYER0_BISECT").is_ok() && il == 0 {
+    if dev_flag("FLAMBEAU_TP_LAYER0_BISECT") && il == 0 {
         use flambeau_core::CopyDirection;
         for (label, ptr) in [
             ("PP post-attn-residual mid_f16", scratch.mid_f16),
@@ -410,7 +420,7 @@ pub fn forward_layer_decode(
     // Gated on FLAMBEAU_PARITY_LAYER_DUMP=1 so it composes with the existing
     // PP layer-dump infra. Read on the same stream the kernels just used so
     // the read sees the just-written values.
-    if std::env::var("FLAMBEAU_PARITY_LAYER_DUMP").is_ok() {
+    if dev_flag("FLAMBEAU_PARITY_LAYER_DUMP") {
         use flambeau_core::CopyDirection;
         let top_k = cfg.num_experts_per_tok;
         let mut ids = vec![0i32; top_k];

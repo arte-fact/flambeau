@@ -1,6 +1,6 @@
 # 35B-A3B-Q4_0 / pp2tp2 multi-slot divergence — reproduction
 
-- **Generated:** 2026-05-07T15:12:48+00:00
+- **Generated:** 2026-05-07T17:01:19+00:00
 - **Model:** qwen36-35b-a3b-q4_0 on 0,2,1,3 (pp+tp)
 - **Slots:** 2 | **Concurrent:** 2 | **ctx_cap:** 4096 | **tg_len:** 64 | seed=0
 

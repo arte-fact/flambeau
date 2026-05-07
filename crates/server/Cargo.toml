@@ -38,6 +38,10 @@ hip = [
     "flambeau-ops/hip",
     "flambeau-qwen3-moe/hip",
 ]
+# Enables debug FLAMBEAU_* env-var reads (TRACE_BATCH, DUMP_PROMPT,
+# DUMP_RAW_REQ, DEBUG_TOOL_RAW, PROFILE_DECODE, HOST_PROFILE) in release
+# builds. Off by default; production binaries elide them.
+dev_trace = ["flambeau-qwen3-moe/dev_trace", "flambeau-quant/dev_trace"]
 
 [dev-dependencies]
 # M2.1 integration test boots the real flambeau-mcp-server over HTTP

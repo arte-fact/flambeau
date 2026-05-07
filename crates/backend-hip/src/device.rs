@@ -25,6 +25,16 @@ use crate::sys::{
 
 const BACKEND: &str = "hip";
 
+#[cfg(feature = "dev_trace")]
+fn dev_flag(name: &str) -> bool {
+    std::env::var(name).is_ok()
+}
+#[cfg(not(feature = "dev_trace"))]
+#[inline(always)]
+fn dev_flag(_name: &str) -> bool {
+    false
+}
+
 fn check(code: c_int, ctx: &'static str) -> DeviceResult<()> {
     if code == HIP_SUCCESS {
         Ok(())
@@ -621,7 +631,7 @@ impl HipGraphExec {
             }
         }
 
-        let trace = std::env::var("FLAMBEAU_GRAPH_TRACE").is_ok();
+        let trace = dev_flag("FLAMBEAU_GRAPH_TRACE");
         if trace {
             eprintln!("[capture_into_shared_graph] closure starting");
         }

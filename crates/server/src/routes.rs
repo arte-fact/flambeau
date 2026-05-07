@@ -29,6 +29,29 @@ use crate::model::{
 };
 use crate::prefix_cache::{PrefixCache, PrefixKeys, TopologyTag};
 
+#[cfg(feature = "dev_trace")]
+fn dev_flag(name: &str) -> bool {
+    std::env::var(name).is_ok()
+}
+#[cfg(not(feature = "dev_trace"))]
+#[inline(always)]
+fn dev_flag(_name: &str) -> bool {
+    false
+}
+
+#[cfg(feature = "dev_trace")]
+fn dev_usize(name: &str, default: usize) -> usize {
+    std::env::var(name)
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(default)
+}
+#[cfg(not(feature = "dev_trace"))]
+#[inline(always)]
+fn dev_usize(_name: &str, default: usize) -> usize {
+    default
+}
+
 /// **#229 V1.1** — outcome of `ServerState::prefix_cache_try_restore`.
 /// Distinguishes the three actionable states for the prefill phase.
 #[derive(Debug)]
@@ -755,7 +778,7 @@ impl ServerState {
                     && taken.load(std::sync::atomic::Ordering::Relaxed)
             })
             .count();
-        let trace = std::env::var("FLAMBEAU_TRACE_BATCH").is_ok();
+        let trace = dev_flag("FLAMBEAU_TRACE_BATCH");
         macro_rules! tr {
             ($($arg:tt)*) => {
                 if trace {
@@ -911,7 +934,7 @@ impl ServerState {
         use flambeau_qwen3_moe::forward::{
             forward_decode_batched_pp, forward_decode_batched_tp, BatchSlot,
         };
-        let trace = std::env::var("FLAMBEAU_TRACE_BATCH").is_ok();
+        let trace = dev_flag("FLAMBEAU_TRACE_BATCH");
         macro_rules! tr_d {
             ($($arg:tt)*) => {
                 if trace {
@@ -1475,7 +1498,7 @@ pub async fn chat_completions(
     // doesn't parse like `tools[]` if the client sent them under a
     // different shape). One log line per request, full body, no
     // truncation. Off by default — bodies can be 10s of KB.
-    if std::env::var("FLAMBEAU_DUMP_RAW_REQ").is_ok() {
+    if dev_flag("FLAMBEAU_DUMP_RAW_REQ") {
         let s = serde_json::to_string(&raw).unwrap_or_else(|_| "<serialise fail>".into());
         tracing::info!(
             target: "server.req.raw",
@@ -1693,7 +1716,7 @@ pub async fn chat_completions(
         if assistant_prefill_active {
             prompt = strip_trailing_assistant_terminator(&prompt);
         }
-        if std::env::var("FLAMBEAU_DUMP_PROMPT").is_ok() {
+        if dev_flag("FLAMBEAU_DUMP_PROMPT") {
             eprintln!(
                 "--- rendered prompt ({} bytes) ---\n{}\n--- end prompt ---",
                 prompt.len(),
@@ -1767,7 +1790,7 @@ pub async fn chat_completions(
         if prefill_this_iter {
             prompt = strip_trailing_assistant_terminator(&prompt);
         }
-        if iter == 0 && std::env::var("FLAMBEAU_DUMP_PROMPT").is_ok() {
+        if iter == 0 && dev_flag("FLAMBEAU_DUMP_PROMPT") {
             eprintln!(
                 "--- rendered prompt ({} bytes) ---\n{}\n--- end prompt ---",
                 prompt.len(),
@@ -1793,7 +1816,7 @@ pub async fn chat_completions(
             // Debug: dump raw model text when FLAMBEAU_DEBUG_TOOL_RAW=1, so we
             // can see what the parser is consuming. Useful for diagnosing
             // parser-vs-model issues on multi-tool prompts.
-            if std::env::var("FLAMBEAU_DEBUG_TOOL_RAW").is_ok() {
+            if dev_flag("FLAMBEAU_DEBUG_TOOL_RAW") {
                 tracing::info!(
                     target: "server.tool_raw",
                     bytes = text.len(),
@@ -4555,17 +4578,14 @@ fn run_completion_blocking_streaming(
     // is set, enable HipEvent section recording for `n` warm-up-skipped decode
     // steps, then flush + dump aggregate per-section ms to stderr. Skips the
     // first 8 steps (cold-cache effects, allocator warmup).
-    let profile_decode_n: usize = std::env::var("FLAMBEAU_PROFILE_DECODE")
-        .ok()
-        .and_then(|s| s.parse().ok())
-        .unwrap_or(0);
+    let profile_decode_n: usize = dev_usize("FLAMBEAU_PROFILE_DECODE", 0);
     let profile_skip: usize = 8;
 
     // **Lever B (host profile)** — per-section host wall accumulator,
     // gated by FLAMBEAU_HOST_PROFILE=1. Skips the first 8 decode
     // steps to dodge cold-cache effects, accumulates ms-per-section
     // over the rest, dumps a one-line summary at end-of-loop.
-    let host_profile_on = std::env::var("FLAMBEAU_HOST_PROFILE").is_ok();
+    let host_profile_on = dev_flag("FLAMBEAU_HOST_PROFILE");
     let mut hp_n: usize = 0;
     let mut hp_decode_us: u128 = 0;
     let mut hp_mask_us: u128 = 0;

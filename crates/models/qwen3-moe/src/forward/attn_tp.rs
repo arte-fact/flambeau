@@ -61,6 +61,16 @@ use super::common::{mat_shape, qdtype_of};
 use crate::config::Qwen3MoEConfig;
 use crate::weights::DeviceTensor;
 
+#[cfg(feature = "dev_trace")]
+fn dev_flag(name: &str) -> bool {
+    std::env::var(name).is_ok()
+}
+#[cfg(not(feature = "dev_trace"))]
+#[inline(always)]
+fn dev_flag(_name: &str) -> bool {
+    false
+}
+
 /// Per-rank decode for one full-attention layer.
 ///
 /// # Shape contract
@@ -206,8 +216,7 @@ pub fn forward_full_attn_decode_tp<L: CacheLayout>(
     // per request) is dwarfed by the kernel's per-call work doubling
     // (52 µs fused vs 2×22 µs unfused). Don't re-attempt without a
     // bandwidth-changing structural redesign.
-    let kv_q4_0_fused = std::env::var("FLAMBEAU_KV_F16_DST").as_deref() != Ok("off")
-        && attn_k.dtype == flambeau_quant::GgmlDType::Q4_0
+    let kv_q4_0_fused = attn_k.dtype == flambeau_quant::GgmlDType::Q4_0
         && attn_v.dtype == flambeau_quant::GgmlDType::Q4_0
         && k_rows == v_rows;
     if kv_q4_0_fused {
@@ -873,7 +882,7 @@ pub fn forward_full_attn_layer_decode_batched_tp(
     // If row 0's K differs, the bug is in Q/K/V projection at small
     // n_tokens. If row 0's K matches, the bug is downstream
     // (KV-append, RoPE, or attention).
-    if std::env::var("FLAMBEAU_KV_PROJ_DUMP").is_ok() {
+    if dev_flag("FLAMBEAU_KV_PROJ_DUMP") {
         // SAFETY: scratch.k_f16 has at least n_tokens rows of
         // local_kv_width F16 each; sync the stream then DtoH.
         stream.synchronize()?;
@@ -932,7 +941,7 @@ pub fn forward_full_attn_layer_decode_batched_tp(
     // **#275 cycle 5b** — `FLAMBEAU_KV_ROPE_DUMP=1` dumps row-0 Q/K
     // L2 + heads AFTER RoPE. Compares post-RoPE K (about to be
     // written to cache) between N=1 and N=2.
-    if std::env::var("FLAMBEAU_KV_ROPE_DUMP").is_ok() {
+    if dev_flag("FLAMBEAU_KV_ROPE_DUMP") {
         stream.synchronize()?;
         let row_bytes_kv = local_kv_width * 2;
         let mut host_k = vec![half::f16::from_f32(0.0); local_kv_width];

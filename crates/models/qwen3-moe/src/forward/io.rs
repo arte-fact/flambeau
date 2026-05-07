@@ -34,6 +34,16 @@ use super::common::{mat_shape, qdtype_of, row_bytes_for_dtype};
 use crate::config::Qwen3MoEConfig;
 use crate::weights::DeviceTensor;
 
+#[cfg(feature = "dev_trace")]
+fn dev_flag(name: &str) -> bool {
+    std::env::var(name).is_ok()
+}
+#[cfg(not(feature = "dev_trace"))]
+#[inline(always)]
+fn dev_flag(_name: &str) -> bool {
+    false
+}
+
 // ---------------------------------------------------------------------------
 // V1.7.3-e2 — token embedding gather.
 // ---------------------------------------------------------------------------
@@ -442,7 +452,7 @@ pub fn argmax_token_host(
     // tell "F16 noise, llama's #1 is in our top 20" from "systematic bug,
     // llama's #1 is rank 200k+". Left in because the parity gap isn't
     // closed yet and the harness is cheap.
-    if std::env::var("FLAMBEAU_PARITY_TOPK_LOGITS").is_ok() {
+    if dev_flag("FLAMBEAU_PARITY_TOPK_LOGITS") {
         let mut idxs: Vec<usize> = (0..host.len()).collect();
         idxs.sort_by(|&a, &b| host[b].partial_cmp(&host[a]).unwrap_or(std::cmp::Ordering::Equal));
         let top: Vec<(usize, f32)> = idxs.iter().take(20).map(|&i| (i, host[i])).collect();

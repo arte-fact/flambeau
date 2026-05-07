@@ -12,6 +12,9 @@ default = []
 # Opt-in RCCL linkage. Off by default so `cargo build` works on hosts without
 # `librccl.so` on the linker search path. Enable for multi-GPU collectives.
 rccl = []
+# Enables debug FLAMBEAU_* env-var reads (FLAMBEAU_LOB_*, etc.) in release
+# builds. Off by default; production binaries elide them.
+dev_trace = []
 
 [dependencies]
 flambeau-core = { path = "../core" }

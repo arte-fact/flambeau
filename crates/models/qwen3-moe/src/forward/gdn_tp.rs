@@ -73,6 +73,17 @@ use crate::config::Qwen3MoEConfig;
 use crate::session::GdnLayerState;
 use crate::weights::DeviceTensor;
 
+#[cfg(feature = "dev_trace")]
+fn dev_flag(name: &str) -> bool {
+    std::env::var(name).is_ok()
+}
+#[cfg(not(feature = "dev_trace"))]
+#[inline(always)]
+fn dev_flag(_name: &str) -> bool {
+    false
+}
+
+
 /// Per-rank decode for one Gated-Delta-Net layer.
 ///
 /// All weight tensors are *already sliced* per the TP-1a/TP-4a-i1
@@ -156,7 +167,7 @@ pub fn forward_gdn_decode_tp(
     // Both reduce to local_num_v_heads / local_num_k_heads.
     let n_rep = local_num_v_heads / local_num_k_heads;
 
-    let probe = std::env::var("FLAMBEAU_TP_PROBE").is_ok();
+    let probe = dev_flag("FLAMBEAU_TP_PROBE");
     macro_rules! probe_f32 {
         ($label:literal, $ptr:expr, $n:expr) => {
             if probe {

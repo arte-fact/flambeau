@@ -18,6 +18,16 @@ use std::collections::HashMap;
 use std::fs::File;
 use std::io::{Cursor, Read};
 use std::path::{Path, PathBuf};
+
+#[cfg(feature = "dev_trace")]
+fn dev_flag(name: &str) -> bool {
+    std::env::var(name).is_ok()
+}
+#[cfg(not(feature = "dev_trace"))]
+#[inline(always)]
+fn dev_flag(_name: &str) -> bool {
+    false
+}
 use std::sync::Arc;
 
 use byteorder::{LittleEndian, ReadBytesExt};
@@ -364,7 +374,7 @@ impl GgufFile {
             let addr = self.mmap.as_ptr().add(aligned_start) as *mut libc::c_void;
             libc::munmap(addr, len)
         };
-        if rc != 0 && std::env::var("FLAMBEAU_LOAD_TRACE").is_ok() {
+        if rc != 0 && dev_flag("FLAMBEAU_LOAD_TRACE") {
             eprintln!("  [munmap] {} failed: {}", name,
                 std::io::Error::last_os_error());
         }

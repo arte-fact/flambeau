@@ -16,6 +16,15 @@ default = []
 hip_sweep = ["flambeau-bench/hip"]
 # Enables `flambeau serve` — loads a real model on HIP devices.
 hip_serve = ["flambeau-server/hip"]
+# Enables debug FLAMBEAU_* env-var reads (probes, dumps, traces).
+# Off by default; production binaries elide all gated reads.
+# (flambeau-server propagates the flag to flambeau-qwen3-moe and
+# flambeau-quant transitively; this CLI only depends on those crates
+# directly which are already covered.)
+dev_trace = [
+    "flambeau-quant/dev_trace",
+    "flambeau-server/dev_trace",
+]
 
 [dependencies]
 flambeau-core = { path = "../core" }

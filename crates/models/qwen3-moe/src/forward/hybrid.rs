@@ -41,6 +41,16 @@ use super::tp::{
     forward_full_attn_layer_tp, forward_gdn_layer_tp, forward_prefill_tp_batched_layers,
 };
 
+#[cfg(feature = "dev_trace")]
+fn dev_flag(name: &str) -> bool {
+    std::env::var(name).is_ok()
+}
+#[cfg(not(feature = "dev_trace"))]
+#[inline(always)]
+fn dev_flag(_name: &str) -> bool {
+    false
+}
+
 /// AUTO-4e — ingest a `prompt_ids` prompt token-by-token and write
 /// the **last** position's F32 logits row into `logits_out`. Mirrors
 /// the TP server-side prefill (`model.rs::prefill_logits` for the
@@ -887,7 +897,7 @@ pub fn forward_decode_batched_hybrid(
         // **#275 cycle 6 debug** — `FLAMBEAU_STAGE_ENTRY_DUMP=1` dumps
         // hidden_a row 0 L2 at the START of each stage (post-peer_copy
         // from previous stage). Used to verify stage handoff at N=2.
-        if std::env::var("FLAMBEAU_STAGE_ENTRY_DUMP").is_ok() {
+        if dev_flag("FLAMBEAU_STAGE_ENTRY_DUMP") {
             let entry_dev = sub_cluster.device(0);
             entry_dev.bind()?;
             entry_dev.default_stream().synchronize()?;
@@ -1064,7 +1074,7 @@ pub fn forward_decode_batched_hybrid(
             // Compares "GDN call wrote wrong row 0" vs "AR mangled row 0
             // at n_tokens=N>1" across N=1 and N=2 dispatches.
             // Dump only layer 32 (first GDN of stage 1) on rank 0.
-            let do_pre_ar_dump = std::env::var("FLAMBEAU_AR_DUMP").is_ok()
+            let do_pre_ar_dump = dev_flag("FLAMBEAU_AR_DUMP")
                 && stage_idx == 1
                 && il == 32;
             if do_pre_ar_dump {
@@ -1199,7 +1209,7 @@ pub fn forward_decode_batched_hybrid(
                 }
             } else {
                 let has_shared = cfg.shared_expert_intermediate_size.is_some()
-                    && std::env::var("FLAMBEAU_TP_SKIP_SHARED").is_err();
+                    && !dev_flag("FLAMBEAU_TP_SKIP_SHARED");
                 for r in 0..sub_cluster.ranks() {
                     let device = sub_cluster.device(r);
                     device.bind()?;
@@ -1322,7 +1332,7 @@ pub fn forward_decode_batched_hybrid(
         // gated by FLAMBEAU_BATCHED_DECODE_DUMP=1. Compares N=1 vs N=2
         // dispatch trace to find the first divergent stage. Dumps from
         // stage rank 0's hidden_a (where the AR result lives).
-        if std::env::var("FLAMBEAU_BATCHED_DECODE_DUMP").is_ok() {
+        if dev_flag("FLAMBEAU_BATCHED_DECODE_DUMP") {
             let dump_dev = stage.sub_cluster.device(0);
             dump_dev.bind()?;
             dump_dev.default_stream().synchronize()?;
@@ -1365,7 +1375,7 @@ pub fn forward_decode_batched_hybrid(
         // bit-deterministic across boots, slot 1 differs — extending
         // the per-slot dump localises which layer first deviates on
         // slot 1 between two boots).
-        if std::env::var("FLAMBEAU_LAYER_STATE_DUMP").is_ok() {
+        if dev_flag("FLAMBEAU_LAYER_STATE_DUMP") {
           // SAFETY: same disjointness as the other unsafe split above —
           // indices 0..n are distinct so the &mut borrows stay disjoint.
           let sessions_ptr = sessions.as_mut_ptr();

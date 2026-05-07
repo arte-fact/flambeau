@@ -23,5 +23,10 @@ libc = "0.2"
 [dev-dependencies]
 byteorder.workspace = true
 
+[features]
+# Enables FLAMBEAU_LOAD_TRACE / dump-on-failure env-var reads in
+# release builds. Off by default; production binaries elide them.
+dev_trace = []
+
 [lints]
 workspace = true

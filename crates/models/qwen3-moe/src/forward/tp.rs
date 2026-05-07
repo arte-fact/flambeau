@@ -462,6 +462,29 @@ use crate::session::LayerCache;
 use crate::tp_sharded::{Qwen3MoETpModel, TpLayerTensor};
 use crate::weights::DeviceTensor;
 
+#[cfg(feature = "dev_trace")]
+fn dev_flag(name: &str) -> bool {
+    std::env::var(name).is_ok()
+}
+#[cfg(not(feature = "dev_trace"))]
+#[inline(always)]
+fn dev_flag(_name: &str) -> bool {
+    false
+}
+
+#[cfg(feature = "dev_trace")]
+fn dev_usize(name: &str, default: usize) -> usize {
+    std::env::var(name)
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(default)
+}
+#[cfg(not(feature = "dev_trace"))]
+#[inline(always)]
+fn dev_usize(_name: &str, default: usize) -> usize {
+    default
+}
+
 /// FLAMBEAU_TP_PROBE — rank-aware F16 probe at an arbitrary device pointer.
 /// Used for inspecting per-rank partial buffers.
 fn debug_probe_named_rank(
@@ -1289,7 +1312,7 @@ pub fn forward_prefill_tp_batched_layers(
             }
         } else {
             let has_shared = cfg.shared_expert_intermediate_size.is_some()
-                && std::env::var("FLAMBEAU_TP_SKIP_SHARED").is_err();
+                && !dev_flag("FLAMBEAU_TP_SKIP_SHARED");
             for r in 0..cluster.ranks() {
                 let device = cluster.device(r);
                 device.bind()?;
@@ -1605,11 +1628,8 @@ fn forward_one_token_tp_inner(
     // is None → interval == 0 → every layer routed to GDN, which the
     // dense model has no tensors for, producing all-NaN logits.
     let n_layers = cfg.num_layers;
-    let layer_limit: usize = std::env::var("FLAMBEAU_TP_LAYER_LIMIT")
-        .ok()
-        .and_then(|s| s.parse().ok())
-        .unwrap_or(n_layers);
-    let probe = std::env::var("FLAMBEAU_TP_PROBE").is_ok();
+    let layer_limit: usize = dev_usize("FLAMBEAU_TP_LAYER_LIMIT", n_layers);
+    let probe = dev_flag("FLAMBEAU_TP_PROBE");
     if probe {
         debug_probe_rank0_hidden(scratch, cluster, "embed", usize::MAX)?;
     }
@@ -1758,7 +1778,7 @@ pub(crate) fn forward_full_attn_layer_tp(
     position: usize,
     world: u32,
 ) -> anyhow::Result<()> {
-    if std::env::var("FLAMBEAU_TP_PROBE").is_ok() {
+    if dev_flag("FLAMBEAU_TP_PROBE") {
         eprintln!("  PROBE entering forward_full_attn_layer_tp il={il} world={world}");
     }
     let cfg = &model.config;
@@ -1806,7 +1826,7 @@ pub(crate) fn forward_full_attn_layer_tp(
             _ => bail!("rank {r} layer {il}: expected FullAttn cache (got non-FullAttn variant)"),
         }
     }
-    if std::env::var("FLAMBEAU_TP_PROBE").is_ok() {
+    if dev_flag("FLAMBEAU_TP_PROBE") {
         let p = scratch.per_rank[0].partial_attn_out;
         debug_probe_rank0_named(scratch, cluster, "post-attn partial", il, p)?;
     }
@@ -1832,7 +1852,7 @@ pub(crate) fn forward_full_attn_layer_tp(
                 .ok_or_else(|| anyhow!("rank {r}: missing LayerForwardScratch"))
         })
         .collect::<anyhow::Result<_>>()?;
-    let probe = std::env::var("FLAMBEAU_TP_PROBE").is_ok();
+    let probe = dev_flag("FLAMBEAU_TP_PROBE");
     if world > 1 {
         ar_residual_rmsnorm(
             ar,
@@ -2134,7 +2154,7 @@ fn forward_ffn_block_tp(
                 .unwrap_or(DevicePtr(0));
             // B5 bisect: FLAMBEAU_TP_SKIP_SHARED=1 skips the shared expert
             // path entirely (no shared partial added to MoE partial).
-            let skip_shared = std::env::var("FLAMBEAU_TP_SKIP_SHARED").is_ok();
+            let skip_shared = dev_flag("FLAMBEAU_TP_SKIP_SHARED");
             let has_shared = cfg.shared_expert_intermediate_size.is_some() && !skip_shared;
             let layer_scratch = scratch.per_rank[r].layer.as_mut().unwrap();
             let ops = &model.ops[r];
@@ -2159,8 +2179,8 @@ fn forward_ffn_block_tp(
                 //   FLAMBEAU_PARITY_LAYER_DUMP=1 — every layer, rank 0 only,
                 //                                  format matching layer.rs PP.
                 let layer0_bisect =
-                    std::env::var("FLAMBEAU_TP_LAYER0_BISECT").is_ok() && il == 0;
-                let layer_dump = std::env::var("FLAMBEAU_PARITY_LAYER_DUMP").is_ok();
+                    dev_flag("FLAMBEAU_TP_LAYER0_BISECT") && il == 0;
+                let layer_dump = dev_flag("FLAMBEAU_PARITY_LAYER_DUMP");
                 if (layer0_bisect && r < cluster.ranks()) || (layer_dump && r == 0) {
                     use flambeau_core::CopyDirection;
                     let device = cluster.device(r);
@@ -2255,7 +2275,7 @@ fn forward_ffn_block_tp(
             // RowParallel-sliced sum-over-experts; shared delta is the
             // shared-expert RowParallel partial. Both per-rank partials
             // get AR'd later, so per-rank values are sliced (asymmetric).
-            if std::env::var("FLAMBEAU_TP_LAYER0_BISECT").is_ok() && il == 0 {
+            if dev_flag("FLAMBEAU_TP_LAYER0_BISECT") && il == 0 {
                 debug_probe_named_rank(
                     scratch, cluster, "moe partial (pre-shared-add)", il, partial_ffn_out, r,
                 )?;
@@ -2275,7 +2295,7 @@ fn forward_ffn_block_tp(
                     cfg.hidden_size,
                 )
                 .context("moe (TP) + shared expert add_f16")?;
-                if std::env::var("FLAMBEAU_TP_LAYER0_BISECT").is_ok() && il == 0 {
+                if dev_flag("FLAMBEAU_TP_LAYER0_BISECT") && il == 0 {
                     debug_probe_named_rank(
                         scratch, cluster, "moe partial (post-shared-add)", il, partial_ffn_out, r,
                     )?;
@@ -2409,7 +2429,7 @@ pub(crate) fn forward_gdn_layer_tp(
     il_cache: usize,
     world: u32,
 ) -> anyhow::Result<()> {
-    let probe = std::env::var("FLAMBEAU_TP_PROBE").is_ok();
+    let probe = dev_flag("FLAMBEAU_TP_PROBE");
     if probe {
         eprintln!("  PROBE entering forward_gdn_layer_tp il={il} world={world}");
     }
@@ -2538,7 +2558,7 @@ pub(crate) fn forward_gdn_layer_tp(
     }
 
     // B5 bisect — dump mid_norm_f16 (post-AR-attn + post-attn-norm).
-    if std::env::var("FLAMBEAU_TP_LAYER0_BISECT").is_ok() && il == 0 {
+    if dev_flag("FLAMBEAU_TP_LAYER0_BISECT") && il == 0 {
         for r in 0..cluster.ranks() {
             debug_probe_named_rank(scratch, cluster, "mid_norm_f16", il, mid_norm_ptrs[r], r)?;
         }
@@ -2918,7 +2938,7 @@ pub fn forward_decode_batched_tp(
             }
         } else {
             let has_shared = cfg.shared_expert_intermediate_size.is_some()
-                && std::env::var("FLAMBEAU_TP_SKIP_SHARED").is_err();
+                && !dev_flag("FLAMBEAU_TP_SKIP_SHARED");
             for r in 0..cluster.ranks() {
                 let device = cluster.device(r);
                 device.bind()?;
