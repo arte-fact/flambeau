@@ -353,8 +353,7 @@ pub fn forward_full_attn_decode<L: CacheLayout>(
             hidden
         );
     }
-    let fuse_kv = std::env::var("FLAMBEAU_VARIANT").as_deref() != Ok("baseline")
-        && weights.attn_k.dtype == flambeau_quant::GgmlDType::Q8_0
+    let fuse_kv = weights.attn_k.dtype == flambeau_quant::GgmlDType::Q8_0
         && weights.attn_v.dtype == flambeau_quant::GgmlDType::Q8_0;
     if fuse_kv {
         // Fused K+V matmul, then two casts (K, V go to different F16 dsts).
@@ -537,7 +536,6 @@ pub fn forward_full_attn_decode<L: CacheLayout>(
     let scale = (head_dim as f32).sqrt().recip();
     let use_splitk = kv_layout == F16Contig::NAME
         && slots.is_none()
-        && std::env::var("FLAMBEAU_VARIANT").as_deref() != Ok("baseline")
         && n_tokens_kv > 256;
     if use_splitk {
         let chunk_size = flambeau_ops::hip::attention::splitk_chunk_size(n_tokens_kv);
@@ -1764,8 +1762,7 @@ pub fn forward_dense_attn_decode<L: CacheLayout>(
             hidden
         );
     }
-    let fuse_kv = std::env::var("FLAMBEAU_VARIANT").as_deref() != Ok("baseline")
-        && weights.attn_k.dtype == flambeau_quant::GgmlDType::Q8_0
+    let fuse_kv = weights.attn_k.dtype == flambeau_quant::GgmlDType::Q8_0
         && weights.attn_v.dtype == flambeau_quant::GgmlDType::Q8_0;
     if fuse_kv {
         let v_f32_offset = scratch.mmvq_f32.offset_bytes(k_rows * 4);
@@ -1898,7 +1895,6 @@ pub fn forward_dense_attn_decode<L: CacheLayout>(
     let scale = (head_dim as f32).sqrt().recip();
     let use_splitk = kv_layout == F16Contig::NAME
         && slots.is_none()
-        && std::env::var("FLAMBEAU_VARIANT").as_deref() != Ok("baseline")
         && n_tokens_kv > 256;
     if use_splitk {
         let chunk_size = flambeau_ops::hip::attention::splitk_chunk_size(n_tokens_kv);

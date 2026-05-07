@@ -219,14 +219,11 @@ pub fn forward_gdn_decode_tp(
     // 2..3. attn_qkv (FusedQkvParallel sliced) + attn_gate (ColParallel sliced)
     //       projections. Output dims are local_conv_channels and local_d_inner.
     //       Both Q8_0 and Q4_0 have fused gate+up MMVQ variants; pick one.
-    let baseline = std::env::var("FLAMBEAU_VARIANT").as_deref() == Ok("baseline");
     let dt_q = attn_qkv.dtype;
     let dt_g = attn_gate.dtype;
-    let fuse_qkv_gate_q8_0 = !baseline
-        && dt_q == flambeau_quant::GgmlDType::Q8_0
+    let fuse_qkv_gate_q8_0 = dt_q == flambeau_quant::GgmlDType::Q8_0
         && dt_g == flambeau_quant::GgmlDType::Q8_0;
-    let fuse_qkv_gate_q4_0 = !baseline
-        && dt_q == flambeau_quant::GgmlDType::Q4_0
+    let fuse_qkv_gate_q4_0 = dt_q == flambeau_quant::GgmlDType::Q4_0
         && dt_g == flambeau_quant::GgmlDType::Q4_0;
     if fuse_qkv_gate_q8_0 {
         mmvq_q8_0_gate_up(
@@ -310,8 +307,7 @@ pub fn forward_gdn_decode_tp(
     probe_f32!("gdn z_f32", scratch.z_f32, local_d_inner);
 
     // 4..5. ssm_alpha + ssm_beta (both ColParallel, [local_num_v_heads, hidden]).
-    let fuse_alpha_beta = std::env::var("FLAMBEAU_VARIANT").as_deref() != Ok("baseline")
-        && ssm_alpha.dtype == flambeau_quant::GgmlDType::Q8_0
+    let fuse_alpha_beta = ssm_alpha.dtype == flambeau_quant::GgmlDType::Q8_0
         && ssm_beta.dtype == flambeau_quant::GgmlDType::Q8_0;
     if fuse_alpha_beta {
         let (a_rows, a_k) = mat_shape(ssm_alpha)?;
@@ -452,61 +448,26 @@ pub fn forward_gdn_decode_tp(
     // CN-80B-13/14 — q/k repeat layout differs by arch; see decode-path
     // comment in `super::gdn::forward_gdn_decode` for the explanation.
     let rep_inner_layout = cfg.arch == "qwen3next";
-    let fuse_state_step = std::env::var("FLAMBEAU_VARIANT").as_deref() != Ok("baseline");
-    if fuse_state_step {
-        gdn_state_step_alphabeta_f32_s128(
-            ops,
-            stream,
-            scratch.q_norm_f32,
-            scratch.k_norm_f32,
-            v_src,
-            scratch.alpha_f32,
-            scratch.beta_f32,
-            ssm_dt_bias.ptr,
-            ssm_a.ptr,
-            layer_state.state,
-            layer_state.state,
-            scratch.state_out,
-            1,
-            local_num_v_heads,
-            1,
-            n_rep,
-            rep_inner_layout,
-        )
-        .context("gdn_state_step_alphabeta_f32_s128 (TP, C10 fused)")?;
-    } else {
-        gdn_alpha_beta_f32(
-            ops,
-            stream,
-            scratch.alpha_f32,
-            scratch.beta_f32,
-            ssm_dt_bias.ptr,
-            ssm_a.ptr,
-            scratch.gate_device,
-            scratch.beta_device,
-            local_num_v_heads,
-            /* n_tokens = */ 1,
-        )
-        .context("gdn_alpha_beta_f32 fused (TP)")?;
-        gdn_state_step_f32_s128(
-            ops,
-            stream,
-            scratch.q_norm_f32,
-            scratch.k_norm_f32,
-            v_src,
-            scratch.gate_device,
-            scratch.beta_device,
-            layer_state.state,
-            layer_state.state,
-            scratch.state_out,
-            1,
-            local_num_v_heads,
-            1,
-            n_rep,
-            rep_inner_layout,
-        )
-        .context("gdn_state_step_f32_s128 (TP, baseline)")?;
-    }
+    gdn_state_step_alphabeta_f32_s128(
+        ops,
+        stream,
+        scratch.q_norm_f32,
+        scratch.k_norm_f32,
+        v_src,
+        scratch.alpha_f32,
+        scratch.beta_f32,
+        ssm_dt_bias.ptr,
+        ssm_a.ptr,
+        layer_state.state,
+        layer_state.state,
+        scratch.state_out,
+        1,
+        local_num_v_heads,
+        1,
+        n_rep,
+        rep_inner_layout,
+    )
+    .context("gdn_state_step_alphabeta_f32_s128 (TP, C10 fused)")?;
 
     // 13. ssm_norm per-(local) head on the state-step output.
     let ssm_norm_k = ssm_norm
@@ -533,8 +494,7 @@ pub fn forward_gdn_decode_tp(
     // (TP variant). Skips the F32 `gated_f32` intermediate buffer + 1
     // launch. Default-on; FLAMBEAU_VARIANT=baseline opts back to the
     // unfused pair.
-    let fuse_tail = std::env::var("FLAMBEAU_VARIANT").as_deref() != Ok("baseline")
-        && local_d_inner % 32 == 0;
+    let fuse_tail = local_d_inner % 32 == 0;
     if fuse_tail {
         flambeau_ops::hip::mlp::swiglu_f32_to_q8_1(
             ops,
@@ -1007,62 +967,26 @@ pub fn forward_gdn_prefill_tp(
     // CN-80B-13/14 — q/k repeat layout differs by arch; see decode-path
     // comment in `super::gdn::forward_gdn_decode` for the explanation.
     let rep_inner_layout = cfg.arch == "qwen3next";
-    let fuse_state_step =
-        std::env::var("FLAMBEAU_VARIANT").as_deref() != Ok("baseline");
-    if fuse_state_step {
-        gdn_state_step_alphabeta_f32_s128(
-            ops,
-            stream,
-            scratch.q_norm_f32,
-            scratch.k_norm_f32,
-            scratch.v_f32,
-            scratch.alpha_f32,
-            scratch.beta_f32,
-            ssm_dt_bias.ptr,
-            ssm_a.ptr,
-            layer_state.state,
-            layer_state.state,
-            scratch.state_out,
-            1,
-            local_num_v_heads,
-            n_tokens,
-            n_rep,
-            rep_inner_layout,
-        )
-        .context("gdn prefill (TP) gdn_state_step_alphabeta_f32_s128 (C10 fused)")?;
-    } else {
-        gdn_alpha_beta_f32(
-            ops,
-            stream,
-            scratch.alpha_f32,
-            scratch.beta_f32,
-            ssm_dt_bias.ptr,
-            ssm_a.ptr,
-            scratch.gate_device,
-            scratch.beta_device,
-            local_num_v_heads,
-            n_tokens,
-        )
-        .context("gdn prefill (TP) gdn_alpha_beta_f32 (batched)")?;
-        gdn_state_step_f32_s128(
-            ops,
-            stream,
-            scratch.q_norm_f32,
-            scratch.k_norm_f32,
-            scratch.v_f32,
-            scratch.gate_device,
-            scratch.beta_device,
-            layer_state.state,
-            layer_state.state,
-            scratch.state_out,
-            1,
-            local_num_v_heads,
-            n_tokens,
-            n_rep,
-            rep_inner_layout,
-        )
-        .context("gdn prefill (TP) gdn_state_step_f32_s128 (baseline)")?;
-    }
+    gdn_state_step_alphabeta_f32_s128(
+        ops,
+        stream,
+        scratch.q_norm_f32,
+        scratch.k_norm_f32,
+        scratch.v_f32,
+        scratch.alpha_f32,
+        scratch.beta_f32,
+        ssm_dt_bias.ptr,
+        ssm_a.ptr,
+        layer_state.state,
+        layer_state.state,
+        scratch.state_out,
+        1,
+        local_num_v_heads,
+        n_tokens,
+        n_rep,
+        rep_inner_layout,
+    )
+    .context("gdn prefill (TP) gdn_state_step_alphabeta_f32_s128 (C10 fused)")?;
 
     // 13. ssm_norm per-(local) head over [L, local_num_v_heads, head_v_dim].
     let ssm_norm_k = ssm_norm
@@ -1311,8 +1235,6 @@ pub fn forward_gdn_decode_batched_tp(
     let row_out_normed_bytes = row_state_out_bytes;
     let q_scale = 1.0f32 / (head_k_dim as f32).sqrt();
     let rep_inner_layout = cfg.arch == "qwen3next";
-    let fuse_state_step =
-        std::env::var("FLAMBEAU_VARIANT").as_deref() != Ok("baseline");
 
     for s in 0..n_tokens {
         // Slot pointers into the batched scratch.
@@ -1396,42 +1318,15 @@ pub fn forward_gdn_decode_batched_tp(
         .context("gdn batched-decode (TP) scale_f32 Q slot")?;
 
         // 11–12. Per-slot state-step. n_tokens=1 update on slot's state.
-        if fuse_state_step {
-            gdn_state_step_alphabeta_f32_s128(
-                ops, stream,
-                slot_q_norm, slot_k_norm, slot_v,
-                slot_alpha, slot_beta,
-                ssm_dt_bias.ptr, ssm_a.ptr,
-                layer_states[s].state, layer_states[s].state, slot_state_out,
-                1, local_num_v_heads, 1, n_rep, rep_inner_layout,
-            )
-            .context("gdn batched-decode (TP) gdn_state_step_alphabeta_f32_s128 slot")?;
-        } else {
-            // The baseline split-path needs gate_device/beta_device
-            // sized for a single row; reuse the per-slot offsets into
-            // the prefill scratch's `gate_device`/`beta_device` buffers.
-            let row_gate_bytes = local_num_v_heads * 4;
-            let slot_gate =
-                DevicePtr(scratch.gate_device.as_usize() + s * row_gate_bytes);
-            let slot_beta_dev =
-                DevicePtr(scratch.beta_device.as_usize() + s * row_gate_bytes);
-            gdn_alpha_beta_f32(
-                ops, stream,
-                slot_alpha, slot_beta,
-                ssm_dt_bias.ptr, ssm_a.ptr,
-                slot_gate, slot_beta_dev,
-                local_num_v_heads, 1,
-            )
-            .context("gdn batched-decode (TP) gdn_alpha_beta_f32 slot")?;
-            gdn_state_step_f32_s128(
-                ops, stream,
-                slot_q_norm, slot_k_norm, slot_v,
-                slot_gate, slot_beta_dev,
-                layer_states[s].state, layer_states[s].state, slot_state_out,
-                1, local_num_v_heads, 1, n_rep, rep_inner_layout,
-            )
-            .context("gdn batched-decode (TP) gdn_state_step_f32_s128 slot")?;
-        }
+        gdn_state_step_alphabeta_f32_s128(
+            ops, stream,
+            slot_q_norm, slot_k_norm, slot_v,
+            slot_alpha, slot_beta,
+            ssm_dt_bias.ptr, ssm_a.ptr,
+            layer_states[s].state, layer_states[s].state, slot_state_out,
+            1, local_num_v_heads, 1, n_rep, rep_inner_layout,
+        )
+        .context("gdn batched-decode (TP) gdn_state_step_alphabeta_f32_s128 slot")?;
 
         // 13. ssm_norm per-(local) head over this slot's [num_v_heads, head_v_dim].
         rmsnorm_f32(

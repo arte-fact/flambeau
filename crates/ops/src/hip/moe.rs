@@ -122,22 +122,11 @@ pub fn indexed_moe_mmvq_q4_k_r2(
     // (n_tokens ≥ 32, launch-overhead-bound), r2 (half-wave) at decode
     // (n_tokens < 32, per-thread-work-bound). Measured r4 +8 % prefill but
     // -2 % decode vs r2; the split captures both.
-    // A/B knobs:
-    //   FLAMBEAU_VARIANT=baseline → scalar (regression compare only)
-    //   FLAMBEAU_VARIANT=dp4a_r2  → r2 everywhere (prior V2.4.a default)
-    //   FLAMBEAU_VARIANT=dp4a_r4  → r4 everywhere (force r4 at decode too)
-    let variant = std::env::var("FLAMBEAU_VARIANT").ok();
-    let force_baseline = variant.as_deref() == Some("baseline");
-    let force_dp4a_r2 = variant.as_deref() == Some("dp4a_r2");
-    let force_dp4a_r4 = variant.as_deref() == Some("dp4a_r4");
     const R4_TOKEN_THRESHOLD: usize = 32;
-    let use_r4 = force_dp4a_r4 || (!force_baseline && !force_dp4a_r2 && n_tokens >= R4_TOKEN_THRESHOLD);
-    let (stem, entry, rows_per_block) = if force_baseline {
-        ("indexed_moe_mmvq_q4_k_r2", "flambeau_indexed_moe_mmvq_q4_k_r2_q8_1", 2u32)
-    } else if use_r4 {
-        ("indexed_moe_mmvq_q4_k_r4_dp4a", "flambeau_indexed_moe_mmvq_q4_k_r4_dp4a_q8_1", 4)
+    let (stem, entry, rows_per_block) = if n_tokens >= R4_TOKEN_THRESHOLD {
+        ("indexed_moe_mmvq_q4_k_r4_dp4a", "flambeau_indexed_moe_mmvq_q4_k_r4_dp4a_q8_1", 4u32)
     } else {
-        ("indexed_moe_mmvq_q4_k_r2_dp4a", "flambeau_indexed_moe_mmvq_q4_k_r2_dp4a_q8_1", 2)
+        ("indexed_moe_mmvq_q4_k_r2_dp4a", "flambeau_indexed_moe_mmvq_q4_k_r2_dp4a_q8_1", 2u32)
     };
     let module = reg.expect_module(stem)?;
     let kernel = module.kernel(entry)?;
@@ -1169,53 +1158,12 @@ pub fn indexed_moe_mmvq_q4_k_gate_up(
     top_k: usize,
     n_sb_per_row: usize,
 ) -> Result<()> {
-    // V2.4.a productisation: r4 variant is the default — 4 rows per block
-    // (quarter-warp per row) halves block count again vs r2 and quarters vs
-    // the V1.7.6 baseline. Measured +19 % pp=512 on Qwen3.6-35B-A3B Mesh<2>,
-    // +7 % decode. Parity bit-exact with llama.cpp on 8-token greedy.
-    //
-    // A/B knobs (regression compare only):
-    //   FLAMBEAU_VARIANT=baseline → unfused scalar
-    //   FLAMBEAU_VARIANT=dp4a_r1  → single-row DP4A (prior default)
-    //   FLAMBEAU_VARIANT=dp4a_r2  → r2 (half-warp per row)
-    let variant = std::env::var("FLAMBEAU_VARIANT").ok();
-    let force_baseline = variant.as_deref() == Some("baseline");
-    let force_dp4a_r1 = variant.as_deref() == Some("dp4a_r1");
-    let force_dp4a_r2 = variant.as_deref() == Some("dp4a_r2");
-    let force_dp4a_r4 = variant.as_deref() == Some("dp4a_r4");
-    let force_dp4a_r8 = variant.as_deref() == Some("dp4a_r8");
-    let (stem, entry) = if force_baseline {
-        (
-            "indexed_moe_mmvq_q4_k_gate_up",
-            "flambeau_indexed_moe_mmvq_q4_k_gate_up_q8_1",
-        )
-    } else if force_dp4a_r1 {
-        (
-            "indexed_moe_mmvq_q4_k_gate_up_dp4a",
-            "flambeau_indexed_moe_mmvq_q4_k_gate_up_dp4a_q8_1",
-        )
-    } else if force_dp4a_r2 {
-        (
-            "indexed_moe_mmvq_q4_k_gate_up_r2_dp4a",
-            "flambeau_indexed_moe_mmvq_q4_k_gate_up_r2_dp4a_q8_1",
-        )
-    } else if force_dp4a_r8 {
-        (
-            "indexed_moe_mmvq_q4_k_gate_up_r8_dp4a",
-            "flambeau_indexed_moe_mmvq_q4_k_gate_up_r8_dp4a_q8_1",
-        )
-    } else if force_dp4a_r4 {
-        (
-            "indexed_moe_mmvq_q4_k_gate_up_r4_dp4a",
-            "flambeau_indexed_moe_mmvq_q4_k_gate_up_r4_dp4a_q8_1",
-        )
-    } else {
-        // Default: r4
-        (
-            "indexed_moe_mmvq_q4_k_gate_up_r4_dp4a",
-            "flambeau_indexed_moe_mmvq_q4_k_gate_up_r4_dp4a_q8_1",
-        )
-    };
+    // V2.4.a productisation: r4 variant — 4 rows per block (quarter-warp
+    // per row) halves block count vs r2 and quarters vs the V1.7.6 baseline.
+    // Measured +19 % pp=512 on Qwen3.6-35B-A3B Mesh<2>, +7 % decode.
+    // Parity bit-exact with llama.cpp on 8-token greedy.
+    let stem = "indexed_moe_mmvq_q4_k_gate_up_r4_dp4a";
+    let entry = "flambeau_indexed_moe_mmvq_q4_k_gate_up_r4_dp4a_q8_1";
     let module = reg.expect_module(stem)?;
     let kernel = module.kernel(entry)?;
 
@@ -1240,32 +1188,11 @@ pub fn indexed_moe_mmvq_q4_k_gate_up(
     args.push(&n_tokens_i);
     args.push(&top_k_i);
     args.push(&nb_i);
-    let cfg = if force_dp4a_r8 {
-        // r8: 8 rows per block via eighth-wave-per-row; grid.x /= 8.
-        LaunchCfg {
-            grid: ((n_rows as u32).div_ceil(8), (n_tokens * top_k) as u32, 1),
-            block: (64, 1, 1),
-            shared_bytes: 0,
-        }
-    } else if force_dp4a_r2 {
-        LaunchCfg {
-            grid: ((n_rows as u32).div_ceil(2), (n_tokens * top_k) as u32, 1),
-            block: (64, 1, 1),
-            shared_bytes: 0,
-        }
-    } else if force_baseline || force_dp4a_r1 {
-        LaunchCfg {
-            grid: (n_rows as u32, (n_tokens * top_k) as u32, 1),
-            block: (64, 1, 1),
-            shared_bytes: 0,
-        }
-    } else {
-        // Default: r4 (4 rows per block, quarter-wave-per-row).
-        LaunchCfg {
-            grid: ((n_rows as u32).div_ceil(4), (n_tokens * top_k) as u32, 1),
-            block: (64, 1, 1),
-            shared_bytes: 0,
-        }
+    // r4: 4 rows per block (quarter-wave-per-row).
+    let cfg = LaunchCfg {
+        grid: ((n_rows as u32).div_ceil(4), (n_tokens * top_k) as u32, 1),
+        block: (64, 1, 1),
+        shared_bytes: 0,
     };
     unsafe { kernel.launch(stream, cfg, args)? };
     Ok(())

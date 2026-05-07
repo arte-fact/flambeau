@@ -2,7 +2,7 @@
 
 - **Class:** X
 - **Default state:** `n/a`
-- **Generated:** 2026-05-07T12:37:51+00:00
+- **Generated:** 2026-05-07T13:10:25+00:00
 - **Spec runs/cell:** 3 (+ 2 warmup)
 
 **Description.** Smoke bench 35B-A3B/pp2tp2 N=1/4
@@ -15,13 +15,13 @@
 
 | value | n | prefill ms | decode ms | tg64 tok/s | Δ vs default | correct? | VRAM peak GB | err |
 |---|---:|---:|---:|---:|---:|---|---:|---|
-| `unset` | 3 | 3897 | 1449 | 44.18 | — | — | 25.90 |  |
+| `unset` | 3 | 3891 | 1433 | 44.65 | — | — | 25.82 |  |
 
 ### qwen36-35b-a3b-q4_0 / pp2tp2 / N=4
 
 | value | n | prefill ms | decode ms | aggregate tg64 tok/s | Δ vs default | correct? | VRAM peak GB | err |
 |---|---:|---:|---:|---:|---:|---|---:|---|
-| `unset` | 3 | 11036 | 2162 | 114.93 | — | — | 26.13 |  |
+| `unset` | 3 | 11011 | 2131 | 116.04 | — | — | 26.13 |  |
 
 ## Triage
 

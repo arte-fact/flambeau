@@ -117,12 +117,9 @@ pub fn forward_moe_ffn_decode_tp(
         hidden,
     )?;
 
-    // 4+5. CN-80B-19d — fused SwiGLU + Q8_1 quantise. Default-on;
-    // FLAMBEAU_VARIANT=baseline opts back to the V2.23.b.2 unfused pair
-    // (swiglu_f32_to_f16 + quantize_f16_q8_1).
+    // 4+5. CN-80B-19d — fused SwiGLU + Q8_1 quantise.
     let n_total = top_k * local_inter;
-    let fuse_swiglu_quant = std::env::var("FLAMBEAU_VARIANT").as_deref() != Ok("baseline")
-        && n_total % 32 == 0;
+    let fuse_swiglu_quant = n_total % 32 == 0;
     if fuse_swiglu_quant {
         flambeau_ops::hip::mlp::swiglu_f32_to_q8_1(
             ops,
@@ -242,8 +239,7 @@ pub fn forward_shared_expert_decode_tp(
     quantize_f16_q8_1(ops, stream, x_norm, scratch.x_q8_1, hidden)
         .context("shexp (TP) x_norm → Q8_1")?;
 
-    let fuse_gate_up = std::env::var("FLAMBEAU_VARIANT").as_deref() != Ok("baseline")
-        && ffn_gate_shexp.dtype == flambeau_quant::GgmlDType::Q8_0
+    let fuse_gate_up = ffn_gate_shexp.dtype == flambeau_quant::GgmlDType::Q8_0
         && ffn_up_shexp.dtype == flambeau_quant::GgmlDType::Q8_0;
     if fuse_gate_up {
         flambeau_ops::hip::qmatmul::mmvq_q8_0_gate_up(
@@ -283,8 +279,7 @@ pub fn forward_shared_expert_decode_tp(
     }
 
     // CN-80B-19d — fused swiglu + Q8_1 quantise (TP shared expert).
-    let fuse_shexp_swiglu_quant = std::env::var("FLAMBEAU_VARIANT").as_deref() != Ok("baseline")
-        && local_inter % 32 == 0;
+    let fuse_shexp_swiglu_quant = local_inter % 32 == 0;
     if fuse_shexp_swiglu_quant {
         flambeau_ops::hip::mlp::swiglu_f32_to_q8_1(
             ops,
@@ -730,14 +725,9 @@ pub fn forward_shared_expert_prefill_tp(
     quantize_f16_q8_1(ops, stream, x_norm, scratch.x_q8_1, n_tokens * hidden)
         .context("shexp (TP) prefill x_norm → Q8_1")?;
 
-    let fuse_gate_up = std::env::var("FLAMBEAU_VARIANT").as_deref() != Ok("baseline")
-        && ffn_gate_shexp.dtype == flambeau_quant::GgmlDType::Q8_0
-        && ffn_up_shexp.dtype == flambeau_quant::GgmlDType::Q8_0
-        && n_tokens == 1;
     // Fused gate+up MMVQ has no L>1 variant; for prefill, the per-token
     // dispatch is dropped and we always go through the standard
     // run_qmatmul path which handles n_tokens > 1 natively.
-    let _ = fuse_gate_up;
     super::common::run_qmatmul_from_tensor(
         ops,
         stream,

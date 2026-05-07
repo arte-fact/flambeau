@@ -212,21 +212,6 @@ pub fn forward_one_token_pp(
         flambeau_backend_hip::profile::mark("embed_done", rank0, rank0.default_stream())?;
     }
 
-    // V2.27.a-i3 — opt-in decode graph capture gate. Per-rank layer
-    // chain captured on first call, replayed with slot updates on
-    // subsequent calls. Embed (rank 0), peer-copy, and argmax
-    // (rank N-1) stay uncaptured regardless.
-    //
-    // V2.27.a-i5 — additionally fold the output head
-    // (rmsnorm_quant_q8_1 + lm_head mmvq) on the LAST rank into that
-    // rank's captured graph. argmax_token_host stays uncaptured
-    // (host-side scan).
-    // Graph capture for decode is HALT-BROKEN on hybrid pp2tp2 (3/9
-    // cells crashed on the env-impact sweep). FLAMBEAU_DECODE_GRAPH=1
-    // env was deleted in S3; the capture/replay branches stay in source
-    // for now (DCE'd by the constant gate) and will be surgically
-    // removed in a follow-up.
-    let use_decode_graph = false;
     let last_idx = n_ranks - 1;
     // Hoist output-head tensor references before the rank loop so the
     // last rank's capture closure can borrow them.
@@ -270,13 +255,6 @@ pub fn forward_one_token_pp(
         )?;
 
         let shard = &model.shards[rank_idx];
-        // Split-borrow: graph_cache_decode[rank] and per_rank[rank] are
-        // disjoint fields of scratch.
-        let graph_slot_ptr: *mut Option<GraphCacheDecodeEntry> = if use_decode_graph {
-            &mut scratch.graph_cache_decode[rank_idx]
-        } else {
-            std::ptr::null_mut()
-        };
         let rank_scratch = &mut scratch.per_rank[rank_idx];
         let rank_session = &mut session.per_rank[rank_idx];
         let layer_scratch = rank_scratch
@@ -284,168 +262,6 @@ pub fn forward_one_token_pp(
             .as_mut()
             .context("per-rank LayerForwardScratch missing")?;
 
-        // SAFETY: pointer non-null iff use_decode_graph; unique derivation
-        // from &mut, no aliasing live here.
-        let graph_slot: Option<&mut Option<GraphCacheDecodeEntry>> = if use_decode_graph {
-            Some(unsafe { &mut *graph_slot_ptr })
-        } else {
-            None
-        };
-        let needs_capture = graph_slot.as_ref().map(|s| s.is_none()).unwrap_or(false);
-        let needs_replay = graph_slot.as_ref().map(|s| s.is_some()).unwrap_or(false);
-
-        if needs_replay {
-            // === REPLAY branch ===
-            let entry = graph_slot.as_ref().unwrap().as_ref().unwrap();
-            let n_layers = entry.layer_slots.len();
-            // Stable per-layer backing for the updated pos scalar.
-            let mut n_tokens_kv_vals: Vec<i32> = vec![0; n_layers];
-            for local_idx in 0..n_layers {
-                let Some(slots) = entry.layer_slots[local_idx] else { continue };
-                let layer_cache = &rank_session.caches[local_idx];
-                let LayerCache::FullAttn(kv) = layer_cache else {
-                    bail!("graph-capture decode: layer {local_idx} on rank {rank_idx} expected FullAttn cache");
-                };
-                n_tokens_kv_vals[local_idx] = (position + 1) as i32;
-                // F16 → 2 bytes per element.
-                let per_token_bytes = kv.n_heads() * kv.head_dim() * 2;
-                let k_dst = kv.k_buffer().offset_bytes(position * per_token_bytes);
-                let v_dst = kv.v_buffer().offset_bytes(position * per_token_bytes);
-                // SAFETY: n_tokens_kv_vals lives through the launch below;
-                // k_dst/v_dst are device pointers valid for the exec's lifetime.
-                unsafe {
-                    entry.exec.set_slot(
-                        slots.full_attn.n_tokens_kv_slot,
-                        &n_tokens_kv_vals[local_idx],
-                    )?;
-                    entry.exec.set_memcpy_slot(slots.full_attn.k_append_slot, k_dst)?;
-                    entry.exec.set_memcpy_slot(slots.full_attn.v_append_slot, v_dst)?;
-                }
-                // Update the persistent positions_host in the FullAttnScratch
-                // so the captured HtoD memcpy reads the new position at replay.
-                layer_scratch
-                    .full_attn
-                    .as_mut()
-                    .context("full_attn scratch missing")?
-                    .positions_host[0] = position as i32;
-            }
-            entry.exec.launch(device.default_stream())?;
-            // Manually bump each full-attn layer's tail by 1 (captured
-            // kv_cache_append_hip_slot's Rust-side bump only ran at capture).
-            for local_idx in 0..n_layers {
-                if entry.layer_slots[local_idx].is_none() { continue; }
-                if let LayerCache::FullAttn(kv) = &mut rank_session.caches[local_idx] {
-                    kv.bump_tail(1).map_err(|e| anyhow::anyhow!(
-                        "bump_tail rank={rank_idx} layer={local_idx}: {e}"
-                    ))?;
-                }
-            }
-            continue;  // skip uncaptured per-layer loop below
-        }
-
-        if needs_capture {
-            // === CAPTURE branch (first decode call on this rank) ===
-            let layer_slots: Vec<Option<super::layer::LayerDecodeSlots>> = shard
-                .layers
-                .iter()
-                .map(|lw| {
-                    if cfg.is_recurrent(lw.layer_idx) {
-                        None
-                    } else {
-                        Some(super::layer::LayerDecodeSlots {
-                            full_attn: super::attn::AttnDecodeSlots {
-                                n_tokens_kv_slot: flambeau_backend_hip::ScalarSlot::new(),
-                                k_append_slot: flambeau_backend_hip::MemcpySlot::new(),
-                                v_append_slot: flambeau_backend_hip::MemcpySlot::new(),
-                            },
-                        })
-                    }
-                })
-                .collect();
-            let hidden_a = rank_scratch.hidden_a;
-            let hidden_b = rank_scratch.hidden_b;
-            // V2.27.a-i5 — take output_head scratch as a separate
-            // split-borrow so the capture closure can run the output
-            // head on the last rank.
-            let output_head_scratch_opt: Option<&mut OutputHeadScratch> =
-                rank_scratch.output_head.as_mut();
-            let is_last_rank = rank_idx == last_idx;
-            let layer_slots_clone = layer_slots.clone();
-            let exec = flambeau_backend_hip::HipGraphExec::capture(
-                device.default_stream(),
-                |capture_s| {
-                    let (mut x_in, mut x_out) = (hidden_a, hidden_b);
-                    for (local_idx, layer_weights) in shard.layers.iter().enumerate() {
-                        let layer_cache = &mut rank_session.caches[local_idx];
-                        forward_layer_decode(
-                            &shard.ops,
-                            capture_s,
-                            device,
-                            cfg,
-                            layer_weights,
-                            layer_cache,
-                            layer_scratch,
-                            x_in,
-                            x_out,
-                            position,
-                            layer_slots_clone[local_idx],
-                        )
-                        .map_err(|e| flambeau_core::DeviceError::Backend {
-                            backend: "hip",
-                            code: -1,
-                            message: format!(
-                                "capture decode rank {} layer {}: {e}",
-                                rank_idx, layer_weights.layer_idx
-                            ),
-                        })?;
-                        std::mem::swap(&mut x_in, &mut x_out);
-                    }
-                    // Tail memcpy to land final hidden in hidden_a for the
-                    // peer-copy / output-head consumer. Captured graph bakes
-                    // in whichever branch the parity of n_layers selected.
-                    if x_in != hidden_a {
-                        // SAFETY: both pointers live; hidden_bytes bounded.
-                        unsafe {
-                            device.memcpy_async(
-                                capture_s,
-                                CopyDirection::DeviceToDevice,
-                                hidden_a,
-                                x_in,
-                                hidden_bytes,
-                            )?;
-                        }
-                    }
-                    // V2.27.a-i5 — fold output head on last rank into
-                    // the captured graph. rmsnorm_quant_q8_1 + mmvq.
-                    // argmax stays uncaptured (host-side scan after
-                    // the graph replay).
-                    if is_last_rank {
-                        if let Some(output_head_scratch) = output_head_scratch_opt {
-                            forward_output_head_decode(
-                                &shard.ops,
-                                capture_s,
-                                cfg,
-                                output_norm,
-                                lm_head,
-                                output_head_scratch,
-                                hidden_a,
-                            )
-                            .map_err(|e| flambeau_core::DeviceError::Backend {
-                                backend: "hip",
-                                code: -1,
-                                message: format!("capture output head: {e}"),
-                            })?;
-                        }
-                    }
-                    Ok(())
-                },
-            )?;
-            exec.launch(device.default_stream())?;
-            *graph_slot.unwrap() = Some(GraphCacheDecodeEntry { exec, layer_slots });
-            continue;
-        }
-
-        // === UNCAPTURED branch (legacy sync decode) ===
         let (mut x_in, mut x_out) = (rank_scratch.hidden_a, rank_scratch.hidden_b);
         for (local_idx, layer_weights) in shard.layers.iter().enumerate() {
             let layer_cache = &mut rank_session.caches[local_idx];
@@ -542,17 +358,15 @@ pub fn forward_one_token_pp(
         .output_head
         .as_mut()
         .context("last rank missing output_head scratch")?;
-    if !use_decode_graph {
-        forward_output_head_decode(
-            &last_shard.ops,
-            last_device.default_stream(),
-            cfg,
-            output_norm,
-            lm_head,
-            output_head_scratch,
-            last_scratch.hidden_a,
-        )?;
-    }
+    forward_output_head_decode(
+        &last_shard.ops,
+        last_device.default_stream(),
+        cfg,
+        output_norm,
+        lm_head,
+        output_head_scratch,
+        last_scratch.hidden_a,
+    )?;
 
     // 4. Host argmax.
     argmax_token_host(

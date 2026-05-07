@@ -881,86 +881,17 @@ fn mmq_lds_x64_params(stem: &str) -> Result<(u32, u32)> {
 
 impl Recipe {
     fn from_impl_id(impl_id: &str) -> Result<Self> {
-        // A/B variant override: FLAMBEAU_VARIANT=dp4a swaps MMVQ kernels to
-        // their DP4A variants without touching the dispatch table. Lets
-        // `ab_decode` compare variants by setting env per-side.
-        // V1.7.6.f productisation: DP4A variants are the default. Env var
-        // kept as an opt-out / A/B escape hatch — `FLAMBEAU_VARIANT=baseline`
-        // reverts to the pre-DP4A scalar kernels, `=dp4a` or `=llamacpp_style`
-        // pins older experiments. Default (env unset) picks the fastest
-        // measured path: VDR=2 for Q8_0, DP4A for Q6_K, Q4_K MoE DP4A via moe.rs.
-        let variant = std::env::var("FLAMBEAU_VARIANT").ok();
-        let force_baseline = variant.as_deref() == Some("baseline");
-        let force_dp4a_only = variant.as_deref() == Some("dp4a");
-        let force_llamacpp = variant.as_deref() == Some("llamacpp_style");
-        let force_q8_r4 = variant.as_deref() == Some("q8_r4");
-        let force_q4_1_wave64 = variant.as_deref() == Some("q4_1_wave64");
-        let force_q4_1_tile16 = variant.as_deref() == Some("q4_1_tile16");
-        let force_q4_k_r4 = variant.as_deref() == Some("q4_k_r4");
-        let force_q8_tile32 = variant.as_deref() == Some("q8_tile32");
-        let impl_id = match (impl_id, force_baseline, force_dp4a_only, force_llamacpp) {
-            // V2.7: baseline-opt-out reverts tile16 → tile8 for regression A/B.
-            // Must precede the general `force_baseline` catch-all below so the
-            // MMQ rename happens even when baseline is requested.
-            ("qmatmul_q8_0_mmq_wave64_tile16_gfx906", true, _, _) => {
-                "qmatmul_q8_0_mmq_wave64_gfx906"
-            }
-            // V2.13 attempted FLAMBEAU_Q4_1_WAVE64 intercept. NULL RESULT:
-            // wave64 single-warp Q4_1 was 3.5× SLOWER than 4warp_lds
-            // (1319 → 4647 ms / 528 calls). Q4_1's 32-element block is 8×
-            // smaller than K-quants' 256-element super-block, so wave64
-            // emits 16× more tile-blocks for the same output area and loses
-            // on launch overhead. 4warp_lds's 128×64 tile + activation LDS
-            // tiling is structurally correct for finer-grained quants;
-            // a proper Q4_1 improvement needs 4warp-level work, not V2.3.b
-            // single-warp wave64. Kernel kept in-tree for future reference.
-            // opt-out to pre-DP4A scalar
-            (_, true, _, _) => impl_id,
-            // llamacpp-style (A/B research only)
-            ("qmatmul_q8_0_mmvq_single_row_gfx906", _, _, true) => {
-                "qmatmul_q8_0_mmvq_llamacpp_style_gfx906"
-            }
-            // Old dp4a-only variant (VDR=1) for regression bench
-            ("qmatmul_q8_0_mmvq_single_row_gfx906", _, true, _) => {
-                "qmatmul_q8_0_mmvq_dp4a_gfx906"
-            }
-            // V2.31.b: A/B toggle for Q8_0 r4 MMVQ.
-            ("qmatmul_q8_0_mmvq_single_row_gfx906", _, _, _) if force_q8_r4 => {
-                "qmatmul_q8_0_mmvq_r4_dp4a_gfx906"
-            }
-            // V2.31.f: A/B Q4_1 MMQ variants at 100 W (re-test V2.29.e's
-            // null result which was at 200 W envelope).
-            ("qmatmul_q4_1_mmq_4warp_lds_gfx906", _, _, _) if force_q4_1_wave64 => {
-                "qmatmul_q4_1_mmq_wave64_gfx906"
-            }
-            ("qmatmul_q4_1_mmq_4warp_lds_gfx906", _, _, _) if force_q4_1_tile16 => {
-                "qmatmul_q4_1_mmq_wave64_tile16_gfx906"
-            }
-            // V2.31.e: A/B Q4_K MMVQ r4 (quarter-wave per row). Targets the
-            // Qwen3-Coder-30B dense attention Q/K/V/O projections (non-MoE
-            // path) where mmvq_q4_k_r2 is 30 % of decode wall.
-            ("qmatmul_q4_K_mmvq_nw1_r2_gfx906", _, _, _) if force_q4_k_r4 => {
-                "qmatmul_q4_K_mmvq_nw1_r4_gfx906"
-            }
-            // V2.31.d: A/B Q8_0 MMQ TILE_N=32 variant. Targets 27B prefill
-            // where mmq_q8_0_wave64_tile16 is 87 % of wall.
-            ("qmatmul_q8_0_mmq_wave64_tile16_gfx906", _, _, _) if force_q8_tile32 => {
-                "qmatmul_q8_0_mmq_wave64_tile32_gfx906"
-            }
-            // C9-followup — Q8_0 t128_vdr2 (combine occupancy + ILP).
-            // Default-baked after multi-run bench (≥+3 % on Qwen3.6-27B-Q8_0
-            // and Qwen3.5-27B-Q8_0). Was opt-out via FLAMBEAU_Q8_0_MMVQ_T128_VDR2;
-            // env removed in S3.
-            ("qmatmul_q8_0_mmvq_single_row_gfx906", _, _, _) => {
+        // C9-followup — Q8_0 t128_vdr2 (combine occupancy + ILP).
+        // Single-row Q8_0 dispatch rows are aliased to the t128_vdr2 kernel
+        // (≥+3 % on Qwen3.6-27B-Q8_0 and Qwen3.5-27B-Q8_0).
+        let impl_id = match impl_id {
+            "qmatmul_q8_0_mmvq_single_row_gfx906" => {
                 "qmatmul_q8_0_mmvq_t128_vdr2_gfx906"
             }
-            ("qmatmul_q8_0_mmvq_dp4a_vdr2_gfx906", _, _, _) => {
+            "qmatmul_q8_0_mmvq_dp4a_vdr2_gfx906" => {
                 "qmatmul_q8_0_mmvq_t128_vdr2_gfx906"
             }
-            // V2.3.d.1: Q6_K DP4A runtime intercept removed — dispatch row
-            // `qmatmul_q6_K_mmvq_dp4a_gfx906` now points at the real DP4A
-            // kernel directly with its own sweep cert.
-            _ => impl_id,
+            other => other,
         };
         Ok(match impl_id {
             "qmatmul_q8_0_mmvq_single_row_gfx906" => Self {

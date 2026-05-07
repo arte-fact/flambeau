@@ -572,167 +572,59 @@ fn forward_one_token_hybrid_inner(
         // output. This isolates the wall-time question (is graph
         // capture worth the implementation cost on hybrid TP?) from
         // the correctness work (iter 2 — slot binding).
-        // FLAMBEAU_DECODE_GRAPH was HALT-BROKEN on hybrid; env removed in S3.
-        let do_graph = false;
-        let stage_n_ranks = stage.sub_cluster.ranks();
-        let cache_populated = do_graph
-            && scratch.decode_graphs.get(s).is_some_and(|g| g.is_some());
-
-        if cache_populated {
-            // === REPLAY ===
-            stage_dev0.bind()?;
-            scratch.decode_graphs[s]
-                .as_ref()
-                .unwrap()
-                .launch(stage_stream0)
-                .with_context(|| format!("hybrid stage {s} shared-graph replay"))?;
-            // Sync every rank's stream — the captured fan-out runs on
-            // HIP runtime worker streams whose completion gets joined
-            // back to the originating stream0, but the cross-stage
-            // hand-off + per-stage profiling marks need every original
-            // rank's stream quiet.
-            for r in 0..stage_n_ranks {
-                let device = stage.sub_cluster.device(r);
-                device.bind()?;
-                device.default_stream().synchronize()?;
-            }
-        } else {
-            let run_layer_loop = |stage_scratch: &mut crate::forward::ShardedForwardOneTokenScratchTp,
-                                  stage_session: &mut crate::hybrid::Qwen3MoEHybridStageSession|
-             -> Result<()> {
-                for il in stage.layer_range.clone() {
-                    let il_cache = il - range_start;
-                    let is_full_attn = !cfg.is_recurrent(il);
-                    if is_full_attn {
-                        forward_full_attn_layer_tp(
-                            &stage.tp_model,
-                            stage_scratch,
-                            &stage.sub_cluster,
-                            stage_ar,
-                            &mut stage_session.caches,
-                            il,
-                            il_cache,
-                            position,
-                            world,
-                        )
-                        .with_context(|| format!("hybrid stage {s} full-attn layer {il}"))?;
-                        if flambeau_backend_hip::profile::is_enabled() {
-                            stage_dev0.bind()?;
-                            flambeau_backend_hip::profile::mark(
-                                "hyb_dec_full_attn",
-                                stage_dev0,
-                                stage_stream0,
-                            )?;
-                        }
-                    } else {
-                        forward_gdn_layer_tp(
-                            &stage.tp_model,
-                            stage_scratch,
-                            &stage.sub_cluster,
-                            stage_ar,
-                            &mut stage_session.caches,
-                            il,
-                            il_cache,
-                            world,
-                        )
-                        .with_context(|| format!("hybrid stage {s} gdn layer {il}"))?;
-                        if flambeau_backend_hip::profile::is_enabled() {
-                            stage_dev0.bind()?;
-                            flambeau_backend_hip::profile::mark(
-                                "hyb_dec_gdn",
-                                stage_dev0,
-                                stage_stream0,
-                            )?;
-                        }
-                    }
-                }
+        for il in stage.layer_range.clone() {
+            let il_cache = il - range_start;
+            let is_full_attn = !cfg.is_recurrent(il);
+            if is_full_attn {
+                forward_full_attn_layer_tp(
+                    &stage.tp_model,
+                    stage_scratch,
+                    &stage.sub_cluster,
+                    stage_ar,
+                    &mut stage_session.caches,
+                    il,
+                    il_cache,
+                    position,
+                    world,
+                )
+                .with_context(|| format!("hybrid stage {s} full-attn layer {il}"))?;
                 if flambeau_backend_hip::profile::is_enabled() {
                     stage_dev0.bind()?;
                     flambeau_backend_hip::profile::mark(
-                        "hyb_dec_post_stage",
+                        "hyb_dec_full_attn",
                         stage_dev0,
                         stage_stream0,
                     )?;
                 }
-                Ok(())
-            };
-
-            if do_graph {
-                // === CAPTURE attempt (first decode call on this stage) ===
-                // CN-80B-20 finding: ROCm 7.1.1 multi-stream
-                // capture-to-shared-graph + cross-stream events is
-                // broken. Both the closure (HIP rejects the first
-                // kernel launch with "invalid argument") and
-                // end-capture (returns no usable graph) fail under
-                // various conditions. Strategy: try capture once; on
-                // any failure, fall through to eager and DISABLE
-                // further graph attempts on this scratch (poison the
-                // slot with a placeholder we never trip again).
-                let stream_refs: Vec<&flambeau_backend_hip::HipStream> = (0..stage_n_ranks)
-                    .map(|r| stage.sub_cluster.device(r).default_stream())
-                    .collect();
-                // We swallow any closure error inside the FnOnce — ROCm
-                // can leave streams in capture mode and a bare ? would
-                // skip the cleanup path, hosing the rest of the run.
-                let exec_result = flambeau_backend_hip::HipGraphExec::capture_into_shared_graph(
-                    &stream_refs,
-                    || {
-                        // Best-effort: if the layer loop kernel-launch
-                        // fails in capture mode, report a generic
-                        // backend error so end-capture still runs and
-                        // the streams are returned to non-capture state.
-                        if let Err(_e) = run_layer_loop(stage_scratch, stage_session) {
-                            return Err(flambeau_core::DeviceError::Backend {
-                                backend: "hip",
-                                code: -1,
-                                message: format!("layer loop kernel failed during capture: stage {s}"),
-                            });
-                        }
-                        Ok(())
-                    },
-                );
-                match exec_result {
-                    Ok(exec) => {
-                        // Future: working ROCm. Replay once for first
-                        // step's output, cache for subsequent steps.
-                        stage_dev0.bind()?;
-                        exec.launch(stage_stream0)
-                            .with_context(|| format!("hybrid stage {s} first replay (post-capture)"))?;
-                        for r in 0..stage_n_ranks {
-                            let device = stage.sub_cluster.device(r);
-                            device.bind()?;
-                            device.default_stream().synchronize()?;
-                        }
-                        scratch.decode_graphs[s] = Some(exec);
-                    }
-                    Err(_) => {
-                        // ROCm 7.1.1 path: capture failed (closure or
-                        // end-capture). Some/all kernels may have been
-                        // partially issued during capture; their output
-                        // state is undefined. Re-run the whole layer
-                        // loop eagerly to overwrite. This step's
-                        // generated token will be VALID; subsequent
-                        // steps continue eagerly because we never
-                        // populated `decode_graphs[s]`. To avoid
-                        // re-trying capture on every step (which would
-                        // tank perf), poison the slot.
-                        // Note: run_layer_loop appends to KV caches and
-                        // advances GDN state — running it twice would
-                        // double-append. Skip the second run if the
-                        // capture's closure fully drained the layer
-                        // loop. Heuristic: under ROCm 7.1.1 the
-                        // closure errors EARLY (first kernel) so the
-                        // captured layer state is mostly fresh; we
-                        // re-run to recover. This may produce
-                        // double-state on a few layers, accepted as
-                        // env-gated experimental behavior.
-                        run_layer_loop(stage_scratch, stage_session)?;
-                    }
-                }
             } else {
-                // === EAGER (env not set) ===
-                run_layer_loop(stage_scratch, stage_session)?;
+                forward_gdn_layer_tp(
+                    &stage.tp_model,
+                    stage_scratch,
+                    &stage.sub_cluster,
+                    stage_ar,
+                    &mut stage_session.caches,
+                    il,
+                    il_cache,
+                    world,
+                )
+                .with_context(|| format!("hybrid stage {s} gdn layer {il}"))?;
+                if flambeau_backend_hip::profile::is_enabled() {
+                    stage_dev0.bind()?;
+                    flambeau_backend_hip::profile::mark(
+                        "hyb_dec_gdn",
+                        stage_dev0,
+                        stage_stream0,
+                    )?;
+                }
             }
+        }
+        if flambeau_backend_hip::profile::is_enabled() {
+            stage_dev0.bind()?;
+            flambeau_backend_hip::profile::mark(
+                "hyb_dec_post_stage",
+                stage_dev0,
+                stage_stream0,
+            )?;
         }
 
         // Hand-off: stage s+1's per-rank `hidden_a` ← stage s's rank-0

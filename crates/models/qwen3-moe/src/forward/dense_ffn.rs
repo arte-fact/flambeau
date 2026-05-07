@@ -161,9 +161,7 @@ pub fn forward_dense_ffn_decode(
     //      equivalence to two independent single-row calls. Disabled only
     //      by the coarse `FLAMBEAU_VARIANT=baseline` or the specific
     //      `FLAMBEAU_DENSE_GATE_UP=unfused`.
-    let global_baseline = std::env::var("FLAMBEAU_VARIANT").as_deref() == Ok("baseline");
-    let fuse_gate_up = !global_baseline
-        && dense.ffn_gate.dtype == flambeau_quant::GgmlDType::Q8_0
+    let fuse_gate_up = dense.ffn_gate.dtype == flambeau_quant::GgmlDType::Q8_0
         && dense.ffn_up.dtype == flambeau_quant::GgmlDType::Q8_0;
     if fuse_gate_up {
         mmvq_q8_0_gate_up(

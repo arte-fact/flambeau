@@ -307,14 +307,11 @@ pub fn forward_gdn_decode(
     // skipped this branch and ran two separate mmvqs). The extended
     // gate_up kernel handles asymmetric n_rows by grid=max(n1,n2) with
     // per-output early-return.
-    let variant_off = std::env::var("FLAMBEAU_VARIANT").as_deref() == Ok("baseline");
     let qkv_dtype = weights.attn_qkv.dtype;
     let gate_dtype = weights.attn_gate.dtype;
-    let fuse_qkv_gate_q8_0 = !variant_off
-        && qkv_dtype == flambeau_quant::GgmlDType::Q8_0
+    let fuse_qkv_gate_q8_0 = qkv_dtype == flambeau_quant::GgmlDType::Q8_0
         && gate_dtype == flambeau_quant::GgmlDType::Q8_0;
-    let fuse_qkv_gate_q4_0 = !variant_off
-        && qkv_dtype == flambeau_quant::GgmlDType::Q4_0
+    let fuse_qkv_gate_q4_0 = qkv_dtype == flambeau_quant::GgmlDType::Q4_0
         && gate_dtype == flambeau_quant::GgmlDType::Q4_0;
     if fuse_qkv_gate_q8_0 {
         mmvq_q8_0_gate_up(
@@ -352,8 +349,7 @@ pub fn forward_gdn_decode(
     // ssm_alpha + ssm_beta fuse when FLAMBEAU_VARIANT=dp4a_vdr2 — both Q8_0,
     // same [num_v_heads, hidden] shape, both read x_q8_1 once. Same pattern
     // as shared-expert gate+up fusion.
-    let fuse_alpha_beta = std::env::var("FLAMBEAU_VARIANT").as_deref() != Ok("baseline")
-        && ssm_alpha.dtype == flambeau_quant::GgmlDType::Q8_0
+    let fuse_alpha_beta = ssm_alpha.dtype == flambeau_quant::GgmlDType::Q8_0
         && ssm_beta.dtype == flambeau_quant::GgmlDType::Q8_0;
     if fuse_alpha_beta {
         let (a_rows, a_k) = mat_shape(ssm_alpha)?;
@@ -476,61 +472,26 @@ pub fn forward_gdn_decode(
     // Wrong choice produces a degenerate logit attractor; see CN-80B-14.
     let n_rep = num_v_heads / num_k_heads;
     let rep_inner_layout = cfg.arch == "qwen3next";
-    let fuse_state_step = std::env::var("FLAMBEAU_VARIANT").as_deref() != Ok("baseline");
-    if fuse_state_step {
-        gdn_state_step_alphabeta_f32_s128(
-            ops,
-            stream,
-            scratch.q_norm_f32,
-            scratch.k_norm_f32,
-            v_src,
-            scratch.alpha_f32,
-            scratch.beta_f32,
-            weights.ssm_dt_bias.ptr,
-            weights.ssm_a.ptr,
-            layer_state.state,
-            layer_state.state,
-            scratch.state_out,
-            1,
-            num_v_heads,
-            1,
-            n_rep,
-            rep_inner_layout,
-        )
-        .context("gdn_state_step_alphabeta_f32_s128 (C10 fused)")?;
-    } else {
-        gdn_alpha_beta_f32(
-            ops,
-            stream,
-            scratch.alpha_f32,
-            scratch.beta_f32,
-            weights.ssm_dt_bias.ptr,
-            weights.ssm_a.ptr,
-            scratch.gate_device,
-            scratch.beta_device,
-            num_v_heads,
-            /* n_tokens = */ 1,
-        )
-        .context("gdn_alpha_beta_f32 fused")?;
-        gdn_state_step_f32_s128(
-            ops,
-            stream,
-            scratch.q_norm_f32,
-            scratch.k_norm_f32,
-            v_src,
-            scratch.gate_device,
-            scratch.beta_device,
-            layer_state.state,
-            layer_state.state,
-            scratch.state_out,
-            1,
-            num_v_heads,
-            1,
-            n_rep,
-            rep_inner_layout,
-        )
-        .context("gdn_state_step_f32_s128 (baseline)")?;
-    }
+    gdn_state_step_alphabeta_f32_s128(
+        ops,
+        stream,
+        scratch.q_norm_f32,
+        scratch.k_norm_f32,
+        v_src,
+        scratch.alpha_f32,
+        scratch.beta_f32,
+        weights.ssm_dt_bias.ptr,
+        weights.ssm_a.ptr,
+        layer_state.state,
+        layer_state.state,
+        scratch.state_out,
+        1,
+        num_v_heads,
+        1,
+        n_rep,
+        rep_inner_layout,
+    )
+    .context("gdn_state_step_alphabeta_f32_s128 (C10 fused)")?;
     flambeau_backend_hip::profile::mark("gdn_state_step", device, stream)?;
 
     // 13. ssm_norm per-head on the state-step output.
@@ -566,8 +527,7 @@ pub fn forward_gdn_decode(
             "GDN layout bug: num_v_heads * head_v_dim ({v_size}) != d_inner ({d_inner})"
         );
     }
-    let fuse_tail = std::env::var("FLAMBEAU_VARIANT").as_deref() != Ok("baseline")
-        && d_inner % 32 == 0;
+    let fuse_tail = d_inner % 32 == 0;
     if fuse_tail {
         flambeau_ops::hip::mlp::swiglu_f32_to_q8_1(
             ops,
@@ -1242,65 +1202,30 @@ pub fn forward_gdn_prefill(
     // comment in `forward_gdn_decode` for the explanation.
     let n_rep = num_v_heads / num_k_heads;
     let rep_inner_layout = cfg.arch == "qwen3next";
-    let fuse_state_step = std::env::var("FLAMBEAU_VARIANT").as_deref() != Ok("baseline");
     if let Some(ev) = state_event {
         ev.stream_wait(stream)
             .context("gdn state_step stream_wait")?;
     }
-    if fuse_state_step {
-        gdn_state_step_alphabeta_f32_s128(
-            ops,
-            stream,
-            scratch.q_norm_f32,
-            scratch.k_norm_f32,
-            scratch.v_f32,
-            scratch.alpha_f32,
-            scratch.beta_f32,
-            weights.ssm_dt_bias.ptr,
-            weights.ssm_a.ptr,
-            layer_state.state,
-            layer_state.state,
-            scratch.state_out,
-            1,
-            num_v_heads,
-            n_tokens,
-            n_rep,
-            rep_inner_layout,
-        )
-        .context("prefill gdn_state_step_alphabeta_f32_s128 (C10 fused)")?;
-    } else {
-        gdn_alpha_beta_f32(
-            ops,
-            stream,
-            scratch.alpha_f32,
-            scratch.beta_f32,
-            weights.ssm_dt_bias.ptr,
-            weights.ssm_a.ptr,
-            scratch.gate_device,
-            scratch.beta_device,
-            num_v_heads,
-            n_tokens,
-        )
-        .context("prefill gdn_alpha_beta_f32 (batched)")?;
-        gdn_state_step_f32_s128(
-            ops,
-            stream,
-            scratch.q_norm_f32,
-            scratch.k_norm_f32,
-            scratch.v_f32,
-            scratch.gate_device,
-            scratch.beta_device,
-            layer_state.state,
-            layer_state.state,
-            scratch.state_out,
-            1,
-            num_v_heads,
-            n_tokens,
-            n_rep,
-            rep_inner_layout,
-        )
-        .context("prefill gdn_state_step_f32_s128 (baseline)")?;
-    }
+    gdn_state_step_alphabeta_f32_s128(
+        ops,
+        stream,
+        scratch.q_norm_f32,
+        scratch.k_norm_f32,
+        scratch.v_f32,
+        scratch.alpha_f32,
+        scratch.beta_f32,
+        weights.ssm_dt_bias.ptr,
+        weights.ssm_a.ptr,
+        layer_state.state,
+        layer_state.state,
+        scratch.state_out,
+        1,
+        num_v_heads,
+        n_tokens,
+        n_rep,
+        rep_inner_layout,
+    )
+    .context("prefill gdn_state_step_alphabeta_f32_s128 (C10 fused)")?;
     if let Some(ev) = state_event {
         ev.record(stream).context("gdn state_step record")?;
     }

@@ -475,8 +475,7 @@ pub fn forward_shared_expert_decode(
     // 2+3. Dense gate + up matmuls. Fuse when FLAMBEAU_VARIANT=dp4a_vdr2 so
     // the shared Q8_1 activation is read once, saving one kernel launch per
     // layer per forward. Both weights must be Q8_0 for the fused path.
-    let fuse_gate_up = std::env::var("FLAMBEAU_VARIANT").as_deref() != Ok("baseline")
-        && shared.ffn_gate_shexp.dtype == flambeau_quant::GgmlDType::Q8_0
+    let fuse_gate_up = shared.ffn_gate_shexp.dtype == flambeau_quant::GgmlDType::Q8_0
         && shared.ffn_up_shexp.dtype == flambeau_quant::GgmlDType::Q8_0;
     if fuse_gate_up {
         let (g_rows, g_k) = mat_shape(&shared.ffn_gate_shexp)?;
@@ -526,8 +525,7 @@ pub fn forward_shared_expert_decode(
     // both the F16 intermediate (`activated_f16`) and 1 launch vs the
     // V2.23.b.2 swiglu_f32_to_f16 + quantize_f16_q8_1 chain. Default-on;
     // FLAMBEAU_VARIANT=baseline opts back to the unfused pair.
-    let fuse_swiglu_quant = std::env::var("FLAMBEAU_VARIANT").as_deref() != Ok("baseline")
-        && inter % 32 == 0;
+    let fuse_swiglu_quant = inter % 32 == 0;
     if fuse_swiglu_quant {
         flambeau_ops::hip::mlp::swiglu_f32_to_q8_1(
             ops,

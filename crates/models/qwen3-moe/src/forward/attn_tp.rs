@@ -206,8 +206,7 @@ pub fn forward_full_attn_decode_tp<L: CacheLayout>(
     // per request) is dwarfed by the kernel's per-call work doubling
     // (52 µs fused vs 2×22 µs unfused). Don't re-attempt without a
     // bandwidth-changing structural redesign.
-    let kv_q4_0_fused = std::env::var("FLAMBEAU_VARIANT").as_deref() != Ok("baseline")
-        && std::env::var("FLAMBEAU_KV_F16_DST").as_deref() != Ok("off")
+    let kv_q4_0_fused = std::env::var("FLAMBEAU_KV_F16_DST").as_deref() != Ok("off")
         && attn_k.dtype == flambeau_quant::GgmlDType::Q4_0
         && attn_v.dtype == flambeau_quant::GgmlDType::Q4_0
         && k_rows == v_rows;
@@ -345,7 +344,6 @@ pub fn forward_full_attn_decode_tp<L: CacheLayout>(
     let n_tokens_kv = kv_cache.current_tokens();
     let scale = (head_dim as f32).sqrt().recip();
     let use_splitk = kv_layout != Q8Contig::NAME
-        && std::env::var("FLAMBEAU_VARIANT").as_deref() != Ok("baseline")
         && n_tokens_kv > 256;
     if use_splitk {
         let chunk_size = splitk_chunk_size(n_tokens_kv);
