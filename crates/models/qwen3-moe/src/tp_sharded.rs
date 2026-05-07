@@ -1153,7 +1153,11 @@ pub struct Qwen3MoETpSession {
 
 impl Qwen3MoETpSession {
     /// Allocate per-rank layer caches for `model` over `cluster`.
-    pub fn new(model: &Qwen3MoETpModel, cluster: &HipCluster) -> Result<Self> {
+    pub fn new(
+        model: &Qwen3MoETpModel,
+        cluster: &HipCluster,
+        kv_layout: crate::session::KvLayout,
+    ) -> Result<Self> {
         let world = model.tp.world();
         if cluster.ranks() as u32 != world {
             anyhow::bail!(
@@ -1175,6 +1179,7 @@ impl Qwen3MoETpSession {
                     il,
                     world,
                     gdn_kq_replicated,
+                    kv_layout,
                 )?);
             }
             device.default_stream().synchronize()?;

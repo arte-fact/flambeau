@@ -246,8 +246,13 @@ impl EmbeddingModel {
             if cfg_for_session.context_length > self.max_tokens {
                 cfg_for_session.context_length = self.max_tokens;
             }
-            let session = Qwen3MoESession::new(&cfg_for_session, device)
-                .context("EmbeddingModel::ensure_scratch: alloc Qwen3MoESession")?;
+            // Embedding pooling never reads KV; F16 layout is fine here.
+            let session = Qwen3MoESession::new(
+                &cfg_for_session,
+                device,
+                crate::session::KvLayout::F16,
+            )
+            .context("EmbeddingModel::ensure_scratch: alloc Qwen3MoESession")?;
             self.session = Some(session);
         }
         Ok(())

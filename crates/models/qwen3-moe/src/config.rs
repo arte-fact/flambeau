@@ -219,23 +219,10 @@ impl Qwen3MoEConfig {
         // that send shorter prompts (the typical case) get the same
         // behaviour at a fraction of the VRAM. Set to 0 or unset to use
         // the model's native value.
-        let model_ctx = req_u32("context_length")?;
-        let context_length = match std::env::var("FLAMBEAU_MAX_CTX")
-            .ok()
-            .and_then(|s| s.parse::<usize>().ok())
-            .filter(|n| *n > 0)
-        {
-            Some(cap) if cap < model_ctx => {
-                tracing::info!(
-                    target: "flambeau_qwen3_moe::config",
-                    model_ctx,
-                    cap,
-                    "FLAMBEAU_MAX_CTX clamping context_length below model native"
-                );
-                cap
-            }
-            _ => model_ctx,
-        };
+        // The server clamps `context_length` to the operator-set
+        // `--ctx-cap` after this loader returns; here we just read the
+        // GGUF-native value and let the caller decide.
+        let context_length = req_u32("context_length")?;
         let num_layers = req_u32("block_count")?;
         let rms_norm_eps = req_f32("attention.layer_norm_rms_epsilon")?;
 

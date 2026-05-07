@@ -35,7 +35,6 @@ use crate::hybrid::{
     Qwen3MoEHybridModel, Qwen3MoEHybridSession, ShardedForwardOneTokenScratchHybrid,
     ShardedForwardPrefillScratchHybrid,
 };
-use crate::Qwen3MoEConfig;
 
 use super::io::{argmax_token_host, forward_embed_decode_host, forward_output_head_decode};
 use super::tp::{
@@ -838,7 +837,6 @@ pub fn forward_decode_batched_hybrid(
     // peer_copy HtoD and clobbers `hidden_a` *after* the HtoD lands,
     // producing garbled output from token 3 onwards on N≥2 batched
     // hybrid (pp2tp2) decode.
-    use flambeau_core::Stream;
     for stage in &model.stages {
         for r in 0..stage.sub_cluster.ranks() {
             let device = stage.sub_cluster.device(r);

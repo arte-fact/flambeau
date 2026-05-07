@@ -18,10 +18,7 @@ use flambeau_ops::hip::{
         quantize_q8_1_mmq, rmsnorm_f16, rmsnorm_f32, rmsnorm_quant_q8_1,
     },
     qmatmul::mmvq_q8_0_gate_up,
-    recurrent::{
-        gdn_alpha_beta_f32, gdn_split_qkv_f32, gdn_state_step_alphabeta_f32_s128,
-        gdn_state_step_f32_s128,
-    },
+    recurrent::{gdn_split_qkv_f32, gdn_state_step_alphabeta_f32_s128},
     HipDevice, HipStream, OpsRegistry,
 };
 use flambeau_quant::BlockQ8_1;

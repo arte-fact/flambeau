@@ -74,6 +74,39 @@ pub struct ServeConfig {
     /// be one of `device_ids`; the embedding model reuses the
     /// chat-cluster's `HipDevice` handle for the matching rank.
     pub embedding_device_id: Option<i32>,
+    /// Number of concurrent inflight decode slots (1-32). VRAM scales
+    /// linearly with this value (each slot owns its own KV cache).
+    pub inflight_slots: usize,
+    /// Prefill chunk size in tokens. Default 512 is the production sweet
+    /// spot across pp/tp/hybrid topologies; tune for short-prompt TTFT.
+    pub prefill_ubatch: usize,
+    /// #232 admission-control queue depth beyond the inflight pool. 0
+    /// disables (legacy unbounded queue). Default 16.
+    pub max_queue_depth: usize,
+    /// Clamp the model's `context_length`. `None` keeps the GGUF's
+    /// architectural max; many GGUFs ship 262 144 which OOMs the per-rank
+    /// KV cache on 16 GB MI50. Only shrinks.
+    pub ctx_cap: Option<usize>,
+    /// On-device GPU sampler (top-k + softmax + penalties on the head
+    /// rank, single DtoH per token). Drops sampler cost from ~12 ms to
+    /// ~0 ms on chat workloads.
+    pub gpu_sampler: bool,
+    /// Batched-decode scheduler. Coalesces concurrent decode steps via
+    /// the inflight-slot leader. Required for N>1 throughput.
+    pub batched_decode: bool,
+    /// #229 prompt prefix cache. Caches prompt-prefix KV across requests.
+    pub prefix_cache: bool,
+    /// Prefix-cache LRU size in GB. Tune to free VRAM minus model + KV.
+    pub prefix_cache_max_gb: f64,
+    /// KV cache layout: `"f16"` or `"q8"`.
+    pub kv: String,
+    /// Default system prompt prepended to chat-template requests when
+    /// none is provided.
+    pub default_system: Option<String>,
+    /// /v1/embeddings per-prompt token cap.
+    pub embedding_max_tokens: usize,
+    /// MTP head GGUF for K=1 speculative decode. `None` disables.
+    pub spec_mtp: Option<PathBuf>,
 }
 
 impl Default for MeshMode {
@@ -158,15 +191,12 @@ pub async fn serve(cfg: ServeConfig) -> Result<()> {
     // `context_length` is often the architectural max (262144 for
     // Qwen3.5/3.6) which would OOM the per-rank KV cache on consumer
     // VRAM. The clamp only shrinks; explicit increases are ignored.
-    if let Some(cap) = std::env::var("FLAMBEAU_CTX_CAP")
-        .ok()
-        .and_then(|s| s.parse::<usize>().ok())
-    {
+    if let Some(cap) = cfg.ctx_cap {
         if cap > 0 && cap < model_cfg.context_length {
             info!(
                 from = model_cfg.context_length,
                 to = cap,
-                "FLAMBEAU_CTX_CAP shrinking model.context_length"
+                "ctx-cap shrinking model.context_length"
             );
             model_cfg.context_length = cap;
         }
@@ -204,13 +234,14 @@ pub async fn serve(cfg: ServeConfig) -> Result<()> {
             // MTP-5d: opt-in MTP attachment. Loaded once, lives on
             // the last rank; per-request scratch allocated on each
             // chat completion.
-            let mtp = match std::env::var("FLAMBEAU_SPEC_MTP") {
-                Ok(path) if !path.is_empty() && path != "0" && path != "off" => {
+            let mtp = match cfg.spec_mtp.as_ref() {
+                Some(path) => {
                     let last_rank = (cluster.ranks() - 1) as usize;
                     let last_device = cluster.device(last_rank);
-                    info!(path = %path, rank = last_rank, "loading MTP head for spec-decode");
-                    let mtp_file = flambeau_quant::GgufFile::open(std::path::Path::new(&path))
-                        .with_context(|| format!("MTP gguf {path}"))?;
+                    info!(path = %path.display(), rank = last_rank,
+                          "loading MTP head for spec-decode");
+                    let mtp_file = flambeau_quant::GgufFile::open(path)
+                        .with_context(|| format!("MTP gguf {}", path.display()))?;
                     let head = flambeau_qwen3_moe::mtp::load_mtp_head(&mtp_file, last_device)
                         .context("load_mtp_head")?;
                     info!(
@@ -219,8 +250,8 @@ pub async fn serve(cfg: ServeConfig) -> Result<()> {
                     );
                     Some(head)
                 }
-                _ => {
-                    info!("FLAMBEAU_SPEC_MTP not set — spec-decode disabled");
+                None => {
+                    info!("--spec-mtp not set — spec-decode disabled");
                     None
                 }
             };
@@ -396,16 +427,15 @@ pub async fn serve(cfg: ServeConfig) -> Result<()> {
     );
 
     // P0.5 — boot-time default system prompt. Empty string treated as
-    // unset so an operator can clear a system-level config by exporting
-    // `FLAMBEAU_DEFAULT_SYSTEM=`.
-    let default_system = std::env::var("FLAMBEAU_DEFAULT_SYSTEM")
-        .ok()
-        .filter(|s| !s.is_empty());
+    // unset so an operator can clear a system-level config by passing
+    // `--default-system ""`.
+    let default_system = cfg
+        .default_system
+        .as_ref()
+        .filter(|s| !s.is_empty())
+        .cloned();
     if let Some(s) = default_system.as_deref() {
-        info!(
-            len = s.len(),
-            "default system prompt loaded from FLAMBEAU_DEFAULT_SYSTEM"
-        );
+        info!(len = s.len(), "default system prompt loaded");
     }
 
     // **P2.9b-i1 (multi-slot pool)** — pre-allocate N inflight slots
@@ -416,23 +446,12 @@ pub async fn serve(cfg: ServeConfig) -> Result<()> {
     // behaviour); N>1 enables request-level concurrency. Decode
     // kernels still serialise on the GPU stream — true batched
     // throughput lands in P2.9b-i2.
-    let prefill_ubatch: usize = std::env::var("FLAMBEAU_PREFILL_UBATCH")
-        .ok()
-        .and_then(|s| s.parse().ok())
-        .filter(|n: &usize| *n >= 128)
-        .unwrap_or(512);
-    let inflight_slots: usize = std::env::var("FLAMBEAU_INFLIGHT_SLOTS")
-        .ok()
-        .and_then(|s| s.parse().ok())
-        .filter(|n: &usize| *n >= 1 && *n <= 32)
-        .unwrap_or(1);
+    let prefill_ubatch = cfg.prefill_ubatch.max(128);
+    let inflight_slots = cfg.inflight_slots.clamp(1, 32);
     // **#232 P2.12** — admission control. Cap at `inflight_slots +
     // max_queue_depth`; new requests beyond that get 503 +
     // Retry-After: 2. `0` disables (legacy behaviour). Default 16.
-    let max_queue_depth: usize = std::env::var("FLAMBEAU_MAX_QUEUE_DEPTH")
-        .ok()
-        .and_then(|s| s.parse().ok())
-        .unwrap_or(16);
+    let max_queue_depth = cfg.max_queue_depth;
     info!(
         prefill_ubatch,
         inflight_slots,
@@ -442,7 +461,12 @@ pub async fn serve(cfg: ServeConfig) -> Result<()> {
     let mut inflight_pool: Vec<Mutex<crate::model::Inflight>> =
         Vec::with_capacity(inflight_slots);
     for slot_idx in 0..inflight_slots {
-        let slot = crate::model::Inflight::new(&model, &cluster, prefill_ubatch)
+        let slot = crate::model::Inflight::new(
+            &model,
+            &cluster,
+            prefill_ubatch,
+            flambeau_qwen3_moe::session::KvLayout::from_str(&cfg.kv),
+        )
             .with_context(|| format!("pre-alloc Inflight slot {slot_idx} at boot"))?;
         inflight_pool.push(Mutex::new(slot));
     }
@@ -456,11 +480,12 @@ pub async fn serve(cfg: ServeConfig) -> Result<()> {
         .collect();
 
     // **#229 P2.10c** — process-local prefix cache. Always constructed;
-    // `PrefixCache::enabled()` (gated by `FLAMBEAU_PREFIX_CACHE`)
-    // controls whether request handlers actually consult it. Empty
-    // index + zero-byte LRU at boot.
+    // `prefix_cache.enabled()` (set from `cfg.prefix_cache`) controls
+    // whether request handlers actually consult it. Empty index +
+    // zero-byte LRU at boot.
     let prefix_cache = Arc::new(crate::prefix_cache::PrefixCache::new(
-        crate::prefix_cache::PrefixCache::budget_from_env(),
+        crate::prefix_cache::PrefixCache::gb_to_bytes(cfg.prefix_cache_max_gb),
+        cfg.prefix_cache,
     ));
     let topology_tag = match cfg.mesh_mode {
         MeshMode::Pp => crate::prefix_cache::TopologyTag {
@@ -482,7 +507,7 @@ pub async fn serve(cfg: ServeConfig) -> Result<()> {
             tp_size,
         },
     };
-    if crate::prefix_cache::PrefixCache::enabled() {
+    if prefix_cache.enabled() {
         info!(
             chunk_tokens = prefill_ubatch,
             budget_bytes = prefix_cache.vram_budget_bytes,
@@ -536,16 +561,10 @@ pub async fn serve(cfg: ServeConfig) -> Result<()> {
                 flambeau_quant::load_from_gguf(&efile)
                     .context("load embedding tokenizer from GGUF")?;
             // **#231** — `max_tokens` caps the longest input the
-            // `/v1/embeddings` endpoint will accept. 4096 covers the
-            // realistic RAG / memory chunking patterns (most clients
-            // chunk at 512–2048 tokens). Operator override hook is
-            // V2; the env knob `FLAMBEAU_EMBEDDING_MAX_TOKENS` provides
-            // a quick escape valve in the meantime.
-            let max_emb_tokens: usize = std::env::var("FLAMBEAU_EMBEDDING_MAX_TOKENS")
-                .ok()
-                .and_then(|s| s.parse().ok())
-                .filter(|n: &usize| *n >= 16 && *n <= 32768)
-                .unwrap_or(4096);
+            // `/v1/embeddings` endpoint will accept. Default 8192;
+            // override with --embedding-max-tokens. Realistic RAG /
+            // memory chunking patterns sit at 512–2048 tokens.
+            let max_emb_tokens = cfg.embedding_max_tokens.clamp(16, 32768);
             let em = flambeau_qwen3_moe::EmbeddingModel::load(
                 &efile,
                 device,
@@ -602,6 +621,9 @@ pub async fn serve(cfg: ServeConfig) -> Result<()> {
         embedding_rank,
         in_flight: std::sync::atomic::AtomicUsize::new(0),
         max_queue_depth,
+        prefill_ubatch,
+        gpu_sampler: cfg.gpu_sampler,
+        batched_decode: cfg.batched_decode,
         remote_tools,
         agent_stats: crate::agent_stats::AgentStatsRing::default(),
         tool_call_format_default,

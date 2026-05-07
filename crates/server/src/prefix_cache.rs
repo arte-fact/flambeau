@@ -238,9 +238,13 @@ pub struct CacheHit<'a> {
 pub struct PrefixCache {
     inner: RwLock<PrefixCacheInner>,
     /// VRAM budget across all entries (bytes). Sized at construction
-    /// from `FLAMBEAU_PREFIX_CACHE_MAX_GB`. **#229** uses this for
-    /// eviction; #227 just stores it.
+    /// from `cfg.prefix_cache_max_gb`. **#229** uses this for eviction;
+    /// #227 just stores it.
     pub vram_budget_bytes: usize,
+    /// True iff this server has the prefix cache enabled. Stored at
+    /// construction (from `cfg.prefix_cache`); read by every cache-
+    /// consulting hot-path site.
+    enabled: bool,
 }
 
 #[derive(Default)]
@@ -257,29 +261,23 @@ struct PrefixCacheInner {
 }
 
 impl PrefixCache {
-    /// Construct an empty cache with the given VRAM budget.
-    pub fn new(vram_budget_bytes: usize) -> PrefixCache {
+    /// Construct an empty cache with the given VRAM budget and enabled flag.
+    pub fn new(vram_budget_bytes: usize, enabled: bool) -> PrefixCache {
         PrefixCache {
             inner: RwLock::new(PrefixCacheInner::default()),
             vram_budget_bytes,
+            enabled,
         }
     }
 
-    /// Read the `FLAMBEAU_PREFIX_CACHE_MAX_GB` env (default 2 GB).
-    pub fn budget_from_env() -> usize {
-        let gb: f64 = std::env::var("FLAMBEAU_PREFIX_CACHE_MAX_GB")
-            .ok()
-            .and_then(|s| s.parse().ok())
-            .unwrap_or(2.0);
+    /// Convert a GB budget to bytes (rounded toward zero).
+    pub fn gb_to_bytes(gb: f64) -> usize {
         (gb * 1024.0 * 1024.0 * 1024.0) as usize
     }
 
     /// True iff prefix-cache is enabled for this server.
-    /// Default OFF in V1 (set `FLAMBEAU_PREFIX_CACHE=1` to engage).
-    pub fn enabled() -> bool {
-        std::env::var("FLAMBEAU_PREFIX_CACHE")
-            .map(|v| !matches!(v.as_str(), "0" | ""))
-            .unwrap_or(false)
+    pub fn enabled(&self) -> bool {
+        self.enabled
     }
 
     /// Find the longest prefix of `keys` whose chain matches a stored

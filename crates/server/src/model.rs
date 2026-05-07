@@ -117,12 +117,16 @@ impl Inflight {
     /// Allocate per-rank caches + scratches for a single request.
     /// `prompt_len` sizes the PP prefill scratch; ignored for TP (TP
     /// loops `forward_one_token_tp` over the prompt instead).
-    pub fn new(model: &LoadedModel, cluster: &HipCluster, prompt_len: usize) -> Result<Self> {
+    pub fn new(
+        model: &LoadedModel,
+        cluster: &HipCluster,
+        prefill_ubatch: usize,
+        kv_layout: flambeau_qwen3_moe::session::KvLayout,
+    ) -> Result<Self> {
         // **chunked prefill** (Phase B / task #237). The per-layer
         // attention scratch is O(heads × L²) and OOMs past ~5k tokens
         // on a 16 GB MI50. forward_prefill_pp recursively chunks when
-        // L > scratch.max_tokens. Cap scratch ubatch to
-        // FLAMBEAU_PREFILL_UBATCH (default 512).
+        // L > scratch.max_tokens.
         //
         // **Critical:** chunk size MUST stay in the same MMQ-dispatch
         // bucket as the model expects. On gfx906 / Q4_1 the boundary
@@ -130,15 +134,9 @@ impl Inflight {
         // mixing them across calls writes numerically-different K
         // bytes for the same input token (Phase A parity test
         // verified bit-equality only when chunks stay in one bucket).
-        // 512 gives generous headroom past the 128 boundary;
-        // override-floor is enforced at 128.
-        let prefill_ubatch: usize = std::env::var("FLAMBEAU_PREFILL_UBATCH")
-            .ok()
-            .and_then(|s| s.parse().ok())
-            .filter(|n: &usize| *n >= 128)
-            .unwrap_or(512);
-        let scratch_tokens = prompt_len.min(prefill_ubatch).max(1);
-        let _ = model; // cfg lookups no longer needed; chunking handles size
+        // 512 (the default `--prefill-ubatch`) gives generous headroom
+        // past the 128 boundary; floor enforced at 128.
+        let scratch_tokens = prefill_ubatch.max(1);
 
         // **leak fix** — every alloc step here that ships a fresh GPU
         // resource must roll back the prior steps' GPU resources on
@@ -151,7 +149,7 @@ impl Inflight {
         match model {
             LoadedModel::Pp { model: m, .. } => {
                 let session =
-                    Qwen3MoEShardedSession::new(m, cluster).context("create PP session")?;
+                    Qwen3MoEShardedSession::new(m, cluster, kv_layout).context("create PP session")?;
                 let prefill = match ShardedForwardPrefillScratch::new(
                     m,
                     cluster,
@@ -179,7 +177,7 @@ impl Inflight {
             }
             LoadedModel::Tp { model, .. } => {
                 let session =
-                    Qwen3MoETpSession::new(model, cluster).context("create TP session")?;
+                    Qwen3MoETpSession::new(model, cluster, kv_layout).context("create TP session")?;
                 let decode = match ShardedForwardOneTokenScratchTp::new(
                     &model.config,
                     cluster,
@@ -197,7 +195,7 @@ impl Inflight {
                 // hybrid session/scratch are sized per-stage against
                 // each stage's owning sub-cluster (no `cluster` arg
                 // needed — sub-clusters live inside `model.stages`).
-                let session = Qwen3MoEHybridSession::new(model)
+                let session = Qwen3MoEHybridSession::new(model, kv_layout)
                     .context("create hybrid session")?;
                 let decode = match ShardedForwardOneTokenScratchHybrid::new(model) {
                     Ok(s) => s,
@@ -439,6 +437,7 @@ pub fn prefill_logits(
     logits_out: &mut Vec<f32>,
     tp_pool_prefill: Option<&mut ShardedForwardPrefillScratchTp>,
     mut on_boundary: Option<BoundaryCallback<'_>>,
+    prefill_ubatch: usize,
 ) -> Result<()> {
     if prompt_ids.is_empty() {
         bail!("prefill_logits: empty prompt");
@@ -522,11 +521,7 @@ pub fn prefill_logits(
             // shared pre-allocated scratch and we skip per-call alloc.
             // When `None`, fall back to the legacy alloc-per-call
             // path inside `forward_prefill_tp_logits`.
-            let chunk: usize = std::env::var("FLAMBEAU_PREFILL_UBATCH")
-                .ok()
-                .and_then(|s| s.parse().ok())
-                .filter(|n: &usize| *n >= 128)
-                .unwrap_or(512);
+            let chunk = prefill_ubatch.max(128);
             let l = prompt_ids.len();
             // We can't reuse `&mut tp_pool_prefill` across loop iterations
             // because the pooled call holds a reborrow; instead, take()
@@ -618,11 +613,7 @@ pub fn prefill_logits(
         ) => {
             // Chunked Hybrid prefill (Phase B4a-Hybrid). Parity
             // verified bit-exact at L=4096 chunk=512 (8 chunks).
-            let chunk: usize = std::env::var("FLAMBEAU_PREFILL_UBATCH")
-                .ok()
-                .and_then(|s| s.parse().ok())
-                .filter(|n: &usize| *n >= 128)
-                .unwrap_or(512);
+            let chunk = prefill_ubatch.max(128);
             let l = prompt_ids.len();
             if l <= chunk {
                 forward_prefill_hybrid_logits(

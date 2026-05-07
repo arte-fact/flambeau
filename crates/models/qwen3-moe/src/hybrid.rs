@@ -342,7 +342,10 @@ impl Qwen3MoEHybridSession {
     /// Allocate per-stage / per-rank caches for `model`. Each stage
     /// allocates only its `layer_range`; layers belonging to other
     /// stages are not present.
-    pub fn new(model: &Qwen3MoEHybridModel) -> Result<Self> {
+    pub fn new(
+        model: &Qwen3MoEHybridModel,
+        kv_layout: crate::session::KvLayout,
+    ) -> Result<Self> {
         let cfg = &model.config;
         let tp_world = model.spec.tp_size;
         let mut stages: Vec<Qwen3MoEHybridStageSession> = Vec::with_capacity(model.stages.len());
@@ -357,7 +360,7 @@ impl Qwen3MoEHybridSession {
                     Vec::with_capacity(stage.layer_range.len());
                 for il in stage.layer_range.clone() {
                     layer_caches.push(
-                        alloc_layer_cache_tp(cfg, device, il, tp_world, gdn_kq_replicated)
+                        alloc_layer_cache_tp(cfg, device, il, tp_world, gdn_kq_replicated, kv_layout)
                             .with_context(|| {
                                 format!(
                                     "alloc_layer_cache_tp stage={} rank={rank_idx} layer={il}",

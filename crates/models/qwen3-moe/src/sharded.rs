@@ -1551,7 +1551,11 @@ impl Qwen3MoEShardedSession {
     /// Allocate caches for every layer, placing each on the rank that
     /// `model.assignment` assigns it to. `cluster.ranks()` must match
     /// `model.shards.len()`.
-    pub fn new(model: &Qwen3MoEShardedModel, cluster: &HipCluster) -> Result<Self> {
+    pub fn new(
+        model: &Qwen3MoEShardedModel,
+        cluster: &HipCluster,
+        kv_layout: crate::session::KvLayout,
+    ) -> Result<Self> {
         if cluster.ranks() != model.shards.len() {
             bail!(
                 "Qwen3MoEShardedSession::new: cluster.ranks={} != model.shards.len()={}",
@@ -1565,7 +1569,7 @@ impl Qwen3MoEShardedSession {
             device.bind()?;
             let mut caches = Vec::with_capacity(shard.layers.len());
             for lw in &shard.layers {
-                caches.push(alloc_layer_cache(&model.config, device, lw.layer_idx)?);
+                caches.push(alloc_layer_cache(&model.config, device, lw.layer_idx, kv_layout)?);
             }
             device.default_stream().synchronize()?;
             per_rank.push(Qwen3MoERankSession {

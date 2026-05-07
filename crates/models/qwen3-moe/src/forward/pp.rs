@@ -511,7 +511,6 @@ fn forward_one_token_pp_inner(
             // for parity comparison vs the TP path (FLAMBEAU_TP_PROBE). Same
             // format: per-layer min/max/L2/head[0..4]. Disabled by default.
             if pp_probe {
-                use flambeau_core::CopyDirection;
                 let n = hidden_bytes / 2;
                 let mut host = vec![0u16; n];
                 unsafe {

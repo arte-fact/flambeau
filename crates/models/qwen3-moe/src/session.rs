@@ -48,14 +48,19 @@ pub enum KvLayout {
 }
 
 impl KvLayout {
-    /// Read `FLAMBEAU_KV` env (values: "f16" default, "q8" / "q8_0").
-    /// Used by every Session ctor so the choice propagates through the
-    /// stack without threading another argument.
-    pub fn from_env() -> Self {
-        match std::env::var("FLAMBEAU_KV").as_deref() {
-            Ok("q8") | Ok("q8_0") | Ok("Q8") | Ok("Q8_0") => Self::Q8,
+    /// Parse a layout name. Accepts `"f16"`, `"q8"`/`"q8_0"`. Default
+    /// fallback for unknown / empty strings is `F16`.
+    pub fn from_str(s: &str) -> Self {
+        match s {
+            "q8" | "q8_0" | "Q8" | "Q8_0" => Self::Q8,
             _ => Self::F16,
         }
+    }
+}
+
+impl Default for KvLayout {
+    fn default() -> Self {
+        Self::F16
     }
 }
 
@@ -93,13 +98,18 @@ pub struct Qwen3MoESession {
 
 impl Qwen3MoESession {
     /// Allocate every per-layer cache sized for `cfg.context_length` tokens.
-    /// Full-attention layers get a `KvCache<F16Contig>`; recurrent layers
-    /// get zero-initialised GDN state + conv-history buffers.
-    pub fn new(cfg: &Qwen3MoEConfig, device: &HipDevice) -> Result<Self> {
+    /// Full-attention layers get a `KvCache<{F16Contig|Q8Contig}>` per
+    /// `kv_layout`; recurrent layers get zero-initialised GDN state +
+    /// conv-history buffers.
+    pub fn new(
+        cfg: &Qwen3MoEConfig,
+        device: &HipDevice,
+        kv_layout: KvLayout,
+    ) -> Result<Self> {
         device.bind()?;
         let mut caches: Vec<LayerCache> = Vec::with_capacity(cfg.num_layers);
         for il in 0..cfg.num_layers {
-            match alloc_layer_cache(cfg, device, il) {
+            match alloc_layer_cache(cfg, device, il, kv_layout) {
                 Ok(c) => caches.push(c),
                 Err(e) => {
                     // **leak fix** — partial allocs from the loop must be
@@ -343,6 +353,7 @@ pub(crate) fn alloc_layer_cache(
     cfg: &Qwen3MoEConfig,
     device: &HipDevice,
     il: usize,
+    kv_layout: KvLayout,
 ) -> Result<LayerCache> {
     if cfg.is_recurrent(il) {
         let gdn = cfg
@@ -379,7 +390,7 @@ pub(crate) fn alloc_layer_cache(
             snapshot_conv_history: None,
         }))
     } else {
-        match KvLayout::from_env() {
+        match kv_layout {
             KvLayout::F16 => {
                 let kv = KvCache::<F16Contig, HipDevice>::new(
                     device,
@@ -419,6 +430,7 @@ pub(crate) fn alloc_layer_cache_tp(
     il: usize,
     tp_world: u32,
     gdn_kq_replicated: bool,
+    kv_layout: KvLayout,
 ) -> Result<LayerCache> {
     if tp_world == 0 {
         anyhow::bail!("tp_world must be >= 1");
@@ -491,7 +503,7 @@ pub(crate) fn alloc_layer_cache_tp(
         } else {
             cfg.num_kv_heads
         };
-        match KvLayout::from_env() {
+        match kv_layout {
             KvLayout::F16 => {
                 let kv = KvCache::<F16Contig, HipDevice>::new(
                     device,

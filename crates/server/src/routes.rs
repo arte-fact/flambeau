@@ -137,7 +137,7 @@ pub struct ServerState {
     pub tp_prefill_scratch:
         std::sync::Mutex<Option<flambeau_qwen3_moe::forward::ShardedForwardPrefillScratchTp>>,
     /// **#229 P2.10c** — process-local prompt prefix cache. Always
-    /// constructed; methods short-circuit when `PrefixCache::enabled()`
+    /// constructed; methods short-circuit when `state.prefix_cache.enabled()`
     /// is false (default OFF; flip via `FLAMBEAU_PREFIX_CACHE=1`).
     /// Stores host-RAM KV snapshots keyed by chained chunk hashes;
     /// LRU-evicts under `FLAMBEAU_PREFIX_CACHE_MAX_GB` (default 2 GB).
@@ -188,6 +188,15 @@ pub struct ServerState {
     /// queue takes ~80s to drain, which is the upper bound a
     /// well-behaved client should retry over.
     pub max_queue_depth: usize,
+    /// Prefill chunk size (`--prefill-ubatch`). Read by the chunked
+    /// prefill driver and the lazy TP-prefill scratch allocator.
+    pub prefill_ubatch: usize,
+    /// `--gpu-sampler` (default true). When true the head rank's
+    /// top-K + softmax (+ penalties) run on device.
+    pub gpu_sampler: bool,
+    /// `--batched-decode` (default true). When true, concurrent decode
+    /// requests aggregate via the scheduler leader.
+    pub batched_decode: bool,
     /// Tools discovered on the `--mcp <url>` upstreams at startup
     /// (ROADMAP-V2 §M2.1). Merged into each request's `tools[]` before
     /// rendering the Jinja template, so the model sees them alongside
@@ -329,11 +338,7 @@ impl ServerState {
     > {
         let mut guard = self.tp_prefill_scratch.lock().unwrap();
         if guard.is_none() {
-            let prefill_ubatch: usize = std::env::var("FLAMBEAU_PREFILL_UBATCH")
-                .ok()
-                .and_then(|s| s.parse().ok())
-                .filter(|n: &usize| *n >= 128)
-                .unwrap_or(512);
+            let prefill_ubatch = self.prefill_ubatch;
             let cfg = match &self.model {
                 LoadedModel::Tp { model, .. } => &model.config,
                 _ => bail!("lock_tp_prefill_scratch on non-TP model"),
@@ -375,11 +380,11 @@ impl ServerState {
         tracing::debug!(
             target: "server.prefix_cache",
             prompt_tokens = prompt_ids.len(),
-            enabled = PrefixCache::enabled(),
+            enabled = self.prefix_cache.enabled(),
             hybrid = matches!(self.model, LoadedModel::Hybrid { .. }),
             "prefix_cache_try_restore called"
         );
-        if !PrefixCache::enabled() {
+        if !self.prefix_cache.enabled() {
             return Ok(PrefixCacheRestore::Miss);
         }
         let chunk_tokens = self.prefix_cache_chunk_tokens;
@@ -468,7 +473,7 @@ impl ServerState {
         n_tokens_completed: usize,
         snap: Vec<Vec<flambeau_qwen3_moe::session::LayerCacheSnapshot>>,
     ) {
-        if !PrefixCache::enabled() {
+        if !self.prefix_cache.enabled() {
             return;
         }
         let chunk_tokens = self.prefix_cache_chunk_tokens;
@@ -545,11 +550,11 @@ impl ServerState {
             target: "server.prefix_cache",
             prompt_tokens = prompt_ids.len(),
             logits_len = last_logits.len(),
-            enabled = PrefixCache::enabled(),
+            enabled = self.prefix_cache.enabled(),
             hybrid = matches!(self.model, LoadedModel::Hybrid { .. }),
             "prefix_cache_try_capture_full called"
         );
-        if !PrefixCache::enabled() {
+        if !self.prefix_cache.enabled() {
             return;
         }
         const MIN_PROMPT_TOKENS: usize = 50;
@@ -2664,8 +2669,8 @@ fn stream_messages_anthropic_sse(
         let mut emitted_any = false;
         let mut has_tool_calls = false;
 
-        let mut emit_block_start_text = |tx: &mpsc::Sender<Result<Event, Infallible>>,
-                                         text_open: &mut bool|
+        let emit_block_start_text = |tx: &mpsc::Sender<Result<Event, Infallible>>,
+                                     text_open: &mut bool|
          -> bool {
             if *text_open {
                 return true;
@@ -3335,7 +3340,7 @@ async fn run_completion_ids(
 /// spec-decode, no GPU sampler, no JSON mode, no logprobs, no tools.
 /// All other configurations fall through to the legacy handler.
 fn scheduler_can_engage(state: &ServerState, params: &SamplingParams) -> bool {
-    if std::env::var("FLAMBEAU_BATCHED_DECODE").is_err() {
+    if !state.batched_decode {
         return false;
     }
     // PP (no MTP), TP, and Hybrid all supported. MTP-spec / JSON /
@@ -3451,6 +3456,7 @@ fn run_completion_scheduler_pp_blocking(
                         &mut logits_buf,
                         tp_pool,
                         None,
+                        state.prefill_ubatch,
                     )
                     .context("scheduler-path tail prefill (after prefix-hit)")?;
                     // After tail prefill we have full state — capture
@@ -3471,7 +3477,7 @@ fn run_completion_scheduler_pp_blocking(
                         Ok(())
                     };
                     let cb_opt: Option<crate::model::BoundaryCallback<'_>> =
-                        if PrefixCache::enabled() {
+                        if state.prefix_cache.enabled() {
                             Some(&mut boundary_cb)
                         } else {
                             None
@@ -3485,6 +3491,7 @@ fn run_completion_scheduler_pp_blocking(
                         &mut logits_buf,
                         tp_pool,
                         cb_opt,
+                        state.prefill_ubatch,
                     )
                     .context("scheduler-path prefill")?;
                     state.prefix_cache_try_capture_full(
@@ -3691,7 +3698,7 @@ fn run_completion_blocking_ids(
     //   - Hybrid: head stage's sub_cluster's head TP-rank device
     //             (head_stage = pp_size - 1; head_rank within stage
     //             defaults to 0 per ShardedForwardOneTokenScratchHybrid).
-    let use_gpu_sampler = std::env::var("FLAMBEAU_GPU_SAMPLER").is_ok()
+    let use_gpu_sampler = state.gpu_sampler
         && matches!(
             model,
             LoadedModel::Tp { .. } | LoadedModel::Hybrid { .. }
@@ -3790,6 +3797,7 @@ fn run_completion_blocking_ids(
                 &mut logits_buf,
                 tp_pool,
                 None,
+                state.prefill_ubatch,
             )
             .context("legacy-path tail prefill (after prefix-hit)")?;
             state.prefix_cache_try_capture_full(&inflight, &prompt_ids, &logits_buf);
@@ -3800,7 +3808,7 @@ fn run_completion_blocking_ids(
                 Ok(())
             };
             let cb_opt: Option<crate::model::BoundaryCallback<'_>> =
-                if cache_eligible && PrefixCache::enabled() {
+                if cache_eligible && state.prefix_cache.enabled() {
                     Some(&mut boundary_cb)
                 } else {
                     None
@@ -3814,6 +3822,7 @@ fn run_completion_blocking_ids(
                 &mut logits_buf,
                 tp_pool,
                 cb_opt,
+                state.prefill_ubatch,
             )
             .context("prefill logits")?;
             if cache_eligible {
@@ -4400,6 +4409,7 @@ fn run_completion_blocking_streaming(
                 &mut logits_buf,
                 tp_pool,
                 None,
+                state.prefill_ubatch,
             )
             .context("streaming-path tail prefill (after prefix-hit)")?;
             state.prefix_cache_try_capture_full(&inflight, &prompt_ids, &logits_buf);
@@ -4410,7 +4420,7 @@ fn run_completion_blocking_streaming(
                 Ok(())
             };
             let cb_opt: Option<crate::model::BoundaryCallback<'_>> =
-                if PrefixCache::enabled() {
+                if state.prefix_cache.enabled() {
                     Some(&mut boundary_cb)
                 } else {
                     None
@@ -4424,6 +4434,7 @@ fn run_completion_blocking_streaming(
                 &mut logits_buf,
                 tp_pool,
                 cb_opt,
+                state.prefill_ubatch,
             )
             .context("prefill logits")?;
             state.prefix_cache_try_capture_full(&inflight, &prompt_ids, &logits_buf);
@@ -4689,7 +4700,6 @@ fn run_completion_blocking_streaming(
         // T4.1: same relax-stop-mask behaviour as the non-streaming path.
         let force_mask = step < MIN_RESPONSE_TOKENS && !relax_stop_mask;
         let hp_step_t0 = if host_profile_on { Some(Instant::now()) } else { None };
-        let hp_decode_t0 = hp_step_t0;
         decode_logits(
             model,
             cluster,

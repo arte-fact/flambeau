@@ -104,6 +104,49 @@ enum Cmd {
         /// embedding fits alongside a 27 B chat shard on 16 GB MI50.
         #[arg(long = "embedding-device")]
         embedding_device: Option<i32>,
+        /// Number of concurrent inflight decode slots (1-32).
+        #[arg(long = "inflight-slots", env = "FLAMBEAU_INFLIGHT_SLOTS", default_value_t = 4)]
+        inflight_slots: usize,
+        /// Prefill chunk size (tokens per forward step).
+        #[arg(long = "prefill-ubatch", env = "FLAMBEAU_PREFILL_UBATCH", default_value_t = 512)]
+        prefill_ubatch: usize,
+        /// Admission-control queue depth beyond `inflight_slots` before
+        /// returning 503 + Retry-After. 0 disables (legacy).
+        #[arg(long = "max-queue-depth", env = "FLAMBEAU_MAX_QUEUE_DEPTH", default_value_t = 16)]
+        max_queue_depth: usize,
+        /// Clamp the model's `context_length` to this many tokens.
+        /// Useful for preventing per-slot KV-cache OOM on consumer VRAM.
+        /// Only shrinks; explicit increases are ignored.
+        #[arg(long = "ctx-cap", env = "FLAMBEAU_CTX_CAP")]
+        ctx_cap: Option<usize>,
+        /// Disable the on-device GPU sampler (default: enabled).
+        #[arg(long = "no-gpu-sampler", env = "FLAMBEAU_NO_GPU_SAMPLER", action = clap::ArgAction::SetTrue)]
+        no_gpu_sampler: bool,
+        /// Disable the batched-decode scheduler (default: enabled).
+        #[arg(long = "no-batched-decode", env = "FLAMBEAU_NO_BATCHED_DECODE", action = clap::ArgAction::SetTrue)]
+        no_batched_decode: bool,
+        /// Enable prompt prefix cache (chat workloads).
+        #[arg(long = "prefix-cache", env = "FLAMBEAU_PREFIX_CACHE", action = clap::ArgAction::SetTrue)]
+        prefix_cache: bool,
+        /// Prefix-cache LRU size in GB. Only used when --prefix-cache is set.
+        #[arg(long = "prefix-cache-max-gb", env = "FLAMBEAU_PREFIX_CACHE_MAX_GB", default_value_t = 2.0)]
+        prefix_cache_max_gb: f64,
+        /// KV cache layout. `f16` (default, canonical) or `q8` (~2× HBM
+        /// saving on decode; quality cert required per model).
+        #[arg(long = "kv", env = "FLAMBEAU_KV", default_value = "f16")]
+        kv: String,
+        /// Default system prompt prepended to chat-template requests
+        /// when none is provided in the request.
+        #[arg(long = "default-system", env = "FLAMBEAU_DEFAULT_SYSTEM")]
+        default_system: Option<String>,
+        /// /v1/embeddings endpoint per-prompt token cap.
+        #[arg(long = "embedding-max-tokens", env = "FLAMBEAU_EMBEDDING_MAX_TOKENS", default_value_t = 8192)]
+        embedding_max_tokens: usize,
+        /// Path to an MTP head GGUF for K=1 speculative decode. Loaded
+        /// on the last rank; per-request scratch allocated lazily.
+        /// Omit to disable spec-decode.
+        #[arg(long = "spec-mtp", env = "FLAMBEAU_SPEC_MTP")]
+        spec_mtp: Option<String>,
     },
     /// T-track warmup-tuner (V1.x side-track).
     Tune {
@@ -204,17 +247,41 @@ fn main() -> Result<()> {
             mcp_urls,
             embedding_model,
             embedding_device,
-        } => serve_cmd(
-            &model,
-            &devices,
+            inflight_slots,
+            prefill_ubatch,
+            max_queue_depth,
+            ctx_cap,
+            no_gpu_sampler,
+            no_batched_decode,
+            prefix_cache,
+            prefix_cache_max_gb,
+            kv,
+            default_system,
+            embedding_max_tokens,
+            spec_mtp,
+        } => serve_cmd(ServeArgs {
+            model,
+            devices,
             port,
-            &mesh_mode,
+            mesh_mode,
             tp_size,
             pp_size,
             mcp_urls,
             embedding_model,
             embedding_device,
-        )?,
+            inflight_slots,
+            prefill_ubatch,
+            max_queue_depth,
+            ctx_cap,
+            gpu_sampler: !no_gpu_sampler,
+            batched_decode: !no_batched_decode,
+            prefix_cache,
+            prefix_cache_max_gb,
+            kv,
+            default_system,
+            embedding_max_tokens,
+            spec_mtp,
+        })?,
         Cmd::Tune { model, .. } => todo!("T-track: implement tune for {model}"),
         Cmd::Mcp { stdio, port } => mcp_cmd(stdio, port)?,
         Cmd::Sweep { arch, op, dtype } => sweep(&arch, op.as_deref(), &dtype)?,
@@ -226,40 +293,68 @@ fn main() -> Result<()> {
     Ok(())
 }
 
+struct ServeArgs {
+    model: String,
+    devices: String,
+    port: u16,
+    mesh_mode: String,
+    tp_size: u32,
+    pp_size: u32,
+    mcp_urls: Vec<String>,
+    embedding_model: Option<String>,
+    embedding_device: Option<i32>,
+    inflight_slots: usize,
+    prefill_ubatch: usize,
+    max_queue_depth: usize,
+    ctx_cap: Option<usize>,
+    gpu_sampler: bool,
+    batched_decode: bool,
+    prefix_cache: bool,
+    prefix_cache_max_gb: f64,
+    kv: String,
+    default_system: Option<String>,
+    embedding_max_tokens: usize,
+    spec_mtp: Option<String>,
+}
+
 #[cfg(not(feature = "hip_serve"))]
-fn serve_cmd(
-    _model: &str,
-    _devices: &str,
-    _port: u16,
-    _mesh_mode: &str,
-    _tp_size: u32,
-    _pp_size: u32,
-    _mcp_urls: Vec<String>,
-    _embedding_model: Option<String>,
-    _embedding_device: Option<i32>,
-) -> Result<()> {
+fn serve_cmd(_args: ServeArgs) -> Result<()> {
     anyhow::bail!(
         "`flambeau serve` requires building with --features hip_serve (needs ROCm + HIP devices)"
     );
 }
 
 #[cfg(feature = "hip_serve")]
-fn serve_cmd(
-    model: &str,
-    devices: &str,
-    port: u16,
-    mesh_mode: &str,
-    tp_size: u32,
-    pp_size: u32,
-    mcp_urls: Vec<String>,
-    embedding_model: Option<String>,
-    embedding_device: Option<i32>,
-) -> Result<()> {
+fn serve_cmd(args: ServeArgs) -> Result<()> {
     use std::net::SocketAddr;
     use std::path::PathBuf;
 
+    let ServeArgs {
+        model,
+        devices,
+        port,
+        mesh_mode,
+        tp_size,
+        pp_size,
+        mcp_urls,
+        embedding_model,
+        embedding_device,
+        inflight_slots,
+        prefill_ubatch,
+        max_queue_depth,
+        ctx_cap,
+        gpu_sampler,
+        batched_decode,
+        prefix_cache,
+        prefix_cache_max_gb,
+        kv,
+        default_system,
+        embedding_max_tokens,
+        spec_mtp,
+    } = args;
+
     // Parse `hip:0,1,2,3` or `0,1,2,3` → Vec<i32>.
-    let dev_str = devices.strip_prefix("hip:").unwrap_or(devices);
+    let dev_str = devices.strip_prefix("hip:").unwrap_or(&devices);
     let device_ids: Vec<i32> = dev_str
         .split(',')
         .filter(|s| !s.is_empty())
@@ -270,7 +365,7 @@ fn serve_cmd(
         anyhow::bail!("--devices must list at least one device ID");
     }
 
-    let mesh_mode_parsed = match mesh_mode {
+    let mesh_mode_parsed = match mesh_mode.as_str() {
         "pp" => flambeau_server::MeshMode::Pp,
         "tp" => {
             let tp_size_resolved = if tp_size == 0 {
@@ -329,10 +424,10 @@ fn serve_cmd(
         None
     };
     let cfg = flambeau_server::ServeConfig {
-        gguf_path: PathBuf::from(model),
+        gguf_path: PathBuf::from(&model),
         device_ids,
         bind_addr,
-        model_id: PathBuf::from(model)
+        model_id: PathBuf::from(&model)
             .file_stem()
             .map(|s| s.to_string_lossy().to_string())
             .unwrap_or_else(|| "flambeau".to_string()),
@@ -340,6 +435,18 @@ fn serve_cmd(
         mcp_urls,
         embedding_gguf_path: embedding_model.map(PathBuf::from),
         embedding_device_id: resolved_embedding_device,
+        inflight_slots,
+        prefill_ubatch,
+        max_queue_depth,
+        ctx_cap,
+        gpu_sampler,
+        batched_decode,
+        prefix_cache,
+        prefix_cache_max_gb,
+        kv,
+        default_system,
+        embedding_max_tokens,
+        spec_mtp: spec_mtp.map(PathBuf::from),
     };
 
     let rt = tokio::runtime::Builder::new_multi_thread()

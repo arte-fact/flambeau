@@ -61,10 +61,7 @@ use flambeau_ops::hip::{
         mmvq_q4_0_gate_up, mmvq_q4_0_gate_up_t128,
         mmvq_q8_0_gate_up,
     },
-    recurrent::{
-        gdn_alpha_beta_f32, gdn_split_qkv_f32, gdn_state_step_alphabeta_f32_s128,
-        gdn_state_step_f32_s128,
-    },
+    recurrent::{gdn_split_qkv_f32, gdn_state_step_alphabeta_f32_s128},
     HipDevice, HipStream, OpsRegistry,
 };
 

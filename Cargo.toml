@@ -68,7 +68,7 @@ rmcp = { version = "=1.5.0", default-features = false, features = [
 # required for byte-parity with llama.cpp's (Python-style) render.
 minijinja = { version = "2", features = ["json", "preserve_order"] }
 # CLI
-clap = { version = "4", features = ["derive"] }
+clap = { version = "4", features = ["derive", "env"] }
 
 [profile.release]
 opt-level = 3

@@ -933,31 +933,34 @@ fn forward_prefill_tp_batched_logits(
         }
     }
 
-    let mut owned_guard: Option<PrefillGuard<'_>> = None;
-    let scratch_ref: &mut ShardedForwardPrefillScratchTp = match pooled {
-        Some(s) => {
-            // Caller-provided scratch must fit n_tokens.
-            if s.per_rank[0].max_tokens < n_tokens {
-                bail!(
-                    "pooled TP prefill scratch sized {} < n_tokens {}",
-                    s.per_rank[0].max_tokens,
-                    n_tokens
-                );
-            }
-            s
+    // Either use the caller-provided pooled scratch, or allocate one
+    // bound to a guard whose Drop disposes the per-rank buffers if
+    // anything past this point fails. The guard's lifetime spans the
+    // whole forward; `scratch_ref` reborrows from it (via the pooled
+    // branch's `s`, or the guard's `scratch` field).
+    if let Some(s) = pooled.as_ref() {
+        if s.per_rank[0].max_tokens < n_tokens {
+            bail!(
+                "pooled TP prefill scratch sized {} < n_tokens {}",
+                s.per_rank[0].max_tokens,
+                n_tokens
+            );
         }
-        None => {
-            let prefill = ShardedForwardPrefillScratchTp::new(cfg, cluster, n_tokens)
-                .context("alloc TP prefill scratch")?;
-            owned_guard = Some(PrefillGuard {
-                scratch: Some(prefill),
-                cluster,
-            });
-            owned_guard
-                .as_mut()
-                .and_then(|g| g.scratch.as_mut())
-                .expect("scratch present until drop")
-        }
+    }
+    let mut owned_guard: Option<PrefillGuard<'_>> = match pooled {
+        Some(_) => None,
+        None => Some(PrefillGuard {
+            scratch: Some(
+                ShardedForwardPrefillScratchTp::new(cfg, cluster, n_tokens)
+                    .context("alloc TP prefill scratch")?,
+            ),
+            cluster,
+        }),
+    };
+    let scratch_ref: &mut ShardedForwardPrefillScratchTp = match (pooled, owned_guard.as_mut()) {
+        (Some(s), _) => s,
+        (None, Some(g)) => g.scratch.as_mut().expect("scratch present until drop"),
+        (None, None) => unreachable!("owned_guard set when pooled is None"),
     };
 
     // 2. Embed all L tokens on every rank. Token_embd is Replicated
