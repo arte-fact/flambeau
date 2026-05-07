@@ -126,19 +126,15 @@ pub fn forward_dense_ffn_decode_tp(
 
     // 2+3. gate + up matmuls — fused if both Q8_0 or both Q4_0, else unfused.
     let global_baseline = std::env::var("FLAMBEAU_VARIANT").as_deref() == Ok("baseline");
-    let specific_off = std::env::var("FLAMBEAU_DENSE_GATE_UP").as_deref() == Ok("unfused");
     let fuse_q8 = !global_baseline
-        && !specific_off
         && ffn_gate.dtype == flambeau_quant::GgmlDType::Q8_0
         && ffn_up.dtype == flambeau_quant::GgmlDType::Q8_0;
     let fuse_q4 = !global_baseline
-        && !specific_off
         && ffn_gate.dtype == flambeau_quant::GgmlDType::Q4_0
         && ffn_up.dtype == flambeau_quant::GgmlDType::Q4_0;
     // C8-i1 — Q4_1 fused gate+up. Sibling of fuse_q4; closes the dense-FFN
     // launch-pair gap on Qwen3.5-9B-Q4_1 / 27B-Q4_1.
     let fuse_q4_1 = !global_baseline
-        && !specific_off
         && ffn_gate.dtype == flambeau_quant::GgmlDType::Q4_1
         && ffn_up.dtype == flambeau_quant::GgmlDType::Q4_1;
     if fuse_q8 {

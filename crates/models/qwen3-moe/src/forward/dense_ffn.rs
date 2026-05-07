@@ -162,8 +162,7 @@ pub fn forward_dense_ffn_decode(
     //      by the coarse `FLAMBEAU_VARIANT=baseline` or the specific
     //      `FLAMBEAU_DENSE_GATE_UP=unfused`.
     let global_baseline = std::env::var("FLAMBEAU_VARIANT").as_deref() == Ok("baseline");
-    let specific_off = std::env::var("FLAMBEAU_DENSE_GATE_UP").as_deref() == Ok("unfused");
-    let fuse_gate_up = !global_baseline && !specific_off
+    let fuse_gate_up = !global_baseline
         && dense.ffn_gate.dtype == flambeau_quant::GgmlDType::Q8_0
         && dense.ffn_up.dtype == flambeau_quant::GgmlDType::Q8_0;
     if fuse_gate_up {

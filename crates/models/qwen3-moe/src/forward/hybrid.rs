@@ -69,12 +69,9 @@ pub fn forward_prefill_hybrid_logits(
     if prompt_ids.is_empty() {
         bail!("forward_prefill_hybrid_logits: empty prompt");
     }
-    // **AUTO-6e** — batched hybrid prefill is the default for pp+tp
-    // topologies on prompts ≥ 8 tokens. Set FLAMBEAU_TP_BATCHED=0 to
-    // opt out. Falls back to per-token loop on small prompts. See
-    // `tp.rs::forward_prefill_tp_logits` for rationale.
-    let batched_opt_out = std::env::var("FLAMBEAU_TP_BATCHED").as_deref() == Ok("0");
-    if !batched_opt_out && prompt_ids.len() >= 8 {
+    // **AUTO-6e** — batched hybrid prefill for prompts ≥ 8 tokens.
+    // Per-token fallback (FLAMBEAU_TP_BATCHED=0) was 13× slower; deleted in S3.
+    if prompt_ids.len() >= 8 {
         return forward_prefill_hybrid_batched_logits(
             model,
             global_cluster,
@@ -575,7 +572,8 @@ fn forward_one_token_hybrid_inner(
         // output. This isolates the wall-time question (is graph
         // capture worth the implementation cost on hybrid TP?) from
         // the correctness work (iter 2 — slot binding).
-        let do_graph = std::env::var("FLAMBEAU_DECODE_GRAPH").is_ok();
+        // FLAMBEAU_DECODE_GRAPH was HALT-BROKEN on hybrid; env removed in S3.
+        let do_graph = false;
         let stage_n_ranks = stage.sub_cluster.ranks();
         let cache_populated = do_graph
             && scratch.decode_graphs.get(s).is_some_and(|g| g.is_some());

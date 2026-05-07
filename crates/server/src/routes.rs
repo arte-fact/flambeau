@@ -741,10 +741,6 @@ impl ServerState {
         // layer (separate rmsnorm + 2 quant variants); at N=1 those
         // launches are pure overhead vs the fused decode form.
         //
-        // **#275 debug** — `FLAMBEAU_NO_FAST_PATH=1` disables this
-        // shortcut so single-user dispatches still go through
-        // `forward_decode_batched_*`. Used to capture per-stage activation
-        // dumps that compare N=1 vs N=2 for the kernel-correctness bug.
         let n_others_active = self
             .slot_in_use
             .iter()
@@ -754,7 +750,6 @@ impl ServerState {
                     && taken.load(std::sync::atomic::Ordering::Relaxed)
             })
             .count();
-        let no_fast_path = std::env::var("FLAMBEAU_NO_FAST_PATH").is_ok();
         let trace = std::env::var("FLAMBEAU_TRACE_BATCH").is_ok();
         macro_rules! tr {
             ($($arg:tt)*) => {
@@ -767,8 +762,8 @@ impl ServerState {
                 }
             };
         }
-        tr!("entry n_others_active={} no_fast={}", n_others_active, no_fast_path);
-        if n_others_active == 0 && !no_fast_path {
+        tr!("entry n_others_active={}", n_others_active);
+        if n_others_active == 0 {
             // #16 race-safe fast-path: hold prefill_serialiser across
             // decode_logits so a concurrent prefill on a sibling slot
             // can't race shared HipCluster scratch mid-decode. Cheap

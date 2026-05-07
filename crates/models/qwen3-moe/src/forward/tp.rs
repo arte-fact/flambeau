@@ -794,8 +794,7 @@ pub fn forward_prefill_tp_logits_pooled(
     let any_q8_kv = layer_caches.iter().any(|cs| {
         cs.iter().any(|c| matches!(c, LayerCache::FullAttnQ8(_)))
     });
-    let batched_opt_out = std::env::var("FLAMBEAU_TP_BATCHED").as_deref() == Ok("0");
-    let use_batched = !any_q8_kv && !batched_opt_out;
+    let use_batched = !any_q8_kv;
     if use_batched && prompt_ids.len() >= 8 {
         return forward_prefill_tp_batched_logits(
             model,
@@ -857,8 +856,7 @@ pub fn forward_prefill_tp_logits(
     let any_q8_kv = layer_caches.iter().any(|cs| {
         cs.iter().any(|c| matches!(c, LayerCache::FullAttnQ8(_)))
     });
-    let batched_opt_out = std::env::var("FLAMBEAU_TP_BATCHED").as_deref() == Ok("0");
-    let use_batched = !any_q8_kv && !batched_opt_out;
+    let use_batched = !any_q8_kv;
     if use_batched && prompt_ids.len() >= 8 {
         return forward_prefill_tp_batched_logits(
             model,

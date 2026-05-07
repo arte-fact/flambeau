@@ -221,7 +221,12 @@ pub fn forward_one_token_pp(
     // (rmsnorm_quant_q8_1 + lm_head mmvq) on the LAST rank into that
     // rank's captured graph. argmax_token_host stays uncaptured
     // (host-side scan).
-    let use_decode_graph = std::env::var("FLAMBEAU_DECODE_GRAPH").is_ok();
+    // Graph capture for decode is HALT-BROKEN on hybrid pp2tp2 (3/9
+    // cells crashed on the env-impact sweep). FLAMBEAU_DECODE_GRAPH=1
+    // env was deleted in S3; the capture/replay branches stay in source
+    // for now (DCE'd by the constant gate) and will be surgically
+    // removed in a follow-up.
+    let use_decode_graph = false;
     let last_idx = n_ranks - 1;
     // Hoist output-head tensor references before the rank loop so the
     // last rank's capture closure can borrow them.

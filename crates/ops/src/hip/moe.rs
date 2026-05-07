@@ -1594,16 +1594,11 @@ pub fn moe_sort_by_expert(
     let k_zero = module.kernel("flambeau_moe_sort_zero_counts")?;
     let k_count = module.kernel("flambeau_moe_sort_count")?;
     let k_scan = module.kernel("flambeau_moe_sort_scan_offsets")?;
-    // CN-80B-18 — default to the deterministic single-thread scatter so
-    // sorted_pair_idx is bit-reproducible across runs and ranks. The
-    // racing-atomic version is faster on long prefills but corrupts TP
-    // determinism; opt back in with `FLAMBEAU_MOE_SCATTER=race`.
-    let scatter_race = std::env::var("FLAMBEAU_MOE_SCATTER").as_deref() == Ok("race");
-    let k_scatter = if scatter_race {
-        module.kernel("flambeau_moe_sort_scatter")?
-    } else {
-        module.kernel("flambeau_moe_sort_scatter_det")?
-    };
+    // CN-80B-18 — deterministic single-thread scatter so sorted_pair_idx
+    // is bit-reproducible across runs and ranks. The racing-atomic
+    // variant was opt-in via FLAMBEAU_MOE_SCATTER=race (deleted in S3 —
+    // it corrupted TP determinism and the perf gain was marginal).
+    let k_scatter = module.kernel("flambeau_moe_sort_scatter_det")?;
 
     let total_i = total as i32;
     let n_experts_i = n_experts as i32;
@@ -1657,17 +1652,11 @@ pub fn moe_sort_by_expert(
         args.push(&k_ptr);
         args.push(&s_ptr);
         args.push(&total_i);
-        let cfg = if scatter_race {
-            const BLOCK: u32 = 256;
-            let grid = (total as u32).div_ceil(BLOCK);
-            LaunchCfg::one_d(grid, BLOCK)
-        } else {
-            // Single thread, single block — see kernel comment.
-            LaunchCfg {
-                grid: (1, 1, 1),
-                block: (1, 1, 1),
-                shared_bytes: 0,
-            }
+        // Deterministic single-thread scatter — see kernel comment.
+        let cfg = LaunchCfg {
+            grid: (1, 1, 1),
+            block: (1, 1, 1),
+            shared_bytes: 0,
         };
         unsafe { k_scatter.launch(stream, cfg, args)? };
     }

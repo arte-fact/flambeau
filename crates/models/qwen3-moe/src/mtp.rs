@@ -1290,31 +1290,17 @@ pub fn forward_mtp_step_with_lm_head(
     )
     .context("base output_norm for MTP h_t")?;
 
-    // 2. Run MTP on post-norm hidden. MTP-4-C-6: `FLAMBEAU_MTP_BF16=1`
-    //    routes to the BF16 forward; default stays on F16/Q8_1 for
-    //    behaviour preservation.
-    let use_bf16 = std::env::var("FLAMBEAU_MTP_BF16")
-        .map(|v| !matches!(v.as_str(), "" | "0" | "off" | "false"))
-        .unwrap_or(false);
-    if use_bf16 {
-        forward_mtp_step_bf16(
-            ops, stream, device, cfg, mtp, scratch,
-            scratch.h_t_post_norm,
-            token_embd_row_f16,
-            position,
-            scratch.mtp_h_final,
-            kv,
-        )?;
-    } else {
-        forward_mtp_step(
-            ops, stream, device, cfg, mtp, scratch,
-            scratch.h_t_post_norm,
-            token_embd_row_f16,
-            position,
-            scratch.mtp_h_final,
-            kv,
-        )?;
-    }
+    // 2. Run MTP on post-norm hidden via the F16/Q8_1 forward path.
+    //    The BF16 alt (FLAMBEAU_MTP_BF16=1) was deleted in S3 — anchors
+    //    leave SPEC_MTP unset, so MTP is loaded but never invoked here.
+    forward_mtp_step(
+        ops, stream, device, cfg, mtp, scratch,
+        scratch.h_t_post_norm,
+        token_embd_row_f16,
+        position,
+        scratch.mtp_h_final,
+        kv,
+    )?;
 
     // 3. LM head: quantize MTP output → Q8_1 → mmvq → F32 logits → argmax.
     quantize_f16_q8_1(ops, stream, scratch.mtp_h_final, scratch.x_q8_1, hidden)
@@ -1400,22 +1386,11 @@ pub fn forward_mtp_step_with_lm_head_async(
     )
     .context("base output_norm for MTP h_t (async)")?;
 
-    let use_bf16 = std::env::var("FLAMBEAU_MTP_BF16")
-        .map(|v| !matches!(v.as_str(), "" | "0" | "off" | "false"))
-        .unwrap_or(false);
-    if use_bf16 {
-        forward_mtp_step_bf16(
-            ops, stream, device, cfg, mtp, scratch,
-            scratch.h_t_post_norm, token_embd_row_f16, position,
-            scratch.mtp_h_final, kv,
-        )?;
-    } else {
-        forward_mtp_step(
-            ops, stream, device, cfg, mtp, scratch,
-            scratch.h_t_post_norm, token_embd_row_f16, position,
-            scratch.mtp_h_final, kv,
-        )?;
-    }
+    forward_mtp_step(
+        ops, stream, device, cfg, mtp, scratch,
+        scratch.h_t_post_norm, token_embd_row_f16, position,
+        scratch.mtp_h_final, kv,
+    )?;
 
     quantize_f16_q8_1(ops, stream, scratch.mtp_h_final, scratch.x_q8_1, hidden)
         .context("mtp lm_head quantize (async)")?;
@@ -1510,22 +1485,11 @@ pub fn forward_mtp_step_with_lm_head_logits(
     )
     .context("base output_norm for MTP h_t (logits variant)")?;
 
-    let use_bf16 = std::env::var("FLAMBEAU_MTP_BF16")
-        .map(|v| !matches!(v.as_str(), "" | "0" | "off" | "false"))
-        .unwrap_or(false);
-    if use_bf16 {
-        forward_mtp_step_bf16(
-            ops, stream, device, cfg, mtp, scratch,
-            scratch.h_t_post_norm, token_embd_row_f16, position,
-            scratch.mtp_h_final, kv,
-        )?;
-    } else {
-        forward_mtp_step(
-            ops, stream, device, cfg, mtp, scratch,
-            scratch.h_t_post_norm, token_embd_row_f16, position,
-            scratch.mtp_h_final, kv,
-        )?;
-    }
+    forward_mtp_step(
+        ops, stream, device, cfg, mtp, scratch,
+        scratch.h_t_post_norm, token_embd_row_f16, position,
+        scratch.mtp_h_final, kv,
+    )?;
 
     quantize_f16_q8_1(ops, stream, scratch.mtp_h_final, scratch.x_q8_1, hidden)
         .context("mtp lm_head quantize (logits variant)")?;

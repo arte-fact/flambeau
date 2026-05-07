@@ -898,21 +898,6 @@ impl Recipe {
         let force_q4_1_tile16 = variant.as_deref() == Some("q4_1_tile16");
         let force_q4_k_r4 = variant.as_deref() == Some("q4_k_r4");
         let force_q8_tile32 = variant.as_deref() == Some("q8_tile32");
-        // C9-i1 — Q8_0 single-row MMVQ t128 schedule (sibling of mmvq_q4_0_t128).
-        // Q8_0 MMVQ eats ~80 % of Qwen3.6-27B-Q8_0 / Coder-30B-Q8_0 decode wall;
-        // t128 trades 1 block / CU at occupancy ceiling for 2 blocks / CU
-        // (latency-hiding lever). Opt-in via `FLAMBEAU_Q8_0_MMVQ_T128=on`.
-        let force_q8_t128 =
-            std::env::var("FLAMBEAU_Q8_0_MMVQ_T128").as_deref() == Ok("on");
-        // C9-followup — combine t128 occupancy lever with VDR=2 inner loop.
-        // After multi-run bench (≥+3 % on both Qwen3.6-27B-Q8_0 and
-        // Qwen3.5-27B-Q8_0), this is the new Q8_0 single-row default. Set
-        // `FLAMBEAU_Q8_0_MMVQ_T128_VDR2=off` to opt out back to the
-        // pre-c9-followup vdr2 schedule.
-        let q8_t128_vdr2_setting =
-            std::env::var("FLAMBEAU_Q8_0_MMVQ_T128_VDR2").ok();
-        let q8_t128_vdr2_opt_out = q8_t128_vdr2_setting.as_deref() == Some("off");
-        let q8_t128_vdr2_default_on = !q8_t128_vdr2_opt_out;
         let impl_id = match (impl_id, force_baseline, force_dp4a_only, force_llamacpp) {
             // V2.7: baseline-opt-out reverts tile16 → tile8 for regression A/B.
             // Must precede the general `force_baseline` catch-all below so the
@@ -962,25 +947,15 @@ impl Recipe {
             ("qmatmul_q8_0_mmq_wave64_tile16_gfx906", _, _, _) if force_q8_tile32 => {
                 "qmatmul_q8_0_mmq_wave64_tile32_gfx906"
             }
-            // C9 — Q8_0 MMVQ t128 schedule (opt-in, FLAMBEAU_Q8_0_MMVQ_T128=on).
-            ("qmatmul_q8_0_mmvq_single_row_gfx906", _, _, _) if force_q8_t128 => {
-                "qmatmul_q8_0_mmvq_t128_gfx906"
-            }
-            ("qmatmul_q8_0_mmvq_dp4a_vdr2_gfx906", _, _, _) if force_q8_t128 => {
-                "qmatmul_q8_0_mmvq_t128_gfx906"
-            }
             // C9-followup — Q8_0 t128_vdr2 (combine occupancy + ILP).
-            // Default-on after multi-run bench. Opt out via
-            // FLAMBEAU_Q8_0_MMVQ_T128_VDR2=off to fall through to vdr2.
-            ("qmatmul_q8_0_mmvq_single_row_gfx906", _, _, _) if q8_t128_vdr2_default_on => {
-                "qmatmul_q8_0_mmvq_t128_vdr2_gfx906"
-            }
-            ("qmatmul_q8_0_mmvq_dp4a_vdr2_gfx906", _, _, _) if q8_t128_vdr2_default_on => {
-                "qmatmul_q8_0_mmvq_t128_vdr2_gfx906"
-            }
-            // Pre-c9-followup default (vdr2 256t).
+            // Default-baked after multi-run bench (≥+3 % on Qwen3.6-27B-Q8_0
+            // and Qwen3.5-27B-Q8_0). Was opt-out via FLAMBEAU_Q8_0_MMVQ_T128_VDR2;
+            // env removed in S3.
             ("qmatmul_q8_0_mmvq_single_row_gfx906", _, _, _) => {
-                "qmatmul_q8_0_mmvq_dp4a_vdr2_gfx906"
+                "qmatmul_q8_0_mmvq_t128_vdr2_gfx906"
+            }
+            ("qmatmul_q8_0_mmvq_dp4a_vdr2_gfx906", _, _, _) => {
+                "qmatmul_q8_0_mmvq_t128_vdr2_gfx906"
             }
             // V2.3.d.1: Q6_K DP4A runtime intercept removed — dispatch row
             // `qmatmul_q6_K_mmvq_dp4a_gfx906` now points at the real DP4A
