@@ -111,6 +111,81 @@ notes           = "Smoke verification gate between cleanup slices."
 
 
 # ─────────────────────────────────────────────────────────────────────
+# Phase 3 — re-bench surviving operator-facing surface.
+# ─────────────────────────────────────────────────────────────────────
+
+# 3a — INFLIGHT_SLOTS perf curve. The pre-cleanup BASELINE_27B_PP2TP2
+# bench at slots=8 vs the sweep at slots=1 measured 23.5 vs 9.1 t/s
+# (2.58×) at N=1 streaming on 27B. This re-confirms the curve on the
+# post-cleanup binary.
+[var.FLAMBEAU_INFLIGHT_SLOTS]
+class           = "C"
+description     = "Phase 3a — perf curve across slot counts at N=1"
+default_state   = "4"
+test_values     = ["1", "4", "8"]
+models          = ["qwen36-27b-q4_0", "qwen36-35b-a3b-q4_0"]
+topologies      = ["pp2tp2"]
+concurrencies   = [1]
+metrics         = ["tg64_tok_s", "vram_peak_gb"]
+notes           = "Confirms the slots=1 → slots=8 throughput cliff at N=1."
+
+# 3b — KV layout. F16 (default, canonical) vs Q8 (~2× HBM saving on
+# decode). Cert delta-perf and VRAM. Quality (delta-perplexity) is
+# already certed at certs/quality/Qwen3.6-35B-A3B-UD-Q4_K_S_q8_kv.json.
+# Spec name is a placeholder; preconditions set the real FLAMBEAU_KV.
+[var.FLAMBEAU_PHASE3B_KV_F16]
+class           = "X"
+description     = "Phase 3b — F16 KV baseline arm"
+default_state   = "n/a"
+test_values     = ["unset"]
+models          = ["qwen36-27b-q4_0", "qwen36-35b-a3b-q4_0"]
+topologies      = ["pp2tp2"]
+concurrencies   = [1, 4]
+metrics         = ["tg64_tok_s", "vram_peak_gb"]
+preconditions   = { FLAMBEAU_INFLIGHT_SLOTS = "8", FLAMBEAU_KV = "f16" }
+notes           = "F16 KV layout (canonical baseline)."
+
+[var.FLAMBEAU_PHASE3B_KV_Q8]
+class           = "X"
+description     = "Phase 3b — Q8 KV arm"
+default_state   = "n/a"
+test_values     = ["unset"]
+models          = ["qwen36-27b-q4_0", "qwen36-35b-a3b-q4_0"]
+topologies      = ["pp2tp2"]
+concurrencies   = [1, 4]
+metrics         = ["tg64_tok_s", "vram_peak_gb"]
+preconditions   = { FLAMBEAU_INFLIGHT_SLOTS = "8", FLAMBEAU_KV = "q8" }
+notes           = "Q8 KV layout (~2× HBM saving on decode)."
+
+# 3d — opt-out flags. Default state (gpu-sampler ON, batched-decode ON)
+# vs each opt-out arm. Quantifies the cost of disabling each lever for
+# operators who run greedy-only / synchronous-only workloads.
+[var.FLAMBEAU_PHASE3D_NO_GPU_SAMPLER]
+class           = "X"
+description     = "Phase 3d — disable on-device GPU sampler"
+default_state   = "n/a"
+test_values     = ["unset"]
+models          = ["qwen36-27b-q4_0", "qwen36-35b-a3b-q4_0"]
+topologies      = ["pp2tp2"]
+concurrencies   = [1, 4]
+metrics         = ["tg64_tok_s"]
+preconditions   = { FLAMBEAU_INFLIGHT_SLOTS = "8", FLAMBEAU_NO_GPU_SAMPLER = "1" }
+notes           = "Validate the opt-out path still works; quantify regression."
+
+[var.FLAMBEAU_PHASE3D_NO_BATCHED_DECODE]
+class           = "X"
+description     = "Phase 3d — disable batched-decode scheduler"
+default_state   = "n/a"
+test_values     = ["unset"]
+models          = ["qwen36-27b-q4_0", "qwen36-35b-a3b-q4_0"]
+topologies      = ["pp2tp2"]
+concurrencies   = [1, 4]
+metrics         = ["tg64_tok_s"]
+preconditions   = { FLAMBEAU_INFLIGHT_SLOTS = "8", FLAMBEAU_NO_BATCHED_DECODE = "1" }
+notes           = "Validate the opt-out path still works; quantify regression."
+
+
+# ─────────────────────────────────────────────────────────────────────
 # Class B — kernel variant / fusion gates  (migrate to dispatch table)
 # ─────────────────────────────────────────────────────────────────────
 

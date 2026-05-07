@@ -8,6 +8,21 @@ use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
 use flambeau_quant::gguf::{GgufFile, Value};
 
+/// Parse a "loose" boolean from CLI / env. Accepts the conventional
+/// truthy/falsy strings (`1`, `0`, `true`, `false`, `yes`, `no`,
+/// `on`, `off`) case-insensitively. Pre-S5 the env-var booleans
+/// triggered on any-value-set; clap's strict `bool` parser broke
+/// that contract for operators with existing `FLAMBEAU_X=1` scripts.
+fn parse_bool_loose(s: &str) -> Result<bool, String> {
+    match s.trim().to_ascii_lowercase().as_str() {
+        "1" | "true" | "yes" | "on" => Ok(true),
+        "0" | "false" | "no" | "off" | "" => Ok(false),
+        other => Err(format!(
+            "invalid boolean `{other}` (accepts 1/0, true/false, yes/no, on/off)"
+        )),
+    }
+}
+
 #[derive(Parser)]
 #[command(name = "flambeau", version, about = "Max-perf inference server for modern LLMs on HIP + CUDA.")]
 struct Cli {
@@ -120,13 +135,34 @@ enum Cmd {
         #[arg(long = "ctx-cap", env = "FLAMBEAU_CTX_CAP")]
         ctx_cap: Option<usize>,
         /// Disable the on-device GPU sampler (default: enabled).
-        #[arg(long = "no-gpu-sampler", env = "FLAMBEAU_NO_GPU_SAMPLER", action = clap::ArgAction::SetTrue)]
+        #[arg(
+            long = "no-gpu-sampler",
+            env = "FLAMBEAU_NO_GPU_SAMPLER",
+            value_parser = parse_bool_loose,
+            num_args = 0..=1,
+            default_value = "false",
+            default_missing_value = "true",
+        )]
         no_gpu_sampler: bool,
         /// Disable the batched-decode scheduler (default: enabled).
-        #[arg(long = "no-batched-decode", env = "FLAMBEAU_NO_BATCHED_DECODE", action = clap::ArgAction::SetTrue)]
+        #[arg(
+            long = "no-batched-decode",
+            env = "FLAMBEAU_NO_BATCHED_DECODE",
+            value_parser = parse_bool_loose,
+            num_args = 0..=1,
+            default_value = "false",
+            default_missing_value = "true",
+        )]
         no_batched_decode: bool,
         /// Enable prompt prefix cache (chat workloads).
-        #[arg(long = "prefix-cache", env = "FLAMBEAU_PREFIX_CACHE", action = clap::ArgAction::SetTrue)]
+        #[arg(
+            long = "prefix-cache",
+            env = "FLAMBEAU_PREFIX_CACHE",
+            value_parser = parse_bool_loose,
+            num_args = 0..=1,
+            default_value = "false",
+            default_missing_value = "true",
+        )]
         prefix_cache: bool,
         /// Prefix-cache LRU size in GB. Only used when --prefix-cache is set.
         #[arg(long = "prefix-cache-max-gb", env = "FLAMBEAU_PREFIX_CACHE_MAX_GB", default_value_t = 2.0)]
