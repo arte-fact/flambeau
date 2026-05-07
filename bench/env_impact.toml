@@ -85,6 +85,31 @@ Result curve answers:
 """
 
 
+[var.FLAMBEAU_BASELINE_27B_PP2TP2]
+class           = "X"
+description     = "Smoke bench 27B/pp2tp2 N=1/4 (S2-style verification)"
+default_state   = "n/a"
+test_values     = ["unset"]
+models          = ["qwen36-27b-q4_0"]
+topologies      = ["pp2tp2"]
+concurrencies   = [1, 4]
+metrics         = ["agg_tps", "ttft_p99_ms", "vram_peak_gb"]
+preconditions   = { FLAMBEAU_INFLIGHT_SLOTS = "8" }
+notes           = "Smoke verification gate between cleanup slices."
+
+[var.FLAMBEAU_BASELINE_35B_PP2TP2]
+class           = "X"
+description     = "Smoke bench 35B-A3B/pp2tp2 N=1/4"
+default_state   = "n/a"
+test_values     = ["unset"]
+models          = ["qwen36-35b-a3b-q4_0"]
+topologies      = ["pp2tp2"]
+concurrencies   = [1, 4]
+metrics         = ["agg_tps", "ttft_p99_ms", "vram_peak_gb"]
+preconditions   = { FLAMBEAU_INFLIGHT_SLOTS = "8" }
+notes           = "Smoke verification gate between cleanup slices."
+
+
 # ─────────────────────────────────────────────────────────────────────
 # Class B — kernel variant / fusion gates  (migrate to dispatch table)
 # ─────────────────────────────────────────────────────────────────────
