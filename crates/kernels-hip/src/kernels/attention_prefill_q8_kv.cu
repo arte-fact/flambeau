@@ -1,32 +1,32 @@
 // attention_prefill_q8_kv — GQA prefill attention with Q8_0 KV cache.
 //
-// Same control flow + causal mask as `attention_prefill_f16`; K and V come
-// from a `KvCache<Q8Contig>` and are dequantised on the fly during the
-// score and V-accumulate (mirrors the chunk pass of
-// `attention_decode_q8_kv_splitk`).
+// V1-BENCH-#116-dp4a (Phase 4 follow-up). Score path is now pure
+// integer dp4a (`v_dot4_i32_i8` on gfx906) — Q for each (q_token,
+// q_head) block is quantized to Q8_0 in LDS once at block start; K
+// is read packed as int32 and dotted via `__builtin_amdgcn_sdot4`;
+// scalar K.d × Q.d is applied once per Q8_0 block (32 elements).
+// V path stays on FP16 dequant per element (Phase 5 covers PV).
 //
-// This is the oracle path — used for any n_q_tokens. Faster
-// flash-tile-Q8 variant is V2 follow-up; even this oracle replaces the
-// per-token Q8 prefill fallback (~50 ms/layer/token at n_kv=200) with
-// a single batched launch per layer.
+// Reference: same `vec_dot_fattn_vec_KQ_q8_0` pattern as decode kernel
+// in `/artefact/llama.cpp/ggml/src/ggml-cuda/fattn-common.cuh:264`.
 //
 // Layout:
-//   Q:     [n_q_tokens, n_heads_q, head_dim]    — F16
-//   K/V:   [n_k_tokens, n_heads_kv, head_dim/32] block_q8_0
-//   Out:   [n_q_tokens, n_heads_q, head_dim]    — F16
+//   Q:   [n_q_tokens, n_heads_q, head_dim] FP16
+//   K/V: [n_k_tokens, n_heads_kv, head_dim/32] block_q8_0
+//   Out: [n_q_tokens, n_heads_q, head_dim] FP16
 //
 // Supported head_dim: {64, 128, 256}.
-// Launch: blockDim = { head_dim }, gridDim = { n_q_tokens, n_heads_q, 1 }.
+// Launch: blockDim = { head_dim/4 }, gridDim = { n_q_tokens, n_heads_q, 1 }.
 
 #include "block_quant.cuh"
+#include "../arch_primitives/gfx906.cuh"
 #include <hip/hip_runtime.h>
 
 #ifndef INFINITY
 #define INFINITY __builtin_huge_valf()
 #endif
 
-#define PREFILL_Q8_MAX_HEAD_DIM 256
-#define PREFILL_Q8_MAX_WARPS (PREFILL_Q8_MAX_HEAD_DIM / 64)
+#define ATTN_Q8DPP_MAX_HEAD_DIM 256
 
 extern "C" __global__ void flambeau_attention_prefill_q8_kv(
     const fb_fp16_t* __restrict__ q,                    // [n_q_tokens, n_heads_q, head_dim]
@@ -47,52 +47,80 @@ extern "C" __global__ void flambeau_attention_prefill_q8_kv(
     const int group   = n_heads_q / n_heads_kv;
     const int kv_head = q_head / group;
 
-    const int tid     = threadIdx.x;
-    const int warp    = tid >> 6;
-    const int lane    = tid & 63;
-    const int n_warps = blockDim.x >> 6;
-
-    const int nb_per_row   = head_dim / 32;
-    const int block_idx    = tid / 32;
-    const int block_offset = tid & 31;
+    const int tid               = threadIdx.x;        // 0..head_dim/4 - 1
+    const int dim_quad          = tid;
+    const int elem_base         = tid * 4;
+    const int n_blocks_per_row  = head_dim / 32;
+    const int q8_block_idx      = elem_base / 32;
+    const int n_quads_per_block = 8;
+    const int quad_in_block     = (elem_base % 32) / 4;
 
     // Causal mask: same as F16 oracle.
     int limit = q_offset + q_token + 1;
     if (limit > n_k_tokens) limit = n_k_tokens;
 
-    __shared__ float q_shared[PREFILL_Q8_MAX_HEAD_DIM];
-    if (tid < head_dim) {
-        q_shared[tid] = (float) q[((size_t) q_token * n_heads_q + q_head) * head_dim + tid];
+    // 1. Q → Q8_0 in LDS, once per (q_token, q_head) block.
+    __shared__ int8_t q_qs[ATTN_Q8DPP_MAX_HEAD_DIM];
+    __shared__ float  q_d_block[ATTN_Q8DPP_MAX_HEAD_DIM / 32];
+
+    float qv[4];
+    qv[0] = (float) q[((size_t) q_token * n_heads_q + q_head) * head_dim + elem_base + 0];
+    qv[1] = (float) q[((size_t) q_token * n_heads_q + q_head) * head_dim + elem_base + 1];
+    qv[2] = (float) q[((size_t) q_token * n_heads_q + q_head) * head_dim + elem_base + 2];
+    qv[3] = (float) q[((size_t) q_token * n_heads_q + q_head) * head_dim + elem_base + 3];
+
+    float amax = fmaxf(fmaxf(fabsf(qv[0]), fabsf(qv[1])),
+                       fmaxf(fabsf(qv[2]), fabsf(qv[3])));
+    #pragma unroll
+    for (int off = 4; off > 0; off >>= 1) {
+        amax = fmaxf(amax, __shfl_xor(amax, off, n_quads_per_block));
+    }
+    const float qd  = amax / 127.0f;
+    const float qid = (qd != 0.0f) ? 1.0f / qd : 0.0f;
+    q_qs[elem_base + 0] = (int8_t) min(127, max(-127, (int) rintf(qv[0] * qid)));
+    q_qs[elem_base + 1] = (int8_t) min(127, max(-127, (int) rintf(qv[1] * qid)));
+    q_qs[elem_base + 2] = (int8_t) min(127, max(-127, (int) rintf(qv[2] * qid)));
+    q_qs[elem_base + 3] = (int8_t) min(127, max(-127, (int) rintf(qv[3] * qid)));
+    if (quad_in_block == 0) {
+        q_d_block[q8_block_idx] = qd;
     }
 
     float running_max = -INFINITY;
     float running_sum = 0.0f;
-    __shared__ float out_shared[PREFILL_Q8_MAX_HEAD_DIM];
-    if (tid < head_dim) out_shared[tid] = 0.0f;
-    __shared__ float score_parts[PREFILL_Q8_MAX_WARPS];
+    float v_out[4] = {0.0f, 0.0f, 0.0f, 0.0f};
+
     __syncthreads();
 
-    for (int t = 0; t < limit; ++t) {
-        const size_t kv_row_blocks = ((size_t) t * n_heads_kv + kv_head) * nb_per_row;
+    const int* q_qs_int = (const int*) q_qs;
+    const int q_packed  = q_qs_int[dim_quad];
 
-        float my_partial = 0.0f;
-        if (tid < head_dim) {
-            const flambeau_block_q8_0* k_block =
-                k_cache + kv_row_blocks + block_idx;
-            const float k_d = (float) k_block->d;
-            const int   k_q = (int)   k_block->qs[block_offset];
-            my_partial = q_shared[tid] * (k_d * (float) k_q);
-        }
+    for (int t = 0; t < limit; ++t) {
+        const size_t kv_row_blocks =
+            ((size_t) t * n_heads_kv + kv_head) * n_blocks_per_row;
+
+        const flambeau_block_q8_0* k_block = k_cache + kv_row_blocks + q8_block_idx;
+        const int   k_packed = ((const int*) k_block->qs)[quad_in_block];
+        const float k_d      = (float) k_block->d;
+
+        const int sumi_thread = gfx906_dp4a(k_packed, q_packed, 0);
+
+        int sumi_block = sumi_thread;
         #pragma unroll
-        for (int off = 32; off > 0; off >>= 1) {
-            my_partial += __shfl_xor(my_partial, off, 64);
+        for (int off = 4; off > 0; off >>= 1) {
+            sumi_block += __shfl_xor(sumi_block, off, n_quads_per_block);
         }
-        if (lane == 0) score_parts[warp] = my_partial;
-        __syncthreads();
-        float score_t = 0.0f;
-        #pragma unroll
-        for (int w = 0; w < PREFILL_Q8_MAX_WARPS; ++w) {
-            if (w < n_warps) score_t += score_parts[w];
+
+        const float qd_block = q_d_block[q8_block_idx];
+        float score_t = k_d * qd_block * (float) sumi_block;
+
+        if (n_blocks_per_row >= 2) {
+            score_t += __shfl_xor(score_t, 8,  n_blocks_per_row * n_quads_per_block);
+        }
+        if (n_blocks_per_row >= 4) {
+            score_t += __shfl_xor(score_t, 16, n_blocks_per_row * n_quads_per_block);
+        }
+        if (n_blocks_per_row >= 8) {
+            score_t += __shfl_xor(score_t, 32, n_blocks_per_row * n_quads_per_block);
         }
         score_t *= scale;
 
@@ -100,23 +128,25 @@ extern "C" __global__ void flambeau_attention_prefill_q8_kv(
         float scale_old = __expf(running_max - new_max);
         float coeff_t   = __expf(score_t - new_max);
 
-        if (tid < head_dim) {
-            const flambeau_block_q8_0* v_block =
-                v_cache + kv_row_blocks + block_idx;
-            const float v_d = (float) v_block->d;
-            const int   v_q = (int)   v_block->qs[block_offset];
-            const float v_v = v_d * (float) v_q;
-            out_shared[tid] = out_shared[tid] * scale_old + coeff_t * v_v;
-        }
+        const flambeau_block_q8_0* v_block = v_cache + kv_row_blocks + q8_block_idx;
+        const float v_d      = (float) v_block->d;
+        const int   v_packed = ((const int*) v_block->qs)[quad_in_block];
+        const int v_q0 = (int)(int8_t)((v_packed >>  0) & 0xFF);
+        const int v_q1 = (int)(int8_t)((v_packed >>  8) & 0xFF);
+        const int v_q2 = (int)(int8_t)((v_packed >> 16) & 0xFF);
+        const int v_q3 = (int)(int8_t)((v_packed >> 24) & 0xFF);
+
+        v_out[0] = v_out[0] * scale_old + coeff_t * (v_d * (float) v_q0);
+        v_out[1] = v_out[1] * scale_old + coeff_t * (v_d * (float) v_q1);
+        v_out[2] = v_out[2] * scale_old + coeff_t * (v_d * (float) v_q2);
+        v_out[3] = v_out[3] * scale_old + coeff_t * (v_d * (float) v_q3);
         running_sum = running_sum * scale_old + coeff_t;
         running_max = new_max;
-
-        __syncthreads();
     }
 
-    if (tid < head_dim) {
-        const float norm = (running_sum > 0.0f) ? 1.0f / running_sum : 0.0f;
-        out[((size_t) q_token * n_heads_q + q_head) * head_dim + tid] =
-            (fb_fp16_t) (out_shared[tid] * norm);
-    }
+    const float norm = (running_sum > 0.0f) ? 1.0f / running_sum : 0.0f;
+    out[((size_t) q_token * n_heads_q + q_head) * head_dim + elem_base + 0] = (fb_fp16_t) (v_out[0] * norm);
+    out[((size_t) q_token * n_heads_q + q_head) * head_dim + elem_base + 1] = (fb_fp16_t) (v_out[1] * norm);
+    out[((size_t) q_token * n_heads_q + q_head) * head_dim + elem_base + 2] = (fb_fp16_t) (v_out[2] * norm);
+    out[((size_t) q_token * n_heads_q + q_head) * head_dim + elem_base + 3] = (fb_fp16_t) (v_out[3] * norm);
 }

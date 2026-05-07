@@ -148,6 +148,68 @@ typedef struct {
 static_assert(sizeof(flambeau_block_q4_K) == 2 + 2 + K_SCALE_SIZE + QK_K / 2,
               "block_q4_K size");
 
+// quantize_q8_1_to_shared — block-level helper that takes a length-D
+// FP16 vector in registers/LDS and emits a Q8_1-style packed
+// representation in shared memory: int8 quants + per-32-element
+// (d, s) header pair. Used by the INT8 attention score path so the
+// inner KQ matmul can stay in integer (dp4a) instead of dequanting K
+// to FP16 per element.
+//
+// Layout in `out_qs`/`out_ds`:
+//   out_qs[D]            : int8 quantized values
+//   out_ds[(D/32) * 2]   : interleaved (d, d*sum) FP16 per 32-elem block
+//                          (matches `flambeau_block_q8_1.ds` semantics)
+//
+// Caller invariants: `D` is a multiple of 32, and `D <= blockDim.x`.
+// One thread reads `q_in[tid]` (or zero-pads if `tid >= D`). Reduction
+// is wave-wide (`__shfl_xor` with WARP=64 on gfx906); for blocks
+// larger than one warp, caller must run this WITH `n_warps = D/64`
+// per group and keep block-amax per 32-element subgroup separately.
+//
+// Reference: `quantize_q8_1_to_shared` in
+// `/artefact/llama.cpp/ggml/src/ggml-cuda/fattn-common.cuh:292`.
+__device__ __forceinline__ void flambeau_quantize_q8_1_to_shared(
+    const fb_fp16_t* __restrict__ q_in,   // [D] fp16
+    int               D,                   // length, multiple of 32
+    int               tid,                 // 0..blockDim.x-1
+    int8_t*  __restrict__ out_qs,          // [D]
+    fb_fp16_t* __restrict__ out_ds          // [(D/32) * 2] interleaved (d, d*sum)
+) {
+    const int block_idx    = tid >> 5;     // tid / 32 → which Q8_1 block
+    const int block_offset = tid & 31;     // tid % 32
+
+    if (tid >= D) return;
+
+    float v = (float) q_in[tid];
+
+    // amax over each 32-lane group via warp shfl-xor. With WARP=64 on
+    // gfx906, lanes 0..31 form group 0, 32..63 form group 1, so we
+    // reduce within the half-warp (shfl_xor up to 16). For blocks
+    // wider than one warp, each warp's lane 0..31 / 32..63 contribute
+    // distinct (d, s) pairs to consecutive Q8_1 blocks — caller is
+    // expected to launch with blockDim.x = D so each tid covers one
+    // element. score_parts-style cross-warp aggregation is NOT needed
+    // because each Q8_1 block is owned by exactly one half-warp.
+    float amax = fabsf(v);
+    float sum  = v;
+    #pragma unroll
+    for (int off = 16; off > 0; off >>= 1) {
+        amax = fmaxf(amax, __shfl_xor(amax, off, 32));
+        sum +=         __shfl_xor(sum,  off, 32);
+    }
+
+    const float d  = amax / 127.0f;
+    const float id = (d != 0.0f) ? 1.0f / d : 0.0f;
+    const int   qi = min(127, max(-127, (int) rintf(v * id)));
+    out_qs[tid] = (int8_t) qi;
+
+    // Lane 0 of each 32-element group writes the (d, d*sum) header.
+    if (block_offset == 0) {
+        out_ds[block_idx * 2 + 0] = (fb_fp16_t) d;
+        out_ds[block_idx * 2 + 1] = (fb_fp16_t) (d * sum);
+    }
+}
+
 // Reconstruct the 6-bit (scale, min) pair for sub-block `j` (0..7) from the
 // packed 12-byte scales array. Mirrors candle's `get_scale_min_k4` exactly.
 __device__ __forceinline__ void flambeau_q4k_scale_min(

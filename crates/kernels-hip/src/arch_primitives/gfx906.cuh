@@ -146,6 +146,16 @@ static __device__ __forceinline__ float gfx906_fast_exp(float x) {
     return gfx906_exp2(x * GFX906_LOG2E);
 }
 
+// ---------------------------------------------------------------------------
+// dp4a — 4×int8 × 4×int8 → int32 fused multiply-add. Single-cycle on gfx906
+// via `v_dot4_i32_i8`. Used by INT8 score paths (Q8_0 KV attention,
+// MMVQ Q4_K/Q4_0/Q5_1, MMQ turbo). Inputs are int32-packed int8 quads.
+// Saturate flag false → plain integer MAC.
+// ---------------------------------------------------------------------------
+static __device__ __forceinline__ int gfx906_dp4a(int a, int b, int c) {
+    return __builtin_amdgcn_sdot4(a, b, c, false);
+}
+
 #else  // non-HIP fallback, should never be reached in V1
 
 static __device__ __forceinline__ float gfx906_warp_reduce_sum(float x) {

@@ -419,7 +419,9 @@ pub fn attention_decode_q8_kv(
     args.push(&head_dim_i);
     args.push(&n_tokens_i);
     args.push(&scale_f);
-    let cfg = LaunchCfg::one_d(n_heads_q as u32, head_dim as u32);
+    // V1-BENCH-#116-dp4a — block.x = head_dim/4 (one thread per int32-
+    // packed quad). For head_dim=256 that's 64 threads = 1 wavefront.
+    let cfg = LaunchCfg::one_d(n_heads_q as u32, (head_dim / 4) as u32);
     unsafe { kernel.launch(stream, cfg, args)? };
     Ok(())
 }
@@ -487,9 +489,12 @@ pub fn attention_decode_q8_kv_splitk(
     a1.push(&n_chunks_i);
     a1.push(&chunk_size_i);
     a1.push(&scale_f);
+    // V1-BENCH-#116-dp4a — chunk pass uses block = head_dim/4 (one
+    // thread per int32-packed quad). Combine pass still needs
+    // head_dim threads (one per output element).
     let cfg1 = LaunchCfg {
         grid: (n_heads_q as u32, n_chunks as u32, 1),
-        block: (head_dim as u32, 1, 1),
+        block: ((head_dim / 4) as u32, 1, 1),
         shared_bytes: 0,
     };
     unsafe { k_chunk.launch(stream, cfg1, a1)? };
@@ -569,9 +574,11 @@ pub fn attention_prefill_q8_kv(
     args.push(&n_k_i);
     args.push(&q_off_i);
     args.push(&scale_f);
+    // V1-BENCH-#116-dp4a — block.x = head_dim/4 (one thread per int32-
+    // packed quad). For head_dim=256 → 64 threads = one wavefront.
     let cfg = LaunchCfg {
         grid: (n_q_tokens as u32, n_heads_q as u32, 1),
-        block: (head_dim as u32, 1, 1),
+        block: ((head_dim / 4) as u32, 1, 1),
         shared_bytes: 0,
     };
     unsafe { kernel.launch(stream, cfg, args)? };

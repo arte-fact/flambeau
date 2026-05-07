@@ -4,13 +4,20 @@
 // 1/n_chunks of the work, then a combine pass merges per-chunk
 // (m, s, o[head_dim]) triples online-softmax style.
 //
-// K and V come from `KvCache<Q8Contig>` — dequantised on the fly during
-// the dot product and the V-accumulate, just like the single-pass
-// `attention_decode_q8_kv` kernel. Combine pass is the SAME as the F16
-// split-K combine (operates on f32 partials, layout-agnostic) — we keep
-// a separate symbol so both modules stay self-contained.
+// V1-BENCH-#116-dp4a (Phase 4 follow-up): chunk pass is now pure
+// integer dp4a (`v_dot4_i32_i8`), mirroring the single-pass kernel.
+// Q is quantized to Q8_0 in LDS once per chunk; K is read packed as
+// int32, dotted via `__builtin_amdgcn_sdot4`; scalar K.d × Q.d
+// applied once per Q8_0 block. V path stays on FP16 dequant per
+// element (Phase 5 covers PV in INT8).
+//
+// Combine pass is identical math to the F16 split-K combine and to
+// the prior FP-dequant Q8 split-K combine — operates on f32 partials,
+// layout-agnostic. Kept as a separate symbol so the Q8 module is
+// self-contained.
 
 #include "block_quant.cuh"
+#include "../arch_primitives/gfx906.cuh"
 #include <hip/hip_runtime.h>
 
 #ifndef INFINITY
@@ -18,10 +25,7 @@
 #endif
 
 #define ATTN_Q8SK_MAX_HEAD_DIM 256
-#define ATTN_Q8SK_MAX_WARPS (ATTN_Q8SK_MAX_HEAD_DIM / 64)
 
-// Pass 1 — each block (blockIdx.x = q_head, blockIdx.y = chunk) processes
-// tokens [chunk*chunk_size, min((chunk+1)*chunk_size, n_tokens)).
 extern "C" __global__ void flambeau_attention_decode_q8_kv_splitk_chunk(
     const fb_fp16_t* __restrict__ q,                    // [n_heads_q, head_dim]
     const flambeau_block_q8_0* __restrict__ k_cache,    // [n_tokens, n_heads_kv, head_dim/32]
@@ -43,54 +47,83 @@ extern "C" __global__ void flambeau_attention_decode_q8_kv_splitk_chunk(
     const int group   = n_heads_q / n_heads_kv;
     const int kv_head = q_head / group;
 
-    const int tid    = threadIdx.x;
-    const int warp   = tid >> 6;
-    const int lane   = tid & 63;
-    const int nwarps = blockDim.x >> 6;
-
-    const int nb_per_row   = head_dim / 32;
-    const int block_idx    = tid / 32;
-    const int block_offset = tid & 31;
+    // 1 thread per int32-packed quad (4 elements). Same layout as
+    // single-pass dp4a kernel.
+    const int tid               = threadIdx.x;
+    const int dim_quad          = tid;
+    const int elem_base         = tid * 4;
+    const int n_blocks_per_row  = head_dim / 32;
+    const int q8_block_idx      = elem_base / 32;
+    const int n_quads_per_block = 8;
+    const int quad_in_block     = (elem_base % 32) / 4;
 
     const int t_start = chunk * chunk_size;
     int t_end         = t_start + chunk_size;
     if (t_end > n_tokens) t_end = n_tokens;
 
-    __shared__ float q_shared[ATTN_Q8SK_MAX_HEAD_DIM];
-    if (tid < head_dim) {
-        q_shared[tid] = (float) q[(size_t) q_head * head_dim + tid];
+    // 1. Q → Q8_0 in LDS, once per (q_head, chunk) block. Same trick as
+    //    single-pass: amax over each 32-elem group, roundf(v/d).
+    __shared__ int8_t q_qs[ATTN_Q8SK_MAX_HEAD_DIM];
+    __shared__ float  q_d_block[ATTN_Q8SK_MAX_HEAD_DIM / 32];
+
+    float qv[4];
+    qv[0] = (float) q[(size_t) q_head * head_dim + elem_base + 0];
+    qv[1] = (float) q[(size_t) q_head * head_dim + elem_base + 1];
+    qv[2] = (float) q[(size_t) q_head * head_dim + elem_base + 2];
+    qv[3] = (float) q[(size_t) q_head * head_dim + elem_base + 3];
+
+    float amax = fmaxf(fmaxf(fabsf(qv[0]), fabsf(qv[1])),
+                       fmaxf(fabsf(qv[2]), fabsf(qv[3])));
+    #pragma unroll
+    for (int off = 4; off > 0; off >>= 1) {
+        amax = fmaxf(amax, __shfl_xor(amax, off, n_quads_per_block));
+    }
+    const float qd  = amax / 127.0f;
+    const float qid = (qd != 0.0f) ? 1.0f / qd : 0.0f;
+    q_qs[elem_base + 0] = (int8_t) min(127, max(-127, (int) rintf(qv[0] * qid)));
+    q_qs[elem_base + 1] = (int8_t) min(127, max(-127, (int) rintf(qv[1] * qid)));
+    q_qs[elem_base + 2] = (int8_t) min(127, max(-127, (int) rintf(qv[2] * qid)));
+    q_qs[elem_base + 3] = (int8_t) min(127, max(-127, (int) rintf(qv[3] * qid)));
+    if (quad_in_block == 0) {
+        q_d_block[q8_block_idx] = qd;
     }
 
     float running_max = -INFINITY;
     float running_sum = 0.0f;
-    __shared__ float out_shared[ATTN_Q8SK_MAX_HEAD_DIM];
-    if (tid < head_dim) out_shared[tid] = 0.0f;
-    __shared__ float score_parts[ATTN_Q8SK_MAX_WARPS];
+    float v_out[4] = {0.0f, 0.0f, 0.0f, 0.0f};
+
     __syncthreads();
+
+    const int* q_qs_int = (const int*) q_qs;
+    const int q_packed  = q_qs_int[dim_quad];
 
     for (int t = t_start; t < t_end; ++t) {
         const size_t kv_row_blocks =
-            ((size_t) t * n_heads_kv + kv_head) * nb_per_row;
+            ((size_t) t * n_heads_kv + kv_head) * n_blocks_per_row;
 
-        // Q · K[t, kv_head] — dequant K on the fly.
-        float my_partial = 0.0f;
-        if (tid < head_dim) {
-            const flambeau_block_q8_0* k_block =
-                k_cache + kv_row_blocks + block_idx;
-            const float k_d = (float) k_block->d;
-            const int   k_q = (int)   k_block->qs[block_offset];
-            my_partial = q_shared[tid] * (k_d * (float) k_q);
-        }
+        const flambeau_block_q8_0* k_block = k_cache + kv_row_blocks + q8_block_idx;
+        const int   k_packed = ((const int*) k_block->qs)[quad_in_block];
+        const float k_d      = (float) k_block->d;
+
+        const int sumi_thread = gfx906_dp4a(k_packed, q_packed, 0);
+
+        int sumi_block = sumi_thread;
         #pragma unroll
-        for (int off = 32; off > 0; off >>= 1) {
-            my_partial += __shfl_xor(my_partial, off, 64);
+        for (int off = 4; off > 0; off >>= 1) {
+            sumi_block += __shfl_xor(sumi_block, off, n_quads_per_block);
         }
-        if (lane == 0) score_parts[warp] = my_partial;
-        __syncthreads();
-        float score_t = 0.0f;
-        #pragma unroll
-        for (int w = 0; w < ATTN_Q8SK_MAX_WARPS; ++w) {
-            if (w < nwarps) score_t += score_parts[w];
+
+        const float qd_block = q_d_block[q8_block_idx];
+        float score_t = k_d * qd_block * (float) sumi_block;
+
+        if (n_blocks_per_row >= 2) {
+            score_t += __shfl_xor(score_t, 8,  n_blocks_per_row * n_quads_per_block);
+        }
+        if (n_blocks_per_row >= 4) {
+            score_t += __shfl_xor(score_t, 16, n_blocks_per_row * n_quads_per_block);
+        }
+        if (n_blocks_per_row >= 8) {
+            score_t += __shfl_xor(score_t, 32, n_blocks_per_row * n_quads_per_block);
         }
         score_t *= scale;
 
@@ -98,38 +131,40 @@ extern "C" __global__ void flambeau_attention_decode_q8_kv_splitk_chunk(
         float scale_old = __expf(running_max - new_max);
         float coeff_t   = __expf(score_t - new_max);
 
-        // V-accum — dequant V on the fly.
-        if (tid < head_dim) {
-            const flambeau_block_q8_0* v_block =
-                v_cache + kv_row_blocks + block_idx;
-            const float v_d = (float) v_block->d;
-            const int   v_q = (int)   v_block->qs[block_offset];
-            const float v_v = v_d * (float) v_q;
-            out_shared[tid] = out_shared[tid] * scale_old + coeff_t * v_v;
-        }
+        const flambeau_block_q8_0* v_block = v_cache + kv_row_blocks + q8_block_idx;
+        const float v_d      = (float) v_block->d;
+        const int   v_packed = ((const int*) v_block->qs)[quad_in_block];
+        const int v_q0 = (int)(int8_t)((v_packed >>  0) & 0xFF);
+        const int v_q1 = (int)(int8_t)((v_packed >>  8) & 0xFF);
+        const int v_q2 = (int)(int8_t)((v_packed >> 16) & 0xFF);
+        const int v_q3 = (int)(int8_t)((v_packed >> 24) & 0xFF);
+
+        v_out[0] = v_out[0] * scale_old + coeff_t * (v_d * (float) v_q0);
+        v_out[1] = v_out[1] * scale_old + coeff_t * (v_d * (float) v_q1);
+        v_out[2] = v_out[2] * scale_old + coeff_t * (v_d * (float) v_q2);
+        v_out[3] = v_out[3] * scale_old + coeff_t * (v_d * (float) v_q3);
         running_sum = running_sum * scale_old + coeff_t;
         running_max = new_max;
-
-        __syncthreads();
     }
 
-    // Write per-chunk partials. If the chunk was empty (t_start >= n_tokens,
-    // possible on the last chunk when n_tokens is not a multiple of
-    // chunk_size), running_max stays -INF / running_sum 0 — combine treats
-    // the contribution as neutral.
+    // Write per-chunk partials. Empty-chunk handling: when n_tokens is
+    // not a multiple of chunk_size, the last chunk's tail tokens give a
+    // smaller t_end; running_max stays -INF / running_sum 0 — combine
+    // treats the contribution as neutral.
     const int part_idx = q_head * n_chunks + chunk;
     if (tid == 0) {
         partials_m[part_idx] = running_max;
         partials_s[part_idx] = running_sum;
     }
-    if (tid < head_dim) {
-        partials_o[(size_t) part_idx * head_dim + tid] = out_shared[tid];
-    }
+    partials_o[(size_t) part_idx * head_dim + elem_base + 0] = v_out[0];
+    partials_o[(size_t) part_idx * head_dim + elem_base + 1] = v_out[1];
+    partials_o[(size_t) part_idx * head_dim + elem_base + 2] = v_out[2];
+    partials_o[(size_t) part_idx * head_dim + elem_base + 3] = v_out[3];
 }
 
-// Pass 2 — combine n_chunks partials per Q head. Identical math to the
-// F16 split-K combine; symbol kept distinct so the Q8 module is self-
-// contained and can be loaded without the F16 split-K module present.
+// Combine pass — unchanged from the FP-dequant version. Operates on
+// f32 partials so layout-agnostic. Kept as a separate symbol from the
+// F16 combine kernel so the Q8 module is self-contained.
 extern "C" __global__ void flambeau_attention_decode_q8_kv_splitk_combine(
     const float* __restrict__ partials_m,  // [n_heads_q, n_chunks]
     const float* __restrict__ partials_s,  // [n_heads_q, n_chunks]
