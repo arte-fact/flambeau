@@ -175,6 +175,79 @@ impl Drop for MoeScratch {
     }
 }
 
+impl MoeScratch {
+    /// View shaped for `flambeau_blocks::MoeExperts` decode methods.
+    pub fn view(&self) -> flambeau_blocks::MoeExpertsDecodeScratch {
+        flambeau_blocks::MoeExpertsDecodeScratch {
+            x_q8_1: self.x_q8_1,
+            router_logits: self.router_logits,
+            expert_ids: self.expert_ids,
+            expert_weights: self.expert_weights,
+            gate_out_f32: self.gate_out_f32,
+            up_out_f32: self.up_out_f32,
+            activated_f16: self.activated_f16,
+            activated_q8_1: self.activated_q8_1,
+            down_f32: self.down_f32,
+            down_f16: self.down_f16,
+        }
+    }
+}
+
+/// Build a `flambeau_blocks::MoeExperts` from already-unpacked
+/// MoE-FFN weights + the model config.
+pub fn build_moe_experts_block(
+    ffn_gate_inp: &DeviceTensor,
+    ffn: &crate::weights::FfnWeights,
+    cfg: &Qwen3MoEConfig,
+) -> Result<flambeau_blocks::MoeExperts> {
+    use super::common::qdtype_of;
+    let ffn_gate_exps = ffn
+        .ffn_gate_exps
+        .as_ref()
+        .context("build_moe_experts_block: ffn.ffn_gate_exps missing")?;
+    let ffn_up_exps = ffn
+        .ffn_up_exps
+        .as_ref()
+        .context("build_moe_experts_block: ffn.ffn_up_exps missing")?;
+    let ffn_down_exps = ffn
+        .ffn_down_exps
+        .as_ref()
+        .context("build_moe_experts_block: ffn.ffn_down_exps missing")?;
+    let router_dtype = qdtype_of(ffn_gate_inp.dtype)?;
+    let gate_dtype = qdtype_of(ffn_gate_exps.dtype)?;
+    let up_dtype = qdtype_of(ffn_up_exps.dtype)?;
+    let down_dtype = qdtype_of(ffn_down_exps.dtype)?;
+    // Router + expert weights are stored as multi-D piles and may not
+    // strictly be 2-D in fixtures; compute dims from cfg so the block
+    // doesn't depend on the exact upload-side flattening.
+    flambeau_blocks::MoeExperts::new(
+        flambeau_blocks::WeightHandle {
+            ptr: ffn_gate_inp.ptr,
+            dtype: router_dtype,
+            dims: [cfg.num_experts, cfg.hidden_size],
+        },
+        flambeau_blocks::WeightHandle {
+            ptr: ffn_gate_exps.ptr,
+            dtype: gate_dtype,
+            dims: [cfg.num_experts * cfg.moe_intermediate_size, cfg.hidden_size],
+        },
+        flambeau_blocks::WeightHandle {
+            ptr: ffn_up_exps.ptr,
+            dtype: up_dtype,
+            dims: [cfg.num_experts * cfg.moe_intermediate_size, cfg.hidden_size],
+        },
+        flambeau_blocks::WeightHandle {
+            ptr: ffn_down_exps.ptr,
+            dtype: down_dtype,
+            dims: [cfg.num_experts * cfg.hidden_size, cfg.moe_intermediate_size],
+        },
+        cfg.hidden_size,
+        cfg.moe_intermediate_size,
+        cfg.num_experts,
+        cfg.num_experts_per_tok,
+    )
+}
+
 /// One decode step of the routed MoE FFN. Assumes the caller has:
 /// - Run `post_attention_norm` on the residual stream (so `x_norm` is the
 /// norm output).
@@ -195,10 +268,17 @@ pub fn forward_moe_ffn_decode(
     extra_residual: Option<DevicePtr>,
     out: DevicePtr,
 ) -> Result<()> {
+    // R4.B — route decode through `flambeau_blocks::MoeExperts`.
+    // Prefill and shared-expert paths stay on their existing free fns
+    // (multi-path tile8/turbo MMQ dispatch + sigmoid-gate scaling
+    // don't yet have a block surface).
+    let ffn_gate_inp = ffn.ffn_gate_inp.as_ref().context(
+        "forward_moe_ffn_decode: ffn.ffn_gate_inp missing (router weight); routing must precede expert forward",
+    )?;
     let ffn_gate_exps = ffn
         .ffn_gate_exps
         .as_ref()
-        .context("forward_moe_ffn_decode: ffn.ffn_gate_exps missing (loader should have rejected a non-MoE layer routed here)")?;
+        .context("forward_moe_ffn_decode: ffn.ffn_gate_exps missing")?;
     let ffn_up_exps = ffn
         .ffn_up_exps
         .as_ref()
@@ -207,130 +287,17 @@ pub fn forward_moe_ffn_decode(
         .ffn_down_exps
         .as_ref()
         .context("forward_moe_ffn_decode: ffn.ffn_down_exps missing")?;
-    let hidden = cfg.hidden_size;
-    let inter = cfg.moe_intermediate_size;
-    let top_k = cfg.num_experts_per_tok;
-    let _ = cfg.num_experts; // presently only asserted by dims on ffn_gate_exps
-
-    // 1. Quantise x_norm to Q8_1 for the gate/up matmul.
-    quantize_f16_q8_1(ops, stream, x_norm, scratch.x_q8_1, hidden)
-        .context("moe x_norm → Q8_1")?;
-
-    // 2. Fused gate + up matmul across top_k selected experts in one launch.
-    // Weight shape (outermost-first): `[n_experts, inter, hidden]`. The
-    // indexed_moe kernels take n_sb_per_row = hidden / QK_K.
-    // gate+up may both be Q4_K (standard UD-Q4_K_S) or Q8_0 (2.a:
-    // UD-Q8_K_XL). down may be Q4_K, Q6_K (UD-Q4_K_S ffn_down promotion),
-    // or Q8_0 (UD-Q8_K_XL). BF16 layers in UD-Q8_K_XL aren't handled here
-    // yet — loader converts them to Q8_0 on host.
-    let gate_dt = ffn_gate_exps.dtype;
-    let up_dt = ffn_up_exps.dtype;
     validate_moe_dtypes(
         "indexed-MoE",
-        gate_dt,
-        up_dt,
+        ffn_gate_exps.dtype,
+        ffn_up_exps.dtype,
         ffn_down_exps.dtype,
-        hidden,
-        inter,
+        cfg.hidden_size,
+        cfg.moe_intermediate_size,
     )?;
-    run_indexed_moe_gate_up(
-        ops,
-        stream,
-        gate_dt,
-        ffn_gate_exps.ptr,
-        ffn_up_exps.ptr,
-        scratch.x_q8_1,
-        scratch.expert_ids,
-        scratch.gate_out_f32,
-        scratch.up_out_f32,
-        inter,
-        1,
-        top_k,
-        hidden,
-    )?;
-
-    // 3+4. 3.b.2 — fused `swiglu_f32_to_f16` writes directly to F16,
-    // skipping the standalone cast_f32_to_f16. Then quantize F16 → Q8_1.
-    flambeau_ops::hip::mlp::swiglu_f32_to_f16(
-        ops,
-        stream,
-        scratch.gate_out_f32,
-        scratch.up_out_f32,
-        scratch.activated_f16,
-        top_k * inter,
-    )
-    .context("moe swiglu_f32_to_f16")?;
-    flambeau_ops::hip::norm::quantize_f16_q8_1(
-        ops,
-        stream,
-        scratch.activated_f16,
-        scratch.activated_q8_1,
-        top_k * inter,
-    )
-    .context("moe quantize activated → Q8_1")?;
-
-    // 5. Down matmul. Indexed MoE MMVQ dispatches by
-    // `expert_ids[token * top_k + slot]`. Treat each of our top_k routed
-    // experts as its own "effective token" with `top_k = 1` and its own
-    // expert id. The scratch already holds `expert_ids[0..top_k]` which
-    // doubles as the flat expert lookup (`flat[i] = expert_ids[0 * 1 + i]`).
-    run_indexed_moe_down(
-        ops,
-        stream,
-        ffn_down_exps.dtype,
-        ffn_down_exps.ptr,
-        scratch.activated_q8_1,
-        scratch.expert_ids,
-        scratch.down_f32,
-        hidden,
-        top_k, // n_tokens_effective
-        1,     // top_k=1 in this re-indexed view
-        inter,
-    )?;
-
-    // 6. Cast expert outputs to F16 for the combine kernel.
-    cast_f32_to_f16(
-        ops,
-        stream,
-        scratch.down_f32,
-        scratch.down_f16,
-        top_k * hidden,
-    )
-    .context("cast down → f16")?;
-
-    // 7. Weighted sum + residual. 3.a.2 — if caller provides a second
-    // residual (shared-expert delta), fuse it into the combine step so
-    // we skip the standalone add_f16 between shared expert and combine.
-    if let Some(extra) = extra_residual {
-        flambeau_ops::hip::moe::moe_combine_two_residuals_f16(
-            ops,
-            stream,
-            scratch.down_f16,
-            scratch.expert_weights,
-            residual,
-            extra,
-            out,
-            1,
-            top_k,
-            hidden,
-        )
-        .context("moe_combine_two_residuals_f16")?;
-    } else {
-        moe_combine_f16(
-            ops,
-            stream,
-            scratch.down_f16,
-            scratch.expert_weights,
-            residual,
-            out,
-            1,
-            top_k,
-            hidden,
-        )
-        .context("moe_combine_f16")?;
-    }
-
-    Ok(())
+    let block = build_moe_experts_block(ffn_gate_inp, ffn, cfg)?;
+    let hipops = flambeau_ops::HipOps::new(ops, stream);
+    block.forward_decode(&hipops, x_norm, residual, extra_residual, out, scratch.view())
 }
 
 // ---------------------------------------------------------------------------

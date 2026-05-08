@@ -239,6 +239,11 @@ pub(super) fn qdtype_of(dtype: GgmlDType) -> Result<QDtype> {
         // attn_q/k + ffn_gate/up/down). `mmvq()` special-cases F16 to skip
         // the dispatch table and call the direct F16×Q8_1 kernel.
         GgmlDType::F16 => QDtype::F16,
+        // F32 — used by the MoE router weight (`ffn_gate_inp`) on
+        // older Qwen3.x GGUFs that predate the F32→F16 loader-side
+        // conversion. Only the dense_gemv router path consumes F32;
+        // qmatmul itself rejects F32 at dispatch time.
+        GgmlDType::F32 => QDtype::F32,
         // 3.a — Q4_0 and Q5_0 unblock Qwen3.6-35B-A3B-Q4_0.
         GgmlDType::Q4_0 => QDtype::Q4_0,
         GgmlDType::Q5_0 => QDtype::Q5_0,
