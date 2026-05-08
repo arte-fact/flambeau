@@ -16,8 +16,10 @@
 #![cfg(feature = "hip")]
 
 pub mod attention;
+pub mod dense_mlp;
 
 pub use attention::{
     StandardAttention, StandardAttentionDecodeScratch, StandardAttentionPrefillScratch,
     WeightHandle, MAX_SPLITK_CHUNKS,
 };
+pub use dense_mlp::{DenseMlp, DenseMlpDecodeScratch, DenseMlpPrefillScratch};

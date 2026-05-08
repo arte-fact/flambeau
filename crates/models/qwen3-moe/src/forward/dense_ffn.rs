@@ -13,15 +13,9 @@
               level forward_*_decode/prefill caller."
 )]
 
-use anyhow::{Context, Result};
+use anyhow::Result;
 use flambeau_core::{Device, DevicePtr};
-use flambeau_ops::hip::{
-    cast::cast_f32_to_f16,
-    mlp::add_f16,
-    norm::{quantize_f16_q8_1, quantize_f16_q8_1_mmq},
-    qmatmul::{mmvq_q8_0_gate_up, qmatmul},
-    HipDevice, HipStream, OpsRegistry,
-};
+use flambeau_ops::hip::{HipDevice, HipStream, OpsRegistry};
 use flambeau_quant::BlockQ8_1;
 
 use super::common::qdtype_of;
@@ -132,6 +126,46 @@ impl Drop for DenseFfnScratch {
     }
 }
 
+impl DenseFfnScratch {
+    /// Build a by-value view shaped for
+    /// `flambeau_blocks::DenseMlp::forward_decode`. All fields are
+    /// `Copy`, so the view can be passed by value (no `&mut`).
+    pub fn view(&self) -> flambeau_blocks::DenseMlpDecodeScratch {
+        flambeau_blocks::DenseMlpDecodeScratch {
+            x_q8_1: self.x_q8_1,
+            gate_f32: self.gate_f32,
+            up_f32: self.up_f32,
+            activated_f16: self.activated_f16,
+            activated_q8_1: self.activated_q8_1,
+            down_f32: self.down_f32,
+            down_f16: self.down_f16,
+        }
+    }
+}
+
+/// Build a `flambeau_blocks::DenseMlp` from already-unpacked dense FFN
+/// weights + the model config. The block holds only `WeightHandle`s;
+/// `ModelWeights` keeps owning the underlying allocations.
+pub fn build_dense_mlp_block(
+    dense: &DenseFfnWeights,
+    cfg: &Qwen3MoEConfig,
+) -> Result<flambeau_blocks::DenseMlp> {
+    use super::common::mat_shape;
+    let g_dtype = qdtype_of(dense.ffn_gate.dtype)?;
+    let u_dtype = qdtype_of(dense.ffn_up.dtype)?;
+    let d_dtype = qdtype_of(dense.ffn_down.dtype)?;
+    let (g_rows, g_k) = mat_shape(&dense.ffn_gate)?;
+    let (u_rows, u_k) = mat_shape(&dense.ffn_up)?;
+    let (d_rows, d_k) = mat_shape(&dense.ffn_down)?;
+    flambeau_blocks::DenseMlp::new(
+        flambeau_blocks::WeightHandle { ptr: dense.ffn_gate.ptr, dtype: g_dtype, dims: [g_rows, g_k] },
+        flambeau_blocks::WeightHandle { ptr: dense.ffn_up.ptr, dtype: u_dtype, dims: [u_rows, u_k] },
+        flambeau_blocks::WeightHandle { ptr: dense.ffn_down.ptr, dtype: d_dtype, dims: [d_rows, d_k] },
+        cfg.hidden_size,
+        cfg.moe_intermediate_size,
+    )
+}
+
 /// One decode step of a dense FFN block (arch=qwen35). Writes
 /// `x_out = residual + ffn_down(swiglu(ffn_gate(x_norm), ffn_up(x_norm)))`
 /// into `x_out`. No router, no experts, no sigmoid-gate scaling.
@@ -145,108 +179,13 @@ pub fn forward_dense_ffn_decode(
     residual: DevicePtr,
     x_out: DevicePtr,
 ) -> Result<()> {
-    let hidden = cfg.hidden_size;
-    let inter = cfg.moe_intermediate_size;
-
-    // 1. Quantise x_norm → Q8_1 once, reused for gate/up.
-    quantize_f16_q8_1(ops, stream, x_norm, scratch.x_q8_1, hidden)
-        .context("dense ffn x_norm → Q8_1")?;
-
-    // 2+3. gate + up matmuls share x_q8_1. 0.b — when both are Q8_0
-    // (Qwen3.6-27B dense path, 66.3% of decode wall pre-fusion), fuse
-    // into one mmvq_q8_0_gate_up launch. Kernel is the same one the
-    // full-attn layer uses for K+V fusion; parity cert in
-    // `crates/bench/tests/mmvq_q8_0_gate_up_parity.rs` proves bit-exact
-    // equivalence to two independent single-row calls. Disabled only
-    // by the coarse `FLAMBEAU_VARIANT=baseline` or the specific
-    // `FLAMBEAU_DENSE_GATE_UP=unfused`.
-    let fuse_gate_up = dense.ffn_gate.dtype == flambeau_quant::GgmlDType::Q8_0
-        && dense.ffn_up.dtype == flambeau_quant::GgmlDType::Q8_0;
-    if fuse_gate_up {
-        mmvq_q8_0_gate_up(
-            ops,
-            stream,
-            dense.ffn_gate.ptr,
-            dense.ffn_up.ptr,
-            scratch.x_q8_1,
-            scratch.gate_f32,
-            scratch.up_f32,
-            inter,
-            inter,
-            hidden,
-        )
-        .context("dense ffn gate+up fused mmvq_q8_0")?;
-    } else {
-        qmatmul(
-            ops,
-            stream,
-            dense.ffn_gate.ptr,
-            scratch.x_q8_1,
-            DevicePtr(0),
-            scratch.gate_f32,
-            1,
-            hidden,
-            inter,
-            qdtype_of(dense.ffn_gate.dtype)?,
-        )
-        .context("dense ffn gate qmatmul")?;
-        qmatmul(
-            ops,
-            stream,
-            dense.ffn_up.ptr,
-            scratch.x_q8_1,
-            DevicePtr(0),
-            scratch.up_f32,
-            1,
-            hidden,
-            inter,
-            qdtype_of(dense.ffn_up.dtype)?,
-        )
-        .context("dense ffn up qmatmul")?;
-    }
-
-    // 4+5. 3.d.2 fused SwiGLU → F16 + quantise; skips the standalone cast.
-    flambeau_ops::hip::mlp::swiglu_f32_to_f16(
-        ops,
-        stream,
-        scratch.gate_f32,
-        scratch.up_f32,
-        scratch.activated_f16,
-        inter,
-    )
-    .context("dense ffn swiglu_f32_to_f16")?;
-    quantize_f16_q8_1(
-        ops,
-        stream,
-        scratch.activated_f16,
-        scratch.activated_q8_1,
-        inter,
-    )
-    .context("dense ffn quantise activated → Q8_1")?;
-
-    // 6. down matmul: weight[hidden, inter] × activated[inter] → down_f32[hidden].
-    // Decode path: m=1 never hits MmqLdsX64.
-    qmatmul(
-        ops,
-        stream,
-        dense.ffn_down.ptr,
-        scratch.activated_q8_1,
-        DevicePtr(0),
-        scratch.down_f32,
-        1,
-        inter,
-        hidden,
-        qdtype_of(dense.ffn_down.dtype)?,
-    )
-    .context("dense ffn down qmatmul")?;
-
-    // 7. Cast down F32→F16, residual add into x_out.
-    cast_f32_to_f16(ops, stream, scratch.down_f32, scratch.down_f16, hidden)
-        .context("dense ffn cast down → f16")?;
-    add_f16(ops, stream, residual, scratch.down_f16, x_out, hidden)
-        .context("dense ffn residual: residual + down")?;
-
-    Ok(())
+    // R4.A — route through `flambeau_blocks::DenseMlp`. The block's
+    // kernel call sequence mirrors the original free-fn body verbatim.
+    // Dense FFN has no slots / graph-capture variant, so the entire
+    // decode goes through the block.
+    let block = build_dense_mlp_block(dense, cfg)?;
+    let hipops = flambeau_ops::HipOps::new(ops, stream);
+    block.forward_decode(&hipops, x_norm, residual, x_out, scratch.view())
 }
 
 // ---------------------------------------------------------------------------
@@ -359,6 +298,24 @@ impl Drop for DenseFfnPrefillScratch {
     }
 }
 
+impl DenseFfnPrefillScratch {
+    /// View shaped for `flambeau_blocks::DenseMlp::forward_prefill`.
+    pub fn view(&self) -> flambeau_blocks::DenseMlpPrefillScratch {
+        flambeau_blocks::DenseMlpPrefillScratch {
+            max_tokens: self.max_tokens,
+            x_q8_1: self.x_q8_1,
+            x_q8_1_mmq: self.x_q8_1_mmq,
+            gate_f32: self.gate_f32,
+            up_f32: self.up_f32,
+            activated_f16: self.activated_f16,
+            activated_q8_1: self.activated_q8_1,
+            activated_q8_1_mmq: self.activated_q8_1_mmq,
+            down_f32: self.down_f32,
+            down_f16: self.down_f16,
+        }
+    }
+}
+
 pub fn forward_dense_ffn_prefill(
     ops: &OpsRegistry,
     stream: &HipStream,
@@ -370,56 +327,9 @@ pub fn forward_dense_ffn_prefill(
     x_out: DevicePtr,
     n_tokens: usize,
 ) -> Result<()> {
-    let hidden = cfg.hidden_size;
-    let inter = cfg.moe_intermediate_size;
-
-    // Quantise x_norm to BOTH Q8_1 layouts: the standard per-row layout
-    // consumed by MMVQ / Mmq4Warp kernels, and the DS4 MMQ layout consumed
-    // by the 4-warp LDS-tiled turbo kernel (Q4_1 at m ≥ 128). qmatmul()
-    // dispatches to whichever matches the weight dtype + M.
-    quantize_f16_q8_1(ops, stream, x_norm, scratch.x_q8_1, n_tokens * hidden)
-        .context("dense ffn prefill x_norm → Q8_1 (std)")?;
-    quantize_f16_q8_1_mmq(ops, stream, x_norm, scratch.x_q8_1_mmq, hidden, n_tokens)
-        .context("dense ffn prefill x_norm → Q8_1 (MMQ DS4)")?;
-
-    qmatmul(
-        ops, stream,
-        dense.ffn_gate.ptr,
-        scratch.x_q8_1, scratch.x_q8_1_mmq,
-        scratch.gate_f32,
-        n_tokens, hidden, inter,
-        qdtype_of(dense.ffn_gate.dtype)?,
-    ).context("dense ffn prefill gate qmatmul")?;
-    qmatmul(
-        ops, stream,
-        dense.ffn_up.ptr,
-        scratch.x_q8_1, scratch.x_q8_1_mmq,
-        scratch.up_f32,
-        n_tokens, hidden, inter,
-        qdtype_of(dense.ffn_up.dtype)?,
-    ).context("dense ffn prefill up qmatmul")?;
-
-    // 3.d.2 fused SwiGLU → F16 (replaces swiglu_f32 + cast_f32_to_f16).
-    flambeau_ops::hip::mlp::swiglu_f32_to_f16(ops, stream, scratch.gate_f32, scratch.up_f32, scratch.activated_f16, n_tokens * inter)
-        .context("dense ffn prefill swiglu_f32_to_f16")?;
-    quantize_f16_q8_1(ops, stream, scratch.activated_f16, scratch.activated_q8_1, n_tokens * inter)
-        .context("dense ffn prefill quantise activated → Q8_1 (std)")?;
-    quantize_f16_q8_1_mmq(ops, stream, scratch.activated_f16, scratch.activated_q8_1_mmq, inter, n_tokens)
-        .context("dense ffn prefill quantise activated → Q8_1 (MMQ DS4)")?;
-
-    qmatmul(
-        ops, stream,
-        dense.ffn_down.ptr,
-        scratch.activated_q8_1, scratch.activated_q8_1_mmq,
-        scratch.down_f32,
-        n_tokens, inter, hidden,
-        qdtype_of(dense.ffn_down.dtype)?,
-    ).context("dense ffn prefill down qmatmul")?;
-
-    cast_f32_to_f16(ops, stream, scratch.down_f32, scratch.down_f16, n_tokens * hidden)
-        .context("dense ffn prefill cast down → f16")?;
-    add_f16(ops, stream, residual, scratch.down_f16, x_out, n_tokens * hidden)
-        .context("dense ffn prefill residual: residual + down")?;
-    Ok(())
+    // R4.A — route through `flambeau_blocks::DenseMlp::forward_prefill`.
+    let block = build_dense_mlp_block(dense, cfg)?;
+    let hipops = flambeau_ops::HipOps::new(ops, stream);
+    block.forward_prefill(&hipops, x_norm, residual, x_out, scratch.view(), n_tokens)
 }
 
