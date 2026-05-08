@@ -32,14 +32,13 @@ use flambeau_ops::hip::{
         moe_sort_by_expert_padded, shared_expert_scale_f32, topk_f32,
     },
     norm::{quantize_f16_q8_1, quantize_f16_q8_1_mmq},
-    qmatmul::mmvq_q8_0_gate_up,
     router::dense_gemv_f32_f16,
     HipDevice, HipStream, OpsRegistry,
 };
 use flambeau_quant::{BlockQ8_1, GgmlDType};
 
 use super::common::{
-    mat_shape, run_indexed_moe_down, run_indexed_moe_gate_up, run_mmvq_from_tensor,
+    run_indexed_moe_down, run_indexed_moe_gate_up,
     run_qmatmul_from_tensor, validate_moe_dtypes, QK_K,
 };
 use crate::config::Qwen3MoEConfig;
@@ -403,6 +402,56 @@ impl Drop for SharedExpertScratch {
     }
 }
 
+impl SharedExpertScratch {
+    /// View shaped for `flambeau_blocks::SharedExpert::forward_decode`.
+    pub fn view(&self) -> flambeau_blocks::SharedExpertDecodeScratch {
+        flambeau_blocks::SharedExpertDecodeScratch {
+            x_q8_1: self.x_q8_1,
+            gate_f32: self.gate_f32,
+            up_f32: self.up_f32,
+            activated_f16: self.activated_f16,
+            activated_q8_1: self.activated_q8_1,
+            down_f32: self.down_f32,
+            x_norm_f32: self.x_norm_f32,
+        }
+    }
+}
+
+/// Build a `flambeau_blocks::SharedExpert` from already-unpacked
+/// shared-expert weights + the model config.
+pub fn build_shared_expert_block(
+    shared: &crate::weights::SharedExpertWeights,
+    cfg: &Qwen3MoEConfig,
+) -> Result<flambeau_blocks::SharedExpert> {
+    use super::common::qdtype_of;
+    let inter = cfg
+        .shared_expert_intermediate_size
+        .context("build_shared_expert_block requires cfg.shared_expert_intermediate_size")?;
+    let g_dt = qdtype_of(shared.ffn_gate_shexp.dtype)?;
+    let u_dt = qdtype_of(shared.ffn_up_shexp.dtype)?;
+    let d_dt = qdtype_of(shared.ffn_down_shexp.dtype)?;
+    flambeau_blocks::SharedExpert::new(
+        shared.ffn_gate_inp_shexp.ptr,
+        flambeau_blocks::WeightHandle {
+            ptr: shared.ffn_gate_shexp.ptr,
+            dtype: g_dt,
+            dims: [inter, cfg.hidden_size],
+        },
+        flambeau_blocks::WeightHandle {
+            ptr: shared.ffn_up_shexp.ptr,
+            dtype: u_dt,
+            dims: [inter, cfg.hidden_size],
+        },
+        flambeau_blocks::WeightHandle {
+            ptr: shared.ffn_down_shexp.ptr,
+            dtype: d_dt,
+            dims: [cfg.hidden_size, inter],
+        },
+        cfg.hidden_size,
+        inter,
+    )
+}
+
 /// One decode step of the shared expert (always-on dense FFN), composed
 /// with the learned per-token sigmoid-gate scaling:
 /// gate_scalar[t] = sigmoid(⟨ ffn_gate_inp_shexp, x_norm[t] ⟩)
@@ -422,132 +471,9 @@ pub fn forward_shared_expert_decode(
     x_norm: DevicePtr,
     shared_out: DevicePtr,
 ) -> Result<()> {
-    let hidden = cfg.hidden_size;
-    let inter = cfg
-        .shared_expert_intermediate_size
-        .context("forward_shared_expert_decode requires cfg.shared_expert_intermediate_size")?;
-
-    // 1. Quantise x_norm → Q8_1 for gate/up matmuls.
-    quantize_f16_q8_1(ops, stream, x_norm, scratch.x_q8_1, hidden)
-        .context("shexp x_norm → Q8_1")?;
-
-    // 2+3. Dense gate + up matmuls. Fuse when FLAMBEAU_VARIANT=dp4a_vdr2 so
-    // the shared Q8_1 activation is read once, saving one kernel launch per
-    // layer per forward. Both weights must be Q8_0 for the fused path.
-    let fuse_gate_up = shared.ffn_gate_shexp.dtype == flambeau_quant::GgmlDType::Q8_0
-        && shared.ffn_up_shexp.dtype == flambeau_quant::GgmlDType::Q8_0;
-    if fuse_gate_up {
-        let (g_rows, g_k) = mat_shape(&shared.ffn_gate_shexp)?;
-        let (u_rows, u_k) = mat_shape(&shared.ffn_up_shexp)?;
-        if g_rows != inter || g_k != hidden || u_rows != inter || u_k != hidden {
-            bail!(
-                "fused shexp gate/up shape mismatch: gate=[{g_rows},{g_k}] up=[{u_rows},{u_k}] expected=[{inter},{hidden}]"
-            );
-        }
-        mmvq_q8_0_gate_up(
-            ops,
-            stream,
-            shared.ffn_gate_shexp.ptr,
-            shared.ffn_up_shexp.ptr,
-            scratch.x_q8_1,
-            scratch.gate_f32,
-            scratch.up_f32,
-            inter,
-            inter,
-            hidden,
-        )
-        .context("shexp mmvq_q8_0_gate_up (fused)")?;
-    } else {
-        run_mmvq_from_tensor(
-            ops,
-            stream,
-            &shared.ffn_gate_shexp,
-            scratch.x_q8_1,
-            scratch.gate_f32,
-            inter,
-            hidden,
-            "ffn_gate_shexp",
-        )?;
-        run_mmvq_from_tensor(
-            ops,
-            stream,
-            &shared.ffn_up_shexp,
-            scratch.x_q8_1,
-            scratch.up_f32,
-            inter,
-            hidden,
-            "ffn_up_shexp",
-        )?;
-    }
-
-    // 4+5. fused swiglu(gate, up) → Q8_1 directly. Skips
-    // both the F16 intermediate (`activated_f16`) and 1 launch vs the
-    // 3.b.2 swiglu_f32_to_f16 + quantize_f16_q8_1 chain. Default-on;
-    // FLAMBEAU_VARIANT=baseline opts back to the unfused pair.
-    let fuse_swiglu_quant = inter % 32 == 0;
-    if fuse_swiglu_quant {
-        flambeau_ops::hip::mlp::swiglu_f32_to_q8_1(
-            ops,
-            stream,
-            scratch.gate_f32,
-            scratch.up_f32,
-            scratch.activated_q8_1,
-            inter,
-        )
-        .context("shexp swiglu_f32_to_q8_1")?;
-    } else {
-        flambeau_ops::hip::mlp::swiglu_f32_to_f16(
-            ops,
-            stream,
-            scratch.gate_f32,
-            scratch.up_f32,
-            scratch.activated_f16,
-            inter,
-        )
-        .context("shexp swiglu_f32_to_f16")?;
-        flambeau_ops::hip::norm::quantize_f16_q8_1(
-            ops,
-            stream,
-            scratch.activated_f16,
-            scratch.activated_q8_1,
-            inter,
-        )
-        .context("shexp quantize activated → Q8_1")?;
-    }
-
-    // 6. Dense down matmul → down_f32 [hidden].
-    run_mmvq_from_tensor(
-        ops,
-        stream,
-        &shared.ffn_down_shexp,
-        scratch.activated_q8_1,
-        scratch.down_f32,
-        hidden,
-        inter,
-        "ffn_down_shexp",
-    )?;
-
-    // 7. Apply the learned per-token sigmoid gate scaling in place.
-    // The kernel needs F32 views of both `shared_out` (the dense FFN
-    // result) and `x_norm` (the layer input the gate learns from).
-    cast_f16_to_f32(ops, stream, x_norm, scratch.x_norm_f32, hidden)
-        .context("shexp cast x_norm → f32")?;
-    shared_expert_scale_f32(
-        ops,
-        stream,
-        scratch.down_f32,
-        scratch.x_norm_f32,
-        shared.ffn_gate_inp_shexp.ptr,
-        1,
-        hidden,
-    )
-    .context("shared_expert_scale_f32")?;
-
-    // 8. Cast the scaled output back to F16 for the outer composition.
-    cast_f32_to_f16(ops, stream, scratch.down_f32, shared_out, hidden)
-        .context("shexp cast → f16")?;
-
-    Ok(())
+    let block = build_shared_expert_block(shared, cfg)?;
+    let hipops = flambeau_ops::HipOps::new(ops, stream);
+    block.forward_decode(&hipops, x_norm, shared_out, scratch.view())
 }
 
 // Dense-FFN decode + prefill (DenseFfnScratch, forward_dense_ffn_decode,

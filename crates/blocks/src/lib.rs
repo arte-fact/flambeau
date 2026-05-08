@@ -20,6 +20,7 @@ pub mod delta_net;
 pub mod dense_mlp;
 pub mod layer;
 pub mod moe_experts;
+pub mod shared_expert;
 pub mod topology;
 
 pub use attention::{
@@ -33,6 +34,7 @@ pub use layer::{
     FfnPrefillScratch, LayerKind,
 };
 pub use moe_experts::{MoeExperts, MoeExpertsDecodeScratch};
+pub use shared_expert::{SharedExpert, SharedExpertDecodeScratch};
 pub use topology::{
     forward_one_token_hybrid, forward_one_token_pp, forward_one_token_tp,
     forward_prefill_hybrid, forward_prefill_pp, forward_prefill_pp_chunk, forward_prefill_tp,

@@ -31,7 +31,7 @@ use super::dense_ffn::forward_dense_ffn_prefill;
 use super::attn::{forward_dense_attn_prefill, forward_full_attn_prefill};
 use super::gdn::forward_gdn_prefill;
 use super::moe::{
-    forward_moe_ffn_prefill, forward_router_decode, forward_router_prefill,
+    forward_moe_ffn_prefill, forward_router_prefill,
     forward_shared_expert_decode, forward_shared_expert_prefill,
 };
 use crate::config::Qwen3MoEConfig;
@@ -444,12 +444,16 @@ pub fn forward_layer_decode(
                 .moe
                 .as_mut()
                 .context("LayerForwardScratch.moe missing")?;
-            let ffn_gate_inp = layer_weights
-                .ffn
-                .ffn_gate_inp
-                .as_ref()
-                .context("MoE branch: ffn.ffn_gate_inp missing")?;
-            forward_router_decode(ops, stream, cfg, ffn_gate_inp, moe, mid_norm_f16)?;
+            let moe_view = moe.view();
+            let hipops = HipOps::new(ops, stream);
+            // Route on the MoE block. The MoeExperts variant runs
+            // `dense_gemv` + `topk_f32` and writes `expert_ids` /
+            // `expert_weights` into the scratch view, which the
+            // routed-experts forward then consumes.
+            let flambeau_blocks::FfnBlock::Moe(moe_block) = &ffn_block else {
+                unreachable!("FfnBlock variant changed under the MoE arm");
+            };
+            moe_block.route_decode(&hipops, mid_norm_f16, moe_view)?;
             flambeau_backend_hip::profile::mark("layer_router", device, stream)?;
             if dev_flag("FLAMBEAU_PARITY_LAYER_DUMP") {
                 use flambeau_core::CopyDirection;
@@ -476,8 +480,6 @@ pub fn forward_layer_decode(
                 eprintln!("[router-dump] PP il={il} expert_ids={ids:?} weights={wts:?}");
             }
 
-            let moe_view = moe.view();
-            let hipops = HipOps::new(ops, stream);
             ffn_block.forward_decode(
                 &hipops,
                 mid_norm_f16,
