@@ -20,6 +20,8 @@ pub mod gpu_sampler;
 #[cfg(feature = "hip")]
 pub mod model;
 #[cfg(feature = "hip")]
+pub mod model_extensions;
+#[cfg(feature = "hip")]
 pub mod model_handle;
 #[cfg(feature = "hip")]
 pub mod routes;
@@ -36,6 +38,8 @@ pub use state::{ModelDefaults, SamplingParams};
 
 #[cfg(feature = "hip")]
 pub use model::{decode_logits, prefill_logits, Inflight, LoadedModel};
+#[cfg(feature = "hip")]
+pub use model_extensions::{KvSnapshot, SpecDecodeModel};
 #[cfg(feature = "hip")]
 pub use model_handle::{create_hip_session, HipModel, HipSession, OwnedHipSession};
 #[cfg(feature = "hip")]

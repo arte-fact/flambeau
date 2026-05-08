@@ -28,11 +28,19 @@ use flambeau_qwen3_moe::session::KvLayout;
 use flambeau_qwen3_moe::Qwen3MoEConfig;
 
 use crate::model::{BoundaryCallback, Inflight, LoadedModel};
+use crate::model_extensions::SpecDecodeModel;
 
 pub trait HipModel: Send + Sync + 'static {
     fn config(&self) -> &Qwen3MoEConfig;
     /// Topology label for handler metrics: `"pp"`, `"tp"`, `"pp+tp"`.
     fn topology(&self) -> &'static str;
+
+    /// Spec-decode capability. PP models with an MTP attachment return
+    /// `Some`; everything else returns `None`. Server uses this to
+    /// gate spec-decode without matching on a topology enum.
+    fn as_spec_decode(&self) -> Option<&dyn SpecDecodeModel> {
+        None
+    }
 }
 
 pub trait HipSession: Send {
@@ -108,6 +116,12 @@ impl HipModel for LoadedModel {
     }
     fn topology(&self) -> &'static str {
         LoadedModel::topology(self)
+    }
+    fn as_spec_decode(&self) -> Option<&dyn SpecDecodeModel> {
+        match self {
+            LoadedModel::Pp(p) if p.mtp.is_some() => Some(p),
+            _ => None,
+        }
     }
 }
 

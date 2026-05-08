@@ -15,11 +15,11 @@ use flambeau_qwen3_moe::forward::{
     forward_one_token_pp_logits, forward_one_token_tp_keep_logits_on_device,
     forward_one_token_tp_logits, forward_prefill_hybrid_logits, forward_prefill_pp,
     forward_prefill_pp_logits, forward_prefill_tp_logits, forward_prefill_tp_logits_pooled,
-    forward_speculative_pp_step, ShardedForwardOneTokenScratch,
-    ShardedForwardOneTokenScratchHybrid, ShardedForwardOneTokenScratchTp,
-    ShardedForwardPrefillScratch, ShardedForwardPrefillScratchTp, SpecStep,
+    ShardedForwardOneTokenScratch, ShardedForwardOneTokenScratchHybrid,
+    ShardedForwardOneTokenScratchTp, ShardedForwardPrefillScratch,
+    ShardedForwardPrefillScratchTp, SpecStep,
 };
-use flambeau_qwen3_moe::session::{restore_layer_caches_from_host, LayerCacheSnapshot};
+use flambeau_qwen3_moe::session::LayerCacheSnapshot;
 use flambeau_qwen3_moe::mtp::{MtpForwardScratch, MtpHeadWeights};
 use flambeau_qwen3_moe::{
     Qwen3MoEConfig, Qwen3MoEHybridModel, Qwen3MoEHybridSession, Qwen3MoEShardedModel,
@@ -381,38 +381,6 @@ fn snapshot_hybrid_session(
     Ok(out)
 }
 
-/// **#229 Hybrid** — inverse of `snapshot_hybrid_session`. Walks the
-/// flat `Vec<Vec<LayerCacheSnapshot>>` in stage-major order
-/// (`g = stage_idx * tp_size + tp_rank`) and writes each inner
-/// snapshot back into the matching `(stage, tp_rank)` device.
-fn restore_hybrid_session(
-    snapshot: &[Vec<LayerCacheSnapshot>],
-    session: &mut flambeau_qwen3_moe::Qwen3MoEHybridSession,
-    model: &flambeau_qwen3_moe::Qwen3MoEHybridModel,
-) -> Result<()> {
-    let total_ranks: usize = session.stages.iter().map(|s| s.caches.len()).sum();
-    if snapshot.len() != total_ranks {
-        bail!(
-            "Hybrid restore: snapshot global-rank count {} != session total ranks {}",
-            snapshot.len(),
-            total_ranks
-        );
-    }
-    let mut g = 0usize;
-    for (stage_idx, stage_session) in session.stages.iter_mut().enumerate() {
-        let stage_model = model
-            .stages
-            .get(stage_idx)
-            .ok_or_else(|| anyhow::anyhow!("hybrid restore: stage {stage_idx} missing in model"))?;
-        for (tp_rank, layer_caches) in stage_session.caches.iter_mut().enumerate() {
-            let device = stage_model.sub_cluster.device(tp_rank);
-            restore_layer_caches_from_host(&snapshot[g], layer_caches, device)
-                .with_context(|| format!("Hybrid restore stage {stage_idx} rank {tp_rank}"))?;
-            g += 1;
-        }
-    }
-    Ok(())
-}
 
 /// Ingest the full prompt and write the logits row for the **last**
 /// prompt position into `logits_out`. Each topology dispatches through
@@ -701,9 +669,10 @@ impl SpecDecodePp {
     }
 }
 
-/// run one K=1 spec-decode macro step. Returns the
-/// committed token(s) + telemetry. PP-only for now (matches
-/// scope).
+/// Greedy K=1 spec-decode macro step. Thin wrapper over
+/// [`SpecDecodeModel::decode_spec_greedy`]; the trait impl carries the
+/// actual logic. Errors when the model isn't a PP model with an MTP
+/// attachment (`FLAMBEAU_SPEC_MTP` unset) or the inflight isn't PP.
 pub fn decode_spec_pp(
     model: &LoadedModel,
     cluster: &HipCluster,
@@ -712,43 +681,21 @@ pub fn decode_spec_pp(
     last_token: u32,
     position: usize,
 ) -> Result<SpecStep> {
-    let (m, mtp) = match model {
-        LoadedModel::Pp(PpHipModel { model: m, mtp: Some(mtp) }) => (m, mtp),
-        LoadedModel::Pp(PpHipModel { mtp: None, .. }) => {
-            bail!("decode_spec_pp called without MTP attachment (FLAMBEAU_SPEC_MTP not set)")
-        }
-        _ => bail!("decode_spec_pp requires LoadedModel::Pp"),
-    };
-    let (session, prefill, decode) = match inflight {
-        Inflight::Pp(PpHipSession { session, prefill, decode }) => (session, prefill, decode),
+    use crate::model_handle::HipModel;
+
+    let spec_model = model
+        .as_spec_decode()
+        .context("decode_spec_pp: model has no spec-decode capability (PP + MTP required)")?;
+    let pp_session = match inflight {
+        Inflight::Pp(s) => s,
         _ => bail!("decode_spec_pp requires Inflight::Pp"),
     };
-
-    let last_rank = cluster.ranks() - 1;
-    let last_shard = &m.shards[last_rank];
-    let output_norm = last_shard
-        .output_norm
-        .as_ref()
-        .context("PP last rank missing output_norm for spec-decode")?;
-    let lm_head = last_shard
-        .output
-        .as_ref()
-        .context("PP last rank missing lm_head for spec-decode")?;
-
-    let (step, h_next) = forward_speculative_pp_step(
-        m, session, cluster, decode, prefill,
-        mtp, &spec.mtp_scratch,
-        output_norm, lm_head,
-        last_token, spec.h_for_mtp, position,
-    )?;
-    spec.h_for_mtp = h_next;
-    Ok(step)
+    spec_model.decode_spec_greedy(cluster, pp_session, spec, last_token, position)
 }
 
-/// rejection-sampling variant. Same shape as
-/// [`decode_spec_pp`] but threads a [`Sampling`] config and an `Rng`
-/// through the spec macro so non-greedy sampling can be used with
-/// vLLM-canonical rejection sampling.
+/// Rejection-sampling variant. Thin wrapper over
+/// [`SpecDecodeModel::decode_spec_sampling`]. `history` is the
+/// per-turn generated-token slice used for penalty application.
 pub fn decode_spec_pp_sampling(
     model: &LoadedModel,
     cluster: &HipCluster,
@@ -758,43 +705,20 @@ pub fn decode_spec_pp_sampling(
     position: usize,
     sampling: &flambeau_runtime::Sampling,
     rng: &mut flambeau_runtime::Rng,
-    // /h — per-turn generated-token slice for penalty application.
     history: &[u32],
 ) -> Result<SpecStep> {
-    use flambeau_qwen3_moe::forward::forward_speculative_pp_step_sampling;
+    use crate::model_handle::HipModel;
 
-    let (m, mtp) = match model {
-        LoadedModel::Pp(PpHipModel { model: m, mtp: Some(mtp) }) => (m, mtp),
-        LoadedModel::Pp(PpHipModel { mtp: None, .. }) => {
-            bail!("decode_spec_pp_sampling called without MTP attachment")
-        }
-        _ => bail!("decode_spec_pp_sampling requires LoadedModel::Pp"),
-    };
-    let (session, prefill, decode) = match inflight {
-        Inflight::Pp(PpHipSession { session, prefill, decode }) => (session, prefill, decode),
+    let spec_model = model.as_spec_decode().context(
+        "decode_spec_pp_sampling: model has no spec-decode capability (PP + MTP required)",
+    )?;
+    let pp_session = match inflight {
+        Inflight::Pp(s) => s,
         _ => bail!("decode_spec_pp_sampling requires Inflight::Pp"),
     };
-
-    let last_rank = cluster.ranks() - 1;
-    let last_shard = &m.shards[last_rank];
-    let output_norm = last_shard
-        .output_norm
-        .as_ref()
-        .context("PP last rank missing output_norm for spec-decode")?;
-    let lm_head = last_shard
-        .output
-        .as_ref()
-        .context("PP last rank missing lm_head for spec-decode")?;
-
-    let (step, h_next) = forward_speculative_pp_step_sampling(
-        m, session, cluster, decode, prefill,
-        mtp, &spec.mtp_scratch,
-        output_norm, lm_head,
-        last_token, spec.h_for_mtp, position,
-        sampling, rng, history,
-    )?;
-    spec.h_for_mtp = h_next;
-    Ok(step)
+    spec_model.decode_spec_sampling(
+        cluster, pp_session, spec, last_token, position, sampling, rng, history,
+    )
 }
 
 /// Advance one token; write that position's logits into `logits_out`.
@@ -927,18 +851,11 @@ pub fn capture_kv_from_inflight(
     cluster: &HipCluster,
     model: &LoadedModel,
 ) -> Result<Vec<Vec<LayerCacheSnapshot>>> {
-    let _ = cluster; // unused for Hybrid (uses per-stage sub_clusters)
+    use crate::model_extensions::KvSnapshot;
     match (inflight, model) {
-        (Inflight::Pp(PpHipSession { session, .. }), LoadedModel::Pp(_)) => {
-            snapshot_pp_session(session, cluster)
-        }
-        (Inflight::Tp(TpHipSession { session, .. }), LoadedModel::Tp(_)) => {
-            snapshot_tp_caches(&session.caches, cluster)
-        }
-        (
-            Inflight::Hybrid(HybridHipSession { session, .. }),
-            LoadedModel::Hybrid(HybridHipModel { model: hmodel, .. }),
-        ) => snapshot_hybrid_session(session, hmodel),
+        (Inflight::Pp(s), LoadedModel::Pp(_)) => s.capture(cluster),
+        (Inflight::Tp(s), LoadedModel::Tp(_)) => s.capture(cluster),
+        (Inflight::Hybrid(s), LoadedModel::Hybrid(h)) => s.capture_with_model(h),
         _ => bail!("capture_kv_from_inflight: model/inflight variant mismatch"),
     }
 }
@@ -1027,49 +944,11 @@ pub fn restore_kv_into_inflight(
     snapshot: &[Vec<LayerCacheSnapshot>],
     model: &LoadedModel,
 ) -> Result<()> {
+    use crate::model_extensions::KvSnapshot;
     match (inflight, model) {
-        (Inflight::Pp(PpHipSession { session, .. }), LoadedModel::Pp(_)) => {
-            if snapshot.len() != session.per_rank.len() {
-                bail!(
-                    "PP restore: snapshot rank count {} != session ranks {}",
-                    snapshot.len(),
-                    session.per_rank.len()
-                );
-            }
-            for (rank_idx, rank_session) in session.per_rank.iter_mut().enumerate() {
-                let device = cluster.device(rank_idx);
-                restore_layer_caches_from_host(
-                    &snapshot[rank_idx],
-                    rank_session.caches_mut(),
-                    device,
-                )
-                .with_context(|| format!("PP restore rank {rank_idx}"))?;
-            }
-            Ok(())
-        }
-        (Inflight::Tp(TpHipSession { session, .. }), LoadedModel::Tp(_)) => {
-            if snapshot.len() != session.caches.len() {
-                bail!(
-                    "TP restore: snapshot rank count {} != session ranks {}",
-                    snapshot.len(),
-                    session.caches.len()
-                );
-            }
-            for (rank_idx, rank_caches) in session.caches.iter_mut().enumerate() {
-                let device = cluster.device(rank_idx);
-                restore_layer_caches_from_host(
-                    &snapshot[rank_idx],
-                    rank_caches,
-                    device,
-                )
-                .with_context(|| format!("TP restore rank {rank_idx}"))?;
-            }
-            Ok(())
-        }
-        (
-            Inflight::Hybrid(HybridHipSession { session, .. }),
-            LoadedModel::Hybrid(HybridHipModel { model: hmodel, .. }),
-        ) => restore_hybrid_session(snapshot, session, hmodel),
+        (Inflight::Pp(s), LoadedModel::Pp(_)) => s.restore(cluster, snapshot),
+        (Inflight::Tp(s), LoadedModel::Tp(_)) => s.restore(cluster, snapshot),
+        (Inflight::Hybrid(s), LoadedModel::Hybrid(h)) => s.restore_with_model(h, snapshot),
         _ => bail!("restore_kv_into_inflight: model/inflight variant mismatch"),
     }
 }
