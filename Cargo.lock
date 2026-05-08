@@ -438,6 +438,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "flambeau-blocks"
+version = "0.1.0-dev"
+dependencies = [
+ "anyhow",
+ "flambeau-backend-hip",
+ "flambeau-core",
+ "flambeau-ops",
+ "flambeau-quant",
+ "flambeau-runtime",
+ "half",
+]
+
+[[package]]
 name = "flambeau-cli"
 version = "0.1.0-dev"
 dependencies = [
