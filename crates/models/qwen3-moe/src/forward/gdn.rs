@@ -314,9 +314,6 @@ pub fn forward_gdn_decode(
     x_in: DevicePtr,
     delta_out: DevicePtr,
 ) -> Result<()> {
-    // R4.C — route through `flambeau_blocks::DeltaNetLayer`. GDN
-    // decode has no slot/graph-capture variant, so the entire body
-    // routes through the block.
     let block = build_delta_net_block(attn_norm, weights, cfg)?;
     let hipops = flambeau_ops::HipOps::new(ops, stream);
     block.forward_decode(

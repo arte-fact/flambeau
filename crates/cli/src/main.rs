@@ -444,9 +444,9 @@ fn serve_cmd(args: ServeArgs) -> Result<()> {
         spec_mtp: spec_mtp.map(PathBuf::from),
     };
 
-    // R5.1 — build the model registry. Each binary populates its
-    // own; register every model crate this CLI links. Future binaries
-    // (sweeps, custom servers) can build different registries.
+    // Each binary populates its own registry; register every model
+    // crate this CLI links. Future binaries (sweeps, custom servers)
+    // can build different registries.
     let mut registry = flambeau_runtime::Registry::new();
     registry.register(std::sync::Arc::new(flambeau_qwen3_moe::Qwen3MoEModelArch));
 

@@ -179,10 +179,6 @@ pub fn forward_dense_ffn_decode(
     residual: DevicePtr,
     x_out: DevicePtr,
 ) -> Result<()> {
-    // R4.A — route through `flambeau_blocks::DenseMlp`. The block's
-    // kernel call sequence mirrors the original free-fn body verbatim.
-    // Dense FFN has no slots / graph-capture variant, so the entire
-    // decode goes through the block.
     let block = build_dense_mlp_block(dense, cfg)?;
     let hipops = flambeau_ops::HipOps::new(ops, stream);
     block.forward_decode(&hipops, x_norm, residual, x_out, scratch.view())
@@ -327,7 +323,6 @@ pub fn forward_dense_ffn_prefill(
     x_out: DevicePtr,
     n_tokens: usize,
 ) -> Result<()> {
-    // R4.A — route through `flambeau_blocks::DenseMlp::forward_prefill`.
     let block = build_dense_mlp_block(dense, cfg)?;
     let hipops = flambeau_ops::HipOps::new(ops, stream);
     block.forward_prefill(&hipops, x_norm, residual, x_out, scratch.view(), n_tokens)

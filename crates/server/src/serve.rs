@@ -117,9 +117,9 @@ pub async fn serve(cfg: ServeConfig, registry: Registry) -> Result<()> {
     let gguf = GgufFile::open(&cfg.gguf_path)
         .with_context(|| format!("open GGUF at {}", cfg.gguf_path.display()))?;
 
-    // R5.1 — validate the GGUF arch is registered before walking
-    // tokenizer / chat template / model paths. Friendly error for
-    // unsupported arches.
+    // Reject unsupported GGUF arches before walking tokenizer / chat
+    // template / model paths so the operator gets a clean diagnostic
+    // instead of a downstream invariant error.
     let gguf_arch = gguf.metadata_str("general.architecture").unwrap_or("");
     let model_arch = registry
         .validate(gguf_arch)

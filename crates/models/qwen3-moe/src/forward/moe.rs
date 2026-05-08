@@ -268,10 +268,6 @@ pub fn forward_moe_ffn_decode(
     extra_residual: Option<DevicePtr>,
     out: DevicePtr,
 ) -> Result<()> {
-    // R4.B — route decode through `flambeau_blocks::MoeExperts`.
-    // Prefill and shared-expert paths stay on their existing free fns
-    // (multi-path tile8/turbo MMQ dispatch + sigmoid-gate scaling
-    // don't yet have a block surface).
     let ffn_gate_inp = ffn.ffn_gate_inp.as_ref().context(
         "forward_moe_ffn_decode: ffn.ffn_gate_inp missing (router weight); routing must precede expert forward",
     )?;

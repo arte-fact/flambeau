@@ -337,10 +337,10 @@ pub fn forward_full_attn_decode<L: CacheLayout>(
     // the handle so d can call it without a second signature.
     let _ = post_attn_norm;
 
-    // R3 — non-graph-capture path routes through the
-    // `flambeau_blocks::StandardAttention` block. Slot variants stay
-    // on the existing free-fn body below until R4 introduces a
-    // capture-aware abstraction on the trait.
+    // Slot variants need the graph-capture-aware kernels; the block
+    // surface only covers the non-slot path. `slots = None` callers
+    // route through the block; `Some(_)` falls through to the body
+    // below.
     if slots.is_none() {
         let block = build_full_attn_block(attn_norm, weights, cfg)?;
         let hipops = flambeau_ops::HipOps::new(ops, stream);
@@ -1137,9 +1137,8 @@ pub fn forward_full_attn_prefill<L: flambeau_runtime::CacheLayout>(
         );
     }
 
-    // R3 — non-graph-capture prefill routes through the
-    // `flambeau_blocks::StandardAttention` block. Slot variants stay
-    // on the existing free-fn body below until R4.
+    // Slot variants stay on the body below; non-slot prefill goes
+    // through the block.
     if slots.is_none() {
         let block = build_full_attn_block(attn_norm, weights, cfg)?;
         let hipops = flambeau_ops::HipOps::new(ops, stream);
