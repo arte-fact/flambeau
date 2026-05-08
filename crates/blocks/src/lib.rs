@@ -27,7 +27,7 @@ pub use attention::{
     AttnDecodeSlots, AttnPrefillSlots, StandardAttention, StandardAttentionDecodeScratch,
     StandardAttentionPrefillScratch, WeightHandle, MAX_SPLITK_CHUNKS,
 };
-pub use delta_net::{DeltaNetLayer, DeltaNetLayerDecodeScratch};
+pub use delta_net::{DeltaNetLayer, DeltaNetLayerDecodeScratch, DeltaNetLayerPrefillScratch};
 pub use dense_mlp::{DenseMlp, DenseMlpDecodeScratch, DenseMlpPrefillScratch};
 pub use layer::{
     AttnBlock, AttnDecodeScratch, AttnPrefillScratch, AttnState, FfnBlock, FfnDecodeScratch,
