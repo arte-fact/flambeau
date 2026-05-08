@@ -948,6 +948,208 @@ impl ShardedForwardPrefillScratch {
 /// each rank's prefill compute. For Qwen3.6-31B at L=512 across 4 ranks,
 /// measured prefill is compute-bound enough that microbatching is a V2+
 /// perf lever, not a V1 correctness blocker.
+/// `flambeau_blocks::PpPrefillDriver` impl wrapping qwen3-moe's
+/// `(model, session, cluster, scratch)` quadruple for prefill.
+struct Qwen3MoEPpPrefillDriver<'a> {
+    model: &'a crate::sharded::Qwen3MoEShardedModel,
+    session: &'a mut crate::sharded::Qwen3MoEShardedSession,
+    cluster: &'a flambeau_backend_hip::HipCluster,
+    scratch: &'a mut ShardedForwardPrefillScratch,
+}
+
+impl<'a> Qwen3MoEPpPrefillDriver<'a> {
+    fn last_rank(&self) -> usize {
+        self.model.shards.len() - 1
+    }
+
+    fn finalize_argmax(&self) -> Result<u32> {
+        let last = self.last_rank();
+        let last_device = self.cluster.device(last);
+        let last_scratch = &self.scratch.per_rank[last];
+        let head_scratch = last_scratch
+            .output_head
+            .as_ref()
+            .context("last rank missing output_head scratch")?;
+        argmax_token_host(
+            last_device,
+            last_device.default_stream(),
+            head_scratch.logits_f32,
+            self.model.config.vocab_size,
+        )
+    }
+
+    fn finalize_logits(&self, logits_out: &mut Vec<f32>) -> Result<()> {
+        let last = self.last_rank();
+        let last_device = self.cluster.device(last);
+        let last_scratch = &self.scratch.per_rank[last];
+        let head_scratch = last_scratch
+            .output_head
+            .as_ref()
+            .context("last rank missing output_head scratch")?;
+        download_logits_host(
+            last_device,
+            last_device.default_stream(),
+            head_scratch.logits_f32,
+            self.model.config.vocab_size,
+            logits_out,
+        )
+    }
+}
+
+impl<'a> flambeau_blocks::PpPrefillDriver for Qwen3MoEPpPrefillDriver<'a> {
+    fn n_ranks(&self) -> usize {
+        self.model.shards.len()
+    }
+
+    fn layers_per_rank(&self, rank: usize) -> usize {
+        self.model.shards[rank].layers.len()
+    }
+
+    fn cluster(&self) -> &flambeau_backend_hip::HipCluster {
+        self.cluster
+    }
+
+    fn hidden_a(&self, rank: usize) -> DevicePtr {
+        self.scratch.per_rank[rank].hidden_a
+    }
+
+    fn hidden_b(&self, rank: usize) -> DevicePtr {
+        self.scratch.per_rank[rank].hidden_b
+    }
+
+    fn hidden_row_bytes(&self) -> usize {
+        self.model.config.hidden_size * 2
+    }
+
+    fn max_tokens(&self) -> usize {
+        self.scratch.per_rank[0].max_tokens
+    }
+
+    fn embed_tokens(&mut self, tokens: &[u32]) -> Result<()> {
+        let rank0 = self.cluster.device(0);
+        let shard0 = &self.model.shards[0];
+        let scratch0 = &mut self.scratch.per_rank[0];
+        let token_embd = shard0
+            .token_embd
+            .as_ref()
+            .context("rank 0 shard missing token_embd")?;
+        let row_bytes = self.model.config.hidden_size * 2;
+        for (t, &token_id) in tokens.iter().enumerate() {
+            forward_embed_decode_host(
+                rank0,
+                rank0.default_stream(),
+                token_embd,
+                token_id,
+                scratch0.hidden_a.offset_bytes(t * row_bytes),
+                self.model.config.hidden_size,
+            )?;
+        }
+        Ok(())
+    }
+
+    fn forward_layer_prefill(
+        &mut self,
+        rank: usize,
+        local_idx: usize,
+        x_in: DevicePtr,
+        x_out: DevicePtr,
+        n_tokens: usize,
+        start_position: usize,
+    ) -> Result<()> {
+        let device = self.cluster.device(rank);
+        let shard = &self.model.shards[rank];
+        let layer_weights = &shard.layers[local_idx];
+        let layer_cache = &mut self.session.per_rank[rank].caches[local_idx];
+        let rank_scratch = &mut self.scratch.per_rank[rank];
+        let layer_scratch = rank_scratch
+            .layer
+            .as_mut()
+            .context("per-rank LayerPrefillScratch missing")?;
+        let cfg = &self.model.config;
+        forward_layer_prefill(
+            &shard.ops,
+            device.default_stream(),
+            device,
+            cfg,
+            layer_weights,
+            layer_cache,
+            layer_scratch,
+            x_in,
+            x_out,
+            n_tokens,
+            start_position,
+            None,
+            None,
+        )
+        .with_context(|| {
+            format!(
+                "prefill rank {} layer {} ({})",
+                rank,
+                layer_weights.layer_idx,
+                if cfg.is_recurrent(layer_weights.layer_idx) { "gdn" } else { "full_attn" },
+            )
+        })?;
+        if dev_flag("FLAMBEAU_PARITY_LAYER_DUMP") {
+            let hidden = cfg.hidden_size;
+            let row_bytes = hidden * 2;
+            for t in 0..n_tokens {
+                let mut buf = vec![half::f16::from_f32(0.0); hidden];
+                unsafe {
+                    device.memcpy_async(
+                        device.default_stream(),
+                        CopyDirection::DeviceToHost,
+                        DevicePtr(buf.as_mut_ptr() as usize),
+                        x_out.offset_bytes(t * row_bytes),
+                        row_bytes,
+                    )?;
+                }
+                device.default_stream().synchronize()?;
+                let vals: Vec<f32> = buf.iter().map(|v| v.to_f32()).collect();
+                let l2 = vals.iter().map(|v| (*v as f64) * (*v as f64)).sum::<f64>().sqrt();
+                eprintln!(
+                    "[prefill-dump] l_out-{} t={} ({}): L2={:.6} head={:?}",
+                    layer_weights.layer_idx,
+                    t,
+                    if cfg.is_recurrent(layer_weights.layer_idx) { "gdn" } else { "full_attn" },
+                    l2, &vals[..4]
+                );
+            }
+        }
+        Ok(())
+    }
+
+    fn output_head_last_token(&mut self, l: usize) -> Result<()> {
+        let last = self.last_rank();
+        let last_device = self.cluster.device(last);
+        let last_shard = &self.model.shards[last];
+        let last_scratch = &mut self.scratch.per_rank[last];
+        let row_bytes = self.model.config.hidden_size * 2;
+        let last_token_hidden = last_scratch.hidden_a.offset_bytes((l - 1) * row_bytes);
+        let output_norm = last_shard
+            .output_norm
+            .as_ref()
+            .context("last rank missing output_norm")?;
+        let lm_head = last_shard
+            .output
+            .as_ref()
+            .or(last_shard.token_embd.as_ref())
+            .context("last rank missing both output.weight and tied token_embd")?;
+        let head_scratch = last_scratch
+            .output_head
+            .as_mut()
+            .context("last rank missing output_head scratch")?;
+        forward_output_head_decode(
+            &last_shard.ops,
+            last_device.default_stream(),
+            &self.model.config,
+            output_norm,
+            lm_head,
+            head_scratch,
+            last_token_hidden,
+        )
+    }
+}
+
 pub fn forward_prefill_pp(
     model: &crate::sharded::Qwen3MoEShardedModel,
     session: &mut crate::sharded::Qwen3MoEShardedSession,
@@ -956,208 +1158,9 @@ pub fn forward_prefill_pp(
     tokens: &[u32],
     start_position: usize,
 ) -> Result<u32> {
-    let n_ranks = model.shards.len();
-    if n_ranks == 0 {
-        bail!("forward_prefill_pp: zero-rank cluster");
-    }
-    let l = tokens.len();
-    if l == 0 {
-        bail!("forward_prefill_pp called with empty tokens");
-    }
-    let max_tokens = scratch.per_rank[0].max_tokens;
-
-    // (2026-04-27) — when scratch is sized below L, transparently
-    // chunk: loop sequentially over ubatches of `max_tokens` tokens each. The
-    // KV cache + GDN state already thread state via `start_position`, so each
-    // recursive call writes its slice into the right cache positions. The
-    // returned argmax is the LAST ubatch's argmax (output head runs every
-    // ubatch — wasteful for non-last, but vocab×hidden is small relative to
-    // a layer chain). Async path (FLAMBEAU_ASYNC_UBATCH) already chunks via
-    // `forward_prefill_pp_async` and was checked above.
-    if l > max_tokens {
-        if max_tokens == 0 {
-            bail!("forward_prefill_pp: scratch.max_tokens=0 — invalid");
-        }
-        let mut last_argmax = 0u32;
-        let mut chunk_start = 0usize;
-        while chunk_start < l {
-            let chunk_end = (chunk_start + max_tokens).min(l);
-            last_argmax = forward_prefill_pp(
-                model, session, cluster, scratch,
-                &tokens[chunk_start..chunk_end],
-                start_position + chunk_start,
-            )?;
-            chunk_start = chunk_end;
-        }
-        return Ok(last_argmax);
-    }
-    let cfg = &model.config;
-    let hidden = cfg.hidden_size;
-    let row_bytes = hidden * 2;
-    let chunk_bytes = l * row_bytes;
-
-    // 1. Embed all L tokens on rank 0. Row-by-row host dequant + upload —
-    // matches single-device `forward_prefill`'s embedding path.
-    {
-        let rank0 = cluster.device(0);
-        rank0.bind()?;
-        let shard0 = &model.shards[0];
-        let scratch0 = &mut scratch.per_rank[0];
-        let token_embd = shard0
-            .token_embd
-            .as_ref()
-            .context("rank 0 shard missing token_embd")?;
-        for (t, &token_id) in tokens.iter().enumerate() {
-            forward_embed_decode_host(
-                rank0,
-                rank0.default_stream(),
-                token_embd,
-                token_id,
-                scratch0.hidden_a.offset_bytes(t * row_bytes),
-                hidden,
-            )?;
-        }
-    }
-
-    // 2. Per-rank layer loop with stage-boundary peer_copy_via_host.
-    for rank_idx in 0..n_ranks {
-        let device = cluster.device(rank_idx);
-
-        if rank_idx > 0 {
-            // SAFETY: both hidden_a buffers are at least `chunk_bytes` long
-            // on their respective devices (sized against scratch.max_tokens
-            // ≥ L); no other stream touches them here.
-            unsafe {
-                cluster.peer_copy_via_host(
-                    scratch.per_rank[rank_idx].hidden_a,
-                    rank_idx,
-                    scratch.per_rank[rank_idx - 1].hidden_a,
-                    rank_idx - 1,
-                    chunk_bytes,
-                )?;
-            }
-        }
-        device.bind()?;
-
-        let shard = &model.shards[rank_idx];
-        let rank_scratch = &mut scratch.per_rank[rank_idx];
-        let rank_session = &mut session.per_rank[rank_idx];
-        let layer_scratch = rank_scratch
-            .layer
-            .as_mut()
-            .context("per-rank LayerPrefillScratch missing")?;
-
-        let (mut x_in, mut x_out) = (rank_scratch.hidden_a, rank_scratch.hidden_b);
-        for (local_idx, layer_weights) in shard.layers.iter().enumerate() {
-            let layer_cache = &mut rank_session.caches[local_idx];
-            forward_layer_prefill(
-                &shard.ops,
-                device.default_stream(),
-                device,
-                cfg,
-                layer_weights,
-                layer_cache,
-                layer_scratch,
-                x_in,
-                x_out,
-                l,
-                start_position,
-                None,
-                None,
-            )
-            .with_context(|| {
-                format!(
-                    "prefill rank {} layer {} ({})",
-                    rank_idx,
-                    layer_weights.layer_idx,
-                    if cfg.is_recurrent(layer_weights.layer_idx) {
-                        "gdn"
-                    } else {
-                        "full_attn"
-                    },
-                )
-            })?;
-            if dev_flag("FLAMBEAU_PARITY_LAYER_DUMP") {
-                // Dump each token's post-layer hidden for A/B vs llama.cpp's
-                // per-layer prefill output (`l_out-<il>` covers the full
-                // [L, hidden] tensor in the callback trace).
-                for t in 0..l {
-                    let mut buf = vec![half::f16::from_f32(0.0); hidden];
-                    unsafe {
-                        device.memcpy_async(
-                            device.default_stream(),
-                            CopyDirection::DeviceToHost,
-                            DevicePtr(buf.as_mut_ptr() as usize),
-                            x_out.offset_bytes(t * row_bytes),
-                            hidden * 2,
-                        )?;
-                    }
-                    device.default_stream().synchronize()?;
-                    let vals: Vec<f32> = buf.iter().map(|v| v.to_f32()).collect();
-                    let l2 = vals.iter().map(|v| (*v as f64) * (*v as f64)).sum::<f64>().sqrt();
-                    eprintln!(
-                        "[prefill-dump] l_out-{} t={} ({}): L2={:.6} head={:?}",
-                        layer_weights.layer_idx,
-                        t,
-                        if cfg.is_recurrent(layer_weights.layer_idx) { "gdn" } else { "full_attn" },
-                        l2, &vals[..4]
-                    );
-                }
-            }
-            std::mem::swap(&mut x_in, &mut x_out);
-        }
-        // Normalise final hidden into hidden_a for the next peer-copy hop
-        // (L rows of F16 hidden).
-        if x_in != rank_scratch.hidden_a {
-            unsafe {
-                device.memcpy_async(
-                    device.default_stream(),
-                    CopyDirection::DeviceToDevice,
-                    rank_scratch.hidden_a,
-                    x_in,
-                    chunk_bytes,
-                )?;
-            }
-            device.default_stream().synchronize()?;
-        }
-    }
-
-    // 3. Output head on the LAST token row on the last rank.
-    let last_idx = n_ranks - 1;
-    let last_shard = &model.shards[last_idx];
-    let last_device = cluster.device(last_idx);
-    last_device.bind()?;
-    let last_scratch = &mut scratch.per_rank[last_idx];
-    let output_norm = last_shard
-        .output_norm
-        .as_ref()
-        .context("last rank missing output_norm")?;
-    let lm_head = last_shard
-        .output
-        .as_ref()
-        .or(last_shard.token_embd.as_ref())
-        .context("last rank missing both output.weight and tied token_embd")?;
-    let output_head_scratch = last_scratch
-        .output_head
-        .as_mut()
-        .context("last rank missing output_head scratch")?;
-    let last_token_hidden = last_scratch.hidden_a.offset_bytes((l - 1) * row_bytes);
-    forward_output_head_decode(
-        &last_shard.ops,
-        last_device.default_stream(),
-        cfg,
-        output_norm,
-        lm_head,
-        output_head_scratch,
-        last_token_hidden,
-    )?;
-
-    argmax_token_host(
-        last_device,
-        last_device.default_stream(),
-        output_head_scratch.logits_f32,
-        cfg.vocab_size,
-    )
+    let mut driver = Qwen3MoEPpPrefillDriver { model, session, cluster, scratch };
+    flambeau_blocks::forward_prefill_pp(&mut driver, tokens, start_position)?;
+    driver.finalize_argmax()
 }
 
 /// 5.d — async ubatch-pipelined prefill.
@@ -1530,152 +1533,9 @@ pub fn forward_prefill_pp_logits(
     start_position: usize,
     logits_out: &mut Vec<f32>,
 ) -> Result<()> {
-    let n_ranks = model.shards.len();
-    if n_ranks == 0 {
-        bail!("forward_prefill_pp_logits: zero-rank cluster");
-    }
-    let l = tokens.len();
-    if l == 0 {
-        bail!("forward_prefill_pp_logits called with empty tokens");
-    }
-    let max_tokens = scratch.per_rank[0].max_tokens;
-    if l > max_tokens {
-        bail!(
-            "forward_prefill_pp_logits: L={l} > scratch.max_tokens={max_tokens}; caller must chunk"
-        );
-    }
-    let cfg = &model.config;
-    let hidden = cfg.hidden_size;
-    let row_bytes = hidden * 2;
-    let chunk_bytes = l * row_bytes;
-
-    {
-        let rank0 = cluster.device(0);
-        rank0.bind()?;
-        let shard0 = &model.shards[0];
-        let scratch0 = &mut scratch.per_rank[0];
-        let token_embd = shard0
-            .token_embd
-            .as_ref()
-            .context("rank 0 shard missing token_embd")?;
-        for (t, &token_id) in tokens.iter().enumerate() {
-            forward_embed_decode_host(
-                rank0,
-                rank0.default_stream(),
-                token_embd,
-                token_id,
-                scratch0.hidden_a.offset_bytes(t * row_bytes),
-                hidden,
-            )?;
-        }
-    }
-
-    for rank_idx in 0..n_ranks {
-        let device = cluster.device(rank_idx);
-
-        if rank_idx > 0 {
-            unsafe {
-                cluster.peer_copy_via_host(
-                    scratch.per_rank[rank_idx].hidden_a,
-                    rank_idx,
-                    scratch.per_rank[rank_idx - 1].hidden_a,
-                    rank_idx - 1,
-                    chunk_bytes,
-                )?;
-            }
-        }
-        device.bind()?;
-
-        let shard = &model.shards[rank_idx];
-        let rank_scratch = &mut scratch.per_rank[rank_idx];
-        let rank_session = &mut session.per_rank[rank_idx];
-        let layer_scratch = rank_scratch
-            .layer
-            .as_mut()
-            .context("per-rank LayerPrefillScratch missing")?;
-
-        let (mut x_in, mut x_out) = (rank_scratch.hidden_a, rank_scratch.hidden_b);
-        for (local_idx, layer_weights) in shard.layers.iter().enumerate() {
-            let layer_cache = &mut rank_session.caches[local_idx];
-            forward_layer_prefill(
-                &shard.ops,
-                device.default_stream(),
-                device,
-                cfg,
-                layer_weights,
-                layer_cache,
-                layer_scratch,
-                x_in,
-                x_out,
-                l,
-                start_position,
-                None,
-                None,
-            )
-            .with_context(|| {
-                format!(
-                    "prefill rank {} layer {} ({})",
-                    rank_idx,
-                    layer_weights.layer_idx,
-                    if cfg.is_recurrent(layer_weights.layer_idx) {
-                        "gdn"
-                    } else {
-                        "full_attn"
-                    },
-                )
-            })?;
-            std::mem::swap(&mut x_in, &mut x_out);
-        }
-        if x_in != rank_scratch.hidden_a {
-            unsafe {
-                device.memcpy_async(
-                    device.default_stream(),
-                    CopyDirection::DeviceToDevice,
-                    rank_scratch.hidden_a,
-                    x_in,
-                    chunk_bytes,
-                )?;
-            }
-            device.default_stream().synchronize()?;
-        }
-    }
-
-    let last_idx = n_ranks - 1;
-    let last_shard = &model.shards[last_idx];
-    let last_device = cluster.device(last_idx);
-    last_device.bind()?;
-    let last_scratch = &mut scratch.per_rank[last_idx];
-    let output_norm = last_shard
-        .output_norm
-        .as_ref()
-        .context("last rank missing output_norm")?;
-    let lm_head = last_shard
-        .output
-        .as_ref()
-        .or(last_shard.token_embd.as_ref())
-        .context("last rank missing both output.weight and tied token_embd")?;
-    let output_head_scratch = last_scratch
-        .output_head
-        .as_mut()
-        .context("last rank missing output_head scratch")?;
-    let last_token_hidden = last_scratch.hidden_a.offset_bytes((l - 1) * row_bytes);
-    forward_output_head_decode(
-        &last_shard.ops,
-        last_device.default_stream(),
-        cfg,
-        output_norm,
-        lm_head,
-        output_head_scratch,
-        last_token_hidden,
-    )?;
-
-    download_logits_host(
-        last_device,
-        last_device.default_stream(),
-        output_head_scratch.logits_f32,
-        cfg.vocab_size,
-        logits_out,
-    )
+    let mut driver = Qwen3MoEPpPrefillDriver { model, session, cluster, scratch };
+    flambeau_blocks::forward_prefill_pp_chunk(&mut driver, tokens, start_position)?;
+    driver.finalize_logits(logits_out)
 }
 
 /// paired-logits L=2 primitive for K=1 spec-decode verify.

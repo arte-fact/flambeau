@@ -33,4 +33,7 @@ pub use layer::{
     FfnPrefillScratch, LayerKind,
 };
 pub use moe_experts::{MoeExperts, MoeExpertsDecodeScratch};
-pub use topology::{forward_one_token_pp, PpDecodeDriver};
+pub use topology::{
+    forward_one_token_pp, forward_prefill_pp, forward_prefill_pp_chunk, PpDecodeDriver,
+    PpPrefillDriver,
+};
