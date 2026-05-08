@@ -353,10 +353,12 @@ impl ServerState {
         let mut guard = self.tp_prefill_scratch.lock().unwrap();
         if guard.is_none() {
             let prefill_ubatch = self.prefill_ubatch;
-            let cfg = match &self.model {
-                LoadedModel::Tp(crate::model::TpHipModel { model, .. }) => &model.config,
-                _ => bail!("lock_tp_prefill_scratch on non-TP model"),
-            };
+            let cfg = &self
+                .model
+                .as_tp()
+                .context("lock_tp_prefill_scratch on non-TP model")?
+                .model
+                .config;
             let scratch = flambeau_qwen3_moe::forward::ShardedForwardPrefillScratchTp::new(
                 cfg,
                 &self.cluster,
@@ -394,7 +396,7 @@ impl ServerState {
             target: "server.prefix_cache",
             prompt_tokens = prompt_ids.len(),
             enabled = self.prefix_cache.enabled(),
-            hybrid = matches!(self.model, LoadedModel::Hybrid { .. }),
+            hybrid = self.model.as_hybrid().is_some(),
             "prefix_cache_try_restore called"
         );
         if !self.prefix_cache.enabled() {
@@ -561,7 +563,7 @@ impl ServerState {
             prompt_tokens = prompt_ids.len(),
             logits_len = last_logits.len(),
             enabled = self.prefix_cache.enabled(),
-            hybrid = matches!(self.model, LoadedModel::Hybrid { .. }),
+            hybrid = self.model.as_hybrid().is_some(),
             "prefix_cache_try_capture_full called"
         );
         if !self.prefix_cache.enabled() {
@@ -964,142 +966,137 @@ impl ServerState {
         let mut logits_refs: Vec<&mut Vec<f32>> =
             logits_owned.iter_mut().collect();
 
-        match &self.model {
-            LoadedModel::Pp(crate::model::PpHipModel { model, .. }) => {
-                let mut sessions: Vec<&mut flambeau_qwen3_moe::Qwen3MoEShardedSession> =
-                    Vec::with_capacity(n);
-                // Use the first guard's prefill scratch as the batched
-                // workspace; loop below only touches each guard's
-                // `session` field (disjoint from `prefill`).
-                let prefill_scratch: &mut flambeau_qwen3_moe::forward::ShardedForwardPrefillScratch = {
-                    // SAFETY: n >= 1; reborrow guards[0]'s `prefill`
-                    // field, disjoint from the `session` borrows below.
-                    unsafe {
-                        let g0: &mut Inflight = &mut **guards_ptr;
-                        match g0 {
-                            Inflight::Pp(crate::model::PpHipSession { prefill, .. }) => prefill,
-                            _ => bail!(
-                                "dispatch_batched_pending: leader slot is not Inflight::Pp"
-                            ),
-                        }
-                    }
-                };
-                for s in 0..n {
-                    // SAFETY: s in 0..n; guards distinct by index.
-                    unsafe {
-                        let g: &mut Inflight = &mut **guards_ptr.add(s);
-                        match g {
-                            Inflight::Pp(crate::model::PpHipSession { session, .. }) => sessions.push(session),
-                            _ => bail!(
-                                "dispatch_batched_pending: slot {s} is not Inflight::Pp"
-                            ),
-                        }
-                    }
+        if let Some(pp_model) = self.model.as_pp() {
+            let model = &pp_model.model;
+            let mut sessions: Vec<&mut flambeau_qwen3_moe::Qwen3MoEShardedSession> =
+                Vec::with_capacity(n);
+            // Use the first guard's prefill scratch as the batched
+            // workspace; loop below only touches each guard's
+            // `session` field (disjoint from `prefill`).
+            let prefill_scratch: &mut flambeau_qwen3_moe::forward::ShardedForwardPrefillScratch = {
+                // SAFETY: n >= 1; reborrow guards[0]'s `prefill`
+                // field, disjoint from the `session` borrows below.
+                unsafe {
+                    let g0: &mut Inflight = &mut **guards_ptr;
+                    &mut g0
+                        .as_pp_mut()
+                        .context("dispatch_batched_pending: leader slot is not Inflight::Pp")?
+                        .prefill
                 }
-                forward_decode_batched_pp(
-                    model,
-                    sessions.as_mut_slice(),
-                    cluster,
-                    prefill_scratch,
-                    &slots,
-                    logits_refs.as_mut_slice(),
-                )
-                .context("forward_decode_batched_pp under scheduler")?;
+            };
+            for s in 0..n {
+                // SAFETY: s in 0..n; guards distinct by index.
+                unsafe {
+                    let g: &mut Inflight = &mut **guards_ptr.add(s);
+                    let pp = g.as_pp_mut().with_context(|| {
+                        format!("dispatch_batched_pending: slot {s} is not Inflight::Pp")
+                    })?;
+                    sessions.push(&mut pp.session);
+                }
             }
-            LoadedModel::Tp(crate::model::TpHipModel { model, ar }) => {
-                // **P2.9b-i2-C-wire** — TP uses a shared per-server batched
-                // scratch (sized for max_inflight_slots, lazy-init).
-                let mut sessions: Vec<&mut flambeau_qwen3_moe::Qwen3MoETpSession> =
-                    Vec::with_capacity(n);
-                for s in 0..n {
-                    // SAFETY: s in 0..n; guards distinct.
-                    unsafe {
-                        let g: &mut Inflight = &mut **guards_ptr.add(s);
-                        match g {
-                            Inflight::Tp(crate::model::TpHipSession { session, .. }) => sessions.push(session),
-                            _ => bail!(
-                                "dispatch_batched_pending: slot {s} is not Inflight::Tp"
-                            ),
-                        }
-                    }
+            forward_decode_batched_pp(
+                model,
+                sessions.as_mut_slice(),
+                cluster,
+                prefill_scratch,
+                &slots,
+                logits_refs.as_mut_slice(),
+            )
+            .context("forward_decode_batched_pp under scheduler")?;
+        } else if let Some(tp_model) = self.model.as_tp() {
+            let model = &tp_model.model;
+            let ar = &tp_model.ar;
+            // **P2.9b-i2-C-wire** — TP uses a shared per-server batched
+            // scratch (sized for max_inflight_slots, lazy-init).
+            let mut sessions: Vec<&mut flambeau_qwen3_moe::Qwen3MoETpSession> =
+                Vec::with_capacity(n);
+            for s in 0..n {
+                // SAFETY: s in 0..n; guards distinct.
+                unsafe {
+                    let g: &mut Inflight = &mut **guards_ptr.add(s);
+                    let tp = g.as_tp_mut().with_context(|| {
+                        format!("dispatch_batched_pending: slot {s} is not Inflight::Tp")
+                    })?;
+                    sessions.push(&mut tp.session);
                 }
-                // Lazy-allocate the shared batched scratch on first
-                // dispatch. Sized for `inflight_pool.len()` slots — a
-                // tight upper bound, much smaller than the prefill
-                // ubatch, so VRAM cost is negligible (~80 KB / rank /
-                // layer).
-                let mut scratch_guard = self
-                    .tp_batched_scratch
-                    .lock()
-                    .expect("tp_batched_scratch poisoned");
-                if scratch_guard.is_none() {
-                    let max_slots = self.inflight_pool.len().max(n);
-                    let s = flambeau_qwen3_moe::forward::ShardedForwardPrefillScratchTp::new(
-                        &model.config,
-                        cluster,
-                        max_slots,
-                    )
-                    .context("alloc tp_batched_scratch")?;
-                    *scratch_guard = Some(s);
-                }
-                let scratch = scratch_guard
-                    .as_mut()
-                    .expect("just initialised");
-                forward_decode_batched_tp(
-                    model,
-                    sessions.as_mut_slice(),
-                    cluster,
-                    ar,
-                    scratch,
-                    &slots,
-                    logits_refs.as_mut_slice(),
-                )
-                .context("forward_decode_batched_tp under scheduler")?;
             }
-            LoadedModel::Hybrid(crate::model::HybridHipModel { model, stage_ars }) => {
-                use flambeau_qwen3_moe::forward::forward_decode_batched_hybrid;
-                let mut sessions: Vec<&mut flambeau_qwen3_moe::Qwen3MoEHybridSession> =
-                    Vec::with_capacity(n);
-                for s in 0..n {
-                    // SAFETY: s in 0..n; guards distinct.
-                    unsafe {
-                        let g: &mut Inflight = &mut **guards_ptr.add(s);
-                        match g {
-                            Inflight::Hybrid(crate::model::HybridHipSession { session, .. }) => sessions.push(session),
-                            _ => bail!(
-                                "dispatch_batched_pending: slot {s} is not Inflight::Hybrid"
-                            ),
-                        }
-                    }
-                }
-                // Lazy-allocate the shared Hybrid batched scratch.
-                let mut scratch_guard = self
-                    .hybrid_batched_scratch
-                    .lock()
-                    .expect("hybrid_batched_scratch poisoned");
-                if scratch_guard.is_none() {
-                    let max_slots = self.inflight_pool.len().max(n);
-                    let s = flambeau_qwen3_moe::ShardedForwardPrefillScratchHybrid::new(
-                        model, max_slots,
-                    )
-                    .context("alloc hybrid_batched_scratch")?;
-                    *scratch_guard = Some(s);
-                }
-                let scratch = scratch_guard
-                    .as_mut()
-                    .expect("just initialised");
-                tr_d!("dispatch hybrid batched N={n}");
-                forward_decode_batched_hybrid(
-                    model,
-                    sessions.as_mut_slice(),
+            // Lazy-allocate the shared batched scratch on first
+            // dispatch. Sized for `inflight_pool.len()` slots — a
+            // tight upper bound, much smaller than the prefill
+            // ubatch, so VRAM cost is negligible (~80 KB / rank /
+            // layer).
+            let mut scratch_guard = self
+                .tp_batched_scratch
+                .lock()
+                .expect("tp_batched_scratch poisoned");
+            if scratch_guard.is_none() {
+                let max_slots = self.inflight_pool.len().max(n);
+                let s = flambeau_qwen3_moe::forward::ShardedForwardPrefillScratchTp::new(
+                    &model.config,
                     cluster,
-                    stage_ars,
-                    scratch,
-                    &slots,
-                    logits_refs.as_mut_slice(),
+                    max_slots,
                 )
-                .context("forward_decode_batched_hybrid under scheduler")?;
+                .context("alloc tp_batched_scratch")?;
+                *scratch_guard = Some(s);
             }
+            let scratch = scratch_guard
+                .as_mut()
+                .expect("just initialised");
+            forward_decode_batched_tp(
+                model,
+                sessions.as_mut_slice(),
+                cluster,
+                ar,
+                scratch,
+                &slots,
+                logits_refs.as_mut_slice(),
+            )
+            .context("forward_decode_batched_tp under scheduler")?;
+        } else if let Some(hybrid_model) = self.model.as_hybrid() {
+            let model = &hybrid_model.model;
+            let stage_ars = &hybrid_model.stage_ars;
+            use flambeau_qwen3_moe::forward::forward_decode_batched_hybrid;
+            let mut sessions: Vec<&mut flambeau_qwen3_moe::Qwen3MoEHybridSession> =
+                Vec::with_capacity(n);
+            for s in 0..n {
+                // SAFETY: s in 0..n; guards distinct.
+                unsafe {
+                    let g: &mut Inflight = &mut **guards_ptr.add(s);
+                    let hyb = g.as_hybrid_mut().with_context(|| {
+                        format!("dispatch_batched_pending: slot {s} is not Inflight::Hybrid")
+                    })?;
+                    sessions.push(&mut hyb.session);
+                }
+            }
+            // Lazy-allocate the shared Hybrid batched scratch.
+            let mut scratch_guard = self
+                .hybrid_batched_scratch
+                .lock()
+                .expect("hybrid_batched_scratch poisoned");
+            if scratch_guard.is_none() {
+                let max_slots = self.inflight_pool.len().max(n);
+                let s = flambeau_qwen3_moe::ShardedForwardPrefillScratchHybrid::new(
+                    model, max_slots,
+                )
+                .context("alloc hybrid_batched_scratch")?;
+                *scratch_guard = Some(s);
+            }
+            let scratch = scratch_guard
+                .as_mut()
+                .expect("just initialised");
+            tr_d!("dispatch hybrid batched N={n}");
+            forward_decode_batched_hybrid(
+                model,
+                sessions.as_mut_slice(),
+                cluster,
+                stage_ars,
+                scratch,
+                &slots,
+                logits_refs.as_mut_slice(),
+            )
+            .context("forward_decode_batched_hybrid under scheduler")?;
+        } else {
+            bail!("dispatch_batched_pending: unknown topology");
         }
 
         for (s, p) in pending.iter().enumerate() {
@@ -3120,12 +3117,9 @@ fn scheduler_can_engage(state: &ServerState, params: &SamplingParams) -> bool {
     // features carry extra device-side state (MTP head, JSON DFA,
     // top-K logprobs grab) that isn't yet plumbed through the
     // scheduler-aware handler.
-    let topo_ok = match &state.model {
-        LoadedModel::Pp(crate::model::PpHipModel { mtp: None, .. }) => true,
-        LoadedModel::Tp(_) => true,
-        LoadedModel::Hybrid(_) => true,
-        _ => false,
-    };
+    let topo_ok = state.model.as_pp().map_or(false, |p| p.mtp.is_none())
+        || state.model.as_tp().is_some()
+        || state.model.as_hybrid().is_some();
     if !topo_ok {
         return false;
     }
@@ -3187,16 +3181,14 @@ fn run_completion_scheduler_pp_blocking(
             let mut logits_buf: Vec<f32> = Vec::with_capacity(vocab);
             // **#321** — TP/Hybrid prefill alloc serialiser. See field
             // doc on ServerState::prefill_serialiser.
-            let _prefill_lock = if matches!(model,
-                LoadedModel::Tp { .. } | LoadedModel::Hybrid { .. }
-            ) {
+            let _prefill_lock = if model.as_tp().is_some() || model.as_hybrid().is_some() {
                 Some(state.prefill_serialiser.lock().unwrap())
             } else {
                 None
             };
             // **#324** — for TP, hand the shared pre-allocated scratch
             // through so prefill_logits skips the per-call alloc.
-            let mut tp_scratch_g = if matches!(model, LoadedModel::Tp { .. }) {
+            let mut tp_scratch_g = if model.as_tp().is_some() {
                 Some(state.lock_tp_prefill_scratch()?)
             } else {
                 None
@@ -3470,43 +3462,39 @@ fn run_completion_blocking_ids(
     // (head_stage = pp_size - 1; head_rank within stage
     // defaults to 0 per ShardedForwardOneTokenScratchHybrid).
     let use_gpu_sampler = state.gpu_sampler
-        && matches!(
-            model,
-            LoadedModel::Tp(_) | LoadedModel::Hybrid(_)
-        )
+        && (model.as_tp().is_some() || model.as_hybrid().is_some())
         && !sampling.is_greedy();
     let mut gpu_scratch: Option<GpuSamplerScratch> = if use_gpu_sampler {
         // Resolve the head device for whichever topology is active.
-        let head_device = match (model, &inflight) {
-            (LoadedModel::Tp(_), Inflight::Tp(crate::model::TpHipSession { decode, .. })) => {
-                let head_rank = decode.head_rank.0 as usize;
-                if head_rank >= cluster.ranks() {
-                    bail!(
-                        "GPU sampler: TP head_rank={head_rank} >= cluster ranks {}",
-                        cluster.ranks()
-                    );
-                }
-                cluster.device(head_rank)
+        let head_device = if let (Some(_), Some(s)) = (model.as_tp(), inflight.as_tp()) {
+            let head_rank = s.decode.head_rank.0 as usize;
+            if head_rank >= cluster.ranks() {
+                bail!(
+                    "GPU sampler: TP head_rank={head_rank} >= cluster ranks {}",
+                    cluster.ranks()
+                );
             }
-            (LoadedModel::Hybrid(crate::model::HybridHipModel { model: hm, .. }), Inflight::Hybrid(crate::model::HybridHipSession { decode, .. })) => {
-                let head_stage = decode.head_stage as usize;
-                let stage_model = hm.stages.get(head_stage).ok_or_else(|| {
-                    anyhow!("GPU sampler: hybrid head_stage {head_stage} out of range")
-                })?;
-                let stage_scratch = decode
-                    .per_stage
-                    .get(head_stage)
-                    .ok_or_else(|| anyhow!("GPU sampler: hybrid decode missing head_stage"))?;
-                let head_rank = stage_scratch.head_rank.0 as usize;
-                if head_rank >= stage_model.sub_cluster.ranks() {
-                    bail!(
-                        "GPU sampler: hybrid head_rank={head_rank} >= stage sub-cluster ranks {}",
-                        stage_model.sub_cluster.ranks()
-                    );
-                }
-                stage_model.sub_cluster.device(head_rank)
+            cluster.device(head_rank)
+        } else if let (Some(hm), Some(s)) = (model.as_hybrid(), inflight.as_hybrid()) {
+            let decode = &s.decode;
+            let head_stage = decode.head_stage as usize;
+            let stage_model = hm.model.stages.get(head_stage).ok_or_else(|| {
+                anyhow!("GPU sampler: hybrid head_stage {head_stage} out of range")
+            })?;
+            let stage_scratch = decode
+                .per_stage
+                .get(head_stage)
+                .ok_or_else(|| anyhow!("GPU sampler: hybrid decode missing head_stage"))?;
+            let head_rank = stage_scratch.head_rank.0 as usize;
+            if head_rank >= stage_model.sub_cluster.ranks() {
+                bail!(
+                    "GPU sampler: hybrid head_rank={head_rank} >= stage sub-cluster ranks {}",
+                    stage_model.sub_cluster.ranks()
+                );
             }
-            _ => bail!("GPU sampler: unsupported (model, inflight) combination"),
+            stage_model.sub_cluster.device(head_rank)
+        } else {
+            bail!("GPU sampler: unsupported (model, inflight) combination");
         };
         Some(
             // K=2048 matches Sampler-A's `effective_top_k` default
@@ -3527,15 +3515,13 @@ fn run_completion_blocking_ids(
     let prefill_start = Instant::now();
     // **#321** — TP/Hybrid prefill alloc serialiser. See field
     // doc on ServerState::prefill_serialiser.
-    let _prefill_lock = if matches!(model,
-        LoadedModel::Tp(_) | LoadedModel::Hybrid(_)
-    ) {
+    let _prefill_lock = if model.as_tp().is_some() || model.as_hybrid().is_some() {
         Some(state.prefill_serialiser.lock().unwrap())
     } else {
         None
     };
     // **#324** — for TP, hand the shared pre-allocated scratch through.
-    let mut tp_scratch_g = if matches!(model, LoadedModel::Tp(_)) {
+    let mut tp_scratch_g = if model.as_tp().is_some() {
         Some(state.lock_tp_prefill_scratch()?)
     } else {
         None
@@ -3547,7 +3533,7 @@ fn run_completion_blocking_ids(
     // outcomes per `prefix_cache_try_restore`. Bypass when logprobs
     // or MTP spec-decode active.
     let cache_eligible = params.collect_logprobs.is_none()
-        && !matches!(model, LoadedModel::Pp(crate::model::PpHipModel { mtp: Some(_), .. }));
+        && !model.as_pp().map_or(false, |p| p.mtp.is_some());
     let restore = if cache_eligible {
         state.prefix_cache_try_restore(&mut inflight, &prompt_ids)?
     } else {
@@ -3766,23 +3752,21 @@ fn run_completion_blocking_ids(
     // MTP distributions inside `build_distribution` via the threaded
     // `history` slice (/h #194), so penalty-active requests no
     // longer have to fall through.
-    let spec_available = matches!(model, LoadedModel::Pp(crate::model::PpHipModel { mtp: Some(_), .. }));
+    let spec_available = model.as_pp().map_or(false, |p| p.mtp.is_some());
     let use_spec = spec_available;
     if use_spec {
         // h_for_mtp at first macro step = h@(prompt_len-1), which lives in
         // the prefill scratch's hidden_a buffer at offset (prompt_len-1)*row_bytes.
         let last_rank = cluster.ranks() - 1;
         let row_bytes = state.cfg.hidden_size * 2;
-        let h_initial = match &inflight {
-            Inflight::Pp(crate::model::PpHipSession { prefill, .. }) => prefill.per_rank[last_rank]
-                .hidden_a
-                .offset_bytes((prompt_ids.len() - 1) * row_bytes),
-            _ => bail!("spec-decode requires Inflight::Pp"),
-        };
-        let m = match model {
-            LoadedModel::Pp(crate::model::PpHipModel { model, .. }) => model,
-            _ => bail!("spec-decode requires LoadedModel::Pp"),
-        };
+        let pp = inflight.as_pp().context("spec-decode requires Inflight::Pp")?;
+        let h_initial = pp.prefill.per_rank[last_rank]
+            .hidden_a
+            .offset_bytes((prompt_ids.len() - 1) * row_bytes);
+        let m = &model
+            .as_pp()
+            .context("spec-decode requires LoadedModel::Pp")?
+            .model;
         let mut spec_state = SpecDecodePp::new(m, cluster).context("alloc SpecDecodePp")?;
         spec_state.h_for_mtp = h_initial;
 
@@ -4010,23 +3994,22 @@ fn run_completion_blocking_ids(
     // resolve it the same way the constructor did, depending on
     // topology.
     if let Some(scratch) = gpu_scratch.take() {
-        let head_device = match (model, &inflight) {
-            (LoadedModel::Tp(_), Inflight::Tp(crate::model::TpHipSession { decode, .. })) => {
-                cluster.device(decode.head_rank.0 as usize)
-            }
-            (LoadedModel::Hybrid(crate::model::HybridHipModel { model: hm, .. }), Inflight::Hybrid(crate::model::HybridHipSession { decode, .. })) => {
-                let head_stage = decode.head_stage as usize;
-                let stage_model = hm.stages.get(head_stage).ok_or_else(|| {
-                    anyhow!("dispose GpuSamplerScratch: hybrid head_stage out of range")
-                })?;
-                let stage_scratch = decode.per_stage.get(head_stage).ok_or_else(|| {
-                    anyhow!("dispose GpuSamplerScratch: hybrid decode missing head_stage")
-                })?;
-                stage_model
-                    .sub_cluster
-                    .device(stage_scratch.head_rank.0 as usize)
-            }
-            _ => bail!("dispose GpuSamplerScratch: unsupported topology"),
+        let head_device = if let (Some(_), Some(s)) = (model.as_tp(), inflight.as_tp()) {
+            cluster.device(s.decode.head_rank.0 as usize)
+        } else if let (Some(hm), Some(s)) = (model.as_hybrid(), inflight.as_hybrid()) {
+            let decode = &s.decode;
+            let head_stage = decode.head_stage as usize;
+            let stage_model = hm.model.stages.get(head_stage).ok_or_else(|| {
+                anyhow!("dispose GpuSamplerScratch: hybrid head_stage out of range")
+            })?;
+            let stage_scratch = decode.per_stage.get(head_stage).ok_or_else(|| {
+                anyhow!("dispose GpuSamplerScratch: hybrid decode missing head_stage")
+            })?;
+            stage_model
+                .sub_cluster
+                .device(stage_scratch.head_rank.0 as usize)
+        } else {
+            bail!("dispose GpuSamplerScratch: unsupported topology");
         };
         scratch
             .dispose(head_device)
@@ -4143,15 +4126,13 @@ fn run_completion_blocking_streaming(
     let prefill_start = Instant::now();
     // **#321** — TP/Hybrid prefill alloc serialiser. See field
     // doc on ServerState::prefill_serialiser.
-    let _prefill_lock = if matches!(model,
-        LoadedModel::Tp(_) | LoadedModel::Hybrid(_)
-    ) {
+    let _prefill_lock = if model.as_tp().is_some() || model.as_hybrid().is_some() {
         Some(state.prefill_serialiser.lock().unwrap())
     } else {
         None
     };
     // **#324** — for TP, hand the shared pre-allocated scratch through.
-    let mut tp_scratch_g = if matches!(model, LoadedModel::Tp(_)) {
+    let mut tp_scratch_g = if model.as_tp().is_some() {
         Some(state.lock_tp_prefill_scratch()?)
     } else {
         None
@@ -4341,21 +4322,19 @@ fn run_completion_blocking_streaming(
     // streaming + 5g/h penalty-aware: spec-decode SSE path. Active
     // when MTP head is loaded. Penalties applied in build_distribution via
     // the threaded `&generated` history. Mirrors the non-streaming branch.
-    let spec_available = matches!(model, LoadedModel::Pp(crate::model::PpHipModel { mtp: Some(_), .. }));
+    let spec_available = model.as_pp().map_or(false, |p| p.mtp.is_some());
     let use_spec = spec_available;
     if use_spec {
         let last_rank = cluster.ranks() - 1;
         let row_bytes = state.cfg.hidden_size * 2;
-        let h_initial = match &inflight {
-            Inflight::Pp(crate::model::PpHipSession { prefill, .. }) => prefill.per_rank[last_rank]
-                .hidden_a
-                .offset_bytes((prompt_ids.len() - 1) * row_bytes),
-            _ => bail!("spec-decode requires Inflight::Pp"),
-        };
-        let m = match model {
-            LoadedModel::Pp(crate::model::PpHipModel { model, .. }) => model,
-            _ => bail!("spec-decode requires LoadedModel::Pp"),
-        };
+        let pp = inflight.as_pp().context("spec-decode requires Inflight::Pp")?;
+        let h_initial = pp.prefill.per_rank[last_rank]
+            .hidden_a
+            .offset_bytes((prompt_ids.len() - 1) * row_bytes);
+        let m = &model
+            .as_pp()
+            .context("spec-decode requires LoadedModel::Pp")?
+            .model;
         let mut spec_state = SpecDecodePp::new(m, cluster).context("alloc SpecDecodePp")?;
         spec_state.h_for_mtp = h_initial;
 

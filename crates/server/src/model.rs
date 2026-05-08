@@ -92,6 +92,20 @@ impl LoadedModel {
             LoadedModel::Hybrid(_) => "pp+tp",
         }
     }
+
+    /// Concrete-variant accessors. Server call sites prefer these over
+    /// matching on the enum so the per-topology pattern boilerplate
+    /// stays out of route handlers and is mechanically forwardable
+    /// when the enum eventually retires in favour of `Box<dyn HipModel>`.
+    pub fn as_pp(&self) -> Option<&PpHipModel> {
+        if let LoadedModel::Pp(p) = self { Some(p) } else { None }
+    }
+    pub fn as_tp(&self) -> Option<&TpHipModel> {
+        if let LoadedModel::Tp(t) = self { Some(t) } else { None }
+    }
+    pub fn as_hybrid(&self) -> Option<&HybridHipModel> {
+        if let LoadedModel::Hybrid(h) = self { Some(h) } else { None }
+    }
 }
 
 /// PP per-request session + scratches. Mirrors [`PpHipModel`].
@@ -120,6 +134,30 @@ pub enum Inflight {
     Pp(PpHipSession),
     Tp(TpHipSession),
     Hybrid(HybridHipSession),
+}
+
+impl Inflight {
+    /// Concrete-variant accessors. Mirrors `LoadedModel::as_*`; the
+    /// server uses these in spec-decode init and head-device resolution
+    /// instead of pattern-matching on the enum.
+    pub fn as_pp(&self) -> Option<&PpHipSession> {
+        if let Inflight::Pp(s) = self { Some(s) } else { None }
+    }
+    pub fn as_pp_mut(&mut self) -> Option<&mut PpHipSession> {
+        if let Inflight::Pp(s) = self { Some(s) } else { None }
+    }
+    pub fn as_tp(&self) -> Option<&TpHipSession> {
+        if let Inflight::Tp(s) = self { Some(s) } else { None }
+    }
+    pub fn as_tp_mut(&mut self) -> Option<&mut TpHipSession> {
+        if let Inflight::Tp(s) = self { Some(s) } else { None }
+    }
+    pub fn as_hybrid(&self) -> Option<&HybridHipSession> {
+        if let Inflight::Hybrid(s) = self { Some(s) } else { None }
+    }
+    pub fn as_hybrid_mut(&mut self) -> Option<&mut HybridHipSession> {
+        if let Inflight::Hybrid(s) = self { Some(s) } else { None }
+    }
 }
 
 impl Inflight {
