@@ -1,31 +1,27 @@
 // mmq_q6_K_4warp — 4-warp LDS-tiled MMQ for Q6_K weights × Q8_1 activation.
-//
-// First-class Q6_K prefill kernel for V1.4. Same tile shape and LDS layout as
+// First-class Q6_K prefill kernel for Same tile shape and LDS layout as
 // `mmq_q4_K_4warp.cu`; only the weight dequant step changes to match Q6_K's
 // split ql/qh/scales layout.
-//
 // Tile shape:
-//   MMQ_Y = 16 output rows per block
-//   MMQ_X =  8 output columns per block
-//   MMQ_K = 256 K-positions per iter (= one Q6_K super-block)
-//
+// MMQ_Y = 16 output rows per block
+// MMQ_X = 8 output columns per block
+// MMQ_K = 256 K-positions per iter (= one Q6_K super-block)
 // Thread layout (128 threads = 2 wave64):
-//   row_in_tile = tid / 8     (0..15)
-//   col_in_tile = tid & 7     (0..7)
-//
+// row_in_tile = tid / 8 (0..15)
+// col_in_tile = tid & 7 (0..7)
 // Q6_K super-block dequant (same math as `mmvq_q6_k.cu`), indexed by
 // position p ∈ 0..255:
-//   sub         = p / 32        (0..7)   — Q8_1 sub-block index
-//   pos_in_sub  = p & 31        (0..31)
-//   h           = sub >> 2      (0..1)   — which 128-element half
-//   q_idx       = sub & 3       (0..3)
-//   lsub        = pos_in_sub >> 4 (0..1)
-//   scale_idx   = 8*h + 2*q_idx + lsub
-//   ql_byte     = ql[64*h + ((q_idx & 1) ? pos_in_sub + 32 : pos_in_sub)]
-//   nibble      = (q_idx < 2) ? (ql_byte & 0x0F) : (ql_byte >> 4)
-//   qh_bits     = (qh[32*h + pos_in_sub] >> (2*q_idx)) & 0x3
-//   raw_q       = (nibble | (qh_bits << 4)) - 32
-//   x_val       = d * scales[scale_idx] * raw_q
+// sub = p / 32 (0..7) — Q8_1 sub-block index
+// pos_in_sub = p & 31 (0..31)
+// h = sub >> 2 (0..1) — which 128-element half
+// q_idx = sub & 3 (0..3)
+// lsub = pos_in_sub >> 4 (0..1)
+// scale_idx = 8*h + 2*q_idx + lsub
+// ql_byte = ql[64*h + ((q_idx & 1) ? pos_in_sub + 32 : pos_in_sub)]
+// nibble = (q_idx < 2) ? (ql_byte & 0x0F) : (ql_byte >> 4)
+// qh_bits = (qh[32*h + pos_in_sub] >> (2*q_idx)) & 0x3
+// raw_q = (nibble | (qh_bits << 4)) - 32
+// x_val = d * scales[scale_idx] * raw_q
 
 #include "block_quant.cuh"
 #include <hip/hip_runtime.h>

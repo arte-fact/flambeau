@@ -1,9 +1,7 @@
 // cast_f32_f16 — pointwise F32 → F16.
-//
 // Decode-path bridge: MMVQ writes its accumulator in F32 (per-block scale
 // chain needs full precision); attention / rmsnorm / swiglu all operate
 // on F16. Saves adding an F16 accumulator variant of every MMVQ kernel.
-//
 // Launch: 1D, ceil(n/256) blocks × 256 threads. One element per thread.
 
 #include <hip/hip_runtime.h>

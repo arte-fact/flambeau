@@ -1,25 +1,22 @@
 //! Multi-device HIP cluster — PP host-bounce + TP BAR1 peer-access primitives.
-//!
 //! A `HipCluster` owns one `HipDevice` per rank plus a pinned host
 //! bounce buffer per rank. The PP-side primitive is `peer_copy_via_host`:
 //! a **CPU-bounce peer copy** that stages a DeviceToHost transfer on the
 //! source rank and a HostToDevice transfer on the destination rank through
-//! pinned host memory. The TP-side primitive (TP-0a) is the on-construction
+//! pinned host memory. The TP-side primitive () is the on-construction
 //! probe of `hipDeviceCanAccessPeer` + authorisation via
 //! `hipDeviceEnablePeerAccess`; the resulting matrix is exposed via
-//! [`HipCluster::peer_access_matrix`] and consumed by the TP-0c BAR1
+//! [`HipCluster::peer_access_matrix`] and consumed by the BAR1
 //! AllReduce path.
-//!
 //! Why not direct `hipMemcpyPeerAsync`? The V1 target rig is PCIe-only
 //! (no xGMI / no NVLink / no kernel `CONFIG_HSA_AMD_P2P`). On that
 //! topology, direct peer copies appear to submit successfully but the
 //! stream ends up in an unsync'able state (candle's
 //! `hip_backend/cluster.rs` documents the same behaviour on ROCm
 //! 7.1.1 + gfx906). The host-bounce fallback is boring and reliable.
-//!
 //! Bandwidth envelope (candle measured on MI50 Gen3 x16): single-chunk
 //! pinned-host bounce hits ~6.75 GB/s. Pipelined multi-chunk with events
-//! and a dedicated DtoH stream climbs to ~10–11 GB/s. V1.7.5-B ships the
+//! and a dedicated DtoH stream climbs to ~10–11 GB/s. B ships the
 //! single-chunk path — it covers every stage-boundary transfer on the
 //! decode/prefill hot path (hidden-state F16 at L ≤ 128 tokens ≤ 512 KB
 //! per hop), which sits comfortably below the 4 MiB chunk threshold the
@@ -40,7 +37,6 @@ use crate::{HipDevice, HipStream};
 use flambeau_core::{Device, DeviceError, DevicePtr, DeviceResult};
 
 /// One entry per rank: the pinned host bounce buffer.
-///
 /// C3-refactor: the hot path (`peer_copy_via_host`) reads `ptr` + `bytes`
 /// lock-free via atomics. The grow path is serialised by `grow_lock` to
 /// prevent concurrent reallocations, but after session warmup the buffer
@@ -77,7 +73,7 @@ impl RankBounce {
 }
 
 /// Multi-device cluster holding one `HipDevice` + one pinned bounce slab
-/// per rank. Only the peer-copy primitive is wired today; V1.7.5-C+ add
+/// per rank. Only the peer-copy primitive is wired today; C+ add
 /// pipeline-level orchestration on top.
 #[derive(Debug)]
 pub struct HipCluster {
@@ -86,12 +82,12 @@ pub struct HipCluster {
     /// hot path — see [`RankBounce`]. Used by the blocking
     /// `peer_copy_via_host` path.
     bounces: Vec<RankBounce>,
-    /// V2.25.a — per-rank auxiliary streams for pipeline-parallel ubatch
+    /// 5.a — per-rank auxiliary streams for pipeline-parallel ubatch
     /// pipelining. `aux_streams[rank][lane]` is an independent HIP stream on
     /// rank `rank`. Populated lazily by [`HipCluster::reserve_aux_streams`].
     /// Empty by default so the non-pipelined path stays byte-identical.
     aux_streams: Vec<std::sync::Mutex<Vec<HipStream>>>,
-    /// V2.25.g — per-rank × per-lane pinned bounces for the async
+    /// 5.g — per-rank × per-lane pinned bounces for the async
     /// peer-copy path. Previously shared one bounce per rank, which
     /// serialised concurrent async peer-copies across lanes. Each lane
     /// now gets its own pinned slab. Populated via
@@ -99,14 +95,12 @@ pub struct HipCluster {
     /// during the grow phase; the read path is atomic via RankBounce's
     /// AtomicPtr / AtomicUsize.
     lane_bounces: Vec<std::sync::Mutex<Vec<RankBounce>>>,
-    /// TP-0a — N×N matrix of authorised BAR1 peer-access edges.
-    ///
+    /// N×N matrix of authorised BAR1 peer-access edges.
     /// `peer_access[i][j] == true` iff rank `i`'s HIP device may
     /// dereference pointers owned by rank `j` directly through PCIe BAR1
     /// (the prerequisite for the kernel-launched P2P AllReduce path).
     /// Probed once at construction; the diagonal is always `true` (a
     /// device trivially "accesses" its own memory).
-    ///
     /// Populated even when peer-enable failed: callers consult this matrix
     /// to decide whether to engage the BAR1 AllReduce kernel or fall back
     /// to the host-bounce path on a per-rank-pair basis.
@@ -124,7 +118,6 @@ pub struct HipCluster {
 impl HipCluster {
     /// Open one `HipDevice` per rank. `device_ids[r]` is the HIP ordinal
     /// for rank `r`. Typically `0..N` when every card is usable.
-    ///
     /// As part of construction the cluster probes the BAR1 peer-access
     /// matrix (`hipDeviceCanAccessPeer` for every off-diagonal pair) and
     /// authorises every reachable edge via `hipDeviceEnablePeerAccess`.
@@ -167,7 +160,6 @@ impl HipCluster {
 
     /// `peer_access[i][j]` — `true` iff rank `i`'s device may dereference
     /// pointers owned by rank `j` directly via PCIe BAR1.
-    ///
     /// The diagonal is always `true`. Off-diagonal entries are `true` only
     /// when both `hipDeviceCanAccessPeer` returned 1 *and* the matching
     /// `hipDeviceEnablePeerAccess` either succeeded or returned the benign
@@ -201,7 +193,7 @@ impl HipCluster {
         true
     }
 
-    /// V2.25.g — reserve `n_lanes` per-lane pinned bounce slabs per rank,
+    /// 5.g — reserve `n_lanes` per-lane pinned bounce slabs per rank,
     /// each pre-grown to `bytes_per_rank` bytes. Required before using
     /// [`Self::peer_copy_via_host_async_laned`] at multiple lanes
     /// concurrently, so each lane has its own pinned memory (no
@@ -227,7 +219,7 @@ impl HipCluster {
         Ok(())
     }
 
-    /// V2.25.a — ensure each rank has at least `n_lanes` auxiliary streams
+    /// 5.a — ensure each rank has at least `n_lanes` auxiliary streams
     /// beyond its default stream. Used by the ubatch-pipelined prefill path
     /// so rank `r` can drive ubatch lane `lane` on its own stream without
     /// serialising behind the default stream. Idempotent: growing from 2 to
@@ -242,7 +234,7 @@ impl HipCluster {
                 message: "aux_streams mutex poisoned".into(),
             })?;
             while slot.len() < n_lanes {
-                // V2.25.g — non-blocking so lanes truly overlap on the same
+                // 5.g — non-blocking so lanes truly overlap on the same
                 // device (blocking streams serialise via the null stream).
                 slot.push(HipStream::new_non_blocking(device.id())?);
             }
@@ -250,10 +242,9 @@ impl HipCluster {
         Ok(())
     }
 
-    /// V2.25.a — run `f` with rank `r`'s aux stream for ubatch lane `lane`.
+    /// 5.a — run `f` with rank `r`'s aux stream for ubatch lane `lane`.
     /// The lane must have been pre-reserved via
     /// [`HipCluster::reserve_aux_streams`] or this returns an error.
-    ///
     /// Closure API (rather than returning `&HipStream`) so the aux-streams
     /// Mutex stays held for the duration of the borrow — the `HipStream` is
     /// Send+Sync, but its lifetime is tied to the Vec entry, which is behind
@@ -287,7 +278,7 @@ impl HipCluster {
         f(&guard[lane])
     }
 
-    /// V2.25.a — number of aux streams currently reserved on rank `r`.
+    /// 5.a — number of aux streams currently reserved on rank `r`.
     /// Useful for assertions at the ubatch-loop site.
     pub fn aux_stream_count(&self, rank: usize) -> DeviceResult<usize> {
         if rank >= self.devices.len() {
@@ -306,12 +297,10 @@ impl HipCluster {
     }
 
     /// Pre-grow every rank's pinned bounce buffer to `bytes_per_rank`.
-    ///
     /// Call this once at session init with the largest expected
     /// stage-boundary payload (`hidden_dim * sizeof::<f16>() *
     /// max_prefill_tokens`). After this call, `peer_copy_via_host` never
     /// takes the grow lock — it only does the atomic fast-path read.
-    ///
     /// # Errors
     /// Returns `DeviceError::Alloc` if any rank's pinned allocation fails.
     pub fn reserve_bounce_capacity(&self, bytes_per_rank: usize) -> DeviceResult<()> {
@@ -338,7 +327,7 @@ impl HipCluster {
     /// cluster without an explicit call leaks the pinned host memory (we
     /// log a warn from `Drop` in that case).
     pub fn dispose(mut self) -> DeviceResult<()> {
-        // V2.25.a — drop aux streams first; each rank binds its device
+        // 5.a — drop aux streams first; each rank binds its device
         // before hipStreamDestroy implicit-runs in HipStream's Drop.
         for (rank, slot) in self.aux_streams.drain(..).enumerate() {
             if let Ok(streams) = slot.into_inner() {
@@ -351,7 +340,7 @@ impl HipCluster {
         for bounce in self.bounces.drain(..) {
             Self::free_bounce(&bounce)?;
         }
-        // V2.25.g — also free per-lane bounces.
+        // 5.g — also free per-lane bounces.
         for slot in self.lane_bounces.drain(..) {
             if let Ok(bounces) = slot.into_inner() {
                 for bounce in bounces {
@@ -385,7 +374,7 @@ impl HipCluster {
         self.ensure_bounce_in(&self.bounces[rank], rank, need)
     }
 
-    /// V2.25.g — helper that grows an arbitrary `RankBounce` slot
+    /// 5.g — helper that grows an arbitrary `RankBounce` slot
     /// associated with `rank` (used for both the default per-rank bounce
     /// and the per-lane lane_bounces).
     fn ensure_bounce_in(
@@ -468,19 +457,17 @@ impl HipCluster {
     /// Single-chunk host-bounce peer copy: DtoH on src rank → sync →
     /// HtoD on dst rank → sync. Returns when the destination buffer
     /// holds the transferred bytes.
-    ///
     /// Correctness-first path. For the PP hot path (≤ 512 KB per hop),
     /// the single-memcpy overhead is one DtoH + one HtoD, each a few µs
     /// on MI50 PCIe 3.0 x16. A pipelined multi-chunk variant is the
     /// natural follow-up if we ever have to shuffle > 4 MiB between ranks.
-    ///
     /// # Safety
     /// - `src_ptr` must point to at least `bytes` valid device bytes on
-    ///   the source rank's HIP device.
+    /// the source rank's HIP device.
     /// - `dst_ptr` must point to at least `bytes` valid device bytes on
-    ///   the destination rank's HIP device.
+    /// the destination rank's HIP device.
     /// - No other stream on either device may concurrently access the
-    ///   source or destination regions.
+    /// source or destination regions.
     pub unsafe fn peer_copy_via_host(
         &self,
         dst_ptr: DevicePtr,
@@ -539,8 +526,8 @@ impl HipCluster {
         let buf = self.ensure_bounce(src_rank, bytes)?;
 
         // 1. DtoH on src rank's default stream. We bind before the async
-        //    launch so `hipMemcpyAsync` routes to the right device's
-        //    command queue.
+        // launch so `hipMemcpyAsync` routes to the right device's
+        // command queue.
         let src_dev = &self.devices[src_rank];
         src_dev.bind()?;
         // SAFETY: `buf` is a live pinned-host allocation sized `bytes` (from
@@ -578,7 +565,7 @@ impl HipCluster {
             )
         };
         check(rc, "peer_copy HtoD")?;
-        // **TP-4d-i3 followup** — sync the HtoD before returning so the
+        // followup** — sync the HtoD before returning so the
         // pinned bounce buffer (shared per src rank) is no longer in
         // flight. Without this sync, callers that loop this primitive
         // for fan-out (PP-of-TP hand-off: stage s rank 0 → all
@@ -597,33 +584,29 @@ impl HipCluster {
         Ok(())
     }
 
-    /// V2.25.b — fully-asynchronous PCIe peer copy.
-    ///
+    /// 5.b — fully-asynchronous PCIe peer copy.
     /// Unlike [`Self::peer_copy_via_host`] which blocks the CPU between DtoH
     /// and HtoD via `hipStreamSynchronize`, this variant records a HIP event
     /// after the DtoH and has the destination stream wait on it driver-side.
     /// The caller's `src_stream` and `dst_stream` continue receiving work
-    /// without host round-trips — essential for the V2.25.d async ubatch
+    /// without host round-trips — essential for the 5.d async ubatch
     /// pipeline where rank k's next ubatch should start before rank k+1's
     /// current ubatch finishes.
-    ///
     /// `done_event` is optional: if `Some`, recorded on `dst_stream` after
     /// the HtoD completes (so downstream dependents can wait without a sync).
-    ///
     /// Same-rank and rank-out-of-range paths mirror the blocking variant.
-    ///
     /// # Safety
     /// - `src_ptr` / `dst_ptr` must be valid for `bytes` on their respective
-    ///   devices.
+    /// devices.
     /// - `src_stream` must be on `src_rank`'s device; `dst_stream` on
-    ///   `dst_rank`'s device.
+    /// `dst_rank`'s device.
     /// - No other work may concurrently alias the pinned bounce buffer
-    ///   bytes for `src_rank` between the DtoH and HtoD on different streams.
-    ///   In practice this means: do not issue two overlapping async peer
-    ///   copies from the SAME source rank on different lanes without
-    ///   per-lane bounce buffers — the current impl has one bounce per rank.
-    ///   V2.25.d works around this by pacing: each ubatch stage completes
-    ///   its DtoH before the next stage starts its DtoH on the same rank.
+    /// bytes for `src_rank` between the DtoH and HtoD on different streams.
+    /// In practice this means: do not issue two overlapping async peer
+    /// copies from the SAME source rank on different lanes without
+    /// per-lane bounce buffers — the current impl has one bounce per rank.
+    /// 5.d works around this by pacing: each ubatch stage completes
+    /// its DtoH before the next stage starts its DtoH on the same rank.
     pub unsafe fn peer_copy_via_host_async(
         &self,
         dst_ptr: DevicePtr,
@@ -647,17 +630,15 @@ impl HipCluster {
         }
     }
 
-    /// V2.25.g — async peer copy with an optional `lane` for per-lane
+    /// 5.g — async peer copy with an optional `lane` for per-lane
     /// bounce buffer selection. When `lane = Some(L)`, the DtoH writes to
     /// `lane_bounces[src_rank][L]` (must have been reserved via
     /// [`Self::reserve_lane_bounces`]). When `None`, falls back to the
     /// shared per-rank bounce (identical to the unlaned variant).
-    ///
     /// Per-lane bounces let two concurrent async peer-copies from the
     /// same source rank truly overlap — each lane has its own pinned
     /// slab so the driver's memcpy DAG doesn't force serialisation on
     /// shared host memory.
-    ///
     /// # Safety
     /// Same as the unlaned variant. Additionally: when `lane = Some(L)`,
     /// no other in-flight async copy may alias lane L's bounce on this
@@ -812,7 +793,6 @@ fn check(rc: c_int, tag: &str) -> DeviceResult<()> {
 /// Probe `hipDeviceCanAccessPeer` for every off-diagonal `(src, dst)` rank
 /// pair and call `hipDeviceEnablePeerAccess` where reachable. Returns the
 /// resulting N×N matrix.
-///
 /// Failures are *not* propagated: a pair that can't be enabled is
 /// recorded as `false` and the cluster continues to construct (the
 /// host-bounce AllReduce stays available for that pair). A `tracing::warn`

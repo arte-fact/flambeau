@@ -1,43 +1,37 @@
 // mmq_q8_0_4warp — 4-warp LDS-tiled MMQ for Q8_0 weights × Q8_1 activation.
-//
 // This is the first-class MMQ prefill kernel for Q8_0 on gfx906. It is a
 // fresh port of llamacpp-turbo's `ggml-cuda/mmq.cuh` 4-warp pattern, with
 // the following simplifications (all scheduled to land as follow-ups on
 // top of this port):
-//   * no stream-K fixup — every output tile is computed by exactly one
-//     thread block (see turbo's `mul_mat_q_process_tile` for the
-//     fixup-enabled variant);
-//   * no L2 prefetch loop;
-//   * no software-pipelined asm load/store macros
-//     (`GFX906_LOAD_TILES_Q8_0_ASYNC` / `GFX906_STORE_TILES_Q8_0_LDS_*`);
-//   * uses the `__builtin_amdgcn_sdot4` intrinsic (gfx906 `v_dot4_i32_i8`)
-//     for the per-thread inner dot. The manual 4× int8 sign-extend + FMA
-//     version is kept as a comment in `dp4a()` below — same arithmetic,
-//     compiler sometimes lowers it, intrinsic guarantees the fast path.
-//
+// * no stream-K fixup — every output tile is computed by exactly one
+// thread block (see turbo's `mul_mat_q_process_tile` for the
+// fixup-enabled variant);
+// * no L2 prefetch loop;
+// * no software-pipelined asm load/store macros
+// (`GFX906_LOAD_TILES_Q8_0_ASYNC` / `GFX906_STORE_TILES_Q8_0_LDS_*`);
+// * uses the `__builtin_amdgcn_sdot4` intrinsic (gfx906 `v_dot4_i32_i8`)
+// for the per-thread inner dot. The manual 4× int8 sign-extend + FMA
+// version is kept as a comment in `dp4a()` below — same arithmetic,
+// compiler sometimes lowers it, intrinsic guarantees the fast path.
 // Tile shape:
-//   MMQ_Y = 32  output weight rows per block
-//   MMQ_X =  8  output batch columns per block
-//   MMQ_K = 32  K elements per iteration (= QK8_0)
-//
+// MMQ_Y = 32 output weight rows per block
+// MMQ_X = 8 output batch columns per block
+// MMQ_K = 32 K elements per iteration (= QK8_0)
 // Thread layout:
-//   NWARPS = 4, WARP_SIZE = 64 → 256 threads/block
-//   Each thread computes exactly ONE output element `dst[batch, row]`.
-//     row_in_tile  = warp * 8 + lane / 8   (0..31)
-//     col_in_tile  = lane % 8              (0..7)
-//
+// NWARPS = 4, WARP_SIZE = 64 → 256 threads/block
+// Each thread computes exactly ONE output element `dst[batch, row]`.
+// row_in_tile = warp * 8 + lane / 8 (0..31)
+// col_in_tile = lane % 8 (0..7)
 // Grid: (ceil(N / MMQ_Y), ceil(M / MMQ_X)).
-//
 // Per K-iter:
-//   1. Load MMQ_Y × 32 Q8_0 quants into LDS `x_qs[256]` (one int per thread).
-//   2. Load MMQ_Y scales into LDS `x_df[32]` (warp 0, lanes 0..31).
-//   3. Load MMQ_X × 32 Q8_1 quants into LDS `y_qs[64]` (warp 0, all lanes).
-//   4. Load MMQ_X scales into LDS `y_df[8]` (warp 0, lanes 0..7).
-//   5. __syncthreads.
-//   6. Each thread accumulates its output via manual 4× int8 dot over the
-//      8 int32 qs slots of its (row, col) pair.
-//   7. __syncthreads (before next iter's LDS writes).
-//
+// 1. Load MMQ_Y × 32 Q8_0 quants into LDS `x_qs[256]` (one int per thread).
+// 2. Load MMQ_Y scales into LDS `x_df[32]` (warp 0, lanes 0..31).
+// 3. Load MMQ_X × 32 Q8_1 quants into LDS `y_qs[64]` (warp 0, all lanes).
+// 4. Load MMQ_X scales into LDS `y_df[8]` (warp 0, lanes 0..7).
+// 5. __syncthreads.
+// 6. Each thread accumulates its output via manual 4× int8 dot over the
+// 8 int32 qs slots of its (row, col) pair.
+// 7. __syncthreads (before next iter's LDS writes).
 // Correctness oracle: `mmq_q8_0_oracle` kernel (same impl_id family).
 
 #include "block_quant.cuh"
@@ -53,7 +47,6 @@
 // `__builtin_amdgcn_sdot4(a, b, c, clamp)` lowers directly to
 // `v_dot4_i32_i8 vdst, a, b, c`. `clamp=false` keeps the wrap-on-overflow
 // semantics (matches the manual version's int32 accumulation).
-//
 // Accumulator form keeps one VALU instruction per 4-element chunk and
 // removes the 8 shifts + 4 sign-extends + 4 muls + 3 adds of the manual
 // path. On gfx906 this is a 1/8-throughput MAD on SIMD; on GCN-era silicon
@@ -93,7 +86,6 @@ extern "C" __global__ void flambeau_mmq_q8_0_4warp_q8_1(
 
     for (int kb = 0; kb < n_blocks_per_row; ++kb) {
         // ---- Load X tile (32 rows × 8 ints) ----
-        //
         // tid ∈ [0, 256); maps 1:1 to the 256 ints. row = tid/8, qs_int = tid%8.
         {
             const int row_tile = tid / 8;            // 0..31
@@ -116,7 +108,6 @@ extern "C" __global__ void flambeau_mmq_q8_0_4warp_q8_1(
         }
 
         // ---- Load Y tile (8 rows × 8 ints) ----
-        //
         // Only warp 0 participates; tid ∈ [0, 64) loads the 64 ints, plus
         // lanes 0..7 load the scales.
         if (warp == 0) {

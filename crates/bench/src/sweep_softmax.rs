@@ -1,4 +1,4 @@
-//! V1.6.2 masked softmax correctness sweep.
+//! masked softmax correctness sweep.
 
 #![cfg(feature = "hip")]
 
@@ -115,9 +115,9 @@ fn run_shape(
     // ... but we don't know n_heads/n_q_tokens partition at this layer. The
     // generic softmax kernel takes the mask buffer as input and applies it
     // verbatim. For cert purposes we use a random mask-or-null:
-    //   causal=true  → additive mask of -INF at a deterministic set of
-    //                  columns per row (tests the masked path);
-    //   causal=false → mask pointer = null (tests the unmasked path).
+    // causal=true → additive mask of -INF at a deterministic set of
+    // columns per row (tests the masked path);
+    // causal=false → mask pointer = null (tests the unmasked path).
     let mask_f16: Vec<f16> = if causal {
         (0..m * k)
             .map(|idx| {

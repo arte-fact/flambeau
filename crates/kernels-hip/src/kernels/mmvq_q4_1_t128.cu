@@ -1,10 +1,8 @@
-// mmvq_q4_1_t128 — V2.24.a.3 thin-block Q4_1 MMVQ.
-//
+// mmvq_q4_1_t128 — 4.a.3 thin-block Q4_1 MMVQ.
 // Same DP4A structure as `mmvq_q4_1.cu` but 128 threads/block instead of
 // 256. Halves the total thread count per launch → less kernel dispatch
 // overhead + higher CU occupancy (more blocks running concurrently on
 // gfx906's 60 CUs, 10 waves/SIMD floor).
-//
 // 128 threads / 4-threads-per-Q4_1-block = 32 Q4_1 blocks processed per
 // iteration. For Qwen3.5-9B hidden=5120 → n_blocks_per_row=160, each
 // thread loops 160/32 = 5 iterations — ~5 DP4A pairs per thread, still

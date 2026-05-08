@@ -1,36 +1,30 @@
-//! TP-1a — qwen35 dense tensor-name → [`WeightLayout`] table.
-//!
+//! qwen35 dense tensor-name → [`WeightLayout`] table.
 //! Maps every weight name produced by `names::*` for the Qwen3.5 dense
-//! family (arch=`qwen35`, V2.2 target) to its TP shard layout. The
+//! family (arch=`qwen35`, target) to its TP shard layout. The
 //! generic [`WeightLayout`] enum lives in `flambeau-runtime`; this
 //! module only owns the model-specific name → layout function and the
 //! divisibility precondition.
-//!
 //! Sharding scheme (standard Megatron-LM, decode-time TP):
-//!
-//! | Tensor                     | Shape                          | Layout                  | AR? |
+//! | Tensor | Shape | Layout | AR? |
 //! |----------------------------|--------------------------------|-------------------------|-----|
-//! | `attn_q.weight`            | `[nQ·D, hidden]`               | `ColParallel{dim=0}`    | no  |
-//! | `attn_k.weight`            | `[nKV·D, hidden]`              | `ColParallel{dim=0}`    | no  |
-//! | `attn_v.weight`            | `[nKV·D, hidden]`              | `ColParallel{dim=0}`    | no  |
-//! | `attn_output.weight`       | `[hidden, nQ·D]`               | `RowParallel{dim=1}`    | yes |
-//! | `attn_q_norm.weight`       | `[head_dim]`                   | `Replicated`            | no  |
-//! | `attn_k_norm.weight`       | `[head_dim]`                   | `Replicated`            | no  |
-//! | `attn_norm.weight`         | `[hidden]`                     | `Replicated`            | no  |
-//! | `ffn_norm.weight`          | `[hidden]`                     | `Replicated`            | no  |
-//! | `ffn_gate.weight`          | `[intermediate, hidden]`       | `ColParallel{dim=0}`    | no  |
-//! | `ffn_up.weight`            | `[intermediate, hidden]`       | `ColParallel{dim=0}`    | no  |
-//! | `ffn_down.weight`          | `[hidden, intermediate]`       | `RowParallel{dim=1}`    | yes |
-//! | `token_embd.weight`        | `[vocab, hidden]`              | `Replicated` (V1)       | n/a |
-//! | `output_norm.weight`       | `[hidden]`                     | `Replicated`            | no  |
-//! | `output.weight`            | `[vocab, hidden]`              | `Replicated` (V1)       | n/a |
-//!
+//! | `attn_q.weight` | `[nQ·D, hidden]` | `ColParallel{dim=0}` | no |
+//! | `attn_k.weight` | `[nKV·D, hidden]` | `ColParallel{dim=0}` | no |
+//! | `attn_v.weight` | `[nKV·D, hidden]` | `ColParallel{dim=0}` | no |
+//! | `attn_output.weight` | `[hidden, nQ·D]` | `RowParallel{dim=1}` | yes |
+//! | `attn_q_norm.weight` | `[head_dim]` | `Replicated` | no |
+//! | `attn_k_norm.weight` | `[head_dim]` | `Replicated` | no |
+//! | `attn_norm.weight` | `[hidden]` | `Replicated` | no |
+//! | `ffn_norm.weight` | `[hidden]` | `Replicated` | no |
+//! | `ffn_gate.weight` | `[intermediate, hidden]` | `ColParallel{dim=0}` | no |
+//! | `ffn_up.weight` | `[intermediate, hidden]` | `ColParallel{dim=0}` | no |
+//! | `ffn_down.weight` | `[hidden, intermediate]` | `RowParallel{dim=1}` | yes |
+//! | `token_embd.weight` | `[vocab, hidden]` | `Replicated` (V1) | n/a |
+//! | `output_norm.weight` | `[hidden]` | `Replicated` | no |
+//! | `output.weight` | `[vocab, hidden]` | `Replicated` (V1) | n/a |
 //! `token_embd` and `output` (LM head) start `Replicated` in V1 to keep
-//! the embed/argmax paths simple. TP-2d may switch them to ColParallel
+//! the embed/argmax paths simple. may switch them to ColParallel
 //! on `vocab` once the AR-of-(logit, idx)-pairs argmax kernel exists.
-//!
 //! ## Divisibility precondition
-//!
 //! ColParallel weights divide along the head-block axis, so the model
 //! config must satisfy `n_heads % world == 0` and `n_kv_heads % world ==
 //! 0` (cleanly partitions head ownership), and `intermediate % world ==
@@ -50,7 +44,6 @@ use crate::config::Qwen3MoEConfig;
 use crate::names::GlobalNames;
 
 /// Per-tensor TP layout selector for `arch=qwen35` (Qwen3.5 dense).
-///
 /// Construct via [`Qwen35DenseTpLayout::new`] with the model config
 /// + mesh size; the constructor validates divisibility and returns a
 /// reusable selector. `for_tensor(tensor_name)` returns the layout for
@@ -63,7 +56,7 @@ pub struct Qwen35DenseTpLayout {
     /// for pure-dense (non-hybrid) configs that wouldn't reach the
     /// `attn_qkv` / `ssm_conv1d` branches anyway.
     gdn_dims: Option<GdnHeadDims>,
-    /// **TP-4d-i2** — `true` when `num_kv_heads % world != 0` and we
+    /// `true` when `num_kv_heads % world != 0` and we
     /// fall back to Replicated K/V (Megatron's standard workaround
     /// for low-GQA models like Qwen3.6-35B-A3B with `nKV=2`). When
     /// set: `attn_k`/`attn_v`/their norms/biases route to Replicated
@@ -71,7 +64,7 @@ pub struct Qwen35DenseTpLayout {
     /// full `nKV` head outputs (duplicated work) but Q output is still
     /// sharded → AR-fold pattern unchanged.
     kv_replicated: bool,
-    /// **TP-4d-i3** — `true` when GDN K/Q must be replicated (rep_outer
+    /// `true` when GDN K/Q must be replicated (rep_outer
     /// arches `qwen35moe` / `qwen36moe`). Contiguous TP split of K/Q
     /// is structurally broken under rep_outer head-mapping
     /// (`V[v] → K[v % H_k]`); replicating K/Q is the standard fix
@@ -95,7 +88,6 @@ struct GdnHeadDims {
 
 impl Qwen35DenseTpLayout {
     /// Build the selector for `cfg` on a `world`-rank TP mesh.
-    ///
     /// # Errors
     /// [`TpLayoutError::WorldZero`] — mesh size of 0 is meaningless.
     /// [`TpLayoutError::IndivisibleNumHeads`] — `n_heads % world != 0`.
@@ -113,7 +105,7 @@ impl Qwen35DenseTpLayout {
                 world,
             });
         }
-        // TP-4d-i2: relax — if nKV doesn't divide world, fall back to
+        // relax — if nKV doesn't divide world, fall back to
         // Replicated K/V (Megatron's "few-KV-head GQA" workaround).
         let kv_replicated = (cfg.num_kv_heads as u32) % world != 0;
         // `moe_intermediate_size` carries the dense-FFN intermediate when
@@ -127,7 +119,7 @@ impl Qwen35DenseTpLayout {
                 world,
             });
         }
-        // **TP-4c** — shared-expert intermediate must divide world if present.
+        // shared-expert intermediate must divide world if present.
         if let Some(s) = cfg.shared_expert_intermediate_size {
             if (s as u32) % world != 0 {
                 return Err(TpLayoutError::IndivisibleSharedExpertIntermediate {
@@ -141,7 +133,7 @@ impl Qwen35DenseTpLayout {
         // *output* dim (heads × head_dim, or intermediate); RowParallel
         // weights (`attn_output`, `ffn_down`) split their *input* dim
         // (`q_width = nQ·D` or `intermediate`), neither of which is
-        // `hidden`. Vocab-shard of `output.weight` (TP-2d follow-up)
+        // `hidden`. Vocab-shard of `output.weight` (follow-up)
         // would split `vocab`, again not `hidden`.
 
         // GDN head divisibility — required for FusedQkvParallel on
@@ -166,14 +158,12 @@ impl Qwen35DenseTpLayout {
                 });
             }
         }
-        // **TP-4d-i3 + #253** — rep-outer arches (qwen35 / qwen35moe /
+        // + #253** — rep-outer arches (qwen35 / qwen35moe /
         // qwen36moe) need K/Q replicated across ranks. qwen3next uses
         // rep_inner mapping and is local under contiguous split.
-        //
         // Qwen3.5-9B (`arch=qwen35`) IS hybrid (GDN every 3 of 4 layers)
         // and dispatches rep_outer in GDN forward; without replication
         // it degenerated into a `</think>` loop on chat (task #253).
-        //
         // **Geometry gate** (post #253 follow-up): the replicated GDN
         // kernel computes `n_rep = local_num_v_heads / num_k_heads` via
         // integer division and assumes it's exact. Qwen3.6-27B has
@@ -182,7 +172,6 @@ impl Qwen35DenseTpLayout {
         // (integer-division collapses to 1, kernel touches OOB →
         // hipStreamSynchronize HIP 700 on prefill). 9B (32/16 → 16/16
         // = 1) and 35B-A3B (32/16 → 16/16 = 1) divide cleanly and work.
-        //
         // Only set the flag when the replicated path's `n_rep` is a
         // clean integer. For shapes that don't fit, fall back to the
         // contiguous-split path. The split path produces wrong-mapping
@@ -214,14 +203,14 @@ impl Qwen35DenseTpLayout {
         })
     }
 
-    /// **TP-4d-i2** — `true` iff this layout falls back to Replicated
+    /// `true` iff this layout falls back to Replicated
     /// K/V because `num_kv_heads % world != 0`. Forward kernels read
     /// this to know whether to use full or per-rank K/V head counts.
     pub fn kv_replicated(&self) -> bool {
         self.kv_replicated
     }
 
-    /// **TP-4d-i3** — `true` iff GDN K/Q are replicated across ranks
+    /// `true` iff GDN K/Q are replicated across ranks
     /// (rep_outer arches: `qwen35moe` / `qwen36moe`). The GDN-TP
     /// forward kernels read this to know whether to use full or
     /// per-rank `num_k_heads`. See [`WeightLayout::FusedQkvParallel`]
@@ -242,20 +231,18 @@ impl Qwen35DenseTpLayout {
     }
 
     /// Layout for a specific weight tensor name.
-    ///
     /// Recognises:
     /// - Per-layer names produced by [`crate::names::CommonNames`] /
-    ///   [`crate::names::DenseAttnNames`] / [`crate::names::DenseFfnNames`]
-    ///   for any layer (matched by suffix after `blk.<L>.`).
+    /// [`crate::names::DenseAttnNames`] / [`crate::names::DenseFfnNames`]
+    /// for any layer (matched by suffix after `blk.<L>.`).
     /// - Global names from [`GlobalNames`].
-    ///
     /// Unknown names return `None`. Callers should treat this as an
     /// error (likely an unsupported architecture or a typo); the loader
     /// has the context to format a useful diagnostic.
     pub fn for_tensor(&self, tensor_name: &str) -> Option<WeightLayout> {
         // Globals first — they're not under a `blk.<L>.` prefix.
         if tensor_name == GlobalNames::TOKEN_EMBD {
-            // V1: replicated for simplicity. TP-2d may switch to
+            // V1: replicated for simplicity. may switch to
             // ColParallel{dim=0} on vocab once the gather-on-rank-0
             // path exists.
             return Some(WeightLayout::Replicated);
@@ -264,7 +251,7 @@ impl Qwen35DenseTpLayout {
             return Some(WeightLayout::Replicated);
         }
         if tensor_name == GlobalNames::OUTPUT {
-            // V1: replicated. TP-2d may switch to ColParallel{dim=0}
+            // V1: replicated. may switch to ColParallel{dim=0}
             // on vocab + AR-of-(logit, idx) for greedy argmax.
             return Some(WeightLayout::Replicated);
         }
@@ -280,9 +267,9 @@ impl Qwen35DenseTpLayout {
 
             // Attention projections. attn_q is always ColParallel
             // (its head count is large enough to divide world cleanly
-            // in V1 scope). K/V depend on `kv_replicated` (TP-4d-i2):
-            //   - kv_replicated=false: ColParallel{dim=0} as before
-            //   - kv_replicated=true:  Replicated (low-GQA fallback)
+            // in V1 scope). K/V depend on `kv_replicated` ():
+            // - kv_replicated=false: ColParallel{dim=0} as before
+            // - kv_replicated=true: Replicated (low-GQA fallback)
             "attn_q.weight" => Some(WeightLayout::col_parallel(self.world, 0)),
             "attn_k.weight" => Some(if self.kv_replicated {
                 WeightLayout::Replicated
@@ -345,7 +332,7 @@ impl Qwen35DenseTpLayout {
             "ssm_out.weight" => Some(WeightLayout::row_parallel(self.world, 1)),
 
             // attn_qkv.weight (GDN fused QKV) and ssm_conv1d.weight share
-            // outer dim = V_part + 2·K_part. TP-4a routes them through
+            // outer dim = V_part + 2·K_part. routes them through
             // FusedQkvParallel which slices V/K/Q sub-slabs independently
             // and re-concatenates per-rank as [V_local | K_local | Q_local].
             // Falls back to Replicated when gdn_dims is None (non-hybrid
@@ -364,7 +351,7 @@ impl Qwen35DenseTpLayout {
                 },
             ),
 
-            // ----- MoE expert tensors (TP-4b, qwen3moe / qwen35moe / qwen36moe) -----
+            // ----- MoE expert tensors (, qwen3moe / qwen35moe / qwen36moe) -----
             // ffn_gate_inp.weight [n_experts, hidden] — F32 router; runs
             // replicated on every rank (input is the AR'd hidden).
             "ffn_gate_inp.weight" => Some(WeightLayout::Replicated),
@@ -379,13 +366,13 @@ impl Qwen35DenseTpLayout {
             // (the down-proj input dim). AR after the combine kernel.
             "ffn_down_exps.weight" => Some(WeightLayout::row_parallel(self.world, 2)),
 
-            // **TP-4c** — shared expert (qwen35moe / qwen36moe).
+            // shared expert (qwen35moe / qwen36moe).
             // Same Megatron split as dense FFN.
-            //   ffn_gate_inp_shexp.weight  [hidden]      — 1-D scalar
-            //                                              gate weight; Replicated.
-            //   ffn_gate_shexp.weight      [shared_inter, hidden] — ColParallel{dim=0}
-            //   ffn_up_shexp.weight        [shared_inter, hidden] — ColParallel{dim=0}
-            //   ffn_down_shexp.weight      [hidden, shared_inter] — RowParallel{dim=1}
+            // ffn_gate_inp_shexp.weight [hidden] — 1-D scalar
+            // gate weight; Replicated.
+            // ffn_gate_shexp.weight [shared_inter, hidden] — ColParallel{dim=0}
+            // ffn_up_shexp.weight [shared_inter, hidden] — ColParallel{dim=0}
+            // ffn_down_shexp.weight [hidden, shared_inter] — RowParallel{dim=1}
             "ffn_gate_inp_shexp.weight" => Some(WeightLayout::Replicated),
             "ffn_gate_shexp.weight" | "ffn_up_shexp.weight" => {
                 Some(WeightLayout::col_parallel(self.world, 0))
@@ -500,7 +487,7 @@ mod tests {
 
     #[test]
     fn world_16_falls_back_to_kv_replicated_on_27b() {
-        // TP-4d-i2: nQ=64 divides world=16, nKV=8 does NOT — instead
+        // nQ=64 divides world=16, nKV=8 does NOT — instead
         // of erroring, the layout sets kv_replicated=true and routes
         // attn_k/v to Replicated.
         let l = Qwen35DenseTpLayout::new(&qwen35_27b_cfg(), 16).unwrap();
@@ -517,7 +504,7 @@ mod tests {
     #[test]
     fn world_4_kv_replicated_on_qwen36_35b() {
         // Qwen3.6-35B-A3B has nKV=2; world=4 fails divisibility →
-        // TP-4d-i2 kv_replicated path engages.
+        // kv_replicated path engages.
         let mut c = qwen35_27b_cfg_with_gdn();
         c.num_heads = 16;
         c.num_kv_heads = 2;
@@ -587,7 +574,7 @@ mod tests {
 
     #[test]
     fn for_tensor_moe_expert_layouts() {
-        // TP-4b: ffn_*_exps tensors map to MoE 3D layouts.
+        // ffn_*_exps tensors map to MoE 3D layouts.
         let l = Qwen35DenseTpLayout::new(&qwen35_27b_cfg(), 4).unwrap();
         assert_eq!(l.for_tensor("blk.0.ffn_gate_inp.weight"), Some(WeightLayout::Replicated));
         assert_eq!(
@@ -602,7 +589,7 @@ mod tests {
             l.for_tensor("blk.0.ffn_down_exps.weight"),
             Some(WeightLayout::row_parallel(4, 2))
         );
-        // Shared expert (TP-4c): now Col/Row-parallel.
+        // Shared expert (): now Col/Row-parallel.
         assert_eq!(
             l.for_tensor("blk.0.ffn_gate_inp_shexp.weight"),
             Some(WeightLayout::Replicated)
@@ -721,7 +708,7 @@ mod tests {
             Some(WeightLayout::row_parallel(4, 1))
         );
         assert_eq!(l.for_tensor("blk.0.ssm_norm.weight"), Some(WeightLayout::Replicated));
-        // Fused-QKV class — replicated until TP-4a's head-aware split.
+        // Fused-QKV class — replicated until head-aware split.
         assert_eq!(l.for_tensor("blk.0.attn_qkv.weight"), Some(WeightLayout::Replicated));
         assert_eq!(
             l.for_tensor("blk.0.ssm_conv1d.weight"),

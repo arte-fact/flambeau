@@ -1,10 +1,9 @@
-// indexed_moe_mmq_q4_0_down_tile8_dp4a — V2.28.c down-projection MoE MMQ
+// indexed_moe_mmq_q4_0_down_tile8_dp4a — 8.c down-projection MoE MMQ
 // for Q4_0. Same tile8 structure as the gate+up sibling, but:
-//   - one weight tensor (`ffn_down_exps`, not fused)
-//   - activation is per-PAIR: `y[pair_idx, :]` indexed directly by sorted_pair_idx
-//     (treats each (token, slot) as its own "effective token" with top_k=1)
-//
-// Matches V2.6.b's `indexed_moe_mmq_q4_k_down_tile8_dp4a.cu` contract
+// - one weight tensor (`ffn_down_exps`, not fused)
+// - activation is per-PAIR: `y[pair_idx, :]` indexed directly by sorted_pair_idx
+// (treats each (token, slot) as its own "effective token" with top_k=1)
+// Matches `indexed_moe_mmq_q4_k_down_tile8_dp4a.cu` contract
 // with Q4_0 weight decode.
 
 #include "block_quant.cuh"

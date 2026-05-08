@@ -1,11 +1,9 @@
-// indexed_moe_mmq_q4_1_down_tile8_dp4a — V1-BENCH-CN-80B-11c down-projection
+// indexed_moe_mmq_q4_1_down_tile8_dp4a — down-projection
 // MoE MMQ for Q4_1 weights × Q8_1 activation.
-//
-// Direct port of `indexed_moe_mmq_q4_0_down_tile8_dp4a.cu` (V2.28.c) with
+// Direct port of `indexed_moe_mmq_q4_0_down_tile8_dp4a.cu` (8.c) with
 // the Q4_1 reconstruction: `y_real = q · d + m`. The dot product per
 // block becomes `d_x · d_y · sumi + m_x · s_y` instead of Q4_0's bias-
 // correction `d_x · (d_y · sumi - 8 · s_y)`.
-//
 // Used by Coder-Next-Q4_0 where `ffn_down_exps` is Q4_1 (gate/up are
 // Q4_0). Pre-this-kernel, the PP and TP MoE prefill paths fell through
 // to MMVQ-per-token because `q4_0_use_tile8` rejects Q4_1 down (only

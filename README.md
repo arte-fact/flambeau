@@ -2,8 +2,6 @@
 
 Max-perf inference server for modern LLMs on AMD HIP + NVIDIA CUDA, exposed over an OpenAI-compatible HTTP API.
 
-**Status:** V1 in progress — vertical slice targeting Qwen3.6 MoE on gfx906 (AMD MI50). CUDA and other archs are V2.
-
 Sibling of [`/artefact/candle`](../candle). We inherit candle's kernel learnings (DPP reductions, multi-row MMVQ, 4-warp LDS-tiled MMQ, Q8 KV cache, fused decode path) and drop its architectural accretion (env-flag variant gates, parallel dense/MoE drivers, one-off model families, autograd plumbing).
 
 ---
@@ -16,9 +14,9 @@ See `doc/ARCHITECTURE.md` for the full rationale.
 
 ---
 
-## Scope (v1)
+## Scope
 
-- **Backends:** HIP + CUDA. Metal is **out of v1 scope**.
+- **Backends:** HIP + CUDA. Metal is **out**.
 - **Models:** Mistral/Devstral dense, Gemma-4 dense + gated, Qwen3.5 dense, Qwen3.6 MoE, Qwen3-Coder MoE, Qwen3-Next (GDN hybrid).
 - **Input:** GGUF only.
 - **Quant:** Q2_K, Q3_K, Q4_K, Q5_K, Q6_K, Q8_K + legacy Q4_0/Q4_1/Q5_0/Q5_1/Q8_0 + F16/BF16/F32.
@@ -26,7 +24,7 @@ See `doc/ARCHITECTURE.md` for the full rationale.
 - **Parallelism:** single GPU + TP + EP on the same binary.
 - **Serving:** OpenAI-compatible `/v1/chat/completions`, `/v1/completions`, `/v1/models`, SSE streaming, `/health`.
 
-Out: training, LoRA, Metal, vision/audio, speculative decoding, ONNX.
+Out: training, LoRA, Metal, vision/audio, ONNX.
 
 ---
 
@@ -34,26 +32,24 @@ Out: training, LoRA, Metal, vision/audio, speculative decoding, ONNX.
 
 ```sh
 cd /artefact/flambeau
-cargo build --release
+cargo build --release -p flambeau-cli --features hip_serve
 ```
-
-V1.0 ships an empty-but-compiling workspace. Kernels land from V1.2 onward — until then `cargo build` finishes in seconds and `flambeau <subcommand>` stubs report `todo!` with a pointer to the roadmap step that will implement it.
 
 ---
 
-## First run (once V1 lands)
+## First run
 
 ```sh
-# Inspect a GGUF file (V1.1)
+# Inspect a GGUF file
 flambeau inspect-gguf ~/models/qwen3.6-30b-a3b-q4_k_m.gguf
 
-# Correctness sweep for a backend/arch (V1.3+)
+# Correctness sweep for a backend/arch
 flambeau sweep --arch gfx906 --op qmatmul
 
-# Single-prompt inference (V1.7)
+# Single-prompt inference
 flambeau infer --model qwen3.6-30b-a3b-q4_k_m --prompt "Hello" --devices hip:0,1,2,3
 
-# OpenAI-compatible server (V1.8)
+# OpenAI-compatible server
 flambeau serve --model qwen3.6-30b-a3b-q4_k_m --devices hip:0,1,2,3 --port 8080
 
 # Then, from any OpenAI client:
@@ -64,12 +60,11 @@ curl -s http://localhost:8080/v1/chat/completions \
 
 ---
 
-## Where to start (picking a task)
+## Where to start
 
-1. **New here?** Read this README, then `CLAUDE.md`, then `doc/ROADMAP-V1-QWEN36-GFX906.md`.
-2. **Claiming V1 work?** The roadmap enumerates steps V1.0 → V1.8 in execution order, plus T-track (warmup-tuner) and M-track (MCP server) as parallel side-tracks. Each step names its entry crate and the port target.
-3. **Porting a kernel?** `doc/candle-prior-art.md` maps every V1 kernel to its source file in `/artefact/candle/`, `/artefact/llamacpp-turbo/`, or `/artefact/llama.cpp/`. Open that file; don't grep the world.
-4. **Writing a cert or dispatch row?** See the example at `certs/hip/gfx906/.example/qmatmul_q4_K_mmvq_nw1_r2_gfx906.json` and `dispatch/hip/gfx906.toml` — schemas are concrete, not prose.
+1. **New here?** Read this README, then `CLAUDE.md`, then `doc/ARCHITECTURE.md`.
+2. **Porting a kernel?** `doc/candle-prior-art.md` maps each kernel to its source file in `/artefact/candle/`, `/artefact/llamacpp-turbo/`, or `/artefact/llama.cpp/`. Open that file; don't grep the world.
+3. **Writing a cert or dispatch row?** See `dispatch/hip/gfx906.toml` and the JSON files in `certs/hip/gfx906/` — schemas are concrete, not prose.
 
 ---
 
@@ -80,7 +75,7 @@ flambeau/
 ├── CLAUDE.md                    # Working notes / architectural rules / measurement rules
 ├── README.md                    # this file
 ├── Cargo.toml                   # Workspace manifest
-├── rust-toolchain.toml          # Pinned 1.82 stable
+├── rust-toolchain.toml          # Pinned stable
 ├── crates/
 │   ├── core/                    # Device-independent traits
 │   ├── quant/                   # GGUF + block-quant layouts + CPU dequant reference
@@ -91,19 +86,19 @@ flambeau/
 │   ├── models/qwen3-moe/        # Qwen3.x MoE composition
 │   ├── runtime/                 # Session, KV cache (typed), Mesh<N>, scheduler
 │   ├── bench/                   # Sweep + matrix + cert-diff harness
-│   ├── autotune/                # T-track warmup-tuner
+│   ├── autotune/                # Warmup-tuner
 │   ├── server/                  # OpenAI-compatible HTTP
-│   ├── mcp-server/              # M-track MCP server (dev-only)
+│   ├── mcp-server/              # MCP server (dev-only)
 │   └── cli/                     # `flambeau` binary
 ├── doc/
 │   ├── ARCHITECTURE.md          # Framework design
-│   ├── ROADMAP-V1-QWEN36-GFX906.md   # Current roadmap
+│   ├── GLOSSARY.md              # Plain-English glossary
+│   ├── Q8_KV_DEQUANT_ANALYSIS.md  # Q8 KV cache analysis (research)
 │   └── candle-prior-art.md      # Port-source map
 ├── dispatch/
-│   └── hip/gfx906.toml          # Dispatch matrix (tuned target)
+│   └── hip/gfx906.toml          # Dispatch matrix
 └── certs/
-    ├── hip/gfx906/              # Correctness + PMC JSON per impl
-    └── quality/                 # Per-model KV-layout quality certs
+    └── hip/gfx906/              # Correctness + PMC JSON per impl
 ```
 
 ---
@@ -111,8 +106,7 @@ flambeau/
 ## Pointers
 
 - `CLAUDE.md` — architectural rules, measurement discipline, technical lessons from the candle sessions. Read before touching anything substantive.
-- `doc/ARCHITECTURE.md` — framework design (crates, traits, dispatch, KV layouts, phasing).
-- `doc/ROADMAP-V1-QWEN36-GFX906.md` — current execution plan; V1.0 through V1.8 + T-track + M-track.
+- `doc/ARCHITECTURE.md` — framework design (crates, traits, dispatch, KV layouts).
 - `doc/GLOSSARY.md` — plain-English glossary of every technical term used across the project docs, aimed at beginners. Start here if the jargon is unfamiliar.
 - `doc/candle-prior-art.md` — where in `/artefact/candle/` + `/artefact/llamacpp-turbo/` to look for each port target.
 - `/artefact/candle/` — source framework; kernel prior art, not architectural patterns.

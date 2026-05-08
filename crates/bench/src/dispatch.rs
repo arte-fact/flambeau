@@ -1,5 +1,4 @@
 //! Minimal reader for `dispatch/<backend>/<arch>.toml`.
-//!
 //! `bench cert-check` loads every dispatch row's `cert` path and asserts the
 //! file exists + has `pass: true` + matches the row's `impl_id` / `dtype`.
 //! Any failure fails the check; CI can wire this up as a build-time gate.
@@ -37,13 +36,13 @@ pub struct DispatchTable {
     /// Prefill-path MMQ (matrix × matrix).
     #[serde(default)]
     pub qmatmul_mmq: Vec<DispatchRow>,
-    /// V2.21.b — F16-weight × Q8_1 / MTP-4-C-2 BF16-weight × BF16 mmvq
+    /// 1.b — F16-weight × Q8_1 / BF16-weight × BF16 mmvq
     /// rows. The wrappers short-circuit the dispatch table for these
     /// dtypes (no shape selection); rows live here purely to gate
     /// cert-check.
     #[serde(default)]
     pub qmatmul_mmvq: Vec<DispatchRow>,
-    /// V1.6 fused decode path — RMSNorm, SwiGLU, RoPE, softmax, attention.
+    /// fused decode path — RMSNorm, SwiGLU, RoPE, softmax, attention.
     #[serde(default)]
     pub rmsnorm: Vec<DispatchRow>,
     #[serde(default)]
@@ -60,7 +59,7 @@ pub struct DispatchTable {
     pub cast_f32_f16: Vec<DispatchRow>,
     #[serde(default)]
     pub cast_f16_f32: Vec<DispatchRow>,
-    /// MTP-4-C-1: BF16 cast surfaces.
+    /// BF16 cast surfaces.
     #[serde(default)]
     pub cast_f32_bf16: Vec<DispatchRow>,
     #[serde(default)]
@@ -97,7 +96,7 @@ pub struct DispatchTable {
     pub attention_decode: Vec<DispatchRow>,
     #[serde(default)]
     pub attention_prefill: Vec<DispatchRow>,
-    /// V1.5 MoE kernels.
+    /// MoE kernels.
     #[serde(default)]
     pub topk: Vec<DispatchRow>,
     #[serde(default)]

@@ -1,9 +1,8 @@
 //! flambeau-backend-hip — `HipDevice`, `HipStream`, minimal HIP runtime FFI,
 //! and (behind the `rccl` feature) RCCL-backed collective impls registered
 //! against `flambeau-runtime`'s op traits.
-//!
-//! V1.2 scope: device + stream + allocation + H↔D copy + RCCL AllReduce /
-//! AllGather / AllToAll / Broadcast. V1.3+ adds the `KernelImpl<..., HipDevice>`
+//! scope: device + stream + allocation + H↔D copy + RCCL AllReduce /
+//! AllGather / AllToAll / Broadcast. + adds the `KernelImpl<..., HipDevice>`
 //! registrations alongside their `.cu` counterparts in `flambeau-kernels-hip`.
 
 #![forbid(unsafe_op_in_unsafe_fn)]

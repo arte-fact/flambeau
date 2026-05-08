@@ -1,19 +1,15 @@
 //! **#227 P2.10a** — prompt prefix caching: keys, lookup, scaffold.
-//!
 //! Skips re-prefilling tokens already prefilled by a prior request whose
 //! prompt is a prefix of the current one. Wins big for multi-turn chat,
 //! where every turn N's prompt is `system + user1 + asst1 + ... + userN-1`,
 //! identical KV state to turn N-1's prefill.
-//!
 //! Granularity: chunks of `FLAMBEAU_PREFILL_UBATCH` tokens (default 512).
 //! KV at chunk boundaries is bit-identical to single-shot prefill of the
 //! same prefix (Phase A2 + A2-TP parity certs).
-//!
 //! V1 scope is design + key types + lookup; KV restore lands in
 //! [`crate::prefix_cache_restore`] (#228) and write/eviction in #229. This
 //! module is the index — read-only on the hot path, write-protected on
 //! request end.
-//!
 //! Design doc: `doc/V1.x/prefix_cache_design.md`.
 
 use std::collections::HashMap;
@@ -21,14 +17,12 @@ use std::hash::{Hash, Hasher};
 use std::sync::RwLock;
 
 /// Default chunk size when `FLAMBEAU_PREFILL_UBATCH` is unset.
-///
 /// Matches the chunked-prefill default in `model.rs`. Cache entries are
 /// only valid when produced under the same chunk size; mismatches are
 /// rejected at lookup.
 pub const DEFAULT_CHUNK_TOKENS: usize = 512;
 
 /// Chained 64-bit hash of one chunk's tokens.
-///
 /// Computed as `H(prev_chunk_key, tokens_in_chunk)` so that the i-th
 /// chunk key uniquely identifies the *full prefix* `tokens[0..i*chunk]`.
 /// `prev_chunk_key` is `0` for the first chunk (the seed).
@@ -52,14 +46,11 @@ impl ChunkKey {
 }
 
 /// Chained chunk keys for a full prompt.
-///
 /// Built by walking the prompt's tokens in `chunk_tokens`-sized strides
 /// and chaining each chunk's hash against the prior key. The last
 /// element is the key for the full prompt's complete chunks (a partial
 /// final chunk is *not* keyed — only chunk boundaries are cacheable).
-///
 /// Examples
-///
 /// ```ignore
 /// // 1300-token prompt at chunk=512:
 /// // -> 2 complete chunks (0..512, 512..1024)
@@ -81,7 +72,6 @@ pub struct PrefixKeys {
 
 impl PrefixKeys {
     /// Compute the chunk-key chain for a prompt at the given chunk size.
-    ///
     /// **#229 V1**: the chain includes a final partial-tail chunk when
     /// `prompt.len() % chunk_tokens != 0`, so the last `chunk_keys` entry
     /// always uniquely identifies the *full* prompt. Prefix-only matches
@@ -146,13 +136,11 @@ pub struct TopologyTag {
 
 /// Host-side KV snapshot covering one rank's full layer set at a given
 /// prefix length.
-///
 /// V1 stores the snapshot in host RAM rather than device VRAM — the
 /// per-snapshot footprint is too big to keep many on-device, but host
 /// RAM is plentiful (64+ GB). The DtoH→HtoD round-trip on hit is
 /// ~700 ms at 6 GB/s for a 4 GB snapshot — still a net win vs the
 /// 2-3 s prefill it replaces.
-///
 /// Hidden behind a feature gate at the type level: when `hip` is off
 /// (CPU-only build of the server crate) this module compiles, but
 /// the snapshot type is feature-gated since it carries
@@ -169,7 +157,6 @@ pub type KvSnapshot = Vec<RankSnapshot>;
 /// One cache entry. **#228** adds the optional `kv` snapshot field;
 /// `kv = None` means the entry exists in the index for lookup-only
 /// purposes (e.g. tests, future write-deferred state).
-///
 /// `n_chunks` is the number of chunks this entry covers (so the matched
 /// prefix is `n_chunks * chunk_tokens` tokens). The entry's chain is
 /// stored so lookup can verify the full prefix matches, not just the
@@ -224,13 +211,11 @@ pub struct CacheHit<'a> {
 }
 
 /// Process-local prefix-cache index.
-///
 /// Multi-reader, single-writer via `RwLock<HashMap>`. The hot path is
 /// read-heavy (every prefill consults it once); writes happen at request
 /// end and on eviction. A more elaborate `DashMap` is justified later
 /// if profiling shows lock contention; for V1 a single RwLock is fine
 /// (the chat handler already serialises on bigger primitives).
-///
 /// Indexed by **terminal chunk key** — `chain[chain.len() - 1]`. The
 /// lookup function walks the prompt's chunk_keys longest-to-shortest,
 /// returning the first match whose stored chain prefix-matches the
@@ -282,11 +267,9 @@ impl PrefixCache {
 
     /// Find the longest prefix of `keys` whose chain matches a stored
     /// entry under the given topology + chunk size.
-    ///
     /// Walks the prompt's chunk_keys from longest to shortest. The first
     /// terminal that hits the index AND whose stored chain agrees byte-
     /// for-byte with `keys.chunk_keys[..n]` wins.
-    ///
     /// Returns `None` when:
     /// - the prompt has no complete chunks (`keys.chunk_keys.is_empty()`),
     /// - no terminal key matches under the given topology + chunk size,
@@ -397,7 +380,6 @@ impl PrefixCache {
 
     /// **#229 P2.10c** — insert an entry with its KV snapshot, account
     /// the bytes against the budget, evict LRU until under cap.
-    ///
     /// Caller passes `bytes` (size of the snapshot in host RAM).
     /// Touches the entry's terminal as MRU. Idempotent: re-inserting
     /// the same chain replaces the prior entry's `kv` field.

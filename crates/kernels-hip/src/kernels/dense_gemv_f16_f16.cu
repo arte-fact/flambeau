@@ -1,23 +1,20 @@
 // dense_gemv_f16_f16 — per-row dense GEMV with F16 weight + F16 activation,
 // F32 output.
-//
-// V1-BENCH-CN-80B-6 (iter-3) sibling of `dense_gemv_f32_f16`. Halves the
+// 6 (iter-3) sibling of `dense_gemv_f32_f16`. Halves the
 // per-row HBM weight bandwidth (2 B/elem vs 4 B/elem) at the cost of one
 // extra fp16→float conversion per FMA. On Coder-Next-Q4_0 the router
 // runs in every one of 48 layers per decode token — saving HBM here
 // chips a measurable slice off the 14.9 % of decode wall the router was
 // taking in iter-2 (with F32 weights).
-//
 // Quality: the router projects to a 512-dim logit vector that's then
 // topk-sampled; F16 vs F32 weight precision shifts logit values by
 // ~1e-3 relative — well within Q8 KV's quality envelope (max KL 3.6e-3,
-// PASS gate 5e-2) measured in V1-BENCH-#117. Validated end-to-end
+// PASS gate 5e-2) measured in Validated end-to-end
 // against the F16-KV / Q8-KV parity tests as part of iter-3.
-//
 // Launch:
-//   gridDim  = { n_rows, 1, 1 }
-//   blockDim = { 256, 1, 1 }       // 4 wave64 per block
-//   shared   = 4 floats (one per warp partial-sum)
+// gridDim = { n_rows, 1, 1 }
+// blockDim = { 256, 1, 1 } // 4 wave64 per block
+// shared = 4 floats (one per warp partial-sum)
 
 #include <hip/hip_runtime.h>
 #include "block_quant.cuh"

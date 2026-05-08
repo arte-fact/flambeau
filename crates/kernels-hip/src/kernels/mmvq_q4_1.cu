@@ -1,34 +1,29 @@
 // mmvq_q4_1 — Q4_1 weight × Q8_1 activation → F32 dst, DP4A inner loop.
-//
-// V2.2.b first kernel for `arch=qwen35` (Qwen3.5-9B-Q4_1). Q4_1 is the
+// first kernel for `arch=qwen35` (Qwen3.5-9B-Q4_1). Q4_1 is the
 // legacy 4-bit quant with a per-block min offset (block = 32 elements,
 // 18 bytes: d fp16 + m fp16 + 16 bytes nibble-packed quants).
-//
 // DP4A inner loop, one Q4_1 block per 4 threads (lane4 ∈ [0, 4)):
-//   v = ((int*)qs)[lane4];            // one int32 = 4 packed bytes
-//   vi_lo = (v >> 0) & 0x0F0F0F0F;    // 4 low nibbles  → elements [4·lane4 .. +3]
-//   vi_hi = (v >> 4) & 0x0F0F0F0F;    // 4 high nibbles → elements [4·lane4+16 .. +19]
-//   u_lo  = ((int*)y.qs)[lane4];      // y int32 covering elements [4·lane4 .. +3]
-//   u_hi  = ((int*)y.qs)[lane4 + 4];  // y int32 covering elements [4·lane4+16 .. +19]
-//   sumi  = dp4a(vi_lo, u_lo, 0)
-//         + dp4a(vi_hi, u_hi, 0);
-//   result = sumi * (d_x * d_y) + (m_x * s_y)
-//
+// v = ((int*)qs)[lane4]; // one int32 = 4 packed bytes
+// vi_lo = (v >> 0) & 0x0F0F0F0F; // 4 low nibbles → elements [4·lane4 .. +3]
+// vi_hi = (v >> 4) & 0x0F0F0F0F; // 4 high nibbles → elements [4·lane4+16 .. +19]
+// u_lo = ((int*)y.qs)[lane4]; // y int32 covering elements [4·lane4 .. +3]
+// u_hi = ((int*)y.qs)[lane4 + 4]; // y int32 covering elements [4·lane4+16 .. +19]
+// sumi = dp4a(vi_lo, u_lo, 0)
+// + dp4a(vi_hi, u_hi, 0);
+// result = sumi * (d_x * d_y) + (m_x * s_y)
 // Reference: ggml nibble layout (see `flambeau_quant::dequantize::dequant_q4_1`):
-//   byte i (i ∈ [0, 16)): low nibble = element i; high nibble = element i + 16.
-//
+// byte i (i ∈ [0, 16)): low nibble = element i; high nibble = element i + 16.
 // Note: llama.cpp's own `vec_dot_q4_1_q8_1_impl` calls dp4a with `u[2*i+0]`
 // and `u[2*i+1]`. That works on their Q4 layout because they use a
 // pre-shuffled format (`get_int_b2`) that reorders nibbles for contiguous
 // DP4A pairing. We use the on-disk ggml Q4_1 layout directly (no pre-shuffle)
 // so the pairing is `lane4` + `lane4 + 4`, not `2·lane4` + `2·lane4 + 1`.
-//
 // Block/grid:
-//   blockDim = 256, gridDim = n_rows (one block per output row).
-//   Each of the 256 threads handles (block_idx, int_idx_in_block) such that
-//   block_idx ∈ [0, 64) and int_idx ∈ [0, 4) — 64 * 4 = 256 threads cover
-//   4 Q4_1 blocks worth of int32s at a time, then stride by
-//   BLOCKS_PER_ITER.
+// blockDim = 256, gridDim = n_rows (one block per output row).
+// Each of the 256 threads handles (block_idx, int_idx_in_block) such that
+// block_idx ∈ [0, 64) and int_idx ∈ [0, 4) — 64 * 4 = 256 threads cover
+// 4 Q4_1 blocks worth of int32s at a time, then stride by
+// BLOCKS_PER_ITER.
 
 #include "block_quant.cuh"
 #include "gfx906.cuh"

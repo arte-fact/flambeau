@@ -1,18 +1,14 @@
 // l2_norm_f32 — per-row L2 normalization, F32 in/out.
-//
 // For each row of `k` elements:
-//   s  = Σ x[i]^2
-//   y[i] = x[i] / sqrt(s + eps)
-//
+// s = Σ x[i]^2
+// y[i] = x[i] / sqrt(s + eps)
 // Used by Gated-Delta-Net: Q and K projections get L2-normalized per head
 // before the recurrent state update. We keep F32 precision (no F16 round-trip)
 // because the GDN state recurrence amplifies Q/K noise over long sequences.
-//
 // Launch:
-//   gridDim  = { n_rows, 1, 1 }
-//   blockDim = { 256, 1, 1 }      // fixed — 4 wave64, matches RMSNorm layout
-//   shared   = 4 floats for cross-warp reduce
-//
+// gridDim = { n_rows, 1, 1 }
+// blockDim = { 256, 1, 1 } // fixed — 4 wave64, matches RMSNorm layout
+// shared = 4 floats for cross-warp reduce
 // `k` must be > 0; `k >= 256` is optimal. For `k < 256` the kernel still
 // works (extra threads contribute 0.0 to the reduce) but occupancy drops.
 

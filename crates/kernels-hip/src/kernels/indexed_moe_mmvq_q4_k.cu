@@ -1,28 +1,23 @@
 // indexed_moe_mmvq_q4_k — Q4_K MMVQ with per-token expert routing.
-//
 // Candle P29 MMVQ pattern adapted to MoE: weight tensor is
 // `[n_experts, n_rows, k]` Q4_K; each token has `top_k` selected experts
 // (lookup `expert_ids[token, slot]`). Output is a per-(token, slot, row)
-// scalar that the V1.5.3 MoE-combine kernel then fans into the residual.
-//
+// scalar that the MoE-combine kernel then fans into the residual.
 // Layout:
-//   weights       [n_experts, n_rows, n_sb_per_row]   Q4_K
-//   activations   [n_tokens, n_sb_per_row * 8]        Q8_1 (8 Q8_1 blocks per super-block)
-//   expert_ids    [n_tokens, top_k]                   i32
-//   output        [n_tokens, top_k, n_rows]           F32
-//
+// weights [n_experts, n_rows, n_sb_per_row] Q4_K
+// activations [n_tokens, n_sb_per_row * 8] Q8_1 (8 Q8_1 blocks per super-block)
+// expert_ids [n_tokens, top_k] i32
+// output [n_tokens, top_k, n_rows] F32
 // Launch:
-//   blockDim  = { 64 }                (one wave64, same as single-row Q4_K MMVQ)
-//   gridDim   = { n_rows, n_tokens * top_k, 1 }
-//
+// blockDim = { 64 } (one wave64, same as single-row Q4_K MMVQ)
+// gridDim = { n_rows, n_tokens * top_k, 1 }
 // Per block:
-//   slot     = blockIdx.y                           (flat token*top_k + slot_idx)
-//   token    = slot / top_k
-//   slot_idx = slot % top_k
-//   expert   = expert_ids[token * top_k + slot_idx]
-//   weight row = x[expert][row]       (n_sb_per_row Q4_K super-blocks)
-//   act row    = y[token][:]          (n_sb_per_row * 8 Q8_1 blocks)
-//
+// slot = blockIdx.y (flat token*top_k + slot_idx)
+// token = slot / top_k
+// slot_idx = slot % top_k
+// expert = expert_ids[token * top_k + slot_idx]
+// weight row = x[expert][row] (n_sb_per_row Q4_K super-blocks)
+// act row = y[token][:] (n_sb_per_row * 8 Q8_1 blocks)
 // The inner arithmetic is byte-identical to `mmvq_q4_k.cu`; only the
 // pointer math and the output write differ. First-class perf variant
 // (multi-row DPP r2 pattern, candle P29 `*_nw1_r2`) is the follow-up.

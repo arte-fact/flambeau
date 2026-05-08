@@ -1,17 +1,14 @@
 // mmvq_q8_0_llamacpp_style — port of llama.cpp's `mul_mat_vec_q<Q8_0, 1, false, false>`
 // specialised for our GCN/gfx906 decode case.
-//
 // Corrected config after reading `calc_nwarps` for MMVQ_PARAMETERS_GCN with
 // ncols_dst=1: **nwarps = 2**, rows_per_cuda_block = 1, warp_size = 64.
 // Threads/block = 2 × 64 = 128 (NOT 64 as in my initial port).
-//
 // Purpose: A/B microbench vs our `mmvq_q8_0_dp4a_vdr2` (256 threads / 4 warps).
 // Isolates whether llama.cpp's 128-thread config beats our 256-thread config
 // on MI50 for our specific decode shapes.
-//
 // Reference: /artefact/llama.cpp/ggml/src/ggml-cuda/mmvq.cu::calc_nwarps (line 309-322)
-//            + mul_mat_vec_q body (lines 391-590). Inner dot:
-//            vecdotq.cuh:243-255 (vec_dot_q8_0_q8_1_impl<float, 2>).
+// + mul_mat_vec_q body (lines 391-590). Inner dot:
+// vecdotq.cuh:243-255 (vec_dot_q8_0_q8_1_impl<float, 2>).
 
 #include "block_quant.cuh"
 #include "gfx906.cuh"

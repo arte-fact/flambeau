@@ -1,10 +1,9 @@
-//! MTP-4-C-5 — BF16 pointwise correctness sweeps.
-//!
+//! BF16 pointwise correctness sweeps.
 //! Four kernels, four sweep entrypoints:
-//!   * `split_q_gate_bf16`        — bit-exact (pure copy)
-//!   * `sigmoid_mul_bf16`         — BF16 round on output
-//!   * `swiglu_f32_to_bf16`       — F32 silu*b → BF16 round
-//!   * `rope_neox_partial_bf16`   — trig+mul, in-place BF16 round
+//! * `split_q_gate_bf16` — bit-exact (pure copy)
+//! * `sigmoid_mul_bf16` — BF16 round on output
+//! * `swiglu_f32_to_bf16` — F32 silu*b → BF16 round
+//! * `rope_neox_partial_bf16` — trig+mul, in-place BF16 round
 
 #![cfg(feature = "hip")]
 

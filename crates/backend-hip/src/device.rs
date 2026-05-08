@@ -1,10 +1,8 @@
 //! `HipDevice` and `HipStream` — safe wrappers around `libamdhip64`.
-//!
 //! One `HipDevice` ≈ one GPU. Internally it owns:
 //! - a default stream (every implicit launch goes here unless the caller
-//!   creates another stream);
+//! creates another stream);
 //! - a device id used by `hipSetDevice` before any operation.
-//!
 //! The device is pinned to its id — `HipDevice::new(0)` sets the context to
 //! device 0 and expects every subsequent operation on that instance to happen
 //! on that device. Callers holding devices for multiple GPUs must call
@@ -101,7 +99,6 @@ unsafe impl Sync for HipStream {}
 impl HipStream {
     /// Create a new stream on `device_id`. Caller must have `bind(device_id)`
     /// in effect for the current thread.
-    ///
     /// NB: `hipStreamCreate` creates a **blocking** stream (serialises with
     /// the null stream). For truly-concurrent streams on the same device
     /// use [`Self::new_non_blocking`].
@@ -116,11 +113,11 @@ impl HipStream {
         })
     }
 
-    /// V2.25.g — create a non-blocking stream (`hipStreamNonBlocking` = 1).
+    /// 5.g — create a non-blocking stream (`hipStreamNonBlocking` = 1).
     /// These streams do NOT serialise with the null stream and can run
     /// concurrently with each other on the same device, subject to
     /// occupancy. Used by `HipCluster::reserve_aux_streams` so the
-    /// V2.25.d async ubatch pipeline truly overlaps lanes on the same
+    /// 5.d async ubatch pipeline truly overlaps lanes on the same
     /// device.
     pub fn new_non_blocking(device_id: i32) -> DeviceResult<Self> {
         let mut s: hipStream_t = ptr::null_mut();
@@ -170,9 +167,8 @@ impl Stream for HipStream {
     }
 }
 
-/// V2.25.b — HIP event for cross-stream DAG scheduling. Used by the async
+/// 5.b — HIP event for cross-stream DAG scheduling. Used by the async
 /// peer-copy pipeline in `HipCluster::peer_copy_via_host_async`.
-///
 /// Created with `hipEventDisableTiming` — we never call `hipEventElapsedTime`,
 /// just `hipEventRecord` / `hipStreamWaitEvent`. Drop destroys the handle.
 pub struct HipEvent {
@@ -247,7 +243,7 @@ impl HipEvent {
         )
     }
 
-    /// V1-BENCH-CN-80B-5 — timing-enabled event constructor (omits
+    /// timing-enabled event constructor (omits
     /// `hipEventDisableTiming` so `hipEventElapsedTime` returns valid
     /// data). Use only for profiling instrumentation; the timing-
     /// disabled `new()` is cheaper for ordering-only events on the
@@ -263,7 +259,7 @@ impl HipEvent {
         Ok(Self { ptr: e, device_id })
     }
 
-    /// V1-BENCH-CN-80B-5 — synchronous wait until this event is reached.
+    /// synchronous wait until this event is reached.
     /// Used by the profiler harness so the host wall-clock observes
     /// device-side completion before reading `elapsed_ms_since`.
     pub fn synchronize(&self) -> DeviceResult<()> {
@@ -274,7 +270,7 @@ impl HipEvent {
         )
     }
 
-    /// V1-BENCH-CN-80B-5 — return milliseconds between `start.record(stream)`
+    /// return milliseconds between `start.record(stream)`
     /// and `self.record(stream)`. Both events must be timing-enabled
     /// (created via [`new_timing`]). Caller is responsible for syncing
     /// the events first (or calling [`synchronize`]).
@@ -300,10 +296,9 @@ impl Drop for HipEvent {
     }
 }
 
-/// V2.26.a — executable HIP graph, instantiated from a stream-capture
+/// 6.a — executable HIP graph, instantiated from a stream-capture
 /// recording. Replay issues the whole captured sequence to a stream with
 /// a single driver call, collapsing per-kernel launch overhead.
-///
 /// Construction flow: `HipGraphExec::capture(stream, |s| { ...enqueue work on s... })`.
 /// The closure issues whatever kernels / memcpys make up the subgraph; on
 /// return we end capture, instantiate, and hold the executable. Drop
@@ -322,13 +317,13 @@ pub struct HipGraphExec {
     /// doesn't implement Send/Sync out of the box; we cast back when
     /// calling the param-update FFI.
     kernel_nodes: Vec<usize>,
-    /// V2.26.a-i5b — memcpy-type graph nodes in dispatch order. Same
+    /// 6.a-i5b — memcpy-type graph nodes in dispatch order. Same
     /// `Vec<usize>` trick as `kernel_nodes`.
     memcpy_nodes: Vec<usize>,
-    /// V2.26.a-i3 — slot → (kernel_node_idx, arg_idx, arity) bindings
+    /// 6.a-i3 — slot → (kernel_node_idx, arg_idx, arity) bindings
     /// accumulated from tagged pushes during capture.
     slot_map: crate::graph_capture::SlotMap,
-    /// V2.26.a-i4 — shadow of each kernel node's current `kernelParams`
+    /// 6.a-i4 — shadow of each kernel node's current `kernelParams`
     /// pointer array, kept in sync with the exec. Without this, every
     /// `set_slot` would read from `hipGraphKernelNodeGetParams` (which
     /// returns the *source graph* params — unchanged across exec
@@ -337,7 +332,7 @@ pub struct HipGraphExec {
     /// `hipKernelNodeParams` metadata (func, dims, sharedMemBytes) is
     /// stored alongside so we don't re-fetch on every update.
     node_shadows: std::cell::RefCell<Vec<NodeShadow>>,
-    /// V2.26.a-i5b — shadow of each memcpy node's current params
+    /// 6.a-i5b — shadow of each memcpy node's current params
     /// (dst, src, count, kind). Same motivation as `node_shadows`:
     /// `hipGraphMemcpyNodeGetParams` returns the source-graph params,
     /// not the exec's. Indexed by memcpy-node ordinal.
@@ -396,7 +391,6 @@ unsafe impl Sync for HipGraphExec {}
 
 impl HipGraphExec {
     /// Capture the closure's stream work into an executable graph.
-    ///
     /// `stream` must be a non-null-stream (capture is illegal on the null
     /// stream). The closure should enqueue all kernels / memcpys that
     /// make up the subgraph on `stream`. Capture mode is `Relaxed` so
@@ -406,7 +400,7 @@ impl HipGraphExec {
     where
         F: FnOnce(&HipStream) -> DeviceResult<()>,
     {
-        // V2.26.a-i3 — enable the thread-local capture recorder for the
+        // 6.a-i3 — enable the thread-local capture recorder for the
         // duration of this capture. Every `HipKernel::launch` issued
         // inside `f` will append a LaunchRecord that we later zip with
         // the graph's kernel nodes to build a SlotMap.
@@ -482,7 +476,7 @@ impl HipGraphExec {
             message: format!("HipGraphExec::capture slot-map: {msg}"),
         })?;
 
-        // V2.26.a-i4 — initialise the per-node shadow so `set_slot`
+        // 6.a-i4 — initialise the per-node shadow so `set_slot`
         // reads state that survives across consecutive updates. We only
         // populate shadows for nodes that have at least one slot bound
         // (lazy init for others happens on first set_slot — see `set_slot`).
@@ -527,7 +521,7 @@ impl HipGraphExec {
             node_shadows.push(NodeShadow { ptrs, meta: params });
         }
 
-        // V2.26.a-i5b — seed the memcpy shadows from the recorded
+        // 6.a-i5b — seed the memcpy shadows from the recorded
         // memcpy params. Index into shadows == memcpy-node ordinal.
         let mut memcpy_shadows: Vec<MemcpyShadow> = Vec::with_capacity(memcpy_nodes.len());
         for rec in memcpys.iter() {
@@ -551,26 +545,23 @@ impl HipGraphExec {
         })
     }
 
-    /// CN-80B-20 — multi-stream capture into ONE shared graph, no slot
+    /// multi-stream capture into ONE shared graph, no slot
     /// machinery. Creates an empty graph, begins capture on every
     /// stream pointing to that graph, runs `f` (which may issue
     /// kernels + cross-stream events on any subset of those streams),
     /// ends capture on each stream, and instantiates a single
     /// `HipGraphExec`. Cross-stream `hipEventRecord` /
     /// `hipStreamWaitEvent` are resolved as internal graph edges.
-    ///
     /// Replay: `launch(stream)` issues the whole shared graph from one
     /// stream — the captured fan-out across the original capturing
     /// streams is preserved as graph topology and replayed on the HIP
     /// runtime's internal worker streams.
-    ///
     /// Use case: per-stage capture in hybrid pp+tp where the layer
     /// loop issues work on every TP-rank's stream and synchronises
     /// cross-rank via events (e.g. AR all-reduce). The
     /// per-stream-separate-graph form (`hipStreamBeginCapture` × N)
     /// can NOT capture cross-stream events — at replay each graph
     /// launches in isolation and the wait fails to resolve.
-    ///
     /// Limitation: returns a HipGraphExec with EMPTY slot map.
     /// `set_slot` / `set_memcpy_slot` will error. K/V append
     /// destinations + `n_tokens_kv` are frozen at capture time.
@@ -590,13 +581,13 @@ impl HipGraphExec {
         }
 
         // 1. Allocate one empty graph that all streams will capture
-        //    INTO. With `hipStreamBeginCaptureToGraph`, the runtime
-        //    appends to this graph as the closure runs; with plain
-        //    `hipStreamBeginCapture`, kernel launches in multi-stream
-        //    mode error out with `hipModuleLaunchKernel: invalid
-        //    argument` on the first launch (ROCm 7.1.1 issue —
-        //    multi-stream concurrent capture without a shared graph
-        //    target rejects launches).
+        // INTO. With `hipStreamBeginCaptureToGraph`, the runtime
+        // appends to this graph as the closure runs; with plain
+        // `hipStreamBeginCapture`, kernel launches in multi-stream
+        // mode error out with `hipModuleLaunchKernel: invalid
+        // argument` on the first launch (ROCm 7.1.1 issue —
+        // multi-stream concurrent capture without a shared graph
+        // target rejects launches).
         let mut shared_graph: crate::sys::hipGraph_t = ptr::null_mut();
         check(
             unsafe { crate::sys::hipGraphCreate(&raw mut shared_graph, 0) },
@@ -606,10 +597,10 @@ impl HipGraphExec {
         let _capture_scope = crate::graph_capture::CaptureScope::begin();
 
         // 2. Begin capture-to-graph on every stream against the shared
-        //    graph. The runtime tracks per-stream capture sessions but
-        //    appends every captured node to `shared_graph`. Cross-stream
-        //    events recorded inside the closure resolve as graph edges
-        //    between nodes from different originating streams.
+        // graph. The runtime tracks per-stream capture sessions but
+        // appends every captured node to `shared_graph`. Cross-stream
+        // events recorded inside the closure resolve as graph edges
+        // between nodes from different originating streams.
         for (i, stream) in streams.iter().enumerate() {
             let code = unsafe {
                 crate::sys::hipStreamBeginCaptureToGraph(
@@ -643,28 +634,26 @@ impl HipGraphExec {
         }
 
         // 4. End capture on every stream so they leave capture mode and
-        //    subsequent kernel launches succeed (a stuck-in-capture
-        //    stream rejects launches with "invalid argument" forever).
-        //    CN-80B-20 finding on ROCm 7.1.1 with
-        //    `hipStreamBeginCaptureToGraph` + cross-stream events
-        //    (Coder-Next pp2tp2):
-        //
-        //      - When the closure RAN TO COMPLETION (no errors), every
-        //        end-capture call returns 904
-        //        (`hipErrorStreamCaptureUnmatched`) — there is no
-        //        "primary" returning success. Calling end-capture on a
-        //        second stream after the first returned 904 SIGSEGVs.
-        //      - When the closure ABORTED early (kernel error in
-        //        capture), end-capture on every stream returns 1
-        //        (Invalid value) but does NOT SIGSEGV; this DOES
-        //        return the streams to non-capture state.
-        //
-        //    Strategy: best-effort end-capture all streams. To avoid
-        //    the post-success SIGSEGV pattern, we stop iterating as
-        //    soon as we observe a "session closed" condition (success
-        //    OR Unmatched). On the failure path (closure aborted),
-        //    every end-capture returns Invalid — keep iterating to
-        //    recover all streams.
+        // subsequent kernel launches succeed (a stuck-in-capture
+        // stream rejects launches with "invalid argument" forever).
+        // finding on ROCm 7.1.1 with
+        // `hipStreamBeginCaptureToGraph` + cross-stream events
+        // (Coder-Next pp2tp2):
+        // - When the closure RAN TO COMPLETION (no errors), every
+        // end-capture call returns 904
+        // (`hipErrorStreamCaptureUnmatched`) — there is no
+        // "primary" returning success. Calling end-capture on a
+        // second stream after the first returned 904 SIGSEGVs.
+        // - When the closure ABORTED early (kernel error in
+        // capture), end-capture on every stream returns 1
+        // (Invalid value) but does NOT SIGSEGV; this DOES
+        // return the streams to non-capture state.
+        // Strategy: best-effort end-capture all streams. To avoid
+        // the post-success SIGSEGV pattern, we stop iterating as
+        // soon as we observe a "session closed" condition (success
+        // OR Unmatched). On the failure path (closure aborted),
+        // every end-capture returns Invalid — keep iterating to
+        // recover all streams.
         const HIP_ERROR_STREAM_CAPTURE_UNMATCHED: i32 = 904;
         let mut last_end_code: i32 = HIP_SUCCESS;
         let mut had_clean_close = false;
@@ -727,7 +716,6 @@ impl HipGraphExec {
     /// to retarget (typically) KV-cache append memcpys — src and count
     /// stay fixed between replays (the scratch layout is stable), only
     /// dst advances with the KV cache's tail position.
-    ///
     /// # Safety
     /// `new_dst` must be a live device pointer valid for `binding.count`
     /// bytes of writes on the exec's device, for the full duration of
@@ -806,17 +794,15 @@ impl HipGraphExec {
     /// building a fresh `kernelParams` pointer array (cloning the current
     /// array from `hipGraphKernelNodeGetParams`) and calling
     /// `hipGraphExecKernelNodeSetParams`.
-    ///
     /// Every untouched arg keeps its current driver-side pointer — the
     /// driver's previous per-node staging buffer stays readable at least
     /// until the next SetParams on the same node, which is when the
     /// values for those pointers are re-snapshotted.
-    ///
     /// # Safety
     /// - `new_value` must have the exact size + type the captured
-    ///   kernel expects at this arg slot. Wrong size writes garbage.
+    /// kernel expects at this arg slot. Wrong size writes garbage.
     /// - `new_value` must remain live until this call returns (the HIP
-    ///   runtime copies the value-by-pointer during SetParams).
+    /// runtime copies the value-by-pointer during SetParams).
     pub unsafe fn set_slot<T>(
         &self,
         slot: crate::graph_capture::ScalarSlot,
@@ -901,7 +887,6 @@ impl HipGraphExec {
     /// exec. The driver copies the param *values* at call-time (into its
     /// internal per-node staging buffer), so callers may drop the
     /// pointer-array backing storage after the call returns.
-    ///
     /// # Safety
     /// `params.kernel_params` must point to an array of at least
     /// `kernel_arity` `*mut c_void` entries, each pointing to storage of
@@ -966,11 +951,9 @@ enum NodeBucket {
 /// remain valid against the later-instantiated exec even after the
 /// source graph is destroyed — that's the whole point of exposing them
 /// to `hipGraphExec*NodeSetParams`.
-///
 /// Returns `(kernel_nodes, memcpy_nodes)`. Other node types (memsets,
 /// host nodes, empty nodes, graph nodes) are currently discarded —
 /// none of them are emitted by our current forward-path ops.
-///
 /// # Safety
 /// `graph` must be a live, end-captured `hipGraph_t`.
 unsafe fn collect_nodes_by_type(
@@ -1038,7 +1021,6 @@ impl Drop for HipGraphExec {
 }
 
 /// A HIP device. Holds a device id and a default stream.
-///
 /// Construction calls `hipSetDevice` once, but there is no guarantee that the
 /// process's HIP context stays on this device across calls — callers driving
 /// multiple GPUs from one thread must `HipDevice::bind()` before operations.
@@ -1073,14 +1055,13 @@ impl HipDevice {
         bind(self.id)
     }
 
-    /// V2.26.a-i5b — graph-captureable variant of `memcpy_async` that
+    /// 6.a-i5b — graph-captureable variant of `memcpy_async` that
     /// tags the memcpy with a [`MemcpySlot`]
     /// (from `crate::graph_capture`). Under a capture scope, the memcpy
     /// is recorded with `slot`; post-capture the exec's `SlotMap` binds
     /// the slot to the resulting memcpy graph node, enabling
     /// `HipGraphExec::set_memcpy_slot` to retarget dst / src per
     /// replay.
-    ///
     /// # Safety
     /// Same as [`flambeau_core::Device::memcpy_async`] — `dst` and `src`
     /// must be valid for `bytes` in their respective address spaces
@@ -1189,7 +1170,7 @@ impl Device for HipDevice {
             CopyDirection::DeviceToHost => hipMemcpyKind::DeviceToHost,
             CopyDirection::DeviceToDevice => hipMemcpyKind::DeviceToDevice,
         };
-        // V2.26.a-i5b — record the memcpy for graph-slot binding when
+        // 6.a-i5b — record the memcpy for graph-slot binding when
         // inside a capture scope. `slot: None` here — the Device trait
         // surface doesn't carry per-call slot info; callers that want
         // a tagged memcpy go through `HipDevice::memcpy_async_slot`.

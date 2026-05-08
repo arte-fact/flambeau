@@ -1,8 +1,7 @@
-//! V1.5 MoE kernel certs — TopK router, IndexedMoE MMVQ Q4_K, MoE combine.
-//!
+//! MoE kernel certs — TopK router, IndexedMoE MMVQ Q4_K, MoE combine.
 //! Three targeted sweeps, each emitting its own cert. Shapes are chosen to
 //! exercise Qwen3.6's MoE regime: 128 experts, top-8 routing, head-shaped
-//! hidden dims. No delta-ppl quality cert — that's a V1.7 model-loader
+//! hidden dims. No delta-ppl quality cert — that's a model-loader
 //! deliverable.
 
 #![cfg(feature = "hip")]
@@ -41,7 +40,7 @@ pub fn run_topk_sweep(repo_root: &Path) -> Result<Cert> {
     let attrs: FuncAttributes = kernel.attributes()?;
 
     // Qwen3.5 is (128 experts, top-8); Qwen3.6 is (256 experts, top-8).
-    // Cover both n_experts values at varying batch sizes. V1.7.4.a (fixed
+    // Cover both n_experts values at varying batch sizes. (fixed
     // 2026-04-21) uncovered TOPK_MAX_EXPERTS=128 silently dropping experts
     // 128..255 — the n_experts=256 rows below gate against regression.
     let cases = [
@@ -191,11 +190,11 @@ pub fn run_indexed_moe_mmvq_sweep(repo_root: &Path) -> Result<Cert> {
     let q_kernel: HipKernel<'_> = q_module.kernel("flambeau_quantize_row_q8_1")?;
 
     // Qwen3.6-scale MoE (scaled down by 10× to keep test runtime sane):
-    //   n_experts = 16 (of 128)
-    //   n_rows    = 256  (expert output dim / 10)
-    //   k         = 2048 (hidden)
-    //   top_k     = 4 (of 8)
-    //   n_tokens  = 1, 8
+    // n_experts = 16 (of 128)
+    // n_rows = 256 (expert output dim / 10)
+    // k = 2048 (hidden)
+    // top_k = 4 (of 8)
+    // n_tokens = 1, 8
     let cases = [(1usize, 4usize, 256usize, 2048usize), (8, 4, 256, 2048)];
     let n_experts = 16usize;
     let mut results = Vec::new();
@@ -225,7 +224,7 @@ pub fn run_indexed_moe_mmvq_sweep(repo_root: &Path) -> Result<Cert> {
         dtype_weight: "Q4_K".to_string(),
         dtype_activation: "Q8_1".to_string(),
         tolerance_formula:
-            "|err| <= 5e-2 * max(|ref|, sqrt(k))  (MoE MMVQ — same envelope as V1.3 MMVQ)".to_string(),
+            "|err| <= 5e-2 * max(|ref|, sqrt(k))  (MoE MMVQ)".to_string(),
         results,
         pass,
         emitted_at: now_utc_iso8601(),
@@ -251,7 +250,7 @@ fn run_moe_mmvq_shape(
     let nb_per_row = k_dim / QK_K;
 
     // Expert weights: random Q4_K with "realistic" d/dmin (same taming as
-    // the V1.3 sweep).
+    // the sweep).
     let total_blocks = n_experts * n_rows * nb_per_row;
     let w_bytes = total_blocks * std::mem::size_of::<BlockQ4K>();
     let w_raw = tame_q4k_scales(seeded_bytes(seed, w_bytes));
@@ -571,10 +570,10 @@ fn run_r2_shape(
 }
 
 // ---------------------------------------------------------------------------
-// Q6_K IndexedMoE MMVQ cert (V1.7.5.K — UD-Q4_K_S mixed-quant down_exps)
+// Q6_K IndexedMoE MMVQ cert (UD-Q4_K_S mixed-quant down_exps)
 // ---------------------------------------------------------------------------
 
-/// V2.28.b-i4 — Q5_K indexed-MoE MMVQ correctness sweep. Shapes cover
+/// 8.b-i4 — Q5_K indexed-MoE MMVQ correctness sweep. Shapes cover
 /// the Qwen3-Coder-30B-A3B-Instruct-UD-Q4_K_XL ffn_down_exps footprint:
 /// hidden=2048, inter=768, n_experts=128, top_k=8. Scaled down to 16
 /// experts for cert runtime.
@@ -828,7 +827,7 @@ pub fn run_indexed_moe_mmvq_q6_k_sweep(repo_root: &Path) -> Result<Cert> {
     Ok(cert)
 }
 
-/// V2.22.a — Q8_0 indexed-MoE MMVQ correctness sweep. Shapes cover the
+/// 2.a — Q8_0 indexed-MoE MMVQ correctness sweep. Shapes cover the
 /// Qwen3.6-35B-A3B MoE footprint in UD-Q8_K_XL: hidden=2048, inter=768,
 /// n_experts=256, top_k=8. Scaled down to 16 experts for cert runtime.
 pub fn run_indexed_moe_mmvq_q8_0_sweep(repo_root: &Path) -> Result<Cert> {
@@ -1381,9 +1380,8 @@ fn run_gate_up_shape(
 }
 
 // ---------------------------------------------------------------------------
-// IndexedMoE MMQ Q4_K cert (V1.5.7 — 4-warp LDS-tiled prefill)
+// IndexedMoE MMQ Q4_K cert (4-warp LDS-tiled prefill)
 // ---------------------------------------------------------------------------
-//
 // MMQ lives in the prefill regime: many (token, slot) pairs processed together.
 // The caller (CPU) sorts (token, slot) pairs into per-expert buckets of
 // MMQ_X=8 slots so that each block shares ONE expert and can amortise the
@@ -1439,7 +1437,7 @@ pub fn run_indexed_moe_mmq_sweep(repo_root: &Path) -> Result<Cert> {
     let q_module = HipModule::load(dev.id(), q_kb)?;
     let q_kernel: HipKernel<'_> = q_module.kernel("flambeau_quantize_row_q8_1")?;
 
-    // Prefill regime: 128 tokens × 8 slots = 1024 work items. Matches V1.4
+    // Prefill regime: 128 tokens × 8 slots = 1024 work items. Matches 
     // MMQ cert shape band. n_rows=256, k=2048 stays comparable to the MMVQ
     // certs; we also run a tall-K case for amortisation sanity.
     let cases = [
@@ -1474,7 +1472,7 @@ pub fn run_indexed_moe_mmq_sweep(repo_root: &Path) -> Result<Cert> {
         dtype_weight: "Q4_K".to_string(),
         dtype_activation: "Q8_1".to_string(),
         tolerance_formula:
-            "|err| <= 5e-2 * max(|ref|, sqrt(k))  (MoE MMQ — same envelope as V1.3 MMVQ)".to_string(),
+            "|err| <= 5e-2 * max(|ref|, sqrt(k))  (MoE MMQ)".to_string(),
         results,
         pass,
         emitted_at: now_utc_iso8601(),
@@ -1758,9 +1756,9 @@ fn run_combine_shape(
 }
 
 // ---------------------------------------------------------------------------
-// V2.22.b — Q8_0 indexed-MoE tile8 MMQ certs.
+// 2.b — Q8_0 indexed-MoE tile8 MMQ certs.
 // Fused gate+up and standalone down kernels on Q8_0 expert weights. Weight
-// dtype identical to the existing V2.22.a Q8_0 MoE MMVQ path — this cert
+// dtype identical to the existing 2.a Q8_0 MoE MMVQ path — this cert
 // gates the tile8 structural port specifically.
 // ---------------------------------------------------------------------------
 
@@ -1839,7 +1837,7 @@ pub fn run_indexed_moe_mmq_q8_0_gate_up_tile8_sweep(repo_root: &Path) -> Result<
         dtype_weight: "Q8_0".to_string(),
         dtype_activation: "Q8_1".to_string(),
         tolerance_formula:
-            "|err| <= 3e-2 * max(|ref|, sqrt(k))  (Q8_0 tile8 fused gate+up; same DP4A math as V2.22.a MMVQ)".to_string(),
+            "|err| <= 3e-2 * max(|ref|, sqrt(k))  (Q8_0 tile8 fused gate+up)".to_string(),
         results,
         pass,
         emitted_at: now_utc_iso8601(),
@@ -1898,7 +1896,7 @@ pub fn run_indexed_moe_mmq_q8_0_down_tile8_sweep(repo_root: &Path) -> Result<Cer
         dtype_weight: "Q8_0".to_string(),
         dtype_activation: "Q8_1".to_string(),
         tolerance_formula:
-            "|err| <= 3e-2 * max(|ref|, sqrt(k))  (Q8_0 tile8 down; same DP4A math as V2.22.a MMVQ)".to_string(),
+            "|err| <= 3e-2 * max(|ref|, sqrt(k))  (Q8_0 tile8 down)".to_string(),
         results,
         pass,
         emitted_at: now_utc_iso8601(),

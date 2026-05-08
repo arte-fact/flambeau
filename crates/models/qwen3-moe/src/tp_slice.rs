@@ -1,38 +1,30 @@
-//! TP-1b — host-side weight slicing for TP-sharded uploads.
-//!
+//! host-side weight slicing for TP-sharded uploads.
 //! Given a [`WeightLayout`] and a rank, produce the byte slice that
 //! belongs to that rank. The actual H2D upload is the caller's
-//! responsibility (TP-1c stitches this into the model loader).
-//!
+//! responsibility (stitches this into the model loader).
 //! ## Slicing semantics
-//!
 //! GGUF stores 2-D tensors as `dims = [outer, inner]` with the outer
 //! dim *outermost* and the inner dim *contiguous*. Per-row stride is
 //! `(inner / block_size) × type_size` bytes. Quantised dtypes pack
 //! `block_size` elements (32 for Q*_0/Q*_1/Q8_0, 256 for K-quants)
 //! into a single header-prefixed block.
-//!
 //! - [`WeightLayout::Replicated`] — return the full mmap slice.
 //! - [`WeightLayout::ColParallel`] with `dim = 0` — return a contiguous
-//!   row range `[rank·outer/world, (rank+1)·outer/world)`. Borrowed
-//!   from the mmap (zero-copy).
+//! row range `[rank·outer/world, (rank+1)·outer/world)`. Borrowed
+//! from the mmap (zero-copy).
 //! - [`WeightLayout::RowParallel`] with `dim = 1` — return a packed
-//!   per-rank buffer: for each row, copy the column subrange
-//!   `[rank·inner/world, (rank+1)·inner/world)`. Owned because the
-//!   slice isn't contiguous in the mmap.
-//!
+//! per-rank buffer: for each row, copy the column subrange
+//! `[rank·inner/world, (rank+1)·inner/world)`. Owned because the
+//! slice isn't contiguous in the mmap.
 //! Other (`dim` value, layout) combinations are rejected as
 //! [`SliceError::UnsupportedAxis`] — keeps the surface honest while
-//! the model surface is small. TP-4 (MoE 3-D tensors) will extend
+//! the model surface is small. (MoE 3-D tensors) will extend
 //! the dim list when needed.
-//!
 //! ## Quantised-tensor block alignment
-//!
 //! ColParallel: rows are block-aligned by construction; any multiple-
 //! of-`world` row count is also a multiple of the block alignment, so
 //! per-rank slice always starts on a row boundary which is also a
 //! block boundary.
-//!
 //! RowParallel: per-rank inner length is `inner / world`. We require
 //! `(inner / world) % block_size == 0` so the per-rank slice ends on
 //! a block boundary. For Qwen3.5-27B at world=4: `q_width=8192/4=2048
@@ -78,15 +70,13 @@ pub enum SliceError {
 }
 
 /// Bytes belonging to `rank` after applying `layout` to tensor `name`.
-///
 /// Borrowed (zero-copy) for Replicated and ColParallel; Owned for
 /// RowParallel (the per-rank slice isn't contiguous in mmap, so we
 /// pack on the host).
-///
 /// # Errors
 /// - [`SliceError`] for layout / divisibility / alignment violations.
 /// - Propagated `anyhow::Error` from the underlying `GgufFile` accessors
-///   (unknown tensor, mmap truncated, etc.).
+/// (unknown tensor, mmap truncated, etc.).
 pub fn slice_for_tp<'a>(
     file: &'a GgufFile,
     name: &str,
@@ -106,7 +96,7 @@ pub fn slice_for_tp<'a>(
         WeightLayout::RowParallel { world, dim: 1 } => {
             slice_row_parallel_dim1(file, name, world, rank)
         }
-        // **TP-4b** — MoE expert tensors are 3D `[n_experts, dim1, dim2]`.
+        // MoE expert tensors are 3D `[n_experts, dim1, dim2]`.
         // Sharding within an expert means slicing dim 1 (ffn_gate/up_exps)
         // or dim 2 (ffn_down_exps).
         WeightLayout::ColParallel { world, dim: 1 } => {
@@ -240,7 +230,7 @@ fn slice_col_parallel_dim0<'a>(
     let rows_per_rank = (outer / world as usize) as u64;
     let row_start = (rank as u64) * rows_per_rank;
 
-    // **TP-4a-i3** — 1-D path for per-head 1-D tensors (GDN `ssm_a`,
+    // 1-D path for per-head 1-D tensors (GDN `ssm_a`,
     // `ssm_dt_bias`, shape `[num_v_heads]`). Slice the full tensor
     // bytes directly: row_count elements × type_size bytes/element.
     if info.dims.len() == 1 {
@@ -267,7 +257,7 @@ fn slice_col_parallel_dim0<'a>(
     Ok(Cow::Borrowed(raw))
 }
 
-/// **TP-4b** — slice a 3D MoE tensor `[n_experts, dim1, dim2]` along
+/// slice a 3D MoE tensor `[n_experts, dim1, dim2]` along
 /// dim 1 (ColParallel). For each expert, the rank takes a contiguous
 /// row range `[r·dim1/world, (r+1)·dim1/world)` of length `dim2`.
 /// Used for `ffn_gate_exps` and `ffn_up_exps` which have shape
@@ -340,13 +330,12 @@ fn slice_col_parallel_dim1_3d<'a>(
     Ok(Cow::Owned(packed))
 }
 
-/// **TP-4b** — slice a 3D MoE tensor `[n_experts, dim1, dim2]` along
+/// slice a 3D MoE tensor `[n_experts, dim1, dim2]` along
 /// dim 2 (RowParallel). For each expert × each row, the rank takes a
 /// contiguous column range `[r·dim2/world, (r+1)·dim2/world)`.
 /// Used for `ffn_down_exps` `[n_experts, hidden, moe_intermediate]` —
 /// each expert's per-row inner slice corresponds to the input dim of
 /// the down projection.
-///
 /// Block alignment: `dim2 / world` must be a multiple of the dtype's
 /// `block_size` (Q4_*/Q5_*/Q8_0 = 32; K-quants = 256).
 fn slice_row_parallel_dim2_3d<'a>(
@@ -417,15 +406,12 @@ fn slice_row_parallel_dim2_3d<'a>(
     Ok(Cow::Owned(packed))
 }
 
-/// **TP-4a** — head-aware fused-QKV permutation slicer.
-///
+/// head-aware fused-QKV permutation slicer.
 /// Source tensor is `[outer, inner]` with outer dim
 /// `outer = V_part_full + 2 · K_part_full` where:
-///   - `V_part_full = num_v_heads · head_v_dim`
-///   - `K_part_full = num_k_heads · head_k_dim`
-///
+/// - `V_part_full = num_v_heads · head_v_dim`
+/// - `K_part_full = num_k_heads · head_k_dim`
 /// (Q and K share the GDN head shape; total = 1·V + 1·K + 1·Q.)
-///
 /// Per rank, we want `[V_local | K_local | Q_local]` re-assembled
 /// where each sub-slab is the rank's contiguous head slice. For
 /// quantised dtypes the rows must already be block-aligned (any
@@ -509,16 +495,15 @@ fn slice_fused_qkv_parallel<'a>(
     // world=1 is identity — is `[Q | K | V]`. The previous code labeled
     // sub-slabs as if on-disk were `[V | K | Q]`, so per-rank slabs at
     // world>1 were filled with bytes from the wrong on-disk regions.
-    //
-    // **TP-4d-i3** — `kq_replicated=true` keeps Q and K full per rank
+    // `kq_replicated=true` keeps Q and K full per rank
     // (rep_outer arches qwen35moe / qwen36moe). Only V is split.
     let r = rank as usize;
     let v_local_rows = v_part_full / (world as usize);
 
     // On-disk row offsets (same regardless of kq_replicated):
-    //   Q rows live at [0, k_part_full)               (Q has the same shape as K)
-    //   K rows live at [k_part_full, 2*k_part_full)
-    //   V rows live at [2*k_part_full, outer_full)
+    // Q rows live at [0, k_part_full) (Q has the same shape as K)
+    // K rows live at [k_part_full, 2*k_part_full)
+    // V rows live at [2*k_part_full, outer_full)
     let (q_rows, k_rows, q_offset_rows, k_offset_rows) = if kq_replicated {
         // K and Q full per rank.
         (k_part_full, k_part_full, 0, k_part_full)

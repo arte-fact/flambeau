@@ -1,18 +1,13 @@
-// mmvq_q4_1_r2_dp4a — V2.24.a.2 DP4A multi-row Q4_1 MMVQ.
-//
-// Sibling of `mmvq_q4_1.cu` (V2.2.b) that emits TWO output rows per block
-// while keeping the 256-thread DP4A inner loop. Halves grid.x (and launch
-// count) + shares the Y read across the two rows (served from L1).
-//
-// V2.24.a.1 scalar r2 variant was NULL (2.3× slower) — the Q4_1 block
-// structure is dense-packed so DP4A is essential. This DP4A r2 version
-// preserves DP4A and only rearranges the block layout for multi-row
-// output.
-//
+// mmvq_q4_1_r2_dp4a — DP4A multi-row Q4_1 MMVQ (2 rows per block).
+// Sibling of `mmvq_q4_1.cu` that emits TWO output rows per block while
+// keeping the 256-thread DP4A inner loop. Halves grid.x (and launch
+// count) and shares the Y read across the two rows (served from L1).
+// A scalar r2 variant without DP4A was 2.3× slower — DP4A is essential
+// at the dense-packed Q4_1 block structure.
 // Block/grid:
-//   blockDim = 256, gridDim = ceil(n_rows / 2)
-//   Same 4-threads-per-Q4_1-block layout as the single-row kernel; each
-//   thread now computes partial products for 2 weight rows per iteration.
+// blockDim = 256, gridDim = ceil(n_rows / 2)
+// Same 4-threads-per-Q4_1-block layout as the single-row kernel; each
+// thread now computes partial products for 2 weight rows per iteration.
 
 #include "block_quant.cuh"
 #include "gfx906.cuh"

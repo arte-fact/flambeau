@@ -1,29 +1,26 @@
 //! Forward-pass composition for a Qwen3.x model.
-//!
 //! Module map:
 //! - `common` — private cross-cutting helpers (`qdtype_of`,
-//!   `mat_shape`, `row_bytes_for_dtype`, `run_mmvq_from_tensor`,
-//!   `run_qmatmul_from_tensor`, `validate_moe_dtypes`,
-//!   `run_indexed_moe_gate_up`, `run_indexed_moe_down`).
+//! `mat_shape`, `row_bytes_for_dtype`, `run_mmvq_from_tensor`,
+//! `run_qmatmul_from_tensor`, `validate_moe_dtypes`,
+//! `run_indexed_moe_gate_up`, `run_indexed_moe_down`).
 //! - `attn` — full-attention decode + prefill (RMSNorm + fused QKV/gate +
-//!   RoPE + softmax attention + output projection).
+//! RoPE + softmax attention + output projection).
 //! - `gdn` — gated-delta-net decode + prefill (hybrid SSM layer).
 //! - `dense_ffn` — dense gate/up/down FFN (arch=qwen35).
 //! - `moe` — routed experts + shared expert + router (arch=qwen36 MoE).
 //! - `io` — token embedding gather + output head + argmax.
 //! - `layer` — per-layer composition dispatcher
-//!   (`forward_layer_{decode,prefill}` pick attn or gdn and the ffn flavour).
+//! (`forward_layer_{decode,prefill}` pick attn or gdn and the ffn flavour).
 //! - `single_device` — Mesh&lt;1&gt; entry points
-//!   (`forward_one_token`, `forward_prefill`).
+//! (`forward_one_token`, `forward_prefill`).
 //! - `pp` — Mesh&lt;N&gt; pipeline-parallel entry points
-//!   (`forward_one_token_pp`, `forward_prefill_pp`).
-//!
+//! (`forward_one_token_pp`, `forward_prefill_pp`).
 //! Shape conventions for one decode step (single token, Qwen3.6-35B):
 //! - hidden `H = 2048`, `n_heads = 16`, `n_kv_heads = 2`, `head_dim = 256`
 //! - fused Q|gate projection width: `2 * n_heads * head_dim = 8192`
 //! - K/V projection width: `n_kv_heads * head_dim = 512`
 //! - post-attention intermediate: `n_heads * head_dim = 4096`
-//!
 //! All intermediates are F16 except MMVQ accumulator outputs, which are
 //! F32 and get cast back with `ops::cast::cast_f32_to_f16`.
 

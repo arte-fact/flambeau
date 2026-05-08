@@ -1,10 +1,8 @@
 // add_f16 — pointwise `y[i] = a[i] + b[i]` in F16.
-//
-// V1.7.3-e1 residual fan-in primitive: used between layers to sum the
+// e1 residual fan-in primitive: used between layers to sum the
 // pre-layer residual with each per-layer delta, and at the end of the
 // MoE+shared combine to merge the shared-expert contribution into the
 // routed-MoE output (which already folds in the post-attn residual).
-//
 // Launch: 1D, ceil(n/256) blocks × 256 threads. One element per thread.
 
 #include <hip/hip_runtime.h>

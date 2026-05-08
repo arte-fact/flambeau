@@ -1,19 +1,15 @@
 // indexed_moe_mmvq_q4_k_gate_up_r4_dp4a — MoE Q4_K fused gate+up, 4 rows per block.
-//
 // r4 extension of `indexed_moe_mmvq_q4_k_gate_up_r2_dp4a.cu`. Halves block
 // count again vs r2 (and quarters vs the 1-row baseline):
-//   - Baseline: grid = (n_rows, n_tokens * top_k)
-//   - r2:       grid = (n_rows / 2, n_tokens * top_k)
-//   - r4:       grid = (n_rows / 4, n_tokens * top_k)
-//
+// - Baseline: grid = (n_rows, n_tokens * top_k)
+// - r2: grid = (n_rows / 2, n_tokens * top_k)
+// - r4: grid = (n_rows / 4, n_tokens * top_k)
 // Lane layout (wave64, 4 rows simultaneously):
-//   row_idx  = lane >> 4            — 0..3: which row within the quad
-//   lane_lo  = lane & 15            — 0..15: quarter-warp position
-//
+// row_idx = lane >> 4 — 0..3: which row within the quad
+// lane_lo = lane & 15 — 0..15: quarter-warp position
 // Each 16-lane group handles 1 row. With 32 int32s per super-block (128 B qs),
 // a quarter-warp must cover all 32 with 16 lanes → 2 ints per lane per super-block.
 // Inner loop does 2 dp4a chains per lane instead of 1 (r2) or stride-2 (full warp).
-//
 // Trade-off: 2× more seq work per lane per super-block, but 2× fewer blocks.
 // Net win is a function of launch overhead vs dp4a issue rate; expected +2-5%
 // at prefill where we're launch-overhead-bound.

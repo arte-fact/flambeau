@@ -1,4 +1,4 @@
-//! V1.6 SwiGLU correctness sweep — pure pointwise silu(gate) * up.
+//! SwiGLU correctness sweep — pure pointwise silu(gate) * up.
 
 #![cfg(feature = "hip")]
 

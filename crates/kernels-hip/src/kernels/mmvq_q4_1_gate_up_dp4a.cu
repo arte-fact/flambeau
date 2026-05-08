@@ -1,15 +1,12 @@
 // mmvq_q4_1_gate_up_dp4a — fused gate+up Q4_1 dense MMVQ with DP4A.
-//
 // C8-i1. Sibling of `mmvq_q4_0_gate_up_dp4a` for Q4_1 weights. Closes the
 // dense-FFN gate+up fusion gap on Qwen3.5-9B-Q4_1 / Qwen3.5-27B-Q4_1, where
 // `ffn_gate` + `ffn_up` are both Q4_1 and currently take two unfused MMVQ
 // launches per layer per rank (visible in cross-model bench: 9B-Q4_1
 // 70 tok/s on Mesh<2>, with Q4_1 single-row MMVQ as the top kernel).
-//
 // Reads each Q8_1 activation word once per block; halves the launch count
 // for any layer that calls the unfused pair. Same per-pointer +
 // asymmetric-row contract as the Q4_0 fused kernel.
-//
 // Q4_1 reconstruction (vs Q4_0's `(q - 8)`): affine `y = d·q + m`, so the
 // per-block correction is `+ m_x · s_y · 0.25` (split across 4 lanes per
 // block) instead of `- 8 · d_x · s_y · 0.25`.

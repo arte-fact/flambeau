@@ -7,7 +7,7 @@
     dead_code,
     reason = "hand-written FFI bindings mirror C NCCL/RCCL symbol names; `dead_code` \
               covers symbols held for future collectives that are declared but not yet \
-              wired (per V1.2 partial rollout)."
+              wired."
 )]
 
 #![expect(

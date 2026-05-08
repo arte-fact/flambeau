@@ -1,10 +1,8 @@
-// moe_combine_two_residuals_f16 — V2.23.a.2 variant of moe_combine_f16
+// moe_combine_two_residuals_f16 — 3.a.2 variant of moe_combine_f16
 // that accepts two F16 residuals and inlines their sum into the combine step.
-//
 // For each token (row) and each hidden dim element:
-//   out[token, d] = residual1[token, d] + residual2[token, d]
-//                 + Σ_{k=0..top_k} weight[token, k] * expert_out[token, k, d]
-//
+// out[token, d] = residual1[token, d] + residual2[token, d]
+// + Σ_{k=0..top_k} weight[token, k] * expert_out[token, k, d]
 // Replaces the `add_f16(mid, shared_delta, moe_residual)` + `moe_combine_f16`
 // pair in `forward_layer_decode`'s shared-expert path. Saves one kernel
 // launch per layer per token.

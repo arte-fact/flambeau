@@ -1,12 +1,10 @@
-//! V1.6.1 RoPE correctness sweep.
-//!
+//! RoPE correctness sweep.
 //! Two-part cert:
 //! 1. **Round-trip**: rotate with positions `p`, then rotate again with
-//!    positions `-p` — should land back at the input modulo F16 round-off.
-//!    This catches axis-flip bugs, wrong pair grouping, etc.
+//! positions `-p` — should land back at the input modulo F16 round-off.
+//! This catches axis-flip bugs, wrong pair grouping, etc.
 //! 2. **Fixed-angle oracle**: positions = 1, theta_base = 10000, compare
-//!    against a CPU F32 reference. This catches the actual angle formula.
-//!
+//! against a CPU F32 reference. This catches the actual angle formula.
 //! Shapes: Qwen3.6's head_dim = 128, n_heads_q = 32, n_heads_kv = 4.
 //! Sequence lengths from decode (1) through short prefill (128).
 
@@ -46,10 +44,10 @@ pub fn run_sweep(repo_root: &Path) -> Result<Cert> {
     let attrs: FuncAttributes = kernel.attributes()?;
 
     // Qwen3.6 shapes: head_dim = 128. Seq × heads:
-    //   (1, 32)    — decode, Q.
-    //   (1, 4)     — decode, KV.
-    //   (128, 32)  — short prefill, Q.
-    //   (128, 4)   — short prefill, KV.
+    // (1, 32) — decode, Q.
+    // (1, 4) — decode, KV.
+    // (128, 32) — short prefill, Q.
+    // (128, 4) — short prefill, KV.
     let shapes = [(1usize, 32usize), (1, 4), (128, 32), (128, 4)];
     let head_dim = 128usize;
     let theta_base = 10000.0f32;

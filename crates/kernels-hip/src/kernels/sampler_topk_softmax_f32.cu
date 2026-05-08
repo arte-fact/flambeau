@@ -2,53 +2,48 @@
 // large vocabulary (V up to ~256k). Designed for the chat decoder's
 // per-token sampler hot path so the host doesn't have to download all V
 // logits and run an O(V log V) sort in CPU code.
-//
 // Inputs:
-//   logits     [V] F32                   penalty-adjusted decoder logits
-//   inv_temp   scalar                    1.0 / temperature (or 1.0 if temp <= 0)
-//   V          int                       vocab size
-//   K          int                       top-K to return (must satisfy 1 <= K <= 256)
+// logits [V] F32 penalty-adjusted decoder logits
+// inv_temp scalar 1.0 / temperature (or 1.0 if temp <= 0)
+// V int vocab size
+// K int top-K to return (must satisfy 1 <= K <= 256)
 // Outputs (only first K entries written, sorted by descending prob):
-//   out_ids    [K] i32                   token ids, sorted descending by prob
-//   out_probs  [K] F32                   softmax-normalised probabilities OVER THE
-//                                        FULL VOCAB (NOT renormalised to sum to 1
-//                                        over the K kept). The K probs sum to
-//                                        sum_topk ≤ 1, which is a small fraction
-//                                        of total mass. This is the right shape
-//                                        for the host-side top_p filter — top_p
-//                                        applied to renormalised-over-K probs
-//                                        gives a SHARPER effective cutoff than
-//                                        top_p over the full distribution
-//                                        (the original chat-truncation bug).
-//
+// out_ids [K] i32 token ids, sorted descending by prob
+// out_probs [K] F32 softmax-normalised probabilities OVER THE
+// FULL VOCAB (NOT renormalised to sum to 1
+// over the K kept). The K probs sum to
+// sum_topk ≤ 1, which is a small fraction
+// of total mass. This is the right shape
+// for the host-side top_p filter — top_p
+// applied to renormalised-over-K probs
+// gives a SHARPER effective cutoff than
+// top_p over the full distribution
+// (the original chat-truncation bug).
 // Launch shape:
-//   blockDim = 256, gridDim = 1
-//
+// blockDim = 256, gridDim = 1
 // Algorithm:
-//   1. Online (max, sum_exp) reduction over the full V via grid-stride loop +
-//      warp/block tree reduction (same recurrence as softmax_masked_f16).
-//   2. Each thread walks V/256 ≈ V/blockDim logits a SECOND time and keeps a
-//      register-resident top-K_PER_THREAD (id, value) heap. Min-heap stored as
-//      a flat array; insert-and-shuffle on each new candidate.
-//   3. All threads dump their K_PER_THREAD candidates into shared memory
-//      (256 * K_PER_THREAD = 4096 slots).
-//   4. Block-level bitonic sort on the 4096 candidates → descending order.
-//   5. First K threads (tid < K) compute prob = exp(value * inv_temp - max) /
-//      sum_exp and write (id, prob) to out_*. We renormalise at the end so
-//      probs over the kept K sum to 1.
-//
+// 1. Online (max, sum_exp) reduction over the full V via grid-stride loop +
+// warp/block tree reduction (same recurrence as softmax_masked_f16).
+// 2. Each thread walks V/256 ≈ V/blockDim logits a SECOND time and keeps a
+// register-resident top-K_PER_THREAD (id, value) heap. Min-heap stored as
+// a flat array; insert-and-shuffle on each new candidate.
+// 3. All threads dump their K_PER_THREAD candidates into shared memory
+// (256 * K_PER_THREAD = 4096 slots).
+// 4. Block-level bitonic sort on the 4096 candidates → descending order.
+// 5. First K threads (tid < K) compute prob = exp(value * inv_temp - max) /
+// sum_exp and write (id, prob) to out_*. We renormalise at the end so
+// probs over the kept K sum to 1.
 // Why a single block:
-//   K up to 256, V up to ~256k → 4096 candidates fits comfortably in 64 KB LDS
-//   (4096 * 8 = 32 KB). Avoids cross-block synchronisation. The kernel is
-//   bandwidth-bound on the V logit reads (~600 KB at V=151k), which the
-//   gfx906 HBM2 ~1 TB/s line-rate handles in ~600 µs. Adding more blocks
-//   would parallelise the reads but require a second merge kernel — not
-//   worth it for V ≤ 256k.
-//
+// K up to 256, V up to ~256k → 4096 candidates fits comfortably in 64 KB LDS
+// (4096 * 8 = 32 KB). Avoids cross-block synchronisation. The kernel is
+// bandwidth-bound on the V logit reads (~600 KB at V=151k), which the
+// gfx906 HBM2 ~1 TB/s line-rate handles in ~600 µs. Adding more blocks
+// would parallelise the reads but require a second merge kernel — not
+// worth it for V ≤ 256k.
 // Stability:
-//   Ties on logit values are broken by lower-id-wins (encoded into the sort
-//   key as a packed (val, idx) where the high 32 bits are the float bit
-//   pattern with sign flip and the low 32 bits are the negated index).
+// Ties on logit values are broken by lower-id-wins (encoded into the sort
+// key as a packed (val, idx) where the high 32 bits are the float bit
+// pattern with sign flip and the low 32 bits are the negated index).
 
 #include <hip/hip_runtime.h>
 
@@ -68,7 +63,6 @@
 // positions). The chat-decode truncation bug (#211 follow-up) where
 // the model would emit a one-sentence answer + EOS instead of the
 // requested longer response was caused by this K=256 cap.
-//
 // SAMPLER_K_MAX=4096 still bounds total candidates; the kernel sorts
 // 4096 then writes the first 2048. Per-thread loop in the output
 // phase handles the 2048-entry write with 256 threads.
@@ -79,15 +73,14 @@
 // LOWER idx winning (i.e., for two equal floats, the entry with the
 // smaller idx gets the LARGER packed key — and so wins under descending
 // sort, which is how the bitonic stage below sorts).
-//
 // Layout:
-//   high 32: monotone-by-float u32 — positive: set MSB; negative: invert
-//            all bits. Result: -INF maps to 0x00000000, -0.0 to
-//            0x7FFFFFFF, +0.0 to 0x80000000, +INF to 0xFF800000. So
-//            ascending u32 = ascending float across the zero crossing.
-//   low 32:  (0x7FFFFFFF - idx) so that ASCENDING low32 = DESCENDING idx.
-//            With the sort below in DESCENDING-by-key order, this means
-//            equal floats are emitted with LOWER idx first.
+// high 32: monotone-by-float u32 — positive: set MSB; negative: invert
+// all bits. Result: -INF maps to 0x00000000, -0.0 to
+// 0x7FFFFFFF, +0.0 to 0x80000000, +INF to 0xFF800000. So
+// ascending u32 = ascending float across the zero crossing.
+// low 32: (0x7FFFFFFF - idx) so that ASCENDING low32 = DESCENDING idx.
+// With the sort below in DESCENDING-by-key order, this means
+// equal floats are emitted with LOWER idx first.
 __device__ __forceinline__ unsigned long long pack_key(float v, int idx) {
     unsigned int b = __float_as_uint(v);
     b = (b & 0x80000000u) ? (~b) : (b | 0x80000000u);
@@ -178,14 +171,14 @@ extern "C" __global__ void flambeau_sampler_topk_softmax_f32(
 
     // ------------------------------------------------------------------
     // Phase 2: per-thread top-K_PER_THREAD via register-resident sorted
-    //          array. We want to keep the K_PER_THREAD candidates with
-    //          the SMALLEST packed keys (= largest float values), so we
-    //          maintain the array sorted DESCENDING by key (slot[0] =
-    //          worst-kept = largest packed key = smallest float value).
-    //          On new candidate: replace slot[0] if cand has a smaller
-    //          key (= larger value), then bubble it down to its sorted
-    //          position. K_PER_THREAD is small (16) so the linear scan
-    //          beats heapify overhead.
+    // array. We want to keep the K_PER_THREAD candidates with
+    // the SMALLEST packed keys (= largest float values), so we
+    // maintain the array sorted DESCENDING by key (slot[0] =
+    // worst-kept = largest packed key = smallest float value).
+    // On new candidate: replace slot[0] if cand has a smaller
+    // key (= larger value), then bubble it down to its sorted
+    // position. K_PER_THREAD is small (16) so the linear scan
+    // beats heapify overhead.
     // ------------------------------------------------------------------
     // Convention: keep the K_PER_THREAD candidates with the LARGEST
     // packed keys. local_keys is sorted ASCENDING so slot[0] is the
@@ -230,7 +223,7 @@ extern "C" __global__ void flambeau_sampler_topk_softmax_f32(
 
     // ------------------------------------------------------------------
     // Phase 4: block-level bitonic sort, DESCENDING by packed key
-    //          (largest key first ⇔ largest float value first).
+    // (largest key first ⇔ largest float value first).
     // ------------------------------------------------------------------
     // 4096 elements, log2 = 12 levels. SAMPLER_THREADS=256 threads each
     // handle SAMPLER_K_MAX/2/SAMPLER_THREADS = 8 compare-swaps per stage.
@@ -265,14 +258,14 @@ extern "C" __global__ void flambeau_sampler_topk_softmax_f32(
 
     // ------------------------------------------------------------------
     // Phase 5: write top-K (id, full-vocab softmax prob) — NOT
-    //          renormalised over the kept K. The host-side top_p filter
-    //          then treats these as a faithful subset of the full
-    //          softmax (sums to sum_topk ≤ 1) so top_p semantics match
-    //          the host's full-vocab path. Renormalising over K here
-    //          would make top_p a sharper cutoff than the user asked
-    //          for and over-collapses to the argmax — caused
-    //          inappropriate early EOS during chat decoding.
-    //          K can exceed blockDim (=256), so loop with stride.
+    // renormalised over the kept K. The host-side top_p filter
+    // then treats these as a faithful subset of the full
+    // softmax (sums to sum_topk ≤ 1) so top_p semantics match
+    // the host's full-vocab path. Renormalising over K here
+    // would make top_p a sharper cutoff than the user asked
+    // for and over-collapses to the argmax — caused
+    // inappropriate early EOS during chat decoding.
+    // K can exceed blockDim (=256), so loop with stride.
     // ------------------------------------------------------------------
     for (int slot = tid; slot < K; slot += SAMPLER_THREADS) {
         const unsigned long long key = s_keys[slot];

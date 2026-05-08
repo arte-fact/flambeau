@@ -1,13 +1,11 @@
 // mmvq_q8_0_t128 — Q8_0 thin-block MMVQ. C9-i1 sibling of `mmvq_q4_0_t128`.
-//
 // Q8_0 MMVQ is 81 % of Qwen3.6-27B-Q8_0 / Coder-30B-Q8_0 decode wall on
-// gfx906 (per V2.30.b profile tour). The kernel sits at ~10 % HBM
+// gfx906 (per 0.b profile tour). The kernel sits at ~10 % HBM
 // utilisation — same latency-bound regime that t128 unblocks for Q4_0
 // on this silicon. 128 t/block (= 2 wave64s/CU) packs more in-flight
 // blocks per CU than the 256t baseline (1 block/CU at occupancy
 // ceiling), giving Q8_0 the same shape Q4_0 already has via
 // `mmvq_q4_0_t128` (TP-perf-c5).
-//
 // Inner loop is byte-identical to `mmvq_q8_0_dp4a`: each thread owns
 // one int32 (4 packed Q8_0 quants); 16 quant blocks per iteration
 // instead of 32 (128 / 8 = 16, vs 256 / 8 = 32 in the 256t kernel).

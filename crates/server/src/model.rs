@@ -1,5 +1,4 @@
-//! **TP-5a-i2** — server-side LoadedModel + Inflight session abstractions.
-//!
+//! server-side LoadedModel + Inflight session abstractions.
 //! Both the PP and TP topologies expose a same-shape surface to the
 //! request handlers: `Inflight::new(...)` allocates per-request
 //! session + scratch, `prefill_logits(...)` ingests the prompt, and
@@ -29,14 +28,13 @@ use flambeau_qwen3_moe::{
 use flambeau_core::DevicePtr;
 
 /// Loaded weights + per-topology auxiliary state.
-///
 /// Built once at startup. The PP variant just owns the sharded model;
 /// the TP variant additionally owns a [`BarP2pAllReduce`] that holds an
 /// `Arc<HipCluster>` against the same cluster the server uses.
 pub enum LoadedModel {
-    /// V1.8 pipeline-parallel sharded model. One whole layer per rank
+    /// pipeline-parallel sharded model. One whole layer per rank
     /// stage; cross-stage hand-off via host-bounce peer copy.
-    /// MTP-5d: optional MTP attachment for spec-decode; loaded at
+    /// optional MTP attachment for spec-decode; loaded at
     /// startup when `FLAMBEAU_SPEC_MTP=path/to/mtp.gguf` is set, lives
     /// on the last rank.
     Pp {
@@ -49,7 +47,7 @@ pub enum LoadedModel {
         model: Qwen3MoETpModel,
         ar: BarP2pAllReduce,
     },
-    /// **AUTO-4f** — hybrid PP-of-TP. `pp_size` contiguous layer
+    /// hybrid PP-of-TP. `pp_size` contiguous layer
     /// stages, each owning a `tp_size`-rank TP subgroup. The
     /// per-stage `BarP2pAllReduce` instances live alongside the
     /// model; the inter-stage hand-off uses the server-owned global
@@ -127,7 +125,6 @@ impl Inflight {
         // attention scratch is O(heads × L²) and OOMs past ~5k tokens
         // on a 16 GB MI50. forward_prefill_pp recursively chunks when
         // L > scratch.max_tokens.
-        //
         // **Critical:** chunk size MUST stay in the same MMQ-dispatch
         // bucket as the model expects. On gfx906 / Q4_1 the boundary
         // is m=128: m<128 routes to MMVQ, m>=128 routes to MMQ-4warp;
@@ -406,14 +403,13 @@ fn restore_hybrid_session(
 /// Ingest the full prompt and write the logits row for the **last**
 /// prompt position into `logits_out`. Each topology dispatches through
 /// its own `forward_prefill_*_logits` entry point; the TP path is a
-/// per-token loop today (AUTO-6a) and gets batched-across-L kernels
-/// in AUTO-6b/c.
+/// per-token loop today () and gets batched-across-L kernels
+/// in /c.
 /// `tp_pool_prefill`: when `Some` and topology is TP, the pooled
 /// `forward_prefill_tp_logits_pooled` is used, skipping per-call
 /// alloc/dispose. Callers must already hold `prefill_serialiser`
 /// (the TP/Hybrid chat handlers do for #321) — the scratch isn't
 /// safe for parallel use. `None` falls back to alloc-per-call.
-///
 /// **#229** — `start_position` is the position-offset of the first
 /// token in `prompt_ids` within the *original* full prompt. `0` means
 /// the entire prompt is being prefilled from scratch (today's behaviour
@@ -421,7 +417,6 @@ fn restore_hybrid_session(
 /// prefix-cache snapshot covering `[0..start_position)` and is now
 /// prefilling only the tail; the per-layer `current_tokens` is already
 /// set to `start_position` by the restore step.
-///
 /// **#229 GDN-boundary** — `on_boundary`, when set, is invoked after
 /// every internal chunk completes (PP/TP only — Hybrid ignores). The
 /// callback receives a host-side snapshot at that boundary and the
@@ -658,7 +653,7 @@ pub fn prefill_logits(
     }
 }
 
-/// MTP-5d — per-request handle for spec-decode state. Owns the MTP
+/// per-request handle for spec-decode state. Owns the MTP
 /// forward scratch (allocated lazily on the first spec call) and
 /// tracks `h_for_mtp` between macro steps so the caller doesn't have
 /// to thread it through. Dispose alongside `Inflight`.
@@ -692,9 +687,9 @@ impl SpecDecodePp {
     }
 }
 
-/// MTP-5d — run one K=1 spec-decode macro step. Returns the
+/// run one K=1 spec-decode macro step. Returns the
 /// committed token(s) + telemetry. PP-only for now (matches
-/// MTP-5c-shipped scope).
+/// scope).
 pub fn decode_spec_pp(
     model: &LoadedModel,
     cluster: &HipCluster,
@@ -736,7 +731,7 @@ pub fn decode_spec_pp(
     Ok(step)
 }
 
-/// MTP-5g — rejection-sampling variant. Same shape as
+/// rejection-sampling variant. Same shape as
 /// [`decode_spec_pp`] but threads a [`Sampling`] config and an `Rng`
 /// through the spec macro so non-greedy sampling can be used with
 /// vLLM-canonical rejection sampling.
@@ -749,7 +744,7 @@ pub fn decode_spec_pp_sampling(
     position: usize,
     sampling: &flambeau_runtime::Sampling,
     rng: &mut flambeau_runtime::Rng,
-    // MTP-5g/h — per-turn generated-token slice for penalty application.
+    // /h — per-turn generated-token slice for penalty application.
     history: &[u32],
 ) -> Result<SpecStep> {
     use flambeau_qwen3_moe::forward::forward_speculative_pp_step_sampling;
@@ -853,7 +848,6 @@ pub fn decode_logits(
 /// GPU sampler hook in `gpu_sampler.rs`) consumes them in place via
 /// `topk_softmax_f32` before the next forward call clobbers the
 /// buffer.
-///
 /// **#258** — Hybrid path now uses
 /// `forward_one_token_hybrid_keep_logits_on_device`, removing the
 /// 600 KB DtoH per token that the prior fallback wasted. PP-only path
@@ -908,10 +902,8 @@ pub fn decode_keep_logits_on_device(
 /// **#229 P2.10c** — capture the active inflight session's KV state
 /// into a host-side snapshot, sized for the current `current_tokens`
 /// of every layer.
-///
 /// Layout: `result[r]` covers rank `r`'s full layer set. PP and TP
 /// supported; Hybrid bails (V2 follow-up — see `restore_kv_into_inflight`).
-///
 /// **Cost**: D→H copy of `total_bytes()` per rank. On 27B/TP2/ctx=4096
 /// that's ~1 GB across 2 ranks, ~150 ms over PCIe 3.0 x16. On hit the
 /// inverse H→D pays the same — still a net win vs the ~2-3 s prefill
@@ -972,7 +964,6 @@ pub fn snapshot_has_gdn(snapshot: &[Vec<LayerCacheSnapshot>]) -> bool {
 /// store only the chunk-boundary prefix (the post-prefill snapshot
 /// covers the full prompt, but the cache key chain identifies a
 /// shorter prefix).
-///
 /// Each FullAttn layer's K/V byte buffer is truncated to
 /// `n_target_tokens * bytes_per_token` (where `bytes_per_token =
 /// existing_bytes / current_tokens`). `current_tokens` is updated to
@@ -1008,13 +999,11 @@ pub fn truncate_snapshot_to_tokens(
 
 /// **#228 P2.10b** — restore a host-side KV snapshot into the active
 /// inflight session.
-///
 /// `snapshot[r]` covers rank `r`'s full layer set (the same layout
 /// `snapshot_layer_caches_to_host` produces). The caller is responsible
 /// for ensuring the snapshot was captured under the same topology and
 /// chunk size — the `PrefixCache::longest_match` lookup checks this
 /// before this function is called.
-///
 /// Errors when the topology is `Hybrid` (V2 follow-up — the per-stage
 /// per-rank shape doesn't match the flat `Vec<RankSnapshot>` layout).
 /// Callers should skip prefix-cache restore for hybrid models in V1.

@@ -1,20 +1,12 @@
-// mmq_q8_0_wave64_tile16 — V2.7 TILE_N=16 variant of Q8_0 wave64 MMQ.
-//
-// V2.6.c PMC measurement on Qwen3.6-35B Mesh<2> pp=512 shape
-// (m=512, k=2048, n=4096):
-//   VGPR=32, waves/SIMD=8, MemUnitBusy=97%, VALUBusy=19%
-// → kernel is HBM-bandwidth-bound, compute is underused.
-//
-// Root cause: at TILE_N=8, grid.y = ncols_y/8 = 64 col-blocks all
-// reading the same weight rows. Weight bytes get re-fetched from HBM
-// per col-block because the 8MB weight matrix doesn't fit L2 (4MB per GPU).
-// → ~72× redundant weight reads.
-//
-// Fix: double TILE_N to 16. Each block now computes 16 cols instead
-// of 8 → weight tile decoded ONCE per thread and reused across 16
-// activations. Halves weight HBM bandwidth. Per-thread VGPR grows
-// modestly (16 accumulators vs 8) but waves/SIMD stays at 8 (within
-// VGPR budget for 256/8 = 32 VGPR/wave).
+// mmq_q8_0_wave64_tile16 — TILE_N=16 variant of Q8_0 wave64 MMQ.
+// At TILE_N=8 on Qwen3.6-35B prefill shapes the kernel is HBM-bound
+// (MemUnitBusy ~97%, VALUBusy ~19%): grid.y = ncols_y/8 = 64 col-blocks
+// all read the same weight rows, and the 8 MiB weight matrix doesn't
+// fit in L2 (4 MiB per GPU) → ~72× redundant weight reads.
+// TILE_N=16 doubles activations per block, so the weight tile decodes
+// once per thread and is reused across 16 cols. Halves weight HBM
+// bandwidth. Per-thread VGPR grows modestly (16 accumulators vs 8) but
+// waves/SIMD stays at 8 (32 VGPR/wave is within budget).
 
 #include "block_quant.cuh"
 #include <hip/hip_runtime.h>

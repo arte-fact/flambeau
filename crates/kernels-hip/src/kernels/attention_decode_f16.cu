@@ -1,35 +1,27 @@
 // attention_decode_f16 — GQA decode attention, F16 KV cache.
-//
 // Fused decode-step attention: Q has 1 token, K and V cover the whole
 // context. For each Q head q_idx (of n_heads_q) we compute:
-//
-//   scores[t] = scale * (Q[q_idx] · K[t, kv_head_of(q_idx)])
-//   out[q_idx, :] = Σ_t softmax(scores)[t] * V[t, kv_head_of(q_idx), :]
-//
+// scores[t] = scale * (Q[q_idx] · K[t, kv_head_of(q_idx)])
+// out[q_idx, :] = Σ_t softmax(scores)[t] * V[t, kv_head_of(q_idx), :]
 // Where `kv_head_of(q) = q / (n_heads_q / n_heads_kv)`.
-//
 // Online (flash-attn-v2) softmax: running (max, sum, out) stats so we
 // never materialise the [n_tokens] scores array in LDS. That makes
 // long-context decode (≥32k tokens) fit regardless of LDS budget.
-//
 // Supported head_dim values: {128, 256}. The caller launches with
 // `block = head_dim` threads; the kernel reduces across the resulting
 // wave64 warps ({2, 4}) via LDS `score_parts`. Q and out shared arrays
 // are sized to the max (256) so the same hsaco serves both — at
 // head_dim=128 the upper half is simply unused (still cheap in LDS on
 // gfx906: ~2 KB per block, well under the 64 KB budget).
-//
 // Launch shape (caller-provided):
-//   blockDim  = { head_dim }       (one thread per output element)
-//   gridDim   = { n_heads_q }
-//   shared    = q_shared[256] + out_shared[256] + score_parts[4] =
-//               (256+256)*4 + 4*4 = 2064 bytes
-//
+// blockDim = { head_dim } (one thread per output element)
+// gridDim = { n_heads_q }
+// shared = q_shared[256] + out_shared[256] + score_parts[4] =
+// (256+256)*4 + 4*4 = 2064 bytes
 // head_dim=128 perf note: block size drops from "hardcoded 128" to
 // "= head_dim" — same 2 wave64 warps, identical occupancy. The added
 // zero-init of the unused out_shared upper half is 64 thread-cycles per
 // launch; noise vs the LDS/HBM costs.
-//
 // Correctness oracle: decomposed F32 reference (CPU) in the cert harness.
 // The harness exercises both head_dim=128 (Qwen3.5 / GQA-32/4) and
 // head_dim=256 (Qwen3.6 / GQA-16/2).

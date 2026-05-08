@@ -1,14 +1,12 @@
-//! Chat-template renderer — V1.8.A piece 3 of 3.
-//!
+//! Chat-template renderer — piece 3 of 3.
 //! GGUF embeds `tokenizer.chat_template` as a Jinja2 string (7816 bytes for
 //! Qwen3.6 — macros, whitespace control, conditionals). `minijinja` renders
 //! it against a `messages: [{role, content}, ...]` array plus a few flags
 //! (`add_generation_prompt`, `enable_thinking`, ...) to produce the raw text
 //! prompt the model sees.
-//!
-//! The HTTP layer (V1.8.B) constructs this from OpenAI `/v1/chat/completions`
-//! payloads, renders, tokenizes (V1.8.A.2), runs the forward, and samples
-//! (V1.8.A.1). Chat template is the glue between wire format and model input.
+//! The HTTP layer () constructs this from OpenAI `/v1/chat/completions`
+//! payloads, renders, tokenizes (), runs the forward, and samples
+//! (). Chat template is the glue between wire format and model input.
 
 use anyhow::{anyhow, Context, Result};
 use minijinja::value::{Kwargs, Value as MjValue};
@@ -124,10 +122,9 @@ impl std::fmt::Debug for ChatTemplate {
 
 impl ChatTemplate {
     /// Load `tokenizer.chat_template` from a GGUF and pre-compile it.
-    ///
     /// # Errors
     /// - `anyhow` wrapping "tokenizer.chat_template missing" if the GGUF
-    ///   lacks the metadata key.
+    /// lacks the metadata key.
     /// - Any error [`from_string`] can return (minijinja parse failure).
     pub fn load_from_gguf(file: &GgufFile) -> Result<Self> {
         let tpl_str = file
@@ -139,7 +136,6 @@ impl ChatTemplate {
 
     /// Pre-compile a raw template string. Accepts owned String so we can
     /// stash it in the environment for the `'static` lifetime.
-    ///
     /// # Errors
     /// `anyhow` wrapping `minijinja::Error` if the template fails to parse.
     pub fn from_string(tpl_str: String) -> Result<Self> {
@@ -165,16 +161,13 @@ impl ChatTemplate {
 
     /// Render messages into the model prompt. `add_generation_prompt=true`
     /// appends the assistant header so the model completes into a new turn.
-    ///
     /// Generic over the message type so callers (e.g. the HTTP server)
     /// can pass their request-body type directly rather than cloning into
     /// [`ChatMessage`] — see C5 in `RUST-PERF-CORRECTIONS.md`. The only
     /// requirement is that `M` serialises into something the template's
     /// `messages` binding understands (role + content fields, matching
     /// the OpenAI chat-completions schema).
-    ///
     /// Short-hand for [`render_with_tools`] with no tools.
-    ///
     /// # Errors
     /// `anyhow` wrapping a `minijinja::Error` if the template references an
     /// undefined variable, applies an unknown filter/method, or raises from
@@ -184,7 +177,7 @@ impl ChatTemplate {
         messages: &[M],
         add_generation_prompt: bool,
     ) -> Result<String> {
-        // `enable_thinking=false` preserves the pre-V2.12 behaviour (the
+        // `enable_thinking=false` preserves the pre-2 behaviour (the
         // server's non-thinking default) for callers that don't care.
         self.render_with_tools::<M, ()>(messages, None, add_generation_prompt, Some(false))
     }
@@ -194,25 +187,22 @@ impl ChatTemplate {
     /// definitions into the system prompt using Hermes-style formatting.
     /// Pass `None` or an empty slice for tool-free turns — identical to
     /// calling [`render`].
-    ///
     /// `enable_thinking`:
-    ///   - `Some(false)` — bind `enable_thinking=false` in Jinja context.
-    ///     Qwen3.6's template renders a closed `<think>\n\n</think>\n\n`
-    ///     after the generation-prompt assistant header, keeping the
-    ///     model in non-thinking mode (Qwen's recommended stable-agent
-    ///     default).
-    ///   - `Some(true)` — bind `enable_thinking=true`. The template opens
-    ///     a `<think>\n` block for reasoning generation.
-    ///   - `None` — leave the variable unbound. The template's
-    ///     `enable_thinking is defined` check is false, which takes the
-    ///     open-`<think>` branch. This is what llama.cpp's
-    ///     `test-chat-template` does when no `enable_thinking` is passed
-    ///     in the JSON input, and is the behaviour this matches byte-for-byte
-    ///     in the T1.3 parity cert.
-    ///
-    /// T-track: this is the V2.12 (ROADMAP-V2-TOOL-CALLING-AND-MCP §T1.2)
+    /// - `Some(false)` — bind `enable_thinking=false` in Jinja context.
+    /// Qwen3.6's template renders a closed `<think>\n\n</think>\n\n`
+    /// after the generation-prompt assistant header, keeping the
+    /// model in non-thinking mode (Qwen's recommended stable-agent
+    /// default).
+    /// - `Some(true)` — bind `enable_thinking=true`. The template opens
+    /// a `<think>\n` block for reasoning generation.
+    /// - `None` — leave the variable unbound. The template's
+    /// `enable_thinking is defined` check is false, which takes the
+    /// open-`<think>` branch. This is what llama.cpp's
+    /// `test-chat-template` does when no `enable_thinking` is passed
+    /// in the JSON input, and is the behaviour this matches byte-for-byte
+    /// in the T1.3 parity cert.
+    /// T-track: this is the 2 (ROADMAP-V2-TOOL-CALLING-AND-MCP §T1.2)
     /// lift of the previously hard-coded empty `tools` slot.
-    ///
     /// # Errors
     /// Same as [`render`].
     pub fn render_with_tools<M: serde::Serialize, T: serde::Serialize>(
@@ -228,7 +218,7 @@ impl ChatTemplate {
             .map_err(|e| anyhow!("minijinja get_template: {e}"))?;
         // Template branches on `tools` being truthy. Empty-list sentinel
         // → template's `{% if tools %}` takes no-tools branch (byte-exact
-        // with the pre-V2.12 hard-coded behaviour).
+        // with the pre-2 hard-coded behaviour).
         let tools_value = match tools {
             Some(t) if !t.is_empty() => MjValue::from_serialize(t),
             _ => MjValue::from_serialize(Vec::<()>::new()),
@@ -239,7 +229,6 @@ impl ChatTemplate {
         // string, not an object. If we pass the string through as-is the
         // `is mapping` test fails and no `<parameter=...>` block is
         // emitted — a silent drop of parameters in prior-turn tool calls.
-        //
         // llama.cpp's `common_chat_msgs_parse_oaicompat` fixes this by
         // parsing `arguments` string → object before handing off to the
         // template. We mirror it: build an MjValue for the messages
@@ -269,7 +258,6 @@ impl ChatTemplate {
 /// the template will need to iterate it. Non-JSON-parsable argument
 /// strings are left as-is (the template's `is mapping` test then drops
 /// them, same as llama.cpp, which is the least-surprising behaviour).
-///
 /// The conversion is serialise-roundtrip (message → JSON value → mutate
 /// → MjValue) rather than in-place; this is the cheap, obvious
 /// implementation and runs once per request, not per token.

@@ -1,4 +1,4 @@
-//! V2.23.a — Q4_0 dense, Q5_0 dense, and Q4_0 indexed-MoE MMVQ correctness
+//! 3.a — Q4_0 dense, Q5_0 dense, and Q4_0 indexed-MoE MMVQ correctness
 //! sweeps. Each kernel is validated against a CPU F32 reference using
 //! Q8_1-roundtripped activations (same envelope as other MMVQ certs).
 
@@ -308,7 +308,7 @@ pub fn run_indexed_moe_mmvq_q4_0_sweep(repo_root: &Path) -> Result<Cert> {
     Ok(cert)
 }
 
-/// B6 / V2.35.a — Q4_1 indexed-MoE MMVQ correctness sweep. Mirrors
+/// B6 / 5.a — Q4_1 indexed-MoE MMVQ correctness sweep. Mirrors
 /// `run_indexed_moe_mmvq_q4_0_sweep`; only the encoder + reference
 /// reconstruction change (Q4_1 affine `d*q + m` instead of Q4_0
 /// symmetric `d*(q-8)`).

@@ -1,4 +1,4 @@
-//! V1.7.2.D shared-expert gate-scale correctness sweep.
+//! shared-expert gate-scale correctness sweep.
 
 #![cfg(feature = "hip")]
 

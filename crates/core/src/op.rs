@@ -1,5 +1,4 @@
 //! `Op` trait — the typed contract every model-visible operation implements.
-//!
 //! Architectural rule 3 from CLAUDE.md: **one contract per op, many impls.**
 //! Models compose ops from `flambeau-ops`; each op carries a typed signature
 //! (`Input`, `Output`, `Cfg`) and a contract struct (`OpContract`) describing
@@ -7,17 +6,15 @@
 //! envelope). Concrete kernels implement [`KernelImpl`] against the same op
 //! trait; the dispatcher selects an impl at runtime using a shape-predicate
 //! table (`dispatch/<backend>/<arch>.toml`).
-//!
-//! V1.3+ surface: [`QMatMul`] as the first op. The four MMVQ + two MMQ
+//! + surface: [`QMatMul`] as the first op. The four MMVQ + two MMQ
 //! kernels we've landed register as `KernelImpl<QMatMul, HipDevice>`. This
 //! trait surface is deliberately minimal — it replaces bare impl-id strings
 //! with typed references, without pulling in async / gradient / scheduler
-//! concerns (those are V1.6+ territory).
+//! concerns (those are + territory).
 
 use crate::device::Device;
 
 /// A tensor-algebra operation with a fixed input/output signature.
-///
 /// Implementors are usually zero-size marker types; all behaviour lives on
 /// `KernelImpl<Self, D>` impls registered in backend crates.
 pub trait Op: 'static {
@@ -57,12 +54,11 @@ pub struct OpContract {
 }
 
 /// A concrete kernel implementation for an op on one device.
-///
 /// `KernelImpl` is the analog of a `dispatch/*.toml` row plus its cert:
 /// `ID` matches the `impl` column, `applies` is the runtime evaluation of
 /// the row's `shape` predicate, and `cert()` points at the `certs/` file.
-/// V1.3+ only wires the lookup — registration happens in backend crates
-/// and is pulled together by the dispatcher in V1.7 (model forward-pass).
+/// + only wires the lookup — registration happens in backend crates
+/// and is pulled together by the dispatcher in (model forward-pass).
 pub trait KernelImpl<O: Op, D: Device>: Send + Sync + 'static {
     /// Stable identifier. Used in `dispatch/*.toml` rows + `certs/*.json`.
     const ID: &'static str;
@@ -81,7 +77,6 @@ pub trait KernelImpl<O: Op, D: Device>: Send + Sync + 'static {
 }
 
 /// QMatMul — quantised weight × activation matrix-multiply, producing F32.
-///
 /// Used for both MMVQ (M=1 decode path) and MMQ (M≥128 prefill path) —
 /// same op, different impls. The dispatcher picks between them based on
 /// the `m` predicate in `dispatch/hip/gfx906.toml`.
@@ -217,7 +212,7 @@ impl Op for SwiGLU {
 
 /// Placeholder input view — carries device pointers to (weights, activation,
 /// output). Real `Tensor<'a, D>` / `QTensor<'a, D>` shapes replace this in
-/// V1.7 when the model forward-pass lands.
+/// when the model forward-pass lands.
 #[derive(Debug)]
 pub struct QMatMulInput<'a, D: Device> {
     pub weights_bytes: usize,
@@ -265,17 +260,15 @@ impl KernelDescriptor {
 
 /// Registry entry for a kernel that is invoked directly by a call site
 /// (`reg.expect_module("stem")`) rather than through shape-based dispatch.
-///
 /// Use this for ops where the implementation choice is fixed per dtype / GGUF
 /// layer type rather than dependent on an `m_range` predicate — e.g.
 /// `indexed_moe_mmvq_q8_0`, `mmvq_q4_0`, `attention_decode_f16_splitk`. These
 /// kernels still need a `dispatch/*.toml` row and a cert, but there is
 /// exactly one implementation per (op, dtype) tuple so the shape-dispatch
 /// machinery adds no value.
-///
 /// The `dispatch_toml_roundtrip` test in `backend-hip` asserts every TOML
 /// `impl = "..."` entry is covered by a `KernelDescriptor` OR a
-/// `DirectCallKernel`, closing the V2.8-class drift window.
+/// `DirectCallKernel`, closing the class drift window.
 #[derive(Debug, Clone, Copy)]
 pub struct DirectCallKernel {
     pub impl_id: &'static str,

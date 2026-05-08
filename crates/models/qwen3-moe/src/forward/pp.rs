@@ -1,9 +1,7 @@
 //! Pipeline-parallel (Mesh&lt;N&gt; for N > 1) forward entry points.
-//!
 //! Each rank owns ~`num_layers / N` contiguous layers; the hidden state
 //! is passed rank-to-rank via `HipCluster::peer_copy_via_host` (pinned-
 //! host bounce on PCIe-only rigs per the V1 CLAUDE.md rationale).
-//!
 //! Mesh&lt;1&gt; is a degenerate instance — the single-device entry points in
 //! `forward::single_device` sidestep the peer-copy path entirely.
 
@@ -38,7 +36,7 @@ fn dev_flag(_name: &str) -> bool {
 }
 
 // ---------------------------------------------------------------------------
-// V1.7.5.C — pipeline-parallel forward_one_token.
+// pipeline-parallel forward_one_token.
 // ---------------------------------------------------------------------------
 
 /// Per-rank scratch for a pipeline-parallel single-token decode. Only the
@@ -90,7 +88,7 @@ impl Drop for RankForwardScratch {
 /// Aggregate scratch: one `RankForwardScratch` per rank in the cluster.
 pub struct ShardedForwardOneTokenScratch {
     pub per_rank: Vec<RankForwardScratch>,
-    /// V2.27.a-i3 — per-rank graph-capture cache for decode. One
+    /// 7.a-i3 — per-rank graph-capture cache for decode. One
     /// `HipGraphExec` per rank populated lazily on the first token
     /// when `FLAMBEAU_DECODE_GRAPH=1`. Stores only the per-rank
     /// layer chain — embed (rank 0), peer-copy, and argmax
@@ -98,7 +96,7 @@ pub struct ShardedForwardOneTokenScratch {
     pub graph_cache_decode: Vec<Option<GraphCacheDecodeEntry>>,
 }
 
-/// V2.27.a-i3 — one cached decode exec per rank with per-layer slot
+/// 7.a-i3 — one cached decode exec per rank with per-layer slot
 /// bundles for full-attn layers.
 pub struct GraphCacheDecodeEntry {
     pub exec: flambeau_backend_hip::HipGraphExec,
@@ -165,22 +163,20 @@ impl ShardedForwardOneTokenScratch {
 }
 
 /// Pipeline-parallel single-token decode across an N-rank cluster.
-///
 /// Flow:
-///   1. Rank 0 gathers the input embedding into its `hidden_a`.
-///   2. For r in 0..N:
-///        - If r > 0: `peer_copy_via_host` pulls the previous rank's
-///          final hidden (in `hidden_a` by convention — see step 3)
-///          into this rank's `hidden_a`.
-///        - Run `forward_layer_decode` over the layers the shard owns,
-///          ping-ponging `hidden_a ↔ hidden_b`.
-///        - Normalise the final hidden back into `hidden_a` so the
-///          next peer-copy has a known source.
-///   3. Last rank runs `forward_output_head_decode` + `argmax_token_host`.
-///
+/// 1. Rank 0 gathers the input embedding into its `hidden_a`.
+/// 2. For r in 0..N:
+/// - If r > 0: `peer_copy_via_host` pulls the previous rank's
+/// final hidden (in `hidden_a` by convention — see step 3)
+/// into this rank's `hidden_a`.
+/// - Run `forward_layer_decode` over the layers the shard owns,
+/// ping-ponging `hidden_a ↔ hidden_b`.
+/// - Normalise the final hidden back into `hidden_a` so the
+/// next peer-copy has a known source.
+/// 3. Last rank runs `forward_output_head_decode` + `argmax_token_host`.
 /// Single-token in flight — no micro-batching (the bubble is the sum of
 /// each rank's compute; V2 can add 2-micro-batch pipelining). Per-hop
-/// cost ≈ 30 µs (V1.7.5.B measurement), 3 hops for N=4 ≈ 0.5% of the
+/// cost ≈ 30 µs (measurement), 3 hops for N=4 ≈ 0.5% of the
 /// 16.7 ms/token budget at 60 tok/s.
 pub fn forward_one_token_pp(
     model: &crate::sharded::Qwen3MoEShardedModel,
@@ -299,7 +295,7 @@ pub fn forward_one_token_pp(
                     },
                 )
             })?;
-            // V1.7.4.b per-layer activation dump for A/B vs llama.cpp.
+            // per-layer activation dump for A/B vs llama.cpp.
             // Env-gated so the hot path pays zero cost when unset. Pair
             // with `llama-eval-callback` + grep `l_out-<il>` to bisect a
             // future forward divergence.
@@ -352,7 +348,7 @@ pub fn forward_one_token_pp(
     }
 
     // 3. Output head on the last rank.
-    // V2.27.a-i5 — under FLAMBEAU_DECODE_GRAPH the output head is
+    // 7.a-i5 — under FLAMBEAU_DECODE_GRAPH the output head is
     // folded into the last rank's captured graph (runs during the
     // exec.launch() above). Skip the uncaptured dispatch here.
     let last_device = cluster.device(last_idx);
@@ -431,7 +427,7 @@ fn forward_one_token_pp_inner(
     let hidden = cfg.hidden_size;
     let hidden_bytes = hidden * 2;
 
-    // V1-BENCH-CN-80B-5 — section markers. No-op when the thread-local
+    // section markers. No-op when the thread-local
     // timer in flambeau_backend_hip::profile is disabled. Each mark is
     // recorded on the relevant rank's default stream so the elapsed_ms
     // delta to the next mark on the SAME rank captures the device-side
@@ -634,11 +630,11 @@ fn forward_one_token_pp_inner(
 }
 
 // ---------------------------------------------------------------------------
-// V1.7.5.D — pipeline-parallel forward_prefill.
+// pipeline-parallel forward_prefill.
 // ---------------------------------------------------------------------------
 
-/// V2.25.c — one ubatch lane's ping-pong + per-layer scratch. Each rank
-/// holds `u_lanes` of these so V2.25.d can pipeline ubatches across ranks
+/// 5.c — one ubatch lane's ping-pong + per-layer scratch. Each rank
+/// holds `u_lanes` of these so 5.d can pipeline ubatches across ranks
 /// without aliasing intermediate buffers.
 pub struct UbatchLane {
     pub hidden_a: DevicePtr,
@@ -674,11 +670,10 @@ impl UbatchLane {
 /// `max_tokens` tokens. Layout mirrors `RankForwardScratch` with the
 /// hidden ping-pong buffers and `LayerPrefillScratch` both sized for `L`
 /// tokens. Only the last rank owns an `OutputHeadScratch`.
-///
-/// V2.25.c — `extra_lanes` holds ADDITIONAL `UbatchLane`s beyond the
+/// 5.c — `extra_lanes` holds ADDITIONAL `UbatchLane`s beyond the
 /// implicit lane 0 (which is the hidden_a/hidden_b/layer fields below).
 /// Empty by default; `new_with_lanes(u_lanes > 1)` pre-allocates them so
-/// V2.25.d can pipeline ubatches across ranks without aliasing.
+/// 5.d can pipeline ubatches across ranks without aliasing.
 pub struct RankForwardPrefillScratch {
     pub rank: flambeau_runtime::RankId,
     pub device_id: i32,
@@ -687,10 +682,10 @@ pub struct RankForwardPrefillScratch {
     pub hidden_b: DevicePtr,
     pub layer: Option<LayerPrefillScratch>,
     pub output_head: Option<OutputHeadScratch>,
-    /// V2.25.c — additional ubatch lanes beyond lane 0 (= the above
-    /// hidden_a/hidden_b/layer fields). Used by V2.25.d.
+    /// 5.c — additional ubatch lanes beyond lane 0 (= the above
+    /// hidden_a/hidden_b/layer fields). Used by 5.d.
     pub extra_lanes: Vec<UbatchLane>,
-    /// MTP-5h-1 — one device buffer per local layer, holding a single
+    /// one device buffer per local layer, holding a single
     /// hidden row (hidden * 2 bytes). Populated lazily during paired-L=2
     /// verify with the per-layer GDN input at L=2 batch position 0, for
     /// use by `Qwen3MoEShardedSession::redo_gdn_only_pp` on spec-decode
@@ -713,21 +708,21 @@ pub struct RankForwardPrefillScratch {
 }
 
 impl RankForwardPrefillScratch {
-    /// V2.25.c — total ubatch lanes (includes lane 0 = the direct fields).
+    /// 5.c — total ubatch lanes (includes lane 0 = the direct fields).
     pub fn u_lanes(&self) -> usize { 1 + self.extra_lanes.len() }
 
-    /// V2.25.c — hidden_a for lane `idx`. Lane 0 = `self.hidden_a`;
+    /// 5.c — hidden_a for lane `idx`. Lane 0 = `self.hidden_a`;
     /// lane i>0 = `self.extra_lanes[i-1].hidden_a`.
     pub fn lane_hidden_a(&self, idx: usize) -> DevicePtr {
         if idx == 0 { self.hidden_a } else { self.extra_lanes[idx - 1].hidden_a }
     }
 
-    /// V2.25.c — hidden_b for lane `idx`.
+    /// 5.c — hidden_b for lane `idx`.
     pub fn lane_hidden_b(&self, idx: usize) -> DevicePtr {
         if idx == 0 { self.hidden_b } else { self.extra_lanes[idx - 1].hidden_b }
     }
 
-    /// V2.25.c — mutable LayerPrefillScratch for lane `idx`.
+    /// 5.c — mutable LayerPrefillScratch for lane `idx`.
     pub fn lane_layer_mut(&mut self, idx: usize) -> Option<&mut LayerPrefillScratch> {
         if idx == 0 {
             self.layer.as_mut()
@@ -745,7 +740,7 @@ impl RankForwardPrefillScratch {
             device.dealloc(self.hidden_a, self.hidden_bytes)?;
             device.dealloc(self.hidden_b, self.hidden_bytes)?;
         }
-        // MTP-5h-1 — release per-GDN-layer snapshot buffers.
+        // release per-GDN-layer snapshot buffers.
         for snap in self.gdn_input_snapshots.drain(..) {
             if let Some(ptr) = snap {
                 unsafe {
@@ -784,29 +779,29 @@ impl Drop for RankForwardPrefillScratch {
 /// Aggregate scratch for PP prefill: one `RankForwardPrefillScratch` per rank.
 pub struct ShardedForwardPrefillScratch {
     pub per_rank: Vec<RankForwardPrefillScratch>,
-    /// V2.26.a-i5c — per (rank, lane) graph-capture cache used by
+    /// 6.a-i5c — per (rank, lane) graph-capture cache used by
     /// `forward_prefill_pp_async` when `FLAMBEAU_ASYNC_GRAPH=1`. The
     /// first ubatch on (rank, lane) captures the whole layer chain;
     /// subsequent ubatches update pos-bearing slots + replay. Empty
     /// Vec (no sub-Vec) means disabled / lazy.
     pub graph_cache: Vec<Vec<Option<GraphCacheEntry>>>,
-    /// V2.26.a-i7b — persistent host-side scratch for rank 0's
+    /// 6.a-i7b — persistent host-side scratch for rank 0's
     /// batched embed (`forward_embed_prefill_batch`). Replaces per-token
     /// DtoH-sync-HtoD-sync pattern that issued 2·u host barriers per
     /// ubatch and starved async-PP's Rust dispatcher.
     pub embed_host: super::io::EmbedPrefillHostScratch,
-    /// V2.30.a — per (rank, local_layer_idx) HipEvent that serialises
+    /// 0.a — per (rank, local_layer_idx) HipEvent that serialises
     /// `gdn_state_step` kernel access across lanes on the same rank.
     /// Ubatch N+1 on the opposite lane waits on this event before
     /// running its state_step; ubatch N records it after its state_step.
     /// Same-lane ubatches are already stream-ordered. Eliminates the
-    /// V2.27.d / V2.28.c.1 / V2.28.a-i1 GDN race guards.
+    /// 7.d / 8.c.1 / 8.a-i1 GDN race guards.
     /// Shape: outer vec is n_ranks; inner vec is local layer count on
     /// that rank. Entry is None for non-GDN (full-attn) layers.
     pub gdn_state_events: Vec<Vec<Option<flambeau_backend_hip::HipEvent>>>,
 }
 
-/// V2.26.a-i5c — one cached exec per (rank, lane) with the per-layer
+/// 6.a-i5c — one cached exec per (rank, lane) with the per-layer
 /// slot bundles that drive pos updates. Captures only the layer-chain
 /// portion (no peer-copy, no embed) — the wrap/unwrap happens outside
 /// the capture closure.
@@ -816,7 +811,7 @@ pub struct GraphCacheEntry {
 }
 
 impl ShardedForwardPrefillScratch {
-    /// V2.25.c back-compat constructor — single lane, lane size = max_tokens.
+    /// 5.c back-compat constructor — single lane, lane size = max_tokens.
     /// Equivalent to `new_with_lanes(model, cluster, max_tokens, 1)`.
     pub fn new(
         model: &crate::sharded::Qwen3MoEShardedModel,
@@ -826,12 +821,11 @@ impl ShardedForwardPrefillScratch {
         Self::new_with_lanes(model, cluster, max_tokens, 1)
     }
 
-    /// V2.25.c — construct per-rank scratch with `u_lanes` lanes, each
+    /// 5.c — construct per-rank scratch with `u_lanes` lanes, each
     /// sized for `ubatch_size` tokens. `u_lanes = 1` is byte-identical to
-    /// the pre-V2.25 layout. `u_lanes >= 2` enables V2.25.d async PP
+    /// the pre-5 layout. `u_lanes >= 2` enables 5.d async PP
     /// pipelining (rank k can work on ubatch i+1 while rank k+1 waits
     /// driver-side for ubatch i's peer-copy).
-    ///
     /// Memory footprint per rank: `u_lanes × (2 × ubatch_size × hidden × 2
     /// bytes hidden ping-pong + LayerPrefillScratch)`.
     pub fn new_with_lanes(
@@ -866,7 +860,7 @@ impl ShardedForwardPrefillScratch {
             } else {
                 None
             };
-            // MTP-5h-1 — one snapshot row per local layer, allocated only
+            // one snapshot row per local layer, allocated only
             // for GDN-bearing layers. Each snapshot holds a single hidden
             // row (position 0 of the L=2 batch) for the spec-decode reject
             // path's GDN-only re-step.
@@ -907,17 +901,17 @@ impl ShardedForwardPrefillScratch {
                 disposed: false,
             });
         }
-        // V2.26.a-i5c — pre-size the graph cache to [ranks][u_lanes]
+        // 6.a-i5c — pre-size the graph cache to [ranks][u_lanes]
         // of None. Populated lazily on the first ubatch that hits
         // (rank, lane) under FLAMBEAU_ASYNC_GRAPH.
         let graph_cache: Vec<Vec<Option<GraphCacheEntry>>> = (0..cluster.ranks())
             .map(|_| (0..u_lanes).map(|_| None).collect())
             .collect();
-        // V2.26.a-i7b — rank-0 embed host scratch sized for max ubatch.
+        // 6.a-i7b — rank-0 embed host scratch sized for max ubatch.
         // row_bytes depends on the token_embd dtype which isn't known
         // here; start empty and grow on first use.
         let embed_host = super::io::EmbedPrefillHostScratch { raw: Vec::new(), f16: Vec::new() };
-        // V2.30.a — one HipEvent per (rank, GDN layer) for cross-lane
+        // 0.a — one HipEvent per (rank, GDN layer) for cross-lane
         // state_step serialisation. Allocated eagerly so no hot-path
         // None-check + device-bind branch; unused on sync / u_lanes=1.
         let mut gdn_state_events: Vec<Vec<Option<flambeau_backend_hip::HipEvent>>> =
@@ -962,21 +956,19 @@ impl ShardedForwardPrefillScratch {
 }
 
 /// Pipeline-parallel prefill over `L` tokens across an N-rank cluster.
-///
 /// Same per-rank flow as [`forward_one_token_pp`] but each stage processes
 /// `L` tokens at once:
-///   1. Rank 0 gathers `L` embeddings (one per token) into `hidden_a[0..L*H]`.
-///   2. For r in 0..N:
-///        - If r > 0: `peer_copy_via_host` moves `L * hidden * 2` bytes of
-///          F16 hidden state from r-1's `hidden_a` to r's `hidden_a`.
-///        - Bind this rank's device.
-///        - Ping-pong through the rank's local layers via `forward_layer_prefill`.
-///          KV cache / GDN state / conv-history get `L` tokens of history
-///          appended per layer.
-///        - If the final swap left the output in `hidden_b`, copy back
-///          into `hidden_a` so the next rank's peer-copy has a known source.
-///   3. Last rank: output head on the LAST token's hidden row + argmax.
-///
+/// 1. Rank 0 gathers `L` embeddings (one per token) into `hidden_a[0..L*H]`.
+/// 2. For r in 0..N:
+/// - If r > 0: `peer_copy_via_host` moves `L * hidden * 2` bytes of
+/// F16 hidden state from r-1's `hidden_a` to r's `hidden_a`.
+/// - Bind this rank's device.
+/// - Ping-pong through the rank's local layers via `forward_layer_prefill`.
+/// KV cache / GDN state / conv-history get `L` tokens of history
+/// appended per layer.
+/// - If the final swap left the output in `hidden_b`, copy back
+/// into `hidden_a` so the next rank's peer-copy has a known source.
+/// 3. Last rank: output head on the LAST token's hidden row + argmax.
 /// No microbatching / 1F1B schedule — the pipeline bubble is the sum of
 /// each rank's prefill compute. For Qwen3.6-31B at L=512 across 4 ranks,
 /// measured prefill is compute-bound enough that microbatching is a V2+
@@ -999,7 +991,7 @@ pub fn forward_prefill_pp(
     }
     let max_tokens = scratch.per_rank[0].max_tokens;
 
-    // V1-BENCH-#111 (2026-04-27) — when scratch is sized below L, transparently
+    // (2026-04-27) — when scratch is sized below L, transparently
     // chunk: loop sequentially over ubatches of `max_tokens` tokens each. The
     // KV cache + GDN state already thread state via `start_position`, so each
     // recursive call writes its slice into the right cache positions. The
@@ -1030,7 +1022,7 @@ pub fn forward_prefill_pp(
     let chunk_bytes = l * row_bytes;
 
     // 1. Embed all L tokens on rank 0. Row-by-row host dequant + upload —
-    //    matches single-device `forward_prefill`'s embedding path.
+    // matches single-device `forward_prefill`'s embedding path.
     {
         let rank0 = cluster.device(0);
         rank0.bind()?;
@@ -1193,22 +1185,19 @@ pub fn forward_prefill_pp(
     )
 }
 
-/// V2.25.d — async ubatch-pipelined prefill.
-///
+/// 5.d — async ubatch-pipelined prefill.
 /// Splits `tokens[0..L]` into ubatches of size `ubatch_size` and drives
-/// them across the N ranks using per-rank aux streams (V2.25.a) + async
-/// peer-copies (V2.25.b) + per-lane scratch (V2.25.c). Ubatch i lives on
+/// them across the N ranks using per-rank aux streams (5.a) + async
+/// peer-copies (5.b) + per-lane scratch (5.c). Ubatch i lives on
 /// lane `i % u_lanes`; same-lane kernels serialize via stream ordering
 /// (KV/GDN state coherence), different-lane kernels overlap on the
 /// driver's DAG.
-///
 /// The caller is responsible for:
-///   - constructing `scratch` via `new_with_lanes(..., ubatch_size, u_lanes)`
-///     so each rank has `u_lanes` hidden+layer scratches sized for ubatch
-///   - ensuring `u_lanes >= 2` — the async path has no benefit at u_lanes=1
-///   - setting `FLAMBEAU_ASYNC_UBATCH` env opt-in (top-level
-///     `forward_prefill_pp` routes here when set)
-///
+/// - constructing `scratch` via `new_with_lanes(..., ubatch_size, u_lanes)`
+/// so each rank has `u_lanes` hidden+layer scratches sized for ubatch
+/// - ensuring `u_lanes >= 2` — the async path has no benefit at u_lanes=1
+/// - setting `FLAMBEAU_ASYNC_UBATCH` env opt-in (top-level
+/// `forward_prefill_pp` routes here when set)
 /// Returns argmax of the LAST token of the LAST ubatch.
 pub fn forward_prefill_pp_async(
     model: &crate::sharded::Qwen3MoEShardedModel,
@@ -1244,22 +1233,22 @@ pub fn forward_prefill_pp_async(
             "forward_prefill_pp_async: u_lanes={u_lanes} < 2 — no async benefit; construct scratch via new_with_lanes(..., u_lanes >= 2)"
         );
     }
-    // V2.30.a — the three GDN cross-lane state-race guards (V2.27.d
-    // ubatch<128/tail<128, V2.28.a-i1 gdn_per_rank>10, V2.28.c.1 K>64)
+    // 0.a — the three GDN cross-lane state-race guards (7.d
+    // ubatch<128/tail<128, 8.a-i1 gdn_per_rank>10, 8.c.1 K>64)
     // are all the same bug: concurrent ubatches on different aux streams
     // read/write the shared per-layer GDN state tensor with no
-    // ordering. V2.30.a serialises the GDN `state_step` call itself via
+    // ordering. 0.a serialises the GDN `state_step` call itself via
     // a per-(rank, layer) HipEvent recorded in `scratch.gdn_state_events`.
     // Each lane's `stream_wait(event)` before `state_step` and `record`
     // after ensures cross-lane state_step executions are ordered, which
     // is all that is needed for parity — the rest of the GDN chain
     // reads/writes only lane-local ubatch-sized buffers.
     cluster.reserve_aux_streams(u_lanes)?;
-    // V2.25.g — per-lane pinned bounces break the single-slab
+    // 5.g — per-lane pinned bounces break the single-slab
     // serialisation. Size to a full ubatch worth of F16 hidden.
     let bounce_bytes = ubatch_size * model.config.hidden_size * 2;
     cluster.reserve_lane_bounces(u_lanes, bounce_bytes)?;
-    // V2.26.a-i5c async graph-capture branch was removed in S6:
+    // 6.a-i5c async graph-capture branch was removed in S6:
     // FLAMBEAU_ASYNC_GRAPH=1 measured -2.4 % on qwen36-35b-a3b-q4_0/pp4
     // and null elsewhere; the uncaptured legacy-async path is the only
     // production code now.
@@ -1285,12 +1274,11 @@ pub fn forward_prefill_pp_async(
 
     let shards = &model.shards;
 
-    // V2.25.h — interleaved 1F1B dispatch. At time step t, rank r
+    // 5.h — interleaved 1F1B dispatch. At time step t, rank r
     // processes ubatch (t - r) if in [0, n_ubatches). At steady state
     // (t in [n_ranks-1, n_ubatches-1]), every rank is dispatching a
     // different ubatch concurrently, producing real pipeline fill.
-    //
-    // Pre-V2.25.h dispatched `for ub in 0..n_ubatches { for rank in
+    // Pre-5.h dispatched `for ub in 0..n_ubatches { for rank in
     // 0..n_ranks }` which is serial-across-ubatches. That wasted the
     // aux-stream / per-lane-bounce infrastructure because rank r's
     // lane-k work finished before rank r ever started lane-k+1 work.
@@ -1325,7 +1313,7 @@ pub fn forward_prefill_pp_async(
             let scratch0 = &mut scratch.per_rank[0];
             let lane_hidden_a = scratch0.lane_hidden_a(lane);
 
-            // V2.26.a-i7b — batched embed (one sync per ubatch
+            // 6.a-i7b — batched embed (one sync per ubatch
             // instead of 2·u). Under 1F1B the Rust driver thread
             // returned here sooner → more time for other-rank
             // dispatches.
@@ -1356,7 +1344,7 @@ pub fn forward_prefill_pp_async(
             let layer_scratch = scratch0
                 .lane_layer_mut(lane)
                 .context("rank 0 lane_layer_mut")?;
-            // V2.30.a — event vector for this rank's GDN layers. Disjoint
+            // 0.a — event vector for this rank's GDN layers. Disjoint
             // from scratch.per_rank borrowed above.
             let rank_events: *mut Vec<Option<flambeau_backend_hip::HipEvent>> =
                 &mut scratch.gdn_state_events[0];
@@ -1417,7 +1405,7 @@ pub fn forward_prefill_pp_async(
                 cluster.with_aux_stream(rank_idx - 1, lane, |src_stream| {
                     cluster.with_aux_stream(rank_idx, lane, |dst_stream| {
                         unsafe {
-                            // V2.25.g — use per-lane bounce to allow
+                            // 5.g — use per-lane bounce to allow
                             // concurrent DtoH across lanes on the same rank.
                             cluster.peer_copy_via_host_async_laned(
                                 scratch.per_rank[rank_idx].lane_hidden_a(lane),
@@ -1441,7 +1429,7 @@ pub fn forward_prefill_pp_async(
             device.bind()?;
             let shard = &shards[rank_idx];
             let rank_session = &mut session.per_rank[rank_idx];
-            // V2.30.a — pull GDN state events out before borrowing per_rank.
+            // 0.a — pull GDN state events out before borrowing per_rank.
             // Disjoint field of scratch.
             let rank_events_ptr: *mut Vec<Option<flambeau_backend_hip::HipEvent>> =
                 &mut scratch.gdn_state_events[rank_idx];
@@ -1715,15 +1703,13 @@ pub fn forward_prefill_pp_logits(
     )
 }
 
-/// MTP-5e — paired-logits L=2 primitive for K=1 spec-decode verify.
-///
+/// paired-logits L=2 primitive for K=1 spec-decode verify.
 /// Identical body to [`forward_prefill_pp_logits`] except `tokens.len()`
 /// is required to be 2 and the LM-head pass runs **twice** on the last
 /// rank: once on `hidden_a[0]` (predicts token at `start_position+1`),
 /// once on `hidden_a[1]` (predicts token at `start_position+2` given the
 /// draft). On return, `logits_out_pos0` and `logits_out_pos1` each hold
 /// `[vocab]` F32 logits.
-///
 /// This replaces the 2× sequential L=1 fallback in `forward/spec.rs`
 /// — the body of the model only runs once, amortising the per-layer
 /// launch overhead and (more importantly on hybrid arch) only paying
@@ -1736,7 +1722,7 @@ pub fn forward_prefill_pp_logits_paired_l2(
     tokens: &[u32],
     start_position: usize,
     logits_out_pos0: &mut Vec<f32>,
-    // MTP-5h-Lever-C — when None, skip the pos1 head + download. Caller
+    // when None, skip the pos1 head + download. Caller
     // can fetch pos1 logits later via [`forward_output_head_at_pp`] if
     // accept-path needs them. Eliminates ~3 ms/macro of always-paid head
     // work on reject paths (saves ~0.4 ms/macro avg at 12.5 % rejects).
@@ -1813,7 +1799,7 @@ pub fn forward_prefill_pp_logits_paired_l2(
         let shard = &model.shards[rank_idx];
         let rank_scratch = &mut scratch.per_rank[rank_idx];
         let rank_session = &mut session.per_rank[rank_idx];
-        // MTP-5h-1 — copy snapshot ptrs out before borrowing the layer
+        // copy snapshot ptrs out before borrowing the layer
         // scratch mutably. DevicePtr is Copy, so this is a cheap clone.
         let gdn_snapshots: Vec<Option<DevicePtr>> = rank_scratch.gdn_input_snapshots.clone();
         let snapshot_row_bytes = rank_scratch.snapshot_row_bytes;
@@ -1824,7 +1810,7 @@ pub fn forward_prefill_pp_logits_paired_l2(
 
         let (mut x_in, mut x_out) = (rank_scratch.hidden_a, rank_scratch.hidden_b);
         for (local_idx, layer_weights) in shard.layers.iter().enumerate() {
-            // MTP-5h-1 — for GDN-bearing layers, save x_in (position 0
+            // for GDN-bearing layers, save x_in (position 0
             // only) to the per-layer snapshot buffer for the spec-decode
             // reject path. DtoD memcpy on this rank's default stream;
             // ordered before forward_layer_prefill's own kernels.
@@ -1939,7 +1925,7 @@ pub fn forward_prefill_pp_logits_paired_l2(
 
     // Position 1. Output-head scratch is reused; logits buffer is
     // overwritten by the next mmvq, so we had to download pos0 first.
-    // MTP-5h-Lever-C — only run pos1 head when caller asks for it; else
+    // only run pos1 head when caller asks for it; else
     // skip and let caller defer this work to the accept branch.
     if let Some(logits_out_pos1) = logits_out_pos1 {
         let h_pos1 = last_scratch.hidden_a.offset_bytes(row_bytes);
@@ -1969,7 +1955,7 @@ pub fn forward_prefill_pp_logits_paired_l2(
     Ok(())
 }
 
-/// MTP-5h-Lever-C — run the LM head on a single hidden row located at
+/// run the LM head on a single hidden row located at
 /// `last_scratch.hidden_a + position * hidden_bytes`. Used by the spec
 /// driver to lazily compute pos1 logits only on accept.
 pub fn forward_output_head_at_pp(

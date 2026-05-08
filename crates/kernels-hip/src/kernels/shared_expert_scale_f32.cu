@@ -1,19 +1,16 @@
 // shared_expert_scale_f32 — compute per-token gate from dot(x_row, gate_w)
 // + sigmoid, then scale `shared_out` in place.
-//
 // Fused form of candle's shared-expert gate path:
-//   gate[t]            = sigmoid( Σ_i gate_w[i] · x[t, i] )
-//   shared_out[t, i]  *= gate[t]                               // pointwise
-//
+// gate[t] = sigmoid( Σ_i gate_w[i] · x[t, i] )
+// shared_out[t, i] *= gate[t] // pointwise
 // Shapes:
-//   x:          [n_tokens, hidden]  F32
-//   gate_w:     [hidden]            F32
-//   shared_out: [n_tokens, hidden]  F32, overwritten
-//
+// x: [n_tokens, hidden] F32
+// gate_w: [hidden] F32
+// shared_out: [n_tokens, hidden] F32, overwritten
 // Launch:
-//   gridDim  = { n_tokens, 1, 1 }
-//   blockDim = { 256, 1, 1 }          // 4 wave64
-//   shared   = 4 floats for cross-warp reduce
+// gridDim = { n_tokens, 1, 1 }
+// blockDim = { 256, 1, 1 } // 4 wave64
+// shared = 4 floats for cross-warp reduce
 
 #include <hip/hip_runtime.h>
 

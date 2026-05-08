@@ -1,40 +1,32 @@
-//! TP-1c — TP-sharded model + topology selector.
-//!
+//! TP-sharded model + topology selector.
 //! `Qwen3MoETpModel` is the TP analogue of [`crate::sharded::Qwen3MoEShardedModel`]:
 //! every rank holds *all* layers, but each layer's weight tensors are
 //! sliced according to [`crate::Qwen35DenseTpLayout`]. The peer model
 //! (PP) stays untouched in `sharded.rs`; the two are selected via the
 //! [`Topology`] enum.
-//!
-//! ## Design split with TP-1b
-//!
-//! TP-1b (`tp_slice.rs`) provides the host-side byte-slicing primitive
-//! (`slice_for_tp` + `slice_bytes_for_tp`). TP-1c composes it with HIP
+//! ## Design split with 
+//! (`tp_slice.rs`) provides the host-side byte-slicing primitive
+//! (`slice_for_tp` + `slice_bytes_for_tp`). composes it with HIP
 //! upload to produce per-rank `LayerWeights` structures.
-//!
 //! ## What's in scope this session
-//!
 //! - `Topology { Pp(LayerAssignment), Tp(Qwen35DenseTpLayout) }` — the
-//!   selector consumed by future loaders.
+//! selector consumed by future loaders.
 //! - `Qwen3MoETpRankShard` / `Qwen3MoETpModel` types holding sliced
-//!   weights per rank.
+//! weights per rank.
 //! - `load()` that walks the model layout, slices per-tensor, allocates
-//!   device memory, and uploads. **Dtype conversions** (F32→F16 norms,
-//!   F32→Q8_0 ssm scalars, BF16→Q8_0) the PP path applies on load are
-//!   intentionally **deferred to TP-2**: TP-1c uploads bytes-as-is so
-//!   the forward path can reach for typed loaders when it needs them
-//!   (this matches V2.32.a's posture: "do conversion where it pays off",
-//!   not at every load site).
-//!
+//! device memory, and uploads. **Dtype conversions** (F32→F16 norms,
+//! F32→Q8_0 ssm scalars, BF16→Q8_0) the PP path applies on load are
+//! intentionally **deferred to uploads bytes-as-is so
+//! the forward path can reach for typed loaders when it needs them
+//! (this matches 2.a's posture: "do conversion where it pays off",
+//! not at every load site).
 //! ## What's deferred
-//!
 //! - Per-layer upload of `attn_qkv` and `ssm_conv1d` is correct (they
-//!   stay `Replicated` per the layout table) but TP-4a will replace
-//!   them with head-aware sharding.
+//! stay `Replicated` per the layout table) but will replace
+//! them with head-aware sharding.
 //! - Tied LM head gets a Replicated `output` ptr at every rank; no
-//!   special-case sharing.
-//! - The TP-aware forward path lands in TP-2.
-
+//! special-case sharing.
+//! - The TP-aware forward path lands in 
 use std::sync::Arc;
 
 use anyhow::{anyhow, bail, Context, Result};
@@ -52,14 +44,13 @@ use crate::weights::DeviceTensor;
 const QK8_0: usize = 32;
 
 /// How weights are distributed across the mesh.
-///
 /// Forward paths and the loader switch on this. Pure-PP runs continue
 /// to use [`Topology::Pp`]; new TP runs use [`Topology::Tp`]. Hybrid
 /// `PpTp` is reserved for V2-tp-5b.
 #[derive(Debug, Clone)]
 pub enum Topology {
     /// Pipeline parallelism — `LayerAssignment` distributes whole
-    /// layers across ranks. The existing V1.7.5 path.
+    /// layers across ranks. The existing path.
     Pp(LayerAssignment),
     /// Tensor parallelism — every rank owns *all* layers, sharded
     /// per-tensor. `Qwen35DenseTpLayout` knows the per-name layout.
@@ -162,7 +153,7 @@ pub struct Qwen3MoETpModel {
     pub layout: ModelLayout,
     pub tp: Qwen35DenseTpLayout,
     pub shards: Vec<Qwen3MoETpRankShard>,
-    /// **TP-2d-i2** — per-rank `OpsRegistry` cache. `OpsRegistry::new`
+    /// per-rank `OpsRegistry` cache. `OpsRegistry::new`
     /// loads every kernel HSACO via `hipModuleLoadData`, which is a
     /// real driver call (no global module cache). Constructing one per
     /// per-op-block per-layer per-rank is the dominant cost on the
@@ -170,24 +161,24 @@ pub struct Qwen3MoETpModel {
     /// added). Built once at load time and reused across every forward
     /// call. Indexed by rank.
     pub ops: Vec<flambeau_ops::hip::OpsRegistry>,
-    /// **AUTO-4b** — range of layer indices actually populated on this
+    /// range of layer indices actually populated on this
     /// model's shards. `0..config.num_layers` for a pure-TP load (the
     /// historical V2.* path). For a hybrid PP+TP stage, this is the
     /// stage's layer range; layer indices outside the range hold empty
     /// `Vec<TpLayerTensor>` placeholders in `shards[r].layers`.
     pub layer_range: std::ops::Range<usize>,
-    /// **AUTO-4b** — `true` iff `token_embd` was actually uploaded on
+    /// `true` iff `token_embd` was actually uploaded on
     /// every rank (always `true` for pure-TP; only `true` on hybrid
     /// stage 0).
     pub has_token_embd: bool,
-    /// **AUTO-4b** — `true` iff `output_norm` (and `output` when the
+    /// `true` iff `output_norm` (and `output` when the
     /// model has an explicit LM head) were uploaded on every rank
     /// (always `true` for pure-TP; only `true` on the last hybrid stage).
     pub has_output_head: bool,
 }
 
 impl Qwen3MoETpModel {
-    /// **TP-7-arch** — `true` iff the loader had to fall back to
+    /// `true` iff the loader had to fall back to
     /// Replicated upload for layer `il`'s MoE expert tensors (K-quant
     /// block-size misalignment). The TP forward path detects this and
     /// runs that layer's MoE with `world=1` semantics + skips the
@@ -213,14 +204,12 @@ impl Qwen3MoETpModel {
     }
 }
 
-/// **AUTO-4b** — knobs the hybrid loader uses to construct a
+/// knobs the hybrid loader uses to construct a
 /// "partial" `Qwen3MoETpModel` covering only one PP stage. Pure-TP
 /// callers ignore this and use [`Qwen3MoETpModel::load`] (which is a
 /// thin wrapper for `Default::default()`).
-///
 /// Forward paths that have not been taught about partial stages will
 /// panic if asked to access an out-of-range layer; that wiring is
-/// AUTO-4d.
 #[derive(Debug, Clone)]
 pub struct TpLoadOpts {
     /// Range of layer indices to actually upload. `None` ≡ all layers.
@@ -247,7 +236,6 @@ impl Qwen3MoETpModel {
     /// Open `file`, slice each tensor by the layout in `tp`, and upload
     /// to every rank in `cluster`. The cluster's rank count must match
     /// `tp.world()`.
-    ///
     /// # Errors
     /// - Cluster size ≠ `tp.world()`.
     /// - Any per-tensor slice / upload failure (propagated).
@@ -255,7 +243,7 @@ impl Qwen3MoETpModel {
         Self::load_with_opts(file, cluster, tp, &TpLoadOpts::default())
     }
 
-    /// **AUTO-4b** — like [`Self::load`], but honours `opts` to upload
+    /// like [`Self::load`], but honours `opts` to upload
     /// only a layer subrange and/or skip the embedding / LM-head globals.
     /// Used by [`crate::hybrid::Qwen3MoEHybridModel`] to construct one
     /// "stage shard" per PP stage. Layer indices outside
@@ -296,7 +284,7 @@ impl Qwen3MoETpModel {
             let rank = RankId(rank_idx);
             let device = cluster.device(rank_idx as usize);
             device.bind()?;
-            // **TP-2d-i2** — load every kernel module once per rank at
+            // load every kernel module once per rank at
             // model-load. Reused across every forward call.
             ops_registries.push(
                 flambeau_ops::hip::OpsRegistry::new(device)
@@ -341,7 +329,7 @@ impl Qwen3MoETpModel {
                 let mut layer_tensors: Vec<TpLayerTensor> = Vec::new();
                 let world = tp.world();
                 for name in collect_layer_tensor_names(desc) {
-                    // V1-BENCH-CN-80B-1 — qwen3next packs ssm_alpha+beta as
+                    // qwen3next packs ssm_alpha+beta as
                     // one fused `ssm_ba.weight`. Split at load-time so the
                     // forward path (which expects the split form) sees them
                     // exactly as if the GGUF had shipped them split. See
@@ -404,7 +392,7 @@ impl Qwen3MoETpModel {
             has_token_embd: opts.load_token_embd,
             has_output_head: opts.load_output_head,
         };
-        // **TP-7-arch** — the Replicated-MoE forward branch skips the
+        // the Replicated-MoE forward branch skips the
         // post-FFN AllReduce because each rank's MoE output is already
         // a full-hidden update. That's only correct when there's no
         // shared expert in the same layer (a sharded shared-expert
@@ -414,7 +402,7 @@ impl Qwen3MoETpModel {
             for il in model.layer_range.clone() {
                 if model.moe_replicated_at(il) {
                     bail!(
-                        "TP-7-arch fallback engaged on layer {il} (K-quant MoE expert \
+                        "fallback engaged on layer {il} (K-quant MoE expert \
                          misalignment) but model has a shared expert; that combination \
                          requires per-layer mixed-mode AR which is not yet implemented. \
                          Run with --mesh-mode pp instead, or use a Q4_0/Q4_1 quant of \
@@ -427,7 +415,7 @@ impl Qwen3MoETpModel {
     }
 
     /// Total bytes uploaded across all ranks. Useful for the smoke
-    /// invariant in TP-1c: `total_bytes == ranks × per_rank_target`.
+    /// invariant in `total_bytes == ranks × per_rank_target`.
     pub fn total_bytes(&self) -> usize {
         self.shards.iter().map(|s| s.total_bytes).sum()
     }
@@ -453,7 +441,7 @@ impl Qwen3MoETpModel {
     }
 }
 
-/// **AUTO-4b** — placeholder `DeviceTensor` for slots a hybrid stage
+/// placeholder `DeviceTensor` for slots a hybrid stage
 /// shard does not own (e.g. `token_embd` on stages > 0). Free of any
 /// device allocation; dispose's `is_live`-style check sees `ptr ==
 /// NULL` + `bytes == 0` and skips it. The `name` is kept for
@@ -504,10 +492,10 @@ fn tp_target_dtype(name: &str, source_dtype: GgmlDType) -> Option<GgmlDType> {
     if name.ends_with("ssm_alpha.weight") || name.ends_with("ssm_beta.weight") {
         return Some(GgmlDType::Q8_0);
     }
-    // V1-BENCH-CN-80B-9 (mirror of iter-3, sharded.rs::upload_ffn). The
+    // (mirror of iter-3, sharded.rs::upload_ffn). The
     // MoE router weight `ffn_gate_inp` is F32 in every Qwen3.x GGUF.
     // Convert to F16 at upload so the dense_gemv_f16_f16 router kernel
-    // (CN-80B-6) is exercised on the TP path too — pp2tp2 didn't
+    // () is exercised on the TP path too — pp2tp2 didn't
     // auto-pick up iter-3's prefill lift because the conversion was
     // PP-loader-only. Quality preserved (router is a coarse top-k
     // discriminator; F16 noise can't flip top-1 except on near-tie).
@@ -536,7 +524,7 @@ fn convert_f32_to_f16(src: &[u8], elems: usize) -> Result<Vec<u8>> {
     Ok(out)
 }
 
-/// V1-BENCH-#110 — quantise a BF16 byte slice to Q8_0 host-side.
+/// quantise a BF16 byte slice to Q8_0 host-side.
 /// BF16 is the upper 16 bits of an F32, so widen byte-by-byte then run
 /// the standard per-32-element absmax/127 quantise. Mirrors
 /// `sharded.rs::upload_bf16_as_q8_0` for the TP slicing path; needed
@@ -613,7 +601,7 @@ fn quantize_f32_to_q8_0(src: &[u8], elems: usize) -> Result<Vec<u8>> {
     Ok(out)
 }
 
-/// V1-BENCH-CN-80B-1 — quantise an F32 buffer to Q8_0 (in-memory variant of
+/// quantise an F32 buffer to Q8_0 (in-memory variant of
 /// `quantize_f32_to_q8_0` that takes `&[f32]` directly, used by the MXFP4
 /// + ssm_ba paths below where we already hold an F32 Vec).
 fn quantize_f32_slice_to_q8_0(f32s: &[f32]) -> Result<Vec<u8>> {
@@ -640,15 +628,13 @@ fn quantize_f32_slice_to_q8_0(f32s: &[f32]) -> Result<Vec<u8>> {
     Ok(out)
 }
 
-/// V1-BENCH-CN-80B-1 — F32 slicer for the per-rank TP shard.
-///
+/// F32 slicer for the per-rank TP shard.
 /// Applied **after** dequant in the MXFP4 + ssm_ba paths because slicing
 /// pre-dequant would require MXFP4-block-grain (17 B / 32 elems) byte
 /// arithmetic. Operating on F32 is straightforward; the ~4× memory blow-up
 /// for the full F32 buffer is bounded by the largest single tensor we
 /// dequant (Coder-Next shared-expert at hidden×shared_inter ≤ ~64 MiB
 /// before quantise; freed immediately after).
-///
 /// Supported layouts: `Replicated`, `ColParallel{dim=0}`,
 /// `RowParallel{dim=1}`. Returns the per-rank dims alongside the bytes
 /// so the caller can record them on the resulting `DeviceTensor`.
@@ -715,11 +701,10 @@ fn slice_f32_for_tp(
     }
 }
 
-/// V1-BENCH-CN-80B-1 — upload an MXFP4-source tensor through the TP
+/// upload an MXFP4-source tensor through the TP
 /// slicing path. Mirrors `sharded.rs::upload_mxfp4_as_q8_0` (V1.x #119)
 /// but applies the per-rank slice on the F32 intermediate, then
 /// quantises the per-rank slice to Q8_0.
-///
 /// Used for Coder-Next-Q4_0's 96 shared-expert tensors (gate/up/down per
 /// 48 layers — `ffn_*_shexp.weight`) which the GGUF stores as MXFP4.
 /// Without this path the TP loader bails on dtype-mismatch when handing
@@ -777,27 +762,23 @@ fn upload_tp_mxfp4_as_q8_0(
     Ok((tensor, n))
 }
 
-/// V1-BENCH-CN-80B-1 / #142 — TP-aware ssm_ba split.
-///
+/// / #142 — TP-aware ssm_ba split.
 /// qwen3next packs `ssm_alpha + ssm_beta` as one fused tensor
 /// `ssm_ba.weight [2*num_v_heads, hidden]`. The on-disk layout is
 /// **interleaved per K-head** as
 /// `[β..., α...] × num_k_heads`, where `n_rep = num_v_heads / num_k_heads`
 /// — see `sharded.rs::split_ssm_ba_to_q8_0` for the full derivation
 /// against llama.cpp's `ssm_beta_alpha` view.
-///
 /// Pre-fix this routine took `alpha = rows[..num_v_heads]; beta =
 /// rows[num_v_heads..]`, which (a) named them backwards and (b) mixed
 /// β/α across k-heads. Latent on perf benches (synthetic prompts hide
 /// the wrong scalars) but produced a degenerate logit attractor live —
-/// see CN-80B-13 cert.
-///
+/// see cert.
 /// TP slicing comes after the de-interleave: split first into
 /// `[num_v_heads, hidden]` α and β, then apply `ColParallel{dim=0}`
 /// per rank so each rank gets `num_v_heads/world` rows of BOTH α and β
 /// (vs the broken `ColParallel{dim=0}` on the fused tensor which would
 /// give rank 0 all-α-mixed and rank 1 all-β-mixed at world=2).
-///
 /// Returns two TP layer-tensors: `*.ssm_alpha.weight` and
 /// `*.ssm_beta.weight`, dtype Q8_0, ready for `mmvq_q8_0` consumption.
 fn upload_tp_ssm_ba_split(
@@ -945,10 +926,9 @@ fn upload_tp_ssm_ba_split(
 
 /// Slice + upload a single tensor for the given rank. Returns the
 /// device tensor (with per-rank dims) and the byte count uploaded.
-///
 /// **Bug 2/3 fix**: applies the same F32→F16 norm conversion and
 /// F32→Q8_0 ssm_alpha/ssm_beta quantisation that `sharded.rs::upload_layer`
-/// does. The original TP-1c design deferred conversion to forward
+/// does. The original design deferred conversion to forward
 /// (see comment in `tp_target_dtype`) but the forward never actually
 /// did it — `rmsnorm_quant_q8_1` reinterpreted F32 norm bytes as F16,
 /// producing all-NaN logits on the first live execution.
@@ -963,7 +943,7 @@ fn upload_tp(
     Ok((t, b))
 }
 
-/// **TP-7-arch** — like [`upload_tp`] but returns the layout that was
+/// like [`upload_tp`] but returns the layout that was
 /// **actually** used. Identical to the configured layout in the common
 /// case. For MoE expert tensors (`ffn_*_exps.weight`) whose K-quant
 /// block size doesn't divide the per-rank slice (Coder-30B Q4_K with
@@ -985,7 +965,7 @@ fn upload_tp_with_layout(
         .for_tensor(name)
         .ok_or_else(|| anyhow!("no TP layout entry for tensor `{name}`"))?;
 
-    // V1-BENCH-CN-80B-1 — MXFP4 source bypasses the post-slice convert
+    // MXFP4 source bypasses the post-slice convert
     // path (upload_tp_with_layout's normal flow slices raw bytes first
     // then converts F32→{F16,Q8_0}, which can't address MXFP4's 17-B
     // 32-elem block stride). Dequant the FULL tensor to F32, slice the
@@ -1003,7 +983,7 @@ fn upload_tp_with_layout(
                 target: "flambeau_qwen3_moe::tp_sharded",
                 tensor = name,
                 rank,
-                "K-quant MoE expert misalignment — falling back to Replicated upload (TP-7-arch)"
+                "K-quant MoE expert misalignment — falling back to Replicated upload "
             );
             let full_layout = WeightLayout::Replicated;
             let full = slice_for_tp(file, name, full_layout, rank)
@@ -1020,8 +1000,8 @@ fn upload_tp_with_layout(
     let per_rank_dims = compute_per_rank_dims(&info.dims, layout);
     let elems: usize = per_rank_dims.iter().product::<u64>() as usize;
 
-    // V1-BENCH-#110 — BF16 → Q8_0 transparent quantise at load. Mirror
-    // of the PP path's `upload_bf16_as_q8_0` (V2.22.a). UD-Q8_K_XL
+    // BF16 → Q8_0 transparent quantise at load. Mirror
+    // of the PP path's `upload_bf16_as_q8_0` (2.a). UD-Q8_K_XL
     // GGUFs (e.g. Qwen3.6-35B-A3B-UD-Q8_K_XL) ship a handful of BF16
     // tensors that no V1 MMVQ/MMQ path consumes; without this branch
     // the TP loader would hand BF16 bytes to a Q8_0-shaped dispatch
@@ -1082,7 +1062,7 @@ fn upload_tp_with_layout(
     ))
 }
 
-/// **TP-7-arch** — recognise the specific slice failure mode that
+/// recognise the specific slice failure mode that
 /// warrants the Replicated fallback: K-quant MoE expert tensors
 /// (`ffn_*_exps.weight`) whose per-rank inner dim doesn't align with
 /// the dtype's block size. Other shape mismatches still bail.
@@ -1141,7 +1121,7 @@ fn compute_per_rank_dims(full_dims: &[u64], layout: WeightLayout) -> Vec<u64> {
     }
 }
 
-/// **TP-2e** — per-rank session holding per-layer caches sized for the
+/// per-rank session holding per-layer caches sized for the
 /// local head subset. Sister of [`crate::session::Qwen3MoESession`].
 pub struct Qwen3MoETpSession {
     /// `caches[rank]` is the layer-cache vector for that rank, sized
@@ -1188,7 +1168,7 @@ impl Qwen3MoETpSession {
         Ok(Self { caches, disposed: false })
     }
 
-    /// V1-BENCH-#116 — true if any rank has a Q8_0 KV cache. Mirrors
+    /// true if any rank has a Q8_0 KV cache. Mirrors
     /// `Qwen3MoESession::is_q8_kv` / `Qwen3MoEShardedSession::is_q8_kv`.
     /// Used to gate the batched TP prefill path.
     pub fn is_q8_kv(&self) -> bool {
@@ -1221,7 +1201,7 @@ impl Qwen3MoETpSession {
         total
     }
 
-    /// MTP-5f-tp2 — save GDN state across all ranks. TP analog of
+    /// save GDN state across all ranks. TP analog of
     /// [`crate::sharded::Qwen3MoEShardedSession::save_gdn_snapshot`].
     pub fn save_gdn_snapshot(&mut self, cluster: &HipCluster) -> Result<()> {
         for (rank_idx, rank_caches) in self.caches.iter_mut().enumerate() {
@@ -1264,7 +1244,7 @@ impl Qwen3MoETpSession {
         Ok(())
     }
 
-    /// MTP-5f-tp2 — restore GDN state from snapshot across all ranks.
+    /// restore GDN state from snapshot across all ranks.
     pub fn restore_gdn_snapshot(&mut self, cluster: &HipCluster) -> Result<()> {
         for (rank_idx, rank_caches) in self.caches.iter_mut().enumerate() {
             let device = cluster.device(rank_idx);
@@ -1298,7 +1278,7 @@ impl Qwen3MoETpSession {
         Ok(())
     }
 
-    /// MTP-5f-tp2 — roll back full-attn K/V tail by `n_remove` slots
+    /// roll back full-attn K/V tail by `n_remove` slots
     /// across every rank's full-attn layers.
     pub fn rollback_full_attn(&mut self, n_remove: usize) -> Result<()> {
         for (rank_idx, rank_caches) in self.caches.iter_mut().enumerate() {
@@ -1450,7 +1430,7 @@ fn collect_layer_tensor_names(desc: &crate::layout::LayerDescriptor) -> Vec<Stri
             d.ffn_down.name.clone(),
         ]);
     } else {
-        // **TP-4b** — MoE expert tensors. Router (ffn_gate_inp) +
+        // MoE expert tensors. Router (ffn_gate_inp) +
         // 3D expert slabs (gate/up/down).
         if let Some(t) = &desc.ffn.ffn_gate_inp {
             out.push(t.name.clone());
@@ -1464,7 +1444,7 @@ fn collect_layer_tensor_names(desc: &crate::layout::LayerDescriptor) -> Vec<Stri
         if let Some(t) = &desc.ffn.ffn_down_exps {
             out.push(t.name.clone());
         }
-        // TP-4c: shared expert (Replicated for now). Walked here so
+        // shared expert (Replicated for now). Walked here so
         // hybrid arches (qwen35moe) load cleanly.
         if let Some(s) = &desc.ffn.shared {
             out.extend([

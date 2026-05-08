@@ -1,5 +1,4 @@
 // mmvq_q4_0_t128 — Q4_0 thin-block MMVQ, gfx906 latency-bound decode lever.
-//
 // Mirror of `mmvq_q4_1_t128` for Q4_0 weights. Motivation: gfx906 at
 // batch=1 sits at ~10% HBM bandwidth
 // utilisation — the kernel is latency-bound, not bandwidth-bound, so the
@@ -7,8 +6,7 @@
 // not the one that reads the fewest bytes. 128 threads/block = 2 wave64s/CU
 // = up to 2 concurrent blocks per CU on gfx906 (vs the 256t baseline's
 // 1 block/CU at the occupancy ceiling), giving Q4_0 the same latency-hiding
-// shape Q4_1 already has via `mmvq_q4_1_t128` (V2.2.b).
-//
+// shape Q4_1 already has via `mmvq_q4_1_t128` ().
 // Q4_0 dequant via the (q − 8) DP4A bias-correction identity
 // (`sumi · d_x · d_y − 8 · d_x · s_y` per block, split across 4 lanes by
 // ·0.25 so the warp reduce sums to one correction per block).

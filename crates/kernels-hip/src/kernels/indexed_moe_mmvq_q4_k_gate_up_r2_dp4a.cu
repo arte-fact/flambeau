@@ -1,24 +1,19 @@
 // indexed_moe_mmvq_q4_k_gate_up_r2_dp4a — MoE Q4_K fused gate+up, 2 rows per block.
-//
 // Same output layout as `indexed_moe_mmvq_q4_k_gate_up_dp4a.cu` but block/grid
 // shape halves block count in the row dimension:
-//   - Original: grid = (n_rows, n_tokens * top_k),  block = (64, 1, 1)
-//   - This:     grid = (n_rows / 2, n_tokens * top_k),  block = (64, 1, 1)
-//
+// - Original: grid = (n_rows, n_tokens * top_k), block = (64, 1, 1)
+// - This: grid = (n_rows / 2, n_tokens * top_k), block = (64, 1, 1)
 // Why: at prefill L=512, n_slots = n_tokens * top_k = 4096 and n_rows ≈ 2816
 // → ~11.5M blocks per call. Each block produces 1 output using a full wave64
-// → tiny work per block, launch-overhead-dominated at 11.46 ms/call (V2.4 profile).
-//
+// → tiny work per block, launch-overhead-dominated at 11.46 ms/call (profile).
 // Adaptation from `indexed_moe_mmvq_q4_k_r2_dp4a.cu`'s r2 pattern (used for
 // the down projection) but with the `gate_up_dp4a` kernel's fusion semantics:
 // one activation load per (slot, super-block) shared between gate and up.
-//
 // Lane layout (wave64, handles 2 rows simultaneously):
-//   row_hi   = lane >> 5           — 0 or 1: selects row_pair*2 or row_pair*2+1
-//   lane_lo  = lane & 31           — 0..31: half-warp position within a row
-//   pair_idx = lane_lo >> 3        — 0..3: which sub-block pair
-//   iqs      = lane_lo & 7         — 0..7: which int32 of the pair's slice
-//
+// row_hi = lane >> 5 — 0 or 1: selects row_pair*2 or row_pair*2+1
+// lane_lo = lane & 31 — 0..31: half-warp position within a row
+// pair_idx = lane_lo >> 3 — 0..3: which sub-block pair
+// iqs = lane_lo & 7 — 0..7: which int32 of the pair's slice
 // Each half-warp (32 lanes) sequentially iterates super-blocks for ITS row.
 // Both halves iterate the same super-block index in lockstep → activation
 // reads happen at the same iteration → shared HBM fetches via L1 cache

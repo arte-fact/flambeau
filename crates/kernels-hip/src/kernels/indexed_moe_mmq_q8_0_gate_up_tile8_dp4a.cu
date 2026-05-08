@@ -1,25 +1,21 @@
-// indexed_moe_mmq_q8_0_gate_up_tile8_dp4a — V2.22.b fused gate+up MoE MMQ
+// indexed_moe_mmq_q8_0_gate_up_tile8_dp4a — 2.b fused gate+up MoE MMQ
 // for Q8_0 expert weights.
-//
-// Direct sibling of V2.28.c's `indexed_moe_mmq_q4_0_gate_up_tile8_dp4a.cu`
+// Direct sibling of 8.c's `indexed_moe_mmq_q4_0_gate_up_tile8_dp4a.cu`
 // with the nibble-unpack and (q-8) bias correction removed. Q8_0 is already
 // signed/centred so the inner formula collapses to
-//     sums[c] += x_d · d_y · sumi.
-//
+// sums[c] += x_d · d_y · sumi.
 // Q8_0 block: {fp16 d, int8 qs[32]} = 8 × int32 of signed quants per block.
 // n_blocks_per_row = hidden / 32 (QK8_0 == QK8_1 == 32), same stride as
 // the activation's Q8_1 blocks → one weight block ↔ one activation block
 // in the k-loop.
-//
-// V2.22.a shipped Q8_0 indexed-MoE MMVQ (256 threads, 1 output/block).
+// shipped Q8_0 indexed-MoE MMVQ (256 threads, 1 output/block).
 // On Qwen3.6-35B-A3B-UD-Q8_K_XL prefill L=512 that kernel held 77 % of
 // GPU time — the sole dominant hotspot. Tile8 delivers 64 rows
 // × 8 slot-cols = 512 outputs per block with one weight-tile decode per
-// thread per block, matching V2.6.b's Q4_K structural win (~3× per-kernel).
-//
+// thread per block, matching Q4_K structural win (~3× per-kernel).
 // Launch:
-//   grid  = (⌈n_rows / 64⌉, padded_total / 8, 1)
-//   block = (64, 1, 1)
+// grid = (⌈n_rows / 64⌉, padded_total / 8, 1)
+// block = (64, 1, 1)
 
 #include "block_quant.cuh"
 #include <hip/hip_runtime.h>
@@ -71,7 +67,7 @@ void flambeau_indexed_moe_mmq_q8_0_gate_up_tile8_dp4a_q8_1(
     const int row     = tile_m + tid;
     const bool row_ok = (row < n_rows);
 
-    // All 8 slots in this block share the same expert (V2.6.a pad-to-8
+    // All 8 slots in this block share the same expert (pad-to-8
     // invariant, enforced by moe_sort_by_expert_padded).
     const int first_pair = sorted_pair_idx_padded[tile_n];
     const int expert = expert_ids[first_pair];

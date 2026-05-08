@@ -1,21 +1,18 @@
 //! RCCL-backed `Mesh<N>` + collective-op implementations.
-//!
 //! Design: a `HipMesh<N>` is created from a single process via
 //! `ncclCommInitAll`, which atomically builds `N` communicators over the
 //! selected devices. Each `HipRankHandle` borrows one comm and binds HIP
 //! ops to its device. Tests drive ranks from `N` threads; every thread runs
 //! `HipDevice::bind()` + its handle's collectives on its own stream.
-//!
 //! Buffers for collectives must already live on the rank's device memory —
 //! RCCL is a device-side library. Hosts copy to device before the collective
 //! and read back after. The runtime-level `AllReduce` trait operates on byte
 //! slices; we interpret those as **device pointers**: the caller is
 //! responsible for having allocated device memory and copied input into it.
-//!
 //! To keep the runtime trait unchanged we expose two surfaces:
 //! - `HipRankHandle::all_reduce_device(d_ptr, ...)` — the "real" HIP path.
 //! - `HipRankHandle::all_reduce_host(host_bytes, ...)` — convenience that
-//!   copies H→D, calls RCCL, copies D→H. Used by the cert harness.
+//! copies H→D, calls RCCL, copies D→H. Used by the cert harness.
 
 #![expect(
     clippy::undocumented_unsafe_blocks,
@@ -70,7 +67,6 @@ fn to_nccl_op(op: ReduceOp) -> ncclRedOp_t {
 }
 
 /// A multi-GPU mesh over HIP devices, backed by RCCL.
-///
 /// Built rank-by-rank via [`HipMesh::builder`] → `connect_rank` on each
 /// driver thread. This matches candle's proven pattern: each rank calls
 /// `ncclCommInitRank` from its own thread after `hipSetDevice(rank)`, and
@@ -90,7 +86,6 @@ impl HipMesh {
     /// Build an empty mesh with a freshly-generated `ncclUniqueId`. Each
     /// rank must call [`HipRankHandle::connect`] from its own driver thread
     /// before collectives will work on that rank.
-    ///
     /// RCCL's `ncclCommInitRank` **blocks** until every rank has joined, so
     /// all N driver threads must race to call it around the same time.
     pub fn new(devices: &[i32]) -> CollectiveResult<Arc<Self>> {
@@ -211,7 +206,6 @@ impl HipRankHandle {
     /// AllReduce on device pointers. Buffer sizes are expressed in *elements*
     /// via `cfg`; `d_buf` must point to at least `cfg.buffer_bytes()` of the
     /// rank's own device memory.
-    ///
     /// # Safety
     /// `d_buf` must be a valid device pointer on this rank's device, and the
     /// rank's HIP context must be bound (`hipSetDevice`) on the calling thread.
@@ -284,7 +278,6 @@ impl HipRankHandle {
 
     /// AllToAll — send[r * shard..(r+1)*shard] goes to rank r, recv[s * shard..(s+1)*shard]
     /// comes from rank s. Implemented as N² ncclSend/ncclRecv inside a group.
-    ///
     /// # Safety
     /// `d_send` and `d_recv` must be valid device pointers on this rank, each
     /// with `rank_count * cfg.buffer_bytes()` bytes of space.

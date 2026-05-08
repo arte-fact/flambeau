@@ -1,20 +1,16 @@
 //! CPU-side token sampling.
-//!
-//! Before V2.12 the config was a three-variant enum (`Greedy | Temperature |
-//! TopP`). V2.12 (T4.b — ROADMAP-V2-TOOL-CALLING-AND-MCP §T4.b) extends it
+//! Before 2 the config was a three-variant enum (`Greedy | Temperature |
+//! TopP`). 2 (T4.b — ROADMAP-V2-TOOL-CALLING-AND-MCP §T4.b) extends it
 //! to a single struct carrying the full OpenAI sampler surface —
 //! `temperature`, `top_p`, `top_k`, `min_p`, `presence_penalty`,
 //! `frequency_penalty`, `repetition_penalty`. Without the penalties,
 //! multi-turn agent loops on Qwen3.5/3.6 degrade to the "long CoT /
 //! garbage output" failure mode community-reported on Ollama.
-//!
 //! Takes a `&[f32]` of decoder logits (one per vocab entry) and an
 //! optional token-history slice (prior-turn tokens — used by the
 //! penalties) and returns the sampled token id.
-//!
 //! Deterministic when `seed` is fixed. The RNG is xoshiro256** (self-contained;
 //! no `rand` dep added so the crate stays light).
-//!
 //! Serving-layer note: the HTTP server constructs one [`Sampler`] per
 //! request from OpenAI params and calls [`Sampler::sample`] once per
 //! token, reusing its scratch buffers across the decode loop.
@@ -22,22 +18,20 @@
 use std::cmp::Ordering;
 
 /// Full sampler config for one decode step.
-///
 /// Field semantics mirror OpenAI / vLLM:
 /// - `temperature == 0.0` → greedy (skip softmax, argmax). Historical
-///   `Sampling::Greedy` variant maps to `temperature = 0.0` here.
+/// `Sampling::Greedy` variant maps to `temperature = 0.0` here.
 /// - `top_p = None` → no top-p filter.
 /// - `top_k = None` → no top-k filter.
 /// - `min_p = None` → no min-p filter.
 /// - `repetition_penalty = 1.0` → disabled. Non-1 values scale the
-///   logit of previously-seen tokens (`logit /= penalty` when
-///   `logit > 0`, `logit *= penalty` otherwise) — the llama.cpp
-///   convention, shared by Qwen's `generation_config.json`.
+/// logit of previously-seen tokens (`logit /= penalty` when
+/// `logit > 0`, `logit *= penalty` otherwise) — the llama.cpp
+/// convention, shared by Qwen's `generation_config.json`.
 /// - `presence_penalty = 0.0` → disabled. Subtracts `penalty` from the
-///   logit of any token appearing at least once in history.
+/// logit of any token appearing at least once in history.
 /// - `frequency_penalty = 0.0` → disabled. Subtracts
-///   `penalty * count_in_history` from the logit of each token.
-///
+/// `penalty * count_in_history` from the logit of each token.
 /// Penalty semantics match OpenAI's reference: penalties are applied
 /// IN-PLACE to logits before any filter or softmax. History is the
 /// caller's per-turn generated-tokens slice.
@@ -73,7 +67,7 @@ impl Sampling {
         }
     }
 
-    /// Temperature-only sampler. Equivalent to the pre-V2.12
+    /// Temperature-only sampler. Equivalent to the pre-2
     /// `Sampling::Temperature { temp }` variant.
     pub fn temperature(temp: f32) -> Self {
         Self {
@@ -82,7 +76,7 @@ impl Sampling {
         }
     }
 
-    /// Temperature + top-p. Equivalent to the pre-V2.12
+    /// Temperature + top-p. Equivalent to the pre-2
     /// `Sampling::TopP { temp, p }` variant.
     pub fn top_p(temp: f32, p: f32) -> Self {
         Self {
@@ -224,11 +218,9 @@ impl Sampler {
     /// `top_k` is implicit (already the size of the input). Penalties
     /// are NOT applied — the GPU sampler path requires `!mode.has_penalties()`
     /// because penalties need full-vocab access on host.
-    ///
     /// `temperature` is also implicit: the GPU kernel applied it before
     /// emitting the top-K probs, so the input distribution already
     /// reflects the chosen temperature.
-    ///
     /// Returns the multinomial-sampled token id, or `topk_ids[0]` (the
     /// argmax) when `mode.is_greedy()`.
     pub fn sample_from_topk(
@@ -337,22 +329,20 @@ impl Sampler {
     }
 }
 
-/// MTP-5g — build the normalized (id, prob) distribution that
+/// build the normalized (id, prob) distribution that
 /// [`Sampler::sample`] would draw from, given `logits`, `mode`, and
 /// `history`. Used by the rejection-sampling spec-decode driver to
 /// compare MTP draft `q(·)` against base verify `p(·)`.
-///
 /// Mirrors `sample_stochastic` exactly except the multinomial pick
 /// at the end — temperature, top-k, top-p, min-p, repetition /
 /// presence / frequency penalties (the last three driven by `history`)
 /// are all applied.
-///
 /// For a `mode` whose [`is_greedy`](Sampling::is_greedy) returns
 /// `true`, the returned distribution is one-hot at the argmax of the
 /// **penalty-adjusted** logits (history is still applied so penalty
 /// effects on the argmax are respected).
 pub fn build_distribution(logits: &[f32], mode: &Sampling, history: &[u32]) -> Vec<(u32, f32)> {
-    // MTP-5g/h penalty-aware path. If no penalties active, skip the
+    // /h penalty-aware path. If no penalties active, skip the
     // O(V)-byte clone and operate on the input slice directly.
     let needs_penalties = mode.has_penalties() && !history.is_empty();
     let logits_owned: Vec<f32>;
@@ -397,7 +387,7 @@ pub fn build_distribution(logits: &[f32], mode: &Sampling, history: &[u32]) -> V
     if !any_filter {
         return pairs;
     }
-    // MTP-5g/h — partial-sort optimisation: when `top_k` is active, use
+    // /h — partial-sort optimisation: when `top_k` is active, use
     // `select_nth_unstable_by` to partition the top-k to the front in
     // O(V) instead of an O(V log V) full sort, then sort only those k
     // entries. On Qwen3.6 vocab=151 936 with top_k=40, this drops
@@ -490,7 +480,6 @@ fn argmax(logits: &[f32]) -> u32 {
 /// `logits`. All three are no-ops at their default values, so this
 /// returns early when no penalty is active — no history walk at all
 /// on a default-config greedy call.
-///
 /// Allocates a fresh HashMap per call. Prefer
 /// [`apply_penalties_with_scratch`] from the per-session [`Sampler`]
 /// which reuses sort+dedup buffers.
@@ -636,7 +625,6 @@ fn sample_stochastic(
     // Sort by descending prob — needed for top-k / top-p. We always
     // sort when any filter is active; for plain-temperature there's no
     // sort (we go straight to multinomial over the full distribution).
-    //
     // **Sampler-A** (#206) — when `top_p` (or `min_p`) is set without an
     // explicit `top_k`, default to `top_k = TOP_K_AUTO_CAP` so the
     // partial-sort path activates instead of an O(V log V) full sort.

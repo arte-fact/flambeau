@@ -1,12 +1,10 @@
 //! Model layout — description of every tensor the model touches, paired
 //! with its dtype + byte size + source tensor name.
-//!
-//! V1.7.2-ext: split per-layer tensor sets into the three flavours the
+//! ext: split per-layer tensor sets into the three flavours the
 //! Qwen3.x MoE family ships:
 //! - [`LayerAttnBlock::Dense`] — standard self-attention (qwen3moe)
 //! - [`LayerAttnBlock::FullAttn`] — gated full-attention (qwen35moe every Nth)
 //! - [`LayerAttnBlock::Gdn`] — Gated-Delta-Net recurrent (qwen35moe the rest)
-//!
 //! The FFN and norm tensors are shared across all flavours and live on
 //! [`LayerDescriptor`] directly.
 
@@ -92,12 +90,10 @@ pub struct GdnTensors {
 }
 
 /// Per-layer FFN descriptors. One of two shapes, selected by the arch:
-///
 /// - **MoE** (`qwen3moe` / `qwen35moe` / `qwen36moe`): `ffn_gate_inp` +
-///   `ffn_{gate,up,down}_exps` populated; optional `shared` expert on hybrid
-///   arches. `dense` is `None`.
+/// `ffn_{gate,up,down}_exps` populated; optional `shared` expert on hybrid
+/// arches. `dense` is `None`.
 /// - **Dense** (`qwen35`): `dense` populated; all MoE fields are `None`.
-///
 /// The two branches are mutually exclusive — the forward pass consults
 /// `cfg.is_dense_ffn()` to pick the right path.
 #[derive(Debug, Clone)]

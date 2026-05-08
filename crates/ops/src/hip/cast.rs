@@ -1,5 +1,4 @@
 //! Dtype cast kernels — F32 → F16 today, others as needed.
-//!
 //! Purpose: decode-path glue. MMVQ accumulates in F32; attention / rmsnorm /
 //! swiglu consume F16. Keeping a one-kernel cast here avoids writing an F16
 //! accumulator variant of every MMVQ kernel.
@@ -63,7 +62,7 @@ pub fn cast_f16_to_f32(
     Ok(())
 }
 
-/// MTP-4-C-1: pointwise `y[i] = (bfloat16) x[i]` with round-to-nearest-even
+/// pointwise `y[i] = (bfloat16) x[i]` with round-to-nearest-even
 /// on the dropped F32 mantissa bits. NaN preserved as quiet NaN.
 pub fn cast_f32_to_bf16(
     reg: &OpsRegistry,
@@ -86,7 +85,7 @@ pub fn cast_f32_to_bf16(
     Ok(())
 }
 
-/// MTP-4-C-1: pointwise `y[i] = (float) x[i]`. Lossless bit-shift; BF16
+/// pointwise `y[i] = (float) x[i]`. Lossless bit-shift; BF16
 /// fits exactly into F32's upper half.
 pub fn cast_bf16_to_f32(
     reg: &OpsRegistry,
@@ -109,7 +108,7 @@ pub fn cast_bf16_to_f32(
     Ok(())
 }
 
-/// MTP-4-C-1: pointwise `y[i] = (bfloat16) (float) x[i]` via F32. F16 fits
+/// pointwise `y[i] = (bfloat16) (float) x[i]` via F32. F16 fits
 /// inside BF16's exponent range, so no overflow; BF16 has 3 fewer mantissa
 /// bits than F16, so the conversion rounds.
 pub fn cast_f16_to_bf16(
@@ -133,7 +132,7 @@ pub fn cast_f16_to_bf16(
     Ok(())
 }
 
-/// MTP-4-C-1: pointwise `y[i] = (fp16) (float) x[i]` via F32. BF16's
+/// pointwise `y[i] = (fp16) (float) x[i]` via F32. BF16's
 /// 8-bit exponent saturates F16's 5-bit exponent: `|x| > 65504` → ±Inf,
 /// `|x| < 6.1e-5` → subnormal/zero.
 pub fn cast_bf16_to_f16(

@@ -1,6 +1,5 @@
-// indexed_moe_mmvq_q4_k_r4_sorted_dp4a — V2.5.b sorted-reorder variant of
-// V2.4.b's r4 down-projection kernel.
-//
+// indexed_moe_mmvq_q4_k_r4_sorted_dp4a — sorted-reorder variant of
+// r4 down-projection kernel.
 // Same arithmetic / launch shape as `indexed_moe_mmvq_q4_k_r4_dp4a`, plus
 // a `sorted_pair_idx[total]` lookup that remaps `blockIdx.y` to the
 // original (token, slot) pair. Adjacent grid.y blocks share an expert

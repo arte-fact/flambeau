@@ -1,21 +1,18 @@
-//! MTP-3 — Multi-token-prediction head loader for Qwen3.6-27B.
-//!
+//! Multi-token-prediction head loader for Qwen3.6-27B.
 //! Reads the 15 mtp.* tensors from a thin sibling GGUF emitted by
 //! `tools/convert_qwen36_mtp.py` (or from the integrated form where the
 //! mtp.* tensors live in the same file as the base). Holds them on a
 //! single device — the LM-head rank in PP/TP topologies.
-//!
 //! Forward composition is intentionally kept out of this module: it
 //! lives next to the existing `forward/full_attn.rs` once the activation-
-//! precision plumbing is in place (MTP-3.5).
-//!
+//! precision plumbing is in place (5).
 //! Pairing semantics:
-//!   1. base GGUF carries `mtp.*` tensors → use those (integrated mode).
-//!   2. else look for `<basename>-mtp.gguf` next to the base, verify
-//!      `mtp.target_arch` / `mtp.target_hidden_size` /
-//!      `mtp.target_vocab_size` against base.
-//!   3. mismatch → fail loud.
-//!   4. neither → load without MTP (caller must handle Option<None>).
+//! 1. base GGUF carries `mtp.*` tensors → use those (integrated mode).
+//! 2. else look for `<basename>-mtp.gguf` next to the base, verify
+//! `mtp.target_arch` / `mtp.target_hidden_size` /
+//! `mtp.target_vocab_size` against base.
+//! 3. mismatch → fail loud.
+//! 4. neither → load without MTP (caller must handle Option<None>).
 
 #![cfg(feature = "hip")]
 
@@ -65,10 +62,10 @@ pub struct MtpHeadWeights {
 /// Weights for the single transformer block inside the MTP head. Looks
 /// like a standard pre-norm Qwen3 block with two notable details:
 /// 1. `q_proj` is `[hidden, 2*num_q_heads*head_dim]` because the
-///    output is `[Q ‖ gate]` (gated attention; `output_gate_type =
-///    "swish"` per Qwen3.6 config).
+/// output is `[Q ‖ gate]` (gated attention; `output_gate_type =
+/// "swish"` per Qwen3.6 config).
 /// 2. There is no `attn_gate` weight — the gate signal lives in the
-///    second half of `q_proj`'s output.
+/// second half of `q_proj`'s output.
 #[derive(Debug)]
 pub struct MtpBlockWeights {
     pub input_layernorm: DeviceTensor,
@@ -107,7 +104,6 @@ impl MtpHeadWeights {
 }
 
 /// Verify the pair-up metadata in `mtp_file` matches the base config.
-///
 /// The thin sibling format stamps `mtp.target_arch`,
 /// `mtp.target_hidden_size`, and `mtp.target_vocab_size`. The
 /// integrated form does NOT stamp these (the base IS the target by
@@ -276,11 +272,11 @@ fn upload_mtp_tensor(
     })
 }
 
-/// MTP-4-C-6: BF16 sibling of `upload_mtp_tensor` for the linear
+/// BF16 sibling of `upload_mtp_tensor` for the linear
 /// weights. F32 (norms) → F16 unchanged; F16 (linears) → BF16 via
 /// host-side cast. Q8_0 linears would need a dequant pass first and
 /// are rejected — re-run the converter with `MTP_LINEAR_DTYPE=f16`
-/// (the default since MTP-4-C-1) for BF16 forward.
+/// (the default since ) for BF16 forward.
 fn upload_mtp_tensor_bf16(
     file: &GgufFile,
     name: &str,
@@ -291,7 +287,7 @@ fn upload_mtp_tensor_bf16(
 
     if r.dtype == GgmlDType::F32 {
         // Norm — same F32 → F16 cast as the F16 path; rmsnorm_bf16
-        // takes F16 weight (decided in MTP-4-C-3).
+        // takes F16 weight (decided in ).
         return upload_mtp_tensor(file, name, device);
     }
 
@@ -352,7 +348,7 @@ fn upload_mtp_tensor_bf16(
     );
 }
 
-/// MTP-4-C-6: load MTP head with BF16 linear weights. Norms stay
+/// load MTP head with BF16 linear weights. Norms stay
 /// F16 (matches `rmsnorm_bf16`'s F16-weight signature).
 pub fn load_mtp_head_bf16(
     mtp_file: &GgufFile,
@@ -398,7 +394,6 @@ pub fn load_mtp_head_bf16(
 }
 
 /// Load all 15 MTP tensors from `mtp_file` to `device`.
-///
 /// The caller is responsible for validating `mtp_file`'s pairing
 /// metadata against the base config (use `verify_pairing`).
 pub fn load_mtp_head(mtp_file: &GgufFile, device: &HipDevice) -> Result<MtpHeadWeights> {
@@ -446,7 +441,6 @@ pub fn load_mtp_head(mtp_file: &GgufFile, device: &HipDevice) -> Result<MtpHeadW
 /// buffers owned by the caller. `cache_position` is where the
 /// current step's K/V will be written; `n_tokens_kv` is the count
 /// (1..=cache_position+1) the attention call should attend over.
-///
 /// vLLM/sglang's `spec_info.hidden_states` flow primes MTP's KV from
 /// every prefill position; passive harnesses without priming get
 /// ~0% acceptance because MTP's attention sees only the current
@@ -463,19 +457,17 @@ pub struct MtpKvCache {
 
 /// Reusable per-call scratch for `forward_mtp_step` and
 /// `forward_mtp_step_with_lm_head`.
-///
-/// MTP-4-CLEAN: previously each call did ~28 `hipMalloc` + `hipFree`
+/// previously each call did ~28 `hipMalloc` + `hipFree`
 /// pairs. The struct is allocated once at session init and reused
 /// for every MTP step. Sizes are derived from the model config
 /// (`hidden_size`, `num_heads`, `num_kv_heads`, `head_dim`,
 /// `moe_intermediate_size`, `vocab_size`) — re-allocate if any of
 /// these change.
-///
 /// Buffers split into three groups:
-///   1. step buffers — used by the body of `forward_mtp_step`
-///   2. transient KV slot — used only when the caller passes
-///      `kv = None` (legacy 1-slot path)
-///   3. lm-head buffers — used only by `forward_mtp_step_with_lm_head`
+/// 1. step buffers — used by the body of `forward_mtp_step`
+/// 2. transient KV slot — used only when the caller passes
+/// `kv = None` (legacy 1-slot path)
+/// 3. lm-head buffers — used only by `forward_mtp_step_with_lm_head`
 #[derive(Debug)]
 pub struct MtpForwardScratch {
     // ── Sizes (kept around for `dispose` so it doesn't need cfg).
@@ -521,7 +513,7 @@ pub struct MtpForwardScratch {
     pub gate_mlp_f32: flambeau_core::DevicePtr,
     pub up_mlp_f32: flambeau_core::DevicePtr,
     pub mlp_q8_1: flambeau_core::DevicePtr,
-    /// MTP-4-C-6: BF16 staging buffer for the MLP `silu(gate)*up` →
+    /// BF16 staging buffer for the MLP `silu(gate)*up` →
     /// down_proj input on the BF16 forward path. Q8_1 buffer is too
     /// small (`inter * 1.125 B` vs BF16 needs `inter * 2 B`).
     pub mlp_bf16: flambeau_core::DevicePtr,
@@ -669,24 +661,21 @@ impl MtpForwardScratch {
     }
 }
 
-/// MTP-3.5 forward — one MTP step on F16 hidden state.
-///
+/// 5 forward — one MTP step on F16 hidden state.
 /// Composes existing flambeau ops; no new kernels. Caller owns
 /// `scratch` (one alloc per session via `MtpForwardScratch::new`)
 /// and the optional persistent KV cache; passes `kv = None` for the
 /// legacy transient-1-slot path.
-///
 /// Inputs:
-///   `h_t` F16 [hidden]      — base model hidden (post `output_norm`)
-///   `e_token` F16 [hidden]  — embedding of the token sampled from h_t
-///   `position` usize        — base-model position (drives MROPE)
-///   `kv` Option             — Some = persistent multi-slot cache
-///                             (vLLM/sglang flow); None = transient
+/// `h_t` F16 [hidden] — base model hidden (post `output_norm`)
+/// `e_token` F16 [hidden] — embedding of the token sampled from h_t
+/// `position` usize — base-model position (drives MROPE)
+/// `kv` Option — Some = persistent multi-slot cache
+/// (vLLM/sglang flow); None = transient
 /// Output:
-///   `h_final_out` F16 [hidden] — pre-LM-head MTP-block output. Caller
-///                                runs the (shared) lm_head matmul to
-///                                produce draft logits.
-///
+/// `h_final_out` F16 [hidden] — pre-LM-head MTP-block output. Caller
+/// runs the (shared) lm_head matmul to
+/// produce draft logits.
 /// `position == 0` skips MROPE entirely (rotation is identity at
 /// position 0 — useful for the parity test against the Python ref).
 /// At `position > 0` we apply `rope_neox_partial_f16` with
@@ -867,12 +856,12 @@ pub fn forward_mtp_step(
     }
 
     // ── 8. Attention. Either:
-    //   (transient KV branch, kv=None) — use the scratch 1-slot KV.
-    //   (persistent KV branch, kv=Some) — append new K/V to
-    //     caller-provided cache at `cache_position`, run with
-    //     `n_tokens_kv` for accumulated history (this is what
-    //     vLLM/sglang's spec_info flow does — primed by the
-    //     prefill walk).
+    // (transient KV branch, kv=None) — use the scratch 1-slot KV.
+    // (persistent KV branch, kv=Some) — append new K/V to
+    // caller-provided cache at `cache_position`, run with
+    // `n_tokens_kv` for accumulated history (this is what
+    // vLLM/sglang's spec_info flow does — primed by the
+    // prefill walk).
     use flambeau_core::CopyDirection;
     let scale = 1.0_f32 / (head_dim as f32).sqrt();
     let (k_buf, v_buf, n_tokens_kv) = if let Some(c) = kv {
@@ -902,7 +891,7 @@ pub fn forward_mtp_step(
     )
     .context("mtp attention_decode_f16")?;
 
-    // ── 9. Output gate: sigmoid(gate) * attn_out (matches V1.7.4.b finding)
+    // ── 9. Output gate: sigmoid(gate) * attn_out (matches finding)
     sigmoid_mul_f16(
         ops, stream, gate_f16, attn_out_f16, gated_out_f16,
         n_q * head_dim,
@@ -917,7 +906,7 @@ pub fn forward_mtp_step(
         h, n_q * head_dim, qdtype_for(&mtp.block.o_proj)?,
     )
     .context("mtp mmvq o_proj")?;
-    // MTP-4-A: residual add in F32. h0_f32 (from fc mmvq) and
+    // residual add in F32. h0_f32 (from fc mmvq) and
     // attn_proj_f32 (from o_proj mmvq) are both already F32 — keep them
     // F32 for the add, cast to F16 only for the post-attn norm input.
     add_f32(ops, stream, h0_f32, attn_proj_f32, attn_proj_f32, h)
@@ -952,7 +941,7 @@ pub fn forward_mtp_step(
         h, inter, qdtype_for(&mtp.block.down_proj)?,
     )
     .context("mtp mmvq down_proj")?;
-    // MTP-4-A: residual add in F32. h1_f32 (= h0 + attn_proj from above)
+    // residual add in F32. h1_f32 (= h0 + attn_proj from above)
     // and down_f32 (from down_proj mmvq) are both F32 — keep F32 through
     // the add, cast to F16 only for the final mtp.norm input.
     add_f32(ops, stream, h1_f32, down_f32, down_f32, h)
@@ -972,23 +961,19 @@ pub fn forward_mtp_step(
     Ok(())
 }
 
-/// MTP-4-C-6: BF16-throughout MTP forward.
-///
+/// BF16-throughout MTP forward.
 /// Same residual/attention/MLP structure as `forward_mtp_step`, but
 /// activations stay BF16 across matmul → matmul (no Q8_1 activation
 /// quantize). F32 mmvq accumulators are cast to BF16 directly. The
 /// dominant per-mmvq Q8_1 noise (~0.78 % per-block-of-32, compounded
 /// across 8 sequential matmuls) is eliminated.
-///
 /// `mtp` weights must be loaded via `load_mtp_head_bf16` so the
 /// linears are BF16 (`mmvq_bf16_bf16` requires BF16 weight). Norms
 /// stay F16 (small + needs more mantissa than BF16).
-///
 /// `h_t` / `e_token` are F16 (caller convention from
 /// `forward_one_token_pp` / token_embd lookup); cast to BF16 at
 /// entry. `h_final_out` is F16 (caller's convention into the LM
 /// head); cast back at exit.
-///
 /// Scratch reuse: every "_f16" buffer in `MtpForwardScratch` is the
 /// same byte size as its BF16 counterpart, so the existing scratch
 /// is reused without growth. The Q8_1 buffers go unused on this
@@ -1176,7 +1161,7 @@ pub fn forward_mtp_step_bf16(
     )
     .context("mtp bf16 attention_decode")?;
 
-    // ── 9. Output gate: sigmoid(gate) * attn_out (V1.7.4.b math).
+    // ── 9. Output gate: sigmoid(gate) * attn_out (math).
     sigmoid_mul_bf16(ops, stream, gate_bf16, attn_out_bf16, gated_out_bf16, n_q * head_dim)
         .context("mtp bf16 sigmoid_mul")?;
 
@@ -1235,29 +1220,25 @@ pub fn forward_mtp_step_bf16(
 
 /// MTP helper: run `forward_mtp_step` followed by the LM-head
 /// matmul, returning the argmax-predicted token id.
-///
 /// vLLM convention (verified from
 /// `vllm/model_executor/models/qwen3_next.py:531`): the base model's
 /// forward applies `self.norm(hidden, residual)` BEFORE returning the
 /// hidden state to the caller. So when the spec-decode caller
 /// invokes `Qwen3NextMultiTokenPredictor.forward(hidden_states, ...)`,
 /// `hidden_states` is **post-`model.norm`**.
-///
 /// flambeau's existing `forward_one_token_pp` writes the pre-norm
 /// hidden into `scratch.hidden_a` (since output_norm is folded into
 /// `forward_output_head_decode` via `rmsnorm_quant_q8_1`). For MTP we
 /// re-apply `output_norm` standalone here to match vLLM's convention.
-///
 /// Inputs:
-///   `scratch`              — reusable per-session scratch buffers
-///   `output_norm_weight`   — base model's `output_norm.weight`
-///   `lm_head_weight`       — base model's `output.weight` (any GGML quant)
-///   `token_embd_row_f16`   — F16 [hidden] embedding of the token whose
-///                            successor we're predicting
-///   `hidden_pre_norm`      — F16 [hidden] base hidden state pre-output_norm
-///   `position`             — base-model position (drives MROPE)
-///   `kv`                   — Some = persistent multi-slot cache; None = transient
-///
+/// `scratch` — reusable per-session scratch buffers
+/// `output_norm_weight` — base model's `output_norm.weight`
+/// `lm_head_weight` — base model's `output.weight` (any GGML quant)
+/// `token_embd_row_f16` — F16 [hidden] embedding of the token whose
+/// successor we're predicting
+/// `hidden_pre_norm` — F16 [hidden] base hidden state pre-output_norm
+/// `position` — base-model position (drives MROPE)
+/// `kv` — Some = persistent multi-slot cache; None = transient
 /// Returns the predicted next-token id.
 #[allow(clippy::too_many_arguments)]
 pub fn forward_mtp_step_with_lm_head(
@@ -1282,7 +1263,7 @@ pub fn forward_mtp_step_with_lm_head(
     let vocab = cfg.vocab_size;
 
     // 1. Apply base output_norm to get the post-norm hidden vLLM's MTP
-    //    convention expects.
+    // convention expects.
     rmsnorm_f16(
         ops, stream,
         hidden_pre_norm, output_norm_weight.ptr, scratch.h_t_post_norm,
@@ -1291,8 +1272,8 @@ pub fn forward_mtp_step_with_lm_head(
     .context("base output_norm for MTP h_t")?;
 
     // 2. Run MTP on post-norm hidden via the F16/Q8_1 forward path.
-    //    The BF16 alt (FLAMBEAU_MTP_BF16=1) was deleted in S3 — anchors
-    //    leave SPEC_MTP unset, so MTP is loaded but never invoked here.
+    // The BF16 alt (FLAMBEAU_MTP_BF16=1) was deleted in S3 — anchors
+    // leave SPEC_MTP unset, so MTP is loaded but never invoked here.
     forward_mtp_step(
         ops, stream, device, cfg, mtp, scratch,
         scratch.h_t_post_norm,
@@ -1347,13 +1328,12 @@ pub fn forward_mtp_step_with_lm_head(
     Ok(best_idx as u32)
 }
 
-/// MTP-5h-Lever-B — async variant of [`forward_mtp_step_with_lm_head`]
+/// async variant of [`forward_mtp_step_with_lm_head`]
 /// that issues every device-side kernel (output_norm, MTP forward, LM
 /// head quant + mmvq) on the supplied `stream` but does NOT download
 /// logits or host-argmax. Returns once kernels are queued; logits live
 /// in `scratch.logits_f32` on device until the caller pairs this with
 /// [`mtp_logits_argmax_host`].
-///
 /// Used by the spec-decode driver to overlap the MTP draft with
 /// `save_gdn_snapshot` on per-rank default streams (run on a different
 /// stream of the head device, executes concurrently with the snap
@@ -1415,7 +1395,7 @@ pub fn forward_mtp_step_with_lm_head_async(
     Ok(())
 }
 
-/// MTP-5h-Lever-B — host-side download + argmax pair for
+/// host-side download + argmax pair for
 /// [`forward_mtp_step_with_lm_head_async`]. Syncs `stream` (waits for
 /// the queued lm-head mmvq to complete), downloads
 /// `scratch.logits_f32` to host, and returns the argmax token id.
@@ -1452,7 +1432,7 @@ pub fn mtp_logits_argmax_host(
 
 /// Variant of [`forward_mtp_step_with_lm_head`] that returns the full
 /// F32 logit row instead of just the argmax token. Used by the
-/// rejection-sampling spec-decode path (MTP-5g) which needs MTP's
+/// rejection-sampling spec-decode path () which needs MTP's
 /// distribution `q(·)` to compute `min(1, p(t)/q(t))` against the
 /// base verifier's `p(·)`.
 #[allow(clippy::too_many_arguments)]
@@ -1539,12 +1519,10 @@ pub fn forward_mtp_step_with_lm_head_logits(
 /// path: strip the trailing quant suffix and `.gguf` extension, then
 /// append `-mtp.gguf`. Returns the candidate path; the caller checks
 /// `.exists()`.
-///
 /// Examples:
-///   `Qwen3.6-27B-Q4_0.gguf`         → `Qwen3.6-27B-mtp.gguf`
-///   `Qwen3.6-27B-UD-Q4_K_XL.gguf`   → `Qwen3.6-27B-mtp.gguf`
-///   `Qwen3.6-27B-Q8_0.gguf`         → `Qwen3.6-27B-mtp.gguf`
-///
+/// `Qwen3.6-27B-Q4_0.gguf` → `Qwen3.6-27B-mtp.gguf`
+/// `Qwen3.6-27B-UD-Q4_K_XL.gguf` → `Qwen3.6-27B-mtp.gguf`
+/// `Qwen3.6-27B-Q8_0.gguf` → `Qwen3.6-27B-mtp.gguf`
 /// The heuristic: split the stem on `-`, drop trailing components
 /// that look like quant tags (start with `Q`, `UD`, `IQ`, `F`, `BF`,
 /// or are pure-numeric), keep the prefix.

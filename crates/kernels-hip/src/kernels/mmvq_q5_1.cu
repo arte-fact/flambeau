@@ -1,22 +1,17 @@
 // mmvq_q5_1 — Q5_1 weight × Q8_1 activation → F32 dst.
-//
 // Q5_1 layout: 2-byte d + 2-byte m + 4-byte qh + 16 bytes nibbles. Each
 // element reconstructs as `y = d · q5 + m` where `q5 = (qh_bit_i << 4) |
 // nibble_i` (∈ [0, 31]).
-//
 // Dot with Q8_1 activation `z` (where `d_y · Σ z_i = s_y`):
-//   Σ y_i · d_y · z_i = d · d_y · Σ q5_i · z_i  +  m · s_y
-//                     = d · d_y · (sumi_nib + 16·sumi_bit)  +  m · s_y
-//
+// Σ y_i · d_y · z_i = d · d_y · Σ q5_i · z_i + m · s_y
+// = d · d_y · (sumi_nib + 16·sumi_bit) + m · s_y
 // where sumi_nib = Σ nibble_i · z_i (packed DP4A on low nibbles) and
 // sumi_bit = Σ bit_i · z_i (packed DP4A on expanded 5th bits).
-//
 // Same threading + nibble-pairing pattern as mmvq_q5_0 / mmvq_q4_1:
-//   lane4 = tid & 3, block_idx = tid >> 2
-//   u_lo = y.qs[lane4]      (elements 4·lane4 .. +3)
-//   u_hi = y.qs[lane4 + 4]  (elements 4·lane4+16 .. +19)
-//   Per block: 4 DP4A (nibble_lo + nibble_hi + bit_lo + bit_hi) + `m·s_y/4`.
-//
+// lane4 = tid & 3, block_idx = tid >> 2
+// u_lo = y.qs[lane4] (elements 4·lane4 .. +3)
+// u_hi = y.qs[lane4 + 4] (elements 4·lane4+16 .. +19)
+// Per block: 4 DP4A (nibble_lo + nibble_hi + bit_lo + bit_hi) + `m·s_y/4`.
 // Block/grid: blockDim=256, gridDim=n_rows.
 
 #include "block_quant.cuh"

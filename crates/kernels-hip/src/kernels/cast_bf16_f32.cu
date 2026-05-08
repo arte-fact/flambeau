@@ -1,9 +1,7 @@
 // cast_bf16_f32 — pointwise BF16 → F32.
-//
-// MTP-4-C-1: lossless lift from BF16 storage into F32 for accumulators
+// lossless lift from BF16 storage into F32 for accumulators
 // or kernels that don't yet have a BF16 variant. Pure bit-shift; no
 // rounding loss.
-//
 // Launch: 1D, ceil(n/256) blocks × 256 threads.
 
 #include <hip/hip_runtime.h>

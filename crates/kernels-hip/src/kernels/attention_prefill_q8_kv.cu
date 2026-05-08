@@ -1,20 +1,16 @@
 // attention_prefill_q8_kv — GQA prefill attention with Q8_0 KV cache.
-//
-// V1-BENCH-#116-dp4a (Phase 4 follow-up). Score path is now pure
+// Score path is now pure
 // integer dp4a (`v_dot4_i32_i8` on gfx906) — Q for each (q_token,
 // q_head) block is quantized to Q8_0 in LDS once at block start; K
 // is read packed as int32 and dotted via `__builtin_amdgcn_sdot4`;
 // scalar K.d × Q.d is applied once per Q8_0 block (32 elements).
 // V path stays on FP16 dequant per element (Phase 5 covers PV).
-//
 // Reference: same `vec_dot_fattn_vec_KQ_q8_0` pattern as decode kernel
 // in `/artefact/llama.cpp/ggml/src/ggml-cuda/fattn-common.cuh:264`.
-//
 // Layout:
-//   Q:   [n_q_tokens, n_heads_q, head_dim] FP16
-//   K/V: [n_k_tokens, n_heads_kv, head_dim/32] block_q8_0
-//   Out: [n_q_tokens, n_heads_q, head_dim] FP16
-//
+// Q: [n_q_tokens, n_heads_q, head_dim] FP16
+// K/V: [n_k_tokens, n_heads_kv, head_dim/32] block_q8_0
+// Out: [n_q_tokens, n_heads_q, head_dim] FP16
 // Supported head_dim: {64, 128, 256}.
 // Launch: blockDim = { head_dim/4 }, gridDim = { n_q_tokens, n_heads_q, 1 }.
 

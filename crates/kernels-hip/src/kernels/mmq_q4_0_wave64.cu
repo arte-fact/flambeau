@@ -1,33 +1,26 @@
-// mmq_q4_0_wave64 — V2.28.a wave64 MMQ for Q4_0 × Q8_1 activation.
-//
-// V2.27 head-to-head bench showed Qwen3.6-35B-A3B-Q4_0 prefill at 12% of
-// llama.cpp (132 vs 1118 tok/s) because V2.23 shipped Q4_0 MMVQ only and
+// mmq_q4_0_wave64 — 8.a wave64 MMQ for Q4_0 × Q8_1 activation.
+// head-to-head bench showed Qwen3.6-35B-A3B-Q4_0 prefill at 12% of
+// llama.cpp (132 vs 1118 tok/s) because 3 shipped Q4_0 MMVQ only and
 // `qmatmul()` falls back to row-by-row at L>1. Closing that gap needs a
 // proper MMQ tile. This kernel is the direct Q4_0 sibling of
 // `mmq_q4_1_wave64.cu` — identical structure with the simpler no-min
-// bias-correction identity (V2.23 MMVQ already uses this form):
-//
-//   dot = Σ_i (d · (q_i - 8)) · d_y · q8_i
-//       = d · d_y · Σ q_i · q8_i  -  8 · d · d_y · Σ q8_i
-//       = d · d_y · sumi          -  8 · d · y_s
-//       = d · (d_y · sumi - 8 · y_s)
-//
+// bias-correction identity (3 MMVQ already uses this form):
+// dot = Σ_i (d · (q_i - 8)) · d_y · q8_i
+// = d · d_y · Σ q_i · q8_i - 8 · d · d_y · Σ q8_i
+// = d · d_y · sumi - 8 · d · y_s
+// = d · (d_y · sumi - 8 · y_s)
 // where sumi = DP4A(q_packed, y_packed) and y_s = by->s = d_y · Σ q8_i
 // (pre-computed in the Q8_1 block header).
-//
 // Tile shape (same family as `mmq_q4_1_wave64` / `mmq_q5_K_wave64`):
-//   MMQ_Y  = 64 (one wave64; each thread = 1 output row)
-//   TILE_N = 8  (8 output cols per block, loop-unrolled)
-//   Grid   = (⌈nrows_x / 64⌉, ⌈ncols_y / 8⌉)
-//   Block  = 64 threads
-//
+// MMQ_Y = 64 (one wave64; each thread = 1 output row)
+// TILE_N = 8 (8 output cols per block, loop-unrolled)
+// Grid = (⌈nrows_x / 64⌉, ⌈ncols_y / 8⌉)
+// Block = 64 threads
 // Q4_0 block layout (18 bytes, 32 elements):
-//   d  fp16       — scale
-//   qs uint8[16]  — nibble pairs; byte i's LOW nibble = element i, HIGH = i+16
-//
-// Reconstruction: x_real_i = d · (q_i - 8)  (q_i unsigned in [0, 15]).
-//
-// V2.10.b lesson: no per-block sumf_* transient arrays — fold the correction
+// d fp16 — scale
+// qs uint8[16] — nibble pairs; byte i's LOW nibble = element i, HIGH = i+16
+// Reconstruction: x_real_i = d · (q_i - 8) (q_i unsigned in [0, 15]).
+// lesson: no per-block sumf_* transient arrays — fold the correction
 // into the persistent `sums[c]` inside the inner loop.
 
 #include "block_quant.cuh"

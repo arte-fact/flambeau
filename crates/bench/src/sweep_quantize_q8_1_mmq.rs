@@ -1,10 +1,8 @@
-//! V2.2.d.P4 — round-trip cert for the `quantize_q8_1_mmq` kernel.
-//!
+//! 4 — round-trip cert for the `quantize_q8_1_mmq` kernel.
 //! Generates seeded F32 input `[total_b, ncols]`, runs the MMQ Q8_1
 //! prequantiser on device, reads the 144-B blocks back, dequantises
 //! each block on CPU using the same (d, Σxi) pair the GPU wrote, and
 //! compares to the input.
-//!
 //! Passes when `max_rel_err ≤ 1e-2`. Q8_1's 8-bit granularity is
 //! ~1/127 ≈ 0.8 %, so the cert tolerance is 1.25× that floor to cover
 //! the sub-block sum path that the Q4_1 vec_dot consumes.
@@ -171,7 +169,7 @@ fn run_shape(
     }
 
     // CPU dequantise + compare. Blocks are laid out (big_block, col) row-major:
-    //   block[b, c] at offset (b * total_b + c) * 144.
+    // block[b, c] at offset (b * total_b + c) * 144.
     let blocks: &[BlockQ8_1Mmq] = bytemuck::cast_slice(&blocks_raw);
 
     // Per-block error metric: the Q8_1 quant noise floor is d/2 per element,

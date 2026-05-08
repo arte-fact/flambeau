@@ -1,5 +1,4 @@
 //! Hermes-style `<tool_call>\n{JSON}\n</tool_call>` parser.
-//!
 //! **T2.1 skeleton**: this module ships with a passthrough impl that
 //! treats the full decoder stream as free text (single `TextDelta`
 //! events). The real state machine lands in T2.2 (happy-path Hermes

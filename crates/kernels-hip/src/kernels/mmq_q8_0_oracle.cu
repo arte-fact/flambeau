@@ -1,16 +1,13 @@
 // mmq_q8_0_oracle — correctness-oracle MMQ for Q8_0 weights × Q8_1 activation.
-//
 // Grid layout:
-//   blockDim  = { 256 }           (single wave64 × 4, same as MMVQ)
-//   gridDim   = { n_rows, n_batches }
-//   shared    = 0
-//
+// blockDim = { 256 } (single wave64 × 4, same as MMVQ)
+// gridDim = { n_rows, n_batches }
+// shared = 0
 // Each block computes ONE output element `dst[batch, row] = sum_k x[row, k] * y[batch, k]`.
 // Inner loop is identical to `mmvq_q8_0_q8_1`; only difference is the `y`
 // pointer is offset by `batch * n_blocks_per_row` to reach the activation
 // row for this batch.
-//
-// This is the V1.4 correctness oracle — slow (no shared-mem tiling, no
+// This is the correctness oracle — slow (no shared-mem tiling, no
 // re-use of X across batches) but proven against the per-shape reference.
 // The first-class 4-warp LDS-tiled port from llamacpp-turbo replaces this
 // impl_id once certed.

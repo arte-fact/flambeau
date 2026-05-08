@@ -1,10 +1,8 @@
 //! Correctness-cert JSON schema.
-//!
 //! A cert is a signed contract that `impl_id` produces results within the
 //! declared tolerance on a fixed shape grid. Every dispatch row in
 //! `dispatch/<backend>/<arch>.toml` must point to a cert file that exists on
 //! disk and has `pass: true`.
-//!
 //! The JSON is stable — adding fields is fine, removing or re-typing
 //! requires a version bump. `bench cert-check` is the build-time gate that
 //! catches dispatch rows whose cert is missing or stale.
@@ -37,7 +35,7 @@ pub struct Cert {
     pub emitted_at: String,
     /// Identifier for the rig that produced this cert (hostname + GPU arch).
     pub rig: String,
-    /// First-level PMC metrics, if captured. Empty for V1.3 (rocprofv3 wiring
+    /// First-level PMC metrics, if captured. Empty for (rocprofv3 wiring
     /// lands later).
     #[serde(default)]
     pub pmc: Option<PmcSnapshot>,

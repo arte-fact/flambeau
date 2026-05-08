@@ -1,13 +1,11 @@
 //! Collective op traits and a CPU host-bounce reference implementation.
-//!
 //! The reference impl runs on a shared-memory `Mesh<N>` — each "rank" is a
 //! thread that uses a barrier + shared buffers to fan data through the
 //! collective. It has two jobs:
-//!
-//! 1. Exercise the `Mesh<N>` trait surface for V1.0's end gate without
-//!    requiring physical GPUs.
+//! 1. Exercise the `Mesh<N>` trait surface for end gate without
+//! requiring physical GPUs.
 //! 2. Serve as the correctness oracle against which RCCL / NCCL impls are
-//!    certed in `bench sweep`.
+//! certed in `bench sweep`.
 
 use std::sync::{Arc, Barrier, Mutex};
 
@@ -65,7 +63,6 @@ fn check_buf(buf: &[u8], cfg: &CollectiveCfg) -> CollectiveResult<()> {
 
 /// CPU host-bounce mesh: N "ranks" run in N threads and cooperate on
 /// shared-memory buffers guarded by a `Barrier` + a `Mutex<Vec<...>>`.
-///
 /// Each rank holds a `RefRankHandle` that issues collectives against this
 /// shared state. Tests spawn N threads, hand each its handle, and assert the
 /// post-collective buffer matches the math.
@@ -143,7 +140,6 @@ impl RefRankHandle {
 // ---- op traits + ref impls -------------------------------------------------
 
 /// In-place sum-reduce across all ranks.
-///
 /// Contract: every rank calls `all_reduce` with a same-size, same-dtype buffer;
 /// on return each rank's buffer holds the element-wise reduction.
 pub trait AllReduce {
@@ -398,7 +394,7 @@ mod tests {
     #[test]
     fn all_reduce_sum_mesh_4() {
         // Each rank contributes [r+1, r+2, r+3, r+4] → sum across 4 ranks:
-        //   [1+2+3+4, 2+3+4+5, 3+4+5+6, 4+5+6+7] = [10, 14, 18, 22].
+        // [1+2+3+4, 2+3+4+5, 3+4+5+6, 4+5+6+7] = [10, 14, 18, 22].
         spawn_ranks(4, |h| {
             let r = h.rank.0 as f32;
             let input: Vec<f32> = (0..4).map(|i| r + 1.0 + i as f32).collect();

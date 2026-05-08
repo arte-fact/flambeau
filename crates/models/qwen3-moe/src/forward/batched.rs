@@ -1,32 +1,28 @@
 //! **P2.9b-i2** — batched decode driver: run N concurrent slots through
 //! one PP forward pass with shared per-rank scratch.
-//!
 //! ## What batches and what doesn't
-//!
 //! For each layer, this driver dispatches:
 //! - **Full-attn layers** → [`super::attn::forward_full_attn_layer_decode_batched`]
-//!   (i2-A1). RMSNorm + Q|gate / K / V projection + RoPE batch as single
-//!   kernel launches over `[N, *]`; per-slot KV-append + per-slot
-//!   `attention_decode_f16_slots` because each slot owns its own KV cache
-//!   and query history.
+//! (i2-A1). RMSNorm + Q|gate / K / V projection + RoPE batch as single
+//! kernel launches over `[N, *]`; per-slot KV-append + per-slot
+//! `attention_decode_f16_slots` because each slot owns its own KV cache
+//! and query history.
 //! - **GDN layers** → per-slot loop calling
-//!   [`super::gdn::forward_gdn_layer_decode`]. GDN is recurrent (one
-//!   `GdnLayerState` evolves through one new token per slot); not
-//!   batchable across slots without a kernel rewrite. Reuses one
-//!   shared `GdnScratch` (`rank_scratch.gdn_decode`) sequentially.
+//! [`super::gdn::forward_gdn_layer_decode`]. GDN is recurrent (one
+//! `GdnLayerState` evolves through one new token per slot); not
+//! batchable across slots without a kernel rewrite. Reuses one
+//! shared `GdnScratch` (`rank_scratch.gdn_decode`) sequentially.
 //! - **Post-attn add + RMSNorm** → batched at `n_tokens=N` via the
-//!   existing `add_f16` / `rmsnorm_f16` kernels.
+//! existing `add_f16` / `rmsnorm_f16` kernels.
 //! - **FFN/MoE** → batched at `n_tokens=N` via the prefill kernels
-//!   (`forward_dense_ffn_prefill` / `forward_router_prefill` /
-//!   `forward_moe_ffn_prefill` / `forward_shared_expert_prefill`),
-//!   which all accept arbitrary `n_tokens`. This is the biggest single
-//!   throughput lever on dense+MoE archs.
+//! (`forward_dense_ffn_prefill` / `forward_router_prefill` /
+//! `forward_moe_ffn_prefill` / `forward_shared_expert_prefill`),
+//! which all accept arbitrary `n_tokens`. This is the biggest single
+//! throughput lever on dense+MoE archs.
 //! - **Output head** → per-slot loop on the last rank
-//!   (one `forward_output_head_decode` call per slot, per-slot logits
-//!   row downloaded between calls).
-//!
+//! (one `forward_output_head_decode` call per slot, per-slot logits
+//! row downloaded between calls).
 //! ## Lifetime / scratch
-//!
 //! The driver consumes a single shared `ShardedForwardPrefillScratch`
 //! sized for `max_tokens >= N` slots — typically allocated once at
 //! server boot and reused per dispatch. Each `Qwen3MoEShardedSession`
@@ -65,15 +61,12 @@ pub struct BatchSlot {
 /// **P2.9b-i2-A1-wire** — drive `slots.len()` concurrent decode steps
 /// through the PP topology with real per-layer batching, returning
 /// per-slot `[vocab]` F32 logits.
-///
 /// `sessions[s.idx]` is the per-slot session for `BatchSlot` `s`. The
 /// caller must hold the i1 slot-pool guards for the lifetime of this
 /// call.
-///
 /// `scratch` is the shared per-rank batched workspace (size sufficient
 /// for `>= slots.len()` tokens; typically allocated once at server boot
 /// at `FLAMBEAU_INFLIGHT_SLOTS`).
-///
 /// `logits_out[s.idx]` is resized to `vocab_size` and overwritten with
 /// the slot's logits row.
 pub fn forward_decode_batched_pp(
@@ -124,8 +117,8 @@ pub fn forward_decode_batched_pp(
     }
 
     // 1. Embed N tokens at rank 0. Each slot's token row goes into
-    //    rank-0 hidden_a at offset s * row_bytes — same pattern as
-    //    forward_prefill_pp's host-loop embed.
+    // rank-0 hidden_a at offset s * row_bytes — same pattern as
+    // forward_prefill_pp's host-loop embed.
     {
         let rank0 = cluster.device(0);
         rank0.bind()?;
@@ -153,7 +146,7 @@ pub fn forward_decode_batched_pp(
     let slot_positions: Vec<usize> = slots.iter().map(|s| s.position).collect();
 
     // 2. Per-rank layer loop with stage-boundary peer_copy_via_host of
-    //    [N, hidden] F16.
+    // [N, hidden] F16.
     for rank_idx in 0..n_ranks {
         let device = cluster.device(rank_idx);
 
@@ -229,10 +222,10 @@ pub fn forward_decode_batched_pp(
     }
 
     // 3. Output head on the last rank — per-slot loop, since
-    //    OutputHeadScratch is sized for one F32 logit row at a time.
-    //    Each slot reads its row of hidden_a, runs the output head,
-    //    downloads logits to host, then the next slot reuses the same
-    //    scratch.
+    // OutputHeadScratch is sized for one F32 logit row at a time.
+    // Each slot reads its row of hidden_a, runs the output head,
+    // downloads logits to host, then the next slot reuses the same
+    // scratch.
     let last_idx = n_ranks - 1;
     let last_device = cluster.device(last_idx);
     last_device.bind()?;
@@ -278,12 +271,10 @@ pub fn forward_decode_batched_pp(
 }
 
 /// Per-layer batched dispatcher used by [`forward_decode_batched_pp`].
-///
 /// Walks one local layer (`local_idx` within the rank's `shard.layers`),
 /// dispatching:
 /// - full-attn → [`forward_full_attn_layer_decode_batched`]
 /// - GDN → per-slot loop with shared `gdn_decode_scratch`
-///
 /// then runs post-attn add + rmsnorm and FFN/MoE batched at `n_tokens=N`.
 #[allow(clippy::too_many_arguments)]
 fn forward_layer_decode_batched(

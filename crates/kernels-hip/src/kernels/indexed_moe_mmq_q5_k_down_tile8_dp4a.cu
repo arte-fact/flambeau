@@ -1,23 +1,19 @@
-// indexed_moe_mmq_q5_k_down_tile8_dp4a — V2.31.a Q5_K down-projection MoE MMQ.
-//
+// indexed_moe_mmq_q5_k_down_tile8_dp4a — 1.a Q5_K down-projection MoE MMQ.
 // Closes the MMVQ-at-prefill hole in Qwen3-Coder-30B-A3B-UD-Q4_K_XL. In the
 // UD mixed-quant GGUF, 13 of 48 layers have Q5_K `ffn_down_exps` (the rest
-// Q4_K / Q6_K). V2.30.b rocprofv3 at Mesh<4> pp=512 attributed 640 ms
+// Q4_K / Q6_K). 0.b rocprofv3 at Mesh<4> pp=512 attributed 640 ms
 // (31.56 % of prefill wall, 9.8 ms / call × 65 calls) to
 // `indexed_moe_mmvq_q5_k` — classic prefill-on-MMVQ latency-bound pattern.
-//
-// Structure: fuses V2.6.b's `indexed_moe_mmq_q4_k_down_tile8_dp4a` tile
+// Structure: fuses `indexed_moe_mmq_q4_k_down_tile8_dp4a` tile
 // layout (Q4_K + dmin — same scales header) with the 5th-bit `qh` decode
 // from `mmvq_q5_k.cu` (bit `2*il + half` of `qh[lane]` contributes 16 to
 // each raw_q). No byte-borrow risk (Q4/Q5 nibbles stay unsigned).
-//
-// Per-block invariant (V2.6.a padded sort): all 8 slots share the same
+// Per-block invariant (padded sort): all 8 slots share the same
 // expert → weight slab loaded per-thread exactly once per sub-block,
 // reused across 8 activation columns via the 8-dp4a inner loop.
-//
 // Launch:
-//   grid  = (ceil(n_rows / 64), padded_total / 8, 1)
-//   block = (64, 1, 1)
+// grid = (ceil(n_rows / 64), padded_total / 8, 1)
+// block = (64, 1, 1)
 
 #include "block_quant.cuh"
 #include <hip/hip_runtime.h>
@@ -116,7 +112,7 @@ void flambeau_indexed_moe_mmq_q5_k_down_tile8_dp4a_q8_1(
             // Decode 32 Q5_K weights for this sub-block into 8 packed int32
             // (4 unsigned values each, byte range [0, 31]).
             // nib4 = low or high 4-bit nibble of qs packed across 4 bytes.
-            // hi4  = bit s_bit of qh, shifted left by 4 to add 16 when set.
+            // hi4 = bit s_bit of qh, shifted left by 4 to add 16 when set.
             int v[8] = {0};
             if (row_ok) {
                 const int* ql_ptr = (const int*) (bx->qs + 32 * il);

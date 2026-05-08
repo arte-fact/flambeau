@@ -1,15 +1,13 @@
 // mmvq_f16_q8_1 — F16 weight × Q8_1 activation MMVQ for F16 weights in
 // UD-Q8_K_XL GGUFs (Unsloth dynamic quant reserves F16 for layers flagged
 // precision-sensitive by the i-matrix).
-//
 // Same threading pattern as `mmvq_q8_0_dp4a_vdr2` (256 threads/block, 1 row
 // per block, lane_in_grp=tid&3 → int32-pair slot, block_idx=tid>>2). Per
 // inner step each thread processes 8 elements — 8 F16 weights × 8 dequantised
 // Q8_1 quants, all accumulated into one F32 per thread, then warp-reduce.
-//
 // The weight side is F16 so DP4A doesn't apply — we use plain F32 FMAs.
 // On gfx906 a 40-CU MI50 at 1 TB/s HBM, reading the 30 MiB (6144×5120 F16)
-// weight matrix is 30 µs roofline per call; V2.21 expects ~100 F16 MMVQs per
+// weight matrix is 30 µs roofline per call; 1 expects ~100 F16 MMVQs per
 // 27B-UD-Q8_K_XL decode step (48 attn_gate + 48 ssm_out + a few scatter),
 // so ~3 ms/decode-step lower bound.
 

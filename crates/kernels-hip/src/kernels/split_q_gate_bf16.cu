@@ -1,8 +1,7 @@
 // split_q_gate_bf16 — BF16 sibling of `split_q_gate_f16`. Splits the
 // interleaved `(Q | gate)` output of a gated-attention query projection
 // into two contiguous BF16 tensors.
-//
-// MTP-4-C-5: matches the F16 kernel byte-for-byte; only storage type
+// matches the F16 kernel byte-for-byte; only storage type
 // differs. Pointwise strided copy (no arithmetic), so no F32 staging.
 
 #include "block_quant.cuh"

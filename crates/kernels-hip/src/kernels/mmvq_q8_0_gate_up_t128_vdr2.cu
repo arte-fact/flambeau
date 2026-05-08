@@ -1,5 +1,4 @@
 // mmvq_q8_0_gate_up_t128_vdr2 — fused gate+up Q8_0 with combined t128 + VDR=2.
-//
 // C9-followup-2 sibling of `mmvq_q8_0_gate_up_dp4a` (256t, VDR=2). Same
 // activation-sharing fusion (one Q8_1 read per block, both gate and up
 // outputs), but at 128 t/block to pack 2 wave64s/CU = 2 in-flight blocks/CU

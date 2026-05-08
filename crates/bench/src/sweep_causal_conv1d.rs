@@ -1,5 +1,4 @@
-//! V1.7.2.C causal depthwise Conv1d correctness sweep.
-//!
+//! causal depthwise Conv1d correctness sweep.
 //! Cert compares the GPU output against a CPU F32 reference at shapes matching
 //! Qwen3.6 GDN inner conv (`conv_kernel = 4`, `conv_channels = 8192`). Also
 //! exercises a small width for edge-case coverage.

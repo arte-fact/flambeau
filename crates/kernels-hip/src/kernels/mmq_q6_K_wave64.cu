@@ -1,41 +1,33 @@
 // mmq_q6_K_wave64 — wave64 MMQ for Q6_K × Q8_1 activation.
-//
-// V2.3.b.3 — candle has no Q6_K MMQ, so this kernel is written fresh using
-// the same wave64 / MMQ_Y=64 / TILE_N=8 / DP4A structure as the V2.2.d Q5_K
-// and V2.3.b.1 Q4_K wave64 ports. The DP4A inner follows our existing
+// candle has no Q6_K MMQ, so this kernel is written fresh using
+// the same wave64 / MMQ_Y=64 / TILE_N=8 / DP4A structure as the Q5_K
+// and Q4_K wave64 ports. The DP4A inner follows our existing
 // `mmvq_q6_k_dp4a.cu` port of llama.cpp `vec_dot_q6_K_q8_1_impl_mmvq`,
 // restructured to iterate serially within one thread (per row) rather
 // than cooperatively across 64 lanes.
-//
-// Why: V1.4's `mmq_q6_K_4warp` is an F32-tile placeholder. Without a
+// Why: `mmq_q6_K_4warp` is an F32-tile placeholder. Without a
 // first-class Q6_K MMQ, prefill on Qwen3.6-35B falls through to per-row
 // Q6_K MMVQ at m ≥ 128 on `ffn_down_exps` (Q6_K in UD-Q4_K_S quant) —
-// 12 k kernel launches per pp512, analogous to the Q5_K pre-V2.2.d gap.
-//
+// 12 k kernel launches per pp512, analogous to the Q5_K pre-gap.
 // Q6_K layout (from block_quant.cuh):
-//   ql[128]     = 128 bytes of low nibbles (4 bits per element × 256)
-//   qh[64]      =  64 bytes of high bits   (2 bits per element × 256)
-//   scales[16]  =  16 signed int8 scales, one per 16 elements
-//   d           =  super-block fp16 scale
-//
+// ql[128] = 128 bytes of low nibbles (4 bits per element × 256)
+// qh[64] = 64 bytes of high bits (2 bits per element × 256)
+// scales[16] = 16 signed int8 scales, one per 16 elements
+// d = super-block fp16 scale
 // Per-element reconstruction (matches llama.cpp vec_dot_q6_K_q8_1_impl_mmvq):
-//   q = (ql_nibble | (qh_bits << 4)) - 32   →  signed int8 in [-32, 31]
-//
+// q = (ql_nibble | (qh_bits << 4)) - 32 → signed int8 in [-32, 31]
 // Sub-block decomposition (mirrors our `mmvq_q6_k.cu`'s h/q_idx/pos
 // scheme, iterated serially inside one thread rather than cooperatively
 // across lanes):
-//   sub ∈ [0, 8)       — one per Q8_1 activation block
-//   h   = sub / 4      — which 128-element half of the super-block
-//   q_idx = sub % 4    — 0..3, picks which ql-nibble + qh-bit shift
-//
+// sub ∈ [0, 8) — one per Q8_1 activation block
+// h = sub / 4 — which 128-element half of the super-block
+// q_idx = sub % 4 — 0..3, picks which ql-nibble + qh-bit shift
 // For a sub-block, the 32 Q6_K weights cluster into 8 packed int32s, each
 // holding 4 signed int8 Q6_K values (bytewise -32 shift applied). This
 // packs as 4 × ql-bytes together with 4 × qh-bit-pairs shifted into the
 // upper nibble.
-//
 // Args (8 scalar + 3 ptr — same signature as Q4_K / Q5_K wave64):
-//   vx, vy, dst, ncols_x, nrows_x, ncols_y, nrows_y, nrows_dst
-//
+// vx, vy, dst, ncols_x, nrows_x, ncols_y, nrows_y, nrows_dst
 // Correctness oracle: CPU dequant(weights) × Q8_1-roundtrip(act), via
 // `crates/bench/src/sweep_mmq.rs` new `Q6KWave64` variant.
 
@@ -117,14 +109,13 @@ void flambeau_mmq_q6_K_wave64_q8_1(
             // shift by byte-wise subtract because `(unsigned)x - const`
             // has a borrow-chain that corrupts bytes when any byte < 32.
             // Instead, compensate after DP4A via the identity
-            //   (raw - 32) · y = (raw · y) - 32 · sum_y
+            // (raw - 32) · y = (raw · y) - 32 · sum_y
             // — the same pattern Q4_K / Q5_K use for their (d, m) bias.
-            //
             // ql layout for this sub-block (32 consecutive bytes):
-            //   base = 64h + (q_idx & 1) * 32
+            // base = 64h + (q_idx & 1) * 32
             // qh layout (32 consecutive bytes, shared shift-pattern across
             // q_idx=0..3 at the same `h`):
-            //   base = 32h
+            // base = 32h
             int v[8] = {0};
             if (row_ok) {
                 const int ql_base = 64 * h + ((q_idx & 1) ? 32 : 0);
@@ -156,7 +147,7 @@ void flambeau_mmq_q6_K_wave64_q8_1(
 
             // Scales apply per 16 elements. Sub-block has 32 elements = 2
             // scale positions. Within-super-block scale index base:
-            //   scale_idx = 8h + 2*q_idx + lsub   (lsub ∈ {0, 1})
+            // scale_idx = 8h + 2*q_idx + lsub (lsub ∈ {0, 1})
             const int sc_a = (int) sc_buf[8 * h + 2 * q_idx + 0];  // j ∈ 0..3
             const int sc_b = (int) sc_buf[8 * h + 2 * q_idx + 1];  // j ∈ 4..7
 
@@ -188,7 +179,7 @@ void flambeau_mmq_q6_K_wave64_q8_1(
                     sumi_y_b = dp4a(0x01010101, y_packed[j], sumi_y_b);
                 }
 
-                // (raw - 32) · y  =  raw · y  -  32 · Σ y
+                // (raw - 32) · y = raw · y - 32 · Σ y
                 const int corrected_a = sumi_a - 32 * sumi_y_a;
                 const int corrected_b = sumi_b - 32 * sumi_y_b;
 

@@ -1,9 +1,8 @@
 //! `Qwen3MoEModel` — config + device weights, the read-only half of
 //! inference state. A model is loaded once per rank and used across many
 //! requests; each active request owns a `Qwen3MoESession` alongside it.
-//!
 //! Forward passes (`forward_one_token`, `forward_prefill`) are not yet
-//! wired — V1.7.3-a lands only the load + teardown scaffold so later
+//! wired — a lands only the load + teardown scaffold so later
 //! chunks (`b`..`e`) can focus on kernel composition.
 
 #![cfg(feature = "hip")]
@@ -17,7 +16,6 @@ use crate::layout::ModelLayout;
 use crate::weights::ModelWeights;
 
 /// Loaded Qwen3.x MoE model. Owns the op registry + device weights.
-///
 /// Created via [`Qwen3MoEModel::load`]. Call [`Qwen3MoEModel::dispose`]
 /// before the `HipDevice` is reclaimed — otherwise the inner weights leak
 /// and you'll see a warn on drop.

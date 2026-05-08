@@ -1,30 +1,24 @@
 // mmq_q4_K_wave64 — wave64 MMQ for Q4_K × Q8_1 activation.
-//
-// V2.3.b.1 port of candle's `mul_mat_q4_K_gfx906_impl_fast`
+// port of candle's `mul_mat_q4_K_gfx906_impl_fast`
 // (/artefact/candle/candle-hip-kernels/src/quantized.cu:8203-8324).
-// Mirrors V2.2.d's `mmq_q5_K_wave64` almost verbatim — Q4_K differs only
+// Mirrors `mmq_q5_K_wave64` almost verbatim — Q4_K differs only
 // in the weight dequant math: flat 4-bit nibbles (no high-bit merge from
 // `qh` that Q5_K needs).
-//
-// Why: V1.4's `mmq_q4_K_4warp` is an F32-tile placeholder — it
+// Why: `mmq_q4_K_4warp` is an F32-tile placeholder — it
 // dequantises to F32, copies a 16×32 F32 tile to LDS, and MMs via scalar
 // FMA. At prefill, Q4_K-weighted mats in Qwen3.6-35B MoE (ffn_gate / up
 // exps) fall through to per-row MMVQ once m≥128 because MMQ is slower
 // per-call than MMVQ-looped. DP4A port lifts per-call time into the
 // turbo band; m≥128 dispatch can switch to MMQ.
-//
 // Activation layout: standard `flambeau_block_q8_1` (36 B), NOT the DS4
 // 144 B MMQ layout. Reuses `scratch.x_q8_1` at the call site — same
 // buffer as MMVQ and Q5_K MMQ.
-//
 // Tile: MMQ_Y = 64 (one wave64 per output row), TILE_N = 8 (8 output
 // cols per thread, loop-unrolled). Grid = (⌈nrows_x / 64⌉, ⌈ncols_y / 8⌉),
 // Block = 64 threads (one warp).
-//
 // Args (8 scalar + 3 ptr — same shape as Q5_K wave64):
-//   vx, vy, dst,
-//   ncols_x, nrows_x, ncols_y, nrows_y, nrows_dst
-//
+// vx, vy, dst,
+// ncols_x, nrows_x, ncols_y, nrows_y, nrows_dst
 // Correctness oracle: CPU dequant(weights) × Q8_1-roundtrip(act), via
 // `crates/bench/src/sweep_mmq.rs` new `Q4KWave64` variant.
 

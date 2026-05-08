@@ -1,12 +1,10 @@
 // mmvq_q4_0_gate_up_t128_dp4a — fused gate+up Q4_0 with t128 schedule.
-//
-// Pairs the V2.2.b-style 128-thread thin-block schedule (mmvq_q4_1_t128 /
+// Pairs the style 128-thread thin-block schedule (mmvq_q4_1_t128 /
 // mmvq_q4_0_t128) with the gate+up activation-sharing pattern from cycle 1
 // (mmvq_q4_0_gate_up_dp4a). Aimed at the same gfx906 latency-bound regime
 // at decode (~10 % HBM utilisation): 128 t/block = 2 wave64s/CU lets gfx906
 // run two concurrent blocks per CU, packing more in-flight work to hide
 // HBM latency than the 256t baseline (1 block/CU at occupancy ceiling).
-//
 // Same per-pointer + asymmetric-row contract as mmvq_q4_0_gate_up_dp4a;
 // only the thread count and per-thread per-iter loop bound change.
 

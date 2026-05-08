@@ -1,5 +1,4 @@
 // mmvq_q5_k_r2 — Q5_K MMVQ with r2 multi-row DPP reduce (candle P29).
-//
 // Same structure as `mmvq_q4_k_r2`, with Q5_K's 5th bit pulled from `qh[]`
 // per element. Within each 32-lane half-warp the qh-byte at `qh[lane_lo]`
 // is shared across the 8 sub-block iterations; the bit mask walks the byte

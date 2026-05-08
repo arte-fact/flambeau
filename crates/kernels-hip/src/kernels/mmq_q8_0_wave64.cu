@@ -1,24 +1,20 @@
 // mmq_q8_0_wave64 — wave64 MMQ for Q8_0 × Q8_1 activation.
-//
-// V2.4.c: alternative to `mmq_q8_0_4warp` targeting the dense-attention
+// alternative to `mmq_q8_0_4warp` targeting the dense-attention
 // Q8_0 MMQ path (attn_q/k/v/o on Qwen3.6-35B, ~310 calls × 1.1 ms = 337 ms
 // / 19 % of prefill time). Same wave64 MMQ_Y=64 × TILE_N=8 pattern used
-// by V2.2.d/V2.3.b K-quant kernels, but simpler dequant: Q8_0 blocks
+// by /K-quant kernels, but simpler dequant: Q8_0 blocks
 // have just `d(fp16) + qs[32 int8]`, no super-block, no min, no qh.
-//
 // Tile shape:
-//   MMQ_Y  = 64 (one wave64 per output-row quad; each thread = 1 row)
-//   TILE_N = 8  (8 output cols per tile, loop-unrolled per thread)
-//   Grid   = (⌈nrows_x / 64⌉, ⌈ncols_y / 8⌉)
-//   Block  = 64 threads (one warp)
-//
+// MMQ_Y = 64 (one wave64 per output-row quad; each thread = 1 row)
+// TILE_N = 8 (8 output cols per tile, loop-unrolled per thread)
+// Grid = (⌈nrows_x / 64⌉, ⌈ncols_y / 8⌉)
+// Block = 64 threads (one warp)
 // Q8_0 dequant math:
-//   per K=32 block: y_j = d_x * d_y * Σ_i (x_i * y_i)
-//   DP4A packs 4 int8×int8 per call → QK8_0=32 means 8 DP4A per block.
-//
+// per K=32 block: y_j = d_x * d_y * Σ_i (x_i * y_i)
+// DP4A packs 4 int8×int8 per call → QK8_0=32 means 8 DP4A per block.
 // Args (8 scalar + 3 ptr — matches K-quant wave64 signature for the shared
 // `mmq_wave64_launch` path):
-//   vx, vy, dst, ncols_x, nrows_x, ncols_y, nrows_y, nrows_dst
+// vx, vy, dst, ncols_x, nrows_x, ncols_y, nrows_y, nrows_dst
 
 #include "block_quant.cuh"
 #include <hip/hip_runtime.h>

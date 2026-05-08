@@ -1,20 +1,16 @@
 // rope_f16 — rotary positional embedding, interleaved-pair layout, F16 in-place.
-//
 // For each (token, head, pair) triple:
-//   angle = positions[token] * theta_base^(-2*pair/head_dim)
-//   (x0, x1) = (x[2*pair], x[2*pair+1])
-//   x[2*pair]   = x0*cos(angle) - x1*sin(angle)
-//   x[2*pair+1] = x0*sin(angle) + x1*cos(angle)
-//
+// angle = positions[token] * theta_base^(-2*pair/head_dim)
+// (x0, x1) = (x[2*pair], x[2*pair+1])
+// x[2*pair] = x0*cos(angle) - x1*sin(angle)
+// x[2*pair+1] = x0*sin(angle) + x1*cos(angle)
 // Layout matches Qwen3.6 (and candle's gemma4-style interleaved-pair):
 // consecutive F16 values in the head_dim axis form one rotating pair. The
 // kernel handles a single tensor — caller invokes it separately for Q and K.
-//
 // Launch shape:
-//   blockDim  = { head_dim / 2 }    (64 threads at head_dim=128)
-//   gridDim   = { n_tokens, n_heads, 1 }
-//   shared    = 0
-//
+// blockDim = { head_dim / 2 } (64 threads at head_dim=128)
+// gridDim = { n_tokens, n_heads, 1 }
+// shared = 0
 // `head_dim` must be even. For head_dim=128 we fit in a single wave64 block.
 
 #include <hip/hip_runtime.h>

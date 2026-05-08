@@ -1,9 +1,7 @@
 //! Multi-device topology: `Mesh<N>`, rank ids, collective ops.
-//!
 //! A `Mesh` is `N` ordered compute ranks cooperating on one model. `Mesh<1>`
 //! is the degenerate single-GPU case — every downstream component passes
 //! through the same trait surface as `Mesh<4>`, no `if N == 1` branching.
-//!
 //! The collective ops (`AllReduce`, `AllGather`, `AllToAll`, `Broadcast`) are
 //! op-trait-shaped so the dispatch story is identical to `QMatMul`: one
 //! contract per op, many impls (host-bounce CPU reference here, RCCL in
@@ -21,7 +19,6 @@ impl fmt::Display for RankId {
 }
 
 /// A mesh describes the size and per-rank identity of a collective group.
-///
 /// V1 ships a single flat mesh. Multi-dimensional sub-meshes (TP × PP, etc.)
 /// are a V2 concern; the trait shape here must not assume flatness beyond
 /// `rank_count`.
@@ -78,7 +75,6 @@ impl CollectiveCfg {
 
 /// Maps each transformer layer index to the rank that owns its weights +
 /// KV / GDN state. Constructed once at load time by `Qwen3MoEShardedModel`.
-///
 /// V1 ships the contiguous-block policy: rank `r` owns layers
 /// `[r * per, (r+1) * per)` for `per = ceil(num_layers / num_ranks)`. The
 /// pattern minimises cross-rank hops per decoded token to exactly

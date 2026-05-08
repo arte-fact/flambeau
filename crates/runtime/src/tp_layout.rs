@@ -1,31 +1,27 @@
-//! TP-1a — generic weight-sharding layout for tensor parallelism.
-//!
+//! generic weight-sharding layout for tensor parallelism.
 //! [`WeightLayout`] encodes how a single weight tensor is distributed
 //! across a TP mesh of `world` ranks. The three variants follow standard
 //! Megatron-LM nomenclature:
-//!
 //! - [`WeightLayout::Replicated`] — every rank holds the full tensor.
-//!   Used for 1-D parameters (norms, biases that aren't on a sharded
-//!   projection's output dim) and for global tensors small enough to
-//!   trade memory for AllReduce-free dispatch (token-embd in V1; later
-//!   vocab-shardable).
+//! Used for 1-D parameters (norms, biases that aren't on a sharded
+//! projection's output dim) and for global tensors small enough to
+//! trade memory for AllReduce-free dispatch (token-embd in V1; later
+//! vocab-shardable).
 //! - [`WeightLayout::ColParallel`] — split along the *output* dimension.
-//!   Each rank computes `Y_r = X · W_r^T` on the full input and emits
-//!   `1/world` of the output rows. No AllReduce required at this stage.
+//! Each rank computes `Y_r = X · W_r^T` on the full input and emits
+//! `1/world` of the output rows. No AllReduce required at this stage.
 //! - [`WeightLayout::RowParallel`] — split along the *input* dimension.
-//!   Each rank computes `Y_r = X_r · W_r^T` on its input slice and emits
-//!   a *partial* output. AllReduce-sum on the partial buffer reconstructs
-//!   the full output (this is where `BarP2pAllReduce` lives in TP-2).
-//!
+//! Each rank computes `Y_r = X_r · W_r^T` on its input slice and emits
+//! a *partial* output. AllReduce-sum on the partial buffer reconstructs
+//! the full output (this is where `BarP2pAllReduce` lives in ).
 //! "Output dim" / "input dim" are framework conventions; the concrete
-//! tensor axis is recorded in `dim` so the slicing code (TP-1b) knows
+//! tensor axis is recorded in `dim` so the slicing code () knows
 //! which axis to cut. For `[rows, cols]` matmul weights stored as
 //! `[output_dim=rows, input_dim=cols]`:
 //! - ColParallel splits dim 0 (rows = output features).
 //! - RowParallel splits dim 1 (cols = input features).
 //! For 1-D tensors that *are* sharded (biases on a ColParallel projection
 //! output), use ColParallel with `dim = 0`.
-//!
 //! Model-family-specific tensor-name → layout maps live in the model
 //! crate (e.g. `crates/models/qwen3-moe/src/tp_layout.rs`); this module
 //! only owns the enum + helpers.
@@ -33,7 +29,6 @@
 use std::fmt;
 
 /// How a single weight tensor is distributed across the TP mesh.
-///
 /// Construct via the safe constructors ([`WeightLayout::col_parallel`],
 /// [`WeightLayout::row_parallel`], [`WeightLayout::replicated`]) which
 /// validate `world >= 1` and reject the meaningless `world = 0` case.
@@ -48,33 +43,29 @@ pub enum WeightLayout {
     /// `total / world` (when divisible). Caller is responsible for
     /// AllReduce-summing partials produced by RowParallel matmuls.
     RowParallel { world: u32, dim: usize },
-    /// **TP-4a** — head-aware permutation slicing for fused-QKV
+    /// head-aware permutation slicing for fused-QKV
     /// tensors (GDN's `attn_qkv` and `ssm_conv1d`).
-    ///
     /// Source tensor outer dim is `[Q_part | K_part | V_part]` (the
     /// on-disk order, verified empirically; see `qwen3-moe::tp_slice`
     /// "Bug 4 fix" comment). Per rank, the slicer re-concatenates as
     /// `[Q_local | K_local | V_local]` — the order the GDN forward
     /// kernel reads.
-    ///
     /// `kq_replicated` controls whether the K and Q sub-slabs are
     /// split or replicated across ranks:
-    ///
     /// - `false` (default, `qwen3next` / `rep_inner` head mapping):
-    ///   contiguous TP split — each rank gets `num_k_heads/world` K
-    ///   heads and `num_v_heads/world` V heads. Local
-    ///   `V[v] → K[v / n_rep]` stays fully on-rank because adjacent V
-    ///   heads share a K head.
+    /// contiguous TP split — each rank gets `num_k_heads/world` K
+    /// heads and `num_v_heads/world` V heads. Local
+    /// `V[v] → K[v / n_rep]` stays fully on-rank because adjacent V
+    /// heads share a K head.
     /// - `true` (`qwen35moe` / `qwen36moe` / `rep_outer` head mapping):
-    ///   contiguous TP split is structurally broken — local
-    ///   `V[v] → K[v % H_k]` would wrap to K heads on other ranks.
-    ///   Workaround (Megatron's standard for incompatible GQA splits):
-    ///   replicate K and Q across ranks (full slabs on every rank),
-    ///   split only V along the v-head axis. Per-rank conv channels
-    ///   become `local_d_inner + 2·full_qk_size`. The downstream
-    ///   `ssm_out` is RowParallel{dim=1} on `local_d_inner` so the
-    ///   AR-fold pattern is unchanged.
-    ///
+    /// contiguous TP split is structurally broken — local
+    /// `V[v] → K[v % H_k]` would wrap to K heads on other ranks.
+    /// Workaround (Megatron's standard for incompatible GQA splits):
+    /// replicate K and Q across ranks (full slabs on every rank),
+    /// split only V along the v-head axis. Per-rank conv channels
+    /// become `local_d_inner + 2·full_qk_size`. The downstream
+    /// `ssm_out` is RowParallel{dim=1} on `local_d_inner` so the
+    /// AR-fold pattern is unchanged.
     /// Divisibility: `num_v_heads % world == 0` always; `num_k_heads %
     /// world == 0` only when `kq_replicated == false`. The slicing
     /// function in `qwen3-moe::tp_slice` validates these at apply time.
@@ -156,7 +147,6 @@ impl WeightLayout {
     /// Per-rank length along the sharded axis when the full axis has
     /// `total_along_dim` elements. For [`WeightLayout::Replicated`]
     /// (no shard axis) this returns `total_along_dim` unchanged.
-    ///
     /// # Errors
     /// [`LayoutError::Indivisible`] if `total_along_dim % world != 0`.
     /// Sharded layouts must divide cleanly so each rank's slice lands
@@ -186,7 +176,6 @@ impl WeightLayout {
     /// elements-per-shard-step `bytes_per_unit` (typically the row stride
     /// for ColParallel, the column stride for RowParallel). For
     /// [`WeightLayout::Replicated`] the offset is always `0`.
-    ///
     /// # Errors
     /// [`LayoutError::RankOutOfRange`] if `r >= world`.
     /// [`LayoutError::Indivisible`] propagated from

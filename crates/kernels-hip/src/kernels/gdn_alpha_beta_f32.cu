@@ -1,24 +1,19 @@
 // gdn_alpha_beta_f32 — fused GDN α/β/gate compute.
-//
 // Per token t, per v-head i:
-//   gate_out[t, i] = softplus(alpha_in[t, i] + ssm_dt_bias[i]) * ssm_a[i]
-//   beta_out[t, i] = sigmoid(beta_in[t, i])
-//
+// gate_out[t, i] = softplus(alpha_in[t, i] + ssm_dt_bias[i]) * ssm_a[i]
+// beta_out[t, i] = sigmoid(beta_in[t, i])
 // `ssm_dt_bias` and `ssm_a` are per-head constants (shape [num_v_heads]),
 // shared across all L tokens.
-//
-// V2.2.d fix 3: kernel now takes `n_tokens`; grid = (n_tokens, 1, 1),
+// kernel now takes `n_tokens`; grid = (n_tokens, 1, 1),
 // block = (num_v_heads, 1, 1). Previously the caller looped L times at
 // one-token-per-launch; at pp512 × 16 GDN layers this fired 12312 tiny
 // launches dominated by launch overhead (4 µs/call × 12k = 50 ms, plus
 // ~150 ms of corresponding rocclr_copyBuffer arg-marshalling). One
 // launch per layer now.
-//
 // Decode (n_tokens = 1) works unchanged — grid = (1, 1, 1).
-//
 // Numerically-stable forms:
-//   softplus(x) = max(x, 0) + log1p(exp(-|x|))
-//   sigmoid(x)  = { 1 / (1 + exp(-x)) if x >= 0,  exp(x) / (1 + exp(x)) otherwise }
+// softplus(x) = max(x, 0) + log1p(exp(-|x|))
+// sigmoid(x) = { 1 / (1 + exp(-x)) if x >= 0, exp(x) / (1 + exp(x)) otherwise }
 
 #include <hip/hip_runtime.h>
 

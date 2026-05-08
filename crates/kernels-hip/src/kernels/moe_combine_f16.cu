@@ -1,16 +1,12 @@
 // moe_combine_f16 — MoE expert output fan-in + residual add.
-//
 // For each token (row) and each hidden dim element:
-//   out[token, d] = residual[token, d]
-//                 + Σ_{k=0..top_k} weight[token, k] * expert_out[token, k, d]
-//
+// out[token, d] = residual[token, d]
+// + Σ_{k=0..top_k} weight[token, k] * expert_out[token, k, d]
 // Candle C1 pattern. Pure pointwise per (token, d) slot with a small
 // inner sum over `top_k`.
-//
 // Launch:
-//   blockDim = { 256 }
-//   gridDim  = { ceil(n_tokens * hidden / 256), 1, 1 }
-//
+// blockDim = { 256 }
+// gridDim = { ceil(n_tokens * hidden / 256), 1, 1 }
 // A thread owns one `(token, d)` slot. Expert-output buffer is shaped
 // [n_tokens, top_k, hidden] F16 and the expert-weight buffer is
 // [n_tokens, top_k] F32 (router softmax output).

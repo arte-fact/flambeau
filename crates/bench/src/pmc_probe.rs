@@ -32,9 +32,9 @@ pub fn run_one(kernel_stem: &str, m: usize, k: usize, n: usize) -> Result<String
         "mmvq_q6_k_r4" => ("flambeau_mmvq_q6_k_r4_q8_1", 64),
         "mmq_q8_0_oracle" => ("flambeau_mmq_q8_0_oracle_q8_1", 256),
         "mmq_q8_0_4warp" => ("flambeau_mmq_q8_0_4warp_q8_1", 256),
-        // V2.2.d candle port: 2D block (64, 4, 1), DS4 Q8_1 activation, 9 args, 30336 B LDS.
+        // candle port: 2D block (64, 4, 1), DS4 Q8_1 activation, 9 args, 30336 B LDS.
         "mmq_q4_1_4warp_lds" => ("flambeau_mmq_q4_1_4warp_lds_q8_1", 0),
-        // V2.2.d / V2.3.b K-quant wave64 MMQ ports. All three share the same
+        // / K-quant wave64 MMQ ports. All three share the same
         // 8-arg signature and launch shape; only weight block size differs.
         "mmq_q4_K_wave64" => ("flambeau_mmq_q4_K_wave64_q8_1", 64),
         "mmq_q5_K_wave64" => ("flambeau_mmq_q5_K_wave64_q8_1", 64),
@@ -146,7 +146,7 @@ fn run_mmq_q8_0(
     Ok(())
 }
 
-/// V2.2.d Q4_1 4-warp LDS-tiled MMQ probe (candle port).
+/// Q4_1 4-warp LDS-tiled MMQ probe (candle port).
 /// Args: (vx, vy, dst, ncols_x, nrows_x, ncols_y, stride_col_y, stride_row_x, nrows_dst)
 /// Block = (64, 4, 1), shared = 30336 B.
 /// Y layout: block_q8_1_mmq × (n_big_blocks_k, ncols_y), 144 B each, where
@@ -238,7 +238,7 @@ fn run_mmq_q4_1_4warp_lds(
     Ok(())
 }
 
-/// V2.2.d / V2.3.b K-quant wave64 MMQ probe (candle ports). Q4_K and Q5_K
+/// / K-quant wave64 MMQ probe (candle ports). Q4_K and Q5_K
 /// share launch shape; only weight block size differs.
 /// Args: (vx, vy, dst, ncols_x, nrows_x, ncols_y, nrows_y, nrows_dst)
 /// Block = (64, 1, 1).
@@ -419,7 +419,7 @@ fn synthetic_weights(kernel_stem: &str, n_blocks: usize) -> Vec<u8> {
     vec![0u8; n_blocks * block_size_of(kernel_stem).unwrap_or(0)]
 }
 
-/// V2.4.c Q8_0 wave64 MMQ probe (separate from K-quant wave64 because
+/// Q8_0 wave64 MMQ probe (separate from K-quant wave64 because
 /// Q8_0 uses 34-byte-per-block layout with QK8_0=32, not QK_K=256).
 fn run_mmq_q8_0_wave64(
     dev: &HipDevice,

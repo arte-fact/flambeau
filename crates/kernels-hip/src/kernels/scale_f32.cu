@@ -1,10 +1,8 @@
 // scale_f32 — pointwise `y[i] = x[i] * scale`.
-//
 // GDN path scales Q by `1 / sqrt(head_k_dim)` before the recurrent state
 // step (matches candle's `q * scale` before `delta_net_step_vectorized`).
 // Separate kernel rather than fusing into l2_norm_f32 to keep that
 // kernel's cert untouched.
-//
 // Launch: 1D, ceil(n/256) blocks × 256 threads.
 
 #include <hip/hip_runtime.h>

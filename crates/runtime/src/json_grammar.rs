@@ -1,22 +1,18 @@
 //! Minimal JSON state machine for **P0.1** response_format=json_object.
-//!
 //! Tracks a streaming JSON value as bytes are appended to it. After each
 //! token the model proposes, the sampler decodes the candidate's bytes,
 //! attempts to advance the state, and rejects (zeros out) candidates
 //! that would make the output structurally invalid.
-//!
 //! Coverage:
 //! - top-level value: object, array, string, number, true, false, null
 //! - balanced braces and brackets
 //! - string escape handling (\\, \", \n, \t, \uXXXX prefix)
 //! - number / true / false / null literal validity
-//!
 //! What it does NOT enforce (intentional, V1):
 //! - JSON Schema (use the json_schema field for tighter constraints in V2)
 //! - key uniqueness
 //! - UTF-8 codepoint completeness past the BPE boundary (the streaming
-//!   detokenizer already handles that)
-//!
+//! detokenizer already handles that)
 //! At every byte the [`JsonState::is_complete`] predicate tells the
 //! sampler whether stopping right now would produce a valid JSON value
 //! (so we can let the model emit `<|im_end|>` only at top-level

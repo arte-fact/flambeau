@@ -1,24 +1,20 @@
 // indexed_moe_mmvq_q6_k — Q6_K MMVQ with per-token expert routing.
-//
 // Q6_K sibling of `indexed_moe_mmvq_q4_k.cu`. Same indexing /
 // launch-shape contract; inner arithmetic is byte-identical to
 // `mmvq_q6_k.cu`. Needed because UD-Q4_K_S and similar mixed-quant
 // GGUFs promote some `ffn_down_exps` from Q4_K to Q6_K for quality.
-//
 // Layout:
-//   weights       [n_experts, n_rows, n_sb_per_row]   Q6_K
-//   activations   [n_tokens, n_sb_per_row * 8]        Q8_1 (8 Q8_1 blocks per super-block)
-//   expert_ids    [n_tokens, top_k]                   i32
-//   output        [n_tokens, top_k, n_rows]           F32
-//
+// weights [n_experts, n_rows, n_sb_per_row] Q6_K
+// activations [n_tokens, n_sb_per_row * 8] Q8_1 (8 Q8_1 blocks per super-block)
+// expert_ids [n_tokens, top_k] i32
+// output [n_tokens, top_k, n_rows] F32
 // Launch:
-//   blockDim  = { 64 }                (one wave64, matches mmvq_q6_k.cu)
-//   gridDim   = { n_rows, n_tokens * top_k, 1 }
-//
+// blockDim = { 64 } (one wave64, matches mmvq_q6_k.cu)
+// gridDim = { n_rows, n_tokens * top_k, 1 }
 // Lane mapping (lane ∈ 0..63), mirroring mmvq_q6_k.cu:
-//   h     = lane / 32               {0, 1}   — which 128-element half of the super-block
-//   pos   = lane % 32                0..31   — position within that half
-//   lsub  = pos / 16                 {0, 1}  — which of the two per-8-scales pairs
+// h = lane / 32 {0, 1} — which 128-element half of the super-block
+// pos = lane % 32 0..31 — position within that half
+// lsub = pos / 16 {0, 1} — which of the two per-8-scales pairs
 // Each lane processes 4 elements per super-block (q_idx ∈ 0..3) →
 // 8 lanes × 4 × 2 halves = 64 elements/lane group, × 32 = one super-block.
 

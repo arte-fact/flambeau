@@ -1,20 +1,16 @@
 // indexed_moe_mmvq_q4_k_r4_dp4a — MoE Q4_K down-projection MMVQ, 4 rows per block.
-//
 // r4 extension of `indexed_moe_mmvq_q4_k_r2_dp4a.cu`. Used for the down
 // projection in `forward_moe_ffn_{prefill,decode}`. Halves block count
 // again vs r2 (and quarters vs the 1-row baseline):
-//   - r2: grid = (n_rows / 2, n_tokens * top_k)
-//   - r4: grid = (n_rows / 4, n_tokens * top_k)
-//
+// - r2: grid = (n_rows / 2, n_tokens * top_k)
+// - r4: grid = (n_rows / 4, n_tokens * top_k)
 // Lane layout (wave64, 4 rows simultaneously):
-//   row_idx  = lane >> 4            — 0..3: which row in the quad
-//   lane_lo  = lane & 15            — 0..15: quarter-warp position
-//
+// row_idx = lane >> 4 — 0..3: which row in the quad
+// lane_lo = lane & 15 — 0..15: quarter-warp position
 // Each 16-lane quarter-warp handles 1 row. Q4_K super-block has 32 int32s
 // of qs (128 bytes); 16 lanes cover them with 2 ints/lane per super-block
 // → inner loop does 2 dp4a chains instead of 1 (r2) per super-block.
-//
-// Expected win: V2.4.a measured +19 % prefill from the same transition
+// Expected win: measured +19 % prefill from the same transition
 // (baseline→r4) on the gate_up kernel; this kernel takes ~400 ms / 21 %
 // of prefill, so proportional savings give another +4–5 % end-to-end.
 

@@ -1,5 +1,4 @@
 //! MLP building blocks — SwiGLU today.
-//!
 //! Dense gate/up/down matmul itself lives under [`super::qmatmul`]; this
 //! module is for the non-matmul pointwise piece.
 
@@ -68,7 +67,7 @@ pub fn swiglu_f32(
     Ok(())
 }
 
-/// V2.23.b.2 — fused `y_f16[i] = (fp16)(silu(a[i]) * b[i])`. Replaces the
+/// 3.b.2 — fused `y_f16[i] = (fp16)(silu(a[i]) * b[i])`. Replaces the
 /// swiglu_f32 + cast_f32_f16 pair on MoE activation paths.
 pub fn swiglu_f32_to_f16(
     reg: &OpsRegistry,
@@ -94,7 +93,7 @@ pub fn swiglu_f32_to_f16(
     Ok(())
 }
 
-/// MTP-4-C-5: BF16 sibling of [`swiglu_f32_to_f16`]. Same fused
+/// BF16 sibling of [`swiglu_f32_to_f16`]. Same fused
 /// `y_bf16[i] = (bf16)(silu(a[i]) * b[i])` from F32 inputs.
 pub fn swiglu_f32_to_bf16(
     reg: &OpsRegistry,
@@ -120,13 +119,12 @@ pub fn swiglu_f32_to_bf16(
     Ok(())
 }
 
-/// CN-80B-19c/d — fused `y_q8_1 = quantize_row_q8_1(silu(a) * b)` for F32
+/// /d — fused `y_q8_1 = quantize_row_q8_1(silu(a) * b)` for F32
 /// inputs. Replaces the unfused chain (swiglu_f32 → quantize_q8_1) used by
 /// the GDN tail (`forward/gdn.rs`), and the swiglu_f32_to_f16 →
 /// quantize_f16_q8_1 chain used by the shared-expert decode
 /// (`forward/moe.rs`). One launch + one HBM round-trip saved per layer
 /// per token.
-///
 /// Grid: one thread block per 32-element Q8_1 block, 32 threads/block.
 /// `n` must be a multiple of 32.
 pub fn swiglu_f32_to_q8_1(
@@ -208,7 +206,7 @@ pub fn add_f16(
     Ok(())
 }
 
-/// MTP-4-A — F32 sibling of `add_f16`. `y[i] = a[i] + b[i]` in F32,
+/// F32 sibling of `add_f16`. `y[i] = a[i] + b[i]` in F32,
 /// no precision loss. Used for the MTP block's residual additions to
 /// keep the residual stream in F32 between matmul output and the next
 /// norm input.
@@ -239,7 +237,6 @@ pub fn add_f32(
 /// `y = silu(gate) * up`, pointwise. All three tensors are F16, flat length
 /// `n` (usually `m * hidden`). In-place-safe if the caller wants `y == gate`
 /// or `y == up` at the cost of the kernel reading before it writes that lane.
-///
 /// Kernel: `flambeau_swiglu_f16`. One thread per output element, 256
 /// threads/block, 1D grid.
 pub fn swiglu_f16(
@@ -268,12 +265,11 @@ pub fn swiglu_f16(
 }
 
 /// Pointwise `y[i] = sigmoid(gate[i]) * x[i]`, F16 in/out.
-///
 /// Qwen3.5/3.6 full-attention output gate: plain logistic sigmoid applied
 /// to the gate half of the fused Q-projection, then element-wise multiply
 /// against the attention output. **Not** SiLU — SiLU is
 /// `gate * sigmoid(gate)`, so using `swiglu_f16` here adds an extra factor
-/// of `gate` vs llama.cpp's graph (V1.7.4.b root cause).
+/// of `gate` vs llama.cpp's graph (root cause).
 pub fn sigmoid_mul_f16(
     reg: &OpsRegistry,
     stream: &HipStream,
@@ -299,7 +295,7 @@ pub fn sigmoid_mul_f16(
     Ok(())
 }
 
-/// MTP-4-C-5: BF16 sibling of [`sigmoid_mul_f16`]. Same numerically-stable
+/// BF16 sibling of [`sigmoid_mul_f16`]. Same numerically-stable
 /// sigmoid (branch on sign so `exp` arg stays ≤ 0). Used for MTP attention
 /// output gate: `attn_gated = attn_out * sigmoid(gate)`.
 pub fn sigmoid_mul_bf16(

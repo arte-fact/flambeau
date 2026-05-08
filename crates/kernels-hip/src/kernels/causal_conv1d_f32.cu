@@ -1,24 +1,19 @@
 // causal_conv1d_f32 — depthwise causal 1D convolution, F32 in/out.
-//
 // The caller pre-concatenates `conv_kernel - 1` history tokens with the
 // `n_new` incoming tokens into one contiguous buffer:
-//   conv_input[n_total = (conv_kernel - 1) + n_new, conv_channels]
-//
+// conv_input[n_total = (conv_kernel - 1) + n_new, conv_channels]
 // For each output (t ∈ 0..n_new, c ∈ 0..conv_channels):
-//   y[t, c] = Σ_{k=0..conv_kernel-1}  w[c, k] · conv_input[t + k, c]
-//
+// y[t, c] = Σ_{k=0..conv_kernel-1} w[c, k] · conv_input[t + k, c]
 // Depthwise — no cross-channel interaction. Channels are independent.
-//
 // Weight layout matches the GGUF on-disk order for `ssm_conv1d.weight`:
 // outermost-first `[conv_channels, conv_kernel]` with the **kernel-tap axis
 // innermost/contiguous** (offset = c * conv_kernel + k). This matches
 // llama.cpp's `ggml-cuda/ssm-conv.cu::w[j] = w_block[tid * stride_w + j]`
 // (tid = channel, j = tap) and avoids a load-time transpose that candle
 // carries instead (`delta_net.rs:248 — .t()?.contiguous()?`).
-//
 // Launch shape:
-//   gridDim  = { ceil(conv_channels / THREADS), n_new, 1 }
-//   blockDim = { THREADS, 1, 1 }     // THREADS=256 fits gfx906 wave64 pairs
+// gridDim = { ceil(conv_channels / THREADS), n_new, 1 }
+// blockDim = { THREADS, 1, 1 } // THREADS=256 fits gfx906 wave64 pairs
 
 #include <hip/hip_runtime.h>
 

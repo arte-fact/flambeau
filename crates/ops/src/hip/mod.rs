@@ -1,20 +1,18 @@
 //! HIP-specialised op surface.
-//!
 //! Every model-visible op lands here as a stateless free function taking
 //! `&OpsRegistry` + `&HipStream` + device pointers + shape. The registry
 //! pre-loads one `HipModule` per kernel stem at session init; per-call cost
 //! is one symbol lookup (`hipModuleGetFunction`) + `hipModuleLaunchKernel`.
-//!
 //! Architectural placement:
 //! - Op wrappers here **never** parse hsaco, never write dispatch predicates
-//!   from env flags. They resolve variant selection through the committed
-//!   `KernelDescriptor` tables in `flambeau-backend-hip::impls` (architectural
-//!   rule 1: dispatch lives in `dispatch/<backend>/<arch>.toml`, mirrored by
-//!   the Rust table).
+//! from env flags. They resolve variant selection through the committed
+//! `KernelDescriptor` tables in `flambeau-backend-hip::impls` (architectural
+//! rule 1: dispatch lives in `dispatch/<backend>/<arch>.toml`, mirrored by
+//! the Rust table).
 //! - The lifetime story: each op call borrows `&OpsRegistry` and a `&HipStream`;
-//!   all kernel args are locals in the launch function so they live until
-//!   `kernel.launch(...)` returns. This matches the pattern already in
-//!   `flambeau-bench::sweep_*`.
+//! all kernel args are locals in the launch function so they live until
+//! `kernel.launch(...)` returns. This matches the pattern already in
+//! `flambeau-bench::sweep_*`.
 
 use std::collections::HashMap;
 
@@ -36,10 +34,9 @@ pub mod router;
 pub mod sampling;
 pub mod softmax;
 
-/// Kernel stems every V1.7 model might touch. Loaded once in
+/// Kernel stems every model might touch. Loaded once in
 /// [`OpsRegistry::new`]; missing entries fail fast so model code never races
 /// an unloaded module.
-///
 /// Keep this list aligned with `kernels-hip/src/kernels/*.cu`. The build's
 /// `hsaco.rs` lists the authoritative set in its `CATALOGUE`.
 pub const KERNEL_STEMS: &[&str] = &[
@@ -216,7 +213,6 @@ pub enum OpsRegistryError {
 impl OpsRegistry {
     /// Load every entry in [`KERNEL_STEMS`] into a fresh `HipModule`. Fails
     /// fast if any stem is missing from the catalogue or HIP refuses the load.
-    ///
     /// Binds `dev` first so the modules load onto the right device even when
     /// the caller built multiple `OpsRegistry`s back-to-back on a multi-GPU
     /// cluster — `hipModuleLoadData` silently picks the thread's current

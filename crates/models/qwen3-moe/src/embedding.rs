@@ -1,7 +1,6 @@
 //! **#230 P2.11a / #231 P2.11b** — embedding model loader + pooled
 //! forward for `general.architecture = "qwen3"` GGUFs (Qwen3-Embedding
 //! family: 0.6B / 4B / 8B).
-//!
 //! Architectural reuse: the qwen3 dense arch maps cleanly to the
 //! existing `AttentionFamily::Dense` + dense-FFN path that the
 //! layout / loader / forward stack already supports. `qwen35moe` and
@@ -13,13 +12,12 @@
 //! through the per-layer loop, then replaces the lm-head with a
 //! final RMSNorm + L2-normalize on the LAST token's hidden vector
 //! and downloads the result as `Vec<f32>`.
-//!
 //! V1 scope:
 //! - Single-device only. Qwen3-Embedding-0.6B fits trivially next to
-//!   a 27B chat shard on 16 GB MI50; multi-device sharding is V2.
+//! a 27B chat shard on 16 GB MI50; multi-device sharding is V2.
 //! - Single text per request — batch over multiple inputs is V2.
 //! - Last-token pooling (`pooling_type = 3`, what Qwen3-Embedding ships
-//!   with). Mean / CLS pooling are V2.
+//! with). Mean / CLS pooling are V2.
 //! - Output is L2-normalised F32 (the canonical embedding format).
 
 #![cfg(feature = "hip")]
@@ -40,12 +38,10 @@ use crate::model::Qwen3MoEModel;
 use crate::session::Qwen3MoESession;
 
 /// Loaded embedding model, single-device.
-///
 /// Wraps a `Qwen3MoEModel` (which handles `qwen3` arch via
 /// `AttentionFamily::Dense` after the #231 config extension) plus
 /// per-request session + scratch state allocated lazily on the first
 /// inference call.
-///
 /// Concurrent requests must serialise externally — the inner session
 /// + scratch are not thread-safe and one call mutates KV cache
 /// counters during the per-layer loop (we discard the cache between
@@ -184,7 +180,6 @@ impl Drop for EmbeddingScratch {
 
 impl EmbeddingModel {
     /// Load all weights from `file` onto `device`.
-    ///
     /// `max_tokens` caps the input length the scratch will support;
     /// the scratch + session are allocated lazily on first inference,
     /// so this method just uploads weights + builds the OpsRegistry.
@@ -261,16 +256,14 @@ impl EmbeddingModel {
     /// **#231** — run pooled-embedding inference on a single sequence
     /// of token ids. Returns an L2-normalised F32 vector of length
     /// `hidden_size`.
-    ///
     /// Errors when `tokens.len() > max_tokens` or `tokens` is empty.
-    ///
     /// Implementation:
     /// 1. Reset session (clear KV `current_tokens`).
     /// 2. Embed L tokens row-by-row into `prefill.hidden_a`.
     /// 3. Per-layer loop: `forward_layer_prefill` ping-ponging
-    ///    `(hidden_a, hidden_b)`.
+    /// `(hidden_a, hidden_b)`.
     /// 4. Take the LAST token's F16 hidden vector (offset
-    ///    `(L-1) * hidden * 2` into the final ping-pong buffer).
+    /// `(L-1) * hidden * 2` into the final ping-pong buffer).
     /// 5. RMSNorm with `output_norm` → `pooled_norm_f16`.
     /// 6. `cast_f16_to_f32` → `pooled_f32`.
     /// 7. `l2_norm_f32` → `pooled_normed_f32`.

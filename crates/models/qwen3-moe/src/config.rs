@@ -1,24 +1,21 @@
 //! Qwen3.x MoE config parsed from GGUF metadata.
-//!
 //! Covers two closely-related Qwen3.x architectures:
-//!
 //! - `qwen3moe` — pure transformer MoE (Qwen3 / Qwen3-Coder 30B-A3B class).
-//!   Every layer is full self-attention with GQA + RoPE, followed by a MoE
-//!   FFN. No SSM, no shared expert, no `full_attention_interval`.
+//! Every layer is full self-attention with GQA + RoPE, followed by a MoE
+//! FFN. No SSM, no shared expert, no `full_attention_interval`.
 //! - `qwen35moe` / `qwen36moe` — hybrid Gated-Delta-Net + full-attention +
-//!   MoE-with-shared-expert. Layers alternate: `(il + 1) % full_attention_interval != 0`
-//!   → recurrent/GDN, else full-attention.
-//!
+//! MoE-with-shared-expert. Layers alternate: `(il + 1) % full_attention_interval != 0`
+//! → recurrent/GDN, else full-attention.
 //! Key GGUF metadata keys (namespaced by `{arch}`):
 //! - `{arch}.attention.head_count`, `.head_count_kv`, `.key_length`, `.value_length`,
-//!   `.layer_norm_rms_epsilon`
+//! `.layer_norm_rms_epsilon`
 //! - `{arch}.embedding_length`, `.block_count`, `.context_length`
 //! - `{arch}.rope.freq_base`, `.rope.dimension_count`, `.rope.dimension_sections`
 //! - `{arch}.expert_count`, `.expert_used_count`, `.expert_feed_forward_length`,
-//!   `.expert_shared_feed_forward_length`
+//! `.expert_shared_feed_forward_length`
 //! - `{arch}.full_attention_interval`
 //! - `{arch}.ssm.inner_size`, `.ssm.state_size`, `.ssm.group_count`,
-//!   `.ssm.time_step_rank`, `.ssm.conv_kernel`
+//! `.ssm.time_step_rank`, `.ssm.conv_kernel`
 
 use flambeau_quant::GgufFile;
 
@@ -36,15 +33,14 @@ pub enum Qwen3MoEConfigError {
 /// metadata convention + `blk.{i}.*` tensor naming, but differs in which
 /// ops the forward pass composes.
 /// Architectures this crate parses config for. `qwen35` is the dense-hybrid
-/// variant (Qwen3.5 / 3.6 without MoE — pure dense FFN per layer). V2.2
+/// variant (Qwen3.5 / 3.6 without MoE — pure dense FFN per layer). 
 /// scaffold: config parser accepts it, but the weight loader + forward path
 /// still assume MoE — a qwen35 GGUF will fail to LOAD until the dense-FFN
-/// paths are wired (see `doc/V2-BACKLOG.md#V2.2`).
+/// paths are wired (see `doc/V2-BACKLOG.md#`).
 pub const SUPPORTED_ARCHS: &[&str] =
     &["qwen35moe", "qwen36moe", "qwen35", "qwen3next", "qwen3"];
 
 /// Which attention family the model uses.
-///
 /// `Hybrid` implies the presence of `ssm.*` metadata and `full_attention_interval`.
 /// `Dense` is pure-transformer MoE.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -156,7 +152,7 @@ pub struct Qwen3MoEConfig {
 impl Qwen3MoEConfig {
     /// `true` iff this is the dense-hybrid arch (`qwen35`) — no routed MoE
     /// experts, only a single dense FFN per layer. Used by the loader +
-    /// forward path to pick the dense-FFN code path (V2.2).
+    /// forward path to pick the dense-FFN code path ().
     pub fn is_dense_ffn(&self) -> bool {
         self.num_experts == 0
     }
@@ -178,7 +174,6 @@ impl Qwen3MoEConfig {
         // dropped — see `project_v1_bench_matrix.md` (Coder-30B was 0.27× combined
         // and the qwen3moe-specific forward_dense_attn_* path lacked the kernel
         // optimizations qwen35moe got).
-        //
         // **#231** — `qwen3` is the dense-attention non-MoE arch carried by
         // Qwen3-Embedding GGUFs (and any future Qwen3 dense chat model).
         // No `ssm.*` keys, no expert keys, full-attention every layer.
@@ -237,7 +232,7 @@ impl Qwen3MoEConfig {
 
         // Dense-hybrid (`qwen35`) has no MoE metadata. Default to 0/1 so the
         // config loads; downstream loader will check `num_experts==0` and
-        // branch to the dense-FFN path (V2.2 follow-up).
+        // branch to the dense-FFN path (follow-up).
         let (num_experts, num_experts_per_tok, moe_intermediate_size) = if is_dense_ffn {
             (
                 0,
@@ -319,7 +314,6 @@ impl Qwen3MoEConfig {
     }
 
     /// Is layer `il` a recurrent (GDN) layer? Dense arches always return `false`.
-    ///
     /// Matches candle's convention: `(il + 1) % full_attention_interval != 0`
     /// → recurrent. Full-attention layers fall on the interval boundary.
     pub fn is_recurrent(&self, il: usize) -> bool {

@@ -1,14 +1,12 @@
 // mmvq_q4_k — Q4_K weight matrix × Q8_1 activation → F32 dst.
-//
-// V1.3 cert-grade single-row reference. Port strategy:
-//   * On-the-fly dequantise: each lane computes `x = d * sc * raw_q - dmin * m`
-//     on the fly, multiplies by the Q8_1 activation (already dequantised
-//     via `d8 * qi`), and accumulates in F32.
-//   * 64 threads per block = one wave64 = one output row per block.
-//   * 1 super-block of 256 elements per outer loop iteration, 4 elements per
-//     lane per super-block (partitioned into 4 groups of 64).
-//   * Final reduction via `gfx906_warp_reduce_sum` (DPP fused).
-//
+// cert-grade single-row reference. Port strategy:
+// * On-the-fly dequantise: each lane computes `x = d * sc * raw_q - dmin * m`
+// on the fly, multiplies by the Q8_1 activation (already dequantised
+// via `d8 * qi`), and accumulates in F32.
+// * 64 threads per block = one wave64 = one output row per block.
+// * 1 super-block of 256 elements per outer loop iteration, 4 elements per
+// lane per super-block (partitioned into 4 groups of 64).
+// * Final reduction via `gfx906_warp_reduce_sum` (DPP fused).
 // This kernel is the correctness oracle for the dp4a-optimised P29 multi-row
 // variant (candle `indexed_moe_forward_q4k_q8_1_nw1_r2`). Port of the perf
 // version follows once the cert harness is in place.

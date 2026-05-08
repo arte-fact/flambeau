@@ -1,20 +1,17 @@
 // indexed_moe_mmvq_q4_k_gate_up — fused gate+up Q4_K MoE MMVQ (candle P30).
-//
 // In the MoE FFN the gate and up projections share the same activation
 // `y[token]`. A naive implementation launches two separate
 // `indexed_moe_mmvq_q4_k` kernels — one for gate, one for up — which
 // reads the activation from HBM twice. Candle's P30 fuses them into a
 // single kernel that reads the activation once and computes both
 // matmuls in the same inner loop, halving activation HBM traffic.
-//
 // Layout (same as the non-fused kernel, doubled on the weight side):
-//   gate_w    [n_experts, n_rows, n_sb_per_row]   Q4_K
-//   up_w      [n_experts, n_rows, n_sb_per_row]   Q4_K
-//   y         [n_tokens, n_sb_per_row * 8]        Q8_1
-//   expert_id [n_tokens, top_k]                   i32
-//   gate_out  [n_tokens, top_k, n_rows]           F32
-//   up_out    [n_tokens, top_k, n_rows]           F32
-//
+// gate_w [n_experts, n_rows, n_sb_per_row] Q4_K
+// up_w [n_experts, n_rows, n_sb_per_row] Q4_K
+// y [n_tokens, n_sb_per_row * 8] Q8_1
+// expert_id [n_tokens, top_k] i32
+// gate_out [n_tokens, top_k, n_rows] F32
+// up_out [n_tokens, top_k, n_rows] F32
 // Launch + inner arithmetic identical to `indexed_moe_mmvq_q4_k.cu`, just
 // carries two accumulators through the inner loop. Register usage grows
 // modestly (extra accumulator + pointer) but stays well clear of the

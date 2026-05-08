@@ -1,5 +1,4 @@
-// indexed_moe_mmq_q4_k_down_turbo — V2.14.c sibling of gate_up_turbo.
-//
+// indexed_moe_mmq_q4_k_down_turbo — 4.c sibling of gate_up_turbo.
 // Down-projection has a single weight matrix and uses the SwiGLU'd per-pair
 // activation (each pair has its own activation vector), so both the
 // activation index AND the output index use slot_pair directly.
@@ -25,7 +24,7 @@
 #define QI8_1            8
 #define MMQ_TILE_Y_K_LDS (MMQ_TILE_NE_K + MMQ_TILE_NE_K / QI8_1)
 
-// MMQ_X=8 matches V2.6.a padded-sort alignment (see gate_up_turbo note).
+// MMQ_X=8 matches padded-sort alignment (see gate_up_turbo note).
 #define MMQ_X 8
 #define MMQ_Y 128
 #define NWARPS 4

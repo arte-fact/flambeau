@@ -1,15 +1,12 @@
 // rmsnorm_bf16 — RMSNorm over an [M, K] activation tensor, BF16 in/out.
-//
-// MTP-4-C-3: BF16 sibling of `rmsnorm_f16`. The norm weight stays F16
+// BF16 sibling of `rmsnorm_f16`. The norm weight stays F16
 // because it's small (`[k]` only), loaded once per row, and F16 has 3
 // more mantissa bits than BF16 — no benefit to widening it. Math is
 // identical to the F16 variant, all in F32.
-//
 // Computation (per row):
-//   mean_sq = Σ x[i]² / K
-//   rsqrt   = 1 / sqrt(mean_sq + eps)
-//   y[i]    = bf16(x[i] * weight[i] * rsqrt)
-//
+// mean_sq = Σ x[i]² / K
+// rsqrt = 1 / sqrt(mean_sq + eps)
+// y[i] = bf16(x[i] * weight[i] * rsqrt)
 // Launch shape: blockDim = {256}, gridDim = {n_rows}, shared = 4 floats.
 // Each thread covers `k / 256` elements; `k` must divide 256 evenly
 // (Qwen3.6 hidden=5120, head_dim=256, intermediate=25600 all qualify).

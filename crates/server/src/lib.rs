@@ -1,9 +1,7 @@
-//! flambeau-server — V1.8 OpenAI-compatible HTTP API.
-//!
+//! flambeau-server — OpenAI-compatible HTTP API.
 //! v1 surface: `GET /health`, `GET /v1/models`, `POST /v1/completions`,
-//! `POST /v1/chat/completions` (non-streaming only in V1.8.B; SSE is V1.8.C).
+//! `POST /v1/chat/completions` (non-streaming only in ; SSE is ).
 //! Chat template from GGUF `tokenizer.chat_template` via `minijinja`.
-//!
 //! Single-session model: one shared `ModelState` behind a Tokio mutex.
 //! Concurrent HTTP requests serialise through the mutex — continuous
 //! batching is V2. The V1 target is "works end-to-end with real OpenAI

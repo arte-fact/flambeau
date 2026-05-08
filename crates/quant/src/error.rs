@@ -15,7 +15,7 @@ pub enum QuantError {
     #[error("not a GGUF file: magic {magic:#010x}")]
     BadMagic { magic: u32 },
 
-    #[error("unsupported GGUF version {version} (flambeau V1.1 supports v2 and v3)")]
+    #[error("unsupported GGUF version {version}")]
     UnsupportedVersion { version: u32 },
 
     #[error("invalid GGUF metadata value-type tag {tag}")]

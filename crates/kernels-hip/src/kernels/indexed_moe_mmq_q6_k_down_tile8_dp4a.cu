@@ -1,25 +1,21 @@
-// indexed_moe_mmq_q6_k_down_tile8_dp4a — V2.8.b Q6_K down-projection MoE MMQ.
-//
+// indexed_moe_mmq_q6_k_down_tile8_dp4a — Q6_K down-projection MoE MMQ.
 // Closes the last MMVQ-at-prefill hole in Qwen3.6-35B-A3B-UD-Q4_K_S. In the
 // UD mixed-quant GGUF, 6 of the 40 layers have Q6_K `ffn_down_exps` (the
-// rest are Q4_K). V2.8.a rocprofv3 at Mesh<2> pp=512 attributed 97 ms
+// rest are Q4_K). rocprofv3 at Mesh<2> pp=512 attributed 97 ms
 // (10.2 % of prefill, 16 ms / call × 6 calls) to `indexed_moe_mmvq_q6_k`,
 // with PMC showing MemBusy 46 % / VALUBusy 21 % / 16 k waves per call —
 // the classic prefill-on-MMVQ latency-bound pattern. MMVQ emits 1 output
 // per block; a wave64 MMQ tile emits 64 × 8 = 512.
-//
-// Structure: fuses the V2.6.b `indexed_moe_mmq_q4_k_down_tile8_dp4a` tile
-// layout with the V2.3.b.3 `mmq_q6_K_wave64` Q6_K decode path (raw·y
-// -32·Σy bias-correction — avoids the byte-borrow bug that bit V2.3.d.1).
-//
-// Per-block invariant (from V2.6.a padded sort):
-//   All 8 slots in a block map to the same expert. Weight slab loaded
-//   per-thread exactly once per sub-block, reused across all 8
-//   activation columns via the 8-dp4a inner loop.
-//
+// Structure: fuses the `indexed_moe_mmq_q4_k_down_tile8_dp4a` tile
+// layout with the `mmq_q6_K_wave64` Q6_K decode path (raw·y
+// -32·Σy bias-correction — avoids the byte-borrow bug that bit ).
+// Per-block invariant (from padded sort):
+// All 8 slots in a block map to the same expert. Weight slab loaded
+// per-thread exactly once per sub-block, reused across all 8
+// activation columns via the 8-dp4a inner loop.
 // Launch:
-//   grid = (ceil(n_rows / 64), padded_total / 8, 1)
-//   block = (64, 1, 1)
+// grid = (ceil(n_rows / 64), padded_total / 8, 1)
+// block = (64, 1, 1)
 
 #include "block_quant.cuh"
 #include <hip/hip_runtime.h>
@@ -43,7 +39,7 @@ static __device__ __forceinline__ int dp4a(int a, int b, int c) {
     return __builtin_amdgcn_sdot4(a, b, c, false);
 }
 
-// V2.9.b: see Q4_K tile8 siblings — same occupancy-floor fix.
+// see Q4_K tile8 siblings — same occupancy-floor fix.
 extern "C" __global__ __launch_bounds__(WARP_SIZE, 2)
 void flambeau_indexed_moe_mmq_q6_k_down_tile8_dp4a_q8_1(
     const flambeau_block_q6_K* __restrict__ down_w,

@@ -2,13 +2,11 @@
 // v2 prefill kernel with Q8_0 KV cache. Mirror of `attention_prefill_flash_tile_f16`
 // with the cooperative K/V load path changed to dequantize Q8_0 blocks
 // on the way into the F32 LDS tile.
-//
-// V1-BENCH-#116-flashtile-q8. Closes the prefill regression where the
+// Closes the prefill regression where the
 // F16 path used BR=8 LDS-tiled prefill while Q8 was stuck on the oracle
 // (one block per (q_token, q_head)). Both kernels now share structure;
 // only the load path differs (Q8 → F32 dequant vs F16 → F32 cast).
 // Score loop and online-softmax rescale are identical.
-//
 // Why the LDS tile stays F32 (not int8): the original f16 flash-tile
 // upcasts to F32 on load, which is necessary for the online-softmax
 // math anyway. Keeping LDS as F32 lets the inner Q·K dot stay
@@ -19,18 +17,14 @@
 // efficiently. The win vs the oracle path is from LDS reuse (each K
 // element is loaded once per chunk and reused by BR=4-8 Q rows in the
 // tile), not from dp4a.
-//
 // Shape (matches the F16 variant exactly):
-//   Q:     [n_q_tokens, n_heads_q, head_dim]                       F16
-//   K/V:   [n_k_tokens, n_heads_kv, head_dim/32]                   block_q8_0
-//   Out:   [n_q_tokens, n_heads_q, head_dim]                       F16
-//
+// Q: [n_q_tokens, n_heads_q, head_dim] F16
+// K/V: [n_k_tokens, n_heads_kv, head_dim/32] block_q8_0
+// Out: [n_q_tokens, n_heads_q, head_dim] F16
 // Causal: Q at global pos (q_offset + q_idx) attends to K[0..q_offset+q_idx].
-//
 // Launch (per template instantiation):
-//   grid  = (ceil(n_q_tokens / BR), n_heads_q, 1)
-//   block = (WARP_SIZE=64, BR, 1)            — 256 or 512 threads, 2D block
-//
+// grid = (ceil(n_q_tokens / BR), n_heads_q, 1)
+// block = (WARP_SIZE=64, BR, 1) — 256 or 512 threads, 2D block
 // LDS: 2 × BC × D floats. Same per-D budget as F16 variant.
 
 #include <hip/hip_runtime.h>
@@ -65,7 +59,7 @@ static __device__ __forceinline__ void flash_attn_prefill_v2_q8_impl(
 
     const int q_tile = blockIdx.x;
     const int h_q    = blockIdx.y;
-    const int lane   = threadIdx.x;   // 0..63  — D-axis
+    const int lane   = threadIdx.x;   // 0..63 — D-axis
     const int warp   = threadIdx.y;   // 0..BR-1 — Q-row axis
     const int tid    = warp * WARP_SIZE + lane;
 

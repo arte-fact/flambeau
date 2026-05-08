@@ -1,24 +1,22 @@
 // mmvq_q6_k — Q6_K weight × Q8_1 activation → F32 dst.
-//
 // Layout diverges from Q4_K/Q5_K: no dmin, per-16-element i8 scales are
 // multiplied by a single super-block `d`, and each 6-bit value is 4 low bits
 // from `ql` + 2 high bits from `qh`. Elements are organised as two halves
 // of 128 elements, each half using 64 ql bytes + 32 qh bytes + 8 of the 16
 // super-block scales.
-//
 // Lane mapping (lane ∈ 0..63):
-//   h     = lane / 32               {0, 1}   — which 128-element half
-//   pos   = lane % 32                0..31   — position within a half
-//   lsub  = pos / 16                 {0, 1}  — which of the two per-8-scales pairs
+// h = lane / 32 {0, 1} — which 128-element half
+// pos = lane % 32 0..31 — position within a half
+// lsub = pos / 16 {0, 1} — which of the two per-8-scales pairs
 // Each lane processes 4 elements per super-block (q_idx ∈ 0..3):
-//   scale_idx = 8*h + 2*q_idx + lsub
-//   ql_byte   = ql[64*h + ((q_idx & 1) ? pos + 32 : pos)]
-//   nibble    = q_idx < 2 ? (ql_byte & 0xF) : (ql_byte >> 4)
-//   qh_byte   = qh[32*h + pos]
-//   qh_bits   = (qh_byte >> (2 * q_idx)) & 0x3
-//   raw_q     = (nibble | (qh_bits << 4)) - 32
-//   y_block   = h*4 + q_idx
-//   y_pos     = pos
+// scale_idx = 8*h + 2*q_idx + lsub
+// ql_byte = ql[64*h + ((q_idx & 1) ? pos + 32 : pos)]
+// nibble = q_idx < 2 ? (ql_byte & 0xF) : (ql_byte >> 4)
+// qh_byte = qh[32*h + pos]
+// qh_bits = (qh_byte >> (2 * q_idx)) & 0x3
+// raw_q = (nibble | (qh_bits << 4)) - 32
+// y_block = h*4 + q_idx
+// y_pos = pos
 
 #include "block_quant.cuh"
 #include "gfx906.cuh"

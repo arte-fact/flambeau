@@ -1,8 +1,6 @@
 // silu_f32 — pointwise SiLU / swish: y[i] = x[i] / (1 + exp(-x[i])).
-//
 // GDN path uses this on the `silu(conv_out)` step before QKV split.
 // 8192-element tensor on Qwen3.6; trivial compute.
-//
 // Launch: 1D, ceil(n/256) blocks × 256 threads.
 
 #include <hip/hip_runtime.h>

@@ -1,42 +1,33 @@
 // attention_prefill_flash_tile_f16 — BR=4 LDS-tiled flash-attention v2
 // prefill kernel, F16 I/O, F32 internal math, gfx906-tuned.
-//
-// V2.2.d fix 4 port of candle's `flash_attn_v2_fwd_d{64,128,256}_f32`
+// Port of candle's `flash_attn_v2_fwd_d{64,128,256}_f32`
 // (/artefact/candle/candle-hip-kernels/src/flash_attn_v2.cu:344-440),
 // adapted to:
-//   - F16 inputs / outputs (candle's source takes F32).
-//   - Internal causal masking from q_offset (no additive mask tensor).
-//   - Single-batch (B=1) contiguous layout matching our KvCache<F16Contig>.
-//
-// Profile motivation (2026-04-22, post-fix-3): `attention_prefill_f16`
-// ran at 2994 µs / call (5× slower per-call than turbo's flash_attn_tile
-// at ~600 µs). The old kernel issues one block per (q_token, q_head) and
-// serially scans all K/V rows — each K/V row re-read from global once
-// per Q row. This kernel replaces it with BR=4 Q rows per block, all 4
-// warps sharing one BC-row K/V LDS tile → 4× global traffic reduction,
-// plus online softmax so V also streams through LDS only once.
-//
+// - F16 inputs / outputs (candle's source takes F32).
+// - Internal causal masking from q_offset (no additive mask tensor).
+// - Single-batch (B=1) contiguous layout matching our KvCache<F16Contig>.
+// Replaces the oracle prefill kernel (one block per (q_token, q_head))
+// — that path serially scans all K/V rows and re-reads each row from
+// global once per Q row. With BR=4 Q rows per block sharing one BC-row
+// K/V LDS tile we get a 4× global-traffic reduction; online softmax
+// makes V also stream through LDS only once.
 // Shape:
-//   Q:     [n_q_tokens, n_heads_q, head_dim]       F16, row-major
-//   K:     [n_k_tokens, n_heads_kv, head_dim]      F16, row-major (flambeau KV layout)
-//   V:     [n_k_tokens, n_heads_kv, head_dim]      F16, row-major
-//   Out:   [n_q_tokens, n_heads_q, head_dim]       F16, row-major
-//
+// Q: [n_q_tokens, n_heads_q, head_dim] F16, row-major
+// K: [n_k_tokens, n_heads_kv, head_dim] F16, row-major (flambeau KV layout)
+// V: [n_k_tokens, n_heads_kv, head_dim] F16, row-major
+// Out: [n_q_tokens, n_heads_q, head_dim] F16, row-major
 // GQA: `n_heads_q / n_heads_kv = group`. Kernel computes kv_head =
 // q_head / group.
-//
 // Causal: Q token at global position (q_offset + q_idx) attends to K
 // positions [0 .. q_offset + q_idx]. K rows beyond that contribute
 // −∞ to the softmax.
-//
 // Launch:
-//   grid  = (ceil(n_q_tokens / BR=4), n_heads_q, 1)
-//   block = (WARP_SIZE=64, BR=4, 1)          — 256 threads, 2D block
-//
+// grid = (ceil(n_q_tokens / BR=4), n_heads_q, 1)
+// block = (WARP_SIZE=64, BR=4, 1) — 256 threads, 2D block
 // LDS: 2 × BC × D floats; chosen per-D (see wrappers below).
-//   D=64,  BC=64 → 32 KiB
-//   D=128, BC=32 → 32 KiB
-//   D=256, BC=16 → 32 KiB
+// D=64, BC=64 → 32 KiB
+// D=128, BC=32 → 32 KiB
+// D=256, BC=16 → 32 KiB
 
 #include <hip/hip_runtime.h>
 #include <hip/hip_fp16.h>
@@ -69,7 +60,7 @@ static __device__ __forceinline__ void flash_attn_prefill_v2_impl(
 
     const int q_tile = blockIdx.x;
     const int h_q    = blockIdx.y;
-    const int lane   = threadIdx.x;   // 0..63  — D-axis
+    const int lane   = threadIdx.x;   // 0..63 — D-axis
     const int warp   = threadIdx.y;   // 0..BR-1 — Q-row axis
     const int tid    = warp * WARP_SIZE + lane;
 
@@ -254,7 +245,7 @@ void flambeau_attention_prefill_flash_tile_d256_f16(
         n_k_tokens, q_offset, scale);
 }
 
-// V2.29.b — BR=8 variant at D=256. Doubles Q rows per block → halves
+// BR=8 variant at D=256. Doubles Q rows per block → halves
 // grid.x → fewer blocks, potentially better CU fill on large
 // n_q_tokens. Block = 64 × 8 = 512 threads (hits launch_bounds at 2
 // waves/SIMD → 1 wave/SIMD). LDS: 2 × 16 × 256 × 4 = 32 KiB (same as

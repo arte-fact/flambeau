@@ -1,42 +1,36 @@
-//! TP-2b — tensor-parallel `forward_full_attn_decode`.
-//!
+//! tensor-parallel `forward_full_attn_decode`.
 //! Per-rank decode for one full-attention layer on a `world`-rank TP
 //! mesh. The function mirrors [`super::attn::forward_full_attn_decode`]
 //! but with two differences:
-//!
 //! 1. Every head-count parameter is the *per-rank* count
-//!    (`local_n_heads = n_heads / world`,
-//!    `local_n_kv_heads = n_kv_heads / world`). Sliced weights and the
-//!    KV cache must already be sized for these locals — the caller
-//!    (TP-2d) is responsible for upstream slicing.
+//! (`local_n_heads = n_heads / world`,
+//! `local_n_kv_heads = n_kv_heads / world`). Sliced weights and the
+//! KV cache must already be sized for these locals — the caller
+//! () is responsible for upstream slicing.
 //! 2. Output writes a *partial* `[hidden, 1]` F16 vector into
-//!    `partial_attn_out`. This is this rank's contribution to the
-//!    AllReduce sum that follows the attention block; the AR kernel
-//!    (TP-0c `BarP2pAllReduce::residual_tp4`) folds the 4 contributions
-//!    into the replicated `hidden` buffer.
-//!
+//! `partial_attn_out`. This is this rank's contribution to the
+//! AllReduce sum that follows the attention block; the AR kernel
+//! ( `BarP2pAllReduce::residual_tp4`) folds the 4 contributions
+//! into the replicated `hidden` buffer.
 //! ## What this function does NOT do
-//!
 //! - **No AllReduce.** Caller schedules `BarP2pAllReduce` on the
-//!   `partial_attn_out` buffer immediately after this returns. We deliberately
-//!   keep the AR out of the per-layer call so TP-3a's deferred-AR refactor
-//!   can fold attn-AR + ffn-AR into one launch without touching this body.
-//! - **No KV cache slot capture.** TP-2b targets the eager (non-graph)
-//!   path; graph capture for TP is V2.
+//! `partial_attn_out` buffer immediately after this returns. We deliberately
+//! keep the AR out of the per-layer call so deferred-AR refactor
+//! can fold attn-AR + ffn-AR into one launch without touching this body.
+//! - **No KV cache slot capture.** targets the eager (non-graph)
+//! path; graph capture for TP is V2.
 //! - **No fused-K+V mmvq path.** The PP version probes
-//!   `FLAMBEAU_VARIANT` for the V2.X K+V fusion; for TP-2b correctness
-//!   we stick to the unfused split. TP-3 may revisit if profiling
-//!   shows attn launch latency dominates.
-//! - **No split-K attention path.** TP-2b targets short-context
-//!   correctness; long-context split-K stays single-rank for now.
-//!
+//! `FLAMBEAU_VARIANT` for the V2.X K+V fusion; for correctness
+//! we stick to the unfused split. may revisit if profiling
+//! shows attn launch latency dominates.
+//! - **No split-K attention path.** targets short-context
+//! correctness; long-context split-K stays single-rank for now.
 //! ## VGPR / scratch implications
-//!
 //! `FullAttnScratch` is sized for the *full* (`n_heads`,
 //! `n_kv_heads`, `q_width = n_heads · head_dim`) shapes, so under TP=4
 //! the scratch buffers are 4× larger than each rank actually needs.
 //! That's wasteful but correct — kernels parameterised by
-//! `local_n_heads` only touch the head of each scratch slab. TP-2b-i2
+//! `local_n_heads` only touch the head of each scratch slab. 
 //! (sized scratch) is filed but not on this session's critical path.
 
 use anyhow::{bail, Context, Result};
@@ -73,23 +67,18 @@ fn dev_flag(_name: &str) -> bool {
 }
 
 /// Per-rank decode for one full-attention layer.
-///
 /// # Shape contract
-///
 /// `tp_world ≥ 1`. The per-rank head counts must divide cleanly:
-///   `cfg.num_heads % tp_world == 0` and
-///   `cfg.num_kv_heads % tp_world == 0`. The TP-1a layout validator
+/// `cfg.num_heads % tp_world == 0` and
+/// `cfg.num_kv_heads % tp_world == 0`. The layout validator
 /// guarantees this at load time; we re-assert here as a debug guard.
-///
 /// Sliced weight shapes (validated below):
-///   - `attn_q.dims  == [2 · local_n_heads · head_dim, hidden]`
-///   - `attn_k.dims  == [local_n_kv_heads · head_dim, hidden]`
-///   - `attn_v.dims  == [local_n_kv_heads · head_dim, hidden]`
-///   - `attn_output.dims == [hidden, local_n_heads · head_dim]`
-///
+/// - `attn_q.dims == [2 · local_n_heads · head_dim, hidden]`
+/// - `attn_k.dims == [local_n_kv_heads · head_dim, hidden]`
+/// - `attn_v.dims == [local_n_kv_heads · head_dim, hidden]`
+/// - `attn_output.dims == [hidden, local_n_heads · head_dim]`
 /// `attn_norm` / `attn_q_norm` / `attn_k_norm` are Replicated (full
 /// shape); `kv_cache` is sized for `local_n_kv_heads` already.
-///
 /// # Errors
 /// - Shape mismatches (returned early as `anyhow::Error`).
 /// - Any underlying op-dispatch / kernel-launch failure (propagated).
@@ -116,7 +105,7 @@ pub fn forward_full_attn_decode_tp<L: CacheLayout>(
     partial_attn_out: DevicePtr,
     position: usize,
     tp_world: u32,
-    // TP-4d-i2: when true, K/V run with full cfg.num_kv_heads per rank.
+    // when true, K/V run with full cfg.num_kv_heads per rank.
     // attn_k/attn_v weights must be Replicated; KvCache is full-sized.
     kv_replicated: bool,
 ) -> Result<()> {
@@ -132,7 +121,7 @@ pub fn forward_full_attn_decode_tp<L: CacheLayout>(
         bail!("num_heads {n_heads} not divisible by tp_world {tp_world}");
     }
     let local_n_heads = n_heads / world;
-    // TP-4d-i2: when kv_replicated, every rank uses full nKV.
+    // when kv_replicated, every rank uses full nKV.
     let local_n_kv_heads = if kv_replicated {
         n_kv_heads
     } else {
@@ -149,7 +138,7 @@ pub fn forward_full_attn_decode_tp<L: CacheLayout>(
     let rope = &cfg.rope;
 
     // 1. Fused RMSNorm(x_in) + Q8_1 quantise. Replicated input + output
-    //    (the AR'd hidden state is identical on every rank).
+    // (the AR'd hidden state is identical on every rank).
     rmsnorm_quant_q8_1(
         ops,
         stream,
@@ -209,7 +198,6 @@ pub fn forward_full_attn_decode_tp<L: CacheLayout>(
     // are Q4_0 and shapes match. Saves 1 MMVQ launch + 2 cast launches
     // per full-attn layer per rank. Falls back to the 4-launch path for
     // any non-Q4_0 dtype (e.g. Q8_0 K/V on other models).
-    //
     // Q4_1 sibling tried in L1 (post-pp2tp2-profile lever) — confirmed
     // **null** on gfx906: kernel-trace +1 % to +3 %, wall ~−2 % on
     // 9B/27B at pp2tp2/N=1. Diagnosis: weight HBM bytes are 99 % of the
@@ -277,7 +265,7 @@ pub fn forward_full_attn_decode_tp<L: CacheLayout>(
     .context("attn_k_norm (TP)")?;
 
     // 7. RoPE on Q and K. Multi-freq partial NeoX. Same RoPE freq base
-    //    on every rank — it doesn't depend on the head subset.
+    // on every rank — it doesn't depend on the head subset.
     scratch.positions_host[0] = position as i32;
     // SAFETY: scratch.positions has 4 valid bytes; positions_host is a
     // persistent Vec on the scratch.
@@ -315,7 +303,7 @@ pub fn forward_full_attn_decode_tp<L: CacheLayout>(
     )
     .context("rope K (TP)")?;
 
-    // 8. Append per-rank K, V to the per-rank KV cache. V1-BENCH-#116
+    // 8. Append per-rank K, V to the per-rank KV cache. 
     // — Q8Contig path quantises K/V (F16) → Q8_0 staging first.
     // SAFETY: scratch.k_f16 / scratch.v_f16 are contiguous F16
     // [local_n_kv_heads, head_dim] and the KV cache was sized for
@@ -345,15 +333,14 @@ pub fn forward_full_attn_decode_tp<L: CacheLayout>(
     }
 
     // 9. Per-rank attention against the local KV slab.
-    //
-    // CN-80B-18 — long-ctx: switch to split-K (flash-decoding) at
+    // long-ctx: switch to split-K (flash-decoding) at
     // n_tokens_kv > 256. The single-pass kernel hits 27 % CU occupancy
     // and serialises over n_tokens_kv per block (2647 µs at ctx=2048 vs
     // 340 µs split-K, 7.78×). Both F16 and Q8 KV layouts have a split-K
     // variant; partials buffers are layout-independent f32. Without
     // this branch, pp2tp2 / tp2 decode at 5 K ctx ran ~5× slower than
     // llama.cpp on F16, and Q8 KV stayed on single-pass at every ctx
-    // length (V1-BENCH-#116 follow-up — split-K Q8_0 dequants on the
+    // length (follow-up — split-K Q8_0 dequants on the
     // fly during the chunk pass; combine pass is identical math).
     // `FullAttnScratch.splitk_partials_*` is sized for `n_heads` (full
     // count) — over-sized for TP but correct; we pass `local_n_heads`.
@@ -419,7 +406,7 @@ pub fn forward_full_attn_decode_tp<L: CacheLayout>(
         .context("attention_decode_f16 (TP)")?;
     }
 
-    // 10. Sigmoid-gate (NOT SiLU — see V1.7.4.b root-cause note).
+    // 10. Sigmoid-gate (NOT SiLU — Qwen3.5/3.6 use sigmoid).
     let gated_elems = local_q_width;
     sigmoid_mul_f16(
         ops,
@@ -436,9 +423,9 @@ pub fn forward_full_attn_decode_tp<L: CacheLayout>(
         .context("quantize gated_out → Q8_1 (TP)")?;
 
     // 12. Row-parallel output projection. attn_output is sliced
-    //     [hidden, local_q_width] — full output rows but only this
-    //     rank's column slab. Result is the per-rank partial that
-    //     contributes to the AllReduce sum.
+    // [hidden, local_q_width] — full output rows but only this
+    // rank's column slab. Result is the per-rank partial that
+    // contributes to the AllReduce sum.
     let dtype_o = qdtype_of(attn_output.dtype)?;
     let (o_rows, o_k) = mat_shape(attn_output)?;
     if o_rows != hidden || o_k != gated_elems {
@@ -463,19 +450,18 @@ pub fn forward_full_attn_decode_tp<L: CacheLayout>(
     Ok(())
 }
 
-/// **AUTO-6b2** — per-rank L-batched full-attn prefill. Counterpart of
+/// 2** — per-rank L-batched full-attn prefill. Counterpart of
 /// [`forward_full_attn_decode_tp`] for n_tokens > 1. Mirrors the
 /// kernel sequence of [`super::attn::forward_full_attn_prefill`] (the
 /// PP version) but emits a `[L, hidden]` partial that the caller folds
 /// via one [`flambeau_backend_hip::BarP2pAllReduce::residual_tp{2,4}`]
 /// across `L * hidden` elements (instead of L per-token ARs).
-///
 /// Reuses [`super::attn::FullAttnPrefillScratch`] verbatim — the
 /// scratch is sized for the *full* (`n_heads`, `n_kv_heads`, `q_width
 /// = n_heads · head_dim`) shapes; per-rank kernels only touch the
 /// head-subset prefix (same waste as `forward_full_attn_decode_tp`,
-/// same trade-off — TP-2b-i2 sized scratch is filed but not on the
-/// AUTO-6 path).
+/// same trade-off — sized scratch is filed but not on the
+/// path).
 #[expect(
     clippy::too_many_arguments,
     reason = "matches super::attn::forward_full_attn_prefill — flat parameter list \
@@ -542,7 +528,7 @@ pub fn forward_full_attn_prefill_tp<L: flambeau_runtime::CacheLayout>(
     let rope = &cfg.rope;
 
     // 1. RMSNorm[L] then quantise to BOTH Q8_1 layouts (PP-prefill pattern
-    //    — DS4 layout feeds the 4-warp LDS-tiled MMQ at M >= 128).
+    // — DS4 layout feeds the 4-warp LDS-tiled MMQ at M >= 128).
     rmsnorm_f16(
         ops,
         stream,
@@ -673,8 +659,8 @@ pub fn forward_full_attn_prefill_tp<L: flambeau_runtime::CacheLayout>(
     }
 
     // 9. Causal prefill attention. n_k_tokens = start_position + L (after
-    //    append); q_offset = start_position so row i attends to K rows
-    //    [0..start_position + i + 1].
+    // append); q_offset = start_position so row i attends to K rows
+    // [0..start_position + i + 1].
     let n_k_tokens = kv_cache.current_tokens();
     let scale = (head_dim as f32).sqrt().recip();
     if kv_layout == Q8Contig::NAME {
@@ -698,7 +684,7 @@ pub fn forward_full_attn_prefill_tp<L: flambeau_runtime::CacheLayout>(
         .context("attention_prefill_f16 (TP)")?;
     }
 
-    // 10. Sigmoid-gate (V1.7.4.b — Qwen3.5/3.6 use sigmoid, not SiLU).
+    // 10. Sigmoid-gate (Qwen3.5/3.6 use sigmoid, not SiLU).
     let gated_elems = n_tokens * local_q_width;
     sigmoid_mul_f16(
         ops, stream,
@@ -719,7 +705,7 @@ pub fn forward_full_attn_prefill_tp<L: flambeau_runtime::CacheLayout>(
     .context("prefill gated → Q8_1 MMQ (TP)")?;
 
     // 12. Row-parallel output projection. Per-rank weight rows = hidden,
-    //     per-rank cols = local_q_width. Result is per-rank partial.
+    // per-rank cols = local_q_width. Result is per-rank partial.
     let dtype_o = qdtype_of(attn_output.dtype)?;
     let (o_rows, o_k) = mat_shape(attn_output)?;
     if o_rows != hidden || o_k != local_q_width {
@@ -742,26 +728,22 @@ pub fn forward_full_attn_prefill_tp<L: flambeau_runtime::CacheLayout>(
 
 /// **P2.9b-i2-C** — batched decode for one full-attention layer on a
 /// `tp_world`-rank TP mesh.
-///
 /// Mirrors [`forward_full_attn_prefill_tp`] for the front-end ops
 /// (rmsnorm, Q|gate / K / V projection, per-head Q/K rmsnorm, RoPE) at
 /// `n_tokens = slot_positions.len()` — those steps batch across slots
 /// at fixed N. Steps 8 (KV-append) and 9 (attention) split per-slot
 /// because each slot owns its own per-rank KV cache and query history.
-///
 /// Output is a per-rank partial `[N, hidden]` F16 in `partial_attn_out`;
 /// the caller AllReduces across ranks (BarP2pAllReduce) to produce the
 /// replicated `[N, hidden]` attention contribution.
-///
 /// Layout:
 /// - `slot_kv_caches[s]` is the **rank-local** KV cache for slot `s`
-///   (sized for `local_n_kv_heads`). All N caches must be FullAttn
-///   F16Contig. Q8 KV is V2.
+/// (sized for `local_n_kv_heads`). All N caches must be FullAttn
+/// F16Contig. Q8 KV is V2.
 /// - `slot_positions[s]` is the cache tail for slot `s` *before* this
-///   token is appended.
+/// token is appended.
 /// - `scratch` is a single shared per-rank `FullAttnPrefillScratch`
-///   sized for `max_tokens >= N`.
-///
+/// sized for `max_tokens >= N`.
 /// **What this function does NOT do**: AllReduce. Caller schedules
 /// `BarP2pAllReduce::residual_*` on `partial_attn_out` immediately
 /// after this returns.
@@ -1040,13 +1022,13 @@ pub fn forward_full_attn_layer_decode_batched_tp(
     }
 
     // 8. Per-slot KV append. Each slot writes ITS row of K/V into ITS
-    //    own per-rank cache. **#275 fix**: write at `current_tokens`
-    //    (the cache tail) rather than `slot_positions[s]` (which is
-    //    `prompt_ids.len() + step` = off by 1). This matches legacy
-    //    `kv_cache.append()` semantics. Without this fix, decode step 1
-    //    writes K/V at slot N+1 instead of slot N → slot N stays
-    //    uninitialised and contaminates attention from step 2 onward.
-    //    F16-only path; Q8 KV slots fall back via the loop.
+    // own per-rank cache. **#275 fix**: write at `current_tokens`
+    // (the cache tail) rather than `slot_positions[s]` (which is
+    // `prompt_ids.len() + step` = off by 1). This matches legacy
+    // `kv_cache.append()` semantics. Without this fix, decode step 1
+    // writes K/V at slot N+1 instead of slot N → slot N stays
+    // uninitialised and contaminates attention from step 2 onward.
+    // F16-only path; Q8 KV slots fall back via the loop.
     let kv_per_token_bytes = local_kv_width * 2;
     for s in 0..n_tokens {
         let kv = &mut *slot_kv_caches[s];
@@ -1079,7 +1061,7 @@ pub fn forward_full_attn_layer_decode_batched_tp(
     }
 
     // 9. Single-launch batched attention over all N slots
-    //    (**#266c** — replaces the per-slot loop).
+    // (**#266c** — replaces the per-slot loop).
     let scale = (head_dim as f32).sqrt().recip();
     // SAFETY: each `slot_*_host[..n_tokens]` is a Vec with stable
     // address; the corresponding device buffer is sized to `max_tokens`
@@ -1141,8 +1123,8 @@ pub fn forward_full_attn_layer_decode_batched_tp(
     .context("batched-decode gated → Q8_1 MMQ (TP)")?;
 
     // 12. Row-parallel output projection. Per-rank weight rows = hidden,
-    //     per-rank cols = local_q_width. Result is per-rank partial
-    //     written into partial_attn_out for the AR that follows.
+    // per-rank cols = local_q_width. Result is per-rank partial
+    // written into partial_attn_out for the AR that follows.
     let dtype_o = qdtype_of(attn_output.dtype)?;
     let (o_rows, o_k) = mat_shape(attn_output)?;
     if o_rows != hidden || o_k != local_q_width {
@@ -1165,7 +1147,7 @@ pub fn forward_full_attn_layer_decode_batched_tp(
 
 #[cfg(test)]
 mod tests {
-    // Substantive tests are GPU-gated and live in TP-2d's parity smoke.
+    // Substantive tests are GPU-gated and live in parity smoke.
     // A non-GPU shape-derivation check would just re-assert the same
     // arithmetic this file's preconditions enforce; not pulling its weight.
 }

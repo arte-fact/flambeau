@@ -23,13 +23,13 @@ use crate::routes::{
     messages_anthropic, models, tokenize, tools_endpoint, ServerState, SharedState,
 };
 
-/// **TP-5a** — mesh topology selector. PP-V1 default; TP engages the
+/// mesh topology selector. PP-V1 default; TP engages the
 /// Qwen3MoETpModel loader + the BarP2pAllReduce-based forward path.
-/// **AUTO-4a** — `Hybrid` adds a manual PP-of-TP composition where
+/// `Hybrid` adds a manual PP-of-TP composition where
 /// `pp_size` contiguous layer stages each own a `tp_size`-rank TP
 /// subgroup. Selection is operator-driven; flambeau does not autodetect
 /// the right topology for a given rig (the bracket-bench harness in
-/// AUTO-5 produces the data, the operator picks the winner).
+/// produces the data, the operator picks the winner).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MeshMode {
     /// Pipeline parallelism — V1 default. `LayerAssignment` distributes
@@ -43,7 +43,7 @@ pub enum MeshMode {
     /// a `tp_size`-rank TP subgroup. Total ranks = `pp_size * tp_size`.
     /// Devices are interpreted in stage-major order: `--devices d0,d1,...`
     /// with `tp_size = 2`, `pp_size = 2` means stage 0 = {d0, d1},
-    /// stage 1 = {d2, d3}. Forward wiring lands in AUTO-4b..f; this
+    /// stage 1 = {d2, d3}. Forward wiring lands in f; this
     /// variant currently boots up to the loader and bails.
     Hybrid { pp_size: u32, tp_size: u32 },
 }
@@ -55,7 +55,7 @@ pub struct ServeConfig {
     pub device_ids: Vec<i32>,
     pub bind_addr: SocketAddr,
     pub model_id: String,
-    /// **TP-5a** — mesh topology. Defaults to `Pp` for V1 callers that
+    /// mesh topology. Defaults to `Pp` for V1 callers that
     /// don't set the field explicitly (constructors use struct-update
     /// syntax with `..Default::default()`).
     pub mesh_mode: MeshMode,
@@ -201,7 +201,7 @@ pub async fn serve(cfg: ServeConfig) -> Result<()> {
             model_cfg.context_length = cap;
         }
     }
-    // **AUTO-4f** — construction order matters on this rig. For pure
+    // construction order matters on this rig. For pure
     // PP/TP, the single global cluster is built first; for hybrid, the
     // per-stage sub-clusters are built first (inside
     // `Qwen3MoEHybridModel::load`) and the global cluster is built
@@ -231,7 +231,7 @@ pub async fn serve(cfg: ServeConfig) -> Result<()> {
                 m.config.context_length = model_cfg.context_length;
             }
 
-            // MTP-5d: opt-in MTP attachment. Loaded once, lives on
+            // opt-in MTP attachment. Loaded once, lives on
             // the last rank; per-request scratch allocated on each
             // chat completion.
             let mtp = match cfg.spec_mtp.as_ref() {
@@ -338,9 +338,9 @@ pub async fn serve(cfg: ServeConfig) -> Result<()> {
                 stage_ars.push(ar);
             }
             // 3. Global cluster LAST — used only for inter-stage
-            //    `peer_copy_via_host` hand-off. Constructing it before
-            //    the per-stage sub-clusters/ARs disables BAR1 on the
-            //    sub-cluster off-diagonal (project_hybrid_cluster_order).
+            // `peer_copy_via_host` hand-off. Constructing it before
+            // the per-stage sub-clusters/ARs disables BAR1 on the
+            // sub-cluster off-diagonal (project_hybrid_cluster_order).
             let cluster: Arc<HipCluster> = Arc::new(
                 HipCluster::new(&cfg.device_ids)
                     .context("HipCluster::new (global, for inter-stage hand-off)")?,

@@ -1,21 +1,18 @@
 // softmax_masked_f16 — per-row masked softmax for attention scores.
-//
-//   v[i]   = scale * scores[i] + mask[i]      (mask may be null)
-//   m      = max_i v[i]
-//   d      = Σ_i exp(v[i] - m)
-//   out[i] = exp(v[i] - m) / d
-//
+// v[i] = scale * scores[i] + mask[i] (mask may be null)
+// m = max_i v[i]
+// d = Σ_i exp(v[i] - m)
+// out[i] = exp(v[i] - m) / d
 // "Online softmax" two-pass layout:
-//   Pass 1 (global → registers): compute running (m, d) stats per thread,
-//          reduce across threads with __shfl_xor + LDS.
-//   Pass 2 (global → global): re-read scores, compute exp((v - m)) * inv_d,
-//          write to output. No intermediate global write — saves one HBM
-//          pass vs the textbook 3-pass version.
-//
+// Pass 1 (global → registers): compute running (m, d) stats per thread,
+// reduce across threads with __shfl_xor + LDS.
+// Pass 2 (global → global): re-read scores, compute exp((v - m)) * inv_d,
+// write to output. No intermediate global write — saves one HBM
+// pass vs the textbook 3-pass version.
 // Launch shape:
-//   blockDim  = { 256 }                         (4 wave64 warps)
-//   gridDim   = { n_rows }
-//   shared    = 4 floats (cross-warp reductions)
+// blockDim = { 256 } (4 wave64 warps)
+// gridDim = { n_rows }
+// shared = 4 floats (cross-warp reductions)
 
 #include <hip/hip_runtime.h>
 
@@ -48,7 +45,6 @@ extern "C" __global__ void flambeau_softmax_masked_f16(
     fb_fp16_t*       o_row = out + (size_t) row * k;
 
     // --- Pass 1: online max + exp-sum ---
-    //
     // Per thread: run the recurrence (local_max, local_sum) over this
     // thread's strided slice. After the inner loop, reduce both stats
     // across the warp / block.

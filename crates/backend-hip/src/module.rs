@@ -1,19 +1,17 @@
 //! `HipModule` / `HipKernel` — safe wrappers around `hipModuleLoadData` +
 //! `hipModuleGetFunction` + `hipModuleLaunchKernel`.
-//!
 //! A `HipModule` owns one loaded `.hsaco` code object per device. Kernel
 //! handles hang off the module; they don't hold their own resources and are
 //! cheap to derive.
-//!
 //! Design notes:
 //! - Device context. Modules are loaded into the current HIP context's
-//!   device. Call `HipDevice::bind()` on the owning device before constructing
-//!   a module and before every launch — same rule as `HipDevice` itself.
+//! device. Call `HipDevice::bind()` on the owning device before constructing
+//! a module and before every launch — same rule as `HipDevice` itself.
 //! - Args are type-erased at the ABI. `hipModuleLaunchKernel` takes a
-//!   `void**` of argument pointers; we expose a tiny builder that takes
-//!   anything `Copy` via `&T`, then addresses of those slots form the array.
+//! `void**` of argument pointers; we expose a tiny builder that takes
+//! anything `Copy` via `&T`, then addresses of those slots form the array.
 //! - Stream ownership. `launch` takes `&HipStream`; the stream must live on
-//!   the same device as the module.
+//! the same device as the module.
 
 use std::collections::HashMap;
 use std::ffi::CString;
@@ -51,7 +49,6 @@ pub struct HipModule {
     raw: hipModule_t,
     device_id: i32,
     /// Resolved kernel-function handles, keyed by entry-point symbol name.
-    ///
     /// The cache is insert-only in practice: every launch site in
     /// `crates/ops/src/hip/*` passes a string literal, and after warmup
     /// every entry point has been resolved once. The cache turns per-launch
@@ -114,16 +111,13 @@ impl HipModule {
     }
 
     /// Resolve a kernel by its extern-C symbol name.
-    ///
     /// Hot path: served from an uncontended read-lock on the per-module
     /// kernel cache. Cold path (first call for this name) goes through
     /// `hipModuleGetFunction` under the write lock and populates the cache.
-    ///
     /// `name` must be a `'static` string — every call site in
     /// `crates/ops/src/hip/*` passes a literal, and the cache key borrows
     /// that literal without allocating. If `name` is genuinely dynamic,
     /// call [`Self::kernel_dynamic`] which pays the CString + String cost.
-    ///
     /// # Errors
     /// Returns `DeviceError::Backend` if the name contains a NUL byte or
     /// the driver reports `hipModuleGetFunction` failure.
@@ -156,7 +150,6 @@ impl HipModule {
     /// Resolve a kernel whose name is not known at compile time. Bypasses the
     /// kernel cache (the cache key is `&'static str`) — pays the `CString +
     /// String` cost per call. Prefer [`Self::kernel`] on the hot path.
-    ///
     /// # Errors
     /// Same as [`Self::kernel`].
     pub fn kernel_dynamic(&self, name: &str) -> DeviceResult<HipKernel<'_>> {
@@ -205,7 +198,6 @@ impl Drop for HipModule {
 
 /// A kernel handle derived from a `HipModule`. Borrows from the module so
 /// the module stays alive as long as any kernel handle does.
-///
 /// `name` is `&'static str`: hot-path call sites pass string literals and
 /// the cache keys borrow those literals. The `_dyn_name` field is kept
 /// around as `None` in the hot path so `Debug`/error messages still work;
@@ -245,8 +237,7 @@ impl LaunchCfg {
 
 /// Kernel argument buffer. Pushes pointer to each arg's storage; the
 /// underlying storage must outlive the launch.
-///
-/// V2.26.a-i3 adds `push_slot`: tag a pushed arg with a
+/// 6.a-i3 adds `push_slot`: tag a pushed arg with a
 /// [`ScalarSlot`](crate::graph_capture::ScalarSlot) so post-capture we
 /// can bind the slot to its kernel-node arg index for later
 /// `hipGraphExecKernelNodeSetParams` updates. `push` (untagged) is
@@ -288,7 +279,6 @@ impl<'a> KernelArgs<'a> {
     /// for the launch itself; additionally, during an active graph
     /// capture the tag is recorded so the exec can later update this
     /// arg in-place via `hipGraphExecKernelNodeSetParams`.
-    ///
     /// Outside a capture scope this is functionally identical to
     /// `push` — the tag is stored in the `KernelArgs` but never
     /// consumed. Ops that want to remain captureable should use
@@ -306,7 +296,7 @@ impl<'a> KernelArgs<'a> {
 
     /// Same as `as_raw` but exposed publicly so callers that reuse a
     /// `KernelArgs` across many launches can pass the pointer to
-    /// [`HipKernel::launch_raw`] directly. See V2.1 docs: this saves
+    /// [`HipKernel::launch_raw`] directly. See docs: this saves
     /// one Vec allocation + N `push()` calls per launch when the arg
     /// layout is stable (common case: same kernel, same shape, different
     /// device pointers mutated in-place by the caller).
@@ -389,10 +379,9 @@ impl HipKernel<'_> {
 
     /// Launch the kernel on `stream` with `cfg` and the arguments packed in
     /// `args`.
-    ///
     /// # Safety
     /// - Argument storage referenced by `args` must live until the stream
-    ///   consumes the launch (typically: until the subsequent `synchronize`).
+    /// consumes the launch (typically: until the subsequent `synchronize`).
     /// - `cfg.grid` × `cfg.block` must not exceed device limits.
     /// - Any device pointers in `args` must be valid on this kernel's device.
     pub unsafe fn launch(
@@ -401,7 +390,7 @@ impl HipKernel<'_> {
         cfg: LaunchCfg,
         mut args: KernelArgs<'_>,
     ) -> DeviceResult<()> {
-        // V2.26.a-i3 — if a capture is active on this thread, record the
+        // 6.a-i3 — if a capture is active on this thread, record the
         // launch's arity + tagged slots so post-capture the exec can build
         // a SlotMap. Outside capture this is a no-op.
         crate::graph_capture::record_launch(args.len(), &args.tagged_slots);
@@ -431,17 +420,16 @@ impl HipKernel<'_> {
     }
 
     /// Lower-latency launch: caller pre-built the arg pointer array.
-    /// Used by V2.1's reuse-pool pattern — callers that launch the same
+    /// Used by reuse-pool pattern — callers that launch the same
     /// kernel many times with a stable arg layout can construct a
     /// `KernelArgs` once, call `.raw_ptrs()` once, and invoke this in
     /// a tight loop without re-running the builder each iteration.
-    ///
     /// # Safety
     /// - `args_ptr` must point to a valid array of at least the number
-    ///   of arguments this kernel expects.
+    /// of arguments this kernel expects.
     /// - Each entry must point to storage matching the kernel's signature
-    ///   at the corresponding position, and that storage must remain live
-    ///   until the stream consumes the launch.
+    /// at the corresponding position, and that storage must remain live
+    /// until the stream consumes the launch.
     pub unsafe fn launch_raw(
         &self,
         stream: &HipStream,

@@ -1,13 +1,11 @@
-// indexed_moe_mmq_q8_0_down_tile8_dp4a — V2.22.b down-projection MoE MMQ
-// for Q8_0. Sibling of the gate_up kernel and structural mirror of V2.28.c's
+// indexed_moe_mmq_q8_0_down_tile8_dp4a — 2.b down-projection MoE MMQ
+// for Q8_0. Sibling of the gate_up kernel and structural mirror of 8.c's
 // `indexed_moe_mmq_q4_0_down_tile8_dp4a.cu`.
-//
 // Down-projection specifics (same as Q4_K/Q4_0 tile8 down):
-//   - one weight tensor (ffn_down_exps), not fused
-//   - activation indexed per-PAIR: `y[pair_idx, :]` via sorted_pair_idx_padded
-//     (each (token, slot) is its own effective token with top_k_inner = 1)
-//   - output layout [n_pairs, n_rows]
-//
+// - one weight tensor (ffn_down_exps), not fused
+// - activation indexed per-PAIR: `y[pair_idx, :]` via sorted_pair_idx_padded
+// (each (token, slot) is its own effective token with top_k_inner = 1)
+// - output layout [n_pairs, n_rows]
 // Q8_0 weight decode: 8 × int32 direct load of signed int8 quants, no
 // nibble unpack, no (q - 8) bias → `sums[c] += w_d · d_y · sumi`.
 

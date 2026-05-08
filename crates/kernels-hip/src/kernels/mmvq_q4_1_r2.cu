@@ -1,19 +1,16 @@
-// mmvq_q4_1_r2 — V2.24.a.1 multi-row r2 DPP-reduce Q4_1 MMVQ.
-//
+// mmvq_q4_1_r2 — 4.a.1 multi-row r2 DPP-reduce Q4_1 MMVQ.
 // Sibling of `mmvq_q4_k_r2.cu` (candle P29 multi-row DPP pattern) for the
 // legacy Q4_1 quant used by Qwen3.5-9B-Q4_1. Replaces the 256-thread,
-// single-row `mmvq_q4_1.cu` (V2.2.b) that is 45 % of Qwen3.5-9B decode
+// single-row `mmvq_q4_1.cu` () that is 45 % of Qwen3.5-9B decode
 // tg=64 time on gfx906 (462 ms / 11,616 calls × 40 µs — measured
 // 2026-04-24).
-//
 // Structure (matches Q4_K r2):
-//   64 threads/block = 1 wave64. Lanes 0..31 compute row R+0; lanes 32..63
-//   compute row R+1. Block.x indexes the row *pair*. Each half-warp's 32
-//   lanes span the 32 elements of one Q4_1 block; lane_lo < 16 takes the
-//   low nibble, lane_lo >= 16 takes the high nibble. Y is shared across
-//   the two rows → per-launch cache traffic on the Q8_1 side halved vs
-//   two single-row launches.
-//
+// 64 threads/block = 1 wave64. Lanes 0..31 compute row R+0; lanes 32..63
+// compute row R+1. Block.x indexes the row *pair*. Each half-warp's 32
+// lanes span the 32 elements of one Q4_1 block; lane_lo < 16 takes the
+// low nibble, lane_lo >= 16 takes the high nibble. Y is shared across
+// the two rows → per-launch cache traffic on the Q8_1 side halved vs
+// two single-row launches.
 // Gain is on launch count (N rows → ceil(N/2) blocks), not arithmetic —
 // DP4A is replaced by FP mul because the per-lane "one element" pattern
 // doesn't pack 4-at-a-time. Net win: per-call µs ↓ + fewer calls.
@@ -56,9 +53,9 @@ extern "C" __global__ void flambeau_mmvq_q4_1_r2_q8_1(
 
         const int qi = (int) by->qs[lane_lo];
 
-        // x_val = raw_q * d + m  (Q4_1 per-block affine quantisation)
-        // y_val = qi * d_y        (Q8_1 per-block linear quantisation)
-        // acc  += x_val * y_val
+        // x_val = raw_q * d + m (Q4_1 per-block affine quantisation)
+        // y_val = qi * d_y (Q8_1 per-block linear quantisation)
+        // acc += x_val * y_val
         const float x_val = (float) raw_q * d + m;
         const float y_val = (float) qi * d_y;
         acc += x_val * y_val;

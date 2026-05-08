@@ -1,20 +1,17 @@
 //! Typed KV cache layouts — architectural rule 6: "KV cache layout is a
 //! type, not a runtime enum."
-//!
-//! V1.6.4 ships `KvCache<F16Contig, D>` — the baseline F16 layout that
+//! ships `KvCache<F16Contig, D>` — the baseline F16 layout that
 //! mirrors llama.cpp's default (K and V stored separately, both contiguous
 //! in `[max_tokens, n_kv_heads, head_dim]` order). The attention decode /
 //! prefill kernels consume `k_buffer()` / `v_buffer()` at `current_tokens`.
-//!
 //! Follow-ups (own files, own types):
-//!   * `KvCache<F16Transposed, D>` — K stored with `[head_dim, max_tokens]`
-//!     inner-most order to let flash-attn-v2 prefill stream without an
-//!     extra transpose.
-//!   * `KvCache<Q8Contig, D>` + `KvCache<Q8Transposed, D>` — 2× HBM
-//!     saving; requires the quality cert gate.
-//!   * `KvCache<TurboQ4Contig, D>` / `KvCache<TurboQ5Contig, D>` (V2 —
-//!     deliberately out of V1 scope per CLAUDE.md).
-//!
+//! * `KvCache<F16Transposed, D>` — K stored with `[head_dim, max_tokens]`
+//! inner-most order to let flash-attn-v2 prefill stream without an
+//! extra transpose.
+//! * `KvCache<Q8Contig, D>` + `KvCache<Q8Transposed, D>` — 2× HBM
+//! saving; requires the quality cert gate.
+//! * `KvCache<TurboQ4Contig, D>` / `KvCache<TurboQ5Contig, D>` (V2 —
+//! deliberately out of V1 scope per CLAUDE.md).
 //! The dispatcher resolves attention impls against the *concrete* layout
 //! type, so an "F16 attention" kernel is statically-disallowed from
 //! dispatching on a `KvCache<Q8Contig>`. No runtime polymorphism, no
@@ -64,14 +61,12 @@ impl CacheLayout for F16Contig {
 /// `BlockQ8_0` Rust struct). At `head_dim=128` that's `128 / 32 = 4`
 /// Q8_0 blocks per (token, head) at `4 × 34 = 136 B` — ~1.9× HBM
 /// saving vs F16's `128 × 2 = 256 B`.
-///
 /// Roadmap requires a **quality cert** (delta-perplexity ≤ 0.5% on
 /// wikitext-2 + chat smoke) before this layout is dispatched on a given
 /// model. The correctness cert alone (K/V round-trip matches the F16
-/// reference within Q8 quant noise) is what V1.6.6 gates on — the
-/// per-model quality cert comes with the V1.7 model loader.
-///
-/// V1-BENCH-#117 fix: the original impl claimed "18 bytes per block"
+/// reference within Q8 quant noise) is what gates on — the
+/// per-model quality cert comes with the model loader.
+/// fix: the original impl claimed "18 bytes per block"
 /// (2-byte scale + 16 int8s — wrong; QK8_0 is 32 elements not 16).
 /// `bytes_per_row` was undersized by ~1.9×, which made `KvCache::append`
 /// memcpy a fraction of each token's quantised vector and the
@@ -121,7 +116,6 @@ pub enum KvCacheError {
 pub type KvCacheResult<T> = std::result::Result<T, KvCacheError>;
 
 /// Two-buffer KV cache parameterised by layout and device.
-///
 /// Allocation is eager: `new()` reserves the full `max_tokens * n_heads *
 /// head_dim * bytes_per_element()` for both K and V. No realloc on append.
 pub struct KvCache<L: CacheLayout, D: Device> {
@@ -190,7 +184,6 @@ impl<L: CacheLayout, D: Device> KvCache<L, D> {
     /// Append `n_new` tokens' worth of K and V data from device buffers
     /// `k_new` / `v_new`. Both source buffers are expected to be in the
     /// same `[n_new, n_heads, head_dim]` layout as the cache.
-    ///
     /// # Safety
     /// `k_new` / `v_new` must point to at least `n_new * n_heads *
     /// head_dim * bytes_per_element()` valid device bytes on the same
@@ -241,7 +234,7 @@ impl<L: CacheLayout, D: Device> KvCache<L, D> {
         Ok(())
     }
 
-    /// V2.26.a-i5b2 — compute the (k_dst, v_dst, total_bytes) an append
+    /// 6.a-i5b2 — compute the (k_dst, v_dst, total_bytes) an append
     /// of `n_new` rows would target WITHOUT mutating any state. Used by
     /// backend-specific graph-capture helpers (e.g.
     /// `flambeau_backend_hip::kv_cache_append_hip_slot`) that need to
@@ -266,7 +259,7 @@ impl<L: CacheLayout, D: Device> KvCache<L, D> {
         Ok((k_dst, v_dst, total_bytes))
     }
 
-    /// V2.26.a-i5b2 — advance the logical tail by `n_new` rows after a
+    /// 6.a-i5b2 — advance the logical tail by `n_new` rows after a
     /// caller-driven append (via `compute_append_dsts` + an external
     /// memcpy, typically under graph capture). Callers that use the
     /// stock `append` path do NOT call this — `append` bumps the tail
@@ -289,7 +282,7 @@ impl<L: CacheLayout, D: Device> KvCache<L, D> {
         self.current_tokens = 0;
     }
 
-    /// MTP-5b — speculative-decode reject rollback. Truncate the cache
+    /// speculative-decode reject rollback. Truncate the cache
     /// tail by `n_remove` slots. Like `clear()`, does not zero the
     /// backing memory — slots beyond `current_tokens()` are
     /// unobservable to attention. Errors if `n_remove > current_tokens`.
@@ -333,9 +326,8 @@ impl<L: CacheLayout, D: Device> KvCache<L, D> {
 
     /// Free the underlying allocations. Separate from `Drop` because we
     /// need a `&D` to call `dealloc`; `Drop` can't require a device.
-    ///
     /// Callers that forget to call this leak the device buffers — logged
-    /// as a warn in V1.7 when session teardown becomes formalised.
+    /// as a warn in when session teardown becomes formalised.
     pub fn dispose(mut self, device: &D) -> KvCacheResult<()> {
         // SAFETY: pointers returned by `device.alloc()` on construction
         // have never been aliased elsewhere; no outstanding stream work
@@ -380,7 +372,7 @@ mod tests {
     #[test]
     fn q8_contig_row_bytes() {
         // head_dim=128 → 4 Q8_0 blocks × 34 B (= sizeof(BlockQ8_0))
-        //              = 136 B per (token, head).
+        // = 136 B per (token, head).
         assert_eq!(Q8Contig::bytes_per_row(128), 136);
         assert_eq!(Q8Contig::bytes_per_row(256), 272);
         assert_eq!(Q8Contig::head_dim_multiple(), 32);

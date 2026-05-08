@@ -1,39 +1,30 @@
 // mmq_q4_1_4warp_lds — 4-warp LDS-tiled MMQ for Q4_1 × Q8_1_MMQ.
-//
-// V2.2.d.P5 port of candle's turbo Q4_1 MMQ kernel
-// (/artefact/candle/candle-hip-kernels/src/mmq_turbo.cu:276-1563).
-// Candle itself is a port of llamacpp-turbo's `mmq.cuh` DP4A path.
-//
-// Why we port candle instead of hand-rolling: two earlier sessions in
-// V2.2.d.S1-S3 tried to grow/tune the hand-rolled flambeau kernel; results
-// hovered at 32% of turbo wall-clock with the full PMC-driven rework chain
-// blocked by kernel latency we can't hide from the outside. Candle already
-// encodes the necessary (MMQ_Y=128, MMQ_X=64, DS4 Q8_1 layout, 2-phase
-// Y-load per K-iter) in production — just mirror it.
-//
+// Port of candle's turbo Q4_1 MMQ kernel
+// (/artefact/candle/candle-hip-kernels/src/mmq_turbo.cu:276-1563),
+// which itself ports llamacpp-turbo's `mmq.cuh` DP4A path. The
+// (MMQ_Y=128, MMQ_X=64, DS4 Q8_1 layout, 2-phase Y-load per K-iter)
+// structure is needed for full perf — hand-rolling lands at ~32% of
+// turbo wall-clock.
 // Differences from candle's source:
-//   - No `MMQ_TURBO_EXPORT` macro-parameterised variants. We ship exactly
-//     one kernel: MMQ_X=64, need_check=false ("unchecked"). MMQ_X=8/16/32
-//     variants and the checked (need_check=true) variant land later if
-//     needed — right now the dispatch table pins m>=128 at MMQ_X=64.
-//   - No MoE variants (the gather-quantise path).
-//   - No L2 prefetch (D3) — pending S3-class follow-up.
-//   - Uses flambeau's block structs (flambeau_block_q4_1,
-//     flambeau_block_q8_1_mmq) rather than candle-local mirrors.
-//
+// - No `MMQ_TURBO_EXPORT` macro-parameterised variants. We ship exactly
+// one kernel: MMQ_X=64, need_check=false ("unchecked"). MMQ_X=8/16/32
+// variants and the checked (need_check=true) variant land later if
+// needed — right now the dispatch table pins m>=128 at MMQ_X=64.
+// - No MoE variants (the gather-quantise path).
+// - No L2 prefetch (D3) — pending S3-class follow-up.
+// - Uses flambeau's block structs (flambeau_block_q4_1,
+// flambeau_block_q8_1_mmq) rather than candle-local mirrors.
 // Y tile input layout (from quantize_q8_1_mmq):
-//   `vy` is `block_q8_1_mmq` × (n_big_blocks, ncols_y) row-major.
-//   Each 144-B block holds 128 K-elements; the outer K-loop advances by
-//   `blocks_per_iter = MMQ_ITER_K / QK4_1 = 8` Q4_1 blocks = 256 K-elems
-//   = 2 MMQ big-blocks per iter.
-//
+// `vy` is `block_q8_1_mmq` × (n_big_blocks, ncols_y) row-major.
+// Each 144-B block holds 128 K-elements; the outer K-loop advances by
+// `blocks_per_iter = MMQ_ITER_K / QK4_1 = 8` Q4_1 blocks = 256 K-elems
+// = 2 MMQ big-blocks per iter.
 // X tile input layout: `vx` is `block_q4_1` × (nrows_x, ncols_x/QK4_1)
 // row-major. 20 B per block, as loaded from GGUF.
-//
 // Launch:
-//   grid = (ceil(nrows_x / MMQ_Y=128), ceil(ncols_y / MMQ_X=64))
-//   block = (WARP_SIZE=64, MMQ_NWARPS=4, 1)   — 2D thread index
-//   shared_bytes = computed by host (see `ops/src/hip/qmatmul.rs`)
+// grid = (ceil(nrows_x / MMQ_Y=128), ceil(ncols_y / MMQ_X=64))
+// block = (WARP_SIZE=64, MMQ_NWARPS=4, 1) — 2D thread index
+// shared_bytes = computed by host (see `ops/src/hip/qmatmul.rs`)
 
 #include "block_quant.cuh"
 #include "mmq_prefetch.cuh"
@@ -77,8 +68,8 @@
 #define Q8_1_MMQ_INTS  (Q8_1_MMQ_BYTES / 4)  // = 36
 
 // LDS sizing (DP4A path, from turbo MMQ_DP4A_TXS_Q4_1):
-//   x_qs: mmq_y * (MMQ_TILE_NE_K + 1)                ints  (33 per row, +1 bank pad)
-//   x_dm: mmq_y * (MMQ_TILE_NE_K/QI4_1) + mmq_y/QI4_1 half2 (8 + 32 per row)
+// x_qs: mmq_y * (MMQ_TILE_NE_K + 1) ints (33 per row, +1 bank pad)
+// x_dm: mmq_y * (MMQ_TILE_NE_K/QI4_1) + mmq_y/QI4_1 half2 (8 + 32 per row)
 #define X_QS_INTS (MMQ_Y * (MMQ_TILE_NE_K + 1))
 #define X_DM_H2S  (MMQ_Y * (MMQ_TILE_NE_K / QI4_1) + MMQ_Y / QI4_1)
 
@@ -247,7 +238,7 @@ static __device__ void mul_mat_q4_1_turbo_impl(
                          / blocks_per_iter * blocks_per_iter;
     const int i_max = nrows_x - it * MMQ_Y - 1;
 
-    // V2.2.d fix 5a — L2 prefetch: each K-iter issues global_load_dword
+    // L2 prefetch: each K-iter issues global_load_dword
     // hints for the NEXT iter's Y-tile and X-tile. Loads are async —
     // the real cooperative tile loads one iter later hit warm
     // cachelines. Hides ~90 % of HBM latency when K is large enough
@@ -339,15 +330,12 @@ static __device__ void mul_mat_q4_1_turbo_impl(
 }
 
 // --- Single kernel export: MMQ_X=64, need_check=false ---
-//
-// V2.3.a closing note: MMQ_X=32 (VGPR 116→84, waves/SIMD 2→3) and
-// __launch_bounds__(256, 3) occupancy-override variants were both measured
-// 1.5–1.7× slower at realistic prefill shapes (m ∈ {128,512} × k=5120 ×
-// n ∈ {5120,15360}). The 2-waves/SIMD / 128-VGPR configuration IS the right
-// config for this kernel. Extra VGPR lets the compiler unroll the DP4A
-// chain and hold sumi accumulators in registers; dropping below that hurts
-// per-thread throughput more than occupancy gains can recover. The
-// ~0.54 ms/call residual gap to turbo is not VGPR-tractable on ROCm 7.1.1.
+// 2 waves/SIMD with 128 VGPR is the right config for this kernel.
+// MMQ_X=32 (VGPR 116→84, waves/SIMD 2→3) and __launch_bounds__(256, 3)
+// occupancy-override variants are both 1.5–1.7× slower at realistic
+// prefill shapes — extra VGPR lets the compiler unroll the DP4A chain
+// and hold sumi accumulators in registers, and dropping below that
+// hurts per-thread throughput more than occupancy gains can recover.
 
 extern "C" __global__
 __launch_bounds__(WARP_SIZE * MMQ_NWARPS, 2)

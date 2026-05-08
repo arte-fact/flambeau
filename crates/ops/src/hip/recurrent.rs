@@ -1,6 +1,5 @@
 //! Recurrent-layer kernels (Gated-Delta-Net).
-//!
-//! V1.7.2.F: fused per-(b,h) autoregressive + prefill step kernel. One launch
+//! fused per-(b,h) autoregressive + prefill step kernel. One launch
 //! runs the recurrence loop over `L` tokens with the state held in registers,
 //! so decode (L=1) and prefill (L>1) share the same dispatch path.
 
@@ -19,19 +18,16 @@ use flambeau_core::DevicePtr;
 use super::OpsRegistry;
 
 /// Fused GDN step. S_v = 128 (Qwen3.6-35B: `head_k_dim = head_v_dim = 128`).
-///
 /// Shapes (row-major, contiguous, F32):
-/// - `q, k`:      `(B, H_kv, L, 128)` where `H_kv = H / n_rep`
-/// - `v`:         `(B, H,    L, 128)`
-/// - `gate, beta`: `(B, H,    L)` — one scalar per (b, h, t)
-/// - `state_in`:  `(B, H, 128, 128)` stored col-outer (see kernel).
+/// - `q, k`: `(B, H_kv, L, 128)` where `H_kv = H / n_rep`
+/// - `v`: `(B, H, L, 128)`
+/// - `gate, beta`: `(B, H, L)` — one scalar per (b, h, t)
+/// - `state_in`: `(B, H, 128, 128)` stored col-outer (see kernel).
 /// - `state_out`: same shape and layout; may alias `state_in` (the kernel
-///   loads state_in into registers at entry and writes state_out at exit).
-/// - `attn_out`:  `(B, H, L, 128)`
-///
+/// loads state_in into registers at entry and writes state_out at exit).
+/// - `attn_out`: `(B, H, L, 128)`
 /// `n_rep = H_v / H_kv` drives implicit GQA broadcast for Q/K (no caller-side
 /// expand). `n_rep = 1` reduces to the no-GQA path.
-///
 /// Launch: grid `(H, B, ceil(S_v / warps_per_block))`, block
 /// `(WARP_SIZE=64, 4, 1)` — 4 warps per block, each warp owns one output
 /// column. `warps_per_block = 4` ⇒ grid_z = `S_v / 4 = 32` at S_v=128.
@@ -98,14 +94,12 @@ pub fn gdn_state_step_f32_s128(
 }
 
 /// Fused GDN α/β/gate compute over `n_tokens × num_v_heads` F32 elements:
-///   gate_out[t, i] = softplus(alpha_in[t, i] + ssm_dt_bias[i]) * ssm_a[i]
-///   beta_out[t, i] = sigmoid(beta_in[t, i])
-///
+/// gate_out[t, i] = softplus(alpha_in[t, i] + ssm_dt_bias[i]) * ssm_a[i]
+/// beta_out[t, i] = sigmoid(beta_in[t, i])
 /// Per-head constants `ssm_dt_bias` and `ssm_a` are shared across all
 /// `n_tokens` rows. Grid = `(n_tokens, 1, 1)`, block = `(num_v_heads,
 /// 1, 1)`. For decode `n_tokens = 1`; for prefill `n_tokens = L`.
-///
-/// V2.2.d fix 3: batched across tokens in one launch. Previously the
+/// batched across tokens in one launch. Previously the
 /// caller looped L times at one-token-per-launch; at pp512 × 16 GDN
 /// layers that fired 12k tiny launches dominated by argument
 /// marshalling (profile 2026-04-22: ~50 ms in the kernel + ~150 ms
@@ -161,7 +155,6 @@ pub fn gdn_alpha_beta_f32(
 /// `alpha_in[B,L,H]` / `beta_in[B,L,H]` plus per-head `ssm_dt_bias` /
 /// `ssm_a` constants directly, computing `softplus`/`sigmoid` inline
 /// in the per-token loop. Saves one launch per GDN layer per token.
-///
 /// Numerically identical to the unfused chain at FP32 (same op order,
 /// same warp-reduce signatures); the cert sweep verifies parity
 /// against `gdn_state_step_f32_s128 ∘ gdn_alpha_beta_f32` on Qwen3.6
@@ -235,7 +228,7 @@ pub fn gdn_state_step_alphabeta_f32_s128(
     Ok(())
 }
 
-/// V2.23.d.1 — fused `conv_input = [history, current]`. Replaces the two
+/// 3.d.1 — fused `conv_input = [history, current]`. Replaces the two
 /// back-to-back DtoD memcpys in `forward/gdn.rs::assemble_conv_input` (decode
 /// path) with a single elementwise kernel. Each GDN layer at decode fires
 /// this pattern once per token.
@@ -269,7 +262,7 @@ pub fn gdn_assemble_conv_input_f32(
     Ok(())
 }
 
-/// V2.4.d fused split: replaces the 3×L DtoD memcpy loop in
+/// fused split: replaces the 3×L DtoD memcpy loop in
 /// `forward.rs::gather_qkv_strided`. Reads one row of silu_out per token
 /// and strided-writes into q_out / k_out / v_out.
 pub fn gdn_split_qkv_f32(

@@ -1,16 +1,13 @@
-//! Build a `tokenizers::Tokenizer` from GGUF metadata — V1.8.A piece 2 of 3.
-//!
+//! Build a `tokenizers::Tokenizer` from GGUF metadata — piece 2 of 3.
 //! GGUF embeds the tokenizer as a handful of metadata keys:
-//!   - `tokenizer.ggml.model`:  BPE family name ("gpt2" for Qwen3.5/3.6/Llama)
-//!   - `tokenizer.ggml.pre`:    pretokenizer preset ("qwen35", "llama-bpe", ...)
-//!   - `tokenizer.ggml.tokens`: vocab strings (unicode-escaped for byte bytes)
-//!   - `tokenizer.ggml.merges`: "a b" BPE merge pairs
-//!   - `tokenizer.ggml.bos/eos/padding_token_id`: special ids
-//!
+//! - `tokenizer.ggml.model`: BPE family name ("gpt2" for Qwen3.5/3.6/Llama)
+//! - `tokenizer.ggml.pre`: pretokenizer preset ("qwen35", "llama-bpe", ...)
+//! - `tokenizer.ggml.tokens`: vocab strings (unicode-escaped for byte bytes)
+//! - `tokenizer.ggml.merges`: "a b" BPE merge pairs
+//! - `tokenizer.ggml.bos/eos/padding_token_id`: special ids
 //! llama.cpp's implementation lives in `src/llama-vocab.cpp`. This module
 //! reproduces enough of its "gpt2" + "qwen35"/"qwen2" BPE-load path to give
 //! byte-identical token IDs on the `parity_vs_llama_cpp.rs` prompts.
-//!
 //! Covered pre-tokenizers: "default", "gpt-2", "llama-bpe", "llama3",
 //! "qwen2", "qwen35". Others return an error — add them as models arrive.
 
@@ -60,7 +57,6 @@ pub struct GgufTokenizer {
 /// `prefix_tok + prefix_text + suffix_tok + suffix_text + middle_tok`
 /// and the model emits the missing middle text terminated by an EOS
 /// token (or, for some models, `<|file_sep|>`).
-///
 /// The optional fields are populated when the vocab carries them and
 /// stay `None` otherwise. `prefix`, `suffix`, `middle` are the only
 /// fields the basic `/infill` flow needs; `pad`, `repo_name`,
@@ -77,8 +73,7 @@ pub struct FimTokens {
 
 impl GgufTokenizer {
     /// Encode `text` → token ids. No added-special-tokens; the chat template
-    /// (V1.8.A.3) is responsible for inserting BOS/EOS as appropriate.
-    ///
+    /// () is responsible for inserting BOS/EOS as appropriate.
     /// # Errors
     /// Returns an `anyhow` error wrapping whatever `tokenizers::Tokenizer::encode`
     /// reports — typically a malformed input or normaliser failure.
@@ -91,7 +86,6 @@ impl GgufTokenizer {
     }
 
     /// Decode `ids` → UTF-8 string. Skips added-special-tokens.
-    ///
     /// # Errors
     /// Returns an `anyhow` error wrapping whatever `tokenizers::Tokenizer::decode`
     /// reports — typically an out-of-vocab id or invalid UTF-8 byte sequence.
@@ -103,7 +97,6 @@ impl GgufTokenizer {
 }
 
 /// Load a tokenizer from a GGUF file's embedded metadata.
-///
 /// # Errors
 /// Returns an `anyhow` error if the required GGUF metadata keys are missing
 /// (`tokenizer.ggml.model`, vocab arrays, merges), if the vocab/merges can't
@@ -227,14 +220,13 @@ pub fn load_from_gguf(file: &GgufFile) -> Result<GgufTokenizer> {
     }
     // Chat end-of-turn / next-turn markers. Qwen's `<|im_end|>` closes a
     // turn even when eos_id differs; llama3's `<|eot_id|>` plays the same
-    // role. CN-80B-18 — also stop on `<|im_start|>`: when the assistant
+    // role. also stop on `<|im_start|>`: when the assistant
     // emits the next-turn-start token mid-response (observed live on
     // Coder-Next under temp=0.7 / top_k=20 — model produces
     // `<|im_start|><|im_start|>...` repeats, or hallucinates a fake
     // user-turn-start), the response has gone off the rails and we
     // should cut it. The model should never legitimately emit the
     // turn-start marker in its own response.
-    //
     // **Sampler-G (2026-04-30)** — also stop on `<think>` and `</think>`.
     // The server renders chat templates with `enable_thinking=false`,
     // which puts a CLOSED `<think>\n\n</think>\n\n` block in the prompt
@@ -288,12 +280,11 @@ pub fn load_from_gguf(file: &GgufFile) -> Result<GgufTokenizer> {
 
 /// Probe the vocab for FIM special tokens. Returns `None` unless all
 /// three required roles (prefix/suffix/middle) are present.
-///
 /// Surface-form aliases per role cover the families we target:
 /// - Qwen-Coder: `<|fim_prefix|>` / `<|fim_suffix|>` / `<|fim_middle|>`
 /// - StarCoder / Code Llama: `<fim_prefix>` / `<fim_suffix>` / `<fim_middle>`
 /// - DeepSeek-Coder: `<｜fim▁begin｜>` / `<｜fim▁hole｜>` / `<｜fim▁end｜>`
-///   (the pipe is U+FF5C, the separator U+2581).
+/// (the pipe is U+FF5C, the separator U+2581).
 fn detect_fim_tokens(tokens_arr: &[crate::gguf::Value]) -> Option<FimTokens> {
     let first = |aliases: &[&str]| -> Option<u32> {
         aliases.iter().find_map(|a| find_vocab_id(tokens_arr, a))

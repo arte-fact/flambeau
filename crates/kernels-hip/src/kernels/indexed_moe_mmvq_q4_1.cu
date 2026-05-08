@@ -1,22 +1,18 @@
 // indexed_moe_mmvq_q4_1 — Q4_1 MMVQ with per-token expert routing.
-//
-// B6 / V2.35.a — unblocks Qwen-published Qwen3.6-35B-A3B-Q4_0 whose
+// B6 / 5.a — unblocks Qwen-published Qwen3.6-35B-A3B-Q4_0 whose
 // `ffn_down_exps` are Q4_1 (gate/up are Q4_0; down is Q4_1 because affine
 // is friendlier to the down direction's wider dynamic range, a common
 // quant-by-tensor-class choice).
-//
 // Sibling of `indexed_moe_mmvq_q4_0.cu` — same per-token expert routing
 // + 256-thread block + (lane4, lane4 + 4) DP4A nibble pairing. Only the
 // inner reconstruction differs:
-//   Q4_0 uses (q - 8) · y   →   sumi · (d_x · d_y) - 8 · d_x · s_y · 0.25
-//   Q4_1 uses  q · y + m    →   sumi · (d_x · d_y) + m_x · s_y · 0.25
-//
+// Q4_0 uses (q - 8) · y → sumi · (d_x · d_y) - 8 · d_x · s_y · 0.25
+// Q4_1 uses q · y + m → sumi · (d_x · d_y) + m_x · s_y · 0.25
 // Layout:
-//   weights       [n_experts, n_rows, n_blocks_per_row]   Q4_1 blocks (20 B)
-//   activations   [n_tokens, n_blocks_per_row]            Q8_1 blocks
-//   expert_ids    [n_tokens, top_k]                       i32
-//   output        [n_tokens, top_k, n_rows]               F32
-//
+// weights [n_experts, n_rows, n_blocks_per_row] Q4_1 blocks (20 B)
+// activations [n_tokens, n_blocks_per_row] Q8_1 blocks
+// expert_ids [n_tokens, top_k] i32
+// output [n_tokens, top_k, n_rows] F32
 // Launch: blockDim=256, gridDim={n_rows, n_tokens*top_k, 1}.
 
 #include "block_quant.cuh"

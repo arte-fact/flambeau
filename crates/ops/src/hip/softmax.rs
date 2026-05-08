@@ -17,7 +17,6 @@ use super::OpsRegistry;
 /// Row-wise softmax with fused `scale` and optional F16 additive `mask`.
 /// Shape: `scores[m, k]`, `mask[m, k]` (F16, `-inf` in excluded positions)
 /// or `DevicePtr::NULL` for no mask. Output `out[m, k]` F16.
-///
 /// Launch: one block per row, 256 threads/row (two-pass online softmax).
 pub fn softmax_masked_f16(
     reg: &OpsRegistry,

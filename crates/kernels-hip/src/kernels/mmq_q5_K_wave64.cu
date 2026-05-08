@@ -1,39 +1,31 @@
 // mmq_q5_K_wave64 — wave64 MMQ for Q5_K × Q8_1 activation (standard
 // BlockQ8_1 layout, NOT DS4 MMQ layout).
-//
-// V2.2.d fix 1 port of candle's `mul_mat_q5_K_gfx906_v2`
+// Port of candle's `mul_mat_q5_K_gfx906_v2`
 // (/artefact/candle/candle-hip-kernels/src/quantized.cu:7760-7912).
-// Candle has an MMQ kernel for Q5_K while flambeau did not — at prefill
-// the Q5_K ssm_out (and related GDN projections) fell through to
-// per-row MMVQ, producing ~12k kernel launches per pp512 (1145 ms of
-// GPU-busy wasted). Profile diff 2026-04-22 showed this as the largest
-// single perf gap vs candle.
-//
+// Without an MMQ kernel for Q5_K the ssm_out + related GDN projections
+// fall through to per-row MMVQ at prefill — ~12k launches per pp512
+// (~1145 ms of GPU-busy wasted on launch overhead).
 // Unlike the turbo MMQ variants, this kernel reads the **standard**
 // `flambeau_block_q8_1` (36-byte-per-row blocks, not the 144-byte DS4
 // MMQ layout). No activation quantise change needed at call sites — the
 // same `scratch.x_q8_1` buffer that MMVQ consumes works here.
-//
 // Tile shape:
-//   MMQ_Y = 64   (one wave64 per output row; each thread = 1 row)
-//   TILE_N = 8   (8 output cols per tile, loop-unrolled per thread)
-//   Grid = (ceil(nrows_x / 64), ceil(ncols_y / 8))
-//   Block = 64 threads (one warp)
-//
+// MMQ_Y = 64 (one wave64 per output row; each thread = 1 row)
+// TILE_N = 8 (8 output cols per tile, loop-unrolled per thread)
+// Grid = (ceil(nrows_x / 64), ceil(ncols_y / 8))
+// Block = 64 threads (one warp)
 // Q5_K dequant math (same as MMVQ kernel):
-//   y_j = super_d * sub_sc * (ql_nibble | (qh_bit << 4))
-//       - super_dmin * sub_m
-//   sumi_d over DP4A of (v, y_quant), sumi_y for min correction.
-//
+// y_j = super_d * sub_sc * (ql_nibble | (qh_bit << 4))
+// - super_dmin * sub_m
+// sumi_d over DP4A of (v, y_quant), sumi_y for min correction.
 // Args (8 scalar + 3 ptr — different shape than the `qmatmul_q4_1_mmq_*`
 // DS4 kernel because the activation layout is different):
-//   vx, vy, dst,
-//   ncols_x = K  (elements),
-//   nrows_x = N  (weight rows),
-//   ncols_y = M  (batch rows),
-//   nrows_y = K  (elements per column of Y — nrows_y / QK8_1 = nb_per_row),
-//   nrows_dst = N
-//
+// vx, vy, dst,
+// ncols_x = K (elements),
+// nrows_x = N (weight rows),
+// ncols_y = M (batch rows),
+// nrows_y = K (elements per column of Y — nrows_y / QK8_1 = nb_per_row),
+// nrows_dst = N
 // Correctness oracle: CPU dequant(weights) × Q8_1-roundtrip(act), via the
 // sweep harness (crates/bench/src/sweep_mmq.rs, new `Q5K_Wave64` variant).
 
@@ -106,7 +98,7 @@ void flambeau_mmq_q5_K_wave64_q8_1(
     for (int c = 0; c < TILE_N; ++c) sums[c] = 0.0f;
 
     for (int ib = 0; ib < blocks_per_row_x; ++ib) {
-        // V2.2.d fix 5d — L2 prefetch of next super-block's X and Y data.
+        // L2 prefetch of next super-block's X and Y data.
         // Wave64 single-warp block → use the 1-D variant of the prefetch
         // helper (no threadIdx.y gate). Prefetches ~1 KB per axis.
         const int ib_next = ib + 1;

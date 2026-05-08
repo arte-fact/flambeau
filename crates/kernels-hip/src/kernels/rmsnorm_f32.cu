@@ -1,13 +1,10 @@
 // rmsnorm_f32 — per-row RMS normalisation, F32 weight + F32 in/out.
-//
 // Identical math to rmsnorm_f16 but keeps F32 precision end-to-end for
 // GDN's ssm_norm step (applied per-head on the state-step F32 output).
-//
 // Launch:
-//   gridDim  = { n_rows, 1, 1 }
-//   blockDim = { 256, 1, 1 }
-//   shared   = 4 floats for cross-warp reduce.
-//
+// gridDim = { n_rows, 1, 1 }
+// blockDim = { 256, 1, 1 }
+// shared = 4 floats for cross-warp reduce.
 // k should be > 0; k >= 256 is optimal.
 
 #include <hip/hip_runtime.h>

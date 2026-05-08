@@ -1,28 +1,21 @@
 // p2p_allreduce_residual — kernel-launched BAR1 P2P AllReduce + residual add.
-//
-// TP-0b (port of mi50grad's `kernel_p2p_allreduce.hip`).
-//
+// Port of mi50grad's `kernel_p2p_allreduce.hip`.
 // Each rank launches its own copy of this kernel on its own stream. The
 // kernel reads peer GPUs' partial buffers directly via BAR1-mapped P2P
 // pointers (authorised at session init by `hipDeviceEnablePeerAccess`,
 // see `crates/backend-hip/src/cluster.rs::probe_and_enable_peer_access`)
 // and folds the sum into the local hidden buffer.
-//
-//   hidden[i] += partial_local[i] + Σ partial_peerK[i]
-//
+// hidden[i] += partial_local[i] + Σ partial_peerK[i]
 // Cross-rank synchronisation lives at the launch boundary (HIP events on
 // the producer GEMV's stream are recorded then waited on by each rank's
 // AR stream before launch). The kernel itself reads peer memory as it
 // stood at launch time and contains no in-kernel barriers.
-//
 // Variants:
-//   *_residual_tp{2,4} — residual add path (this file)
-//   *_sum_tp{2,4}      — pure AllReduce sum, writes back into partial_local
-//
+// *_residual_tp{2,4} — residual add path (this file)
+// *_sum_tp{2,4} — pure AllReduce sum, writes back into partial_local
 // Grid: ceil(n / (256 * 2)) blocks × 256 threads. Each thread processes
 // 2 fp16 elements via half2 packing (4-byte vectorised load/store on local
 // HBM; peer half2 reads go through BAR1 at PCIe bandwidth).
-//
 // FP32 accumulation is mandatory on gfx906 (no MFMA; F16 add precision is
 // thin enough that 4-way sums in F16 introduce visible drift on hidden
 // states with high dynamic range).
@@ -119,7 +112,6 @@ void flambeau_p2p_allreduce_residual_tp2(
 
 // ------------------------------------------------------------------------
 // TP=4 sum (no residual): partial_local = partial_local + Σ partial_peerK
-//
 // Used by the LM-head and embedding paths where the input to AR is itself
 // the value we want post-AR (no separate residual to fold in).
 // ------------------------------------------------------------------------

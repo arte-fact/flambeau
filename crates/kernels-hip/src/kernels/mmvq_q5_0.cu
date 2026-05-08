@@ -1,26 +1,21 @@
 // mmvq_q5_0 — Q5_0 weight × Q8_1 activation → F32 dst.
-//
 // Q5_0 layout: 2-byte F16 scale + 4-byte qh (32 "5th bits") + 16 bytes
 // nibble-packed unsigned low-4-bits. Reconstruction per element i:
-//   q5_i = ((qh >> i) & 1) << 4 | nibble_i;
-//   y_i  = d * (q5_i - 16)
-//
+// q5_i = ((qh >> i) & 1) << 4 | nibble_i;
+// y_i = d * (q5_i - 16)
 // DP4A identity (same as Q4_0 but with offset 16 and 5th bits):
-//   (q5 - 16) · y = (nibble · y) + (bit << 4 · y) - 16 · sum(y)
-//                 = nibble_dp4a + 16 · bit_dp4a - 16 · sum_y
+// (q5 - 16) · y = (nibble · y) + (bit << 4 · y) - 16 · sum(y)
+// = nibble_dp4a + 16 · bit_dp4a - 16 · sum_y
 // where `bit_dp4a` is the DP4A of the 5th-bit pattern (packed as 0/1 bytes)
 // against the y quant int32. Per 4-byte slot the 5th bits are 4 disjoint
 // bits of the `qh` word; we expand them to 4 bytes `(bit?1:0)` in an int.
-//
 // For each thread handling lane4 ∈ [0, 4):
-//   - low half (elements 4·lane4 .. +3): nibble = (v >> 0) & 0x0F0F0F0F,
-//     bit = (qh >> (4·lane4)) & 0x0F, expanded to 4 bytes {bit0,bit1,bit2,bit3}
-//   - high half (elements 4·lane4 + 16 .. +19): nibble = (v >> 4) & 0x0F0F0F0F,
-//     bit = (qh >> (4·lane4 + 16)) & 0x0F, expanded likewise
-//
+// - low half (elements 4·lane4 .. +3): nibble = (v >> 0) & 0x0F0F0F0F,
+// bit = (qh >> (4·lane4)) & 0x0F, expanded to 4 bytes {bit0,bit1,bit2,bit3}
+// - high half (elements 4·lane4 + 16 .. +19): nibble = (v >> 4) & 0x0F0F0F0F,
+// bit = (qh >> (4·lane4 + 16)) & 0x0F, expanded likewise
 // Bit expansion: given `b = 4 bits packed into bits [0..4) of a byte`, produce
 // `b0 | (b1 << 8) | (b2 << 16) | (b3 << 24)` — each byte is 0 or 1.
-//
 // Block/grid: blockDim=256, gridDim=n_rows.
 
 #include "block_quant.cuh"

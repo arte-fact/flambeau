@@ -52,7 +52,7 @@ fn dev_usize(_name: &str, default: usize) -> usize {
     default
 }
 
-/// **#229 V1.1** — outcome of `ServerState::prefix_cache_try_restore`.
+/// **#229 outcome of `ServerState::prefix_cache_try_restore`.
 /// Distinguishes the three actionable states for the prefill phase.
 #[derive(Debug)]
 pub enum PrefixCacheRestore {
@@ -74,11 +74,11 @@ use crate::state::{parse_stop, SamplingParams};
 pub struct ServerState {
     pub model_id: String,
     pub cfg: Qwen3MoEConfig,
-    /// **TP-5a-i2** — PP or TP loaded model. Handlers dispatch via the
+    /// PP or TP loaded model. Handlers dispatch via the
     /// `crate::model::{prefill_logits, decode_logits}` helpers; they
     /// don't need to inspect this variant directly.
     pub model: LoadedModel,
-    /// **TP-5a-i2** — `Arc` so the TP variant's `BarP2pAllReduce` can
+    /// `Arc` so the TP variant's `BarP2pAllReduce` can
     /// hold a peer reference to the same cluster the handlers borrow
     /// from.
     pub cluster: Arc<HipCluster>,
@@ -300,14 +300,12 @@ impl Drop for AdmissionGuard {
 /// **#236 P0.1b** — strip the chat-template-emitted assistant
 /// terminator from a rendered prompt so the model continues the
 /// assistant prefill content rather than seeing a closed turn.
-///
 /// Qwen-family templates emit `<|im_end|>` followed by a newline at
 /// the end of every closed turn; `add_generation_prompt=false` keeps
 /// that terminator on the in-progress assistant turn. For prefill /
 /// continue-the-message semantics we want to delete it so the model's
 /// next-token distribution is conditioned on the partial assistant
 /// content, not on "another turn finished, what's next".
-///
 /// Conservative: trim trailing whitespace, then a single `<|im_end|>`
 /// substring, then more trailing whitespace. Does nothing if the
 /// terminator isn't found (works as a no-op for templates that
@@ -346,7 +344,6 @@ impl ServerState {
     /// on first call. Caller MUST already hold `prefill_serialiser` to
     /// avoid concurrent init races and concurrent kernel writes (the
     /// scratch buffers are not safe for parallel use).
-    ///
     /// Sized for `FLAMBEAU_PREFILL_UBATCH` (default 512). Returns the
     /// locked option as a guard so the caller can borrow `&mut` for
     /// the duration of `prefill_logits`. PP-only models don't call
@@ -382,12 +379,11 @@ impl ServerState {
         Ok(guard)
     }
 
-    /// **#229 V1.1 P2.10c** — look up the prefix cache for the given
+    /// **#229 P2.10c** — look up the prefix cache for the given
     /// prompt. On a hit, restore the cached KV+GDN state into
     /// `inflight` and report whether it covers the FULL prompt (with
     /// cached logits, prefill skipped) or just a chunk-aligned PREFIX
     /// (caller must run a partial tail prefill).
-    ///
     /// Returns `Ok(Miss)` (caller does fresh full prefill) when:
     /// - `FLAMBEAU_PREFIX_CACHE` is unset (default OFF).
     /// - Prompt is shorter than one chunk (< chunk_tokens).
@@ -485,7 +481,7 @@ impl ServerState {
         }
     }
 
-    /// **#229 V1.1** — insert an intermediate (chunk-boundary) cache
+    /// **#229 insert an intermediate (chunk-boundary) cache
     /// entry produced during a fresh prefill's per-chunk loop. No
     /// logits are stored (callers can't sample mid-prefill); future
     /// requests that hit this entry restore at the boundary and
@@ -542,10 +538,9 @@ impl ServerState {
     /// - `FLAMBEAU_PREFIX_CACHE` must be set.
     /// - Topology must be PP or TP (Hybrid bails).
     /// - Prompt must have at least one new complete chunk past
-    ///   `n_already_matched`.
+    /// `n_already_matched`.
     /// - Prompt must be at least 50 tokens (cache-hit savings won't
-    ///   justify the host-RAM cost on tiny prompts).
-    ///
+    /// justify the host-RAM cost on tiny prompts).
     /// Errors are logged and swallowed — capture is opportunistic; a
     /// failed snapshot must not break the caller's request.
     /// **#229 V1** — capture the post-prefill KV+GDN state plus the
@@ -554,11 +549,9 @@ impl ServerState {
     /// GDN-at-position snapshotting (V2). Keyed by the full chain
     /// (chunk-keys including partial tail) so future identical
     /// prompts hit and can skip prefill entirely.
-    ///
     /// `last_logits` is the prefill's last-position F32 vocab row,
     /// the same one the caller is about to feed into the first-token
     /// sampler. Cloned into the cache entry; ~600 KB on Qwen3.6.
-    ///
     /// Eligibility:
     /// - `FLAMBEAU_PREFIX_CACHE` set.
     /// - Topology PP or TP (Hybrid bails).
@@ -723,17 +716,14 @@ impl ServerState {
 
     /// **P2.9b-i2-B** — push one decode request into the batched
     /// queue and wait for the leader to dispatch.
-    ///
     /// Caller must NOT be holding `inflight_pool[slot_idx]`'s mutex —
     /// the leader needs to `blocking_lock` it during dispatch.
-    ///
     /// If we win `batched_dispatcher`, we become the leader: brief
     /// 200 µs sleep to allow other handlers to push, then drain the
     /// queue, lock each referenced slot's `Inflight`, run
     /// `forward_decode_batched_pp` across the batch, and fire each
     /// pending entry's response sender. The leader then awaits its
     /// own response on the same channel as the others.
-    ///
     /// Errors propagate through the response channel; PP-only
     /// (TP/Hybrid still go through legacy `decode_logits`).
     pub fn decode_via_scheduler(
@@ -768,7 +758,6 @@ impl ServerState {
         // prefill-flavoured kernels which add a few extra launches per
         // layer (separate rmsnorm + 2 quant variants); at N=1 those
         // launches are pure overhead vs the fused decode form.
-        //
         let n_others_active = self
             .slot_in_use
             .iter()
@@ -853,22 +842,20 @@ impl ServerState {
             }
 
             // **#276 fix** — drain-dispatch-loop with atomic empty-drop.
-            //
             // Without this restructure, late-arriving pending entries
             // could be stranded by a two-step race:
-            //   1. Leader L drains queue (perhaps empty). Releases
-            //      `batched_pending`.
-            //   2. Thread T2 takes `batched_pending`, pushes its entry,
-            //      releases.
-            //   3. T2 try_locks `batched_dispatcher` — STILL HELD by L
-            //      (which is mid-dispatch or mid-cleanup). Returns Err.
-            //      T2 falls through to `rx.recv()`.
-            //   4. L releases `batched_dispatcher`, returns from
-            //      `decode_via_scheduler_into`. L's request finishes
-            //      (max_tokens / stop) without re-entering the scheduler.
-            //   5. T2's pending entry never drained → forever blocked on
-            //      `rx.recv()`.
-            //
+            // 1. Leader L drains queue (perhaps empty). Releases
+            // `batched_pending`.
+            // 2. Thread T2 takes `batched_pending`, pushes its entry,
+            // releases.
+            // 3. T2 try_locks `batched_dispatcher` — STILL HELD by L
+            // (which is mid-dispatch or mid-cleanup). Returns Err.
+            // T2 falls through to `rx.recv()`.
+            // 4. L releases `batched_dispatcher`, returns from
+            // `decode_via_scheduler_into`. L's request finishes
+            // (max_tokens / stop) without re-entering the scheduler.
+            // 5. T2's pending entry never drained → forever blocked on
+            // `rx.recv()`.
             // Fix: when L sees an empty queue, it must release
             // `batched_dispatcher` *while still holding `batched_pending`*.
             // After that, any T2 push observes a clean dispatch lock and
@@ -924,7 +911,6 @@ impl ServerState {
     /// slot's `Inflight`, builds the `BatchSlot` list, runs
     /// `forward_decode_batched_pp`, and sends per-slot logits via
     /// the response senders.
-    ///
     /// Returns Err on dispatch failure; caller fans the error to all
     /// pending senders.
     fn dispatch_batched_pending(
@@ -1174,14 +1160,12 @@ pub async fn tools_endpoint(State(state): State<SharedState>) -> impl IntoRespon
 }
 
 /// **#234 P3.14** — POST /tokenize (llama.cpp-compat).
-///
 /// Returns `{"tokens": [int, ...]}` for the given `content`. When
 /// `add_special=true`, BOS/EOS are inserted by the underlying
 /// tokenizer (the default `false` matches the chat-completion path,
 /// which delegates specials to the chat template). When
 /// `with_pieces=true`, each token is emitted as `{"id", "piece"}`
 /// so a UI can render the surface form alongside the id.
-///
 /// 400 on tokenizer failure (typically a normaliser bug or invalid
 /// UTF-8 in `content`). No GPU work — runs on the tokio worker.
 pub async fn tokenize(
@@ -1218,7 +1202,6 @@ pub async fn tokenize(
 }
 
 /// **#234 P3.14** — POST /detokenize (llama.cpp-compat).
-///
 /// Returns `{"content": "..."}` for the given `tokens` array. Special
 /// tokens are NOT skipped — clients sending a stop-id back through
 /// detokenize see its surface form (`<|im_end|>`, `<|endoftext|>`).
@@ -1238,12 +1221,10 @@ pub async fn detokenize(
 }
 
 /// **#231 P2.11b** — POST /v1/embeddings.
-///
 /// Tokenises each input string with the chat tokenizer (Qwen3 family
 /// shares a tokenizer between chat and embedding models), then runs
 /// the loaded embedding model's pooled forward and returns the L2-
 /// normalised F32 vector. OpenAI-compatible response shape.
-///
 /// Returns 503 when the server was started without
 /// `--embedding-model`. Returns 400 on integer-array inputs (V1 only
 /// handles strings — OpenAI clients we care about always send strings).
@@ -1743,16 +1724,16 @@ pub async fn chat_completions(
     }
 
     // Non-streaming agent loop (M2.2). On each iteration:
-    //   1. Render the current `messages` into a prompt (with tools).
-    //   2. Run decode to text completion.
-    //   3. Parse text → (content, tool_calls).
-    //   4. Partition tool_calls into client-visible vs self-executable
-    //      (remote). If self-executable ones exist AND no client ones
-    //      block us, execute them, append `assistant` + `role=tool`
-    //      turns to `messages`, loop. Otherwise return.
-    //   5. Cap at `MAX_TOOL_ITERATIONS`; hitting the cap returns
-    //      whatever was produced on the final iteration as-is (no
-    //      further execution).
+    // 1. Render the current `messages` into a prompt (with tools).
+    // 2. Run decode to text completion.
+    // 3. Parse text → (content, tool_calls).
+    // 4. Partition tool_calls into client-visible vs self-executable
+    // (remote). If self-executable ones exist AND no client ones
+    // block us, execute them, append `assistant` + `role=tool`
+    // turns to `messages`, loop. Otherwise return.
+    // 5. Cap at `MAX_TOOL_ITERATIONS`; hitting the cap returns
+    // whatever was produced on the final iteration as-is (no
+    // further execution).
     const MAX_TOOL_ITERATIONS: usize = 10;
 
     let mut sum_prompt_tokens: u32 = 0;
@@ -1871,12 +1852,12 @@ pub async fn chat_completions(
         };
 
         // Stop conditions. The loop breaks in three cases:
-        //   (a) no tool calls at all → plain "stop" response;
-        //   (b) any client-visible tool calls → hand them back with
-        //       finish_reason="tool_calls" (we don't execute them);
-        //   (c) we've hit the iteration budget → return whatever
-        //       remote_calls we have without running them, flagged so
-        //       the client can follow up manually.
+        // (a) no tool calls at all → plain "stop" response;
+        // (b) any client-visible tool calls → hand them back with
+        // finish_reason="tool_calls" (we don't execute them);
+        // (c) we've hit the iteration budget → return whatever
+        // remote_calls we have without running them, flagged so
+        // the client can follow up manually.
         if remote_calls.is_empty() && client_calls.is_empty() {
             record_stat(&iter_finish);
             final_content = content;
@@ -2038,7 +2019,7 @@ pub async fn completions(
     let _admission = state.try_admit().ok_or_else(ApiError::queue_full)?;
     if req.stream {
         return Err(ApiError::bad_request(
-            "SSE streaming is not yet implemented (V1.8.C). Retry with stream=false.",
+            "SSE streaming is not yet implemented. Retry with stream=false.",
         ));
     }
     // Legacy /v1/completions doesn't surface the full OpenAI sampler
@@ -2130,7 +2111,6 @@ pub async fn completions(
 /// reproduce the same penalty + temperature + top-k/top-p/min-p
 /// transforms the sampler applied, then extracts the chosen token's
 /// log-probability and the top-`top_n` alternatives.
-///
 /// Returns `None` if the chosen token is outside the post-filter
 /// distribution (defensive — shouldn't happen because the sampler
 /// drew from the same distribution). Logprobs below -100 are clamped
@@ -2211,7 +2191,6 @@ fn log_clamped(p: f32) -> f32 {
 
 /// Assemble a PSM-shaped FIM token stream from prefix / suffix / middle
 /// fragments. Returns the full prompt-id vector ready for the engine.
-///
 /// Shared by `/infill` (P1.6b) and `/v1/completions?suffix=…` (P1.6c).
 /// `extra` carries optional repo-context files (Qwen-Coder PSM); silently
 /// skipped when the vocab lacks `<|repo_name|>` / `<|file_sep|>`.
@@ -2256,13 +2235,13 @@ fn build_fim_prompt_ids(
 /// **P1.8c** — translate one Anthropic message into 0+ OpenAI
 /// ChatMessages, appending to `out`. Splits on content-block boundary:
 /// - text + tool_use blocks at the same role go into a single
-///   ChatMessage carrying both (text becomes `content`; tool_use
-///   blocks become `tool_calls`).
+/// ChatMessage carrying both (text becomes `content`; tool_use
+/// blocks become `tool_calls`).
 /// - tool_result blocks (only legal on `role="user"` per the spec) are
-///   converted to `role="tool"` ChatMessages with `tool_call_id`. They
-///   are emitted independently from the surrounding text, in document
-///   order, since the OpenAI shape doesn't carry tool replies inside
-///   user turns.
+/// converted to `role="tool"` ChatMessages with `tool_call_id`. They
+/// are emitted independently from the surrounding text, in document
+/// order, since the OpenAI shape doesn't carry tool replies inside
+/// user turns.
 /// - image blocks (vision) are dropped; flambeau is text-only in V1.
 fn translate_anthropic_message(m: &AnthropicMessage, out: &mut Vec<ChatMessage>) {
     let blocks: Vec<&AnthropicContentBlock> = match &m.content {
@@ -2381,13 +2360,11 @@ fn anthropic_tools_to_openai(tools: &[AnthropicTool]) -> Vec<ToolDef> {
 }
 
 /// POST /v1/messages — Anthropic-compatible Messages API (P1.8a).
-///
 /// Translates the Anthropic envelope into our existing chat path:
 /// - `system` (top-level) → first OpenAI `role="system"` message
 /// - `messages[*]` with text content → OpenAI ChatMessage
 /// - `stop_sequences[]` → SamplingParams.stop_strings
 /// - `max_tokens` (required by Anthropic) → SamplingParams.max_tokens
-///
 /// V1 scope: text + tool_use/tool_result content blocks (P1.8c).
 /// Image blocks are dropped silently. Streaming events shipped in P1.8b.
 #[tracing::instrument(name = "server.messages", skip_all, fields(stream = req.stream))]
@@ -2599,15 +2576,13 @@ pub async fn messages_anthropic(
 }
 
 /// Anthropic SSE streaming engine (P1.8b).
-///
 /// Emits the canonical Anthropic event sequence:
-///   1. `message_start`         — full message envelope, content=[], usage{input_tokens, output_tokens=0}
-///   2. `content_block_start`   — `{type:"text",text:""}` at index 0
-///   3. `content_block_delta`*  — one per emitted text fragment
-///   4. `content_block_stop`    — index 0
-///   5. `message_delta`         — `{stop_reason, stop_sequence}` + cumulative `output_tokens`
-///   6. `message_stop`
-///
+/// 1. `message_start` — full message envelope, content=[], usage{input_tokens, output_tokens=0}
+/// 2. `content_block_start` — `{type:"text",text:""}` at index 0
+/// 3. `content_block_delta`* — one per emitted text fragment
+/// 4. `content_block_stop` — index 0
+/// 5. `message_delta` — `{stop_reason, stop_sequence}` + cumulative `output_tokens`
+/// 6. `message_stop`
 /// Each frame uses both `event:` and `data:` SSE fields per Anthropic
 /// spec — the openai-style single-`data:`-line is not enough. Anthropic
 /// does NOT terminate with `[DONE]`; the stream simply closes after
@@ -2923,13 +2898,11 @@ fn stream_messages_anthropic_sse(
 }
 
 /// POST /infill — llama.cpp-compatible Fill-in-the-Middle endpoint.
-///
 /// Composes a PSM-shaped FIM prompt of the form
 /// `[<|repo_name|>name<|file_sep|>body…]<|fim_prefix|>{prefix}<|fim_suffix|>{suffix}<|fim_middle|>{prompt}`
 /// using the FIM specials detected at boot (P1.6a). The leading repo
 /// block is omitted when `input_extra` is empty or the vocab lacks
 /// `<|repo_name|>` / `<|file_sep|>`.
-///
 /// The `text` returned in the OpenAI-shaped response carries ONLY the
 /// generated middle — caller is expected to splice it back at the
 /// cursor between `input_prefix` and `input_suffix`.
@@ -3008,12 +2981,12 @@ pub async fn infill(
 
 /// Merge client-supplied tools with any registered via `--mcp <url>`.
 /// Returns `None` when both are empty so the Jinja template takes the
-/// no-tools branch (same byte-for-byte output as V1.8). Returns a
+/// no-tools branch (same byte-for-byte output as ). Returns a
 /// `Vec<serde_json::Value>` with two kinds of entries:
 /// - client tools — serialised from `api::ToolDef` directly;
 /// - remote tools — rendered through `mcp_client::to_tool_json`, which
-///   uses the `alias.name`-prefixed name so the two sources can share
-///   a tool namespace without collisions.
+/// uses the `alias.name`-prefixed name so the two sources can share
+/// a tool namespace without collisions.
 fn merge_request_and_remote_tools(
     client_tools: Option<&[ToolDef]>,
     remote_tools: &[crate::mcp_client::RemoteTool],
@@ -3048,11 +3021,9 @@ fn merge_request_and_remote_tools(
 }
 
 /// Build an SSE stream from the blocking completion pipeline.
-///
 /// Emits OpenAI-compatible `chat.completion.chunk` frames: role
 /// announcement, zero-or-more content / tool-call deltas, and a final
 /// frame with `finish_reason` + `[DONE]` sentinel.
-///
 /// T3.1: tool-call deltas are emitted as the parser transitions — we
 /// never buffer a tool call body to end-of-stream and then dump it as
 /// raw text (the specific anti-pattern that produces the "raw XML at
@@ -3298,9 +3269,7 @@ fn stream_completion_sse(
 }
 
 /// Shared engine: text prompt → generated text + token counts + finish reason.
-///
 /// Runs inside `spawn_blocking` because HIP kernels + mutex hold are sync.
-///
 /// `relax_stop_mask`: when `true`, disables the first-N-token stop-token
 /// suppression and the post-N stop-bias — used on turns where the client
 /// supplied `tools[]` (T4.1). Tool-call responses are legitimately short
@@ -3387,7 +3356,6 @@ fn scheduler_can_engage(state: &ServerState, params: &SamplingParams) -> bool {
 /// the scheduler. Engaged when [`scheduler_can_engage`] returns true.
 /// Releases the slot's mutex during the decode loop so the scheduler-
 /// leader can `blocking_lock` other slots' mutexes for batched dispatch.
-///
 /// Supports the full host-sampler feature set: greedy or temp/top_k/
 /// top_p/min_p sampling, repetition / presence / frequency penalties.
 /// Does NOT (yet) support: spec-decode (MTP), JSON-grammar masking,
@@ -3456,12 +3424,12 @@ fn run_completion_scheduler_pp_blocking(
             let tp_pool: Option<
                 &mut flambeau_qwen3_moe::forward::ShardedForwardPrefillScratchTp,
             > = tp_scratch_g.as_mut().and_then(|g| g.as_mut());
-            // **#229 V1.1** — prefix-cache lookup. Three outcomes:
-            //   FullHit: KV+GDN restored, logits cached → skip prefill.
-            //   PrefixHit: KV+GDN restored at chunk boundary → partial
-            //              prefill of the tail starting at n_matched.
-            //   Miss: full fresh prefill, capture both intermediate
-            //         (chunk-boundary) and final (full prompt) entries.
+            // **#229 prefix-cache lookup. Three outcomes:
+            // FullHit: KV+GDN restored, logits cached → skip prefill.
+            // PrefixHit: KV+GDN restored at chunk boundary → partial
+            // prefill of the tail starting at n_matched.
+            // Miss: full fresh prefill, capture both intermediate
+            // (chunk-boundary) and final (full prompt) entries.
             let restore =
                 state.prefix_cache_try_restore(&mut *guard, &prompt_ids)?;
             match restore {
@@ -3717,10 +3685,10 @@ fn run_completion_blocking_ids(
     // presence / frequency on device before topk) instead of
     // `run_gpu_topk` (D3 — bare topk). Resolves the head device
     // differently per topology:
-    //   - TP:     global cluster's `decode.head_rank` device
-    //   - Hybrid: head stage's sub_cluster's head TP-rank device
-    //             (head_stage = pp_size - 1; head_rank within stage
-    //             defaults to 0 per ShardedForwardOneTokenScratchHybrid).
+    // - TP: global cluster's `decode.head_rank` device
+    // - Hybrid: head stage's sub_cluster's head TP-rank device
+    // (head_stage = pp_size - 1; head_rank within stage
+    // defaults to 0 per ShardedForwardOneTokenScratchHybrid).
     let use_gpu_sampler = state.gpu_sampler
         && matches!(
             model,
@@ -3795,7 +3763,7 @@ fn run_completion_blocking_ids(
     let tp_pool: Option<
         &mut flambeau_qwen3_moe::forward::ShardedForwardPrefillScratchTp,
     > = tp_scratch_g.as_mut().and_then(|g| g.as_mut());
-    // **#229 V1.1** — prefix-cache restore (legacy path). Three
+    // **#229 prefix-cache restore (legacy path). Three
     // outcomes per `prefix_cache_try_restore`. Bypass when logprobs
     // or MTP spec-decode active.
     let cache_eligible = params.collect_logprobs.is_none()
@@ -3973,14 +3941,12 @@ fn run_completion_blocking_ids(
     // on multi-turn prompts otherwise emits `<|im_end|>` after 0-1 content
     // tokens, producing unusable one-word replies. MIN is small enough
     // that short on-topic answers ("Yes.", "42.") are still possible.
-    //
     // T4.1: tool-call turns disable this entirely. When the model is
     // asked to emit a `<tool_call>…</tool_call>` body it may legitimately
     // take only ~10 tokens; forcing 24 content tokens before allowing
     // stop injects noise between the body and the `<|im_end|>` and
     // breaks downstream parsing. `relax_stop_mask` flips both knobs to
     // no-ops — trust the model on turns where `tools[]` is present.
-    //
     // **Sampler-G (2026-04-30)** — was 24, lowered to 8. With Qwen3.6-27B
     // at temp=0.7+top_p=0.8 the 24-token floor forced the model to keep
     // generating 13+ tokens past natural endpoints like
@@ -3992,7 +3958,7 @@ fn run_completion_blocking_ids(
     // multi-turn prompts.
     const MIN_RESPONSE_TOKENS: usize = 24;
     // Nats subtracted from every stop-token logit beyond MIN_RESPONSE_TOKENS.
-    // CN-80B-18 — was 0.5 (was 3.0 before that). Even 0.5 is enough to push
+    // was 0.5 (was 3.0 before that). Even 0.5 is enough to push
     // EOS below the next-best continuation when the model wants to stop at
     // the end of a paragraph; under top_k=20 sampling the next-best is
     // typically "regenerate the paragraph" → whole-block repetition loops
@@ -4009,16 +3975,16 @@ fn run_completion_blocking_ids(
     // implementation below." → STOP, instead of actually delivering
     // the implementation. 1.5 nats was insufficient at temp=1.0;
     // 3.0 is enough to keep EOS below the next-best continuation at
-    // most natural endpoints. The prior CN-80B-18 concern about `0.5
+    // most natural endpoints. The prior concern about `0.5
     // → repeat loops` was driven by Coder-Next-80B specifically;
     // Qwen3.6 doesn't show that failure at this bias on chat tests.
     const STOP_BIAS: f32 = 3.0;
-    // MTP-5d/5g/h: spec-decode fast path. Active when MTP head is loaded
+    // /5g/h: spec-decode fast path. Active when MTP head is loaded
     // (FLAMBEAU_SPEC_MTP=path at startup). Greedy uses strict-match verify;
     // non-greedy uses vLLM-canonical rejection sampling. Penalties
     // (repetition / presence / frequency) are now applied to base AND
     // MTP distributions inside `build_distribution` via the threaded
-    // `history` slice (MTP-5g/h #194), so penalty-active requests no
+    // `history` slice (/h #194), so penalty-active requests no
     // longer have to fall through.
     let spec_available = matches!(model, LoadedModel::Pp { mtp: Some(_), .. });
     let use_spec = spec_available;
@@ -4220,7 +4186,6 @@ fn run_completion_blocking_ids(
             // mask by emitting the multi-token text form. Detokenize
             // the recent tail and stop if a leak is present. Final
             // response cleanup happens in `finalise`.
-            //
             // **P0.2** — same mechanism extended to the per-request
             // `stop` strings. Tail window grows with the longest
             // user stop so multi-token caller stops are catchable.
@@ -4414,7 +4379,7 @@ fn run_completion_blocking_streaming(
     let tp_pool: Option<
         &mut flambeau_qwen3_moe::forward::ShardedForwardPrefillScratchTp,
     > = tp_scratch_g.as_mut().and_then(|g| g.as_mut());
-    // **#229 V1.1** — prefix-cache restore (streaming path).
+    // **#229 prefix-cache restore (streaming path).
     let restore_stream =
         state.prefix_cache_try_restore(&mut inflight, &prompt_ids)?;
     match restore_stream {
@@ -4485,14 +4450,13 @@ fn run_completion_blocking_streaming(
     // tokens without surfacing partial codepoints to the client.
     let mut generated: Vec<u32> = Vec::with_capacity(params.max_tokens as usize);
     let mut emitted_text = String::new();
-    // CN-80B-19 — incremental detokenize state. `decode_cursor` is the
+    // incremental detokenize state. `decode_cursor` is the
     // index of the first token NOT yet decoded into clean emitted bytes.
     // `pending_emitted_in_segment` tracks how many bytes of the current
     // open segment (`generated[decode_cursor..]`) we've already streamed
     // to the client, so a re-decode after a multi-byte boundary doesn't
     // re-emit safe bytes. When the segment finishes cleanly (no
     // trailing U+FFFD), `decode_cursor` advances and the segment resets.
-    //
     // Reduces per-step decode cost from O(generated.len()) to ~O(1) —
     // typical "open segment" is 1-3 tokens, only growing when a multi-
     // byte glyph straddles a BPE-token boundary.
@@ -4553,7 +4517,7 @@ fn run_completion_blocking_streaming(
     // at natural endpoints instead of wandering into leak territory.
     const MIN_RESPONSE_TOKENS: usize = 24;
     // Nats subtracted from every stop-token logit beyond MIN_RESPONSE_TOKENS.
-    // CN-80B-18 — was 0.5 (was 3.0 before that). Even 0.5 is enough to push
+    // was 0.5 (was 3.0 before that). Even 0.5 is enough to push
     // EOS below the next-best continuation when the model wants to stop at
     // the end of a paragraph; under top_k=20 sampling the next-best is
     // typically "regenerate the paragraph" → whole-block repetition loops
@@ -4570,11 +4534,11 @@ fn run_completion_blocking_streaming(
     // implementation below." → STOP, instead of actually delivering
     // the implementation. 1.5 nats was insufficient at temp=1.0;
     // 3.0 is enough to keep EOS below the next-best continuation at
-    // most natural endpoints. The prior CN-80B-18 concern about `0.5
+    // most natural endpoints. The prior concern about `0.5
     // → repeat loops` was driven by Coder-Next-80B specifically;
     // Qwen3.6 doesn't show that failure at this bias on chat tests.
     const STOP_BIAS: f32 = 3.0;
-    // CN-80B-22 — env-gated TP-decode profiling. When FLAMBEAU_PROFILE_DECODE
+    // env-gated TP-decode profiling. When FLAMBEAU_PROFILE_DECODE
     // is set, enable HipEvent section recording for `n` warm-up-skipped decode
     // steps, then flush + dump aggregate per-section ms to stderr. Skips the
     // first 8 steps (cold-cache effects, allocator warmup).
@@ -4594,7 +4558,7 @@ fn run_completion_blocking_streaming(
     let mut hp_stopstr_us: u128 = 0;
     let mut hp_step_us: u128 = 0;
 
-    // MTP-5d streaming + 5g/h penalty-aware: spec-decode SSE path. Active
+    // streaming + 5g/h penalty-aware: spec-decode SSE path. Active
     // when MTP head is loaded. Penalties applied in build_distribution via
     // the threaded `&generated` history. Mirrors the non-streaming branch.
     let spec_available = matches!(model, LoadedModel::Pp { mtp: Some(_), .. });

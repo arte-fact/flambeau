@@ -1,22 +1,18 @@
-// mmq_f16_tile — V2.29.a tile-M MMQ for F16 weight × Q8_1 activation.
-//
-// V2.25.a shipped a trivial multi-row variant (same per-block math as the
+// mmq_f16_tile — 9.a tile-M MMQ for F16 weight × Q8_1 activation.
+// shipped a trivial multi-row variant (same per-block math as the
 // MMVQ, grid.y = n_tokens) that gave +4 % on 27B-UD-Q8_K_XL prefill —
-// pure launch-overhead saving, no compute amortisation. V2.27 head-to-head
+// pure launch-overhead saving, no compute amortisation. 7 head-to-head
 // showed the F16 path at 40 % of llama.cpp (56 vs 142 tok/s L=512).
-//
 // This kernel is the real tile-M: MMQ_Y = 64 output rows per block, MMQ_X
 // = 8 activation rows per block, 64 threads / wave64. Each thread owns
 // one output row's dot against all 8 activation rows. The weight is
 // read once per K-sub-block per thread (into registers — 32 F16 fit
 // easily); the activation tile (8 Q8_1 blocks = 8 × 34 B = 272 B) is
 // read from HBM once per ib and L1-broadcast across the 64 threads.
-//
-// Key difference from V2.24.b's null Y-LDS port on Q4_K tile8: Y is read
+// Key difference from 4.b's null Y-LDS port on Q4_K tile8: Y is read
 // by all 64 threads but the broadcast pattern hits L1 hot. We don't LDS-
 // stage either side — we just amortise weight HBM by having each of 64
 // threads do 8× work instead of 1×.
-//
 // Launch: block = (64, 1, 1), grid = (⌈n_rows / 64⌉, ⌈n_tokens / 8⌉, 1).
 
 #include "block_quant.cuh"

@@ -1,11 +1,9 @@
 //! CPU dequantize reference (`dequantize_row_*`) for every V1 GGUF block dtype.
-//!
 //! These are ports of candle's `GgmlType::to_float` impls (crates/candle-core/
 //! src/quantized/k_quants.rs), which in turn mirror llama.cpp's
 //! `ggml-cpu-quants.c::dequantize_row_*`. The arithmetic is written to be
 //! bit-identical to llama.cpp on IEEE754-friendly hardware — round-off only
 //! differs if reordering / fused FMA is applied, which we explicitly avoid.
-//!
 //! These functions are the correctness oracle against which every GPU MMVQ /
 //! MMQ kernel is certed. Performance is not a concern here.
 
@@ -13,7 +11,6 @@
 // quant codes (the GGUF format uses u8 storage for [-N, N-1] signed quants
 // that the decoder recovers by a bias subtract). These casts are intentional
 // and bit-preserving — clippy::cast_possible_wrap doesn't apply.
-//
 // Test asserts compare against exact-representable f32 constants (powers of
 // 2, zeros, small integers) that round-trip through quant → dequant with
 // zero error — strict `==` is correct there, not an epsilon comparison.
@@ -34,7 +31,6 @@ use crate::error::QuantError;
 
 /// Dispatch on `dtype` and dequantize `raw` (one tensor's packed bytes) into a
 /// freshly-allocated `Vec<f32>` of length `elem_count`.
-///
 /// # Errors
 /// Returns an error if `raw` is the wrong byte length for `elem_count` of
 /// `dtype`, or if `elem_count` is not a multiple of the dtype's block size.
@@ -50,7 +46,6 @@ pub fn dequantize_to_vec(
 
 /// Dequantize `raw` into a caller-supplied `out` buffer of exactly `elem_count`
 /// elements. This is the allocation-free form used by the sweep harness.
-///
 /// # Errors
 /// Returns an error if `raw` is the wrong byte length for `out.len()` of
 /// `dtype`, or if `out.len()` is not a multiple of the dtype's block size.
@@ -133,7 +128,7 @@ fn dequant_mxfp4(raw: &[u8], out: &mut [f32]) {
         let scale = if e == 0 { 0.0f32 } else { f32::from_bits((e as u32) << 23) };
         let nibbles = &raw[off + 1..off + 1 + QK / 2];
         let dst = &mut out[b * QK..(b + 1) * QK];
-        // CN-80B-16 — ggml Q4_0-family layout: lo nibble at byte j → elem j,
+        // ggml Q4_0-family layout: lo nibble at byte j → elem j,
         // hi nibble at byte j → elem j + QK/2. Earlier impl placed them
         // adjacent (elem 2j / 2j+1) which is the post-shuffle layout and
         // does not match what GGUFs store.
@@ -453,7 +448,7 @@ mod tests {
     #[test]
     fn q4_0_known_values() {
         // d = 0.5, qs[0] = 0x42 → low nibble 2 → (2 - 8) * 0.5 = -3.0
-        //                       high nibble 4 → (4 - 8) * 0.5 = -2.0
+        // high nibble 4 → (4 - 8) * 0.5 = -2.0
         let mut block = BlockQ4_0 {
             d: f16::from_f32(0.5),
             qs: [0x88u8; QK4_0 / 2],
@@ -485,7 +480,7 @@ mod tests {
     #[test]
     fn q5_0_msb_is_restored() {
         // d = 1.0, all low nibbles = 0, qh high-bit set for lane 0 low-half only:
-        //   lane 0 low: (0 | 0x10) - 16 = 0, lane 0 high: (0 | 0) - 16 = -16.
+        // lane 0 low: (0 | 0x10) - 16 = 0, lane 0 high: (0 | 0) - 16 = -16.
         let mut block = BlockQ5_0 {
             d: f16::from_f32(1.0),
             qh: [0; 4],

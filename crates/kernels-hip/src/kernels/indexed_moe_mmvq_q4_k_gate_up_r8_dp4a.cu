@@ -1,25 +1,20 @@
 // indexed_moe_mmvq_q4_k_gate_up_r8_dp4a — MoE Q4_K fused gate+up, 8 rows per block.
-//
-// r8 extension of V2.4.a's r4. Halves block count once more:
-//   - r1 baseline: grid = (n_rows,     n_tokens * top_k)
-//   - r2:          grid = (n_rows/2,   n_tokens * top_k)
-//   - r4:          grid = (n_rows/4,   n_tokens * top_k)
-//   - r8:          grid = (n_rows/8,   n_tokens * top_k)
-//
+// r8 extension of r4. Halves block count once more:
+// - r1 baseline: grid = (n_rows, n_tokens * top_k)
+// - r2: grid = (n_rows/2, n_tokens * top_k)
+// - r4: grid = (n_rows/4, n_tokens * top_k)
+// - r8: grid = (n_rows/8, n_tokens * top_k)
 // Lane layout (wave64, 8 rows simultaneously):
-//   row_idx  = lane >> 3            — 0..7: which row within the octet
-//   lane_lo  = lane & 7             — 0..7: eighth-warp position
-//
+// row_idx = lane >> 3 — 0..7: which row within the octet
+// lane_lo = lane & 7 — 0..7: eighth-warp position
 // Each 8-lane eighth-warp handles 1 row. Q4_K super-block has 32 int32s of
 // qs (128 bytes); 8 lanes cover them with 4 ints/lane per super-block →
 // inner loop does 4 dp4a chains per lane (vs 2 for r4, 1 for r2).
-//
 // Reduce via `gfx906_eighth_warp_reduce_sum` (xor-1, xor-2, xor-4 DPP
 // sequence within a 16-lane bank — no cross-bank shuffle needed).
-//
 // Trade-off: 2× per-lane work vs r4, but 2× fewer blocks. Net gain
 // depends on whether launch overhead still dominates per-block cost at
-// r4 scale. V2.4.a/b measured r1→r2 (+6 %), r2→r4 (+12 %); r4→r8 is the
+// r4 scale. /b measured r1→r2 (+6 %), r2→r4 (+12 %); r4→r8 is the
 // "is launch overhead still the bottleneck?" test.
 
 #include "block_quant.cuh"

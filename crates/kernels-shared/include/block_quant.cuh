@@ -66,13 +66,11 @@ static_assert(sizeof(flambeau_block_q8_1) == 4 + QK8_1, "block_q8_1 size");
 // Q8_1 MMQ layout — turbo / candle 4-warp LDS-tiled prefill path's activation
 // block. One MMQ block holds 4 × 32 = 128 elements (vs standard Q8_1's 32).
 // Header: 4 × half2 ds (one (d, d*sum) per 32-element sub-block) = 16 B.
-// Body:   4 × QK8_1 = 128 int8 quants = 128 B.
+// Body: 4 × QK8_1 = 128 int8 quants = 128 B.
 // Total: 144 B.
-//
 // Storage: (k_big_block, col) row-major in the device buffer — the MMQ
 // K-loop fetches 144-B strides along the col axis, sharing each block
 // across all threads in the tile's col-group.
-//
 // Source: /artefact/candle/candle-hip-kernels/src/mmq_turbo.cu:159-167.
 typedef struct {
     fb_fp16_t ds[8];                  // 4 × half2 = 8 fp16 ((d, d*sum) × 4)
@@ -154,18 +152,15 @@ static_assert(sizeof(flambeau_block_q4_K) == 2 + 2 + K_SCALE_SIZE + QK_K / 2,
 // (d, s) header pair. Used by the INT8 attention score path so the
 // inner KQ matmul can stay in integer (dp4a) instead of dequanting K
 // to FP16 per element.
-//
 // Layout in `out_qs`/`out_ds`:
-//   out_qs[D]            : int8 quantized values
-//   out_ds[(D/32) * 2]   : interleaved (d, d*sum) FP16 per 32-elem block
-//                          (matches `flambeau_block_q8_1.ds` semantics)
-//
+// out_qs[D] : int8 quantized values
+// out_ds[(D/32) * 2] : interleaved (d, d*sum) FP16 per 32-elem block
+// (matches `flambeau_block_q8_1.ds` semantics)
 // Caller invariants: `D` is a multiple of 32, and `D <= blockDim.x`.
 // One thread reads `q_in[tid]` (or zero-pads if `tid >= D`). Reduction
 // is wave-wide (`__shfl_xor` with WARP=64 on gfx906); for blocks
 // larger than one warp, caller must run this WITH `n_warps = D/64`
 // per group and keep block-amax per 32-element subgroup separately.
-//
 // Reference: `quantize_q8_1_to_shared` in
 // `/artefact/llama.cpp/ggml/src/ggml-cuda/fattn-common.cuh:292`.
 __device__ __forceinline__ void flambeau_quantize_q8_1_to_shared(

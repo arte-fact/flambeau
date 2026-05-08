@@ -1,26 +1,21 @@
-// mmq_q4_0_4warp_lds — V1-BENCH-C1 4-warp LDS-tiled MMQ for Q4_0 × Q8_1_MMQ.
-//
-// Direct sibling of `mmq_q4_1_4warp_lds.cu`. The V2.28.a single-warp wave64
+// mmq_q4_0_4warp_lds — 4-warp LDS-tiled MMQ for Q4_0 × Q8_1_MMQ.
+// Direct sibling of `mmq_q4_1_4warp_lds.cu`. The 8.a single-warp wave64
 // MMQ for Q4_0 (mmq_q4_0_wave64) saturates at small-M (35B-A3B-Q4_0 MoE)
 // but loses 2.5× to Q4_1's 4warp_lds at dense prefill (V1 bench matrix
 // 27B-Q4_0 = 73 tok/s pp4 vs 27B-Q4_1 = 188 tok/s pp4). The dense path
 // needs the larger MMQ_Y=128 / MMQ_X=64 tile with cooperative LDS staging
 // of the activation; that's exactly what the Q4_1 4warp_lds kernel has.
-//
 // Differences from `mmq_q4_1_4warp_lds.cu`:
-//   - `flambeau_block_q4_0` (18 B = d:fp16 + qs:16 B) instead of
-//     `flambeau_block_q4_1` (20 B with extra `m` field).
-//   - x_dm half2 stores `(d, 0)` — we keep the half2 layout so the
-//     LDS sizing + load-tiles helper structure mirrors Q4_1 exactly.
-//   - vec_dot uses Q4_0's bias-correction identity:
-//
-//       dot = Σ d·(q-8) · d_y·q8
-//           = d · (d_y · Σ q·q8 − 8 · Σ d_y·q8)
-//           = d · (d_y · sumi − 8 · y_s)
-//
-//     (sumi from DP4A, y_s = d_y · Σ q8 pre-computed in Q8_1 block header.)
-//   - q4_0_block_bytes = 18 (vs 20) for the L2 prefetch stride.
-//
+// - `flambeau_block_q4_0` (18 B = d:fp16 + qs:16 B) instead of
+// `flambeau_block_q4_1` (20 B with extra `m` field).
+// - x_dm half2 stores `(d, 0)` — we keep the half2 layout so the
+// LDS sizing + load-tiles helper structure mirrors Q4_1 exactly.
+// - vec_dot uses Q4_0's bias-correction identity:
+// dot = Σ d·(q-8) · d_y·q8
+// = d · (d_y · Σ q·q8 − 8 · Σ d_y·q8)
+// = d · (d_y · sumi − 8 · y_s)
+// (sumi from DP4A, y_s = d_y · Σ q8 pre-computed in Q8_1 block header.)
+// - q4_0_block_bytes = 18 (vs 20) for the L2 prefetch stride.
 // Same launch geometry, same dispatch shape (m >= 128).
 
 #include "block_quant.cuh"

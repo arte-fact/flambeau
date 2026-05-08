@@ -1,6 +1,5 @@
 //! Per-layer forward composition — the dispatcher that chains attn/gdn +
 //! (moe | dense_ffn) into one layer's output, for both decode and prefill.
-//!
 //! Everything this module produces is already-residual-summed `x_out = x_in
 //! + attn_delta + ffn_out(residual = mid + shared_delta)` matching
 //! `moe_combine_f16`'s semantics (no double-residual).
@@ -52,14 +51,13 @@ fn dev_flag(_name: &str) -> bool {
 }
 
 // ---------------------------------------------------------------------------
-// V1.7.3-e4 — per-layer composition (residual sums + ffn/post-attn norm +
+// e4 — per-layer composition (residual sums + ffn/post-attn norm +
 // routed/shared fan-in).
 // ---------------------------------------------------------------------------
 
 /// Every scratch the per-layer composition function touches. Owning them
 /// in one struct keeps the `forward_layer_decode` signature readable and
 /// lets the session allocate exactly once.
-///
 /// We always carry a `FullAttnScratch` and a `GdnScratch` even though
 /// each layer uses only one; the unused one sits idle. The `SharedExpertScratch`
 /// is `Option` because dense qwen3moe arches have no shared expert.
@@ -91,7 +89,7 @@ impl LayerForwardScratch {
         let hidden_bytes = hidden * 2;
 
         let full_attn = Some(FullAttnScratch::new(cfg, device)?);
-        // V2.28.b — GDN scratch only on hybrid arches (qwen35moe).
+        // 8.b — GDN scratch only on hybrid arches (qwen35moe).
         let gdn = if cfg.gdn.is_some() {
             Some(GdnScratch::new(cfg, device)?)
         } else {
@@ -175,18 +173,16 @@ impl Drop for LayerForwardScratch {
 /// One decode step of a full layer block — dispatches on `cfg.is_recurrent(il)`
 /// to the GDN or full-attention path, then runs the MoE FFN (with optional
 /// shared expert) and composes all the residual sums.
-///
 /// Math, per layer:
-///   attn_delta = attn(attn_norm(x_in))                 (forward_{full_attn,gdn}_decode)
-///   mid        = x_in + attn_delta                     (add_f16)
-///   mid_norm   = post_attn_norm(mid)                   (rmsnorm_f16)
-///   shared     = shared_expert(mid_norm)               (optional; forward_shared_expert_decode)
-///   moe_res    = mid + shared                          (add_f16, if shared)
-///   x_out      = moe_res + Σ w_k · expert_k(mid_norm)  (forward_moe_ffn_decode)
-///
+/// attn_delta = attn(attn_norm(x_in)) (forward_{full_attn,gdn}_decode)
+/// mid = x_in + attn_delta (add_f16)
+/// mid_norm = post_attn_norm(mid) (rmsnorm_f16)
+/// shared = shared_expert(mid_norm) (optional; forward_shared_expert_decode)
+/// moe_res = mid + shared (add_f16, if shared)
+/// x_out = moe_res + Σ w_k · expert_k(mid_norm) (forward_moe_ffn_decode)
 /// On arches without a shared expert (dense qwen3moe), the `shared` and
 /// `moe_res` steps are skipped and `moe_res = mid` is passed directly.
-/// V2.27.a-i3 — optional slot bundle for graph-captureable decode.
+/// 7.a-i3 — optional slot bundle for graph-captureable decode.
 /// Only full-attn layers contribute slots; GDN layers advance state
 /// in-place across replays and need no slot updates.
 #[derive(Clone, Copy, Debug)]
@@ -210,7 +206,7 @@ pub fn forward_layer_decode(
     let hidden = cfg.hidden_size;
     let il = layer_weights.layer_idx;
 
-    // V1-BENCH-CN-80B-6 — intra-layer section markers. No-op when the
+    // intra-layer section markers. No-op when the
     // thread-local profile timer is disabled (~ns thread_local check).
     // Boundaries: attn_done, post_norm_done, shared_expert_done,
     // router_done, moe_ffn_done. Per-layer total = sum of these = the
@@ -241,7 +237,7 @@ pub fn forward_layer_decode(
             .full_attn
             .as_mut()
             .context("LayerForwardScratch.full_attn missing")?;
-        // V2.28.b — qwen3moe's dense attention (plain Q projection, no
+        // 8.b — qwen3moe's dense attention (plain Q projection, no
         // gate) vs qwen35moe's gated full-attention. Dispatch on the
         // weights variant.
         match &layer_weights.attn {
@@ -283,7 +279,7 @@ pub fn forward_layer_decode(
         stream,
     )?;
 
-    // 2+3. V2.23.a.1 fused: `mid = x_in + attn_delta; mid_norm = rmsnorm(mid)*w`.
+    // 2+3. 3.a.1 fused: `mid = x_in + attn_delta; mid_norm = rmsnorm(mid)*w`.
     // Saves one kernel launch per layer per token vs the old add_f16 + rmsnorm
     // pair. Both outputs consumed downstream.
     let post_norm = layer_weights
@@ -348,10 +344,10 @@ pub fn forward_layer_decode(
     }
 
     // 4. FFN. Two flavours:
-    //    - arch=qwen35 (dense): single gate/up/down triple, no router. Writes
-    //      `x_out = mid + FFN(mid_norm)` directly.
-    //    - MoE arches: optional shared expert delta + router + routed MoE
-    //      (residual folded into moe_combine).
+    // - arch=qwen35 (dense): single gate/up/down triple, no router. Writes
+    // `x_out = mid + FFN(mid_norm)` directly.
+    // - MoE arches: optional shared expert delta + router + routed MoE
+    // (residual folded into moe_combine).
     if cfg.is_dense_ffn() {
         let dense_w = layer_weights
             .ffn
@@ -375,7 +371,7 @@ pub fn forward_layer_decode(
         return Ok(());
     }
 
-    // MoE path — optional shared expert delta. V2.23.a.2 skips the explicit
+    // MoE path — optional shared expert delta. 3.a.2 skips the explicit
     // `add_f16(mid, shared_delta)` by passing both residuals to
     // `moe_combine_two_residuals_f16`, saving one launch per layer per token.
     let (moe_residual, shared_extra) = if let (Some(shared_w), Some(shared_scratch)) =
@@ -448,7 +444,7 @@ pub fn forward_layer_decode(
     }
 
     // 6. Routed MoE FFN — fuses the residual add in moe_combine (and optionally
-    // the shared-expert delta residual via V2.23.a.2 two-residuals variant).
+    // the shared-expert delta residual via 3.a.2 two-residuals variant).
     forward_moe_ffn_decode(
         ops,
         stream,
@@ -467,7 +463,7 @@ pub fn forward_layer_decode(
 
 
 // ---------------------------------------------------------------------------
-// V1.7.3-f4 — per-layer prefill + forward_prefill end-to-end.
+// f4 — per-layer prefill + forward_prefill end-to-end.
 // ---------------------------------------------------------------------------
 
 /// Scratches a per-layer prefill step touches: sibling of
@@ -498,7 +494,7 @@ impl LayerPrefillScratch {
         let hidden_bytes = max_tokens * cfg.hidden_size * 2;
 
         let full_attn = Some(FullAttnPrefillScratch::new(cfg, device, max_tokens)?);
-        // V2.28.b — only allocate GDN scratch when the arch actually has
+        // 8.b — only allocate GDN scratch when the arch actually has
         // GDN layers (qwen35moe hybrid). qwen3moe is pure full-attn.
         let gdn = if cfg.gdn.is_some() {
             Some(GdnPrefillScratch::new(cfg, device, max_tokens)?)
@@ -580,7 +576,7 @@ impl Drop for LayerPrefillScratch {
 }
 
 /// One prefill chunk through one full layer. Mirrors
-/// V2.26.a-i5b — optional slot bundle for graph-capture. Holds the
+/// 6.a-i5b — optional slot bundle for graph-capture. Holds the
 /// per-layer slots that need updating per ubatch (pos-varying scalars
 /// and KV-append dsts). Only the full-attn layer contributes slots in
 /// the V1 target (qwen35 dense, qwen35moe); GDN + dense FFN are
@@ -604,7 +600,7 @@ pub fn forward_layer_prefill(
     n_tokens: usize,
     start_position: usize,
     slots: Option<LayerPrefillSlots>,
-    // V2.30.a — optional event for serialising GDN state_step across
+    // 0.a — optional event for serialising GDN state_step across
     // lanes on same rank. Only meaningful on recurrent layers; full-attn
     // layers ignore. `None` on single-lane / sync paths.
     gdn_state_event: Option<&flambeau_backend_hip::HipEvent>,
@@ -612,7 +608,7 @@ pub fn forward_layer_prefill(
     let hidden = cfg.hidden_size;
     let il = layer_weights.layer_idx;
 
-    // MTP-5h-2 — intra-layer marks for the L>=2 prefill path. Mirror the
+    // intra-layer marks for the L>=2 prefill path. Mirror the
     // L=1 forward_layer_decode marks but suffixed `_p` so a profile run
     // that includes BOTH L=2 verify and L=1 redo (spec reject path) keeps
     // them separable.
@@ -646,8 +642,8 @@ pub fn forward_layer_prefill(
             .full_attn
             .as_mut()
             .context("LayerPrefillScratch.full_attn missing")?;
-        // V2.28.b — dispatch on attn variant: Dense (qwen3moe) vs
-        // FullAttn (qwen35moe gated full-attn). V1-BENCH-#116 follow-up:
+        // 8.b — dispatch on attn variant: Dense (qwen3moe) vs
+        // FullAttn (qwen35moe gated full-attn). follow-up:
         // FullAttnQ8 cache routes through the same generic `<L>` prefill
         // function — branches on layout internally.
         match (&layer_weights.attn, &mut *layer_cache) {

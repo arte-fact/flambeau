@@ -1,18 +1,16 @@
 // mmvq_q4_k_r2 — Q4_K MMVQ, multi-row r2 DPP-reduce (candle P29 pattern).
-//
 // Compared to the single-row oracle in `mmvq_q4_k.cu`:
 // - 64 threads per block STILL = one wave64, but the wavefront computes
-//   two output rows simultaneously. Lanes 0..31 own row R+0; lanes 32..63
-//   own row R+1. `blockIdx.x` indexes the row *pair*.
+// two output rows simultaneously. Lanes 0..31 own row R+0; lanes 32..63
+// own row R+1. `blockIdx.x` indexes the row *pair*.
 // - Each half-warp iterates all 8 sub-blocks for its row, reading one
-//   element per sub-block (8 elements per lane per super-block). The
-//   single-row kernel's "hi_half picks nibble" trick is gone — each lane
-//   now visits every sub-block so it covers both nibbles.
+// element per sub-block (8 elements per lane per super-block). The
+// single-row kernel's "hi_half picks nibble" trick is gone — each lane
+// now visits every sub-block so it covers both nibbles.
 // - Activation (`y_sb[s]`) is shared across the two rows → halved
-//   per-launch cache traffic on the Q8_1 side vs two single-row launches.
+// per-launch cache traffic on the Q8_1 side vs two single-row launches.
 // - Final reduction uses `gfx906_half_warp_reduce_sum` (32-lane DPP chain,
-//   stops at xor-16, skipping the cross-half swap).
-//
+// stops at xor-16, skipping the cross-half swap).
 // This is the primary decode-path dtype for Qwen3.6 Q4_K_M.
 
 #include "block_quant.cuh"

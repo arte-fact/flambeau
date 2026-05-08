@@ -1,10 +1,8 @@
 // sigmoid_mul_bf16 — pointwise `y[i] = sigmoid(gate[i]) * x[i]`, BF16 in/out.
-//
-// MTP-4-C-5: BF16 sibling of `sigmoid_mul_f16`. Same numerically-stable
+// BF16 sibling of `sigmoid_mul_f16`. Same numerically-stable
 // sigmoid formula (branch on sign so the exp argument stays ≤ 0). Used
 // for the MTP attention output gate `attn_gated = attn_out * sigmoid(gate)`
-// (NOT silu — see V1.7.4.b post-mortem).
-//
+// (NOT silu — see post-mortem).
 // Launch: blockDim = 256, gridDim = ceil(n / 256).
 
 #include "block_quant.cuh"

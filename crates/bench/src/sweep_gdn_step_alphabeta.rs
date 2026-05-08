@@ -1,6 +1,5 @@
 //! C10 — differential cert for `gdn_state_step_alphabeta_f32_s128`
 //! versus the unfused chain `gdn_alpha_beta_f32 ∘ gdn_state_step_f32_s128`.
-//!
 //! The fused kernel inlines the softplus / sigmoid / exp ops the
 //! alpha-beta kernel performs upstream, then runs the same recurrent
 //! step. Same op order, same warp-reduce signatures — bit-identical at

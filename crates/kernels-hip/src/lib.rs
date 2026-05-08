@@ -8,7 +8,7 @@
 //!
 //! Rust code in `backend-hip` loads these slices via `hipModuleLoadData` at
 //! the first launch. No kernel is launched without a matching cert (see
-//! `certs/hip/gfx906/`); V1.3's bench sweep produces them.
+//! `certs/hip/gfx906/`); the bench sweep produces them.
 //!
 //! `HIP_SKIP_BUILD=1` skips hipcc; the generated `hsaco.rs` is still valid
 //! but `CATALOGUE` is empty, so `hipModuleLoadData` failures land cleanly.

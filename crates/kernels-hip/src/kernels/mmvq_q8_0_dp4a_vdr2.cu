@@ -1,21 +1,17 @@
 // mmvq_q8_0_dp4a_vdr2 — Q8_0 MMVQ with VDR=2 DP4A inner loop.
-//
 // Refinement of mmvq_q8_0_dp4a.cu. Matches llama.cpp's
 // vec_dot_q8_0_q8_1_impl<float, VDR_Q8_0_Q8_1_MMVQ=2> pattern
 // (vecdotq.cuh:243-255):
-//
-//   int sumi = 0;
-//   for (int i = 0; i < 2; i++) sumi = dp4a(v[i], u[i], sumi);
-//   return (float)(d_x * d_y) * (float)sumi;
-//
+// int sumi = 0;
+// for (int i = 0; i < 2; i++) sumi = dp4a(v[i], u[i], sumi);
+// return (float)(d_x * d_y) * (float)sumi;
 // vs our VDR=1 which did 1 dp4a + 1 float multiply PER BLOCK. This
 // version does 2 dp4a + 1 float multiply per "pair slot" (half a block),
 // so per-chunk float multiplies are halved and the two dp4a share a
 // register chain, improving instruction-level parallelism.
-//
 // Thread layout (256 threads / block, 1 row / block):
-//   lane_in_grp = tid & 3     — 0..3: which int32-pair within a block (4 pairs per block of 8 int32s)
-//   block_idx   = tid >> 2    — 0..63: block index (64 blocks covered per wave iter)
+// lane_in_grp = tid & 3 — 0..3: which int32-pair within a block (4 pairs per block of 8 int32s)
+// block_idx = tid >> 2 — 0..63: block index (64 blocks covered per wave iter)
 // Outer stride = 64 blocks.
 
 #include "block_quant.cuh"

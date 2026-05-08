@@ -1,10 +1,8 @@
 //! Minimal FFI to HIP runtime (`libamdhip64`).
-//!
-//! We hand-write just the surface V1.2 needs — device/stream/alloc/memcpy/sync
+//! We hand-write just the surface needs — device/stream/alloc/memcpy/sync
 //! plus error text. No bindgen-shaped full header import: it pulls in
 //! thousands of symbols we will never use, bloats build time, and makes the
 //! ABI target version harder to reason about.
-//!
 //! The `hipError_t` enum has hundreds of values; we treat it as an i32 and
 //! rely on `hipGetErrorString` to format anything non-zero.
 
@@ -21,7 +19,6 @@ use std::os::raw::{c_char, c_int, c_uint, c_void};
 pub const HIP_SUCCESS: c_int = 0;
 
 /// `hipErrorPeerAccessAlreadyEnabled` from `hip/hip_runtime_api.h`.
-///
 /// Returned by `hipDeviceEnablePeerAccess` when the (current device, peer)
 /// edge is already authorised — benign on cluster re-bind paths and
 /// treated as success by `HipCluster::new`.
@@ -97,15 +94,14 @@ extern "C" {
         hfunc: hipFunction_t,
     ) -> c_int;
 
-    // Pinned (page-locked) host memory — required by V1.7.5.B's PP peer
+    // Pinned (page-locked) host memory — required by PP peer
     // copy host-bounce to keep DtoH + HtoD at full PCIe bandwidth.
     // Pageable memory forces the driver to stage through an internal
     // pinned buffer, halving throughput.
     pub fn hipHostMalloc(ptr: *mut *mut c_void, size: usize, flags: c_uint) -> c_int;
     pub fn hipHostFree(ptr: *mut c_void) -> c_int;
 
-    // TP-0a — peer access for BAR1-mapped P2P kernels.
-    //
+    // peer access for BAR1-mapped P2P kernels.
     // `hipDeviceCanAccessPeer(can, dev, peer)` writes 1 to `*can` if `dev`
     // is allowed to read/write `peer`'s memory through PCIe BAR1 once peer
     // access is enabled. On gfx906 PCIe-only rigs the matrix is symmetric
@@ -113,14 +109,12 @@ extern "C" {
     // Above-4G-Decoding + Resizable-BAR. If a pair returns 0, the BIOS or
     // motherboard topology blocks BAR1 mapping and the BAR1 P2P AllReduce
     // path must be skipped on that pair (host-bounce stays as fallback).
-    //
     // `hipDeviceEnablePeerAccess(peer, flags)` is a per-thread, per-device
     // operation: it grants the *current* HIP device (last `hipSetDevice`)
     // permission to dereference pointers owned by `peer`. `flags` is
     // reserved (HIP requires it to be 0). The "already enabled" return
     // (`hipErrorPeerAccessAlreadyEnabled`, code 705) is benign and is
     // treated as success by the cluster bring-up path.
-    //
     // Unlike `hipMemcpyPeerAsync`, which on this rig has been observed to
     // submit successfully but leave the source stream in an unsync'able
     // state (see `cluster.rs` header), the BAR1 *direct dereference*
@@ -135,7 +129,7 @@ extern "C" {
     pub fn hipDeviceEnablePeerAccess(peer_device_id: c_int, flags: c_uint) -> c_int;
     pub fn hipDeviceDisablePeerAccess(peer_device_id: c_int) -> c_int;
 
-    // V2.25.b — event primitives for cross-stream / cross-device DAG
+    // 5.b — event primitives for cross-stream / cross-device DAG
     // scheduling (async peer-copy pipeline-parallel ubatch path).
     pub fn hipEventCreate(event: *mut hipEvent_t) -> c_int;
     pub fn hipEventCreateWithFlags(event: *mut hipEvent_t, flags: c_uint) -> c_int;
@@ -143,17 +137,17 @@ extern "C" {
     pub fn hipEventRecord(event: hipEvent_t, stream: hipStream_t) -> c_int;
     pub fn hipStreamWaitEvent(stream: hipStream_t, event: hipEvent_t, flags: c_uint) -> c_int;
     pub fn hipEventSynchronize(event: hipEvent_t) -> c_int;
-    /// V1-BENCH-CN-80B-5 — measure ms between two recorded events. Both
+    /// measure ms between two recorded events. Both
     /// events must have been created **without** `hipEventDisableTiming`
     /// for the timestamp to be valid.
     pub fn hipEventElapsedTime(ms: *mut f32, start: hipEvent_t, stop: hipEvent_t) -> c_int;
 
-    // V2.26.a — graph-capture primitives. Record a sequence of kernel
+    // 6.a — graph-capture primitives. Record a sequence of kernel
     // launches + memcpys on a stream once, instantiate into an executable
     // graph, and replay per ubatch. Collapses per-ubatch Rust FFI /
     // driver launch overhead to a single graph-replay call.
     pub fn hipStreamBeginCapture(stream: hipStream_t, mode: c_uint) -> c_int;
-    /// CN-80B-20 — capture stream work INTO an existing graph. Multiple
+    /// capture stream work INTO an existing graph. Multiple
     /// streams can capture into the SAME `hipGraph_t` simultaneously,
     /// resolving cross-stream events as internal graph edges. Beta API in
     /// ROCm 7.x; `dependencyData` must be NULL.
@@ -166,7 +160,7 @@ extern "C" {
         mode: c_uint,
     ) -> c_int;
     pub fn hipStreamEndCapture(stream: hipStream_t, graph: *mut hipGraph_t) -> c_int;
-    /// CN-80B-20 — create an empty graph for capture-to-graph use.
+    /// create an empty graph for capture-to-graph use.
     pub fn hipGraphCreate(graph: *mut hipGraph_t, flags: c_uint) -> c_int;
     pub fn hipGraphInstantiate(
         exec: *mut hipGraphExec_t,
@@ -179,7 +173,7 @@ extern "C" {
     pub fn hipGraphExecDestroy(exec: hipGraphExec_t) -> c_int;
     pub fn hipGraphDestroy(graph: hipGraph_t) -> c_int;
 
-    // V2.26.a-i2 — graph-node introspection + in-place param update on an
+    // 6.a-i2 — graph-node introspection + in-place param update on an
     // instantiated exec. Lets us capture a forward pass once and replay it
     // with updated scalar params (e.g. pos, start_position) per ubatch.
     pub fn hipGraphGetNodes(
@@ -198,7 +192,7 @@ extern "C" {
         params: *const hipKernelNodeParams,
     ) -> c_int;
 
-    // V2.26.a-i5b — 1D memcpy-node in-place update on an instantiated exec.
+    // 6.a-i5b — 1D memcpy-node in-place update on an instantiated exec.
     // Used to retarget the KV-cache append memcpys per ubatch (dst is
     // pos-dependent; src and size stay fixed).
     pub fn hipGraphExecMemcpyNodeSetParams1D(

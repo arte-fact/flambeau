@@ -1,26 +1,22 @@
 // indexed_moe_mmvq_q8_0 — Q8_0 MMVQ with per-token expert routing.
-//
 // Sibling of `indexed_moe_mmvq_q4_k` (the Q4_K r1) and
 // `indexed_moe_mmvq_q6_k` (the Q6_K) kernels; unblocks UD-Q8_K_XL GGUFs
 // where MoE expert weights stay Q8_0 instead of the usual Q4_K.
-//
 // Inner math identical to `mmvq_q8_0_dp4a_vdr2.cu`: 256 threads/block,
 // VDR=2 pattern (8 elements per thread per inner iter via two dp4a).
 // Differences from the non-MoE kernel:
-//   - weight rows are selected by `expert_ids[token, slot_idx]`
-//   - activation is `y[token, :]` (shared across all top_k slots)
-//   - output is `dst[token, slot_idx, row]` layout, matching the combine
-//     kernel contract.
-//
+// - weight rows are selected by `expert_ids[token, slot_idx]`
+// - activation is `y[token, :]` (shared across all top_k slots)
+// - output is `dst[token, slot_idx, row]` layout, matching the combine
+// kernel contract.
 // Layout:
-//   weights       [n_experts, n_rows, n_blocks_per_row]   Q8_0 blocks
-//   activations   [n_tokens, n_blocks_per_row]            Q8_1 blocks (QK8_0 == QK8_1)
-//   expert_ids    [n_tokens, top_k]                       i32
-//   output        [n_tokens, top_k, n_rows]               F32
-//
+// weights [n_experts, n_rows, n_blocks_per_row] Q8_0 blocks
+// activations [n_tokens, n_blocks_per_row] Q8_1 blocks (QK8_0 == QK8_1)
+// expert_ids [n_tokens, top_k] i32
+// output [n_tokens, top_k, n_rows] F32
 // Launch:
-//   blockDim  = { 256 }                                   (same as mmvq_q8_0_dp4a_vdr2)
-//   gridDim   = { n_rows, n_tokens * top_k, 1 }
+// blockDim = { 256 } (same as mmvq_q8_0_dp4a_vdr2)
+// gridDim = { n_rows, n_tokens * top_k, 1 }
 
 #include "block_quant.cuh"
 #include "gfx906.cuh"

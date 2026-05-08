@@ -1,9 +1,7 @@
-//! V1.6.5 attention prefill (F16 KV, GQA, causal mask) correctness sweep.
-//!
+//! attention prefill (F16 KV, GQA, causal mask) correctness sweep.
 //! Covers both V1 head_dim values:
 //! - head_dim=128, GQA-32/4 — Qwen3.5 family.
 //! - head_dim=256, GQA-16/2 — Qwen3.6 family.
-//!
 //! Varies Q token count (the novel axis vs decode) and KV cache size.
 //! Causal mask is applied inside the kernel via a per-(q_token) context
 //! limit.
@@ -49,8 +47,8 @@ pub fn run_sweep(repo_root: &Path) -> Result<Cert> {
     let attrs: FuncAttributes = kernel.attributes()?;
 
     // (n_q_tokens, n_k_tokens, q_offset) combinations covering:
-    //  - first prefill batch (q_offset=0, n_k=n_q).
-    //  - follow-on prefill batch into an existing cache (q_offset>0).
+    // - first prefill batch (q_offset=0, n_k=n_q).
+    // - follow-on prefill batch into an existing cache (q_offset>0).
     let cases = [
         (8usize, 8usize, 0usize),   // short first batch
         (128, 128, 0),              // canonical 128-token prefill
@@ -242,8 +240,7 @@ fn run_shape(
     Ok((got, reference))
 }
 
-/// V2.2.d fix 4 — cert for the flash-tile flash-attention v2 port.
-///
+/// cert for the flash-tile flash-attention v2 port.
 /// Shares CPU reference + shape grid with the baseline `attention_prefill_f16`
 /// cert; swaps the device-side kernel + launch signature. The new kernel has
 /// a different entry point per head_dim (`_d64`, `_d128`, `_d256`) and uses

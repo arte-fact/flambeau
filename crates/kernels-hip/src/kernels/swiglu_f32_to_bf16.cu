@@ -1,6 +1,5 @@
 // swiglu_f32_to_bf16 — fused `y_bf16[i] = (bf16)(silu(a[i]) * b[i])`.
-//
-// MTP-4-C-5: BF16 analogue of `swiglu_f32_to_f16`. In the BF16 MTP MLP,
+// BF16 analogue of `swiglu_f32_to_f16`. In the BF16 MTP MLP,
 // `gate` and `up` come from the F32 mmvq accumulator outputs; the next
 // step is the BF16 down matmul, so we fuse swiglu + cast into BF16 to
 // avoid the intermediate F32 round-trip + extra launch.

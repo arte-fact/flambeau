@@ -1,8 +1,6 @@
-// moe_combine_no_residual_f16 — TP-4b-i2 variant of `moe_combine_f16`
+// moe_combine_no_residual_f16 — variant of `moe_combine_f16`
 // without the input residual.
-//
-//   out[token, d] = Σ_{k=0..top_k} weight[token, k] * expert_out[token, k, d]
-//
+// out[token, d] = Σ_{k=0..top_k} weight[token, k] * expert_out[token, k, d]
 // Used by the TP-sharded MoE forward, where the residual stream is
 // folded later by the AllReduce-residual kernel rather than by the
 // combine. Same launch shape as `moe_combine_f16`.

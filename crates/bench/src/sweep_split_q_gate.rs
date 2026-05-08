@@ -1,4 +1,4 @@
-//! V1.7.2.E split-q-gate correctness sweep.
+//! split-q-gate correctness sweep.
 
 #![cfg(feature = "hip")]
 

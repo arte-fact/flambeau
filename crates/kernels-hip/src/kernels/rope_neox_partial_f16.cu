@@ -1,27 +1,22 @@
 // rope_neox_partial_f16 — NeoX-style partial RoPE, F16 in-place.
-//
 // Qwen3.5/3.6/3-Next full-attention layers use a **partial** RoPE that
 // rotates only the first `rotated_dims` of `head_dim`, with the pair layout
 // split (not interleaved): pair indices are `(i, i + rotated_dims/2)`.
 // This mirrors llama.cpp's `rope_multi` kernel (the non-vision, non-imrope
 // path) for the text-only case where all MROPE sections point at the same
 // position ID — mathematically equivalent to plain partial NeoX RoPE.
-//
 // For each (token, head, pair_i ∈ 0..rotated_dims/2):
-//   angle = positions[token] * theta_base^(-2*pair_i/rotated_dims)
-//   (x0, x1) = (x[pair_i], x[pair_i + rotated_dims/2])
-//   x[pair_i]                       = x0*cos(angle) - x1*sin(angle)
-//   x[pair_i + rotated_dims/2]      = x0*sin(angle) + x1*cos(angle)
-//
+// angle = positions[token] * theta_base^(-2*pair_i/rotated_dims)
+// (x0, x1) = (x[pair_i], x[pair_i + rotated_dims/2])
+// x[pair_i] = x0*cos(angle) - x1*sin(angle)
+// x[pair_i + rotated_dims/2] = x0*sin(angle) + x1*cos(angle)
 // Dimensions `rotated_dims..head_dim` pass through unchanged (no write).
-//
 // Caller invokes separately for Q and K. Gate (from qwen3.5/3.6 gated
 // attention) is never rotated.
-//
 // Launch shape:
-//   blockDim  = { rotated_dims / 2 }    (32 threads at rotated_dims=64)
-//   gridDim   = { n_tokens, n_heads, 1 }
-//   shared    = 0
+// blockDim = { rotated_dims / 2 } (32 threads at rotated_dims=64)
+// gridDim = { n_tokens, n_heads, 1 }
+// shared = 0
 
 #include <hip/hip_runtime.h>
 

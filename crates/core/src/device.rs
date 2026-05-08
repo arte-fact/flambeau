@@ -1,18 +1,16 @@
 //! Device / Stream trait surface.
-//!
 //! Flambeau is device-generic at the trait level: `Device` and `Stream` are the
 //! only surface models touch. Concrete `HipDevice` + `HipStream` live in
 //! `flambeau-backend-hip`; `CudaDevice` + `CudaStream` will live in
 //! `flambeau-backend-cuda` (V2).
-//!
 //! Design notes:
 //! - Allocation returns a `DevicePtr` newtype — opaque to consumers. Backends
-//!   cast to their real pointer type internally.
+//! cast to their real pointer type internally.
 //! - Streams are **explicit**: every kernel launch / memcpy / collective takes
-//!   `&Stream`. No hidden `hipDeviceSynchronize` except at session boundaries
-//!   (architectural rule 7 from CLAUDE.md).
+//! `&Stream`. No hidden `hipDeviceSynchronize` except at session boundaries
+//! (architectural rule 7 from CLAUDE.md).
 //! - `DeviceError` is the common failure type. Backends wrap their native
-//!   error codes (hipError_t, ncclResult_t) behind this with a string context.
+//! error codes (hipError_t, ncclResult_t) behind this with a string context.
 
 use std::fmt;
 
@@ -87,7 +85,6 @@ pub trait Stream: Send + Sync {
     fn raw_handle(&self) -> usize;
 
     /// Block the calling thread until every launch on this stream has retired.
-    ///
     /// # Errors
     /// Returns `DeviceError::Backend` if the underlying stream-sync call
     /// (e.g. `hipStreamSynchronize`) reports a non-success status.
@@ -113,14 +110,12 @@ pub trait Device: Send + Sync + 'static {
     fn default_stream(&self) -> &Self::Stream;
 
     /// Create an additional stream.
-    ///
     /// # Errors
     /// Returns `DeviceError::Backend` if the backend stream-create call fails.
     fn new_stream(&self) -> DeviceResult<Self::Stream>;
 
     /// Allocate `bytes` bytes of device memory. The returned pointer is owned
     /// by the caller and must be freed by `dealloc` on this same device.
-    ///
     /// # Errors
     /// Returns `DeviceError::Alloc` if the backend allocator fails (typically
     /// out-of-memory). Zero-byte allocations are infallible and return a
@@ -128,11 +123,9 @@ pub trait Device: Send + Sync + 'static {
     fn alloc(&self, bytes: usize) -> DeviceResult<DevicePtr>;
 
     /// Free a pointer previously returned by `alloc` on this device.
-    ///
     /// # Safety
     /// The pointer must have been returned by a successful `alloc` on **this**
     /// device, and no outstanding work on any stream may reference it.
-    ///
     /// # Errors
     /// Returns `DeviceError::Backend` if the backend free call fails.
     /// `DevicePtr::NULL` is accepted and returns `Ok(())`.
@@ -141,10 +134,8 @@ pub trait Device: Send + Sync + 'static {
     /// Copy `bytes` bytes across the H↔D boundary on `stream`. The caller is
     /// responsible for ensuring the host buffer lives until the stream
     /// synchronises for `HostToDevice` / `DeviceToHost` transfers.
-    ///
     /// # Safety
     /// Both endpoints must be valid for the declared direction and size.
-    ///
     /// # Errors
     /// Returns `DeviceError::Backend` if the backend async-memcpy enqueue
     /// fails. Zero-byte copies are infallible.
@@ -159,7 +150,6 @@ pub trait Device: Send + Sync + 'static {
 
     /// Block until **all** streams on this device have retired. Session
     /// boundaries only; hot paths must use `Stream::synchronize`.
-    ///
     /// # Errors
     /// Returns `DeviceError::Backend` if the device-sync call fails.
     fn synchronize(&self) -> DeviceResult<()>;

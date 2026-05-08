@@ -1,27 +1,22 @@
 // mmq_q4_K_4warp — 4-warp LDS-tiled MMQ for Q4_K weights × Q8_1 activation.
-//
-// First-class Q4_K prefill kernel for V1.4. Inner arithmetic is byte-identical
+// First-class Q4_K prefill kernel for Inner arithmetic is byte-identical
 // to `indexed_moe_mmq_q4_k.cu`; only the expert indirection is removed so
 // this can serve the dense (non-MoE) matmul path (attention Q/K/V/O
 // projections + dense FFN gate/up/down).
-//
 // Tile shape:
-//   MMQ_Y = 16 output rows per block
-//   MMQ_X =  8 output columns per block
-//   MMQ_K = 256 K-positions per iter (= one Q4_K super-block)
-//
+// MMQ_Y = 16 output rows per block
+// MMQ_X = 8 output columns per block
+// MMQ_K = 256 K-positions per iter (= one Q4_K super-block)
 // Thread layout (128 threads = 2 wave64):
-//   row_in_tile = tid / 8     (0..15)
-//   col_in_tile = tid & 7     (0..7)
-//
+// row_in_tile = tid / 8 (0..15)
+// col_in_tile = tid & 7 (0..7)
 // LDS budget:
-//   x_f32[MMQ_Y * 256] = 16 KB
-//   y_f32[MMQ_X * 256] =  8 KB
-//                        ≈ 24 KB / 64 KB LDS.
-//
+// x_f32[MMQ_Y * 256] = 16 KB
+// y_f32[MMQ_X * 256] = 8 KB
+// ≈ 24 KB / 64 KB LDS.
 // The F32-tile variant lands correctness first. The int8-tile / dp4a refactor
 // (per-subblock sc*d and m*dmin scales + int32 dot + sum(y) correction) is
-// the next V1.4 perf step and supersedes this kernel behind the same
+// the next perf step and supersedes this kernel behind the same
 // `impl_id`.
 
 #include "block_quant.cuh"
@@ -59,7 +54,6 @@ extern "C" __global__ void flambeau_mmq_q4_K_4warp_q8_1(
 
     for (int sb = 0; sb < n_sb_per_row; ++sb) {
         // -- Phase 1: dequant X super-block into LDS.
-        //
         // MMQ_Y × 256 = 4096 F32 slots; 128 threads → 32 elements per thread.
         #pragma unroll 4
         for (int flat = tid; flat < MMQ_Y * MMQ_K; flat += THREADS) {
@@ -86,7 +80,6 @@ extern "C" __global__ void flambeau_mmq_q4_K_4warp_q8_1(
         }
 
         // -- Phase 2: dequant Y super-block into LDS.
-        //
         // MMQ_X × 256 = 2048 F32 slots; 128 threads → 16 elements per thread.
         #pragma unroll 4
         for (int flat = tid; flat < MMQ_X * MMQ_K; flat += THREADS) {

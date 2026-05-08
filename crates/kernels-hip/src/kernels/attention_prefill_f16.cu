@@ -1,27 +1,22 @@
 // attention_prefill_f16 — GQA prefill attention, F16 KV cache.
-//
 // Generalises the decode kernel to multi-token Q. Each (q_token, q_head)
 // pair gets its own block; the online-softmax recurrence is identical to
 // decode but the context is causally truncated to
 // `min(q_offset + q_token + 1, n_k_tokens)`.
-//
 // Layout:
-//   Q:     [n_q_tokens, n_heads_q, head_dim]
-//   K/V:   [n_k_tokens, n_heads_kv, head_dim]   (same layout KvCache<F16Contig> uses)
-//   Out:   [n_q_tokens, n_heads_q, head_dim]
-//
+// Q: [n_q_tokens, n_heads_q, head_dim]
+// K/V: [n_k_tokens, n_heads_kv, head_dim] (same layout KvCache<F16Contig> uses)
+// Out: [n_q_tokens, n_heads_q, head_dim]
 // Supported head_dim: {64, 128, 256} (matching attention_decode_f16).
 // Caller launches with `block = head_dim` threads; kernel computes
 // `n_warps = blockDim.x / 64` at runtime and sums `score_parts[0..n_warps]`.
-//
 // Launch shape:
-//   blockDim = { head_dim }
-//   gridDim  = { n_q_tokens, n_heads_q, 1 }
-//
+// blockDim = { head_dim }
+// gridDim = { n_q_tokens, n_heads_q, 1 }
 // This is the correctness oracle. First-class perf variant is a tiled
 // flash-attn-v2 (block-over-Q + block-over-K with cooperative LDS tiles
 // and K-transposed layout in the KvCache); it ships as a separate impl_id
-// behind the same cert once V1.6.5 perf work lands.
+// behind the same cert once perf work lands.
 
 #include <hip/hip_runtime.h>
 

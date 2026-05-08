@@ -1,21 +1,18 @@
-//! V1-BENCH-CN-80B-5 — section-level profiling via HipEvent timestamps.
-//!
-//! rocprofv3 7.1.1 SIGABRTs on multi-rank (≥ 4 ranks) on this rig (V2.30
+//! section-level profiling via HipEvent timestamps.
+//! rocprofv3 7.1.1 SIGABRTs on multi-rank (≥ 4 ranks) on this rig (0
 //! memory). For models that only run at pp4 (Coder-Next-80B, 35B-A3B
 //! at all topologies), per-kernel attribution is unavailable through
 //! the standard tool. This module provides a coarse alternative:
-//!
-//!   * Caller enables a thread-local section timer via [`enable`].
-//!   * Forward code along the hot path inserts [`mark`] calls at
-//!     well-known section boundaries, each of which lazily allocates
-//!     a timing-enabled `HipEvent` and records it on the supplied
-//!     stream. When the timer is disabled, [`mark`] is a single
-//!     thread-local check (~ns) and a fast-return.
-//!   * After the workload completes, caller calls [`flush`] to drain
-//!     the recorded events and compute per-section ms via
-//!     `hipEventElapsedTime`. Events are pairwise consecutive — section
-//!     `name[i]` ms = `event[i+1].elapsed_since(event[i])`.
-//!
+//! * Caller enables a thread-local section timer via [`enable`].
+//! * Forward code along the hot path inserts [`mark`] calls at
+//! well-known section boundaries, each of which lazily allocates
+//! a timing-enabled `HipEvent` and records it on the supplied
+//! stream. When the timer is disabled, [`mark`] is a single
+//! thread-local check (~ns) and a fast-return.
+//! * After the workload completes, caller calls [`flush`] to drain
+//! the recorded events and compute per-section ms via
+//! `hipEventElapsedTime`. Events are pairwise consecutive — section
+//! `name[i]` ms = `event[i+1].elapsed_since(event[i])`.
 //! The instrumentation never changes the production hot path's behaviour;
 //! all it adds when enabled is one event-record per mark (low-µs cost on
 //! gfx906) and `O(N_marks)` heap allocations.
@@ -60,7 +57,6 @@ pub fn is_enabled() -> bool {
 
 /// Record a section boundary on `stream` (which must belong to `device`).
 /// No-op when the thread-local timer is disabled.
-///
 /// # Errors
 /// Propagates HipEvent allocation / record failures.
 pub fn mark(name: &'static str, device: &HipDevice, stream: &HipStream) -> anyhow::Result<()> {
@@ -81,7 +77,6 @@ pub fn mark(name: &'static str, device: &HipDevice, stream: &HipStream) -> anyho
 
 /// Synchronise every recorded event, compute pairwise ms deltas, and
 /// aggregate by section name. Disables the timer.
-///
 /// The delta for `events[i]` is the elapsed time between `events[i-1].event`
 /// and `events[i].event`, attributed to `events[i].name`. The very first
 /// event has no predecessor and contributes nothing.

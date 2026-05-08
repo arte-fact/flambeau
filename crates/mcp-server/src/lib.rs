@@ -1,19 +1,15 @@
 //! flambeau-mcp-server — M-track, dev-only.
-//!
 //! Exposes flambeau's internal dev-surface (sweep, cert-check, pmc-probe,
 //! inspect-gguf, dispatch reads, cert-diff) as MCP tools over the
 //! official Rust SDK (`rmcp`). Every tool's return type is a JSON
 //! artefact that is itself committable — cert rows, PMC snapshots,
 //! dispatch-row TOML fragments.
-//!
 //! **Never load-bearing for production.** `flambeau serve` in prod
 //! must not depend on this crate — enforced by the workspace
 //! dependency graph (server crate has no path = "../mcp-server" link).
-//!
 //! Transports today:
-//!   - stdio (T:1.1 / M1.1) — Claude Code / MCP CLI default.
-//!   - HTTP (M1.5 follow-up).
-//!
+//! - stdio (T:1.1 / M1.1) — Claude Code / MCP CLI default.
+//! - HTTP (M1.5 follow-up).
 //! See `doc/ROADMAP-V2-TOOL-CALLING-AND-MCP.md` §M1 for the tool
 //! catalogue and CLAUDE.md §M-track for the "every finding
 //! round-trips into a committable artefact" contract.
@@ -29,13 +25,13 @@ use rmcp::{schemars, tool, tool_handler, tool_router, ServerHandler, ServiceExt}
 
 /// Shorthand: every tool returns this. We construct `CallToolResult`
 /// by hand so the response carries BOTH:
-///   - `structured_content`: the parsed JSON object — what an MCP-spec-
-///     compliant client (Claude Code, MCP Inspector, agents) renders.
-///   - `content[0]`: a *pretty-printed* JSON dump as text fallback —
-///     what older clients see. `CallToolResult::structured()` uses
-///     `to_string()` (compact) for the fallback which renders as a
-///     wall of escaped JSON; pretty-printing makes it readable too.
-///   - `is_error`: false for success, true for tool-level errors.
+/// - `structured_content`: the parsed JSON object — what an MCP-spec-
+/// compliant client (Claude Code, MCP Inspector, agents) renders.
+/// - `content[0]`: a *pretty-printed* JSON dump as text fallback —
+/// what older clients see. `CallToolResult::structured()` uses
+/// `to_string()` (compact) for the fallback which renders as a
+/// wall of escaped JSON; pretty-printing makes it readable too.
+/// - `is_error`: false for success, true for tool-level errors.
 type ToolReturn = CallToolResult;
 
 /// The M-track MCP server. Each `#[tool]` method corresponds to one
@@ -271,7 +267,6 @@ impl FlambeauMcp {
     /// `git show <commit>:<path>`, parses both, and returns a
     /// structured summary: `{pass_flip, results_added, results_removed,
     /// results_changed, pmc_delta, notes}`.
-    ///
     /// Intended flow: a driver agent sweeps a new kernel, commits the
     /// cert, then calls this tool with `commit_a=HEAD~1, commit_b=HEAD`
     /// to auto-generate PR-body content — the JSON artefact
@@ -458,7 +453,6 @@ fn git_show_json(commit: &str, path: &str) -> Result<serde_json::Value> {
 /// Diff two cert JSONs into an agent-friendly summary. Focuses on what
 /// a reviewer would want in a PR body: whether `pass` flipped at all,
 /// which shapes were added / removed / changed, and any PMC deltas.
-///
 /// Cert schema (see `certs/hip/gfx906/*.json`): `{impl_id, backend,
 /// arch, op, dtype_weight, dtype_activation, results: [{m, k, n, seed,
 /// max_rel_err, tolerance, pass, pmc?}], ...}`. We diff `results[]` by
@@ -635,7 +629,6 @@ impl ServerHandler for FlambeauMcp {
 
 /// Boot the MCP server over stdio. Blocks the current task until the
 /// peer closes the connection or an error is raised.
-///
 /// Invoked by `flambeau mcp --stdio` (the default CLI mode).
 pub fn run_stdio() -> impl Future<Output = Result<()>> {
     async move {
@@ -662,13 +655,11 @@ pub fn run_stdio() -> impl Future<Output = Result<()>> {
 
 /// Boot the MCP server over streamable HTTP on `127.0.0.1:<port>`.
 /// Mounts the service at `/mcp`.
-///
 /// Binds 127.0.0.1 by default — this is a DEV surface and exposing
 /// it on a routable address is an explicit opt-in. Crosses the line
 /// into real network exposure only when the operator passes a
 /// different bind address; until M2, the only caller is another
 /// flambeau process on the same host.
-///
 /// Invoked by `flambeau mcp --port N`.
 pub fn run_http(port: u16) -> impl Future<Output = Result<()>> {
     use rmcp::transport::streamable_http_server::{

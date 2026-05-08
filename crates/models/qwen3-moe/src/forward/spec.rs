@@ -1,54 +1,45 @@
 //! Speculative-decode drivers (one K=1 macro step at a time).
-//!
 //! Three flavors live here:
-//!
 //! - [`forward_speculative_pp_step`] — greedy K=1 spec on PP topology.
-//!   Strict-match verify (`accept ⇔ argmax(p_pos0) == draft`).
+//! Strict-match verify (`accept ⇔ argmax(p_pos0) == draft`).
 //! - [`forward_speculative_pp_step_sampling`] — non-greedy spec via
-//!   vLLM-canonical rejection sampling (Leviathan et al. 2022). Applies
-//!   the full sampling config (temperature / top-k / top-p / min-p /
-//!   penalties) to BOTH base `p` and MTP `q` distributions.
+//! vLLM-canonical rejection sampling (Leviathan et al. 2022). Applies
+//! the full sampling config (temperature / top-k / top-p / min-p /
+//! penalties) to BOTH base `p` and MTP `q` distributions.
 //! - [`forward_speculative_tp_step`] — TP topology analog (greedy only).
-//!
 //! ## Macro-step shape (PP, greedy)
-//!
 //! Pre-state: cache populated through slot `position - 1`; caller holds
 //! `last_token = T@position` (sampled by the prior step) and
 //! `h_for_mtp = h@(position - 1)` (the hidden that produced last_token).
-//!
 //! Per macro:
-//!   1. Snapshot GDN state across all ranks.
-//!   2. MTP draft: `(h_for_mtp, embed(last_token)) → T_draft`, a guess
-//!      at `T@(position + 1)`.
-//!   3. Base verify at L=2 with `[last_token, T_draft]` starting at
-//!      `position`. K/V extends to slot `position+1`. Pos1 head is
-//!      deferred (Lever C); only `p_pos0` is downloaded.
-//!   4. `T_actual_pos1 = argmax(p_pos0)`.
-//!   5. Verify: `T_draft == T_actual_pos1`?
-//!      - **Accept**: lazily run pos1 head (Lever C), commit
-//!        `[T_actual_pos1, argmax(p_pos1)]`, advance position by 2.
-//!      - **Reject (Lever 1)**: rollback K/V by **1** (slot=position
-//!        from `last_token` is correct and stays); restore GDN snapshot;
-//!        re-advance GDN by 1 step per recurrent layer using per-layer
-//!        x_in snapshots saved during the L=2 verify (~7 ms parallel
-//!        across ranks instead of a 50 ms full L=1 PP redo). Commit
-//!        `T_actual_pos1` from p_pos0; advance position by 1.
-//!
+//! 1. Snapshot GDN state across all ranks.
+//! 2. MTP draft: `(h_for_mtp, embed(last_token)) → T_draft`, a guess
+//! at `T@(position + 1)`.
+//! 3. Base verify at L=2 with `[last_token, T_draft]` starting at
+//! `position`. K/V extends to slot `position+1`. Pos1 head is
+//! deferred (Lever C); only `p_pos0` is downloaded.
+//! 4. `T_actual_pos1 = argmax(p_pos0)`.
+//! 5. Verify: `T_draft == T_actual_pos1`?
+//! - **Accept**: lazily run pos1 head (Lever C), commit
+//! `[T_actual_pos1, argmax(p_pos1)]`, advance position by 2.
+//! - **Reject (Lever 1)**: rollback K/V by **1** (slot=position
+//! from `last_token` is correct and stays); restore GDN snapshot;
+//! re-advance GDN by 1 step per recurrent layer using per-layer
+//! x_in snapshots saved during the L=2 verify (~7 ms parallel
+//! across ranks instead of a 50 ms full L=1 PP redo). Commit
+//! `T_actual_pos1` from p_pos0; advance position by 1.
 //! The key invariants of the reject path: full-attn K/V at slot=position
 //! was written with `last_token` during the L=2 verify and is correct;
 //! MoE/FFN outputs at L=2 position 0 are likewise correct; the only
 //! piece of state that L=2 advanced incorrectly is each GDN layer's
 //! recurrent state (it consumed `[last_token, draft]`; we want only
 //! `last_token`). `redo_gdn_only_pp` re-advances exactly that.
-//!
 //! ## Performance
-//!
 //! Empirical numbers on Qwen3.6-27B-Q4_0 / 4× MI50 PCIe Mesh<4>:
-//!   - greedy A/B at 87.5 % accept: spec 56.11 ms/tok vs baseline
-//!     50.14 (+11.9 %); first 16 tokens bit-identical to baseline
-//!   - sampling smoke (temp=0.8, top_p=0.9): 90.7 ms/tok at 68.8 %
-//!     accept
-//!
+//! - greedy A/B at 87.5 % accept: spec 56.11 ms/tok vs baseline
+//! 50.14 (+11.9 %); first 16 tokens bit-identical to baseline
+//! - sampling smoke (temp=0.8, top_p=0.9): 90.7 ms/tok at 68.8 %
+//! accept
 //! Spec is structurally net-negative on this rig (PCIe-3, no NVLink):
 //! L=2 paired-prefill multiplier was ~1.92× (not the projected ~1.5×)
 //! because peer-copy/AR sync dominates L=1 wall on PCIe. Default off;
@@ -113,11 +104,9 @@ pub struct SpecTimings {
 /// will be processed at slot `position`) and `h_for_mtp_dev`
 /// (post-base-norm hidden of the step that produced `last_token`,
 /// living on the **last rank** in `cluster`).
-///
 /// On the **first** macro step of a session, `h_for_mtp_dev` should
 /// come from a preceding `forward_one_token_pp_logits` call with the
 /// last prompt token — that primes the MTP input correctly.
-///
 /// Returns the committed tokens, the new position, and a fresh
 /// `h_for_mtp_dev_next` pointer (= the device buffer holding the
 /// hidden that produced the LAST committed token). The buffer
@@ -248,9 +237,9 @@ pub fn forward_speculative_pp_step(
     t.mtp_draft = t0.elapsed().as_secs_f64() * 1000.0 - t.gdn_snapshot;
 
     // ── 3. Base verify: batched L=2 paired-logits over
-    //    [last_token, mtp_draft] at start_position = position.
-    //    MTP-5h-Lever-C — defer pos1 head computation until accept;
-    //    saves 3 ms × 12.5 % rejects = 0.4 ms/macro avg.
+    // [last_token, mtp_draft] at start_position = position.
+    // defer pos1 head computation until accept;
+    // saves 3 ms × 12.5 % rejects = 0.4 ms/macro avg.
     let t0 = now();
     let mut step1_logits = Vec::with_capacity(vocab);
     let verify_tokens = [last_token, mtp_draft];
@@ -289,7 +278,7 @@ pub fn forward_speculative_pp_step(
     let accepted = mtp_draft == t_actual_pos1;
 
     if accepted {
-        // MTP-5h-Lever-C — pos1 head deferred; run it now to get the
+        // pos1 head deferred; run it now to get the
         // second committed token. Cost (~3 ms) only paid on accept paths.
         let mut step2_logits = Vec::with_capacity(vocab);
         forward_output_head_at_pp(
@@ -320,7 +309,7 @@ pub fn forward_speculative_pp_step(
             h_for_next,
         ))
     } else {
-        // ── Reject (MTP-5h-1): rollback ONLY the wrong-input K/V slot
+        // ── Reject (): rollback ONLY the wrong-input K/V slot
         // (slot=position+1, written from `mtp_draft`). Slot=position was
         // written from `last_token` during L=2 verify and is correct,
         // so it stays. Restore GDN to "after position-1", then re-run
@@ -371,7 +360,7 @@ pub fn forward_speculative_pp_step(
 }
 
 // ===================================================================
-// MTP-5g — rejection-sampling spec-decode (non-greedy).
+// rejection-sampling spec-decode (non-greedy).
 // ===================================================================
 
 fn prob_of(dist: &[(u32, f32)], token: u32) -> f32 {
@@ -407,26 +396,22 @@ fn sample_residual(p: &[(u32, f32)], q: &[(u32, f32)], rng: &mut Rng) -> u32 {
     sample_from_distribution(&residual, rng)
 }
 
-/// MTP-5g — rejection-sampling K=1 spec-decode macro step.
-///
+/// rejection-sampling K=1 spec-decode macro step.
 /// Same shape as [`forward_speculative_pp_step`], but instead of
 /// strict-greedy verify (`accept iff t_d == argmax(p)`), implements
 /// vLLM-canonical rejection sampling:
-///
 /// - Draft: `t_d ~ q(·)` where `q` is MTP's filtered/temperatured
-///   distribution under `sampling`.
+/// distribution under `sampling`.
 /// - Verify: compute `p(·)` (base) under the same `sampling`.
 /// - Accept iff `u < min(1, p(t_d) / q(t_d))` for `u ~ U[0,1)`.
 /// - On accept: commit `t_d` and a second token sampled from
-///   `p_pos1(·)` (base at position+1).
+/// `p_pos1(·)` (base at position+1).
 /// - On reject: rollback, restore GDN, redo L=1 with `last_token`,
-///   commit a token sampled from the **residual**
-///   `r(x) = max(0, p_pos0(x) - q(x))` (normalized).
-///
+/// commit a token sampled from the **residual**
+/// `r(x) = max(0, p_pos0(x) - q(x))` (normalized).
 /// When `sampling.is_greedy()` is true this collapses to the same
 /// behaviour as the strict-greedy path (q is one-hot at draft, p is
 /// one-hot at argmax, accept iff they coincide).
-///
 /// Penalties on `sampling` are NOT applied here — caller should
 /// either disable penalties or pass logits with penalties already
 /// baked in. Filed as follow-up; the production call site (greedy
@@ -447,7 +432,7 @@ pub fn forward_speculative_pp_step_sampling(
     position: usize,
     sampling: &Sampling,
     rng: &mut Rng,
-    // MTP-5g/h — caller's per-turn generated-token slice for
+    // /h — caller's per-turn generated-token slice for
     // penalty application. Pass `&[]` when penalties are inactive.
     history: &[u32],
 ) -> Result<(SpecStep, DevicePtr)> {
@@ -538,7 +523,7 @@ pub fn forward_speculative_pp_step_sampling(
     t.mtp_draft = t0.elapsed().as_secs_f64() * 1000.0 - t.gdn_snapshot;
 
     // ── 3. Paired L=2 verify with [last_token, mtp_draft].
-    // MTP-5h-Lever-C — pos1 head deferred to accept branch.
+    // pos1 head deferred to accept branch.
     let t0 = now();
     let mut step1_logits = Vec::with_capacity(vocab);
     let verify_tokens = [last_token, mtp_draft];
@@ -571,7 +556,7 @@ pub fn forward_speculative_pp_step_sampling(
     let accepted = u < accept_prob;
 
     if accepted {
-        // MTP-5h-Lever-C — fetch pos1 logits now (only on accept), then
+        // fetch pos1 logits now (only on accept), then
         // build pos1 dist + sample second committed token.
         let mut step2_logits = Vec::with_capacity(vocab);
         forward_output_head_at_pp(
@@ -645,7 +630,7 @@ pub fn forward_speculative_pp_step_sampling(
 }
 
 // ===================================================================
-// MTP-5f-tp2 — TP spec-decode driver (one macro step at a time).
+// TP spec-decode driver (one macro step at a time).
 // ===================================================================
 
 /// Run one K=1 spec-decode macro step on a TP-sharded session. TP analog

@@ -1,30 +1,25 @@
-// mmq_q4_K_turbo — V2.14.b port of llamacpp-turbo's 4-warp LDS-tiled Q4_K MMQ.
-//
+// mmq_q4_K_turbo — 4.b port of llamacpp-turbo's 4-warp LDS-tiled Q4_K MMQ.
 // Source: /artefact/llamacpp-turbo/llama-cpp-gfx906-turbo/ggml/src/ggml-cuda/mmq.cuh
-//   - load_tiles_q4_K (DP4A branch)
-//   - vec_dot_q4_K_q8_1_dp4a
-//   - vec_dot_q4_K_q8_1_impl_mmq (from vecdotq.cuh)
-//   - mul_mat_q_process_tile (outer K loop with double-buffered Y LDS)
-//
+// - load_tiles_q4_K (DP4A branch)
+// - vec_dot_q4_K_q8_1_dp4a
+// - vec_dot_q4_K_q8_1_impl_mmq (from vecdotq.cuh)
+// - mul_mat_q_process_tile (outer K loop with double-buffered Y LDS)
 // This is the DENSE standalone port — no indexed-MoE wrapping. That lands in
-// V2.14.c once this passes sweep_mmq correctness.
-//
-// Fixed template parameters for V2.14.b:
-//   mmq_x = 16 (activation cols per block)
-//   mmq_y = 16 (weight rows per block)
-//   nwarps = 4 × warp_size 64 = 256 threads/block
-//   DP4A path only (no MFMA/MMA)
-//
+// once this passes sweep_mmq correctness.
+// Fixed template parameters for 4.b:
+// mmq_x = 16 (activation cols per block)
+// mmq_y = 16 (weight rows per block)
+// nwarps = 4 × warp_size 64 = 256 threads/block
+// DP4A path only (no MFMA/MMA)
 // Launch:
-//   block  = (64, 4, 1)
-//   grid   = (⌈n/mmq_y⌉, ⌈m/mmq_x⌉, 1)
-//   shared = (mmq_x * MMQ_TILE_Y_K_LDS + tile_x_qs + tile_x_dm + tile_x_sc) * 4 B
-//
+// block = (64, 4, 1)
+// grid = (⌈n/mmq_y⌉, ⌈m/mmq_x⌉, 1)
+// shared = (mmq_x * MMQ_TILE_Y_K_LDS + tile_x_qs + tile_x_dm + tile_x_sc) * 4 B
 // Args:
-//   vx            — device ptr to block_q4_K array, shape [N, K / QK_K]
-//   vy_mmq        — device ptr to block_q8_1_mmq array (DS4 layout), shape [M_big, K / QK8_1_MMQ]
-//   dst           — device ptr to f32 output, shape [M, N] col-major (dst[col*nrows_dst + row])
-//   ncols_x (=K), nrows_x (=N), ncols_y (=M), stride_col_y, stride_row_x, nrows_dst (=N)
+// vx — device ptr to block_q4_K array, shape [N, K / QK_K]
+// vy_mmq — device ptr to block_q8_1_mmq array (DS4 layout), shape [M_big, K / QK8_1_MMQ]
+// dst — device ptr to f32 output, shape [M, N] col-major (dst[col*nrows_dst + row])
+// ncols_x (=K), nrows_x (=N), ncols_y (=M), stride_col_y, stride_row_x, nrows_dst (=N)
 
 #include "block_quant.cuh"
 #include <hip/hip_runtime.h>
@@ -56,9 +51,9 @@
 #define BLOCK_THREADS (WARP_SIZE * NWARPS)  // 256
 
 // DP4A tile sizes for Q4_K (from MMQ_DP4A_TXS_Q4_K in turbo mmq.cuh:185):
-//   qs: mmq_y * MMQ_TILE_NE_K + mmq_y
-//   dm: mmq_y * MMQ_TILE_NE_K / QI4_K   (half2 count; half2 = 1 int slot each)
-//   sc: mmq_y * MMQ_TILE_NE_K / 8 + mmq_y / 8
+// qs: mmq_y * MMQ_TILE_NE_K + mmq_y
+// dm: mmq_y * MMQ_TILE_NE_K / QI4_K (half2 count; half2 = 1 int slot each)
+// sc: mmq_y * MMQ_TILE_NE_K / 8 + mmq_y / 8
 #define TXS_QS (MMQ_Y * MMQ_TILE_NE_K + MMQ_Y)         // 128*32 + 128 = 4224 ints
 #define TXS_DM (MMQ_Y * MMQ_TILE_NE_K / QI4_K)          // 128 half2 = 128 int slots
 #define TXS_SC (MMQ_Y * MMQ_TILE_NE_K / 8 + MMQ_Y / 8)  // 128*4 + 16 = 528 ints
@@ -111,10 +106,10 @@ void flambeau_mmq_q4_K_turbo_q8_1(
 ) {
     extern __shared__ int lds[];
     // LDS layout:
-    //   tile_y[MMQ_X * MMQ_TILE_Y_K_LDS]  ints  (double-buffered per-half-super-block)
-    //   tile_x_qs[TXS_QS]                 ints
-    //   tile_x_dm[TXS_DM * 2]             ints  (stored as half2 pairs, 2 ints per half2)
-    //   tile_x_sc[TXS_SC]                 ints
+    // tile_y[MMQ_X * MMQ_TILE_Y_K_LDS] ints (double-buffered per-half-super-block)
+    // tile_x_qs[TXS_QS] ints
+    // tile_x_dm[TXS_DM * 2] ints (stored as half2 pairs, 2 ints per half2)
+    // tile_x_sc[TXS_SC] ints
     int   * tile_y  = lds;
     int   * tile_x  = tile_y  + MMQ_X * MMQ_TILE_Y_K_LDS;
     int   * x_qs    = tile_x;
@@ -133,8 +128,8 @@ void flambeau_mmq_q4_K_turbo_q8_1(
 
     // Per-thread accumulators: one fp32 per (j, i) pair this thread owns.
     // With nwarps=4, warp_size=64, mmq_x=16, mmq_y=16:
-    //   j slot count = mmq_x / nwarps = 4   (each warp owns 4 cols)
-    //   i slot count = mmq_y / warp_size = 16 / 64 = 0 → each thread owns partial row via modulo
+    // j slot count = mmq_x / nwarps = 4 (each warp owns 4 cols)
+    // i slot count = mmq_y / warp_size = 16 / 64 = 0 → each thread owns partial row via modulo
     // Actually turbo's setup uses j0 += nwarps → j = j0 + threadIdx.y (4 iters × 4 warps = 16).
     // And i0 += warp_size → i = i0 + threadIdx.x. With mmq_y=16 < warp_size=64, only threads
     // with threadIdx.x < mmq_y participate on the dot side. Accumulator size = mmq_x/nwarps * 1 = 4.
@@ -211,8 +206,8 @@ void flambeau_mmq_q4_K_turbo_q8_1(
         const int* y_int_tile = (const int*) y + tile_n * sz_mmq_int;
         {
             // by0 = y_tile + ncols_y * (kb0 * qk / ne_block) * sz
-            //   qk = QK_K = 256, ne_block = 4*QK8_1 = 128
-            //   (kb0 * 256 / 128) = kb0 * 2 — each Q4_K super-block covers 2 Q8_1_MMQ blocks.
+            // qk = QK_K = 256, ne_block = 4*QK8_1 = 128
+            // (kb0 * 256 / 128) = kb0 * 2 — each Q4_K super-block covers 2 Q8_1_MMQ blocks.
             const int* by0 = y_int_tile + ncols_y * (kb0 * (QK_K / (4 * QK8_1_FLAMBEAU))) * sz_mmq_int;
             #pragma unroll
             for (int l0 = 0; l0 < MMQ_X * MMQ_TILE_Y_K_LDS; l0 += NWARPS * WARP_SIZE) {
@@ -265,7 +260,7 @@ void flambeau_mmq_q4_K_turbo_q8_1(
 
         // =========================================================
         // Y LDS load pass 2 (second half-super-block).
-        // by0 += sz_mmq_int  (turbo: `(kb0 * qk / ne_block) * sz + sz`).
+        // by0 += sz_mmq_int (turbo: `(kb0 * qk / ne_block) * sz + sz`).
         // =========================================================
         {
             const int* by0 = y_int_tile
@@ -321,7 +316,7 @@ void flambeau_mmq_q4_K_turbo_q8_1(
 
     // =========================================================
     // Write back. Output layout matches other flambeau MMQ kernels:
-    //   dst[col * nrows_dst + row].
+    // dst[col * nrows_dst + row].
     // =========================================================
     #pragma unroll
     for (int j0 = 0; j0 < MMQ_X; j0 += NWARPS) {

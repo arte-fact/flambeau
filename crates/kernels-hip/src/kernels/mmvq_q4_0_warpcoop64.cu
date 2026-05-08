@@ -1,5 +1,4 @@
 // mmvq_q4_0_warpcoop64 — Q4_0 single-warp MMVQ. C6-i1.
-//
 // gfx906-decode latency-bound lever. The 256-thread baseline and 128-thread
 // (`mmvq_q4_0_t128`) variant pay an LDS round-trip + cross-warp shfl in the
 // reduce. At decode (n_rows × 1 output, k ≤ 4096), VALU compute per block is
@@ -7,12 +6,10 @@
 // turnover — so a single-warp schedule that skips LDS entirely and uses the
 // gfx906 DPP butterfly reduce in-place can pack 4× more blocks/CU than the
 // 256t variant on this same kernel family.
-//
 // Structure: blockDim=64 (one wave64), grid={n_rows, 1, 1}. Each thread
 // handles a (block_idx, lane4) pair — 16 Q4_0 blocks/iter (64t / 4-int per
 // block = 16). DP4A inner identical to the 256t kernel; only the reduce
 // differs (`gfx906_warp_reduce_sum` once, no LDS, lane-0 writes).
-//
 // Reference for the schedule shape: iacopPBK / llamacpp's
 // `vec_dot_q4_0_q8_1_impl` warp-cooperative pattern (one wave per row).
 

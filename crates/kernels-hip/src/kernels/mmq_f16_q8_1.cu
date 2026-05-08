@@ -1,22 +1,19 @@
 // mmq_f16_q8_1 — F16 weight × Q8_1 activation, multi-activation-row variant
-// of `mmvq_f16_q8_1`. V2.25.a: replaces the V2.21.b row-by-row prefill
+// of `mmvq_f16_q8_1`. 5.a: replaces the 1.b row-by-row prefill
 // fallback (m independent MMVQ launches) with ONE launch of grid =
 // (n_rows, m) blocks.
-//
 // Kernel math is byte-identical to `mmvq_f16_q8_1`: same 256-thread block,
 // same lane_in_grp=tid&3 int32-pair slot pattern, same Q8_1 dequant →
 // F32 FMA. The only change is picking up the activation row via
 // blockIdx.y and offsetting the y pointer + dst pointer accordingly.
-//
-// Why this helps: V2.21.b row-by-row costs ~1 µs launch overhead per row
+// Why this helps: 1.b row-by-row costs ~1 µs launch overhead per row
 // on top of the ~30 µs HBM-roofline per-call time. At L=512 × ~100 F16
 // tensors/layer × 40 layers = 2M launches/prefill — launch overhead
 // dominates. One launch amortises the overhead across all m rows;
 // per-block GPU work is unchanged.
-//
 // Does not use LDS (the per-block math doesn't benefit — each block's
 // weight row is unique, and 256 threads within a block broadcast-share
-// Y from L1 already). See V2.24.b NULL for the LDS-on-MoE-tile8 story.
+// Y from L1 already). See 4.b NULL for the LDS-on-MoE-tile8 story.
 
 #include "block_quant.cuh"
 #include "gfx906.cuh"

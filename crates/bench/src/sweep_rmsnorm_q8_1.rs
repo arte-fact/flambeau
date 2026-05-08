@@ -1,5 +1,4 @@
-//! V1.6 RMSNorm + Q8_1 fused correctness sweep.
-//!
+//! RMSNorm + Q8_1 fused correctness sweep.
 //! Compares the fused kernel's Q8_1 output against the 2-kernel oracle
 //! (`rmsnorm_f16` → `quantize_row_q8_1`). Both paths should produce
 //! bit-equivalent Q8_1 blocks modulo the round-off difference between

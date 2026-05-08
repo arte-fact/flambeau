@@ -1,10 +1,7 @@
 #pragma once
 // gfx906 arch primitives — DPP-fused warp reductions on MI50 / MI60 (GCN 5.1).
-//
-// Ported from candle-hip-kernels/src/gfx906_primitives.cuh (the subset V1.3
-// MMVQ actually needs). We keep the full-warp and half-warp reduce paths
+// Ported from candle-hip-kernels/src/gfx906_primitives.cuh (the subset // MMVQ actually needs). We keep the full-warp and half-warp reduce paths
 // behind the same names candle uses so future ports stay byte-searchable.
-//
 // Architectural rule 5: this header contains HIP/gfx906 intrinsics and
 // therefore cannot live in kernels-shared. Shared algorithmic-core headers
 // (block-quant unpack math, softmax math) stay in kernels-shared/include.
@@ -17,15 +14,12 @@
 
 // ---------------------------------------------------------------------------
 // DPP fused add/max primitives.
-//
 // Vega ISA Table 8 (§4.5) wait-state rules:
-//   VALU→VGPR then VALU-DPP reads that VGPR → 2 wait states (s_nop 1)
-//   VALU writes EXEC then VALU-DPP          → 5 wait states (s_nop 4)
-//
+// VALU→VGPR then VALU-DPP reads that VGPR → 2 wait states (s_nop 1)
+// VALU writes EXEC then VALU-DPP → 5 wait states (s_nop 4)
 // The first DPP of a reduction chain follows the op that wrote EXEC (the
 // compare/branch above the call site), so it uses `s_nop 4`. Subsequent
 // DPPs follow DPP ops and only need `s_nop 1`.
-//
 // Single-arg inline asm ("%1, %1") forces the compiler to keep src0 and
 // src1 in the same VGPR, avoiding a MOV that would break the wait-state
 // bookkeeping. "memory" clobber pins instruction order across the DPP.
@@ -109,7 +103,7 @@ static __device__ __forceinline__ float gfx906_quarter_warp_reduce_sum(float x) 
     return x;
 }
 
-// Eighth-warp (8 lanes) — stops at xor-4. Used by V2.4.c r8 MoE layouts.
+// Eighth-warp (8 lanes) — stops at xor-4. Used by r8 MoE layouts.
 // All 3 steps are DPP within the same 16-lane bank so no cross-bank shuffle
 // is needed.
 static __device__ __forceinline__ float gfx906_eighth_warp_reduce_sum(float x) {
@@ -121,7 +115,7 @@ static __device__ __forceinline__ float gfx906_eighth_warp_reduce_sum(float x) {
 
 // ---------------------------------------------------------------------------
 // Fast-math primitives — ported from candle's gfx906_primitives.cuh
-// (V2.2.d fix 4 flash-attn port). Each maps to a single gfx906 SFU
+// (flash-attn port). Each maps to a single gfx906 SFU
 // instruction (2-4 cycles) vs software math's ~10-20 instructions.
 // ---------------------------------------------------------------------------
 

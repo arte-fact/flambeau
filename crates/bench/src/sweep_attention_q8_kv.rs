@@ -1,6 +1,5 @@
-//! V1.6.6 attention decode with Q8_0 KV cache — correctness cert.
-//!
-//! The quality cert (delta-ppl ≤ 0.5% on wikitext-2) lands with the V1.7
+//! attention decode with Q8_0 KV cache — correctness cert.
+//! The quality cert (delta-ppl ≤ 0.5% on wikitext-2) lands with the 
 //! model loader; this sweep gates on the kernel's *arithmetic* matching
 //! the F32 reference that uses Q8-round-tripped K/V — i.e. the kernel
 //! must compute exactly what you'd get if you dequantised K/V to F32 and
@@ -88,7 +87,7 @@ pub fn run_sweep(repo_root: &Path) -> Result<Cert> {
         op: "attention_decode_q8_kv".to_string(),
         dtype_weight: "Q8_0".to_string(),    // KV dtype
         dtype_activation: "F16".to_string(),  // Q/out dtype
-        tolerance_formula: "|err| <= 5e-2 * max(|ref|, sqrt(head_dim))  (correctness; V1.7 adds delta-ppl quality cert)".to_string(),
+        tolerance_formula: "|err| <= 5e-2 * max(|ref|, sqrt(head_dim))  (correctness; delta-ppl quality cert)".to_string(),
         results,
         pass,
         emitted_at: now_utc_iso8601(),

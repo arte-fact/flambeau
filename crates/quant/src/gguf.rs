@@ -1,18 +1,16 @@
 //! GGUF v2 / v3 reader — `mmap`-backed.
-//!
 //! Spec: <https://github.com/ggml-org/ggml/blob/master/docs/gguf.md>.
 //! Candle's `gguf_file.rs` is the primary port reference.
-//!
 //! Design notes:
 //! - The file is `mmap`'d and held as an `Arc<Mmap>`. Tensor reads return a
-//!   byte slice that borrows from the mmap for as long as the reader lives —
-//!   no copy into an owned `Vec<u8>`.
+//! byte slice that borrows from the mmap for as long as the reader lives —
+//! no copy into an owned `Vec<u8>`.
 //! - Per-rank tensor-range reads (`tensor_row_range`, `tensor_expert_range`)
-//!   are the X5 sharded-load pattern: a rank loads only its shard from disk,
-//!   avoiding the 2× VRAM spike of "load full → narrow on-device".
+//! are the X5 sharded-load pattern: a rank loads only its shard from disk,
+//! avoiding the 2× VRAM spike of "load full → narrow on-device".
 //! - Metadata values are decoded eagerly (they're small). Tensor payloads are
-//!   never decoded here — callers either dequantise via [`crate::dequant`] or
-//!   hand the raw bytes to a backend-specific upload path.
+//! never decoded here — callers either dequantise via [`crate::dequant`] or
+//! hand the raw bytes to a backend-specific upload path.
 
 use std::collections::HashMap;
 use std::fs::File;
@@ -197,17 +195,16 @@ pub struct GgufFile {
 
 impl GgufFile {
     /// Open `path`, mmap it, parse the header and tensor index.
-    ///
     /// # Errors
     /// - `std::io::Error` wrapped as `QuantError::Io` if the file can't be
-    ///   opened or mmapped.
+    /// opened or mmapped.
     /// - Propagates [`from_mmap`] errors: `BadMagic`, `UnsupportedVersion`,
-    ///   `TruncatedHeader`, or a metadata/tensor-index parse error.
+    /// `TruncatedHeader`, or a metadata/tensor-index parse error.
     pub fn open<P: AsRef<Path>>(path: P) -> Result<Self> {
         use std::os::unix::io::AsRawFd;
         let path = path.as_ref();
         let file = File::open(path)?;
-        // V2.17: mirror llama.cpp's loader hints. SEQUENTIAL tells the
+        // 7: mirror llama.cpp's loader hints. SEQUENTIAL tells the
         // kernel to prefetch aggressively + evict early pages once we've
         // moved past them. Combined with per-tensor `munmap` during
         // loading, this keeps page-cache pressure bounded for GGUFs
@@ -228,12 +225,11 @@ impl GgufFile {
 
     /// Parse a GGUF header from an already-mmapped blob. Split from [`open`]
     /// so tests can feed in-memory fixtures.
-    ///
     /// # Errors
     /// - `QuantError::BadMagic` if the blob doesn't start with `GGUF`.
     /// - `QuantError::UnsupportedVersion` for versions outside {2, 3}.
     /// - `QuantError::TruncatedHeader` if any metadata or tensor-index read
-    ///   runs past the mmap's length.
+    /// runs past the mmap's length.
     /// - `QuantError::Io` wrapping a `byteorder` short-read error.
     pub fn from_mmap(path: PathBuf, mmap: Arc<Mmap>) -> Result<Self> {
         let mut cur = Cursor::new(&mmap[..]);
@@ -323,11 +319,10 @@ impl GgufFile {
 
     /// Zero-copy slice of the full payload for `name`. Lifetime is tied to
     /// `self` (which owns the mmap).
-    ///
     /// # Errors
     /// - `QuantError::TensorNotFound` if `name` is not in the tensor index.
     /// - `QuantError::TruncatedTensor` if the recorded tensor extent runs
-    ///   past the mmap's length.
+    /// past the mmap's length.
     pub fn tensor_raw(&self, name: &str) -> Result<&[u8]> {
         let info = self.info(name)?;
         self.raw_for(info, 0, info.size_in_bytes())
@@ -345,7 +340,6 @@ impl GgufFile {
     /// is advisory and does not reliably free page cache on Linux 5.x/6.x).
     /// Only the page-aligned inner slice is unmapped; partially-used
     /// boundary pages stay mapped so neighbouring tensors still work.
-    ///
     /// Safe to call even if the tensor doesn't exist — best-effort hint.
     /// Caller must have already transferred (and synced) the bytes off to
     /// GPU. After this, the tensor is no longer accessible via
@@ -419,7 +413,6 @@ impl GgufFile {
     }
 
     /// Look up a tensor's metadata by name.
-    ///
     /// # Errors
     /// `QuantError::UnknownTensor` if `name` is not in the index.
     pub fn info(&self, name: &str) -> Result<&TensorInfo> {
@@ -431,7 +424,6 @@ impl GgufFile {
     }
 
     /// Dequantise `name`'s full payload to a fresh `Vec<f32>`.
-    ///
     /// # Errors
     /// - `QuantError::UnknownTensor` if `name` is not indexed.
     /// - `QuantError::TruncatedTensor` if the mmap is short.
@@ -446,12 +438,11 @@ impl GgufFile {
     /// X5 pattern: read rows `[row_start, row_start + row_count)` of a 2D
     /// tensor. Each row is `cols` elements; `cols` must be a multiple of the
     /// dtype's block_size. Returns the raw packed bytes for this row range.
-    ///
     /// # Errors
     /// - `QuantError::UnknownTensor` if `name` is not indexed.
     /// - `QuantError::RangeOutOfBounds` if the tensor isn't 2D, rows aren't
-    ///   aligned to the dtype's block boundary, or `row_start + row_count`
-    ///   exceeds the row count.
+    /// aligned to the dtype's block boundary, or `row_start + row_count`
+    /// exceeds the row count.
     /// - `QuantError::TruncatedTensor` if the underlying mmap is short.
     pub fn tensor_row_range_raw(
         &self,
@@ -495,7 +486,6 @@ impl GgufFile {
     /// X5 pattern for MoE: read experts `[e_start, e_start + e_count)` of a
     /// 3D expert tensor `[num_experts, d1, d2]`. `d1 * d2` must be a multiple
     /// of the dtype's block_size.
-    ///
     /// # Errors
     /// Same error space as [`tensor_row_range_raw`] — `UnknownTensor`,
     /// `RangeOutOfBounds`, or `TruncatedTensor`.

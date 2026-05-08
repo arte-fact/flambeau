@@ -61,11 +61,9 @@ pub struct BlockQ8_1 {
 const _: () = assert!(std::mem::size_of::<BlockQ8_1>() == 36);
 
 /// Turbo / candle 4-warp MMQ activation block — 128 elements (4 sub-blocks of 32).
-///
 /// Header = 4 × half2 ds pairs (one `(d, d*sum)` per 32-element sub-block, 16 B).
-/// Body   = 4 × QK8_1 = 128 signed int8 quants.
+/// Body = 4 × QK8_1 = 128 signed int8 quants.
 /// Total 144 B.
-///
 /// Storage order on device: `(k_big_block, col)` row-major (see
 /// `mmq_turbo.cu:159-167` for the source layout). The MMQ kernel's
 /// inner loop fetches a 144-B block at stride `ncols_y * 144` along K;

@@ -1,15 +1,12 @@
 // rmsnorm_f16 — RMSNorm over an [M, K] activation tensor, F16 in/out.
-//
 // Computation (per row):
-//   mean_sq = Σ x[i]² / K                 (reduction across the row)
-//   rsqrt   = 1 / sqrt(mean_sq + eps)
-//   y[i]    = x[i] * weight[i] * rsqrt    (elementwise)
-//
+// mean_sq = Σ x[i]² / K (reduction across the row)
+// rsqrt = 1 / sqrt(mean_sq + eps)
+// y[i] = x[i] * weight[i] * rsqrt (elementwise)
 // Launch shape:
-//   blockDim  = { 256 }                    (4 wave64 warps on gfx906)
-//   gridDim   = { n_rows }                 one block per row
-//   shared    = 4 floats                   (cross-warp partial sums)
-//
+// blockDim = { 256 } (4 wave64 warps on gfx906)
+// gridDim = { n_rows } one block per row
+// shared = 4 floats (cross-warp partial sums)
 // Each thread processes `K / 256` elements (must divide evenly for Qwen3.6's
 // 2048 / 5120 / 15360 hidden sizes — all multiples of 256). The inner loop
 // accumulates in F32 so round-off on long rows doesn't creep above the cert

@@ -1,5 +1,4 @@
 //! `KernelImpl` registrations for `QMatMul` on `HipDevice`.
-//!
 //! Each row corresponds to a `[[qmatmul]]` / `[[qmatmul_mmq]]` entry in
 //! `dispatch/hip/gfx906.toml` and a cert under `certs/hip/gfx906/`. This
 //! module is the Rust-typed mirror of the TOML — the dispatcher calls
@@ -35,8 +34,8 @@ pub const QMATMUL_GFX906: &[KernelDescriptor] = &[
         cert_rel_path: "certs/hip/gfx906/qmatmul_q4_K_mmvq_nw1_r2_gfx906.json",
     },
     KernelDescriptor {
-        // V2.24.a.3 — 128-thread single-row DP4A Q4_1 MMVQ. Same DP4A
-        // math as V2.2.b but half the threads per block, reducing kernel
+        // 4.a.3 — 128-thread single-row DP4A Q4_1 MMVQ. Same DP4A
+        // math as but half the threads per block, reducing kernel
         // dispatch overhead + increasing CU occupancy. r1 scalar +
         // r2 DP4A attempts NULL'd; thin-block is the last MMVQ lever.
         op_name: "QMatMul",
@@ -55,7 +54,7 @@ pub const QMATMUL_GFX906: &[KernelDescriptor] = &[
         arch: "gfx906",
         dtype_weight: QDtype::Q5_K,
         dtype_activation: QDtype::Q8_1,
-        // V2.2.d fix 1: narrowed from (1, 512) to (1, 127) so prefill paths
+        // narrowed from (1, 512) to (1, 127) so prefill paths
         // route to the wave64 MMQ kernel below instead of looping MMVQ per row.
         m_range: (1, 127),
         cert_rel_path: "certs/hip/gfx906/qmatmul_q5_K_mmvq_nw1_r2_gfx906.json",
@@ -72,12 +71,12 @@ pub const QMATMUL_GFX906: &[KernelDescriptor] = &[
     },
     KernelDescriptor {
         op_name: "QMatMul",
-        // V2.3.d.1: the DP4A kernel (3.24× per-call win on LM-head) used
+        // the DP4A kernel (3.24× per-call win on LM-head) used
         // to swap in via a runtime intercept in `ops/qmatmul.rs`, which
         // routed under the r4 scalar cert even though the actual kernel
         // was uncertified. Sweep-certed the DP4A variant directly and
         // also fixed a 32-bit unsigned-subtract borrow-chain bug in it
-        // (same class as V2.3.b.4's mmq_q6_K_wave64 fix). Now dispatched
+        // (same class as mmq_q6_K_wave64 fix). Now dispatched
         // directly, intercept removed.
         impl_id: "qmatmul_q6_K_mmvq_dp4a_gfx906",
         backend: "hip",
@@ -90,13 +89,13 @@ pub const QMATMUL_GFX906: &[KernelDescriptor] = &[
     // MMQ (prefill): m ≥ 128
     KernelDescriptor {
         op_name: "QMatMul",
-        // V2.7: TILE_N=16 wave64 MMQ replaces TILE_N=8 at m ≥ 128. Halves weight
+        // TILE_N=16 wave64 MMQ replaces TILE_N=8 at m ≥ 128. Halves weight
         // HBM fetches (each decoded weight tile reused across 16 activations vs 8).
         // Kernel PMC at m=512 k=2048 n=4096: MemUnitBusy 97.6 % → 83.1 %,
         // VALUBusy 19.1 % → 65.5 %. End-to-end Qwen3.6-35B prefill is a wash
         // (MoE Q4_K dominates); tile16 wins show on Q8_0-heavy workloads.
-        // `FLAMBEAU_VARIANT=baseline` reverts to the V2.4.c TILE_N=8 kernel.
-        // V2.11.b: dispatch_qmatmul() overrides tile16 → tile8 when n < 1024
+        // `FLAMBEAU_VARIANT=baseline` reverts to the TILE_N=8 kernel.
+        // 1.b: dispatch_qmatmul() overrides tile16 → tile8 when n < 1024
         // (small-N shapes like shexp gate/up k=2048 n=512 lose at tile16).
         impl_id: "qmatmul_q8_0_mmq_wave64_tile16_gfx906",
         backend: "hip",
@@ -108,9 +107,9 @@ pub const QMATMUL_GFX906: &[KernelDescriptor] = &[
     },
     KernelDescriptor {
         op_name: "QMatMul",
-        // V2.13.a: wave64 port of Q4_1 MMQ. Never matched by default dispatch
-        // (m_range MAX..MAX); lookup-only. Promoted to default after V2.13.b
-        // A/B confirms uplift. V2.29.e recycle A/B'd this against 4warp_lds
+        // 3.a: wave64 port of Q4_1 MMQ. Never matched by default dispatch
+        // (m_range MAX..MAX); lookup-only. Promoted to default after 3.b
+        // A/B confirms uplift. 9.e recycle A/B'd this against 4warp_lds
         // as default — regressed -60 % (see v2_29_e_research_null.md cert).
         impl_id: "qmatmul_q4_1_mmq_wave64_gfx906",
         backend: "hip",
@@ -132,7 +131,7 @@ pub const QMATMUL_GFX906: &[KernelDescriptor] = &[
     },
     KernelDescriptor {
         op_name: "QMatMul",
-        // V1-BENCH-C1: 4-warp LDS-tiled Q4_0 MMQ (port of Q4_1 4warp_lds with
+        // 4-warp LDS-tiled Q4_0 MMQ (port of Q4_1 4warp_lds with
         // Q4_0 bias-correction in the dot). Engages at m >= 128 ahead of the
         // wave64 row below; wave64 still owns m=32..127 where the larger tile's
         // grid-fill dominates. Closes part of the dense-prefill gap on 27B-Q4_0.
@@ -146,9 +145,9 @@ pub const QMATMUL_GFX906: &[KernelDescriptor] = &[
     },
     KernelDescriptor {
         op_name: "QMatMul",
-        // V2.28.b: wave64 Q4_0 MMQ — owns m=32..127 (the C1 4warp_lds row above
+        // 8.b: wave64 Q4_0 MMQ — owns m=32..127 (the C1 4warp_lds row above
         // takes m >= 128). At m < 32 the qmatmul() wrapper short-circuits to
-        // the Q4_0 MMVQ single-row kernel (V2.23).
+        // the Q4_0 MMVQ single-row kernel (3).
         impl_id: "qmatmul_q4_0_mmq_wave64_gfx906",
         backend: "hip",
         arch: "gfx906",
@@ -159,10 +158,10 @@ pub const QMATMUL_GFX906: &[KernelDescriptor] = &[
     },
     KernelDescriptor {
         op_name: "QMatMul",
-        // V2.30.a: wave64 Q5_0 MMQ — shexp dense prefill for
+        // 0.a: wave64 Q5_0 MMQ — shexp dense prefill for
         // Qwen3.6-35B-A3B-Q4_0 (20/40 layers have Q5_0 shared-expert FFN).
         // Default dispatched at m >= 32; qmatmul() short-circuits m < 32 to
-        // the Q5_0 MMVQ single-row kernel (V2.23).
+        // the Q5_0 MMVQ single-row kernel (3).
         impl_id: "qmatmul_q5_0_mmq_wave64_gfx906",
         backend: "hip",
         arch: "gfx906",
@@ -173,11 +172,11 @@ pub const QMATMUL_GFX906: &[KernelDescriptor] = &[
     },
     KernelDescriptor {
         op_name: "QMatMul",
-        // V2.14.b kernel, promoted V1-BENCH-#112 (2026-04-27): llamacpp-turbo
+        // 4.b kernel, promoted (2026-04-27): llamacpp-turbo
         // 4-warp LDS-tiled Q4_K MMQ port. 256 threads (4 warps × 64), MMQ_Y=128,
         // MMQ_X=16, double-buffered Y LDS per super-block. Owns m >= 128; the
         // wave64 row below covers m = 32..127. Static dispatch is first-match
-        // — keep this entry ABOVE the wave64 row (V1-BENCH-C1 lesson).
+        // — keep this entry ABOVE the wave64 row (lesson).
         impl_id: "qmatmul_q4_K_mmq_turbo_gfx906",
         backend: "hip",
         arch: "gfx906",
@@ -188,9 +187,9 @@ pub const QMATMUL_GFX906: &[KernelDescriptor] = &[
     },
     KernelDescriptor {
         op_name: "QMatMul",
-        // V2.3.b.2 candle port `mmq_q4_K_wave64.cu`; structural mirror of the
-        // V2.2.d Q5_K wave64 with flat 4-bit nibble decode (no qh merge).
-        // Owns m = 32..127 since V1-BENCH-#112 promoted Q4_K turbo to (128, MAX).
+        // candle port `mmq_q4_K_wave64.cu`; structural mirror of the
+        // Q5_K wave64 with flat 4-bit nibble decode (no qh merge).
+        // Owns m = 32..127 since promoted Q4_K turbo to (128, MAX).
         impl_id: "qmatmul_q4_K_mmq_wave64_gfx906",
         backend: "hip",
         arch: "gfx906",
@@ -201,7 +200,7 @@ pub const QMATMUL_GFX906: &[KernelDescriptor] = &[
     },
     KernelDescriptor {
         op_name: "QMatMul",
-        // V2.3.b.4: wave64 MMQ replaces the V1.4 F32-tile placeholder
+        // wave64 MMQ replaces the F32-tile placeholder
         // (`qmatmul_q6_K_mmq_4warp_lds_gfx906`) at m >= 128. Kernel:
         // `mmq_q6_K_wave64.cu`, authored fresh — candle has no Q6_K MMQ.
         impl_id: "qmatmul_q6_K_mmq_wave64_gfx906",
@@ -225,7 +224,7 @@ pub const QMATMUL_GFX906: &[KernelDescriptor] = &[
     },
 ];
 
-/// V1.6 RMSNorm + SwiGLU + D1 fused. The dispatch key is `(dtype_in,
+/// RMSNorm + SwiGLU + D1 fused. The dispatch key is `(dtype_in,
 /// dtype_out)` + the shape m-band, but since all three impls accept any
 /// `m`, the m_range is `(1, usize::MAX)` and we route solely on dtype pair.
 pub const RMSNORM_GFX906: &[KernelDescriptor] = &[
@@ -326,7 +325,7 @@ pub const ATTENTION_PREFILL_GFX906: &[KernelDescriptor] = &[
     },
 ];
 
-// ----- V1.5 MoE -------------------------------------------------------------
+// ----- MoE -------------------------------------------------------------
 
 pub const TOPK_GFX906: &[KernelDescriptor] = &[
     KernelDescriptor {
@@ -342,7 +341,7 @@ pub const TOPK_GFX906: &[KernelDescriptor] = &[
 ];
 
 pub const SPLIT_Q_GATE_GFX906: &[KernelDescriptor] = &[
-    // V1.7.2.E — split (Q | gate) output of Qwen3.5/3.6 gated attention.
+    // split (Q | gate) output of Qwen3.5/3.6 gated attention.
     KernelDescriptor {
         op_name: "SplitQGate",
         impl_id: "split_q_gate_f16_gfx906",
@@ -356,7 +355,7 @@ pub const SPLIT_Q_GATE_GFX906: &[KernelDescriptor] = &[
 ];
 
 pub const SHARED_EXPERT_SCALE_GFX906: &[KernelDescriptor] = &[
-    // V1.7.2.D — fused per-token sigmoid-gate scaling for shared expert.
+    // fused per-token sigmoid-gate scaling for shared expert.
     KernelDescriptor {
         op_name: "SharedExpertScale",
         impl_id: "shared_expert_scale_f32_gfx906",
@@ -370,7 +369,7 @@ pub const SHARED_EXPERT_SCALE_GFX906: &[KernelDescriptor] = &[
 ];
 
 pub const CAUSAL_CONV1D_GFX906: &[KernelDescriptor] = &[
-    // V1.7.2.C — depthwise causal conv1d used inside GDN.
+    // depthwise causal conv1d used inside GDN.
     KernelDescriptor {
         op_name: "CausalConv1d",
         impl_id: "causal_conv1d_f32_gfx906",
@@ -384,7 +383,7 @@ pub const CAUSAL_CONV1D_GFX906: &[KernelDescriptor] = &[
 ];
 
 pub const ADD_F16_GFX906: &[KernelDescriptor] = &[
-    // V1.7.3-e1 — pointwise F16 + F16 → F16. Residual fan-in primitive.
+    // e1 — pointwise F16 + F16 → F16. Residual fan-in primitive.
     KernelDescriptor {
         op_name: "AddF16",
         impl_id: "add_f16_gfx906",
@@ -398,7 +397,7 @@ pub const ADD_F16_GFX906: &[KernelDescriptor] = &[
 ];
 
 pub const CAST_F16_F32_GFX906: &[KernelDescriptor] = &[
-    // V1.7.3-c1 glue — F16 → F32 for the GDN path's internal recurrence.
+    // c1 glue — F16 → F32 for the GDN path's internal recurrence.
     KernelDescriptor {
         op_name: "CastF16F32",
         impl_id: "cast_f16_f32_gfx906",
@@ -412,7 +411,7 @@ pub const CAST_F16_F32_GFX906: &[KernelDescriptor] = &[
 ];
 
 pub const SILU_F32_GFX906: &[KernelDescriptor] = &[
-    // V1.7.3-c1 — standalone F32 SiLU for GDN's silu(conv_out).
+    // c1 — standalone F32 SiLU for GDN's silu(conv_out).
     KernelDescriptor {
         op_name: "SiluF32",
         impl_id: "silu_f32_gfx906",
@@ -426,7 +425,7 @@ pub const SILU_F32_GFX906: &[KernelDescriptor] = &[
 ];
 
 pub const SWIGLU_F32_GFX906: &[KernelDescriptor] = &[
-    // V1.7.3-c1 — F32 SwiGLU for GDN's gated output compose.
+    // c1 — F32 SwiGLU for GDN's gated output compose.
     KernelDescriptor {
         op_name: "SwigluF32",
         impl_id: "swiglu_f32_gfx906",
@@ -440,7 +439,7 @@ pub const SWIGLU_F32_GFX906: &[KernelDescriptor] = &[
 ];
 
 pub const SCALE_F32_GFX906: &[KernelDescriptor] = &[
-    // V1.7.3-c1 — pointwise scalar multiply. GDN scales Q by 1/sqrt(head_k_dim).
+    // c1 — pointwise scalar multiply. GDN scales Q by 1/sqrt(head_k_dim).
     KernelDescriptor {
         op_name: "ScaleF32",
         impl_id: "scale_f32_gfx906",
@@ -454,7 +453,7 @@ pub const SCALE_F32_GFX906: &[KernelDescriptor] = &[
 ];
 
 pub const RMSNORM_F32_GFX906: &[KernelDescriptor] = &[
-    // V1.7.3-c1 — F32 RMSNorm for GDN's ssm_norm (per-head on F32 state out).
+    // c1 — F32 RMSNorm for GDN's ssm_norm (per-head on F32 state out).
     KernelDescriptor {
         op_name: "RmsnormF32",
         impl_id: "rmsnorm_f32_gfx906",
@@ -468,7 +467,7 @@ pub const RMSNORM_F32_GFX906: &[KernelDescriptor] = &[
 ];
 
 pub const CAST_F32_F16_GFX906: &[KernelDescriptor] = &[
-    // V1.7.3-b glue — F32 MMVQ output → F16 for attention / rmsnorm inputs.
+    // b glue — F32 MMVQ output → F16 for attention / rmsnorm inputs.
     KernelDescriptor {
         op_name: "CastF32F16",
         impl_id: "cast_f32_f16_gfx906",
@@ -482,7 +481,7 @@ pub const CAST_F32_F16_GFX906: &[KernelDescriptor] = &[
 ];
 
 pub const QUANTIZE_F16_Q8_1_GFX906: &[KernelDescriptor] = &[
-    // V1.7.3-g — F16 → Q8_1 activation quantise. Replaces the V1.7.3-b
+    // g — F16 → Q8_1 activation quantise. Replaces the b
     // host-roundtrip placeholder between swiglu and the output MMVQ.
     KernelDescriptor {
         op_name: "QuantizeF16Q8_1",
@@ -497,7 +496,7 @@ pub const QUANTIZE_F16_Q8_1_GFX906: &[KernelDescriptor] = &[
 ];
 
 pub const DENSE_GEMV_F32_F16_GFX906: &[KernelDescriptor] = &[
-    // V1.7.3-d3 — F32 weight × F16 activation → F32 output.
+    // d3 — F32 weight × F16 activation → F32 output.
     // The MoE router (ffn_gate_inp × x_norm → expert logits). Single shape.
     KernelDescriptor {
         op_name: "DenseGemvF32F16",
@@ -512,7 +511,7 @@ pub const DENSE_GEMV_F32_F16_GFX906: &[KernelDescriptor] = &[
 ];
 
 pub const GDN_ALPHA_BETA_GFX906: &[KernelDescriptor] = &[
-    // V1.7.3-g — fused GDN α/β/gate compute. Replaces the V1.7.3-c2 host
+    // g — fused GDN α/β/gate compute. Replaces the c2 host
     // roundtrip (download α/β/ssm_a/ssm_dt_bias, compute softplus+sigmoid,
     // upload gate/beta) with a single device launch.
     KernelDescriptor {
@@ -528,7 +527,7 @@ pub const GDN_ALPHA_BETA_GFX906: &[KernelDescriptor] = &[
 ];
 
 pub const GDN_STATE_STEP_GFX906: &[KernelDescriptor] = &[
-    // V1.7.2.F — fused Gated-Delta-Net recurrent step at S_v = 128.
+    // fused Gated-Delta-Net recurrent step at S_v = 128.
     // One launch handles both decode (L = 1) and prefill (L > 1); state
     // stays register-resident across the full L-token recurrence loop.
     KernelDescriptor {
@@ -544,7 +543,7 @@ pub const GDN_STATE_STEP_GFX906: &[KernelDescriptor] = &[
 ];
 
 pub const L2_NORM_GFX906: &[KernelDescriptor] = &[
-    // V1.7.2.B — per-row L2 norm. Used inside GDN.
+    // per-row L2 norm. Used inside GDN.
     KernelDescriptor {
         op_name: "L2Norm",
         impl_id: "l2_norm_f32_gfx906",
@@ -558,7 +557,7 @@ pub const L2_NORM_GFX906: &[KernelDescriptor] = &[
 ];
 
 pub const ROPE_NEOX_PARTIAL_GFX906: &[KernelDescriptor] = &[
-    // V1.7.2.A — NeoX-split partial RoPE for Qwen3.5/3.6 full-attention layers.
+    // NeoX-split partial RoPE for Qwen3.5/3.6 full-attention layers.
     KernelDescriptor {
         op_name: "RoPENeoXPartial",
         impl_id: "rope_neox_partial_f16_gfx906",
@@ -572,7 +571,7 @@ pub const ROPE_NEOX_PARTIAL_GFX906: &[KernelDescriptor] = &[
 ];
 
 pub const INDEXED_MOE_MMVQ_GFX906: &[KernelDescriptor] = &[
-    // Active: P29 multi-row r2 (landed V1.5.6). Halves launches vs single-row,
+    // Active: P29 multi-row r2 (landed ). Halves launches vs single-row,
     // keeps VGPR 24 / waves/SIMD 10.
     KernelDescriptor {
         op_name: "IndexedMoEMMVQ",
@@ -616,20 +615,19 @@ pub const INDEXED_MOE_MMVQ_GATE_UP_GFX906: &[KernelDescriptor] = &[
 /// `reg.expect_module("stem")`) rather than through shape-based dispatch.
 /// Each entry must have a matching row in `dispatch/hip/gfx906.toml` and a
 /// cert on disk. The `dispatch_toml_roundtrip` test (below) enforces both.
-///
 /// Membership rule: a kernel belongs here when there is exactly one
 /// implementation per `(op, dtype)` — no `m_range` choice to make. Adding
 /// a second implementation for the same dtype means promoting the pair into
 /// a `KernelDescriptor` table so shape-dispatch can pick between them.
 pub const DIRECT_CALL_KERNELS_GFX906: &[DirectCallKernel] = &[
-    // V2.19.b flash-decoding split-K attention for long-context decode.
+    // 9.b flash-decoding split-K attention for long-context decode.
     // Forward layer crosses the threshold at `n_tokens_kv > 256` and
     // invokes this kernel directly rather than `attention_decode_f16`.
     DirectCallKernel {
         impl_id: "attention_decode_f16_splitk_gfx906",
         cert_rel_path: "certs/hip/gfx906/attention_decode_f16_splitk_gfx906.json",
     },
-    // V2.23.a — dense Q4_0 / Q5_0 MMVQ (DP4A) for Qwen3.6-35B-A3B-Q4_0
+    // 3.a — dense Q4_0 / Q5_0 MMVQ (DP4A) for Qwen3.6-35B-A3B-Q4_0
     // attention and shared-expert weights. Single-kernel per dtype.
     DirectCallKernel {
         impl_id: "mmvq_q4_0_gfx906",
@@ -639,12 +637,12 @@ pub const DIRECT_CALL_KERNELS_GFX906: &[DirectCallKernel] = &[
         impl_id: "mmvq_q5_0_gfx906",
         cert_rel_path: "certs/hip/gfx906/mmvq_q5_0_gfx906.json",
     },
-    // V2.26.a — Q5_1 dense MMVQ (llama.cpp parity).
+    // 6.a — Q5_1 dense MMVQ (llama.cpp parity).
     DirectCallKernel {
         impl_id: "mmvq_q5_1_gfx906",
         cert_rel_path: "certs/hip/gfx906/mmvq_q5_1_gfx906.json",
     },
-    // V2.21.b / V2.25.a — F16 × Q8_1 MMVQ + MMQ (Unsloth UD-Q8_K_XL F16 layers).
+    // 1.b / 5.a — F16 × Q8_1 MMVQ + MMQ (Unsloth UD-Q8_K_XL F16 layers).
     DirectCallKernel {
         impl_id: "mmvq_f16_q8_1_gfx906",
         cert_rel_path: "certs/hip/gfx906/mmvq_f16_q8_1_gfx906.json",
@@ -653,7 +651,7 @@ pub const DIRECT_CALL_KERNELS_GFX906: &[DirectCallKernel] = &[
         impl_id: "mmq_f16_q8_1_gfx906",
         cert_rel_path: "certs/hip/gfx906/mmq_f16_q8_1_gfx906.json",
     },
-    // V2.22.a / V2.23.a / V1.7.5.K — indexed-MoE MMVQ for Q8_0 / Q4_0 / Q6_K
+    // 2.a / 3.a / indexed-MoE MMVQ for Q8_0 / Q4_0 / Q6_K
     // expert weights. Routing is by GGUF tensor dtype, not shape.
     DirectCallKernel {
         impl_id: "indexed_moe_mmvq_q8_0_gfx906",
@@ -677,41 +675,38 @@ pub const DIRECT_CALL_KERNELS_GFX906: &[DirectCallKernel] = &[
 /// in-tree as A/B baselines for correctness / perf comparison. Each has a
 /// cert under `certs/hip/gfx906/` and a call site in `crates/bench/src/`
 /// or `crates/cli/src/main.rs` (PMC-refresh target list).
-///
 /// Unlike [`DIRECT_CALL_KERNELS_GFX906`], these are not invoked by any
 /// forward-path code — a bench sweep (or PMC refresh) is the only caller.
 /// They stay registered here so:
-///
 /// 1. The `dispatch_toml_roundtrip` test does not need to special-case
-///    TOML rows for bench baselines.
+/// TOML rows for bench baselines.
 /// 2. Future simplifier passes have a single source of truth for
-///    "this kernel is not dead — it's a reference baseline" and don't
-///    propose deletion. (Sessions 1 and 2 of the simplification pass both
-///    initially flagged these as orphans; this catalog closes that loop.)
-///
+/// "this kernel is not dead — it's a reference baseline" and don't
+/// propose deletion. (Sessions 1 and 2 of the simplification pass both
+/// initially flagged these as orphans; this catalog closes that loop.)
 /// Matches the "Single-row reference MMVQ kernels for the K-quants are
 /// kept in-tree for cert cross-checks" note in `dispatch/hip/gfx906.toml`.
 pub const BENCH_REFERENCE_KERNELS_GFX906: &[DirectCallKernel] = &[
-    // V1.6 long-context attention baseline — pre-split-K reference.
+    // long-context attention baseline — pre-split-K reference.
     DirectCallKernel {
         impl_id: "attention_prefill_flash_tile_f16_gfx906",
         cert_rel_path: "certs/hip/gfx906/attention_prefill_flash_tile_f16_gfx906.json",
     },
-    // V1.5 single-row indexed-MoE MMVQ baseline. Production ships r2 (and Q6_K
+    // single-row indexed-MoE MMVQ baseline. Production ships r2 (and Q6_K
     // dp4a); this stays as the A/B reference it was promoted from.
     DirectCallKernel {
         impl_id: "indexed_moe_mmvq_q4_k_gfx906",
         cert_rel_path: "certs/hip/gfx906/indexed_moe_mmvq_q4_k_gfx906.json",
     },
-    // V1.7.5.B PP hand-off bandwidth cert. Exercised by `bench sweep
+    // PP hand-off bandwidth cert. Exercised by `bench sweep
     // peer_copy_via_host` on the rig; not a kernel-launch dispatch.
     DirectCallKernel {
         impl_id: "peer_copy_via_host_gfx906",
         cert_rel_path: "certs/hip/gfx906/peer_copy_via_host_gfx906.json",
     },
-    // V1.4 4-warp LDS-tiled MMQ placeholders. Superseded by wave64 in
-    // production (Q4_K wave64 V2.3.b.2, Q6_K wave64 V2.3.b.4, Q8_0
-    // wave64_tile16 V2.7). Kept as bench A/B baselines — `sweep_mmq` runs
+    // 4-warp LDS-tiled MMQ placeholders. Superseded by wave64 in
+    // production (Q4_K wave64 , Q6_K wave64 , Q8_0
+    // wave64_tile16 ). Kept as bench A/B baselines — `sweep_mmq` runs
     // them as Q{4,6}K4Warp / Q8_04Warp variants alongside the shipped
     // kernels so the comparison stays live. See CLI PMC-refresh target
     // list at `crates/cli/src/main.rs`.
@@ -727,13 +722,13 @@ pub const BENCH_REFERENCE_KERNELS_GFX906: &[DirectCallKernel] = &[
         impl_id: "qmatmul_q8_0_mmq_4warp_lds_gfx906",
         cert_rel_path: "certs/hip/gfx906/qmatmul_q8_0_mmq_4warp_lds_gfx906.json",
     },
-    // V2.7 superseded Q8_0 MMQ wave64 by wave64_tile16 at m >= 128. Wave64
+    // superseded Q8_0 MMQ wave64 by wave64_tile16 at m >= 128. Wave64
     // stays as the bench baseline (PMC-refresh target).
     DirectCallKernel {
         impl_id: "qmatmul_q8_0_mmq_wave64_gfx906",
         cert_rel_path: "certs/hip/gfx906/qmatmul_q8_0_mmq_wave64_gfx906.json",
     },
-    // V1.3 single-row MMVQ references. Production dispatches r2/r4/dp4a at
+    // single-row MMVQ references. Production dispatches r2/r4/dp4a at
     // m < 128 for the K-quants; the single_row kernels stay as cross-check
     // baselines (called out in the TOML header).
     DirectCallKernel {
@@ -748,13 +743,13 @@ pub const BENCH_REFERENCE_KERNELS_GFX906: &[DirectCallKernel] = &[
         impl_id: "qmatmul_q6_K_mmvq_single_row_gfx906",
         cert_rel_path: "certs/hip/gfx906/qmatmul_q6_K_mmvq_single_row_gfx906.json",
     },
-    // V2.3.d Q6_K multi-row r4. Superseded by dp4a at runtime; r4 remains
+    // Q6_K multi-row r4. Superseded by dp4a at runtime; r4 remains
     // a cross-check baseline invoked from the PMC-refresh target list.
     DirectCallKernel {
         impl_id: "qmatmul_q6_K_mmvq_nw1_r4_gfx906",
         cert_rel_path: "certs/hip/gfx906/qmatmul_q6_K_mmvq_nw1_r4_gfx906.json",
     },
-    // V1.4 turbo Q8_1 quantise — bench-only sanity (the forward path uses
+    // turbo Q8_1 quantise — bench-only sanity (the forward path uses
     // `quantize_f16_q8_1` via `DIRECT_CALL_KERNELS_GFX906`, which is a
     // distinct kernel).
     DirectCallKernel {
@@ -764,7 +759,7 @@ pub const BENCH_REFERENCE_KERNELS_GFX906: &[DirectCallKernel] = &[
 ];
 
 pub const INDEXED_MOE_MMQ_GFX906: &[KernelDescriptor] = &[
-    // V1.5.7: 4-warp LDS-tiled MoE MMQ. Caller sorts (token, slot) pairs into
+    // 4-warp LDS-tiled MoE MMQ. Caller sorts (token, slot) pairs into
     // per-expert buckets so the weight tile amortises across MMQ_X=8 slots.
     KernelDescriptor {
         op_name: "IndexedMoEMMQ",
@@ -785,7 +780,7 @@ pub const INDEXED_MOE_MMQ_GFX906: &[KernelDescriptor] = &[
 pub fn dispatch_qmatmul(cfg: &QMatMulCfg) -> Option<&'static KernelDescriptor> {
     first_match(QMATMUL_GFX906, cfg.dtype_weight, cfg.dtype_activation, cfg.m)
 }
-// V2.11.b was an attempt at shape-aware (n < 1024 → tile8) for Q8_0 MMQ,
+// 1.b was an attempt at shape-aware (n < 1024 → tile8) for Q8_0 MMQ,
 // based on microbench PMC showing tile16 MemBusy crashes 75 % → 35 % at
 // small-N. End-to-end was a regression: the shexp shapes (k=2048 n=512)
 // are already-fast (~0.15 ms/call), and routing them through tile8's
@@ -860,7 +855,7 @@ mod tests {
 
     #[test]
     fn mmvq_decode_selects_dp4a_for_q6_k() {
-        // V2.3.d.1: Q6_K MMVQ decode dispatch is the DP4A kernel directly
+        // Q6_K MMVQ decode dispatch is the DP4A kernel directly
         // (runtime intercept removed after the borrow-chain bug was fixed).
         let d = dispatch_qmatmul(&cfg(QDtype::Q6_K, QDtype::Q8_1, 1)).unwrap();
         assert_eq!(d.impl_id, "qmatmul_q6_K_mmvq_dp4a_gfx906");
@@ -875,7 +870,7 @@ mod tests {
     #[test]
     fn mmq_tile16_at_m_128() {
         let d = dispatch_qmatmul(&cfg(QDtype::Q8_0, QDtype::Q8_1, 128)).unwrap();
-        // V2.7: default large-N Q8_0 MMQ is tile16.
+        // default large-N Q8_0 MMQ is tile16.
         assert_eq!(d.impl_id, "qmatmul_q8_0_mmq_wave64_tile16_gfx906");
     }
 
@@ -960,11 +955,11 @@ mod tests {
         }
     }
 
-    /// V2.8-class regression guard. Every `impl = "..."` row in
+    /// class regression guard. Every `impl = "..."` row in
     /// `dispatch/hip/gfx906.toml` must be registered in either a
     /// `KernelDescriptor` table or `DIRECT_CALL_KERNELS_GFX906`. Otherwise a
     /// routing swap in the TOML won't actually change runtime behaviour
-    /// (V2.8 tile16 bug).
+    /// (tile16 bug).
     #[test]
     fn dispatch_toml_roundtrip() {
         let repo_root = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))

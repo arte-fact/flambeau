@@ -1,18 +1,14 @@
-// swiglu_f32_to_q8_1 — CN-80B-19c/d fused `silu(a) * b` (F32 inputs) → Q8_1
+// swiglu_f32_to_q8_1 — /d fused `silu(a) * b` (F32 inputs) → Q8_1
 // blocks, replacing two unfused chains:
-//
-//   GDN tail (forward/gdn.rs):
-//     swiglu_f32(z, out_normed)         → gated_f32  (1 launch + 1 HBM RT)
-//     quantize_row_q8_1(gated_f32)      → gated_q8_1 (1 launch)
-//
-//   Shared expert (forward/moe.rs):
-//     swiglu_f32_to_f16(gate_f32, up_f32) → activated_f16  (1 launch + 1 HBM RT)
-//     quantize_row_f16_q8_1(activated_f16) → activated_q8_1 (1 launch)
-//
+// GDN tail (forward/gdn.rs):
+// swiglu_f32(z, out_normed) → gated_f32 (1 launch + 1 HBM RT)
+// quantize_row_q8_1(gated_f32) → gated_q8_1 (1 launch)
+// Shared expert (forward/moe.rs):
+// swiglu_f32_to_f16(gate_f32, up_f32) → activated_f16 (1 launch + 1 HBM RT)
+// quantize_row_f16_q8_1(activated_f16) → activated_q8_1 (1 launch)
 // In both cases the intermediate buffer is consumed only by the next
 // step, so fusing eliminates one launch + one HBM round-trip per layer
 // per token.
-//
 // Layout matches `quantize_row_q8_1`: one thread block per 32-element
 // Q8_1 block, 32 threads per block, lane t owns element t. Math is
 // `silu(a[i]) * b[i]` per lane, then per-block amax / sum reductions

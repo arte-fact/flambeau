@@ -1,11 +1,9 @@
 //! Tool-call parser trait + format-dispatch.
-//!
 //! The parser consumes the **decoded text stream** (what the tokenizer
 //! produced from sampled tokens) and emits a stream of structured events
 //! that the chat-completions handler (T2.5) assembles into
 //! `tool_calls[]` — for the non-streaming path — and the SSE producer
 //! (T3) translates into `delta.tool_calls[]` chunks.
-//!
 //! The core design goal (see ROADMAP-V2-TOOL-CALLING-AND-MCP §T2): the
 //! state machine's shape mirrors XGrammar's "structural tag" primitive —
 //! `Outside` (free text) vs `Inside { schema }` (constrained JSON body).
@@ -13,24 +11,20 @@
 //! states drive an `llguidance` mask generator that constrains logits
 //! directly. Keeping the shape compatible from day one avoids a rewrite
 //! when T5 lands.
-//!
 //! Two formats exist in the Qwen family and we expose a trait so the
 //! format-specific logic is one file each:
-//!
 //! - **Hermes-JSON** (`hermes.rs`): `<tool_call>\n{...JSON...}\n</tool_call>`.
-//!   Qwen3 / Qwen3.5 / Qwen3.6 with the Qwen-official (HuggingFace-pushed)
-//!   chat template.
+//! Qwen3 / Qwen3.5 / Qwen3.6 with the Qwen-official (HuggingFace-pushed)
+//! chat template.
 //! - **Qwen3-Coder XML** (`qwen3_coder.rs`): nested XML with
-//!   `<function=name>…<parameter=k>v</parameter>…</function>` inside a
-//!   `<tool_call>`. Qwen3-Coder family and — per the T1.3 parity-cert
-//!   finding — the Unsloth "UD" Qwen3.6 quants on this rig.
-//!
+//! `<function=name>…<parameter=k>v</parameter>…</function>` inside a
+//! `<tool_call>`. Qwen3-Coder family and — per the T1.3 parity-cert
+//! finding — the Unsloth "UD" Qwen3.6 quants on this rig.
 //! Both parsers conform to [`ToolCallParser`]. Selection at request
 //! time goes through [`dispatcher`], which honours the `tool_call_format`
 //! request field (`"hermes" | "qwen3_coder" | "auto"`) and falls back to
 //! an architecture-based default when the caller says `"auto"` or omits
 //! it.
-//!
 //! The `arguments` field emitted by [`ParserEvent::ToolCallArgumentsDelta`]
 //! / collected across the turn is always a JSON-encoded *string* — never
 //! an object — so the server wire format stays stable. This guards
@@ -42,7 +36,6 @@ pub mod hermes;
 pub mod qwen3_coder;
 
 /// Events emitted as the decoder-text stream is consumed.
-///
 /// The stream is append-only: text emitted earlier in a turn is never
 /// retracted. The parser MUST satisfy the "buffer-before-emit"
 /// discipline — an ambiguous prefix (e.g. a bare `<` in free text)
@@ -113,14 +106,13 @@ impl ParserEvent {
 /// T2.5 assembler: walk a (coalesced) parser-event stream and split it
 /// into the assistant `content` string and the `tool_calls[]` list that
 /// go into the OpenAI response body.
-///
 /// - `TextDelta` chunks concatenate into `content`.
 /// - `ThinkDelta` is discarded today (reasoning_content is V3 scope).
 /// - Each `ToolCallOpen` + its `ToolCallArgumentsDelta`s + matching
-///   `ToolCallClose` build one [`crate::api::ToolCall`].
+/// `ToolCallClose` build one [`crate::api::ToolCall`].
 /// - Close events whose matching Open never fired still produce a
-///   `ToolCall` with an empty name — imperfect, but preserves parser
-///   events rather than dropping them.
+/// `ToolCall` with an empty name — imperfect, but preserves parser
+/// events rather than dropping them.
 pub fn split_events(
     events: Vec<ParserEvent>,
 ) -> (String, Vec<crate::api::ToolCall>) {
@@ -164,13 +156,11 @@ pub fn split_events(
 }
 
 /// A streaming-capable tool-call parser.
-///
 /// Implementations must be deterministic: feeding the same bytes split
 /// into different chunks (e.g. `push("<tool_call>\n")` vs
 /// `push("<tool_"); push("call>\n");`) must produce the same total
 /// event stream. The T2.4 fixture corpus exercises this invariant via
 /// randomised chunk splits.
-///
 /// Malformed input is NEVER a panic. Garbage JSON in a tool-call body,
 /// a missing `</tool_call>`, or a `<tool_call>` inside a `<think>`
 /// block — each parser should degrade gracefully: surface the run of
@@ -214,20 +204,18 @@ impl ToolCallFormat {
 }
 
 /// Choose a parser format, honouring (in precedence order):
-///
 /// 1. An explicit `request_override` — `Some("hermes" | "qwen3_coder")`.
 /// 2. `"auto"` or `None` — fall back to the architecture default.
-///
 /// Architecture defaults are deliberately conservative:
 /// - `qwen35moe` (our V1 model arch) defaults to **`Hermes`**.
-///   **Caveat**: the specific Qwen3.6 GGUF on the V1 rig (Unsloth's
-///   `UD-Q8_K_XL` build) ships a **Coder-XML** chat template — see
-///   `certs/chat_template/qwen35moe_tools/README.md`. Clients running
-///   that GGUF should set `tool_call_format: "qwen3_coder"` explicitly.
-///   A finer-grained auto-detection from the loaded GGUF template will
-///   land as a follow-up once we reliably probe the template shape.
+/// **Caveat**: the specific Qwen3.6 GGUF on the V1 rig (Unsloth's
+/// `UD-Q8_K_XL` build) ships a **Coder-XML** chat template — see
+/// `certs/chat_template/qwen35moe_tools/README.md`. Clients running
+/// that GGUF should set `tool_call_format: "qwen3_coder"` explicitly.
+/// A finer-grained auto-detection from the loaded GGUF template will
+/// land as a follow-up once we reliably probe the template shape.
 /// - any other arch → `Hermes` (safest default — the open-source
-///   standard used across vLLM / SGLang / llama.cpp for non-Coder Qwens).
+/// standard used across vLLM / SGLang / llama.cpp for non-Coder Qwens).
 pub fn choose_format(
     request_override: Option<&str>,
     server_default: ToolCallFormat,
@@ -244,7 +232,6 @@ pub fn choose_format(
 /// template even though `general.architecture` says `qwen35moe`,
 /// so we can't rely on arch alone — but the template itself
 /// contains the literal tag tokens that classify it.
-///
 /// Used by `flambeau serve` at startup to set
 /// `ServerState.tool_call_format_default` once per process. Per-
 /// request `tool_call_format` overrides are honoured first.

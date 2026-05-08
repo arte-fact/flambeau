@@ -1,11 +1,9 @@
 //! Weight-name map — single source of truth for every GGUF tensor the
 //! Qwen3.x MoE family touches. Covers three layer flavours:
-//!
 //! - `DenseAttn` — pure-transformer self-attention with GQA (qwen3moe).
 //! - `FullAttn` — Gated Full-Attention with output gate + multi-freq RoPE
-//!   (qwen35moe / qwen36moe hybrid, on every Nth layer).
+//! (qwen35moe / qwen36moe hybrid, on every Nth layer).
 //! - `Gdn` — Gated-Delta-Net recurrent layer (qwen35moe hybrid, other layers).
-//!
 //! Each variant shares common FFN-side names (MoE + optional shared expert,
 //! `attn_norm`, `post_attention_norm`).
 
@@ -200,8 +198,8 @@ impl MoeFfnNames {
     }
 }
 
-/// Backward-compat alias — V1.7.2 code referenced `TensorNames::for_layer`
-/// for the dense case. Kept so V1.7.2 tests still type-check. The new
+/// Backward-compat alias — code referenced `TensorNames::for_layer`
+/// for the dense case. Kept so tests still type-check. The new
 /// hybrid code path uses the split `*Names` structs above.
 pub type TensorNames = DenseAttnNames;
 

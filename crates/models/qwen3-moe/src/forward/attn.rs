@@ -1,5 +1,4 @@
 //! Full-attention forward: decode (one token) + prefill (L tokens).
-//!
 //! Composes the attention block — RMSNorm + fused Q|gate projection + K/V
 //! projection + partial NeoX RoPE + KV append + softmax attention + output
 //! projection. The KV cache is `F16Contig`; Q8-KV is a separate code path
@@ -42,7 +41,7 @@ pub struct FullAttnScratch {
     pub gate_f16: DevicePtr,       // F16 [n_heads * head_dim]
     pub k_f16: DevicePtr,          // F16 [n_kv_heads * head_dim]
     pub v_f16: DevicePtr,          // F16 [n_kv_heads * head_dim]
-    /// V1-BENCH-#116a — Q8_0 staging for KvCache<Q8Contig>. Sized for
+    /// Q8_0 staging for KvCache<Q8Contig>. Sized for
     /// `n_kv_heads * head_dim / 32` Q8_0 blocks (18 B each). Unused on the
     /// F16-KV path; tiny relative to the F16 buffers (16× smaller per-row
     /// since 18 B vs 32 B per block).
@@ -51,16 +50,16 @@ pub struct FullAttnScratch {
     pub attn_out_f16: DevicePtr,   // F16 [n_heads * head_dim]
     pub gated_out_f16: DevicePtr,  // F16 [n_heads * head_dim]
     pub positions: DevicePtr,      // i32 [1] — position for the current token
-    /// V2.27.a-i2b — persistent host-side 1-slot position backing. Same
-    /// motivation as V2.26.a-i5a's `positions_host` for prefill: the
+    /// 7.a-i2b — persistent host-side 1-slot position backing. Same
+    /// motivation as 6.a-i5a's `positions_host` for prefill: the
     /// per-layer `upload_position` HtoD memcpy's source was a stack-local
     /// `[i32; 1]` requiring an internal `stream.synchronize()` to keep
     /// it alive across the copy — a per-layer per-token barrier of ~50 µs
     /// (~5 % of decode wall at 53 tok/s on Mesh<4>). The persistent Vec
     /// lets us drop the sync and keeps the memcpy source stable for
-    /// V2.27.a-i3's graph-capture path.
+    /// 7.a-i3's graph-capture path.
     pub(crate) positions_host: Vec<i32>,
-    // V2.19.b — split-K (flash-decoding) partials. Sized for
+    // 9.b — split-K (flash-decoding) partials. Sized for
     // `MAX_SPLITK_CHUNKS` chunks so the scratch can serve any context up to
     // `MAX_SPLITK_CHUNKS * SPLITK_CHUNK_SIZE_LONG` tokens; dispatch asserts
     // `n_chunks <= MAX_SPLITK_CHUNKS`.
@@ -82,7 +81,7 @@ pub struct FullAttnScratch {
     disposed: bool,
 }
 
-/// V2.19.b — partials scratch budget. 32 chunks × 512 tokens/chunk = 16 384
+/// 9.b — partials scratch budget. 32 chunks × 512 tokens/chunk = 16 384
 /// tokens max context covered by split-K (≥ anything practical on gfx906
 /// decode). Bump alongside the dispatch threshold if context ever exceeds.
 pub const MAX_SPLITK_CHUNKS: usize = 32;
@@ -110,20 +109,19 @@ impl FullAttnScratch {
         assert!(x_q8_1_elems % 32 == 0, "x_q8_1 elems must be multiple of QK8_1=32");
         let x_q8_1_bytes = (x_q8_1_elems / 32) * std::mem::size_of::<BlockQ8_1>();
         // Max MMVQ output width across all layer matmuls:
-        //   attn_q: q_fused_width (8192)
-        //   attn_output: hidden (2048)
-        //   attn_k/v: kv_width (512)
+        // attn_q: q_fused_width (8192)
+        // attn_output: hidden (2048)
+        // attn_k/v: kv_width (512)
         let mmvq_f32_bytes = q_fused_width.max(hidden) * 4;
         let q_fused_bytes = q_fused_width * 2;
         let qk_bytes = q_width * 2;
         let kv_bytes = kv_width * 2;
-        // V1-BENCH-#116a — Q8_0 staging for the q8_contig KV path. Each
+        // Q8_0 staging for the q8_contig KV path. Each
         // 32-element block is 34 B (2-byte fp16 scale + 32 int8 quants =
         // `sizeof(flambeau_block_q8_0)`). Allocated unconditionally so
         // dispatch on L::NAME can pick the right buffer without touching
         // scratch construction.
-        //
-        // V1-BENCH-#117 fix: was 18 B/block (wrong arithmetic — assumed
+        // fix: was 18 B/block (wrong arithmetic — assumed
         // 16 int8 quants instead of QK8_0=32). Q8 KV path was OOB-writing
         // 1088 B into a 576 B staging slab, corrupting the next allocation
         // and writing only ~17/32 blocks worth of data into the cache.
@@ -233,13 +231,12 @@ impl Drop for FullAttnScratch {
 /// Decode step for one full-attention layer. Consumes `x_in` (F16 `[H]`)
 /// and writes the pre-residual output to `delta_out` (F16 `[H]`). The
 /// caller is expected to do the residual sum (`out = x_in + delta_out`)
-/// outside this function — V1.7.3-e adds the fused residual-add kernel
+/// outside this function — e adds the fused residual-add kernel
 /// for the top-level compose.
-///
 /// Appends to `kv_cache` at the current tail. `position` is the 0-based
 /// token index used by RoPE and also the `n_tokens_kv` for the attention
 /// kernel after the append bumps the cache size by 1.
-/// V2.27.a-i3 — per-layer slot bundle for graph-captureable decode.
+/// 7.a-i3 — per-layer slot bundle for graph-captureable decode.
 /// Present only when the caller is building a decode graph capture;
 /// non-capture callers pass `None` to `forward_full_attn_decode`.
 #[derive(Clone, Copy, Debug)]
@@ -268,9 +265,9 @@ pub fn forward_full_attn_decode<L: CacheLayout>(
     position: usize,
     slots: Option<AttnDecodeSlots>,
 ) -> Result<()> {
-    // V1.7.3-b wires the attention block only; the FFN side of the
-    // residual is V1.7.3-d. `post_attn_norm` is still unused here; keep
-    // the handle so V1.7.3-d can call it without a second signature.
+    // b wires the attention block only; the FFN side of the
+    // residual is d. `post_attn_norm` is still unused here; keep
+    // the handle so d can call it without a second signature.
     let _ = post_attn_norm;
 
     let hidden = cfg.hidden_size;
@@ -293,8 +290,8 @@ pub fn forward_full_attn_decode<L: CacheLayout>(
     .context("attn_norm + quant")?;
 
     // 2. Q|gate projection. `attn_q.weight` rows = `2 * n_heads * head_dim`
-    //    (fused). Output lands in F32; cast to F16 for the downstream
-    //    F16-only kernels.
+    // (fused). Output lands in F32; cast to F16 for the downstream
+    // F16-only kernels.
     let dtype_q = qdtype_of(weights.attn_q.dtype)?;
     let (q_rows, q_k) = mat_shape(&weights.attn_q)?;
     if q_rows != 2 * n_heads * head_dim || q_k != hidden {
@@ -426,8 +423,7 @@ pub fn forward_full_attn_decode<L: CacheLayout>(
     .context("attn_k_norm")?;
 
     // 7. RoPE on Q and K. Multi-freq partial NeoX for Qwen3.5/3.6 text-only.
-    //
-    // V2.27.a-i2b — upload the position via the scratch's persistent
+    // 7.a-i2b — upload the position via the scratch's persistent
     // positions_host Vec so the HtoD source is stable across graph
     // replays AND we can drop the internal sync the stack-local
     // [position] variant needed. Saves ~50 µs/layer/token on decode.
@@ -469,8 +465,7 @@ pub fn forward_full_attn_decode<L: CacheLayout>(
     .context("rope K")?;
 
     // 8. Append K, V to the KV cache at the tail slot.
-    //
-    // V1-BENCH-#116 — generic over `L: CacheLayout`. F16Contig appends
+    // generic over `L: CacheLayout`. F16Contig appends
     // F16 K/V directly. Q8Contig quantises K/V (F16) → Q8_0 staging
     // first, then appends 18 B/block. Graph-capture slots are F16-only
     // (no Q8 capture path yet); Q8 + slots is rejected.
@@ -483,7 +478,7 @@ pub fn forward_full_attn_decode<L: CacheLayout>(
             );
         }
         // SAFETY: scratch.k_f16 and v_f16 are contiguous F16 `[n_kv_heads, head_dim]`.
-        // V2.27.a-i3 — capture-tagged append so dst can be retargeted
+        // 7.a-i3 — capture-tagged append so dst can be retargeted
         // per replay via HipGraphExec::set_memcpy_slot.
         unsafe {
             kv_cache_append_hip_slot(
@@ -523,14 +518,12 @@ pub fn forward_full_attn_decode<L: CacheLayout>(
     }
 
     // 9. Attention decode against the full cache (includes the token we
-    //    just appended — `current_tokens = position + 1`).
-    //
-    // V2.19.b — split-K (flash-decoding) for long contexts. The single-pass
+    // just appended — `current_tokens = position + 1`).
+    // 9.b — split-K (flash-decoding) for long contexts. The single-pass
     // kernel hits 27 % CU occupancy (16 heads × 1 block on 60 CUs) and
     // serialises over n_tokens_kv per block; at n_tokens=2048 that's 2647 µs
     // vs split-K's 340 µs (7.78×). FLAMBEAU_VARIANT=baseline opts out.
-    //
-    // V1-BENCH-#116 follow-up — split-K now exists for both F16 and Q8 KV.
+    // follow-up — split-K now exists for both F16 and Q8 KV.
     // The Q8 variant dequants on the fly during the chunk pass; combine
     // pass is layout-agnostic (operates on f32 partials).
     let n_tokens_kv = kv_cache.current_tokens();
@@ -620,7 +613,7 @@ pub fn forward_full_attn_decode<L: CacheLayout>(
     // Qwen3.5/3.6 uses a plain logistic sigmoid (per llama.cpp qwen35moe.cpp
     // `gate_sigmoid = sigmoid(Qcur_full view); attn_gated = attn * gate_sigmoid`)
     // NOT SiLU. Using swiglu here adds an extra factor of `gate`; that was
-    // V1.7.4.b's root cause — our full-attn layer 3 diverged 10-25× per element
+    // root cause — our full-attn layer 3 diverged 10-25× per element
     // from llama.cpp, cascading through the remaining 37 layers into garbage
     // logits. See `project_v1_7_4_b_sigmoid_gate.md`.
     let gated_elems = n_heads * head_dim;
@@ -635,7 +628,7 @@ pub fn forward_full_attn_decode<L: CacheLayout>(
     .context("post-attn sigmoid-gate")?;
 
     // 11. Quantise gated_out to Q8_1 for the output projection. Fused
-    // F16 → Q8_1 kernel lands from V1.7.3-g; replaces the earlier host
+    // F16 → Q8_1 kernel lands from g; replaces the earlier host
     // roundtrip.
     quantize_f16_q8_1(ops, stream, scratch.gated_out_f16, scratch.x_q8_1, gated_elems)
         .context("quantize gated_out → Q8_1")?;
@@ -670,8 +663,7 @@ pub fn forward_full_attn_decode<L: CacheLayout>(
 /// Route a `LayerCache` entry through the full-attn forward, pulling the
 /// correct `KvCache` out of the enum. Fails if the layer is actually a
 /// GDN layer (caller dispatch error).
-///
-/// V1-BENCH-#116 — dispatches on the cache variant (F16Contig or Q8Contig)
+/// dispatches on the cache variant (F16Contig or Q8Contig)
 /// to the same generic `forward_full_attn_decode<L>` body; the compiler
 /// monomorphises and the runtime branch in the body picks the right
 /// quantise + attention kernels.
@@ -714,22 +706,21 @@ pub fn forward_full_attn_layer_decode(
 
 
 // ---------------------------------------------------------------------------
-// V1.7.3-f1 — full-attention prefill (L > 1).
+// f1 — full-attention prefill (L > 1).
 // ---------------------------------------------------------------------------
 
 /// Workspace for one prefill chunk of a full-attention layer. Sized once
 /// against `(cfg, max_prefill_tokens)` — the caller chunks long prompts
-/// to keep scratch VRAM bounded (V1.7.3-f4 decides the chunk size).
-///
+/// to keep scratch VRAM bounded (f4 decides the chunk size).
 /// The buffers scale linearly with `max_prefill_tokens` except `x_q8_1`
 /// (which scales in blocks of 32 inputs). At hidden=2048 and L=128:
 /// activations + scratch < 10 MB total — comfortable even on 16 GB cards.
 pub struct FullAttnPrefillScratch {
     pub max_tokens: usize,
     pub x_norm_f16: DevicePtr,      // F16 [max_L, hidden] — rmsnorm output buffer
-                                    //                      (V2.2.d.P8: split away from the
-                                    //                       D1 fused rmsnorm+quant path so we
-                                    //                       can emit both Q8_1 layouts.)
+                                    // (8: split away from the
+                                    // D1 fused rmsnorm+quant path so we
+                                    // can emit both Q8_1 layouts.)
     pub x_q8_1: DevicePtr,          // Q8_1 blocks [max_L, hidden/32]
     pub x_q8_1_mmq: DevicePtr,      // BlockQ8_1Mmq [hidden/128, max_L] — DS4 layout for MmqLdsX64
     pub mmvq_f32: DevicePtr,        // F32 [max_L, max(2*H*D, H_kv*D, hidden)]
@@ -756,7 +747,7 @@ pub struct FullAttnPrefillScratch {
     pub(crate) slot_k_ptrs_host: Vec<u64>,
     pub(crate) slot_v_ptrs_host: Vec<u64>,
     pub(crate) slot_n_tokens_kv_host: Vec<i32>,
-    /// V2.26.a-i5a — persistent host-side position buffer. `positions`
+    /// 6.a-i5a — persistent host-side position buffer. `positions`
     /// on the device is filled each prefill call via a HtoD memcpy
     /// whose *source* is this Vec's stable address. Keeping it on the
     /// scratch (and therefore alive for the scratch's lifetime) is
@@ -764,7 +755,6 @@ pub struct FullAttnPrefillScratch {
     /// the previous path used a transient `Vec<i32>` created inside
     /// `upload_positions_range`, whose address becomes invalid once
     /// that function returns and breaks graph replay.
-    ///
     /// Sized `max_tokens`; writes are in-place via `[..n].copy_from_slice`.
     pub(crate) positions_host: Vec<i32>,
     // Bookkeeping.
@@ -930,8 +920,7 @@ impl Drop for FullAttnPrefillScratch {
 
 /// Upload `L` i32 positions `[start_position, start_position + L)` into
 /// the device-side `positions` scratch slot.
-///
-/// V2.26.a-i5a — the host-side source is `scratch.positions_host`, a
+/// 6.a-i5a — the host-side source is `scratch.positions_host`, a
 /// persistent `Vec<i32>` owned by the scratch. Previously this fn built
 /// a transient `Vec<i32>` on the stack, uploaded, and synced to keep
 /// the Vec alive across the copy. That works for direct dispatch but
@@ -941,7 +930,6 @@ impl Drop for FullAttnPrefillScratch {
 /// stable for the scratch's lifetime, so the same memcpy replays safely
 /// and — critically — picks up new values when we overwrite the host
 /// Vec between replays.
-///
 /// The internal `stream.synchronize()` is dropped: the memcpy is
 /// ordered in-stream with any subsequent RoPE launch, and the host
 /// storage (`positions_host`) outlives both the copy and the stream
@@ -984,17 +972,14 @@ pub(crate) fn upload_positions_range(
 /// (0 on a fresh sequence); this call appends the L new tokens and
 /// computes causal attention for each new Q row against the combined
 /// `[history + L]` KV.
-///
 /// `x_in` layout: F16 `[L, hidden]`, row-major (rows are tokens).
 /// `delta_out` layout: F16 `[L, hidden]`.
-/// V2.26.a-i5b — optional slot bundle for graph-captureable prefill.
-///
+/// 6.a-i5b — optional slot bundle for graph-captureable prefill.
 /// When a caller under [`flambeau_backend_hip::HipGraphExec::capture`]
 /// passes `Some(AttnPrefillSlots { .. })`, `forward_full_attn_prefill`
 /// tags the pos-varying kernel args + the K/V append memcpys so the
 /// resulting exec can be replayed across ubatches with just
 /// `set_slot` + `set_memcpy_slot` calls.
-///
 /// `None` preserves the original non-captureable behaviour — existing
 /// callers are unaffected.
 #[derive(Clone, Copy, Debug)]
@@ -1045,8 +1030,7 @@ pub fn forward_full_attn_prefill<L: flambeau_runtime::CacheLayout>(
     let rope = &cfg.rope;
 
     // 1. rmsnorm(x_in) → F16 scratch, then quantise to BOTH Q8_1 layouts.
-    //
-    // V2.2.d.P8: the older D1 fused rmsnorm+quant_q8_1 kernel writes only
+    // 8: the older D1 fused rmsnorm+quant_q8_1 kernel writes only
     // the standard per-row layout. To feed the 4-warp LDS-tiled Q4_1 MMQ
     // kernel at M ≥ 128 we need the DS4 (BlockQ8_1Mmq) layout in parallel.
     // Unfused rmsnorm costs one extra HBM round-trip per token (x_norm_f16
@@ -1072,7 +1056,7 @@ pub fn forward_full_attn_prefill<L: flambeau_runtime::CacheLayout>(
     .context("prefill attn x_norm → Q8_1 (MMQ DS4)")?;
 
     // 2. Q|gate projection across L rows. `qmatmul` auto-dispatches to
-    //    looped MMVQ (mid-M) or MMQ (M ≥ 128) based on the table.
+    // looped MMVQ (mid-M) or MMQ (M ≥ 128) based on the table.
     let dtype_q = qdtype_of(weights.attn_q.dtype)?;
     let (q_rows, q_k) = mat_shape(&weights.attn_q)?;
     if q_rows != 2 * n_heads * head_dim || q_k != hidden {
@@ -1240,7 +1224,7 @@ pub fn forward_full_attn_prefill<L: flambeau_runtime::CacheLayout>(
             .bump_tail(n_tokens)
             .map_err(|e| anyhow::anyhow!("kv_cache.bump_tail q8 (PP prefill): {e}"))?;
     } else if let Some(AttnPrefillSlots { k_append_slot, v_append_slot, .. }) = slots {
-        // V2.26.a-i5b — captureable variant: tag each memcpy so dst can
+        // 6.a-i5b — captureable variant: tag each memcpy so dst can
         // be retargeted per-replay via HipGraphExec::set_memcpy_slot.
         unsafe {
             kv_cache_append_hip_slot(
@@ -1310,7 +1294,7 @@ pub fn forward_full_attn_prefill<L: flambeau_runtime::CacheLayout>(
     }
 
     // 9. Post-attention sigmoid-gate: gated_out = sigmoid(gate) * attn_out,
-    // per token. See V1.7.4.b note in the decode path — Qwen3.5/3.6 uses
+    // per token. See note in the decode path — Qwen3.5/3.6 uses
     // plain sigmoid, not SiLU.
     sigmoid_mul_f16(
         ops,
@@ -1408,26 +1392,24 @@ pub(crate) fn upload_positions_arbitrary(
 }
 
 /// **P2.9b-i2-A1** — batched decode for one full-attention layer.
-///
 /// Mirrors [`forward_full_attn_prefill`] for the input-side ops
 /// (rmsnorm, Q|gate / K / V projections, per-head Q/K rmsnorm, RoPE)
 /// at `n_tokens = slot_positions.len()`, so those kernel launches are
 /// shared across slots. The KV-append (step 7) and attention (step 8)
 /// are split per slot because each slot owns its own KV cache and
 /// query history.
-///
 /// Layout:
-///   - `x_in` / `delta_out` are F16 `[N, hidden]`, row `s` belongs to
-///     slot `s` whose index in the per-rank session/cache arrays is
-///     also `s`.
-///   - `slot_caches[s]` is the layer-local KV cache for slot `s`. All
-///     must be `LayerCache::FullAttn` with identical `n_kv_heads`
-///     and `head_dim`.
-///   - `slot_positions[s]` is the cache tail for slot `s` *before* this
-///     token is appended (i.e. the position the new K/V row writes to).
-///   - `scratch` is a single shared per-rank `FullAttnPrefillScratch`
-///     sized for `max_tokens >= N` — the same buffers that prefill uses,
-///     reused as the [N, *] batched workspace.
+/// - `x_in` / `delta_out` are F16 `[N, hidden]`, row `s` belongs to
+/// slot `s` whose index in the per-rank session/cache arrays is
+/// also `s`.
+/// - `slot_caches[s]` is the layer-local KV cache for slot `s`. All
+/// must be `LayerCache::FullAttn` with identical `n_kv_heads`
+/// and `head_dim`.
+/// - `slot_positions[s]` is the cache tail for slot `s` *before* this
+/// token is appended (i.e. the position the new K/V row writes to).
+/// - `scratch` is a single shared per-rank `FullAttnPrefillScratch`
+/// sized for `max_tokens >= N` — the same buffers that prefill uses,
+/// reused as the [N, *] batched workspace.
 pub fn forward_full_attn_layer_decode_batched(
     ops: &OpsRegistry,
     stream: &HipStream,
@@ -1590,12 +1572,11 @@ pub fn forward_full_attn_layer_decode_batched(
     .context("batched-decode rope K")?;
 
     // 7. Per-slot KV append. **#275 fix**: write at `current_tokens`
-    //    (the cache tail) rather than `slot_positions[s]` (which is
-    //    `prompt_ids.len() + step` = off by 1). Matches legacy
-    //    `kv_cache.append()` semantics. F16-only (FullAttn cache).
-    //
-    //    **#266c**: in the same pass, populate the per-slot pointer/
-    //    length tables consumed by `attention_decode_f16_batched`.
+    // (the cache tail) rather than `slot_positions[s]` (which is
+    // `prompt_ids.len() + step` = off by 1). Matches legacy
+    // `kv_cache.append()` semantics. F16-only (FullAttn cache).
+    // **#266c**: in the same pass, populate the per-slot pointer/
+    // length tables consumed by `attention_decode_f16_batched`.
     let kv_per_token_bytes = kv_width * 2;
     for (s, cache) in slot_caches.iter_mut().enumerate() {
         let LayerCache::FullAttn(kv) = cache else {
@@ -1631,7 +1612,7 @@ pub fn forward_full_attn_layer_decode_batched(
     }
 
     // 8. Single-launch batched attention over all N slots
-    //    (**#266c** — replaces the per-slot loop).
+    // (**#266c** — replaces the per-slot loop).
     let scale = (head_dim as f32).sqrt().recip();
     // SAFETY: each `slot_*_host[..n_tokens]` is a Vec<u64|i32> with
     // stable address; the corresponding device buffer is sized to
@@ -1715,18 +1696,16 @@ pub fn forward_full_attn_layer_decode_batched(
 }
 
 // ---------------------------------------------------------------------------
-// V2.28.b-i1 — dense attention (qwen3moe family).
-//
+// 8.b-i1 — dense attention (qwen3moe family).
 // Differs from `forward_full_attn_*` above:
-//   - Q projection is plain `[n_heads*head_dim, hidden]` (not 2× fused with
-//     an input gate).
-//   - No `split_q_gate`.
-//   - No post-attn `sigmoid_mul` — `attn_out_f16` is quantised and fed
-//     directly into the output projection.
-//   - Q/K/V biases can be present (added after each matmul); Qwen3-Coder-30B
-//     has none, but the path supports optional biases via a runtime bail if
-//     the caller passes them (not yet implemented — asserts None).
-//
+// - Q projection is plain `[n_heads*head_dim, hidden]` (not 2× fused with
+// an input gate).
+// - No `split_q_gate`.
+// - No post-attn `sigmoid_mul` — `attn_out_f16` is quantised and fed
+// directly into the output projection.
+// - Q/K/V biases can be present (added after each matmul); Qwen3-Coder-30B
+// has none, but the path supports optional biases via a runtime bail if
+// the caller passes them (not yet implemented — asserts None).
 // Reuses `FullAttnScratch` / `FullAttnPrefillScratch` — `q_fused_f16` and
 // `gate_f16` inside them go unused on this path (~128 KiB dead per layer,
 // fine at 4.11 GiB/rank for Qwen3-Coder).
@@ -1889,7 +1868,7 @@ pub fn forward_dense_attn_decode<L: CacheLayout>(
     .context("dense attn_k_norm")?;
 
     // 5. RoPE. qwen3moe uses standard NeoX RoPE over `head_dim` (no
-    //    multi-freq sections — `rope.rotated_dims` equals head_dim).
+    // multi-freq sections — `rope.rotated_dims` equals head_dim).
     scratch.positions_host[0] = position as i32;
     unsafe {
         device.memcpy_async(
@@ -1911,7 +1890,7 @@ pub fn forward_dense_attn_decode<L: CacheLayout>(
     )
     .context("dense rope K")?;
 
-    // 6. KV append. V1-BENCH-#116 — same dispatch as gated full-attn.
+    // 6. KV append. same dispatch as gated full-attn.
     let kv_layout = L::NAME;
     if let Some(AttnDecodeSlots { k_append_slot, v_append_slot, .. }) = slots {
         if kv_layout != F16Contig::NAME {
@@ -1946,7 +1925,7 @@ pub fn forward_dense_attn_decode<L: CacheLayout>(
         }
     }
 
-    // 7. Attention decode. V1-BENCH-#116 follow-up — both F16 and Q8 KV
+    // 7. Attention decode. follow-up — both F16 and Q8 KV
     // layouts have a split-K (flash-decoding) variant; combine pass is
     // f32 partials, layout-agnostic.
     let n_tokens_kv = kv_cache.current_tokens();
@@ -2243,7 +2222,7 @@ pub fn forward_dense_attn_prefill(
     .context("dense attention_prefill_f16")?;
 
     // 8. Quantise attn_out to BOTH Q8_1 layouts for the output projection
-    //    (no sigmoid gate).
+    // (no sigmoid gate).
     quantize_f16_q8_1(
         ops, stream, scratch.attn_out_f16, scratch.gated_q8_1, n_tokens * q_width,
     )

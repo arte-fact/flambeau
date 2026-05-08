@@ -1,31 +1,26 @@
-//! TP-2c — tensor-parallel `forward_dense_ffn_decode`.
-//!
+//! tensor-parallel `forward_dense_ffn_decode`.
 //! Sister of [`super::dense_ffn::forward_dense_ffn_decode`] for the
 //! TP-sharded forward path. Same 7-op structure, with two changes:
-//!
 //! 1. `local_inter = cfg.moe_intermediate_size / tp_world` is used
-//!    everywhere the PP version uses `inter`. Sliced weights:
-//!    - `ffn_gate.weight` ColParallel{dim=0} → `[local_inter, hidden]`
-//!    - `ffn_up.weight`   ColParallel{dim=0} → `[local_inter, hidden]`
-//!    - `ffn_down.weight` RowParallel{dim=1} → `[hidden, local_inter]`
-//!
+//! everywhere the PP version uses `inter`. Sliced weights:
+//! - `ffn_gate.weight` ColParallel{dim=0} → `[local_inter, hidden]`
+//! - `ffn_up.weight` ColParallel{dim=0} → `[local_inter, hidden]`
+//! - `ffn_down.weight` RowParallel{dim=1} → `[hidden, local_inter]`
 //! 2. **No residual add.** The PP path computes
-//!    `x_out = residual + down(F16)` in one shot via `add_f16`. The TP
-//!    path emits *only the per-rank `down` projection* (cast to F16)
-//!    into `partial_ffn_out` — caller schedules
-//!    `BarP2pAllReduce::residual_tp{2,4}` immediately after to fold the
-//!    rank-local partials into `hidden` together with the residual.
-//!
-//! ## Same trade-offs as TP-2b
-//!
+//! `x_out = residual + down(F16)` in one shot via `add_f16`. The TP
+//! path emits *only the per-rank `down` projection* (cast to F16)
+//! into `partial_ffn_out` — caller schedules
+//! `BarP2pAllReduce::residual_tp{2,4}` immediately after to fold the
+//! rank-local partials into `hidden` together with the residual.
+//! ## Same trade-offs as 
 //! - `DenseFfnScratch` reused as-is — its `gate_f32` / `up_f32` /
-//!   `activated_*` slabs are sized for full `inter`, so they overflow
-//!   the per-rank slice into space that's never touched. 4× wasteful
-//!   on TP=4; not a correctness issue.
+//! `activated_*` slabs are sized for full `inter`, so they overflow
+//! the per-rank slice into space that's never touched. 4× wasteful
+//! on TP=4; not a correctness issue.
 //! - The fused `mmvq_q8_0_gate_up` branch still works under TP when
-//!   both gate and up are Q8_0 — slicing only changes per-rank row
-//!   counts. Qwen3.5-27B-Q4_1 takes the unfused branch (Q4_1 weights);
-//!   models with Q8_0 dense FFN take the fused branch.
+//! both gate and up are Q8_0 — slicing only changes per-rank row
+//! counts. Qwen3.5-27B-Q4_1 takes the unfused branch (Q4_1 weights);
+//! models with Q8_0 dense FFN take the fused branch.
 
 #![cfg(feature = "hip")]
 
@@ -53,15 +48,12 @@ use crate::config::Qwen3MoEConfig;
 use crate::weights::DeviceTensor;
 
 /// Per-rank decode for one dense FFN layer.
-///
 /// `ffn_gate`, `ffn_up`, `ffn_down` are *already sliced* per the
-/// TP-1a layout table.
-///
+/// layout table.
 /// Output: writes the per-rank `down(SwiGLU(gate, up))` cast to F16
 /// into `partial_ffn_out` (length `hidden`). The caller's AR fold
 /// resolves both the cross-rank reduction and the residual add into
 /// `hidden`.
-///
 /// # Errors
 /// - `tp_world == 0` or `moe_intermediate_size % tp_world != 0`.
 /// - Sliced weight shape mismatch.
@@ -113,10 +105,10 @@ pub fn forward_dense_ffn_decode_tp(
     }
 
     // 1. Quantise x_norm → Q8_1 once. x_norm is the AR'd post-attn
-    //    hidden state (replicated across ranks, so every rank
-    //    quantises the same input — duplicated but correct).
-    //    TP-perf-c2: skip when `pre_quantized` because the upstream
-    //    fused AR+RMSNorm+Q8_1 already wrote scratch.x_q8_1.
+    // hidden state (replicated across ranks, so every rank
+    // quantises the same input — duplicated but correct).
+    // TP-perf-c2: skip when `pre_quantized` because the upstream
+    // fused AR+RMSNorm+Q8_1 already wrote scratch.x_q8_1.
     if !pre_quantized {
         quantize_f16_q8_1(ops, stream, x_norm, scratch.x_q8_1, hidden)
             .context("dense ffn (TP) x_norm → Q8_1")?;
@@ -229,7 +221,7 @@ pub fn forward_dense_ffn_decode_tp(
     .context("dense ffn (TP) activated → Q8_1")?;
 
     // 6. Row-parallel down matmul: weight[hidden, local_inter] × activated[local_inter]
-    //    → down_f32[hidden]. Decode m=1.
+    // → down_f32[hidden]. Decode m=1.
     qmatmul(
         ops,
         stream,
@@ -245,22 +237,21 @@ pub fn forward_dense_ffn_decode_tp(
     .context("dense ffn (TP) down qmatmul")?;
 
     // 7. Cast down F32→F16 directly into partial_ffn_out. NO residual
-    //    add here — the AR fold (caller's
-    //    BarP2pAllReduce::residual_tp{2,4}) sums the 4 rank-local
-    //    partials into hidden together with the residual.
+    // add here — the AR fold (caller's
+    // BarP2pAllReduce::residual_tp{2,4}) sums the 4 rank-local
+    // partials into hidden together with the residual.
     cast_f32_to_f16(ops, stream, scratch.down_f32, partial_ffn_out, hidden)
         .context("dense ffn (TP) cast down → partial_ffn_out")?;
 
     Ok(())
 }
 
-/// **AUTO-6b3** — per-rank L-batched dense FFN prefill. Counterpart of
+/// 3** — per-rank L-batched dense FFN prefill. Counterpart of
 /// [`forward_dense_ffn_decode_tp`] for n_tokens > 1. Mirrors the
 /// kernel shape of [`super::dense_ffn::forward_dense_ffn_prefill`]
 /// (the PP version) but emits a `[L, hidden]` partial that the caller
 /// folds via one `BarP2pAllReduce::residual_tp{2,4}` call across `L *
 /// hidden` elements (instead of L per-token ARs).
-///
 /// Reuses [`super::dense_ffn::DenseFfnPrefillScratch`] (sized for full
 /// `inter` — same waste profile as the decode TP path; slicing only
 /// changes per-rank row counts).
@@ -359,8 +350,8 @@ pub fn forward_dense_ffn_prefill_tp(
     .context("dense ffn prefill (TP) down qmatmul")?;
 
     // 7. Cast F32→F16 directly into partial_ffn_out. AR fold (caller's
-    //    BarP2pAllReduce::residual_tp{2,4}) sums the partials together
-    //    with the residual.
+    // BarP2pAllReduce::residual_tp{2,4}) sums the partials together
+    // with the residual.
     cast_f32_to_f16(ops, stream, scratch.down_f32, partial_ffn_out, n_tokens * hidden)
         .context("dense ffn prefill (TP) cast down → partial_ffn_out")?;
     Ok(())
@@ -368,6 +359,6 @@ pub fn forward_dense_ffn_prefill_tp(
 
 #[cfg(test)]
 mod tests {
-    // Substantive tests need GPU; covered by TP-2d's parity smoke
+    // Substantive tests need GPU; covered by parity smoke
     // (compares TP at world=1 against PP forward_dense_ffn_decode).
 }

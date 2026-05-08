@@ -1,9 +1,7 @@
-//! V1.6 RMSNorm correctness sweep.
-//!
+//! RMSNorm correctness sweep.
 //! Computation — per row i of length k:
-//!   mean_sq = Σ x² / k
-//!   y       = x * weight / sqrt(mean_sq + eps)
-//!
+//! mean_sq = Σ x² / k
+//! y = x * weight / sqrt(mean_sq + eps)
 //! The reference matches the kernel: F32 accumulator for the sum-of-squares,
 //! F16 weight, F16 output. The cert records max relative error across rows,
 //! with a floor tracking `sqrt(K)` noise (same formula as the MMVQ sweep).

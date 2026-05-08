@@ -1,39 +1,30 @@
-// mmq_q4_1_wave64 — V2.13.a wave64 MMQ for Q4_1 × Q8_1 activation.
-//
-// V2.12 bench found `mmq_q4_1_4warp_lds` at 33.4 % of Qwen3.5-9B Mesh<1>
-// prefill time (1319 ms / 528 calls). The V1.4 4-warp LDS-tiled kernel was
-// the only Q4_1 path; Q4_K/Q5_K/Q6_K all got wave64 ports in V2.3.b (−60-70 %
-// kernel time). Q4_1 was skipped because 4warp_lds was "good enough" at the
-// time. Closing that gap is the clearest 9B lever.
-//
+// mmq_q4_1_wave64 — wave64 MMQ for Q4_1 × Q8_1 activation.
+// Sibling of the wave64 MMQ kernels for Q4_K / Q5_K / Q6_K / Q8_0
+// (the 4-warp LDS-tiled Q4_1 variant pays significant kernel-time at
+// 9B prefill shapes; the wave64 ports closed that gap −60-70%).
 // Tile shape (same family as `mmq_q8_0_wave64` / `mmq_q5_K_wave64`):
-//   MMQ_Y  = 64 (one wave64; each thread = 1 output row)
-//   TILE_N = 8  (8 output cols per block, loop-unrolled)
-//   Grid   = (⌈nrows_x / 64⌉, ⌈ncols_y / 8⌉)
-//   Block  = 64 threads
-//
+// MMQ_Y = 64 (one wave64; each thread = 1 output row)
+// TILE_N = 8 (8 output cols per block, loop-unrolled)
+// Grid = (⌈nrows_x / 64⌉, ⌈ncols_y / 8⌉)
+// Block = 64 threads
 // Q4_1 block layout (20 bytes, 32 elements):
-//   d  fp16  — scale
-//   m  fp16  — min offset
-//   qs uint8[16] — nibble pairs; byte i's LOW nibble = element i, HIGH = i+16
-//
-// Reconstruction: x_real_i = d · q_i + m  (q_i unsigned in [0, 15]).
-//
+// d fp16 — scale
+// m fp16 — min offset
+// qs uint8[16] — nibble pairs; byte i's LOW nibble = element i, HIGH = i+16
+// Reconstruction: x_real_i = d · q_i + m (q_i unsigned in [0, 15]).
 // Dot product with Q8_1 (d_y · q8_i + 0; Q8_1 has no m, its `s` field is
 // d_y · Σ q8_i pre-computed):
-//   dot = Σ_i (d·q_i + m) · d_y·q8_i
-//       = d · d_y · Σ(q·q8)      +    m · (d_y · Σ q8)
-//       = d · d_y · sumi          +    m · y_s
+// dot = Σ_i (d·q_i + m) · d_y·q8_i
+// = d · d_y · Σ(q·q8) + m · (d_y · Σ q8)
+// = d · d_y · sumi + m · y_s
 // where sumi = DP4A(q_packed, y_packed) and y_s = by->s (fp16).
-//
 // Per-block DP4A pack:
-//   v[0..3] = low nibbles of qs[0..15]  (elements 0..15, 4-per-int32)
-//   v[4..7] = high nibbles of qs[0..15] (elements 16..31)
+// v[0..3] = low nibbles of qs[0..15] (elements 0..15, 4-per-int32)
+// v[4..7] = high nibbles of qs[0..15] (elements 16..31)
 // Same layout as `mmvq_q4_1`; confirmed bit-identical to ggml on-disk.
-//
-// V2.10.b lesson applied from day one: no per-block sumf_* transient arrays.
-// Fold `d · d_y · sumi + m · y_s` directly into the persistent `sums[c]`
-// inside the inner loop. Keeps VGPR budget low.
+// No per-block sumf_* transient arrays. Fold `d · d_y · sumi + m · y_s`
+// directly into the persistent `sums[c]` inside the inner loop. Keeps
+// VGPR budget low.
 
 #include "block_quant.cuh"
 #include <hip/hip_runtime.h>

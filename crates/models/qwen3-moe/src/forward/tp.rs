@@ -1,19 +1,15 @@
-//! TP-2 — tensor-parallel forward path scratch + driver.
-//!
+//! tensor-parallel forward path scratch + driver.
 //! Sister of [`super::pp`]. Where PP holds whole layers per rank and
 //! threads the hidden state across ranks once per layer chain, TP holds
 //! every layer on every rank (sliced) and threads `partial_attn` /
 //! `partial_ffn` buffers through the AllReduce kernel twice per layer.
-//!
-//! ## Scope this session (TP-2a)
-//!
+//! ## Scope this session ()
 //! Only the per-rank scratch types land here:
 //! - [`RankForwardScratchTp`] — `hidden_a/b` (replicated, AR-reduced) +
-//!   `partial_attn_out` / `partial_ffn_out` (rank-local, AR-source).
+//! `partial_attn_out` / `partial_ffn_out` (rank-local, AR-source).
 //! - [`ShardedForwardOneTokenScratchTp`] — aggregate over the cluster.
-//!
-//! Forward kernel composition (TP-2b/c/d), parity cert (TP-2d), and
-//! perf cert (TP-2e) follow.
+//! Forward kernel composition (/c/d), parity cert (), and
+//! perf cert () follow.
 
 use anyhow::{bail, Result};
 use flambeau_backend_hip::{HipCluster, HipDevice, HipEvent};
@@ -25,22 +21,21 @@ use super::layer::LayerForwardScratch;
 use crate::config::Qwen3MoEConfig;
 
 /// Per-rank scratch for tensor-parallel decode.
-///
 /// Layout vs PP's [`super::pp::RankForwardScratch`]:
 /// - `hidden_a` / `hidden_b` — same ping-pong shape, but the contents
-///   are *replicated* across ranks (AR kernel writes the same value to
-///   every rank's `hidden_a`).
+/// are *replicated* across ranks (AR kernel writes the same value to
+/// every rank's `hidden_a`).
 /// - `partial_attn_out` / `partial_ffn_out` — new. Rank-local outputs
-///   of the row-parallel `attn_output` and `ffn_down` projections,
-///   fed into [`flambeau_backend_hip::BarP2pAllReduce`] which folds
-///   them back into `hidden_a` with residual-add.
+/// of the row-parallel `attn_output` and `ffn_down` projections,
+/// fed into [`flambeau_backend_hip::BarP2pAllReduce`] which folds
+/// them back into `hidden_a` with residual-add.
 /// - `layer` is reused as-is for now. Some sub-buffers
-///   (per-head Q/K/V scratches) are larger than the per-rank slice
-///   strictly needs; TP-2b may introduce a TP-aware sizing variant if
-///   the over-allocation matters.
+/// (per-head Q/K/V scratches) are larger than the per-rank slice
+/// strictly needs; may introduce a TP-aware sizing variant if
+/// the over-allocation matters.
 /// - `output_head` lives only on the last rank in the PP path; for TP
-///   every rank can carry one (the LM head is replicated in V1) but
-///   we still gate to a single rank to avoid 4× wasted scratch.
+/// every rank can carry one (the LM head is replicated in V1) but
+/// we still gate to a single rank to avoid 4× wasted scratch.
 pub struct RankForwardScratchTp {
     pub rank: RankId,
     pub device_id: i32,
@@ -58,19 +53,19 @@ pub struct RankForwardScratchTp {
     /// Rank-local FFN output partial. Same shape + role as above.
     pub partial_ffn_out: DevicePtr,
     /// Per-layer ops scratch. For now reuses the PP-shaped allocation;
-    /// TP-2b may shrink head-sized slabs to per-rank head count.
+    /// may shrink head-sized slabs to per-rank head count.
     pub layer: Option<LayerForwardScratch>,
     /// LM head scratch — populated only on the rank that owns the
-    /// argmax. V1 keeps `output.weight` Replicated (TP-1a layout
+    /// argmax. V1 keeps `output.weight` Replicated (layout
     /// table), so a single designated rank runs the LM head; the
     /// others have `None` here.
     pub output_head: Option<OutputHeadScratch>,
-    /// **TP-3a** — event recorded on the producer stream after a
+    /// event recorded on the producer stream after a
     /// partial-write kernel (last op of `forward_full_attn_decode_tp`,
     /// `forward_dense_ffn_decode_tp`, or `forward_gdn_decode_tp`).
     /// Peer ranks' AR streams `stream_wait` on this event before
     /// launching the AR kernel that reads this rank's partial buffer.
-    /// Replaces the host `Stream::synchronize` in TP-2d's `ar_residual`
+    /// Replaces the host `Stream::synchronize` in `ar_residual`
     /// with a driver-side DAG edge — host doesn't block.
     pub producer_done_event: HipEvent,
     hidden_bytes: usize,
@@ -103,7 +98,7 @@ impl RankForwardScratchTp {
     }
 
     /// Bytes allocated by this rank's scratch. Diagnostic for the
-    /// TP-2a smoke test — should equal `2·hidden + 2·hidden + layer +
+    /// smoke test — should equal `2·hidden + 2·hidden + layer +
     /// optional output_head` per rank.
     pub fn allocated_bytes(&self) -> usize {
         2 * self.hidden_bytes + 2 * self.partial_bytes
@@ -123,7 +118,6 @@ impl Drop for RankForwardScratchTp {
 }
 
 /// Aggregate per-rank scratch for a TP-sharded decode.
-///
 /// Designed-rank for the LM head defaults to rank 0 (V1 LM head is
 /// Replicated; any rank could run it but rank 0 already holds
 /// `token_embd` for the embed gather, so reusing the same rank
@@ -139,7 +133,6 @@ impl ShardedForwardOneTokenScratchTp {
     /// drives the buffer sizing; the per-rank `partial_*` buffers are
     /// the same shape as `hidden` (they hold a *full*-H partial of one
     /// token's contribution to the AllReduce sum).
-    ///
     /// `head_rank` defaults to 0; pass an explicit override only when
     /// the caller has a topology-specific reason (load-balancing
     /// across decode + prefill, etc. — V2-tp-5 territory).
@@ -217,14 +210,14 @@ impl ShardedForwardOneTokenScratchTp {
 
     /// Total bytes allocated across all ranks (excluding `LayerForwardScratch`
     /// internals — those are owned by the layer scratch and aggregated
-    /// separately). Sanity check for TP-2a's invariant.
+    /// separately). Sanity check for invariant.
     pub fn rank_level_bytes(&self) -> usize {
         self.per_rank.iter().map(|r| r.allocated_bytes()).sum()
     }
 }
 
 // =====================================================================
-// AUTO-6b1 — ShardedForwardPrefillScratchTp
+// 1 — ShardedForwardPrefillScratchTp
 // =====================================================================
 
 /// Per-rank scratch for an L-batched TP prefill. Mirrors
@@ -233,7 +226,6 @@ impl ShardedForwardOneTokenScratchTp {
 /// chain handles all `L` prompt tokens at once. The per-layer
 /// kernel-level scratch is the same [`super::layer::LayerPrefillScratch`]
 /// the PP path already uses (it is L-aware by design).
-///
 /// Lifecycle: allocate once per request via
 /// [`ShardedForwardPrefillScratchTp::new`], dispose once via
 /// [`ShardedForwardPrefillScratchTp::dispose`]. The decode path
@@ -309,7 +301,7 @@ impl RankForwardPrefillScratchTp {
 
     /// Bytes allocated by this rank's scratch (excluding
     /// `LayerPrefillScratch` internals — those are owned by the layer
-    /// scratch). Diagnostic for the AUTO-6b1 smoke test.
+    /// scratch). Diagnostic for the 1 smoke test.
     pub fn allocated_bytes(&self) -> usize {
         2 * self.hidden_bytes + 2 * self.partial_bytes
     }
@@ -329,8 +321,8 @@ impl Drop for RankForwardPrefillScratchTp {
 
 /// Aggregate per-rank scratch for an L-batched TP prefill. Counterpart
 /// to [`ShardedForwardOneTokenScratchTp`] for the prefill path. The
-/// AUTO-6b2 / AUTO-6b3 batched kernel composites consume this; the
-/// AUTO-6a per-token loop continues to use the decode scratch.
+/// 2 / 3 batched kernel composites consume this; the
+/// per-token loop continues to use the decode scratch.
 pub struct ShardedForwardPrefillScratchTp {
     pub per_rank: Vec<RankForwardPrefillScratchTp>,
     /// Rank that runs the LM head. V1 default: rank 0 (matches
@@ -449,7 +441,7 @@ impl ShardedForwardPrefillScratchTp {
 }
 
 // =====================================================================
-// TP-2d — forward_one_token_tp end-to-end driver
+// forward_one_token_tp end-to-end driver
 // =====================================================================
 
 use anyhow::{anyhow, Context};
@@ -686,31 +678,21 @@ fn debug_probe_rank0_hidden(
 }
 
 /// V1 TP forward driver — single-token decode through a TP-sharded model.
-///
 /// ## Layer dispatch
-///
 /// - **Full-attn layers** route through [`forward_full_attn_decode_tp`]
-///   + [`forward_dense_ffn_decode_tp`] with two AllReduce launches per
-///   layer (post-attn and post-FFN).
-/// - **GDN layers** error out with a `TP-4a required` diagnostic. The
-///   `attn_qkv` / `ssm_conv1d` Replicated layout TP-1a installed lets
-///   the model *load* on TP, but the head-aware sharding for forward
-///   correctness lives in TP-4a.
-///
-/// ## AllReduce path
-///
+/// + [`forward_dense_ffn_decode_tp`] with two AllReduce launches per
+/// layer (post-attn and post-FFN).
+/// - **GDN layers** error out with a `required` diagnostic. The
+/// `attn_qkv` / `ssm_conv1d` Replicated layout installed lets
+/// the model *load* on TP, but the head-aware sharding for forward
+/// correctness lives in /// ## AllReduce path
 /// `tp_world == 1`: degenerate. AR is skipped (one rank, no peers). The
 /// per-rank partial buffers are bit-identical to PP single-device
 /// outputs at this world size — useful for parity validation.
-///
 /// `tp_world == 2`: `BarP2pAllReduce::residual_tp2`.
-///
 /// `tp_world == 4`: `BarP2pAllReduce::residual_tp4`.
-///
-/// Other world sizes are rejected; TP-3 may add tp8/tp3 variants.
-///
+/// Other world sizes are rejected; may add tp8/tp3 variants.
 /// ## Returns
-///
 /// `(next_token_id, logits_optional)`. `logits` is `None` in the V1
 /// greedy-only path; sampler integration is V2.
 pub fn forward_one_token_tp(
@@ -728,7 +710,7 @@ pub fn forward_one_token_tp(
     )
 }
 
-/// **TP-5a-i2** — variant of [`forward_one_token_tp`] that downloads
+/// variant of [`forward_one_token_tp`] that downloads
 /// the F32 logits row into a caller-owned `Vec<f32>` instead of
 /// running argmax host-side. Used by the HTTP server when
 /// `temperature > 0` / `top_p < 1` (matches PP's
@@ -756,7 +738,6 @@ pub fn forward_one_token_tp_logits(
 /// `scratch.per_rank[head].output_head.logits_f32` holds valid F32
 /// logits for one token; the caller must consume it (e.g.
 /// `topk_softmax_f32`) before the next forward call clobbers it.
-///
 /// Saves the 600 KB DtoH per token — visible in the chat decode hot
 /// path under FLAMBEAU_GPU_SAMPLER=1.
 pub fn forward_one_token_tp_keep_logits_on_device(
@@ -775,28 +756,25 @@ pub fn forward_one_token_tp_keep_logits_on_device(
     .map(|_| ())
 }
 
-/// **AUTO-6a** — ingest a `prompt_ids` prompt and write the **last**
+/// ingest a `prompt_ids` prompt and write the **last**
 /// position's F32 logits row into `logits_out`. Mirrors the shape of
 /// [`super::pp::forward_prefill_pp_logits`] and
 /// [`super::hybrid::forward_prefill_hybrid_logits`] so the server's
 /// `prefill_logits` can dispatch through one symmetric entry point per
 /// topology.
-///
 /// Implementation note: today this is a per-token loop over
 /// [`forward_one_token_tp_logits`] — same behavior as the inline loop
-/// the server used pre-AUTO-6a. AUTO-6b/c swap in batched-across-L
+/// the server used pre-/c swap in batched-across-L
 /// kernels behind the same call site (full-attn + dense FFN first,
 /// then GDN + MoE). `start_position` is the position the *first*
 /// prompt token lands at — non-zero when this prefill is appending to
 /// a session that already saw earlier tokens.
 /// **#324** — pooled-scratch variant of [`forward_prefill_tp_logits`].
-///
 /// Uses the caller-supplied `pool_prefill` scratch instead of
 /// allocating one inside the batched driver. Caller must size
 /// `pool_prefill` for at least `prompt_ids.len()` tokens (typically
 /// the per-slot scratch is sized for `FLAMBEAU_PREFILL_UBATCH`,
 /// matching the chunk size used in `prefill_logits`).
-///
 /// Falls through to the per-token loop when the prompt is short
 /// (<8 tokens) or KV is Q8 — the pooled scratch is unused on those
 /// paths since they go through `forward_one_token_tp_logits`.
@@ -854,24 +832,21 @@ pub fn forward_prefill_tp_logits(
     if prompt_ids.is_empty() {
         bail!("forward_prefill_tp_logits: empty prompt");
     }
-    // **AUTO-6b2 / AUTO-6c4** — L-batched prefill is the default for
+    // 2 / 4** — L-batched prefill is the default for
     // TP/hybrid topologies on prompts ≥ 8 tokens. Set
     // `FLAMBEAU_TP_BATCHED=0` to opt out and fall through to the
     // per-token loop (kept for diagnostics + Q8 KV which has no batched
     // attention kernel).
-    //
     // Default-on rationale: bench cert
     // `coder_next_80b_cn80b_12_topology_summary.md` measures pp512
     // 801 tok/s (batched) vs the per-token loop at ~36 tok/s — a 22×
     // gap that left live serving running at ~5% of kernel ceiling.
-    //
     // The driver handles all four layer flavors:
-    //   * full-attn + dense FFN  (Qwen3.5 9B/27B Q4_1, dense)
-    //   * GDN + dense FFN        (Qwen3.5 hybrid)
-    //   * full-attn + MoE        (Qwen3-Coder-30B)
-    //   * GDN + MoE + shared exp (Qwen3.6-35B-A3B, Coder-Next-80B)
-    //
-    // V1-BENCH-#116 — Q8_0 KV has no batched-prefill kernel
+    // * full-attn + dense FFN (Qwen3.5 9B/27B Q4_1, dense)
+    // * GDN + dense FFN (Qwen3.5 hybrid)
+    // * full-attn + MoE (Qwen3-Coder-30B)
+    // * GDN + MoE + shared exp (Qwen3.6-35B-A3B, Coder-Next-80B)
+    // Q8_0 KV has no batched-prefill kernel
     // (attention_prefill_q8_kv doesn't exist yet). Detect and fall
     // through to the per-token loop; each iter goes through
     // forward_one_token_tp_logits → forward_full_attn_decode_tp<L>
@@ -891,7 +866,7 @@ pub fn forward_prefill_tp_logits(
             logits_out,
             None,
         )
-        .context("TP batched prefill (AUTO-6b2 / AUTO-6c4)");
+        .context("TP batched prefill");
     }
     for (i, &tok) in prompt_ids.iter().enumerate() {
         let pos = start_position + i;
@@ -903,15 +878,14 @@ pub fn forward_prefill_tp_logits(
     Ok(())
 }
 
-/// **AUTO-6b2** — L-batched TP prefill driver for dense (qwen35)
+/// 2** — L-batched TP prefill driver for dense (qwen35)
 /// arches. Allocates a [`ShardedForwardPrefillScratchTp`] sized to
 /// `prompt_ids.len()` on the fly, runs each layer's full-attn +
 /// dense-FFN with one AR per side per layer (instead of per-token),
 /// then runs the LM head on the last position. Per-token decode
 /// continues via `forward_one_token_tp_logits`.
-///
 /// V2.x deferred: bound the prefill scratch on the inflight session
-/// so we don't pay alloc/dispose per request — for AUTO-6b2 this
+/// so we don't pay alloc/dispose per request — for 2 this
 /// keeps the call-site change minimal.
 fn forward_prefill_tp_batched_logits(
     model: &Qwen3MoETpModel,
@@ -937,7 +911,6 @@ fn forward_prefill_tp_batched_logits(
     // (sized for `prefill_ubatch`), skipping the ~35 MB alloc/dispose
     // each call. The scratch must be sized for at least `n_tokens`;
     // we bail loudly if the caller violated that invariant.
-    //
     // When `pooled` is `None`, we fall back to the legacy per-call
     // alloc with a RAII dispose guard — kept for tests and any future
     // caller that hasn't wired pooling.
@@ -987,9 +960,9 @@ fn forward_prefill_tp_batched_logits(
     };
 
     // 2. Embed all L tokens on every rank. Token_embd is Replicated
-    //    so each rank writes the same F16 [L, hidden] into its own
-    //    `hidden_a` (loop the per-row embed helper — same as the
-    //    decode path, just over L positions).
+    // so each rank writes the same F16 [L, hidden] into its own
+    // `hidden_a` (loop the per-row embed helper — same as the
+    // decode path, just over L positions).
     let hidden = cfg.hidden_size;
     let row_bytes = hidden * 2;
     for r in 0..cluster.ranks() {
@@ -1012,9 +985,9 @@ fn forward_prefill_tp_batched_logits(
     }
 
     // 3. Layer loop. Pure-TP: full range, no cache offset.
-    //    (Body extracted to forward_prefill_tp_batched_layers for
-    //    AUTO-6e1 — hybrid callers pass a stage-local layer range +
-    //    il_cache_offset = range.start.)
+    // (Body extracted to forward_prefill_tp_batched_layers for
+    // 1 — hybrid callers pass a stage-local layer range +
+    // il_cache_offset = range.start.)
     forward_prefill_tp_batched_layers(
         model,
         scratch_ref,
@@ -1071,27 +1044,26 @@ fn forward_prefill_tp_batched_logits(
     Ok(())
 }
 
-/// **AUTO-6e1** — layer-range-aware body of the L-batched TP prefill.
+/// 1** — layer-range-aware body of the L-batched TP prefill.
 /// The same per-layer attn → AR → FFN-norm → FFN → AR chain that
 /// [`forward_prefill_tp_batched_logits`] runs over `0..n_layers`,
 /// extracted so hybrid (PP-of-TP) callers can run only a stage's
 /// slice of layers between inter-stage hand-offs.
-///
 /// Contract:
-///  * `hidden_a` on every rank is the residual stream — read at the
-///    start of each layer, written at the end. Caller is responsible
-///    for embedding the prompt into rank-0..N's `hidden_a` before
-///    `il_range.start`, and for consuming the post-final-layer
-///    `hidden_a` (output head + last-position logits, or hand-off).
-///  * `il_range` enumerates absolute layer indices into
-///    `model.shards[r].layers[il]`.
-///  * `il_cache_offset` is subtracted from `il` to index into
-///    `layer_caches[r]`. Pure-TP callers pass `0` (caches sized to
-///    `cfg.num_layers`); hybrid stages pass `stage.layer_range.start`
-///    (each stage's caches were allocated for its slice only).
-///  * `start_position` is the position the *first* prompt token
-///    lands at — propagated to the full-attn prefill so KV slots are
-///    written at the right offset.
+/// * `hidden_a` on every rank is the residual stream — read at the
+/// start of each layer, written at the end. Caller is responsible
+/// for embedding the prompt into rank-0..N's `hidden_a` before
+/// `il_range.start`, and for consuming the post-final-layer
+/// `hidden_a` (output head + last-position logits, or hand-off).
+/// * `il_range` enumerates absolute layer indices into
+/// `model.shards[r].layers[il]`.
+/// * `il_cache_offset` is subtracted from `il` to index into
+/// `layer_caches[r]`. Pure-TP callers pass `0` (caches sized to
+/// `cfg.num_layers`); hybrid stages pass `stage.layer_range.start`
+/// (each stage's caches were allocated for its slice only).
+/// * `start_position` is the position the *first* prompt token
+/// lands at — propagated to the full-attn prefill so KV slots are
+/// written at the right offset.
 #[expect(
     clippy::too_many_arguments,
     reason = "matches forward_prefill_tp_batched_logits arg shape; the alternative \
@@ -1116,7 +1088,7 @@ pub fn forward_prefill_tp_batched_layers(
     let kv_replicated = model.tp.kv_replicated();
     let hidden = cfg.hidden_size;
     let elem_count_l = (n_tokens * hidden) as u32;
-    // V1-BENCH-CN-80B-11a — mark on rank 0's stream at each section
+    // mark on rank 0's stream at each section
     // boundary. The AR (`ar_residual_prefill`) syncs all ranks before
     // launching, so marks taken AFTER an AR have a clean barrier; marks
     // taken BEFORE an AR (post-rank-loop, pre-AR) measure rank 0's
@@ -1226,7 +1198,7 @@ pub fn forward_prefill_tp_batched_layers(
                 .with_context(|| format!("gdn prefill TP layer {il}"))?;
             }
         }
-        // V1-BENCH-CN-80B-11a — mark after the attn block (full-attn
+        // mark after the attn block (full-attn
         // or GDN) but before the AR.
         dev0.bind()?;
         flambeau_backend_hip::profile::mark(
@@ -1362,7 +1334,7 @@ pub fn forward_prefill_tp_batched_layers(
                     let shared_w_gate = find_by_suffix(layer_tensors, il, "ffn_gate_shexp.weight")?;
                     let shared_w_up = find_by_suffix(layer_tensors, il, "ffn_up_shexp.weight")?;
                     let shared_w_down = find_by_suffix(layer_tensors, il, "ffn_down_shexp.weight")?;
-                    // CN-80B-15 — qwen3next's sigmoid-gated shared expert
+                    // qwen3next's sigmoid-gated shared expert
                     // (qwen35moe lacks this projection).
                     let shared_w_gate_inp = find_by_suffix(layer_tensors, il, "ffn_gate_inp_shexp.weight").ok();
                     let shared_scratch = layer_scratch
@@ -1462,7 +1434,7 @@ pub fn forward_prefill_tp_batched_layers(
     Ok(())
 }
 
-/// **AUTO-6b2** — explicit-elem-count AR variant of [`ar_residual`]
+/// 2** — explicit-elem-count AR variant of [`ar_residual`]
 /// for the L-batched prefill path. The decode helper derives elem
 /// count from `scratch.per_rank[0].hidden_bytes / 2` (= one F16
 /// hidden vector); the prefill scratch allocates `[max_tokens, hidden]`
@@ -1488,8 +1460,8 @@ fn ar_residual_prefill(
     let hidden_ptr = |r: usize| scratch.per_rank[r].hidden_a;
 
     // 1. Sync each rank's stream so peer reads see the partial-write
-    //    completed (event-based ordering is the decode optimization;
-    //    deferred for AUTO-6b2 — single synchronize per rank).
+    // completed (event-based ordering is the decode optimization;
+    // deferred for 2 — single synchronize per rank).
     for r in 0..cluster.ranks() {
         let device = cluster.device(r);
         device.bind()?;
@@ -1497,7 +1469,7 @@ fn ar_residual_prefill(
     }
 
     // 2. Launch AR on each rank's stream. Same kernels as the decode
-    //    path; only the `elem_count` argument grows.
+    // path; only the `elem_count` argument grows.
     match world {
         1 => {
             // Degenerate single-rank: in-place add residual + partial.
@@ -1546,7 +1518,6 @@ fn ar_residual_prefill(
 
 /// What to do with the F32 logits row after the LM head emits it on
 /// the head rank's device.
-///
 /// **Sampler-D3 Phase B (#211)** added the third variant — a "skip
 /// the postlude" mode the server uses when running the GPU top-K
 /// sampler directly on the head-rank's `OutputHeadScratch::logits_f32`.
@@ -1580,7 +1551,7 @@ fn forward_one_token_tp_inner(
     let cfg = &model.config;
     let world = cluster.ranks() as u32;
     if world != 1 && world != 2 && world != 4 {
-        bail!("TP-2d supports world ∈ {{1, 2, 4}}; got {world}");
+        bail!("supports world ∈ {{1, 2, 4}}; got {world}");
     }
     if scratch.per_rank.len() != cluster.ranks() {
         bail!(
@@ -1598,8 +1569,8 @@ fn forward_one_token_tp_inner(
     }
 
     // 1. Embed gather on every rank — token_embd is Replicated, so each
-    //    rank dequantises and writes the F16 hidden into its own
-    //    hidden_a. Deterministic → bit-identical across ranks.
+    // rank dequantises and writes the F16 hidden into its own
+    // hidden_a. Deterministic → bit-identical across ranks.
     for r in 0..cluster.ranks() {
         let device = cluster.device(r);
         device.bind()?;
@@ -1616,8 +1587,7 @@ fn forward_one_token_tp_inner(
     }
 
     // 2. Layer loop. Every rank runs every layer (full TP topology;
-    //    not pipeline-parallel).
-    //
+    // not pipeline-parallel).
     // Dispatch matches the non-TP paths (`forward/layer.rs`,
     // `forward/pp.rs`): `cfg.is_recurrent(il)` is the source of truth.
     // The earlier local check `interval > 0 && (il+1) % interval == 0`
@@ -1630,7 +1600,7 @@ fn forward_one_token_tp_inner(
     if probe {
         debug_probe_rank0_hidden(scratch, cluster, "embed", usize::MAX)?;
     }
-    // CN-80B-22 — per-layer-type wall time for decode profiling. The mark
+    // per-layer-type wall time for decode profiling. The mark
     // is a thread-local check + HipEvent record on rank 0's stream when
     // `profile::enable()` was called; otherwise it's a single bool load.
     // Aggregates across the n_run iterations: total/mean per name reveals
@@ -1691,7 +1661,7 @@ fn forward_one_token_tp_inner(
     }
 
     // 3. Output head + argmax on head_rank only. LM head + token_embd
-    //    are Replicated in V1, so head_rank's local copy is sufficient.
+    // are Replicated in V1, so head_rank's local copy is sufficient.
     let head_rank = scratch.head_rank.0 as usize;
     let device = cluster.device(head_rank);
     device.bind()?;
@@ -1757,11 +1727,10 @@ fn forward_one_token_tp_inner(
 }
 
 /// Per-rank dispatch of one full-attn layer + dense FFN + 2 AllReduces.
-///
 /// `il` is the absolute layer index used to look up weight tensors in
 /// `model.shards[r].layers[il]`. `il_cache` is the index into
 /// `layer_caches[r]`; callers under the pure-TP path pass `il_cache =
-/// il` (caches are sized to `cfg.num_layers`). The AUTO-4d hybrid
+/// il` (caches are sized to `cfg.num_layers`). The hybrid
 /// driver passes `il_cache = il - layer_range.start` because each
 /// stage allocates only its slice of layer caches.
 pub(crate) fn forward_full_attn_layer_tp(
@@ -1794,7 +1763,7 @@ pub(crate) fn forward_full_attn_layer_tp(
         let attn_q_norm = find_by_suffix(layer_tensors, il, "attn_q_norm.weight")?;
         let attn_k_norm = find_by_suffix(layer_tensors, il, "attn_k_norm.weight")?;
 
-        // V1-BENCH-#116 — dispatch on cache variant; the generic
+        // dispatch on cache variant; the generic
         // `forward_full_attn_decode_tp<L>` body picks the right
         // attention kernel (F16 vs Q8_0) via L::NAME.
         let hidden_a = scratch.per_rank[r].hidden_a;
@@ -1828,11 +1797,11 @@ pub(crate) fn forward_full_attn_layer_tp(
         debug_probe_rank0_named(scratch, cluster, "post-attn partial", il, p)?;
     }
 
-    // 2+3a. Fused AR-residual + post-attention RMSNorm (TP-3b-i2).
-    //   world > 1: BarP2pAllReduce::residual_rmsnorm_tp{2,4} replaces
-    //   the AR launch + the per-rank rmsnorm_f16 launch with a single
-    //   kernel call per rank.
-    //   world = 1: degenerate — fall back to add_f16 + rmsnorm_f16.
+    // 2+3a. Fused AR-residual + post-attention RMSNorm ().
+    // world > 1: BarP2pAllReduce::residual_rmsnorm_tp{2,4} replaces
+    // the AR launch + the per-rank rmsnorm_f16 launch with a single
+    // kernel call per rank.
+    // world = 1: degenerate — fall back to add_f16 + rmsnorm_f16.
     let post_norm_ptrs: Vec<DevicePtr> = (0..cluster.ranks())
         .map(|r| {
             find_by_suffix(&model.shards[r].layers[il], il, "post_attention_norm.weight")
@@ -1897,11 +1866,10 @@ pub(crate) fn forward_full_attn_layer_tp(
     }
 
     // 3b. FFN consuming the AR'd-and-normed mid_norm. Dense path
-    //     (arch=qwen35) calls forward_dense_ffn_decode_tp; MoE path
-    //     (qwen3moe / qwen35moe / qwen36moe) calls
-    //     forward_moe_ffn_decode_tp via forward_ffn_block_tp.
-    //
-    // **TP-7-arch** — when the loader had to fall back to Replicated
+    // (arch=qwen35) calls forward_dense_ffn_decode_tp; MoE path
+    // (qwen3moe / qwen35moe / qwen36moe) calls
+    // forward_moe_ffn_decode_tp via forward_ffn_block_tp.
+    // when the loader had to fall back to Replicated
     // upload for this layer's MoE expert tensors (K-quant misalignment),
     // each rank already holds the full MoE weights and computes the
     // full FFN output. Pass `ffn_world = 1` so the MoE kernels emit a
@@ -1921,7 +1889,7 @@ pub(crate) fn forward_full_attn_layer_tp(
     }
 
     // 4. AR-residual on FFN output. Skipped when the FFN is replicated
-    //    (TP-7-arch); the per-rank partial is already a full update.
+    // (); the per-rank partial is already a full update.
     if ffn_world > 1 {
         ar_residual(ar, scratch, cluster, world, AttnOrFfn::Ffn)?;
     } else {
@@ -1977,21 +1945,19 @@ pub fn ar_residual_prefill_pub(
     ar_residual_prefill(ar, scratch, cluster, world, elem_count, kind_priv)
 }
 
-/// **TP-3a** — async AR via HIP events. Replaces TP-2d's per-rank
+/// async AR via HIP events. Replaces per-rank
 /// host `Stream::synchronize` with driver-side cross-stream waits.
-///
 /// Pattern:
 /// 1. Each rank records its `producer_done_event` on its compute
-///    stream (the stream that just wrote the partial buffer). The
-///    record is non-blocking on the host.
+/// stream (the stream that just wrote the partial buffer). The
+/// record is non-blocking on the host.
 /// 2. Each rank's AR launch first issues `stream_wait` for every
-///    *other* rank's producer event. The waits go on the AR launch's
-///    stream, which on V1 is the same compute stream — so subsequent
-///    work on that stream blocks until peers signal, but the host
-///    doesn't.
+/// *other* rank's producer event. The waits go on the AR launch's
+/// stream, which on V1 is the same compute stream — so subsequent
+/// work on that stream blocks until peers signal, but the host
+/// doesn't.
 /// 3. The AR kernel launches on each rank's stream. By the time it
-///    reads peer partials, every peer's producer has signalled.
-///
+/// reads peer partials, every peer's producer has signalled.
 /// Same-rank ordering (rank `r`'s producer on stream `S_r` followed
 /// by rank `r`'s AR also on `S_r`) auto-serialises via stream order;
 /// no event needed.
@@ -2010,7 +1976,7 @@ fn ar_residual(
     let hidden_ptr = |r: usize| scratch.per_rank[r].hidden_a;
 
     // 1. Each rank records its producer-done event on its own stream
-    //    after the partial-write kernel. record() is host-non-blocking.
+    // after the partial-write kernel. record() is host-non-blocking.
     for r in 0..cluster.ranks() {
         let device = cluster.device(r);
         device.bind()?;
@@ -2020,8 +1986,8 @@ fn ar_residual(
     }
 
     // 2. Each rank's AR launch waits on every other rank's producer
-    //    event before the AR kernel reads that peer's partial buffer.
-    //    Same-rank waits are unnecessary (stream ordering auto-serialises).
+    // event before the AR kernel reads that peer's partial buffer.
+    // Same-rank waits are unnecessary (stream ordering auto-serialises).
     for r in 0..cluster.ranks() {
         let device = cluster.device(r);
         device.bind()?;
@@ -2036,7 +2002,7 @@ fn ar_residual(
     }
 
     // 3. Launch AR on each rank's stream. The driver schedules the
-    //    launch as soon as the per-rank wait list resolves.
+    // launch as soon as the per-rank wait list resolves.
     let elem_count = scratch.per_rank[0].hidden_bytes / 2; // bytes/F16
     match world {
         2 => {
@@ -2072,13 +2038,12 @@ fn ar_residual(
     Ok(())
 }
 
-/// **TP-4b-i2 / 4c-i2** — per-rank FFN dispatch. Branches on
+/// / 4c-i2** — per-rank FFN dispatch. Branches on
 /// `cfg.is_dense_ffn()`: dense routes through
 /// [`super::dense_ffn_tp::forward_dense_ffn_decode_tp`]; MoE routes
 /// through [`super::moe_tp::forward_moe_ffn_decode_tp`] preceded by
 /// [`super::moe::forward_router_decode`] (router is Replicated, runs
 /// identically per rank).
-///
 /// Shared expert (qwen35moe / qwen36moe) is folded by the layer
 /// driver via the second-residual path; for the simplest TP case
 /// (qwen3moe Coder-30B, no shared expert) this function emits the
@@ -2172,9 +2137,9 @@ fn forward_ffn_block_tp(
                 )?;
                 // B5 router-divergence bisect: dump expert_ids per layer.
                 // Two env gates:
-                //   FLAMBEAU_TP_LAYER0_BISECT=1 — layer 0 only, both ranks.
-                //   FLAMBEAU_PARITY_LAYER_DUMP=1 — every layer, rank 0 only,
-                //                                  format matching layer.rs PP.
+                // FLAMBEAU_TP_LAYER0_BISECT=1 — layer 0 only, both ranks.
+                // FLAMBEAU_PARITY_LAYER_DUMP=1 — every layer, rank 0 only,
+                // format matching layer.rs PP.
                 let layer0_bisect =
                     dev_flag("FLAMBEAU_TP_LAYER0_BISECT") && il == 0;
                 let layer_dump = dev_flag("FLAMBEAU_PARITY_LAYER_DUMP");
@@ -2223,7 +2188,7 @@ fn forward_ffn_block_tp(
                 let shared_w_up = find_by_suffix(layer_tensors, il, "ffn_up_shexp.weight")?;
                 let shared_w_down =
                     find_by_suffix(layer_tensors, il, "ffn_down_shexp.weight")?;
-                // CN-80B-15 — qwen3next's sigmoid-gated shared expert.
+                // qwen3next's sigmoid-gated shared expert.
                 let shared_w_gate_inp =
                     find_by_suffix(layer_tensors, il, "ffn_gate_inp_shexp.weight").ok();
                 let shared_scratch = layer_scratch
@@ -2246,11 +2211,11 @@ fn forward_ffn_block_tp(
             }
 
             // 3. MoE FFN forward → partial_ffn_out.
-            //    For shared-expert arches, partial_ffn_out is overwritten
-            //    by moe_combine_no_residual; we then add shared_delta via
-            //    add_f16. (Single in-layer launch overhead — TP-4d-i3
-            //    can replace with a moe_combine_with_extra variant if
-            //    profiling shows it matters.)
+            // For shared-expert arches, partial_ffn_out is overwritten
+            // by moe_combine_no_residual; we then add shared_delta via
+            // add_f16. (Single in-layer launch overhead — 
+            // can replace with a moe_combine_with_extra variant if
+            // profiling shows it matters.)
             let moe_scratch = layer_scratch
                 .moe
                 .as_mut()
@@ -2303,14 +2268,12 @@ fn forward_ffn_block_tp(
     Ok(())
 }
 
-/// **TP-3b-i2** — fused AR + residual + RMSNorm in one call per rank.
+/// fused AR + residual + RMSNorm in one call per rank.
 /// Replaces the (`ar_residual` + per-rank `rmsnorm_f16`) pair on the
 /// post-attn boundary inside a layer.
-///
 /// `weights[r]` is rank `r`'s `Replicated` post-attention RMSNorm
 /// weight (F16 `[hidden]`); `out_norm[r]` is rank `r`'s F16 `[hidden]`
 /// destination buffer (typically `LayerForwardScratch::mid_norm_f16`).
-///
 /// Producer-stream ordering uses the same event protocol as
 /// [`ar_residual`]: per-rank `producer_done_event.record(stream)`,
 /// then per-rank `stream_wait` on every peer's event before launching
@@ -2366,9 +2329,9 @@ fn ar_residual_rmsnorm(
             let s1 = cluster.device(1).default_stream();
             let streams = [s0, s1];
             // SAFETY: caller (forward_*_layer_tp) guarantees:
-            //   - hidden / partial / out_norm / weights all live
-            //     `elem_count`-element F16 allocs on the matching rank's device,
-            //   - producer streams are sync'd via the event protocol above.
+            // - hidden / partial / out_norm / weights all live
+            // `elem_count`-element F16 allocs on the matching rank's device,
+            // - producer streams are sync'd via the event protocol above.
             unsafe {
                 ar.residual_rmsnorm_tp2(&hidden, &partial, &w, &o, n, eps, &streams)?
             };
@@ -2409,8 +2372,7 @@ fn find_by_suffix<'a>(
         .ok_or_else(|| anyhow!("layer {il}: missing tensor with suffix `{suffix}`"))
 }
 
-/// Per-rank dispatch of one GDN layer + 2 AllReduces (TP-4a).
-///
+/// Per-rank dispatch of one GDN layer + 2 AllReduces ().
 /// Mirrors [`forward_full_attn_layer_tp`] for the GDN flavour: GDN's
 /// "delta" plays the same residual-stream role as full-attn's, so we
 /// fold the per-rank GDN partial into `hidden_a` via the same
@@ -2498,7 +2460,7 @@ pub(crate) fn forward_gdn_layer_tp(
         }
     }
 
-    // 2+3a. Fused AR-residual + post-attention RMSNorm (TP-3b-i2).
+    // 2+3a. Fused AR-residual + post-attention RMSNorm ().
     let post_norm_ptrs: Vec<DevicePtr> = (0..cluster.ranks())
         .map(|r| {
             find_by_suffix(&model.shards[r].layers[il], il, "post_attention_norm.weight")
@@ -2566,7 +2528,7 @@ pub(crate) fn forward_gdn_layer_tp(
     }
 
     // 3b. FFN block (dense or MoE — see forward_ffn_block_tp).
-    // **TP-7-arch** — same Replicated-MoE override as the full-attn
+    // same Replicated-MoE override as the full-attn
     // layer: pass `ffn_world = 1` and skip the post-FFN AR.
     let ffn_world = if !cfg.is_dense_ffn() && model.moe_replicated_at(il) {
         1
@@ -2607,30 +2569,26 @@ pub(crate) fn forward_gdn_layer_tp(
 
 /// Drive `slots.len()` concurrent decode steps through the TP topology
 /// with real per-layer batching, returning per-slot `[vocab]` F32 logits.
-///
 /// Mirrors [`super::pp::forward_decode_batched_pp`] but with all-rank
 /// participation per layer + AllReduce. Each slot has its own per-rank
 /// KV caches (in `sessions[s].caches[rank][layer]`); the layer body
 /// runs once per layer with N inputs/outputs in the per-rank batched
 /// scratch.
-///
 /// `sessions` parallel array — `sessions[s]` is the slot for
 /// `BatchSlot { idx: s, .. }` (caller indexes via `BatchSlot.idx`).
-///
 /// `scratch` is the shared per-rank batched workspace, sized for
 /// `>= slots.len()` tokens.
-///
 /// PP-i2-A1-wire pattern adapted for TP:
 /// - Embed N tokens replicated on every rank.
 /// - Per layer:
-///   * full-attn → `forward_full_attn_layer_decode_batched_tp`,
-///     writes per-rank partial; AR sums to replicated `hidden_a`.
-///   * GDN → per-slot loop calling `forward_gdn_decode_tp` (recurrent;
-///     not batchable across slots without kernel rewrite). Writes
-///     partial; AR.
-///   * post-attn add+rmsnorm batched at n_tokens=N (replicated).
-///   * Per-rank FFN/MoE batched at n_tokens=N (existing prefill TP
-///     kernels). AR.
+/// * full-attn → `forward_full_attn_layer_decode_batched_tp`,
+/// writes per-rank partial; AR sums to replicated `hidden_a`.
+/// * GDN → per-slot loop calling `forward_gdn_decode_tp` (recurrent;
+/// not batchable across slots without kernel rewrite). Writes
+/// partial; AR.
+/// * post-attn add+rmsnorm batched at n_tokens=N (replicated).
+/// * Per-rank FFN/MoE batched at n_tokens=N (existing prefill TP
+/// kernels). AR.
 /// - Output head per-slot on `head_rank`.
 pub fn forward_decode_batched_tp(
     model: &Qwen3MoETpModel,
@@ -2683,8 +2641,8 @@ pub fn forward_decode_batched_tp(
     }
 
     // 1. Embed N tokens replicated on every rank. token_embd is
-    //    Replicated (each rank's shard has the full embedding); each
-    //    rank dequant/uploads its own copy bit-identically.
+    // Replicated (each rank's shard has the full embedding); each
+    // rank dequant/uploads its own copy bit-identically.
     for r in 0..cluster.ranks() {
         let device = cluster.device(r);
         device.bind()?;
@@ -2712,8 +2670,8 @@ pub fn forward_decode_batched_tp(
         let is_full_attn = !cfg.is_recurrent(il);
 
         // 3a. Per-rank attention forward. Full-attn uses the new
-        //     batched-decode TP function; GDN loops slots with the
-        //     existing per-token decode kernel.
+        // batched-decode TP function; GDN loops slots with the
+        // existing per-token decode kernel.
         for r in 0..cluster.ranks() {
             let device = cluster.device(r);
             device.bind()?;
@@ -2894,8 +2852,8 @@ pub fn forward_decode_batched_tp(
         }
 
         // 3d. Per-rank FFN forward (dense or MoE). Reuse prefill TP
-        //     functions — they accept arbitrary n_tokens at fixed
-        //     [N, hidden] mid_norm.
+        // functions — they accept arbitrary n_tokens at fixed
+        // [N, hidden] mid_norm.
         let moe_replicated = !cfg.is_dense_ffn() && model.moe_replicated_at(il);
         let ffn_world = if moe_replicated { 1 } else { world };
         if cfg.is_dense_ffn() {

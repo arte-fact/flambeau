@@ -1,14 +1,11 @@
 // mmvq_q8_0_gate_up_dp4a — fused gate+up Q8_0 dense MMVQ with DP4A.
-//
 // For the shared-expert FFN (Qwen3.6 et al) the `ffn_gate_shexp` and
 // `ffn_up_shexp` matmuls share the same activation. A naive dispatch
 // launches two independent `mmvq_q8_0_dp4a` kernels, reading the same
 // Q8_1 activation twice from HBM.
-//
 // This kernel reads the activation ONCE per block and computes BOTH
 // matmuls in the same inner loop. Same block/grid/thread layout as the
 // VDR=2 Q8_0 DP4A kernel (256 threads, 1 row/block).
-//
 // Per-block: 2 dp4a against x.qs, 2 dp4a against gate_w.qs, 2 dp4a against
 // up_w.qs ... wait, we only need 2 dp4a per block for the activation side
 // (VDR=2), then split: gate_sumi = dp4a(gate_v, u, 0) + dp4a(gate_v+1, u+1),

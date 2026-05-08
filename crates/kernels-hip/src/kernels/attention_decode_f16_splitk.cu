@@ -1,22 +1,18 @@
 // attention_decode_f16_splitk — flash-decoding (two-pass split-K) variant
 // of attention_decode_f16. Attacks the occupancy starvation of the single-
 // pass kernel on Qwen3.6 decode (head_dim=256, n_heads_q=16, n_heads_kv=2):
-//
 // Single-pass: grid = {16, 1} → 16 blocks on 60 CUs = 27 % occupancy, each
-//   block serially iterates n_tokens. Measured 2869 µs at n_tokens≈2048 —
-//   ~700× off the 4 MiB / 1 TB/s HBM roofline. NOT bandwidth-bound; block
-//   count is the bottleneck.
-//
+// block serially iterates n_tokens. Measured 2869 µs at n_tokens≈2048 —
+// ~700× off the 4 MiB / 1 TB/s HBM roofline. NOT bandwidth-bound; block
+// count is the bottleneck.
 // Split-K: grid = {16, n_chunks} → each block handles `CHUNK` tokens of
-//   one Q head. A second reduce kernel merges `n_chunks` partial (m, s, o)
-//   triples online-softmax style. At n_chunks=8 we land 128 blocks → >2×
-//   CU saturation with each block doing 1/8 the work.
-//
+// one Q head. A second reduce kernel merges `n_chunks` partial (m, s, o)
+// triples online-softmax style. At n_chunks=8 we land 128 blocks → >2×
+// CU saturation with each block doing 1/8 the work.
 // Layout of partials (written by the chunk kernel, read by combine):
-//   partials_m[n_heads_q * n_chunks]             f32  — per-chunk local max
-//   partials_s[n_heads_q * n_chunks]             f32  — per-chunk local sum
-//   partials_o[n_heads_q * n_chunks * head_dim]  f32  — per-chunk local accum
-//
+// partials_m[n_heads_q * n_chunks] f32 — per-chunk local max
+// partials_s[n_heads_q * n_chunks] f32 — per-chunk local sum
+// partials_o[n_heads_q * n_chunks * head_dim] f32 — per-chunk local accum
 // Per-chunk head index is blockIdx.x, chunk index is blockIdx.y.
 
 #include <hip/hip_runtime.h>

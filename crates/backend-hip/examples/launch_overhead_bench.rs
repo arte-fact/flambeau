@@ -1,7 +1,7 @@
-//! V2.1 step 1 — measure the full Rust-side launch path cost per kernel
-//! invocation, compared against `rocprof`'s host-side `hipModuleLaunchKernel`
-//! timing. The delta is our Rust-FFI overhead — the hypothesised residual
-//! ~1.5-3 ms/token gap to llama.cpp per the V1.7.6 cert.
+//! Measure the full Rust-side launch path cost per kernel invocation,
+//! compared against `rocprof`'s host-side `hipModuleLaunchKernel`
+//! timing. The delta is our Rust-FFI overhead — the residual gap to
+//! llama.cpp on the decode hot path.
 //!
 //! Usage:
 //!   cargo run --release -p flambeau-backend-hip --example launch_overhead_bench --features hip
@@ -87,7 +87,7 @@ fn main() -> anyhow::Result<()> {
     stream.synchronize()?;
     let dt_a = t0.elapsed();
 
-    // --- Path B: V2.1 pre-allocated pool, launch_raw on hot path ---
+    // --- Path B: pre-allocated pool, launch_raw on hot path ---
     //
     // Build the arg pointer array ONCE, then launch_raw in the loop.
     // Tests whether the Vec allocation + push calls are the dominant

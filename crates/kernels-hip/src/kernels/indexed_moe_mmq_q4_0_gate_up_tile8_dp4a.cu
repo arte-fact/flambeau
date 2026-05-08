@@ -1,23 +1,17 @@
-// indexed_moe_mmq_q4_0_gate_up_tile8_dp4a — V2.28.c fused gate+up MoE MMQ
-// for Q4_0 expert weights.
-//
-// Mirrors V2.6.b's `indexed_moe_mmq_q4_k_gate_up_tile8_dp4a.cu` structure —
-// 64 threads / wave64, MMQ_Y=64 rows/block, TILE_N=8 slot-cols/block,
-// V2.6.a padded-sort expert routing — but substitutes Q4_K's super-block
-// decode for Q4_0's simpler flat 32-elem block dequant. Same bias-correction
-// identity as dense Q4_0 MMQ:
-//
-//   (q - 8) · y = dp4a(q, y) - 8 · y_s,   y_s = d_y · Σ q8
-//
+// indexed_moe_mmq_q4_0_gate_up_tile8_dp4a — fused gate+up MoE MMQ for
+// Q4_0 expert weights.
+// Mirrors `indexed_moe_mmq_q4_k_gate_up_tile8_dp4a.cu`: 64 threads /
+// wave64, MMQ_Y=64 rows/block, TILE_N=8 slot-cols/block, padded-sort
+// expert routing — but substitutes Q4_K's super-block decode for
+// Q4_0's flat 32-elem block dequant. Same bias-correction identity as
+// dense Q4_0 MMQ:
+// (q - 8) · y = dp4a(q, y) - 8 · y_s, y_s = d_y · Σ q8
 // and no per-sub-block min → folded into `sums[c] += x_d · (y_d·sumi − 8·y_s)`.
-//
-// Unblocks Qwen3.6-35B-A3B-Q4_0 MoE prefill: V2.27 measured the full-model
-// prefill at 132 tok/s (12 % of llama.cpp 1118), and the MoE expert matmuls
-// are the dominant fraction since ffn_gate/up/down_exps are all Q4_0.
-//
+// Used by Qwen3.6-35B-A3B-Q4_0 MoE prefill (Q4_0 ffn_gate/up/down_exps
+// are the dominant prefill fraction).
 // Launch:
-//   grid  = (⌈n_rows / 64⌉, padded_total / 8, 1)
-//   block = (64, 1, 1)
+// grid = (⌈n_rows / 64⌉, padded_total / 8, 1)
+// block = (64, 1, 1)
 
 #include "block_quant.cuh"
 #include <hip/hip_runtime.h>
@@ -69,7 +63,7 @@ void flambeau_indexed_moe_mmq_q4_0_gate_up_tile8_dp4a_q8_1(
     const int row     = tile_m + tid;
     const bool row_ok = (row < n_rows);
 
-    // All 8 slots in this block share the same expert (V2.6.a pad-to-8).
+    // All 8 slots in this block share the same expert (pad-to-8).
     const int first_pair = sorted_pair_idx_padded[tile_n];
     const int expert = expert_ids[first_pair];
 

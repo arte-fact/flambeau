@@ -1,28 +1,24 @@
 // rmsnorm_q8_1_fused — RMSNorm + Q8_1 activation quantize in one kernel.
-//
 // Candle D1 pattern: the decode path's hot loop is `... → RMSNorm → Q8_1
 // quantize → MMVQ → ...`, and every RMSNorm→Q8_1 edge goes through HBM
 // twice (F16 write, F16 read). Fusing it saves one full pass of hidden-
 // sized traffic per transformer layer.
-//
 // Output is Q8_1 blocks of 32 elements each. For each row (length K, must
 // be a multiple of QK8_1=32):
-//   1. mean_sq = Σ(x[i] * weight[i])² / K     (the full RMSNorm output
-//                                              has weight applied before
-//                                              quant — not just x)
-//   2. rsqrt   = 1 / sqrt(mean_sq + eps)       (broadcast)
-//   3. normed[i] = x[i] * weight[i] * rsqrt   (kept in registers)
-//   4. amax    = max|normed[j]| over j ∈ block (per-block Q8_1 scale)
-//   5. d       = amax / 127
-//   6. qs[j]   = round(normed[j] / d)           (per-block int8 quant)
-//   7. s       = d * Σ qs[j]                    (Q8_1 "sum" field)
-//
+// 1. mean_sq = Σ(x[i] * weight[i])² / K (the full RMSNorm output
+// has weight applied before
+// quant — not just x)
+// 2. rsqrt = 1 / sqrt(mean_sq + eps) (broadcast)
+// 3. normed[i] = x[i] * weight[i] * rsqrt (kept in registers)
+// 4. amax = max|normed[j]| over j ∈ block (per-block Q8_1 scale)
+// 5. d = amax / 127
+// 6. qs[j] = round(normed[j] / d) (per-block int8 quant)
+// 7. s = d * Σ qs[j] (Q8_1 "sum" field)
 // Layout choices:
-//   blockDim  = { 256 }                         (4 wave64 warps)
-//   gridDim   = { n_rows }
-//   shared    = 4 floats for cross-warp sum + a per-warp scratch for block
-//               max-abs reductions.
-//
+// blockDim = { 256 } (4 wave64 warps)
+// gridDim = { n_rows }
+// shared = 4 floats for cross-warp sum + a per-warp scratch for block
+// max-abs reductions.
 // NOTE: the RMSNorm step uses the TRUE sum-of-squares (NOT the weighted
 // product squared) per ggml convention — weight is applied after the
 // rsqrt in the standard definition. We follow that; the test harness
@@ -88,7 +84,7 @@ extern "C" __global__ void flambeau_rmsnorm_q8_1_fused(
     // per iteration. We loop over (k / QK8_1) blocks, 8 at a time.
     const int nblocks = k / QK8_1;
     const int block_lane  = tid & 31;               // 0..31 — position within Q8_1 block
-    const int block_group = tid >> 5;               // 0..7  — which Q8_1 block in this step
+    const int block_group = tid >> 5;               // 0..7 — which Q8_1 block in this step
 
     for (int b0 = 0; b0 < nblocks; b0 += 8) {
         const int b = b0 + block_group;

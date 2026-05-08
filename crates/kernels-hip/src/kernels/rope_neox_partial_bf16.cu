@@ -1,13 +1,11 @@
 // rope_neox_partial_bf16 — BF16 sibling of `rope_neox_partial_f16`.
-//
-// MTP-4-C-5: same partial-NeoX RoPE math (rotates the first
+// same partial-NeoX RoPE math (rotates the first
 // `rotated_dims` of `head_dim`, split-pair layout
 // `(i, i + rotated_dims/2)`). BF16 storage in-place; F32 internal
 // trig + multiply.
-//
 // Launch shape:
-//   blockDim = { rotated_dims / 2 }
-//   gridDim  = { n_tokens, n_heads, 1 }
+// blockDim = { rotated_dims / 2 }
+// gridDim = { n_tokens, n_heads, 1 }
 
 #include "block_quant.cuh"
 

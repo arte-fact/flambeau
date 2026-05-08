@@ -1,30 +1,25 @@
-// indexed_moe_mmq_q4_k_gate_up_tile8_dp4a — V2.6.b fused gate+up MoE MMQ.
-//
+// indexed_moe_mmq_q4_k_gate_up_tile8_dp4a — fused gate+up MoE MMQ.
 // Structural lever closing the 2× gap to Qwen3.5-9B dense prefill:
-//   - 64 threads per block, 1 wave64
-//   - MMQ_Y = 64 output rows per block (1 row per thread)
-//   - TILE_N = 8 slot-cols per block (iterated per-thread)
-//   - Total 64 × 8 = 512 outputs per block
-//
+// - 64 threads per block, 1 wave64
+// - MMQ_Y = 64 output rows per block (1 row per thread)
+// - TILE_N = 8 slot-cols per block (iterated per-thread)
+// - Total 64 × 8 = 512 outputs per block
 // All 8 slots in a block are GUARANTEED to map to the same expert
-// (V2.6.a's padded sort enforces this by padding each expert's range
+// (padded sort enforces this by padding each expert's range
 // to a multiple of 8, with tail slots repeating the last real
 // pair_idx). Weight slab is thus loaded per-thread exactly once per
 // sub-block and reused across all 8 activation columns via the
 // 8-dp4a inner loop — cache-efficient in both L1 and registers.
-//
 // Padding slots compute redundantly (same expert, same activation as
 // the last real slot → same output); their output write is a duplicate
 // that either overwrites or is overwritten. No per-slot validity check
 // in the inner loop → branch-free hot path.
-//
 // Launch:
-//   grid = (ceil(n_rows / 64), padded_total / 8, 1)
-//   block = (64, 1, 1)
-//
-// Compared to V2.5.b sorted r4 gate_up (4 rows × 1 col = 4 outputs/block):
-//   32× more outputs per block AND weight tile shared across 8 cols
-//   → expected 2-3× per-kernel speedup on prefill.
+// grid = (ceil(n_rows / 64), padded_total / 8, 1)
+// block = (64, 1, 1)
+// Compared to sorted r4 gate_up (4 rows × 1 col = 4 outputs/block):
+// 32× more outputs per block AND weight tile shared across 8 cols
+// → expected 2-3× per-kernel speedup on prefill.
 
 #include "block_quant.cuh"
 #include <hip/hip_runtime.h>
@@ -48,22 +43,13 @@ static __device__ __forceinline__ int dp4a(int a, int b, int c) {
     return __builtin_amdgcn_sdot4(a, b, c, false);
 }
 
-// V2.9.b attempted (WARP_SIZE, 2) here: occupancy 1 → 2 waves/SIMD but
-// Scratch_Size 156 → 684 bytes → kernel 187ms → 377ms (+101%). Kept (_, 1).
-//
-// V2.10.b attempted an inline-accumulator refactor (eliminating the
-// per-super-block `sumf_*` FP32 transient arrays) to enable (_, 2) without
-// pathological spill. Got VGPR 256 → 128 but Scratch 156 → 696 — compiler
-// wasn't spilling the sumf_* arrays (probably register-renaming those
-// anyway), real spill sources are the `g_v[8]`/`u_v[8]` int weight packs +
-// scale buffers across the unrolled super-block loop. Kernel time stayed at
-// 382ms, no win over V2.8 baseline. Reverted to (_, 1) + original
-// accumulator structure.
-//
-// Taking gate_up occupancy past 1 wave/SIMD needs a larger structural
-// change — splitting into separate gate/up kernels (trades launch count for
-// register pressure) or persistent-thread / LDS-staged designs. Deferred to
-// V3.
+// `__launch_bounds__(WARP_SIZE, 1)` is intentional. (WARP_SIZE, 2) was
+// 2.0× slower (Scratch 156 → 684 B). An inline-accumulator refactor
+// (eliminating the per-super-block sumf_* FP32 transients) likewise
+// failed to recover (_, 2) — the real spill sources are the
+// `g_v[8]`/`u_v[8]` int weight packs + scale buffers across the
+// unrolled super-block loop. Past 1 wave/SIMD needs a structural change
+// (split gate/up, persistent-thread, or LDS-staged designs).
 extern "C" __global__ __launch_bounds__(WARP_SIZE, 1)
 void flambeau_indexed_moe_mmq_q4_k_gate_up_tile8_dp4a_q8_1(
     const flambeau_block_q4_K* __restrict__ gate_w,
@@ -94,7 +80,7 @@ void flambeau_indexed_moe_mmq_q4_k_gate_up_tile8_dp4a_q8_1(
     const int row     = tile_m + tid;
     const bool row_ok = (row < n_rows);
 
-    // All 8 slots in this block share the same expert (V2.6.a padding
+    // All 8 slots in this block share the same expert (padding
     // guarantee). Read once, use for the whole block.
     const int first_pair = sorted_pair_idx_padded[tile_n];
     const int expert = expert_ids[first_pair];

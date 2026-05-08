@@ -1,38 +1,33 @@
-// indexed_moe_mmq_q4_k_gate_up_turbo — V2.14.c indexed-MoE port of the
-// V2.14.b turbo-style 4-warp LDS-tiled Q4_K MMQ.
-//
+// indexed_moe_mmq_q4_k_gate_up_turbo — indexed-MoE port of the
+// turbo-style 4-warp LDS-tiled Q4_K MMQ.
 // Two changes vs the dense `mmq_q4_K_turbo` kernel:
-//   1. Weight pointer is expert-indexed.
-//      All MMQ_X slots in a block share the same expert (V2.6.a padded-sort
-//      invariant). Resolve `expert = expert_ids[sorted_pair_idx_padded[tile_n]]`
-//      once per block, then address
-//        gate_w[expert * n_rows * n_sb_per_row + row * n_sb_per_row + kb0]
-//      as usual.
-//   2. Y activation is per-pair gathered, not contiguous along col axis.
-//      Dense turbo loads `tile_y[l] = by0[l]` with by0 pointing at the mmq_x
-//      col slice after the baked `tile_n * sz_mmq_int` offset. For indexed
-//      MoE the "cols" are pair-indices from sorted_pair_idx_padded, NOT
-//      contiguous in memory. Each tile_y[l] load now computes
-//        pair = slot_pair[l / MMQ_TILE_Y_K_LDS]
-//        tile_y[l] = y_int[big_block * n_pairs * sz + pair * sz + (l % MMQ_TILE_Y_K_LDS)]
-//      The 2-wave indirect gather adds some overhead vs the dense contiguous
-//      load, but the LDS tile reuse across 128 rows × 8 dp4a columns per
-//      vec_dot dwarfs it.
-//
+// 1. Weight pointer is expert-indexed.
+// All MMQ_X slots in a block share the same expert (padded-sort
+// invariant). Resolve `expert = expert_ids[sorted_pair_idx_padded[tile_n]]`
+// once per block, then address
+// gate_w[expert * n_rows * n_sb_per_row + row * n_sb_per_row + kb0]
+// as usual.
+// 2. Y activation is per-pair gathered, not contiguous along col axis.
+// Dense turbo loads `tile_y[l] = by0[l]` with by0 pointing at the mmq_x
+// col slice after the baked `tile_n * sz_mmq_int` offset. For indexed
+// MoE the "cols" are pair-indices from sorted_pair_idx_padded, NOT
+// contiguous in memory. Each tile_y[l] load now computes
+// pair = slot_pair[l / MMQ_TILE_Y_K_LDS]
+// tile_y[l] = y_int[big_block * n_pairs * sz + pair * sz + (l % MMQ_TILE_Y_K_LDS)]
+// The 2-wave indirect gather adds some overhead vs the dense contiguous
+// load, but the LDS tile reuse across 128 rows × 8 dp4a columns per
+// vec_dot dwarfs it.
 // Dual outputs (gate + up): both weight matrices share the same activation.
 // Per-block LDS holds gate's tile_x AND up's tile_x side-by-side (2× LDS
 // budget for x), loaded in sequence per K-iter. Each vec_dot pass runs twice
 // (once with gate tile, once with up tile) against the same tile_y.
-//
-// Padding slots (V2.6.a): tail slots in each expert range repeat the last
+// Padding slots (): tail slots in each expert range repeat the last
 // real pair_idx → redundant compute + duplicate writeback, no branch.
-//
 // Launch:
-//   grid  = (⌈n_rows / MMQ_Y⌉, ⌈padded_total / MMQ_X⌉, 1)
-//   block = (64, 4, 1) = 256 threads = 4 warps × 64
-//   shared = tile_y (MMQ_X×MMQ_TILE_Y_K_LDS)
-//          + 2 × (TXS_QS + TXS_DM + TXS_SC) for gate_x + up_x
-//
+// grid = (⌈n_rows / MMQ_Y⌉, ⌈padded_total / MMQ_X⌉, 1)
+// block = (64, 4, 1) = 256 threads = 4 warps × 64
+// shared = tile_y (MMQ_X×MMQ_TILE_Y_K_LDS)
+// + 2 × (TXS_QS + TXS_DM + TXS_SC) for gate_x + up_x
 // Activation format: `block_q8_1_mmq` (DS4). Must be pre-quantised via
 // `quantize_q8_1_mmq` on an F32 activation (F16 input: cast then quantise).
 
@@ -55,7 +50,7 @@
 #define QI8_1            8
 #define MMQ_TILE_Y_K_LDS (MMQ_TILE_NE_K + MMQ_TILE_NE_K / QI8_1)   // 36
 
-// MMQ_X=8 matches V2.6.a padded-sort alignment. Turbo dense uses 16 but the
+// MMQ_X=8 matches padded-sort alignment. Turbo dense uses 16 but the
 // indexed-MoE path's per-expert padding is pad-to-8 — using 16 would read
 // uninitialised sorted_pair_idx_padded slots for the 9th-16th entries in a
 // block straddling an expert boundary, producing OOB Y loads (HIP 700).
@@ -227,10 +222,10 @@ void flambeau_indexed_moe_mmq_q4_k_gate_up_turbo_q8_1(
 ) {
     extern __shared__ int lds[];
     // LDS layout:
-    //   tile_y          : MMQ_X * MMQ_TILE_Y_K_LDS ints              (576)
-    //   tile_x_gate     : TILE_X_TOTAL ints                           (4880)
-    //   tile_x_up       : TILE_X_TOTAL ints                           (4880)
-    //   Total                                                         10336 ints = 41344 B
+    // tile_y : MMQ_X * MMQ_TILE_Y_K_LDS ints (576)
+    // tile_x_gate : TILE_X_TOTAL ints (4880)
+    // tile_x_up : TILE_X_TOTAL ints (4880)
+    // Total 10336 ints = 41344 B
     int * tile_y    = lds;
     int * tile_x_gate = tile_y + MMQ_X * MMQ_TILE_Y_K_LDS;
     int * tile_x_up   = tile_x_gate + TILE_X_TOTAL;
@@ -252,7 +247,7 @@ void flambeau_indexed_moe_mmq_q4_k_gate_up_turbo_q8_1(
     __syncthreads();
     if (tile_n >= padded_total_shared) return;
 
-    // Per-block expert lookup (V2.6.a invariant: all MMQ_X slots same expert).
+    // Per-block expert lookup (invariant: all MMQ_X slots same expert).
     const int first_pair = sorted_pair_idx_padded[tile_n];
     const int expert     = expert_ids[first_pair];
 

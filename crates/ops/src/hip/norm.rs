@@ -1,5 +1,4 @@
 //! RMSNorm — F16→F16 and fused F16→Q8_1.
-//!
 //! Both kernels use 256 threads/row, one block per row. Layout of the Q8_1
 //! output is the GGUF-standard `[d (fp16), s (fp16), qs[32] (i8)]` block.
 
@@ -50,7 +49,7 @@ pub fn rmsnorm_f16(
     Ok(())
 }
 
-/// MTP-4-C-3 — BF16 RMSNorm. Same math as `rmsnorm_f16`, but x/y are
+/// BF16 RMSNorm. Same math as `rmsnorm_f16`, but x/y are
 /// BF16. Weight stays F16 because it's small (`[k]`), loaded once per
 /// row, and F16 has more mantissa bits than BF16 — no benefit to
 /// widening. Internal arithmetic is F32.
@@ -85,7 +84,7 @@ pub fn rmsnorm_bf16(
     Ok(())
 }
 
-/// V2.23.a.1 — fused `mid = x_in + delta; mid_norm = rmsnorm(mid) * weight`.
+/// 3.a.1 — fused `mid = x_in + delta; mid_norm = rmsnorm(mid) * weight`.
 /// Replaces `add_f16` + `rmsnorm_f16` pair at the attention-residual epilogue.
 /// Both `mid` and `mid_norm` are needed downstream.
 pub fn rmsnorm_f16_add_residual(
@@ -194,7 +193,6 @@ pub fn rmsnorm_f32(
 
 /// L2 normalization along the last dimension. `y[i] = x[i] / sqrt(sum(x^2) + eps)`.
 /// F32 in/out. Used by GDN on Q and K before the recurrent state update.
-///
 /// Launch: one block/row, 256 threads.
 pub fn l2_norm_f32(
     reg: &OpsRegistry,
@@ -226,7 +224,6 @@ pub fn l2_norm_f32(
 /// Stand-alone activation quantise: F32 → Q8_1 blocks. Used for the
 /// first-layer input before RMSNorm's fused variant is in play, and any time
 /// we need to quantise an existing F32 tensor on device.
-///
 /// `n_elems` must be a multiple of 32 (QK8_1). Launches one block per Q8_1
 /// super-block, 32 threads/block.
 pub fn quantize_q8_1(
@@ -253,7 +250,7 @@ pub fn quantize_q8_1(
     Ok(())
 }
 
-/// V2.2.d.P8 — F32 activation → BlockQ8_1Mmq (DS4 layout) for the 4-warp
+/// 8 — F32 activation → BlockQ8_1Mmq (DS4 layout) for the 4-warp
 /// LDS-tiled MMQ prefill path. Output is `[n_big_blocks, total_b]`
 /// row-major of 144 B blocks (128 F32 elements per block). Grid =
 /// `(ncols/128, total_b)`, block = 128 threads.
@@ -344,7 +341,7 @@ pub fn quantize_f16_q8_1(
     Ok(())
 }
 
-/// V1-BENCH-#116a — F16 → Q8_0 row-quantise. Used to convert K/V
+/// F16 → Q8_0 row-quantise. Used to convert K/V
 /// projection output (F16) to Q8_0 blocks for `KvCache<Q8Contig>`. Same
 /// shape as [`quantize_f16_q8_1`] but writes 18 B / 32 elems (no `s`
 /// field).

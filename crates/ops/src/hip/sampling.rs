@@ -1,9 +1,7 @@
 //! GPU-side sampler primitives — Solution D in the sampler-perf plan.
-//!
 //! `sampler_topk_softmax_f32` runs on the head rank after the LM head
 //! produces F32 logits and replaces the host-side
 //! `Sampler::sample_stochastic` softmax+sort hot path.
-//!
 //! Output is the top-K (id, prob) pairs, sorted descending by prob,
 //! with probs renormalised over the kept K. Caller does host-side
 //! `top_p` filter + multinomial draw on the small K-tuple (DtoH cost
@@ -37,7 +35,6 @@ pub const SAMPLER_K_OUT_MAX: usize = 2048;
 /// `[tok0, count0, tok1, count1, ...]`. Caller must dedup the
 /// history before passing — the kernel assumes unique `tok` per
 /// pair (no atomic-add).
-///
 /// # Errors
 /// - `n_pairs == 0` (penalty path should short-circuit on host).
 /// - kernel-launch dispatch failure.
@@ -81,19 +78,16 @@ pub fn apply_penalties_f32(
 /// vector. Single-block kernel: launches one 256-thread block on
 /// `stream` regardless of `vocab` (the kernel grid-strides over the
 /// logit reads internally).
-///
 /// Shapes:
 /// - `logits` `[vocab]` F32 — the LM-head output for one token, in
-///   place where the forward kernel left it.
+/// place where the forward kernel left it.
 /// - `out_ids` `[k]` i32 — sorted-descending-by-prob token ids.
 /// - `out_probs` `[k]` F32 — softmax-normalised probabilities,
-///   renormalised so the kept K sum to 1.
-///
+/// renormalised so the kept K sum to 1.
 /// Args:
 /// - `inv_temp` — `1.0 / temperature` (caller passes `1.0` when
-///   `temperature <= 0`; the kernel applies the multiply uniformly).
+/// `temperature <= 0`; the kernel applies the multiply uniformly).
 /// - `k` ≤ [`SAMPLER_K_OUT_MAX`].
-///
 /// # Errors
 /// - `k <= 0` or `k > SAMPLER_K_OUT_MAX`.
 /// - kernel-launch dispatch failure.

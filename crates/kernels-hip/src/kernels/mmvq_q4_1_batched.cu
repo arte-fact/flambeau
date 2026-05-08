@@ -1,32 +1,26 @@
 // mmvq_q4_1_batched — Q4_1 weight × N Q8_1 activation rows → N F32 dst rows.
-//
 // **#288** — batched-MMVQ kernel that AMORTIZES weight HBM reads across N
 // activation rows. The single-row `mmvq_q4_1_q8_1` reads the full weight tile
 // from HBM once per output row × per launch; calling it N times for N batched
 // slots costs N× the HBM bandwidth (see `feedback_qmatmul_small_m_no_amortize.md`).
-//
 // This kernel uses gridDim=(n_rows,) — same as the single-row variant — but
 // loops over all N slots within the inner K-block iteration, reusing the
 // loaded weight register values N times. Per (output row, K-block) pair:
-//   - Weight bytes: read ONCE per thread regardless of N.
-//   - Activation bytes: read N times (each slot has its own row).
-//   - DP4A: N invocations.
+// - Weight bytes: read ONCE per thread regardless of N.
+// - Activation bytes: read N times (each slot has its own row).
+// - DP4A: N invocations.
 // HBM bandwidth scales: weight reads stay constant in N (the lever); activation
 // reads are negligible vs weight (Q4_1 weight is ~9 KB/row × n_rows ≈ 36 MB at
 // k=4096; activation is ~144 KB/row × N ≈ 1 MB at N=8).
-//
 // Mirrors `attention_decode_f16_batched`'s pattern (see #266): single launch
 // covers N "rows" (batch dim) with shared resource reuse.
-//
 // Output layout: dst[N, n_rows] F32, slot-major (matches qmatmul ABI's
 // [m, n] = [batch, output] convention).
-//
 // Block/grid:
-//   blockDim = 256, gridDim = n_rows (one block per output row).
-//   Same threading as `mmvq_q4_1_q8_1`: lane4 ∈ [0,4) = which int32 of qs;
-//   block_idx = which Q4_1 block (0..63 across 256 threads). N slots inner-
-//   looped per (block_idx, K-iter).
-//
+// blockDim = 256, gridDim = n_rows (one block per output row).
+// Same threading as `mmvq_q4_1_q8_1`: lane4 ∈ [0,4) = which int32 of qs;
+// block_idx = which Q4_1 block (0..63 across 256 threads). N slots inner-
+// looped per (block_idx, K-iter).
 // VGPR budget: per-slot accumulator adds 1 F32 register per slot. At N=8
 // that's +8 VGPRs over the N=1 baseline. Single-row mmvq_q4_1 uses ~20
 // VGPRs (estimated from kernel size); N=8 batched lands at ~28 — still

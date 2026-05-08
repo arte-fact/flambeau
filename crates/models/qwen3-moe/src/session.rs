@@ -1,17 +1,14 @@
 //! Per-sequence inference state for a Qwen3.x MoE model.
-//!
 //! The model weights are read-only; everything that mutates during decode
-//! lives here. V1.7.3-a allocates:
-//!
+//! lives here. a allocates:
 //! - `KvCache<F16Contig, HipDevice>` for each full-attention layer (10 of
-//!   40 layers in Qwen3.6-35B). Sized for `max_tokens = config.context_length`.
+//! 40 layers in Qwen3.6-35B). Sized for `max_tokens = config.context_length`.
 //! - A GDN state buffer for each recurrent layer (30 of 40), shape
-//!   `[num_v_heads, head_k_dim, head_v_dim]` F32, zero-initialised so the
-//!   first-token recurrence is a clean slate.
+//! `[num_v_heads, head_k_dim, head_v_dim]` F32, zero-initialised so the
+//! first-token recurrence is a clean slate.
 //! - A GDN conv1d "history" buffer per recurrent layer, shape
-//!   `[conv_kernel - 1, conv_channels]` F32 — holds the last `conv_kernel-1`
-//!   input rows needed by the causal conv at decode-time.
-//!
+//! `[conv_kernel - 1, conv_channels]` F32 — holds the last `conv_kernel-1`
+//! input rows needed by the causal conv at decode-time.
 //! Dispose mirrors weights.rs: explicit `dispose(device)` frees everything.
 
 #![cfg(feature = "hip")]
@@ -25,8 +22,7 @@ use crate::config::Qwen3MoEConfig;
 
 /// Per-layer mutable state. Exactly one of the variants is populated,
 /// matching the layer's attention family + chosen KV layout.
-///
-/// V1-BENCH-#116 — `FullAttnQ8` adds a Q8_0-quantised KV variant. Selected
+/// `FullAttnQ8` adds a Q8_0-quantised KV variant. Selected
 /// at session-construction time (env: `FLAMBEAU_KV=q8` or
 /// `kv_layout: KvLayout` ctor param). Per CLAUDE.md rule #6, layouts are
 /// distinct types — the enum here is the dispatch boundary; the inner
@@ -38,7 +34,7 @@ pub enum LayerCache {
     Gdn(GdnLayerState),
 }
 
-/// V1-BENCH-#116 — runtime selector for the Q8 KV path. Lives at session
+/// runtime selector for the Q8 KV path. Lives at session
 /// construction; once chosen, every full-attn layer in this session uses
 /// that layout (mixed F16/Q8 across layers is not supported).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -81,7 +77,7 @@ pub struct GdnLayerState {
     pub head_v_dim: usize,
     pub conv_kernel: usize,
     pub conv_channels: usize,
-    /// MTP-5b-2 — speculative-decode snapshot buffers. Lazy-allocated on
+    /// speculative-decode snapshot buffers. Lazy-allocated on
     /// the first `save_snapshot` call so non-speculative sessions don't
     /// pay the ~150 MiB session-wide memory cost. None until first save.
     pub snapshot_state: Option<DevicePtr>,
@@ -144,7 +140,7 @@ impl Qwen3MoESession {
         self.device_id
     }
 
-    /// V1-BENCH-#116 — true if any full-attn layer uses the Q8_0 KV layout.
+    /// true if any full-attn layer uses the Q8_0 KV layout.
     /// Callers (forward_prefill_pp, forward_prefill_tp_logits) gate the
     /// batched prefill paths on this; Q8 KV currently has no batched
     /// prefill kernel, so prefill falls back to per-token decode.
@@ -179,7 +175,7 @@ impl Qwen3MoESession {
         &mut self.caches
     }
 
-    /// MTP-5b-2 — speculative-decode snapshot. Saves every GDN layer's
+    /// speculative-decode snapshot. Saves every GDN layer's
     /// recurrent state + conv-history into shadow buffers (lazy-allocated
     /// on first call). Full-attention K/V and current_tokens are NOT
     /// snapshotted — those are recovered via `KvCache::rollback(n)`,
@@ -232,7 +228,7 @@ impl Qwen3MoESession {
         Ok(())
     }
 
-    /// MTP-5b-2 — restore GDN state from the most recent snapshot.
+    /// restore GDN state from the most recent snapshot.
     /// `save_gdn_snapshot` must have been called previously, otherwise
     /// errors out per layer. Pair with `KvCache::rollback(n)` for the
     /// full-attn side.
@@ -273,7 +269,7 @@ impl Qwen3MoESession {
         Ok(())
     }
 
-    /// MTP-5b-2 — roll back full-attention K/V tail by `n_remove` slots
+    /// roll back full-attention K/V tail by `n_remove` slots
     /// across every full-attn layer. Pair with `restore_gdn_snapshot`
     /// to undo a complete speculative step on reject.
     pub fn rollback_full_attn(&mut self, n_remove: usize) -> Result<()> {
@@ -415,13 +411,12 @@ pub(crate) fn alloc_layer_cache(
     }
 }
 
-/// **TP-2e** — per-rank `LayerCache` allocator for tensor-parallel
+/// per-rank `LayerCache` allocator for tensor-parallel
 /// decode. Uses `local_num_v_heads = num_v_heads / tp_world` and
 /// `local_num_kv_heads = num_kv_heads / tp_world` so each rank's
 /// `KvCache` and `GdnLayerState` are sized for the local head subset
 /// only. Without this, kernels parameterised by `local_*` head counts
 /// would walk into uninitialised slabs in oversized PP-shape allocations.
-///
 /// Caller (`Qwen3MoETpSession::new`) loops over ranks × layers and
 /// binds the device per rank.
 pub(crate) fn alloc_layer_cache_tp(
@@ -455,7 +450,7 @@ pub(crate) fn alloc_layer_cache_tp(
         }
         let head_v_dim = gdn.head_v_dim();
         let local_num_v_heads = gdn.num_v_heads / world;
-        // **TP-4d-i3** — replicated K/Q (rep_outer arches) keeps the
+        // replicated K/Q (rep_outer arches) keeps the
         // full K head count per rank. See `WeightLayout::FusedQkvParallel`.
         let local_num_k_heads = if gdn_kq_replicated {
             gdn.num_k_heads
@@ -494,7 +489,7 @@ pub(crate) fn alloc_layer_cache_tp(
             snapshot_conv_history: None,
         }))
     } else {
-        // **TP-4d-i2** — KV-replication fallback: when nKV doesn't
+        // KV-replication fallback: when nKV doesn't
         // divide world, allocate the full KvCache on every rank.
         // Caller (forward_full_attn_decode_tp) passes kv_replicated=true
         // and the K/V projections run with full nKV per rank.
@@ -531,7 +526,6 @@ pub(crate) fn alloc_layer_cache_tp(
 /// **Phase A1 (test/diagnostic)** — flat per-layer KV snapshot of one
 /// session, copied device→host. Used by chunked-vs-single-shot KV
 /// parity tests in `tests/chunked_prefill_kv_parity.rs`.
-///
 /// Each entry is one layer: full-attn layers carry K and V byte
 /// buffers (sized `bytes_per_tensor`); GDN layers carry the recurrent
 /// `state` + `conv_history` byte buffers. The byte representation is
@@ -658,7 +652,6 @@ pub fn snapshot_layer_caches_to_host(
 /// host-side `LayerCacheSnapshot` byte buffers into device-side
 /// `LayerCache` slots. Caller owns the matching pair (one snapshot per
 /// cache entry, in order) and the device that owns the slice.
-///
 /// Errors if the snapshot variant doesn't match the cache variant
 /// (e.g. trying to restore a `FullAttn` snapshot into a `Gdn` slot —
 /// the prefix cache key chain prevents this in practice but the check

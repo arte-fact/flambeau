@@ -1,5 +1,4 @@
-// swiglu_f32_to_f16 — V2.23.b.2 fused `y_f16[i] = (fp16)(silu(a[i]) * b[i])`.
-//
+// swiglu_f32_to_f16 — 3.b.2 fused `y_f16[i] = (fp16)(silu(a[i]) * b[i])`.
 // Replaces the `swiglu_f32 + cast_f32_f16` pair on MoE decode + shared-expert
 // paths. The next step after cast is always quantize_row_f16_q8_1, so the
 // intermediate F32 buffer is only touched once by swiglu_f32 then once by

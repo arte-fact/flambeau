@@ -1,5 +1,4 @@
 //! Small cross-cutting helpers used by every submodule under `forward/`.
-//!
 //! Nothing here is on the tight inner loop — these are setup /
 //! one-shot conversions that appear in both decode and prefill paths.
 
@@ -28,14 +27,11 @@ pub(crate) const QK_K: usize = 256;
 
 /// Assert MoE expert dtypes fall inside the supported set and that
 /// `hidden` / `inter` are `QK_K`-aligned. Shared by decode and prefill.
-///
 /// Gate and up must agree in dtype and be one of `Q4_K / Q8_0 / Q4_0`.
 /// Down may additionally be `Q6_K` (UD-Q4_K_S `ffn_down_exps` promotion).
-///
 /// `label` disambiguates decode vs prefill in error messages; pass
 /// `"indexed-MoE"` for decode and `"indexed-MoE prefill"` for prefill to
 /// preserve the existing text that downstream tests grep against.
-///
 /// # Errors
 /// Returns an error if any dtype is outside the supported set or
 /// `hidden` / `inter` are not multiples of `QK_K`.
@@ -81,9 +77,7 @@ pub(crate) fn validate_moe_dtypes(
 /// implementation. Dispatches:
 /// - Q4_K → fused `indexed_moe_mmvq_q4_k_gate_up` (1 kernel, 2 outputs)
 /// - Q8_0 / Q4_0 → two separate `indexed_moe_mmvq_q{8_0,4_0}` launches
-///
 /// Caller must have validated `dtype` via [`validate_moe_dtypes`].
-///
 /// # Errors
 /// Returns an error if the underlying kernel launch fails.
 #[expect(
@@ -130,7 +124,7 @@ pub(crate) fn run_indexed_moe_gate_up(
             .context("indexed_moe up q8_0")
         }
         GgmlDType::Q4_0 => {
-            // V2.23.b.1 — fused gate+up reads Q8_1 activation once per block
+            // 3.b.1 — fused gate+up reads Q8_1 activation once per block
             // and produces both outputs. Halves launch count for Q4_0 MoE
             // decode (where the tile8 MMQ path does not fire at n_tokens<32).
             let nb = hidden / 32;
@@ -150,7 +144,6 @@ pub(crate) fn run_indexed_moe_gate_up(
 /// pass `(n_tokens * top_k, 1)` (decode + prefill down-step pattern), and
 /// the standard prefill path can pass `(n_tokens, top_k)` directly.
 /// Dispatches Q4_K (r2 variant), Q6_K, Q8_0, Q4_0.
-///
 /// # Errors
 /// Returns an error if the underlying kernel launch fails or the dtype is
 /// outside the supported set.
@@ -215,7 +208,7 @@ pub(crate) fn run_indexed_moe_down(
             .context("indexed_moe down q4_0")
         }
         GgmlDType::Q4_1 => {
-            // B6 / V2.35.a — Qwen-published Qwen3.6-35B-A3B-Q4_0 packs
+            // 5.a — Qwen-published Qwen3.6-35B-A3B-Q4_0 packs
             // ffn_down_exps as Q4_1 (gate/up are Q4_0). Same call shape as
             // Q4_0; only the per-block reconstruction differs.
             let nb = inter / 32;
@@ -232,7 +225,6 @@ pub(crate) fn run_indexed_moe_down(
 /// Map our `GgmlDType` (from GGUF) to the `QDtype` the qmatmul dispatcher
 /// uses. Only the dtypes our V1 kernels support are allowed here; everything
 /// else is a load-time error.
-///
 /// # Errors
 /// Returns an error if `dtype` is not in the V1 qmatmul dispatch set.
 pub(super) fn qdtype_of(dtype: GgmlDType) -> Result<QDtype> {
@@ -242,15 +234,15 @@ pub(super) fn qdtype_of(dtype: GgmlDType) -> Result<QDtype> {
         GgmlDType::Q6K => QDtype::Q6_K,
         GgmlDType::Q8_0 => QDtype::Q8_0,
         GgmlDType::Q4_1 => QDtype::Q4_1,
-        // V2.21.b — UD-Q8_K_XL reserves F16 for i-matrix-flagged layers
+        // 1.b — UD-Q8_K_XL reserves F16 for i-matrix-flagged layers
         // (Qwen3.6-27B-UD-Q8_K_XL: all 48 attn_gate + 48 ssm_out + scattered
         // attn_q/k + ffn_gate/up/down). `mmvq()` special-cases F16 to skip
         // the dispatch table and call the direct F16×Q8_1 kernel.
         GgmlDType::F16 => QDtype::F16,
-        // V2.23.a — Q4_0 and Q5_0 unblock Qwen3.6-35B-A3B-Q4_0.
+        // 3.a — Q4_0 and Q5_0 unblock Qwen3.6-35B-A3B-Q4_0.
         GgmlDType::Q4_0 => QDtype::Q4_0,
         GgmlDType::Q5_0 => QDtype::Q5_0,
-        // V2.26.a — Q5_1 (llama.cpp parity; no Qwen3 model currently uses it
+        // 6.a — Q5_1 (llama.cpp parity; no Qwen3 model currently uses it
         // but unblocks any incoming GGUF mix).
         GgmlDType::Q5_1 => QDtype::Q5_1,
         other => bail!("weight dtype {other:?} not supported by V1 qmatmul dispatch"),
@@ -258,11 +250,9 @@ pub(super) fn qdtype_of(dtype: GgmlDType) -> Result<QDtype> {
 }
 
 /// Pull the `(n_rows, k)` pair out of a weight tensor's GGUF dims.
-///
 /// `flambeau_quant::GgufFile` reverses the on-wire dim order at parse time,
 /// so `dims` is **outermost-first**: for a 2D weight `[n_rows, k]` we have
 /// `dims = [n_rows, k]`.
-///
 /// # Errors
 /// Returns an error if the weight is not 2D.
 pub(super) fn mat_shape(w: &DeviceTensor) -> Result<(usize, usize)> {
@@ -280,7 +270,6 @@ pub(super) fn mat_shape(w: &DeviceTensor) -> Result<(usize, usize)> {
 
 /// Byte count per vocabulary row for a 2D weight `[vocab, hidden]` of the
 /// given dtype.
-///
 /// # Errors
 /// Returns an error if `hidden` is not a multiple of the dtype's block size.
 pub(super) fn row_bytes_for_dtype(dtype: GgmlDType, hidden: usize) -> Result<usize> {
@@ -297,7 +286,6 @@ pub(super) fn row_bytes_for_dtype(dtype: GgmlDType, hidden: usize) -> Result<usi
 
 /// Run an MMVQ against a weight `DeviceTensor`, validating dims and
 /// dispatching on dtype. Keeps forward bodies readable.
-///
 /// # Errors
 /// Returns an error if the tensor shape doesn't match the caller's
 /// `(expected_rows, expected_k)`, or if the mmvq dispatch fails.
@@ -326,7 +314,6 @@ pub(super) fn run_mmvq_from_tensor(
 /// routes through MMQ when the caller's recipe applies; callers that don't
 /// exercise the MmqLdsX64 kernel can pass [`DevicePtr(0)`] for
 /// `act_q8_1_mmq` (no access).
-///
 /// # Errors
 /// Returns an error if the tensor shape doesn't match the caller's
 /// `(expected_rows, expected_k)`, or if the qmatmul dispatch fails.

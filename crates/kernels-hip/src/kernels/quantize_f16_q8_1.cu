@@ -1,12 +1,9 @@
 // quantize_f16_q8_1 — F16 activation → Q8_1 blocks.
-//
-// F16 sibling of quantize_q8_1 (which takes F32 input). V1.7.3-g: replaces
+// F16 sibling of quantize_q8_1 (which takes F32 input). g: replaces
 // the host-roundtrip placeholder in full_attn forward (F16 swiglu output
 // → host F32 → device F32 → Q8_1) with one on-device launch.
-//
 // Same math as the F32 variant — upcast to float for the amax/reduce so
 // denormals don't bite us.
-//
 // Grid: one thread block per 32 elements. 32 threads per block.
 
 #include "block_quant.cuh"

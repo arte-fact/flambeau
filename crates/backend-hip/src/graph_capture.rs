@@ -1,18 +1,15 @@
-//! V2.26.a-i3 — thread-local capture-state recorder.
-//!
+//! 6.a-i3 — thread-local capture-state recorder.
 //! While a capture is active on a thread, every `HipKernel::launch` call
 //! appends a record to the thread-local state. `KernelArgs::push_slot`
 //! attaches a logical [`ScalarSlot`] tag to a pushed arg so post-capture
 //! we can correlate graph kernel nodes (enumerated via `hipGraphGetNodes`)
 //! with the logical slots a caller declared.
-//!
 //! The result is a `SlotMap` that maps each user-declared slot to a
 //! (kernel_node_idx, arg_index, arity) triple — enough for
 //! [`crate::HipGraphExec::set_slot`] to build a fresh `kernelParams`
 //! pointer array and call `hipGraphExecKernelNodeSetParams`.
-//!
 //! Scope of i3 is infra + a small unit test. Forward-path integration
-//! lands in V2.26.a-i4 (`pos`-bearing kernels in `forward_layer_prefill`).
+//! lands in 6.a-i4 (`pos`-bearing kernels in `forward_layer_prefill`).
 
 use std::cell::RefCell;
 use std::collections::HashMap;
@@ -21,7 +18,6 @@ use std::sync::atomic::{AtomicU32, Ordering};
 /// A logical handle to an updateable scalar kernel parameter. Obtained
 /// via [`ScalarSlot::new`] and passed to [`super::module::KernelArgs::push_slot`]
 /// at capture time to tag the arg as updateable.
-///
 /// The numeric id is process-global and monotonically increasing. Scopes
 /// can reset by using a fresh HipGraphExec — slots from an old exec are
 /// meaningless to a new one.
@@ -30,7 +26,7 @@ pub struct ScalarSlot {
     id: u32,
 }
 
-/// V2.26.a-i5b — handle to an updateable memcpy-node's parameters
+/// 6.a-i5b — handle to an updateable memcpy-node's parameters
 /// (typically the dst pointer, since src + count are usually fixed in
 /// our KV-cache-append use case). Obtained via [`MemcpySlot::new`];
 /// tagged at capture time by passing it to
@@ -96,7 +92,7 @@ pub(crate) struct LaunchRecord {
 #[derive(Debug, Default)]
 pub(crate) struct CaptureState {
     pub launches: Vec<LaunchRecord>,
-    /// V2.26.a-i5b — memcpy issues observed during this capture, in
+    /// 6.a-i5b — memcpy issues observed during this capture, in
     /// dispatch order. Each entry records whether the caller tagged the
     /// memcpy with a [`MemcpySlot`] and the initial (dst, src, count,
     /// kind) so post-capture we can seed the exec's memcpy shadow.
@@ -118,7 +114,6 @@ thread_local! {
 
 /// Enable capture-state recording on the current thread. Returned
 /// guard disables it in Drop.
-///
 /// Nested captures are not supported — calling this while another scope
 /// is active is a bug and panics.
 pub(crate) struct CaptureScope {
@@ -173,7 +168,7 @@ pub(crate) fn record_launch(arity: usize, tagged: &[(ScalarSlot, usize)]) {
     });
 }
 
-/// V2.26.a-i5b — called by `HipDevice::memcpy_async*` before submitting
+/// 6.a-i5b — called by `HipDevice::memcpy_async*` before submitting
 /// a memcpy. If capture is active, appends a [`MemcpyRecord`] so
 /// post-capture we can zip records with memcpy-type graph nodes.
 /// `slot=None` means the caller isn't interested in updating this
@@ -206,7 +201,7 @@ pub(crate) fn record_memcpy(
 pub struct SlotMap {
     /// slot -> (kernel_node_idx, arg_index, launch_arity)
     entries: HashMap<ScalarSlot, SlotBinding>,
-    /// V2.26.a-i5b — memcpy-slot bindings. memcpy_node_idx indexes into
+    /// 6.a-i5b — memcpy-slot bindings. memcpy_node_idx indexes into
     /// the exec's ordered list of memcpy-type graph nodes (SEPARATE
     /// from kernel_nodes — their indices are not interchangeable).
     memcpy_entries: HashMap<MemcpySlot, MemcpyBinding>,

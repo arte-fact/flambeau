@@ -1,27 +1,22 @@
 // indexed_moe_mmq_q4_k — 4-warp LDS-tiled MoE MMQ for Q4_K × Q8_1.
-//
-// Pattern from V1.4's `mmq_q8_0_4warp.cu`, adapted for:
-//   * Q4_K weights (128-element super-blocks, 4-bit packed nibbles + packed
-//     6-bit scales/mins), dequantised into LDS as F32;
-//   * Per-block expert indirection — caller (CPU) sorts (token, slot) pairs
-//     into per-expert buckets so that all MMQ_X slots in a single block
-//     share ONE expert. This is the architectural choice that makes the
-//     weight-tile amortisation work: `n_rows × top_k` blocks would need
-//     a different weight tile per block without sorting.
-//
+// Pattern from `mmq_q8_0_4warp.cu`, adapted for:
+// * Q4_K weights (128-element super-blocks, 4-bit packed nibbles + packed
+// 6-bit scales/mins), dequantised into LDS as F32;
+// * Per-block expert indirection — caller (CPU) sorts (token, slot) pairs
+// into per-expert buckets so that all MMQ_X slots in a single block
+// share ONE expert. This is the architectural choice that makes the
+// weight-tile amortisation work: `n_rows × top_k` blocks would need
+// a different weight tile per block without sorting.
 // Tile shape:
-//   MMQ_Y = 16  output rows per block
-//   MMQ_X = 8   (token, slot) pairs per block (all sharing one expert)
-//
+// MMQ_Y = 16 output rows per block
+// MMQ_X = 8 (token, slot) pairs per block (all sharing one expert)
 // Thread layout (128 threads = 2 wave64):
-//   row_in_tile = tid / 8     (0..15)
-//   col_in_tile = tid & 7     (0..7)
-//
+// row_in_tile = tid / 8 (0..15)
+// col_in_tile = tid & 7 (0..7)
 // LDS budget:
-//   x_f32[MMQ_Y * 256]      = 16 * 256 * 4 = 16 KB  (dequantised weight tile)
-//   y_f32[MMQ_X * 256]      =  8 * 256 * 4 =  8 KB  (dequantised activation tile)
-//                                            ≈ 24 KB / 64 KB LDS.
-//
+// x_f32[MMQ_Y * 256] = 16 * 256 * 4 = 16 KB (dequantised weight tile)
+// y_f32[MMQ_X * 256] = 8 * 256 * 4 = 8 KB (dequantised activation tile)
+// ≈ 24 KB / 64 KB LDS.
 // Sentinel: `bucket_slots[i] = -1` marks an unfilled tail slot. Those threads
 // skip the Y load + the output write.
 
@@ -72,7 +67,6 @@ extern "C" __global__ void flambeau_indexed_moe_mmq_q4_k_q8_1(
 
     for (int sb = 0; sb < n_sb_per_row; ++sb) {
         // -- Phase 1: dequant X super-block into LDS.
-        //
         // MMQ_Y × 256 elements = 4096 F32 slots. 128 threads → 32 elements
         // per thread, strided. Each thread's assigned rows vary per sb so
         // we walk rows and positions via a flat index.
@@ -86,7 +80,7 @@ extern "C" __global__ void flambeau_indexed_moe_mmq_q4_k_q8_1(
                     w_base + (size_t) r_in * n_sb_per_row + sb;
                 // Dequant layout: elements 0..31 = low nibbles of bytes 0..31,
                 // 32..63 = high nibbles of bytes 0..31, 64..95 = low of 32..63,
-                // 96..127 = high of 32..63, etc. Same pattern the V1.3 MMVQ
+                // 96..127 = high of 32..63, etc. Same pattern the MMVQ
                 // kernel uses.
                 const int sub       = p / 32;                 // 0..7
                 const int grp       = sub / 2;                 // 0..3
@@ -104,7 +98,6 @@ extern "C" __global__ void flambeau_indexed_moe_mmq_q4_k_q8_1(
         }
 
         // -- Phase 2: dequant Y super-block (per slot) into LDS.
-        //
         // MMQ_X × 256 elements = 2048 F32 slots. 128 threads → 16 elements
         // per thread, strided.
         #pragma unroll 4

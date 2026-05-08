@@ -1,21 +1,17 @@
 // attention_decode_q8_kv — GQA decode attention with Q8_0 KV cache.
-//
-// V1-BENCH-#116-dp4a (Phase 4 follow-up). Score path is now pure
+// Score path is now pure
 // integer dp4a (`v_dot4_i32_i8` on gfx906) — Q is quantized to Q8_0
 // in LDS once per kernel; K is read as packed int32s (4 int8 each)
 // and dotted with Q via `__builtin_amdgcn_sdot4`. Scalar dequant
 // `K.d × Q.d` happens ONCE per QK8_0 block (32 elements), at the
 // end of each block's dp4a chain. V path stays on FP16 dequant
 // per element (Phase 5 covers PV in INT8 — INT-FlashAttention).
-//
 // Reference: `vec_dot_fattn_vec_KQ_q8_0` in
 // `/artefact/llama.cpp/ggml/src/ggml-cuda/fattn-common.cuh:264`.
-//
 // Layout:
-//   k_cache / v_cache: [n_tokens, n_heads_kv, head_dim/32] block_q8_0
-//   q:                 [n_heads_q, head_dim] FP16
-//   out:               [n_heads_q, head_dim] FP16
-//
+// k_cache / v_cache: [n_tokens, n_heads_kv, head_dim/32] block_q8_0
+// q: [n_heads_q, head_dim] FP16
+// out: [n_heads_q, head_dim] FP16
 // Supported head_dim: {64, 128, 256}. block.x = head_dim / 4 threads
 // (= 16, 32, 64 — one wavefront for head_dim=256). Each thread owns
 // 4 int8 K-bytes + 4 fp32 V-accumulators + 4 int8 Q-bytes from LDS.
@@ -57,8 +53,8 @@ extern "C" __global__ void flambeau_attention_decode_q8_kv(
     const int quad_in_block = (elem_base % 32) / 4;  // 0..7
 
     // 1. Q → Q8_0 in LDS once per kernel. Symmetric (no s field needed —
-    //    K is also Q8_0 so the sum-correction term in Q8_1 cancels out).
-    //    Each thread writes 4 int8 quants into shared.
+    // K is also Q8_0 so the sum-correction term in Q8_1 cancels out).
+    // Each thread writes 4 int8 quants into shared.
     __shared__ int8_t  q_qs[ATTN_Q8DP_MAX_HEAD_DIM];
     __shared__ float   q_d_block[ATTN_Q8DP_MAX_HEAD_DIM / 32];
 
@@ -120,14 +116,14 @@ extern "C" __global__ void flambeau_attention_decode_q8_kv(
         // block (replicated across all 8 quads of the block).
 
         // 6. Scalar dequant: ONE FMA per Q8_0 block (instead of one per
-        //    element in the FP16-dequant variant).
+        // element in the FP16-dequant variant).
         const float qd_block = q_d_block[q8_block_idx];
         const float block_score = k_d * qd_block * (float) sumi_block;
 
         // 7. Sum block_scores across the n_blocks_per_row blocks → final
-        //    score for this (q_token, q_head, t). Only quad_in_block==0
-        //    holds a unique value per block; we shuffle them across the
-        //    rest of the wave and sum.
+        // score for this (q_token, q_head, t). Only quad_in_block==0
+        // holds a unique value per block; we shuffle them across the
+        // rest of the wave and sum.
         float score_t = block_score;
         // First, broadcast lane 0 of each 8-lane group to all lanes of
         // that group (already done by the earlier reduction above; all
@@ -153,8 +149,8 @@ extern "C" __global__ void flambeau_attention_decode_q8_kv(
         float coeff_t   = __expf(score_t - new_max);
 
         // 9. V-accum: dequant V on the fly. Each thread reads its 4 int8
-        //    V-bytes from the same Q8_0 block as its K (they share row
-        //    layout). Multiply by V's d and coeff_t, fold into v_out[4].
+        // V-bytes from the same Q8_0 block as its K (they share row
+        // layout). Multiply by V's d and coeff_t, fold into v_out[4].
         const flambeau_block_q8_0* v_block = v_cache + kv_row_blocks + q8_block_idx;
         const float v_d = (float) v_block->d;
         const int   v_packed = ((const int*) v_block->qs)[quad_in_block];

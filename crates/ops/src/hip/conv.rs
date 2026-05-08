@@ -1,5 +1,4 @@
 //! 1D convolutions used inside recurrent layers (GDN).
-//!
 //! Only one kernel today: depthwise causal conv1d. Gated-Delta-Net uses it
 //! between the QKV input projection and the silu activation.
 
@@ -21,7 +20,6 @@ use super::OpsRegistry;
 /// caller-prepared concat of `conv_kernel - 1` history tokens and `n_new`
 /// new tokens, so `n_total = (conv_kernel - 1) + n_new`. Output is
 /// `y[n_new, conv_channels]` F32. Each channel runs independently.
-///
 /// Launch: `(ceil(conv_channels/256), n_new)` blocks × 256 threads.
 pub fn causal_conv1d_f32(
     reg: &OpsRegistry,

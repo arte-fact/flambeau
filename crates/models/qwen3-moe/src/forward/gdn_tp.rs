@@ -1,42 +1,36 @@
-//! TP-4a-i2 — tensor-parallel `forward_gdn_decode`.
-//!
+//! tensor-parallel `forward_gdn_decode`.
 //! Sister of [`super::gdn::forward_gdn_decode`] for the TP-sharded
 //! forward path. Same 17-op structure, with two differences:
-//!
 //! 1. Per-rank head counts threaded through every kernel call:
-//!    - `local_num_v_heads = num_v_heads / world`
-//!    - `local_num_k_heads = num_k_heads / world`
-//!    - `local_d_inner = local_num_v_heads · head_v_dim`
-//!    - `local_qk_size = local_num_k_heads · head_k_dim`
-//!    - `local_conv_channels = local_d_inner + 2 · local_qk_size`
-//!    - `n_rep = num_v_heads / num_k_heads` (unchanged — divides identically
-//!      on either side of the per-rank split).
-//!
-//!    Sliced weights (per TP-1a + TP-4a-i1):
-//!    - `attn_qkv.weight`     `FusedQkvParallel` → `[local_conv_channels, hidden]`
-//!    - `attn_gate.weight`    `ColParallel{dim=0}`  → `[local_d_inner, hidden]`
-//!    - `ssm_alpha.weight`    `ColParallel{dim=0}`  → `[local_num_v_heads, hidden]`
-//!    - `ssm_beta.weight`     `ColParallel{dim=0}`  → `[local_num_v_heads, hidden]`
-//!    - `ssm_a` (1-D)         `ColParallel{dim=0}`  → `[local_num_v_heads]`
-//!    - `ssm_dt.bias` (1-D)   `ColParallel{dim=0}`  → `[local_num_v_heads]`
-//!    - `ssm_conv1d.weight`   `FusedQkvParallel` → `[local_conv_channels, conv_kernel]`
-//!    - `ssm_norm.weight`     Replicated (per-`head_v_dim`)
-//!    - `ssm_out.weight`      `RowParallel{dim=1}`  → `[hidden, local_d_inner]`
-//!
+//! - `local_num_v_heads = num_v_heads / world`
+//! - `local_num_k_heads = num_k_heads / world`
+//! - `local_d_inner = local_num_v_heads · head_v_dim`
+//! - `local_qk_size = local_num_k_heads · head_k_dim`
+//! - `local_conv_channels = local_d_inner + 2 · local_qk_size`
+//! - `n_rep = num_v_heads / num_k_heads` (unchanged — divides identically
+//! on either side of the per-rank split).
+//! Sliced weights (per + ):
+//! - `attn_qkv.weight` `FusedQkvParallel` → `[local_conv_channels, hidden]`
+//! - `attn_gate.weight` `ColParallel{dim=0}` → `[local_d_inner, hidden]`
+//! - `ssm_alpha.weight` `ColParallel{dim=0}` → `[local_num_v_heads, hidden]`
+//! - `ssm_beta.weight` `ColParallel{dim=0}` → `[local_num_v_heads, hidden]`
+//! - `ssm_a` (1-D) `ColParallel{dim=0}` → `[local_num_v_heads]`
+//! - `ssm_dt.bias` (1-D) `ColParallel{dim=0}` → `[local_num_v_heads]`
+//! - `ssm_conv1d.weight` `FusedQkvParallel` → `[local_conv_channels, conv_kernel]`
+//! - `ssm_norm.weight` Replicated (per-`head_v_dim`)
+//! - `ssm_out.weight` `RowParallel{dim=1}` → `[hidden, local_d_inner]`
 //! 2. **No residual add.** The PP path writes a full-`H` `delta_out` that
-//!    the layer driver folds into the residual; the TP path emits the
-//!    rank-local partial into `partial_attn_out` (this rank's
-//!    contribution to the AllReduce sum). The caller schedules
-//!    `BarP2pAllReduce::residual_tp{2,4}` immediately after to fold the
-//!    rank-local partials into `hidden`.
-//!
+//! the layer driver folds into the residual; the TP path emits the
+//! rank-local partial into `partial_attn_out` (this rank's
+//! contribution to the AllReduce sum). The caller schedules
+//! `BarP2pAllReduce::residual_tp{2,4}` immediately after to fold the
+//! rank-local partials into `hidden`.
 //! ## Layer state sizing
-//!
 //! `GdnLayerState::state` and `GdnLayerState::conv_history` must be
-//! sized for the *per-rank* head count. Caller (TP-2d's KV-cache
+//! sized for the *per-rank* head count. Caller (KV-cache
 //! plumbing) is responsible for allocating per-rank state at world-aware
 //! sizes. Re-using PP full-shape allocations is correct (kernels only
-//! touch the head of each slab) but ~world× wasteful — TP-4d may revisit.
+//! touch the head of each slab) but ~world× wasteful — may revisit.
 
 #![cfg(feature = "hip")]
 
@@ -85,15 +79,13 @@ fn dev_flag(_name: &str) -> bool {
 
 
 /// Per-rank decode for one Gated-Delta-Net layer.
-///
-/// All weight tensors are *already sliced* per the TP-1a/TP-4a-i1
-/// layout table. The caller (TP-2d's `forward_full_attn_layer_tp`'s
+/// All weight tensors are *already sliced* per the /
+/// layout table. The caller ( `forward_full_attn_layer_tp`'s
 /// GDN sibling) is responsible for picking them out of `TpLayerTensor`
 /// by name.
-///
 /// # Errors
 /// - `tp_world == 0`, or any of `num_v_heads`/`num_k_heads`/`d_inner`
-///   not divisible by `tp_world`.
+/// not divisible by `tp_world`.
 /// - Sliced weight shape mismatch.
 /// - Underlying op-dispatch / kernel-launch failures.
 #[expect(
@@ -145,7 +137,7 @@ pub fn forward_gdn_decode_tp(
         bail!("d_inner {d_inner} not divisible by tp_world {tp_world}");
     }
     let local_num_v_heads = num_v_heads / world;
-    // **TP-4d-i3** — kq_replicated keeps the full K/Q head count
+    // kq_replicated keeps the full K/Q head count
     // per rank (rep_outer arches: qwen35moe / qwen36moe). See
     // `WeightLayout::FusedQkvParallel` doc for the rationale.
     let local_num_k_heads = if kq_replicated {
@@ -162,8 +154,8 @@ pub fn forward_gdn_decode_tp(
     }
     // n_rep is the V→K ratio the kernel walks. When K is replicated,
     // each local V head sees its actual matching K head locally:
-    //   - rep_outer + kq_replicated:  H_v_local / H_k = (H_v/world)/H_k
-    //   - rep_inner contiguous:       H_v / H_k (same on local side)
+    // - rep_outer + kq_replicated: H_v_local / H_k = (H_v/world)/H_k
+    // - rep_inner contiguous: H_v / H_k (same on local side)
     // Both reduce to local_num_v_heads / local_num_k_heads.
     let n_rep = local_num_v_heads / local_num_k_heads;
 
@@ -225,8 +217,8 @@ pub fn forward_gdn_decode_tp(
     }
 
     // 2..3. attn_qkv (FusedQkvParallel sliced) + attn_gate (ColParallel sliced)
-    //       projections. Output dims are local_conv_channels and local_d_inner.
-    //       Both Q8_0 and Q4_0 have fused gate+up MMVQ variants; pick one.
+    // projections. Output dims are local_conv_channels and local_d_inner.
+    // Both Q8_0 and Q4_0 have fused gate+up MMVQ variants; pick one.
     let dt_q = attn_qkv.dtype;
     let dt_g = attn_gate.dtype;
     let fuse_qkv_gate_q8_0 = dt_q == flambeau_quant::GgmlDType::Q8_0
@@ -249,13 +241,11 @@ pub fn forward_gdn_decode_tp(
         .context("attn_qkv + attn_gate (TP) fused mmvq_q8_0")?;
     } else if fuse_qkv_gate_q4_0 {
         // Shape-aware Q4_0 fused gate+up dispatch (task #53 fix).
-        //
         // Cycle-5 made t128 the default; benching on Qwen3.6-35B-A3B-Q4_0
         // (hidden=2048, GDN asymmetric local_conv_channels=2560 vs
         // local_d_inner=2048) showed t128 regresses -15.5% vs the cycle-1
         // 256t baseline at *that* shape. On Qwen3.6-27B-Q4_0 (hidden=5120,
         // dense FFN symmetric) t128 wins +3.3 %.
-        //
         // The discriminator that matches the measured sign-flip is
         // (n_rows_gate == n_rows_up) — symmetric → t128, asymmetric → 256t.
         // GDN's attn_qkv (`local_conv_channels`) ≠ attn_gate
@@ -367,8 +357,8 @@ pub fn forward_gdn_decode_tp(
     }
 
     // 6. Conv1d step — assemble [history, qkv_mixed] → conv_input, run
-    //    causal conv, shift history. All ops parameterised by
-    //    local_conv_channels.
+    // causal conv, shift history. All ops parameterised by
+    // local_conv_channels.
     flambeau_ops::hip::recurrent::gdn_assemble_conv_input_f32(
         ops,
         stream,
@@ -410,7 +400,7 @@ pub fn forward_gdn_decode_tp(
         .context("silu_f32(conv_out) (TP)")?;
 
     // 8. Slice silu_out into Q|K|V via pointer offsets within the
-    //    per-rank conv_channels layout: [Q_local | K_local | V_local].
+    // per-rank conv_channels layout: [Q_local | K_local | V_local].
     let q_src = scratch.silu_out;
     let k_src = scratch.silu_out.offset_bytes(local_qk_size * 4);
     let v_src = scratch.silu_out.offset_bytes(2 * local_qk_size * 4);
@@ -453,7 +443,7 @@ pub fn forward_gdn_decode_tp(
     // chain via FLAMBEAU_VARIANT=baseline). ssm_dt_bias / ssm_a are
     // 1-D ColParallel — the local slice is the right per-rank head
     // subset. Operates on local_num_v_heads.
-    // CN-80B-13/14 — q/k repeat layout differs by arch; see decode-path
+    // /14 — q/k repeat layout differs by arch; see decode-path
     // comment in `super::gdn::forward_gdn_decode` for the explanation.
     let rep_inner_layout = cfg.arch == "qwen3next";
     gdn_state_step_alphabeta_f32_s128(
@@ -498,7 +488,7 @@ pub fn forward_gdn_decode_tp(
     )
     .context("ssm_norm (rmsnorm_f32) (TP)")?;
 
-    // 14+15. CN-80B-19c — fused swiglu(z, out_normed) → Q8_1 directly
+    // 14+15. fused swiglu(z, out_normed) → Q8_1 directly
     // (TP variant). Skips the F32 `gated_f32` intermediate buffer + 1
     // launch. Default-on; FLAMBEAU_VARIANT=baseline opts back to the
     // unfused pair.
@@ -512,7 +502,7 @@ pub fn forward_gdn_decode_tp(
             scratch.gated_q8_1,
             local_d_inner,
         )
-        .context("swiglu_f32_to_q8_1(z, out_normed) (TP) (CN-80B-19c)")?;
+        .context("swiglu_f32_to_q8_1(z, out_normed) (TP)")?;
     } else {
         swiglu_f32(
             ops,
@@ -528,8 +518,7 @@ pub fn forward_gdn_decode_tp(
     }
 
     // 16+17. Row-parallel ssm_out projection — weight[hidden, local_d_inner]
-    //        × gated[local_d_inner] → partial_attn_out[hidden] (full-H partial).
-    //
+    // × gated[local_d_inner] → partial_attn_out[hidden] (full-H partial).
     // **Cycle-4 lever** — when ssm_out is Q5_K (the common case for
     // Qwen3.5/3.6 hybrids), use the F16-dst variant that fuses the
     // cast_f32_to_f16 into the kernel epilogue. Saves 1 launch + 1
@@ -700,23 +689,19 @@ fn debug_probe_f16(
     Ok(())
 }
 
-/// **AUTO-6c1** — L-batched per-rank GDN prefill.
-///
+/// 1** — L-batched per-rank GDN prefill.
 /// Sister of [`forward_gdn_decode_tp`] (M=L instead of M=1) and
 /// [`super::gdn::forward_gdn_prefill`] (TP-sliced weights instead of
 /// PP-full). Same 17-op chain — every kernel call is the L-aware variant
 /// and every dim is the per-rank `local_*` count.
-///
 /// Output is `partial_attn_out[L, hidden]`: this rank's contribution to
 /// the AllReduce sum, written at hidden-stride. The caller schedules
 /// `ar_residual_prefill` immediately after to fold the per-rank partials
 /// into the residual.
-///
 /// State management: `layer_state.state` and `layer_state.conv_history`
 /// are read/written in place; the kernels touch only the leading
 /// `local_num_v_heads` slabs (PP-allocation is over-allocated for TP, see
 /// the gdn_tp.rs preamble).
-///
 /// `n_tokens` must be ≤ `scratch.max_tokens`; caller chunks larger
 /// prompts.
 #[expect(
@@ -777,7 +762,7 @@ pub fn forward_gdn_prefill_tp(
         bail!("d_inner {d_inner} not divisible by tp_world {tp_world}");
     }
     let local_num_v_heads = num_v_heads / world;
-    // **TP-4d-i3** — see `forward_gdn_decode_tp` for the kq_replicated
+    // see `forward_gdn_decode_tp` for the kq_replicated
     // rationale (rep_outer head-mapping + contiguous TP split is broken).
     let local_num_k_heads = if kq_replicated {
         num_k_heads
@@ -826,7 +811,7 @@ pub fn forward_gdn_prefill_tp(
     .context("gdn prefill (TP) x_norm → Q8_1 (MMQ DS4)")?;
 
     // 2..5. Per-rank projections at M = L. attn_qkv → [L, local_conv_channels],
-    //       attn_gate → [L, local_d_inner], ssm_alpha/beta → [L, local_num_v_heads].
+    // attn_gate → [L, local_d_inner], ssm_alpha/beta → [L, local_num_v_heads].
     run_qmatmul_from_tensor(
         ops,
         stream,
@@ -877,8 +862,8 @@ pub fn forward_gdn_prefill_tp(
     )?;
 
     // 6. Conv1d step over L tokens. All buffers are at local-stride layout
-    //    (PP-allocated rows are wider but kernels only touch the leading
-    //    local_conv_channels floats per row).
+    // (PP-allocated rows are wider but kernels only touch the leading
+    // local_conv_channels floats per row).
     assemble_conv_input_prefill(
         device,
         stream,
@@ -969,10 +954,10 @@ pub fn forward_gdn_prefill_tp(
     .context("gdn prefill (TP) scale_f32 Q")?;
 
     // 11–12. C10 fused state-step (default) absorbs α/β/gate; baseline
-    //        chain via FLAMBEAU_VARIANT=baseline. All operands at per-rank
-    //        local_num_v_heads; n_tokens = L. Same kernel as decode_tp,
-    //        just with n_tokens > 1.
-    // CN-80B-13/14 — q/k repeat layout differs by arch; see decode-path
+    // chain via FLAMBEAU_VARIANT=baseline. All operands at per-rank
+    // local_num_v_heads; n_tokens = L. Same kernel as decode_tp,
+    // just with n_tokens > 1.
+    // /14 — q/k repeat layout differs by arch; see decode-path
     // comment in `super::gdn::forward_gdn_decode` for the explanation.
     let rep_inner_layout = cfg.arch == "qwen3next";
     gdn_state_step_alphabeta_f32_s128(
@@ -1048,8 +1033,8 @@ pub fn forward_gdn_prefill_tp(
     .context("gdn prefill (TP) quantise gated → Q8_1 (MMQ DS4)")?;
 
     // 16. Row-parallel ssm_out projection: weight [hidden, local_d_inner]
-    //     × gated_q8_1[L, local_d_inner] → ssm_out_f32[L, hidden]. Each
-    //     rank emits a partial sum; AR after this layer folds them.
+    // × gated_q8_1[L, local_d_inner] → ssm_out_f32[L, hidden]. Each
+    // rank emits a partial sum; AR after this layer folds them.
     run_qmatmul_from_tensor(
         ops,
         stream,
@@ -1079,29 +1064,25 @@ pub fn forward_gdn_prefill_tp(
 /// **#285 batched-GDN decode** — single GDN-layer forward over N
 /// (slot, layer-state) pairs. Replaces the per-slot loop in
 /// `forward_decode_batched_hybrid`'s GDN branch (and PP twin).
-///
 /// Shape map (mirrors `forward_gdn_prefill_tp`, with the per-slot
 /// state mutation factored into a per-slot inner loop):
 /// - **Stages A–C** (rmsnorm + dual Q8_1 quant + attn_qkv proj +
-///   attn_gate proj + ssm_alpha proj + ssm_beta proj): batched
-///   over n_tokens=N via the prefill kernels. Same launches as the
-///   prefill path; one launch per kernel regardless of N.
+/// attn_gate proj + ssm_alpha proj + ssm_beta proj): batched
+/// over n_tokens=N via the prefill kernels. Same launches as the
+/// prefill path; one launch per kernel regardless of N.
 /// - **Stage D** (per-slot conv1d + silu + split_qkv + l2_norm +
-///   scale + state-step + ssm_norm): looped per slot. Each slot's
-///   conv_history and recurrent state mutate in place. Conv-input
-///   scratch (`scratch.conv_input`) is REUSED per iteration —
-///   each slot's K-row temp lives there only during its loop body.
-///   conv_out / silu_out / Q/K/V / state_out / out_normed are
-///   indexed per-slot via base+s*stride pointers.
+/// scale + state-step + ssm_norm): looped per slot. Each slot's
+/// conv_history and recurrent state mutate in place. Conv-input
+/// scratch (`scratch.conv_input`) is REUSED per iteration —
+/// each slot's K-row temp lives there only during its loop body.
+/// conv_out / silu_out / Q/K/V / state_out / out_normed are
+/// indexed per-slot via base+s*stride pointers.
 /// - **Stages E–F** (swiglu+quant + ssm_out proj + cast → F16):
-///   batched over N. Same launches as prefill.
-///
+/// batched over N. Same launches as prefill.
 /// `layer_states.len()` must equal `n_tokens`; each entry's per-rank
 /// `state` and `conv_history` are mutated in place.
-///
 /// `n_tokens` ≤ `scratch.max_tokens` (= INFLIGHT_SLOTS in the
 /// batched-decode caller).
-///
 /// `kq_replicated` must match the caller's TP layout — same rule as
 /// `forward_gdn_decode_tp`.
 #[expect(
@@ -1227,8 +1208,7 @@ pub fn forward_gdn_decode_batched_tp(
     )?;
 
     // === Stage D: per-slot conv1d + silu + split_qkv + l2_norm + scale +
-    //              state-step + ssm_norm.
-    //
+    // state-step + ssm_norm.
     // Each slot has its own `conv_history` and recurrent `state` to
     // mutate. The conv/SSM kernels themselves are SMALL (head_dim=128
     // tiles, N=4 → ~50 µs each); the wins from batching come from the
@@ -1269,7 +1249,7 @@ pub fn forward_gdn_decode_batched_tp(
         let _ = row_z_bytes; // z_f32 read in Stage E batched; row stride for slicing not needed here.
 
         // 6a. Assemble conv_input from slot's history + slot's qkv_mixed
-        //     (n_tokens=1 per slot).
+        // (n_tokens=1 per slot).
         assemble_conv_input_prefill(
             device, stream,
             layer_states[s].conv_history,
@@ -1382,5 +1362,5 @@ pub fn forward_gdn_decode_batched_tp(
 #[cfg(test)]
 mod tests {
     // Substantive validation needs GPU + per-rank GdnLayerState
-    // allocated at local dims; covered by TP-4a-i2's parity smoke.
+    // allocated at local dims; covered by parity smoke.
 }

@@ -1,13 +1,10 @@
 // quantize_q8_1 — F32 activation → Q8_1 blocks.
-//
 // Each block of QK8_1 (=32) F32 inputs maps to one `flambeau_block_q8_1`:
-//   d = max(|x|) / 127
-//   qs[j] = round(x[j] / d)   (clamped to [-127,127])
-//   s = d * sum(qs)            (used by Q4_1/Q5_1/Q8_1 vec_dot)
-//
+// d = max(|x|) / 127
+// qs[j] = round(x[j] / d) (clamped to [-127,127])
+// s = d * sum(qs) (used by Q4_1/Q5_1/Q8_1 vec_dot)
 // Grid: one thread block per 32 elements (one Q8_1 block). 32 threads, each
 // owns one element → one reduce across the block.
-//
 // Port basis: candle-hip-kernels quantize_row_q8_1 + ggml reference. No
 // gfx906-specific intrinsics here; the reduction is small enough that a
 // shared-memory tree is both portable and fast.

@@ -1,27 +1,23 @@
-// p2p_allreduce_residual_rmsnorm — TP-3b fused AR + residual-add + RMSNorm.
-//
+// p2p_allreduce_residual_rmsnorm — fused AR + residual-add + RMSNorm.
 // In one launch per rank:
-//   1. Read peer partials directly via BAR1.
-//   2. hidden[i] += partial_local[i] + Σ partial_peer{0,1,2}[i]
-//      (residual-fold AR — same arithmetic as flambeau_p2p_allreduce_residual_tp{2,4})
-//   3. Compute mean(hidden^2) across the full vector of length n.
-//   4. out_norm[i] = hidden[i] * rsqrt(mean_sq + eps) * weight[i]
-//
+// 1. Read peer partials directly via BAR1.
+// 2. hidden[i] += partial_local[i] + Σ partial_peer{0,1,2}[i]
+// (residual-fold AR — same arithmetic as flambeau_p2p_allreduce_residual_tp{2,4})
+// 3. Compute mean(hidden^2) across the full vector of length n.
+// 4. out_norm[i] = hidden[i] * rsqrt(mean_sq + eps) * weight[i]
 // Replaces TWO launches in the TP forward path (residual-tp4 + rmsnorm_f16)
 // with ONE. Bit-exact equivalent because:
-//   - Same AR arithmetic (FP32 accumulate of the same operands in the same order).
-//   - Same RMSNorm formula on the post-AR hidden value, identical to running
-//     flambeau_rmsnorm_f16 on the AR'd buffer.
-//   - Single-block (one block per call, no inter-block reduction races).
-//
+// - Same AR arithmetic (FP32 accumulate of the same operands in the same order).
+// - Same RMSNorm formula on the post-AR hidden value, identical to running
+// flambeau_rmsnorm_f16 on the AR'd buffer.
+// - Single-block (one block per call, no inter-block reduction races).
 // Constraints:
-//   - n must be a multiple of THREADS=256 AND fit in one block's element budget.
-//     Per thread: ELEMS_PER_THREAD = n / 256. For Qwen3.5/3.6 hidden sizes
-//     {2048, 4096, 5120, 8192} this is 8/16/20/32 elements/thread — all
-//     comfortable within VGPR budget (≤ 32 floats × 4 bytes = 128 bytes/lane).
-//   - Outer grid = 1 block (the kernel is row-internal — the global mean-sq
-//     reduce is a single-block reduction over LDS, no inter-block sync).
-//
+// - n must be a multiple of THREADS=256 AND fit in one block's element budget.
+// Per thread: ELEMS_PER_THREAD = n / 256. For Qwen3.5/3.6 hidden sizes
+// {2048, 4096, 5120, 8192} this is 8/16/20/32 elements/thread — all
+// comfortable within VGPR budget (≤ 32 floats × 4 bytes = 128 bytes/lane).
+// - Outer grid = 1 block (the kernel is row-internal — the global mean-sq
+// reduce is a single-block reduction over LDS, no inter-block sync).
 // gfx906 occupancy: 256 threads/block × 1 block = 4 wave64s on a single CU.
 // One CU per rank running this means peak occupancy isn't a concern; the
 // kernel is fundamentally serial against itself.

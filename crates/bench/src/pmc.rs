@@ -1,12 +1,9 @@
 //! Runtime PMC collection via rocprofv3 (ROCm 7.1.1 matched stack).
-//!
 //! `rocprofv3` launches the target binary with HSA-level interception,
 //! records per-kernel counter values, writes a CSV like
 //! `probe_counter_collection.csv`:
-//!
-//!   Correlation_Id,Dispatch_Id,Agent_Id,...,Kernel_Name,...,VGPR_Count,...,SGPR_Count,Counter_Name,Counter_Value,Start,End
-//!   3,3,"Agent 1",...,"flambeau_mmvq_q8_0_q8_1",256,512,0,20,0,32,"MemUnitBusy",5.483540,...
-//!
+//! Correlation_Id,Dispatch_Id,Agent_Id,...,Kernel_Name,...,VGPR_Count,...,SGPR_Count,Counter_Name,Counter_Value,Start,End
+//! 3,3,"Agent 1",...,"flambeau_mmvq_q8_0_q8_1",256,512,0,20,0,32,"MemUnitBusy",5.483540,...
 //! We parse this CSV, filter to our target kernel, and aggregate per counter
 //! (one line per counter per dispatch). Every PMC snapshot captures both
 //! static PMC (VGPR/SGPR are columns in the CSV itself — no separate
@@ -33,7 +30,6 @@ struct CounterRow {
 
 /// Run `cmd` (and its args) under rocprofv3, collect `counters`, return the
 /// merged `PmcSnapshot` for the first invocation of `kernel_name`.
-///
 /// `rocprofv3_bin` should come from `$ROCPROFV3` (set by `.env`). The
 /// target binary must already link against the matched ROCm 7.1.1 runtime
 /// (our build.rs rpaths `$ROCM_PATH/{core-7.13/lib, lib}`).
@@ -225,7 +221,7 @@ fn aggregate_pmc(rows: &[CounterRow], kernel_name: &str) -> Result<PmcSnapshot> 
 }
 
 /// Convenience wrapper: read `$ROCPROFV3` env var and call
-/// [`capture_runtime_pmc`] with the V1.3 default counter set.
+/// [`capture_runtime_pmc`] with the default counter set.
 pub fn capture_runtime_pmc_default(
     workdir: &Path,
     cmd: &Path,

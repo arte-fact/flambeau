@@ -1,12 +1,10 @@
 //! Sampler-D3 Phase A — server-side hook that runs the GPU top-K +
 //! softmax kernel on the head-rank logits in place after the existing
 //! forward path, then DtoH only the K-tuple.
-//!
 //! This still pays the 600 KB host-logits DtoH that the existing
 //! `decode_logits` / `prefill_logits` does (Phase A's marginal-win
 //! tradeoff). Phase B will add a `forward_*_topk` variant that skips
 //! that DtoH.
-//!
 //! Gated behind `FLAMBEAU_GPU_SAMPLER=1` so the path is opt-in until
 //! the cert + bench-A/B confirm parity at the server level.
 
@@ -57,7 +55,6 @@ impl GpuSamplerScratch {
     /// The penalty-path device buffer is allocated lazily on the first
     /// `run_gpu_topk_with_penalties` call so penalty-free requests
     /// don't pay for the 64 KB.
-    ///
     /// The caller picks the device — TP path passes the global cluster's
     /// `head_rank` device; Hybrid passes the head stage's sub_cluster's
     /// `head_rank` device. The scratch records the device's HIP id so
@@ -142,11 +139,9 @@ impl Drop for GpuSamplerScratch {
 /// Run `topk_softmax_f32` on the head rank's `logits_f32` buffer (the
 /// device-resident output of the existing forward pass), then DtoH the
 /// K-tuple into `scratch.host_ids` / `scratch.host_probs`.
-///
 /// Caller must invoke this immediately after `decode_logits` /
 /// `prefill_logits` returns — the device pointer to logits is only
 /// guaranteed-valid until the next forward call clobbers it.
-///
 /// # Errors
 /// - Topology unsupported (Phase A wires TP only).
 /// - Topk kernel-launch / DtoH failure.
@@ -200,7 +195,6 @@ pub fn run_gpu_topk(
 /// Hybrid topologies. Centralises the head-rank lookup. The TP arm
 /// pulls the device from the global cluster; the Hybrid arm pulls it
 /// from the head stage's sub_cluster (the global cluster is unused).
-///
 /// All Option/Result branches use `ok_or_else` rather than `.unwrap()`
 /// — a missing scratch field is a real configuration mismatch and
 /// must error rather than panic.
@@ -315,7 +309,6 @@ pub fn apply_stop_mask(
 /// on a *clone*; zero out probs for candidates that would invalidate
 /// the running JSON. The token finally sampled gets fed into the
 /// caller's actual `state` after the multinomial draw.
-///
 /// Decoding 2048 candidates per token is non-trivial — only call this
 /// when `params.json_mode == true`. At top_k=2048, vocab=151424,
 /// the cost is dominated by the BPE decode loop on the JSON-relevant
@@ -365,13 +358,11 @@ pub fn apply_json_mask(
 /// JSON to `f32::NEG_INFINITY`. Tokens outside the top-N stay
 /// untouched — they're below the threshold any sane sampler will
 /// pick from anyway.
-///
 /// Differs from [`apply_json_mask`] (which masks an *already extracted*
 /// `(host_ids, host_probs)` top-K from the GPU-sampler path) in that
 /// it does the candidate selection itself. Cost is dominated by the
 /// per-candidate `tokenizer.decode` (BPE byte reconstruction); ~1–2 ms
 /// at `max_candidates=2048` on a 151 k-vocab Qwen tokenizer.
-///
 /// Caller must ensure `state` reflects the bytes already emitted /
 /// primed; this function does not mutate `state`.
 pub fn apply_json_mask_to_logits(
@@ -455,11 +446,9 @@ pub fn apply_json_mask_to_logits(
 /// sort+dedup, uploads to device, runs the GPU penalty kernel
 /// in-place on the head-rank's `logits_f32`, then runs topk + DtoH
 /// the K-tuple as in [`run_gpu_topk`].
-///
 /// `mode.has_penalties()` MUST be true — caller is responsible for
 /// short-circuiting to [`run_gpu_topk`] otherwise (the penalty kernel
 /// errors on n_pairs=0 and the upload+launch overhead is unwanted).
-///
 /// # Errors
 /// - Topology unsupported (Phase A wires TP only).
 /// - History exceeds [`SAMPLER_HISTORY_MAX`] unique tokens.

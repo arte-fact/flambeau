@@ -1,9 +1,8 @@
-// indexed_moe_mmvq_q4_0_gate_up_dp4a — V2.23.b.1 fused gate+up MoE MMVQ
+// indexed_moe_mmvq_q4_0_gate_up_dp4a — 3.b.1 fused gate+up MoE MMVQ
 // for Q4_0 expert weights. Sibling of `indexed_moe_mmvq_q4_0.cu` that
 // reads the Q8_1 activation once per block and produces two outputs
 // (gate and up), halving the launch count at decode where the tile8 MMQ
 // path does not fire (n_tokens < 32).
-//
 // Same per-block shape as the single-weight variant: blockDim=256,
 // gridDim={n_rows, n_tokens*top_k, 1}. Each thread owns one
 // `lane4`-indexed Q4_0 block slice; the inner loop accumulates both

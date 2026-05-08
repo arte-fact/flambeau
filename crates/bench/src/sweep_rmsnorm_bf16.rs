@@ -1,9 +1,7 @@
-//! MTP-4-C-3 — BF16 RMSNorm correctness sweep.
-//!
+//! BF16 RMSNorm correctness sweep.
 //! Computation per row of length k:
-//!   mean_sq = Σ x² / k
-//!   y       = bf16(x * weight * rsqrt(mean_sq + eps))
-//!
+//! mean_sq = Σ x² / k
+//! y = bf16(x * weight * rsqrt(mean_sq + eps))
 //! Reference matches the kernel: F32 reduction of BF16-lifted inputs,
 //! F16 weight, BF16 output. Tolerance covers the BF16 output rounding
 //! plus the F32 vs parallel-reduction summation order delta.
@@ -31,11 +29,11 @@ use crate::cert::{now_utc_iso8601, Cert, PmcSnapshot, ShapeResult, SCHEMA_VERSIO
 use crate::harness::{alloc_and_upload, max_rel_err_with_floor, rig, seeded_f32_range};
 
 /// Shapes covering every MTP-norm size on Qwen3.6-27B + a prefill case:
-///   `[1, 5120]` — pre_fc_norm_*, input_layernorm, post_attention_layernorm,
-///                 mtp.norm
-///   `[24, 256]` — q_norm (n_q heads × head_dim)
-///   `[4, 256]`  — k_norm
-///   `[8, 5120]` / `[128, 5120]` — prefill seq lengths
+/// `[1, 5120]` — pre_fc_norm_*, input_layernorm, post_attention_layernorm,
+/// mtp.norm
+/// `[24, 256]` — q_norm (n_q heads × head_dim)
+/// `[4, 256]` — k_norm
+/// `[8, 5120]` / `[128, 5120]` — prefill seq lengths
 const SHAPES: &[(usize, usize)] = &[
     (1, 5120),
     (24, 256),

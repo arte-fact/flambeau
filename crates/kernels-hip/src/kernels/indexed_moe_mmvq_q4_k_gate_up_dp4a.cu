@@ -1,24 +1,20 @@
 // indexed_moe_mmvq_q4_k_gate_up_dp4a — fused gate+up Q4_K MoE MMVQ, DP4A.
-//
 // Drop-in replacement for `indexed_moe_mmvq_q4_k_gate_up.cu`. Same block/grid
 // shape (64 threads = 1 wave64, one output row per block), same output layout.
-//
 // Fusion: reads the shared activation ONCE per super-block-per-sub-block and
 // uses it for both gate and up matmuls (P30 pattern).
-//
 // DP4A inner loop: same pattern as `indexed_moe_mmvq_q4_k_r2_dp4a.cu` but
 // scaled to 64 lanes full wave coverage. 32 lanes handle 1 super-block's
 // worth of int32s (128 bytes = 32 × 4). With 64 lanes, outer loop strides
 // super-blocks by 2 so both halves contribute. Per lane:
-//   - ONE qs int32 load per super-block (own position)
-//   - ONE Q8_1 int32 load per sub-block (shared across gate+up)
-//   - FOUR dp4a calls: 2 for gate (raw_q×y + sum_u), 2 for up
-//
+// - ONE qs int32 load per super-block (own position)
+// - ONE Q8_1 int32 load per sub-block (shared across gate+up)
+// - FOUR dp4a calls: 2 for gate (raw_q×y + sum_u), 2 for up
 // Lane layout (within wave64):
-//   super_hi  = lane >> 5           — 0 or 1: which of the two super-blocks in the stride-2 iter
-//   lane_lo   = lane & 31           — 0..31: position within a super-block's 32 int32s
-//   pair_idx  = lane_lo >> 3        — 0..3: which pair of sub-blocks
-//   iqs       = lane_lo & 7         — 0..7: which int32 of the pair's slice
+// super_hi = lane >> 5 — 0 or 1: which of the two super-blocks in the stride-2 iter
+// lane_lo = lane & 31 — 0..31: position within a super-block's 32 int32s
+// pair_idx = lane_lo >> 3 — 0..3: which pair of sub-blocks
+// iqs = lane_lo & 7 — 0..7: which int32 of the pair's slice
 
 #include "block_quant.cuh"
 #include "gfx906.cuh"

@@ -6,14 +6,12 @@
               gated and `#[expect]` would be unfulfilled on non-hip builds."
 )]
 //! flambeau-qwen3-moe — Qwen3.x MoE family composition.
-//!
-//! V1.7 target: `Qwen3MoEModel` with `forward_one_token` and `forward_prefill`,
+//! target: `Qwen3MoEModel` with `forward_one_token` and `forward_prefill`,
 //! `Mesh<N>`-generic, weight-name map parsed from GGUF metadata. No new
 //! kernels — if this crate needs one that isn't in `flambeau-ops`, fix
 //! `flambeau-ops` instead.
-//!
-//! **V1.7.2 (this commit):** config + weight-name map + layer descriptor.
-//! No forward pass yet — that lands in V1.7.3 with the ops wiring.
+//! (this commit):** config + weight-name map + layer descriptor.
+//! No forward pass yet — that lands in with the ops wiring.
 
 pub mod config;
 pub mod names;

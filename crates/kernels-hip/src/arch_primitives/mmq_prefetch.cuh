@@ -1,19 +1,16 @@
 #pragma once
 // gfx906 L2-prefetch helpers for MMQ kernels. Ported from
 // /artefact/llamacpp-turbo/.../ggml-cuda/gfx906/matmul/mmq-prefetch.cuh
-// (V2.2.d fix 5a).
-//
+// ().
 // Pattern: at the top of each K-iteration in a MMQ kernel, issue a
 // handful of `global_load_dword` instructions pointed at the NEXT
 // iteration's X / Y tile addresses. The loads don't wait — they just
 // warm the L2 cache. When the real cooperative load runs one iteration
 // later, it hits warm cachelines instead of stalling on HBM.
-//
 // The "consume" helper (`gfx906_prefetch_consume`) is a no-op
 // `v_mov_b32 %0, %0` that the compiler can't dead-code-eliminate; without
 // it the `global_load_dword` return value is unused and the compiler
 // may elide the load entirely.
-//
 // All helpers are `no-op` on non-gfx906 targets — the kernel falls back
 // to synchronous loads.
 
@@ -25,7 +22,6 @@
 /// Caller: expects a 2-D block with `threadIdx.y == 0` being the
 /// "prefetch warp". Lanes 0..15 each issue one `global_load_dword` at
 /// 64-byte-stride offsets to warm a 1 KB window.
-///
 /// `y_next_words` must already point at the FIRST int of the next
 /// iteration's Y tile (caller computes stride from Y layout).
 /// Returns a dummy int that the caller must pass to

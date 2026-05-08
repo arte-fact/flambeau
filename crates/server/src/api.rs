@@ -1,11 +1,9 @@
 //! OpenAI-compatible request/response types.
-//!
-//! V1.8 shipped chat completions, text completions, models list, health.
+//! shipped chat completions, text completions, models list, health.
 //! V2 tool-calling track (T1.1 — ROADMAP-V2-TOOL-CALLING-AND-MCP.md) adds
 //! the wire surface for `tools[]`, `tool_choice`, `tool_calls[]`,
 //! `role="tool"`, and `finish_reason="tool_calls"`. The types are wired
 //! here but not acted upon yet — T1.2/T2.x fill in the behaviour.
-//!
 //! Logprobs, embeddings, structured outputs (response_format=json_schema),
 //! vision/audio tool results stay V2+.
 
@@ -199,7 +197,6 @@ pub enum ResponseFormat {
 }
 
 /// One chat message on the wire.
-///
 /// T1.1 extends this to carry tool-call payloads: a prior `role="assistant"`
 /// turn may carry `tool_calls` with no `content`; a `role="tool"` turn
 /// carries `tool_call_id` + `content` (the tool's reply). OpenAI sends
@@ -292,7 +289,6 @@ pub struct ToolChoiceFunction {
 
 /// One tool call emitted by the model and echoed back in prior-turn
 /// assistant messages.
-///
 /// **`arguments` is a JSON-encoded string, never an object.** This guards
 /// llama.cpp #20198, where returning `arguments` as an object broke the
 /// openai-python SDK. The wire contract stays string; any structural
@@ -472,11 +468,9 @@ pub struct Usage {
 }
 
 // ---- Anthropic /v1/messages (P1.8a) ---------------------------------------
-//
 // Mirrors the request envelope at https://docs.anthropic.com/en/api/messages
 // closely enough for Claude Code, Cursor, and the anthropic-sdk-python /
 // anthropic-sdk-typescript clients to talk to flambeau without a shim.
-//
 // V1 scope (P1.8a — this commit): text-only content blocks, non-streaming
 // path, no tools mapping. Tools (`tool_use` / `tool_result` content blocks)
 // are P1.8c; SSE event stream is P1.8b.
@@ -676,7 +670,7 @@ pub struct AnthropicUsage {
 mod tests {
     use super::*;
 
-    /// Back-compat: V1.8 clients that POST messages with string `content`
+    /// Back-compat: clients that POST messages with string `content`
     /// and no tool fields must deserialise unchanged.
     #[test]
     fn v1_8_compat_message_roundtrip() {
@@ -1078,7 +1072,6 @@ mod tests {
 /// - an array of strings (batch),
 /// - a single token id array,
 /// - an array of token id arrays.
-///
 /// V1 only handles strings; integer-array forms return 400.
 #[derive(Debug, Clone, serde::Deserialize)]
 #[serde(untagged)]
@@ -1139,7 +1132,6 @@ pub struct EmbeddingsResponse {
 // ---- /tokenize, /detokenize -----------------------------------------------
 
 /// **#234 P3.14** — llama.cpp-compatible tokenize endpoint body.
-///
 /// Mirrors `llama.cpp` server: `content` is the text to tokenize,
 /// `add_special` toggles BOS/EOS injection (default `false` — the
 /// chat template handles specials for actual chat turns), and

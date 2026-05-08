@@ -1,27 +1,23 @@
 // mmvq_q6_k_dp4a — Q6_K MMVQ with DP4A inner dot product.
-//
 // Ports llama.cpp's `vec_dot_q6_K_q8_1_impl_mmvq` (vecdotq.cuh:624-644).
 // Q6_K per-element math: raw_q (6-bit) = (4-bit ql nibble | (2-bit qh bits << 4)) - 32.
 // DP4A packs 4 raw_q int8 values (-32..31) × 4 Q8_1 int8 values into one
 // v_dot4_i32_i8 instruction per 4 elements.
-//
 // Indexing mirrors llama.cpp's `iqs`-based scheme so the bit-layout
 // assumptions match exactly. QI6_K = QK_K/(4*QR6_K) = 32 iqs positions per
 // super-block. Each iqs call processes 2×4 = 8 elements (QR6_K=2, inner dp4a
 // per iteration on 4 elements).
-//
 // Thread layout:
-//   lane       = threadIdx.x (0..63)
-//   iqs        = lane & 31        — iqs position within super-block (0..31)
-//   super_hi   = lane >> 5        — 0 or 1: which super-block in stride-2
-//                                    outer iter (fills all 64 lanes)
+// lane = threadIdx.x (0..63)
+// iqs = lane & 31 — iqs position within super-block (0..31)
+// super_hi = lane >> 5 — 0 or 1: which super-block in stride-2
+// outer iter (fills all 64 lanes)
 // Wave = 64 threads, 1 output row/block.
-//
 // Per lane per super-block:
-//   - Load vl (4 bytes of ql) and vh (4 bytes of qh, shifted) as int32s
-//   - Load u[0], u[1] (2 int32s from distinct Q8_1 blocks)
-//   - Two iterations (i=0,1): construct 4-element signed int8 vi, dp4a, scale
-//   - acc += d * Σ_i (d8[i] * dp4a(vi, u[i], 0) * sc[i])
+// - Load vl (4 bytes of ql) and vh (4 bytes of qh, shifted) as int32s
+// - Load u[0], u[1] (2 int32s from distinct Q8_1 blocks)
+// - Two iterations (i=0,1): construct 4-element signed int8 vi, dp4a, scale
+// - acc += d * Σ_i (d8[i] * dp4a(vi, u[i], 0) * sc[i])
 
 #include "block_quant.cuh"
 #include "gfx906.cuh"
@@ -81,20 +77,19 @@ extern "C" __global__ void flambeau_mmvq_q6_k_dp4a_q8_1(
         const float d8_0 = (float) ya0->d;
         const float d8_1 = (float) ya1->d;
 
-        // V2.3.d.1 correctness fix: the original code did
-        //     `(unsigned)(vil | vih) - 0x20202020u`
+        // correctness fix: the original code did
+        // `(unsigned)(vil | vih) - 0x20202020u`
         // as a 32-bit unsigned subtract to apply the Q6_K −32 bias byte-wise.
         // That is NOT a per-byte saturate subtract — when any source byte
         // is < 32 (~50 % of random weights), the borrow cascades into the
         // next byte and shifts its decoded value by −1. Errors up to 90 %
         // at m≥128, and 6 % even at the dispatched m=1, k=15360 shape.
-        //
         // Fix: use the DP4A identity
-        //     (raw − 32) · y  =  raw · y  −  32 · Σ y
+        // (raw − 32) · y = raw · y − 32 · Σ y
         // — store `raw = vil | vih` as unsigned [0, 63] (safe to read as
         // signed int8 because top 2 bits are zero), compute one extra
         // `dp4a(0x01010101, y, 0)` per term for the bias correction.
-        // Same pattern V2.3.b.4's mmq_q6_K_wave64 uses; HIP has no
+        // Same pattern mmq_q6_K_wave64 uses; HIP has no
         // per-byte saturate-subtract equivalent of CUDA's `__vsubss4`.
         float sumf = 0.0f;
         {

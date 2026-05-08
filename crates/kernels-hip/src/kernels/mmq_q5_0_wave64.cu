@@ -1,26 +1,21 @@
-// mmq_q5_0_wave64 — V2.30.a wave64 MMQ for Q5_0 × Q8_1 activation.
-//
-// Direct sibling of `mmq_q4_0_wave64.cu` (V2.28.a) with the 5th-bit ladder
-// from V2.23's `mmvq_q5_0.cu` grafted into the inner loop. Q5_0 closes a
+// mmq_q5_0_wave64 — 0.a wave64 MMQ for Q5_0 × Q8_1 activation.
+// Direct sibling of `mmq_q4_0_wave64.cu` (8.a) with the 5th-bit ladder
+// from 3's `mmvq_q5_0.cu` grafted into the inner loop. Q5_0 closes a
 // low-traffic gap in Qwen3.6-35B-A3B-Q4_0 (20/40 layers use Q5_0 for
-// ffn_*_shexp); the V2.27 head-to-head never measured it as a primary
+// ffn_*_shexp); the 7 head-to-head never measured it as a primary
 // bottleneck, but it's a cheap port and clears the dtype out of MMVQ-only
 // status.
-//
 // Q5_0 block layout (22 bytes, 32 elements):
-//   d  fp16       — scale
-//   qh uint8[4]   — 32 "5th bits", one per element (packed LSB-first)
-//   qs uint8[16]  — nibble pairs; byte i's LOW nibble = element i, HIGH = i+16
-//
-// Reconstruction: x_real_i = d · (q5_i - 16)  where q5_i = (qh_i << 4) | nibble_i.
-//
-// Identity (exactly mirrors V2.23 mmvq_q5_0 arithmetic, lifted to tile-M):
-//   (q5 - 16) · y  =  nibble · y  +  16·bit · y  -  16·y
-//                  =  dp4a(nibble, y)  +  16·dp4a(bit, y)  -  16·s_y
+// d fp16 — scale
+// qh uint8[4] — 32 "5th bits", one per element (packed LSB-first)
+// qs uint8[16] — nibble pairs; byte i's LOW nibble = element i, HIGH = i+16
+// Reconstruction: x_real_i = d · (q5_i - 16) where q5_i = (qh_i << 4) | nibble_i.
+// Identity (exactly mirrors 3 mmvq_q5_0 arithmetic, lifted to tile-M):
+// (q5 - 16) · y = nibble · y + 16·bit · y - 16·y
+// = dp4a(nibble, y) + 16·dp4a(bit, y) - 16·s_y
 // per block, where s_y = d_y · Σ q8 is the Q8_1 pre-computed sum.
-//
 // Tile shape (same family as mmq_q4_0_wave64):
-//   MMQ_Y  = 64, TILE_N = 8, 64 threads / block (1 wave64), 1 output row/thread.
+// MMQ_Y = 64, TILE_N = 8, 64 threads / block (1 wave64), 1 output row/thread.
 
 #include "block_quant.cuh"
 #include <hip/hip_runtime.h>
@@ -45,7 +40,7 @@ static __device__ __forceinline__ int dp4a(int a, int b, int c) {
 }
 
 // Expand 4 consecutive qh bits starting at `start` into a packed int32
-// with each byte = 0 or 1 (same primitive as V2.23 mmvq_q5_0). Used to
+// with each byte = 0 or 1 (same primitive as 3 mmvq_q5_0). Used to
 // feed the 5th-bit side through DP4A alongside the low-nibble side.
 static __device__ __forceinline__ int expand_bits4(unsigned int qh, int start) {
     int out = 0;
@@ -132,7 +127,7 @@ void flambeau_mmq_q5_0_wave64_q8_1(
             }
 
             // Per-block: d · ((nibble + 16·bit) · y - 16·y_s)
-            //          = d · (d_y · (sumi_nib + 16·sumi_bit) - 16·y_s)
+            // = d · (d_y · (sumi_nib + 16·sumi_bit) - 16·y_s)
             // Since s_y = d_y · Σ q8 already, the −16·d·y_s correction
             // is one FMA per block (no per-lane split like the dense
             // mmvq kernel's ×0.25 since here we aren't warp-reducing).

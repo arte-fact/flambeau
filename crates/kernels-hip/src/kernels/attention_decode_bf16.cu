@@ -1,26 +1,21 @@
 // attention_decode_bf16 — GQA decode attention, BF16 Q/KV/out.
-//
-// MTP-4-C-4: BF16 sibling of `attention_decode_f16`. Identical math
+// BF16 sibling of `attention_decode_f16`. Identical math
 // (online flash-attn-v2 softmax, F32 internal accumulators) — only
 // the storage dtype changes. Used by the MTP BF16 forward path so
 // Q / K / V / out stay in BF16 across the matmul-attention chain
 // (no F16/Q8_1 hops between mmvq output and attention input).
-//
 // gfx906 has no native BF16 arithmetic — we lift each load to F32
 // via `fb_bf16_to_f32` (lossless bit-shift) and round the output
 // via `fb_f32_to_bf16` (RNE).
-//
 // Shapes:
-//   q       : [n_heads_q, head_dim]            BF16
-//   k_cache : [n_tokens, n_heads_kv, head_dim] BF16 contiguous
-//   v_cache : same shape as k                  BF16
-//   out     : [n_heads_q, head_dim]            BF16
-//
+// q : [n_heads_q, head_dim] BF16
+// k_cache : [n_tokens, n_heads_kv, head_dim] BF16 contiguous
+// v_cache : same shape as k BF16
+// out : [n_heads_q, head_dim] BF16
 // Launch (caller-provided):
-//   blockDim = head_dim   (one thread per output lane)
-//   gridDim  = n_heads_q
-//   shared   = q[256] + out[256] + score_parts[4] = 2064 bytes
-//
+// blockDim = head_dim (one thread per output lane)
+// gridDim = n_heads_q
+// shared = q[256] + out[256] + score_parts[4] = 2064 bytes
 // Supports `head_dim ∈ {64, 128, 256}` — the same range the F16
 // kernel covers; MTP uses 256.
 

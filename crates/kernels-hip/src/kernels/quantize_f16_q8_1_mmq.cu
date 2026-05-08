@@ -1,9 +1,7 @@
 // quantize_f16_q8_1_mmq — F16 activation → BlockQ8_1Mmq (DS4 layout).
-//
 // F16 sibling of `quantize_q8_1_mmq` (F32 variant) for the forward path:
 // rmsnorm → F16 hidden → this kernel → BlockQ8_1Mmq buffer consumed by
 // the 4-warp LDS-tiled MMQ kernel at prefill (m ≥ 128).
-//
 // Same block layout and reduction as the F32 version. Only difference is
 // reading `__half` and upcasting to float for the sub-block reduce so
 // accumulation precision isn't bound by F16.

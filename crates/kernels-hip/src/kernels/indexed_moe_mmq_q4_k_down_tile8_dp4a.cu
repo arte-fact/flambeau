@@ -1,14 +1,11 @@
-// indexed_moe_mmq_q4_k_down_tile8_dp4a — V2.6.b down-projection MoE MMQ.
-//
+// indexed_moe_mmq_q4_k_down_tile8_dp4a — down-projection MoE MMQ.
 // Structural sibling of `indexed_moe_mmq_q4_k_gate_up_tile8_dp4a.cu`. Same
 // per-block layout (64 rows × 8 slots, wave64, all slots share expert
-// via V2.6.a padded sort), different activation indexing:
-//
+// via padded sort), different activation indexing:
 // Unlike gate+up (activation indexed by `token`, weight by `expert`),
 // the down projection consumes the per-pair SwiGLU'd activation:
 // `activated_q8_1[pair_idx, n_sb_per_row_inter]`, where pair_idx =
 // token * top_k + slot. Output is also per-pair.
-//
 // Padding slots repeat the last real pair_idx → redundant compute but
 // no branches.
 
@@ -34,7 +31,7 @@ static __device__ __forceinline__ int dp4a(int a, int b, int c) {
     return __builtin_amdgcn_sdot4(a, b, c, false);
 }
 
-// V2.9.b: see gate_up_tile8 sibling — same 1-wave/SIMD occupancy floor +
+// see gate_up_tile8 sibling — same 1-wave/SIMD occupancy floor +
 // same (WARP_SIZE, 2) fix.
 extern "C" __global__ __launch_bounds__(WARP_SIZE, 2)
 void flambeau_indexed_moe_mmq_q4_k_down_tile8_dp4a_q8_1(

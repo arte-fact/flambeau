@@ -1,19 +1,15 @@
 // dense_gemv_f32_f16 — per-row dense GEMV with F32 weight, F16 activation,
 // F32 output.
-//
-//   y[n] = Σ_k  w[n, k] · (float) x[k]
-//
-// V1.7.3-d3 use case: the MoE router, which has an F32 `ffn_gate_inp.weight`
+// y[n] = Σ_k w[n, k] · (float) x[k]
+// d3 use case: the MoE router, which has an F32 `ffn_gate_inp.weight`
 // and consumes the F16 post-attention-norm activation to produce F32 logits
 // fed to `topk_f32`.
-//
 // Weight layout (matches GGUF outermost-first): `[n_rows, k]` with `k`
 // innermost/contiguous, so row `n` lives at offset `n * k`.
-//
 // Launch:
-//   gridDim  = { n_rows, 1, 1 }
-//   blockDim = { 256, 1, 1 }       // 4 wave64 per block
-//   shared   = 4 floats (one per warp partial-sum)
+// gridDim = { n_rows, 1, 1 }
+// blockDim = { 256, 1, 1 } // 4 wave64 per block
+// shared = 4 floats (one per warp partial-sum)
 
 #include <hip/hip_runtime.h>
 #include "block_quant.cuh"

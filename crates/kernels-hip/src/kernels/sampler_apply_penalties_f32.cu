@@ -5,21 +5,18 @@
 // reads `logits[tok]`, applies the three penalties, writes back. No
 // cross-thread coordination since deduped pairs guarantee unique
 // `tok` per thread (no atomic-add needed).
-//
 // Mirrors the host-side `apply_penalty_kernel` in
 // `crates/runtime/src/sampling.rs` so a future cert can compare GPU
 // output bit-for-bit against the host reference.
-//
 // Layout:
-//   blockDim = { 256 }                          (4 wave64 warps)
-//   gridDim  = { ceil(n_pairs / 256) }
-//
+// blockDim = { 256 } (4 wave64 warps)
+// gridDim = { ceil(n_pairs / 256) }
 // Penalty conventions (llama.cpp / OpenAI):
-//   * `repetition_penalty`: `logit /= penalty` when logit > 0,
-//                           `logit *= penalty` otherwise. Preserves
-//                           sign. No-op at 1.0.
-//   * `presence_penalty`:   `logit -= penalty`. No-op at 0.0.
-//   * `frequency_penalty`:  `logit -= penalty * count`. No-op at 0.0.
+// * `repetition_penalty`: `logit /= penalty` when logit > 0,
+// `logit *= penalty` otherwise. Preserves
+// sign. No-op at 1.0.
+// * `presence_penalty`: `logit -= penalty`. No-op at 0.0.
+// * `frequency_penalty`: `logit -= penalty * count`. No-op at 0.0.
 
 #include <hip/hip_runtime.h>
 

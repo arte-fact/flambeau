@@ -18,7 +18,6 @@ use super::OpsRegistry;
 /// F16 tensor. Pairs are `(x[2i], x[2i+1])` — used by dense Qwen3 / Gemma-4.
 /// For Qwen3.5/3.6 full-attention layers (NeoX-split partial), use
 /// [`rope_neox_partial_f16`] instead.
-///
 /// Grid: `(n_tokens, n_heads)`. Block: `head_dim / 2` threads.
 pub fn rope_f16(
     reg: &OpsRegistry,
@@ -59,10 +58,8 @@ pub fn rope_f16(
 /// Pair layout is split — `(x[i], x[i + rotated_dims/2])` — matching
 /// llama.cpp's `rope_multi` path for text-only MROPE (all sections pointing
 /// at the same position ID).
-///
 /// Used by Qwen3.5 / Qwen3.6 / Qwen3-Next full-attention layers.
 /// `rotated_dims` must be even and ≤ `head_dim`.
-///
 /// Grid: `(n_tokens, n_heads)`. Block: `rotated_dims / 2` threads.
 pub fn rope_neox_partial_f16(
     reg: &OpsRegistry,
@@ -105,7 +102,7 @@ pub fn rope_neox_partial_f16(
     Ok(())
 }
 
-/// MTP-4-C-5: BF16 sibling of [`rope_neox_partial_f16`]. Identical math
+/// BF16 sibling of [`rope_neox_partial_f16`]. Identical math
 /// (F32 trig + multiply); BF16 in-place storage.
 pub fn rope_neox_partial_bf16(
     reg: &OpsRegistry,

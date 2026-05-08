@@ -1,18 +1,16 @@
 //! Shared bench sweep helpers.
-//!
 //! Every `sweep_*.rs` used to open-code the same five boilerplate pieces:
 //! hostname lookup, rig-string assembly, an `alloc_and_upload<T>` upload
 //! helper, a splitmix-style `seeded_f32` generator, and a max-relative-
 //! error comparator. Extracted here so each sweep becomes ~40 LOC lighter
 //! and bugfixes in these primitives propagate everywhere automatically.
-//!
 //! The two variable parts are exposed as parameters:
 //! - `seeded_f32_range(seed, n, lo, hi)` lets callers pick the input
-//!   dynamic range (swiglu wants `[-2, 2]`, attention wants `[-0.5, 0.5]`,
-//!   etc.) instead of hard-coding a range.
+//! dynamic range (swiglu wants `[-2, 2]`, attention wants `[-0.5, 0.5]`,
+//! etc.) instead of hard-coding a range.
 //! - `max_rel_err_with_floor(got, ref, abs_floor)` takes the tolerance
-//!   floor directly — callers that scale with `sqrt(k)` or `sqrt(head_dim)`
-//!   compute their floor at the call site.
+//! floor directly — callers that scale with `sqrt(k)` or `sqrt(head_dim)`
+//! compute their floor at the call site.
 
 #![cfg(feature = "hip")]
 
@@ -51,7 +49,6 @@ pub fn rig() -> String {
 
 /// Allocate `data.len() * size_of::<T>()` bytes on `dev`, copy `data` in,
 /// sync the default stream, return the device pointer.
-///
 /// # Panics
 /// Panics on allocation or copy failure. Used only by the sweep harness,
 /// which runs in single-threaded test context — a panic here is a broken

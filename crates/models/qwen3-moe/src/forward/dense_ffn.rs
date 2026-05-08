@@ -29,8 +29,7 @@ use crate::config::Qwen3MoEConfig;
 use crate::weights::DenseFfnWeights;
 
 // ---------------------------------------------------------------------------
-// V2.2.c — dense FFN decode (arch=qwen35).
-//
+// dense FFN decode (arch=qwen35).
 // One gate+up+down triple per layer (no router, no experts, no shared expert).
 // Structurally identical to forward_shared_expert_decode minus the
 // sigmoid-gate post-scale. `forward_dense_ffn_decode` writes the residual sum
@@ -153,14 +152,14 @@ pub fn forward_dense_ffn_decode(
     quantize_f16_q8_1(ops, stream, x_norm, scratch.x_q8_1, hidden)
         .context("dense ffn x_norm → Q8_1")?;
 
-    // 2+3. gate + up matmuls share x_q8_1. V2.20.b — when both are Q8_0
-    //      (Qwen3.6-27B dense path, 66.3% of decode wall pre-fusion), fuse
-    //      into one mmvq_q8_0_gate_up launch. Kernel is the same one the
-    //      full-attn layer uses for K+V fusion; parity cert in
-    //      `crates/bench/tests/mmvq_q8_0_gate_up_parity.rs` proves bit-exact
-    //      equivalence to two independent single-row calls. Disabled only
-    //      by the coarse `FLAMBEAU_VARIANT=baseline` or the specific
-    //      `FLAMBEAU_DENSE_GATE_UP=unfused`.
+    // 2+3. gate + up matmuls share x_q8_1. 0.b — when both are Q8_0
+    // (Qwen3.6-27B dense path, 66.3% of decode wall pre-fusion), fuse
+    // into one mmvq_q8_0_gate_up launch. Kernel is the same one the
+    // full-attn layer uses for K+V fusion; parity cert in
+    // `crates/bench/tests/mmvq_q8_0_gate_up_parity.rs` proves bit-exact
+    // equivalence to two independent single-row calls. Disabled only
+    // by the coarse `FLAMBEAU_VARIANT=baseline` or the specific
+    // `FLAMBEAU_DENSE_GATE_UP=unfused`.
     let fuse_gate_up = dense.ffn_gate.dtype == flambeau_quant::GgmlDType::Q8_0
         && dense.ffn_up.dtype == flambeau_quant::GgmlDType::Q8_0;
     if fuse_gate_up {
@@ -206,7 +205,7 @@ pub fn forward_dense_ffn_decode(
         .context("dense ffn up qmatmul")?;
     }
 
-    // 4+5. V2.23.d.2 fused SwiGLU → F16 + quantise; skips the standalone cast.
+    // 4+5. 3.d.2 fused SwiGLU → F16 + quantise; skips the standalone cast.
     flambeau_ops::hip::mlp::swiglu_f32_to_f16(
         ops,
         stream,
@@ -226,7 +225,7 @@ pub fn forward_dense_ffn_decode(
     .context("dense ffn quantise activated → Q8_1")?;
 
     // 6. down matmul: weight[hidden, inter] × activated[inter] → down_f32[hidden].
-    //    Decode path: m=1 never hits MmqLdsX64.
+    // Decode path: m=1 never hits MmqLdsX64.
     qmatmul(
         ops,
         stream,
@@ -251,13 +250,13 @@ pub fn forward_dense_ffn_decode(
 }
 
 // ---------------------------------------------------------------------------
-// V2.2.c — dense FFN prefill (arch=qwen35, L tokens).
+// dense FFN prefill (arch=qwen35, L tokens).
 // ---------------------------------------------------------------------------
 
 pub struct DenseFfnPrefillScratch {
     pub max_tokens: usize,
     pub x_q8_1: DevicePtr,
-    /// V2.2.d.P8 — DS4 Q8_1 MMQ layout sibling of `x_q8_1`, consumed by the
+    /// 8 — DS4 Q8_1 MMQ layout sibling of `x_q8_1`, consumed by the
     /// 4-warp LDS-tiled Q4_1 MMQ (and future Q4_K / Q6_K MMQ turbo kernels)
     /// at m ≥ 128. Populated from `x_q8_1` F16 source via the
     /// `flambeau_quantize_f16_q8_1_mmq` kernel alongside the standard quant.
@@ -267,7 +266,7 @@ pub struct DenseFfnPrefillScratch {
     pub activated_f32: DevicePtr,
     pub activated_f16: DevicePtr,
     pub activated_q8_1: DevicePtr,
-    /// V2.2.d.P8 — DS4 sibling of `activated_q8_1` for the down-projection.
+    /// 8 — DS4 sibling of `activated_q8_1` for the down-projection.
     pub activated_q8_1_mmq: DevicePtr,
     pub down_f32: DevicePtr,
     pub down_f16: DevicePtr,
@@ -400,7 +399,7 @@ pub fn forward_dense_ffn_prefill(
         qdtype_of(dense.ffn_up.dtype)?,
     ).context("dense ffn prefill up qmatmul")?;
 
-    // V2.23.d.2 fused SwiGLU → F16 (replaces swiglu_f32 + cast_f32_to_f16).
+    // 3.d.2 fused SwiGLU → F16 (replaces swiglu_f32 + cast_f32_to_f16).
     flambeau_ops::hip::mlp::swiglu_f32_to_f16(ops, stream, scratch.gate_f32, scratch.up_f32, scratch.activated_f16, n_tokens * inter)
         .context("dense ffn prefill swiglu_f32_to_f16")?;
     quantize_f16_q8_1(ops, stream, scratch.activated_f16, scratch.activated_q8_1, n_tokens * inter)

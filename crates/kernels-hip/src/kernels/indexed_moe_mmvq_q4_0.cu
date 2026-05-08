@@ -1,16 +1,13 @@
 // indexed_moe_mmvq_q4_0 — Q4_0 MMVQ with per-token expert routing.
-//
-// Sibling of `indexed_moe_mmvq_q8_0.cu` (V2.22.a); unblocks
+// Sibling of `indexed_moe_mmvq_q8_0.cu` (2.a); unblocks
 // Qwen3.6-35B-A3B-Q4_0 where MoE expert weights are Q4_0. Inner arithmetic
 // is byte-identical to `mmvq_q4_0.cu` — same `(q - 8) · y = q · y - 8 · s_y`
 // identity, same nibble-pair DP4A.
-//
 // Layout:
-//   weights       [n_experts, n_rows, n_blocks_per_row]   Q4_0 blocks (18 B)
-//   activations   [n_tokens, n_blocks_per_row]            Q8_1 blocks
-//   expert_ids    [n_tokens, top_k]                       i32
-//   output        [n_tokens, top_k, n_rows]               F32
-//
+// weights [n_experts, n_rows, n_blocks_per_row] Q4_0 blocks (18 B)
+// activations [n_tokens, n_blocks_per_row] Q8_1 blocks
+// expert_ids [n_tokens, top_k] i32
+// output [n_tokens, top_k, n_rows] F32
 // Launch: blockDim=256, gridDim={n_rows, n_tokens*top_k, 1}.
 
 #include "block_quant.cuh"

@@ -1,5 +1,4 @@
-//! V1.7.5.B peer_copy_via_host correctness + bandwidth sweep.
-//!
+//! peer_copy_via_host correctness + bandwidth sweep.
 //! Runs a round-trip between every (src, dst) pair in the cluster at
 //! several payload sizes, asserts bit-exact payload preservation, and
 //! reports effective single-direction bandwidth. With `device_count < 2`

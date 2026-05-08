@@ -1,5 +1,4 @@
-//! AUTO-4d — hybrid PP-of-TP forward driver.
-//!
+//! hybrid PP-of-TP forward driver.
 //! Composes the existing per-layer TP entry points
 //! ([`super::tp::forward_full_attn_layer_tp`],
 //! [`super::tp::forward_gdn_layer_tp`]) per stage, with one
@@ -7,17 +6,13 @@
 //! **global** cluster (the one that spans all `pp_size * tp_size`
 //! ranks). The intra-stage AllReduce uses each stage's per-stage
 //! `BarP2pAllReduce` against its sub-cluster — these are constructed
-//! by the server at startup (AUTO-4f).
-//!
+//! by the server at startup ().
 //! ### Embedding & LM head
-//!
-//! The AUTO-4b loader puts `token_embd` only on **stage 0** and
+//! The loader puts `token_embd` only on **stage 0** and
 //! `output_norm` + `output` only on the **last stage**. The driver
 //! mirrors that placement: embed runs on stage 0's TP ranks; the LM
 //! head runs on the last stage's `head_rank` (rank 0 by default).
-//!
 //! ### Inter-stage hand-off
-//!
 //! After stage `s`'s last layer, the residual `hidden_a` on rank 0 of
 //! stage `s` is copied to **every rank** of stage `s+1`'s sub-cluster
 //! via `peer_copy_via_host`. The cost is `tp_size_next × hidden_size ×
@@ -51,17 +46,16 @@ fn dev_flag(_name: &str) -> bool {
     false
 }
 
-/// AUTO-4e — ingest a `prompt_ids` prompt token-by-token and write
+/// ingest a `prompt_ids` prompt token-by-token and write
 /// the **last** position's F32 logits row into `logits_out`. Mirrors
 /// the TP server-side prefill (`model.rs::prefill_logits` for the
 /// `LoadedModel::Tp` arm), which is itself a per-token loop because
-/// the V1 TP path has no batched prefill kernel — TP-5b "prefill-PP +
+/// the V1 TP path has no batched prefill kernel — "prefill-PP +
 /// decode-TP coexistence" deferred batched-TP-prefill to V2 and
 /// hybrid inherits the same posture. The hand-off cost between
 /// stages stays the same per-token primitive (one F16 hidden vec
 /// per hop); a true batched prefill would change the hop payload to
 /// `[L, hidden] * F16`, deferred until profile data justifies it.
-///
 /// `start_position` is the position the *first* prompt token lands
 /// at — non-zero when this prefill is appending to a session that
 /// already saw earlier tokens.
@@ -78,7 +72,7 @@ pub fn forward_prefill_hybrid_logits(
     if prompt_ids.is_empty() {
         bail!("forward_prefill_hybrid_logits: empty prompt");
     }
-    // **AUTO-6e** — batched hybrid prefill for prompts ≥ 8 tokens.
+    // batched hybrid prefill for prompts ≥ 8 tokens.
     // Per-token fallback (FLAMBEAU_TP_BATCHED=0) was 13× slower; deleted in S3.
     if prompt_ids.len() >= 8 {
         return forward_prefill_hybrid_batched_logits(
@@ -90,7 +84,7 @@ pub fn forward_prefill_hybrid_logits(
             start_position,
             logits_out,
         )
-        .context("hybrid batched prefill (AUTO-6e)");
+        .context("hybrid batched prefill");
     }
     let last = prompt_ids.len() - 1;
     for (i, &tok) in prompt_ids.iter().enumerate() {
@@ -125,23 +119,20 @@ pub fn forward_prefill_hybrid_logits(
     Ok(())
 }
 
-/// **AUTO-6e3** — L-batched per-stage hybrid prefill.
-///
+/// 3** — L-batched per-stage hybrid prefill.
 /// Mirrors [`forward_one_token_hybrid_inner`] structurally (embed →
 /// per-stage layers → inter-stage hand-off → output head) but every
 /// step is L-aware:
-///
-///  * Stage 0 embeds **all L tokens** into rank-0..N's `hidden_a`
-///    (sized `[L, hidden]` by [`ShardedForwardPrefillScratchHybrid`]).
-///  * Each stage runs [`forward_prefill_tp_batched_layers`] over its
-///    layer range with `il_cache_offset = stage.layer_range.start`
-///    (each stage's session caches were allocated for its slice
-///    only — same convention as the per-token hybrid driver).
-///  * Inter-stage hand-off transfers `[L, hidden]` F16
-///    (`L * hidden * 2` bytes) instead of one hidden vector.
-///  * The last stage runs the LM head on the **last position** of
-///    `hidden_a` and downloads `cfg.vocab_size` F32 logits.
-///
+/// * Stage 0 embeds **all L tokens** into rank-0..N's `hidden_a`
+/// (sized `[L, hidden]` by [`ShardedForwardPrefillScratchHybrid`]).
+/// * Each stage runs [`forward_prefill_tp_batched_layers`] over its
+/// layer range with `il_cache_offset = stage.layer_range.start`
+/// (each stage's session caches were allocated for its slice
+/// only — same convention as the per-token hybrid driver).
+/// * Inter-stage hand-off transfers `[L, hidden]` F16
+/// (`L * hidden * 2` bytes) instead of one hidden vector.
+/// * The last stage runs the LM head on the **last position** of
+/// `hidden_a` and downloads `cfg.vocab_size` F32 logits.
 /// Allocates a fresh [`ShardedForwardPrefillScratchHybrid`] per call
 /// and disposes on every exit path. V2.x: bind it on
 /// `Qwen3MoEHybridSession` to avoid the per-request alloc.
@@ -190,7 +181,7 @@ pub fn forward_prefill_hybrid_batched_logits(
     let row_bytes = hidden * 2;
 
     // 1. Allocate prefill scratch sized to this prompt. RAII guard so
-    //    the scratch is disposed on every exit path.
+    // the scratch is disposed on every exit path.
     let prefill = ShardedForwardPrefillScratchHybrid::new(model, n_tokens)
         .context("alloc hybrid prefill scratch")?;
     struct PrefillGuard<'m> {
@@ -439,7 +430,6 @@ pub fn forward_one_token_hybrid_logits(
 /// `scratch.per_stage[head_stage].per_rank[head_rank].output_head.logits_f32`
 /// (e.g. via `topk_softmax_f32` on the same default stream) before
 /// the next forward call clobbers it.
-///
 /// Saves the 600 KB DtoH per token under `FLAMBEAU_GPU_SAMPLER=1`,
 /// matching the TP path's improvement.
 pub fn forward_one_token_hybrid_keep_logits_on_device(
@@ -567,14 +557,13 @@ fn forward_one_token_hybrid_inner(
         let range_start = stage.layer_range.start;
         let stage_dev0 = stage.sub_cluster.device(0);
         let stage_stream0 = stage_dev0.default_stream();
-        // CN-80B-20 — per-stage SHARED-graph capture/replay, gated on
+        // per-stage SHARED-graph capture/replay, gated on
         // FLAMBEAU_DECODE_GRAPH=1. ONE `hipGraph_t` per stage; every
         // TP-rank stream captures into that same graph via
         // `hipStreamBeginCaptureToGraph`, so cross-rank events
         // (BarP2pAllReduce record/wait) resolve as internal graph
         // edges. Replay = single `launch` on rank-0's stream which
         // issues the whole captured fan-out.
-        //
         // Iter 1 limitation: NO slot binding. Captured K/V append
         // destinations and `n_tokens_kv` arg are FROZEN at capture-
         // time. Replay produces TIMING-MEANINGFUL but INCOHERENT
@@ -771,18 +760,16 @@ fn forward_one_token_hybrid_inner(
 /// Drive `slots.len()` concurrent decode steps through the Hybrid
 /// (PP-of-TP) topology with real per-layer batching, returning
 /// per-slot `[vocab]` F32 logits.
-///
 /// Mirrors [`forward_prefill_hybrid_batched_logits`] for control
 /// flow but with batched-decode bodies:
 /// - Stage 0 embeds N tokens replicated on every rank within the stage.
 /// - Per stage: per-rank per-layer:
-///   * full-attn → `forward_full_attn_layer_decode_batched_tp`
-///   * GDN → per-slot loop calling `forward_gdn_decode_tp`
-///   followed by stage-internal AllReduce (`stage_ar`).
+/// * full-attn → `forward_full_attn_layer_decode_batched_tp`
+/// * GDN → per-slot loop calling `forward_gdn_decode_tp`
+/// followed by stage-internal AllReduce (`stage_ar`).
 /// - Stage-boundary `peer_copy_via_host` of `[N, hidden]` F16 from
-///   stage `s` rank 0 to every rank of stage `s+1`'s sub-cluster.
+/// stage `s` rank 0 to every rank of stage `s+1`'s sub-cluster.
 /// - Last stage: output head per-slot on `head_rank`.
-///
 /// PP-only and TP-only collapses to single-stage / single-rank
 /// degenerates of this driver.
 #[allow(clippy::too_many_arguments)]
@@ -860,7 +847,7 @@ pub fn forward_decode_batched_hybrid(
     let slot_positions: Vec<usize> = slots.iter().map(|s| s.position).collect();
 
     // 1. Stage 0 embed — replicate token row 0..N across all ranks of
-    //    stage 0's sub_cluster.
+    // stage 0's sub_cluster.
     {
         let stage0 = &model.stages[0];
         if !stage0.tp_model.has_token_embd {
@@ -1521,7 +1508,7 @@ pub fn forward_decode_batched_hybrid(
         }
 
         // 4. Stage-boundary hand-off: peer_copy stage_idx rank 0's
-        //    hidden_a to every rank of stage_idx+1.
+        // hidden_a to every rank of stage_idx+1.
         if stage_idx + 1 < n_stages {
             let prod_dev = model.stages[stage_idx].sub_cluster.device(0);
             prod_dev.bind()?;

@@ -1,9 +1,7 @@
-// dense_gemv_f16_f16_batched — V1-BENCH-CN-80B-6 (iter-3) F16-weight
+// dense_gemv_f16_f16_batched — (iter-3) F16-weight
 // variant of `dense_gemv_f32_f16_batched`. Halves the per-row HBM
 // weight bandwidth at the cost of one F16→float conversion per FMA.
-//
-//   y[t, n] = Σ_k  (float) w[n, k] · (float) x[t, k]
-//
+// y[t, n] = Σ_k (float) w[n, k] · (float) x[t, k]
 // Used by the MoE router at prefill when the loader has converted the
 // F32 source `ffn_gate_inp` to F16. Same launch shape as the F32
 // variant; only the weight load + cast differs.

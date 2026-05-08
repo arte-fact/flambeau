@@ -5,24 +5,22 @@
               adds a reborrow dance with no readability win"
 )]
 //! Device-resident weight tensors for a Qwen3.x MoE model.
-//!
 //! Upload path: [`ModelWeights::upload`] walks a [`ModelLayout`] and
 //! transfers every required tensor from the GGUF mmap to HIP global memory
 //! via `memcpy_async(HostToDevice)`, allocating a fresh `DevicePtr` per
 //! tensor. The structs mirror the layout variants 1:1 so model code can
 //! pattern-match without an extra indirection.
-//!
 //! Memory layout decisions:
 //! - **One allocation per tensor.** Matches candle's pattern and makes it
-//!   trivial to cert per-tensor uploads. A future "one big arena" change
-//!   would only need to rewrite this file.
+//! trivial to cert per-tensor uploads. A future "one big arena" change
+//! would only need to rewrite this file.
 //! - **Dtype stays whatever the GGUF says.** No on-upload requantisation.
-//!   Q4_K weights stay Q4_K; F16 norms stay F16; the Q8_0 ssm_alpha /
-//!   ssm_beta that Candle requantises on load (candle P20) will be a
-//!   future optimisation, not part of V1.7.3-a.
+//! Q4_K weights stay Q4_K; F16 norms stay F16; the Q8_0 ssm_alpha /
+//! ssm_beta that Candle requantises on load (candle P20) will be a
+//! future optimisation, not part of a.
 //! - **Dealloc via [`ModelWeights::dispose`].** Drop alone can't get a
-//!   device handle, so the scaffold deliberately surfaces the teardown
-//!   call instead of silently leaking.
+//! device handle, so the scaffold deliberately surfaces the teardown
+//! call instead of silently leaking.
 
 #![cfg(feature = "hip")]
 
@@ -157,7 +155,7 @@ pub struct ModelWeights {
 impl ModelWeights {
     /// Build a `ModelWeights` from already-allocated device tensors. Skips
     /// the GGUF upload path — intended for synthetic-model smoke tests
-    /// (V1.7.3-e5, forward_one_token). Callers are responsible for
+    /// (e5, forward_one_token). Callers are responsible for
     /// uploading consistent weight data; `total_bytes` is computed by
     /// summing each `DeviceTensor.bytes`.
     pub fn from_parts(

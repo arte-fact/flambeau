@@ -1,20 +1,16 @@
 // moe_sort_by_expert — histogram + prefix-sum + scatter, for grouping
 // (token, slot) pairs by expert_id.
-//
 // Input:
-//   expert_ids[total]   int32 — total = n_tokens * top_k, value in [0, n_experts)
-//
+// expert_ids[total] int32 — total = n_tokens * top_k, value in [0, n_experts)
 // Output:
-//   counts[n_experts]             int32 — #pairs routed to each expert
-//   offsets[n_experts + 1]        int32 — exclusive prefix-sum of counts; offsets[n_experts] = total
-//   cursors[n_experts]            int32 — scatter cursor, init'd to offsets[e] by kernel 2
-//   sorted_pair_idx[total]        int32 — input pair indices grouped by expert
-//
+// counts[n_experts] int32 — #pairs routed to each expert
+// offsets[n_experts + 1] int32 — exclusive prefix-sum of counts; offsets[n_experts] = total
+// cursors[n_experts] int32 — scatter cursor, init'd to offsets[e] by kernel 2
+// sorted_pair_idx[total] int32 — input pair indices grouped by expert
 // Usage (host side, 3 launches in order):
-//   1. memset counts and cursors to 0, then launch `moe_sort_count`
-//   2. launch `moe_sort_scan_offsets` (single 256-thread block)
-//   3. launch `moe_sort_scatter`
-//
+// 1. memset counts and cursors to 0, then launch `moe_sort_count`
+// 2. launch `moe_sort_scan_offsets` (single 256-thread block)
+// 3. launch `moe_sort_scatter`
 // Complexity: O(total) × 2 + O(n_experts) scan. For pp=512 × top_k=8,
 // total = 4096, n_experts = 256. All on-GPU, no host round-trip.
 
@@ -43,7 +39,7 @@ extern "C" __global__ void flambeau_moe_sort_zero_counts(
 // ---------------------------------------------------------------------------
 extern "C" __global__ void flambeau_moe_sort_count(
     const int* __restrict__ expert_ids,   // [total]
-    int*       __restrict__ counts,       // [n_experts]  (must be zero-inited by caller)
+    int*       __restrict__ counts,       // [n_experts] (must be zero-inited by caller)
     const int total
 ) {
     const int i = blockIdx.x * blockDim.x + threadIdx.x;
@@ -55,7 +51,6 @@ extern "C" __global__ void flambeau_moe_sort_count(
 // ---------------------------------------------------------------------------
 // Kernel 2: exclusive prefix-sum on counts[] → offsets[], also initialise
 // cursors[e] = offsets[e] for the scatter kernel.
-//
 // Single-block Blelloch scan on n_experts entries. n_experts is bounded
 // by MAX_N_EXPERTS = 512 (so 1 block of 512 threads max).
 // ---------------------------------------------------------------------------
@@ -104,8 +99,7 @@ extern "C" __global__ void flambeau_moe_sort_scan_offsets(
 // Kernel 3: scatter — atomicAdd on cursors[e] to find the sorted position
 // for each pair, then write pair index there.
 // grid = ((total + 255) / 256, 1, 1), block = (256, 1, 1)
-//
-// CN-80B-18 — non-deterministic across runs (and across ranks under TP)
+// non-deterministic across runs (and across ranks under TP)
 // because the atomic race winner determines within-expert ordering. Kept
 // for opt-in via `FLAMBEAU_MOE_SCATTER=race`; the deterministic variant
 // below is the default.
@@ -124,14 +118,13 @@ extern "C" __global__ void flambeau_moe_sort_scatter(
 }
 
 // ---------------------------------------------------------------------------
-// Kernel 3-det (CN-80B-18): deterministic scatter — single thread, single
+// Kernel 3-det (): deterministic scatter — single thread, single
 // block, walks `expert_ids[]` in input order. The within-expert ordering is
 // fixed by input index `i` (lex-stable on `(expert_ids[i], i)`), bit-
 // reproducible across runs and across TP ranks. Per-iteration cost is ~5–10
 // ns once `cursors[]` warms in L1 (cursors is ≤512 ints = 2 KB, fits in
 // MI50's per-CU L1). At N=40960 worst case ~250 µs per layer; at decode
 // (N≈10) ~1 µs. Negligible vs the surrounding MoE matmul.
-//
 // Launch: <<< 1, 1 >>>.
 // ---------------------------------------------------------------------------
 extern "C" __global__ void flambeau_moe_sort_scatter_det(
@@ -150,7 +143,7 @@ extern "C" __global__ void flambeau_moe_sort_scatter_det(
 }
 
 // ---------------------------------------------------------------------------
-// Kernel 4 (V2.6.a): scan counts → padded_offsets where
+// Kernel 4 (): scan counts → padded_offsets where
 // padded_counts[e] = ceil(counts[e] / 8) * 8. Each expert's range is
 // padded to a multiple of 8 for use by 8-slot-per-block MMQ kernels
 // that need all 8 slots in a block to share the same expert.
@@ -197,9 +190,9 @@ extern "C" __global__ void flambeau_moe_sort_scan_padded_offsets(
 }
 
 // ---------------------------------------------------------------------------
-// Kernel 4b (V2.31.b): pad-to-16 variant of the scan. Same structure,
+// Kernel 4b (1.b): pad-to-16 variant of the scan. Same structure,
 // different mask: `(counts[e] + 15) & ~15`. Lets 16-slot-per-block MMQ
-// kernels (tile16, V2.31.b) share the same block-expert invariant. The
+// kernels (tile16, 1.b) share the same block-expert invariant. The
 // pad_copy kernel below is pad-agnostic (reads padded_count from
 // padded_offsets[e+1] - padded_offsets[e]) so no tile16 clone needed.
 // ---------------------------------------------------------------------------
@@ -242,13 +235,12 @@ extern "C" __global__ void flambeau_moe_sort_scan_padded_offsets_16(
 }
 
 // ---------------------------------------------------------------------------
-// Kernel 5 (V2.6.a): copy unpadded sorted_pair_idx → padded layout and
+// Kernel 5 (): copy unpadded sorted_pair_idx → padded layout and
 // fill each expert's tail padding with the last real entry. Using
 // last-real (rather than -1 sentinel) keeps the 8-slot MMQ kernel branch-
 // free: padding slots do the same matmul as the last real slot, just
 // get their output written to a "don't care" buffer (or silently
 // overwritten by the next real slot's write).
-//
 // grid = (ceil(max_padded_per_expert / 256), n_experts, 1)
 // block = (256, 1, 1)
 // Blocks whose chunk-offset >= padded_count[e] early-exit.

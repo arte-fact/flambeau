@@ -1,10 +1,8 @@
 // cast_f16_bf16 — pointwise F16 → BF16 via F32.
-//
-// MTP-4-C-1: BF16 has a wider exponent range than F16 (8 vs 5 bits)
+// BF16 has a wider exponent range than F16 (8 vs 5 bits)
 // but a narrower mantissa (7 vs 10), so F16 → BF16 always fits in
 // range but loses 3 mantissa bits. Routing through F32 makes the
 // rounding step explicit.
-//
 // Launch: 1D, ceil(n/256) blocks × 256 threads.
 
 #include <hip/hip_runtime.h>

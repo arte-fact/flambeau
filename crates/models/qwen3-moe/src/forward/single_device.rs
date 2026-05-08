@@ -1,5 +1,4 @@
 //! Mesh&lt;1&gt; (single-device) forward entry points — decode and prefill.
-//!
 //! The pipeline-parallel (Mesh&lt;N&gt; for N > 1) counterparts live in
 //! `forward::pp`. Both sides compose the same per-layer helpers from
 //! `forward::layer`; the difference is only in the outer loop (single
@@ -27,7 +26,7 @@ use super::{
 use crate::config::Qwen3MoEConfig;
 
 // ---------------------------------------------------------------------------
-// V1.7.3-e5 — forward_one_token end-to-end.
+// e5 — forward_one_token end-to-end.
 // ---------------------------------------------------------------------------
 
 /// Complete per-token scratch: two hidden-state buffers (ping/pong for
@@ -92,13 +91,11 @@ impl Drop for ForwardOneTokenScratch {
 /// End-to-end single-token decode. Reads the weights + layout from the
 /// model, updates the per-sequence session (KV caches, GDN state, conv
 /// history), and returns the argmax-sampled next token id.
-///
 /// Flow:
 /// 1. Embed `token_id` → hidden_a [hidden] F16.
 /// 2. For il in 0..num_layers: `forward_layer_decode(il, hidden_{a,b}, ...)` then swap.
 /// 3. `forward_output_head_decode(hidden, output_norm, lm_head)` → logits.
 /// 4. `argmax_token_host(logits)` → next token id.
-///
 /// `lm_head`: if `cfg.tied_lm_head` is true, pass `&weights.token_embd` —
 /// otherwise the untied `&weights.output`. Wiring this pick is the
 /// model-struct's job; we keep the forward path dtype-agnostic.
@@ -242,16 +239,14 @@ impl Drop for ForwardPrefillScratch {
 /// Prefill a chunk of L tokens end-to-end. Feeds the whole chunk through
 /// every layer, then runs the output head on the LAST token's hidden and
 /// returns the argmax-sampled next token id.
-///
 /// Semantics:
 /// - Each token's embedding is gathered on host and uploaded into
-///   `hidden_a[t]` (one F16 row per token).
+/// `hidden_a[t]` (one F16 row per token).
 /// - `forward_layer_prefill` runs over all L tokens per layer.
 /// - KV cache / GDN state / conv history are updated with L tokens of
-///   history before returning.
+/// history before returning.
 /// - Output head runs on the last token's final hidden (F16 `[hidden]`
-///   slice at offset `(L-1) * hidden`). Argmax on host.
-///
+/// slice at offset `(L-1) * hidden`). Argmax on host.
 /// Caller is responsible for chunking a long prompt if `L > scratch.max_tokens`.
 pub fn forward_prefill(
     ops: &OpsRegistry,
@@ -318,9 +313,9 @@ pub fn forward_prefill(
     // `x_in` now holds the final hidden `[L, hidden]` F16.
 
     // 3. Output head on the LAST token only — argmax logits for that token
-    //    are what the sampler needs. Upstream prefill users also typically
-    //    care only about the final position; if a use case wants
-    //    per-position logits, a variant could return them all.
+    // are what the sampler needs. Upstream prefill users also typically
+    // care only about the final position; if a use case wants
+    // per-position logits, a variant could return them all.
     let last_token_hidden = x_in.offset_bytes((l - 1) * row_bytes);
     let lm_head = weights
         .output

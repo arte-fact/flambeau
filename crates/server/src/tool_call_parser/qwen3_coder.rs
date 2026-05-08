@@ -1,8 +1,6 @@
 //! Qwen3-Coder XML-style tool-call parser.
-//!
 //! Happy-path state machine (T2.2). Parses the format that Qwen3-Coder
 //! and the Unsloth UD Qwen3.6 GGUFs emit:
-//!
 //! ```text
 //! <tool_call>
 //! <function=get_weather>
@@ -12,27 +10,23 @@
 //! </function>
 //! </tool_call>
 //! ```
-//!
 //! Emits:
-//!   - `ToolCallOpen{ index, name }` at `<function=NAME>`.
-//!   - `ToolCallArgumentsDelta{ index, arguments }` once at `</function>`
-//!     with the JSON-encoded parameter object as a **string** (guards
-//!     llama.cpp #20198).
-//!   - `ToolCallClose{ index }` at `</tool_call>`.
-//!   - `TextDelta(..)` for any free-text content outside tool calls.
-//!
+//! - `ToolCallOpen{ index, name }` at `<function=NAME>`.
+//! - `ToolCallArgumentsDelta{ index, arguments }` once at `</function>`
+//! with the JSON-encoded parameter object as a **string** (guards
+//! llama.cpp #20198).
+//! - `ToolCallClose{ index }` at `</tool_call>`.
+//! - `TextDelta(..)` for any free-text content outside tool calls.
 //! Parameter values are literal strings from `<parameter=K>\n…\n</parameter>`
 //! — multi-line and angle-bracket-containing values pass through
 //! unchanged. Parameter ORDER is preserved in the emitted JSON object
 //! via `serde_json::Map` (workspace-wide `preserve_order` feature).
-//!
 //! Ambiguous-prefix hardening (buffer-before-emit for partial `<` tag
 //! starts in free text and inside parameter bodies) is T2.3's scope;
 //! for T2.2 we use the minimum-viable tail-holdback approach: never
 //! emit the last `MAX_TAG_LEN` bytes of the buffer while in a state
 //! that might see a tag next, so a tag straddling a chunk boundary
 //! doesn't get mis-parsed.
-//!
 //! `<think>` interaction is also T2.3; today `<think>` runs inside a
 //! `Text` state get emitted as normal `TextDelta` (never promoted to a
 //! tool call) because none of the tool tags start with `<th`.
@@ -445,10 +439,8 @@ fn align_down_char_boundary(s: &str, n: usize) -> usize {
 /// prefix of at least one watched `tags` — i.e. this tail *could* be
 /// the start of a matching tag once more data arrives. Everything
 /// before `p` is unambiguous and safe to emit.
-///
 /// Returns `s.len()` when no ambiguous tail exists — the whole string
 /// can be emitted.
-///
 /// Only the last `max(tag.len()) - 1` bytes are candidates — no need to
 /// scan the whole string.
 fn ambiguous_tail_start(s: &str, tags: &[&str]) -> usize {

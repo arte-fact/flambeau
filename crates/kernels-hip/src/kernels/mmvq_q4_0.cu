@@ -1,24 +1,20 @@
 // mmvq_q4_0 — Q4_0 weight × Q8_1 activation → F32 dst, DP4A inner loop.
-//
 // Q4_0 is the legacy 4-bit quant without a min: 18 bytes/block = 2-byte F16
 // scale d + 16 bytes nibble-packed unsigned quants. Reconstruction is
 // `y = d * (q - 8)` where `q ∈ [0, 15]`.
-//
 // DP4A can't subtract a scalar from packed bytes, but the identity
-//   (q - 8) · y  =  q · y - 8 · sum(y)
+// (q - 8) · y = q · y - 8 · sum(y)
 // lets us compute the dot product as
-//   sumi    = dp4a(q_packed, y_packed, 0)          (regular DP4A)
-//   dot     = d_x * d_y * sumi - 8 · d_x · s_y     (bias correction)
+// sumi = dp4a(q_packed, y_packed, 0) (regular DP4A)
+// dot = d_x * d_y * sumi - 8 · d_x · s_y (bias correction)
 // where s_y = d_y · sum(y_qs), already baked into the Q8_1 block header.
-//
 // Same threading + nibble-pairing pattern as mmvq_q4_1:
-//   lane4     = tid & 3            — which int32 of the 16-byte qs
-//   block_idx = tid >> 2           — which Q4_0 block this thread processes
-//   u_lo = y.qs[lane4]             — y int32 for elements 4·lane4 .. +3
-//   u_hi = y.qs[lane4 + 4]         — y int32 for elements 4·lane4+16 .. +19
-//   vi_lo = (v >> 0) & 0x0F0F0F0F  — 4 low nibbles
-//   vi_hi = (v >> 4) & 0x0F0F0F0F  — 4 high nibbles
-//
+// lane4 = tid & 3 — which int32 of the 16-byte qs
+// block_idx = tid >> 2 — which Q4_0 block this thread processes
+// u_lo = y.qs[lane4] — y int32 for elements 4·lane4 .. +3
+// u_hi = y.qs[lane4 + 4] — y int32 for elements 4·lane4+16 .. +19
+// vi_lo = (v >> 0) & 0x0F0F0F0F — 4 low nibbles
+// vi_hi = (v >> 4) & 0x0F0F0F0F — 4 high nibbles
 // Block/grid: blockDim=256, gridDim=n_rows (one block per output row).
 
 #include "block_quant.cuh"

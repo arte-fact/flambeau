@@ -1,5 +1,4 @@
 //! Gated-Delta-Net (GDN) forward: decode (one token) + prefill (L tokens).
-//!
 //! GDN is Qwen3.5-Next / Qwen3.6's hybrid-recurrent layer — it replaces the
 //! attention block on even-numbered layer indices with an SSM-style state
 //! update. F32 precision end-to-end between MMVQ cast-up and the gated F16
@@ -31,12 +30,11 @@ use crate::session::{GdnLayerState, LayerCache};
 use crate::weights::{DeviceTensor, GdnWeights};
 
 // ---------------------------------------------------------------------------
-// V1.7.3-c2 — Gated-Delta-Net decode-step forward.
+// c2 — Gated-Delta-Net decode-step forward.
 // ---------------------------------------------------------------------------
 
 /// Workspace buffers for one decode step of a GDN layer. Sized against
 /// `Qwen3MoEConfig::gdn` (the hybrid arch's SSM dims).
-///
 /// The GDN path keeps F32 precision end-to-end from the post-MMVQ cast
 /// through the state update, the ssm_norm, and the gated output. Only
 /// the input activation coming in and the delta output going out are
@@ -96,7 +94,7 @@ impl GdnScratch {
         assert!(hidden % 32 == 0, "hidden must be a multiple of QK8_1=32");
         assert!(
             head_k_dim == 128 && head_v_dim == 128,
-            "V1.7.2.F gdn_state_step kernel only instantiated at S_v=128"
+            "gdn_state_step kernel only instantiated at S_v=128"
         );
 
         let x_q8_1_bytes = (hidden / 32) * std::mem::size_of::<BlockQ8_1>();
@@ -231,16 +229,15 @@ fn shift_conv_history(
 /// Decode step for one GDN layer. Consumes `x_in` (F16 `[hidden]`) and
 /// writes the pre-residual output to `delta_out` (F16 `[hidden]`). Updates
 /// the layer's recurrent state + conv1d history in-place.
-///
-/// V1.7.3-c2 scope:
+/// c2 scope:
 /// - Split `ssm_alpha` + `ssm_beta` projections (Qwen3.6 / Qwen3.5 convention).
-///   Fused `ssm_ba` (Qwen3-Next) is rejected with a bail for now.
+/// Fused `ssm_ba` (Qwen3-Next) is rejected with a bail for now.
 /// - F32 recurrent arithmetic end-to-end from post-MMVQ cast to output
-///   projection input (matches candle's `delta_net.rs` precision).
+/// projection input (matches candle's `delta_net.rs` precision).
 /// - Host alpha/beta/gate compute on `num_v_heads` floats per layer per
-///   token. Flagged as follow-up for fusion into a single device kernel
-///   (~2 memcpy roundtrips per GDN layer per decode step = 60 roundtrips
-///   per decode at 30 GDN layers).
+/// token. Flagged as follow-up for fusion into a single device kernel
+/// (~2 memcpy roundtrips per GDN layer per decode step = 60 roundtrips
+/// per decode at 30 GDN layers).
 pub fn forward_gdn_decode(
     ops: &OpsRegistry,
     stream: &HipStream,
@@ -277,7 +274,7 @@ pub fn forward_gdn_decode(
         .as_ref()
         .context("V1 GDN forward requires ssm_beta")?;
 
-    // V1-BENCH-CN-80B-7 — intra-GDN section markers. No-op when timer
+    // intra-GDN section markers. No-op when timer
     // disabled. Every section's elapsed_ms aggregates across the GDN
     // layers in a forward pass, surfacing the dominant sub-kernel.
     flambeau_backend_hip::profile::mark("gdn_start", device, stream)?;
@@ -337,7 +334,7 @@ pub fn forward_gdn_decode(
             d_inner,
             hidden,
         )
-        .context("attn_qkv + attn_gate fused mmvq_q4_0 (V1-BENCH-CN-80B-7)")?;
+        .context("attn_qkv + attn_gate fused mmvq_q4_0")?;
     } else {
         run_mmvq_from_tensor(ops, stream, &weights.attn_qkv, scratch.x_q8_1, scratch.qkv_mixed_f32, conv_channels, hidden, "attn_qkv")?;
         run_mmvq_from_tensor(ops, stream, &weights.attn_gate, scratch.x_q8_1, scratch.z_f32, d_inner, hidden, "attn_gate")?;
@@ -376,7 +373,7 @@ pub fn forward_gdn_decode(
     flambeau_backend_hip::profile::mark("gdn_proj_alpha_beta", device, stream)?;
 
     // 6. Conv1d step — assemble [history_{k-1}, qkv_mixed] into conv_input,
-    // run causal conv, then shift history forward. V2.23.d.1 uses a single
+    // run causal conv, then shift history forward. 3.d.1 uses a single
     // fused kernel in place of the prior two DtoD memcpys.
     let _ = device; // history+current copy now done via kernel, not device
     flambeau_ops::hip::recurrent::gdn_assemble_conv_input_f32(
@@ -455,18 +452,16 @@ pub fn forward_gdn_decode(
     .context("scale_f32 Q")?;
     flambeau_backend_hip::profile::mark("gdn_l2norm_qk", device, stream)?;
 
-    // 11–12. C10 — fused state-step that absorbs the α/β/gate compute
-    // (saves one kernel launch per GDN layer per token). Default-on;
-    // `FLAMBEAU_VARIANT=baseline` opts back to the unfused chain for
-    // regression A/B. n_rep = num_v_heads / num_k_heads.
+    // Fused state-step that absorbs the α/β/gate compute (saves one
+    // kernel launch per GDN layer per token).
     //
-    // CN-80B-13/14 — q/k repeat layout differs by arch:
+    // Q/K repeat layout differs by arch:
     //   qwen35moe (Qwen3.6-35B-A3B): rep-OUTER (cyclic ggml_repeat_4d)
-    //     → kernel uses `h_kv = h_idx % H_kv`. rep_inner_layout = false.
+    //     → kernel uses `h_kv = h_idx % H_kv`; rep_inner_layout = false.
     //   qwen3next (Coder-Next-80B): rep-INNER (reshape-interleave per
-    //     `qwen3next.cpp:418-431`) → kernel uses `h_kv = h_idx / n_rep`.
+    //     `qwen3next.cpp:418-431`) → `h_kv = h_idx / n_rep`;
     //     rep_inner_layout = true.
-    // Wrong choice produces a degenerate logit attractor; see CN-80B-14.
+    // Wrong choice produces a degenerate logit attractor.
     let n_rep = num_v_heads / num_k_heads;
     let rep_inner_layout = cfg.arch == "qwen3next";
     gdn_state_step_alphabeta_f32_s128(
@@ -516,7 +511,7 @@ pub fn forward_gdn_decode(
     .context("ssm_norm (rmsnorm_f32)")?;
     flambeau_backend_hip::profile::mark("gdn_ssm_norm", device, stream)?;
 
-    // 14+15. CN-80B-19c — fused swiglu(z, out_normed) → Q8_1 directly.
+    // 14+15. fused swiglu(z, out_normed) → Q8_1 directly.
     // Skips the F32 `gated_f32` intermediate buffer + 1 launch. Default-on;
     // FLAMBEAU_VARIANT=baseline opts back to the unfused pair.
     if v_size != d_inner {
@@ -534,7 +529,7 @@ pub fn forward_gdn_decode(
             scratch.gated_q8_1,
             d_inner,
         )
-        .context("swiglu_f32_to_q8_1(z, out_normed) (CN-80B-19c)")?;
+        .context("swiglu_f32_to_q8_1(z, out_normed)")?;
     } else {
         swiglu_f32(ops, stream, scratch.z_f32, scratch.out_normed, scratch.gated_f32, d_inner)
             .context("swiglu_f32(z, out_normed)")?;
@@ -605,7 +600,7 @@ pub fn forward_gdn_layer_decode(
 
 
 // ---------------------------------------------------------------------------
-// V1.7.3-f2 — Gated-Delta-Net prefill (L > 1).
+// f2 — Gated-Delta-Net prefill (L > 1).
 // ---------------------------------------------------------------------------
 
 /// Workspace for one prefill chunk of a GDN layer. Sized once against
@@ -613,7 +608,7 @@ pub fn forward_gdn_layer_decode(
 /// tensor is per-layer (doesn't grow with L) and lives in the session.
 pub struct GdnPrefillScratch {
     pub max_tokens: usize,
-    pub x_norm_f16: DevicePtr,      // F16 [L, hidden] — V2.2.d.P8 unfused rmsnorm sink
+    pub x_norm_f16: DevicePtr,      // F16 [L, hidden] — 8 unfused rmsnorm sink
     pub x_q8_1: DevicePtr,
     pub x_q8_1_mmq: DevicePtr,      // DS4 layout sibling of x_q8_1 for MmqLdsX64
     pub qkv_mixed_f32: DevicePtr,   // [L, conv_channels]
@@ -684,7 +679,7 @@ impl GdnPrefillScratch {
         );
         assert!(
             head_k_dim == 128 && head_v_dim == 128,
-            "V1.7.2.F gdn_state_step kernel only instantiated at S_v=128"
+            "gdn_state_step kernel only instantiated at S_v=128"
         );
 
         let mmq_block = std::mem::size_of::<flambeau_quant::BlockQ8_1Mmq>();
@@ -884,7 +879,6 @@ pub(super) fn shift_conv_history_prefill(
 /// Prefill step for one GDN layer. Consumes `x_in` (F16 `[L, hidden]`),
 /// updates `layer_state.state` + `layer_state.conv_history` across all L
 /// tokens, and writes the pre-residual `delta_out` (F16 `[L, hidden]`).
-///
 /// The GDN state-step kernel is already L-aware — it keeps the per-head
 /// `[S_v, S_v]` state register-resident across the entire L recurrence
 /// loop in a single launch. The α / β / gate compute is currently a L-wide
@@ -938,7 +932,7 @@ pub fn forward_gdn_prefill(
         .as_ref()
         .context("V1 GDN forward requires ssm_beta")?;
 
-    // MTP-5h-2b — intra-prefill section markers, mirror of the L=1
+    // intra-prefill section markers, mirror of the L=1
     // decode marks defined in forward_gdn_decode (gdn_start, gdn_norm_quant,
     // gdn_proj_qkv_gate, gdn_proj_alpha_beta, gdn_conv1d, gdn_silu,
     // gdn_l2norm_qk, gdn_state_step, gdn_ssm_norm, gdn_swiglu_quant,
@@ -949,9 +943,9 @@ pub fn forward_gdn_prefill(
     flambeau_backend_hip::profile::mark("gdn_start_p", device, stream)?;
 
     // 1. rmsnorm(x_in) → F16 scratch, then quantise to BOTH Q8_1 layouts.
-    //    V2.2.d.P8 de-fuses the old rmsnorm_quant_q8_1 so we can emit the
-    //    DS4 (BlockQ8_1Mmq) layout consumed by the new Q4_1 MMQ kernel at
-    //    m ≥ 128 alongside the standard per-row layout for MMVQ.
+    // 8 de-fuses the old rmsnorm_quant_q8_1 so we can emit the
+    // DS4 (BlockQ8_1Mmq) layout consumed by the new Q4_1 MMQ kernel at
+    // m ≥ 128 alongside the standard per-row layout for MMVQ.
     rmsnorm_f16(
         ops,
         stream,
@@ -1029,7 +1023,7 @@ pub fn forward_gdn_prefill(
     flambeau_backend_hip::profile::mark("gdn_proj_alpha_beta_p", device, stream)?;
 
     // 6. Conv1d across L tokens: assemble [history, qkv_mixed] → conv_input,
-    //    run conv, then shift history to the last (K-1) rows.
+    // run conv, then shift history to the last (K-1) rows.
     assemble_conv_input_prefill(
         device,
         stream,
@@ -1073,7 +1067,7 @@ pub fn forward_gdn_prefill(
     .context("prefill silu_f32(conv_out)")?;
     flambeau_backend_hip::profile::mark("gdn_silu_p", device, stream)?;
 
-    // 8. Split silu_out into Q / K / V contiguous buffers. V2.4.d fused
+    // 8. Split silu_out into Q / K / V contiguous buffers. fused
     // `gdn_split_qkv_f32` kernel replaces the 3×L memcpy loop (~1500
     // driver calls per layer at L=512). The unfused fallback was kept
     // as `FLAMBEAU_QKV_FUSED=0` regression A/B; deleted in S6 — null
@@ -1128,8 +1122,8 @@ pub fn forward_gdn_prefill(
 
     // 11–12. C10 fused state-step (default) absorbs α/β/gate; baseline
     // chain available via FLAMBEAU_VARIANT=baseline. State-step
-    // event-ordering preserved across both branches (V2.30.a).
-    // CN-80B-13/14 — q/k repeat layout differs by arch; see decode-path
+    // event-ordering preserved across both branches (0.a).
+    // /14 — q/k repeat layout differs by arch; see decode-path
     // comment in `forward_gdn_decode` for the explanation.
     let n_rep = num_v_heads / num_k_heads;
     let rep_inner_layout = cfg.arch == "qwen3next";

@@ -1,27 +1,23 @@
-// p2p_allreduce_residual_rmsnorm_q8_1 — TP-3b-i3 4-op fusion.
-//
+// p2p_allreduce_residual_rmsnorm_q8_1 — 4-op fusion.
 // One launch per rank fuses:
-//   1. Peer-read via BAR1: load partial_local + partial_peer{0,1,2}.
-//   2. Residual-add: hidden[i] += partial_local + Σ peers.
-//   3. RMSNorm: normed[i] = hidden[i] * rsqrt(mean(hidden²) + eps) * weight[i].
-//   4. Q8_1 quantize: per-32-element block, qs[j] = round(normed[j]/d),
-//      d = amax/127, s = d * Σ qs[j].
-//
+// 1. Peer-read via BAR1: load partial_local + partial_peer{0,1,2}.
+// 2. Residual-add: hidden[i] += partial_local + Σ peers.
+// 3. RMSNorm: normed[i] = hidden[i] * rsqrt(mean(hidden²) + eps) * weight[i].
+// 4. Q8_1 quantize: per-32-element block, qs[j] = round(normed[j]/d),
+// d = amax/127, s = d * Σ qs[j].
 // Replaces THREE launches in the post-FFN cross-layer boundary:
-//   - flambeau_p2p_allreduce_residual_tp4 (TP-0b)
-//   - flambeau_rmsnorm_q8_1_fused (existing) — already fuses norm+quant
-//   → ONE fused call. Per-token saving: 64 launches × 10 µs ≈ 0.6 ms at
-//   60 tok/s budget (~3.5% throughput).
-//
+// - flambeau_p2p_allreduce_residual_tp4 ()
+// - flambeau_rmsnorm_q8_1_fused (existing) — already fuses norm+quant
+// → ONE fused call. Per-token saving: 64 launches × 10 µs ≈ 0.6 ms at
+// 60 tok/s budget (~3.5% throughput).
 // Bit-exact equivalent: arithmetic order matches the unfused chain.
-//   - AR sum: same FP32 accumulate as residual_tp4.
-//   - sum_sq: __shfl_xor + LDS (same reduction tree as rmsnorm_f16).
-//   - Q8_1 amax / quantize: per-half-warp reduction as in rmsnorm_q8_1_fused.
-//
+// - AR sum: same FP32 accumulate as residual_tp4.
+// - sum_sq: __shfl_xor + LDS (same reduction tree as rmsnorm_f16).
+// - Q8_1 amax / quantize: per-half-warp reduction as in rmsnorm_q8_1_fused.
 // Constraints:
-//   - n must be a multiple of 256 (single-block kernel) AND of QK8_1=32
-//     (every Qwen3.5/3.6 hidden satisfies both: {2048, 4096, 5120, 8192}).
-//   - Output is `flambeau_block_q8_1[n / QK8_1]`.
+// - n must be a multiple of 256 (single-block kernel) AND of QK8_1=32
+// (every Qwen3.5/3.6 hidden satisfies both: {2048, 4096, 5120, 8192}).
+// - Output is `flambeau_block_q8_1[n / QK8_1]`.
 
 #include <hip/hip_runtime.h>
 #include <hip/hip_fp16.h>
@@ -93,7 +89,7 @@ void flambeau_p2p_allreduce_residual_rmsnorm_q8_1_tp4(
     // so 8 blocks processed per iteration. Loop over n / QK8_1 blocks.
     const int nblocks = (int) n / QK8_1;
     const int block_lane = tid & 31;       // 0..31 — position within block
-    const int block_group = tid >> 5;      // 0..7  — which block in this step
+    const int block_group = tid >> 5;      // 0..7 — which block in this step
 
     for (int b0 = 0; b0 < nblocks; b0 += 8) {
         const int b = b0 + block_group;

@@ -1,38 +1,32 @@
-//! TP-0c — kernel-launched BAR1 P2P AllReduce, wired against [`HipCluster`].
-//!
+//! kernel-launched BAR1 P2P AllReduce, wired against [`HipCluster`].
 //! `BarP2pAllReduce` is the device-side AllReduce primitive used on the TP
 //! decode hot path. Each call launches one
 //! `flambeau_p2p_allreduce_*_tp{2,4}` kernel per rank, simultaneously, on
 //! per-rank streams. The kernels read peer GPUs' partial buffers directly
 //! through PCIe BAR1 (authorised at `HipCluster::new` time, see
 //! `cluster::probe_and_enable_peer_access`).
-//!
 //! Two operating modes:
-//!   - **residual** (`residual_tpN`) — `hidden += partial_local + Σ peers`
-//!     on each rank. Used after attention output proj and FFN down proj
-//!     where the sharded result must be folded into the residual stream.
-//!   - **sum** (`sum_tpN`) — `partial_local += Σ peers` (no residual add).
-//!     Used at the LM-head output-AR boundary where the post-AR value
-//!     *is* the final result, no residual to fold.
-//!
+//! - **residual** (`residual_tpN`) — `hidden += partial_local + Σ peers`
+//! on each rank. Used after attention output proj and FFN down proj
+//! where the sharded result must be folded into the residual stream.
+//! - **sum** (`sum_tpN`) — `partial_local += Σ peers` (no residual add).
+//! Used at the LM-head output-AR boundary where the post-AR value
+//! *is* the final result, no residual to fold.
 //! ## Ordering contract (caller responsibility)
-//!
 //! The kernel reads peer partials at launch time. The producer GEMV that
 //! wrote each rank's `partial[r]` must have completed *and been visible
 //! to peer ranks' streams* before this AllReduce launches. The standard
 //! pattern is:
-//!
 //! ```text
-//! rank r's GEMV stream         AR stream r reads peer partials
-//! produces partial[r]   →  hipEventRecord(event_r)
-//!                                                    ↓
+//! rank r's GEMV stream AR stream r reads peer partials
+//! produces partial[r] → hipEventRecord(event_r)
+//! ↓
 //! AR stream r waits ←─ hipStreamWaitEvent(stream_ar_r, event_(r+1)%N)
-//!                  ←─ hipStreamWaitEvent(stream_ar_r, event_(r+2)%N)
-//!                  ←─ hipStreamWaitEvent(stream_ar_r, event_(r+3)%N)
+//! ←─ hipStreamWaitEvent(stream_ar_r, event_(r+2)%N)
+//! ←─ hipStreamWaitEvent(stream_ar_r, event_(r+3)%N)
 //! AR launch: BarP2pAllReduce::residual_tp4(...)
 //! ```
-//!
-//! The TP-2 forward path will set up these waits explicitly. For
+//! The forward path will set up these waits explicitly. For
 //! same-stream usage (producer + AR on the same stream per rank) HIP
 //! guarantees serial execution within the stream, so only the
 //! cross-rank waits are strictly required.
@@ -97,12 +91,10 @@ impl ArKind {
 }
 
 /// BAR1 P2P AllReduce primitive.
-///
 /// Holds one [`HipModule`] per rank — all loaded from the same hsaco —
 /// because `HipModule` is bound to a specific HIP device at load time.
 /// Kernel handles are resolved on demand via `HipModule::kernel`'s
 /// internal cache (uncontended `RwLock` read on the hot path).
-///
 /// Construction requires a fully-connected peer-access matrix
 /// ([`HipCluster::peer_access_full`]); a partial matrix means at least
 /// one rank can't read at least one peer through BAR1, and the caller
@@ -111,11 +103,11 @@ pub struct BarP2pAllReduce {
     cluster: Arc<HipCluster>,
     /// `modules[r]` is the AR hsaco loaded onto rank `r`'s device.
     modules: Vec<HipModule>,
-    /// **TP-3b** — fused AR + residual + RMSNorm hsaco loaded onto each
+    /// fused AR + residual + RMSNorm hsaco loaded onto each
     /// rank's device. Separate module from the plain-AR one because
     /// build.rs emits one hsaco per `.cu` file.
     modules_fused_norm: Vec<HipModule>,
-    /// **TP-3b-i3** — fused AR + residual + RMSNorm + Q8_1 quantize
+    /// fused AR + residual + RMSNorm + Q8_1 quantize
     /// hsaco. Used at the cross-layer FFN boundary so the next layer's
     /// first mmvq sees the AR'd-and-quantized x_q8_1 directly.
     modules_fused_norm_q8_1: Vec<HipModule>,
@@ -131,14 +123,13 @@ impl std::fmt::Debug for BarP2pAllReduce {
 
 impl BarP2pAllReduce {
     /// Load the AllReduce hsaco onto every rank.
-    ///
     /// # Errors
     /// - The cluster's peer-access matrix isn't fully connected
-    ///   (`HipCluster::peer_access_full` returned `false`). The
-    ///   kernel-launched AR path is unsafe to engage in this case;
-    ///   the caller must fall back to host-bounce.
+    /// (`HipCluster::peer_access_full` returned `false`). The
+    /// kernel-launched AR path is unsafe to engage in this case;
+    /// the caller must fall back to host-bounce.
     /// - The `p2p_allreduce_residual` hsaco wasn't compiled into
-    ///   `flambeau-kernels-hip` (build.rs failure or `HIP_SKIP_BUILD=1`).
+    /// `flambeau-kernels-hip` (build.rs failure or `HIP_SKIP_BUILD=1`).
     /// - Any per-rank `hipDeviceBind` / `hipModuleLoadData` failure.
     pub fn new(cluster: Arc<HipCluster>) -> DeviceResult<Self> {
         if !cluster.peer_access_full() {
@@ -193,18 +184,16 @@ impl BarP2pAllReduce {
 
     /// TP=4 residual: on every rank simultaneously,
     /// `hidden[r] += partial[r] + Σ_{k≠r} partial[k]`.
-    ///
     /// `hidden[r]` and `partial[r]` are device pointers on rank `r`'s
     /// HIP device, each addressing at least `elem_count * 2` bytes
     /// (fp16). Each rank's launch goes on `streams[r]`.
-    ///
     /// # Safety
     /// - `hidden[r]` and `partial[r]` must be valid for `elem_count`
-    ///   `__half` values on rank `r`'s device.
+    /// `__half` values on rank `r`'s device.
     /// - Producer writes to `partial[k]` must be ordered against
-    ///   `streams[r]` for every peer `k ≠ r` (typically via
-    ///   `hipEventRecord` on the producer stream + `hipStreamWaitEvent`
-    ///   on `streams[r]`); see the module-level "Ordering contract".
+    /// `streams[r]` for every peer `k ≠ r` (typically via
+    /// `hipEventRecord` on the producer stream + `hipStreamWaitEvent`
+    /// on `streams[r]`); see the module-level "Ordering contract".
     /// - `streams[r]` must be on rank `r`'s device.
     pub unsafe fn residual_tp4(
         &self,
@@ -240,7 +229,6 @@ impl BarP2pAllReduce {
     }
 
     /// TP=2 residual. Mirrors `residual_tp4` for two ranks.
-    ///
     /// **B5 fix** — partial pointers are passed in CANONICAL (rank-id sorted)
     /// order to both ranks, so both compute `hidden + partial[0] + partial[1]`
     /// in the same FP32 add order. Without this, rank 0 sums `h + p[0] + p[1]`
@@ -249,7 +237,6 @@ impl BarP2pAllReduce {
     /// experts on each rank → AR sums mismatched experts → garbage tokens.
     /// Dense-FFN paths happen to round to the same argmax despite the drift,
     /// so this bug only surfaced on qwen35moe (35B-A3B parity drift).
-    ///
     /// # Safety
     /// Same per-pointer + ordering contract as `residual_tp4`, with
     /// only one peer per rank.
@@ -264,7 +251,6 @@ impl BarP2pAllReduce {
         let cfg = launch_cfg(elem_count);
         for r in 0..2 {
             // SAFETY: forwarded from the public-method contract.
-            //
             // Canonical order: partial[0] is "local" arg, partial[1] is "peer"
             // — for rank 0, partial[0] is local-device read and partial[1] is
             // a BAR1 P2P read; for rank 1 the roles swap (partial[0] becomes
@@ -290,7 +276,6 @@ impl BarP2pAllReduce {
 
     /// TP=4 sum (no residual): on every rank,
     /// `partial[r] = Σ partial[k]` for k in 0..4.
-    ///
     /// # Safety
     /// Same per-pointer + ordering contract as `residual_tp4`.
     pub unsafe fn sum_tp4(
@@ -321,19 +306,17 @@ impl BarP2pAllReduce {
         Ok(())
     }
 
-    /// **TP-3b** — fused TP=4 AllReduce + residual-add + RMSNorm.
+    /// fused TP=4 AllReduce + residual-add + RMSNorm.
     /// On every rank, in one launch:
-    ///   `hidden[r]   += partial[r] + Σ_{k≠r} partial[k]`
-    ///   `out_norm[r]  = hidden[r] * rsqrt(mean(hidden²) + eps) * rms_weight`
-    ///
+    /// `hidden[r] += partial[r] + Σ_{k≠r} partial[k]`
+    /// `out_norm[r] = hidden[r] * rsqrt(mean(hidden²) + eps) * rms_weight`
     /// `n` is the hidden_size; must satisfy `n % 256 == 0` (single-block
     /// kernel; per-thread element count is `n / 256`).
-    ///
     /// # Safety
     /// - `hidden[r]`, `partial[r]`, `out_norm[r]` valid for `n` `__half`
-    ///   elements on rank `r`'s device.
+    /// elements on rank `r`'s device.
     /// - `rms_weight[r]` valid for `n` `__half` elements (Replicated
-    ///   per the layout table).
+    /// per the layout table).
     /// - Producer-stream ordering as in `residual_tp4`.
     pub unsafe fn residual_rmsnorm_tp4(
         &self,
@@ -379,15 +362,13 @@ impl BarP2pAllReduce {
         Ok(())
     }
 
-    /// **TP-3b-i3** — fused TP=4 AR + residual + RMSNorm + Q8_1 quantize.
+    /// fused TP=4 AR + residual + RMSNorm + Q8_1 quantize.
     /// Cross-layer FFN-boundary lever: produces the next layer's
     /// `x_q8_1` directly so the next forward call's first mmvq doesn't
     /// run a separate `rmsnorm_quant_q8_1`.
-    ///
     /// `out_q8_1[r]` must point to at least `n / QK8_1` `flambeau_block_q8_1`
     /// entries on rank `r`'s device (= `n / 32 * sizeof(BlockQ8_1)` bytes).
     /// `n % 256 == 0` and `n % QK8_1 == 0` (covers Qwen3.5/3.6 hidden sizes).
-    ///
     /// # Safety
     /// Same per-pointer + ordering contract as `residual_rmsnorm_tp4`,
     /// with `out_q8_1` replacing `out_norm`.
@@ -434,8 +415,7 @@ impl BarP2pAllReduce {
         Ok(())
     }
 
-    /// **TP-3b-i3** — fused TP=2 AR + residual + RMSNorm + Q8_1 quantize.
-    ///
+    /// fused TP=2 AR + residual + RMSNorm + Q8_1 quantize.
     /// # Safety
     /// Same per-pointer + ordering contract as `residual_rmsnorm_q8_1_tp4`.
     pub unsafe fn residual_rmsnorm_q8_1_tp2(
@@ -481,8 +461,7 @@ impl BarP2pAllReduce {
         Ok(())
     }
 
-    /// **TP-3b** — fused TP=2 AllReduce + residual-add + RMSNorm.
-    ///
+    /// fused TP=2 AllReduce + residual-add + RMSNorm.
     /// # Safety
     /// Same per-pointer + ordering contract as `residual_rmsnorm_tp4`.
     pub unsafe fn residual_rmsnorm_tp2(
@@ -530,7 +509,6 @@ impl BarP2pAllReduce {
     }
 
     /// TP=2 sum.
-    ///
     /// # Safety
     /// Same per-pointer + ordering contract as `residual_tp4`.
     pub unsafe fn sum_tp2(
@@ -634,9 +612,8 @@ impl BarP2pAllReduce {
         Ok(())
     }
 
-    /// **TP-3b** — launch the fused AR+residual+RMSNorm kernel on rank
+    /// launch the fused AR+residual+RMSNorm kernel on rank
     /// `rank`. Resolved from the rank's `modules_fused_norm[rank]`.
-    ///
     /// # Safety
     /// Forwarded from `residual_rmsnorm_tp{2,4}` public-method contracts.
     #[expect(
@@ -687,11 +664,10 @@ impl BarP2pAllReduce {
         Ok(())
     }
 
-    /// **TP-3b-i3** — launch the 4-op fused AR+residual+RMSNorm+Q8_1
+    /// launch the 4-op fused AR+residual+RMSNorm+Q8_1
     /// kernel. Same arg layout as `launch_fused_rmsnorm` except the
     /// final pointer is a `flambeau_block_q8_1*` output instead of a
     /// `__half*` normed output. Kernel ABI matches.
-    ///
     /// # Safety
     /// Forwarded from `residual_rmsnorm_q8_1_tp{2,4}` public-method
     /// contracts.

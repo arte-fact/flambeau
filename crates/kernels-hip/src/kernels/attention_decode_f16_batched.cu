@@ -1,36 +1,30 @@
 // attention_decode_f16_batched — single-launch GQA decode attention over
 // N (Q-row, per-slot KV-cache) pairs.
-//
 // Replaces the per-slot loop in `forward_full_attn_layer_decode_batched_*`,
 // which structurally caps hybrid throughput at ~1.0× (per #267 cert).
 // Each (q_head, slot) block runs the same flash-attn-v2 online-softmax
 // body as `attention_decode_f16`; the slot index is carried through
 // `blockIdx.y`, and per-slot KV-cache base pointers + KV-tail lengths
 // are read from device-side tables built once per call by the dispatcher.
-//
 // Block math is bit-identical to `attention_decode_f16` for any single
 // (q_head, slot) pair — the kernel reuses the same body verbatim with
 // `q`, `k_cache`, `v_cache`, `out`, `n_tokens` rebound per block from
 // the slot tables. Therefore N=1 dispatches produce bit-identical
 // output to the single-slot kernel (regression guard for #266c wiring).
-//
 // Shapes:
-//   q_batched[N, n_heads_q, head_dim]                 F16
-//   k_cache_ptrs[N]                                   u64 (device ptr per slot)
-//   v_cache_ptrs[N]                                   u64 (device ptr per slot)
-//   out_batched[N, n_heads_q, head_dim]               F16
-//   n_tokens_kv[N]                                    i32 (per-slot KV tail)
+// q_batched[N, n_heads_q, head_dim] F16
+// k_cache_ptrs[N] u64 (device ptr per slot)
+// v_cache_ptrs[N] u64 (device ptr per slot)
+// out_batched[N, n_heads_q, head_dim] F16
+// n_tokens_kv[N] i32 (per-slot KV tail)
 // Per slot, the pointed buffers cover [n_tokens_kv[slot], n_heads_kv, head_dim] F16.
-//
 // Launch shape (caller-provided):
-//   blockDim  = { head_dim }                         (one thread per output element)
-//   gridDim   = { n_heads_q, n_slots }
-//   shared    = q_shared[256] + out_shared[256] + score_parts[4]
-//             = 2064 bytes
-//
+// blockDim = { head_dim } (one thread per output element)
+// gridDim = { n_heads_q, n_slots }
+// shared = q_shared[256] + out_shared[256] + score_parts[4]
+// = 2064 bytes
 // Supported head_dim: {64, 128, 256}. Block dim equals head_dim, so the
 // number of wave64 warps is head_dim / 64 ∈ {1, 2, 4}.
-//
 // Correctness oracle: per-slot loop of `attention_decode_f16` (already certed).
 // Element-wise max delta tolerance is the flash-attn-v2 reordering bound
 // (~1e-3 in F16 — same bar as `attention_decode_f16_splitk`).

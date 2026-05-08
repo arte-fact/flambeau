@@ -1,11 +1,9 @@
-//! V1.7.2.A RoPE NeoX-partial correctness sweep.
-//!
+//! RoPE NeoX-partial correctness sweep.
 //! Two-part cert (same shape as `sweep_rope`):
 //! 1. Round-trip: rotate with positions `p`, then with `-p` — modulo F16 noise.
 //! 2. Fixed-angle oracle: compare to CPU F32 reference at sequential positions.
-//!
 //! Shapes cover the Qwen3.6 full-attention layer:
-//!   head_dim=256, rotated_dims=64, theta_base=1e7, n_heads_q=16, n_heads_kv=2.
+//! head_dim=256, rotated_dims=64, theta_base=1e7, n_heads_q=16, n_heads_kv=2.
 
 #![cfg(feature = "hip")]
 

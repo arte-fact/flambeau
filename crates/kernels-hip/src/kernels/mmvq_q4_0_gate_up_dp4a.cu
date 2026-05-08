@@ -1,19 +1,17 @@
 // mmvq_q4_0_gate_up_dp4a — fused gate+up Q4_0 dense MMVQ with DP4A.
-//
 // TP-perf-c1 lever — Qwen3.6-27B-Q4_0 decode is dominated by
 // `flambeau_mmvq_q4_0_q8_1` (50% of decode wall). Most of those calls
 // come in pairs that share the activation: `attn_qkv` + `attn_gate`
 // in GDN layers, and `ffn_gate` + `ffn_up` in dense FFN layers (both
 // Q4_0 in this model). This kernel merges each pair into one launch
 // and reads the Q8_1 activation once.
-//
 // Mirrors `mmvq_q8_0_gate_up_dp4a` exactly except:
-//   - reads Q4_0 weights (18 B / block: half d + 16 nibble bytes),
-//   - uses the (q - 8) DP4A bias-correction identity from `mmvq_q4_0`:
-//       sumi  = dp4a(vi_lo, u_lo, 0) + dp4a(vi_hi, u_hi, sumi)
-//       acc  += sumi · d_x · d_y - 8 · d_x · s_y · 0.25  (per-block)
-//   - asymmetric `n_rows_gate` vs `n_rows_up` supported via per-row
-//     short-circuit (same pattern as the Q8_0 fusion).
+// - reads Q4_0 weights (18 B / block: half d + 16 nibble bytes),
+// - uses the (q - 8) DP4A bias-correction identity from `mmvq_q4_0`:
+// sumi = dp4a(vi_lo, u_lo, 0) + dp4a(vi_hi, u_hi, sumi)
+// acc += sumi · d_x · d_y - 8 · d_x · s_y · 0.25 (per-block)
+// - asymmetric `n_rows_gate` vs `n_rows_up` supported via per-row
+// short-circuit (same pattern as the Q8_0 fusion).
 
 #include "block_quant.cuh"
 #include "gfx906.cuh"

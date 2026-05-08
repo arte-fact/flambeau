@@ -55,7 +55,6 @@ pub struct SamplingParams {
 /// request omits a knob, the corresponding model default fills in. If
 /// neither is set, [`SamplingParams::from_parts`] falls back to the
 /// OpenAI/unbiased defaults documented on each field.
-///
 /// Authors of GGUFs (Unsloth, official Qwen, etc.) ship these values
 /// because the model is calibrated for them — e.g.
 /// Qwen3-Coder-Next ships `temp=1.0, top_p=0.95, top_k=40` and
@@ -86,26 +85,25 @@ impl ModelDefaults {
 impl SamplingParams {
     /// Derive from OpenAI params. Defaults match the OpenAI surface so
     /// that an unconfigured client gets unbiased sampling.
-    ///
     /// - `temperature` → `1.0` when omitted. `0.0` means greedy.
     /// - `top_p` → passed through when in `(0, 1)`.
     /// - `top_k` → `None` (disabled). `0` is also treated as disabled.
     /// - `min_p` → `0.0` (off). Passed through when positive.
     /// - `repetition_penalty` → `1.0` (off) unless the client provides one.
     /// - `presence_penalty` → `0.0` (OpenAI default) unless client-set.
-    ///   An earlier default of `1.5` was lifted from a community claim
-    ///   about Qwen3.5's "stable agent setup"; in practice it is far too
-    ///   aggressive for normal chat — every token already in history
-    ///   loses 1.5 nats, and on long generations the distribution drifts
-    ///   into degenerate synonym-spam (verified live). Keep it 0.0;
-    ///   callers doing agent loops can opt into a small positive value.
+    /// An earlier default of `1.5` was lifted from a community claim
+    /// about Qwen3.5's "stable agent setup"; in practice it is far too
+    /// aggressive for normal chat — every token already in history
+    /// loses 1.5 nats, and on long generations the distribution drifts
+    /// into degenerate synonym-spam (verified live). Keep it 0.0;
+    /// callers doing agent loops can opt into a small positive value.
     /// - `frequency_penalty` → `0.0` unless client-supplied.
     /// - `max_tokens` → `4096` when omitted; capped at `8192` to keep a
-    ///   single request from monopolising the server. Earlier 2048 cap
-    ///   silently truncated long answers (`finish=length` after exactly
-    ///   2048 tokens regardless of the request); earlier 512 default
-    ///   was too tight for code-generation requests via curl/clients
-    ///   that don't pass `max_tokens` explicitly.
+    /// single request from monopolising the server. Earlier 2048 cap
+    /// silently truncated long answers (`finish=length` after exactly
+    /// 2048 tokens regardless of the request); earlier 512 default
+    /// was too tight for code-generation requests via curl/clients
+    /// that don't pass `max_tokens` explicitly.
     #[allow(clippy::too_many_arguments)]
     pub fn from_parts(
         temperature: Option<f32>,
@@ -129,7 +127,6 @@ impl SamplingParams {
         // is a documented greedy override and must NOT fall back to
         // the model default — that would surprise a caller who
         // explicitly asked for greedy.
-        //
         // **P0.4** — auto-low-temp for tool-router / structured-output
         // meta-prompts. OpenWebUI's auto-prompts (search-query-gen,
         // follow-ups, title, tags) and Aider/Continue/LangChain JSON
@@ -174,7 +171,6 @@ impl SamplingParams {
 /// - `null` / missing → empty
 /// - a single string → one-element vec
 /// - an array of strings → first 4 non-empty entries
-///
 /// OpenAI caps the array at 4 entries; longer arrays are truncated rather
 /// than rejected so a misconfigured client gets a usable response.
 pub fn parse_stop(stop: Option<&serde_json::Value>) -> Vec<String> {

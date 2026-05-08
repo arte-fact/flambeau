@@ -1,5 +1,4 @@
-//! V1.7.2.B L2-norm correctness sweep.
-//!
+//! L2-norm correctness sweep.
 //! One block per row, 256 threads. Compared to CPU F32 reference at several
 //! shapes matching the GDN Q/K layout (`num_k_heads × head_k_dim = 16 × 128`
 //! for Qwen3.6).

@@ -1,14 +1,11 @@
-//! V1.4 MMQ correctness sweep.
-//!
+//! MMQ correctness sweep.
 //! MMQ = matrix × matrix (prefill path). Inputs:
-//!   weights: [N, K]  Q-format blocks
-//!   act:     [M, K]  F32 → quantised to Q8_1 on device
-//!   output:  [M, N]  F32
-//!
-//! The V1.4 roadmap cert grid is `M ∈ {128, 512, 2048}` × Qwen3.6 attention /
+//! weights: [N, K] Q-format blocks
+//! act: [M, K] F32 → quantised to Q8_1 on device
+//! output: [M, N] F32
+//! The roadmap cert grid is `M ∈ {128, 512, 2048}` × Qwen3.6 attention /
 //! MoE projection widths (K, N). This sweep runs a compact sub-grid; full
 //! coverage lands with the first-class 4-warp LDS-tiled port next session.
-//!
 //! Current impl: `qmatmul_q8_0_mmq_oracle_gfx906` — the `mmq_q8_0_oracle`
 //! kernel (one output element per single-wave block). Slow but correct.
 
@@ -45,41 +42,41 @@ pub enum Dtype {
     Q8_0Oracle,
     /// 4-warp LDS-tiled MMQ, MMQ_Y=32, MMQ_X=8, 256 threads.
     Q8_04Warp,
-    /// Wave64 Q8_0 MMQ (V2.4.c). MMQ_Y=64, TILE_N=8, 64 threads.
+    /// Wave64 Q8_0 MMQ (). MMQ_Y=64, TILE_N=8, 64 threads.
     Q8_0Wave64,
-    /// Wave64 Q8_0 MMQ TILE_N=16 (V2.7). MMQ_Y=64, TILE_N=16, 64 threads.
+    /// Wave64 Q8_0 MMQ TILE_N=16 (). MMQ_Y=64, TILE_N=16, 64 threads.
     /// Halves weight HBM fetches vs TILE_N=8 (each weight tile reused across
     /// 16 activations instead of 8). Targets the 97 % MemBusy bottleneck
     /// measured on Qwen3.6-35B Mesh<2> pp=512.
     Q8_0Wave64Tile16,
     /// 4-warp LDS-tiled Q4_1 MMQ, MMQ_Y=32, MMQ_X=8, 256 threads.
     Q4_14Warp,
-    /// Wave64 Q4_1 MMQ (V2.13.a). MMQ_Y=64, TILE_N=8, 64 threads. DP4A inner.
+    /// Wave64 Q4_1 MMQ (3.a). MMQ_Y=64, TILE_N=8, 64 threads. DP4A inner.
     Q4_1Wave64,
-    /// Wave64 Q4_0 MMQ (V2.28.a). MMQ_Y=64, TILE_N=8, 64 threads. DP4A inner
+    /// Wave64 Q4_0 MMQ (8.a). MMQ_Y=64, TILE_N=8, 64 threads. DP4A inner
     /// with the `(q-8)·y = dp4a(q,y) - 8·y_s` bias-correction identity.
     Q4_0Wave64,
-    /// V1-BENCH-C1 — 4-warp LDS-tiled Q4_0 MMQ. MMQ_Y=128, MMQ_X=64, 256 threads
+    /// 4-warp LDS-tiled Q4_0 MMQ. MMQ_Y=128, MMQ_X=64, 256 threads
     /// (4 warps × 64). Direct port of Q4_1 4warp_lds with bias-correction in
     /// the dot. Closes the 2.5× dense-prefill gap on 27B-Q4_0 vs Q4_1.
     Q4_04Warp,
-    /// Wave64 Q5_0 MMQ (V2.30.a). MMQ_Y=64, TILE_N=8, 64 threads. DP4A inner
+    /// Wave64 Q5_0 MMQ (0.a). MMQ_Y=64, TILE_N=8, 64 threads. DP4A inner
     /// with the `(q5-16)·y = dp4a(nibble,y) + 16·dp4a(bit,y) - 16·y_s` identity
-    /// (5th-bit side from V2.23 mmvq_q5_0 grafted into the V2.28.a tile shape).
+    /// (5th-bit side from 3 mmvq_q5_0 grafted into the 8.a tile shape).
     Q5_0Wave64,
     /// 4-warp LDS-tiled Q4_K MMQ, MMQ_Y=16, MMQ_X=8, 128 threads.
     Q4K4Warp,
-    /// V2.14.b — llamacpp-turbo Q4_K MMQ port. 256 threads (4 warps × 64),
+    /// 4.b — llamacpp-turbo Q4_K MMQ port. 256 threads (4 warps × 64),
     /// MMQ_Y=16, MMQ_X=16, double-buffered Y LDS per super-block. DS4 Q8_1
     /// activation layout.
     Q4KTurbo,
-    /// Wave64 Q4_K MMQ (V2.3.b.1, candle port). MMQ_Y=64, TILE_N=8, 64 threads.
+    /// Wave64 Q4_K MMQ (, candle port). MMQ_Y=64, TILE_N=8, 64 threads.
     Q4KWave64,
-    /// Wave64 Q5_K MMQ (V2.2.d fix 1, candle port). MMQ_Y=64, TILE_N=8, 64 threads.
+    /// Wave64 Q5_K MMQ (, candle port). MMQ_Y=64, TILE_N=8, 64 threads.
     Q5KWave64,
     /// 4-warp LDS-tiled Q6_K MMQ, MMQ_Y=16, MMQ_X=8, 128 threads.
     Q6K4Warp,
-    /// Wave64 Q6_K MMQ (V2.3.b.3 — flambeau-authored, no candle source).
+    /// Wave64 Q6_K MMQ (flambeau-authored, no candle source).
     /// MMQ_Y=64, TILE_N=8, 64 threads. DP4A inner.
     Q6KWave64,
 }
@@ -91,19 +88,19 @@ fn tile_shape(dtype: Dtype) -> (u32, u32) {
     match dtype {
         Dtype::Q8_0Oracle => (1, 1),   // one output element per block
         Dtype::Q8_04Warp => (32, 8),   // MMQ_Y × MMQ_X
-        Dtype::Q8_0Wave64 => (64, 8),  // MMQ_Y × TILE_N — wave64 (V2.4.c)
-        Dtype::Q8_0Wave64Tile16 => (64, 16), // MMQ_Y × TILE_N — wave64 (V2.7)
-        Dtype::Q4_14Warp => (128, 64), // V2.2.d.P5 — candle turbo tile shape
-        Dtype::Q4_1Wave64 => (64, 8),  // V2.13.a wave64 MMQ for Q4_1
-        Dtype::Q4_0Wave64 => (64, 8),  // V2.28.a wave64 MMQ for Q4_0
+        Dtype::Q8_0Wave64 => (64, 8),  // MMQ_Y × TILE_N — wave64 ()
+        Dtype::Q8_0Wave64Tile16 => (64, 16), // MMQ_Y × TILE_N — wave64 ()
+        Dtype::Q4_14Warp => (128, 64), // 5 — candle turbo tile shape
+        Dtype::Q4_1Wave64 => (64, 8),  // 3.a wave64 MMQ for Q4_1
+        Dtype::Q4_0Wave64 => (64, 8),  // 8.a wave64 MMQ for Q4_0
         Dtype::Q4_04Warp => (128, 64), // C1 — 4warp_lds tile, MMQ_Y=128, MMQ_X=64
-        Dtype::Q5_0Wave64 => (64, 8),  // V2.30.a wave64 MMQ for Q5_0
+        Dtype::Q5_0Wave64 => (64, 8),  // 0.a wave64 MMQ for Q5_0
         Dtype::Q4K4Warp => (16, 8),    // MMQ_Y × MMQ_X (Q4_K uses 16 rows to fit LDS)
-        Dtype::Q4KTurbo => (128, 16),  // V2.14.b turbo-ported Q4_K (MMQ_Y=128, MMQ_X=16)
+        Dtype::Q4KTurbo => (128, 16),  // 4.b turbo-ported Q4_K (MMQ_Y=128, MMQ_X=16)
         Dtype::Q4KWave64 => (64, 8),   // MMQ_Y × TILE_N — wave64 MMQ for Q4_K (candle port)
         Dtype::Q5KWave64 => (64, 8),   // MMQ_Y × TILE_N — wave64 MMQ for Q5_K (candle port)
         Dtype::Q6K4Warp => (16, 8),    // MMQ_Y × MMQ_X (Q6_K same tile as Q4_K)
-        Dtype::Q6KWave64 => (64, 8),   // MMQ_Y × TILE_N — wave64 MMQ for Q6_K (V2.3.b.3)
+        Dtype::Q6KWave64 => (64, 8),   // MMQ_Y × TILE_N — wave64 MMQ for Q6_K ()
     }
 }
 
@@ -262,7 +259,7 @@ pub struct SweepSpec {
 }
 
 impl SweepSpec {
-    /// V1.4 oracle grid — small enough that the single-wave-per-output kernel
+    /// oracle grid — small enough that the single-wave-per-output kernel
     /// finishes in a reasonable wall-clock. Once the 4-warp LDS-tiled kernel
     /// lands, the grid grows to `M ∈ {128, 512, 2048}` × full K × N.
     pub fn v1_4_oracle(dtype: Dtype) -> Self {
@@ -300,7 +297,7 @@ impl SweepSpec {
 pub fn run_sweep(spec: &SweepSpec, repo_root: &Path) -> Result<Cert> {
     let n = device_count().context("hipGetDeviceCount")?;
     if n < 1 {
-        bail!("no HIP devices on this host — V1.4 sweep needs gfx906");
+        bail!("no HIP devices on this host — sweep needs gfx906");
     }
 
     let dev = HipDevice::new(0)?;
@@ -394,7 +391,7 @@ fn run_shape(
     assert_eq!(k % dtype.block_elem_count(), 0);
     let nb_per_row = k / dtype.block_elem_count();
 
-    // Q4_1 MMQ uses the DS4 / BlockQ8_1Mmq activation layout (V2.2.d.P-series
+    // Q4_1 MMQ uses the DS4 / BlockQ8_1Mmq activation layout (series
     // port of candle). Every other MMQ variant still uses the per-row
     // BlockQ8_1 layout. The fork happens here.
     let uses_mmq_layout = dtype == Dtype::Q4_14Warp
@@ -510,10 +507,10 @@ fn run_shape(
             let grid_x = (n as u32).div_ceil(rows_per_block);
             let grid_y = (m as u32).div_ceil(batches_per_block);
             // LDS budget depends on kernel:
-            //   Q4_1 4warp_lds: 7584*4 = 30336 B (matches mmq_q4_1_4warp_lds.cu)
-            //   Q4_K turbo:     tile_y (MMQ_X × 36) + tile_x_qs (MMQ_Y × (32+1))
-            //                   + tile_x_dm (MMQ_Y half2) + tile_x_sc (MMQ_Y×4 + MMQ_Y/8) ints
-            //                 = 576 + 4224 + 128 + 528 = 5456 ints = 21824 B (mmq_y=128)
+            // Q4_1 4warp_lds: 7584*4 = 30336 B (matches mmq_q4_1_4warp_lds.cu)
+            // Q4_K turbo: tile_y (MMQ_X × 36) + tile_x_qs (MMQ_Y × (32+1))
+            // + tile_x_dm (MMQ_Y half2) + tile_x_sc (MMQ_Y×4 + MMQ_Y/8) ints
+            // = 576 + 4224 + 128 + 528 = 5456 ints = 21824 B (mmq_y=128)
             let shared_bytes: u32 = match dtype {
                 Dtype::Q4_14Warp | Dtype::Q4_04Warp => 7584 * 4,  // same MMQ_Y/MMQ_X tile
                 Dtype::Q4KTurbo  => 22528,  // 22 KiB, rounded up
@@ -657,7 +654,7 @@ fn tame_weight_scales(dtype: Dtype, mut raw: Vec<u8>) -> Vec<u8> {
             Dtype::Q4K4Warp | Dtype::Q4KWave64 | Dtype::Q4KTurbo => {
                 // Q4_K: d(fp16), dmin(fp16), scales[12], qs[128]. Tame d/dmin
                 // so the reference stays well-conditioned (same shaping the
-                // V1.3 MMVQ sweep uses).
+                // MMVQ sweep uses).
                 let d = f16::from_f32((block[0] as f32 / 255.0) * 0.1 + 0.01);
                 let dmin = f16::from_f32((block[1] as f32 / 255.0) * 0.05);
                 block[0..2].copy_from_slice(&d.to_bits().to_le_bytes());

@@ -1,19 +1,16 @@
 // mmvq_q8_0_t128_vdr2 — Q8_0 single-row MMVQ combining t128 occupancy
 // with the VDR=2 inner-loop unroll.
-//
 // C9-followup. C9's standalone t128 lost decisively to the cycle-1 vdr2
 // default (-3.5 % on 27B-Q8_0 Qwen3.6, -19.2 % on Qwen3.5) because t128
 // halves the threads/block while keeping VDR=1, throwing away the ILP
 // win that vdr2 already amortizes via per-thread DP4A unrolling.
-//
 // This kernel keeps the vdr2 inner-loop pattern (2 dp4a per "pair slot",
 // scheduler overlap on the 2nd dp4a's source fetch) but at 128 t/block
 // = 2 wave64s/CU = 2 in-flight blocks/CU at the gfx906 occupancy ceiling.
 // The expected win: vdr2's ILP * t128's latency-hiding > vdr2 alone.
-//
 // Thread layout (128 threads / block, 1 row / block):
-//   lane_in_grp = tid & 3  — 0..3: which int32-pair within a block
-//   block_idx   = tid >> 2 — 0..31: 32 blocks/iter (vs 64 in 256t vdr2)
+// lane_in_grp = tid & 3 — 0..3: which int32-pair within a block
+// block_idx = tid >> 2 — 0..31: 32 blocks/iter (vs 64 in 256t vdr2)
 // Outer stride = 32 blocks/iter.
 
 #include "block_quant.cuh"

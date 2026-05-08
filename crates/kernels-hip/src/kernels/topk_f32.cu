@@ -1,25 +1,20 @@
 // topk_f32 — per-token top-k selection over F32 logits.
-//
 // For each token, pick the k largest logits; return their expert ids +
 // softmax-normalised weights over the selected k. No candle prior art —
 // Qwen3.x MoE uses 128–256 experts × top-8 which is small enough for an
 // iterative find-max + mask kernel (the dedicated bitonic top-k path
 // is a perf follow-up).
-//
 // Layout:
-//   blockDim  = { n_experts }   (128 for Qwen3.5, 256 for Qwen3.6)
-//   gridDim   = { n_tokens }
-//   shared    = n_experts floats + 2 stats + k floats
-//
+// blockDim = { n_experts } (128 for Qwen3.5, 256 for Qwen3.6)
+// gridDim = { n_tokens }
+// shared = n_experts floats + 2 stats + k floats
 // Supported `n_experts` ceiling: TOPK_MAX_EXPERTS (compile-time). Bumping
 // this requires a matching bump in `s_logits`, `s_max_v`, `s_max_i` +
 // a cert shape at the new ceiling — do not silently raise.
-//
 // Algorithm:
-//   Load all logits into LDS. Loop k times: warp-reduce find-max across
-//   the block, record (index, value), write -INF at the winner, repeat.
-//   After the k-loop, softmax the k captured raw values → weights.
-//
+// Load all logits into LDS. Loop k times: warp-reduce find-max across
+// the block, record (index, value), write -INF at the winner, repeat.
+// After the k-loop, softmax the k captured raw values → weights.
 // Stability: ties are broken by lower-index-wins (via explicit
 // `idx_other < local_idx` in the reduce) so CPU and GPU agree.
 

@@ -1,20 +1,17 @@
 // indexed_moe_mmvq_q5_k — Q5_K MMVQ with per-token expert routing.
-//
 // Q5_K sibling of `indexed_moe_mmvq_q4_k.cu` / `indexed_moe_mmvq_q6_k.cu`.
 // Inner arithmetic is byte-identical to `mmvq_q5_k.cu` (5-bit = 4-bit nibble
 // + high bit from `qh`, mask `1<<(2*grp)` for low-nibble, `2<<(2*grp)` for
 // high-nibble). Needed because Qwen3-Coder-30B-A3B-Instruct-UD-Q4_K_XL
 // promotes 13/48 `ffn_down_exps` from Q4_K to Q5_K for quality.
-//
 // Layout:
-//   weights       [n_experts, n_rows, n_sb_per_row]   Q5_K
-//   activations   [n_tokens, n_sb_per_row * 8]        Q8_1 (8 blocks/SB)
-//   expert_ids    [n_tokens, top_k]                   i32
-//   output        [n_tokens, top_k, n_rows]           F32
-//
+// weights [n_experts, n_rows, n_sb_per_row] Q5_K
+// activations [n_tokens, n_sb_per_row * 8] Q8_1 (8 blocks/SB)
+// expert_ids [n_tokens, top_k] i32
+// output [n_tokens, top_k, n_rows] F32
 // Launch:
-//   blockDim  = { 64 }                (one wave64)
-//   gridDim   = { n_rows, n_tokens * top_k, 1 }
+// blockDim = { 64 } (one wave64)
+// gridDim = { n_rows, n_tokens * top_k, 1 }
 
 #include "block_quant.cuh"
 #include "gfx906.cuh"

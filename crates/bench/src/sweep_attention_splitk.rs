@@ -1,4 +1,4 @@
-//! V2.19.b — attention_decode_f16 split-K (flash-decoding) correctness
+//! 9.b — attention_decode_f16 split-K (flash-decoding) correctness
 //! sweep. Same math as [`sweep_attention`] but launches the two-pass
 //! split-K kernel pair and checks against the same F32 reference.
 

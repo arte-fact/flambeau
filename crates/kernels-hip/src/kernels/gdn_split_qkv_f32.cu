@@ -1,22 +1,18 @@
 // gdn_split_qkv_f32 — fused replacement for `gather_qkv_strided`'s 3×L
-// DtoD memcpy loop (V2.4.d).
-//
+// DtoD memcpy loop ().
 // Previous: for t in 0..n_tokens { 3 × hipMemcpyAsync(DeviceToDevice) }
-//   → 3 * L memcpy launches per GDN layer per prefill pass.
-//   → at L=512 × 20 GDN layers × 3 = 30,720 driver calls per prefill.
-//
+// → 3 * L memcpy launches per GDN layer per prefill pass.
+// → at L=512 × 20 GDN layers × 3 = 30,720 driver calls per prefill.
 // This: single kernel launch per call site. 1 thread = 1 output element,
 // 1D grid over the total output span (3 * qk_size per token for Q+K,
 // plus v_size per token for V).
-//
 // Layout — source `silu_out[n_tokens, conv_channels]` where
-//   conv_channels = 2*qk_size + v_size
+// conv_channels = 2*qk_size + v_size
 // and each row is packed as [q_section | k_section | v_section].
 // We produce 3 contiguous outputs:
-//   q_out[n_tokens, qk_size] ← silu_out[:, 0 .. qk_size]
-//   k_out[n_tokens, qk_size] ← silu_out[:, qk_size .. 2*qk_size]
-//   v_out[n_tokens, v_size]  ← silu_out[:, 2*qk_size .. 2*qk_size + v_size]
-//
+// q_out[n_tokens, qk_size] ← silu_out[:, 0 .. qk_size]
+// k_out[n_tokens, qk_size] ← silu_out[:, qk_size .. 2*qk_size]
+// v_out[n_tokens, v_size] ← silu_out[:, 2*qk_size .. 2*qk_size + v_size]
 // This kernel is pure memory bandwidth — same HBM bytes move as the
 // memcpy loop, but the launch overhead is O(1) per call site instead of
 // O(3L). At L=512 that's a ~1500× reduction in driver calls per layer.

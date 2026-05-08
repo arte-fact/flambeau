@@ -1,19 +1,16 @@
 // mmvq_q4_0_kv_f16dst_dp4a — fused K+V Q4_0 dense MMVQ with F16 destination.
-//
 // Cycle 3 lever (post-review). In a TP full-attn layer, attn_k and
 // attn_v are both Q4_0, share the same Q8_1 activation, and have the
 // same per-rank shape `[local_n_kv_heads · head_dim, hidden]`. The
 // existing path runs THREE serialised launches per K and per V:
-//   1. mmvq_q4_0_q8_1 → scratch.mmvq_f32 (shared!)
-//   2. cast_f32_to_f16 → scratch.k_f16
-//   3. mmvq_q4_0_q8_1 → scratch.mmvq_f32 (overwrites!)
-//   4. cast_f32_to_f16 → scratch.v_f16
-//
+// 1. mmvq_q4_0_q8_1 → scratch.mmvq_f32 (shared!)
+// 2. cast_f32_to_f16 → scratch.k_f16
+// 3. mmvq_q4_0_q8_1 → scratch.mmvq_f32 (overwrites!)
+// 4. cast_f32_to_f16 → scratch.v_f16
 // This kernel collapses both into ONE launch:
-//   - Single activation read per block per thread (the gate+up pattern)
-//   - Two F32 accumulators per output row
-//   - Final write straight to F16 destinations — no intermediate F32 buffer
-//
+// - Single activation read per block per thread (the gate+up pattern)
+// - Two F32 accumulators per output row
+// - Final write straight to F16 destinations — no intermediate F32 buffer
 // Saves 1 MMVQ launch + 2 cast launches per full-attn layer per rank.
 // Symmetric n_rows (K and V always share shape) → no asymmetric branches.
 

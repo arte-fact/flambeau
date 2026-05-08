@@ -1,11 +1,9 @@
 //! flambeau-runtime — the glue between models and physical devices.
-//!
-//! V1.2: `Mesh<N>` trait surface + collective ops (`AllReduce`, `AllGather`,
+//! `Mesh<N>` trait surface + collective ops (`AllReduce`, `AllGather`,
 //! `AllToAll`, `Broadcast`) with a CPU host-bounce reference impl. Real RCCL
 //! impls land in `flambeau-backend-hip` and register against these traits.
-//!
-//! V1.6: typed `KvCache<L>` for `F16Contig`, `F16Transposed`, `Q8Contig`,
-//! `Q8Transposed`. V1.7: chat template + tokenizer glue + CPU-side sampler.
+//! typed `KvCache<L>` for `F16Contig`, `F16Transposed`, `Q8Contig`,
+//! `Q8Transposed`. chat template + tokenizer glue + CPU-side sampler.
 
 #![forbid(unsafe_op_in_unsafe_fn)]
 

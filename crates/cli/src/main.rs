@@ -1,6 +1,5 @@
 //! `flambeau` CLI — subcommand dispatch.
-//!
-//! V1.0 stub: subcommands parse but print a "not yet implemented" message until
+//! stub: subcommands parse but print a "not yet implemented" message until
 //! their target step lands. See `doc/ROADMAP-V1-QWEN36-GFX906.md` for what each
 //! subcommand requires.
 
@@ -32,12 +31,11 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Cmd {
-    /// Dump GGUF tensor list, dtype audit, metadata (V1.1).
+    /// Dump GGUF tensor list, dtype audit, metadata ().
     InspectGguf {
         path: String,
     },
     /// Dump the GGUF-embedded Jinja chat template to a `.jinja` file.
-    ///
     /// Used by `certs/chat_template/qwen35moe_tools/regenerate.sh` and as
     /// a general utility for anyone wanting to feed the model's actual
     /// chat template to an external Jinja renderer (e.g. llama.cpp's
@@ -51,11 +49,11 @@ enum Cmd {
         #[arg(long)]
         out: Option<String>,
     },
-    /// Dump HIP `.hsaco` kernel symbols + VGPR budgets (V1.3+).
+    /// Dump HIP `.hsaco` kernel symbols + VGPR budgets (+).
     InspectHsaco {
         path: String,
     },
-    /// Single-prompt inference; prints completion to stdout (V1.7).
+    /// Single-prompt inference; prints completion to stdout ().
     Infer {
         #[arg(long)]
         model: String,
@@ -67,8 +65,8 @@ enum Cmd {
         #[arg(long, default_value = "hip:0")]
         devices: String,
     },
-    /// OpenAI-compatible HTTP server (V1.8) + optional MCP upstream
-    /// client (V2.17 — ROADMAP-V2 §M2.1).
+    /// OpenAI-compatible HTTP server () + optional MCP upstream
+    /// client (7 — ROADMAP-V2 §M2.1).
     Serve {
         #[arg(long)]
         model: String,
@@ -76,25 +74,25 @@ enum Cmd {
         devices: String,
         #[arg(long, default_value_t = 8080)]
         port: u16,
-        /// **TP-5a** / **AUTO-4a** — mesh topology:
+        /// / mesh topology:
         /// - `pp` — pipeline-parallel (V1 default, LayerAssignment-based).
         /// - `tp` — tensor-parallel (Megatron-style per-tensor sharding
-        ///   with BAR1 P2P AllReduce).
+        /// with BAR1 P2P AllReduce).
         /// - `pp+tp` (alias `hybrid`) — manual PP-of-TP. Requires both
-        ///   `--pp-size` and `--tp-size`; `pp_size * tp_size` must equal
-        ///   `--devices` count. Devices are interpreted in stage-major
-        ///   order. flambeau does not autodetect the right topology —
-        ///   pick one with the AUTO-5 bracket-bench harness.
+        /// `--pp-size` and `--tp-size`; `pp_size * tp_size` must equal
+        /// `--devices` count. Devices are interpreted in stage-major
+        /// order. flambeau does not autodetect the right topology —
+        /// pick one with the bracket-bench harness.
         #[arg(long = "mesh-mode", default_value = "pp")]
         mesh_mode: String,
-        /// **TP-5a** — TP world size when `--mesh-mode tp`, or per-stage
+        /// TP world size when `--mesh-mode tp`, or per-stage
         /// TP size when `--mesh-mode pp+tp`. Must equal `--devices` count
         /// (tp) or `--devices count / --pp-size` (pp+tp). Ignored for
         /// `--mesh-mode pp` (which uses `--devices` count as the PP rank
         /// count).
         #[arg(long = "tp-size", default_value_t = 0)]
         tp_size: u32,
-        /// **AUTO-4a** — number of pipeline stages when
+        /// number of pipeline stages when
         /// `--mesh-mode pp+tp`. Must divide `num_layers` and satisfy
         /// `pp_size * tp_size == --devices count`. Ignored for `pp`/`tp`.
         #[arg(long = "pp-size", default_value_t = 0)]
@@ -193,11 +191,10 @@ enum Cmd {
         #[arg(long)]
         dry_run: bool,
     },
-    /// M-track MCP server (V2.16, ROADMAP-V2 §M1). Dev-only — never
+    /// M-track MCP server (6, ROADMAP-V2 §M1). Dev-only — never
     /// exposed to production traffic. Wraps flambeau's internal
     /// dev-surface (sweep / cert-check / pmc-probe / inspect / dispatch)
     /// as MCP tools that return committable JSON artefacts.
-    ///
     /// Default transport is stdio (matches Claude Code / mcp-cli).
     /// `--port N` enables the streamable-HTTP transport (M1.5).
     Mcp {
@@ -209,7 +206,7 @@ enum Cmd {
         #[arg(long, default_value_t = 0)]
         port: u16,
     },
-    /// Correctness-sweep harness; emits certs (V1.3+).
+    /// Correctness-sweep harness; emits certs (+).
     Sweep {
         #[arg(long)]
         arch: String,
@@ -219,7 +216,7 @@ enum Cmd {
         #[arg(long, default_value = "all")]
         dtype: String,
     },
-    /// Validate that every dispatch row has a matching green cert (V1.3+).
+    /// Validate that every dispatch row has a matching green cert (+).
     CertCheck {
         #[arg(long, default_value = "gfx906")]
         arch: String,
@@ -247,7 +244,7 @@ enum Cmd {
         #[arg(long, default_value = "gfx906")]
         arch: String,
     },
-    /// Perf-regression matrix (V1.4+).
+    /// Perf-regression matrix (+).
     Matrix {
         #[arg(long)]
         models: Vec<String>,
@@ -271,8 +268,8 @@ fn main() -> Result<()> {
     match cli.cmd {
         Cmd::InspectGguf { path } => inspect_gguf(&path)?,
         Cmd::ExtractChatTemplate { path, out } => extract_chat_template(&path, out.as_deref())?,
-        Cmd::InspectHsaco { path } => todo!("V1.3+: implement inspect-hsaco for {path}"),
-        Cmd::Infer { model, .. } => todo!("V1.7: implement infer for {model}"),
+        Cmd::InspectHsaco { path } => todo!("implement inspect-hsaco for {path}"),
+        Cmd::Infer { model, .. } => todo!("implement infer for {model}"),
         Cmd::Serve {
             model,
             devices,
@@ -324,7 +321,7 @@ fn main() -> Result<()> {
         Cmd::CertCheck { arch, backend } => cert_check(&backend, &arch)?,
         Cmd::PmcProbe { kernel, m, k, n } => pmc_probe(&kernel, m, k, n)?,
         Cmd::PmcRefresh { arch } => pmc_refresh(&arch)?,
-        Cmd::Matrix { .. } => todo!("V1.4+: implement matrix"),
+        Cmd::Matrix { .. } => todo!("implement matrix"),
     }
     Ok(())
 }
@@ -418,7 +415,7 @@ fn serve_cmd(args: ServeArgs) -> Result<()> {
             flambeau_server::MeshMode::Tp { world: tp_size_resolved }
         }
         "pp+tp" | "hybrid" => {
-            // AUTO-4a: both axes are explicit — operator-driven, no
+            // both axes are explicit — operator-driven, no
             // autodetect. Either both unset → bail with usage; otherwise
             // require pp_size * tp_size == |devices|.
             if pp_size == 0 || tp_size == 0 {
@@ -673,7 +670,7 @@ fn find_simple_sweep(op: &str) -> Option<SweepFn> {
 fn sweep(arch: &str, op: Option<&str>, dtype: &str) -> Result<()> {
     let op = op.unwrap_or("qmatmul");
     if arch != "gfx906" {
-        anyhow::bail!("only --arch gfx906 is implemented in V1.3+ (got {arch:?})");
+        anyhow::bail!("only --arch gfx906 is implemented (got {arch:?})");
     }
 
     #[cfg(feature = "hip_sweep")]

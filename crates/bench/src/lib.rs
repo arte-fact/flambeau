@@ -1,11 +1,9 @@
 //! flambeau-bench — sweep / matrix / cert subcommands.
-//!
-//! V1.3: `sweep` runs the MMVQ correctness grid on real HIP hardware
+//! `sweep` runs the MMVQ correctness grid on real HIP hardware
 //! (`--features hip`) and writes `certs/<backend>/<arch>/<impl_id>.json` per
 //! dtype. `cert-check` validates every dispatch row has a matching green
 //! cert — the build-time gate from architecture rule 2.
-//!
-//! Matrix / PMC / dispatch-A/B land in V1.4+ on the same scaffolding.
+//! Matrix / PMC / dispatch-A/B land in + on the same scaffolding.
 
 #![allow(
     clippy::too_many_arguments,

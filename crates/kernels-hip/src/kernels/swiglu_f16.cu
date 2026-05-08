@@ -1,16 +1,12 @@
 // swiglu_f16 — SwiGLU activation for FFN gate+up projection output.
-//
-//   y[i] = silu(gate[i]) * up[i]
-//   silu(x) = x * sigmoid(x) = x / (1 + exp(-x))
-//
+// y[i] = silu(gate[i]) * up[i]
+// silu(x) = x * sigmoid(x) = x / (1 + exp(-x))
 // Pure pointwise; one thread per element. gfx906's `__frcp_rn` + `__expf`
 // are fast-path enough that we don't need a specialised transcendental.
-//
 // Launch shape:
-//   blockDim  = { 256 }
-//   gridDim   = { ceil(n / 256) }
-//   shared    = 0
-//
+// blockDim = { 256 }
+// gridDim = { ceil(n / 256) }
+// shared = 0
 // Inputs and outputs are flat F16 buffers of length `n` — the caller is
 // responsible for laying out [m, hidden] as a contiguous `n = m * hidden`
 // stream.

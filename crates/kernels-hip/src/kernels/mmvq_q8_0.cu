@@ -1,20 +1,16 @@
 // mmvq_q8_0 — Q8_0 weight matrix × Q8_1 activation → F32 dst.
-//
 // First-class reference: candle-hip-kernels mul_mat_vec_q8_0_q8_1_cuda1
 // (256-thread, one row per block — the P34 default at small M). This is the
 // simplest of the V1 MMVQ kernels; Q4_K/Q5_K/Q6_K follow the same shape but
 // with the multi-row DPP reduce from gfx906.cuh.
-//
 // Launch shape:
-//   blockDim  = { 256 } threads (8 warps of 32 lanes on gfx906 / one wave64)
-//   gridDim   = { N }            one block per output row
-//   shared    = 0
-//
+// blockDim = { 256 } threads (8 warps of 32 lanes on gfx906 / one wave64)
+// gridDim = { N } one block per output row
+// shared = 0
 // Contract:
-//   x : [N, K] Q8_0 weights, row-major, K blocks-per-row = K / QK8_0
-//   y : [K]    Q8_1 activation blocks, K/QK8_1
-//   dst[n] = sum_k  x[n,k] . y[k]    in F32
-//
+// x : [N, K] Q8_0 weights, row-major, K blocks-per-row = K / QK8_0
+// y : [K] Q8_1 activation blocks, K/QK8_1
+// dst[n] = sum_k x[n,k] . y[k] in F32
 // The inner loop streams blocks in pairs: 256 threads / 32 lanes-per-block
 // gives 8 blocks processed cooperatively per iteration.
 

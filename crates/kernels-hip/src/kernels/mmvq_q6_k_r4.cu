@@ -1,15 +1,12 @@
 // mmvq_q6_k_r4 — Q6_K MMVQ with r4 multi-row DPP reduce (candle P29 default).
-//
 // 64 threads per block = one wave64. Each 16-lane quarter-warp computes one
 // output row; a wavefront produces 4 rows. `blockIdx.x` is the row-quadruple
 // index.
-//
 // Per-lane work per super-block: 16 elements (4 sub-positions × 4 q_idx).
 // This is 4× the single-row kernel's per-lane work, balancing the 4× row
 // count per wave. Register usage stays at 22-ish because the inner layout
 // is identical to the single-row path — we just unroll over `p` to reach
 // all 64 candle-style "effective lanes" from 16 physical lanes.
-//
 // Final reduce: `gfx906_quarter_warp_reduce_sum` — DPP chain that stops at
 // xor-8, keeping each 16-lane group's sum local (the DPP row_mask keeps
 // lanes in the same 16-lane "row" from spilling into neighbours).

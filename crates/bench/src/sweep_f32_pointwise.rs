@@ -1,7 +1,6 @@
-//! V1.7.3-c1 correctness sweeps for the GDN F32 pointwise kernels:
+//! c1 correctness sweeps for the GDN F32 pointwise kernels:
 //! silu_f32, swiglu_f32, scale_f32, rmsnorm_f32, cast_f16_f32. Each writes
 //! its own cert under `certs/hip/gfx906/<impl_id>.json`.
-//!
 //! All references are host F64 scalar implementations; pass tolerance is
 //! `1e-6` in the relative sense. The kernels are trivial pointwise math;
 //! any larger error is a real bug.
@@ -306,7 +305,7 @@ pub fn run_rmsnorm_f32_sweep(repo_root: &Path) -> Result<Cert> {
     let (dev, module, entry) = open_kernel("rmsnorm_f32", "flambeau_rmsnorm_f32")?;
     let kernel = module.kernel_dynamic(&entry)?;
     // GDN ssm_norm shapes: per-head over num_v_heads × head_v_dim.
-    //   Qwen3.6: (32, 128). Include 9B variant and a 1-row sanity check.
+    // Qwen3.6: (32, 128). Include 9B variant and a 1-row sanity check.
     let shapes = [(32usize, 128usize), (16, 128), (1, 512)];
     let eps = 1e-6f32;
     let mut results = Vec::new();

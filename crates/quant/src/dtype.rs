@@ -1,5 +1,4 @@
 //! GGUF block-quant dtype discriminant.
-//!
 //! Wire-format codes come from ggml (`enum ggml_type` in `ggml.h`) — the numeric
 //! ids are stable and we must match them byte-for-byte against GGUFs written by
 //! llama.cpp / llamacpp-turbo.
@@ -47,7 +46,7 @@ pub enum GgmlDType {
     /// Block layout: `[uint8 e, uint8 qs[16]]` = 17 B/block. Used by Unsloth
     /// Dynamic Quants on sensitivity-tagged layers (e.g. qwen3next shared
     /// experts in Coder-Next-80B-Q4_0). Not natively supported by V1 kernels;
-    /// the loader transparently dequant→Q8_0 at load (mirrors V2.22 BF16→Q8_0).
+    /// the loader transparently dequant→Q8_0 at load (mirrors 2 BF16→Q8_0).
     Mxfp4,
 }
 
@@ -207,9 +206,9 @@ mod tests {
 
     #[test]
     fn mxfp4_dequant_round_trip() {
-        // CN-80B-16 — match llama.cpp `dequantize_row_mxfp4` final values:
-        //   layout: lo nibble at byte j → element j; hi → element j + QK/2
-        //   scale: half-LUT × 2^(e-127) ≡ doubled-LUT × 2^(e-128)
+        // match llama.cpp `dequantize_row_mxfp4` final values:
+        // layout: lo nibble at byte j → element j; hi → element j + QK/2
+        // scale: half-LUT × 2^(e-127) ≡ doubled-LUT × 2^(e-128)
         // One block, e=128 → scale=2^1=2.0. byte0=0x21 (lo=1=0.5, hi=2=1.0),
         // byte1=0x43 (lo=3=1.5, hi=4=2.0). Scaled: out[0]=1.0, out[1]=3.0,
         // out[16]=2.0, out[17]=4.0.

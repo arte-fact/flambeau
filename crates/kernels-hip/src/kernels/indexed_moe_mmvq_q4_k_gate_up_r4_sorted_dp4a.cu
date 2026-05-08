@@ -1,19 +1,16 @@
-// indexed_moe_mmvq_q4_k_gate_up_r4_sorted_dp4a — V2.5.b.1 sorted-reorder
-// variant of the V2.4.a r4 gate_up kernel.
-//
+// indexed_moe_mmvq_q4_k_gate_up_r4_sorted_dp4a — sorted-reorder
+// variant of the r4 gate_up kernel.
 // Identical arithmetic / launch shape to
 // `indexed_moe_mmvq_q4_k_gate_up_r4_dp4a`, but takes an additional
 // `sorted_pair_idx[total]` lookup array that remaps `blockIdx.y` to an
-// original (token, slot) pair. V2.5.a produces this array grouping pairs
+// original (token, slot) pair. produces this array grouping pairs
 // by expert.
-//
 // Why: in the unsorted baseline, adjacent blocks along grid.y touch
 // DIFFERENT experts → each block fetches its own weight slab cold from
 // HBM. With the remap, adjacent blocks along grid.y touch the SAME
 // expert → the next block's weights are warm in L1/L2 from the previous
 // block's fetch. For Qwen3.6-35B: ~16 tokens per expert typical, so 16
 // consecutive blocks share the expert-weight working set.
-//
 // One-line change vs r4_dp4a: the first two lines of kernel body.
 // Output layout unchanged — still writes via the original token/slot_idx.
 
@@ -29,7 +26,7 @@ extern "C" __global__ void flambeau_indexed_moe_mmvq_q4_k_gate_up_r4_sorted_dp4a
     const flambeau_block_q4_K* __restrict__ up_w,
     const flambeau_block_q8_1* __restrict__ y,
     const int* __restrict__ expert_ids,
-    const int* __restrict__ sorted_pair_idx,  // V2.5.a output: permutes block.y → original pair_idx
+    const int* __restrict__ sorted_pair_idx,  // output: permutes block.y → original pair_idx
     float* __restrict__ gate_out,
     float* __restrict__ up_out,
     const int n_rows,

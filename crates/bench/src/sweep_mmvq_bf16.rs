@@ -1,19 +1,17 @@
-//! MTP-4-C-2 — BF16 weight × BF16 activation MMVQ correctness sweep.
-//!
+//! BF16 weight × BF16 activation MMVQ correctness sweep.
 //! Validates `flambeau_mmvq_bf16_bf16` against an F32 reference that
 //! up-casts both BF16 inputs to F32 (lossless bit-shift) and accumulates
 //! sequentially. The kernel does the same up-cast in F32 but reduces in
 //! parallel (256 threads × per-warp sum); accumulation order differs, so
 //! we use a relative-error tolerance, not bit-exact.
-//!
 //! Shapes cover Qwen3.6-27B MTP-block projection sizes:
-//!   * fc:        n=5120,  k=10240   (concat embedding+hidden → hidden)
-//!   * q_proj:    n=12288, k=5120    (Q ‖ gate)
-//!   * k/v_proj:  n=1024,  k=5120
-//!   * o_proj:    n=5120,  k=6144    (n_q*head_dim → hidden)
-//!   * gate/up:   n=intermediate, k=5120
-//!   * down:      n=5120, k=intermediate
-//!   * lm_head:   n=248320, k=5120
+//! * fc: n=5120, k=10240 (concat embedding+hidden → hidden)
+//! * q_proj: n=12288, k=5120 (Q ‖ gate)
+//! * k/v_proj: n=1024, k=5120
+//! * o_proj: n=5120, k=6144 (n_q*head_dim → hidden)
+//! * gate/up: n=intermediate, k=5120
+//! * down: n=5120, k=intermediate
+//! * lm_head: n=248320, k=5120
 
 #![cfg(feature = "hip")]
 
@@ -40,8 +38,8 @@ use crate::harness::{alloc_and_upload, max_rel_err_with_floor, rig, seeded_f32_r
 /// Decode-path MTP shapes; smoke + production sizes.
 const SHAPES: &[(usize, usize)] = &[
     (256, 256),       // smoke
-    (5120, 10240),    // mtp.fc       (hidden, 2*hidden)
-    (12288, 5120),    // q_proj       (2*n_q*head_dim, hidden)
+    (5120, 10240),    // mtp.fc (hidden, 2*hidden)
+    (12288, 5120),    // q_proj (2*n_q*head_dim, hidden)
     (1024, 5120),     // k/v_proj
     (5120, 6144),     // o_proj
     (5120, 25600),    // mtp down_proj (hidden, intermediate)

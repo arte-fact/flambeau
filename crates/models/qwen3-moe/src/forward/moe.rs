@@ -1,12 +1,11 @@
 //! MoE forward: routed experts + shared expert + router, decode + prefill.
-//!
 //! All MoE forward paths live here. Dense layers bypass this module and
 //! route through `forward::dense_ffn` instead. The split between routed /
 //! shared / router reflects the Qwen3 MoE recipe:
 //! - router: dense GEMV producing per-expert logits → topk.
 //! - routed experts: indexed MMVQ/MMQ selecting the top-k experts per token.
 //! - shared expert: a dense FFN added to every token's output, gated by a
-//!   learned sigmoid.
+//! learned sigmoid.
 
 #![cfg(feature = "hip")]
 
@@ -47,11 +46,11 @@ use crate::config::Qwen3MoEConfig;
 use crate::weights::DeviceTensor;
 
 // ---------------------------------------------------------------------------
-// V1.7.3-d1 — routed MoE FFN decode step.
+// d1 — routed MoE FFN decode step.
 // ---------------------------------------------------------------------------
 
 /// Workspace for one decode step of the routed MoE FFN (no shared expert —
-/// that lands in V1.7.3-d2, no router — V1.7.3-d3). Sized against
+/// that lands in d2, no router — d3). Sized against
 /// `(hidden, moe_intermediate_size, num_experts_per_tok=top_k)`.
 pub struct MoeScratch {
     // Q8_1 of layer input, shared across all top_k experts' gate/up matmuls.
@@ -178,11 +177,10 @@ impl Drop for MoeScratch {
 
 /// One decode step of the routed MoE FFN. Assumes the caller has:
 /// - Run `post_attention_norm` on the residual stream (so `x_norm` is the
-///   norm output).
+/// norm output).
 /// - Already filled `scratch.expert_ids` and `scratch.expert_weights` with
-///   the router's output. V1.7.3-d3 will land the router; until then the
-///   caller is synthetic (test fixture or hand-rolled top-k).
-///
+/// the router's output. d3 will land the router; until then the
+/// caller is synthetic (test fixture or hand-rolled top-k).
 /// The final `out` is computed as `residual + Σ_k weight_k · expert_out_k`,
 /// matching `moe_combine_f16`'s semantics — so `out` already has the
 /// residual fused in and the outer loop can skip a second residual add.
@@ -221,7 +219,7 @@ pub fn forward_moe_ffn_decode(
     // 2. Fused gate + up matmul across top_k selected experts in one launch.
     // Weight shape (outermost-first): `[n_experts, inter, hidden]`. The
     // indexed_moe kernels take n_sb_per_row = hidden / QK_K.
-    // gate+up may both be Q4_K (standard UD-Q4_K_S) or Q8_0 (V2.22.a:
+    // gate+up may both be Q4_K (standard UD-Q4_K_S) or Q8_0 (2.a:
     // UD-Q8_K_XL). down may be Q4_K, Q6_K (UD-Q4_K_S ffn_down promotion),
     // or Q8_0 (UD-Q8_K_XL). BF16 layers in UD-Q8_K_XL aren't handled here
     // yet — loader converts them to Q8_0 on host.
@@ -251,7 +249,7 @@ pub fn forward_moe_ffn_decode(
         hidden,
     )?;
 
-    // 3+4. V2.23.b.2 — fused `swiglu_f32_to_f16` writes directly to F16,
+    // 3+4. 3.b.2 — fused `swiglu_f32_to_f16` writes directly to F16,
     // skipping the standalone cast_f32_to_f16. Then quantize F16 → Q8_1.
     flambeau_ops::hip::mlp::swiglu_f32_to_f16(
         ops,
@@ -300,7 +298,7 @@ pub fn forward_moe_ffn_decode(
     )
     .context("cast down → f16")?;
 
-    // 7. Weighted sum + residual. V2.23.a.2 — if caller provides a second
+    // 7. Weighted sum + residual. 3.a.2 — if caller provides a second
     // residual (shared-expert delta), fuse it into the combine step so
     // we skip the standalone add_f16 between shared expert and combine.
     if let Some(extra) = extra_residual {
@@ -336,7 +334,7 @@ pub fn forward_moe_ffn_decode(
 }
 
 // ---------------------------------------------------------------------------
-// V1.7.3-d2 — shared expert decode step.
+// d2 — shared expert decode step.
 // ---------------------------------------------------------------------------
 
 /// Workspace for one decode step of the shared expert (dense FFN +
@@ -444,16 +442,14 @@ impl Drop for SharedExpertScratch {
 
 /// One decode step of the shared expert (always-on dense FFN), composed
 /// with the learned per-token sigmoid-gate scaling:
-///
-///   gate_scalar[t] = sigmoid(⟨ ffn_gate_inp_shexp, x_norm[t] ⟩)
-///   dense[t]       = down_shexp(swiglu(gate_shexp(x_norm[t]), up_shexp(x_norm[t])))
-///   shared_out[t]  = gate_scalar[t] * dense[t]
-///
+/// gate_scalar[t] = sigmoid(⟨ ffn_gate_inp_shexp, x_norm[t] ⟩)
+/// dense[t] = down_shexp(swiglu(gate_shexp(x_norm[t]), up_shexp(x_norm[t])))
+/// shared_out[t] = gate_scalar[t] * dense[t]
 /// Output (`shared_out`) is a standalone F16 **delta** — the caller is
 /// expected to sum it with the routed-MoE output and the residual in
-/// V1.7.3-e. Keeping this delta-only keeps the composition orthogonal:
+/// e. Keeping this delta-only keeps the composition orthogonal:
 /// routed and shared contributions flow through the same combine layer in
-/// V1.7.3-e without re-using `residual` for a second purpose.
+/// e without re-using `residual` for a second purpose.
 pub fn forward_shared_expert_decode(
     ops: &OpsRegistry,
     stream: &HipStream,
@@ -521,9 +517,9 @@ pub fn forward_shared_expert_decode(
         )?;
     }
 
-    // 4+5. CN-80B-19d — fused swiglu(gate, up) → Q8_1 directly. Skips
+    // 4+5. fused swiglu(gate, up) → Q8_1 directly. Skips
     // both the F16 intermediate (`activated_f16`) and 1 launch vs the
-    // V2.23.b.2 swiglu_f32_to_f16 + quantize_f16_q8_1 chain. Default-on;
+    // 3.b.2 swiglu_f32_to_f16 + quantize_f16_q8_1 chain. Default-on;
     // FLAMBEAU_VARIANT=baseline opts back to the unfused pair.
     let fuse_swiglu_quant = inter % 32 == 0;
     if fuse_swiglu_quant {
@@ -535,7 +531,7 @@ pub fn forward_shared_expert_decode(
             scratch.activated_q8_1,
             inter,
         )
-        .context("shexp swiglu_f32_to_q8_1 (CN-80B-19d)")?;
+        .context("shexp swiglu_f32_to_q8_1")?;
     } else {
         flambeau_ops::hip::mlp::swiglu_f32_to_f16(
             ops,
@@ -595,18 +591,16 @@ pub fn forward_shared_expert_decode(
 // DenseFfnPrefillScratch, forward_dense_ffn_prefill) moved to `forward::dense_ffn`.
 
 // ---------------------------------------------------------------------------
-// V1.7.3-d3 — MoE router.
+// d3 — MoE router.
 // ---------------------------------------------------------------------------
 
 /// Run the MoE router for one decode token. Reads `x_norm` and the FFN's
 /// `ffn_gate_inp` weight; writes the top-k selected expert ids + their
 /// softmaxed weights into the MoE scratch buffers that
 /// `forward_moe_ffn_decode` consumes.
-///
 /// Two-stage path:
-///   1. `dense_gemv_f32_f16(ffn_gate_inp, x_norm)` → `router_logits` F32 [n_experts]
-///   2. `topk_f32(router_logits, expert_ids, expert_weights, 1, n_experts, top_k)`
-///
+/// 1. `dense_gemv_f32_f16(ffn_gate_inp, x_norm)` → `router_logits` F32 [n_experts]
+/// 2. `topk_f32(router_logits, expert_ids, expert_weights, 1, n_experts, top_k)`
 /// The router weight must be F32 — Qwen3.x GGUFs don't quantise this
 /// particular tensor (`ffn_gate_inp.weight`) since it's tiny.
 pub fn forward_router_decode(
@@ -621,7 +615,7 @@ pub fn forward_router_decode(
     let n_experts = cfg.num_experts;
     let top_k = cfg.num_experts_per_tok;
 
-    // V1-BENCH-CN-80B-6 — accept either F32 or F16 router weight. F16
+    // accept either F32 or F16 router weight. F16
     // is the iter-3 default (loader converts F32→F16 at upload — see
     // sharded.rs); F32 stays as a fallback when a model legitimately
     // ships an F32 router (older Qwen3.5 GGUFs predate the conversion).
@@ -687,7 +681,7 @@ pub fn forward_router_decode(
 
 
 // ---------------------------------------------------------------------------
-// V1.7.3-f3 — MoE + shared expert + router prefill.
+// f3 — MoE + shared expert + router prefill.
 // ---------------------------------------------------------------------------
 
 /// Workspace for one prefill chunk of the routed MoE FFN. Sized against
@@ -703,20 +697,20 @@ pub struct MoePrefillScratch {
     pub activated_f32: DevicePtr,
     pub activated_f16: DevicePtr,
     pub activated_q8_1: DevicePtr,
-    // V2.14.c DS4 Q8_1 activation buffers (turbo MoE variant only).
+    // 4.c DS4 Q8_1 activation buffers (turbo MoE variant only).
     // `x_q8_1_mmq`: hidden activation in DS4 layout — [hidden/128, n_tokens].
     // `activated_q8_1_mmq`: per-pair SwiGLU'd activation in DS4 layout — [inter/128, n_pairs].
     pub x_q8_1_mmq: DevicePtr,
     pub activated_q8_1_mmq: DevicePtr,
     pub down_f32: DevicePtr,           // F32 [L, top_k, hidden]
     pub down_f16: DevicePtr,
-    // V2.5.a sort-by-expert state. Only populated / used when
+    // sort-by-expert state. Only populated / used when
     // FLAMBEAU_MOE_SORTED=1 is set on the gate+up path.
     pub sort_counts: DevicePtr,        // i32 [n_experts]
     pub sort_offsets: DevicePtr,       // i32 [n_experts + 1]
     pub sort_cursors: DevicePtr,       // i32 [n_experts]
     pub sort_sorted_pair_idx: DevicePtr, // i32 [L * top_k]
-    // V2.6.a padded sort outputs (only touched when tile8 path is on).
+    // padded sort outputs (only touched when tile8 path is on).
     pub sort_padded_offsets: DevicePtr,   // i32 [n_experts + 1]
     pub sort_sorted_pair_idx_padded: DevicePtr, // i32 [max_tokens * top_k + n_experts * 8]
     x_q8_1_bytes: usize,
@@ -764,7 +758,7 @@ impl MoePrefillScratch {
         let activated_f16_bytes = max_tokens * top_k * inter * 2;
         let activated_q8_1_bytes =
             max_tokens * top_k * (inter / 32) * std::mem::size_of::<BlockQ8_1>();
-        // V2.14.c DS4 activation buffers. 144 bytes per MMQ block (128 elements).
+        // 4.c DS4 activation buffers. 144 bytes per MMQ block (128 elements).
         // hidden/128 big_blocks × max_tokens rows for gate+up (per-token);
         // inter/128 big_blocks × max_tokens*top_k rows for down (per-pair).
         let x_q8_1_mmq_bytes =
@@ -788,7 +782,7 @@ impl MoePrefillScratch {
         let down_f32 = device.alloc(down_f32_bytes)?;
         let down_f16 = device.alloc(down_f16_bytes)?;
 
-        // V2.5.a sort-by-expert scratch
+        // sort-by-expert scratch
         let sort_counts_bytes = n_experts * 4;
         let sort_offsets_bytes = (n_experts + 1) * 4;
         let sort_cursors_bytes = n_experts * 4;
@@ -797,8 +791,8 @@ impl MoePrefillScratch {
         let sort_offsets = device.alloc(sort_offsets_bytes)?;
         let sort_cursors = device.alloc(sort_cursors_bytes)?;
         let sort_sorted_pair_idx = device.alloc(sort_sorted_pair_idx_bytes)?;
-        // V2.6.a padded sort outputs. Upper bound on padded total: the
-        // real total plus up to 15 padding entries per expert (V2.31.b
+        // padded sort outputs. Upper bound on padded total: the
+        // real total plus up to 15 padding entries per expert (1.b
         // bumped from 7 to accommodate pad-to-16 for tile16 MMQ; tile8
         // path uses ≤ 7 slack and still fits).
         let sort_padded_offsets_bytes = (n_experts + 1) * 4;
@@ -921,11 +915,11 @@ pub fn forward_router_prefill(
         );
     }
 
-    // V2.31.g — batched dense GEMV: single launch across all L tokens
+    // 1.g — batched dense GEMV: single launch across all L tokens
     // instead of L individual launches. On 35B Mesh<4> prefill L=512 this
     // collapsed 20520 launches per pass (40 layers × 512 tokens) down to
-    // 40; profiled 9 % of wall in V2.30.b.
-    // V1-BENCH-CN-80B-6 — dispatch F16-weight variant when the loader
+    // 40; profiled 9 % of wall in 0.b.
+    // dispatch F16-weight variant when the loader
     // converted F32→F16 at upload (default path post-iter-3).
     if ffn_gate_inp.dtype == GgmlDType::F16 {
         flambeau_ops::hip::router::dense_gemv_f16_f16_batched(
@@ -1035,29 +1029,27 @@ pub fn forward_moe_ffn_prefill(
     quantize_f16_q8_1(ops, stream, x_norm, scratch.x_q8_1, n_tokens * hidden)
         .context("prefill moe x_norm → Q8_1")?;
 
-    // V2.22.a / V2.23.a — Q8_0 / Q4_0 fast path. Skip sort/pad + MMQ tile8
+    // 2.a / 3.a — Q8_0 / Q4_0 fast path. Skip sort/pad + MMQ tile8
     // (not ported yet); use plain indexed MoE MMVQ with n_tokens > 1. Slower
     // than tile8 at prefill but structurally correct — unblocks UD-Q8_K_XL
-    // and Qwen3.6-35B-A3B-Q4_0 load-and-run. V2.22.b will add MMQ tile8 for
+    // and Qwen3.6-35B-A3B-Q4_0 load-and-run. 2.b will add MMQ tile8 for
     // Q8_0 to recover prefill throughput.
-    //
     // Allowed combos: Q8_0 gate+up requires Q8_0 down; Q4_0 gate+up allows
-    // either Q4_0 or Q8_0 down (V2.23.a ffn_down promotion).
-    //
-    // V2.28.c — at n_tokens >= 32, route Q4_0 through the tile8 MMQ path
+    // either Q4_0 or Q8_0 down (3.a ffn_down promotion).
+    // 8.c — at n_tokens >= 32, route Q4_0 through the tile8 MMQ path
     // below (sort+pad+fused-tile kernels). MMVQ fallback stays for small
     // n_tokens where the tile8 kernel's grid overhead dominates.
     const Q4_0_TILE8_THRESHOLD: usize = 32;
-    // V2.22.b — tile8 handles three shape classes:
-    //   (Q4_0, Q4_0): pure Q4_0 → Q4_0 gate_up + Q4_0 down tile8
-    //   (Q4_0, Q8_0): mixed 5-layer case (V2.23.a Q4_1→Q8_0 conversion for
-    //                 35B-A3B-Q4_0) → Q4_0 gate_up + Q8_0 down tile8
-    //   (Q8_0, Q8_0): pure Q8_0 (UD-Q8_K_XL) → Q8_0 gate_up + Q8_0 down tile8
+    // 2.b — tile8 handles three shape classes:
+    // (Q4_0, Q4_0): pure Q4_0 → Q4_0 gate_up + Q4_0 down tile8
+    // (Q4_0, Q8_0): mixed 5-layer case (3.a Q4_1→Q8_0 conversion for
+    // 35B-A3B-Q4_0) → Q4_0 gate_up + Q8_0 down tile8
+    // (Q8_0, Q8_0): pure Q8_0 (UD-Q8_K_XL) → Q8_0 gate_up + Q8_0 down tile8
     // MMVQ fallback stays for n_tokens < 32 where tile8 grid overhead dominates.
     let q4_0_use_tile8 = gate_dt_pre == GgmlDType::Q4_0
         && (down_dt_pre == GgmlDType::Q4_0
             || down_dt_pre == GgmlDType::Q8_0
-            // V1-BENCH-CN-80B-11c — Q4_1 down tile8 unblocks Coder-Next-Q4_0
+            // Q4_1 down tile8 unblocks Coder-Next-Q4_0
             // (gate/up Q4_0, down Q4_1). Pre-this-kernel both PP and TP fell
             // through to MMVQ-per-token because Q4_1 down rejected tile8.
             || down_dt_pre == GgmlDType::Q4_1)
@@ -1082,7 +1074,7 @@ pub fn forward_moe_ffn_prefill(
             scratch.x_q8_1, scratch.expert_ids, scratch.gate_out_f32,
             scratch.up_out_f32, inter, n_tokens, top_k, hidden,
         )?;
-        // V2.23.d.2 — fused swiglu_f32_to_f16 + quantize. Skips the
+        // 3.d.2 — fused swiglu_f32_to_f16 + quantize. Skips the
         // standalone cast_f32_to_f16 between swiglu and quantize.
         flambeau_ops::hip::mlp::swiglu_f32_to_f16(
             ops, stream,
@@ -1117,9 +1109,9 @@ pub fn forward_moe_ffn_prefill(
     }
 
     // 2. Path selection:
-    //   tile8  (V2.6.b, default): sort+pad + 64×8-tile MMQ kernel
-    //   sorted (V2.5.b): sort + r4 block reorder
-    //   none   (V2.4): raw r4
+    // tile8 (, default): sort+pad + 64×8-tile MMQ kernel
+    // sorted (): sort + r4 block reorder
+    // none (): raw r4
     // FLAMBEAU_MOE_VARIANT in {tile8, sorted, r4}. Default = tile8.
     // FLAMBEAU_MOE_SORTED=0 still works as a shortcut to force r4.
     // Env vars are process-static — resolve once per process (T3.4), avoid
@@ -1147,7 +1139,7 @@ pub fn forward_moe_ffn_prefill(
         // per expert. Kernel early-exits blocks past the actual count.
         let padded_total_ub = total_pairs + n_experts * 8;
     if moe_variant == "turbo" {
-        // V2.14.c: DS4 Q8_1 activation for turbo gate_up. Per-TOKEN layout
+        // 4.c: DS4 Q8_1 activation for turbo gate_up. Per-TOKEN layout
         // — hidden activation shared across the top_k slots of each token.
         quantize_f16_q8_1_mmq(ops, stream, x_norm, scratch.x_q8_1_mmq, hidden, n_tokens)
             .context("prefill turbo quantize x_norm → Q8_1_MMQ")?;
@@ -1173,7 +1165,7 @@ pub fn forward_moe_ffn_prefill(
         )
         .context("prefill indexed_moe gate+up turbo")?;
     } else if gate_dt_pre == GgmlDType::Q4_0 {
-        // V2.28.c — Q4_0 variant of the tile8 gate+up MMQ. n_sb_per_row for
+        // 8.c — Q4_0 variant of the tile8 gate+up MMQ. n_sb_per_row for
         // Q4_0 is hidden/32 (no super-block), not hidden/QK_K.
         flambeau_ops::hip::moe::indexed_moe_mmq_q4_0_gate_up_tile8(
             ops,
@@ -1197,7 +1189,7 @@ pub fn forward_moe_ffn_prefill(
         )
         .context("prefill indexed_moe gate+up q4_0 tile8")?;
     } else if gate_dt_pre == GgmlDType::Q8_0 {
-        // V2.22.b — Q8_0 variant of the tile8 gate+up MMQ. Same Q4_0 shape
+        // 2.b — Q8_0 variant of the tile8 gate+up MMQ. Same Q4_0 shape
         // conventions (hidden/32 blocks/row).
         flambeau_ops::hip::moe::indexed_moe_mmq_q8_0_gate_up_tile8(
             ops,
@@ -1290,7 +1282,7 @@ pub fn forward_moe_ffn_prefill(
         .context("prefill indexed_moe gate+up")?;
     }
 
-    // 3. V2.23.d.2 — fused SwiGLU → F16 over [L, top_k, inter] flat.
+    // 3. 3.d.2 — fused SwiGLU → F16 over [L, top_k, inter] flat.
     flambeau_ops::hip::mlp::swiglu_f32_to_f16(
         ops,
         stream,
@@ -1301,11 +1293,11 @@ pub fn forward_moe_ffn_prefill(
     )
     .context("prefill moe swiglu_f32_to_f16")?;
 
-    // 4. Q8_1-quantise activated. V2.23.d.2 uses `swiglu_f32_to_f16` above
+    // 4. Q8_1-quantise activated. 3.d.2 uses `swiglu_f32_to_f16` above
     // to write F16 directly, skipping the standalone cast_f32_to_f16 on
     // the main prefill path (turbo variant keeps its DS4 MMQ quantize).
     if moe_variant == "turbo" {
-        // V2.14.c turbo path: DS4 Q8_1 activation for down matmul, per-PAIR layout.
+        // 4.c turbo path: DS4 Q8_1 activation for down matmul, per-PAIR layout.
         quantize_f16_q8_1_mmq(
             ops,
             stream,
@@ -1402,7 +1394,7 @@ pub fn forward_moe_ffn_prefill(
             nb_per_row_inter,
         )
         .context("prefill indexed_moe down q4_k r2")?,
-        // V2.31.a — Q5_K tile8 MMQ when sorted-padded path is enabled
+        // 1.a — Q5_K tile8 MMQ when sorted-padded path is enabled
         // (moe_variant="tile8"), else fall through to MMVQ. Closes the
         // prefill-on-MMVQ hole for Qwen3-Coder-30B's UD-Q4_K_XL ffn_down
         // (13/48 layers Q5_K).
@@ -1477,7 +1469,7 @@ pub fn forward_moe_ffn_prefill(
         )
         .context("prefill indexed_moe down q6_k")?,
         GgmlDType::Q4_0 if moe_variant == "tile8" => {
-            // V2.28.c — Q4_0 down tile8 for MoE prefill.
+            // 8.c — Q4_0 down tile8 for MoE prefill.
             let padded_total_ub = total_pairs + n_experts * 8;
             flambeau_ops::hip::moe::indexed_moe_mmq_q4_0_down_tile8(
                 ops,
@@ -1500,9 +1492,9 @@ pub fn forward_moe_ffn_prefill(
             .context("prefill indexed_moe down q4_0 tile8")?;
         }
         GgmlDType::Q8_0 if moe_variant == "tile8" => {
-            // V2.22.b — Q8_0 down tile8 for MoE prefill. Serves pure Q8_0
+            // 2.b — Q8_0 down tile8 for MoE prefill. Serves pure Q8_0
             // (UD-Q8_K_XL) AND the mixed Q4_0/Q8_0 layer case (35B-A3B-Q4_0
-            // V2.23.a-converted layers).
+            // 3.a-converted layers).
             let padded_total_ub = total_pairs + n_experts * 8;
             flambeau_ops::hip::moe::indexed_moe_mmq_q8_0_down_tile8(
                 ops,
@@ -1525,7 +1517,7 @@ pub fn forward_moe_ffn_prefill(
             .context("prefill indexed_moe down q8_0 tile8")?;
         }
         GgmlDType::Q4_1 if moe_variant == "tile8" => {
-            // V1-BENCH-CN-80B-11c — Q4_1 down tile8 for MoE prefill.
+            // Q4_1 down tile8 for MoE prefill.
             // Pre-this-kernel Q4_1 down forced MMVQ-per-token even at
             // L≥32; on Coder-Next-Q4_0 (Q4_0 gate/up + Q4_1 down) that
             // capped pp4 prefill and made pp2tp2 ~5x slower per layer.
@@ -1553,7 +1545,7 @@ pub fn forward_moe_ffn_prefill(
             .context("prefill indexed_moe down q4_1 tile8")?;
         }
         GgmlDType::Q4_1 => {
-            // B6 / V2.35.a — fall-through MMVQ for n_tokens < 32 (tile8 grid
+            // 5.a — fall-through MMVQ for n_tokens < 32 (tile8 grid
             // overhead dominates at small L) and for non-tile8 variants.
             flambeau_ops::hip::moe::indexed_moe_mmvq_q4_1(
                 ops,
@@ -1744,7 +1736,7 @@ pub fn forward_shared_expert_prefill(
         ops, stream, &shared.ffn_up_shexp, scratch.x_q8_1, DevicePtr(0), scratch.up_f32,
         n_tokens, hidden, inter, "ffn_up_shexp",
     )?;
-    // V2.23.d.2 — fused swiglu_f32_to_f16 + quantize (prefill shared expert).
+    // 3.d.2 — fused swiglu_f32_to_f16 + quantize (prefill shared expert).
     flambeau_ops::hip::mlp::swiglu_f32_to_f16(
         ops, stream, scratch.gate_f32, scratch.up_f32, scratch.activated_f16,
         n_tokens * inter,

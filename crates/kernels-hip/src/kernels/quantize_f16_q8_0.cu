@@ -1,9 +1,7 @@
 // quantize_f16_q8_0 — F16 input → Q8_0 blocks.
-//
-// V1-BENCH-#116a (2026-04-27). Sibling of `quantize_f16_q8_1` — drops the
+// Sibling of `quantize_f16_q8_1` — drops the
 // `s` (sum) field so the output matches `flambeau_block_q8_0`'s 18 B
 // layout (used by the Q8 KV cache + the `attention_decode_q8_kv` kernel).
-//
 // Grid: one thread block per 32 elements. 32 threads per block.
 
 #include "block_quant.cuh"

@@ -1,10 +1,8 @@
 // mmvq_bf16_bf16 — BF16 weight × BF16 activation MMVQ.
-//
-// MTP-4-C-2: the load-bearing kernel of the BF16-throughout MTP forward.
+// the load-bearing kernel of the BF16-throughout MTP forward.
 // vLLM/sglang's BF16 path keeps activations in BF16 across the matmul
 // chain (no Q8_1 quantize between layers); this kernel makes that
 // possible on flambeau.
-//
 // gfx906 has no native BF16 arithmetic — CDNA2/MI200's
 // `v_dot2_f32_bf16` is the first BF16-capable hardware. We emulate by
 // up-casting both operands to F32 (lossless bit-shift) and accumulating
@@ -12,14 +10,13 @@
 // quantize (eliminates ~0.78 % per-block-of-32 noise) and gain ~3 bits
 // of exponent range, at the cost of 2× the activation HBM bandwidth
 // (BF16 = 2 B/elem vs Q8_1 ≈ 1.125 B/elem).
-//
 // Layout / launch:
-//   weight `x` : `[n_rows, k]` BF16 row-major
-//   act    `y` : `[k]` BF16
-//   dst        : `[n_rows]` F32
-//   grid       : (n_rows, 1, 1)
-//   block      : (256, 1, 1) — 4 wave64 warps; one row per block,
-//                threads stride k by 256 with coalesced loads.
+// weight `x` : `[n_rows, k]` BF16 row-major
+// act `y` : `[k]` BF16
+// dst : `[n_rows]` F32
+// grid : (n_rows, 1, 1)
+// block : (256, 1, 1) — 4 wave64 warps; one row per block,
+// threads stride k by 256 with coalesced loads.
 // `k` must be a multiple of 256 (we don't tail-handle here; in practice
 // every Qwen3.6 hidden / projection size satisfies this).
 

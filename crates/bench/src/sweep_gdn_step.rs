@@ -1,15 +1,12 @@
-//! V1.7.2.F — Gated-Delta-Net fused step correctness sweep.
-//!
+//! Gated-Delta-Net fused step correctness sweep.
 //! Reference: candle's `delta_net_single_step` tensor-op chain, unrolled
 //! to a flat per-(b, h) scalar loop so the host and device follow the
 //! same op order and compare bit-wise in F32:
-//!
-//!   state[col, i] *= exp(gate[t])
-//!   sk[col]       = Σ_i state[col, i] * k[t, i]
-//!   delta[col]    = (v[t, col] - sk[col]) * beta[t]
-//!   state[col, i] += k[t, i] * delta[col]
-//!   attn[t, col]  = Σ_i state[col, i] * q[t, i]
-//!
+//! state[col, i] *= exp(gate[t])
+//! sk[col] = Σ_i state[col, i] * k[t, i]
+//! delta[col] = (v[t, col] - sk[col]) * beta[t]
+//! state[col, i] += k[t, i] * delta[col]
+//! attn[t, col] = Σ_i state[col, i] * q[t, i]
 //! Shape budget covers Qwen3.6-35B (`num_v_heads = 32`, `head_v_dim = 128`,
 //! GQA `n_rep = 32 / 16 = 2`), both decode (L = 1) and a prefill chunk
 //! (L = 8). A small-batch shape with n_rep = 1 sanity-checks the no-GQA
@@ -146,7 +143,7 @@ fn run_shape(
     // CPU reference. Col-outer layout matches the kernel so we can compare
     // the post-run state element-wise without a transpose. Input q/k/v and
     // output attn_ref use the **L-outer layout** `[B, L, H_*, S_v]` the
-    // kernel expects (per the V1.7.5.D.1 layout fix — the kernel comment
+    // kernel expects (per the layout fix — the kernel comment
     // calls out that L=1 silently papered over the bug until L>1 surfaced
     // it). Previous revision of this reference used head-outer indexing
     // which passed L=1 but drifted at L>1 — see task #22.
@@ -161,7 +158,7 @@ fn run_shape(
                 let gb_idx = (bi * l + t) * h_v + hv;
                 let g = (gate[gb_idx] as f64).exp() as f32;
                 let bt = beta[gb_idx];
-                // q / k: [B, L, H_kv, S_v].  v: [B, L, H_v, S_v].
+                // q / k: [B, L, H_kv, S_v]. v: [B, L, H_v, S_v].
                 let qk_base = ((bi * l + t) * h_kv + hkv) * S_V;
                 let v_base = ((bi * l + t) * h_v + hv) * S_V;
                 for col in 0..S_V {
@@ -181,7 +178,7 @@ fn run_shape(
                     for i in 0..S_V {
                         state_ref[state_base + i] += k[qk_base + i] * delta;
                     }
-                    // attn_out: [B, L, H_v, S_v] (kernel post-V1.7.5.D.1).
+                    // attn_out: [B, L, H_v, S_v] (kernel post-).
                     let mut a = 0.0f32;
                     for i in 0..S_V {
                         a += state_ref[state_base + i] * q[qk_base + i];

@@ -1,14 +1,11 @@
 // indexed_moe_mmvq_q4_k_r2 — Q4_K MoE MMVQ with multi-row r2 DPP reduce.
-//
 // Candle P29 `_nw1_r2` pattern adapted for MoE: same 64-thread wave64,
 // but each block computes TWO output rows of the expert weight matrix
 // for one (token, slot). Lanes 0..31 own row R+0, lanes 32..63 own R+1.
 // Half-warp DPP reduce finishes each row's dot product independently.
-//
 // Dispatch drop-in for `indexed_moe_mmvq_q4_k.cu`:
-//   - Grid: { ceil(n_rows / 2), n_tokens * top_k, 1 }
-//   - Output layout unchanged: [n_tokens, top_k, n_rows]
-//
+// - Grid: { ceil(n_rows / 2), n_tokens * top_k, 1 }
+// - Output layout unchanged: [n_tokens, top_k, n_rows]
 // Win vs the single-row MoE MMVQ: half the kernel launches for the same
 // work, same activation HBM traffic, half the Q4_K-scale-unpack work
 // (the block's Q4_K scales are read once per 32 lanes instead of once
@@ -57,7 +54,7 @@ extern "C" __global__ void flambeau_indexed_moe_mmvq_q4_k_r2_q8_1(
 
         const flambeau_block_q8_1* y_sb = y_row + b * 8;
 
-        // Same half-warp / 8-sub-block walk as V1.3 `mmvq_q4_k_r2.cu`:
+        // Same half-warp / 8-sub-block walk as `mmvq_q4_k_r2.cu`:
         // each lane visits all 8 sub-blocks, reading one quant nibble +
         // one Q8_1 quant byte per iteration.
         #pragma unroll

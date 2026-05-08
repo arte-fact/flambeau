@@ -1,15 +1,14 @@
 //! I/O boundary for the forward pass: token embedding gather, output head
 //! (RMSNorm + LM-head MMVQ), and host-side argmax.
-//!
 //! Three entry points:
 //! - [`forward_embed_decode_host`] — look up a token embedding row. Host-
-//!   side dequantise + upload; per-token cost is negligible vs the layer
-//!   stack.
+//! side dequantise + upload; per-token cost is negligible vs the layer
+//! stack.
 //! - [`forward_output_head_decode`] — final `rmsnorm + mmvq` producing the
-//!   logits row.
+//! logits row.
 //! - [`argmax_token_host`] — download the logit row and pick its maximum.
-//!   Greedy-only in V1; temperature/top-p land alongside a logit-returning
-//!   variant of the forward.
+//! Greedy-only in V1; temperature/top-p land alongside a logit-returning
+//! variant of the forward.
 
 #![cfg(feature = "hip")]
 
@@ -45,16 +44,15 @@ fn dev_flag(_name: &str) -> bool {
 }
 
 // ---------------------------------------------------------------------------
-// V1.7.3-e2 — token embedding gather.
+// e2 — token embedding gather.
 // ---------------------------------------------------------------------------
 
 // `row_bytes_for_dtype` moved to `forward::common`.
 
-/// V2.26.a-i7b — persistent host-side scratch for the prefill embed
+/// 6.a-i7b — persistent host-side scratch for the prefill embed
 /// batch path (`forward_embed_prefill_batch`). Sized once per scratch
 /// construction to the largest ubatch the session will ever use;
 /// grown on demand if a caller asks for more.
-///
 /// The Rust Vec's address is read by the batched HtoD memcpy AFTER
 /// the last host-side dequant iteration completes — dropping the
 /// per-token `stream.synchronize()` calls that the legacy per-token
@@ -73,26 +71,24 @@ impl EmbedPrefillHostScratch {
     }
 }
 
-/// V2.26.a-i7b — batched embed for `L` prefill tokens. Replaces the
+/// 6.a-i7b — batched embed for `L` prefill tokens. Replaces the
 /// per-token loop `for tid in tokens { forward_embed_decode_host(...) }`
 /// which under async-PP dispatch issued 2L host-blocking
 /// `stream.synchronize()` calls on rank 0 — each of which starved
 /// other-lane / other-rank dispatches of the single Rust driver
-/// thread (a cross-lane barrier in the same shape as V2.26.a-i5a's
+/// thread (a cross-lane barrier in the same shape as 6.a-i5a's
 /// `upload_positions_range` fix).
-///
 /// The batched path:
-///   1. Async DtoH each of `L` rows into one persistent host buffer
-///      (caller-owned — usually on `FullAttnPrefillScratch` /
-///      per-rank scratch).
-///   2. Sync ONCE — the downloads all belong to the caller's stream.
-///   3. Dequant all `L` rows on the host (straight-line CPU work;
-///      no kernel launches).
-///   4. Single HtoD copy of the whole batched F16 block to
-///      `out_f16`. No sync needed — stream-ordered with the
-///      subsequent layer-chain kernels; the host scratch's
-///      lifetime is bounded by the caller's `&mut`.
-///
+/// 1. Async DtoH each of `L` rows into one persistent host buffer
+/// (caller-owned — usually on `FullAttnPrefillScratch` /
+/// per-rank scratch).
+/// 2. Sync ONCE — the downloads all belong to the caller's stream.
+/// 3. Dequant all `L` rows on the host (straight-line CPU work;
+/// no kernel launches).
+/// 4. Single HtoD copy of the whole batched F16 block to
+/// `out_f16`. No sync needed — stream-ordered with the
+/// subsequent layer-chain kernels; the host scratch's
+/// lifetime is bounded by the caller's `&mut`.
 /// Result on 9B Q4_1 Mesh<4> L=4096 ubatch=128 u_lanes=2: per-pass
 /// embed syncs drop from 2·4096 = 8192 to 1. Freed driver time
 /// lets rank 0 issue other-rank work sooner, tightening 1F1B
@@ -205,7 +201,6 @@ pub fn forward_embed_prefill_batch(
 /// `out_f16`. Decode-path only (one token). Path: download the row's raw
 /// bytes from `token_embd` on device → dequantise on host → cast to F16 →
 /// upload to `out_f16`.
-///
 /// Per-token cost at Qwen3.6 dims: ~1 KB download + 256-block dequant +
 /// ~4 KB upload + two stream syncs. Negligible at any realistic tg
 /// throughput. Future optimisation: an on-device `gather_q4_k_to_f16`
@@ -292,7 +287,7 @@ pub fn forward_embed_decode_host(
 }
 
 // ---------------------------------------------------------------------------
-// V1.7.3-e3 — output norm + LM head + argmax sampling.
+// e3 — output norm + LM head + argmax sampling.
 // ---------------------------------------------------------------------------
 
 /// Workspace for the output / LM head path. Sized against
@@ -359,11 +354,9 @@ impl Drop for OutputHeadScratch {
 }
 
 /// Run the post-last-layer tail: output rmsnorm → LM head mmvq → logits F32.
-///
 /// `lm_head_weight`: either the untied `output.weight` (when present) or
 /// the tied `token_embd.weight`. Expected shape (outermost-first):
 /// `[vocab, hidden]`.
-///
 /// On return, `scratch.logits_f32` holds `[vocab]` F32 logits.
 pub fn forward_output_head_decode(
     ops: &OpsRegistry,
@@ -416,7 +409,6 @@ pub fn forward_output_head_decode(
 /// Host-side argmax sampler over the F32 logits produced by
 /// [`forward_output_head_decode`]. Downloads `[vocab]` F32s to host and
 /// scans for the maximum.
-///
 /// V1 intentionally keeps sampling CPU-side: vocab × 4 bytes is tiny
 /// (Qwen3.6: 248320 × 4 ≈ 970 KB — a single PCIe memcpy + ~1 ms argmax).
 /// Temperature / top-p sampling is V2.
@@ -447,7 +439,7 @@ pub fn argmax_token_host(
             best_idx = i;
         }
     }
-    // V1.7.4.a diagnostic: set FLAMBEAU_PARITY_TOPK_LOGITS to dump the
+    // diagnostic: set FLAMBEAU_PARITY_TOPK_LOGITS to dump the
     // top-20 argmax + rank of llama.cpp's top-7 baseline tokens. Lets us
     // tell "F16 noise, llama's #1 is in our top 20" from "systematic bug,
     // llama's #1 is rank 200k+". Left in because the parity gap isn't
@@ -476,7 +468,6 @@ pub fn argmax_token_host(
 /// [`forward_output_head_decode`]. Fills `out` with exactly `vocab` F32
 /// values; any prior contents are replaced. `out.capacity() >= vocab`
 /// avoids a reallocation on the hot path.
-///
 /// Used by the sampler path in the HTTP server (`/v1/chat/completions`
 /// with `temperature > 0` / `top_p < 1`). Greedy callers should keep
 /// using [`argmax_token_host`] to avoid the vocab-sized memcpy + clone.

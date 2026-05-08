@@ -1,13 +1,10 @@
-//! V1.3 MMVQ correctness sweep — one HIP device, one dtype at a time.
-//!
+//! MMVQ correctness sweep — one HIP device, one dtype at a time.
 //! Mirrors the ad-hoc `crates/backend-hip/tests/mmvq_q*.rs` tests but runs
 //! from the library / CLI and writes a `Cert` JSON under `certs/hip/gfx906/`.
-//!
-//! V1.3 grid per roadmap:
-//!   M ∈ {1, 8, 16, 128, 512}    (row counts — we run M rows per shape)
-//!   K ∈ {2048, 5120, 15360, 128256}
-//!   N — not a kernel input for single-row MMVQ (one block per row).
-//!
+//! grid per roadmap:
+//! M ∈ {1, 8, 16, 128, 512} (row counts — we run M rows per shape)
+//! K ∈ {2048, 5120, 15360, 128256}
+//! N — not a kernel input for single-row MMVQ (one block per row).
 //! Tolerance: `1e-2 * sqrt(K/128)` — captures F32 accumulation noise + Q8_1
 //! activation quant round-trip. See `project_v1_3_q8_0_landed.md` for the
 //! derivation.
@@ -41,7 +38,7 @@ use crate::harness::{alloc_and_upload, max_rel_err_with_floor, rig, seeded_f32_r
 const QK8: usize = QK8_0;
 
 /// Dtype tag selecting which weight block layout the sweep drives. We only
-/// define the four V1.3 dtypes here; `GgmlDType::from_wire` covers the rest.
+/// define the four dtypes here; `GgmlDType::from_wire` covers the rest.
 /// `(weight dtype, kernel variant)` — selects one impl to certify.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Dtype {
@@ -55,21 +52,21 @@ pub enum Dtype {
     Q5KR2,
     /// r4 multi-row variant of Q6_K (4 output rows per wave64).
     Q6KR4,
-    /// V1.6 DP4A single-row Q6_K variant. Cooperative 64 lanes across
+    /// DP4A single-row Q6_K variant. Cooperative 64 lanes across
     /// 2 super-blocks, inner DP4A via `__builtin_amdgcn_sdot4`. Runtime
     /// intercepts the base Q6_K row when this kernel is loaded.
     Q6KDP4A,
-    /// V2.2.b Q4_1 legacy quant with per-block min offset. Single row per
+    /// Q4_1 legacy quant with per-block min offset. Single row per
     /// 256-thread block, DP4A inner loop.
     Q4_1,
-    /// V2.24.a.1 r2 multi-row Q4_1 (64 threads, 2 rows/block, half-warp
+    /// 4.a.1 r2 multi-row Q4_1 (64 threads, 2 rows/block, half-warp
     /// DPP reduce). NULL — lost DP4A parallelism. Kept for regression.
     Q4_1R2,
-    /// V2.24.a.2 DP4A r2 multi-row Q4_1 (256 threads, 2 rows/block).
+    /// 4.a.2 DP4A r2 multi-row Q4_1 (256 threads, 2 rows/block).
     /// Halves grid + shares Y across rows; preserves DP4A.
     /// NULL — register pressure regressed wall −7.5 %.
     Q4_1R2DP4A,
-    /// V2.24.a.3 thin-block 128-thread single-row Q4_1 DP4A.
+    /// 4.a.3 thin-block 128-thread single-row Q4_1 DP4A.
     Q4_1T128,
     /// C9-i1 thin-block 128-thread single-row Q8_0 DP4A. Mirror of Q4_1T128
     /// for Q8_0 weights — targets the gfx906 latency-bound regime where Q8_0
@@ -203,8 +200,7 @@ pub struct SweepSpec {
 }
 
 impl SweepSpec {
-    /// The V1.3 cert grid from `doc/ROADMAP-V1-QWEN36-GFX906.md` §V1.3.
-    pub fn v1_3_default(dtype: Dtype) -> Self {
+    /// The cert grid from `doc/ROADMAP-V1-QWEN36-GFX906.md` §    pub fn v1_3_default(dtype: Dtype) -> Self {
         Self {
             dtype,
             m_grid: vec![1, 8, 16, 128, 512],
@@ -218,7 +214,7 @@ pub fn run_sweep(spec: &SweepSpec, repo_root: &Path) -> Result<Cert> {
     let n = device_count()
         .context("hipGetDeviceCount")?;
     if n < 1 {
-        bail!("no HIP devices on this host — V1.3 sweep needs gfx906");
+        bail!("no HIP devices on this host — sweep needs gfx906");
     }
 
     let dev = HipDevice::new(0)?;
@@ -300,7 +296,7 @@ fn capture_static_pmc(dev: &HipDevice, dtype: Dtype) -> Result<PmcSnapshot> {
 
     let pmc = PmcSnapshot {
         vgpr_count: Some(attrs.num_regs),
-        sgpr_count: None, // hipFuncGetAttribute doesn't expose SGPR; V1.3
+        sgpr_count: None, // hipFuncGetAttribute doesn't expose SGPR; 
                           // captures it from the .hsaco ELF via inspect-hsaco
                           // once that CLI lands.
         waves_per_simd: Some(attrs.gfx906_waves_per_simd()),
@@ -516,7 +512,7 @@ fn reference_matmul(weights_f32: &[f32], y_f32: &[f32], m: usize, k: usize) -> V
 }
 
 fn cert_tol(_k: usize) -> f32 {
-    // 3e-2 is the measured worst-case across the V1.3 grid on gfx906 for the
+    // 3e-2 is the measured worst-case across the grid on gfx906 for the
     // single-row on-the-fly-dequant kernels — dominated by Q8_1 activation
     // quant noise on cancellation-heavy output rows. The `abs_floor` inside
     // `max_rel_err` absorbs the sqrt(K) scaling, so the bar stays flat.

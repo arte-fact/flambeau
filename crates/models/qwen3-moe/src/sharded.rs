@@ -1,23 +1,20 @@
-//! V1.7.5.A — pipeline-parallel sharded model.
-//!
+//! pipeline-parallel sharded model.
 //! `Qwen3MoEShardedModel` holds one `Qwen3MoERankShard` per rank in a
 //! `HipCluster`. Each shard owns:
 //! - The subset of transformer layers assigned to its rank (by
-//!   [`flambeau_runtime::LayerAssignment`]).
+//! [`flambeau_runtime::LayerAssignment`]).
 //! - The `OpsRegistry` for its rank's HIP device.
 //! - Global tensors (`token_embd`, `output_norm`, `output`) only on the
-//!   ranks that actually use them in the forward path (rank 0 for
-//!   embedding, last rank for the output head).
-//!
+//! ranks that actually use them in the forward path (rank 0 for
+//! embedding, last rank for the output head).
 //! This is the PP-primary topology per CLAUDE.md: each layer's MoE
 //! experts live on the same rank as the layer; routing/topk/indexed-MMVQ
 //! are all intra-stage; only the hidden-state hand-off crosses PCIe.
 //! Wide-EP (router all-to-all across ranks) is deferred to V2+.
-//!
 //! Load-time memory budget (Qwen3.6-31B-A3B, 4× MI50 16 GB):
-//!   - 40 layers ÷ 4 ranks = 10 layers/rank
-//!   - Per layer ≈ 500 MB Q4_K experts + 20 MB full-attn/GDN = ~520 MB
-//!   - Per rank ≈ 5.2 GB weights + KV/GDN/scratch ≤ 10 GB → fits 16 GB.
+//! - 40 layers ÷ 4 ranks = 10 layers/rank
+//! - Per layer ≈ 500 MB Q4_K experts + 20 MB full-attn/GDN = ~520 MB
+//! - Per rank ≈ 5.2 GB weights + KV/GDN/scratch ≤ 10 GB → fits 16 GB.
 
 #![cfg(feature = "hip")]
 
@@ -222,7 +219,6 @@ impl Qwen3MoEShardedModel {
     /// `output_norm`, `output`) go only to the ranks that consume them:
     /// rank 0 for the embedding gather, the last rank for the output
     /// head.
-    ///
     /// Tied LM head: when `cfg.tied_lm_head == true` the last rank gets
     /// its own copy of `token_embd` too (the first rank needs it for the
     /// embedding gather, the last rank for the LM head matmul — can't
@@ -504,10 +500,10 @@ fn upload_one_inner(
     r: &ResolvedTensor,
     device: &HipDevice,
 ) -> Result<(DeviceTensor, usize)> {
-    // V2.22.a — BF16 tensors in UD-Q8_K_XL (10 total per 35B-UD-Q8_K_XL:
+    // 2.a — BF16 tensors in UD-Q8_K_XL (10 total per 35B-UD-Q8_K_XL:
     // 1 attn_qkv, 1 attn_gate, 1–4 of each ffn_*_exps + shexp) aren't
     // supported by any V1 MMVQ/MMQ path. Transparently quantise to Q8_0 at
-    // load so downstream dispatch flows through the Q8_0 kernels V2.22.a
+    // load so downstream dispatch flows through the Q8_0 kernels 2.a
     // just added. Precision loss is ~0.4 % (Q8 step vs BF16 step) — tiny
     // compared to the Q8_0 noise elsewhere in the model.
     if r.dtype == GgmlDType::BF16 {
@@ -520,7 +516,7 @@ fn upload_one_inner(
     if r.dtype == GgmlDType::Mxfp4 {
         return upload_mxfp4_as_q8_0(file, r, device);
     }
-    // V2.23.a — 5 Qwen3.6-35B-A3B-Q4_0 layers store `ffn_down_exps` as
+    // 3.a — 5 Qwen3.6-35B-A3B-Q4_0 layers store `ffn_down_exps` as
     // Q4_1 (scattered among 35 Q4_0 + 5 Q4_1). Rather than author a Q4_1
     // indexed-MoE kernel for 5 tensors, convert them to Q8_0 on host at
     // load so they flow through `indexed_moe_mmvq_q8_0`. Applied only to
@@ -557,7 +553,7 @@ fn upload_one_inner(
             )
             .map_err(|e| anyhow::anyhow!("memcpy `{}`: {e}", r.name))?;
     }
-    // V2.17: sync after every tensor to prevent HIP queue backlog on
+    // 7: sync after every tensor to prevent HIP queue backlog on
     // large loads. `upload_one` stays non-munmapping by default so it's
     // safe for tensors shared across ranks (token_embd, output_norm,
     // output — the last rank reads them AFTER rank 0 uploads them).
@@ -654,7 +650,7 @@ fn upload_as_f16(
 /// to `mmvq` (which requires a Q-quant). Quant scheme matches
 /// `flambeau_block_q8_0`: per-32-elem block absmax / 127 → d (F16),
 /// qs[i] = round(x[i] / d) clamped to [-127, 127].
-/// V2.22.a — BF16 tensor → Q8_0 on device. BF16's 16 bits are the upper half
+/// 2.a — BF16 tensor → Q8_0 on device. BF16's 16 bits are the upper half
 /// of a F32, so widen to F32 byte-by-byte, then use the standard Q8_0 per-32-
 /// block absmax/127 quantise. Preserves dims + name; sets dtype=Q8_0 so
 /// the downstream dispatch treats it like any other Q8_0 weight.
@@ -733,7 +729,6 @@ fn upload_bf16_as_q8_0(
 /// V1.x #120 — Split qwen3next's fused `ssm_ba.weight`
 /// `[2*num_v_heads, hidden]` tensor into two Q8_0 device tensors
 /// `ssm_alpha` + `ssm_beta`, each `[num_v_heads, hidden]`.
-///
 /// **Layout** (matches `llama.cpp/src/models/qwen3next.cpp`'s
 /// `ssm_beta_alpha` view): the rows are NOT a contiguous `[α | β]`
 /// block — they are interleaved per K-head as
@@ -747,7 +742,6 @@ fn upload_bf16_as_q8_0(
 /// the α slice is the SECOND half — and the names matter (see
 /// `pattern_ssm_beta_alpha = "blk\\.\\d*\\.ssm_ba.weight"` in
 /// `llama-model.cpp:59`).
-///
 /// Pre-fix this routine took
 /// `alpha = rows[..num_v_heads]; beta = rows[num_v_heads..]`, which
 /// (a) names them backwards and (b) takes contiguous halves that mix
@@ -758,12 +752,11 @@ fn upload_bf16_as_q8_0(
 /// stores `ssm_alpha`/`ssm_beta` separately. CLOSES the
 /// Coder-Next-80B coherence regression observed live on flambeau
 /// serve at curl temp=0 → "** ** ** ** …".
-///
 /// Source dtype is whatever the GGUF stored (Q4_0 for Coder-Next-Q4_0,
 /// Q4_K for Coder-Next-UD-Q4_K_*): dequant→F32 host-side, gather
 /// interleaved rows, re-quantise each half to Q8_0 with the standard
 /// absmax/127 encoder. Output is two `DeviceTensor` with dtype=Q8_0
-/// ready for `mmvq_q8_0` and the V2.27.c gate+up fusion path.
+/// ready for `mmvq_q8_0` and the 7.c gate+up fusion path.
 fn split_ssm_ba_to_q8_0(
     file: &GgufFile,
     r: &ResolvedTensor,
@@ -815,18 +808,18 @@ fn split_ssm_ba_to_q8_0(
         .with_context(|| format!("dequant `{}` (dtype={:?})", r.name, r.dtype))?;
 
     // 2. Gather interleaved rows. Source layout (row-major):
-    //    rows = [β_{kh=0,r=0}, β_{kh=0,r=1}, …, β_{kh=0,r=n_rep-1},
-    //            α_{kh=0,r=0}, …,           α_{kh=0,r=n_rep-1},
-    //            β_{kh=1,r=0}, …]
-    //    Total rows: 2 * n_rep * num_k_heads = 2 * num_v_heads.
-    //    Beta rows are at row index `kh * 2*n_rep + r` for r ∈ [0, n_rep).
-    //    Alpha rows are at row index `kh * 2*n_rep + n_rep + r` for r ∈ [0, n_rep).
-    //    Outputs:
-    //      alpha_buf[(kh * n_rep + r) * cols + c] = src[(kh*2*n_rep + n_rep + r)*cols + c]
-    //      beta_buf [(kh * n_rep + r) * cols + c] = src[(kh*2*n_rep + r)*cols + c]
-    //    The destination layout `[num_v_heads, hidden]` matches the
-    //    qwen35moe split-tensor convention so the existing GDN forward
-    //    path consumes them unchanged.
+    // rows = [β_{kh=0,r=0}, β_{kh=0,r=1}, …, β_{kh=0,r=n_rep-1},
+    // α_{kh=0,r=0}, …, α_{kh=0,r=n_rep-1},
+    // β_{kh=1,r=0}, …]
+    // Total rows: 2 * n_rep * num_k_heads = 2 * num_v_heads.
+    // Beta rows are at row index `kh * 2*n_rep + r` for r ∈ [0, n_rep).
+    // Alpha rows are at row index `kh * 2*n_rep + n_rep + r` for r ∈ [0, n_rep).
+    // Outputs:
+    // alpha_buf[(kh * n_rep + r) * cols + c] = src[(kh*2*n_rep + n_rep + r)*cols + c]
+    // beta_buf [(kh * n_rep + r) * cols + c] = src[(kh*2*n_rep + r)*cols + c]
+    // The destination layout `[num_v_heads, hidden]` matches the
+    // qwen35moe split-tensor convention so the existing GDN forward
+    // path consumes them unchanged.
     let half_elems = num_v_heads * cols;
     let mut alpha_f32 = vec![0.0f32; half_elems];
     let mut beta_f32 = vec![0.0f32; half_elems];
@@ -927,20 +920,16 @@ fn split_ssm_ba_to_q8_0(
 }
 
 /// V1.x #119 — MXFP4 (Microscaling FP4) tensor → Q8_0 on device.
-///
 /// MXFP4 block layout (17 B):
-///   `e: u8`  — shared E8M0 microscale (block scale = 2^(e - 127); e=0 → 0)
-///   `qs[16]: u8` — 32 nibbles of E2M1 FP4 packed low/high
-///
+/// `e: u8` — shared E8M0 microscale (block scale = 2^(e - 127); e=0 → 0)
+/// `qs[16]: u8` — 32 nibbles of E2M1 FP4 packed low/high
 /// E2M1 nibble lookup (sign << 3 | exp << 1 | mant):
-///   0..=7  →  0, 0.5, 1, 1.5, 2, 3, 4, 6
-///   8..=15 →  -0, -0.5, -1, -1.5, -2, -3, -4, -6
-///
+/// 0..=7 → 0, 0.5, 1, 1.5, 2, 3, 4, 6
+/// 8..=15 → -0, -0.5, -1, -1.5, -2, -3, -4, -6
 /// Dequant: `y = MXFP4_LUT[nibble] * 2^(e - 127)`. Then standard absmax/127
 /// Q8_0 encoder (mirror of `upload_bf16_as_q8_0`). ~0.5% additional noise
 /// vs the FP4 baseline (Q8 step bigger than the FP4 LSB), negligible vs the
 /// Q8_0 noise everywhere else in the model.
-///
 /// Used by: Unsloth Dynamic Quants on Qwen3-Coder-Next-Q4_0 shared expert
 /// FFN tensors (per `crates/quant/src/dtype.rs:39`).
 fn upload_mxfp4_as_q8_0(
@@ -991,7 +980,7 @@ fn upload_mxfp4_as_q8_0(
         } else {
             f32::from_bits((e as u32) << 23)
         };
-        // CN-80B-16 — ggml Q4_0-family layout: lo nibble at byte j →
+        // ggml Q4_0-family layout: lo nibble at byte j →
         // element j; hi nibble at byte j → element j + QK8_0/2. Earlier
         // impl placed them adjacent (2j, 2j+1), the post-shuffle layout.
         for (j, &byte) in nibbles.iter().enumerate() {
@@ -1040,7 +1029,7 @@ fn upload_mxfp4_as_q8_0(
     ))
 }
 
-/// V2.23.a — Q4_1 MoE tensor → Q8_0 on device. Q4_1 stores 20 bytes/block:
+/// 3.a — Q4_1 MoE tensor → Q8_0 on device. Q4_1 stores 20 bytes/block:
 /// `d (f16) + m (f16) + 16 × 4-bit nibbles`, reconstruction `y = d·q + m`
 /// where `q ∈ [0, 15]`. Dequantise to F32 on host, then apply the standard
 /// absmax/127 Q8_0 encoder. ~0.4 % additional noise vs Q4_1's own noise.
@@ -1283,7 +1272,7 @@ fn up_raw(
 ) -> Result<DeviceTensor> {
     let (t, b) = upload_one(file, r, device)?;
     *total += b;
-    // V2.17: this helper is called ONLY from per-layer upload paths
+    // 7: this helper is called ONLY from per-layer upload paths
     // (upload_dense / upload_full_attn / upload_gdn / upload_ffn). Each
     // layer's tensors are uploaded exactly once (by the owning rank) so
     // it's safe to munmap their mmap ranges here — keeps page cache
@@ -1431,7 +1420,7 @@ fn upload_ffn(
     let opt_up_raw = |t: &Option<ResolvedTensor>, total: &mut usize| -> Result<Option<DeviceTensor>> {
         t.as_ref().map(|r| up_raw(file, r, device, total)).transpose()
     };
-    // V1-BENCH-CN-80B-6 — convert F32 router weight (`ffn_gate_inp`) to
+    // convert F32 router weight (`ffn_gate_inp`) to
     // F16 at load. Halves the per-token HBM weight read inside the
     // `dense_gemv_*` router kernel; quality impact is negligible (router
     // is a coarse top-k discriminator over discrete experts). The F16
@@ -1546,7 +1535,7 @@ pub struct Qwen3MoEShardedSession {
 }
 
 impl Qwen3MoEShardedSession {
-    /// V1-BENCH-#116 — true if any rank has a Q8_0 KV cache. Mirrors
+    /// true if any rank has a Q8_0 KV cache. Mirrors
     /// `Qwen3MoESession::is_q8_kv`. Used to gate batched-prefill paths
     /// since Q8 KV has no batched-prefill kernel; prefill loops the
     /// per-token decode path instead.
@@ -1629,7 +1618,7 @@ impl Qwen3MoEShardedSession {
         first_err.map_or(Ok(()), Err)
     }
 
-    /// MTP-5b-2 — speculative-decode snapshot across all ranks. Loops
+    /// speculative-decode snapshot across all ranks. Loops
     /// over each rank's local layers; only GDN layers store data
     /// (full-attn relies on `rollback_full_attn` for cheaper recovery).
     pub fn save_gdn_snapshot(&mut self, cluster: &HipCluster) -> Result<()> {
@@ -1672,7 +1661,7 @@ impl Qwen3MoEShardedSession {
         Ok(())
     }
 
-    /// MTP-5b-2 — restore GDN state from snapshot across all ranks.
+    /// restore GDN state from snapshot across all ranks.
     pub fn restore_gdn_snapshot(&mut self, cluster: &HipCluster) -> Result<()> {
         for rank_session in &mut self.per_rank {
             let rank_idx = rank_session.rank.0 as usize;
@@ -1705,7 +1694,7 @@ impl Qwen3MoEShardedSession {
         Ok(())
     }
 
-    /// MTP-5b-2 — roll back full-attn K/V tail by `n_remove` slots
+    /// roll back full-attn K/V tail by `n_remove` slots
     /// across every rank's full-attn layers.
     pub fn rollback_full_attn(&mut self, n_remove: usize) -> Result<()> {
         for rank_session in &mut self.per_rank {
@@ -1725,12 +1714,11 @@ impl Qwen3MoEShardedSession {
         Ok(())
     }
 
-    /// MTP-5h-1 — re-advance GDN state by 1 step per recurrent layer
+    /// re-advance GDN state by 1 step per recurrent layer
     /// using the per-layer x_in snapshots saved during a prior
     /// `forward_prefill_pp_logits_paired_l2` call. Used by the
     /// spec-decode reject path to replace the full L=1 redo with a
     /// per-rank-parallel GDN-only re-step (~7 ms vs ~50 ms).
-    ///
     /// Caller is expected to have already run
     /// [`Self::restore_gdn_snapshot`] (puts every recurrent layer's
     /// state back to "after position-1") and
@@ -1739,7 +1727,6 @@ impl Qwen3MoEShardedSession {
     /// committing one token at position with last_token's input" —
     /// the same state a full L=1 redo would have produced, but
     /// without re-running full-attn / MoE / FFN / output-head.
-    ///
     /// `decode_scratch` provides per-rank `hidden_b` as a discardable
     /// delta_out target plus the per-rank `LayerForwardScratch.gdn`
     /// workspace required by `forward_gdn_layer_decode`.

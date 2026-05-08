@@ -1,11 +1,9 @@
-//! V1.7.3-b cast_f32_f16 correctness sweep — single-kernel pointwise cast.
-//!
+//! b cast_f32_f16 correctness sweep — single-kernel pointwise cast.
 //! Reference: host F32→f16 round-trip (`half::f16::from_f32`). We expect
 //! bit-exact match on every element: both the device and the host cast
 //! go through round-to-nearest-even with identical rounding modes on the
 //! values produced by `seeded_f32`.
-//!
-//! MTP-4-C-1 extends this with four BF16 cast sweeps (F32↔BF16, F16↔BF16),
+//! extends this with four BF16 cast sweeps (F32↔BF16, F16↔BF16),
 //! same bit-exact-vs-host pattern.
 
 #![cfg(feature = "hip")]
@@ -48,7 +46,7 @@ pub fn run_sweep(repo_root: &Path) -> Result<Cert> {
     // - 2048: hidden
     // - 4096: per-head projection × n_heads (post-split gate size)
     // - 8192: fused (Q, gate) output width
-    // - 64:   odd small, checks tail-handling
+    // - 64: odd small, checks tail-handling
     // - 1024: covers shapes that don't divide 256 cleanly
     let shapes = [64usize, 1024, 2048, 4096, 8192];
     let mut results = Vec::new();
@@ -138,7 +136,7 @@ fn run_shape(dev: &HipDevice, kernel: &HipKernel<'_>, n_elems: usize, seed: u64)
     Ok(diff_bits as f32)
 }
 
-// ── MTP-4-C-1 BF16 cast sweeps ────────────────────────────────────────
+// ── BF16 cast sweeps ────────────────────────────────────────
 
 /// Common shape set for BF16 cast sweeps; mirrors `run_sweep` above.
 const BF16_SHAPES: [usize; 5] = [64, 1024, 2048, 4096, 8192];
@@ -272,7 +270,7 @@ where
     Ok(cert)
 }
 
-/// MTP-4-C-1: F32 → BF16 cast sweep. Reference: `bf16::from_f32` (RNE).
+/// F32 → BF16 cast sweep. Reference: `bf16::from_f32` (RNE).
 pub fn run_cast_f32_bf16_sweep(repo_root: &Path) -> Result<Cert> {
     run_cast_sweep::<f32, bf16>(
         repo_root,
@@ -291,7 +289,7 @@ pub fn run_cast_f32_bf16_sweep(repo_root: &Path) -> Result<Cert> {
     )
 }
 
-/// MTP-4-C-1: BF16 → F32 cast sweep. Reference: `bf16::to_f32` (lossless).
+/// BF16 → F32 cast sweep. Reference: `bf16::to_f32` (lossless).
 pub fn run_cast_bf16_f32_sweep(repo_root: &Path) -> Result<Cert> {
     run_cast_sweep::<bf16, f32>(
         repo_root,
@@ -315,7 +313,7 @@ pub fn run_cast_bf16_f32_sweep(repo_root: &Path) -> Result<Cert> {
     )
 }
 
-/// MTP-4-C-1: F16 → BF16 cast sweep. Reference: `bf16::from_f32(f16.to_f32())`.
+/// F16 → BF16 cast sweep. Reference: `bf16::from_f32(f16.to_f32())`.
 pub fn run_cast_f16_bf16_sweep(repo_root: &Path) -> Result<Cert> {
     run_cast_sweep::<f16, bf16>(
         repo_root,
@@ -339,7 +337,7 @@ pub fn run_cast_f16_bf16_sweep(repo_root: &Path) -> Result<Cert> {
     )
 }
 
-/// MTP-4-C-1: BF16 → F16 cast sweep. Reference: `f16::from_f32(bf16.to_f32())`.
+/// BF16 → F16 cast sweep. Reference: `f16::from_f32(bf16.to_f32())`.
 /// Inputs are bounded to F16-representable range to avoid Inf saturation
 /// (which is a correct outcome, but matching saturation bit-exactly across
 /// device/host requires care; the cast itself is exercised on in-range

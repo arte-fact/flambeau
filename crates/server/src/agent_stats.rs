@@ -1,11 +1,9 @@
 //! M2.3 — per-iteration agent-loop telemetry, exposed at
 //! `GET /v1/agent/stats`.
-//!
 //! Read-only debug surface. Each chat completion contributes zero or
 //! more `IterStat` entries (one per agent-loop iteration); they land
 //! in an in-memory ring keyed by session id. Bounded capacity, no
 //! persistence.
-//!
 //! Intent: catch Qwen3.6 MoE-routing oscillation in long agent
 //! sessions — the community-reported failure mode where the model
 //! loops through tool calls, gets stuck on the same tool, or

@@ -1,12 +1,10 @@
 //! MCP client that `flambeau serve` uses to enumerate / call tools on
 //! remote MCP servers passed via `--mcp <url>` (ROADMAP-V2 §M2.1).
-//!
 //! Non-goals for M2.1: the full agent loop (tool-call bridging + re-
 //! prompt) is M2.2; telemetry and context-budgeting are M2.3. This
 //! module ships the read-only "enumerate tools at startup" primitive
 //! plus the data structures the chat handler renders into the model's
 //! `tools[]` list.
-//!
 //! Disambiguation: tool names are prefixed with a short alias derived
 //! from the URL host+port (`alias.tool_name`), so two servers exposing
 //! `flambeau_sweep` don't collide in the model's view. If the client
@@ -21,7 +19,6 @@ use rmcp::transport::streamable_http_client::{
 use rmcp::ServiceExt;
 
 /// One tool advertised by a remote MCP server.
-///
 /// `name` is the **prefixed** name the model sees (`alias.tool`). The
 /// original, unprefixed name is kept as `remote_name` so the agent
 /// loop (M2.2) can forward `tools/call` using the name the server
@@ -131,7 +128,6 @@ async fn enumerate_one(url: &str) -> Result<Vec<RemoteTool>> {
 /// Short alias derived from `url`. Hostname by default, with port
 /// appended when the URL specifies one (so `http://localhost:9090` and
 /// `http://localhost:9091` don't collide).
-///
 /// Falls back to `"mcp"` when parsing fails — better than a crash, and
 /// the prefix still disambiguates against other sources.
 fn alias_for(url: &str) -> String {
@@ -174,7 +170,6 @@ pub fn find_by_prefixed_name<'a>(
 /// call (pooling is a perf lever deferred to a follow-up), sends
 /// `tools/call`, and flattens the result's content list into a single
 /// string that the model can consume as a `role="tool"` payload.
-///
 /// `arguments_json` is the JSON-*string* the model emitted (our wire
 /// contract, #20198). We parse it here into a `Map` for the MCP call.
 pub async fn call_remote(tool: &RemoteTool, arguments_json: &str) -> Result<String> {
@@ -269,7 +264,6 @@ fn content_to_text(content: &[rmcp::model::Content]) -> String {
 /// tools list, tokenizes it, subtracts the render output of an
 /// empty-tools prompt, and returns the delta. This is an upper bound
 /// on "tokens consumed just for tool-definition overhead".
-///
 /// Returns `None` when rendering or tokenising fails — the caller
 /// (startup log) then skips the budget warning rather than crashing.
 pub fn estimate_tools_token_cost(

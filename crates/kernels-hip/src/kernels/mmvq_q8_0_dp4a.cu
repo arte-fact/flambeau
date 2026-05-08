@@ -1,24 +1,19 @@
 // mmvq_q8_0_dp4a — Q8_0 weight × Q8_1 activation → F32 dst, DP4A inner loop.
-//
 // Same block/grid shape as `mmvq_q8_0`:
-//   blockDim  = { 256 }
-//   gridDim   = { N }  (one block per output row)
-//   shared    = 0
-//
+// blockDim = { 256 }
+// gridDim = { N } (one block per output row)
+// shared = 0
 // The inner loop swaps per-element scalar `xi * yi * d_x * d_y` for the
 // gfx906 `v_dot4_i32_i8` intrinsic: each thread owns ONE int32 (4 packed
 // quants) of a block instead of one byte, runs one dp4a to get 4 int8×int8
 // MACs in a single VALU, then applies the block scale once.
-//
 // Math equivalence to the scalar version is exact — dp4a with clamp=false
 // does the same int32 accumulation the manual (xi*yi)-sum would.
-//
 // Thread layout per block-of-256:
-//   lane8      = tid & 7    — which int32 (0..7) within a quant block
-//   block_idx  = tid >> 3   — which logical block stride (0..31)
+// lane8 = tid & 7 — which int32 (0..7) within a quant block
+// block_idx = tid >> 3 — which logical block stride (0..31)
 // 32 blocks processed per iteration → outer loop strides `n_blocks_per_row`
 // in 32-block steps from `block_idx`.
-//
 // First-class reference: llama.cpp `vec_dot_q8_0_q8_1_impl` +
 // `vec_dot_q8_0_q8_1` in `ggml-cuda/vecdotq.cuh`, specialised for the
 // MMVQ_BLOCK_THREADS=256, one-row-per-block shape of our `mmvq_q8_0`.

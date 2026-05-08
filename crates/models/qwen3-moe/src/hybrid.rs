@@ -1,25 +1,20 @@
-//! AUTO-4b — hybrid PP-of-TP model loader.
-//!
+//! hybrid PP-of-TP model loader.
 //! `Qwen3MoEHybridModel` composes `pp_size` `Qwen3MoETpModel` instances
 //! (one per pipeline stage) on top of `pp_size` per-stage `HipCluster`s
 //! of `tp_size` ranks each. Stages are uniform: each stage owns a
 //! contiguous `num_layers / pp_size` slice of the layer list, plus
 //! global tensors only where they're consumed:
-//!
-//!   - `token_embd` lives on **stage 0** only (the embed lookup runs
-//!     before the layer loop on the first stage).
-//!   - `output_norm` + `output` (LM head) live on the **last stage**
-//!     only.
-//!
+//! - `token_embd` lives on **stage 0** only (the embed lookup runs
+//! before the layer loop on the first stage).
+//! - `output_norm` + `output` (LM head) live on the **last stage**
+//! only.
 //! This is the loader-only milestone for the hybrid path (task #65).
-//! Forward composition is AUTO-4d (#67); session/scratch is AUTO-4c
-//! (#66); server wiring is AUTO-4f (#69). The variant is selected
+//! Forward composition is (#67); session/scratch is 
+//! (#66); server wiring is (#69). The variant is selected
 //! manually via `--mesh-mode pp+tp --pp-size N --tp-size M`; flambeau
-//! does not autodetect topology — operators pick one with the AUTO-5
+//! does not autodetect topology — operators pick one with the 
 //! bracket-bench harness (#61).
-//!
 //! ### Device ordering
-//!
 //! `device_ids[0..tp_size]` form stage 0's TP subgroup,
 //! `device_ids[tp_size..2*tp_size]` form stage 1's, and so on. The
 //! caller is responsible for picking pairings that have a healthy
@@ -60,7 +55,7 @@ impl HybridMeshSpec {
 
     /// Validate against a model + device list. Both axes must be
     /// non-zero, total ranks must equal `device_ids.len()`, and the
-    /// layer count must divide cleanly (uniform stages only at AUTO-4b).
+    /// layer count must divide cleanly (uniform stages only at ).
     pub fn validate(self, num_layers: usize, num_devices: usize) -> Result<()> {
         if self.pp_size == 0 || self.tp_size == 0 {
             bail!(
@@ -135,7 +130,7 @@ impl std::fmt::Debug for Qwen3MoEHybridStage {
 
 /// Hybrid PP-of-TP model — `Vec<Qwen3MoEHybridStage>`, one per PP
 /// stage. Constructed once at `flambeau serve` startup and consumed by
-/// the AUTO-4d hybrid forward path.
+/// the hybrid forward path.
 pub struct Qwen3MoEHybridModel {
     pub config: Qwen3MoEConfig,
     pub spec: HybridMeshSpec,
@@ -155,7 +150,6 @@ impl std::fmt::Debug for Qwen3MoEHybridModel {
 impl Qwen3MoEHybridModel {
     /// Build the per-stage sub-clusters, slice the layer table per
     /// stage, and load every stage's weights.
-    ///
     /// `device_ids` is in stage-major order: `device_ids[s*tp_size ..
     /// (s+1)*tp_size]` form stage `s`'s TP subgroup.
     pub fn load(
@@ -177,7 +171,7 @@ impl Qwen3MoEHybridModel {
             );
             // The intra-stage AR path requires a fully-connected peer
             // matrix among `stage_devices`. We don't probe it here —
-            // `BarP2pAllReduce::new` (constructed in AUTO-4f) is the
+            // `BarP2pAllReduce::new` (constructed in ) is the
             // right place; failure there surfaces a clear "stage N has
             // a broken peer pair" message to the operator.
 
@@ -254,17 +248,16 @@ impl Qwen3MoEHybridModel {
 }
 
 // ────────────────────────────────────────────────────────────────────
-// AUTO-4c — per-stage session + decode/prefill scratch
+// per-stage session + decode/prefill scratch
 // ────────────────────────────────────────────────────────────────────
 
 /// One PP stage's per-rank KV / GDN caches. `caches[rank][i]` holds the
 /// cache for **layer `layer_range.start + i`**. Layers outside the
 /// stage's range live on a different stage and are not allocated here.
-///
 /// Sizing inherits the same per-rank-TP shrinkage as
 /// [`crate::Qwen3MoETpSession`]: `local_num_v_heads = num_v_heads /
 /// tp_size` (GDN), `local_num_kv_heads = num_kv_heads / tp_size` for
-/// full-attn (with the V2.4d-i2 KV-replication fallback when
+/// full-attn (with the d-i2 KV-replication fallback when
 /// `num_kv_heads % tp_size != 0`).
 pub struct Qwen3MoEHybridStageSession {
     pub stage_idx: u32,
@@ -278,7 +271,7 @@ pub struct Qwen3MoEHybridStageSession {
 
 impl Qwen3MoEHybridStageSession {
     /// Bytes of KV / GDN state held by this stage across all its TP
-    /// ranks. Used by the AUTO-4c smoke cert.
+    /// ranks. Used by the smoke cert.
     pub fn total_bytes(&self) -> usize {
         let mut total = 0usize;
         for rank_caches in &self.caches {
@@ -484,9 +477,8 @@ impl Drop for Qwen3MoEHybridSession {
 /// [`ShardedForwardOneTokenScratchTp`] verbatim because that scratch is
 /// hidden-size-driven, not layer-count-driven — the same shape covers
 /// any stage's layer range. The `head_stage` field marks the stage that
-/// runs the LM head + argmax (always the last stage in AUTO-4a, since
+/// runs the LM head + argmax (always the last stage in , since
 /// that's where `output_norm` / `output` were uploaded by the loader).
-///
 /// Inter-stage hand-off is one F16 hidden vector per token per hop,
 /// sent via [`HipCluster::peer_copy_via_host`] on the **global**
 /// cluster (constructed by the server, not by this scratch). The
@@ -496,12 +488,11 @@ pub struct ShardedForwardOneTokenScratchHybrid {
     pub per_stage: Vec<ShardedForwardOneTokenScratchTp>,
     /// Stage that runs the LM head. V1: `pp_size - 1`.
     pub head_stage: u32,
-    /// CN-80B-20 — per-stage captured decode graph. ONE shared graph per
+    /// per-stage captured decode graph. ONE shared graph per
     /// stage covering all TP-rank streams (captured via
     /// `hipStreamBeginCaptureToGraph`). Cross-rank events recorded inside
     /// the closure resolve as internal graph edges. Populated lazily on
     /// the first decode call when `FLAMBEAU_DECODE_GRAPH=1`.
-    ///
     /// Iter 1 stores HipGraphExec only (no slot binding) — captured K/V
     /// append destinations and `n_tokens_kv` are frozen at capture time,
     /// so replays produce TIMING-MEANINGFUL but OUTPUT-WRONG results.
@@ -541,7 +532,7 @@ impl ShardedForwardOneTokenScratchHybrid {
                 })?;
             per_stage.push(scratch);
         }
-        // CN-80B-20 — graph cache: one shared graph per stage covering all
+        // graph cache: one shared graph per stage covering all
         // TP-rank streams. Lazy population on first decode call.
         let decode_graphs: Vec<Option<flambeau_backend_hip::HipGraphExec>> =
             model.stages.iter().map(|_| None).collect();
@@ -597,11 +588,10 @@ impl Drop for ShardedForwardOneTokenScratchHybrid {
     }
 }
 
-/// **AUTO-6e2** — per-stage prefill scratch for the hybrid (PP-of-TP)
+/// 2** — per-stage prefill scratch for the hybrid (PP-of-TP)
 /// L-batched driver. Mirrors [`ShardedForwardOneTokenScratchHybrid`]
 /// but each stage's scratch is a [`ShardedForwardPrefillScratchTp`]
 /// sized for `max_tokens`.
-///
 /// LM head buffers live only on `head_stage` (last stage) — non-head
 /// stages still allocate `OutputHeadScratch` against rank 0 (cheap)
 /// and dispose cleanly. Mirrors the per-token sibling's choice; could

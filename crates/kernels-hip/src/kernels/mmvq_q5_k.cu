@@ -1,5 +1,4 @@
 // mmvq_q5_k — Q5_K weight × Q8_1 activation → F32 dst.
-//
 // Same 64-thread / single-row layout as `mmvq_q4_k`. Adds the 5th bit from
 // `qh` (one bit per element, 32 bytes per super-block). The bit-mask walks
 // `u1 = 1 << (2*grp)` / `u2 = 2 << (2*grp)` across the 4 groups, so each

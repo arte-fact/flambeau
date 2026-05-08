@@ -1,23 +1,20 @@
 // indexed_moe_mmvq_q4_k_r2_dp4a — Q4_K MoE MMVQ with DP4A inner loop.
-//
 // Drop-in replacement for `indexed_moe_mmvq_q4_k_r2.cu`. Same block/grid
 // shape (64 threads = 1 wave64, 2 rows per block), same output layout.
 // Inner loop swaps per-element scalar `d*sc*raw_q*y - dmin*m*y` for llama.cpp's
 // `vec_dot_q4_K_q8_1_impl_vmmq` DP4A pattern:
-//   - pack 4 nibbles into int32
-//   - dp4a(q_nibbles, u_q8, 0)            → sum of 4 raw_q * raw_y products
-//   - dp4a(0x01010101, u_q8, 0)           → sum of 4 raw_y values (for dmin*m subtraction)
-//
+// - pack 4 nibbles into int32
+// - dp4a(q_nibbles, u_q8, 0) → sum of 4 raw_q * raw_y products
+// - dp4a(0x01010101, u_q8, 0) → sum of 4 raw_y values (for dmin*m subtraction)
 // Per super-block, 32 lanes (half-warp per row) cover all 128 bytes of
 // `bk->qs` as 32 int32s. Each lane owns ONE int32 = 4 low nibbles going to
 // the even sub-block of a pair, + 4 high nibbles going to the odd sub-block.
 // Lane layout:
-//   pair_idx = lane_lo >> 3   — 0..3 — which pair of sub-blocks (0:(0,1), 1:(2,3), …)
-//   iqs      = lane_lo & 7    — 0..7 — which int32 of the pair's 32-byte slice
+// pair_idx = lane_lo >> 3 — 0..3 — which pair of sub-blocks (0:(0,1), 1:(2,3), …)
+// iqs = lane_lo & 7 — 0..7 — which int32 of the pair's 32-byte slice
 // Each lane does 4 dp4a calls → 16 int8×int8 MACs per super-block per lane,
 // matching the scalar kernel's 8 scalar FMAs per super-block per lane but with
 // ~2× better inner-loop throughput.
-//
 // Reference: /artefact/llama.cpp/ggml/src/ggml-cuda/vecdotq.cuh:501-527.
 
 #include "block_quant.cuh"

@@ -1,61 +1,53 @@
 // gdn_state_step_f32 — fused Gated-Delta-Net recurrent step (S_v = 128).
-//
 // Replaces the ~8 tensor-op launches of candle's `delta_net_single_step`
 // with one kernel that consumes q, k, v, gate, beta, and an in-place state
 // and emits `L` output rows plus the updated state. One launch handles both
 // decode (L = 1) and prefill (L > 1) — state stays register-resident across
 // all L tokens in the recurrence loop.
-//
 // Ported from candle-hip-kernels/src/gated_delta_net.cu, itself ported from
 // llamacpp-turbo's `ggml-cuda/gated_delta_net.cu::gated_delta_net_cuda`.
 // Kept minimal: Wave64 (WARP_SIZE=64), KDA=false (scalar gate per head),
 // single template instantiation at S_v = 128 to cover qwen35moe / qwen36moe
 // (head_k_dim = head_v_dim = 128). Extending to S_v ∈ {16, 32, 64} later is
 // mechanical — copy the extern "C" wrapper with a new name.
-//
 // Layout (row-major, contiguous) — all L-outer so the kernel integrates
 // cleanly with upstream ops that produce per-token rows (`qmatmul(M=L)`,
 // `gather_qkv_strided`, etc.), and so attn_out reshapes directly to
 // `[L, d_inner]` for the downstream `ssm_norm + silu(z)*x + ssm_out` chain:
-//
-//   q, k:      (B, L, H_kv, S_v)   — H_kv = H / n_rep (GQA-shared heads)
-//   v:         (B, L, H_v,  S_v)
-//   gate,beta: (B, L, H_v)         — one scalar per (b, t, h)
-//   state_in:  (B, H_v,  S_v, S_v) — stored as [col][row]: the col-outer
-//                                    transpose lets a warp reading column
-//                                    `col` hit S_v contiguous floats (8
-//                                    cache lines at S_v=128) instead of
-//                                    S_v cache lines strided by 512 B.
-//   state_out: (B, H_v,  S_v, S_v) — same col-outer layout. state_in and
-//                                    state_out may alias (the kernel loads
-//                                    state_in into registers once at the
-//                                    start and writes state_out at the end).
-//   attn_out:  (B, L,    H_v, S_v)   — **L outer, H_v middle, S_v inner**.
-//                                      Matches llama.cpp's output shape
-//                                      `[S_v, H_v, n_tokens, n_seqs]` (which
-//                                      then reshapes to `[d_inner, L]` — one
-//                                      contiguous `d_inner` row per token),
-//                                      and lets our downstream `rmsnorm_f32`,
-//                                      `swiglu_f32(z, ...)` and `ssm_out`
-//                                      mmvq read `[L, d_inner]` directly.
-//                                      At L=1 this coincides with the
-//                                      head-outer layout, which is why V1.7
-//                                      decode landed correctly while V1.7.5.D
-//                                      prefill at L>1 was silently wrong
-//                                      until V1.7.5.D.1 (this commit).
-//
+// q, k: (B, L, H_kv, S_v) — H_kv = H / n_rep (GQA-shared heads)
+// v: (B, L, H_v, S_v)
+// gate,beta: (B, L, H_v) — one scalar per (b, t, h)
+// state_in: (B, H_v, S_v, S_v) — stored as [col][row]: the col-outer
+// transpose lets a warp reading column
+// `col` hit S_v contiguous floats (8
+// cache lines at S_v=128) instead of
+// S_v cache lines strided by 512 B.
+// state_out: (B, H_v, S_v, S_v) — same col-outer layout. state_in and
+// state_out may alias (the kernel loads
+// state_in into registers once at the
+// start and writes state_out at the end).
+// attn_out: (B, L, H_v, S_v) — **L outer, H_v middle, S_v inner**.
+// Matches llama.cpp's output shape
+// `[S_v, H_v, n_tokens, n_seqs]` (which
+// then reshapes to `[d_inner, L]` — one
+// contiguous `d_inner` row per token),
+// and lets our downstream `rmsnorm_f32`,
+// `swiglu_f32(z, ...)` and `ssm_out`
+// mmvq read `[L, d_inner]` directly.
+// At L=1 this coincides with the
+// head-outer layout, which is why // decode landed correctly while // prefill at L>1 was silently wrong
+// until (this commit).
 // Per token t, each warp owns one output column `col`:
-//   state[col, i] *= exp(gate[t])
-//   sk[col]       = Σ_i state[col, i] * k[t, i]
-//   delta[col]    = (v[t, col] - sk[col]) * beta[t]
-//   state[col, i] += k[t, i] * delta[col]
-//   attn[t, col]  = Σ_i state[col, i] * q[t, i]
-//
-// Grid:  (H_v, B, ceil(S_v / WARPS_PER_BLOCK))
+// state[col, i] *= exp(gate[t])
+// sk[col] = Σ_i state[col, i] * k[t, i]
+// delta[col] = (v[t, col] - sk[col]) * beta[t]
+// state[col, i] += k[t, i] * delta[col]
+// attn[t, col] = Σ_i state[col, i] * q[t, i]
+// Grid: (H_v, B, ceil(S_v / WARPS_PER_BLOCK))
 // Block: (WARP_SIZE = 64, WARPS_PER_BLOCK = 4, 1)
-//   → 256 threads = 4 warps per block, 4 columns of the same (b, h) issuing
-//     together. __launch_bounds__(256, 1) keeps the VGPR budget generous
-//     (we want S_v/WARP_SIZE = 2 state rows + 2 k-rows + 2 q-rows in regs).
+// → 256 threads = 4 warps per block, 4 columns of the same (b, h) issuing
+// together. __launch_bounds__(256, 1) keeps the VGPR budget generous
+// (we want S_v/WARP_SIZE = 2 state rows + 2 k-rows + 2 q-rows in regs).
 
 #include <hip/hip_runtime.h>
 
@@ -103,19 +95,19 @@ static __device__ __forceinline__ void gdn_state_step_impl(
     // V / state / attn_out / gate / beta are indexed by (b, h_idx).
     // Q / K are indexed by (b, h_kv), the GQA-shared k-head for this
     // v-head. Two repeat conventions exist in the wild:
-    //   rep-OUTER (rep_inner_layout = 0):  candle / llama.cpp qwen35moe
-    //     uses `ggml_repeat_4d(Q, num_v_heads)` which CYCLES through
-    //     k-heads — v-head h_idx → k-head `h_idx % H_kv`. Pattern at
-    //     n_rep=2: v-heads {0..H_kv-1} cover k-heads {0..H_kv-1}, then
-    //     v-heads {H_kv..2*H_kv-1} cover them again.
-    //   rep-INNER (rep_inner_layout = 1):  llama.cpp qwen3next
-    //     does an `ggml_reshape_4d → repeat_4d → reshape` that
-    //     INTERLEAVES — each k-head is duplicated `n_rep` times in a
-    //     row, giving v-head h_idx → k-head `h_idx / n_rep`. Pattern
-    //     at n_rep=2: v-heads {0,1} share k-head 0, {2,3} share
-    //     k-head 1, etc. (See `qwen3next.cpp:418-431` for the explicit
-    //     reshape-interleave.) This is the natural `kv = v / n_rep`
-    //     mapping used by most modern GQA models.
+    // rep-OUTER (rep_inner_layout = 0): candle / llama.cpp qwen35moe
+    // uses `ggml_repeat_4d(Q, num_v_heads)` which CYCLES through
+    // k-heads — v-head h_idx → k-head `h_idx % H_kv`. Pattern at
+    // n_rep=2: v-heads {0..H_kv-1} cover k-heads {0..H_kv-1}, then
+    // v-heads {H_kv..2*H_kv-1} cover them again.
+    // rep-INNER (rep_inner_layout = 1): llama.cpp qwen3next
+    // does an `ggml_reshape_4d → repeat_4d → reshape` that
+    // INTERLEAVES — each k-head is duplicated `n_rep` times in a
+    // row, giving v-head h_idx → k-head `h_idx / n_rep`. Pattern
+    // at n_rep=2: v-heads {0,1} share k-head 0, {2,3} share
+    // k-head 1, etc. (See `qwen3next.cpp:418-431` for the explicit
+    // reshape-interleave.) This is the natural `kv = v / n_rep`
+    // mapping used by most modern GQA models.
     // The two layouts are NOT compatible; using the wrong one produces
     // a recurrent state that evolves with the wrong q/k for half the
     // v-heads, manifesting at the model output as a degenerate-token
@@ -196,7 +188,7 @@ static __device__ __forceinline__ void gdn_state_step_impl(
         const float delta_col = (v_col - kv_col) * beta_val;
 
         // Fused: state[col, i] += k[i] * delta_col
-        //        attn[col]     = Σ_i state[col, i] * q[i]   (new state)
+        // attn[col] = Σ_i state[col, i] * q[i] (new state)
         float attn_partial = 0.0f;
 #pragma unroll
         for (int r = 0; r < rows_per_lane; r++) {

@@ -1,15 +1,13 @@
-//! MTP-4-C-4 — BF16 attention decode (GQA) correctness sweep.
-//!
+//! BF16 attention decode (GQA) correctness sweep.
 //! Mirrors the F16 sweep across the same head-dim / GQA shapes, but
 //! all storage is BF16 (Q / K / V / out). Internal F32 math; reference
 //! is the same decomposed F32 attention with BF16 quantisation applied
 //! to inputs and output.
-//!
 //! Shapes:
-//!   (head_dim, n_heads_q, n_heads_kv)
-//!     (64, 4, 1)     — smoke (1 wave64 warp)
-//!     (128, 32, 4)   — Qwen3.5 GQA-8
-//!     (256, 16, 2)   — Qwen3.6 GQA-8 / MTP target
+//! (head_dim, n_heads_q, n_heads_kv)
+//! (64, 4, 1) — smoke (1 wave64 warp)
+//! (128, 32, 4) — Qwen3.5 GQA-8
+//! (256, 16, 2) — Qwen3.6 GQA-8 / MTP target
 
 #![cfg(feature = "hip")]
 

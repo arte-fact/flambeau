@@ -1,12 +1,9 @@
-// rmsnorm_f16_add_residual — V2.23.a.1 fused add+rmsnorm.
-//
+// rmsnorm_f16_add_residual — 3.a.1 fused add+rmsnorm.
 // Pattern in `forward_layer_decode`:
-//   mid      = x_in + attn_delta          (add_f16)
-//   mid_norm = rmsnorm(mid) * weight      (rmsnorm_f16)
-//
+// mid = x_in + attn_delta (add_f16)
+// mid_norm = rmsnorm(mid) * weight (rmsnorm_f16)
 // Both mid and mid_norm are consumed downstream (mid → moe_residual path,
 // mid_norm → FFN input), so we emit both. Single kernel, single pass.
-//
 // Launch identical to rmsnorm_f16.cu: blockDim={256}, gridDim={n_rows},
 // 4 wave64 warps/block. K must be multiple of 256 (Qwen3.6's hidden sizes
 // 2048/5120/15360 all are).

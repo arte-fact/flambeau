@@ -3,14 +3,12 @@
 // partition the n_tokens dimension across grid.y so each block does
 // 1/n_chunks of the work, then a combine pass merges per-chunk
 // (m, s, o[head_dim]) triples online-softmax style.
-//
-// V1-BENCH-#116-dp4a (Phase 4 follow-up): chunk pass is now pure
+// chunk pass is now pure
 // integer dp4a (`v_dot4_i32_i8`), mirroring the single-pass kernel.
 // Q is quantized to Q8_0 in LDS once per chunk; K is read packed as
 // int32, dotted via `__builtin_amdgcn_sdot4`; scalar K.d × Q.d
 // applied once per Q8_0 block. V path stays on FP16 dequant per
 // element (Phase 5 covers PV in INT8).
-//
 // Combine pass is identical math to the F16 split-K combine and to
 // the prior FP-dequant Q8 split-K combine — operates on f32 partials,
 // layout-agnostic. Kept as a separate symbol so the Q8 module is
@@ -62,7 +60,7 @@ extern "C" __global__ void flambeau_attention_decode_q8_kv_splitk_chunk(
     if (t_end > n_tokens) t_end = n_tokens;
 
     // 1. Q → Q8_0 in LDS, once per (q_head, chunk) block. Same trick as
-    //    single-pass: amax over each 32-elem group, roundf(v/d).
+    // single-pass: amax over each 32-elem group, roundf(v/d).
     __shared__ int8_t q_qs[ATTN_Q8SK_MAX_HEAD_DIM];
     __shared__ float  q_d_block[ATTN_Q8SK_MAX_HEAD_DIM / 32];
 

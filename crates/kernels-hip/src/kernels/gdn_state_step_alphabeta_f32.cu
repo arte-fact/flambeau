@@ -1,23 +1,18 @@
 // gdn_state_step_alphabeta_f32 — C10 fused GDN recurrent step + α/β/gate
-//
 // Same kernel structure as `gdn_state_step_f32_s128`, but absorbs the
 // preceding `flambeau_gdn_alpha_beta_f32` launch (one launch saved per
 // GDN layer per token). Instead of reading already-processed gate/beta
 // scalars, this kernel reads the raw mmvq outputs `alpha_in[B,L,H]` and
 // `beta_in[B,L,H]` plus the per-head constants `ssm_dt_bias[H]`,
 // `ssm_a[H]`, and computes:
-//
-//   gate_eff = exp( softplus(alpha[t,i] + ssm_dt_bias[i]) * ssm_a[i] )
-//   beta_eff = sigmoid( beta_in[t,i] )
-//
+// gate_eff = exp( softplus(alpha[t,i] + ssm_dt_bias[i]) * ssm_a[i] )
+// beta_eff = sigmoid( beta_in[t,i] )
 // inline. The unfused chain ran:
-//   alpha_beta(...) → gate_device, beta_device  (kernel 1)
-//   state_step(... gate_device, beta_device ...)                (kernel 2)
-//
+// alpha_beta(...) → gate_device, beta_device (kernel 1)
+// state_step(... gate_device, beta_device ...) (kernel 2)
 // On Qwen3.6 with 30 GDN layers, that's 60 launches per decode token;
 // the fusion drops it to 30 — saves ~5 µs × 30 ≈ 150 µs/token (~3-5 %
 // of decode wall on a hybrid 9B/35B run).
-//
 // Numerically identical to the unfused chain at FP32: same op order
 // (softplus → __expf), same sigmoid branch, same warp-reduce
 // signatures. Caller no longer needs to allocate `gate_device` /
