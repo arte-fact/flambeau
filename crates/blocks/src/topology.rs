@@ -334,3 +334,76 @@ pub fn forward_prefill_pp_chunk<D: PpPrefillDriver>(
     driver.cluster().device(last).bind()?;
     driver.output_head_last_token(l)
 }
+
+/// Per-rank handles + per-call hooks for tensor-parallel single-token
+/// decode. TP holds every layer on every rank (sliced via Megatron
+/// splits); the topology orchestrator just iterates layers, the
+/// driver handles the per-layer intra-rank slicing + BAR1 P2P
+/// AllReduces.
+///
+/// Finalisation (argmax / logits download / keep-on-device) stays
+/// caller-side.
+pub trait TpDecodeDriver {
+    fn cluster(&self) -> &HipCluster;
+
+    fn n_layers(&self) -> usize;
+
+    /// Rank that holds the LM head + final norm. The orchestrator
+    /// binds this device before `output_head`.
+    fn head_rank(&self) -> usize;
+
+    /// Embed `token_id` on `rank`. token_embd is replicated across
+    /// ranks in the V1 TP layout, so each rank dequantises into its
+    /// own hidden buffer.
+    fn embed_token(&mut self, rank: usize, token_id: u32) -> Result<()>;
+
+    /// Run layer `il`'s decode across all ranks. The driver dispatches
+    /// to its own full-attn / GDN / dense / MoE TP kernels per
+    /// `cfg.is_recurrent(il)` (or whichever predicate the model uses).
+    fn forward_layer_decode(&mut self, il: usize, position: usize) -> Result<()>;
+
+    /// Run final norm + LM head on the head rank, leaving F32 logits
+    /// in the driver-owned head scratch. Caller finalises through
+    /// driver-specific methods after the orchestrator returns.
+    fn output_head(&mut self) -> Result<()>;
+}
+
+/// Single-token decode through a tensor-parallel mesh.
+///
+/// Sequence:
+/// 1. Bind each rank in turn; `embed_token` writes the F16 hidden
+///    vector to the rank's hidden buffer.
+/// 2. Iterate `0..n_layers()` calling `forward_layer_decode` — the
+///    driver runs whatever TP-specific intra-layer composition the
+///    model needs (BAR1 P2P AllReduce after attn / FFN, etc.).
+/// 3. Bind `head_rank`; `output_head` runs the LM head on that
+///    rank's hidden vector.
+pub fn forward_one_token_tp<D: TpDecodeDriver>(
+    driver: &mut D,
+    token_id: u32,
+    position: usize,
+) -> Result<()> {
+    let n_ranks = driver.cluster().ranks();
+    if n_ranks == 0 {
+        bail!("forward_one_token_tp: zero-rank driver");
+    }
+
+    for r in 0..n_ranks {
+        driver.cluster().device(r).bind()?;
+        driver.embed_token(r, token_id)?;
+    }
+
+    let n_layers = driver.n_layers();
+    for il in 0..n_layers {
+        driver.forward_layer_decode(il, position)?;
+    }
+
+    let head = driver.head_rank();
+    if head >= n_ranks {
+        bail!(
+            "forward_one_token_tp: head_rank={head} out of range (n_ranks={n_ranks})"
+        );
+    }
+    driver.cluster().device(head).bind()?;
+    driver.output_head()
+}
