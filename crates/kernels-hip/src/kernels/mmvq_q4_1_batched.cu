@@ -54,9 +54,8 @@ static __device__ __forceinline__ int flambeau_q4_1_batched_dp4a(int a, int b, i
 // per-element output drift versus the single-row kernel sits at f32 LSB
 // scale (max_abs_err ≈ 1.5e-6 at k=4096, well within the existing
 // batched-GDN tolerance). The parity test enforces abs_err < 1e-5
-// rather than bit-equal — matches the tolerance the batched-GDN cert
-// (`certs/perf/p29b_i2_F_throughput/...`) already accepts on the
-// model-level forward path.
+// rather than bit-equal — matches the batched-GDN tolerance accepted
+// on the model-level forward path.
 
 extern "C" __global__ void flambeau_mmvq_q4_1_q8_1_batched(
     const flambeau_block_q4_1* __restrict__ x,    // [n_rows, n_blocks_per_row]

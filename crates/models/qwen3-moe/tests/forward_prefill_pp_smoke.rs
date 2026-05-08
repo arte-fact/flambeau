@@ -6,9 +6,9 @@
 //! 0, output head on rank 1. Zero Q4_K / Q8_0 matmul weights → every
 //! delta zero → LM head matmul is zero × zero → argmax lane 0.
 //!
-//! Skips when `device_count < 2`. Real-weight parity for PP prefill is
-//! tracked separately (the parity cert under `certs/parity/` currently
-//! covers decode only).
+//! Skips when `device_count < 2`. Real-weight PP prefill parity is
+//! covered by `forward_prefill_pp_real` and the wider chunked-prefill
+//! test suite.
 
 #![cfg(feature = "hip")]
 

@@ -1,0 +1,29 @@
+{
+  "messages": [
+    { "role": "user", "content": "Add these tags: urgent, external, review." }
+  ],
+  "tools": [
+    {
+      "type": "function",
+      "function": {
+        "name": "add_tags",
+        "description": "Attach a list of tags to the active item.",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "tags": {
+              "type": "array",
+              "items": { "type": "string" },
+              "minItems": 1,
+              "uniqueItems": true
+            }
+          },
+          "required": ["tags"]
+        }
+      }
+    }
+  ],
+  "bos_token": "",
+  "eos_token": "<|im_end|>",
+  "add_generation_prompt": true
+}

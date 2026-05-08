@@ -524,11 +524,10 @@ pub fn attention_decode_q8_kv_splitk(
 /// - `n_q_tokens < 4` → oracle kernel (one block per `(q_token, q_head)`,
 ///   dp4a score loop, V FP-dequant per element).
 ///
-/// V1-BENCH-#116-flashtile-q8: closes the prefill regression in
-/// `certs/perf/q8_vs_f16_32k_2026_05_08.md` (Q8 prefill 0.90× F16 →
-/// targeting ≤ 1.05× F16). Used by the batched-Q8-prefill driver —
-/// replaces the per-token Q8 prefill fallback with one launch per layer
-/// per ubatch chunk.
+/// V1-BENCH-#116-flashtile-q8: closes the prefill regression where Q8
+/// was stuck on the oracle path (~0.90× F16). Used by the batched-Q8-
+/// prefill driver — replaces the per-token Q8 prefill fallback with
+/// one launch per layer per ubatch chunk.
 #[allow(clippy::too_many_arguments)]
 pub fn attention_prefill_q8_kv(
     reg: &OpsRegistry,

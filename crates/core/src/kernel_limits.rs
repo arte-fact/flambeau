@@ -34,8 +34,8 @@
 ///
 /// Historical incident: V1.7.4.a parity regression on Qwen3.6-35B-A3B was
 /// caused by this being hardcoded at 128 (pre-V1.7.4.a), silently discarding
-/// experts 128..255. Do not reduce below **256** without auditing every model
-/// in `certs/parity/`.
+/// experts 128..255. Do not reduce below **256** without auditing every
+/// supported model's expert count.
 pub const TOPK_MAX_EXPERTS: usize = 512;
 
 /// Compile-time upper bound on `n_experts` for the `moe_sort_by_expert`
@@ -49,5 +49,5 @@ pub const TOPK_MAX_EXPERTS: usize = 512;
 ///
 /// - **Raise**: bump `#define`, re-verify LDS fits in the target arch's budget
 ///   (gfx906 max 64 KiB / CU, gfx1031 = 64 KiB as well).
-/// - **Lower**: check every `certs/moe_sort_*.json` shape fits.
+/// - **Lower**: confirm every supported model's expert count fits.
 pub const MOE_SORT_MAX_EXPERTS: usize = 512;

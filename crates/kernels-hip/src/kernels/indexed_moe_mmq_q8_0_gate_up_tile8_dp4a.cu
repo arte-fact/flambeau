@@ -12,9 +12,8 @@
 // in the k-loop.
 //
 // V2.22.a shipped Q8_0 indexed-MoE MMVQ (256 threads, 1 output/block).
-// The V2.30 profile (certs/perf/profiles/v2_30_35b_a3b_ud_q8_k_xl_*.csv)
-// measured Qwen3.6-35B-A3B-UD-Q8_K_XL prefill L=512 at 77.0 % of GPU time
-// in that MMVQ kernel — the sole dominant hotspot. Tile8 delivers 64 rows
+// On Qwen3.6-35B-A3B-UD-Q8_K_XL prefill L=512 that kernel held 77 % of
+// GPU time — the sole dominant hotspot. Tile8 delivers 64 rows
 // × 8 slot-cols = 512 outputs per block with one weight-tile decode per
 // thread per block, matching V2.6.b's Q4_K structural win (~3× per-kernel).
 //

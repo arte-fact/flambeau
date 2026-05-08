@@ -76,10 +76,6 @@ pub fn qmatmul(
     // MMVQ loop (the path we fall through to below). The v1 / wave64 /
     // shape-aware opt-ins were measured null-to-loss on every anchor
     // cell and removed from the env surface in S6.
-    //
-    // Certs:
-    //   - `certs/perf/mmvq_q4_1_batched_v1_2026_05_04.md` — v1 diag.
-    //   - `certs/perf/mmvq_q4_1_batched_v2_2026_05_04.md` — wave64 routing.
     if dtype_weight == QDtype::Q5_1
         || (dtype_weight == QDtype::Q4_0 && m < 32)
         || (dtype_weight == QDtype::Q5_0 && m < 32)

@@ -3,13 +3,9 @@
 //!
 //! Two gates:
 //!   1. PP prefill executes end-to-end without HIP errors.
-//!   2. Argmax on the final token matches what llama.cpp would produce
-//!      from the same prompt via its own prefill path. The parity cert
-//!      at `certs/parity/qwen3_6_35b_a3b_ud_q4_k_s_decode.json` records
-//!      llama.cpp's greedy output for seed 9419 ("Hello") at position 0.
-//!      That cert used step-by-step decode; running `forward_prefill_pp`
-//!      on the same single-token prompt must produce the same argmax
-//!      (= 11 ',').
+//!   2. Argmax on the final token matches what llama.cpp produces from
+//!      the same prompt — for seed 9419 ("Hello") at position 0 the
+//!      expected greedy argmax is 11 (',').
 //!
 //! Skips when `FLAMBEAU_QWEN3_GGUF` unset, < 2 HIP devices, or cluster
 //! doesn't have enough VRAM.

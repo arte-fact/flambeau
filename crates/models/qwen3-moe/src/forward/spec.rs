@@ -49,10 +49,10 @@
 //!   - sampling smoke (temp=0.8, top_p=0.9): 90.7 ms/tok at 68.8 %
 //!     accept
 //!
-//! Spec is structurally net-negative on this rig (PCIe-3, no NVLink) —
-//! see `certs/research/mtp_5e_profile_breakdown.md` and
-//! `certs/research/mtp_5h_final_summary.md` for the analysis. Default
-//! off; opt-in via `FLAMBEAU_SPEC_MTP=path/to/mtp.gguf`.
+//! Spec is structurally net-negative on this rig (PCIe-3, no NVLink):
+//! L=2 paired-prefill multiplier was ~1.92× (not the projected ~1.5×)
+//! because peer-copy/AR sync dominates L=1 wall on PCIe. Default off;
+//! opt-in via `FLAMBEAU_SPEC_MTP=path/to/mtp.gguf`.
 
 #![cfg(feature = "hip")]
 

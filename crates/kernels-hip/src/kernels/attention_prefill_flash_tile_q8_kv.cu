@@ -3,13 +3,11 @@
 // with the cooperative K/V load path changed to dequantize Q8_0 blocks
 // on the way into the F32 LDS tile.
 //
-// V1-BENCH-#116-flashtile-q8 (Phase 5 follow-up). Closes the 14-second
-// prefill regression observed in `certs/perf/q8_vs_f16_32k_2026_05_08.md`:
-// at 24K ctx the F16 path uses BR=8 LDS-tiled prefill while Q8 was
-// stuck on the oracle (one block per (q_token, q_head)). Both kernels
-// now share structure; only the load path differs (Q8 → F32 dequant
-// vs F16 → F32 cast). Score loop and online-softmax rescale are
-// identical.
+// V1-BENCH-#116-flashtile-q8. Closes the prefill regression where the
+// F16 path used BR=8 LDS-tiled prefill while Q8 was stuck on the oracle
+// (one block per (q_token, q_head)). Both kernels now share structure;
+// only the load path differs (Q8 → F32 dequant vs F16 → F32 cast).
+// Score loop and online-softmax rescale are identical.
 //
 // Why the LDS tile stays F32 (not int8): the original f16 flash-tile
 // upcasts to F32 on load, which is necessary for the online-softmax

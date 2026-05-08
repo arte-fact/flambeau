@@ -1,8 +1,7 @@
 // mmvq_q4_0_t128 — Q4_0 thin-block MMVQ, gfx906 latency-bound decode lever.
 //
-// Mirror of `mmvq_q4_1_t128` for Q4_0 weights. The motivation is documented
-// in `certs/perf/tp2_gpu_0_1_cross_model_bench.json` under
-// `q4_0_vs_q4_1_anomaly`: gfx906 at batch=1 sits at ~10% HBM bandwidth
+// Mirror of `mmvq_q4_1_t128` for Q4_0 weights. Motivation: gfx906 at
+// batch=1 sits at ~10% HBM bandwidth
 // utilisation — the kernel is latency-bound, not bandwidth-bound, so the
 // schedule that wins is the one that packs more in-flight blocks per CU,
 // not the one that reads the fewest bytes. 128 threads/block = 2 wave64s/CU

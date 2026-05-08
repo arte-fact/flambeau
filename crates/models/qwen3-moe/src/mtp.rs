@@ -9,7 +9,7 @@
 //! lives next to the existing `forward/full_attn.rs` once the activation-
 //! precision plumbing is in place (MTP-3.5).
 //!
-//! Pairing semantics (see `certs/research/mtp_2_converter_landed.md`):
+//! Pairing semantics:
 //!   1. base GGUF carries `mtp.*` tensors → use those (integrated mode).
 //!   2. else look for `<basename>-mtp.gguf` next to the base, verify
 //!      `mtp.target_arch` / `mtp.target_hidden_size` /
