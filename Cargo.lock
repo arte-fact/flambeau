@@ -527,6 +527,7 @@ dependencies = [
  "anyhow",
  "bytemuck",
  "flambeau-backend-hip",
+ "flambeau-blocks",
  "flambeau-core",
  "flambeau-ops",
  "flambeau-quant",

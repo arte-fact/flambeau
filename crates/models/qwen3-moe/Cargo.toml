@@ -9,6 +9,7 @@ description = "Qwen3.x MoE model family (Qwen3-30B-A3B, Qwen3-Coder MoE). Block 
 [dependencies]
 flambeau-core = { path = "../../core" }
 flambeau-ops = { path = "../../ops" }
+flambeau-blocks = { path = "../../blocks", optional = true }
 flambeau-quant = { path = "../../quant" }
 flambeau-runtime = { path = "../../runtime" }
 anyhow.workspace = true
@@ -21,7 +22,7 @@ bytemuck.workspace = true
 default = []
 # Session allocation + weight upload require a HIP device; gate so non-HIP
 # builds (CI lint, sandbox `cargo check`) stay green.
-hip = ["flambeau-ops/hip", "dep:flambeau-backend-hip"]
+hip = ["flambeau-ops/hip", "flambeau-blocks/hip", "dep:flambeau-backend-hip", "dep:flambeau-blocks"]
 # Enables FLAMBEAU_*_PROBE / *_DUMP / TRACE env-var reads in release
 # builds. Off by default; production binaries elide them.
 dev_trace = []

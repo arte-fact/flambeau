@@ -226,6 +226,34 @@ impl Drop for FullAttnScratch {
     }
 }
 
+impl FullAttnScratch {
+    /// Build a borrowed view over this scratch shaped to feed into
+    /// `flambeau_blocks::StandardAttention::forward_decode`. All
+    /// `DevicePtr` fields are copied; only `positions_host` is
+    /// borrowed mutably (its address must stay stable across the HtoD
+    /// memcpy inside the block).
+    pub fn view_mut(&mut self) -> flambeau_blocks::StandardAttentionDecodeScratch<'_> {
+        flambeau_blocks::StandardAttentionDecodeScratch {
+            x_q8_1: self.x_q8_1,
+            mmvq_f32: self.mmvq_f32,
+            q_fused_f16: self.q_fused_f16,
+            q_f16: self.q_f16,
+            gate_f16: self.gate_f16,
+            k_f16: self.k_f16,
+            v_f16: self.v_f16,
+            k_q8_0: self.k_q8_0,
+            v_q8_0: self.v_q8_0,
+            attn_out_f16: self.attn_out_f16,
+            gated_out_f16: self.gated_out_f16,
+            positions: self.positions,
+            positions_host: &mut self.positions_host,
+            splitk_partials_m: self.splitk_partials_m,
+            splitk_partials_s: self.splitk_partials_s,
+            splitk_partials_o: self.splitk_partials_o,
+        }
+    }
+}
+
 // `upload_position`, `qdtype_of`, `mat_shape` moved to `forward::common`.
 
 /// Decode step for one full-attention layer. Consumes `x_in` (F16 `[H]`)
@@ -250,6 +278,45 @@ pub struct AttnDecodeSlots {
     pub v_append_slot: MemcpySlot,
 }
 
+/// Build a `flambeau_blocks::StandardAttention` from already-unpacked
+/// full-attention weights + the model config. The block holds only
+/// `WeightHandle`s and 1-D `DevicePtr`s — `ModelWeights` keeps owning
+/// the underlying allocations.
+pub fn build_full_attn_block(
+    attn_norm: &DeviceTensor,
+    weights: &FullAttnWeights,
+    cfg: &Qwen3MoEConfig,
+) -> Result<flambeau_blocks::StandardAttention> {
+    let q_dtype = qdtype_of(weights.attn_q.dtype)?;
+    let k_dtype = qdtype_of(weights.attn_k.dtype)?;
+    let v_dtype = qdtype_of(weights.attn_v.dtype)?;
+    let o_dtype = qdtype_of(weights.attn_output.dtype)?;
+    let (q_rows, q_k) = mat_shape(&weights.attn_q)?;
+    let (k_rows, k_k) = mat_shape(&weights.attn_k)?;
+    let (v_rows, v_k) = mat_shape(&weights.attn_v)?;
+    let (o_rows, o_k) = mat_shape(&weights.attn_output)?;
+    flambeau_blocks::StandardAttention::new(
+        flambeau_blocks::WeightHandle { ptr: weights.attn_q.ptr, dtype: q_dtype, dims: [q_rows, q_k] },
+        flambeau_blocks::WeightHandle { ptr: weights.attn_k.ptr, dtype: k_dtype, dims: [k_rows, k_k] },
+        flambeau_blocks::WeightHandle { ptr: weights.attn_v.ptr, dtype: v_dtype, dims: [v_rows, v_k] },
+        flambeau_blocks::WeightHandle {
+            ptr: weights.attn_output.ptr,
+            dtype: o_dtype,
+            dims: [o_rows, o_k],
+        },
+        attn_norm.ptr,
+        weights.attn_q_norm.ptr,
+        weights.attn_k_norm.ptr,
+        cfg.hidden_size,
+        cfg.num_heads,
+        cfg.num_kv_heads,
+        cfg.head_dim,
+        cfg.rms_norm_eps,
+        cfg.rope.freq_base,
+        cfg.rope.rotated_dims,
+    )
+}
+
 pub fn forward_full_attn_decode<L: CacheLayout>(
     ops: &OpsRegistry,
     stream: &HipStream,
@@ -269,6 +336,25 @@ pub fn forward_full_attn_decode<L: CacheLayout>(
     // residual is d. `post_attn_norm` is still unused here; keep
     // the handle so d can call it without a second signature.
     let _ = post_attn_norm;
+
+    // R3 — non-graph-capture path routes through the
+    // `flambeau_blocks::StandardAttention` block. Slot variants stay
+    // on the existing free-fn body below until R4 introduces a
+    // capture-aware abstraction on the trait.
+    if slots.is_none() {
+        let block = build_full_attn_block(attn_norm, weights, cfg)?;
+        let hipops = flambeau_ops::HipOps::new(ops, stream);
+        return block.forward_decode(
+            &hipops,
+            device,
+            stream,
+            x_in,
+            delta_out,
+            kv_cache,
+            &mut scratch.view_mut(),
+            position,
+        );
+    }
 
     let hidden = cfg.hidden_size;
     let head_dim = cfg.head_dim;
@@ -918,6 +1004,35 @@ impl Drop for FullAttnPrefillScratch {
     }
 }
 
+impl FullAttnPrefillScratch {
+    /// Build a borrowed view shaped to feed into
+    /// `flambeau_blocks::StandardAttention::forward_prefill`. The
+    /// batched-decode-only fields (`slot_k_ptrs`, `slot_v_ptrs`,
+    /// `slot_n_tokens_kv`) are not in the block's surface and stay on
+    /// `FullAttnPrefillScratch` for callers that need them
+    /// (`forward_full_attn_layer_decode_batched`).
+    pub fn view_mut(&mut self) -> flambeau_blocks::StandardAttentionPrefillScratch<'_> {
+        flambeau_blocks::StandardAttentionPrefillScratch {
+            max_tokens: self.max_tokens,
+            x_norm_f16: self.x_norm_f16,
+            x_q8_1: self.x_q8_1,
+            x_q8_1_mmq: self.x_q8_1_mmq,
+            mmvq_f32: self.mmvq_f32,
+            q_fused_f16: self.q_fused_f16,
+            q_f16: self.q_f16,
+            gate_f16: self.gate_f16,
+            k_f16: self.k_f16,
+            v_f16: self.v_f16,
+            attn_out_f16: self.attn_out_f16,
+            gated_out_f16: self.gated_out_f16,
+            positions: self.positions,
+            gated_q8_1: self.gated_q8_1,
+            gated_q8_1_mmq: self.gated_q8_1_mmq,
+            positions_host: &mut self.positions_host,
+        }
+    }
+}
+
 /// Upload `L` i32 positions `[start_position, start_position + L)` into
 /// the device-side `positions` scratch slot.
 /// 6.a-i5a — the host-side source is `scratch.positions_host`, a
@@ -1019,6 +1134,25 @@ pub fn forward_full_attn_prefill<L: flambeau_runtime::CacheLayout>(
         bail!(
             "forward_full_attn_prefill: n_tokens={n_tokens} > scratch.max_tokens={}; caller must chunk",
             scratch.max_tokens
+        );
+    }
+
+    // R3 — non-graph-capture prefill routes through the
+    // `flambeau_blocks::StandardAttention` block. Slot variants stay
+    // on the existing free-fn body below until R4.
+    if slots.is_none() {
+        let block = build_full_attn_block(attn_norm, weights, cfg)?;
+        let hipops = flambeau_ops::HipOps::new(ops, stream);
+        return block.forward_prefill(
+            &hipops,
+            device,
+            stream,
+            x_in,
+            delta_out,
+            kv_cache,
+            &mut scratch.view_mut(),
+            n_tokens,
+            start_position,
         );
     }
 

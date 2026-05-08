@@ -11,8 +11,6 @@
 //! captured paths stay on the existing `flambeau-qwen3-moe` free
 //! functions until R4 introduces a slot abstraction.
 
-use std::marker::PhantomData;
-
 use anyhow::{bail, Context, Result};
 use flambeau_backend_hip::{HipDevice, HipStream};
 use flambeau_core::{CopyDirection, Device, DevicePtr};
@@ -34,11 +32,12 @@ pub struct WeightHandle {
     pub dims: [usize; 2],
 }
 
-/// Workspace for one decode step (single-token forward) of a full-
-/// attention layer. Owned by the caller; sized once at session init
-/// against `(hidden, n_heads, n_kv_heads, head_dim)`. The block only
-/// borrows `&mut` for the single position write to `positions_host`.
-pub struct StandardAttentionDecodeScratch {
+/// Borrowed view over a caller-owned attention decode scratch. The
+/// `'a` lifetime ties the view to the underlying owning scratch (in
+/// V1 this is `qwen3-moe`'s `FullAttnScratch`); call sites build a
+/// fresh view per forward call via `view_mut()`. All `DevicePtr`
+/// fields are `Copy`; only `positions_host` actually borrows mutably.
+pub struct StandardAttentionDecodeScratch<'a> {
     pub x_q8_1: DevicePtr,         // Q8_1 blocks [hidden / 32]
     pub mmvq_f32: DevicePtr,       // F32 [max(2*H*D, H_kv*D, hidden)]
     pub q_fused_f16: DevicePtr,    // F16 [2 * n_heads * head_dim]
@@ -55,18 +54,16 @@ pub struct StandardAttentionDecodeScratch {
     pub gated_out_f16: DevicePtr,
     pub positions: DevicePtr,      // i32 [1]
     /// Persistent host-side 1-slot position backing — keeps the HtoD
-    /// memcpy source stable so the call can drop its sync (matches the
-    /// existing qwen3-moe `FullAttnScratch::positions_host` rationale).
-    pub positions_host: Vec<i32>,
+    /// memcpy source stable so the call can drop its sync.
+    pub positions_host: &'a mut [i32],
     /// Split-K (flash-decoding) partials for long contexts.
     pub splitk_partials_m: DevicePtr, // F32 [n_heads * MAX_SPLITK_CHUNKS]
     pub splitk_partials_s: DevicePtr, // F32 [n_heads * MAX_SPLITK_CHUNKS]
     pub splitk_partials_o: DevicePtr, // F32 [n_heads * MAX_SPLITK_CHUNKS * head_dim]
 }
 
-/// Workspace for one prefill chunk of a full-attention layer. Sized
-/// against `(cfg, max_tokens)`; caller chunks long prompts.
-pub struct StandardAttentionPrefillScratch {
+/// Borrowed view over a caller-owned attention prefill scratch.
+pub struct StandardAttentionPrefillScratch<'a> {
     pub max_tokens: usize,
     pub x_norm_f16: DevicePtr,
     pub x_q8_1: DevicePtr,
@@ -82,7 +79,7 @@ pub struct StandardAttentionPrefillScratch {
     pub positions: DevicePtr,
     pub gated_q8_1: DevicePtr,
     pub gated_q8_1_mmq: DevicePtr,
-    pub positions_host: Vec<i32>,
+    pub positions_host: &'a mut [i32],
 }
 
 /// Split-K partial budget — 32 chunks × 512 tokens covers any decode
@@ -92,9 +89,13 @@ pub const MAX_SPLITK_CHUNKS: usize = 32;
 
 /// Qwen3-style full attention block — fused Q|gate, per-head Q/K
 /// rmsnorm, partial NeoX RoPE, KV append, decode/prefill attention,
-/// post-attn sigmoid gate, output projection. Generic over the
-/// backend's `Ops` impl.
-pub struct StandardAttention<O: Ops> {
+/// post-attn sigmoid gate, output projection.
+///
+/// The block carries no backend-specific state; methods take
+/// `ops: &O: &impl Ops` at call time. Same instance can serve any
+/// `Ops` implementor that satisfies the call signature — useful for
+/// the future CPU-reference-impl test harness.
+pub struct StandardAttention {
     pub attn_q: WeightHandle,        // [2*n_heads*head_dim, hidden]
     pub attn_k: WeightHandle,        // [n_kv_heads*head_dim, hidden]
     pub attn_v: WeightHandle,        // [n_kv_heads*head_dim, hidden]
@@ -109,10 +110,9 @@ pub struct StandardAttention<O: Ops> {
     pub rms_norm_eps: f32,
     pub rope_freq_base: f32,
     pub rope_rotated_dims: usize,
-    _o: PhantomData<O>,
 }
 
-impl<O: Ops> StandardAttention<O> {
+impl StandardAttention {
     /// Construct a new block from already-loaded weight handles + cfg
     /// scalars. Asserts the matmul shapes match the head/dim contract.
     pub fn new(
@@ -181,14 +181,13 @@ impl<O: Ops> StandardAttention<O> {
             rms_norm_eps,
             rope_freq_base,
             rope_rotated_dims,
-            _o: PhantomData,
         })
     }
 
     /// Single-token decode through the attention block. The K/V row
     /// derived from `x_in` is appended to `kv_cache` before the
     /// attention call, so `current_tokens = position + 1` post-call.
-    pub fn forward_decode<L: CacheLayout>(
+    pub fn forward_decode<L: CacheLayout, O: Ops>(
         &self,
         ops: &O,
         device: &HipDevice,
@@ -196,7 +195,7 @@ impl<O: Ops> StandardAttention<O> {
         x_in: DevicePtr,
         delta_out: DevicePtr,
         kv_cache: &mut KvCache<L, HipDevice>,
-        scratch: &mut StandardAttentionDecodeScratch,
+        scratch: &mut StandardAttentionDecodeScratch<'_>,
         position: usize,
     ) -> Result<()> {
         let hidden = self.hidden;
@@ -473,7 +472,7 @@ impl<O: Ops> StandardAttention<O> {
 
     /// Multi-token prefill. `start_position` is the cache tail length
     /// before this chunk's K/V are appended.
-    pub fn forward_prefill<L: CacheLayout>(
+    pub fn forward_prefill<L: CacheLayout, O: Ops>(
         &self,
         ops: &O,
         device: &HipDevice,
@@ -481,7 +480,7 @@ impl<O: Ops> StandardAttention<O> {
         x_in: DevicePtr,
         delta_out: DevicePtr,
         kv_cache: &mut KvCache<L, HipDevice>,
-        scratch: &mut StandardAttentionPrefillScratch,
+        scratch: &mut StandardAttentionPrefillScratch<'_>,
         n_tokens: usize,
         start_position: usize,
     ) -> Result<()> {
