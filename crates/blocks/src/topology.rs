@@ -573,3 +573,90 @@ pub fn forward_one_token_hybrid<D: HybridDecodeDriver>(
     driver.bind(head_s, head_r)?;
     driver.output_head()
 }
+
+/// Per-stage handles + per-call hooks for hybrid (PP-of-TP) multi-
+/// token prefill. Same stage-aware shape as `HybridDecodeDriver` but
+/// every step processes `prompt_len` rows and the inter-stage handoff
+/// carries `prompt_len * hidden * 2` bytes.
+pub trait HybridPrefillDriver {
+    fn n_stages(&self) -> usize;
+
+    fn ranks_per_stage(&self, stage: usize) -> usize;
+
+    fn head_stage(&self) -> usize;
+
+    fn head_rank_in_head_stage(&self) -> usize;
+
+    fn bind(&self, stage: usize, rank: usize) -> Result<()>;
+
+    /// Embed the whole prompt on `(stage, rank)` — token_embd is
+    /// replicated within a stage; each rank writes `[L, hidden]` F16
+    /// rows into its hidden buffer.
+    fn embed_prompt_on_rank(
+        &mut self,
+        stage: usize,
+        rank: usize,
+        tokens: &[u32],
+    ) -> Result<()>;
+
+    /// Run `stage`'s entire layer slice at `prompt_len` tokens with
+    /// `start_position` as the position the first prompt token lands
+    /// at. Driver handles intra-stage TP slicing + AllReduces.
+    fn forward_layers_prefill_in_stage(
+        &mut self,
+        stage: usize,
+        prompt_len: usize,
+        start_position: usize,
+    ) -> Result<()>;
+
+    /// Carry the L-row residual stream from `stage`'s rank 0 to every
+    /// rank of `stage + 1`. `prompt_len * hidden * 2` bytes per dst.
+    fn handoff_stage_to_next(&mut self, stage: usize, prompt_len: usize) -> Result<()>;
+
+    /// Run final norm + LM head on `head_rank`'s last-token row of
+    /// the L-row hidden buffer.
+    fn output_head_last_token(&mut self, prompt_len: usize) -> Result<()>;
+}
+
+/// Multi-token prefill across a hybrid PP-of-TP mesh.
+///
+/// Sequence:
+/// 1. Bind every rank of stage 0; `embed_prompt_on_rank` writes all L
+///    F16 rows into each rank's hidden buffer.
+/// 2. For each stage in order:
+///    a. `forward_layers_prefill_in_stage` runs the stage's layer
+///       chain at L tokens.
+///    b. If `stage + 1 < n_stages`, call `handoff_stage_to_next`.
+/// 3. Bind the head rank; `output_head_last_token` runs the LM head
+///    on the last-token row.
+pub fn forward_prefill_hybrid<D: HybridPrefillDriver>(
+    driver: &mut D,
+    prompt_ids: &[u32],
+    start_position: usize,
+) -> Result<()> {
+    if prompt_ids.is_empty() {
+        bail!("forward_prefill_hybrid: empty prompt");
+    }
+    let n_stages = driver.n_stages();
+    if n_stages == 0 {
+        bail!("forward_prefill_hybrid: zero-stage driver");
+    }
+    let l = prompt_ids.len();
+
+    for r in 0..driver.ranks_per_stage(0) {
+        driver.bind(0, r)?;
+        driver.embed_prompt_on_rank(0, r, prompt_ids)?;
+    }
+
+    for s in 0..n_stages {
+        driver.forward_layers_prefill_in_stage(s, l, start_position)?;
+        if s + 1 < n_stages {
+            driver.handoff_stage_to_next(s, l)?;
+        }
+    }
+
+    let head_s = driver.head_stage();
+    let head_r = driver.head_rank_in_head_stage();
+    driver.bind(head_s, head_r)?;
+    driver.output_head_last_token(l)
+}
