@@ -170,6 +170,7 @@ pub const KERNEL_STEMS: &[&str] = &[
     "attention_prefill_f16",
     "attention_prefill_flash_tile_f16",
     "attention_prefill_q8_kv",
+    "attention_prefill_flash_tile_q8_kv",
     // MoE.
     "topk_f32",
     "indexed_moe_mmvq_q4_k",

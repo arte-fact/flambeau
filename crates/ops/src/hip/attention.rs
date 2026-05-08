@@ -517,15 +517,18 @@ pub fn attention_decode_q8_kv_splitk(
     Ok(())
 }
 
-/// Prefill attention with Q8_0 KV cache (oracle path). GQA shape, F16 Q,
-/// Q8_0 K/V, F16 out. Same control flow as [`attention_prefill_f16_slots`]'s
-/// oracle branch (n_q < 4); K/V dequant on the fly during the score and
-/// V-accumulate. Used by the batched-Q8-prefill driver — replaces the
-/// per-token Q8 prefill fallback (~50 ms × n_prompt) with one launch
-/// per layer per ubatch chunk.
+/// Prefill attention with Q8_0 KV cache. Dispatches on `n_q_tokens`:
+/// - `n_q_tokens >= 4` → BR-tiled flash-tile kernel (LDS K/V tile reuse,
+///   mirrors the F16 flash-tile path; cooperative load dequants Q8 → F32
+///   into LDS, score loop is identical to F16 flash-tile after that).
+/// - `n_q_tokens < 4` → oracle kernel (one block per `(q_token, q_head)`,
+///   dp4a score loop, V FP-dequant per element).
 ///
-/// Flash-tile-Q8 (BR-tiled, n_q ≥ 4 fast path) is V2 follow-up; this
-/// oracle handles any `n_q_tokens` correctly.
+/// V1-BENCH-#116-flashtile-q8: closes the prefill regression in
+/// `certs/perf/q8_vs_f16_32k_2026_05_08.md` (Q8 prefill 0.90× F16 →
+/// targeting ≤ 1.05× F16). Used by the batched-Q8-prefill driver —
+/// replaces the per-token Q8 prefill fallback with one launch per layer
+/// per ubatch chunk.
 #[allow(clippy::too_many_arguments)]
 pub fn attention_prefill_q8_kv(
     reg: &OpsRegistry,
@@ -547,13 +550,9 @@ pub fn attention_prefill_q8_kv(
         "attention_prefill_q8_kv: head_dim {head_dim} not supported"
     );
 
-    let module = reg.expect_module("attention_prefill_q8_kv")?;
-    let kernel = module.kernel("flambeau_attention_prefill_q8_kv")?;
-
     let n_q_i = n_q_tokens as i32;
     let n_heads_q_i = n_heads_q as i32;
     let n_heads_kv_i = n_heads_kv as i32;
-    let head_dim_i = head_dim as i32;
     let n_k_i = n_k_tokens as i32;
     let q_off_i = q_offset as i32;
     let scale_f = scale;
@@ -562,6 +561,43 @@ pub fn attention_prefill_q8_kv(
     let v_ptr: u64 = v_cache.as_usize() as u64;
     let o_ptr: u64 = out.as_usize() as u64;
 
+    if n_q_tokens >= 4 {
+        // Flash-tile fast path: BR=4 (head_dim ∈ {64,128}) or BR=8
+        // (head_dim=256, more Q rows / fewer blocks at high n_q).
+        let module = reg.expect_module("attention_prefill_flash_tile_q8_kv")?;
+        let entry = match head_dim {
+            64 => "flambeau_attention_prefill_flash_tile_d64_q8_kv",
+            128 => "flambeau_attention_prefill_flash_tile_d128_q8_kv",
+            256 => "flambeau_attention_prefill_flash_tile_d256_br8_q8_kv",
+            _ => unreachable!(),
+        };
+        let kernel = module.kernel(entry)?;
+        let mut args = KernelArgs::new();
+        args.push(&q_ptr);
+        args.push(&k_ptr);
+        args.push(&v_ptr);
+        args.push(&o_ptr);
+        args.push(&n_q_i);
+        args.push(&n_heads_q_i);
+        args.push(&n_heads_kv_i);
+        args.push(&n_k_i);
+        args.push(&q_off_i);
+        args.push(&scale_f);
+        let br: u32 = if head_dim == 256 { 8 } else { 4 };
+        const WARP: u32 = 64;
+        let cfg = LaunchCfg {
+            grid: ((n_q_tokens as u32).div_ceil(br), n_heads_q as u32, 1),
+            block: (WARP, br, 1),
+            shared_bytes: 0,
+        };
+        unsafe { kernel.launch(stream, cfg, args)? };
+        return Ok(());
+    }
+
+    // Oracle path for n_q < 4 (very short prompts / edge shapes).
+    let module = reg.expect_module("attention_prefill_q8_kv")?;
+    let kernel = module.kernel("flambeau_attention_prefill_q8_kv")?;
+    let head_dim_i = head_dim as i32;
     let mut args = KernelArgs::new();
     args.push(&q_ptr);
     args.push(&k_ptr);
@@ -574,8 +610,6 @@ pub fn attention_prefill_q8_kv(
     args.push(&n_k_i);
     args.push(&q_off_i);
     args.push(&scale_f);
-    // V1-BENCH-#116-dp4a — block.x = head_dim/4 (one thread per int32-
-    // packed quad). For head_dim=256 → 64 threads = one wavefront.
     let cfg = LaunchCfg {
         grid: (n_q_tokens as u32, n_heads_q as u32, 1),
         block: ((head_dim / 4) as u32, 1, 1),
