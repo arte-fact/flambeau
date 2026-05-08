@@ -41,3 +41,6 @@ tools/mtp_cache/
 
 # Bench harness logs
 scripts/bench/logs/
+scripts/bench/__pycache__/
+**/__pycache__/
+*.pyc
