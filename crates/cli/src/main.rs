@@ -1,7 +1,7 @@
 //! `flambeau` CLI — subcommand dispatch.
-//! stub: subcommands parse but print a "not yet implemented" message until
-//! their target step lands. See `doc/ROADMAP-V1-QWEN36-GFX906.md` for what each
-//! subcommand requires.
+
+#[global_allocator]
+static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
 use anyhow::Result;
 use clap::{Parser, Subcommand};

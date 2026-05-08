@@ -37,6 +37,11 @@ clap.workspace = true
 tokio.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
+# Global allocator override. mimalloc beats glibc's ptmalloc on the
+# tokio HTTP path under concurrency (less arena-lock contention) and
+# on the per-request alloc churn (smaller-block fast path). Linked at
+# the binary, so kernel crates and lib crates are unaffected.
+mimalloc = { version = "0.1", default-features = false }
 
 [lints]
 workspace = true
