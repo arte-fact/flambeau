@@ -875,15 +875,128 @@ pub fn forward_prefill_tp_logits(
     Ok(())
 }
 
-/// 2** — L-batched TP prefill driver for dense (qwen35)
-/// arches. Allocates a [`ShardedForwardPrefillScratchTp`] sized to
-/// `prompt_ids.len()` on the fly, runs each layer's full-attn +
-/// dense-FFN with one AR per side per layer (instead of per-token),
-/// then runs the LM head on the last position. Per-token decode
-/// continues via `forward_one_token_tp_logits`.
-/// V2.x deferred: bound the prefill scratch on the inflight session
-/// so we don't pay alloc/dispose per request — for 2 this
-/// keeps the call-site change minimal.
+/// `flambeau_blocks::TpPrefillDriver` impl wrapping the L-batched TP
+/// prefill state. The model wrapper picks pooled vs alloc-per-call;
+/// this driver just consumes whatever scratch is handed in.
+struct Qwen3MoETpPrefillDriver<'a> {
+    model: &'a Qwen3MoETpModel,
+    scratch: &'a mut ShardedForwardPrefillScratchTp,
+    cluster: &'a flambeau_backend_hip::HipCluster,
+    ar: &'a BarP2pAllReduce,
+    layer_caches: &'a mut [Vec<LayerCache>],
+}
+
+impl<'a> Qwen3MoETpPrefillDriver<'a> {
+    fn finalize_logits(&self, out: &mut Vec<f32>) -> anyhow::Result<()> {
+        use flambeau_core::Stream;
+        let head_rank = self.scratch.head_rank.0 as usize;
+        let device = self.cluster.device(head_rank);
+        let stream = device.default_stream();
+        let head_scratch = self.scratch.per_rank[head_rank]
+            .output_head
+            .as_ref()
+            .ok_or_else(|| anyhow!("head_rank={head_rank} missing OutputHeadScratch"))?;
+        let vocab = self.model.config.vocab_size;
+        out.clear();
+        out.resize(vocab, 0.0f32);
+        // SAFETY: logits_f32 is valid for `vocab` F32 values on
+        // `device`; out.as_mut_ptr() is host memory of matching size.
+        unsafe {
+            <flambeau_backend_hip::HipDevice as flambeau_core::Device>::memcpy_async(
+                device,
+                stream,
+                flambeau_core::CopyDirection::DeviceToHost,
+                DevicePtr(out.as_mut_ptr() as usize),
+                head_scratch.logits_f32,
+                vocab * 4,
+            )?;
+        }
+        Stream::synchronize(stream)?;
+        Ok(())
+    }
+}
+
+impl<'a> flambeau_blocks::TpPrefillDriver for Qwen3MoETpPrefillDriver<'a> {
+    fn cluster(&self) -> &flambeau_backend_hip::HipCluster {
+        self.cluster
+    }
+
+    fn head_rank(&self) -> usize {
+        self.scratch.head_rank.0 as usize
+    }
+
+    fn embed_prompt_on_rank(&mut self, rank: usize, tokens: &[u32]) -> anyhow::Result<()> {
+        let device = self.cluster.device(rank);
+        let stream = device.default_stream();
+        let row_bytes = self.model.config.hidden_size * 2;
+        let dst_base = self.scratch.per_rank[rank].hidden_a;
+        for (i, &tok) in tokens.iter().enumerate() {
+            let dst_row = DevicePtr(dst_base.as_usize() + i * row_bytes);
+            forward_embed_decode_host(
+                device,
+                stream,
+                &self.model.shards[rank].token_embd,
+                tok,
+                dst_row,
+                self.model.config.hidden_size,
+            )
+            .with_context(|| format!("rank {rank} prefill embed pos {i}"))?;
+        }
+        Ok(())
+    }
+
+    fn forward_layers_prefill(
+        &mut self,
+        prompt_len: usize,
+        start_position: usize,
+    ) -> anyhow::Result<()> {
+        forward_prefill_tp_batched_layers(
+            self.model,
+            self.scratch,
+            self.cluster,
+            self.ar,
+            self.layer_caches,
+            0..self.model.config.num_layers,
+            0,
+            prompt_len,
+            start_position,
+        )
+        .context("TP batched prefill layer loop")
+    }
+
+    fn output_head_last_token(&mut self, l: usize) -> anyhow::Result<()> {
+        let head_rank = self.scratch.head_rank.0 as usize;
+        let device = self.cluster.device(head_rank);
+        let stream = device.default_stream();
+        let head_shard = &self.model.shards[head_rank];
+        let lm_head = head_shard.output.as_ref().unwrap_or(&head_shard.token_embd);
+        let row_bytes = self.model.config.hidden_size * 2;
+        let last_row_off = (l - 1) * row_bytes;
+        let hidden_a_last =
+            DevicePtr(self.scratch.per_rank[head_rank].hidden_a.as_usize() + last_row_off);
+        let head_scratch = self.scratch.per_rank[head_rank]
+            .output_head
+            .as_mut()
+            .ok_or_else(|| anyhow!("head_rank={head_rank} missing OutputHeadScratch"))?;
+        let ops = &self.model.ops[head_rank];
+        forward_output_head_decode(
+            ops,
+            stream,
+            &self.model.config,
+            &head_shard.output_norm,
+            lm_head,
+            head_scratch,
+            hidden_a_last,
+        )
+        .context("output_head_decode (TP batched prefill)")
+    }
+}
+
+/// L-batched TP prefill: chooses between caller-pooled scratch and
+/// per-call alloc, then runs the orchestrator. The `pooled` arg is
+/// `Some` for hot-path callers (the inflight session's pre-allocated
+/// scratch); `None` callers (tests, single-shot benchmarks) get a
+/// per-call alloc with RAII dispose.
 fn forward_prefill_tp_batched_logits(
     model: &Qwen3MoETpModel,
     cluster: &flambeau_backend_hip::HipCluster,
@@ -894,8 +1007,6 @@ fn forward_prefill_tp_batched_logits(
     logits_out: &mut Vec<f32>,
     pooled: Option<&mut ShardedForwardPrefillScratchTp>,
 ) -> Result<()> {
-    use flambeau_core::Stream;
-
     let cfg = &model.config;
     let world = cluster.ranks() as u32;
     if world != 1 && world != 2 && world != 4 {
@@ -903,17 +1014,18 @@ fn forward_prefill_tp_batched_logits(
     }
     let n_tokens = prompt_ids.len();
 
-    // **#324** — caller-provided pooled scratch path. When `pooled` is
-    // `Some`, we reuse the inflight session's pre-allocated scratch
-    // (sized for `prefill_ubatch`), skipping the ~35 MB alloc/dispose
-    // each call. The scratch must be sized for at least `n_tokens`;
-    // we bail loudly if the caller violated that invariant.
-    // When `pooled` is `None`, we fall back to the legacy per-call
-    // alloc with a RAII dispose guard — kept for tests and any future
-    // caller that hasn't wired pooling.
+    if let Some(s) = pooled.as_ref() {
+        if s.per_rank[0].max_tokens < n_tokens {
+            bail!(
+                "pooled TP prefill scratch sized {} < n_tokens {}",
+                s.per_rank[0].max_tokens,
+                n_tokens
+            );
+        }
+    }
 
-    // RAII guard so the scratch is disposed on every exit path
-    // (only used in the alloc-per-call branch).
+    // RAII guard so the per-call scratch is disposed on every exit
+    // path. Unused on the pooled branch.
     struct PrefillGuard<'c> {
         scratch: Option<ShardedForwardPrefillScratchTp>,
         cluster: &'c flambeau_backend_hip::HipCluster,
@@ -923,21 +1035,6 @@ fn forward_prefill_tp_batched_logits(
             if let Some(s) = self.scratch.take() {
                 let _ = s.dispose(self.cluster);
             }
-        }
-    }
-
-    // Either use the caller-provided pooled scratch, or allocate one
-    // bound to a guard whose Drop disposes the per-rank buffers if
-    // anything past this point fails. The guard's lifetime spans the
-    // whole forward; `scratch_ref` reborrows from it (via the pooled
-    // branch's `s`, or the guard's `scratch` field).
-    if let Some(s) = pooled.as_ref() {
-        if s.per_rank[0].max_tokens < n_tokens {
-            bail!(
-                "pooled TP prefill scratch sized {} < n_tokens {}",
-                s.per_rank[0].max_tokens,
-                n_tokens
-            );
         }
     }
     let mut owned_guard: Option<PrefillGuard<'_>> = match pooled {
@@ -956,89 +1053,15 @@ fn forward_prefill_tp_batched_logits(
         (None, None) => unreachable!("owned_guard set when pooled is None"),
     };
 
-    // 2. Embed all L tokens on every rank. Token_embd is Replicated
-    // so each rank writes the same F16 [L, hidden] into its own
-    // `hidden_a` (loop the per-row embed helper — same as the
-    // decode path, just over L positions).
-    let hidden = cfg.hidden_size;
-    let row_bytes = hidden * 2;
-    for r in 0..cluster.ranks() {
-        let device = cluster.device(r);
-        device.bind()?;
-        let stream = device.default_stream();
-        let dst_base = scratch_ref.per_rank[r].hidden_a;
-        for (i, &tok) in prompt_ids.iter().enumerate() {
-            let dst_row = DevicePtr(dst_base.as_usize() + i * row_bytes);
-            forward_embed_decode_host(
-                device,
-                stream,
-                &model.shards[r].token_embd,
-                tok,
-                dst_row,
-                hidden,
-            )
-            .with_context(|| format!("rank {r} prefill embed pos {i}"))?;
-        }
-    }
-
-    // 3. Layer loop. Pure-TP: full range, no cache offset.
-    // (Body extracted to forward_prefill_tp_batched_layers for
-    // 1 — hybrid callers pass a stage-local layer range +
-    // il_cache_offset = range.start.)
-    forward_prefill_tp_batched_layers(
+    let mut driver = Qwen3MoETpPrefillDriver {
         model,
-        scratch_ref,
+        scratch: scratch_ref,
         cluster,
         ar,
         layer_caches,
-        0..cfg.num_layers,
-        0,
-        n_tokens,
-        start_position,
-    )
-    .context("TP batched prefill layer loop")?;
-
-    // 4. Output head + logits download on head_rank, last position.
-    let head_rank = scratch_ref.head_rank.0 as usize;
-    let device = cluster.device(head_rank);
-    device.bind()?;
-    let stream = device.default_stream();
-    let head_shard = &model.shards[head_rank];
-    let lm_head = head_shard.output.as_ref().unwrap_or(&head_shard.token_embd);
-    let last_row_off = (n_tokens - 1) * row_bytes;
-    let hidden_a_last = DevicePtr(scratch_ref.per_rank[head_rank].hidden_a.as_usize() + last_row_off);
-    let head_scratch = scratch_ref.per_rank[head_rank]
-        .output_head
-        .as_mut()
-        .ok_or_else(|| anyhow!("head_rank={head_rank} missing OutputHeadScratch"))?;
-    let logits_f32 = head_scratch.logits_f32;
-    let ops = &model.ops[head_rank];
-    forward_output_head_decode(
-        ops,
-        stream,
-        cfg,
-        &head_shard.output_norm,
-        lm_head,
-        head_scratch,
-        hidden_a_last,
-    )
-    .context("output_head_decode (TP batched prefill)")?;
-    logits_out.clear();
-    logits_out.resize(cfg.vocab_size, 0.0f32);
-    // SAFETY: logits_f32 is valid for cfg.vocab_size F32 values on
-    // `device`; logits_out.as_mut_ptr() is host memory of matching size.
-    unsafe {
-        <flambeau_backend_hip::HipDevice as flambeau_core::Device>::memcpy_async(
-            device,
-            stream,
-            flambeau_core::CopyDirection::DeviceToHost,
-            DevicePtr(logits_out.as_mut_ptr() as usize),
-            logits_f32,
-            cfg.vocab_size * 4,
-        )?;
-    }
-    Stream::synchronize(stream)?;
-    Ok(())
+    };
+    flambeau_blocks::forward_prefill_tp(&mut driver, prompt_ids, start_position)?;
+    driver.finalize_logits(logits_out)
 }
 
 /// 1** — layer-range-aware body of the L-batched TP prefill.

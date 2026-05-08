@@ -407,3 +407,76 @@ pub fn forward_one_token_tp<D: TpDecodeDriver>(
     driver.cluster().device(head).bind()?;
     driver.output_head()
 }
+
+/// Per-rank handles + per-call hooks for tensor-parallel multi-token
+/// prefill. Same all-ranks-run-all-layers shape as `TpDecodeDriver`,
+/// just with multi-token args.
+///
+/// The driver's `forward_layers_prefill` runs the whole layer chain
+/// in one call — TP's L-batched prefill kernels (e.g.
+/// `attn_tp::forward_full_attn_prefill_tp`) operate on the full
+/// `[L, hidden]` strip per layer. Per-token-loop fallbacks (e.g. on
+/// Q8 KV that has no batched-prefill kernel) live at the model
+/// wrapper level: the wrapper picks between this orchestrator and a
+/// per-token loop through `forward_one_token_tp`.
+pub trait TpPrefillDriver {
+    fn cluster(&self) -> &HipCluster;
+
+    /// Rank that holds the LM head + final norm.
+    fn head_rank(&self) -> usize;
+
+    /// Embed `tokens` on `rank`. token_embd is replicated; each rank
+    /// writes the same `[L, hidden]` F16 strip into its hidden buffer.
+    fn embed_prompt_on_rank(&mut self, rank: usize, tokens: &[u32]) -> Result<()>;
+
+    /// Run the entire layer chain for the prompt at L tokens. Driver
+    /// handles per-rank weight slicing + intra-layer AllReduces.
+    fn forward_layers_prefill(
+        &mut self,
+        prompt_len: usize,
+        start_position: usize,
+    ) -> Result<()>;
+
+    /// Run final norm + LM head on `head_rank`'s last-token row,
+    /// leaving F32 logits in the driver-owned head scratch.
+    fn output_head_last_token(&mut self, l: usize) -> Result<()>;
+}
+
+/// Multi-token prefill across a tensor-parallel mesh.
+///
+/// Sequence:
+/// 1. For each rank, bind + `embed_prompt_on_rank` writes all L F16
+///    rows into the rank's hidden buffer (token_embd is replicated).
+/// 2. `forward_layers_prefill` runs the whole layer chain at L
+///    tokens. Driver handles per-rank slicing + AllReduces.
+/// 3. Bind `head_rank`; `output_head_last_token` runs the LM head on
+///    the last-token row.
+pub fn forward_prefill_tp<D: TpPrefillDriver>(
+    driver: &mut D,
+    prompt_ids: &[u32],
+    start_position: usize,
+) -> Result<()> {
+    if prompt_ids.is_empty() {
+        bail!("forward_prefill_tp: empty prompt");
+    }
+    let n_ranks = driver.cluster().ranks();
+    if n_ranks == 0 {
+        bail!("forward_prefill_tp: zero-rank driver");
+    }
+
+    for r in 0..n_ranks {
+        driver.cluster().device(r).bind()?;
+        driver.embed_prompt_on_rank(r, prompt_ids)?;
+    }
+
+    driver.forward_layers_prefill(prompt_ids.len(), start_position)?;
+
+    let head = driver.head_rank();
+    if head >= n_ranks {
+        bail!(
+            "forward_prefill_tp: head_rank={head} out of range (n_ranks={n_ranks})"
+        );
+    }
+    driver.cluster().device(head).bind()?;
+    driver.output_head_last_token(prompt_ids.len())
+}
