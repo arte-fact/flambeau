@@ -124,16 +124,20 @@ pub struct StandardAttentionPrefillScratch<'a> {
 /// if context ever exceeds. Mirrors qwen3-moe's `MAX_SPLITK_CHUNKS`.
 pub const MAX_SPLITK_CHUNKS: usize = 32;
 
-/// Qwen3-style full attention block — fused Q|gate, per-head Q/K
-/// rmsnorm, partial NeoX RoPE, KV append, decode/prefill attention,
-/// post-attn sigmoid gate, output projection.
+/// Qwen3-style full attention block. Two shapes share one type:
+///
+/// * `gated = true` (qwen35moe / qwen36moe): Q+gate fused projection
+///   into a `[2 * n_heads * head_dim, hidden]` weight, post-attention
+///   sigmoid gate `gated_out = sigmoid(gate) * attn_out`. Used by
+///   Qwen3.5/3.6 dense + MoE arches.
+/// * `gated = false` (qwen3moe): plain Q projection into a
+///   `[n_heads * head_dim, hidden]` weight, no output gate
+///   (`attn_out` feeds the output projection directly).
 ///
 /// The block carries no backend-specific state; methods take
-/// `ops: &O: &impl Ops` at call time. Same instance can serve any
-/// `Ops` implementor that satisfies the call signature — useful for
-/// the future CPU-reference-impl test harness.
+/// `ops: &O: &impl Ops` at call time.
 pub struct StandardAttention {
-    pub attn_q: WeightHandle,        // [2*n_heads*head_dim, hidden]
+    pub attn_q: WeightHandle,
     pub attn_k: WeightHandle,        // [n_kv_heads*head_dim, hidden]
     pub attn_v: WeightHandle,        // [n_kv_heads*head_dim, hidden]
     pub attn_output: WeightHandle,   // [hidden, n_heads*head_dim]
@@ -147,11 +151,17 @@ pub struct StandardAttention {
     pub rms_norm_eps: f32,
     pub rope_freq_base: f32,
     pub rope_rotated_dims: usize,
+    /// `true` when Q+gate are fused (qwen35moe-style) and the output
+    /// passes through `sigmoid(gate) * attn_out`. `false` for the
+    /// plain-Q (qwen3moe-style) path.
+    pub gated: bool,
 }
 
 impl StandardAttention {
-    /// Construct a new block from already-loaded weight handles + cfg
-    /// scalars. Asserts the matmul shapes match the head/dim contract.
+    /// Construct a new block. Q-weight rows are
+    /// `2 * n_heads * head_dim` when `gated` and `n_heads * head_dim`
+    /// otherwise; the constructor asserts the matmul shapes match.
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         attn_q: WeightHandle,
         attn_k: WeightHandle,
@@ -167,15 +177,17 @@ impl StandardAttention {
         rms_norm_eps: f32,
         rope_freq_base: f32,
         rope_rotated_dims: usize,
+        gated: bool,
     ) -> Result<Self> {
         let q_width = n_heads * head_dim;
         let kv_width = n_kv_heads * head_dim;
+        let expected_q_rows = if gated { 2 * q_width } else { q_width };
 
-        if attn_q.dims != [2 * q_width, hidden] {
+        if attn_q.dims != [expected_q_rows, hidden] {
             bail!(
                 "attn_q dims {:?} != expected [{}, {}]",
                 attn_q.dims,
-                2 * q_width,
+                expected_q_rows,
                 hidden
             );
         }
@@ -218,6 +230,7 @@ impl StandardAttention {
             rms_norm_eps,
             rope_freq_base,
             rope_rotated_dims,
+            gated,
         })
     }
 
@@ -242,7 +255,7 @@ impl StandardAttention {
         let n_kv_heads = self.n_kv_heads;
         let q_width = n_heads * head_dim;
         let kv_width = n_kv_heads * head_dim;
-        let q_fused_width = 2 * q_width;
+        let q_proj_rows = if self.gated { 2 * q_width } else { q_width };
 
         // 1. Fused RMSNorm(x_in) + Q8_1 quantise.
         ops.rmsnorm_quant_q8_1(
@@ -255,29 +268,36 @@ impl StandardAttention {
         )
         .context("attn_norm + quant")?;
 
-        // 2. Q|gate fused projection (rows = 2 * n_heads * head_dim).
+        // 2. Q projection. `gated`: fused Q+gate at `2 * q_width`
+        // rows, cast into the fused F16 buffer for the split below.
+        // Plain: Q-only at `q_width` rows, cast directly into q_f16
+        // (no split, no gate).
         ops.mmvq(
             self.attn_q.ptr,
             scratch.x_q8_1,
             scratch.mmvq_f32,
-            q_fused_width,
+            q_proj_rows,
             hidden,
             self.attn_q.dtype,
         )
         .context("mmvq attn_q")?;
-        ops.cast_f32_to_f16(scratch.mmvq_f32, scratch.q_fused_f16, q_fused_width)
-            .context("cast attn_q → f16")?;
-
-        // 3. Split fused [Q | gate] → q_f16, gate_f16.
-        ops.split_q_gate_f16(
-            scratch.q_fused_f16,
-            scratch.q_f16,
-            scratch.gate_f16,
-            1,
-            n_heads,
-            head_dim,
-        )
-        .context("split_q_gate")?;
+        if self.gated {
+            ops.cast_f32_to_f16(scratch.mmvq_f32, scratch.q_fused_f16, q_proj_rows)
+                .context("cast attn_q → f16")?;
+            // 3. Split fused [Q | gate] → q_f16, gate_f16.
+            ops.split_q_gate_f16(
+                scratch.q_fused_f16,
+                scratch.q_f16,
+                scratch.gate_f16,
+                1,
+                n_heads,
+                head_dim,
+            )
+            .context("split_q_gate")?;
+        } else {
+            ops.cast_f32_to_f16(scratch.mmvq_f32, scratch.q_f16, q_proj_rows)
+                .context("cast attn_q → f16")?;
+        }
 
         // 4+5. K and V projections. Fuse to one launch when both Q8_0.
         let fuse_kv = self.attn_k.dtype == QDtype::Q8_0 && self.attn_v.dtype == QDtype::Q8_0;
@@ -523,18 +543,24 @@ impl StandardAttention {
             bail!("StandardAttention: unsupported KV layout {kv_layout}");
         }
 
-        // 10. Post-attn sigmoid gate.
-        ops.sigmoid_mul_f16(
-            scratch.gate_f16,
-            scratch.attn_out_f16,
-            scratch.gated_out_f16,
-            q_width,
-        )
-        .context("post-attn sigmoid-gate")?;
+        // 10. Post-attn sigmoid gate (gated path only). Plain path
+        // feeds attn_out_f16 straight into the output projection.
+        let post_attn_f16 = if self.gated {
+            ops.sigmoid_mul_f16(
+                scratch.gate_f16,
+                scratch.attn_out_f16,
+                scratch.gated_out_f16,
+                q_width,
+            )
+            .context("post-attn sigmoid-gate")?;
+            scratch.gated_out_f16
+        } else {
+            scratch.attn_out_f16
+        };
 
-        // 11. Quantise gated_out to Q8_1 for the output projection.
-        ops.quantize_f16_q8_1(scratch.gated_out_f16, scratch.x_q8_1, q_width)
-            .context("quantize gated_out → Q8_1")?;
+        // 11. Quantise the post-attn F16 to Q8_1 for the output proj.
+        ops.quantize_f16_q8_1(post_attn_f16, scratch.x_q8_1, q_width)
+            .context("quantize post-attn → Q8_1")?;
 
         // 12. Output projection [hidden, q_width].
         ops.mmvq(
@@ -583,7 +609,7 @@ impl StandardAttention {
         let n_kv_heads = self.n_kv_heads;
         let q_width = n_heads * head_dim;
         let kv_width = n_kv_heads * head_dim;
-        let q_fused_width = 2 * q_width;
+        let q_proj_rows = if self.gated { 2 * q_width } else { q_width };
 
         // 1. RMSNorm + dual Q8_1 quantisation (standard + DS4-MMQ).
         ops.rmsnorm_f16(
@@ -600,7 +626,8 @@ impl StandardAttention {
         ops.quantize_f16_q8_1_mmq(scratch.x_norm_f16, scratch.x_q8_1_mmq, hidden, n_tokens)
             .context("prefill x_norm → Q8_1 (MMQ DS4)")?;
 
-        // 2. Q|gate projection.
+        // 2. Q projection. `gated`: fused Q+gate at `2*q_width` rows.
+        // Plain: Q-only at `q_width` rows.
         ops.qmatmul(
             self.attn_q.ptr,
             scratch.x_q8_1,
@@ -608,27 +635,35 @@ impl StandardAttention {
             scratch.mmvq_f32,
             n_tokens,
             hidden,
-            q_fused_width,
+            q_proj_rows,
             self.attn_q.dtype,
         )
         .context("prefill qmatmul attn_q")?;
-        ops.cast_f32_to_f16(
-            scratch.mmvq_f32,
-            scratch.q_fused_f16,
-            n_tokens * q_fused_width,
-        )
-        .context("prefill cast attn_q → f16")?;
-
-        // 3. Split Q | gate.
-        ops.split_q_gate_f16(
-            scratch.q_fused_f16,
-            scratch.q_f16,
-            scratch.gate_f16,
-            n_tokens,
-            n_heads,
-            head_dim,
-        )
-        .context("prefill split_q_gate")?;
+        if self.gated {
+            ops.cast_f32_to_f16(
+                scratch.mmvq_f32,
+                scratch.q_fused_f16,
+                n_tokens * q_proj_rows,
+            )
+            .context("prefill cast attn_q → f16")?;
+            // 3. Split Q | gate.
+            ops.split_q_gate_f16(
+                scratch.q_fused_f16,
+                scratch.q_f16,
+                scratch.gate_f16,
+                n_tokens,
+                n_heads,
+                head_dim,
+            )
+            .context("prefill split_q_gate")?;
+        } else {
+            ops.cast_f32_to_f16(
+                scratch.mmvq_f32,
+                scratch.q_f16,
+                n_tokens * q_proj_rows,
+            )
+            .context("prefill cast attn_q → f16")?;
+        }
 
         // 4. K projection.
         ops.qmatmul(
@@ -818,29 +853,31 @@ impl StandardAttention {
             bail!("StandardAttention prefill: unsupported KV layout {kv_layout}");
         }
 
-        // 10. Post-attn sigmoid gate.
-        ops.sigmoid_mul_f16(
-            scratch.gate_f16,
-            scratch.attn_out_f16,
-            scratch.gated_out_f16,
-            n_tokens * q_width,
-        )
-        .context("prefill post-attn sigmoid-gate")?;
+        // 10. Post-attn sigmoid gate (gated path only). Plain path
+        // feeds attn_out_f16 straight into the output projection.
+        let post_attn_f16 = if self.gated {
+            ops.sigmoid_mul_f16(
+                scratch.gate_f16,
+                scratch.attn_out_f16,
+                scratch.gated_out_f16,
+                n_tokens * q_width,
+            )
+            .context("prefill post-attn sigmoid-gate")?;
+            scratch.gated_out_f16
+        } else {
+            scratch.attn_out_f16
+        };
 
-        // 11. Quantise gated_out to BOTH Q8_1 layouts.
-        ops.quantize_f16_q8_1(
-            scratch.gated_out_f16,
-            scratch.gated_q8_1,
-            n_tokens * q_width,
-        )
-        .context("prefill quantise gated → Q8_1 (std)")?;
+        // 11. Quantise the post-attn F16 to BOTH Q8_1 layouts.
+        ops.quantize_f16_q8_1(post_attn_f16, scratch.gated_q8_1, n_tokens * q_width)
+            .context("prefill quantise post-attn → Q8_1 (std)")?;
         ops.quantize_f16_q8_1_mmq(
-            scratch.gated_out_f16,
+            post_attn_f16,
             scratch.gated_q8_1_mmq,
             q_width,
             n_tokens,
         )
-        .context("prefill quantise gated → Q8_1 (MMQ DS4)")?;
+        .context("prefill quantise post-attn → Q8_1 (MMQ DS4)")?;
 
         // 12. Output projection.
         ops.qmatmul(

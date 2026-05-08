@@ -28,9 +28,7 @@ use super::{
     SharedExpertScratch,
 };
 use super::dense_ffn::forward_dense_ffn_prefill;
-use super::attn::{
-    forward_dense_attn_layer_decode, forward_dense_attn_prefill, forward_full_attn_prefill,
-};
+use super::attn::{forward_dense_attn_prefill, forward_full_attn_prefill};
 use super::gdn::forward_gdn_prefill;
 use super::moe::{
     forward_moe_ffn_prefill, forward_router_decode, forward_router_prefill,
@@ -197,20 +195,24 @@ pub struct LayerDecodeSlots {
 
 /// Build the attention-half block for this layer. Returns `None` when
 /// the layer is the qwen3moe non-gated dense full-attn variant, which
-/// has no portable block surface today; callers fall through to
-/// `forward_dense_attn_layer_decode`.
+/// Always succeeds — `Dense` (qwen3moe non-gated) maps to
+/// `AttnBlock::Standard` with `gated = false`; `FullAttn`
+/// (qwen35moe / qwen36moe gated) maps to `gated = true`; `Gdn` maps
+/// to `AttnBlock::DeltaNet`.
 fn build_attn_block(
     layer_weights: &LayerWeights,
     cfg: &Qwen3MoEConfig,
-) -> Result<Option<AttnBlock>> {
+) -> Result<AttnBlock> {
     match &layer_weights.attn {
-        AttnWeights::FullAttn(fa) => Ok(Some(AttnBlock::Standard(
+        AttnWeights::FullAttn(fa) => Ok(AttnBlock::Standard(
             super::attn::build_full_attn_block(&layer_weights.attn_norm, fa, cfg)?,
-        ))),
-        AttnWeights::Gdn(gw) => Ok(Some(AttnBlock::DeltaNet(
+        )),
+        AttnWeights::Gdn(gw) => Ok(AttnBlock::DeltaNet(
             super::gdn::build_delta_net_block(&layer_weights.attn_norm, gw, cfg)?,
-        ))),
-        AttnWeights::Dense(_) => Ok(None),
+        )),
+        AttnWeights::Dense(d) => Ok(AttnBlock::Standard(
+            super::attn::build_dense_attn_block(&layer_weights.attn_norm, d, cfg)?,
+        )),
     }
 }
 
@@ -301,56 +303,30 @@ pub fn forward_layer_decode(
 
     // Attention half. The block surface covers `AttnBlock::Standard`
     // (gated full-attn) and `AttnBlock::DeltaNet` (GDN). The qwen3moe
-    // non-gated dense full-attn variant and the slot/graph-capture
-    // path stay on their existing free fns since they don't have
-    // portable counterparts on the trait yet.
-    let attn_block = build_attn_block(layer_weights, cfg)?;
-
-    if let Some(block) = attn_block {
-        let mid_f16 = scratch.mid_f16;
-        // GDN layers don't consume the slot bundle even when a
-        // graph-capture caller threads one in (only full-attn layers
-        // contribute slots in `LayerDecodeSlots`). Pass `None` to
-        // `AttnBlock::DeltaNet`; the block bails on `Some(slots)`.
-        let attn_slots = match &block {
-            flambeau_blocks::AttnBlock::Standard(_) => slots.map(|s| s.full_attn),
-            flambeau_blocks::AttnBlock::DeltaNet(_) => None,
-        };
-        let (state, attn_scratch) = attn_state_and_scratch(&block, layer_cache, scratch)?;
-        let hipops = HipOps::new(ops, stream);
-        block.forward_decode(
-            &hipops,
-            device,
-            stream,
-            x_in,
-            mid_f16,
-            state,
-            attn_scratch,
-            position,
-            attn_slots,
-        )?;
-    } else {
-        // qwen3moe non-gated dense full-attn — no portable block
-        // surface yet; routes through the existing free fn (slots
-        // pass-through preserved).
-        let full_attn = scratch
-            .full_attn
-            .as_mut()
-            .context("LayerForwardScratch.full_attn missing")?;
-        forward_dense_attn_layer_decode(
-            ops,
-            stream,
-            device,
-            cfg,
-            layer_weights,
-            layer_cache,
-            full_attn,
-            x_in,
-            scratch.mid_f16,
-            position,
-            slots.map(|s| s.full_attn),
-        )?;
-    }
+    // The block surface covers all three attn variants
+    // (gated full-attn, plain full-attn, GDN). Slot bundles are
+    // forwarded only to `Standard` — GDN kernels are not
+    // graph-capture-aware, so the block bails on `Some(slots)` for
+    // `DeltaNet`.
+    let block = build_attn_block(layer_weights, cfg)?;
+    let mid_f16 = scratch.mid_f16;
+    let attn_slots = match &block {
+        flambeau_blocks::AttnBlock::Standard(_) => slots.map(|s| s.full_attn),
+        flambeau_blocks::AttnBlock::DeltaNet(_) => None,
+    };
+    let (state, attn_scratch) = attn_state_and_scratch(&block, layer_cache, scratch)?;
+    let hipops = HipOps::new(ops, stream);
+    block.forward_decode(
+        &hipops,
+        device,
+        stream,
+        x_in,
+        mid_f16,
+        state,
+        attn_scratch,
+        position,
+        attn_slots,
+    )?;
     flambeau_backend_hip::profile::mark(
         if cfg.is_recurrent(il) { "layer_attn_gdn" } else { "layer_attn_full" },
         device,

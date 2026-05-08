@@ -7,22 +7,18 @@
 #![cfg(feature = "hip")]
 
 use anyhow::{bail, Context, Result};
-use flambeau_backend_hip::kv_cache_append_hip_slot;
 use flambeau_core::{CopyDirection, Device, DevicePtr};
 use flambeau_ops::hip::{
-    attention::{
-        attention_decode_f16_slots, attention_decode_q8_kv, attention_prefill_f16_slots,
-        split_q_gate_f16,
-    },
+    attention::split_q_gate_f16,
     cast::cast_f32_to_f16,
     mlp::sigmoid_mul_f16,
-    norm::{quantize_f16_q8_0, quantize_f16_q8_1, quantize_f16_q8_1_mmq, rmsnorm_f16, rmsnorm_quant_q8_1},
+    norm::{quantize_f16_q8_1, quantize_f16_q8_1_mmq, rmsnorm_f16},
     pe::rope_neox_partial_f16,
-    qmatmul::{mmvq, mmvq_q8_0_gate_up, qmatmul},
+    qmatmul::qmatmul,
     HipDevice, HipStream, OpsRegistry,
 };
 use flambeau_quant::BlockQ8_1;
-use flambeau_runtime::{CacheLayout, F16Contig, KvCache, Q8Contig};
+use flambeau_runtime::{CacheLayout, KvCache};
 
 use super::common::{mat_shape, qdtype_of};
 use crate::config::Qwen3MoEConfig;
@@ -270,10 +266,10 @@ impl FullAttnScratch {
 /// keep their existing field names.
 pub use flambeau_blocks::AttnDecodeSlots;
 
-/// Build a `flambeau_blocks::StandardAttention` from already-unpacked
-/// full-attention weights + the model config. The block holds only
-/// `WeightHandle`s and 1-D `DevicePtr`s — `ModelWeights` keeps owning
-/// the underlying allocations.
+/// Build a `flambeau_blocks::StandardAttention` for the gated
+/// (qwen35moe / qwen36moe) full-attention path. Q+gate are fused
+/// at `2 * n_heads * head_dim` rows; the output goes through a
+/// post-attn sigmoid gate.
 pub fn build_full_attn_block(
     attn_norm: &DeviceTensor,
     weights: &FullAttnWeights,
@@ -306,6 +302,60 @@ pub fn build_full_attn_block(
         cfg.rms_norm_eps,
         cfg.rope.freq_base,
         cfg.rope.rotated_dims,
+        true, // gated
+    )
+}
+
+/// Build a `flambeau_blocks::StandardAttention` for the plain Q
+/// (qwen3moe) full-attention path. Q is a single matmul at
+/// `n_heads * head_dim` rows; the output projection consumes
+/// `attn_out_f16` directly with no sigmoid gate.
+///
+/// V1 doesn't carry Q/K/V biases on the block surface — qwen3moe
+/// arches that ship them are rejected at this constructor.
+pub fn build_dense_attn_block(
+    attn_norm: &DeviceTensor,
+    weights: &DenseAttnWeights,
+    cfg: &Qwen3MoEConfig,
+) -> Result<flambeau_blocks::StandardAttention> {
+    if weights.attn_q_bias.is_some()
+        || weights.attn_k_bias.is_some()
+        || weights.attn_v_bias.is_some()
+    {
+        bail!(
+            "build_dense_attn_block: Q/K/V biases not supported on the block \
+             surface (Qwen3-Coder-30B has none; older Qwen3 variants need a \
+             bias-add step added to the block)"
+        );
+    }
+    let q_dtype = qdtype_of(weights.attn_q.dtype)?;
+    let k_dtype = qdtype_of(weights.attn_k.dtype)?;
+    let v_dtype = qdtype_of(weights.attn_v.dtype)?;
+    let o_dtype = qdtype_of(weights.attn_output.dtype)?;
+    let (q_rows, q_k) = mat_shape(&weights.attn_q)?;
+    let (k_rows, k_k) = mat_shape(&weights.attn_k)?;
+    let (v_rows, v_k) = mat_shape(&weights.attn_v)?;
+    let (o_rows, o_k) = mat_shape(&weights.attn_output)?;
+    flambeau_blocks::StandardAttention::new(
+        flambeau_blocks::WeightHandle { ptr: weights.attn_q.ptr, dtype: q_dtype, dims: [q_rows, q_k] },
+        flambeau_blocks::WeightHandle { ptr: weights.attn_k.ptr, dtype: k_dtype, dims: [k_rows, k_k] },
+        flambeau_blocks::WeightHandle { ptr: weights.attn_v.ptr, dtype: v_dtype, dims: [v_rows, v_k] },
+        flambeau_blocks::WeightHandle {
+            ptr: weights.attn_output.ptr,
+            dtype: o_dtype,
+            dims: [o_rows, o_k],
+        },
+        attn_norm.ptr,
+        weights.attn_q_norm.ptr,
+        weights.attn_k_norm.ptr,
+        cfg.hidden_size,
+        cfg.num_heads,
+        cfg.num_kv_heads,
+        cfg.head_dim,
+        cfg.rms_norm_eps,
+        cfg.rope.freq_base,
+        cfg.rope.rotated_dims,
+        false, // gated
     )
 }
 
@@ -1104,282 +1154,19 @@ pub fn forward_dense_attn_decode<L: CacheLayout>(
     position: usize,
     slots: Option<AttnDecodeSlots>,
 ) -> Result<()> {
-    if weights.attn_q_bias.is_some()
-        || weights.attn_k_bias.is_some()
-        || weights.attn_v_bias.is_some()
-    {
-        bail!(
-            "forward_dense_attn_decode: Q/K/V biases not yet supported \
-             (Qwen3-Coder-30B has none; add a bias_add step to support \
-             older Qwen3 variants)"
-        );
-    }
-
-    let hidden = cfg.hidden_size;
-    let head_dim = cfg.head_dim;
-    let n_heads = cfg.num_heads;
-    let n_kv_heads = cfg.num_kv_heads;
-    let rope = &cfg.rope;
-
-    // 1. Fused RMSNorm(x_in) + Q8_1 quantise.
-    rmsnorm_quant_q8_1(
-        ops,
+    let block = build_dense_attn_block(attn_norm, weights, cfg)?;
+    let hipops = flambeau_ops::HipOps::new(ops, stream);
+    block.forward_decode(
+        &hipops,
+        device,
         stream,
         x_in,
-        attn_norm.ptr,
-        scratch.x_q8_1,
-        1,
-        hidden,
-        cfg.rms_norm_eps,
+        delta_out,
+        kv_cache,
+        &mut scratch.view_mut(),
+        position,
+        slots,
     )
-    .context("dense attn_norm + quant")?;
-
-    // 2. Plain Q projection → q_f16 directly (no fused gate split).
-    let dtype_q = qdtype_of(weights.attn_q.dtype)?;
-    let (q_rows, q_k) = mat_shape(&weights.attn_q)?;
-    if q_rows != n_heads * head_dim || q_k != hidden {
-        bail!(
-            "dense attn_q shape [{q_rows}, {q_k}] != expected [{}, {}]",
-            n_heads * head_dim,
-            hidden
-        );
-    }
-    mmvq(
-        ops,
-        stream,
-        weights.attn_q.ptr,
-        scratch.x_q8_1,
-        scratch.mmvq_f32,
-        q_rows,
-        q_k,
-        dtype_q,
-    )
-    .context("dense mmvq attn_q")?;
-    cast_f32_to_f16(ops, stream, scratch.mmvq_f32, scratch.q_f16, q_rows)
-        .context("dense cast attn_q → f16")?;
-
-    // 3. K and V projections (optionally fused for Q8_0 pair).
-    let dtype_k = qdtype_of(weights.attn_k.dtype)?;
-    let dtype_v = qdtype_of(weights.attn_v.dtype)?;
-    let (k_rows, k_k) = mat_shape(&weights.attn_k)?;
-    let (v_rows, v_k) = mat_shape(&weights.attn_v)?;
-    if k_rows != n_kv_heads * head_dim || k_k != hidden {
-        bail!(
-            "dense attn_k shape [{k_rows}, {k_k}] != expected [{}, {}]",
-            n_kv_heads * head_dim,
-            hidden
-        );
-    }
-    if v_rows != n_kv_heads * head_dim || v_k != hidden {
-        bail!(
-            "dense attn_v shape [{v_rows}, {v_k}] != expected [{}, {}]",
-            n_kv_heads * head_dim,
-            hidden
-        );
-    }
-    let fuse_kv = weights.attn_k.dtype == flambeau_quant::GgmlDType::Q8_0
-        && weights.attn_v.dtype == flambeau_quant::GgmlDType::Q8_0;
-    if fuse_kv {
-        let v_f32_offset = scratch.mmvq_f32.offset_bytes(k_rows * 4);
-        mmvq_q8_0_gate_up(
-            ops,
-            stream,
-            weights.attn_k.ptr,
-            weights.attn_v.ptr,
-            scratch.x_q8_1,
-            scratch.mmvq_f32,
-            v_f32_offset,
-            k_rows,
-            v_rows,
-            k_k,
-        )
-        .context("dense attn_k + attn_v fused mmvq_q8_0")?;
-        cast_f32_to_f16(ops, stream, scratch.mmvq_f32, scratch.k_f16, k_rows)
-            .context("dense cast attn_k → f16")?;
-        cast_f32_to_f16(ops, stream, v_f32_offset, scratch.v_f16, v_rows)
-            .context("dense cast attn_v → f16")?;
-    } else {
-        mmvq(
-            ops, stream, weights.attn_k.ptr, scratch.x_q8_1,
-            scratch.mmvq_f32, k_rows, k_k, dtype_k,
-        ).context("dense mmvq attn_k")?;
-        cast_f32_to_f16(ops, stream, scratch.mmvq_f32, scratch.k_f16, k_rows)
-            .context("dense cast attn_k → f16")?;
-        mmvq(
-            ops, stream, weights.attn_v.ptr, scratch.x_q8_1,
-            scratch.mmvq_f32, v_rows, v_k, dtype_v,
-        ).context("dense mmvq attn_v")?;
-        cast_f32_to_f16(ops, stream, scratch.mmvq_f32, scratch.v_f16, v_rows)
-            .context("dense cast attn_v → f16")?;
-    }
-
-    // 4. Per-head RMSNorm on Q and K.
-    let q_norm_dim = weights
-        .attn_q_norm
-        .dims
-        .first()
-        .copied()
-        .context("attn_q_norm missing dim")? as usize;
-    if q_norm_dim != head_dim {
-        bail!("attn_q_norm dim {q_norm_dim} != head_dim {head_dim}");
-    }
-    rmsnorm_f16(
-        ops,
-        stream,
-        scratch.q_f16,
-        weights.attn_q_norm.ptr,
-        scratch.q_f16,
-        n_heads,
-        head_dim,
-        cfg.rms_norm_eps,
-    )
-    .context("dense attn_q_norm")?;
-    rmsnorm_f16(
-        ops,
-        stream,
-        scratch.k_f16,
-        weights.attn_k_norm.ptr,
-        scratch.k_f16,
-        n_kv_heads,
-        head_dim,
-        cfg.rms_norm_eps,
-    )
-    .context("dense attn_k_norm")?;
-
-    // 5. RoPE. qwen3moe uses standard NeoX RoPE over `head_dim` (no
-    // multi-freq sections — `rope.rotated_dims` equals head_dim).
-    scratch.positions_host[0] = position as i32;
-    unsafe {
-        device.memcpy_async(
-            stream,
-            CopyDirection::HostToDevice,
-            scratch.positions,
-            DevicePtr(scratch.positions_host.as_ptr() as usize),
-            4,
-        )?;
-    }
-    rope_neox_partial_f16(
-        ops, stream, scratch.q_f16, scratch.positions,
-        rope.freq_base, 1, n_heads, head_dim, rope.rotated_dims,
-    )
-    .context("dense rope Q")?;
-    rope_neox_partial_f16(
-        ops, stream, scratch.k_f16, scratch.positions,
-        rope.freq_base, 1, n_kv_heads, head_dim, rope.rotated_dims,
-    )
-    .context("dense rope K")?;
-
-    // 6. KV append. same dispatch as gated full-attn.
-    let kv_layout = L::NAME;
-    if let Some(AttnDecodeSlots { k_append_slot, v_append_slot, .. }) = slots {
-        if kv_layout != F16Contig::NAME {
-            bail!(
-                "forward_dense_attn_decode: graph-capture slots are F16-only; \
-                 KV layout {kv_layout} not supported under capture"
-            );
-        }
-        unsafe {
-            kv_cache_append_hip_slot(
-                kv_cache, device, stream,
-                scratch.k_f16, scratch.v_f16, 1,
-                k_append_slot, v_append_slot,
-            )?;
-        }
-    } else if kv_layout == Q8Contig::NAME {
-        let kv_elems = n_kv_heads * head_dim;
-        quantize_f16_q8_0(ops, stream, scratch.k_f16, scratch.k_q8_0, kv_elems)
-            .context("dense quantize attn_k → q8_0")?;
-        quantize_f16_q8_0(ops, stream, scratch.v_f16, scratch.v_q8_0, kv_elems)
-            .context("dense quantize attn_v → q8_0")?;
-        unsafe {
-            kv_cache
-                .append(device, stream, scratch.k_q8_0, scratch.v_q8_0, 1)
-                .map_err(|e| anyhow::anyhow!("dense kv_cache.append (q8): {e}"))?;
-        }
-    } else {
-        unsafe {
-            kv_cache
-                .append(device, stream, scratch.k_f16, scratch.v_f16, 1)
-                .map_err(|e| anyhow::anyhow!("dense kv_cache.append: {e}"))?;
-        }
-    }
-
-    // 7. Attention decode. follow-up — both F16 and Q8 KV
-    // layouts have a split-K (flash-decoding) variant; combine pass is
-    // f32 partials, layout-agnostic.
-    let n_tokens_kv = kv_cache.current_tokens();
-    let scale = (head_dim as f32).sqrt().recip();
-    let use_splitk = slots.is_none() && n_tokens_kv > 256;
-    if use_splitk {
-        let chunk_size = flambeau_ops::hip::attention::splitk_chunk_size(n_tokens_kv);
-        let n_chunks = n_tokens_kv.div_ceil(chunk_size);
-        debug_assert!(
-            n_chunks <= MAX_SPLITK_CHUNKS,
-            "split-K n_chunks={n_chunks} exceeds scratch budget MAX={MAX_SPLITK_CHUNKS}"
-        );
-        if kv_layout == Q8Contig::NAME {
-            flambeau_ops::hip::attention::attention_decode_q8_kv_splitk(
-                ops, stream,
-                scratch.q_f16, kv_cache.k_buffer(), kv_cache.v_buffer(),
-                scratch.attn_out_f16,
-                scratch.splitk_partials_m, scratch.splitk_partials_s, scratch.splitk_partials_o,
-                n_heads, n_kv_heads, head_dim, n_tokens_kv, chunk_size, scale,
-            )
-            .context("dense attention_decode_q8_kv_splitk")?;
-        } else {
-            flambeau_ops::hip::attention::attention_decode_f16_splitk(
-                ops, stream,
-                scratch.q_f16, kv_cache.k_buffer(), kv_cache.v_buffer(),
-                scratch.attn_out_f16,
-                scratch.splitk_partials_m, scratch.splitk_partials_s, scratch.splitk_partials_o,
-                n_heads, n_kv_heads, head_dim, n_tokens_kv, chunk_size, scale,
-            )
-            .context("dense attention_decode_f16_splitk")?;
-        }
-    } else if kv_layout == Q8Contig::NAME {
-        attention_decode_q8_kv(
-            ops, stream,
-            scratch.q_f16, kv_cache.k_buffer(), kv_cache.v_buffer(),
-            scratch.attn_out_f16,
-            n_heads, n_kv_heads, head_dim, n_tokens_kv, scale,
-        )
-        .context("dense attention_decode_q8_kv")?;
-    } else {
-        let n_tokens_kv_slot = slots.map(|s| s.n_tokens_kv_slot);
-        attention_decode_f16_slots(
-            ops, stream,
-            scratch.q_f16, kv_cache.k_buffer(), kv_cache.v_buffer(),
-            scratch.attn_out_f16,
-            n_heads, n_kv_heads, head_dim, n_tokens_kv, scale,
-            n_tokens_kv_slot,
-        )
-        .context("dense attention_decode_f16")?;
-    }
-
-    // 8. Quantise attn_out directly (NO sigmoid gate in qwen3moe).
-    let o_width = n_heads * head_dim;
-    quantize_f16_q8_1(ops, stream, scratch.attn_out_f16, scratch.x_q8_1, o_width)
-        .context("dense quantize attn_out → Q8_1")?;
-
-    // 9. Output projection.
-    let dtype_o = qdtype_of(weights.attn_output.dtype)?;
-    let (o_rows, o_k) = mat_shape(&weights.attn_output)?;
-    if o_rows != hidden || o_k != o_width {
-        bail!(
-            "dense attn_output shape [{o_rows}, {o_k}] != expected [{}, {}]",
-            hidden,
-            o_width
-        );
-    }
-    mmvq(
-        ops, stream, weights.attn_output.ptr, scratch.x_q8_1,
-        scratch.mmvq_f32, o_rows, o_k, dtype_o,
-    )
-    .context("dense mmvq attn_output")?;
-    cast_f32_to_f16(ops, stream, scratch.mmvq_f32, delta_out, o_rows)
-        .context("dense cast attn_output → f16")?;
-
-    Ok(())
 }
 
 /// Route a `LayerCache` entry through the dense-attn forward, pulling the
@@ -1438,198 +1225,27 @@ pub fn forward_dense_attn_prefill(
     start_position: usize,
     slots: Option<AttnPrefillSlots>,
 ) -> Result<()> {
-    if weights.attn_q_bias.is_some()
-        || weights.attn_k_bias.is_some()
-        || weights.attn_v_bias.is_some()
-    {
-        bail!("forward_dense_attn_prefill: Q/K/V biases not yet supported");
-    }
     if n_tokens == 0 {
         bail!("forward_dense_attn_prefill called with n_tokens = 0");
     }
     if n_tokens > scratch.max_tokens {
         bail!(
-            "forward_dense_attn_prefill: n_tokens={n_tokens} > max_tokens={}",
+            "forward_dense_attn_prefill: n_tokens={n_tokens} > scratch.max_tokens={}",
             scratch.max_tokens
         );
     }
-
-    let hidden = cfg.hidden_size;
-    let head_dim = cfg.head_dim;
-    let n_heads = cfg.num_heads;
-    let n_kv_heads = cfg.num_kv_heads;
-    let q_width = n_heads * head_dim;
-    let rope = &cfg.rope;
-
-    // 1. rmsnorm + dual Q8_1 quant (std + MMQ DS4).
-    rmsnorm_f16(
-        ops, stream, x_in, attn_norm.ptr, scratch.x_norm_f16,
-        n_tokens, hidden, cfg.rms_norm_eps,
+    let block = build_dense_attn_block(attn_norm, weights, cfg)?;
+    let hipops = flambeau_ops::HipOps::new(ops, stream);
+    block.forward_prefill(
+        &hipops,
+        device,
+        stream,
+        x_in,
+        delta_out,
+        kv_cache,
+        &mut scratch.view_mut(),
+        n_tokens,
+        start_position,
+        slots,
     )
-    .context("dense prefill attn_norm")?;
-    quantize_f16_q8_1(
-        ops, stream, scratch.x_norm_f16, scratch.x_q8_1, n_tokens * hidden,
-    )
-    .context("dense prefill x_norm → Q8_1 std")?;
-    quantize_f16_q8_1_mmq(
-        ops, stream, scratch.x_norm_f16, scratch.x_q8_1_mmq, hidden, n_tokens,
-    )
-    .context("dense prefill x_norm → Q8_1 MMQ")?;
-
-    // 2. Plain Q projection → q_f16 directly.
-    let dtype_q = qdtype_of(weights.attn_q.dtype)?;
-    let (q_rows, q_k) = mat_shape(&weights.attn_q)?;
-    if q_rows != q_width || q_k != hidden {
-        bail!(
-            "dense prefill attn_q shape [{q_rows}, {q_k}] != expected [{}, {}]",
-            q_width, hidden
-        );
-    }
-    qmatmul(
-        ops, stream, weights.attn_q.ptr,
-        scratch.x_q8_1, scratch.x_q8_1_mmq,
-        scratch.mmvq_f32, n_tokens, q_k, q_rows, dtype_q,
-    )
-    .context("dense prefill qmatmul attn_q")?;
-    cast_f32_to_f16(
-        ops, stream, scratch.mmvq_f32, scratch.q_f16, n_tokens * q_rows,
-    )
-    .context("dense prefill cast attn_q → f16")?;
-
-    // 3. K / V projections.
-    let dtype_k = qdtype_of(weights.attn_k.dtype)?;
-    let (k_rows, k_k) = mat_shape(&weights.attn_k)?;
-    if k_rows != n_kv_heads * head_dim || k_k != hidden {
-        bail!(
-            "dense prefill attn_k shape [{k_rows}, {k_k}] != expected [{}, {}]",
-            n_kv_heads * head_dim, hidden
-        );
-    }
-    qmatmul(
-        ops, stream, weights.attn_k.ptr,
-        scratch.x_q8_1, scratch.x_q8_1_mmq,
-        scratch.mmvq_f32, n_tokens, k_k, k_rows, dtype_k,
-    )
-    .context("dense prefill qmatmul attn_k")?;
-    cast_f32_to_f16(
-        ops, stream, scratch.mmvq_f32, scratch.k_f16, n_tokens * k_rows,
-    )
-    .context("dense prefill cast attn_k → f16")?;
-
-    let dtype_v = qdtype_of(weights.attn_v.dtype)?;
-    let (v_rows, v_k) = mat_shape(&weights.attn_v)?;
-    if v_rows != n_kv_heads * head_dim || v_k != hidden {
-        bail!(
-            "dense prefill attn_v shape [{v_rows}, {v_k}] != expected [{}, {}]",
-            n_kv_heads * head_dim, hidden
-        );
-    }
-    qmatmul(
-        ops, stream, weights.attn_v.ptr,
-        scratch.x_q8_1, scratch.x_q8_1_mmq,
-        scratch.mmvq_f32, n_tokens, v_k, v_rows, dtype_v,
-    )
-    .context("dense prefill qmatmul attn_v")?;
-    cast_f32_to_f16(
-        ops, stream, scratch.mmvq_f32, scratch.v_f16, n_tokens * v_rows,
-    )
-    .context("dense prefill cast attn_v → f16")?;
-
-    // 4. Per-head Q/K rmsnorm.
-    let q_norm_dim = weights
-        .attn_q_norm.dims.first().copied()
-        .context("attn_q_norm missing dim")? as usize;
-    if q_norm_dim != head_dim {
-        bail!("attn_q_norm dim {q_norm_dim} != head_dim {head_dim}");
-    }
-    rmsnorm_f16(
-        ops, stream, scratch.q_f16, weights.attn_q_norm.ptr,
-        scratch.q_f16, n_tokens * n_heads, head_dim, cfg.rms_norm_eps,
-    )
-    .context("dense prefill attn_q_norm")?;
-    rmsnorm_f16(
-        ops, stream, scratch.k_f16, weights.attn_k_norm.ptr,
-        scratch.k_f16, n_tokens * n_kv_heads, head_dim, cfg.rms_norm_eps,
-    )
-    .context("dense prefill attn_k_norm")?;
-
-    // 5. RoPE (uniform — qwen3moe has no multi-freq sections).
-    upload_positions_range(device, stream, scratch, start_position, n_tokens)?;
-    rope_neox_partial_f16(
-        ops, stream, scratch.q_f16, scratch.positions,
-        rope.freq_base, n_tokens, n_heads, head_dim, rope.rotated_dims,
-    )
-    .context("dense prefill rope Q")?;
-    rope_neox_partial_f16(
-        ops, stream, scratch.k_f16, scratch.positions,
-        rope.freq_base, n_tokens, n_kv_heads, head_dim, rope.rotated_dims,
-    )
-    .context("dense prefill rope K")?;
-
-    // 6. KV append.
-    if let Some(AttnPrefillSlots { k_append_slot, v_append_slot, .. }) = slots {
-        unsafe {
-            kv_cache_append_hip_slot(
-                kv_cache, device, stream,
-                scratch.k_f16, scratch.v_f16, n_tokens,
-                k_append_slot, v_append_slot,
-            )?;
-        }
-    } else {
-        unsafe {
-            kv_cache
-                .append(device, stream, scratch.k_f16, scratch.v_f16, n_tokens)
-                .map_err(|e| anyhow::anyhow!("dense kv_cache.append(L={n_tokens}): {e}"))?;
-        }
-    }
-
-    // 7. Causal attention.
-    let n_k_tokens = kv_cache.current_tokens();
-    let scale = (head_dim as f32).sqrt().recip();
-    let (n_k_slot_opt, q_off_slot_opt) = match slots {
-        Some(s) => (Some(s.n_k_slot), Some(s.q_off_slot)),
-        None => (None, None),
-    };
-    attention_prefill_f16_slots(
-        ops, stream,
-        scratch.q_f16, kv_cache.k_buffer(), kv_cache.v_buffer(),
-        scratch.attn_out_f16,
-        n_tokens, n_heads, n_kv_heads, head_dim,
-        n_k_tokens, start_position, scale,
-        n_k_slot_opt, q_off_slot_opt,
-    )
-    .context("dense attention_prefill_f16")?;
-
-    // 8. Quantise attn_out to BOTH Q8_1 layouts for the output projection
-    // (no sigmoid gate).
-    quantize_f16_q8_1(
-        ops, stream, scratch.attn_out_f16, scratch.gated_q8_1, n_tokens * q_width,
-    )
-    .context("dense prefill quantise attn_out → Q8_1 std")?;
-    quantize_f16_q8_1_mmq(
-        ops, stream, scratch.attn_out_f16, scratch.gated_q8_1_mmq, q_width, n_tokens,
-    )
-    .context("dense prefill quantise attn_out → Q8_1 MMQ")?;
-
-    // 9. Output projection.
-    let dtype_o = qdtype_of(weights.attn_output.dtype)?;
-    let (o_rows, o_k) = mat_shape(&weights.attn_output)?;
-    if o_rows != hidden || o_k != q_width {
-        bail!(
-            "dense prefill attn_output shape [{o_rows}, {o_k}] != expected [{}, {}]",
-            hidden, q_width
-        );
-    }
-    qmatmul(
-        ops, stream, weights.attn_output.ptr,
-        scratch.gated_q8_1, scratch.gated_q8_1_mmq,
-        scratch.mmvq_f32, n_tokens, o_k, o_rows, dtype_o,
-    )
-    .context("dense prefill qmatmul attn_output")?;
-    cast_f32_to_f16(
-        ops, stream, scratch.mmvq_f32, delta_out, n_tokens * hidden,
-    )
-    .context("dense prefill cast attn_output → f16")?;
-
-    Ok(())
 }
