@@ -200,7 +200,7 @@ pub struct SweepSpec {
 }
 
 impl SweepSpec {
-    /// The cert grid from `doc/ROADMAP-V1-QWEN36-GFX906.md` §    pub fn v1_3_default(dtype: Dtype) -> Self {
+    pub fn v1_3_default(dtype: Dtype) -> Self {
         Self {
             dtype,
             m_grid: vec![1, 8, 16, 128, 512],

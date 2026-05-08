@@ -37,3 +37,20 @@ pub use hip::{OpsRegistry, OpsRegistryError};
 
 #[cfg(feature = "hip")]
 pub use hip::{attention, conv, mlp, moe, norm, pe, qmatmul, softmax};
+
+// Backend-portable shape used by every `indexed_moe_mmq_*` method on
+// the `Ops` trait. Lifted out of `hip::moe` so CUDA can implement the
+// trait without depending on the HIP module path.
+#[cfg(feature = "hip")]
+pub use hip::moe::MoeShape;
+
+// `Ops` references `MoeShape`, which today only exists under the `hip`
+// feature. Gate the trait the same way; CUDA will pull `MoeShape` to a
+// backend-neutral home at the point where it grows a second impl.
+#[cfg(feature = "hip")]
+mod ops_trait;
+#[cfg(feature = "hip")]
+pub use ops_trait::Ops;
+
+#[cfg(feature = "hip")]
+pub use hip::HipOps;

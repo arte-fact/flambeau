@@ -27,12 +27,15 @@ pub mod conv;
 pub mod mlp;
 pub mod moe;
 pub mod norm;
+mod ops_impl;
 pub mod pe;
 pub mod qmatmul;
 pub mod recurrent;
 pub mod router;
 pub mod sampling;
 pub mod softmax;
+
+pub use ops_impl::HipOps;
 
 /// Kernel stems every model might touch. Loaded once in
 /// [`OpsRegistry::new`]; missing entries fail fast so model code never races
