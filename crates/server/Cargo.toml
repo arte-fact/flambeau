@@ -21,10 +21,6 @@ serde = { workspace = true, features = ["derive"] }
 serde_json.workspace = true
 tracing.workspace = true
 half.workspace = true
-# M2.1: MCP client, used when `--mcp <url>` is passed on the command
-# line. Transport is streamable-HTTP; rmcp uses its own reqwest stack
-# under the hood so we don't add a direct dep here.
-rmcp.workspace = true
 
 [dependencies.flambeau-backend-hip]
 path = "../backend-hip"

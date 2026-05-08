@@ -220,13 +220,7 @@ pub struct ServerState {
     /// `--batched-decode` (default true). When true, concurrent decode
     /// requests aggregate via the scheduler leader.
     pub batched_decode: bool,
-    /// Tools discovered on the `--mcp <url>` upstreams at startup
-    /// (ROADMAP-V2 §M2.1). Merged into each request's `tools[]` before
-    /// rendering the Jinja template, so the model sees them alongside
-    /// any client-supplied tools. Agent-loop bridging (actually calling
-    /// them on a tool_call emission) is M2.2.
-    pub remote_tools: Vec<crate::mcp_client::RemoteTool>,
-    /// Per-iteration agent-loop telemetry (M2.3). Ring buffer; surfaced
+    /// Per-iteration agent-loop telemetry. Ring buffer; surfaced
     /// read-only at `GET /v1/agent/stats`.
     pub agent_stats: crate::agent_stats::AgentStatsRing,
     /// L3 — tool-call format detected at boot from the GGUF chat
@@ -1145,20 +1139,6 @@ pub async fn agent_stats(State(state): State<SharedState>) -> impl IntoResponse 
     }))
 }
 
-/// GET /v1/tools — C4.1 introspection for the chat UI's "what tools
-/// does the model see?" panel. Surfaces only the `--mcp <url>`-
-/// discovered remote tools (request-supplied `tools[]` are per-request
-/// and not server state). Tools are reported with their alias-prefixed
-/// `name` (what the model sees), the unprefixed `remote_name` (what
-/// the upstream server knows), the source URL, and the parameters
-/// schema.
-pub async fn tools_endpoint(State(state): State<SharedState>) -> impl IntoResponse {
-    Json(json!({
-        "remote_tools": &state.remote_tools,
-        "count": state.remote_tools.len(),
-    }))
-}
-
 /// **#234 P3.14** — POST /tokenize (llama.cpp-compat).
 /// Returns `{"tokens": [int, ...]}` for the given `content`. When
 /// `add_special=true`, BOS/EOS are inserted by the underlying
@@ -1579,18 +1559,16 @@ pub async fn chat_completions(
     // model greedy-stops on the first token. Normalise every assistant
     // message that lacks `</think>` by wrapping its content the same way
     // the template would for the current turn.
-    let mut messages: Vec<ChatMessage> = injected_system
+    let messages: Vec<ChatMessage> = injected_system
         .into_iter()
         .chain(req.messages.iter().map(normalise_message))
         .collect();
 
-    // T1.2 + M2.1: thread client tools + `--mcp`-discovered remote
-    // tools into the Jinja render. Both visible to the model under one
-    // namespace; remote tools are `alias.name`-prefixed.
-    let merged_tools = merge_request_and_remote_tools(
-        req.tools.as_deref(),
-        &state.remote_tools,
-    );
+    // Thread the client-supplied tools[] into the Jinja render.
+    let merged_tools = req
+        .tools
+        .as_deref()
+        .map(|ts| ts.iter().map(serde_json::to_value).filter_map(Result::ok).collect::<Vec<_>>());
 
     // T4.b.2 / T4.b.1 sampler config.
     // P0.1: detect json_object response format and propagate.
@@ -1723,235 +1701,85 @@ pub async fn chat_completions(
         .into_response());
     }
 
-    // Non-streaming agent loop (M2.2). On each iteration:
-    // 1. Render the current `messages` into a prompt (with tools).
-    // 2. Run decode to text completion.
-    // 3. Parse text → (content, tool_calls).
-    // 4. Partition tool_calls into client-visible vs self-executable
-    // (remote). If self-executable ones exist AND no client ones
-    // block us, execute them, append `assistant` + `role=tool`
-    // turns to `messages`, loop. Otherwise return.
-    // 5. Cap at `MAX_TOOL_ITERATIONS`; hitting the cap returns
-    // whatever was produced on the final iteration as-is (no
-    // further execution).
-    const MAX_TOOL_ITERATIONS: usize = 10;
-
-    let mut sum_prompt_tokens: u32 = 0;
-    let mut sum_completion_tokens: u32 = 0;
-    let mut final_content = String::new();
-    let mut final_tool_calls: Vec<crate::api::ToolCall> = Vec::new();
-    let mut final_finish: String = "stop".into();
-    // P1.7 — logprobs of the FINAL iteration (the one whose text is
-    // surfaced as `choices[0].message.content`). Only populated when
-    // the request opted in.
-    let mut final_logprobs: Option<Vec<ChatLogProbContent>> = None;
-    // **#233** — reasoning_content of the FINAL iteration. Populated
-    // by `finalise` when `enable_thinking=true` and the model emitted
-    // a `<think>...</think>` block.
-    let mut final_reasoning_content: Option<String> = None;
+    // Single-pass chat completion. The server is OpenAI-compat: accept
+    // client-supplied `tools[]`, run the model, parse any `tool_calls`
+    // out of the model output, return them. Multi-turn tool execution
+    // is the client's responsibility.
     let session_id = request_id("chatcmpl");
-
-    for iter in 0..MAX_TOOL_ITERATIONS {
-        let iter_start = Instant::now();
-        // **#236 P0.1b** — assistant prefill applies only on iter=0 (the
-        // user-supplied messages). On subsequent iterations the agent
-        // loop has appended fresh assistant + tool turns, and we want
-        // the standard `add_generation_prompt=true` behaviour.
-        let prefill_this_iter = iter == 0 && assistant_prefill_active;
-        let add_generation_prompt = !prefill_this_iter;
-        let mut prompt = state
-            .chat_template
-            .render_with_tools(
-                &messages,
-                merged_tools.as_deref(),
-                add_generation_prompt,
-                Some(params.enable_thinking),
-            )
-            .map_err(ApiError::internal)?;
-        if prefill_this_iter {
-            prompt = strip_trailing_assistant_terminator(&prompt);
-        }
-        if iter == 0 && dev_flag("FLAMBEAU_DUMP_PROMPT") {
-            eprintln!(
-                "--- rendered prompt ({} bytes) ---\n{}\n--- end prompt ---",
-                prompt.len(),
-                prompt
-            );
-        }
-
-        let (
-            text,
-            iter_prompt_tokens,
-            iter_completion_tokens,
-            iter_finish,
-            iter_logprobs,
-            iter_reasoning,
-        ) = run_completion(state.clone(), &prompt, params.clone(), relax_stop_mask)
-            .await
-            .map_err(ApiError::internal)?;
-        sum_prompt_tokens = sum_prompt_tokens.saturating_add(iter_prompt_tokens);
-        sum_completion_tokens = sum_completion_tokens.saturating_add(iter_completion_tokens);
-
-        let (content, mut tool_calls) = {
-            use crate::tool_call_parser::{dispatcher, split_events, ParserEvent};
-            // Debug: dump raw model text when FLAMBEAU_DEBUG_TOOL_RAW=1, so we
-            // can see what the parser is consuming. Useful for diagnosing
-            // parser-vs-model issues on multi-tool prompts.
-            if dev_flag("FLAMBEAU_DEBUG_TOOL_RAW") {
-                tracing::info!(
-                    target: "server.tool_raw",
-                    bytes = text.len(),
-                    text_dbg = ?text,
-                    "raw model text before tool-call parser"
-                );
-            }
-            let mut parser = dispatcher(
-                req.tool_call_format.as_deref(),
-                state.tool_call_format_default,
-            )
-            .map_err(|e| ApiError::bad_request(e.to_string()))?;
-            let mut events = parser.push(&text);
-            events.extend(parser.finish());
-            split_events(ParserEvent::coalesce(events))
-        };
-        if !parallel_tool_calls && tool_calls.len() > 1 {
-            tool_calls.truncate(1);
-        }
-
-        // Partition: remote tools we own vs client tools we hand back.
-        let (remote_calls, client_calls): (Vec<_>, Vec<_>) = tool_calls
-            .into_iter()
-            .partition(|tc| {
-                crate::mcp_client::find_by_prefixed_name(
-                    &state.remote_tools,
-                    &tc.function.name,
-                )
-                .is_some()
-            });
-
-        // Capture per-iteration telemetry (M2.3). We include both the
-        // remote- and client-side tool names so the stats reflect what
-        // the model actually emitted, not just what we executed.
-        let iter_tool_names: Vec<String> = remote_calls
-            .iter()
-            .chain(client_calls.iter())
-            .map(|tc| tc.function.name.clone())
-            .collect();
-        let iter_remote_count = remote_calls.len() as u32;
-        let record_stat = |finish: &str| {
-            state.agent_stats.push(crate::agent_stats::IterStat {
-                session_id: session_id.clone(),
-                iteration: iter as u32,
-                tool_names: iter_tool_names.clone(),
-                remote_count: iter_remote_count,
-                latency_ms: iter_start.elapsed().as_millis() as u64,
-                prompt_tokens: iter_prompt_tokens,
-                completion_tokens: iter_completion_tokens,
-                finish_reason: finish.to_owned(),
-            });
-        };
-
-        // Stop conditions. The loop breaks in three cases:
-        // (a) no tool calls at all → plain "stop" response;
-        // (b) any client-visible tool calls → hand them back with
-        // finish_reason="tool_calls" (we don't execute them);
-        // (c) we've hit the iteration budget → return whatever
-        // remote_calls we have without running them, flagged so
-        // the client can follow up manually.
-        if remote_calls.is_empty() && client_calls.is_empty() {
-            record_stat(&iter_finish);
-            final_content = content;
-            final_finish = iter_finish;
-            // P1.7 — only this break path surfaces user-visible text;
-            // the tool-call paths emit JSON tool args without
-            // user-visible content. Logprobs are most useful for the
-            // text path so attach here.
-            final_logprobs = iter_logprobs;
-            // **#233** — reasoning_content rides with the user-visible
-            // text. Tool-call iterations don't return reasoning since
-            // the model is producing JSON tool args, not chain-of-
-            // thought we want to surface.
-            final_reasoning_content = iter_reasoning;
-            break;
-        }
-        if !client_calls.is_empty() {
-            record_stat("tool_calls");
-            final_content = content;
-            final_tool_calls = [client_calls, remote_calls].concat();
-            final_finish = "tool_calls".into();
-            break;
-        }
-        if iter + 1 >= MAX_TOOL_ITERATIONS {
-            tracing::warn!(
-                target: "flambeau.server",
-                iter = iter + 1,
-                max = MAX_TOOL_ITERATIONS,
-                "agent loop hit max_tool_iterations — returning remote tool_calls to the caller"
-            );
-            record_stat("tool_calls");
-            final_content = content;
-            final_tool_calls = remote_calls;
-            final_finish = "tool_calls".into();
-            break;
-        }
-        // Loop continuing: record the iteration before we re-enter.
-        record_stat("tool_calls");
-
-        // Execute the remote tool calls server-side, splice results
-        // into `messages`, loop.
-        tracing::info!(
-            target: "flambeau.server",
-            iter = iter + 1,
-            remote_calls = remote_calls.len(),
-            "agent loop: executing remote tool calls"
-        );
-        // Persist the assistant turn with the tool_calls into history —
-        // Qwen3's template needs that slot for the role=tool follow-up
-        // to land in the right conversational place.
-        messages.push(ChatMessage {
-            role: "assistant".into(),
-            content: if content.is_empty() {
-                None
-            } else {
-                Some(format!("<think>\n\n</think>\n\n{}", content))
-            },
-            tool_call_id: None,
-            tool_calls: Some(remote_calls.clone()),
-            reasoning_content: None,
-        });
-        for tc in &remote_calls {
-            let Some(rt) = crate::mcp_client::find_by_prefixed_name(
-                &state.remote_tools,
-                &tc.function.name,
-            ) else {
-                // Shouldn't fire — partition check already matched.
-                continue;
-            };
-            let tool_output = crate::mcp_client::call_remote(rt, &tc.function.arguments)
-                .await
-                .unwrap_or_else(|e| {
-                    tracing::warn!(
-                        target: "flambeau.server",
-                        tool = %tc.function.name,
-                        error = %e,
-                        "remote tool call failed — surfacing error text to model"
-                    );
-                    format!(
-                        "{{\"error\":\"remote tool {name} failed: {err}\"}}",
-                        name = tc.function.name,
-                        err = e.to_string().replace('"', "\\\""),
-                    )
-                });
-            messages.push(ChatMessage {
-                role: "tool".into(),
-                content: Some(tool_output),
-                tool_call_id: Some(tc.id.clone()),
-                tool_calls: None,
-                reasoning_content: None,
-            });
-        }
-        // continue the loop
+    let iter_start = Instant::now();
+    let mut prompt = state
+        .chat_template
+        .render_with_tools(
+            &messages,
+            merged_tools.as_deref(),
+            !assistant_prefill_active,
+            Some(params.enable_thinking),
+        )
+        .map_err(ApiError::internal)?;
+    if assistant_prefill_active {
+        prompt = strip_trailing_assistant_terminator(&prompt);
     }
+    if dev_flag("FLAMBEAU_DUMP_PROMPT") {
+        eprintln!(
+            "--- rendered prompt ({} bytes) ---\n{}\n--- end prompt ---",
+            prompt.len(),
+            prompt
+        );
+    }
+
+    let (
+        text,
+        sum_prompt_tokens,
+        sum_completion_tokens,
+        iter_finish,
+        final_logprobs,
+        final_reasoning_content,
+    ) = run_completion(state.clone(), &prompt, params.clone(), relax_stop_mask)
+        .await
+        .map_err(ApiError::internal)?;
+
+    let (final_content, mut final_tool_calls) = {
+        use crate::tool_call_parser::{dispatcher, split_events, ParserEvent};
+        if dev_flag("FLAMBEAU_DEBUG_TOOL_RAW") {
+            tracing::info!(
+                target: "server.tool_raw",
+                bytes = text.len(),
+                text_dbg = ?text,
+                "raw model text before tool-call parser"
+            );
+        }
+        let mut parser = dispatcher(
+            req.tool_call_format.as_deref(),
+            state.tool_call_format_default,
+        )
+        .map_err(|e| ApiError::bad_request(e.to_string()))?;
+        let mut events = parser.push(&text);
+        events.extend(parser.finish());
+        split_events(ParserEvent::coalesce(events))
+    };
+    if !parallel_tool_calls && final_tool_calls.len() > 1 {
+        final_tool_calls.truncate(1);
+    }
+
+    let iter_tool_names: Vec<String> = final_tool_calls
+        .iter()
+        .map(|tc| tc.function.name.clone())
+        .collect();
+    let final_finish = if final_tool_calls.is_empty() {
+        iter_finish
+    } else {
+        "tool_calls".into()
+    };
+    state.agent_stats.push(crate::agent_stats::IterStat {
+        session_id: session_id.clone(),
+        iteration: 0,
+        tool_names: iter_tool_names,
+        remote_count: 0,
+        latency_ms: iter_start.elapsed().as_millis() as u64,
+        prompt_tokens: sum_prompt_tokens,
+        completion_tokens: sum_completion_tokens,
+        finish_reason: final_finish.clone(),
+    });
 
     Ok(Json(ChatCompletionResponse {
         // One id per HTTP request; the agent-loop stats ring (M2.3)
@@ -2467,8 +2295,11 @@ pub async fn messages_anthropic(
         .as_deref()
         .map(anthropic_tools_to_openai)
         .filter(|v| !v.is_empty());
-    let merged_tools =
-        merge_request_and_remote_tools(openai_tools.as_deref(), &state.remote_tools);
+    let merged_tools = openai_tools.as_ref().map(|ts| {
+        ts.iter()
+            .filter_map(|t| serde_json::to_value(t).ok())
+            .collect::<Vec<_>>()
+    });
 
     let prompt = state
         .chat_template
@@ -2977,47 +2808,6 @@ pub async fn infill(
             total_tokens: prompt_tokens + completion_tokens,
         },
     }))
-}
-
-/// Merge client-supplied tools with any registered via `--mcp <url>`.
-/// Returns `None` when both are empty so the Jinja template takes the
-/// no-tools branch (same byte-for-byte output as ). Returns a
-/// `Vec<serde_json::Value>` with two kinds of entries:
-/// - client tools — serialised from `api::ToolDef` directly;
-/// - remote tools — rendered through `mcp_client::to_tool_json`, which
-/// uses the `alias.name`-prefixed name so the two sources can share
-/// a tool namespace without collisions.
-fn merge_request_and_remote_tools(
-    client_tools: Option<&[ToolDef]>,
-    remote_tools: &[crate::mcp_client::RemoteTool],
-) -> Option<Vec<serde_json::Value>> {
-    let client_len = client_tools.map_or(0, <[ToolDef]>::len);
-    let total = client_len + remote_tools.len();
-    if total == 0 {
-        return None;
-    }
-    let mut out = Vec::with_capacity(total);
-    if let Some(ts) = client_tools {
-        for t in ts {
-            match serde_json::to_value(t) {
-                Ok(v) => out.push(v),
-                Err(e) => {
-                    // Shouldn't happen — ToolDef is a plain serde struct.
-                    // If it does, skip the tool rather than fail the
-                    // whole turn.
-                    tracing::warn!(
-                        target: "flambeau.server",
-                        error = %e,
-                        "failed to serialise client-supplied tool; skipping"
-                    );
-                }
-            }
-        }
-    }
-    for rt in remote_tools {
-        out.push(crate::mcp_client::to_tool_json(rt));
-    }
-    Some(out)
 }
 
 /// Build an SSE stream from the blocking completion pipeline.

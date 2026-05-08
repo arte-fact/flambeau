@@ -23,9 +23,9 @@ pub struct IterStat {
     pub iteration: u32,
     /// Tool names the model emitted this iteration (if any).
     pub tool_names: Vec<String>,
-    /// Whether each tool_name mapped to a remote (`--mcp`-owned) tool.
+    /// Reserved for future use (always 0 on the single-pass path).
     pub remote_count: u32,
-    /// Wall-clock ms for this iteration (decode + tool calls).
+    /// Wall-clock ms for this iteration.
     pub latency_ms: u64,
     /// Tokens consumed this iteration (prompt + completion).
     pub prompt_tokens: u32,

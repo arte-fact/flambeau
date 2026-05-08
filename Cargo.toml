@@ -43,22 +43,6 @@ tower = "0.5"
 # Model loading
 memmap2 = "0.9"
 tokenizers = "0.20"
-# MCP server/client SDK (official rust-sdk). Pinned exactly per
-# ROADMAP-V2-TOOL-CALLING-AND-MCP.md "Risks / rmcp version churn" — the
-# protocol ships version-bump changes and we don't want silent drift.
-# Features: `server` (default) for M1; add `client` for M2.1 when it
-# lands. `transport-io` = stdio transport; `transport-streamable-http-server` = HTTP (M1.5).
-rmcp = { version = "=1.5.0", default-features = false, features = [
-    "server",
-    "client",
-    "macros",
-    "schemars",
-    "transport-io",
-    "transport-streamable-http-server",
-    "transport-streamable-http-client",
-    "transport-streamable-http-client-reqwest",
-    "reqwest",
-] }
 # `json`: enables the `tojson` filter the Qwen3.6 chat template uses
 # (V2.12, certs/chat_template/qwen35moe_tools/). `preserve_order`:
 # minijinja's internal map switches from BTreeMap to IndexMap so object

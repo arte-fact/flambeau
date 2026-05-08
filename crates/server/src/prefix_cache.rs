@@ -547,7 +547,7 @@ mod tests {
 
     #[test]
     fn longest_match_walks_longest_first() {
-        let cache = PrefixCache::new(0);
+        let cache = PrefixCache::new(0, true);
         // 1536-token prompt at chunk=512 = 3 full chunks, no tail.
         let prompt: Vec<u32> = (0..1536).collect();
         let keys = PrefixKeys::from_prompt(&prompt, 512);
@@ -564,7 +564,7 @@ mod tests {
 
     #[test]
     fn longest_match_returns_partial_when_full_not_cached() {
-        let cache = PrefixCache::new(0);
+        let cache = PrefixCache::new(0, true);
         let prompt: Vec<u32> = (0..1536).collect();
         let keys = PrefixKeys::from_prompt(&prompt, 512);
         // Cache only the first 2 chunks.
@@ -579,7 +579,7 @@ mod tests {
 
     #[test]
     fn topology_mismatch_rejects() {
-        let cache = PrefixCache::new(0);
+        let cache = PrefixCache::new(0, true);
         let prompt: Vec<u32> = (0..1024).collect();
         let keys = PrefixKeys::from_prompt(&prompt, 512);
         let other = TopologyTag {
@@ -596,7 +596,7 @@ mod tests {
 
     #[test]
     fn empty_prompt_no_match() {
-        let cache = PrefixCache::new(0);
+        let cache = PrefixCache::new(0, true);
         let keys = PrefixKeys::from_prompt(&[], 512);
         assert!(cache.longest_match(&keys, topo(), |_| {}).is_none());
     }
