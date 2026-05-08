@@ -31,8 +31,13 @@ one only with a measured reason.
 - **KV cache:** F16 (baseline), Q8 (quantX, candle shape), turbo-quant
   (Q4/Q5 llamacpp-turbo scheme). Static typing; turbo-quant requires a
   quality cert.
-- **Server:** OpenAI-compatible HTTP API (`/v1/chat/completions`,
-  `/v1/completions`, `/v1/models`, SSE, `/health`).
+- **Server:** Bare JSON HTTP API. OpenAI-compatible
+  (`/v1/chat/completions`, `/v1/completions`, `/v1/models`, SSE,
+  `/v1/embeddings`, `/health`, `/tokenize`) plus Anthropic
+  `/v1/messages`. No browser UI, no upstream-MCP-client enumeration,
+  no server-side multi-turn tool execution — tool calls round-trip
+  through the client like every other inference server (vLLM, SGLang,
+  TGI, llama-server, OpenAI, Anthropic).
 - **Out:** Metal, training, LoRA, vision/audio, ONNX, non-target model
   families.
 
@@ -81,6 +86,12 @@ implementing.
     lives.** If a kernel is null on all target models, either it gets
     deleted or it lives behind `cfg(unverified)` with a one-line
     `why:` comment. No env-flag resurrection.
+11. **The server stays a JSON HTTP API.** Don't bundle browser UI
+    assets, don't enumerate upstream MCP servers at boot, don't run
+    multi-turn tool-execution loops server-side. Render `tools[]` →
+    decode → emit `tool_calls` → return. Multi-turn execution and MCP
+    are the *client's* job (Claude Desktop, IDE extensions, the user's
+    app), exactly like vLLM / SGLang / OpenAI / Anthropic.
 
 ## Measurement rules
 
