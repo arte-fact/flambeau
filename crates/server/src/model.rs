@@ -94,23 +94,32 @@ impl LoadedModel {
     }
 }
 
+/// PP per-request session + scratches. Mirrors [`PpHipModel`].
+pub struct PpHipSession {
+    pub session: Qwen3MoEShardedSession,
+    pub prefill: ShardedForwardPrefillScratch,
+    pub decode: ShardedForwardOneTokenScratch,
+}
+
+/// TP per-request session + scratch. Mirrors [`TpHipModel`].
+pub struct TpHipSession {
+    pub session: Qwen3MoETpSession,
+    pub decode: ShardedForwardOneTokenScratchTp,
+}
+
+/// Hybrid per-request session + scratch. Mirrors [`HybridHipModel`].
+pub struct HybridHipSession {
+    pub session: Qwen3MoEHybridSession,
+    pub decode: ShardedForwardOneTokenScratchHybrid,
+}
+
 /// Per-request session + scratch. Variant must match the
 /// [`LoadedModel`] variant used to construct it; mismatches bail at
 /// dispatch.
 pub enum Inflight {
-    Pp {
-        session: Qwen3MoEShardedSession,
-        prefill: ShardedForwardPrefillScratch,
-        decode: ShardedForwardOneTokenScratch,
-    },
-    Tp {
-        session: Qwen3MoETpSession,
-        decode: ShardedForwardOneTokenScratchTp,
-    },
-    Hybrid {
-        session: Qwen3MoEHybridSession,
-        decode: ShardedForwardOneTokenScratchHybrid,
-    },
+    Pp(PpHipSession),
+    Tp(TpHipSession),
+    Hybrid(HybridHipSession),
 }
 
 impl Inflight {
@@ -169,11 +178,11 @@ impl Inflight {
                         return Err(e).context("PP decode scratch");
                     }
                 };
-                Ok(Inflight::Pp {
+                Ok(Inflight::Pp(PpHipSession {
                     session,
                     prefill,
                     decode,
-                })
+                }))
             }
             LoadedModel::Tp(t) => {
                 let model = &t.model;
@@ -189,7 +198,7 @@ impl Inflight {
                         return Err(e).context("TP decode scratch");
                     }
                 };
-                Ok(Inflight::Tp { session, decode })
+                Ok(Inflight::Tp(TpHipSession { session, decode }))
             }
             LoadedModel::Hybrid(h) => {
                 // `cluster` here is the server's global cluster; the
@@ -206,7 +215,7 @@ impl Inflight {
                         return Err(e).context("hybrid decode scratch");
                     }
                 };
-                Ok(Inflight::Hybrid { session, decode })
+                Ok(Inflight::Hybrid(HybridHipSession { session, decode }))
             }
         }
     }
@@ -217,11 +226,11 @@ impl Inflight {
     /// cluster); pass `model` from the same registration.
     pub fn dispose(self, cluster: &HipCluster, model: &LoadedModel) -> Result<()> {
         match self {
-            Inflight::Pp {
+            Inflight::Pp(PpHipSession {
                 session,
                 prefill,
                 decode,
-            } => {
+            }) => {
                 decode
                     .dispose(cluster)
                     .context("dispose PP decode scratch")?;
@@ -231,14 +240,14 @@ impl Inflight {
                 session.dispose(cluster).context("dispose PP session")?;
                 Ok(())
             }
-            Inflight::Tp { session, decode } => {
+            Inflight::Tp(TpHipSession { session, decode }) => {
                 decode
                     .dispose(cluster)
                     .context("dispose TP decode scratch")?;
                 session.dispose(cluster).context("dispose TP session")?;
                 Ok(())
             }
-            Inflight::Hybrid { session, decode } => {
+            Inflight::Hybrid(HybridHipSession { session, decode }) => {
                 let LoadedModel::Hybrid(h) = model else {
                     bail!(
                         "Inflight::Hybrid::dispose: paired LoadedModel variant is not Hybrid"
@@ -266,14 +275,14 @@ impl Inflight {
         model: &LoadedModel,
     ) -> Result<()> {
         match (self, model) {
-            (Inflight::Pp { session, .. }, LoadedModel::Pp(_)) => session
+            (Inflight::Pp(PpHipSession { session, .. }), LoadedModel::Pp(_)) => session
                 .reset_for_next_request(cluster)
                 .context("reset PP session"),
-            (Inflight::Tp { session, .. }, LoadedModel::Tp(_)) => session
+            (Inflight::Tp(TpHipSession { session, .. }), LoadedModel::Tp(_)) => session
                 .reset_for_next_request(cluster)
                 .context("reset TP session"),
             (
-                Inflight::Hybrid { session, .. },
+                Inflight::Hybrid(HybridHipSession { session, .. }),
                 LoadedModel::Hybrid(HybridHipModel { model: hm, .. }),
             ) => session
                 .reset_for_next_request(hm)
@@ -445,9 +454,9 @@ pub fn prefill_logits(
     match (model, inflight) {
         (
             LoadedModel::Pp(PpHipModel { model: m, .. }),
-            Inflight::Pp {
+            Inflight::Pp(PpHipSession {
                 session, prefill, ..
-            },
+            }),
         ) => {
             // **#229 GDN-boundary** — explicit per-chunk loop (mirrors
             // TP/Hybrid below). Earlier this arm relied on
@@ -512,7 +521,7 @@ pub fn prefill_logits(
             }
             Ok(())
         }
-        (LoadedModel::Tp(TpHipModel { model, ar }), Inflight::Tp { session, decode }) => {
+        (LoadedModel::Tp(TpHipModel { model, ar }), Inflight::Tp(TpHipSession { session, decode })) => {
             // Chunked TP prefill (Phase B3a-TP). Phase A2-TP parity
             // test verified bit-exact KV at L=4096 chunk=512 (8 chunks),
             // so chunking is safe at chunk>=128. **#324** — when
@@ -609,7 +618,7 @@ pub fn prefill_logits(
                 model: hmodel,
                 stage_ars,
             }),
-            Inflight::Hybrid { session, decode },
+            Inflight::Hybrid(HybridHipSession { session, decode }),
         ) => {
             // Chunked Hybrid prefill (Phase B4a-Hybrid). Parity
             // verified bit-exact at L=4096 chunk=512 (8 chunks).
@@ -711,7 +720,7 @@ pub fn decode_spec_pp(
         _ => bail!("decode_spec_pp requires LoadedModel::Pp"),
     };
     let (session, prefill, decode) = match inflight {
-        Inflight::Pp { session, prefill, decode } => (session, prefill, decode),
+        Inflight::Pp(PpHipSession { session, prefill, decode }) => (session, prefill, decode),
         _ => bail!("decode_spec_pp requires Inflight::Pp"),
     };
 
@@ -762,7 +771,7 @@ pub fn decode_spec_pp_sampling(
         _ => bail!("decode_spec_pp_sampling requires LoadedModel::Pp"),
     };
     let (session, prefill, decode) = match inflight {
-        Inflight::Pp { session, prefill, decode } => (session, prefill, decode),
+        Inflight::Pp(PpHipSession { session, prefill, decode }) => (session, prefill, decode),
         _ => bail!("decode_spec_pp_sampling requires Inflight::Pp"),
     };
 
@@ -808,12 +817,12 @@ pub fn decode_logits(
     match (model, inflight) {
         (
             LoadedModel::Pp(PpHipModel { model: m, .. }),
-            Inflight::Pp {
+            Inflight::Pp(PpHipSession {
                 session, decode, ..
-            },
+            }),
         ) => forward_one_token_pp_logits(m, session, cluster, decode, token, position, logits_out)
             .context("PP decode_logits"),
-        (LoadedModel::Tp(TpHipModel { model, ar }), Inflight::Tp { session, decode }) => {
+        (LoadedModel::Tp(TpHipModel { model, ar }), Inflight::Tp(TpHipSession { session, decode })) => {
             forward_one_token_tp_logits(
                 model,
                 decode,
@@ -831,7 +840,7 @@ pub fn decode_logits(
                 model: hmodel,
                 stage_ars,
             }),
-            Inflight::Hybrid { session, decode },
+            Inflight::Hybrid(HybridHipSession { session, decode }),
         ) => forward_one_token_hybrid_logits(
             hmodel,
             decode,
@@ -868,7 +877,7 @@ pub fn decode_keep_logits_on_device(
 ) -> Result<()> {
     match model {
         LoadedModel::Tp(TpHipModel { model: m, ar }) => match inflight {
-            Inflight::Tp { session, decode } => forward_one_token_tp_keep_logits_on_device(
+            Inflight::Tp(TpHipSession { session, decode }) => forward_one_token_tp_keep_logits_on_device(
                 m,
                 decode,
                 cluster,
@@ -884,7 +893,7 @@ pub fn decode_keep_logits_on_device(
             model: hmodel,
             stage_ars,
         }) => match inflight {
-            Inflight::Hybrid { session, decode } => {
+            Inflight::Hybrid(HybridHipSession { session, decode }) => {
                 forward_one_token_hybrid_keep_logits_on_device(
                     hmodel,
                     decode,
@@ -920,14 +929,14 @@ pub fn capture_kv_from_inflight(
 ) -> Result<Vec<Vec<LayerCacheSnapshot>>> {
     let _ = cluster; // unused for Hybrid (uses per-stage sub_clusters)
     match (inflight, model) {
-        (Inflight::Pp { session, .. }, LoadedModel::Pp(_)) => {
+        (Inflight::Pp(PpHipSession { session, .. }), LoadedModel::Pp(_)) => {
             snapshot_pp_session(session, cluster)
         }
-        (Inflight::Tp { session, .. }, LoadedModel::Tp(_)) => {
+        (Inflight::Tp(TpHipSession { session, .. }), LoadedModel::Tp(_)) => {
             snapshot_tp_caches(&session.caches, cluster)
         }
         (
-            Inflight::Hybrid { session, .. },
+            Inflight::Hybrid(HybridHipSession { session, .. }),
             LoadedModel::Hybrid(HybridHipModel { model: hmodel, .. }),
         ) => snapshot_hybrid_session(session, hmodel),
         _ => bail!("capture_kv_from_inflight: model/inflight variant mismatch"),
@@ -1019,7 +1028,7 @@ pub fn restore_kv_into_inflight(
     model: &LoadedModel,
 ) -> Result<()> {
     match (inflight, model) {
-        (Inflight::Pp { session, .. }, LoadedModel::Pp(_)) => {
+        (Inflight::Pp(PpHipSession { session, .. }), LoadedModel::Pp(_)) => {
             if snapshot.len() != session.per_rank.len() {
                 bail!(
                     "PP restore: snapshot rank count {} != session ranks {}",
@@ -1038,7 +1047,7 @@ pub fn restore_kv_into_inflight(
             }
             Ok(())
         }
-        (Inflight::Tp { session, .. }, LoadedModel::Tp(_)) => {
+        (Inflight::Tp(TpHipSession { session, .. }), LoadedModel::Tp(_)) => {
             if snapshot.len() != session.caches.len() {
                 bail!(
                     "TP restore: snapshot rank count {} != session ranks {}",
@@ -1058,7 +1067,7 @@ pub fn restore_kv_into_inflight(
             Ok(())
         }
         (
-            Inflight::Hybrid { session, .. },
+            Inflight::Hybrid(HybridHipSession { session, .. }),
             LoadedModel::Hybrid(HybridHipModel { model: hmodel, .. }),
         ) => restore_hybrid_session(snapshot, session, hmodel),
         _ => bail!("restore_kv_into_inflight: model/inflight variant mismatch"),

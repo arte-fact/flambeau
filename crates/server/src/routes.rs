@@ -977,7 +977,7 @@ impl ServerState {
                     unsafe {
                         let g0: &mut Inflight = &mut **guards_ptr;
                         match g0 {
-                            Inflight::Pp { prefill, .. } => prefill,
+                            Inflight::Pp(crate::model::PpHipSession { prefill, .. }) => prefill,
                             _ => bail!(
                                 "dispatch_batched_pending: leader slot is not Inflight::Pp"
                             ),
@@ -989,7 +989,7 @@ impl ServerState {
                     unsafe {
                         let g: &mut Inflight = &mut **guards_ptr.add(s);
                         match g {
-                            Inflight::Pp { session, .. } => sessions.push(session),
+                            Inflight::Pp(crate::model::PpHipSession { session, .. }) => sessions.push(session),
                             _ => bail!(
                                 "dispatch_batched_pending: slot {s} is not Inflight::Pp"
                             ),
@@ -1016,7 +1016,7 @@ impl ServerState {
                     unsafe {
                         let g: &mut Inflight = &mut **guards_ptr.add(s);
                         match g {
-                            Inflight::Tp { session, .. } => sessions.push(session),
+                            Inflight::Tp(crate::model::TpHipSession { session, .. }) => sessions.push(session),
                             _ => bail!(
                                 "dispatch_batched_pending: slot {s} is not Inflight::Tp"
                             ),
@@ -1065,7 +1065,7 @@ impl ServerState {
                     unsafe {
                         let g: &mut Inflight = &mut **guards_ptr.add(s);
                         match g {
-                            Inflight::Hybrid { session, .. } => sessions.push(session),
+                            Inflight::Hybrid(crate::model::HybridHipSession { session, .. }) => sessions.push(session),
                             _ => bail!(
                                 "dispatch_batched_pending: slot {s} is not Inflight::Hybrid"
                             ),
@@ -3478,7 +3478,7 @@ fn run_completion_blocking_ids(
     let mut gpu_scratch: Option<GpuSamplerScratch> = if use_gpu_sampler {
         // Resolve the head device for whichever topology is active.
         let head_device = match (model, &inflight) {
-            (LoadedModel::Tp(_), Inflight::Tp { decode, .. }) => {
+            (LoadedModel::Tp(_), Inflight::Tp(crate::model::TpHipSession { decode, .. })) => {
                 let head_rank = decode.head_rank.0 as usize;
                 if head_rank >= cluster.ranks() {
                     bail!(
@@ -3488,7 +3488,7 @@ fn run_completion_blocking_ids(
                 }
                 cluster.device(head_rank)
             }
-            (LoadedModel::Hybrid(crate::model::HybridHipModel { model: hm, .. }), Inflight::Hybrid { decode, .. }) => {
+            (LoadedModel::Hybrid(crate::model::HybridHipModel { model: hm, .. }), Inflight::Hybrid(crate::model::HybridHipSession { decode, .. })) => {
                 let head_stage = decode.head_stage as usize;
                 let stage_model = hm.stages.get(head_stage).ok_or_else(|| {
                     anyhow!("GPU sampler: hybrid head_stage {head_stage} out of range")
@@ -3774,7 +3774,7 @@ fn run_completion_blocking_ids(
         let last_rank = cluster.ranks() - 1;
         let row_bytes = state.cfg.hidden_size * 2;
         let h_initial = match &inflight {
-            Inflight::Pp { prefill, .. } => prefill.per_rank[last_rank]
+            Inflight::Pp(crate::model::PpHipSession { prefill, .. }) => prefill.per_rank[last_rank]
                 .hidden_a
                 .offset_bytes((prompt_ids.len() - 1) * row_bytes),
             _ => bail!("spec-decode requires Inflight::Pp"),
@@ -4011,10 +4011,10 @@ fn run_completion_blocking_ids(
     // topology.
     if let Some(scratch) = gpu_scratch.take() {
         let head_device = match (model, &inflight) {
-            (LoadedModel::Tp(_), Inflight::Tp { decode, .. }) => {
+            (LoadedModel::Tp(_), Inflight::Tp(crate::model::TpHipSession { decode, .. })) => {
                 cluster.device(decode.head_rank.0 as usize)
             }
-            (LoadedModel::Hybrid(crate::model::HybridHipModel { model: hm, .. }), Inflight::Hybrid { decode, .. }) => {
+            (LoadedModel::Hybrid(crate::model::HybridHipModel { model: hm, .. }), Inflight::Hybrid(crate::model::HybridHipSession { decode, .. })) => {
                 let head_stage = decode.head_stage as usize;
                 let stage_model = hm.stages.get(head_stage).ok_or_else(|| {
                     anyhow!("dispose GpuSamplerScratch: hybrid head_stage out of range")
@@ -4347,7 +4347,7 @@ fn run_completion_blocking_streaming(
         let last_rank = cluster.ranks() - 1;
         let row_bytes = state.cfg.hidden_size * 2;
         let h_initial = match &inflight {
-            Inflight::Pp { prefill, .. } => prefill.per_rank[last_rank]
+            Inflight::Pp(crate::model::PpHipSession { prefill, .. }) => prefill.per_rank[last_rank]
                 .hidden_a
                 .offset_bytes((prompt_ids.len() - 1) * row_bytes),
             _ => bail!("spec-decode requires Inflight::Pp"),
