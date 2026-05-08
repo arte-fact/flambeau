@@ -262,7 +262,10 @@ pub async fn serve(cfg: ServeConfig, registry: Registry) -> Result<()> {
                     None
                 }
             };
-            (cluster, LoadedModel::Pp(crate::model::PpHipModel { model: m, mtp }))
+            (
+                cluster,
+                std::sync::Arc::new(crate::model::PpHipModel { model: m, mtp }) as LoadedModel,
+            )
         }
         MeshMode::Tp { world } => {
             let cluster: Arc<HipCluster> =
@@ -294,7 +297,10 @@ pub async fn serve(cfg: ServeConfig, registry: Registry) -> Result<()> {
             }
             let ar = BarP2pAllReduce::new(Arc::clone(&cluster))
                 .context("BarP2pAllReduce::new (requires fully-connected peer-access matrix)")?;
-            (cluster, LoadedModel::Tp(crate::model::TpHipModel { model: m, ar }))
+            (
+                cluster,
+                std::sync::Arc::new(crate::model::TpHipModel { model: m, ar }) as LoadedModel,
+            )
         }
         MeshMode::Hybrid { pp_size, tp_size } => {
             let spec = HybridMeshSpec { pp_size, tp_size };
@@ -354,10 +360,10 @@ pub async fn serve(cfg: ServeConfig, registry: Registry) -> Result<()> {
             );
             (
                 cluster,
-                LoadedModel::Hybrid(crate::model::HybridHipModel {
+                std::sync::Arc::new(crate::model::HybridHipModel {
                     model: hybrid,
                     stage_ars,
-                }),
+                }) as LoadedModel,
             )
         }
     };

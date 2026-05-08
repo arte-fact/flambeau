@@ -22,8 +22,8 @@ use flambeau_qwen3_moe::forward::{
 use flambeau_qwen3_moe::session::LayerCacheSnapshot;
 use flambeau_qwen3_moe::mtp::{MtpForwardScratch, MtpHeadWeights};
 use flambeau_qwen3_moe::{
-    Qwen3MoEConfig, Qwen3MoEHybridModel, Qwen3MoEHybridSession, Qwen3MoEShardedModel,
-    Qwen3MoEShardedSession, Qwen3MoETpModel, Qwen3MoETpSession,
+    Qwen3MoEHybridModel, Qwen3MoEHybridSession, Qwen3MoEShardedModel, Qwen3MoEShardedSession,
+    Qwen3MoETpModel, Qwen3MoETpSession,
 };
 use flambeau_core::DevicePtr;
 
@@ -52,61 +52,15 @@ pub struct HybridHipModel {
     pub stage_ars: Vec<BarP2pAllReduce>,
 }
 
-/// Loaded weights + per-topology auxiliary state. Wraps one of the
-/// concrete topology structs above; topology dispatch is a single match
-/// at the top of every server entry point.
-pub enum LoadedModel {
-    Pp(PpHipModel),
-    Tp(TpHipModel),
-    Hybrid(HybridHipModel),
-}
-
-impl std::fmt::Debug for LoadedModel {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            LoadedModel::Pp(_) => f.debug_struct("LoadedModel::Pp").finish(),
-            LoadedModel::Tp(_) => f.debug_struct("LoadedModel::Tp").finish(),
-            LoadedModel::Hybrid(h) => f
-                .debug_struct("LoadedModel::Hybrid")
-                .field("spec", &h.model.spec)
-                .finish(),
-        }
-    }
-}
-
-impl LoadedModel {
-    /// Common config shared between variants.
-    pub fn config(&self) -> &Qwen3MoEConfig {
-        match self {
-            LoadedModel::Pp(p) => &p.model.config,
-            LoadedModel::Tp(t) => &t.model.config,
-            LoadedModel::Hybrid(h) => &h.model.config,
-        }
-    }
-
-    /// Topology label for `tracing` / handler-side metrics.
-    pub fn topology(&self) -> &'static str {
-        match self {
-            LoadedModel::Pp(_) => "pp",
-            LoadedModel::Tp(_) => "tp",
-            LoadedModel::Hybrid(_) => "pp+tp",
-        }
-    }
-
-    /// Concrete-variant accessors. Server call sites prefer these over
-    /// matching on the enum so the per-topology pattern boilerplate
-    /// stays out of route handlers and is mechanically forwardable
-    /// when the enum eventually retires in favour of `Box<dyn HipModel>`.
-    pub fn as_pp(&self) -> Option<&PpHipModel> {
-        if let LoadedModel::Pp(p) = self { Some(p) } else { None }
-    }
-    pub fn as_tp(&self) -> Option<&TpHipModel> {
-        if let LoadedModel::Tp(t) = self { Some(t) } else { None }
-    }
-    pub fn as_hybrid(&self) -> Option<&HybridHipModel> {
-        if let LoadedModel::Hybrid(h) = self { Some(h) } else { None }
-    }
-}
+/// Loaded weights + per-topology auxiliary state. Held as a trait
+/// object so the server can be polymorphic over the model crate.
+/// Each concrete topology (`PpHipModel`, `TpHipModel`, `HybridHipModel`)
+/// implements [`HipModel`]; future model crates plug in by adding
+/// their own concrete `HipModel` impl with no changes to this alias.
+///
+/// The `Arc` lets per-request [`Inflight`] sessions hold a back-reference
+/// without copying weights.
+pub type LoadedModel = std::sync::Arc<dyn crate::model_handle::HipModel>;
 
 /// PP per-request session + scratches. Mirrors [`PpHipModel`].
 pub struct PpHipSession {
@@ -192,69 +146,59 @@ impl Inflight {
         // only WARNS and leaves the device buffers pinned until
         // process exit. One failed request used to lose ~3 GB of
         // VRAM on each rank.
-        match model {
-            LoadedModel::Pp(p) => {
-                let m = &p.model;
-                let session =
-                    Qwen3MoEShardedSession::new(m, cluster, kv_layout).context("create PP session")?;
-                let prefill = match ShardedForwardPrefillScratch::new(
-                    m,
-                    cluster,
-                    scratch_tokens,
-                ) {
-                    Ok(s) => s,
-                    Err(e) => {
-                        let _ = session.dispose(cluster);
-                        return Err(e).context("PP prefill scratch");
-                    }
-                };
-                let decode = match ShardedForwardOneTokenScratch::new(m, cluster) {
-                    Ok(s) => s,
-                    Err(e) => {
-                        let _ = prefill.dispose(cluster);
-                        let _ = session.dispose(cluster);
-                        return Err(e).context("PP decode scratch");
-                    }
-                };
-                Ok(Inflight::Pp(PpHipSession {
-                    session,
-                    prefill,
-                    decode,
-                }))
-            }
-            LoadedModel::Tp(t) => {
-                let model = &t.model;
-                let session =
-                    Qwen3MoETpSession::new(model, cluster, kv_layout).context("create TP session")?;
-                let decode = match ShardedForwardOneTokenScratchTp::new(
-                    &model.config,
-                    cluster,
-                ) {
-                    Ok(s) => s,
-                    Err(e) => {
-                        let _ = session.dispose(cluster);
-                        return Err(e).context("TP decode scratch");
-                    }
-                };
-                Ok(Inflight::Tp(TpHipSession { session, decode }))
-            }
-            LoadedModel::Hybrid(h) => {
-                // `cluster` here is the server's global cluster; the
-                // hybrid session/scratch are sized per-stage against
-                // each stage's owning sub-cluster (no `cluster` arg
-                // needed — sub-clusters live inside `model.stages`).
-                let model = &h.model;
-                let session = Qwen3MoEHybridSession::new(model, kv_layout)
-                    .context("create hybrid session")?;
-                let decode = match ShardedForwardOneTokenScratchHybrid::new(model) {
-                    Ok(s) => s,
-                    Err(e) => {
-                        let _ = session.dispose(model);
-                        return Err(e).context("hybrid decode scratch");
-                    }
-                };
-                Ok(Inflight::Hybrid(HybridHipSession { session, decode }))
-            }
+        if let Some(p) = model.as_pp() {
+            let m = &p.model;
+            let session =
+                Qwen3MoEShardedSession::new(m, cluster, kv_layout).context("create PP session")?;
+            let prefill = match ShardedForwardPrefillScratch::new(m, cluster, scratch_tokens) {
+                Ok(s) => s,
+                Err(e) => {
+                    let _ = session.dispose(cluster);
+                    return Err(e).context("PP prefill scratch");
+                }
+            };
+            let decode = match ShardedForwardOneTokenScratch::new(m, cluster) {
+                Ok(s) => s,
+                Err(e) => {
+                    let _ = prefill.dispose(cluster);
+                    let _ = session.dispose(cluster);
+                    return Err(e).context("PP decode scratch");
+                }
+            };
+            Ok(Inflight::Pp(PpHipSession {
+                session,
+                prefill,
+                decode,
+            }))
+        } else if let Some(t) = model.as_tp() {
+            let m = &t.model;
+            let session =
+                Qwen3MoETpSession::new(m, cluster, kv_layout).context("create TP session")?;
+            let decode = match ShardedForwardOneTokenScratchTp::new(&m.config, cluster) {
+                Ok(s) => s,
+                Err(e) => {
+                    let _ = session.dispose(cluster);
+                    return Err(e).context("TP decode scratch");
+                }
+            };
+            Ok(Inflight::Tp(TpHipSession { session, decode }))
+        } else if let Some(h) = model.as_hybrid() {
+            // `cluster` here is the server's global cluster; the
+            // hybrid session/scratch are sized per-stage against each
+            // stage's owning sub-cluster.
+            let m = &h.model;
+            let session =
+                Qwen3MoEHybridSession::new(m, kv_layout).context("create hybrid session")?;
+            let decode = match ShardedForwardOneTokenScratchHybrid::new(m) {
+                Ok(s) => s,
+                Err(e) => {
+                    let _ = session.dispose(m);
+                    return Err(e).context("hybrid decode scratch");
+                }
+            };
+            Ok(Inflight::Hybrid(HybridHipSession { session, decode }))
+        } else {
+            bail!("Inflight::new: model topology has no registered HipModel impl")
         }
     }
 
@@ -286,11 +230,9 @@ impl Inflight {
                 Ok(())
             }
             Inflight::Hybrid(HybridHipSession { session, decode }) => {
-                let LoadedModel::Hybrid(h) = model else {
-                    bail!(
-                        "Inflight::Hybrid::dispose: paired LoadedModel variant is not Hybrid"
-                    );
-                };
+                let h = model.as_hybrid().context(
+                    "Inflight::Hybrid::dispose: paired LoadedModel is not a hybrid topology",
+                )?;
                 decode
                     .dispose(&h.model)
                     .context("dispose hybrid decode scratch")?;
@@ -312,19 +254,21 @@ impl Inflight {
         cluster: &HipCluster,
         model: &LoadedModel,
     ) -> Result<()> {
-        match (self, model) {
-            (Inflight::Pp(PpHipSession { session, .. }), LoadedModel::Pp(_)) => session
+        match self {
+            Inflight::Pp(PpHipSession { session, .. }) if model.as_pp().is_some() => session
                 .reset_for_next_request(cluster)
                 .context("reset PP session"),
-            (Inflight::Tp(TpHipSession { session, .. }), LoadedModel::Tp(_)) => session
+            Inflight::Tp(TpHipSession { session, .. }) if model.as_tp().is_some() => session
                 .reset_for_next_request(cluster)
                 .context("reset TP session"),
-            (
-                Inflight::Hybrid(HybridHipSession { session, .. }),
-                LoadedModel::Hybrid(HybridHipModel { model: hm, .. }),
-            ) => session
-                .reset_for_next_request(hm)
-                .context("reset Hybrid session"),
+            Inflight::Hybrid(HybridHipSession { session, .. }) => {
+                let h = model.as_hybrid().context(
+                    "reset_for_next_request: paired LoadedModel is not a hybrid topology",
+                )?;
+                session
+                    .reset_for_next_request(&h.model)
+                    .context("reset Hybrid session")
+            }
             _ => bail!("Inflight / LoadedModel variant mismatch in reset_for_next_request"),
         }
     }
@@ -457,13 +401,11 @@ pub fn prefill_logits(
     if prompt_ids.is_empty() {
         bail!("prefill_logits: empty prompt");
     }
-    match (model, inflight) {
-        (
-            LoadedModel::Pp(PpHipModel { model: m, .. }),
-            Inflight::Pp(PpHipSession {
-                session, prefill, ..
-            }),
-        ) => {
+    if let (Some(p), Some(pp_s)) = (model.as_pp(), inflight.as_pp_mut()) {
+        let m = &p.model;
+        let session = &mut pp_s.session;
+        let prefill = &mut pp_s.prefill;
+        {
             // **#229 GDN-boundary** — explicit per-chunk loop (mirrors
             // TP/Hybrid below). Earlier this arm relied on
             // `forward_prefill_pp`'s internal recursion for non-final
@@ -527,7 +469,12 @@ pub fn prefill_logits(
             }
             Ok(())
         }
-        (LoadedModel::Tp(TpHipModel { model, ar }), Inflight::Tp(TpHipSession { session, decode })) => {
+    } else if let (Some(t), Some(tp_s)) = (model.as_tp(), inflight.as_tp_mut()) {
+        let model = &t.model;
+        let ar = &t.ar;
+        let session = &mut tp_s.session;
+        let decode = &mut tp_s.decode;
+        {
             // Chunked TP prefill (Phase B3a-TP). Phase A2-TP parity
             // test verified bit-exact KV at L=4096 chunk=512 (8 chunks),
             // so chunking is safe at chunk>=128. **#324** — when
@@ -619,13 +566,12 @@ pub fn prefill_logits(
             }
             Ok(())
         }
-        (
-            LoadedModel::Hybrid(HybridHipModel {
-                model: hmodel,
-                stage_ars,
-            }),
-            Inflight::Hybrid(HybridHipSession { session, decode }),
-        ) => {
+    } else if let (Some(h), Some(hyb_s)) = (model.as_hybrid(), inflight.as_hybrid_mut()) {
+        let hmodel = &h.model;
+        let stage_ars = &h.stage_ars;
+        let session = &mut hyb_s.session;
+        let decode = &mut hyb_s.decode;
+        {
             // Chunked Hybrid prefill (Phase B4a-Hybrid). Parity
             // verified bit-exact at L=4096 chunk=512 (8 chunks).
             let chunk = prefill_ubatch.max(128);
@@ -669,7 +615,8 @@ pub fn prefill_logits(
             }
             Ok(())
         }
-        _ => bail!("LoadedModel/Inflight variant mismatch"),
+    } else {
+        bail!("LoadedModel/Inflight variant mismatch")
     }
 }
 
@@ -719,9 +666,7 @@ pub fn decode_spec_pp(
     last_token: u32,
     position: usize,
 ) -> Result<SpecStep> {
-    use crate::model_handle::HipModel;
-
-    let spec_model = model
+let spec_model = model
         .as_spec_decode()
         .context("decode_spec_pp: model has no spec-decode capability (PP + MTP required)")?;
     let pp_session = match inflight {
@@ -745,9 +690,7 @@ pub fn decode_spec_pp_sampling(
     rng: &mut flambeau_runtime::Rng,
     history: &[u32],
 ) -> Result<SpecStep> {
-    use crate::model_handle::HipModel;
-
-    let spec_model = model.as_spec_decode().context(
+let spec_model = model.as_spec_decode().context(
         "decode_spec_pp_sampling: model has no spec-decode capability (PP + MTP required)",
     )?;
     let pp_session = match inflight {
@@ -776,45 +719,43 @@ pub fn decode_logits(
     // handler entry (`scheduler_can_engage`). `decode_logits` itself
     // is the legacy fallback path — invariant: takes a held mutex
     // guard and runs the single-slot forward.
-    match (model, inflight) {
-        (
-            LoadedModel::Pp(PpHipModel { model: m, .. }),
-            Inflight::Pp(PpHipSession {
-                session, decode, ..
-            }),
-        ) => forward_one_token_pp_logits(m, session, cluster, decode, token, position, logits_out)
-            .context("PP decode_logits"),
-        (LoadedModel::Tp(TpHipModel { model, ar }), Inflight::Tp(TpHipSession { session, decode })) => {
-            forward_one_token_tp_logits(
-                model,
-                decode,
-                cluster,
-                ar,
-                &mut session.caches,
-                token,
-                position,
-                logits_out,
-            )
-            .context("TP decode_logits")
-        }
-        (
-            LoadedModel::Hybrid(HybridHipModel {
-                model: hmodel,
-                stage_ars,
-            }),
-            Inflight::Hybrid(HybridHipSession { session, decode }),
-        ) => forward_one_token_hybrid_logits(
-            hmodel,
-            decode,
+    if let (Some(p), Some(s)) = (model.as_pp(), inflight.as_pp_mut()) {
+        forward_one_token_pp_logits(
+            &p.model,
+            &mut s.session,
             cluster,
-            stage_ars,
-            session,
+            &mut s.decode,
             token,
             position,
             logits_out,
         )
-        .context("hybrid decode_logits"),
-        _ => bail!("LoadedModel/Inflight variant mismatch"),
+        .context("PP decode_logits")
+    } else if let (Some(t), Some(s)) = (model.as_tp(), inflight.as_tp_mut()) {
+        forward_one_token_tp_logits(
+            &t.model,
+            &mut s.decode,
+            cluster,
+            &t.ar,
+            &mut s.session.caches,
+            token,
+            position,
+            logits_out,
+        )
+        .context("TP decode_logits")
+    } else if let (Some(h), Some(s)) = (model.as_hybrid(), inflight.as_hybrid_mut()) {
+        forward_one_token_hybrid_logits(
+            &h.model,
+            &mut s.decode,
+            cluster,
+            &h.stage_ars,
+            &mut s.session,
+            token,
+            position,
+            logits_out,
+        )
+        .context("hybrid decode_logits")
+    } else {
+        bail!("LoadedModel/Inflight variant mismatch")
     }
 }
 
@@ -837,41 +778,30 @@ pub fn decode_keep_logits_on_device(
     token: u32,
     position: usize,
 ) -> Result<()> {
-    match model {
-        LoadedModel::Tp(TpHipModel { model: m, ar }) => match inflight {
-            Inflight::Tp(TpHipSession { session, decode }) => forward_one_token_tp_keep_logits_on_device(
-                m,
-                decode,
-                cluster,
-                ar,
-                &mut session.caches,
-                token,
-                position,
-            )
-            .context("TP decode_keep_logits_on_device"),
-            _ => bail!("Inflight variant doesn't match LoadedModel::Tp"),
-        },
-        LoadedModel::Hybrid(HybridHipModel {
-            model: hmodel,
-            stage_ars,
-        }) => match inflight {
-            Inflight::Hybrid(HybridHipSession { session, decode }) => {
-                forward_one_token_hybrid_keep_logits_on_device(
-                    hmodel,
-                    decode,
-                    cluster,
-                    stage_ars,
-                    session,
-                    token,
-                    position,
-                )
-                .context("Hybrid decode_keep_logits_on_device")
-            }
-            _ => bail!("Inflight variant doesn't match LoadedModel::Hybrid"),
-        },
-        _ => bail!(
-            "decode_keep_logits_on_device only wired for TP and Hybrid topologies"
-        ),
+    if let (Some(t), Some(s)) = (model.as_tp(), inflight.as_tp_mut()) {
+        forward_one_token_tp_keep_logits_on_device(
+            &t.model,
+            &mut s.decode,
+            cluster,
+            &t.ar,
+            &mut s.session.caches,
+            token,
+            position,
+        )
+        .context("TP decode_keep_logits_on_device")
+    } else if let (Some(h), Some(s)) = (model.as_hybrid(), inflight.as_hybrid_mut()) {
+        forward_one_token_hybrid_keep_logits_on_device(
+            &h.model,
+            &mut s.decode,
+            cluster,
+            &h.stage_ars,
+            &mut s.session,
+            token,
+            position,
+        )
+        .context("Hybrid decode_keep_logits_on_device")
+    } else {
+        bail!("decode_keep_logits_on_device only wired for TP and Hybrid topologies")
     }
 }
 
@@ -890,12 +820,16 @@ pub fn capture_kv_from_inflight(
     model: &LoadedModel,
 ) -> Result<Vec<Vec<LayerCacheSnapshot>>> {
     use crate::model_extensions::KvSnapshot;
-    match (inflight, model) {
-        (Inflight::Pp(s), LoadedModel::Pp(_)) => s.capture(cluster),
-        (Inflight::Tp(s), LoadedModel::Tp(_)) => s.capture(cluster),
-        (Inflight::Hybrid(s), LoadedModel::Hybrid(h)) => s.capture_with_model(h),
-        _ => bail!("capture_kv_from_inflight: model/inflight variant mismatch"),
+    if let (Inflight::Pp(s), Some(_)) = (inflight, model.as_pp()) {
+        return s.capture(cluster);
     }
+    if let (Inflight::Tp(s), Some(_)) = (inflight, model.as_tp()) {
+        return s.capture(cluster);
+    }
+    if let (Inflight::Hybrid(s), Some(h)) = (inflight, model.as_hybrid()) {
+        return s.capture_with_model(h);
+    }
+    bail!("capture_kv_from_inflight: model/inflight variant mismatch")
 }
 
 /// **#229** — total host-RAM bytes a snapshot occupies. Used by the
@@ -983,12 +917,16 @@ pub fn restore_kv_into_inflight(
     model: &LoadedModel,
 ) -> Result<()> {
     use crate::model_extensions::KvSnapshot;
-    match (inflight, model) {
-        (Inflight::Pp(s), LoadedModel::Pp(_)) => s.restore(cluster, snapshot),
-        (Inflight::Tp(s), LoadedModel::Tp(_)) => s.restore(cluster, snapshot),
-        (Inflight::Hybrid(s), LoadedModel::Hybrid(h)) => s.restore_with_model(h, snapshot),
-        _ => bail!("restore_kv_into_inflight: model/inflight variant mismatch"),
+    if let (Inflight::Pp(s), Some(_)) = (&mut *inflight, model.as_pp()) {
+        return s.restore(cluster, snapshot);
     }
+    if let (Inflight::Tp(s), Some(_)) = (&mut *inflight, model.as_tp()) {
+        return s.restore(cluster, snapshot);
+    }
+    if let (Inflight::Hybrid(s), Some(h)) = (&mut *inflight, model.as_hybrid()) {
+        return s.restore_with_model(h, snapshot);
+    }
+    bail!("restore_kv_into_inflight: model/inflight variant mismatch")
 }
 
 

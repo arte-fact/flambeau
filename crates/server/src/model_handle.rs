@@ -19,15 +19,16 @@
 
 #![cfg(feature = "hip")]
 
-use std::sync::Arc;
-
 use anyhow::Result;
 use flambeau_backend_hip::HipCluster;
 use flambeau_qwen3_moe::forward::ShardedForwardPrefillScratchTp;
 use flambeau_qwen3_moe::session::KvLayout;
 use flambeau_qwen3_moe::Qwen3MoEConfig;
 
-use crate::model::{BoundaryCallback, Inflight, LoadedModel};
+use crate::model::{
+    BoundaryCallback, HybridHipModel, HybridHipSession, Inflight, LoadedModel, PpHipModel,
+    PpHipSession, TpHipModel, TpHipSession,
+};
 use crate::model_extensions::SpecDecodeModel;
 
 pub trait HipModel: Send + Sync + 'static {
@@ -39,6 +40,21 @@ pub trait HipModel: Send + Sync + 'static {
     /// `Some`; everything else returns `None`. Server uses this to
     /// gate spec-decode without matching on a topology enum.
     fn as_spec_decode(&self) -> Option<&dyn SpecDecodeModel> {
+        None
+    }
+
+    /// Concrete-type accessors. Each topology overrides exactly one of
+    /// these to return `Some(self)`; the others stay at the default
+    /// `None`. Server call sites use these in place of pattern-matching
+    /// on a closed enum, so adding a new model topology in the future
+    /// only requires implementing `HipModel` (no enum-variant churn).
+    fn as_pp(&self) -> Option<&PpHipModel> {
+        None
+    }
+    fn as_tp(&self) -> Option<&TpHipModel> {
+        None
+    }
+    fn as_hybrid(&self) -> Option<&HybridHipModel> {
         None
     }
 }
@@ -86,14 +102,38 @@ pub trait HipSession: Send {
     fn reset_for_next_request(&mut self, cluster: &HipCluster) -> Result<()>;
 
     fn dispose(self: Box<Self>, cluster: &HipCluster) -> Result<()>;
+
+    /// Concrete-session accessors, mirror of `HipModel::as_pp`. Server
+    /// uses these in spec-decode init / GPU-sampler scratch
+    /// resolution / batched-dispatch field access without matching on
+    /// the now-retired `Inflight` enum.
+    fn as_pp(&self) -> Option<&PpHipSession> {
+        None
+    }
+    fn as_pp_mut(&mut self) -> Option<&mut PpHipSession> {
+        None
+    }
+    fn as_tp(&self) -> Option<&TpHipSession> {
+        None
+    }
+    fn as_tp_mut(&mut self) -> Option<&mut TpHipSession> {
+        None
+    }
+    fn as_hybrid(&self) -> Option<&HybridHipSession> {
+        None
+    }
+    fn as_hybrid_mut(&mut self) -> Option<&mut HybridHipSession> {
+        None
+    }
 }
 
-/// Self-sufficient session: bundles an `Inflight` with an `Arc` back-
-/// reference to its parent `LoadedModel`. Constructed via
+/// Self-sufficient session: bundles an `Inflight` with a back-reference
+/// to its parent `LoadedModel` (which is itself an `Arc<dyn HipModel>`,
+/// so the back-ref is a cheap clone). Constructed via
 /// [`create_hip_session`]; the server holds it as `Box<dyn HipSession>`
-/// so call sites stop matching on the topology variant.
+/// so call sites stop matching on a topology variant.
 pub struct OwnedHipSession {
-    pub model: Arc<LoadedModel>,
+    pub model: LoadedModel,
     pub inflight: Inflight,
 }
 
@@ -101,7 +141,7 @@ pub struct OwnedHipSession {
 /// the PP prefill scratch (ignored for TP/Hybrid); `kv_layout` selects
 /// between F16 / Q8 / turbo-quant KV.
 pub fn create_hip_session(
-    model: Arc<LoadedModel>,
+    model: LoadedModel,
     cluster: &HipCluster,
     prefill_ubatch: usize,
     kv_layout: KvLayout,
@@ -110,18 +150,42 @@ pub fn create_hip_session(
     Ok(Box::new(OwnedHipSession { model, inflight }))
 }
 
-impl HipModel for LoadedModel {
+impl HipModel for PpHipModel {
     fn config(&self) -> &Qwen3MoEConfig {
-        LoadedModel::config(self)
+        &self.model.config
     }
     fn topology(&self) -> &'static str {
-        LoadedModel::topology(self)
+        "pp"
     }
     fn as_spec_decode(&self) -> Option<&dyn SpecDecodeModel> {
-        match self {
-            LoadedModel::Pp(p) if p.mtp.is_some() => Some(p),
-            _ => None,
-        }
+        if self.mtp.is_some() { Some(self) } else { None }
+    }
+    fn as_pp(&self) -> Option<&PpHipModel> {
+        Some(self)
+    }
+}
+
+impl HipModel for TpHipModel {
+    fn config(&self) -> &Qwen3MoEConfig {
+        &self.model.config
+    }
+    fn topology(&self) -> &'static str {
+        "tp"
+    }
+    fn as_tp(&self) -> Option<&TpHipModel> {
+        Some(self)
+    }
+}
+
+impl HipModel for HybridHipModel {
+    fn config(&self) -> &Qwen3MoEConfig {
+        &self.model.config
+    }
+    fn topology(&self) -> &'static str {
+        "pp+tp"
+    }
+    fn as_hybrid(&self) -> Option<&HybridHipModel> {
+        Some(self)
     }
 }
 
@@ -188,5 +252,24 @@ impl HipSession for OwnedHipSession {
     fn dispose(self: Box<Self>, cluster: &HipCluster) -> Result<()> {
         let OwnedHipSession { model, inflight } = *self;
         inflight.dispose(cluster, &model)
+    }
+
+    fn as_pp(&self) -> Option<&PpHipSession> {
+        self.inflight.as_pp()
+    }
+    fn as_pp_mut(&mut self) -> Option<&mut PpHipSession> {
+        self.inflight.as_pp_mut()
+    }
+    fn as_tp(&self) -> Option<&TpHipSession> {
+        self.inflight.as_tp()
+    }
+    fn as_tp_mut(&mut self) -> Option<&mut TpHipSession> {
+        self.inflight.as_tp_mut()
+    }
+    fn as_hybrid(&self) -> Option<&HybridHipSession> {
+        self.inflight.as_hybrid()
+    }
+    fn as_hybrid_mut(&mut self) -> Option<&mut HybridHipSession> {
+        self.inflight.as_hybrid_mut()
     }
 }
