@@ -389,7 +389,7 @@ fn forward_one_token_pp_synthetic_2rank() -> Result<()> {
     );
 
     let model = Qwen3MoEShardedModel::from_parts(cfg.clone(), layout, assignment, vec![shard0, shard1]);
-    let mut session = Qwen3MoEShardedSession::new(&model, &cluster)?;
+    let mut session = Qwen3MoEShardedSession::new(&model, &cluster, flambeau_qwen3_moe::session::KvLayout::F16)?;
     let mut scratch = ShardedForwardOneTokenScratch::new(&model, &cluster)?;
 
     let next = forward_one_token_pp(

@@ -64,7 +64,7 @@ fn main() -> Result<()> {
     eprintln!("decode-profile: loading {} ranks on {devices:?}…", cluster.ranks());
     let model = Qwen3MoEShardedModel::load(&file, &cluster, &assignment)?;
 
-    let mut session = Qwen3MoEShardedSession::new(&model, &cluster)?;
+    let mut session = Qwen3MoEShardedSession::new(&model, &cluster, flambeau_qwen3_moe::session::KvLayout::F16)?;
     let mut prefill_scratch = ShardedForwardPrefillScratch::new(&model, &cluster, 1)?;
     let mut decode_scratch = ShardedForwardOneTokenScratch::new(&model, &cluster)?;
 

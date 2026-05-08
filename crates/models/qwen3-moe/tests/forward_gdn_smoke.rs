@@ -257,7 +257,7 @@ fn forward_gdn_decode_smoke() -> Result<()> {
     };
 
     // Session for the single GDN layer: allocates state + conv_history.
-    let mut session = Qwen3MoESession::new(&cfg, &device)?;
+    let mut session = Qwen3MoESession::new(&cfg, &device, flambeau_qwen3_moe::session::KvLayout::F16)?;
     let state = match &mut session.layers_mut()[0] {
         LayerCache::Gdn(s) => s,
         LayerCache::FullAttn(_) | LayerCache::FullAttnQ8(_) => {

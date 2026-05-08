@@ -33,7 +33,7 @@ fn prefill_vs_decode_27b() -> Result<()> {
     let model = Qwen3MoEShardedModel::load(&file, &cluster, &assignment)?;
 
     // Decode 8 tokens.
-    let mut session = Qwen3MoEShardedSession::new(&model, &cluster)?;
+    let mut session = Qwen3MoEShardedSession::new(&model, &cluster, flambeau_qwen3_moe::session::KvLayout::F16)?;
     let mut decode_scratch = ShardedForwardOneTokenScratch::new(&model, &cluster)?;
     let mut prefill_scratch = ShardedForwardPrefillScratch::new(&model, &cluster, 1)?;
     let seed = forward_prefill_pp(&model, &mut session, &cluster, &mut prefill_scratch, &[9419], 0)?;
@@ -49,7 +49,7 @@ fn prefill_vs_decode_27b() -> Result<()> {
     session.dispose(&cluster)?;
 
     // Prefill on the 8-token sequence.
-    let mut session = Qwen3MoEShardedSession::new(&model, &cluster)?;
+    let mut session = Qwen3MoEShardedSession::new(&model, &cluster, flambeau_qwen3_moe::session::KvLayout::F16)?;
     let mut scratch = ShardedForwardPrefillScratch::new(&model, &cluster, 8)?;
     let last_argmax = forward_prefill_pp(&model, &mut session, &cluster, &mut scratch, &decode_history[..8], 0)?;
     eprintln!("forward_prefill_pp returned last_argmax = {last_argmax} (expected {})", decode_history[8]);

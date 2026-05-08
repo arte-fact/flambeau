@@ -384,7 +384,7 @@ fn forward_prefill_l4_end_to_end_smoke() -> Result<()> {
     let ops = OpsRegistry::new(&device)
         .map_err(|e| anyhow::anyhow!("OpsRegistry: {e}"))?;
     let weights = build_synthetic_weights(&device, &cfg)?;
-    let mut session = Qwen3MoESession::new(&cfg, &device)?;
+    let mut session = Qwen3MoESession::new(&cfg, &device, flambeau_qwen3_moe::session::KvLayout::F16)?;
     let mut scratch = ForwardPrefillScratch::new(&cfg, &device, 4)?;
 
     let tokens = [3u32, 7, 1, 15];

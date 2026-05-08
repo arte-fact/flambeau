@@ -50,7 +50,7 @@ fn qwen35_forward_one_token_mesh1_smoke() -> Result<()> {
         model.total_bytes() as f64 / (1024.0 * 1024.0 * 1024.0),
     );
 
-    let mut session = Qwen3MoEShardedSession::new(&model, &cluster)?;
+    let mut session = Qwen3MoEShardedSession::new(&model, &cluster, flambeau_qwen3_moe::session::KvLayout::F16)?;
     let mut scratch = ShardedForwardOneTokenScratch::new(&model, &cluster)?;
 
     // Token id 9419 = "Hello" in the rest of the harness. Any valid id

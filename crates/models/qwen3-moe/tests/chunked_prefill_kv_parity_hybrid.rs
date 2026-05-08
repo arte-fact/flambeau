@@ -106,7 +106,7 @@ fn chunked_prefill_kv_parity_hybrid_pp2tp2() -> Result<()> {
     };
 
     // ---- single-shot ----
-    let mut sess_a = Qwen3MoEHybridSession::new(&model)?;
+    let mut sess_a = Qwen3MoEHybridSession::new(&model, flambeau_qwen3_moe::session::KvLayout::F16)?;
     let mut decode_a = ShardedForwardOneTokenScratchHybrid::new(&model)?;
     let mut sink: Vec<f32> = Vec::new();
     forward_prefill_hybrid_logits(
@@ -124,7 +124,7 @@ fn chunked_prefill_kv_parity_hybrid_pp2tp2() -> Result<()> {
     sess_a.dispose(&model)?;
 
     // ---- chunked: 2+ manual calls ----
-    let mut sess_b = Qwen3MoEHybridSession::new(&model)?;
+    let mut sess_b = Qwen3MoEHybridSession::new(&model, flambeau_qwen3_moe::session::KvLayout::F16)?;
     let mut decode_b = ShardedForwardOneTokenScratchHybrid::new(&model)?;
     let mut start = 0usize;
     let mut chunk_err: Option<anyhow::Error> = None;

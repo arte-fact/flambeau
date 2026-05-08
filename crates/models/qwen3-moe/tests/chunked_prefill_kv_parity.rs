@@ -219,7 +219,7 @@ fn run_prefill_logits_single_shot(
     prompt: &[u32],
     l: usize,
 ) -> Result<Vec<Vec<LayerCacheSnapshot>>> {
-    let mut session = Qwen3MoEShardedSession::new(model, cluster)?;
+    let mut session = Qwen3MoEShardedSession::new(model, cluster, flambeau_qwen3_moe::session::KvLayout::F16)?;
     let mut scratch = ShardedForwardPrefillScratch::new(model, cluster, l)?;
     let mut sink: Vec<f32> = Vec::new();
     let res = forward_prefill_pp_logits(model, &mut session, cluster, &mut scratch, prompt, 0, &mut sink);
@@ -239,7 +239,7 @@ fn run_prefill_pp_no_chunking(
     prompt: &[u32],
     l: usize,
 ) -> Result<Vec<Vec<LayerCacheSnapshot>>> {
-    let mut session = Qwen3MoEShardedSession::new(model, cluster)?;
+    let mut session = Qwen3MoEShardedSession::new(model, cluster, flambeau_qwen3_moe::session::KvLayout::F16)?;
     let mut scratch = ShardedForwardPrefillScratch::new(model, cluster, l)?;
     let res = forward_prefill_pp(model, &mut session, cluster, &mut scratch, prompt, 0);
     let snap = if res.is_ok() {
@@ -259,7 +259,7 @@ fn run_prefill_pp_two_manual_calls(
     scratch_size: usize,
     chunk: usize,
 ) -> Result<Vec<Vec<LayerCacheSnapshot>>> {
-    let mut session = Qwen3MoEShardedSession::new(model, cluster)?;
+    let mut session = Qwen3MoEShardedSession::new(model, cluster, flambeau_qwen3_moe::session::KvLayout::F16)?;
     let mut scratch = ShardedForwardPrefillScratch::new(model, cluster, scratch_size)?;
     let mut start = 0usize;
     let mut last_err: Option<anyhow::Error> = None;
@@ -294,7 +294,7 @@ fn run_prefill_pp_chunked(
     prompt: &[u32],
     chunk_size: usize,
 ) -> Result<Vec<Vec<LayerCacheSnapshot>>> {
-    let mut session = Qwen3MoEShardedSession::new(model, cluster)?;
+    let mut session = Qwen3MoEShardedSession::new(model, cluster, flambeau_qwen3_moe::session::KvLayout::F16)?;
     let mut scratch = ShardedForwardPrefillScratch::new(model, cluster, chunk_size)?;
     let res = forward_prefill_pp(model, &mut session, cluster, &mut scratch, prompt, 0);
     let snap = if res.is_ok() {

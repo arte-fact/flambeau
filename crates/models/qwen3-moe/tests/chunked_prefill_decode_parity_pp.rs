@@ -59,7 +59,7 @@ fn run_single_shot_then_decode(
     n_decode: usize,
 ) -> Result<Vec<u32>> {
     let l = prompt.len();
-    let mut session = Qwen3MoEShardedSession::new(model, cluster)?;
+    let mut session = Qwen3MoEShardedSession::new(model, cluster, flambeau_qwen3_moe::session::KvLayout::F16)?;
     let mut prefill_scratch = ShardedForwardPrefillScratch::new(model, cluster, l)?;
     let mut decode_scratch = ShardedForwardOneTokenScratch::new(model, cluster)?;
 
@@ -103,7 +103,7 @@ fn run_chunked_then_decode(
     n_decode: usize,
 ) -> Result<Vec<u32>> {
     let l = prompt.len();
-    let mut session = Qwen3MoEShardedSession::new(model, cluster)?;
+    let mut session = Qwen3MoEShardedSession::new(model, cluster, flambeau_qwen3_moe::session::KvLayout::F16)?;
     let mut prefill_scratch = ShardedForwardPrefillScratch::new(model, cluster, chunk_size)?;
     let mut decode_scratch = ShardedForwardOneTokenScratch::new(model, cluster)?;
 

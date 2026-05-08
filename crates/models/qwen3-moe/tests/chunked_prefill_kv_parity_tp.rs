@@ -167,7 +167,7 @@ fn chunked_prefill_kv_parity_tp2() -> Result<()> {
     let prompt: Vec<u32> = (0..l as u32).map(|i| (1 + i * 37) % 151000).collect();
 
     // ---- single-shot ----
-    let mut sess_a = Qwen3MoETpSession::new(&model, &cluster)?;
+    let mut sess_a = Qwen3MoETpSession::new(&model, &cluster, flambeau_qwen3_moe::session::KvLayout::F16)?;
     let mut decode_a = ShardedForwardOneTokenScratchTp::new(&model.config, &cluster)?;
     let mut sink: Vec<f32> = Vec::new();
     forward_prefill_tp_logits(
@@ -185,7 +185,7 @@ fn chunked_prefill_kv_parity_tp2() -> Result<()> {
     sess_a.dispose(&cluster)?;
 
     // ---- chunked: 2 manual calls of L=128 ----
-    let mut sess_b = Qwen3MoETpSession::new(&model, &cluster)?;
+    let mut sess_b = Qwen3MoETpSession::new(&model, &cluster, flambeau_qwen3_moe::session::KvLayout::F16)?;
     let mut decode_b = ShardedForwardOneTokenScratchTp::new(&model.config, &cluster)?;
     let mut chunk_err: Option<anyhow::Error> = None;
     let mut start = 0usize;

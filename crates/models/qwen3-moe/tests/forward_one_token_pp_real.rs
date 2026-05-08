@@ -82,7 +82,7 @@ fn forward_one_token_pp_real_qwen3_moe() -> Result<()> {
         model.shards.len(),
     );
 
-    let mut session = Qwen3MoEShardedSession::new(&model, &cluster)?;
+    let mut session = Qwen3MoEShardedSession::new(&model, &cluster, flambeau_qwen3_moe::session::KvLayout::F16)?;
     let mut scratch = ShardedForwardOneTokenScratch::new(&model, &cluster)?;
 
     // BOS-adjacent token id — any id in-range suffices; we're only checking

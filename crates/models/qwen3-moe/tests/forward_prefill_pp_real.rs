@@ -85,7 +85,7 @@ fn forward_prefill_pp_real_qwen3_moe_hello() -> Result<()> {
     // Case 1: L=1 prefill on seed token 9419 should match the decode-path
     // parity cert (llama.cpp's argmax for position 0 = 11 ',').
     {
-        let mut session = Qwen3MoEShardedSession::new(&model, &cluster)?;
+        let mut session = Qwen3MoEShardedSession::new(&model, &cluster, flambeau_qwen3_moe::session::KvLayout::F16)?;
         let mut scratch = ShardedForwardPrefillScratch::new(&model, &cluster, 1)?;
         let tokens = vec![9419u32];
         let next = forward_prefill_pp(
@@ -104,7 +104,7 @@ fn forward_prefill_pp_real_qwen3_moe_hello() -> Result<()> {
     // decode sequence = 271 ('\n\n'). Fresh session so KV/GDN state
     // starts clean.
     {
-        let mut session = Qwen3MoEShardedSession::new(&model, &cluster)?;
+        let mut session = Qwen3MoEShardedSession::new(&model, &cluster, flambeau_qwen3_moe::session::KvLayout::F16)?;
         let mut scratch = ShardedForwardPrefillScratch::new(&model, &cluster, 2)?;
         let tokens = vec![9419u32, 11];
         let next = forward_prefill_pp(

@@ -389,7 +389,7 @@ fn run_prefill_pp_smoke(scratch_max_tokens: usize) -> Result<()> {
     );
 
     let model = Qwen3MoEShardedModel::from_parts(cfg.clone(), layout, assignment, vec![shard0, shard1]);
-    let mut session = Qwen3MoEShardedSession::new(&model, &cluster)?;
+    let mut session = Qwen3MoEShardedSession::new(&model, &cluster, flambeau_qwen3_moe::session::KvLayout::F16)?;
     // L=4 prefill; scratch may be sized smaller (=> internal chunking).
     let mut scratch =
         ShardedForwardPrefillScratch::new(&model, &cluster, scratch_max_tokens)?;

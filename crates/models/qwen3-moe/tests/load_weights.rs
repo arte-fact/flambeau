@@ -110,7 +110,7 @@ fn upload_full_qwen3_moe_model() -> Result<()> {
     );
 
     // Session caches: full-attn layers get KvCache, recurrent get GDN state.
-    let session = Qwen3MoESession::new(&cfg, &device)?;
+    let session = Qwen3MoESession::new(&cfg, &device, flambeau_qwen3_moe::session::KvLayout::F16)?;
     let mut n_kv = 0usize;
     let mut n_gdn = 0usize;
     for (il, cache) in session.layers().iter().enumerate() {

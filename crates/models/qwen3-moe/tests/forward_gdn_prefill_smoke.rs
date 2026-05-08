@@ -247,7 +247,7 @@ fn forward_gdn_prefill_l4_smoke() -> Result<()> {
 
     // Session hands us the per-layer state + conv_history. Copy out into a
     // `GdnLayerState` we can mutate (same pattern as the decode smoke).
-    let mut session = Qwen3MoESession::new(&cfg, &device)?;
+    let mut session = Qwen3MoESession::new(&cfg, &device, flambeau_qwen3_moe::session::KvLayout::F16)?;
     let mut state_take = match &session.layers_mut()[0] {
         LayerCache::Gdn(s) => GdnLayerState {
             state: s.state,

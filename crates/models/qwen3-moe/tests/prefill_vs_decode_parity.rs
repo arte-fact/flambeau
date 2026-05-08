@@ -38,7 +38,7 @@ fn prefill_vs_decode_per_position() -> Result<()> {
     let model = Qwen3MoEShardedModel::load(&file, &cluster, &assignment)?;
 
     // Ground-truth: greedy decode 8 tokens from seed 9419.
-    let mut session = Qwen3MoEShardedSession::new(&model, &cluster)?;
+    let mut session = Qwen3MoEShardedSession::new(&model, &cluster, flambeau_qwen3_moe::session::KvLayout::F16)?;
     let mut decode_scratch = ShardedForwardOneTokenScratch::new(&model, &cluster)?;
     let mut prefill_scratch = ShardedForwardPrefillScratch::new(&model, &cluster, 1)?;
     let seed = forward_prefill_pp(&model, &mut session, &cluster, &mut prefill_scratch, &[9419], 0)?;
@@ -55,7 +55,7 @@ fn prefill_vs_decode_per_position() -> Result<()> {
 
     // Now prefill the full 8-token sequence in ONE call, extract argmax at each pos.
     // FRESH session so KV cache is empty — start_position=0 matches pos 0.
-    let mut session = Qwen3MoEShardedSession::new(&model, &cluster)?;
+    let mut session = Qwen3MoEShardedSession::new(&model, &cluster, flambeau_qwen3_moe::session::KvLayout::F16)?;
     let mut scratch = ShardedForwardPrefillScratch::new(&model, &cluster, 8)?;
     let last_argmax = forward_prefill_pp(&model, &mut session, &cluster, &mut scratch, &decode_history[..8], 0)?;
     eprintln!("forward_prefill_pp's return (pos-7 argmax): {last_argmax} (decode says should be {})", decode_history[8]);
