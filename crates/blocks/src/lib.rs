@@ -18,6 +18,7 @@
 pub mod attention;
 pub mod delta_net;
 pub mod dense_mlp;
+pub mod layer;
 pub mod moe_experts;
 
 pub use attention::{
@@ -26,4 +27,8 @@ pub use attention::{
 };
 pub use delta_net::{DeltaNetLayer, DeltaNetLayerDecodeScratch};
 pub use dense_mlp::{DenseMlp, DenseMlpDecodeScratch, DenseMlpPrefillScratch};
+pub use layer::{
+    AttnBlock, AttnDecodeScratch, AttnPrefillScratch, AttnState, FfnBlock, FfnDecodeScratch,
+    FfnPrefillScratch, LayerKind,
+};
 pub use moe_experts::{MoeExperts, MoeExpertsDecodeScratch};
