@@ -14,17 +14,14 @@ use flambeau_ops::hip::{
     mlp::{scale_f32, silu_f32, swiglu_f32},
     norm::{
         l2_norm_f32, quantize_f16_q8_1, quantize_f16_q8_1_mmq, quantize_q8_1,
-        quantize_q8_1_mmq, rmsnorm_f16, rmsnorm_f32, rmsnorm_quant_q8_1,
+        quantize_q8_1_mmq, rmsnorm_f16, rmsnorm_f32,
     },
-    qmatmul::mmvq_q8_0_gate_up,
     recurrent::{gdn_split_qkv_f32, gdn_state_step_alphabeta_f32_s128},
     HipDevice, HipStream, OpsRegistry,
 };
 use flambeau_quant::BlockQ8_1;
 
-use super::common::{
-    mat_shape, run_mmvq_from_tensor, run_qmatmul_from_tensor,
-};
+use super::common::run_qmatmul_from_tensor;
 use crate::config::Qwen3MoEConfig;
 use crate::session::{GdnLayerState, LayerCache};
 use crate::weights::{DeviceTensor, GdnWeights};
@@ -196,34 +193,101 @@ impl Drop for GdnScratch {
     }
 }
 
-/// After the conv kernel has read `conv_input`, advance the layer's
-/// `conv_history` by one row: `history[0..k-2] = history[1..k-1]`,
-/// `history[k-2] = current`. We exploit the fact that `conv_input` now
-/// holds exactly `[old_history, current]`; copying `conv_input[1..k]`
-/// back to the history slot is a single memcpy.
-fn shift_conv_history(
-    device: &HipDevice,
-    stream: &HipStream,
-    conv_input: DevicePtr,
-    history: DevicePtr,
-    conv_channels: usize,
-    conv_kernel: usize,
-) -> Result<()> {
-    let row_bytes = conv_channels * 4;
-    let hist_rows = conv_kernel - 1;
-    // SAFETY: `conv_input` and `history` both have at least
-    // `hist_rows * row_bytes` valid device bytes starting from the
-    // offsets we read/write.
-    unsafe {
-        device.memcpy_async(
-            stream,
-            CopyDirection::DeviceToDevice,
-            history,
-            conv_input.offset_bytes(row_bytes),
-            hist_rows * row_bytes,
-        )?;
+impl GdnScratch {
+    /// Build a by-value view shaped for
+    /// `flambeau_blocks::DeltaNetLayer::forward_decode`. All fields
+    /// are `Copy`, so the view passes by value.
+    pub fn view(&self) -> flambeau_blocks::DeltaNetLayerDecodeScratch {
+        flambeau_blocks::DeltaNetLayerDecodeScratch {
+            x_q8_1: self.x_q8_1,
+            qkv_mixed_f32: self.qkv_mixed_f32,
+            z_f32: self.z_f32,
+            alpha_f32: self.alpha_f32,
+            beta_f32: self.beta_f32,
+            conv_input: self.conv_input,
+            conv_out: self.conv_out,
+            silu_out: self.silu_out,
+            q_norm_f32: self.q_norm_f32,
+            k_norm_f32: self.k_norm_f32,
+            state_out: self.state_out,
+            out_normed: self.out_normed,
+            gated_f32: self.gated_f32,
+            gated_q8_1: self.gated_q8_1,
+            ssm_out_f32: self.ssm_out_f32,
+        }
     }
-    Ok(())
+}
+
+/// Build a `flambeau_blocks::DeltaNetLayer` from the layer's GDN
+/// weights + the model config. Asserts the V1 GDN invariants
+/// (split alpha/beta, no fused ssm_ba).
+pub fn build_delta_net_block(
+    attn_norm: &DeviceTensor,
+    weights: &GdnWeights,
+    cfg: &Qwen3MoEConfig,
+) -> Result<flambeau_blocks::DeltaNetLayer> {
+    use super::common::qdtype_of;
+    let gdn = cfg.gdn.as_ref().context("build_delta_net_block requires cfg.gdn")?;
+    if weights.ssm_ba.is_some() {
+        bail!("V1 GDN forward expects split ssm_alpha/ssm_beta; fused ssm_ba is unsupported");
+    }
+    let ssm_alpha = weights
+        .ssm_alpha
+        .as_ref()
+        .context("V1 GDN forward requires ssm_alpha")?;
+    let ssm_beta = weights
+        .ssm_beta
+        .as_ref()
+        .context("V1 GDN forward requires ssm_beta")?;
+    let qkv_dt = qdtype_of(weights.attn_qkv.dtype)?;
+    let gate_dt = qdtype_of(weights.attn_gate.dtype)?;
+    let alpha_dt = qdtype_of(ssm_alpha.dtype)?;
+    let beta_dt = qdtype_of(ssm_beta.dtype)?;
+    let out_dt = qdtype_of(weights.ssm_out.dtype)?;
+    let head_v_dim = gdn.head_v_dim();
+    let conv_channels = gdn.conv_channels();
+    flambeau_blocks::DeltaNetLayer::new(
+        flambeau_blocks::WeightHandle {
+            ptr: weights.attn_qkv.ptr,
+            dtype: qkv_dt,
+            dims: [conv_channels, cfg.hidden_size],
+        },
+        flambeau_blocks::WeightHandle {
+            ptr: weights.attn_gate.ptr,
+            dtype: gate_dt,
+            dims: [gdn.d_inner, cfg.hidden_size],
+        },
+        flambeau_blocks::WeightHandle {
+            ptr: ssm_alpha.ptr,
+            dtype: alpha_dt,
+            dims: [gdn.num_v_heads, cfg.hidden_size],
+        },
+        flambeau_blocks::WeightHandle {
+            ptr: ssm_beta.ptr,
+            dtype: beta_dt,
+            dims: [gdn.num_v_heads, cfg.hidden_size],
+        },
+        flambeau_blocks::WeightHandle {
+            ptr: weights.ssm_out.ptr,
+            dtype: out_dt,
+            dims: [cfg.hidden_size, gdn.d_inner],
+        },
+        weights.ssm_dt_bias.ptr,
+        weights.ssm_a.ptr,
+        weights.ssm_conv1d.ptr,
+        weights.ssm_norm.ptr,
+        attn_norm.ptr,
+        cfg.hidden_size,
+        gdn.d_inner,
+        gdn.num_v_heads,
+        gdn.num_k_heads,
+        gdn.head_k_dim,
+        head_v_dim,
+        conv_channels,
+        gdn.conv_kernel,
+        cfg.rms_norm_eps,
+        cfg.arch == "qwen3next",
+    )
 }
 
 /// Decode step for one GDN layer. Consumes `x_in` (F16 `[hidden]`) and
@@ -250,314 +314,23 @@ pub fn forward_gdn_decode(
     x_in: DevicePtr,
     delta_out: DevicePtr,
 ) -> Result<()> {
-    let gdn = cfg.gdn.as_ref().context("forward_gdn_decode requires cfg.gdn")?;
-    let hidden = cfg.hidden_size;
-    let d_inner = gdn.d_inner;
-    let num_v_heads = gdn.num_v_heads;
-    let num_k_heads = gdn.num_k_heads;
-    let head_k_dim = gdn.head_k_dim;
-    let head_v_dim = gdn.head_v_dim();
-    let conv_channels = gdn.conv_channels();
-    let conv_kernel = gdn.conv_kernel;
-    let qk_size = num_k_heads * head_k_dim;
-    let v_size = num_v_heads * head_v_dim;
-    // Sanity — V1 only supports the split-alpha/split-beta arch family.
-    if weights.ssm_ba.is_some() {
-        bail!("V1 GDN forward expects split ssm_alpha/ssm_beta; fused ssm_ba is unsupported");
-    }
-    let ssm_alpha = weights
-        .ssm_alpha
-        .as_ref()
-        .context("V1 GDN forward requires ssm_alpha")?;
-    let ssm_beta = weights
-        .ssm_beta
-        .as_ref()
-        .context("V1 GDN forward requires ssm_beta")?;
-
-    // intra-GDN section markers. No-op when timer
-    // disabled. Every section's elapsed_ms aggregates across the GDN
-    // layers in a forward pass, surfacing the dominant sub-kernel.
-    flambeau_backend_hip::profile::mark("gdn_start", device, stream)?;
-
-    // 1. Fused rmsnorm(x_in) + Q8_1 quantise.
-    rmsnorm_quant_q8_1(
-        ops,
-        stream,
-        x_in,
-        attn_norm.ptr,
-        scratch.x_q8_1,
-        1,
-        hidden,
-        cfg.rms_norm_eps,
-    )
-    .context("gdn attn_norm + quant")?;
-    flambeau_backend_hip::profile::mark("gdn_norm_quant", device, stream)?;
-
-    // 2..5. Four hidden-input projections share the Q8_1 input.
-    // attn_qkv + attn_gate fuse when both weights match a supported
-    // dtype: Q8_0 (Qwen3.6-x-Q8_0/Q8_K_XL family) or Q4_0 (Qwen3.6-x-
-    // Q4_0 + Coder-Next-Q4_0 — the common GDN case per
-    // mmvq_q4_0_gate_up's own docstring; pre-iter-4 the V1 dispatcher
-    // skipped this branch and ran two separate mmvqs). The extended
-    // gate_up kernel handles asymmetric n_rows by grid=max(n1,n2) with
-    // per-output early-return.
-    let qkv_dtype = weights.attn_qkv.dtype;
-    let gate_dtype = weights.attn_gate.dtype;
-    let fuse_qkv_gate_q8_0 = qkv_dtype == flambeau_quant::GgmlDType::Q8_0
-        && gate_dtype == flambeau_quant::GgmlDType::Q8_0;
-    let fuse_qkv_gate_q4_0 = qkv_dtype == flambeau_quant::GgmlDType::Q4_0
-        && gate_dtype == flambeau_quant::GgmlDType::Q4_0;
-    if fuse_qkv_gate_q8_0 {
-        mmvq_q8_0_gate_up(
-            ops,
-            stream,
-            weights.attn_qkv.ptr,
-            weights.attn_gate.ptr,
-            scratch.x_q8_1,
-            scratch.qkv_mixed_f32,
-            scratch.z_f32,
-            conv_channels,
-            d_inner,
-            hidden,
-        )
-        .context("attn_qkv + attn_gate fused mmvq_q8_0")?;
-    } else if fuse_qkv_gate_q4_0 {
-        flambeau_ops::hip::qmatmul::mmvq_q4_0_gate_up(
-            ops,
-            stream,
-            weights.attn_qkv.ptr,
-            weights.attn_gate.ptr,
-            scratch.x_q8_1,
-            scratch.qkv_mixed_f32,
-            scratch.z_f32,
-            conv_channels,
-            d_inner,
-            hidden,
-        )
-        .context("attn_qkv + attn_gate fused mmvq_q4_0")?;
-    } else {
-        run_mmvq_from_tensor(ops, stream, &weights.attn_qkv, scratch.x_q8_1, scratch.qkv_mixed_f32, conv_channels, hidden, "attn_qkv")?;
-        run_mmvq_from_tensor(ops, stream, &weights.attn_gate, scratch.x_q8_1, scratch.z_f32, d_inner, hidden, "attn_gate")?;
-    }
-    flambeau_backend_hip::profile::mark("gdn_proj_qkv_gate", device, stream)?;
-    // ssm_alpha + ssm_beta fuse when FLAMBEAU_VARIANT=dp4a_vdr2 — both Q8_0,
-    // same [num_v_heads, hidden] shape, both read x_q8_1 once. Same pattern
-    // as shared-expert gate+up fusion.
-    let fuse_alpha_beta = ssm_alpha.dtype == flambeau_quant::GgmlDType::Q8_0
-        && ssm_beta.dtype == flambeau_quant::GgmlDType::Q8_0;
-    if fuse_alpha_beta {
-        let (a_rows, a_k) = mat_shape(ssm_alpha)?;
-        let (b_rows, b_k) = mat_shape(ssm_beta)?;
-        if a_rows != num_v_heads || a_k != hidden || b_rows != num_v_heads || b_k != hidden {
-            bail!(
-                "fused ssm alpha/beta shape mismatch: alpha=[{a_rows},{a_k}] beta=[{b_rows},{b_k}] expected=[{num_v_heads},{hidden}]"
-            );
-        }
-        mmvq_q8_0_gate_up(
-            ops,
-            stream,
-            ssm_alpha.ptr,
-            ssm_beta.ptr,
-            scratch.x_q8_1,
-            scratch.alpha_f32,
-            scratch.beta_f32,
-            num_v_heads,
-            num_v_heads,
-            hidden,
-        )
-        .context("ssm alpha+beta fused mmvq_q8_0")?;
-    } else {
-        run_mmvq_from_tensor(ops, stream, ssm_alpha, scratch.x_q8_1, scratch.alpha_f32, num_v_heads, hidden, "ssm_alpha")?;
-        run_mmvq_from_tensor(ops, stream, ssm_beta, scratch.x_q8_1, scratch.beta_f32, num_v_heads, hidden, "ssm_beta")?;
-    }
-    flambeau_backend_hip::profile::mark("gdn_proj_alpha_beta", device, stream)?;
-
-    // 6. Conv1d step — assemble [history_{k-1}, qkv_mixed] into conv_input,
-    // run causal conv, then shift history forward. 3.d.1 uses a single
-    // fused kernel in place of the prior two DtoD memcpys.
-    let _ = device; // history+current copy now done via kernel, not device
-    flambeau_ops::hip::recurrent::gdn_assemble_conv_input_f32(
-        ops,
-        stream,
-        layer_state.conv_history,
-        scratch.qkv_mixed_f32,
-        scratch.conv_input,
-        conv_channels,
-        conv_kernel,
-    )?;
-    causal_conv1d_f32(
-        ops,
-        stream,
-        scratch.conv_input,
-        weights.ssm_conv1d.ptr,
-        scratch.conv_out,
-        1,
-        conv_channels,
-        conv_kernel,
-    )
-    .context("causal_conv1d_f32")?;
-    shift_conv_history(
+    // R4.C — route through `flambeau_blocks::DeltaNetLayer`. GDN
+    // decode has no slot/graph-capture variant, so the entire body
+    // routes through the block.
+    let block = build_delta_net_block(attn_norm, weights, cfg)?;
+    let hipops = flambeau_ops::HipOps::new(ops, stream);
+    block.forward_decode(
+        &hipops,
         device,
         stream,
-        scratch.conv_input,
+        x_in,
+        delta_out,
+        layer_state.state,
         layer_state.conv_history,
-        conv_channels,
-        conv_kernel,
-    )?;
-    flambeau_backend_hip::profile::mark("gdn_conv1d", device, stream)?;
-
-    // 7. silu(conv_out).
-    silu_f32(ops, stream, scratch.conv_out, scratch.silu_out, conv_channels)
-        .context("silu_f32(conv_out)")?;
-    flambeau_backend_hip::profile::mark("gdn_silu", device, stream)?;
-
-    // 8. Slice silu_out into Q|K|V via pointer offsets. Q and K are
-    // adjacent `qk_size` blocks; V follows. No kernel.
-    let q_src = scratch.silu_out;
-    let k_src = scratch.silu_out.offset_bytes(qk_size * 4);
-    let v_src = scratch.silu_out.offset_bytes(2 * qk_size * 4);
-
-    // 9. L2-normalise Q and K per head (row = head, k = head_k_dim).
-    l2_norm_f32(
-        ops,
-        stream,
-        q_src,
-        scratch.q_norm_f32,
-        num_k_heads,
-        head_k_dim,
-        cfg.rms_norm_eps,
+        scratch.view(),
     )
-    .context("l2_norm Q")?;
-    l2_norm_f32(
-        ops,
-        stream,
-        k_src,
-        scratch.k_norm_f32,
-        num_k_heads,
-        head_k_dim,
-        cfg.rms_norm_eps,
-    )
-    .context("l2_norm K")?;
-
-    // 10. Scale Q by 1/sqrt(head_k_dim) (in-place).
-    let q_scale = 1.0f32 / (head_k_dim as f32).sqrt();
-    scale_f32(
-        ops,
-        stream,
-        scratch.q_norm_f32,
-        scratch.q_norm_f32,
-        qk_size,
-        q_scale,
-    )
-    .context("scale_f32 Q")?;
-    flambeau_backend_hip::profile::mark("gdn_l2norm_qk", device, stream)?;
-
-    // Fused state-step that absorbs the α/β/gate compute (saves one
-    // kernel launch per GDN layer per token).
-    //
-    // Q/K repeat layout differs by arch:
-    //   qwen35moe (Qwen3.6-35B-A3B): rep-OUTER (cyclic ggml_repeat_4d)
-    //     → kernel uses `h_kv = h_idx % H_kv`; rep_inner_layout = false.
-    //   qwen3next (Coder-Next-80B): rep-INNER (reshape-interleave per
-    //     `qwen3next.cpp:418-431`) → `h_kv = h_idx / n_rep`;
-    //     rep_inner_layout = true.
-    // Wrong choice produces a degenerate logit attractor.
-    let n_rep = num_v_heads / num_k_heads;
-    let rep_inner_layout = cfg.arch == "qwen3next";
-    gdn_state_step_alphabeta_f32_s128(
-        ops,
-        stream,
-        scratch.q_norm_f32,
-        scratch.k_norm_f32,
-        v_src,
-        scratch.alpha_f32,
-        scratch.beta_f32,
-        weights.ssm_dt_bias.ptr,
-        weights.ssm_a.ptr,
-        layer_state.state,
-        layer_state.state,
-        scratch.state_out,
-        1,
-        num_v_heads,
-        1,
-        n_rep,
-        rep_inner_layout,
-    )
-    .context("gdn_state_step_alphabeta_f32_s128 (C10 fused)")?;
-    flambeau_backend_hip::profile::mark("gdn_state_step", device, stream)?;
-
-    // 13. ssm_norm per-head on the state-step output.
-    let ssm_norm_k = weights
-        .ssm_norm
-        .dims
-        .first()
-        .copied()
-        .context("ssm_norm missing dim")? as usize;
-    if ssm_norm_k != head_v_dim {
-        bail!(
-            "ssm_norm dim {ssm_norm_k} != head_v_dim {head_v_dim}"
-        );
-    }
-    rmsnorm_f32(
-        ops,
-        stream,
-        scratch.state_out,
-        weights.ssm_norm.ptr,
-        scratch.out_normed,
-        num_v_heads,
-        head_v_dim,
-        cfg.rms_norm_eps,
-    )
-    .context("ssm_norm (rmsnorm_f32)")?;
-    flambeau_backend_hip::profile::mark("gdn_ssm_norm", device, stream)?;
-
-    // 14+15. fused swiglu(z, out_normed) → Q8_1 directly.
-    // Skips the F32 `gated_f32` intermediate buffer + 1 launch. Default-on;
-    // FLAMBEAU_VARIANT=baseline opts back to the unfused pair.
-    if v_size != d_inner {
-        bail!(
-            "GDN layout bug: num_v_heads * head_v_dim ({v_size}) != d_inner ({d_inner})"
-        );
-    }
-    let fuse_tail = d_inner % 32 == 0;
-    if fuse_tail {
-        flambeau_ops::hip::mlp::swiglu_f32_to_q8_1(
-            ops,
-            stream,
-            scratch.z_f32,
-            scratch.out_normed,
-            scratch.gated_q8_1,
-            d_inner,
-        )
-        .context("swiglu_f32_to_q8_1(z, out_normed)")?;
-    } else {
-        swiglu_f32(ops, stream, scratch.z_f32, scratch.out_normed, scratch.gated_f32, d_inner)
-            .context("swiglu_f32(z, out_normed)")?;
-        quantize_q8_1(ops, stream, scratch.gated_f32, scratch.gated_q8_1, d_inner)
-            .context("quantize gated → Q8_1")?;
-    }
-    flambeau_backend_hip::profile::mark("gdn_swiglu_quant", device, stream)?;
-
-    // 16. ssm_out projection.
-    run_mmvq_from_tensor(
-        ops,
-        stream,
-        &weights.ssm_out,
-        scratch.gated_q8_1,
-        scratch.ssm_out_f32,
-        hidden,
-        d_inner,
-        "ssm_out",
-    )?;
-    flambeau_backend_hip::profile::mark("gdn_ssm_out", device, stream)?;
-
-    // 17. Cast back to F16 for the residual path.
-    cast_f32_to_f16(ops, stream, scratch.ssm_out_f32, delta_out, hidden)
-        .context("cast ssm_out → f16")?;
-    flambeau_backend_hip::profile::mark("gdn_cast_f16", device, stream)?;
-
-    Ok(())
 }
+
 
 // `run_mmvq_from_tensor` moved to `forward::common`.
 

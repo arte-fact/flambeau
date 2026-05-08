@@ -16,6 +16,7 @@
 #![cfg(feature = "hip")]
 
 pub mod attention;
+pub mod delta_net;
 pub mod dense_mlp;
 pub mod moe_experts;
 
@@ -23,5 +24,6 @@ pub use attention::{
     StandardAttention, StandardAttentionDecodeScratch, StandardAttentionPrefillScratch,
     WeightHandle, MAX_SPLITK_CHUNKS,
 };
+pub use delta_net::{DeltaNetLayer, DeltaNetLayerDecodeScratch};
 pub use dense_mlp::{DenseMlp, DenseMlpDecodeScratch, DenseMlpPrefillScratch};
 pub use moe_experts::{MoeExperts, MoeExpertsDecodeScratch};
