@@ -1,0 +1,131 @@
+{
+  "timestamp": "2026-05-08T08:55:34Z",
+  "topology": "TP2",
+  "devices": "0,1",
+  "results": [
+    {
+      "label": "flambeau__qwen36-27b-q4_0",
+      "n_turns": 3,
+      "avg_prefill_rate_tok_per_s": 279.93271008037806,
+      "avg_decode_rate_tok_per_s": 24.33904045624647,
+      "total_ptok": 2016,
+      "total_ctok": 1171,
+      "per_turn": [
+        {
+          "ptok": 77,
+          "ctok": 512,
+          "ttft_ms": 961.2,
+          "decode_ms_per_tok": 40.211,
+          "wall_ms": 21509.2
+        },
+        {
+          "ptok": 674,
+          "ctok": 512,
+          "ttft_ms": 2194.0,
+          "decode_ms_per_tok": 41.368,
+          "wall_ms": 23332.9
+        },
+        {
+          "ptok": 1265,
+          "ctok": 147,
+          "ttft_ms": 4046.6,
+          "decode_ms_per_tok": 43.153,
+          "wall_ms": 10303.8
+        }
+      ]
+    },
+    {
+      "label": "llama.cpp__qwen36-27b-q4_0",
+      "n_turns": 3,
+      "avg_prefill_rate_tok_per_s": 0.0,
+      "avg_decode_rate_tok_per_s": 21.361280743168297,
+      "total_ptok": 0,
+      "total_ctok": 1536,
+      "per_turn": [
+        {
+          "ptok": 0,
+          "ctok": 512,
+          "ttft_ms": 1381.8,
+          "decode_ms_per_tok": 46.007,
+          "wall_ms": 24891.6
+        },
+        {
+          "ptok": 0,
+          "ctok": 512,
+          "ttft_ms": 3098.1,
+          "decode_ms_per_tok": 46.712,
+          "wall_ms": 26967.8
+        },
+        {
+          "ptok": 0,
+          "ctok": 512,
+          "ttft_ms": 2808.5,
+          "decode_ms_per_tok": 47.722,
+          "wall_ms": 27194.4
+        }
+      ]
+    },
+    {
+      "label": "flambeau__qwen36-35b-a3b-q4_0",
+      "n_turns": 3,
+      "avg_prefill_rate_tok_per_s": 891.7339200518605,
+      "avg_decode_rate_tok_per_s": 55.458015475691404,
+      "total_ptok": 1996,
+      "total_ctok": 1536,
+      "per_turn": [
+        {
+          "ptok": 77,
+          "ctok": 512,
+          "ttft_ms": 186.8,
+          "decode_ms_per_tok": 17.289,
+          "wall_ms": 9021.5
+        },
+        {
+          "ptok": 669,
+          "ctok": 512,
+          "ttft_ms": 727.2,
+          "decode_ms_per_tok": 17.913,
+          "wall_ms": 9881.0
+        },
+        {
+          "ptok": 1250,
+          "ctok": 512,
+          "ttft_ms": 1324.3,
+          "decode_ms_per_tok": 18.892,
+          "wall_ms": 10978.4
+        }
+      ]
+    },
+    {
+      "label": "llama.cpp__qwen36-35b-a3b-q4_0",
+      "n_turns": 3,
+      "avg_prefill_rate_tok_per_s": 0.0,
+      "avg_decode_rate_tok_per_s": 41.06631909158007,
+      "total_ptok": 0,
+      "total_ctok": 1536,
+      "per_turn": [
+        {
+          "ptok": 0,
+          "ctok": 512,
+          "ttft_ms": 1183.6,
+          "decode_ms_per_tok": 25.048,
+          "wall_ms": 13983.0
+        },
+        {
+          "ptok": 0,
+          "ctok": 512,
+          "ttft_ms": 1285.3,
+          "decode_ms_per_tok": 24.895,
+          "wall_ms": 14006.6
+        },
+        {
+          "ptok": 0,
+          "ctok": 512,
+          "ttft_ms": 1241.8,
+          "decode_ms_per_tok": 23.11,
+          "wall_ms": 13050.9
+        }
+      ]
+    }
+  ]
+}
