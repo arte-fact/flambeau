@@ -480,3 +480,96 @@ pub fn forward_prefill_tp<D: TpPrefillDriver>(
     driver.cluster().device(head).bind()?;
     driver.output_head_last_token(prompt_ids.len())
 }
+
+/// Per-stage handles + per-call hooks for hybrid (PP-of-TP) single-
+/// token decode. The mesh is `n_stages` contiguous layer stages, each
+/// owning a TP subgroup. Stage 0 holds `token_embd`; the head stage
+/// (last in V1) holds the LM head.
+///
+/// The driver knows about per-stage rank counts + layer ranges; the
+/// orchestrator just iterates stages and layers, calling back into
+/// the driver for embed, per-layer dispatch, inter-stage handoff,
+/// and output head.
+pub trait HybridDecodeDriver {
+    fn n_stages(&self) -> usize;
+
+    fn ranks_per_stage(&self, stage: usize) -> usize;
+
+    fn n_layers_in_stage(&self, stage: usize) -> usize;
+
+    /// Stage that holds the LM head (last stage in V1).
+    fn head_stage(&self) -> usize;
+
+    /// Rank within `head_stage` that holds the head weights / scratch.
+    fn head_rank_in_head_stage(&self) -> usize;
+
+    /// Bind `(stage, rank)`'s device on the calling thread. Takes
+    /// `&self` so callers can interleave bind with `&mut self`
+    /// dispatch calls without borrow conflicts.
+    fn bind(&self, stage: usize, rank: usize) -> Result<()>;
+
+    /// Embed `token_id` on `(stage, rank)`. Stage 0 is where this is
+    /// called; later stages receive hidden state via
+    /// `handoff_stage_to_next`.
+    fn embed_token(&mut self, stage: usize, rank: usize, token_id: u32) -> Result<()>;
+
+    /// Run one layer's decode within `stage`. `il_in_stage` is
+    /// `0..n_layers_in_stage(stage)`. Driver handles intra-stage TP
+    /// per-rank dispatch + BAR1 P2P AllReduces.
+    fn forward_layer_decode(
+        &mut self,
+        stage: usize,
+        il_in_stage: usize,
+        position: usize,
+    ) -> Result<()>;
+
+    /// Carry the residual stream from `stage`'s rank 0 to every rank
+    /// of `stage + 1`. Implementor uses the global cluster's
+    /// `peer_copy_via_host`.
+    fn handoff_stage_to_next(&mut self, stage: usize) -> Result<()>;
+
+    /// Run final norm + LM head on the head rank, leaving F32 logits
+    /// in the driver-owned head scratch.
+    fn output_head(&mut self) -> Result<()>;
+}
+
+/// Single-token decode through a hybrid PP-of-TP mesh.
+///
+/// Sequence:
+/// 1. Bind every rank of stage 0; `embed_token` writes the F16 hidden
+///    vector on each.
+/// 2. For each stage in order:
+///    a. Iterate `n_layers_in_stage(stage)` calling
+///       `forward_layer_decode`.
+///    b. If `stage + 1 < n_stages`, call `handoff_stage_to_next`.
+/// 3. Bind the head rank; `output_head` runs the LM head.
+pub fn forward_one_token_hybrid<D: HybridDecodeDriver>(
+    driver: &mut D,
+    token_id: u32,
+    position: usize,
+) -> Result<()> {
+    let n_stages = driver.n_stages();
+    if n_stages == 0 {
+        bail!("forward_one_token_hybrid: zero-stage driver");
+    }
+
+    for r in 0..driver.ranks_per_stage(0) {
+        driver.bind(0, r)?;
+        driver.embed_token(0, r, token_id)?;
+    }
+
+    for s in 0..n_stages {
+        let n_layers = driver.n_layers_in_stage(s);
+        for il in 0..n_layers {
+            driver.forward_layer_decode(s, il, position)?;
+        }
+        if s + 1 < n_stages {
+            driver.handoff_stage_to_next(s)?;
+        }
+    }
+
+    let head_s = driver.head_stage();
+    let head_r = driver.head_rank_in_head_stage();
+    driver.bind(head_s, head_r)?;
+    driver.output_head()
+}
