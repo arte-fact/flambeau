@@ -459,6 +459,7 @@ dependencies = [
  "flambeau-bench",
  "flambeau-core",
  "flambeau-quant",
+ "flambeau-qwen3-moe",
  "flambeau-runtime",
  "flambeau-server",
  "mimalloc",

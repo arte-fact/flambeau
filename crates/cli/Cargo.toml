@@ -32,6 +32,10 @@ flambeau-quant = { path = "../quant" }
 flambeau-runtime = { path = "../runtime" }
 flambeau-bench = { path = "../bench" }
 flambeau-server = { path = "../server" }
+# Direct dep so the CLI can register `Qwen3MoEModelArch` with the
+# runtime registry. Compiles arch-only (no `hip` feature) — the
+# struct + trait impl don't need device code.
+flambeau-qwen3-moe = { path = "../models/qwen3-moe" }
 anyhow.workspace = true
 clap.workspace = true
 tokio.workspace = true

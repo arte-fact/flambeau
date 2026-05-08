@@ -13,7 +13,7 @@ use flambeau_qwen3_moe::{
     HybridMeshSpec, Qwen35DenseTpLayout, Qwen3MoEConfig, Qwen3MoEHybridModel,
     Qwen3MoEShardedModel, Qwen3MoETpModel,
 };
-use flambeau_runtime::LayerAssignment;
+use flambeau_runtime::{LayerAssignment, Registry};
 use tokio::sync::Mutex;
 use tracing::info;
 
@@ -111,11 +111,24 @@ impl Default for MeshMode {
 
 /// Blocking serve loop — loads the model, starts the HTTP server, runs
 /// until terminated. Caller owns the tokio runtime.
-pub async fn serve(cfg: ServeConfig) -> Result<()> {
+pub async fn serve(cfg: ServeConfig, registry: Registry) -> Result<()> {
     info!(?cfg, "flambeau serve: loading model");
 
     let gguf = GgufFile::open(&cfg.gguf_path)
         .with_context(|| format!("open GGUF at {}", cfg.gguf_path.display()))?;
+
+    // R5.1 — validate the GGUF arch is registered before walking
+    // tokenizer / chat template / model paths. Friendly error for
+    // unsupported arches.
+    let gguf_arch = gguf.metadata_str("general.architecture").unwrap_or("");
+    let model_arch = registry
+        .validate(gguf_arch)
+        .with_context(|| format!("flambeau serve: unsupported GGUF arch `{gguf_arch}`"))?;
+    info!(
+        arch = gguf_arch,
+        handler = model_arch.description(),
+        "GGUF arch validated against registry"
+    );
 
     // Load tokenizer + chat template first (cheap, catch config errors early).
     let tokenizer = flambeau_quant::load_from_gguf(&gguf).context("load tokenizer")?;

@@ -444,10 +444,16 @@ fn serve_cmd(args: ServeArgs) -> Result<()> {
         spec_mtp: spec_mtp.map(PathBuf::from),
     };
 
+    // R5.1 — build the model registry. Each binary populates its
+    // own; register every model crate this CLI links. Future binaries
+    // (sweeps, custom servers) can build different registries.
+    let mut registry = flambeau_runtime::Registry::new();
+    registry.register(std::sync::Arc::new(flambeau_qwen3_moe::Qwen3MoEModelArch));
+
     let rt = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()?;
-    rt.block_on(flambeau_server::serve(cfg))
+    rt.block_on(flambeau_server::serve(cfg, registry))
 }
 
 /// Dump the GGUF's embedded `tokenizer.chat_template` Jinja source.
