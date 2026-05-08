@@ -27,46 +27,48 @@ use flambeau_qwen3_moe::{
 };
 use flambeau_core::DevicePtr;
 
-/// Loaded weights + per-topology auxiliary state.
-/// Built once at startup. The PP variant just owns the sharded model;
-/// the TP variant additionally owns a [`BarP2pAllReduce`] that holds an
-/// `Arc<HipCluster>` against the same cluster the server uses.
+/// Pipeline-parallel sharded model. One whole layer per rank stage;
+/// cross-stage hand-off via host-bounce peer copy. Optional MTP
+/// attachment for spec-decode loads on the last rank when
+/// `FLAMBEAU_SPEC_MTP=path/to/mtp.gguf` is set at boot.
+pub struct PpHipModel {
+    pub model: Qwen3MoEShardedModel,
+    pub mtp: Option<MtpHeadWeights>,
+}
+
+/// Tensor-parallel sharded model. Every rank holds every layer
+/// (sliced); intra-layer Megatron splits + BAR1 P2P AllReduce.
+pub struct TpHipModel {
+    pub model: Qwen3MoETpModel,
+    pub ar: BarP2pAllReduce,
+}
+
+/// Hybrid PP-of-TP. `pp_size` contiguous layer stages, each owning a
+/// `tp_size`-rank TP subgroup. The per-stage `BarP2pAllReduce`
+/// instances live alongside the model; inter-stage hand-off uses the
+/// server-owned global `HipCluster`.
+pub struct HybridHipModel {
+    pub model: Qwen3MoEHybridModel,
+    pub stage_ars: Vec<BarP2pAllReduce>,
+}
+
+/// Loaded weights + per-topology auxiliary state. Wraps one of the
+/// concrete topology structs above; topology dispatch is a single match
+/// at the top of every server entry point.
 pub enum LoadedModel {
-    /// pipeline-parallel sharded model. One whole layer per rank
-    /// stage; cross-stage hand-off via host-bounce peer copy.
-    /// optional MTP attachment for spec-decode; loaded at
-    /// startup when `FLAMBEAU_SPEC_MTP=path/to/mtp.gguf` is set, lives
-    /// on the last rank.
-    Pp {
-        model: Qwen3MoEShardedModel,
-        mtp: Option<MtpHeadWeights>,
-    },
-    /// V2 tensor-parallel sharded model. Every rank holds every layer
-    /// (sliced); intra-layer Megatron splits + BAR1 P2P AllReduce.
-    Tp {
-        model: Qwen3MoETpModel,
-        ar: BarP2pAllReduce,
-    },
-    /// hybrid PP-of-TP. `pp_size` contiguous layer
-    /// stages, each owning a `tp_size`-rank TP subgroup. The
-    /// per-stage `BarP2pAllReduce` instances live alongside the
-    /// model; the inter-stage hand-off uses the server-owned global
-    /// `HipCluster` passed through to [`prefill_logits`] /
-    /// [`decode_logits`].
-    Hybrid {
-        model: Qwen3MoEHybridModel,
-        stage_ars: Vec<BarP2pAllReduce>,
-    },
+    Pp(PpHipModel),
+    Tp(TpHipModel),
+    Hybrid(HybridHipModel),
 }
 
 impl std::fmt::Debug for LoadedModel {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            LoadedModel::Pp { .. } => f.debug_struct("LoadedModel::Pp").finish(),
-            LoadedModel::Tp { .. } => f.debug_struct("LoadedModel::Tp").finish(),
-            LoadedModel::Hybrid { model, .. } => f
+            LoadedModel::Pp(_) => f.debug_struct("LoadedModel::Pp").finish(),
+            LoadedModel::Tp(_) => f.debug_struct("LoadedModel::Tp").finish(),
+            LoadedModel::Hybrid(h) => f
                 .debug_struct("LoadedModel::Hybrid")
-                .field("spec", &model.spec)
+                .field("spec", &h.model.spec)
                 .finish(),
         }
     }
@@ -76,18 +78,18 @@ impl LoadedModel {
     /// Common config shared between variants.
     pub fn config(&self) -> &Qwen3MoEConfig {
         match self {
-            LoadedModel::Pp { model: m, .. } => &m.config,
-            LoadedModel::Tp { model, .. } => &model.config,
-            LoadedModel::Hybrid { model, .. } => &model.config,
+            LoadedModel::Pp(p) => &p.model.config,
+            LoadedModel::Tp(t) => &t.model.config,
+            LoadedModel::Hybrid(h) => &h.model.config,
         }
     }
 
     /// Topology label for `tracing` / handler-side metrics.
     pub fn topology(&self) -> &'static str {
         match self {
-            LoadedModel::Pp { .. } => "pp",
-            LoadedModel::Tp { .. } => "tp",
-            LoadedModel::Hybrid { .. } => "pp+tp",
+            LoadedModel::Pp(_) => "pp",
+            LoadedModel::Tp(_) => "tp",
+            LoadedModel::Hybrid(_) => "pp+tp",
         }
     }
 }
@@ -144,7 +146,8 @@ impl Inflight {
         // process exit. One failed request used to lose ~3 GB of
         // VRAM on each rank.
         match model {
-            LoadedModel::Pp { model: m, .. } => {
+            LoadedModel::Pp(p) => {
+                let m = &p.model;
                 let session =
                     Qwen3MoEShardedSession::new(m, cluster, kv_layout).context("create PP session")?;
                 let prefill = match ShardedForwardPrefillScratch::new(
@@ -172,7 +175,8 @@ impl Inflight {
                     decode,
                 })
             }
-            LoadedModel::Tp { model, .. } => {
+            LoadedModel::Tp(t) => {
+                let model = &t.model;
                 let session =
                     Qwen3MoETpSession::new(model, cluster, kv_layout).context("create TP session")?;
                 let decode = match ShardedForwardOneTokenScratchTp::new(
@@ -187,11 +191,12 @@ impl Inflight {
                 };
                 Ok(Inflight::Tp { session, decode })
             }
-            LoadedModel::Hybrid { model, .. } => {
+            LoadedModel::Hybrid(h) => {
                 // `cluster` here is the server's global cluster; the
                 // hybrid session/scratch are sized per-stage against
                 // each stage's owning sub-cluster (no `cluster` arg
                 // needed — sub-clusters live inside `model.stages`).
+                let model = &h.model;
                 let session = Qwen3MoEHybridSession::new(model, kv_layout)
                     .context("create hybrid session")?;
                 let decode = match ShardedForwardOneTokenScratchHybrid::new(model) {
@@ -234,16 +239,16 @@ impl Inflight {
                 Ok(())
             }
             Inflight::Hybrid { session, decode } => {
-                let LoadedModel::Hybrid { model, .. } = model else {
+                let LoadedModel::Hybrid(h) = model else {
                     bail!(
                         "Inflight::Hybrid::dispose: paired LoadedModel variant is not Hybrid"
                     );
                 };
                 decode
-                    .dispose(model)
+                    .dispose(&h.model)
                     .context("dispose hybrid decode scratch")?;
                 session
-                    .dispose(model)
+                    .dispose(&h.model)
                     .context("dispose hybrid session")?;
                 Ok(())
             }
@@ -261,15 +266,15 @@ impl Inflight {
         model: &LoadedModel,
     ) -> Result<()> {
         match (self, model) {
-            (Inflight::Pp { session, .. }, LoadedModel::Pp { .. }) => session
+            (Inflight::Pp { session, .. }, LoadedModel::Pp(_)) => session
                 .reset_for_next_request(cluster)
                 .context("reset PP session"),
-            (Inflight::Tp { session, .. }, LoadedModel::Tp { .. }) => session
+            (Inflight::Tp { session, .. }, LoadedModel::Tp(_)) => session
                 .reset_for_next_request(cluster)
                 .context("reset TP session"),
             (
                 Inflight::Hybrid { session, .. },
-                LoadedModel::Hybrid { model: hm, .. },
+                LoadedModel::Hybrid(HybridHipModel { model: hm, .. }),
             ) => session
                 .reset_for_next_request(hm)
                 .context("reset Hybrid session"),
@@ -439,7 +444,7 @@ pub fn prefill_logits(
     }
     match (model, inflight) {
         (
-            LoadedModel::Pp { model: m, .. },
+            LoadedModel::Pp(PpHipModel { model: m, .. }),
             Inflight::Pp {
                 session, prefill, ..
             },
@@ -507,7 +512,7 @@ pub fn prefill_logits(
             }
             Ok(())
         }
-        (LoadedModel::Tp { model, ar }, Inflight::Tp { session, decode }) => {
+        (LoadedModel::Tp(TpHipModel { model, ar }), Inflight::Tp { session, decode }) => {
             // Chunked TP prefill (Phase B3a-TP). Phase A2-TP parity
             // test verified bit-exact KV at L=4096 chunk=512 (8 chunks),
             // so chunking is safe at chunk>=128. **#324** — when
@@ -600,10 +605,10 @@ pub fn prefill_logits(
             Ok(())
         }
         (
-            LoadedModel::Hybrid {
+            LoadedModel::Hybrid(HybridHipModel {
                 model: hmodel,
                 stage_ars,
-            },
+            }),
             Inflight::Hybrid { session, decode },
         ) => {
             // Chunked Hybrid prefill (Phase B4a-Hybrid). Parity
@@ -699,8 +704,8 @@ pub fn decode_spec_pp(
     position: usize,
 ) -> Result<SpecStep> {
     let (m, mtp) = match model {
-        LoadedModel::Pp { model: m, mtp: Some(mtp) } => (m, mtp),
-        LoadedModel::Pp { mtp: None, .. } => {
+        LoadedModel::Pp(PpHipModel { model: m, mtp: Some(mtp) }) => (m, mtp),
+        LoadedModel::Pp(PpHipModel { mtp: None, .. }) => {
             bail!("decode_spec_pp called without MTP attachment (FLAMBEAU_SPEC_MTP not set)")
         }
         _ => bail!("decode_spec_pp requires LoadedModel::Pp"),
@@ -750,8 +755,8 @@ pub fn decode_spec_pp_sampling(
     use flambeau_qwen3_moe::forward::forward_speculative_pp_step_sampling;
 
     let (m, mtp) = match model {
-        LoadedModel::Pp { model: m, mtp: Some(mtp) } => (m, mtp),
-        LoadedModel::Pp { mtp: None, .. } => {
+        LoadedModel::Pp(PpHipModel { model: m, mtp: Some(mtp) }) => (m, mtp),
+        LoadedModel::Pp(PpHipModel { mtp: None, .. }) => {
             bail!("decode_spec_pp_sampling called without MTP attachment")
         }
         _ => bail!("decode_spec_pp_sampling requires LoadedModel::Pp"),
@@ -802,13 +807,13 @@ pub fn decode_logits(
     // guard and runs the single-slot forward.
     match (model, inflight) {
         (
-            LoadedModel::Pp { model: m, .. },
+            LoadedModel::Pp(PpHipModel { model: m, .. }),
             Inflight::Pp {
                 session, decode, ..
             },
         ) => forward_one_token_pp_logits(m, session, cluster, decode, token, position, logits_out)
             .context("PP decode_logits"),
-        (LoadedModel::Tp { model, ar }, Inflight::Tp { session, decode }) => {
+        (LoadedModel::Tp(TpHipModel { model, ar }), Inflight::Tp { session, decode }) => {
             forward_one_token_tp_logits(
                 model,
                 decode,
@@ -822,10 +827,10 @@ pub fn decode_logits(
             .context("TP decode_logits")
         }
         (
-            LoadedModel::Hybrid {
+            LoadedModel::Hybrid(HybridHipModel {
                 model: hmodel,
                 stage_ars,
-            },
+            }),
             Inflight::Hybrid { session, decode },
         ) => forward_one_token_hybrid_logits(
             hmodel,
@@ -862,7 +867,7 @@ pub fn decode_keep_logits_on_device(
     position: usize,
 ) -> Result<()> {
     match model {
-        LoadedModel::Tp { model: m, ar } => match inflight {
+        LoadedModel::Tp(TpHipModel { model: m, ar }) => match inflight {
             Inflight::Tp { session, decode } => forward_one_token_tp_keep_logits_on_device(
                 m,
                 decode,
@@ -875,10 +880,10 @@ pub fn decode_keep_logits_on_device(
             .context("TP decode_keep_logits_on_device"),
             _ => bail!("Inflight variant doesn't match LoadedModel::Tp"),
         },
-        LoadedModel::Hybrid {
+        LoadedModel::Hybrid(HybridHipModel {
             model: hmodel,
             stage_ars,
-        } => match inflight {
+        }) => match inflight {
             Inflight::Hybrid { session, decode } => {
                 forward_one_token_hybrid_keep_logits_on_device(
                     hmodel,
@@ -915,15 +920,15 @@ pub fn capture_kv_from_inflight(
 ) -> Result<Vec<Vec<LayerCacheSnapshot>>> {
     let _ = cluster; // unused for Hybrid (uses per-stage sub_clusters)
     match (inflight, model) {
-        (Inflight::Pp { session, .. }, LoadedModel::Pp { .. }) => {
+        (Inflight::Pp { session, .. }, LoadedModel::Pp(_)) => {
             snapshot_pp_session(session, cluster)
         }
-        (Inflight::Tp { session, .. }, LoadedModel::Tp { .. }) => {
+        (Inflight::Tp { session, .. }, LoadedModel::Tp(_)) => {
             snapshot_tp_caches(&session.caches, cluster)
         }
         (
             Inflight::Hybrid { session, .. },
-            LoadedModel::Hybrid { model: hmodel, .. },
+            LoadedModel::Hybrid(HybridHipModel { model: hmodel, .. }),
         ) => snapshot_hybrid_session(session, hmodel),
         _ => bail!("capture_kv_from_inflight: model/inflight variant mismatch"),
     }
@@ -1014,7 +1019,7 @@ pub fn restore_kv_into_inflight(
     model: &LoadedModel,
 ) -> Result<()> {
     match (inflight, model) {
-        (Inflight::Pp { session, .. }, LoadedModel::Pp { .. }) => {
+        (Inflight::Pp { session, .. }, LoadedModel::Pp(_)) => {
             if snapshot.len() != session.per_rank.len() {
                 bail!(
                     "PP restore: snapshot rank count {} != session ranks {}",
@@ -1033,7 +1038,7 @@ pub fn restore_kv_into_inflight(
             }
             Ok(())
         }
-        (Inflight::Tp { session, .. }, LoadedModel::Tp { .. }) => {
+        (Inflight::Tp { session, .. }, LoadedModel::Tp(_)) => {
             if snapshot.len() != session.caches.len() {
                 bail!(
                     "TP restore: snapshot rank count {} != session ranks {}",
@@ -1054,7 +1059,7 @@ pub fn restore_kv_into_inflight(
         }
         (
             Inflight::Hybrid { session, .. },
-            LoadedModel::Hybrid { model: hmodel, .. },
+            LoadedModel::Hybrid(HybridHipModel { model: hmodel, .. }),
         ) => restore_hybrid_session(snapshot, session, hmodel),
         _ => bail!("restore_kv_into_inflight: model/inflight variant mismatch"),
     }

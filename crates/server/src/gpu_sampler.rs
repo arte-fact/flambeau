@@ -210,7 +210,7 @@ fn resolve_head_logits<'a>(
     usize,
 )> {
     match (model, inflight) {
-        (LoadedModel::Tp { model: m, .. }, Inflight::Tp { decode, .. }) => {
+        (LoadedModel::Tp(crate::model::TpHipModel { model: m, .. }), Inflight::Tp { decode, .. }) => {
             let head = decode.head_rank.0 as usize;
             if head >= cluster.ranks() {
                 bail!(
@@ -239,7 +239,7 @@ fn resolve_head_logits<'a>(
                 .ok_or_else(|| anyhow!("TP head rank missing OutputHeadScratch"))?;
             Ok((dev, ops, head_scratch.logits_f32, m.config.vocab_size))
         }
-        (LoadedModel::Hybrid { model: hm, .. }, Inflight::Hybrid { decode, .. }) => {
+        (LoadedModel::Hybrid(crate::model::HybridHipModel { model: hm, .. }), Inflight::Hybrid { decode, .. }) => {
             let head_stage = decode.head_stage as usize;
             let stage_model = hm
                 .stages

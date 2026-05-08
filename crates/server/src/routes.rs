@@ -354,7 +354,7 @@ impl ServerState {
         if guard.is_none() {
             let prefill_ubatch = self.prefill_ubatch;
             let cfg = match &self.model {
-                LoadedModel::Tp { model, .. } => &model.config,
+                LoadedModel::Tp(crate::model::TpHipModel { model, .. }) => &model.config,
                 _ => bail!("lock_tp_prefill_scratch on non-TP model"),
             };
             let scratch = flambeau_qwen3_moe::forward::ShardedForwardPrefillScratchTp::new(
@@ -965,7 +965,7 @@ impl ServerState {
             logits_owned.iter_mut().collect();
 
         match &self.model {
-            LoadedModel::Pp { model, .. } => {
+            LoadedModel::Pp(crate::model::PpHipModel { model, .. }) => {
                 let mut sessions: Vec<&mut flambeau_qwen3_moe::Qwen3MoEShardedSession> =
                     Vec::with_capacity(n);
                 // Use the first guard's prefill scratch as the batched
@@ -1006,7 +1006,7 @@ impl ServerState {
                 )
                 .context("forward_decode_batched_pp under scheduler")?;
             }
-            LoadedModel::Tp { model, ar } => {
+            LoadedModel::Tp(crate::model::TpHipModel { model, ar }) => {
                 // **P2.9b-i2-C-wire** — TP uses a shared per-server batched
                 // scratch (sized for max_inflight_slots, lazy-init).
                 let mut sessions: Vec<&mut flambeau_qwen3_moe::Qwen3MoETpSession> =
@@ -1056,7 +1056,7 @@ impl ServerState {
                 )
                 .context("forward_decode_batched_tp under scheduler")?;
             }
-            LoadedModel::Hybrid { model, stage_ars } => {
+            LoadedModel::Hybrid(crate::model::HybridHipModel { model, stage_ars }) => {
                 use flambeau_qwen3_moe::forward::forward_decode_batched_hybrid;
                 let mut sessions: Vec<&mut flambeau_qwen3_moe::Qwen3MoEHybridSession> =
                     Vec::with_capacity(n);
@@ -3121,9 +3121,9 @@ fn scheduler_can_engage(state: &ServerState, params: &SamplingParams) -> bool {
     // top-K logprobs grab) that isn't yet plumbed through the
     // scheduler-aware handler.
     let topo_ok = match &state.model {
-        LoadedModel::Pp { mtp: None, .. } => true,
-        LoadedModel::Tp { .. } => true,
-        LoadedModel::Hybrid { .. } => true,
+        LoadedModel::Pp(crate::model::PpHipModel { mtp: None, .. }) => true,
+        LoadedModel::Tp(_) => true,
+        LoadedModel::Hybrid(_) => true,
         _ => false,
     };
     if !topo_ok {
@@ -3472,13 +3472,13 @@ fn run_completion_blocking_ids(
     let use_gpu_sampler = state.gpu_sampler
         && matches!(
             model,
-            LoadedModel::Tp { .. } | LoadedModel::Hybrid { .. }
+            LoadedModel::Tp(_) | LoadedModel::Hybrid(_)
         )
         && !sampling.is_greedy();
     let mut gpu_scratch: Option<GpuSamplerScratch> = if use_gpu_sampler {
         // Resolve the head device for whichever topology is active.
         let head_device = match (model, &inflight) {
-            (LoadedModel::Tp { .. }, Inflight::Tp { decode, .. }) => {
+            (LoadedModel::Tp(_), Inflight::Tp { decode, .. }) => {
                 let head_rank = decode.head_rank.0 as usize;
                 if head_rank >= cluster.ranks() {
                     bail!(
@@ -3488,7 +3488,7 @@ fn run_completion_blocking_ids(
                 }
                 cluster.device(head_rank)
             }
-            (LoadedModel::Hybrid { model: hm, .. }, Inflight::Hybrid { decode, .. }) => {
+            (LoadedModel::Hybrid(crate::model::HybridHipModel { model: hm, .. }), Inflight::Hybrid { decode, .. }) => {
                 let head_stage = decode.head_stage as usize;
                 let stage_model = hm.stages.get(head_stage).ok_or_else(|| {
                     anyhow!("GPU sampler: hybrid head_stage {head_stage} out of range")
@@ -3528,14 +3528,14 @@ fn run_completion_blocking_ids(
     // **#321** — TP/Hybrid prefill alloc serialiser. See field
     // doc on ServerState::prefill_serialiser.
     let _prefill_lock = if matches!(model,
-        LoadedModel::Tp { .. } | LoadedModel::Hybrid { .. }
+        LoadedModel::Tp(_) | LoadedModel::Hybrid(_)
     ) {
         Some(state.prefill_serialiser.lock().unwrap())
     } else {
         None
     };
     // **#324** — for TP, hand the shared pre-allocated scratch through.
-    let mut tp_scratch_g = if matches!(model, LoadedModel::Tp { .. }) {
+    let mut tp_scratch_g = if matches!(model, LoadedModel::Tp(_)) {
         Some(state.lock_tp_prefill_scratch()?)
     } else {
         None
@@ -3547,7 +3547,7 @@ fn run_completion_blocking_ids(
     // outcomes per `prefix_cache_try_restore`. Bypass when logprobs
     // or MTP spec-decode active.
     let cache_eligible = params.collect_logprobs.is_none()
-        && !matches!(model, LoadedModel::Pp { mtp: Some(_), .. });
+        && !matches!(model, LoadedModel::Pp(crate::model::PpHipModel { mtp: Some(_), .. }));
     let restore = if cache_eligible {
         state.prefix_cache_try_restore(&mut inflight, &prompt_ids)?
     } else {
@@ -3766,7 +3766,7 @@ fn run_completion_blocking_ids(
     // MTP distributions inside `build_distribution` via the threaded
     // `history` slice (/h #194), so penalty-active requests no
     // longer have to fall through.
-    let spec_available = matches!(model, LoadedModel::Pp { mtp: Some(_), .. });
+    let spec_available = matches!(model, LoadedModel::Pp(crate::model::PpHipModel { mtp: Some(_), .. }));
     let use_spec = spec_available;
     if use_spec {
         // h_for_mtp at first macro step = h@(prompt_len-1), which lives in
@@ -3780,7 +3780,7 @@ fn run_completion_blocking_ids(
             _ => bail!("spec-decode requires Inflight::Pp"),
         };
         let m = match model {
-            LoadedModel::Pp { model, .. } => model,
+            LoadedModel::Pp(crate::model::PpHipModel { model, .. }) => model,
             _ => bail!("spec-decode requires LoadedModel::Pp"),
         };
         let mut spec_state = SpecDecodePp::new(m, cluster).context("alloc SpecDecodePp")?;
@@ -4011,10 +4011,10 @@ fn run_completion_blocking_ids(
     // topology.
     if let Some(scratch) = gpu_scratch.take() {
         let head_device = match (model, &inflight) {
-            (LoadedModel::Tp { .. }, Inflight::Tp { decode, .. }) => {
+            (LoadedModel::Tp(_), Inflight::Tp { decode, .. }) => {
                 cluster.device(decode.head_rank.0 as usize)
             }
-            (LoadedModel::Hybrid { model: hm, .. }, Inflight::Hybrid { decode, .. }) => {
+            (LoadedModel::Hybrid(crate::model::HybridHipModel { model: hm, .. }), Inflight::Hybrid { decode, .. }) => {
                 let head_stage = decode.head_stage as usize;
                 let stage_model = hm.stages.get(head_stage).ok_or_else(|| {
                     anyhow!("dispose GpuSamplerScratch: hybrid head_stage out of range")
@@ -4144,14 +4144,14 @@ fn run_completion_blocking_streaming(
     // **#321** — TP/Hybrid prefill alloc serialiser. See field
     // doc on ServerState::prefill_serialiser.
     let _prefill_lock = if matches!(model,
-        LoadedModel::Tp { .. } | LoadedModel::Hybrid { .. }
+        LoadedModel::Tp(_) | LoadedModel::Hybrid(_)
     ) {
         Some(state.prefill_serialiser.lock().unwrap())
     } else {
         None
     };
     // **#324** — for TP, hand the shared pre-allocated scratch through.
-    let mut tp_scratch_g = if matches!(model, LoadedModel::Tp { .. }) {
+    let mut tp_scratch_g = if matches!(model, LoadedModel::Tp(_)) {
         Some(state.lock_tp_prefill_scratch()?)
     } else {
         None
@@ -4341,7 +4341,7 @@ fn run_completion_blocking_streaming(
     // streaming + 5g/h penalty-aware: spec-decode SSE path. Active
     // when MTP head is loaded. Penalties applied in build_distribution via
     // the threaded `&generated` history. Mirrors the non-streaming branch.
-    let spec_available = matches!(model, LoadedModel::Pp { mtp: Some(_), .. });
+    let spec_available = matches!(model, LoadedModel::Pp(crate::model::PpHipModel { mtp: Some(_), .. }));
     let use_spec = spec_available;
     if use_spec {
         let last_rank = cluster.ranks() - 1;
@@ -4353,7 +4353,7 @@ fn run_completion_blocking_streaming(
             _ => bail!("spec-decode requires Inflight::Pp"),
         };
         let m = match model {
-            LoadedModel::Pp { model, .. } => model,
+            LoadedModel::Pp(crate::model::PpHipModel { model, .. }) => model,
             _ => bail!("spec-decode requires LoadedModel::Pp"),
         };
         let mut spec_state = SpecDecodePp::new(m, cluster).context("alloc SpecDecodePp")?;
