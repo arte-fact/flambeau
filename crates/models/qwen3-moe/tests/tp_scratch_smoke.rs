@@ -1,5 +1,4 @@
-//! TP-2a — `ShardedForwardOneTokenScratchTp` allocation smoke.
-//!
+//! `ShardedForwardOneTokenScratchTp` allocation smoke.
 //! Allocates the TP scratch on a 4× HIP cluster, verifies per-rank
 //! byte budget, then disposes. GPU-gated; skips cleanly without HIP.
 
@@ -98,7 +97,7 @@ fn tp_scratch_allocates_and_disposes() -> Result<()> {
     );
 
     eprintln!(
-        "TP-2a scratch (Qwen3.5-27B): rank-level = {:.2} MiB/rank x {} ranks = {:.2} MiB total",
+        "TP scratch (Qwen3.5-27B): rank-level = {:.2} MiB/rank x {} ranks = {:.2} MiB total",
         expected_per_rank as f64 / 1024.0 / 1024.0,
         cluster.ranks(),
         scratch.rank_level_bytes() as f64 / 1024.0 / 1024.0
@@ -139,7 +138,7 @@ fn tp_scratch_rejects_out_of_range_head_rank() -> Result<()> {
 
 #[test]
 fn tp_prefill_scratch_allocates_and_disposes() -> Result<()> {
-    // **AUTO-6b1** — same shape invariants as the decode scratch but
+    // 1** — same shape invariants as the decode scratch but
     // every per-rank buffer is grown by `max_tokens`. Skips cleanly
     // without HIP.
     match device_count() {
@@ -194,7 +193,7 @@ fn tp_prefill_scratch_allocates_and_disposes() -> Result<()> {
     );
 
     eprintln!(
-        "AUTO-6b1 prefill scratch (Qwen3.5-27B, L={max_tokens}): rank-level = {:.2} MiB/rank \
+        "prefill scratch (Qwen3.5-27B, L={max_tokens}): rank-level = {:.2} MiB/rank \
          × {} ranks = {:.2} MiB total",
         expected_per_rank as f64 / 1024.0 / 1024.0,
         cluster.ranks(),

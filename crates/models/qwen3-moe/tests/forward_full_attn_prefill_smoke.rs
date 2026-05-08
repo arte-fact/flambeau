@@ -1,4 +1,4 @@
-//! V1.7.3-f1 smoke test — full-attention prefill over L = 4 tokens on real
+//! f1 smoke test — full-attention prefill over L = 4 tokens on real
 //! HIP with zero Q8_0 projection weights. Verifies that the prefill
 //! function runs to completion, appends 4 tokens to the KV cache, and
 //! writes a finite near-zero delta for every input row.

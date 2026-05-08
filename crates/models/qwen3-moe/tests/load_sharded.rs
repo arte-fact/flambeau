@@ -1,10 +1,9 @@
-//! V1.7.5.A smoke test — load a real GGUF across N ranks and assert each
+//! smoke test — load a real GGUF across N ranks and assert each
 //! rank holds only its assigned layers + the correct globals.
-//!
 //! Skips when `FLAMBEAU_QWEN3_GGUF` is unset OR device_count < 2 (the
 //! single-device case is already covered by `load_weights.rs`). With the
 //! 20 GB Qwen3.6-31B model across 4×16 GB cards, each rank gets ~5 GB of
-//! weights — the whole point of V1.7.5 is to unblock this load.
+//! weights — the whole point of is to unblock this load.
 
 #![cfg(feature = "hip")]
 
@@ -73,11 +72,11 @@ fn load_sharded_qwen3_moe_across_all_ranks() -> Result<()> {
     let model = Qwen3MoEShardedModel::load(&file, &cluster, &assignment)?;
 
     // Invariants:
-    //   1. One shard per rank.
-    //   2. Each shard holds exactly the layers assigned to its rank.
-    //   3. Rank 0's shard holds `token_embd` (always); last rank's shard
-    //      holds `output_norm` and (iff tied) `token_embd`.
-    //   4. No layer lives on more than one rank.
+    // 1. One shard per rank.
+    // 2. Each shard holds exactly the layers assigned to its rank.
+    // 3. Rank 0's shard holds `token_embd` (always); last rank's shard
+    // holds `output_norm` and (iff tied) `token_embd`.
+    // 4. No layer lives on more than one rank.
     assert_eq!(model.shards.len(), cluster.ranks());
 
     let mut seen_layers: std::collections::HashSet<usize> = std::collections::HashSet::new();

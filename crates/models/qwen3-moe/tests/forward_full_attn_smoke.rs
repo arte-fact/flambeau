@@ -1,12 +1,10 @@
-//! V1.7.3-b smoke test — run one decode step of `forward_full_attn_decode`
+//! b smoke test — run one decode step of `forward_full_attn_decode`
 //! on real HIP hardware with dummy weights + inputs. Verifies the whole
 //! kernel chain (rmsnorm → mmvq → cast → split_q_gate → per-head rmsnorm
 //! → RoPE → kv append → attention_decode → swiglu → mmvq → cast) wires up
 //! without panicking and writes a finite (non-NaN, non-Inf) output.
-//!
 //! This is not a correctness cert — it's the "no crash, no NaN" gate.
-//! Per-layer parity vs llama.cpp lands in V1.7.4.
-
+//! Per-layer parity vs llama.cpp lands in 
 #![cfg(feature = "hip")]
 
 #![expect(
@@ -259,7 +257,7 @@ fn forward_full_attn_decode_smoke() -> Result<()> {
         out_host[0].to_f32()
     );
 
-    // Teardown — explicit, matches the dispose pattern in V1.7.3-a.
+    // Teardown — explicit, matches the dispose pattern in a.
     unsafe {
         device.dealloc(x_in, x_bytes)?;
         device.dealloc(delta_out, x_bytes)?;

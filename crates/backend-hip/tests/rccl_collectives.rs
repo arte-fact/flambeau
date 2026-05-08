@@ -1,9 +1,7 @@
-//! End-to-end RCCL vs CPU-host-bounce correctness — the V1.2 cert gate.
-//!
+//! End-to-end RCCL vs CPU-host-bounce correctness — the cert gate.
 //! Skips cleanly if fewer than 2 HIP devices are present. On the 4× MI50 rig
 //! this exercises Mesh<2> and Mesh<4> for AllReduce / AllGather / AllToAll /
 //! Broadcast against the reference implementation in `flambeau-runtime`.
-//!
 //! Currently gated `#[ignore]`: `ncclAllReduce` segfaults on ROCm 7.2.1 +
 //! 4× MI50 + PCIe (no xGMI). The pure-C equivalent crashes the same way, so
 //! this is an environmental / RCCL-build issue, not an FFI bug. Re-enable

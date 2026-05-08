@@ -1,9 +1,7 @@
 //! Integration test — parse config + layout from a real Qwen3-family MoE GGUF.
-//!
 //! Set `FLAMBEAU_QWEN3_GGUF=/path/to/qwen3moe.gguf` to enable the real-file
 //! tests; otherwise they skip. Any GGUF whose `general.architecture` is one
 //! of `qwen3moe` / `qwen35moe` / `qwen36moe` works.
-//!
 //! The V1 reference is `Qwen3.6-35B-A3B-UD-Q4_K_S.gguf` (arch=qwen35moe,
 //! hybrid GDN + full-attention + MoE-with-shared-expert).
 

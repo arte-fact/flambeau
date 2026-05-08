@@ -1,5 +1,4 @@
 //! Standalone RCCL AllReduce — no CPU-ref interleaving, single shot.
-//!
 //! Gated `#[ignore]` because `ncclAllReduce` segfaults on the ROCm 7.2.1 +
 //! 4× MI50 rig we currently ship against. The pure-C equivalent crashes the
 //! same way, so the issue is environmental (likely P2P / PCIe topology), not

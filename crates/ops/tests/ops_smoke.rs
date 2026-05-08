@@ -1,11 +1,9 @@
 //! Smoke test — boot the OpsRegistry on a real MI50 + run one op per family.
-//!
-//! This is a V1.7.1 gate: if any kernel stem named in `KERNEL_STEMS` is
+//! This is a gate: if any kernel stem named in `KERNEL_STEMS` is
 //! missing from the compiled HSACO catalogue, `OpsRegistry::new` fails.
 //! If any op wrapper disagrees with its kernel's entry symbol or launch
 //! config, the launch returns a HIP error.
-//!
-//! We don't assert numerical correctness here — that's what the V1.3–V1.6
+//! We don't assert numerical correctness here — that's what the –
 //! certs in `certs/hip/gfx906/` are for. We only want the ops surface to
 //! round-trip through the real driver.
 

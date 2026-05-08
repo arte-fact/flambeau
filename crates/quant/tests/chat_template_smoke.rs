@@ -1,13 +1,11 @@
-//! V1.8.A.3 chat-template smoke + structural parity.
-//!
+//! chat-template smoke + structural parity.
 //! llama.cpp's apply_chat_template on Qwen3.6 produces a string with
 //! `<|im_start|>{role}\n{content}<|im_end|>\n` turns. We check that our
 //! minijinja render:
-//!  1. Produces non-empty output.
-//!  2. Contains the expected role/content markup for each message.
-//!  3. With `add_generation_prompt=true`, ends with an open assistant turn
-//!     (`<|im_start|>assistant\n`) — so the model decodes into it.
-//!
+//! 1. Produces non-empty output.
+//! 2. Contains the expected role/content markup for each message.
+//! 3. With `add_generation_prompt=true`, ends with an open assistant turn
+//! (`<|im_start|>assistant\n`) — so the model decodes into it.
 //! Full llama.cpp byte-exact parity is a larger follow-up (requires
 //! extracting the exact whitespace + macro-rendering llama.cpp does; the
 //! Qwen template has conditional branches for tools/images/thinking that
@@ -180,7 +178,7 @@ NO_TOOLS
     );
 
     // Back-compat: render() delegates to render_with_tools with None, so
-    // the pre-V2.12 empty-tools behaviour is preserved byte-for-byte.
+    // the pre-2 empty-tools behaviour is preserved byte-for-byte.
     let r_compat = tpl.render(&msgs, false).expect("render compat");
     assert_eq!(r_compat, r_none);
 }

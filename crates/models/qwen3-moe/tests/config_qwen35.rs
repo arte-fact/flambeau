@@ -1,6 +1,6 @@
-//! V2.2.a scaffold: `Qwen3MoEConfig::from_gguf` + `ModelLayout::from_gguf`
+//! scaffold: `Qwen3MoEConfig::from_gguf` + `ModelLayout::from_gguf`
 //! + sharded weight upload accept arch=`qwen35` (dense-hybrid). The forward
-//! + parity land in V2.2.b (Q4_1 MMVQ) and V2.2.c (dense FFN forward).
+//! + parity land in (Q4_1 MMVQ) and (dense FFN forward).
 
 use flambeau_quant::GgufFile;
 use flambeau_qwen3_moe::Qwen3MoEConfig;
@@ -97,8 +97,8 @@ fn qwen35_loads_on_mesh1() -> anyhow::Result<()> {
 
     let cluster = HipCluster::new(&[0])?;
     let assignment = LayerAssignment::contiguous(cfg.num_layers, 1);
-    // Exit criterion for V2.2.a: upload succeeds without error. Forward
-    // fails until V2.2.b (Q4_1 MMVQ) + V2.2.c (forward_dense_ffn_decode)
+    // Exit criterion for upload succeeds without error. Forward
+    // fails until (Q4_1 MMVQ) + (forward_dense_ffn_decode)
     // land.
     let model = Qwen3MoEShardedModel::load(&file, &cluster, &assignment)?;
     let bytes = model.shards[0].total_bytes();

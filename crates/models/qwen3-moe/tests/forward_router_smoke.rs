@@ -1,15 +1,14 @@
-//! V1.7.3-d3 smoke test — router (`forward_router_decode`) end-to-end into
+//! d3 smoke test — router (`forward_router_decode`) end-to-end into
 //! `forward_moe_ffn_decode`. Replaces the hardcoded routing used by the
-//! V1.7.3-d1 smoke with real top-k + softmax on logits produced from
+//! d1 smoke with real top-k + softmax on logits produced from
 //! F32×F16 dense GEMV.
-//!
 //! Invariants:
 //! - Router weight is F32, shape `[n_experts, hidden]` (outermost-first).
 //! - With zero expert matmul weights the routed contribution is still zero,
-//!   so `out == residual` exactly — same assertion as V1.7.3-d1 but now
-//!   driven by a real router pick rather than hand-chosen ids.
+//! so `out == residual` exactly — same assertion as d1 but now
+//! driven by a real router pick rather than hand-chosen ids.
 //! - Asserts `expert_ids` and `expert_weights` device buffers are populated
-//!   with finite top-k values (read back to host and sanity-checked).
+//! with finite top-k values (read back to host and sanity-checked).
 
 #![cfg(feature = "hip")]
 

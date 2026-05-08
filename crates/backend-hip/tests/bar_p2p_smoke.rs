@@ -1,10 +1,8 @@
-//! TP-0c — `BarP2pAllReduce` end-to-end smoke test.
-//!
+//! `BarP2pAllReduce` end-to-end smoke test.
 //! Validates that the high-level wrapper (`BarP2pAllReduce::residual_tp4`)
 //! produces the same result as the direct kernel-launch path tested in
 //! `tests/p2p_allreduce_smoke.rs`. Runs a single shape (N=5120, the
 //! Qwen3.5-27B hidden_size — the load-bearing TP target) at TP=4.
-//!
 //! Skipped at runtime when fewer than 4 HIP devices are visible or the
 //! cluster's peer-access matrix isn't fully connected.
 

@@ -1,4 +1,4 @@
-//! V1.7.3-f4 capstone smoke test — `forward_prefill` end-to-end for an L=4
+//! f4 capstone smoke test — `forward_prefill` end-to-end for an L=4
 //! prompt through a 2-layer synthetic hybrid model (layer 0 = GDN, layer 1
 //! = full-attn). Exercises every prefill path (embed → GDN prefill →
 //! full-attn prefill → MoE prefill + shared prefill + router prefill →
@@ -36,7 +36,7 @@ fn hip_device() -> Option<HipDevice> {
 }
 
 fn f4_cfg() -> Qwen3MoEConfig {
-    // Same shape as the V1.7.3-e5 end-to-end decode capstone — ensures the
+    // Same shape as the e5 end-to-end decode capstone — ensures the
     // prefill path is exercised against the same fixture shape.
     Qwen3MoEConfig {
         arch: "qwen35moe".into(),
@@ -71,7 +71,7 @@ fn f4_cfg() -> Qwen3MoEConfig {
     }
 }
 
-// Cookie-cutter alloc helpers — same as V1.7.3-e5 smoke, duplicated to
+// Cookie-cutter alloc helpers — same as e5 smoke, duplicated to
 // keep the test file self-contained.
 
 fn alloc_q4k_2d(device: &HipDevice, name: &str, n_rows: usize, k: usize) -> Result<DeviceTensor> {

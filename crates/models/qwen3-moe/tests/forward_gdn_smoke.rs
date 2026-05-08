@@ -1,9 +1,8 @@
-//! V1.7.3-c2 smoke test — run one decode step of `forward_gdn_decode` on
+//! c2 smoke test — run one decode step of `forward_gdn_decode` on
 //! real HIP hardware with dummy weights and assert the 17-step kernel chain
 //! produces finite output. Fixture uses S_v=128 (the only instantiation of
 //! the GDN state-step kernel today).
-//!
-//! Not a correctness cert; that lands in V1.7.4. This just validates the
+//! Not a correctness cert; that lands in This just validates the
 //! kernel composition + pointer plumbing + conv-history rotation +
 //! alpha/beta host compute + state-alias handling.
 
@@ -36,7 +35,7 @@ fn hip_device() -> Option<HipDevice> {
 }
 
 /// Smallest GDN fixture that respects the kernel constraints:
-/// - `head_k_dim == head_v_dim == 128` (V1.7.2.F kernel specialisation)
+/// - `head_k_dim == head_v_dim == 128` (kernel specialisation)
 /// - `hidden % 32 == 0` (Q8_1 quant)
 /// - `d_inner % 32 == 0` (ssm_out Q8_1 quant)
 fn tiny_gdn_cfg() -> Qwen3MoEConfig {

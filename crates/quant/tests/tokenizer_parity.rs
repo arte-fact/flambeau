@@ -1,6 +1,5 @@
-//! V1.8.A.2 tokenizer parity — encode matches llama.cpp on Qwen3.6-35B.
-//!
-//! Seed token "Hello" (token 9419) is what V1.7.4.b parity cert uses; if our
+//! tokenizer parity — encode matches llama.cpp on Qwen3.6-35B.
+//! Seed token "Hello" (token 9419) is what parity cert uses; if our
 //! tokenizer produces a different id, the whole decode-parity chain breaks.
 //! Env-gated on `FLAMBEAU_QWEN3_GGUF` (full Qwen3.6-35B GGUF).
 
@@ -26,7 +25,7 @@ fn encode_hello_matches_llama_cpp() {
         tok.vocab_size, tok.bos_id, tok.eos_id, tok.pad_id
     );
     // Reference from llama.cpp's tokenization of "Hello" (no BOS) on Qwen3.6-UD-Q4_K_S:
-    //   token 9419 = "Hello" (single-token).
+    // token 9419 = "Hello" (single-token).
     let ids = tok.encode("Hello").expect("encode");
     eprintln!("encode('Hello') = {ids:?}");
     assert_eq!(

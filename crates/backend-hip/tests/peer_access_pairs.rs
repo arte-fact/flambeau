@@ -1,7 +1,7 @@
 //! Diagnostic — bracket every 2-device sub-cluster and print whether
 //! `peer_access_full` is true. Useful when the 4-card matrix shows full
 //! access but a 2-device sub-cluster mysteriously fails (which is what
-//! AUTO-4d hit — `[0,2]` and `[1,3]` both report off-diagonal 0 on this
+//! hit — `[0,2]` and `[1,3]` both report off-diagonal 0 on this
 //! rig despite `[0,1,2,3]` showing full access).
 
 use flambeau_backend_hip::{device_count, HipCluster};

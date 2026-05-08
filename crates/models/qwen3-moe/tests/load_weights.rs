@@ -1,7 +1,6 @@
 //! Integration test — upload a full Qwen3.x MoE model to HIP + allocate a
 //! session's caches. Skips when either `FLAMBEAU_QWEN3_GGUF` is unset or
 //! there is no HIP device available (sandbox / CI lint hosts).
-//!
 //! Reference model: Qwen3.6-35B-A3B-UD-Q4_K_S.gguf — ~20 GB of weights,
 //! 40 layers, 30 GDN + 10 full-attn, 32 num_v_heads × 128² × 30 ≈ 60 MB
 //! of GDN state for the full context.
@@ -56,14 +55,14 @@ fn upload_full_qwen3_moe_model() -> Result<()> {
         flambeau_qwen3_moe::ModelLayout::from_gguf(&file, &cfg)?.total_bytes() as usize;
 
     // VRAM pre-check. Qwen3.6-35B at ~20 GB doesn't fit on 16 GB MI50; the
-    // real Mesh<N>-sharded load lands in V1.7.5. Skip rather than OOM so
+    // real Mesh<N>-sharded load lands in Skip rather than OOM so
     // CI hosts with small cards still run the scaffold path against any
     // GGUF whose layout total fits in a single card's VRAM.
     if let Some(vram) = card0_vram_bytes() {
         if (expected_layout_bytes as u64) + 512 * 1024 * 1024 > vram {
             eprintln!(
                 "skipping upload: model needs {:.2} GiB but device has {:.2} GiB — \
-                 run against a smaller GGUF until Mesh<N> sharding lands (V1.7.5)",
+                 run against a smaller GGUF until Mesh<N> sharding lands",
                 expected_layout_bytes as f64 / (1024.0 * 1024.0 * 1024.0),
                 vram as f64 / (1024.0 * 1024.0 * 1024.0),
             );

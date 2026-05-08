@@ -1,5 +1,4 @@
-//! CN-80B-19c/d — parity test for the fused `swiglu_f32_to_q8_1` kernel.
-//!
+//! /d — parity test for the fused `swiglu_f32_to_q8_1` kernel.
 //! Compares the fused kernel's Q8_1 output against the unfused chain
 //! (`swiglu_f32` → `quantize_q8_1`) on the same F32 inputs. Every Q8_1
 //! block (32 elements) must match exactly: same `d` (F16), same `s`

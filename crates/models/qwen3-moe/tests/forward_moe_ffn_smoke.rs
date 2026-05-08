@@ -1,4 +1,4 @@
-//! V1.7.3-d1 smoke test — routed MoE FFN decode step on real HIP with zero
+//! d1 smoke test — routed MoE FFN decode step on real HIP with zero
 //! Q4_K weights + hardcoded routing. Asserts the composition (quant →
 //! indexed gate+up → swiglu → cast → quant → indexed down → cast → combine)
 //! produces finite output and that `moe_combine_f16` with zero expert
@@ -172,7 +172,7 @@ fn forward_moe_ffn_decode_smoke() -> Result<()> {
         inter,
     )?;
 
-    // ffn_gate_inp is unused in V1.7.3-d1 (router lands in d3) — we still
+    // ffn_gate_inp is unused in d1 (router lands in d3) — we still
     // populate the DeviceTensor field with a placeholder so FfnWeights is
     // complete.
     let gate_inp_host = vec![0.0f32; n_experts * hidden];

@@ -1,8 +1,7 @@
-//! V2.31.b diagnostic — compare `flambeau_mmvq_q8_0_r4_dp4a_q8_1` output
+//! 1.b diagnostic — compare `flambeau_mmvq_q8_0_r4_dp4a_q8_1` output
 //! vs `flambeau_mmvq_q8_0_dp4a_vdr2_q8_1` output on a tiny matrix.
-//!
 //! The r4 kernel produces different last_ids on 27B decode (per
-//! V2.31.b initial run). This is a minimal reproducer to find the
+//! 1.b initial run). This is a minimal reproducer to find the
 //! divergence point.
 
 #![cfg(feature = "hip")]
@@ -65,7 +64,7 @@ fn mmvq_q8_0_r4_matches_vdr2() -> Result<()> {
     };
     let reg = flambeau_ops::OpsRegistry::new(&dev)?;
 
-    // V2.31.b realistic 27B attn_q fused Q|gate shape: n_rows=12288,
+    // 1.b realistic 27B attn_q fused Q|gate shape: n_rows=12288,
     // k=5120 = 160 blocks. Start there — bug may only appear at
     // production-sized shapes.
     let n_rows: usize = std::env::var("TEST_N_ROWS")

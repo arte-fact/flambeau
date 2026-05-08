@@ -1,5 +1,4 @@
-//! V2.2.c smoke test — real-weight Qwen3.5-9B-Q4_1 on Mesh<1>.
-//!
+//! smoke test — real-weight Qwen3.5-9B-Q4_1 on Mesh<1>.
 //! First end-to-end exercise of the dense-FFN forward path + Q4_1 MMVQ
 //! kernel. Success = `forward_one_token_pp` returns a valid token id
 //! without crashing. Parity vs llama.cpp is a separate cert.

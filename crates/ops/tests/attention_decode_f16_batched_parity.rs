@@ -1,20 +1,18 @@
 //! #266b parity test — verify `attention_decode_f16_batched` produces
 //! output bit-identical to running `attention_decode_f16_slots` once
 //! per slot.
-//!
 //! Each (q_head, slot) block in the batched kernel reuses the same
 //! flash-attn-v2 body as the single-slot kernel; the only difference
 //! is per-slot pointer/length rebinding before the compute body runs.
 //! Therefore parity should be **bit-identical** for any N — the floats
 //! traverse the same operations in the same order.
-//!
 //! Sweep:
-//!   - N ∈ {1, 2, 4, 8}
-//!   - n_kv_tokens per slot: heterogeneous within the batch (stress the
-//!     per-slot loop bound in the kernel)
-//!   - (n_heads_q, n_heads_kv): (32, 4) for Qwen3.5 GQA-32/4 and
-//!     (16, 2) for Qwen3.6 GQA-16/2
-//!   - head_dim ∈ {128, 256}
+//! - N ∈ {1, 2, 4, 8}
+//! - n_kv_tokens per slot: heterogeneous within the batch (stress the
+//! per-slot loop bound in the kernel)
+//! - (n_heads_q, n_heads_kv): (32, 4) for Qwen3.5 GQA-32/4 and
+//! (16, 2) for Qwen3.6 GQA-16/2
+//! - head_dim ∈ {128, 256}
 
 #![cfg(feature = "hip")]
 #![expect(
@@ -133,7 +131,7 @@ fn run_parity(
     let scale = (head_dim as f32).sqrt().recip();
 
     // 1. Build host-side Q (one row per slot) and per-slot K/V caches sized
-    //    to that slot's `n_kv_tokens`.
+    // to that slot's `n_kv_tokens`.
     let mut all_q: Vec<f16> = Vec::with_capacity(n_slots * q_per_slot);
     let mut per_slot_k: Vec<Vec<f16>> = Vec::with_capacity(n_slots);
     let mut per_slot_v: Vec<Vec<f16>> = Vec::with_capacity(n_slots);

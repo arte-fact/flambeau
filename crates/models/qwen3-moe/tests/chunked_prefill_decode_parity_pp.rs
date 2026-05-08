@@ -1,18 +1,15 @@
 //! **#242 Phase B2** — chunked-prefill-then-decode token-id parity test (PP).
-//!
 //! Phase A2/A3/B1 (`chunked_prefill_kv_parity.rs`) verified that chunked
 //! prefill leaves the per-layer KV state byte-equal to single-shot
 //! prefill. Phase B2 closes the next gap: that the decode loop driven
 //! from a chunked-prefill session produces the same token-id sequence
 //! as decode from a single-shot prefill session.
-//!
 //! KV parity is necessary but not sufficient — even if KV bytes
 //! match, divergent scratch contents, residual stream snapshots, or
 //! position-tracking off-by-ones inside `forward_one_token_pp` could
 //! make decode disagree. This test runs prefill + 16 greedy decodes
 //! through both paths and asserts the 16-token sequences are
 //! identical.
-//!
 //! Skipped when the GGUF is missing or fewer than 4 HIP devices are
 //! available. Runs under `FLAMBEAU_MAX_CTX=2048`.
 

@@ -1,9 +1,7 @@
 //! #266b microbench — wall-clock A/B between serial-per-slot and batched
 //! attention decode at the Qwen3.6-27B / pp2tp2 / N∈{2,4,8} shape.
-//!
 //! Not a perf gate (that's #266d's throughput cert); this just sanity-
 //! checks the direction-of-win and rules out a regression at N=1.
-//!
 //! Run with: `cargo test --release -p flambeau-ops --features hip --test
 //! attention_decode_f16_batched_perf -- --nocapture --ignored`.
 

@@ -1,4 +1,4 @@
-//! V1.7.3-e5 capstone smoke test — `forward_one_token` end-to-end with a
+//! e5 capstone smoke test — `forward_one_token` end-to-end with a
 //! tiny synthetic 2-layer model that exercises BOTH the full-attention
 //! (il=1) and the GDN (il=0) paths in a single decode step. Router uses
 //! real F32 GEMV + topk. All Q4_K matmul weights are zero, so the MoE
@@ -37,8 +37,8 @@ fn hip_device() -> Option<HipDevice> {
 
 fn e5_cfg() -> Qwen3MoEConfig {
     // 2 layers, `full_attention_interval = 2` so:
-    //   is_recurrent(0) = (0+1) % 2 = 1 != 0 → GDN
-    //   is_recurrent(1) = (1+1) % 2 = 0      → full-attn
+    // is_recurrent(0) = (0+1) % 2 = 1 != 0 → GDN
+    // is_recurrent(1) = (1+1) % 2 = 0 → full-attn
     // This exercises both per-layer branches in one forward call.
     Qwen3MoEConfig {
         arch: "qwen35moe".into(),

@@ -1,10 +1,8 @@
-//! TP-0b correctness + latency cert for the BAR1 P2P AllReduce kernel.
-//!
+//! correctness + latency cert for the BAR1 P2P AllReduce kernel.
 //! Sweeps `flambeau_p2p_allreduce_residual_tp4` and `_sum_tp4` at
 //! N ∈ {1024, 5120, 8192, 16384, 65536} fp16 elements; emits
 //! `certs/hip/gfx906/p2p_allreduce_residual_tp4.json` with per-N
 //! `(max_abs_err, latency_us)` records.
-//!
 //! Skipped at runtime when fewer than 4 HIP devices are visible, or when
 //! the cluster's peer-access matrix isn't fully connected.
 
@@ -28,13 +26,13 @@ use half::f16;
 const TP4_RESIDUAL_FN: &str = "flambeau_p2p_allreduce_residual_tp4";
 const HSACO_NAME: &str = "p2p_allreduce_residual";
 // Production hidden_size values for V1/V2 targets:
-//   - 2048 (Qwen3.6-35B-A3B, Qwen3-Coder-30B)
-//   - 4096 (Qwen3.5-9B)
-//   - 5120 (Qwen3.5-27B)
+// - 2048 (Qwen3.6-35B-A3B, Qwen3-Coder-30B)
+// - 4096 (Qwen3.5-9B)
+// - 5120 (Qwen3.5-27B)
 // Plus 1024 / 8192 to bracket. Larger sizes (16384, 65536) trigger a
 // cross-rank dealloc-vs-stale-peer-read race (code 719 on next-iter
-// upload) that's outside TP-0b's correctness scope; revisit when batch
-// AR (multi-token) needs them in TP-3+.
+// upload) that's outside correctness scope; revisit when batch
+// AR (multi-token) needs them in +.
 const SWEEP_NS: &[usize] = &[1024, 2048, 4096, 5120, 8192];
 const TP4_BLOCK_THREADS: u32 = 256;
 // Tolerance: each fp16 round-trip via FP32 accumulate introduces ≤ 2^-10
@@ -110,7 +108,7 @@ fn tp4_residual_correctness_sweep_and_latency() {
     }
     let cluster = HipCluster::new(&[0, 1, 2, 3]).expect("HipCluster::new");
     if !cluster.peer_access_full() {
-        eprintln!("[skip] BAR1 peer-access matrix is not fully connected; need TP-0a green");
+        eprintln!("[skip] BAR1 peer-access matrix is not fully connected");
         return;
     }
 

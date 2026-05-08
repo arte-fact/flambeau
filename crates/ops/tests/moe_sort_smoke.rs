@@ -1,4 +1,4 @@
-//! V2.5.a — smoke test for `moe_sort_by_expert`: verify that the 3-kernel
+//! smoke test for `moe_sort_by_expert`: verify that the 3-kernel
 //! sort groups (token, slot) pair indices by expert_id correctly.
 
 #![cfg(feature = "hip")]

@@ -1,11 +1,10 @@
 //! End-to-end correctness for `flambeau_mmvq_q4_k_q8_1` on MI50 vs CPU
 //! dequant + f32 matmul (with Q8_1 activation round-trip to isolate kernel
 //! arithmetic from quant-representation noise).
-//!
 //! Generates Q4_K blocks by direct byte randomisation — the kernel's
 //! arithmetic operates on whatever bit pattern the blocks hold, so the
 //! cert is valid regardless of whether the weights came from a real
-//! `make_qkx1_quants` quantiser. Future V1.3 cert grid will fold in real
+//! `make_qkx1_quants` quantiser. Future cert grid will fold in real
 //! round-trip GGUFs.
 
 #![expect(
@@ -269,7 +268,7 @@ fn mmvq_q4_k_qwen_2048() {
     let (got, reference) = run_mmvq_q4_k(8, k, 0xFEEDFACE);
     let err = max_rel_err(&got, &reference);
     // Tol = 1e-2 * sqrt(K/128). The sqrt(K) factor tracks F32 accumulation
-    // noise for K-scale dot products; 1e-2 is the V1.3 MMVQ cert constant
+    // noise for K-scale dot products; 1e-2 is the MMVQ cert constant
     // (tighter 5e-3 variant lands once we move to Kahan accumulation).
     let tol = 1e-2 * (k as f32 / 128.0).sqrt();
     eprintln!("[mmvq_q4_k 8×{k}] max_rel_err={err:.3e}, tol={tol:.3e}");
@@ -286,7 +285,7 @@ fn mmvq_q4_k_5120() {
     let (got, reference) = run_mmvq_q4_k(16, k, 0x12345678);
     let err = max_rel_err(&got, &reference);
     // Tol = 1e-2 * sqrt(K/128). The sqrt(K) factor tracks F32 accumulation
-    // noise for K-scale dot products; 1e-2 is the V1.3 MMVQ cert constant
+    // noise for K-scale dot products; 1e-2 is the MMVQ cert constant
     // (tighter 5e-3 variant lands once we move to Kahan accumulation).
     let tol = 1e-2 * (k as f32 / 128.0).sqrt();
     eprintln!("[mmvq_q4_k 16×{k}] max_rel_err={err:.3e}, tol={tol:.3e}");
@@ -302,7 +301,7 @@ fn mmvq_q4_k_15360() {
     let (got, reference) = run_mmvq_q4_k(4, k, 0xABCDEF01);
     let err = max_rel_err(&got, &reference);
     // Tol = 1e-2 * sqrt(K/128). The sqrt(K) factor tracks F32 accumulation
-    // noise for K-scale dot products; 1e-2 is the V1.3 MMVQ cert constant
+    // noise for K-scale dot products; 1e-2 is the MMVQ cert constant
     // (tighter 5e-3 variant lands once we move to Kahan accumulation).
     let tol = 1e-2 * (k as f32 / 128.0).sqrt();
     eprintln!("[mmvq_q4_k 4×{k}] max_rel_err={err:.3e}, tol={tol:.3e}");

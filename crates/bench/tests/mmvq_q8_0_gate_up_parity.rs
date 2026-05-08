@@ -1,9 +1,8 @@
-//! V2.20.b parity — verify `mmvq_q8_0_gate_up_dp4a` output matches two
+//! 0.b parity — verify `mmvq_q8_0_gate_up_dp4a` output matches two
 //! independent `mmvq_q8_0_dp4a_vdr2` calls within F16 round-trip noise at
 //! the dense-FFN shape (27B-Q8_0: hidden=5120, inter=17408) and a smaller
 //! full-attn-style shape (hidden=5120, n_kv_heads*head_dim=1024) for good
 //! measure.
-//!
 //! Run: `cargo test --release -p flambeau-bench --features hip --test
 //! mmvq_q8_0_gate_up_parity -- --nocapture`.
 

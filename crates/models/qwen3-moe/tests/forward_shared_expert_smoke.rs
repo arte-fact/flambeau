@@ -1,4 +1,4 @@
-//! V1.7.3-d2 smoke test — shared expert decode step on real HIP with zero
+//! d2 smoke test — shared expert decode step on real HIP with zero
 //! Q4_K weights. Asserts the 8-op chain (quant → 2× dense gate/up mmvq →
 //! swiglu_f32 → cast → quant → down mmvq → cast x_norm → shared_expert_scale →
 //! cast) produces a finite, all-zero F16 output (zero matmul outputs stay

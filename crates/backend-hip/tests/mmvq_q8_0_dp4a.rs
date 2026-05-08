@@ -1,5 +1,4 @@
 //! Parity: `flambeau_mmvq_q8_0_dp4a_q8_1` vs the scalar `flambeau_mmvq_q8_0_q8_1`.
-//!
 //! Runs both kernels on the same quantised inputs and checks bit-level
 //! equivalence (abs diff ≤ 5e-3 × max(|ref|, 1)). If they disagree the DP4A
 //! variant has a bug.

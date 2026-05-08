@@ -1,12 +1,10 @@
-//! V1.7.5.D real-weight smoke — pipeline-parallel prefill against the
+//! real-weight smoke — pipeline-parallel prefill against the
 //! real Qwen3.6-35B-A3B-UD-Q4_K_S GGUF across `device_count()` ranks.
-//!
 //! Two gates:
-//!   1. PP prefill executes end-to-end without HIP errors.
-//!   2. Argmax on the final token matches what llama.cpp produces from
-//!      the same prompt — for seed 9419 ("Hello") at position 0 the
-//!      expected greedy argmax is 11 (',').
-//!
+//! 1. PP prefill executes end-to-end without HIP errors.
+//! 2. Argmax on the final token matches what llama.cpp produces from
+//! the same prompt — for seed 9419 ("Hello") at position 0 the
+//! expected greedy argmax is 11 (',').
 //! Skips when `FLAMBEAU_QWEN3_GGUF` unset, < 2 HIP devices, or cluster
 //! doesn't have enough VRAM.
 

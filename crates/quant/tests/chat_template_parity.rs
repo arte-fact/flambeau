@@ -1,18 +1,14 @@
 //! T1.3 — Chat-template parity cert vs `llama.cpp --jinja`.
-//!
 //! For a fixed set of (messages, tools, add_generation_prompt) inputs,
 //! the prompt string flambeau's Jinja render produces must be
 //! byte-identical to `llama.cpp`'s `test-chat-template` render on the
 //! same template extracted from the same GGUF.
-//!
 //! Both implementations share `minijinja`-family semantics but differ in
 //! edge cases (pycompat method coverage, whitespace control flags,
 //! default filter behaviour) — byte-level parity is the real gate.
-//!
 //! Activated by two environment variables:
-//!   FLAMBEAU_QWEN3_GGUF                    → path to a Qwen3.6 GGUF
-//!   FLAMBEAU_LLAMACPP_TEST_CHAT_TEMPLATE   → path to llama.cpp's test binary
-//!
+//! FLAMBEAU_QWEN3_GGUF → path to a Qwen3.6 GGUF
+//! FLAMBEAU_LLAMACPP_TEST_CHAT_TEMPLATE → path to llama.cpp's test binary
 //! With either unset the test prints a skip message and passes — the cert
 //! machinery still ships, but isn't a hard gate on environments that
 //! don't have llama.cpp built.

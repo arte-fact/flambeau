@@ -1,7 +1,6 @@
 //! #288-v2 finding test — verifies (and documents) that the wave64
 //! kernel's per-slot outputs differ at f32 LSB scale even when the two
 //! batched activation rows are IDENTICAL.
-//!
 //! Result observed on gfx906: 11118 / 14336 outputs differ between
 //! slot 0 and slot 1, max abs diff ~3.3e-6 (f32 LSB). The cause is
 //! compiler FMA-contraction asymmetry inside the per-col unrolled
@@ -9,7 +8,6 @@
 //! FP code for c=0 vs c=1 even though the math is symmetric. The
 //! kernel is correct in the IEEE-754 sense; the output is coherent;
 //! but bit-identical-within-batch is NOT preserved.
-//!
 //! This test asserts max_abs < 1e-5 (tolerance) rather than
 //! `n_diff == 0` so it captures the regression boundary if the kernel
 //! changes shape later, while documenting the LSB-scale slot
@@ -173,7 +171,7 @@ fn mmvq_q4_1_wave64_identical_slots() -> Result<()> {
     let h_dst = download_f32(&dev, d_dst, n_slots * n_rows);
 
     // 4. dst[0, :] should equal dst[1, :] bit-for-bit since both slots
-    //    received identical activation.
+    // received identical activation.
     let mut n_diff = 0usize;
     let mut max_abs = 0.0f32;
     let mut first_diff: Option<(usize, f32, f32)> = None;

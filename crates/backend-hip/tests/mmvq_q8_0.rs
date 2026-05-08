@@ -1,10 +1,8 @@
 //! End-to-end correctness: `flambeau_mmvq_q8_0_q8_1` on MI50 vs CPU dequant +
 //! f32 matmul.
-//!
-//! The V1.3 correctness bar is `|got - ref| ≤ 5e-3 × max(|ref|, 1.0)` per
-//! shape (roadmap §V1.3 cert tolerances).
-//!
-//! Grid here is intentionally small — the bench sweep harness in V1.3's cert
+//! The correctness bar is `|got - ref| ≤ 5e-3 × max(|ref|, 1.0)` per
+//! shape (roadmap §cert tolerances).
+//! Grid here is intentionally small — the bench sweep harness in cert
 //! step will drive the full `M ∈ {1,8,16,128,512}` × `K,N ∈ {2048, 5120,
 //! 15360, 128256}` grid.
 

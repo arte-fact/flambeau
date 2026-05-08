@@ -1,7 +1,6 @@
 //! #288-v2 parity test — verify the existing `mmq_q4_1_wave64` kernel
 //! produces output bit-identical to per-row `qmatmul(m=1)` when invoked
 //! at small N (decode batch dim).
-//!
 //! The wave64 kernel was tuned for prefill (large m); this test
 //! confirms it stays correct at decode-N values N ∈ {2, 4, 8}, which
 //! is the regime the #288-v2 dispatch routes through it.

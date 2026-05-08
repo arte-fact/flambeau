@@ -1,16 +1,13 @@
 //! **Phase A2-TP** — chunked-vs-single-shot KV parity test for TP topology.
-//!
 //! Mirrors `chunked_prefill_kv_parity.rs` (PP) but for tensor-parallel.
 //! Runs forward_prefill_tp_logits with the same prompt:
-//!   - Single-shot at L=256 (m=256 → MMQ kernel bucket on Q4_1)
-//!   - Two manual calls at L=128 each (m=128 → SAME MMQ bucket per Phase A)
-//!
+//! - Single-shot at L=256 (m=256 → MMQ kernel bucket on Q4_1)
+//! - Two manual calls at L=128 each (m=128 → SAME MMQ bucket per Phase A)
 //! Per-rank LayerCache vectors are snapshotted via the existing helper.
 //! The PP test proved the recursive chunker is bit-exact when chunks
 //! stay in the same m-bucket. If TP behaves identically, this test
 //! passes; if it doesn't, the diff message localises the divergence
 //! (full-attn K/V or GDN state per-rank).
-//!
 //! Skips when: GGUF missing, fewer than 2 HIP devices, no peer access
 //! between the chosen pair (default [0,1]).
 

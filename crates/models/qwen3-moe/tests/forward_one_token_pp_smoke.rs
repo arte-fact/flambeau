@@ -1,13 +1,11 @@
-//! V1.7.5.C smoke test — pipeline-parallel single-token decode on a tiny
+//! smoke test — pipeline-parallel single-token decode on a tiny
 //! synthetic 2-layer hybrid model sharded across 2 HIP devices.
-//!
 //! Layer 0 (GDN) → rank 0; layer 1 (full-attn) → rank 1. The forward runs
 //! embed on rank 0, per-layer on each rank with a PCIe hand-off between,
 //! and LM head on rank 1. Zero Q4_K / Q8_0 matmul weights → zero logits
 //! → argmax 0.
-//!
-//! Skips when device_count < 2. Real-weight Qwen3.6 run is V1.7.5.E, which
-//! is blocked on V1.7.5.J (F32 weight conversion at load time).
+//! Skips when device_count < 2. Real-weight Qwen3.6 run is , which
+//! is blocked on (F32 weight conversion at load time).
 
 #![cfg(feature = "hip")]
 
@@ -37,7 +35,7 @@ use half::f16;
 use std::sync::Arc;
 
 fn cfg() -> Qwen3MoEConfig {
-    // Same shape as V1.7.3-e5 capstone — 2 layers, layer 0 = GDN, layer 1
+    // Same shape as e5 capstone — 2 layers, layer 0 = GDN, layer 1
     // = full-attn via `full_attention_interval = 2`.
     Qwen3MoEConfig {
         arch: "qwen35moe".into(),

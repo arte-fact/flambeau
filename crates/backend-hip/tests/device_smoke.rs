@@ -1,5 +1,4 @@
 //! HIP device smoke test — runs end-to-end against real hardware.
-//!
 //! The whole test file is gated on `#[cfg(hip_hardware_present)]` which is
 //! never set by cargo unless you go out of your way. Instead we check at
 //! runtime: if `hipGetDeviceCount` reports zero devices or fails, we skip.

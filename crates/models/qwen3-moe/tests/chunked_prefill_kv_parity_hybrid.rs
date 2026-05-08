@@ -1,9 +1,7 @@
 //! **Phase B4a-Hybrid** — chunked-vs-single-shot KV parity for the
 //! Hybrid (pp+tp) topology.
-//!
 //! Mirrors the PP and TP parity tests. Default: pp2tp2 over devices
 //! [0,2,1,3] (intra-die pairs per the rig topology memory).
-//!
 //! Skips when GGUF missing, fewer than 4 HIP devices, or BAR1 peer
 //! access is unhealthy on a stage sub-cluster.
 

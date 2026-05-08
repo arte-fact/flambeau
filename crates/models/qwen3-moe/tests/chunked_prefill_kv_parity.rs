@@ -1,17 +1,14 @@
 //! **Phase A2** — chunked-vs-single-shot KV parity test.
-//!
 //! Runs the same prompt twice on a freshly-built Qwen3.5-9B-Q4_1 PP4
 //! session: once with scratch sized to the full prompt (single-shot
 //! prefill — the production path) and once with scratch sized to half
 //! the prompt (forces `forward_prefill_pp`'s recursive chunking at
 //! pp.rs:1198). Snapshots per-layer KV state to host after each run
 //! and asserts byte-equal.
-//!
 //! When the test fails, it reports the FIRST layer whose state
 //! differs and whether it's the K/V buffers (full-attn) or the
 //! GDN state/conv_history. That localises the cross-chunk-state bug
 //! without needing to read kernel source.
-//!
 //! Skipped when the GGUF is missing or fewer than 4 HIP devices are
 //! available. Runs with FLAMBEAU_MAX_CTX=2048 so the per-layer KV
 //! buffers stay small enough to snapshot quickly.

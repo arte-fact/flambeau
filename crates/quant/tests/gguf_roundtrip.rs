@@ -1,9 +1,7 @@
 //! GGUF reader round-trip tests.
-//!
 //! We build a synthetic GGUF v3 blob in memory (no llama.cpp dependency at
 //! test time), feed it to `GgufFile::from_mmap`, and assert that header +
 //! metadata + tensor index + raw-range readers all agree with what we wrote.
-//!
 //! Byte-for-byte cross-checking against llama.cpp `gguf-dump` requires a
 //! committed real-GGUF fixture — deferred to a separate integration test.
 

@@ -1,4 +1,4 @@
-//! V1.7.3-e3 smoke test — output norm + LM head + argmax sampling. Uses
+//! e3 smoke test — output norm + LM head + argmax sampling. Uses
 //! zero Q8_0 LM head weight so logits are all zero, then verifies that
 //! `argmax_token_host` returns 0 (first lane wins on ties).
 

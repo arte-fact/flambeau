@@ -1,7 +1,6 @@
-//! V2.33.d diagnostic — does forward_prefill_pp at position i produce
+//! 3.d diagnostic — does forward_prefill_pp at position i produce
 //! the same argmax as forward_one_token_pp at position i, given the
 //! same preceding tokens?
-//!
 //! If NO → the two kernels diverge at F32-accumulation-order precision,
 //! and spec decoding's acceptance rate will be capped by this drift.
 

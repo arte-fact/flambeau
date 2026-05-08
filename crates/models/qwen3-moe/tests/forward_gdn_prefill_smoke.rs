@@ -1,4 +1,4 @@
-//! V1.7.3-f2 smoke test — Gated-Delta-Net prefill over L = 4 tokens on real
+//! f2 smoke test — Gated-Delta-Net prefill over L = 4 tokens on real
 //! HIP. Zero Q8_0 projection weights (attn_qkv/attn_gate/ssm_alpha/ssm_beta/
 //! ssm_out) + ones-pattern F32 ssm_conv1d / ssm_norm / ssm_a / ssm_dt_bias
 //! (same setup as the decode smoke, just with L > 1). Expects a finite

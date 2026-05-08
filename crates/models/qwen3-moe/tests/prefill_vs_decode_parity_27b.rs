@@ -1,7 +1,7 @@
 //! Same diagnostic as prefill_vs_decode_parity, but on Qwen3.5-27B-Q4_1
 //! (arch=qwen35 gated full-attn) instead of Coder (arch=qwen3moe dense).
 //! Isolates whether the per-position prefill bug is universal or
-//! specific to V2.28.b-i1 dense-attn prefill.
+//! specific to 8.b-i1 dense-attn prefill.
 
 #![cfg(feature = "hip")]
 

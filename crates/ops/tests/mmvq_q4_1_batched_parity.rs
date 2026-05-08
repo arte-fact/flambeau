@@ -1,7 +1,6 @@
 //! #288 parity test — verify `mmvq_q4_1_batched` produces output
 //! bit-identical to looping the single-row `mmvq_q4_1_q8_1` kernel
 //! once per slot.
-//!
 //! The batched kernel uses the same per-thread per-K-block accumulator
 //! math (`sumi · (d_x · d_y) + (m_x · s_y) · 0.25`) and the same
 //! reduction pattern as the single-row kernel; the only difference is
@@ -11,12 +10,11 @@
 //! `abs_err < 1e-5` (10× safety margin over observed) — same scale of
 //! tolerance the existing batched-GDN cert already accepts on the
 //! model-level forward path.
-//!
 //! Sweep:
-//!   - N ∈ {1, 2, 4, 8, 16}
-//!   - n_rows ∈ {64, 4096}: small for fast cycles, prod-realistic for
-//!     stress (Qwen3.6 hidden=3584 / GDN-out widths in this range).
-//!   - k ∈ {1024, 4096}: GDN intermediate widths span this range.
+//! - N ∈ {1, 2, 4, 8, 16}
+//! - n_rows ∈ {64, 4096}: small for fast cycles, prod-realistic for
+//! stress (Qwen3.6 hidden=3584 / GDN-out widths in this range).
+//! - k ∈ {1024, 4096}: GDN intermediate widths span this range.
 
 #![cfg(feature = "hip")]
 #![expect(
@@ -184,8 +182,8 @@ fn run_parity(label: &str, shape: Shape, n_slots: usize, seed: u64) -> Result<bo
     let d_out_batched = alloc_zeroed(&dev, dst_bytes);
 
     // 5. Baseline: N independent qmatmul(m=1) calls, one per slot.
-    //    m=1 doesn't trigger the batched short-circuit (which needs m≥2).
-    //    Ensure batched-MMVQ env is unset for the baseline path.
+    // m=1 doesn't trigger the batched short-circuit (which needs m≥2).
+    // Ensure batched-MMVQ env is unset for the baseline path.
     // SAFETY: env mutation/restore is single-threaded inside this test.
     unsafe { std::env::remove_var("FLAMBEAU_BATCHED_MMVQ"); }
     let act_row_bytes = n_blocks_per_row * std::mem::size_of::<BlockQ8_1>();
@@ -201,7 +199,7 @@ fn run_parity(label: &str, shape: Shape, n_slots: usize, seed: u64) -> Result<bo
     stream.synchronize()?;
 
     // 6. Batched: single qmatmul(m=N) call routed explicitly through the
-    //    v1 batched-MMVQ kernel via `FLAMBEAU_BATCHED_MMVQ=v1`.
+    // v1 batched-MMVQ kernel via `FLAMBEAU_BATCHED_MMVQ=v1`.
     if n_slots >= 2 {
         unsafe { std::env::set_var("FLAMBEAU_BATCHED_MMVQ", "v1"); }
         qmatmul(

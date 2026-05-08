@@ -1,14 +1,12 @@
 //! #288 microbench — wall-clock A/B between per-row `qmatmul(m=1)` ×N
 //! and the new batched `mmvq_q4_1_batched` kernel via `qmatmul(m=N)`.
-//!
 //! Goal: confirm the weight-HBM amortization lever delivers a real
 //! speedup at the GDN matmul shapes used by Qwen3.6-27B (k=4096,
 //! n_rows in [3584, 14336]). Not the perf gate — that's #292 / live
 //! cert. This bench just sanity-checks direction-of-win.
-//!
 //! Run with:
-//!   cargo test --release -p flambeau-ops --features hip \
-//!     --test mmvq_q4_1_batched_perf -- --nocapture --ignored
+//! cargo test --release -p flambeau-ops --features hip \
+//! --test mmvq_q4_1_batched_perf -- --nocapture --ignored
 
 #![cfg(feature = "hip")]
 #![expect(
@@ -152,9 +150,9 @@ fn mmvq_q4_1_batched_perf_sweep() -> Result<()> {
     // Bench three paths: per-row mmvq (baseline), v1 batched-MMVQ
     // (new kernel), wave64 (existing prefill kernel reused at small N).
     // FLAMBEAU_BATCHED_MMVQ env routes the qmatmul short-circuit:
-    //   unset → per-row MMVQ loop (baseline)
-    //   "v1"  → mmvq_q4_1_q8_1_batched (this session's new kernel)
-    //   any other → mmq_q4_1_wave64 (existing prefill kernel)
+    // unset → per-row MMVQ loop (baseline)
+    // "v1" → mmvq_q4_1_q8_1_batched (this session's new kernel)
+    // any other → mmq_q4_1_wave64 (existing prefill kernel)
     let modes: &[(&str, Option<&str>)] = &[
         ("baseline (per-row MMVQ loop)", None),
         ("v1 batched", Some("v1")),

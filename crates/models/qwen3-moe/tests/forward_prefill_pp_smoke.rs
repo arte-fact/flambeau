@@ -1,11 +1,9 @@
-//! V1.7.5.D smoke test — pipeline-parallel prefill on a tiny synthetic
+//! smoke test — pipeline-parallel prefill on a tiny synthetic
 //! 2-layer hybrid model sharded across 2 HIP devices.
-//!
 //! Same fixture as `forward_one_token_pp_smoke` but runs an L=4 prefill:
 //! layer 0 (GDN) on rank 0, layer 1 (full-attn) on rank 1, embed on rank
 //! 0, output head on rank 1. Zero Q4_K / Q8_0 matmul weights → every
 //! delta zero → LM head matmul is zero × zero → argmax lane 0.
-//!
 //! Skips when `device_count < 2`. Real-weight PP prefill parity is
 //! covered by `forward_prefill_pp_real` and the wider chunked-prefill
 //! test suite.
@@ -326,7 +324,7 @@ fn forward_prefill_pp_synthetic_2rank_l4() -> Result<()> {
     run_prefill_pp_smoke(/*scratch_max_tokens=*/ 4)
 }
 
-/// V1-BENCH-#111 — chunking smoke: scratch sized below L forces
+/// chunking smoke: scratch sized below L forces
 /// `forward_prefill_pp` to internally loop over ubatches of
 /// `max_tokens` tokens. Same fixture, same expected argmax.
 #[test]

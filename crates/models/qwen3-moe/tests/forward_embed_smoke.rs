@@ -1,5 +1,4 @@
-//! V1.7.3-e2 smoke test — token embedding gather (host dequant + upload).
-//!
+//! e2 smoke test — token embedding gather (host dequant + upload).
 //! Validates that `forward_embed_decode_host` returns the correct
 //! embedding row from an F16 `token_embd.weight`. Each vocab row is
 //! seeded with a distinct arithmetic pattern so the host can verify the

@@ -1,11 +1,9 @@
-//! V1.7.5.J / V1.7.5.E — real-weight pipeline-parallel forward smoke.
-//!
+//! / real-weight pipeline-parallel forward smoke.
 //! Loads the real Qwen3.6 GGUF via `Qwen3MoEShardedModel::load` across
 //! `device_count()` ranks and runs `forward_one_token_pp` once. A success
 //! is a finite `u32` lane index in `[0, vocab)` — we don't cert argmax
-//! here (that's V1.7.4), only that the full real-weight PP path executes
+//! here (that's ), only that the full real-weight PP path executes
 //! without HIP errors or dtype mismatches.
-//!
 //! Skips when `FLAMBEAU_QWEN3_GGUF` is unset, fewer than 2 HIP devices
 //! are available, or the cluster doesn't have enough aggregate VRAM.
 
