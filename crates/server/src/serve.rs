@@ -19,7 +19,7 @@ use tracing::info;
 
 use crate::model::LoadedModel;
 use crate::routes::{
-    agent_stats, chat_completions, completions, detokenize, embeddings, health, index, infill,
+    agent_stats, chat_completions, completions, detokenize, embeddings, health, infill,
     messages_anthropic, models, tokenize, ServerState, SharedState,
 };
 
@@ -565,7 +565,6 @@ pub async fn serve(cfg: ServeConfig) -> Result<()> {
     });
 
     let app = Router::new()
-        .route("/", get(index))
         .route("/health", get(health))
         .route("/v1/models", get(models))
         .route("/v1/chat/completions", post(chat_completions))

@@ -1119,16 +1119,6 @@ pub async fn health() -> impl IntoResponse {
     Json(json!({ "status": "ok" }))
 }
 
-/// GET / — embedded single-file chat UI (Nord palette, Claude aesthetic).
-pub async fn index() -> impl IntoResponse {
-    (
-        [(axum::http::header::CONTENT_TYPE, "text/html; charset=utf-8")],
-        INDEX_HTML,
-    )
-}
-
-const INDEX_HTML: &str = include_str!("../assets/index.html");
-
 /// GET /v1/agent/stats — M2.3 read-only agent-loop telemetry snapshot.
 /// Returns the last N per-iteration stats (N = ring capacity).
 pub async fn agent_stats(State(state): State<SharedState>) -> impl IntoResponse {
