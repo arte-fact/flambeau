@@ -33,7 +33,7 @@ pub use layer::{
     AttnBlock, AttnDecodeScratch, AttnPrefillScratch, AttnState, FfnBlock, FfnDecodeScratch,
     FfnPrefillScratch, LayerKind,
 };
-pub use moe_experts::{MoeExperts, MoeExpertsDecodeScratch};
+pub use moe_experts::{MoeExperts, MoeExpertsDecodeScratch, MoeExpertsPrefillScratch};
 pub use shared_expert::{SharedExpert, SharedExpertDecodeScratch};
 pub use topology::{
     forward_one_token_hybrid, forward_one_token_pp, forward_one_token_tp,
