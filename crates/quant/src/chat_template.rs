@@ -199,10 +199,8 @@ impl ChatTemplate {
     /// `enable_thinking is defined` check is false, which takes the
     /// open-`<think>` branch. This is what llama.cpp's
     /// `test-chat-template` does when no `enable_thinking` is passed
-    /// in the JSON input, and is the behaviour this matches byte-for-byte
-    /// in the T1.3 parity cert.
-    /// T-track: this is the 2 (ROADMAP-V2-TOOL-CALLING-AND-MCP §T1.2)
-    /// lift of the previously hard-coded empty `tools` slot.
+    /// in the JSON input, and is the behaviour this matches byte-for-byte.
+    ///
     /// # Errors
     /// Same as [`render`].
     pub fn render_with_tools<M: serde::Serialize, T: serde::Serialize>(

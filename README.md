@@ -86,9 +86,7 @@ flambeau/
 │   ├── models/qwen3-moe/        # Qwen3.x MoE composition
 │   ├── runtime/                 # Session, KV cache (typed), Mesh<N>, scheduler
 │   ├── bench/                   # Sweep + matrix + cert-diff harness
-│   ├── autotune/                # Warmup-tuner
 │   ├── server/                  # OpenAI-compatible HTTP
-│   ├── mcp-server/              # MCP server (dev-only)
 │   └── cli/                     # `flambeau` binary
 ├── doc/
 │   ├── ARCHITECTURE.md          # Framework design

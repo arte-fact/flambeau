@@ -31,9 +31,7 @@ flambeau-core = { path = "../core" }
 flambeau-quant = { path = "../quant" }
 flambeau-runtime = { path = "../runtime" }
 flambeau-bench = { path = "../bench" }
-flambeau-autotune = { path = "../autotune" }
 flambeau-server = { path = "../server" }
-flambeau-mcp-server = { path = "../mcp-server" }
 anyhow.workspace = true
 clap.workspace = true
 tokio.workspace = true

@@ -69,10 +69,8 @@ workspace/
 │   │   └── qwen3_next/
 │   ├── runtime/         # KV cache (typed F16/Q8/turbo-quant), session, sampler, tokenizer glue, TP/EP primitives
 │   ├── bench/           # First-class bench + correctness-sweep harness; emits certs
-│   ├── autotune/        # Warmup shape-recorder + micro-bench + local-override writer (T-track)
 │   ├── server/          # OpenAI-compatible HTTP server (/v1/chat/completions, /v1/completions, /v1/models, SSE)
-│   ├── mcp-server/      # Dev-only MCP server exposing sweep/matrix/profile/ab/inspect/cert-diff tools (M-track)
-│   └── cli/             # `infer`, `bench`, `sweep`, `inspect-gguf`, `inspect-hsaco`, `serve`, `tune`, `mcp`
+│   └── cli/             # `infer`, `bench`, `sweep`, `inspect-gguf`, `inspect-hsaco`, `serve`
 ├── dispatch/
 │   ├── hip/
 │   │   ├── gfx906.toml  # Primary tuned matrix (test target, wave64, GCN cross-lane)

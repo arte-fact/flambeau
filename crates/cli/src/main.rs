@@ -3,7 +3,7 @@
 //! their target step lands. See `doc/ROADMAP-V1-QWEN36-GFX906.md` for what each
 //! subcommand requires.
 
-use anyhow::{Context, Result};
+use anyhow::Result;
 use clap::{Parser, Subcommand};
 use flambeau_quant::gguf::{GgufFile, Value};
 
@@ -182,30 +182,6 @@ enum Cmd {
         #[arg(long = "spec-mtp", env = "FLAMBEAU_SPEC_MTP")]
         spec_mtp: Option<String>,
     },
-    /// T-track warmup-tuner (V1.x side-track).
-    Tune {
-        #[arg(long)]
-        model: String,
-        #[arg(long, default_value = "hip:0")]
-        devices: String,
-        #[arg(long)]
-        dry_run: bool,
-    },
-    /// M-track MCP server (6, ROADMAP-V2 §M1). Dev-only — never
-    /// exposed to production traffic. Wraps flambeau's internal
-    /// dev-surface (sweep / cert-check / pmc-probe / inspect / dispatch)
-    /// as MCP tools that return committable JSON artefacts.
-    /// Default transport is stdio (matches Claude Code / mcp-cli).
-    /// `--port N` enables the streamable-HTTP transport (M1.5).
-    Mcp {
-        /// Use stdio transport. Default when neither --stdio nor --port
-        /// is given.
-        #[arg(long, default_value_t = false)]
-        stdio: bool,
-        /// Use HTTP transport on the given TCP port. `0` = stdio.
-        #[arg(long, default_value_t = 0)]
-        port: u16,
-    },
     /// Correctness-sweep harness; emits certs (+).
     Sweep {
         #[arg(long)]
@@ -315,8 +291,6 @@ fn main() -> Result<()> {
             embedding_max_tokens,
             spec_mtp,
         })?,
-        Cmd::Tune { model, .. } => todo!("T-track: implement tune for {model}"),
-        Cmd::Mcp { stdio, port } => mcp_cmd(stdio, port)?,
         Cmd::Sweep { arch, op, dtype } => sweep(&arch, op.as_deref(), &dtype)?,
         Cmd::CertCheck { arch, backend } => cert_check(&backend, &arch)?,
         Cmd::PmcProbe { kernel, m, k, n } => pmc_probe(&kernel, m, k, n)?,
@@ -486,29 +460,6 @@ fn serve_cmd(args: ServeArgs) -> Result<()> {
         .enable_all()
         .build()?;
     rt.block_on(flambeau_server::serve(cfg))
-}
-
-/// `flambeau mcp` — boot the M-track MCP server. Stdio transport by
-/// default (matches Claude Code / mcp-cli); `--port N` opts into the
-/// streamable-HTTP transport mounted at `127.0.0.1:N/mcp` (M1.5).
-fn mcp_cmd(stdio: bool, port: u16) -> Result<()> {
-    // If the user passed --stdio explicitly, honour it even if --port
-    // was also supplied (stdio wins). Otherwise pick based on port.
-    let use_stdio = stdio || port == 0;
-    // HTTP transport needs a multi-threaded runtime (axum + tokio tasks);
-    // stdio is fine with a current-thread runtime.
-    if use_stdio {
-        let rt = tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-            .context("build tokio runtime")?;
-        return rt.block_on(flambeau_mcp_server::run_stdio());
-    }
-    let rt = tokio::runtime::Builder::new_multi_thread()
-        .enable_all()
-        .build()
-        .context("build tokio runtime")?;
-    rt.block_on(flambeau_mcp_server::run_http(port))
 }
 
 /// Dump the GGUF's embedded `tokenizer.chat_template` Jinja source.

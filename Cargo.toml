@@ -10,9 +10,7 @@ members = [
     "crates/models/qwen3-moe",
     "crates/runtime",
     "crates/bench",
-    "crates/autotune",
     "crates/server",
-    "crates/mcp-server",
     "crates/cli",
 ]
 

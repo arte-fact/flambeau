@@ -42,11 +42,7 @@ implementing.
 ## Architectural rules (do not quietly break)
 
 1. **No `CANDLE_*`-style env flags.** All variant selection lives in
-   `dispatch/<backend>/<arch>.toml`, reviewed in PRs. The warmup-tuner
-   may write a machine-local override at
-   `dispatch/<backend>/<arch>.local.toml` (gitignored), but **only**
-   for rows whose impls carry a committed correctness cert — never a
-   new impl, never a new shape-predicate.
+   `dispatch/<backend>/<arch>.toml`, reviewed in PRs.
 2. **No kernel ships without a cert.** Every `impl_id` referenced from
    `dispatch/*.toml` must have a matching
    `certs/<backend>/<impl_id>.json` produced by the sweep harness.
@@ -230,12 +226,6 @@ implementing.
   usage (CUDA).
 - `cargo run -p cli -- serve --model <path> --port 8080` — start
   OpenAI-compatible HTTP server.
-- `cargo run -p cli -- tune --model <id> --devices hip:0,1,2,3` —
-  warmup-tuner: records session shapes, micro-benches certed variants,
-  writes `dispatch/<backend>/<arch>.local.toml`. `--dry-run` reports
-  proposed overrides without writing.
-- `cargo run -p cli -- mcp --port 9090` — MCP dev server. Dev-only;
-  never expose to the network.
 
 ## Quick-reference: pre-claim checklist
 

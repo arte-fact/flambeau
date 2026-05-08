@@ -402,18 +402,10 @@ The dispatcher picks the *most-specific-matching* row; two rows matching the sam
 - `models/<family>/` — Model composition only: weight-name map, block list, `forward_one_token`, `forward_prefill`. **Zero new kernels.**
 - `runtime/` — KvCache, Session, Mesh<N>, scheduler.
 - `bench/` — Sweep + matrix + cert-diff harness.
-- `autotune/` — T-track warmup-tuner.
 - `server/` — OpenAI-compatible HTTP.
-- `mcp-server/` — M-track dev MCP server.
 - `cli/` — The `flambeau` binary.
 
 **arch_primitives.** The per-arch header directory `kernels-hip/arch_primitives/{gfx906,gfx908,gfx90a,gfx942,gfx1031,gfx1100}.cuh`. Each header exposes **the same signatures** (e.g. `half_warp_reduce_sum_dpp`) with arch-specific bodies. Wave-width constants live here — never hard-code `WAVE_SIZE = 64` anywhere else.
-
-### Development side-tracks
-
-**T-track (warmup-tuner).** A runtime microbench that picks, at session start, between *already certed* variants to specialize the dispatch table for *this rig's* exact shapes. Writes a gitignored `dispatch/<backend>/<arch>.local.toml` that layers over the committed table. Never runtime codegen — only runtime selection. Implemented in `crates/autotune`. CLI: `flambeau tune`.
-
-**M-track (MCP server).** A dev-only MCP server exposing sweep/matrix/profile/A-B/inspect/cert-diff tools to a Claude session. Lives in `crates/mcp-server`. Never part of production. CLI: `flambeau mcp --port 9090`.
 
 ### Non-negotiable rules (paraphrase)
 
@@ -445,8 +437,6 @@ Commands and metrics that appear in logs and PR descriptions.
 - **`inspect-gguf <path>`** — Tensor listing, dtype audit for a GGUF file.
 - **`inspect-hsaco <path>`** — Kernel symbols + VGPR budgets for a HIP binary.
 - **`inspect-ptx <path>`** — Kernel symbols + register usage for a CUDA binary.
-- **`tune`** — T-track warmup-tuner session. `--dry-run` reports proposed overrides without writing.
-- **`mcp`** — M-track MCP server.
 
 ### Bench subcommands
 
@@ -608,7 +598,6 @@ A quick lookup of every term in this document. Terms are listed with the section
 | MoE (Mixture of Experts) | §2 Feedforward |
 | MoE combine | §2 Feedforward |
 | Multi-row MMVQ (nw1 / r2 / r4) | §4 Matmul patterns |
-| M-track (MCP server) | §5 Development side-tracks |
 | NCCL | §1 Programming models |
 | Nsight | §1 Kernel artefacts |
 | Occupancy | §1 Inside a GPU |
@@ -647,7 +636,6 @@ A quick lookup of every term in this document. Terms are listed with the section
 | Token | §2 Basics |
 | Top-k / topk | §2 Feedforward |
 | TP (Tensor Parallelism) | §5 Multi-GPU |
-| T-track (warmup-tuner) | §5 Development side-tracks |
 | Turbo-quant KV | §3 |
 | Tensor metadata | §3 GGUF |
 | Variant naming | §4 Naming convention |
@@ -677,8 +665,6 @@ The authoritative version of this timeline is `doc/ROADMAP-V1-QWEN36-GFX906.md` 
 
 Two side-tracks run alongside from V1.2 onward:
 
-- **T-track (T1–T5, warmup-tuner)** — shape recorder → variant enumerator → micro-bench runner → session integration → auto-promote rule. Output: `dispatch/<backend>/<arch>.local.toml` machine-local overrides, always layered over a committed table.
-- **M-track (M1–M5, MCP server)** — `flambeau_sweep`, `flambeau_matrix`, `flambeau_profile`, `flambeau_dispatch_ab`, `flambeau_inspect`, `flambeau_cert_diff`, `flambeau_tune_dry`. Output: every MCP finding round-trips into a committable artifact (cert, matrix snapshot, dispatch row).
 
 ---
 

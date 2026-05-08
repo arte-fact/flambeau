@@ -41,7 +41,7 @@ Every V1 kernel below is a port, not a new implementation. This table tells an a
 |---|---|---|
 | 4-warp LDS-tiled MMQ (Q4_K / Q6_K / Q8_0) | `turbo/ggml/src/ggml-cuda/mmq.cu` + `mmq.cuh` | **Primary port target.** Contains stream-K fixup + L2 prefetch + vectorised X/Y tile load. Much of this is in `mmq.cuh` template machinery. |
 | Candle's port attempt (single-warp, incomplete) | `candle/candle-hip-kernels/src/mmq_turbo.cu` | Candle landed `mul_mat_q4_K_turbo_dense` + `q6_K_turbo_dense` (P37/P38) as single-warp — do NOT port this, it's the variant flambeau V1 explicitly skips. Read for the calling-convention + mmq_x tuning lessons only. |
-| mmq_x selection heuristic | `candle/candle-core/src/quantized/hip.rs` near line 741-832 | K-quants want `mmq_x=8` at VGPR≈99. Port the heuristic; autotune refines. |
+| mmq_x selection heuristic | `candle/candle-core/src/quantized/hip.rs` near line 741-832 | K-quants want `mmq_x=8` at VGPR≈99. Port the heuristic. |
 | llama.cpp upstream MMQ (reference) | `llamacpp/ggml/src/ggml-cuda/mmq.cu` | Source of turbo's port. Use for correctness comparison on edge shapes. |
 
 ## V1.5 — MoE: TopK router + indexed expert matmul + combine
@@ -87,13 +87,6 @@ Every V1 kernel below is a port, not a new implementation. This table tells an a
 | Tokenizer | Embedded in GGUF — `tokenizer.ggml.*` fields | Feed to the `tokenizers` crate. |
 | Sampler (temperature + top-p) | `candle/candle-examples/examples/quantized-qwen35/main.rs` search `LogitsProcessor` | CPU-side on the last logit row; not perf-critical. |
 | OpenAI HTTP surface | `llamacpp/tools/server/server.cpp` | Reference for request/response JSON shapes, SSE framing, chat-completions vs completions distinction. Axum port. |
-
-## V1.x — T-track (warmup-tuner) + M-track (MCP server)
-
-No direct prior art in this repo trio — these are new to flambeau. For MCP protocol reference:
-
-- MCP protocol spec: <https://spec.modelcontextprotocol.io/>
-- Existing MCP servers in `/artefact/mcp-web-search-hacks/` (different domain but same protocol shape).
 
 ## Meta — when candle prior art is wrong
 

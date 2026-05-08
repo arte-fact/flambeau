@@ -44,11 +44,6 @@ hip = [
 dev_trace = ["flambeau-qwen3-moe/dev_trace", "flambeau-quant/dev_trace"]
 
 [dev-dependencies]
-# M2.1 integration test boots the real flambeau-mcp-server over HTTP
-# in-process and hits it with the client. Keeping these in dev-deps
-# so the core server crate has no runtime dep on the mcp-server (the
-# "never load-bearing" rule from CLAUDE.md).
-flambeau-mcp-server = { path = "../mcp-server" }
 axum.workspace = true
 tokio-util = "0.7"
 tokio = { workspace = true, features = ["macros", "rt-multi-thread", "time"] }

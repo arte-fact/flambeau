@@ -588,18 +588,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "5baebc0774151f905a1a2cc41989300b1e6fbb29aff0ceffa1064fdd3088d582"
 
 [[package]]
-name = "flambeau-autotune"
-version = "0.1.0-dev"
-dependencies = [
- "anyhow",
- "flambeau-bench",
- "flambeau-core",
- "serde",
- "toml",
- "tracing",
-]
-
-[[package]]
 name = "flambeau-backend-hip"
 version = "0.1.0-dev"
 dependencies = [
@@ -638,10 +626,8 @@ version = "0.1.0-dev"
 dependencies = [
  "anyhow",
  "clap",
- "flambeau-autotune",
  "flambeau-bench",
  "flambeau-core",
- "flambeau-mcp-server",
  "flambeau-quant",
  "flambeau-runtime",
  "flambeau-server",
@@ -670,25 +656,6 @@ dependencies = [
 [[package]]
 name = "flambeau-kernels-shared"
 version = "0.1.0-dev"
-
-[[package]]
-name = "flambeau-mcp-server"
-version = "0.1.0-dev"
-dependencies = [
- "anyhow",
- "axum",
- "flambeau-autotune",
- "flambeau-bench",
- "flambeau-core",
- "flambeau-quant",
- "rmcp",
- "serde",
- "serde_json",
- "tokio",
- "tokio-util",
- "toml",
- "tracing",
-]
 
 [[package]]
 name = "flambeau-ops"
@@ -764,7 +731,6 @@ dependencies = [
  "axum",
  "flambeau-backend-hip",
  "flambeau-core",
- "flambeau-mcp-server",
  "flambeau-ops",
  "flambeau-quant",
  "flambeau-qwen3-moe",
