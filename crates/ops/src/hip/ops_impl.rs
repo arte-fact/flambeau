@@ -213,6 +213,25 @@ impl<'a> Ops for HipOps<'a> {
         )
     }
 
+    fn attention_decode_f16_slots(
+        &self,
+        q: DevicePtr,
+        k_cache: DevicePtr,
+        v_cache: DevicePtr,
+        out: DevicePtr,
+        n_heads_q: usize,
+        n_heads_kv: usize,
+        head_dim: usize,
+        n_tokens_kv: usize,
+        scale: f32,
+        n_tokens_kv_slot: Option<flambeau_backend_hip::ScalarSlot>,
+    ) -> Result<()> {
+        super::attention::attention_decode_f16_slots(
+            self.reg, self.stream, q, k_cache, v_cache, out, n_heads_q, n_heads_kv, head_dim,
+            n_tokens_kv, scale, n_tokens_kv_slot,
+        )
+    }
+
     fn attention_decode_f16_batched(
         &self,
         q_batched: DevicePtr,
@@ -349,6 +368,28 @@ impl<'a> Ops for HipOps<'a> {
         super::attention::attention_prefill_f16(
             self.reg, self.stream, q, k_cache, v_cache, out, n_q_tokens, n_heads_q, n_heads_kv,
             head_dim, n_k_tokens, q_offset, scale,
+        )
+    }
+
+    fn attention_prefill_f16_slots(
+        &self,
+        q: DevicePtr,
+        k_cache: DevicePtr,
+        v_cache: DevicePtr,
+        out: DevicePtr,
+        n_q_tokens: usize,
+        n_heads_q: usize,
+        n_heads_kv: usize,
+        head_dim: usize,
+        n_k_tokens: usize,
+        q_offset: usize,
+        scale: f32,
+        n_k_slot: Option<flambeau_backend_hip::ScalarSlot>,
+        q_off_slot: Option<flambeau_backend_hip::ScalarSlot>,
+    ) -> Result<()> {
+        super::attention::attention_prefill_f16_slots(
+            self.reg, self.stream, q, k_cache, v_cache, out, n_q_tokens, n_heads_q, n_heads_kv,
+            head_dim, n_k_tokens, q_offset, scale, n_k_slot, q_off_slot,
         )
     }
 

@@ -1,4 +1,4 @@
-//! `StandardAttention<O>` — Qwen3-style full attention block.
+//! `StandardAttention` — Qwen3-style full attention block.
 //!
 //! Composes the attention pipeline (RMSNorm + fused Q|gate + K/V proj +
 //! per-head Q/K norm + partial NeoX RoPE + KV append + decode/prefill
@@ -7,17 +7,54 @@
 //! alongside `&O: &impl Ops` because the position upload and KV append
 //! are not yet on the trait. Kernel launches always go through `O`.
 //!
-//! Slots / graph capture overloads are out of scope: callers using
-//! captured paths stay on the existing `flambeau-qwen3-moe` free
-//! functions until R4 introduces a slot abstraction.
+//! Graph-capture slot variants are reachable through the optional
+//! `AttnDecodeSlots` / `AttnPrefillSlots` args on `forward_decode` and
+//! `forward_prefill`. When `Some`, the block calls slot-tagged
+//! variants of the underlying kernels (`attention_decode_f16_slots`,
+//! `attention_prefill_f16_slots`, `kv_cache_append_hip_slot`); the
+//! caller updates each slot per replay via `HipGraphExec::set_slot`.
 
 use anyhow::{bail, Context, Result};
-use flambeau_backend_hip::{HipDevice, HipStream};
+use flambeau_backend_hip::{
+    kv_cache_append_hip_slot, HipDevice, HipStream, MemcpySlot, ScalarSlot,
+};
 use flambeau_core::{CopyDirection, Device, DevicePtr};
 use flambeau_ops::Ops;
 use flambeau_runtime::{CacheLayout, F16Contig, KvCache, Q8Contig};
 
 use flambeau_core::op::QDtype;
+
+/// Graph-capture slot bundle for one decode call. When passed to
+/// `StandardAttention::forward_decode` (or via `AttnBlock::Standard`),
+/// the block calls slot-tagged kernels so the recorder can bind each
+/// slot to a per-replay value via `HipGraphExec::set_slot`.
+///
+/// Only `AttnBlock::Standard` accepts slots in V1; the kernels for
+/// `AttnBlock::DeltaNet` are not graph-capture-aware. Graph-captured
+/// callers leave GDN layers uncaptured.
+#[derive(Clone, Copy, Debug)]
+pub struct AttnDecodeSlots {
+    /// Tags `n_tokens_kv` at `attention_decode_f16`. Value per replay
+    /// = cache tail post-append (`position + 1`).
+    pub n_tokens_kv_slot: ScalarSlot,
+    /// Tags the K-tensor dst of `kv_cache.append`.
+    pub k_append_slot: MemcpySlot,
+    /// Tags the V-tensor dst of `kv_cache.append`.
+    pub v_append_slot: MemcpySlot,
+}
+
+/// Graph-capture slot bundle for one prefill chunk.
+#[derive(Clone, Copy, Debug)]
+pub struct AttnPrefillSlots {
+    /// Tags `n_k_tokens` at `attention_prefill_f16`.
+    pub n_k_slot: ScalarSlot,
+    /// Tags `q_offset` at `attention_prefill_f16`.
+    pub q_off_slot: ScalarSlot,
+    /// Tags the K-tensor dst of `kv_cache.append`.
+    pub k_append_slot: MemcpySlot,
+    /// Tags the V-tensor dst of `kv_cache.append`.
+    pub v_append_slot: MemcpySlot,
+}
 
 /// Borrowed handle to one model weight tensor on device. The block
 /// holds these instead of owning the underlying alloc — the caller
@@ -197,6 +234,7 @@ impl StandardAttention {
         kv_cache: &mut KvCache<L, HipDevice>,
         scratch: &mut StandardAttentionDecodeScratch<'_>,
         position: usize,
+        slots: Option<AttnDecodeSlots>,
     ) -> Result<()> {
         let hidden = self.hidden;
         let head_dim = self.head_dim;
@@ -339,9 +377,35 @@ impl StandardAttention {
         )
         .context("rope K")?;
 
-        // 8. Append K, V into the KV cache (Q8 layout dequants first).
+        // 8. Append K, V into the KV cache. Slot path uses
+        // `kv_cache_append_hip_slot` so the K / V dst memcpys are
+        // graph-recorded with their dst tagged for per-replay
+        // retargeting. Slots are F16-only — Q8 KV with slots bails.
         let kv_layout = L::NAME;
-        if kv_layout == Q8Contig::NAME {
+        if let Some(s) = slots {
+            if kv_layout != F16Contig::NAME {
+                bail!(
+                    "StandardAttention::forward_decode: graph-capture slots are F16-only; \
+                     KV layout {kv_layout} not supported under capture"
+                );
+            }
+            // SAFETY: scratch.k_f16 / v_f16 are contiguous F16
+            // [n_kv_heads, head_dim] on `device`. The slot variant
+            // tags both memcpys' dst arg so the recorder can retarget
+            // them per replay via `HipGraphExec::set_memcpy_slot`.
+            unsafe {
+                kv_cache_append_hip_slot(
+                    kv_cache,
+                    device,
+                    stream,
+                    scratch.k_f16,
+                    scratch.v_f16,
+                    1,
+                    s.k_append_slot,
+                    s.v_append_slot,
+                )?;
+            }
+        } else if kv_layout == Q8Contig::NAME {
             ops.quantize_f16_q8_0(scratch.k_f16, scratch.k_q8_0, kv_width)
                 .context("quantize attn_k → q8_0")?;
             ops.quantize_f16_q8_0(scratch.v_f16, scratch.v_q8_0, kv_width)
@@ -365,11 +429,29 @@ impl StandardAttention {
             }
         }
 
-        // 9. Attention decode (split-K above the threshold).
+        // 9. Attention decode. Split-K + Q8 KV bypass the slot path
+        // (the slot-tagged kernels are F16 single-pass only). Slot
+        // callers run F16 KV decodes through `attention_decode_f16_slots`
+        // so `n_tokens_kv` is recorded as a tagged kernel arg.
         let n_tokens_kv = kv_cache.current_tokens();
         let scale = (head_dim as f32).sqrt().recip();
-        let use_splitk = n_tokens_kv > 256;
-        if use_splitk {
+        let use_splitk = slots.is_none() && n_tokens_kv > 256;
+        if let Some(s) = slots {
+            // F16 KV slots-aware decode. Already validated above.
+            ops.attention_decode_f16_slots(
+                scratch.q_f16,
+                kv_cache.k_buffer(),
+                kv_cache.v_buffer(),
+                scratch.attn_out_f16,
+                n_heads,
+                n_kv_heads,
+                head_dim,
+                n_tokens_kv,
+                scale,
+                Some(s.n_tokens_kv_slot),
+            )
+            .context("attention_decode_f16_slots")?;
+        } else if use_splitk {
             let chunk_size = flambeau_ops::hip::attention::splitk_chunk_size(n_tokens_kv);
             let n_chunks = n_tokens_kv.div_ceil(chunk_size);
             debug_assert!(
@@ -483,6 +565,7 @@ impl StandardAttention {
         scratch: &mut StandardAttentionPrefillScratch<'_>,
         n_tokens: usize,
         start_position: usize,
+        slots: Option<AttnPrefillSlots>,
     ) -> Result<()> {
         if n_tokens == 0 {
             bail!("forward_prefill called with n_tokens = 0");
@@ -634,9 +717,32 @@ impl StandardAttention {
         )
         .context("prefill rope K")?;
 
-        // 8. Append K / V to the KV cache.
+        // 8. Append K / V to the KV cache. Slot path uses the
+        // graph-capture-tagged variant; F16-only.
         let kv_layout = L::NAME;
-        if kv_layout == Q8Contig::NAME {
+        if let Some(s) = slots {
+            if kv_layout != F16Contig::NAME {
+                bail!(
+                    "StandardAttention::forward_prefill: graph-capture slots are F16-only; \
+                     KV layout {kv_layout} not supported under capture"
+                );
+            }
+            // SAFETY: scratch.k_f16 / v_f16 hold n_tokens * kv_width
+            // F16s. The slot variant tags both memcpys' dst arg so the
+            // recorder can retarget per replay.
+            unsafe {
+                kv_cache_append_hip_slot(
+                    kv_cache,
+                    device,
+                    stream,
+                    scratch.k_f16,
+                    scratch.v_f16,
+                    n_tokens,
+                    s.k_append_slot,
+                    s.v_append_slot,
+                )?;
+            }
+        } else if kv_layout == Q8Contig::NAME {
             // Q8 path: quantise directly into the cache slot.
             let total_elems = n_tokens * kv_width;
             let (k_dst, v_dst, _) = kv_cache
@@ -658,10 +764,27 @@ impl StandardAttention {
             }
         }
 
-        // 9. Causal prefill attention.
+        // 9. Causal prefill attention. Slot path uses tagged variant.
         let n_k_tokens = kv_cache.current_tokens();
         let scale = (head_dim as f32).sqrt().recip();
-        if kv_layout == Q8Contig::NAME {
+        if let Some(s) = slots {
+            ops.attention_prefill_f16_slots(
+                scratch.q_f16,
+                kv_cache.k_buffer(),
+                kv_cache.v_buffer(),
+                scratch.attn_out_f16,
+                n_tokens,
+                n_heads,
+                n_kv_heads,
+                head_dim,
+                n_k_tokens,
+                start_position,
+                scale,
+                Some(s.n_k_slot),
+                Some(s.q_off_slot),
+            )
+            .context("attention_prefill_f16_slots")?;
+        } else if kv_layout == Q8Contig::NAME {
             ops.attention_prefill_q8_kv(
                 scratch.q_f16,
                 kv_cache.k_buffer(),

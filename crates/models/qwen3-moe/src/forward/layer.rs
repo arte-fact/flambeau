@@ -29,10 +29,9 @@ use super::{
 };
 use super::dense_ffn::forward_dense_ffn_prefill;
 use super::attn::{
-    forward_dense_attn_layer_decode, forward_dense_attn_prefill,
-    forward_full_attn_layer_decode, forward_full_attn_prefill,
+    forward_dense_attn_layer_decode, forward_dense_attn_prefill, forward_full_attn_prefill,
 };
-use super::gdn::{forward_gdn_layer_decode, forward_gdn_prefill};
+use super::gdn::forward_gdn_prefill;
 use super::moe::{
     forward_moe_ffn_prefill, forward_router_decode, forward_router_prefill,
     forward_shared_expert_decode, forward_shared_expert_prefill,
@@ -305,14 +304,18 @@ pub fn forward_layer_decode(
     // non-gated dense full-attn variant and the slot/graph-capture
     // path stay on their existing free fns since they don't have
     // portable counterparts on the trait yet.
-    let attn_block = if slots.is_none() {
-        build_attn_block(layer_weights, cfg)?
-    } else {
-        None
-    };
+    let attn_block = build_attn_block(layer_weights, cfg)?;
 
     if let Some(block) = attn_block {
         let mid_f16 = scratch.mid_f16;
+        // GDN layers don't consume the slot bundle even when a
+        // graph-capture caller threads one in (only full-attn layers
+        // contribute slots in `LayerDecodeSlots`). Pass `None` to
+        // `AttnBlock::DeltaNet`; the block bails on `Some(slots)`.
+        let attn_slots = match &block {
+            flambeau_blocks::AttnBlock::Standard(_) => slots.map(|s| s.full_attn),
+            flambeau_blocks::AttnBlock::DeltaNet(_) => None,
+        };
         let (state, attn_scratch) = attn_state_and_scratch(&block, layer_cache, scratch)?;
         let hipops = HipOps::new(ops, stream);
         block.forward_decode(
@@ -324,56 +327,29 @@ pub fn forward_layer_decode(
             state,
             attn_scratch,
             position,
+            attn_slots,
         )?;
-    } else if cfg.is_recurrent(il) {
-        let gdn = scratch
-            .gdn
+    } else {
+        // qwen3moe non-gated dense full-attn — no portable block
+        // surface yet; routes through the existing free fn (slots
+        // pass-through preserved).
+        let full_attn = scratch
+            .full_attn
             .as_mut()
-            .context("LayerForwardScratch.gdn missing")?;
-        forward_gdn_layer_decode(
+            .context("LayerForwardScratch.full_attn missing")?;
+        forward_dense_attn_layer_decode(
             ops,
             stream,
             device,
             cfg,
             layer_weights,
             layer_cache,
-            gdn,
+            full_attn,
             x_in,
             scratch.mid_f16,
+            position,
+            slots.map(|s| s.full_attn),
         )?;
-    } else {
-        let full_attn = scratch
-            .full_attn
-            .as_mut()
-            .context("LayerForwardScratch.full_attn missing")?;
-        match &layer_weights.attn {
-            AttnWeights::Dense(_) => forward_dense_attn_layer_decode(
-                ops,
-                stream,
-                device,
-                cfg,
-                layer_weights,
-                layer_cache,
-                full_attn,
-                x_in,
-                scratch.mid_f16,
-                position,
-                slots.map(|s| s.full_attn),
-            )?,
-            _ => forward_full_attn_layer_decode(
-                ops,
-                stream,
-                device,
-                cfg,
-                layer_weights,
-                layer_cache,
-                full_attn,
-                x_in,
-                scratch.mid_f16,
-                position,
-                slots.map(|s| s.full_attn),
-            )?,
-        }
     }
     flambeau_backend_hip::profile::mark(
         if cfg.is_recurrent(il) { "layer_attn_gdn" } else { "layer_attn_full" },

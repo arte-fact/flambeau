@@ -15,9 +15,9 @@ use flambeau_ops::Ops;
 use flambeau_runtime::{F16Contig, KvCache, Q8Contig};
 
 use crate::{
-    DeltaNetLayer, DeltaNetLayerDecodeScratch, DenseMlp, DenseMlpDecodeScratch,
-    DenseMlpPrefillScratch, MoeExperts, MoeExpertsDecodeScratch, StandardAttention,
-    StandardAttentionDecodeScratch, StandardAttentionPrefillScratch,
+    AttnDecodeSlots, AttnPrefillSlots, DeltaNetLayer, DeltaNetLayerDecodeScratch, DenseMlp,
+    DenseMlpDecodeScratch, DenseMlpPrefillScratch, MoeExperts, MoeExpertsDecodeScratch,
+    StandardAttention, StandardAttentionDecodeScratch, StandardAttentionPrefillScratch,
 };
 
 /// Attention-half block for one layer.
@@ -76,6 +76,10 @@ impl AttnBlock {
     /// Single-token decode. The block writes the pre-residual delta
     /// to `delta_out`; the caller composes the residual + post-attn
     /// norm as it sees fit (the topology driver does this).
+    ///
+    /// `slots` are graph-capture-only and accepted only by
+    /// `Standard`. `DeltaNet + Some(slots)` bails since GDN kernels
+    /// are not graph-capture-aware.
     pub fn forward_decode<O: Ops>(
         &self,
         ops: &O,
@@ -86,28 +90,36 @@ impl AttnBlock {
         state: AttnState<'_>,
         scratch: AttnDecodeScratch<'_>,
         position: usize,
+        slots: Option<AttnDecodeSlots>,
     ) -> Result<()> {
         match (self, state, scratch) {
             (AttnBlock::Standard(blk), AttnState::KvF16(kv), AttnDecodeScratch::Standard(mut s)) => {
-                blk.forward_decode(ops, device, stream, x_in, delta_out, kv, &mut s, position)
+                blk.forward_decode(ops, device, stream, x_in, delta_out, kv, &mut s, position, slots)
             }
             (AttnBlock::Standard(blk), AttnState::KvQ8(kv), AttnDecodeScratch::Standard(mut s)) => {
-                blk.forward_decode(ops, device, stream, x_in, delta_out, kv, &mut s, position)
+                blk.forward_decode(ops, device, stream, x_in, delta_out, kv, &mut s, position, slots)
             }
             (
                 AttnBlock::DeltaNet(blk),
                 AttnState::Recurrent { state, conv_history },
                 AttnDecodeScratch::DeltaNet(s),
-            ) => blk.forward_decode(
-                ops,
-                device,
-                stream,
-                x_in,
-                delta_out,
-                state,
-                conv_history,
-                s,
-            ),
+            ) => {
+                if slots.is_some() {
+                    bail!(
+                        "AttnBlock::DeltaNet::forward_decode: graph-capture slots are not supported on the recurrent path"
+                    );
+                }
+                blk.forward_decode(
+                    ops,
+                    device,
+                    stream,
+                    x_in,
+                    delta_out,
+                    state,
+                    conv_history,
+                    s,
+                )
+            }
             _ => bail!("AttnBlock::forward_decode: variant mismatch between block, state, and scratch"),
         }
     }
@@ -125,6 +137,7 @@ impl AttnBlock {
         scratch: AttnPrefillScratch<'_>,
         n_tokens: usize,
         start_position: usize,
+        slots: Option<AttnPrefillSlots>,
     ) -> Result<()> {
         match (self, state, scratch) {
             (AttnBlock::Standard(blk), AttnState::KvF16(kv), AttnPrefillScratch::Standard(mut s)) => {
@@ -138,6 +151,7 @@ impl AttnBlock {
                     &mut s,
                     n_tokens,
                     start_position,
+                    slots,
                 )
             }
             (AttnBlock::Standard(blk), AttnState::KvQ8(kv), AttnPrefillScratch::Standard(mut s)) => {
@@ -151,6 +165,7 @@ impl AttnBlock {
                     &mut s,
                     n_tokens,
                     start_position,
+                    slots,
                 )
             }
             (AttnBlock::DeltaNet(_), _, _) => bail!(

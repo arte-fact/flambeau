@@ -4,14 +4,17 @@
 //! method args are pure shape scalars + device pointers. CUDA's
 //! `CudaOps` will mirror this surface 1:1.
 //!
-//! Methods that today reference HIP-specific scaffolding (graph-capture
-//! `ScalarSlot` overloads, the `splitk_chunk_size` utility) stay as
-//! inherent methods on `HipOps` — not part of this portable surface.
-//! When CUDA arrives we will revisit slot abstractions if and only if a
-//! caller actually needs them through the trait.
+//! Graph-capture slot methods (`attention_decode_f16_slots`,
+//! `attention_prefill_f16_slots`) reference `ScalarSlot` from
+//! `flambeau-backend-hip`. The whole trait is gated under
+//! `feature = "hip"` at the crate root, so HIP-specific types in
+//! method signatures are consistent — when CUDA arrives, the slot
+//! types either go behind a `Slot` trait at flambeau-blocks or split
+//! into per-backend trait extensions.
 
 use crate::MoeShape;
 use anyhow::Result;
+use flambeau_backend_hip::ScalarSlot;
 use flambeau_core::device::DevicePtr;
 use flambeau_core::op::QDtype;
 
@@ -158,6 +161,24 @@ pub trait Ops {
         scale: f32,
     ) -> Result<()>;
 
+    /// Graph-capture variant of `attention_decode_f16`. When
+    /// `n_tokens_kv_slot` is `Some`, the recorder tags the
+    /// `n_tokens_kv` kernel arg so the caller can update it per
+    /// replay via `HipGraphExec::set_slot`.
+    fn attention_decode_f16_slots(
+        &self,
+        q: DevicePtr,
+        k_cache: DevicePtr,
+        v_cache: DevicePtr,
+        out: DevicePtr,
+        n_heads_q: usize,
+        n_heads_kv: usize,
+        head_dim: usize,
+        n_tokens_kv: usize,
+        scale: f32,
+        n_tokens_kv_slot: Option<ScalarSlot>,
+    ) -> Result<()>;
+
     fn attention_decode_f16_batched(
         &self,
         q_batched: DevicePtr,
@@ -260,6 +281,26 @@ pub trait Ops {
         n_k_tokens: usize,
         q_offset: usize,
         scale: f32,
+    ) -> Result<()>;
+
+    /// Graph-capture variant of `attention_prefill_f16`. When
+    /// `n_k_slot` / `q_off_slot` are `Some`, the recorder tags those
+    /// kernel args for per-replay updates.
+    fn attention_prefill_f16_slots(
+        &self,
+        q: DevicePtr,
+        k_cache: DevicePtr,
+        v_cache: DevicePtr,
+        out: DevicePtr,
+        n_q_tokens: usize,
+        n_heads_q: usize,
+        n_heads_kv: usize,
+        head_dim: usize,
+        n_k_tokens: usize,
+        q_offset: usize,
+        scale: f32,
+        n_k_slot: Option<ScalarSlot>,
+        q_off_slot: Option<ScalarSlot>,
     ) -> Result<()>;
 
     fn split_q_gate_f16(

@@ -23,8 +23,8 @@ pub mod moe_experts;
 pub mod topology;
 
 pub use attention::{
-    StandardAttention, StandardAttentionDecodeScratch, StandardAttentionPrefillScratch,
-    WeightHandle, MAX_SPLITK_CHUNKS,
+    AttnDecodeSlots, AttnPrefillSlots, StandardAttention, StandardAttentionDecodeScratch,
+    StandardAttentionPrefillScratch, WeightHandle, MAX_SPLITK_CHUNKS,
 };
 pub use delta_net::{DeltaNetLayer, DeltaNetLayerDecodeScratch};
 pub use dense_mlp::{DenseMlp, DenseMlpDecodeScratch, DenseMlpPrefillScratch};
