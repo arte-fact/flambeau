@@ -178,30 +178,46 @@ impl ShardedForwardOneTokenScratch {
 /// each rank's compute; V2 can add 2-micro-batch pipelining). Per-hop
 /// cost ≈ 30 µs (measurement), 3 hops for N=4 ≈ 0.5% of the
 /// 16.7 ms/token budget at 60 tok/s.
-pub fn forward_one_token_pp(
-    model: &crate::sharded::Qwen3MoEShardedModel,
-    session: &mut crate::sharded::Qwen3MoEShardedSession,
-    cluster: &flambeau_backend_hip::HipCluster,
-    scratch: &mut ShardedForwardOneTokenScratch,
-    token_id: u32,
-    position: usize,
-) -> Result<u32> {
-    let n_ranks = model.shards.len();
-    if n_ranks == 0 {
-        bail!("forward_one_token_pp: zero-rank cluster");
-    }
-    let cfg = &model.config;
-    let hidden = cfg.hidden_size;
-    let hidden_bytes = hidden * 2;
+/// `flambeau_blocks::PpDecodeDriver` impl wrapping qwen3-moe's
+/// `(model, session, cluster, scratch)` quadruple. Built per-call;
+/// holds borrows that the topology orchestrator dereferences through
+/// the trait.
+struct Qwen3MoEPpDriver<'a> {
+    model: &'a crate::sharded::Qwen3MoEShardedModel,
+    session: &'a mut crate::sharded::Qwen3MoEShardedSession,
+    cluster: &'a flambeau_backend_hip::HipCluster,
+    scratch: &'a mut ShardedForwardOneTokenScratch,
+}
 
-    // 1. Embed on rank 0. Bind first so the embed memcpys land on the
-    // right device.
-    {
-        let rank0 = cluster.device(0);
-        rank0.bind()?;
-        flambeau_backend_hip::profile::mark("step_start", rank0, rank0.default_stream())?;
-        let shard0 = &model.shards[0];
-        let scratch0 = &mut scratch.per_rank[0];
+impl<'a> flambeau_blocks::PpDecodeDriver for Qwen3MoEPpDriver<'a> {
+    fn n_ranks(&self) -> usize {
+        self.model.shards.len()
+    }
+
+    fn layers_per_rank(&self, rank: usize) -> usize {
+        self.model.shards[rank].layers.len()
+    }
+
+    fn cluster(&self) -> &flambeau_backend_hip::HipCluster {
+        self.cluster
+    }
+
+    fn hidden_a(&self, rank: usize) -> DevicePtr {
+        self.scratch.per_rank[rank].hidden_a
+    }
+
+    fn hidden_b(&self, rank: usize) -> DevicePtr {
+        self.scratch.per_rank[rank].hidden_b
+    }
+
+    fn hidden_bytes(&self) -> usize {
+        self.model.config.hidden_size * 2
+    }
+
+    fn embed_token(&mut self, token_id: u32) -> Result<()> {
+        let rank0 = self.cluster.device(0);
+        let shard0 = &self.model.shards[0];
+        let scratch0 = &mut self.scratch.per_rank[0];
         let token_embd = shard0
             .token_embd
             .as_ref()
@@ -212,174 +228,133 @@ pub fn forward_one_token_pp(
             token_embd,
             token_id,
             scratch0.hidden_a,
-            hidden,
-        )?;
-        flambeau_backend_hip::profile::mark("embed_done", rank0, rank0.default_stream())?;
+            self.model.config.hidden_size,
+        )
     }
 
-    let last_idx = n_ranks - 1;
-    // Hoist output-head tensor references before the rank loop so the
-    // last rank's capture closure can borrow them.
-    let last_shard = &model.shards[last_idx];
-    let output_norm = last_shard
-        .output_norm
-        .as_ref()
-        .context("last rank missing output_norm")?;
-    let lm_head = last_shard
-        .output
-        .as_ref()
-        .or(last_shard.token_embd.as_ref())
-        .context("last rank missing both output.weight and tied token_embd")?;
-
-    // 2. Per-rank layer loop with stage-boundary peer_copy_via_host.
-    for rank_idx in 0..n_ranks {
-        let device = cluster.device(rank_idx);
-
-        if rank_idx > 0 {
-            // SAFETY: both hidden_a buffers are hidden_bytes long on their
-            // respective devices; no other stream touches them here.
-            unsafe {
-                cluster.peer_copy_via_host(
-                    scratch.per_rank[rank_idx].hidden_a,
-                    rank_idx,
-                    scratch.per_rank[rank_idx - 1].hidden_a,
-                    rank_idx - 1,
-                    hidden_bytes,
-                )?;
-            }
-        }
-        // Bind this rank's device before issuing any kernels through its
-        // OpsRegistry — HIP's module-launched kernels use the thread's
-        // current device context, not whichever device the module was
-        // loaded on.
-        device.bind()?;
-        flambeau_backend_hip::profile::mark(
-            "stage_start",
-            device,
-            device.default_stream(),
-        )?;
-
-        let shard = &model.shards[rank_idx];
-        let rank_scratch = &mut scratch.per_rank[rank_idx];
-        let rank_session = &mut session.per_rank[rank_idx];
+    fn forward_layer_decode(
+        &mut self,
+        rank: usize,
+        local_idx: usize,
+        x_in: DevicePtr,
+        x_out: DevicePtr,
+        position: usize,
+    ) -> Result<()> {
+        let device = self.cluster.device(rank);
+        let shard = &self.model.shards[rank];
+        let layer_weights = &shard.layers[local_idx];
+        let layer_cache = &mut self.session.per_rank[rank].caches[local_idx];
+        let rank_scratch = &mut self.scratch.per_rank[rank];
         let layer_scratch = rank_scratch
             .layer
             .as_mut()
             .context("per-rank LayerForwardScratch missing")?;
-
-        let (mut x_in, mut x_out) = (rank_scratch.hidden_a, rank_scratch.hidden_b);
-        for (local_idx, layer_weights) in shard.layers.iter().enumerate() {
-            let layer_cache = &mut rank_session.caches[local_idx];
-            forward_layer_decode(
-                &shard.ops,
-                device.default_stream(),
-                device,
-                cfg,
-                layer_weights,
-                layer_cache,
-                layer_scratch,
-                x_in,
-                x_out,
-                position,
-                None,
+        let cfg = &self.model.config;
+        forward_layer_decode(
+            &shard.ops,
+            device.default_stream(),
+            device,
+            cfg,
+            layer_weights,
+            layer_cache,
+            layer_scratch,
+            x_in,
+            x_out,
+            position,
+            None,
+        )
+        .with_context(|| {
+            format!(
+                "rank {} layer {} ({})",
+                rank,
+                layer_weights.layer_idx,
+                if cfg.is_recurrent(layer_weights.layer_idx) { "gdn" } else { "full_attn" },
             )
-            .with_context(|| {
-                format!(
-                    "rank {} layer {} ({})",
-                    rank_idx,
-                    layer_weights.layer_idx,
-                    if cfg.is_recurrent(layer_weights.layer_idx) {
-                        "gdn"
-                    } else {
-                        "full_attn"
-                    },
-                )
-            })?;
-            // per-layer activation dump for A/B vs llama.cpp.
-            // Env-gated so the hot path pays zero cost when unset. Pair
-            // with `llama-eval-callback` + grep `l_out-<il>` to bisect a
-            // future forward divergence.
-            if dev_flag("FLAMBEAU_PARITY_LAYER_DUMP") && position == 0 {
-                let mut buf = vec![half::f16::from_f32(0.0); hidden];
-                unsafe {
-                    device.memcpy_async(
-                        device.default_stream(),
-                        CopyDirection::DeviceToHost,
-                        DevicePtr(buf.as_mut_ptr() as usize),
-                        x_out,
-                        hidden * 2,
-                    )?;
-                }
-                device.default_stream().synchronize()?;
-                let vals: Vec<f32> = buf.iter().map(|v| v.to_f32()).collect();
-                let l2 = vals.iter().map(|v| (*v as f64) * (*v as f64)).sum::<f64>().sqrt();
-                let (mn, mx) = vals
-                    .iter()
-                    .fold((f32::MAX, f32::MIN), |(a, b), &v| (a.min(v), b.max(v)));
-                eprintln!(
-                    "[layer-dump] l_out-{} ({}): L2={:.6} min={} max={} head={:?}",
-                    layer_weights.layer_idx,
-                    if cfg.is_recurrent(layer_weights.layer_idx) { "gdn" } else { "full_attn" },
-                    l2, mn, mx, &vals[..4]
-                );
-            }
-            std::mem::swap(&mut x_in, &mut x_out);
-        }
-        // Normalise final hidden into hidden_a for the next hand-off.
-        // NO sync: subsequent peer_copy_via_host + downstream kernels all run on
-        // the same default_stream, so stream ordering guarantees correctness.
-        // Removing this sync saves one ~200 µs CPU-wait per rank per forward.
-        if x_in != rank_scratch.hidden_a {
+        })?;
+        if dev_flag("FLAMBEAU_PARITY_LAYER_DUMP") && position == 0 {
+            let hidden = cfg.hidden_size;
+            let mut buf = vec![half::f16::from_f32(0.0); hidden];
             unsafe {
                 device.memcpy_async(
                     device.default_stream(),
-                    CopyDirection::DeviceToDevice,
-                    rank_scratch.hidden_a,
-                    x_in,
-                    hidden_bytes,
+                    CopyDirection::DeviceToHost,
+                    DevicePtr(buf.as_mut_ptr() as usize),
+                    x_out,
+                    hidden * 2,
                 )?;
             }
+            device.default_stream().synchronize()?;
+            let vals: Vec<f32> = buf.iter().map(|v| v.to_f32()).collect();
+            let l2 = vals.iter().map(|v| (*v as f64) * (*v as f64)).sum::<f64>().sqrt();
+            let (mn, mx) = vals
+                .iter()
+                .fold((f32::MAX, f32::MIN), |(a, b), &v| (a.min(v), b.max(v)));
+            eprintln!(
+                "[layer-dump] l_out-{} ({}): L2={:.6} min={} max={} head={:?}",
+                layer_weights.layer_idx,
+                if cfg.is_recurrent(layer_weights.layer_idx) { "gdn" } else { "full_attn" },
+                l2, mn, mx, &vals[..4]
+            );
         }
-        flambeau_backend_hip::profile::mark(
-            "stage_end",
-            device,
-            device.default_stream(),
-        )?;
+        Ok(())
     }
 
-    // 3. Output head on the last rank.
-    // 7.a-i5 — under FLAMBEAU_DECODE_GRAPH the output head is
-    // folded into the last rank's captured graph (runs during the
-    // exec.launch() above). Skip the uncaptured dispatch here.
-    let last_device = cluster.device(last_idx);
-    last_device.bind()?;
-    flambeau_backend_hip::profile::mark(
-        "output_head_start",
-        last_device,
-        last_device.default_stream(),
-    )?;
-    let last_scratch = &mut scratch.per_rank[last_idx];
-    let output_head_scratch = last_scratch
-        .output_head
-        .as_mut()
-        .context("last rank missing output_head scratch")?;
-    forward_output_head_decode(
-        &last_shard.ops,
-        last_device.default_stream(),
-        cfg,
-        output_norm,
-        lm_head,
-        output_head_scratch,
-        last_scratch.hidden_a,
-    )?;
+    fn output_head(&mut self) -> Result<()> {
+        let last = self.model.shards.len() - 1;
+        let last_device = self.cluster.device(last);
+        let last_shard = &self.model.shards[last];
+        let last_scratch = &mut self.scratch.per_rank[last];
+        let output_norm = last_shard
+            .output_norm
+            .as_ref()
+            .context("last rank missing output_norm")?;
+        let lm_head = last_shard
+            .output
+            .as_ref()
+            .or(last_shard.token_embd.as_ref())
+            .context("last rank missing both output.weight and tied token_embd")?;
+        let head_scratch = last_scratch
+            .output_head
+            .as_mut()
+            .context("last rank missing output_head scratch")?;
+        forward_output_head_decode(
+            &last_shard.ops,
+            last_device.default_stream(),
+            &self.model.config,
+            output_norm,
+            lm_head,
+            head_scratch,
+            last_scratch.hidden_a,
+        )
+    }
 
-    // 4. Host argmax.
-    argmax_token_host(
-        last_device,
-        last_device.default_stream(),
-        output_head_scratch.logits_f32,
-        cfg.vocab_size,
-    )
+    fn argmax(&self) -> Result<u32> {
+        let last = self.model.shards.len() - 1;
+        let last_device = self.cluster.device(last);
+        let last_scratch = &self.scratch.per_rank[last];
+        let head_scratch = last_scratch
+            .output_head
+            .as_ref()
+            .context("last rank missing output_head scratch")?;
+        argmax_token_host(
+            last_device,
+            last_device.default_stream(),
+            head_scratch.logits_f32,
+            self.model.config.vocab_size,
+        )
+    }
+}
+
+pub fn forward_one_token_pp(
+    model: &crate::sharded::Qwen3MoEShardedModel,
+    session: &mut crate::sharded::Qwen3MoEShardedSession,
+    cluster: &flambeau_backend_hip::HipCluster,
+    scratch: &mut ShardedForwardOneTokenScratch,
+    token_id: u32,
+    position: usize,
+) -> Result<u32> {
+    let mut driver = Qwen3MoEPpDriver { model, session, cluster, scratch };
+    flambeau_blocks::forward_one_token_pp(&mut driver, token_id, position)
 }
 
 /// Variant of [`forward_one_token_pp`] that downloads the F32 logit row

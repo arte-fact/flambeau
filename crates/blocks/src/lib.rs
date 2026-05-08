@@ -20,6 +20,7 @@ pub mod delta_net;
 pub mod dense_mlp;
 pub mod layer;
 pub mod moe_experts;
+pub mod topology;
 
 pub use attention::{
     StandardAttention, StandardAttentionDecodeScratch, StandardAttentionPrefillScratch,
@@ -32,3 +33,4 @@ pub use layer::{
     FfnPrefillScratch, LayerKind,
 };
 pub use moe_experts::{MoeExperts, MoeExpertsDecodeScratch};
+pub use topology::{forward_one_token_pp, PpDecodeDriver};
