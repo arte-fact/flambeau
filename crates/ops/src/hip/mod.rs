@@ -69,8 +69,6 @@ pub const KERNEL_STEMS: &[&str] = &[
     "indexed_moe_mmvq_q4_k_r4_dp4a",
     "indexed_moe_mmvq_q4_k_r4_sorted_dp4a",
     "indexed_moe_mmq_q4_k_gate_up_tile8_dp4a",
-    "indexed_moe_mmq_q4_k_gate_only_tile8_dp4a",
-    "indexed_moe_mmq_q4_k_up_only_tile8_dp4a",
     "indexed_moe_mmq_q4_0_gate_up_tile8_dp4a",
     "indexed_moe_mmq_q4_0_down_tile8_dp4a",
     "indexed_moe_mmq_q4_1_down_tile8_dp4a",
