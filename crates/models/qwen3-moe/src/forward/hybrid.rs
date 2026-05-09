@@ -697,6 +697,15 @@ impl<'a> flambeau_blocks::HybridDecodeDriver for Qwen3MoEHybridDriver<'a> {
         for dst_local in 0..next_ranks {
             let dst_global_rank = (stage + 1) * self.tp_size + dst_local;
             let dst_ptr = self.scratch.per_stage[stage + 1].per_rank[dst_local].hidden_a;
+            // The next stage's compute on this dst rank runs on the
+            // sub_cluster's default stream — different HipStream handle
+            // than the global_cluster's dst default stream where the
+            // HtoD is queued. Pass it as `consumer_stream` so the HtoD
+            // completion event fires a driver-side wait on it (no CPU sync).
+            let consumer = self.model.stages[stage + 1]
+                .sub_cluster
+                .device(dst_local)
+                .default_stream();
             // SAFETY: src/dst pointers each `bytes` long on their respective
             // ranks. Producer sync above flushes prior compute; the event
             // variant chains bounce-buffer reuse driver-side.
@@ -708,6 +717,7 @@ impl<'a> flambeau_blocks::HybridDecodeDriver for Qwen3MoEHybridDriver<'a> {
                         src_ptr,
                         src_global_rank,
                         bytes,
+                        Some(consumer),
                     )
                     .with_context(|| {
                         format!(
@@ -717,15 +727,6 @@ impl<'a> flambeau_blocks::HybridDecodeDriver for Qwen3MoEHybridDriver<'a> {
                         )
                     })?;
             }
-        }
-        // Bridge global_cluster dst streams to the next stage's sub_cluster
-        // streams via CPU sync (HBM coherence). One sync per dst rank,
-        // collected at the end of the loop so the per-dst HtoDs overlap.
-        for dst_local in 0..next_ranks {
-            let dst_global_rank = (stage + 1) * self.tp_size + dst_local;
-            let dst_dev = self.global_cluster.device(dst_global_rank);
-            dst_dev.bind()?;
-            dst_dev.default_stream().synchronize()?;
         }
         Ok(())
     }

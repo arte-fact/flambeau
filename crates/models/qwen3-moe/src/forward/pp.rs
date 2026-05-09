@@ -468,6 +468,7 @@ fn forward_one_token_pp_inner(
                     scratch.per_rank[rank_idx - 1].hidden_a,
                     rank_idx - 1,
                     hidden_bytes,
+                    None,
                 )?;
             }
         }

@@ -597,6 +597,11 @@ impl HipCluster {
     /// Back-to-back calls on the same `src_rank` are safe — the next
     /// DtoH waits driver-side on the previous HtoD-completion event
     /// before overwriting the shared bounce.
+    /// `consumer_stream`, when `Some`, is made to wait driver-side for
+    /// the HtoD before any subsequent op enqueued on it. Pass it when
+    /// the dst rank's downstream compute lives on a different stream
+    /// than the global_cluster's dst default stream (e.g. the
+    /// sub_cluster default stream in pp+tp). PP can pass `None`.
     /// # Safety
     /// As per [`Self::peer_copy_via_host`].
     pub unsafe fn peer_copy_via_host_event(
@@ -606,6 +611,7 @@ impl HipCluster {
         src_ptr: DevicePtr,
         src_rank: usize,
         bytes: usize,
+        consumer_stream: Option<&HipStream>,
     ) -> DeviceResult<()> {
         if bytes == 0 {
             return Ok(());
@@ -696,6 +702,9 @@ impl HipCluster {
 
         let htod_done = crate::HipEvent::new(dst_dev.id())?;
         htod_done.record(dst_stream)?;
+        if let Some(consumer) = consumer_stream {
+            htod_done.stream_wait(consumer)?;
+        }
         *self.peer_copy_htod_event[src_rank].lock().map_err(|_| {
             DeviceError::Backend {
                 backend: "hip",
