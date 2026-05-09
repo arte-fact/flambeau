@@ -1,10 +1,7 @@
-//! L3 micro-experiment: time `N` small kernel launches via direct
-//! dispatch vs `HipGraphExec::launch` replay. Validates whether HIP
-//! graph capture saves CPU launch overhead on gfx906 — memory note
-//! says past attempts were null; this is a fresh measurement.
-//!
-//! Skipped unless run on real ROCm hardware. Run with:
-//!   cargo test --features hip -p flambeau-backend-hip \
+//! Time `N` small kernel launches via direct dispatch vs
+//! `HipGraphExec::launch` replay. Reports per-launch CPU overhead delta.
+//! Run with:
+//!   cargo test -p flambeau-backend-hip --release \
 //!     --test graph_perf_microbench -- --nocapture --ignored
 
 use flambeau_backend_hip::{

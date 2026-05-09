@@ -53,30 +53,21 @@ pub struct HybridHipModel {
     pub stage_ars: Vec<BarP2pAllReduce>,
 }
 
-/// Loaded weights + per-topology auxiliary state. Held as a trait
-/// object so the server can be polymorphic over the model crate.
-/// Each concrete topology (`PpHipModel`, `TpHipModel`, `HybridHipModel`)
-/// implements [`HipModel`]; future model crates plug in by adding
-/// their own concrete `HipModel` impl with no changes to this alias.
-///
-/// The `Arc` lets per-request [`Inflight`] sessions hold a back-reference
-/// without copying weights.
+/// Loaded weights + per-topology auxiliary state. `Arc<dyn HipModel>`
+/// so per-request sessions can hold a cheap back-reference.
 pub type LoadedModel = std::sync::Arc<dyn crate::model_handle::HipModel>;
 
-/// PP per-request session + scratches. Mirrors [`PpHipModel`].
 pub struct PpHipSession {
     pub session: Qwen3MoEShardedSession,
     pub prefill: ShardedForwardPrefillScratch,
     pub decode: ShardedForwardOneTokenScratch,
 }
 
-/// TP per-request session + scratch. Mirrors [`TpHipModel`].
 pub struct TpHipSession {
     pub session: Qwen3MoETpSession,
     pub decode: ShardedForwardOneTokenScratchTp,
 }
 
-/// Hybrid per-request session + scratch. Mirrors [`HybridHipModel`].
 pub struct HybridHipSession {
     pub session: Qwen3MoEHybridSession,
     pub decode: ShardedForwardOneTokenScratchHybrid,
@@ -92,9 +83,6 @@ pub enum Inflight {
 }
 
 impl Inflight {
-    /// Concrete-variant accessors. Mirrors `LoadedModel::as_*`; the
-    /// server uses these in spec-decode init and head-device resolution
-    /// instead of pattern-matching on the enum.
     pub fn as_pp(&self) -> Option<&PpHipSession> {
         if let Inflight::Pp(s) = self { Some(s) } else { None }
     }
@@ -760,18 +748,8 @@ pub fn decode_logits(
     }
 }
 
-/// **Sampler-D3 Phase B (#211)** — same as [`decode_logits`] but does
-/// NOT DtoH the F32 logits row to host. Logits remain on the head
-/// rank's `output_head.logits_f32` device pointer; the caller (the
-/// GPU sampler hook in `gpu_sampler.rs`) consumes them in place via
-/// `topk_softmax_f32` before the next forward call clobbers the
-/// buffer.
-/// **#258** — Hybrid path now uses
-/// `forward_one_token_hybrid_keep_logits_on_device`, removing the
-/// 600 KB DtoH per token that the prior fallback wasted. **L2** wires
-/// the same path for PP via `forward_one_token_pp_keep_logits_on_device`
-/// — the head rank's `OutputHeadScratch.logits_f32` is the keep-on-device
-/// surface, identical to TP/Hybrid.
+/// Like [`decode_logits`] but skips the F32 logits DtoH; the row stays
+/// in the head rank's `output_head.logits_f32` for the GPU sampler.
 pub fn decode_keep_logits_on_device(
     model: &LoadedModel,
     cluster: &HipCluster,

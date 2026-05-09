@@ -378,13 +378,9 @@ pub fn forward_one_token_pp_logits(
     .map(|_| ())
 }
 
-/// **L2 (#211 mirror for PP)** — variant of
-/// [`forward_one_token_pp_logits`] that leaves the F32 logits row on
-/// the head rank's `output_head.logits_f32` for in-place GPU-side
-/// sampling. Caller MUST consume the buffer (e.g. `topk_softmax_f32`
-/// dispatched on the head rank's default stream) before the next
-/// forward call clobbers it. Saves the per-token 605 KB DtoH on the
-/// chat decode hot path under `FLAMBEAU_GPU_SAMPLER=1`.
+/// Like [`forward_one_token_pp_logits`] but skips the logits DtoH; the
+/// F32 row stays in `decode.per_rank[last_rank].output_head.logits_f32`
+/// for the GPU sampler. Caller must consume it before the next forward.
 pub fn forward_one_token_pp_keep_logits_on_device(
     model: &crate::sharded::Qwen3MoEShardedModel,
     session: &mut crate::sharded::Qwen3MoEShardedSession,
@@ -400,12 +396,9 @@ pub fn forward_one_token_pp_keep_logits_on_device(
     .map(|_| ())
 }
 
-/// What to do with the F32 logits row at the end of the head-rank
-/// output head. The three variants map to the three callers:
-/// - `Host`: chat sampler path — DtoH the row.
-/// - `Argmax`: greedy fast path — argmax on device + DtoH one u32.
-/// - `KeepOnDevice`: GPU sampler path — leave on device for the
-///   caller's `topk_softmax_f32` to consume in place.
+/// Logits sink for [`forward_one_token_pp_inner`]:
+/// `Host` DtoH-s the row, `Argmax` returns the argmax token id,
+/// `KeepOnDevice` leaves the row on the head rank for a GPU sampler.
 pub enum PpLogitsSink<'a> {
     Host(&'a mut Vec<f32>),
     Argmax,
@@ -466,13 +459,8 @@ fn forward_one_token_pp_inner(
         let device = cluster.device(rank_idx);
 
         if rank_idx > 0 {
-            // L1: event-based async peer copy. CPU returns as soon as the
-            // HtoD is queued; the dst stream waits on a HIP event for the
-            // src DtoH driver-side. Subsequent layer kernels submitted on
-            // dst's default stream see the bytes via natural FIFO. The
-            // logits DtoH at the end of this function syncs the head-rank
-            // stream and so naturally orders this iteration's HtoD before
-            // the next iteration's DtoH overwrites the shared bounce.
+            // SAFETY: shared bounce is reordered by the per-token logits
+            // DtoH below; the dst stream picks up the bytes via FIFO.
             unsafe {
                 cluster.peer_copy_via_host_event(
                     scratch.per_rank[rank_idx].hidden_a,

@@ -584,21 +584,11 @@ impl HipCluster {
         Ok(())
     }
 
-    /// **L1** — host-fire-and-forget peer copy for the decode hot path.
-    /// Mirrors [`Self::peer_copy_via_host`] in argument shape but submits
-    /// on the rank default streams and uses a freshly-recorded HIP event
-    /// to make `dst` wait on `src`'s DtoH driver-side. CPU returns as soon
-    /// as the HtoD is queued — no `hipStreamSynchronize`. Subsequent work
-    /// on `dst_rank`'s default stream sees the bytes via natural FIFO.
-    /// **Bounce-buffer correctness**: this variant uses the same shared
-    /// `bounces[src_rank]` slab as the sync variant. Callers must guarantee
-    /// (via downstream sync points on the dst stream — typically the
-    /// per-token logits DtoH at the end of `forward_one_token_pp_logits`)
-    /// that the previous call's HtoD has completed before issuing a new
-    /// DtoH that overwrites the bounce. The decode hot path satisfies
-    /// this because `download_logits_host` syncs the head-rank stream,
-    /// fully draining the previous HtoD on the same rank, before the
-    /// caller advances to the next token.
+    /// Async PCIe peer copy: submits DtoH + HtoD on the rank default
+    /// streams; dst waits on src's DtoH via a HIP event (no CPU sync).
+    /// Callers must guarantee — via a downstream sync on the dst stream
+    /// before the next call — that the previous HtoD has read the
+    /// shared `bounces[src_rank]` slab before the next DtoH overwrites it.
     /// # Safety
     /// As per [`Self::peer_copy_via_host`].
     pub unsafe fn peer_copy_via_host_event(
@@ -639,10 +629,7 @@ impl HipCluster {
             return Ok(());
         }
 
-        // Per-src serialiser — same lock as the sync variant (mixing the two
-        // primitives is safe because both serialize on this lock and the
-        // event variant relies on the caller's downstream sync to order
-        // back-to-back calls for bounce-buffer reuse).
+        // Shares the per-src lock + bounce buffer with `peer_copy_via_host`.
         let _bounce_guard = self.peer_copy_lock[src_rank].lock().map_err(|_| {
             DeviceError::Backend {
                 backend: "hip",
@@ -653,12 +640,11 @@ impl HipCluster {
 
         let buf = self.ensure_bounce(src_rank, bytes)?;
 
-        // 1. DtoH on src rank's default stream.
         let src_dev = &self.devices[src_rank];
         src_dev.bind()?;
         let src_stream = src_dev.default_stream();
-        // SAFETY: `buf` is a live pinned-host region of >= `bytes` bytes
-        // (`ensure_bounce`); `src_ptr` valid for `bytes` per caller contract.
+        // SAFETY: `buf` is a pinned-host region of >= `bytes` bytes
+        // (`ensure_bounce`); `src_ptr` is valid for `bytes` per caller contract.
         let rc = unsafe {
             hipMemcpyAsync(
                 buf,
@@ -670,19 +656,14 @@ impl HipCluster {
         };
         check(rc, "peer_copy_event DtoH")?;
 
-        // 2. Record bridge event on src stream + dst stream waits on it.
-        // One fresh non-timing event per call (~1 µs to allocate); pooling
-        // is a micro-opt for later if profiling shows it matters.
         let bridge = crate::HipEvent::new(src_dev.id())?;
         bridge.record(src_stream)?;
 
-        // 3. HtoD on dst rank's default stream, gated by bridge event.
         let dst_dev = &self.devices[dst_rank];
         dst_dev.bind()?;
         let dst_stream = dst_dev.default_stream();
         bridge.stream_wait(dst_stream)?;
-        // SAFETY: bridge_event guarantees the pinned `buf` is populated
-        // before this HtoD reads it (driver-side DAG edge).
+        // SAFETY: `bridge` orders this HtoD after the DtoH that populates `buf`.
         let rc = unsafe {
             hipMemcpyAsync(
                 dst_ptr.as_usize() as *mut c_void,
