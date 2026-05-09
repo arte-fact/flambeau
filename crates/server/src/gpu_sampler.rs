@@ -209,6 +209,38 @@ fn resolve_head_logits<'a>(
     DevicePtr,
     usize,
 )> {
+    if let (Some(pp_model), Some(pp_session)) = (model.as_pp(), inflight.as_pp()) {
+        let m = &pp_model.model;
+        let n_ranks = m.shards.len();
+        if n_ranks == 0 {
+            bail!("run_gpu_topk: PP model has zero ranks");
+        }
+        let head = n_ranks - 1;
+        if head >= cluster.ranks() {
+            bail!(
+                "run_gpu_topk: PP head_rank={head} >= cluster ranks {}",
+                cluster.ranks()
+            );
+        }
+        let dev = cluster.device(head);
+        if dev.id() != scratch.device_id() {
+            bail!(
+                "run_gpu_topk: scratch device_id={} != PP head device id={}",
+                scratch.device_id(),
+                dev.id()
+            );
+        }
+        let ops = &m.shards[head].ops;
+        let head_scratch = pp_session
+            .decode
+            .per_rank
+            .get(head)
+            .ok_or_else(|| anyhow!("PP scratch per_rank missing rank {head}"))?
+            .output_head
+            .as_ref()
+            .ok_or_else(|| anyhow!("PP head rank missing OutputHeadScratch"))?;
+        return Ok((dev, ops, head_scratch.logits_f32, m.config.vocab_size));
+    }
     if let (Some(tp_model), Some(tp_session)) = (model.as_tp(), inflight.as_tp()) {
         let m = &tp_model.model;
         let decode = &tp_session.decode;

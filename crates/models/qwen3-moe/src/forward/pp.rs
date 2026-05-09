@@ -372,14 +372,48 @@ pub fn forward_one_token_pp_logits(
     logits_out: &mut Vec<f32>,
 ) -> Result<()> {
     forward_one_token_pp_inner(
-        model, session, cluster, scratch, token_id, position, /*download_logits=*/ Some(logits_out),
+        model, session, cluster, scratch, token_id, position,
+        PpLogitsSink::Host(logits_out),
     )
     .map(|_| ())
 }
 
-/// Shared body for `forward_one_token_pp` and `forward_one_token_pp_logits`.
-/// When `logits_out` is `Some`, downloads the F32 logits into it and returns 0;
-/// when `None`, runs host argmax and returns the sampled token id.
+/// **L2 (#211 mirror for PP)** — variant of
+/// [`forward_one_token_pp_logits`] that leaves the F32 logits row on
+/// the head rank's `output_head.logits_f32` for in-place GPU-side
+/// sampling. Caller MUST consume the buffer (e.g. `topk_softmax_f32`
+/// dispatched on the head rank's default stream) before the next
+/// forward call clobbers it. Saves the per-token 605 KB DtoH on the
+/// chat decode hot path under `FLAMBEAU_GPU_SAMPLER=1`.
+pub fn forward_one_token_pp_keep_logits_on_device(
+    model: &crate::sharded::Qwen3MoEShardedModel,
+    session: &mut crate::sharded::Qwen3MoEShardedSession,
+    cluster: &flambeau_backend_hip::HipCluster,
+    scratch: &mut ShardedForwardOneTokenScratch,
+    token_id: u32,
+    position: usize,
+) -> Result<()> {
+    forward_one_token_pp_inner(
+        model, session, cluster, scratch, token_id, position,
+        PpLogitsSink::KeepOnDevice,
+    )
+    .map(|_| ())
+}
+
+/// What to do with the F32 logits row at the end of the head-rank
+/// output head. The three variants map to the three callers:
+/// - `Host`: chat sampler path — DtoH the row.
+/// - `Argmax`: greedy fast path — argmax on device + DtoH one u32.
+/// - `KeepOnDevice`: GPU sampler path — leave on device for the
+///   caller's `topk_softmax_f32` to consume in place.
+pub enum PpLogitsSink<'a> {
+    Host(&'a mut Vec<f32>),
+    Argmax,
+    KeepOnDevice,
+}
+
+/// Shared body for the three single-token PP entry points. Returns the
+/// sampled token id on `Argmax`, `0` on the other two sinks.
 fn forward_one_token_pp_inner(
     model: &crate::sharded::Qwen3MoEShardedModel,
     session: &mut crate::sharded::Qwen3MoEShardedSession,
@@ -387,7 +421,7 @@ fn forward_one_token_pp_inner(
     scratch: &mut ShardedForwardOneTokenScratch,
     token_id: u32,
     position: usize,
-    logits_out: Option<&mut Vec<f32>>,
+    sink: PpLogitsSink<'_>,
 ) -> Result<u32> {
     // Re-run the same composition as `forward_one_token_pp`, but branch on
     // the final reducer. Copy-paste is deliberate — the body is ~150 lines
@@ -591,8 +625,8 @@ fn forward_one_token_pp_inner(
         last_scratch.hidden_a,
     )?;
 
-    match logits_out {
-        Some(buf) => {
+    match sink {
+        PpLogitsSink::Host(buf) => {
             download_logits_host(
                 last_device,
                 last_device.default_stream(),
@@ -602,12 +636,19 @@ fn forward_one_token_pp_inner(
             )?;
             Ok(0)
         }
-        None => argmax_token_host(
+        PpLogitsSink::Argmax => argmax_token_host(
             last_device,
             last_device.default_stream(),
             output_head_scratch.logits_f32,
             cfg.vocab_size,
         ),
+        PpLogitsSink::KeepOnDevice => {
+            // Logits remain in `output_head_scratch.logits_f32`. The
+            // caller's downstream kernel (GPU top-K on the head rank's
+            // default stream) serialises against the output_head writes
+            // via stream ordering — no explicit sync required.
+            Ok(0)
+        }
     }
 }
 

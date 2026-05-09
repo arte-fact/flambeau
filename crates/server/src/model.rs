@@ -12,9 +12,10 @@ use anyhow::{bail, Context, Result};
 use flambeau_backend_hip::{BarP2pAllReduce, HipCluster};
 use flambeau_qwen3_moe::forward::{
     forward_one_token_hybrid_keep_logits_on_device, forward_one_token_hybrid_logits,
-    forward_one_token_pp_logits, forward_one_token_tp_keep_logits_on_device,
-    forward_one_token_tp_logits, forward_prefill_hybrid_logits, forward_prefill_pp,
-    forward_prefill_pp_logits, forward_prefill_tp_logits, forward_prefill_tp_logits_pooled,
+    forward_one_token_pp_keep_logits_on_device, forward_one_token_pp_logits,
+    forward_one_token_tp_keep_logits_on_device, forward_one_token_tp_logits,
+    forward_prefill_hybrid_logits, forward_prefill_pp, forward_prefill_pp_logits,
+    forward_prefill_tp_logits, forward_prefill_tp_logits_pooled,
     ShardedForwardOneTokenScratch, ShardedForwardOneTokenScratchHybrid,
     ShardedForwardOneTokenScratchTp, ShardedForwardPrefillScratch,
     ShardedForwardPrefillScratchTp, SpecStep,
@@ -767,10 +768,10 @@ pub fn decode_logits(
 /// buffer.
 /// **#258** — Hybrid path now uses
 /// `forward_one_token_hybrid_keep_logits_on_device`, removing the
-/// 600 KB DtoH per token that the prior fallback wasted. PP-only path
-/// still bails — the GPU sampler isn't wired for PP topologies (the
-/// TP and Hybrid head ranks expose the head-rank `OutputHeadScratch`
-/// uniformly; PP would need a separate plumbing pass).
+/// 600 KB DtoH per token that the prior fallback wasted. **L2** wires
+/// the same path for PP via `forward_one_token_pp_keep_logits_on_device`
+/// — the head rank's `OutputHeadScratch.logits_f32` is the keep-on-device
+/// surface, identical to TP/Hybrid.
 pub fn decode_keep_logits_on_device(
     model: &LoadedModel,
     cluster: &HipCluster,
@@ -778,7 +779,17 @@ pub fn decode_keep_logits_on_device(
     token: u32,
     position: usize,
 ) -> Result<()> {
-    if let (Some(t), Some(s)) = (model.as_tp(), inflight.as_tp_mut()) {
+    if let (Some(p), Some(s)) = (model.as_pp(), inflight.as_pp_mut()) {
+        forward_one_token_pp_keep_logits_on_device(
+            &p.model,
+            &mut s.session,
+            cluster,
+            &mut s.decode,
+            token,
+            position,
+        )
+        .context("PP decode_keep_logits_on_device")
+    } else if let (Some(t), Some(s)) = (model.as_tp(), inflight.as_tp_mut()) {
         forward_one_token_tp_keep_logits_on_device(
             &t.model,
             &mut s.decode,
@@ -801,7 +812,7 @@ pub fn decode_keep_logits_on_device(
         )
         .context("Hybrid decode_keep_logits_on_device")
     } else {
-        bail!("decode_keep_logits_on_device only wired for TP and Hybrid topologies")
+        bail!("decode_keep_logits_on_device: model topology has no GPU sampler wiring")
     }
 }
 

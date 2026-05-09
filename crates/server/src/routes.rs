@@ -3462,11 +3462,23 @@ fn run_completion_blocking_ids(
     // (head_stage = pp_size - 1; head_rank within stage
     // defaults to 0 per ShardedForwardOneTokenScratchHybrid).
     let use_gpu_sampler = state.gpu_sampler
-        && (model.as_tp().is_some() || model.as_hybrid().is_some())
+        && (model.as_pp().is_some()
+            || model.as_tp().is_some()
+            || model.as_hybrid().is_some())
         && !sampling.is_greedy();
     let mut gpu_scratch: Option<GpuSamplerScratch> = if use_gpu_sampler {
         // Resolve the head device for whichever topology is active.
-        let head_device = if let (Some(_), Some(s)) = (model.as_tp(), inflight.as_tp()) {
+        let head_device = if let (Some(p), Some(_)) = (model.as_pp(), inflight.as_pp()) {
+            // PP head rank is the last shard.
+            let head_rank = p.model.shards.len().saturating_sub(1);
+            if head_rank >= cluster.ranks() {
+                bail!(
+                    "GPU sampler: PP head_rank={head_rank} >= cluster ranks {}",
+                    cluster.ranks()
+                );
+            }
+            cluster.device(head_rank)
+        } else if let (Some(_), Some(s)) = (model.as_tp(), inflight.as_tp()) {
             let head_rank = s.decode.head_rank.0 as usize;
             if head_rank >= cluster.ranks() {
                 bail!(
@@ -3994,7 +4006,9 @@ fn run_completion_blocking_ids(
     // resolve it the same way the constructor did, depending on
     // topology.
     if let Some(scratch) = gpu_scratch.take() {
-        let head_device = if let (Some(_), Some(s)) = (model.as_tp(), inflight.as_tp()) {
+        let head_device = if let (Some(p), Some(_)) = (model.as_pp(), inflight.as_pp()) {
+            cluster.device(p.model.shards.len().saturating_sub(1))
+        } else if let (Some(_), Some(s)) = (model.as_tp(), inflight.as_tp()) {
             cluster.device(s.decode.head_rank.0 as usize)
         } else if let (Some(hm), Some(s)) = (model.as_hybrid(), inflight.as_hybrid()) {
             let decode = &s.decode;

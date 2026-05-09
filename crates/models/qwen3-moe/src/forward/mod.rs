@@ -72,10 +72,11 @@ pub use single_device::{
 
 pub mod pp;
 pub use pp::{
-    forward_one_token_pp, forward_one_token_pp_logits, forward_prefill_pp,
-    forward_prefill_pp_async, forward_prefill_pp_logits, forward_prefill_pp_logits_paired_l2,
-    RankForwardPrefillScratch,
-    RankForwardScratch, ShardedForwardOneTokenScratch, ShardedForwardPrefillScratch, UbatchLane,
+    forward_one_token_pp, forward_one_token_pp_keep_logits_on_device,
+    forward_one_token_pp_logits, forward_prefill_pp, forward_prefill_pp_async,
+    forward_prefill_pp_logits, forward_prefill_pp_logits_paired_l2,
+    RankForwardPrefillScratch, RankForwardScratch, ShardedForwardOneTokenScratch,
+    ShardedForwardPrefillScratch, UbatchLane,
 };
 
 pub mod batched;
