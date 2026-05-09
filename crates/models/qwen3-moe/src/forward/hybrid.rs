@@ -682,6 +682,9 @@ impl<'a> flambeau_blocks::HybridDecodeDriver for Qwen3MoEHybridDriver<'a> {
     }
 
     fn handoff_stage_to_next(&mut self, stage: usize) -> Result<()> {
+        // Producer compute lives on the sub_cluster's stream; peer_copy
+        // submits on the global_cluster's stream. Different HipStream
+        // handles for the same physical device — sync to bridge.
         let prod_dev = self.model.stages[stage].sub_cluster.device(0);
         prod_dev.bind()?;
         prod_dev.default_stream().synchronize()?;
@@ -694,14 +697,12 @@ impl<'a> flambeau_blocks::HybridDecodeDriver for Qwen3MoEHybridDriver<'a> {
         for dst_local in 0..next_ranks {
             let dst_global_rank = (stage + 1) * self.tp_size + dst_local;
             let dst_ptr = self.scratch.per_stage[stage + 1].per_rank[dst_local].hidden_a;
-            // SAFETY: src_ptr is `bytes` long on `src_global_rank`'s
-            // device; dst_ptr is the same size on `dst_global_rank`'s
-            // device. Both ranks belong to global_cluster. Producer
-            // sync above guarantees src is fully written; dst is about
-            // to be re-written by the next stage's first kernel.
+            // SAFETY: src/dst pointers each `bytes` long on their respective
+            // ranks. Producer sync above flushes prior compute; the event
+            // variant chains bounce-buffer reuse driver-side.
             unsafe {
                 self.global_cluster
-                    .peer_copy_via_host(
+                    .peer_copy_via_host_event(
                         dst_ptr,
                         dst_global_rank,
                         src_ptr,
@@ -716,6 +717,15 @@ impl<'a> flambeau_blocks::HybridDecodeDriver for Qwen3MoEHybridDriver<'a> {
                         )
                     })?;
             }
+        }
+        // Bridge global_cluster dst streams to the next stage's sub_cluster
+        // streams via CPU sync (HBM coherence). One sync per dst rank,
+        // collected at the end of the loop so the per-dst HtoDs overlap.
+        for dst_local in 0..next_ranks {
+            let dst_global_rank = (stage + 1) * self.tp_size + dst_local;
+            let dst_dev = self.global_cluster.device(dst_global_rank);
+            dst_dev.bind()?;
+            dst_dev.default_stream().synchronize()?;
         }
         Ok(())
     }
