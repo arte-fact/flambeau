@@ -432,8 +432,15 @@ fn forward_one_token_pp_inner(
         let device = cluster.device(rank_idx);
 
         if rank_idx > 0 {
+            // L1: event-based async peer copy. CPU returns as soon as the
+            // HtoD is queued; the dst stream waits on a HIP event for the
+            // src DtoH driver-side. Subsequent layer kernels submitted on
+            // dst's default stream see the bytes via natural FIFO. The
+            // logits DtoH at the end of this function syncs the head-rank
+            // stream and so naturally orders this iteration's HtoD before
+            // the next iteration's DtoH overwrites the shared bounce.
             unsafe {
-                cluster.peer_copy_via_host(
+                cluster.peer_copy_via_host_event(
                     scratch.per_rank[rank_idx].hidden_a,
                     rank_idx,
                     scratch.per_rank[rank_idx - 1].hidden_a,
