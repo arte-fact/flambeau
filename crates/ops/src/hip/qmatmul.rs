@@ -75,6 +75,23 @@ pub fn qmatmul(
         || (dtype_weight == QDtype::Q4_0 && m < 32)
         || (dtype_weight == QDtype::Q5_0 && m < 32)
     {
+        // K1 — Q4_0 at m ∈ {2, 3, 4}: single-launch batched MMVQ with
+        // compile-time N specialization. Each N has its own kernel
+        // entry so VGPR usage stays close to the single-row baseline
+        // (~17 VGPRs) and gfx906 occupancy is preserved. Outside this
+        // window we keep the row-by-row MMVQ short-circuit:
+        //   m == 1     → no amortization to win; single-row hot path
+        //   m ∈ {5..7} → no batched specialization yet; falls back
+        //   m >= 8     → ≥ 32 routes to MMQ via dispatch table above
+        // Output layout matches the row-by-row loop's `dst[i, n]` slot-
+        // major convention since the batched kernel writes
+        // `dst[s * n_rows + row]` for the same s = row-batch index.
+        if dtype_weight == QDtype::Q4_0 && (2..=4).contains(&m) {
+            mmvq_q4_0_batched(reg, stream, weights, act_q8_1, dst, n, k, m)?;
+            let _ = act_q8_1_mmq;
+            return Ok(());
+        }
+
         let (stem, entry) = match dtype_weight {
             QDtype::Q4_0 => ("mmvq_q4_0", "flambeau_mmvq_q4_0_q8_1"),
             QDtype::Q5_0 => ("mmvq_q5_0", "flambeau_mmvq_q5_0_q8_1"),
@@ -209,6 +226,63 @@ pub fn mmvq_q4_0_t128(
     args.push(&n_rows_i);
     args.push(&n_blocks_i);
     let cfg = LaunchCfg::one_d(n_rows as u32, 128);
+    unsafe { kernel.launch(stream, cfg, args)? };
+    Ok(())
+}
+
+/// **K1** — Q4_0 batched MMVQ: one launch covers `n_slots` activation
+/// rows, each block reads its weight row once and applies it across all
+/// slots in the inner kbx loop. Amortizes weight HBM reads across
+/// activations; the lever for the `qmatmul(m=N)` row-by-row null
+/// observed at L=2 spec verify (see
+/// `feedback_qmatmul_small_m_no_amortize`). Sibling of the existing
+/// `mmvq_q4_1_q8_1_batched` kernel (this is the same pattern with Q4_0
+/// math: `-8·d_x·s_y` bias correction in place of Q4_1's `m_x·s_y`).
+///
+/// Activation layout: `y_q8_1` is `[n_slots, n_blocks_per_row]`
+/// row-major (slot stride = `n_blocks_per_row * sizeof(BlockQ8_1)`).
+/// Output layout: `dst` is `[n_slots, n_rows]` slot-major F32 — matches
+/// the `qmatmul` ABI's `[m, n] = [batch, output]` convention.
+///
+/// `n_slots` ∈ [2, 4]. Per-N compile-time specialization keeps VGPR
+/// usage close to the single-row baseline (~17 VGPRs) so gfx906 wave
+/// occupancy stays at 8+ waves/SIMD. A prior version with a runtime
+/// `n_slots` loop bounded by MAX_N=8 measured at 59 VGPRs / 4 waves —
+/// occupancy loss drowned the weight-amortization win. Callers outside
+/// {2, 3, 4} should fall back to row-by-row MMVQ.
+pub fn mmvq_q4_0_batched(
+    reg: &OpsRegistry,
+    stream: &HipStream,
+    weights: DevicePtr,
+    y_q8_1: DevicePtr,
+    dst: DevicePtr,
+    n_rows: usize,
+    k: usize,
+    n_slots: usize,
+) -> Result<()> {
+    let entry = match n_slots {
+        2 => "flambeau_mmvq_q4_0_q8_1_batched_n2",
+        3 => "flambeau_mmvq_q4_0_q8_1_batched_n3",
+        4 => "flambeau_mmvq_q4_0_q8_1_batched_n4",
+        _ => bail!(
+            "mmvq_q4_0_batched: n_slots={n_slots} outside [2, 4]; \
+             single-row callers should use mmvq_q4_0 row-by-row"
+        ),
+    };
+    let module = reg.expect_module("mmvq_q4_0_batched")?;
+    let kernel = module.kernel(entry)?;
+    let n_rows_i = n_rows as i32;
+    let n_blocks_i = (k / 32) as i32;
+    let w_ptr: u64 = weights.as_usize() as u64;
+    let y_ptr: u64 = y_q8_1.as_usize() as u64;
+    let d_ptr: u64 = dst.as_usize() as u64;
+    let mut args = KernelArgs::new();
+    args.push(&w_ptr);
+    args.push(&y_ptr);
+    args.push(&d_ptr);
+    args.push(&n_rows_i);
+    args.push(&n_blocks_i);
+    let cfg = LaunchCfg::one_d(n_rows as u32, 256);
     unsafe { kernel.launch(stream, cfg, args)? };
     Ok(())
 }
