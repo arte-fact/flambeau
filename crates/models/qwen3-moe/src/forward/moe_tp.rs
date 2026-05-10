@@ -28,7 +28,8 @@ use flambeau_ops::hip::{
     cast::{cast_f16_to_f32, cast_f32_to_f16},
     moe::{
         indexed_moe_mmq_q4_0_down_tile8, indexed_moe_mmq_q4_0_gate_up_tile8,
-        indexed_moe_mmq_q4_1_down_tile8, indexed_moe_mmq_q8_0_down_tile8,
+        indexed_moe_mmq_q4_1_down_tile8, indexed_moe_mmq_q4_k_down_tile8,
+        indexed_moe_mmq_q4_k_gate_up_tile8, indexed_moe_mmq_q8_0_down_tile8,
         indexed_moe_mmq_q8_0_gate_up_tile8, moe_combine_no_residual_f16,
         moe_sort_by_expert_padded, shared_expert_scale_f32, MoeShape,
     },
@@ -420,8 +421,11 @@ pub fn forward_moe_ffn_prefill_tp(
         (GgmlDType::Q4_0, GgmlDType::Q4_0)
             | (GgmlDType::Q4_0, GgmlDType::Q8_0)
             | (GgmlDType::Q4_0, GgmlDType::Q4_1)
-            | (GgmlDType::Q8_0, GgmlDType::Q8_0),
+            | (GgmlDType::Q8_0, GgmlDType::Q8_0)
+            | (GgmlDType::Q4K, GgmlDType::Q4K),
     );
+    let gate_block_size = ffn_gate_exps.dtype.block_size();
+    let down_block_size = ffn_down_exps.dtype.block_size();
     if tile8_dt_ok && n_tokens >= TP_TILE8_THRESHOLD {
         moe_sort_by_expert_padded(
             ops,
@@ -441,6 +445,14 @@ pub fn forward_moe_ffn_prefill_tp(
         .context("moe (TP) prefill moe_sort_by_expert_padded")?;
         let padded_total_ub = total_pairs + n_experts * 8;
 
+        let gate_up_shape = MoeShape {
+            n_rows: local_inter,
+            n_tokens,
+            top_k,
+            n_sb_per_row: hidden / gate_block_size,
+            n_experts,
+            padded_total_upper_bound: padded_total_ub,
+        };
         match ffn_gate_exps.dtype {
             GgmlDType::Q4_0 => indexed_moe_mmq_q4_0_gate_up_tile8(
                 ops,
@@ -453,14 +465,7 @@ pub fn forward_moe_ffn_prefill_tp(
                 scratch.sort_padded_offsets,
                 scratch.gate_out_f32,
                 scratch.up_out_f32,
-                MoeShape {
-                    n_rows: local_inter,
-                    n_tokens,
-                    top_k,
-                    n_sb_per_row: hidden / 32,
-                    n_experts,
-                    padded_total_upper_bound: padded_total_ub,
-                },
+                gate_up_shape,
             )
             .context("moe (TP) prefill gate+up q4_0 tile8")?,
             GgmlDType::Q8_0 => indexed_moe_mmq_q8_0_gate_up_tile8(
@@ -474,16 +479,23 @@ pub fn forward_moe_ffn_prefill_tp(
                 scratch.sort_padded_offsets,
                 scratch.gate_out_f32,
                 scratch.up_out_f32,
-                MoeShape {
-                    n_rows: local_inter,
-                    n_tokens,
-                    top_k,
-                    n_sb_per_row: hidden / 32,
-                    n_experts,
-                    padded_total_upper_bound: padded_total_ub,
-                },
+                gate_up_shape,
             )
             .context("moe (TP) prefill gate+up q8_0 tile8")?,
+            GgmlDType::Q4K => indexed_moe_mmq_q4_k_gate_up_tile8(
+                ops,
+                stream,
+                ffn_gate_exps.ptr,
+                ffn_up_exps.ptr,
+                scratch.x_q8_1,
+                scratch.expert_ids,
+                scratch.sort_sorted_pair_idx_padded,
+                scratch.sort_padded_offsets,
+                scratch.gate_out_f32,
+                scratch.up_out_f32,
+                gate_up_shape,
+            )
+            .context("moe (TP) prefill gate+up q4_k tile8")?,
             _ => unreachable!("tile8_dt_ok already filtered gate dtype"),
         }
 
@@ -509,7 +521,7 @@ pub fn forward_moe_ffn_prefill_tp(
             n_rows: hidden,
             n_tokens: total_pairs,
             top_k: 1,
-            n_sb_per_row: local_inter / 32,
+            n_sb_per_row: local_inter / down_block_size,
             n_experts,
             padded_total_upper_bound: padded_total_ub,
         };
@@ -550,6 +562,18 @@ pub fn forward_moe_ffn_prefill_tp(
                 down_shape,
             )
             .context("moe (TP) prefill down q8_0 tile8")?,
+            GgmlDType::Q4K => indexed_moe_mmq_q4_k_down_tile8(
+                ops,
+                stream,
+                ffn_down_exps.ptr,
+                scratch.activated_q8_1,
+                scratch.expert_ids,
+                scratch.sort_sorted_pair_idx_padded,
+                scratch.sort_padded_offsets,
+                scratch.down_f32,
+                down_shape,
+            )
+            .context("moe (TP) prefill down q4_k tile8")?,
             _ => unreachable!("tile8_dt_ok already filtered down dtype"),
         }
 
