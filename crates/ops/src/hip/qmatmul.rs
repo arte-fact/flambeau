@@ -116,6 +116,17 @@ pub fn qmatmul(
         let _ = act_q8_1_mmq;
         return Ok(());
     }
+
+    // K3 — Q5_K at m ∈ {2, 3, 4}: batched MMVQ with r2 multi-row + per-N
+    // activation cols. Bypasses the dispatch-table m-loop which would
+    // otherwise route to `mmvq_q5_k_r2_q8_1` m times. Same VGPR/occupancy
+    // discipline as K1's Q4_0 batched.
+    if dtype_weight == QDtype::Q5_K && (2..=4).contains(&m) {
+        mmvq_q5_k_r2_batched(reg, stream, weights, act_q8_1, dst, n, k, m)?;
+        let _ = act_q8_1_mmq;
+        return Ok(());
+    }
+
     let cfg = QMatMulCfg {
         dtype_weight,
         dtype_activation: QDtype::Q8_1,
@@ -283,6 +294,54 @@ pub fn mmvq_q4_0_batched(
     args.push(&n_rows_i);
     args.push(&n_blocks_i);
     let cfg = LaunchCfg::one_d(n_rows as u32, 256);
+    unsafe { kernel.launch(stream, cfg, args)? };
+    Ok(())
+}
+
+/// **K3** — Q5_K batched MMVQ with r2 multi-row + per-N activation
+/// columns. Sibling of [`mmvq_q4_0_batched`] for Q5_K weights (the
+/// `ssm_*` projections in GDN layers — second-largest decode bucket
+/// per S2 rocprof at 760 ms / spec phase). Same lever: one launch
+/// covers N activation rows; each block reads its Q5_K super-block
+/// once and applies it across the N columns. Block grid:
+/// `ceil(n_rows / 2)` (r2 retained from the single-col Q5_K kernel).
+///
+/// `n_slots` ∈ [2, 4]. Outside that the caller falls back to the
+/// row-by-row m-loop in [`qmatmul`].
+pub fn mmvq_q5_k_r2_batched(
+    reg: &OpsRegistry,
+    stream: &HipStream,
+    weights: DevicePtr,
+    y_q8_1: DevicePtr,
+    dst: DevicePtr,
+    n_rows: usize,
+    k: usize,
+    n_slots: usize,
+) -> Result<()> {
+    let entry = match n_slots {
+        2 => "flambeau_mmvq_q5_k_r2_q8_1_batched_n2",
+        3 => "flambeau_mmvq_q5_k_r2_q8_1_batched_n3",
+        4 => "flambeau_mmvq_q5_k_r2_q8_1_batched_n4",
+        _ => bail!(
+            "mmvq_q5_k_r2_batched: n_slots={n_slots} outside [2, 4]"
+        ),
+    };
+    let module = reg.expect_module("mmvq_q5_k_r2_batched")?;
+    let kernel = module.kernel(entry)?;
+    let n_rows_i = n_rows as i32;
+    let n_superblocks_i = (k / 256) as i32;
+    let w_ptr: u64 = weights.as_usize() as u64;
+    let y_ptr: u64 = y_q8_1.as_usize() as u64;
+    let d_ptr: u64 = dst.as_usize() as u64;
+    let mut args = KernelArgs::new();
+    args.push(&w_ptr);
+    args.push(&y_ptr);
+    args.push(&d_ptr);
+    args.push(&n_rows_i);
+    args.push(&n_superblocks_i);
+    // 64 threads/block = 1 wave64 (r2 multi-row pattern); grid = ceil(n_rows / 2).
+    let n_row_pairs = ((n_rows + 1) / 2) as u32;
+    let cfg = LaunchCfg::one_d(n_row_pairs, 64);
     unsafe { kernel.launch(stream, cfg, args)? };
     Ok(())
 }
