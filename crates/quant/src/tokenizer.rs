@@ -13,9 +13,14 @@
 
 use anyhow::{anyhow, Context, Result};
 use tokenizers::models::bpe::{Vocab, BPE};
+use tokenizers::pre_tokenizers::{
+    byte_level::ByteLevel,
+    sequence::Sequence as PreTokSequence,
+    split::{Split, SplitPattern},
+};
 use tokenizers::{
-    decoders, normalizers, pre_tokenizers, AddedToken, DecoderWrapper, ModelWrapper,
-    NormalizerWrapper, PostProcessorWrapper, PreTokenizerWrapper, Tokenizer, TokenizerImpl,
+    decoders, normalizers, AddedToken, DecoderWrapper, ModelWrapper, NormalizerWrapper,
+    PostProcessorWrapper, PreTokenizerWrapper, SplitDelimiterBehavior, Tokenizer, TokenizerImpl,
 };
 
 use crate::gguf::GgufFile;
@@ -404,20 +409,45 @@ mod fim_tests {
 
 /// Map GGUF `tokenizer.ggml.pre` → concrete pretokenizer. llama.cpp supports
 /// many presets; we cover the ones in-use for our target models.
+///
+/// Qwen2/Qwen3 use a tokenizer-pre regex that, unlike GPT-2's, keeps optional
+/// leading punctuation attached to the following letters — `"-time"` stays as
+/// one chunk that BPE can merge into the single vocab token, instead of
+/// splitting into `["-", "time"]`. Stock `ByteLevel(use_regex=true)` would
+/// apply GPT-2's regex and emit two tokens. Fix: split with the Qwen regex
+/// first, then byte-level map without re-splitting.
 fn pre_for(pre: &str) -> Result<PreTokenizerWrapper> {
-    // GPT-2 / ByteLevel is the common case. The `pre` name selects the regex
-    // split pattern; for our Qwen3.5/3.6 path ("qwen35") the effective pattern
-    // matches GPT-2's and llama3's pre — a contextual regex over bytes before
-    // the byte-level mapper. `tokenizers` crate ByteLevel does both.
     match pre {
-        "default" | "gpt-2" | "llama-bpe" | "llama3" | "qwen2" | "qwen35" => {
-            Ok(PreTokenizerWrapper::ByteLevel(
-                pre_tokenizers::byte_level::ByteLevel::new(
-                    /*add_prefix_space=*/ false,
-                    /*trim_offsets=*/ true,
-                    /*use_regex=*/ true,
-                ),
-            ))
+        "default" | "gpt-2" | "llama-bpe" | "llama3" => {
+            Ok(PreTokenizerWrapper::ByteLevel(ByteLevel::new(
+                /*add_prefix_space=*/ false,
+                /*trim_offsets=*/ true,
+                /*use_regex=*/ true,
+            )))
+        }
+        "qwen2" | "qwen35" => {
+            let regex = if pre == "qwen35" {
+                // llama.cpp LLAMA_VOCAB_PRE_TYPE_QWEN35.
+                r"(?:'[sS]|'[tT]|'[rR][eE]|'[vV][eE]|'[mM]|'[lL][lL]|'[dD])|[^\r\n\p{L}\p{N}]?[\p{L}\p{M}]+|\p{N}| ?[^\s\p{L}\p{M}\p{N}]+[\r\n]*|\s*[\r\n]+|\s+(?!\S)|\s+"
+            } else {
+                // llama.cpp LLAMA_VOCAB_PRE_TYPE_QWEN2.
+                r"(?:'[sS]|'[tT]|'[rR][eE]|'[vV][eE]|'[mM]|'[lL][lL]|'[dD])|[^\r\n\p{L}\p{N}]?\p{L}+|\p{N}| ?[^\s\p{L}\p{N}]+[\r\n]*|\s*[\r\n]+|\s+(?!\S)|\s+"
+            };
+            let split = Split::new(
+                SplitPattern::Regex(regex.to_owned()),
+                SplitDelimiterBehavior::Isolated,
+                /*invert=*/ false,
+            )
+            .map_err(|e| anyhow!("qwen split pretokenizer: {e}"))?;
+            let byte_level = ByteLevel::new(
+                /*add_prefix_space=*/ false,
+                /*trim_offsets=*/ true,
+                /*use_regex=*/ false,
+            );
+            Ok(PreTokenizerWrapper::Sequence(PreTokSequence::new(vec![
+                PreTokenizerWrapper::Split(split),
+                PreTokenizerWrapper::ByteLevel(byte_level),
+            ])))
         }
         other => Err(anyhow!(
             "tokenizer.ggml.pre=`{other}` not supported (add a match arm in pre_for)"
