@@ -100,7 +100,12 @@ impl ArKind {
 /// one rank can't read at least one peer through BAR1, and the caller
 /// should fall back to host-bounce AllReduce instead.
 pub struct BarP2pAllReduce {
-    cluster: Arc<HipCluster>,
+    // **drop-order**: Rust drops fields in declaration order, so
+    // anything that holds a per-device resource MUST be declared
+    // before the `cluster` Arc. Otherwise the Arc drops first; if it
+    // was the last holder the devices get freed; then HipModule drops
+    // try to unload from dangling device handles → SIGSEGV at process
+    // exit. Same pattern as HipDevice's blas-before-stream rule.
     /// `modules[r]` is the AR hsaco loaded onto rank `r`'s device.
     modules: Vec<HipModule>,
     /// fused AR + residual + RMSNorm hsaco loaded onto each
@@ -111,6 +116,7 @@ pub struct BarP2pAllReduce {
     /// hsaco. Used at the cross-layer FFN boundary so the next layer's
     /// first mmvq sees the AR'd-and-quantized x_q8_1 directly.
     modules_fused_norm_q8_1: Vec<HipModule>,
+    cluster: Arc<HipCluster>,
 }
 
 impl std::fmt::Debug for BarP2pAllReduce {
