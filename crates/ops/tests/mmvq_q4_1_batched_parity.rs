@@ -1,20 +1,11 @@
-//! #288 parity test — verify `mmvq_q4_1_batched` produces output
-//! bit-identical to looping the single-row `mmvq_q4_1_q8_1` kernel
-//! once per slot.
-//! The batched kernel uses the same per-thread per-K-block accumulator
-//! math (`sumi · (d_x · d_y) + (m_x · s_y) · 0.25`) and the same
-//! reduction pattern as the single-row kernel; the only difference is
-//! that N slot accumulators live in registers per thread instead of one.
-//! However, the surrounding slot loop changes hipcc's FMA-contraction
-//! choices, which produces ~1.5e-6 max abs drift at k=4096. We enforce
-//! `abs_err < 1e-5` (10× safety margin over observed) — same scale of
-//! tolerance the existing batched-GDN cert already accepts on the
-//! model-level forward path.
-//! Sweep:
-//! - N ∈ {1, 2, 4, 8, 16}
-//! - n_rows ∈ {64, 4096}: small for fast cycles, prod-realistic for
-//! stress (Qwen3.6 hidden=3584 / GDN-out widths in this range).
-//! - k ∈ {1024, 4096}: GDN intermediate widths span this range.
+//! Parity test — `mmvq_q4_1_batched` (per-N compile-time, n2/n3/n4)
+//! vs. looping the single-row `mmvq_q4_1_q8_1` kernel once per slot.
+//! Math is algebraically identical (`sumi · (d_x · d_y) + (m_x · s_y) · 0.25`
+//! per Q4_1 block), but the slot-loop changes hipcc's FMA-contraction
+//! choices → ~1.5e-6 max abs drift at k=4096. Tolerance enforced at
+//! `abs_err < 1e-5`, matching the batched-GDN cert tolerance.
+//! Sweep: N ∈ {2, 3, 4} (the supported window); n_rows ∈ {64, 4096};
+//! k ∈ {1024, 4096}.
 
 #![cfg(feature = "hip")]
 #![expect(
@@ -182,10 +173,6 @@ fn run_parity(label: &str, shape: Shape, n_slots: usize, seed: u64) -> Result<bo
     let d_out_batched = alloc_zeroed(&dev, dst_bytes);
 
     // 5. Baseline: N independent qmatmul(m=1) calls, one per slot.
-    // m=1 doesn't trigger the batched short-circuit (which needs m≥2).
-    // Ensure batched-MMVQ env is unset for the baseline path.
-    // SAFETY: env mutation/restore is single-threaded inside this test.
-    unsafe { std::env::remove_var("FLAMBEAU_BATCHED_MMVQ"); }
     let act_row_bytes = n_blocks_per_row * std::mem::size_of::<BlockQ8_1>();
     let dst_row_bytes = n_rows * 4;
     for s in 0..n_slots {
@@ -198,29 +185,13 @@ fn run_parity(label: &str, shape: Shape, n_slots: usize, seed: u64) -> Result<bo
     }
     stream.synchronize()?;
 
-    // 6. Batched: single qmatmul(m=N) call routed explicitly through the
-    // v1 batched-MMVQ kernel via `FLAMBEAU_BATCHED_MMVQ=v1`.
-    if n_slots >= 2 {
-        unsafe { std::env::set_var("FLAMBEAU_BATCHED_MMVQ", "v1"); }
-        qmatmul(
-            &reg, stream, d_w, d_act_q8_1, DevicePtr(0), d_out_batched,
-            n_slots, k, n_rows, QDtype::Q4_1,
-        )?;
-        unsafe { std::env::remove_var("FLAMBEAU_BATCHED_MMVQ"); }
-    } else {
-        // N=1: short-circuit skipped, copy baseline as "batched" so the
-        // bit-equal check is trivially true. The kernel was designed for
-        // N≥2; N=1 falls through to the per-row path.
-        unsafe {
-            dev.memcpy_async(
-                stream,
-                CopyDirection::DeviceToDevice,
-                d_out_batched,
-                d_out_baseline,
-                dst_bytes,
-            )?;
-        }
-    }
+    // 6. Batched: single qmatmul(m=N) call. For N ∈ {2,3,4} this is
+    // auto-dispatched to mmvq_q4_1_batched_n{N}; for N=1 it falls
+    // through to the same per-row path as the baseline.
+    qmatmul(
+        &reg, stream, d_w, d_act_q8_1, DevicePtr(0), d_out_batched,
+        n_slots, k, n_rows, QDtype::Q4_1,
+    )?;
     stream.synchronize()?;
 
     // 7. Download both, compare bit-equal.
@@ -260,9 +231,9 @@ fn run_parity(label: &str, shape: Shape, n_slots: usize, seed: u64) -> Result<bo
 #[test]
 fn mmvq_q4_1_batched_parity_sweep() -> Result<()> {
     let cases: &[(&str, Shape, &[usize])] = &[
-        ("small",  Shape { n_rows: 64,   k: 1024 }, &[1, 2, 4, 8, 16]),
-        ("k=4096", Shape { n_rows: 64,   k: 4096 }, &[2, 4, 8]),
-        ("prod",   Shape { n_rows: 4096, k: 4096 }, &[2, 4, 8]),
+        ("small",  Shape { n_rows: 64,   k: 1024 }, &[2, 3, 4]),
+        ("k=4096", Shape { n_rows: 64,   k: 4096 }, &[2, 3, 4]),
+        ("prod",   Shape { n_rows: 4096, k: 4096 }, &[2, 3, 4]),
     ];
     let mut all_pass = true;
     for (label, shape, slots) in cases {
