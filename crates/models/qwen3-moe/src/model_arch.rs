@@ -14,7 +14,7 @@ impl Model for Qwen3MoEModelArch {
         // string the config parser accepts must be registered here so
         // `Registry::validate` matches GGUFs the model can actually
         // load.
-        &["qwen35moe", "qwen3moe", "qwen3next"]
+        &["qwen35", "qwen35moe", "qwen3moe", "qwen3next"]
     }
 
     fn description(&self) -> &'static str {
