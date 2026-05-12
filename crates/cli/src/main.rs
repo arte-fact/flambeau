@@ -605,8 +605,9 @@ fn sweep(arch: &str, op: Option<&str>, dtype: &str) -> Result<()> {
             "qmatmul" => {
                 use flambeau_bench::sweep_mmvq::{run_sweep, Dtype, SweepSpec};
                 let dtypes: Vec<Dtype> = match dtype {
-                    "all" => vec![Dtype::Q8_0, Dtype::Q3K, Dtype::Q4K, Dtype::Q5K, Dtype::Q6K],
+                    "all" => vec![Dtype::Q8_0, Dtype::Q3K, Dtype::Q4K, Dtype::Q5K, Dtype::Q6K, Dtype::Q8K],
                     "Q3_K" => vec![Dtype::Q3K],
+                    "Q8_K" => vec![Dtype::Q8K],
                     "all-multirow" => vec![Dtype::Q4KR2, Dtype::Q5KR2, Dtype::Q6KR4],
                     "Q8_0" => vec![Dtype::Q8_0],
                     "Q4_K" => vec![Dtype::Q4K],
