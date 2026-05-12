@@ -82,6 +82,11 @@ pub fn qmatmul(
         let _ = act_q8_1_mmq;
         return Ok(());
     }
+    if dtype_weight == QDtype::Q6_K && (2..=4).contains(&m) {
+        mmvq_q6_k_batched(reg, stream, weights, act_q8_1, dst, n, k, m)?;
+        let _ = act_q8_1_mmq;
+        return Ok(());
+    }
     if (dtype_weight == QDtype::Q5_1 && m < 32)
         || (dtype_weight == QDtype::Q4_0 && m < 32)
         || (dtype_weight == QDtype::Q5_0 && m < 32)
@@ -332,6 +337,46 @@ pub fn mmvq_q4_k_batched(
         ),
     };
     let module = reg.expect_module("mmvq_q4_k_batched")?;
+    let kernel = module.kernel(entry)?;
+    let n_rows_i = n_rows as i32;
+    let n_superblocks_i = (k / flambeau_quant::QK_K) as i32;
+    let w_ptr: u64 = weights.as_usize() as u64;
+    let y_ptr: u64 = y_q8_1.as_usize() as u64;
+    let d_ptr: u64 = dst.as_usize() as u64;
+    let mut args = KernelArgs::new();
+    args.push(&w_ptr);
+    args.push(&y_ptr);
+    args.push(&d_ptr);
+    args.push(&n_rows_i);
+    args.push(&n_superblocks_i);
+    let cfg = LaunchCfg::one_d(n_rows as u32, 64);
+    unsafe { kernel.launch(stream, cfg, args)? };
+    Ok(())
+}
+
+/// Q6_K sibling of [`mmvq_q4_k_batched`]. Single-row Q6_K decode
+/// (4 elements per lane per super-block via the 6-bit ql+qh layout)
+/// with an inner N-slot loop. Takes `k` (counted in elements, not blocks);
+/// kernel arg is `k / QK_K` super-blocks.
+pub fn mmvq_q6_k_batched(
+    reg: &OpsRegistry,
+    stream: &HipStream,
+    weights: DevicePtr,
+    y_q8_1: DevicePtr,
+    dst: DevicePtr,
+    n_rows: usize,
+    k: usize,
+    n_slots: usize,
+) -> Result<()> {
+    let entry = match n_slots {
+        2 => "flambeau_mmvq_q6_k_q8_1_batched_n2",
+        3 => "flambeau_mmvq_q6_k_q8_1_batched_n3",
+        4 => "flambeau_mmvq_q6_k_q8_1_batched_n4",
+        _ => bail!(
+            "mmvq_q6_k_batched: n_slots={n_slots} outside [2, 4]"
+        ),
+    };
+    let module = reg.expect_module("mmvq_q6_k_batched")?;
     let kernel = module.kernel(entry)?;
     let n_rows_i = n_rows as i32;
     let n_superblocks_i = (k / flambeau_quant::QK_K) as i32;
