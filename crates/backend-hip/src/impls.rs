@@ -172,6 +172,16 @@ pub const QMATMUL_GFX906: &[KernelDescriptor] = &[
     },
     KernelDescriptor {
         op_name: "QMatMul",
+        impl_id: "qmatmul_q5_1_mmq_wave64_gfx906",
+        backend: "hip",
+        arch: "gfx906",
+        dtype_weight: QDtype::Q5_1,
+        dtype_activation: QDtype::Q8_1,
+        m_range: (32, usize::MAX),
+        cert_rel_path: "certs/hip/gfx906/qmatmul_q5_1_mmq_wave64_gfx906.json",
+    },
+    KernelDescriptor {
+        op_name: "QMatMul",
         // 4.b kernel, promoted (2026-04-27): llamacpp-turbo
         // 4-warp LDS-tiled Q4_K MMQ port. 256 threads (4 warps × 64), MMQ_Y=128,
         // MMQ_X=16, double-buffered Y LDS per super-block. Owns m >= 128; the

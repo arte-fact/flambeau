@@ -27,8 +27,8 @@ use flambeau_backend_hip::{
 use flambeau_core::{CopyDirection, Device, DevicePtr, Stream};
 use flambeau_kernels_hip as kernels;
 use flambeau_quant::{
-    dequantize_into, BlockQ4_0, BlockQ4_1, BlockQ4K, BlockQ5_0, BlockQ5K, BlockQ6K, BlockQ8_0,
-    BlockQ8_1, GgmlDType, QK4_1, QK8_0, QK_K,
+    dequantize_into, BlockQ4_0, BlockQ4_1, BlockQ4K, BlockQ5_0, BlockQ5_1, BlockQ5K, BlockQ6K, BlockQ8_0,
+    BlockQ8_1, GgmlDType, QK4_1, QK5_1, QK8_0, QK_K,
 };
 use half::f16;
 
@@ -64,6 +64,10 @@ pub enum Dtype {
     /// with the `(q5-16)·y = dp4a(nibble,y) + 16·dp4a(bit,y) - 16·y_s` identity
     /// (5th-bit side from 3 mmvq_q5_0 grafted into the 8.a tile shape).
     Q5_0Wave64,
+    /// Wave64 Q5_1 MMQ. Combines the Q5_0 5th-bit ladder with the Q4_1
+    /// `d·d_y·sumi + m·y_s` reduction; Q5_1 elements are unsigned so no
+    /// −16·y_s correction.
+    Q5_1Wave64,
     /// 4-warp LDS-tiled Q4_K MMQ, MMQ_Y=16, MMQ_X=8, 128 threads.
     Q4K4Warp,
     /// 4.b — llamacpp-turbo Q4_K MMQ port. 256 threads (4 warps × 64),
@@ -95,6 +99,7 @@ fn tile_shape(dtype: Dtype) -> (u32, u32) {
         Dtype::Q4_0Wave64 => (64, 8),  // 8.a wave64 MMQ for Q4_0
         Dtype::Q4_04Warp => (128, 64), // C1 — 4warp_lds tile, MMQ_Y=128, MMQ_X=64
         Dtype::Q5_0Wave64 => (64, 8),  // 0.a wave64 MMQ for Q5_0
+        Dtype::Q5_1Wave64 => (64, 8),
         Dtype::Q4K4Warp => (16, 8),    // MMQ_Y × MMQ_X (Q4_K uses 16 rows to fit LDS)
         Dtype::Q4KTurbo => (128, 16),  // 4.b turbo-ported Q4_K (MMQ_Y=128, MMQ_X=16)
         Dtype::Q4KWave64 => (64, 8),   // MMQ_Y × TILE_N — wave64 MMQ for Q4_K (candle port)
@@ -114,6 +119,7 @@ impl Dtype {
             Dtype::Q4_14Warp | Dtype::Q4_1Wave64 => "Q4_1",
             Dtype::Q4_0Wave64 | Dtype::Q4_04Warp => "Q4_0",
             Dtype::Q5_0Wave64 => "Q5_0",
+            Dtype::Q5_1Wave64 => "Q5_1",
             Dtype::Q4K4Warp | Dtype::Q4KWave64 | Dtype::Q4KTurbo => "Q4_K",
             Dtype::Q5KWave64 => "Q5_K",
             Dtype::Q6K4Warp | Dtype::Q6KWave64 => "Q6_K",
@@ -129,6 +135,7 @@ impl Dtype {
             Dtype::Q4_14Warp | Dtype::Q4_1Wave64 => GgmlDType::Q4_1,
             Dtype::Q4_0Wave64 | Dtype::Q4_04Warp => GgmlDType::Q4_0,
             Dtype::Q5_0Wave64 => GgmlDType::Q5_0,
+            Dtype::Q5_1Wave64 => GgmlDType::Q5_1,
             Dtype::Q4K4Warp | Dtype::Q4KWave64 | Dtype::Q4KTurbo => GgmlDType::Q4K,
             Dtype::Q5KWave64 => GgmlDType::Q5K,
             Dtype::Q6K4Warp | Dtype::Q6KWave64 => GgmlDType::Q6K,
@@ -146,6 +153,7 @@ impl Dtype {
             Dtype::Q4_0Wave64 => "qmatmul_q4_0_mmq_wave64_gfx906",
             Dtype::Q4_04Warp => "qmatmul_q4_0_mmq_4warp_lds_gfx906",
             Dtype::Q5_0Wave64 => "qmatmul_q5_0_mmq_wave64_gfx906",
+            Dtype::Q5_1Wave64 => "qmatmul_q5_1_mmq_wave64_gfx906",
             Dtype::Q4K4Warp => "qmatmul_q4_K_mmq_4warp_lds_gfx906",
             Dtype::Q4KTurbo => "qmatmul_q4_K_mmq_turbo_gfx906",
             Dtype::Q4KWave64 => "qmatmul_q4_K_mmq_wave64_gfx906",
@@ -166,6 +174,7 @@ impl Dtype {
             Dtype::Q4_0Wave64 => "mmq_q4_0_wave64",
             Dtype::Q4_04Warp => "mmq_q4_0_4warp_lds",
             Dtype::Q5_0Wave64 => "mmq_q5_0_wave64",
+            Dtype::Q5_1Wave64 => "mmq_q5_1_wave64",
             Dtype::Q4K4Warp => "mmq_q4_K_4warp",
             Dtype::Q4KTurbo => "mmq_q4_K_turbo",
             Dtype::Q4KWave64 => "mmq_q4_K_wave64",
@@ -186,6 +195,7 @@ impl Dtype {
             Dtype::Q4_0Wave64 => "flambeau_mmq_q4_0_wave64_q8_1",
             Dtype::Q4_04Warp => "flambeau_mmq_q4_0_4warp_lds_q8_1",
             Dtype::Q5_0Wave64 => "flambeau_mmq_q5_0_wave64_q8_1",
+            Dtype::Q5_1Wave64 => "flambeau_mmq_q5_1_wave64_q8_1",
             Dtype::Q4K4Warp => "flambeau_mmq_q4_K_4warp_q8_1",
             Dtype::Q4KTurbo => "flambeau_mmq_q4_K_turbo_q8_1",
             Dtype::Q4KWave64 => "flambeau_mmq_q4_K_wave64_q8_1",
@@ -198,7 +208,7 @@ impl Dtype {
     fn launch_threads(self) -> u32 {
         match self {
             Dtype::Q8_0Oracle | Dtype::Q8_04Warp | Dtype::Q4_14Warp | Dtype::Q4_04Warp => 256,
-            Dtype::Q8_0Wave64 | Dtype::Q8_0Wave64Tile16 | Dtype::Q4_1Wave64 | Dtype::Q4_0Wave64 | Dtype::Q5_0Wave64 => 64,
+            Dtype::Q8_0Wave64 | Dtype::Q8_0Wave64Tile16 | Dtype::Q4_1Wave64 | Dtype::Q4_0Wave64 | Dtype::Q5_0Wave64 | Dtype::Q5_1Wave64 => 64,
             Dtype::Q4K4Warp | Dtype::Q6K4Warp => 128,
             Dtype::Q4KTurbo => 256,  // 4 warps × 64
             Dtype::Q4KWave64 | Dtype::Q5KWave64 | Dtype::Q6KWave64 => 64,
@@ -218,6 +228,7 @@ impl Dtype {
             Dtype::Q4_14Warp | Dtype::Q4_1Wave64 => std::mem::size_of::<BlockQ4_1>(),
             Dtype::Q4_0Wave64 | Dtype::Q4_04Warp => std::mem::size_of::<BlockQ4_0>(),
             Dtype::Q5_0Wave64 => std::mem::size_of::<BlockQ5_0>(),
+            Dtype::Q5_1Wave64 => std::mem::size_of::<BlockQ5_1>(),
             Dtype::Q4K4Warp | Dtype::Q4KWave64 | Dtype::Q4KTurbo => std::mem::size_of::<BlockQ4K>(),
             Dtype::Q5KWave64 => std::mem::size_of::<BlockQ5K>(),
             Dtype::Q6K4Warp | Dtype::Q6KWave64 => std::mem::size_of::<BlockQ6K>(),
@@ -234,6 +245,7 @@ impl Dtype {
             Dtype::Q4_0Wave64 => "wave64",
             Dtype::Q4_04Warp => "4warp_lds",
             Dtype::Q5_0Wave64 => "wave64",
+            Dtype::Q5_1Wave64 => "wave64",
             Dtype::Q4K4Warp => "4warp_lds",
             Dtype::Q4KTurbo => "turbo",
             Dtype::Q4KWave64 | Dtype::Q5KWave64 | Dtype::Q6KWave64 | Dtype::Q8_0Wave64 => "wave64",
@@ -522,7 +534,7 @@ fn run_shape(
                 shared_bytes,
             };
             unsafe { k_mmq.launch(stream, cfg, args)? };
-        } else if dtype == Dtype::Q4KWave64 || dtype == Dtype::Q5KWave64 || dtype == Dtype::Q6KWave64 || dtype == Dtype::Q8_0Wave64 || dtype == Dtype::Q8_0Wave64Tile16 || dtype == Dtype::Q4_1Wave64 || dtype == Dtype::Q4_0Wave64 || dtype == Dtype::Q5_0Wave64 {
+        } else if dtype == Dtype::Q4KWave64 || dtype == Dtype::Q5KWave64 || dtype == Dtype::Q6KWave64 || dtype == Dtype::Q8_0Wave64 || dtype == Dtype::Q8_0Wave64Tile16 || dtype == Dtype::Q4_1Wave64 || dtype == Dtype::Q4_0Wave64 || dtype == Dtype::Q5_0Wave64 || dtype == Dtype::Q5_1Wave64 {
             // flambeau_mmq_{q4_K,q5_K,q6_K,q8_0}_wave64_q8_1: 8 scalar args + 3 ptrs, wave64
             // block. Args: vx, vy, dst, ncols_x=K, nrows_x=N, ncols_y=M,
             // nrows_y=K, nrows_dst=N.
@@ -650,6 +662,15 @@ fn tame_weight_scales(dtype: Dtype, mut raw: Vec<u8>) -> Vec<u8> {
                 // expand_bits4 DP4A path across all 32 bits naturally.
                 let d = f16::from_f32((block[0] as f32 / 255.0) * 0.1 + 0.01);
                 block[0..2].copy_from_slice(&d.to_bits().to_le_bytes());
+            }
+            Dtype::Q5_1Wave64 => {
+                // Q5_1 block: d(fp16), m(fp16), qh[4], qs[16]. Tame d + m
+                // for the same reasons as Q4_1.
+                let d = f16::from_f32((block[0] as f32 / 255.0) * 0.1 + 0.01);
+                let m = f16::from_f32((block[1] as f32 / 255.0) * 0.05 - 0.025);
+                block[0..2].copy_from_slice(&d.to_bits().to_le_bytes());
+                block[2..4].copy_from_slice(&m.to_bits().to_le_bytes());
+                let _ = QK5_1;
             }
             Dtype::Q4K4Warp | Dtype::Q4KWave64 | Dtype::Q4KTurbo => {
                 // Q4_K: d(fp16), dmin(fp16), scales[12], qs[128]. Tame d/dmin

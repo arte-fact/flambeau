@@ -148,6 +148,14 @@ cert    = "certs/hip/gfx906/qmatmul_q5_0_mmq_wave64_gfx906.json"
 notes   = "V2.30.a — wave64 MMQ for Q5_0. Same tile shape (MMQ_Y=64, TILE_N=8) as Q4_0 MMQ, inner loop adds the 5th-bit DP4A term: `(q5 - 16)·y = dp4a(nibble, y) + 16·dp4a(bit, y) - 16·y_s`. 5th-bit-expand pattern lifted from V2.23 mmvq_q5_0. Targets the 20/40 ffn_*_shexp layers on Qwen3.6-35B-A3B-Q4_0 that V2.26.b originally deferred; now served by the tile kernel at m>=32."
 
 [[qmatmul_mmq]]
+dtype   = "Q5_1"
+dtype_q = "Q8_1"
+shape   = { m = ">=32", k = "any", n = "any" }
+impl    = "qmatmul_q5_1_mmq_wave64_gfx906"
+cert    = "certs/hip/gfx906/qmatmul_q5_1_mmq_wave64_gfx906.json"
+notes   = "Wave64 MMQ for Q5_1. Q5_0 wave64 5th-bit ladder + Q4_1 wave64 d/m reduction: dot = d·d_y·(Σ nibble·q8 + 16·Σ bit·q8) + m·y_s. MMQ_Y=64, TILE_N=8, 64 threads/block."
+
+[[qmatmul_mmq]]
 dtype   = "Q4_K"
 dtype_q = "Q8_1"
 shape   = { m = ">=128", k = "any", n = "any" }
