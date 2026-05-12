@@ -126,15 +126,6 @@ pub trait Ops {
         dtype_weight: QDtype,
     ) -> Result<()>;
 
-    fn mmvq_bf16_bf16(
-        &self,
-        weights: DevicePtr,
-        act_bf16: DevicePtr,
-        dst: DevicePtr,
-        n_rows: usize,
-        k: usize,
-    ) -> Result<()>;
-
     fn mmq(
         &self,
         weights: DevicePtr,
@@ -190,19 +181,6 @@ pub trait Ops {
         n_heads_kv: usize,
         head_dim: usize,
         n_slots: usize,
-        scale: f32,
-    ) -> Result<()>;
-
-    fn attention_decode_bf16(
-        &self,
-        q: DevicePtr,
-        k_cache: DevicePtr,
-        v_cache: DevicePtr,
-        out: DevicePtr,
-        n_heads_q: usize,
-        n_heads_kv: usize,
-        head_dim: usize,
-        n_tokens_kv: usize,
         scale: f32,
     ) -> Result<()>;
 
@@ -313,16 +291,6 @@ pub trait Ops {
         head_dim: usize,
     ) -> Result<()>;
 
-    fn split_q_gate_bf16(
-        &self,
-        fused_qg: DevicePtr,
-        q_out: DevicePtr,
-        gate_out: DevicePtr,
-        n_tokens: usize,
-        n_heads: usize,
-        head_dim: usize,
-    ) -> Result<()>;
-
     // -- norm (RMSNorm + L2-norm + Q8_1 quantize) --
 
     fn rmsnorm_f16(
@@ -330,16 +298,6 @@ pub trait Ops {
         x: DevicePtr,
         weight: DevicePtr,
         y: DevicePtr,
-        m: usize,
-        k: usize,
-        eps: f32,
-    ) -> Result<()>;
-
-    fn rmsnorm_bf16(
-        &self,
-        x_bf16: DevicePtr,
-        weight_f16: DevicePtr,
-        y_bf16: DevicePtr,
         m: usize,
         k: usize,
         eps: f32,
@@ -443,14 +401,6 @@ pub trait Ops {
         n: usize,
     ) -> Result<()>;
 
-    fn swiglu_f32_to_bf16(
-        &self,
-        a: DevicePtr,
-        b: DevicePtr,
-        y: DevicePtr,
-        n: usize,
-    ) -> Result<()>;
-
     fn swiglu_f32_to_q8_1(
         &self,
         a: DevicePtr,
@@ -499,14 +449,6 @@ pub trait Ops {
         n: usize,
     ) -> Result<()>;
 
-    fn sigmoid_mul_bf16(
-        &self,
-        gate: DevicePtr,
-        x: DevicePtr,
-        y: DevicePtr,
-        n: usize,
-    ) -> Result<()>;
-
     // -- pe (rope) --
 
     fn rope_f16(
@@ -530,25 +472,10 @@ pub trait Ops {
         rotated_dims: usize,
     ) -> Result<()>;
 
-    fn rope_neox_partial_bf16(
-        &self,
-        x: DevicePtr,
-        positions: DevicePtr,
-        theta_base: f32,
-        n_tokens: usize,
-        n_heads: usize,
-        head_dim: usize,
-        rotated_dims: usize,
-    ) -> Result<()>;
-
     // -- cast (dtype conversion) --
 
     fn cast_f32_to_f16(&self, x_f32: DevicePtr, y_f16: DevicePtr, n: usize) -> Result<()>;
     fn cast_f16_to_f32(&self, x_f16: DevicePtr, y_f32: DevicePtr, n: usize) -> Result<()>;
-    fn cast_f32_to_bf16(&self, x_f32: DevicePtr, y_bf16: DevicePtr, n: usize) -> Result<()>;
-    fn cast_bf16_to_f32(&self, x_bf16: DevicePtr, y_f32: DevicePtr, n: usize) -> Result<()>;
-    fn cast_f16_to_bf16(&self, x_f16: DevicePtr, y_bf16: DevicePtr, n: usize) -> Result<()>;
-    fn cast_bf16_to_f16(&self, x_bf16: DevicePtr, y_f16: DevicePtr, n: usize) -> Result<()>;
 
     // -- sampling --
 

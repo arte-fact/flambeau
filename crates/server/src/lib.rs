@@ -39,7 +39,7 @@ pub use state::{ModelDefaults, SamplingParams};
 #[cfg(feature = "hip")]
 pub use model::{decode_logits, prefill_logits, Inflight, LoadedModel};
 #[cfg(feature = "hip")]
-pub use model_extensions::{KvSnapshot, SpecDecodeModel};
+pub use model_extensions::KvSnapshot;
 #[cfg(feature = "hip")]
 pub use model_handle::{create_hip_session, HipModel, HipSession, OwnedHipSession};
 #[cfg(feature = "hip")]

@@ -890,42 +890,6 @@ fn mmvq_f16_launch(
     Ok(())
 }
 
-/// BF16 weight × BF16 activation MMVQ.
-/// `weights`: `[n_rows, k]` BF16 row-major device tensor.
-/// `act`: `[k]` BF16 device tensor.
-/// `dst`: `[n_rows]` F32.
-/// Both operands are up-cast to F32 in-kernel (no native BF16 FMA on
-/// gfx906); accumulation is in F32. `k` must be a multiple of 256 — the
-/// kernel does not tail-handle. All MTP forward shapes
-/// (hidden=5120, intermediate, n_q*head_dim) satisfy this.
-pub fn mmvq_bf16_bf16(
-    reg: &OpsRegistry,
-    stream: &HipStream,
-    weights: DevicePtr,
-    act_bf16: DevicePtr,
-    dst: DevicePtr,
-    n_rows: usize,
-    k: usize,
-) -> Result<()> {
-    assert_eq!(k % 256, 0, "mmvq_bf16_bf16 requires k % 256 == 0");
-    let module = reg.expect_module("mmvq_bf16_bf16")?;
-    let kernel = module.kernel("flambeau_mmvq_bf16_bf16")?;
-    let n_rows_i = n_rows as i32;
-    let k_i = k as i32;
-    let w_ptr: u64 = weights.as_usize() as u64;
-    let y_ptr: u64 = act_bf16.as_usize() as u64;
-    let d_ptr: u64 = dst.as_usize() as u64;
-    let mut args = KernelArgs::new();
-    args.push(&w_ptr);
-    args.push(&y_ptr);
-    args.push(&d_ptr);
-    args.push(&n_rows_i);
-    args.push(&k_i);
-    let cfg = LaunchCfg::one_d(n_rows as u32, 256);
-    unsafe { kernel.launch(stream, cfg, args)? };
-    Ok(())
-}
-
 /// Prefill-path MMQ for M batch rows. `m` must be ≥ the dispatch floor for
 /// the dtype (e.g. 128 for Q4_K/Q6_K/Q8_0 4-warp).
 pub fn mmq(

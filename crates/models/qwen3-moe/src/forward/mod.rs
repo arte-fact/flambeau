@@ -104,12 +104,6 @@ pub use hybrid::{
 pub mod attn_tp;
 pub use attn_tp::forward_full_attn_decode_tp;
 
-pub mod spec;
-pub use spec::{
-    forward_speculative_pp_step, forward_speculative_pp_step_sampling,
-    forward_speculative_tp_step, SpecStep, SpecTimings,
-};
-
 pub mod dense_ffn_tp;
 pub use dense_ffn_tp::forward_dense_ffn_decode_tp;
 

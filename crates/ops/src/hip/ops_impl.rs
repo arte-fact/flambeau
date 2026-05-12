@@ -167,17 +167,6 @@ impl<'a> Ops for HipOps<'a> {
         )
     }
 
-    fn mmvq_bf16_bf16(
-        &self,
-        weights: DevicePtr,
-        act_bf16: DevicePtr,
-        dst: DevicePtr,
-        n_rows: usize,
-        k: usize,
-    ) -> Result<()> {
-        super::qmatmul::mmvq_bf16_bf16(self.reg, self.stream, weights, act_bf16, dst, n_rows, k)
-    }
-
     fn mmq(
         &self,
         weights: DevicePtr,
@@ -248,24 +237,6 @@ impl<'a> Ops for HipOps<'a> {
         super::attention::attention_decode_f16_batched(
             self.reg, self.stream, q_batched, k_cache_ptrs, v_cache_ptrs, out_batched, n_tokens_kv,
             n_heads_q, n_heads_kv, head_dim, n_slots, scale,
-        )
-    }
-
-    fn attention_decode_bf16(
-        &self,
-        q: DevicePtr,
-        k_cache: DevicePtr,
-        v_cache: DevicePtr,
-        out: DevicePtr,
-        n_heads_q: usize,
-        n_heads_kv: usize,
-        head_dim: usize,
-        n_tokens_kv: usize,
-        scale: f32,
-    ) -> Result<()> {
-        super::attention::attention_decode_bf16(
-            self.reg, self.stream, q, k_cache, v_cache, out, n_heads_q, n_heads_kv, head_dim,
-            n_tokens_kv, scale,
         )
     }
 
@@ -407,20 +378,6 @@ impl<'a> Ops for HipOps<'a> {
         )
     }
 
-    fn split_q_gate_bf16(
-        &self,
-        fused_qg: DevicePtr,
-        q_out: DevicePtr,
-        gate_out: DevicePtr,
-        n_tokens: usize,
-        n_heads: usize,
-        head_dim: usize,
-    ) -> Result<()> {
-        super::attention::split_q_gate_bf16(
-            self.reg, self.stream, fused_qg, q_out, gate_out, n_tokens, n_heads, head_dim,
-        )
-    }
-
     // -- norm --
 
     fn rmsnorm_f16(
@@ -433,18 +390,6 @@ impl<'a> Ops for HipOps<'a> {
         eps: f32,
     ) -> Result<()> {
         super::norm::rmsnorm_f16(self.reg, self.stream, x, weight, y, m, k, eps)
-    }
-
-    fn rmsnorm_bf16(
-        &self,
-        x_bf16: DevicePtr,
-        weight_f16: DevicePtr,
-        y_bf16: DevicePtr,
-        m: usize,
-        k: usize,
-        eps: f32,
-    ) -> Result<()> {
-        super::norm::rmsnorm_bf16(self.reg, self.stream, x_bf16, weight_f16, y_bf16, m, k, eps)
     }
 
     fn rmsnorm_f16_add_residual(
@@ -571,16 +516,6 @@ impl<'a> Ops for HipOps<'a> {
         super::mlp::swiglu_f32_to_f16(self.reg, self.stream, a, b, y, n)
     }
 
-    fn swiglu_f32_to_bf16(
-        &self,
-        a: DevicePtr,
-        b: DevicePtr,
-        y: DevicePtr,
-        n: usize,
-    ) -> Result<()> {
-        super::mlp::swiglu_f32_to_bf16(self.reg, self.stream, a, b, y, n)
-    }
-
     fn swiglu_f32_to_q8_1(
         &self,
         a: DevicePtr,
@@ -641,16 +576,6 @@ impl<'a> Ops for HipOps<'a> {
         super::mlp::sigmoid_mul_f16(self.reg, self.stream, gate, x, y, n)
     }
 
-    fn sigmoid_mul_bf16(
-        &self,
-        gate: DevicePtr,
-        x: DevicePtr,
-        y: DevicePtr,
-        n: usize,
-    ) -> Result<()> {
-        super::mlp::sigmoid_mul_bf16(self.reg, self.stream, gate, x, y, n)
-    }
-
     // -- pe --
 
     fn rope_f16(
@@ -683,22 +608,6 @@ impl<'a> Ops for HipOps<'a> {
         )
     }
 
-    fn rope_neox_partial_bf16(
-        &self,
-        x: DevicePtr,
-        positions: DevicePtr,
-        theta_base: f32,
-        n_tokens: usize,
-        n_heads: usize,
-        head_dim: usize,
-        rotated_dims: usize,
-    ) -> Result<()> {
-        super::pe::rope_neox_partial_bf16(
-            self.reg, self.stream, x, positions, theta_base, n_tokens, n_heads, head_dim,
-            rotated_dims,
-        )
-    }
-
     // -- cast --
 
     fn cast_f32_to_f16(&self, x_f32: DevicePtr, y_f16: DevicePtr, n: usize) -> Result<()> {
@@ -707,22 +616,6 @@ impl<'a> Ops for HipOps<'a> {
 
     fn cast_f16_to_f32(&self, x_f16: DevicePtr, y_f32: DevicePtr, n: usize) -> Result<()> {
         super::cast::cast_f16_to_f32(self.reg, self.stream, x_f16, y_f32, n)
-    }
-
-    fn cast_f32_to_bf16(&self, x_f32: DevicePtr, y_bf16: DevicePtr, n: usize) -> Result<()> {
-        super::cast::cast_f32_to_bf16(self.reg, self.stream, x_f32, y_bf16, n)
-    }
-
-    fn cast_bf16_to_f32(&self, x_bf16: DevicePtr, y_f32: DevicePtr, n: usize) -> Result<()> {
-        super::cast::cast_bf16_to_f32(self.reg, self.stream, x_bf16, y_f32, n)
-    }
-
-    fn cast_f16_to_bf16(&self, x_f16: DevicePtr, y_bf16: DevicePtr, n: usize) -> Result<()> {
-        super::cast::cast_f16_to_bf16(self.reg, self.stream, x_f16, y_bf16, n)
-    }
-
-    fn cast_bf16_to_f16(&self, x_bf16: DevicePtr, y_f16: DevicePtr, n: usize) -> Result<()> {
-        super::cast::cast_bf16_to_f16(self.reg, self.stream, x_bf16, y_f16, n)
     }
 
     // -- sampling --

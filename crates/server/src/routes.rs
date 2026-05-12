@@ -23,9 +23,8 @@ use tokio_stream::wrappers::ReceiverStream;
 use crate::api::*;
 use crate::gpu_sampler::{self, GpuSamplerScratch};
 use crate::model::{
-    capture_kv_from_inflight, decode_keep_logits_on_device, decode_logits, decode_spec_pp,
-    decode_spec_pp_sampling, prefill_logits, restore_kv_into_inflight, snapshot_bytes, Inflight,
-    LoadedModel, SpecDecodePp,
+    capture_kv_from_inflight, decode_keep_logits_on_device, decode_logits, prefill_logits,
+    restore_kv_into_inflight, snapshot_bytes, Inflight, LoadedModel,
 };
 use crate::prefix_cache::{PrefixCache, PrefixKeys, TopologyTag};
 
@@ -3112,12 +3111,11 @@ fn scheduler_can_engage(state: &ServerState, params: &SamplingParams) -> bool {
     if !state.batched_decode {
         return false;
     }
-    // PP (no MTP), TP, and Hybrid all supported. MTP-spec / JSON /
-    // logprobs paths still go through the legacy handler — those
-    // features carry extra device-side state (MTP head, JSON DFA,
-    // top-K logprobs grab) that isn't yet plumbed through the
-    // scheduler-aware handler.
-    let topo_ok = state.model.as_pp().map_or(false, |p| p.mtp.is_none())
+    // PP, TP, and Hybrid all supported. JSON / logprobs paths still go
+    // through the legacy handler — those features carry extra device-
+    // side state (JSON DFA, top-K logprobs grab) that isn't yet plumbed
+    // through the scheduler-aware handler.
+    let topo_ok = state.model.as_pp().is_some()
         || state.model.as_tp().is_some()
         || state.model.as_hybrid().is_some();
     if !topo_ok {
@@ -3543,9 +3541,8 @@ fn run_completion_blocking_ids(
     > = tp_scratch_g.as_mut().and_then(|g| g.as_mut());
     // **#229 prefix-cache restore (legacy path). Three
     // outcomes per `prefix_cache_try_restore`. Bypass when logprobs
-    // or MTP spec-decode active.
-    let cache_eligible = params.collect_logprobs.is_none()
-        && !model.as_pp().map_or(false, |p| p.mtp.is_some());
+    // active.
+    let cache_eligible = params.collect_logprobs.is_none();
     let restore = if cache_eligible {
         state.prefix_cache_try_restore(&mut inflight, &prompt_ids)?
     } else {
@@ -3757,244 +3754,172 @@ fn run_completion_blocking_ids(
     // → repeat loops` was driven by Coder-Next-80B specifically;
     // Qwen3.6 doesn't show that failure at this bias on chat tests.
     const STOP_BIAS: f32 = 3.0;
-    // /5g/h: spec-decode fast path. Active when MTP head is loaded
-    // (FLAMBEAU_SPEC_MTP=path at startup). Greedy uses strict-match verify;
-    // non-greedy uses vLLM-canonical rejection sampling. Penalties
-    // (repetition / presence / frequency) are now applied to base AND
-    // MTP distributions inside `build_distribution` via the threaded
-    // `history` slice (/h #194), so penalty-active requests no
-    // longer have to fall through.
-    let spec_available = model.as_pp().map_or(false, |p| p.mtp.is_some());
-    let use_spec = spec_available;
-    if use_spec {
-        // h_for_mtp at first macro step = h@(prompt_len-1), which lives in
-        // the prefill scratch's hidden_a buffer at offset (prompt_len-1)*row_bytes.
-        let last_rank = cluster.ranks() - 1;
-        let row_bytes = state.cfg.hidden_size * 2;
-        let pp = inflight.as_pp().context("spec-decode requires Inflight::Pp")?;
-        let h_initial = pp.prefill.per_rank[last_rank]
-            .hidden_a
-            .offset_bytes((prompt_ids.len() - 1) * row_bytes);
-        let m = &model
-            .as_pp()
-            .context("spec-decode requires LoadedModel::Pp")?
-            .model;
-        let mut spec_state = SpecDecodePp::new(m, cluster).context("alloc SpecDecodePp")?;
-        spec_state.h_for_mtp = h_initial;
-
-        let mut accept_count = 0usize;
-        let mut macro_count = 0usize;
-        let mut position = prompt_ids.len();
-        'spec_loop: while generated.len() < params.max_tokens as usize {
-            let step = if is_greedy {
-                decode_spec_pp(
-                    model, cluster, &mut inflight, &mut spec_state, last_token, position,
-                )
-                .context("spec macro step (greedy)")?
-            } else {
-                decode_spec_pp_sampling(
-                    model, cluster, &mut inflight, &mut spec_state, last_token, position,
-                    sampling, sampler.rng_mut(), &generated,
-                )
-                .context("spec macro step (sampling)")?
-            };
-            macro_count += 1;
-            if step.accepted { accept_count += 1; }
-            for tok in step.committed.iter().copied() {
-                generated.push(tok);
-                last_token = tok;
-                if is_stop(tok) {
-                    finish_reason = "stop";
-                    break 'spec_loop;
-                }
-                if generated.len() >= params.max_tokens as usize {
-                    break 'spec_loop;
-                }
-            }
-            position = step.new_position;
-        }
-        let accept_pct = if macro_count == 0 {
-            0.0
-        } else {
-            100.0 * accept_count as f64 / macro_count as f64
-        };
-        tracing::info!(
-            target: "server.spec_decode",
-            macro_steps = macro_count,
-            tokens = generated.len() as u32,
-            accept_pct,
-            "spec-decode loop complete"
-        );
-        spec_state.dispose(cluster).ok();
-    } else {
-        for step in 1..params.max_tokens as usize {
-            let force_mask = step < MIN_RESPONSE_TOKENS && !relax_stop_mask;
-            // **Sampler-D3 Phase B** — GPU sampler path skips the
-            // 600 KB host-logits DtoH entirely; logits stay on device
-            // and `run_gpu_topk` consumes them via topk_softmax_f32.
-            // Host path keeps the existing `decode_logits` DtoH so
-            // penalty / non-TP / fallback callers still get host
-            // logits.
-            let next = if let Some(scratch) = gpu_scratch.as_mut() {
-                decode_keep_logits_on_device(
+    for step in 1..params.max_tokens as usize {
+        let force_mask = step < MIN_RESPONSE_TOKENS && !relax_stop_mask;
+        // **Sampler-D3 Phase B** — GPU sampler path skips the
+        // 600 KB host-logits DtoH entirely; logits stay on device
+        // and `run_gpu_topk` consumes them via topk_softmax_f32.
+        // Host path keeps the existing `decode_logits` DtoH so
+        // penalty / non-TP / fallback callers still get host
+        // logits.
+        let next = if let Some(scratch) = gpu_scratch.as_mut() {
+            decode_keep_logits_on_device(
+                model,
+                cluster,
+                &mut inflight,
+                last_token,
+                prompt_ids.len() + step,
+            )
+            .context("decode step keep-on-device")?;
+            if sampling.has_penalties() {
+                // D4 — apply penalties on GPU before topk.
+                gpu_sampler::run_gpu_topk_with_penalties(
                     model,
                     cluster,
-                    &mut inflight,
-                    last_token,
-                    prompt_ids.len() + step,
-                )
-                .context("decode step keep-on-device")?;
-                if sampling.has_penalties() {
-                    // D4 — apply penalties on GPU before topk.
-                    gpu_sampler::run_gpu_topk_with_penalties(
-                        model,
-                        cluster,
-                        &inflight,
-                        scratch,
-                        &generated,
-                        sampling,
-                        inv_temp,
-                    )
-                    .context("decode-step GPU topk (with penalties)")?;
-                } else {
-                    gpu_sampler::run_gpu_topk(
-                        model, cluster, &inflight, scratch, inv_temp,
-                    )
-                    .context("decode-step GPU topk")?;
-                }
-                if force_mask && !relax_stop_mask {
-                    gpu_sampler::apply_stop_mask(
-                        &scratch.host_ids,
-                        &mut scratch.host_probs,
-                        stop_ids,
-                    );
-                }
-                // P0.1 — JSON-grammar mask before multinomial.
-                if let Some(js) = json_state.as_ref() {
-                    gpu_sampler::apply_json_mask(
-                        js,
-                        &state.tokenizer,
-                        &scratch.host_ids,
-                        &mut scratch.host_probs,
-                    );
-                }
-                sampler.sample_from_topk(
-                    &scratch.host_ids,
-                    &scratch.host_probs,
+                    &inflight,
+                    scratch,
+                    &generated,
                     sampling,
+                    inv_temp,
                 )
+                .context("decode-step GPU topk (with penalties)")?;
             } else {
-                decode_logits(
-                    model,
-                    cluster,
-                    &mut inflight,
-                    last_token,
-                    prompt_ids.len() + step,
-                    &mut logits_buf,
+                gpu_sampler::run_gpu_topk(
+                    model, cluster, &inflight, scratch, inv_temp,
                 )
-                .context("decode step logits")?;
-                if !relax_stop_mask {
-                    for &sid in stop_ids {
-                        if (sid as usize) < logits_buf.len() {
-                            // Sampler-G — `<think>` / `</think>` always
-                            // get NEG_INFINITY, even outside the early
-                            // window: the chat template ran with
-                            // `enable_thinking=false` so the model
-                            // should never emit them.
-                            if always_stop_ids.contains(&sid) {
-                                logits_buf[sid as usize] = f32::NEG_INFINITY;
-                            } else if force_mask {
-                                logits_buf[sid as usize] = f32::NEG_INFINITY;
-                            } else {
-                                logits_buf[sid as usize] -= STOP_BIAS;
-                            }
+                .context("decode-step GPU topk")?;
+            }
+            if force_mask && !relax_stop_mask {
+                gpu_sampler::apply_stop_mask(
+                    &scratch.host_ids,
+                    &mut scratch.host_probs,
+                    stop_ids,
+                );
+            }
+            // P0.1 — JSON-grammar mask before multinomial.
+            if let Some(js) = json_state.as_ref() {
+                gpu_sampler::apply_json_mask(
+                    js,
+                    &state.tokenizer,
+                    &scratch.host_ids,
+                    &mut scratch.host_probs,
+                );
+            }
+            sampler.sample_from_topk(
+                &scratch.host_ids,
+                &scratch.host_probs,
+                sampling,
+            )
+        } else {
+            decode_logits(
+                model,
+                cluster,
+                &mut inflight,
+                last_token,
+                prompt_ids.len() + step,
+                &mut logits_buf,
+            )
+            .context("decode step logits")?;
+            if !relax_stop_mask {
+                for &sid in stop_ids {
+                    if (sid as usize) < logits_buf.len() {
+                        // Sampler-G — `<think>` / `</think>` always
+                        // get NEG_INFINITY, even outside the early
+                        // window: the chat template ran with
+                        // `enable_thinking=false` so the model
+                        // should never emit them.
+                        if always_stop_ids.contains(&sid) {
+                            logits_buf[sid as usize] = f32::NEG_INFINITY;
+                        } else if force_mask {
+                            logits_buf[sid as usize] = f32::NEG_INFINITY;
+                        } else {
+                            logits_buf[sid as usize] -= STOP_BIAS;
                         }
                     }
                 }
-                // **#236 P0.1b** — host-path JSON mask. Mirrors the
-                // GPU-path mask above (line ~4001): set logit of any
-                // top-K candidate that would invalidate the running
-                // JSON to NEG_INFINITY before the sampler picks. Only
-                // active when the request set `response_format=
-                // json_object`. Top-K=2048 cap keeps the per-token
-                // cost in the low-ms range.
-                if let Some(js) = json_state.as_ref() {
-                    gpu_sampler::apply_json_mask_to_logits(
-                        js,
-                        &state.tokenizer,
-                        &mut logits_buf,
-                        /*max_candidates=*/ 2048,
-                    );
-                }
-                // Pass `generated` as history so penalties can fire on
-                // repeats / frequent tokens. T4.b.2 — without this,
-                // Qwen3.5/3.6 agent loops degrade to long-CoT drift.
-                let next = sampler.sample(&logits_buf, sampling, &generated);
-                // P1.7 — collect per-token logprobs (host path only).
-                if let Some(lp) = logprobs_acc.as_mut() {
-                    if let Some(entry) = build_logprob_entry(
-                        &state.tokenizer,
-                        &logits_buf,
-                        sampling,
-                        &generated,
-                        next,
-                        params.collect_logprobs.unwrap_or(0) as usize,
-                    ) {
-                        lp.push(entry);
-                    }
-                }
-                next
-            };
-            // P0.1 — advance JSON state with the chosen token's bytes.
-            if let Some(js) = json_state.as_mut() {
-                if let Ok(text) = state.tokenizer.decode(&[next]) {
-                    let _ = js.feed_slice(text.as_bytes());
+            }
+            // **#236 P0.1b** — host-path JSON mask. Mirrors the
+            // GPU-path mask above: set logit of any top-K candidate
+            // that would invalidate the running JSON to NEG_INFINITY
+            // before the sampler picks. Only active when the request
+            // set `response_format=json_object`. Top-K=2048 cap keeps
+            // the per-token cost in the low-ms range.
+            if let Some(js) = json_state.as_ref() {
+                gpu_sampler::apply_json_mask_to_logits(
+                    js,
+                    &state.tokenizer,
+                    &mut logits_buf,
+                    /*max_candidates=*/ 2048,
+                );
+            }
+            // Pass `generated` as history so penalties can fire on
+            // repeats / frequent tokens. T4.b.2 — without this,
+            // Qwen3.5/3.6 agent loops degrade to long-CoT drift.
+            let next = sampler.sample(&logits_buf, sampling, &generated);
+            // P1.7 — collect per-token logprobs (host path only).
+            if let Some(lp) = logprobs_acc.as_mut() {
+                if let Some(entry) = build_logprob_entry(
+                    &state.tokenizer,
+                    &logits_buf,
+                    sampling,
+                    &generated,
+                    next,
+                    params.collect_logprobs.unwrap_or(0) as usize,
+                ) {
+                    lp.push(entry);
                 }
             }
-            generated.push(next);
-            last_token = next;
-            if is_stop(next) {
-                finish_reason = "stop";
-                break;
+            next
+        };
+        // P0.1 — advance JSON state with the chosen token's bytes.
+        if let Some(js) = json_state.as_mut() {
+            if let Ok(text) = state.tokenizer.decode(&[next]) {
+                let _ = js.feed_slice(text.as_bytes());
             }
-            // **Sampler-G** — string-level stop on reasoning markers.
-            // The model can route around the single-token `</think>`
-            // mask by emitting the multi-token text form. Detokenize
-            // the recent tail and stop if a leak is present. Final
-            // response cleanup happens in `finalise`.
-            // **P0.2** — same mechanism extended to the per-request
-            // `stop` strings. Tail window grows with the longest
-            // user stop so multi-token caller stops are catchable.
-            let user_stop_max = params
-                .stop_strings
-                .iter()
-                .map(|s| s.len())
-                .max()
-                .unwrap_or(0);
-            let need_user_check = !params.stop_strings.is_empty();
-            if (need_user_check || !relax_stop_mask)
-                && (step % 4 == 0 || step >= MIN_RESPONSE_TOKENS)
-            {
-                let n = generated.len();
-                // 16 tokens covers ≥48 chars typical; widen if a user
-                // stop string is longer than ~32 chars.
-                let token_window = 16.max((user_stop_max / 2).min(64));
-                let from = n.saturating_sub(token_window);
-                if let Ok(tail) = state.tokenizer.decode(&generated[from..]) {
-                    let marker_hit = !relax_stop_mask
-                        && !params.enable_thinking
-                        && (tail.contains("</think>")
-                            || tail.contains("<end_thought>")
-                            || tail.contains("<end_think>")
-                            || tail.contains("</thought>"));
-                    let user_hit = params
-                        .stop_strings
-                        .iter()
-                        .any(|s| tail.contains(s.as_str()));
-                    if marker_hit || user_hit {
-                        finish_reason = "stop";
-                        break;
-                    }
+        }
+        generated.push(next);
+        last_token = next;
+        if is_stop(next) {
+            finish_reason = "stop";
+            break;
+        }
+        // **Sampler-G** — string-level stop on reasoning markers.
+        // The model can route around the single-token `</think>`
+        // mask by emitting the multi-token text form. Detokenize
+        // the recent tail and stop if a leak is present. Final
+        // response cleanup happens in `finalise`.
+        // **P0.2** — same mechanism extended to the per-request
+        // `stop` strings. Tail window grows with the longest
+        // user stop so multi-token caller stops are catchable.
+        let user_stop_max = params
+            .stop_strings
+            .iter()
+            .map(|s| s.len())
+            .max()
+            .unwrap_or(0);
+        let need_user_check = !params.stop_strings.is_empty();
+        if (need_user_check || !relax_stop_mask)
+            && (step % 4 == 0 || step >= MIN_RESPONSE_TOKENS)
+        {
+            let n = generated.len();
+            // 16 tokens covers ≥48 chars typical; widen if a user
+            // stop string is longer than ~32 chars.
+            let token_window = 16.max((user_stop_max / 2).min(64));
+            let from = n.saturating_sub(token_window);
+            if let Ok(tail) = state.tokenizer.decode(&generated[from..]) {
+                let marker_hit = !relax_stop_mask
+                    && !params.enable_thinking
+                    && (tail.contains("</think>")
+                        || tail.contains("<end_thought>")
+                        || tail.contains("<end_think>")
+                        || tail.contains("</thought>"));
+                let user_hit = params
+                    .stop_strings
+                    .iter()
+                    .any(|s| tail.contains(s.as_str()));
+                if marker_hit || user_hit {
+                    finish_reason = "stop";
+                    break;
                 }
             }
         }
@@ -4332,91 +4257,6 @@ fn run_completion_blocking_streaming(
     let mut hp_emit_us: u128 = 0;
     let mut hp_stopstr_us: u128 = 0;
     let mut hp_step_us: u128 = 0;
-
-    // streaming + 5g/h penalty-aware: spec-decode SSE path. Active
-    // when MTP head is loaded. Penalties applied in build_distribution via
-    // the threaded `&generated` history. Mirrors the non-streaming branch.
-    let spec_available = model.as_pp().map_or(false, |p| p.mtp.is_some());
-    let use_spec = spec_available;
-    if use_spec {
-        let last_rank = cluster.ranks() - 1;
-        let row_bytes = state.cfg.hidden_size * 2;
-        let pp = inflight.as_pp().context("spec-decode requires Inflight::Pp")?;
-        let h_initial = pp.prefill.per_rank[last_rank]
-            .hidden_a
-            .offset_bytes((prompt_ids.len() - 1) * row_bytes);
-        let m = &model
-            .as_pp()
-            .context("spec-decode requires LoadedModel::Pp")?
-            .model;
-        let mut spec_state = SpecDecodePp::new(m, cluster).context("alloc SpecDecodePp")?;
-        spec_state.h_for_mtp = h_initial;
-
-        let mut accept_count = 0usize;
-        let mut macro_count = 0usize;
-        let mut position = prompt_ids.len();
-        'spec_stream_loop: while generated.len() < params.max_tokens as usize {
-            let step_result = if is_greedy {
-                decode_spec_pp(
-                    model, cluster, &mut inflight, &mut spec_state, last_token, position,
-                )
-                .context("spec macro step (greedy, streaming)")
-            } else {
-                decode_spec_pp_sampling(
-                    model, cluster, &mut inflight, &mut spec_state, last_token, position,
-                    sampling, sampler.rng_mut(), &generated,
-                )
-                .context("spec macro step (sampling, streaming)")
-            };
-            let step = match step_result {
-                Ok(s) => s,
-                Err(e) => {
-                    spec_state.dispose(cluster).ok();
-                    return Err(e);
-                }
-            };
-            macro_count += 1;
-            if step.accepted { accept_count += 1; }
-            for tok in step.committed.iter().copied() {
-                let alive = push_and_emit(tok, &mut generated, &mut emitted_text)?;
-                last_token = tok;
-                if !alive {
-                    finish_reason = "stop";
-                    break 'spec_stream_loop;
-                }
-                if generated.len() >= params.max_tokens as usize {
-                    break 'spec_stream_loop;
-                }
-            }
-            position = step.new_position;
-        }
-        let accept_pct = if macro_count == 0 {
-            0.0
-        } else {
-            100.0 * accept_count as f64 / macro_count as f64
-        };
-        tracing::info!(
-            target: "server.spec_decode",
-            macro_steps = macro_count,
-            tokens = generated.len() as u32,
-            accept_pct,
-            stream = true,
-            "spec-decode SSE loop complete"
-        );
-        spec_state.dispose(cluster).ok();
-
-        // Slot stays pooled; mutex releases on function return.
-        tracing::info!(
-            target: "server.completion.finish",
-            prompt_tokens,
-            completion_tokens = generated.len() as u32,
-            finish_reason,
-            total_ms = request_start.elapsed().as_secs_f64() * 1000.0,
-            stream = true,
-            "streaming completion finished (spec)"
-        );
-        return Ok((finish_reason.into(), prompt_tokens, generated.len() as u32));
-    }
 
     for step in 1..params.max_tokens as usize {
         if profile_decode_n > 0 {

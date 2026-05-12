@@ -7,15 +7,15 @@
 //!
 //! Two traits:
 //! * `HipModel` — load-time entry. Owns weights + per-topology
-//!   auxiliary state (`BarP2pAllReduce`, sub-cluster handles, optional
-//!   MTP). Reports topology + config.
+//!   auxiliary state (`BarP2pAllReduce`, sub-cluster handles).
+//!   Reports topology + config.
 //! * `HipSession` — per-request handle. Owns KV caches + scratches and
 //!   a back-reference to its parent `HipModel`. `prefill_logits` /
 //!   `decode_logits` advance generation; `dispose` frees device buffers.
 //!
-//! Spec-decode and KV snapshot/restore are PP- / qwen3-moe-specific
-//! and stay as free helpers in `model.rs` (extension-trait wiring lands
-//! when a second model crate needs them).
+//! KV snapshot/restore is qwen3-moe-specific and stays as free helpers
+//! in `model.rs` (extension-trait wiring lands when a second model
+//! crate needs it).
 
 #![cfg(feature = "hip")]
 
@@ -29,19 +29,11 @@ use crate::model::{
     BoundaryCallback, HybridHipModel, HybridHipSession, Inflight, LoadedModel, PpHipModel,
     PpHipSession, TpHipModel, TpHipSession,
 };
-use crate::model_extensions::SpecDecodeModel;
 
 pub trait HipModel: Send + Sync + 'static {
     fn config(&self) -> &Qwen3MoEConfig;
     /// Topology label for handler metrics: `"pp"`, `"tp"`, `"pp+tp"`.
     fn topology(&self) -> &'static str;
-
-    /// Spec-decode capability. PP models with an MTP attachment return
-    /// `Some`; everything else returns `None`. Server uses this to
-    /// gate spec-decode without matching on a topology enum.
-    fn as_spec_decode(&self) -> Option<&dyn SpecDecodeModel> {
-        None
-    }
 
     /// Concrete-type accessors. Each topology overrides exactly one of
     /// these to return `Some(self)`; the others stay at the default
@@ -156,9 +148,6 @@ impl HipModel for PpHipModel {
     }
     fn topology(&self) -> &'static str {
         "pp"
-    }
-    fn as_spec_decode(&self) -> Option<&dyn SpecDecodeModel> {
-        if self.mtp.is_some() { Some(self) } else { None }
     }
     fn as_pp(&self) -> Option<&PpHipModel> {
         Some(self)

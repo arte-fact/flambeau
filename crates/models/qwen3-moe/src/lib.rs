@@ -41,9 +41,6 @@ pub mod tp_sharded;
 pub mod hybrid;
 
 #[cfg(feature = "hip")]
-pub mod mtp;
-
-#[cfg(feature = "hip")]
 pub mod embedding;
 
 #[cfg(feature = "hip")]

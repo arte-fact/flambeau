@@ -99,8 +99,6 @@ pub struct ServeConfig {
     pub default_system: Option<String>,
     /// /v1/embeddings per-prompt token cap.
     pub embedding_max_tokens: usize,
-    /// MTP head GGUF for K=1 speculative decode. `None` disables.
-    pub spec_mtp: Option<PathBuf>,
 }
 
 impl Default for MeshMode {
@@ -238,33 +236,9 @@ pub async fn serve(cfg: ServeConfig, registry: Registry) -> Result<()> {
                 m.config.context_length = model_cfg.context_length;
             }
 
-            // opt-in MTP attachment. Loaded once, lives on
-            // the last rank; per-request scratch allocated on each
-            // chat completion.
-            let mtp = match cfg.spec_mtp.as_ref() {
-                Some(path) => {
-                    let last_rank = (cluster.ranks() - 1) as usize;
-                    let last_device = cluster.device(last_rank);
-                    info!(path = %path.display(), rank = last_rank,
-                          "loading MTP head for spec-decode");
-                    let mtp_file = flambeau_quant::GgufFile::open(path)
-                        .with_context(|| format!("MTP gguf {}", path.display()))?;
-                    let head = flambeau_qwen3_moe::mtp::load_mtp_head(&mtp_file, last_device)
-                        .context("load_mtp_head")?;
-                    info!(
-                        bytes = head.total_bytes(),
-                        "MTP head loaded — spec-decode ENABLED"
-                    );
-                    Some(head)
-                }
-                None => {
-                    info!("--spec-mtp not set — spec-decode disabled");
-                    None
-                }
-            };
             (
                 cluster,
-                std::sync::Arc::new(crate::model::PpHipModel { model: m, mtp }) as LoadedModel,
+                std::sync::Arc::new(crate::model::PpHipModel { model: m }) as LoadedModel,
             )
         }
         MeshMode::Tp { world } => {

@@ -18,23 +18,18 @@ use flambeau_qwen3_moe::forward::{
     forward_prefill_tp_logits, forward_prefill_tp_logits_pooled,
     ShardedForwardOneTokenScratch, ShardedForwardOneTokenScratchHybrid,
     ShardedForwardOneTokenScratchTp, ShardedForwardPrefillScratch,
-    ShardedForwardPrefillScratchTp, SpecStep,
+    ShardedForwardPrefillScratchTp,
 };
 use flambeau_qwen3_moe::session::LayerCacheSnapshot;
-use flambeau_qwen3_moe::mtp::{MtpForwardScratch, MtpHeadWeights};
 use flambeau_qwen3_moe::{
     Qwen3MoEHybridModel, Qwen3MoEHybridSession, Qwen3MoEShardedModel, Qwen3MoEShardedSession,
     Qwen3MoETpModel, Qwen3MoETpSession,
 };
-use flambeau_core::DevicePtr;
 
 /// Pipeline-parallel sharded model. One whole layer per rank stage;
-/// cross-stage hand-off via host-bounce peer copy. Optional MTP
-/// attachment for spec-decode loads on the last rank when
-/// `FLAMBEAU_SPEC_MTP=path/to/mtp.gguf` is set at boot.
+/// cross-stage hand-off via host-bounce peer copy.
 pub struct PpHipModel {
     pub model: Qwen3MoEShardedModel,
-    pub mtp: Option<MtpHeadWeights>,
 }
 
 /// Tensor-parallel sharded model. Every rank holds every layer
@@ -607,88 +602,6 @@ pub fn prefill_logits(
     } else {
         bail!("LoadedModel/Inflight variant mismatch")
     }
-}
-
-/// per-request handle for spec-decode state. Owns the MTP
-/// forward scratch (allocated lazily on the first spec call) and
-/// tracks `h_for_mtp` between macro steps so the caller doesn't have
-/// to thread it through. Dispose alongside `Inflight`.
-pub struct SpecDecodePp {
-    pub mtp_scratch: MtpForwardScratch,
-    /// `h_for_mtp_dev` for the NEXT macro step's MTP draft. Lives
-    /// inside `decode_scratch.per_rank[last_rank].hidden_a` after
-    /// the most recent base step on the last rank.
-    pub h_for_mtp: DevicePtr,
-}
-
-impl SpecDecodePp {
-    pub fn new(model: &Qwen3MoEShardedModel, cluster: &HipCluster) -> Result<Self> {
-        let last_rank = cluster.ranks() - 1;
-        let last_device = cluster.device(last_rank);
-        last_device.bind()?;
-        let mtp_scratch = MtpForwardScratch::new(last_device, &model.config)
-            .context("alloc MtpForwardScratch")?;
-        // Placeholder; caller sets after the first base call (prefill_logits)
-        // by reading `decode_scratch.per_rank[last].hidden_a` (or `hidden_b`).
-        let h_for_mtp = mtp_scratch.h_t_post_norm; // arbitrary valid pointer; set by caller
-        Ok(Self { mtp_scratch, h_for_mtp })
-    }
-
-    pub fn dispose(self, cluster: &HipCluster) -> Result<()> {
-        let last_rank = cluster.ranks() - 1;
-        let last_device = cluster.device(last_rank);
-        last_device.bind()?;
-        self.mtp_scratch.dispose(last_device)?;
-        Ok(())
-    }
-}
-
-/// Greedy K=1 spec-decode macro step. Thin wrapper over
-/// [`SpecDecodeModel::decode_spec_greedy`]; the trait impl carries the
-/// actual logic. Errors when the model isn't a PP model with an MTP
-/// attachment (`FLAMBEAU_SPEC_MTP` unset) or the inflight isn't PP.
-pub fn decode_spec_pp(
-    model: &LoadedModel,
-    cluster: &HipCluster,
-    inflight: &mut Inflight,
-    spec: &mut SpecDecodePp,
-    last_token: u32,
-    position: usize,
-) -> Result<SpecStep> {
-let spec_model = model
-        .as_spec_decode()
-        .context("decode_spec_pp: model has no spec-decode capability (PP + MTP required)")?;
-    let pp_session = match inflight {
-        Inflight::Pp(s) => s,
-        _ => bail!("decode_spec_pp requires Inflight::Pp"),
-    };
-    spec_model.decode_spec_greedy(cluster, pp_session, spec, last_token, position)
-}
-
-/// Rejection-sampling variant. Thin wrapper over
-/// [`SpecDecodeModel::decode_spec_sampling`]. `history` is the
-/// per-turn generated-token slice used for penalty application.
-pub fn decode_spec_pp_sampling(
-    model: &LoadedModel,
-    cluster: &HipCluster,
-    inflight: &mut Inflight,
-    spec: &mut SpecDecodePp,
-    last_token: u32,
-    position: usize,
-    sampling: &flambeau_runtime::Sampling,
-    rng: &mut flambeau_runtime::Rng,
-    history: &[u32],
-) -> Result<SpecStep> {
-let spec_model = model.as_spec_decode().context(
-        "decode_spec_pp_sampling: model has no spec-decode capability (PP + MTP required)",
-    )?;
-    let pp_session = match inflight {
-        Inflight::Pp(s) => s,
-        _ => bail!("decode_spec_pp_sampling requires Inflight::Pp"),
-    };
-    spec_model.decode_spec_sampling(
-        cluster, pp_session, spec, last_token, position, sampling, rng, history,
-    )
 }
 
 /// Advance one token; write that position's logits into `logits_out`.

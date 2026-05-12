@@ -23,7 +23,7 @@ use flambeau_backend_hip::{
 };
 use flambeau_core::{CopyDirection, Device, DevicePtr, Stream};
 use flambeau_kernels_hip as kernels;
-use half::{bf16, f16};
+use half::f16;
 
 use crate::cert::{now_utc_iso8601, Cert, PmcSnapshot, ShapeResult, SCHEMA_VERSION};
 use crate::harness::{alloc_and_upload, rig, seeded_f32_range};
@@ -268,104 +268,5 @@ where
     };
     cert.write_to_disk(repo_root)?;
     Ok(cert)
-}
-
-/// F32 → BF16 cast sweep. Reference: `bf16::from_f32` (RNE).
-pub fn run_cast_f32_bf16_sweep(repo_root: &Path) -> Result<Cert> {
-    run_cast_sweep::<f32, bf16>(
-        repo_root,
-        "cast_f32_bf16",
-        "flambeau_cast_f32_bf16",
-        "cast_f32_bf16_gfx906",
-        "cast_f32_bf16",
-        "F32",
-        "BF16",
-        "exact bit match vs half::bf16::from_f32",
-        0xBF16C0FFu64,
-        |seed, n| seeded_f32_range(seed, n, -3.0, 3.0),
-        |x| x.iter().map(|v| bf16::from_f32(*v)).collect(),
-        |v| v.to_bits(),
-        |v| v.to_bits() as u32,
-    )
-}
-
-/// BF16 → F32 cast sweep. Reference: `bf16::to_f32` (lossless).
-pub fn run_cast_bf16_f32_sweep(repo_root: &Path) -> Result<Cert> {
-    run_cast_sweep::<bf16, f32>(
-        repo_root,
-        "cast_bf16_f32",
-        "flambeau_cast_bf16_f32",
-        "cast_bf16_f32_gfx906",
-        "cast_bf16_f32",
-        "BF16",
-        "F32",
-        "exact bit match vs half::bf16::to_f32 (lossless)",
-        0xBF16F32u64,
-        |seed, n| {
-            seeded_f32_range(seed, n, -3.0, 3.0)
-                .into_iter()
-                .map(bf16::from_f32)
-                .collect()
-        },
-        |x| x.iter().map(|v| v.to_f32()).collect(),
-        |v| v.to_bits() as u32,
-        |v| v.to_bits(),
-    )
-}
-
-/// F16 → BF16 cast sweep. Reference: `bf16::from_f32(f16.to_f32())`.
-pub fn run_cast_f16_bf16_sweep(repo_root: &Path) -> Result<Cert> {
-    run_cast_sweep::<f16, bf16>(
-        repo_root,
-        "cast_f16_bf16",
-        "flambeau_cast_f16_bf16",
-        "cast_f16_bf16_gfx906",
-        "cast_f16_bf16",
-        "F16",
-        "BF16",
-        "exact bit match vs bf16::from_f32(f16.to_f32())",
-        0xF16BF16u64,
-        |seed, n| {
-            seeded_f32_range(seed, n, -3.0, 3.0)
-                .into_iter()
-                .map(f16::from_f32)
-                .collect()
-        },
-        |x| x.iter().map(|v| bf16::from_f32(v.to_f32())).collect(),
-        |v| v.to_bits() as u32,
-        |v| v.to_bits() as u32,
-    )
-}
-
-/// BF16 → F16 cast sweep. Reference: `f16::from_f32(bf16.to_f32())`.
-/// Inputs are bounded to F16-representable range to avoid Inf saturation
-/// (which is a correct outcome, but matching saturation bit-exactly across
-/// device/host requires care; the cast itself is exercised on in-range
-/// values here).
-pub fn run_cast_bf16_f16_sweep(repo_root: &Path) -> Result<Cert> {
-    run_cast_sweep::<bf16, f16>(
-        repo_root,
-        "cast_bf16_f16",
-        "flambeau_cast_bf16_f16",
-        "cast_bf16_f16_gfx906",
-        "cast_bf16_f16",
-        "BF16",
-        "F16",
-        "exact bit match vs f16::from_f32(bf16.to_f32()), inputs |x|<=3.0",
-        0xBF16F16u64,
-        |seed, n| {
-            seeded_f32_range(seed, n, -3.0, 3.0)
-                .into_iter()
-                .map(bf16::from_f32)
-                .collect()
-        },
-        |x| {
-            x.iter()
-                .map(|v| f16::from_f32(v.to_f32()))
-                .collect()
-        },
-        |v| v.to_bits() as u32,
-        |v| v.to_bits() as u32,
-    )
 }
 

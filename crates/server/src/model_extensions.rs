@@ -1,174 +1,23 @@
-//! Per-capability extension traits over `HipModel` / `HipSession`.
+//! Host-side KV+GDN snapshot capability for the prefix cache.
 //!
-//! Some capabilities are model-specific:
-//!
-//! * **Spec-decode** is PP-only (greedy strict-match + rejection-sampling
-//!   variants), and only when an MTP head is attached at boot. Future
-//!   model crates without an MTP head do not implement `SpecDecodeModel`.
-//! * **KV snapshot / restore** is the prefix-cache hook. PP and TP
-//!   serialise per-rank caches against the global cluster; Hybrid walks
-//!   per-stage sub-clusters. All three topologies support it; future
-//!   models that ship without a recurrent / attention KV cache (none
-//!   today) would not.
-//!
-//! Each trait is opt-in via a downcast on the parent `HipModel` /
-//! `HipSession` trait — `model.as_spec_decode()` returns `None` for
-//! topologies / configurations that don't support it. The server reads
-//! the option and routes accordingly without matching on the topology
-//! enum.
+//! PP and TP capture against the server-owned global `HipCluster`;
+//! Hybrid additionally needs its parent model so each stage's
+//! sub-cluster is reachable. Hybrid impls require the typed model
+//! (`HybridHipModel`) — the blanket trait doesn't carry it; use
+//! [`HybridHipSession::capture_with_model`] /
+//! [`HybridHipSession::restore_with_model`] for hybrid sessions, or
+//! drive the dispatch through the server's `KvSnapshotExt` helpers.
 
 #![cfg(feature = "hip")]
 
 use anyhow::{bail, Context, Result};
 use flambeau_backend_hip::HipCluster;
-use flambeau_qwen3_moe::forward::{
-    forward_speculative_pp_step, forward_speculative_pp_step_sampling, SpecStep,
-};
 use flambeau_qwen3_moe::session::{
     restore_layer_caches_from_host, snapshot_layer_caches_to_host, LayerCacheSnapshot,
 };
 
-use crate::model::{
-    HybridHipModel, HybridHipSession, PpHipModel, PpHipSession, SpecDecodePp, TpHipSession,
-};
+use crate::model::{HybridHipModel, HybridHipSession, PpHipSession, TpHipSession};
 
-/// PP + MTP capability. Models that load without an MTP head (everything
-/// today except `flambeau-server` with `--spec-mtp`) return `None` from
-/// `HipModel::as_spec_decode`; this trait is otherwise unreachable.
-pub trait SpecDecodeModel: Send + Sync {
-    /// Allocate per-request spec state — the MTP forward scratch + a
-    /// placeholder for `h_for_mtp` that the caller sets after the
-    /// first base prefill writes its hidden output to the last rank.
-    fn create_spec_state(&self, cluster: &HipCluster) -> Result<SpecDecodePp>;
-
-    /// One K=1 strict-match (greedy) macro step. Returns committed
-    /// tokens + telemetry; updates `spec.h_for_mtp` in place.
-    fn decode_spec_greedy(
-        &self,
-        cluster: &HipCluster,
-        session: &mut PpHipSession,
-        spec: &mut SpecDecodePp,
-        last_token: u32,
-        position: usize,
-    ) -> Result<SpecStep>;
-
-    /// One vLLM-canonical rejection-sampling macro step.
-    #[allow(clippy::too_many_arguments)]
-    fn decode_spec_sampling(
-        &self,
-        cluster: &HipCluster,
-        session: &mut PpHipSession,
-        spec: &mut SpecDecodePp,
-        last_token: u32,
-        position: usize,
-        sampling: &flambeau_runtime::Sampling,
-        rng: &mut flambeau_runtime::Rng,
-        history: &[u32],
-    ) -> Result<SpecStep>;
-}
-
-impl SpecDecodeModel for PpHipModel {
-    fn create_spec_state(&self, cluster: &HipCluster) -> Result<SpecDecodePp> {
-        SpecDecodePp::new(&self.model, cluster).context("alloc SpecDecodePp")
-    }
-
-    fn decode_spec_greedy(
-        &self,
-        cluster: &HipCluster,
-        session: &mut PpHipSession,
-        spec: &mut SpecDecodePp,
-        last_token: u32,
-        position: usize,
-    ) -> Result<SpecStep> {
-        let mtp = self
-            .mtp
-            .as_ref()
-            .context("decode_spec_greedy: PpHipModel has no MTP attachment (FLAMBEAU_SPEC_MTP not set)")?;
-        let last_rank = cluster.ranks() - 1;
-        let last_shard = &self.model.shards[last_rank];
-        let output_norm = last_shard
-            .output_norm
-            .as_ref()
-            .context("PP last rank missing output_norm for spec-decode")?;
-        let lm_head = last_shard
-            .output
-            .as_ref()
-            .context("PP last rank missing lm_head for spec-decode")?;
-
-        let (step, h_next) = forward_speculative_pp_step(
-            &self.model,
-            &mut session.session,
-            cluster,
-            &mut session.decode,
-            &mut session.prefill,
-            mtp,
-            &spec.mtp_scratch,
-            output_norm,
-            lm_head,
-            last_token,
-            spec.h_for_mtp,
-            position,
-        )?;
-        spec.h_for_mtp = h_next;
-        Ok(step)
-    }
-
-    fn decode_spec_sampling(
-        &self,
-        cluster: &HipCluster,
-        session: &mut PpHipSession,
-        spec: &mut SpecDecodePp,
-        last_token: u32,
-        position: usize,
-        sampling: &flambeau_runtime::Sampling,
-        rng: &mut flambeau_runtime::Rng,
-        history: &[u32],
-    ) -> Result<SpecStep> {
-        let mtp = self
-            .mtp
-            .as_ref()
-            .context("decode_spec_sampling: PpHipModel has no MTP attachment")?;
-        let last_rank = cluster.ranks() - 1;
-        let last_shard = &self.model.shards[last_rank];
-        let output_norm = last_shard
-            .output_norm
-            .as_ref()
-            .context("PP last rank missing output_norm for spec-decode")?;
-        let lm_head = last_shard
-            .output
-            .as_ref()
-            .context("PP last rank missing lm_head for spec-decode")?;
-
-        let (step, h_next) = forward_speculative_pp_step_sampling(
-            &self.model,
-            &mut session.session,
-            cluster,
-            &mut session.decode,
-            &mut session.prefill,
-            mtp,
-            &spec.mtp_scratch,
-            output_norm,
-            lm_head,
-            last_token,
-            spec.h_for_mtp,
-            position,
-            sampling,
-            rng,
-            history,
-        )?;
-        spec.h_for_mtp = h_next;
-        Ok(step)
-    }
-}
-
-/// Host-side KV+GDN snapshot capability for the prefix cache.
-///
-/// PP and TP capture against the server-owned global `HipCluster`;
-/// Hybrid additionally needs its parent model so each stage's
-/// sub-cluster is reachable. Hybrid impls require the typed model
-/// (`HybridHipModel`) — the trait method takes it as `&dyn HipModel`
-/// and downcasts via `Any` so the call site can carry a single
-/// model handle.
 pub trait KvSnapshot {
     fn capture(&self, cluster: &HipCluster) -> Result<Vec<Vec<LayerCacheSnapshot>>>;
 
@@ -245,11 +94,6 @@ impl KvSnapshot for TpHipSession {
     }
 }
 
-/// Hybrid capture/restore needs the parent `HybridHipModel` for its
-/// per-stage `sub_cluster` handles. The blanket trait doesn't carry
-/// it; use [`HybridHipSession::capture_with_model`] /
-/// [`HybridHipSession::restore_with_model`] for hybrid sessions, or
-/// drive the dispatch through the server's `KvSnapshotExt` helpers.
 impl HybridHipSession {
     pub fn capture_with_model(
         &self,
@@ -308,4 +152,3 @@ impl HybridHipSession {
         Ok(())
     }
 }
-

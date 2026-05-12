@@ -169,11 +169,6 @@ enum Cmd {
         /// /v1/embeddings endpoint per-prompt token cap.
         #[arg(long = "embedding-max-tokens", env = "FLAMBEAU_EMBEDDING_MAX_TOKENS", default_value_t = 8192)]
         embedding_max_tokens: usize,
-        /// Path to an MTP head GGUF for K=1 speculative decode. Loaded
-        /// on the last rank; per-request scratch allocated lazily.
-        /// Omit to disable spec-decode.
-        #[arg(long = "spec-mtp", env = "FLAMBEAU_SPEC_MTP")]
-        spec_mtp: Option<String>,
     },
     /// Correctness-sweep harness; emits certs (+).
     Sweep {
@@ -259,7 +254,6 @@ fn main() -> Result<()> {
             kv,
             default_system,
             embedding_max_tokens,
-            spec_mtp,
         } => serve_cmd(ServeArgs {
             model,
             devices,
@@ -280,7 +274,6 @@ fn main() -> Result<()> {
             kv,
             default_system,
             embedding_max_tokens,
-            spec_mtp,
         })?,
         Cmd::Sweep { arch, op, dtype } => sweep(&arch, op.as_deref(), &dtype)?,
         Cmd::CertCheck { arch, backend } => cert_check(&backend, &arch)?,
@@ -311,7 +304,6 @@ struct ServeArgs {
     kv: String,
     default_system: Option<String>,
     embedding_max_tokens: usize,
-    spec_mtp: Option<String>,
 }
 
 #[cfg(not(feature = "hip_serve"))]
@@ -346,7 +338,6 @@ fn serve_cmd(args: ServeArgs) -> Result<()> {
         kv,
         default_system,
         embedding_max_tokens,
-        spec_mtp,
     } = args;
 
     // Parse `hip:0,1,2,3` or `0,1,2,3` → Vec<i32>.
@@ -441,7 +432,6 @@ fn serve_cmd(args: ServeArgs) -> Result<()> {
         kv,
         default_system,
         embedding_max_tokens,
-        spec_mtp: spec_mtp.map(PathBuf::from),
     };
 
     // Each binary populates its own registry; register every model
@@ -558,10 +548,6 @@ const SIMPLE_SWEEPS: &[(&str, SweepFn)] = &[
     ("gdn_state_step_alphabeta", flambeau_bench::sweep_gdn_step_alphabeta::run_sweep),
     ("cast_f32_f16", flambeau_bench::sweep_cast::run_sweep),
     ("cast_f16_f32", flambeau_bench::sweep_f32_pointwise::run_cast_f16_f32_sweep),
-    ("cast_f32_bf16", flambeau_bench::sweep_cast::run_cast_f32_bf16_sweep),
-    ("cast_bf16_f32", flambeau_bench::sweep_cast::run_cast_bf16_f32_sweep),
-    ("cast_f16_bf16", flambeau_bench::sweep_cast::run_cast_f16_bf16_sweep),
-    ("cast_bf16_f16", flambeau_bench::sweep_cast::run_cast_bf16_f16_sweep),
     ("silu_f32", flambeau_bench::sweep_f32_pointwise::run_silu_sweep),
     ("swiglu_f32", flambeau_bench::sweep_f32_pointwise::run_swiglu_sweep),
     ("scale_f32", flambeau_bench::sweep_f32_pointwise::run_scale_sweep),
@@ -579,13 +565,6 @@ const SIMPLE_SWEEPS: &[(&str, SweepFn)] = &[
     ("attention_decode_q8_kv", flambeau_bench::sweep_attention_q8_kv::run_sweep),
     ("attention_decode_splitk", flambeau_bench::sweep_attention_splitk::run_sweep),
     ("mmvq_f16", flambeau_bench::sweep_mmvq_f16::run_sweep),
-    ("mmvq_bf16", flambeau_bench::sweep_mmvq_bf16::run_sweep),
-    ("rmsnorm_bf16", flambeau_bench::sweep_rmsnorm_bf16::run_sweep),
-    ("attention_decode_bf16", flambeau_bench::sweep_attention_bf16::run_sweep),
-    ("split_q_gate_bf16", flambeau_bench::sweep_pointwise_bf16::run_split_q_gate_sweep),
-    ("sigmoid_mul_bf16", flambeau_bench::sweep_pointwise_bf16::run_sigmoid_mul_sweep),
-    ("swiglu_f32_to_bf16", flambeau_bench::sweep_pointwise_bf16::run_swiglu_f32_to_bf16_sweep),
-    ("rope_neox_partial_bf16", flambeau_bench::sweep_pointwise_bf16::run_rope_neox_partial_sweep),
     ("mmq_f16", flambeau_bench::sweep_mmvq_f16::run_mmq_sweep),
     ("mmq_f16_tile", flambeau_bench::sweep_mmvq_f16::run_mmq_tile_sweep),
     ("mmvq_q4_0", flambeau_bench::sweep_q4_0_q5_0::run_mmvq_q4_0_sweep),
