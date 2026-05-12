@@ -1,0 +1,147 @@
+{
+  "started": "2026-05-12T21:52:28.759185+00:00",
+  "max_tokens": 256,
+  "concurrencies": [
+    1,
+    2
+  ],
+  "cells": [
+    {
+      "model": "qwen36_35B_a3b_q3_k_s",
+      "topo": "pp2tp2",
+      "path": "no_batched",
+      "boot_secs": 7.363613843917847,
+      "port": 40925,
+      "log": "/artefact/flambeau/scripts/bench/logs/qwen36_35B_a3b_q3_k_s__pp2tp2__no_batched.log",
+      "concurrency_results": [
+        {
+          "n_concurrent": 1,
+          "wall_ms": 33386.219804000575,
+          "n_ok": 1,
+          "n_err": 0,
+          "errs": [],
+          "per_stream": [
+            {
+              "prefill_ms": 24871.802192996256,
+              "decode_ms": 8513.566107998486,
+              "completion_tokens": 256,
+              "tps": 30.069655506578883
+            }
+          ],
+          "prompt_tokens": 3003,
+          "prefill_ms_mean": 24871.802192996256,
+          "prefill_ms_min": 24871.802192996256,
+          "prefill_ms_max": 24871.802192996256,
+          "decode_ms_mean": 8513.566107998486,
+          "completion_tokens_total": 256,
+          "decode_tps_per_stream_mean": 30.069655506578883,
+          "decode_tps_aggregate": 30.069655506578883
+        },
+        {
+          "n_concurrent": 2,
+          "wall_ms": 63588.1782869983,
+          "n_ok": 2,
+          "n_err": 0,
+          "errs": [],
+          "per_stream": [
+            {
+              "prefill_ms": 25001.066368000465,
+              "decode_ms": 31042.620534004527,
+              "completion_tokens": 256,
+              "tps": 8.24672645531243
+            },
+            {
+              "prefill_ms": 55060.10430400784,
+              "decode_ms": 8526.853610994294,
+              "completion_tokens": 256,
+              "tps": 30.022797585022513
+            }
+          ],
+          "prompt_tokens": 3003,
+          "prefill_ms_mean": 40030.58533600415,
+          "prefill_ms_min": 25001.066368000465,
+          "prefill_ms_max": 55060.10430400784,
+          "decode_ms_mean": 19784.73707249941,
+          "completion_tokens_total": 512,
+          "decode_tps_per_stream_mean": 19.13476202016747,
+          "decode_tps_aggregate": 16.49345291062486
+        }
+      ],
+      "warmup": {
+        "prefill_ms": 24825.562857004115,
+        "decode_ms": 1024.9368310032878,
+        "completion_tokens": 32,
+        "err": null
+      }
+    },
+    {
+      "model": "qwen36_35B_a3b_q3_k_s",
+      "topo": "pp2tp2",
+      "path": "batched",
+      "boot_secs": 7.333418846130371,
+      "port": 45637,
+      "log": "/artefact/flambeau/scripts/bench/logs/qwen36_35B_a3b_q3_k_s__pp2tp2__batched.log",
+      "concurrency_results": [
+        {
+          "n_concurrent": 1,
+          "wall_ms": 33679.09840699576,
+          "n_ok": 1,
+          "n_err": 0,
+          "errs": [],
+          "per_stream": [
+            {
+              "prefill_ms": 25146.63709499291,
+              "decode_ms": 8531.412997006555,
+              "completion_tokens": 256,
+              "tps": 30.006752702022933
+            }
+          ],
+          "prompt_tokens": 3003,
+          "prefill_ms_mean": 25146.63709499291,
+          "prefill_ms_min": 25146.63709499291,
+          "prefill_ms_max": 25146.63709499291,
+          "decode_ms_mean": 8531.412997006555,
+          "completion_tokens_total": 256,
+          "decode_tps_per_stream_mean": 30.006752702022933,
+          "decode_tps_aggregate": 30.006752702022933
+        },
+        {
+          "n_concurrent": 2,
+          "wall_ms": 64616.2100359943,
+          "n_ok": 2,
+          "n_err": 0,
+          "errs": [],
+          "per_stream": [
+            {
+              "prefill_ms": 25292.054996010847,
+              "decode_ms": 32003.64921298751,
+              "completion_tokens": 256,
+              "tps": 7.999087800778411
+            },
+            {
+              "prefill_ms": 56060.704275005264,
+              "decode_ms": 8554.26923999039,
+              "completion_tokens": 256,
+              "tps": 29.92657734026239
+            }
+          ],
+          "prompt_tokens": 3003,
+          "prefill_ms_mean": 40676.379635508056,
+          "prefill_ms_min": 25292.054996010847,
+          "prefill_ms_max": 56060.704275005264,
+          "decode_ms_mean": 20278.95922648895,
+          "completion_tokens_total": 512,
+          "decode_tps_per_stream_mean": 18.9628325705204,
+          "decode_tps_aggregate": 15.998175601556822
+        }
+      ],
+      "warmup": {
+        "prefill_ms": 25116.123544008587,
+        "decode_ms": 1036.4836389926495,
+        "completion_tokens": 32,
+        "err": null
+      }
+    }
+  ],
+  "finished": "2026-05-12T21:56:59.224079+00:00"
+}
