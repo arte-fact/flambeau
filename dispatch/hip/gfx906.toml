@@ -523,6 +523,14 @@ impl    = "indexed_moe_mmvq_q4_0_gfx906"
 cert    = "certs/hip/gfx906/indexed_moe_mmvq_q4_0_gfx906.json"
 notes   = "V2.23.a — Q4_0 indexed-MoE MMVQ for Qwen3.6-35B-A3B-Q4_0 expert weights. Same inner loop as dense mmvq_q4_0 + expert-id indirection on the weight tensor; 256 threads/block, grid (n_rows, n_tokens·top_k). 5 Q4_1 ffn_down_exps layers get host-converted to Q8_0 at load."
 
+[[indexed_moe_mmvq]]
+dtype   = "Q5_0"
+dtype_q = "Q8_1"
+shape   = { m = "any", k = "any", n = "any" }
+impl    = "indexed_moe_mmvq_q5_0_gfx906"
+cert    = "certs/hip/gfx906/indexed_moe_mmvq_q5_0_gfx906.json"
+notes   = "Q5_0 indexed-MoE MMVQ. Q4_0 indexed kernel structure with the 5th-bit ladder from mmvq_q5_0: per block, (q5 − 16)·y = nibble·y + 16·bit·y − 16·s_y. 256 threads/block, grid (n_rows, n_tokens·top_k)."
+
 [[moe_combine]]
 dtype   = "F16"
 dtype_q = "F16"
