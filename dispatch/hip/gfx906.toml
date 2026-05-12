@@ -203,6 +203,14 @@ impl    = "qmatmul_q6_K_mmq_wave64_gfx906"
 cert    = "certs/hip/gfx906/qmatmul_q6_K_mmq_wave64_gfx906.json"
 notes   = "V2.3.b.4 — wave64 MMQ Q6_K. Flambeau-authored (candle has no Q6_K MMQ); mirrors the wave64 / MMQ_Y=64 / TILE_N=8 / DP4A structure used by Q4_K and Q5_K wave64. Per-sub-block decode packs 32 weights into 8 signed-int8 int32s (-32 pre-applied). Consumes standard flambeau_block_q8_1."
 
+[[qmatmul_mmq]]
+dtype   = "Q8_K"
+dtype_q = "Q8_1"
+shape   = { m = ">=128", k = "any", n = "any" }
+impl    = "qmatmul_q8_K_mmq_wave64_gfx906"
+cert    = "certs/hip/gfx906/qmatmul_q8_K_mmq_wave64_gfx906.json"
+notes   = "Q8_K MMQ wave64. Simplest K-quant MMQ: f32 d × i8 qs[256], no nibble unpack, no sub-block scale, no min. Per super-block accumulates Σ_sub d_y[sub] * dp4a(qs_sub, y_sub) then scales once by d_x. MMQ_Y=64, TILE_N=8."
+
 # ----- RMSNorm (V1.6 fused decode path) -------------------------------------
 
 [[rmsnorm]]
