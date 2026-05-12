@@ -2671,6 +2671,8 @@ enum Tile8Wk {
     Q4_1,
     Q5_0,
     Q5_1,
+    Q2K,
+    Q3K,
     Q4K,
     Q5K,
     Q6K,
@@ -2683,6 +2685,8 @@ impl Tile8Wk {
             Tile8Wk::Q4_1 => GgmlDType::Q4_1,
             Tile8Wk::Q5_0 => GgmlDType::Q5_0,
             Tile8Wk::Q5_1 => GgmlDType::Q5_1,
+            Tile8Wk::Q2K => GgmlDType::Q2K,
+            Tile8Wk::Q3K => GgmlDType::Q3K,
             Tile8Wk::Q4K => GgmlDType::Q4K,
             Tile8Wk::Q5K => GgmlDType::Q5K,
             Tile8Wk::Q6K => GgmlDType::Q6K,
@@ -2695,6 +2699,8 @@ impl Tile8Wk {
             Tile8Wk::Q4_1 => std::mem::size_of::<BlockQ4_1>(),
             Tile8Wk::Q5_0 => std::mem::size_of::<flambeau_quant::BlockQ5_0>(),
             Tile8Wk::Q5_1 => std::mem::size_of::<flambeau_quant::BlockQ5_1>(),
+            Tile8Wk::Q2K => std::mem::size_of::<BlockQ2K>(),
+            Tile8Wk::Q3K => std::mem::size_of::<BlockQ3K>(),
             Tile8Wk::Q4K => std::mem::size_of::<BlockQ4K>(),
             Tile8Wk::Q5K => std::mem::size_of::<BlockQ5K>(),
             Tile8Wk::Q6K => std::mem::size_of::<BlockQ6K>(),
@@ -2707,7 +2713,7 @@ impl Tile8Wk {
 
     fn tol(self) -> f32 {
         match self {
-            Tile8Wk::Q4K | Tile8Wk::Q5K | Tile8Wk::Q6K => 5e-2,
+            Tile8Wk::Q2K | Tile8Wk::Q3K | Tile8Wk::Q4K | Tile8Wk::Q5K | Tile8Wk::Q6K => 5e-2,
             _ => 3e-2,
         }
     }
@@ -2739,6 +2745,23 @@ impl Tile8Wk {
                 let dmin = f16::from_f32((block[1] as f32 / 255.0) * 0.05);
                 block[0..2].copy_from_slice(&d.to_bits().to_le_bytes());
                 block[2..4].copy_from_slice(&dmin.to_bits().to_le_bytes());
+            }
+            Tile8Wk::Q2K => {
+                // Q2_K: scales[16] + qs[64] + d (f16 @ 80) + dmin (f16 @ 82).
+                let d = f16::from_f32((block[80] as f32 / 255.0) * 0.05 + 0.005);
+                let dmin = f16::from_f32((block[81] as f32 / 255.0) * 0.02);
+                block[80..82].copy_from_slice(&d.to_bits().to_le_bytes());
+                block[82..84].copy_from_slice(&dmin.to_bits().to_le_bytes());
+            }
+            Tile8Wk::Q3K => {
+                // Q3_K: hmask[32] + qs[64] + scales[12] + d (f16 @ 108).
+                let scales_off = QK_K / 8 + QK_K / 4;
+                for s in &mut block[scales_off..scales_off + 12] {
+                    *s = (*s as i32 % 32) as u8;
+                }
+                let d_off = scales_off + 12;
+                let d = f16::from_f32((block[d_off] as f32 / 255.0) * 0.05 + 0.005);
+                block[d_off..d_off + 2].copy_from_slice(&d.to_bits().to_le_bytes());
             }
             Tile8Wk::Q6K => {
                 let scales_off = QK_K / 2 + QK_K / 4; // 192
@@ -3258,4 +3281,14 @@ tile8_sweeps!(
     Tile8Wk::Q6K, "Q6_K", "q6_k", 0xB6C0,
     run_indexed_moe_mmq_q6_k_gate_up_tile8_sweep,
     run_indexed_moe_mmq_q6_k_down_tile8_sweep
+);
+tile8_sweeps!(
+    Tile8Wk::Q2K, "Q2_K", "q2_k", 0xB2C0,
+    run_indexed_moe_mmq_q2_k_gate_up_tile8_sweep,
+    run_indexed_moe_mmq_q2_k_down_tile8_sweep
+);
+tile8_sweeps!(
+    Tile8Wk::Q3K, "Q3_K", "q3_k", 0xB3C0,
+    run_indexed_moe_mmq_q3_k_gate_up_tile8_sweep,
+    run_indexed_moe_mmq_q3_k_down_tile8_sweep
 );

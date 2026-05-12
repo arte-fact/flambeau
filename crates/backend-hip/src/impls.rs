@@ -822,6 +822,22 @@ pub const DIRECT_CALL_KERNELS_GFX906: &[DirectCallKernel] = &[
         impl_id: "indexed_moe_mmq_q6_k_down_tile8_gfx906",
         cert_rel_path: "certs/hip/gfx906/indexed_moe_mmq_q6_k_down_tile8_gfx906.json",
     },
+    DirectCallKernel {
+        impl_id: "indexed_moe_mmq_q2_k_gate_up_tile8_gfx906",
+        cert_rel_path: "certs/hip/gfx906/indexed_moe_mmq_q2_k_gate_up_tile8_gfx906.json",
+    },
+    DirectCallKernel {
+        impl_id: "indexed_moe_mmq_q2_k_down_tile8_gfx906",
+        cert_rel_path: "certs/hip/gfx906/indexed_moe_mmq_q2_k_down_tile8_gfx906.json",
+    },
+    DirectCallKernel {
+        impl_id: "indexed_moe_mmq_q3_k_gate_up_tile8_gfx906",
+        cert_rel_path: "certs/hip/gfx906/indexed_moe_mmq_q3_k_gate_up_tile8_gfx906.json",
+    },
+    DirectCallKernel {
+        impl_id: "indexed_moe_mmq_q3_k_down_tile8_gfx906",
+        cert_rel_path: "certs/hip/gfx906/indexed_moe_mmq_q3_k_down_tile8_gfx906.json",
+    },
 ];
 
 /// Catalog of kernels that are **not** dispatched at runtime but are kept
