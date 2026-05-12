@@ -755,6 +755,73 @@ pub const DIRECT_CALL_KERNELS_GFX906: &[DirectCallKernel] = &[
         impl_id: "indexed_moe_mmvq_q5_k_gfx906",
         cert_rel_path: "certs/hip/gfx906/indexed_moe_mmvq_q5_k_gfx906.json",
     },
+    // Indexed-MoE MMQ tile8 (gate_up + down) per dtype. Routed by GGUF
+    // tensor dtype, not via dispatch_qmatmul; cert harness in
+    // crates/bench/src/sweep_moe.rs (T2.3b — generic tile8 harness).
+    DirectCallKernel {
+        impl_id: "indexed_moe_mmq_q8_0_gate_up_tile8_gfx906",
+        cert_rel_path: "certs/hip/gfx906/indexed_moe_mmq_q8_0_gate_up_tile8_gfx906.json",
+    },
+    DirectCallKernel {
+        impl_id: "indexed_moe_mmq_q8_0_down_tile8_gfx906",
+        cert_rel_path: "certs/hip/gfx906/indexed_moe_mmq_q8_0_down_tile8_gfx906.json",
+    },
+    DirectCallKernel {
+        impl_id: "indexed_moe_mmq_q4_0_gate_up_tile8_gfx906",
+        cert_rel_path: "certs/hip/gfx906/indexed_moe_mmq_q4_0_gate_up_tile8_gfx906.json",
+    },
+    DirectCallKernel {
+        impl_id: "indexed_moe_mmq_q4_0_down_tile8_gfx906",
+        cert_rel_path: "certs/hip/gfx906/indexed_moe_mmq_q4_0_down_tile8_gfx906.json",
+    },
+    DirectCallKernel {
+        impl_id: "indexed_moe_mmq_q4_1_gate_up_tile8_gfx906",
+        cert_rel_path: "certs/hip/gfx906/indexed_moe_mmq_q4_1_gate_up_tile8_gfx906.json",
+    },
+    DirectCallKernel {
+        impl_id: "indexed_moe_mmq_q4_1_down_tile8_gfx906",
+        cert_rel_path: "certs/hip/gfx906/indexed_moe_mmq_q4_1_down_tile8_gfx906.json",
+    },
+    DirectCallKernel {
+        impl_id: "indexed_moe_mmq_q5_0_gate_up_tile8_gfx906",
+        cert_rel_path: "certs/hip/gfx906/indexed_moe_mmq_q5_0_gate_up_tile8_gfx906.json",
+    },
+    DirectCallKernel {
+        impl_id: "indexed_moe_mmq_q5_0_down_tile8_gfx906",
+        cert_rel_path: "certs/hip/gfx906/indexed_moe_mmq_q5_0_down_tile8_gfx906.json",
+    },
+    DirectCallKernel {
+        impl_id: "indexed_moe_mmq_q5_1_gate_up_tile8_gfx906",
+        cert_rel_path: "certs/hip/gfx906/indexed_moe_mmq_q5_1_gate_up_tile8_gfx906.json",
+    },
+    DirectCallKernel {
+        impl_id: "indexed_moe_mmq_q5_1_down_tile8_gfx906",
+        cert_rel_path: "certs/hip/gfx906/indexed_moe_mmq_q5_1_down_tile8_gfx906.json",
+    },
+    DirectCallKernel {
+        impl_id: "indexed_moe_mmq_q4_k_gate_up_tile8_gfx906",
+        cert_rel_path: "certs/hip/gfx906/indexed_moe_mmq_q4_k_gate_up_tile8_gfx906.json",
+    },
+    DirectCallKernel {
+        impl_id: "indexed_moe_mmq_q4_k_down_tile8_gfx906",
+        cert_rel_path: "certs/hip/gfx906/indexed_moe_mmq_q4_k_down_tile8_gfx906.json",
+    },
+    DirectCallKernel {
+        impl_id: "indexed_moe_mmq_q5_k_gate_up_tile8_gfx906",
+        cert_rel_path: "certs/hip/gfx906/indexed_moe_mmq_q5_k_gate_up_tile8_gfx906.json",
+    },
+    DirectCallKernel {
+        impl_id: "indexed_moe_mmq_q5_k_down_tile8_gfx906",
+        cert_rel_path: "certs/hip/gfx906/indexed_moe_mmq_q5_k_down_tile8_gfx906.json",
+    },
+    DirectCallKernel {
+        impl_id: "indexed_moe_mmq_q6_k_gate_up_tile8_gfx906",
+        cert_rel_path: "certs/hip/gfx906/indexed_moe_mmq_q6_k_gate_up_tile8_gfx906.json",
+    },
+    DirectCallKernel {
+        impl_id: "indexed_moe_mmq_q6_k_down_tile8_gfx906",
+        cert_rel_path: "certs/hip/gfx906/indexed_moe_mmq_q6_k_down_tile8_gfx906.json",
+    },
 ];
 
 /// Catalog of kernels that are **not** dispatched at runtime but are kept
