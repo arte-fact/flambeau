@@ -580,6 +580,8 @@ const SIMPLE_SWEEPS: &[(&str, SweepFn)] = &[
     ("moe_combine", flambeau_bench::sweep_moe::run_moe_combine_sweep),
     ("indexed_moe_mmvq_gate_up", flambeau_bench::sweep_moe::run_gate_up_sweep),
     ("indexed_moe_mmvq_r2", flambeau_bench::sweep_moe::run_indexed_moe_mmvq_r2_sweep),
+    ("indexed_moe_mmvq_q2_k", flambeau_bench::sweep_moe::run_indexed_moe_mmvq_q2_k_sweep),
+    ("indexed_moe_mmvq_q3_k", flambeau_bench::sweep_moe::run_indexed_moe_mmvq_q3_k_sweep),
     ("indexed_moe_mmvq_q5_k", flambeau_bench::sweep_moe::run_indexed_moe_mmvq_q5_k_sweep),
     ("indexed_moe_mmvq_q6_k", flambeau_bench::sweep_moe::run_indexed_moe_mmvq_q6_k_sweep),
     ("indexed_moe_mmvq_q8_0", flambeau_bench::sweep_moe::run_indexed_moe_mmvq_q8_0_sweep),

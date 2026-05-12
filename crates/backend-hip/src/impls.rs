@@ -710,6 +710,14 @@ pub const DIRECT_CALL_KERNELS_GFX906: &[DirectCallKernel] = &[
         cert_rel_path: "certs/hip/gfx906/indexed_moe_mmvq_q5_1_gfx906.json",
     },
     DirectCallKernel {
+        impl_id: "indexed_moe_mmvq_q2_k_gfx906",
+        cert_rel_path: "certs/hip/gfx906/indexed_moe_mmvq_q2_k_gfx906.json",
+    },
+    DirectCallKernel {
+        impl_id: "indexed_moe_mmvq_q3_k_gfx906",
+        cert_rel_path: "certs/hip/gfx906/indexed_moe_mmvq_q3_k_gfx906.json",
+    },
+    DirectCallKernel {
         impl_id: "indexed_moe_mmvq_q6_k_gfx906",
         cert_rel_path: "certs/hip/gfx906/indexed_moe_mmvq_q6_k_gfx906.json",
     },

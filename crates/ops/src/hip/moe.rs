@@ -154,6 +154,90 @@ pub fn indexed_moe_mmvq_q4_k_r2(
     Ok(())
 }
 
+/// Q3_K MoE MMVQ. Same indexing contract as `indexed_moe_mmvq_q4_k`;
+/// weights are Q3_K super-blocks (110 B; byte-wise scales unpack).
+pub fn indexed_moe_mmvq_q3_k(
+    reg: &OpsRegistry,
+    stream: &HipStream,
+    w: DevicePtr,
+    y: DevicePtr,
+    expert_ids: DevicePtr,
+    dst: DevicePtr,
+    n_rows: usize,
+    n_tokens: usize,
+    top_k: usize,
+    n_sb_per_row: usize,
+) -> Result<()> {
+    let module = reg.expect_module("indexed_moe_mmvq_q3_k")?;
+    let kernel = module.kernel("flambeau_indexed_moe_mmvq_q3_k_q8_1")?;
+    let n_rows_i = n_rows as i32;
+    let n_tokens_i = n_tokens as i32;
+    let top_k_i = top_k as i32;
+    let nb_i = n_sb_per_row as i32;
+    let w_ptr: u64 = w.as_usize() as u64;
+    let y_ptr: u64 = y.as_usize() as u64;
+    let e_ptr: u64 = expert_ids.as_usize() as u64;
+    let d_ptr: u64 = dst.as_usize() as u64;
+    let mut args = KernelArgs::new();
+    args.push(&w_ptr);
+    args.push(&y_ptr);
+    args.push(&e_ptr);
+    args.push(&d_ptr);
+    args.push(&n_rows_i);
+    args.push(&n_tokens_i);
+    args.push(&top_k_i);
+    args.push(&nb_i);
+    let cfg = LaunchCfg {
+        grid: (n_rows as u32, (n_tokens * top_k) as u32, 1),
+        block: (64, 1, 1),
+        shared_bytes: 0,
+    };
+    unsafe { kernel.launch(stream, cfg, args)? };
+    Ok(())
+}
+
+/// Q2_K MoE MMVQ. Same indexing contract as `indexed_moe_mmvq_q4_k`;
+/// weights are Q2_K super-blocks (affine, packed 4-bit (scale, min)).
+pub fn indexed_moe_mmvq_q2_k(
+    reg: &OpsRegistry,
+    stream: &HipStream,
+    w: DevicePtr,
+    y: DevicePtr,
+    expert_ids: DevicePtr,
+    dst: DevicePtr,
+    n_rows: usize,
+    n_tokens: usize,
+    top_k: usize,
+    n_sb_per_row: usize,
+) -> Result<()> {
+    let module = reg.expect_module("indexed_moe_mmvq_q2_k")?;
+    let kernel = module.kernel("flambeau_indexed_moe_mmvq_q2_K_q8_1")?;
+    let n_rows_i = n_rows as i32;
+    let n_tokens_i = n_tokens as i32;
+    let top_k_i = top_k as i32;
+    let nb_i = n_sb_per_row as i32;
+    let w_ptr: u64 = w.as_usize() as u64;
+    let y_ptr: u64 = y.as_usize() as u64;
+    let e_ptr: u64 = expert_ids.as_usize() as u64;
+    let d_ptr: u64 = dst.as_usize() as u64;
+    let mut args = KernelArgs::new();
+    args.push(&w_ptr);
+    args.push(&y_ptr);
+    args.push(&e_ptr);
+    args.push(&d_ptr);
+    args.push(&n_rows_i);
+    args.push(&n_tokens_i);
+    args.push(&top_k_i);
+    args.push(&nb_i);
+    let cfg = LaunchCfg {
+        grid: (n_rows as u32, (n_tokens * top_k) as u32, 1),
+        block: (64, 1, 1),
+        shared_bytes: 0,
+    };
+    unsafe { kernel.launch(stream, cfg, args)? };
+    Ok(())
+}
+
 /// Q6_K sibling of `indexed_moe_mmvq_q4_k_r2`. Same indexing contract —
 /// `[n_tokens, top_k]` expert ids, `[n_tokens, top_k, n_rows]` F32 output,
 /// `[n_tokens, n_sb_per_row * 8]` Q8_1 activations — but weights are

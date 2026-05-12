@@ -20,7 +20,7 @@ use flambeau_backend_hip::{
 };
 use flambeau_core::{CopyDirection, Device, DevicePtr, Stream};
 use flambeau_kernels_hip as kernels;
-use flambeau_quant::{BlockQ4K, BlockQ5K, BlockQ6K, BlockQ8_1, QK8_0, QK_K};
+use flambeau_quant::{BlockQ2K, BlockQ3K, BlockQ4K, BlockQ5K, BlockQ6K, BlockQ8_1, QK8_0, QK_K};
 use half::f16;
 
 use crate::cert::{now_utc_iso8601, Cert, PmcSnapshot, ShapeResult, SCHEMA_VERSION};
@@ -2270,4 +2270,384 @@ fn max_rel_err(got: &[f32], reference: &[f32]) -> f32 {
 
 fn max_rel_err_with_floor(got: &[f32], reference: &[f32], k: usize) -> f32 {
     harness_err_floor(got, reference, (k as f32).sqrt())
+}
+
+// ---------------------------------------------------------------------------
+// Q3_K + Q2_K indexed-MoE MMVQ correctness sweeps
+// ---------------------------------------------------------------------------
+
+pub fn run_indexed_moe_mmvq_q3_k_sweep(repo_root: &Path) -> Result<Cert> {
+    let dev = ensure_dev()?;
+    let kb = kernels::hsaco("indexed_moe_mmvq_q3_k").unwrap();
+    let module = HipModule::load(dev.id(), kb)?;
+    let kernel: HipKernel<'_> =
+        module.kernel("flambeau_indexed_moe_mmvq_q3_k_q8_1")?;
+    let attrs: FuncAttributes = kernel.attributes()?;
+    let q_kb = kernels::hsaco("quantize_q8_1").unwrap();
+    let q_module = HipModule::load(dev.id(), q_kb)?;
+    let q_kernel: HipKernel<'_> = q_module.kernel("flambeau_quantize_row_q8_1")?;
+
+    let n_experts = 16usize;
+    let cases = [(1usize, 4usize, 256usize, 512usize), (4, 4, 256, 512)];
+    let mut results = Vec::new();
+    for (n_tokens, top_k, n_rows, k_dim) in cases {
+        let seed = 0xDEC0DE
+            ^ (n_tokens as u64 * 53 + top_k as u64 * 17)
+            ^ 0xD3D3_u64;
+        let max_rel = run_q3k_shape(
+            &dev, &kernel, &q_kernel, n_experts, n_rows, k_dim, top_k, n_tokens, seed,
+        )?;
+        let tol = 5e-2;
+        results.push(ShapeResult {
+            m: n_tokens,
+            k: k_dim,
+            n: n_rows,
+            seed,
+            max_rel_err: max_rel,
+            tolerance: tol,
+            pass: max_rel <= tol,
+        });
+    }
+    let pass = results.iter().all(|r| r.pass);
+    let cert = Cert {
+        schema_version: SCHEMA_VERSION,
+        impl_id: "indexed_moe_mmvq_q3_k_gfx906".to_string(),
+        backend: "hip".to_string(),
+        arch: "gfx906".to_string(),
+        op: "indexed_moe_mmvq".to_string(),
+        dtype_weight: "Q3_K".to_string(),
+        dtype_activation: "Q8_1".to_string(),
+        tolerance_formula:
+            "|err| <= 5e-2 * max(|ref|, sqrt(k))  (Q3_K weights; same envelope as Q4_K MoE MMVQ)".to_string(),
+        results,
+        pass,
+        emitted_at: now_utc_iso8601(),
+        rig: rig_tag(),
+        pmc: Some(pmc_from(&attrs)),
+    };
+    cert.write_to_disk(repo_root)?;
+    Ok(cert)
+}
+
+pub fn run_indexed_moe_mmvq_q2_k_sweep(repo_root: &Path) -> Result<Cert> {
+    let dev = ensure_dev()?;
+    let kb = kernels::hsaco("indexed_moe_mmvq_q2_k").unwrap();
+    let module = HipModule::load(dev.id(), kb)?;
+    let kernel: HipKernel<'_> =
+        module.kernel("flambeau_indexed_moe_mmvq_q2_K_q8_1")?;
+    let attrs: FuncAttributes = kernel.attributes()?;
+    let q_kb = kernels::hsaco("quantize_q8_1").unwrap();
+    let q_module = HipModule::load(dev.id(), q_kb)?;
+    let q_kernel: HipKernel<'_> = q_module.kernel("flambeau_quantize_row_q8_1")?;
+
+    let n_experts = 16usize;
+    let cases = [(1usize, 4usize, 256usize, 512usize), (4, 4, 256, 512)];
+    let mut results = Vec::new();
+    for (n_tokens, top_k, n_rows, k_dim) in cases {
+        let seed = 0xDEC0DE
+            ^ (n_tokens as u64 * 53 + top_k as u64 * 17)
+            ^ 0xD2D2_u64;
+        let max_rel = run_q2k_shape(
+            &dev, &kernel, &q_kernel, n_experts, n_rows, k_dim, top_k, n_tokens, seed,
+        )?;
+        let tol = 5e-2;
+        results.push(ShapeResult {
+            m: n_tokens,
+            k: k_dim,
+            n: n_rows,
+            seed,
+            max_rel_err: max_rel,
+            tolerance: tol,
+            pass: max_rel <= tol,
+        });
+    }
+    let pass = results.iter().all(|r| r.pass);
+    let cert = Cert {
+        schema_version: SCHEMA_VERSION,
+        impl_id: "indexed_moe_mmvq_q2_k_gfx906".to_string(),
+        backend: "hip".to_string(),
+        arch: "gfx906".to_string(),
+        op: "indexed_moe_mmvq".to_string(),
+        dtype_weight: "Q2_K".to_string(),
+        dtype_activation: "Q8_1".to_string(),
+        tolerance_formula:
+            "|err| <= 5e-2 * max(|ref|, sqrt(k))  (Q2_K weights; same envelope as Q4_K MoE MMVQ)".to_string(),
+        results,
+        pass,
+        emitted_at: now_utc_iso8601(),
+        rig: rig_tag(),
+        pmc: Some(pmc_from(&attrs)),
+    };
+    cert.write_to_disk(repo_root)?;
+    Ok(cert)
+}
+
+fn run_q3k_shape(
+    dev: &HipDevice,
+    kernel: &HipKernel<'_>,
+    q_kernel: &HipKernel<'_>,
+    n_experts: usize,
+    n_rows: usize,
+    k_dim: usize,
+    top_k: usize,
+    n_tokens: usize,
+    seed: u64,
+) -> Result<f32> {
+    assert_eq!(k_dim % QK_K, 0);
+    let nb_per_row = k_dim / QK_K;
+
+    let total_blocks = n_experts * n_rows * nb_per_row;
+    let w_bytes = total_blocks * std::mem::size_of::<BlockQ3K>();
+    let w_raw = tame_q3k_scales(seeded_bytes(seed, w_bytes));
+
+    let act_f32 = seeded_f32(seed.wrapping_add(0xA1), n_tokens * k_dim);
+    let expert_ids: Vec<i32> = (0..n_tokens * top_k)
+        .map(|i| {
+            let h = (i as u64)
+                .wrapping_mul(0x9E3779B97F4A7C15)
+                .wrapping_add(seed.wrapping_mul(0x12345));
+            ((h >> 32) as u32 % n_experts as u32) as i32
+        })
+        .collect();
+
+    let d_w = upload(dev, &w_raw);
+    let d_act = upload(dev, &act_f32);
+    let y_blocks_total = n_tokens * nb_per_row * 8;
+    let d_y = dev.alloc(y_blocks_total * std::mem::size_of::<BlockQ8_1>())?;
+    let d_ids = upload(dev, &expert_ids);
+    let d_dst = dev.alloc(n_tokens * top_k * n_rows * 4)?;
+
+    {
+        let stream = dev.default_stream();
+        let n_elems = (n_tokens * k_dim) as i32;
+        let d_a_p: u64 = d_act.as_usize() as u64;
+        let d_y_p: u64 = d_y.as_usize() as u64;
+        let mut args = KernelArgs::new();
+        args.push(&d_a_p);
+        args.push(&d_y_p);
+        args.push(&n_elems);
+        let cfg = LaunchCfg::one_d(y_blocks_total as u32, QK8 as u32);
+        unsafe { q_kernel.launch(stream, cfg, args)? };
+        stream.synchronize()?;
+    }
+
+    {
+        let stream = dev.default_stream();
+        let n_rows_i = n_rows as i32;
+        let n_tokens_i = n_tokens as i32;
+        let top_k_i = top_k as i32;
+        let nb_i = nb_per_row as i32;
+        let d_w_p: u64 = d_w.as_usize() as u64;
+        let d_y_p: u64 = d_y.as_usize() as u64;
+        let d_ids_p: u64 = d_ids.as_usize() as u64;
+        let d_dst_p: u64 = d_dst.as_usize() as u64;
+        let mut args = KernelArgs::new();
+        args.push(&d_w_p);
+        args.push(&d_y_p);
+        args.push(&d_ids_p);
+        args.push(&d_dst_p);
+        args.push(&n_rows_i);
+        args.push(&n_tokens_i);
+        args.push(&top_k_i);
+        args.push(&nb_i);
+        let cfg = LaunchCfg {
+            grid: (n_rows as u32, (n_tokens * top_k) as u32, 1),
+            block: (64, 1, 1),
+            shared_bytes: 0,
+        };
+        unsafe { kernel.launch(stream, cfg, args)? };
+        stream.synchronize()?;
+    }
+
+    let mut got = vec![0.0f32; n_tokens * top_k * n_rows];
+    unsafe {
+        dev.memcpy_async(
+            dev.default_stream(),
+            CopyDirection::DeviceToHost,
+            DevicePtr(got.as_mut_ptr() as usize),
+            d_dst,
+            n_tokens * top_k * n_rows * 4,
+        )?;
+    }
+    dev.default_stream().synchronize()?;
+    unsafe {
+        dev.dealloc(d_w, w_bytes)?;
+        dev.dealloc(d_act, act_f32.len() * 4)?;
+        dev.dealloc(d_y, y_blocks_total * std::mem::size_of::<BlockQ8_1>())?;
+        dev.dealloc(d_ids, expert_ids.len() * 4)?;
+        dev.dealloc(d_dst, n_tokens * top_k * n_rows * 4)?;
+    }
+
+    let total_elems = n_experts * n_rows * k_dim;
+    let mut w_dequant = vec![0.0f32; total_elems];
+    flambeau_quant::dequantize_into(flambeau_quant::GgmlDType::Q3K, &w_raw, &mut w_dequant)?;
+    let act_rt = q8_1_roundtrip(&act_f32);
+    let mut reference = vec![0.0f32; n_tokens * top_k * n_rows];
+    for t in 0..n_tokens {
+        for slot in 0..top_k {
+            let expert = expert_ids[t * top_k + slot] as usize;
+            for row in 0..n_rows {
+                let mut acc = 0.0f64;
+                for j in 0..k_dim {
+                    let w = w_dequant[((expert * n_rows) + row) * k_dim + j];
+                    let a = act_rt[t * k_dim + j];
+                    acc += (w * a) as f64;
+                }
+                reference[(t * top_k + slot) * n_rows + row] = acc as f32;
+            }
+        }
+    }
+    Ok(max_rel_err_with_floor(&got, &reference, k_dim))
+}
+
+fn run_q2k_shape(
+    dev: &HipDevice,
+    kernel: &HipKernel<'_>,
+    q_kernel: &HipKernel<'_>,
+    n_experts: usize,
+    n_rows: usize,
+    k_dim: usize,
+    top_k: usize,
+    n_tokens: usize,
+    seed: u64,
+) -> Result<f32> {
+    assert_eq!(k_dim % QK_K, 0);
+    let nb_per_row = k_dim / QK_K;
+
+    let total_blocks = n_experts * n_rows * nb_per_row;
+    let w_bytes = total_blocks * std::mem::size_of::<BlockQ2K>();
+    let w_raw = tame_q2k_scales(seeded_bytes(seed, w_bytes));
+
+    let act_f32 = seeded_f32(seed.wrapping_add(0xA1), n_tokens * k_dim);
+    let expert_ids: Vec<i32> = (0..n_tokens * top_k)
+        .map(|i| {
+            let h = (i as u64)
+                .wrapping_mul(0x9E3779B97F4A7C15)
+                .wrapping_add(seed.wrapping_mul(0x12345));
+            ((h >> 32) as u32 % n_experts as u32) as i32
+        })
+        .collect();
+
+    let d_w = upload(dev, &w_raw);
+    let d_act = upload(dev, &act_f32);
+    let y_blocks_total = n_tokens * nb_per_row * 8;
+    let d_y = dev.alloc(y_blocks_total * std::mem::size_of::<BlockQ8_1>())?;
+    let d_ids = upload(dev, &expert_ids);
+    let d_dst = dev.alloc(n_tokens * top_k * n_rows * 4)?;
+
+    {
+        let stream = dev.default_stream();
+        let n_elems = (n_tokens * k_dim) as i32;
+        let d_a_p: u64 = d_act.as_usize() as u64;
+        let d_y_p: u64 = d_y.as_usize() as u64;
+        let mut args = KernelArgs::new();
+        args.push(&d_a_p);
+        args.push(&d_y_p);
+        args.push(&n_elems);
+        let cfg = LaunchCfg::one_d(y_blocks_total as u32, QK8 as u32);
+        unsafe { q_kernel.launch(stream, cfg, args)? };
+        stream.synchronize()?;
+    }
+
+    {
+        let stream = dev.default_stream();
+        let n_rows_i = n_rows as i32;
+        let n_tokens_i = n_tokens as i32;
+        let top_k_i = top_k as i32;
+        let nb_i = nb_per_row as i32;
+        let d_w_p: u64 = d_w.as_usize() as u64;
+        let d_y_p: u64 = d_y.as_usize() as u64;
+        let d_ids_p: u64 = d_ids.as_usize() as u64;
+        let d_dst_p: u64 = d_dst.as_usize() as u64;
+        let mut args = KernelArgs::new();
+        args.push(&d_w_p);
+        args.push(&d_y_p);
+        args.push(&d_ids_p);
+        args.push(&d_dst_p);
+        args.push(&n_rows_i);
+        args.push(&n_tokens_i);
+        args.push(&top_k_i);
+        args.push(&nb_i);
+        let cfg = LaunchCfg {
+            grid: (n_rows as u32, (n_tokens * top_k) as u32, 1),
+            block: (64, 1, 1),
+            shared_bytes: 0,
+        };
+        unsafe { kernel.launch(stream, cfg, args)? };
+        stream.synchronize()?;
+    }
+
+    let mut got = vec![0.0f32; n_tokens * top_k * n_rows];
+    unsafe {
+        dev.memcpy_async(
+            dev.default_stream(),
+            CopyDirection::DeviceToHost,
+            DevicePtr(got.as_mut_ptr() as usize),
+            d_dst,
+            n_tokens * top_k * n_rows * 4,
+        )?;
+    }
+    dev.default_stream().synchronize()?;
+    unsafe {
+        dev.dealloc(d_w, w_bytes)?;
+        dev.dealloc(d_act, act_f32.len() * 4)?;
+        dev.dealloc(d_y, y_blocks_total * std::mem::size_of::<BlockQ8_1>())?;
+        dev.dealloc(d_ids, expert_ids.len() * 4)?;
+        dev.dealloc(d_dst, n_tokens * top_k * n_rows * 4)?;
+    }
+
+    let total_elems = n_experts * n_rows * k_dim;
+    let mut w_dequant = vec![0.0f32; total_elems];
+    flambeau_quant::dequantize_into(flambeau_quant::GgmlDType::Q2K, &w_raw, &mut w_dequant)?;
+    let act_rt = q8_1_roundtrip(&act_f32);
+    let mut reference = vec![0.0f32; n_tokens * top_k * n_rows];
+    for t in 0..n_tokens {
+        for slot in 0..top_k {
+            let expert = expert_ids[t * top_k + slot] as usize;
+            for row in 0..n_rows {
+                let mut acc = 0.0f64;
+                for j in 0..k_dim {
+                    let w = w_dequant[((expert * n_rows) + row) * k_dim + j];
+                    let a = act_rt[t * k_dim + j];
+                    acc += (w * a) as f64;
+                }
+                reference[(t * top_k + slot) * n_rows + row] = acc as f32;
+            }
+        }
+    }
+    Ok(max_rel_err_with_floor(&got, &reference, k_dim))
+}
+
+fn tame_q3k_scales(mut raw: Vec<u8>) -> Vec<u8> {
+    // Same treatment as the Q3_K MMVQ sweep: signed-6-bit scale bytes
+    // (the 12 packed bytes at offset 96..108) clamped via mod-32; d (f16
+    // at 108..110) bounded small.
+    let bs = std::mem::size_of::<BlockQ3K>();
+    let nblocks = raw.len() / bs;
+    let scales_off = QK_K / 8 + QK_K / 4; // 32+64 = 96
+    let d_off = scales_off + 12;
+    for i in 0..nblocks {
+        let block = &mut raw[i * bs..(i + 1) * bs];
+        for s in &mut block[scales_off..scales_off + 12] {
+            *s = (*s as i32 % 32) as u8;
+        }
+        let d = f16::from_f32((block[d_off] as f32 / 255.0) * 0.05 + 0.005);
+        block[d_off..d_off + 2].copy_from_slice(&d.to_bits().to_le_bytes());
+    }
+    raw
+}
+
+fn tame_q2k_scales(mut raw: Vec<u8>) -> Vec<u8> {
+    // BlockQ2K: scales[16] + qs[64] + d (f16 @ 80) + dmin (f16 @ 82).
+    // Scales bytes are 4-bit (scale, min) packed; leave random. Bound d/dmin.
+    let bs = std::mem::size_of::<BlockQ2K>();
+    let nblocks = raw.len() / bs;
+    for i in 0..nblocks {
+        let block = &mut raw[i * bs..(i + 1) * bs];
+        let d = f16::from_f32((block[80] as f32 / 255.0) * 0.05 + 0.005);
+        let dmin = f16::from_f32((block[81] as f32 / 255.0) * 0.02);
+        block[80..82].copy_from_slice(&d.to_bits().to_le_bytes());
+        block[82..84].copy_from_slice(&dmin.to_bits().to_le_bytes());
+    }
+    raw
 }
