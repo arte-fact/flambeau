@@ -134,6 +134,29 @@ typedef struct {
 } flambeau_block_q5_1;
 static_assert(sizeof(flambeau_block_q5_1) == 2 + 2 + 4 + QK5_1 / 2, "block_q5_1 size");
 
+// Q2_K — 2-bit K-quant, super-block of 256 elements. Byte-identical to
+// ggml-common.h block_q2_K + flambeau-quant's BlockQ2K.
+typedef struct {
+    uint8_t   scales[QK_K / 16];           // 16 × packed 4-bit (scale, min)
+    uint8_t   qs[QK_K / 4];                // 64 bytes, 4 elements / byte
+    fb_fp16_t d;                           // super-block scale
+    fb_fp16_t dmin;                        // super-block min scale
+} flambeau_block_q2_K;
+static_assert(sizeof(flambeau_block_q2_K) == QK_K / 16 + QK_K / 4 + 4,
+              "block_q2_K size");
+
+// Q3_K — 3-bit K-quant, super-block of 256 elements. Byte-identical to
+// ggml-common.h block_q3_K + flambeau-quant's BlockQ3K. High bit lives in
+// `hmask`; low 2 bits in `qs`; signed 6-bit scales packed in 12 bytes.
+typedef struct {
+    uint8_t   hmask[QK_K / 8];             // 32 bytes — 1 bit per element
+    uint8_t   qs[QK_K / 4];                // 64 bytes — 2 bits per element
+    uint8_t   scales[12];                  // 16 × signed 6-bit scales
+    fb_fp16_t d;                           // super-block scale
+} flambeau_block_q3_K;
+static_assert(sizeof(flambeau_block_q3_K) == QK_K / 8 + QK_K / 4 + 12 + 2,
+              "block_q3_K size");
+
 // Q4_K — 4-bit K-quant, super-block of 256 elements split into 8 sub-blocks
 // of 32. Byte-identical to ggml-common.h block_q4_K and to flambeau-quant's
 // BlockQ4K.
@@ -243,3 +266,14 @@ typedef struct {
 static_assert(sizeof(flambeau_block_q6_K) ==
                   QK_K / 2 + QK_K / 4 + QK_K / 16 + 2,
               "block_q6_K size");
+
+// Q8_K — 8-bit K-quant, super-block of 256 elements. Activation-side
+// quant (ggml uses it for K · Q dot products). Byte-identical to
+// ggml-common.h block_q8_K + flambeau-quant's BlockQ8K.
+typedef struct {
+    float   d;                             // super-block scale (F32)
+    int8_t  qs[QK_K];                      // 256 signed quants
+    int16_t bsums[QK_K / 16];              // per-16-elem sum of qs (precomputed)
+} flambeau_block_q8_K;
+static_assert(sizeof(flambeau_block_q8_K) == 4 + QK_K + QK_K / 16 * 2,
+              "block_q8_K size");
