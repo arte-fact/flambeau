@@ -531,6 +531,14 @@ impl    = "indexed_moe_mmvq_q5_0_gfx906"
 cert    = "certs/hip/gfx906/indexed_moe_mmvq_q5_0_gfx906.json"
 notes   = "Q5_0 indexed-MoE MMVQ. Q4_0 indexed kernel structure with the 5th-bit ladder from mmvq_q5_0: per block, (q5 − 16)·y = nibble·y + 16·bit·y − 16·s_y. 256 threads/block, grid (n_rows, n_tokens·top_k)."
 
+[[indexed_moe_mmvq]]
+dtype   = "Q5_1"
+dtype_q = "Q8_1"
+shape   = { m = "any", k = "any", n = "any" }
+impl    = "indexed_moe_mmvq_q5_1_gfx906"
+cert    = "certs/hip/gfx906/indexed_moe_mmvq_q5_1_gfx906.json"
+notes   = "Q5_1 indexed-MoE MMVQ. Q5_0 indexed structure with the Q4_1-style m·s_y correction: per block, d·d_y·(sumi_nib + 16·sumi_bit) + m·s_y/4. 256 threads/block."
+
 [[moe_combine]]
 dtype   = "F16"
 dtype_q = "F16"

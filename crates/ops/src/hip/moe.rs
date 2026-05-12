@@ -336,6 +336,49 @@ pub fn indexed_moe_mmvq_q5_0(
     Ok(())
 }
 
+/// Q5_1 indexed-MoE MMVQ. Q5_0 indexed structure with the Q4_1-style
+/// `m·s_y` correction (Q5_1 is affine: y = d·q5 + m).
+#[allow(clippy::too_many_arguments)]
+pub fn indexed_moe_mmvq_q5_1(
+    reg: &OpsRegistry,
+    stream: &HipStream,
+    w: DevicePtr,
+    y: DevicePtr,
+    expert_ids: DevicePtr,
+    dst: DevicePtr,
+    n_rows: usize,
+    n_tokens: usize,
+    top_k: usize,
+    n_blocks_per_row: usize,
+) -> Result<()> {
+    let module = reg.expect_module("indexed_moe_mmvq_q5_1")?;
+    let kernel = module.kernel("flambeau_indexed_moe_mmvq_q5_1_q8_1")?;
+    let n_rows_i = n_rows as i32;
+    let n_tokens_i = n_tokens as i32;
+    let top_k_i = top_k as i32;
+    let nb_i = n_blocks_per_row as i32;
+    let w_ptr: u64 = w.as_usize() as u64;
+    let y_ptr: u64 = y.as_usize() as u64;
+    let e_ptr: u64 = expert_ids.as_usize() as u64;
+    let d_ptr: u64 = dst.as_usize() as u64;
+    let mut args = KernelArgs::new();
+    args.push(&w_ptr);
+    args.push(&y_ptr);
+    args.push(&e_ptr);
+    args.push(&d_ptr);
+    args.push(&n_rows_i);
+    args.push(&n_tokens_i);
+    args.push(&top_k_i);
+    args.push(&nb_i);
+    let cfg = LaunchCfg {
+        grid: (n_rows as u32, (n_tokens * top_k) as u32, 1),
+        block: (256, 1, 1),
+        shared_bytes: 0,
+    };
+    unsafe { kernel.launch(stream, cfg, args)? };
+    Ok(())
+}
+
 /// B6 / 5.a — Q4_1 indexed-MoE MMVQ. Unblocks Qwen-published
 /// Qwen3.6-35B-A3B-Q4_0 whose `ffn_down_exps` are Q4_1 (gate/up are Q4_0,
 /// down is Q4_1). Same contract as `indexed_moe_mmvq_q4_0`; per-block
