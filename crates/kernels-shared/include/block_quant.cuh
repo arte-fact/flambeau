@@ -241,6 +241,39 @@ __device__ __forceinline__ void flambeau_q4k_scale_min(
     }
 }
 
+// Byte-wise u32 load. Q3_K block size is 110 B (non-multiple-of-4), so
+// scales[], qs[], and hmask[] alternate 4-byte / 2-byte alignment across
+// consecutive blocks; a `(uint32_t*)` cast there is unaligned UB on the
+// 2-byte-aligned half (empirically 18-137% rel-err in Q3_K MMVQ before fix).
+__device__ __forceinline__ uint32_t flambeau_load_u32_unaligned(const uint8_t* p) {
+    return (uint32_t) p[0]
+         | ((uint32_t) p[1] << 8)
+         | ((uint32_t) p[2] << 16)
+         | ((uint32_t) p[3] << 24);
+}
+
+// Unpack the packed 6-bit signed scales (12 bytes) into 16 raw bytes in
+// [0, 63]. Caller applies the -32 bias at use time. Uses byte-wise loads
+// to handle Q3_K's misaligned scales[] across blocks.
+__device__ __forceinline__ void flambeau_q3k_unpack_scales(
+    const uint8_t* __restrict__ scales, int8_t out[16]) {
+    const uint32_t k1 = 0x0303'0303u;
+    const uint32_t k2 = 0x0f0f'0f0fu;
+    uint32_t aux[4];
+    aux[0] = flambeau_load_u32_unaligned(scales);
+    aux[1] = flambeau_load_u32_unaligned(scales + 4);
+    const uint32_t tmp = flambeau_load_u32_unaligned(scales + 8);
+    aux[2] = ((aux[0] >> 4) & k2) | (((tmp >> 4) & k1) << 4);
+    aux[3] = ((aux[1] >> 4) & k2) | (((tmp >> 6) & k1) << 4);
+    aux[0] = (aux[0] & k2) | ((tmp & k1) << 4);
+    aux[1] = (aux[1] & k2) | (((tmp >> 2) & k1) << 4);
+    const uint8_t* bytes = (const uint8_t*) aux;
+    #pragma unroll
+    for (int i = 0; i < 16; ++i) {
+        out[i] = (int8_t) bytes[i];
+    }
+}
+
 // Q5_K — 5-bit K-quant: 4-bit low nibble in `qs` + 1 high bit in `qh`.
 // Byte layout identical to flambeau-quant's BlockQ5K.
 typedef struct {

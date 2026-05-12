@@ -27,34 +27,6 @@ static __device__ __forceinline__ int dp4a(int a, int b, int c) {
     return __builtin_amdgcn_sdot4(a, b, c, false);
 }
 
-static __device__ __forceinline__ uint32_t q3k_t8gu_load_u32(const uint8_t* p) {
-    return (uint32_t) p[0]
-         | ((uint32_t) p[1] << 8)
-         | ((uint32_t) p[2] << 16)
-         | ((uint32_t) p[3] << 24);
-}
-
-static __device__ __forceinline__ void q3k_t8gu_unpack_scales(
-    const uint8_t* __restrict__ scales,
-    int8_t out[16]
-) {
-    const uint32_t k1 = 0x0303'0303u;
-    const uint32_t k2 = 0x0f0f'0f0fu;
-    uint32_t aux[4];
-    aux[0] = q3k_t8gu_load_u32(scales);
-    aux[1] = q3k_t8gu_load_u32(scales + 4);
-    const uint32_t tmp = q3k_t8gu_load_u32(scales + 8);
-    aux[2] = ((aux[0] >> 4) & k2) | (((tmp >> 4) & k1) << 4);
-    aux[3] = ((aux[1] >> 4) & k2) | (((tmp >> 6) & k1) << 4);
-    aux[0] = (aux[0] & k2) | ((tmp & k1) << 4);
-    aux[1] = (aux[1] & k2) | (((tmp >> 2) & k1) << 4);
-    const uint8_t* bytes = (const uint8_t*) aux;
-    #pragma unroll
-    for (int i = 0; i < 16; ++i) {
-        out[i] = (int8_t) bytes[i];
-    }
-}
-
 static __device__ __forceinline__ void q3k_t8gu_decode_sub(
     bool row_ok,
     const flambeau_block_q3_K* __restrict__ bx,
@@ -73,8 +45,8 @@ static __device__ __forceinline__ void q3k_t8gu_decode_sub(
     const uint8_t* hm_base = bx->hmask;
     #pragma unroll
     for (int j = 0; j < 8; ++j) {
-        const uint32_t ql_word = q3k_t8gu_load_u32(qs_base + j * 4);
-        const uint32_t qh_word = q3k_t8gu_load_u32(hm_base + j * 4);
+        const uint32_t ql_word = flambeau_load_u32_unaligned(qs_base + j * 4);
+        const uint32_t qh_word = flambeau_load_u32_unaligned(hm_base + j * 4);
         const int raw2 = (int) ((ql_word >> shift) & 0x03030303u);
         const int hi   = (int) (((qh_word >> hmask_bit_pos) << 2) & 0x04040404u);
         v[j] = raw2 | hi;
@@ -144,8 +116,8 @@ void flambeau_indexed_moe_mmq_q3_k_gate_up_tile8_dp4a_q8_1(
             ubx = &up_w[w_row_off];
             g_d = (float) gbx->d;
             u_d = (float) ubx->d;
-            q3k_t8gu_unpack_scales(gbx->scales, g_sc);
-            q3k_t8gu_unpack_scales(ubx->scales, u_sc);
+            flambeau_q3k_unpack_scales(gbx->scales, g_sc);
+            flambeau_q3k_unpack_scales(ubx->scales, u_sc);
         }
 
         #pragma unroll

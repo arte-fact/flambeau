@@ -43,12 +43,8 @@ pub fn qmatmul(
     n: usize,
     dtype_weight: QDtype,
 ) -> Result<()> {
-    // 1.b — F16 weight short-circuits the dispatch table. Row-by-row
-    // MMVQ for M rows covers both the L=1 warmup prefill (which enters via
-    // qmatmul rather than mmvq) and the L>1 prefill path until 1.d
-    // lands a proper F16 MMQ. Per-row cost is ~30 µs roofline; at L=1024 ×
-    // 117 F16 matmuls that's 3.6 s of F16 MMVQ — prefill-slow but
-    // correct, matching V2's "make it load first" pattern.
+    // F16 short-circuits the dispatch table: there is no F16 MMQ, so all
+    // M (including L>1 prefill) routes through per-row MMVQ.
     if dtype_weight == QDtype::F16 {
         let _ = act_q8_1_mmq;
         // 9.a — tile-M kernel at m >= 8: each block handles 64 output
@@ -826,7 +822,6 @@ pub fn mmvq(
     k: usize,
     dtype_weight: QDtype,
 ) -> Result<()> {
-    // 1.b — F16 weight × Q8_1 activation bypasses the dispatch table.
     if dtype_weight == QDtype::F16 {
         return mmvq_f16_launch(reg, stream, weights, act_q8_1, dst, n_rows, k);
     }
@@ -995,7 +990,7 @@ fn mmq_f16_launch(
     Ok(())
 }
 
-/// 1.b — direct launch for the F16-weight × Q8_1-activation MMVQ.
+/// Direct launch for the F16-weight × Q8_1-activation MMVQ.
 /// Kernel stem `mmvq_f16_q8_1`, block = 256 threads, grid = n_rows.
 fn mmvq_f16_launch(
     reg: &OpsRegistry,
@@ -1694,12 +1689,9 @@ fn block_elems(dtype: QDtype) -> usize {
     match dtype {
         QDtype::Q8_0 | QDtype::Q8_1 | QDtype::Q4_0 | QDtype::Q4_1 | QDtype::Q5_0 | QDtype::Q5_1 => QK8_0,
         QDtype::Q2_K | QDtype::Q3_K | QDtype::Q4_K | QDtype::Q5_K | QDtype::Q6_K | QDtype::Q8_K => QK_K,
-        // 1.b — F16 is "1 element per block" in terms of the quant-block
-        // unit used for `n_blocks_per_row = k / block_elems`. The F16 MMVQ
-        // kernel multiplies F16 weight by Q8_1 activation (QK8_1=32), so the
-        // inner loop iterates over Q8_1 blocks — the weight side has no blocks,
-        // but `n_blocks_per_row` reflects the Q8_1 activation stride. Return 32
-        // to match the caller's `k / 32` computation used for the Q8_1 side.
+        // F16 has no native block; return the Q8_1 stride (QK8_1) so the
+        // caller's `n_blocks_per_row = k / block_elems` matches the
+        // activation side, which is what the F16 MMVQ kernel iterates over.
         QDtype::F16 => 32,
         other => panic!("qmatmul weight dtype {other:?} not supported"),
     }

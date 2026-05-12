@@ -22,34 +22,6 @@
 #include "block_quant.cuh"
 #include "gfx906.cuh"
 
-static __device__ __forceinline__ uint32_t q3k_r2_load_u32_unaligned(const uint8_t* p) {
-    return (uint32_t) p[0]
-         | ((uint32_t) p[1] << 8)
-         | ((uint32_t) p[2] << 16)
-         | ((uint32_t) p[3] << 24);
-}
-
-static __device__ __forceinline__ void q3k_r2_unpack_scales(
-    const uint8_t* __restrict__ scales,
-    int8_t out[16]
-) {
-    const uint32_t k1 = 0x0303'0303u;
-    const uint32_t k2 = 0x0f0f'0f0fu;
-    uint32_t aux[4];
-    aux[0] = q3k_r2_load_u32_unaligned(scales);
-    aux[1] = q3k_r2_load_u32_unaligned(scales + 4);
-    const uint32_t tmp = q3k_r2_load_u32_unaligned(scales + 8);
-    aux[2] = ((aux[0] >> 4) & k2) | (((tmp >> 4) & k1) << 4);
-    aux[3] = ((aux[1] >> 4) & k2) | (((tmp >> 6) & k1) << 4);
-    aux[0] = (aux[0] & k2) | ((tmp & k1) << 4);
-    aux[1] = (aux[1] & k2) | (((tmp >> 2) & k1) << 4);
-    const uint8_t* bytes = (const uint8_t*) aux;
-    #pragma unroll
-    for (int i = 0; i < 16; ++i) {
-        out[i] = (int8_t) bytes[i];
-    }
-}
-
 extern "C" __global__ void flambeau_mmvq_q3_k_r2_q8_1(
     const flambeau_block_q3_K* __restrict__ x,
     const flambeau_block_q8_1* __restrict__ y,
@@ -73,7 +45,7 @@ extern "C" __global__ void flambeau_mmvq_q3_k_r2_q8_1(
         const flambeau_block_q3_K* bk = xrow + b;
         const float d_all = (float) bk->d;
         int8_t scales[16];
-        q3k_r2_unpack_scales(bk->scales, scales);
+        flambeau_q3k_unpack_scales(bk->scales, scales);
 
         const flambeau_block_q8_1* y_sb = y + (size_t) b * 8;
 

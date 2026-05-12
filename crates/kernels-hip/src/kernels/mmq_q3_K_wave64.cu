@@ -19,8 +19,8 @@
 //
 // Q3_K block stride is 110 B (not multiple of 4), so hmask[], qs[] and
 // scales[] alternate 4-byte / 2-byte alignment across consecutive blocks.
-// All multi-byte reads go through `load_u32_unaligned` to stay correct on
-// the 2-byte-aligned half.
+// All multi-byte reads go through `flambeau_load_u32_unaligned` to stay
+// correct on the 2-byte-aligned half.
 
 #include "block_quant.cuh"
 #include <hip/hip_runtime.h>
@@ -42,34 +42,6 @@
 
 static __device__ __forceinline__ int dp4a(int a, int b, int c) {
     return __builtin_amdgcn_sdot4(a, b, c, false);
-}
-
-static __device__ __forceinline__ uint32_t q3k_mmq_load_u32(const uint8_t* p) {
-    return (uint32_t) p[0]
-         | ((uint32_t) p[1] << 8)
-         | ((uint32_t) p[2] << 16)
-         | ((uint32_t) p[3] << 24);
-}
-
-static __device__ __forceinline__ void q3k_mmq_unpack_scales(
-    const uint8_t* __restrict__ scales,
-    int8_t out[16]
-) {
-    const uint32_t k1 = 0x0303'0303u;
-    const uint32_t k2 = 0x0f0f'0f0fu;
-    uint32_t aux[4];
-    aux[0] = q3k_mmq_load_u32(scales);
-    aux[1] = q3k_mmq_load_u32(scales + 4);
-    const uint32_t tmp = q3k_mmq_load_u32(scales + 8);
-    aux[2] = ((aux[0] >> 4) & k2) | (((tmp >> 4) & k1) << 4);
-    aux[3] = ((aux[1] >> 4) & k2) | (((tmp >> 6) & k1) << 4);
-    aux[0] = (aux[0] & k2) | ((tmp & k1) << 4);
-    aux[1] = (aux[1] & k2) | (((tmp >> 2) & k1) << 4);
-    const uint8_t* bytes = (const uint8_t*) aux;
-    #pragma unroll
-    for (int i = 0; i < 16; ++i) {
-        out[i] = (int8_t) bytes[i];
-    }
 }
 
 extern "C" __global__ __launch_bounds__(WARP_SIZE, 1)
@@ -108,7 +80,7 @@ void flambeau_mmq_q3_K_wave64_q8_1(
         if (row_ok) {
             bx = &x[(size_t) row * blocks_per_row_x + ib];
             super_d = (float) bx->d;
-            q3k_mmq_unpack_scales(bx->scales, sc_buf);
+            flambeau_q3k_unpack_scales(bx->scales, sc_buf);
         }
 
         #pragma unroll
@@ -124,8 +96,8 @@ void flambeau_mmq_q3_K_wave64_q8_1(
                 const uint8_t* hm_base = bx->hmask;
                 #pragma unroll
                 for (int j = 0; j < 8; ++j) {
-                    const uint32_t ql_word = q3k_mmq_load_u32(qs_base + j * 4);
-                    const uint32_t qh_word = q3k_mmq_load_u32(hm_base + j * 4);
+                    const uint32_t ql_word = flambeau_load_u32_unaligned(qs_base + j * 4);
+                    const uint32_t qh_word = flambeau_load_u32_unaligned(hm_base + j * 4);
                     const int raw2 = (int) ((ql_word >> shift) & 0x03030303u);
                     const int hi   = (int) (((qh_word >> hmask_bit_pos) << 2) & 0x04040404u);
                     v[j] = raw2 | hi;
