@@ -151,6 +151,10 @@ class ModelSpec:
 
 MODELS = [
     ModelSpec("qwen35_9B_q4_1",  "/artefact/models/Qwen3.5-9B-Q4_1.gguf",       16384, 512),
+    # Qwen3.5-9B re-quantised from Q4_1 → Q3_K_S via llama-quantize
+    # (`--allow-requantize` Q3_K_S). Exists to exercise the Q3_K dispatch
+    # rows on a model that fits a single GPU; main rejects this dtype.
+    ModelSpec("qwen35_9B_q3_k_s", "/artefact/models/Qwen3.5-9B-Q3_K_S.gguf",    16384, 512),
     # 27B context dropped from 16384 to 4096 so PP2 (2 GPUs × 32 layers
     # per rank × 8 inflight slots) fits in VRAM. Long-prompt
     # characterisation is still meaningful at ctx=4096.
