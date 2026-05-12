@@ -261,6 +261,26 @@ pub const QMATMUL_GFX906: &[KernelDescriptor] = &[
         m_range: (128, usize::MAX),
         cert_rel_path: "certs/hip/gfx906/qmatmul_q8_K_mmq_wave64_gfx906.json",
     },
+    KernelDescriptor {
+        op_name: "QMatMul",
+        impl_id: "qmatmul_q2_K_mmq_wave64_gfx906",
+        backend: "hip",
+        arch: "gfx906",
+        dtype_weight: QDtype::Q2_K,
+        dtype_activation: QDtype::Q8_1,
+        m_range: (128, usize::MAX),
+        cert_rel_path: "certs/hip/gfx906/qmatmul_q2_K_mmq_wave64_gfx906.json",
+    },
+    KernelDescriptor {
+        op_name: "QMatMul",
+        impl_id: "qmatmul_q3_K_mmq_wave64_gfx906",
+        backend: "hip",
+        arch: "gfx906",
+        dtype_weight: QDtype::Q3_K,
+        dtype_activation: QDtype::Q8_1,
+        m_range: (128, usize::MAX),
+        cert_rel_path: "certs/hip/gfx906/qmatmul_q3_K_mmq_wave64_gfx906.json",
+    },
     // MMQ oracle covers the mid-M band (4..128) for Q8_0.
     KernelDescriptor {
         op_name: "QMatMul",

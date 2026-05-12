@@ -211,6 +211,22 @@ impl    = "qmatmul_q8_K_mmq_wave64_gfx906"
 cert    = "certs/hip/gfx906/qmatmul_q8_K_mmq_wave64_gfx906.json"
 notes   = "Q8_K MMQ wave64. Simplest K-quant MMQ: f32 d × i8 qs[256], no nibble unpack, no sub-block scale, no min. Per super-block accumulates Σ_sub d_y[sub] * dp4a(qs_sub, y_sub) then scales once by d_x. MMQ_Y=64, TILE_N=8."
 
+[[qmatmul_mmq]]
+dtype   = "Q2_K"
+dtype_q = "Q8_1"
+shape   = { m = ">=128", k = "any", n = "any" }
+impl    = "qmatmul_q2_K_mmq_wave64_gfx906"
+cert    = "certs/hip/gfx906/qmatmul_q2_K_mmq_wave64_gfx906.json"
+notes   = "Q2_K MMQ wave64. Affine quant: y = d*scale*raw - dmin*min. 4-bit (scale,min) packed per 16-element sub-block. Standard wave64/MMQ_Y=64/TILE_N=8/DP4A with (sc*dot - m*Σy) per Q8_1 sub-block."
+
+[[qmatmul_mmq]]
+dtype   = "Q3_K"
+dtype_q = "Q8_1"
+shape   = { m = ">=128", k = "any", n = "any" }
+impl    = "qmatmul_q3_K_mmq_wave64_gfx906"
+cert    = "certs/hip/gfx906/qmatmul_q3_K_mmq_wave64_gfx906.json"
+notes   = "Q3_K MMQ wave64. Per element: q = (raw_2bit + 4*hmask_bit) - 4; signed 6-bit scale - 32. Bias correction: (raw_4bit - 4)·y = raw_4bit·y - 4·Σy. Byte-wise u32 loads on qs/hmask/scales — Q3_K is 110 B and alternates 4-byte/2-byte alignment across blocks."
+
 # ----- RMSNorm (V1.6 fused decode path) -------------------------------------
 
 [[rmsnorm]]

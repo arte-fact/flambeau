@@ -1490,6 +1490,22 @@ impl Recipe {
                 rows_per_block: 0,
                 mmq_tile: (64, 8),
             },
+            "qmatmul_q2_K_mmq_wave64_gfx906" => Self {
+                kind: RecipeKind::MmqWave64,
+                stem: "mmq_q2_K_wave64",
+                entry: "flambeau_mmq_q2_K_wave64_q8_1",
+                threads: 64,
+                rows_per_block: 0,
+                mmq_tile: (64, 8),
+            },
+            "qmatmul_q3_K_mmq_wave64_gfx906" => Self {
+                kind: RecipeKind::MmqWave64,
+                stem: "mmq_q3_K_wave64",
+                entry: "flambeau_mmq_q3_K_wave64_q8_1",
+                threads: 64,
+                rows_per_block: 0,
+                mmq_tile: (64, 8),
+            },
             other => bail!("no launch recipe registered for impl_id {other}"),
         })
     }

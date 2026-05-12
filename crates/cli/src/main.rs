@@ -667,6 +667,8 @@ fn sweep(arch: &str, op: Option<&str>, dtype: &str) -> Result<()> {
                     "Q6_K" | "Q6_K_4warp" => (vec![MmqDtype::Q6K4Warp], SweepSpec::v1_4_prefill),
                     "Q6_K_wave64" => (vec![MmqDtype::Q6KWave64], SweepSpec::v1_4_prefill),
                     "Q8_K" | "Q8_K_wave64" => (vec![MmqDtype::Q8KWave64], SweepSpec::v1_4_prefill),
+                    "Q2_K" | "Q2_K_wave64" => (vec![MmqDtype::Q2KWave64], SweepSpec::v1_4_prefill),
+                    "Q3_K" | "Q3_K_wave64" => (vec![MmqDtype::Q3KWave64], SweepSpec::v1_4_prefill),
                     "all" => (
                         vec![
                             MmqDtype::Q8_0Oracle,
@@ -685,6 +687,8 @@ fn sweep(arch: &str, op: Option<&str>, dtype: &str) -> Result<()> {
                             MmqDtype::Q6K4Warp,
                             MmqDtype::Q6KWave64,
                             MmqDtype::Q8KWave64,
+                            MmqDtype::Q2KWave64,
+                            MmqDtype::Q3KWave64,
                         ],
                         // Oracle uses its small grid, 4warp uses the prefill grid.
                         |d| match d {
@@ -704,7 +708,9 @@ fn sweep(arch: &str, op: Option<&str>, dtype: &str) -> Result<()> {
                             | MmqDtype::Q5KWave64
                             | MmqDtype::Q6K4Warp
                             | MmqDtype::Q6KWave64
-                            | MmqDtype::Q8KWave64 => SweepSpec::v1_4_prefill(d),
+                            | MmqDtype::Q8KWave64
+                            | MmqDtype::Q2KWave64
+                            | MmqDtype::Q3KWave64 => SweepSpec::v1_4_prefill(d),
                         },
                     ),
                     other => anyhow::bail!("unknown MMQ dtype {other}"),

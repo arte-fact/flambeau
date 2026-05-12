@@ -27,8 +27,8 @@ use flambeau_backend_hip::{
 use flambeau_core::{CopyDirection, Device, DevicePtr, Stream};
 use flambeau_kernels_hip as kernels;
 use flambeau_quant::{
-    dequantize_into, BlockQ4_0, BlockQ4_1, BlockQ4K, BlockQ5_0, BlockQ5_1, BlockQ5K, BlockQ6K, BlockQ8K,
-    BlockQ8_0, BlockQ8_1, GgmlDType, QK4_1, QK5_1, QK8_0, QK_K,
+    dequantize_into, BlockQ2K, BlockQ3K, BlockQ4_0, BlockQ4_1, BlockQ4K, BlockQ5_0, BlockQ5_1, BlockQ5K,
+    BlockQ6K, BlockQ8K, BlockQ8_0, BlockQ8_1, GgmlDType, QK4_1, QK5_1, QK8_0, QK_K,
 };
 use half::f16;
 
@@ -86,6 +86,10 @@ pub enum Dtype {
     /// Wave64 Q8_K MMQ. MMQ_Y=64, TILE_N=8, 64 threads. DP4A inner.
     /// Simplest K-quant MMQ: no nibble unpack, no sub-block scale, no min.
     Q8KWave64,
+    /// Wave64 Q2_K MMQ. Affine quant; bias correction via -m·Σy.
+    Q2KWave64,
+    /// Wave64 Q3_K MMQ. Byte-wise u32 loads on qs/hmask/scales.
+    Q3KWave64,
 }
 
 /// Shape of the output tile a single thread block produces for `dtype`.
@@ -110,6 +114,8 @@ fn tile_shape(dtype: Dtype) -> (u32, u32) {
         Dtype::Q6K4Warp => (16, 8),    // MMQ_Y × MMQ_X (Q6_K same tile as Q4_K)
         Dtype::Q6KWave64 => (64, 8),   // MMQ_Y × TILE_N — wave64 MMQ for Q6_K ()
         Dtype::Q8KWave64 => (64, 8),
+        Dtype::Q2KWave64 => (64, 8),
+        Dtype::Q3KWave64 => (64, 8),
     }
 }
 
@@ -128,6 +134,8 @@ impl Dtype {
             Dtype::Q5KWave64 => "Q5_K",
             Dtype::Q6K4Warp | Dtype::Q6KWave64 => "Q6_K",
             Dtype::Q8KWave64 => "Q8_K",
+            Dtype::Q2KWave64 => "Q2_K",
+            Dtype::Q3KWave64 => "Q3_K",
         }
     }
 
@@ -145,6 +153,8 @@ impl Dtype {
             Dtype::Q5KWave64 => GgmlDType::Q5K,
             Dtype::Q6K4Warp | Dtype::Q6KWave64 => GgmlDType::Q6K,
             Dtype::Q8KWave64 => GgmlDType::Q8K,
+            Dtype::Q2KWave64 => GgmlDType::Q2K,
+            Dtype::Q3KWave64 => GgmlDType::Q3K,
         }
     }
 
@@ -167,6 +177,8 @@ impl Dtype {
             Dtype::Q6K4Warp => "qmatmul_q6_K_mmq_4warp_lds_gfx906",
             Dtype::Q6KWave64 => "qmatmul_q6_K_mmq_wave64_gfx906",
             Dtype::Q8KWave64 => "qmatmul_q8_K_mmq_wave64_gfx906",
+            Dtype::Q2KWave64 => "qmatmul_q2_K_mmq_wave64_gfx906",
+            Dtype::Q3KWave64 => "qmatmul_q3_K_mmq_wave64_gfx906",
         }
     }
 
@@ -189,6 +201,8 @@ impl Dtype {
             Dtype::Q6K4Warp => "mmq_q6_K_4warp",
             Dtype::Q6KWave64 => "mmq_q6_K_wave64",
             Dtype::Q8KWave64 => "mmq_q8_K_wave64",
+            Dtype::Q2KWave64 => "mmq_q2_K_wave64",
+            Dtype::Q3KWave64 => "mmq_q3_K_wave64",
         }
     }
 
@@ -211,6 +225,8 @@ impl Dtype {
             Dtype::Q6K4Warp => "flambeau_mmq_q6_K_4warp_q8_1",
             Dtype::Q6KWave64 => "flambeau_mmq_q6_K_wave64_q8_1",
             Dtype::Q8KWave64 => "flambeau_mmq_q8_K_wave64_q8_1",
+            Dtype::Q2KWave64 => "flambeau_mmq_q2_K_wave64_q8_1",
+            Dtype::Q3KWave64 => "flambeau_mmq_q3_K_wave64_q8_1",
         }
     }
 
@@ -220,7 +236,7 @@ impl Dtype {
             Dtype::Q8_0Wave64 | Dtype::Q8_0Wave64Tile16 | Dtype::Q4_1Wave64 | Dtype::Q4_0Wave64 | Dtype::Q5_0Wave64 | Dtype::Q5_1Wave64 => 64,
             Dtype::Q4K4Warp | Dtype::Q6K4Warp => 128,
             Dtype::Q4KTurbo => 256,  // 4 warps × 64
-            Dtype::Q4KWave64 | Dtype::Q5KWave64 | Dtype::Q6KWave64 | Dtype::Q8KWave64 => 64,
+            Dtype::Q4KWave64 | Dtype::Q5KWave64 | Dtype::Q6KWave64 | Dtype::Q8KWave64 | Dtype::Q2KWave64 | Dtype::Q3KWave64 => 64,
         }
     }
 
@@ -242,6 +258,8 @@ impl Dtype {
             Dtype::Q5KWave64 => std::mem::size_of::<BlockQ5K>(),
             Dtype::Q6K4Warp | Dtype::Q6KWave64 => std::mem::size_of::<BlockQ6K>(),
             Dtype::Q8KWave64 => std::mem::size_of::<BlockQ8K>(),
+            Dtype::Q2KWave64 => std::mem::size_of::<BlockQ2K>(),
+            Dtype::Q3KWave64 => std::mem::size_of::<BlockQ3K>(),
         }
     }
 
@@ -258,7 +276,7 @@ impl Dtype {
             Dtype::Q5_1Wave64 => "wave64",
             Dtype::Q4K4Warp => "4warp_lds",
             Dtype::Q4KTurbo => "turbo",
-            Dtype::Q4KWave64 | Dtype::Q5KWave64 | Dtype::Q6KWave64 | Dtype::Q8KWave64 | Dtype::Q8_0Wave64 => "wave64",
+            Dtype::Q4KWave64 | Dtype::Q5KWave64 | Dtype::Q6KWave64 | Dtype::Q8KWave64 | Dtype::Q2KWave64 | Dtype::Q3KWave64 | Dtype::Q8_0Wave64 => "wave64",
             Dtype::Q8_0Wave64Tile16 => "wave64_tile16",
             Dtype::Q6K4Warp => "4warp_lds",
         }
@@ -367,7 +385,7 @@ pub fn run_sweep(spec: &SweepSpec, repo_root: &Path) -> Result<Cert> {
         dtype_weight: spec.dtype.name().to_string(),
         dtype_activation: "Q8_1".to_string(),
         tolerance_formula: match spec.dtype {
-            Dtype::Q4KWave64 | Dtype::Q5KWave64 | Dtype::Q6KWave64 | Dtype::Q8KWave64 => "|err| <= 5e-2 * max(|ref|, sqrt(k))".to_string(),
+            Dtype::Q4KWave64 | Dtype::Q5KWave64 | Dtype::Q6KWave64 | Dtype::Q8KWave64 | Dtype::Q2KWave64 | Dtype::Q3KWave64 => "|err| <= 5e-2 * max(|ref|, sqrt(k))".to_string(),
             _ => "|err| <= 3e-2 * max(|ref|, sqrt(k))".to_string(),
         },
         results,
@@ -544,7 +562,7 @@ fn run_shape(
                 shared_bytes,
             };
             unsafe { k_mmq.launch(stream, cfg, args)? };
-        } else if dtype == Dtype::Q4KWave64 || dtype == Dtype::Q5KWave64 || dtype == Dtype::Q6KWave64 || dtype == Dtype::Q8KWave64 || dtype == Dtype::Q8_0Wave64 || dtype == Dtype::Q8_0Wave64Tile16 || dtype == Dtype::Q4_1Wave64 || dtype == Dtype::Q4_0Wave64 || dtype == Dtype::Q5_0Wave64 || dtype == Dtype::Q5_1Wave64 {
+        } else if dtype == Dtype::Q4KWave64 || dtype == Dtype::Q5KWave64 || dtype == Dtype::Q6KWave64 || dtype == Dtype::Q8KWave64 || dtype == Dtype::Q2KWave64 || dtype == Dtype::Q3KWave64 || dtype == Dtype::Q8_0Wave64 || dtype == Dtype::Q8_0Wave64Tile16 || dtype == Dtype::Q4_1Wave64 || dtype == Dtype::Q4_0Wave64 || dtype == Dtype::Q5_0Wave64 || dtype == Dtype::Q5_1Wave64 {
             // flambeau_mmq_{q4_K,q5_K,q6_K,q8_0}_wave64_q8_1: 8 scalar args + 3 ptrs, wave64
             // block. Args: vx, vy, dst, ncols_x=K, nrows_x=N, ncols_y=M,
             // nrows_y=K, nrows_dst=N.
@@ -715,6 +733,24 @@ fn tame_weight_scales(dtype: Dtype, mut raw: Vec<u8>) -> Vec<u8> {
                 // Q8_K: d(f32) at offset 0, qs[256] i8, bsums[16] i16. Tame d.
                 let d = (block[0] as f32 / 255.0) * 0.02 + 0.002;
                 block[0..4].copy_from_slice(&d.to_le_bytes());
+            }
+            Dtype::Q2KWave64 => {
+                // Q2_K: scales[16] + qs[64] + d (f16 @ 80) + dmin (f16 @ 82).
+                let d = f16::from_f32((block[80] as f32 / 255.0) * 0.05 + 0.005);
+                let dmin = f16::from_f32((block[81] as f32 / 255.0) * 0.02);
+                block[80..82].copy_from_slice(&d.to_bits().to_le_bytes());
+                block[82..84].copy_from_slice(&dmin.to_bits().to_le_bytes());
+            }
+            Dtype::Q3KWave64 => {
+                // Q3_K: hmask[32] + qs[64] + scales[12] + d (f16 @ 108).
+                // Scales bytes are signed 6-bit packed; mod-32 keeps them
+                // in-range. d tamed small.
+                let d_off = QK_K / 8 + QK_K / 4 + 12;
+                for s in &mut block[(QK_K / 8 + QK_K / 4)..(QK_K / 8 + QK_K / 4 + 12)] {
+                    *s = (*s as i32 % 32) as u8;
+                }
+                let d = f16::from_f32((block[d_off] as f32 / 255.0) * 0.05 + 0.005);
+                block[d_off..d_off + 2].copy_from_slice(&d.to_bits().to_le_bytes());
             }
         }
     }
