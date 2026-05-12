@@ -969,6 +969,10 @@ fn upload_tp_with_layout(
             | GgmlDType::Iq3Xxs
             | GgmlDType::Iq3S
             | GgmlDType::Iq2Xxs
+            | GgmlDType::Iq2Xs
+            | GgmlDType::Iq2S
+            | GgmlDType::Iq1S
+            | GgmlDType::Iq1M
     ) {
         let layout = configured;
         let (tensor, n) = upload_tp_via_dequant_to_q8_0(

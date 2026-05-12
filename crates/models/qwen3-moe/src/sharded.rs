@@ -522,6 +522,10 @@ fn upload_one_inner(
             | GgmlDType::Iq3Xxs
             | GgmlDType::Iq3S
             | GgmlDType::Iq2Xxs
+            | GgmlDType::Iq2Xs
+            | GgmlDType::Iq2S
+            | GgmlDType::Iq1S
+            | GgmlDType::Iq1M
     ) || (r.dtype == GgmlDType::Q4_1 && r.name.contains("_exps"));
     if needs_q8_0_convert {
         return upload_via_dequant_to_q8_0(file, r, device);
