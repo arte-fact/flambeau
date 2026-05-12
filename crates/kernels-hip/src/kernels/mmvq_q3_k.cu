@@ -26,17 +26,26 @@
 
 #define MMVQ_Q3K_THREADS 64
 
+static __device__ __forceinline__ uint32_t load_u32_unaligned(const uint8_t* p) {
+    return (uint32_t) p[0]
+         | ((uint32_t) p[1] << 8)
+         | ((uint32_t) p[2] << 16)
+         | ((uint32_t) p[3] << 24);
+}
+
 static __device__ __forceinline__ void unpack_q3_k_scales(
     const uint8_t* __restrict__ scales,
     int8_t out[16]
 ) {
-    const uint32_t* aux32 = (const uint32_t*) scales;
+    // Q3_K block size is 110 B (not multiple of 4), so scales[] at struct
+    // offset 96 is only 2-byte aligned for every other super-block. Byte-wise
+    // load to dodge the misaligned u32 read.
     const uint32_t k1 = 0x0303'0303u;
     const uint32_t k2 = 0x0f0f'0f0fu;
     uint32_t aux[4];
-    aux[0] = aux32[0];
-    aux[1] = aux32[1];
-    const uint32_t tmp = aux32[2];
+    aux[0] = load_u32_unaligned(scales);
+    aux[1] = load_u32_unaligned(scales + 4);
+    const uint32_t tmp = load_u32_unaligned(scales + 8);
     aux[2] = ((aux[0] >> 4) & k2) | (((tmp >> 4) & k1) << 4);
     aux[3] = ((aux[1] >> 4) & k2) | (((tmp >> 6) & k1) << 4);
     aux[0] = (aux[0] & k2) | ((tmp & k1) << 4);

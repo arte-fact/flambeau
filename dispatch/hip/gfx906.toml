@@ -108,6 +108,14 @@ impl    = "qmatmul_q8_K_mmvq_single_row_gfx906"
 cert    = "certs/hip/gfx906/qmatmul_q8_K_mmvq_single_row_gfx906.json"
 notes   = "Q8_K MMVQ single-row (256 threads, 1 row/block). Q8_K is the simplest K-quant: f32 d × i8 qs[256], no sub-block scales. DP4A inner loop on 8 int32-packed lanes per Q8_1 sub-block; d_x factors out of the per-sub-block sum."
 
+[[qmatmul]]
+dtype   = "Q3_K"
+dtype_q = "Q8_1"
+shape   = { m = "1..127", k = "any", n = "any" }
+impl    = "qmatmul_q3_K_mmvq_single_row_gfx906"
+cert    = "certs/hip/gfx906/qmatmul_q3_K_mmvq_single_row_gfx906.json"
+notes   = "Q3_K MMVQ single-row (64 threads wave64, 1 row/block). Per-element on-the-fly decode: 2 low bits from qs[], 1 high bit from hmask[], 6-bit signed scale unpacked from packed scales[12]. Bug class: Q3_K block size is 110 B (non-multiple-of-4), so scales[] is misaligned for every other super-block — load it byte-wise."
+
 # ----- QMatMul MMQ (prefill / large-M path) ---------------------------------
 #
 # V1.4: only the Q8_0 correctness oracle is live. First-class 4-warp
