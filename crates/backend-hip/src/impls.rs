@@ -98,6 +98,16 @@ pub const QMATMUL_GFX906: &[KernelDescriptor] = &[
     },
     KernelDescriptor {
         op_name: "QMatMul",
+        impl_id: "qmatmul_q2_K_mmvq_single_row_gfx906",
+        backend: "hip",
+        arch: "gfx906",
+        dtype_weight: QDtype::Q2_K,
+        dtype_activation: QDtype::Q8_1,
+        m_range: (1, 127),
+        cert_rel_path: "certs/hip/gfx906/qmatmul_q2_K_mmvq_single_row_gfx906.json",
+    },
+    KernelDescriptor {
+        op_name: "QMatMul",
         impl_id: "qmatmul_q3_K_mmvq_single_row_gfx906",
         backend: "hip",
         arch: "gfx906",

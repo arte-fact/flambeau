@@ -27,8 +27,8 @@ use flambeau_backend_hip::{
 use flambeau_core::{CopyDirection, Device, DevicePtr, Stream};
 use flambeau_kernels_hip as kernels;
 use flambeau_quant::{
-    dequantize_into, BlockQ3K, BlockQ4K, BlockQ4_1, BlockQ5K, BlockQ6K, BlockQ8K, BlockQ8_0, BlockQ8_1,
-    GgmlDType, QK8_0, QK_K,
+    dequantize_into, BlockQ2K, BlockQ3K, BlockQ4K, BlockQ4_1, BlockQ5K, BlockQ6K, BlockQ8K, BlockQ8_0,
+    BlockQ8_1, GgmlDType, QK8_0, QK_K,
 };
 use half::f16;
 
@@ -43,6 +43,7 @@ const QK8: usize = QK8_0;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Dtype {
     Q8_0,
+    Q2K,
     Q3K,
     Q4K,
     Q5K,
@@ -83,6 +84,7 @@ impl Dtype {
     pub fn name(self) -> &'static str {
         match self {
             Dtype::Q8_0 | Dtype::Q8_0T128 | Dtype::Q8_0T128VDR2 => "Q8_0",
+            Dtype::Q2K => "Q2_K",
             Dtype::Q3K => "Q3_K",
             Dtype::Q4K | Dtype::Q4KR2 => "Q4_K",
             Dtype::Q5K | Dtype::Q5KR2 => "Q5_K",
@@ -95,6 +97,7 @@ impl Dtype {
     pub fn ggml(self) -> GgmlDType {
         match self {
             Dtype::Q8_0 | Dtype::Q8_0T128 | Dtype::Q8_0T128VDR2 => GgmlDType::Q8_0,
+            Dtype::Q2K => GgmlDType::Q2K,
             Dtype::Q3K => GgmlDType::Q3K,
             Dtype::Q4K | Dtype::Q4KR2 => GgmlDType::Q4K,
             Dtype::Q5K | Dtype::Q5KR2 => GgmlDType::Q5K,
@@ -107,6 +110,7 @@ impl Dtype {
     fn impl_id(self) -> &'static str {
         match self {
             Dtype::Q8_0 => "qmatmul_q8_0_mmvq_single_row_gfx906",
+            Dtype::Q2K => "qmatmul_q2_K_mmvq_single_row_gfx906",
             Dtype::Q3K => "qmatmul_q3_K_mmvq_single_row_gfx906",
             Dtype::Q4K => "qmatmul_q4_K_mmvq_single_row_gfx906",
             Dtype::Q5K => "qmatmul_q5_K_mmvq_single_row_gfx906",
@@ -130,6 +134,7 @@ impl Dtype {
             Dtype::Q8_0 => "mmvq_q8_0",
             Dtype::Q8_0T128 => "mmvq_q8_0_t128",
             Dtype::Q8_0T128VDR2 => "mmvq_q8_0_t128_vdr2",
+            Dtype::Q2K => "mmvq_q2_k",
             Dtype::Q3K => "mmvq_q3_k",
             Dtype::Q4K => "mmvq_q4_k",
             Dtype::Q5K => "mmvq_q5_k",
@@ -149,6 +154,7 @@ impl Dtype {
     fn kernel_entry(self) -> &'static str {
         match self {
             Dtype::Q8_0 => "flambeau_mmvq_q8_0_q8_1",
+            Dtype::Q2K => "flambeau_mmvq_q2_K_q8_1",
             Dtype::Q3K => "flambeau_mmvq_q3_k_q8_1",
             Dtype::Q8K => "flambeau_mmvq_q8_K_q8_1",
             Dtype::Q4K => "flambeau_mmvq_q4_k_q8_1",
@@ -170,6 +176,7 @@ impl Dtype {
     fn block_size_bytes(self) -> usize {
         match self {
             Dtype::Q8_0 | Dtype::Q8_0T128 | Dtype::Q8_0T128VDR2 => std::mem::size_of::<BlockQ8_0>(),
+            Dtype::Q2K => std::mem::size_of::<BlockQ2K>(),
             Dtype::Q3K => std::mem::size_of::<BlockQ3K>(),
             Dtype::Q4K | Dtype::Q4KR2 => std::mem::size_of::<BlockQ4K>(),
             Dtype::Q5K | Dtype::Q5KR2 => std::mem::size_of::<BlockQ5K>(),
@@ -465,6 +472,14 @@ fn tame_scales(dtype: Dtype, raw: Vec<u8>) -> Vec<u8> {
                 // BlockQ8_0: d (f16, 2 bytes) + qs[32]. Scale ≈ 0.01 to 0.11.
                 let d = f16::from_f32((block[0] as f32 / 255.0) * 0.1 + 0.01);
                 block[0..2].copy_from_slice(&d.to_bits().to_le_bytes());
+            }
+            Dtype::Q2K => {
+                // BlockQ2K: scales[16] + qs[64] + d (f16 @ 80) + dmin (f16 @ 82).
+                // Keep scale-low-nibble in 0..15 (random already); cap d & dmin small.
+                let d = f16::from_f32((block[80] as f32 / 255.0) * 0.05 + 0.005);
+                let dmin = f16::from_f32((block[81] as f32 / 255.0) * 0.02);
+                block[80..82].copy_from_slice(&d.to_bits().to_le_bytes());
+                block[82..84].copy_from_slice(&dmin.to_bits().to_le_bytes());
             }
             Dtype::Q3K => {
                 // BlockQ3K: hmask[32] + qs[64] + scales[12] + d (f16 at offset 108..110).

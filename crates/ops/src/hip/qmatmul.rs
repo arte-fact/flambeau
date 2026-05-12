@@ -1179,6 +1179,14 @@ impl Recipe {
                 rows_per_block: 1,
                 mmq_tile: (0, 0),
             },
+            "qmatmul_q2_K_mmvq_single_row_gfx906" => Self {
+                kind: RecipeKind::Mmvq,
+                stem: "mmvq_q2_k",
+                entry: "flambeau_mmvq_q2_K_q8_1",
+                threads: 64,
+                rows_per_block: 1,
+                mmq_tile: (0, 0),
+            },
             "qmatmul_q3_K_mmvq_single_row_gfx906" => Self {
                 kind: RecipeKind::Mmvq,
                 stem: "mmvq_q3_k",
@@ -1645,7 +1653,7 @@ fn block_elems(dtype: QDtype) -> usize {
     use flambeau_quant::{QK8_0, QK_K};
     match dtype {
         QDtype::Q8_0 | QDtype::Q8_1 | QDtype::Q4_0 | QDtype::Q4_1 | QDtype::Q5_0 | QDtype::Q5_1 => QK8_0,
-        QDtype::Q4_K | QDtype::Q5_K | QDtype::Q6_K | QDtype::Q8_K => QK_K,
+        QDtype::Q2_K | QDtype::Q3_K | QDtype::Q4_K | QDtype::Q5_K | QDtype::Q6_K | QDtype::Q8_K => QK_K,
         // 1.b — F16 is "1 element per block" in terms of the quant-block
         // unit used for `n_blocks_per_row = k / block_elems`. The F16 MMVQ
         // kernel multiplies F16 weight by Q8_1 activation (QK8_1=32), so the

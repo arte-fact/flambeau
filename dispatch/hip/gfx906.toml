@@ -109,6 +109,14 @@ cert    = "certs/hip/gfx906/qmatmul_q8_K_mmvq_single_row_gfx906.json"
 notes   = "Q8_K MMVQ single-row (256 threads, 1 row/block). Q8_K is the simplest K-quant: f32 d × i8 qs[256], no sub-block scales. DP4A inner loop on 8 int32-packed lanes per Q8_1 sub-block; d_x factors out of the per-sub-block sum."
 
 [[qmatmul]]
+dtype   = "Q2_K"
+dtype_q = "Q8_1"
+shape   = { m = "1..127", k = "any", n = "any" }
+impl    = "qmatmul_q2_K_mmvq_single_row_gfx906"
+cert    = "certs/hip/gfx906/qmatmul_q2_K_mmvq_single_row_gfx906.json"
+notes   = "Q2_K MMVQ single-row (64 threads wave64, 1 row/block). Affine quant with packed 4-bit (scale,min) per sub-block: y = d*scale*q - dmin*min. 2-bit quants packed 4 per byte, 16 sub-blocks of 16 elements each."
+
+[[qmatmul]]
 dtype   = "Q3_K"
 dtype_q = "Q8_1"
 shape   = { m = "1..127", k = "any", n = "any" }
