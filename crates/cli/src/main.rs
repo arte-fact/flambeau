@@ -607,9 +607,11 @@ fn sweep(arch: &str, op: Option<&str>, dtype: &str) -> Result<()> {
                 let dtypes: Vec<Dtype> = match dtype {
                     "all" => vec![Dtype::Q8_0, Dtype::Q2K, Dtype::Q3K, Dtype::Q4K, Dtype::Q5K, Dtype::Q6K, Dtype::Q8K],
                     "Q2_K" => vec![Dtype::Q2K],
+                    "Q2_K_r2" => vec![Dtype::Q2KR2],
                     "Q3_K" => vec![Dtype::Q3K],
+                    "Q3_K_r2" => vec![Dtype::Q3KR2],
                     "Q8_K" => vec![Dtype::Q8K],
-                    "all-multirow" => vec![Dtype::Q4KR2, Dtype::Q5KR2, Dtype::Q6KR4],
+                    "all-multirow" => vec![Dtype::Q2KR2, Dtype::Q3KR2, Dtype::Q4KR2, Dtype::Q5KR2, Dtype::Q6KR4],
                     "Q8_0" => vec![Dtype::Q8_0],
                     "Q4_K" => vec![Dtype::Q4K],
                     "Q5_K" => vec![Dtype::Q5K],

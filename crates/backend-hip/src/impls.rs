@@ -98,23 +98,23 @@ pub const QMATMUL_GFX906: &[KernelDescriptor] = &[
     },
     KernelDescriptor {
         op_name: "QMatMul",
-        impl_id: "qmatmul_q2_K_mmvq_single_row_gfx906",
+        impl_id: "qmatmul_q2_K_mmvq_nw1_r2_gfx906",
         backend: "hip",
         arch: "gfx906",
         dtype_weight: QDtype::Q2_K,
         dtype_activation: QDtype::Q8_1,
         m_range: (1, 127),
-        cert_rel_path: "certs/hip/gfx906/qmatmul_q2_K_mmvq_single_row_gfx906.json",
+        cert_rel_path: "certs/hip/gfx906/qmatmul_q2_K_mmvq_nw1_r2_gfx906.json",
     },
     KernelDescriptor {
         op_name: "QMatMul",
-        impl_id: "qmatmul_q3_K_mmvq_single_row_gfx906",
+        impl_id: "qmatmul_q3_K_mmvq_nw1_r2_gfx906",
         backend: "hip",
         arch: "gfx906",
         dtype_weight: QDtype::Q3_K,
         dtype_activation: QDtype::Q8_1,
         m_range: (1, 127),
-        cert_rel_path: "certs/hip/gfx906/qmatmul_q3_K_mmvq_single_row_gfx906.json",
+        cert_rel_path: "certs/hip/gfx906/qmatmul_q3_K_mmvq_nw1_r2_gfx906.json",
     },
     // MMQ (prefill): m ≥ 128
     KernelDescriptor {
@@ -782,6 +782,14 @@ pub const BENCH_REFERENCE_KERNELS_GFX906: &[DirectCallKernel] = &[
     DirectCallKernel {
         impl_id: "qmatmul_q4_K_mmvq_single_row_gfx906",
         cert_rel_path: "certs/hip/gfx906/qmatmul_q4_K_mmvq_single_row_gfx906.json",
+    },
+    DirectCallKernel {
+        impl_id: "qmatmul_q2_K_mmvq_single_row_gfx906",
+        cert_rel_path: "certs/hip/gfx906/qmatmul_q2_K_mmvq_single_row_gfx906.json",
+    },
+    DirectCallKernel {
+        impl_id: "qmatmul_q3_K_mmvq_single_row_gfx906",
+        cert_rel_path: "certs/hip/gfx906/qmatmul_q3_K_mmvq_single_row_gfx906.json",
     },
     DirectCallKernel {
         impl_id: "qmatmul_q5_K_mmvq_single_row_gfx906",
