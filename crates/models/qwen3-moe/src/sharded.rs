@@ -515,7 +515,13 @@ fn upload_one_inner(
     // kernel for 5 tensors). Non-MoE Q4_1 still flows through the Q4_1 path.
     let needs_q8_0_convert = matches!(
         r.dtype,
-        GgmlDType::BF16 | GgmlDType::Mxfp4 | GgmlDType::Iq4Xs | GgmlDType::Iq3Xxs
+        GgmlDType::BF16
+            | GgmlDType::Mxfp4
+            | GgmlDType::Iq4Xs
+            | GgmlDType::Iq4Nl
+            | GgmlDType::Iq3Xxs
+            | GgmlDType::Iq3S
+            | GgmlDType::Iq2Xxs
     ) || (r.dtype == GgmlDType::Q4_1 && r.name.contains("_exps"));
     if needs_q8_0_convert {
         return upload_via_dequant_to_q8_0(file, r, device);

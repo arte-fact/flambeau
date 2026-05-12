@@ -62,6 +62,24 @@ pub enum GgmlDType {
     /// per-32-elem scale + sign bits. Used by UD-Q3_K_XL builds (≈ 50%
     /// of layers). At-load dequant→Q8_0; no native kernel.
     Iq3Xxs,
+    /// IQ4_NL — 4-bit non-linear, 32-element block. Layout
+    /// `[half d, u8 qs[16]]` = 18 B/block. Same `kvalues_iq4nl` LUT as
+    /// IQ4_XS but a flat per-block scale instead of a sub-block scale.
+    Iq4Nl,
+    /// IQ3_S — 3-bit non-linear, 256-element super-block. 110 B/block:
+    /// `[half d, u8 qs[64], u8 qh[8], u8 signs[32], u8 scales[4]]`. 9-bit
+    /// codebook index per pair (8 low bits in qs, 1 high in qh) into the
+    /// 512-entry `iq3s_grid`; per-32-elem 4-bit scale stored as
+    /// `1 + 2*nib` in `scales`; per-byte sign in `signs`. Used in some
+    /// UD-Q3 / UD-Q4 builds. At-load dequant→Q8_0; no native kernel.
+    Iq3S,
+    /// IQ2_XXS — extreme 2-bit non-linear quant. 256-element super-block,
+    /// 66 B/block: `[half d, u16 qs[32]]`. Each 32-elem sub-block consumes
+    /// 8 qs bytes packed as 2 × u32: low 4 bytes index the 256-entry
+    /// `iq2xxs_grid` codebook (8 i8 quants per u64 entry), high u32 packs
+    /// 4 × 7-bit sign-LUT indices + a 4-bit scale. Used in UD-Q2_K_XL.
+    /// At-load dequant→Q8_0; no native kernel.
+    Iq2Xxs,
 }
 
 #[derive(Debug, Error)]
@@ -91,9 +109,13 @@ impl GgmlDType {
             14 => Self::Q6K,
             15 => Self::Q8K,
             30 => Self::BF16,
-            // IQ3_XXS / IQ4_XS — accepted at parse-time; loader dequant→Q8_0
-            // at upload. Both appear in UD-Q3_K_XL builds; no native kernel.
+            // IQ family — accepted at parse-time; loader dequant→Q8_0 at
+            // upload (Phase 2 will switch the target to Q*_K to keep the
+            // convert close to source bpw). No native kernels yet.
+            16 => Self::Iq2Xxs,
             18 => Self::Iq3Xxs,
+            20 => Self::Iq4Nl,
+            21 => Self::Iq3S,
             23 => Self::Iq4Xs,
             // MXFP4 (Microscaling FP4) — accepted at parse-time so the loader
             // can transparently dequant→Q8_0 at upload time. Used by Unsloth
@@ -101,7 +123,7 @@ impl GgmlDType {
             39 => Self::Mxfp4,
             // Other IQ quants exist in GGUFs in the wild but are not part of
             // V1's dtype set. Distinct error so loaders reject cleanly.
-            16..=17 | 19..=22 | 24..=29 | 31..=38 => return Err(DTypeError::UnsupportedWireId(u)),
+            17 | 19 | 22 | 24..=29 | 31..=38 => return Err(DTypeError::UnsupportedWireId(u)),
             _ => return Err(DTypeError::UnknownWireId(u)),
         })
     }
@@ -123,7 +145,10 @@ impl GgmlDType {
             Self::Q6K => 14,
             Self::Q8K => 15,
             Self::BF16 => 30,
+            Self::Iq2Xxs => 16,
             Self::Iq3Xxs => 18,
+            Self::Iq4Nl => 20,
+            Self::Iq3S => 21,
             Self::Iq4Xs => 23,
             Self::Mxfp4 => 39,
         }
@@ -147,7 +172,10 @@ impl GgmlDType {
             Self::Q5K => "Q5_K",
             Self::Q6K => "Q6_K",
             Self::Q8K => "Q8_K",
+            Self::Iq2Xxs => "IQ2_XXS",
             Self::Iq3Xxs => "IQ3_XXS",
+            Self::Iq4Nl => "IQ4_NL",
+            Self::Iq3S => "IQ3_S",
             Self::Iq4Xs => "IQ4_XS",
             Self::Mxfp4 => "MXFP4",
         }
@@ -165,7 +193,9 @@ impl GgmlDType {
             Self::Q8_1 => QK8_1,
             Self::Q2K | Self::Q3K | Self::Q4K | Self::Q5K | Self::Q6K | Self::Q8K => QK_K,
             // IQ4_XS uses a 256-element super-block (8 sub-blocks of 32).
-            Self::Iq4Xs | Self::Iq3Xxs => QK_K,
+            Self::Iq4Xs | Self::Iq3Xxs | Self::Iq3S | Self::Iq2Xxs => QK_K,
+            // IQ4_NL uses a 32-element block like Q4_0.
+            Self::Iq4Nl => QK4_0,
             // MXFP4 uses Q4_0's 32-element block.
             Self::Mxfp4 => QK4_0,
         }
@@ -193,6 +223,13 @@ impl GgmlDType {
             Self::Iq4Xs => 2 + 2 + (QK_K / 64) + (QK_K / 2),
             // IQ3_XXS block: f16 d (2) + u8 qs[96] = 98 B.
             Self::Iq3Xxs => 2 + 3 * QK_K / 8,
+            // IQ4_NL block: f16 d (2) + u8 qs[16] = 18 B (32-elem block).
+            Self::Iq4Nl => 2 + QK4_0 / 2,
+            // IQ3_S block: f16 d (2) + u8 qs[64] + u8 qh[8] + u8 signs[32]
+            // + u8 scales[4] = 110 B.
+            Self::Iq3S => 2 + QK_K / 4 + QK_K / 32 + QK_K / 8 + QK_K / 64,
+            // IQ2_XXS block: f16 d (2) + u16 qs[32] (64) = 66 B.
+            Self::Iq2Xxs => 2 + 2 * (QK_K / 8),
             // MXFP4 block: 1 byte E8M0 microscale + 16 bytes nibbles = 17 B.
             Self::Mxfp4 => 1 + QK4_0 / 2,
         }

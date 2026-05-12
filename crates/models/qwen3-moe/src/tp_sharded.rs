@@ -961,7 +961,15 @@ fn upload_tp_with_layout(
     // first then converts F32→{F16,Q8_0}, which can't address per-block
     // strides of MXFP4 / IQ4_XS / etc). Dequant the full tensor to F32,
     // slice the F32, then quantise the per-rank slice to Q8_0.
-    if matches!(info.dtype, GgmlDType::Mxfp4 | GgmlDType::Iq4Xs | GgmlDType::Iq3Xxs) {
+    if matches!(
+        info.dtype,
+        GgmlDType::Mxfp4
+            | GgmlDType::Iq4Xs
+            | GgmlDType::Iq4Nl
+            | GgmlDType::Iq3Xxs
+            | GgmlDType::Iq3S
+            | GgmlDType::Iq2Xxs
+    ) {
         let layout = configured;
         let (tensor, n) = upload_tp_via_dequant_to_q8_0(
             file, name, &info.dims, layout, rank, device, info.dtype,
