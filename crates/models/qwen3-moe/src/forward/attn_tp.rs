@@ -1021,43 +1021,50 @@ pub fn forward_full_attn_layer_decode_batched_tp(
         );
     }
 
-    // 8. Per-slot KV append. Each slot writes ITS row of K/V into ITS
-    // own per-rank cache. **#275 fix**: write at `current_tokens`
-    // (the cache tail) rather than `slot_positions[s]` (which is
-    // `prompt_ids.len() + step` = off by 1). This matches legacy
-    // `kv_cache.append()` semantics. Without this fix, decode step 1
-    // writes K/V at slot N+1 instead of slot N → slot N stays
-    // uninitialised and contaminates attention from step 2 onward.
-    // F16-only path; Q8 KV slots fall back via the loop.
+    // 8. Per-slot KV append. Each slot writes one row of K/V into its
+    // own per-rank cache. When the batched path is enabled, the N×2
+    // small DtoD memcpys are replaced by one `kv_append_f16_batched_slots`
+    // launch driven by a `slot_write_pos` table; the host-side loop
+    // only does bookkeeping (record pre-bump write_pos, bump_tail,
+    // populate the slot ptr/length tables). Set FLAMBEAU_KV_APPEND_BATCHED=0
+    // to fall back to the per-slot DtoD memcpy loop.
+    let batch_kv_append = std::env::var("FLAMBEAU_KV_APPEND_BATCHED")
+        .as_deref()
+        != Ok("0");
     let kv_per_token_bytes = local_kv_width * 2;
+    // Host-side bookkeeping for every slot. When batched, the actual
+    // K/V row copy is deferred to a single `kv_append_f16_batched_slots`
+    // launch below (the HtoD copies of the slot tables — including the
+    // new `write_pos` — happen once at step 9 just before attention).
     for s in 0..n_tokens {
         let kv = &mut *slot_kv_caches[s];
         let write_pos = kv.current_tokens();
-        let k_src = scratch.k_f16.offset_bytes(s * kv_per_token_bytes);
-        let v_src = scratch.v_f16.offset_bytes(s * kv_per_token_bytes);
-        let k_dst = kv.k_buffer().offset_bytes(write_pos * kv_per_token_bytes);
-        let v_dst = kv.v_buffer().offset_bytes(write_pos * kv_per_token_bytes);
-        // SAFETY: src buffers are scratch.k_f16/v_f16 each ≥ N rows of
-        // kv_per_token_bytes; dst is the slot's per-rank KV cache buffer
-        // sized to ≥ (max_seq_len * kv_per_token_bytes); write_pos <
-        // max_seq_len is enforced by the cache's bounds check.
-        unsafe {
-            device.memcpy_async(
-                stream, CopyDirection::DeviceToDevice,
-                k_dst, k_src, kv_per_token_bytes,
-            )?;
-            device.memcpy_async(
-                stream, CopyDirection::DeviceToDevice,
-                v_dst, v_src, kv_per_token_bytes,
-            )?;
+        if !batch_kv_append {
+            let k_src = scratch.k_f16.offset_bytes(s * kv_per_token_bytes);
+            let v_src = scratch.v_f16.offset_bytes(s * kv_per_token_bytes);
+            let k_dst = kv.k_buffer().offset_bytes(write_pos * kv_per_token_bytes);
+            let v_dst = kv.v_buffer().offset_bytes(write_pos * kv_per_token_bytes);
+            // SAFETY: src buffers are scratch.k_f16/v_f16 each ≥ N rows of
+            // kv_per_token_bytes; dst is the slot's per-rank KV cache buffer
+            // sized to ≥ (max_seq_len * kv_per_token_bytes); write_pos <
+            // max_seq_len is enforced by the cache's bounds check.
+            unsafe {
+                device.memcpy_async(
+                    stream, CopyDirection::DeviceToDevice,
+                    k_dst, k_src, kv_per_token_bytes,
+                )?;
+                device.memcpy_async(
+                    stream, CopyDirection::DeviceToDevice,
+                    v_dst, v_src, kv_per_token_bytes,
+                )?;
+            }
         }
         kv.bump_tail(1)
             .map_err(|e| anyhow::anyhow!("slot {s} bump_tail (TP): {e}"))?;
-        // **#266c**: populate the per-slot tables for the batched
-        // attention launch below. n_tokens_kv reads post-bump.
         scratch.slot_k_ptrs_host[s] = kv.k_buffer().as_usize() as u64;
         scratch.slot_v_ptrs_host[s] = kv.v_buffer().as_usize() as u64;
         scratch.slot_n_tokens_kv_host[s] = kv.current_tokens() as i32;
+        scratch.slot_write_pos_host[s] = write_pos as i32;
     }
 
     // 9. Single-launch batched attention over all N slots
@@ -1085,6 +1092,24 @@ pub fn forward_full_attn_layer_decode_batched_tp(
             DevicePtr(scratch.slot_n_tokens_kv_host.as_ptr() as usize),
             n_tokens * 4,
         )?;
+        if batch_kv_append {
+            device.memcpy_async(
+                stream, CopyDirection::HostToDevice,
+                scratch.slot_write_pos,
+                DevicePtr(scratch.slot_write_pos_host.as_ptr() as usize),
+                n_tokens * 4,
+            )?;
+        }
+    }
+    if batch_kv_append {
+        flambeau_ops::hip::attention::kv_append_f16_batched_slots(
+            ops, stream,
+            scratch.k_f16, scratch.v_f16,
+            scratch.slot_k_ptrs, scratch.slot_v_ptrs,
+            scratch.slot_write_pos,
+            n_tokens, local_kv_width,
+        )
+        .context("batched KV-append (TP)")?;
     }
     flambeau_ops::hip::attention::attention_decode_f16_batched(
         ops,

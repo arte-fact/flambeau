@@ -184,6 +184,57 @@ pub fn attention_decode_f16_batched(
     Ok(())
 }
 
+/// Batched K+V append across N decode slots, each writing one new
+/// token row into its own KV cache. Companion to
+/// [`attention_decode_f16_batched`] — replaces the N×2
+/// `memcpy_async(DtoD)` calls that previously walked per-slot KV
+/// caches.
+///
+/// `slot_k_dst_ptrs` / `slot_v_dst_ptrs` are `[N] u64` device arrays
+/// of per-slot KV-cache base pointers (one per slot). `slot_write_pos`
+/// is `[N] i32` with each slot's pre-bump tail index. The kernel
+/// writes one row of `kv_width = n_kv_heads * head_dim` F16 values
+/// per slot from `k_src` / `v_src` (both `[N, kv_width]` slot-major)
+/// at `dst + write_pos * kv_width`.
+pub fn kv_append_f16_batched_slots(
+    reg: &OpsRegistry,
+    stream: &HipStream,
+    k_src: DevicePtr,
+    v_src: DevicePtr,
+    slot_k_dst_ptrs: DevicePtr,
+    slot_v_dst_ptrs: DevicePtr,
+    slot_write_pos: DevicePtr,
+    n_slots: usize,
+    kv_width: usize,
+) -> Result<()> {
+    let module = reg.expect_module("kv_append_f16_batched_slots")?;
+    let kernel = module.kernel("flambeau_kv_append_f16_batched_slots")?;
+
+    let n_slots_i = n_slots as i32;
+    let kv_width_i = kv_width as i32;
+    let k_src_ptr: u64 = k_src.as_usize() as u64;
+    let v_src_ptr: u64 = v_src.as_usize() as u64;
+    let k_dst_arr: u64 = slot_k_dst_ptrs.as_usize() as u64;
+    let v_dst_arr: u64 = slot_v_dst_ptrs.as_usize() as u64;
+    let wpos_ptr: u64 = slot_write_pos.as_usize() as u64;
+    let mut args = KernelArgs::new();
+    args.push(&k_src_ptr);
+    args.push(&v_src_ptr);
+    args.push(&k_dst_arr);
+    args.push(&v_dst_arr);
+    args.push(&wpos_ptr);
+    args.push(&n_slots_i);
+    args.push(&kv_width_i);
+    let block_threads: u32 = kv_width.min(128) as u32;
+    let cfg = LaunchCfg {
+        grid: (n_slots as u32, 1, 1),
+        block: (block_threads.max(1), 1, 1),
+        shared_bytes: 0,
+    };
+    unsafe { kernel.launch(stream, cfg, args)? };
+    Ok(())
+}
+
 /// 9.b — split-K (flash-decoding) decode attention, F16 KV. Same math
 /// as [`attention_decode_f16`] but partitions the context across grid.y to
 /// attack the single-pass kernel's occupancy starvation on Qwen3.6

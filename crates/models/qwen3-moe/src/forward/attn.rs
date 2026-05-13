@@ -479,11 +479,15 @@ pub struct FullAttnPrefillScratch {
     pub slot_v_ptrs: DevicePtr,
     /// **#266c** — per-slot KV-tail length post-append. i32 [max_L].
     pub slot_n_tokens_kv: DevicePtr,
+    /// Per-slot pre-bump write position (cache tail BEFORE this token's
+    /// append). Consumed by `kv_append_f16_batched_slots`. i32 [max_L].
+    pub slot_write_pos: DevicePtr,
     /// Persistent host-side staging for the slot tables. Same lifetime
     /// rationale as `positions_host`: stable address for HtoD memcpy.
     pub(crate) slot_k_ptrs_host: Vec<u64>,
     pub(crate) slot_v_ptrs_host: Vec<u64>,
     pub(crate) slot_n_tokens_kv_host: Vec<i32>,
+    pub(crate) slot_write_pos_host: Vec<i32>,
     /// 6.a-i5a — persistent host-side position buffer. `positions`
     /// on the device is filled each prefill call via a HtoD memcpy
     /// whose *source* is this Vec's stable address. Keeping it on the
@@ -509,6 +513,7 @@ pub struct FullAttnPrefillScratch {
     slot_k_ptrs_bytes: usize,
     slot_v_ptrs_bytes: usize,
     slot_n_tokens_kv_bytes: usize,
+    slot_write_pos_bytes: usize,
     disposed: bool,
 }
 
@@ -555,6 +560,7 @@ impl FullAttnPrefillScratch {
         let slot_k_ptrs_bytes = max_tokens * 8;
         let slot_v_ptrs_bytes = max_tokens * 8;
         let slot_n_tokens_kv_bytes = max_tokens * 4;
+        let slot_write_pos_bytes = max_tokens * 4;
 
         let x_norm_f16 = device.alloc(x_norm_f16_bytes)?;
         let x_q8_1 = device.alloc(x_q8_1_bytes)?;
@@ -573,6 +579,7 @@ impl FullAttnPrefillScratch {
         let slot_k_ptrs = device.alloc(slot_k_ptrs_bytes)?;
         let slot_v_ptrs = device.alloc(slot_v_ptrs_bytes)?;
         let slot_n_tokens_kv = device.alloc(slot_n_tokens_kv_bytes)?;
+        let slot_write_pos = device.alloc(slot_write_pos_bytes)?;
 
         Ok(Self {
             max_tokens,
@@ -593,9 +600,11 @@ impl FullAttnPrefillScratch {
             slot_k_ptrs,
             slot_v_ptrs,
             slot_n_tokens_kv,
+            slot_write_pos,
             slot_k_ptrs_host: vec![0u64; max_tokens],
             slot_v_ptrs_host: vec![0u64; max_tokens],
             slot_n_tokens_kv_host: vec![0i32; max_tokens],
+            slot_write_pos_host: vec![0i32; max_tokens],
             positions_host: vec![0i32; max_tokens],
             x_norm_f16_bytes,
             x_q8_1_bytes,
@@ -611,6 +620,7 @@ impl FullAttnPrefillScratch {
             slot_k_ptrs_bytes,
             slot_v_ptrs_bytes,
             slot_n_tokens_kv_bytes,
+            slot_write_pos_bytes,
             disposed: false,
         })
     }
@@ -639,6 +649,7 @@ impl FullAttnPrefillScratch {
             device.dealloc(self.slot_k_ptrs, self.slot_k_ptrs_bytes)?;
             device.dealloc(self.slot_v_ptrs, self.slot_v_ptrs_bytes)?;
             device.dealloc(self.slot_n_tokens_kv, self.slot_n_tokens_kv_bytes)?;
+            device.dealloc(self.slot_write_pos, self.slot_write_pos_bytes)?;
         }
         Ok(())
     }
