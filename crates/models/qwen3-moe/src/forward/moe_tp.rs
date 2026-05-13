@@ -424,7 +424,30 @@ pub fn forward_moe_ffn_prefill_tp(
     // wired through `MoeShape::n_rows`.
     let n_experts = cfg.num_experts;
     let total_pairs = n_tokens * top_k;
-    const TP_TILE8_THRESHOLD: usize = 32;
+    // Tile8 MMQ wins on the indexed-MoE prefill path whenever there are
+    // enough routing pairs to cover at least one tile column (TILE_N=8).
+    // At prefill `n_tokens >> top_k` so the original `n_tokens >= 32`
+    // gate was effectively the same. At batched-decode `n_tokens = N`
+    // (small) but `total_pairs = N * top_k` can also clear that bar —
+    // e.g. Qwen3.6-A3B's top_k=4 → N=2 hits 8 pairs, N=4 hits 16.
+    //
+    // Topology-aware: with no real TP overhead competing (`tp_world ==
+    // 1`, the pp-only-on-this-fn path), decode tile8 is a measured
+    // +13% win on pp2 / Qwen3.6-35B-A3B at N=4. Under real TP (`tp_world
+    // >= 2`), the AllReduce on residual at the layer boundary
+    // serialises against the tile8 launch and the per-call MMVQ path
+    // overlaps better with AR — measured -10% on tp2 at N=4 — so
+    // keep the original prefill-only threshold for TP.
+    const TP_TILE8_PREFILL_THRESHOLD: usize = 32;
+    const TP_TILE8_DECODE_PAIRS_MIN: usize = 8;
+    let allow_tile8_decode =
+        std::env::var("FLAMBEAU_MOE_TILE8_DECODE").as_deref() != Ok("0");
+    let tile8_engage = if tp_world == 1 {
+        n_tokens >= TP_TILE8_PREFILL_THRESHOLD
+            || (total_pairs >= TP_TILE8_DECODE_PAIRS_MIN && allow_tile8_decode)
+    } else {
+        n_tokens >= TP_TILE8_PREFILL_THRESHOLD
+    };
     let gate_is_iq = matches!(
         ffn_gate_exps.dtype,
         GgmlDType::Iq4Nl
@@ -459,7 +482,7 @@ pub fn forward_moe_ffn_prefill_tp(
     ) || (gate_is_iq && down_is_iq);
     let gate_block_size = ffn_gate_exps.dtype.block_size();
     let down_block_size = ffn_down_exps.dtype.block_size();
-    if tile8_dt_ok && n_tokens >= TP_TILE8_THRESHOLD {
+    if tile8_dt_ok && tile8_engage {
         moe_sort_by_expert_padded(
             ops,
             stream,

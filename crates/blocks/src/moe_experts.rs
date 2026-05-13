@@ -460,7 +460,12 @@ impl MoeExperts {
     /// Threshold above which the tile8 path beats the plain MMVQ path
     /// for Q4_0 / Q8_0 prefill. Below this, tile8's grid overhead
     /// dominates and the per-token MMVQ wins.
-    const TILE8_THRESHOLD: usize = 32;
+    /// Historically `prompt_len >= 32` (a prefill-only condition). At
+    /// batched-decode `prompt_len = N` is small but `n_pairs = N * top_k`
+    /// lands in the tile8 sweet spot (top_k=4 → N=2 hits 8, N=4 hits 16).
+    /// Both prefill and batched-decode now share the
+    /// `n_pairs >= TILE8_PAIRS_MIN` gate.
+    const TILE8_PAIRS_MIN: usize = 8;
 
     /// Multi-token routed-experts prefill. Caller has already
     /// populated `expert_ids` / `expert_weights` (via
@@ -507,12 +512,16 @@ impl MoeExperts {
         // 2. Q4_0 / Q8_0 short-prompt fast path. Uses plain indexed
         // MoE MMVQ (no sort/pad). Allowed combos: Q4_0 gate+up with
         // Q4_0 / Q8_0 / Q4_1 down; Q8_0 gate+up with Q8_0 down.
+        let allow_tile8_decode =
+            std::env::var("FLAMBEAU_MOE_TILE8_DECODE").as_deref() != Ok("0");
         let q4_0_use_tile8 = gate_dt == QDtype::Q4_0
             && (down_dt == QDtype::Q4_0 || down_dt == QDtype::Q8_0 || down_dt == QDtype::Q4_1)
-            && prompt_len >= Self::TILE8_THRESHOLD;
+            && n_pairs >= Self::TILE8_PAIRS_MIN
+            && allow_tile8_decode;
         let q8_0_use_tile8 = gate_dt == QDtype::Q8_0
             && down_dt == QDtype::Q8_0
-            && prompt_len >= Self::TILE8_THRESHOLD;
+            && n_pairs >= Self::TILE8_PAIRS_MIN
+            && allow_tile8_decode;
         if (gate_dt == QDtype::Q4_0 && !q4_0_use_tile8)
             || (gate_dt == QDtype::Q8_0 && !q8_0_use_tile8)
         {
