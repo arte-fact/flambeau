@@ -78,3 +78,23 @@ Output coherent across 3 runs. Sample (run1, first 80 chars):
 - HipDeviceEnablePeerAccess warnings at boot (`peer access is already
   enabled`) are pre-existing benign — the rig has system-wide peer
   access pre-enabled.
+
+---
+
+## Update (2026-05-13, post Phase 4 Slice A start)
+
+After adding wave64 MMQ for **IQ4_XS** and **IQ3_S** (commit ea0b0c4), re-benched on the same topology:
+
+| Run     | wall   | pp_tokens | gen_tokens |
+|---------|--------|-----------|------------|
+| warmup  | 5.60s  |       445 |          8 |
+| run1    | 12.01s |       445 |         64 |
+| run2    | 12.08s |       445 |         64 |
+| run3    | 12.08s |       445 |         64 |
+
+Solving the linear model again:
+
+- **Prefill: 95.5 tok/s** @ m=445 (was 36.9 — **2.6× lift**)
+- **Decode:  8.62 tok/s** @ m=1 (was 8.52 — unchanged, as expected — only MMQ added)
+
+Still partial-coverage gain: only IQ4_XS (64 attn_gate tensors) and IQ3_S (10 ffn_gate/up tensors) get the MMQ path. The 2 IQ3_XXS tensors still fall through to the MMVQ-loop-per-row at m>=128. Adding MMQ for the remaining 7 IQ dtypes in Slice A should bring prefill into the 150-200 tok/s band (Q4_K_M envelope is ~300, gap closed by dp4a-with-LUT micro-opt in Phase 4-perf).
