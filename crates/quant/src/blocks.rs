@@ -151,6 +151,34 @@ pub struct BlockIq4Nl {
 }
 const _: () = assert!(std::mem::size_of::<BlockIq4Nl>() == 2 + QK4_0 / 2);
 
+/// IQ3_XXS — ~3.06-bpw K-quant with 256-entry u32 codebook. Super-block of
+/// 256 elements: f16 scale + 96 bytes split into 64 codebook indices + 32
+/// bytes of packed (4-bit scale + 4 × 7-bit sign-LUT idx) per ib32.
+/// Byte-identical to `ggml-common.h`'s `block_iq3_xxs`.
+#[derive(Debug, Clone, Copy, Pod, Zeroable)]
+#[repr(C)]
+pub struct BlockIq3Xxs {
+    pub d: f16,
+    pub qs: [u8; QK_K / 4 + QK_K / 8],     // 64 + 32 = 96
+}
+const _: () = assert!(std::mem::size_of::<BlockIq3Xxs>() == 2 + QK_K / 4 + QK_K / 8);
+
+/// IQ3_S — ~3.44-bpw K-quant with 512-entry u32 codebook. Super-block of
+/// 256 elements: f16 scale + 64-byte codebook-low + 8-byte codebook-high-bit
+/// + 32-byte per-element sign masks + 4-byte 4-bit scales (8 sub-block
+/// scales total). Byte-identical to `ggml-common.h`'s `block_iq3_s`.
+#[derive(Debug, Clone, Copy, Pod, Zeroable)]
+#[repr(C)]
+pub struct BlockIq3S {
+    pub d: f16,
+    pub qs: [u8; QK_K / 4],                // 64
+    pub qh: [u8; QK_K / 32],               //  8
+    pub signs: [u8; QK_K / 8],             // 32
+    pub scales: [u8; QK_K / 64],           //  4
+}
+const _: () = assert!(std::mem::size_of::<BlockIq3S>()
+    == 2 + QK_K / 4 + QK_K / 32 + QK_K / 8 + QK_K / 64);
+
 /// IQ4_XS — 4-bit non-linear K-quant, 256-element super-block with 8
 /// sub-blocks of 32. Per-sub-block signed 6-bit scale split into
 /// `scales_l` (low 4 bits × 8 → 4 bytes) and `scales_h` (high 2 bits × 8

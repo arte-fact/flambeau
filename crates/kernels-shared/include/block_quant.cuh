@@ -343,6 +343,40 @@ typedef struct {
 static_assert(sizeof(flambeau_block_iq4_xs) == 2 + 2 + QK_K / 64 + QK_K / 2,
               "block_iq4_xs size");
 
+// IQ3_XXS — 3-bit-ish (3.06 bpw) K-quant with codebook lookup. Super-block
+// of 256 elements; per-block layout:
+//   f16 d (2 bytes)
+//   u8 qs[96]:
+//     qs[0..64]   — 64 codebook indices (2 indices per ib32 × 4 groups × 8 ib32)
+//     qs[64..96]  — 32 packed (4-bit scale + 4 × 7-bit sign-LUT index) per ib32,
+//                   loaded as 8 × u32 with the scale at bits [28..32]
+// Byte-identical to ggml-common.h `block_iq3_xxs`.
+typedef struct {
+    fb_fp16_t d;
+    uint8_t   qs[QK_K / 4 + QK_K / 8];     // 64 + 32 = 96
+} flambeau_block_iq3_xxs;
+static_assert(sizeof(flambeau_block_iq3_xxs) == 2 + QK_K / 4 + QK_K / 8,
+              "block_iq3_xxs size");
+
+// IQ3_S — refined 3.44-bpw K-quant. Super-block of 256 elements with explicit
+// 9th-bit and sign arrays alongside the 8-bit codebook indices:
+//   f16 d (2 bytes)
+//   u8 qs[64]      — codebook low 8 bits (one byte per 4-element group)
+//   u8 qh[8]       — codebook 9th bit, one bit per qs byte (8 bytes pack 64 bits)
+//   u8 signs[32]   — per-byte 8-bit sign masks
+//   u8 scales[4]   — 4-bit nibble scales, two per byte, 8 sub-block scales total
+// Byte-identical to ggml-common.h `block_iq3_s`.
+typedef struct {
+    fb_fp16_t d;
+    uint8_t   qs[QK_K / 4];                // 64
+    uint8_t   qh[QK_K / 32];               //  8
+    uint8_t   signs[QK_K / 8];             // 32
+    uint8_t   scales[QK_K / 64];           //  4
+} flambeau_block_iq3_s;
+static_assert(sizeof(flambeau_block_iq3_s)
+              == 2 + QK_K / 4 + QK_K / 32 + QK_K / 8 + QK_K / 64,
+              "block_iq3_s size");
+
 // Shared signed-i8 LUT for IQ4_NL and IQ4_XS. Byte-identical port of
 // llama.cpp `kvalues_iq4nl` (ggml-common.h). Inline so each kernel TU
 // gets a register-resident copy without ODR conflicts; the compiler is
