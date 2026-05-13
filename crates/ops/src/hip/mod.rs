@@ -216,6 +216,7 @@ pub const KERNEL_STEMS: &[&str] = &[
     "gdn_alpha_beta_f32",
     "gdn_state_step_f32",
     "gdn_state_step_alphabeta_f32",
+    "gdn_state_step_alphabeta_f32_batched_slots",
     "shared_expert_scale_f32",
     "split_q_gate_f16",
     "swiglu_f16",

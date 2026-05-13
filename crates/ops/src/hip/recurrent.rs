@@ -228,6 +228,87 @@ pub fn gdn_state_step_alphabeta_f32_s128(
     Ok(())
 }
 
+/// Batched-slots variant of [`gdn_state_step_alphabeta_f32_s128`]. Same
+/// per-(B,H,col) compute and grid shape; the state-in / state-out
+/// pointers per batch are dereferenced through a `[B] u64` device
+/// pointer array instead of computed by stride from a single base.
+/// Lets `forward_gdn_decode_batched_tp` collapse its per-slot
+/// state-step loop into one launch when each slot's
+/// `GdnLayerState::state` lives in a separate allocation.
+///
+/// `state_in_ptrs` and `state_out_ptrs` must each point to a `B`-entry
+/// `u64` array on the device containing the per-slot
+/// `GdnLayerState::state` base pointers. Same buffer for both is fine
+/// when in-place (the existing kernel's pattern).
+#[allow(clippy::too_many_arguments)]
+pub fn gdn_state_step_alphabeta_f32_s128_batched_slots(
+    reg: &OpsRegistry,
+    stream: &HipStream,
+    q: DevicePtr,
+    k: DevicePtr,
+    v: DevicePtr,
+    alpha_in: DevicePtr,
+    beta_in: DevicePtr,
+    ssm_dt_bias: DevicePtr,
+    ssm_a: DevicePtr,
+    state_in_ptrs: DevicePtr,
+    state_out_ptrs: DevicePtr,
+    attn_out: DevicePtr,
+    b: usize,
+    h_v: usize,
+    l: usize,
+    n_rep: usize,
+    rep_inner_layout: bool,
+) -> Result<()> {
+    const S_V: u32 = 128;
+    const WARP_SIZE: u32 = 64;
+    const WARPS_PER_BLOCK: u32 = 4;
+
+    let module = reg.expect_module("gdn_state_step_alphabeta_f32_batched_slots")?;
+    let kernel = module.kernel("flambeau_gdn_state_step_alphabeta_f32_s128_batched_slots")?;
+
+    let b_i = b as i32;
+    let h_i = h_v as i32;
+    let l_i = l as i32;
+    let n_rep_i = n_rep as i32;
+    let rep_inner_i: i32 = if rep_inner_layout { 1 } else { 0 };
+    let q_ptr: u64 = q.as_usize() as u64;
+    let k_ptr: u64 = k.as_usize() as u64;
+    let v_ptr: u64 = v.as_usize() as u64;
+    let alpha_ptr: u64 = alpha_in.as_usize() as u64;
+    let beta_ptr: u64 = beta_in.as_usize() as u64;
+    let dt_ptr: u64 = ssm_dt_bias.as_usize() as u64;
+    let sa_ptr: u64 = ssm_a.as_usize() as u64;
+    let sin_arr: u64 = state_in_ptrs.as_usize() as u64;
+    let sout_arr: u64 = state_out_ptrs.as_usize() as u64;
+    let ao_ptr: u64 = attn_out.as_usize() as u64;
+    let mut args = KernelArgs::new();
+    args.push(&q_ptr);
+    args.push(&k_ptr);
+    args.push(&v_ptr);
+    args.push(&alpha_ptr);
+    args.push(&beta_ptr);
+    args.push(&dt_ptr);
+    args.push(&sa_ptr);
+    args.push(&sin_arr);
+    args.push(&sout_arr);
+    args.push(&ao_ptr);
+    args.push(&b_i);
+    args.push(&h_i);
+    args.push(&l_i);
+    args.push(&n_rep_i);
+    args.push(&rep_inner_i);
+
+    let grid_z = S_V / WARPS_PER_BLOCK;
+    let cfg = LaunchCfg {
+        grid: (h_v as u32, b as u32, grid_z),
+        block: (WARP_SIZE, WARPS_PER_BLOCK, 1),
+        shared_bytes: 0,
+    };
+    unsafe { kernel.launch(stream, cfg, args)? };
+    Ok(())
+}
+
 /// 3.d.1 — fused `conv_input = [history, current]`. Replaces the two
 /// back-to-back DtoD memcpys in `forward/gdn.rs::assemble_conv_input` (decode
 /// path) with a single elementwise kernel. Each GDN layer at decode fires

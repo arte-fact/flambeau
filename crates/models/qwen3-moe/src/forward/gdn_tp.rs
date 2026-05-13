@@ -42,7 +42,7 @@
 )]
 
 use anyhow::{bail, Context, Result};
-use flambeau_core::{CopyDirection, Device, DevicePtr};
+use flambeau_core::{CopyDirection, Device, DevicePtr, Stream};
 use flambeau_ops::hip::{
     cast::cast_f32_to_f16,
     conv::causal_conv1d_f32,
@@ -55,7 +55,10 @@ use flambeau_ops::hip::{
         mmvq_q4_0_gate_up, mmvq_q4_0_gate_up_row_tile_batched, mmvq_q4_0_gate_up_t128,
         mmvq_q8_0_gate_up,
     },
-    recurrent::{gdn_split_qkv_f32, gdn_state_step_alphabeta_f32_s128},
+    recurrent::{
+        gdn_split_qkv_f32, gdn_state_step_alphabeta_f32_s128,
+        gdn_state_step_alphabeta_f32_s128_batched_slots,
+    },
     HipDevice, HipStream, OpsRegistry,
 };
 
@@ -652,7 +655,6 @@ fn debug_probe_f16(
     ptr: DevicePtr,
     n: usize,
 ) -> Result<()> {
-    use flambeau_core::Stream;
     let mut host = vec![0u16; n];
     unsafe {
         device.memcpy_async(
@@ -1252,6 +1254,10 @@ pub fn forward_gdn_decode_batched_tp(
     let q_scale = 1.0f32 / (head_k_dim as f32).sqrt();
     let rep_inner_layout = cfg.arch == "qwen3next";
 
+    let batch_state_step = std::env::var("FLAMBEAU_GDN_STATE_STEP_BATCHED")
+        .as_deref()
+        != Ok("0");
+
     for s in 0..n_tokens {
         // Slot pointers into the batched scratch.
         let slot_qkv =
@@ -1333,24 +1339,79 @@ pub fn forward_gdn_decode_batched_tp(
         )
         .context("gdn batched-decode (TP) scale_f32 Q slot")?;
 
-        // 11–12. Per-slot state-step. n_tokens=1 update on slot's state.
-        gdn_state_step_alphabeta_f32_s128(
-            ops, stream,
-            slot_q_norm, slot_k_norm, slot_v,
-            slot_alpha, slot_beta,
-            ssm_dt_bias.ptr, ssm_a.ptr,
-            layer_states[s].state, layer_states[s].state, slot_state_out,
-            1, local_num_v_heads, 1, n_rep, rep_inner_layout,
-        )
-        .context("gdn batched-decode (TP) gdn_state_step_alphabeta_f32_s128 slot")?;
+        // 11–12. Per-slot state-step (when batched_state_step is off).
+        // When on, the per-slot state-step is replaced with one batched
+        // call over all N slots after this loop ends.
+        if !batch_state_step {
+            gdn_state_step_alphabeta_f32_s128(
+                ops, stream,
+                slot_q_norm, slot_k_norm, slot_v,
+                slot_alpha, slot_beta,
+                ssm_dt_bias.ptr, ssm_a.ptr,
+                layer_states[s].state, layer_states[s].state, slot_state_out,
+                1, local_num_v_heads, 1, n_rep, rep_inner_layout,
+            )
+            .context("gdn batched-decode (TP) gdn_state_step_alphabeta_f32_s128 slot")?;
 
-        // 13. ssm_norm per-(local) head over this slot's [num_v_heads, head_v_dim].
-        rmsnorm_f32(
+            // 13. ssm_norm per-(local) head over this slot's [num_v_heads, head_v_dim].
+            rmsnorm_f32(
+                ops, stream,
+                slot_state_out, ssm_norm.ptr, slot_out_normed,
+                local_num_v_heads, head_v_dim, cfg.rms_norm_eps,
+            )
+            .context("gdn batched-decode (TP) ssm_norm slot")?;
+        }
+    }
+
+    // === Stage D' (batched state-step): one launch over all N slots. ===
+    // Per-slot Q/K/V/α/β are already laid out slot-major in scratch as
+    // `[N, H, head_dim]`; only the per-slot `GdnLayerState::state`
+    // pointers differ, so we HtoD-copy a `[N] u64` array of slot state
+    // base pointers and let the kernel dereference indirectly.
+    if batch_state_step {
+        let slot_ptrs: Vec<u64> =
+            layer_states.iter().map(|ls| ls.state.as_usize() as u64).collect();
+        // HtoD on the same stream as the state-step kernel; ordering is
+        // guaranteed by stream-queue semantics so no host-side sync
+        // needed. SAFETY: slot_ptrs lives on the host for the lifetime
+        // of this call frame; `memcpy_async` only requires the host
+        // buffer to remain valid until the next operation on this
+        // stream observes the copy, which happens before this function
+        // returns. scratch.slot_state_ptrs was sized for max_tokens*8 B.
+        unsafe {
+            device.memcpy_async(
+                stream,
+                CopyDirection::HostToDevice,
+                scratch.slot_state_ptrs,
+                DevicePtr(slot_ptrs.as_ptr() as usize),
+                std::mem::size_of_val(slot_ptrs.as_slice()),
+            )?;
+        }
+
+        gdn_state_step_alphabeta_f32_s128_batched_slots(
             ops, stream,
-            slot_state_out, ssm_norm.ptr, slot_out_normed,
-            local_num_v_heads, head_v_dim, cfg.rms_norm_eps,
+            scratch.q_norm_f32, scratch.k_norm_f32, scratch.v_f32,
+            scratch.alpha_f32, scratch.beta_f32,
+            ssm_dt_bias.ptr, ssm_a.ptr,
+            scratch.slot_state_ptrs, scratch.slot_state_ptrs,
+            scratch.state_out,
+            n_tokens, local_num_v_heads, 1, n_rep, rep_inner_layout,
         )
-        .context("gdn batched-decode (TP) ssm_norm slot")?;
+        .context("gdn batched-decode (TP) batched-slots state-step")?;
+
+        // Per-slot ssm_norm (kept per-slot; batching this is the
+        // next-smaller lever, deferred).
+        for s in 0..n_tokens {
+            let slot_state_out =
+                DevicePtr(scratch.state_out.as_usize() + s * row_state_out_bytes);
+            let slot_out_normed =
+                DevicePtr(scratch.out_normed.as_usize() + s * row_out_normed_bytes);
+            rmsnorm_f32(
+                ops, stream, slot_state_out, ssm_norm.ptr, slot_out_normed,
+                local_num_v_heads, head_v_dim, cfg.rms_norm_eps,
+            )
+            .context("gdn batched-decode (TP) ssm_norm slot (post-batched)")?;
+        }
     }
 
     // === Stage E: swiglu(z, out_normed) → gated_f32 (batched) ===
