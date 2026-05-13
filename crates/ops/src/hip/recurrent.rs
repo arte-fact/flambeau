@@ -309,6 +309,63 @@ pub fn gdn_state_step_alphabeta_f32_s128_batched_slots(
     Ok(())
 }
 
+/// Fused single-token GDN conv trio (assemble + causal_conv1d + shift)
+/// across `N` decode slots, each owning its own `conv_history` buffer.
+/// One launch replaces 3N per-slot launches (DtoD assemble + conv1d +
+/// DtoD shift) at GDN-batched-decode. Each block handles a
+/// `(slot, channel_tile)` pair; all 3 ops happen in registers (no LDS,
+/// no inter-block sync). Caller writes per-slot history base pointers
+/// into a device array sized `[N] u64` and passes its base via
+/// `slot_history_ptrs`.
+#[allow(clippy::too_many_arguments)]
+pub fn gdn_conv_trio_decode_f32_batched_slots(
+    reg: &OpsRegistry,
+    stream: &HipStream,
+    slot_history_ptrs: DevicePtr,
+    qkv_mixed: DevicePtr,
+    weight: DevicePtr,
+    conv_out: DevicePtr,
+    n_slots: usize,
+    conv_channels: usize,
+    conv_kernel: usize,
+) -> Result<()> {
+    const THREADS: u32 = 256;
+    const KERNEL_MAX: usize = 8;
+    assert!(
+        conv_kernel <= KERNEL_MAX,
+        "gdn_conv_trio_decode_f32_batched_slots: conv_kernel {conv_kernel} > KERNEL_MAX {KERNEL_MAX}"
+    );
+    let module = reg.expect_module("gdn_conv_trio_decode_f32_batched_slots")?;
+    let kernel = module.kernel("flambeau_gdn_conv_trio_decode_f32_batched_slots")?;
+
+    let n_slots_i = n_slots as i32;
+    let conv_channels_i = conv_channels as i32;
+    let conv_kernel_i = conv_kernel as i32;
+    let ptrs_arr: u64 = slot_history_ptrs.as_usize() as u64;
+    let q_ptr: u64 = qkv_mixed.as_usize() as u64;
+    let w_ptr: u64 = weight.as_usize() as u64;
+    let o_ptr: u64 = conv_out.as_usize() as u64;
+    let mut args = KernelArgs::new();
+    args.push(&ptrs_arr);
+    args.push(&q_ptr);
+    args.push(&w_ptr);
+    args.push(&o_ptr);
+    args.push(&n_slots_i);
+    args.push(&conv_channels_i);
+    args.push(&conv_kernel_i);
+    let cfg = LaunchCfg {
+        grid: (
+            (conv_channels as u32).div_ceil(THREADS),
+            n_slots as u32,
+            1,
+        ),
+        block: (THREADS, 1, 1),
+        shared_bytes: 0,
+    };
+    unsafe { kernel.launch(stream, cfg, args)? };
+    Ok(())
+}
+
 /// 3.d.1 — fused `conv_input = [history, current]`. Replaces the two
 /// back-to-back DtoD memcpys in `forward/gdn.rs::assemble_conv_input` (decode
 /// path) with a single elementwise kernel. Each GDN layer at decode fires

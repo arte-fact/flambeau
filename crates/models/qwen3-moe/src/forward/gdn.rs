@@ -393,6 +393,11 @@ pub struct GdnPrefillScratch {
     /// each batched slot's `GdnLayerState::state` base pointer
     /// indirectly. Caller populates via memcpy_async per call.
     pub slot_state_ptrs: DevicePtr,
+    /// `[max_tokens] u64` device pointer array used by
+    /// `gdn_conv_trio_decode_f32_batched_slots` to address each
+    /// slot's `GdnLayerState::conv_history` base pointer indirectly
+    /// in one fused conv-trio launch per layer.
+    pub slot_conv_history_ptrs: DevicePtr,
     // Bookkeeping.
     x_norm_f16_bytes: usize,
     x_q8_1_bytes: usize,
@@ -413,6 +418,7 @@ pub struct GdnPrefillScratch {
     ssm_out_bytes: usize,
     gate_device_bytes: usize,
     slot_state_ptrs_bytes: usize,
+    slot_conv_history_ptrs_bytes: usize,
     disposed: bool,
 }
 
@@ -492,6 +498,8 @@ impl GdnPrefillScratch {
         let beta_device = device.alloc(gate_device_bytes)?;
         let slot_state_ptrs_bytes = max_tokens * std::mem::size_of::<u64>();
         let slot_state_ptrs = device.alloc(slot_state_ptrs_bytes)?;
+        let slot_conv_history_ptrs_bytes = max_tokens * std::mem::size_of::<u64>();
+        let slot_conv_history_ptrs = device.alloc(slot_conv_history_ptrs_bytes)?;
 
         Ok(Self {
             max_tokens,
@@ -517,6 +525,7 @@ impl GdnPrefillScratch {
             gate_device,
             beta_device,
             slot_state_ptrs,
+            slot_conv_history_ptrs,
             x_norm_f16_bytes,
             x_q8_1_bytes,
             x_q8_1_mmq_bytes,
@@ -536,6 +545,7 @@ impl GdnPrefillScratch {
             ssm_out_bytes,
             gate_device_bytes,
             slot_state_ptrs_bytes,
+            slot_conv_history_ptrs_bytes,
             disposed: false,
         })
     }
@@ -569,6 +579,7 @@ impl GdnPrefillScratch {
             device.dealloc(self.gate_device, self.gate_device_bytes)?;
             device.dealloc(self.beta_device, self.gate_device_bytes)?;
             device.dealloc(self.slot_state_ptrs, self.slot_state_ptrs_bytes)?;
+            device.dealloc(self.slot_conv_history_ptrs, self.slot_conv_history_ptrs_bytes)?;
         }
         Ok(())
     }

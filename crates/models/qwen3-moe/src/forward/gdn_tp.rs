@@ -1260,38 +1260,74 @@ pub fn forward_gdn_decode_batched_tp(
     let batch_pass_a = std::env::var("FLAMBEAU_GDN_PASSA_BATCHED")
         .as_deref()
         != Ok("0");
+    let batch_conv_trio = std::env::var("FLAMBEAU_GDN_CONV_TRIO_BATCHED")
+        .as_deref()
+        != Ok("0");
     let _ = row_z_bytes; // z_f32 sliced in Stage E batched only.
 
-    // === Pass A.1: per-slot conv-trio. ===
-    // Each slot has its own `conv_history`, so the assemble + conv1d +
-    // shift trio must walk one slot at a time. Batching this requires
-    // slot-pointer-indirect kernels (similar pattern to the batched
-    // state-step) — that's a separate lever, not in this commit.
-    for s in 0..n_tokens {
-        let slot_qkv =
-            DevicePtr(scratch.qkv_mixed_f32.as_usize() + s * row_qkv_bytes);
-        let slot_conv_out =
-            DevicePtr(scratch.conv_out.as_usize() + s * row_qkv_bytes);
-
-        assemble_conv_input_prefill(
-            device, stream,
-            layer_states[s].conv_history,
-            slot_qkv,
-            scratch.conv_input,
-            1, local_conv_channels, conv_kernel,
-        )?;
-        causal_conv1d_f32(
+    // === Pass A.1: GDN conv-trio. ===
+    // Per slot the trio is assemble_conv_input + causal_conv1d_f32 +
+    // shift_conv_history (3 launches per slot per layer). With each
+    // slot's `conv_history` living in its own device allocation, the
+    // legacy fallback walks one slot at a time. The batched-slots
+    // variant takes a [N] u64 device array of per-slot conv_history
+    // base pointers and does all three ops in one fused kernel
+    // launch per layer.
+    if batch_conv_trio {
+        let slot_ptrs: Vec<u64> = layer_states
+            .iter()
+            .map(|ls| ls.conv_history.as_usize() as u64)
+            .collect();
+        // SAFETY: slot_ptrs lives on the host stack/heap for this call;
+        // memcpy_async with non-pinned host source stages synchronously
+        // before returning, so the host slice is consumed before this
+        // function returns. scratch.slot_conv_history_ptrs is sized
+        // for max_tokens * 8 bytes at allocation time.
+        unsafe {
+            device.memcpy_async(
+                stream,
+                CopyDirection::HostToDevice,
+                scratch.slot_conv_history_ptrs,
+                DevicePtr(slot_ptrs.as_ptr() as usize),
+                std::mem::size_of_val(slot_ptrs.as_slice()),
+            )?;
+        }
+        flambeau_ops::hip::recurrent::gdn_conv_trio_decode_f32_batched_slots(
             ops, stream,
-            scratch.conv_input, ssm_conv1d.ptr, slot_conv_out,
-            1, local_conv_channels, conv_kernel,
+            scratch.slot_conv_history_ptrs,
+            scratch.qkv_mixed_f32,
+            ssm_conv1d.ptr,
+            scratch.conv_out,
+            n_tokens, local_conv_channels, conv_kernel,
         )
-        .context("gdn batched-decode (TP) causal_conv1d_f32 slot")?;
-        shift_conv_history_prefill(
-            device, stream,
-            scratch.conv_input,
-            layer_states[s].conv_history,
-            1, local_conv_channels, conv_kernel,
-        )?;
+        .context("gdn batched-decode (TP) fused conv-trio batched-slots")?;
+    } else {
+        for s in 0..n_tokens {
+            let slot_qkv =
+                DevicePtr(scratch.qkv_mixed_f32.as_usize() + s * row_qkv_bytes);
+            let slot_conv_out =
+                DevicePtr(scratch.conv_out.as_usize() + s * row_qkv_bytes);
+
+            assemble_conv_input_prefill(
+                device, stream,
+                layer_states[s].conv_history,
+                slot_qkv,
+                scratch.conv_input,
+                1, local_conv_channels, conv_kernel,
+            )?;
+            causal_conv1d_f32(
+                ops, stream,
+                scratch.conv_input, ssm_conv1d.ptr, slot_conv_out,
+                1, local_conv_channels, conv_kernel,
+            )
+            .context("gdn batched-decode (TP) causal_conv1d_f32 slot")?;
+            shift_conv_history_prefill(
+                device, stream,
+                scratch.conv_input,
+                layer_states[s].conv_history,
+                1, local_conv_channels, conv_kernel,
+            )?;
+        }
     }
 
     // === Pass A.2: batched pointwise (silu / split_qkv / l2_norm / scale). ===
