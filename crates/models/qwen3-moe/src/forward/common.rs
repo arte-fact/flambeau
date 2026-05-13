@@ -53,28 +53,51 @@ pub(crate) fn validate_moe_dtypes(
     if inter % QK_K != 0 {
         bail!("MoE expects moe_intermediate_size={inter} divisible by QK_K={QK_K}");
     }
-    if !(gate_dt == up_dt
-        && (gate_dt == GgmlDType::Q2K
-            || gate_dt == GgmlDType::Q3K
-            || gate_dt == GgmlDType::Q4K
-            || gate_dt == GgmlDType::Q8_0
-            || gate_dt == GgmlDType::Q4_0))
-    {
+    let gate_up_ok = matches!(
+        gate_dt,
+        GgmlDType::Q2K
+            | GgmlDType::Q3K
+            | GgmlDType::Q4K
+            | GgmlDType::Q8_0
+            | GgmlDType::Q4_0
+            | GgmlDType::Iq4Nl
+            | GgmlDType::Iq4Xs
+            | GgmlDType::Iq3Xxs
+            | GgmlDType::Iq3S
+            | GgmlDType::Iq2Xxs
+            | GgmlDType::Iq2Xs
+            | GgmlDType::Iq2S
+            | GgmlDType::Iq1S
+            | GgmlDType::Iq1M
+    );
+    if !(gate_dt == up_dt && gate_up_ok) {
         bail!(
-            "{label} gate/up dtypes must match and be Q2_K, Q3_K, Q4_K, Q8_0 or Q4_0; got gate={gate_dt:?}, up={up_dt:?}"
+            "{label} gate/up dtypes must match and be Q2_K, Q3_K, Q4_K, Q8_0, Q4_0 or IQ family; got gate={gate_dt:?}, up={up_dt:?}"
         );
     }
-    if down_dt != GgmlDType::Q2K
-        && down_dt != GgmlDType::Q3K
-        && down_dt != GgmlDType::Q4K
-        && down_dt != GgmlDType::Q5K
-        && down_dt != GgmlDType::Q6K
-        && down_dt != GgmlDType::Q8_0
-        && down_dt != GgmlDType::Q4_0
-        && down_dt != GgmlDType::Q4_1
-    {
+    let down_ok = matches!(
+        down_dt,
+        GgmlDType::Q2K
+            | GgmlDType::Q3K
+            | GgmlDType::Q4K
+            | GgmlDType::Q5K
+            | GgmlDType::Q6K
+            | GgmlDType::Q8_0
+            | GgmlDType::Q4_0
+            | GgmlDType::Q4_1
+            | GgmlDType::Iq4Nl
+            | GgmlDType::Iq4Xs
+            | GgmlDType::Iq3Xxs
+            | GgmlDType::Iq3S
+            | GgmlDType::Iq2Xxs
+            | GgmlDType::Iq2Xs
+            | GgmlDType::Iq2S
+            | GgmlDType::Iq1S
+            | GgmlDType::Iq1M
+    );
+    if !down_ok {
         bail!(
-            "{label} ffn_down_exps must be Q2_K, Q3_K, Q4_K, Q5_K, Q6_K, Q8_0, Q4_0 or Q4_1; got {down_dt:?}"
+            "{label} ffn_down_exps must be Q2_K, Q3_K, Q4_K, Q5_K, Q6_K, Q8_0, Q4_0, Q4_1 or IQ family; got {down_dt:?}"
         );
     }
     Ok(())
