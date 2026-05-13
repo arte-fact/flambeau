@@ -302,6 +302,10 @@ pub(super) fn qdtype_of(dtype: GgmlDType) -> Result<QDtype> {
         // (no host re-quant), llama.cpp-style. Used by UD-Q3_K_XL etc.
         GgmlDType::Iq4Nl => QDtype::IQ4_NL,
         GgmlDType::Iq4Xs => QDtype::IQ4_XS,
+        // T-IQ.14 — native IQ3 MMVQ kernels (codebook lookup, 256/512-entry
+        // u32 grid). Covers UD-Q3_K_XL MoE expert tensors.
+        GgmlDType::Iq3Xxs => QDtype::IQ3_XXS,
+        GgmlDType::Iq3S => QDtype::IQ3_S,
         other => bail!("weight dtype {other:?} not supported by V1 qmatmul dispatch"),
     })
 }

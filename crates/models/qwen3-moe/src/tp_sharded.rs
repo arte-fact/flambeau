@@ -977,17 +977,15 @@ fn upload_tp_with_layout(
     // Source dtypes with no native V1 kernel bypass the post-slice
     // convert path (upload_tp_with_layout's normal flow slices raw bytes
     // first then converts F32→{F16,Q8_0}, which can't address per-block
-    // strides of MXFP4 / IQ3 / IQ2 / IQ1). Dequant the full tensor to F32,
+    // strides of MXFP4 / IQ2 / IQ1). Dequant the full tensor to F32,
     // slice the F32, then quantise the per-rank slice.
-    // T-IQ.13: IQ4_XS / IQ4_NL skip this convert path — they have native
-    // kernels and the TP slicer handles their block strides because both
-    // align on a 32-elem (IQ4_NL) or 256-elem (IQ4_XS) boundary that
-    // matches the dispatch-axis splits we ever use.
+    // T-IQ.13/T-IQ.14: IQ4_XS, IQ4_NL, IQ3_XXS, IQ3_S skip this path —
+    // they have native kernels and the TP slicer handles their block
+    // strides because each block-of-N aligns on the dispatch axis we
+    // ever split on.
     if matches!(
         info.dtype,
         GgmlDType::Mxfp4
-            | GgmlDType::Iq3Xxs
-            | GgmlDType::Iq3S
             | GgmlDType::Iq2Xxs
             | GgmlDType::Iq2Xs
             | GgmlDType::Iq2S

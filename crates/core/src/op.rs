@@ -131,6 +131,8 @@ pub enum QDtype {
     Q8_K,
     IQ4_NL,
     IQ4_XS,
+    IQ3_XXS,
+    IQ3_S,
 }
 
 impl QDtype {
@@ -153,6 +155,8 @@ impl QDtype {
             Self::Q8_K => "Q8_K",
             Self::IQ4_NL => "IQ4_NL",
             Self::IQ4_XS => "IQ4_XS",
+            Self::IQ3_XXS => "IQ3_XXS",
+            Self::IQ3_S => "IQ3_S",
         }
     }
 }

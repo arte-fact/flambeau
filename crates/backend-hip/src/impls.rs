@@ -57,6 +57,29 @@ pub const QMATMUL_GFX906: &[KernelDescriptor] = &[
         m_range: (1, 127),
         cert_rel_path: "certs/hip/gfx906/qmatmul_iq4_nl_mmvq_nw1_r2_gfx906.json",
     },
+    // T-IQ.14 — native IQ3 MMVQ (codebook lookup, 256/512-entry u32 grid).
+    // r2 multi-row is the decode default; single-row variant retained for
+    // the sweep/cert harness.
+    KernelDescriptor {
+        op_name: "QMatMul",
+        impl_id: "qmatmul_iq3_xxs_mmvq_nw1_r2_gfx906",
+        backend: "hip",
+        arch: "gfx906",
+        dtype_weight: QDtype::IQ3_XXS,
+        dtype_activation: QDtype::Q8_1,
+        m_range: (1, 127),
+        cert_rel_path: "certs/hip/gfx906/qmatmul_iq3_xxs_mmvq_nw1_r2_gfx906.json",
+    },
+    KernelDescriptor {
+        op_name: "QMatMul",
+        impl_id: "qmatmul_iq3_s_mmvq_nw1_r2_gfx906",
+        backend: "hip",
+        arch: "gfx906",
+        dtype_weight: QDtype::IQ3_S,
+        dtype_activation: QDtype::Q8_1,
+        m_range: (1, 127),
+        cert_rel_path: "certs/hip/gfx906/qmatmul_iq3_s_mmvq_nw1_r2_gfx906.json",
+    },
     KernelDescriptor {
         // 4.a.3 — 128-thread single-row DP4A Q4_1 MMVQ. Same DP4A
         // math as but half the threads per block, reducing kernel
