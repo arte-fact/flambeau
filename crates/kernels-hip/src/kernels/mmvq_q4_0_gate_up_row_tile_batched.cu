@@ -53,8 +53,8 @@ __device__ __forceinline__ void flambeau_mmvq_q4_0_gate_up_row_tile_batched_body
     const bool do_gate = row < n_rows_gate;
     const bool do_up   = row < n_rows_up;
 
-    const flambeau_block_q4_0* g_row = gate_w + (size_t) row * n_blocks_per_row;
-    const flambeau_block_q4_0* u_row = up_w   + (size_t) row * n_blocks_per_row;
+    const flambeau_block_q4_0* g_row = do_gate ? (gate_w + (size_t) row * n_blocks_per_row) : gate_w;
+    const flambeau_block_q4_0* u_row = do_up   ? (up_w   + (size_t) row * n_blocks_per_row) : up_w;
 
     __shared__ int   s_y_qs[N][RTGU_OUTER_BLOCKS][8];
     __shared__ float s_y_d [N][RTGU_OUTER_BLOCKS];
@@ -98,18 +98,24 @@ __device__ __forceinline__ void flambeau_mmvq_q4_0_gate_up_row_tile_batched_body
         if (bi_in < RTGU_OUTER_BLOCKS) {
             const int block_idx = b_outer + bi_in;
             if (block_idx < n_blocks_per_row) {
-                const flambeau_block_q4_0* gbk = g_row + block_idx;
-                const flambeau_block_q4_0* ubk = u_row + block_idx;
-
-                const int g_v     = ((const int*) gbk->qs)[lane4];
-                const int g_vi_lo = (g_v >> 0) & 0x0F0F0F0F;
-                const int g_vi_hi = (g_v >> 4) & 0x0F0F0F0F;
-                const float g_dx  = (float) gbk->d;
-
-                const int u_v     = ((const int*) ubk->qs)[lane4];
-                const int u_vi_lo = (u_v >> 0) & 0x0F0F0F0F;
-                const int u_vi_hi = (u_v >> 4) & 0x0F0F0F0F;
-                const float u_dx  = (float) ubk->d;
+                int g_vi_lo = 0, g_vi_hi = 0;
+                float g_dx = 0.0f;
+                if (do_gate) {
+                    const flambeau_block_q4_0* gbk = g_row + block_idx;
+                    const int g_v = ((const int*) gbk->qs)[lane4];
+                    g_vi_lo = (g_v >> 0) & 0x0F0F0F0F;
+                    g_vi_hi = (g_v >> 4) & 0x0F0F0F0F;
+                    g_dx    = (float) gbk->d;
+                }
+                int u_vi_lo = 0, u_vi_hi = 0;
+                float u_dx = 0.0f;
+                if (do_up) {
+                    const flambeau_block_q4_0* ubk = u_row + block_idx;
+                    const int u_v = ((const int*) ubk->qs)[lane4];
+                    u_vi_lo = (u_v >> 0) & 0x0F0F0F0F;
+                    u_vi_hi = (u_v >> 4) & 0x0F0F0F0F;
+                    u_dx    = (float) ubk->d;
+                }
 
                 #pragma unroll
                 for (int c = 0; c < N; ++c) {

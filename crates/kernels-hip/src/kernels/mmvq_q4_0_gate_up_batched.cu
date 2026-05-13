@@ -55,8 +55,8 @@ __device__ __forceinline__ void flambeau_mmvq_q4_0_gate_up_batched_body(
     const int lane4     = tid & 3;
     const int block_idx = tid >> 2;
 
-    const flambeau_block_q4_0* g_row = gate_w + (size_t) row * n_blocks_per_row;
-    const flambeau_block_q4_0* u_row = up_w   + (size_t) row * n_blocks_per_row;
+    const flambeau_block_q4_0* g_row = do_gate ? (gate_w + (size_t) row * n_blocks_per_row) : gate_w;
+    const flambeau_block_q4_0* u_row = do_up   ? (up_w   + (size_t) row * n_blocks_per_row) : up_w;
 
     // Per-column accumulators — 2 per col (gate + up).
     float acc_g[N];
@@ -68,20 +68,24 @@ __device__ __forceinline__ void flambeau_mmvq_q4_0_gate_up_batched_body(
     }
 
     for (int b = block_idx; b < n_blocks_per_row; b += GU4B_BLOCKS_PER_ITER) {
-        const flambeau_block_q4_0* gbk = g_row + b;
-        const flambeau_block_q4_0* ubk = u_row + b;
-
-        // Decode each weight ONCE per (block, thread) — amortized
-        // across both N activation cols and the gate/up pair.
-        const int g_v     = ((const int*) gbk->qs)[lane4];
-        const int g_vi_lo = (g_v >> 0) & 0x0F0F0F0F;
-        const int g_vi_hi = (g_v >> 4) & 0x0F0F0F0F;
-        const float g_dx  = (float) gbk->d;
-
-        const int u_v     = ((const int*) ubk->qs)[lane4];
-        const int u_vi_lo = (u_v >> 0) & 0x0F0F0F0F;
-        const int u_vi_hi = (u_v >> 4) & 0x0F0F0F0F;
-        const float u_dx  = (float) ubk->d;
+        int g_vi_lo = 0, g_vi_hi = 0;
+        float g_dx = 0.0f;
+        if (do_gate) {
+            const flambeau_block_q4_0* gbk = g_row + b;
+            const int g_v = ((const int*) gbk->qs)[lane4];
+            g_vi_lo = (g_v >> 0) & 0x0F0F0F0F;
+            g_vi_hi = (g_v >> 4) & 0x0F0F0F0F;
+            g_dx    = (float) gbk->d;
+        }
+        int u_vi_lo = 0, u_vi_hi = 0;
+        float u_dx = 0.0f;
+        if (do_up) {
+            const flambeau_block_q4_0* ubk = u_row + b;
+            const int u_v = ((const int*) ubk->qs)[lane4];
+            u_vi_lo = (u_v >> 0) & 0x0F0F0F0F;
+            u_vi_hi = (u_v >> 4) & 0x0F0F0F0F;
+            u_dx    = (float) ubk->d;
+        }
 
         // Inner col loop — fully unrolled at compile time.
         #pragma unroll

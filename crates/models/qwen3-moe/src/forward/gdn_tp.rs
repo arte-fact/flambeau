@@ -52,7 +52,7 @@ use flambeau_ops::hip::{
         rmsnorm_f16, rmsnorm_f32, rmsnorm_quant_q8_1,
     },
     qmatmul::{
-        mmvq_q4_0_gate_up, mmvq_q4_0_gate_up_t128,
+        mmvq_q4_0_gate_up, mmvq_q4_0_gate_up_row_tile_batched, mmvq_q4_0_gate_up_t128,
         mmvq_q8_0_gate_up,
     },
     recurrent::{gdn_split_qkv_f32, gdn_state_step_alphabeta_f32_s128},
@@ -1186,16 +1186,44 @@ pub fn forward_gdn_decode_batched_tp(
     .context("gdn batched-decode (TP) x_norm → Q8_1 (MMQ DS4)")?;
 
     // === Stages B + C: 4 projections at n_tokens=N ===
-    run_qmatmul_from_tensor(
-        ops, stream, attn_qkv,
-        scratch.x_q8_1, scratch.x_q8_1_mmq, scratch.qkv_mixed_f32,
-        n_tokens, hidden, local_conv_channels, "attn_qkv (TP batched-decode)",
-    )?;
-    run_qmatmul_from_tensor(
-        ops, stream, attn_gate,
-        scratch.x_q8_1, scratch.x_q8_1_mmq, scratch.z_f32,
-        n_tokens, hidden, local_d_inner, "attn_gate (TP batched-decode)",
-    )?;
+    // Fused Q4_0 gate+up via the row-tile batched kernel: one launch
+    // produces both `qkv_mixed_f32 = attn_qkv · x_norm` and
+    // `z_f32 = attn_gate · x_norm` across all N slots, with the Q8_1
+    // activation strip staged into LDS once per (R=4 row tile, outer
+    // iter) instead of HBM-fetched per row per call. cert.md:
+    // 1.32–1.80× vs the two-separate-launch path on GDN-class shapes.
+    // Mirrors the m=1 fused dispatch in `forward_gdn_decode_tp`.
+    let fuse_qkv_gate_q4_0 = attn_qkv.dtype == flambeau_quant::GgmlDType::Q4_0
+        && attn_gate.dtype == flambeau_quant::GgmlDType::Q4_0
+        && (2..=4).contains(&n_tokens)
+        && std::env::var("FLAMBEAU_GDN_FUSE_Q4_0_ROWTILE").as_deref() != Ok("0");
+    if fuse_qkv_gate_q4_0 {
+        mmvq_q4_0_gate_up_row_tile_batched(
+            ops,
+            stream,
+            attn_qkv.ptr,
+            attn_gate.ptr,
+            scratch.x_q8_1,
+            scratch.qkv_mixed_f32,
+            scratch.z_f32,
+            local_conv_channels,
+            local_d_inner,
+            hidden,
+            n_tokens,
+        )
+        .context("attn_qkv + attn_gate (TP batched-decode) fused row-tile Q4_0")?;
+    } else {
+        run_qmatmul_from_tensor(
+            ops, stream, attn_qkv,
+            scratch.x_q8_1, scratch.x_q8_1_mmq, scratch.qkv_mixed_f32,
+            n_tokens, hidden, local_conv_channels, "attn_qkv (TP batched-decode)",
+        )?;
+        run_qmatmul_from_tensor(
+            ops, stream, attn_gate,
+            scratch.x_q8_1, scratch.x_q8_1_mmq, scratch.z_f32,
+            n_tokens, hidden, local_d_inner, "attn_gate (TP batched-decode)",
+        )?;
+    }
     run_qmatmul_from_tensor(
         ops, stream, ssm_alpha,
         scratch.x_q8_1, scratch.x_q8_1_mmq, scratch.alpha_f32,
