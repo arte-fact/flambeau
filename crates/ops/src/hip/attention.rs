@@ -39,10 +39,11 @@ pub fn attention_decode_f16(
     head_dim: usize,
     n_tokens_kv: usize,
     scale: f32,
+    window_size: i32,
 ) -> Result<()> {
     attention_decode_f16_slots(
         reg, stream, q, k_cache, v_cache, out, n_heads_q, n_heads_kv, head_dim,
-        n_tokens_kv, scale, None,
+        n_tokens_kv, scale, window_size, None,
     )
 }
 
@@ -65,11 +66,12 @@ pub fn attention_decode_f16_slots(
     head_dim: usize,
     n_tokens_kv: usize,
     scale: f32,
+    window_size: i32,
     n_tokens_kv_slot: Option<flambeau_backend_hip::ScalarSlot>,
 ) -> Result<()> {
     assert!(
-        head_dim == 64 || head_dim == 128 || head_dim == 256,
-        "attention_decode_f16: head_dim {head_dim} not supported (expected 64, 128, or 256)"
+        head_dim == 64 || head_dim == 128 || head_dim == 256 || head_dim == 512,
+        "attention_decode_f16: head_dim {head_dim} not supported (expected 64, 128, 256, or 512)"
     );
     let module = reg.expect_module("attention_decode_f16")?;
     let kernel = module.kernel("flambeau_attention_decode_f16")?;
@@ -79,6 +81,7 @@ pub fn attention_decode_f16_slots(
     let head_dim_i = head_dim as i32;
     let n_tokens_i = n_tokens_kv as i32;
     let scale_f = scale;
+    let window_i = window_size;
     let q_ptr: u64 = q.as_usize() as u64;
     let k_ptr: u64 = k_cache.as_usize() as u64;
     let v_ptr: u64 = v_cache.as_usize() as u64;
@@ -96,6 +99,7 @@ pub fn attention_decode_f16_slots(
         None => args.push(&n_tokens_i),
     }
     args.push(&scale_f);
+    args.push(&window_i);
     let cfg = LaunchCfg::one_d(n_heads_q as u32, head_dim as u32);
     unsafe { kernel.launch(stream, cfg, args)? };
     Ok(())
@@ -252,6 +256,7 @@ pub fn kv_append_f16_batched_slots(
 /// Measured (Qwen3.6 shape, head_dim=256, 16/2, MI50):
 /// * n_tokens=2048: single-pass 2647 µs → split-K 340 µs = **7.78×**
 /// * n_tokens=4096: single-pass 5210 µs → split-K 662 µs = **7.87×**
+#[allow(clippy::too_many_arguments)]
 pub fn attention_decode_f16_splitk(
     reg: &OpsRegistry,
     stream: &HipStream,
@@ -268,6 +273,7 @@ pub fn attention_decode_f16_splitk(
     n_tokens_kv: usize,
     chunk_size: usize,
     scale: f32,
+    window_size: i32,
 ) -> Result<()> {
     assert!(
         head_dim == 64 || head_dim == 128 || head_dim == 256,
@@ -295,6 +301,7 @@ pub fn attention_decode_f16_splitk(
     let po_ptr: u64 = partials_o.as_usize() as u64;
     let scale_f = scale;
 
+    let window_i = window_size;
     let mut a1 = KernelArgs::new();
     a1.push(&q_ptr);
     a1.push(&k_ptr);
@@ -309,6 +316,7 @@ pub fn attention_decode_f16_splitk(
     a1.push(&n_chunks_i);
     a1.push(&chunk_size_i);
     a1.push(&scale_f);
+    a1.push(&window_i);
     let cfg1 = LaunchCfg {
         grid: (n_heads_q as u32, n_chunks as u32, 1),
         block: (head_dim as u32, 1, 1),
@@ -667,10 +675,11 @@ pub fn attention_prefill_f16(
     n_k_tokens: usize,
     q_offset: usize,
     scale: f32,
+    window_size: i32,
 ) -> Result<()> {
     attention_prefill_f16_slots(
         reg, stream, q, k_cache, v_cache, out, n_q_tokens, n_heads_q, n_heads_kv,
-        head_dim, n_k_tokens, q_offset, scale, None, None,
+        head_dim, n_k_tokens, q_offset, scale, window_size, None, None,
     )
 }
 
@@ -705,14 +714,18 @@ pub fn attention_prefill_f16_slots(
     n_k_tokens: usize,
     q_offset: usize,
     scale: f32,
+    window_size: i32,
     n_k_slot: Option<flambeau_backend_hip::ScalarSlot>,
     q_off_slot: Option<flambeau_backend_hip::ScalarSlot>,
 ) -> Result<()> {
     assert!(
-        head_dim == 64 || head_dim == 128 || head_dim == 256,
-        "attention_prefill_f16: head_dim {head_dim} not supported (expected 64, 128, or 256)"
+        head_dim == 64 || head_dim == 128 || head_dim == 256 || head_dim == 512,
+        "attention_prefill_f16: head_dim {head_dim} not supported (expected 64, 128, 256, or 512)"
     );
 
+    // flash_tile prefill now SWA-aware (window_size kernel arg lands
+    // alongside causal + per-warp swa_min masking). Route through it
+    // whenever n_q ≥ 4.
     let use_flash_tile = n_q_tokens >= 4;
 
     let q_ptr: u64 = q.as_usize() as u64;
@@ -733,9 +746,11 @@ pub fn attention_prefill_f16_slots(
             64 => "flambeau_attention_prefill_flash_tile_d64_f16",
             128 => "flambeau_attention_prefill_flash_tile_d128_f16",
             256 => "flambeau_attention_prefill_flash_tile_d256_br8_f16",
+            512 => "flambeau_attention_prefill_flash_tile_d512_f16",
             _ => unreachable!(),
         };
         let kernel = module.kernel(entry)?;
+        let window_i = window_size;
         let mut args = KernelArgs::new();
         args.push(&q_ptr);
         args.push(&k_ptr);
@@ -747,6 +762,7 @@ pub fn attention_prefill_f16_slots(
         push_scalar_maybe_slot(&mut args, &n_k_i, n_k_slot);
         push_scalar_maybe_slot(&mut args, &q_off_i, q_off_slot);
         args.push(&scale_f);
+        args.push(&window_i);
         // 9.b — BR depends on which variant we dispatch to.
         // d256_br8 uses BR=8 (more Q rows per block, fewer blocks);
         // other head_dims still use BR=4.
@@ -761,10 +777,12 @@ pub fn attention_prefill_f16_slots(
         return Ok(());
     }
 
-    // Oracle path for n_q < 4 (very short prompts / edge shapes).
+    // Oracle path for n_q < 4 (very short prompts / edge shapes) or
+    // any SWA call (flash_tile is not SWA-aware yet).
     let module = reg.expect_module("attention_prefill_f16")?;
     let kernel = module.kernel("flambeau_attention_prefill_f16")?;
     let head_dim_i = head_dim as i32;
+    let window_i = window_size;
     let mut args = KernelArgs::new();
     args.push(&q_ptr);
     args.push(&k_ptr);
@@ -777,6 +795,7 @@ pub fn attention_prefill_f16_slots(
     push_scalar_maybe_slot(&mut args, &n_k_i, n_k_slot);
     push_scalar_maybe_slot(&mut args, &q_off_i, q_off_slot);
     args.push(&scale_f);
+    args.push(&window_i);
     let cfg = LaunchCfg {
         grid: (n_q_tokens as u32, n_heads_q as u32, 1),
         block: (head_dim as u32, 1, 1),

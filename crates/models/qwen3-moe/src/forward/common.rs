@@ -117,6 +117,7 @@ pub(crate) fn validate_moe_dtypes(
               the caller's existing scratch-pointer flow so introducing a context struct \
               would just rewrap the same pointers."
 )]
+#[allow(dead_code)] // kept available; previously used by inline MoE TP prefill (now migrated to blocks)
 pub(crate) fn run_indexed_moe_gate_up(
     ops: &OpsRegistry,
     stream: &HipStream,
@@ -256,6 +257,7 @@ pub(crate) fn run_indexed_moe_gate_up(
               the caller's existing scratch-pointer flow so introducing a context struct \
               would just rewrap the same pointers."
 )]
+#[allow(dead_code)] // kept available; see run_indexed_moe_gate_up note
 pub(crate) fn run_indexed_moe_down(
     ops: &OpsRegistry,
     stream: &HipStream,

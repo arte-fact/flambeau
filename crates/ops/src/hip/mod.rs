@@ -33,6 +33,7 @@ pub mod qmatmul;
 pub mod recurrent;
 pub mod router;
 pub mod sampling;
+pub mod softcap;
 pub mod softmax;
 
 pub use ops_impl::HipOps;
@@ -227,6 +228,7 @@ pub const KERNEL_STEMS: &[&str] = &[
     "silu_f32",
     "sigmoid_mul_f16",
     "scale_f32",
+    "scale_f16",
     "add_f16",
     "add_f32",
     "rope_f16",
@@ -268,6 +270,11 @@ pub const KERNEL_STEMS: &[&str] = &[
     // Sampler-D (#211, #212) — GPU-side sampler kernels for the chat hot path.
     "sampler_topk_softmax_f32",
     "sampler_apply_penalties_f32",
+    // Gemma4 — final logit softcap.
+    "apply_softcap_f32",
+    // Gemma4 — GELU-based FFN + per-layer side-channel.
+    "gelu_f32_to_f16",
+    "gelu_mul_f32",
 ];
 
 /// Single-session registry of loaded HIP kernel modules. Built once at model

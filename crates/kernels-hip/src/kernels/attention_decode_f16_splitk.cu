@@ -41,7 +41,8 @@ extern "C" __global__ void flambeau_attention_decode_f16_splitk_chunk(
     const int n_tokens,
     const int n_chunks,
     const int chunk_size,
-    const float scale
+    const float scale,
+    const int window_size                  // SWA radius, 0 = unbounded causal
 ) {
     const int q_head = blockIdx.x;
     const int chunk  = blockIdx.y;
@@ -54,9 +55,19 @@ extern "C" __global__ void flambeau_attention_decode_f16_splitk_chunk(
     const int lane   = tid & 63;
     const int nwarps = blockDim.x >> 6;
 
-    const int t_start = chunk * chunk_size;
-    int t_end         = t_start + chunk_size;
+    int t_start = chunk * chunk_size;
+    int t_end   = t_start + chunk_size;
     if (t_end > n_tokens) t_end = n_tokens;
+    // SWA: clamp chunk range to the window. Query position is the last
+    // appended token (n_tokens - 1). A chunk entirely outside the window
+    // contributes -INF max + 0 sum, neutralised by the combine pass.
+    if (window_size > 0) {
+        const int qpos = n_tokens - 1;
+        int swa_min = qpos - window_size + 1;
+        if (swa_min < 0) swa_min = 0;
+        if (t_start < swa_min) t_start = swa_min;
+    }
+    if (t_start > t_end) t_start = t_end;
 
     __shared__ float q_shared[ATTN_SK_MAX_HEAD_DIM];
     if (tid < head_dim) {

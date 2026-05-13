@@ -1,3 +1,9 @@
+// Supported head_dim values: {64, 128, 256, 512}. The caller launches with
+// `block = head_dim` threads (1 wave64 at d=64, 2 at d=128, 4 at d=256,
+// 8 at d=512). LDS scales with ATTN_MAX_HEAD_DIM (~4 KB at 512 vs 2 KB
+// at 256) — well under the 64 KB/CU budget; LDS-limited occupancy is
+// not the binding constraint at any of these head_dims.
+//
 // attention_decode_f16 — GQA decode attention, F16 KV cache.
 // Fused decode-step attention: Q has 1 token, K and V cover the whole
 // context. For each Q head q_idx (of n_heads_q) we compute:
@@ -36,7 +42,7 @@ typedef _Float16 fb_fp16_t;
 
 // Max head_dim the kernel tolerates. Bump alongside the dispatcher /
 // ops-layer guard + new cert shapes, never silently.
-#define ATTN_MAX_HEAD_DIM 256
+#define ATTN_MAX_HEAD_DIM 512
 // Max warps per block = ATTN_MAX_HEAD_DIM / wave64.
 #define ATTN_MAX_WARPS (ATTN_MAX_HEAD_DIM / 64)
 
@@ -47,9 +53,10 @@ extern "C" __global__ void flambeau_attention_decode_f16(
     fb_fp16_t* __restrict__ out,              // [n_heads_q, head_dim]
     const int n_heads_q,
     const int n_heads_kv,
-    const int head_dim,                       // must be 128 or 256
+    const int head_dim,                       // must be 64, 128, 256, or 512
     const int n_tokens,
-    const float scale                         // 1 / sqrt(head_dim)
+    const float scale,                        // 1 / sqrt(head_dim) (caller-supplied; gemma4 passes 1.0)
+    const int window_size                     // SWA radius, 0 = unbounded causal
 ) {
     const int q_head  = blockIdx.x;
     if (q_head >= n_heads_q) return;
@@ -59,7 +66,7 @@ extern "C" __global__ void flambeau_attention_decode_f16(
     const int tid   = threadIdx.x;
     const int warp  = tid >> 6;                   // 0..(n_warps-1)
     const int lane  = tid & 63;                   // 0..63
-    const int n_warps = blockDim.x >> 6;          // {2, 4} for head_dim ∈ {128, 256}
+    const int n_warps = blockDim.x >> 6;          // {1,2,4,8} for head_dim ∈ {64,128,256,512}
 
     // --- Load Q for this head ---
     __shared__ float q_shared[ATTN_MAX_HEAD_DIM];
@@ -77,8 +84,18 @@ extern "C" __global__ void flambeau_attention_decode_f16(
     __shared__ float score_parts[ATTN_MAX_WARPS];
     __syncthreads();
 
+    // SWA: query position is the last token in the cache (n_tokens - 1).
+    // Keys older than (query_pos - window_size + 1) are masked. window_size=0
+    // disables the window — full causal range.
+    int t_start = 0;
+    if (window_size > 0) {
+        const int qpos = n_tokens - 1;
+        t_start = qpos - window_size + 1;
+        if (t_start < 0) t_start = 0;
+    }
+
     // --- Inner loop over context positions ---
-    for (int t = 0; t < n_tokens; ++t) {
+    for (int t = t_start; t < n_tokens; ++t) {
         const size_t kv_row = ((size_t) t * n_heads_kv + kv_head) * head_dim;
 
         // 1. Compute Q · K[t, kv_head] cooperatively — each thread owns one lane.

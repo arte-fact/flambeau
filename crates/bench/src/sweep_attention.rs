@@ -32,6 +32,7 @@ const SHAPES: &[(usize, usize, usize)] = &[
     (64, 4, 1),    // synthetic smoke-test shape (head_dim=64, 1 warp path)
     (128, 32, 4), // Qwen3.5 / GQA-8
     (256, 16, 2), // Qwen3.6 / GQA-8
+    (512, 32, 16), // gemma4-31B full-attn (n_heads=32, n_heads_kv=16)
 ];
 
 pub fn run_sweep(repo_root: &Path) -> Result<Cert> {
@@ -143,6 +144,7 @@ fn run_shape(
         let d_v_ptr: u64 = d_v.as_usize() as u64;
         let d_out_ptr: u64 = d_out.as_usize() as u64;
         let scale_f = scale;
+        let window_i: i32 = 0;
         let mut args = KernelArgs::new();
         args.push(&d_q_ptr);
         args.push(&d_k_ptr);
@@ -153,6 +155,7 @@ fn run_shape(
         args.push(&head_dim_i);
         args.push(&n_tokens_i);
         args.push(&scale_f);
+        args.push(&window_i);
         let cfg = LaunchCfg::one_d(n_heads_q as u32, head_dim as u32);
         unsafe { kernel.launch(stream, cfg, args)? };
         stream.synchronize()?;

@@ -1,0 +1,971 @@
+//! Hybrid PP-of-TP decode driver for Gemma 4 (pp2tp2 — 4-GPU target).
+//!
+//! Mesh shape: `n_stages * ranks_per_stage` devices. Stage `s`'s
+//! sub-cluster holds `ranks_per_stage[s]` devices; the global cluster
+//! covers all of them in the order `s * tp_size + r`. The driver runs
+//! TP within a stage (Megatron-style sharding + `sum_tp2` AR) and PP
+//! between stages (peer-copy-via-host of the F16 hidden residual).
+//!
+//! Cluster construction order matters (MEMORY.md `hybrid_cluster_order`):
+//! per-stage sub-clusters MUST be created BEFORE the global cluster.
+//! The driver assumes the caller already obeys this ordering when
+//! handing in the cluster handles.
+//!
+//! Device mesh for the 4× MI50 rig is `hip:0,2,1,3` with `pp_size=2,
+//! tp_size=2` (MEMORY.md `never_tp4_use_pp2tp2`) — the {2,3} link-
+//! faulted pair is avoided by interleaving devices across stages.
+//!
+//! S10-A scope:
+//! - Decode only (hybrid prefill = S10-B follow-up).
+//! - pp2tp2 only (4 stages × N ranks deferred to S10-B; TP4 stages
+//!   wait on #20).
+//! - Dense FFN only; MoE deferred (#18 + S10-B integration).
+//! - No shared-KV-on-hybrid (deferred), no per-layer-embed (#17), no
+//!   layer_output_scale.
+
+#![cfg(feature = "hip")]
+
+use std::sync::Arc;
+
+use anyhow::{anyhow, bail, Context, Result};
+use flambeau_backend_hip::{BarP2pAllReduce, HipCluster, HipDevice};
+use flambeau_blocks::{
+    forward_one_token_hybrid, Activation, DenseMlpDecodeScratch, DenseMlpTp, HybridDecodeDriver,
+    StandardAttention, StandardAttentionDecodeScratch, WeightHandle,
+};
+use flambeau_core::{CopyDirection, Device, DevicePtr, Stream};
+use flambeau_ops::hip::{HipOps, OpsRegistry};
+use flambeau_ops::Ops;
+use flambeau_quant::GgmlDType;
+use flambeau_runtime::{F16Contig, KvCache};
+use half::f16;
+
+use crate::config::Gemma4Config;
+use crate::layer::Gemma4LayerWeights;
+use crate::layout::{FfnKind, ModelLayout};
+use crate::output_head::{forward_output_head, OutputHeadScratch};
+use crate::weights_hip::DeviceTensor;
+
+/// Per-rank state within a stage. Mirrors `Gemma4TpStage` but
+/// parameterised by stage layers + their sharded weights.
+pub struct HybridRankState {
+    pub rank_in_stage: usize,
+    pub layer_weights: Vec<Gemma4LayerWeights>,
+    pub kv_caches: Vec<Option<KvCache<F16Contig, HipDevice>>>,
+    /// Stage 0 only.
+    pub token_embd: Option<DeviceTensor>,
+    pub token_embd_dims: Option<[usize; 2]>,
+    /// Head stage only (replicated across that stage's ranks).
+    pub output_norm: Option<DeviceTensor>,
+    pub lm_head: Option<DeviceTensor>,
+    pub lm_head_dims: Option<[usize; 2]>,
+    pub hidden: DevicePtr,
+    pub partial_attn: DevicePtr,
+    pub partial_ffn: DevicePtr,
+    scratch: HybridScratchPtrs,
+    /// Head rank only.
+    pub output_head_scratch: Option<OutputHeadScratch>,
+    positions_host: Vec<i32>,
+    raw_alloc_bytes: Vec<(DevicePtr, usize)>,
+    disposed: bool,
+}
+
+struct HybridScratchPtrs {
+    x_q8_1: (DevicePtr, usize),
+    mmvq_f32: (DevicePtr, usize),
+    q_f16: (DevicePtr, usize),
+    k_f16: (DevicePtr, usize),
+    v_f16: (DevicePtr, usize),
+    attn_out_local: (DevicePtr, usize),
+    attn_residual_f16: (DevicePtr, usize),
+    gate_f32: (DevicePtr, usize),
+    up_f32: (DevicePtr, usize),
+    activated_f16: (DevicePtr, usize),
+    activated_q8_1: (DevicePtr, usize),
+    positions: (DevicePtr, usize),
+    v_ones_f16: (DevicePtr, usize),
+    /// Splitk partials (engaged by `StandardAttention::forward_decode`
+    /// when `n_tokens_kv > 256`). Sized for n_heads_local_max heads.
+    splitk_partials_m: (DevicePtr, usize),
+    splitk_partials_s: (DevicePtr, usize),
+    splitk_partials_o: (DevicePtr, usize),
+}
+
+/// One PP stage. Owns its own TP sub-cluster + per-rank state +
+/// `BarP2pAllReduce` over the sub-cluster.
+pub struct Gemma4HybridStage {
+    pub stage_idx: usize,
+    pub sub_cluster: Arc<HipCluster>,
+    /// Layers in this stage (global indices, ascending).
+    pub layers_global: Vec<usize>,
+    pub rank_state: Vec<HybridRankState>,
+    /// AR primitive over this stage's sub-cluster.
+    ar: BarP2pAllReduce,
+    /// Per-rank `OpsRegistry` over the sub-cluster.
+    regs: Vec<OpsRegistry>,
+}
+
+/// Hybrid driver. Holds the global cluster (for inter-stage peer
+/// copies) and per-stage TP machinery.
+pub struct Gemma4HybridDriver {
+    pub global_cluster: Arc<HipCluster>,
+    pub cfg: Gemma4Config,
+    pub layout: ModelLayout,
+    pub stages: Vec<Gemma4HybridStage>,
+    pub layer_to_stage: Vec<usize>,
+    pub head_stage_idx: usize,
+    pub head_rank_in_head_stage_idx: usize,
+    pub tp_size: usize,
+    logits_host: Vec<f32>,
+}
+
+fn alloc_zeroed(dev: &HipDevice, bytes: usize) -> Result<DevicePtr> {
+    let p = dev.alloc(bytes).map_err(|e| anyhow!("alloc {bytes}: {e}"))?;
+    let zero = vec![0u8; bytes];
+    // SAFETY: dst has bytes; src is host vec of same len.
+    unsafe {
+        dev.memcpy_async(
+            dev.default_stream(),
+            CopyDirection::HostToDevice,
+            p,
+            DevicePtr(zero.as_ptr() as usize),
+            bytes,
+        )?;
+    }
+    dev.default_stream().synchronize()?;
+    Ok(p)
+}
+
+fn upload_f16_ones(dev: &HipDevice, n: usize) -> Result<DevicePtr> {
+    let ones: Vec<f16> = vec![f16::from_f32(1.0); n];
+    let bytes = ones.len() * 2;
+    let p = dev.alloc(bytes).map_err(|e| anyhow!("alloc {bytes}: {e}"))?;
+    // SAFETY: see above.
+    unsafe {
+        dev.memcpy_async(
+            dev.default_stream(),
+            CopyDirection::HostToDevice,
+            p,
+            DevicePtr(ones.as_ptr() as usize),
+            bytes,
+        )?;
+    }
+    dev.default_stream().synchronize()?;
+    Ok(p)
+}
+
+fn dummy_dt() -> DeviceTensor {
+    DeviceTensor {
+        ptr: DevicePtr::NULL,
+        dtype: GgmlDType::F32,
+        bytes: 0,
+    }
+}
+
+/// Even-split layer-to-stage assignment with shared-KV stage-boundary
+/// validation (mirrors `partition_layers` in `pp.rs`).
+pub fn partition_layers_pp(n_stages: usize, layout: &ModelLayout) -> Result<Vec<usize>> {
+    if n_stages == 0 {
+        bail!("partition_layers_pp: n_stages=0");
+    }
+    let n = layout.layers.len();
+    if n == 0 {
+        bail!("partition_layers_pp: 0 layers");
+    }
+    let per_stage = n.div_ceil(n_stages);
+    let mut out = vec![0usize; n];
+    for (i, _) in layout.layers.iter().enumerate() {
+        out[i] = (i / per_stage).min(n_stages - 1);
+    }
+    for spec in &layout.layers {
+        if !spec.has_kv {
+            let src = spec.kv_share_src.ok_or_else(|| {
+                anyhow!(
+                    "partition_layers_pp: tail layer {} has no kv_share_src",
+                    spec.index
+                )
+            })?;
+            if out[spec.index] != out[src] {
+                bail!(
+                    "partition_layers_pp: shared-KV tail layer {} on stage {} but \
+                     kv_share_src layer {} on stage {}; tail must be in same stage",
+                    spec.index,
+                    out[spec.index],
+                    src,
+                    out[src]
+                );
+            }
+        }
+    }
+    Ok(out)
+}
+
+impl HybridRankState {
+    #[allow(clippy::too_many_arguments)]
+    pub fn from_pieces(
+        device: &HipDevice,
+        rank_in_stage: usize,
+        cfg: &Gemma4Config,
+        layout: &ModelLayout,
+        layers_global: &[usize],
+        tp_size: usize,
+        layer_weights: Vec<Gemma4LayerWeights>,
+        token_embd: Option<DeviceTensor>,
+        token_embd_dims: Option<[usize; 2]>,
+        output_norm: Option<DeviceTensor>,
+        lm_head: Option<DeviceTensor>,
+        lm_head_dims: Option<[usize; 2]>,
+        is_head_rank: bool,
+        max_tokens: usize,
+    ) -> Result<Self> {
+        device.bind()?;
+        if layer_weights.len() != layers_global.len() {
+            bail!(
+                "HybridRankState: expected {} layer weights, got {}",
+                layers_global.len(),
+                layer_weights.len()
+            );
+        }
+        let hidden = cfg.hidden_size;
+        let head_dim = cfg.head_dim.max(cfg.head_dim_swa);
+        let n_heads_local_max = cfg.num_heads / tp_size;
+        let n_kv_local_max = layers_global
+            .iter()
+            .map(|&gi| cfg.num_kv_heads[gi] / tp_size)
+            .max()
+            .unwrap_or(0);
+        let q_width_local_max = n_heads_local_max * head_dim;
+        let kv_width_local_max = n_kv_local_max * head_dim;
+        let ff_len = cfg.feed_forward_length;
+        let ff_len_local = ff_len / tp_size;
+
+        let mut kv_caches = Vec::with_capacity(layers_global.len());
+        for &gi in layers_global {
+            let spec = &layout.layers[gi];
+            if !spec.has_kv {
+                bail!("HybridRankState: shared-KV tail layer {gi} not supported in S10-A");
+            }
+            if spec.ffn_kind != FfnKind::Dense {
+                bail!("HybridRankState: MoE layer {gi} not supported in S10-A");
+            }
+            let n_kv_local = spec.n_kv_heads / tp_size;
+            let kv = KvCache::<F16Contig, HipDevice>::new(
+                device,
+                n_kv_local,
+                spec.head_dim,
+                max_tokens,
+            )
+            .map_err(|e| anyhow!("kv alloc layer {gi}: {e}"))?;
+            kv_caches.push(Some(kv));
+        }
+
+        let mut raw_alloc_bytes: Vec<(DevicePtr, usize)> = Vec::new();
+        macro_rules! ta {
+            ($bytes:expr) => {{
+                let bytes = $bytes;
+                let p = alloc_zeroed(device, bytes)?;
+                raw_alloc_bytes.push((p, bytes));
+                (p, bytes)
+            }};
+        }
+
+        let mmvq_max = q_width_local_max
+            .max(kv_width_local_max)
+            .max(hidden)
+            .max(ff_len_local);
+        let q8_1_blocks = hidden.max(ff_len_local).div_ceil(32);
+        let q8_1_bytes_per_block = 36;
+        let x_q8_1_bytes = q8_1_blocks * q8_1_bytes_per_block;
+        let activated_q8_1_bytes = ff_len_local.div_ceil(32) * q8_1_bytes_per_block;
+
+        let v_ones_ptr = upload_f16_ones(device, head_dim)?;
+        raw_alloc_bytes.push((v_ones_ptr, head_dim * 2));
+
+        // Splitk partials sized for n_heads_local_max × MAX_SPLITK_CHUNKS.
+        let splitk_ms_bytes = n_heads_local_max * flambeau_blocks::MAX_SPLITK_CHUNKS * 4;
+        let splitk_o_bytes =
+            n_heads_local_max * flambeau_blocks::MAX_SPLITK_CHUNKS * head_dim * 4;
+
+        let scratch = HybridScratchPtrs {
+            x_q8_1: ta!(x_q8_1_bytes),
+            mmvq_f32: ta!(mmvq_max * 4),
+            q_f16: ta!(q_width_local_max * 2),
+            k_f16: ta!(kv_width_local_max * 2),
+            v_f16: ta!(kv_width_local_max * 2),
+            attn_out_local: ta!(q_width_local_max.max(hidden) * 2),
+            attn_residual_f16: ta!(hidden * 2),
+            gate_f32: ta!(ff_len_local * 4),
+            up_f32: ta!(ff_len_local * 4),
+            activated_f16: ta!(ff_len_local * 2),
+            activated_q8_1: ta!(activated_q8_1_bytes),
+            positions: ta!(4),
+            v_ones_f16: (v_ones_ptr, head_dim * 2),
+            splitk_partials_m: ta!(splitk_ms_bytes),
+            splitk_partials_s: ta!(splitk_ms_bytes),
+            splitk_partials_o: ta!(splitk_o_bytes),
+        };
+        let hidden_ptr = ta!(hidden * 2).0;
+        let partial_attn = ta!(hidden * 2).0;
+        let partial_ffn = ta!(hidden * 2).0;
+        let output_head_scratch = if is_head_rank {
+            Some(OutputHeadScratch {
+                x_norm_f16: ta!(hidden * 2).0,
+                x_q8_1: ta!(x_q8_1_bytes).0,
+                logits_f32: ta!(cfg.vocab_size * 4).0,
+            })
+        } else {
+            None
+        };
+
+        Ok(Self {
+            rank_in_stage,
+            layer_weights,
+            kv_caches,
+            token_embd,
+            token_embd_dims,
+            output_norm,
+            lm_head,
+            lm_head_dims,
+            hidden: hidden_ptr,
+            partial_attn,
+            partial_ffn,
+            scratch,
+            output_head_scratch,
+            positions_host: vec![0i32; 1],
+            raw_alloc_bytes,
+            disposed: false,
+        })
+    }
+
+    fn dispose(&mut self, device: &HipDevice) -> Result<()> {
+        if self.disposed {
+            return Ok(());
+        }
+        self.disposed = true;
+        let kvs = std::mem::take(&mut self.kv_caches);
+        for kv in kvs.into_iter().flatten() {
+            kv.dispose(device).map_err(|e| anyhow!("kv dispose: {e}"))?;
+        }
+        for (p, b) in self.raw_alloc_bytes.drain(..) {
+            unsafe {
+                let _ = device.dealloc(p, b);
+            }
+        }
+        for t in [
+            std::mem::replace(&mut self.token_embd, None),
+            std::mem::replace(&mut self.output_norm, None),
+            std::mem::replace(&mut self.lm_head, None),
+        ]
+        .into_iter()
+        .flatten()
+        {
+            if !t.ptr.is_null() && t.bytes > 0 {
+                unsafe {
+                    let _ = device.dealloc(t.ptr, t.bytes);
+                }
+            }
+        }
+        let _ = dummy_dt(); // keep helper referenced for future use
+        Ok(())
+    }
+}
+
+impl Drop for HybridRankState {
+    fn drop(&mut self) {
+        if !self.disposed {
+            tracing::warn!(
+                "HybridRankState rank-in-stage {} dropped without dispose()",
+                self.rank_in_stage
+            );
+        }
+    }
+}
+
+impl Gemma4HybridStage {
+    pub fn new(
+        stage_idx: usize,
+        sub_cluster: Arc<HipCluster>,
+        layers_global: Vec<usize>,
+        rank_state: Vec<HybridRankState>,
+    ) -> Result<Self> {
+        let n_ranks = sub_cluster.ranks();
+        if rank_state.len() != n_ranks {
+            bail!(
+                "Gemma4HybridStage: sub_cluster has {n_ranks} ranks but {} rank states",
+                rank_state.len()
+            );
+        }
+        let ar = BarP2pAllReduce::new(sub_cluster.clone())
+            .map_err(|e| anyhow!("BarP2pAllReduce stage {stage_idx}: {e}"))?;
+        let mut regs = Vec::with_capacity(n_ranks);
+        for r in 0..n_ranks {
+            let dev = sub_cluster.device(r);
+            dev.bind()?;
+            regs.push(OpsRegistry::new(dev).map_err(|e| anyhow!("registry stage {stage_idx} rank {r}: {e}"))?);
+        }
+        Ok(Self {
+            stage_idx,
+            sub_cluster,
+            layers_global,
+            rank_state,
+            ar,
+            regs,
+        })
+    }
+
+    fn dispose(&mut self) -> Result<()> {
+        let n = self.sub_cluster.ranks();
+        for r in 0..n {
+            let dev = self.sub_cluster.device(r);
+            self.rank_state[r].dispose(dev)?;
+        }
+        Ok(())
+    }
+}
+
+impl Gemma4HybridDriver {
+    /// `tp_size` is uniform across stages in S10-A. `global_cluster`
+    /// has `n_stages * tp_size` ranks. `stages[s]` has its own
+    /// sub-cluster of `tp_size` ranks. The global rank for
+    /// `(stage=s, rank=r)` is `s * tp_size + r`.
+    pub fn from_pieces(
+        global_cluster: Arc<HipCluster>,
+        cfg: Gemma4Config,
+        layout: ModelLayout,
+        stages: Vec<Gemma4HybridStage>,
+        layer_to_stage: Vec<usize>,
+        tp_size: usize,
+        head_stage_idx: usize,
+        head_rank_in_head_stage_idx: usize,
+    ) -> Result<Self> {
+        let n_stages = stages.len();
+        if n_stages == 0 {
+            bail!("Gemma4HybridDriver: 0 stages");
+        }
+        let expected_ranks = n_stages * tp_size;
+        if global_cluster.ranks() != expected_ranks {
+            bail!(
+                "Gemma4HybridDriver: global_cluster ranks {} != n_stages*tp_size {}",
+                global_cluster.ranks(),
+                expected_ranks
+            );
+        }
+        if head_stage_idx >= n_stages {
+            bail!("Gemma4HybridDriver: head_stage_idx {head_stage_idx} OOB");
+        }
+        if head_rank_in_head_stage_idx >= tp_size {
+            bail!(
+                "Gemma4HybridDriver: head_rank_in_head_stage_idx {head_rank_in_head_stage_idx} OOB"
+            );
+        }
+        let logits_host = vec![0.0f32; cfg.vocab_size];
+        Ok(Self {
+            global_cluster,
+            cfg,
+            layout,
+            stages,
+            layer_to_stage,
+            head_stage_idx,
+            head_rank_in_head_stage_idx,
+            tp_size,
+            logits_host,
+        })
+    }
+
+    /// Map (stage, rank_in_stage) → global rank in `global_cluster`.
+    pub fn global_rank(&self, stage: usize, rank_in_stage: usize) -> usize {
+        stage * self.tp_size + rank_in_stage
+    }
+
+    pub fn dispose(&mut self) -> Result<()> {
+        for stage in &mut self.stages {
+            stage.dispose()?;
+        }
+        Ok(())
+    }
+
+    pub fn forward_one_token(&mut self, token_id: u32, position: usize) -> Result<u32> {
+        forward_one_token_hybrid(self, token_id, position)?;
+        let mut best_i = 0u32;
+        let mut best_v = f32::NEG_INFINITY;
+        for (i, &v) in self.logits_host.iter().enumerate() {
+            if v > best_v {
+                best_v = v;
+                best_i = i as u32;
+            }
+        }
+        Ok(best_i)
+    }
+}
+
+impl Drop for Gemma4HybridDriver {
+    fn drop(&mut self) {
+        // Best-effort; stages warn themselves if leaked.
+    }
+}
+
+fn embed_decode_host(
+    device: &HipDevice,
+    stream: &flambeau_backend_hip::HipStream,
+    tok_embd_ptr: DevicePtr,
+    tok_embd_bytes: usize,
+    tok_embd_dtype: GgmlDType,
+    vocab: usize,
+    hidden: usize,
+    token_id: u32,
+    out_f16_dev: DevicePtr,
+) -> Result<()> {
+    if (token_id as usize) >= vocab {
+        bail!("token_id {token_id} >= vocab {vocab}");
+    }
+    let bs = tok_embd_dtype.block_size() as usize;
+    let ts = tok_embd_dtype.type_size() as usize;
+    if hidden % bs != 0 {
+        bail!("hidden {hidden} % block_size {bs} != 0 for {tok_embd_dtype:?}");
+    }
+    let row_bytes = (hidden / bs) * ts;
+    let offset = token_id as usize * row_bytes;
+    if offset + row_bytes > tok_embd_bytes {
+        bail!("tok_embd row OOB at token {token_id}");
+    }
+    let src = tok_embd_ptr.offset_bytes(offset);
+    let mut row_raw = vec![0u8; row_bytes];
+    unsafe {
+        device.memcpy_async(
+            stream,
+            CopyDirection::DeviceToHost,
+            DevicePtr(row_raw.as_mut_ptr() as usize),
+            src,
+            row_bytes,
+        )?;
+    }
+    stream.synchronize()?;
+    let row_f16: Vec<f16> = if tok_embd_dtype == GgmlDType::F16 {
+        bytemuck::cast_slice::<u8, f16>(&row_raw).to_vec()
+    } else {
+        let f32 = flambeau_quant::dequantize_to_vec(tok_embd_dtype, &row_raw, hidden)
+            .map_err(|e| anyhow!("dequant tok_embd: {e}"))?;
+        f32.into_iter().map(f16::from_f32).collect()
+    };
+    let upload_bytes = hidden * 2;
+    unsafe {
+        device.memcpy_async(
+            stream,
+            CopyDirection::HostToDevice,
+            out_f16_dev,
+            DevicePtr(row_f16.as_ptr() as usize),
+            upload_bytes,
+        )?;
+    }
+    stream.synchronize()?;
+    Ok(())
+}
+
+fn forward_layer_decode_hybrid(
+    driver: &mut Gemma4HybridDriver,
+    stage_idx: usize,
+    il_in_stage: usize,
+    position: usize,
+) -> Result<()> {
+    let cfg = driver.cfg.clone();
+    let stage = &mut driver.stages[stage_idx];
+    let n_ranks = stage.sub_cluster.ranks();
+    if n_ranks != 2 {
+        bail!("forward_layer_decode_hybrid: TP{n_ranks} not supported in S10-A; only tp2");
+    }
+    let global_il = stage.layers_global[il_in_stage];
+    let spec = driver.layout.layers[global_il];
+
+    let hidden = cfg.hidden_size;
+    let head_dim = spec.head_dim;
+    let n_heads_local = spec.n_heads / n_ranks;
+    let n_kv_local = spec.n_kv_heads / n_ranks;
+    let q_width_local = n_heads_local * head_dim;
+    let kv_width_local = n_kv_local * head_dim;
+    let ff_len = cfg.feed_forward_length;
+    let ff_len_local = ff_len / n_ranks;
+    let window: i32 = spec.window as i32;
+    let softmax_scale: f32 = 1.0;
+    let rms_eps = cfg.rms_norm_eps;
+
+    // Phase 1: per-rank pre-AR fragment. Same delegation pattern as
+    // `tp::forward_layer_decode_tp` Phase 1 — full kernel sequence
+    // (norm → Q proj → K proj → V (proj or alt-V from K) →
+    // Q/K/V per-head norm → RoPE Q+K → KV append → attention →
+    // output projection → cast) handed off to
+    // `flambeau_blocks::StandardAttention::forward_decode`.
+    for r in 0..n_ranks {
+        let dev = stage.sub_cluster.device(r);
+        dev.bind()?;
+        let stream = dev.default_stream();
+        let reg = &stage.regs[r];
+        let ops = HipOps::new(reg, stream);
+        let rs = &mut stage.rank_state[r];
+        let weights = &rs.layer_weights[il_in_stage];
+        let x_in = rs.hidden;
+        let attn_k = weights
+            .attn_k
+            .as_ref()
+            .ok_or_else(|| anyhow!("layer {global_il}: attn_k missing"))?;
+        let attn_k_norm_w = weights
+            .attn_k_norm
+            .ok_or_else(|| anyhow!("layer {global_il}: attn_k_norm missing"))?;
+
+        let attn_q_handle = WeightHandle {
+            ptr: weights.attn_q.ptr,
+            dtype: weights.attn_q.dtype,
+            dims: [q_width_local, hidden],
+        };
+        let attn_k_handle = WeightHandle {
+            ptr: attn_k.ptr,
+            dtype: attn_k.dtype,
+            dims: [kv_width_local, hidden],
+        };
+        let attn_v_handle = weights.attn_v.as_ref().map(|v| WeightHandle {
+            ptr: v.ptr,
+            dtype: v.dtype,
+            dims: [kv_width_local, hidden],
+        });
+        let attn_output_handle = WeightHandle {
+            ptr: weights.attn_output.ptr,
+            dtype: weights.attn_output.dtype,
+            dims: [hidden, q_width_local],
+        };
+        let block = StandardAttention::new(
+            attn_q_handle,
+            attn_k_handle,
+            attn_v_handle,
+            attn_output_handle,
+            weights.attn_norm,
+            weights.attn_q_norm,
+            attn_k_norm_w,
+            hidden,
+            n_heads_local,
+            n_kv_local,
+            head_dim,
+            rms_eps,
+            spec.rope_freq_base,
+            spec.rope_dim,
+            /* gated = */ false,
+        )
+        .context("StandardAttention::new (gemma4 hybrid)")?
+        .with_softmax_scale(softmax_scale)
+        .with_v_norm_w(rs.scratch.v_ones_f16.0);
+        let block = if window > 0 {
+            block.with_window_size(window as u32)
+        } else {
+            block
+        };
+
+        let kv = rs.kv_caches[il_in_stage]
+            .as_mut()
+            .expect("S10-A requires per-layer KV");
+        let mut std_scratch = StandardAttentionDecodeScratch {
+            x_q8_1: rs.scratch.x_q8_1.0,
+            mmvq_f32: rs.scratch.mmvq_f32.0,
+            q_fused_f16: DevicePtr(0),
+            q_f16: rs.scratch.q_f16.0,
+            gate_f16: DevicePtr(0),
+            k_f16: rs.scratch.k_f16.0,
+            v_f16: rs.scratch.v_f16.0,
+            k_q8_0: DevicePtr(0),
+            v_q8_0: DevicePtr(0),
+            attn_out_f16: rs.scratch.attn_out_local.0,
+            gated_out_f16: DevicePtr(0),
+            positions: rs.scratch.positions.0,
+            positions_host: &mut rs.positions_host,
+            splitk_partials_m: rs.scratch.splitk_partials_m.0,
+            splitk_partials_s: rs.scratch.splitk_partials_s.0,
+            splitk_partials_o: rs.scratch.splitk_partials_o.0,
+        };
+        block.forward_decode(
+            &ops,
+            dev,
+            stream,
+            x_in,
+            rs.partial_attn,
+            kv,
+            &mut std_scratch,
+            position,
+            /* slots = */ None,
+        )
+        .context("StandardAttention::forward_decode (gemma4 hybrid)")?;
+    }
+
+    // Phase 2: AR over the stage's sub-cluster.
+    let partials: [DevicePtr; 2] = [stage.rank_state[0].partial_attn, stage.rank_state[1].partial_attn];
+    let streams = [
+        stage.sub_cluster.device(0).default_stream(),
+        stage.sub_cluster.device(1).default_stream(),
+    ];
+    // SAFETY: each partial_attn is hidden F16 elems on its rank's device.
+    unsafe {
+        stage
+            .ar
+            .sum_tp2(&partials, hidden as u32, &streams)
+            .map_err(|e| anyhow!("AR sum_tp2 attn stage {stage_idx}: {e}"))?;
+    }
+
+    // Phase 3: per-rank post_attention_norm + residual.
+    for r in 0..n_ranks {
+        let dev = stage.sub_cluster.device(r);
+        dev.bind()?;
+        let stream = dev.default_stream();
+        let reg = &stage.regs[r];
+        let ops = HipOps::new(reg, stream);
+        let rs = &mut stage.rank_state[r];
+        let weights = &rs.layer_weights[il_in_stage];
+        let scratch = &mut rs.scratch;
+        ops.rmsnorm_f16(
+            rs.partial_attn,
+            weights.post_attention_norm,
+            scratch.attn_out_local.0,
+            1,
+            hidden,
+            rms_eps,
+        )?;
+        ops.add_f16(
+            rs.hidden,
+            scratch.attn_out_local.0,
+            scratch.attn_residual_f16.0,
+            hidden,
+        )?;
+    }
+
+    // Phase 4: per-rank FFN pre-AR fragment. Same delegation pattern
+    // as `tp::forward_layer_decode_tp` Phase 4 — ffn_norm + quant
+    // inline (block API doesn't own the norm), gate/up/activation/
+    // down/cast through `DenseMlpTp`.
+    for r in 0..n_ranks {
+        let dev = stage.sub_cluster.device(r);
+        dev.bind()?;
+        let stream = dev.default_stream();
+        let reg = &stage.regs[r];
+        let ops = HipOps::new(reg, stream);
+        let rs = &mut stage.rank_state[r];
+        let weights = &rs.layer_weights[il_in_stage];
+        let scratch = &mut rs.scratch;
+        ops.rmsnorm_quant_q8_1(
+            scratch.attn_residual_f16.0,
+            weights.ffn_norm,
+            scratch.x_q8_1.0,
+            1,
+            hidden,
+            rms_eps,
+        )?;
+        let ffn_gate = WeightHandle {
+            ptr: weights.ffn_gate.ptr,
+            dtype: weights.ffn_gate.dtype,
+            dims: [ff_len_local, hidden],
+        };
+        let ffn_up = WeightHandle {
+            ptr: weights.ffn_up.ptr,
+            dtype: weights.ffn_up.dtype,
+            dims: [ff_len_local, hidden],
+        };
+        let ffn_down = WeightHandle {
+            ptr: weights.ffn_down.ptr,
+            dtype: weights.ffn_down.dtype,
+            dims: [hidden, ff_len_local],
+        };
+        let block = DenseMlpTp::new(
+            ffn_gate, ffn_up, ffn_down, hidden, ff_len_local, Activation::Gelu,
+        )
+        .context("DenseMlpTp::new (gemma4 hybrid)")?;
+        let block_scratch = DenseMlpDecodeScratch {
+            x_q8_1: scratch.x_q8_1.0,
+            gate_f32: scratch.gate_f32.0,
+            up_f32: scratch.up_f32.0,
+            activated_f16: scratch.activated_f16.0,
+            activated_q8_1: scratch.activated_q8_1.0,
+            down_f32: scratch.mmvq_f32.0,
+            down_f16: DevicePtr(0),
+        };
+        block.forward_decode(
+            &ops,
+            DevicePtr(0),
+            rs.partial_ffn,
+            block_scratch,
+            /* pre_quantized = */ true,
+        )
+        .context("DenseMlpTp::forward_decode (gemma4 hybrid)")?;
+    }
+
+    // Phase 5: AR FFN.
+    let partials_ffn: [DevicePtr; 2] = [stage.rank_state[0].partial_ffn, stage.rank_state[1].partial_ffn];
+    let streams = [
+        stage.sub_cluster.device(0).default_stream(),
+        stage.sub_cluster.device(1).default_stream(),
+    ];
+    // SAFETY: same as phase 2.
+    unsafe {
+        stage
+            .ar
+            .sum_tp2(&partials_ffn, hidden as u32, &streams)
+            .map_err(|e| anyhow!("AR sum_tp2 ffn stage {stage_idx}: {e}"))?;
+    }
+
+    // Phase 6: per-rank post_ffw_norm + residual.
+    for r in 0..n_ranks {
+        let dev = stage.sub_cluster.device(r);
+        dev.bind()?;
+        let stream = dev.default_stream();
+        let reg = &stage.regs[r];
+        let ops = HipOps::new(reg, stream);
+        let rs = &mut stage.rank_state[r];
+        let weights = &rs.layer_weights[il_in_stage];
+        let scratch = &mut rs.scratch;
+        ops.rmsnorm_f16(
+            rs.partial_ffn,
+            weights.post_ffw_norm,
+            scratch.attn_out_local.0,
+            1,
+            hidden,
+            rms_eps,
+        )?;
+        ops.add_f16(
+            scratch.attn_residual_f16.0,
+            scratch.attn_out_local.0,
+            rs.hidden,
+            hidden,
+        )?;
+    }
+    Ok(())
+}
+
+impl HybridDecodeDriver for Gemma4HybridDriver {
+    fn n_stages(&self) -> usize {
+        self.stages.len()
+    }
+
+    fn ranks_per_stage(&self, stage: usize) -> usize {
+        self.stages[stage].sub_cluster.ranks()
+    }
+
+    fn n_layers_in_stage(&self, stage: usize) -> usize {
+        self.stages[stage].layers_global.len()
+    }
+
+    fn head_stage(&self) -> usize {
+        self.head_stage_idx
+    }
+
+    fn head_rank_in_head_stage(&self) -> usize {
+        self.head_rank_in_head_stage_idx
+    }
+
+    fn bind(&self, stage: usize, rank: usize) -> Result<()> {
+        self.stages[stage].sub_cluster.device(rank).bind()?;
+        Ok(())
+    }
+
+    fn embed_token(&mut self, stage: usize, rank: usize, token_id: u32) -> Result<()> {
+        let cfg = self.cfg.clone();
+        let stage_ref = &mut self.stages[stage];
+        let device = stage_ref.sub_cluster.device(rank);
+        let stream = device.default_stream();
+        let rs = &mut stage_ref.rank_state[rank];
+        let tok = rs
+            .token_embd
+            .as_ref()
+            .ok_or_else(|| anyhow!("embed_token: stage {stage} rank {rank} no token_embd"))?;
+        embed_decode_host(
+            device,
+            stream,
+            tok.ptr,
+            tok.bytes,
+            tok.dtype,
+            cfg.vocab_size,
+            cfg.hidden_size,
+            token_id,
+            rs.hidden,
+        )
+    }
+
+    fn forward_layer_decode(
+        &mut self,
+        stage: usize,
+        il_in_stage: usize,
+        position: usize,
+    ) -> Result<()> {
+        forward_layer_decode_hybrid(self, stage, il_in_stage, position)
+    }
+
+    fn handoff_stage_to_next(&mut self, stage: usize) -> Result<()> {
+        let hidden_bytes = self.cfg.hidden_size * 2;
+        let src_global_rank = self.global_rank(stage, 0);
+        let src_ptr = self.stages[stage].rank_state[0].hidden;
+        let dst_stage = stage + 1;
+        let dst_n_ranks = self.stages[dst_stage].sub_cluster.ranks();
+        for dst_r in 0..dst_n_ranks {
+            let dst_global = self.global_rank(dst_stage, dst_r);
+            let dst_ptr = self.stages[dst_stage].rank_state[dst_r].hidden;
+            // SAFETY: each `hidden` is a `hidden*2` byte F16 alloc on
+            // its rank's device; the global cluster's
+            // peer_copy_via_host validates source/destination ranks.
+            unsafe {
+                self.global_cluster
+                    .peer_copy_via_host(dst_ptr, dst_global, src_ptr, src_global_rank, hidden_bytes)
+                    .map_err(|e| {
+                        anyhow!(
+                            "peer_copy stage {stage}→{dst_stage} rank 0 → rank {dst_r}: {e}"
+                        )
+                    })?;
+            }
+        }
+        Ok(())
+    }
+
+    fn output_head(&mut self) -> Result<()> {
+        let stage = self.head_stage_idx;
+        let rank = self.head_rank_in_head_stage_idx;
+        let cfg = &self.cfg;
+        let stage_ref = &mut self.stages[stage];
+        let device = stage_ref.sub_cluster.device(rank);
+        let stream = device.default_stream();
+        let reg = &stage_ref.regs[rank];
+        let ops = HipOps::new(reg, stream);
+        let rs = &mut stage_ref.rank_state[rank];
+        let scratch = rs
+            .output_head_scratch
+            .as_mut()
+            .ok_or_else(|| anyhow!("output_head: missing scratch"))?;
+        let lm_head_t = rs
+            .lm_head
+            .as_ref()
+            .or(rs.token_embd.as_ref())
+            .ok_or_else(|| anyhow!("output_head: missing LM head weight"))?;
+        let lm_head_dims = rs
+            .lm_head_dims
+            .or(rs.token_embd_dims)
+            .ok_or_else(|| anyhow!("output_head: missing dims"))?;
+        let lm_head: WeightHandle = lm_head_t.as_weight_handle(lm_head_dims)?;
+        let on = rs
+            .output_norm
+            .as_ref()
+            .ok_or_else(|| anyhow!("output_head: missing output_norm"))?;
+        let logits = forward_output_head(
+            &ops,
+            rs.hidden,
+            on.ptr,
+            lm_head,
+            cfg.final_logit_softcap,
+            scratch,
+            cfg.hidden_size,
+            cfg.vocab_size,
+            cfg.rms_norm_eps,
+        )?;
+        // SAFETY: logits is vocab*4 device bytes; host buffer matches.
+        unsafe {
+            device.memcpy_async(
+                stream,
+                CopyDirection::DeviceToHost,
+                DevicePtr(self.logits_host.as_mut_ptr() as usize),
+                logits,
+                cfg.vocab_size * 4,
+            )?;
+        }
+        stream.synchronize()?;
+        Ok(())
+    }
+}

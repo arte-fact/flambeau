@@ -423,7 +423,7 @@ pub fn build_shared_expert_block(
     let u_dt = qdtype_of(shared.ffn_up_shexp.dtype)?;
     let d_dt = qdtype_of(shared.ffn_down_shexp.dtype)?;
     flambeau_blocks::SharedExpert::new(
-        shared.ffn_gate_inp_shexp.ptr,
+        Some(shared.ffn_gate_inp_shexp.ptr),
         flambeau_blocks::WeightHandle {
             ptr: shared.ffn_gate_shexp.ptr,
             dtype: g_dt,
@@ -974,6 +974,22 @@ impl SharedExpertPrefillScratch {
             device.dealloc(self.x_norm_f32, self.hidden_f32_bytes)?;
         }
         Ok(())
+    }
+}
+
+impl SharedExpertPrefillScratch {
+    /// View shaped for `flambeau_blocks::SharedExpert::forward_prefill`.
+    pub fn view(&self) -> flambeau_blocks::SharedExpertPrefillScratch {
+        flambeau_blocks::SharedExpertPrefillScratch {
+            max_tokens: self.max_tokens,
+            x_q8_1: self.x_q8_1,
+            gate_f32: self.gate_f32,
+            up_f32: self.up_f32,
+            activated_f16: self.activated_f16,
+            activated_q8_1: self.activated_q8_1,
+            down_f32: self.down_f32,
+            x_norm_f32: self.x_norm_f32,
+        }
     }
 }
 

@@ -1,0 +1,30 @@
+[package]
+name = "flambeau-gemma4"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "Gemma 4 family (E2B / E4B edge + 26B-A4B MoE + 31B dense). Block composition only, zero kernels."
+
+[dependencies]
+flambeau-core = { path = "../../core" }
+flambeau-ops = { path = "../../ops" }
+flambeau-blocks = { path = "../../blocks", optional = true }
+flambeau-quant = { path = "../../quant" }
+flambeau-runtime = { path = "../../runtime" }
+anyhow.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+half.workspace = true
+bytemuck.workspace = true
+
+[features]
+default = []
+hip = ["flambeau-ops/hip", "flambeau-blocks/hip", "dep:flambeau-backend-hip", "dep:flambeau-blocks"]
+
+[dependencies.flambeau-backend-hip]
+path = "../../backend-hip"
+optional = true
+
+[lints]
+workspace = true

@@ -119,6 +119,44 @@ pub struct StandardAttentionPrefillScratch<'a> {
     pub positions_host: &'a mut [i32],
 }
 
+/// Borrowed view over a caller-owned scratch sized for the
+/// **batched-decode TP** path (one shared scratch across N concurrent
+/// decode slots). Extends the prefill scratch with the per-slot tables
+/// the batched KV-append + batched-attention kernels read:
+/// - `slot_{k,v}_ptrs`: device `[N] u64` arrays of per-slot KV-cache
+///   base pointers.
+/// - `slot_n_tokens_kv`: device `[N] i32` of each slot's KV tail
+///   length AFTER this token is appended.
+/// - `slot_write_pos`: device `[N] i32` of each slot's pre-bump write
+///   position (used by `kv_append_f16_batched_slots`).
+/// - `slot_*_host`: persistent host mirrors uploaded once per call.
+pub struct StandardAttentionBatchedDecodeScratch<'a> {
+    pub max_tokens: usize,
+    pub x_norm_f16: DevicePtr,
+    pub x_q8_1: DevicePtr,
+    pub x_q8_1_mmq: DevicePtr,
+    pub mmvq_f32: DevicePtr,
+    pub q_fused_f16: DevicePtr,
+    pub q_f16: DevicePtr,
+    pub gate_f16: DevicePtr,
+    pub k_f16: DevicePtr,
+    pub v_f16: DevicePtr,
+    pub attn_out_f16: DevicePtr,
+    pub gated_out_f16: DevicePtr,
+    pub positions: DevicePtr,
+    pub gated_q8_1: DevicePtr,
+    pub gated_q8_1_mmq: DevicePtr,
+    pub positions_host: &'a mut [i32],
+    pub slot_k_ptrs: DevicePtr,
+    pub slot_v_ptrs: DevicePtr,
+    pub slot_n_tokens_kv: DevicePtr,
+    pub slot_write_pos: DevicePtr,
+    pub slot_k_ptrs_host: &'a mut [u64],
+    pub slot_v_ptrs_host: &'a mut [u64],
+    pub slot_n_tokens_kv_host: &'a mut [i32],
+    pub slot_write_pos_host: &'a mut [i32],
+}
+
 /// Split-K partial budget — 32 chunks × 512 tokens covers any decode
 /// context up to 16 384 tokens. Bump alongside the dispatch threshold
 /// if context ever exceeds. Mirrors qwen3-moe's `MAX_SPLITK_CHUNKS`.
@@ -138,12 +176,21 @@ pub const MAX_SPLITK_CHUNKS: usize = 32;
 /// `ops: &O: &impl Ops` at call time.
 pub struct StandardAttention {
     pub attn_q: WeightHandle,
-    pub attn_k: WeightHandle,        // [n_kv_heads*head_dim, hidden]
-    pub attn_v: WeightHandle,        // [n_kv_heads*head_dim, hidden]
-    pub attn_output: WeightHandle,   // [hidden, n_heads*head_dim]
-    pub attn_norm_w: DevicePtr,      // F16 [hidden]
-    pub attn_q_norm_w: DevicePtr,    // F16 [head_dim]
-    pub attn_k_norm_w: DevicePtr,    // F16 [head_dim]
+    pub attn_k: WeightHandle,            // [n_kv_heads*head_dim, hidden]
+    /// V projection weight. `None` triggers the gemma4
+    /// "alt-attention" path where V is the pre-norm K row (a single
+    /// DtoD memcpy replaces the V matmul). Standard models (qwen3.x,
+    /// llama, etc.) always set this.
+    pub attn_v: Option<WeightHandle>,    // [n_kv_heads*head_dim, hidden]
+    pub attn_output: WeightHandle,       // [hidden, n_heads*head_dim]
+    pub attn_norm_w: DevicePtr,          // F16 [hidden]
+    pub attn_q_norm_w: DevicePtr,        // F16 [head_dim]
+    pub attn_k_norm_w: DevicePtr,        // F16 [head_dim]
+    /// V-norm weight, F16 `[head_dim]`. When `Some`, an extra
+    /// per-head RMSNorm is applied to V. Gemma4 uses this with a
+    /// caller-owned unit-weight buffer for the "unlearned" V norm
+    /// (V-norm with weight=1.0 per lane).
+    pub attn_v_norm_w: Option<DevicePtr>,
     pub hidden: usize,
     pub n_heads: usize,
     pub n_kv_heads: usize,
@@ -155,17 +202,33 @@ pub struct StandardAttention {
     /// passes through `sigmoid(gate) * attn_out`. `false` for the
     /// plain-Q (qwen3moe-style) path.
     pub gated: bool,
+    /// Override the softmax pre-scale applied to QK^T. `None` ⇒ the
+    /// canonical `1/sqrt(head_dim)`. Gemma4 sets this to `1.0` (its
+    /// `f_attention_scale = 1.0`, no pre-attention scaling).
+    pub softmax_scale: Option<f32>,
+    /// Sliding-window mask radius. When `Some(w)`, keys older than
+    /// `query_pos - w + 1` are masked out (Gemma4 SWA layers). When
+    /// `None`, standard causal attention. The SWA-aware kernel
+    /// variants land in S3 — the field is stored on the block now so
+    /// callers can configure it without a second API change.
+    pub window_size: Option<u32>,
 }
 
 impl StandardAttention {
     /// Construct a new block. Q-weight rows are
     /// `2 * n_heads * head_dim` when `gated` and `n_heads * head_dim`
     /// otherwise; the constructor asserts the matmul shapes match.
+    ///
+    /// `attn_v` is `Option`: pass `Some(handle)` for the standard
+    /// (qwen3.x / llama) path with a learned V projection. Pass `None`
+    /// for gemma4's "alt-attention" path where V is the pre-norm K
+    /// row (a DtoD memcpy from K replaces the V matmul). `attn_v_norm_w`
+    /// is set separately via [`with_v_norm_w`].
     #[allow(clippy::too_many_arguments)]
     pub fn new(
         attn_q: WeightHandle,
         attn_k: WeightHandle,
-        attn_v: WeightHandle,
+        attn_v: Option<WeightHandle>,
         attn_output: WeightHandle,
         attn_norm_w: DevicePtr,
         attn_q_norm_w: DevicePtr,
@@ -199,13 +262,15 @@ impl StandardAttention {
                 hidden
             );
         }
-        if attn_v.dims != [kv_width, hidden] {
-            bail!(
-                "attn_v dims {:?} != expected [{}, {}]",
-                attn_v.dims,
-                kv_width,
-                hidden
-            );
+        if let Some(v) = attn_v.as_ref() {
+            if v.dims != [kv_width, hidden] {
+                bail!(
+                    "attn_v dims {:?} != expected [{}, {}]",
+                    v.dims,
+                    kv_width,
+                    hidden
+                );
+            }
         }
         if attn_output.dims != [hidden, q_width] {
             bail!(
@@ -223,6 +288,7 @@ impl StandardAttention {
             attn_norm_w,
             attn_q_norm_w,
             attn_k_norm_w,
+            attn_v_norm_w: None,
             hidden,
             n_heads,
             n_kv_heads,
@@ -231,7 +297,33 @@ impl StandardAttention {
             rope_freq_base,
             rope_rotated_dims,
             gated,
+            softmax_scale: None,
+            window_size: None,
         })
+    }
+
+    /// Attach a V-norm weight. Set this on gemma4 layers — pass a
+    /// caller-owned F16 `[head_dim]` buffer prefilled with `1.0`
+    /// (unlearned norm; the per-head RMSNorm-with-unit-weights still
+    /// rescales lane variance).
+    pub fn with_v_norm_w(mut self, ptr: DevicePtr) -> Self {
+        self.attn_v_norm_w = Some(ptr);
+        self
+    }
+
+    /// Override the softmax pre-scale. Gemma4 uses `1.0`; qwen3.x
+    /// leaves it `None` and the block falls back to `1/sqrt(head_dim)`.
+    pub fn with_softmax_scale(mut self, scale: f32) -> Self {
+        self.softmax_scale = Some(scale);
+        self
+    }
+
+    /// Configure sliding-window attention. `Some(w)` switches the
+    /// block to the SWA-aware kernels in S3; `None` keeps the
+    /// standard causal path.
+    pub fn with_window_size(mut self, window: u32) -> Self {
+        self.window_size = Some(window);
+        self
     }
 
     /// Single-token decode through the attention block. The K/V row
@@ -299,13 +391,40 @@ impl StandardAttention {
                 .context("cast attn_q → f16")?;
         }
 
-        // 4+5. K and V projections. Fuse to one launch when both Q8_0.
-        let fuse_kv = self.attn_k.dtype == QDtype::Q8_0 && self.attn_v.dtype == QDtype::Q8_0;
-        if fuse_kv {
+        // 4+5. K and V projections. Three paths:
+        // - Both K and V are present + Q4_0: single-launch fused
+        //   `mmvq_q4_0_kv_f16dst` writes directly into F16 buffers.
+        // - Both K and V are present + Q8_0: single-launch fused
+        //   `mmvq_q8_0_gate_up` into F32 slab + two casts.
+        // - V absent (gemma4 alt-attention): K projection only; V is
+        //   a DtoD copy of K's pre-norm row.
+        // - Otherwise: two unfused `mmvq` + two casts (universal fallback).
+        let v_present = self.attn_v.is_some();
+        let attn_v_ref = self.attn_v.as_ref();
+        let fuse_q4_0_kv = v_present
+            && self.attn_k.dtype == QDtype::Q4_0
+            && attn_v_ref.map(|v| v.dtype == QDtype::Q4_0).unwrap_or(false);
+        let fuse_q8_0_kv = v_present
+            && self.attn_k.dtype == QDtype::Q8_0
+            && attn_v_ref.map(|v| v.dtype == QDtype::Q8_0).unwrap_or(false);
+        if fuse_q4_0_kv {
+            let v = attn_v_ref.expect("v_present");
+            ops.mmvq_q4_0_kv_f16dst(
+                self.attn_k.ptr,
+                v.ptr,
+                scratch.x_q8_1,
+                scratch.k_f16,
+                scratch.v_f16,
+                kv_width,
+                hidden,
+            )
+            .context("attn_k + attn_v fused mmvq_q4_0_kv_f16dst")?;
+        } else if fuse_q8_0_kv {
+            let v = attn_v_ref.expect("v_present");
             let v_f32_offset = scratch.mmvq_f32.offset_bytes(kv_width * 4);
             ops.mmvq_q8_0_gate_up(
                 self.attn_k.ptr,
-                self.attn_v.ptr,
+                v.ptr,
                 scratch.x_q8_1,
                 scratch.mmvq_f32,
                 v_f32_offset,
@@ -330,20 +449,39 @@ impl StandardAttention {
             .context("mmvq attn_k")?;
             ops.cast_f32_to_f16(scratch.mmvq_f32, scratch.k_f16, kv_width)
                 .context("cast attn_k → f16")?;
-            ops.mmvq(
-                self.attn_v.ptr,
-                scratch.x_q8_1,
-                scratch.mmvq_f32,
-                kv_width,
-                hidden,
-                self.attn_v.dtype,
-            )
-            .context("mmvq attn_v")?;
-            ops.cast_f32_to_f16(scratch.mmvq_f32, scratch.v_f16, kv_width)
-                .context("cast attn_v → f16")?;
+            if let Some(v) = attn_v_ref {
+                ops.mmvq(
+                    v.ptr,
+                    scratch.x_q8_1,
+                    scratch.mmvq_f32,
+                    kv_width,
+                    hidden,
+                    v.dtype,
+                )
+                .context("mmvq attn_v")?;
+                ops.cast_f32_to_f16(scratch.mmvq_f32, scratch.v_f16, kv_width)
+                    .context("cast attn_v → f16")?;
+            } else {
+                // Alt-attention (gemma4): V = K's pre-norm row. Done
+                // BEFORE the per-head norms so V's RMSNorm (when
+                // present) runs on the raw projection, not the
+                // K-normed one.
+                // SAFETY: k_f16 / v_f16 are both contiguous F16
+                // `[n_kv_heads, head_dim]` buffers on `device`.
+                unsafe {
+                    device.memcpy_async(
+                        stream,
+                        CopyDirection::DeviceToDevice,
+                        scratch.v_f16,
+                        scratch.k_f16,
+                        kv_width * 2,
+                    )?;
+                }
+            }
         }
 
-        // 6. Per-head Q / K rmsnorm.
+        // 6. Per-head Q / K rmsnorm. V-norm (unlearned, gemma4) runs
+        // only when `attn_v_norm_w` is set.
         ops.rmsnorm_f16(
             scratch.q_f16,
             self.attn_q_norm_w,
@@ -362,6 +500,17 @@ impl StandardAttention {
             self.rms_norm_eps,
         )
         .context("attn_k_norm")?;
+        if let Some(v_norm_w) = self.attn_v_norm_w {
+            ops.rmsnorm_f16(
+                scratch.v_f16,
+                v_norm_w,
+                scratch.v_f16,
+                n_kv_heads,
+                head_dim,
+                self.rms_norm_eps,
+            )
+            .context("attn_v_norm (unlearned)")?;
+        }
 
         // 7. Upload position (1-slot) and apply RoPE on Q + K.
         scratch.positions_host[0] = position as i32;
@@ -454,7 +603,10 @@ impl StandardAttention {
         // callers run F16 KV decodes through `attention_decode_f16_slots`
         // so `n_tokens_kv` is recorded as a tagged kernel arg.
         let n_tokens_kv = kv_cache.current_tokens();
-        let scale = (head_dim as f32).sqrt().recip();
+        let scale = self
+            .softmax_scale
+            .unwrap_or_else(|| (head_dim as f32).sqrt().recip());
+        let window = self.window_size.map(|w| w as i32).unwrap_or(0);
         let use_splitk = slots.is_none() && n_tokens_kv > 256;
         if let Some(s) = slots {
             // F16 KV slots-aware decode. Already validated above.
@@ -468,6 +620,7 @@ impl StandardAttention {
                 head_dim,
                 n_tokens_kv,
                 scale,
+                window,
                 Some(s.n_tokens_kv_slot),
             )
             .context("attention_decode_f16_slots")?;
@@ -510,6 +663,7 @@ impl StandardAttention {
                     n_tokens_kv,
                     chunk_size,
                     scale,
+                    window,
                 )
                 .context("attention_decode_f16_splitk")?;
             }
@@ -537,6 +691,7 @@ impl StandardAttention {
                 head_dim,
                 n_tokens_kv,
                 scale,
+                window,
             )
             .context("attention_decode_f16")?;
         } else {
@@ -680,22 +835,28 @@ impl StandardAttention {
         ops.cast_f32_to_f16(scratch.mmvq_f32, scratch.k_f16, n_tokens * kv_width)
             .context("prefill cast attn_k → f16")?;
 
-        // 5. V projection.
+        // 5. V projection. Alt-V (gemma4 V=K) is not supported on the
+        // block's prefill path yet — gemma4 prefill uses its own
+        // `layer.rs::forward_layer_prefill` inline composition.
+        let attn_v_pref = self.attn_v.as_ref().ok_or_else(|| anyhow::anyhow!(
+            "StandardAttention::forward_prefill: attn_v is None (alt-attention prefill \
+             via this block not implemented; use the model's inline prefill)"
+        ))?;
         ops.qmatmul(
-            self.attn_v.ptr,
+            attn_v_pref.ptr,
             scratch.x_q8_1,
             scratch.x_q8_1_mmq,
             scratch.mmvq_f32,
             n_tokens,
             hidden,
             kv_width,
-            self.attn_v.dtype,
+            attn_v_pref.dtype,
         )
         .context("prefill qmatmul attn_v")?;
         ops.cast_f32_to_f16(scratch.mmvq_f32, scratch.v_f16, n_tokens * kv_width)
             .context("prefill cast attn_v → f16")?;
 
-        // 6. Per-head Q / K rmsnorm.
+        // 6. Per-head Q / K / (optional V) rmsnorm.
         ops.rmsnorm_f16(
             scratch.q_f16,
             self.attn_q_norm_w,
@@ -714,6 +875,17 @@ impl StandardAttention {
             self.rms_norm_eps,
         )
         .context("prefill attn_k_norm")?;
+        if let Some(v_norm_w) = self.attn_v_norm_w {
+            ops.rmsnorm_f16(
+                scratch.v_f16,
+                v_norm_w,
+                scratch.v_f16,
+                n_tokens * n_kv_heads,
+                head_dim,
+                self.rms_norm_eps,
+            )
+            .context("prefill attn_v_norm (unlearned)")?;
+        }
 
         // 7. Upload positions [start_position, start_position + n_tokens).
         for i in 0..n_tokens {
@@ -801,7 +973,10 @@ impl StandardAttention {
 
         // 9. Causal prefill attention. Slot path uses tagged variant.
         let n_k_tokens = kv_cache.current_tokens();
-        let scale = (head_dim as f32).sqrt().recip();
+        let scale = self
+            .softmax_scale
+            .unwrap_or_else(|| (head_dim as f32).sqrt().recip());
+        let window = self.window_size.map(|w| w as i32).unwrap_or(0);
         if let Some(s) = slots {
             ops.attention_prefill_f16_slots(
                 scratch.q_f16,
@@ -815,6 +990,7 @@ impl StandardAttention {
                 n_k_tokens,
                 start_position,
                 scale,
+                window,
                 Some(s.n_k_slot),
                 Some(s.q_off_slot),
             )
@@ -847,6 +1023,7 @@ impl StandardAttention {
                 n_k_tokens,
                 start_position,
                 scale,
+                window,
             )
             .context("attention_prefill_f16")?;
         } else {
@@ -893,6 +1070,349 @@ impl StandardAttention {
         .context("prefill qmatmul attn_output")?;
         ops.cast_f32_to_f16(scratch.mmvq_f32, delta_out, n_tokens * hidden)
             .context("prefill cast attn_output → f16")?;
+
+        Ok(())
+    }
+
+    /// **#266c** — batched decode across `N = slot_positions.len()`
+    /// concurrent slots, per-rank TP. Front-end (RMSNorm + Q|gate proj
+    /// + K proj + V proj + per-head Q/K norm + RoPE) mirrors prefill at
+    /// `n_tokens = N`. Back-end diverges:
+    /// - **Step 8 (KV append):** per-slot bookkeeping + optional
+    ///   single-launch `kv_append_f16_batched_slots` driven by
+    ///   `slot_write_pos`. Set `batch_kv_append = false` to fall back
+    ///   to the per-slot DtoD memcpy loop (FLAMBEAU_KV_APPEND_BATCHED=0
+    ///   at qwen3-moe call sites).
+    /// - **Step 9 (attention):** single-launch
+    ///   `attention_decode_f16_batched` over all N slots reading the
+    ///   `slot_*` tables.
+    /// Caller schedules the AR over `partial_out` after this returns.
+    ///
+    /// Requires `self.gated == true` (qwen3.x batched-decode is always
+    /// gated) and the V projection present (no alt-V on this path).
+    #[allow(clippy::too_many_arguments)]
+    pub fn forward_decode_batched_tp<O: Ops>(
+        &self,
+        ops: &O,
+        device: &HipDevice,
+        stream: &HipStream,
+        x_in: DevicePtr,
+        partial_out: DevicePtr,
+        slot_kv_caches: &mut [&mut KvCache<F16Contig, HipDevice>],
+        slot_positions: &[usize],
+        scratch: &mut StandardAttentionBatchedDecodeScratch<'_>,
+        batch_kv_append: bool,
+    ) -> Result<()> {
+        if !self.gated {
+            bail!(
+                "StandardAttention::forward_decode_batched_tp: requires gated=true \
+                 (qwen3.x batched-decode); plain-Q + alt-V batched path not implemented"
+            );
+        }
+        let attn_v = self.attn_v.as_ref().ok_or_else(|| anyhow::anyhow!(
+            "forward_decode_batched_tp: attn_v is None (alt-attention batched path not implemented)"
+        ))?;
+        let n_tokens = slot_positions.len();
+        if n_tokens == 0 {
+            bail!("forward_decode_batched_tp called with 0 slots");
+        }
+        if n_tokens != slot_kv_caches.len() {
+            bail!(
+                "slot count mismatch: positions={n_tokens}, caches={}",
+                slot_kv_caches.len()
+            );
+        }
+        if n_tokens > scratch.max_tokens {
+            bail!(
+                "n_tokens={n_tokens} > scratch.max_tokens={}",
+                scratch.max_tokens
+            );
+        }
+
+        let hidden = self.hidden;
+        let head_dim = self.head_dim;
+        let n_heads = self.n_heads;
+        let n_kv_heads = self.n_kv_heads;
+        let q_width = n_heads * head_dim;
+        let kv_width = n_kv_heads * head_dim;
+        let q_proj_rows = 2 * q_width;
+
+        // 1. RMSNorm + Q8_1 quantise (both layouts).
+        ops.rmsnorm_f16(
+            x_in,
+            self.attn_norm_w,
+            scratch.x_norm_f16,
+            n_tokens,
+            hidden,
+            self.rms_norm_eps,
+        )
+        .context("batched-decode attn_norm")?;
+        ops.quantize_f16_q8_1(scratch.x_norm_f16, scratch.x_q8_1, n_tokens * hidden)
+            .context("batched-decode x_norm → Q8_1 std")?;
+        ops.quantize_f16_q8_1_mmq(
+            scratch.x_norm_f16,
+            scratch.x_q8_1_mmq,
+            hidden,
+            n_tokens,
+        )
+        .context("batched-decode x_norm → Q8_1 MMQ")?;
+
+        // 2. Q|gate fused projection.
+        ops.qmatmul(
+            self.attn_q.ptr,
+            scratch.x_q8_1,
+            scratch.x_q8_1_mmq,
+            scratch.mmvq_f32,
+            n_tokens,
+            hidden,
+            q_proj_rows,
+            self.attn_q.dtype,
+        )
+        .context("batched-decode qmatmul attn_q")?;
+        ops.cast_f32_to_f16(
+            scratch.mmvq_f32,
+            scratch.q_fused_f16,
+            n_tokens * q_proj_rows,
+        )
+        .context("batched-decode cast attn_q → f16")?;
+
+        // 3. Split Q | gate.
+        ops.split_q_gate_f16(
+            scratch.q_fused_f16,
+            scratch.q_f16,
+            scratch.gate_f16,
+            n_tokens,
+            n_heads,
+            head_dim,
+        )
+        .context("batched-decode split_q_gate")?;
+
+        // 4. K projection.
+        ops.qmatmul(
+            self.attn_k.ptr,
+            scratch.x_q8_1,
+            scratch.x_q8_1_mmq,
+            scratch.mmvq_f32,
+            n_tokens,
+            hidden,
+            kv_width,
+            self.attn_k.dtype,
+        )
+        .context("batched-decode qmatmul attn_k")?;
+        ops.cast_f32_to_f16(scratch.mmvq_f32, scratch.k_f16, n_tokens * kv_width)
+            .context("batched-decode cast attn_k → f16")?;
+
+        // 5. V projection.
+        ops.qmatmul(
+            attn_v.ptr,
+            scratch.x_q8_1,
+            scratch.x_q8_1_mmq,
+            scratch.mmvq_f32,
+            n_tokens,
+            hidden,
+            kv_width,
+            attn_v.dtype,
+        )
+        .context("batched-decode qmatmul attn_v")?;
+        ops.cast_f32_to_f16(scratch.mmvq_f32, scratch.v_f16, n_tokens * kv_width)
+            .context("batched-decode cast attn_v → f16")?;
+
+        // 6. Per-head Q/K rmsnorm.
+        ops.rmsnorm_f16(
+            scratch.q_f16,
+            self.attn_q_norm_w,
+            scratch.q_f16,
+            n_tokens * n_heads,
+            head_dim,
+            self.rms_norm_eps,
+        )
+        .context("batched-decode attn_q_norm")?;
+        ops.rmsnorm_f16(
+            scratch.k_f16,
+            self.attn_k_norm_w,
+            scratch.k_f16,
+            n_tokens * n_kv_heads,
+            head_dim,
+            self.rms_norm_eps,
+        )
+        .context("batched-decode attn_k_norm")?;
+
+        // 7. RoPE with per-slot positions.
+        for (i, &pos) in slot_positions.iter().enumerate() {
+            scratch.positions_host[i] = pos as i32;
+        }
+        // SAFETY: scratch.positions has at least n_tokens * 4 valid
+        // bytes; positions_host is a persistent Vec on the scratch.
+        unsafe {
+            device.memcpy_async(
+                stream,
+                CopyDirection::HostToDevice,
+                scratch.positions,
+                DevicePtr(scratch.positions_host.as_ptr() as usize),
+                n_tokens * 4,
+            )?;
+        }
+        ops.rope_neox_partial_f16(
+            scratch.q_f16,
+            scratch.positions,
+            self.rope_freq_base,
+            n_tokens,
+            n_heads,
+            head_dim,
+            self.rope_rotated_dims,
+        )
+        .context("batched-decode rope Q")?;
+        ops.rope_neox_partial_f16(
+            scratch.k_f16,
+            scratch.positions,
+            self.rope_freq_base,
+            n_tokens,
+            n_kv_heads,
+            head_dim,
+            self.rope_rotated_dims,
+        )
+        .context("batched-decode rope K")?;
+
+        // 8. Per-slot KV append. Host-side bookkeeping always runs
+        // (records write_pos, bumps tail, populates slot tables); the
+        // K/V row copy is either deferred to a single
+        // `kv_append_f16_batched_slots` launch (when
+        // `batch_kv_append=true`) or done per-slot via DtoD memcpy.
+        let kv_per_token_bytes = kv_width * 2;
+        for s in 0..n_tokens {
+            let kv = &mut *slot_kv_caches[s];
+            let write_pos = kv.current_tokens();
+            if !batch_kv_append {
+                let k_src = scratch.k_f16.offset_bytes(s * kv_per_token_bytes);
+                let v_src = scratch.v_f16.offset_bytes(s * kv_per_token_bytes);
+                let k_dst = kv.k_buffer().offset_bytes(write_pos * kv_per_token_bytes);
+                let v_dst = kv.v_buffer().offset_bytes(write_pos * kv_per_token_bytes);
+                // SAFETY: src/dst sizes match kv_per_token_bytes;
+                // write_pos < max_seq_len enforced by cache.
+                unsafe {
+                    device.memcpy_async(
+                        stream,
+                        CopyDirection::DeviceToDevice,
+                        k_dst,
+                        k_src,
+                        kv_per_token_bytes,
+                    )?;
+                    device.memcpy_async(
+                        stream,
+                        CopyDirection::DeviceToDevice,
+                        v_dst,
+                        v_src,
+                        kv_per_token_bytes,
+                    )?;
+                }
+            }
+            kv.bump_tail(1)
+                .map_err(|e| anyhow::anyhow!("slot {s} bump_tail: {e}"))?;
+            scratch.slot_k_ptrs_host[s] = kv.k_buffer().as_usize() as u64;
+            scratch.slot_v_ptrs_host[s] = kv.v_buffer().as_usize() as u64;
+            scratch.slot_n_tokens_kv_host[s] = kv.current_tokens() as i32;
+            scratch.slot_write_pos_host[s] = write_pos as i32;
+        }
+
+        // 9. Upload slot tables + single-launch batched attention.
+        // SAFETY: host vecs have stable addresses; device buffers
+        // sized for max_tokens ≥ n_tokens.
+        unsafe {
+            device.memcpy_async(
+                stream,
+                CopyDirection::HostToDevice,
+                scratch.slot_k_ptrs,
+                DevicePtr(scratch.slot_k_ptrs_host.as_ptr() as usize),
+                n_tokens * 8,
+            )?;
+            device.memcpy_async(
+                stream,
+                CopyDirection::HostToDevice,
+                scratch.slot_v_ptrs,
+                DevicePtr(scratch.slot_v_ptrs_host.as_ptr() as usize),
+                n_tokens * 8,
+            )?;
+            device.memcpy_async(
+                stream,
+                CopyDirection::HostToDevice,
+                scratch.slot_n_tokens_kv,
+                DevicePtr(scratch.slot_n_tokens_kv_host.as_ptr() as usize),
+                n_tokens * 4,
+            )?;
+            if batch_kv_append {
+                device.memcpy_async(
+                    stream,
+                    CopyDirection::HostToDevice,
+                    scratch.slot_write_pos,
+                    DevicePtr(scratch.slot_write_pos_host.as_ptr() as usize),
+                    n_tokens * 4,
+                )?;
+            }
+        }
+        if batch_kv_append {
+            ops.kv_append_f16_batched_slots(
+                scratch.k_f16,
+                scratch.v_f16,
+                scratch.slot_k_ptrs,
+                scratch.slot_v_ptrs,
+                scratch.slot_write_pos,
+                n_tokens,
+                kv_width,
+            )
+            .context("batched KV-append")?;
+        }
+        let scale = self
+            .softmax_scale
+            .unwrap_or_else(|| (head_dim as f32).sqrt().recip());
+        ops.attention_decode_f16_batched(
+            scratch.q_f16,
+            scratch.slot_k_ptrs,
+            scratch.slot_v_ptrs,
+            scratch.attn_out_f16,
+            scratch.slot_n_tokens_kv,
+            n_heads,
+            n_kv_heads,
+            head_dim,
+            n_tokens,
+            scale,
+        )
+        .context("attention_decode_f16_batched")?;
+
+        // 10. Post-attn sigmoid gate over [N, q_width].
+        let gated_elems = n_tokens * q_width;
+        ops.sigmoid_mul_f16(
+            scratch.gate_f16,
+            scratch.attn_out_f16,
+            scratch.gated_out_f16,
+            gated_elems,
+        )
+        .context("batched-decode sigmoid-gate")?;
+
+        // 11. Quantise gated → both Q8_1 layouts.
+        ops.quantize_f16_q8_1(scratch.gated_out_f16, scratch.gated_q8_1, gated_elems)
+            .context("batched-decode gated → Q8_1 std")?;
+        ops.quantize_f16_q8_1_mmq(
+            scratch.gated_out_f16,
+            scratch.gated_q8_1_mmq,
+            q_width,
+            n_tokens,
+        )
+        .context("batched-decode gated → Q8_1 MMQ")?;
+
+        // 12. Row-parallel output projection.
+        ops.qmatmul(
+            self.attn_output.ptr,
+            scratch.gated_q8_1,
+            scratch.gated_q8_1_mmq,
+            scratch.mmvq_f32,
+            n_tokens,
+            q_width,
+            hidden,
+            self.attn_output.dtype,
+        )
+        .context("batched-decode qmatmul attn_output")?;
+        ops.cast_f32_to_f16(scratch.mmvq_f32, partial_out, n_tokens * hidden)
+            .context("batched-decode cast attn_output → f16")?;
 
         Ok(())
     }

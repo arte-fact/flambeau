@@ -9,6 +9,7 @@ members = [
     "crates/ops",
     "crates/blocks",
     "crates/models/qwen3-moe",
+    "crates/models/gemma4",
     "crates/runtime",
     "crates/bench",
     "crates/server",

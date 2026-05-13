@@ -71,6 +71,81 @@ pub struct MoeExpertsPrefillScratch {
 
 const QK_K: usize = 256;
 
+/// Source of the router input. Qwen3.x routes on the post-norm
+/// hidden (`Cur`); Gemma4 routes on the residual stream `attn_out`.
+/// The block does not pick the buffer — this field documents the
+/// arch convention so the caller can pass the correct DevicePtr as
+/// `x_norm`.
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub enum RouterInput {
+    /// Post-norm hidden state (qwen3.x).
+    Cur,
+    /// Pre-norm residual stream `attn_out` (gemma4).
+    AttnOut,
+}
+
+/// Expert activation function. Used between gate/up and down.
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub enum Activation {
+    /// `silu(gate) * up` — qwen3.x convention.
+    SwiGLU,
+    /// `gelu(gate) * up` — gemma4 convention (ggml tanh-approximation GELU).
+    Gelu,
+}
+
+impl Default for Activation {
+    fn default() -> Self {
+        Self::SwiGLU
+    }
+}
+
+/// How router logits become per-expert weights.
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub enum RouterNormalize {
+    /// Pick top-k highest logits, then softmax over the captured k
+    /// raw values (sum to 1). Matches qwen3.x convention and the
+    /// current `topk_f32` kernel. Equivalent to llama.cpp's
+    /// `LLAMA_EXPERT_GATING_FUNC_TYPE_SOFTMAX` + `norm_topk_prob`.
+    TopkRenorm,
+    /// Softmax over all `n_experts`, then take top-k indices keeping
+    /// the softmax-over-all probability for each kept slot (no
+    /// renorm). Matches gemma4 (`LLAMA_EXPERT_GATING_FUNC_TYPE_SOFTMAX`
+    /// without renorm). The kernel arrives in S3 — selecting this
+    /// variant before then errors out at `route_*` call time.
+    Softmax,
+}
+
+/// Router shape: input source, optional pre-router scale (vector
+/// `[hidden]` multiplied element-wise into `x_norm` before the
+/// router matmul), optional pre-router scalar, and the gate
+/// normalisation policy. Default = qwen3.x convention.
+#[derive(Copy, Clone)]
+pub struct RouterPolicy {
+    pub input: RouterInput,
+    /// F32 [hidden] device pointer. When `Some`, the model crate is
+    /// expected to broadcast-multiply it into the router input
+    /// before calling `route_*`. The handle is stored here so the
+    /// block can validate / pass it to a future fused pre-scale
+    /// kernel; the current API does no implicit application.
+    pub pre_scale: Option<DevicePtr>,
+    /// Scalar applied to the router input. Defaults to `1.0`. Gemma4
+    /// uses `1.0 / sqrt(n_embd)`. Same delivery contract as
+    /// `pre_scale` — the caller applies it.
+    pub pre_scalar: f32,
+    pub normalize: RouterNormalize,
+}
+
+impl Default for RouterPolicy {
+    fn default() -> Self {
+        Self {
+            input: RouterInput::Cur,
+            pre_scale: None,
+            pre_scalar: 1.0,
+            normalize: RouterNormalize::TopkRenorm,
+        }
+    }
+}
+
 /// Qwen3-MoE routed-experts block (decode-only V1).
 ///
 /// Holds: router weight (`ffn_gate_inp`), per-expert gate/up/down
@@ -85,6 +160,18 @@ pub struct MoeExperts {
     pub intermediate: usize,
     pub n_experts: usize,
     pub top_k: usize,
+    pub router_policy: RouterPolicy,
+    /// Activation between gate/up and down. Default `SwiGLU` (qwen3.x);
+    /// gemma4 sets this to `Gelu`.
+    pub activation: Activation,
+    /// Minimum `prompt_len` at which the tile8 path engages, in
+    /// addition to the universal `n_pairs >= TILE8_PAIRS_MIN` gate.
+    /// `None` ⇒ no extra minimum (tile8 engages whenever the pair
+    /// count clears 8). qwen3-moe TP sets this to `Some(32)` when
+    /// `tp_world >= 2` to avoid the AR-vs-tile8 launch serialisation
+    /// observed on tp2 / N=4 batched decode (the cert noted -10% wall;
+    /// see `crates/models/qwen3-moe/src/forward/moe_tp.rs`).
+    pub tile8_min_tokens: Option<usize>,
 }
 
 impl MoeExperts {
@@ -120,7 +207,33 @@ impl MoeExperts {
             intermediate,
             n_experts,
             top_k,
+            router_policy: RouterPolicy::default(),
+            activation: Activation::default(),
+            tile8_min_tokens: None,
         })
+    }
+
+    /// Override the router policy. Default keeps the qwen3.x
+    /// convention; gemma4 sets `{ input: AttnOut, pre_scale:
+    /// Some(ffn_gate_inp_s), pre_scalar: 1.0 / sqrt(hidden),
+    /// normalize: Softmax }`.
+    pub fn with_router_policy(mut self, policy: RouterPolicy) -> Self {
+        self.router_policy = policy;
+        self
+    }
+
+    /// Override the activation. Default `SwiGLU`; gemma4 uses `Gelu`.
+    pub fn with_activation(mut self, activation: Activation) -> Self {
+        self.activation = activation;
+        self
+    }
+
+    /// Set a minimum `prompt_len` for tile8 prefill engagement (on top
+    /// of the universal `n_pairs >= 8` gate). qwen3-moe TP sets this
+    /// to 32 when `tp_world >= 2`.
+    pub fn with_tile8_min_tokens(mut self, n: usize) -> Self {
+        self.tile8_min_tokens = Some(n);
+        self
     }
 
     /// Run the dense-router GEMV + topk that populates
@@ -153,15 +266,21 @@ impl MoeExperts {
                 .context("router dense_gemv_f32_f16")?,
             other => bail!("router expects F32 or F16 ffn_gate_inp; got {other:?}"),
         }
-        ops.topk_f32(
-            scratch.router_logits,
-            scratch.expert_ids,
-            scratch.expert_weights,
-            1,
-            self.n_experts,
-            self.top_k,
-        )
-        .context("router topk_f32")?;
+        match self.router_policy.normalize {
+            RouterNormalize::TopkRenorm => ops
+                .topk_f32(
+                    scratch.router_logits,
+                    scratch.expert_ids,
+                    scratch.expert_weights,
+                    1,
+                    self.n_experts,
+                    self.top_k,
+                )
+                .context("router topk_f32")?,
+            RouterNormalize::Softmax => bail!(
+                "RouterNormalize::Softmax requires the softmax-then-topk kernel landing in S3"
+            ),
+        }
         Ok(())
     }
 
@@ -364,16 +483,43 @@ impl MoeExperts {
         // 2. indexed gate + up per expert dtype.
         self.gate_up(ops, scratch)?;
 
-        // 3+4. Fused SwiGLU → F16 + Q8_1 quantise.
-        ops.swiglu_f32_to_f16(
-            scratch.gate_out_f32,
-            scratch.up_out_f32,
-            scratch.activated_f16,
-            top_k * inter,
-        )
-        .context("moe swiglu_f32_to_f16")?;
-        ops.quantize_f16_q8_1(scratch.activated_f16, scratch.activated_q8_1, top_k * inter)
-            .context("moe quantize activated → Q8_1")?;
+        // 3+4. Fused activation → F16 + Q8_1 quantise. SwiGLU at
+        // multiples of QK8_1=32 takes the single-launch fused
+        // `swiglu_f32_to_q8_1` fast path (saves the F16 cast +
+        // quantise pair). GELU has no fused-q8_1 sibling kernel.
+        let n_total = top_k * inter;
+        let fuse_swiglu_quant =
+            matches!(self.activation, Activation::SwiGLU) && n_total % 32 == 0;
+        if fuse_swiglu_quant {
+            ops.swiglu_f32_to_q8_1(
+                scratch.gate_out_f32,
+                scratch.up_out_f32,
+                scratch.activated_q8_1,
+                n_total,
+            )
+            .context("moe swiglu_f32_to_q8_1")?;
+        } else {
+            match self.activation {
+                Activation::SwiGLU => ops
+                    .swiglu_f32_to_f16(
+                        scratch.gate_out_f32,
+                        scratch.up_out_f32,
+                        scratch.activated_f16,
+                        n_total,
+                    )
+                    .context("moe swiglu_f32_to_f16")?,
+                Activation::Gelu => ops
+                    .gelu_f32_to_f16(
+                        scratch.gate_out_f32,
+                        scratch.up_out_f32,
+                        scratch.activated_f16,
+                        n_total,
+                    )
+                    .context("moe gelu_f32_to_f16")?,
+            }
+            ops.quantize_f16_q8_1(scratch.activated_f16, scratch.activated_q8_1, n_total)
+                .context("moe quantize activated → Q8_1")?;
+        }
 
         // 5. indexed down. Treats each top_k slot as its own effective
         // token with top_k=1 — the kernel's expert lookup collapses to
@@ -413,6 +559,89 @@ impl MoeExperts {
         Ok(())
     }
 
+    /// Per-rank decode for the TP path. Same kernel sequence as
+    /// [`Self::forward_decode`] but operates on per-rank sliced expert
+    /// weights (`self.intermediate` set to `local_inter`) and emits a
+    /// `partial_out` `[hidden]` via `moe_combine_no_residual_f16` — the
+    /// caller's AR folds the residual + cross-rank sum together.
+    /// `self.intermediate` MUST equal `moe_intermediate_size / tp_world`;
+    /// shape checks happen at `new()`.
+    pub fn forward_decode_tp<O: Ops>(
+        &self,
+        ops: &O,
+        x_norm: DevicePtr,
+        partial_out: DevicePtr,
+        scratch: MoeExpertsDecodeScratch,
+    ) -> Result<()> {
+        let hidden = self.hidden;
+        let inter = self.intermediate;
+        let top_k = self.top_k;
+
+        // 1. Quantise x_norm → Q8_1.
+        ops.quantize_f16_q8_1(x_norm, scratch.x_q8_1, hidden)
+            .context("moe (TP) x_norm → Q8_1")?;
+
+        // 2. Indexed gate + up. `inter` is `local_inter` from the
+        // outer perspective; the indexed-MoE kernels are oblivious.
+        self.gate_up(ops, scratch)?;
+
+        // 3+4. Fused activation → Q8_1 (SwiGLU @ multiples of QK8_1=32)
+        // or unfused (GELU / off-multiples).
+        let n_total = top_k * inter;
+        let fuse_swiglu_quant =
+            matches!(self.activation, Activation::SwiGLU) && n_total % 32 == 0;
+        if fuse_swiglu_quant {
+            ops.swiglu_f32_to_q8_1(
+                scratch.gate_out_f32,
+                scratch.up_out_f32,
+                scratch.activated_q8_1,
+                n_total,
+            )
+            .context("moe (TP) swiglu_f32_to_q8_1")?;
+        } else {
+            match self.activation {
+                Activation::SwiGLU => ops
+                    .swiglu_f32_to_f16(
+                        scratch.gate_out_f32,
+                        scratch.up_out_f32,
+                        scratch.activated_f16,
+                        n_total,
+                    )
+                    .context("moe (TP) swiglu_f32_to_f16")?,
+                Activation::Gelu => ops
+                    .gelu_f32_to_f16(
+                        scratch.gate_out_f32,
+                        scratch.up_out_f32,
+                        scratch.activated_f16,
+                        n_total,
+                    )
+                    .context("moe (TP) gelu_f32_to_f16")?,
+            }
+            ops.quantize_f16_q8_1(scratch.activated_f16, scratch.activated_q8_1, n_total)
+                .context("moe (TP) quantize activated → Q8_1")?;
+        }
+
+        // 5. Indexed down on the sliced ffn_down_exps.
+        self.down(ops, scratch)?;
+
+        // 6. Cast expert outputs to F16 for the combine kernel.
+        ops.cast_f32_to_f16(scratch.down_f32, scratch.down_f16, top_k * hidden)
+            .context("moe (TP) cast down → f16")?;
+
+        // 7. Weighted sum WITHOUT residual: partial = Σ w_k · down_k.
+        // Residual is folded by the AR that follows.
+        ops.moe_combine_no_residual_f16(
+            scratch.down_f16,
+            scratch.expert_weights,
+            partial_out,
+            1,
+            top_k,
+            hidden,
+        )
+        .context("moe (TP) combine_no_residual_f16")?;
+        Ok(())
+    }
+
     /// Multi-token router. Same shape as `route_decode` but uses the
     /// batched dense_gemv kernel + L-aware topk.
     pub fn route_prefill<O: Ops>(
@@ -445,15 +674,21 @@ impl MoeExperts {
                 .context("router prefill dense_gemv_f32_f16_batched")?,
             other => bail!("router expects F32 or F16 ffn_gate_inp; got {other:?}"),
         }
-        ops.topk_f32(
-            scratch.router_logits,
-            scratch.expert_ids,
-            scratch.expert_weights,
-            prompt_len,
-            self.n_experts,
-            self.top_k,
-        )
-        .context("router prefill topk_f32")?;
+        match self.router_policy.normalize {
+            RouterNormalize::TopkRenorm => ops
+                .topk_f32(
+                    scratch.router_logits,
+                    scratch.expert_ids,
+                    scratch.expert_weights,
+                    prompt_len,
+                    self.n_experts,
+                    self.top_k,
+                )
+                .context("router prefill topk_f32")?,
+            RouterNormalize::Softmax => bail!(
+                "RouterNormalize::Softmax requires the softmax-then-topk kernel landing in S3"
+            ),
+        }
         Ok(())
     }
 
@@ -479,6 +714,52 @@ impl MoeExperts {
         residual: DevicePtr,
         extra_residual: Option<DevicePtr>,
         out: DevicePtr,
+        prompt_len: usize,
+        scratch: MoeExpertsPrefillScratch,
+    ) -> Result<()> {
+        self.prefill_compute_expert_outs(ops, x_norm, prompt_len, scratch)?;
+        // 7. Weighted sum + residual (+ optional shared-expert delta).
+        self.combine_prefill(ops, scratch, residual, extra_residual, out, prompt_len)
+    }
+
+    /// Per-rank routed-experts prefill (TP). Same kernel sequence as
+    /// [`Self::forward_prefill`] but writes the per-rank partial via
+    /// `moe_combine_no_residual_f16`; caller's AR folds the residual
+    /// + cross-rank sum together. `self.intermediate` must equal
+    /// `moe_intermediate_size / tp_world`. Set
+    /// [`Self::with_tile8_min_tokens`] to gate the tile8 path on a
+    /// prompt-length floor when running at `tp_world >= 2`.
+    pub fn forward_prefill_tp<O: Ops>(
+        &self,
+        ops: &O,
+        x_norm: DevicePtr,
+        partial_out: DevicePtr,
+        prompt_len: usize,
+        scratch: MoeExpertsPrefillScratch,
+    ) -> Result<()> {
+        self.prefill_compute_expert_outs(ops, x_norm, prompt_len, scratch)?;
+        ops.moe_combine_no_residual_f16(
+            scratch.down_f16,
+            scratch.expert_weights,
+            partial_out,
+            prompt_len,
+            self.top_k,
+            self.hidden,
+        )
+        .context("prefill (TP) combine_no_residual_f16")
+    }
+
+    /// Steps 1-6 of the prefill pipeline. Writes the per-pair F16
+    /// expert outputs into `scratch.down_f16` (`[prompt_len * top_k,
+    /// hidden]`). Routing decisions in `scratch.expert_ids` /
+    /// `scratch.expert_weights` must already be populated by the
+    /// caller (`route_prefill` typically). The helper picks the mmvq
+    /// short-prompt fallback vs. tile8 dispatch per the configured
+    /// thresholds.
+    fn prefill_compute_expert_outs<O: Ops>(
+        &self,
+        ops: &O,
+        x_norm: DevicePtr,
         prompt_len: usize,
         scratch: MoeExpertsPrefillScratch,
     ) -> Result<()> {
@@ -514,13 +795,19 @@ impl MoeExperts {
         // Q4_0 / Q8_0 / Q4_1 down; Q8_0 gate+up with Q8_0 down.
         let allow_tile8_decode =
             std::env::var("FLAMBEAU_MOE_TILE8_DECODE").as_deref() != Ok("0");
+        let tile8_tokens_ok = self
+            .tile8_min_tokens
+            .map(|m| prompt_len >= m)
+            .unwrap_or(true);
         let q4_0_use_tile8 = gate_dt == QDtype::Q4_0
             && (down_dt == QDtype::Q4_0 || down_dt == QDtype::Q8_0 || down_dt == QDtype::Q4_1)
             && n_pairs >= Self::TILE8_PAIRS_MIN
+            && tile8_tokens_ok
             && allow_tile8_decode;
         let q8_0_use_tile8 = gate_dt == QDtype::Q8_0
             && down_dt == QDtype::Q8_0
             && n_pairs >= Self::TILE8_PAIRS_MIN
+            && tile8_tokens_ok
             && allow_tile8_decode;
         if (gate_dt == QDtype::Q4_0 && !q4_0_use_tile8)
             || (gate_dt == QDtype::Q8_0 && !q8_0_use_tile8)
@@ -542,7 +829,7 @@ impl MoeExperts {
             self.down_prefill_mmvq(ops, prompt_len, scratch)?;
             ops.cast_f32_to_f16(scratch.down_f32, scratch.down_f16, n_pairs * hidden)
                 .context("prefill cast down → f16 (q4_0/q8_0 short path)")?;
-            return self.combine_prefill(ops, scratch, residual, extra_residual, out, prompt_len);
+            return Ok(());
         }
 
         // 3. tile8 path. Sort + pad routing decisions, then 64×8-tile
@@ -604,6 +891,186 @@ impl MoeExperts {
                     },
                 )
                 .context("prefill indexed_moe gate+up q8_0 tile8")?,
+            QDtype::IQ4_NL => ops
+                .indexed_moe_mmq_iq4_nl_gate_up_tile8(
+                    self.ffn_gate_exps.ptr,
+                    self.ffn_up_exps.ptr,
+                    scratch.x_q8_1,
+                    scratch.expert_ids,
+                    scratch.sort_sorted_pair_idx_padded,
+                    scratch.sort_padded_offsets,
+                    scratch.gate_out_f32,
+                    scratch.up_out_f32,
+                    flambeau_ops::MoeShape {
+                        n_rows: inter,
+                        n_tokens: prompt_len,
+                        top_k,
+                        n_sb_per_row: n_sb_per_row_hidden_32,
+                        n_experts,
+                        padded_total_upper_bound: padded_total_ub,
+                    },
+                )
+                .context("prefill indexed_moe gate+up iq4_nl tile8")?,
+            QDtype::IQ4_XS => ops
+                .indexed_moe_mmq_iq4_xs_gate_up_tile8(
+                    self.ffn_gate_exps.ptr,
+                    self.ffn_up_exps.ptr,
+                    scratch.x_q8_1,
+                    scratch.expert_ids,
+                    scratch.sort_sorted_pair_idx_padded,
+                    scratch.sort_padded_offsets,
+                    scratch.gate_out_f32,
+                    scratch.up_out_f32,
+                    flambeau_ops::MoeShape {
+                        n_rows: inter,
+                        n_tokens: prompt_len,
+                        top_k,
+                        n_sb_per_row: n_sb_per_row_hidden_kk,
+                        n_experts,
+                        padded_total_upper_bound: padded_total_ub,
+                    },
+                )
+                .context("prefill indexed_moe gate+up iq4_xs tile8")?,
+            QDtype::IQ3_XXS => ops
+                .indexed_moe_mmq_iq3_xxs_gate_up_tile8(
+                    self.ffn_gate_exps.ptr,
+                    self.ffn_up_exps.ptr,
+                    scratch.x_q8_1,
+                    scratch.expert_ids,
+                    scratch.sort_sorted_pair_idx_padded,
+                    scratch.sort_padded_offsets,
+                    scratch.gate_out_f32,
+                    scratch.up_out_f32,
+                    flambeau_ops::MoeShape {
+                        n_rows: inter,
+                        n_tokens: prompt_len,
+                        top_k,
+                        n_sb_per_row: n_sb_per_row_hidden_kk,
+                        n_experts,
+                        padded_total_upper_bound: padded_total_ub,
+                    },
+                )
+                .context("prefill indexed_moe gate+up iq3_xxs tile8")?,
+            QDtype::IQ3_S => ops
+                .indexed_moe_mmq_iq3_s_gate_up_tile8(
+                    self.ffn_gate_exps.ptr,
+                    self.ffn_up_exps.ptr,
+                    scratch.x_q8_1,
+                    scratch.expert_ids,
+                    scratch.sort_sorted_pair_idx_padded,
+                    scratch.sort_padded_offsets,
+                    scratch.gate_out_f32,
+                    scratch.up_out_f32,
+                    flambeau_ops::MoeShape {
+                        n_rows: inter,
+                        n_tokens: prompt_len,
+                        top_k,
+                        n_sb_per_row: n_sb_per_row_hidden_kk,
+                        n_experts,
+                        padded_total_upper_bound: padded_total_ub,
+                    },
+                )
+                .context("prefill indexed_moe gate+up iq3_s tile8")?,
+            QDtype::IQ2_XXS => ops
+                .indexed_moe_mmq_iq2_xxs_gate_up_tile8(
+                    self.ffn_gate_exps.ptr,
+                    self.ffn_up_exps.ptr,
+                    scratch.x_q8_1,
+                    scratch.expert_ids,
+                    scratch.sort_sorted_pair_idx_padded,
+                    scratch.sort_padded_offsets,
+                    scratch.gate_out_f32,
+                    scratch.up_out_f32,
+                    flambeau_ops::MoeShape {
+                        n_rows: inter,
+                        n_tokens: prompt_len,
+                        top_k,
+                        n_sb_per_row: n_sb_per_row_hidden_kk,
+                        n_experts,
+                        padded_total_upper_bound: padded_total_ub,
+                    },
+                )
+                .context("prefill indexed_moe gate+up iq2_xxs tile8")?,
+            QDtype::IQ2_XS => ops
+                .indexed_moe_mmq_iq2_xs_gate_up_tile8(
+                    self.ffn_gate_exps.ptr,
+                    self.ffn_up_exps.ptr,
+                    scratch.x_q8_1,
+                    scratch.expert_ids,
+                    scratch.sort_sorted_pair_idx_padded,
+                    scratch.sort_padded_offsets,
+                    scratch.gate_out_f32,
+                    scratch.up_out_f32,
+                    flambeau_ops::MoeShape {
+                        n_rows: inter,
+                        n_tokens: prompt_len,
+                        top_k,
+                        n_sb_per_row: n_sb_per_row_hidden_kk,
+                        n_experts,
+                        padded_total_upper_bound: padded_total_ub,
+                    },
+                )
+                .context("prefill indexed_moe gate+up iq2_xs tile8")?,
+            QDtype::IQ2_S => ops
+                .indexed_moe_mmq_iq2_s_gate_up_tile8(
+                    self.ffn_gate_exps.ptr,
+                    self.ffn_up_exps.ptr,
+                    scratch.x_q8_1,
+                    scratch.expert_ids,
+                    scratch.sort_sorted_pair_idx_padded,
+                    scratch.sort_padded_offsets,
+                    scratch.gate_out_f32,
+                    scratch.up_out_f32,
+                    flambeau_ops::MoeShape {
+                        n_rows: inter,
+                        n_tokens: prompt_len,
+                        top_k,
+                        n_sb_per_row: n_sb_per_row_hidden_kk,
+                        n_experts,
+                        padded_total_upper_bound: padded_total_ub,
+                    },
+                )
+                .context("prefill indexed_moe gate+up iq2_s tile8")?,
+            QDtype::IQ1_S => ops
+                .indexed_moe_mmq_iq1_s_gate_up_tile8(
+                    self.ffn_gate_exps.ptr,
+                    self.ffn_up_exps.ptr,
+                    scratch.x_q8_1,
+                    scratch.expert_ids,
+                    scratch.sort_sorted_pair_idx_padded,
+                    scratch.sort_padded_offsets,
+                    scratch.gate_out_f32,
+                    scratch.up_out_f32,
+                    flambeau_ops::MoeShape {
+                        n_rows: inter,
+                        n_tokens: prompt_len,
+                        top_k,
+                        n_sb_per_row: n_sb_per_row_hidden_kk,
+                        n_experts,
+                        padded_total_upper_bound: padded_total_ub,
+                    },
+                )
+                .context("prefill indexed_moe gate+up iq1_s tile8")?,
+            QDtype::IQ1_M => ops
+                .indexed_moe_mmq_iq1_m_gate_up_tile8(
+                    self.ffn_gate_exps.ptr,
+                    self.ffn_up_exps.ptr,
+                    scratch.x_q8_1,
+                    scratch.expert_ids,
+                    scratch.sort_sorted_pair_idx_padded,
+                    scratch.sort_padded_offsets,
+                    scratch.gate_out_f32,
+                    scratch.up_out_f32,
+                    flambeau_ops::MoeShape {
+                        n_rows: inter,
+                        n_tokens: prompt_len,
+                        top_k,
+                        n_sb_per_row: n_sb_per_row_hidden_kk,
+                        n_experts,
+                        padded_total_upper_bound: padded_total_ub,
+                    },
+                )
+                .context("prefill indexed_moe gate+up iq1_m tile8")?,
             QDtype::Q4_K => ops
                 .indexed_moe_mmq_q4_k_gate_up_tile8(
                     self.ffn_gate_exps.ptr,
@@ -725,6 +1192,105 @@ impl MoeExperts {
                     down_shape_tile8_32,
                 )
                 .context("prefill indexed_moe down q4_1 tile8")?,
+            QDtype::IQ4_NL => ops
+                .indexed_moe_mmq_iq4_nl_down_tile8(
+                    self.ffn_down_exps.ptr,
+                    scratch.activated_q8_1,
+                    scratch.expert_ids,
+                    scratch.sort_sorted_pair_idx_padded,
+                    scratch.sort_padded_offsets,
+                    scratch.down_f32,
+                    down_shape_tile8_32,
+                )
+                .context("prefill indexed_moe down iq4_nl tile8")?,
+            QDtype::IQ4_XS => ops
+                .indexed_moe_mmq_iq4_xs_down_tile8(
+                    self.ffn_down_exps.ptr,
+                    scratch.activated_q8_1,
+                    scratch.expert_ids,
+                    scratch.sort_sorted_pair_idx_padded,
+                    scratch.sort_padded_offsets,
+                    scratch.down_f32,
+                    down_shape_tile8_kk,
+                )
+                .context("prefill indexed_moe down iq4_xs tile8")?,
+            QDtype::IQ3_XXS => ops
+                .indexed_moe_mmq_iq3_xxs_down_tile8(
+                    self.ffn_down_exps.ptr,
+                    scratch.activated_q8_1,
+                    scratch.expert_ids,
+                    scratch.sort_sorted_pair_idx_padded,
+                    scratch.sort_padded_offsets,
+                    scratch.down_f32,
+                    down_shape_tile8_kk,
+                )
+                .context("prefill indexed_moe down iq3_xxs tile8")?,
+            QDtype::IQ3_S => ops
+                .indexed_moe_mmq_iq3_s_down_tile8(
+                    self.ffn_down_exps.ptr,
+                    scratch.activated_q8_1,
+                    scratch.expert_ids,
+                    scratch.sort_sorted_pair_idx_padded,
+                    scratch.sort_padded_offsets,
+                    scratch.down_f32,
+                    down_shape_tile8_kk,
+                )
+                .context("prefill indexed_moe down iq3_s tile8")?,
+            QDtype::IQ2_XXS => ops
+                .indexed_moe_mmq_iq2_xxs_down_tile8(
+                    self.ffn_down_exps.ptr,
+                    scratch.activated_q8_1,
+                    scratch.expert_ids,
+                    scratch.sort_sorted_pair_idx_padded,
+                    scratch.sort_padded_offsets,
+                    scratch.down_f32,
+                    down_shape_tile8_kk,
+                )
+                .context("prefill indexed_moe down iq2_xxs tile8")?,
+            QDtype::IQ2_XS => ops
+                .indexed_moe_mmq_iq2_xs_down_tile8(
+                    self.ffn_down_exps.ptr,
+                    scratch.activated_q8_1,
+                    scratch.expert_ids,
+                    scratch.sort_sorted_pair_idx_padded,
+                    scratch.sort_padded_offsets,
+                    scratch.down_f32,
+                    down_shape_tile8_kk,
+                )
+                .context("prefill indexed_moe down iq2_xs tile8")?,
+            QDtype::IQ2_S => ops
+                .indexed_moe_mmq_iq2_s_down_tile8(
+                    self.ffn_down_exps.ptr,
+                    scratch.activated_q8_1,
+                    scratch.expert_ids,
+                    scratch.sort_sorted_pair_idx_padded,
+                    scratch.sort_padded_offsets,
+                    scratch.down_f32,
+                    down_shape_tile8_kk,
+                )
+                .context("prefill indexed_moe down iq2_s tile8")?,
+            QDtype::IQ1_S => ops
+                .indexed_moe_mmq_iq1_s_down_tile8(
+                    self.ffn_down_exps.ptr,
+                    scratch.activated_q8_1,
+                    scratch.expert_ids,
+                    scratch.sort_sorted_pair_idx_padded,
+                    scratch.sort_padded_offsets,
+                    scratch.down_f32,
+                    down_shape_tile8_kk,
+                )
+                .context("prefill indexed_moe down iq1_s tile8")?,
+            QDtype::IQ1_M => ops
+                .indexed_moe_mmq_iq1_m_down_tile8(
+                    self.ffn_down_exps.ptr,
+                    scratch.activated_q8_1,
+                    scratch.expert_ids,
+                    scratch.sort_sorted_pair_idx_padded,
+                    scratch.sort_padded_offsets,
+                    scratch.down_f32,
+                    down_shape_tile8_kk,
+                )
+                .context("prefill indexed_moe down iq1_m tile8")?,
             other => bail!(
                 "MoeExperts prefill: down_dt {other:?} not on the tile8 surface"
             ),
@@ -734,8 +1300,7 @@ impl MoeExperts {
         ops.cast_f32_to_f16(scratch.down_f32, scratch.down_f16, n_pairs * hidden)
             .context("prefill cast down → f16")?;
 
-        // 7. Weighted sum + residual (+ optional shared-expert delta).
-        self.combine_prefill(ops, scratch, residual, extra_residual, out, prompt_len)
+        Ok(())
     }
 
     fn gate_up_prefill_mmvq<O: Ops>(

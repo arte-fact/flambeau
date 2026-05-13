@@ -24,17 +24,21 @@ pub mod shared_expert;
 pub mod topology;
 
 pub use attention::{
-    AttnDecodeSlots, AttnPrefillSlots, StandardAttention, StandardAttentionDecodeScratch,
-    StandardAttentionPrefillScratch, WeightHandle, MAX_SPLITK_CHUNKS,
+    AttnDecodeSlots, AttnPrefillSlots, StandardAttention, StandardAttentionBatchedDecodeScratch,
+    StandardAttentionDecodeScratch, StandardAttentionPrefillScratch, WeightHandle,
+    MAX_SPLITK_CHUNKS,
 };
 pub use delta_net::{DeltaNetLayer, DeltaNetLayerDecodeScratch, DeltaNetLayerPrefillScratch};
-pub use dense_mlp::{DenseMlp, DenseMlpDecodeScratch, DenseMlpPrefillScratch};
+pub use dense_mlp::{DenseMlp, DenseMlpDecodeScratch, DenseMlpPrefillScratch, DenseMlpTp};
 pub use layer::{
     AttnBlock, AttnDecodeScratch, AttnPrefillScratch, AttnState, FfnBlock, FfnDecodeScratch,
     FfnPrefillScratch, LayerKind,
 };
-pub use moe_experts::{MoeExperts, MoeExpertsDecodeScratch, MoeExpertsPrefillScratch};
-pub use shared_expert::{SharedExpert, SharedExpertDecodeScratch};
+pub use moe_experts::{
+    Activation, MoeExperts, MoeExpertsDecodeScratch, MoeExpertsPrefillScratch, RouterInput,
+    RouterNormalize, RouterPolicy,
+};
+pub use shared_expert::{SharedExpert, SharedExpertDecodeScratch, SharedExpertPrefillScratch};
 pub use topology::{
     forward_one_token_hybrid, forward_one_token_pp, forward_one_token_tp,
     forward_prefill_hybrid, forward_prefill_pp, forward_prefill_pp_chunk, forward_prefill_tp,

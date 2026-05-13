@@ -28,10 +28,11 @@ use half::f16;
 use crate::cert::{now_utc_iso8601, Cert, PmcSnapshot, ShapeResult, SCHEMA_VERSION};
 use crate::harness::{alloc_and_upload, max_rel_err_with_floor, rig, seeded_f32_range};
 
-/// (head_dim, n_heads_q, n_heads_kv) — V1 target families.
+/// (head_dim, n_heads_q, n_heads_kv) — V1 target families + gemma4.
 const SHAPES: &[(usize, usize, usize)] = &[
-    (128, 32, 4), // Qwen3.5
-    (256, 16, 2), // Qwen3.6
+    (128, 32, 4),  // Qwen3.5
+    (256, 16, 2),  // Qwen3.6
+    (512, 32, 16), // gemma4 full-attn
 ];
 
 pub fn run_sweep(repo_root: &Path) -> Result<Cert> {
@@ -149,6 +150,7 @@ fn run_shape(
         let n_k_i = n_k_tokens as i32;
         let q_off_i = q_offset as i32;
         let scale_f = scale;
+        let window_i: i32 = 0;
         let d_q_ptr: u64 = d_q.as_usize() as u64;
         let d_k_ptr: u64 = d_k.as_usize() as u64;
         let d_v_ptr: u64 = d_v.as_usize() as u64;
@@ -165,6 +167,7 @@ fn run_shape(
         args.push(&n_k_i);
         args.push(&q_off_i);
         args.push(&scale_f);
+        args.push(&window_i);
         let cfg = LaunchCfg {
             grid: (n_q_tokens as u32, n_heads_q as u32, 1),
             block: (head_dim as u32, 1, 1),
@@ -264,12 +267,15 @@ pub fn run_sweep_flash_tile(repo_root: &Path) -> Result<Cert> {
         module.kernel("flambeau_attention_prefill_flash_tile_d64_f16")?;
     let kernel_d256: HipKernel<'_> =
         module.kernel("flambeau_attention_prefill_flash_tile_d256_f16")?;
+    let kernel_d512: HipKernel<'_> =
+        module.kernel("flambeau_attention_prefill_flash_tile_d512_f16")?;
 
-    // Extra shapes: d=64, d=128, d=256 coverage.
+    // Extra shapes: d=64, d=128, d=256, d=512 coverage.
     const FT_SHAPES: &[(usize, usize, usize)] = &[
-        (64, 32, 8),   // synthetic d=64 coverage
-        (128, 32, 4),  // Qwen3.5
-        (256, 16, 2),  // Qwen3.6
+        (64, 32, 8),    // synthetic d=64 coverage
+        (128, 32, 4),   // Qwen3.5
+        (256, 16, 2),   // Qwen3.6
+        (512, 32, 16),  // gemma4 full-attn
     ];
     let cases = [
         (8usize, 8usize, 0usize),
@@ -284,6 +290,7 @@ pub fn run_sweep_flash_tile(repo_root: &Path) -> Result<Cert> {
             64 => &kernel_d64,
             128 => &kernel_d128,
             256 => &kernel_d256,
+            512 => &kernel_d512,
             _ => unreachable!(),
         };
         for (n_q, n_k, q_off) in cases {
@@ -377,6 +384,7 @@ fn run_shape_flash_tile(
         let n_k_i = n_k_tokens as i32;
         let q_off_i = q_offset as i32;
         let scale_f = scale;
+        let window_i: i32 = 0;
         let d_q_ptr: u64 = d_q.as_usize() as u64;
         let d_k_ptr: u64 = d_k.as_usize() as u64;
         let d_v_ptr: u64 = d_v.as_usize() as u64;
@@ -392,6 +400,7 @@ fn run_shape_flash_tile(
         args.push(&n_k_i);
         args.push(&q_off_i);
         args.push(&scale_f);
+        args.push(&window_i);
         // Grid = (ceil(n_q / BR=4), H_q, 1); Block = (WARP_SIZE=64, BR=4, 1).
         const BR: u32 = 4;
         const WARP: u32 = 64;

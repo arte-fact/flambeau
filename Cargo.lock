@@ -479,6 +479,23 @@ dependencies = [
 ]
 
 [[package]]
+name = "flambeau-gemma4"
+version = "0.1.0-dev"
+dependencies = [
+ "anyhow",
+ "bytemuck",
+ "flambeau-backend-hip",
+ "flambeau-blocks",
+ "flambeau-core",
+ "flambeau-ops",
+ "flambeau-quant",
+ "flambeau-runtime",
+ "half",
+ "thiserror 2.0.18",
+ "tracing",
+]
+
+[[package]]
 name = "flambeau-kernels-hip"
 version = "0.1.0-dev"
 dependencies = [

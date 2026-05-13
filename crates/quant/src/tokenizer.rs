@@ -15,6 +15,7 @@ use anyhow::{anyhow, Context, Result};
 use tokenizers::models::bpe::{Vocab, BPE};
 use tokenizers::pre_tokenizers::{
     byte_level::ByteLevel,
+    metaspace::{Metaspace, PrependScheme},
     sequence::Sequence as PreTokSequence,
     split::{Split, SplitPattern},
 };
@@ -55,6 +56,12 @@ pub struct GgufTokenizer {
     /// surface form (Qwen-Coder `<|fim_prefix|>`, StarCoder
     /// `<fim_prefix>`, DeepSeek `<｜fim▁begin｜>`).
     pub fim: Option<FimTokens>,
+    /// Tokenizer-mandated `add_bos`, overriding the GGUF
+    /// `tokenizer.ggml.add_bos_token` flag. Gemma 4 sets this to
+    /// `true` regardless of the file's stored value (mirrors
+    /// llama.cpp PR #21500). Servers that prepend BOS should consult
+    /// this rather than the raw GGUF flag.
+    pub force_add_bos: bool,
 }
 
 /// Fill-in-the-Middle (FIM) special-token ids for code-completion
@@ -111,12 +118,17 @@ pub fn load_from_gguf(file: &GgufFile) -> Result<GgufTokenizer> {
     let model = file
         .metadata_str("tokenizer.ggml.model")
         .context("tokenizer.ggml.model missing from GGUF")?;
-    if model != "gpt2" {
+    if model != "gpt2" && model != "gemma4" {
         return Err(anyhow!(
-            "tokenizer model `{model}` not supported (only `gpt2` BPE family so far)"
+            "tokenizer model `{model}` not supported (only `gpt2` BPE family + `gemma4`)"
         ));
     }
     let pre = file.metadata_str("tokenizer.ggml.pre").unwrap_or("default");
+    // Gemma 4 uses SentencePiece-style BPE: spaces are encoded as
+    // `▁` (U+2581) and BPE merges run on raw UTF-8 (not GPT-2 byte
+    // encoding). The pretokenizer only splits on newline groups
+    // (llama.cpp `LLAMA_VOCAB_PRE_TYPE_GEMMA4`).
+    let is_gemma4 = model == "gemma4";
 
     // Vocab array: index → token string. GGUF stores it as Array(String).
     let tokens_arr = file
@@ -154,14 +166,22 @@ pub fn load_from_gguf(file: &GgufFile) -> Result<GgufTokenizer> {
         merges.push((a.to_owned(), b.to_owned()));
     }
 
+    // Gemma 4 BPE: byte_fallback=true so single-byte fallback tokens
+    // decode correctly (mirrors llama.cpp PR #21488). GPT-2 BPE has
+    // no byte fallback (byte-level encoding handles all bytes via
+    // ByteLevel pretokenizer).
     let bpe = BPE::builder()
         .vocab_and_merges(vocab, merges)
-        .byte_fallback(false)
+        .byte_fallback(is_gemma4)
         .build()
         .map_err(|e| anyhow!("BPE::build: {e}"))?;
 
-    // Pretokenizer selection — llama.cpp's tokenizer_pre cases we support.
-    let pre_tok = pre_for(pre)?;
+    // Pretokenizer selection.
+    let pre_tok = if is_gemma4 {
+        gemma4_pre_tok()?
+    } else {
+        pre_for(pre)?
+    };
 
     let mut tok: TokenizerImpl<
         ModelWrapper,
@@ -171,16 +191,33 @@ pub fn load_from_gguf(file: &GgufFile) -> Result<GgufTokenizer> {
         DecoderWrapper,
     > = TokenizerImpl::new(bpe.into());
     tok.with_pre_tokenizer(Some(pre_tok));
-    tok.with_decoder(Some(DecoderWrapper::ByteLevel(
-        decoders::byte_level::ByteLevel::new(
-            /*add_prefix_space=*/ false,
-            /*trim_offsets=*/ true,
-            /*use_regex=*/ true,
-        ),
-    )));
+    if is_gemma4 {
+        // Sequence(ByteFallback, Metaspace) — undoes byte-fallback
+        // bytes back to UTF-8 then ▁ back to space. Mirrors
+        // SentencePiece-with-bytefallback decoders (llama.cpp PR
+        // #21488 byte-token handling).
+        let bf = decoders::byte_fallback::ByteFallback::new();
+        let ms = Metaspace::new('▁', PrependScheme::Never, true);
+        let seq =
+            decoders::sequence::Sequence::new(vec![
+                DecoderWrapper::ByteFallback(bf),
+                DecoderWrapper::Metaspace(ms),
+            ]);
+        tok.with_decoder(Some(DecoderWrapper::Sequence(seq)));
+    } else {
+        tok.with_decoder(Some(DecoderWrapper::ByteLevel(
+            decoders::byte_level::ByteLevel::new(
+                /*add_prefix_space=*/ false,
+                /*trim_offsets=*/ true,
+                /*use_regex=*/ true,
+            ),
+        )));
+    }
     // Normalizer: gpt2 BPE is typically NFC. Qwen3 uses no normalizer
-    // ("default"); leave None unless GGUF says otherwise.
-    if pre == "gpt-2" {
+    // ("default"); leave None unless GGUF says otherwise. Gemma 4
+    // skips normalization — the Metaspace pretokenizer handles the
+    // space → ▁ mapping in pre-tokenization.
+    if pre == "gpt-2" && !is_gemma4 {
         tok.with_normalizer(Some(NormalizerWrapper::NFC(normalizers::NFC)));
     }
 
@@ -269,7 +306,38 @@ pub fn load_from_gguf(file: &GgufFile) -> Result<GgufTokenizer> {
         }
     }
 
+    // Gemma 4 chat-stop markers (in addition to `eos_id`). Mirrors
+    // llama.cpp `llama-vocab.cpp:2569` plus the tokenizer-pre group's
+    // closing tokens.
+    if is_gemma4 {
+        for needle in [
+            "<end_of_turn>",
+            "<eos>",
+            "<turn|>",
+            "<|tool_response>",
+        ] {
+            if let Some(id) = find_vocab_id(tokens_arr, needle) {
+                if !stop_ids.contains(&id) {
+                    stop_ids.push(id);
+                }
+            }
+        }
+    }
+
     let fim = detect_fim_tokens(tokens_arr);
+    let raw_add_bos = file
+        .metadata
+        .get("tokenizer.ggml.add_bos_token")
+        .and_then(|v| match v {
+            crate::gguf::Value::Bool(b) => Some(*b),
+            _ => None,
+        })
+        .unwrap_or(false);
+    // PR #21500: gemma4 always forces add_bos=true regardless of the
+    // GGUF stored flag. 4 of 5 audited GGUFs have add_bos_token=false
+    // (see `certs/research/gemma4_recon.md` tokenizer findings), so
+    // this override is mandatory for parity with llama.cpp.
+    let force_add_bos = if is_gemma4 { true } else { raw_add_bos };
 
     Ok(GgufTokenizer {
         inner: wrapped,
@@ -280,7 +348,31 @@ pub fn load_from_gguf(file: &GgufFile) -> Result<GgufTokenizer> {
         stop_ids,
         always_stop_ids,
         fim,
+        force_add_bos,
     })
+}
+
+/// Pretokenizer for Gemma 4. Llama.cpp's `LLAMA_VOCAB_PRE_TYPE_GEMMA4`
+/// regex (`[^\n]+|[\n]+`) splits on newline groups; the rest is
+/// handled by Metaspace (space → ▁) + raw BPE. Newline-only tokens
+/// in the vocab (PR #21343) are handled by Metaspace's split=true
+/// behaviour combined with BPE merge lookup.
+fn gemma4_pre_tok() -> Result<PreTokenizerWrapper> {
+    // PR #21406 / `LLAMA_VOCAB_PRE_TYPE_GEMMA4`: split into "non-newline runs"
+    // and "newline runs" so BPE merges never cross newline boundaries.
+    let split = Split::new(
+        SplitPattern::Regex(r"[^\n]+|[\n]+".to_string()),
+        SplitDelimiterBehavior::Isolated,
+        /*invert=*/ false,
+    )
+    .map_err(|e| anyhow!("gemma4 newline split: {e}"))?;
+    // Metaspace replaces ' ' with '▁'; PrependScheme::Never matches
+    // `add_space_prefix=false` in the audited GGUFs.
+    let metaspace = Metaspace::new('▁', PrependScheme::Never, true);
+    Ok(PreTokenizerWrapper::Sequence(PreTokSequence::new(vec![
+        PreTokenizerWrapper::Split(split),
+        PreTokenizerWrapper::Metaspace(metaspace),
+    ])))
 }
 
 /// Probe the vocab for FIM special tokens. Returns `None` unless all

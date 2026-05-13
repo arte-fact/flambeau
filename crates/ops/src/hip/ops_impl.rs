@@ -195,10 +195,11 @@ impl<'a> Ops for HipOps<'a> {
         head_dim: usize,
         n_tokens_kv: usize,
         scale: f32,
+        window_size: i32,
     ) -> Result<()> {
         super::attention::attention_decode_f16(
             self.reg, self.stream, q, k_cache, v_cache, out, n_heads_q, n_heads_kv, head_dim,
-            n_tokens_kv, scale,
+            n_tokens_kv, scale, window_size,
         )
     }
 
@@ -213,11 +214,12 @@ impl<'a> Ops for HipOps<'a> {
         head_dim: usize,
         n_tokens_kv: usize,
         scale: f32,
+        window_size: i32,
         n_tokens_kv_slot: Option<flambeau_backend_hip::ScalarSlot>,
     ) -> Result<()> {
         super::attention::attention_decode_f16_slots(
             self.reg, self.stream, q, k_cache, v_cache, out, n_heads_q, n_heads_kv, head_dim,
-            n_tokens_kv, scale, n_tokens_kv_slot,
+            n_tokens_kv, scale, window_size, n_tokens_kv_slot,
         )
     }
 
@@ -240,6 +242,29 @@ impl<'a> Ops for HipOps<'a> {
         )
     }
 
+    fn kv_append_f16_batched_slots(
+        &self,
+        k_src: DevicePtr,
+        v_src: DevicePtr,
+        slot_k_dst_ptrs: DevicePtr,
+        slot_v_dst_ptrs: DevicePtr,
+        slot_write_pos: DevicePtr,
+        n_slots: usize,
+        kv_width: usize,
+    ) -> Result<()> {
+        super::attention::kv_append_f16_batched_slots(
+            self.reg,
+            self.stream,
+            k_src,
+            v_src,
+            slot_k_dst_ptrs,
+            slot_v_dst_ptrs,
+            slot_write_pos,
+            n_slots,
+            kv_width,
+        )
+    }
+
     fn attention_decode_f16_splitk(
         &self,
         q: DevicePtr,
@@ -255,10 +280,11 @@ impl<'a> Ops for HipOps<'a> {
         n_tokens_kv: usize,
         chunk_size: usize,
         scale: f32,
+        window_size: i32,
     ) -> Result<()> {
         super::attention::attention_decode_f16_splitk(
             self.reg, self.stream, q, k_cache, v_cache, out, partials_m, partials_s, partials_o,
-            n_heads_q, n_heads_kv, head_dim, n_tokens_kv, chunk_size, scale,
+            n_heads_q, n_heads_kv, head_dim, n_tokens_kv, chunk_size, scale, window_size,
         )
     }
 
@@ -335,10 +361,11 @@ impl<'a> Ops for HipOps<'a> {
         n_k_tokens: usize,
         q_offset: usize,
         scale: f32,
+        window_size: i32,
     ) -> Result<()> {
         super::attention::attention_prefill_f16(
             self.reg, self.stream, q, k_cache, v_cache, out, n_q_tokens, n_heads_q, n_heads_kv,
-            head_dim, n_k_tokens, q_offset, scale,
+            head_dim, n_k_tokens, q_offset, scale, window_size,
         )
     }
 
@@ -355,12 +382,13 @@ impl<'a> Ops for HipOps<'a> {
         n_k_tokens: usize,
         q_offset: usize,
         scale: f32,
+        window_size: i32,
         n_k_slot: Option<flambeau_backend_hip::ScalarSlot>,
         q_off_slot: Option<flambeau_backend_hip::ScalarSlot>,
     ) -> Result<()> {
         super::attention::attention_prefill_f16_slots(
             self.reg, self.stream, q, k_cache, v_cache, out, n_q_tokens, n_heads_q, n_heads_kv,
-            head_dim, n_k_tokens, q_offset, scale, n_k_slot, q_off_slot,
+            head_dim, n_k_tokens, q_offset, scale, window_size, n_k_slot, q_off_slot,
         )
     }
 
@@ -534,6 +562,16 @@ impl<'a> Ops for HipOps<'a> {
         scale: f32,
     ) -> Result<()> {
         super::mlp::scale_f32(self.reg, self.stream, x, y, n, scale)
+    }
+
+    fn scale_f16(
+        &self,
+        x: DevicePtr,
+        y: DevicePtr,
+        n: usize,
+        scale: f32,
+    ) -> Result<()> {
+        super::mlp::scale_f16(self.reg, self.stream, x, y, n, scale)
     }
 
     fn add_f16(
@@ -1095,6 +1133,306 @@ impl<'a> Ops for HipOps<'a> {
         )
     }
 
+    // ---- IQ tile8 impls. All follow the same shape: dispatch to the
+    // matching free function in `super::moe`.
+
+    fn indexed_moe_mmq_iq4_xs_gate_up_tile8(
+        &self,
+        w_gate: DevicePtr,
+        w_up: DevicePtr,
+        y: DevicePtr,
+        expert_ids: DevicePtr,
+        sorted_pair_idx_padded: DevicePtr,
+        padded_offsets: DevicePtr,
+        gate_out: DevicePtr,
+        up_out: DevicePtr,
+        shape: MoeShape,
+    ) -> Result<()> {
+        super::moe::indexed_moe_mmq_iq4_xs_gate_up_tile8(
+            self.reg, self.stream, w_gate, w_up, y, expert_ids,
+            sorted_pair_idx_padded, padded_offsets, gate_out, up_out, shape,
+        )
+    }
+    fn indexed_moe_mmq_iq4_xs_down_tile8(
+        &self,
+        w: DevicePtr,
+        y: DevicePtr,
+        expert_ids: DevicePtr,
+        sorted_pair_idx_padded: DevicePtr,
+        padded_offsets: DevicePtr,
+        dst: DevicePtr,
+        shape: MoeShape,
+    ) -> Result<()> {
+        super::moe::indexed_moe_mmq_iq4_xs_down_tile8(
+            self.reg, self.stream, w, y, expert_ids,
+            sorted_pair_idx_padded, padded_offsets, dst, shape,
+        )
+    }
+
+    fn indexed_moe_mmq_iq4_nl_gate_up_tile8(
+        &self,
+        w_gate: DevicePtr,
+        w_up: DevicePtr,
+        y: DevicePtr,
+        expert_ids: DevicePtr,
+        sorted_pair_idx_padded: DevicePtr,
+        padded_offsets: DevicePtr,
+        gate_out: DevicePtr,
+        up_out: DevicePtr,
+        shape: MoeShape,
+    ) -> Result<()> {
+        super::moe::indexed_moe_mmq_iq4_nl_gate_up_tile8(
+            self.reg, self.stream, w_gate, w_up, y, expert_ids,
+            sorted_pair_idx_padded, padded_offsets, gate_out, up_out, shape,
+        )
+    }
+    fn indexed_moe_mmq_iq4_nl_down_tile8(
+        &self,
+        w: DevicePtr,
+        y: DevicePtr,
+        expert_ids: DevicePtr,
+        sorted_pair_idx_padded: DevicePtr,
+        padded_offsets: DevicePtr,
+        dst: DevicePtr,
+        shape: MoeShape,
+    ) -> Result<()> {
+        super::moe::indexed_moe_mmq_iq4_nl_down_tile8(
+            self.reg, self.stream, w, y, expert_ids,
+            sorted_pair_idx_padded, padded_offsets, dst, shape,
+        )
+    }
+
+    fn indexed_moe_mmq_iq3_xxs_gate_up_tile8(
+        &self,
+        w_gate: DevicePtr,
+        w_up: DevicePtr,
+        y: DevicePtr,
+        expert_ids: DevicePtr,
+        sorted_pair_idx_padded: DevicePtr,
+        padded_offsets: DevicePtr,
+        gate_out: DevicePtr,
+        up_out: DevicePtr,
+        shape: MoeShape,
+    ) -> Result<()> {
+        super::moe::indexed_moe_mmq_iq3_xxs_gate_up_tile8(
+            self.reg, self.stream, w_gate, w_up, y, expert_ids,
+            sorted_pair_idx_padded, padded_offsets, gate_out, up_out, shape,
+        )
+    }
+    fn indexed_moe_mmq_iq3_xxs_down_tile8(
+        &self,
+        w: DevicePtr,
+        y: DevicePtr,
+        expert_ids: DevicePtr,
+        sorted_pair_idx_padded: DevicePtr,
+        padded_offsets: DevicePtr,
+        dst: DevicePtr,
+        shape: MoeShape,
+    ) -> Result<()> {
+        super::moe::indexed_moe_mmq_iq3_xxs_down_tile8(
+            self.reg, self.stream, w, y, expert_ids,
+            sorted_pair_idx_padded, padded_offsets, dst, shape,
+        )
+    }
+
+    fn indexed_moe_mmq_iq3_s_gate_up_tile8(
+        &self,
+        w_gate: DevicePtr,
+        w_up: DevicePtr,
+        y: DevicePtr,
+        expert_ids: DevicePtr,
+        sorted_pair_idx_padded: DevicePtr,
+        padded_offsets: DevicePtr,
+        gate_out: DevicePtr,
+        up_out: DevicePtr,
+        shape: MoeShape,
+    ) -> Result<()> {
+        super::moe::indexed_moe_mmq_iq3_s_gate_up_tile8(
+            self.reg, self.stream, w_gate, w_up, y, expert_ids,
+            sorted_pair_idx_padded, padded_offsets, gate_out, up_out, shape,
+        )
+    }
+    fn indexed_moe_mmq_iq3_s_down_tile8(
+        &self,
+        w: DevicePtr,
+        y: DevicePtr,
+        expert_ids: DevicePtr,
+        sorted_pair_idx_padded: DevicePtr,
+        padded_offsets: DevicePtr,
+        dst: DevicePtr,
+        shape: MoeShape,
+    ) -> Result<()> {
+        super::moe::indexed_moe_mmq_iq3_s_down_tile8(
+            self.reg, self.stream, w, y, expert_ids,
+            sorted_pair_idx_padded, padded_offsets, dst, shape,
+        )
+    }
+
+    fn indexed_moe_mmq_iq2_xxs_gate_up_tile8(
+        &self,
+        w_gate: DevicePtr,
+        w_up: DevicePtr,
+        y: DevicePtr,
+        expert_ids: DevicePtr,
+        sorted_pair_idx_padded: DevicePtr,
+        padded_offsets: DevicePtr,
+        gate_out: DevicePtr,
+        up_out: DevicePtr,
+        shape: MoeShape,
+    ) -> Result<()> {
+        super::moe::indexed_moe_mmq_iq2_xxs_gate_up_tile8(
+            self.reg, self.stream, w_gate, w_up, y, expert_ids,
+            sorted_pair_idx_padded, padded_offsets, gate_out, up_out, shape,
+        )
+    }
+    fn indexed_moe_mmq_iq2_xxs_down_tile8(
+        &self,
+        w: DevicePtr,
+        y: DevicePtr,
+        expert_ids: DevicePtr,
+        sorted_pair_idx_padded: DevicePtr,
+        padded_offsets: DevicePtr,
+        dst: DevicePtr,
+        shape: MoeShape,
+    ) -> Result<()> {
+        super::moe::indexed_moe_mmq_iq2_xxs_down_tile8(
+            self.reg, self.stream, w, y, expert_ids,
+            sorted_pair_idx_padded, padded_offsets, dst, shape,
+        )
+    }
+
+    fn indexed_moe_mmq_iq2_xs_gate_up_tile8(
+        &self,
+        w_gate: DevicePtr,
+        w_up: DevicePtr,
+        y: DevicePtr,
+        expert_ids: DevicePtr,
+        sorted_pair_idx_padded: DevicePtr,
+        padded_offsets: DevicePtr,
+        gate_out: DevicePtr,
+        up_out: DevicePtr,
+        shape: MoeShape,
+    ) -> Result<()> {
+        super::moe::indexed_moe_mmq_iq2_xs_gate_up_tile8(
+            self.reg, self.stream, w_gate, w_up, y, expert_ids,
+            sorted_pair_idx_padded, padded_offsets, gate_out, up_out, shape,
+        )
+    }
+    fn indexed_moe_mmq_iq2_xs_down_tile8(
+        &self,
+        w: DevicePtr,
+        y: DevicePtr,
+        expert_ids: DevicePtr,
+        sorted_pair_idx_padded: DevicePtr,
+        padded_offsets: DevicePtr,
+        dst: DevicePtr,
+        shape: MoeShape,
+    ) -> Result<()> {
+        super::moe::indexed_moe_mmq_iq2_xs_down_tile8(
+            self.reg, self.stream, w, y, expert_ids,
+            sorted_pair_idx_padded, padded_offsets, dst, shape,
+        )
+    }
+
+    fn indexed_moe_mmq_iq2_s_gate_up_tile8(
+        &self,
+        w_gate: DevicePtr,
+        w_up: DevicePtr,
+        y: DevicePtr,
+        expert_ids: DevicePtr,
+        sorted_pair_idx_padded: DevicePtr,
+        padded_offsets: DevicePtr,
+        gate_out: DevicePtr,
+        up_out: DevicePtr,
+        shape: MoeShape,
+    ) -> Result<()> {
+        super::moe::indexed_moe_mmq_iq2_s_gate_up_tile8(
+            self.reg, self.stream, w_gate, w_up, y, expert_ids,
+            sorted_pair_idx_padded, padded_offsets, gate_out, up_out, shape,
+        )
+    }
+    fn indexed_moe_mmq_iq2_s_down_tile8(
+        &self,
+        w: DevicePtr,
+        y: DevicePtr,
+        expert_ids: DevicePtr,
+        sorted_pair_idx_padded: DevicePtr,
+        padded_offsets: DevicePtr,
+        dst: DevicePtr,
+        shape: MoeShape,
+    ) -> Result<()> {
+        super::moe::indexed_moe_mmq_iq2_s_down_tile8(
+            self.reg, self.stream, w, y, expert_ids,
+            sorted_pair_idx_padded, padded_offsets, dst, shape,
+        )
+    }
+
+    fn indexed_moe_mmq_iq1_s_gate_up_tile8(
+        &self,
+        w_gate: DevicePtr,
+        w_up: DevicePtr,
+        y: DevicePtr,
+        expert_ids: DevicePtr,
+        sorted_pair_idx_padded: DevicePtr,
+        padded_offsets: DevicePtr,
+        gate_out: DevicePtr,
+        up_out: DevicePtr,
+        shape: MoeShape,
+    ) -> Result<()> {
+        super::moe::indexed_moe_mmq_iq1_s_gate_up_tile8(
+            self.reg, self.stream, w_gate, w_up, y, expert_ids,
+            sorted_pair_idx_padded, padded_offsets, gate_out, up_out, shape,
+        )
+    }
+    fn indexed_moe_mmq_iq1_s_down_tile8(
+        &self,
+        w: DevicePtr,
+        y: DevicePtr,
+        expert_ids: DevicePtr,
+        sorted_pair_idx_padded: DevicePtr,
+        padded_offsets: DevicePtr,
+        dst: DevicePtr,
+        shape: MoeShape,
+    ) -> Result<()> {
+        super::moe::indexed_moe_mmq_iq1_s_down_tile8(
+            self.reg, self.stream, w, y, expert_ids,
+            sorted_pair_idx_padded, padded_offsets, dst, shape,
+        )
+    }
+
+    fn indexed_moe_mmq_iq1_m_gate_up_tile8(
+        &self,
+        w_gate: DevicePtr,
+        w_up: DevicePtr,
+        y: DevicePtr,
+        expert_ids: DevicePtr,
+        sorted_pair_idx_padded: DevicePtr,
+        padded_offsets: DevicePtr,
+        gate_out: DevicePtr,
+        up_out: DevicePtr,
+        shape: MoeShape,
+    ) -> Result<()> {
+        super::moe::indexed_moe_mmq_iq1_m_gate_up_tile8(
+            self.reg, self.stream, w_gate, w_up, y, expert_ids,
+            sorted_pair_idx_padded, padded_offsets, gate_out, up_out, shape,
+        )
+    }
+    fn indexed_moe_mmq_iq1_m_down_tile8(
+        &self,
+        w: DevicePtr,
+        y: DevicePtr,
+        expert_ids: DevicePtr,
+        sorted_pair_idx_padded: DevicePtr,
+        padded_offsets: DevicePtr,
+        dst: DevicePtr,
+        shape: MoeShape,
+    ) -> Result<()> {
+        super::moe::indexed_moe_mmq_iq1_m_down_tile8(
+            self.reg, self.stream, w, y, expert_ids,
+            sorted_pair_idx_padded, padded_offsets, dst, shape,
+        )
+    }
+
     fn indexed_moe_mmq_q4_k_gate_up_turbo(
         &self,
         gate_w: DevicePtr,
@@ -1331,5 +1669,35 @@ impl<'a> Ops for HipOps<'a> {
             self.reg, self.stream, expert_ids, counts, offsets, cursors, sorted_pair_idx,
             padded_offsets, sorted_pair_idx_padded, total, n_experts, max_tokens, top_k,
         )
+    }
+
+    fn apply_softcap_f32(
+        &self,
+        x: DevicePtr,
+        y: DevicePtr,
+        n: usize,
+        cap: f32,
+    ) -> Result<()> {
+        super::softcap::apply_softcap_f32(self.reg, self.stream, x, y, n, cap)
+    }
+
+    fn gelu_f32_to_f16(
+        &self,
+        a: DevicePtr,
+        b: DevicePtr,
+        y: DevicePtr,
+        n: usize,
+    ) -> Result<()> {
+        super::mlp::gelu_f32_to_f16(self.reg, self.stream, a, b, y, n)
+    }
+
+    fn gelu_mul_f32(
+        &self,
+        a: DevicePtr,
+        b: DevicePtr,
+        y: DevicePtr,
+        n: usize,
+    ) -> Result<()> {
+        super::mlp::gelu_mul_f32(self.reg, self.stream, a, b, y, n)
     }
 }

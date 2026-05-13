@@ -286,7 +286,7 @@ pub fn build_full_attn_block(
     flambeau_blocks::StandardAttention::new(
         flambeau_blocks::WeightHandle { ptr: weights.attn_q.ptr, dtype: q_dtype, dims: [q_rows, q_k] },
         flambeau_blocks::WeightHandle { ptr: weights.attn_k.ptr, dtype: k_dtype, dims: [k_rows, k_k] },
-        flambeau_blocks::WeightHandle { ptr: weights.attn_v.ptr, dtype: v_dtype, dims: [v_rows, v_k] },
+        Some(flambeau_blocks::WeightHandle { ptr: weights.attn_v.ptr, dtype: v_dtype, dims: [v_rows, v_k] }),
         flambeau_blocks::WeightHandle {
             ptr: weights.attn_output.ptr,
             dtype: o_dtype,
@@ -339,7 +339,7 @@ pub fn build_dense_attn_block(
     flambeau_blocks::StandardAttention::new(
         flambeau_blocks::WeightHandle { ptr: weights.attn_q.ptr, dtype: q_dtype, dims: [q_rows, q_k] },
         flambeau_blocks::WeightHandle { ptr: weights.attn_k.ptr, dtype: k_dtype, dims: [k_rows, k_k] },
-        flambeau_blocks::WeightHandle { ptr: weights.attn_v.ptr, dtype: v_dtype, dims: [v_rows, v_k] },
+        Some(flambeau_blocks::WeightHandle { ptr: weights.attn_v.ptr, dtype: v_dtype, dims: [v_rows, v_k] }),
         flambeau_blocks::WeightHandle {
             ptr: weights.attn_output.ptr,
             dtype: o_dtype,
@@ -693,6 +693,39 @@ impl FullAttnPrefillScratch {
             positions_host: &mut self.positions_host,
         }
     }
+
+    /// Builds the batched-decode view (prefill scratch plus the
+    /// per-slot tables that `forward_decode_batched_tp` reads).
+    pub fn view_mut_batched(
+        &mut self,
+    ) -> flambeau_blocks::StandardAttentionBatchedDecodeScratch<'_> {
+        flambeau_blocks::StandardAttentionBatchedDecodeScratch {
+            max_tokens: self.max_tokens,
+            x_norm_f16: self.x_norm_f16,
+            x_q8_1: self.x_q8_1,
+            x_q8_1_mmq: self.x_q8_1_mmq,
+            mmvq_f32: self.mmvq_f32,
+            q_fused_f16: self.q_fused_f16,
+            q_f16: self.q_f16,
+            gate_f16: self.gate_f16,
+            k_f16: self.k_f16,
+            v_f16: self.v_f16,
+            attn_out_f16: self.attn_out_f16,
+            gated_out_f16: self.gated_out_f16,
+            positions: self.positions,
+            gated_q8_1: self.gated_q8_1,
+            gated_q8_1_mmq: self.gated_q8_1_mmq,
+            positions_host: &mut self.positions_host,
+            slot_k_ptrs: self.slot_k_ptrs,
+            slot_v_ptrs: self.slot_v_ptrs,
+            slot_n_tokens_kv: self.slot_n_tokens_kv,
+            slot_write_pos: self.slot_write_pos,
+            slot_k_ptrs_host: &mut self.slot_k_ptrs_host,
+            slot_v_ptrs_host: &mut self.slot_v_ptrs_host,
+            slot_n_tokens_kv_host: &mut self.slot_n_tokens_kv_host,
+            slot_write_pos_host: &mut self.slot_write_pos_host,
+        }
+    }
 }
 
 /// Upload `L` i32 positions `[start_position, start_position + L)` into
@@ -711,6 +744,7 @@ impl FullAttnPrefillScratch {
 /// ordered in-stream with any subsequent RoPE launch, and the host
 /// storage (`positions_host`) outlives both the copy and the stream
 /// work that reads the device target.
+#[allow(dead_code)] // kept available for future batched-decode TP migration
 pub(crate) fn upload_positions_range(
     device: &HipDevice,
     stream: &HipStream,

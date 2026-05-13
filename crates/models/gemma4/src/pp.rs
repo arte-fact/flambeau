@@ -1,0 +1,1533 @@
+//! Pipeline-parallel decode driver for Gemma 4.
+//!
+//! Each rank owns:
+//! - A subset of layers (assigned by [`partition_layers`]).
+//! - The KV caches for those layers (shared-KV tail layers reference
+//!   another layer in the same rank).
+//! - Per-call layer scratch + hidden ping-pong (`hidden_a`/`hidden_b`).
+//! - Rank 0 also owns `token_embd`.
+//! - Last rank also owns `output_norm` (+ optional `output`) and the
+//!   output-head scratch.
+//!
+//! Stage-boundary invariant: a tail layer (`has_kv == false`) MUST be
+//! on the same rank as its `kv_share_src`. The partition function
+//! enforces this — splits that would violate it return an error.
+//!
+//! Limitations of S8-A:
+//! - Decode only (PP prefill is a follow-up).
+//! - Dense FFN only (MoE branch lands with S6-B).
+//! - No per-layer side-channel embedding (S5-B-2).
+//! - No embedding-input `sqrt(n_embd)` scale (S5-B-2 follow-up).
+
+#![cfg(feature = "hip")]
+
+use anyhow::{anyhow, bail, Context, Result};
+use flambeau_backend_hip::{HipCluster, HipDevice, HipStream};
+use flambeau_blocks::{forward_one_token_pp, forward_prefill_pp, PpDecodeDriver, PpPrefillDriver};
+use flambeau_core::{CopyDirection, Device, DevicePtr, Stream};
+use flambeau_ops::hip::{HipOps, OpsRegistry};
+use flambeau_quant::GgmlDType;
+use flambeau_runtime::{F16Contig, KvCache};
+use half::f16;
+
+use flambeau_quant::{GgufFile, TensorInfo};
+
+use crate::config::Gemma4Config;
+use crate::layer::{forward_layer_decode, forward_layer_prefill, Gemma4LayerWeights};
+use crate::layout::{FfnKind, LayerSpec, ModelLayout};
+use crate::names::{AttnNames, DenseFfnNames, GlobalNames};
+use crate::output_head::{forward_output_head, OutputHeadScratch};
+use crate::scratch::{LayerDecodeScratch, LayerPrefillScratch};
+use crate::softcap::apply_logit_softcap;
+use crate::weights_hip::DeviceTensor;
+
+/// Even-split layer-to-rank assignment with a stage-boundary validity
+/// check. Returns one rank index per layer (`out.len() == cfg.num_layers`).
+/// Errors when a shared-KV tail layer would land on a different rank
+/// than its `kv_share_src`.
+pub fn partition_layers(n_ranks: usize, layout: &ModelLayout) -> Result<Vec<usize>> {
+    if n_ranks == 0 {
+        bail!("partition_layers: n_ranks=0");
+    }
+    let n = layout.layers.len();
+    if n == 0 {
+        bail!("partition_layers: layout has 0 layers");
+    }
+    let per_rank = n.div_ceil(n_ranks);
+    let mut layer_to_rank = vec![0usize; n];
+    for (i, spec) in layout.layers.iter().enumerate() {
+        layer_to_rank[i] = (spec.index / per_rank).min(n_ranks - 1);
+    }
+
+    // Stage-boundary check: tail layer's source must be on same rank.
+    for spec in &layout.layers {
+        if !spec.has_kv {
+            let src = spec.kv_share_src.ok_or_else(|| {
+                anyhow!(
+                    "partition_layers: tail layer {} has no kv_share_src \
+                     (run `ModelLayout::resolve_kv_sharing` first)",
+                    spec.index
+                )
+            })?;
+            if layer_to_rank[spec.index] != layer_to_rank[src] {
+                bail!(
+                    "partition_layers: shared-KV tail layer {} on rank {} but \
+                     its kv_share_src layer {} is on rank {}; split would break \
+                     the tail's KV reference. Adjust per_rank or merge stages.",
+                    spec.index,
+                    layer_to_rank[spec.index],
+                    src,
+                    layer_to_rank[src]
+                );
+            }
+        }
+    }
+    Ok(layer_to_rank)
+}
+
+struct LayerScratchPtrs {
+    x_q8_1: (DevicePtr, usize),
+    mmvq_f32: (DevicePtr, usize),
+    q_f16: (DevicePtr, usize),
+    k_f16: (DevicePtr, usize),
+    v_f16: (DevicePtr, usize),
+    attn_out_f16: (DevicePtr, usize),
+    post_attn_norm_f16: (DevicePtr, usize),
+    attn_residual_f16: (DevicePtr, usize),
+    ffn_norm_f16: (DevicePtr, usize),
+    gate_f32: (DevicePtr, usize),
+    up_f32: (DevicePtr, usize),
+    activated_f16: (DevicePtr, usize),
+    activated_q8_1: (DevicePtr, usize),
+    down_f32: (DevicePtr, usize),
+    post_ffw_norm_f16: (DevicePtr, usize),
+    positions: (DevicePtr, usize),
+    v_ones_f16: (DevicePtr, usize),
+}
+
+/// Per-stage prefill scratch, sized for `max_tokens` rows.
+struct PrefillScratchPtrs {
+    x_norm_f16: (DevicePtr, usize),
+    x_q8_1: (DevicePtr, usize),
+    x_q8_1_mmq: (DevicePtr, usize),
+    mmvq_f32: (DevicePtr, usize),
+    q_f16: (DevicePtr, usize),
+    k_f16: (DevicePtr, usize),
+    v_f16: (DevicePtr, usize),
+    attn_out_f16: (DevicePtr, usize),
+    post_attn_norm_f16: (DevicePtr, usize),
+    attn_residual_f16: (DevicePtr, usize),
+    gate_f32: (DevicePtr, usize),
+    up_f32: (DevicePtr, usize),
+    activated_f16: (DevicePtr, usize),
+    activated_q8_1: (DevicePtr, usize),
+    activated_q8_1_mmq: (DevicePtr, usize),
+    down_f32: (DevicePtr, usize),
+    post_ffw_norm_f16: (DevicePtr, usize),
+    positions: (DevicePtr, usize),
+    v_ones_f16: (DevicePtr, usize),
+    positions_host: Vec<i32>,
+}
+
+/// Per-rank pipeline stage. Holds this rank's layers + KV caches +
+/// scratches. Rank-0 holds `token_embd`; last-rank holds `output_norm`
+/// and the output-head scratch.
+pub struct Gemma4PpStage {
+    pub rank: usize,
+    /// Indices into [`ModelLayout::layers`] for this rank's layers,
+    /// in ascending order.
+    pub global_layer_indices: Vec<usize>,
+    /// One [`Gemma4LayerWeights`] per `global_layer_indices` entry.
+    pub layer_weights: Vec<Gemma4LayerWeights>,
+    /// One KV cache per local layer; `None` for shared-KV tail layers
+    /// (which read from another local entry resolved via
+    /// `local_kv_share_src`).
+    pub kv_caches: Vec<Option<KvCache<F16Contig, HipDevice>>>,
+    /// Maps each local layer index to the LOCAL index of its
+    /// `kv_share_src` (or itself when `has_kv == true`).
+    local_kv_share_src: Vec<usize>,
+    /// F16 [hidden] hidden ping-pong slot A.
+    pub hidden_a: DevicePtr,
+    /// F16 [hidden] hidden ping-pong slot B.
+    pub hidden_b: DevicePtr,
+    /// Rank-0 only: device-resident `token_embd`.
+    pub token_embd: Option<DeviceTensor>,
+    pub token_embd_dims: Option<[usize; 2]>,
+    /// Last-rank only: device-resident `output_norm`.
+    pub output_norm: Option<DeviceTensor>,
+    /// Last-rank only: optional separate `output` (gemma4 ties).
+    pub output: Option<DeviceTensor>,
+    /// Last-rank only.
+    pub output_head_scratch: Option<OutputHeadScratch>,
+    scratch: LayerScratchPtrs,
+    /// Per-stage prefill scratch, sized for `max_tokens` rows.
+    prefill: PrefillScratchPtrs,
+    /// One 1-element host position slot per rank (HtoD'd into
+    /// `scratch.positions` per layer).
+    positions_host: Vec<i32>,
+    /// Maximum prefill chunk size (number of tokens) this stage can
+    /// handle in a single `forward_layers_prefill_in_stage` call.
+    pub max_tokens: usize,
+    /// Raw allocations tracked for `dispose()`. Mirrors
+    /// `Gemma4DeviceWeights.raw_tensors`.
+    raw_alloc_bytes: Vec<(DevicePtr, usize)>,
+    disposed: bool,
+}
+
+/// Pipeline-parallel driver. Owns the cluster and one stage per rank.
+pub struct Gemma4PpDriver {
+    pub cluster: HipCluster,
+    pub cfg: Gemma4Config,
+    pub layout: ModelLayout,
+    pub layer_to_rank: Vec<usize>,
+    pub stages: Vec<Gemma4PpStage>,
+    /// One `OpsRegistry` per rank. Built once at driver init.
+    regs: Vec<OpsRegistry>,
+    /// Last-rank logits scratch host buffer (vocab F32) for argmax.
+    logits_host: Vec<f32>,
+}
+
+fn alloc_zeroed(dev: &HipDevice, bytes: usize) -> Result<DevicePtr> {
+    let p = dev.alloc(bytes).map_err(|e| anyhow!("alloc {bytes}: {e}"))?;
+    let zero = vec![0u8; bytes];
+    // SAFETY: dst has `bytes` allocation; src is a host vec of the same length.
+    unsafe {
+        dev.memcpy_async(
+            dev.default_stream(),
+            CopyDirection::HostToDevice,
+            p,
+            DevicePtr(zero.as_ptr() as usize),
+            bytes,
+        )?;
+    }
+    dev.default_stream().synchronize()?;
+    Ok(p)
+}
+
+fn upload_f16_ones(dev: &HipDevice, n: usize) -> Result<DevicePtr> {
+    let ones: Vec<f16> = vec![f16::from_f32(1.0); n];
+    let bytes = ones.len() * 2;
+    let p = dev.alloc(bytes).map_err(|e| anyhow!("alloc {bytes}: {e}"))?;
+    // SAFETY: see above.
+    unsafe {
+        dev.memcpy_async(
+            dev.default_stream(),
+            CopyDirection::HostToDevice,
+            p,
+            DevicePtr(ones.as_ptr() as usize),
+            bytes,
+        )?;
+    }
+    dev.default_stream().synchronize()?;
+    Ok(p)
+}
+
+impl Gemma4PpStage {
+    /// Build per-rank scratch + KV cache pool for the layers assigned
+    /// to `rank`. Does NOT upload weights — the caller is expected to
+    /// pass in pre-populated `layer_weights` and tail-token/norm
+    /// tensors (test-friendly constructor; the real-GGUF
+    /// `Gemma4PpDriver::upload` lands in S8-B).
+    #[allow(clippy::too_many_arguments)]
+    #[allow(clippy::too_many_arguments)]
+    pub fn from_pieces(
+        device: &HipDevice,
+        rank: usize,
+        cfg: &Gemma4Config,
+        layout: &ModelLayout,
+        layer_to_rank: &[usize],
+        layer_weights: Vec<Gemma4LayerWeights>,
+        token_embd: Option<DeviceTensor>,
+        token_embd_dims: Option<[usize; 2]>,
+        output_norm: Option<DeviceTensor>,
+        output: Option<DeviceTensor>,
+        max_tokens: usize,
+    ) -> Result<Self> {
+        device.bind()?;
+        let global_layer_indices: Vec<usize> = (0..layout.layers.len())
+            .filter(|&i| layer_to_rank[i] == rank)
+            .collect();
+        if global_layer_indices.len() != layer_weights.len() {
+            bail!(
+                "Gemma4PpStage::from_pieces: rank {rank} owns {} layers but got {} weights",
+                global_layer_indices.len(),
+                layer_weights.len()
+            );
+        }
+
+        // Map global → local index for this rank.
+        let mut global_to_local = vec![usize::MAX; layout.layers.len()];
+        for (li, &gi) in global_layer_indices.iter().enumerate() {
+            global_to_local[gi] = li;
+        }
+        // For tail layers, resolve the LOCAL index of their kv_share_src.
+        let mut local_kv_share_src = vec![0usize; global_layer_indices.len()];
+        for (li, &gi) in global_layer_indices.iter().enumerate() {
+            let spec = &layout.layers[gi];
+            if spec.has_kv {
+                local_kv_share_src[li] = li;
+            } else {
+                let src_g = spec.kv_share_src.expect("partition validated this");
+                let src_l = global_to_local[src_g];
+                if src_l == usize::MAX {
+                    bail!(
+                        "Gemma4PpStage::from_pieces: rank {rank} layer {gi} \
+                         kv_share_src={src_g} not on same rank",
+                    );
+                }
+                local_kv_share_src[li] = src_l;
+            }
+        }
+
+        // KV caches: one per owning local layer; None for tail.
+        let mut kv_caches = Vec::with_capacity(global_layer_indices.len());
+        for &gi in &global_layer_indices {
+            let spec = &layout.layers[gi];
+            if spec.has_kv {
+                let kv =
+                    KvCache::<F16Contig, HipDevice>::new(device, spec.n_kv_heads, spec.head_dim, max_tokens)
+                        .map_err(|e| anyhow!("kv alloc layer {gi}: {e}"))?;
+                kv_caches.push(Some(kv));
+            } else {
+                kv_caches.push(None);
+            }
+        }
+
+        // Per-stage layer scratch. Sizes are widest over THIS stage's
+        // layers — different stages may carry layers with different
+        // shapes (per-layer head_dim/n_kv_heads).
+        let hidden = cfg.hidden_size;
+        let ff_len = cfg.feed_forward_length;
+        let q_width_max = global_layer_indices
+            .iter()
+            .map(|&gi| layout.layers[gi].n_heads * layout.layers[gi].head_dim)
+            .max()
+            .unwrap_or(hidden);
+        let kv_width_max = global_layer_indices
+            .iter()
+            .map(|&gi| layout.layers[gi].n_kv_heads * layout.layers[gi].head_dim)
+            .max()
+            .unwrap_or(hidden);
+        let head_dim_max = global_layer_indices
+            .iter()
+            .map(|&gi| layout.layers[gi].head_dim)
+            .max()
+            .unwrap_or(64);
+        let mmvq_max = q_width_max.max(kv_width_max).max(hidden).max(ff_len);
+        let q8_1_blocks = hidden.max(ff_len).div_ceil(32);
+        let q8_1_bytes_per_block = 36;
+        let x_q8_1_bytes = q8_1_blocks * q8_1_bytes_per_block;
+        let activated_q8_1_bytes = ff_len.div_ceil(32) * q8_1_bytes_per_block;
+
+        let mut raw_alloc_bytes: Vec<(DevicePtr, usize)> = Vec::new();
+        // Helper macro: alloc + track, avoiding the closure-borrow tangle.
+        macro_rules! ta {
+            ($bytes:expr) => {{
+                let bytes = $bytes;
+                let p = alloc_zeroed(device, bytes)?;
+                raw_alloc_bytes.push((p, bytes));
+                (p, bytes)
+            }};
+        }
+
+        let v_ones_ptr = upload_f16_ones(device, head_dim_max)?;
+        raw_alloc_bytes.push((v_ones_ptr, head_dim_max * 2));
+        let scratch = LayerScratchPtrs {
+            x_q8_1: ta!(x_q8_1_bytes),
+            mmvq_f32: ta!(mmvq_max * 4),
+            q_f16: ta!(q_width_max * 2),
+            k_f16: ta!(kv_width_max * 2),
+            v_f16: ta!(kv_width_max * 2),
+            attn_out_f16: ta!(q_width_max.max(hidden) * 2),
+            post_attn_norm_f16: ta!(hidden * 2),
+            attn_residual_f16: ta!(hidden * 2),
+            ffn_norm_f16: ta!(hidden * 2),
+            gate_f32: ta!(ff_len * 4),
+            up_f32: ta!(ff_len * 4),
+            activated_f16: ta!(ff_len * 2),
+            activated_q8_1: ta!(activated_q8_1_bytes),
+            down_f32: ta!(hidden * 4),
+            post_ffw_norm_f16: ta!(hidden * 2),
+            positions: ta!(4),
+            v_ones_f16: (v_ones_ptr, head_dim_max * 2),
+        };
+
+        // hidden_a / hidden_b sized for L=max_tokens prefill rows
+        // (decode reuses the head as a 1-row view).
+        let hidden_a = ta!(max_tokens * hidden * 2).0;
+        let hidden_b = ta!(max_tokens * hidden * 2).0;
+
+        // Prefill scratches sized for max_tokens.
+        let n_heads_max = layout
+            .layers
+            .iter()
+            .map(|l| l.n_heads * l.head_dim)
+            .max()
+            .unwrap_or(hidden);
+        let kv_width_max = layout
+            .layers
+            .iter()
+            .map(|l| l.n_kv_heads * l.head_dim)
+            .max()
+            .unwrap_or(hidden);
+        let mmvq_max_p = n_heads_max.max(kv_width_max).max(hidden).max(ff_len);
+        let pf_x_q8_1_bytes = max_tokens * q8_1_blocks * q8_1_bytes_per_block;
+        let pf_activated_q8_1_bytes =
+            max_tokens * ff_len.div_ceil(32) * q8_1_bytes_per_block;
+        let prefill = PrefillScratchPtrs {
+            x_norm_f16: ta!(max_tokens * hidden * 2),
+            x_q8_1: ta!(pf_x_q8_1_bytes),
+            x_q8_1_mmq: ta!(pf_x_q8_1_bytes),
+            mmvq_f32: ta!(max_tokens * mmvq_max_p * 4),
+            q_f16: ta!(max_tokens * n_heads_max * 2),
+            k_f16: ta!(max_tokens * kv_width_max * 2),
+            v_f16: ta!(max_tokens * kv_width_max * 2),
+            attn_out_f16: ta!(max_tokens * n_heads_max.max(hidden) * 2),
+            post_attn_norm_f16: ta!(max_tokens * hidden * 2),
+            attn_residual_f16: ta!(max_tokens * hidden * 2),
+            gate_f32: ta!(max_tokens * ff_len * 4),
+            up_f32: ta!(max_tokens * ff_len * 4),
+            activated_f16: ta!(max_tokens * ff_len * 2),
+            activated_q8_1: ta!(pf_activated_q8_1_bytes),
+            activated_q8_1_mmq: ta!(pf_activated_q8_1_bytes),
+            down_f32: ta!(max_tokens * hidden * 4),
+            post_ffw_norm_f16: ta!(max_tokens * hidden * 2),
+            positions: ta!(max_tokens * 4),
+            v_ones_f16: (v_ones_ptr, head_dim_max * 2),
+            positions_host: vec![0i32; max_tokens],
+        };
+
+        let output_head_scratch = if output_norm.is_some() {
+            Some(OutputHeadScratch {
+                x_norm_f16: ta!(hidden * 2).0,
+                x_q8_1: ta!(x_q8_1_bytes).0,
+                logits_f32: ta!(cfg.vocab_size * 4).0,
+            })
+        } else {
+            None
+        };
+
+        Ok(Self {
+            rank,
+            global_layer_indices,
+            layer_weights,
+            kv_caches,
+            local_kv_share_src,
+            hidden_a,
+            hidden_b,
+            token_embd,
+            token_embd_dims,
+            output_norm,
+            output,
+            output_head_scratch,
+            scratch,
+            prefill,
+            positions_host: vec![0i32; 1],
+            max_tokens,
+            raw_alloc_bytes,
+            disposed: false,
+        })
+    }
+
+    fn layer_scratch_view(&mut self) -> LayerDecodeScratch<'_> {
+        LayerDecodeScratch {
+            x_q8_1: self.scratch.x_q8_1.0,
+            mmvq_f32: self.scratch.mmvq_f32.0,
+            q_f16: self.scratch.q_f16.0,
+            k_f16: self.scratch.k_f16.0,
+            v_f16: self.scratch.v_f16.0,
+            attn_out_f16: self.scratch.attn_out_f16.0,
+            post_attn_norm_f16: self.scratch.post_attn_norm_f16.0,
+            attn_residual_f16: self.scratch.attn_residual_f16.0,
+            ffn_norm_f16: self.scratch.ffn_norm_f16.0,
+            gate_f32: self.scratch.gate_f32.0,
+            up_f32: self.scratch.up_f32.0,
+            activated_f16: self.scratch.activated_f16.0,
+            activated_q8_1: self.scratch.activated_q8_1.0,
+            down_f32: self.scratch.down_f32.0,
+            post_ffw_norm_f16: self.scratch.post_ffw_norm_f16.0,
+            positions: self.scratch.positions.0,
+            positions_host: &mut self.positions_host,
+            v_ones_f16: self.scratch.v_ones_f16.0,
+        }
+    }
+
+    fn prefill_scratch_view(&mut self) -> LayerPrefillScratch<'_> {
+        LayerPrefillScratch {
+            max_tokens: self.max_tokens,
+            x_norm_f16: self.prefill.x_norm_f16.0,
+            x_q8_1: self.prefill.x_q8_1.0,
+            x_q8_1_mmq: self.prefill.x_q8_1_mmq.0,
+            mmvq_f32: self.prefill.mmvq_f32.0,
+            q_f16: self.prefill.q_f16.0,
+            k_f16: self.prefill.k_f16.0,
+            v_f16: self.prefill.v_f16.0,
+            attn_out_f16: self.prefill.attn_out_f16.0,
+            post_attn_norm_f16: self.prefill.post_attn_norm_f16.0,
+            attn_residual_f16: self.prefill.attn_residual_f16.0,
+            gate_f32: self.prefill.gate_f32.0,
+            up_f32: self.prefill.up_f32.0,
+            activated_f16: self.prefill.activated_f16.0,
+            activated_q8_1: self.prefill.activated_q8_1.0,
+            activated_q8_1_mmq: self.prefill.activated_q8_1_mmq.0,
+            down_f32: self.prefill.down_f32.0,
+            post_ffw_norm_f16: self.prefill.post_ffw_norm_f16.0,
+            positions: self.prefill.positions.0,
+            positions_host: &mut self.prefill.positions_host,
+            v_ones_f16: self.prefill.v_ones_f16.0,
+        }
+    }
+
+    pub fn dispose(&mut self, device: &HipDevice) -> Result<()> {
+        if self.disposed {
+            return Ok(());
+        }
+        self.disposed = true;
+        let kvs = std::mem::take(&mut self.kv_caches);
+        for kv in kvs.into_iter().flatten() {
+            kv.dispose(device).map_err(|e| anyhow!("kv dispose: {e}"))?;
+        }
+        for (ptr, bytes) in self.raw_alloc_bytes.drain(..) {
+            // SAFETY: every ptr came from `device.alloc(bytes)`.
+            unsafe {
+                let _ = device.dealloc(ptr, bytes);
+            }
+        }
+        // Token embd / output_norm / output were uploaded by the
+        // driver; their bytes are tracked in their owning DeviceTensor.
+        for t in self.token_embd.take().into_iter()
+            .chain(self.output_norm.take().into_iter())
+            .chain(self.output.take().into_iter())
+        {
+            if !t.ptr.is_null() && t.bytes > 0 {
+                unsafe {
+                    let _ = device.dealloc(t.ptr, t.bytes);
+                }
+            }
+        }
+        Ok(())
+    }
+}
+
+impl Drop for Gemma4PpStage {
+    fn drop(&mut self) {
+        if !self.disposed {
+            tracing::warn!(
+                "Gemma4PpStage rank {} dropped without dispose(); resources leaked",
+                self.rank
+            );
+        }
+    }
+}
+
+impl Gemma4PpDriver {
+    /// Build the driver from per-rank stages. The caller is
+    /// responsible for setting up `cluster.device(rank)` correctly
+    /// (e.g. via `HipCluster::new(&device_ids)`) and for uploading
+    /// the per-stage weights / globals matching the partition. The
+    /// stages must have been built on the matching device.
+    pub fn from_pieces(
+        cluster: HipCluster,
+        cfg: Gemma4Config,
+        layout: ModelLayout,
+        layer_to_rank: Vec<usize>,
+        stages: Vec<Gemma4PpStage>,
+    ) -> Result<Self> {
+        if stages.is_empty() {
+            bail!("Gemma4PpDriver::from_pieces: 0 stages");
+        }
+        let n_ranks = stages.len();
+        if cluster.ranks() != n_ranks {
+            bail!(
+                "Gemma4PpDriver::from_pieces: cluster has {} ranks but got {} stages",
+                cluster.ranks(),
+                n_ranks
+            );
+        }
+        if stages[0].token_embd.is_none() {
+            bail!("Gemma4PpDriver::from_pieces: rank 0 must own token_embd");
+        }
+        if stages[n_ranks - 1].output_norm.is_none() {
+            bail!("Gemma4PpDriver::from_pieces: last rank must own output_norm");
+        }
+
+        let mut regs = Vec::with_capacity(n_ranks);
+        for rank in 0..n_ranks {
+            let dev = cluster.device(rank);
+            dev.bind()?;
+            let reg = OpsRegistry::new(dev).map_err(|e| anyhow!("registry rank {rank}: {e}"))?;
+            regs.push(reg);
+        }
+        let logits_host = vec![0.0f32; cfg.vocab_size];
+        Ok(Self {
+            cluster,
+            cfg,
+            layout,
+            layer_to_rank,
+            stages,
+            regs,
+            logits_host,
+        })
+    }
+
+    /// Real-GGUF upload: build the driver by streaming each rank's
+    /// assigned layers from the GGUF mmap to that rank's device, with
+    /// F32→F16 norm casts and tied LM-head replication on the last
+    /// rank. Bails on MoE / per-layer-embd variants (those have their
+    /// own follow-ups).
+    pub fn upload(
+        file: &GgufFile,
+        cfg: Gemma4Config,
+        layout: ModelLayout,
+        layer_to_rank: Vec<usize>,
+        cluster: HipCluster,
+        max_tokens: usize,
+    ) -> Result<Self> {
+        if cluster.ranks() == 0 {
+            bail!("Gemma4PpDriver::upload: cluster has 0 ranks");
+        }
+        if cfg.moe.is_some() {
+            bail!(
+                "Gemma4PpDriver::upload: MoE variants need the indexed-experts \
+                 upload path (followup #23)"
+            );
+        }
+        if cfg.per_layer_embed.is_some() {
+            bail!(
+                "Gemma4PpDriver::upload: per-layer side-channel embedding \
+                 (E2B/E4B) needs the per-layer-embd upload path (followup #22)"
+            );
+        }
+        for spec in &layout.layers {
+            if spec.ffn_kind != FfnKind::Dense {
+                bail!(
+                    "Gemma4PpDriver::upload: MoE FFN at layer {} (followup #23)",
+                    spec.index
+                );
+            }
+            if !spec.has_kv && spec.kv_share_src.is_none() {
+                bail!(
+                    "Gemma4PpDriver::upload: tail layer {} missing kv_share_src; \
+                     run `ModelLayout::resolve_kv_sharing()` first",
+                    spec.index
+                );
+            }
+        }
+        if layer_to_rank.len() != layout.layers.len() {
+            bail!(
+                "Gemma4PpDriver::upload: layer_to_rank len {} != num_layers {}",
+                layer_to_rank.len(),
+                layout.layers.len()
+            );
+        }
+
+        let n_ranks = cluster.ranks();
+        let g_names = GlobalNames::default_names();
+        let token_embd_info = file
+            .tensors
+            .get(&g_names.token_embd)
+            .ok_or_else(|| anyhow!("token_embd missing"))?;
+        let token_embd_dims = [
+            token_embd_info.dims[0] as usize,
+            token_embd_info.dims[1] as usize,
+        ];
+
+        let mut stages: Vec<Gemma4PpStage> = Vec::with_capacity(n_ranks);
+        for rank in 0..n_ranks {
+            let device = cluster.device(rank);
+            device.bind()?;
+            let stream = device.default_stream();
+            let mut raw: Vec<(DevicePtr, usize)> = Vec::new();
+
+            // Per-layer uploads for this rank.
+            let mut layer_weights: Vec<Gemma4LayerWeights> = Vec::new();
+            for (i, spec) in layout.layers.iter().enumerate() {
+                if layer_to_rank[i] != rank {
+                    continue;
+                }
+                let lw = upload_layer_pp(file, spec, device, stream, &mut raw)
+                    .with_context(|| format!("rank {rank} layer {}", spec.index))?;
+                layer_weights.push(lw);
+            }
+
+            // Globals: rank 0 owns token_embd; last rank owns output_norm
+            // (F32→F16 cast) and a replica of the LM-head weight (separate
+            // device alloc — gemma4 ties, so this re-uploads token_embd
+            // from the GGUF mmap).
+            let (token_embd, td_dims): (Option<DeviceTensor>, Option<[usize; 2]>) =
+                if rank == 0 {
+                    let t = upload_tensor_raw(file, token_embd_info, device, stream)
+                        .context("rank 0 token_embd")?;
+                    (Some(t), Some(token_embd_dims))
+                } else {
+                    (None, None)
+                };
+
+            let (output_norm, output) = if rank == n_ranks - 1 {
+                let on_info = file
+                    .tensors
+                    .get(&g_names.output_norm)
+                    .ok_or_else(|| anyhow!("output_norm missing"))?;
+                let on_ptr = upload_norm_f32_as_f16(file, on_info, device, stream)
+                    .context("output_norm cast")?;
+                let on_bytes = (on_info.dims.iter().product::<u64>() as usize) * 2;
+                let on = DeviceTensor {
+                    ptr: on_ptr,
+                    dtype: GgmlDType::F16,
+                    bytes: on_bytes,
+                };
+                // LM head: either explicit `output.weight` (untied) or
+                // re-upload `token_embd.weight` (tied; gemma4 default).
+                let lm = if let Some(info) = file.tensors.get(&g_names.output) {
+                    upload_tensor_raw(file, info, device, stream).context("output (untied)")?
+                } else {
+                    upload_tensor_raw(file, token_embd_info, device, stream)
+                        .context("tied LM head replica (token_embd)")?
+                };
+                (Some(on), Some(lm))
+            } else {
+                (None, None)
+            };
+
+            // Build the stage scratch + KV with from_pieces; it tracks
+            // its own scratch allocations. Then append the raw layer
+            // allocations we just made so dispose frees them.
+            let mut stage = Gemma4PpStage::from_pieces(
+                device,
+                rank,
+                &cfg,
+                &layout,
+                &layer_to_rank,
+                layer_weights,
+                token_embd,
+                td_dims,
+                output_norm,
+                output,
+                max_tokens,
+            )?;
+            stage.raw_alloc_bytes.extend(raw);
+            // Last rank also needs token_embd_dims for the LM-head GEMM
+            // shape (we keep it on every rank so callers can introspect,
+            // but only the last rank consumes it in `output_head`).
+            if rank == n_ranks - 1 && stage.token_embd_dims.is_none() {
+                stage.token_embd_dims = Some(token_embd_dims);
+            }
+            stages.push(stage);
+        }
+
+        Self::from_pieces(cluster, cfg, layout, layer_to_rank, stages)
+    }
+
+    /// Free every device allocation. Idempotent.
+    pub fn dispose(&mut self) -> Result<()> {
+        for (rank, stage) in self.stages.iter_mut().enumerate() {
+            let dev = self.cluster.device(rank);
+            stage.dispose(dev)?;
+        }
+        Ok(())
+    }
+
+    /// Forward one decode token through the pipeline. Returns the
+    /// argmax token id.
+    pub fn forward_one_token(&mut self, token_id: u32, position: usize) -> Result<u32> {
+        forward_one_token_pp(self, token_id, position)
+    }
+
+    /// Multi-token prefill across the pipeline. Output is the LM-head
+    /// logits' argmax for the LAST token of the chunk (consumed
+    /// host-side from the driver's logits buffer after the call).
+    pub fn forward_prefill(&mut self, tokens: &[u32], start_position: usize) -> Result<u32> {
+        forward_prefill_pp(self, tokens, start_position)?;
+        let mut best_i = 0u32;
+        let mut best_v = f32::NEG_INFINITY;
+        for (i, &v) in self.logits_host.iter().enumerate() {
+            if v > best_v {
+                best_v = v;
+                best_i = i as u32;
+            }
+        }
+        Ok(best_i)
+    }
+}
+
+impl Drop for Gemma4PpDriver {
+    fn drop(&mut self) {
+        // Best-effort cleanup; warn on leak.
+        if self
+            .stages
+            .iter()
+            .any(|s| !s.disposed)
+        {
+            tracing::warn!("Gemma4PpDriver dropped without dispose()");
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// PpDecodeDriver impl
+// ---------------------------------------------------------------------------
+
+impl PpDecodeDriver for Gemma4PpDriver {
+    fn n_ranks(&self) -> usize {
+        self.stages.len()
+    }
+
+    fn layers_per_rank(&self, rank: usize) -> usize {
+        self.stages[rank].global_layer_indices.len()
+    }
+
+    fn cluster(&self) -> &HipCluster {
+        &self.cluster
+    }
+
+    fn hidden_a(&self, rank: usize) -> DevicePtr {
+        self.stages[rank].hidden_a
+    }
+
+    fn hidden_b(&self, rank: usize) -> DevicePtr {
+        self.stages[rank].hidden_b
+    }
+
+    fn hidden_bytes(&self) -> usize {
+        self.cfg.hidden_size * 2
+    }
+
+    fn embed_token(&mut self, token_id: u32) -> Result<()> {
+        let stage = &mut self.stages[0];
+        let device = self.cluster.device(0);
+        let stream = device.default_stream();
+        let tok_embd = stage
+            .token_embd
+            .as_ref()
+            .ok_or_else(|| anyhow!("embed_token: rank 0 missing token_embd"))?;
+        embed_decode_host(
+            device,
+            stream,
+            tok_embd.ptr,
+            tok_embd.bytes,
+            tok_embd.dtype,
+            self.cfg.vocab_size,
+            self.cfg.hidden_size,
+            token_id,
+            stage.hidden_a,
+        )
+    }
+
+    fn forward_layer_decode(
+        &mut self,
+        rank: usize,
+        local_idx: usize,
+        x_in: DevicePtr,
+        x_out: DevicePtr,
+        position: usize,
+    ) -> Result<()> {
+        let device = self.cluster.device(rank);
+        let stream = device.default_stream();
+        let reg = &self.regs[rank];
+        let ops = HipOps::new(reg, stream);
+
+        let stage = &mut self.stages[rank];
+        let global_idx = stage.global_layer_indices[local_idx];
+        let spec = self.layout.layers[global_idx];
+
+        let weights_ref =
+            &stage.layer_weights[local_idx] as *const Gemma4LayerWeights;
+        // SAFETY: weights immutable; subsequent mutations touch other
+        // fields (kv_caches, scratch).
+        let weights = unsafe { &*weights_ref };
+
+        let kv_local_idx = stage.local_kv_share_src[local_idx];
+        let kv_ptr: *mut Option<KvCache<F16Contig, HipDevice>> =
+            &mut stage.kv_caches[kv_local_idx];
+        let mut scratch = stage.layer_scratch_view();
+        // SAFETY: kv_ptr borrows stage.kv_caches[kv_local_idx] disjointly
+        // from the other fields the scratch view touches.
+        let kv = unsafe { &mut *kv_ptr };
+        let kv = kv
+            .as_mut()
+            .ok_or_else(|| anyhow!("rank {rank} local layer {local_idx} (global {global_idx}) kv slot unallocated"))?;
+
+        forward_layer_decode(
+            &ops,
+            device,
+            stream,
+            weights,
+            &spec,
+            self.cfg.rms_norm_eps,
+            self.cfg.feed_forward_length,
+            self.cfg.hidden_size,
+            kv,
+            &mut scratch,
+            x_in,
+            x_out,
+            position,
+            /*per_layer_slice=*/ None,
+        )
+    }
+
+    fn output_head(&mut self) -> Result<()> {
+        let last = self.stages.len() - 1;
+        let device = self.cluster.device(last);
+        let stream = device.default_stream();
+        let reg = &self.regs[last];
+        let ops = HipOps::new(reg, stream);
+
+        let cfg = &self.cfg;
+        let stage = &mut self.stages[last];
+        let scratch = stage
+            .output_head_scratch
+            .as_mut()
+            .ok_or_else(|| anyhow!("output_head: last rank missing scratch"))?;
+        let output_norm = stage
+            .output_norm
+            .as_ref()
+            .ok_or_else(|| anyhow!("output_head: last rank missing output_norm"))?;
+        // LM head: tied to token_embd (which lives on rank 0). For
+        // S8-A we require the LM head weight to be replicated on the
+        // last rank — caller passes it as `output` on the last rank.
+        // Tied gemma4 files set this to the same Q8_0 token_embd
+        // tensor uploaded to the last rank. Untied models (none
+        // observed in our 5 audited GGUFs) use `output`.
+        let lm_head_t = stage
+            .output
+            .as_ref()
+            .or(stage.token_embd.as_ref())
+            .ok_or_else(|| anyhow!("output_head: last rank missing LM head weight"))?;
+        let lm_head_dims = stage
+            .token_embd_dims
+            .ok_or_else(|| anyhow!("output_head: last rank missing token_embd_dims"))?;
+        let lm_head = lm_head_t.as_weight_handle(lm_head_dims)?;
+        let in_ptr = stage.hidden_a;
+        let logits = forward_output_head(
+            &ops,
+            in_ptr,
+            output_norm.ptr,
+            lm_head,
+            cfg.final_logit_softcap,
+            scratch,
+            cfg.hidden_size,
+            cfg.vocab_size,
+            cfg.rms_norm_eps,
+        )?;
+        // Download logits into host buffer for argmax.
+        // SAFETY: logits points at vocab*4 device bytes; host buffer matches.
+        unsafe {
+            device.memcpy_async(
+                stream,
+                CopyDirection::DeviceToHost,
+                DevicePtr(self.logits_host.as_mut_ptr() as usize),
+                logits,
+                cfg.vocab_size * 4,
+            )?;
+        }
+        stream.synchronize()?;
+        // After softcap, ensure no in-place hazard for next call.
+        let _ = apply_logit_softcap::<HipOps>;
+        Ok(())
+    }
+
+    fn argmax(&self) -> Result<u32> {
+        let mut best_i = 0u32;
+        let mut best_v = f32::NEG_INFINITY;
+        for (i, &v) in self.logits_host.iter().enumerate() {
+            if v > best_v {
+                best_v = v;
+                best_i = i as u32;
+            }
+        }
+        Ok(best_i)
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Shared helpers
+// ---------------------------------------------------------------------------
+
+fn embed_decode_host(
+    device: &HipDevice,
+    stream: &HipStream,
+    tok_embd_ptr: DevicePtr,
+    tok_embd_bytes: usize,
+    tok_embd_dtype: GgmlDType,
+    vocab: usize,
+    hidden: usize,
+    token_id: u32,
+    out_f16_dev: DevicePtr,
+) -> Result<()> {
+    if (token_id as usize) >= vocab {
+        bail!("token_id {token_id} >= vocab {vocab}");
+    }
+    let row_bytes = row_bytes_for_dtype(tok_embd_dtype, hidden)?;
+    let offset = token_id as usize * row_bytes;
+    if offset + row_bytes > tok_embd_bytes {
+        bail!("tok_embd row OOB at token {token_id}");
+    }
+    let src = tok_embd_ptr.offset_bytes(offset);
+
+    let mut row_raw = vec![0u8; row_bytes];
+    // SAFETY: src points at ≥ row_bytes valid device bytes; row_raw holds row_bytes host bytes.
+    unsafe {
+        device.memcpy_async(
+            stream,
+            CopyDirection::DeviceToHost,
+            DevicePtr(row_raw.as_mut_ptr() as usize),
+            src,
+            row_bytes,
+        )?;
+    }
+    stream.synchronize()?;
+
+    let row_f16: Vec<f16> = if tok_embd_dtype == GgmlDType::F16 {
+        bytemuck::cast_slice::<u8, f16>(&row_raw).to_vec()
+    } else {
+        let row_f32 = flambeau_quant::dequantize_to_vec(tok_embd_dtype, &row_raw, hidden)
+            .map_err(|e| anyhow!("dequant tok_embd row {token_id}: {e}"))?;
+        row_f32.into_iter().map(f16::from_f32).collect()
+    };
+    let upload_bytes = hidden * 2;
+    // SAFETY: out_f16_dev has hidden*2 valid bytes; row_f16 outlives the sync.
+    unsafe {
+        device.memcpy_async(
+            stream,
+            CopyDirection::HostToDevice,
+            out_f16_dev,
+            DevicePtr(row_f16.as_ptr() as usize),
+            upload_bytes,
+        )?;
+    }
+    stream.synchronize()?;
+    Ok(())
+}
+
+/// Upload one tensor verbatim from the GGUF mmap to the device, in
+/// its native dtype. Returns the resulting [`DeviceTensor`] (the
+/// caller does NOT need to track it for dispose — it goes through
+/// `stage.token_embd`/`output`/`output_norm` slots which `dispose`
+/// already frees). Used for token_embd + LM-head replica.
+fn upload_tensor_raw(
+    file: &GgufFile,
+    info: &TensorInfo,
+    device: &HipDevice,
+    stream: &HipStream,
+) -> Result<DeviceTensor> {
+    let bytes = info.size_in_bytes() as usize;
+    let data = file
+        .tensor_raw(&info.name)
+        .with_context(|| format!("tensor_raw `{}`", info.name))?;
+    if data.len() < bytes {
+        bail!(
+            "tensor `{}` mmap slice {} < declared {}",
+            info.name,
+            data.len(),
+            bytes
+        );
+    }
+    let ptr = device
+        .alloc(bytes)
+        .map_err(|e| anyhow!("hipMalloc {} B for `{}`: {e}", bytes, info.name))?;
+    // SAFETY: ptr is a fresh HIP alloc of `bytes`; data is an mmap
+    // view of ≥ bytes host bytes.
+    unsafe {
+        device
+            .memcpy_async(
+                stream,
+                CopyDirection::HostToDevice,
+                ptr,
+                DevicePtr(data.as_ptr() as usize),
+                bytes,
+            )
+            .map_err(|e| anyhow!("memcpy_async `{}`: {e}", info.name))?;
+    }
+    stream.synchronize()?;
+    Ok(DeviceTensor {
+        ptr,
+        dtype: info.dtype,
+        bytes,
+    })
+}
+
+/// Upload one tensor, tracking it in the per-stage raw-alloc list so
+/// `dispose` frees it. Returns the [`DeviceTensor`]. Used for layer
+/// quant weights.
+fn upload_tensor_tracked(
+    file: &GgufFile,
+    info: &TensorInfo,
+    device: &HipDevice,
+    stream: &HipStream,
+    raw: &mut Vec<(DevicePtr, usize)>,
+) -> Result<DeviceTensor> {
+    let t = upload_tensor_raw(file, info, device, stream)?;
+    raw.push((t.ptr, t.bytes));
+    Ok(t)
+}
+
+/// Read an F32 norm weight from the GGUF mmap, cast each lane to F16
+/// host-side, upload the F16 buffer to the device, and track the
+/// allocation in `raw` for dispose. Returns the device pointer ready
+/// for `rmsnorm_f16`. F16 inputs pass through with a raw upload
+/// (still tracked).
+fn upload_norm_f32_as_f16(
+    file: &GgufFile,
+    info: &TensorInfo,
+    device: &HipDevice,
+    stream: &HipStream,
+) -> Result<DevicePtr> {
+    let elems: usize = info.dims.iter().product::<u64>() as usize;
+    match info.dtype {
+        GgmlDType::F32 => {
+            let raw_bytes = file
+                .tensor_raw(&info.name)
+                .with_context(|| format!("tensor_raw `{}`", info.name))?;
+            if raw_bytes.len() < elems * 4 {
+                bail!(
+                    "norm `{}` mmap slice {} < expected {}",
+                    info.name,
+                    raw_bytes.len(),
+                    elems * 4
+                );
+            }
+            // SAFETY: dtype == F32 means the mmap region is F32 lanes;
+            // mmap is page-aligned which exceeds 4-byte alignment.
+            let src: &[f32] = bytemuck::cast_slice(&raw_bytes[..elems * 4]);
+            let host: Vec<f16> = src.iter().map(|&v| f16::from_f32(v)).collect();
+            let new_bytes = elems * 2;
+            let new_ptr = device
+                .alloc(new_bytes)
+                .map_err(|e| anyhow!("alloc F16 norm `{}`: {e}", info.name))?;
+            // SAFETY: new_ptr owns new_bytes; host outlives the sync.
+            unsafe {
+                device
+                    .memcpy_async(
+                        stream,
+                        CopyDirection::HostToDevice,
+                        new_ptr,
+                        DevicePtr(host.as_ptr() as usize),
+                        new_bytes,
+                    )
+                    .map_err(|e| anyhow!("memcpy F32→F16 `{}`: {e}", info.name))?;
+            }
+            stream.synchronize()?;
+            drop(host);
+            Ok(new_ptr)
+        }
+        GgmlDType::F16 => {
+            let t = upload_tensor_raw(file, info, device, stream)?;
+            Ok(t.ptr)
+        }
+        other => bail!(
+            "norm `{}`: unsupported dtype {:?} (expected F32 or F16)",
+            info.name,
+            other
+        ),
+    }
+}
+
+/// Same as [`upload_norm_f32_as_f16`] but tracks the resulting
+/// allocation in `raw` for dispose.
+fn upload_norm_tracked(
+    file: &GgufFile,
+    info: &TensorInfo,
+    device: &HipDevice,
+    stream: &HipStream,
+    raw: &mut Vec<(DevicePtr, usize)>,
+) -> Result<DevicePtr> {
+    let elems: usize = info.dims.iter().product::<u64>() as usize;
+    let ptr = upload_norm_f32_as_f16(file, info, device, stream)?;
+    // F32 was cast → F16, F16 was uploaded raw. Either way the alloc is
+    // elems * 2 bytes.
+    raw.push((ptr, elems * 2));
+    Ok(ptr)
+}
+
+/// Upload every tensor for one layer (attention + dense FFN), with
+/// F32→F16 cast for norms. The layer's `attn_k` / `attn_v` /
+/// `attn_k_norm` are honoured optional per the alt-attention +
+/// shared-KV-tail rules. `raw` collects every device alloc this
+/// function makes so the caller can dispose them.
+fn upload_layer_pp(
+    file: &GgufFile,
+    spec: &LayerSpec,
+    device: &HipDevice,
+    stream: &HipStream,
+    raw: &mut Vec<(DevicePtr, usize)>,
+) -> Result<Gemma4LayerWeights> {
+    let an = AttnNames::for_layer(spec.index);
+    let dn = DenseFfnNames::for_layer(spec.index);
+
+    let attn_norm = upload_norm_tracked(
+        file,
+        file.tensors
+            .get(&an.attn_norm)
+            .ok_or_else(|| anyhow!("{}", an.attn_norm))?,
+        device,
+        stream,
+        raw,
+    )?;
+    let attn_q_info = file
+        .tensors
+        .get(&an.attn_q)
+        .ok_or_else(|| anyhow!("{}", an.attn_q))?;
+    let attn_q_t = upload_tensor_tracked(file, attn_q_info, device, stream, raw)?;
+    let attn_q_dims = [
+        attn_q_info.dims[0] as usize,
+        attn_q_info.dims[1] as usize,
+    ];
+
+    let (attn_k_handle, _attn_k_present) = if let Some(info) = file.tensors.get(&an.attn_k) {
+        let t = upload_tensor_tracked(file, info, device, stream, raw)?;
+        let dims = [info.dims[0] as usize, info.dims[1] as usize];
+        (Some(t.as_weight_handle(dims)?), true)
+    } else {
+        if spec.has_kv {
+            bail!("layer {}: attn_k required but missing", spec.index);
+        }
+        (None, false)
+    };
+    let attn_v_handle = if let Some(info) = file.tensors.get(&an.attn_v) {
+        let t = upload_tensor_tracked(file, info, device, stream, raw)?;
+        let dims = [info.dims[0] as usize, info.dims[1] as usize];
+        Some(t.as_weight_handle(dims)?)
+    } else {
+        None
+    };
+
+    let attn_output_info = file
+        .tensors
+        .get(&an.attn_output)
+        .ok_or_else(|| anyhow!("{}", an.attn_output))?;
+    let attn_output_t = upload_tensor_tracked(file, attn_output_info, device, stream, raw)?;
+    let attn_output_dims = [
+        attn_output_info.dims[0] as usize,
+        attn_output_info.dims[1] as usize,
+    ];
+
+    let attn_q_norm = upload_norm_tracked(
+        file,
+        file.tensors
+            .get(&an.attn_q_norm)
+            .ok_or_else(|| anyhow!("{}", an.attn_q_norm))?,
+        device,
+        stream,
+        raw,
+    )?;
+    let attn_k_norm = if let Some(info) = file.tensors.get(&an.attn_k_norm) {
+        Some(upload_norm_tracked(file, info, device, stream, raw)?)
+    } else {
+        if spec.has_kv {
+            bail!("layer {}: attn_k_norm required but missing", spec.index);
+        }
+        None
+    };
+    let post_attention_norm = upload_norm_tracked(
+        file,
+        file.tensors
+            .get(&an.post_attention_norm)
+            .ok_or_else(|| anyhow!("{}", an.post_attention_norm))?,
+        device,
+        stream,
+        raw,
+    )?;
+    let layer_output_scale = if let Some(info) = file.tensors.get(&an.layer_output_scale) {
+        if info.dtype != GgmlDType::F32 {
+            bail!(
+                "layer {}: layer_output_scale must be F32, got {:?}",
+                spec.index,
+                info.dtype
+            );
+        }
+        let raw_bytes = file
+            .tensor_raw(&info.name)
+            .with_context(|| format!("tensor_raw `{}`", info.name))?;
+        if raw_bytes.len() < 4 {
+            bail!("layer {}: layer_output_scale row < 4 bytes", spec.index);
+        }
+        Some(f32::from_le_bytes([
+            raw_bytes[0],
+            raw_bytes[1],
+            raw_bytes[2],
+            raw_bytes[3],
+        ]))
+    } else {
+        None
+    };
+
+    let ffn_norm = upload_norm_tracked(
+        file,
+        file.tensors
+            .get(&dn.ffn_norm)
+            .ok_or_else(|| anyhow!("{}", dn.ffn_norm))?,
+        device,
+        stream,
+        raw,
+    )?;
+    let ffn_gate_info = file
+        .tensors
+        .get(&dn.ffn_gate)
+        .ok_or_else(|| anyhow!("{}", dn.ffn_gate))?;
+    let ffn_gate_t = upload_tensor_tracked(file, ffn_gate_info, device, stream, raw)?;
+    let ffn_gate_dims = [
+        ffn_gate_info.dims[0] as usize,
+        ffn_gate_info.dims[1] as usize,
+    ];
+    let ffn_up_info = file
+        .tensors
+        .get(&dn.ffn_up)
+        .ok_or_else(|| anyhow!("{}", dn.ffn_up))?;
+    let ffn_up_t = upload_tensor_tracked(file, ffn_up_info, device, stream, raw)?;
+    let ffn_up_dims = [
+        ffn_up_info.dims[0] as usize,
+        ffn_up_info.dims[1] as usize,
+    ];
+    let ffn_down_info = file
+        .tensors
+        .get(&dn.ffn_down)
+        .ok_or_else(|| anyhow!("{}", dn.ffn_down))?;
+    let ffn_down_t = upload_tensor_tracked(file, ffn_down_info, device, stream, raw)?;
+    let ffn_down_dims = [
+        ffn_down_info.dims[0] as usize,
+        ffn_down_info.dims[1] as usize,
+    ];
+    let post_ffw_norm = upload_norm_tracked(
+        file,
+        file.tensors
+            .get(&dn.post_ffw_norm)
+            .ok_or_else(|| anyhow!("{}", dn.post_ffw_norm))?,
+        device,
+        stream,
+        raw,
+    )?;
+
+    Ok(Gemma4LayerWeights {
+        attn_norm,
+        attn_q: attn_q_t.as_weight_handle(attn_q_dims)?,
+        attn_k: attn_k_handle,
+        attn_v: attn_v_handle,
+        attn_output: attn_output_t.as_weight_handle(attn_output_dims)?,
+        attn_q_norm,
+        attn_k_norm,
+        post_attention_norm,
+        layer_output_scale,
+        ffn_norm,
+        ffn_gate: ffn_gate_t.as_weight_handle(ffn_gate_dims)?,
+        ffn_up: ffn_up_t.as_weight_handle(ffn_up_dims)?,
+        ffn_down: ffn_down_t.as_weight_handle(ffn_down_dims)?,
+        post_ffw_norm,
+        per_layer_embed: None,
+    })
+}
+
+fn row_bytes_for_dtype(dt: GgmlDType, hidden: usize) -> Result<usize> {
+    let bs = dt.block_size() as usize;
+    let ts = dt.type_size() as usize;
+    if hidden % bs != 0 {
+        bail!("hidden {hidden} % block_size {bs} != 0 for {dt:?}");
+    }
+    Ok((hidden / bs) * ts)
+}
+
+#[allow(dead_code)]
+fn _context_keepalive<E>(e: Result<()>) -> Result<()> {
+    use Context as _Use;
+    e.context("keepalive")
+}
+
+// ---------------------------------------------------------------------------
+// PpPrefillDriver impl
+// ---------------------------------------------------------------------------
+
+impl PpPrefillDriver for Gemma4PpDriver {
+    fn n_ranks(&self) -> usize {
+        self.stages.len()
+    }
+
+    fn layers_per_rank(&self, rank: usize) -> usize {
+        self.stages[rank].global_layer_indices.len()
+    }
+
+    fn cluster(&self) -> &HipCluster {
+        &self.cluster
+    }
+
+    fn hidden_a(&self, rank: usize) -> DevicePtr {
+        self.stages[rank].hidden_a
+    }
+
+    fn hidden_b(&self, rank: usize) -> DevicePtr {
+        self.stages[rank].hidden_b
+    }
+
+    fn hidden_row_bytes(&self) -> usize {
+        self.cfg.hidden_size * 2
+    }
+
+    fn max_tokens(&self) -> usize {
+        // All stages allocated with the same max_tokens.
+        self.stages[0].max_tokens
+    }
+
+    fn embed_tokens(&mut self, tokens: &[u32]) -> Result<()> {
+        let stage = &mut self.stages[0];
+        let device = self.cluster.device(0);
+        let stream = device.default_stream();
+        let tok_embd = stage
+            .token_embd
+            .as_ref()
+            .ok_or_else(|| anyhow!("embed_tokens: rank 0 missing token_embd"))?;
+        let hidden = self.cfg.hidden_size;
+        let vocab = self.cfg.vocab_size;
+        let row_bytes = row_bytes_for_dtype(tok_embd.dtype, hidden)?;
+        let mut host = vec![half::f16::from_f32(0.0); tokens.len() * hidden];
+        for (i, &tok) in tokens.iter().enumerate() {
+            if (tok as usize) >= vocab {
+                bail!("token {tok} >= vocab {vocab}");
+            }
+            let offset = tok as usize * row_bytes;
+            if offset + row_bytes > tok_embd.bytes {
+                bail!("tok_embd row OOB at token {tok}");
+            }
+            let src = tok_embd.ptr.offset_bytes(offset);
+            let mut row_raw = vec![0u8; row_bytes];
+            // SAFETY: src has >= row_bytes valid bytes.
+            unsafe {
+                device.memcpy_async(
+                    stream,
+                    CopyDirection::DeviceToHost,
+                    DevicePtr(row_raw.as_mut_ptr() as usize),
+                    src,
+                    row_bytes,
+                )?;
+            }
+            stream.synchronize()?;
+            let row_f16: Vec<half::f16> = if tok_embd.dtype == GgmlDType::F16 {
+                bytemuck::cast_slice::<u8, half::f16>(&row_raw).to_vec()
+            } else {
+                let row_f32 = flambeau_quant::dequantize_to_vec(tok_embd.dtype, &row_raw, hidden)
+                    .map_err(|e| anyhow!("dequant tok_embd row {tok}: {e}"))?;
+                row_f32.into_iter().map(half::f16::from_f32).collect()
+            };
+            host[i * hidden..(i + 1) * hidden].copy_from_slice(&row_f16);
+        }
+        let bytes = host.len() * 2;
+        // SAFETY: stage.hidden_a sized max_tokens * hidden * 2 bytes;
+        // tokens.len() * hidden * 2 <= bytes (checked by driver
+        // orchestrator before this call).
+        unsafe {
+            device.memcpy_async(
+                stream,
+                CopyDirection::HostToDevice,
+                stage.hidden_a,
+                DevicePtr(host.as_ptr() as usize),
+                bytes,
+            )?;
+        }
+        stream.synchronize()?;
+        Ok(())
+    }
+
+    fn forward_layer_prefill(
+        &mut self,
+        rank: usize,
+        local_idx: usize,
+        x_in: DevicePtr,
+        x_out: DevicePtr,
+        n_tokens: usize,
+        start_position: usize,
+    ) -> Result<()> {
+        let device = self.cluster.device(rank);
+        let stream = device.default_stream();
+        let reg = &self.regs[rank];
+        let ops = HipOps::new(reg, stream);
+
+        let stage = &mut self.stages[rank];
+        let global_idx = stage.global_layer_indices[local_idx];
+        let spec = self.layout.layers[global_idx];
+
+        let weights_ref =
+            &stage.layer_weights[local_idx] as *const Gemma4LayerWeights;
+        // SAFETY: subsequent mutations touch other fields.
+        let weights = unsafe { &*weights_ref };
+
+        let kv_local_idx = stage.local_kv_share_src[local_idx];
+        let kv_ptr: *mut Option<KvCache<F16Contig, HipDevice>> =
+            &mut stage.kv_caches[kv_local_idx];
+        let mut scratch = stage.prefill_scratch_view();
+        // SAFETY: kv_ptr disjoint from prefill scratch fields.
+        let kv = unsafe { &mut *kv_ptr };
+        let kv = kv
+            .as_mut()
+            .ok_or_else(|| anyhow!("rank {rank} local layer {local_idx} kv unallocated"))?;
+
+        forward_layer_prefill(
+            &ops,
+            device,
+            stream,
+            weights,
+            &spec,
+            self.cfg.rms_norm_eps,
+            self.cfg.feed_forward_length,
+            self.cfg.hidden_size,
+            kv,
+            &mut scratch,
+            x_in,
+            x_out,
+            n_tokens,
+            start_position,
+        )
+    }
+
+    fn output_head_last_token(&mut self, l: usize) -> Result<()> {
+        // Same as decode `output_head`, but reads from the last-token
+        // row of `hidden_a`.
+        let last = self.stages.len() - 1;
+        let device = self.cluster.device(last);
+        let stream = device.default_stream();
+        let reg = &self.regs[last];
+        let ops = HipOps::new(reg, stream);
+        let cfg = &self.cfg;
+        let stage = &mut self.stages[last];
+        let scratch = stage
+            .output_head_scratch
+            .as_mut()
+            .ok_or_else(|| anyhow!("output_head: last rank missing scratch"))?;
+        let output_norm = stage
+            .output_norm
+            .as_ref()
+            .ok_or_else(|| anyhow!("output_head: last rank missing output_norm"))?;
+        let lm_head_t = stage
+            .output
+            .as_ref()
+            .or(stage.token_embd.as_ref())
+            .ok_or_else(|| anyhow!("output_head: last rank missing LM head weight"))?;
+        let lm_head_dims = stage
+            .token_embd_dims
+            .ok_or_else(|| anyhow!("output_head: last rank missing token_embd_dims"))?;
+        let lm_head = lm_head_t.as_weight_handle(lm_head_dims)?;
+        // Last-token row offset = (l - 1) * hidden * 2 bytes.
+        let last_row_offset = (l - 1) * cfg.hidden_size * 2;
+        let in_ptr = stage.hidden_a.offset_bytes(last_row_offset);
+        let logits = forward_output_head(
+            &ops,
+            in_ptr,
+            output_norm.ptr,
+            lm_head,
+            cfg.final_logit_softcap,
+            scratch,
+            cfg.hidden_size,
+            cfg.vocab_size,
+            cfg.rms_norm_eps,
+        )?;
+        // SAFETY: logits vocab*4 bytes; host buffer matches.
+        unsafe {
+            device.memcpy_async(
+                stream,
+                CopyDirection::DeviceToHost,
+                DevicePtr(self.logits_host.as_mut_ptr() as usize),
+                logits,
+                cfg.vocab_size * 4,
+            )?;
+        }
+        stream.synchronize()?;
+        let _ = apply_logit_softcap::<HipOps>; // keepalive for the import
+        Ok(())
+    }
+}
