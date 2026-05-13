@@ -707,6 +707,13 @@ fn sweep(arch: &str, op: Option<&str>, dtype: &str) -> Result<()> {
                     "Q3_K" | "Q3_K_wave64" => (vec![MmqDtype::Q3KWave64], SweepSpec::v1_4_prefill),
                     "IQ4_XS" | "IQ4_XS_wave64" => (vec![MmqDtype::Iq4XsWave64], SweepSpec::v1_4_prefill),
                     "IQ3_S" | "IQ3_S_wave64" => (vec![MmqDtype::Iq3SWave64], SweepSpec::v1_4_prefill),
+                    "IQ4_NL" | "IQ4_NL_wave64" => (vec![MmqDtype::Iq4NlWave64], SweepSpec::v1_4_prefill),
+                    "IQ3_XXS" | "IQ3_XXS_wave64" => (vec![MmqDtype::Iq3XxsWave64], SweepSpec::v1_4_prefill),
+                    "IQ2_XXS" | "IQ2_XXS_wave64" => (vec![MmqDtype::Iq2XxsWave64], SweepSpec::v1_4_prefill),
+                    "IQ2_XS" | "IQ2_XS_wave64" => (vec![MmqDtype::Iq2XsWave64], SweepSpec::v1_4_prefill),
+                    "IQ2_S" | "IQ2_S_wave64" => (vec![MmqDtype::Iq2SWave64], SweepSpec::v1_4_prefill),
+                    "IQ1_S" | "IQ1_S_wave64" => (vec![MmqDtype::Iq1SWave64], SweepSpec::v1_4_prefill),
+                    "IQ1_M" | "IQ1_M_wave64" => (vec![MmqDtype::Iq1MWave64], SweepSpec::v1_4_prefill),
                     "all" => (
                         vec![
                             MmqDtype::Q8_0Oracle,
@@ -750,7 +757,14 @@ fn sweep(arch: &str, op: Option<&str>, dtype: &str) -> Result<()> {
                             | MmqDtype::Q2KWave64
                             | MmqDtype::Q3KWave64
                             | MmqDtype::Iq4XsWave64
-                            | MmqDtype::Iq3SWave64 => SweepSpec::v1_4_prefill(d),
+                            | MmqDtype::Iq3SWave64
+                            | MmqDtype::Iq4NlWave64
+                            | MmqDtype::Iq3XxsWave64
+                            | MmqDtype::Iq2XxsWave64
+                            | MmqDtype::Iq2XsWave64
+                            | MmqDtype::Iq2SWave64
+                            | MmqDtype::Iq1SWave64
+                            | MmqDtype::Iq1MWave64 => SweepSpec::v1_4_prefill(d),
                         },
                     ),
                     other => anyhow::bail!("unknown MMQ dtype {other}"),

@@ -1358,6 +1358,41 @@ impl Recipe {
                 entry: "flambeau_mmq_iq3_s_wave64_q8_1",
                 threads: 64, rows_per_block: 0, mmq_tile: (64, 8),
             },
+            "qmatmul_iq4_nl_mmq_wave64_gfx906" => Self {
+                kind: RecipeKind::MmqWave64, stem: "mmq_iq4_nl_wave64",
+                entry: "flambeau_mmq_iq4_nl_wave64_q8_1",
+                threads: 64, rows_per_block: 0, mmq_tile: (64, 8),
+            },
+            "qmatmul_iq3_xxs_mmq_wave64_gfx906" => Self {
+                kind: RecipeKind::MmqWave64, stem: "mmq_iq3_xxs_wave64",
+                entry: "flambeau_mmq_iq3_xxs_wave64_q8_1",
+                threads: 64, rows_per_block: 0, mmq_tile: (64, 8),
+            },
+            "qmatmul_iq2_xxs_mmq_wave64_gfx906" => Self {
+                kind: RecipeKind::MmqWave64, stem: "mmq_iq2_xxs_wave64",
+                entry: "flambeau_mmq_iq2_xxs_wave64_q8_1",
+                threads: 64, rows_per_block: 0, mmq_tile: (64, 8),
+            },
+            "qmatmul_iq2_xs_mmq_wave64_gfx906" => Self {
+                kind: RecipeKind::MmqWave64, stem: "mmq_iq2_xs_wave64",
+                entry: "flambeau_mmq_iq2_xs_wave64_q8_1",
+                threads: 64, rows_per_block: 0, mmq_tile: (64, 8),
+            },
+            "qmatmul_iq2_s_mmq_wave64_gfx906" => Self {
+                kind: RecipeKind::MmqWave64, stem: "mmq_iq2_s_wave64",
+                entry: "flambeau_mmq_iq2_s_wave64_q8_1",
+                threads: 64, rows_per_block: 0, mmq_tile: (64, 8),
+            },
+            "qmatmul_iq1_s_mmq_wave64_gfx906" => Self {
+                kind: RecipeKind::MmqWave64, stem: "mmq_iq1_s_wave64",
+                entry: "flambeau_mmq_iq1_s_wave64_q8_1",
+                threads: 64, rows_per_block: 0, mmq_tile: (64, 8),
+            },
+            "qmatmul_iq1_m_mmq_wave64_gfx906" => Self {
+                kind: RecipeKind::MmqWave64, stem: "mmq_iq1_m_wave64",
+                entry: "flambeau_mmq_iq1_m_wave64_q8_1",
+                threads: 64, rows_per_block: 0, mmq_tile: (64, 8),
+            },
             "qmatmul_q4_1_mmvq_dp4a_gfx906" => Self {
                 kind: RecipeKind::Mmvq,
                 stem: "mmvq_q4_1",

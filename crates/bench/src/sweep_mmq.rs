@@ -27,7 +27,7 @@ use flambeau_backend_hip::{
 use flambeau_core::{CopyDirection, Device, DevicePtr, Stream};
 use flambeau_kernels_hip as kernels;
 use flambeau_quant::{
-    dequantize_into, BlockIq3S, BlockIq4Xs, BlockQ2K, BlockQ3K, BlockQ4_0, BlockQ4_1, BlockQ4K, BlockQ5_0, BlockQ5_1, BlockQ5K,
+    dequantize_into, BlockIq1M, BlockIq1S, BlockIq2S, BlockIq2Xs, BlockIq2Xxs, BlockIq3S, BlockIq3Xxs, BlockIq4Nl, BlockIq4Xs, BlockQ2K, BlockQ3K, BlockQ4_0, BlockQ4_1, BlockQ4K, BlockQ5_0, BlockQ5_1, BlockQ5K,
     BlockQ6K, BlockQ8K, BlockQ8_0, BlockQ8_1, GgmlDType, QK4_1, QK5_1, QK8_0, QK_K,
 };
 use half::f16;
@@ -95,6 +95,20 @@ pub enum Dtype {
     /// Wave64 IQ3_S MMQ. 9-bit codebook lookup + per-byte sign-mask packing
     /// + dp4a. T-IQ.16 Slice A.
     Iq3SWave64,
+    /// Phase 4 Slice A wave64 MMQ for IQ4_NL.
+    Iq4NlWave64,
+    /// Phase 4 Slice A wave64 MMQ for IQ3_XXS.
+    Iq3XxsWave64,
+    /// Phase 4 Slice A wave64 MMQ for IQ2_XXS.
+    Iq2XxsWave64,
+    /// Phase 4 Slice A wave64 MMQ for IQ2_XS.
+    Iq2XsWave64,
+    /// Phase 4 Slice A wave64 MMQ for IQ2_S.
+    Iq2SWave64,
+    /// Phase 4 Slice A wave64 MMQ for IQ1_S.
+    Iq1SWave64,
+    /// Phase 4 Slice A wave64 MMQ for IQ1_M.
+    Iq1MWave64,
 }
 
 /// Shape of the output tile a single thread block produces for `dtype`.
@@ -123,6 +137,13 @@ fn tile_shape(dtype: Dtype) -> (u32, u32) {
         Dtype::Q3KWave64 => (64, 8),
         Dtype::Iq4XsWave64 => (64, 8),
         Dtype::Iq3SWave64 => (64, 8),
+        Dtype::Iq4NlWave64 => (64, 8),
+        Dtype::Iq3XxsWave64 => (64, 8),
+        Dtype::Iq2XxsWave64 => (64, 8),
+        Dtype::Iq2XsWave64 => (64, 8),
+        Dtype::Iq2SWave64 => (64, 8),
+        Dtype::Iq1SWave64 => (64, 8),
+        Dtype::Iq1MWave64 => (64, 8),
     }
 }
 
@@ -145,6 +166,13 @@ impl Dtype {
             Dtype::Q3KWave64 => "Q3_K",
             Dtype::Iq4XsWave64 => "IQ4_XS",
             Dtype::Iq3SWave64 => "IQ3_S",
+            Dtype::Iq4NlWave64 => "IQ4_NL",
+            Dtype::Iq3XxsWave64 => "IQ3_XXS",
+            Dtype::Iq2XxsWave64 => "IQ2_XXS",
+            Dtype::Iq2XsWave64 => "IQ2_XS",
+            Dtype::Iq2SWave64 => "IQ2_S",
+            Dtype::Iq1SWave64 => "IQ1_S",
+            Dtype::Iq1MWave64 => "IQ1_M",
         }
     }
 
@@ -166,6 +194,13 @@ impl Dtype {
             Dtype::Q3KWave64 => GgmlDType::Q3K,
             Dtype::Iq4XsWave64 => GgmlDType::Iq4Xs,
             Dtype::Iq3SWave64 => GgmlDType::Iq3S,
+            Dtype::Iq4NlWave64 => GgmlDType::Iq4Nl,
+            Dtype::Iq3XxsWave64 => GgmlDType::Iq3Xxs,
+            Dtype::Iq2XxsWave64 => GgmlDType::Iq2Xxs,
+            Dtype::Iq2XsWave64 => GgmlDType::Iq2Xs,
+            Dtype::Iq2SWave64 => GgmlDType::Iq2S,
+            Dtype::Iq1SWave64 => GgmlDType::Iq1S,
+            Dtype::Iq1MWave64 => GgmlDType::Iq1M,
         }
     }
 
@@ -192,6 +227,13 @@ impl Dtype {
             Dtype::Q3KWave64 => "qmatmul_q3_K_mmq_wave64_gfx906",
             Dtype::Iq4XsWave64 => "qmatmul_iq4_xs_mmq_wave64_gfx906",
             Dtype::Iq3SWave64 => "qmatmul_iq3_s_mmq_wave64_gfx906",
+            Dtype::Iq4NlWave64 => "qmatmul_iq4_nl_mmq_wave64_gfx906",
+            Dtype::Iq3XxsWave64 => "qmatmul_iq3_xxs_mmq_wave64_gfx906",
+            Dtype::Iq2XxsWave64 => "qmatmul_iq2_xxs_mmq_wave64_gfx906",
+            Dtype::Iq2XsWave64 => "qmatmul_iq2_xs_mmq_wave64_gfx906",
+            Dtype::Iq2SWave64 => "qmatmul_iq2_s_mmq_wave64_gfx906",
+            Dtype::Iq1SWave64 => "qmatmul_iq1_s_mmq_wave64_gfx906",
+            Dtype::Iq1MWave64 => "qmatmul_iq1_m_mmq_wave64_gfx906",
         }
     }
 
@@ -218,6 +260,13 @@ impl Dtype {
             Dtype::Q3KWave64 => "mmq_q3_K_wave64",
             Dtype::Iq4XsWave64 => "mmq_iq4_xs_wave64",
             Dtype::Iq3SWave64 => "mmq_iq3_s_wave64",
+            Dtype::Iq4NlWave64 => "mmq_iq4_nl_wave64",
+            Dtype::Iq3XxsWave64 => "mmq_iq3_xxs_wave64",
+            Dtype::Iq2XxsWave64 => "mmq_iq2_xxs_wave64",
+            Dtype::Iq2XsWave64 => "mmq_iq2_xs_wave64",
+            Dtype::Iq2SWave64 => "mmq_iq2_s_wave64",
+            Dtype::Iq1SWave64 => "mmq_iq1_s_wave64",
+            Dtype::Iq1MWave64 => "mmq_iq1_m_wave64",
         }
     }
 
@@ -244,6 +293,13 @@ impl Dtype {
             Dtype::Q3KWave64 => "flambeau_mmq_q3_K_wave64_q8_1",
             Dtype::Iq4XsWave64 => "flambeau_mmq_iq4_xs_wave64_q8_1",
             Dtype::Iq3SWave64 => "flambeau_mmq_iq3_s_wave64_q8_1",
+            Dtype::Iq4NlWave64 => "flambeau_mmq_iq4_nl_wave64_q8_1",
+            Dtype::Iq3XxsWave64 => "flambeau_mmq_iq3_xxs_wave64_q8_1",
+            Dtype::Iq2XxsWave64 => "flambeau_mmq_iq2_xxs_wave64_q8_1",
+            Dtype::Iq2XsWave64 => "flambeau_mmq_iq2_xs_wave64_q8_1",
+            Dtype::Iq2SWave64 => "flambeau_mmq_iq2_s_wave64_q8_1",
+            Dtype::Iq1SWave64 => "flambeau_mmq_iq1_s_wave64_q8_1",
+            Dtype::Iq1MWave64 => "flambeau_mmq_iq1_m_wave64_q8_1",
         }
     }
 
@@ -253,7 +309,7 @@ impl Dtype {
             Dtype::Q8_0Wave64 | Dtype::Q8_0Wave64Tile16 | Dtype::Q4_1Wave64 | Dtype::Q4_0Wave64 | Dtype::Q5_0Wave64 | Dtype::Q5_1Wave64 => 64,
             Dtype::Q4K4Warp | Dtype::Q6K4Warp => 128,
             Dtype::Q4KTurbo => 256,  // 4 warps × 64
-            Dtype::Q4KWave64 | Dtype::Q5KWave64 | Dtype::Q6KWave64 | Dtype::Q8KWave64 | Dtype::Q2KWave64 | Dtype::Q3KWave64 | Dtype::Iq4XsWave64 | Dtype::Iq3SWave64 => 64,
+            Dtype::Q4KWave64 | Dtype::Q5KWave64 | Dtype::Q6KWave64 | Dtype::Q8KWave64 | Dtype::Q2KWave64 | Dtype::Q3KWave64 | Dtype::Iq4XsWave64 | Dtype::Iq3SWave64 | Dtype::Iq4NlWave64 | Dtype::Iq3XxsWave64 | Dtype::Iq2XxsWave64 | Dtype::Iq2XsWave64 | Dtype::Iq2SWave64 | Dtype::Iq1SWave64 | Dtype::Iq1MWave64 => 64,
         }
     }
 
@@ -279,6 +335,13 @@ impl Dtype {
             Dtype::Q3KWave64 => std::mem::size_of::<BlockQ3K>(),
             Dtype::Iq4XsWave64 => std::mem::size_of::<BlockIq4Xs>(),
             Dtype::Iq3SWave64 => std::mem::size_of::<BlockIq3S>(),
+            Dtype::Iq4NlWave64 => std::mem::size_of::<BlockIq4Nl>(),
+            Dtype::Iq3XxsWave64 => std::mem::size_of::<BlockIq3Xxs>(),
+            Dtype::Iq2XxsWave64 => std::mem::size_of::<BlockIq2Xxs>(),
+            Dtype::Iq2XsWave64 => std::mem::size_of::<BlockIq2Xs>(),
+            Dtype::Iq2SWave64 => std::mem::size_of::<BlockIq2S>(),
+            Dtype::Iq1SWave64 => std::mem::size_of::<BlockIq1S>(),
+            Dtype::Iq1MWave64 => std::mem::size_of::<BlockIq1M>(),
         }
     }
 
@@ -295,7 +358,7 @@ impl Dtype {
             Dtype::Q5_1Wave64 => "wave64",
             Dtype::Q4K4Warp => "4warp_lds",
             Dtype::Q4KTurbo => "turbo",
-            Dtype::Q4KWave64 | Dtype::Q5KWave64 | Dtype::Q6KWave64 | Dtype::Q8KWave64 | Dtype::Q2KWave64 | Dtype::Q3KWave64 | Dtype::Q8_0Wave64 | Dtype::Iq4XsWave64 | Dtype::Iq3SWave64 => "wave64",
+            Dtype::Q4KWave64 | Dtype::Q5KWave64 | Dtype::Q6KWave64 | Dtype::Q8KWave64 | Dtype::Q2KWave64 | Dtype::Q3KWave64 | Dtype::Q8_0Wave64 | Dtype::Iq4XsWave64 | Dtype::Iq3SWave64 | Dtype::Iq4NlWave64 | Dtype::Iq3XxsWave64 | Dtype::Iq2XxsWave64 | Dtype::Iq2XsWave64 | Dtype::Iq2SWave64 | Dtype::Iq1SWave64 | Dtype::Iq1MWave64 => "wave64",
             Dtype::Q8_0Wave64Tile16 => "wave64_tile16",
             Dtype::Q6K4Warp => "4warp_lds",
         }
@@ -404,7 +467,7 @@ pub fn run_sweep(spec: &SweepSpec, repo_root: &Path) -> Result<Cert> {
         dtype_weight: spec.dtype.name().to_string(),
         dtype_activation: "Q8_1".to_string(),
         tolerance_formula: match spec.dtype {
-            Dtype::Q4KWave64 | Dtype::Q5KWave64 | Dtype::Q6KWave64 | Dtype::Q8KWave64 | Dtype::Q2KWave64 | Dtype::Q3KWave64 | Dtype::Iq4XsWave64 | Dtype::Iq3SWave64 => "|err| <= 5e-2 * max(|ref|, sqrt(k))".to_string(),
+            Dtype::Q4KWave64 | Dtype::Q5KWave64 | Dtype::Q6KWave64 | Dtype::Q8KWave64 | Dtype::Q2KWave64 | Dtype::Q3KWave64 | Dtype::Iq4XsWave64 | Dtype::Iq3SWave64 | Dtype::Iq4NlWave64 | Dtype::Iq3XxsWave64 | Dtype::Iq2XxsWave64 | Dtype::Iq2XsWave64 | Dtype::Iq2SWave64 | Dtype::Iq1SWave64 | Dtype::Iq1MWave64 => "|err| <= 5e-2 * max(|ref|, sqrt(k))".to_string(),
             _ => "|err| <= 3e-2 * max(|ref|, sqrt(k))".to_string(),
         },
         results,
@@ -581,7 +644,7 @@ fn run_shape(
                 shared_bytes,
             };
             unsafe { k_mmq.launch(stream, cfg, args)? };
-        } else if dtype == Dtype::Q4KWave64 || dtype == Dtype::Q5KWave64 || dtype == Dtype::Q6KWave64 || dtype == Dtype::Q8KWave64 || dtype == Dtype::Q2KWave64 || dtype == Dtype::Q3KWave64 || dtype == Dtype::Q8_0Wave64 || dtype == Dtype::Q8_0Wave64Tile16 || dtype == Dtype::Q4_1Wave64 || dtype == Dtype::Q4_0Wave64 || dtype == Dtype::Q5_0Wave64 || dtype == Dtype::Q5_1Wave64 || dtype == Dtype::Iq4XsWave64 || dtype == Dtype::Iq3SWave64 {
+        } else if dtype == Dtype::Q4KWave64 || dtype == Dtype::Q5KWave64 || dtype == Dtype::Q6KWave64 || dtype == Dtype::Q8KWave64 || dtype == Dtype::Q2KWave64 || dtype == Dtype::Q3KWave64 || dtype == Dtype::Q8_0Wave64 || dtype == Dtype::Q8_0Wave64Tile16 || dtype == Dtype::Q4_1Wave64 || dtype == Dtype::Q4_0Wave64 || dtype == Dtype::Q5_0Wave64 || dtype == Dtype::Q5_1Wave64 || dtype == Dtype::Iq4XsWave64 || dtype == Dtype::Iq3SWave64 || dtype == Dtype::Iq4NlWave64 || dtype == Dtype::Iq3XxsWave64 || dtype == Dtype::Iq2XxsWave64 || dtype == Dtype::Iq2XsWave64 || dtype == Dtype::Iq2SWave64 || dtype == Dtype::Iq1SWave64 || dtype == Dtype::Iq1MWave64 {
             // flambeau_mmq_{q4_K,q5_K,q6_K,q8_0}_wave64_q8_1: 8 scalar args + 3 ptrs, wave64
             // block. Args: vx, vy, dst, ncols_x=K, nrows_x=N, ncols_y=M,
             // nrows_y=K, nrows_dst=N.
@@ -785,6 +848,35 @@ fn tame_weight_scales(dtype: Dtype, mut raw: Vec<u8>) -> Vec<u8> {
                 let d = f16::from_f32((block[0] as f32 / 255.0) * 0.001 + 0.0001);
                 block[0..2].copy_from_slice(&d.to_bits().to_le_bytes());
             }
+            Dtype::Iq4NlWave64 => {
+                let d = f16::from_f32((block[0] as f32 / 255.0) * 0.05 + 0.005);
+                block[0..2].copy_from_slice(&d.to_bits().to_le_bytes());
+            }
+            Dtype::Iq3XxsWave64 => {
+                let d = f16::from_f32((block[0] as f32 / 255.0) * 0.005 + 0.0005);
+                block[0..2].copy_from_slice(&d.to_bits().to_le_bytes());
+            }
+            Dtype::Iq2XxsWave64 | Dtype::Iq2XsWave64 | Dtype::Iq2SWave64 => {
+                let d = f16::from_f32((block[0] as f32 / 255.0) * 0.005 + 0.0005);
+                block[0..2].copy_from_slice(&d.to_bits().to_le_bytes());
+            }
+            Dtype::Iq1SWave64 => {
+                let d = f16::from_f32((block[0] as f32 / 255.0) * 0.001 + 0.0001);
+                block[0..2].copy_from_slice(&d.to_bits().to_le_bytes());
+            }
+            Dtype::Iq1MWave64 => {
+                // No per-block d — d is reassembled from 4 spread nibbles at
+                // scales[0..8]. Pin those nibbles so d_bits resolves to a
+                // small positive fp16 (~1e-3); see mmvq_iq1_m randomize_block.
+                let pin_nib = [0x0u16, 0x5, 0x8, 0x0];
+                let sc_off = QK_K / 8 + QK_K / 16;
+                for i in 0..4 {
+                    let off = sc_off + 2 * i;
+                    let lo = u16::from_le_bytes([block[off], block[off + 1]]);
+                    let new = (lo & 0x0FFF) | (pin_nib[i] << 12);
+                    block[off..off + 2].copy_from_slice(&new.to_le_bytes());
+                }
+            }
         }
     }
     let _ = QK_K;
@@ -829,7 +921,7 @@ fn cert_tol(dtype: Dtype, _k: usize) -> f32 {
         // even for a correct kernel. Candle's Q5_K MMQ accepts ~5e-2 at m=2048.
         // Q4_K wave64 shares the same super/sub-block decomposition as Q5_K.
         Dtype::Q4KWave64 | Dtype::Q5KWave64 | Dtype::Q6KWave64 | Dtype::Q4KTurbo => 5e-2,
-        Dtype::Iq4XsWave64 | Dtype::Iq3SWave64 => 5e-2,
+        Dtype::Iq4XsWave64 | Dtype::Iq3SWave64 | Dtype::Iq4NlWave64 | Dtype::Iq3XxsWave64 | Dtype::Iq2XxsWave64 | Dtype::Iq2XsWave64 | Dtype::Iq2SWave64 | Dtype::Iq1SWave64 | Dtype::Iq1MWave64 => 5e-2,
         _ => 3e-2,
     }
 }
