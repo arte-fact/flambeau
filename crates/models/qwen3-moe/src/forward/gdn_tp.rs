@@ -1440,19 +1440,17 @@ pub fn forward_gdn_decode_batched_tp(
         )
         .context("gdn batched-decode (TP) batched-slots state-step")?;
 
-        // Per-slot ssm_norm (kept per-slot; batching this is the
-        // next-smaller lever, deferred).
-        for s in 0..n_tokens {
-            let slot_state_out =
-                DevicePtr(scratch.state_out.as_usize() + s * row_state_out_bytes);
-            let slot_out_normed =
-                DevicePtr(scratch.out_normed.as_usize() + s * row_out_normed_bytes);
-            rmsnorm_f32(
-                ops, stream, slot_state_out, ssm_norm.ptr, slot_out_normed,
-                local_num_v_heads, head_v_dim, cfg.rms_norm_eps,
-            )
-            .context("gdn batched-decode (TP) ssm_norm slot (post-batched)")?;
-        }
+        // Batched ssm_norm: scratch.state_out / scratch.out_normed are
+        // slot-major `[N, num_v_heads, head_v_dim]`. rmsnorm_f32
+        // processes `n_rows` independently, so one call with
+        // `n_rows = N * local_num_v_heads` covers every slot.
+        rmsnorm_f32(
+            ops, stream, scratch.state_out, ssm_norm.ptr, scratch.out_normed,
+            n_tokens * local_num_v_heads, head_v_dim, cfg.rms_norm_eps,
+        )
+        .context("gdn batched-decode (TP) ssm_norm batched (post-state-step)")?;
+        let _ = row_state_out_bytes; // kept for non-batched fallback above
+        let _ = row_out_normed_bytes;
     }
 
     // === Stage E: swiglu(z, out_normed) → gated_f32 (batched) ===
