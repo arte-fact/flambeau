@@ -310,3 +310,57 @@ typedef struct {
 } flambeau_block_q8_K;
 static_assert(sizeof(flambeau_block_q8_K) == 4 + QK_K + QK_K / 16 * 2,
               "block_q8_K size");
+
+// IQ4_NL — 4-bit non-linear quant, 32-element block. f16 scale + 16 bytes
+// of nibble-packed unsigned 4-bit codes. Reconstruction:
+//   y_i = d * KVALUES_IQ4NL[code_i]
+// where code_i indexes a 16-entry signed i8 LUT (ported from llama.cpp's
+// `kvalues_iq4nl`). Low nibble at byte j → elem j; high nibble at byte j →
+// elem j + 16. Byte-identical to ggml-common.h block_iq4_nl.
+typedef struct {
+    fb_fp16_t d;                  // per-block scale
+    uint8_t   qs[QK4_0 / 2];      // 16 bytes, 4-bit LUT indices (low | high)
+} flambeau_block_iq4_nl;
+static_assert(sizeof(flambeau_block_iq4_nl) == 2 + QK4_0 / 2,
+              "block_iq4_nl size");
+
+// IQ4_XS — 4-bit non-linear K-quant, super-block of 256 elements with 8
+// sub-blocks of 32. Per-sub-block signed 6-bit scale split into
+// `scales_l` (low 4 bits × 8 in 4 bytes) and `scales_h` (high 2 bits × 8
+// in u16). Reconstruction (per sub-block ib):
+//   ls = (scales_l[ib/2] >> (4*(ib&1)) & 0xF) | ((scales_h >> (2*ib)) & 3) << 4
+//   ls_signed = (i32) ls - 32                    (range [-32, 31])
+//   y = d * ls_signed * KVALUES_IQ4NL[code]      (same LUT as IQ4_NL)
+// qs layout: sub-block ib owns bytes qs[ib*16 .. ib*16+16]; low nibble →
+// elem 0..15 of sub-block, high nibble → elem 16..31. Byte-identical to
+// ggml-common.h block_iq4_xs.
+typedef struct {
+    fb_fp16_t d;                           // super-block scale
+    uint16_t  scales_h;                    // high 2 bits of each of 8 sub-block scales
+    uint8_t   scales_l[QK_K / 64];         // low 4 bits × 8 → 4 bytes
+    uint8_t   qs[QK_K / 2];                // 128 bytes, 4-bit LUT indices
+} flambeau_block_iq4_xs;
+static_assert(sizeof(flambeau_block_iq4_xs) == 2 + 2 + QK_K / 64 + QK_K / 2,
+              "block_iq4_xs size");
+
+// Shared signed-i8 LUT for IQ4_NL and IQ4_XS. Byte-identical port of
+// llama.cpp `kvalues_iq4nl` (ggml-common.h). Inline so each kernel TU
+// gets a register-resident copy without ODR conflicts; the compiler is
+// free to keep it in constant memory if launch occupancy benefits.
+__device__ __forceinline__ int8_t flambeau_iq4nl_lut(int idx) {
+    constexpr int8_t lut[16] = {
+        -127, -104, -83, -65, -49, -35, -22, -10,
+           1,   13,  25,  38,  53,  69,  89, 113,
+    };
+    return lut[idx & 0xF];
+}
+
+// Reconstruct the signed 6-bit sub-block scale for sub-block `ib` (0..7)
+// in an IQ4_XS super-block. Returns the bias-corrected i32 in [-32, 31].
+__device__ __forceinline__ int flambeau_iq4_xs_scale(
+    int ib, uint16_t scales_h, const uint8_t* __restrict__ scales_l
+) {
+    const int l_nib = (scales_l[ib >> 1] >> (4 * (ib & 1))) & 0x0F;
+    const int h_bits = (scales_h >> (2 * ib)) & 0x03;
+    return (l_nib | (h_bits << 4)) - 32;
+}

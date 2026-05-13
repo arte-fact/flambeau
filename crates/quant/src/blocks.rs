@@ -139,3 +139,28 @@ pub struct BlockQ8K {
     pub bsums: [i16; QK_K / 16],
 }
 const _: () = assert!(std::mem::size_of::<BlockQ8K>() == 4 + QK_K + QK_K / 16 * 2);
+
+/// IQ4_NL — 4-bit non-linear quant, 32-element block. Per-block f16 scale
+/// + 16 bytes of nibble-packed LUT indices. Byte-identical to
+/// `ggml-common.h`'s `block_iq4_nl`.
+#[derive(Debug, Clone, Copy, Pod, Zeroable)]
+#[repr(C)]
+pub struct BlockIq4Nl {
+    pub d: f16,
+    pub qs: [u8; QK4_0 / 2],
+}
+const _: () = assert!(std::mem::size_of::<BlockIq4Nl>() == 2 + QK4_0 / 2);
+
+/// IQ4_XS — 4-bit non-linear K-quant, 256-element super-block with 8
+/// sub-blocks of 32. Per-sub-block signed 6-bit scale split into
+/// `scales_l` (low 4 bits × 8 → 4 bytes) and `scales_h` (high 2 bits × 8
+/// → u16). Byte-identical to `ggml-common.h`'s `block_iq4_xs`.
+#[derive(Debug, Clone, Copy, Pod, Zeroable)]
+#[repr(C)]
+pub struct BlockIq4Xs {
+    pub d: f16,
+    pub scales_h: u16,
+    pub scales_l: [u8; QK_K / 64],
+    pub qs: [u8; QK_K / 2],
+}
+const _: () = assert!(std::mem::size_of::<BlockIq4Xs>() == 2 + 2 + QK_K / 64 + QK_K / 2);
