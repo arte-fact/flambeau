@@ -1294,6 +1294,56 @@ impl Recipe {
                 rows_per_block: 2,
                 mmq_tile: (0, 0),
             },
+            "qmatmul_iq2_xxs_mmvq_single_row_gfx906" => Self {
+                kind: RecipeKind::Mmvq, stem: "mmvq_iq2_xxs",
+                entry: "flambeau_mmvq_iq2_xxs_q8_1",
+                threads: 64, rows_per_block: 1, mmq_tile: (0, 0),
+            },
+            "qmatmul_iq2_xxs_mmvq_nw1_r2_gfx906" => Self {
+                kind: RecipeKind::Mmvq, stem: "mmvq_iq2_xxs_r2",
+                entry: "flambeau_mmvq_iq2_xxs_r2_q8_1",
+                threads: 64, rows_per_block: 2, mmq_tile: (0, 0),
+            },
+            "qmatmul_iq2_xs_mmvq_single_row_gfx906" => Self {
+                kind: RecipeKind::Mmvq, stem: "mmvq_iq2_xs",
+                entry: "flambeau_mmvq_iq2_xs_q8_1",
+                threads: 64, rows_per_block: 1, mmq_tile: (0, 0),
+            },
+            "qmatmul_iq2_xs_mmvq_nw1_r2_gfx906" => Self {
+                kind: RecipeKind::Mmvq, stem: "mmvq_iq2_xs_r2",
+                entry: "flambeau_mmvq_iq2_xs_r2_q8_1",
+                threads: 64, rows_per_block: 2, mmq_tile: (0, 0),
+            },
+            "qmatmul_iq2_s_mmvq_single_row_gfx906" => Self {
+                kind: RecipeKind::Mmvq, stem: "mmvq_iq2_s",
+                entry: "flambeau_mmvq_iq2_s_q8_1",
+                threads: 64, rows_per_block: 1, mmq_tile: (0, 0),
+            },
+            "qmatmul_iq2_s_mmvq_nw1_r2_gfx906" => Self {
+                kind: RecipeKind::Mmvq, stem: "mmvq_iq2_s_r2",
+                entry: "flambeau_mmvq_iq2_s_r2_q8_1",
+                threads: 64, rows_per_block: 2, mmq_tile: (0, 0),
+            },
+            "qmatmul_iq1_s_mmvq_single_row_gfx906" => Self {
+                kind: RecipeKind::Mmvq, stem: "mmvq_iq1_s",
+                entry: "flambeau_mmvq_iq1_s_q8_1",
+                threads: 64, rows_per_block: 1, mmq_tile: (0, 0),
+            },
+            "qmatmul_iq1_s_mmvq_nw1_r2_gfx906" => Self {
+                kind: RecipeKind::Mmvq, stem: "mmvq_iq1_s_r2",
+                entry: "flambeau_mmvq_iq1_s_r2_q8_1",
+                threads: 64, rows_per_block: 2, mmq_tile: (0, 0),
+            },
+            "qmatmul_iq1_m_mmvq_single_row_gfx906" => Self {
+                kind: RecipeKind::Mmvq, stem: "mmvq_iq1_m",
+                entry: "flambeau_mmvq_iq1_m_q8_1",
+                threads: 64, rows_per_block: 1, mmq_tile: (0, 0),
+            },
+            "qmatmul_iq1_m_mmvq_nw1_r2_gfx906" => Self {
+                kind: RecipeKind::Mmvq, stem: "mmvq_iq1_m_r2",
+                entry: "flambeau_mmvq_iq1_m_r2_q8_1",
+                threads: 64, rows_per_block: 2, mmq_tile: (0, 0),
+            },
             "qmatmul_q4_1_mmvq_dp4a_gfx906" => Self {
                 kind: RecipeKind::Mmvq,
                 stem: "mmvq_q4_1",
@@ -1760,6 +1810,9 @@ fn block_elems(dtype: QDtype) -> usize {
         // IQ3_XXS and IQ3_S are both 256-elem super-blocks (same family
         // shape as Q3_K / Q4_K).
         QDtype::IQ3_XXS | QDtype::IQ3_S => QK_K,
+        // IQ2 + IQ1 family all share the 256-elem super-block shape.
+        QDtype::IQ2_XXS | QDtype::IQ2_XS | QDtype::IQ2_S
+        | QDtype::IQ1_S | QDtype::IQ1_M => QK_K,
         // F16 has no native block; return the Q8_1 stride (QK8_1) so the
         // caller's `n_blocks_per_row = k / block_elems` matches the
         // activation side, which is what the F16 MMVQ kernel iterates over.

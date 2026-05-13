@@ -306,6 +306,13 @@ pub(super) fn qdtype_of(dtype: GgmlDType) -> Result<QDtype> {
         // u32 grid). Covers UD-Q3_K_XL MoE expert tensors.
         GgmlDType::Iq3Xxs => QDtype::IQ3_XXS,
         GgmlDType::Iq3S => QDtype::IQ3_S,
+        // T-IQ.15 — full IQ2/IQ1 family native MMVQ kernels (codebook
+        // lookup, 256..2048-entry u64 grids).
+        GgmlDType::Iq2Xxs => QDtype::IQ2_XXS,
+        GgmlDType::Iq2Xs => QDtype::IQ2_XS,
+        GgmlDType::Iq2S => QDtype::IQ2_S,
+        GgmlDType::Iq1S => QDtype::IQ1_S,
+        GgmlDType::Iq1M => QDtype::IQ1_M,
         other => bail!("weight dtype {other:?} not supported by V1 qmatmul dispatch"),
     })
 }

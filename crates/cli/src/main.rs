@@ -654,6 +654,16 @@ fn sweep(arch: &str, op: Option<&str>, dtype: &str) -> Result<()> {
                     "IQ3_XXS_r2" => vec![Dtype::Iq3XxsR2],
                     "IQ3_S" => vec![Dtype::Iq3S, Dtype::Iq3SR2],
                     "IQ3_S_r2" => vec![Dtype::Iq3SR2],
+                    "IQ2_XXS" => vec![Dtype::Iq2Xxs, Dtype::Iq2XxsR2],
+                    "IQ2_XXS_r2" => vec![Dtype::Iq2XxsR2],
+                    "IQ2_XS" => vec![Dtype::Iq2Xs, Dtype::Iq2XsR2],
+                    "IQ2_XS_r2" => vec![Dtype::Iq2XsR2],
+                    "IQ2_S" => vec![Dtype::Iq2S, Dtype::Iq2SR2],
+                    "IQ2_S_r2" => vec![Dtype::Iq2SR2],
+                    "IQ1_S" => vec![Dtype::Iq1S, Dtype::Iq1SR2],
+                    "IQ1_S_r2" => vec![Dtype::Iq1SR2],
+                    "IQ1_M" => vec![Dtype::Iq1M, Dtype::Iq1MR2],
+                    "IQ1_M_r2" => vec![Dtype::Iq1MR2],
                     other => anyhow::bail!("unknown dtype {other}"),
                 };
                 let root = repo_root();

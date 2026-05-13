@@ -27,7 +27,9 @@ use flambeau_backend_hip::{
 use flambeau_core::{CopyDirection, Device, DevicePtr, Stream};
 use flambeau_kernels_hip as kernels;
 use flambeau_quant::{
-    dequantize_into, BlockIq3S, BlockIq3Xxs, BlockIq4Nl, BlockIq4Xs, BlockQ2K, BlockQ3K, BlockQ4K, BlockQ4_1, BlockQ5K, BlockQ6K, BlockQ8K, BlockQ8_0,
+    dequantize_into, BlockIq1M, BlockIq1S, BlockIq2S, BlockIq2Xs, BlockIq2Xxs, BlockIq3S,
+    BlockIq3Xxs, BlockIq4Nl, BlockIq4Xs, BlockQ2K, BlockQ3K, BlockQ4K, BlockQ4_1, BlockQ5K,
+    BlockQ6K, BlockQ8K, BlockQ8_0,
     BlockQ8_1, GgmlDType, QK8_0, QK_K,
 };
 use half::f16;
@@ -98,6 +100,17 @@ pub enum Dtype {
     Iq3S,
     /// T-IQ.14 — native IQ3_S r2 multi-row MMVQ.
     Iq3SR2,
+    /// T-IQ.15 — native IQ2_XXS single-row MMVQ.
+    Iq2Xxs,
+    Iq2XxsR2,
+    Iq2Xs,
+    Iq2XsR2,
+    Iq2S,
+    Iq2SR2,
+    Iq1S,
+    Iq1SR2,
+    Iq1M,
+    Iq1MR2,
 }
 
 impl Dtype {
@@ -115,6 +128,11 @@ impl Dtype {
             Dtype::Iq4Xs | Dtype::Iq4XsR2 => "IQ4_XS",
             Dtype::Iq3Xxs | Dtype::Iq3XxsR2 => "IQ3_XXS",
             Dtype::Iq3S | Dtype::Iq3SR2 => "IQ3_S",
+            Dtype::Iq2Xxs | Dtype::Iq2XxsR2 => "IQ2_XXS",
+            Dtype::Iq2Xs | Dtype::Iq2XsR2 => "IQ2_XS",
+            Dtype::Iq2S | Dtype::Iq2SR2 => "IQ2_S",
+            Dtype::Iq1S | Dtype::Iq1SR2 => "IQ1_S",
+            Dtype::Iq1M | Dtype::Iq1MR2 => "IQ1_M",
         }
     }
 
@@ -132,6 +150,11 @@ impl Dtype {
             Dtype::Iq4Xs | Dtype::Iq4XsR2 => GgmlDType::Iq4Xs,
             Dtype::Iq3Xxs | Dtype::Iq3XxsR2 => GgmlDType::Iq3Xxs,
             Dtype::Iq3S | Dtype::Iq3SR2 => GgmlDType::Iq3S,
+            Dtype::Iq2Xxs | Dtype::Iq2XxsR2 => GgmlDType::Iq2Xxs,
+            Dtype::Iq2Xs | Dtype::Iq2XsR2 => GgmlDType::Iq2Xs,
+            Dtype::Iq2S | Dtype::Iq2SR2 => GgmlDType::Iq2S,
+            Dtype::Iq1S | Dtype::Iq1SR2 => GgmlDType::Iq1S,
+            Dtype::Iq1M | Dtype::Iq1MR2 => GgmlDType::Iq1M,
         }
     }
 
@@ -164,6 +187,16 @@ impl Dtype {
             Dtype::Iq3XxsR2 => "qmatmul_iq3_xxs_mmvq_nw1_r2_gfx906",
             Dtype::Iq3S => "qmatmul_iq3_s_mmvq_single_row_gfx906",
             Dtype::Iq3SR2 => "qmatmul_iq3_s_mmvq_nw1_r2_gfx906",
+            Dtype::Iq2Xxs => "qmatmul_iq2_xxs_mmvq_single_row_gfx906",
+            Dtype::Iq2XxsR2 => "qmatmul_iq2_xxs_mmvq_nw1_r2_gfx906",
+            Dtype::Iq2Xs => "qmatmul_iq2_xs_mmvq_single_row_gfx906",
+            Dtype::Iq2XsR2 => "qmatmul_iq2_xs_mmvq_nw1_r2_gfx906",
+            Dtype::Iq2S => "qmatmul_iq2_s_mmvq_single_row_gfx906",
+            Dtype::Iq2SR2 => "qmatmul_iq2_s_mmvq_nw1_r2_gfx906",
+            Dtype::Iq1S => "qmatmul_iq1_s_mmvq_single_row_gfx906",
+            Dtype::Iq1SR2 => "qmatmul_iq1_s_mmvq_nw1_r2_gfx906",
+            Dtype::Iq1M => "qmatmul_iq1_m_mmvq_single_row_gfx906",
+            Dtype::Iq1MR2 => "qmatmul_iq1_m_mmvq_nw1_r2_gfx906",
         }
     }
 
@@ -196,6 +229,16 @@ impl Dtype {
             Dtype::Iq3XxsR2 => "mmvq_iq3_xxs_r2",
             Dtype::Iq3S => "mmvq_iq3_s",
             Dtype::Iq3SR2 => "mmvq_iq3_s_r2",
+            Dtype::Iq2Xxs => "mmvq_iq2_xxs",
+            Dtype::Iq2XxsR2 => "mmvq_iq2_xxs_r2",
+            Dtype::Iq2Xs => "mmvq_iq2_xs",
+            Dtype::Iq2XsR2 => "mmvq_iq2_xs_r2",
+            Dtype::Iq2S => "mmvq_iq2_s",
+            Dtype::Iq2SR2 => "mmvq_iq2_s_r2",
+            Dtype::Iq1S => "mmvq_iq1_s",
+            Dtype::Iq1SR2 => "mmvq_iq1_s_r2",
+            Dtype::Iq1M => "mmvq_iq1_m",
+            Dtype::Iq1MR2 => "mmvq_iq1_m_r2",
         }
     }
 
@@ -228,6 +271,16 @@ impl Dtype {
             Dtype::Iq3XxsR2 => "flambeau_mmvq_iq3_xxs_r2_q8_1",
             Dtype::Iq3S => "flambeau_mmvq_iq3_s_q8_1",
             Dtype::Iq3SR2 => "flambeau_mmvq_iq3_s_r2_q8_1",
+            Dtype::Iq2Xxs => "flambeau_mmvq_iq2_xxs_q8_1",
+            Dtype::Iq2XxsR2 => "flambeau_mmvq_iq2_xxs_r2_q8_1",
+            Dtype::Iq2Xs => "flambeau_mmvq_iq2_xs_q8_1",
+            Dtype::Iq2XsR2 => "flambeau_mmvq_iq2_xs_r2_q8_1",
+            Dtype::Iq2S => "flambeau_mmvq_iq2_s_q8_1",
+            Dtype::Iq2SR2 => "flambeau_mmvq_iq2_s_r2_q8_1",
+            Dtype::Iq1S => "flambeau_mmvq_iq1_s_q8_1",
+            Dtype::Iq1SR2 => "flambeau_mmvq_iq1_s_r2_q8_1",
+            Dtype::Iq1M => "flambeau_mmvq_iq1_m_q8_1",
+            Dtype::Iq1MR2 => "flambeau_mmvq_iq1_m_r2_q8_1",
         }
     }
 
@@ -245,6 +298,11 @@ impl Dtype {
             Dtype::Iq4Xs | Dtype::Iq4XsR2 => std::mem::size_of::<BlockIq4Xs>(),
             Dtype::Iq3Xxs | Dtype::Iq3XxsR2 => std::mem::size_of::<BlockIq3Xxs>(),
             Dtype::Iq3S | Dtype::Iq3SR2 => std::mem::size_of::<BlockIq3S>(),
+            Dtype::Iq2Xxs | Dtype::Iq2XxsR2 => std::mem::size_of::<BlockIq2Xxs>(),
+            Dtype::Iq2Xs | Dtype::Iq2XsR2 => std::mem::size_of::<BlockIq2Xs>(),
+            Dtype::Iq2S | Dtype::Iq2SR2 => std::mem::size_of::<BlockIq2S>(),
+            Dtype::Iq1S | Dtype::Iq1SR2 => std::mem::size_of::<BlockIq1S>(),
+            Dtype::Iq1M | Dtype::Iq1MR2 => std::mem::size_of::<BlockIq1M>(),
         }
     }
 
@@ -265,7 +323,9 @@ impl Dtype {
     fn rows_per_block(self) -> u32 {
         match self {
             Dtype::Q6KR4 => 4,
-            Dtype::Q2KR2 | Dtype::Q3KR2 | Dtype::Q4KR2 | Dtype::Q5KR2 | Dtype::Q4_1R2 | Dtype::Q4_1R2DP4A | Dtype::Iq4NlR2 | Dtype::Iq4XsR2 | Dtype::Iq3XxsR2 | Dtype::Iq3SR2 => 2,
+            Dtype::Q2KR2 | Dtype::Q3KR2 | Dtype::Q4KR2 | Dtype::Q5KR2 | Dtype::Q4_1R2
+            | Dtype::Q4_1R2DP4A | Dtype::Iq4NlR2 | Dtype::Iq4XsR2 | Dtype::Iq3XxsR2 | Dtype::Iq3SR2
+            | Dtype::Iq2XxsR2 | Dtype::Iq2XsR2 | Dtype::Iq2SR2 | Dtype::Iq1SR2 | Dtype::Iq1MR2 => 2,
             // Q6KDP4A is a single-row kernel (inner cooperative across 2 super-blocks).
             _ => 1,
         }
@@ -613,6 +673,45 @@ fn tame_scales(dtype: Dtype, raw: Vec<u8>) -> Vec<u8> {
                 // Even tighter d cap due to the higher scale range.
                 let d = f16::from_f32((block[0] as f32 / 255.0) * 0.001 + 0.0001);
                 block[0..2].copy_from_slice(&d.to_bits().to_le_bytes());
+            }
+            Dtype::Iq2Xxs | Dtype::Iq2XxsR2 => {
+                // Per-block 4-bit scale (top of aux32) and grid magnitudes
+                // up to ~0x3e (62); scale chain (0.5+s) * 0.25 max ~3.875.
+                let d = f16::from_f32((block[0] as f32 / 255.0) * 0.005 + 0.0005);
+                block[0..2].copy_from_slice(&d.to_bits().to_le_bytes());
+            }
+            Dtype::Iq2Xs | Dtype::Iq2XsR2 => {
+                // Same (0.5 + nibble) * 0.25 scaling as IQ2_XXS — cap d
+                // similarly. Random scale-nibbles are fine.
+                let d = f16::from_f32((block[0] as f32 / 255.0) * 0.005 + 0.0005);
+                block[0..2].copy_from_slice(&d.to_bits().to_le_bytes());
+            }
+            Dtype::Iq2S | Dtype::Iq2SR2 => {
+                let d = f16::from_f32((block[0] as f32 / 255.0) * 0.005 + 0.0005);
+                block[0..2].copy_from_slice(&d.to_bits().to_le_bytes());
+            }
+            Dtype::Iq1S | Dtype::Iq1SR2 => {
+                // IQ1_S scale = (2 * (qh>>12)&7 + 1), max 15. Cap d tighter.
+                let d = f16::from_f32((block[0] as f32 / 255.0) * 0.001 + 0.0001);
+                block[0..2].copy_from_slice(&d.to_bits().to_le_bytes());
+            }
+            Dtype::Iq1M | Dtype::Iq1MR2 => {
+                // IQ1_M has no per-block d — it's reassembled from the top
+                // nibble of each of 4 u16 scale-words at scales[0..8].
+                // Pin those nibbles so the reassembled d_bits resolves to
+                // a small positive fp16 (~1e-3), keeping F32 dot precision
+                // at k=15360.
+                //   d_bits = (sc[0]>>12) | ((sc[1]>>8)&0xF0)
+                //          | ((sc[2]>>4)&0xF00) | (sc[3] & 0xF000)
+                // Target d_bits = 0x0850. Distribute nibbles 0x0, 0x5, 0x8, 0x0.
+                let pin_nib = [0x0u16, 0x5, 0x8, 0x0];
+                let sc_off = QK_K / 8 + QK_K / 16;   // scales array offset in BlockIq1M (no d)
+                for i in 0..4 {
+                    let off = sc_off + 2 * i;
+                    let lo = u16::from_le_bytes([block[off], block[off + 1]]);
+                    let new = (lo & 0x0FFF) | (pin_nib[i] << 12);
+                    block[off..off + 2].copy_from_slice(&new.to_le_bytes());
+                }
             }
         }
     }

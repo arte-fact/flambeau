@@ -80,6 +80,42 @@ pub const QMATMUL_GFX906: &[KernelDescriptor] = &[
         m_range: (1, 127),
         cert_rel_path: "certs/hip/gfx906/qmatmul_iq3_s_mmvq_nw1_r2_gfx906.json",
     },
+    // T-IQ.15 — IQ2 + IQ1 family native MMVQ. r2 multi-row default.
+    KernelDescriptor {
+        op_name: "QMatMul", impl_id: "qmatmul_iq2_xxs_mmvq_nw1_r2_gfx906",
+        backend: "hip", arch: "gfx906",
+        dtype_weight: QDtype::IQ2_XXS, dtype_activation: QDtype::Q8_1,
+        m_range: (1, 127),
+        cert_rel_path: "certs/hip/gfx906/qmatmul_iq2_xxs_mmvq_nw1_r2_gfx906.json",
+    },
+    KernelDescriptor {
+        op_name: "QMatMul", impl_id: "qmatmul_iq2_xs_mmvq_nw1_r2_gfx906",
+        backend: "hip", arch: "gfx906",
+        dtype_weight: QDtype::IQ2_XS, dtype_activation: QDtype::Q8_1,
+        m_range: (1, 127),
+        cert_rel_path: "certs/hip/gfx906/qmatmul_iq2_xs_mmvq_nw1_r2_gfx906.json",
+    },
+    KernelDescriptor {
+        op_name: "QMatMul", impl_id: "qmatmul_iq2_s_mmvq_nw1_r2_gfx906",
+        backend: "hip", arch: "gfx906",
+        dtype_weight: QDtype::IQ2_S, dtype_activation: QDtype::Q8_1,
+        m_range: (1, 127),
+        cert_rel_path: "certs/hip/gfx906/qmatmul_iq2_s_mmvq_nw1_r2_gfx906.json",
+    },
+    KernelDescriptor {
+        op_name: "QMatMul", impl_id: "qmatmul_iq1_s_mmvq_nw1_r2_gfx906",
+        backend: "hip", arch: "gfx906",
+        dtype_weight: QDtype::IQ1_S, dtype_activation: QDtype::Q8_1,
+        m_range: (1, 127),
+        cert_rel_path: "certs/hip/gfx906/qmatmul_iq1_s_mmvq_nw1_r2_gfx906.json",
+    },
+    KernelDescriptor {
+        op_name: "QMatMul", impl_id: "qmatmul_iq1_m_mmvq_nw1_r2_gfx906",
+        backend: "hip", arch: "gfx906",
+        dtype_weight: QDtype::IQ1_M, dtype_activation: QDtype::Q8_1,
+        m_range: (1, 127),
+        cert_rel_path: "certs/hip/gfx906/qmatmul_iq1_m_mmvq_nw1_r2_gfx906.json",
+    },
     KernelDescriptor {
         // 4.a.3 — 128-thread single-row DP4A Q4_1 MMVQ. Same DP4A
         // math as but half the threads per block, reducing kernel

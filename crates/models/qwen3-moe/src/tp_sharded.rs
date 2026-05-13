@@ -974,24 +974,12 @@ fn upload_tp_with_layout(
         .for_tensor(name)
         .ok_or_else(|| anyhow!("no TP layout entry for tensor `{name}`"))?;
 
-    // Source dtypes with no native V1 kernel bypass the post-slice
-    // convert path (upload_tp_with_layout's normal flow slices raw bytes
-    // first then converts F32→{F16,Q8_0}, which can't address per-block
-    // strides of MXFP4 / IQ2 / IQ1). Dequant the full tensor to F32,
-    // slice the F32, then quantise the per-rank slice.
-    // T-IQ.13/T-IQ.14: IQ4_XS, IQ4_NL, IQ3_XXS, IQ3_S skip this path —
-    // they have native kernels and the TP slicer handles their block
-    // strides because each block-of-N aligns on the dispatch axis we
-    // ever split on.
-    if matches!(
-        info.dtype,
-        GgmlDType::Mxfp4
-            | GgmlDType::Iq2Xxs
-            | GgmlDType::Iq2Xs
-            | GgmlDType::Iq2S
-            | GgmlDType::Iq1S
-            | GgmlDType::Iq1M
-    ) {
+    // T-IQ.15 — every IQ family now has native kernels and aligns on the
+    // TP dispatch axis. MXFP4 is the only remaining source dtype that
+    // needs the F32 dequant → re-slice → re-quant detour because its
+    // 17-byte / 32-elem block + E8M0 scale can't be cleanly byte-sliced
+    // on the TP axis.
+    if matches!(info.dtype, GgmlDType::Mxfp4) {
         let layout = configured;
         let (tensor, n) = upload_tp_via_dequant_to_q8_0(
             file, name, &info.dims, layout, rank, device, info.dtype,
