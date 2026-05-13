@@ -23,7 +23,10 @@
 
 use anyhow::{anyhow, bail, Context, Result};
 use flambeau_backend_hip::{HipCluster, HipDevice, HipStream};
-use flambeau_blocks::{forward_one_token_pp, forward_prefill_pp, PpDecodeDriver, PpPrefillDriver};
+use flambeau_blocks::{
+    alloc_zeroed, embed_token_host, forward_one_token_pp, forward_prefill_pp, row_bytes_for_dtype,
+    upload_f16_ones, PpDecodeDriver, PpPrefillDriver,
+};
 use flambeau_core::{CopyDirection, Device, DevicePtr, Stream};
 use flambeau_ops::hip::{HipOps, OpsRegistry};
 use flambeau_quant::GgmlDType;
@@ -185,41 +188,6 @@ pub struct Gemma4PpDriver {
     regs: Vec<OpsRegistry>,
     /// Last-rank logits scratch host buffer (vocab F32) for argmax.
     logits_host: Vec<f32>,
-}
-
-fn alloc_zeroed(dev: &HipDevice, bytes: usize) -> Result<DevicePtr> {
-    let p = dev.alloc(bytes).map_err(|e| anyhow!("alloc {bytes}: {e}"))?;
-    let zero = vec![0u8; bytes];
-    // SAFETY: dst has `bytes` allocation; src is a host vec of the same length.
-    unsafe {
-        dev.memcpy_async(
-            dev.default_stream(),
-            CopyDirection::HostToDevice,
-            p,
-            DevicePtr(zero.as_ptr() as usize),
-            bytes,
-        )?;
-    }
-    dev.default_stream().synchronize()?;
-    Ok(p)
-}
-
-fn upload_f16_ones(dev: &HipDevice, n: usize) -> Result<DevicePtr> {
-    let ones: Vec<f16> = vec![f16::from_f32(1.0); n];
-    let bytes = ones.len() * 2;
-    let p = dev.alloc(bytes).map_err(|e| anyhow!("alloc {bytes}: {e}"))?;
-    // SAFETY: see above.
-    unsafe {
-        dev.memcpy_async(
-            dev.default_stream(),
-            CopyDirection::HostToDevice,
-            p,
-            DevicePtr(ones.as_ptr() as usize),
-            bytes,
-        )?;
-    }
-    dev.default_stream().synchronize()?;
-    Ok(p)
 }
 
 impl Gemma4PpStage {
@@ -800,12 +768,12 @@ impl PpDecodeDriver for Gemma4PpDriver {
             .token_embd
             .as_ref()
             .ok_or_else(|| anyhow!("embed_token: rank 0 missing token_embd"))?;
-        embed_decode_host(
+        embed_token_host(
             device,
             stream,
             tok_embd.ptr,
-            tok_embd.bytes,
             tok_embd.dtype,
+            tok_embd.bytes,
             self.cfg.vocab_size,
             self.cfg.hidden_size,
             token_id,
@@ -942,62 +910,6 @@ impl PpDecodeDriver for Gemma4PpDriver {
 // ---------------------------------------------------------------------------
 // Shared helpers
 // ---------------------------------------------------------------------------
-
-fn embed_decode_host(
-    device: &HipDevice,
-    stream: &HipStream,
-    tok_embd_ptr: DevicePtr,
-    tok_embd_bytes: usize,
-    tok_embd_dtype: GgmlDType,
-    vocab: usize,
-    hidden: usize,
-    token_id: u32,
-    out_f16_dev: DevicePtr,
-) -> Result<()> {
-    if (token_id as usize) >= vocab {
-        bail!("token_id {token_id} >= vocab {vocab}");
-    }
-    let row_bytes = row_bytes_for_dtype(tok_embd_dtype, hidden)?;
-    let offset = token_id as usize * row_bytes;
-    if offset + row_bytes > tok_embd_bytes {
-        bail!("tok_embd row OOB at token {token_id}");
-    }
-    let src = tok_embd_ptr.offset_bytes(offset);
-
-    let mut row_raw = vec![0u8; row_bytes];
-    // SAFETY: src points at ≥ row_bytes valid device bytes; row_raw holds row_bytes host bytes.
-    unsafe {
-        device.memcpy_async(
-            stream,
-            CopyDirection::DeviceToHost,
-            DevicePtr(row_raw.as_mut_ptr() as usize),
-            src,
-            row_bytes,
-        )?;
-    }
-    stream.synchronize()?;
-
-    let row_f16: Vec<f16> = if tok_embd_dtype == GgmlDType::F16 {
-        bytemuck::cast_slice::<u8, f16>(&row_raw).to_vec()
-    } else {
-        let row_f32 = flambeau_quant::dequantize_to_vec(tok_embd_dtype, &row_raw, hidden)
-            .map_err(|e| anyhow!("dequant tok_embd row {token_id}: {e}"))?;
-        row_f32.into_iter().map(f16::from_f32).collect()
-    };
-    let upload_bytes = hidden * 2;
-    // SAFETY: out_f16_dev has hidden*2 valid bytes; row_f16 outlives the sync.
-    unsafe {
-        device.memcpy_async(
-            stream,
-            CopyDirection::HostToDevice,
-            out_f16_dev,
-            DevicePtr(row_f16.as_ptr() as usize),
-            upload_bytes,
-        )?;
-    }
-    stream.synchronize()?;
-    Ok(())
-}
 
 /// Upload one tensor verbatim from the GGUF mmap to the device, in
 /// its native dtype. Returns the resulting [`DeviceTensor`] (the
@@ -1314,15 +1226,6 @@ fn upload_layer_pp(
         post_ffw_norm,
         per_layer_embed: None,
     })
-}
-
-fn row_bytes_for_dtype(dt: GgmlDType, hidden: usize) -> Result<usize> {
-    let bs = dt.block_size() as usize;
-    let ts = dt.type_size() as usize;
-    if hidden % bs != 0 {
-        bail!("hidden {hidden} % block_size {bs} != 0 for {dt:?}");
-    }
-    Ok((hidden / bs) * ts)
 }
 
 #[allow(dead_code)]

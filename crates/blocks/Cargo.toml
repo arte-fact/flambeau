@@ -20,7 +20,9 @@ flambeau-quant = { path = "../quant" }
 flambeau-backend-hip = { path = "../backend-hip", optional = true }
 flambeau-runtime = { path = "../runtime", optional = true }
 anyhow.workspace = true
+bytemuck.workspace = true
 half.workspace = true
+tracing.workspace = true
 
 [lints]
 workspace = true

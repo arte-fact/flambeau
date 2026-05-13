@@ -30,15 +30,15 @@ use std::sync::Arc;
 use anyhow::{anyhow, bail, Context, Result};
 use flambeau_backend_hip::{BarP2pAllReduce, HipCluster, HipDevice};
 use flambeau_blocks::{
-    forward_one_token_hybrid, Activation, DenseMlpDecodeScratch, DenseMlpTp, HybridDecodeDriver,
-    StandardAttention, StandardAttentionDecodeScratch, WeightHandle,
+    alloc_zeroed, embed_token_host, forward_one_token_hybrid, upload_f16_ones, Activation,
+    DenseMlpDecodeScratch, DenseMlpTp, HybridDecodeDriver, StandardAttention,
+    StandardAttentionDecodeScratch, WeightHandle,
 };
 use flambeau_core::{CopyDirection, Device, DevicePtr, Stream};
 use flambeau_ops::hip::{HipOps, OpsRegistry};
 use flambeau_ops::Ops;
 use flambeau_quant::GgmlDType;
 use flambeau_runtime::{F16Contig, KvCache};
-use half::f16;
 
 use crate::config::Gemma4Config;
 use crate::layer::Gemma4LayerWeights;
@@ -117,41 +117,6 @@ pub struct Gemma4HybridDriver {
     pub head_rank_in_head_stage_idx: usize,
     pub tp_size: usize,
     logits_host: Vec<f32>,
-}
-
-fn alloc_zeroed(dev: &HipDevice, bytes: usize) -> Result<DevicePtr> {
-    let p = dev.alloc(bytes).map_err(|e| anyhow!("alloc {bytes}: {e}"))?;
-    let zero = vec![0u8; bytes];
-    // SAFETY: dst has bytes; src is host vec of same len.
-    unsafe {
-        dev.memcpy_async(
-            dev.default_stream(),
-            CopyDirection::HostToDevice,
-            p,
-            DevicePtr(zero.as_ptr() as usize),
-            bytes,
-        )?;
-    }
-    dev.default_stream().synchronize()?;
-    Ok(p)
-}
-
-fn upload_f16_ones(dev: &HipDevice, n: usize) -> Result<DevicePtr> {
-    let ones: Vec<f16> = vec![f16::from_f32(1.0); n];
-    let bytes = ones.len() * 2;
-    let p = dev.alloc(bytes).map_err(|e| anyhow!("alloc {bytes}: {e}"))?;
-    // SAFETY: see above.
-    unsafe {
-        dev.memcpy_async(
-            dev.default_stream(),
-            CopyDirection::HostToDevice,
-            p,
-            DevicePtr(ones.as_ptr() as usize),
-            bytes,
-        )?;
-    }
-    dev.default_stream().synchronize()?;
-    Ok(p)
 }
 
 fn dummy_dt() -> DeviceTensor {
@@ -504,63 +469,6 @@ impl Drop for Gemma4HybridDriver {
     }
 }
 
-fn embed_decode_host(
-    device: &HipDevice,
-    stream: &flambeau_backend_hip::HipStream,
-    tok_embd_ptr: DevicePtr,
-    tok_embd_bytes: usize,
-    tok_embd_dtype: GgmlDType,
-    vocab: usize,
-    hidden: usize,
-    token_id: u32,
-    out_f16_dev: DevicePtr,
-) -> Result<()> {
-    if (token_id as usize) >= vocab {
-        bail!("token_id {token_id} >= vocab {vocab}");
-    }
-    let bs = tok_embd_dtype.block_size() as usize;
-    let ts = tok_embd_dtype.type_size() as usize;
-    if hidden % bs != 0 {
-        bail!("hidden {hidden} % block_size {bs} != 0 for {tok_embd_dtype:?}");
-    }
-    let row_bytes = (hidden / bs) * ts;
-    let offset = token_id as usize * row_bytes;
-    if offset + row_bytes > tok_embd_bytes {
-        bail!("tok_embd row OOB at token {token_id}");
-    }
-    let src = tok_embd_ptr.offset_bytes(offset);
-    let mut row_raw = vec![0u8; row_bytes];
-    unsafe {
-        device.memcpy_async(
-            stream,
-            CopyDirection::DeviceToHost,
-            DevicePtr(row_raw.as_mut_ptr() as usize),
-            src,
-            row_bytes,
-        )?;
-    }
-    stream.synchronize()?;
-    let row_f16: Vec<f16> = if tok_embd_dtype == GgmlDType::F16 {
-        bytemuck::cast_slice::<u8, f16>(&row_raw).to_vec()
-    } else {
-        let f32 = flambeau_quant::dequantize_to_vec(tok_embd_dtype, &row_raw, hidden)
-            .map_err(|e| anyhow!("dequant tok_embd: {e}"))?;
-        f32.into_iter().map(f16::from_f32).collect()
-    };
-    let upload_bytes = hidden * 2;
-    unsafe {
-        device.memcpy_async(
-            stream,
-            CopyDirection::HostToDevice,
-            out_f16_dev,
-            DevicePtr(row_f16.as_ptr() as usize),
-            upload_bytes,
-        )?;
-    }
-    stream.synchronize()?;
-    Ok(())
-}
-
 fn forward_layer_decode_hybrid(
     driver: &mut Gemma4HybridDriver,
     stage_idx: usize,
@@ -869,12 +777,12 @@ impl HybridDecodeDriver for Gemma4HybridDriver {
             .token_embd
             .as_ref()
             .ok_or_else(|| anyhow!("embed_token: stage {stage} rank {rank} no token_embd"))?;
-        embed_decode_host(
+        embed_token_host(
             device,
             stream,
             tok.ptr,
-            tok.bytes,
             tok.dtype,
+            tok.bytes,
             cfg.vocab_size,
             cfg.hidden_size,
             token_id,

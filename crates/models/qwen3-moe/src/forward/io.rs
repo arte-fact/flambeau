@@ -222,68 +222,19 @@ pub fn forward_embed_decode_host(
     let vocab = token_embd.dims[0] as usize;
     let w_k = token_embd.dims[1] as usize;
     if w_k != hidden {
-        bail!(
-            "token_embd inner dim {w_k} != config hidden {hidden}"
-        );
+        bail!("token_embd inner dim {w_k} != config hidden {hidden}");
     }
-    if (token_id as usize) >= vocab {
-        bail!("token_id {token_id} >= vocab {vocab}");
-    }
-
-    let row_bytes = row_bytes_for_dtype(token_embd.dtype, hidden)?;
-    let offset = token_id as usize * row_bytes;
-    if offset + row_bytes > token_embd.bytes {
-        bail!(
-            "token_embd row out of bounds: token_id={token_id} row_bytes={row_bytes} \
-             total_bytes={}",
-            token_embd.bytes
-        );
-    }
-
-    // 1. Download the row's raw bytes.
-    let mut row_raw = vec![0u8; row_bytes];
-    let src = token_embd.ptr.offset_bytes(offset);
-    // SAFETY: `src` points to at least `row_bytes` valid device bytes
-    // (checked above); `row_raw` is a host vec of the same length.
-    unsafe {
-        device.memcpy_async(
-            stream,
-            CopyDirection::DeviceToHost,
-            DevicePtr(row_raw.as_mut_ptr() as usize),
-            src,
-            row_bytes,
-        )?;
-    }
-    stream.synchronize()?;
-
-    // 2. Dequantise on host. F16 fast-path avoids the F32 round-trip.
-    let row_f16: Vec<half::f16> = if token_embd.dtype == GgmlDType::F16 {
-        bytemuck::cast_slice::<u8, half::f16>(&row_raw).to_vec()
-    } else {
-        let row_f32 =
-            flambeau_quant::dequantize_to_vec(token_embd.dtype, &row_raw, hidden)
-                .map_err(|e| anyhow::anyhow!("dequant token_embd row {token_id}: {e}"))?;
-        row_f32
-            .into_iter()
-            .map(half::f16::from_f32)
-            .collect()
-    };
-    drop(row_raw);
-
-    // 3. Upload to the F16 scratch slot.
-    let upload_bytes = hidden * 2;
-    unsafe {
-        device.memcpy_async(
-            stream,
-            CopyDirection::HostToDevice,
-            out_f16,
-            DevicePtr(row_f16.as_ptr() as usize),
-            upload_bytes,
-        )?;
-    }
-    stream.synchronize()?;
-    drop(row_f16);
-    Ok(())
+    flambeau_blocks::embed_token_host(
+        device,
+        stream,
+        token_embd.ptr,
+        token_embd.dtype,
+        token_embd.bytes,
+        vocab,
+        hidden,
+        token_id,
+        out_f16,
+    )
 }
 
 // ---------------------------------------------------------------------------

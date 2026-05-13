@@ -1,0 +1,229 @@
+//! Shared driver-scaffolding helpers used by every model crate's
+//! `PpStage` / `TpStage` / `HybridStage` upload + dispose flow.
+//!
+//! Move-here policy: this module is for boilerplate that has zero
+//! coupling to model layer composition or layout. Anything that
+//! reasons about per-layer shape (KV cache sizing, scratch shape,
+//! weight slicing) stays in the model crate. The pieces collected
+//! here are kernel-launch-free utility (allocate, zero, memcpy) plus
+//! the host-side token-embedding lookup that every model uses
+//! identically.
+
+#![cfg(feature = "hip")]
+
+use anyhow::{anyhow, bail, Context, Result};
+use flambeau_backend_hip::{HipDevice, HipStream};
+use flambeau_core::{CopyDirection, Device, DevicePtr, Stream};
+use flambeau_quant::GgmlDType;
+use half::f16;
+
+/// Allocate `bytes` on `device` and zero-fill via a host→device memcpy
+/// on the default stream. Synchronises before returning. Used by every
+/// per-stage scratch-builder for buffers that must start at zero
+/// (residual streams, partial accumulators).
+pub fn alloc_zeroed(device: &HipDevice, bytes: usize) -> Result<DevicePtr> {
+    let p = device.alloc(bytes).map_err(|e| anyhow!("alloc {bytes}: {e}"))?;
+    let zero = vec![0u8; bytes];
+    // SAFETY: dst has `bytes` allocation; src is a host vec of the
+    // same length; we sync the stream before returning so the host
+    // buffer outlives the copy.
+    unsafe {
+        device.memcpy_async(
+            device.default_stream(),
+            CopyDirection::HostToDevice,
+            p,
+            DevicePtr(zero.as_ptr() as usize),
+            bytes,
+        )?;
+    }
+    device.default_stream().synchronize()?;
+    Ok(p)
+}
+
+/// Allocate an F16 `[n]` buffer on `device` and fill with `1.0` via a
+/// host→device memcpy on the default stream. Used by gemma4 + future
+/// models that apply an "unlearned" RMSNorm (norm-with-unit-weight) —
+/// the V-norm pass in gemma4's full-attn layer is the canonical
+/// caller.
+pub fn upload_f16_ones(device: &HipDevice, n: usize) -> Result<DevicePtr> {
+    let ones: Vec<f16> = vec![f16::from_f32(1.0); n];
+    let bytes = ones.len() * 2;
+    let p = device.alloc(bytes).map_err(|e| anyhow!("alloc {bytes}: {e}"))?;
+    // SAFETY: dst has `bytes` allocation; ones outlives the bounded sync.
+    unsafe {
+        device.memcpy_async(
+            device.default_stream(),
+            CopyDirection::HostToDevice,
+            p,
+            DevicePtr(ones.as_ptr() as usize),
+            bytes,
+        )?;
+    }
+    device.default_stream().synchronize()?;
+    Ok(p)
+}
+
+/// Bytes-per-row for a 2-D quantised weight with `hidden` columns.
+/// Asserts the contraction dim divides cleanly into the dtype's
+/// block size — otherwise the GGUF layout is malformed.
+pub fn row_bytes_for_dtype(dtype: GgmlDType, hidden: usize) -> Result<usize> {
+    let bs = dtype.block_size() as usize;
+    let ts = dtype.type_size() as usize;
+    if hidden % bs != 0 {
+        bail!("hidden {hidden} % block_size {bs} != 0 for {dtype:?}");
+    }
+    Ok((hidden / bs) * ts)
+}
+
+/// Host-side single-token embedding lookup. Downloads the
+/// `token_id`-th row of `token_embd_ptr` (a 2-D `[vocab, hidden]`
+/// weight in GGUF-native dtype), dequantises it on the host, casts
+/// to F16, and uploads the F16 row into `out_f16_dev`. Returns after
+/// a stream sync so the caller can read the result immediately.
+///
+/// Per-token cost is two memcpys + one host dequantise + two syncs —
+/// negligible at any realistic decode throughput. A device-side
+/// gather kernel that bypasses the host round-trip is a future
+/// optimisation candidate but has not been measured to be on any
+/// hot-path bottleneck.
+#[allow(clippy::too_many_arguments)]
+pub fn embed_token_host(
+    device: &HipDevice,
+    stream: &HipStream,
+    token_embd_ptr: DevicePtr,
+    token_embd_dtype: GgmlDType,
+    token_embd_bytes: usize,
+    vocab: usize,
+    hidden: usize,
+    token_id: u32,
+    out_f16_dev: DevicePtr,
+) -> Result<()> {
+    if (token_id as usize) >= vocab {
+        bail!("token_id {token_id} >= vocab {vocab}");
+    }
+    let row_bytes = row_bytes_for_dtype(token_embd_dtype, hidden)?;
+    let offset = (token_id as usize) * row_bytes;
+    if offset + row_bytes > token_embd_bytes {
+        bail!(
+            "token_embd row out of bounds: token_id={token_id} row_bytes={row_bytes} \
+             total_bytes={token_embd_bytes}"
+        );
+    }
+    let src = token_embd_ptr.offset_bytes(offset);
+
+    // 1. Download the row's raw bytes.
+    let mut row_raw = vec![0u8; row_bytes];
+    // SAFETY: src points at >= row_bytes valid device bytes; row_raw
+    // owns row_bytes host bytes.
+    unsafe {
+        device.memcpy_async(
+            stream,
+            CopyDirection::DeviceToHost,
+            DevicePtr(row_raw.as_mut_ptr() as usize),
+            src,
+            row_bytes,
+        )?;
+    }
+    stream.synchronize()?;
+
+    // 2. Dequantise on host. F16 fast-path avoids the F32 round-trip.
+    let row_f16: Vec<f16> = if token_embd_dtype == GgmlDType::F16 {
+        bytemuck::cast_slice::<u8, f16>(&row_raw).to_vec()
+    } else {
+        let row_f32 = flambeau_quant::dequantize_to_vec(token_embd_dtype, &row_raw, hidden)
+            .with_context(|| format!("dequant token_embd row {token_id}"))?;
+        row_f32.into_iter().map(f16::from_f32).collect()
+    };
+    drop(row_raw);
+
+    // 3. Upload to the F16 scratch slot.
+    let upload_bytes = hidden * 2;
+    // SAFETY: out_f16_dev has hidden*2 valid bytes; row_f16 outlives
+    // the bounded sync.
+    unsafe {
+        device.memcpy_async(
+            stream,
+            CopyDirection::HostToDevice,
+            out_f16_dev,
+            DevicePtr(row_f16.as_ptr() as usize),
+            upload_bytes,
+        )?;
+    }
+    stream.synchronize()?;
+    Ok(())
+}
+
+/// Tracks `(DevicePtr, bytes)` pairs for every raw allocation made
+/// while building a per-rank stage's scratch / weight buffers, so
+/// the stage's `dispose(device)` can walk them in one place. Mirrors
+/// the ad-hoc `raw_alloc_bytes: Vec<(DevicePtr, usize)>` field every
+/// model crate previously carried.
+///
+/// `disposed` lets the stage's `Drop` impl warn-on-leak without
+/// double-free risk if `dispose` was already called.
+#[derive(Default)]
+pub struct RawAllocTracker {
+    pub allocs: Vec<(DevicePtr, usize)>,
+    disposed: bool,
+}
+
+impl RawAllocTracker {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Allocate `bytes` on `device`, zero-fill, and record the
+    /// `(ptr, bytes)` pair for later dispose. Returns the new ptr.
+    pub fn alloc_zeroed_tracked(
+        &mut self,
+        device: &HipDevice,
+        bytes: usize,
+    ) -> Result<DevicePtr> {
+        let p = alloc_zeroed(device, bytes)?;
+        self.allocs.push((p, bytes));
+        Ok(p)
+    }
+
+    /// Record an externally-made allocation (e.g. the result of
+    /// `upload_f16_ones` whose host source we want to free before
+    /// dispose).
+    pub fn track(&mut self, ptr: DevicePtr, bytes: usize) {
+        self.allocs.push((ptr, bytes));
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.allocs.is_empty()
+    }
+
+    pub fn disposed(&self) -> bool {
+        self.disposed
+    }
+
+    /// Free every tracked allocation on `device` and mark disposed.
+    /// Idempotent — a second call is a no-op.
+    pub fn dispose(&mut self, device: &HipDevice) -> Result<()> {
+        if self.disposed {
+            return Ok(());
+        }
+        self.disposed = true;
+        for (ptr, bytes) in self.allocs.drain(..) {
+            // SAFETY: every ptr came from `device.alloc(bytes)` (or a
+            // tracked sibling that uses the same allocator).
+            unsafe {
+                let _ = device.dealloc(ptr, bytes);
+            }
+        }
+        Ok(())
+    }
+}
+
+impl Drop for RawAllocTracker {
+    fn drop(&mut self) {
+        if !self.disposed && !self.allocs.is_empty() {
+            tracing::warn!(
+                "RawAllocTracker dropped without dispose(); {} allocations leaked",
+                self.allocs.len()
+            );
+        }
+    }
+}

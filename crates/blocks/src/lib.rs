@@ -18,6 +18,7 @@
 pub mod attention;
 pub mod delta_net;
 pub mod dense_mlp;
+pub mod driver_utils;
 pub mod layer;
 pub mod moe_experts;
 pub mod shared_expert;
@@ -29,6 +30,9 @@ pub use attention::{
     MAX_SPLITK_CHUNKS,
 };
 pub use delta_net::{DeltaNetLayer, DeltaNetLayerDecodeScratch, DeltaNetLayerPrefillScratch};
+pub use driver_utils::{
+    alloc_zeroed, embed_token_host, row_bytes_for_dtype, upload_f16_ones, RawAllocTracker,
+};
 pub use dense_mlp::{DenseMlp, DenseMlpDecodeScratch, DenseMlpPrefillScratch, DenseMlpTp};
 pub use layer::{
     AttnBlock, AttnDecodeScratch, AttnPrefillScratch, AttnState, FfnBlock, FfnDecodeScratch,

@@ -11,91 +11,14 @@
 
 #![cfg(feature = "hip")]
 
-use anyhow::{anyhow, bail, Result};
+use anyhow::{anyhow, Result};
+use flambeau_blocks::embed_token_host;
 use flambeau_core::{CopyDirection, Device, DevicePtr, Stream};
-use flambeau_ops::hip::{HipDevice, HipOps, HipStream, OpsRegistry};
-use flambeau_quant::GgmlDType;
-use half::f16;
+use flambeau_ops::hip::{HipDevice, HipOps, OpsRegistry};
 
 use crate::layer::forward_layer_decode;
 use crate::output_head::forward_output_head;
 use crate::session::Gemma4Session;
-
-/// Host-side embedding lookup + upload. Dequants the GGUF row for
-/// `token_id` to F16 and writes to `out_f16_dev` ([hidden] F16). Used
-/// on the decode path where the per-token cost of the host roundtrip
-/// is negligible relative to the layer loop (~µs per token at gemma4
-/// shapes).
-fn embed_decode_host(
-    device: &HipDevice,
-    stream: &HipStream,
-    tok_embd_ptr: DevicePtr,
-    tok_embd_bytes: usize,
-    tok_embd_dtype: GgmlDType,
-    vocab: usize,
-    hidden: usize,
-    token_id: u32,
-    out_f16_dev: DevicePtr,
-) -> Result<()> {
-    if (token_id as usize) >= vocab {
-        bail!("token_id {token_id} >= vocab {vocab}");
-    }
-    let row_bytes = row_bytes_for_dtype(tok_embd_dtype, hidden)?;
-    let offset = token_id as usize * row_bytes;
-    if offset + row_bytes > tok_embd_bytes {
-        bail!("tok_embd row OOB at token {token_id}");
-    }
-    let src = tok_embd_ptr.offset_bytes(offset);
-
-    let mut row_raw = vec![0u8; row_bytes];
-    // SAFETY: src points at ≥ row_bytes valid device bytes; row_raw holds row_bytes host bytes.
-    unsafe {
-        device.memcpy_async(
-            stream,
-            CopyDirection::DeviceToHost,
-            DevicePtr(row_raw.as_mut_ptr() as usize),
-            src,
-            row_bytes,
-        )?;
-    }
-    stream.synchronize()?;
-
-    let row_f16: Vec<f16> = if tok_embd_dtype == GgmlDType::F16 {
-        bytemuck::cast_slice::<u8, f16>(&row_raw).to_vec()
-    } else {
-        let row_f32 =
-            flambeau_quant::dequantize_to_vec(tok_embd_dtype, &row_raw, hidden)
-                .map_err(|e| anyhow!("dequant tok_embd row {token_id}: {e}"))?;
-        row_f32.into_iter().map(f16::from_f32).collect()
-    };
-    drop(row_raw);
-
-    let upload_bytes = hidden * 2;
-    // SAFETY: out_f16_dev has at least hidden*2 valid bytes; row_f16 outlives the sync.
-    unsafe {
-        device.memcpy_async(
-            stream,
-            CopyDirection::HostToDevice,
-            out_f16_dev,
-            DevicePtr(row_f16.as_ptr() as usize),
-            upload_bytes,
-        )?;
-    }
-    stream.synchronize()?;
-    drop(row_f16);
-    Ok(())
-}
-
-fn row_bytes_for_dtype(dt: GgmlDType, hidden: usize) -> Result<usize> {
-    let bs = dt.block_size() as usize;
-    let ts = dt.type_size() as usize;
-    if hidden % bs != 0 {
-        bail!(
-            "row_bytes_for_dtype: hidden {hidden} % block_size {bs} != 0 for {dt:?}"
-        );
-    }
-    Ok((hidden / bs) * ts)
-}
 
 /// Forward one decode token. Returns the host-side argmax token id.
 /// `position` is the cache tail length before this call (i.e. the
@@ -153,12 +76,12 @@ pub fn forward_one_token_logits(
 
     // 1. Embed.
     let residual = session.outer_residual();
-    embed_decode_host(
+    embed_token_host(
         device,
         stream,
         session.weights.token_embd.ptr,
-        session.weights.token_embd.bytes,
         session.weights.token_embd.dtype,
+        session.weights.token_embd.bytes,
         vocab,
         hidden,
         token_id,
