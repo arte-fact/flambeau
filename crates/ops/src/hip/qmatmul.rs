@@ -129,12 +129,12 @@ pub fn qmatmul(
         return Ok(());
     }
 
-    // K3 — Q5_K at m ∈ {2, 3, 4}: batched MMVQ with r2 multi-row + per-N
-    // activation cols. Bypasses the dispatch-table m-loop which would
-    // otherwise route to `mmvq_q5_k_r2_q8_1` m times. Same VGPR/occupancy
-    // discipline as K1's Q4_0 batched.
+    // Q5_K at m ∈ {2, 3, 4}: row-tile batched MMVQ (R=8 rows per block,
+    // LDS-resident activation strip per super-block). Replaced the
+    // earlier r2 batched at this dispatch row; cert.md shows 1.50×–2.68×
+    // vs the r2 sibling on decode-class shapes.
     if dtype_weight == QDtype::Q5_K && (2..=4).contains(&m) {
-        mmvq_q5_k_r2_batched(reg, stream, weights, act_q8_1, dst, n, k, m)?;
+        mmvq_q5_k_row_tile_batched(reg, stream, weights, act_q8_1, dst, n, k, m)?;
         let _ = act_q8_1_mmq;
         return Ok(());
     }
@@ -520,6 +520,49 @@ pub fn mmvq_q5_k_r2_batched(
     Ok(())
 }
 
+/// Row-tiled sibling of [`mmvq_q5_k_r2_batched`]. Each block owns
+/// `R = 8` consecutive rows (4 wave64 × half-warp split) and shares one
+/// LDS-resident Q8_1 activation strip per super-block across all N
+/// decode slots; cuts activation HBM traffic ~8× vs the r2 kernel at
+/// the same output count.
+///
+/// `n_slots` ∈ [2, 4]. Output ABI identical to `mmvq_q5_k_r2_batched`
+/// (`dst[N, n_rows]` slot-major F32).
+pub fn mmvq_q5_k_row_tile_batched(
+    reg: &OpsRegistry,
+    stream: &HipStream,
+    weights: DevicePtr,
+    y_q8_1: DevicePtr,
+    dst: DevicePtr,
+    n_rows: usize,
+    k: usize,
+    n_slots: usize,
+) -> Result<()> {
+    let entry = match n_slots {
+        2 => "flambeau_mmvq_q5_k_row_tile_q8_1_batched_n2",
+        3 => "flambeau_mmvq_q5_k_row_tile_q8_1_batched_n3",
+        4 => "flambeau_mmvq_q5_k_row_tile_q8_1_batched_n4",
+        _ => bail!("mmvq_q5_k_row_tile_batched: n_slots={n_slots} outside [2, 4]"),
+    };
+    let module = reg.expect_module("mmvq_q5_k_row_tile_batched")?;
+    let kernel = module.kernel(entry)?;
+    let n_rows_i = n_rows as i32;
+    let n_superblocks_i = (k / 256) as i32;
+    let w_ptr: u64 = weights.as_usize() as u64;
+    let y_ptr: u64 = y_q8_1.as_usize() as u64;
+    let d_ptr: u64 = dst.as_usize() as u64;
+    let mut args = KernelArgs::new();
+    args.push(&w_ptr);
+    args.push(&y_ptr);
+    args.push(&d_ptr);
+    args.push(&n_rows_i);
+    args.push(&n_superblocks_i);
+    let grid = (n_rows as u32).div_ceil(8);
+    let cfg = LaunchCfg::one_d(grid, 256);
+    unsafe { kernel.launch(stream, cfg, args)? };
+    Ok(())
+}
+
 /// **TP-perf-c5** — fused gate+up Q4_0 t128. Same gate+up activation
 /// sharing as `mmvq_q4_0_gate_up`, but with the t128 schedule for the
 /// gfx906 latency-bound regime.
@@ -725,6 +768,61 @@ pub fn mmvq_q4_0_gate_up_batched(
     args.push(&n_rows_u);
     args.push(&n_blocks_i);
     let grid = n_rows_gate.max(n_rows_up) as u32;
+    let cfg = LaunchCfg::one_d(grid, 256);
+    unsafe { kernel.launch(stream, cfg, args)? };
+    Ok(())
+}
+
+/// Row-tiled sibling of [`mmvq_q4_0_gate_up_batched`]. Each block owns
+/// `R = 4` consecutive rows of the gate+up matmul and shares one
+/// LDS-resident Q8_1 activation strip across the N decode slots; cuts
+/// activation HBM traffic ~4× vs the per-row K5 kernel at the same
+/// output count.
+///
+/// `n_slots` ∈ [2, 4]. Output ABI identical to `mmvq_q4_0_gate_up_batched`
+/// (`gate_out[N, n_rows_gate]`, `up_out[N, n_rows_up]`, slot-major F32).
+pub fn mmvq_q4_0_gate_up_row_tile_batched(
+    reg: &OpsRegistry,
+    stream: &HipStream,
+    gate_w: DevicePtr,
+    up_w: DevicePtr,
+    y_q8_1: DevicePtr,
+    gate_out: DevicePtr,
+    up_out: DevicePtr,
+    n_rows_gate: usize,
+    n_rows_up: usize,
+    k: usize,
+    n_slots: usize,
+) -> Result<()> {
+    let entry = match n_slots {
+        2 => "flambeau_mmvq_q4_0_gate_up_row_tile_dp4a_q8_1_batched_n2",
+        3 => "flambeau_mmvq_q4_0_gate_up_row_tile_dp4a_q8_1_batched_n3",
+        4 => "flambeau_mmvq_q4_0_gate_up_row_tile_dp4a_q8_1_batched_n4",
+        _ => bail!(
+            "mmvq_q4_0_gate_up_row_tile_batched: n_slots={n_slots} outside [2, 4]"
+        ),
+    };
+    let module = reg.expect_module("mmvq_q4_0_gate_up_row_tile_batched")?;
+    let kernel = module.kernel(entry)?;
+    let n_rows_g = n_rows_gate as i32;
+    let n_rows_u = n_rows_up as i32;
+    let n_blocks_i = (k / 32) as i32;
+    let gw_ptr: u64 = gate_w.as_usize() as u64;
+    let uw_ptr: u64 = up_w.as_usize() as u64;
+    let y_ptr: u64 = y_q8_1.as_usize() as u64;
+    let g_ptr: u64 = gate_out.as_usize() as u64;
+    let u_ptr: u64 = up_out.as_usize() as u64;
+    let mut args = KernelArgs::new();
+    args.push(&gw_ptr);
+    args.push(&uw_ptr);
+    args.push(&y_ptr);
+    args.push(&g_ptr);
+    args.push(&u_ptr);
+    args.push(&n_rows_g);
+    args.push(&n_rows_u);
+    args.push(&n_blocks_i);
+    let max_rows = n_rows_gate.max(n_rows_up);
+    let grid = (max_rows as u32).div_ceil(4);
     let cfg = LaunchCfg::one_d(grid, 256);
     unsafe { kernel.launch(stream, cfg, args)? };
     Ok(())
