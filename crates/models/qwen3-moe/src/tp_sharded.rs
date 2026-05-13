@@ -567,8 +567,8 @@ fn quantize_bf16_to_q8_0(src: &[u8], elems: usize) -> Result<Vec<u8>> {
 }
 
 /// Quantise a F32 byte slice to Q8_0 host-side (32-element blocks,
-/// 34 B/block: half scale + 32 i8 quants). Mirrors
-/// `sharded.rs::upload_as_q8_0_inner`.
+/// 34 B/block: half scale + 32 i8 quants). Delegates to the rayon-parallel
+/// `flambeau_quant::quantize_k::quantize_row_q8_0`.
 fn quantize_f32_to_q8_0(src: &[u8], elems: usize) -> Result<Vec<u8>> {
     if src.len() < elems * 4 {
         bail!(
@@ -583,27 +583,15 @@ fn quantize_f32_to_q8_0(src: &[u8], elems: usize) -> Result<Vec<u8>> {
         );
     }
     let f32s: &[f32] = bytemuck::cast_slice(&src[..elems * 4]);
-    let n_blocks = elems / QK8_0;
-    let block_bytes = 34usize; // half d (2) + 32 i8
-    let mut out = Vec::with_capacity(n_blocks * block_bytes);
-    for block in f32s.chunks_exact(QK8_0) {
-        let absmax = block.iter().map(|v| v.abs()).fold(0.0f32, f32::max);
-        let d = absmax / 127.0;
-        let id = if d != 0.0 { 1.0 / d } else { 0.0 };
-        let d_f16 = half::f16::from_f32(d);
-        out.extend_from_slice(&d_f16.to_bits().to_le_bytes());
-        for &v in block {
-            let q = (v * id).round_ties_even() as i32;
-            let q = q.clamp(-127, 127) as i8;
-            out.push(q as u8);
-        }
-    }
+    let mut out = Vec::with_capacity(elems / QK8_0 * 34);
+    flambeau_quant::quantize_k::quantize_row_q8_0(f32s, &mut out);
     Ok(out)
 }
 
 /// quantise an F32 buffer to Q8_0 (in-memory variant of
 /// `quantize_f32_to_q8_0` that takes `&[f32]` directly, used by the MXFP4
-/// + ssm_ba paths below where we already hold an F32 Vec).
+/// + ssm_ba paths below where we already hold an F32 Vec). Delegates to
+/// the rayon-parallel `flambeau_quant::quantize_k::quantize_row_q8_0`.
 fn quantize_f32_slice_to_q8_0(f32s: &[f32]) -> Result<Vec<u8>> {
     if f32s.len() % QK8_0 != 0 {
         bail!(
@@ -611,20 +599,8 @@ fn quantize_f32_slice_to_q8_0(f32s: &[f32]) -> Result<Vec<u8>> {
             f32s.len()
         );
     }
-    let n_blocks = f32s.len() / QK8_0;
-    let mut out = Vec::with_capacity(n_blocks * 34);
-    for block in f32s.chunks_exact(QK8_0) {
-        let absmax = block.iter().map(|v| v.abs()).fold(0.0f32, f32::max);
-        let d = absmax / 127.0;
-        let id = if d != 0.0 { 1.0 / d } else { 0.0 };
-        let d_f16 = half::f16::from_f32(d);
-        out.extend_from_slice(&d_f16.to_bits().to_le_bytes());
-        for &v in block {
-            let q = (v * id).round_ties_even() as i32;
-            let q = q.clamp(-127, 127) as i8;
-            out.push(q as u8);
-        }
-    }
+    let mut out = Vec::with_capacity(f32s.len() / QK8_0 * 34);
+    flambeau_quant::quantize_k::quantize_row_q8_0(f32s, &mut out);
     Ok(out)
 }
 

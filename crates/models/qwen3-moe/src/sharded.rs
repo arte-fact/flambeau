@@ -683,20 +683,8 @@ fn upload_via_dequant_to(
                     r.name
                 );
             }
-            let n_blocks = elems / QK8_0;
-            let mut buf = Vec::with_capacity(n_blocks * 34);
-            for block in f32_full.chunks_exact(QK8_0) {
-                let absmax = block.iter().map(|v| v.abs()).fold(0.0f32, f32::max);
-                let d = absmax / 127.0;
-                let id = if d != 0.0 { 1.0 / d } else { 0.0 };
-                let d_f16 = half::f16::from_f32(d);
-                buf.extend_from_slice(&d_f16.to_bits().to_le_bytes());
-                for &v in block {
-                    let q = (v * id).round_ties_even() as i32;
-                    let q = q.clamp(-127, 127) as i8;
-                    buf.push(q as u8);
-                }
-            }
+            let mut buf = Vec::with_capacity(elems / QK8_0 * 34);
+            flambeau_quant::quantize_k::quantize_row_q8_0(&f32_full, &mut buf);
             buf
         }
         GgmlDType::Q4K => {
