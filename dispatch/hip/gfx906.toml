@@ -69,6 +69,22 @@ cert    = "certs/hip/gfx906/qmatmul_q4_K_mmvq_nw1_r2_gfx906.json"
 notes   = "P29 multi-row DPP r2 — 2 output rows per wave64, half-warp reduce. VGPR 24, waves/SIMD 10. Narrowed to m<=127 in V1.4 — Q4_K MMQ handles m>=128."
 
 [[qmatmul]]
+dtype   = "IQ4_XS"
+dtype_q = "Q8_1"
+shape   = { m = "1..127", k = "any", n = "any" }
+impl    = "qmatmul_iq4_xs_mmvq_nw1_r2_gfx906"
+cert    = "certs/hip/gfx906/qmatmul_iq4_xs_mmvq_nw1_r2_gfx906.json"
+notes   = "T-IQ.13 — native IQ4_XS MMVQ. r2 multi-row pattern shared with Q4_K. Scalar inner loop with KVALUES_IQ4NL LUT — dp4a-with-LUT deferred to Phase 3a-perf."
+
+[[qmatmul]]
+dtype   = "IQ4_NL"
+dtype_q = "Q8_1"
+shape   = { m = "1..127", k = "any", n = "any" }
+impl    = "qmatmul_iq4_nl_mmvq_nw1_r2_gfx906"
+cert    = "certs/hip/gfx906/qmatmul_iq4_nl_mmvq_nw1_r2_gfx906.json"
+notes   = "T-IQ.13 — native IQ4_NL MMVQ. 32-elem block, no sub-block scale. r2 multi-row pattern."
+
+[[qmatmul]]
 dtype   = "Q4_1"
 dtype_q = "Q8_1"
 shape   = { m = "1..127", k = "any", n = "any" }

@@ -513,12 +513,14 @@ fn upload_one_inner(
     // Qwen3.6-35B-A3B-Q4_0 (5 layers ship `ffn_down_exps` as Q4_1 amid the
     // Q4_0 bulk; converting on load avoids authoring a Q4_1 indexed-MoE
     // kernel for 5 tensors). Non-MoE Q4_1 still flows through the Q4_1 path.
+    // T-IQ.13 — IQ4_XS and IQ4_NL now have native kernels; they flow
+    // through `upload_one` (mmap → memcpy, llama.cpp-style) and dispatch
+    // to mmvq_iq4_xs / mmvq_iq4_nl. Remaining IQ-family + BF16 + MXFP4
+    // still take the host F32 → K-quant convert path.
     let needs_q8_0_convert = matches!(
         r.dtype,
         GgmlDType::BF16
             | GgmlDType::Mxfp4
-            | GgmlDType::Iq4Xs
-            | GgmlDType::Iq4Nl
             | GgmlDType::Iq3Xxs
             | GgmlDType::Iq3S
             | GgmlDType::Iq2Xxs

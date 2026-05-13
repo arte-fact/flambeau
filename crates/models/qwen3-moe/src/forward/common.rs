@@ -298,6 +298,10 @@ pub(super) fn qdtype_of(dtype: GgmlDType) -> Result<QDtype> {
         // 6.a — Q5_1 (llama.cpp parity; no Qwen3 model currently uses it
         // but unblocks any incoming GGUF mix).
         GgmlDType::Q5_1 => QDtype::Q5_1,
+        // T-IQ.13 — native IQ4 MMVQ kernels. Direct mmap → memcpy → kernel
+        // (no host re-quant), llama.cpp-style. Used by UD-Q3_K_XL etc.
+        GgmlDType::Iq4Nl => QDtype::IQ4_NL,
+        GgmlDType::Iq4Xs => QDtype::IQ4_XS,
         other => bail!("weight dtype {other:?} not supported by V1 qmatmul dispatch"),
     })
 }

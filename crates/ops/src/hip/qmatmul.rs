@@ -1230,6 +1230,38 @@ impl Recipe {
                 rows_per_block: 4,
                 mmq_tile: (0, 0),
             },
+            "qmatmul_iq4_nl_mmvq_single_row_gfx906" => Self {
+                kind: RecipeKind::Mmvq,
+                stem: "mmvq_iq4_nl",
+                entry: "flambeau_mmvq_iq4_nl_q8_1",
+                threads: 64,
+                rows_per_block: 1,
+                mmq_tile: (0, 0),
+            },
+            "qmatmul_iq4_nl_mmvq_nw1_r2_gfx906" => Self {
+                kind: RecipeKind::Mmvq,
+                stem: "mmvq_iq4_nl_r2",
+                entry: "flambeau_mmvq_iq4_nl_r2_q8_1",
+                threads: 64,
+                rows_per_block: 2,
+                mmq_tile: (0, 0),
+            },
+            "qmatmul_iq4_xs_mmvq_single_row_gfx906" => Self {
+                kind: RecipeKind::Mmvq,
+                stem: "mmvq_iq4_xs",
+                entry: "flambeau_mmvq_iq4_xs_q8_1",
+                threads: 64,
+                rows_per_block: 1,
+                mmq_tile: (0, 0),
+            },
+            "qmatmul_iq4_xs_mmvq_nw1_r2_gfx906" => Self {
+                kind: RecipeKind::Mmvq,
+                stem: "mmvq_iq4_xs_r2",
+                entry: "flambeau_mmvq_iq4_xs_r2_q8_1",
+                threads: 64,
+                rows_per_block: 2,
+                mmq_tile: (0, 0),
+            },
             "qmatmul_q4_1_mmvq_dp4a_gfx906" => Self {
                 kind: RecipeKind::Mmvq,
                 stem: "mmvq_q4_1",
@@ -1689,6 +1721,10 @@ fn block_elems(dtype: QDtype) -> usize {
     match dtype {
         QDtype::Q8_0 | QDtype::Q8_1 | QDtype::Q4_0 | QDtype::Q4_1 | QDtype::Q5_0 | QDtype::Q5_1 => QK8_0,
         QDtype::Q2_K | QDtype::Q3_K | QDtype::Q4_K | QDtype::Q5_K | QDtype::Q6_K | QDtype::Q8_K => QK_K,
+        // IQ4_NL is a 32-elem block (like Q4_0); IQ4_XS is a 256-elem
+        // super-block (like Q4_K).
+        QDtype::IQ4_NL => QK8_0,
+        QDtype::IQ4_XS => QK_K,
         // F16 has no native block; return the Q8_1 stride (QK8_1) so the
         // caller's `n_blocks_per_row = k / block_elems` matches the
         // activation side, which is what the F16 MMVQ kernel iterates over.
