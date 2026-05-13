@@ -1,7 +1,6 @@
 // indexed_moe_mmq_iq1_m_gate_up_tile8_dp4a — IQ1_M MoE MMQ tile8 gate+up.
 // IQ1_M has no per-block `d` — reassembled from spread nibbles in `scales`.
 // Per-l (dl, delta) vary; the per-l sum_qi is computed via dp4a-with-ones.
-// Phase 4 Slice C.
 
 #include "block_quant.cuh"
 #include "iq_grid.cuh"

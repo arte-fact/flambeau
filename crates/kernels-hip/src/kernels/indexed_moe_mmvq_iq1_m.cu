@@ -1,6 +1,6 @@
 // indexed_moe_mmvq_iq1_m — IQ1_M MMVQ with per-token expert routing.
 // `d` is reassembled from 4 nibbles spread across the 4 u16 `scales`
-// words. Phase 4 Slice B.
+// words.
 
 #include "block_quant.cuh"
 #include "gfx906.cuh"

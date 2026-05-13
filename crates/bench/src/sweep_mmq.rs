@@ -90,24 +90,24 @@ pub enum Dtype {
     Q2KWave64,
     /// Wave64 Q3_K MMQ. Byte-wise u32 loads on qs/hmask/scales.
     Q3KWave64,
-    /// Wave64 IQ4_XS MMQ. LUT-pre-applied dp4a. T-IQ.16 Slice A.
+    /// Wave64 IQ4_XS MMQ. LUT-pre-applied dp4a.
     Iq4XsWave64,
     /// Wave64 IQ3_S MMQ. 9-bit codebook lookup + per-byte sign-mask packing
-    /// + dp4a. T-IQ.16 Slice A.
+    /// + dp4a.
     Iq3SWave64,
-    /// Phase 4 Slice A wave64 MMQ for IQ4_NL.
+    /// wave64 MMQ for IQ4_NL.
     Iq4NlWave64,
-    /// Phase 4 Slice A wave64 MMQ for IQ3_XXS.
+    /// wave64 MMQ for IQ3_XXS.
     Iq3XxsWave64,
-    /// Phase 4 Slice A wave64 MMQ for IQ2_XXS.
+    /// wave64 MMQ for IQ2_XXS.
     Iq2XxsWave64,
-    /// Phase 4 Slice A wave64 MMQ for IQ2_XS.
+    /// wave64 MMQ for IQ2_XS.
     Iq2XsWave64,
-    /// Phase 4 Slice A wave64 MMQ for IQ2_S.
+    /// wave64 MMQ for IQ2_S.
     Iq2SWave64,
-    /// Phase 4 Slice A wave64 MMQ for IQ1_S.
+    /// wave64 MMQ for IQ1_S.
     Iq1SWave64,
-    /// Phase 4 Slice A wave64 MMQ for IQ1_M.
+    /// wave64 MMQ for IQ1_M.
     Iq1MWave64,
 }
 

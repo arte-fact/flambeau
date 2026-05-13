@@ -513,7 +513,7 @@ fn upload_one_inner(
     // Qwen3.6-35B-A3B-Q4_0 (5 layers ship `ffn_down_exps` as Q4_1 amid the
     // Q4_0 bulk; converting on load avoids authoring a Q4_1 indexed-MoE
     // kernel for 5 tensors). Non-MoE Q4_1 still flows through the Q4_1 path.
-    // T-IQ.13/T-IQ.14/T-IQ.15 — every IQ family now has a native MMVQ;
+    // every IQ family now has a native MMVQ;
     // they flow through `upload_one` (mmap → memcpy, llama.cpp-style).
     // Only BF16, MXFP4, and the scattered Q4_1 MoE expert tensors on
     // Qwen3.6-35B-A3B-Q4_0 still take the host F32 → Q8_0 convert path.

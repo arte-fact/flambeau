@@ -1,5 +1,5 @@
 // indexed_moe_mmq_iq2_xxs_gate_up_tile8_dp4a — IQ2_XXS MoE MMQ tile8 gate+up.
-// Phase 4 Slice C. Same skeleton as IQ3_XXS but uses u64 codebook (256 entries,
+// Same skeleton as IQ3_XXS but uses u64 codebook (256 entries,
 // 8 magnitudes per entry) and the IQ2_XXS scale factor *0.25.
 
 #include "block_quant.cuh"

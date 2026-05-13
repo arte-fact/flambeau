@@ -1,5 +1,4 @@
 // indexed_moe_mmq_iq2_s_down_tile8_dp4a — IQ2_S MoE MMQ tile8 down.
-// Phase 4 Slice D.
 
 #include "block_quant.cuh"
 #include "iq_grid.cuh"

@@ -1,5 +1,5 @@
 // indexed_moe_mmq_iq4_nl_down_tile8_dp4a — IQ4_NL MoE MMQ tile8 down.
-// Phase 4 Slice D. 32-elem blocks (no super-block).
+// 32-elem blocks (no super-block).
 
 #include "block_quant.cuh"
 #include "iq_grid.cuh"

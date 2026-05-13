@@ -1,6 +1,6 @@
 // indexed_moe_mmq_iq4_nl_gate_up_tile8_dp4a — IQ4_NL MoE MMQ tile8 gate+up.
 // 32-elem blocks (no super-block); inner loops one block at a time vs
-// the 8-sub-block IQ4_XS / IQ3_S variants. Phase 4 Slice C.
+// the 8-sub-block IQ4_XS / IQ3_S variants.
 
 #include "block_quant.cuh"
 #include "iq_grid.cuh"

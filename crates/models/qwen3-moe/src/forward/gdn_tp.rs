@@ -556,7 +556,6 @@ fn debug_probe_q8_1(
     ptr: DevicePtr,
     n_blocks: usize,
 ) -> Result<()> {
-    use flambeau_core::Stream;
     // Q8_1 block: half scale + half ds + i8[32] = 36 B
     let block_bytes = 36;
     let n = n_blocks * block_bytes;
@@ -591,7 +590,6 @@ fn debug_probe_quant_bytes(
     ptr: DevicePtr,
     n_bytes: usize,
 ) -> Result<()> {
-    use flambeau_core::Stream;
     let mut host = vec![0u8; n_bytes];
     unsafe {
         device.memcpy_async(
@@ -618,7 +616,6 @@ fn debug_probe_f32(
     ptr: DevicePtr,
     n: usize,
 ) -> Result<()> {
-    use flambeau_core::Stream;
     let mut host = vec![0.0f32; n];
     unsafe {
         device.memcpy_async(

@@ -3,7 +3,6 @@
 // Each u16 packs (9-bit grid idx | 7-bit sign-LUT idx). Codebook =
 // IQ2XS_GRID (512 × u64, 8 unsigned-i8 magnitudes per entry).
 // Scale: scales[ib32 >> 1] supplies a nibble pair; db = (0.5 + nibble) * 0.25.
-// Phase 4 Slice A.
 
 #include "block_quant.cuh"
 #include "iq_grid.cuh"

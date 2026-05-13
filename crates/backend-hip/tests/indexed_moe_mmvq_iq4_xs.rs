@@ -1,6 +1,6 @@
 //! Structural parity for `flambeau_indexed_moe_mmvq_iq4_xs_q8_1` on MI50.
 //!
-//! Slice B kernels are byte-identical to the dense Slice 3a MMVQ kernels
+//!! Kernels are byte-identical to the dense MMVQ kernels
 //! in the per-element decode body — the only difference is the
 //! `expert_ids[]` indirection in pointer math and the dst write offset.
 //! This test exercises that indirection: given `n_experts` distinct

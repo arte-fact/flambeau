@@ -1,5 +1,4 @@
 // indexed_moe_mmq_iq3_s_gate_up_tile8_dp4a — IQ3_S MoE MMQ tile8 gate+up.
-// Phase 4 Slice C.
 
 #include "block_quant.cuh"
 #include "iq_grid.cuh"

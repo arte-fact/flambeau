@@ -239,7 +239,7 @@ pub fn indexed_moe_mmvq_q2_k(
 }
 
 /// IQ4_XS MoE MMVQ. Same indexing contract as `indexed_moe_mmvq_q4_k`;
-/// weights are IQ4_XS blocks. T-IQ.16 Phase 4 Slice B.
+/// weights are IQ4_XS blocks.
 pub fn indexed_moe_mmvq_iq4_xs(
     reg: &OpsRegistry,
     stream: &HipStream,
@@ -281,7 +281,7 @@ pub fn indexed_moe_mmvq_iq4_xs(
 }
 
 /// IQ4_NL MoE MMVQ. Same indexing contract as `indexed_moe_mmvq_q4_k`;
-/// weights are IQ4_NL blocks. T-IQ.16 Phase 4 Slice B.
+/// weights are IQ4_NL blocks.
 pub fn indexed_moe_mmvq_iq4_nl(
     reg: &OpsRegistry,
     stream: &HipStream,
@@ -323,7 +323,7 @@ pub fn indexed_moe_mmvq_iq4_nl(
 }
 
 /// IQ3_XXS MoE MMVQ. Same indexing contract as `indexed_moe_mmvq_q4_k`;
-/// weights are IQ3_XXS blocks. T-IQ.16 Phase 4 Slice B.
+/// weights are IQ3_XXS blocks.
 pub fn indexed_moe_mmvq_iq3_xxs(
     reg: &OpsRegistry,
     stream: &HipStream,
@@ -365,7 +365,7 @@ pub fn indexed_moe_mmvq_iq3_xxs(
 }
 
 /// IQ3_S MoE MMVQ. Same indexing contract as `indexed_moe_mmvq_q4_k`;
-/// weights are IQ3_S blocks. T-IQ.16 Phase 4 Slice B.
+/// weights are IQ3_S blocks.
 pub fn indexed_moe_mmvq_iq3_s(
     reg: &OpsRegistry,
     stream: &HipStream,
@@ -407,7 +407,7 @@ pub fn indexed_moe_mmvq_iq3_s(
 }
 
 /// IQ2_XXS MoE MMVQ. Same indexing contract as `indexed_moe_mmvq_q4_k`;
-/// weights are IQ2_XXS blocks. T-IQ.16 Phase 4 Slice B.
+/// weights are IQ2_XXS blocks.
 pub fn indexed_moe_mmvq_iq2_xxs(
     reg: &OpsRegistry,
     stream: &HipStream,
@@ -449,7 +449,7 @@ pub fn indexed_moe_mmvq_iq2_xxs(
 }
 
 /// IQ2_XS MoE MMVQ. Same indexing contract as `indexed_moe_mmvq_q4_k`;
-/// weights are IQ2_XS blocks. T-IQ.16 Phase 4 Slice B.
+/// weights are IQ2_XS blocks.
 pub fn indexed_moe_mmvq_iq2_xs(
     reg: &OpsRegistry,
     stream: &HipStream,
@@ -491,7 +491,7 @@ pub fn indexed_moe_mmvq_iq2_xs(
 }
 
 /// IQ2_S MoE MMVQ. Same indexing contract as `indexed_moe_mmvq_q4_k`;
-/// weights are IQ2_S blocks. T-IQ.16 Phase 4 Slice B.
+/// weights are IQ2_S blocks.
 pub fn indexed_moe_mmvq_iq2_s(
     reg: &OpsRegistry,
     stream: &HipStream,
@@ -533,7 +533,7 @@ pub fn indexed_moe_mmvq_iq2_s(
 }
 
 /// IQ1_S MoE MMVQ. Same indexing contract as `indexed_moe_mmvq_q4_k`;
-/// weights are IQ1_S blocks. T-IQ.16 Phase 4 Slice B.
+/// weights are IQ1_S blocks.
 pub fn indexed_moe_mmvq_iq1_s(
     reg: &OpsRegistry,
     stream: &HipStream,
@@ -575,7 +575,7 @@ pub fn indexed_moe_mmvq_iq1_s(
 }
 
 /// IQ1_M MoE MMVQ. Same indexing contract as `indexed_moe_mmvq_q4_k`;
-/// weights are IQ1_M blocks. T-IQ.16 Phase 4 Slice B.
+/// weights are IQ1_M blocks.
 pub fn indexed_moe_mmvq_iq1_m(
     reg: &OpsRegistry,
     stream: &HipStream,
@@ -1040,7 +1040,7 @@ pub fn indexed_moe_mmvq_q4_k_r2_sorted(
 /// padded-sort + tile8 contract as `indexed_moe_mmq_q4_k_gate_up_tile8`;
 /// kernel buildable and registered, not yet wired into TP MoE prefill
 /// dispatch (`moe_tp.rs::tile8_dt_ok` does not include IQ4_XS).
-/// T-IQ.16 Phase 4 Slice C.
+///
 pub fn indexed_moe_mmq_iq4_xs_gate_up_tile8(
     reg: &OpsRegistry,
     stream: &HipStream,
@@ -1097,7 +1097,7 @@ pub fn indexed_moe_mmq_iq4_xs_gate_up_tile8(
 /// padded-sort + tile8 contract as `indexed_moe_mmq_q4_k_gate_up_tile8`;
 /// kernel buildable and registered, not yet wired into TP MoE prefill
 /// dispatch (`moe_tp.rs::tile8_dt_ok` does not include IQ4_NL).
-/// T-IQ.16 Phase 4 Slice C.
+///
 pub fn indexed_moe_mmq_iq4_nl_gate_up_tile8(
     reg: &OpsRegistry,
     stream: &HipStream,
@@ -1154,7 +1154,7 @@ pub fn indexed_moe_mmq_iq4_nl_gate_up_tile8(
 /// padded-sort + tile8 contract as `indexed_moe_mmq_q4_k_gate_up_tile8`;
 /// kernel buildable and registered, not yet wired into TP MoE prefill
 /// dispatch (`moe_tp.rs::tile8_dt_ok` does not include IQ3_XXS).
-/// T-IQ.16 Phase 4 Slice C.
+///
 pub fn indexed_moe_mmq_iq3_xxs_gate_up_tile8(
     reg: &OpsRegistry,
     stream: &HipStream,
@@ -1211,7 +1211,7 @@ pub fn indexed_moe_mmq_iq3_xxs_gate_up_tile8(
 /// padded-sort + tile8 contract as `indexed_moe_mmq_q4_k_gate_up_tile8`;
 /// kernel buildable and registered, not yet wired into TP MoE prefill
 /// dispatch (`moe_tp.rs::tile8_dt_ok` does not include IQ3_S).
-/// T-IQ.16 Phase 4 Slice C.
+///
 pub fn indexed_moe_mmq_iq3_s_gate_up_tile8(
     reg: &OpsRegistry,
     stream: &HipStream,
@@ -1268,7 +1268,7 @@ pub fn indexed_moe_mmq_iq3_s_gate_up_tile8(
 /// padded-sort + tile8 contract as `indexed_moe_mmq_q4_k_gate_up_tile8`;
 /// kernel buildable and registered, not yet wired into TP MoE prefill
 /// dispatch (`moe_tp.rs::tile8_dt_ok` does not include IQ2_XXS).
-/// T-IQ.16 Phase 4 Slice C.
+///
 pub fn indexed_moe_mmq_iq2_xxs_gate_up_tile8(
     reg: &OpsRegistry,
     stream: &HipStream,
@@ -1325,7 +1325,7 @@ pub fn indexed_moe_mmq_iq2_xxs_gate_up_tile8(
 /// padded-sort + tile8 contract as `indexed_moe_mmq_q4_k_gate_up_tile8`;
 /// kernel buildable and registered, not yet wired into TP MoE prefill
 /// dispatch (`moe_tp.rs::tile8_dt_ok` does not include IQ2_XS).
-/// T-IQ.16 Phase 4 Slice C.
+///
 pub fn indexed_moe_mmq_iq2_xs_gate_up_tile8(
     reg: &OpsRegistry,
     stream: &HipStream,
@@ -1382,7 +1382,7 @@ pub fn indexed_moe_mmq_iq2_xs_gate_up_tile8(
 /// padded-sort + tile8 contract as `indexed_moe_mmq_q4_k_gate_up_tile8`;
 /// kernel buildable and registered, not yet wired into TP MoE prefill
 /// dispatch (`moe_tp.rs::tile8_dt_ok` does not include IQ2_S).
-/// T-IQ.16 Phase 4 Slice C.
+///
 pub fn indexed_moe_mmq_iq2_s_gate_up_tile8(
     reg: &OpsRegistry,
     stream: &HipStream,
@@ -1439,7 +1439,7 @@ pub fn indexed_moe_mmq_iq2_s_gate_up_tile8(
 /// padded-sort + tile8 contract as `indexed_moe_mmq_q4_k_gate_up_tile8`;
 /// kernel buildable and registered, not yet wired into TP MoE prefill
 /// dispatch (`moe_tp.rs::tile8_dt_ok` does not include IQ1_S).
-/// T-IQ.16 Phase 4 Slice C.
+///
 pub fn indexed_moe_mmq_iq1_s_gate_up_tile8(
     reg: &OpsRegistry,
     stream: &HipStream,
@@ -1496,7 +1496,7 @@ pub fn indexed_moe_mmq_iq1_s_gate_up_tile8(
 /// padded-sort + tile8 contract as `indexed_moe_mmq_q4_k_gate_up_tile8`;
 /// kernel buildable and registered, not yet wired into TP MoE prefill
 /// dispatch (`moe_tp.rs::tile8_dt_ok` does not include IQ1_M).
-/// T-IQ.16 Phase 4 Slice C.
+///
 pub fn indexed_moe_mmq_iq1_m_gate_up_tile8(
     reg: &OpsRegistry,
     stream: &HipStream,
@@ -1612,7 +1612,7 @@ pub fn indexed_moe_mmq_q4_k_gate_up_tile8(
 /// IQ4_XS MoE MMQ tile8 down — single-output companion to the gate+up
 /// kernel. Kernel buildable + registered; dormant in TP MoE prefill
 /// dispatch (`moe_tp.rs::tile8_dt_ok` does not include IQ4_XS).
-/// T-IQ.16 Phase 4 Slice D.
+///
 pub fn indexed_moe_mmq_iq4_xs_down_tile8(
     reg: &OpsRegistry,
     stream: &HipStream,
@@ -1662,7 +1662,7 @@ pub fn indexed_moe_mmq_iq4_xs_down_tile8(
 /// IQ4_NL MoE MMQ tile8 down — single-output companion to the gate+up
 /// kernel. Kernel buildable + registered; dormant in TP MoE prefill
 /// dispatch (`moe_tp.rs::tile8_dt_ok` does not include IQ4_NL).
-/// T-IQ.16 Phase 4 Slice D.
+///
 pub fn indexed_moe_mmq_iq4_nl_down_tile8(
     reg: &OpsRegistry,
     stream: &HipStream,
@@ -1712,7 +1712,7 @@ pub fn indexed_moe_mmq_iq4_nl_down_tile8(
 /// IQ3_XXS MoE MMQ tile8 down — single-output companion to the gate+up
 /// kernel. Kernel buildable + registered; dormant in TP MoE prefill
 /// dispatch (`moe_tp.rs::tile8_dt_ok` does not include IQ3_XXS).
-/// T-IQ.16 Phase 4 Slice D.
+///
 pub fn indexed_moe_mmq_iq3_xxs_down_tile8(
     reg: &OpsRegistry,
     stream: &HipStream,
@@ -1762,7 +1762,7 @@ pub fn indexed_moe_mmq_iq3_xxs_down_tile8(
 /// IQ3_S MoE MMQ tile8 down — single-output companion to the gate+up
 /// kernel. Kernel buildable + registered; dormant in TP MoE prefill
 /// dispatch (`moe_tp.rs::tile8_dt_ok` does not include IQ3_S).
-/// T-IQ.16 Phase 4 Slice D.
+///
 pub fn indexed_moe_mmq_iq3_s_down_tile8(
     reg: &OpsRegistry,
     stream: &HipStream,
@@ -1812,7 +1812,7 @@ pub fn indexed_moe_mmq_iq3_s_down_tile8(
 /// IQ2_XXS MoE MMQ tile8 down — single-output companion to the gate+up
 /// kernel. Kernel buildable + registered; dormant in TP MoE prefill
 /// dispatch (`moe_tp.rs::tile8_dt_ok` does not include IQ2_XXS).
-/// T-IQ.16 Phase 4 Slice D.
+///
 pub fn indexed_moe_mmq_iq2_xxs_down_tile8(
     reg: &OpsRegistry,
     stream: &HipStream,
@@ -1862,7 +1862,7 @@ pub fn indexed_moe_mmq_iq2_xxs_down_tile8(
 /// IQ2_XS MoE MMQ tile8 down — single-output companion to the gate+up
 /// kernel. Kernel buildable + registered; dormant in TP MoE prefill
 /// dispatch (`moe_tp.rs::tile8_dt_ok` does not include IQ2_XS).
-/// T-IQ.16 Phase 4 Slice D.
+///
 pub fn indexed_moe_mmq_iq2_xs_down_tile8(
     reg: &OpsRegistry,
     stream: &HipStream,
@@ -1912,7 +1912,7 @@ pub fn indexed_moe_mmq_iq2_xs_down_tile8(
 /// IQ2_S MoE MMQ tile8 down — single-output companion to the gate+up
 /// kernel. Kernel buildable + registered; dormant in TP MoE prefill
 /// dispatch (`moe_tp.rs::tile8_dt_ok` does not include IQ2_S).
-/// T-IQ.16 Phase 4 Slice D.
+///
 pub fn indexed_moe_mmq_iq2_s_down_tile8(
     reg: &OpsRegistry,
     stream: &HipStream,
@@ -1962,7 +1962,7 @@ pub fn indexed_moe_mmq_iq2_s_down_tile8(
 /// IQ1_S MoE MMQ tile8 down — single-output companion to the gate+up
 /// kernel. Kernel buildable + registered; dormant in TP MoE prefill
 /// dispatch (`moe_tp.rs::tile8_dt_ok` does not include IQ1_S).
-/// T-IQ.16 Phase 4 Slice D.
+///
 pub fn indexed_moe_mmq_iq1_s_down_tile8(
     reg: &OpsRegistry,
     stream: &HipStream,
@@ -2012,7 +2012,7 @@ pub fn indexed_moe_mmq_iq1_s_down_tile8(
 /// IQ1_M MoE MMQ tile8 down — single-output companion to the gate+up
 /// kernel. Kernel buildable + registered; dormant in TP MoE prefill
 /// dispatch (`moe_tp.rs::tile8_dt_ok` does not include IQ1_M).
-/// T-IQ.16 Phase 4 Slice D.
+///
 pub fn indexed_moe_mmq_iq1_m_down_tile8(
     reg: &OpsRegistry,
     stream: &HipStream,

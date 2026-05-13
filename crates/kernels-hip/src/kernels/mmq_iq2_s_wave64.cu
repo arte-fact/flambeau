@@ -4,7 +4,6 @@
 // Codebook = IQ2S_GRID (1024 × u64). Sign masks are stored in
 // `qs[32 + 4*ib32 + l]` directly (per-byte, no LUT). Scale chain mirrors
 // IQ2_XS: db = (0.5 + nibble) * 0.25, nibble from scales[ib32 >> 1].
-// Phase 4 Slice A.
 
 #include "block_quant.cuh"
 #include "iq_grid.cuh"

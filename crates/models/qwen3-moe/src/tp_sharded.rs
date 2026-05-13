@@ -974,7 +974,7 @@ fn upload_tp_with_layout(
         .for_tensor(name)
         .ok_or_else(|| anyhow!("no TP layout entry for tensor `{name}`"))?;
 
-    // T-IQ.15 — every IQ family now has native kernels and aligns on the
+    // every IQ family now has native kernels and aligns on the
     // TP dispatch axis. MXFP4 is the only remaining source dtype that
     // needs the F32 dequant → re-slice → re-quant detour because its
     // 17-byte / 32-elem block + E8M0 scale can't be cleanly byte-sliced

@@ -10,7 +10,6 @@
 //       delta_bit = (l & 1) == 0 ? 0x08 : 0x80
 //       dl_pair = (l < 2) ? dl1 : dl2  with dl1/dl2 from scale-word nibbles
 // dl1, dl2 share the qh byte and are computed once per sub-block.
-// Phase 4 Slice A.
 
 #include "block_quant.cuh"
 #include "iq_grid.cuh"

@@ -2,7 +2,6 @@
 // IQ4_NL is the 32-elem-block sibling of IQ4_XS — no sub-block scale, no
 // super-block. Reconstruction: y = d * KVALUES_IQ4NL[code]. Treats each
 // IQ4_NL block as a single 32-element tile (matches the Q8_1 block grain).
-// Phase 4 Slice A.
 
 #include "block_quant.cuh"
 #include "iq_grid.cuh"

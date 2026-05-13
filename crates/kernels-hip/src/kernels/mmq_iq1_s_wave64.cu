@@ -6,7 +6,6 @@
 //           = dl * (d_y * sumi + delta * s)
 // where `s = d_y * sum(qi)` is stored in `by->s` (Q8_1 second f16 field).
 // Per sub-block: 4 × 11-bit codebook indices into IQ1S_GRID (2048 × u64).
-// Phase 4 Slice A.
 
 #include "block_quant.cuh"
 #include "iq_grid.cuh"

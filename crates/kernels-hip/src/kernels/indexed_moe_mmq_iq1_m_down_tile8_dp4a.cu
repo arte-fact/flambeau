@@ -1,6 +1,6 @@
 // indexed_moe_mmq_iq1_m_down_tile8_dp4a — IQ1_M MoE MMQ tile8 down.
 // IQ1_M has no per-block `d` — reassembled from spread nibbles in `scales`.
-// Per-l (dl, delta) vary; per-l sum_qi via dp4a-with-ones. Phase 4 Slice D.
+// Per-l (dl, delta) vary; per-l sum_qi via dp4a-with-ones.
 
 #include "block_quant.cuh"
 #include "iq_grid.cuh"

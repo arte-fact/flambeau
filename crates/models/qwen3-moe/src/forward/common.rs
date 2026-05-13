@@ -189,9 +189,9 @@ pub(crate) fn run_indexed_moe_gate_up(
             )
             .context("indexed_moe up q3_k")
         }
-        // T-IQ.16 Phase 4 Slice B — full IQ family MoE expert support.
+        //— full IQ family MoE expert support.
         // Same separate-gate / separate-up pattern as Q2_K / Q3_K (no fused
-        // gate_up variant yet; that's Slice C).
+        // gate_up variant yet).
         GgmlDType::Iq4Xs => {
             let nb = hidden / QK_K;
             indexed_moe_mmvq_iq4_xs(ops, stream, w_gate, x_q8_1, expert_ids, gate_out, inter, n_tokens, top_k, nb).context("indexed_moe gate iq4_xs")?;
@@ -337,7 +337,7 @@ pub(crate) fn run_indexed_moe_down(
             )
             .context("indexed_moe down q3_k")
         }
-        // T-IQ.16 Phase 4 Slice B — IQ family.
+        //— IQ family.
         GgmlDType::Iq4Xs => {
             let nb = inter / QK_K;
             indexed_moe_mmvq_iq4_xs(ops, stream, w_down, activated_q8_1, expert_ids, down_out, hidden, n_tokens_eff, top_k_inner, nb).context("indexed_moe down iq4_xs")
@@ -409,15 +409,15 @@ pub(super) fn qdtype_of(dtype: GgmlDType) -> Result<QDtype> {
         // 6.a — Q5_1 (llama.cpp parity; no Qwen3 model currently uses it
         // but unblocks any incoming GGUF mix).
         GgmlDType::Q5_1 => QDtype::Q5_1,
-        // T-IQ.13 — native IQ4 MMVQ kernels. Direct mmap → memcpy → kernel
+        // native IQ4 MMVQ kernels. Direct mmap → memcpy → kernel
         // (no host re-quant), llama.cpp-style. Used by UD-Q3_K_XL etc.
         GgmlDType::Iq4Nl => QDtype::IQ4_NL,
         GgmlDType::Iq4Xs => QDtype::IQ4_XS,
-        // T-IQ.14 — native IQ3 MMVQ kernels (codebook lookup, 256/512-entry
+        // native IQ3 MMVQ kernels (codebook lookup, 256/512-entry
         // u32 grid). Covers UD-Q3_K_XL MoE expert tensors.
         GgmlDType::Iq3Xxs => QDtype::IQ3_XXS,
         GgmlDType::Iq3S => QDtype::IQ3_S,
-        // T-IQ.15 — full IQ2/IQ1 family native MMVQ kernels (codebook
+        // full IQ2/IQ1 family native MMVQ kernels (codebook
         // lookup, 256..2048-entry u64 grids).
         GgmlDType::Iq2Xxs => QDtype::IQ2_XXS,
         GgmlDType::Iq2Xs => QDtype::IQ2_XS,

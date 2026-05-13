@@ -3,7 +3,6 @@
 // weight tensor + a single dst per (token, slot) pair. Activation is
 // indexed by `slot_pair` directly (the down-projection activation is
 // the per-pair swiglu output, not the per-token shared input).
-// Phase 4 Slice D.
 
 #include "block_quant.cuh"
 #include "iq_grid.cuh"

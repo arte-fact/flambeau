@@ -1,6 +1,6 @@
 // indexed_moe_mmvq_iq4_nl — IQ4_NL MMVQ with per-token expert routing.
 // IQ4_NL = 32-elem block, no super-block. n_sb_per_row carries the
-// per-row block count (k / 32). Phase 4 Slice B.
+// per-row block count (k / 32).
 
 #include "block_quant.cuh"
 #include "gfx906.cuh"

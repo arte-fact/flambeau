@@ -84,23 +84,23 @@ pub enum Dtype {
     /// C9-followup t128 + VDR=2 combined (the kernel that should beat
     /// vdr2-alone where t128-alone lost).
     Q8_0T128VDR2,
-    /// T-IQ.13 — native IQ4_NL single-row MMVQ.
+    /// native IQ4_NL single-row MMVQ.
     Iq4Nl,
-    /// T-IQ.13 — native IQ4_NL r2 multi-row MMVQ.
+    /// native IQ4_NL r2 multi-row MMVQ.
     Iq4NlR2,
-    /// T-IQ.13 — native IQ4_XS single-row MMVQ.
+    /// native IQ4_XS single-row MMVQ.
     Iq4Xs,
-    /// T-IQ.13 — native IQ4_XS r2 multi-row MMVQ.
+    /// native IQ4_XS r2 multi-row MMVQ.
     Iq4XsR2,
-    /// T-IQ.14 — native IQ3_XXS single-row MMVQ.
+    /// native IQ3_XXS single-row MMVQ.
     Iq3Xxs,
-    /// T-IQ.14 — native IQ3_XXS r2 multi-row MMVQ.
+    /// native IQ3_XXS r2 multi-row MMVQ.
     Iq3XxsR2,
-    /// T-IQ.14 — native IQ3_S single-row MMVQ.
+    /// native IQ3_S single-row MMVQ.
     Iq3S,
-    /// T-IQ.14 — native IQ3_S r2 multi-row MMVQ.
+    /// native IQ3_S r2 multi-row MMVQ.
     Iq3SR2,
-    /// T-IQ.15 — native IQ2_XXS single-row MMVQ.
+    /// native IQ2_XXS single-row MMVQ.
     Iq2Xxs,
     Iq2XxsR2,
     Iq2Xs,

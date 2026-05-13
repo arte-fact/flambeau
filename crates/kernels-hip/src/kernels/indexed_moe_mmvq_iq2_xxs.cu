@@ -1,5 +1,4 @@
 // indexed_moe_mmvq_iq2_xxs — IQ2_XXS MMVQ with per-token expert routing.
-// Phase 4 Slice B.
 
 #include "block_quant.cuh"
 #include "gfx906.cuh"

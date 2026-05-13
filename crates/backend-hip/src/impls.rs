@@ -33,9 +33,9 @@ pub const QMATMUL_GFX906: &[KernelDescriptor] = &[
         m_range: (1, 127),
         cert_rel_path: "certs/hip/gfx906/qmatmul_q4_K_mmvq_nw1_r2_gfx906.json",
     },
-    // T-IQ.13 — native IQ4 MMVQ. r2 multi-row is the decode default
+    // native IQ4 MMVQ. r2 multi-row is the decode default
     // (parity tested 4..16 rows × 256..5120 K). MMQ + MoE indexed
-    // variants land in Phase 3b/4. Wave64-shaped, scalar inner loop —
+    // variants land in . Wave64-shaped, scalar inner loop —
     // dp4a-with-LUT deferred until a measured bottleneck appears.
     KernelDescriptor {
         op_name: "QMatMul",
@@ -66,7 +66,7 @@ pub const QMATMUL_GFX906: &[KernelDescriptor] = &[
         m_range: (1, 127),
         cert_rel_path: "certs/hip/gfx906/qmatmul_iq4_nl_mmvq_nw1_r2_gfx906.json",
     },
-    // T-IQ.14 — native IQ3 MMVQ (codebook lookup, 256/512-entry u32 grid).
+    // native IQ3 MMVQ (codebook lookup, 256/512-entry u32 grid).
     // r2 multi-row is the decode default; single-row variant retained for
     // the sweep/cert harness.
     KernelDescriptor {
@@ -98,7 +98,7 @@ pub const QMATMUL_GFX906: &[KernelDescriptor] = &[
         m_range: (128, usize::MAX),
         cert_rel_path: "certs/hip/gfx906/qmatmul_iq3_s_mmq_wave64_gfx906.json",
     },
-    // T-IQ.15 — IQ2 + IQ1 family native MMVQ. r2 multi-row default.
+    // IQ2 + IQ1 family native MMVQ. r2 multi-row default.
     KernelDescriptor {
         op_name: "QMatMul", impl_id: "qmatmul_iq2_xxs_mmvq_nw1_r2_gfx906",
         backend: "hip", arch: "gfx906",
@@ -393,7 +393,7 @@ pub const QMATMUL_GFX906: &[KernelDescriptor] = &[
         m_range: (4, 127),
         cert_rel_path: "certs/hip/gfx906/qmatmul_q8_0_mmq_oracle_gfx906.json",
     },
-    // T-IQ.16 Phase 4 Slice A — remaining 7 dense MMQ wave64 (IQ4_NL,
+    //— remaining 7 dense MMQ wave64 (IQ4_NL,
     // IQ3_XXS, IQ2_XXS, IQ2_XS, IQ2_S, IQ1_S, IQ1_M). Same wave64 tile shape.
     KernelDescriptor {
         op_name: "QMatMul", impl_id: "qmatmul_iq4_nl_mmq_wave64_gfx906",

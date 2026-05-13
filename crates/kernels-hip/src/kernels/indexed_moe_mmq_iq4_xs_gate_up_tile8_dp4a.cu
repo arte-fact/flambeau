@@ -9,7 +9,6 @@
 // to each 4-bit code → packed signed-i8 → dp4a vs Q8_1. No min /
 // bias-correction term (IQ4_XS reconstruction is symmetric, just
 // `d * ls * LUT[code]`).
-// Phase 4 Slice C.
 
 #include "block_quant.cuh"
 #include "iq_grid.cuh"

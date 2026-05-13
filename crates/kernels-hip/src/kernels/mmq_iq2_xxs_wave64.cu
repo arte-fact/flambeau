@@ -7,7 +7,6 @@
 // Each codebook lookup yields a full 8-element group; per ib32 there are
 // 4 such groups = 32 elements. Sign byte = KSIGNS_IQ2XS[(aux1 >> (7*l)) & 0x7F].
 // db = (0.5 + (aux1 >> 28)) * 0.25; partial = super_d * db * dp4a(weights, act).
-// Phase 4 Slice A.
 
 #include "block_quant.cuh"
 #include "iq_grid.cuh"

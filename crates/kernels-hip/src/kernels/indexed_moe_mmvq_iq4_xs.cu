@@ -3,7 +3,6 @@
 // byte-identical to `mmvq_iq4_xs.cu` (single-row scalar variant). Per
 // (token, slot) pair: read expert id, fetch its weight slice, compute
 // MMVQ row × Q8_1 activation row, write the f32 scalar.
-// Phase 4 Slice B.
 
 #include "block_quant.cuh"
 #include "gfx906.cuh"

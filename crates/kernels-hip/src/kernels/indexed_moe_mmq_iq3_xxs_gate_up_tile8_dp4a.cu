@@ -1,5 +1,5 @@
 // indexed_moe_mmq_iq3_xxs_gate_up_tile8_dp4a — IQ3_XXS MoE MMQ tile8 gate+up.
-// Phase 4 Slice C. Decode mirrors mmq_iq3_xxs_wave64.cu: sub-block scale
+// Decode mirrors mmq_iq3_xxs_wave64.cu: sub-block scale
 // is (0.5 + (aux32 >> 28)) * 0.5; signs come from KSIGNS_IQ2XS LUT.
 
 #include "block_quant.cuh"

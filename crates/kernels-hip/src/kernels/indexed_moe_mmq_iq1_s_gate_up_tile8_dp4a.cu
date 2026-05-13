@@ -1,6 +1,6 @@
 // indexed_moe_mmq_iq1_s_gate_up_tile8_dp4a — IQ1_S MoE MMQ tile8 gate+up.
 // Same `dl * (d_y * sumi + delta * s_y)` bias-correction pattern as the
-// dense IQ1_S MMQ wave64. Phase 4 Slice C.
+// dense IQ1_S MMQ wave64.
 
 #include "block_quant.cuh"
 #include "iq_grid.cuh"

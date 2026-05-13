@@ -5,7 +5,6 @@
 //   - 8 codebook indices per ib32 at qs[ib32*8..(ib32+1)*8], looking up
 //     IQ3XXS_GRID (256 × u32) → 4 unsigned-i8 magnitudes per entry.
 //   - Sign byte = KSIGNS_IQ2XS[(aux32 >> (7*l)) & 0x7F] (shared with IQ2XS).
-// Phase 4 Slice A.
 
 #include "block_quant.cuh"
 #include "iq_grid.cuh"
