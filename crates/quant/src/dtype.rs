@@ -133,9 +133,10 @@ impl GgmlDType {
             14 => Self::Q6K,
             15 => Self::Q8K,
             30 => Self::BF16,
-            // IQ family — accepted at parse-time; loader dequant→Q8_0 at
-            // upload (Phase 2 will switch the target to Q*_K to keep the
-            // convert close to source bpw). No native kernels yet.
+            // IQ family — accepted at parse-time; loader has the option
+            // to dequant→Q*_K at upload for backends without native IQ
+            // kernels (the HIP path now has native MMVQ/MMQ kernels
+            // and skips the convert).
             16 => Self::Iq2Xxs,
             17 => Self::Iq2Xs,
             18 => Self::Iq3Xxs,

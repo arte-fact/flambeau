@@ -1,6 +1,6 @@
 // mmvq_iq4_nl — IQ4_NL weight × Q8_1 activation → F32 dst.
-// cert-grade single-row reference (scalar inner loop; dp4a-with-LUT
-// variant deferred to Phase 3a-perf).
+// cert-grade single-row reference (scalar inner loop; a dp4a-with-LUT
+// variant is a possible follow-up).
 //
 // IQ4_NL is the 4-bit non-linear quant: 32-element block, f16 d, 16 bytes
 // of nibble-packed LUT indices. The codes map to signed i8 values via
