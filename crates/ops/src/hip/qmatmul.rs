@@ -1344,6 +1344,20 @@ impl Recipe {
                 entry: "flambeau_mmvq_iq1_m_r2_q8_1",
                 threads: 64, rows_per_block: 2, mmq_tile: (0, 0),
             },
+            // T-IQ.16 Phase 4 Slice A — dense MMQ wave64 for IQ family.
+            // MMQ_Y=64, TILE_N=8 (same tile shape as the K-quant wave64 MMQ).
+            "qmatmul_iq4_xs_mmq_wave64_gfx906" => Self {
+                kind: RecipeKind::MmqWave64,
+                stem: "mmq_iq4_xs_wave64",
+                entry: "flambeau_mmq_iq4_xs_wave64_q8_1",
+                threads: 64, rows_per_block: 0, mmq_tile: (64, 8),
+            },
+            "qmatmul_iq3_s_mmq_wave64_gfx906" => Self {
+                kind: RecipeKind::MmqWave64,
+                stem: "mmq_iq3_s_wave64",
+                entry: "flambeau_mmq_iq3_s_wave64_q8_1",
+                threads: 64, rows_per_block: 0, mmq_tile: (64, 8),
+            },
             "qmatmul_q4_1_mmvq_dp4a_gfx906" => Self {
                 kind: RecipeKind::Mmvq,
                 stem: "mmvq_q4_1",

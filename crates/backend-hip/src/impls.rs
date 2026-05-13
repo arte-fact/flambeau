@@ -44,8 +44,17 @@ pub const QMATMUL_GFX906: &[KernelDescriptor] = &[
         arch: "gfx906",
         dtype_weight: QDtype::IQ4_XS,
         dtype_activation: QDtype::Q8_1,
-        m_range: (1, usize::MAX),
+        m_range: (1, 127),
         cert_rel_path: "certs/hip/gfx906/qmatmul_iq4_xs_mmvq_nw1_r2_gfx906.json",
+    },
+    KernelDescriptor {
+        op_name: "QMatMul",
+        impl_id: "qmatmul_iq4_xs_mmq_wave64_gfx906",
+        backend: "hip", arch: "gfx906",
+        dtype_weight: QDtype::IQ4_XS,
+        dtype_activation: QDtype::Q8_1,
+        m_range: (128, usize::MAX),
+        cert_rel_path: "certs/hip/gfx906/qmatmul_iq4_xs_mmq_wave64_gfx906.json",
     },
     KernelDescriptor {
         op_name: "QMatMul",
@@ -77,8 +86,17 @@ pub const QMATMUL_GFX906: &[KernelDescriptor] = &[
         arch: "gfx906",
         dtype_weight: QDtype::IQ3_S,
         dtype_activation: QDtype::Q8_1,
-        m_range: (1, usize::MAX),
+        m_range: (1, 127),
         cert_rel_path: "certs/hip/gfx906/qmatmul_iq3_s_mmvq_nw1_r2_gfx906.json",
+    },
+    KernelDescriptor {
+        op_name: "QMatMul",
+        impl_id: "qmatmul_iq3_s_mmq_wave64_gfx906",
+        backend: "hip", arch: "gfx906",
+        dtype_weight: QDtype::IQ3_S,
+        dtype_activation: QDtype::Q8_1,
+        m_range: (128, usize::MAX),
+        cert_rel_path: "certs/hip/gfx906/qmatmul_iq3_s_mmq_wave64_gfx906.json",
     },
     // T-IQ.15 — IQ2 + IQ1 family native MMVQ. r2 multi-row default.
     KernelDescriptor {

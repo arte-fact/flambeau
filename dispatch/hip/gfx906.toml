@@ -71,10 +71,18 @@ notes   = "P29 multi-row DPP r2 — 2 output rows per wave64, half-warp reduce. 
 [[qmatmul]]
 dtype   = "IQ4_XS"
 dtype_q = "Q8_1"
-shape   = { m = ">=1", k = "any", n = "any" }
+shape   = { m = "1..127", k = "any", n = "any" }
 impl    = "qmatmul_iq4_xs_mmvq_nw1_r2_gfx906"
 cert    = "certs/hip/gfx906/qmatmul_iq4_xs_mmvq_nw1_r2_gfx906.json"
-notes   = "T-IQ.13 — native IQ4_XS MMVQ. r2 multi-row pattern shared with Q4_K. Scalar inner loop with KVALUES_IQ4NL LUT — dp4a-with-LUT deferred to Phase 3a-perf."
+notes   = "T-IQ.13 — native IQ4_XS MMVQ. r2 multi-row pattern shared with Q4_K. LUT-pre-applied dp4a via mmq_iq4_xs_wave64 at m>=128."
+
+[[qmatmul]]
+dtype   = "IQ4_XS"
+dtype_q = "Q8_1"
+shape   = { m = ">=128", k = "any", n = "any" }
+impl    = "qmatmul_iq4_xs_mmq_wave64_gfx906"
+cert    = "certs/hip/gfx906/qmatmul_iq4_xs_mmq_wave64_gfx906.json"
+notes   = "T-IQ.16 Phase 4 Slice A — wave64 MMQ for IQ4_XS. Pre-applies the IQ4_NL LUT into packed signed-i8, then dp4a vs Q8_1. Mirrors mmq_q4_K_wave64 minus the dmin/min correction."
 
 [[qmatmul]]
 dtype   = "IQ4_NL"
@@ -95,10 +103,18 @@ notes   = "T-IQ.14 — native IQ3_XXS MMVQ. 256-entry u32 codebook + 7-bit sign 
 [[qmatmul]]
 dtype   = "IQ3_S"
 dtype_q = "Q8_1"
-shape   = { m = ">=1", k = "any", n = "any" }
+shape   = { m = "1..127", k = "any", n = "any" }
 impl    = "qmatmul_iq3_s_mmvq_nw1_r2_gfx906"
 cert    = "certs/hip/gfx906/qmatmul_iq3_s_mmvq_nw1_r2_gfx906.json"
-notes   = "T-IQ.14 — native IQ3_S MMVQ. 512-entry 9-bit codebook + explicit per-byte sign array (~3.44 bpw)."
+notes   = "T-IQ.14 — native IQ3_S MMVQ. 512-entry 9-bit codebook + explicit per-byte sign array (~3.44 bpw). MMQ at m>=128."
+
+[[qmatmul]]
+dtype   = "IQ3_S"
+dtype_q = "Q8_1"
+shape   = { m = ">=128", k = "any", n = "any" }
+impl    = "qmatmul_iq3_s_mmq_wave64_gfx906"
+cert    = "certs/hip/gfx906/qmatmul_iq3_s_mmq_wave64_gfx906.json"
+notes   = "T-IQ.16 Phase 4 Slice A — wave64 MMQ for IQ3_S. Per-element 9-bit codebook lookup + per-byte sign-mask-into-packed-i8 + dp4a vs Q8_1."
 
 [[qmatmul]]
 dtype   = "IQ2_XXS"

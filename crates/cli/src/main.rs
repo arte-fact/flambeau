@@ -705,6 +705,8 @@ fn sweep(arch: &str, op: Option<&str>, dtype: &str) -> Result<()> {
                     "Q8_K" | "Q8_K_wave64" => (vec![MmqDtype::Q8KWave64], SweepSpec::v1_4_prefill),
                     "Q2_K" | "Q2_K_wave64" => (vec![MmqDtype::Q2KWave64], SweepSpec::v1_4_prefill),
                     "Q3_K" | "Q3_K_wave64" => (vec![MmqDtype::Q3KWave64], SweepSpec::v1_4_prefill),
+                    "IQ4_XS" | "IQ4_XS_wave64" => (vec![MmqDtype::Iq4XsWave64], SweepSpec::v1_4_prefill),
+                    "IQ3_S" | "IQ3_S_wave64" => (vec![MmqDtype::Iq3SWave64], SweepSpec::v1_4_prefill),
                     "all" => (
                         vec![
                             MmqDtype::Q8_0Oracle,
@@ -746,7 +748,9 @@ fn sweep(arch: &str, op: Option<&str>, dtype: &str) -> Result<()> {
                             | MmqDtype::Q6KWave64
                             | MmqDtype::Q8KWave64
                             | MmqDtype::Q2KWave64
-                            | MmqDtype::Q3KWave64 => SweepSpec::v1_4_prefill(d),
+                            | MmqDtype::Q3KWave64
+                            | MmqDtype::Iq4XsWave64
+                            | MmqDtype::Iq3SWave64 => SweepSpec::v1_4_prefill(d),
                         },
                     ),
                     other => anyhow::bail!("unknown MMQ dtype {other}"),
