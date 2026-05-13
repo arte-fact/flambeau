@@ -720,14 +720,43 @@ fn upload_tp_via_dequant_to_q8_0(
         .with_context(|| format!("slice F32 (post-{src_dtype:?}) `{name}` rank={rank}"))?;
     drop(f32_full);
 
-    let q8_bytes = quantize_f32_slice_to_q8_0(&f32_slice)
-        .with_context(|| format!("quantize F32→Q8_0 ({src_dtype:?} path) `{name}` rank={rank}"))?;
-    let n = q8_bytes.len();
+    let target = pick_convert_target(src_dtype);
+    let elems_slice = f32_slice.len();
+    let bytes: Vec<u8> = match target {
+        GgmlDType::Q8_0 => quantize_f32_slice_to_q8_0(&f32_slice)
+            .with_context(|| format!("quantize F32→Q8_0 ({src_dtype:?}) `{name}` rank={rank}"))?,
+        GgmlDType::Q4K => {
+            if elems_slice % flambeau_quant::QK_K != 0 {
+                bail!("`{name}` rank={rank} elem {elems_slice} not multiple of QK_K");
+            }
+            let mut buf = Vec::with_capacity(elems_slice / flambeau_quant::QK_K * 144);
+            flambeau_quant::quantize_k::quantize_row_q4_k(&f32_slice, &mut buf);
+            buf
+        }
+        GgmlDType::Q3K => {
+            if elems_slice % flambeau_quant::QK_K != 0 {
+                bail!("`{name}` rank={rank} elem {elems_slice} not multiple of QK_K");
+            }
+            let mut buf = Vec::with_capacity(elems_slice / flambeau_quant::QK_K * 110);
+            flambeau_quant::quantize_k::quantize_row_q3_k(&f32_slice, &mut buf);
+            buf
+        }
+        GgmlDType::Q2K => {
+            if elems_slice % flambeau_quant::QK_K != 0 {
+                bail!("`{name}` rank={rank} elem {elems_slice} not multiple of QK_K");
+            }
+            let mut buf = Vec::with_capacity(elems_slice / flambeau_quant::QK_K * 84);
+            flambeau_quant::quantize_k::quantize_row_q2_k(&f32_slice, &mut buf);
+            buf
+        }
+        other => bail!("upload_tp_via_dequant_to: unsupported target {other:?}"),
+    };
+    let n = bytes.len();
 
     let ptr = device
         .alloc(n)
         .map_err(|e| anyhow!("hipMalloc {n} B `{name}`: {e}"))?;
-    // SAFETY: ptr is a fresh device alloc of n bytes; q8_bytes is a host
+    // SAFETY: ptr is a fresh device alloc of n bytes; bytes is a host
     // Vec we own that lives through the synchronize at the call-site of
     // `upload_tp_with_layout`'s caller.
     unsafe {
@@ -736,21 +765,34 @@ fn upload_tp_via_dequant_to_q8_0(
                 device.default_stream(),
                 CopyDirection::HostToDevice,
                 ptr,
-                DevicePtr(q8_bytes.as_ptr() as usize),
+                DevicePtr(bytes.as_ptr() as usize),
                 n,
             )
-            .map_err(|e| anyhow!("memcpy {src_dtype:?}→Q8_0 `{name}` rank={rank}: {e}"))?;
+            .map_err(|e| anyhow!("memcpy {src_dtype:?}→{target:?} `{name}` rank={rank}: {e}"))?;
     }
     device.default_stream().synchronize()?;
 
     let tensor = DeviceTensor {
         ptr,
-        dtype: GgmlDType::Q8_0,
+        dtype: target,
         dims: per_rank_dims,
         bytes: n,
         name: Arc::from(name),
     };
     Ok((tensor, n))
+}
+
+/// Source-dtype → at-load conversion-target policy. Mirror of the same
+/// function in sharded.rs — kept duplicate-but-local so the TP path
+/// doesn't reach across modules for one match arm.
+fn pick_convert_target(src: GgmlDType) -> GgmlDType {
+    match src {
+        GgmlDType::Iq4Xs | GgmlDType::Iq4Nl => GgmlDType::Q4K,
+        GgmlDType::Iq3Xxs | GgmlDType::Iq3S => GgmlDType::Q3K,
+        GgmlDType::Iq2Xxs | GgmlDType::Iq2Xs | GgmlDType::Iq2S
+        | GgmlDType::Iq1S | GgmlDType::Iq1M => GgmlDType::Q2K,
+        _ => GgmlDType::Q8_0,
+    }
 }
 
 /// / #142 — TP-aware ssm_ba split.

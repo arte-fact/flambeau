@@ -528,7 +528,7 @@ fn upload_one_inner(
             | GgmlDType::Iq1M
     ) || (r.dtype == GgmlDType::Q4_1 && r.name.contains("_exps"));
     if needs_q8_0_convert {
-        return upload_via_dequant_to_q8_0(file, r, device);
+        return upload_via_dequant_to(file, r, device);
     }
     let bytes = r.size_bytes as usize;
     let raw = file
@@ -653,48 +653,79 @@ fn upload_as_f16(
 /// Generic at-load conversion path: dequantise `r` from its source dtype
 /// to F32 on host, then encode the F32 buffer as Q8_0 and upload. Used
 /// for every weight dtype that has no native V1 kernel but reaches the
-/// loader: BF16, MXFP4, IQ4_XS, and the scattered Q4_1 MoE expert
-/// tensors on Qwen3.6-35B-A3B-Q4_0.
-/// Quant scheme is the standard per-32-elem block absmax / 127 Q8_0
-/// encoder. Per-dtype noise floors vary (~0.4 % for BF16 / Q4_1, ~0.5 %
-/// for MXFP4 / IQ4_XS) — all negligible vs the Q8_0 noise downstream.
-fn upload_via_dequant_to_q8_0(
+/// loader: BF16, MXFP4, IQ-family (IQ2_XXS..IQ4_XS, IQ1_S, IQ1_M), and
+/// the scattered Q4_1 MoE expert tensors on Qwen3.6-35B-A3B-Q4_0.
+///
+/// Target dtype is chosen by source dtype to keep the convert close to
+/// source bpw (Q8_0 target on a 3-bpw source blows VRAM up ~2.7× —
+/// fatal on 122B-class models). Per-target re-quant noise:
+/// Q8_0 ~0.1 %, Q4_K ~0.5 %, Q3_K ~1.5 %, Q2_K ~1.8 % — all small vs
+/// the source IQ noise itself.
+fn upload_via_dequant_to(
     file: &GgufFile,
     r: &ResolvedTensor,
     device: &HipDevice,
 ) -> Result<(DeviceTensor, usize)> {
     let elems: usize = r.dims.iter().product::<u64>() as usize;
-    if elems % QK8_0 != 0 {
-        bail!(
-            "upload_via_dequant_to_q8_0: `{}` elem count {elems} not multiple of QK8_0={QK8_0}",
-            r.name
-        );
-    }
     let raw = file
         .tensor_raw(&r.name)
         .with_context(|| format!("tensor_raw `{}`", r.name))?;
-    // Dequantise the whole tensor to F32 first; dispatch picks up the
-    // source dtype's specific decode path.
     let mut f32_full = vec![0.0f32; elems];
     flambeau_quant::dequantize_into(r.dtype, raw, &mut f32_full)
         .with_context(|| format!("dequant {:?} `{}`", r.dtype, r.name))?;
-    let n_blocks = elems / QK8_0;
-    let block_size = 34usize;
-    let out_bytes = n_blocks * block_size;
-    let mut buf: Vec<u8> = Vec::with_capacity(out_bytes);
-    for block in f32_full.chunks_exact(QK8_0) {
-        let absmax = block.iter().map(|v| v.abs()).fold(0.0f32, f32::max);
-        let d = absmax / 127.0;
-        let id = if d != 0.0 { 1.0 / d } else { 0.0 };
-        let d_f16 = half::f16::from_f32(d);
-        buf.extend_from_slice(&d_f16.to_bits().to_le_bytes());
-        for &v in block {
-            let q = (v * id).round_ties_even() as i32;
-            let q = q.clamp(-127, 127) as i8;
-            buf.push(q as u8);
+
+    let target = pick_convert_target(r.dtype);
+    let buf: Vec<u8> = match target {
+        GgmlDType::Q8_0 => {
+            if elems % QK8_0 != 0 {
+                bail!(
+                    "upload_via_dequant_to: `{}` elem count {elems} not multiple of QK8_0={QK8_0}",
+                    r.name
+                );
+            }
+            let n_blocks = elems / QK8_0;
+            let mut buf = Vec::with_capacity(n_blocks * 34);
+            for block in f32_full.chunks_exact(QK8_0) {
+                let absmax = block.iter().map(|v| v.abs()).fold(0.0f32, f32::max);
+                let d = absmax / 127.0;
+                let id = if d != 0.0 { 1.0 / d } else { 0.0 };
+                let d_f16 = half::f16::from_f32(d);
+                buf.extend_from_slice(&d_f16.to_bits().to_le_bytes());
+                for &v in block {
+                    let q = (v * id).round_ties_even() as i32;
+                    let q = q.clamp(-127, 127) as i8;
+                    buf.push(q as u8);
+                }
+            }
+            buf
         }
-    }
-    debug_assert_eq!(buf.len(), out_bytes);
+        GgmlDType::Q4K => {
+            if elems % flambeau_quant::QK_K != 0 {
+                bail!("`{}` elem count {elems} not multiple of QK_K", r.name);
+            }
+            let mut buf = Vec::with_capacity(elems / flambeau_quant::QK_K * 144);
+            flambeau_quant::quantize_k::quantize_row_q4_k(&f32_full, &mut buf);
+            buf
+        }
+        GgmlDType::Q3K => {
+            if elems % flambeau_quant::QK_K != 0 {
+                bail!("`{}` elem count {elems} not multiple of QK_K", r.name);
+            }
+            let mut buf = Vec::with_capacity(elems / flambeau_quant::QK_K * 110);
+            flambeau_quant::quantize_k::quantize_row_q3_k(&f32_full, &mut buf);
+            buf
+        }
+        GgmlDType::Q2K => {
+            if elems % flambeau_quant::QK_K != 0 {
+                bail!("`{}` elem count {elems} not multiple of QK_K", r.name);
+            }
+            let mut buf = Vec::with_capacity(elems / flambeau_quant::QK_K * 84);
+            flambeau_quant::quantize_k::quantize_row_q2_k(&f32_full, &mut buf);
+            buf
+        }
+        other => bail!("upload_via_dequant_to: unsupported target dtype {other:?}"),
+    };
+    let out_bytes = buf.len();
     let ptr = device.alloc(out_bytes)?;
     unsafe {
         device
@@ -705,7 +736,7 @@ fn upload_via_dequant_to_q8_0(
                 DevicePtr(buf.as_ptr() as usize),
                 out_bytes,
             )
-            .map_err(|e| anyhow::anyhow!("memcpy ({:?}→Q8_0) `{}`: {e}", r.dtype, r.name))?;
+            .map_err(|e| anyhow::anyhow!("memcpy ({:?}→{:?}) `{}`: {e}", r.dtype, target, r.name))?;
     }
     device.default_stream().synchronize()?;
     drop(buf);
@@ -713,13 +744,28 @@ fn upload_via_dequant_to_q8_0(
     Ok((
         DeviceTensor {
             ptr,
-            dtype: GgmlDType::Q8_0,
+            dtype: target,
             dims: r.dims.clone(),
             bytes: out_bytes,
             name: std::sync::Arc::from(r.name.as_str()),
         },
         out_bytes,
     ))
+}
+
+/// Source-dtype → at-load conversion-target policy. IQ-family with
+/// matching K-quant capacity goes to that K-quant (~1.0–1.4× source
+/// bpw); everything else falls back to Q8_0 (the BF16 / MXFP4 /
+/// Q4_1-exps cohort, where memory blow-up is bounded and the simpler
+/// quant scheme is cheaper).
+fn pick_convert_target(src: GgmlDType) -> GgmlDType {
+    match src {
+        GgmlDType::Iq4Xs | GgmlDType::Iq4Nl => GgmlDType::Q4K,
+        GgmlDType::Iq3Xxs | GgmlDType::Iq3S => GgmlDType::Q3K,
+        GgmlDType::Iq2Xxs | GgmlDType::Iq2Xs | GgmlDType::Iq2S
+        | GgmlDType::Iq1S | GgmlDType::Iq1M => GgmlDType::Q2K,
+        _ => GgmlDType::Q8_0,
+    }
 }
 
 /// V1.x #120 — Split qwen3next's fused `ssm_ba.weight`

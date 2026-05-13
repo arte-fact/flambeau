@@ -16,6 +16,7 @@ pub mod dtype;
 pub mod error;
 pub mod gguf;
 mod iq_tables;
+pub mod quantize_k;
 pub mod tokenizer;
 
 pub use blocks::{
