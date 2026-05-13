@@ -98,3 +98,22 @@ Solving the linear model again:
 - **Decode:  8.62 tok/s** @ m=1 (was 8.52 — unchanged, as expected — only MMQ added)
 
 Still partial-coverage gain: only IQ4_XS (64 attn_gate tensors) and IQ3_S (10 ffn_gate/up tensors) get the MMQ path. The 2 IQ3_XXS tensors still fall through to the MMVQ-loop-per-row at m>=128. Adding MMQ for the remaining 7 IQ dtypes in Slice A should bring prefill into the 150-200 tok/s band (Q4_K_M envelope is ~300, gap closed by dp4a-with-LUT micro-opt in Phase 4-perf).
+
+## Slice A complete (2026-05-13)
+
+After adding wave64 MMQ for the remaining 7 IQ dtypes (IQ4_NL, IQ3_XXS, IQ2_*, IQ1_*) in commit 3736375:
+
+- **Prefill: 97.6 tok/s** (was 95.5 — marginal lift; this model only uses IQ4_XS + IQ3_S + 2 IQ3_XXS tensors, so the extra 5 dtypes don't fire here)
+- **Decode: 8.69 tok/s** (unchanged — MMVQ path)
+
+Slice A is the right scope on this model — bigger lift came from the first 2 dtypes (IQ4_XS + IQ3_S). The remaining 5 (IQ4_NL, IQ2_*, IQ1_*) pay off on models that use them (UD-IQ2_XXS, UD-IQ1_S builds).
+
+### Summary trajectory
+
+| Stage | Prefill | Decode | Notes |
+|-------|---------|--------|-------|
+| Phase 3c (MMVQ loop) | 36.9 | 8.52 | scalar prefill |
+| Slice A start | 95.5 | 8.62 | IQ4_XS + IQ3_S MMQ |
+| Slice A complete | 97.6 | 8.69 | all 9 IQ MMQ |
+
+`cert-check`: 81 rows, 0 failures.
