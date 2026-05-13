@@ -13,7 +13,7 @@ use flambeau_qwen3_moe::{
     HybridMeshSpec, Qwen35DenseTpLayout, Qwen3MoEConfig, Qwen3MoEHybridModel,
     Qwen3MoEShardedModel, Qwen3MoETpModel,
 };
-use flambeau_runtime::LayerAssignment;
+use flambeau_runtime::{LayerAssignment, Registry};
 use tokio::sync::Mutex;
 use tracing::info;
 
@@ -99,8 +99,6 @@ pub struct ServeConfig {
     pub default_system: Option<String>,
     /// /v1/embeddings per-prompt token cap.
     pub embedding_max_tokens: usize,
-    /// MTP head GGUF for K=1 speculative decode. `None` disables.
-    pub spec_mtp: Option<PathBuf>,
 }
 
 impl Default for MeshMode {
@@ -111,11 +109,24 @@ impl Default for MeshMode {
 
 /// Blocking serve loop — loads the model, starts the HTTP server, runs
 /// until terminated. Caller owns the tokio runtime.
-pub async fn serve(cfg: ServeConfig) -> Result<()> {
+pub async fn serve(cfg: ServeConfig, registry: Registry) -> Result<()> {
     info!(?cfg, "flambeau serve: loading model");
 
     let gguf = GgufFile::open(&cfg.gguf_path)
         .with_context(|| format!("open GGUF at {}", cfg.gguf_path.display()))?;
+
+    // Reject unsupported GGUF arches before walking tokenizer / chat
+    // template / model paths so the operator gets a clean diagnostic
+    // instead of a downstream invariant error.
+    let gguf_arch = gguf.metadata_str("general.architecture").unwrap_or("");
+    let model_arch = registry
+        .validate(gguf_arch)
+        .with_context(|| format!("flambeau serve: unsupported GGUF arch `{gguf_arch}`"))?;
+    info!(
+        arch = gguf_arch,
+        handler = model_arch.description(),
+        "GGUF arch validated against registry"
+    );
 
     // Load tokenizer + chat template first (cheap, catch config errors early).
     let tokenizer = flambeau_quant::load_from_gguf(&gguf).context("load tokenizer")?;
@@ -225,31 +236,10 @@ pub async fn serve(cfg: ServeConfig) -> Result<()> {
                 m.config.context_length = model_cfg.context_length;
             }
 
-            // opt-in MTP attachment. Loaded once, lives on
-            // the last rank; per-request scratch allocated on each
-            // chat completion.
-            let mtp = match cfg.spec_mtp.as_ref() {
-                Some(path) => {
-                    let last_rank = (cluster.ranks() - 1) as usize;
-                    let last_device = cluster.device(last_rank);
-                    info!(path = %path.display(), rank = last_rank,
-                          "loading MTP head for spec-decode");
-                    let mtp_file = flambeau_quant::GgufFile::open(path)
-                        .with_context(|| format!("MTP gguf {}", path.display()))?;
-                    let head = flambeau_qwen3_moe::mtp::load_mtp_head(&mtp_file, last_device)
-                        .context("load_mtp_head")?;
-                    info!(
-                        bytes = head.total_bytes(),
-                        "MTP head loaded — spec-decode ENABLED"
-                    );
-                    Some(head)
-                }
-                None => {
-                    info!("--spec-mtp not set — spec-decode disabled");
-                    None
-                }
-            };
-            (cluster, LoadedModel::Pp { model: m, mtp })
+            (
+                cluster,
+                std::sync::Arc::new(crate::model::PpHipModel { model: m }) as LoadedModel,
+            )
         }
         MeshMode::Tp { world } => {
             let cluster: Arc<HipCluster> =
@@ -281,7 +271,10 @@ pub async fn serve(cfg: ServeConfig) -> Result<()> {
             }
             let ar = BarP2pAllReduce::new(Arc::clone(&cluster))
                 .context("BarP2pAllReduce::new (requires fully-connected peer-access matrix)")?;
-            (cluster, LoadedModel::Tp { model: m, ar })
+            (
+                cluster,
+                std::sync::Arc::new(crate::model::TpHipModel { model: m, ar }) as LoadedModel,
+            )
         }
         MeshMode::Hybrid { pp_size, tp_size } => {
             let spec = HybridMeshSpec { pp_size, tp_size };
@@ -341,10 +334,10 @@ pub async fn serve(cfg: ServeConfig) -> Result<()> {
             );
             (
                 cluster,
-                LoadedModel::Hybrid {
+                std::sync::Arc::new(crate::model::HybridHipModel {
                     model: hybrid,
                     stage_ars,
-                },
+                }) as LoadedModel,
             )
         }
     };

@@ -15,11 +15,14 @@ pub mod dequant;
 pub mod dtype;
 pub mod error;
 pub mod gguf;
+mod iq_tables;
+pub mod quantize_k;
 pub mod tokenizer;
 
 pub use blocks::{
-    BlockQ2K, BlockQ3K, BlockQ4K, BlockQ4_0, BlockQ4_1, BlockQ5K, BlockQ5_0, BlockQ5_1, BlockQ6K,
-    BlockQ8K, BlockQ8_0, BlockQ8_1, BlockQ8_1Mmq, QK8_1_MMQ,
+    BlockIq1M, BlockIq1S, BlockIq2S, BlockIq2Xs, BlockIq2Xxs, BlockIq3S, BlockIq3Xxs, BlockIq4Nl,
+    BlockIq4Xs, BlockQ2K, BlockQ3K, BlockQ4K, BlockQ4_0, BlockQ4_1, BlockQ5K, BlockQ5_0, BlockQ5_1,
+    BlockQ6K, BlockQ8K, BlockQ8_0, BlockQ8_1, BlockQ8_1Mmq, QK8_1_MMQ,
 };
 pub use dequant::{dequantize_into, dequantize_to_vec};
 pub use dtype::{

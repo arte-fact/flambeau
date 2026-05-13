@@ -1,0 +1,23 @@
+baseline:  certs/perf/branch_vs_main/MAIN2.json  (cells=16)
+candidate: certs/perf/branch_vs_main/HEAD2.json  (cells=16)
+
+model                          topo     path        N    pref_ms_base pref_ms_cand pref_ratio  tg_per_base tg_per_cand tg_per_ratio  tg_agg_base tg_agg_cand tg_agg_ratio
+qwen36_27B_q4_0                pp2tp2   batched     1         11474.4      10159.4   1.129x +        23.20       23.07     0.994x =        23.20       23.07     0.994x =
+qwen36_27B_q4_0                pp2tp2   batched     2         20370.0      18405.8   1.107x +        19.49       19.42     0.996x =        31.85       31.06     0.975x -
+qwen36_27B_q4_0                pp2tp2   no_batched  1         11401.1      10081.3   1.131x +        23.24       23.10     0.994x =        23.24       23.10     0.994x =
+qwen36_27B_q4_0                pp2tp2   no_batched  2         20212.7      18241.7   1.108x +        19.57       19.26     0.984x =        32.17       30.83     0.959x -
+qwen36_27B_q4_1                pp2tp2   batched     1         11843.6      10509.6   1.127x +        23.33       23.21     0.995x =        23.33       23.21     0.995x =
+qwen36_27B_q4_1                pp2tp2   batched     2         20842.0      18869.7   1.105x +        19.67       19.49     0.991x =        32.37       31.83     0.983x =
+qwen36_27B_q4_1                pp2tp2   no_batched  1         11814.0      10462.0   1.129x +        23.30       23.20     0.996x =        23.30       23.20     0.996x =
+qwen36_27B_q4_1                pp2tp2   no_batched  2         20806.8      18805.4   1.106x +        19.75       19.63     0.994x =        32.71       31.70     0.969x -
+qwen36_35B_a3b_q4_0            pp2tp2   batched     1          3958.5       3497.0   1.132x +        44.47       44.50     1.001x =        44.47       44.50     1.001x =
+qwen36_35B_a3b_q4_0            pp2tp2   batched     2          7127.3       6328.1   1.126x +        38.74       39.42     1.018x =        64.55       66.97     1.038x +
+qwen36_35B_a3b_q4_0            pp2tp2   no_batched  1          3968.2       3493.7   1.136x +        45.01       44.68     0.993x =        45.01       44.68     0.993x =
+qwen36_35B_a3b_q4_0            pp2tp2   no_batched  2          7066.3       6282.2   1.125x +        39.16       39.58     1.011x =        65.45       67.41     1.030x +
+qwen36_35B_a3b_ud_q4_k_s       pp2tp2   batched     1          5125.1       4550.9   1.126x +        46.34       46.34     1.000x =        46.34       46.34     1.000x =
+qwen36_35B_a3b_ud_q4_k_s       pp2tp2   batched     2          9037.2       8003.8   1.129x +        38.32       39.82     1.039x +        59.51       63.20     1.062x +
+qwen36_35B_a3b_ud_q4_k_s       pp2tp2   no_batched  1          5111.6       4550.0   1.123x +        46.99       46.92     0.999x =        46.99       46.92     0.999x =
+qwen36_35B_a3b_ud_q4_k_s       pp2tp2   no_batched  2          8955.0       8025.5   1.116x +        38.94       39.68     1.019x =        61.10       63.34     1.037x +
+
+prefill: 16 faster / 0 flat / 0 slower (>2% gate)
+decode (aggregate): 4 faster / 9 flat / 3 slower (>2% gate)

@@ -113,6 +113,10 @@ pub struct HipCluster {
     /// src_rank keeps cross-rank parallelism while serialising same-rank
     /// access. Cheap: peer_copy is ~100 µs per stage transition.
     peer_copy_lock: Vec<std::sync::Mutex<()>>,
+    /// Most-recent in-flight HtoD-completion event per src rank from
+    /// `peer_copy_via_host_event`. Next async call's DtoH waits on this
+    /// (driver-side, on src stream) before overwriting the bounce.
+    peer_copy_htod_event: Vec<std::sync::Mutex<Option<crate::HipEvent>>>,
 }
 
 impl HipCluster {
@@ -148,6 +152,9 @@ impl HipCluster {
         let peer_copy_lock = (0..device_ids.len())
             .map(|_| std::sync::Mutex::new(()))
             .collect();
+        let peer_copy_htod_event = (0..device_ids.len())
+            .map(|_| std::sync::Mutex::new(None))
+            .collect();
         Ok(Self {
             devices,
             bounces,
@@ -155,6 +162,7 @@ impl HipCluster {
             lane_bounces,
             peer_access,
             peer_copy_lock,
+            peer_copy_htod_event,
         })
     }
 
@@ -580,6 +588,130 @@ impl HipCluster {
         // handle as above.
         let rc = unsafe { hipStreamSynchronize(dst_dev.default_stream().raw()) };
         check(rc, "peer_copy HtoD sync")?;
+
+        Ok(())
+    }
+
+    /// Async PCIe peer copy: submits DtoH + HtoD on the rank default
+    /// streams; dst waits on src's DtoH via a HIP event (no CPU sync).
+    /// Back-to-back calls on the same `src_rank` are safe — the next
+    /// DtoH waits driver-side on the previous HtoD-completion event
+    /// before overwriting the shared bounce.
+    /// `consumer_stream`, when `Some`, is made to wait driver-side for
+    /// the HtoD before any subsequent op enqueued on it. Pass it when
+    /// the dst rank's downstream compute lives on a different stream
+    /// than the global_cluster's dst default stream (e.g. the
+    /// sub_cluster default stream in pp+tp). PP can pass `None`.
+    /// # Safety
+    /// As per [`Self::peer_copy_via_host`].
+    pub unsafe fn peer_copy_via_host_event(
+        &self,
+        dst_ptr: DevicePtr,
+        dst_rank: usize,
+        src_ptr: DevicePtr,
+        src_rank: usize,
+        bytes: usize,
+        consumer_stream: Option<&HipStream>,
+    ) -> DeviceResult<()> {
+        if bytes == 0 {
+            return Ok(());
+        }
+        if src_rank >= self.devices.len() || dst_rank >= self.devices.len() {
+            return Err(DeviceError::Backend {
+                backend: "hip",
+                code: -1,
+                message: format!(
+                    "peer_copy_via_host_event: rank out of range (src={src_rank}, dst={dst_rank}, N={})",
+                    self.devices.len()
+                ),
+            });
+        }
+        if src_rank == dst_rank {
+            let device = &self.devices[dst_rank];
+            device.bind()?;
+            // SAFETY: per caller contract, `src_ptr`/`dst_ptr` valid for `bytes`.
+            unsafe {
+                device.memcpy_async(
+                    device.default_stream(),
+                    flambeau_core::CopyDirection::DeviceToDevice,
+                    dst_ptr,
+                    src_ptr,
+                    bytes,
+                )?;
+            }
+            return Ok(());
+        }
+
+        let _bounce_guard = self.peer_copy_lock[src_rank].lock().map_err(|_| {
+            DeviceError::Backend {
+                backend: "hip",
+                code: -1,
+                message: format!("peer_copy_lock[{src_rank}] poisoned"),
+            }
+        })?;
+
+        let buf = self.ensure_bounce(src_rank, bytes)?;
+
+        let src_dev = &self.devices[src_rank];
+        src_dev.bind()?;
+        let src_stream = src_dev.default_stream();
+
+        let prev_htod = self.peer_copy_htod_event[src_rank].lock().map_err(|_| {
+            DeviceError::Backend {
+                backend: "hip",
+                code: -1,
+                message: format!("peer_copy_htod_event[{src_rank}] poisoned"),
+            }
+        })?.take();
+        if let Some(ref ev) = prev_htod {
+            ev.stream_wait(src_stream)?;
+        }
+
+        // SAFETY: `buf` is a pinned-host region of >= `bytes` bytes; the
+        // src stream waits for any in-flight previous-call HtoD before
+        // overwriting it.
+        let rc = unsafe {
+            hipMemcpyAsync(
+                buf,
+                src_ptr.as_usize() as *const c_void,
+                bytes,
+                hipMemcpyKind::DeviceToHost,
+                src_stream.raw(),
+            )
+        };
+        check(rc, "peer_copy_event DtoH")?;
+
+        let bridge = crate::HipEvent::new(src_dev.id())?;
+        bridge.record(src_stream)?;
+
+        let dst_dev = &self.devices[dst_rank];
+        dst_dev.bind()?;
+        let dst_stream = dst_dev.default_stream();
+        bridge.stream_wait(dst_stream)?;
+        // SAFETY: `bridge` orders this HtoD after the DtoH that populates `buf`.
+        let rc = unsafe {
+            hipMemcpyAsync(
+                dst_ptr.as_usize() as *mut c_void,
+                buf.cast_const(),
+                bytes,
+                hipMemcpyKind::HostToDevice,
+                dst_stream.raw(),
+            )
+        };
+        check(rc, "peer_copy_event HtoD")?;
+
+        let htod_done = crate::HipEvent::new(dst_dev.id())?;
+        htod_done.record(dst_stream)?;
+        if let Some(consumer) = consumer_stream {
+            htod_done.stream_wait(consumer)?;
+        }
+        *self.peer_copy_htod_event[src_rank].lock().map_err(|_| {
+            DeviceError::Backend {
+                backend: "hip",
+                code: -1,
+                message: format!("peer_copy_htod_event[{src_rank}] poisoned"),
+            }
+        })? = Some(htod_done);
 
         Ok(())
     }

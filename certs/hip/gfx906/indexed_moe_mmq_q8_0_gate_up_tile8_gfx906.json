@@ -6,7 +6,7 @@
   "op": "indexed_moe_mmq",
   "dtype_weight": "Q8_0",
   "dtype_activation": "Q8_1",
-  "tolerance_formula": "|err| <= 3e-2 * max(|ref|, sqrt(k))  (Q8_0 tile8 fused gate+up; same DP4A math as V2.22.a MMVQ)",
+  "tolerance_formula": "|err| <= 3e-2 * max(|ref|, sqrt(k))  (Q8_0 tile8 fused gate+up)",
   "results": [
     {
       "m": 32,
@@ -37,7 +37,7 @@
     }
   ],
   "pass": true,
-  "emitted_at": "2026-04-23T20:54:03Z",
+  "emitted_at": "2026-05-12T19:50:55Z",
   "rig": "threadreaper-gfx906",
   "pmc": {
     "vgpr_count": 49,

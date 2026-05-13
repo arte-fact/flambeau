@@ -1,0 +1,85 @@
+{
+  "schema_version": 1,
+  "impl_id": "qmatmul_iq1_m_mmq_wave64_gfx906",
+  "backend": "hip",
+  "arch": "gfx906",
+  "op": "qmatmul_mmq",
+  "dtype_weight": "IQ1_M",
+  "dtype_activation": "Q8_1",
+  "tolerance_formula": "|err| <= 5e-2 * max(|ref|, sqrt(k))",
+  "results": [
+    {
+      "m": 128,
+      "k": 2048,
+      "n": 2048,
+      "seed": 3009893645707529070,
+      "max_rel_err": 5.160314e-7,
+      "tolerance": 0.05,
+      "pass": true
+    },
+    {
+      "m": 128,
+      "k": 5120,
+      "n": 5120,
+      "seed": 16748106147439587182,
+      "max_rel_err": 5.3927005e-7,
+      "tolerance": 0.05,
+      "pass": true
+    },
+    {
+      "m": 128,
+      "k": 5120,
+      "n": 15360,
+      "seed": 1027578854477782894,
+      "max_rel_err": 5.317145e-7,
+      "tolerance": 0.05,
+      "pass": true
+    },
+    {
+      "m": 128,
+      "k": 15360,
+      "n": 5120,
+      "seed": 10624613509239895918,
+      "max_rel_err": 5.373824e-7,
+      "tolerance": 0.05,
+      "pass": true
+    },
+    {
+      "m": 512,
+      "k": 2048,
+      "n": 2048,
+      "seed": 3009893653037606382,
+      "max_rel_err": 8.074579e-7,
+      "tolerance": 0.05,
+      "pass": true
+    },
+    {
+      "m": 512,
+      "k": 5120,
+      "n": 5120,
+      "seed": 16748106154769664494,
+      "max_rel_err": 6.4297205e-7,
+      "tolerance": 0.05,
+      "pass": true
+    },
+    {
+      "m": 2048,
+      "k": 2048,
+      "n": 2048,
+      "seed": 3009893682357915630,
+      "max_rel_err": 8.141874e-7,
+      "tolerance": 0.05,
+      "pass": true
+    }
+  ],
+  "pass": true,
+  "emitted_at": "2026-05-13T09:19:03Z",
+  "rig": "threadreaper-gfx906",
+  "pmc": {
+    "vgpr_count": 46,
+    "sgpr_count": null,
+    "waves_per_simd": 5,
+    "mem_busy_pct": null,
+    "valu_busy_pct": null
+  }
+}

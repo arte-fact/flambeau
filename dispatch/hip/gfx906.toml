@@ -69,6 +69,151 @@ cert    = "certs/hip/gfx906/qmatmul_q4_K_mmvq_nw1_r2_gfx906.json"
 notes   = "P29 multi-row DPP r2 — 2 output rows per wave64, half-warp reduce. VGPR 24, waves/SIMD 10. Narrowed to m<=127 in V1.4 — Q4_K MMQ handles m>=128."
 
 [[qmatmul]]
+dtype   = "IQ4_XS"
+dtype_q = "Q8_1"
+shape   = { m = "1..127", k = "any", n = "any" }
+impl    = "qmatmul_iq4_xs_mmvq_nw1_r2_gfx906"
+cert    = "certs/hip/gfx906/qmatmul_iq4_xs_mmvq_nw1_r2_gfx906.json"
+notes   = "T-IQ.13 — native IQ4_XS MMVQ. r2 multi-row pattern shared with Q4_K. LUT-pre-applied dp4a via mmq_iq4_xs_wave64 at m>=128."
+
+[[qmatmul]]
+dtype   = "IQ4_XS"
+dtype_q = "Q8_1"
+shape   = { m = ">=128", k = "any", n = "any" }
+impl    = "qmatmul_iq4_xs_mmq_wave64_gfx906"
+cert    = "certs/hip/gfx906/qmatmul_iq4_xs_mmq_wave64_gfx906.json"
+notes   = "T-IQ.16 Phase 4 Slice A — wave64 MMQ for IQ4_XS. Pre-applies the IQ4_NL LUT into packed signed-i8, then dp4a vs Q8_1. Mirrors mmq_q4_K_wave64 minus the dmin/min correction."
+
+[[qmatmul]]
+dtype   = "IQ4_NL"
+dtype_q = "Q8_1"
+shape   = { m = "1..127", k = "any", n = "any" }
+impl    = "qmatmul_iq4_nl_mmvq_nw1_r2_gfx906"
+cert    = "certs/hip/gfx906/qmatmul_iq4_nl_mmvq_nw1_r2_gfx906.json"
+notes   = "T-IQ.13 — native IQ4_NL MMVQ. 32-elem block, no sub-block scale. r2 multi-row pattern."
+
+[[qmatmul]]
+dtype   = "IQ3_XXS"
+dtype_q = "Q8_1"
+shape   = { m = "1..127", k = "any", n = "any" }
+impl    = "qmatmul_iq3_xxs_mmvq_nw1_r2_gfx906"
+cert    = "certs/hip/gfx906/qmatmul_iq3_xxs_mmvq_nw1_r2_gfx906.json"
+notes   = "T-IQ.14 — native IQ3_XXS MMVQ. 256-entry u32 codebook + 7-bit sign LUT, scalar inner loop (~3.06 bpw)."
+
+[[qmatmul]]
+dtype   = "IQ3_S"
+dtype_q = "Q8_1"
+shape   = { m = "1..127", k = "any", n = "any" }
+impl    = "qmatmul_iq3_s_mmvq_nw1_r2_gfx906"
+cert    = "certs/hip/gfx906/qmatmul_iq3_s_mmvq_nw1_r2_gfx906.json"
+notes   = "T-IQ.14 — native IQ3_S MMVQ. 512-entry 9-bit codebook + explicit per-byte sign array (~3.44 bpw). MMQ at m>=128."
+
+[[qmatmul]]
+dtype   = "IQ3_S"
+dtype_q = "Q8_1"
+shape   = { m = ">=128", k = "any", n = "any" }
+impl    = "qmatmul_iq3_s_mmq_wave64_gfx906"
+cert    = "certs/hip/gfx906/qmatmul_iq3_s_mmq_wave64_gfx906.json"
+notes   = "T-IQ.16 Phase 4 Slice A — wave64 MMQ for IQ3_S. Per-element 9-bit codebook lookup + per-byte sign-mask-into-packed-i8 + dp4a vs Q8_1."
+
+[[qmatmul]]
+dtype   = "IQ2_XXS"
+dtype_q = "Q8_1"
+shape   = { m = "1..127", k = "any", n = "any" }
+impl    = "qmatmul_iq2_xxs_mmvq_nw1_r2_gfx906"
+cert    = "certs/hip/gfx906/qmatmul_iq2_xxs_mmvq_nw1_r2_gfx906.json"
+notes   = "T-IQ.15 — native IQ2_XXS MMVQ. 256-entry u64 codebook + 7-bit sign LUT (shared with IQ3_XXS). ~2.06 bpw."
+
+[[qmatmul]]
+dtype   = "IQ2_XS"
+dtype_q = "Q8_1"
+shape   = { m = "1..127", k = "any", n = "any" }
+impl    = "qmatmul_iq2_xs_mmvq_nw1_r2_gfx906"
+cert    = "certs/hip/gfx906/qmatmul_iq2_xs_mmvq_nw1_r2_gfx906.json"
+notes   = "T-IQ.15 — native IQ2_XS MMVQ. 512-entry u64 codebook (9-bit idx packed in u16 with 7-bit sign idx) + nibble-pair scales. ~2.31 bpw."
+
+[[qmatmul]]
+dtype   = "IQ2_S"
+dtype_q = "Q8_1"
+shape   = { m = "1..127", k = "any", n = "any" }
+impl    = "qmatmul_iq2_s_mmvq_nw1_r2_gfx906"
+cert    = "certs/hip/gfx906/qmatmul_iq2_s_mmvq_nw1_r2_gfx906.json"
+notes   = "T-IQ.15 — native IQ2_S MMVQ. 1024-entry u64 codebook (10-bit idx) + per-byte sign array. ~2.5 bpw."
+
+[[qmatmul]]
+dtype   = "IQ1_S"
+dtype_q = "Q8_1"
+shape   = { m = "1..127", k = "any", n = "any" }
+impl    = "qmatmul_iq1_s_mmvq_nw1_r2_gfx906"
+cert    = "certs/hip/gfx906/qmatmul_iq1_s_mmvq_nw1_r2_gfx906.json"
+notes   = "T-IQ.15 — native IQ1_S MMVQ. 2048-entry u64 codebook (11-bit idx) with signed-i8 grid entries + per-sub-block ±IQ1_DELTA offset. ~1.56 bpw."
+
+[[qmatmul]]
+dtype   = "IQ1_M"
+dtype_q = "Q8_1"
+shape   = { m = "1..127", k = "any", n = "any" }
+impl    = "qmatmul_iq1_m_mmvq_nw1_r2_gfx906"
+cert    = "certs/hip/gfx906/qmatmul_iq1_m_mmvq_nw1_r2_gfx906.json"
+notes   = "T-IQ.15 — native IQ1_M MMVQ. Same 2048-entry grid as IQ1_S; `d` reassembled from 4 spread nibbles. ~1.75 bpw."
+
+[[qmatmul]]
+dtype   = "IQ4_NL"
+dtype_q = "Q8_1"
+shape   = { m = ">=128", k = "any", n = "any" }
+impl    = "qmatmul_iq4_nl_mmq_wave64_gfx906"
+cert    = "certs/hip/gfx906/qmatmul_iq4_nl_mmq_wave64_gfx906.json"
+notes   = "T-IQ.16 Phase 4 Slice A — wave64 MMQ for IQ4_NL. dp4a inner loop with signed-i8 weights (sign mask pre-applied)."
+
+[[qmatmul]]
+dtype   = "IQ3_XXS"
+dtype_q = "Q8_1"
+shape   = { m = ">=128", k = "any", n = "any" }
+impl    = "qmatmul_iq3_xxs_mmq_wave64_gfx906"
+cert    = "certs/hip/gfx906/qmatmul_iq3_xxs_mmq_wave64_gfx906.json"
+notes   = "T-IQ.16 Phase 4 Slice A — wave64 MMQ for IQ3_XXS. dp4a inner loop with signed-i8 weights (sign mask pre-applied)."
+
+[[qmatmul]]
+dtype   = "IQ2_XXS"
+dtype_q = "Q8_1"
+shape   = { m = ">=128", k = "any", n = "any" }
+impl    = "qmatmul_iq2_xxs_mmq_wave64_gfx906"
+cert    = "certs/hip/gfx906/qmatmul_iq2_xxs_mmq_wave64_gfx906.json"
+notes   = "T-IQ.16 Phase 4 Slice A — wave64 MMQ for IQ2_XXS. dp4a inner loop with signed-i8 weights (sign mask pre-applied)."
+
+[[qmatmul]]
+dtype   = "IQ2_XS"
+dtype_q = "Q8_1"
+shape   = { m = ">=128", k = "any", n = "any" }
+impl    = "qmatmul_iq2_xs_mmq_wave64_gfx906"
+cert    = "certs/hip/gfx906/qmatmul_iq2_xs_mmq_wave64_gfx906.json"
+notes   = "T-IQ.16 Phase 4 Slice A — wave64 MMQ for IQ2_XS. dp4a inner loop with signed-i8 weights (sign mask pre-applied)."
+
+[[qmatmul]]
+dtype   = "IQ2_S"
+dtype_q = "Q8_1"
+shape   = { m = ">=128", k = "any", n = "any" }
+impl    = "qmatmul_iq2_s_mmq_wave64_gfx906"
+cert    = "certs/hip/gfx906/qmatmul_iq2_s_mmq_wave64_gfx906.json"
+notes   = "T-IQ.16 Phase 4 Slice A — wave64 MMQ for IQ2_S. dp4a inner loop with signed-i8 weights (sign mask pre-applied)."
+
+[[qmatmul]]
+dtype   = "IQ1_S"
+dtype_q = "Q8_1"
+shape   = { m = ">=128", k = "any", n = "any" }
+impl    = "qmatmul_iq1_s_mmq_wave64_gfx906"
+cert    = "certs/hip/gfx906/qmatmul_iq1_s_mmq_wave64_gfx906.json"
+notes   = "T-IQ.16 Phase 4 Slice A — wave64 MMQ for IQ1_S. dp4a inner loop with signed-i8 weights (sign mask pre-applied)."
+
+[[qmatmul]]
+dtype   = "IQ1_M"
+dtype_q = "Q8_1"
+shape   = { m = ">=128", k = "any", n = "any" }
+impl    = "qmatmul_iq1_m_mmq_wave64_gfx906"
+cert    = "certs/hip/gfx906/qmatmul_iq1_m_mmq_wave64_gfx906.json"
+notes   = "T-IQ.16 Phase 4 Slice A — wave64 MMQ for IQ1_M. dp4a inner loop with signed-i8 weights (sign mask pre-applied)."
+
+
+[[qmatmul]]
 dtype   = "Q4_1"
 dtype_q = "Q8_1"
 shape   = { m = "1..127", k = "any", n = "any" }
@@ -99,6 +244,30 @@ shape   = { m = "1..127", k = "any", n = "any" }
 impl    = "qmatmul_q6_K_mmvq_dp4a_gfx906"
 cert    = "certs/hip/gfx906/qmatmul_q6_K_mmvq_dp4a_gfx906.json"
 notes   = "V1.6 DP4A single-row Q6_K (3.24× per-call win on LM-head). V2.3.d.1: certed directly instead of via runtime intercept under the r4 scalar cert, and fixed a 32-bit unsigned-subtract borrow-chain bug in the (raw - 32) step — same class as V2.3.b.4's mmq_q6_K_wave64 fix. Uses the DP4A bias-correction identity (raw · y − 32 · Σy)."
+
+[[qmatmul]]
+dtype   = "Q8_K"
+dtype_q = "Q8_1"
+shape   = { m = "1..127", k = "any", n = "any" }
+impl    = "qmatmul_q8_K_mmvq_single_row_gfx906"
+cert    = "certs/hip/gfx906/qmatmul_q8_K_mmvq_single_row_gfx906.json"
+notes   = "Q8_K MMVQ single-row (256 threads, 1 row/block). Q8_K is the simplest K-quant: f32 d × i8 qs[256], no sub-block scales. DP4A inner loop on 8 int32-packed lanes per Q8_1 sub-block; d_x factors out of the per-sub-block sum."
+
+[[qmatmul]]
+dtype   = "Q2_K"
+dtype_q = "Q8_1"
+shape   = { m = "1..127", k = "any", n = "any" }
+impl    = "qmatmul_q2_K_mmvq_nw1_r2_gfx906"
+cert    = "certs/hip/gfx906/qmatmul_q2_K_mmvq_nw1_r2_gfx906.json"
+notes   = "Q2_K MMVQ r2 multi-row (64 threads wave64, 2 rows/block). Half-warp DPP reduce (xor-1..16). Activation shared across the row pair. Single-row kept as cross-check oracle."
+
+[[qmatmul]]
+dtype   = "Q3_K"
+dtype_q = "Q8_1"
+shape   = { m = "1..127", k = "any", n = "any" }
+impl    = "qmatmul_q3_K_mmvq_nw1_r2_gfx906"
+cert    = "certs/hip/gfx906/qmatmul_q3_K_mmvq_nw1_r2_gfx906.json"
+notes   = "Q3_K MMVQ r2 multi-row (64 threads wave64, 2 rows/block). Half-warp DPP reduce. Reuses the byte-wise scales unpack (Q3_K is 110 B, scales[] misaligned for every other super-block)."
 
 # ----- QMatMul MMQ (prefill / large-M path) ---------------------------------
 #
@@ -148,6 +317,14 @@ cert    = "certs/hip/gfx906/qmatmul_q5_0_mmq_wave64_gfx906.json"
 notes   = "V2.30.a — wave64 MMQ for Q5_0. Same tile shape (MMQ_Y=64, TILE_N=8) as Q4_0 MMQ, inner loop adds the 5th-bit DP4A term: `(q5 - 16)·y = dp4a(nibble, y) + 16·dp4a(bit, y) - 16·y_s`. 5th-bit-expand pattern lifted from V2.23 mmvq_q5_0. Targets the 20/40 ffn_*_shexp layers on Qwen3.6-35B-A3B-Q4_0 that V2.26.b originally deferred; now served by the tile kernel at m>=32."
 
 [[qmatmul_mmq]]
+dtype   = "Q5_1"
+dtype_q = "Q8_1"
+shape   = { m = ">=32", k = "any", n = "any" }
+impl    = "qmatmul_q5_1_mmq_wave64_gfx906"
+cert    = "certs/hip/gfx906/qmatmul_q5_1_mmq_wave64_gfx906.json"
+notes   = "Wave64 MMQ for Q5_1. Q5_0 wave64 5th-bit ladder + Q4_1 wave64 d/m reduction: dot = d·d_y·(Σ nibble·q8 + 16·Σ bit·q8) + m·y_s. MMQ_Y=64, TILE_N=8, 64 threads/block."
+
+[[qmatmul_mmq]]
 dtype   = "Q4_K"
 dtype_q = "Q8_1"
 shape   = { m = ">=128", k = "any", n = "any" }
@@ -171,6 +348,30 @@ impl    = "qmatmul_q6_K_mmq_wave64_gfx906"
 cert    = "certs/hip/gfx906/qmatmul_q6_K_mmq_wave64_gfx906.json"
 notes   = "V2.3.b.4 — wave64 MMQ Q6_K. Flambeau-authored (candle has no Q6_K MMQ); mirrors the wave64 / MMQ_Y=64 / TILE_N=8 / DP4A structure used by Q4_K and Q5_K wave64. Per-sub-block decode packs 32 weights into 8 signed-int8 int32s (-32 pre-applied). Consumes standard flambeau_block_q8_1."
 
+[[qmatmul_mmq]]
+dtype   = "Q8_K"
+dtype_q = "Q8_1"
+shape   = { m = ">=128", k = "any", n = "any" }
+impl    = "qmatmul_q8_K_mmq_wave64_gfx906"
+cert    = "certs/hip/gfx906/qmatmul_q8_K_mmq_wave64_gfx906.json"
+notes   = "Q8_K MMQ wave64. Simplest K-quant MMQ: f32 d × i8 qs[256], no nibble unpack, no sub-block scale, no min. Per super-block accumulates Σ_sub d_y[sub] * dp4a(qs_sub, y_sub) then scales once by d_x. MMQ_Y=64, TILE_N=8."
+
+[[qmatmul_mmq]]
+dtype   = "Q2_K"
+dtype_q = "Q8_1"
+shape   = { m = ">=128", k = "any", n = "any" }
+impl    = "qmatmul_q2_K_mmq_wave64_gfx906"
+cert    = "certs/hip/gfx906/qmatmul_q2_K_mmq_wave64_gfx906.json"
+notes   = "Q2_K MMQ wave64. Affine quant: y = d*scale*raw - dmin*min. 4-bit (scale,min) packed per 16-element sub-block. Standard wave64/MMQ_Y=64/TILE_N=8/DP4A with (sc*dot - m*Σy) per Q8_1 sub-block."
+
+[[qmatmul_mmq]]
+dtype   = "Q3_K"
+dtype_q = "Q8_1"
+shape   = { m = ">=128", k = "any", n = "any" }
+impl    = "qmatmul_q3_K_mmq_wave64_gfx906"
+cert    = "certs/hip/gfx906/qmatmul_q3_K_mmq_wave64_gfx906.json"
+notes   = "Q3_K MMQ wave64. Per element: q = (raw_2bit + 4*hmask_bit) - 4; signed 6-bit scale - 32. Bias correction: (raw_4bit - 4)·y = raw_4bit·y - 4·Σy. Byte-wise u32 loads on qs/hmask/scales — Q3_K is 110 B and alternates 4-byte/2-byte alignment across blocks."
+
 # ----- RMSNorm (V1.6 fused decode path) -------------------------------------
 
 [[rmsnorm]]
@@ -180,14 +381,6 @@ shape   = { m = "any", k = "any", n = "any" }
 impl    = "rmsnorm_f16_gfx906"
 cert    = "certs/hip/gfx906/rmsnorm_f16_gfx906.json"
 notes   = "256-thread/row, warp+cross-warp sum_sq reduce, rsqrt broadcast, elementwise scale."
-
-[[rmsnorm]]
-dtype   = "F16"
-dtype_q = "BF16"
-shape   = { m = "any", k = "any", n = "any" }
-impl    = "rmsnorm_bf16_gfx906"
-cert    = "certs/hip/gfx906/rmsnorm_bf16_gfx906.json"
-notes   = "MTP-4-C-3 — BF16 in/out activations, F16 norm-weight (norm weight is small + needs more mantissa than BF16). Same 256-thread/row pattern as rmsnorm_f16. Internal F32. Used by the MTP BF16 forward for 7 norms (pre_fc, input, post_attn, q/k_norm, mtp.norm)."
 
 [[rmsnorm]]
 dtype   = "F16"
@@ -226,14 +419,6 @@ shape   = { m = "any", k = "any", n = "any" }
 impl    = "split_q_gate_f16_gfx906"
 cert    = "certs/hip/gfx906/split_q_gate_f16_gfx906.json"
 notes   = "Strided split of attn_q output into contiguous Q + gate tensors. Post-attn, ops::mlp::swiglu_f16(gate, attn_out) applies silu(gate)*attn_out."
-
-[[split_q_gate]]
-dtype   = "BF16"
-dtype_q = "BF16"
-shape   = { m = "any", k = "any", n = "any" }
-impl    = "split_q_gate_bf16_gfx906"
-cert    = "certs/hip/gfx906/split_q_gate_bf16_gfx906.json"
-notes   = "MTP-4-C-5 — BF16 sibling. Pure strided copy, no arithmetic, bit-exact vs host."
 
 # ----- Shared-expert gate scale (V1.7.2.D — Qwen3.5/3.6 MoE) ---------------
 
@@ -274,40 +459,6 @@ shape   = { m = "any", k = "any", n = "any" }
 impl    = "cast_f16_f32_gfx906"
 cert    = "certs/hip/gfx906/cast_f16_f32_gfx906.json"
 notes   = "Pointwise F16→F32 cast. 256 threads/block. Bridges F16 attn_norm output into F32 GDN internal recurrence."
-
-# ----- BF16 cast glue (MTP-4-C-1, BF16-throughout MTP forward) -------------
-
-[[cast_f32_bf16]]
-dtype   = "F32"
-dtype_q = "BF16"
-shape   = { m = "any", k = "any", n = "any" }
-impl    = "cast_f32_bf16_gfx906"
-cert    = "certs/hip/gfx906/cast_f32_bf16_gfx906.json"
-notes   = "F32→BF16 round-to-nearest-even. 256 threads/block. Bridges F32 mmvq accumulator into BF16 activation."
-
-[[cast_bf16_f32]]
-dtype   = "BF16"
-dtype_q = "F32"
-shape   = { m = "any", k = "any", n = "any" }
-impl    = "cast_bf16_f32_gfx906"
-cert    = "certs/hip/gfx906/cast_bf16_f32_gfx906.json"
-notes   = "BF16→F32 lossless lift (bit-shift). 256 threads/block. Used at F32-only seams (residual accumulators)."
-
-[[cast_f16_bf16]]
-dtype   = "F16"
-dtype_q = "BF16"
-shape   = { m = "any", k = "any", n = "any" }
-impl    = "cast_f16_bf16_gfx906"
-cert    = "certs/hip/gfx906/cast_f16_bf16_gfx906.json"
-notes   = "F16→BF16 via F32. 256 threads/block. Bridges legacy F16 inputs into the BF16 MTP forward."
-
-[[cast_bf16_f16]]
-dtype   = "BF16"
-dtype_q = "F16"
-shape   = { m = "any", k = "any", n = "any" }
-impl    = "cast_bf16_f16_gfx906"
-cert    = "certs/hip/gfx906/cast_bf16_f16_gfx906.json"
-notes   = "BF16→F16 via F32. 256 threads/block. Last-stage cast of BF16 MTP output back to F16 (LM head input)."
 
 # ----- F32 SiLU / SwiGLU / scale / rmsnorm (V1.7.3-c1 GDN pointwise) -------
 
@@ -421,14 +572,6 @@ impl    = "rope_neox_partial_f16_gfx906"
 cert    = "certs/hip/gfx906/rope_neox_partial_f16_gfx906.json"
 notes   = "In-place F16 NeoX-split partial RoPE. Rotates first rotated_dims of head_dim; pair layout (i, i+rotated_dims/2). rotated_dims/2 threads per block. Matches llama.cpp rope_multi text-only path."
 
-[[rope_neox_partial]]
-dtype   = "BF16"
-dtype_q = "BF16"
-shape   = { m = "any", k = "any", n = "any" }
-impl    = "rope_neox_partial_bf16_gfx906"
-cert    = "certs/hip/gfx906/rope_neox_partial_bf16_gfx906.json"
-notes   = "MTP-4-C-5 — BF16 sibling. Same NeoX-split partial RoPE; F32 trig + multiply, BF16 in-place storage."
-
 # ----- Masked softmax -------------------------------------------------------
 
 [[softmax]]
@@ -456,14 +599,6 @@ shape   = { m = "any", k = "any", n = "any" }
 impl    = "mmvq_f16_q8_1_gfx906"
 cert    = "certs/hip/gfx906/mmvq_f16_q8_1_gfx906.json"
 notes   = "V2.21.b — F16 weight × Q8_1 activation MMVQ. Unblocks Unsloth UD-Q8_K_XL GGUFs (i-matrix-flagged layers kept in F16). 256 threads × n_rows blocks, 8 elements/thread F32 FMA. No DP4A (weight is F16). HBM-bound at ~30 µs/call for 6144×5120."
-
-[[qmatmul_mmvq]]
-dtype   = "BF16"
-dtype_q = "BF16"
-shape   = { m = "any", k = "any", n = "any" }
-impl    = "mmvq_bf16_bf16_gfx906"
-cert    = "certs/hip/gfx906/mmvq_bf16_bf16_gfx906.json"
-notes   = "MTP-4-C-2 — BF16 weight × BF16 activation MMVQ. 256 threads/row, F32 accumulator, both operands lifted to F32 in-kernel (gfx906 has no native BF16 FMA — CDNA2/MI200+ only). Key step toward >75% MTP acceptance: eliminates the per-mmvq Q8_1 activation quantize that drags MTP precision."
 
 [[qmatmul]]
 dtype   = "F16"
@@ -496,14 +631,6 @@ shape   = { m = "1..4", k = "any", n = "any" }
 impl    = "attention_decode_q8_kv_gfx906"
 cert    = "certs/hip/gfx906/attention_decode_q8_kv_gfx906.json"
 notes   = "GQA fused decode with Q8_0 KV (head_dim=128). 2× HBM saving vs F16 KV. Dispatched per-model after V1.7 delta-ppl quality cert passes."
-
-[[attention_decode]]
-dtype   = "BF16"
-dtype_q = "BF16"
-shape   = { m = "1..4", k = "any", n = "any" }
-impl    = "attention_decode_bf16_gfx906"
-cert    = "certs/hip/gfx906/attention_decode_bf16_gfx906.json"
-notes   = "MTP-4-C-4 — BF16 sibling of attention_decode_f16. Same online flash-attn-v2 softmax in F32, BF16 storage throughout. head_dim ∈ {64, 128, 256}. Used by MTP BF16 forward; not on the base-model decode path."
 
 # ----- Attention prefill (causal, F16 KV) -----------------------------------
 
@@ -588,6 +715,22 @@ shape   = { m = "any", k = "any", n = "any" }
 impl    = "indexed_moe_mmvq_q4_0_gfx906"
 cert    = "certs/hip/gfx906/indexed_moe_mmvq_q4_0_gfx906.json"
 notes   = "V2.23.a — Q4_0 indexed-MoE MMVQ for Qwen3.6-35B-A3B-Q4_0 expert weights. Same inner loop as dense mmvq_q4_0 + expert-id indirection on the weight tensor; 256 threads/block, grid (n_rows, n_tokens·top_k). 5 Q4_1 ffn_down_exps layers get host-converted to Q8_0 at load."
+
+[[indexed_moe_mmvq]]
+dtype   = "Q5_0"
+dtype_q = "Q8_1"
+shape   = { m = "any", k = "any", n = "any" }
+impl    = "indexed_moe_mmvq_q5_0_gfx906"
+cert    = "certs/hip/gfx906/indexed_moe_mmvq_q5_0_gfx906.json"
+notes   = "Q5_0 indexed-MoE MMVQ. Q4_0 indexed kernel structure with the 5th-bit ladder from mmvq_q5_0: per block, (q5 − 16)·y = nibble·y + 16·bit·y − 16·s_y. 256 threads/block, grid (n_rows, n_tokens·top_k)."
+
+[[indexed_moe_mmvq]]
+dtype   = "Q5_1"
+dtype_q = "Q8_1"
+shape   = { m = "any", k = "any", n = "any" }
+impl    = "indexed_moe_mmvq_q5_1_gfx906"
+cert    = "certs/hip/gfx906/indexed_moe_mmvq_q5_1_gfx906.json"
+notes   = "Q5_1 indexed-MoE MMVQ. Q5_0 indexed structure with the Q4_1-style m·s_y correction: per block, d·d_y·(sumi_nib + 16·sumi_bit) + m·s_y/4. 256 threads/block."
 
 [[moe_combine]]
 dtype   = "F16"

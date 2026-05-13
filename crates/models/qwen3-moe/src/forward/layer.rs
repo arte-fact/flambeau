@@ -27,18 +27,21 @@ use super::{
     GdnPrefillScratch, GdnScratch, MoePrefillScratch, MoeScratch, SharedExpertPrefillScratch,
     SharedExpertScratch,
 };
-use super::dense_ffn::{forward_dense_ffn_decode, forward_dense_ffn_prefill};
-use super::attn::{
-    forward_dense_attn_layer_decode, forward_dense_attn_prefill,
-    forward_full_attn_layer_decode, forward_full_attn_prefill,
-};
-use super::gdn::{forward_gdn_layer_decode, forward_gdn_prefill};
+use super::dense_ffn::forward_dense_ffn_prefill;
+use super::attn::{forward_dense_attn_prefill, forward_full_attn_prefill};
+use super::gdn::forward_gdn_prefill;
 use super::moe::{
-    forward_moe_ffn_decode, forward_moe_ffn_prefill, forward_router_decode,
-    forward_router_prefill, forward_shared_expert_decode, forward_shared_expert_prefill,
+    forward_moe_ffn_prefill, forward_router_prefill,
+    forward_shared_expert_decode, forward_shared_expert_prefill,
 };
 use crate::config::Qwen3MoEConfig;
 use crate::session::LayerCache;
+use crate::weights::{AttnWeights, LayerWeights};
+
+use flambeau_blocks::{
+    AttnBlock, AttnDecodeScratch, AttnState, FfnBlock, FfnDecodeScratch,
+};
+use flambeau_ops::HipOps;
 
 #[cfg(feature = "dev_trace")]
 fn dev_flag(name: &str) -> bool {
@@ -190,12 +193,102 @@ pub struct LayerDecodeSlots {
     pub full_attn: super::attn::AttnDecodeSlots,
 }
 
+/// Build the attention-half block for this layer. Returns `None` when
+/// the layer is the qwen3moe non-gated dense full-attn variant, which
+/// Always succeeds — `Dense` (qwen3moe non-gated) maps to
+/// `AttnBlock::Standard` with `gated = false`; `FullAttn`
+/// (qwen35moe / qwen36moe gated) maps to `gated = true`; `Gdn` maps
+/// to `AttnBlock::DeltaNet`.
+fn build_attn_block(
+    layer_weights: &LayerWeights,
+    cfg: &Qwen3MoEConfig,
+) -> Result<AttnBlock> {
+    match &layer_weights.attn {
+        AttnWeights::FullAttn(fa) => Ok(AttnBlock::Standard(
+            super::attn::build_full_attn_block(&layer_weights.attn_norm, fa, cfg)?,
+        )),
+        AttnWeights::Gdn(gw) => Ok(AttnBlock::DeltaNet(
+            super::gdn::build_delta_net_block(&layer_weights.attn_norm, gw, cfg)?,
+        )),
+        AttnWeights::Dense(d) => Ok(AttnBlock::Standard(
+            super::attn::build_dense_attn_block(&layer_weights.attn_norm, d, cfg)?,
+        )),
+    }
+}
+
+/// Build the FFN-half block for this layer. Always succeeds for the
+/// supported model families (Dense FFN or MoE FFN); callers don't need
+/// a fallback path.
+fn build_ffn_block(
+    layer_weights: &LayerWeights,
+    cfg: &Qwen3MoEConfig,
+) -> Result<FfnBlock> {
+    if cfg.is_dense_ffn() {
+        let dense = layer_weights
+            .ffn
+            .dense
+            .as_ref()
+            .context("dense FFN arch but layer.ffn.dense missing")?;
+        Ok(FfnBlock::Dense(super::dense_ffn::build_dense_mlp_block(dense, cfg)?))
+    } else {
+        let ffn_gate_inp = layer_weights
+            .ffn
+            .ffn_gate_inp
+            .as_ref()
+            .context("MoE FFN arch but layer.ffn.ffn_gate_inp missing")?;
+        Ok(FfnBlock::Moe(super::moe::build_moe_experts_block(
+            ffn_gate_inp,
+            &layer_weights.ffn,
+            cfg,
+        )?))
+    }
+}
+
+/// Pair an `AttnBlock` with the matching runtime state and scratch
+/// view drawn from `LayerForwardScratch` and the per-layer cache.
+fn attn_state_and_scratch<'a>(
+    block: &AttnBlock,
+    layer_cache: &'a mut LayerCache,
+    scratch: &'a mut LayerForwardScratch,
+) -> Result<(AttnState<'a>, AttnDecodeScratch<'a>)> {
+    match (block, layer_cache) {
+        (AttnBlock::Standard(_), LayerCache::FullAttn(kv)) => {
+            let s = scratch
+                .full_attn
+                .as_mut()
+                .context("LayerForwardScratch.full_attn missing")?;
+            Ok((AttnState::standard_f16(kv), AttnDecodeScratch::Standard(s.view_mut())))
+        }
+        (AttnBlock::Standard(_), LayerCache::FullAttnQ8(kv)) => {
+            let s = scratch
+                .full_attn
+                .as_mut()
+                .context("LayerForwardScratch.full_attn missing")?;
+            Ok((AttnState::standard_q8(kv), AttnDecodeScratch::Standard(s.view_mut())))
+        }
+        (AttnBlock::DeltaNet(_), LayerCache::Gdn(state)) => {
+            let s = scratch
+                .gdn
+                .as_ref()
+                .context("LayerForwardScratch.gdn missing")?;
+            Ok((
+                AttnState::recurrent(state.state, state.conv_history),
+                AttnDecodeScratch::DeltaNet(s.view()),
+            ))
+        }
+        (AttnBlock::Standard(_), LayerCache::Gdn(_))
+        | (AttnBlock::DeltaNet(_), LayerCache::FullAttn(_) | LayerCache::FullAttnQ8(_)) => bail!(
+            "attn block / layer cache variant mismatch"
+        ),
+    }
+}
+
 pub fn forward_layer_decode(
     ops: &OpsRegistry,
     stream: &HipStream,
     device: &HipDevice,
     cfg: &Qwen3MoEConfig,
-    layer_weights: &crate::weights::LayerWeights,
+    layer_weights: &LayerWeights,
     layer_cache: &mut LayerCache,
     scratch: &mut LayerForwardScratch,
     x_in: DevicePtr,
@@ -206,82 +299,42 @@ pub fn forward_layer_decode(
     let hidden = cfg.hidden_size;
     let il = layer_weights.layer_idx;
 
-    // intra-layer section markers. No-op when the
-    // thread-local profile timer is disabled (~ns thread_local check).
-    // Boundaries: attn_done, post_norm_done, shared_expert_done,
-    // router_done, moe_ffn_done. Per-layer total = sum of these = the
-    // 0.47 ms/layer wall the iter-2 profile measured.
     flambeau_backend_hip::profile::mark("layer_start", device, stream)?;
 
-    // 1. Attention (full-attn or GDN) → attn_delta in `mid_f16`.
-    // We reuse mid_f16 as the delta slot first, then overwrite it with the
-    // post-attention residual sum on the next line.
-    if cfg.is_recurrent(il) {
-        let gdn = scratch
-            .gdn
-            .as_mut()
-            .context("LayerForwardScratch.gdn missing")?;
-        forward_gdn_layer_decode(
-            ops,
-            stream,
-            device,
-            cfg,
-            layer_weights,
-            layer_cache,
-            gdn,
-            x_in,
-            scratch.mid_f16,
-        )?;
-    } else {
-        let full_attn = scratch
-            .full_attn
-            .as_mut()
-            .context("LayerForwardScratch.full_attn missing")?;
-        // 8.b — qwen3moe's dense attention (plain Q projection, no
-        // gate) vs qwen35moe's gated full-attention. Dispatch on the
-        // weights variant.
-        match &layer_weights.attn {
-            crate::weights::AttnWeights::Dense(_) => {
-                forward_dense_attn_layer_decode(
-                    ops,
-                    stream,
-                    device,
-                    cfg,
-                    layer_weights,
-                    layer_cache,
-                    full_attn,
-                    x_in,
-                    scratch.mid_f16,
-                    position,
-                    slots.map(|s| s.full_attn),
-                )?;
-            }
-            _ => {
-                forward_full_attn_layer_decode(
-                    ops,
-                    stream,
-                    device,
-                    cfg,
-                    layer_weights,
-                    layer_cache,
-                    full_attn,
-                    x_in,
-                    scratch.mid_f16,
-                    position,
-                    slots.map(|s| s.full_attn),
-                )?;
-            }
-        }
-    }
+    // Attention half. The block surface covers `AttnBlock::Standard`
+    // (gated full-attn) and `AttnBlock::DeltaNet` (GDN). The qwen3moe
+    // The block surface covers all three attn variants
+    // (gated full-attn, plain full-attn, GDN). Slot bundles are
+    // forwarded only to `Standard` — GDN kernels are not
+    // graph-capture-aware, so the block bails on `Some(slots)` for
+    // `DeltaNet`.
+    let block = build_attn_block(layer_weights, cfg)?;
+    let mid_f16 = scratch.mid_f16;
+    let attn_slots = match &block {
+        flambeau_blocks::AttnBlock::Standard(_) => slots.map(|s| s.full_attn),
+        flambeau_blocks::AttnBlock::DeltaNet(_) => None,
+    };
+    let (state, attn_scratch) = attn_state_and_scratch(&block, layer_cache, scratch)?;
+    let hipops = HipOps::new(ops, stream);
+    block.forward_decode(
+        &hipops,
+        device,
+        stream,
+        x_in,
+        mid_f16,
+        state,
+        attn_scratch,
+        position,
+        attn_slots,
+    )?;
     flambeau_backend_hip::profile::mark(
         if cfg.is_recurrent(il) { "layer_attn_gdn" } else { "layer_attn_full" },
         device,
         stream,
     )?;
 
-    // 2+3. 3.a.1 fused: `mid = x_in + attn_delta; mid_norm = rmsnorm(mid)*w`.
-    // Saves one kernel launch per layer per token vs the old add_f16 + rmsnorm
-    // pair. Both outputs consumed downstream.
+    // Fused `mid = x_in + attn_delta; mid_norm = rmsnorm(mid) * w`. Both
+    // outputs feed the FFN half (mid as residual, mid_norm as input).
     let post_norm = layer_weights
         .post_attention_norm
         .as_ref()
@@ -301,9 +354,6 @@ pub fn forward_layer_decode(
     )
     .context("fused post-attn add+rmsnorm")?;
     flambeau_backend_hip::profile::mark("layer_post_norm", device, stream)?;
-    // B5 bisect — dump PP analogues of TP's "post-AR-attn hidden_a" and
-    // "mid_norm_f16" at layer 0. Gated on FLAMBEAU_TP_LAYER0_BISECT (same
-    // env as TP) so PP and TP runs can be diffed by the same flag.
     if dev_flag("FLAMBEAU_TP_LAYER0_BISECT") && il == 0 {
         use flambeau_core::CopyDirection;
         for (label, ptr) in [
@@ -343,119 +393,103 @@ pub fn forward_layer_decode(
         }
     }
 
-    // 4. FFN. Two flavours:
-    // - arch=qwen35 (dense): single gate/up/down triple, no router. Writes
-    // `x_out = mid + FFN(mid_norm)` directly.
-    // - MoE arches: optional shared expert delta + router + routed MoE
-    // (residual folded into moe_combine).
-    if cfg.is_dense_ffn() {
-        let dense_w = layer_weights
-            .ffn
-            .dense
-            .as_ref()
-            .context("dense FFN forward: layer.ffn.dense missing")?;
-        let dense_scratch = scratch
-            .dense_ffn
-            .as_mut()
-            .context("LayerForwardScratch.dense_ffn missing")?;
-        forward_dense_ffn_decode(
-            ops,
-            stream,
-            cfg,
-            dense_w,
-            dense_scratch,
-            scratch.mid_norm_f16,
-            scratch.mid_f16,
-            x_out,
-        )?;
-        return Ok(());
-    }
+    // FFN half. Dense and MoE both go through `FfnBlock::forward_decode`.
+    // The MoE path requires the shared-expert delta and the router to
+    // run first since the block consumes pre-populated `expert_ids` /
+    // `expert_weights` and an optional `extra_residual`.
+    let ffn_block = build_ffn_block(layer_weights, cfg)?;
 
-    // MoE path — optional shared expert delta. 3.a.2 skips the explicit
-    // `add_f16(mid, shared_delta)` by passing both residuals to
-    // `moe_combine_two_residuals_f16`, saving one launch per layer per token.
-    let (moe_residual, shared_extra) = if let (Some(shared_w), Some(shared_scratch)) =
-        (layer_weights.ffn.shared.as_ref(), scratch.shared.as_mut())
-    {
-        forward_shared_expert_decode(
-            ops,
-            stream,
-            cfg,
-            shared_w,
-            shared_scratch,
-            scratch.mid_norm_f16,
-            scratch.shared_delta_f16,
-        )?;
-        flambeau_backend_hip::profile::mark("layer_shared_expert", device, stream)?;
-        (scratch.mid_f16, Some(scratch.shared_delta_f16))
-    } else {
-        // Dense arch with no shared expert: combine's residual is just mid.
-        (scratch.mid_f16, None)
-    };
-
-    // 5. Router (dense F32 GEMV + topk).
-    let moe = scratch
-        .moe
-        .as_mut()
-        .context("LayerForwardScratch.moe missing")?;
-    let ffn_gate_inp = layer_weights
-        .ffn
-        .ffn_gate_inp
-        .as_ref()
-        .context("forward_layer_decode MoE branch: ffn.ffn_gate_inp missing")?;
-    forward_router_decode(
-        ops,
-        stream,
-        cfg,
-        ffn_gate_inp,
-        moe,
-        scratch.mid_norm_f16,
-    )?;
-    flambeau_backend_hip::profile::mark("layer_router", device, stream)?;
-    // B5 router-divergence bisect: dump expert_ids per layer for parity diff.
-    // Gated on FLAMBEAU_PARITY_LAYER_DUMP=1 so it composes with the existing
-    // PP layer-dump infra. Read on the same stream the kernels just used so
-    // the read sees the just-written values.
-    if dev_flag("FLAMBEAU_PARITY_LAYER_DUMP") {
-        use flambeau_core::CopyDirection;
-        let top_k = cfg.num_experts_per_tok;
-        let mut ids = vec![0i32; top_k];
-        let mut wts = vec![0f32; top_k];
-        unsafe {
-            device.memcpy_async(
-                stream,
-                CopyDirection::DeviceToHost,
-                DevicePtr(ids.as_mut_ptr() as usize),
-                moe.expert_ids,
-                top_k * std::mem::size_of::<i32>(),
-            )?;
-            device.memcpy_async(
-                stream,
-                CopyDirection::DeviceToHost,
-                DevicePtr(wts.as_mut_ptr() as usize),
-                moe.expert_weights,
-                top_k * std::mem::size_of::<f32>(),
+    match &ffn_block {
+        FfnBlock::Dense(_) => {
+            let dense_scratch = scratch
+                .dense_ffn
+                .as_ref()
+                .context("LayerForwardScratch.dense_ffn missing")?;
+            let hipops = HipOps::new(ops, stream);
+            ffn_block.forward_decode(
+                &hipops,
+                scratch.mid_norm_f16,
+                scratch.mid_f16,
+                None,
+                x_out,
+                FfnDecodeScratch::Dense(dense_scratch.view()),
             )?;
         }
-        flambeau_core::Stream::synchronize(stream)?;
-        eprintln!(
-            "[router-dump] PP il={il} expert_ids={ids:?} weights={wts:?}"
-        );
-    }
+        FfnBlock::Moe(_) => {
+            // Snapshot the residual + norm pointers (Copy) before any
+            // re-borrow of `scratch` so the split-borrow holds.
+            let mid_f16 = scratch.mid_f16;
+            let mid_norm_f16 = scratch.mid_norm_f16;
+            let shared_delta_f16 = scratch.shared_delta_f16;
 
-    // 6. Routed MoE FFN — fuses the residual add in moe_combine (and optionally
-    // the shared-expert delta residual via 3.a.2 two-residuals variant).
-    forward_moe_ffn_decode(
-        ops,
-        stream,
-        cfg,
-        &layer_weights.ffn,
-        moe,
-        scratch.mid_norm_f16,
-        moe_residual,
-        shared_extra,
-        x_out,
-    )?;
+            let extra_residual = if let (Some(shared_w), Some(shared_scratch)) =
+                (layer_weights.ffn.shared.as_ref(), scratch.shared.as_mut())
+            {
+                forward_shared_expert_decode(
+                    ops,
+                    stream,
+                    cfg,
+                    shared_w,
+                    shared_scratch,
+                    mid_norm_f16,
+                    shared_delta_f16,
+                )?;
+                flambeau_backend_hip::profile::mark("layer_shared_expert", device, stream)?;
+                Some(shared_delta_f16)
+            } else {
+                None
+            };
+
+            let moe = scratch
+                .moe
+                .as_mut()
+                .context("LayerForwardScratch.moe missing")?;
+            let moe_view = moe.view();
+            let hipops = HipOps::new(ops, stream);
+            // Route on the MoE block. The MoeExperts variant runs
+            // `dense_gemv` + `topk_f32` and writes `expert_ids` /
+            // `expert_weights` into the scratch view, which the
+            // routed-experts forward then consumes.
+            let flambeau_blocks::FfnBlock::Moe(moe_block) = &ffn_block else {
+                unreachable!("FfnBlock variant changed under the MoE arm");
+            };
+            moe_block.route_decode(&hipops, mid_norm_f16, moe_view)?;
+            flambeau_backend_hip::profile::mark("layer_router", device, stream)?;
+            if dev_flag("FLAMBEAU_PARITY_LAYER_DUMP") {
+                use flambeau_core::CopyDirection;
+                let top_k = cfg.num_experts_per_tok;
+                let mut ids = vec![0i32; top_k];
+                let mut wts = vec![0f32; top_k];
+                unsafe {
+                    device.memcpy_async(
+                        stream,
+                        CopyDirection::DeviceToHost,
+                        DevicePtr(ids.as_mut_ptr() as usize),
+                        moe.expert_ids,
+                        top_k * std::mem::size_of::<i32>(),
+                    )?;
+                    device.memcpy_async(
+                        stream,
+                        CopyDirection::DeviceToHost,
+                        DevicePtr(wts.as_mut_ptr() as usize),
+                        moe.expert_weights,
+                        top_k * std::mem::size_of::<f32>(),
+                    )?;
+                }
+                flambeau_core::Stream::synchronize(stream)?;
+                eprintln!("[router-dump] PP il={il} expert_ids={ids:?} weights={wts:?}");
+            }
+
+            ffn_block.forward_decode(
+                &hipops,
+                mid_norm_f16,
+                mid_f16,
+                extra_residual,
+                x_out,
+                FfnDecodeScratch::Moe(moe_view),
+            )?;
+        }
+    }
     flambeau_backend_hip::profile::mark("layer_moe_ffn", device, stream)?;
 
     Ok(())

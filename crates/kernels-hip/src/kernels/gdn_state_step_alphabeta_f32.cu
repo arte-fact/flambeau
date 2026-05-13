@@ -129,11 +129,7 @@ static __device__ __forceinline__ void gdn_state_step_alphabeta_impl(
             q_reg[r] = q_bt[i];
         }
 
-#pragma unroll
-        for (int r = 0; r < rows_per_lane; r++) {
-            s_shard[r] *= g_val;
-        }
-
+        // kv = sum_i s_old[i,col] * k[i];  g folded into delta below.
         float kv_shard = 0.0f;
 #pragma unroll
         for (int r = 0; r < rows_per_lane; r++) {
@@ -142,12 +138,12 @@ static __device__ __forceinline__ void gdn_state_step_alphabeta_impl(
         const float kv_col = gdn_warp_reduce_sum_f32_ab(kv_shard);
 
         const float v_col     = v_bt[col];
-        const float delta_col = (v_col - kv_col) * beta_val;
+        const float delta_col = (v_col - g_val * kv_col) * beta_val;
 
         float attn_partial = 0.0f;
 #pragma unroll
         for (int r = 0; r < rows_per_lane; r++) {
-            s_shard[r]   += k_reg[r] * delta_col;
+            s_shard[r]    = g_val * s_shard[r] + k_reg[r] * delta_col;
             attn_partial += s_shard[r] * q_reg[r];
         }
         const float attn_col = gdn_warp_reduce_sum_f32_ab(attn_partial);
@@ -164,7 +160,7 @@ static __device__ __forceinline__ void gdn_state_step_alphabeta_impl(
     }
 }
 
-extern "C" __global__ __launch_bounds__(WARP_SIZE * GDN_WARPS_PER_BLOCK, 1)
+extern "C" __global__ __launch_bounds__(WARP_SIZE * GDN_WARPS_PER_BLOCK, 2)
 void flambeau_gdn_state_step_alphabeta_f32_s128(
     const float * __restrict__ q,
     const float * __restrict__ k,

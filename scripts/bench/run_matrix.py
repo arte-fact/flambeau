@@ -151,11 +151,21 @@ class ModelSpec:
 
 MODELS = [
     ModelSpec("qwen35_9B_q4_1",  "/artefact/models/Qwen3.5-9B-Q4_1.gguf",       16384, 512),
-    # **2026-05-05** — 27B context dropped from 16384 to 4096 so PP2
-    # (2 GPUs × 32 layers per rank × 8 inflight slots) fits in VRAM.
-    # Long-prompt characterisation is still meaningful at ctx=4096.
+    # Qwen3.5-9B re-quantised from Q4_1 → Q3_K_S via llama-quantize
+    # (`--allow-requantize` Q3_K_S). Exists to exercise the Q3_K dispatch
+    # rows on a model that fits a single GPU; main rejects this dtype.
+    ModelSpec("qwen35_9B_q3_k_s", "/artefact/models/Qwen3.5-9B-Q3_K_S.gguf",    16384, 512),
+    # 27B context dropped from 16384 to 4096 so PP2 (2 GPUs × 32 layers
+    # per rank × 8 inflight slots) fits in VRAM. Long-prompt
+    # characterisation is still meaningful at ctx=4096.
+    ModelSpec("qwen36_27B_q4_0", "/artefact/models/Qwen3.6-27B-Q4_0.gguf",      4096, 512),
     ModelSpec("qwen36_27B_q4_1", "/artefact/models/Qwen3.6-27B-Q4_1.gguf",      4096, 512),
     ModelSpec("qwen36_35B_a3b_q4_0", "/artefact/models/Qwen_Qwen3.6-35B-A3B-Q4_0.gguf", 16384, 512),
+    # Qwen3.6-35B-A3B MoE re-quantised from Q4_0 → Q3_K_S to exercise the
+    # Q3_K MoE indexed-MMVQ + tile8 kernels added in tier-1. main rejects
+    # Q3_K weights at qmatmul-dispatch time so this is a branch-only path.
+    ModelSpec("qwen36_35B_a3b_q3_k_s", "/artefact/models/Qwen3.6-35B-A3B-Q3_K_S.gguf", 16384, 512),
+    ModelSpec("qwen36_35B_a3b_ud_q4_k_s", "/artefact/models/Qwen3.6-35B-A3B-UD-Q4_K_S.gguf", 4096, 512),
 ]
 
 @dataclasses.dataclass(frozen=True)
@@ -186,15 +196,16 @@ PATHS = ["no_batched", "batched"]
 
 # Skip cells that won't fit in 16 GB / GPU.
 def is_feasible(model: ModelSpec, topo: TopoSpec) -> bool:
-    # Single-GPU 27B Q4_1 (~17 GB) doesn't fit in 16 GB MI50.
-    # Single-GPU 35B A3B Q4_0 (~20 GB) doesn't fit either.
+    # Single-GPU 27B (~14-17 GB) doesn't fit in 16 GB MI50 above Q4_0.
+    # Single-GPU 35B A3B (~20 GB+) doesn't fit either.
     # 2-GPU TP for 35B (~10 GB / GPU + KV) marginal but tries.
     if topo.id == "single":
-        if model.id in ("qwen36_27B_q4_1", "qwen36_35B_a3b_q4_0"):
+        if model.id in ("qwen36_27B_q4_0", "qwen36_27B_q4_1",
+                        "qwen36_35B_a3b_q4_0", "qwen36_35B_a3b_ud_q4_k_s"):
             return False
     if topo.id == "tp2":
-        if model.id == "qwen36_35B_a3b_q4_0":
-            # 35B / 2 = 10 GB weights + KV at ctx=16384 risks OOM; skip
+        if model.id in ("qwen36_35B_a3b_q4_0", "qwen36_35B_a3b_ud_q4_k_s"):
+            # 35B / 2 = 10 GB weights + KV at ctx risks OOM; skip
             return False
     return True
 

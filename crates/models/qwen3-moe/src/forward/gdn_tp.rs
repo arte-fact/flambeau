@@ -42,7 +42,7 @@
 )]
 
 use anyhow::{bail, Context, Result};
-use flambeau_core::{CopyDirection, Device, DevicePtr};
+use flambeau_core::{CopyDirection, Device, DevicePtr, Stream};
 use flambeau_ops::hip::{
     cast::cast_f32_to_f16,
     conv::causal_conv1d_f32,
@@ -52,10 +52,13 @@ use flambeau_ops::hip::{
         rmsnorm_f16, rmsnorm_f32, rmsnorm_quant_q8_1,
     },
     qmatmul::{
-        mmvq_q4_0_gate_up, mmvq_q4_0_gate_up_t128,
+        mmvq_q4_0_gate_up, mmvq_q4_0_gate_up_row_tile_batched, mmvq_q4_0_gate_up_t128,
         mmvq_q8_0_gate_up,
     },
-    recurrent::{gdn_split_qkv_f32, gdn_state_step_alphabeta_f32_s128},
+    recurrent::{
+        gdn_split_qkv_f32, gdn_state_step_alphabeta_f32_s128,
+        gdn_state_step_alphabeta_f32_s128_batched_slots,
+    },
     HipDevice, HipStream, OpsRegistry,
 };
 
@@ -553,7 +556,6 @@ fn debug_probe_q8_1(
     ptr: DevicePtr,
     n_blocks: usize,
 ) -> Result<()> {
-    use flambeau_core::Stream;
     // Q8_1 block: half scale + half ds + i8[32] = 36 B
     let block_bytes = 36;
     let n = n_blocks * block_bytes;
@@ -588,7 +590,6 @@ fn debug_probe_quant_bytes(
     ptr: DevicePtr,
     n_bytes: usize,
 ) -> Result<()> {
-    use flambeau_core::Stream;
     let mut host = vec![0u8; n_bytes];
     unsafe {
         device.memcpy_async(
@@ -615,7 +616,6 @@ fn debug_probe_f32(
     ptr: DevicePtr,
     n: usize,
 ) -> Result<()> {
-    use flambeau_core::Stream;
     let mut host = vec![0.0f32; n];
     unsafe {
         device.memcpy_async(
@@ -652,7 +652,6 @@ fn debug_probe_f16(
     ptr: DevicePtr,
     n: usize,
 ) -> Result<()> {
-    use flambeau_core::Stream;
     let mut host = vec![0u16; n];
     unsafe {
         device.memcpy_async(
@@ -1186,16 +1185,44 @@ pub fn forward_gdn_decode_batched_tp(
     .context("gdn batched-decode (TP) x_norm → Q8_1 (MMQ DS4)")?;
 
     // === Stages B + C: 4 projections at n_tokens=N ===
-    run_qmatmul_from_tensor(
-        ops, stream, attn_qkv,
-        scratch.x_q8_1, scratch.x_q8_1_mmq, scratch.qkv_mixed_f32,
-        n_tokens, hidden, local_conv_channels, "attn_qkv (TP batched-decode)",
-    )?;
-    run_qmatmul_from_tensor(
-        ops, stream, attn_gate,
-        scratch.x_q8_1, scratch.x_q8_1_mmq, scratch.z_f32,
-        n_tokens, hidden, local_d_inner, "attn_gate (TP batched-decode)",
-    )?;
+    // Fused Q4_0 gate+up via the row-tile batched kernel: one launch
+    // produces both `qkv_mixed_f32 = attn_qkv · x_norm` and
+    // `z_f32 = attn_gate · x_norm` across all N slots, with the Q8_1
+    // activation strip staged into LDS once per (R=4 row tile, outer
+    // iter) instead of HBM-fetched per row per call. cert.md:
+    // 1.32–1.80× vs the two-separate-launch path on GDN-class shapes.
+    // Mirrors the m=1 fused dispatch in `forward_gdn_decode_tp`.
+    let fuse_qkv_gate_q4_0 = attn_qkv.dtype == flambeau_quant::GgmlDType::Q4_0
+        && attn_gate.dtype == flambeau_quant::GgmlDType::Q4_0
+        && (2..=4).contains(&n_tokens)
+        && std::env::var("FLAMBEAU_GDN_FUSE_Q4_0_ROWTILE").as_deref() != Ok("0");
+    if fuse_qkv_gate_q4_0 {
+        mmvq_q4_0_gate_up_row_tile_batched(
+            ops,
+            stream,
+            attn_qkv.ptr,
+            attn_gate.ptr,
+            scratch.x_q8_1,
+            scratch.qkv_mixed_f32,
+            scratch.z_f32,
+            local_conv_channels,
+            local_d_inner,
+            hidden,
+            n_tokens,
+        )
+        .context("attn_qkv + attn_gate (TP batched-decode) fused row-tile Q4_0")?;
+    } else {
+        run_qmatmul_from_tensor(
+            ops, stream, attn_qkv,
+            scratch.x_q8_1, scratch.x_q8_1_mmq, scratch.qkv_mixed_f32,
+            n_tokens, hidden, local_conv_channels, "attn_qkv (TP batched-decode)",
+        )?;
+        run_qmatmul_from_tensor(
+            ops, stream, attn_gate,
+            scratch.x_q8_1, scratch.x_q8_1_mmq, scratch.z_f32,
+            n_tokens, hidden, local_d_inner, "attn_gate (TP batched-decode)",
+        )?;
+    }
     run_qmatmul_from_tensor(
         ops, stream, ssm_alpha,
         scratch.x_q8_1, scratch.x_q8_1_mmq, scratch.alpha_f32,
@@ -1224,105 +1251,239 @@ pub fn forward_gdn_decode_batched_tp(
     let q_scale = 1.0f32 / (head_k_dim as f32).sqrt();
     let rep_inner_layout = cfg.arch == "qwen3next";
 
-    for s in 0..n_tokens {
-        // Slot pointers into the batched scratch.
-        let slot_qkv =
-            DevicePtr(scratch.qkv_mixed_f32.as_usize() + s * row_qkv_bytes);
-        let slot_conv_out =
-            DevicePtr(scratch.conv_out.as_usize() + s * row_qkv_bytes);
-        let slot_silu_out =
-            DevicePtr(scratch.silu_out.as_usize() + s * row_qkv_bytes);
-        let slot_q_norm =
-            DevicePtr(scratch.q_norm_f32.as_usize() + s * row_qk_bytes);
-        let slot_k_norm =
-            DevicePtr(scratch.k_norm_f32.as_usize() + s * row_qk_bytes);
-        let slot_v =
-            DevicePtr(scratch.v_f32.as_usize() + s * row_v_bytes);
-        let slot_alpha =
-            DevicePtr(scratch.alpha_f32.as_usize() + s * row_alpha_bytes);
-        let slot_beta =
-            DevicePtr(scratch.beta_f32.as_usize() + s * row_alpha_bytes);
-        let slot_state_out =
-            DevicePtr(scratch.state_out.as_usize() + s * row_state_out_bytes);
-        let slot_out_normed =
-            DevicePtr(scratch.out_normed.as_usize() + s * row_out_normed_bytes);
-        let _ = row_z_bytes; // z_f32 read in Stage E batched; row stride for slicing not needed here.
+    let batch_state_step = std::env::var("FLAMBEAU_GDN_STATE_STEP_BATCHED")
+        .as_deref()
+        != Ok("0");
+    let batch_pass_a = std::env::var("FLAMBEAU_GDN_PASSA_BATCHED")
+        .as_deref()
+        != Ok("0");
+    let batch_conv_trio = std::env::var("FLAMBEAU_GDN_CONV_TRIO_BATCHED")
+        .as_deref()
+        != Ok("0");
+    let _ = row_z_bytes; // z_f32 sliced in Stage E batched only.
 
-        // 6a. Assemble conv_input from slot's history + slot's qkv_mixed
-        // (n_tokens=1 per slot).
-        assemble_conv_input_prefill(
-            device, stream,
-            layer_states[s].conv_history,
-            slot_qkv,
-            scratch.conv_input,
-            1, local_conv_channels, conv_kernel,
-        )?;
-        // 6b. Conv1d: K-row input → 1-row output for this slot.
-        causal_conv1d_f32(
+    // === Pass A.1: GDN conv-trio. ===
+    // Per slot the trio is assemble_conv_input + causal_conv1d_f32 +
+    // shift_conv_history (3 launches per slot per layer). With each
+    // slot's `conv_history` living in its own device allocation, the
+    // legacy fallback walks one slot at a time. The batched-slots
+    // variant takes a [N] u64 device array of per-slot conv_history
+    // base pointers and does all three ops in one fused kernel
+    // launch per layer.
+    if batch_conv_trio {
+        let slot_ptrs: Vec<u64> = layer_states
+            .iter()
+            .map(|ls| ls.conv_history.as_usize() as u64)
+            .collect();
+        // SAFETY: slot_ptrs lives on the host stack/heap for this call;
+        // memcpy_async with non-pinned host source stages synchronously
+        // before returning, so the host slice is consumed before this
+        // function returns. scratch.slot_conv_history_ptrs is sized
+        // for max_tokens * 8 bytes at allocation time.
+        unsafe {
+            device.memcpy_async(
+                stream,
+                CopyDirection::HostToDevice,
+                scratch.slot_conv_history_ptrs,
+                DevicePtr(slot_ptrs.as_ptr() as usize),
+                std::mem::size_of_val(slot_ptrs.as_slice()),
+            )?;
+        }
+        flambeau_ops::hip::recurrent::gdn_conv_trio_decode_f32_batched_slots(
             ops, stream,
-            scratch.conv_input, ssm_conv1d.ptr, slot_conv_out,
-            1, local_conv_channels, conv_kernel,
+            scratch.slot_conv_history_ptrs,
+            scratch.qkv_mixed_f32,
+            ssm_conv1d.ptr,
+            scratch.conv_out,
+            n_tokens, local_conv_channels, conv_kernel,
         )
-        .context("gdn batched-decode (TP) causal_conv1d_f32 slot")?;
-        // 6c. Update slot's conv_history with the new row.
-        shift_conv_history_prefill(
-            device, stream,
-            scratch.conv_input,
-            layer_states[s].conv_history,
-            1, local_conv_channels, conv_kernel,
-        )?;
+        .context("gdn batched-decode (TP) fused conv-trio batched-slots")?;
+    } else {
+        for s in 0..n_tokens {
+            let slot_qkv =
+                DevicePtr(scratch.qkv_mixed_f32.as_usize() + s * row_qkv_bytes);
+            let slot_conv_out =
+                DevicePtr(scratch.conv_out.as_usize() + s * row_qkv_bytes);
 
-        // 7. silu(conv_out) on this slot's row.
+            assemble_conv_input_prefill(
+                device, stream,
+                layer_states[s].conv_history,
+                slot_qkv,
+                scratch.conv_input,
+                1, local_conv_channels, conv_kernel,
+            )?;
+            causal_conv1d_f32(
+                ops, stream,
+                scratch.conv_input, ssm_conv1d.ptr, slot_conv_out,
+                1, local_conv_channels, conv_kernel,
+            )
+            .context("gdn batched-decode (TP) causal_conv1d_f32 slot")?;
+            shift_conv_history_prefill(
+                device, stream,
+                scratch.conv_input,
+                layer_states[s].conv_history,
+                1, local_conv_channels, conv_kernel,
+            )?;
+        }
+    }
+
+    // === Pass A.2: batched pointwise (silu / split_qkv / l2_norm / scale). ===
+    // All these ops are slot-major contiguous in scratch, so a single
+    // launch with `n = n_tokens * local_*` covers every slot. Cuts
+    // 5×N launches per layer per token to 5 total.
+    if batch_pass_a {
         silu_f32(
-            ops, stream, slot_conv_out, slot_silu_out, local_conv_channels,
+            ops, stream, scratch.conv_out, scratch.silu_out,
+            n_tokens * local_conv_channels,
         )
-        .context("gdn batched-decode (TP) silu_f32(conv_out) slot")?;
-
-        // 8. Split silu_out → Q | K | V at local sizes (1-row).
+        .context("gdn batched-decode (TP) silu_f32 (pass A.2)")?;
         gdn_split_qkv_f32(
             ops, stream,
-            slot_silu_out, slot_q_norm, slot_k_norm, slot_v,
-            1, local_qk_size, local_v_size,
+            scratch.silu_out,
+            scratch.q_norm_f32, scratch.k_norm_f32, scratch.v_f32,
+            n_tokens, local_qk_size, local_v_size,
         )
-        .context("gdn batched-decode (TP) gdn_split_qkv_f32 slot")?;
-
-        // 9. L2-normalise Q and K per local head.
+        .context("gdn batched-decode (TP) gdn_split_qkv_f32 (pass A.2)")?;
         l2_norm_f32(
-            ops, stream, slot_q_norm, slot_q_norm,
-            local_num_k_heads, head_k_dim, cfg.rms_norm_eps,
+            ops, stream, scratch.q_norm_f32, scratch.q_norm_f32,
+            n_tokens * local_num_k_heads, head_k_dim, cfg.rms_norm_eps,
         )
-        .context("gdn batched-decode (TP) l2_norm Q slot")?;
+        .context("gdn batched-decode (TP) l2_norm_f32 Q (pass A.2)")?;
         l2_norm_f32(
-            ops, stream, slot_k_norm, slot_k_norm,
-            local_num_k_heads, head_k_dim, cfg.rms_norm_eps,
+            ops, stream, scratch.k_norm_f32, scratch.k_norm_f32,
+            n_tokens * local_num_k_heads, head_k_dim, cfg.rms_norm_eps,
         )
-        .context("gdn batched-decode (TP) l2_norm K slot")?;
-
-        // 10. Scale Q by 1/sqrt(head_k_dim).
+        .context("gdn batched-decode (TP) l2_norm_f32 K (pass A.2)")?;
         scale_f32(
-            ops, stream, slot_q_norm, slot_q_norm,
-            local_qk_size, q_scale,
+            ops, stream, scratch.q_norm_f32, scratch.q_norm_f32,
+            n_tokens * local_qk_size, q_scale,
         )
-        .context("gdn batched-decode (TP) scale_f32 Q slot")?;
+        .context("gdn batched-decode (TP) scale_f32 Q (pass A.2)")?;
+    } else {
+        for s in 0..n_tokens {
+            let slot_conv_out =
+                DevicePtr(scratch.conv_out.as_usize() + s * row_qkv_bytes);
+            let slot_silu_out =
+                DevicePtr(scratch.silu_out.as_usize() + s * row_qkv_bytes);
+            let slot_q_norm =
+                DevicePtr(scratch.q_norm_f32.as_usize() + s * row_qk_bytes);
+            let slot_k_norm =
+                DevicePtr(scratch.k_norm_f32.as_usize() + s * row_qk_bytes);
+            let slot_v =
+                DevicePtr(scratch.v_f32.as_usize() + s * row_v_bytes);
 
-        // 11–12. Per-slot state-step. n_tokens=1 update on slot's state.
-        gdn_state_step_alphabeta_f32_s128(
+            silu_f32(
+                ops, stream, slot_conv_out, slot_silu_out, local_conv_channels,
+            )
+            .context("gdn batched-decode (TP) silu_f32(conv_out) slot")?;
+            gdn_split_qkv_f32(
+                ops, stream,
+                slot_silu_out, slot_q_norm, slot_k_norm, slot_v,
+                1, local_qk_size, local_v_size,
+            )
+            .context("gdn batched-decode (TP) gdn_split_qkv_f32 slot")?;
+            l2_norm_f32(
+                ops, stream, slot_q_norm, slot_q_norm,
+                local_num_k_heads, head_k_dim, cfg.rms_norm_eps,
+            )
+            .context("gdn batched-decode (TP) l2_norm Q slot")?;
+            l2_norm_f32(
+                ops, stream, slot_k_norm, slot_k_norm,
+                local_num_k_heads, head_k_dim, cfg.rms_norm_eps,
+            )
+            .context("gdn batched-decode (TP) l2_norm K slot")?;
+            scale_f32(
+                ops, stream, slot_q_norm, slot_q_norm,
+                local_qk_size, q_scale,
+            )
+            .context("gdn batched-decode (TP) scale_f32 Q slot")?;
+        }
+    }
+
+    // === Pass A.3: per-slot state-step (when batched_state_step is off). ===
+    // When on, replaced by one batched call below.
+    if !batch_state_step {
+        for s in 0..n_tokens {
+            let slot_q_norm =
+                DevicePtr(scratch.q_norm_f32.as_usize() + s * row_qk_bytes);
+            let slot_k_norm =
+                DevicePtr(scratch.k_norm_f32.as_usize() + s * row_qk_bytes);
+            let slot_v =
+                DevicePtr(scratch.v_f32.as_usize() + s * row_v_bytes);
+            let slot_alpha =
+                DevicePtr(scratch.alpha_f32.as_usize() + s * row_alpha_bytes);
+            let slot_beta =
+                DevicePtr(scratch.beta_f32.as_usize() + s * row_alpha_bytes);
+            let slot_state_out =
+                DevicePtr(scratch.state_out.as_usize() + s * row_state_out_bytes);
+            let slot_out_normed =
+                DevicePtr(scratch.out_normed.as_usize() + s * row_out_normed_bytes);
+
+            gdn_state_step_alphabeta_f32_s128(
+                ops, stream,
+                slot_q_norm, slot_k_norm, slot_v,
+                slot_alpha, slot_beta,
+                ssm_dt_bias.ptr, ssm_a.ptr,
+                layer_states[s].state, layer_states[s].state, slot_state_out,
+                1, local_num_v_heads, 1, n_rep, rep_inner_layout,
+            )
+            .context("gdn batched-decode (TP) gdn_state_step_alphabeta_f32_s128 slot")?;
+            rmsnorm_f32(
+                ops, stream,
+                slot_state_out, ssm_norm.ptr, slot_out_normed,
+                local_num_v_heads, head_v_dim, cfg.rms_norm_eps,
+            )
+            .context("gdn batched-decode (TP) ssm_norm slot")?;
+        }
+    }
+
+    // === Stage D' (batched state-step): one launch over all N slots. ===
+    // Per-slot Q/K/V/α/β are already laid out slot-major in scratch as
+    // `[N, H, head_dim]`; only the per-slot `GdnLayerState::state`
+    // pointers differ, so we HtoD-copy a `[N] u64` array of slot state
+    // base pointers and let the kernel dereference indirectly.
+    if batch_state_step {
+        let slot_ptrs: Vec<u64> =
+            layer_states.iter().map(|ls| ls.state.as_usize() as u64).collect();
+        // HtoD on the same stream as the state-step kernel; ordering is
+        // guaranteed by stream-queue semantics so no host-side sync
+        // needed. SAFETY: slot_ptrs lives on the host for the lifetime
+        // of this call frame; `memcpy_async` only requires the host
+        // buffer to remain valid until the next operation on this
+        // stream observes the copy, which happens before this function
+        // returns. scratch.slot_state_ptrs was sized for max_tokens*8 B.
+        unsafe {
+            device.memcpy_async(
+                stream,
+                CopyDirection::HostToDevice,
+                scratch.slot_state_ptrs,
+                DevicePtr(slot_ptrs.as_ptr() as usize),
+                std::mem::size_of_val(slot_ptrs.as_slice()),
+            )?;
+        }
+
+        gdn_state_step_alphabeta_f32_s128_batched_slots(
             ops, stream,
-            slot_q_norm, slot_k_norm, slot_v,
-            slot_alpha, slot_beta,
+            scratch.q_norm_f32, scratch.k_norm_f32, scratch.v_f32,
+            scratch.alpha_f32, scratch.beta_f32,
             ssm_dt_bias.ptr, ssm_a.ptr,
-            layer_states[s].state, layer_states[s].state, slot_state_out,
-            1, local_num_v_heads, 1, n_rep, rep_inner_layout,
+            scratch.slot_state_ptrs, scratch.slot_state_ptrs,
+            scratch.state_out,
+            n_tokens, local_num_v_heads, 1, n_rep, rep_inner_layout,
         )
-        .context("gdn batched-decode (TP) gdn_state_step_alphabeta_f32_s128 slot")?;
+        .context("gdn batched-decode (TP) batched-slots state-step")?;
 
-        // 13. ssm_norm per-(local) head over this slot's [num_v_heads, head_v_dim].
+        // Batched ssm_norm: scratch.state_out / scratch.out_normed are
+        // slot-major `[N, num_v_heads, head_v_dim]`. rmsnorm_f32
+        // processes `n_rows` independently, so one call with
+        // `n_rows = N * local_num_v_heads` covers every slot.
         rmsnorm_f32(
-            ops, stream,
-            slot_state_out, ssm_norm.ptr, slot_out_normed,
-            local_num_v_heads, head_v_dim, cfg.rms_norm_eps,
+            ops, stream, scratch.state_out, ssm_norm.ptr, scratch.out_normed,
+            n_tokens * local_num_v_heads, head_v_dim, cfg.rms_norm_eps,
         )
-        .context("gdn batched-decode (TP) ssm_norm slot")?;
+        .context("gdn batched-decode (TP) ssm_norm batched (post-state-step)")?;
+        let _ = row_state_out_bytes; // kept for non-batched fallback above
+        let _ = row_out_normed_bytes;
     }
 
     // === Stage E: swiglu(z, out_normed) → gated_f32 (batched) ===

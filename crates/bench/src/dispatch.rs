@@ -36,10 +36,9 @@ pub struct DispatchTable {
     /// Prefill-path MMQ (matrix × matrix).
     #[serde(default)]
     pub qmatmul_mmq: Vec<DispatchRow>,
-    /// 1.b — F16-weight × Q8_1 / BF16-weight × BF16 mmvq
-    /// rows. The wrappers short-circuit the dispatch table for these
-    /// dtypes (no shape selection); rows live here purely to gate
-    /// cert-check.
+    /// F16-weight × Q8_1 mmvq rows. The wrappers short-circuit the
+    /// dispatch table for these dtypes (no shape selection); rows
+    /// live here purely to gate cert-check.
     #[serde(default)]
     pub qmatmul_mmvq: Vec<DispatchRow>,
     /// fused decode path — RMSNorm, SwiGLU, RoPE, softmax, attention.
@@ -59,15 +58,6 @@ pub struct DispatchTable {
     pub cast_f32_f16: Vec<DispatchRow>,
     #[serde(default)]
     pub cast_f16_f32: Vec<DispatchRow>,
-    /// BF16 cast surfaces.
-    #[serde(default)]
-    pub cast_f32_bf16: Vec<DispatchRow>,
-    #[serde(default)]
-    pub cast_bf16_f32: Vec<DispatchRow>,
-    #[serde(default)]
-    pub cast_f16_bf16: Vec<DispatchRow>,
-    #[serde(default)]
-    pub cast_bf16_f16: Vec<DispatchRow>,
     #[serde(default)]
     pub causal_conv1d: Vec<DispatchRow>,
     #[serde(default)]
@@ -194,30 +184,6 @@ pub fn cert_check(repo_root: &Path, dispatch_path: &Path) -> Result<CertCheckRep
         }
     }
     for row in &table.cast_f16_f32 {
-        rows_checked += 1;
-        if let Err(e) = check_one(repo_root, row) {
-            failures.push((row.r#impl.clone(), e));
-        }
-    }
-    for row in &table.cast_f32_bf16 {
-        rows_checked += 1;
-        if let Err(e) = check_one(repo_root, row) {
-            failures.push((row.r#impl.clone(), e));
-        }
-    }
-    for row in &table.cast_bf16_f32 {
-        rows_checked += 1;
-        if let Err(e) = check_one(repo_root, row) {
-            failures.push((row.r#impl.clone(), e));
-        }
-    }
-    for row in &table.cast_f16_bf16 {
-        rows_checked += 1;
-        if let Err(e) = check_one(repo_root, row) {
-            failures.push((row.r#impl.clone(), e));
-        }
-    }
-    for row in &table.cast_bf16_f16 {
         rows_checked += 1;
         if let Err(e) = check_one(repo_root, row) {
             failures.push((row.r#impl.clone(), e));

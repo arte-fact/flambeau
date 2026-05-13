@@ -27,8 +27,18 @@ use flambeau_core::DevicePtr;
 use flambeau_ops::hip::{
     cast::{cast_f16_to_f32, cast_f32_to_f16},
     moe::{
+        indexed_moe_mmq_iq1_m_down_tile8, indexed_moe_mmq_iq1_m_gate_up_tile8,
+        indexed_moe_mmq_iq1_s_down_tile8, indexed_moe_mmq_iq1_s_gate_up_tile8,
+        indexed_moe_mmq_iq2_s_down_tile8, indexed_moe_mmq_iq2_s_gate_up_tile8,
+        indexed_moe_mmq_iq2_xs_down_tile8, indexed_moe_mmq_iq2_xs_gate_up_tile8,
+        indexed_moe_mmq_iq2_xxs_down_tile8, indexed_moe_mmq_iq2_xxs_gate_up_tile8,
+        indexed_moe_mmq_iq3_s_down_tile8, indexed_moe_mmq_iq3_s_gate_up_tile8,
+        indexed_moe_mmq_iq3_xxs_down_tile8, indexed_moe_mmq_iq3_xxs_gate_up_tile8,
+        indexed_moe_mmq_iq4_nl_down_tile8, indexed_moe_mmq_iq4_nl_gate_up_tile8,
+        indexed_moe_mmq_iq4_xs_down_tile8, indexed_moe_mmq_iq4_xs_gate_up_tile8,
         indexed_moe_mmq_q4_0_down_tile8, indexed_moe_mmq_q4_0_gate_up_tile8,
-        indexed_moe_mmq_q4_1_down_tile8, indexed_moe_mmq_q8_0_down_tile8,
+        indexed_moe_mmq_q4_1_down_tile8, indexed_moe_mmq_q4_k_down_tile8,
+        indexed_moe_mmq_q4_k_gate_up_tile8, indexed_moe_mmq_q8_0_down_tile8,
         indexed_moe_mmq_q8_0_gate_up_tile8, moe_combine_no_residual_f16,
         moe_sort_by_expert_padded, shared_expert_scale_f32, MoeShape,
     },
@@ -414,15 +424,65 @@ pub fn forward_moe_ffn_prefill_tp(
     // wired through `MoeShape::n_rows`.
     let n_experts = cfg.num_experts;
     let total_pairs = n_tokens * top_k;
-    const TP_TILE8_THRESHOLD: usize = 32;
+    // Tile8 MMQ wins on the indexed-MoE prefill path whenever there are
+    // enough routing pairs to cover at least one tile column (TILE_N=8).
+    // At prefill `n_tokens >> top_k` so the original `n_tokens >= 32`
+    // gate was effectively the same. At batched-decode `n_tokens = N`
+    // (small) but `total_pairs = N * top_k` can also clear that bar —
+    // e.g. Qwen3.6-A3B's top_k=4 → N=2 hits 8 pairs, N=4 hits 16.
+    //
+    // Topology-aware: with no real TP overhead competing (`tp_world ==
+    // 1`, the pp-only-on-this-fn path), decode tile8 is a measured
+    // +13% win on pp2 / Qwen3.6-35B-A3B at N=4. Under real TP (`tp_world
+    // >= 2`), the AllReduce on residual at the layer boundary
+    // serialises against the tile8 launch and the per-call MMVQ path
+    // overlaps better with AR — measured -10% on tp2 at N=4 — so
+    // keep the original prefill-only threshold for TP.
+    const TP_TILE8_PREFILL_THRESHOLD: usize = 32;
+    const TP_TILE8_DECODE_PAIRS_MIN: usize = 8;
+    let allow_tile8_decode =
+        std::env::var("FLAMBEAU_MOE_TILE8_DECODE").as_deref() != Ok("0");
+    let tile8_engage = if tp_world == 1 {
+        n_tokens >= TP_TILE8_PREFILL_THRESHOLD
+            || (total_pairs >= TP_TILE8_DECODE_PAIRS_MIN && allow_tile8_decode)
+    } else {
+        n_tokens >= TP_TILE8_PREFILL_THRESHOLD
+    };
+    let gate_is_iq = matches!(
+        ffn_gate_exps.dtype,
+        GgmlDType::Iq4Nl
+            | GgmlDType::Iq4Xs
+            | GgmlDType::Iq3Xxs
+            | GgmlDType::Iq3S
+            | GgmlDType::Iq2Xxs
+            | GgmlDType::Iq2Xs
+            | GgmlDType::Iq2S
+            | GgmlDType::Iq1S
+            | GgmlDType::Iq1M
+    );
+    let down_is_iq = matches!(
+        ffn_down_exps.dtype,
+        GgmlDType::Iq4Nl
+            | GgmlDType::Iq4Xs
+            | GgmlDType::Iq3Xxs
+            | GgmlDType::Iq3S
+            | GgmlDType::Iq2Xxs
+            | GgmlDType::Iq2Xs
+            | GgmlDType::Iq2S
+            | GgmlDType::Iq1S
+            | GgmlDType::Iq1M
+    );
     let tile8_dt_ok = matches!(
         (ffn_gate_exps.dtype, ffn_down_exps.dtype),
         (GgmlDType::Q4_0, GgmlDType::Q4_0)
             | (GgmlDType::Q4_0, GgmlDType::Q8_0)
             | (GgmlDType::Q4_0, GgmlDType::Q4_1)
-            | (GgmlDType::Q8_0, GgmlDType::Q8_0),
-    );
-    if tile8_dt_ok && n_tokens >= TP_TILE8_THRESHOLD {
+            | (GgmlDType::Q8_0, GgmlDType::Q8_0)
+            | (GgmlDType::Q4K, GgmlDType::Q4K),
+    ) || (gate_is_iq && down_is_iq);
+    let gate_block_size = ffn_gate_exps.dtype.block_size();
+    let down_block_size = ffn_down_exps.dtype.block_size();
+    if tile8_dt_ok && tile8_engage {
         moe_sort_by_expert_padded(
             ops,
             stream,
@@ -441,6 +501,14 @@ pub fn forward_moe_ffn_prefill_tp(
         .context("moe (TP) prefill moe_sort_by_expert_padded")?;
         let padded_total_ub = total_pairs + n_experts * 8;
 
+        let gate_up_shape = MoeShape {
+            n_rows: local_inter,
+            n_tokens,
+            top_k,
+            n_sb_per_row: hidden / gate_block_size,
+            n_experts,
+            padded_total_upper_bound: padded_total_ub,
+        };
         match ffn_gate_exps.dtype {
             GgmlDType::Q4_0 => indexed_moe_mmq_q4_0_gate_up_tile8(
                 ops,
@@ -453,14 +521,7 @@ pub fn forward_moe_ffn_prefill_tp(
                 scratch.sort_padded_offsets,
                 scratch.gate_out_f32,
                 scratch.up_out_f32,
-                MoeShape {
-                    n_rows: local_inter,
-                    n_tokens,
-                    top_k,
-                    n_sb_per_row: hidden / 32,
-                    n_experts,
-                    padded_total_upper_bound: padded_total_ub,
-                },
+                gate_up_shape,
             )
             .context("moe (TP) prefill gate+up q4_0 tile8")?,
             GgmlDType::Q8_0 => indexed_moe_mmq_q8_0_gate_up_tile8(
@@ -474,16 +535,77 @@ pub fn forward_moe_ffn_prefill_tp(
                 scratch.sort_padded_offsets,
                 scratch.gate_out_f32,
                 scratch.up_out_f32,
-                MoeShape {
-                    n_rows: local_inter,
-                    n_tokens,
-                    top_k,
-                    n_sb_per_row: hidden / 32,
-                    n_experts,
-                    padded_total_upper_bound: padded_total_ub,
-                },
+                gate_up_shape,
             )
             .context("moe (TP) prefill gate+up q8_0 tile8")?,
+            GgmlDType::Q4K => indexed_moe_mmq_q4_k_gate_up_tile8(
+                ops,
+                stream,
+                ffn_gate_exps.ptr,
+                ffn_up_exps.ptr,
+                scratch.x_q8_1,
+                scratch.expert_ids,
+                scratch.sort_sorted_pair_idx_padded,
+                scratch.sort_padded_offsets,
+                scratch.gate_out_f32,
+                scratch.up_out_f32,
+                gate_up_shape,
+            )
+            .context("moe (TP) prefill gate+up q4_k tile8")?,
+            GgmlDType::Iq4Xs => indexed_moe_mmq_iq4_xs_gate_up_tile8(
+                ops, stream, ffn_gate_exps.ptr, ffn_up_exps.ptr, scratch.x_q8_1,
+                scratch.expert_ids, scratch.sort_sorted_pair_idx_padded,
+                scratch.sort_padded_offsets, scratch.gate_out_f32, scratch.up_out_f32,
+                gate_up_shape,
+            ).context("moe (TP) prefill gate+up iq4_xs tile8")?,
+            GgmlDType::Iq4Nl => indexed_moe_mmq_iq4_nl_gate_up_tile8(
+                ops, stream, ffn_gate_exps.ptr, ffn_up_exps.ptr, scratch.x_q8_1,
+                scratch.expert_ids, scratch.sort_sorted_pair_idx_padded,
+                scratch.sort_padded_offsets, scratch.gate_out_f32, scratch.up_out_f32,
+                gate_up_shape,
+            ).context("moe (TP) prefill gate+up iq4_nl tile8")?,
+            GgmlDType::Iq3Xxs => indexed_moe_mmq_iq3_xxs_gate_up_tile8(
+                ops, stream, ffn_gate_exps.ptr, ffn_up_exps.ptr, scratch.x_q8_1,
+                scratch.expert_ids, scratch.sort_sorted_pair_idx_padded,
+                scratch.sort_padded_offsets, scratch.gate_out_f32, scratch.up_out_f32,
+                gate_up_shape,
+            ).context("moe (TP) prefill gate+up iq3_xxs tile8")?,
+            GgmlDType::Iq3S => indexed_moe_mmq_iq3_s_gate_up_tile8(
+                ops, stream, ffn_gate_exps.ptr, ffn_up_exps.ptr, scratch.x_q8_1,
+                scratch.expert_ids, scratch.sort_sorted_pair_idx_padded,
+                scratch.sort_padded_offsets, scratch.gate_out_f32, scratch.up_out_f32,
+                gate_up_shape,
+            ).context("moe (TP) prefill gate+up iq3_s tile8")?,
+            GgmlDType::Iq2Xxs => indexed_moe_mmq_iq2_xxs_gate_up_tile8(
+                ops, stream, ffn_gate_exps.ptr, ffn_up_exps.ptr, scratch.x_q8_1,
+                scratch.expert_ids, scratch.sort_sorted_pair_idx_padded,
+                scratch.sort_padded_offsets, scratch.gate_out_f32, scratch.up_out_f32,
+                gate_up_shape,
+            ).context("moe (TP) prefill gate+up iq2_xxs tile8")?,
+            GgmlDType::Iq2Xs => indexed_moe_mmq_iq2_xs_gate_up_tile8(
+                ops, stream, ffn_gate_exps.ptr, ffn_up_exps.ptr, scratch.x_q8_1,
+                scratch.expert_ids, scratch.sort_sorted_pair_idx_padded,
+                scratch.sort_padded_offsets, scratch.gate_out_f32, scratch.up_out_f32,
+                gate_up_shape,
+            ).context("moe (TP) prefill gate+up iq2_xs tile8")?,
+            GgmlDType::Iq2S => indexed_moe_mmq_iq2_s_gate_up_tile8(
+                ops, stream, ffn_gate_exps.ptr, ffn_up_exps.ptr, scratch.x_q8_1,
+                scratch.expert_ids, scratch.sort_sorted_pair_idx_padded,
+                scratch.sort_padded_offsets, scratch.gate_out_f32, scratch.up_out_f32,
+                gate_up_shape,
+            ).context("moe (TP) prefill gate+up iq2_s tile8")?,
+            GgmlDType::Iq1S => indexed_moe_mmq_iq1_s_gate_up_tile8(
+                ops, stream, ffn_gate_exps.ptr, ffn_up_exps.ptr, scratch.x_q8_1,
+                scratch.expert_ids, scratch.sort_sorted_pair_idx_padded,
+                scratch.sort_padded_offsets, scratch.gate_out_f32, scratch.up_out_f32,
+                gate_up_shape,
+            ).context("moe (TP) prefill gate+up iq1_s tile8")?,
+            GgmlDType::Iq1M => indexed_moe_mmq_iq1_m_gate_up_tile8(
+                ops, stream, ffn_gate_exps.ptr, ffn_up_exps.ptr, scratch.x_q8_1,
+                scratch.expert_ids, scratch.sort_sorted_pair_idx_padded,
+                scratch.sort_padded_offsets, scratch.gate_out_f32, scratch.up_out_f32,
+                gate_up_shape,
+            ).context("moe (TP) prefill gate+up iq1_m tile8")?,
             _ => unreachable!("tile8_dt_ok already filtered gate dtype"),
         }
 
@@ -509,7 +631,7 @@ pub fn forward_moe_ffn_prefill_tp(
             n_rows: hidden,
             n_tokens: total_pairs,
             top_k: 1,
-            n_sb_per_row: local_inter / 32,
+            n_sb_per_row: local_inter / down_block_size,
             n_experts,
             padded_total_upper_bound: padded_total_ub,
         };
@@ -550,6 +672,63 @@ pub fn forward_moe_ffn_prefill_tp(
                 down_shape,
             )
             .context("moe (TP) prefill down q8_0 tile8")?,
+            GgmlDType::Q4K => indexed_moe_mmq_q4_k_down_tile8(
+                ops,
+                stream,
+                ffn_down_exps.ptr,
+                scratch.activated_q8_1,
+                scratch.expert_ids,
+                scratch.sort_sorted_pair_idx_padded,
+                scratch.sort_padded_offsets,
+                scratch.down_f32,
+                down_shape,
+            )
+            .context("moe (TP) prefill down q4_k tile8")?,
+            GgmlDType::Iq4Xs => indexed_moe_mmq_iq4_xs_down_tile8(
+                ops, stream, ffn_down_exps.ptr, scratch.activated_q8_1,
+                scratch.expert_ids, scratch.sort_sorted_pair_idx_padded,
+                scratch.sort_padded_offsets, scratch.down_f32, down_shape,
+            ).context("moe (TP) prefill down iq4_xs tile8")?,
+            GgmlDType::Iq4Nl => indexed_moe_mmq_iq4_nl_down_tile8(
+                ops, stream, ffn_down_exps.ptr, scratch.activated_q8_1,
+                scratch.expert_ids, scratch.sort_sorted_pair_idx_padded,
+                scratch.sort_padded_offsets, scratch.down_f32, down_shape,
+            ).context("moe (TP) prefill down iq4_nl tile8")?,
+            GgmlDType::Iq3Xxs => indexed_moe_mmq_iq3_xxs_down_tile8(
+                ops, stream, ffn_down_exps.ptr, scratch.activated_q8_1,
+                scratch.expert_ids, scratch.sort_sorted_pair_idx_padded,
+                scratch.sort_padded_offsets, scratch.down_f32, down_shape,
+            ).context("moe (TP) prefill down iq3_xxs tile8")?,
+            GgmlDType::Iq3S => indexed_moe_mmq_iq3_s_down_tile8(
+                ops, stream, ffn_down_exps.ptr, scratch.activated_q8_1,
+                scratch.expert_ids, scratch.sort_sorted_pair_idx_padded,
+                scratch.sort_padded_offsets, scratch.down_f32, down_shape,
+            ).context("moe (TP) prefill down iq3_s tile8")?,
+            GgmlDType::Iq2Xxs => indexed_moe_mmq_iq2_xxs_down_tile8(
+                ops, stream, ffn_down_exps.ptr, scratch.activated_q8_1,
+                scratch.expert_ids, scratch.sort_sorted_pair_idx_padded,
+                scratch.sort_padded_offsets, scratch.down_f32, down_shape,
+            ).context("moe (TP) prefill down iq2_xxs tile8")?,
+            GgmlDType::Iq2Xs => indexed_moe_mmq_iq2_xs_down_tile8(
+                ops, stream, ffn_down_exps.ptr, scratch.activated_q8_1,
+                scratch.expert_ids, scratch.sort_sorted_pair_idx_padded,
+                scratch.sort_padded_offsets, scratch.down_f32, down_shape,
+            ).context("moe (TP) prefill down iq2_xs tile8")?,
+            GgmlDType::Iq2S => indexed_moe_mmq_iq2_s_down_tile8(
+                ops, stream, ffn_down_exps.ptr, scratch.activated_q8_1,
+                scratch.expert_ids, scratch.sort_sorted_pair_idx_padded,
+                scratch.sort_padded_offsets, scratch.down_f32, down_shape,
+            ).context("moe (TP) prefill down iq2_s tile8")?,
+            GgmlDType::Iq1S => indexed_moe_mmq_iq1_s_down_tile8(
+                ops, stream, ffn_down_exps.ptr, scratch.activated_q8_1,
+                scratch.expert_ids, scratch.sort_sorted_pair_idx_padded,
+                scratch.sort_padded_offsets, scratch.down_f32, down_shape,
+            ).context("moe (TP) prefill down iq1_s tile8")?,
+            GgmlDType::Iq1M => indexed_moe_mmq_iq1_m_down_tile8(
+                ops, stream, ffn_down_exps.ptr, scratch.activated_q8_1,
+                scratch.expert_ids, scratch.sort_sorted_pair_idx_padded,
+                scratch.sort_padded_offsets, scratch.down_f32, down_shape,
+            ).context("moe (TP) prefill down iq1_m tile8")?,
             _ => unreachable!("tile8_dt_ok already filtered down dtype"),
         }
 

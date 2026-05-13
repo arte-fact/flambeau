@@ -1,0 +1,85 @@
+{
+  "started": "2026-05-12T21:32:04.691159+00:00",
+  "max_tokens": 256,
+  "concurrencies": [
+    1,
+    2
+  ],
+  "cells": [
+    {
+      "model": "qwen35_9B_q3_k_s",
+      "topo": "pp2tp2",
+      "path": "no_batched",
+      "boot_secs": 3.1660025119781494,
+      "port": 50339,
+      "log": "/artefact/flambeau/scripts/bench/logs/qwen35_9B_q3_k_s__pp2tp2__no_batched.log",
+      "concurrency_results": [
+        {
+          "n_concurrent": 1,
+          "wall_ms": 134.54134701169096,
+          "n_ok": 0,
+          "n_err": 1,
+          "errs": [
+            "no first chunk"
+          ],
+          "per_stream": []
+        },
+        {
+          "n_concurrent": 2,
+          "wall_ms": 295.80971399263944,
+          "n_ok": 0,
+          "n_err": 2,
+          "errs": [
+            "no first chunk",
+            "no first chunk"
+          ],
+          "per_stream": []
+        }
+      ],
+      "warmup": {
+        "prefill_ms": null,
+        "decode_ms": null,
+        "completion_tokens": null,
+        "err": "no first chunk"
+      }
+    },
+    {
+      "model": "qwen35_9B_q3_k_s",
+      "topo": "pp2tp2",
+      "path": "batched",
+      "boot_secs": 3.178093194961548,
+      "port": 35673,
+      "log": "/artefact/flambeau/scripts/bench/logs/qwen35_9B_q3_k_s__pp2tp2__batched.log",
+      "concurrency_results": [
+        {
+          "n_concurrent": 1,
+          "wall_ms": 130.57815899082925,
+          "n_ok": 0,
+          "n_err": 1,
+          "errs": [
+            "no first chunk"
+          ],
+          "per_stream": []
+        },
+        {
+          "n_concurrent": 2,
+          "wall_ms": 243.70594300853554,
+          "n_ok": 0,
+          "n_err": 2,
+          "errs": [
+            "no first chunk",
+            "no first chunk"
+          ],
+          "per_stream": []
+        }
+      ],
+      "warmup": {
+        "prefill_ms": null,
+        "decode_ms": null,
+        "completion_tokens": null,
+        "err": "no first chunk"
+      }
+    }
+  ],
+  "finished": "2026-05-12T21:32:19.439711+00:00"
+}

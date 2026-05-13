@@ -134,6 +134,29 @@ typedef struct {
 } flambeau_block_q5_1;
 static_assert(sizeof(flambeau_block_q5_1) == 2 + 2 + 4 + QK5_1 / 2, "block_q5_1 size");
 
+// Q2_K — 2-bit K-quant, super-block of 256 elements. Byte-identical to
+// ggml-common.h block_q2_K + flambeau-quant's BlockQ2K.
+typedef struct {
+    uint8_t   scales[QK_K / 16];           // 16 × packed 4-bit (scale, min)
+    uint8_t   qs[QK_K / 4];                // 64 bytes, 4 elements / byte
+    fb_fp16_t d;                           // super-block scale
+    fb_fp16_t dmin;                        // super-block min scale
+} flambeau_block_q2_K;
+static_assert(sizeof(flambeau_block_q2_K) == QK_K / 16 + QK_K / 4 + 4,
+              "block_q2_K size");
+
+// Q3_K — 3-bit K-quant, super-block of 256 elements. Byte-identical to
+// ggml-common.h block_q3_K + flambeau-quant's BlockQ3K. High bit lives in
+// `hmask`; low 2 bits in `qs`; signed 6-bit scales packed in 12 bytes.
+typedef struct {
+    uint8_t   hmask[QK_K / 8];             // 32 bytes — 1 bit per element
+    uint8_t   qs[QK_K / 4];                // 64 bytes — 2 bits per element
+    uint8_t   scales[12];                  // 16 × signed 6-bit scales
+    fb_fp16_t d;                           // super-block scale
+} flambeau_block_q3_K;
+static_assert(sizeof(flambeau_block_q3_K) == QK_K / 8 + QK_K / 4 + 12 + 2,
+              "block_q3_K size");
+
 // Q4_K — 4-bit K-quant, super-block of 256 elements split into 8 sub-blocks
 // of 32. Byte-identical to ggml-common.h block_q4_K and to flambeau-quant's
 // BlockQ4K.
@@ -218,6 +241,39 @@ __device__ __forceinline__ void flambeau_q4k_scale_min(
     }
 }
 
+// Byte-wise u32 load. Q3_K block size is 110 B (non-multiple-of-4), so
+// scales[], qs[], and hmask[] alternate 4-byte / 2-byte alignment across
+// consecutive blocks; a `(uint32_t*)` cast there is unaligned UB on the
+// 2-byte-aligned half (empirically 18-137% rel-err in Q3_K MMVQ before fix).
+__device__ __forceinline__ uint32_t flambeau_load_u32_unaligned(const uint8_t* p) {
+    return (uint32_t) p[0]
+         | ((uint32_t) p[1] << 8)
+         | ((uint32_t) p[2] << 16)
+         | ((uint32_t) p[3] << 24);
+}
+
+// Unpack the packed 6-bit signed scales (12 bytes) into 16 raw bytes in
+// [0, 63]. Caller applies the -32 bias at use time. Uses byte-wise loads
+// to handle Q3_K's misaligned scales[] across blocks.
+__device__ __forceinline__ void flambeau_q3k_unpack_scales(
+    const uint8_t* __restrict__ scales, int8_t out[16]) {
+    const uint32_t k1 = 0x0303'0303u;
+    const uint32_t k2 = 0x0f0f'0f0fu;
+    uint32_t aux[4];
+    aux[0] = flambeau_load_u32_unaligned(scales);
+    aux[1] = flambeau_load_u32_unaligned(scales + 4);
+    const uint32_t tmp = flambeau_load_u32_unaligned(scales + 8);
+    aux[2] = ((aux[0] >> 4) & k2) | (((tmp >> 4) & k1) << 4);
+    aux[3] = ((aux[1] >> 4) & k2) | (((tmp >> 6) & k1) << 4);
+    aux[0] = (aux[0] & k2) | ((tmp & k1) << 4);
+    aux[1] = (aux[1] & k2) | (((tmp >> 2) & k1) << 4);
+    const uint8_t* bytes = (const uint8_t*) aux;
+    #pragma unroll
+    for (int i = 0; i < 16; ++i) {
+        out[i] = (int8_t) bytes[i];
+    }
+}
+
 // Q5_K — 5-bit K-quant: 4-bit low nibble in `qs` + 1 high bit in `qh`.
 // Byte layout identical to flambeau-quant's BlockQ5K.
 typedef struct {
@@ -243,3 +299,165 @@ typedef struct {
 static_assert(sizeof(flambeau_block_q6_K) ==
                   QK_K / 2 + QK_K / 4 + QK_K / 16 + 2,
               "block_q6_K size");
+
+// Q8_K — 8-bit K-quant, super-block of 256 elements. Activation-side
+// quant (ggml uses it for K · Q dot products). Byte-identical to
+// ggml-common.h block_q8_K + flambeau-quant's BlockQ8K.
+typedef struct {
+    float   d;                             // super-block scale (F32)
+    int8_t  qs[QK_K];                      // 256 signed quants
+    int16_t bsums[QK_K / 16];              // per-16-elem sum of qs (precomputed)
+} flambeau_block_q8_K;
+static_assert(sizeof(flambeau_block_q8_K) == 4 + QK_K + QK_K / 16 * 2,
+              "block_q8_K size");
+
+// IQ4_NL — 4-bit non-linear quant, 32-element block. f16 scale + 16 bytes
+// of nibble-packed unsigned 4-bit codes. Reconstruction:
+//   y_i = d * KVALUES_IQ4NL[code_i]
+// where code_i indexes a 16-entry signed i8 LUT (ported from llama.cpp's
+// `kvalues_iq4nl`). Low nibble at byte j → elem j; high nibble at byte j →
+// elem j + 16. Byte-identical to ggml-common.h block_iq4_nl.
+typedef struct {
+    fb_fp16_t d;                  // per-block scale
+    uint8_t   qs[QK4_0 / 2];      // 16 bytes, 4-bit LUT indices (low | high)
+} flambeau_block_iq4_nl;
+static_assert(sizeof(flambeau_block_iq4_nl) == 2 + QK4_0 / 2,
+              "block_iq4_nl size");
+
+// IQ4_XS — 4-bit non-linear K-quant, super-block of 256 elements with 8
+// sub-blocks of 32. Per-sub-block signed 6-bit scale split into
+// `scales_l` (low 4 bits × 8 in 4 bytes) and `scales_h` (high 2 bits × 8
+// in u16). Reconstruction (per sub-block ib):
+//   ls = (scales_l[ib/2] >> (4*(ib&1)) & 0xF) | ((scales_h >> (2*ib)) & 3) << 4
+//   ls_signed = (i32) ls - 32                    (range [-32, 31])
+//   y = d * ls_signed * KVALUES_IQ4NL[code]      (same LUT as IQ4_NL)
+// qs layout: sub-block ib owns bytes qs[ib*16 .. ib*16+16]; low nibble →
+// elem 0..15 of sub-block, high nibble → elem 16..31. Byte-identical to
+// ggml-common.h block_iq4_xs.
+typedef struct {
+    fb_fp16_t d;                           // super-block scale
+    uint16_t  scales_h;                    // high 2 bits of each of 8 sub-block scales
+    uint8_t   scales_l[QK_K / 64];         // low 4 bits × 8 → 4 bytes
+    uint8_t   qs[QK_K / 2];                // 128 bytes, 4-bit LUT indices
+} flambeau_block_iq4_xs;
+static_assert(sizeof(flambeau_block_iq4_xs) == 2 + 2 + QK_K / 64 + QK_K / 2,
+              "block_iq4_xs size");
+
+// IQ3_XXS — 3-bit-ish (3.06 bpw) K-quant with codebook lookup. Super-block
+// of 256 elements; per-block layout:
+//   f16 d (2 bytes)
+//   u8 qs[96]:
+//     qs[0..64]   — 64 codebook indices (2 indices per ib32 × 4 groups × 8 ib32)
+//     qs[64..96]  — 32 packed (4-bit scale + 4 × 7-bit sign-LUT index) per ib32,
+//                   loaded as 8 × u32 with the scale at bits [28..32]
+// Byte-identical to ggml-common.h `block_iq3_xxs`.
+typedef struct {
+    fb_fp16_t d;
+    uint8_t   qs[QK_K / 4 + QK_K / 8];     // 64 + 32 = 96
+} flambeau_block_iq3_xxs;
+static_assert(sizeof(flambeau_block_iq3_xxs) == 2 + QK_K / 4 + QK_K / 8,
+              "block_iq3_xxs size");
+
+// IQ3_S — refined 3.44-bpw K-quant. Super-block of 256 elements with explicit
+// 9th-bit and sign arrays alongside the 8-bit codebook indices:
+//   f16 d (2 bytes)
+//   u8 qs[64]      — codebook low 8 bits (one byte per 4-element group)
+//   u8 qh[8]       — codebook 9th bit, one bit per qs byte (8 bytes pack 64 bits)
+//   u8 signs[32]   — per-byte 8-bit sign masks
+//   u8 scales[4]   — 4-bit nibble scales, two per byte, 8 sub-block scales total
+// Byte-identical to ggml-common.h `block_iq3_s`.
+typedef struct {
+    fb_fp16_t d;
+    uint8_t   qs[QK_K / 4];                // 64
+    uint8_t   qh[QK_K / 32];               //  8
+    uint8_t   signs[QK_K / 8];             // 32
+    uint8_t   scales[QK_K / 64];           //  4
+} flambeau_block_iq3_s;
+static_assert(sizeof(flambeau_block_iq3_s)
+              == 2 + QK_K / 4 + QK_K / 32 + QK_K / 8 + QK_K / 64,
+              "block_iq3_s size");
+
+// IQ2_XXS — 2.0625 bpw super-block (256 elems / 66 bytes). f16 d + 64 bytes
+// of u16 qs[32]. Per ib32: 8 qs bytes read as 2 × u32, top u32 holds the
+// 4-bit scale at [28..32] + 4 × 7-bit sign-LUT indices, bottom u32 holds
+// 4 × 8-bit codebook indices into IQ2XXS_GRID (256 × u64).
+typedef struct {
+    fb_fp16_t d;
+    uint8_t   qs[2 * QK_K / 8];           // 64 bytes (u16 × 32 viewed byte-wise)
+} flambeau_block_iq2_xxs;
+static_assert(sizeof(flambeau_block_iq2_xxs) == 2 + 2 * QK_K / 8,
+              "block_iq2_xxs size");
+
+// IQ2_XS — 2.3125 bpw. 256 elems / 74 bytes. f16 d + 64-byte u16 qs[32] +
+// 8-byte sub-block scales (8 × 4-bit nibbles, two per byte). Each qs u16
+// packs (9-bit grid index | 7-bit sign-LUT index).
+typedef struct {
+    fb_fp16_t d;
+    uint8_t   qs[2 * QK_K / 8];           // 64 bytes
+    uint8_t   scales[QK_K / 32];          //  8 bytes
+} flambeau_block_iq2_xs;
+static_assert(sizeof(flambeau_block_iq2_xs)
+              == 2 + 2 * QK_K / 8 + QK_K / 32,
+              "block_iq2_xs size");
+
+// IQ2_S — 2.5 bpw. 256 elems / 82 bytes. f16 d + qs[32] (low-8 of 10-bit
+// codebook index) + qs[32..64] (per-byte sign masks) + qh[8] (2 high bits
+// of the codebook index per qs byte, four bytes packed into one qh byte)
+// + scales[8] (8 × 4-bit nibbles, two per byte).
+typedef struct {
+    fb_fp16_t d;
+    uint8_t   qs[QK_K / 4];                // 64 bytes: [0..32] idx-low, [32..64] signs
+    uint8_t   qh[QK_K / 32];               //  8 bytes: 2 high bits per qs byte
+    uint8_t   scales[QK_K / 32];           //  8 bytes: 4-bit nibble pairs
+} flambeau_block_iq2_s;
+static_assert(sizeof(flambeau_block_iq2_s)
+              == 2 + QK_K / 4 + QK_K / 32 + QK_K / 32,
+              "block_iq2_s size");
+
+// IQ1_S — 1.5625 bpw. 256 elems / 50 bytes. f16 d + qs[32] (low-8 of
+// 11-bit codebook index) + qh[8] u16 (per-sub-block 3-bit scale + 1-bit
+// delta-sign + 4 × 3 high-bits of codebook indices in one u16).
+typedef struct {
+    fb_fp16_t d;
+    uint8_t   qs[QK_K / 8];                // 32 bytes
+    uint8_t   qh[2 * QK_K / 32];           // 16 bytes (u16 × 8)
+} flambeau_block_iq1_s;
+static_assert(sizeof(flambeau_block_iq1_s)
+              == 2 + QK_K / 8 + 2 * QK_K / 32,
+              "block_iq1_s size");
+
+// IQ1_M — 1.75 bpw. 256 elems / 56 bytes. NO per-block `d` in the bytes —
+// `d` is reassembled from 4 nibbles spread across the 4 u16 scale-words
+// (scales[]). qs[32] = low-8 codebook idx, qh[16] = pairs of (3-bit
+// high-idx + 1-bit delta-sign) × 2 per byte, scales[8] = 4 × u16 packing
+// (d-nibble + 2 × 3-bit sub-block scales).
+typedef struct {
+    uint8_t qs[QK_K / 8];                  // 32 bytes
+    uint8_t qh[QK_K / 16];                 // 16 bytes
+    uint8_t scales[QK_K / 32];             //  8 bytes
+} flambeau_block_iq1_m;
+static_assert(sizeof(flambeau_block_iq1_m)
+              == QK_K / 8 + QK_K / 16 + QK_K / 32,
+              "block_iq1_m size");
+
+// Shared signed-i8 LUT for IQ4_NL and IQ4_XS. Byte-identical port of
+// llama.cpp `kvalues_iq4nl` (ggml-common.h). Inline so each kernel TU
+// gets a register-resident copy without ODR conflicts; the compiler is
+// free to keep it in constant memory if launch occupancy benefits.
+__device__ __forceinline__ int8_t flambeau_iq4nl_lut(int idx) {
+    constexpr int8_t lut[16] = {
+        -127, -104, -83, -65, -49, -35, -22, -10,
+           1,   13,  25,  38,  53,  69,  89, 113,
+    };
+    return lut[idx & 0xF];
+}
+
+// Reconstruct the signed 6-bit sub-block scale for sub-block `ib` (0..7)
+// in an IQ4_XS super-block. Returns the bias-corrected i32 in [-32, 31].
+__device__ __forceinline__ int flambeau_iq4_xs_scale(
+    int ib, uint16_t scales_h, const uint8_t* __restrict__ scales_l
+) {
+    const int l_nib = (scales_l[ib >> 1] >> (4 * (ib & 1))) & 0x0F;
+    const int h_bits = (scales_h >> (2 * ib)) & 0x03;
+    return (l_nib | (h_bits << 4)) - 32;
+}

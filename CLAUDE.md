@@ -211,6 +211,14 @@ implementing.
   and a lower bound. If we hit the silicon ceiling and llama.cpp is
   faster, they have room; we file the diagnosis, we do not ship a
   regression to "catch up".
+- **No narrative comments.** Code comments describe what the code does
+  or why a non-obvious choice was made — they do not narrate the
+  refactor that produced them. No `// L1` / `// **#229**` / "Mirrors
+  llama.cpp X" / "saves 200 µs" / "memory note says…" / phase-number
+  markers. Session prose, ROI claims, and roadmap references belong in
+  the commit message, not the source file. Strip them before commit.
+  Bare technical minimum: invariants, safety, hidden constraints —
+  nothing else.
 
 ## Build / run conventions
 

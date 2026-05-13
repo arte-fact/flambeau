@@ -13,6 +13,7 @@ bytemuck.workspace = true
 byteorder.workspace = true
 half.workspace = true
 memmap2.workspace = true
+rayon.workspace = true
 tokenizers = { workspace = true }
 serde_json.workspace = true
 minijinja.workspace = true

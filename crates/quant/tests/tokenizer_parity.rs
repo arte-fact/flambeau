@@ -64,3 +64,24 @@ fn encode_longer_prompt() {
     eprintln!("encode('{text}') = {} tokens → '{back}'", ids.len());
     assert_eq!(back.trim(), text);
 }
+
+/// Qwen2/Qwen3 pre-tokenizer regex keeps optional leading punctuation
+/// attached to the following letters (`-time` → one chunk), so the BPE
+/// merge that produces vocab token 7019 (`-time`) fires. GPT-2's default
+/// regex would split into `["-", "time"]` and emit `[12, 1619]`.
+#[test]
+fn qwen35_dash_word_uses_punct_letter_merge() {
+    let Some(path) = gguf_path() else {
+        eprintln!("FLAMBEAU_QWEN3_GGUF unset — skipping");
+        return;
+    };
+    let gguf = GgufFile::open(&path).expect("open GGUF");
+    let tok = load_from_gguf(&gguf).expect("load tokenizer");
+    let ids = tok.encode("-time").expect("encode");
+    eprintln!("encode('-time') = {ids:?}");
+    assert_eq!(
+        ids,
+        vec![7019],
+        "qwen35 pretokenizer should keep '-time' as one chunk for the BPE merge"
+    );
+}

@@ -33,6 +33,107 @@ pub const QMATMUL_GFX906: &[KernelDescriptor] = &[
         m_range: (1, 127),
         cert_rel_path: "certs/hip/gfx906/qmatmul_q4_K_mmvq_nw1_r2_gfx906.json",
     },
+    // native IQ4 MMVQ. r2 multi-row is the decode default
+    // (parity tested 4..16 rows × 256..5120 K). MMQ + MoE indexed
+    // variants land in . Wave64-shaped, scalar inner loop —
+    // dp4a-with-LUT deferred until a measured bottleneck appears.
+    KernelDescriptor {
+        op_name: "QMatMul",
+        impl_id: "qmatmul_iq4_xs_mmvq_nw1_r2_gfx906",
+        backend: "hip",
+        arch: "gfx906",
+        dtype_weight: QDtype::IQ4_XS,
+        dtype_activation: QDtype::Q8_1,
+        m_range: (1, 127),
+        cert_rel_path: "certs/hip/gfx906/qmatmul_iq4_xs_mmvq_nw1_r2_gfx906.json",
+    },
+    KernelDescriptor {
+        op_name: "QMatMul",
+        impl_id: "qmatmul_iq4_xs_mmq_wave64_gfx906",
+        backend: "hip", arch: "gfx906",
+        dtype_weight: QDtype::IQ4_XS,
+        dtype_activation: QDtype::Q8_1,
+        m_range: (128, usize::MAX),
+        cert_rel_path: "certs/hip/gfx906/qmatmul_iq4_xs_mmq_wave64_gfx906.json",
+    },
+    KernelDescriptor {
+        op_name: "QMatMul",
+        impl_id: "qmatmul_iq4_nl_mmvq_nw1_r2_gfx906",
+        backend: "hip",
+        arch: "gfx906",
+        dtype_weight: QDtype::IQ4_NL,
+        dtype_activation: QDtype::Q8_1,
+        m_range: (1, 127),
+        cert_rel_path: "certs/hip/gfx906/qmatmul_iq4_nl_mmvq_nw1_r2_gfx906.json",
+    },
+    // native IQ3 MMVQ (codebook lookup, 256/512-entry u32 grid).
+    // r2 multi-row is the decode default; single-row variant retained for
+    // the sweep/cert harness.
+    KernelDescriptor {
+        op_name: "QMatMul",
+        impl_id: "qmatmul_iq3_xxs_mmvq_nw1_r2_gfx906",
+        backend: "hip",
+        arch: "gfx906",
+        dtype_weight: QDtype::IQ3_XXS,
+        dtype_activation: QDtype::Q8_1,
+        m_range: (1, 127),
+        cert_rel_path: "certs/hip/gfx906/qmatmul_iq3_xxs_mmvq_nw1_r2_gfx906.json",
+    },
+    KernelDescriptor {
+        op_name: "QMatMul",
+        impl_id: "qmatmul_iq3_s_mmvq_nw1_r2_gfx906",
+        backend: "hip",
+        arch: "gfx906",
+        dtype_weight: QDtype::IQ3_S,
+        dtype_activation: QDtype::Q8_1,
+        m_range: (1, 127),
+        cert_rel_path: "certs/hip/gfx906/qmatmul_iq3_s_mmvq_nw1_r2_gfx906.json",
+    },
+    KernelDescriptor {
+        op_name: "QMatMul",
+        impl_id: "qmatmul_iq3_s_mmq_wave64_gfx906",
+        backend: "hip", arch: "gfx906",
+        dtype_weight: QDtype::IQ3_S,
+        dtype_activation: QDtype::Q8_1,
+        m_range: (128, usize::MAX),
+        cert_rel_path: "certs/hip/gfx906/qmatmul_iq3_s_mmq_wave64_gfx906.json",
+    },
+    // IQ2 + IQ1 family native MMVQ. r2 multi-row default.
+    KernelDescriptor {
+        op_name: "QMatMul", impl_id: "qmatmul_iq2_xxs_mmvq_nw1_r2_gfx906",
+        backend: "hip", arch: "gfx906",
+        dtype_weight: QDtype::IQ2_XXS, dtype_activation: QDtype::Q8_1,
+        m_range: (1, 127),
+        cert_rel_path: "certs/hip/gfx906/qmatmul_iq2_xxs_mmvq_nw1_r2_gfx906.json",
+    },
+    KernelDescriptor {
+        op_name: "QMatMul", impl_id: "qmatmul_iq2_xs_mmvq_nw1_r2_gfx906",
+        backend: "hip", arch: "gfx906",
+        dtype_weight: QDtype::IQ2_XS, dtype_activation: QDtype::Q8_1,
+        m_range: (1, 127),
+        cert_rel_path: "certs/hip/gfx906/qmatmul_iq2_xs_mmvq_nw1_r2_gfx906.json",
+    },
+    KernelDescriptor {
+        op_name: "QMatMul", impl_id: "qmatmul_iq2_s_mmvq_nw1_r2_gfx906",
+        backend: "hip", arch: "gfx906",
+        dtype_weight: QDtype::IQ2_S, dtype_activation: QDtype::Q8_1,
+        m_range: (1, 127),
+        cert_rel_path: "certs/hip/gfx906/qmatmul_iq2_s_mmvq_nw1_r2_gfx906.json",
+    },
+    KernelDescriptor {
+        op_name: "QMatMul", impl_id: "qmatmul_iq1_s_mmvq_nw1_r2_gfx906",
+        backend: "hip", arch: "gfx906",
+        dtype_weight: QDtype::IQ1_S, dtype_activation: QDtype::Q8_1,
+        m_range: (1, 127),
+        cert_rel_path: "certs/hip/gfx906/qmatmul_iq1_s_mmvq_nw1_r2_gfx906.json",
+    },
+    KernelDescriptor {
+        op_name: "QMatMul", impl_id: "qmatmul_iq1_m_mmvq_nw1_r2_gfx906",
+        backend: "hip", arch: "gfx906",
+        dtype_weight: QDtype::IQ1_M, dtype_activation: QDtype::Q8_1,
+        m_range: (1, 127),
+        cert_rel_path: "certs/hip/gfx906/qmatmul_iq1_m_mmvq_nw1_r2_gfx906.json",
+    },
     KernelDescriptor {
         // 4.a.3 — 128-thread single-row DP4A Q4_1 MMVQ. Same DP4A
         // math as but half the threads per block, reducing kernel
@@ -85,6 +186,36 @@ pub const QMATMUL_GFX906: &[KernelDescriptor] = &[
         dtype_activation: QDtype::Q8_1,
         m_range: (1, 127),
         cert_rel_path: "certs/hip/gfx906/qmatmul_q6_K_mmvq_dp4a_gfx906.json",
+    },
+    KernelDescriptor {
+        op_name: "QMatMul",
+        impl_id: "qmatmul_q8_K_mmvq_single_row_gfx906",
+        backend: "hip",
+        arch: "gfx906",
+        dtype_weight: QDtype::Q8_K,
+        dtype_activation: QDtype::Q8_1,
+        m_range: (1, 127),
+        cert_rel_path: "certs/hip/gfx906/qmatmul_q8_K_mmvq_single_row_gfx906.json",
+    },
+    KernelDescriptor {
+        op_name: "QMatMul",
+        impl_id: "qmatmul_q2_K_mmvq_nw1_r2_gfx906",
+        backend: "hip",
+        arch: "gfx906",
+        dtype_weight: QDtype::Q2_K,
+        dtype_activation: QDtype::Q8_1,
+        m_range: (1, 127),
+        cert_rel_path: "certs/hip/gfx906/qmatmul_q2_K_mmvq_nw1_r2_gfx906.json",
+    },
+    KernelDescriptor {
+        op_name: "QMatMul",
+        impl_id: "qmatmul_q3_K_mmvq_nw1_r2_gfx906",
+        backend: "hip",
+        arch: "gfx906",
+        dtype_weight: QDtype::Q3_K,
+        dtype_activation: QDtype::Q8_1,
+        m_range: (1, 127),
+        cert_rel_path: "certs/hip/gfx906/qmatmul_q3_K_mmvq_nw1_r2_gfx906.json",
     },
     // MMQ (prefill): m ≥ 128
     KernelDescriptor {
@@ -172,6 +303,16 @@ pub const QMATMUL_GFX906: &[KernelDescriptor] = &[
     },
     KernelDescriptor {
         op_name: "QMatMul",
+        impl_id: "qmatmul_q5_1_mmq_wave64_gfx906",
+        backend: "hip",
+        arch: "gfx906",
+        dtype_weight: QDtype::Q5_1,
+        dtype_activation: QDtype::Q8_1,
+        m_range: (32, usize::MAX),
+        cert_rel_path: "certs/hip/gfx906/qmatmul_q5_1_mmq_wave64_gfx906.json",
+    },
+    KernelDescriptor {
+        op_name: "QMatMul",
         // 4.b kernel, promoted (2026-04-27): llamacpp-turbo
         // 4-warp LDS-tiled Q4_K MMQ port. 256 threads (4 warps × 64), MMQ_Y=128,
         // MMQ_X=16, double-buffered Y LDS per super-block. Owns m >= 128; the
@@ -211,6 +352,36 @@ pub const QMATMUL_GFX906: &[KernelDescriptor] = &[
         m_range: (128, usize::MAX),
         cert_rel_path: "certs/hip/gfx906/qmatmul_q6_K_mmq_wave64_gfx906.json",
     },
+    KernelDescriptor {
+        op_name: "QMatMul",
+        impl_id: "qmatmul_q8_K_mmq_wave64_gfx906",
+        backend: "hip",
+        arch: "gfx906",
+        dtype_weight: QDtype::Q8_K,
+        dtype_activation: QDtype::Q8_1,
+        m_range: (128, usize::MAX),
+        cert_rel_path: "certs/hip/gfx906/qmatmul_q8_K_mmq_wave64_gfx906.json",
+    },
+    KernelDescriptor {
+        op_name: "QMatMul",
+        impl_id: "qmatmul_q2_K_mmq_wave64_gfx906",
+        backend: "hip",
+        arch: "gfx906",
+        dtype_weight: QDtype::Q2_K,
+        dtype_activation: QDtype::Q8_1,
+        m_range: (128, usize::MAX),
+        cert_rel_path: "certs/hip/gfx906/qmatmul_q2_K_mmq_wave64_gfx906.json",
+    },
+    KernelDescriptor {
+        op_name: "QMatMul",
+        impl_id: "qmatmul_q3_K_mmq_wave64_gfx906",
+        backend: "hip",
+        arch: "gfx906",
+        dtype_weight: QDtype::Q3_K,
+        dtype_activation: QDtype::Q8_1,
+        m_range: (128, usize::MAX),
+        cert_rel_path: "certs/hip/gfx906/qmatmul_q3_K_mmq_wave64_gfx906.json",
+    },
     // MMQ oracle covers the mid-M band (4..128) for Q8_0.
     KernelDescriptor {
         op_name: "QMatMul",
@@ -222,6 +393,58 @@ pub const QMATMUL_GFX906: &[KernelDescriptor] = &[
         m_range: (4, 127),
         cert_rel_path: "certs/hip/gfx906/qmatmul_q8_0_mmq_oracle_gfx906.json",
     },
+    //— remaining 7 dense MMQ wave64 (IQ4_NL,
+    // IQ3_XXS, IQ2_XXS, IQ2_XS, IQ2_S, IQ1_S, IQ1_M). Same wave64 tile shape.
+    KernelDescriptor {
+        op_name: "QMatMul", impl_id: "qmatmul_iq4_nl_mmq_wave64_gfx906",
+        backend: "hip", arch: "gfx906",
+        dtype_weight: QDtype::IQ4_NL, dtype_activation: QDtype::Q8_1,
+        m_range: (128, usize::MAX),
+        cert_rel_path: "certs/hip/gfx906/qmatmul_iq4_nl_mmq_wave64_gfx906.json",
+    },
+    KernelDescriptor {
+        op_name: "QMatMul", impl_id: "qmatmul_iq3_xxs_mmq_wave64_gfx906",
+        backend: "hip", arch: "gfx906",
+        dtype_weight: QDtype::IQ3_XXS, dtype_activation: QDtype::Q8_1,
+        m_range: (128, usize::MAX),
+        cert_rel_path: "certs/hip/gfx906/qmatmul_iq3_xxs_mmq_wave64_gfx906.json",
+    },
+    KernelDescriptor {
+        op_name: "QMatMul", impl_id: "qmatmul_iq2_xxs_mmq_wave64_gfx906",
+        backend: "hip", arch: "gfx906",
+        dtype_weight: QDtype::IQ2_XXS, dtype_activation: QDtype::Q8_1,
+        m_range: (128, usize::MAX),
+        cert_rel_path: "certs/hip/gfx906/qmatmul_iq2_xxs_mmq_wave64_gfx906.json",
+    },
+    KernelDescriptor {
+        op_name: "QMatMul", impl_id: "qmatmul_iq2_xs_mmq_wave64_gfx906",
+        backend: "hip", arch: "gfx906",
+        dtype_weight: QDtype::IQ2_XS, dtype_activation: QDtype::Q8_1,
+        m_range: (128, usize::MAX),
+        cert_rel_path: "certs/hip/gfx906/qmatmul_iq2_xs_mmq_wave64_gfx906.json",
+    },
+    KernelDescriptor {
+        op_name: "QMatMul", impl_id: "qmatmul_iq2_s_mmq_wave64_gfx906",
+        backend: "hip", arch: "gfx906",
+        dtype_weight: QDtype::IQ2_S, dtype_activation: QDtype::Q8_1,
+        m_range: (128, usize::MAX),
+        cert_rel_path: "certs/hip/gfx906/qmatmul_iq2_s_mmq_wave64_gfx906.json",
+    },
+    KernelDescriptor {
+        op_name: "QMatMul", impl_id: "qmatmul_iq1_s_mmq_wave64_gfx906",
+        backend: "hip", arch: "gfx906",
+        dtype_weight: QDtype::IQ1_S, dtype_activation: QDtype::Q8_1,
+        m_range: (128, usize::MAX),
+        cert_rel_path: "certs/hip/gfx906/qmatmul_iq1_s_mmq_wave64_gfx906.json",
+    },
+    KernelDescriptor {
+        op_name: "QMatMul", impl_id: "qmatmul_iq1_m_mmq_wave64_gfx906",
+        backend: "hip", arch: "gfx906",
+        dtype_weight: QDtype::IQ1_M, dtype_activation: QDtype::Q8_1,
+        m_range: (128, usize::MAX),
+        cert_rel_path: "certs/hip/gfx906/qmatmul_iq1_m_mmq_wave64_gfx906.json",
+    },
+
 ];
 
 /// RMSNorm + SwiGLU + D1 fused. The dispatch key is `(dtype_in,
@@ -662,12 +885,111 @@ pub const DIRECT_CALL_KERNELS_GFX906: &[DirectCallKernel] = &[
         cert_rel_path: "certs/hip/gfx906/indexed_moe_mmvq_q4_0_gfx906.json",
     },
     DirectCallKernel {
+        impl_id: "indexed_moe_mmvq_q5_0_gfx906",
+        cert_rel_path: "certs/hip/gfx906/indexed_moe_mmvq_q5_0_gfx906.json",
+    },
+    DirectCallKernel {
+        impl_id: "indexed_moe_mmvq_q5_1_gfx906",
+        cert_rel_path: "certs/hip/gfx906/indexed_moe_mmvq_q5_1_gfx906.json",
+    },
+    DirectCallKernel {
+        impl_id: "indexed_moe_mmvq_q2_k_gfx906",
+        cert_rel_path: "certs/hip/gfx906/indexed_moe_mmvq_q2_k_gfx906.json",
+    },
+    DirectCallKernel {
+        impl_id: "indexed_moe_mmvq_q3_k_gfx906",
+        cert_rel_path: "certs/hip/gfx906/indexed_moe_mmvq_q3_k_gfx906.json",
+    },
+    DirectCallKernel {
         impl_id: "indexed_moe_mmvq_q6_k_gfx906",
         cert_rel_path: "certs/hip/gfx906/indexed_moe_mmvq_q6_k_gfx906.json",
     },
     DirectCallKernel {
         impl_id: "indexed_moe_mmvq_q5_k_gfx906",
         cert_rel_path: "certs/hip/gfx906/indexed_moe_mmvq_q5_k_gfx906.json",
+    },
+    // Indexed-MoE MMQ tile8 (gate_up + down) per dtype. Routed by GGUF
+    // tensor dtype, not via dispatch_qmatmul; cert harness in
+    // crates/bench/src/sweep_moe.rs (T2.3b — generic tile8 harness).
+    DirectCallKernel {
+        impl_id: "indexed_moe_mmq_q8_0_gate_up_tile8_gfx906",
+        cert_rel_path: "certs/hip/gfx906/indexed_moe_mmq_q8_0_gate_up_tile8_gfx906.json",
+    },
+    DirectCallKernel {
+        impl_id: "indexed_moe_mmq_q8_0_down_tile8_gfx906",
+        cert_rel_path: "certs/hip/gfx906/indexed_moe_mmq_q8_0_down_tile8_gfx906.json",
+    },
+    DirectCallKernel {
+        impl_id: "indexed_moe_mmq_q4_0_gate_up_tile8_gfx906",
+        cert_rel_path: "certs/hip/gfx906/indexed_moe_mmq_q4_0_gate_up_tile8_gfx906.json",
+    },
+    DirectCallKernel {
+        impl_id: "indexed_moe_mmq_q4_0_down_tile8_gfx906",
+        cert_rel_path: "certs/hip/gfx906/indexed_moe_mmq_q4_0_down_tile8_gfx906.json",
+    },
+    DirectCallKernel {
+        impl_id: "indexed_moe_mmq_q4_1_gate_up_tile8_gfx906",
+        cert_rel_path: "certs/hip/gfx906/indexed_moe_mmq_q4_1_gate_up_tile8_gfx906.json",
+    },
+    DirectCallKernel {
+        impl_id: "indexed_moe_mmq_q4_1_down_tile8_gfx906",
+        cert_rel_path: "certs/hip/gfx906/indexed_moe_mmq_q4_1_down_tile8_gfx906.json",
+    },
+    DirectCallKernel {
+        impl_id: "indexed_moe_mmq_q5_0_gate_up_tile8_gfx906",
+        cert_rel_path: "certs/hip/gfx906/indexed_moe_mmq_q5_0_gate_up_tile8_gfx906.json",
+    },
+    DirectCallKernel {
+        impl_id: "indexed_moe_mmq_q5_0_down_tile8_gfx906",
+        cert_rel_path: "certs/hip/gfx906/indexed_moe_mmq_q5_0_down_tile8_gfx906.json",
+    },
+    DirectCallKernel {
+        impl_id: "indexed_moe_mmq_q5_1_gate_up_tile8_gfx906",
+        cert_rel_path: "certs/hip/gfx906/indexed_moe_mmq_q5_1_gate_up_tile8_gfx906.json",
+    },
+    DirectCallKernel {
+        impl_id: "indexed_moe_mmq_q5_1_down_tile8_gfx906",
+        cert_rel_path: "certs/hip/gfx906/indexed_moe_mmq_q5_1_down_tile8_gfx906.json",
+    },
+    DirectCallKernel {
+        impl_id: "indexed_moe_mmq_q4_k_gate_up_tile8_gfx906",
+        cert_rel_path: "certs/hip/gfx906/indexed_moe_mmq_q4_k_gate_up_tile8_gfx906.json",
+    },
+    DirectCallKernel {
+        impl_id: "indexed_moe_mmq_q4_k_down_tile8_gfx906",
+        cert_rel_path: "certs/hip/gfx906/indexed_moe_mmq_q4_k_down_tile8_gfx906.json",
+    },
+    DirectCallKernel {
+        impl_id: "indexed_moe_mmq_q5_k_gate_up_tile8_gfx906",
+        cert_rel_path: "certs/hip/gfx906/indexed_moe_mmq_q5_k_gate_up_tile8_gfx906.json",
+    },
+    DirectCallKernel {
+        impl_id: "indexed_moe_mmq_q5_k_down_tile8_gfx906",
+        cert_rel_path: "certs/hip/gfx906/indexed_moe_mmq_q5_k_down_tile8_gfx906.json",
+    },
+    DirectCallKernel {
+        impl_id: "indexed_moe_mmq_q6_k_gate_up_tile8_gfx906",
+        cert_rel_path: "certs/hip/gfx906/indexed_moe_mmq_q6_k_gate_up_tile8_gfx906.json",
+    },
+    DirectCallKernel {
+        impl_id: "indexed_moe_mmq_q6_k_down_tile8_gfx906",
+        cert_rel_path: "certs/hip/gfx906/indexed_moe_mmq_q6_k_down_tile8_gfx906.json",
+    },
+    DirectCallKernel {
+        impl_id: "indexed_moe_mmq_q2_k_gate_up_tile8_gfx906",
+        cert_rel_path: "certs/hip/gfx906/indexed_moe_mmq_q2_k_gate_up_tile8_gfx906.json",
+    },
+    DirectCallKernel {
+        impl_id: "indexed_moe_mmq_q2_k_down_tile8_gfx906",
+        cert_rel_path: "certs/hip/gfx906/indexed_moe_mmq_q2_k_down_tile8_gfx906.json",
+    },
+    DirectCallKernel {
+        impl_id: "indexed_moe_mmq_q3_k_gate_up_tile8_gfx906",
+        cert_rel_path: "certs/hip/gfx906/indexed_moe_mmq_q3_k_gate_up_tile8_gfx906.json",
+    },
+    DirectCallKernel {
+        impl_id: "indexed_moe_mmq_q3_k_down_tile8_gfx906",
+        cert_rel_path: "certs/hip/gfx906/indexed_moe_mmq_q3_k_down_tile8_gfx906.json",
     },
 ];
 
@@ -734,6 +1056,14 @@ pub const BENCH_REFERENCE_KERNELS_GFX906: &[DirectCallKernel] = &[
     DirectCallKernel {
         impl_id: "qmatmul_q4_K_mmvq_single_row_gfx906",
         cert_rel_path: "certs/hip/gfx906/qmatmul_q4_K_mmvq_single_row_gfx906.json",
+    },
+    DirectCallKernel {
+        impl_id: "qmatmul_q2_K_mmvq_single_row_gfx906",
+        cert_rel_path: "certs/hip/gfx906/qmatmul_q2_K_mmvq_single_row_gfx906.json",
+    },
+    DirectCallKernel {
+        impl_id: "qmatmul_q3_K_mmvq_single_row_gfx906",
+        cert_rel_path: "certs/hip/gfx906/qmatmul_q3_K_mmvq_single_row_gfx906.json",
     },
     DirectCallKernel {
         impl_id: "qmatmul_q5_K_mmvq_single_row_gfx906",

@@ -567,8 +567,8 @@ fn quantize_bf16_to_q8_0(src: &[u8], elems: usize) -> Result<Vec<u8>> {
 }
 
 /// Quantise a F32 byte slice to Q8_0 host-side (32-element blocks,
-/// 34 B/block: half scale + 32 i8 quants). Mirrors
-/// `sharded.rs::upload_as_q8_0_inner`.
+/// 34 B/block: half scale + 32 i8 quants). Delegates to the rayon-parallel
+/// `flambeau_quant::quantize_k::quantize_row_q8_0`.
 fn quantize_f32_to_q8_0(src: &[u8], elems: usize) -> Result<Vec<u8>> {
     if src.len() < elems * 4 {
         bail!(
@@ -583,27 +583,15 @@ fn quantize_f32_to_q8_0(src: &[u8], elems: usize) -> Result<Vec<u8>> {
         );
     }
     let f32s: &[f32] = bytemuck::cast_slice(&src[..elems * 4]);
-    let n_blocks = elems / QK8_0;
-    let block_bytes = 34usize; // half d (2) + 32 i8
-    let mut out = Vec::with_capacity(n_blocks * block_bytes);
-    for block in f32s.chunks_exact(QK8_0) {
-        let absmax = block.iter().map(|v| v.abs()).fold(0.0f32, f32::max);
-        let d = absmax / 127.0;
-        let id = if d != 0.0 { 1.0 / d } else { 0.0 };
-        let d_f16 = half::f16::from_f32(d);
-        out.extend_from_slice(&d_f16.to_bits().to_le_bytes());
-        for &v in block {
-            let q = (v * id).round_ties_even() as i32;
-            let q = q.clamp(-127, 127) as i8;
-            out.push(q as u8);
-        }
-    }
+    let mut out = Vec::with_capacity(elems / QK8_0 * 34);
+    flambeau_quant::quantize_k::quantize_row_q8_0(f32s, &mut out);
     Ok(out)
 }
 
 /// quantise an F32 buffer to Q8_0 (in-memory variant of
 /// `quantize_f32_to_q8_0` that takes `&[f32]` directly, used by the MXFP4
-/// + ssm_ba paths below where we already hold an F32 Vec).
+/// + ssm_ba paths below where we already hold an F32 Vec). Delegates to
+/// the rayon-parallel `flambeau_quant::quantize_k::quantize_row_q8_0`.
 fn quantize_f32_slice_to_q8_0(f32s: &[f32]) -> Result<Vec<u8>> {
     if f32s.len() % QK8_0 != 0 {
         bail!(
@@ -611,20 +599,8 @@ fn quantize_f32_slice_to_q8_0(f32s: &[f32]) -> Result<Vec<u8>> {
             f32s.len()
         );
     }
-    let n_blocks = f32s.len() / QK8_0;
-    let mut out = Vec::with_capacity(n_blocks * 34);
-    for block in f32s.chunks_exact(QK8_0) {
-        let absmax = block.iter().map(|v| v.abs()).fold(0.0f32, f32::max);
-        let d = absmax / 127.0;
-        let id = if d != 0.0 { 1.0 / d } else { 0.0 };
-        let d_f16 = half::f16::from_f32(d);
-        out.extend_from_slice(&d_f16.to_bits().to_le_bytes());
-        for &v in block {
-            let q = (v * id).round_ties_even() as i32;
-            let q = q.clamp(-127, 127) as i8;
-            out.push(q as u8);
-        }
-    }
+    let mut out = Vec::with_capacity(f32s.len() / QK8_0 * 34);
+    flambeau_quant::quantize_k::quantize_row_q8_0(f32s, &mut out);
     Ok(out)
 }
 
@@ -651,92 +627,112 @@ fn slice_f32_for_tp(
             f32s.len()
         );
     }
-    match layout {
-        WeightLayout::Replicated => Ok((f32s.to_vec(), dims.to_vec())),
-        WeightLayout::ColParallel { world, dim: 0 } => {
-            if dims.is_empty() {
-                bail!("slice_f32_for_tp ColParallel{{dim=0}}: empty dims");
-            }
-            let rows = dims[0] as usize;
-            if rows % world as usize != 0 {
-                bail!(
-                    "slice_f32_for_tp: rows {rows} not divisible by world {world}"
-                );
-            }
-            let inner: usize = dims[1..].iter().product::<u64>() as usize;
-            let per_rank_rows = rows / world as usize;
-            let r0 = rank as usize * per_rank_rows;
-            let out: Vec<f32> = f32s[r0 * inner..(r0 + per_rank_rows) * inner].to_vec();
-            let mut new_dims = dims.to_vec();
-            new_dims[0] = per_rank_rows as u64;
-            Ok((out, new_dims))
-        }
-        WeightLayout::RowParallel { world, dim: 1 } => {
-            if dims.len() < 2 {
-                bail!("slice_f32_for_tp RowParallel{{dim=1}}: need 2D dims, got {:?}", dims);
-            }
-            let rows = dims[0] as usize;
-            let cols = dims[1] as usize;
-            if cols % world as usize != 0 {
-                bail!(
-                    "slice_f32_for_tp: cols {cols} not divisible by world {world}"
-                );
-            }
-            let per_rank_cols = cols / world as usize;
-            let c0 = rank as usize * per_rank_cols;
-            let mut out = Vec::with_capacity(rows * per_rank_cols);
-            for r in 0..rows {
-                let row_start = r * cols;
-                out.extend_from_slice(&f32s[row_start + c0..row_start + c0 + per_rank_cols]);
-            }
-            let mut new_dims = dims.to_vec();
-            new_dims[1] = per_rank_cols as u64;
-            Ok((out, new_dims))
+    // Replicated and Col/RowParallel{world=1} are full copies.
+    let (world, axis) = match layout {
+        WeightLayout::Replicated => return Ok((f32s.to_vec(), dims.to_vec())),
+        WeightLayout::ColParallel { world, dim } | WeightLayout::RowParallel { world, dim } => {
+            (world as usize, dim)
         }
         other => bail!(
-            "slice_f32_for_tp: layout {:?} not supported (only Replicated, \
-             ColParallel{{dim=0}}, RowParallel{{dim=1}})",
+            "slice_f32_for_tp: layout {:?} not supported (Replicated / Col / RowParallel)",
             other
         ),
+    };
+    if world <= 1 {
+        return Ok((f32s.to_vec(), dims.to_vec()));
     }
+    if axis >= dims.len() {
+        bail!(
+            "slice_f32_for_tp: axis {axis} out of bounds for dims {:?}",
+            dims
+        );
+    }
+    let axis_len = dims[axis] as usize;
+    if axis_len % world != 0 {
+        bail!(
+            "slice_f32_for_tp: dims[{axis}]={axis_len} not divisible by world {world}"
+        );
+    }
+    let outer: usize = dims[..axis].iter().product::<u64>() as usize;
+    let inner: usize = dims[axis + 1..].iter().product::<u64>() as usize;
+    let per_rank_axis = axis_len / world;
+    let r0 = rank as usize * per_rank_axis;
+    let group_stride = axis_len * inner;
+    let mut out = Vec::with_capacity(outer * per_rank_axis * inner);
+    for o in 0..outer {
+        let base = o * group_stride + r0 * inner;
+        out.extend_from_slice(&f32s[base..base + per_rank_axis * inner]);
+    }
+    let mut new_dims = dims.to_vec();
+    new_dims[axis] = per_rank_axis as u64;
+    Ok((out, new_dims))
 }
 
-/// upload an MXFP4-source tensor through the TP
-/// slicing path. Mirrors `sharded.rs::upload_mxfp4_as_q8_0` (V1.x #119)
-/// but applies the per-rank slice on the F32 intermediate, then
-/// quantises the per-rank slice to Q8_0.
-/// Used for Coder-Next-Q4_0's 96 shared-expert tensors (gate/up/down per
-/// 48 layers — `ffn_*_shexp.weight`) which the GGUF stores as MXFP4.
-/// Without this path the TP loader bails on dtype-mismatch when handing
-/// MXFP4 bytes to a Q8_0-shaped dispatch.
-fn upload_tp_mxfp4_as_q8_0(
+/// Generic TP at-load conversion: dequant `src_dtype` → F32, apply the
+/// per-rank slice, quantise to Q8_0, upload. Used for any weight dtype
+/// that has no native V1 kernel and reaches the TP loader — MXFP4
+/// (Coder-Next-Q4_0 shared-expert FFN), IQ4_XS (UD-XL builds), and any
+/// future source dtype that has a `dequantize_into` impl. Without this
+/// path the TP loader bails on dtype-mismatch when handing src bytes to
+/// a Q8_0-shaped dispatch.
+fn upload_tp_via_dequant_to_q8_0(
     file: &GgufFile,
     name: &str,
     dims: &[u64],
     layout: WeightLayout,
     rank: u32,
     device: &HipDevice,
+    src_dtype: GgmlDType,
 ) -> Result<(DeviceTensor, usize)> {
     let total_elems: usize = dims.iter().product::<u64>() as usize;
     let raw = file
         .tensor_raw(name)
         .with_context(|| format!("tensor_raw `{name}`"))?;
     let mut f32_full = vec![0.0f32; total_elems];
-    flambeau_quant::dequantize_into(GgmlDType::Mxfp4, raw, &mut f32_full)
-        .with_context(|| format!("MXFP4 dequant `{name}` rank={rank}"))?;
+    flambeau_quant::dequantize_into(src_dtype, raw, &mut f32_full)
+        .with_context(|| format!("{src_dtype:?} dequant `{name}` rank={rank}"))?;
 
     let (f32_slice, per_rank_dims) = slice_f32_for_tp(&f32_full, dims, layout, rank)
-        .with_context(|| format!("slice F32 (post-MXFP4) `{name}` rank={rank}"))?;
+        .with_context(|| format!("slice F32 (post-{src_dtype:?}) `{name}` rank={rank}"))?;
     drop(f32_full);
 
-    let q8_bytes = quantize_f32_slice_to_q8_0(&f32_slice)
-        .with_context(|| format!("quantize F32→Q8_0 (MXFP4 path) `{name}` rank={rank}"))?;
-    let n = q8_bytes.len();
+    let target = pick_convert_target(src_dtype);
+    let elems_slice = f32_slice.len();
+    let bytes: Vec<u8> = match target {
+        GgmlDType::Q8_0 => quantize_f32_slice_to_q8_0(&f32_slice)
+            .with_context(|| format!("quantize F32→Q8_0 ({src_dtype:?}) `{name}` rank={rank}"))?,
+        GgmlDType::Q4K => {
+            if elems_slice % flambeau_quant::QK_K != 0 {
+                bail!("`{name}` rank={rank} elem {elems_slice} not multiple of QK_K");
+            }
+            let mut buf = Vec::with_capacity(elems_slice / flambeau_quant::QK_K * 144);
+            flambeau_quant::quantize_k::quantize_row_q4_k(&f32_slice, &mut buf);
+            buf
+        }
+        GgmlDType::Q3K => {
+            if elems_slice % flambeau_quant::QK_K != 0 {
+                bail!("`{name}` rank={rank} elem {elems_slice} not multiple of QK_K");
+            }
+            let mut buf = Vec::with_capacity(elems_slice / flambeau_quant::QK_K * 110);
+            flambeau_quant::quantize_k::quantize_row_q3_k(&f32_slice, &mut buf);
+            buf
+        }
+        GgmlDType::Q2K => {
+            if elems_slice % flambeau_quant::QK_K != 0 {
+                bail!("`{name}` rank={rank} elem {elems_slice} not multiple of QK_K");
+            }
+            let mut buf = Vec::with_capacity(elems_slice / flambeau_quant::QK_K * 84);
+            flambeau_quant::quantize_k::quantize_row_q2_k(&f32_slice, &mut buf);
+            buf
+        }
+        other => bail!("upload_tp_via_dequant_to: unsupported target {other:?}"),
+    };
+    let n = bytes.len();
 
     let ptr = device
         .alloc(n)
         .map_err(|e| anyhow!("hipMalloc {n} B `{name}`: {e}"))?;
-    // SAFETY: ptr is a fresh device alloc of n bytes; q8_bytes is a host
+    // SAFETY: ptr is a fresh device alloc of n bytes; bytes is a host
     // Vec we own that lives through the synchronize at the call-site of
     // `upload_tp_with_layout`'s caller.
     unsafe {
@@ -745,21 +741,34 @@ fn upload_tp_mxfp4_as_q8_0(
                 device.default_stream(),
                 CopyDirection::HostToDevice,
                 ptr,
-                DevicePtr(q8_bytes.as_ptr() as usize),
+                DevicePtr(bytes.as_ptr() as usize),
                 n,
             )
-            .map_err(|e| anyhow!("memcpy MXFP4→Q8_0 `{name}` rank={rank}: {e}"))?;
+            .map_err(|e| anyhow!("memcpy {src_dtype:?}→{target:?} `{name}` rank={rank}: {e}"))?;
     }
     device.default_stream().synchronize()?;
 
     let tensor = DeviceTensor {
         ptr,
-        dtype: GgmlDType::Q8_0,
+        dtype: target,
         dims: per_rank_dims,
         bytes: n,
         name: Arc::from(name),
     };
     Ok((tensor, n))
+}
+
+/// Source-dtype → at-load conversion-target policy. Mirror of the same
+/// function in sharded.rs — kept duplicate-but-local so the TP path
+/// doesn't reach across modules for one match arm.
+fn pick_convert_target(src: GgmlDType) -> GgmlDType {
+    match src {
+        GgmlDType::Iq4Xs | GgmlDType::Iq4Nl => GgmlDType::Q4K,
+        GgmlDType::Iq3Xxs | GgmlDType::Iq3S => GgmlDType::Q3K,
+        GgmlDType::Iq2Xxs | GgmlDType::Iq2Xs | GgmlDType::Iq2S
+        | GgmlDType::Iq1S | GgmlDType::Iq1M => GgmlDType::Q2K,
+        _ => GgmlDType::Q8_0,
+    }
 }
 
 /// / #142 — TP-aware ssm_ba split.
@@ -965,15 +974,16 @@ fn upload_tp_with_layout(
         .for_tensor(name)
         .ok_or_else(|| anyhow!("no TP layout entry for tensor `{name}`"))?;
 
-    // MXFP4 source bypasses the post-slice convert
-    // path (upload_tp_with_layout's normal flow slices raw bytes first
-    // then converts F32→{F16,Q8_0}, which can't address MXFP4's 17-B
-    // 32-elem block stride). Dequant the FULL tensor to F32, slice the
-    // F32, then quantise the per-rank slice to Q8_0.
-    if info.dtype == GgmlDType::Mxfp4 {
+    // every IQ family now has native kernels and aligns on the
+    // TP dispatch axis. MXFP4 is the only remaining source dtype that
+    // needs the F32 dequant → re-slice → re-quant detour because its
+    // 17-byte / 32-elem block + E8M0 scale can't be cleanly byte-sliced
+    // on the TP axis.
+    if matches!(info.dtype, GgmlDType::Mxfp4) {
         let layout = configured;
-        let (tensor, n) =
-            upload_tp_mxfp4_as_q8_0(file, name, &info.dims, layout, rank, device)?;
+        let (tensor, n) = upload_tp_via_dequant_to_q8_0(
+            file, name, &info.dims, layout, rank, device, info.dtype,
+        )?;
         return Ok((tensor, n, layout));
     }
     let (bytes_cow, layout) = match slice_for_tp(file, name, configured, rank) {

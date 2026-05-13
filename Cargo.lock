@@ -438,6 +438,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "flambeau-blocks"
+version = "0.1.0-dev"
+dependencies = [
+ "anyhow",
+ "flambeau-backend-hip",
+ "flambeau-core",
+ "flambeau-ops",
+ "flambeau-quant",
+ "flambeau-runtime",
+ "half",
+]
+
+[[package]]
 name = "flambeau-cli"
 version = "0.1.0-dev"
 dependencies = [
@@ -446,8 +459,10 @@ dependencies = [
  "flambeau-bench",
  "flambeau-core",
  "flambeau-quant",
+ "flambeau-qwen3-moe",
  "flambeau-runtime",
  "flambeau-server",
+ "mimalloc",
  "tokio",
  "tracing",
  "tracing-subscriber",
@@ -500,6 +515,7 @@ dependencies = [
  "memmap2",
  "minijinja",
  "minijinja-contrib",
+ "rayon",
  "serde",
  "serde_json",
  "thiserror 2.0.18",
@@ -513,6 +529,7 @@ dependencies = [
  "anyhow",
  "bytemuck",
  "flambeau-backend-hip",
+ "flambeau-blocks",
  "flambeau-core",
  "flambeau-ops",
  "flambeau-quant",
@@ -813,6 +830,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "52ff2c0fe9bc6cb6b14a0592c2ff4fa9ceb83eea9db979b0487cd054946a2b8f"
 
 [[package]]
+name = "libmimalloc-sys"
+version = "0.1.47"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "2d1eacfa31c33ec25e873c136ba5669f00f9866d0688bea7be4d3f7e43067df6"
+dependencies = [
+ "cc",
+]
+
+[[package]]
 name = "log"
 version = "0.4.29"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -869,6 +895,15 @@ name = "memo-map"
 version = "0.3.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "38d1115007560874e373613744c6fba374c17688327a71c1476d1a5954cc857b"
+
+[[package]]
+name = "mimalloc"
+version = "0.1.50"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b3627c4272df786b9260cabaa46aec1d59c93ede723d4c3ef646c503816b0640"
+dependencies = [
+ "libmimalloc-sys",
+]
 
 [[package]]
 name = "mime"

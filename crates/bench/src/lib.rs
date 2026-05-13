@@ -93,18 +93,6 @@ pub mod sweep_attention_splitk;
 pub mod sweep_mmvq_f16;
 
 #[cfg(feature = "hip")]
-pub mod sweep_mmvq_bf16;
-
-#[cfg(feature = "hip")]
-pub mod sweep_rmsnorm_bf16;
-
-#[cfg(feature = "hip")]
-pub mod sweep_attention_bf16;
-
-#[cfg(feature = "hip")]
-pub mod sweep_pointwise_bf16;
-
-#[cfg(feature = "hip")]
 pub mod sweep_q4_0_q5_0;
 
 #[cfg(feature = "hip")]

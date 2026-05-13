@@ -27,6 +27,9 @@ pub enum QuantError {
     #[error("tensor {name:?} has no matching entry in the file")]
     UnknownTensor { name: String },
 
+    #[error("tensor {name:?} declared in two different split files")]
+    DuplicateTensor { name: String },
+
     #[error(
         "byte range [{start}..+{len}) on tensor {name:?} exceeds its {total} bytes"
     )]

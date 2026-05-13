@@ -1202,3 +1202,15 @@ impl Device for HipDevice {
         )
     }
 }
+
+impl Drop for HipDevice {
+    fn drop(&mut self) {
+        // The thread's currently-bound HIP device might be a different
+        // rank by the time this fires. `hipStreamDestroy` on the
+        // default_stream needs THIS device's context to be active,
+        // otherwise the runtime defers teardown and crashes at process
+        // exit when its atexit handler iterates orphaned streams. Bind
+        // first; the inner `HipStream::Drop` then sees a matching context.
+        let _ = bind(self.id);
+    }
+}

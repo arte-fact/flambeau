@@ -1,0 +1,555 @@
+{
+  "started": "2026-05-12T20:30:21.314914+00:00",
+  "max_tokens": 256,
+  "concurrencies": [
+    1,
+    2
+  ],
+  "cells": [
+    {
+      "model": "qwen36_27B_q4_0",
+      "topo": "pp2tp2",
+      "path": "no_batched",
+      "boot_secs": 16.65896201133728,
+      "port": 55183,
+      "log": "/artefact/flambeau/scripts/bench/logs/qwen36_27B_q4_0__pp2tp2__no_batched.log",
+      "concurrency_results": [
+        {
+          "n_concurrent": 1,
+          "wall_ms": 21164.745891001076,
+          "n_ok": 1,
+          "n_err": 0,
+          "errs": [],
+          "per_stream": [
+            {
+              "prefill_ms": 10081.32023300277,
+              "decode_ms": 11082.591248996323,
+              "completion_tokens": 256,
+              "tps": 23.099290973416007
+            }
+          ],
+          "prompt_tokens": 3003,
+          "prefill_ms_mean": 10081.32023300277,
+          "prefill_ms_min": 10081.32023300277,
+          "prefill_ms_max": 10081.32023300277,
+          "decode_ms_mean": 11082.591248996323,
+          "completion_tokens_total": 256,
+          "decode_tps_per_stream_mean": 23.099290973416007,
+          "decode_tps_aggregate": 23.099290973416007
+        },
+        {
+          "n_concurrent": 2,
+          "wall_ms": 37405.72825900745,
+          "n_ok": 2,
+          "n_err": 0,
+          "errs": [],
+          "per_stream": [
+            {
+              "prefill_ms": 10156.236249007634,
+              "decode_ms": 16606.639103993075,
+              "completion_tokens": 256,
+              "tps": 15.415521370512874
+            },
+            {
+              "prefill_ms": 26327.164787988295,
+              "decode_ms": 11077.21038001182,
+              "completion_tokens": 256,
+              "tps": 23.11051169181882
+            }
+          ],
+          "prompt_tokens": 3003,
+          "prefill_ms_mean": 18241.700518497964,
+          "prefill_ms_min": 10156.236249007634,
+          "prefill_ms_max": 26327.164787988295,
+          "decode_ms_mean": 13841.924742002448,
+          "completion_tokens_total": 512,
+          "decode_tps_per_stream_mean": 19.263016531165846,
+          "decode_tps_aggregate": 30.831042741025747
+        }
+      ],
+      "warmup": {
+        "prefill_ms": 10070.45666500926,
+        "decode_ms": 1330.3190909937257,
+        "completion_tokens": 32,
+        "err": null
+      }
+    },
+    {
+      "model": "qwen36_27B_q4_0",
+      "topo": "pp2tp2",
+      "path": "batched",
+      "boot_secs": 8.342812776565552,
+      "port": 43503,
+      "log": "/artefact/flambeau/scripts/bench/logs/qwen36_27B_q4_0__pp2tp2__batched.log",
+      "concurrency_results": [
+        {
+          "n_concurrent": 1,
+          "wall_ms": 21259.03479999397,
+          "n_ok": 1,
+          "n_err": 0,
+          "errs": [],
+          "per_stream": [
+            {
+              "prefill_ms": 10159.443684009602,
+              "decode_ms": 11098.445839001215,
+              "completion_tokens": 256,
+              "tps": 23.06629267860069
+            }
+          ],
+          "prompt_tokens": 3003,
+          "prefill_ms_mean": 10159.443684009602,
+          "prefill_ms_min": 10159.443684009602,
+          "prefill_ms_max": 10159.443684009602,
+          "decode_ms_mean": 11098.445839001215,
+          "completion_tokens_total": 256,
+          "decode_tps_per_stream_mean": 23.06629267860069,
+          "decode_tps_aggregate": 23.06629267860069
+        },
+        {
+          "n_concurrent": 2,
+          "wall_ms": 37598.599295000895,
+          "n_ok": 2,
+          "n_err": 0,
+          "errs": [],
+          "per_stream": [
+            {
+              "prefill_ms": 26611.333849999937,
+              "decode_ms": 10986.598483999842,
+              "completion_tokens": 256,
+              "tps": 23.301115479265174
+            },
+            {
+              "prefill_ms": 10200.358829009929,
+              "decode_ms": 16484.936337990803,
+              "completion_tokens": 256,
+              "tps": 15.529329003838997
+            }
+          ],
+          "prompt_tokens": 3003,
+          "prefill_ms_mean": 18405.846339504933,
+          "prefill_ms_min": 10200.358829009929,
+          "prefill_ms_max": 26611.333849999937,
+          "decode_ms_mean": 13735.767410995322,
+          "completion_tokens_total": 512,
+          "decode_tps_per_stream_mean": 19.415222241552087,
+          "decode_tps_aggregate": 31.058658007677995
+        }
+      ],
+      "warmup": {
+        "prefill_ms": 10199.118008997175,
+        "decode_ms": 1334.5005650044186,
+        "completion_tokens": 32,
+        "err": null
+      }
+    },
+    {
+      "model": "qwen36_27B_q4_1",
+      "topo": "pp2tp2",
+      "path": "no_batched",
+      "boot_secs": 18.75476598739624,
+      "port": 53699,
+      "log": "/artefact/flambeau/scripts/bench/logs/qwen36_27B_q4_1__pp2tp2__no_batched.log",
+      "concurrency_results": [
+        {
+          "n_concurrent": 1,
+          "wall_ms": 21497.885642995243,
+          "n_ok": 1,
+          "n_err": 0,
+          "errs": [],
+          "per_stream": [
+            {
+              "prefill_ms": 10461.980763007887,
+              "decode_ms": 11035.176240999135,
+              "completion_tokens": 256,
+              "tps": 23.198542044927187
+            }
+          ],
+          "prompt_tokens": 3003,
+          "prefill_ms_mean": 10461.980763007887,
+          "prefill_ms_min": 10461.980763007887,
+          "prefill_ms_max": 10461.980763007887,
+          "decode_ms_mean": 11035.176240999135,
+          "completion_tokens_total": 256,
+          "decode_tps_per_stream_mean": 23.198542044927187,
+          "decode_tps_aggregate": 23.198542044927187
+        },
+        {
+          "n_concurrent": 2,
+          "wall_ms": 38002.776748006,
+          "n_ok": 2,
+          "n_err": 0,
+          "errs": [],
+          "per_stream": [
+            {
+              "prefill_ms": 27071.323448006297,
+              "decode_ms": 10930.836491999798,
+              "completion_tokens": 256,
+              "tps": 23.41998255919065
+            },
+            {
+              "prefill_ms": 10539.508950998425,
+              "decode_ms": 16152.83707799972,
+              "completion_tokens": 256,
+              "tps": 15.8486090563418
+            }
+          ],
+          "prompt_tokens": 3003,
+          "prefill_ms_mean": 18805.41619950236,
+          "prefill_ms_min": 10539.508950998425,
+          "prefill_ms_max": 27071.323448006297,
+          "decode_ms_mean": 13541.83678499976,
+          "completion_tokens_total": 512,
+          "decode_tps_per_stream_mean": 19.634295807766225,
+          "decode_tps_aggregate": 31.6972181126836
+        }
+      ],
+      "warmup": {
+        "prefill_ms": 10515.494576000492,
+        "decode_ms": 1329.0574359998573,
+        "completion_tokens": 32,
+        "err": null
+      }
+    },
+    {
+      "model": "qwen36_27B_q4_1",
+      "topo": "pp2tp2",
+      "path": "batched",
+      "boot_secs": 8.378925323486328,
+      "port": 42201,
+      "log": "/artefact/flambeau/scripts/bench/logs/qwen36_27B_q4_1__pp2tp2__batched.log",
+      "concurrency_results": [
+        {
+          "n_concurrent": 1,
+          "wall_ms": 21539.30481200223,
+          "n_ok": 1,
+          "n_err": 0,
+          "errs": [],
+          "per_stream": [
+            {
+              "prefill_ms": 10509.614645998226,
+              "decode_ms": 11028.720882008201,
+              "completion_tokens": 256,
+              "tps": 23.212120674631255
+            }
+          ],
+          "prompt_tokens": 3003,
+          "prefill_ms_mean": 10509.614645998226,
+          "prefill_ms_min": 10509.614645998226,
+          "prefill_ms_max": 10509.614645998226,
+          "decode_ms_mean": 11028.720882008201,
+          "completion_tokens_total": 256,
+          "decode_tps_per_stream_mean": 23.212120674631255,
+          "decode_tps_aggregate": 23.212120674631255
+        },
+        {
+          "n_concurrent": 2,
+          "wall_ms": 38273.74297600181,
+          "n_ok": 2,
+          "n_err": 0,
+          "errs": [],
+          "per_stream": [
+            {
+              "prefill_ms": 10566.267059999518,
+              "decode_ms": 16084.706612004084,
+              "completion_tokens": 256,
+              "tps": 15.91573947696044
+            },
+            {
+              "prefill_ms": 27173.12091300846,
+              "decode_ms": 11099.074625002686,
+              "completion_tokens": 256,
+              "tps": 23.06498592444035
+            }
+          ],
+          "prompt_tokens": 3003,
+          "prefill_ms_mean": 18869.69398650399,
+          "prefill_ms_min": 10566.267059999518,
+          "prefill_ms_max": 27173.12091300846,
+          "decode_ms_mean": 13591.890618503385,
+          "completion_tokens_total": 512,
+          "decode_tps_per_stream_mean": 19.490362700700395,
+          "decode_tps_aggregate": 31.83147895392088
+        }
+      ],
+      "warmup": {
+        "prefill_ms": 10534.062819002429,
+        "decode_ms": 1331.5333820064552,
+        "completion_tokens": 32,
+        "err": null
+      }
+    },
+    {
+      "model": "qwen36_35B_a3b_q4_0",
+      "topo": "pp2tp2",
+      "path": "no_batched",
+      "boot_secs": 29.202397346496582,
+      "port": 50025,
+      "log": "/artefact/flambeau/scripts/bench/logs/qwen36_35B_a3b_q4_0__pp2tp2__no_batched.log",
+      "concurrency_results": [
+        {
+          "n_concurrent": 1,
+          "wall_ms": 9223.98393000185,
+          "n_ok": 1,
+          "n_err": 0,
+          "errs": [],
+          "per_stream": [
+            {
+              "prefill_ms": 3493.6654189950787,
+              "decode_ms": 5729.737761997967,
+              "completion_tokens": 256,
+              "tps": 44.67918264914317
+            }
+          ],
+          "prompt_tokens": 3003,
+          "prefill_ms_mean": 3493.6654189950787,
+          "prefill_ms_min": 3493.6654189950787,
+          "prefill_ms_max": 3493.6654189950787,
+          "decode_ms_mean": 5729.737761997967,
+          "completion_tokens_total": 256,
+          "decode_tps_per_stream_mean": 44.67918264914317,
+          "decode_tps_aggregate": 44.67918264914317
+        },
+        {
+          "n_concurrent": 2,
+          "wall_ms": 14655.381964999833,
+          "n_ok": 2,
+          "n_err": 0,
+          "errs": [],
+          "per_stream": [
+            {
+              "prefill_ms": 9023.966658001882,
+              "decode_ms": 5630.763141991338,
+              "completion_tokens": 256,
+              "tps": 45.46453003694713
+            },
+            {
+              "prefill_ms": 3540.457012990373,
+              "decode_ms": 7595.372266005143,
+              "completion_tokens": 256,
+              "tps": 33.704733755551075
+            }
+          ],
+          "prompt_tokens": 3003,
+          "prefill_ms_mean": 6282.211835496128,
+          "prefill_ms_min": 3540.457012990373,
+          "prefill_ms_max": 9023.966658001882,
+          "decode_ms_mean": 6613.06770399824,
+          "completion_tokens_total": 512,
+          "decode_tps_per_stream_mean": 39.58463189624911,
+          "decode_tps_aggregate": 67.40946751110215
+        }
+      ],
+      "warmup": {
+        "prefill_ms": 3596.0579170059646,
+        "decode_ms": 696.1150989955058,
+        "completion_tokens": 32,
+        "err": null
+      }
+    },
+    {
+      "model": "qwen36_35B_a3b_q4_0",
+      "topo": "pp2tp2",
+      "path": "batched",
+      "boot_secs": 9.413045883178711,
+      "port": 54671,
+      "log": "/artefact/flambeau/scripts/bench/logs/qwen36_35B_a3b_q4_0__pp2tp2__batched.log",
+      "concurrency_results": [
+        {
+          "n_concurrent": 1,
+          "wall_ms": 9250.723871999071,
+          "n_ok": 1,
+          "n_err": 0,
+          "errs": [],
+          "per_stream": [
+            {
+              "prefill_ms": 3497.000741001102,
+              "decode_ms": 5753.062110001338,
+              "completion_tokens": 256,
+              "tps": 44.49804210438821
+            }
+          ],
+          "prompt_tokens": 3003,
+          "prefill_ms_mean": 3497.000741001102,
+          "prefill_ms_min": 3497.000741001102,
+          "prefill_ms_max": 3497.000741001102,
+          "decode_ms_mean": 5753.062110001338,
+          "completion_tokens_total": 256,
+          "decode_tps_per_stream_mean": 44.49804210438821,
+          "decode_tps_aggregate": 44.49804210438821
+        },
+        {
+          "n_concurrent": 2,
+          "wall_ms": 14747.293662992888,
+          "n_ok": 2,
+          "n_err": 0,
+          "errs": [],
+          "per_stream": [
+            {
+              "prefill_ms": 9102.518674000748,
+              "decode_ms": 5644.096393996733,
+              "completion_tokens": 256,
+              "tps": 45.35712754167185
+            },
+            {
+              "prefill_ms": 3553.739417999168,
+              "decode_ms": 7645.29899500485,
+              "completion_tokens": 256,
+              "tps": 33.484628942211515
+            }
+          ],
+          "prompt_tokens": 3003,
+          "prefill_ms_mean": 6328.129045999958,
+          "prefill_ms_min": 3553.739417999168,
+          "prefill_ms_max": 9102.518674000748,
+          "decode_ms_mean": 6644.697694500792,
+          "completion_tokens_total": 512,
+          "decode_tps_per_stream_mean": 39.42087824194168,
+          "decode_tps_aggregate": 66.96925788442303
+        }
+      ],
+      "warmup": {
+        "prefill_ms": 3578.69478999055,
+        "decode_ms": 699.2033340065973,
+        "completion_tokens": 32,
+        "err": null
+      }
+    },
+    {
+      "model": "qwen36_35B_a3b_ud_q4_k_s",
+      "topo": "pp2tp2",
+      "path": "no_batched",
+      "boot_secs": 30.238741159439087,
+      "port": 37239,
+      "log": "/artefact/flambeau/scripts/bench/logs/qwen36_35B_a3b_ud_q4_k_s__pp2tp2__no_batched.log",
+      "concurrency_results": [
+        {
+          "n_concurrent": 1,
+          "wall_ms": 10006.598618012504,
+          "n_ok": 1,
+          "n_err": 0,
+          "errs": [],
+          "per_stream": [
+            {
+              "prefill_ms": 4550.0456010049675,
+              "decode_ms": 5455.860828005825,
+              "completion_tokens": 256,
+              "tps": 46.92201800418188
+            }
+          ],
+          "prompt_tokens": 3003,
+          "prefill_ms_mean": 4550.0456010049675,
+          "prefill_ms_min": 4550.0456010049675,
+          "prefill_ms_max": 4550.0456010049675,
+          "decode_ms_mean": 5455.860828005825,
+          "completion_tokens_total": 256,
+          "decode_tps_per_stream_mean": 46.92201800418188,
+          "decode_tps_aggregate": 46.92201800418188
+        },
+        {
+          "n_concurrent": 2,
+          "wall_ms": 16825.645877004717,
+          "n_ok": 2,
+          "n_err": 0,
+          "errs": [],
+          "per_stream": [
+            {
+              "prefill_ms": 11456.949571002042,
+              "decode_ms": 5367.981703995611,
+              "completion_tokens": 256,
+              "tps": 47.690177447782396
+            },
+            {
+              "prefill_ms": 4594.009614011156,
+              "decode_ms": 8083.601557998918,
+              "completion_tokens": 256,
+              "tps": 31.669052236584058
+            }
+          ],
+          "prompt_tokens": 3003,
+          "prefill_ms_mean": 8025.479592506599,
+          "prefill_ms_min": 4594.009614011156,
+          "prefill_ms_max": 11456.949571002042,
+          "decode_ms_mean": 6725.791630997264,
+          "completion_tokens_total": 512,
+          "decode_tps_per_stream_mean": 39.67961484218323,
+          "decode_tps_aggregate": 63.338104473168116
+        }
+      ],
+      "warmup": {
+        "prefill_ms": 4681.97801700444,
+        "decode_ms": 661.7860690021189,
+        "completion_tokens": 32,
+        "err": null
+      }
+    },
+    {
+      "model": "qwen36_35B_a3b_ud_q4_k_s",
+      "topo": "pp2tp2",
+      "path": "batched",
+      "boot_secs": 9.421658992767334,
+      "port": 47145,
+      "log": "/artefact/flambeau/scripts/bench/logs/qwen36_35B_a3b_ud_q4_k_s__pp2tp2__batched.log",
+      "concurrency_results": [
+        {
+          "n_concurrent": 1,
+          "wall_ms": 10076.079878999735,
+          "n_ok": 1,
+          "n_err": 0,
+          "errs": [],
+          "per_stream": [
+            {
+              "prefill_ms": 4550.884670010419,
+              "decode_ms": 5523.864540999057,
+              "completion_tokens": 256,
+              "tps": 46.34436599592997
+            }
+          ],
+          "prompt_tokens": 3003,
+          "prefill_ms_mean": 4550.884670010419,
+          "prefill_ms_min": 4550.884670010419,
+          "prefill_ms_max": 4550.884670010419,
+          "decode_ms_mean": 5523.864540999057,
+          "completion_tokens_total": 256,
+          "decode_tps_per_stream_mean": 46.34436599592997,
+          "decode_tps_aggregate": 46.34436599592997
+        },
+        {
+          "n_concurrent": 2,
+          "wall_ms": 16749.979105006787,
+          "n_ok": 2,
+          "n_err": 0,
+          "errs": [],
+          "per_stream": [
+            {
+              "prefill_ms": 11419.438730998081,
+              "decode_ms": 5329.633868997917,
+              "completion_tokens": 256,
+              "tps": 48.03331829023621
+            },
+            {
+              "prefill_ms": 4588.252490997547,
+              "decode_ms": 8101.313664999907,
+              "completion_tokens": 256,
+              "tps": 31.599813386561788
+            }
+          ],
+          "prompt_tokens": 3003,
+          "prefill_ms_mean": 8003.845610997814,
+          "prefill_ms_min": 4588.252490997547,
+          "prefill_ms_max": 11419.438730998081,
+          "decode_ms_mean": 6715.473766998912,
+          "completion_tokens_total": 512,
+          "decode_tps_per_stream_mean": 39.816565838399,
+          "decode_tps_aggregate": 63.199626773123576
+        }
+      ],
+      "warmup": {
+        "prefill_ms": 4652.9581130016595,
+        "decode_ms": 672.1362149983179,
+        "completion_tokens": 32,
+        "err": null
+      }
+    }
+  ],
+  "finished": "2026-05-12T20:39:50.880845+00:00"
+}

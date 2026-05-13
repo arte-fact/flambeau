@@ -32,11 +32,20 @@ flambeau-quant = { path = "../quant" }
 flambeau-runtime = { path = "../runtime" }
 flambeau-bench = { path = "../bench" }
 flambeau-server = { path = "../server" }
+# Direct dep so the CLI can register `Qwen3MoEModelArch` with the
+# runtime registry. Compiles arch-only (no `hip` feature) — the
+# struct + trait impl don't need device code.
+flambeau-qwen3-moe = { path = "../models/qwen3-moe" }
 anyhow.workspace = true
 clap.workspace = true
 tokio.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
+# Global allocator override. mimalloc beats glibc's ptmalloc on the
+# tokio HTTP path under concurrency (less arena-lock contention) and
+# on the per-request alloc churn (smaller-block fast path). Linked at
+# the binary, so kernel crates and lib crates are unaffected.
+mimalloc = { version = "0.1", default-features = false }
 
 [lints]
 workspace = true

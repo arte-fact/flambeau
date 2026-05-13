@@ -209,80 +209,116 @@ fn resolve_head_logits<'a>(
     DevicePtr,
     usize,
 )> {
-    match (model, inflight) {
-        (LoadedModel::Tp { model: m, .. }, Inflight::Tp { decode, .. }) => {
-            let head = decode.head_rank.0 as usize;
-            if head >= cluster.ranks() {
-                bail!(
-                    "run_gpu_topk: TP head_rank={head} >= cluster ranks {}",
-                    cluster.ranks()
-                );
-            }
-            let dev = cluster.device(head);
-            if dev.id() != scratch.device_id() {
-                bail!(
-                    "run_gpu_topk: scratch device_id={} != TP head device id={}",
-                    scratch.device_id(),
-                    dev.id()
-                );
-            }
-            let ops = m
-                .ops
-                .get(head)
-                .ok_or_else(|| anyhow!("TP ops registry missing rank {head}"))?;
-            let head_scratch = decode
-                .per_rank
-                .get(head)
-                .ok_or_else(|| anyhow!("TP scratch per_rank missing rank {head}"))?
-                .output_head
-                .as_ref()
-                .ok_or_else(|| anyhow!("TP head rank missing OutputHeadScratch"))?;
-            Ok((dev, ops, head_scratch.logits_f32, m.config.vocab_size))
+    if let (Some(pp_model), Some(pp_session)) = (model.as_pp(), inflight.as_pp()) {
+        let m = &pp_model.model;
+        let n_ranks = m.shards.len();
+        if n_ranks == 0 {
+            bail!("run_gpu_topk: PP model has zero ranks");
         }
-        (LoadedModel::Hybrid { model: hm, .. }, Inflight::Hybrid { decode, .. }) => {
-            let head_stage = decode.head_stage as usize;
-            let stage_model = hm
-                .stages
-                .get(head_stage)
-                .ok_or_else(|| anyhow!("Hybrid model missing head_stage {head_stage}"))?;
-            let stage_scratch = decode
-                .per_stage
-                .get(head_stage)
-                .ok_or_else(|| anyhow!("Hybrid decode missing head_stage {head_stage}"))?;
-            let head_rank = stage_scratch.head_rank.0 as usize;
-            if head_rank >= stage_model.sub_cluster.ranks() {
-                bail!(
-                    "run_gpu_topk: hybrid head_rank={head_rank} >= stage sub-cluster ranks {}",
-                    stage_model.sub_cluster.ranks()
-                );
-            }
-            let dev = stage_model.sub_cluster.device(head_rank);
-            if dev.id() != scratch.device_id() {
-                bail!(
-                    "run_gpu_topk: scratch device_id={} != hybrid head device id={}",
-                    scratch.device_id(),
-                    dev.id()
-                );
-            }
-            let ops = stage_model
-                .tp_model
-                .ops
-                .get(head_rank)
-                .ok_or_else(|| anyhow!("Hybrid stage ops missing rank {head_rank}"))?;
-            let head_scratch = stage_scratch
-                .per_rank
-                .get(head_rank)
-                .ok_or_else(|| anyhow!("Hybrid scratch per_rank missing rank {head_rank}"))?
-                .output_head
-                .as_ref()
-                .ok_or_else(|| anyhow!("Hybrid head rank missing OutputHeadScratch"))?;
-            Ok((dev, ops, head_scratch.logits_f32, hm.config.vocab_size))
+        let head = n_ranks - 1;
+        if head >= cluster.ranks() {
+            bail!(
+                "run_gpu_topk: PP head_rank={head} >= cluster ranks {}",
+                cluster.ranks()
+            );
         }
-        _ => bail!(
-            "GPU sampler is wired for TP and Hybrid topologies (got {})",
-            model.topology()
-        ),
+        let dev = cluster.device(head);
+        if dev.id() != scratch.device_id() {
+            bail!(
+                "run_gpu_topk: scratch device_id={} != PP head device id={}",
+                scratch.device_id(),
+                dev.id()
+            );
+        }
+        let ops = &m.shards[head].ops;
+        let head_scratch = pp_session
+            .decode
+            .per_rank
+            .get(head)
+            .ok_or_else(|| anyhow!("PP scratch per_rank missing rank {head}"))?
+            .output_head
+            .as_ref()
+            .ok_or_else(|| anyhow!("PP head rank missing OutputHeadScratch"))?;
+        return Ok((dev, ops, head_scratch.logits_f32, m.config.vocab_size));
     }
+    if let (Some(tp_model), Some(tp_session)) = (model.as_tp(), inflight.as_tp()) {
+        let m = &tp_model.model;
+        let decode = &tp_session.decode;
+        let head = decode.head_rank.0 as usize;
+        if head >= cluster.ranks() {
+            bail!(
+                "run_gpu_topk: TP head_rank={head} >= cluster ranks {}",
+                cluster.ranks()
+            );
+        }
+        let dev = cluster.device(head);
+        if dev.id() != scratch.device_id() {
+            bail!(
+                "run_gpu_topk: scratch device_id={} != TP head device id={}",
+                scratch.device_id(),
+                dev.id()
+            );
+        }
+        let ops = m
+            .ops
+            .get(head)
+            .ok_or_else(|| anyhow!("TP ops registry missing rank {head}"))?;
+        let head_scratch = decode
+            .per_rank
+            .get(head)
+            .ok_or_else(|| anyhow!("TP scratch per_rank missing rank {head}"))?
+            .output_head
+            .as_ref()
+            .ok_or_else(|| anyhow!("TP head rank missing OutputHeadScratch"))?;
+        return Ok((dev, ops, head_scratch.logits_f32, m.config.vocab_size));
+    }
+    if let (Some(hybrid_model), Some(hybrid_session)) =
+        (model.as_hybrid(), inflight.as_hybrid())
+    {
+        let hm = &hybrid_model.model;
+        let decode = &hybrid_session.decode;
+        let head_stage = decode.head_stage as usize;
+        let stage_model = hm
+            .stages
+            .get(head_stage)
+            .ok_or_else(|| anyhow!("Hybrid model missing head_stage {head_stage}"))?;
+        let stage_scratch = decode
+            .per_stage
+            .get(head_stage)
+            .ok_or_else(|| anyhow!("Hybrid decode missing head_stage {head_stage}"))?;
+        let head_rank = stage_scratch.head_rank.0 as usize;
+        if head_rank >= stage_model.sub_cluster.ranks() {
+            bail!(
+                "run_gpu_topk: hybrid head_rank={head_rank} >= stage sub-cluster ranks {}",
+                stage_model.sub_cluster.ranks()
+            );
+        }
+        let dev = stage_model.sub_cluster.device(head_rank);
+        if dev.id() != scratch.device_id() {
+            bail!(
+                "run_gpu_topk: scratch device_id={} != hybrid head device id={}",
+                scratch.device_id(),
+                dev.id()
+            );
+        }
+        let ops = stage_model
+            .tp_model
+            .ops
+            .get(head_rank)
+            .ok_or_else(|| anyhow!("Hybrid stage ops missing rank {head_rank}"))?;
+        let head_scratch = stage_scratch
+            .per_rank
+            .get(head_rank)
+            .ok_or_else(|| anyhow!("Hybrid scratch per_rank missing rank {head_rank}"))?
+            .output_head
+            .as_ref()
+            .ok_or_else(|| anyhow!("Hybrid head rank missing OutputHeadScratch"))?;
+        return Ok((dev, ops, head_scratch.logits_f32, hm.config.vocab_size));
+    }
+    bail!(
+        "GPU sampler is wired for TP and Hybrid topologies (got {})",
+        model.topology()
+    )
 }
 
 /// Apply the stop-token mask to `(host_ids, host_probs)` AFTER the GPU

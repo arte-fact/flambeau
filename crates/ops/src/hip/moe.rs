@@ -154,6 +154,469 @@ pub fn indexed_moe_mmvq_q4_k_r2(
     Ok(())
 }
 
+/// Q3_K MoE MMVQ. Same indexing contract as `indexed_moe_mmvq_q4_k`;
+/// weights are Q3_K super-blocks (110 B; byte-wise scales unpack).
+pub fn indexed_moe_mmvq_q3_k(
+    reg: &OpsRegistry,
+    stream: &HipStream,
+    w: DevicePtr,
+    y: DevicePtr,
+    expert_ids: DevicePtr,
+    dst: DevicePtr,
+    n_rows: usize,
+    n_tokens: usize,
+    top_k: usize,
+    n_sb_per_row: usize,
+) -> Result<()> {
+    let module = reg.expect_module("indexed_moe_mmvq_q3_k")?;
+    let kernel = module.kernel("flambeau_indexed_moe_mmvq_q3_k_q8_1")?;
+    let n_rows_i = n_rows as i32;
+    let n_tokens_i = n_tokens as i32;
+    let top_k_i = top_k as i32;
+    let nb_i = n_sb_per_row as i32;
+    let w_ptr: u64 = w.as_usize() as u64;
+    let y_ptr: u64 = y.as_usize() as u64;
+    let e_ptr: u64 = expert_ids.as_usize() as u64;
+    let d_ptr: u64 = dst.as_usize() as u64;
+    let mut args = KernelArgs::new();
+    args.push(&w_ptr);
+    args.push(&y_ptr);
+    args.push(&e_ptr);
+    args.push(&d_ptr);
+    args.push(&n_rows_i);
+    args.push(&n_tokens_i);
+    args.push(&top_k_i);
+    args.push(&nb_i);
+    let cfg = LaunchCfg {
+        grid: (n_rows as u32, (n_tokens * top_k) as u32, 1),
+        block: (64, 1, 1),
+        shared_bytes: 0,
+    };
+    unsafe { kernel.launch(stream, cfg, args)? };
+    Ok(())
+}
+
+/// Q2_K MoE MMVQ. Same indexing contract as `indexed_moe_mmvq_q4_k`;
+/// weights are Q2_K super-blocks (affine, packed 4-bit (scale, min)).
+pub fn indexed_moe_mmvq_q2_k(
+    reg: &OpsRegistry,
+    stream: &HipStream,
+    w: DevicePtr,
+    y: DevicePtr,
+    expert_ids: DevicePtr,
+    dst: DevicePtr,
+    n_rows: usize,
+    n_tokens: usize,
+    top_k: usize,
+    n_sb_per_row: usize,
+) -> Result<()> {
+    let module = reg.expect_module("indexed_moe_mmvq_q2_k")?;
+    let kernel = module.kernel("flambeau_indexed_moe_mmvq_q2_K_q8_1")?;
+    let n_rows_i = n_rows as i32;
+    let n_tokens_i = n_tokens as i32;
+    let top_k_i = top_k as i32;
+    let nb_i = n_sb_per_row as i32;
+    let w_ptr: u64 = w.as_usize() as u64;
+    let y_ptr: u64 = y.as_usize() as u64;
+    let e_ptr: u64 = expert_ids.as_usize() as u64;
+    let d_ptr: u64 = dst.as_usize() as u64;
+    let mut args = KernelArgs::new();
+    args.push(&w_ptr);
+    args.push(&y_ptr);
+    args.push(&e_ptr);
+    args.push(&d_ptr);
+    args.push(&n_rows_i);
+    args.push(&n_tokens_i);
+    args.push(&top_k_i);
+    args.push(&nb_i);
+    let cfg = LaunchCfg {
+        grid: (n_rows as u32, (n_tokens * top_k) as u32, 1),
+        block: (64, 1, 1),
+        shared_bytes: 0,
+    };
+    unsafe { kernel.launch(stream, cfg, args)? };
+    Ok(())
+}
+
+/// IQ4_XS MoE MMVQ. Same indexing contract as `indexed_moe_mmvq_q4_k`;
+/// weights are IQ4_XS blocks.
+pub fn indexed_moe_mmvq_iq4_xs(
+    reg: &OpsRegistry,
+    stream: &HipStream,
+    w: DevicePtr,
+    y: DevicePtr,
+    expert_ids: DevicePtr,
+    dst: DevicePtr,
+    n_rows: usize,
+    n_tokens: usize,
+    top_k: usize,
+    n_sb_per_row: usize,
+) -> Result<()> {
+    let module = reg.expect_module("indexed_moe_mmvq_iq4_xs")?;
+    let kernel = module.kernel("flambeau_indexed_moe_mmvq_iq4_xs_q8_1")?;
+    let n_rows_i = n_rows as i32;
+    let n_tokens_i = n_tokens as i32;
+    let top_k_i = top_k as i32;
+    let nb_i = n_sb_per_row as i32;
+    let w_ptr: u64 = w.as_usize() as u64;
+    let y_ptr: u64 = y.as_usize() as u64;
+    let e_ptr: u64 = expert_ids.as_usize() as u64;
+    let d_ptr: u64 = dst.as_usize() as u64;
+    let mut args = KernelArgs::new();
+    args.push(&w_ptr);
+    args.push(&y_ptr);
+    args.push(&e_ptr);
+    args.push(&d_ptr);
+    args.push(&n_rows_i);
+    args.push(&n_tokens_i);
+    args.push(&top_k_i);
+    args.push(&nb_i);
+    let cfg = LaunchCfg {
+        grid: (n_rows as u32, (n_tokens * top_k) as u32, 1),
+        block: (64, 1, 1),
+        shared_bytes: 0,
+    };
+    unsafe { kernel.launch(stream, cfg, args)? };
+    Ok(())
+}
+
+/// IQ4_NL MoE MMVQ. Same indexing contract as `indexed_moe_mmvq_q4_k`;
+/// weights are IQ4_NL blocks.
+pub fn indexed_moe_mmvq_iq4_nl(
+    reg: &OpsRegistry,
+    stream: &HipStream,
+    w: DevicePtr,
+    y: DevicePtr,
+    expert_ids: DevicePtr,
+    dst: DevicePtr,
+    n_rows: usize,
+    n_tokens: usize,
+    top_k: usize,
+    n_blocks_per_row: usize,
+) -> Result<()> {
+    let module = reg.expect_module("indexed_moe_mmvq_iq4_nl")?;
+    let kernel = module.kernel("flambeau_indexed_moe_mmvq_iq4_nl_q8_1")?;
+    let n_rows_i = n_rows as i32;
+    let n_tokens_i = n_tokens as i32;
+    let top_k_i = top_k as i32;
+    let nb_i = n_blocks_per_row as i32;
+    let w_ptr: u64 = w.as_usize() as u64;
+    let y_ptr: u64 = y.as_usize() as u64;
+    let e_ptr: u64 = expert_ids.as_usize() as u64;
+    let d_ptr: u64 = dst.as_usize() as u64;
+    let mut args = KernelArgs::new();
+    args.push(&w_ptr);
+    args.push(&y_ptr);
+    args.push(&e_ptr);
+    args.push(&d_ptr);
+    args.push(&n_rows_i);
+    args.push(&n_tokens_i);
+    args.push(&top_k_i);
+    args.push(&nb_i);
+    let cfg = LaunchCfg {
+        grid: (n_rows as u32, (n_tokens * top_k) as u32, 1),
+        block: (64, 1, 1),
+        shared_bytes: 0,
+    };
+    unsafe { kernel.launch(stream, cfg, args)? };
+    Ok(())
+}
+
+/// IQ3_XXS MoE MMVQ. Same indexing contract as `indexed_moe_mmvq_q4_k`;
+/// weights are IQ3_XXS blocks.
+pub fn indexed_moe_mmvq_iq3_xxs(
+    reg: &OpsRegistry,
+    stream: &HipStream,
+    w: DevicePtr,
+    y: DevicePtr,
+    expert_ids: DevicePtr,
+    dst: DevicePtr,
+    n_rows: usize,
+    n_tokens: usize,
+    top_k: usize,
+    n_sb_per_row: usize,
+) -> Result<()> {
+    let module = reg.expect_module("indexed_moe_mmvq_iq3_xxs")?;
+    let kernel = module.kernel("flambeau_indexed_moe_mmvq_iq3_xxs_q8_1")?;
+    let n_rows_i = n_rows as i32;
+    let n_tokens_i = n_tokens as i32;
+    let top_k_i = top_k as i32;
+    let nb_i = n_sb_per_row as i32;
+    let w_ptr: u64 = w.as_usize() as u64;
+    let y_ptr: u64 = y.as_usize() as u64;
+    let e_ptr: u64 = expert_ids.as_usize() as u64;
+    let d_ptr: u64 = dst.as_usize() as u64;
+    let mut args = KernelArgs::new();
+    args.push(&w_ptr);
+    args.push(&y_ptr);
+    args.push(&e_ptr);
+    args.push(&d_ptr);
+    args.push(&n_rows_i);
+    args.push(&n_tokens_i);
+    args.push(&top_k_i);
+    args.push(&nb_i);
+    let cfg = LaunchCfg {
+        grid: (n_rows as u32, (n_tokens * top_k) as u32, 1),
+        block: (64, 1, 1),
+        shared_bytes: 0,
+    };
+    unsafe { kernel.launch(stream, cfg, args)? };
+    Ok(())
+}
+
+/// IQ3_S MoE MMVQ. Same indexing contract as `indexed_moe_mmvq_q4_k`;
+/// weights are IQ3_S blocks.
+pub fn indexed_moe_mmvq_iq3_s(
+    reg: &OpsRegistry,
+    stream: &HipStream,
+    w: DevicePtr,
+    y: DevicePtr,
+    expert_ids: DevicePtr,
+    dst: DevicePtr,
+    n_rows: usize,
+    n_tokens: usize,
+    top_k: usize,
+    n_sb_per_row: usize,
+) -> Result<()> {
+    let module = reg.expect_module("indexed_moe_mmvq_iq3_s")?;
+    let kernel = module.kernel("flambeau_indexed_moe_mmvq_iq3_s_q8_1")?;
+    let n_rows_i = n_rows as i32;
+    let n_tokens_i = n_tokens as i32;
+    let top_k_i = top_k as i32;
+    let nb_i = n_sb_per_row as i32;
+    let w_ptr: u64 = w.as_usize() as u64;
+    let y_ptr: u64 = y.as_usize() as u64;
+    let e_ptr: u64 = expert_ids.as_usize() as u64;
+    let d_ptr: u64 = dst.as_usize() as u64;
+    let mut args = KernelArgs::new();
+    args.push(&w_ptr);
+    args.push(&y_ptr);
+    args.push(&e_ptr);
+    args.push(&d_ptr);
+    args.push(&n_rows_i);
+    args.push(&n_tokens_i);
+    args.push(&top_k_i);
+    args.push(&nb_i);
+    let cfg = LaunchCfg {
+        grid: (n_rows as u32, (n_tokens * top_k) as u32, 1),
+        block: (64, 1, 1),
+        shared_bytes: 0,
+    };
+    unsafe { kernel.launch(stream, cfg, args)? };
+    Ok(())
+}
+
+/// IQ2_XXS MoE MMVQ. Same indexing contract as `indexed_moe_mmvq_q4_k`;
+/// weights are IQ2_XXS blocks.
+pub fn indexed_moe_mmvq_iq2_xxs(
+    reg: &OpsRegistry,
+    stream: &HipStream,
+    w: DevicePtr,
+    y: DevicePtr,
+    expert_ids: DevicePtr,
+    dst: DevicePtr,
+    n_rows: usize,
+    n_tokens: usize,
+    top_k: usize,
+    n_sb_per_row: usize,
+) -> Result<()> {
+    let module = reg.expect_module("indexed_moe_mmvq_iq2_xxs")?;
+    let kernel = module.kernel("flambeau_indexed_moe_mmvq_iq2_xxs_q8_1")?;
+    let n_rows_i = n_rows as i32;
+    let n_tokens_i = n_tokens as i32;
+    let top_k_i = top_k as i32;
+    let nb_i = n_sb_per_row as i32;
+    let w_ptr: u64 = w.as_usize() as u64;
+    let y_ptr: u64 = y.as_usize() as u64;
+    let e_ptr: u64 = expert_ids.as_usize() as u64;
+    let d_ptr: u64 = dst.as_usize() as u64;
+    let mut args = KernelArgs::new();
+    args.push(&w_ptr);
+    args.push(&y_ptr);
+    args.push(&e_ptr);
+    args.push(&d_ptr);
+    args.push(&n_rows_i);
+    args.push(&n_tokens_i);
+    args.push(&top_k_i);
+    args.push(&nb_i);
+    let cfg = LaunchCfg {
+        grid: (n_rows as u32, (n_tokens * top_k) as u32, 1),
+        block: (64, 1, 1),
+        shared_bytes: 0,
+    };
+    unsafe { kernel.launch(stream, cfg, args)? };
+    Ok(())
+}
+
+/// IQ2_XS MoE MMVQ. Same indexing contract as `indexed_moe_mmvq_q4_k`;
+/// weights are IQ2_XS blocks.
+pub fn indexed_moe_mmvq_iq2_xs(
+    reg: &OpsRegistry,
+    stream: &HipStream,
+    w: DevicePtr,
+    y: DevicePtr,
+    expert_ids: DevicePtr,
+    dst: DevicePtr,
+    n_rows: usize,
+    n_tokens: usize,
+    top_k: usize,
+    n_sb_per_row: usize,
+) -> Result<()> {
+    let module = reg.expect_module("indexed_moe_mmvq_iq2_xs")?;
+    let kernel = module.kernel("flambeau_indexed_moe_mmvq_iq2_xs_q8_1")?;
+    let n_rows_i = n_rows as i32;
+    let n_tokens_i = n_tokens as i32;
+    let top_k_i = top_k as i32;
+    let nb_i = n_sb_per_row as i32;
+    let w_ptr: u64 = w.as_usize() as u64;
+    let y_ptr: u64 = y.as_usize() as u64;
+    let e_ptr: u64 = expert_ids.as_usize() as u64;
+    let d_ptr: u64 = dst.as_usize() as u64;
+    let mut args = KernelArgs::new();
+    args.push(&w_ptr);
+    args.push(&y_ptr);
+    args.push(&e_ptr);
+    args.push(&d_ptr);
+    args.push(&n_rows_i);
+    args.push(&n_tokens_i);
+    args.push(&top_k_i);
+    args.push(&nb_i);
+    let cfg = LaunchCfg {
+        grid: (n_rows as u32, (n_tokens * top_k) as u32, 1),
+        block: (64, 1, 1),
+        shared_bytes: 0,
+    };
+    unsafe { kernel.launch(stream, cfg, args)? };
+    Ok(())
+}
+
+/// IQ2_S MoE MMVQ. Same indexing contract as `indexed_moe_mmvq_q4_k`;
+/// weights are IQ2_S blocks.
+pub fn indexed_moe_mmvq_iq2_s(
+    reg: &OpsRegistry,
+    stream: &HipStream,
+    w: DevicePtr,
+    y: DevicePtr,
+    expert_ids: DevicePtr,
+    dst: DevicePtr,
+    n_rows: usize,
+    n_tokens: usize,
+    top_k: usize,
+    n_sb_per_row: usize,
+) -> Result<()> {
+    let module = reg.expect_module("indexed_moe_mmvq_iq2_s")?;
+    let kernel = module.kernel("flambeau_indexed_moe_mmvq_iq2_s_q8_1")?;
+    let n_rows_i = n_rows as i32;
+    let n_tokens_i = n_tokens as i32;
+    let top_k_i = top_k as i32;
+    let nb_i = n_sb_per_row as i32;
+    let w_ptr: u64 = w.as_usize() as u64;
+    let y_ptr: u64 = y.as_usize() as u64;
+    let e_ptr: u64 = expert_ids.as_usize() as u64;
+    let d_ptr: u64 = dst.as_usize() as u64;
+    let mut args = KernelArgs::new();
+    args.push(&w_ptr);
+    args.push(&y_ptr);
+    args.push(&e_ptr);
+    args.push(&d_ptr);
+    args.push(&n_rows_i);
+    args.push(&n_tokens_i);
+    args.push(&top_k_i);
+    args.push(&nb_i);
+    let cfg = LaunchCfg {
+        grid: (n_rows as u32, (n_tokens * top_k) as u32, 1),
+        block: (64, 1, 1),
+        shared_bytes: 0,
+    };
+    unsafe { kernel.launch(stream, cfg, args)? };
+    Ok(())
+}
+
+/// IQ1_S MoE MMVQ. Same indexing contract as `indexed_moe_mmvq_q4_k`;
+/// weights are IQ1_S blocks.
+pub fn indexed_moe_mmvq_iq1_s(
+    reg: &OpsRegistry,
+    stream: &HipStream,
+    w: DevicePtr,
+    y: DevicePtr,
+    expert_ids: DevicePtr,
+    dst: DevicePtr,
+    n_rows: usize,
+    n_tokens: usize,
+    top_k: usize,
+    n_sb_per_row: usize,
+) -> Result<()> {
+    let module = reg.expect_module("indexed_moe_mmvq_iq1_s")?;
+    let kernel = module.kernel("flambeau_indexed_moe_mmvq_iq1_s_q8_1")?;
+    let n_rows_i = n_rows as i32;
+    let n_tokens_i = n_tokens as i32;
+    let top_k_i = top_k as i32;
+    let nb_i = n_sb_per_row as i32;
+    let w_ptr: u64 = w.as_usize() as u64;
+    let y_ptr: u64 = y.as_usize() as u64;
+    let e_ptr: u64 = expert_ids.as_usize() as u64;
+    let d_ptr: u64 = dst.as_usize() as u64;
+    let mut args = KernelArgs::new();
+    args.push(&w_ptr);
+    args.push(&y_ptr);
+    args.push(&e_ptr);
+    args.push(&d_ptr);
+    args.push(&n_rows_i);
+    args.push(&n_tokens_i);
+    args.push(&top_k_i);
+    args.push(&nb_i);
+    let cfg = LaunchCfg {
+        grid: (n_rows as u32, (n_tokens * top_k) as u32, 1),
+        block: (64, 1, 1),
+        shared_bytes: 0,
+    };
+    unsafe { kernel.launch(stream, cfg, args)? };
+    Ok(())
+}
+
+/// IQ1_M MoE MMVQ. Same indexing contract as `indexed_moe_mmvq_q4_k`;
+/// weights are IQ1_M blocks.
+pub fn indexed_moe_mmvq_iq1_m(
+    reg: &OpsRegistry,
+    stream: &HipStream,
+    w: DevicePtr,
+    y: DevicePtr,
+    expert_ids: DevicePtr,
+    dst: DevicePtr,
+    n_rows: usize,
+    n_tokens: usize,
+    top_k: usize,
+    n_sb_per_row: usize,
+) -> Result<()> {
+    let module = reg.expect_module("indexed_moe_mmvq_iq1_m")?;
+    let kernel = module.kernel("flambeau_indexed_moe_mmvq_iq1_m_q8_1")?;
+    let n_rows_i = n_rows as i32;
+    let n_tokens_i = n_tokens as i32;
+    let top_k_i = top_k as i32;
+    let nb_i = n_sb_per_row as i32;
+    let w_ptr: u64 = w.as_usize() as u64;
+    let y_ptr: u64 = y.as_usize() as u64;
+    let e_ptr: u64 = expert_ids.as_usize() as u64;
+    let d_ptr: u64 = dst.as_usize() as u64;
+    let mut args = KernelArgs::new();
+    args.push(&w_ptr);
+    args.push(&y_ptr);
+    args.push(&e_ptr);
+    args.push(&d_ptr);
+    args.push(&n_rows_i);
+    args.push(&n_tokens_i);
+    args.push(&top_k_i);
+    args.push(&nb_i);
+    let cfg = LaunchCfg {
+        grid: (n_rows as u32, (n_tokens * top_k) as u32, 1),
+        block: (64, 1, 1),
+        shared_bytes: 0,
+    };
+    unsafe { kernel.launch(stream, cfg, args)? };
+    Ok(())
+}
+
+
 /// Q6_K sibling of `indexed_moe_mmvq_q4_k_r2`. Same indexing contract —
 /// `[n_tokens, top_k]` expert ids, `[n_tokens, top_k, n_rows]` F32 output,
 /// `[n_tokens, n_sb_per_row * 8]` Q8_1 activations — but weights are
@@ -265,6 +728,94 @@ pub fn indexed_moe_mmvq_q4_0(
 ) -> Result<()> {
     let module = reg.expect_module("indexed_moe_mmvq_q4_0")?;
     let kernel = module.kernel("flambeau_indexed_moe_mmvq_q4_0_q8_1")?;
+    let n_rows_i = n_rows as i32;
+    let n_tokens_i = n_tokens as i32;
+    let top_k_i = top_k as i32;
+    let nb_i = n_blocks_per_row as i32;
+    let w_ptr: u64 = w.as_usize() as u64;
+    let y_ptr: u64 = y.as_usize() as u64;
+    let e_ptr: u64 = expert_ids.as_usize() as u64;
+    let d_ptr: u64 = dst.as_usize() as u64;
+    let mut args = KernelArgs::new();
+    args.push(&w_ptr);
+    args.push(&y_ptr);
+    args.push(&e_ptr);
+    args.push(&d_ptr);
+    args.push(&n_rows_i);
+    args.push(&n_tokens_i);
+    args.push(&top_k_i);
+    args.push(&nb_i);
+    let cfg = LaunchCfg {
+        grid: (n_rows as u32, (n_tokens * top_k) as u32, 1),
+        block: (256, 1, 1),
+        shared_bytes: 0,
+    };
+    unsafe { kernel.launch(stream, cfg, args)? };
+    Ok(())
+}
+
+/// Q5_0 indexed-MoE MMVQ. Same contract as `indexed_moe_mmvq_q4_0` plus
+/// the 5th-bit DP4A from `mmvq_q5_0`: per block, decode adds
+/// `16 · sumi_bit · d_x · d_y` and subtracts `16 · d_x · s_y` for the
+/// (q5 − 16) offset.
+#[allow(clippy::too_many_arguments)]
+pub fn indexed_moe_mmvq_q5_0(
+    reg: &OpsRegistry,
+    stream: &HipStream,
+    w: DevicePtr,
+    y: DevicePtr,
+    expert_ids: DevicePtr,
+    dst: DevicePtr,
+    n_rows: usize,
+    n_tokens: usize,
+    top_k: usize,
+    n_blocks_per_row: usize,
+) -> Result<()> {
+    let module = reg.expect_module("indexed_moe_mmvq_q5_0")?;
+    let kernel = module.kernel("flambeau_indexed_moe_mmvq_q5_0_q8_1")?;
+    let n_rows_i = n_rows as i32;
+    let n_tokens_i = n_tokens as i32;
+    let top_k_i = top_k as i32;
+    let nb_i = n_blocks_per_row as i32;
+    let w_ptr: u64 = w.as_usize() as u64;
+    let y_ptr: u64 = y.as_usize() as u64;
+    let e_ptr: u64 = expert_ids.as_usize() as u64;
+    let d_ptr: u64 = dst.as_usize() as u64;
+    let mut args = KernelArgs::new();
+    args.push(&w_ptr);
+    args.push(&y_ptr);
+    args.push(&e_ptr);
+    args.push(&d_ptr);
+    args.push(&n_rows_i);
+    args.push(&n_tokens_i);
+    args.push(&top_k_i);
+    args.push(&nb_i);
+    let cfg = LaunchCfg {
+        grid: (n_rows as u32, (n_tokens * top_k) as u32, 1),
+        block: (256, 1, 1),
+        shared_bytes: 0,
+    };
+    unsafe { kernel.launch(stream, cfg, args)? };
+    Ok(())
+}
+
+/// Q5_1 indexed-MoE MMVQ. Q5_0 indexed structure with the Q4_1-style
+/// `m·s_y` correction (Q5_1 is affine: y = d·q5 + m).
+#[allow(clippy::too_many_arguments)]
+pub fn indexed_moe_mmvq_q5_1(
+    reg: &OpsRegistry,
+    stream: &HipStream,
+    w: DevicePtr,
+    y: DevicePtr,
+    expert_ids: DevicePtr,
+    dst: DevicePtr,
+    n_rows: usize,
+    n_tokens: usize,
+    top_k: usize,
+    n_blocks_per_row: usize,
+) -> Result<()> {
+    let module = reg.expect_module("indexed_moe_mmvq_q5_1")?;
+    let kernel = module.kernel("flambeau_indexed_moe_mmvq_q5_1_q8_1")?;
     let n_rows_i = n_rows as i32;
     let n_tokens_i = n_tokens as i32;
     let top_k_i = top_k as i32;
@@ -485,6 +1036,519 @@ pub fn indexed_moe_mmvq_q4_k_r2_sorted(
     Ok(())
 }
 
+/// IQ4_XS MoE MMQ tile8 gate+up — fused gate+up MoE prefill kernel. Same
+/// padded-sort + tile8 contract as `indexed_moe_mmq_q4_k_gate_up_tile8`;
+/// kernel buildable and registered, not yet wired into TP MoE prefill
+/// dispatch (`moe_tp.rs::tile8_dt_ok` does not include IQ4_XS).
+///
+pub fn indexed_moe_mmq_iq4_xs_gate_up_tile8(
+    reg: &OpsRegistry,
+    stream: &HipStream,
+    w_gate: DevicePtr,
+    w_up: DevicePtr,
+    y: DevicePtr,
+    expert_ids: DevicePtr,
+    sorted_pair_idx_padded: DevicePtr,
+    padded_offsets: DevicePtr,
+    gate_out: DevicePtr,
+    up_out: DevicePtr,
+    shape: MoeShape,
+) -> Result<()> {
+    let module = reg.expect_module("indexed_moe_mmq_iq4_xs_gate_up_tile8_dp4a")?;
+    let kernel = module.kernel("flambeau_indexed_moe_mmq_iq4_xs_gate_up_tile8_dp4a_q8_1")?;
+    let n_rows_i = shape.n_rows as i32;
+    let n_tokens_i = shape.n_tokens as i32;
+    let top_k_i = shape.top_k as i32;
+    let nb_i = shape.n_sb_per_row as i32;
+    let n_experts_i = shape.n_experts as i32;
+    let g_ptr: u64 = w_gate.as_usize() as u64;
+    let u_ptr: u64 = w_up.as_usize() as u64;
+    let y_ptr: u64 = y.as_usize() as u64;
+    let e_ptr: u64 = expert_ids.as_usize() as u64;
+    let s_ptr: u64 = sorted_pair_idx_padded.as_usize() as u64;
+    let po_ptr: u64 = padded_offsets.as_usize() as u64;
+    let go_ptr: u64 = gate_out.as_usize() as u64;
+    let uo_ptr: u64 = up_out.as_usize() as u64;
+    let mut args = KernelArgs::new();
+    args.push(&g_ptr);
+    args.push(&u_ptr);
+    args.push(&y_ptr);
+    args.push(&e_ptr);
+    args.push(&s_ptr);
+    args.push(&po_ptr);
+    args.push(&go_ptr);
+    args.push(&uo_ptr);
+    args.push(&n_rows_i);
+    args.push(&n_tokens_i);
+    args.push(&top_k_i);
+    args.push(&nb_i);
+    args.push(&n_experts_i);
+    let grid_y = shape.padded_total_upper_bound.div_ceil(8) as u32;
+    let cfg = LaunchCfg {
+        grid: ((shape.n_rows as u32).div_ceil(64), grid_y, 1),
+        block: (64, 1, 1),
+        shared_bytes: 0,
+    };
+    unsafe { kernel.launch(stream, cfg, args)? };
+    Ok(())
+}
+
+/// IQ4_NL MoE MMQ tile8 gate+up — fused gate+up MoE prefill kernel. Same
+/// padded-sort + tile8 contract as `indexed_moe_mmq_q4_k_gate_up_tile8`;
+/// kernel buildable and registered, not yet wired into TP MoE prefill
+/// dispatch (`moe_tp.rs::tile8_dt_ok` does not include IQ4_NL).
+///
+pub fn indexed_moe_mmq_iq4_nl_gate_up_tile8(
+    reg: &OpsRegistry,
+    stream: &HipStream,
+    w_gate: DevicePtr,
+    w_up: DevicePtr,
+    y: DevicePtr,
+    expert_ids: DevicePtr,
+    sorted_pair_idx_padded: DevicePtr,
+    padded_offsets: DevicePtr,
+    gate_out: DevicePtr,
+    up_out: DevicePtr,
+    shape: MoeShape,
+) -> Result<()> {
+    let module = reg.expect_module("indexed_moe_mmq_iq4_nl_gate_up_tile8_dp4a")?;
+    let kernel = module.kernel("flambeau_indexed_moe_mmq_iq4_nl_gate_up_tile8_dp4a_q8_1")?;
+    let n_rows_i = shape.n_rows as i32;
+    let n_tokens_i = shape.n_tokens as i32;
+    let top_k_i = shape.top_k as i32;
+    let nb_i = shape.n_sb_per_row as i32;
+    let n_experts_i = shape.n_experts as i32;
+    let g_ptr: u64 = w_gate.as_usize() as u64;
+    let u_ptr: u64 = w_up.as_usize() as u64;
+    let y_ptr: u64 = y.as_usize() as u64;
+    let e_ptr: u64 = expert_ids.as_usize() as u64;
+    let s_ptr: u64 = sorted_pair_idx_padded.as_usize() as u64;
+    let po_ptr: u64 = padded_offsets.as_usize() as u64;
+    let go_ptr: u64 = gate_out.as_usize() as u64;
+    let uo_ptr: u64 = up_out.as_usize() as u64;
+    let mut args = KernelArgs::new();
+    args.push(&g_ptr);
+    args.push(&u_ptr);
+    args.push(&y_ptr);
+    args.push(&e_ptr);
+    args.push(&s_ptr);
+    args.push(&po_ptr);
+    args.push(&go_ptr);
+    args.push(&uo_ptr);
+    args.push(&n_rows_i);
+    args.push(&n_tokens_i);
+    args.push(&top_k_i);
+    args.push(&nb_i);
+    args.push(&n_experts_i);
+    let grid_y = shape.padded_total_upper_bound.div_ceil(8) as u32;
+    let cfg = LaunchCfg {
+        grid: ((shape.n_rows as u32).div_ceil(64), grid_y, 1),
+        block: (64, 1, 1),
+        shared_bytes: 0,
+    };
+    unsafe { kernel.launch(stream, cfg, args)? };
+    Ok(())
+}
+
+/// IQ3_XXS MoE MMQ tile8 gate+up — fused gate+up MoE prefill kernel. Same
+/// padded-sort + tile8 contract as `indexed_moe_mmq_q4_k_gate_up_tile8`;
+/// kernel buildable and registered, not yet wired into TP MoE prefill
+/// dispatch (`moe_tp.rs::tile8_dt_ok` does not include IQ3_XXS).
+///
+pub fn indexed_moe_mmq_iq3_xxs_gate_up_tile8(
+    reg: &OpsRegistry,
+    stream: &HipStream,
+    w_gate: DevicePtr,
+    w_up: DevicePtr,
+    y: DevicePtr,
+    expert_ids: DevicePtr,
+    sorted_pair_idx_padded: DevicePtr,
+    padded_offsets: DevicePtr,
+    gate_out: DevicePtr,
+    up_out: DevicePtr,
+    shape: MoeShape,
+) -> Result<()> {
+    let module = reg.expect_module("indexed_moe_mmq_iq3_xxs_gate_up_tile8_dp4a")?;
+    let kernel = module.kernel("flambeau_indexed_moe_mmq_iq3_xxs_gate_up_tile8_dp4a_q8_1")?;
+    let n_rows_i = shape.n_rows as i32;
+    let n_tokens_i = shape.n_tokens as i32;
+    let top_k_i = shape.top_k as i32;
+    let nb_i = shape.n_sb_per_row as i32;
+    let n_experts_i = shape.n_experts as i32;
+    let g_ptr: u64 = w_gate.as_usize() as u64;
+    let u_ptr: u64 = w_up.as_usize() as u64;
+    let y_ptr: u64 = y.as_usize() as u64;
+    let e_ptr: u64 = expert_ids.as_usize() as u64;
+    let s_ptr: u64 = sorted_pair_idx_padded.as_usize() as u64;
+    let po_ptr: u64 = padded_offsets.as_usize() as u64;
+    let go_ptr: u64 = gate_out.as_usize() as u64;
+    let uo_ptr: u64 = up_out.as_usize() as u64;
+    let mut args = KernelArgs::new();
+    args.push(&g_ptr);
+    args.push(&u_ptr);
+    args.push(&y_ptr);
+    args.push(&e_ptr);
+    args.push(&s_ptr);
+    args.push(&po_ptr);
+    args.push(&go_ptr);
+    args.push(&uo_ptr);
+    args.push(&n_rows_i);
+    args.push(&n_tokens_i);
+    args.push(&top_k_i);
+    args.push(&nb_i);
+    args.push(&n_experts_i);
+    let grid_y = shape.padded_total_upper_bound.div_ceil(8) as u32;
+    let cfg = LaunchCfg {
+        grid: ((shape.n_rows as u32).div_ceil(64), grid_y, 1),
+        block: (64, 1, 1),
+        shared_bytes: 0,
+    };
+    unsafe { kernel.launch(stream, cfg, args)? };
+    Ok(())
+}
+
+/// IQ3_S MoE MMQ tile8 gate+up — fused gate+up MoE prefill kernel. Same
+/// padded-sort + tile8 contract as `indexed_moe_mmq_q4_k_gate_up_tile8`;
+/// kernel buildable and registered, not yet wired into TP MoE prefill
+/// dispatch (`moe_tp.rs::tile8_dt_ok` does not include IQ3_S).
+///
+pub fn indexed_moe_mmq_iq3_s_gate_up_tile8(
+    reg: &OpsRegistry,
+    stream: &HipStream,
+    w_gate: DevicePtr,
+    w_up: DevicePtr,
+    y: DevicePtr,
+    expert_ids: DevicePtr,
+    sorted_pair_idx_padded: DevicePtr,
+    padded_offsets: DevicePtr,
+    gate_out: DevicePtr,
+    up_out: DevicePtr,
+    shape: MoeShape,
+) -> Result<()> {
+    let module = reg.expect_module("indexed_moe_mmq_iq3_s_gate_up_tile8_dp4a")?;
+    let kernel = module.kernel("flambeau_indexed_moe_mmq_iq3_s_gate_up_tile8_dp4a_q8_1")?;
+    let n_rows_i = shape.n_rows as i32;
+    let n_tokens_i = shape.n_tokens as i32;
+    let top_k_i = shape.top_k as i32;
+    let nb_i = shape.n_sb_per_row as i32;
+    let n_experts_i = shape.n_experts as i32;
+    let g_ptr: u64 = w_gate.as_usize() as u64;
+    let u_ptr: u64 = w_up.as_usize() as u64;
+    let y_ptr: u64 = y.as_usize() as u64;
+    let e_ptr: u64 = expert_ids.as_usize() as u64;
+    let s_ptr: u64 = sorted_pair_idx_padded.as_usize() as u64;
+    let po_ptr: u64 = padded_offsets.as_usize() as u64;
+    let go_ptr: u64 = gate_out.as_usize() as u64;
+    let uo_ptr: u64 = up_out.as_usize() as u64;
+    let mut args = KernelArgs::new();
+    args.push(&g_ptr);
+    args.push(&u_ptr);
+    args.push(&y_ptr);
+    args.push(&e_ptr);
+    args.push(&s_ptr);
+    args.push(&po_ptr);
+    args.push(&go_ptr);
+    args.push(&uo_ptr);
+    args.push(&n_rows_i);
+    args.push(&n_tokens_i);
+    args.push(&top_k_i);
+    args.push(&nb_i);
+    args.push(&n_experts_i);
+    let grid_y = shape.padded_total_upper_bound.div_ceil(8) as u32;
+    let cfg = LaunchCfg {
+        grid: ((shape.n_rows as u32).div_ceil(64), grid_y, 1),
+        block: (64, 1, 1),
+        shared_bytes: 0,
+    };
+    unsafe { kernel.launch(stream, cfg, args)? };
+    Ok(())
+}
+
+/// IQ2_XXS MoE MMQ tile8 gate+up — fused gate+up MoE prefill kernel. Same
+/// padded-sort + tile8 contract as `indexed_moe_mmq_q4_k_gate_up_tile8`;
+/// kernel buildable and registered, not yet wired into TP MoE prefill
+/// dispatch (`moe_tp.rs::tile8_dt_ok` does not include IQ2_XXS).
+///
+pub fn indexed_moe_mmq_iq2_xxs_gate_up_tile8(
+    reg: &OpsRegistry,
+    stream: &HipStream,
+    w_gate: DevicePtr,
+    w_up: DevicePtr,
+    y: DevicePtr,
+    expert_ids: DevicePtr,
+    sorted_pair_idx_padded: DevicePtr,
+    padded_offsets: DevicePtr,
+    gate_out: DevicePtr,
+    up_out: DevicePtr,
+    shape: MoeShape,
+) -> Result<()> {
+    let module = reg.expect_module("indexed_moe_mmq_iq2_xxs_gate_up_tile8_dp4a")?;
+    let kernel = module.kernel("flambeau_indexed_moe_mmq_iq2_xxs_gate_up_tile8_dp4a_q8_1")?;
+    let n_rows_i = shape.n_rows as i32;
+    let n_tokens_i = shape.n_tokens as i32;
+    let top_k_i = shape.top_k as i32;
+    let nb_i = shape.n_sb_per_row as i32;
+    let n_experts_i = shape.n_experts as i32;
+    let g_ptr: u64 = w_gate.as_usize() as u64;
+    let u_ptr: u64 = w_up.as_usize() as u64;
+    let y_ptr: u64 = y.as_usize() as u64;
+    let e_ptr: u64 = expert_ids.as_usize() as u64;
+    let s_ptr: u64 = sorted_pair_idx_padded.as_usize() as u64;
+    let po_ptr: u64 = padded_offsets.as_usize() as u64;
+    let go_ptr: u64 = gate_out.as_usize() as u64;
+    let uo_ptr: u64 = up_out.as_usize() as u64;
+    let mut args = KernelArgs::new();
+    args.push(&g_ptr);
+    args.push(&u_ptr);
+    args.push(&y_ptr);
+    args.push(&e_ptr);
+    args.push(&s_ptr);
+    args.push(&po_ptr);
+    args.push(&go_ptr);
+    args.push(&uo_ptr);
+    args.push(&n_rows_i);
+    args.push(&n_tokens_i);
+    args.push(&top_k_i);
+    args.push(&nb_i);
+    args.push(&n_experts_i);
+    let grid_y = shape.padded_total_upper_bound.div_ceil(8) as u32;
+    let cfg = LaunchCfg {
+        grid: ((shape.n_rows as u32).div_ceil(64), grid_y, 1),
+        block: (64, 1, 1),
+        shared_bytes: 0,
+    };
+    unsafe { kernel.launch(stream, cfg, args)? };
+    Ok(())
+}
+
+/// IQ2_XS MoE MMQ tile8 gate+up — fused gate+up MoE prefill kernel. Same
+/// padded-sort + tile8 contract as `indexed_moe_mmq_q4_k_gate_up_tile8`;
+/// kernel buildable and registered, not yet wired into TP MoE prefill
+/// dispatch (`moe_tp.rs::tile8_dt_ok` does not include IQ2_XS).
+///
+pub fn indexed_moe_mmq_iq2_xs_gate_up_tile8(
+    reg: &OpsRegistry,
+    stream: &HipStream,
+    w_gate: DevicePtr,
+    w_up: DevicePtr,
+    y: DevicePtr,
+    expert_ids: DevicePtr,
+    sorted_pair_idx_padded: DevicePtr,
+    padded_offsets: DevicePtr,
+    gate_out: DevicePtr,
+    up_out: DevicePtr,
+    shape: MoeShape,
+) -> Result<()> {
+    let module = reg.expect_module("indexed_moe_mmq_iq2_xs_gate_up_tile8_dp4a")?;
+    let kernel = module.kernel("flambeau_indexed_moe_mmq_iq2_xs_gate_up_tile8_dp4a_q8_1")?;
+    let n_rows_i = shape.n_rows as i32;
+    let n_tokens_i = shape.n_tokens as i32;
+    let top_k_i = shape.top_k as i32;
+    let nb_i = shape.n_sb_per_row as i32;
+    let n_experts_i = shape.n_experts as i32;
+    let g_ptr: u64 = w_gate.as_usize() as u64;
+    let u_ptr: u64 = w_up.as_usize() as u64;
+    let y_ptr: u64 = y.as_usize() as u64;
+    let e_ptr: u64 = expert_ids.as_usize() as u64;
+    let s_ptr: u64 = sorted_pair_idx_padded.as_usize() as u64;
+    let po_ptr: u64 = padded_offsets.as_usize() as u64;
+    let go_ptr: u64 = gate_out.as_usize() as u64;
+    let uo_ptr: u64 = up_out.as_usize() as u64;
+    let mut args = KernelArgs::new();
+    args.push(&g_ptr);
+    args.push(&u_ptr);
+    args.push(&y_ptr);
+    args.push(&e_ptr);
+    args.push(&s_ptr);
+    args.push(&po_ptr);
+    args.push(&go_ptr);
+    args.push(&uo_ptr);
+    args.push(&n_rows_i);
+    args.push(&n_tokens_i);
+    args.push(&top_k_i);
+    args.push(&nb_i);
+    args.push(&n_experts_i);
+    let grid_y = shape.padded_total_upper_bound.div_ceil(8) as u32;
+    let cfg = LaunchCfg {
+        grid: ((shape.n_rows as u32).div_ceil(64), grid_y, 1),
+        block: (64, 1, 1),
+        shared_bytes: 0,
+    };
+    unsafe { kernel.launch(stream, cfg, args)? };
+    Ok(())
+}
+
+/// IQ2_S MoE MMQ tile8 gate+up — fused gate+up MoE prefill kernel. Same
+/// padded-sort + tile8 contract as `indexed_moe_mmq_q4_k_gate_up_tile8`;
+/// kernel buildable and registered, not yet wired into TP MoE prefill
+/// dispatch (`moe_tp.rs::tile8_dt_ok` does not include IQ2_S).
+///
+pub fn indexed_moe_mmq_iq2_s_gate_up_tile8(
+    reg: &OpsRegistry,
+    stream: &HipStream,
+    w_gate: DevicePtr,
+    w_up: DevicePtr,
+    y: DevicePtr,
+    expert_ids: DevicePtr,
+    sorted_pair_idx_padded: DevicePtr,
+    padded_offsets: DevicePtr,
+    gate_out: DevicePtr,
+    up_out: DevicePtr,
+    shape: MoeShape,
+) -> Result<()> {
+    let module = reg.expect_module("indexed_moe_mmq_iq2_s_gate_up_tile8_dp4a")?;
+    let kernel = module.kernel("flambeau_indexed_moe_mmq_iq2_s_gate_up_tile8_dp4a_q8_1")?;
+    let n_rows_i = shape.n_rows as i32;
+    let n_tokens_i = shape.n_tokens as i32;
+    let top_k_i = shape.top_k as i32;
+    let nb_i = shape.n_sb_per_row as i32;
+    let n_experts_i = shape.n_experts as i32;
+    let g_ptr: u64 = w_gate.as_usize() as u64;
+    let u_ptr: u64 = w_up.as_usize() as u64;
+    let y_ptr: u64 = y.as_usize() as u64;
+    let e_ptr: u64 = expert_ids.as_usize() as u64;
+    let s_ptr: u64 = sorted_pair_idx_padded.as_usize() as u64;
+    let po_ptr: u64 = padded_offsets.as_usize() as u64;
+    let go_ptr: u64 = gate_out.as_usize() as u64;
+    let uo_ptr: u64 = up_out.as_usize() as u64;
+    let mut args = KernelArgs::new();
+    args.push(&g_ptr);
+    args.push(&u_ptr);
+    args.push(&y_ptr);
+    args.push(&e_ptr);
+    args.push(&s_ptr);
+    args.push(&po_ptr);
+    args.push(&go_ptr);
+    args.push(&uo_ptr);
+    args.push(&n_rows_i);
+    args.push(&n_tokens_i);
+    args.push(&top_k_i);
+    args.push(&nb_i);
+    args.push(&n_experts_i);
+    let grid_y = shape.padded_total_upper_bound.div_ceil(8) as u32;
+    let cfg = LaunchCfg {
+        grid: ((shape.n_rows as u32).div_ceil(64), grid_y, 1),
+        block: (64, 1, 1),
+        shared_bytes: 0,
+    };
+    unsafe { kernel.launch(stream, cfg, args)? };
+    Ok(())
+}
+
+/// IQ1_S MoE MMQ tile8 gate+up — fused gate+up MoE prefill kernel. Same
+/// padded-sort + tile8 contract as `indexed_moe_mmq_q4_k_gate_up_tile8`;
+/// kernel buildable and registered, not yet wired into TP MoE prefill
+/// dispatch (`moe_tp.rs::tile8_dt_ok` does not include IQ1_S).
+///
+pub fn indexed_moe_mmq_iq1_s_gate_up_tile8(
+    reg: &OpsRegistry,
+    stream: &HipStream,
+    w_gate: DevicePtr,
+    w_up: DevicePtr,
+    y: DevicePtr,
+    expert_ids: DevicePtr,
+    sorted_pair_idx_padded: DevicePtr,
+    padded_offsets: DevicePtr,
+    gate_out: DevicePtr,
+    up_out: DevicePtr,
+    shape: MoeShape,
+) -> Result<()> {
+    let module = reg.expect_module("indexed_moe_mmq_iq1_s_gate_up_tile8_dp4a")?;
+    let kernel = module.kernel("flambeau_indexed_moe_mmq_iq1_s_gate_up_tile8_dp4a_q8_1")?;
+    let n_rows_i = shape.n_rows as i32;
+    let n_tokens_i = shape.n_tokens as i32;
+    let top_k_i = shape.top_k as i32;
+    let nb_i = shape.n_sb_per_row as i32;
+    let n_experts_i = shape.n_experts as i32;
+    let g_ptr: u64 = w_gate.as_usize() as u64;
+    let u_ptr: u64 = w_up.as_usize() as u64;
+    let y_ptr: u64 = y.as_usize() as u64;
+    let e_ptr: u64 = expert_ids.as_usize() as u64;
+    let s_ptr: u64 = sorted_pair_idx_padded.as_usize() as u64;
+    let po_ptr: u64 = padded_offsets.as_usize() as u64;
+    let go_ptr: u64 = gate_out.as_usize() as u64;
+    let uo_ptr: u64 = up_out.as_usize() as u64;
+    let mut args = KernelArgs::new();
+    args.push(&g_ptr);
+    args.push(&u_ptr);
+    args.push(&y_ptr);
+    args.push(&e_ptr);
+    args.push(&s_ptr);
+    args.push(&po_ptr);
+    args.push(&go_ptr);
+    args.push(&uo_ptr);
+    args.push(&n_rows_i);
+    args.push(&n_tokens_i);
+    args.push(&top_k_i);
+    args.push(&nb_i);
+    args.push(&n_experts_i);
+    let grid_y = shape.padded_total_upper_bound.div_ceil(8) as u32;
+    let cfg = LaunchCfg {
+        grid: ((shape.n_rows as u32).div_ceil(64), grid_y, 1),
+        block: (64, 1, 1),
+        shared_bytes: 0,
+    };
+    unsafe { kernel.launch(stream, cfg, args)? };
+    Ok(())
+}
+
+/// IQ1_M MoE MMQ tile8 gate+up — fused gate+up MoE prefill kernel. Same
+/// padded-sort + tile8 contract as `indexed_moe_mmq_q4_k_gate_up_tile8`;
+/// kernel buildable and registered, not yet wired into TP MoE prefill
+/// dispatch (`moe_tp.rs::tile8_dt_ok` does not include IQ1_M).
+///
+pub fn indexed_moe_mmq_iq1_m_gate_up_tile8(
+    reg: &OpsRegistry,
+    stream: &HipStream,
+    w_gate: DevicePtr,
+    w_up: DevicePtr,
+    y: DevicePtr,
+    expert_ids: DevicePtr,
+    sorted_pair_idx_padded: DevicePtr,
+    padded_offsets: DevicePtr,
+    gate_out: DevicePtr,
+    up_out: DevicePtr,
+    shape: MoeShape,
+) -> Result<()> {
+    let module = reg.expect_module("indexed_moe_mmq_iq1_m_gate_up_tile8_dp4a")?;
+    let kernel = module.kernel("flambeau_indexed_moe_mmq_iq1_m_gate_up_tile8_dp4a_q8_1")?;
+    let n_rows_i = shape.n_rows as i32;
+    let n_tokens_i = shape.n_tokens as i32;
+    let top_k_i = shape.top_k as i32;
+    let nb_i = shape.n_sb_per_row as i32;
+    let n_experts_i = shape.n_experts as i32;
+    let g_ptr: u64 = w_gate.as_usize() as u64;
+    let u_ptr: u64 = w_up.as_usize() as u64;
+    let y_ptr: u64 = y.as_usize() as u64;
+    let e_ptr: u64 = expert_ids.as_usize() as u64;
+    let s_ptr: u64 = sorted_pair_idx_padded.as_usize() as u64;
+    let po_ptr: u64 = padded_offsets.as_usize() as u64;
+    let go_ptr: u64 = gate_out.as_usize() as u64;
+    let uo_ptr: u64 = up_out.as_usize() as u64;
+    let mut args = KernelArgs::new();
+    args.push(&g_ptr);
+    args.push(&u_ptr);
+    args.push(&y_ptr);
+    args.push(&e_ptr);
+    args.push(&s_ptr);
+    args.push(&po_ptr);
+    args.push(&go_ptr);
+    args.push(&uo_ptr);
+    args.push(&n_rows_i);
+    args.push(&n_tokens_i);
+    args.push(&top_k_i);
+    args.push(&nb_i);
+    args.push(&n_experts_i);
+    let grid_y = shape.padded_total_upper_bound.div_ceil(8) as u32;
+    let cfg = LaunchCfg {
+        grid: ((shape.n_rows as u32).div_ceil(64), grid_y, 1),
+        block: (64, 1, 1),
+        shared_bytes: 0,
+    };
+    unsafe { kernel.launch(stream, cfg, args)? };
+    Ok(())
+}
+
 /// fused gate+up tile8 MoE MMQ. Block = 64 rows × 8 slots = 512
 /// outputs; all 8 slots guaranteed same expert via padded sort.
 /// Weight tile decoded ONCE per thread per sub-block, reused across 8 cols.
@@ -535,6 +1599,456 @@ pub fn indexed_moe_mmq_q4_k_gate_up_tile8(
     args.push(&nb_i);
     args.push(&n_experts_i);
     // Upper-bound grid.y; in-kernel early-exit handles actual padded_total.
+    let grid_y = shape.padded_total_upper_bound.div_ceil(8) as u32;
+    let cfg = LaunchCfg {
+        grid: ((shape.n_rows as u32).div_ceil(64), grid_y, 1),
+        block: (64, 1, 1),
+        shared_bytes: 0,
+    };
+    unsafe { kernel.launch(stream, cfg, args)? };
+    Ok(())
+}
+
+/// IQ4_XS MoE MMQ tile8 down — single-output companion to the gate+up
+/// kernel. Kernel buildable + registered; dormant in TP MoE prefill
+/// dispatch (`moe_tp.rs::tile8_dt_ok` does not include IQ4_XS).
+///
+pub fn indexed_moe_mmq_iq4_xs_down_tile8(
+    reg: &OpsRegistry,
+    stream: &HipStream,
+    w: DevicePtr,
+    y: DevicePtr,
+    expert_ids: DevicePtr,
+    sorted_pair_idx_padded: DevicePtr,
+    padded_offsets: DevicePtr,
+    dst: DevicePtr,
+    shape: MoeShape,
+) -> Result<()> {
+    let module = reg.expect_module("indexed_moe_mmq_iq4_xs_down_tile8_dp4a")?;
+    let kernel = module.kernel("flambeau_indexed_moe_mmq_iq4_xs_down_tile8_dp4a_q8_1")?;
+    let n_rows_i = shape.n_rows as i32;
+    let n_tokens_i = shape.n_tokens as i32;
+    let top_k_i = shape.top_k as i32;
+    let nb_i = shape.n_sb_per_row as i32;
+    let n_experts_i = shape.n_experts as i32;
+    let w_ptr: u64 = w.as_usize() as u64;
+    let y_ptr: u64 = y.as_usize() as u64;
+    let e_ptr: u64 = expert_ids.as_usize() as u64;
+    let s_ptr: u64 = sorted_pair_idx_padded.as_usize() as u64;
+    let po_ptr: u64 = padded_offsets.as_usize() as u64;
+    let d_ptr: u64 = dst.as_usize() as u64;
+    let mut args = KernelArgs::new();
+    args.push(&w_ptr);
+    args.push(&y_ptr);
+    args.push(&e_ptr);
+    args.push(&s_ptr);
+    args.push(&po_ptr);
+    args.push(&d_ptr);
+    args.push(&n_rows_i);
+    args.push(&n_tokens_i);
+    args.push(&top_k_i);
+    args.push(&nb_i);
+    args.push(&n_experts_i);
+    let grid_y = shape.padded_total_upper_bound.div_ceil(8) as u32;
+    let cfg = LaunchCfg {
+        grid: ((shape.n_rows as u32).div_ceil(64), grid_y, 1),
+        block: (64, 1, 1),
+        shared_bytes: 0,
+    };
+    unsafe { kernel.launch(stream, cfg, args)? };
+    Ok(())
+}
+
+/// IQ4_NL MoE MMQ tile8 down — single-output companion to the gate+up
+/// kernel. Kernel buildable + registered; dormant in TP MoE prefill
+/// dispatch (`moe_tp.rs::tile8_dt_ok` does not include IQ4_NL).
+///
+pub fn indexed_moe_mmq_iq4_nl_down_tile8(
+    reg: &OpsRegistry,
+    stream: &HipStream,
+    w: DevicePtr,
+    y: DevicePtr,
+    expert_ids: DevicePtr,
+    sorted_pair_idx_padded: DevicePtr,
+    padded_offsets: DevicePtr,
+    dst: DevicePtr,
+    shape: MoeShape,
+) -> Result<()> {
+    let module = reg.expect_module("indexed_moe_mmq_iq4_nl_down_tile8_dp4a")?;
+    let kernel = module.kernel("flambeau_indexed_moe_mmq_iq4_nl_down_tile8_dp4a_q8_1")?;
+    let n_rows_i = shape.n_rows as i32;
+    let n_tokens_i = shape.n_tokens as i32;
+    let top_k_i = shape.top_k as i32;
+    let nb_i = shape.n_sb_per_row as i32;
+    let n_experts_i = shape.n_experts as i32;
+    let w_ptr: u64 = w.as_usize() as u64;
+    let y_ptr: u64 = y.as_usize() as u64;
+    let e_ptr: u64 = expert_ids.as_usize() as u64;
+    let s_ptr: u64 = sorted_pair_idx_padded.as_usize() as u64;
+    let po_ptr: u64 = padded_offsets.as_usize() as u64;
+    let d_ptr: u64 = dst.as_usize() as u64;
+    let mut args = KernelArgs::new();
+    args.push(&w_ptr);
+    args.push(&y_ptr);
+    args.push(&e_ptr);
+    args.push(&s_ptr);
+    args.push(&po_ptr);
+    args.push(&d_ptr);
+    args.push(&n_rows_i);
+    args.push(&n_tokens_i);
+    args.push(&top_k_i);
+    args.push(&nb_i);
+    args.push(&n_experts_i);
+    let grid_y = shape.padded_total_upper_bound.div_ceil(8) as u32;
+    let cfg = LaunchCfg {
+        grid: ((shape.n_rows as u32).div_ceil(64), grid_y, 1),
+        block: (64, 1, 1),
+        shared_bytes: 0,
+    };
+    unsafe { kernel.launch(stream, cfg, args)? };
+    Ok(())
+}
+
+/// IQ3_XXS MoE MMQ tile8 down — single-output companion to the gate+up
+/// kernel. Kernel buildable + registered; dormant in TP MoE prefill
+/// dispatch (`moe_tp.rs::tile8_dt_ok` does not include IQ3_XXS).
+///
+pub fn indexed_moe_mmq_iq3_xxs_down_tile8(
+    reg: &OpsRegistry,
+    stream: &HipStream,
+    w: DevicePtr,
+    y: DevicePtr,
+    expert_ids: DevicePtr,
+    sorted_pair_idx_padded: DevicePtr,
+    padded_offsets: DevicePtr,
+    dst: DevicePtr,
+    shape: MoeShape,
+) -> Result<()> {
+    let module = reg.expect_module("indexed_moe_mmq_iq3_xxs_down_tile8_dp4a")?;
+    let kernel = module.kernel("flambeau_indexed_moe_mmq_iq3_xxs_down_tile8_dp4a_q8_1")?;
+    let n_rows_i = shape.n_rows as i32;
+    let n_tokens_i = shape.n_tokens as i32;
+    let top_k_i = shape.top_k as i32;
+    let nb_i = shape.n_sb_per_row as i32;
+    let n_experts_i = shape.n_experts as i32;
+    let w_ptr: u64 = w.as_usize() as u64;
+    let y_ptr: u64 = y.as_usize() as u64;
+    let e_ptr: u64 = expert_ids.as_usize() as u64;
+    let s_ptr: u64 = sorted_pair_idx_padded.as_usize() as u64;
+    let po_ptr: u64 = padded_offsets.as_usize() as u64;
+    let d_ptr: u64 = dst.as_usize() as u64;
+    let mut args = KernelArgs::new();
+    args.push(&w_ptr);
+    args.push(&y_ptr);
+    args.push(&e_ptr);
+    args.push(&s_ptr);
+    args.push(&po_ptr);
+    args.push(&d_ptr);
+    args.push(&n_rows_i);
+    args.push(&n_tokens_i);
+    args.push(&top_k_i);
+    args.push(&nb_i);
+    args.push(&n_experts_i);
+    let grid_y = shape.padded_total_upper_bound.div_ceil(8) as u32;
+    let cfg = LaunchCfg {
+        grid: ((shape.n_rows as u32).div_ceil(64), grid_y, 1),
+        block: (64, 1, 1),
+        shared_bytes: 0,
+    };
+    unsafe { kernel.launch(stream, cfg, args)? };
+    Ok(())
+}
+
+/// IQ3_S MoE MMQ tile8 down — single-output companion to the gate+up
+/// kernel. Kernel buildable + registered; dormant in TP MoE prefill
+/// dispatch (`moe_tp.rs::tile8_dt_ok` does not include IQ3_S).
+///
+pub fn indexed_moe_mmq_iq3_s_down_tile8(
+    reg: &OpsRegistry,
+    stream: &HipStream,
+    w: DevicePtr,
+    y: DevicePtr,
+    expert_ids: DevicePtr,
+    sorted_pair_idx_padded: DevicePtr,
+    padded_offsets: DevicePtr,
+    dst: DevicePtr,
+    shape: MoeShape,
+) -> Result<()> {
+    let module = reg.expect_module("indexed_moe_mmq_iq3_s_down_tile8_dp4a")?;
+    let kernel = module.kernel("flambeau_indexed_moe_mmq_iq3_s_down_tile8_dp4a_q8_1")?;
+    let n_rows_i = shape.n_rows as i32;
+    let n_tokens_i = shape.n_tokens as i32;
+    let top_k_i = shape.top_k as i32;
+    let nb_i = shape.n_sb_per_row as i32;
+    let n_experts_i = shape.n_experts as i32;
+    let w_ptr: u64 = w.as_usize() as u64;
+    let y_ptr: u64 = y.as_usize() as u64;
+    let e_ptr: u64 = expert_ids.as_usize() as u64;
+    let s_ptr: u64 = sorted_pair_idx_padded.as_usize() as u64;
+    let po_ptr: u64 = padded_offsets.as_usize() as u64;
+    let d_ptr: u64 = dst.as_usize() as u64;
+    let mut args = KernelArgs::new();
+    args.push(&w_ptr);
+    args.push(&y_ptr);
+    args.push(&e_ptr);
+    args.push(&s_ptr);
+    args.push(&po_ptr);
+    args.push(&d_ptr);
+    args.push(&n_rows_i);
+    args.push(&n_tokens_i);
+    args.push(&top_k_i);
+    args.push(&nb_i);
+    args.push(&n_experts_i);
+    let grid_y = shape.padded_total_upper_bound.div_ceil(8) as u32;
+    let cfg = LaunchCfg {
+        grid: ((shape.n_rows as u32).div_ceil(64), grid_y, 1),
+        block: (64, 1, 1),
+        shared_bytes: 0,
+    };
+    unsafe { kernel.launch(stream, cfg, args)? };
+    Ok(())
+}
+
+/// IQ2_XXS MoE MMQ tile8 down — single-output companion to the gate+up
+/// kernel. Kernel buildable + registered; dormant in TP MoE prefill
+/// dispatch (`moe_tp.rs::tile8_dt_ok` does not include IQ2_XXS).
+///
+pub fn indexed_moe_mmq_iq2_xxs_down_tile8(
+    reg: &OpsRegistry,
+    stream: &HipStream,
+    w: DevicePtr,
+    y: DevicePtr,
+    expert_ids: DevicePtr,
+    sorted_pair_idx_padded: DevicePtr,
+    padded_offsets: DevicePtr,
+    dst: DevicePtr,
+    shape: MoeShape,
+) -> Result<()> {
+    let module = reg.expect_module("indexed_moe_mmq_iq2_xxs_down_tile8_dp4a")?;
+    let kernel = module.kernel("flambeau_indexed_moe_mmq_iq2_xxs_down_tile8_dp4a_q8_1")?;
+    let n_rows_i = shape.n_rows as i32;
+    let n_tokens_i = shape.n_tokens as i32;
+    let top_k_i = shape.top_k as i32;
+    let nb_i = shape.n_sb_per_row as i32;
+    let n_experts_i = shape.n_experts as i32;
+    let w_ptr: u64 = w.as_usize() as u64;
+    let y_ptr: u64 = y.as_usize() as u64;
+    let e_ptr: u64 = expert_ids.as_usize() as u64;
+    let s_ptr: u64 = sorted_pair_idx_padded.as_usize() as u64;
+    let po_ptr: u64 = padded_offsets.as_usize() as u64;
+    let d_ptr: u64 = dst.as_usize() as u64;
+    let mut args = KernelArgs::new();
+    args.push(&w_ptr);
+    args.push(&y_ptr);
+    args.push(&e_ptr);
+    args.push(&s_ptr);
+    args.push(&po_ptr);
+    args.push(&d_ptr);
+    args.push(&n_rows_i);
+    args.push(&n_tokens_i);
+    args.push(&top_k_i);
+    args.push(&nb_i);
+    args.push(&n_experts_i);
+    let grid_y = shape.padded_total_upper_bound.div_ceil(8) as u32;
+    let cfg = LaunchCfg {
+        grid: ((shape.n_rows as u32).div_ceil(64), grid_y, 1),
+        block: (64, 1, 1),
+        shared_bytes: 0,
+    };
+    unsafe { kernel.launch(stream, cfg, args)? };
+    Ok(())
+}
+
+/// IQ2_XS MoE MMQ tile8 down — single-output companion to the gate+up
+/// kernel. Kernel buildable + registered; dormant in TP MoE prefill
+/// dispatch (`moe_tp.rs::tile8_dt_ok` does not include IQ2_XS).
+///
+pub fn indexed_moe_mmq_iq2_xs_down_tile8(
+    reg: &OpsRegistry,
+    stream: &HipStream,
+    w: DevicePtr,
+    y: DevicePtr,
+    expert_ids: DevicePtr,
+    sorted_pair_idx_padded: DevicePtr,
+    padded_offsets: DevicePtr,
+    dst: DevicePtr,
+    shape: MoeShape,
+) -> Result<()> {
+    let module = reg.expect_module("indexed_moe_mmq_iq2_xs_down_tile8_dp4a")?;
+    let kernel = module.kernel("flambeau_indexed_moe_mmq_iq2_xs_down_tile8_dp4a_q8_1")?;
+    let n_rows_i = shape.n_rows as i32;
+    let n_tokens_i = shape.n_tokens as i32;
+    let top_k_i = shape.top_k as i32;
+    let nb_i = shape.n_sb_per_row as i32;
+    let n_experts_i = shape.n_experts as i32;
+    let w_ptr: u64 = w.as_usize() as u64;
+    let y_ptr: u64 = y.as_usize() as u64;
+    let e_ptr: u64 = expert_ids.as_usize() as u64;
+    let s_ptr: u64 = sorted_pair_idx_padded.as_usize() as u64;
+    let po_ptr: u64 = padded_offsets.as_usize() as u64;
+    let d_ptr: u64 = dst.as_usize() as u64;
+    let mut args = KernelArgs::new();
+    args.push(&w_ptr);
+    args.push(&y_ptr);
+    args.push(&e_ptr);
+    args.push(&s_ptr);
+    args.push(&po_ptr);
+    args.push(&d_ptr);
+    args.push(&n_rows_i);
+    args.push(&n_tokens_i);
+    args.push(&top_k_i);
+    args.push(&nb_i);
+    args.push(&n_experts_i);
+    let grid_y = shape.padded_total_upper_bound.div_ceil(8) as u32;
+    let cfg = LaunchCfg {
+        grid: ((shape.n_rows as u32).div_ceil(64), grid_y, 1),
+        block: (64, 1, 1),
+        shared_bytes: 0,
+    };
+    unsafe { kernel.launch(stream, cfg, args)? };
+    Ok(())
+}
+
+/// IQ2_S MoE MMQ tile8 down — single-output companion to the gate+up
+/// kernel. Kernel buildable + registered; dormant in TP MoE prefill
+/// dispatch (`moe_tp.rs::tile8_dt_ok` does not include IQ2_S).
+///
+pub fn indexed_moe_mmq_iq2_s_down_tile8(
+    reg: &OpsRegistry,
+    stream: &HipStream,
+    w: DevicePtr,
+    y: DevicePtr,
+    expert_ids: DevicePtr,
+    sorted_pair_idx_padded: DevicePtr,
+    padded_offsets: DevicePtr,
+    dst: DevicePtr,
+    shape: MoeShape,
+) -> Result<()> {
+    let module = reg.expect_module("indexed_moe_mmq_iq2_s_down_tile8_dp4a")?;
+    let kernel = module.kernel("flambeau_indexed_moe_mmq_iq2_s_down_tile8_dp4a_q8_1")?;
+    let n_rows_i = shape.n_rows as i32;
+    let n_tokens_i = shape.n_tokens as i32;
+    let top_k_i = shape.top_k as i32;
+    let nb_i = shape.n_sb_per_row as i32;
+    let n_experts_i = shape.n_experts as i32;
+    let w_ptr: u64 = w.as_usize() as u64;
+    let y_ptr: u64 = y.as_usize() as u64;
+    let e_ptr: u64 = expert_ids.as_usize() as u64;
+    let s_ptr: u64 = sorted_pair_idx_padded.as_usize() as u64;
+    let po_ptr: u64 = padded_offsets.as_usize() as u64;
+    let d_ptr: u64 = dst.as_usize() as u64;
+    let mut args = KernelArgs::new();
+    args.push(&w_ptr);
+    args.push(&y_ptr);
+    args.push(&e_ptr);
+    args.push(&s_ptr);
+    args.push(&po_ptr);
+    args.push(&d_ptr);
+    args.push(&n_rows_i);
+    args.push(&n_tokens_i);
+    args.push(&top_k_i);
+    args.push(&nb_i);
+    args.push(&n_experts_i);
+    let grid_y = shape.padded_total_upper_bound.div_ceil(8) as u32;
+    let cfg = LaunchCfg {
+        grid: ((shape.n_rows as u32).div_ceil(64), grid_y, 1),
+        block: (64, 1, 1),
+        shared_bytes: 0,
+    };
+    unsafe { kernel.launch(stream, cfg, args)? };
+    Ok(())
+}
+
+/// IQ1_S MoE MMQ tile8 down — single-output companion to the gate+up
+/// kernel. Kernel buildable + registered; dormant in TP MoE prefill
+/// dispatch (`moe_tp.rs::tile8_dt_ok` does not include IQ1_S).
+///
+pub fn indexed_moe_mmq_iq1_s_down_tile8(
+    reg: &OpsRegistry,
+    stream: &HipStream,
+    w: DevicePtr,
+    y: DevicePtr,
+    expert_ids: DevicePtr,
+    sorted_pair_idx_padded: DevicePtr,
+    padded_offsets: DevicePtr,
+    dst: DevicePtr,
+    shape: MoeShape,
+) -> Result<()> {
+    let module = reg.expect_module("indexed_moe_mmq_iq1_s_down_tile8_dp4a")?;
+    let kernel = module.kernel("flambeau_indexed_moe_mmq_iq1_s_down_tile8_dp4a_q8_1")?;
+    let n_rows_i = shape.n_rows as i32;
+    let n_tokens_i = shape.n_tokens as i32;
+    let top_k_i = shape.top_k as i32;
+    let nb_i = shape.n_sb_per_row as i32;
+    let n_experts_i = shape.n_experts as i32;
+    let w_ptr: u64 = w.as_usize() as u64;
+    let y_ptr: u64 = y.as_usize() as u64;
+    let e_ptr: u64 = expert_ids.as_usize() as u64;
+    let s_ptr: u64 = sorted_pair_idx_padded.as_usize() as u64;
+    let po_ptr: u64 = padded_offsets.as_usize() as u64;
+    let d_ptr: u64 = dst.as_usize() as u64;
+    let mut args = KernelArgs::new();
+    args.push(&w_ptr);
+    args.push(&y_ptr);
+    args.push(&e_ptr);
+    args.push(&s_ptr);
+    args.push(&po_ptr);
+    args.push(&d_ptr);
+    args.push(&n_rows_i);
+    args.push(&n_tokens_i);
+    args.push(&top_k_i);
+    args.push(&nb_i);
+    args.push(&n_experts_i);
+    let grid_y = shape.padded_total_upper_bound.div_ceil(8) as u32;
+    let cfg = LaunchCfg {
+        grid: ((shape.n_rows as u32).div_ceil(64), grid_y, 1),
+        block: (64, 1, 1),
+        shared_bytes: 0,
+    };
+    unsafe { kernel.launch(stream, cfg, args)? };
+    Ok(())
+}
+
+/// IQ1_M MoE MMQ tile8 down — single-output companion to the gate+up
+/// kernel. Kernel buildable + registered; dormant in TP MoE prefill
+/// dispatch (`moe_tp.rs::tile8_dt_ok` does not include IQ1_M).
+///
+pub fn indexed_moe_mmq_iq1_m_down_tile8(
+    reg: &OpsRegistry,
+    stream: &HipStream,
+    w: DevicePtr,
+    y: DevicePtr,
+    expert_ids: DevicePtr,
+    sorted_pair_idx_padded: DevicePtr,
+    padded_offsets: DevicePtr,
+    dst: DevicePtr,
+    shape: MoeShape,
+) -> Result<()> {
+    let module = reg.expect_module("indexed_moe_mmq_iq1_m_down_tile8_dp4a")?;
+    let kernel = module.kernel("flambeau_indexed_moe_mmq_iq1_m_down_tile8_dp4a_q8_1")?;
+    let n_rows_i = shape.n_rows as i32;
+    let n_tokens_i = shape.n_tokens as i32;
+    let top_k_i = shape.top_k as i32;
+    let nb_i = shape.n_sb_per_row as i32;
+    let n_experts_i = shape.n_experts as i32;
+    let w_ptr: u64 = w.as_usize() as u64;
+    let y_ptr: u64 = y.as_usize() as u64;
+    let e_ptr: u64 = expert_ids.as_usize() as u64;
+    let s_ptr: u64 = sorted_pair_idx_padded.as_usize() as u64;
+    let po_ptr: u64 = padded_offsets.as_usize() as u64;
+    let d_ptr: u64 = dst.as_usize() as u64;
+    let mut args = KernelArgs::new();
+    args.push(&w_ptr);
+    args.push(&y_ptr);
+    args.push(&e_ptr);
+    args.push(&s_ptr);
+    args.push(&po_ptr);
+    args.push(&d_ptr);
+    args.push(&n_rows_i);
+    args.push(&n_tokens_i);
+    args.push(&top_k_i);
+    args.push(&nb_i);
+    args.push(&n_experts_i);
     let grid_y = shape.padded_total_upper_bound.div_ceil(8) as u32;
     let cfg = LaunchCfg {
         grid: ((shape.n_rows as u32).div_ceil(64), grid_y, 1),
@@ -697,6 +2211,210 @@ pub fn indexed_moe_mmq_q4_0_down_tile8(
     Ok(())
 }
 
+/// Q5_0 gate+up tile8 MoE MMQ. Q4_0 tile8 structure + the 5th-bit
+/// ladder: per-block dot is `d_x·(d_y·(sumi_nib + 16·sumi_bit) - 16·s_y)`.
+#[allow(clippy::too_many_arguments)]
+pub fn indexed_moe_mmq_q5_0_gate_up_tile8(
+    reg: &OpsRegistry,
+    stream: &HipStream,
+    w_gate: DevicePtr,
+    w_up: DevicePtr,
+    y: DevicePtr,
+    expert_ids: DevicePtr,
+    sorted_pair_idx_padded: DevicePtr,
+    padded_offsets: DevicePtr,
+    gate_out: DevicePtr,
+    up_out: DevicePtr,
+    shape: MoeShape,
+) -> Result<()> {
+    let module = reg.expect_module("indexed_moe_mmq_q5_0_gate_up_tile8_dp4a")?;
+    let kernel = module.kernel("flambeau_indexed_moe_mmq_q5_0_gate_up_tile8_dp4a_q8_1")?;
+    let n_rows_i = shape.n_rows as i32;
+    let n_tokens_i = shape.n_tokens as i32;
+    let top_k_i = shape.top_k as i32;
+    let nb_i = shape.n_sb_per_row as i32;
+    let n_experts_i = shape.n_experts as i32;
+    let g_ptr: u64 = w_gate.as_usize() as u64;
+    let u_ptr: u64 = w_up.as_usize() as u64;
+    let y_ptr: u64 = y.as_usize() as u64;
+    let e_ptr: u64 = expert_ids.as_usize() as u64;
+    let s_ptr: u64 = sorted_pair_idx_padded.as_usize() as u64;
+    let po_ptr: u64 = padded_offsets.as_usize() as u64;
+    let go_ptr: u64 = gate_out.as_usize() as u64;
+    let uo_ptr: u64 = up_out.as_usize() as u64;
+    let mut args = KernelArgs::new();
+    args.push(&g_ptr);
+    args.push(&u_ptr);
+    args.push(&y_ptr);
+    args.push(&e_ptr);
+    args.push(&s_ptr);
+    args.push(&po_ptr);
+    args.push(&go_ptr);
+    args.push(&uo_ptr);
+    args.push(&n_rows_i);
+    args.push(&n_tokens_i);
+    args.push(&top_k_i);
+    args.push(&nb_i);
+    args.push(&n_experts_i);
+    let grid_y = shape.padded_total_upper_bound.div_ceil(8) as u32;
+    let cfg = LaunchCfg {
+        grid: ((shape.n_rows as u32).div_ceil(64), grid_y, 1),
+        block: (64, 1, 1),
+        shared_bytes: 0,
+    };
+    unsafe { kernel.launch(stream, cfg, args)? };
+    Ok(())
+}
+
+/// Q5_0 down tile8 MoE MMQ.
+pub fn indexed_moe_mmq_q5_0_down_tile8(
+    reg: &OpsRegistry,
+    stream: &HipStream,
+    w: DevicePtr,
+    y: DevicePtr,
+    expert_ids: DevicePtr,
+    sorted_pair_idx_padded: DevicePtr,
+    padded_offsets: DevicePtr,
+    dst: DevicePtr,
+    shape: MoeShape,
+) -> Result<()> {
+    let module = reg.expect_module("indexed_moe_mmq_q5_0_down_tile8_dp4a")?;
+    let kernel = module.kernel("flambeau_indexed_moe_mmq_q5_0_down_tile8_dp4a_q8_1")?;
+    let n_rows_i = shape.n_rows as i32;
+    let n_tokens_i = shape.n_tokens as i32;
+    let top_k_i = shape.top_k as i32;
+    let nb_i = shape.n_sb_per_row as i32;
+    let n_experts_i = shape.n_experts as i32;
+    let w_ptr: u64 = w.as_usize() as u64;
+    let y_ptr: u64 = y.as_usize() as u64;
+    let e_ptr: u64 = expert_ids.as_usize() as u64;
+    let s_ptr: u64 = sorted_pair_idx_padded.as_usize() as u64;
+    let po_ptr: u64 = padded_offsets.as_usize() as u64;
+    let d_ptr: u64 = dst.as_usize() as u64;
+    let mut args = KernelArgs::new();
+    args.push(&w_ptr);
+    args.push(&y_ptr);
+    args.push(&e_ptr);
+    args.push(&s_ptr);
+    args.push(&po_ptr);
+    args.push(&d_ptr);
+    args.push(&n_rows_i);
+    args.push(&n_tokens_i);
+    args.push(&top_k_i);
+    args.push(&nb_i);
+    args.push(&n_experts_i);
+    let grid_y = shape.padded_total_upper_bound.div_ceil(8) as u32;
+    let cfg = LaunchCfg {
+        grid: ((shape.n_rows as u32).div_ceil(64), grid_y, 1),
+        block: (64, 1, 1),
+        shared_bytes: 0,
+    };
+    unsafe { kernel.launch(stream, cfg, args)? };
+    Ok(())
+}
+
+/// Q5_1 gate+up tile8 MoE MMQ. Q5_0 tile8 structure with Q4_1-style
+/// per-block reduction `d_x·d_y·(sumi_nib + 16·sumi_bit) + m_x·s_y`.
+#[allow(clippy::too_many_arguments)]
+pub fn indexed_moe_mmq_q5_1_gate_up_tile8(
+    reg: &OpsRegistry,
+    stream: &HipStream,
+    w_gate: DevicePtr,
+    w_up: DevicePtr,
+    y: DevicePtr,
+    expert_ids: DevicePtr,
+    sorted_pair_idx_padded: DevicePtr,
+    padded_offsets: DevicePtr,
+    gate_out: DevicePtr,
+    up_out: DevicePtr,
+    shape: MoeShape,
+) -> Result<()> {
+    let module = reg.expect_module("indexed_moe_mmq_q5_1_gate_up_tile8_dp4a")?;
+    let kernel = module.kernel("flambeau_indexed_moe_mmq_q5_1_gate_up_tile8_dp4a_q8_1")?;
+    let n_rows_i = shape.n_rows as i32;
+    let n_tokens_i = shape.n_tokens as i32;
+    let top_k_i = shape.top_k as i32;
+    let nb_i = shape.n_sb_per_row as i32;
+    let n_experts_i = shape.n_experts as i32;
+    let g_ptr: u64 = w_gate.as_usize() as u64;
+    let u_ptr: u64 = w_up.as_usize() as u64;
+    let y_ptr: u64 = y.as_usize() as u64;
+    let e_ptr: u64 = expert_ids.as_usize() as u64;
+    let s_ptr: u64 = sorted_pair_idx_padded.as_usize() as u64;
+    let po_ptr: u64 = padded_offsets.as_usize() as u64;
+    let go_ptr: u64 = gate_out.as_usize() as u64;
+    let uo_ptr: u64 = up_out.as_usize() as u64;
+    let mut args = KernelArgs::new();
+    args.push(&g_ptr);
+    args.push(&u_ptr);
+    args.push(&y_ptr);
+    args.push(&e_ptr);
+    args.push(&s_ptr);
+    args.push(&po_ptr);
+    args.push(&go_ptr);
+    args.push(&uo_ptr);
+    args.push(&n_rows_i);
+    args.push(&n_tokens_i);
+    args.push(&top_k_i);
+    args.push(&nb_i);
+    args.push(&n_experts_i);
+    let grid_y = shape.padded_total_upper_bound.div_ceil(8) as u32;
+    let cfg = LaunchCfg {
+        grid: ((shape.n_rows as u32).div_ceil(64), grid_y, 1),
+        block: (64, 1, 1),
+        shared_bytes: 0,
+    };
+    unsafe { kernel.launch(stream, cfg, args)? };
+    Ok(())
+}
+
+/// Q5_1 down tile8 MoE MMQ.
+pub fn indexed_moe_mmq_q5_1_down_tile8(
+    reg: &OpsRegistry,
+    stream: &HipStream,
+    w: DevicePtr,
+    y: DevicePtr,
+    expert_ids: DevicePtr,
+    sorted_pair_idx_padded: DevicePtr,
+    padded_offsets: DevicePtr,
+    dst: DevicePtr,
+    shape: MoeShape,
+) -> Result<()> {
+    let module = reg.expect_module("indexed_moe_mmq_q5_1_down_tile8_dp4a")?;
+    let kernel = module.kernel("flambeau_indexed_moe_mmq_q5_1_down_tile8_dp4a_q8_1")?;
+    let n_rows_i = shape.n_rows as i32;
+    let n_tokens_i = shape.n_tokens as i32;
+    let top_k_i = shape.top_k as i32;
+    let nb_i = shape.n_sb_per_row as i32;
+    let n_experts_i = shape.n_experts as i32;
+    let w_ptr: u64 = w.as_usize() as u64;
+    let y_ptr: u64 = y.as_usize() as u64;
+    let e_ptr: u64 = expert_ids.as_usize() as u64;
+    let s_ptr: u64 = sorted_pair_idx_padded.as_usize() as u64;
+    let po_ptr: u64 = padded_offsets.as_usize() as u64;
+    let d_ptr: u64 = dst.as_usize() as u64;
+    let mut args = KernelArgs::new();
+    args.push(&w_ptr);
+    args.push(&y_ptr);
+    args.push(&e_ptr);
+    args.push(&s_ptr);
+    args.push(&po_ptr);
+    args.push(&d_ptr);
+    args.push(&n_rows_i);
+    args.push(&n_tokens_i);
+    args.push(&top_k_i);
+    args.push(&nb_i);
+    args.push(&n_experts_i);
+    let grid_y = shape.padded_total_upper_bound.div_ceil(8) as u32;
+    let cfg = LaunchCfg {
+        grid: ((shape.n_rows as u32).div_ceil(64), grid_y, 1),
+        block: (64, 1, 1),
+        shared_bytes: 0,
+    };
+    unsafe { kernel.launch(stream, cfg, args)? };
+    Ok(())
+}
+
 /// Q4_1 down tile8 MoE MMQ sibling of the Q4_0
 /// down tile8. Same launch shape; the kernel's per-block dot uses the
 /// Q4_1 affine `d_x·d_y·sumi + m_x·s_y` instead of Q4_0's bias-corrected
@@ -732,6 +2450,62 @@ pub fn indexed_moe_mmq_q4_1_down_tile8(
     args.push(&s_ptr);
     args.push(&po_ptr);
     args.push(&d_ptr);
+    args.push(&n_rows_i);
+    args.push(&n_tokens_i);
+    args.push(&top_k_i);
+    args.push(&nb_i);
+    args.push(&n_experts_i);
+    let grid_y = shape.padded_total_upper_bound.div_ceil(8) as u32;
+    let cfg = LaunchCfg {
+        grid: ((shape.n_rows as u32).div_ceil(64), grid_y, 1),
+        block: (64, 1, 1),
+        shared_bytes: 0,
+    };
+    unsafe { kernel.launch(stream, cfg, args)? };
+    Ok(())
+}
+
+/// Q4_1 gate+up tile8 MoE MMQ. Q4_0 gate+up structure with Q4_1's affine
+/// reduction `d_x · d_y · sumi + m_x · s_y` per block, mirror of the
+/// `indexed_moe_mmq_q4_1_down_tile8` sibling.
+#[allow(clippy::too_many_arguments)]
+pub fn indexed_moe_mmq_q4_1_gate_up_tile8(
+    reg: &OpsRegistry,
+    stream: &HipStream,
+    w_gate: DevicePtr,
+    w_up: DevicePtr,
+    y: DevicePtr,
+    expert_ids: DevicePtr,
+    sorted_pair_idx_padded: DevicePtr,
+    padded_offsets: DevicePtr,
+    gate_out: DevicePtr,
+    up_out: DevicePtr,
+    shape: MoeShape,
+) -> Result<()> {
+    let module = reg.expect_module("indexed_moe_mmq_q4_1_gate_up_tile8_dp4a")?;
+    let kernel = module.kernel("flambeau_indexed_moe_mmq_q4_1_gate_up_tile8_dp4a_q8_1")?;
+    let n_rows_i = shape.n_rows as i32;
+    let n_tokens_i = shape.n_tokens as i32;
+    let top_k_i = shape.top_k as i32;
+    let nb_i = shape.n_sb_per_row as i32;
+    let n_experts_i = shape.n_experts as i32;
+    let g_ptr: u64 = w_gate.as_usize() as u64;
+    let u_ptr: u64 = w_up.as_usize() as u64;
+    let y_ptr: u64 = y.as_usize() as u64;
+    let e_ptr: u64 = expert_ids.as_usize() as u64;
+    let s_ptr: u64 = sorted_pair_idx_padded.as_usize() as u64;
+    let po_ptr: u64 = padded_offsets.as_usize() as u64;
+    let go_ptr: u64 = gate_out.as_usize() as u64;
+    let uo_ptr: u64 = up_out.as_usize() as u64;
+    let mut args = KernelArgs::new();
+    args.push(&g_ptr);
+    args.push(&u_ptr);
+    args.push(&y_ptr);
+    args.push(&e_ptr);
+    args.push(&s_ptr);
+    args.push(&po_ptr);
+    args.push(&go_ptr);
+    args.push(&uo_ptr);
     args.push(&n_rows_i);
     args.push(&n_tokens_i);
     args.push(&top_k_i);
@@ -1015,6 +2789,118 @@ pub fn indexed_moe_mmq_q5_k_down_tile8(
     args.push(&s_ptr);
     args.push(&po_ptr);
     args.push(&d_ptr);
+    args.push(&n_rows_i);
+    args.push(&n_tokens_i);
+    args.push(&top_k_i);
+    args.push(&nb_i);
+    args.push(&n_experts_i);
+    let grid_y = shape.padded_total_upper_bound.div_ceil(8) as u32;
+    let cfg = LaunchCfg {
+        grid: ((shape.n_rows as u32).div_ceil(64), grid_y, 1),
+        block: (64, 1, 1),
+        shared_bytes: 0,
+    };
+    unsafe { kernel.launch(stream, cfg, args)? };
+    Ok(())
+}
+
+/// Q5_K gate+up tile8 MoE MMQ. Q5_K down tile8 decode (per-element ql+qh
+/// 5-bit, per-sub-block (sc, m) → d·sumi_d·sc − dmin·sumi_y·m) fused for
+/// two output projections.
+#[allow(clippy::too_many_arguments)]
+pub fn indexed_moe_mmq_q5_k_gate_up_tile8(
+    reg: &OpsRegistry,
+    stream: &HipStream,
+    w_gate: DevicePtr,
+    w_up: DevicePtr,
+    y: DevicePtr,
+    expert_ids: DevicePtr,
+    sorted_pair_idx_padded: DevicePtr,
+    padded_offsets: DevicePtr,
+    gate_out: DevicePtr,
+    up_out: DevicePtr,
+    shape: MoeShape,
+) -> Result<()> {
+    let module = reg.expect_module("indexed_moe_mmq_q5_k_gate_up_tile8_dp4a")?;
+    let kernel = module.kernel("flambeau_indexed_moe_mmq_q5_k_gate_up_tile8_dp4a_q8_1")?;
+    let n_rows_i = shape.n_rows as i32;
+    let n_tokens_i = shape.n_tokens as i32;
+    let top_k_i = shape.top_k as i32;
+    let nb_i = shape.n_sb_per_row as i32;
+    let n_experts_i = shape.n_experts as i32;
+    let g_ptr: u64 = w_gate.as_usize() as u64;
+    let u_ptr: u64 = w_up.as_usize() as u64;
+    let y_ptr: u64 = y.as_usize() as u64;
+    let e_ptr: u64 = expert_ids.as_usize() as u64;
+    let s_ptr: u64 = sorted_pair_idx_padded.as_usize() as u64;
+    let po_ptr: u64 = padded_offsets.as_usize() as u64;
+    let go_ptr: u64 = gate_out.as_usize() as u64;
+    let uo_ptr: u64 = up_out.as_usize() as u64;
+    let mut args = KernelArgs::new();
+    args.push(&g_ptr);
+    args.push(&u_ptr);
+    args.push(&y_ptr);
+    args.push(&e_ptr);
+    args.push(&s_ptr);
+    args.push(&po_ptr);
+    args.push(&go_ptr);
+    args.push(&uo_ptr);
+    args.push(&n_rows_i);
+    args.push(&n_tokens_i);
+    args.push(&top_k_i);
+    args.push(&nb_i);
+    args.push(&n_experts_i);
+    let grid_y = shape.padded_total_upper_bound.div_ceil(8) as u32;
+    let cfg = LaunchCfg {
+        grid: ((shape.n_rows as u32).div_ceil(64), grid_y, 1),
+        block: (64, 1, 1),
+        shared_bytes: 0,
+    };
+    unsafe { kernel.launch(stream, cfg, args)? };
+    Ok(())
+}
+
+/// Q6_K gate+up tile8 MoE MMQ. Q6_K down tile8 decode (ql+qh 6-bit lookup,
+/// per-16-element scale, `(raw − 32)·y = raw·y − 32·Σy` bias-correction)
+/// fused for two output projections.
+#[allow(clippy::too_many_arguments)]
+pub fn indexed_moe_mmq_q6_k_gate_up_tile8(
+    reg: &OpsRegistry,
+    stream: &HipStream,
+    w_gate: DevicePtr,
+    w_up: DevicePtr,
+    y: DevicePtr,
+    expert_ids: DevicePtr,
+    sorted_pair_idx_padded: DevicePtr,
+    padded_offsets: DevicePtr,
+    gate_out: DevicePtr,
+    up_out: DevicePtr,
+    shape: MoeShape,
+) -> Result<()> {
+    let module = reg.expect_module("indexed_moe_mmq_q6_k_gate_up_tile8_dp4a")?;
+    let kernel = module.kernel("flambeau_indexed_moe_mmq_q6_k_gate_up_tile8_dp4a_q8_1")?;
+    let n_rows_i = shape.n_rows as i32;
+    let n_tokens_i = shape.n_tokens as i32;
+    let top_k_i = shape.top_k as i32;
+    let nb_i = shape.n_sb_per_row as i32;
+    let n_experts_i = shape.n_experts as i32;
+    let g_ptr: u64 = w_gate.as_usize() as u64;
+    let u_ptr: u64 = w_up.as_usize() as u64;
+    let y_ptr: u64 = y.as_usize() as u64;
+    let e_ptr: u64 = expert_ids.as_usize() as u64;
+    let s_ptr: u64 = sorted_pair_idx_padded.as_usize() as u64;
+    let po_ptr: u64 = padded_offsets.as_usize() as u64;
+    let go_ptr: u64 = gate_out.as_usize() as u64;
+    let uo_ptr: u64 = up_out.as_usize() as u64;
+    let mut args = KernelArgs::new();
+    args.push(&g_ptr);
+    args.push(&u_ptr);
+    args.push(&y_ptr);
+    args.push(&e_ptr);
+    args.push(&s_ptr);
+    args.push(&po_ptr);
+    args.push(&go_ptr);
+    args.push(&uo_ptr);
     args.push(&n_rows_i);
     args.push(&n_tokens_i);
     args.push(&top_k_i);

@@ -1,7 +1,7 @@
 //! `flambeau` CLI — subcommand dispatch.
-//! stub: subcommands parse but print a "not yet implemented" message until
-//! their target step lands. See `doc/ROADMAP-V1-QWEN36-GFX906.md` for what each
-//! subcommand requires.
+
+#[global_allocator]
+static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
 use anyhow::Result;
 use clap::{Parser, Subcommand};
@@ -169,11 +169,6 @@ enum Cmd {
         /// /v1/embeddings endpoint per-prompt token cap.
         #[arg(long = "embedding-max-tokens", env = "FLAMBEAU_EMBEDDING_MAX_TOKENS", default_value_t = 8192)]
         embedding_max_tokens: usize,
-        /// Path to an MTP head GGUF for K=1 speculative decode. Loaded
-        /// on the last rank; per-request scratch allocated lazily.
-        /// Omit to disable spec-decode.
-        #[arg(long = "spec-mtp", env = "FLAMBEAU_SPEC_MTP")]
-        spec_mtp: Option<String>,
     },
     /// Correctness-sweep harness; emits certs (+).
     Sweep {
@@ -259,7 +254,6 @@ fn main() -> Result<()> {
             kv,
             default_system,
             embedding_max_tokens,
-            spec_mtp,
         } => serve_cmd(ServeArgs {
             model,
             devices,
@@ -280,7 +274,6 @@ fn main() -> Result<()> {
             kv,
             default_system,
             embedding_max_tokens,
-            spec_mtp,
         })?,
         Cmd::Sweep { arch, op, dtype } => sweep(&arch, op.as_deref(), &dtype)?,
         Cmd::CertCheck { arch, backend } => cert_check(&backend, &arch)?,
@@ -311,7 +304,6 @@ struct ServeArgs {
     kv: String,
     default_system: Option<String>,
     embedding_max_tokens: usize,
-    spec_mtp: Option<String>,
 }
 
 #[cfg(not(feature = "hip_serve"))]
@@ -346,7 +338,6 @@ fn serve_cmd(args: ServeArgs) -> Result<()> {
         kv,
         default_system,
         embedding_max_tokens,
-        spec_mtp,
     } = args;
 
     // Parse `hip:0,1,2,3` or `0,1,2,3` → Vec<i32>.
@@ -441,13 +432,18 @@ fn serve_cmd(args: ServeArgs) -> Result<()> {
         kv,
         default_system,
         embedding_max_tokens,
-        spec_mtp: spec_mtp.map(PathBuf::from),
     };
+
+    // Each binary populates its own registry; register every model
+    // crate this CLI links. Future binaries (sweeps, custom servers)
+    // can build different registries.
+    let mut registry = flambeau_runtime::Registry::new();
+    registry.register(std::sync::Arc::new(flambeau_qwen3_moe::Qwen3MoEModelArch));
 
     let rt = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()?;
-    rt.block_on(flambeau_server::serve(cfg))
+    rt.block_on(flambeau_server::serve(cfg, registry))
 }
 
 /// Dump the GGUF's embedded `tokenizer.chat_template` Jinja source.
@@ -552,10 +548,6 @@ const SIMPLE_SWEEPS: &[(&str, SweepFn)] = &[
     ("gdn_state_step_alphabeta", flambeau_bench::sweep_gdn_step_alphabeta::run_sweep),
     ("cast_f32_f16", flambeau_bench::sweep_cast::run_sweep),
     ("cast_f16_f32", flambeau_bench::sweep_f32_pointwise::run_cast_f16_f32_sweep),
-    ("cast_f32_bf16", flambeau_bench::sweep_cast::run_cast_f32_bf16_sweep),
-    ("cast_bf16_f32", flambeau_bench::sweep_cast::run_cast_bf16_f32_sweep),
-    ("cast_f16_bf16", flambeau_bench::sweep_cast::run_cast_f16_bf16_sweep),
-    ("cast_bf16_f16", flambeau_bench::sweep_cast::run_cast_bf16_f16_sweep),
     ("silu_f32", flambeau_bench::sweep_f32_pointwise::run_silu_sweep),
     ("swiglu_f32", flambeau_bench::sweep_f32_pointwise::run_swiglu_sweep),
     ("scale_f32", flambeau_bench::sweep_f32_pointwise::run_scale_sweep),
@@ -573,13 +565,6 @@ const SIMPLE_SWEEPS: &[(&str, SweepFn)] = &[
     ("attention_decode_q8_kv", flambeau_bench::sweep_attention_q8_kv::run_sweep),
     ("attention_decode_splitk", flambeau_bench::sweep_attention_splitk::run_sweep),
     ("mmvq_f16", flambeau_bench::sweep_mmvq_f16::run_sweep),
-    ("mmvq_bf16", flambeau_bench::sweep_mmvq_bf16::run_sweep),
-    ("rmsnorm_bf16", flambeau_bench::sweep_rmsnorm_bf16::run_sweep),
-    ("attention_decode_bf16", flambeau_bench::sweep_attention_bf16::run_sweep),
-    ("split_q_gate_bf16", flambeau_bench::sweep_pointwise_bf16::run_split_q_gate_sweep),
-    ("sigmoid_mul_bf16", flambeau_bench::sweep_pointwise_bf16::run_sigmoid_mul_sweep),
-    ("swiglu_f32_to_bf16", flambeau_bench::sweep_pointwise_bf16::run_swiglu_f32_to_bf16_sweep),
-    ("rope_neox_partial_bf16", flambeau_bench::sweep_pointwise_bf16::run_rope_neox_partial_sweep),
     ("mmq_f16", flambeau_bench::sweep_mmvq_f16::run_mmq_sweep),
     ("mmq_f16_tile", flambeau_bench::sweep_mmvq_f16::run_mmq_tile_sweep),
     ("mmvq_q4_0", flambeau_bench::sweep_q4_0_q5_0::run_mmvq_q4_0_sweep),
@@ -588,17 +573,39 @@ const SIMPLE_SWEEPS: &[(&str, SweepFn)] = &[
     ("mmvq_q5_1", flambeau_bench::sweep_q4_0_q5_0::run_mmvq_q5_1_sweep),
     ("indexed_moe_mmvq_q4_0", flambeau_bench::sweep_q4_0_q5_0::run_indexed_moe_mmvq_q4_0_sweep),
     ("indexed_moe_mmvq_q4_1", flambeau_bench::sweep_q4_0_q5_0::run_indexed_moe_mmvq_q4_1_sweep),
+    ("indexed_moe_mmvq_q5_0", flambeau_bench::sweep_q4_0_q5_0::run_indexed_moe_mmvq_q5_0_sweep),
+    ("indexed_moe_mmvq_q5_1", flambeau_bench::sweep_q4_0_q5_0::run_indexed_moe_mmvq_q5_1_sweep),
     ("topk", flambeau_bench::sweep_moe::run_topk_sweep),
     ("indexed_moe_mmvq", flambeau_bench::sweep_moe::run_indexed_moe_mmvq_sweep),
     ("moe_combine", flambeau_bench::sweep_moe::run_moe_combine_sweep),
     ("indexed_moe_mmvq_gate_up", flambeau_bench::sweep_moe::run_gate_up_sweep),
     ("indexed_moe_mmvq_r2", flambeau_bench::sweep_moe::run_indexed_moe_mmvq_r2_sweep),
+    ("indexed_moe_mmvq_q2_k", flambeau_bench::sweep_moe::run_indexed_moe_mmvq_q2_k_sweep),
+    ("indexed_moe_mmvq_q3_k", flambeau_bench::sweep_moe::run_indexed_moe_mmvq_q3_k_sweep),
     ("indexed_moe_mmvq_q5_k", flambeau_bench::sweep_moe::run_indexed_moe_mmvq_q5_k_sweep),
     ("indexed_moe_mmvq_q6_k", flambeau_bench::sweep_moe::run_indexed_moe_mmvq_q6_k_sweep),
     ("indexed_moe_mmvq_q8_0", flambeau_bench::sweep_moe::run_indexed_moe_mmvq_q8_0_sweep),
     ("indexed_moe_mmq", flambeau_bench::sweep_moe::run_indexed_moe_mmq_sweep),
     ("indexed_moe_mmq_q8_0_gate_up_tile8", flambeau_bench::sweep_moe::run_indexed_moe_mmq_q8_0_gate_up_tile8_sweep),
     ("indexed_moe_mmq_q8_0_down_tile8", flambeau_bench::sweep_moe::run_indexed_moe_mmq_q8_0_down_tile8_sweep),
+    ("indexed_moe_mmq_q4_0_gate_up_tile8", flambeau_bench::sweep_moe::run_indexed_moe_mmq_q4_0_gate_up_tile8_sweep),
+    ("indexed_moe_mmq_q4_0_down_tile8", flambeau_bench::sweep_moe::run_indexed_moe_mmq_q4_0_down_tile8_sweep),
+    ("indexed_moe_mmq_q4_1_gate_up_tile8", flambeau_bench::sweep_moe::run_indexed_moe_mmq_q4_1_gate_up_tile8_sweep),
+    ("indexed_moe_mmq_q4_1_down_tile8", flambeau_bench::sweep_moe::run_indexed_moe_mmq_q4_1_down_tile8_sweep),
+    ("indexed_moe_mmq_q5_0_gate_up_tile8", flambeau_bench::sweep_moe::run_indexed_moe_mmq_q5_0_gate_up_tile8_sweep),
+    ("indexed_moe_mmq_q5_0_down_tile8", flambeau_bench::sweep_moe::run_indexed_moe_mmq_q5_0_down_tile8_sweep),
+    ("indexed_moe_mmq_q5_1_gate_up_tile8", flambeau_bench::sweep_moe::run_indexed_moe_mmq_q5_1_gate_up_tile8_sweep),
+    ("indexed_moe_mmq_q5_1_down_tile8", flambeau_bench::sweep_moe::run_indexed_moe_mmq_q5_1_down_tile8_sweep),
+    ("indexed_moe_mmq_q4_k_gate_up_tile8", flambeau_bench::sweep_moe::run_indexed_moe_mmq_q4_k_gate_up_tile8_sweep),
+    ("indexed_moe_mmq_q4_k_down_tile8", flambeau_bench::sweep_moe::run_indexed_moe_mmq_q4_k_down_tile8_sweep),
+    ("indexed_moe_mmq_q5_k_gate_up_tile8", flambeau_bench::sweep_moe::run_indexed_moe_mmq_q5_k_gate_up_tile8_sweep),
+    ("indexed_moe_mmq_q5_k_down_tile8", flambeau_bench::sweep_moe::run_indexed_moe_mmq_q5_k_down_tile8_sweep),
+    ("indexed_moe_mmq_q6_k_gate_up_tile8", flambeau_bench::sweep_moe::run_indexed_moe_mmq_q6_k_gate_up_tile8_sweep),
+    ("indexed_moe_mmq_q6_k_down_tile8", flambeau_bench::sweep_moe::run_indexed_moe_mmq_q6_k_down_tile8_sweep),
+    ("indexed_moe_mmq_q2_k_gate_up_tile8", flambeau_bench::sweep_moe::run_indexed_moe_mmq_q2_k_gate_up_tile8_sweep),
+    ("indexed_moe_mmq_q2_k_down_tile8", flambeau_bench::sweep_moe::run_indexed_moe_mmq_q2_k_down_tile8_sweep),
+    ("indexed_moe_mmq_q3_k_gate_up_tile8", flambeau_bench::sweep_moe::run_indexed_moe_mmq_q3_k_gate_up_tile8_sweep),
+    ("indexed_moe_mmq_q3_k_down_tile8", flambeau_bench::sweep_moe::run_indexed_moe_mmq_q3_k_down_tile8_sweep),
 ];
 
 #[cfg(feature = "hip_sweep")]
@@ -618,8 +625,13 @@ fn sweep(arch: &str, op: Option<&str>, dtype: &str) -> Result<()> {
             "qmatmul" => {
                 use flambeau_bench::sweep_mmvq::{run_sweep, Dtype, SweepSpec};
                 let dtypes: Vec<Dtype> = match dtype {
-                    "all" => vec![Dtype::Q8_0, Dtype::Q4K, Dtype::Q5K, Dtype::Q6K],
-                    "all-multirow" => vec![Dtype::Q4KR2, Dtype::Q5KR2, Dtype::Q6KR4],
+                    "all" => vec![Dtype::Q8_0, Dtype::Q2K, Dtype::Q3K, Dtype::Q4K, Dtype::Q5K, Dtype::Q6K, Dtype::Q8K],
+                    "Q2_K" => vec![Dtype::Q2K],
+                    "Q2_K_r2" => vec![Dtype::Q2KR2],
+                    "Q3_K" => vec![Dtype::Q3K],
+                    "Q3_K_r2" => vec![Dtype::Q3KR2],
+                    "Q8_K" => vec![Dtype::Q8K],
+                    "all-multirow" => vec![Dtype::Q2KR2, Dtype::Q3KR2, Dtype::Q4KR2, Dtype::Q5KR2, Dtype::Q6KR4],
                     "Q8_0" => vec![Dtype::Q8_0],
                     "Q4_K" => vec![Dtype::Q4K],
                     "Q5_K" => vec![Dtype::Q5K],
@@ -634,6 +646,24 @@ fn sweep(arch: &str, op: Option<&str>, dtype: &str) -> Result<()> {
                     "Q4_1_t128" => vec![Dtype::Q4_1T128],
                     "Q8_0_t128" => vec![Dtype::Q8_0T128],
                     "Q8_0_t128_vdr2" => vec![Dtype::Q8_0T128VDR2],
+                    "IQ4_NL" => vec![Dtype::Iq4Nl, Dtype::Iq4NlR2],
+                    "IQ4_NL_r2" => vec![Dtype::Iq4NlR2],
+                    "IQ4_XS" => vec![Dtype::Iq4Xs, Dtype::Iq4XsR2],
+                    "IQ4_XS_r2" => vec![Dtype::Iq4XsR2],
+                    "IQ3_XXS" => vec![Dtype::Iq3Xxs, Dtype::Iq3XxsR2],
+                    "IQ3_XXS_r2" => vec![Dtype::Iq3XxsR2],
+                    "IQ3_S" => vec![Dtype::Iq3S, Dtype::Iq3SR2],
+                    "IQ3_S_r2" => vec![Dtype::Iq3SR2],
+                    "IQ2_XXS" => vec![Dtype::Iq2Xxs, Dtype::Iq2XxsR2],
+                    "IQ2_XXS_r2" => vec![Dtype::Iq2XxsR2],
+                    "IQ2_XS" => vec![Dtype::Iq2Xs, Dtype::Iq2XsR2],
+                    "IQ2_XS_r2" => vec![Dtype::Iq2XsR2],
+                    "IQ2_S" => vec![Dtype::Iq2S, Dtype::Iq2SR2],
+                    "IQ2_S_r2" => vec![Dtype::Iq2SR2],
+                    "IQ1_S" => vec![Dtype::Iq1S, Dtype::Iq1SR2],
+                    "IQ1_S_r2" => vec![Dtype::Iq1SR2],
+                    "IQ1_M" => vec![Dtype::Iq1M, Dtype::Iq1MR2],
+                    "IQ1_M_r2" => vec![Dtype::Iq1MR2],
                     other => anyhow::bail!("unknown dtype {other}"),
                 };
                 let root = repo_root();
@@ -665,12 +695,25 @@ fn sweep(arch: &str, op: Option<&str>, dtype: &str) -> Result<()> {
                     "Q4_0" | "Q4_0_wave64" => (vec![MmqDtype::Q4_0Wave64], SweepSpec::v1_4_prefill),
                     "Q4_0_4warp" => (vec![MmqDtype::Q4_04Warp], SweepSpec::v1_4_prefill),
                     "Q5_0" | "Q5_0_wave64" => (vec![MmqDtype::Q5_0Wave64], SweepSpec::v1_4_prefill),
+                    "Q5_1" | "Q5_1_wave64" => (vec![MmqDtype::Q5_1Wave64], SweepSpec::v1_4_prefill),
                     "Q4_K" | "Q4_K_4warp" => (vec![MmqDtype::Q4K4Warp], SweepSpec::v1_4_prefill),
                     "Q4_K_wave64" => (vec![MmqDtype::Q4KWave64], SweepSpec::v1_4_prefill),
                     "Q4_K_turbo" => (vec![MmqDtype::Q4KTurbo], SweepSpec::v1_4_prefill),
                     "Q5_K" | "Q5_K_wave64" => (vec![MmqDtype::Q5KWave64], SweepSpec::v1_4_prefill),
                     "Q6_K" | "Q6_K_4warp" => (vec![MmqDtype::Q6K4Warp], SweepSpec::v1_4_prefill),
                     "Q6_K_wave64" => (vec![MmqDtype::Q6KWave64], SweepSpec::v1_4_prefill),
+                    "Q8_K" | "Q8_K_wave64" => (vec![MmqDtype::Q8KWave64], SweepSpec::v1_4_prefill),
+                    "Q2_K" | "Q2_K_wave64" => (vec![MmqDtype::Q2KWave64], SweepSpec::v1_4_prefill),
+                    "Q3_K" | "Q3_K_wave64" => (vec![MmqDtype::Q3KWave64], SweepSpec::v1_4_prefill),
+                    "IQ4_XS" | "IQ4_XS_wave64" => (vec![MmqDtype::Iq4XsWave64], SweepSpec::v1_4_prefill),
+                    "IQ3_S" | "IQ3_S_wave64" => (vec![MmqDtype::Iq3SWave64], SweepSpec::v1_4_prefill),
+                    "IQ4_NL" | "IQ4_NL_wave64" => (vec![MmqDtype::Iq4NlWave64], SweepSpec::v1_4_prefill),
+                    "IQ3_XXS" | "IQ3_XXS_wave64" => (vec![MmqDtype::Iq3XxsWave64], SweepSpec::v1_4_prefill),
+                    "IQ2_XXS" | "IQ2_XXS_wave64" => (vec![MmqDtype::Iq2XxsWave64], SweepSpec::v1_4_prefill),
+                    "IQ2_XS" | "IQ2_XS_wave64" => (vec![MmqDtype::Iq2XsWave64], SweepSpec::v1_4_prefill),
+                    "IQ2_S" | "IQ2_S_wave64" => (vec![MmqDtype::Iq2SWave64], SweepSpec::v1_4_prefill),
+                    "IQ1_S" | "IQ1_S_wave64" => (vec![MmqDtype::Iq1SWave64], SweepSpec::v1_4_prefill),
+                    "IQ1_M" | "IQ1_M_wave64" => (vec![MmqDtype::Iq1MWave64], SweepSpec::v1_4_prefill),
                     "all" => (
                         vec![
                             MmqDtype::Q8_0Oracle,
@@ -682,11 +725,15 @@ fn sweep(arch: &str, op: Option<&str>, dtype: &str) -> Result<()> {
                             MmqDtype::Q4_0Wave64,
                             MmqDtype::Q4_04Warp,
                             MmqDtype::Q5_0Wave64,
+                            MmqDtype::Q5_1Wave64,
                             MmqDtype::Q4K4Warp,
                             MmqDtype::Q4KWave64,
                             MmqDtype::Q5KWave64,
                             MmqDtype::Q6K4Warp,
                             MmqDtype::Q6KWave64,
+                            MmqDtype::Q8KWave64,
+                            MmqDtype::Q2KWave64,
+                            MmqDtype::Q3KWave64,
                         ],
                         // Oracle uses its small grid, 4warp uses the prefill grid.
                         |d| match d {
@@ -699,12 +746,25 @@ fn sweep(arch: &str, op: Option<&str>, dtype: &str) -> Result<()> {
                             | MmqDtype::Q4_0Wave64
                             | MmqDtype::Q4_04Warp
                             | MmqDtype::Q5_0Wave64
+                            | MmqDtype::Q5_1Wave64
                             | MmqDtype::Q4KTurbo
                             | MmqDtype::Q4K4Warp
                             | MmqDtype::Q4KWave64
                             | MmqDtype::Q5KWave64
                             | MmqDtype::Q6K4Warp
-                            | MmqDtype::Q6KWave64 => SweepSpec::v1_4_prefill(d),
+                            | MmqDtype::Q6KWave64
+                            | MmqDtype::Q8KWave64
+                            | MmqDtype::Q2KWave64
+                            | MmqDtype::Q3KWave64
+                            | MmqDtype::Iq4XsWave64
+                            | MmqDtype::Iq3SWave64
+                            | MmqDtype::Iq4NlWave64
+                            | MmqDtype::Iq3XxsWave64
+                            | MmqDtype::Iq2XxsWave64
+                            | MmqDtype::Iq2XsWave64
+                            | MmqDtype::Iq2SWave64
+                            | MmqDtype::Iq1SWave64
+                            | MmqDtype::Iq1MWave64 => SweepSpec::v1_4_prefill(d),
                         },
                     ),
                     other => anyhow::bail!("unknown MMQ dtype {other}"),

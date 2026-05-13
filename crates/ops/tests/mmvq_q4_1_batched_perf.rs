@@ -144,22 +144,11 @@ fn mmvq_q4_1_batched_perf_sweep() -> Result<()> {
         (3584, 4096, "qkv (≈hidden×k)"),
         (14336, 4096, "ssm_out width"),
     ];
-    let slot_counts: &[usize] = &[1, 2, 4, 8];
+    let slot_counts: &[usize] = &[2, 3, 4];
     let iters = 50;
 
-    // Bench three paths: per-row mmvq (baseline), v1 batched-MMVQ
-    // (new kernel), wave64 (existing prefill kernel reused at small N).
-    // FLAMBEAU_BATCHED_MMVQ env routes the qmatmul short-circuit:
-    // unset → per-row MMVQ loop (baseline)
-    // "v1" → mmvq_q4_1_q8_1_batched (this session's new kernel)
-    // any other → mmq_q4_1_wave64 (existing prefill kernel)
-    let modes: &[(&str, Option<&str>)] = &[
-        ("baseline (per-row MMVQ loop)", None),
-        ("v1 batched", Some("v1")),
-        ("wave64 (prefill kernel)", Some("1")),
-    ];
-
     eprintln!("# mmvq_q4_1_batched perf sweep — Qwen3.6-27B GDN matmul shapes");
+    eprintln!("# Per-N batched MMVQ (n2/n3/n4) vs row-by-row baseline.");
     eprintln!("# Wall time per call (µs), 50 iters after 3 warm-up.");
 
     for &(n_rows, k, label) in shapes {
@@ -186,11 +175,7 @@ fn mmvq_q4_1_batched_perf_sweep() -> Result<()> {
         let dst_bytes = max_n * n_rows * 4;
         let d_dst = alloc_zeroed(&dev, dst_bytes);
 
-        // N=1 single-row baseline (no env override needed — m=1 always
-        // hits per-row MMVQ regardless of FLAMBEAU_BATCHED_MMVQ).
-        // SAFETY: the env mutation/restore is single-threaded inside the
-        // test; no other thread reads FLAMBEAU_BATCHED_MMVQ here.
-        unsafe { std::env::remove_var("FLAMBEAU_BATCHED_MMVQ"); }
+        // N=1 single-row baseline (m=1 falls through to per-row MMVQ).
         let single_us = time_us(stream, iters, || {
             qmatmul(
                 &reg, stream, d_w, d_act_q8_1, DevicePtr(0), d_dst,
@@ -203,28 +188,39 @@ fn mmvq_q4_1_batched_perf_sweep() -> Result<()> {
             single_us
         );
 
-        // Sweep batched paths × N.
-        for (mode_name, env_val) in modes {
-            // SAFETY: env var change is local to test thread.
-            unsafe {
-                match env_val {
-                    Some(v) => std::env::set_var("FLAMBEAU_BATCHED_MMVQ", v),
-                    None => std::env::remove_var("FLAMBEAU_BATCHED_MMVQ"),
-                }
-            }
-            let mut bits = vec![format!("{:<32}", mode_name)];
-            for &n in &slot_counts[1..] {
-                let us = time_us(stream, iters, || {
+        // Baseline: per-row m-loop. Call qmatmul(m=1) N times per
+        // iteration so the wall is N row launches.
+        let act_row_bytes = n_blocks_per_row * std::mem::size_of::<BlockQ8_1>();
+        let dst_row_bytes = n_rows * 4;
+        let mut baseline_bits = vec![format!("{:<32}", "baseline (per-row m-loop)")];
+        for &n in slot_counts {
+            let us = time_us(stream, iters, || {
+                for s in 0..n {
+                    let act_row = DevicePtr(d_act_q8_1.as_usize() + s * act_row_bytes);
+                    let dst_row = DevicePtr(d_dst.as_usize() + s * dst_row_bytes);
                     qmatmul(
-                        &reg, stream, d_w, d_act_q8_1, DevicePtr(0), d_dst,
-                        n, k, n_rows, QDtype::Q4_1,
-                    )
-                })?;
-                bits.push(format!("N={n}: {:>7.1}µs ({:.2}×)", us, single_us * n as f64 / us));
-            }
-            eprintln!("    {}", bits.join("  "));
+                        &reg, stream, d_w, act_row, DevicePtr(0), dst_row,
+                        1, k, n_rows, QDtype::Q4_1,
+                    )?;
+                }
+                Ok(())
+            })?;
+            baseline_bits.push(format!("N={n}: {:>7.1}µs ({:.2}×)", us, single_us * n as f64 / us));
         }
-        unsafe { std::env::remove_var("FLAMBEAU_BATCHED_MMVQ"); }
+        eprintln!("    {}", baseline_bits.join("  "));
+
+        // Batched: auto-dispatched via qmatmul(m=N) at N ∈ {2,3,4}.
+        let mut batched_bits = vec![format!("{:<32}", "batched n2/n3/n4")];
+        for &n in slot_counts {
+            let us = time_us(stream, iters, || {
+                qmatmul(
+                    &reg, stream, d_w, d_act_q8_1, DevicePtr(0), d_dst,
+                    n, k, n_rows, QDtype::Q4_1,
+                )
+            })?;
+            batched_bits.push(format!("N={n}: {:>7.1}µs ({:.2}×)", us, single_us * n as f64 / us));
+        }
+        eprintln!("    {}", batched_bits.join("  "));
 
         // Cleanup.
         unsafe {

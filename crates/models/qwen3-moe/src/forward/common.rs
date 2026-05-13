@@ -13,8 +13,12 @@ use flambeau_ops::hip::{
 use flambeau_quant::GgmlDType;
 
 use flambeau_ops::hip::moe::{
-    indexed_moe_mmvq_q4_0, indexed_moe_mmvq_q4_1, indexed_moe_mmvq_q4_k_gate_up,
-    indexed_moe_mmvq_q4_k_r2, indexed_moe_mmvq_q5_k, indexed_moe_mmvq_q6_k, indexed_moe_mmvq_q8_0,
+    indexed_moe_mmvq_iq1_m, indexed_moe_mmvq_iq1_s, indexed_moe_mmvq_iq2_s,
+    indexed_moe_mmvq_iq2_xs, indexed_moe_mmvq_iq2_xxs, indexed_moe_mmvq_iq3_s,
+    indexed_moe_mmvq_iq3_xxs, indexed_moe_mmvq_iq4_nl, indexed_moe_mmvq_iq4_xs,
+    indexed_moe_mmvq_q2_k, indexed_moe_mmvq_q3_k, indexed_moe_mmvq_q4_0, indexed_moe_mmvq_q4_1,
+    indexed_moe_mmvq_q4_k_gate_up, indexed_moe_mmvq_q4_k_r2, indexed_moe_mmvq_q5_k,
+    indexed_moe_mmvq_q6_k, indexed_moe_mmvq_q8_0,
 };
 
 use crate::weights::DeviceTensor;
@@ -49,24 +53,51 @@ pub(crate) fn validate_moe_dtypes(
     if inter % QK_K != 0 {
         bail!("MoE expects moe_intermediate_size={inter} divisible by QK_K={QK_K}");
     }
-    if !(gate_dt == up_dt
-        && (gate_dt == GgmlDType::Q4K
-            || gate_dt == GgmlDType::Q8_0
-            || gate_dt == GgmlDType::Q4_0))
-    {
+    let gate_up_ok = matches!(
+        gate_dt,
+        GgmlDType::Q2K
+            | GgmlDType::Q3K
+            | GgmlDType::Q4K
+            | GgmlDType::Q8_0
+            | GgmlDType::Q4_0
+            | GgmlDType::Iq4Nl
+            | GgmlDType::Iq4Xs
+            | GgmlDType::Iq3Xxs
+            | GgmlDType::Iq3S
+            | GgmlDType::Iq2Xxs
+            | GgmlDType::Iq2Xs
+            | GgmlDType::Iq2S
+            | GgmlDType::Iq1S
+            | GgmlDType::Iq1M
+    );
+    if !(gate_dt == up_dt && gate_up_ok) {
         bail!(
-            "{label} gate/up dtypes must match and be Q4_K, Q8_0 or Q4_0; got gate={gate_dt:?}, up={up_dt:?}"
+            "{label} gate/up dtypes must match and be Q2_K, Q3_K, Q4_K, Q8_0, Q4_0 or IQ family; got gate={gate_dt:?}, up={up_dt:?}"
         );
     }
-    if down_dt != GgmlDType::Q4K
-        && down_dt != GgmlDType::Q5K
-        && down_dt != GgmlDType::Q6K
-        && down_dt != GgmlDType::Q8_0
-        && down_dt != GgmlDType::Q4_0
-        && down_dt != GgmlDType::Q4_1
-    {
+    let down_ok = matches!(
+        down_dt,
+        GgmlDType::Q2K
+            | GgmlDType::Q3K
+            | GgmlDType::Q4K
+            | GgmlDType::Q5K
+            | GgmlDType::Q6K
+            | GgmlDType::Q8_0
+            | GgmlDType::Q4_0
+            | GgmlDType::Q4_1
+            | GgmlDType::Iq4Nl
+            | GgmlDType::Iq4Xs
+            | GgmlDType::Iq3Xxs
+            | GgmlDType::Iq3S
+            | GgmlDType::Iq2Xxs
+            | GgmlDType::Iq2Xs
+            | GgmlDType::Iq2S
+            | GgmlDType::Iq1S
+            | GgmlDType::Iq1M
+    );
+    if !down_ok {
         bail!(
-            "{label} ffn_down_exps must be Q4_K, Q5_K, Q6_K, Q8_0, Q4_0 or Q4_1; got {down_dt:?}"
+            "{label} ffn_down_exps must be Q2_K, Q3_K, Q4_K, Q5_K, Q6_K, Q8_0, Q4_0, Q4_1 or IQ family; got {down_dt:?}"
         );
     }
     Ok(())
@@ -134,7 +165,79 @@ pub(crate) fn run_indexed_moe_gate_up(
             )
             .context("indexed_moe gate+up q4_0 fused")
         }
-        _ => bail!("run_indexed_moe_gate_up: unsupported gate dtype {dtype:?} (expected Q4_K / Q8_0 / Q4_0)"),
+        GgmlDType::Q2K => {
+            let nb = hidden / QK_K;
+            indexed_moe_mmvq_q2_k(
+                ops, stream, w_gate, x_q8_1, expert_ids, gate_out, inter, n_tokens,
+                top_k, nb,
+            )
+            .context("indexed_moe gate q2_k")?;
+            indexed_moe_mmvq_q2_k(
+                ops, stream, w_up, x_q8_1, expert_ids, up_out, inter, n_tokens, top_k, nb,
+            )
+            .context("indexed_moe up q2_k")
+        }
+        GgmlDType::Q3K => {
+            let nb = hidden / QK_K;
+            indexed_moe_mmvq_q3_k(
+                ops, stream, w_gate, x_q8_1, expert_ids, gate_out, inter, n_tokens,
+                top_k, nb,
+            )
+            .context("indexed_moe gate q3_k")?;
+            indexed_moe_mmvq_q3_k(
+                ops, stream, w_up, x_q8_1, expert_ids, up_out, inter, n_tokens, top_k, nb,
+            )
+            .context("indexed_moe up q3_k")
+        }
+        //— full IQ family MoE expert support.
+        // Same separate-gate / separate-up pattern as Q2_K / Q3_K (no fused
+        // gate_up variant yet).
+        GgmlDType::Iq4Xs => {
+            let nb = hidden / QK_K;
+            indexed_moe_mmvq_iq4_xs(ops, stream, w_gate, x_q8_1, expert_ids, gate_out, inter, n_tokens, top_k, nb).context("indexed_moe gate iq4_xs")?;
+            indexed_moe_mmvq_iq4_xs(ops, stream, w_up, x_q8_1, expert_ids, up_out, inter, n_tokens, top_k, nb).context("indexed_moe up iq4_xs")
+        }
+        GgmlDType::Iq4Nl => {
+            let nb = hidden / 32;
+            indexed_moe_mmvq_iq4_nl(ops, stream, w_gate, x_q8_1, expert_ids, gate_out, inter, n_tokens, top_k, nb).context("indexed_moe gate iq4_nl")?;
+            indexed_moe_mmvq_iq4_nl(ops, stream, w_up, x_q8_1, expert_ids, up_out, inter, n_tokens, top_k, nb).context("indexed_moe up iq4_nl")
+        }
+        GgmlDType::Iq3Xxs => {
+            let nb = hidden / QK_K;
+            indexed_moe_mmvq_iq3_xxs(ops, stream, w_gate, x_q8_1, expert_ids, gate_out, inter, n_tokens, top_k, nb).context("indexed_moe gate iq3_xxs")?;
+            indexed_moe_mmvq_iq3_xxs(ops, stream, w_up, x_q8_1, expert_ids, up_out, inter, n_tokens, top_k, nb).context("indexed_moe up iq3_xxs")
+        }
+        GgmlDType::Iq3S => {
+            let nb = hidden / QK_K;
+            indexed_moe_mmvq_iq3_s(ops, stream, w_gate, x_q8_1, expert_ids, gate_out, inter, n_tokens, top_k, nb).context("indexed_moe gate iq3_s")?;
+            indexed_moe_mmvq_iq3_s(ops, stream, w_up, x_q8_1, expert_ids, up_out, inter, n_tokens, top_k, nb).context("indexed_moe up iq3_s")
+        }
+        GgmlDType::Iq2Xxs => {
+            let nb = hidden / QK_K;
+            indexed_moe_mmvq_iq2_xxs(ops, stream, w_gate, x_q8_1, expert_ids, gate_out, inter, n_tokens, top_k, nb).context("indexed_moe gate iq2_xxs")?;
+            indexed_moe_mmvq_iq2_xxs(ops, stream, w_up, x_q8_1, expert_ids, up_out, inter, n_tokens, top_k, nb).context("indexed_moe up iq2_xxs")
+        }
+        GgmlDType::Iq2Xs => {
+            let nb = hidden / QK_K;
+            indexed_moe_mmvq_iq2_xs(ops, stream, w_gate, x_q8_1, expert_ids, gate_out, inter, n_tokens, top_k, nb).context("indexed_moe gate iq2_xs")?;
+            indexed_moe_mmvq_iq2_xs(ops, stream, w_up, x_q8_1, expert_ids, up_out, inter, n_tokens, top_k, nb).context("indexed_moe up iq2_xs")
+        }
+        GgmlDType::Iq2S => {
+            let nb = hidden / QK_K;
+            indexed_moe_mmvq_iq2_s(ops, stream, w_gate, x_q8_1, expert_ids, gate_out, inter, n_tokens, top_k, nb).context("indexed_moe gate iq2_s")?;
+            indexed_moe_mmvq_iq2_s(ops, stream, w_up, x_q8_1, expert_ids, up_out, inter, n_tokens, top_k, nb).context("indexed_moe up iq2_s")
+        }
+        GgmlDType::Iq1S => {
+            let nb = hidden / QK_K;
+            indexed_moe_mmvq_iq1_s(ops, stream, w_gate, x_q8_1, expert_ids, gate_out, inter, n_tokens, top_k, nb).context("indexed_moe gate iq1_s")?;
+            indexed_moe_mmvq_iq1_s(ops, stream, w_up, x_q8_1, expert_ids, up_out, inter, n_tokens, top_k, nb).context("indexed_moe up iq1_s")
+        }
+        GgmlDType::Iq1M => {
+            let nb = hidden / QK_K;
+            indexed_moe_mmvq_iq1_m(ops, stream, w_gate, x_q8_1, expert_ids, gate_out, inter, n_tokens, top_k, nb).context("indexed_moe gate iq1_m")?;
+            indexed_moe_mmvq_iq1_m(ops, stream, w_up, x_q8_1, expert_ids, up_out, inter, n_tokens, top_k, nb).context("indexed_moe up iq1_m")
+        }
+        _ => bail!("run_indexed_moe_gate_up: unsupported gate dtype {dtype:?} (expected Q2_K / Q3_K / Q4_K / Q8_0 / Q4_0 / IQ4_XS / IQ4_NL / IQ3_XXS / IQ3_S / IQ2_XXS / IQ2_XS / IQ2_S / IQ1_S / IQ1_M)"),
     }
 }
 
@@ -218,7 +321,60 @@ pub(crate) fn run_indexed_moe_down(
             )
             .context("indexed_moe down q4_1")
         }
-        _ => bail!("run_indexed_moe_down: unsupported down dtype {dtype:?} (expected Q4_K / Q5_K / Q6_K / Q8_0 / Q4_0 / Q4_1)"),
+        GgmlDType::Q2K => {
+            let nb = inter / QK_K;
+            indexed_moe_mmvq_q2_k(
+                ops, stream, w_down, activated_q8_1, expert_ids, down_out, hidden,
+                n_tokens_eff, top_k_inner, nb,
+            )
+            .context("indexed_moe down q2_k")
+        }
+        GgmlDType::Q3K => {
+            let nb = inter / QK_K;
+            indexed_moe_mmvq_q3_k(
+                ops, stream, w_down, activated_q8_1, expert_ids, down_out, hidden,
+                n_tokens_eff, top_k_inner, nb,
+            )
+            .context("indexed_moe down q3_k")
+        }
+        //— IQ family.
+        GgmlDType::Iq4Xs => {
+            let nb = inter / QK_K;
+            indexed_moe_mmvq_iq4_xs(ops, stream, w_down, activated_q8_1, expert_ids, down_out, hidden, n_tokens_eff, top_k_inner, nb).context("indexed_moe down iq4_xs")
+        }
+        GgmlDType::Iq4Nl => {
+            let nb = inter / 32;
+            indexed_moe_mmvq_iq4_nl(ops, stream, w_down, activated_q8_1, expert_ids, down_out, hidden, n_tokens_eff, top_k_inner, nb).context("indexed_moe down iq4_nl")
+        }
+        GgmlDType::Iq3Xxs => {
+            let nb = inter / QK_K;
+            indexed_moe_mmvq_iq3_xxs(ops, stream, w_down, activated_q8_1, expert_ids, down_out, hidden, n_tokens_eff, top_k_inner, nb).context("indexed_moe down iq3_xxs")
+        }
+        GgmlDType::Iq3S => {
+            let nb = inter / QK_K;
+            indexed_moe_mmvq_iq3_s(ops, stream, w_down, activated_q8_1, expert_ids, down_out, hidden, n_tokens_eff, top_k_inner, nb).context("indexed_moe down iq3_s")
+        }
+        GgmlDType::Iq2Xxs => {
+            let nb = inter / QK_K;
+            indexed_moe_mmvq_iq2_xxs(ops, stream, w_down, activated_q8_1, expert_ids, down_out, hidden, n_tokens_eff, top_k_inner, nb).context("indexed_moe down iq2_xxs")
+        }
+        GgmlDType::Iq2Xs => {
+            let nb = inter / QK_K;
+            indexed_moe_mmvq_iq2_xs(ops, stream, w_down, activated_q8_1, expert_ids, down_out, hidden, n_tokens_eff, top_k_inner, nb).context("indexed_moe down iq2_xs")
+        }
+        GgmlDType::Iq2S => {
+            let nb = inter / QK_K;
+            indexed_moe_mmvq_iq2_s(ops, stream, w_down, activated_q8_1, expert_ids, down_out, hidden, n_tokens_eff, top_k_inner, nb).context("indexed_moe down iq2_s")
+        }
+        GgmlDType::Iq1S => {
+            let nb = inter / QK_K;
+            indexed_moe_mmvq_iq1_s(ops, stream, w_down, activated_q8_1, expert_ids, down_out, hidden, n_tokens_eff, top_k_inner, nb).context("indexed_moe down iq1_s")
+        }
+        GgmlDType::Iq1M => {
+            let nb = inter / QK_K;
+            indexed_moe_mmvq_iq1_m(ops, stream, w_down, activated_q8_1, expert_ids, down_out, hidden, n_tokens_eff, top_k_inner, nb).context("indexed_moe down iq1_m")
+        }
+        _ => bail!("run_indexed_moe_down: unsupported down dtype {dtype:?} (expected Q2_K / Q3_K / Q4_K / Q5_K / Q6_K / Q8_0 / Q4_0 / Q4_1 / IQ family)"),
     }
 }
 
@@ -229,9 +385,12 @@ pub(crate) fn run_indexed_moe_down(
 /// Returns an error if `dtype` is not in the V1 qmatmul dispatch set.
 pub(super) fn qdtype_of(dtype: GgmlDType) -> Result<QDtype> {
     Ok(match dtype {
+        GgmlDType::Q2K => QDtype::Q2_K,
+        GgmlDType::Q3K => QDtype::Q3_K,
         GgmlDType::Q4K => QDtype::Q4_K,
         GgmlDType::Q5K => QDtype::Q5_K,
         GgmlDType::Q6K => QDtype::Q6_K,
+        GgmlDType::Q8K => QDtype::Q8_K,
         GgmlDType::Q8_0 => QDtype::Q8_0,
         GgmlDType::Q4_1 => QDtype::Q4_1,
         // 1.b — UD-Q8_K_XL reserves F16 for i-matrix-flagged layers
@@ -239,12 +398,32 @@ pub(super) fn qdtype_of(dtype: GgmlDType) -> Result<QDtype> {
         // attn_q/k + ffn_gate/up/down). `mmvq()` special-cases F16 to skip
         // the dispatch table and call the direct F16×Q8_1 kernel.
         GgmlDType::F16 => QDtype::F16,
+        // F32 — used by the MoE router weight (`ffn_gate_inp`) on
+        // older Qwen3.x GGUFs that predate the F32→F16 loader-side
+        // conversion. Only the dense_gemv router path consumes F32;
+        // qmatmul itself rejects F32 at dispatch time.
+        GgmlDType::F32 => QDtype::F32,
         // 3.a — Q4_0 and Q5_0 unblock Qwen3.6-35B-A3B-Q4_0.
         GgmlDType::Q4_0 => QDtype::Q4_0,
         GgmlDType::Q5_0 => QDtype::Q5_0,
         // 6.a — Q5_1 (llama.cpp parity; no Qwen3 model currently uses it
         // but unblocks any incoming GGUF mix).
         GgmlDType::Q5_1 => QDtype::Q5_1,
+        // native IQ4 MMVQ kernels. Direct mmap → memcpy → kernel
+        // (no host re-quant), llama.cpp-style. Used by UD-Q3_K_XL etc.
+        GgmlDType::Iq4Nl => QDtype::IQ4_NL,
+        GgmlDType::Iq4Xs => QDtype::IQ4_XS,
+        // native IQ3 MMVQ kernels (codebook lookup, 256/512-entry
+        // u32 grid). Covers UD-Q3_K_XL MoE expert tensors.
+        GgmlDType::Iq3Xxs => QDtype::IQ3_XXS,
+        GgmlDType::Iq3S => QDtype::IQ3_S,
+        // full IQ2/IQ1 family native MMVQ kernels (codebook
+        // lookup, 256..2048-entry u64 grids).
+        GgmlDType::Iq2Xxs => QDtype::IQ2_XXS,
+        GgmlDType::Iq2Xs => QDtype::IQ2_XS,
+        GgmlDType::Iq2S => QDtype::IQ2_S,
+        GgmlDType::Iq1S => QDtype::IQ1_S,
+        GgmlDType::Iq1M => QDtype::IQ1_M,
         other => bail!("weight dtype {other:?} not supported by V1 qmatmul dispatch"),
     })
 }

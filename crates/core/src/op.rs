@@ -123,9 +123,21 @@ pub enum QDtype {
     Q4_1,
     Q5_0,
     Q5_1,
+    Q2_K,
+    Q3_K,
     Q4_K,
     Q5_K,
     Q6_K,
+    Q8_K,
+    IQ4_NL,
+    IQ4_XS,
+    IQ3_XXS,
+    IQ3_S,
+    IQ2_XXS,
+    IQ2_XS,
+    IQ2_S,
+    IQ1_S,
+    IQ1_M,
 }
 
 impl QDtype {
@@ -140,9 +152,21 @@ impl QDtype {
             Self::Q4_1 => "Q4_1",
             Self::Q5_0 => "Q5_0",
             Self::Q5_1 => "Q5_1",
+            Self::Q2_K => "Q2_K",
+            Self::Q3_K => "Q3_K",
             Self::Q4_K => "Q4_K",
             Self::Q5_K => "Q5_K",
             Self::Q6_K => "Q6_K",
+            Self::Q8_K => "Q8_K",
+            Self::IQ4_NL => "IQ4_NL",
+            Self::IQ4_XS => "IQ4_XS",
+            Self::IQ3_XXS => "IQ3_XXS",
+            Self::IQ3_S => "IQ3_S",
+            Self::IQ2_XXS => "IQ2_XXS",
+            Self::IQ2_XS => "IQ2_XS",
+            Self::IQ2_S => "IQ2_S",
+            Self::IQ1_S => "IQ1_S",
+            Self::IQ1_M => "IQ1_M",
         }
     }
 }

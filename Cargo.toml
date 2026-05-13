@@ -7,6 +7,7 @@ members = [
     "crates/kernels-hip",
     "crates/backend-hip",
     "crates/ops",
+    "crates/blocks",
     "crates/models/qwen3-moe",
     "crates/runtime",
     "crates/bench",
@@ -42,6 +43,7 @@ axum = { version = "0.7", features = ["json"] }
 tower = "0.5"
 # Model loading
 memmap2 = "0.9"
+rayon = "1"
 tokenizers = "0.20"
 # `json`: enables the `tojson` filter the Qwen3.6 chat template uses
 # (V2.12, certs/chat_template/qwen35moe_tools/). `preserve_order`:

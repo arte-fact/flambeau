@@ -14,10 +14,13 @@
 //! No forward pass yet — that lands in with the ops wiring.
 
 pub mod config;
+pub mod model_arch;
 pub mod names;
 pub mod layout;
 pub mod tp_layout;
 pub mod tp_slice;
+
+pub use model_arch::Qwen3MoEModelArch;
 
 #[cfg(feature = "hip")]
 pub mod forward;
@@ -36,9 +39,6 @@ pub mod tp_sharded;
 
 #[cfg(feature = "hip")]
 pub mod hybrid;
-
-#[cfg(feature = "hip")]
-pub mod mtp;
 
 #[cfg(feature = "hip")]
 pub mod embedding;
