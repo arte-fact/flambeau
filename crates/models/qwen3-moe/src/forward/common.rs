@@ -13,6 +13,9 @@ use flambeau_ops::hip::{
 use flambeau_quant::GgmlDType;
 
 use flambeau_ops::hip::moe::{
+    indexed_moe_mmvq_iq1_m, indexed_moe_mmvq_iq1_s, indexed_moe_mmvq_iq2_s,
+    indexed_moe_mmvq_iq2_xs, indexed_moe_mmvq_iq2_xxs, indexed_moe_mmvq_iq3_s,
+    indexed_moe_mmvq_iq3_xxs, indexed_moe_mmvq_iq4_nl, indexed_moe_mmvq_iq4_xs,
     indexed_moe_mmvq_q2_k, indexed_moe_mmvq_q3_k, indexed_moe_mmvq_q4_0, indexed_moe_mmvq_q4_1,
     indexed_moe_mmvq_q4_k_gate_up, indexed_moe_mmvq_q4_k_r2, indexed_moe_mmvq_q5_k,
     indexed_moe_mmvq_q6_k, indexed_moe_mmvq_q8_0,
@@ -163,7 +166,55 @@ pub(crate) fn run_indexed_moe_gate_up(
             )
             .context("indexed_moe up q3_k")
         }
-        _ => bail!("run_indexed_moe_gate_up: unsupported gate dtype {dtype:?} (expected Q2_K / Q3_K / Q4_K / Q8_0 / Q4_0)"),
+        // T-IQ.16 Phase 4 Slice B — full IQ family MoE expert support.
+        // Same separate-gate / separate-up pattern as Q2_K / Q3_K (no fused
+        // gate_up variant yet; that's Slice C).
+        GgmlDType::Iq4Xs => {
+            let nb = hidden / QK_K;
+            indexed_moe_mmvq_iq4_xs(ops, stream, w_gate, x_q8_1, expert_ids, gate_out, inter, n_tokens, top_k, nb).context("indexed_moe gate iq4_xs")?;
+            indexed_moe_mmvq_iq4_xs(ops, stream, w_up, x_q8_1, expert_ids, up_out, inter, n_tokens, top_k, nb).context("indexed_moe up iq4_xs")
+        }
+        GgmlDType::Iq4Nl => {
+            let nb = hidden / 32;
+            indexed_moe_mmvq_iq4_nl(ops, stream, w_gate, x_q8_1, expert_ids, gate_out, inter, n_tokens, top_k, nb).context("indexed_moe gate iq4_nl")?;
+            indexed_moe_mmvq_iq4_nl(ops, stream, w_up, x_q8_1, expert_ids, up_out, inter, n_tokens, top_k, nb).context("indexed_moe up iq4_nl")
+        }
+        GgmlDType::Iq3Xxs => {
+            let nb = hidden / QK_K;
+            indexed_moe_mmvq_iq3_xxs(ops, stream, w_gate, x_q8_1, expert_ids, gate_out, inter, n_tokens, top_k, nb).context("indexed_moe gate iq3_xxs")?;
+            indexed_moe_mmvq_iq3_xxs(ops, stream, w_up, x_q8_1, expert_ids, up_out, inter, n_tokens, top_k, nb).context("indexed_moe up iq3_xxs")
+        }
+        GgmlDType::Iq3S => {
+            let nb = hidden / QK_K;
+            indexed_moe_mmvq_iq3_s(ops, stream, w_gate, x_q8_1, expert_ids, gate_out, inter, n_tokens, top_k, nb).context("indexed_moe gate iq3_s")?;
+            indexed_moe_mmvq_iq3_s(ops, stream, w_up, x_q8_1, expert_ids, up_out, inter, n_tokens, top_k, nb).context("indexed_moe up iq3_s")
+        }
+        GgmlDType::Iq2Xxs => {
+            let nb = hidden / QK_K;
+            indexed_moe_mmvq_iq2_xxs(ops, stream, w_gate, x_q8_1, expert_ids, gate_out, inter, n_tokens, top_k, nb).context("indexed_moe gate iq2_xxs")?;
+            indexed_moe_mmvq_iq2_xxs(ops, stream, w_up, x_q8_1, expert_ids, up_out, inter, n_tokens, top_k, nb).context("indexed_moe up iq2_xxs")
+        }
+        GgmlDType::Iq2Xs => {
+            let nb = hidden / QK_K;
+            indexed_moe_mmvq_iq2_xs(ops, stream, w_gate, x_q8_1, expert_ids, gate_out, inter, n_tokens, top_k, nb).context("indexed_moe gate iq2_xs")?;
+            indexed_moe_mmvq_iq2_xs(ops, stream, w_up, x_q8_1, expert_ids, up_out, inter, n_tokens, top_k, nb).context("indexed_moe up iq2_xs")
+        }
+        GgmlDType::Iq2S => {
+            let nb = hidden / QK_K;
+            indexed_moe_mmvq_iq2_s(ops, stream, w_gate, x_q8_1, expert_ids, gate_out, inter, n_tokens, top_k, nb).context("indexed_moe gate iq2_s")?;
+            indexed_moe_mmvq_iq2_s(ops, stream, w_up, x_q8_1, expert_ids, up_out, inter, n_tokens, top_k, nb).context("indexed_moe up iq2_s")
+        }
+        GgmlDType::Iq1S => {
+            let nb = hidden / QK_K;
+            indexed_moe_mmvq_iq1_s(ops, stream, w_gate, x_q8_1, expert_ids, gate_out, inter, n_tokens, top_k, nb).context("indexed_moe gate iq1_s")?;
+            indexed_moe_mmvq_iq1_s(ops, stream, w_up, x_q8_1, expert_ids, up_out, inter, n_tokens, top_k, nb).context("indexed_moe up iq1_s")
+        }
+        GgmlDType::Iq1M => {
+            let nb = hidden / QK_K;
+            indexed_moe_mmvq_iq1_m(ops, stream, w_gate, x_q8_1, expert_ids, gate_out, inter, n_tokens, top_k, nb).context("indexed_moe gate iq1_m")?;
+            indexed_moe_mmvq_iq1_m(ops, stream, w_up, x_q8_1, expert_ids, up_out, inter, n_tokens, top_k, nb).context("indexed_moe up iq1_m")
+        }
+        _ => bail!("run_indexed_moe_gate_up: unsupported gate dtype {dtype:?} (expected Q2_K / Q3_K / Q4_K / Q8_0 / Q4_0 / IQ4_XS / IQ4_NL / IQ3_XXS / IQ3_S / IQ2_XXS / IQ2_XS / IQ2_S / IQ1_S / IQ1_M)"),
     }
 }
 
@@ -263,7 +314,44 @@ pub(crate) fn run_indexed_moe_down(
             )
             .context("indexed_moe down q3_k")
         }
-        _ => bail!("run_indexed_moe_down: unsupported down dtype {dtype:?} (expected Q2_K / Q3_K / Q4_K / Q5_K / Q6_K / Q8_0 / Q4_0 / Q4_1)"),
+        // T-IQ.16 Phase 4 Slice B — IQ family.
+        GgmlDType::Iq4Xs => {
+            let nb = inter / QK_K;
+            indexed_moe_mmvq_iq4_xs(ops, stream, w_down, activated_q8_1, expert_ids, down_out, hidden, n_tokens_eff, top_k_inner, nb).context("indexed_moe down iq4_xs")
+        }
+        GgmlDType::Iq4Nl => {
+            let nb = inter / 32;
+            indexed_moe_mmvq_iq4_nl(ops, stream, w_down, activated_q8_1, expert_ids, down_out, hidden, n_tokens_eff, top_k_inner, nb).context("indexed_moe down iq4_nl")
+        }
+        GgmlDType::Iq3Xxs => {
+            let nb = inter / QK_K;
+            indexed_moe_mmvq_iq3_xxs(ops, stream, w_down, activated_q8_1, expert_ids, down_out, hidden, n_tokens_eff, top_k_inner, nb).context("indexed_moe down iq3_xxs")
+        }
+        GgmlDType::Iq3S => {
+            let nb = inter / QK_K;
+            indexed_moe_mmvq_iq3_s(ops, stream, w_down, activated_q8_1, expert_ids, down_out, hidden, n_tokens_eff, top_k_inner, nb).context("indexed_moe down iq3_s")
+        }
+        GgmlDType::Iq2Xxs => {
+            let nb = inter / QK_K;
+            indexed_moe_mmvq_iq2_xxs(ops, stream, w_down, activated_q8_1, expert_ids, down_out, hidden, n_tokens_eff, top_k_inner, nb).context("indexed_moe down iq2_xxs")
+        }
+        GgmlDType::Iq2Xs => {
+            let nb = inter / QK_K;
+            indexed_moe_mmvq_iq2_xs(ops, stream, w_down, activated_q8_1, expert_ids, down_out, hidden, n_tokens_eff, top_k_inner, nb).context("indexed_moe down iq2_xs")
+        }
+        GgmlDType::Iq2S => {
+            let nb = inter / QK_K;
+            indexed_moe_mmvq_iq2_s(ops, stream, w_down, activated_q8_1, expert_ids, down_out, hidden, n_tokens_eff, top_k_inner, nb).context("indexed_moe down iq2_s")
+        }
+        GgmlDType::Iq1S => {
+            let nb = inter / QK_K;
+            indexed_moe_mmvq_iq1_s(ops, stream, w_down, activated_q8_1, expert_ids, down_out, hidden, n_tokens_eff, top_k_inner, nb).context("indexed_moe down iq1_s")
+        }
+        GgmlDType::Iq1M => {
+            let nb = inter / QK_K;
+            indexed_moe_mmvq_iq1_m(ops, stream, w_down, activated_q8_1, expert_ids, down_out, hidden, n_tokens_eff, top_k_inner, nb).context("indexed_moe down iq1_m")
+        }
+        _ => bail!("run_indexed_moe_down: unsupported down dtype {dtype:?} (expected Q2_K / Q3_K / Q4_K / Q5_K / Q6_K / Q8_0 / Q4_0 / Q4_1 / IQ family)"),
     }
 }
 
