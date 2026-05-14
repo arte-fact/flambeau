@@ -355,3 +355,96 @@ pub unsafe fn tp_allreduce_sum<const DIM: usize>(
     Ok(partials.iter().map(|b| b.retag()).collect())
 }
 
+/// AllReduce-sum the per-rank `partials[]` and fold the result into
+/// `hidden[r]` in place: each rank ends with
+/// `hidden[r] = hidden[r] + Σ_k partial[k]`. Wraps
+/// `BarP2pAllReduce::residual_tp{2,4}`.
+///
+/// # Safety
+/// Inherits the contract of [`BarP2pAllReduce::residual_tp2`] /
+/// [`BarP2pAllReduce::residual_tp4`]:
+/// - every `hidden[r]` and `partial[r]` must point at a buffer of at
+///   least `n_elems` F16 on rank `r`;
+/// - the caller must order subsequent reads/writes of `hidden[r]` and
+///   `partials[r]` after the `streams[r]` work completes;
+/// - the streams must outlive the launch.
+pub unsafe fn tp_allreduce_residual_into(
+    ar: &BarP2pAllReduce,
+    hidden: &[DevicePtr],
+    partials: &[DevicePtr],
+    n_elems: usize,
+    streams: &[&HipStream],
+) -> Result<()> {
+    if hidden.len() != partials.len() || hidden.len() != streams.len() {
+        bail!(
+            "tp_allreduce_residual_into: hidden({}), partials({}), streams({}) length mismatch",
+            hidden.len(),
+            partials.len(),
+            streams.len(),
+        );
+    }
+    match hidden.len() {
+        2 => {
+            let h: [DevicePtr; 2] = [hidden[0], hidden[1]];
+            let p: [DevicePtr; 2] = [partials[0], partials[1]];
+            let s: [&HipStream; 2] = [streams[0], streams[1]];
+            unsafe { ar.residual_tp2(&h, &p, n_elems as u32, &s) }
+                .map_err(|e| anyhow::anyhow!("AR residual_tp2: {e}"))?;
+        }
+        4 => {
+            let h: [DevicePtr; 4] = [hidden[0], hidden[1], hidden[2], hidden[3]];
+            let p: [DevicePtr; 4] = [partials[0], partials[1], partials[2], partials[3]];
+            let s: [&HipStream; 4] = [streams[0], streams[1], streams[2], streams[3]];
+            unsafe { ar.residual_tp4(&h, &p, n_elems as u32, &s) }
+                .map_err(|e| anyhow::anyhow!("AR residual_tp4: {e}"))?;
+        }
+        n => bail!("tp_allreduce_residual_into: unsupported tp_size {n}"),
+    }
+    Ok(())
+}
+
+/// Typed AllReduce-residual: consumes per-rank
+/// `Buffer<F16, RowParallel<DIM>>` partials, in-place updates per-rank
+/// `Buffer<F16, Replicated>` hiddens (`hidden[r] += Σ partial[k]`),
+/// and leaves the hiddens tagged `Replicated` after the call. The
+/// partials are *logically spent* by the AR — the typestate doesn't
+/// move them but the caller should treat them as consumed.
+///
+/// # Safety
+/// Inherits the contract of [`tp_allreduce_residual_into`]. The
+/// typestate enforces "Replicated hidden required" at compile time
+/// but does not relax the BAR1 / streams / ordering invariants.
+pub unsafe fn tp_allreduce_residual<const DIM: usize>(
+    ar: &BarP2pAllReduce,
+    hidden: &[crate::tensor_view::Buffer<crate::tensor_view::F16, crate::tensor_view::Replicated>],
+    partials: &[crate::tensor_view::Buffer<crate::tensor_view::F16, crate::tensor_view::RowParallel<DIM>>],
+    streams: &[&HipStream],
+) -> Result<()> {
+    if hidden.is_empty() {
+        return Ok(());
+    }
+    let n_elems = hidden[0].n_elems();
+    for (i, b) in hidden.iter().enumerate() {
+        if b.n_elems() != n_elems {
+            bail!(
+                "tp_allreduce_residual: hidden[{i}].n_elems={} != hidden[0].n_elems={}",
+                b.n_elems(),
+                n_elems,
+            );
+        }
+    }
+    for (i, b) in partials.iter().enumerate() {
+        if b.n_elems() != n_elems {
+            bail!(
+                "tp_allreduce_residual: partials[{i}].n_elems={} != hidden[0].n_elems={}",
+                b.n_elems(),
+                n_elems,
+            );
+        }
+    }
+    let h_ptrs: Vec<DevicePtr> = hidden.iter().map(|b| b.ptr()).collect();
+    let p_ptrs: Vec<DevicePtr> = partials.iter().map(|b| b.ptr()).collect();
+    // SAFETY: caller upholds the BAR1 + streams + ordering contract.
+    unsafe { tp_allreduce_residual_into(ar, &h_ptrs, &p_ptrs, n_elems, streams) }
+}
+

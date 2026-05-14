@@ -1962,6 +1962,8 @@ fn ar_residual(
     world: u32,
     which: AttnOrFfn,
 ) -> anyhow::Result<()> {
+    use flambeau_blocks::{tp_allreduce_residual, Buffer, F16, Replicated, RowParallel};
+
     // Build the per-rank pointer arrays.
     let partial_ptr = |r: usize| match which {
         AttnOrFfn::Attn => scratch.per_rank[r].partial_attn_out,
@@ -1995,39 +1997,35 @@ fn ar_residual(
         }
     }
 
-    // 3. Launch AR on each rank's stream. The driver schedules the
-    // launch as soon as the per-rank wait list resolves.
+    // 3. Launch AR on each rank's stream via the typed
+    // `tp_allreduce_residual<0>` transition: per-rank
+    // `Buffer<F16, RowParallel<0>>` partials fold into per-rank
+    // `Buffer<F16, Replicated>` hiddens in place. The typed wrappers
+    // are constructed at the boundary from the existing raw
+    // `DevicePtr` scratch fields — field-type migration to
+    // `Buffer<F16, _>` storage is deferred to Phase 8 (touches ~118
+    // ref sites). The typestate enforces "hidden is Replicated" at
+    // the AR boundary so downstream ops that demand
+    // `Buffer<F16, Replicated>` can consume it.
     let elem_count = scratch.per_rank[0].hidden_bytes / 2; // bytes/F16
-    match world {
-        2 => {
-            let hidden = [hidden_ptr(0), hidden_ptr(1)];
-            let partial = [partial_ptr(0), partial_ptr(1)];
-            let s0 = cluster.device(0).default_stream();
-            let s1 = cluster.device(1).default_stream();
-            let streams = [s0, s1];
-            // SAFETY: every rank's hidden + partial point to live device
-            // allocations of `elem_count * 2` bytes (alloc'd in
-            // ShardedForwardOneTokenScratchTp::new). Producer streams
-            // synced above ⇒ peer reads are valid.
-            unsafe { ar.residual_tp2(&hidden, &partial, elem_count as u32, &streams)? };
-        }
-        4 => {
-            let hidden = [hidden_ptr(0), hidden_ptr(1), hidden_ptr(2), hidden_ptr(3)];
-            let partial = [
-                partial_ptr(0),
-                partial_ptr(1),
-                partial_ptr(2),
-                partial_ptr(3),
-            ];
-            let s0 = cluster.device(0).default_stream();
-            let s1 = cluster.device(1).default_stream();
-            let s2 = cluster.device(2).default_stream();
-            let s3 = cluster.device(3).default_stream();
-            let streams = [s0, s1, s2, s3];
-            // SAFETY: same as the tp2 arm.
-            unsafe { ar.residual_tp4(&hidden, &partial, elem_count as u32, &streams)? };
-        }
-        _ => bail!("ar_residual: unsupported world {world}"),
+    let n_ranks = world as usize;
+    let hiddens: Vec<Buffer<F16, Replicated>> = (0..n_ranks)
+        .map(|r| Buffer::from_raw_unchecked(hidden_ptr(r), elem_count))
+        .collect();
+    let partials: Vec<Buffer<F16, RowParallel<0>>> = (0..n_ranks)
+        .map(|r| Buffer::from_raw_unchecked(partial_ptr(r), elem_count))
+        .collect();
+    let stream_vec: Vec<&_> = (0..n_ranks)
+        .map(|r| cluster.device(r).default_stream())
+        .collect();
+    // SAFETY: every rank's hidden + partial point to live device
+    // allocations of `elem_count * 2` bytes (alloc'd in
+    // ShardedForwardOneTokenScratchTp::new). Producer streams synced
+    // above ⇒ peer reads are valid. tp_allreduce_residual dispatches
+    // to residual_tp2 / residual_tp4 based on `world`.
+    unsafe {
+        tp_allreduce_residual::<0>(ar, &hiddens, &partials, &stream_vec)
+            .map_err(|e| anyhow!("ar_residual world={world}: {e}"))?;
     }
     Ok(())
 }
