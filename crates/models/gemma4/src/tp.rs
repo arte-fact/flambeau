@@ -548,7 +548,8 @@ fn forward_decode_layer_tp_moe(
     let rms_eps = driver.cfg.rms_norm_eps;
     let ff_len_local = driver.cfg.feed_forward_length / n;
 
-    let probe = std::env::var_os("FLAMBEAU_TP_MOE_DEBUG").is_some() && il == 0;
+    let probe = std::env::var_os("FLAMBEAU_TP_MOE_DEBUG").is_some()
+        && (il == 0 || il == 4 || il == 5 || il + 1 == driver.cfg.num_layers);
 
     // ---- Attention half (Phases 1-3) — same as dense composer. ----
     for r in 0..n {

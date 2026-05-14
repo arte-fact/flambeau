@@ -639,10 +639,25 @@ pub fn forward_ffn_moe_tp_per_rank<O: Ops>(
 
     // 5. Routed MoE forward (per-rank sliced experts). Writes
     //    `partial_moe_f16` = Σ_k w_k · down_local[k, :].
-    tp_moe
-        .moe
-        .forward_decode_tp(ops, scratch.cur_moe_f16, scratch.partial_moe_f16, scratch.moe_scratch)
-        .context("MoE TP forward_decode_tp")?;
+    //
+    // Diagnostic bypass: `FLAMBEAU_TP_MOE_BYPASS_ROUTED=1` skips the
+    // routed branch and zeros the partial. Used by Phase 10c-G to
+    // isolate whether the F16 overflow at layer 5 originates in the
+    // shared MLP TP path or the routed MoE TP path.
+    if std::env::var_os("FLAMBEAU_TP_MOE_BYPASS_ROUTED").is_some() {
+        ops.scale_f16(
+            scratch.partial_moe_f16,
+            scratch.partial_moe_f16,
+            hidden,
+            0.0,
+        )
+        .context("MoE TP bypass (zero partial_moe)")?;
+    } else {
+        tp_moe
+            .moe
+            .forward_decode_tp(ops, scratch.cur_moe_f16, scratch.partial_moe_f16, scratch.moe_scratch)
+            .context("MoE TP forward_decode_tp")?;
+    }
 
     Ok(())
 }
