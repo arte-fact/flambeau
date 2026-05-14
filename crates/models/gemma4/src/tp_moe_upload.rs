@@ -25,15 +25,18 @@ use anyhow::{anyhow, bail, Context, Result};
 use flambeau_blocks::{
     ggml_to_qdtype as blocks_ggml_to_qdtype, row_bytes_for_dtype as blocks_row_bytes,
     upload_replicated_norm_f32_to_f16, upload_replicated_tensor, upload_sharded_tensor, Activation,
-    MoeExperts, MoeExpertsDecodeScratch, RawAllocTracker, WeightHandle,
+    DenseMlpDecodeScratch, DenseMlpTp, MoeExperts, MoeExpertsDecodeScratch, RawAllocTracker,
+    WeightHandle,
 };
 use flambeau_core::{CopyDirection, Device, DevicePtr, Stream};
 use flambeau_ops::hip::HipDevice;
+use flambeau_ops::Ops;
 use flambeau_quant::{GgmlDType, GgufFile};
 use flambeau_runtime::WeightLayout;
 use half::f16;
 
 use crate::config::MoeDims;
+use crate::layer::Gemma4LayerWeights;
 use crate::names::MoeFfnNames;
 use crate::weights_hip::DeviceTensor;
 
@@ -61,6 +64,11 @@ pub struct Gemma4TpMoeScratch {
     /// `MoeExperts::forward_decode_tp` (no fused residual; the
     /// per-branch norm + residual add happen in the composer).
     pub zero_hidden_f16: DevicePtr,
+    /// F16 `[hidden]` — second row-parallel partial. The shared-MLP
+    /// branch reuses `stage.partial_ffn`; the MoE branch writes here.
+    /// AR'd in Phase 5b (separately from `partial_ffn`) under
+    /// `post_ffw_norm_2`.
+    pub partial_moe_f16: DevicePtr,
     /// `MoeExperts` decode scratch view, sized for `local_inter`.
     pub moe_scratch: MoeExpertsDecodeScratch,
 }
@@ -91,6 +99,7 @@ impl Gemma4TpMoeScratch {
         let cur_moe_f16 = raw_alloc.alloc_f16(device, hidden)?.0;
         let cur_combined_f16 = raw_alloc.alloc_f16(device, hidden)?.0;
         let zero_hidden_f16 = raw_alloc.alloc_f16(device, hidden)?.0; // zeroed by alloc_f16
+        let partial_moe_f16 = raw_alloc.alloc_f16(device, hidden)?.0;
 
         let moe_scratch = MoeExpertsDecodeScratch {
             x_q8_1: raw_alloc.alloc_q8_1(device, hidden)?.0,
@@ -111,6 +120,7 @@ impl Gemma4TpMoeScratch {
             cur_moe_f16,
             cur_combined_f16,
             zero_hidden_f16,
+            partial_moe_f16,
             moe_scratch,
         })
     }
@@ -503,4 +513,136 @@ fn ut_to_dt(u: flambeau_blocks::UploadedTensor) -> DeviceTensor {
         dtype: u.dtype,
         bytes: u.bytes,
     }
+}
+
+/// Per-rank forward for one gemma4 MoE FFN layer (TP). Writes the two
+/// row-parallel partials needed by the MoE-aware composer:
+/// - `partial_shared_mlp_out` (`Buffer<F16, RowParallel<0>>`): shared
+///   MLP per-rank down-projection. AR'd in Phase 5a under `post_ffw_norm_1`.
+/// - `scratch.partial_moe_f16` (same type): routed-experts per-rank
+///   sum-over-experts. AR'd in Phase 5b under `post_ffw_norm_2`.
+///
+/// Pipeline (mirrors single-device `crate::moe::forward_ffn_moe` but
+/// sliced for TP):
+/// ```text
+/// router_input = rmsnorm_f16(attn_residual, pre_router_weight)
+/// {ids, w} = tp_moe.moe.route_decode(router_input)    // replicated topk
+/// partial_shared_mlp_out = SharedMLP_TP(attn_residual, ffn_norm,
+///                                        ffn_gate, ffn_up, ffn_down)
+/// cur_moe_input = rmsnorm_f16(attn_residual, pre_ffw_norm_2)
+/// scratch.partial_moe_f16 = tp_moe.moe.forward_decode_tp(cur_moe_input,
+///                                                        moe_scratch)
+/// ```
+///
+/// The per-branch post-norms (`post_ffw_norm_1`, `post_ffw_norm_2`)
+/// and the combine + final norm + residual are all in the composer
+/// (Phase 5a-c, 6) — they need full-hidden (post-AR) values.
+#[allow(clippy::too_many_arguments)]
+pub fn forward_ffn_moe_tp_per_rank<O: Ops>(
+    ops: &O,
+    layer: &Gemma4LayerWeights,
+    tp_moe: &Gemma4TpMoeFfnWeights,
+    scratch: &Gemma4TpMoeScratch,
+    layer_x_q8_1: DevicePtr,
+    layer_gate_f32: DevicePtr,
+    layer_up_f32: DevicePtr,
+    layer_activated_f16: DevicePtr,
+    layer_activated_q8_1: DevicePtr,
+    layer_down_f32: DevicePtr,
+    attn_residual: DevicePtr,
+    partial_shared_mlp_out: DevicePtr,
+    hidden: usize,
+    ff_len_local: usize,
+    rms_norm_eps: f32,
+) -> Result<()> {
+    // 1. Router input — folded rmsnorm + scale + mul (pre_router_weight
+    //    already carries (1/sqrt(hidden)) * ffn_gate_inp.scale).
+    ops.rmsnorm_f16(
+        attn_residual,
+        tp_moe.pre_router_weight_f16,
+        scratch.router_input_f16,
+        1,
+        hidden,
+        rms_norm_eps,
+    )
+    .context("MoE TP router_input rmsnorm")?;
+
+    // 2. Replicated router top-k. Every rank computes the same
+    //    expert_ids/weights (same router weights, same input).
+    tp_moe
+        .moe
+        .route_decode(ops, scratch.router_input_f16, scratch.moe_scratch)
+        .context("MoE TP route_decode")?;
+
+    // 3. Shared MLP TP forward (parallel branch). Mirrors the dense
+    //    `forward_ffn` body in `tp.rs::Gemma4TpDriver::forward_ffn`.
+    ops.rmsnorm_quant_q8_1(
+        attn_residual,
+        layer.ffn_norm,
+        layer_x_q8_1,
+        1,
+        hidden,
+        rms_norm_eps,
+    )
+    .context("MoE TP shared-MLP ffn_norm + quant")?;
+    let block = DenseMlpTp::new(
+        WeightHandle {
+            ptr: layer.ffn_gate.ptr,
+            dtype: layer.ffn_gate.dtype,
+            dims: [ff_len_local, hidden],
+        },
+        WeightHandle {
+            ptr: layer.ffn_up.ptr,
+            dtype: layer.ffn_up.dtype,
+            dims: [ff_len_local, hidden],
+        },
+        WeightHandle {
+            ptr: layer.ffn_down.ptr,
+            dtype: layer.ffn_down.dtype,
+            dims: [hidden, ff_len_local],
+        },
+        hidden,
+        ff_len_local,
+        Activation::Gelu,
+    )
+    .context("MoE TP shared-MLP DenseMlpTp::new")?;
+    let dense_scratch = DenseMlpDecodeScratch {
+        x_q8_1: layer_x_q8_1,
+        gate_f32: layer_gate_f32,
+        up_f32: layer_up_f32,
+        activated_f16: layer_activated_f16,
+        activated_q8_1: layer_activated_q8_1,
+        down_f32: layer_down_f32,
+        down_f16: DevicePtr(0),
+    };
+    block
+        .forward_decode(
+            ops,
+            /* x_norm = */ DevicePtr(0),
+            partial_shared_mlp_out,
+            dense_scratch,
+            /* pre_quantized = */ true,
+        )
+        .context("MoE TP shared-MLP DenseMlpTp::forward_decode")?;
+
+    // 4. Pre-MoE-branch norm: cur_moe_input = rmsnorm(attn_residual,
+    //    pre_ffw_norm_2). Per-row norm preserves the replicated layout.
+    ops.rmsnorm_f16(
+        attn_residual,
+        tp_moe.pre_ffw_norm_2,
+        scratch.cur_moe_f16,
+        1,
+        hidden,
+        rms_norm_eps,
+    )
+    .context("MoE TP pre_ffw_norm_2")?;
+
+    // 5. Routed MoE forward (per-rank sliced experts). Writes
+    //    `partial_moe_f16` = Σ_k w_k · down_local[k, :].
+    tp_moe
+        .moe
+        .forward_decode_tp(ops, scratch.cur_moe_f16, scratch.partial_moe_f16, scratch.moe_scratch)
+        .context("MoE TP forward_decode_tp")?;
+
+    Ok(())
 }
