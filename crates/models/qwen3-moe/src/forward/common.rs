@@ -381,53 +381,12 @@ pub(crate) fn run_indexed_moe_down(
 }
 
 /// Map our `GgmlDType` (from GGUF) to the `QDtype` the qmatmul dispatcher
-/// uses. Only the dtypes our V1 kernels support are allowed here; everything
-/// else is a load-time error.
+/// uses. Thin wrapper over [`flambeau_blocks::ggml_to_qdtype`] — kept
+/// pub(super) for backward-compat with internal call sites.
 /// # Errors
 /// Returns an error if `dtype` is not in the V1 qmatmul dispatch set.
 pub(super) fn qdtype_of(dtype: GgmlDType) -> Result<QDtype> {
-    Ok(match dtype {
-        GgmlDType::Q2K => QDtype::Q2_K,
-        GgmlDType::Q3K => QDtype::Q3_K,
-        GgmlDType::Q4K => QDtype::Q4_K,
-        GgmlDType::Q5K => QDtype::Q5_K,
-        GgmlDType::Q6K => QDtype::Q6_K,
-        GgmlDType::Q8K => QDtype::Q8_K,
-        GgmlDType::Q8_0 => QDtype::Q8_0,
-        GgmlDType::Q4_1 => QDtype::Q4_1,
-        // 1.b — UD-Q8_K_XL reserves F16 for i-matrix-flagged layers
-        // (Qwen3.6-27B-UD-Q8_K_XL: all 48 attn_gate + 48 ssm_out + scattered
-        // attn_q/k + ffn_gate/up/down). `mmvq()` special-cases F16 to skip
-        // the dispatch table and call the direct F16×Q8_1 kernel.
-        GgmlDType::F16 => QDtype::F16,
-        // F32 — used by the MoE router weight (`ffn_gate_inp`) on
-        // older Qwen3.x GGUFs that predate the F32→F16 loader-side
-        // conversion. Only the dense_gemv router path consumes F32;
-        // qmatmul itself rejects F32 at dispatch time.
-        GgmlDType::F32 => QDtype::F32,
-        // 3.a — Q4_0 and Q5_0 unblock Qwen3.6-35B-A3B-Q4_0.
-        GgmlDType::Q4_0 => QDtype::Q4_0,
-        GgmlDType::Q5_0 => QDtype::Q5_0,
-        // 6.a — Q5_1 (llama.cpp parity; no Qwen3 model currently uses it
-        // but unblocks any incoming GGUF mix).
-        GgmlDType::Q5_1 => QDtype::Q5_1,
-        // native IQ4 MMVQ kernels. Direct mmap → memcpy → kernel
-        // (no host re-quant), llama.cpp-style. Used by UD-Q3_K_XL etc.
-        GgmlDType::Iq4Nl => QDtype::IQ4_NL,
-        GgmlDType::Iq4Xs => QDtype::IQ4_XS,
-        // native IQ3 MMVQ kernels (codebook lookup, 256/512-entry
-        // u32 grid). Covers UD-Q3_K_XL MoE expert tensors.
-        GgmlDType::Iq3Xxs => QDtype::IQ3_XXS,
-        GgmlDType::Iq3S => QDtype::IQ3_S,
-        // full IQ2/IQ1 family native MMVQ kernels (codebook
-        // lookup, 256..2048-entry u64 grids).
-        GgmlDType::Iq2Xxs => QDtype::IQ2_XXS,
-        GgmlDType::Iq2Xs => QDtype::IQ2_XS,
-        GgmlDType::Iq2S => QDtype::IQ2_S,
-        GgmlDType::Iq1S => QDtype::IQ1_S,
-        GgmlDType::Iq1M => QDtype::IQ1_M,
-        other => bail!("weight dtype {other:?} not supported by V1 qmatmul dispatch"),
-    })
+    flambeau_blocks::ggml_to_qdtype(dtype)
 }
 
 /// Pull the `(n_rows, k)` pair out of a weight tensor's GGUF dims.

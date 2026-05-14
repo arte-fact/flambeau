@@ -194,13 +194,17 @@ fn build_synthetic_session(dev: &HipDevice) -> Gemma4Session {
     assert!(!layout.layers[0].is_swa);
     assert!(layout.layers[1].is_swa);
 
+    let mut tracker = flambeau_blocks::RawAllocTracker::new();
+    for t in raw {
+        tracker.track(t.ptr, t.bytes);
+    }
     let weights = Gemma4DeviceWeights::from_pieces(
         token_embd,
         [VOCAB, HIDDEN],
         output_norm,
         None,
         layers,
-        raw,
+        tracker,
         dev.id(),
     );
 

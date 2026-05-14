@@ -220,13 +220,17 @@ fn build_synthetic_session_with_shared_kv(dev: &HipDevice) -> Gemma4Session {
         make_tail_layer(dev, &mut raw),
     ];
 
+    let mut tracker = flambeau_blocks::RawAllocTracker::new();
+    for t in raw {
+        tracker.track(t.ptr, t.bytes);
+    }
     let weights = Gemma4DeviceWeights::from_pieces(
         token_embd,
         [VOCAB, HIDDEN],
         output_norm,
         None,
         layers,
-        raw,
+        tracker,
         dev.id(),
     );
     Gemma4Session::new(dev, weights, cfg, layout, /*max_tokens=*/ 16).expect("session new")

@@ -1224,10 +1224,9 @@ fn upload_layer_pp(
         let moe_dims = cfg
             .moe
             .ok_or_else(|| anyhow!("layer {} ffn_kind=Moe but cfg.moe is None", spec.index))?;
-        // Adapter: `upload_moe_layer` populates a Vec<DeviceTensor>;
-        // PP uses (DevicePtr, usize) tuples for its dispose list.
-        let mut moe_tracker: Vec<crate::weights_hip::DeviceTensor> = Vec::new();
-        let mut total_bytes: usize = 0;
+        // Adapter: PP's raw is `Vec<(DevicePtr, usize)>`; the upload
+        // helper writes into a `RawAllocTracker`. Drain into PP's vec.
+        let mut moe_tracker = flambeau_blocks::RawAllocTracker::new();
         let weights = crate::weights_hip::upload_moe_layer(
             file,
             spec.index,
@@ -1236,12 +1235,13 @@ fn upload_layer_pp(
             device,
             stream,
             &mut moe_tracker,
-            &mut total_bytes,
         )?;
-        for t in moe_tracker {
-            raw.push((t.ptr, t.bytes));
+        // Move the tracked allocs into PP's dispose list. Mark the
+        // tracker disposed-without-free so its Drop doesn't warn.
+        for (ptr, bytes) in std::mem::take(&mut moe_tracker.allocs) {
+            raw.push((ptr, bytes));
         }
-        let _ = total_bytes;
+        let _ = moe_tracker.dispose(device);
         Some(weights)
     } else {
         None

@@ -6,8 +6,11 @@
 #![cfg(feature = "hip")]
 
 use anyhow::{anyhow, bail, Context, Result};
-use flambeau_blocks::WeightHandle;
-use flambeau_core::op::QDtype;
+use flambeau_blocks::{
+    ggml_to_qdtype as blocks_ggml_to_qdtype, row_bytes_for_dtype as blocks_row_bytes,
+    upload_replicated_norm_f32_to_f16, upload_replicated_tensor, RawAllocTracker, UploadedTensor,
+    WeightHandle,
+};
 use flambeau_core::{CopyDirection, Device, DevicePtr, Stream};
 use flambeau_ops::hip::HipDevice;
 use flambeau_quant::{GgmlDType, GgufFile, TensorInfo};
@@ -22,6 +25,59 @@ use crate::per_layer_embd::PerLayerEmbedLayerWeights;
 use crate::weights::resolve_weights;
 use flambeau_blocks::{Activation, MoeExperts};
 
+/// Internal helper — convert an [`UploadedTensor`] from
+/// `blocks::sharding` to the model crate's [`DeviceTensor`] without
+/// re-tracking (the tracker passed to the upload already holds the
+/// alloc).
+fn ut_to_dt(u: UploadedTensor) -> DeviceTensor {
+    DeviceTensor {
+        ptr: u.ptr,
+        dtype: u.dtype,
+        bytes: u.bytes,
+    }
+}
+
+/// Replicated raw upload (no dtype cast). Thin adapter over
+/// `blocks::sharding::upload_replicated_tensor` that returns
+/// [`DeviceTensor`] for the surrounding code's `as_weight_handle()`
+/// path.
+fn upload_replicated(
+    file: &GgufFile,
+    info: &TensorInfo,
+    device: &HipDevice,
+    stream: &flambeau_backend_hip::HipStream,
+    tracker: &mut RawAllocTracker,
+) -> Result<DeviceTensor> {
+    Ok(ut_to_dt(upload_replicated_tensor(
+        file, info, device, stream, tracker,
+    )?))
+}
+
+/// Replicated norm upload — casts F32 → F16, passes F16 through.
+/// Mirrors gemma4's "norms are always F16 on device" invariant.
+fn upload_replicated_norm(
+    file: &GgufFile,
+    info: &TensorInfo,
+    device: &HipDevice,
+    stream: &flambeau_backend_hip::HipStream,
+    tracker: &mut RawAllocTracker,
+) -> Result<DeviceTensor> {
+    match info.dtype {
+        GgmlDType::F32 => {
+            let elems: usize = info.dims.iter().product::<u64>() as usize;
+            Ok(ut_to_dt(upload_replicated_norm_f32_to_f16(
+                file, info, elems, device, stream, tracker,
+            )?))
+        }
+        GgmlDType::F16 => upload_replicated(file, info, device, stream, tracker),
+        other => bail!(
+            "norm `{}`: unsupported dtype {:?} (expected F32 or F16)",
+            info.name,
+            other
+        ),
+    }
+}
+
 /// One device-resident tensor. Owns its allocation; freed by
 /// [`Gemma4DeviceWeights::dispose`].
 #[derive(Debug, Clone, Copy)]
@@ -32,50 +88,17 @@ pub struct DeviceTensor {
 }
 
 impl DeviceTensor {
-    fn is_live(&self) -> bool {
-        !self.ptr.is_null() && self.bytes > 0
-    }
-
     /// Convert to a [`WeightHandle`] for the blocks API. `dims` is
     /// the resolver's `[out_rows, hidden]` (or analogous) shape.
     pub fn as_weight_handle(&self, dims: [usize; 2]) -> Result<WeightHandle> {
         Ok(WeightHandle {
             ptr: self.ptr,
-            dtype: ggml_to_qdtype(self.dtype)?,
+            dtype: blocks_ggml_to_qdtype(self.dtype)?,
             dims,
         })
     }
 }
 
-fn ggml_to_qdtype(d: GgmlDType) -> Result<QDtype> {
-    Ok(match d {
-        GgmlDType::F32 => QDtype::F32,
-        GgmlDType::F16 => QDtype::F16,
-        GgmlDType::BF16 => QDtype::BF16,
-        GgmlDType::Q8_0 => QDtype::Q8_0,
-        GgmlDType::Q8_1 => QDtype::Q8_1,
-        GgmlDType::Q4_0 => QDtype::Q4_0,
-        GgmlDType::Q4_1 => QDtype::Q4_1,
-        GgmlDType::Q5_0 => QDtype::Q5_0,
-        GgmlDType::Q5_1 => QDtype::Q5_1,
-        GgmlDType::Q2K => QDtype::Q2_K,
-        GgmlDType::Q3K => QDtype::Q3_K,
-        GgmlDType::Q4K => QDtype::Q4_K,
-        GgmlDType::Q5K => QDtype::Q5_K,
-        GgmlDType::Q6K => QDtype::Q6_K,
-        GgmlDType::Q8K => QDtype::Q8_K,
-        GgmlDType::Iq4Nl => QDtype::IQ4_NL,
-        GgmlDType::Iq4Xs => QDtype::IQ4_XS,
-        GgmlDType::Iq3Xxs => QDtype::IQ3_XXS,
-        GgmlDType::Iq3S => QDtype::IQ3_S,
-        GgmlDType::Iq2Xxs => QDtype::IQ2_XXS,
-        GgmlDType::Iq2Xs => QDtype::IQ2_XS,
-        GgmlDType::Iq2S => QDtype::IQ2_S,
-        GgmlDType::Iq1S => QDtype::IQ1_S,
-        GgmlDType::Iq1M => QDtype::IQ1_M,
-        other => bail!("unsupported GGML dtype for Gemma 4 weight: {other:?}"),
-    })
-}
 
 /// Per-layer-embd global tensors (E2B / E4B only). Each is uploaded
 /// once at session init; `build_inp_per_layer_table` reads the mmap
@@ -100,10 +123,10 @@ pub struct Gemma4DeviceWeights {
     /// `Some` for E2B / E4B variants (`cfg.per_layer_embed.is_some()`).
     /// `None` for 26B-A4B / 31B (no side-channel embedding).
     pub per_layer_embd_globals: Option<PerLayerEmbedDeviceGlobals>,
-    /// Raw device tensors held for `dispose()`. Mirrors
-    /// `qwen3-moe::ModelWeights::iter_tensors_mut` but kept as a flat
-    /// list to keep the upload-time bookkeeping simple.
-    pub raw_tensors: Vec<DeviceTensor>,
+    /// Every device alloc made during upload tracked here for
+    /// `dispose()`. Replaces the previous `Vec<DeviceTensor>` — dtype
+    /// info on the dispose list isn't used by anything load-bearing.
+    pub raw_alloc: RawAllocTracker,
     pub total_bytes: usize,
     pub device_id: i32,
     disposed: bool,
@@ -111,20 +134,19 @@ pub struct Gemma4DeviceWeights {
 
 impl Gemma4DeviceWeights {
     /// Build a `Gemma4DeviceWeights` from pre-allocated device buffers
-    /// for tests. The caller is responsible for keeping `raw_tensors`
-    /// consistent with the per-layer `Gemma4LayerWeights` (every
-    /// device pointer the layer references must appear in
-    /// `raw_tensors` so `dispose()` frees it).
+    /// for tests. Caller passes the [`RawAllocTracker`] that owns
+    /// every device alloc the per-layer `Gemma4LayerWeights` references
+    /// — `dispose()` calls `tracker.dispose()` to free them.
     pub fn from_pieces(
         token_embd: DeviceTensor,
         token_embd_dims: [usize; 2],
         output_norm: DeviceTensor,
         output: Option<DeviceTensor>,
         layers: Vec<Gemma4LayerWeights>,
-        raw_tensors: Vec<DeviceTensor>,
+        raw_alloc: RawAllocTracker,
         device_id: i32,
     ) -> Self {
-        let total_bytes = raw_tensors.iter().map(|t| t.bytes).sum();
+        let total_bytes = raw_alloc.allocs.iter().map(|(_, b)| *b).sum();
         Self {
             token_embd,
             token_embd_dims,
@@ -132,7 +154,7 @@ impl Gemma4DeviceWeights {
             output,
             layers,
             per_layer_embd_globals: None,
-            raw_tensors,
+            raw_alloc,
             total_bytes,
             device_id,
             disposed: false,
@@ -224,8 +246,7 @@ pub(crate) fn upload_moe_layer(
     moe_dims: crate::config::MoeDims,
     device: &HipDevice,
     stream: &flambeau_backend_hip::HipStream,
-    raw_tensors: &mut Vec<DeviceTensor>,
-    total_bytes: &mut usize,
+    tracker: &mut RawAllocTracker,
 ) -> Result<Gemma4MoeFfnWeights> {
     let names = MoeFfnNames::for_layer(layer_index);
     let n_experts = moe_dims.num_experts;
@@ -253,7 +274,7 @@ pub(crate) fn upload_moe_layer(
             hidden
         );
     }
-    let router = raw_upload(file, router_info, device, stream, raw_tensors, total_bytes)?;
+    let router = ut_to_dt(upload_replicated_tensor(file, router_info, device, stream, tracker)?);
 
     // 2. Pre-router weight: `(1/sqrt(hidden)) * ffn_gate_inp.scale`, cast F16.
     let scale_info = file
@@ -302,12 +323,7 @@ pub(crate) fn upload_moe_layer(
     }
     stream.synchronize()?;
     drop(pre_router_host);
-    *total_bytes += pre_router_bytes;
-    raw_tensors.push(DeviceTensor {
-        ptr: pre_router_ptr,
-        dtype: GgmlDType::F16,
-        bytes: pre_router_bytes,
-    });
+    tracker.track(pre_router_ptr, pre_router_bytes);
 
     // 3. Split fused `ffn_gate_up_exps` (Q8_0 [n_experts, 2*n_ff_exp, hidden])
     //    into separate gate / up device slabs.
@@ -327,16 +343,8 @@ pub(crate) fn upload_moe_layer(
             hidden
         );
     }
-    let (gate_ptr, up_ptr, gate_up_bytes_each) = split_fused_gate_up(
-        file,
-        fused_info,
-        n_experts,
-        n_ff_exp,
-        hidden,
-        device,
-        stream,
-        raw_tensors,
-        total_bytes,
+    let (gate_ptr, up_ptr) = split_fused_gate_up(
+        file, fused_info, n_experts, n_ff_exp, hidden, device, stream, tracker,
     )?;
 
     // 4. Down experts (`Q8_0 [n_experts, hidden, n_ff_exp]`).
@@ -354,49 +362,57 @@ pub(crate) fn upload_moe_layer(
             n_ff_exp
         );
     }
-    let down = raw_upload(file, down_info, device, stream, raw_tensors, total_bytes)?;
+    let down = ut_to_dt(upload_replicated_tensor(file, down_info, device, stream, tracker)?);
 
     // 5. Three extra MoE norms (F32→F16 cast).
-    let pre_ffw_norm_2_info = file
-        .tensors
-        .get(&names.pre_ffw_norm_2)
-        .ok_or_else(|| anyhow!("{} missing", names.pre_ffw_norm_2))?;
-    let post_ffw_norm_1_info = file
-        .tensors
-        .get(&names.post_ffw_norm_1)
-        .ok_or_else(|| anyhow!("{} missing", names.post_ffw_norm_1))?;
-    let post_ffw_norm_2_info = file
-        .tensors
-        .get(&names.post_ffw_norm_2)
-        .ok_or_else(|| anyhow!("{} missing", names.post_ffw_norm_2))?;
-    let pre_ffw_norm_2 = norm_upload_f32_to_f16(
-        file, pre_ffw_norm_2_info, hidden, device, stream, raw_tensors, total_bytes,
-    )?;
-    let post_ffw_norm_1 = norm_upload_f32_to_f16(
-        file, post_ffw_norm_1_info, hidden, device, stream, raw_tensors, total_bytes,
-    )?;
-    let post_ffw_norm_2 = norm_upload_f32_to_f16(
-        file, post_ffw_norm_2_info, hidden, device, stream, raw_tensors, total_bytes,
-    )?;
+    let pre_ffw_norm_2 = ut_to_dt(upload_replicated_norm_f32_to_f16(
+        file,
+        file.tensors
+            .get(&names.pre_ffw_norm_2)
+            .ok_or_else(|| anyhow!("{} missing", names.pre_ffw_norm_2))?,
+        hidden,
+        device,
+        stream,
+        tracker,
+    )?);
+    let post_ffw_norm_1 = ut_to_dt(upload_replicated_norm_f32_to_f16(
+        file,
+        file.tensors
+            .get(&names.post_ffw_norm_1)
+            .ok_or_else(|| anyhow!("{} missing", names.post_ffw_norm_1))?,
+        hidden,
+        device,
+        stream,
+        tracker,
+    )?);
+    let post_ffw_norm_2 = ut_to_dt(upload_replicated_norm_f32_to_f16(
+        file,
+        file.tensors
+            .get(&names.post_ffw_norm_2)
+            .ok_or_else(|| anyhow!("{} missing", names.post_ffw_norm_2))?,
+        hidden,
+        device,
+        stream,
+        tracker,
+    )?);
 
     // 6. Build WeightHandles + MoeExperts.
     let router_handle = router.as_weight_handle([n_experts, hidden])?;
     let gate_handle = WeightHandle {
         ptr: gate_ptr,
-        dtype: ggml_to_qdtype(fused_info.dtype)?,
+        dtype: blocks_ggml_to_qdtype(fused_info.dtype)?,
         dims: [n_experts * n_ff_exp, hidden],
     };
     let up_handle = WeightHandle {
         ptr: up_ptr,
-        dtype: ggml_to_qdtype(fused_info.dtype)?,
+        dtype: blocks_ggml_to_qdtype(fused_info.dtype)?,
         dims: [n_experts * n_ff_exp, hidden],
     };
     let down_handle = WeightHandle {
         ptr: down.ptr,
-        dtype: ggml_to_qdtype(down_info.dtype)?,
+        dtype: blocks_ggml_to_qdtype(down_info.dtype)?,
         dims: [n_experts * hidden, n_ff_exp],
     };
-    let _ = gate_up_bytes_each;
 
     let moe = MoeExperts::new(
         router_handle,
@@ -425,134 +441,14 @@ pub(crate) fn upload_moe_layer(
     })
 }
 
-/// Raw HtoD upload of one GGUF tensor — kernel-free, no dtype cast.
-/// Sister of the `upload_one` closure used inside `upload()`; exposed
-/// here so [`upload_moe_layer`] can share the same allocation +
-/// dispose-list bookkeeping.
-fn raw_upload(
-    file: &GgufFile,
-    info: &TensorInfo,
-    device: &HipDevice,
-    stream: &flambeau_backend_hip::HipStream,
-    raw_tensors: &mut Vec<DeviceTensor>,
-    total_bytes: &mut usize,
-) -> Result<DeviceTensor> {
-    let bytes = info.size_in_bytes() as usize;
-    let data = file
-        .tensor_raw(&info.name)
-        .with_context(|| format!("tensor_raw `{}`", info.name))?;
-    if data.len() < bytes {
-        bail!(
-            "tensor `{}` mmap slice {} < declared {}",
-            info.name,
-            data.len(),
-            bytes
-        );
-    }
-    let ptr = device
-        .alloc(bytes)
-        .map_err(|e| anyhow!("hipMalloc {} B for `{}`: {e}", bytes, info.name))?;
-    // SAFETY: ptr is a fresh HIP alloc of `bytes`; data is mmap view ≥ bytes.
-    unsafe {
-        device
-            .memcpy_async(
-                stream,
-                CopyDirection::HostToDevice,
-                ptr,
-                DevicePtr(data.as_ptr() as usize),
-                bytes,
-            )
-            .map_err(|e| anyhow!("memcpy_async `{}`: {e}", info.name))?;
-    }
-    *total_bytes += bytes;
-    let t = DeviceTensor {
-        ptr,
-        dtype: info.dtype,
-        bytes,
-    };
-    raw_tensors.push(t);
-    Ok(t)
-}
-
-/// F32 norm tensor → F16 upload, picked from the inline `upload_norm`
-/// closure for reuse by [`upload_moe_layer`].
-#[allow(clippy::too_many_arguments)]
-fn norm_upload_f32_to_f16(
-    file: &GgufFile,
-    info: &TensorInfo,
-    expected_len: usize,
-    device: &HipDevice,
-    stream: &flambeau_backend_hip::HipStream,
-    raw_tensors: &mut Vec<DeviceTensor>,
-    total_bytes: &mut usize,
-) -> Result<DeviceTensor> {
-    if info.dtype != GgmlDType::F32 {
-        bail!(
-            "norm `{}` expected F32, got {:?}",
-            info.name,
-            info.dtype
-        );
-    }
-    let elems: usize = info.dims.iter().product::<u64>() as usize;
-    if elems != expected_len {
-        bail!(
-            "norm `{}` elems {} != expected {}",
-            info.name,
-            elems,
-            expected_len
-        );
-    }
-    let data = file
-        .tensor_raw(&info.name)
-        .with_context(|| format!("tensor_raw `{}`", info.name))?;
-    if data.len() < elems * 4 {
-        bail!(
-            "norm `{}` mmap slice {} < expected {}",
-            info.name,
-            data.len(),
-            elems * 4
-        );
-    }
-    // SAFETY: F32 + page-aligned mmap = 4-byte alignment OK.
-    let src: &[f32] = bytemuck::cast_slice(&data[..elems * 4]);
-    let host: Vec<f16> = src.iter().map(|&v| f16::from_f32(v)).collect();
-    let new_bytes = elems * 2;
-    let ptr = device
-        .alloc(new_bytes)
-        .map_err(|e| anyhow!("alloc F16 norm `{}`: {e}", info.name))?;
-    // SAFETY: ptr owns new_bytes; host outlives the bounded sync.
-    unsafe {
-        device
-            .memcpy_async(
-                stream,
-                CopyDirection::HostToDevice,
-                ptr,
-                DevicePtr(host.as_ptr() as usize),
-                new_bytes,
-            )
-            .map_err(|e| anyhow!("memcpy F32→F16 `{}`: {e}", info.name))?;
-    }
-    stream.synchronize()?;
-    drop(host);
-    *total_bytes += new_bytes;
-    let t = DeviceTensor {
-        ptr,
-        dtype: GgmlDType::F16,
-        bytes: new_bytes,
-    };
-    raw_tensors.push(t);
-    Ok(t)
-}
-
-/// Host-side split of fused `ffn_gate_up_exps` (Q8_0 / Q8_1 / etc.)
-/// into separate per-expert gate and up device buffers. The GGUF
-/// layout is `[n_experts, 2 * n_ff_exp, hidden]` with the first
-/// `n_ff_exp` rows per expert being gate and the next `n_ff_exp`
-/// being up — but stored interleaved across experts. The indexed
-/// MMVQ kernels need each expert's gate and up rows in their own
-/// contiguous slab.
-///
-/// Returns `(gate_ptr, up_ptr, bytes_per_half_per_expert)`.
+/// Host-side split of fused `ffn_gate_up_exps` into separate
+/// per-expert gate and up device buffers. The GGUF layout is
+/// `[n_experts, 2 * n_ff_exp, hidden]` with the first `n_ff_exp` rows
+/// per expert being gate and the next `n_ff_exp` being up — but
+/// interleaved across experts. The indexed MMVQ kernels need each
+/// expert's gate / up rows in their own contiguous slab.
+/// Returns `(gate_ptr, up_ptr)`; both allocations are tracked in
+/// `tracker` for dispose.
 #[allow(clippy::too_many_arguments)]
 fn split_fused_gate_up(
     file: &GgufFile,
@@ -562,19 +458,12 @@ fn split_fused_gate_up(
     hidden: usize,
     device: &HipDevice,
     stream: &flambeau_backend_hip::HipStream,
-    raw_tensors: &mut Vec<DeviceTensor>,
-    total_bytes: &mut usize,
-) -> Result<(DevicePtr, DevicePtr, usize)> {
-    let row_bytes = row_bytes_for_dtype(fused_info.dtype, hidden).with_context(|| {
-        format!(
-            "row_bytes_for_dtype `{}` ({:?})",
-            fused_info.name, fused_info.dtype
-        )
-    })?;
-    let gate_bytes_per_expert = n_ff_exp * row_bytes;
-    let up_bytes_per_expert = n_ff_exp * row_bytes;
-    let fused_bytes_per_expert = gate_bytes_per_expert + up_bytes_per_expert;
-    let total_per_half = n_experts * gate_bytes_per_expert;
+    tracker: &mut RawAllocTracker,
+) -> Result<(DevicePtr, DevicePtr)> {
+    let row_bytes = blocks_row_bytes(fused_info.dtype, hidden)?;
+    let bytes_per_half_per_expert = n_ff_exp * row_bytes;
+    let fused_bytes_per_expert = 2 * bytes_per_half_per_expert;
+    let total_per_half = n_experts * bytes_per_half_per_expert;
 
     let fused_raw = file
         .tensor_raw(&fused_info.name)
@@ -595,74 +484,35 @@ fn split_fused_gate_up(
     let up_ptr = device
         .alloc(total_per_half)
         .map_err(|e| anyhow!("alloc up_exps split: {e}"))?;
+    tracker.track(gate_ptr, total_per_half);
+    tracker.track(up_ptr, total_per_half);
 
     for e in 0..n_experts {
         let src_base = e * fused_bytes_per_expert;
-        // SAFETY: gate_ptr owns total_per_half bytes; gate/up source slices
-        // are bounded by the expected_bytes check above.
+        // SAFETY: gate/up bufs own total_per_half each; src slices bounded above.
         unsafe {
             device
                 .memcpy_async(
                     stream,
                     CopyDirection::HostToDevice,
-                    DevicePtr(gate_ptr.0 + e * gate_bytes_per_expert),
+                    DevicePtr(gate_ptr.0 + e * bytes_per_half_per_expert),
                     DevicePtr(fused_raw.as_ptr() as usize + src_base),
-                    gate_bytes_per_expert,
+                    bytes_per_half_per_expert,
                 )
                 .map_err(|e| anyhow!("memcpy gate expert: {e}"))?;
             device
                 .memcpy_async(
                     stream,
                     CopyDirection::HostToDevice,
-                    DevicePtr(up_ptr.0 + e * up_bytes_per_expert),
-                    DevicePtr(fused_raw.as_ptr() as usize + src_base + gate_bytes_per_expert),
-                    up_bytes_per_expert,
+                    DevicePtr(up_ptr.0 + e * bytes_per_half_per_expert),
+                    DevicePtr(fused_raw.as_ptr() as usize + src_base + bytes_per_half_per_expert),
+                    bytes_per_half_per_expert,
                 )
                 .map_err(|e| anyhow!("memcpy up expert: {e}"))?;
         }
     }
     stream.synchronize()?;
-
-    *total_bytes += 2 * total_per_half;
-    raw_tensors.push(DeviceTensor {
-        ptr: gate_ptr,
-        dtype: fused_info.dtype,
-        bytes: total_per_half,
-    });
-    raw_tensors.push(DeviceTensor {
-        ptr: up_ptr,
-        dtype: fused_info.dtype,
-        bytes: total_per_half,
-    });
-    Ok((gate_ptr, up_ptr, gate_bytes_per_expert))
-}
-
-/// Bytes per row at the given dtype for a row of `cols` elements.
-/// Q-quant rows are block-packed; `cols` must be a multiple of the
-/// block size (32 for Q8_0/Q8_1 family, 256 for K-quants). F16/F32
-/// scale linearly with element count.
-fn row_bytes_for_dtype(dtype: GgmlDType, cols: usize) -> Result<usize> {
-    match dtype {
-        GgmlDType::F32 => Ok(cols * 4),
-        GgmlDType::F16 => Ok(cols * 2),
-        GgmlDType::Q8_0 => {
-            if cols % 32 != 0 {
-                bail!("Q8_0 cols {} not a multiple of 32", cols);
-            }
-            // Q8_0 block: 2-byte F16 scale + 32 i8.
-            Ok((cols / 32) * 34)
-        }
-        GgmlDType::Q8_1 => {
-            if cols % 32 != 0 {
-                bail!("Q8_1 cols {} not a multiple of 32", cols);
-            }
-            Ok((cols / 32) * 36)
-        }
-        other => bail!(
-            "row_bytes_for_dtype: dtype {:?} not yet handled for the fused-split path",
-            other
-        ),
-    }
+    Ok((gate_ptr, up_ptr))
 }
 
 impl Gemma4DeviceWeights {
@@ -674,8 +524,7 @@ impl Gemma4DeviceWeights {
     ) -> Result<Self> {
         device.bind()?;
         let stream = device.default_stream();
-        let mut total_bytes = 0usize;
-        let mut raw_tensors: Vec<DeviceTensor> = Vec::new();
+        let mut tracker = RawAllocTracker::new();
 
         let resolved = resolve_weights(file, cfg, layout).context("resolve_weights")?;
         let has_per_layer_embed = cfg.per_layer_embed.is_some();
@@ -696,142 +545,10 @@ impl Gemma4DeviceWeights {
             }
         }
 
-        let upload_one = |info: &TensorInfo,
-                          raw: &mut Vec<DeviceTensor>,
-                          total: &mut usize|
-         -> Result<DeviceTensor> {
-            let bytes = info.size_in_bytes() as usize;
-            let data = file
-                .tensor_raw(&info.name)
-                .with_context(|| format!("tensor_raw `{}`", info.name))?;
-            if data.len() < bytes {
-                bail!(
-                    "tensor `{}` mmap slice {} < declared {}",
-                    info.name,
-                    data.len(),
-                    bytes
-                );
-            }
-            let ptr = device.alloc(bytes).map_err(|e| {
-                anyhow!("hipMalloc {} B for `{}`: {e}", bytes, info.name)
-            })?;
-            // SAFETY: ptr is a fresh HIP alloc of `bytes`; data is an
-            // mmap view of ≥ bytes host bytes.
-            unsafe {
-                device
-                    .memcpy_async(
-                        stream,
-                        CopyDirection::HostToDevice,
-                        ptr,
-                        DevicePtr(data.as_ptr() as usize),
-                        bytes,
-                    )
-                    .map_err(|e| anyhow!("memcpy_async `{}`: {e}", info.name))?;
-            }
-            *total += bytes;
-            let t = DeviceTensor {
-                ptr,
-                dtype: info.dtype,
-                bytes,
-            };
-            raw.push(t);
-            Ok(t)
-        };
-
-        // Helper for norm tensors: upload, then if dtype was F32, cast
-        // to F16 in place (gemma4 GGUFs store norms F32 but
-        // `rmsnorm_f16` reads them as F16 — silent corruption otherwise).
-        // Updates `raw_tensors` to point at the new F16 buffer so
-        // `dispose()` frees the right allocation.
-        let upload_norm = |info: &TensorInfo,
-                           raw: &mut Vec<DeviceTensor>,
-                           total: &mut usize|
-         -> Result<DeviceTensor> {
-            let bytes = info.size_in_bytes() as usize;
-            let data = file
-                .tensor_raw(&info.name)
-                .with_context(|| format!("tensor_raw `{}`", info.name))?;
-            if data.len() < bytes {
-                bail!(
-                    "norm `{}` mmap slice {} < declared {}",
-                    info.name,
-                    data.len(),
-                    bytes
-                );
-            }
-            if info.dtype == GgmlDType::F32 {
-                // F32 → F16 cast at upload time. Single allocation,
-                // single memcpy.
-                let elems: usize = info.dims.iter().product::<u64>() as usize;
-                if data.len() < elems * 4 {
-                    bail!(
-                        "norm `{}` mmap slice {} < expected {}",
-                        info.name,
-                        data.len(),
-                        elems * 4
-                    );
-                }
-                // SAFETY: F32 dtype + page-aligned mmap = 4-byte alignment OK.
-                let src: &[f32] = bytemuck::cast_slice(&data[..elems * 4]);
-                let host: Vec<f16> = src.iter().map(|&v| f16::from_f32(v)).collect();
-                let new_bytes = elems * 2;
-                let ptr = device
-                    .alloc(new_bytes)
-                    .map_err(|e| anyhow!("alloc F16 norm `{}`: {e}", info.name))?;
-                // SAFETY: ptr owns new_bytes; host outlives the bounded sync.
-                unsafe {
-                    device
-                        .memcpy_async(
-                            stream,
-                            CopyDirection::HostToDevice,
-                            ptr,
-                            DevicePtr(host.as_ptr() as usize),
-                            new_bytes,
-                        )
-                        .map_err(|e| anyhow!("memcpy F32→F16 `{}`: {e}", info.name))?;
-                }
-                *total += new_bytes;
-                let t = DeviceTensor {
-                    ptr,
-                    dtype: GgmlDType::F16,
-                    bytes: new_bytes,
-                };
-                raw.push(t);
-                Ok(t)
-            } else if info.dtype == GgmlDType::F16 {
-                // Already F16; upload raw.
-                let ptr = device
-                    .alloc(bytes)
-                    .map_err(|e| anyhow!("hipMalloc {} B for `{}`: {e}", bytes, info.name))?;
-                // SAFETY: ptr is a fresh HIP alloc of `bytes`; data is an
-                // mmap view of ≥ bytes host bytes.
-                unsafe {
-                    device
-                        .memcpy_async(
-                            stream,
-                            CopyDirection::HostToDevice,
-                            ptr,
-                            DevicePtr(data.as_ptr() as usize),
-                            bytes,
-                        )
-                        .map_err(|e| anyhow!("memcpy_async `{}`: {e}", info.name))?;
-                }
-                *total += bytes;
-                let t = DeviceTensor {
-                    ptr,
-                    dtype: info.dtype,
-                    bytes,
-                };
-                raw.push(t);
-                Ok(t)
-            } else {
-                bail!(
-                    "norm `{}`: unsupported dtype {:?} (expected F32 or F16)",
-                    info.name,
-                    info.dtype
-                );
-            }
-        };
+        // Local helpers — call blocks::sharding directly. Inline at every
+        // site to avoid closure-captures-&mut-tracker borrow chains.
+        // `upload_norm_local` accepts F32 (cast → F16) or already-F16
+        // (raw upload) since gemma4 GGUFs vary.
 
         let g_names = GlobalNames::default_names();
         let token_embd_info = file
@@ -842,16 +559,17 @@ impl Gemma4DeviceWeights {
             token_embd_info.dims[0] as usize,
             token_embd_info.dims[1] as usize,
         ];
-        let token_embd = upload_one(token_embd_info, &mut raw_tensors, &mut total_bytes)?;
-        let output_norm = upload_norm(
+        let token_embd = upload_replicated(file,token_embd_info, device, stream, &mut tracker)?;
+        let output_norm = upload_replicated_norm(file,
             file.tensors
                 .get(&g_names.output_norm)
                 .ok_or_else(|| anyhow!("output_norm missing"))?,
-            &mut raw_tensors,
-            &mut total_bytes,
+            device,
+            stream,
+            &mut tracker,
         )?;
         let output = if let Some(t) = file.tensors.get(&g_names.output) {
-            Some(upload_one(t, &mut raw_tensors, &mut total_bytes)?)
+            Some(upload_replicated(file,t, device, stream, &mut tracker)?)
         } else {
             None
         };
@@ -870,11 +588,11 @@ impl Gemma4DeviceWeights {
                 .get(&g_names.per_layer_proj_norm)
                 .ok_or_else(|| anyhow!("per_layer_proj_norm missing"))?;
             let per_layer_token_embd =
-                upload_one(tokembd_info, &mut raw_tensors, &mut total_bytes)?;
+                upload_replicated(file,tokembd_info, device, stream, &mut tracker)?;
             let per_layer_model_proj =
-                upload_one(modelproj_info, &mut raw_tensors, &mut total_bytes)?;
+                upload_replicated(file,modelproj_info, device, stream, &mut tracker)?;
             let per_layer_proj_norm =
-                upload_one(projnorm_info, &mut raw_tensors, &mut total_bytes)?;
+                upload_replicated(file,projnorm_info, device, stream, &mut tracker)?;
             Some(PerLayerEmbedDeviceGlobals {
                 per_layer_token_embd,
                 per_layer_model_proj,
@@ -890,13 +608,14 @@ impl Gemma4DeviceWeights {
             let an = AttnNames::for_layer(spec.index);
             let dn = DenseFfnNames::for_layer(spec.index);
 
-            let attn_norm = upload_norm(
+            let attn_norm = upload_replicated_norm(file,
                 file.tensors.get(&an.attn_norm).ok_or_else(|| anyhow!("{}", an.attn_norm))?,
-                &mut raw_tensors,
-                &mut total_bytes,
+                device,
+                stream,
+                &mut tracker,
             )?;
             let attn_q_info = file.tensors.get(&an.attn_q).ok_or_else(|| anyhow!("{}", an.attn_q))?;
-            let attn_q = upload_one(attn_q_info, &mut raw_tensors, &mut total_bytes)?;
+            let attn_q = upload_replicated(file,attn_q_info, device, stream, &mut tracker)?;
             let attn_q_dims = [
                 attn_q_info.dims[0] as usize,
                 attn_q_info.dims[1] as usize,
@@ -906,7 +625,7 @@ impl Gemma4DeviceWeights {
             // shared-KV tail layers (mirrors llama.cpp PR #21739); attn_v
             // is additionally always optional (alt-attention).
             let (attn_k, attn_k_dims) = if let Some(info) = file.tensors.get(&an.attn_k) {
-                let dt = upload_one(info, &mut raw_tensors, &mut total_bytes)?;
+                let dt = upload_replicated(file,info, device, stream, &mut tracker)?;
                 let dims = [info.dims[0] as usize, info.dims[1] as usize];
                 (Some(dt), Some(dims))
             } else {
@@ -917,7 +636,7 @@ impl Gemma4DeviceWeights {
             };
 
             let (attn_v, attn_v_dims) = if let Some(info) = file.tensors.get(&an.attn_v) {
-                let dt = upload_one(info, &mut raw_tensors, &mut total_bytes)?;
+                let dt = upload_replicated(file,info, device, stream, &mut tracker)?;
                 let dims = [info.dims[0] as usize, info.dims[1] as usize];
                 (Some(dt), Some(dims))
             } else {
@@ -925,31 +644,33 @@ impl Gemma4DeviceWeights {
             };
 
             let attn_output_info = file.tensors.get(&an.attn_output).ok_or_else(|| anyhow!("{}", an.attn_output))?;
-            let attn_output = upload_one(attn_output_info, &mut raw_tensors, &mut total_bytes)?;
+            let attn_output = upload_replicated(file,attn_output_info, device, stream, &mut tracker)?;
             let attn_output_dims = [
                 attn_output_info.dims[0] as usize,
                 attn_output_info.dims[1] as usize,
             ];
 
-            let attn_q_norm = upload_norm(
+            let attn_q_norm = upload_replicated_norm(file,
                 file.tensors.get(&an.attn_q_norm).ok_or_else(|| anyhow!("{}", an.attn_q_norm))?,
-                &mut raw_tensors,
-                &mut total_bytes,
+                device,
+                stream,
+                &mut tracker,
             )?;
             let attn_k_norm = if let Some(info) = file.tensors.get(&an.attn_k_norm) {
-                Some(upload_norm(info, &mut raw_tensors, &mut total_bytes)?)
+                Some(upload_replicated_norm(file,info, device, stream, &mut tracker)?)
             } else {
                 if spec.has_kv {
                     bail!("layer {}: attn_k_norm required but missing", spec.index);
                 }
                 None
             };
-            let post_attention_norm = upload_norm(
+            let post_attention_norm = upload_replicated_norm(file,
                 file.tensors
                     .get(&an.post_attention_norm)
                     .ok_or_else(|| anyhow!("{}", an.post_attention_norm))?,
-                &mut raw_tensors,
-                &mut total_bytes,
+                device,
+                stream,
+                &mut tracker,
             )?;
             // `layer_output_scale` is F32 [1]. Read its value host-side
             // (it's a constant during inference) so the layer composer
@@ -976,33 +697,35 @@ impl Gemma4DeviceWeights {
                 };
 
             // Dense FFN
-            let ffn_norm = upload_norm(
+            let ffn_norm = upload_replicated_norm(file,
                 file.tensors.get(&dn.ffn_norm).ok_or_else(|| anyhow!("{}", dn.ffn_norm))?,
-                &mut raw_tensors,
-                &mut total_bytes,
+                device,
+                stream,
+                &mut tracker,
             )?;
             let ffn_gate_info = file.tensors.get(&dn.ffn_gate).ok_or_else(|| anyhow!("{}", dn.ffn_gate))?;
-            let ffn_gate = upload_one(ffn_gate_info, &mut raw_tensors, &mut total_bytes)?;
+            let ffn_gate = upload_replicated(file,ffn_gate_info, device, stream, &mut tracker)?;
             let ffn_gate_dims = [
                 ffn_gate_info.dims[0] as usize,
                 ffn_gate_info.dims[1] as usize,
             ];
             let ffn_up_info = file.tensors.get(&dn.ffn_up).ok_or_else(|| anyhow!("{}", dn.ffn_up))?;
-            let ffn_up = upload_one(ffn_up_info, &mut raw_tensors, &mut total_bytes)?;
+            let ffn_up = upload_replicated(file,ffn_up_info, device, stream, &mut tracker)?;
             let ffn_up_dims = [
                 ffn_up_info.dims[0] as usize,
                 ffn_up_info.dims[1] as usize,
             ];
             let ffn_down_info = file.tensors.get(&dn.ffn_down).ok_or_else(|| anyhow!("{}", dn.ffn_down))?;
-            let ffn_down = upload_one(ffn_down_info, &mut raw_tensors, &mut total_bytes)?;
+            let ffn_down = upload_replicated(file,ffn_down_info, device, stream, &mut tracker)?;
             let ffn_down_dims = [
                 ffn_down_info.dims[0] as usize,
                 ffn_down_info.dims[1] as usize,
             ];
-            let post_ffw_norm = upload_norm(
+            let post_ffw_norm = upload_replicated_norm(file,
                 file.tensors.get(&dn.post_ffw_norm).ok_or_else(|| anyhow!("{}", dn.post_ffw_norm))?,
-                &mut raw_tensors,
-                &mut total_bytes,
+                device,
+                stream,
+                &mut tracker,
             )?;
 
             // Per-layer-embd weights (E2B/E4B only).
@@ -1020,9 +743,9 @@ impl Gemma4DeviceWeights {
                     .tensors
                     .get(&ple.post_norm)
                     .ok_or_else(|| anyhow!("{}", ple.post_norm))?;
-                let inp_gate = upload_one(inp_gate_info, &mut raw_tensors, &mut total_bytes)?;
-                let proj = upload_one(proj_info, &mut raw_tensors, &mut total_bytes)?;
-                let post_norm = upload_norm(post_norm_info, &mut raw_tensors, &mut total_bytes)?;
+                let inp_gate = upload_replicated(file,inp_gate_info, device, stream, &mut tracker)?;
+                let proj = upload_replicated(file,proj_info, device, stream, &mut tracker)?;
+                let post_norm = upload_replicated_norm(file,post_norm_info, device, stream, &mut tracker)?;
                 Some(PerLayerEmbedLayerWeights {
                     inp_gate: inp_gate.ptr,
                     proj: proj.ptr,
@@ -1051,8 +774,7 @@ impl Gemma4DeviceWeights {
                     moe_dims,
                     device,
                     stream,
-                    &mut raw_tensors,
-                    &mut total_bytes,
+                    &mut tracker,
                 )?)
             } else {
                 None
@@ -1085,6 +807,7 @@ impl Gemma4DeviceWeights {
         // `Gemma4LayerWeights` we just built.
         let _ = resolved;
 
+        let total_bytes = tracker.allocs.iter().map(|(_, b)| *b).sum();
         Ok(Self {
             token_embd,
             token_embd_dims,
@@ -1092,7 +815,7 @@ impl Gemma4DeviceWeights {
             output,
             layers,
             per_layer_embd_globals,
-            raw_tensors,
+            raw_alloc: tracker,
             total_bytes,
             device_id: device.id(),
             disposed: false,
@@ -1105,32 +828,18 @@ impl Gemma4DeviceWeights {
             return Ok(());
         }
         self.disposed = true;
-        let mut out = Ok(());
-        for t in &self.raw_tensors {
-            if !t.is_live() {
-                continue;
-            }
-            // SAFETY: every pointer came from `device.alloc(bytes)` above;
-            // no aliasing; no outstanding stream work (caller contract).
-            unsafe {
-                if let Err(e) = device.dealloc(t.ptr, t.bytes) {
-                    if out.is_ok() {
-                        out = Err(anyhow!("hipFree: {e}"));
-                    }
-                }
-            }
-        }
-        self.raw_tensors.clear();
-        out
+        self.raw_alloc
+            .dispose(device)
+            .map_err(|e| anyhow!("raw_alloc dispose: {e}"))
     }
 }
 
 impl Drop for Gemma4DeviceWeights {
     fn drop(&mut self) {
-        if !self.disposed && !self.raw_tensors.is_empty() {
+        if !self.disposed && !self.raw_alloc.is_empty() {
             tracing::warn!(
-                "Gemma4DeviceWeights dropped without dispose(); {} tensors leaked on device {}",
-                self.raw_tensors.len(),
+                "Gemma4DeviceWeights dropped without dispose(); {} allocations leaked on device {}",
+                self.raw_alloc.allocs.len(),
                 self.device_id
             );
         }

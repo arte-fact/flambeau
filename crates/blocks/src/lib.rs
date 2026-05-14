@@ -32,7 +32,8 @@ pub use attention::{
 };
 pub use delta_net::{DeltaNetLayer, DeltaNetLayerDecodeScratch, DeltaNetLayerPrefillScratch};
 pub use driver_utils::{
-    alloc_zeroed, embed_token_host, row_bytes_for_dtype, upload_f16_ones, RawAllocTracker,
+    alloc_zeroed, embed_token_host, ggml_to_qdtype, row_bytes_for_dtype, upload_f16_ones,
+    RawAllocTracker,
 };
 pub use dense_mlp::{DenseMlp, DenseMlpDecodeScratch, DenseMlpPrefillScratch, DenseMlpTp};
 pub use layer::{

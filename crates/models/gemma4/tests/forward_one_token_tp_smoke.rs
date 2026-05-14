@@ -212,6 +212,7 @@ fn build_synthetic_tp_driver(cluster: HipCluster) -> Gemma4TpDriver {
             Some(lm_head_dt),
             is_head_rank,
             /*max_tokens=*/ 16,
+            flambeau_blocks::RawAllocTracker::new(),
         )
         .expect("stage");
         stages.push(stage);

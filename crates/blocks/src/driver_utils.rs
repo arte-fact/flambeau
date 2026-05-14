@@ -13,6 +13,7 @@
 
 use anyhow::{anyhow, bail, Context, Result};
 use flambeau_backend_hip::{HipDevice, HipStream};
+use flambeau_core::op::QDtype;
 use flambeau_core::{CopyDirection, Device, DevicePtr, Stream};
 use flambeau_quant::GgmlDType;
 use half::f16;
@@ -61,6 +62,40 @@ pub fn upload_f16_ones(device: &HipDevice, n: usize) -> Result<DevicePtr> {
     }
     device.default_stream().synchronize()?;
     Ok(p)
+}
+
+/// Map a GGUF [`GgmlDType`] to the [`QDtype`] the qmatmul dispatcher
+/// uses. Covers every quant family the V1 kernels support; returns
+/// an error for unsupported dtypes (e.g. MXFP4, which is at-load
+/// dequantised to Q8_0 by callers).
+pub fn ggml_to_qdtype(d: GgmlDType) -> Result<QDtype> {
+    Ok(match d {
+        GgmlDType::F32 => QDtype::F32,
+        GgmlDType::F16 => QDtype::F16,
+        GgmlDType::BF16 => QDtype::BF16,
+        GgmlDType::Q8_0 => QDtype::Q8_0,
+        GgmlDType::Q8_1 => QDtype::Q8_1,
+        GgmlDType::Q4_0 => QDtype::Q4_0,
+        GgmlDType::Q4_1 => QDtype::Q4_1,
+        GgmlDType::Q5_0 => QDtype::Q5_0,
+        GgmlDType::Q5_1 => QDtype::Q5_1,
+        GgmlDType::Q2K => QDtype::Q2_K,
+        GgmlDType::Q3K => QDtype::Q3_K,
+        GgmlDType::Q4K => QDtype::Q4_K,
+        GgmlDType::Q5K => QDtype::Q5_K,
+        GgmlDType::Q6K => QDtype::Q6_K,
+        GgmlDType::Q8K => QDtype::Q8_K,
+        GgmlDType::Iq4Nl => QDtype::IQ4_NL,
+        GgmlDType::Iq4Xs => QDtype::IQ4_XS,
+        GgmlDType::Iq3Xxs => QDtype::IQ3_XXS,
+        GgmlDType::Iq3S => QDtype::IQ3_S,
+        GgmlDType::Iq2Xxs => QDtype::IQ2_XXS,
+        GgmlDType::Iq2Xs => QDtype::IQ2_XS,
+        GgmlDType::Iq2S => QDtype::IQ2_S,
+        GgmlDType::Iq1S => QDtype::IQ1_S,
+        GgmlDType::Iq1M => QDtype::IQ1_M,
+        other => bail!("ggml_to_qdtype: unsupported dtype {other:?}"),
+    })
 }
 
 /// Bytes-per-row for a 2-D quantised weight with `hidden` columns.
