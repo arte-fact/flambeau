@@ -37,7 +37,7 @@ use flambeau_quant::{GgufFile, TensorInfo};
 use crate::config::Gemma4Config;
 use crate::layer::{forward_layer_decode, forward_layer_prefill, Gemma4LayerWeights};
 use crate::layout::{FfnKind, LayerSpec, ModelLayout};
-use crate::names::{AttnNames, DenseFfnNames, GlobalNames};
+use crate::names::{AttnNames, GlobalNames};
 use crate::output_head::{forward_output_head, OutputHeadScratch};
 use crate::scratch::{LayerDecodeScratch, LayerPrefillScratch};
 use crate::softcap::apply_logit_softcap;

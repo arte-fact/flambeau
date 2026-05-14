@@ -36,9 +36,11 @@ use anyhow::{anyhow, bail, Context, Result};
 use flambeau_backend_hip::{HipCluster, HipDevice};
 use flambeau_blocks::{
     embed_token_host, forward_one_token_tp, post_norm_residual_f16, tp_allreduce_sum_into,
-    upload_f16_ones, upload_replicated_norm_f32_to_f16, upload_replicated_tensor,
-    upload_sharded_tensor, Activation, DenseMlpDecodeScratch, DenseMlpTp, RawAllocTracker,
+    upload_f16_ones, AttnK, AttnKNorm, AttnNorm, AttnOutput, AttnQ, AttnQNorm, AttnV, FfnDown,
+    FfnGate, FfnNorm, FfnUp, LmHead, OutputNorm, PostAttnNorm, PostFfwNorm, TokenEmbd,
+    Activation, DenseMlpDecodeScratch, DenseMlpTp, RawAllocTracker,
     StandardAttentionDecodeScratch, TpCluster, TpDecodeDriver, UploadedTensor, WeightHandle,
+    WeightUploader,
 };
 use flambeau_core::{CopyDirection, Device, DevicePtr, Stream};
 use flambeau_ops::hip::{HipOps, OpsRegistry};
@@ -855,47 +857,34 @@ fn upload_one_tp_stage(
     max_tokens: usize,
 ) -> Result<Gemma4TpStage> {
     let stream = device.default_stream();
-    let g = crate::names::GlobalNames::default_names();
     let mut tracker = RawAllocTracker::new();
 
-    // Replicated globals.
-    let tok_info = file
-        .tensors
-        .get(&g.token_embd)
-        .ok_or_else(|| anyhow!("token_embd missing"))?;
-    let token_embd_dims = [
-        tok_info.dims[0] as usize,
-        tok_info.dims[1] as usize,
-    ];
-    let token_embd =
-        uploaded_to_device_tensor(upload_replicated_tensor(file, tok_info, device, stream, &mut tracker)?);
-
-    let output_norm_info = file
-        .tensors
-        .get(&g.output_norm)
-        .ok_or_else(|| anyhow!("output_norm missing"))?;
-    let output_norm = uploaded_to_device_tensor(upload_replicated_norm_f32_to_f16(
-        file,
-        output_norm_info,
-        cfg.hidden_size,
+    // Replicated globals via typed roles (`world=1` so token_embd /
+    // output_norm / lm_head are uploaded as-is on each rank).
+    let token_embd_dims: [usize; 2] = {
+        let info = file
+            .tensors
+            .get("token_embd.weight")
+            .ok_or_else(|| anyhow!("token_embd missing"))?;
+        [info.dims[0] as usize, info.dims[1] as usize]
+    };
+    let mut up = WeightUploader {
         device,
         stream,
-        &mut tracker,
-    )?);
-
+        tracker: &mut tracker,
+        file,
+        cfg,
+        world: 1,
+        rank: 0,
+    };
+    let token_embd = uploaded_to_device_tensor(up.upload_required::<TokenEmbd>(0)?);
+    let output_norm = uploaded_to_device_tensor(up.upload_required::<OutputNorm>(0)?);
     let lm_head = if cfg.tied_lm_head {
         None
-    } else if let Some(info) = file.tensors.get(&g.output) {
-        Some(uploaded_to_device_tensor(upload_replicated_tensor(
-            file,
-            info,
-            device,
-            stream,
-            &mut tracker,
-        )?))
     } else {
-        None
+        up.upload::<LmHead>(0)?.map(uploaded_to_device_tensor)
     };
+    drop(up);
 
     // Per-layer sharded weights — each upload pushes into `tracker`.
     let mut layer_weights = Vec::with_capacity(cfg.num_layers);
@@ -940,181 +929,68 @@ fn upload_layer_tp(
     stream: &flambeau_backend_hip::HipStream,
     tracker: &mut RawAllocTracker,
 ) -> Result<Gemma4LayerWeights> {
-    use flambeau_runtime::WeightLayout;
-    let an = crate::names::AttnNames::for_layer(spec.index);
-    let dn = crate::names::DenseFfnNames::for_layer(spec.index);
+    let il = spec.index;
+    let mut up = WeightUploader {
+        device,
+        stream,
+        tracker,
+        file,
+        cfg,
+        world: n_ranks as u32,
+        rank: rank as u32,
+    };
 
-    let hidden = cfg.hidden_size;
-    let ff_len = cfg.feed_forward_length;
-    let ff_local = ff_len / n_ranks;
-    let head_dim = spec.head_dim;
-    let q_width = spec.n_heads * head_dim;
-    let q_width_local = q_width / n_ranks;
-    let kv_width = spec.n_kv_heads * head_dim;
-    let kv_width_local = kv_width / n_ranks;
+    let attn_norm = up.upload_norm_required::<AttnNorm>(il)?;
+    let attn_q = up.upload_matmul_required::<AttnQ>(il)?;
+    let attn_k = up.upload_matmul::<AttnK>(il)?;
+    let attn_v = up.upload_matmul::<AttnV>(il)?;
+    let attn_output = up.upload_matmul_required::<AttnOutput>(il)?;
+    let attn_q_norm = up.upload_norm_required::<AttnQNorm>(il)?;
+    let attn_k_norm = up.upload_norm::<AttnKNorm>(il)?;
+    let post_attention_norm = up.upload_norm_required::<PostAttnNorm>(il)?;
+    let ffn_norm = up.upload_norm_required::<FfnNorm>(il)?;
+    let ffn_gate = up.upload_matmul_required::<FfnGate>(il)?;
+    let ffn_up = up.upload_matmul_required::<FfnUp>(il)?;
+    let ffn_down = up.upload_matmul_required::<FfnDown>(il)?;
+    let post_ffw_norm = up.upload_norm_required::<PostFfwNorm>(il)?;
+    drop(up);
 
-    let world = n_ranks as u32;
-    let r = rank as u32;
-    let col_parallel = WeightLayout::ColParallel { world, dim: 0 };
-    let row_parallel = WeightLayout::RowParallel { world, dim: 1 };
-
-    fn require<'a>(
-        file: &'a flambeau_quant::GgufFile,
-        name: &str,
-        layer_idx: usize,
-    ) -> Result<&'a flambeau_quant::TensorInfo> {
-        file.tensors
-            .get(name)
-            .ok_or_else(|| anyhow!("missing tensor `{name}` for layer {layer_idx}"))
+    // Gemma4 quirks: shared-KV layer invariants + host-side F32 scalar.
+    if spec.has_kv {
+        if attn_k.is_none() {
+            bail!("layer {il}: attn_k required for has_kv layer");
+        }
+        if attn_k_norm.is_none() {
+            bail!("layer {il}: attn_k_norm required for has_kv layer");
+        }
     }
-
-    let attn_norm = upload_replicated_norm_f32_to_f16(
-        file,
-        require(file, &an.attn_norm, spec.index)?,
-        hidden,
-        device,
-        stream,
-        tracker,
-    )?
-    .ptr;
-    let attn_q = upload_sharded_tensor(
-        file,
-        require(file, &an.attn_q, spec.index)?,
-        col_parallel,
-        r,
-        device,
-        stream,
-        tracker,
-    )?;
-    let attn_k = if let Some(info) = file.tensors.get(&an.attn_k) {
-        Some(upload_sharded_tensor(file, info, col_parallel, r, device, stream, tracker)?)
-    } else {
-        if spec.has_kv {
-            bail!("layer {}: attn_k required but missing", spec.index);
+    let layer_output_scale = {
+        let name = crate::names::AttnNames::for_layer(il).layer_output_scale;
+        if let Some(info) = file.tensors.get(&name) {
+            let raw = file.tensor_raw(&info.name)?;
+            if raw.len() < 4 {
+                bail!("layer {il}: layer_output_scale < 4 bytes");
+            }
+            Some(f32::from_le_bytes([raw[0], raw[1], raw[2], raw[3]]))
+        } else {
+            None
         }
-        None
-    };
-    let attn_v = if let Some(info) = file.tensors.get(&an.attn_v) {
-        Some(upload_sharded_tensor(file, info, col_parallel, r, device, stream, tracker)?)
-    } else {
-        None
-    };
-    let attn_output = upload_sharded_tensor(
-        file,
-        require(file, &an.attn_output, spec.index)?,
-        row_parallel,
-        r,
-        device,
-        stream,
-        tracker,
-    )?;
-    let attn_q_norm = upload_replicated_norm_f32_to_f16(
-        file,
-        require(file, &an.attn_q_norm, spec.index)?,
-        head_dim,
-        device,
-        stream,
-        tracker,
-    )?
-    .ptr;
-    let attn_k_norm = if let Some(info) = file.tensors.get(&an.attn_k_norm) {
-        Some(upload_replicated_norm_f32_to_f16(file, info, head_dim, device, stream, tracker)?.ptr)
-    } else {
-        if spec.has_kv {
-            bail!("layer {}: attn_k_norm required but missing", spec.index);
-        }
-        None
-    };
-    let post_attention_norm = upload_replicated_norm_f32_to_f16(
-        file,
-        require(file, &an.post_attention_norm, spec.index)?,
-        hidden,
-        device,
-        stream,
-        tracker,
-    )?
-    .ptr;
-    let layer_output_scale = if let Some(info) = file.tensors.get(&an.layer_output_scale) {
-        let raw = file.tensor_raw(&info.name)?;
-        if raw.len() < 4 {
-            bail!("layer {}: layer_output_scale < 4 bytes", spec.index);
-        }
-        Some(f32::from_le_bytes([raw[0], raw[1], raw[2], raw[3]]))
-    } else {
-        None
-    };
-    let ffn_norm = upload_replicated_norm_f32_to_f16(
-        file,
-        require(file, &dn.ffn_norm, spec.index)?,
-        hidden,
-        device,
-        stream,
-        tracker,
-    )?
-    .ptr;
-    let ffn_gate = upload_sharded_tensor(
-        file,
-        require(file, &dn.ffn_gate, spec.index)?,
-        col_parallel,
-        r,
-        device,
-        stream,
-        tracker,
-    )?;
-    let ffn_up = upload_sharded_tensor(
-        file,
-        require(file, &dn.ffn_up, spec.index)?,
-        col_parallel,
-        r,
-        device,
-        stream,
-        tracker,
-    )?;
-    let ffn_down = upload_sharded_tensor(
-        file,
-        require(file, &dn.ffn_down, spec.index)?,
-        row_parallel,
-        r,
-        device,
-        stream,
-        tracker,
-    )?;
-    let post_ffw_norm = upload_replicated_norm_f32_to_f16(
-        file,
-        require(file, &dn.post_ffw_norm, spec.index)?,
-        hidden,
-        device,
-        stream,
-        tracker,
-    )?
-    .ptr;
-
-    let handle = |t: UploadedTensor, dims: [usize; 2]| -> Result<WeightHandle> {
-        Ok(WeightHandle {
-            ptr: t.ptr,
-            dtype: flambeau_blocks::ggml_to_qdtype(t.dtype)?,
-            dims,
-        })
     };
 
     Ok(Gemma4LayerWeights {
         attn_norm,
-        attn_q: handle(attn_q, [q_width_local, hidden])?,
-        attn_k: attn_k
-            .map(|t| handle(t, [kv_width_local, hidden]))
-            .transpose()?,
-        attn_v: attn_v
-            .map(|t| handle(t, [kv_width_local, hidden]))
-            .transpose()?,
-        attn_output: handle(attn_output, [hidden, q_width_local])?,
+        attn_q,
+        attn_k,
+        attn_v,
+        attn_output,
         attn_q_norm,
         attn_k_norm,
         post_attention_norm,
         layer_output_scale,
         ffn_norm,
-        ffn_gate: handle(ffn_gate, [ff_local, hidden])?,
-        ffn_up: handle(ffn_up, [ff_local, hidden])?,
-        ffn_down: handle(ffn_down, [hidden, ff_local])?,
+        ffn_gate,
+        ffn_up,
+        ffn_down,
         post_ffw_norm,
         per_layer_embed: None,
         moe: None,
