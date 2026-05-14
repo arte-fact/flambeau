@@ -1019,7 +1019,16 @@ fn upload_tp_via_role<R: WeightRole>(
     let uploaded = up.upload_required::<R>(layer_idx)?;
     drop(up);
     let _ = tracker.forget_allocs();
-    file.advise_drop_tensor(name);
+    // NB: do NOT call `file.advise_drop_tensor(name)` here.
+    // Unlike the PP path (sharded.rs::up_role), the TP path uploads
+    // every tensor on every rank — globals are full replicated, and
+    // per-layer tensors are sliced (still reading the same mmap
+    // region per rank for ColParallel / RowParallel / FusedQkv). If
+    // we evict after the first rank uploads, every subsequent rank
+    // SIGSEGVs reading the now-unmapped mmap pages. Eviction would
+    // need to fire once-per-name after all ranks have uploaded;
+    // the legacy `upload_tp_with_layout` path also doesn't evict and
+    // tolerated the load-time HBM cost.
     let layout = (<R as WeightRole>::SPEC.layout_for)(cfg, layer_idx, tp.world());
     let per_rank_dims = compute_per_rank_dims(&info.dims, layout);
     Ok((
