@@ -17,7 +17,6 @@ use flambeau_ops::hip::{
     qmatmul::qmatmul,
     HipDevice, HipStream, OpsRegistry,
 };
-use flambeau_quant::BlockQ8_1;
 use flambeau_runtime::{CacheLayout, KvCache};
 
 use super::common::{mat_shape, qdtype_of};
@@ -275,68 +274,14 @@ pub fn forward_full_attn_layer_decode(
 /// The buffers scale linearly with `max_prefill_tokens` except `x_q8_1`
 /// (which scales in blocks of 32 inputs). At hidden=2048 and L=128:
 /// activations + scratch < 10 MB total — comfortable even on 16 GB cards.
+/// Workspace for one prefill chunk of a full-attention layer. Wraps
+/// [`flambeau_blocks::OwnedStandardAttentionBatchedDecodeScratch`] —
+/// the block's batched-decode scratch is a superset of the prefill
+/// shape (16 fields × `max_tokens` plus 4 slot tables), so qwen3-moe
+/// can share one allocation for both paths.
 pub struct FullAttnPrefillScratch {
-    pub max_tokens: usize,
-    pub x_norm_f16: DevicePtr,      // F16 [max_L, hidden] — rmsnorm output buffer
-                                    // (8: split away from the
-                                    // D1 fused rmsnorm+quant path so we
-                                    // can emit both Q8_1 layouts.)
-    pub x_q8_1: DevicePtr,          // Q8_1 blocks [max_L, hidden/32]
-    pub x_q8_1_mmq: DevicePtr,      // BlockQ8_1Mmq [hidden/128, max_L] — DS4 layout for MmqLdsX64
-    pub mmvq_f32: DevicePtr,        // F32 [max_L, max(2*H*D, H_kv*D, hidden)]
-    pub q_fused_f16: DevicePtr,     // F16 [max_L, 2*n_heads*head_dim]
-    pub q_f16: DevicePtr,           // F16 [max_L, n_heads*head_dim]
-    pub gate_f16: DevicePtr,        // F16 [max_L, n_heads*head_dim]
-    pub k_f16: DevicePtr,           // F16 [max_L, n_kv_heads*head_dim]
-    pub v_f16: DevicePtr,           // F16 [max_L, n_kv_heads*head_dim]
-    pub attn_out_f16: DevicePtr,    // F16 [max_L, n_heads*head_dim]
-    pub gated_out_f16: DevicePtr,   // F16 [max_L, n_heads*head_dim]
-    pub positions: DevicePtr,       // i32 [max_L]
-    pub gated_q8_1: DevicePtr,      // Q8_1 [max_L, n_heads*head_dim/32]
-    pub gated_q8_1_mmq: DevicePtr,  // BlockQ8_1Mmq [q_width/128, max_L] — DS4 layout
-    /// **#266c** — per-slot K-cache base pointers, uploaded HtoD once
-    /// per `forward_full_attn_layer_decode_batched_*` call so the
-    /// batched-attention kernel can address each slot's KV. u64 [max_L].
-    pub slot_k_ptrs: DevicePtr,
-    /// **#266c** — per-slot V-cache base pointers. u64 [max_L].
-    pub slot_v_ptrs: DevicePtr,
-    /// **#266c** — per-slot KV-tail length post-append. i32 [max_L].
-    pub slot_n_tokens_kv: DevicePtr,
-    /// Per-slot pre-bump write position (cache tail BEFORE this token's
-    /// append). Consumed by `kv_append_f16_batched_slots`. i32 [max_L].
-    pub slot_write_pos: DevicePtr,
-    /// Persistent host-side staging for the slot tables. Same lifetime
-    /// rationale as `positions_host`: stable address for HtoD memcpy.
-    pub(crate) slot_k_ptrs_host: Vec<u64>,
-    pub(crate) slot_v_ptrs_host: Vec<u64>,
-    pub(crate) slot_n_tokens_kv_host: Vec<i32>,
-    pub(crate) slot_write_pos_host: Vec<i32>,
-    /// 6.a-i5a — persistent host-side position buffer. `positions`
-    /// on the device is filled each prefill call via a HtoD memcpy
-    /// whose *source* is this Vec's stable address. Keeping it on the
-    /// scratch (and therefore alive for the scratch's lifetime) is
-    /// what makes the memcpy safe to capture into a `HipGraphExec` —
-    /// the previous path used a transient `Vec<i32>` created inside
-    /// `upload_positions_range`, whose address becomes invalid once
-    /// that function returns and breaks graph replay.
-    /// Sized `max_tokens`; writes are in-place via `[..n].copy_from_slice`.
-    pub(crate) positions_host: Vec<i32>,
-    // Bookkeeping.
-    x_norm_f16_bytes: usize,
-    x_q8_1_bytes: usize,
-    x_q8_1_mmq_bytes: usize,
-    mmvq_f32_bytes: usize,
-    q_fused_bytes: usize,
-    qk_bytes: usize,
-    kv_bytes: usize,
-    attn_bytes: usize,
-    positions_bytes: usize,
-    gated_q8_1_bytes: usize,
-    gated_q8_1_mmq_bytes: usize,
-    slot_k_ptrs_bytes: usize,
-    slot_v_ptrs_bytes: usize,
-    slot_n_tokens_kv_bytes: usize,
-    slot_write_pos_bytes: usize,
+    inner: flambeau_blocks::OwnedStandardAttentionBatchedDecodeScratch,
+    tracker: flambeau_blocks::RawAllocTracker,
     disposed: bool,
 }
 
@@ -346,106 +291,20 @@ impl FullAttnPrefillScratch {
         device: &HipDevice,
         max_tokens: usize,
     ) -> Result<Self> {
-        assert!(max_tokens >= 1, "max_tokens must be >= 1");
-        let hidden = cfg.hidden_size;
-        let head_dim = cfg.head_dim;
-        let n_heads = cfg.num_heads;
-        let n_kv_heads = cfg.num_kv_heads;
-
-        let q_fused_width = 2 * n_heads * head_dim;
-        let q_width = n_heads * head_dim;
-        let kv_width = n_kv_heads * head_dim;
-
-        assert!(hidden % 32 == 0, "hidden must be a multiple of QK8_1=32");
-        assert!(q_width % 32 == 0, "n_heads * head_dim must be multiple of 32");
-        assert!(
-            hidden % 128 == 0,
-            "hidden must be a multiple of QK8_1_MMQ=128 for the DS4 layout"
-        );
-        assert!(
-            q_width % 128 == 0,
-            "n_heads * head_dim must be a multiple of QK8_1_MMQ=128 for the DS4 layout"
-        );
-
-        let mmq_block = std::mem::size_of::<flambeau_quant::BlockQ8_1Mmq>();
-        let x_norm_f16_bytes = max_tokens * hidden * 2;
-        let x_q8_1_bytes = max_tokens * (hidden / 32) * std::mem::size_of::<BlockQ8_1>();
-        let x_q8_1_mmq_bytes = max_tokens * (hidden / 128) * mmq_block;
-        let mmvq_f32_bytes = max_tokens * q_fused_width.max(hidden) * 4;
-        let q_fused_bytes = max_tokens * q_fused_width * 2;
-        let qk_bytes = max_tokens * q_width * 2;
-        let kv_bytes = max_tokens * kv_width * 2;
-        let attn_bytes = max_tokens * q_width * 2;
-        let positions_bytes = max_tokens * 4;
-        let gated_q8_1_bytes =
-            max_tokens * (q_width / 32) * std::mem::size_of::<BlockQ8_1>();
-        let gated_q8_1_mmq_bytes = max_tokens * (q_width / 128) * mmq_block;
-        let slot_k_ptrs_bytes = max_tokens * 8;
-        let slot_v_ptrs_bytes = max_tokens * 8;
-        let slot_n_tokens_kv_bytes = max_tokens * 4;
-        let slot_write_pos_bytes = max_tokens * 4;
-
-        let x_norm_f16 = device.alloc(x_norm_f16_bytes)?;
-        let x_q8_1 = device.alloc(x_q8_1_bytes)?;
-        let x_q8_1_mmq = device.alloc(x_q8_1_mmq_bytes)?;
-        let mmvq_f32 = device.alloc(mmvq_f32_bytes)?;
-        let q_fused_f16 = device.alloc(q_fused_bytes)?;
-        let q_f16 = device.alloc(qk_bytes)?;
-        let gate_f16 = device.alloc(qk_bytes)?;
-        let k_f16 = device.alloc(kv_bytes)?;
-        let v_f16 = device.alloc(kv_bytes)?;
-        let attn_out_f16 = device.alloc(attn_bytes)?;
-        let gated_out_f16 = device.alloc(attn_bytes)?;
-        let positions = device.alloc(positions_bytes)?;
-        let gated_q8_1 = device.alloc(gated_q8_1_bytes)?;
-        let gated_q8_1_mmq = device.alloc(gated_q8_1_mmq_bytes)?;
-        let slot_k_ptrs = device.alloc(slot_k_ptrs_bytes)?;
-        let slot_v_ptrs = device.alloc(slot_v_ptrs_bytes)?;
-        let slot_n_tokens_kv = device.alloc(slot_n_tokens_kv_bytes)?;
-        let slot_write_pos = device.alloc(slot_write_pos_bytes)?;
-
-        Ok(Self {
+        let mut tracker = flambeau_blocks::RawAllocTracker::new();
+        let dims = flambeau_blocks::AttentionScratchDims {
+            hidden: cfg.hidden_size,
+            n_heads: cfg.num_heads,
+            n_kv_heads: cfg.num_kv_heads,
+            head_dim: cfg.head_dim,
+        };
+        let inner = flambeau_blocks::StandardAttention::alloc_batched_decode_scratch(
+            device,
+            &mut tracker,
+            dims,
             max_tokens,
-            x_norm_f16,
-            x_q8_1,
-            x_q8_1_mmq,
-            mmvq_f32,
-            q_fused_f16,
-            q_f16,
-            gate_f16,
-            k_f16,
-            v_f16,
-            attn_out_f16,
-            gated_out_f16,
-            positions,
-            gated_q8_1,
-            gated_q8_1_mmq,
-            slot_k_ptrs,
-            slot_v_ptrs,
-            slot_n_tokens_kv,
-            slot_write_pos,
-            slot_k_ptrs_host: vec![0u64; max_tokens],
-            slot_v_ptrs_host: vec![0u64; max_tokens],
-            slot_n_tokens_kv_host: vec![0i32; max_tokens],
-            slot_write_pos_host: vec![0i32; max_tokens],
-            positions_host: vec![0i32; max_tokens],
-            x_norm_f16_bytes,
-            x_q8_1_bytes,
-            x_q8_1_mmq_bytes,
-            mmvq_f32_bytes,
-            q_fused_bytes,
-            qk_bytes,
-            kv_bytes,
-            attn_bytes,
-            positions_bytes,
-            gated_q8_1_bytes,
-            gated_q8_1_mmq_bytes,
-            slot_k_ptrs_bytes,
-            slot_v_ptrs_bytes,
-            slot_n_tokens_kv_bytes,
-            slot_write_pos_bytes,
-            disposed: false,
-        })
+        )?;
+        Ok(Self { inner, tracker, disposed: false })
     }
 
     pub fn dispose(mut self, device: &HipDevice) -> Result<()> {
@@ -453,101 +312,51 @@ impl FullAttnPrefillScratch {
             return Ok(());
         }
         self.disposed = true;
-        // SAFETY: every pointer came from `device.alloc(bytes)` above.
-        unsafe {
-            device.dealloc(self.x_norm_f16, self.x_norm_f16_bytes)?;
-            device.dealloc(self.x_q8_1, self.x_q8_1_bytes)?;
-            device.dealloc(self.x_q8_1_mmq, self.x_q8_1_mmq_bytes)?;
-            device.dealloc(self.mmvq_f32, self.mmvq_f32_bytes)?;
-            device.dealloc(self.q_fused_f16, self.q_fused_bytes)?;
-            device.dealloc(self.q_f16, self.qk_bytes)?;
-            device.dealloc(self.gate_f16, self.qk_bytes)?;
-            device.dealloc(self.k_f16, self.kv_bytes)?;
-            device.dealloc(self.v_f16, self.kv_bytes)?;
-            device.dealloc(self.attn_out_f16, self.attn_bytes)?;
-            device.dealloc(self.gated_out_f16, self.attn_bytes)?;
-            device.dealloc(self.positions, self.positions_bytes)?;
-            device.dealloc(self.gated_q8_1, self.gated_q8_1_bytes)?;
-            device.dealloc(self.gated_q8_1_mmq, self.gated_q8_1_mmq_bytes)?;
-            device.dealloc(self.slot_k_ptrs, self.slot_k_ptrs_bytes)?;
-            device.dealloc(self.slot_v_ptrs, self.slot_v_ptrs_bytes)?;
-            device.dealloc(self.slot_n_tokens_kv, self.slot_n_tokens_kv_bytes)?;
-            device.dealloc(self.slot_write_pos, self.slot_write_pos_bytes)?;
-        }
-        Ok(())
+        self.tracker.dispose(device)
     }
-}
 
-impl Drop for FullAttnPrefillScratch {
-    fn drop(&mut self) {
-        if !self.disposed {
-            tracing::warn!(
-                target: "flambeau_qwen3_moe::forward",
-                "FullAttnPrefillScratch dropped without dispose(device); device buffers leaked"
-            );
-        }
-    }
-}
-
-impl FullAttnPrefillScratch {
-    /// Build a borrowed view shaped to feed into
-    /// `flambeau_blocks::StandardAttention::forward_prefill`. The
-    /// batched-decode-only fields (`slot_k_ptrs`, `slot_v_ptrs`,
-    /// `slot_n_tokens_kv`) are not in the block's surface and stay on
-    /// `FullAttnPrefillScratch` for callers that need them
-    /// (`forward_full_attn_layer_decode_batched`).
+    /// Prefill view shaped for `StandardAttention::forward_prefill`. The
+    /// slot_* tables on the inner batched-decode scratch are not exposed
+    /// here — callers that need them use `view_mut_batched`.
     pub fn view_mut(&mut self) -> flambeau_blocks::StandardAttentionPrefillScratch<'_> {
         flambeau_blocks::StandardAttentionPrefillScratch {
-            max_tokens: self.max_tokens,
-            x_norm_f16: self.x_norm_f16,
-            x_q8_1: self.x_q8_1,
-            x_q8_1_mmq: self.x_q8_1_mmq,
-            mmvq_f32: self.mmvq_f32,
-            q_fused_f16: self.q_fused_f16,
-            q_f16: self.q_f16,
-            gate_f16: self.gate_f16,
-            k_f16: self.k_f16,
-            v_f16: self.v_f16,
-            attn_out_f16: self.attn_out_f16,
-            gated_out_f16: self.gated_out_f16,
-            positions: self.positions,
-            gated_q8_1: self.gated_q8_1,
-            gated_q8_1_mmq: self.gated_q8_1_mmq,
-            positions_host: &mut self.positions_host,
+            max_tokens: self.inner.max_tokens,
+            x_norm_f16: self.inner.x_norm_f16,
+            x_q8_1: self.inner.x_q8_1,
+            x_q8_1_mmq: self.inner.x_q8_1_mmq,
+            mmvq_f32: self.inner.mmvq_f32,
+            q_fused_f16: self.inner.q_fused_f16,
+            q_f16: self.inner.q_f16,
+            gate_f16: self.inner.gate_f16,
+            k_f16: self.inner.k_f16,
+            v_f16: self.inner.v_f16,
+            attn_out_f16: self.inner.attn_out_f16,
+            gated_out_f16: self.inner.gated_out_f16,
+            positions: self.inner.positions,
+            gated_q8_1: self.inner.gated_q8_1,
+            gated_q8_1_mmq: self.inner.gated_q8_1_mmq,
+            positions_host: &mut self.inner.positions_host,
         }
     }
 
-    /// Builds the batched-decode view (prefill scratch plus the
-    /// per-slot tables that `forward_decode_batched_tp` reads).
+    /// Batched-decode view (16 prefill fields + 4 slot tables).
     pub fn view_mut_batched(
         &mut self,
     ) -> flambeau_blocks::StandardAttentionBatchedDecodeScratch<'_> {
-        flambeau_blocks::StandardAttentionBatchedDecodeScratch {
-            max_tokens: self.max_tokens,
-            x_norm_f16: self.x_norm_f16,
-            x_q8_1: self.x_q8_1,
-            x_q8_1_mmq: self.x_q8_1_mmq,
-            mmvq_f32: self.mmvq_f32,
-            q_fused_f16: self.q_fused_f16,
-            q_f16: self.q_f16,
-            gate_f16: self.gate_f16,
-            k_f16: self.k_f16,
-            v_f16: self.v_f16,
-            attn_out_f16: self.attn_out_f16,
-            gated_out_f16: self.gated_out_f16,
-            positions: self.positions,
-            gated_q8_1: self.gated_q8_1,
-            gated_q8_1_mmq: self.gated_q8_1_mmq,
-            positions_host: &mut self.positions_host,
-            slot_k_ptrs: self.slot_k_ptrs,
-            slot_v_ptrs: self.slot_v_ptrs,
-            slot_n_tokens_kv: self.slot_n_tokens_kv,
-            slot_write_pos: self.slot_write_pos,
-            slot_k_ptrs_host: &mut self.slot_k_ptrs_host,
-            slot_v_ptrs_host: &mut self.slot_v_ptrs_host,
-            slot_n_tokens_kv_host: &mut self.slot_n_tokens_kv_host,
-            slot_write_pos_host: &mut self.slot_write_pos_host,
-        }
+        self.inner.view_mut()
+    }
+}
+
+impl std::ops::Deref for FullAttnPrefillScratch {
+    type Target = flambeau_blocks::OwnedStandardAttentionBatchedDecodeScratch;
+    fn deref(&self) -> &Self::Target {
+        &self.inner
+    }
+}
+
+impl std::ops::DerefMut for FullAttnPrefillScratch {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.inner
     }
 }
 

@@ -18,7 +18,7 @@
 )]
 
 use anyhow::{bail, Context, Result};
-use flambeau_core::{Device, DevicePtr};
+use flambeau_core::DevicePtr;
 use flambeau_ops::hip::{
     cast::{cast_f16_to_f32, cast_f32_to_f16},
     moe::{
@@ -28,7 +28,7 @@ use flambeau_ops::hip::{
     router::dense_gemv_f32_f16,
     HipDevice, HipStream, OpsRegistry,
 };
-use flambeau_quant::{BlockQ8_1, GgmlDType};
+use flambeau_quant::GgmlDType;
 
 use super::common::{
     run_qmatmul_from_tensor, validate_moe_dtypes,
@@ -406,53 +406,12 @@ pub fn forward_router_decode(
 // f3 — MoE + shared expert + router prefill.
 // ---------------------------------------------------------------------------
 
-/// Workspace for one prefill chunk of the routed MoE FFN. Sized against
-/// `(cfg, max_tokens)`.
+/// Workspace for one prefill chunk of the routed MoE FFN. Wraps
+/// [`flambeau_blocks::OwnedMoeExpertsPrefillScratch`]; field access
+/// flows through `Deref`.
 pub struct MoePrefillScratch {
-    pub max_tokens: usize,
-    pub x_q8_1: DevicePtr,
-    pub router_logits: DevicePtr,      // F32 [L, n_experts]
-    pub expert_ids: DevicePtr,         // i32 [L, top_k]
-    pub expert_weights: DevicePtr,     // F32 [L, top_k]
-    pub gate_out_f32: DevicePtr,       // F32 [L, top_k, inter]
-    pub up_out_f32: DevicePtr,         // F32 [L, top_k, inter]
-    pub activated_f32: DevicePtr,
-    pub activated_f16: DevicePtr,
-    pub activated_q8_1: DevicePtr,
-    // 4.c DS4 Q8_1 activation buffers (turbo MoE variant only).
-    // `x_q8_1_mmq`: hidden activation in DS4 layout — [hidden/128, n_tokens].
-    // `activated_q8_1_mmq`: per-pair SwiGLU'd activation in DS4 layout — [inter/128, n_pairs].
-    pub x_q8_1_mmq: DevicePtr,
-    pub activated_q8_1_mmq: DevicePtr,
-    pub down_f32: DevicePtr,           // F32 [L, top_k, hidden]
-    pub down_f16: DevicePtr,
-    // sort-by-expert state. Only populated / used when
-    // FLAMBEAU_MOE_SORTED=1 is set on the gate+up path.
-    pub sort_counts: DevicePtr,        // i32 [n_experts]
-    pub sort_offsets: DevicePtr,       // i32 [n_experts + 1]
-    pub sort_cursors: DevicePtr,       // i32 [n_experts]
-    pub sort_sorted_pair_idx: DevicePtr, // i32 [L * top_k]
-    // padded sort outputs (only touched when tile8 path is on).
-    pub sort_padded_offsets: DevicePtr,   // i32 [n_experts + 1]
-    pub sort_sorted_pair_idx_padded: DevicePtr, // i32 [max_tokens * top_k + n_experts * 8]
-    x_q8_1_bytes: usize,
-    router_logits_bytes: usize,
-    expert_ids_bytes: usize,
-    expert_weights_bytes: usize,
-    gate_up_bytes: usize,
-    activated_f32_bytes: usize,
-    activated_f16_bytes: usize,
-    activated_q8_1_bytes: usize,
-    x_q8_1_mmq_bytes: usize,
-    activated_q8_1_mmq_bytes: usize,
-    down_f32_bytes: usize,
-    down_f16_bytes: usize,
-    sort_counts_bytes: usize,
-    sort_offsets_bytes: usize,
-    sort_cursors_bytes: usize,
-    sort_sorted_pair_idx_bytes: usize,
-    sort_padded_offsets_bytes: usize,
-    sort_sorted_pair_idx_padded_bytes: usize,
+    inner: flambeau_blocks::OwnedMoeExpertsPrefillScratch,
+    tracker: flambeau_blocks::RawAllocTracker,
     disposed: bool,
 }
 
@@ -462,108 +421,17 @@ impl MoePrefillScratch {
         device: &HipDevice,
         max_tokens: usize,
     ) -> Result<Self> {
-        assert!(max_tokens >= 1, "max_tokens must be >= 1");
-        let hidden = cfg.hidden_size;
-        let inter = cfg.moe_intermediate_size;
-        let top_k = cfg.num_experts_per_tok;
-        let n_experts = cfg.num_experts;
-        assert!(hidden % 32 == 0);
-        assert!(inter % 32 == 0);
-
-        let x_q8_1_bytes =
-            max_tokens * (hidden / 32) * std::mem::size_of::<BlockQ8_1>();
-        let router_logits_bytes = max_tokens * n_experts * 4;
-        let expert_ids_bytes = max_tokens * top_k * 4;
-        let expert_weights_bytes = max_tokens * top_k * 4;
-        let gate_up_bytes = max_tokens * top_k * inter * 4;
-        let activated_f32_bytes = max_tokens * top_k * inter * 4;
-        let activated_f16_bytes = max_tokens * top_k * inter * 2;
-        let activated_q8_1_bytes =
-            max_tokens * top_k * (inter / 32) * std::mem::size_of::<BlockQ8_1>();
-        // 4.c DS4 activation buffers. 144 bytes per MMQ block (128 elements).
-        // hidden/128 big_blocks × max_tokens rows for gate+up (per-token);
-        // inter/128 big_blocks × max_tokens*top_k rows for down (per-pair).
-        let x_q8_1_mmq_bytes =
-            max_tokens * (hidden / 128) * std::mem::size_of::<flambeau_quant::BlockQ8_1Mmq>();
-        let activated_q8_1_mmq_bytes =
-            max_tokens * top_k * (inter / 128) * std::mem::size_of::<flambeau_quant::BlockQ8_1Mmq>();
-        let down_f32_bytes = max_tokens * top_k * hidden * 4;
-        let down_f16_bytes = max_tokens * top_k * hidden * 2;
-
-        let x_q8_1 = device.alloc(x_q8_1_bytes)?;
-        let router_logits = device.alloc(router_logits_bytes)?;
-        let expert_ids = device.alloc(expert_ids_bytes)?;
-        let expert_weights = device.alloc(expert_weights_bytes)?;
-        let gate_out_f32 = device.alloc(gate_up_bytes)?;
-        let up_out_f32 = device.alloc(gate_up_bytes)?;
-        let activated_f32 = device.alloc(activated_f32_bytes)?;
-        let activated_f16 = device.alloc(activated_f16_bytes)?;
-        let activated_q8_1 = device.alloc(activated_q8_1_bytes)?;
-        let x_q8_1_mmq = device.alloc(x_q8_1_mmq_bytes)?;
-        let activated_q8_1_mmq = device.alloc(activated_q8_1_mmq_bytes)?;
-        let down_f32 = device.alloc(down_f32_bytes)?;
-        let down_f16 = device.alloc(down_f16_bytes)?;
-
-        // sort-by-expert scratch
-        let sort_counts_bytes = n_experts * 4;
-        let sort_offsets_bytes = (n_experts + 1) * 4;
-        let sort_cursors_bytes = n_experts * 4;
-        let sort_sorted_pair_idx_bytes = max_tokens * top_k * 4;
-        let sort_counts = device.alloc(sort_counts_bytes)?;
-        let sort_offsets = device.alloc(sort_offsets_bytes)?;
-        let sort_cursors = device.alloc(sort_cursors_bytes)?;
-        let sort_sorted_pair_idx = device.alloc(sort_sorted_pair_idx_bytes)?;
-        // padded sort outputs. Upper bound on padded total: the
-        // real total plus up to 15 padding entries per expert (1.b
-        // bumped from 7 to accommodate pad-to-16 for tile16 MMQ; tile8
-        // path uses ≤ 7 slack and still fits).
-        let sort_padded_offsets_bytes = (n_experts + 1) * 4;
-        let sort_sorted_pair_idx_padded_bytes =
-            (max_tokens * top_k + n_experts * 16) * 4;
-        let sort_padded_offsets = device.alloc(sort_padded_offsets_bytes)?;
-        let sort_sorted_pair_idx_padded = device.alloc(sort_sorted_pair_idx_padded_bytes)?;
-
-        Ok(Self {
-            max_tokens,
-            x_q8_1,
-            router_logits,
-            expert_ids,
-            expert_weights,
-            gate_out_f32,
-            up_out_f32,
-            activated_f32,
-            activated_f16,
-            activated_q8_1,
-            x_q8_1_mmq,
-            activated_q8_1_mmq,
-            down_f32,
-            down_f16,
-            sort_counts,
-            sort_offsets,
-            sort_cursors,
-            sort_sorted_pair_idx,
-            sort_padded_offsets,
-            sort_sorted_pair_idx_padded,
-            x_q8_1_bytes,
-            router_logits_bytes,
-            expert_ids_bytes,
-            expert_weights_bytes,
-            gate_up_bytes,
-            activated_f32_bytes,
-            activated_f16_bytes,
-            activated_q8_1_bytes,
-            x_q8_1_mmq_bytes,
-            activated_q8_1_mmq_bytes,
-            down_f32_bytes,
-            down_f16_bytes,
-            sort_counts_bytes,
-            sort_offsets_bytes,
-            sort_cursors_bytes,
-            sort_sorted_pair_idx_bytes,
-            sort_padded_offsets_bytes,
-            sort_sorted_pair_idx_padded_bytes,
-            disposed: false,
-        })
+        let mut tracker = flambeau_blocks::RawAllocTracker::new();
+        let dims = flambeau_blocks::MoeExpertsScratchDims {
+            hidden: cfg.hidden_size,
+            intermediate: cfg.moe_intermediate_size,
+            n_experts: cfg.num_experts,
+            top_k: cfg.num_experts_per_tok,
+        };
+        let inner = flambeau_blocks::MoeExperts::alloc_prefill_scratch(
+            device, &mut tracker, dims, max_tokens,
+        )?;
+        Ok(Self { inner, tracker, disposed: false })
     }
 
     pub fn dispose(mut self, device: &HipDevice) -> Result<()> {
@@ -571,64 +439,24 @@ impl MoePrefillScratch {
             return Ok(());
         }
         self.disposed = true;
-        unsafe {
-            device.dealloc(self.x_q8_1, self.x_q8_1_bytes)?;
-            device.dealloc(self.router_logits, self.router_logits_bytes)?;
-            device.dealloc(self.expert_ids, self.expert_ids_bytes)?;
-            device.dealloc(self.expert_weights, self.expert_weights_bytes)?;
-            device.dealloc(self.gate_out_f32, self.gate_up_bytes)?;
-            device.dealloc(self.up_out_f32, self.gate_up_bytes)?;
-            device.dealloc(self.activated_f32, self.activated_f32_bytes)?;
-            device.dealloc(self.activated_f16, self.activated_f16_bytes)?;
-            device.dealloc(self.activated_q8_1, self.activated_q8_1_bytes)?;
-            device.dealloc(self.x_q8_1_mmq, self.x_q8_1_mmq_bytes)?;
-            device.dealloc(self.activated_q8_1_mmq, self.activated_q8_1_mmq_bytes)?;
-            device.dealloc(self.down_f32, self.down_f32_bytes)?;
-            device.dealloc(self.down_f16, self.down_f16_bytes)?;
-            device.dealloc(self.sort_counts, self.sort_counts_bytes)?;
-            device.dealloc(self.sort_offsets, self.sort_offsets_bytes)?;
-            device.dealloc(self.sort_cursors, self.sort_cursors_bytes)?;
-            device.dealloc(self.sort_sorted_pair_idx, self.sort_sorted_pair_idx_bytes)?;
-            device.dealloc(self.sort_padded_offsets, self.sort_padded_offsets_bytes)?;
-            device.dealloc(self.sort_sorted_pair_idx_padded, self.sort_sorted_pair_idx_padded_bytes)?;
-        }
-        Ok(())
+        self.tracker.dispose(device)
     }
-}
 
-impl Drop for MoePrefillScratch {
-    fn drop(&mut self) {
-        if !self.disposed {
-            tracing::warn!(
-                target: "flambeau_qwen3_moe::forward",
-                "MoePrefillScratch dropped without dispose(device); device buffers leaked"
-            );
-        }
-    }
-}
-
-impl MoePrefillScratch {
-    /// View shaped for `flambeau_blocks::MoeExperts` prefill methods.
     pub fn view(&self) -> flambeau_blocks::MoeExpertsPrefillScratch {
-        flambeau_blocks::MoeExpertsPrefillScratch {
-            max_tokens: self.max_tokens,
-            x_q8_1: self.x_q8_1,
-            router_logits: self.router_logits,
-            expert_ids: self.expert_ids,
-            expert_weights: self.expert_weights,
-            gate_out_f32: self.gate_out_f32,
-            up_out_f32: self.up_out_f32,
-            activated_f16: self.activated_f16,
-            activated_q8_1: self.activated_q8_1,
-            down_f32: self.down_f32,
-            down_f16: self.down_f16,
-            sort_counts: self.sort_counts,
-            sort_offsets: self.sort_offsets,
-            sort_cursors: self.sort_cursors,
-            sort_sorted_pair_idx: self.sort_sorted_pair_idx,
-            sort_padded_offsets: self.sort_padded_offsets,
-            sort_sorted_pair_idx_padded: self.sort_sorted_pair_idx_padded,
-        }
+        self.inner.view()
+    }
+}
+
+impl std::ops::Deref for MoePrefillScratch {
+    type Target = flambeau_blocks::OwnedMoeExpertsPrefillScratch;
+    fn deref(&self) -> &Self::Target {
+        &self.inner
+    }
+}
+
+impl std::ops::DerefMut for MoePrefillScratch {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.inner
     }
 }
 
@@ -732,21 +560,12 @@ pub fn forward_moe_ffn_prefill(
 // Shared-expert prefill.
 // ---------------------------------------------------------------------------
 
+/// Prefill workspace for the shared-expert FFN. Wraps
+/// [`flambeau_blocks::OwnedSharedExpertPrefillScratch`]; field access
+/// flows through `Deref`.
 pub struct SharedExpertPrefillScratch {
-    pub max_tokens: usize,
-    pub x_q8_1: DevicePtr,
-    pub gate_f32: DevicePtr,
-    pub up_f32: DevicePtr,
-    pub activated_f32: DevicePtr,
-    pub activated_f16: DevicePtr,
-    pub activated_q8_1: DevicePtr,
-    pub down_f32: DevicePtr,
-    pub x_norm_f32: DevicePtr,
-    x_q8_1_bytes: usize,
-    inter_f32_bytes: usize,
-    inter_f16_bytes: usize,
-    inter_q8_1_bytes: usize,
-    hidden_f32_bytes: usize,
+    inner: flambeau_blocks::OwnedSharedExpertPrefillScratch,
+    tracker: flambeau_blocks::RawAllocTracker,
     disposed: bool,
 }
 
@@ -756,47 +575,18 @@ impl SharedExpertPrefillScratch {
         device: &HipDevice,
         max_tokens: usize,
     ) -> Result<Self> {
-        assert!(max_tokens >= 1);
-        let hidden = cfg.hidden_size;
-        let inter = cfg
-            .shared_expert_intermediate_size
-            .context("SharedExpertPrefillScratch requires cfg.shared_expert_intermediate_size")?;
-        assert!(hidden % 32 == 0);
-        assert!(inter % 32 == 0);
-
-        let x_q8_1_bytes = max_tokens * (hidden / 32) * std::mem::size_of::<BlockQ8_1>();
-        let inter_f32_bytes = max_tokens * inter * 4;
-        let inter_f16_bytes = max_tokens * inter * 2;
-        let inter_q8_1_bytes =
-            max_tokens * (inter / 32) * std::mem::size_of::<BlockQ8_1>();
-        let hidden_f32_bytes = max_tokens * hidden * 4;
-
-        let x_q8_1 = device.alloc(x_q8_1_bytes)?;
-        let gate_f32 = device.alloc(inter_f32_bytes)?;
-        let up_f32 = device.alloc(inter_f32_bytes)?;
-        let activated_f32 = device.alloc(inter_f32_bytes)?;
-        let activated_f16 = device.alloc(inter_f16_bytes)?;
-        let activated_q8_1 = device.alloc(inter_q8_1_bytes)?;
-        let down_f32 = device.alloc(hidden_f32_bytes)?;
-        let x_norm_f32 = device.alloc(hidden_f32_bytes)?;
-
-        Ok(Self {
-            max_tokens,
-            x_q8_1,
-            gate_f32,
-            up_f32,
-            activated_f32,
-            activated_f16,
-            activated_q8_1,
-            down_f32,
-            x_norm_f32,
-            x_q8_1_bytes,
-            inter_f32_bytes,
-            inter_f16_bytes,
-            inter_q8_1_bytes,
-            hidden_f32_bytes,
-            disposed: false,
-        })
+        let intermediate = cfg.shared_expert_intermediate_size.context(
+            "SharedExpertPrefillScratch requires cfg.shared_expert_intermediate_size",
+        )?;
+        let mut tracker = flambeau_blocks::RawAllocTracker::new();
+        let dims = flambeau_blocks::SharedExpertScratchDims {
+            hidden: cfg.hidden_size,
+            intermediate,
+        };
+        let inner = flambeau_blocks::SharedExpert::alloc_prefill_scratch(
+            device, &mut tracker, dims, max_tokens,
+        )?;
+        Ok(Self { inner, tracker, disposed: false })
     }
 
     pub fn dispose(mut self, device: &HipDevice) -> Result<()> {
@@ -804,44 +594,24 @@ impl SharedExpertPrefillScratch {
             return Ok(());
         }
         self.disposed = true;
-        unsafe {
-            device.dealloc(self.x_q8_1, self.x_q8_1_bytes)?;
-            device.dealloc(self.gate_f32, self.inter_f32_bytes)?;
-            device.dealloc(self.up_f32, self.inter_f32_bytes)?;
-            device.dealloc(self.activated_f32, self.inter_f32_bytes)?;
-            device.dealloc(self.activated_f16, self.inter_f16_bytes)?;
-            device.dealloc(self.activated_q8_1, self.inter_q8_1_bytes)?;
-            device.dealloc(self.down_f32, self.hidden_f32_bytes)?;
-            device.dealloc(self.x_norm_f32, self.hidden_f32_bytes)?;
-        }
-        Ok(())
+        self.tracker.dispose(device)
     }
-}
 
-impl SharedExpertPrefillScratch {
-    /// View shaped for `flambeau_blocks::SharedExpert::forward_prefill`.
     pub fn view(&self) -> flambeau_blocks::SharedExpertPrefillScratch {
-        flambeau_blocks::SharedExpertPrefillScratch {
-            max_tokens: self.max_tokens,
-            x_q8_1: self.x_q8_1,
-            gate_f32: self.gate_f32,
-            up_f32: self.up_f32,
-            activated_f16: self.activated_f16,
-            activated_q8_1: self.activated_q8_1,
-            down_f32: self.down_f32,
-            x_norm_f32: self.x_norm_f32,
-        }
+        self.inner.view()
     }
 }
 
-impl Drop for SharedExpertPrefillScratch {
-    fn drop(&mut self) {
-        if !self.disposed {
-            tracing::warn!(
-                target: "flambeau_qwen3_moe::forward",
-                "SharedExpertPrefillScratch dropped without dispose(device); device buffers leaked"
-            );
-        }
+impl std::ops::Deref for SharedExpertPrefillScratch {
+    type Target = flambeau_blocks::OwnedSharedExpertPrefillScratch;
+    fn deref(&self) -> &Self::Target {
+        &self.inner
+    }
+}
+
+impl std::ops::DerefMut for SharedExpertPrefillScratch {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.inner
     }
 }
 
