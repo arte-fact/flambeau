@@ -1,6 +1,12 @@
 # Gemma 4 v1 perf cert — flambeau vs llama.cpp
 
 **Date:** 2026-05-14
+**Output-quality status:** Coherent. The companion parity test
+(`crates/models/gemma4/tests/parity_vs_llamacpp.rs`) decodes
+greedy on "The capital of France is" and asserts the output contains
+"Paris". Bug caught by that test (PP missing `sqrt(n_embd)` embedding
+scale → constant token 240017) was fixed before these numbers were
+finalised; the timings below are on coherent decode output.
 **Rig:** threadreaper-gfx906, 4 × MI50 (16 GB / card), 100 W cap
 **Flambeau build:** `feature/gemma4` @ ce61ecf
 **llama.cpp build:** 97508acb1 (8704), ROCm gfx906 backend

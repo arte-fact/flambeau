@@ -14,10 +14,7 @@
 //! enforces this — splits that would violate it return an error.
 //!
 //! Limitations of S8-A:
-//! - Decode only (PP prefill is a follow-up).
-//! - Dense FFN only (MoE branch lands with S6-B).
 //! - No per-layer side-channel embedding (S5-B-2).
-//! - No embedding-input `sqrt(n_embd)` scale (S5-B-2 follow-up).
 
 #![cfg(feature = "hip")]
 
@@ -772,7 +769,25 @@ impl PpDecodeDriver for Gemma4PpDriver {
             self.cfg.hidden_size,
             token_id,
             stage.hidden_a,
+        )?;
+        // Gemma4 input scale: `inpL = scale(inpL, sqrt(n_embd))`
+        // (`gemma4-iswa.cpp:20`). Mirrors the same step in
+        // `single_device::forward_one_token_logits`. Without this, the
+        // residual magnitude is too small, every downstream rmsnorm
+        // computes the wrong scale, and the output converges to a
+        // degenerate token (caught by parity test #36 on 31B Q4_0).
+        let reg = flambeau_ops::hip::OpsRegistry::new(device)
+            .map_err(|e| anyhow!("embed_token registry: {e}"))?;
+        let ops = flambeau_ops::hip::HipOps::new(&reg, stream);
+        use flambeau_ops::Ops;
+        ops.scale_f16(
+            stage.hidden_a,
+            stage.hidden_a,
+            self.cfg.hidden_size,
+            (self.cfg.hidden_size as f32).sqrt(),
         )
+        .context("embed_token sqrt(n_embd) scale")?;
+        Ok(())
     }
 
     fn forward_layer_decode(
@@ -1333,6 +1348,13 @@ impl PpPrefillDriver for Gemma4PpDriver {
                 row_f32.into_iter().map(half::f16::from_f32).collect()
             };
             host[i * hidden..(i + 1) * hidden].copy_from_slice(&row_f16);
+        }
+        // Gemma4 input scale: `inpL = scale(inpL, sqrt(n_embd))`
+        // (`gemma4-iswa.cpp:20`). Applied host-side here so the
+        // uploaded F16 already has the correct magnitude.
+        let scale = (hidden as f32).sqrt();
+        for v in host.iter_mut() {
+            *v = half::f16::from_f32(v.to_f32() * scale);
         }
         let bytes = host.len() * 2;
         // SAFETY: stage.hidden_a sized max_tokens * hidden * 2 bytes;
