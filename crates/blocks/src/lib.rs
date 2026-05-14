@@ -25,6 +25,7 @@ pub mod moe_experts;
 pub mod shared_expert;
 pub mod sharding;
 pub mod topology;
+pub mod weight_roles;
 
 pub use attention::{
     AttentionScratchDims, AttnDecodeSlots, AttnPrefillSlots,
@@ -62,6 +63,11 @@ pub use shared_expert::{
 pub use sharding::{
     upload_replicated_norm_f32_to_f16, upload_replicated_tensor, upload_sharded_tensor,
     UploadedTensor,
+};
+pub use weight_roles::{
+    AttnK, AttnKNorm, AttnNorm, AttnOutput, AttnQ, AttnQNorm, AttnV, DtypeFilter, FfnDown, FfnGate,
+    FfnNorm, FfnUp, LmHead, ModelConfig, OutputNorm, PostAttnNorm, PostFfwNorm, TokenEmbd,
+    WeightRole, WeightSpec, WeightUploader,
 };
 pub use topology::{
     forward_one_token_hybrid, forward_one_token_pp, forward_one_token_tp,

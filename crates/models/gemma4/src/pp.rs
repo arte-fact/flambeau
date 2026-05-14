@@ -22,7 +22,9 @@ use anyhow::{anyhow, bail, Context, Result};
 use flambeau_backend_hip::{HipCluster, HipDevice, HipStream};
 use flambeau_blocks::{
     embed_token_host, forward_one_token_pp, forward_prefill_pp, row_bytes_for_dtype,
-    upload_f16_ones, PpDecodeDriver, PpPrefillDriver, RawAllocTracker,
+    upload_f16_ones, AttnK, AttnKNorm, AttnNorm, AttnOutput, AttnQ, AttnQNorm, AttnV, FfnDown,
+    FfnGate, FfnNorm, FfnUp, PostAttnNorm, PostFfwNorm, PpDecodeDriver, PpPrefillDriver,
+    RawAllocTracker, WeightUploader,
 };
 use flambeau_core::{CopyDirection, Device, DevicePtr, Stream};
 use flambeau_ops::hip::{HipOps, OpsRegistry};
@@ -977,21 +979,6 @@ fn upload_tensor_raw(
     })
 }
 
-/// Upload one tensor, tracking it in the per-stage raw-alloc list so
-/// `dispose` frees it. Returns the [`DeviceTensor`]. Used for layer
-/// quant weights.
-fn upload_tensor_tracked(
-    file: &GgufFile,
-    info: &TensorInfo,
-    device: &HipDevice,
-    stream: &HipStream,
-    raw: &mut Vec<(DevicePtr, usize)>,
-) -> Result<DeviceTensor> {
-    let t = upload_tensor_raw(file, info, device, stream)?;
-    raw.push((t.ptr, t.bytes));
-    Ok(t)
-}
-
 /// Read an F32 norm weight from the GGUF mmap, cast each lane to F16
 /// host-side, upload the F16 buffer to the device, and track the
 /// allocation in `raw` for dispose. Returns the device pointer ready
@@ -1053,28 +1040,42 @@ fn upload_norm_f32_as_f16(
     }
 }
 
-/// Same as [`upload_norm_f32_as_f16`] but tracks the resulting
-/// allocation in `raw` for dispose.
-fn upload_norm_tracked(
-    file: &GgufFile,
-    info: &TensorInfo,
-    device: &HipDevice,
-    stream: &HipStream,
-    raw: &mut Vec<(DevicePtr, usize)>,
-) -> Result<DevicePtr> {
-    let elems: usize = info.dims.iter().product::<u64>() as usize;
-    let ptr = upload_norm_f32_as_f16(file, info, device, stream)?;
-    // F32 was cast → F16, F16 was uploaded raw. Either way the alloc is
-    // elems * 2 bytes.
-    raw.push((ptr, elems * 2));
-    Ok(ptr)
-}
 
 /// Upload every tensor for one layer (attention + dense FFN), with
 /// F32→F16 cast for norms. The layer's `attn_k` / `attn_v` /
 /// `attn_k_norm` are honoured optional per the alt-attention +
 /// shared-KV-tail rules. `raw` collects every device alloc this
 /// function makes so the caller can dispose them.
+/// Read the per-layer F32 scalar `layer_output_scale` host-side. This
+/// isn't a `WeightRole` because flambeau holds the value as an
+/// `Option<f32>` (no device buffer), so the typed uploader has nothing
+/// to do.
+fn read_layer_output_scale(file: &GgufFile, spec: &LayerSpec) -> Result<Option<f32>> {
+    let name = AttnNames::for_layer(spec.index).layer_output_scale;
+    let Some(info) = file.tensors.get(&name) else {
+        return Ok(None);
+    };
+    if info.dtype != GgmlDType::F32 {
+        bail!(
+            "layer {}: layer_output_scale must be F32, got {:?}",
+            spec.index,
+            info.dtype
+        );
+    }
+    let raw_bytes = file
+        .tensor_raw(&info.name)
+        .with_context(|| format!("tensor_raw `{}`", info.name))?;
+    if raw_bytes.len() < 4 {
+        bail!("layer {}: layer_output_scale row < 4 bytes", spec.index);
+    }
+    Ok(Some(f32::from_le_bytes([
+        raw_bytes[0],
+        raw_bytes[1],
+        raw_bytes[2],
+        raw_bytes[3],
+    ])))
+}
+
 fn upload_layer_pp(
     file: &GgufFile,
     spec: &LayerSpec,
@@ -1083,151 +1084,51 @@ fn upload_layer_pp(
     stream: &HipStream,
     raw: &mut Vec<(DevicePtr, usize)>,
 ) -> Result<Gemma4LayerWeights> {
-    let an = AttnNames::for_layer(spec.index);
-    let dn = DenseFfnNames::for_layer(spec.index);
-
-    let attn_norm = upload_norm_tracked(
-        file,
-        file.tensors
-            .get(&an.attn_norm)
-            .ok_or_else(|| anyhow!("{}", an.attn_norm))?,
+    let il = spec.index;
+    let mut tracker = RawAllocTracker::new();
+    let mut up = WeightUploader {
         device,
         stream,
-        raw,
-    )?;
-    let attn_q_info = file
-        .tensors
-        .get(&an.attn_q)
-        .ok_or_else(|| anyhow!("{}", an.attn_q))?;
-    let attn_q_t = upload_tensor_tracked(file, attn_q_info, device, stream, raw)?;
-    let attn_q_dims = [
-        attn_q_info.dims[0] as usize,
-        attn_q_info.dims[1] as usize,
-    ];
-
-    let (attn_k_handle, _attn_k_present) = if let Some(info) = file.tensors.get(&an.attn_k) {
-        let t = upload_tensor_tracked(file, info, device, stream, raw)?;
-        let dims = [info.dims[0] as usize, info.dims[1] as usize];
-        (Some(t.as_weight_handle(dims)?), true)
-    } else {
-        if spec.has_kv {
-            bail!("layer {}: attn_k required but missing", spec.index);
-        }
-        (None, false)
-    };
-    let attn_v_handle = if let Some(info) = file.tensors.get(&an.attn_v) {
-        let t = upload_tensor_tracked(file, info, device, stream, raw)?;
-        let dims = [info.dims[0] as usize, info.dims[1] as usize];
-        Some(t.as_weight_handle(dims)?)
-    } else {
-        None
+        tracker: &mut tracker,
+        file,
+        cfg,
+        world: 1,
+        rank: 0,
     };
 
-    let attn_output_info = file
-        .tensors
-        .get(&an.attn_output)
-        .ok_or_else(|| anyhow!("{}", an.attn_output))?;
-    let attn_output_t = upload_tensor_tracked(file, attn_output_info, device, stream, raw)?;
-    let attn_output_dims = [
-        attn_output_info.dims[0] as usize,
-        attn_output_info.dims[1] as usize,
-    ];
+    let attn_norm = up.upload_norm_required::<AttnNorm>(il)?;
+    let attn_q = up.upload_matmul_required::<AttnQ>(il)?;
+    let attn_k = up.upload_matmul::<AttnK>(il)?;
+    let attn_v = up.upload_matmul::<AttnV>(il)?;
+    let attn_output = up.upload_matmul_required::<AttnOutput>(il)?;
+    let attn_q_norm = up.upload_norm_required::<AttnQNorm>(il)?;
+    let attn_k_norm = up.upload_norm::<AttnKNorm>(il)?;
+    let post_attention_norm = up.upload_norm_required::<PostAttnNorm>(il)?;
+    let ffn_norm = up.upload_norm_required::<FfnNorm>(il)?;
+    let ffn_gate = up.upload_matmul_required::<FfnGate>(il)?;
+    let ffn_up = up.upload_matmul_required::<FfnUp>(il)?;
+    let ffn_down = up.upload_matmul_required::<FfnDown>(il)?;
+    let post_ffw_norm = up.upload_norm_required::<PostFfwNorm>(il)?;
+    drop(up);
 
-    let attn_q_norm = upload_norm_tracked(
-        file,
-        file.tensors
-            .get(&an.attn_q_norm)
-            .ok_or_else(|| anyhow!("{}", an.attn_q_norm))?,
-        device,
-        stream,
-        raw,
-    )?;
-    let attn_k_norm = if let Some(info) = file.tensors.get(&an.attn_k_norm) {
-        Some(upload_norm_tracked(file, info, device, stream, raw)?)
-    } else {
-        if spec.has_kv {
-            bail!("layer {}: attn_k_norm required but missing", spec.index);
+    // Gemma4 quirks the typed roles don't model: shared-KV invariants +
+    // host-side F32 scalar `layer_output_scale`.
+    if spec.has_kv {
+        if attn_k.is_none() {
+            bail!("layer {il}: attn_k required for has_kv layer");
         }
-        None
-    };
-    let post_attention_norm = upload_norm_tracked(
-        file,
-        file.tensors
-            .get(&an.post_attention_norm)
-            .ok_or_else(|| anyhow!("{}", an.post_attention_norm))?,
-        device,
-        stream,
-        raw,
-    )?;
-    let layer_output_scale = if let Some(info) = file.tensors.get(&an.layer_output_scale) {
-        if info.dtype != GgmlDType::F32 {
-            bail!(
-                "layer {}: layer_output_scale must be F32, got {:?}",
-                spec.index,
-                info.dtype
-            );
+        if attn_k_norm.is_none() {
+            bail!("layer {il}: attn_k_norm required for has_kv layer");
         }
-        let raw_bytes = file
-            .tensor_raw(&info.name)
-            .with_context(|| format!("tensor_raw `{}`", info.name))?;
-        if raw_bytes.len() < 4 {
-            bail!("layer {}: layer_output_scale row < 4 bytes", spec.index);
-        }
-        Some(f32::from_le_bytes([
-            raw_bytes[0],
-            raw_bytes[1],
-            raw_bytes[2],
-            raw_bytes[3],
-        ]))
-    } else {
-        None
-    };
+    }
+    let layer_output_scale = read_layer_output_scale(file, spec)?;
 
-    let ffn_norm = upload_norm_tracked(
-        file,
-        file.tensors
-            .get(&dn.ffn_norm)
-            .ok_or_else(|| anyhow!("{}", dn.ffn_norm))?,
-        device,
-        stream,
-        raw,
-    )?;
-    let ffn_gate_info = file
-        .tensors
-        .get(&dn.ffn_gate)
-        .ok_or_else(|| anyhow!("{}", dn.ffn_gate))?;
-    let ffn_gate_t = upload_tensor_tracked(file, ffn_gate_info, device, stream, raw)?;
-    let ffn_gate_dims = [
-        ffn_gate_info.dims[0] as usize,
-        ffn_gate_info.dims[1] as usize,
-    ];
-    let ffn_up_info = file
-        .tensors
-        .get(&dn.ffn_up)
-        .ok_or_else(|| anyhow!("{}", dn.ffn_up))?;
-    let ffn_up_t = upload_tensor_tracked(file, ffn_up_info, device, stream, raw)?;
-    let ffn_up_dims = [
-        ffn_up_info.dims[0] as usize,
-        ffn_up_info.dims[1] as usize,
-    ];
-    let ffn_down_info = file
-        .tensors
-        .get(&dn.ffn_down)
-        .ok_or_else(|| anyhow!("{}", dn.ffn_down))?;
-    let ffn_down_t = upload_tensor_tracked(file, ffn_down_info, device, stream, raw)?;
-    let ffn_down_dims = [
-        ffn_down_info.dims[0] as usize,
-        ffn_down_info.dims[1] as usize,
-    ];
-    let post_ffw_norm = upload_norm_tracked(
-        file,
-        file.tensors
-            .get(&dn.post_ffw_norm)
-            .ok_or_else(|| anyhow!("{}", dn.post_ffw_norm))?,
-        device,
-        stream,
-        raw,
-    )?;
+    // Drain the local tracker into the PP-driver `raw` vec so dispose
+    // chain remains identical.
+    for (ptr, bytes) in std::mem::take(&mut tracker.allocs) {
+        raw.push((ptr, bytes));
+    }
+    let _ = tracker.dispose(device);
 
     let moe = if spec.ffn_kind == FfnKind::Moe {
         let moe_dims = cfg
@@ -1258,18 +1159,18 @@ fn upload_layer_pp(
 
     Ok(Gemma4LayerWeights {
         attn_norm,
-        attn_q: attn_q_t.as_weight_handle(attn_q_dims)?,
-        attn_k: attn_k_handle,
-        attn_v: attn_v_handle,
-        attn_output: attn_output_t.as_weight_handle(attn_output_dims)?,
+        attn_q,
+        attn_k,
+        attn_v,
+        attn_output,
         attn_q_norm,
         attn_k_norm,
         post_attention_norm,
         layer_output_scale,
         ffn_norm,
-        ffn_gate: ffn_gate_t.as_weight_handle(ffn_gate_dims)?,
-        ffn_up: ffn_up_t.as_weight_handle(ffn_up_dims)?,
-        ffn_down: ffn_down_t.as_weight_handle(ffn_down_dims)?,
+        ffn_gate,
+        ffn_up,
+        ffn_down,
         post_ffw_norm,
         per_layer_embed: None,
         moe,

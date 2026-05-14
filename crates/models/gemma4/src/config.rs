@@ -313,6 +313,17 @@ impl Gemma4Config {
     }
 }
 
+#[cfg(feature = "hip")]
+impl flambeau_blocks::ModelConfig for Gemma4Config {
+    fn hidden(&self) -> usize { self.hidden_size }
+    fn ff_len(&self) -> usize { self.feed_forward_length }
+    fn n_heads(&self, _layer: usize) -> usize { self.num_heads }
+    fn n_kv_heads(&self, layer: usize) -> usize { self.num_kv_heads[layer] }
+    fn head_dim(&self, layer: usize) -> usize { self.head_dim_for_layer(layer) }
+    fn rms_norm_eps(&self) -> f32 { self.rms_norm_eps }
+    fn vocab_size(&self) -> usize { self.vocab_size }
+}
+
 /// Read a metadata key as a length-`n` array of `usize`. If the key
 /// stores a scalar, broadcast it.
 fn read_usize_array_or_scalar(
