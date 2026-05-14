@@ -478,6 +478,73 @@ fn parity_31b_q4_0_tp2() {
     );
 }
 
+/// Phase 10c-G bisect: 26B-A4B-Q8_0 on PP2 (layer-split). Single-
+/// device OOMs at 27 GB on a 16 GB MI50; PP2 splits layers so each
+/// rank holds ~13.5 GB. If PP-MoE produces coherent (non-pad) output
+/// for the same model, the F16 overflow in `smoke_26b_a4b_q8_0_tp2`
+/// is TP-specific (likely in the per-branch norm composition for
+/// shared-MLP + routed-MoE). If PP-MoE ALSO overflows, the bug is
+/// gemma4-general.
+#[test]
+fn smoke_26b_a4b_q8_0_pp2() {
+    let Some(file) = open_or_skip("gemma-4-26B-A4B-it-Q8_0.gguf") else {
+        return;
+    };
+    if device_count().map(|n| n < 2).unwrap_or(true) {
+        eprintln!("skipping — need 2 HIP devices");
+        return;
+    }
+    let file = Arc::new(file);
+    let cfg = Gemma4Config::from_gguf(&file).expect("cfg");
+    let vocab = cfg.vocab_size;
+    // Per-token decode avoids the MoE prefill bail (#23). Each prompt
+    // token + decode token feeds through forward_one_token. NOTE:
+    // PP's forward_one_token currently passes `moe_scratch: None` to
+    // forward_layer_decode (pp.rs:853), so PP-MoE is also unwired.
+    // The smoke skips with a diagnostic rather than panicking — once
+    // PP-MoE scratch is wired, this becomes a real bisect tool.
+    let (prompt_ids, fb_ids) = match flambeau_decode_pp_pertoken(file.clone(), &[0, 2]) {
+        Ok(r) => r,
+        Err(e) => {
+            let msg = e.to_string();
+            if msg.contains("moe_scratch is None")
+                || msg.contains("MoE prefill not supported")
+            {
+                eprintln!(
+                    "skipping — PP-MoE not yet wired: {msg}\n\
+                     (Pending: alloc Gemma4MoeScratch on Gemma4PpStage + pass through \
+                     forward_one_token; tracked under 10c-G followup.)"
+                );
+                return;
+            }
+            eprintln!("26B-A4B PP2 decode failed: {e}");
+            panic!("flambeau decode PP2 (MoE)");
+        }
+    };
+    let tokenizer = load_from_gguf(&file).expect("tokenizer");
+    let fb_text = tokenizer.decode(&fb_ids).unwrap_or_default();
+    eprintln!("\n=== SMOKE | 26B-A4B-Q8_0 PP2 (hip:0,2) ===");
+    eprintln!("  prompt   ({} ids): {prompt_ids:?}", prompt_ids.len());
+    eprintln!("  flambeau ({} ids): {fb_ids:?}", fb_ids.len());
+    eprintln!("  flambeau text: {fb_text:?}");
+
+    assert_eq!(fb_ids.len(), N_DECODE);
+    for (i, &t) in fb_ids.iter().enumerate() {
+        assert!((t as usize) < vocab, "step {i}: token {t} >= vocab {vocab}");
+    }
+    let first = fb_ids[0];
+    let all_same = fb_ids.iter().all(|&t| t == first);
+    if all_same {
+        eprintln!(
+            "  [WARN] all {} decoded tokens identical ({first}); gemma4 PP MoE \
+             produces constant logits — bug is gemma4-general, not TP-specific",
+            fb_ids.len()
+        );
+    } else {
+        eprintln!("  [OK] non-degenerate output → 10c-G TP MoE is the bug");
+    }
+}
+
 /// Smoke test for Gemma4-26B-A4B (MoE) on TP2. Asserts decode runs
 /// to completion without crash + produces in-vocab tokens for every
 /// step. Does NOT assert text match — the gemma4 MoE path uses
