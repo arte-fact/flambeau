@@ -439,6 +439,7 @@ fn serve_cmd(args: ServeArgs) -> Result<()> {
     // can build different registries.
     let mut registry = flambeau_runtime::Registry::new();
     registry.register(std::sync::Arc::new(flambeau_qwen3_moe::Qwen3MoEModelArch));
+    registry.register(std::sync::Arc::new(flambeau_gemma4::Gemma4ModelArch));
 
     let rt = tokio::runtime::Builder::new_multi_thread()
         .enable_all()

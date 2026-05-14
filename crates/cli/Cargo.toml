@@ -36,6 +36,7 @@ flambeau-server = { path = "../server" }
 # runtime registry. Compiles arch-only (no `hip` feature) — the
 # struct + trait impl don't need device code.
 flambeau-qwen3-moe = { path = "../models/qwen3-moe" }
+flambeau-gemma4 = { path = "../models/gemma4" }
 anyhow.workspace = true
 clap.workspace = true
 tokio.workspace = true
