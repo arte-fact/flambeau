@@ -19,55 +19,36 @@ use crate::layout::ModelLayout;
 use crate::moe::Gemma4MoeScratch;
 use crate::output_head::OutputHeadScratch;
 use crate::weights_hip::Gemma4DeviceWeights;
-use flambeau_blocks::MoeExpertsDecodeScratch;
+use flambeau_blocks::{MoeExpertsDecodeScratch, RawAllocTracker};
 
 /// Persistent device scratch for one decode step. Allocated once at
 /// session-init; the per-call [`crate::scratch::LayerDecodeScratch`]
 /// view is reconstructed each forward call from these pointers.
 struct LayerScratchPtrs {
     x_q8_1: DevicePtr,
-    x_q8_1_bytes: usize,
     mmvq_f32: DevicePtr,
-    mmvq_f32_bytes: usize,
     q_f16: DevicePtr,
-    q_f16_bytes: usize,
     k_f16: DevicePtr,
-    k_f16_bytes: usize,
     v_f16: DevicePtr,
-    v_f16_bytes: usize,
     attn_out_f16: DevicePtr,
-    attn_out_bytes: usize,
     post_attn_norm_f16: DevicePtr,
-    post_attn_norm_bytes: usize,
     attn_residual_f16: DevicePtr,
-    attn_residual_bytes: usize,
     ffn_norm_f16: DevicePtr,
-    ffn_norm_bytes: usize,
     gate_f32: DevicePtr,
-    gate_f32_bytes: usize,
     up_f32: DevicePtr,
-    up_f32_bytes: usize,
     activated_f16: DevicePtr,
-    activated_f16_bytes: usize,
     activated_q8_1: DevicePtr,
-    activated_q8_1_bytes: usize,
     down_f32: DevicePtr,
-    down_f32_bytes: usize,
     post_ffw_norm_f16: DevicePtr,
-    post_ffw_norm_bytes: usize,
     positions: DevicePtr,
-    positions_bytes: usize,
     v_ones_f16: DevicePtr,
-    v_ones_f16_bytes: usize,
 }
 
 struct OuterScratchPtrs {
     /// F16 [hidden] — residual stream (input of next layer, output of last).
     x_residual_f16: DevicePtr,
-    x_residual_bytes: usize,
     /// F16 [hidden] — destination of the current layer (swapped with residual each step).
     x_next_f16: DevicePtr,
-    x_next_bytes: usize,
 }
 
 /// Persistent device scratch for the MoE branch (26B-A4B only).
@@ -91,9 +72,6 @@ struct MoeScratchPtrs {
     activated_q8_1: DevicePtr,
     down_f32: DevicePtr,
     down_f16: DevicePtr,
-    /// Total byte count of every device alloc above — used for the
-    /// dispose pass.
-    total_bytes: usize,
 }
 
 pub struct Gemma4Session {
@@ -106,6 +84,9 @@ pub struct Gemma4Session {
     pub kv_caches: Vec<Option<KvCache<F16Contig, HipDevice>>>,
     layer_scratch: LayerScratchPtrs,
     outer_scratch: OuterScratchPtrs,
+    /// Every device alloc the session made — scratch + MoE + per-layer-
+    /// embd table — tracked here for `dispose()`.
+    raw_alloc: RawAllocTracker,
     /// `Some` when `cfg.moe.is_some()`; the MoE composer reads it via
     /// [`Gemma4Session::moe_scratch_view`].
     moe_scratch: Option<MoeScratchPtrs>,
@@ -117,7 +98,6 @@ pub struct Gemma4Session {
     /// per token from the GGUF mmap and uploaded once per forward
     /// call. `None` when `cfg.per_layer_embed.is_none()`.
     pub(crate) inp_per_layer_table_buf: Option<DevicePtr>,
-    inp_per_layer_table_bytes: usize,
     /// E2B/E4B only: GGUF mmap reference so we can dequant the
     /// `per_layer_token_embd` row for the input token + read the
     /// `per_layer_model_proj` / `per_layer_proj_norm` tensors per
@@ -189,52 +169,29 @@ impl Gemma4Session {
             .unwrap_or(64);
         let ff_len = cfg.feed_forward_length;
         let mmvq_max = q_width_max.max(kv_width_max).max(hidden).max(ff_len);
-        // Q8_1 block = `d + s + 32 i8` = 36 bytes (matches kernels-hip layout).
-        let q8_1_blocks = hidden.max(ff_len).div_ceil(32);
-        let q8_1_bytes_per_block = 36;
-        let x_q8_1_bytes = q8_1_blocks * q8_1_bytes_per_block;
-        let activated_q8_1_bytes = ff_len.div_ceil(32) * q8_1_bytes_per_block;
+        let x_q8_1_n = hidden.max(ff_len).div_ceil(32) * 32;
+        let activated_q8_1_n = ff_len.div_ceil(32) * 32;
 
-        let alloc = |bytes: usize| -> Result<DevicePtr> {
-            let p = device.alloc(bytes).map_err(|e| anyhow::anyhow!("alloc {bytes}: {e}"))?;
-            Ok(p)
-        };
+        let mut raw_alloc = RawAllocTracker::new();
 
         let layer_scratch = LayerScratchPtrs {
-            x_q8_1: alloc(x_q8_1_bytes)?,
-            x_q8_1_bytes,
-            mmvq_f32: alloc(mmvq_max * 4)?,
-            mmvq_f32_bytes: mmvq_max * 4,
-            q_f16: alloc(q_width_max * 2)?,
-            q_f16_bytes: q_width_max * 2,
-            k_f16: alloc(kv_width_max * 2)?,
-            k_f16_bytes: kv_width_max * 2,
-            v_f16: alloc(kv_width_max * 2)?,
-            v_f16_bytes: kv_width_max * 2,
-            attn_out_f16: alloc(q_width_max.max(hidden) * 2)?,
-            attn_out_bytes: q_width_max.max(hidden) * 2,
-            post_attn_norm_f16: alloc(hidden * 2)?,
-            post_attn_norm_bytes: hidden * 2,
-            attn_residual_f16: alloc(hidden * 2)?,
-            attn_residual_bytes: hidden * 2,
-            ffn_norm_f16: alloc(hidden * 2)?,
-            ffn_norm_bytes: hidden * 2,
-            gate_f32: alloc(ff_len * 4)?,
-            gate_f32_bytes: ff_len * 4,
-            up_f32: alloc(ff_len * 4)?,
-            up_f32_bytes: ff_len * 4,
-            activated_f16: alloc(ff_len * 2)?,
-            activated_f16_bytes: ff_len * 2,
-            activated_q8_1: alloc(activated_q8_1_bytes)?,
-            activated_q8_1_bytes,
-            down_f32: alloc(hidden * 4)?,
-            down_f32_bytes: hidden * 4,
-            post_ffw_norm_f16: alloc(hidden * 2)?,
-            post_ffw_norm_bytes: hidden * 2,
-            positions: alloc(4)?,
-            positions_bytes: 4,
-            v_ones_f16: alloc(head_dim_max * 2)?,
-            v_ones_f16_bytes: head_dim_max * 2,
+            x_q8_1: raw_alloc.alloc_q8_1(device, x_q8_1_n)?.0,
+            mmvq_f32: raw_alloc.alloc_f32(device, mmvq_max)?.0,
+            q_f16: raw_alloc.alloc_f16(device, q_width_max)?.0,
+            k_f16: raw_alloc.alloc_f16(device, kv_width_max)?.0,
+            v_f16: raw_alloc.alloc_f16(device, kv_width_max)?.0,
+            attn_out_f16: raw_alloc.alloc_f16(device, q_width_max.max(hidden))?.0,
+            post_attn_norm_f16: raw_alloc.alloc_f16(device, hidden)?.0,
+            attn_residual_f16: raw_alloc.alloc_f16(device, hidden)?.0,
+            ffn_norm_f16: raw_alloc.alloc_f16(device, hidden)?.0,
+            gate_f32: raw_alloc.alloc_f32(device, ff_len)?.0,
+            up_f32: raw_alloc.alloc_f32(device, ff_len)?.0,
+            activated_f16: raw_alloc.alloc_f16(device, ff_len)?.0,
+            activated_q8_1: raw_alloc.alloc_q8_1(device, activated_q8_1_n)?.0,
+            down_f32: raw_alloc.alloc_f32(device, hidden)?.0,
+            post_ffw_norm_f16: raw_alloc.alloc_f16(device, hidden)?.0,
+            positions: raw_alloc.alloc_i32(device, 1)?.0,
+            v_ones_f16: raw_alloc.alloc_f16(device, head_dim_max)?.0,
         };
 
         // Fill the v_ones buffer with 1.0 in F16.
@@ -254,10 +211,8 @@ impl Gemma4Session {
         drop(ones);
 
         let outer_scratch = OuterScratchPtrs {
-            x_residual_f16: alloc(hidden * 2)?,
-            x_residual_bytes: hidden * 2,
-            x_next_f16: alloc(hidden * 2)?,
-            x_next_bytes: hidden * 2,
+            x_residual_f16: raw_alloc.alloc_f16(device, hidden)?.0,
+            x_next_f16: raw_alloc.alloc_f16(device, hidden)?.0,
         };
 
         // MoE composer scratch (26B-A4B only). `zero_hidden_f16` is
@@ -268,31 +223,24 @@ impl Gemma4Session {
             let n_experts = moe_dims.num_experts;
             let intermediate = moe_dims.moe_intermediate_size;
 
-            let router_input_f16 = alloc(hidden * 2)?;
-            let cur_mlp_f16 = alloc(hidden * 2)?;
-            let cur_moe_f16 = alloc(hidden * 2)?;
-            let cur_combined_f16 = alloc(hidden * 2)?;
-            let zero_hidden_f16 = alloc(hidden * 2)?;
+            let router_input_f16 = raw_alloc.alloc_f16(device, hidden)?.0;
+            let cur_mlp_f16 = raw_alloc.alloc_f16(device, hidden)?.0;
+            let cur_moe_f16 = raw_alloc.alloc_f16(device, hidden)?.0;
+            let cur_combined_f16 = raw_alloc.alloc_f16(device, hidden)?.0;
+            let zero_hidden_f16 = raw_alloc.alloc_f16(device, hidden)?.0;
 
-            // x_q8_1: Q8_1 [hidden / 32] (36-byte blocks).
-            let x_q8_1_bytes_moe = hidden.div_ceil(32) * 36;
-            let x_q8_1 = alloc(x_q8_1_bytes_moe)?;
-
-            let router_logits = alloc(n_experts * 4)?;
-            let expert_ids = alloc(top_k * 4)?;
-            let expert_weights = alloc(top_k * 4)?;
-
-            // Indexed gate/up/down work over [top_k, intermediate] /
-            // [top_k, hidden] slabs (block-2D launches treat each top_k
-            // slot as its own effective token; the indexed-MMVQ kernel
-            // reads expert_ids[k] to pick the slab).
-            let gate_out_f32 = alloc(top_k * intermediate * 4)?;
-            let up_out_f32 = alloc(top_k * intermediate * 4)?;
-            let activated_f16 = alloc(top_k * intermediate * 2)?;
-            let activated_q8_1 =
-                alloc(top_k * intermediate.div_ceil(32) * 36)?;
-            let down_f32 = alloc(top_k * hidden * 4)?;
-            let down_f16 = alloc(top_k * hidden * 2)?;
+            let x_q8_1 = raw_alloc.alloc_q8_1(device, hidden.div_ceil(32) * 32)?.0;
+            let router_logits = raw_alloc.alloc_f32(device, n_experts)?.0;
+            let expert_ids = raw_alloc.alloc_i32(device, top_k)?.0;
+            let expert_weights = raw_alloc.alloc_f32(device, top_k)?.0;
+            let gate_out_f32 = raw_alloc.alloc_f32(device, top_k * intermediate)?.0;
+            let up_out_f32 = raw_alloc.alloc_f32(device, top_k * intermediate)?.0;
+            let activated_f16 = raw_alloc.alloc_f16(device, top_k * intermediate)?.0;
+            let activated_q8_1 = raw_alloc
+                .alloc_q8_1(device, top_k * intermediate.div_ceil(32) * 32)?
+                .0;
+            let down_f32 = raw_alloc.alloc_f32(device, top_k * hidden)?.0;
+            let down_f16 = raw_alloc.alloc_f16(device, top_k * hidden)?.0;
 
             // Upload zeros to zero_hidden_f16.
             let zeros: Vec<f16> = vec![f16::from_f32(0.0); hidden];
@@ -310,16 +258,6 @@ impl Gemma4Session {
             device.default_stream().synchronize()?;
             drop(zeros);
 
-            let total_bytes = hidden * 2 * 5
-                + x_q8_1_bytes_moe
-                + n_experts * 4
-                + top_k * 4 * 2
-                + top_k * intermediate * 4 * 2
-                + top_k * intermediate * 2
-                + top_k * intermediate.div_ceil(32) * 36
-                + top_k * hidden * 4
-                + top_k * hidden * 2;
-
             Some(MoeScratchPtrs {
                 router_input_f16,
                 cur_mlp_f16,
@@ -336,27 +274,24 @@ impl Gemma4Session {
                 activated_q8_1,
                 down_f32,
                 down_f16,
-                total_bytes,
             })
         } else {
             None
         };
 
         let output_head = OutputHeadScratch {
-            x_norm_f16: alloc(hidden * 2)?,
-            x_q8_1: alloc(x_q8_1_bytes)?,
-            logits_f32: alloc(vocab * 4)?,
+            x_norm_f16: raw_alloc.alloc_f16(device, hidden)?.0,
+            x_q8_1: raw_alloc.alloc_q8_1(device, x_q8_1_n)?.0,
+            logits_f32: raw_alloc.alloc_f32(device, vocab)?.0,
         };
 
         // Per-layer-embd table buffer: F32 [n_layer × pe]. Allocated
         // only when the variant has the side-channel; otherwise None.
-        let (inp_per_layer_table_buf, inp_per_layer_table_bytes) =
-            if let Some(ple) = cfg.per_layer_embed {
-                let bytes = cfg.num_layers * ple.n_embd_per_layer * 4;
-                (Some(alloc(bytes)?), bytes)
-            } else {
-                (None, 0)
-            };
+        let inp_per_layer_table_buf = if let Some(ple) = cfg.per_layer_embed {
+            Some(raw_alloc.alloc_f32(device, cfg.num_layers * ple.n_embd_per_layer)?.0)
+        } else {
+            None
+        };
 
         Ok(Self {
             cfg,
@@ -369,10 +304,10 @@ impl Gemma4Session {
             output_head,
             positions_host: vec![0i32; 1],
             inp_per_layer_table_buf,
-            inp_per_layer_table_bytes,
             gguf: None,
             device_id: device.id(),
             max_tokens,
+            raw_alloc,
             disposed: false,
         })
     }
@@ -433,10 +368,6 @@ impl Gemma4Session {
             &mut self.outer_scratch.x_residual_f16,
             &mut self.outer_scratch.x_next_f16,
         );
-        std::mem::swap(
-            &mut self.outer_scratch.x_residual_bytes,
-            &mut self.outer_scratch.x_next_bytes,
-        );
     }
 
     pub(crate) fn output_head_scratch(&mut self) -> &mut OutputHeadScratch {
@@ -477,91 +408,15 @@ impl Gemma4Session {
         }
         self.disposed = true;
 
-        // KV caches.
         let kvs = std::mem::take(&mut self.kv_caches);
         for kv in kvs.into_iter().flatten() {
             // SAFETY: KvCache.dispose contract — see runtime/kv_cache.rs.
             kv.dispose(device)
                 .map_err(|e| anyhow::anyhow!("kv dispose: {e}"))?;
         }
-
-        // Layer scratch.
-        let lf = &self.layer_scratch;
-        let deallocs: &[(DevicePtr, usize)] = &[
-            (lf.x_q8_1, lf.x_q8_1_bytes),
-            (lf.mmvq_f32, lf.mmvq_f32_bytes),
-            (lf.q_f16, lf.q_f16_bytes),
-            (lf.k_f16, lf.k_f16_bytes),
-            (lf.v_f16, lf.v_f16_bytes),
-            (lf.attn_out_f16, lf.attn_out_bytes),
-            (lf.post_attn_norm_f16, lf.post_attn_norm_bytes),
-            (lf.attn_residual_f16, lf.attn_residual_bytes),
-            (lf.ffn_norm_f16, lf.ffn_norm_bytes),
-            (lf.gate_f32, lf.gate_f32_bytes),
-            (lf.up_f32, lf.up_f32_bytes),
-            (lf.activated_f16, lf.activated_f16_bytes),
-            (lf.activated_q8_1, lf.activated_q8_1_bytes),
-            (lf.down_f32, lf.down_f32_bytes),
-            (lf.post_ffw_norm_f16, lf.post_ffw_norm_bytes),
-            (lf.positions, lf.positions_bytes),
-            (lf.v_ones_f16, lf.v_ones_f16_bytes),
-            (self.outer_scratch.x_residual_f16, self.outer_scratch.x_residual_bytes),
-            (self.outer_scratch.x_next_f16, self.outer_scratch.x_next_bytes),
-            (self.output_head.x_norm_f16, self.cfg.hidden_size * 2),
-            (self.output_head.x_q8_1, lf.x_q8_1_bytes),
-            (self.output_head.logits_f32, self.cfg.vocab_size * 4),
-        ];
-        for &(ptr, bytes) in deallocs {
-            // SAFETY: every ptr came from `device.alloc(bytes)` in `new`.
-            unsafe {
-                let _ = device.dealloc(ptr, bytes);
-            }
-        }
-
-        if let Some(ptr) = self.inp_per_layer_table_buf.take() {
-            // SAFETY: ptr came from `alloc(inp_per_layer_table_bytes)` in `new`.
-            unsafe {
-                let _ = device.dealloc(ptr, self.inp_per_layer_table_bytes);
-            }
-        }
-
-        if let Some(m) = self.moe_scratch.take() {
-            let moe_dims = self
-                .cfg
-                .moe
-                .expect("moe_scratch alive but cfg.moe is None");
-            let hidden = self.cfg.hidden_size;
-            let top_k = moe_dims.num_experts_per_tok;
-            let n_experts = moe_dims.num_experts;
-            let intermediate = moe_dims.moe_intermediate_size;
-            let x_q8_1_bytes_moe = hidden.div_ceil(32) * 36;
-            let activated_q8_1_bytes = top_k * intermediate.div_ceil(32) * 36;
-            let moe_deallocs: &[(DevicePtr, usize)] = &[
-                (m.router_input_f16, hidden * 2),
-                (m.cur_mlp_f16, hidden * 2),
-                (m.cur_moe_f16, hidden * 2),
-                (m.cur_combined_f16, hidden * 2),
-                (m.zero_hidden_f16, hidden * 2),
-                (m.x_q8_1, x_q8_1_bytes_moe),
-                (m.router_logits, n_experts * 4),
-                (m.expert_ids, top_k * 4),
-                (m.expert_weights, top_k * 4),
-                (m.gate_out_f32, top_k * intermediate * 4),
-                (m.up_out_f32, top_k * intermediate * 4),
-                (m.activated_f16, top_k * intermediate * 2),
-                (m.activated_q8_1, activated_q8_1_bytes),
-                (m.down_f32, top_k * hidden * 4),
-                (m.down_f16, top_k * hidden * 2),
-            ];
-            for &(ptr, bytes) in moe_deallocs {
-                // SAFETY: every ptr came from `device.alloc(bytes)` in `new`.
-                unsafe {
-                    let _ = device.dealloc(ptr, bytes);
-                }
-            }
-            let _ = m.total_bytes;
-        }
-
+        self.raw_alloc
+            .dispose(device)
+            .map_err(|e| anyhow::anyhow!("raw_alloc dispose: {e}"))?;
         self.weights.dispose(device).context("weights dispose")?;
         Ok(())
     }

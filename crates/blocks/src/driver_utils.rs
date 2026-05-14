@@ -226,6 +226,53 @@ impl RawAllocTracker {
         self.allocs.push((ptr, bytes));
     }
 
+    /// Allocate + track an F32 buffer of `n` elements (4 B / elem).
+    /// Returns `(ptr, bytes)` — the `(DevicePtr, usize)` pair used by
+    /// stage-scratch structs.
+    pub fn alloc_f32(&mut self, device: &HipDevice, n: usize) -> Result<(DevicePtr, usize)> {
+        let bytes = n * 4;
+        let ptr = self.alloc_zeroed_tracked(device, bytes)?;
+        Ok((ptr, bytes))
+    }
+
+    /// Allocate + track an F16 buffer of `n` elements (2 B / elem).
+    pub fn alloc_f16(&mut self, device: &HipDevice, n: usize) -> Result<(DevicePtr, usize)> {
+        let bytes = n * 2;
+        let ptr = self.alloc_zeroed_tracked(device, bytes)?;
+        Ok((ptr, bytes))
+    }
+
+    /// Allocate + track a Q8_0 buffer of `n` elements
+    /// (`(n / 32) * 34` B; asserts `n % 32 == 0`).
+    pub fn alloc_q8_0(&mut self, device: &HipDevice, n: usize) -> Result<(DevicePtr, usize)> {
+        if n % 32 != 0 {
+            bail!("alloc_q8_0: n={n} not a multiple of 32");
+        }
+        let bytes = (n / 32) * 34;
+        let ptr = self.alloc_zeroed_tracked(device, bytes)?;
+        Ok((ptr, bytes))
+    }
+
+    /// Allocate + track a Q8_1 buffer of `n` elements
+    /// (`(n / 32) * 36` B; asserts `n % 32 == 0`).
+    pub fn alloc_q8_1(&mut self, device: &HipDevice, n: usize) -> Result<(DevicePtr, usize)> {
+        if n % 32 != 0 {
+            bail!("alloc_q8_1: n={n} not a multiple of 32");
+        }
+        let bytes = (n / 32) * 36;
+        let ptr = self.alloc_zeroed_tracked(device, bytes)?;
+        Ok((ptr, bytes))
+    }
+
+    /// Allocate + track an `i32` scratch of `n` elements (4 B / elem).
+    /// Used for `positions`, `expert_ids`, and other small index
+    /// buffers.
+    pub fn alloc_i32(&mut self, device: &HipDevice, n: usize) -> Result<(DevicePtr, usize)> {
+        let bytes = n * 4;
+        let ptr = self.alloc_zeroed_tracked(device, bytes)?;
+        Ok((ptr, bytes))
+    }
+
     pub fn is_empty(&self) -> bool {
         self.allocs.is_empty()
     }

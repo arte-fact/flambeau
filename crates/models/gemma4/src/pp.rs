@@ -21,8 +21,8 @@
 use anyhow::{anyhow, bail, Context, Result};
 use flambeau_backend_hip::{HipCluster, HipDevice, HipStream};
 use flambeau_blocks::{
-    alloc_zeroed, embed_token_host, forward_one_token_pp, forward_prefill_pp, row_bytes_for_dtype,
-    upload_f16_ones, PpDecodeDriver, PpPrefillDriver,
+    embed_token_host, forward_one_token_pp, forward_prefill_pp, row_bytes_for_dtype,
+    upload_f16_ones, PpDecodeDriver, PpPrefillDriver, RawAllocTracker,
 };
 use flambeau_core::{CopyDirection, Device, DevicePtr, Stream};
 use flambeau_ops::hip::{HipOps, OpsRegistry};
@@ -168,9 +168,9 @@ pub struct Gemma4PpStage {
     /// Maximum prefill chunk size (number of tokens) this stage can
     /// handle in a single `forward_layers_prefill_in_stage` call.
     pub max_tokens: usize,
-    /// Raw allocations tracked for `dispose()`. Mirrors
-    /// `Gemma4DeviceWeights.raw_tensors`.
-    raw_alloc_bytes: Vec<(DevicePtr, usize)>,
+    /// Every device alloc the stage made — scratch buffers + weight
+    /// buffers — tracked here for `dispose()`.
+    raw_alloc: RawAllocTracker,
     disposed: bool,
 }
 
@@ -279,48 +279,37 @@ impl Gemma4PpStage {
             .max()
             .unwrap_or(64);
         let mmvq_max = q_width_max.max(kv_width_max).max(hidden).max(ff_len);
-        let q8_1_blocks = hidden.max(ff_len).div_ceil(32);
-        let q8_1_bytes_per_block = 36;
-        let x_q8_1_bytes = q8_1_blocks * q8_1_bytes_per_block;
-        let activated_q8_1_bytes = ff_len.div_ceil(32) * q8_1_bytes_per_block;
+        let x_q8_1_n = hidden.max(ff_len).div_ceil(32) * 32;
+        let activated_q8_1_n = ff_len.div_ceil(32) * 32;
 
-        let mut raw_alloc_bytes: Vec<(DevicePtr, usize)> = Vec::new();
-        // Helper macro: alloc + track, avoiding the closure-borrow tangle.
-        macro_rules! ta {
-            ($bytes:expr) => {{
-                let bytes = $bytes;
-                let p = alloc_zeroed(device, bytes)?;
-                raw_alloc_bytes.push((p, bytes));
-                (p, bytes)
-            }};
-        }
+        let mut raw_alloc = RawAllocTracker::new();
 
         let v_ones_ptr = upload_f16_ones(device, head_dim_max)?;
-        raw_alloc_bytes.push((v_ones_ptr, head_dim_max * 2));
+        raw_alloc.track(v_ones_ptr, head_dim_max * 2);
         let scratch = LayerScratchPtrs {
-            x_q8_1: ta!(x_q8_1_bytes),
-            mmvq_f32: ta!(mmvq_max * 4),
-            q_f16: ta!(q_width_max * 2),
-            k_f16: ta!(kv_width_max * 2),
-            v_f16: ta!(kv_width_max * 2),
-            attn_out_f16: ta!(q_width_max.max(hidden) * 2),
-            post_attn_norm_f16: ta!(hidden * 2),
-            attn_residual_f16: ta!(hidden * 2),
-            ffn_norm_f16: ta!(hidden * 2),
-            gate_f32: ta!(ff_len * 4),
-            up_f32: ta!(ff_len * 4),
-            activated_f16: ta!(ff_len * 2),
-            activated_q8_1: ta!(activated_q8_1_bytes),
-            down_f32: ta!(hidden * 4),
-            post_ffw_norm_f16: ta!(hidden * 2),
-            positions: ta!(4),
+            x_q8_1: raw_alloc.alloc_q8_1(device, x_q8_1_n)?,
+            mmvq_f32: raw_alloc.alloc_f32(device, mmvq_max)?,
+            q_f16: raw_alloc.alloc_f16(device, q_width_max)?,
+            k_f16: raw_alloc.alloc_f16(device, kv_width_max)?,
+            v_f16: raw_alloc.alloc_f16(device, kv_width_max)?,
+            attn_out_f16: raw_alloc.alloc_f16(device, q_width_max.max(hidden))?,
+            post_attn_norm_f16: raw_alloc.alloc_f16(device, hidden)?,
+            attn_residual_f16: raw_alloc.alloc_f16(device, hidden)?,
+            ffn_norm_f16: raw_alloc.alloc_f16(device, hidden)?,
+            gate_f32: raw_alloc.alloc_f32(device, ff_len)?,
+            up_f32: raw_alloc.alloc_f32(device, ff_len)?,
+            activated_f16: raw_alloc.alloc_f16(device, ff_len)?,
+            activated_q8_1: raw_alloc.alloc_q8_1(device, activated_q8_1_n)?,
+            down_f32: raw_alloc.alloc_f32(device, hidden)?,
+            post_ffw_norm_f16: raw_alloc.alloc_f16(device, hidden)?,
+            positions: raw_alloc.alloc_i32(device, 1)?,
             v_ones_f16: (v_ones_ptr, head_dim_max * 2),
         };
 
         // hidden_a / hidden_b sized for L=max_tokens prefill rows
         // (decode reuses the head as a 1-row view).
-        let hidden_a = ta!(max_tokens * hidden * 2).0;
-        let hidden_b = ta!(max_tokens * hidden * 2).0;
+        let hidden_a = raw_alloc.alloc_f16(device, max_tokens * hidden)?.0;
+        let hidden_b = raw_alloc.alloc_f16(device, max_tokens * hidden)?.0;
 
         // Prefill scratches sized for max_tokens.
         let n_heads_max = layout
@@ -336,37 +325,36 @@ impl Gemma4PpStage {
             .max()
             .unwrap_or(hidden);
         let mmvq_max_p = n_heads_max.max(kv_width_max).max(hidden).max(ff_len);
-        let pf_x_q8_1_bytes = max_tokens * q8_1_blocks * q8_1_bytes_per_block;
-        let pf_activated_q8_1_bytes =
-            max_tokens * ff_len.div_ceil(32) * q8_1_bytes_per_block;
+        let pf_x_q8_1_n = max_tokens * x_q8_1_n;
+        let pf_activated_q8_1_n = max_tokens * activated_q8_1_n;
         let prefill = PrefillScratchPtrs {
-            x_norm_f16: ta!(max_tokens * hidden * 2),
-            x_q8_1: ta!(pf_x_q8_1_bytes),
-            x_q8_1_mmq: ta!(pf_x_q8_1_bytes),
-            mmvq_f32: ta!(max_tokens * mmvq_max_p * 4),
-            q_f16: ta!(max_tokens * n_heads_max * 2),
-            k_f16: ta!(max_tokens * kv_width_max * 2),
-            v_f16: ta!(max_tokens * kv_width_max * 2),
-            attn_out_f16: ta!(max_tokens * n_heads_max.max(hidden) * 2),
-            post_attn_norm_f16: ta!(max_tokens * hidden * 2),
-            attn_residual_f16: ta!(max_tokens * hidden * 2),
-            gate_f32: ta!(max_tokens * ff_len * 4),
-            up_f32: ta!(max_tokens * ff_len * 4),
-            activated_f16: ta!(max_tokens * ff_len * 2),
-            activated_q8_1: ta!(pf_activated_q8_1_bytes),
-            activated_q8_1_mmq: ta!(pf_activated_q8_1_bytes),
-            down_f32: ta!(max_tokens * hidden * 4),
-            post_ffw_norm_f16: ta!(max_tokens * hidden * 2),
-            positions: ta!(max_tokens * 4),
+            x_norm_f16: raw_alloc.alloc_f16(device, max_tokens * hidden)?,
+            x_q8_1: raw_alloc.alloc_q8_1(device, pf_x_q8_1_n)?,
+            x_q8_1_mmq: raw_alloc.alloc_q8_1(device, pf_x_q8_1_n)?,
+            mmvq_f32: raw_alloc.alloc_f32(device, max_tokens * mmvq_max_p)?,
+            q_f16: raw_alloc.alloc_f16(device, max_tokens * n_heads_max)?,
+            k_f16: raw_alloc.alloc_f16(device, max_tokens * kv_width_max)?,
+            v_f16: raw_alloc.alloc_f16(device, max_tokens * kv_width_max)?,
+            attn_out_f16: raw_alloc.alloc_f16(device, max_tokens * n_heads_max.max(hidden))?,
+            post_attn_norm_f16: raw_alloc.alloc_f16(device, max_tokens * hidden)?,
+            attn_residual_f16: raw_alloc.alloc_f16(device, max_tokens * hidden)?,
+            gate_f32: raw_alloc.alloc_f32(device, max_tokens * ff_len)?,
+            up_f32: raw_alloc.alloc_f32(device, max_tokens * ff_len)?,
+            activated_f16: raw_alloc.alloc_f16(device, max_tokens * ff_len)?,
+            activated_q8_1: raw_alloc.alloc_q8_1(device, pf_activated_q8_1_n)?,
+            activated_q8_1_mmq: raw_alloc.alloc_q8_1(device, pf_activated_q8_1_n)?,
+            down_f32: raw_alloc.alloc_f32(device, max_tokens * hidden)?,
+            post_ffw_norm_f16: raw_alloc.alloc_f16(device, max_tokens * hidden)?,
+            positions: raw_alloc.alloc_i32(device, max_tokens)?,
             v_ones_f16: (v_ones_ptr, head_dim_max * 2),
             positions_host: vec![0i32; max_tokens],
         };
 
         let output_head_scratch = if output_norm.is_some() {
             Some(OutputHeadScratch {
-                x_norm_f16: ta!(hidden * 2).0,
-                x_q8_1: ta!(x_q8_1_bytes).0,
-                logits_f32: ta!(cfg.vocab_size * 4).0,
+                x_norm_f16: raw_alloc.alloc_f16(device, hidden)?.0,
+                x_q8_1: raw_alloc.alloc_q8_1(device, x_q8_1_n)?.0,
+                logits_f32: raw_alloc.alloc_f32(device, cfg.vocab_size)?.0,
             })
         } else {
             None
@@ -389,7 +377,7 @@ impl Gemma4PpStage {
             prefill,
             positions_host: vec![0i32; 1],
             max_tokens,
-            raw_alloc_bytes,
+            raw_alloc,
             disposed: false,
         })
     }
@@ -452,12 +440,9 @@ impl Gemma4PpStage {
         for kv in kvs.into_iter().flatten() {
             kv.dispose(device).map_err(|e| anyhow!("kv dispose: {e}"))?;
         }
-        for (ptr, bytes) in self.raw_alloc_bytes.drain(..) {
-            // SAFETY: every ptr came from `device.alloc(bytes)`.
-            unsafe {
-                let _ = device.dealloc(ptr, bytes);
-            }
-        }
+        self.raw_alloc
+            .dispose(device)
+            .map_err(|e| anyhow!("raw_alloc dispose: {e}"))?;
         // Token embd / output_norm / output were uploaded by the
         // driver; their bytes are tracked in their owning DeviceTensor.
         for t in self.token_embd.take().into_iter()
@@ -664,7 +649,9 @@ impl Gemma4PpDriver {
                 output,
                 max_tokens,
             )?;
-            stage.raw_alloc_bytes.extend(raw);
+            for (ptr, bytes) in raw {
+                stage.raw_alloc.track(ptr, bytes);
+            }
             // Last rank also needs token_embd_dims for the LM-head GEMM
             // shape (we keep it on every rank so callers can introspect,
             // but only the last rank consumes it in `output_head`).

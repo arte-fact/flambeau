@@ -30,8 +30,8 @@ use std::sync::Arc;
 use anyhow::{anyhow, bail, Context, Result};
 use flambeau_backend_hip::{BarP2pAllReduce, HipCluster, HipDevice};
 use flambeau_blocks::{
-    alloc_zeroed, embed_token_host, forward_one_token_hybrid, upload_f16_ones, Activation,
-    DenseMlpDecodeScratch, DenseMlpTp, HybridDecodeDriver, StandardAttention,
+    embed_token_host, forward_one_token_hybrid, upload_f16_ones, Activation,
+    DenseMlpDecodeScratch, DenseMlpTp, HybridDecodeDriver, RawAllocTracker, StandardAttention,
     StandardAttentionDecodeScratch, WeightHandle,
 };
 use flambeau_core::{CopyDirection, Device, DevicePtr, Stream};
@@ -66,7 +66,7 @@ pub struct HybridRankState {
     /// Head rank only.
     pub output_head_scratch: Option<OutputHeadScratch>,
     positions_host: Vec<i32>,
-    raw_alloc_bytes: Vec<(DevicePtr, usize)>,
+    raw_alloc: RawAllocTracker,
     disposed: bool,
 }
 
@@ -224,59 +224,47 @@ impl HybridRankState {
             kv_caches.push(Some(kv));
         }
 
-        let mut raw_alloc_bytes: Vec<(DevicePtr, usize)> = Vec::new();
-        macro_rules! ta {
-            ($bytes:expr) => {{
-                let bytes = $bytes;
-                let p = alloc_zeroed(device, bytes)?;
-                raw_alloc_bytes.push((p, bytes));
-                (p, bytes)
-            }};
-        }
+        let mut raw_alloc = RawAllocTracker::new();
 
         let mmvq_max = q_width_local_max
             .max(kv_width_local_max)
             .max(hidden)
             .max(ff_len_local);
-        let q8_1_blocks = hidden.max(ff_len_local).div_ceil(32);
-        let q8_1_bytes_per_block = 36;
-        let x_q8_1_bytes = q8_1_blocks * q8_1_bytes_per_block;
-        let activated_q8_1_bytes = ff_len_local.div_ceil(32) * q8_1_bytes_per_block;
+        let x_q8_1_n = hidden.max(ff_len_local).div_ceil(32) * 32;
+        let activated_q8_1_n = ff_len_local.div_ceil(32) * 32;
 
         let v_ones_ptr = upload_f16_ones(device, head_dim)?;
-        raw_alloc_bytes.push((v_ones_ptr, head_dim * 2));
+        raw_alloc.track(v_ones_ptr, head_dim * 2);
 
-        // Splitk partials sized for n_heads_local_max × MAX_SPLITK_CHUNKS.
-        let splitk_ms_bytes = n_heads_local_max * flambeau_blocks::MAX_SPLITK_CHUNKS * 4;
-        let splitk_o_bytes =
-            n_heads_local_max * flambeau_blocks::MAX_SPLITK_CHUNKS * head_dim * 4;
+        let splitk_ms_n = n_heads_local_max * flambeau_blocks::MAX_SPLITK_CHUNKS;
+        let splitk_o_n = n_heads_local_max * flambeau_blocks::MAX_SPLITK_CHUNKS * head_dim;
 
         let scratch = HybridScratchPtrs {
-            x_q8_1: ta!(x_q8_1_bytes),
-            mmvq_f32: ta!(mmvq_max * 4),
-            q_f16: ta!(q_width_local_max * 2),
-            k_f16: ta!(kv_width_local_max * 2),
-            v_f16: ta!(kv_width_local_max * 2),
-            attn_out_local: ta!(q_width_local_max.max(hidden) * 2),
-            attn_residual_f16: ta!(hidden * 2),
-            gate_f32: ta!(ff_len_local * 4),
-            up_f32: ta!(ff_len_local * 4),
-            activated_f16: ta!(ff_len_local * 2),
-            activated_q8_1: ta!(activated_q8_1_bytes),
-            positions: ta!(4),
+            x_q8_1: raw_alloc.alloc_q8_1(device, x_q8_1_n)?,
+            mmvq_f32: raw_alloc.alloc_f32(device, mmvq_max)?,
+            q_f16: raw_alloc.alloc_f16(device, q_width_local_max)?,
+            k_f16: raw_alloc.alloc_f16(device, kv_width_local_max)?,
+            v_f16: raw_alloc.alloc_f16(device, kv_width_local_max)?,
+            attn_out_local: raw_alloc.alloc_f16(device, q_width_local_max.max(hidden))?,
+            attn_residual_f16: raw_alloc.alloc_f16(device, hidden)?,
+            gate_f32: raw_alloc.alloc_f32(device, ff_len_local)?,
+            up_f32: raw_alloc.alloc_f32(device, ff_len_local)?,
+            activated_f16: raw_alloc.alloc_f16(device, ff_len_local)?,
+            activated_q8_1: raw_alloc.alloc_q8_1(device, activated_q8_1_n)?,
+            positions: raw_alloc.alloc_i32(device, 1)?,
             v_ones_f16: (v_ones_ptr, head_dim * 2),
-            splitk_partials_m: ta!(splitk_ms_bytes),
-            splitk_partials_s: ta!(splitk_ms_bytes),
-            splitk_partials_o: ta!(splitk_o_bytes),
+            splitk_partials_m: raw_alloc.alloc_f32(device, splitk_ms_n)?,
+            splitk_partials_s: raw_alloc.alloc_f32(device, splitk_ms_n)?,
+            splitk_partials_o: raw_alloc.alloc_f32(device, splitk_o_n)?,
         };
-        let hidden_ptr = ta!(hidden * 2).0;
-        let partial_attn = ta!(hidden * 2).0;
-        let partial_ffn = ta!(hidden * 2).0;
+        let hidden_ptr = raw_alloc.alloc_f16(device, hidden)?.0;
+        let partial_attn = raw_alloc.alloc_f16(device, hidden)?.0;
+        let partial_ffn = raw_alloc.alloc_f16(device, hidden)?.0;
         let output_head_scratch = if is_head_rank {
             Some(OutputHeadScratch {
-                x_norm_f16: ta!(hidden * 2).0,
-                x_q8_1: ta!(x_q8_1_bytes).0,
-                logits_f32: ta!(cfg.vocab_size * 4).0,
+                x_norm_f16: raw_alloc.alloc_f16(device, hidden)?.0,
+                x_q8_1: raw_alloc.alloc_q8_1(device, x_q8_1_n)?.0,
+                logits_f32: raw_alloc.alloc_f32(device, cfg.vocab_size)?.0,
             })
         } else {
             None
@@ -297,7 +285,7 @@ impl HybridRankState {
             scratch,
             output_head_scratch,
             positions_host: vec![0i32; 1],
-            raw_alloc_bytes,
+            raw_alloc,
             disposed: false,
         })
     }
@@ -311,11 +299,9 @@ impl HybridRankState {
         for kv in kvs.into_iter().flatten() {
             kv.dispose(device).map_err(|e| anyhow!("kv dispose: {e}"))?;
         }
-        for (p, b) in self.raw_alloc_bytes.drain(..) {
-            unsafe {
-                let _ = device.dealloc(p, b);
-            }
-        }
+        self.raw_alloc
+            .dispose(device)
+            .map_err(|e| anyhow!("raw_alloc dispose: {e}"))?;
         for t in [
             std::mem::replace(&mut self.token_embd, None),
             std::mem::replace(&mut self.output_norm, None),
