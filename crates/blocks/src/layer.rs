@@ -448,3 +448,93 @@ pub unsafe fn tp_allreduce_residual<const DIM: usize>(
     unsafe { tp_allreduce_residual_into(ar, &h_ptrs, &p_ptrs, n_elems, streams) }
 }
 
+/// AllReduce-sum the partials, fold into `hidden[r]`, then RMSNorm the
+/// result into `out_norm[r]` — one fused kernel via
+/// `BarP2pAllReduce::residual_rmsnorm_tp{2,4}`. Untyped wrapper.
+///
+/// # Safety
+/// Inherits the contract of [`BarP2pAllReduce::residual_rmsnorm_tp2`] /
+/// [`BarP2pAllReduce::residual_rmsnorm_tp4`].
+#[allow(clippy::too_many_arguments)]
+pub unsafe fn tp_allreduce_residual_rmsnorm_into(
+    ar: &BarP2pAllReduce,
+    hidden: &[DevicePtr],
+    partials: &[DevicePtr],
+    rms_weight: &[DevicePtr],
+    out_norm: &[DevicePtr],
+    n_elems: usize,
+    eps: f32,
+    streams: &[&HipStream],
+) -> Result<()> {
+    if hidden.len() != partials.len()
+        || hidden.len() != rms_weight.len()
+        || hidden.len() != out_norm.len()
+        || hidden.len() != streams.len()
+    {
+        bail!(
+            "tp_allreduce_residual_rmsnorm_into: hidden/partials/rms_weight/out_norm/streams length mismatch ({}, {}, {}, {}, {})",
+            hidden.len(),
+            partials.len(),
+            rms_weight.len(),
+            out_norm.len(),
+            streams.len(),
+        );
+    }
+    match hidden.len() {
+        2 => {
+            let h: [DevicePtr; 2] = [hidden[0], hidden[1]];
+            let p: [DevicePtr; 2] = [partials[0], partials[1]];
+            let w: [DevicePtr; 2] = [rms_weight[0], rms_weight[1]];
+            let o: [DevicePtr; 2] = [out_norm[0], out_norm[1]];
+            let s: [&HipStream; 2] = [streams[0], streams[1]];
+            unsafe { ar.residual_rmsnorm_tp2(&h, &p, &w, &o, n_elems as u32, eps, &s) }
+                .map_err(|e| anyhow::anyhow!("AR residual_rmsnorm_tp2: {e}"))?;
+        }
+        4 => {
+            let h: [DevicePtr; 4] = [hidden[0], hidden[1], hidden[2], hidden[3]];
+            let p: [DevicePtr; 4] = [partials[0], partials[1], partials[2], partials[3]];
+            let w: [DevicePtr; 4] = [rms_weight[0], rms_weight[1], rms_weight[2], rms_weight[3]];
+            let o: [DevicePtr; 4] = [out_norm[0], out_norm[1], out_norm[2], out_norm[3]];
+            let s: [&HipStream; 4] = [streams[0], streams[1], streams[2], streams[3]];
+            unsafe { ar.residual_rmsnorm_tp4(&h, &p, &w, &o, n_elems as u32, eps, &s) }
+                .map_err(|e| anyhow::anyhow!("AR residual_rmsnorm_tp4: {e}"))?;
+        }
+        n => bail!("tp_allreduce_residual_rmsnorm_into: unsupported tp_size {n}"),
+    }
+    Ok(())
+}
+
+/// Typed fused AR-residual-rmsnorm. Consumes per-rank
+/// `Buffer<F16, RowParallel<DIM>>` partials, folds into per-rank
+/// `Buffer<F16, Replicated>` hiddens (in place), and writes RMSNormed
+/// output into `Buffer<F16, Replicated>` `out_norm`. `rms_weight` is
+/// the (replicated) norm weight.
+///
+/// # Safety
+/// Inherits the contract of [`tp_allreduce_residual_rmsnorm_into`].
+#[allow(clippy::too_many_arguments)]
+pub unsafe fn tp_allreduce_residual_rmsnorm<const DIM: usize>(
+    ar: &BarP2pAllReduce,
+    hidden: &[crate::tensor_view::Buffer<crate::tensor_view::F16, crate::tensor_view::Replicated>],
+    partials: &[crate::tensor_view::Buffer<crate::tensor_view::F16, crate::tensor_view::RowParallel<DIM>>],
+    rms_weight: &[crate::tensor_view::Buffer<crate::tensor_view::F16, crate::tensor_view::Replicated>],
+    out_norm: &[crate::tensor_view::Buffer<crate::tensor_view::F16, crate::tensor_view::Replicated>],
+    eps: f32,
+    streams: &[&HipStream],
+) -> Result<()> {
+    if hidden.is_empty() {
+        return Ok(());
+    }
+    let n_elems = hidden[0].n_elems();
+    let h_ptrs: Vec<DevicePtr> = hidden.iter().map(|b| b.ptr()).collect();
+    let p_ptrs: Vec<DevicePtr> = partials.iter().map(|b| b.ptr()).collect();
+    let w_ptrs: Vec<DevicePtr> = rms_weight.iter().map(|b| b.ptr()).collect();
+    let o_ptrs: Vec<DevicePtr> = out_norm.iter().map(|b| b.ptr()).collect();
+    // SAFETY: caller upholds the BAR1 + streams + ordering contract.
+    unsafe {
+        tp_allreduce_residual_rmsnorm_into(
+            ar, &h_ptrs, &p_ptrs, &w_ptrs, &o_ptrs, n_elems, eps, streams,
+        )
+    }
+}
+

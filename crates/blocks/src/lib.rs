@@ -26,6 +26,7 @@ pub mod shared_expert;
 pub mod sharding;
 pub mod tensor_view;
 pub mod topology;
+pub mod typed_ops;
 pub mod weight_roles;
 
 pub use attention::{
@@ -49,7 +50,8 @@ pub use dense_mlp::{
     OwnedDenseMlpDecodeScratch, OwnedDenseMlpPrefillScratch,
 };
 pub use layer::{
-    post_norm_residual_f16, tp_allreduce_residual, tp_allreduce_residual_into, tp_allreduce_sum,
+    post_norm_residual_f16, tp_allreduce_residual, tp_allreduce_residual_into,
+    tp_allreduce_residual_rmsnorm, tp_allreduce_residual_rmsnorm_into, tp_allreduce_sum,
     tp_allreduce_sum_into, AttnBlock, AttnDecodeScratch, AttnPrefillScratch, AttnState, FfnBlock,
     FfnDecodeScratch, FfnPrefillScratch, LayerKind,
 };
@@ -70,6 +72,7 @@ pub use tensor_view::{
     Buffer, ColParallel, ColParallelF32, Distribution, ElemType, Local, LocalF16, Replicated,
     ReplicatedF16, RowParallel, RowPartialF16, SubClusterPartial, F16, F32, I32,
 };
+pub use typed_ops as ops_typed;
 pub use weight_roles::{
     AttnGate, AttnK, AttnKBias, AttnKNorm, AttnNorm, AttnOutput, AttnQ, AttnQBias, AttnQNorm,
     AttnV, AttnVBias, DtypeFilter, FfnDown, FfnGate, FfnNorm, FfnUp, FusedAttnQkv, LmHead,
