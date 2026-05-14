@@ -25,6 +25,7 @@ pub mod moe_experts;
 pub mod shared_expert;
 pub mod sharding;
 pub mod layer_composer_tp;
+pub mod softcap;
 pub mod tensor_view;
 pub mod topology;
 pub mod tp_rank_core;
@@ -76,6 +77,7 @@ pub use tensor_view::{
     ReplicatedF16, RowParallel, RowPartialF16, SubClusterPartial, F16, F32, I32,
 };
 pub use layer_composer_tp::{forward_decode_layer_tp, LayerComposerTp};
+pub use softcap::apply_logit_softcap_f32;
 pub use tp_rank_core::TpRankCore;
 pub use tp_sync::cross_rank_event_barrier;
 pub use typed_ops as ops_typed;
