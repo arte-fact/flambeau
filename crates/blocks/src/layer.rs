@@ -276,6 +276,11 @@ pub fn post_norm_residual_f16<O: Ops>(
 /// `[DevicePtr; N]` / `[&HipStream; N]` plumbing and the rank-count
 /// match arm.
 ///
+/// The typed [`tp_allreduce_sum`] variant in this module is the
+/// preferred entry — it accepts `Buffer<F16, RowParallel<DIM>>` and
+/// returns `Buffer<F16, Replicated>`, making the AR a compile-time
+/// distribution transition.
+///
 /// # Safety
 /// Inherits the contract of [`BarP2pAllReduce::sum_tp2`] /
 /// [`BarP2pAllReduce::sum_tp4`]:
@@ -313,5 +318,40 @@ pub unsafe fn tp_allreduce_sum_into(
         n => bail!("tp_allreduce_sum_into: unsupported tp_size {n}"),
     }
     Ok(())
+}
+
+/// Typed AllReduce-sum: consumes per-rank `Buffer<F16, RowParallel<DIM>>`
+/// partials, performs the BAR1 AllReduce, and returns the same buffers
+/// retagged as `Buffer<F16, Replicated>`. The typestate transition is
+/// the safety guarantee — after this call, the buffers can be read as
+/// full-hidden by ops whose signature requires
+/// `Buffer<F16, Replicated>`.
+///
+/// # Safety
+/// Inherits the contract of [`tp_allreduce_sum_into`] (the unsafe
+/// untyped wrapper). The typestate makes misuse a compile error but
+/// does not relax the BAR1 / streams / ordering invariants.
+pub unsafe fn tp_allreduce_sum<const DIM: usize>(
+    ar: &BarP2pAllReduce,
+    partials: &[crate::tensor_view::Buffer<crate::tensor_view::F16, crate::tensor_view::RowParallel<DIM>>],
+    streams: &[&HipStream],
+) -> Result<Vec<crate::tensor_view::Buffer<crate::tensor_view::F16, crate::tensor_view::Replicated>>> {
+    if partials.is_empty() {
+        return Ok(Vec::new());
+    }
+    let n_elems = partials[0].n_elems();
+    for (i, b) in partials.iter().enumerate() {
+        if b.n_elems() != n_elems {
+            bail!(
+                "tp_allreduce_sum: partials[{i}].n_elems={} != partials[0].n_elems={}",
+                b.n_elems(),
+                n_elems,
+            );
+        }
+    }
+    let ptrs: Vec<DevicePtr> = partials.iter().map(|b| b.ptr()).collect();
+    // SAFETY: caller upholds the BAR1 + streams + ordering contract.
+    unsafe { tp_allreduce_sum_into(ar, &ptrs, n_elems, streams)? };
+    Ok(partials.iter().map(|b| b.retag()).collect())
 }
 
