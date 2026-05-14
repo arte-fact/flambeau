@@ -26,6 +26,8 @@ pub mod shared_expert;
 pub mod sharding;
 pub mod tensor_view;
 pub mod topology;
+pub mod tp_rank_core;
+pub mod tp_sync;
 pub mod typed_ops;
 pub mod weight_roles;
 
@@ -72,6 +74,8 @@ pub use tensor_view::{
     Buffer, ColParallel, ColParallelF32, Distribution, ElemType, Local, LocalF16, Replicated,
     ReplicatedF16, RowParallel, RowPartialF16, SubClusterPartial, F16, F32, I32,
 };
+pub use tp_rank_core::TpRankCore;
+pub use tp_sync::cross_rank_event_barrier;
 pub use typed_ops as ops_typed;
 pub use weight_roles::{
     AttnGate, AttnK, AttnKBias, AttnKNorm, AttnNorm, AttnOutput, AttnQ, AttnQBias, AttnQNorm,

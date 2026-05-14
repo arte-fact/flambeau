@@ -12,7 +12,7 @@
 //! perf cert () follow.
 
 use anyhow::{bail, Result};
-use flambeau_backend_hip::{HipCluster, HipDevice, HipEvent};
+use flambeau_backend_hip::{HipCluster, HipDevice};
 use flambeau_core::{Device, DevicePtr};
 use flambeau_runtime::RankId;
 
@@ -66,14 +66,15 @@ pub struct RankForwardScratchTp {
     /// table), so a single designated rank runs the LM head; the
     /// others have `None` here.
     pub output_head: Option<OutputHeadScratch>,
-    /// event recorded on the producer stream after a
-    /// partial-write kernel (last op of `forward_full_attn_decode_tp`,
-    /// `forward_dense_ffn_decode_tp`, or `forward_gdn_decode_tp`).
-    /// Peer ranks' AR streams `stream_wait` on this event before
-    /// launching the AR kernel that reads this rank's partial buffer.
-    /// Replaces the host `Stream::synchronize` in `ar_residual`
-    /// with a driver-side DAG edge — host doesn't block.
-    pub producer_done_event: HipEvent,
+    /// Universal TP per-rank sync identity (rank id, device id,
+    /// `producer_done_event`). The `producer_done_event` is recorded
+    /// on the producer stream after a partial-write kernel (last op
+    /// of `forward_full_attn_decode_tp`, `forward_dense_ffn_decode_tp`,
+    /// or `forward_gdn_decode_tp`); peer ranks' AR streams
+    /// `stream_wait` on it via
+    /// [`flambeau_blocks::cross_rank_event_barrier`] before launching
+    /// the AR kernel that reads this rank's partial buffer.
+    pub core: flambeau_blocks::TpRankCore,
     hidden_bytes: usize,
     partial_bytes: usize,
     disposed: bool,
@@ -182,7 +183,7 @@ impl ShardedForwardOneTokenScratchTp {
             } else {
                 None
             };
-            let producer_done_event = HipEvent::new(device.id())?;
+            let core = flambeau_blocks::TpRankCore::new(rank_idx, device.id())?;
             per_rank.push(RankForwardScratchTp {
                 rank: RankId(rank_idx as u32),
                 device_id: device.id(),
@@ -196,7 +197,7 @@ impl ShardedForwardOneTokenScratchTp {
                 },
                 layer,
                 output_head,
-                producer_done_event,
+                core,
                 hidden_bytes,
                 partial_bytes,
                 disposed: false,
@@ -1995,30 +1996,13 @@ fn ar_residual(
     };
     let hidden_ptr = |r: usize| scratch.per_rank[r].hidden_a.ptr();
 
-    // 1. Each rank records its producer-done event on its own stream
-    // after the partial-write kernel. record() is host-non-blocking.
-    for r in 0..cluster.ranks() {
-        let device = cluster.device(r);
-        device.bind()?;
-        scratch.per_rank[r]
-            .producer_done_event
-            .record(device.default_stream())?;
-    }
-
-    // 2. Each rank's AR launch waits on every other rank's producer
-    // event before the AR kernel reads that peer's partial buffer.
-    // Same-rank waits are unnecessary (stream ordering auto-serialises).
-    for r in 0..cluster.ranks() {
-        let device = cluster.device(r);
-        device.bind()?;
-        let stream = device.default_stream();
-        for peer in 0..cluster.ranks() {
-            if peer != r {
-                scratch.per_rank[peer]
-                    .producer_done_event
-                    .stream_wait(stream)?;
-            }
-        }
+    // 1+2. Cross-rank stream barrier via per-rank producer_done_event.
+    // After this returns, every rank's stream is ordered behind every
+    // peer's pre-call producer-write — driver-side DAG, no host block.
+    {
+        let cores: Vec<&flambeau_blocks::TpRankCore> =
+            scratch.per_rank.iter().map(|s| &s.core).collect();
+        flambeau_blocks::cross_rank_event_barrier(cluster, &cores)?;
     }
 
     // 3. Launch AR on each rank's stream via the typed
@@ -2315,26 +2299,11 @@ fn ar_residual_rmsnorm(
     };
     let hidden_ptr = |r: usize| scratch.per_rank[r].hidden_a.ptr();
 
-    // 1. Per-rank producer-done event record (host non-blocking).
-    for r in 0..cluster.ranks() {
-        let device = cluster.device(r);
-        device.bind()?;
-        scratch.per_rank[r]
-            .producer_done_event
-            .record(device.default_stream())?;
-    }
-    // 2. Each rank waits on every peer's producer event.
-    for r in 0..cluster.ranks() {
-        let device = cluster.device(r);
-        device.bind()?;
-        let stream = device.default_stream();
-        for peer in 0..cluster.ranks() {
-            if peer != r {
-                scratch.per_rank[peer]
-                    .producer_done_event
-                    .stream_wait(stream)?;
-            }
-        }
+    // 1+2. Cross-rank stream barrier via per-rank producer_done_event.
+    {
+        let cores: Vec<&flambeau_blocks::TpRankCore> =
+            scratch.per_rank.iter().map(|s| &s.core).collect();
+        flambeau_blocks::cross_rank_event_barrier(cluster, &cores)?;
     }
     // 3. Launch the fused AR+norm.
     let elem_count = scratch.per_rank[0].hidden_bytes / 2; // bytes/F16
