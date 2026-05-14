@@ -128,8 +128,8 @@ impl ShardedForwardOneTokenScratch {
             let hidden_a_ptr = device.alloc(hidden_bytes)?;
             let hidden_b_ptr = device.alloc(hidden_bytes)?;
             let hidden_elems = hidden_bytes / 2;
-            let hidden_a = flambeau_blocks::Buffer::from_raw_unchecked(hidden_a_ptr, hidden_elems);
-            let hidden_b = flambeau_blocks::Buffer::from_raw_unchecked(hidden_b_ptr, hidden_elems);
+            let hidden_a = unsafe { flambeau_blocks::Buffer::from_raw_unchecked(hidden_a_ptr, hidden_elems) };
+            let hidden_b = unsafe { flambeau_blocks::Buffer::from_raw_unchecked(hidden_b_ptr, hidden_elems) };
             let layer = Some(LayerForwardScratch::new(&model.config, device)?);
             let output_head = if rank_idx == cluster.ranks() - 1 {
                 Some(OutputHeadScratch::new(&model.config, device)?)
@@ -671,8 +671,8 @@ impl UbatchLane {
         let hidden_a_ptr = device.alloc(hidden_bytes)?;
         let hidden_b_ptr = device.alloc(hidden_bytes)?;
         let hidden_elems = hidden_bytes / 2;
-        let hidden_a = flambeau_blocks::Buffer::from_raw_unchecked(hidden_a_ptr, hidden_elems);
-        let hidden_b = flambeau_blocks::Buffer::from_raw_unchecked(hidden_b_ptr, hidden_elems);
+        let hidden_a = unsafe { flambeau_blocks::Buffer::from_raw_unchecked(hidden_a_ptr, hidden_elems) };
+        let hidden_b = unsafe { flambeau_blocks::Buffer::from_raw_unchecked(hidden_b_ptr, hidden_elems) };
         let layer = LayerPrefillScratch::new(cfg, device, ubatch_size)?;
         Ok(Self { hidden_a, hidden_b, layer, hidden_bytes })
     }
@@ -871,8 +871,8 @@ impl ShardedForwardPrefillScratch {
             let hidden_a_ptr = device.alloc(hidden_bytes)?;
             let hidden_b_ptr = device.alloc(hidden_bytes)?;
             let hidden_elems = hidden_bytes / 2;
-            let hidden_a = flambeau_blocks::Buffer::from_raw_unchecked(hidden_a_ptr, hidden_elems);
-            let hidden_b = flambeau_blocks::Buffer::from_raw_unchecked(hidden_b_ptr, hidden_elems);
+            let hidden_a = unsafe { flambeau_blocks::Buffer::from_raw_unchecked(hidden_a_ptr, hidden_elems) };
+            let hidden_b = unsafe { flambeau_blocks::Buffer::from_raw_unchecked(hidden_b_ptr, hidden_elems) };
             let layer = Some(LayerPrefillScratch::new(&model.config, device, ubatch_size)?);
             // Extra lanes — one fresh UbatchLane per additional u_lane.
             let mut extra_lanes = Vec::with_capacity(u_lanes.saturating_sub(1));

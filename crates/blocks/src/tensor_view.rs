@@ -155,9 +155,25 @@ pub struct Buffer<T: ElemType, D: Distribution> {
 
 impl<T: ElemType, D: Distribution> Buffer<T, D> {
     /// Wrap a raw device pointer with the given distribution. The
-    /// caller asserts the distribution invariant — the type system
-    /// will enforce it from then on.
-    pub fn from_raw_unchecked(ptr: DevicePtr, n_elems: usize) -> Self {
+    /// caller asserts the distribution invariant; the type system
+    /// enforces it from then on.
+    ///
+    /// # Safety
+    /// The caller asserts that `ptr`:
+    /// - points at a valid device allocation of at least
+    ///   `n_elems * T::BYTES` bytes,
+    /// - actually has the distribution `D` claims (e.g. that the
+    ///   bytes were *just* AR-summed when claiming `Replicated`, or
+    ///   that this is a per-rank partial when claiming
+    ///   `RowParallel<DIM>`),
+    /// - won't be aliased mutably while any other view exists.
+    ///
+    /// Misuse defeats the typestate (Buffer carries no runtime check).
+    /// The boundary callers are upload paths (raw allocs → typed
+    /// buffers) and FFI boundaries (post-kernel raw outputs). Internal
+    /// code should consume buffers through typed transitions
+    /// (`tp_allreduce_sum`, etc.) rather than reconstructing from raw.
+    pub unsafe fn from_raw_unchecked(ptr: DevicePtr, n_elems: usize) -> Self {
         Self {
             ptr,
             n_elems,

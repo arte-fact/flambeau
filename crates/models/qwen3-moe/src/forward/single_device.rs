@@ -45,9 +45,9 @@ impl ForwardOneTokenScratch {
     pub fn new(cfg: &Qwen3MoEConfig, device: &HipDevice) -> Result<Self> {
         let hidden_bytes = cfg.hidden_size * 2;
         let hidden_a_ptr = device.alloc(hidden_bytes)?;
-        let hidden_a = flambeau_blocks::Buffer::from_raw_unchecked(hidden_a_ptr, hidden_bytes / 2);
+        let hidden_a = unsafe { flambeau_blocks::Buffer::from_raw_unchecked(hidden_a_ptr, hidden_bytes / 2) };
         let hidden_b_ptr = device.alloc(hidden_bytes)?;
-        let hidden_b = flambeau_blocks::Buffer::from_raw_unchecked(hidden_b_ptr, hidden_bytes / 2);
+        let hidden_b = unsafe { flambeau_blocks::Buffer::from_raw_unchecked(hidden_b_ptr, hidden_bytes / 2) };
         let layer = Some(LayerForwardScratch::new(cfg, device)?);
         let output_head = Some(OutputHeadScratch::new(cfg, device)?);
         Ok(Self {
@@ -194,9 +194,9 @@ impl ForwardPrefillScratch {
     ) -> Result<Self> {
         let hidden_bytes = max_tokens * cfg.hidden_size * 2;
         let hidden_a_ptr = device.alloc(hidden_bytes)?;
-        let hidden_a = flambeau_blocks::Buffer::from_raw_unchecked(hidden_a_ptr, hidden_bytes / 2);
+        let hidden_a = unsafe { flambeau_blocks::Buffer::from_raw_unchecked(hidden_a_ptr, hidden_bytes / 2) };
         let hidden_b_ptr = device.alloc(hidden_bytes)?;
-        let hidden_b = flambeau_blocks::Buffer::from_raw_unchecked(hidden_b_ptr, hidden_bytes / 2);
+        let hidden_b = unsafe { flambeau_blocks::Buffer::from_raw_unchecked(hidden_b_ptr, hidden_bytes / 2) };
         let layer = Some(LayerPrefillScratch::new(cfg, device, max_tokens)?);
         let output_head = Some(OutputHeadScratch::new(cfg, device)?);
         Ok(Self {

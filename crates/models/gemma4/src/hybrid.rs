@@ -596,16 +596,19 @@ fn forward_layer_decode_hybrid(
 
     // Phase 2: typed AR over the stage's sub-cluster — same pattern as
     // gemma4 tp.rs Phase-2 (commit 20ce15b) but per-stage.
-    let partials: [Buffer<F16, RowParallel<0>>; 2] = [
-        Buffer::from_raw_unchecked(stage.rank_state[0].partial_attn, hidden),
-        Buffer::from_raw_unchecked(stage.rank_state[1].partial_attn, hidden),
-    ];
-    let streams: [&_; 2] = [
-        sub_cluster.device(0).default_stream(),
-        sub_cluster.device(1).default_stream(),
-    ];
-    // SAFETY: each partial_attn is hidden F16 elems on its rank's device.
+    // SAFETY (Buffer::from_raw_unchecked + tp_allreduce_sum): each
+    // partial_attn is hidden F16 elems on its rank's device; streams
+    // outlive the AR; subsequent reads are serialised on each rank's
+    // default stream.
     let _replicated = unsafe {
+        let partials: [Buffer<F16, RowParallel<0>>; 2] = [
+            Buffer::from_raw_unchecked(stage.rank_state[0].partial_attn, hidden),
+            Buffer::from_raw_unchecked(stage.rank_state[1].partial_attn, hidden),
+        ];
+        let streams: [&_; 2] = [
+            sub_cluster.device(0).default_stream(),
+            sub_cluster.device(1).default_stream(),
+        ];
         tp_allreduce_sum::<0>(ar, &partials, &streams)
     }
     .map_err(|e| anyhow!("AR sum attn stage {stage_idx}: {e}"))?;
@@ -696,16 +699,16 @@ fn forward_layer_decode_hybrid(
     }
 
     // Phase 5: typed AR FFN — same pattern as Phase 2 above.
-    let partials_ffn: [Buffer<F16, RowParallel<0>>; 2] = [
-        Buffer::from_raw_unchecked(stage.rank_state[0].partial_ffn, hidden),
-        Buffer::from_raw_unchecked(stage.rank_state[1].partial_ffn, hidden),
-    ];
-    let streams: [&_; 2] = [
-        sub_cluster.device(0).default_stream(),
-        sub_cluster.device(1).default_stream(),
-    ];
-    // SAFETY: same as phase 2.
+    // SAFETY: same as Phase 2.
     let _replicated_ffn = unsafe {
+        let partials_ffn: [Buffer<F16, RowParallel<0>>; 2] = [
+            Buffer::from_raw_unchecked(stage.rank_state[0].partial_ffn, hidden),
+            Buffer::from_raw_unchecked(stage.rank_state[1].partial_ffn, hidden),
+        ];
+        let streams: [&_; 2] = [
+            sub_cluster.device(0).default_stream(),
+            sub_cluster.device(1).default_stream(),
+        ];
         tp_allreduce_sum::<0>(ar, &partials_ffn, &streams)
     }
     .map_err(|e| anyhow!("AR sum ffn stage {stage_idx}: {e}"))?;

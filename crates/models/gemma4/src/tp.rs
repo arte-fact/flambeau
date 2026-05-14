@@ -563,18 +563,18 @@ fn forward_layer_decode_tp(
     // — it demonstrates the compile-time transition flow without
     // forcing the larger field-type churn.
     {
-        let partials: [Buffer<F16, RowParallel<0>>; 2] = [
-            Buffer::from_raw_unchecked(driver.stages[0].partial_attn, hidden),
-            Buffer::from_raw_unchecked(driver.stages[1].partial_attn, hidden),
-        ];
-        let streams: [&_; 2] = [
-            driver.tp.cluster().device(0).default_stream(),
-            driver.tp.cluster().device(1).default_stream(),
-        ];
         // SAFETY: partial_attn is hidden F16 elems per rank; streams outlive
         // this call; subsequent Phase-3 reads on each rank are serialised on
         // that rank's stream.
         let _replicated = unsafe {
+            let partials: [Buffer<F16, RowParallel<0>>; 2] = [
+                Buffer::from_raw_unchecked(driver.stages[0].partial_attn, hidden),
+                Buffer::from_raw_unchecked(driver.stages[1].partial_attn, hidden),
+            ];
+            let streams: [&_; 2] = [
+                driver.tp.cluster().device(0).default_stream(),
+                driver.tp.cluster().device(1).default_stream(),
+            ];
             tp_allreduce_sum::<0>(driver.tp.ar(), &partials, &streams)
         }
         .context("AR sum partial_attn (typed)")?;
@@ -686,16 +686,16 @@ fn forward_layer_decode_tp(
     // Phase 5: AR-sum partial_ffn via the typed transition (same
     // pattern as Phase 2 above).
     {
-        let partials_ffn: [Buffer<F16, RowParallel<0>>; 2] = [
-            Buffer::from_raw_unchecked(driver.stages[0].partial_ffn, hidden),
-            Buffer::from_raw_unchecked(driver.stages[1].partial_ffn, hidden),
-        ];
-        let streams: [&_; 2] = [
-            driver.tp.cluster().device(0).default_stream(),
-            driver.tp.cluster().device(1).default_stream(),
-        ];
         // SAFETY: same as Phase 2.
         let _replicated = unsafe {
+            let partials_ffn: [Buffer<F16, RowParallel<0>>; 2] = [
+                Buffer::from_raw_unchecked(driver.stages[0].partial_ffn, hidden),
+                Buffer::from_raw_unchecked(driver.stages[1].partial_ffn, hidden),
+            ];
+            let streams: [&_; 2] = [
+                driver.tp.cluster().device(0).default_stream(),
+                driver.tp.cluster().device(1).default_stream(),
+            ];
             tp_allreduce_sum::<0>(driver.tp.ar(), &partials_ffn, &streams)
         }
         .context("AR sum partial_ffn (typed)")?;

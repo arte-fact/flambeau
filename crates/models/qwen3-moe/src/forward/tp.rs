@@ -186,16 +186,14 @@ impl ShardedForwardOneTokenScratchTp {
             per_rank.push(RankForwardScratchTp {
                 rank: RankId(rank_idx as u32),
                 device_id: device.id(),
-                hidden_a: flambeau_blocks::Buffer::from_raw_unchecked(hidden_a_ptr, hidden_elems),
-                hidden_b: flambeau_blocks::Buffer::from_raw_unchecked(hidden_b_ptr, hidden_elems),
-                partial_attn_out: flambeau_blocks::Buffer::from_raw_unchecked(
-                    partial_attn_ptr,
-                    partial_elems,
-                ),
-                partial_ffn_out: flambeau_blocks::Buffer::from_raw_unchecked(
-                    partial_ffn_ptr,
-                    partial_elems,
-                ),
+                hidden_a: unsafe { flambeau_blocks::Buffer::from_raw_unchecked(hidden_a_ptr, hidden_elems) },
+                hidden_b: unsafe { flambeau_blocks::Buffer::from_raw_unchecked(hidden_b_ptr, hidden_elems) },
+                partial_attn_out: unsafe {
+                    flambeau_blocks::Buffer::from_raw_unchecked(partial_attn_ptr, partial_elems)
+                },
+                partial_ffn_out: unsafe {
+                    flambeau_blocks::Buffer::from_raw_unchecked(partial_ffn_ptr, partial_elems)
+                },
                 layer,
                 output_head,
                 producer_done_event,
@@ -390,12 +388,14 @@ impl ShardedForwardPrefillScratchTp {
             let partial_ffn_ptr = device.alloc(partial_bytes)?;
             let hidden_elems = hidden_bytes / 2;
             let partial_elems = partial_bytes / 2;
-            let hidden_a = flambeau_blocks::Buffer::from_raw_unchecked(hidden_a_ptr, hidden_elems);
-            let hidden_b = flambeau_blocks::Buffer::from_raw_unchecked(hidden_b_ptr, hidden_elems);
-            let partial_attn_out =
-                flambeau_blocks::Buffer::from_raw_unchecked(partial_attn_ptr, partial_elems);
-            let partial_ffn_out =
-                flambeau_blocks::Buffer::from_raw_unchecked(partial_ffn_ptr, partial_elems);
+            let hidden_a = unsafe { flambeau_blocks::Buffer::from_raw_unchecked(hidden_a_ptr, hidden_elems) };
+            let hidden_b = unsafe { flambeau_blocks::Buffer::from_raw_unchecked(hidden_b_ptr, hidden_elems) };
+            let partial_attn_out = unsafe {
+                flambeau_blocks::Buffer::from_raw_unchecked(partial_attn_ptr, partial_elems)
+            };
+            let partial_ffn_out = unsafe {
+                flambeau_blocks::Buffer::from_raw_unchecked(partial_ffn_ptr, partial_elems)
+            };
             let layer = Some(super::layer::LayerPrefillScratch::new(cfg, device, max_tokens)?);
             let output_head = if rank_idx as u32 == head_rank.0 {
                 Some(super::io::OutputHeadScratch::new(cfg, device)?)
@@ -2033,20 +2033,24 @@ fn ar_residual(
     // `Buffer<F16, Replicated>` can consume it.
     let elem_count = scratch.per_rank[0].hidden_bytes / 2; // bytes/F16
     let n_ranks = world as usize;
-    let hiddens: Vec<Buffer<F16, Replicated>> = (0..n_ranks)
-        .map(|r| Buffer::from_raw_unchecked(hidden_ptr(r), elem_count))
-        .collect();
-    let partials: Vec<Buffer<F16, RowParallel<0>>> = (0..n_ranks)
-        .map(|r| Buffer::from_raw_unchecked(partial_ptr(r), elem_count))
-        .collect();
-    let stream_vec: Vec<&_> = (0..n_ranks)
-        .map(|r| cluster.device(r).default_stream())
-        .collect();
     // SAFETY: every rank's hidden + partial point to live device
     // allocations of `elem_count * 2` bytes (alloc'd in
     // ShardedForwardOneTokenScratchTp::new). Producer streams synced
     // above ⇒ peer reads are valid. tp_allreduce_residual dispatches
     // to residual_tp2 / residual_tp4 based on `world`.
+    let (hiddens, partials): (Vec<Buffer<F16, Replicated>>, Vec<Buffer<F16, RowParallel<0>>>) =
+        unsafe {
+            let hs = (0..n_ranks)
+                .map(|r| Buffer::from_raw_unchecked(hidden_ptr(r), elem_count))
+                .collect();
+            let ps = (0..n_ranks)
+                .map(|r| Buffer::from_raw_unchecked(partial_ptr(r), elem_count))
+                .collect();
+            (hs, ps)
+        };
+    let stream_vec: Vec<&_> = (0..n_ranks)
+        .map(|r| cluster.device(r).default_stream())
+        .collect();
     unsafe {
         tp_allreduce_residual::<0>(ar, &hiddens, &partials, &stream_vec)
             .map_err(|e| anyhow!("ar_residual world={world}: {e}"))?;
