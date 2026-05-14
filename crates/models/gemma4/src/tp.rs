@@ -210,12 +210,9 @@ impl Gemma4TpStage {
                     spec.index
                 );
             }
-            if spec.ffn_kind != FfnKind::Dense {
-                bail!(
-                    "Gemma4TpStage: MoE FFN layer {} not supported in S9-A",
-                    spec.index
-                );
-            }
+            // MoE FFN layers now supported on TP — per-layer
+            // tp_moe weights uploaded by `upload_one_tp_stage` via
+            // `tp_moe_upload::upload_moe_layer_tp`.
             let n_kv_local = spec.n_kv_heads / n_ranks;
             let kv =
                 KvCache::<F16Contig, HipDevice>::new(device, n_kv_local, spec.head_dim, max_tokens)
@@ -428,8 +425,18 @@ impl Gemma4TpDriver {
             bail!("Gemma4TpDriver::upload: cluster has 0 ranks");
         }
         Gemma4TpStage::validate_shardable(&cfg, n_ranks)?;
-        if cfg.moe.is_some() {
-            bail!("Gemma4TpDriver::upload: MoE TP path is followup work");
+        // MoE TP upload runs `upload_moe_layer_tp` per rank inside
+        // `upload_one_tp_stage` when `cfg.moe.is_some()` AND the layer
+        // spec is FfnKind::Moe. Validate divisibility here so the
+        // per-layer upload doesn't fail mid-stage.
+        if let Some(moe) = &cfg.moe {
+            if moe.moe_intermediate_size % n_ranks != 0 {
+                bail!(
+                    "Gemma4TpDriver::upload: moe_intermediate_size {} not divisible by n_ranks {}",
+                    moe.moe_intermediate_size,
+                    n_ranks
+                );
+            }
         }
         if cfg.per_layer_embed.is_some() {
             bail!("Gemma4TpDriver::upload: per-layer-embd TP path is followup work");
@@ -502,7 +509,283 @@ fn forward_layer_decode_tp(
         // hookups; left for S9-B.
         bail!("forward_layer_decode_tp: TP{n_ranks} not supported in S9-A; only TP2");
     }
-    flambeau_blocks::forward_decode_layer_tp(driver, position, il)
+    // MoE layers use the parallel-branch composer (3 ARs/layer);
+    // dense layers use the shared `LayerComposerTp` (2 ARs/layer).
+    if driver.layout.layers[il].ffn_kind == FfnKind::Moe {
+        forward_decode_layer_tp_moe(driver, il, position)
+    } else {
+        flambeau_blocks::forward_decode_layer_tp(driver, position, il)
+    }
+}
+
+/// MoE-aware decode-layer composer for gemma4 26B-A4B. Re-uses the
+/// dense composer's attention phases (1-3) via the `LayerComposerTp`
+/// trait methods on `driver`, then forks the FFN half into the
+/// 5-phase parallel-branch shape:
+///
+/// 4. Per-rank: `forward_ffn_moe_tp_per_rank` writes BOTH the shared
+///    MLP partial (`stage.partial_ffn`) and the routed-MoE partial
+///    (`tp_moe_scratch.partial_moe_f16`).
+/// 5a. Barrier-fused AR-sum on `partial_ffn` (shared-MLP).
+/// 5b. Per-rank: `cur_mlp_f16 = rmsnorm(partial_ffn, post_ffw_norm_1)`.
+/// 5c. Barrier-fused AR-sum on `partial_moe_f16` (routed-MoE).
+/// 5d. Per-rank: `cur_moe_f16 = rmsnorm(partial_moe, post_ffw_norm_2)`.
+/// 5e. Per-rank: `cur_combined = cur_mlp + cur_moe`.
+/// 6. Per-rank: `post_ffw_norm + residual_add` → next-layer hidden
+///    (with optional `layer_output_scale`).
+fn forward_decode_layer_tp_moe(
+    driver: &mut Gemma4TpDriver,
+    il: usize,
+    position: usize,
+) -> Result<()> {
+    use flambeau_blocks::{
+        cross_rank_event_barrier, tp_allreduce_sum_synced, Buffer, LayerComposerTp, RowParallel,
+        F16,
+    };
+
+    let n = driver.stages.len();
+    let hidden = driver.cfg.hidden_size;
+    let rms_eps = driver.cfg.rms_norm_eps;
+    let ff_len_local = driver.cfg.feed_forward_length / n;
+
+    // ---- Attention half (Phases 1-3) — same as dense composer. ----
+    for r in 0..n {
+        <Gemma4TpDriver as LayerComposerTp>::forward_attn(driver, r, position, il)?;
+    }
+    {
+        let cores: Vec<&TpRankCore> = driver.stages.iter().map(|s| &s.core).collect();
+        // SAFETY: partial_attn is hidden F16 elems per rank; streams
+        // outlive this call; synced helper adds the cross-rank edge.
+        let _ = unsafe {
+            let partials: [Buffer<F16, RowParallel<0>>; 2] = [
+                Buffer::from_raw_unchecked(driver.stages[0].partial_attn, hidden),
+                Buffer::from_raw_unchecked(driver.stages[1].partial_attn, hidden),
+            ];
+            let streams: [&_; 2] = [
+                driver.tp.cluster().device(0).default_stream(),
+                driver.tp.cluster().device(1).default_stream(),
+            ];
+            tp_allreduce_sum_synced::<0>(
+                driver.tp.ar(),
+                driver.tp.cluster(),
+                &cores,
+                &partials,
+                &streams,
+            )
+        }
+        .context("MoE AR sum partial_attn")?;
+    }
+    for r in 0..n {
+        <Gemma4TpDriver as LayerComposerTp>::post_norm_residual_attn(driver, r, il)?;
+    }
+
+    // ---- FFN half (Phases 4 / 5a-e / 6) — MoE-specific. ----
+    // Phase 4: per-rank MoE FFN forward → two partials.
+    for r in 0..n {
+        let dev = driver.tp.cluster().device(r);
+        dev.bind()?;
+        let stream = dev.default_stream();
+        let reg = &driver.regs[r];
+        let ops = HipOps::new(reg, stream);
+        let stage = &mut driver.stages[r];
+        let layer = &stage.layer_weights[il];
+        let tp_moe = layer
+            .tp_moe
+            .as_ref()
+            .ok_or_else(|| anyhow!("layer {il} rank {r}: tp_moe weights missing for MoE layer"))?;
+        let tp_moe_scratch = stage
+            .tp_moe_scratch
+            .as_ref()
+            .ok_or_else(|| anyhow!("rank {r}: tp_moe_scratch missing for MoE forward"))?;
+        let scratch = &stage.scratch;
+        crate::tp_moe_upload::forward_ffn_moe_tp_per_rank(
+            &ops,
+            layer,
+            tp_moe,
+            tp_moe_scratch,
+            scratch.x_q8_1.0,
+            scratch.gate_f32.0,
+            scratch.up_f32.0,
+            scratch.activated_f16.0,
+            scratch.activated_q8_1.0,
+            scratch.mmvq_f32.0,
+            scratch.attn_residual_f16.0,
+            stage.partial_ffn,
+            hidden,
+            ff_len_local,
+            rms_eps,
+        )
+        .with_context(|| format!("MoE per-rank FFN layer {il} rank {r}"))?;
+    }
+
+    // Phase 5a: AR-sum partial_ffn (shared-MLP).
+    {
+        let cores: Vec<&TpRankCore> = driver.stages.iter().map(|s| &s.core).collect();
+        let _ = unsafe {
+            let partials: [Buffer<F16, RowParallel<0>>; 2] = [
+                Buffer::from_raw_unchecked(driver.stages[0].partial_ffn, hidden),
+                Buffer::from_raw_unchecked(driver.stages[1].partial_ffn, hidden),
+            ];
+            let streams: [&_; 2] = [
+                driver.tp.cluster().device(0).default_stream(),
+                driver.tp.cluster().device(1).default_stream(),
+            ];
+            tp_allreduce_sum_synced::<0>(
+                driver.tp.ar(),
+                driver.tp.cluster(),
+                &cores,
+                &partials,
+                &streams,
+            )
+        }
+        .context("MoE AR sum partial_ffn (shared MLP)")?;
+    }
+
+    // Phase 5b: per-rank rmsnorm(partial_ffn, post_ffw_norm_1) → cur_mlp_f16.
+    for r in 0..n {
+        let dev = driver.tp.cluster().device(r);
+        dev.bind()?;
+        let stream = dev.default_stream();
+        let reg = &driver.regs[r];
+        let ops = HipOps::new(reg, stream);
+        let stage = &driver.stages[r];
+        let tp_moe = stage.layer_weights[il]
+            .tp_moe
+            .as_ref()
+            .ok_or_else(|| anyhow!("layer {il} rank {r}: tp_moe missing in Phase 5b"))?;
+        let tp_moe_scratch = stage
+            .tp_moe_scratch
+            .as_ref()
+            .ok_or_else(|| anyhow!("rank {r}: tp_moe_scratch missing in Phase 5b"))?;
+        ops.rmsnorm_f16(
+            stage.partial_ffn,
+            tp_moe.post_ffw_norm_1,
+            tp_moe_scratch.cur_mlp_f16,
+            1,
+            hidden,
+            rms_eps,
+        )
+        .context("MoE post_ffw_norm_1")?;
+    }
+
+    // Phase 5c: AR-sum partial_moe_f16 (routed-MoE).
+    {
+        let cores: Vec<&TpRankCore> = driver.stages.iter().map(|s| &s.core).collect();
+        let moe_partials: [DevicePtr; 2] = [
+            driver.stages[0]
+                .tp_moe_scratch
+                .as_ref()
+                .ok_or_else(|| anyhow!("rank 0: tp_moe_scratch missing in Phase 5c"))?
+                .partial_moe_f16,
+            driver.stages[1]
+                .tp_moe_scratch
+                .as_ref()
+                .ok_or_else(|| anyhow!("rank 1: tp_moe_scratch missing in Phase 5c"))?
+                .partial_moe_f16,
+        ];
+        let _ = unsafe {
+            let partials: [Buffer<F16, RowParallel<0>>; 2] = [
+                Buffer::from_raw_unchecked(moe_partials[0], hidden),
+                Buffer::from_raw_unchecked(moe_partials[1], hidden),
+            ];
+            let streams: [&_; 2] = [
+                driver.tp.cluster().device(0).default_stream(),
+                driver.tp.cluster().device(1).default_stream(),
+            ];
+            tp_allreduce_sum_synced::<0>(
+                driver.tp.ar(),
+                driver.tp.cluster(),
+                &cores,
+                &partials,
+                &streams,
+            )
+        }
+        .context("MoE AR sum partial_moe (routed)")?;
+    }
+
+    // Phase 5d: per-rank rmsnorm(partial_moe, post_ffw_norm_2) → cur_moe_f16.
+    for r in 0..n {
+        let dev = driver.tp.cluster().device(r);
+        dev.bind()?;
+        let stream = dev.default_stream();
+        let reg = &driver.regs[r];
+        let ops = HipOps::new(reg, stream);
+        let stage = &driver.stages[r];
+        let tp_moe = stage.layer_weights[il]
+            .tp_moe
+            .as_ref()
+            .ok_or_else(|| anyhow!("layer {il} rank {r}: tp_moe missing in Phase 5d"))?;
+        let tp_moe_scratch = stage
+            .tp_moe_scratch
+            .as_ref()
+            .ok_or_else(|| anyhow!("rank {r}: tp_moe_scratch missing in Phase 5d"))?;
+        ops.rmsnorm_f16(
+            tp_moe_scratch.partial_moe_f16,
+            tp_moe.post_ffw_norm_2,
+            tp_moe_scratch.cur_moe_f16,
+            1,
+            hidden,
+            rms_eps,
+        )
+        .context("MoE post_ffw_norm_2")?;
+    }
+
+    // Phase 5e: per-rank cur_combined = cur_mlp + cur_moe.
+    for r in 0..n {
+        let dev = driver.tp.cluster().device(r);
+        dev.bind()?;
+        let stream = dev.default_stream();
+        let reg = &driver.regs[r];
+        let ops = HipOps::new(reg, stream);
+        let stage = &driver.stages[r];
+        let tp_moe_scratch = stage
+            .tp_moe_scratch
+            .as_ref()
+            .ok_or_else(|| anyhow!("rank {r}: tp_moe_scratch missing in Phase 5e"))?;
+        ops.add_f16(
+            tp_moe_scratch.cur_mlp_f16,
+            tp_moe_scratch.cur_moe_f16,
+            tp_moe_scratch.cur_combined_f16,
+            hidden,
+        )
+        .context("MoE combine cur_mlp + cur_moe")?;
+    }
+
+    // Phase 6: per-rank post_ffw_norm + residual add → next-layer hidden.
+    for r in 0..n {
+        let dev = driver.tp.cluster().device(r);
+        dev.bind()?;
+        let stream = dev.default_stream();
+        let reg = &driver.regs[r];
+        let ops = HipOps::new(reg, stream);
+        let stage = &mut driver.stages[r];
+        let layer = &stage.layer_weights[il];
+        let scratch = &stage.scratch;
+        let tp_moe_scratch = stage
+            .tp_moe_scratch
+            .as_ref()
+            .ok_or_else(|| anyhow!("rank {r}: tp_moe_scratch missing in Phase 6"))?;
+        post_norm_residual_f16(
+            &ops,
+            tp_moe_scratch.cur_combined_f16,
+            layer.post_ffw_norm,
+            scratch.attn_out_local.0,
+            scratch.attn_residual_f16.0,
+            stage.hidden,
+            1,
+            hidden,
+            rms_eps,
+        )
+        .context("MoE post_ffw_norm + residual")?;
+        if let Some(scale_v) = layer.layer_output_scale {
+            if scale_v != 1.0 {
+                ops.scale_f16(stage.hidden, stage.hidden, hidden, scale_v)
+                    .context("MoE layer_output_scale")?;
+            }
+        }
+    }
+
+    Ok(())
 }
 
 // `LayerComposerTp` impl — model-specific per-rank hooks. The
@@ -981,6 +1264,29 @@ fn upload_layer_tp(
         }
     };
 
+    // MoE branch (26B-A4B) — TP-sharded routed-experts upload.
+    let tp_moe = if spec.ffn_kind == FfnKind::Moe {
+        let moe_dims = cfg
+            .moe
+            .ok_or_else(|| anyhow!("layer {il}: ffn_kind=Moe but cfg.moe is None"))?;
+        Some(
+            crate::tp_moe_upload::upload_moe_layer_tp(
+                file,
+                il,
+                cfg.hidden_size,
+                moe_dims,
+                n_ranks as u32,
+                rank as u32,
+                device,
+                stream,
+                tracker,
+            )
+            .with_context(|| format!("upload_moe_layer_tp layer {il} rank {rank}"))?,
+        )
+    } else {
+        None
+    };
+
     Ok(Gemma4LayerWeights {
         attn_norm,
         attn_q,
@@ -998,7 +1304,7 @@ fn upload_layer_tp(
         post_ffw_norm,
         per_layer_embed: None,
         moe: None,
-        tp_moe: None,
+        tp_moe,
     })
 }
 
