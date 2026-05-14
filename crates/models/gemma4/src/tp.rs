@@ -37,7 +37,7 @@ use flambeau_backend_hip::{BarP2pAllReduce, HipCluster, HipDevice};
 use flambeau_blocks::{
     embed_token_host, forward_one_token_tp, upload_f16_ones, upload_replicated_norm_f32_to_f16,
     upload_replicated_tensor, upload_sharded_tensor, Activation, DenseMlpDecodeScratch, DenseMlpTp,
-    RawAllocTracker, StandardAttention, StandardAttentionDecodeScratch, TpDecodeDriver,
+    RawAllocTracker, StandardAttentionDecodeScratch, TpDecodeDriver,
     UploadedTensor, WeightHandle,
 };
 use flambeau_core::{CopyDirection, Device, DevicePtr, Stream};
@@ -483,12 +483,8 @@ fn forward_layer_decode_tp(
     let head_dim = spec.head_dim;
     let n_heads_local = spec.n_heads / n_ranks;
     let n_kv_local = spec.n_kv_heads / n_ranks;
-    let q_width_local = n_heads_local * head_dim;
-    let kv_width_local = n_kv_local * head_dim;
     let ff_len = cfg.feed_forward_length;
     let ff_len_local = ff_len / n_ranks;
-    let window: i32 = spec.window as i32;
-    let softmax_scale: f32 = 1.0;
     let rms_eps = cfg.rms_norm_eps;
 
     // Phase 1: per-rank → partial_attn (row-parallel output proj).
@@ -506,59 +502,15 @@ fn forward_layer_decode_tp(
         let stage = &mut driver.stages[r];
         let weights = &stage.layer_weights[il];
         let x_in = stage.hidden;
-        let attn_k = weights
-            .attn_k
-            .as_ref()
-            .ok_or_else(|| anyhow!("layer {il}: attn_k missing"))?;
-        let attn_k_norm_w = weights
-            .attn_k_norm
-            .ok_or_else(|| anyhow!("layer {il}: attn_k_norm missing"))?;
-
-        let attn_q_handle = WeightHandle {
-            ptr: weights.attn_q.ptr,
-            dtype: weights.attn_q.dtype,
-            dims: [q_width_local, hidden],
-        };
-        let attn_k_handle = WeightHandle {
-            ptr: attn_k.ptr,
-            dtype: attn_k.dtype,
-            dims: [kv_width_local, hidden],
-        };
-        let attn_v_handle = weights.attn_v.as_ref().map(|v| WeightHandle {
-            ptr: v.ptr,
-            dtype: v.dtype,
-            dims: [kv_width_local, hidden],
-        });
-        let attn_output_handle = WeightHandle {
-            ptr: weights.attn_output.ptr,
-            dtype: weights.attn_output.dtype,
-            dims: [hidden, q_width_local],
-        };
-        let block = StandardAttention::new(
-            attn_q_handle,
-            attn_k_handle,
-            attn_v_handle,
-            attn_output_handle,
-            weights.attn_norm,
-            weights.attn_q_norm,
-            attn_k_norm_w,
+        let block = weights.build_attn_block(
+            &spec,
             hidden,
             n_heads_local,
             n_kv_local,
             head_dim,
             rms_eps,
-            spec.rope_freq_base,
-            spec.rope_dim,
-            /* gated = */ false,
-        )
-        .context("StandardAttention::new (gemma4 TP)")?
-        .with_softmax_scale(softmax_scale)
-        .with_v_norm_w(stage.scratch.v_ones_f16.0);
-        let block = if window > 0 {
-            block.with_window_size(window as u32)
-        } else {
-            block
-        };
+            stage.scratch.v_ones_f16.0,
+        )?;
 
         let kv = stage.kv_caches[il]
             .as_mut()

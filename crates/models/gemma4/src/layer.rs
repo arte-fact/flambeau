@@ -87,6 +87,81 @@ pub struct Gemma4LayerWeights {
     pub moe: Option<crate::moe::Gemma4MoeFfnWeights>,
 }
 
+impl Gemma4LayerWeights {
+    /// Build the per-call `StandardAttention` block for this layer.
+    /// Caller passes per-call shape info (n_heads / n_kv_heads /
+    /// head_dim — may be locally sharded for TP, full per-layer in
+    /// PP/single), plus the V-norm unit-weight buffer.
+    ///
+    /// Window-aware: when `spec.window > 0` (SWA layers), wraps the
+    /// block with `with_window_size`. Always sets `softmax_scale = 1.0`
+    /// (gemma4's `f_attention_scale`). Always non-gated.
+    #[allow(clippy::too_many_arguments)]
+    pub fn build_attn_block(
+        &self,
+        spec: &LayerSpec,
+        hidden: usize,
+        n_heads: usize,
+        n_kv_heads: usize,
+        head_dim: usize,
+        rms_norm_eps: f32,
+        v_ones_f16: DevicePtr,
+    ) -> Result<flambeau_blocks::StandardAttention> {
+        let q_width = n_heads * head_dim;
+        let kv_width = n_kv_heads * head_dim;
+        let attn_k = self
+            .attn_k
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("layer {}: attn_k missing", spec.index))?;
+        let attn_k_norm_w = self
+            .attn_k_norm
+            .ok_or_else(|| anyhow::anyhow!("layer {}: attn_k_norm missing", spec.index))?;
+        let attn_v = self.attn_v.as_ref().map(|v| WeightHandle {
+            ptr: v.ptr,
+            dtype: v.dtype,
+            dims: [kv_width, hidden],
+        });
+        let block = StandardAttention::new(
+            WeightHandle {
+                ptr: self.attn_q.ptr,
+                dtype: self.attn_q.dtype,
+                dims: [q_width, hidden],
+            },
+            WeightHandle {
+                ptr: attn_k.ptr,
+                dtype: attn_k.dtype,
+                dims: [kv_width, hidden],
+            },
+            attn_v,
+            WeightHandle {
+                ptr: self.attn_output.ptr,
+                dtype: self.attn_output.dtype,
+                dims: [hidden, q_width],
+            },
+            self.attn_norm,
+            self.attn_q_norm,
+            attn_k_norm_w,
+            hidden,
+            n_heads,
+            n_kv_heads,
+            head_dim,
+            rms_norm_eps,
+            spec.rope_freq_base,
+            spec.rope_dim,
+            /* gated = */ false,
+        )
+        .context("Gemma4LayerWeights::build_attn_block")?
+        .with_softmax_scale(1.0)
+        .with_v_norm_w(v_ones_f16);
+        let window: i32 = spec.window as i32;
+        Ok(if window > 0 {
+            block.with_window_size(window as u32)
+        } else {
+            block
+        })
+    }
+}
+
 /// One decode step through a single Gemma 4 layer.
 ///
 /// Writes one new token's attention output + FFN to `x_out`, modifying
@@ -149,11 +224,9 @@ pub fn forward_layer_decode<L: CacheLayout, O: Ops>(
     let n_heads = spec.n_heads;
     let n_kv_heads = spec.n_kv_heads;
     let q_width = n_heads * head_dim;
-    let kv_width = n_kv_heads * head_dim;
     let window: i32 = spec.window as i32;
     // Gemma 4 sets `f_attention_scale = 1.0f` (no pre-attention
-    // scaling). See llama.cpp `model.cpp:1638`.
-    let softmax_scale: f32 = 1.0;
+    // scaling); the block's `with_softmax_scale(1.0)` enforces this.
 
     // KV layout assertion (the block also enforces this internally;
     // keep an early bail so the error message names the gemma4 layer).
@@ -171,59 +244,9 @@ pub fn forward_layer_decode<L: CacheLayout, O: Ops>(
         //   rmsnorm+Q8_1 → Q proj → K proj → V proj (or alt-V from K)
         //   → Q/K/V per-head norms (V uses the unit-weight buffer)
         //   → RoPE Q+K → KV append → attention → output_proj.
-        // Mirrors gemma4 TP's per-rank dispatch at `tp.rs::forward_layer_decode_tp`.
-        let attn_k = weights
-            .attn_k
-            .as_ref()
-            .expect("has_kv invariant: attn_k present");
-        let attn_k_norm_w = weights
-            .attn_k_norm
-            .expect("has_kv invariant: attn_k_norm present");
-        let attn_v = weights.attn_v.as_ref().map(|v| WeightHandle {
-            ptr: v.ptr,
-            dtype: v.dtype,
-            dims: [kv_width, hidden],
-        });
-        let attn_q_handle = WeightHandle {
-            ptr: weights.attn_q.ptr,
-            dtype: weights.attn_q.dtype,
-            dims: [q_width, hidden],
-        };
-        let attn_k_handle = WeightHandle {
-            ptr: attn_k.ptr,
-            dtype: attn_k.dtype,
-            dims: [kv_width, hidden],
-        };
-        let attn_output_handle = WeightHandle {
-            ptr: weights.attn_output.ptr,
-            dtype: weights.attn_output.dtype,
-            dims: [hidden, q_width],
-        };
-        let block = StandardAttention::new(
-            attn_q_handle,
-            attn_k_handle,
-            attn_v,
-            attn_output_handle,
-            weights.attn_norm,
-            weights.attn_q_norm,
-            attn_k_norm_w,
-            hidden,
-            n_heads,
-            n_kv_heads,
-            head_dim,
-            rms_norm_eps,
-            spec.rope_freq_base,
-            spec.rope_dim,
-            /* gated = */ false,
-        )
-        .context("StandardAttention::new (gemma4 layer)")?
-        .with_softmax_scale(softmax_scale)
-        .with_v_norm_w(scratch.v_ones_f16);
-        let block = if window > 0 {
-            block.with_window_size(window as u32)
-        } else {
-            block
-        };
+        let block = weights.build_attn_block(
+            spec, hidden, n_heads, n_kv_heads, head_dim, rms_norm_eps, scratch.v_ones_f16,
+        )?;
         let mut std_scratch = StandardAttentionDecodeScratch {
             x_q8_1: scratch.x_q8_1,
             mmvq_f32: scratch.mmvq_f32,
@@ -256,6 +279,9 @@ pub fn forward_layer_decode<L: CacheLayout, O: Ops>(
             )
             .context("StandardAttention::forward_decode (gemma4 layer)")?;
     } else {
+        let kv_width = n_kv_heads * head_dim;
+        let _ = kv_width;
+        let softmax_scale: f32 = 1.0;
         // Shared-KV tail (has_kv == false): Q runs through this layer's
         // own attn_norm + Q proj + attn_q_norm + RoPE Q, but K/V/append
         // are skipped (the routed cache already holds them from the
@@ -565,16 +591,10 @@ pub fn forward_layer_prefill<L: CacheLayout, O: Ops>(
     let head_dim = spec.head_dim;
     let n_heads = spec.n_heads;
     let n_kv_heads = spec.n_kv_heads;
-    let q_width = n_heads * head_dim;
-    let kv_width = n_kv_heads * head_dim;
-    let window: i32 = spec.window as i32;
-    let softmax_scale: f32 = 1.0;
 
     // Steps 1-9 collapse into `StandardAttention::forward_prefill`.
-    // Mirrors the decode-side migration: the block runs rmsnorm + Q/K/V
-    // proj + per-head Q/K/V norms + RoPE + KV append + attention +
-    // output_proj. The block always appends to `kv_cache`, so the
-    // (rare) shared-KV-tail prefill case bails up front.
+    // The block always appends to `kv_cache`, so the (rare) shared-KV-
+    // tail prefill case bails up front.
     if !spec.has_kv {
         bail!(
             "forward_layer_prefill: shared-KV tail (layer {}) — prefill of tail layers \
@@ -582,58 +602,9 @@ pub fn forward_layer_prefill<L: CacheLayout, O: Ops>(
             spec.index
         );
     }
-    let attn_k = weights
-        .attn_k
-        .as_ref()
-        .ok_or_else(|| anyhow::anyhow!("layer {}: attn_k missing", spec.index))?;
-    let attn_k_norm_w = weights
-        .attn_k_norm
-        .ok_or_else(|| anyhow::anyhow!("layer {}: attn_k_norm missing", spec.index))?;
-    let attn_v = weights.attn_v.as_ref().map(|v| WeightHandle {
-        ptr: v.ptr,
-        dtype: v.dtype,
-        dims: [kv_width, hidden],
-    });
-    let attn_q_handle = WeightHandle {
-        ptr: weights.attn_q.ptr,
-        dtype: weights.attn_q.dtype,
-        dims: [q_width, hidden],
-    };
-    let attn_k_handle = WeightHandle {
-        ptr: attn_k.ptr,
-        dtype: attn_k.dtype,
-        dims: [kv_width, hidden],
-    };
-    let attn_output_handle = WeightHandle {
-        ptr: weights.attn_output.ptr,
-        dtype: weights.attn_output.dtype,
-        dims: [hidden, q_width],
-    };
-    let block = StandardAttention::new(
-        attn_q_handle,
-        attn_k_handle,
-        attn_v,
-        attn_output_handle,
-        weights.attn_norm,
-        weights.attn_q_norm,
-        attn_k_norm_w,
-        hidden,
-        n_heads,
-        n_kv_heads,
-        head_dim,
-        rms_norm_eps,
-        spec.rope_freq_base,
-        spec.rope_dim,
-        /* gated = */ false,
-    )
-    .context("StandardAttention::new (gemma4 prefill)")?
-    .with_softmax_scale(softmax_scale)
-    .with_v_norm_w(scratch.v_ones_f16);
-    let block = if window > 0 {
-        block.with_window_size(window as u32)
-    } else {
-        block
-    };
+    let block = weights.build_attn_block(
+        spec, hidden, n_heads, n_kv_heads, head_dim, rms_norm_eps, scratch.v_ones_f16,
+    )?;
     let mut std_scratch = flambeau_blocks::StandardAttentionPrefillScratch {
         max_tokens: scratch.max_tokens,
         x_norm_f16: scratch.x_norm_f16,
