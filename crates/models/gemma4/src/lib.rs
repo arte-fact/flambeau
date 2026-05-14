@@ -35,6 +35,8 @@ pub mod softcap;
 #[cfg(feature = "hip")]
 pub mod tp_layout;
 #[cfg(feature = "hip")]
+pub mod tp_moe_upload;
+#[cfg(feature = "hip")]
 pub mod weights_hip;
 
 pub use config::{
