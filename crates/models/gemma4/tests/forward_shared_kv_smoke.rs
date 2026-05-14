@@ -126,6 +126,7 @@ fn make_owning_layer(dev: &HipDevice, raw: &mut Vec<DeviceTensor>) -> Gemma4Laye
         ffn_down,
         post_ffw_norm: make_f16_ones(dev, HIDDEN, raw),
         per_layer_embed: None,
+        moe: None,
     }
 }
 
@@ -154,6 +155,7 @@ fn make_tail_layer(dev: &HipDevice, raw: &mut Vec<DeviceTensor>) -> Gemma4LayerW
         ffn_down,
         post_ffw_norm: make_f16_ones(dev, HIDDEN, raw),
         per_layer_embed: None,
+        moe: None,
     }
 }
 

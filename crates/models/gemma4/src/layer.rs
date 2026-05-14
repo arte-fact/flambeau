@@ -76,6 +76,13 @@ pub struct Gemma4LayerWeights {
 
     /// Per-layer side-channel embed weights (E2B / E4B only).
     pub per_layer_embed: Option<crate::per_layer_embd::PerLayerEmbedLayerWeights>,
+
+    /// MoE-specific weights (26B-A4B only). `Some` when
+    /// `spec.ffn_kind == Moe`; the dense `ffn_gate` / `ffn_up` /
+    /// `ffn_down` fields above are then **also** present (they serve
+    /// as the parallel shared-MLP branch of the MoE composer — see
+    /// `gemma4/src/moe.rs::forward_ffn_moe`).
+    pub moe: Option<crate::moe::Gemma4MoeFfnWeights>,
 }
 
 /// One decode step through a single Gemma 4 layer.
@@ -102,12 +109,34 @@ pub fn forward_layer_decode<L: CacheLayout, O: Ops>(
     // `Some(ptr, pe)` iff the model has per-layer-embd AND
     // `weights.per_layer_embed` is `Some`.
     per_layer_slice: Option<(DevicePtr, usize)>,
+    // MoE composer scratch — required when `spec.ffn_kind == Moe`
+    // (caller pre-allocates one scratch sized for the widest MoE
+    // layer's `n_embd_per_layer`/`n_experts`/`top_k`); `None` on
+    // dense layers.
+    moe_scratch: Option<&crate::moe::Gemma4MoeScratch>,
 ) -> Result<()> {
-    if spec.ffn_kind != FfnKind::Dense {
+    if spec.ffn_kind != FfnKind::Dense && spec.ffn_kind != FfnKind::Moe {
         bail!(
-            "forward_layer_decode: MoE FFN (layer {}) not supported in S5-A; see S6-B",
-            spec.index
+            "forward_layer_decode: ffn_kind {:?} not supported",
+            spec.ffn_kind
         );
+    }
+    if spec.ffn_kind == FfnKind::Moe {
+        // Pre-validate so we fail fast rather than midway through attn.
+        if weights.moe.is_none() {
+            bail!(
+                "forward_layer_decode: layer {} is MoE but weights.moe is None — \
+                 upload path must populate Gemma4MoeFfnWeights",
+                spec.index
+            );
+        }
+        if moe_scratch.is_none() {
+            bail!(
+                "forward_layer_decode: layer {} is MoE but moe_scratch is None — \
+                 caller must pass a Gemma4MoeScratch (session-allocated)",
+                spec.index
+            );
+        }
     }
     // Shared-KV tail layers (`has_kv == false`) skip K/V projection +
     // K/V norm + K-side RoPE + KV append; they query the routed cache
@@ -365,73 +394,102 @@ pub fn forward_layer_decode<L: CacheLayout, O: Ops>(
     )
     .context("residual_add post-attn")?;
 
-    // 12. RMSNorm(ffn_norm) on the post-attn residual, then dense FFN.
-    ops.rmsnorm_quant_q8_1(
-        scratch.attn_residual_f16,
-        weights.ffn_norm,
-        scratch.x_q8_1,
-        1,
-        hidden,
-        rms_norm_eps,
-    )
-    .context("ffn_norm + quant")?;
+    // 12-16. FFN section. Dense and MoE branches both produce `x_out
+    // = post_ffw_norm(FFN(attn_residual)) + attn_residual`. The dense
+    // branch is the inline gate/up/GELU/down sequence; the MoE branch
+    // delegates to `forward_ffn_moe` (shared MLP || routed experts →
+    // sum → post_ffw_norm → residual).
+    if let (FfnKind::Moe, Some(moe_w), Some(moe_s)) =
+        (spec.ffn_kind, weights.moe.as_ref(), moe_scratch)
+    {
+        crate::moe::forward_ffn_moe(
+            ops,
+            weights,
+            moe_w,
+            scratch.x_q8_1,
+            scratch.mmvq_f32,
+            scratch.gate_f32,
+            scratch.up_f32,
+            scratch.activated_f16,
+            scratch.activated_q8_1,
+            scratch.down_f32,
+            moe_s,
+            scratch.attn_residual_f16,
+            x_out,
+            ff_len,
+            hidden,
+            rms_norm_eps,
+        )?;
+    } else {
+        // Dense FFN (existing path).
+        // 12. RMSNorm(ffn_norm) on the post-attn residual.
+        ops.rmsnorm_quant_q8_1(
+            scratch.attn_residual_f16,
+            weights.ffn_norm,
+            scratch.x_q8_1,
+            1,
+            hidden,
+            rms_norm_eps,
+        )
+        .context("ffn_norm + quant")?;
 
-    // 13. Gate + up projections.
-    ops.mmvq(
-        weights.ffn_gate.ptr,
-        scratch.x_q8_1,
-        scratch.gate_f32,
-        ff_len,
-        hidden,
-        weights.ffn_gate.dtype,
-    )
-    .context("mmvq ffn_gate")?;
-    ops.mmvq(
-        weights.ffn_up.ptr,
-        scratch.x_q8_1,
-        scratch.up_f32,
-        ff_len,
-        hidden,
-        weights.ffn_up.dtype,
-    )
-    .context("mmvq ffn_up")?;
+        // 13. Gate + up projections.
+        ops.mmvq(
+            weights.ffn_gate.ptr,
+            scratch.x_q8_1,
+            scratch.gate_f32,
+            ff_len,
+            hidden,
+            weights.ffn_gate.dtype,
+        )
+        .context("mmvq ffn_gate")?;
+        ops.mmvq(
+            weights.ffn_up.ptr,
+            scratch.x_q8_1,
+            scratch.up_f32,
+            ff_len,
+            hidden,
+            weights.ffn_up.dtype,
+        )
+        .context("mmvq ffn_up")?;
 
-    // 14. GELU(gate) * up, fused F32 → F16.
-    ops.gelu_f32_to_f16(scratch.gate_f32, scratch.up_f32, scratch.activated_f16, ff_len)
-        .context("gelu_f32_to_f16")?;
+        // 14. GELU(gate) * up, fused F32 → F16.
+        ops.gelu_f32_to_f16(scratch.gate_f32, scratch.up_f32, scratch.activated_f16, ff_len)
+            .context("gelu_f32_to_f16")?;
 
-    // 15. Quantise + ffn_down projection.
-    ops.quantize_f16_q8_1(scratch.activated_f16, scratch.activated_q8_1, ff_len)
-        .context("quantize activated → Q8_1")?;
-    ops.mmvq(
-        weights.ffn_down.ptr,
-        scratch.activated_q8_1,
-        scratch.down_f32,
-        hidden,
-        ff_len,
-        weights.ffn_down.dtype,
-    )
-    .context("mmvq ffn_down")?;
-    ops.cast_f32_to_f16(scratch.down_f32, scratch.post_ffw_norm_f16, hidden)
-        .context("cast ffn_down → f16")?;
+        // 15. Quantise + ffn_down projection.
+        ops.quantize_f16_q8_1(scratch.activated_f16, scratch.activated_q8_1, ff_len)
+            .context("quantize activated → Q8_1")?;
+        ops.mmvq(
+            weights.ffn_down.ptr,
+            scratch.activated_q8_1,
+            scratch.down_f32,
+            hidden,
+            ff_len,
+            weights.ffn_down.dtype,
+        )
+        .context("mmvq ffn_down")?;
+        ops.cast_f32_to_f16(scratch.down_f32, scratch.post_ffw_norm_f16, hidden)
+            .context("cast ffn_down → f16")?;
 
-    // 16. post_ffw_norm on the FFN output, then add residual.
-    ops.rmsnorm_f16(
-        scratch.post_ffw_norm_f16,
-        weights.post_ffw_norm,
-        scratch.post_ffw_norm_f16,
-        1,
-        hidden,
-        rms_norm_eps,
-    )
-    .context("post_ffw_norm")?;
-    ops.add_f16(
-        scratch.attn_residual_f16,
-        scratch.post_ffw_norm_f16,
-        x_out,
-        hidden,
-    )
-    .context("residual_add post-ffn")?;
+        // 16. post_ffw_norm + residual add.
+        ops.rmsnorm_f16(
+            scratch.post_ffw_norm_f16,
+            weights.post_ffw_norm,
+            scratch.post_ffw_norm_f16,
+            1,
+            hidden,
+            rms_norm_eps,
+        )
+        .context("post_ffw_norm")?;
+        ops.add_f16(
+            scratch.attn_residual_f16,
+            scratch.post_ffw_norm_f16,
+            x_out,
+            hidden,
+        )
+        .context("residual_add post-ffn")?;
+    }
 
     // 17. Optional per-layer side-channel embedding (E2B / E4B).
     if let (Some(pe_w), Some((slice, pe))) =

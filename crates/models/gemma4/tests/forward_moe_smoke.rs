@@ -152,6 +152,7 @@ fn build_layer_weights(dev: &HipDevice) -> Gemma4LayerWeights {
         },
         post_ffw_norm: alloc_f16_ones(dev, HIDDEN),
         per_layer_embed: None,
+        moe: None,
     }
 }
 
@@ -214,6 +215,7 @@ fn build_moe_scratch(dev: &HipDevice) -> Gemma4MoeScratch {
         cur_mlp_f16: alloc_zeroed(dev, HIDDEN * 2),
         cur_moe_f16: alloc_zeroed(dev, HIDDEN * 2),
         cur_combined_f16: alloc_zeroed(dev, HIDDEN * 2),
+        zero_hidden_f16: alloc_zeroed(dev, HIDDEN * 2),
         moe_scratch: MoeExpertsDecodeScratch {
             x_q8_1: alloc_zeroed(dev, q8_1_blocks_hidden * q8_1_bytes_per_block),
             router_logits: alloc_zeroed(dev, N_EXPERTS * 4),

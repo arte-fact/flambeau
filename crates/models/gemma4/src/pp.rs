@@ -554,12 +554,6 @@ impl Gemma4PpDriver {
         if cluster.ranks() == 0 {
             bail!("Gemma4PpDriver::upload: cluster has 0 ranks");
         }
-        if cfg.moe.is_some() {
-            bail!(
-                "Gemma4PpDriver::upload: MoE variants need the indexed-experts \
-                 upload path (followup #23)"
-            );
-        }
         if cfg.per_layer_embed.is_some() {
             bail!(
                 "Gemma4PpDriver::upload: per-layer side-channel embedding \
@@ -567,9 +561,9 @@ impl Gemma4PpDriver {
             );
         }
         for spec in &layout.layers {
-            if spec.ffn_kind != FfnKind::Dense {
+            if spec.ffn_kind == FfnKind::Moe && cfg.moe.is_none() {
                 bail!(
-                    "Gemma4PpDriver::upload: MoE FFN at layer {} (followup #23)",
+                    "Gemma4PpDriver::upload: layer {} ffn_kind=Moe but cfg.moe is None",
                     spec.index
                 );
             }
@@ -613,7 +607,7 @@ impl Gemma4PpDriver {
                 if layer_to_rank[i] != rank {
                     continue;
                 }
-                let lw = upload_layer_pp(file, spec, device, stream, &mut raw)
+                let lw = upload_layer_pp(file, spec, &cfg, device, stream, &mut raw)
                     .with_context(|| format!("rank {rank} layer {}", spec.index))?;
                 layer_weights.push(lw);
             }
@@ -830,6 +824,7 @@ impl PpDecodeDriver for Gemma4PpDriver {
             x_out,
             position,
             /*per_layer_slice=*/ None,
+            /*moe_scratch=*/ None,
         )
     }
 
@@ -1059,6 +1054,7 @@ fn upload_norm_tracked(
 fn upload_layer_pp(
     file: &GgufFile,
     spec: &LayerSpec,
+    cfg: &Gemma4Config,
     device: &HipDevice,
     stream: &HipStream,
     raw: &mut Vec<(DevicePtr, usize)>,
@@ -1209,6 +1205,33 @@ fn upload_layer_pp(
         raw,
     )?;
 
+    let moe = if spec.ffn_kind == FfnKind::Moe {
+        let moe_dims = cfg
+            .moe
+            .ok_or_else(|| anyhow!("layer {} ffn_kind=Moe but cfg.moe is None", spec.index))?;
+        // Adapter: `upload_moe_layer` populates a Vec<DeviceTensor>;
+        // PP uses (DevicePtr, usize) tuples for its dispose list.
+        let mut moe_tracker: Vec<crate::weights_hip::DeviceTensor> = Vec::new();
+        let mut total_bytes: usize = 0;
+        let weights = crate::weights_hip::upload_moe_layer(
+            file,
+            spec.index,
+            cfg.hidden_size,
+            moe_dims,
+            device,
+            stream,
+            &mut moe_tracker,
+            &mut total_bytes,
+        )?;
+        for t in moe_tracker {
+            raw.push((t.ptr, t.bytes));
+        }
+        let _ = total_bytes;
+        Some(weights)
+    } else {
+        None
+    };
+
     Ok(Gemma4LayerWeights {
         attn_norm,
         attn_q: attn_q_t.as_weight_handle(attn_q_dims)?,
@@ -1225,6 +1248,7 @@ fn upload_layer_pp(
         ffn_down: ffn_down_t.as_weight_handle(ffn_down_dims)?,
         post_ffw_norm,
         per_layer_embed: None,
+        moe,
     })
 }
 

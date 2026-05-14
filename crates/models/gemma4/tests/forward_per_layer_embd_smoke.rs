@@ -175,6 +175,7 @@ fn build_weights(dev: &HipDevice) -> Gemma4LayerWeights {
         ffn_down,
         post_ffw_norm: alloc_f16_ones(dev, HIDDEN),
         per_layer_embed: Some(pe_w),
+        moe: None,
     }
 }
 
@@ -319,6 +320,7 @@ fn forward_layer_decode_with_per_layer_embd_smoke() -> Result<()> {
         &ops, &dev, stream, &weights, &spec, RMS_EPS, FF_LEN, HIDDEN,
         &mut kv, &mut scratch, d_x_in, d_x_out, 0,
         Some((slice_l0, PE)),
+        /*moe_scratch=*/ None,
     )?;
     stream.synchronize()?;
 

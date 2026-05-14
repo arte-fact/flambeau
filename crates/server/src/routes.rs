@@ -1403,6 +1403,7 @@ pub async fn models(State(state): State<SharedState>) -> impl IntoResponse {
     let tool_call_format = match state.tool_call_format_default {
         crate::tool_call_parser::ToolCallFormat::Hermes => "hermes",
         crate::tool_call_parser::ToolCallFormat::QwenCoder => "qwen_coder",
+        crate::tool_call_parser::ToolCallFormat::Gemma4 => "gemma4",
     };
 
     Json(ModelsListResponse {

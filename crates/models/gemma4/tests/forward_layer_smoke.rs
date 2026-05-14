@@ -180,6 +180,7 @@ fn build_weights(dev: &HipDevice, with_v_proj: bool) -> Gemma4LayerWeights {
         ffn_down,
         post_ffw_norm: alloc_f16_ones(dev, HIDDEN),
         per_layer_embed: None,
+        moe: None,
     }
 }
 
@@ -258,6 +259,7 @@ fn run_one_layer(dev: &HipDevice, window: u32, with_v_proj: bool) -> Result<Vec<
         &ops, dev, dev.default_stream(), &weights, &spec, RMS_EPS, FF_LEN, HIDDEN,
         &mut kv, &mut scratch, d_x_in, d_x_out, 0,
         /*per_layer_slice=*/ None,
+        /*moe_scratch=*/ None,
     )?;
     dev.default_stream().synchronize()?;
 

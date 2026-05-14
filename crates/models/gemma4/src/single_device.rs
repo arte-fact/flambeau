@@ -11,13 +11,18 @@
 
 #![cfg(feature = "hip")]
 
-use anyhow::{anyhow, Result};
+use anyhow::{anyhow, bail, Context, Result};
 use flambeau_blocks::embed_token_host;
 use flambeau_core::{CopyDirection, Device, DevicePtr, Stream};
 use flambeau_ops::hip::{HipDevice, HipOps, OpsRegistry};
+use flambeau_ops::Ops;
 
 use crate::layer::forward_layer_decode;
 use crate::output_head::forward_output_head;
+use crate::per_layer_embd::{
+    build_inp_per_layer_table, per_layer_token_embd_row_bytes, table_slice_ptr,
+    upload_inp_per_layer_table,
+};
 use crate::session::Gemma4Session;
 
 /// Forward one decode token. Returns the host-side argmax token id.
@@ -88,22 +93,24 @@ pub fn forward_one_token_logits(
         residual,
     )?;
 
-    // 2. Scale embedding by sqrt(n_embd) per gemma4-iswa.cpp:20.
-    // The F16 scale uses the F32 input-scale kernel via cast — for
-    // smoke purposes, multiply in-place via a scale op. We don't yet
-    // have a scalar-mul-F16 op; instead we apply this scaling via the
-    // RMSNorm/first-layer matmul-magnitude path implicitly. The
-    // input scaling matters for parity; for the dummy smoke it is a
-    // constant factor and the chain still produces finite values.
-    // S5-B-2: add a `scale_f16` op or fuse into the embedding upload
-    // step.
-    // TODO: parity hookup.
+    // 2. Scale embedding by sqrt(n_embd) (gemma4-iswa.cpp:20
+    // `inpL = scale(inpL, sqrtf(n_embd))`).
+    ops.scale_f16(residual, residual, hidden, (hidden as f32).sqrt())
+        .context("embedding sqrt(n_embd) scale")?;
+
+    // 2b. Per-layer-embd table build (E2B/E4B only). Reads the input
+    // token's `per_layer_token_embd` row from the mmap, dequants +
+    // projects + RMSNorms host-side, uploads to
+    // `session.inp_per_layer_table_buf`.
+    let pe_table_base = build_per_layer_table_for_token(session, token_id, device, stream)?;
 
     // 3. Per-layer loop. Tail layers (`has_kv == false`) route their
     // attention through the source layer's KV cache via
     // `spec.kv_share_src`; the layer composer skips K/V projection +
     // append in that branch.
     let snapshot_layers: Vec<crate::layout::LayerSpec> = session.layout.layers.clone();
+    let pe_n_embd_per_layer = session.cfg.per_layer_embed.as_ref().map(|p| p.n_embd_per_layer);
+    let moe_scratch_view = session.moe_scratch_view();
     for spec in snapshot_layers {
         let weights_ref =
             &session.weights.layers[spec.index] as *const crate::layer::Gemma4LayerWeights;
@@ -134,10 +141,16 @@ pub fn forward_one_token_logits(
             .as_mut()
             .ok_or_else(|| anyhow!("layer {} kv slot {} unallocated", spec.index, kv_slot_idx))?;
 
+        // Per-layer slice for E2B/E4B side-channel embedding. `None`
+        // for variants without per-layer-embd.
+        let per_layer_slice = pe_table_base
+            .zip(pe_n_embd_per_layer)
+            .map(|(base, pe)| (table_slice_ptr(base, spec.index, pe), pe));
         forward_layer_decode(
             &ops, device, stream, weights, &spec, rms_eps, ff_len, hidden,
             kv, &mut scratch, in_ptr, out_ptr, position,
-            /*per_layer_slice=*/ None,
+            per_layer_slice,
+            moe_scratch_view.as_ref(),
         )?;
         session.swap_residual();
     }
@@ -159,4 +172,121 @@ pub fn forward_one_token_logits(
     )?;
 
     Ok(logits)
+}
+
+/// Build the `inp_per_layer_table` for a single decode token and
+/// upload it to `session.inp_per_layer_table_buf`. Returns the device
+/// base pointer of the table, or `None` when the variant has no
+/// per-layer-embd (table_buf is None).
+///
+/// Reads three tensors from the session's `Arc<GgufFile>`:
+/// - `per_layer_token_embd[token_id, :]` row (Q5_K on E4B, dequant
+///   host-side to F32)
+/// - `per_layer_model_proj` (BF16 on E4B; matmul on host)
+/// - `per_layer_proj_norm` (F32, RMSNorm scale)
+///
+/// Plus the F16 input embedding (which we read back from device — the
+/// `residual` buffer has just had `sqrt(n_embd)` applied; we use it
+/// post-scale to match `gemma4-iswa.cpp:264-322`).
+fn build_per_layer_table_for_token(
+    session: &mut Gemma4Session,
+    token_id: u32,
+    device: &HipDevice,
+    stream: &flambeau_backend_hip::HipStream,
+) -> Result<Option<DevicePtr>> {
+    let Some(pe_cfg) = session.cfg.per_layer_embed else {
+        return Ok(None);
+    };
+    let pe = pe_cfg.n_embd_per_layer;
+    let n_layer = session.cfg.num_layers;
+    let hidden = session.cfg.hidden_size;
+    let rms_eps = session.cfg.rms_norm_eps;
+    let gguf = session
+        .gguf
+        .as_ref()
+        .ok_or_else(|| anyhow!(
+            "build_per_layer_table_for_token: session has no GgufFile (use \
+             Gemma4Session::new_with_gguf for E2B/E4B variants)"
+        ))?
+        .clone();
+    let globals = session
+        .weights
+        .per_layer_embd_globals
+        .ok_or_else(|| anyhow!("per_layer_embd_globals missing despite cfg.per_layer_embed.is_some()"))?;
+    let table_buf = session
+        .inp_per_layer_table_buf
+        .ok_or_else(|| anyhow!("inp_per_layer_table_buf missing despite cfg.per_layer_embed.is_some()"))?;
+
+    // Tensor infos from the GGUF.
+    let g_names = crate::names::GlobalNames::default_names();
+    let tokembd_info = gguf
+        .tensors
+        .get(&g_names.per_layer_token_embd)
+        .ok_or_else(|| anyhow!("per_layer_token_embd missing in GGUF"))?;
+    let modelproj_info = gguf
+        .tensors
+        .get(&g_names.per_layer_model_proj)
+        .ok_or_else(|| anyhow!("per_layer_model_proj missing in GGUF"))?;
+    let projnorm_info = gguf
+        .tensors
+        .get(&g_names.per_layer_proj_norm)
+        .ok_or_else(|| anyhow!("per_layer_proj_norm missing in GGUF"))?;
+
+    // 1. Read the token's per_layer_token_embd row from mmap.
+    let row_bytes = per_layer_token_embd_row_bytes(tokembd_info)?;
+    let tokembd_raw = gguf
+        .tensor_raw(&tokembd_info.name)
+        .with_context(|| format!("tensor_raw `{}`", tokembd_info.name))?;
+    let vocab = tokembd_info.dims[0] as usize;
+    if (token_id as usize) >= vocab {
+        bail!(
+            "per_layer build: token_id {token_id} >= per_layer_token_embd vocab {vocab}"
+        );
+    }
+    let offset = (token_id as usize) * row_bytes;
+    if offset + row_bytes > tokembd_raw.len() {
+        bail!("per_layer_token_embd row OOB at token {token_id}");
+    }
+    let row = &tokembd_raw[offset..offset + row_bytes];
+
+    // 2. Full model_proj + proj_norm slabs.
+    let modelproj_raw = gguf
+        .tensor_raw(&modelproj_info.name)
+        .with_context(|| format!("tensor_raw `{}`", modelproj_info.name))?;
+    let projnorm_raw = gguf
+        .tensor_raw(&projnorm_info.name)
+        .with_context(|| format!("tensor_raw `{}`", projnorm_info.name))?;
+
+    // 3. Read back the post-scale F16 embedding from device.
+    let mut inp_batch_f16 = vec![half::f16::from_f32(0.0); hidden];
+    // SAFETY: outer_residual holds hidden*2 F16 bytes; host buf same.
+    unsafe {
+        device.memcpy_async(
+            stream,
+            CopyDirection::DeviceToHost,
+            DevicePtr(inp_batch_f16.as_mut_ptr() as usize),
+            session.outer_residual(),
+            hidden * 2,
+        )?;
+    }
+    stream.synchronize()?;
+
+    // 4. Host-side build.
+    let table = build_inp_per_layer_table(
+        row,
+        tokembd_info.dtype,
+        modelproj_raw,
+        modelproj_info.dtype,
+        projnorm_raw,
+        &inp_batch_f16,
+        pe,
+        n_layer,
+        hidden,
+        rms_eps,
+    )?;
+    let _ = globals; // on-device copies kept for future on-device build path
+
+    // 5. Upload to the session's table buffer.
+    upload_inp_per_layer_table(device, stream, &table, table_buf)?;
+    Ok(Some(table_buf))
 }

@@ -32,6 +32,7 @@
 
 use anyhow::{anyhow, Result};
 
+pub mod gemma4;
 pub mod hermes;
 pub mod qwen3_coder;
 
@@ -186,18 +187,21 @@ pub enum ToolCallFormat {
     Hermes,
     /// Qwen3-Coder XML: `<tool_call><function=name><parameter=k>v</parameter>…</function></tool_call>`.
     QwenCoder,
+    /// Gemma 4 custom: `<|tool_call>call:NAME{k:<|"|>v<|"|>,...}<tool_call|>`.
+    Gemma4,
 }
 
 impl ToolCallFormat {
-    /// Parse `"hermes" | "qwen3_coder"`. Other strings — including
-    /// `"auto"` — are not accepted here; use [`dispatcher`] to resolve
-    /// `"auto"` against a model architecture.
+    /// Parse `"hermes" | "qwen3_coder" | "gemma4"`. Other strings —
+    /// including `"auto"` — are not accepted here; use [`dispatcher`]
+    /// to resolve `"auto"` against a model architecture.
     pub fn from_explicit(s: &str) -> Result<Self> {
         match s {
             "hermes" => Ok(Self::Hermes),
             "qwen3_coder" | "qwen3-coder" | "qwen_coder" => Ok(Self::QwenCoder),
+            "gemma4" | "gemma-4" => Ok(Self::Gemma4),
             other => Err(anyhow!(
-                "unknown tool_call_format: {other:?} (expected \"hermes\" or \"qwen3_coder\")"
+                "unknown tool_call_format: {other:?} (expected \"hermes\", \"qwen3_coder\", or \"gemma4\")"
             )),
         }
     }
@@ -236,6 +240,12 @@ pub fn choose_format(
 /// `ServerState.tool_call_format_default` once per process. Per-
 /// request `tool_call_format` overrides are honoured first.
 pub fn detect_format_from_template(template_src: &str) -> ToolCallFormat {
+    // Gemma 4 signature: the custom `<|tool_call>call:` open + the
+    // `<|"|>` string-quote special-token sequence. Both are unique to
+    // gemma4 and absent from Hermes / Coder templates.
+    if template_src.contains("<|tool_call>") && template_src.contains("<|\"|>") {
+        return ToolCallFormat::Gemma4;
+    }
     // Coder-XML signature: literal tag instructions in the system
     // prompt branch. Hermes templates emit JSON-shaped guidance.
     if template_src.contains("<function=") || template_src.contains("<parameter=") {
@@ -255,6 +265,7 @@ pub fn dispatcher(
     match choose_format(request_override, server_default)? {
         ToolCallFormat::Hermes => Ok(Box::new(hermes::HermesJsonParser::new())),
         ToolCallFormat::QwenCoder => Ok(Box::new(qwen3_coder::QwenCoderXmlParser::new())),
+        ToolCallFormat::Gemma4 => Ok(Box::new(gemma4::Gemma4ToolCallParser::new())),
     }
 }
 
@@ -302,6 +313,28 @@ mod tests {
     #[test]
     fn unknown_format_is_error() {
         assert!(choose_format(Some("qwen42"), ToolCallFormat::Hermes).is_err());
+    }
+
+    #[test]
+    fn detect_format_gemma4_template() {
+        let tpl = r#"
+            {{ bos_token }}
+            <|turn>system
+            <|tool_call>call:NAME{k:<|"|>v<|"|>}<tool_call|>
+        "#;
+        assert_eq!(detect_format_from_template(tpl), ToolCallFormat::Gemma4);
+    }
+
+    #[test]
+    fn explicit_gemma4() {
+        assert_eq!(
+            choose_format(Some("gemma4"), ToolCallFormat::Hermes).unwrap(),
+            ToolCallFormat::Gemma4
+        );
+        assert_eq!(
+            choose_format(Some("gemma-4"), ToolCallFormat::Hermes).unwrap(),
+            ToolCallFormat::Gemma4
+        );
     }
 
     #[test]

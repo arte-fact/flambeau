@@ -11,14 +11,15 @@
 //! is precomputed as `w = (1/sqrt(n_embd)) * ffn_gate_inp_s` at
 //! upload time. No new kernel.
 //!
-//! Gating gap (S6-B-A): the gemma4 expert gating function is
+//! Gating gap: the gemma4 expert gating function is
 //! `LLAMA_EXPERT_GATING_FUNC_TYPE_SOFTMAX` (softmax over all experts
 //! → take top-k → keep softmax-of-all probs, no renorm). The
 //! `blocks::MoeExperts` route_decode currently dispatches
 //! `RouterNormalize::Softmax` to an error; this composer uses
 //! `RouterNormalize::TopkRenorm` (softmax-of-topk) until the
-//! dedicated kernel ships in a follow-up. Real-weights parity vs
-//! llama.cpp on 26B-A4B is blocked on closing this gap.
+//! dedicated kernel ships. Real-weights bit-exact parity vs
+//! llama.cpp on 26B-A4B is blocked on closing this gap; output is
+//! finite + plausible without it.
 
 #![cfg(feature = "hip")]
 
@@ -63,6 +64,11 @@ pub struct Gemma4MoeScratch {
     pub cur_moe_f16: DevicePtr,
     /// F16 [hidden] — combined `cur_mlp + cur_moe` (intermediate).
     pub cur_combined_f16: DevicePtr,
+    /// F16 [hidden] — read-only zero buffer fed as `residual` to
+    /// `MoeExperts::forward_decode` so the combine kernel does the
+    /// straight weighted sum (no residual fold). Uploaded once at
+    /// session init; never written.
+    pub zero_hidden_f16: DevicePtr,
     /// blocks::MoeExperts decode scratch.
     pub moe_scratch: MoeExpertsDecodeScratch,
 }
@@ -192,24 +198,15 @@ pub fn forward_ffn_moe<O: Ops>(
         .route_decode(ops, moe_scratch.router_input_f16, moe_scratch.moe_scratch)
         .context("MoE route_decode")?;
 
-    // Expert forward — residual is zero (we want cur_moe alone, no
-    // residual fold here; the final residual is `attn_residual` added
-    // after post_ffw_norm). Pass cur_moe_f16 as both x_norm (already
-    // rmsnormed above) and reuse another buffer as the "residual=0"
-    // input. The block's combine adds residual + Σ w_k · expert_out_k.
-    // We want only the Σ — but the API requires a residual. Trick:
-    // allocate a zero buffer once on session init. For this composer
-    // we re-use cur_combined_f16 zeroed below.
-    //
-    // Zero `cur_combined_f16` via `add_f16(x, -x, y)` would need extra
-    // ops; simplest is a memset to zero. The caller is expected to
-    // keep `cur_combined_f16` zeroed between calls (a session-level
-    // invariant — see Gemma4MoeScratch docs).
+    // Expert forward. The block's combine adds `residual + Σ w_k ·
+    // expert_out_k`; we want only the Σ (the final residual fold uses
+    // `attn_residual` after `post_ffw_norm`), so feed a dedicated
+    // session-init-zeroed buffer as `residual`.
     moe.moe
         .forward_decode(
             ops,
             moe_scratch.cur_moe_f16,        // x_norm
-            moe_scratch.cur_combined_f16,   // residual = zeros
+            moe_scratch.zero_hidden_f16,    // residual = zeros
             None,                            // no extra residual
             moe_scratch.cur_moe_f16,        // out (overwritten)
             moe_scratch.moe_scratch,

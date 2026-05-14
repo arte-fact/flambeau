@@ -130,6 +130,7 @@ fn make_layer(dev: &HipDevice, raw: &mut Vec<DeviceTensor>) -> Gemma4LayerWeight
         ffn_down,
         post_ffw_norm: make_f16_ones_tensor(dev, HIDDEN, raw),
         per_layer_embed: None,
+        moe: None,
     }
 }
 

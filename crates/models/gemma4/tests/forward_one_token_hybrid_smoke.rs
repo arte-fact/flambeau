@@ -170,6 +170,7 @@ fn make_layer_shard(dev: &HipDevice) -> Gemma4LayerWeights {
         ffn_down,
         post_ffw_norm,
         per_layer_embed: None,
+        moe: None,
     }
 }
 
