@@ -30,9 +30,9 @@ use std::sync::Arc;
 use anyhow::{anyhow, bail, Context, Result};
 use flambeau_backend_hip::{HipCluster, HipDevice};
 use flambeau_blocks::{
-    embed_token_host, forward_one_token_hybrid, upload_f16_ones, Activation,
-    DenseMlpDecodeScratch, DenseMlpTp, HybridCluster, HybridDecodeDriver, RawAllocTracker,
-    StandardAttention, StandardAttentionDecodeScratch, WeightHandle,
+    embed_token_host, forward_one_token_hybrid, tp_allreduce_sum, upload_f16_ones, Activation,
+    Buffer, DenseMlpDecodeScratch, DenseMlpTp, HybridCluster, HybridDecodeDriver, RawAllocTracker,
+    RowParallel, StandardAttention, StandardAttentionDecodeScratch, WeightHandle, F16,
 };
 use flambeau_core::{CopyDirection, Device, DevicePtr, Stream};
 use flambeau_ops::hip::{HipOps, OpsRegistry};
@@ -594,17 +594,21 @@ fn forward_layer_decode_hybrid(
         .context("StandardAttention::forward_decode (gemma4 hybrid)")?;
     }
 
-    // Phase 2: AR over the stage's sub-cluster.
-    let partials: [DevicePtr; 2] = [stage.rank_state[0].partial_attn, stage.rank_state[1].partial_attn];
-    let streams = [
+    // Phase 2: typed AR over the stage's sub-cluster — same pattern as
+    // gemma4 tp.rs Phase-2 (commit 20ce15b) but per-stage.
+    let partials: [Buffer<F16, RowParallel<0>>; 2] = [
+        Buffer::from_raw_unchecked(stage.rank_state[0].partial_attn, hidden),
+        Buffer::from_raw_unchecked(stage.rank_state[1].partial_attn, hidden),
+    ];
+    let streams: [&_; 2] = [
         sub_cluster.device(0).default_stream(),
         sub_cluster.device(1).default_stream(),
     ];
     // SAFETY: each partial_attn is hidden F16 elems on its rank's device.
-    unsafe {
-        ar.sum_tp2(&partials, hidden as u32, &streams)
-            .map_err(|e| anyhow!("AR sum_tp2 attn stage {stage_idx}: {e}"))?;
+    let _replicated = unsafe {
+        tp_allreduce_sum::<0>(ar, &partials, &streams)
     }
+    .map_err(|e| anyhow!("AR sum attn stage {stage_idx}: {e}"))?;
 
     // Phase 3: per-rank post_attention_norm + residual.
     for r in 0..n_ranks {
@@ -691,17 +695,20 @@ fn forward_layer_decode_hybrid(
         .context("DenseMlpTp::forward_decode (gemma4 hybrid)")?;
     }
 
-    // Phase 5: AR FFN.
-    let partials_ffn: [DevicePtr; 2] = [stage.rank_state[0].partial_ffn, stage.rank_state[1].partial_ffn];
-    let streams = [
+    // Phase 5: typed AR FFN — same pattern as Phase 2 above.
+    let partials_ffn: [Buffer<F16, RowParallel<0>>; 2] = [
+        Buffer::from_raw_unchecked(stage.rank_state[0].partial_ffn, hidden),
+        Buffer::from_raw_unchecked(stage.rank_state[1].partial_ffn, hidden),
+    ];
+    let streams: [&_; 2] = [
         sub_cluster.device(0).default_stream(),
         sub_cluster.device(1).default_stream(),
     ];
     // SAFETY: same as phase 2.
-    unsafe {
-        ar.sum_tp2(&partials_ffn, hidden as u32, &streams)
-            .map_err(|e| anyhow!("AR sum_tp2 ffn stage {stage_idx}: {e}"))?;
+    let _replicated_ffn = unsafe {
+        tp_allreduce_sum::<0>(ar, &partials_ffn, &streams)
     }
+    .map_err(|e| anyhow!("AR sum ffn stage {stage_idx}: {e}"))?;
 
     // Phase 6: per-rank post_ffw_norm + residual.
     for r in 0..n_ranks {
