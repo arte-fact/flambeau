@@ -379,16 +379,16 @@ fn upload_byte_parity_31b_q4_0_tp2_rank0_attn_q() {
     let mut driver = Gemma4TpDriver::upload(&file, cfg, layout, cluster, MAX_TOKENS)
         .expect("TP upload");
 
-    // Take rank-1's attn_output for layer 0 (row-parallel, second half cols).
+    // Take rank-1's ffn_down for layer 0 (row-parallel Q4_1, second half cols).
     let stage = &driver.stages[1];
     let layer0 = &stage.layer_weights[0];
-    let q_dims = layer0.attn_output.dims;
-    let q_ptr = layer0.attn_output.ptr;
-    eprintln!("rank 1 layer 0 attn_output dims = {q_dims:?}");
+    let q_dims = layer0.ffn_down.dims;
+    let q_ptr = layer0.ffn_down.ptr;
+    eprintln!("rank 1 layer 0 ffn_down dims = {q_dims:?}");
 
     // Compute expected byte count.
     let bytes_per_row = flambeau_blocks::row_bytes_for_dtype(
-        flambeau_quant::GgmlDType::Q4_0,
+        flambeau_quant::GgmlDType::Q4_1,
         q_dims[1],
     )
     .expect("row_bytes");
@@ -416,14 +416,14 @@ fn upload_byte_parity_31b_q4_0_tp2_rank0_attn_q() {
     }
     device.default_stream().synchronize().expect("sync");
 
-    // Hand-shard attn_output rank-1 = for each row, cols
-    // [q_width_local, q_width). Read the expected slice from mmap.
+    // Hand-shard ffn_down rank-1 = for each row, cols
+    // [ff_local, ff_global). Read the expected slice from mmap.
     let raw = file
-        .tensor_raw("blk.0.attn_output.weight")
+        .tensor_raw("blk.0.ffn_down.weight")
         .expect("tensor_raw");
     let q_width_global = q_dims[1] * 2;
     let bpr_global = flambeau_blocks::row_bytes_for_dtype(
-        flambeau_quant::GgmlDType::Q4_0,
+        flambeau_quant::GgmlDType::Q4_1,
         q_width_global,
     )
     .expect("bpr_global");
@@ -449,7 +449,7 @@ fn upload_byte_parity_31b_q4_0_tp2_rank0_attn_q() {
 
     assert_eq!(
         match_count, total_bytes,
-        "rank 1 attn_output upload differs from expected mmap row-parallel slice"
+        "rank 1 ffn_down (Q4_1) upload differs from expected mmap row-parallel slice"
     );
 }
 
