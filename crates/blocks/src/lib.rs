@@ -41,8 +41,8 @@ pub use delta_net::{
 };
 pub use driver_base::{HybridCluster, HybridStageCluster, TpCluster};
 pub use driver_utils::{
-    alloc_zeroed, embed_token_host, ggml_to_qdtype, row_bytes_for_dtype, upload_f16_ones,
-    RawAllocTracker,
+    alloc_zeroed, embed_token_host, ggml_to_qdtype, quant_f32_to_q8_0, row_bytes_for_dtype,
+    upload_f16_ones, RawAllocTracker,
 };
 pub use dense_mlp::{
     DenseMlp, DenseMlpDecodeScratch, DenseMlpPrefillScratch, DenseMlpScratchDims, DenseMlpTp,

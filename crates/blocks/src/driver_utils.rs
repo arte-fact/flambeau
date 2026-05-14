@@ -15,7 +15,7 @@ use anyhow::{anyhow, bail, Context, Result};
 use flambeau_backend_hip::{HipDevice, HipStream};
 use flambeau_core::op::QDtype;
 use flambeau_core::{CopyDirection, Device, DevicePtr, Stream};
-use flambeau_quant::GgmlDType;
+use flambeau_quant::{GgmlDType, QK8_0};
 use half::f16;
 
 /// Allocate `bytes` on `device` and zero-fill via a host→device memcpy
@@ -96,6 +96,52 @@ pub fn ggml_to_qdtype(d: GgmlDType) -> Result<QDtype> {
         GgmlDType::Iq1M => QDtype::IQ1_M,
         other => bail!("ggml_to_qdtype: unsupported dtype {other:?}"),
     })
+}
+
+/// Host-side F32 → Q8_0 quantisation. Used as a `WeightSpec.pre_upload`
+/// hook for tensors that ship F32 in the GGUF but are consumed by
+/// Q8_0 kernels (e.g. qwen3-moe's `ssm_alpha` / `ssm_beta`). Element
+/// count must be a multiple of `QK8_0` (32). Block layout matches
+/// `flambeau_quant::BlockQ8_0`: 2-byte `d` (F16 scale) + 32-byte `qs`
+/// = 34 bytes per block.
+///
+/// Pass-through if the source dtype is already `Q8_0` — returns the
+/// original bytes verbatim so callers can use this as a single
+/// `pre_upload` hook for tensors that *might* already be quantised.
+pub fn quant_f32_to_q8_0(raw: &[u8], src_dtype: GgmlDType) -> Result<(Vec<u8>, GgmlDType)> {
+    if src_dtype == GgmlDType::Q8_0 {
+        return Ok((raw.to_vec(), GgmlDType::Q8_0));
+    }
+    if src_dtype != GgmlDType::F32 {
+        bail!(
+            "quant_f32_to_q8_0: unsupported source dtype {src_dtype:?} (expected F32 or Q8_0)"
+        );
+    }
+    // SAFETY-cast: raw is the F32 mmap view; alignment is 4 bytes
+    // (mmap is page-aligned, exceeds f32 alignment).
+    let src: &[f32] = bytemuck::cast_slice(raw);
+    let elems = src.len();
+    if elems == 0 || elems % QK8_0 != 0 {
+        bail!(
+            "quant_f32_to_q8_0: elem count {elems} not a positive multiple of QK8_0={QK8_0}"
+        );
+    }
+    let n_blocks = elems / QK8_0;
+    let block_size = 34usize; // 2 (d) + 32 (qs)
+    let mut buf: Vec<u8> = Vec::with_capacity(n_blocks * block_size);
+    for block in src.chunks_exact(QK8_0) {
+        let absmax = block.iter().map(|v| v.abs()).fold(0.0f32, f32::max);
+        let d = absmax / 127.0;
+        let id = if d != 0.0 { 1.0 / d } else { 0.0 };
+        let d_f16 = half::f16::from_f32(d);
+        buf.extend_from_slice(&d_f16.to_bits().to_le_bytes());
+        for &v in block {
+            let q = (v * id).round_ties_even() as i32;
+            let q = q.clamp(-127, 127) as i8;
+            buf.push(q as u8);
+        }
+    }
+    Ok((buf, GgmlDType::Q8_0))
 }
 
 /// Bytes-per-row for a 2-D quantised weight with `hidden` columns.

@@ -614,77 +614,6 @@ fn upload_one_inner(
     ))
 }
 
-/// Upload a tensor as F16 — if source is already F16, as-is; if source is
-/// F32, cast on host then upload. All V1 norm slots (attn_norm,
-/// post_attention_norm, ffn_norm, attn_q_norm, attn_k_norm, output_norm)
-/// go through here because Qwen3.6's GGUF stores them F32 but our
-/// rmsnorm kernels expect F16 weight.
-fn upload_as_f16(
-    file: &GgufFile,
-    r: &ResolvedTensor,
-    device: &HipDevice,
-) -> Result<(DeviceTensor, usize)> {
-    if r.dtype == GgmlDType::F16 {
-        return upload_one(file, r, device);
-    }
-    if r.dtype != GgmlDType::F32 {
-        bail!(
-            "upload_as_f16: tensor `{}` has unsupported source dtype {:?}",
-            r.name,
-            r.dtype
-        );
-    }
-    let raw = file
-        .tensor_raw(&r.name)
-        .with_context(|| format!("tensor_raw `{}`", r.name))?;
-    let src: &[f32] = bytemuck::cast_slice(raw);
-    let elems: usize = r.dims.iter().product::<u64>() as usize;
-    if src.len() < elems {
-        bail!(
-            "upload_as_f16: `{}` mmap slice {} < expected {}",
-            r.name,
-            src.len(),
-            elems
-        );
-    }
-    let host: Vec<half::f16> = src[..elems]
-        .iter()
-        .map(|&v| half::f16::from_f32(v))
-        .collect();
-    let bytes = host.len() * 2;
-    let ptr = device.alloc(bytes)?;
-    // SAFETY: `ptr` is a fresh HIP allocation; `host` has `bytes` valid host bytes.
-    unsafe {
-        device
-            .memcpy_async(
-                device.default_stream(),
-                CopyDirection::HostToDevice,
-                ptr,
-                DevicePtr(host.as_ptr() as usize),
-                bytes,
-            )
-            .map_err(|e| anyhow::anyhow!("memcpy (f32→f16) `{}`: {e}", r.name))?;
-    }
-    device.default_stream().synchronize()?;
-    drop(host);
-    // Same drop-only-for-layer-private rule as upload_one; safe to drop here
-    // because upload_as_f16 is called for per-layer norms + the global
-    // output_norm, but output_norm is only uploaded by is_last rank, no
-    // sharing conflict. Explicit drop of the staged `host` Vec already frees
-    // the converted buffer; the mmap source pages are released by madvise
-    // in the caller via `up_f16_drop` when appropriate.
-    Ok((
-        DeviceTensor {
-            ptr,
-            dtype: GgmlDType::F16,
-            dims: r.dims.clone(),
-            bytes,
-            name: std::sync::Arc::from(r.name.as_str()),
-        },
-        bytes,
-    ))
-}
-
 
 /// Generic at-load conversion path: dequantise `r` from its source dtype
 /// to F32 on host, then encode the F32 buffer as Q8_0 and upload. Used
@@ -987,102 +916,6 @@ fn split_ssm_ba_to_q8_0(
 
 
 
-fn upload_as_q8_0(
-    file: &GgufFile,
-    r: &ResolvedTensor,
-    device: &HipDevice,
-) -> Result<(DeviceTensor, usize)> {
-    if dev_flag("FLAMBEAU_LOAD_TRACE") {
-        let t0 = std::time::Instant::now();
-        let out = upload_as_q8_0_inner(file, r, device);
-        eprintln!("  [load] as_q8_0    {:<50} {:?} {:>7.1} MB {:>6.1} ms",
-            r.name, r.dtype, r.size_bytes as f64 / 1e6,
-            t0.elapsed().as_secs_f64() * 1000.0);
-        return out;
-    }
-    upload_as_q8_0_inner(file, r, device)
-}
-
-fn upload_as_q8_0_inner(
-    file: &GgufFile,
-    r: &ResolvedTensor,
-    device: &HipDevice,
-) -> Result<(DeviceTensor, usize)> {
-    if r.dtype == GgmlDType::Q8_0 {
-        return upload_one_inner(file, r, device);
-    }
-    if r.dtype != GgmlDType::F32 {
-        bail!(
-            "upload_as_q8_0: tensor `{}` has unsupported source dtype {:?}",
-            r.name,
-            r.dtype
-        );
-    }
-    let raw = file
-        .tensor_raw(&r.name)
-        .with_context(|| format!("tensor_raw `{}`", r.name))?;
-    let src: &[f32] = bytemuck::cast_slice(raw);
-    let elems: usize = r.dims.iter().product::<u64>() as usize;
-    if src.len() < elems {
-        bail!(
-            "upload_as_q8_0: `{}` mmap slice {} < expected {}",
-            r.name,
-            src.len(),
-            elems
-        );
-    }
-    if elems % QK8_0 != 0 {
-        bail!(
-            "upload_as_q8_0: `{}` elem count {elems} not multiple of QK8_0={QK8_0}",
-            r.name
-        );
-    }
-    let n_blocks = elems / QK8_0;
-    // `BlockQ8_0` layout (see `flambeau_quant::BlockQ8_0`): 2-byte d +
-    // 32-byte qs = 34 bytes per block.
-    let block_size = 34usize;
-    let bytes = n_blocks * block_size;
-    let mut buf: Vec<u8> = Vec::with_capacity(bytes);
-    for block in src[..elems].chunks_exact(QK8_0) {
-        let absmax = block.iter().map(|v| v.abs()).fold(0.0f32, f32::max);
-        let d = absmax / 127.0;
-        let id = if d != 0.0 { 1.0 / d } else { 0.0 };
-        let d_f16 = half::f16::from_f32(d);
-        buf.extend_from_slice(&d_f16.to_bits().to_le_bytes());
-        for &v in block {
-            let q = (v * id).round_ties_even() as i32;
-            let q = q.clamp(-127, 127) as i8;
-            buf.push(q as u8);
-        }
-    }
-    debug_assert_eq!(buf.len(), bytes);
-    let ptr = device.alloc(bytes)?;
-    // SAFETY: `ptr` has `bytes` valid HIP bytes; `buf` has `bytes` valid host bytes.
-    unsafe {
-        device
-            .memcpy_async(
-                device.default_stream(),
-                CopyDirection::HostToDevice,
-                ptr,
-                DevicePtr(buf.as_ptr() as usize),
-                bytes,
-            )
-            .map_err(|e| anyhow::anyhow!("memcpy (f32→Q8_0) `{}`: {e}", r.name))?;
-    }
-    device.default_stream().synchronize()?;
-    drop(buf);
-    Ok((
-        DeviceTensor {
-            ptr,
-            dtype: GgmlDType::Q8_0,
-            dims: r.dims.clone(),
-            bytes,
-            name: std::sync::Arc::from(r.name.as_str()),
-        },
-        bytes,
-    ))
-}
-
 /// Upload a full `LayerDescriptor`'s tensors to `device`, returning a
 /// populated `LayerWeights` + total byte count for this layer.
 fn upload_layer(
@@ -1094,31 +927,56 @@ fn upload_layer(
     let mut bytes = 0usize;
 
     // Norm slots: rmsnorm kernels all expect F16 weight. Qwen3.6 stores
-    // them F32 in the GGUF; cast on load.
-    let attn_norm = up_f16(file, &desc.attn_norm, device, &mut bytes)?;
+    // them F32 in the GGUF; cast on load — the shared `AttnNorm` /
+    // `PostAttnNorm` / `FfnNorm` roles declare `DtypeFilter::F32ToF16Norm`
+    // which does the cast.
+    let attn_norm = up_role::<flambeau_blocks::AttnNorm>(
+        file,
+        cfg,
+        &desc.attn_norm,
+        desc.layer_idx,
+        device,
+        &mut bytes,
+    )?;
     let post_attention_norm = desc
         .post_attention_norm
         .as_ref()
-        .map(|t| up_f16(file, t, device, &mut bytes))
+        .map(|t| {
+            up_role::<flambeau_blocks::PostAttnNorm>(
+                file,
+                cfg,
+                t,
+                desc.layer_idx,
+                device,
+                &mut bytes,
+            )
+        })
         .transpose()?;
     let ffn_norm = desc
         .ffn_norm
         .as_ref()
-        .map(|t| up_f16(file, t, device, &mut bytes))
+        .map(|t| {
+            up_role::<flambeau_blocks::FfnNorm>(file, cfg, t, desc.layer_idx, device, &mut bytes)
+        })
         .transpose()?;
 
     let attn = match &desc.attn {
         LayerAttnBlock::Dense(d) => {
             AttnWeights::Dense(upload_dense(d, file, desc.layer_idx, cfg, device, &mut bytes)?)
         }
-        LayerAttnBlock::FullAttn(f) => {
-            AttnWeights::FullAttn(upload_full(f, file, device, &mut bytes)?)
-        }
+        LayerAttnBlock::FullAttn(f) => AttnWeights::FullAttn(upload_full(
+            f,
+            file,
+            desc.layer_idx,
+            cfg,
+            device,
+            &mut bytes,
+        )?),
         LayerAttnBlock::Gdn(g) => {
-            AttnWeights::Gdn(upload_gdn(g, file, device, &mut bytes, cfg)?)
+            AttnWeights::Gdn(upload_gdn(g, file, desc.layer_idx, cfg, device, &mut bytes)?)
         }
     };
-    let ffn = upload_ffn(&desc.ffn, file, device, &mut bytes)?;
+    let ffn = upload_ffn(&desc.ffn, file, desc.layer_idx, cfg, device, &mut bytes)?;
 
     Ok((
         LayerWeights {
@@ -1147,32 +1005,6 @@ fn up_raw(
     // layer's tensors are uploaded exactly once (by the owning rank) so
     // it's safe to munmap their mmap ranges here — keeps page cache
     // under host RAM for GGUFs larger than RAM.
-    file.advise_drop_tensor(&r.name);
-    Ok(t)
-}
-
-/// Upload the tensor as F16 (casting F32 source on host if needed).
-fn up_f16(
-    file: &GgufFile,
-    r: &ResolvedTensor,
-    device: &HipDevice,
-    total: &mut usize,
-) -> Result<DeviceTensor> {
-    let (t, b) = upload_as_f16(file, r, device)?;
-    *total += b;
-    file.advise_drop_tensor(&r.name);
-    Ok(t)
-}
-
-/// Upload the tensor as Q8_0 (quantising F32 source on host if needed).
-fn up_q8_0(
-    file: &GgufFile,
-    r: &ResolvedTensor,
-    device: &HipDevice,
-    total: &mut usize,
-) -> Result<DeviceTensor> {
-    let (t, b) = upload_as_q8_0(file, r, device)?;
-    *total += b;
     file.advise_drop_tensor(&r.name);
     Ok(t)
 }
@@ -1293,33 +1125,48 @@ fn upload_dense(
 fn upload_full(
     f: &FullAttnTensors,
     file: &GgufFile,
+    layer_idx: usize,
+    cfg: &Qwen3MoEConfig,
     device: &HipDevice,
     total: &mut usize,
 ) -> Result<FullAttnWeights> {
+    use flambeau_blocks::{AttnK, AttnKNorm, AttnOutput, AttnQ, AttnQNorm, AttnV};
+    // Note: qwen3.5's `attn_q` is stored on disk as `[2 * q_width, hidden]`
+    // (Q concatenated with the output gate along the outer dim). At PP
+    // (world=1) the role's `shape_for = [q_width, hidden]` is unused;
+    // upload just memcpys the full tensor at its declared size. TP (S4)
+    // slicing of `attn_q` with `ColParallel { dim: 0 }` cleanly splits
+    // both halves because the descriptor's `dims` carry the full 2×
+    // width.
     Ok(FullAttnWeights {
-        attn_q: up_raw(file, &f.attn_q, device, total)?,
-        attn_k: up_raw(file, &f.attn_k, device, total)?,
-        attn_v: up_raw(file, &f.attn_v, device, total)?,
-        attn_output: up_raw(file, &f.attn_output, device, total)?,
-        attn_q_norm: up_f16(file, &f.attn_q_norm, device, total)?,
-        attn_k_norm: up_f16(file, &f.attn_k_norm, device, total)?,
+        attn_q: up_role::<AttnQ>(file, cfg, &f.attn_q, layer_idx, device, total)?,
+        attn_k: up_role::<AttnK>(file, cfg, &f.attn_k, layer_idx, device, total)?,
+        attn_v: up_role::<AttnV>(file, cfg, &f.attn_v, layer_idx, device, total)?,
+        attn_output: up_role::<AttnOutput>(file, cfg, &f.attn_output, layer_idx, device, total)?,
+        attn_q_norm: up_role::<AttnQNorm>(file, cfg, &f.attn_q_norm, layer_idx, device, total)?,
+        attn_k_norm: up_role::<AttnKNorm>(file, cfg, &f.attn_k_norm, layer_idx, device, total)?,
     })
 }
 
 fn upload_gdn(
     g: &GdnTensors,
     file: &GgufFile,
+    layer_idx: usize,
+    cfg: &Qwen3MoEConfig,
     device: &HipDevice,
     total: &mut usize,
-    cfg: &Qwen3MoEConfig,
 ) -> Result<GdnWeights> {
+    use flambeau_blocks::{
+        AttnGate, FusedAttnQkv, SsmA, SsmAlpha, SsmBa, SsmBeta, SsmConv1d, SsmDtBias, SsmNorm,
+        SsmOut,
+    };
     // V1.x #120 / #142 — qwen3next packs ssm_alpha + ssm_beta as one
     // fused `ssm_ba.weight` tensor `[2*num_v_heads, hidden]`. The on-disk
     // layout is INTERLEAVED per K-head as `[β..., α...] × num_k_heads`,
     // matching llama.cpp's `ssm_beta_alpha` view; see
-    // `split_ssm_ba_to_q8_0` for details. Re-quantise each half to Q8_0
-    // so the V1 GDN forward path (which expects split α/β) consumes
-    // them as if the GGUF had shipped them separately.
+    // `split_ssm_ba_to_q8_0` for details. The split helper produces two
+    // Q8_0 DeviceTensors directly — stays inline because it's a 1-in /
+    // 2-out transform that doesn't fit the WeightRole shape.
     let split_ba = g.ssm_alpha.is_none() && g.ssm_beta.is_none() && g.ssm_ba.is_some();
     let (alpha_dt, beta_dt, ba_dt) = if split_ba {
         let ba = g.ssm_ba.as_ref().unwrap();
@@ -1327,88 +1174,106 @@ fn upload_gdn(
         *total += a.bytes + b.bytes;
         (Some(a), Some(b), None)
     } else {
+        // SsmAlpha / SsmBeta roles have `pre_upload = quant_f32_to_q8_0`
+        // which transcodes F32 → Q8_0 at load (or passes through Q8_0).
         let alpha = g
             .ssm_alpha
             .as_ref()
-            .map(|t| up_q8_0(file, t, device, total))
+            .map(|t| up_role::<SsmAlpha>(file, cfg, t, layer_idx, device, total))
             .transpose()?;
         let beta = g
             .ssm_beta
             .as_ref()
-            .map(|t| up_q8_0(file, t, device, total))
+            .map(|t| up_role::<SsmBeta>(file, cfg, t, layer_idx, device, total))
             .transpose()?;
         let ba = g
             .ssm_ba
             .as_ref()
-            .map(|t| up_raw(file, t, device, total))
+            .map(|t| up_role::<SsmBa>(file, cfg, t, layer_idx, device, total))
             .transpose()?;
         (alpha, beta, ba)
     };
     Ok(GdnWeights {
-        attn_qkv: up_raw(file, &g.attn_qkv, device, total)?,
-        attn_gate: up_raw(file, &g.attn_gate, device, total)?,
-        // ssm_alpha / ssm_beta — split from qwen3next's ssm_ba above, or
-        // loaded directly for Qwen3.5/3.6 (F32 → Q8_0 at load).
+        attn_qkv: up_role::<FusedAttnQkv>(file, cfg, &g.attn_qkv, layer_idx, device, total)?,
+        attn_gate: up_role::<AttnGate>(file, cfg, &g.attn_gate, layer_idx, device, total)?,
         ssm_alpha: alpha_dt,
         ssm_beta: beta_dt,
         ssm_ba: ba_dt,
         // ssm_a / ssm_dt / ssm_conv1d / ssm_norm stay F32 — they're
-        // consumed by F32-native ops.
-        ssm_a: up_raw(file, &g.ssm_a, device, total)?,
-        ssm_dt_bias: up_raw(file, &g.ssm_dt_bias, device, total)?,
-        ssm_conv1d: up_raw(file, &g.ssm_conv1d, device, total)?,
-        ssm_norm: up_raw(file, &g.ssm_norm, device, total)?,
-        ssm_out: up_raw(file, &g.ssm_out, device, total)?,
+        // consumed by F32-native ops; roles preserve dtype.
+        ssm_a: up_role::<SsmA>(file, cfg, &g.ssm_a, layer_idx, device, total)?,
+        ssm_dt_bias: up_role::<SsmDtBias>(file, cfg, &g.ssm_dt_bias, layer_idx, device, total)?,
+        ssm_conv1d: up_role::<SsmConv1d>(file, cfg, &g.ssm_conv1d, layer_idx, device, total)?,
+        ssm_norm: up_role::<SsmNorm>(file, cfg, &g.ssm_norm, layer_idx, device, total)?,
+        ssm_out: up_role::<SsmOut>(file, cfg, &g.ssm_out, layer_idx, device, total)?,
     })
 }
 
 fn upload_ffn(
     f: &MoeFfnTensors,
     file: &GgufFile,
+    layer_idx: usize,
+    cfg: &Qwen3MoEConfig,
     device: &HipDevice,
     total: &mut usize,
 ) -> Result<FfnWeights> {
-    let opt_up_raw = |t: &Option<ResolvedTensor>, total: &mut usize| -> Result<Option<DeviceTensor>> {
-        t.as_ref().map(|r| up_raw(file, r, device, total)).transpose()
+    use flambeau_blocks::{
+        FfnDown, FfnGate, FfnUp, MoeExpertsDown, MoeExpertsGate, MoeExpertsUp, MoeRouter,
     };
-    // convert F32 router weight (`ffn_gate_inp`) to
-    // F16 at load. Halves the per-token HBM weight read inside the
-    // `dense_gemv_*` router kernel; quality impact is negligible (router
-    // is a coarse top-k discriminator over discrete experts). The F16
-    // conversion only fires when the GGUF stored F32; other dtypes
-    // (e.g. already-quantised) pass through up_raw unchanged.
-    let opt_up_router_f16 = |t: &Option<ResolvedTensor>,
-                             total: &mut usize|
-     -> Result<Option<DeviceTensor>> {
-        let Some(r) = t.as_ref() else {
-            return Ok(None);
-        };
-        if r.dtype == GgmlDType::F32 {
-            up_f16(file, r, device, total).map(Some)
-        } else {
-            up_raw(file, r, device, total).map(Some)
-        }
-    };
+    // `MoeRouter` role uses `DtypeFilter::F32ToF16Norm` so F32 routers
+    // are cast to F16 at upload (halves HBM bandwidth for the router
+    // GEMV); other dtypes pass through unchanged via the role path.
+    // Note: the legacy path only F16-cast when source was F32; the
+    // typed role's F32ToF16Norm filter handles both F32 (cast) and F16
+    // (raw upload). Sources already quantised (Q8_0 etc) would fail
+    // the cast — none of the qwen3-moe variants have non-F32/F16
+    // routers, but if that changes the role needs an `Any` variant.
     let dense = f
         .dense
         .as_ref()
         .map(|d| -> Result<crate::weights::DenseFfnWeights> {
             Ok(crate::weights::DenseFfnWeights {
-                ffn_gate: up_raw(file, &d.ffn_gate, device, total)?,
-                ffn_up: up_raw(file, &d.ffn_up, device, total)?,
-                ffn_down: up_raw(file, &d.ffn_down, device, total)?,
+                ffn_gate: up_role::<FfnGate>(file, cfg, &d.ffn_gate, layer_idx, device, total)?,
+                ffn_up: up_role::<FfnUp>(file, cfg, &d.ffn_up, layer_idx, device, total)?,
+                ffn_down: up_role::<FfnDown>(file, cfg, &d.ffn_down, layer_idx, device, total)?,
             })
         })
         .transpose()?;
     Ok(FfnWeights {
-        ffn_gate_inp: opt_up_router_f16(&f.ffn_gate_inp, total)?,
-        ffn_gate_exps: opt_up_raw(&f.ffn_gate_exps, total)?,
-        ffn_up_exps: opt_up_raw(&f.ffn_up_exps, total)?,
-        ffn_down_exps: opt_up_raw(&f.ffn_down_exps, total)?,
+        ffn_gate_inp: f
+            .ffn_gate_inp
+            .as_ref()
+            .map(|r| {
+                // The role declares `DtypeFilter::F32ToF16Norm`. Some
+                // GGUFs ship the router pre-quantised; in that case
+                // fall back to `up_raw` rather than rejecting.
+                if r.dtype == GgmlDType::F32 || r.dtype == GgmlDType::F16 {
+                    up_role::<MoeRouter>(file, cfg, r, layer_idx, device, total).map(Some)
+                } else {
+                    up_raw(file, r, device, total).map(Some)
+                }
+            })
+            .transpose()?
+            .flatten(),
+        ffn_gate_exps: f
+            .ffn_gate_exps
+            .as_ref()
+            .map(|r| up_role::<MoeExpertsGate>(file, cfg, r, layer_idx, device, total))
+            .transpose()?,
+        ffn_up_exps: f
+            .ffn_up_exps
+            .as_ref()
+            .map(|r| up_role::<MoeExpertsUp>(file, cfg, r, layer_idx, device, total))
+            .transpose()?,
+        ffn_down_exps: f
+            .ffn_down_exps
+            .as_ref()
+            .map(|r| up_role::<MoeExpertsDown>(file, cfg, r, layer_idx, device, total))
+            .transpose()?,
         shared: f
             .shared
             .as_ref()
-            .map(|s| upload_shared(s, file, device, total))
+            .map(|s| upload_shared(s, file, layer_idx, cfg, device, total))
             .transpose()?,
         dense,
     })
@@ -1417,14 +1282,45 @@ fn upload_ffn(
 fn upload_shared(
     s: &SharedExpertTensors,
     file: &GgufFile,
+    layer_idx: usize,
+    cfg: &Qwen3MoEConfig,
     device: &HipDevice,
     total: &mut usize,
 ) -> Result<SharedExpertWeights> {
+    use flambeau_blocks::{SharedExpertDown, SharedExpertGate, SharedExpertRouter, SharedExpertUp};
     Ok(SharedExpertWeights {
-        ffn_gate_inp_shexp: up_raw(file, &s.ffn_gate_inp_shexp, device, total)?,
-        ffn_gate_shexp: up_raw(file, &s.ffn_gate_shexp, device, total)?,
-        ffn_up_shexp: up_raw(file, &s.ffn_up_shexp, device, total)?,
-        ffn_down_shexp: up_raw(file, &s.ffn_down_shexp, device, total)?,
+        ffn_gate_inp_shexp: up_role::<SharedExpertRouter>(
+            file,
+            cfg,
+            &s.ffn_gate_inp_shexp,
+            layer_idx,
+            device,
+            total,
+        )?,
+        ffn_gate_shexp: up_role::<SharedExpertGate>(
+            file,
+            cfg,
+            &s.ffn_gate_shexp,
+            layer_idx,
+            device,
+            total,
+        )?,
+        ffn_up_shexp: up_role::<SharedExpertUp>(
+            file,
+            cfg,
+            &s.ffn_up_shexp,
+            layer_idx,
+            device,
+            total,
+        )?,
+        ffn_down_shexp: up_role::<SharedExpertDown>(
+            file,
+            cfg,
+            &s.ffn_down_shexp,
+            layer_idx,
+            device,
+            total,
+        )?,
     })
 }
 

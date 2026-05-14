@@ -35,7 +35,7 @@ use flambeau_ops::hip::HipDevice;
 use flambeau_quant::{GgmlDType, GgufFile};
 use flambeau_runtime::WeightLayout;
 
-use crate::driver_utils::{ggml_to_qdtype, RawAllocTracker};
+use crate::driver_utils::{ggml_to_qdtype, quant_f32_to_q8_0, RawAllocTracker};
 use crate::sharding::{
     upload_replicated_norm_f32_to_f16, upload_replicated_tensor, upload_sharded_tensor,
     UploadedTensor,
@@ -795,7 +795,8 @@ impl WeightRole for AttnGate {
 
 /// SSM alpha projection (qwen3.5 / 3.6 GDN — distinct from qwen3next's
 /// fused ssm_ba). Optional: the upload path treats absence + presence
-/// of `ssm_ba` as a 2-way branch.
+/// of `ssm_ba` as a 2-way branch. F32 source is transcoded to Q8_0 at
+/// upload via the `pre_upload` hook (Q8_0 source passes through).
 pub struct SsmAlpha;
 impl WeightRole for SsmAlpha {
     const SPEC: WeightSpec = WeightSpec {
@@ -809,11 +810,13 @@ impl WeightRole for SsmAlpha {
             }
         },
         required: false,
+        pre_upload: Some(quant_f32_to_q8_0),
         ..DEFAULT_WEIGHT_SPEC
     };
 }
 
-/// SSM beta projection (qwen3.5 / 3.6 GDN). Optional, paired with ssm_alpha.
+/// SSM beta projection (qwen3.5 / 3.6 GDN). Optional, paired with
+/// ssm_alpha. F32 → Q8_0 at upload via `pre_upload`.
 pub struct SsmBeta;
 impl WeightRole for SsmBeta {
     const SPEC: WeightSpec = WeightSpec {
@@ -827,6 +830,7 @@ impl WeightRole for SsmBeta {
             }
         },
         required: false,
+        pre_upload: Some(quant_f32_to_q8_0),
         ..DEFAULT_WEIGHT_SPEC
     };
 }
