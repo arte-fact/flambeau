@@ -34,8 +34,9 @@ use std::borrow::Cow;
 
 use anyhow::{anyhow, Context, Result};
 use flambeau_quant::GgufFile;
-use flambeau_runtime::WeightLayout;
 use thiserror::Error;
+
+use crate::tp_layout::WeightLayout;
 
 /// Slicing error — distinct from `anyhow` so callers can match on
 /// "unsupported axis" vs "block misalignment".

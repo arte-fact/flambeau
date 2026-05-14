@@ -15,6 +15,7 @@ pub mod model;
 pub mod registry;
 pub mod sampling;
 pub mod tp_layout;
+pub mod tp_slice;
 
 pub use collective::{
     AllGather, AllReduce, AllToAll, Broadcast, CollectiveError, CollectiveResult, RefMesh,
@@ -28,3 +29,4 @@ pub use model::Model;
 pub use registry::{Registry, RegistryError};
 pub use sampling::{sample, Rng, Sampler, Sampling};
 pub use tp_layout::{LayoutError, WeightLayout};
+pub use tp_slice::{slice_bytes_for_tp, slice_for_tp, SliceError};

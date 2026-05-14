@@ -18,7 +18,6 @@ pub mod model_arch;
 pub mod names;
 pub mod layout;
 pub mod tp_layout;
-pub mod tp_slice;
 
 pub use model_arch::Qwen3MoEModelArch;
 
@@ -93,4 +92,4 @@ pub use names::{
     MoeFfnNames, TensorNames,
 };
 pub use tp_layout::{Qwen35DenseTpLayout, TpLayoutError};
-pub use tp_slice::{slice_bytes_for_tp, slice_for_tp, SliceError};
+pub use flambeau_runtime::tp_slice::{slice_bytes_for_tp, slice_for_tp, SliceError};

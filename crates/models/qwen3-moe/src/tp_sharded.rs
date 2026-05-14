@@ -38,7 +38,7 @@ use flambeau_runtime::{LayerAssignment, RankId, WeightLayout};
 use crate::config::Qwen3MoEConfig;
 use crate::layout::ModelLayout;
 use crate::tp_layout::Qwen35DenseTpLayout;
-use crate::tp_slice::slice_for_tp;
+use flambeau_runtime::tp_slice::slice_for_tp;
 use crate::weights::DeviceTensor;
 
 const QK8_0: usize = 32;
@@ -1087,8 +1087,8 @@ fn is_moe_block_misalignment(err: &anyhow::Error, tensor_name: &str) -> bool {
     if !is_moe_expert {
         return false;
     }
-    err.downcast_ref::<crate::tp_slice::SliceError>()
-        .is_some_and(|e| matches!(e, crate::tp_slice::SliceError::InnerBlockMisaligned { .. }))
+    err.downcast_ref::<flambeau_runtime::tp_slice::SliceError>()
+        .is_some_and(|e| matches!(e, flambeau_runtime::tp_slice::SliceError::InnerBlockMisaligned { .. }))
 }
 
 /// Per-rank dims after applying `layout`. Replicated returns the full
