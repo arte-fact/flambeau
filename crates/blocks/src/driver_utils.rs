@@ -273,6 +273,31 @@ impl RawAllocTracker {
         Ok((ptr, bytes))
     }
 
+    /// Allocate + track a Q8_1_MMQ buffer of `n` elements. The 4-warp
+    /// LDS-tiled MMQ kernels read Q8_1 in 128-elem super-blocks
+    /// (`BlockQ8_1Mmq`, 144 B). Asserts `n % 128 == 0`.
+    pub fn alloc_q8_1_mmq(
+        &mut self,
+        device: &HipDevice,
+        n: usize,
+    ) -> Result<(DevicePtr, usize)> {
+        if n % 128 != 0 {
+            bail!("alloc_q8_1_mmq: n={n} not a multiple of 128");
+        }
+        let bytes = (n / 128) * std::mem::size_of::<flambeau_quant::BlockQ8_1Mmq>();
+        let ptr = self.alloc_zeroed_tracked(device, bytes)?;
+        Ok((ptr, bytes))
+    }
+
+    /// Allocate + track a `u64` scratch of `n` elements (8 B / elem).
+    /// Used for batched-decode per-slot pointer tables (`slot_k_ptrs`,
+    /// `slot_v_ptrs`).
+    pub fn alloc_u64(&mut self, device: &HipDevice, n: usize) -> Result<(DevicePtr, usize)> {
+        let bytes = n * 8;
+        let ptr = self.alloc_zeroed_tracked(device, bytes)?;
+        Ok((ptr, bytes))
+    }
+
     pub fn is_empty(&self) -> bool {
         self.allocs.is_empty()
     }

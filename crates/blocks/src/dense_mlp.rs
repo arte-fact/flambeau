@@ -16,9 +16,11 @@
 //! all `DevicePtr` (Copy), so the view passes by value.
 
 use anyhow::{bail, Context, Result};
+use flambeau_backend_hip::HipDevice;
 use flambeau_core::device::DevicePtr;
 use flambeau_ops::Ops;
 
+use crate::driver_utils::RawAllocTracker;
 use crate::moe_experts::Activation;
 use crate::WeightHandle;
 
@@ -49,6 +51,71 @@ pub struct DenseMlpPrefillScratch {
     pub activated_q8_1_mmq: DevicePtr,
     pub down_f32: DevicePtr,
     pub down_f16: DevicePtr,
+}
+
+/// Shape inputs needed to size a `DenseMlp` decode scratch.
+#[derive(Copy, Clone, Debug)]
+pub struct DenseMlpScratchDims {
+    pub hidden: usize,
+    pub intermediate: usize,
+}
+
+/// Owned dense-FFN decode scratch. See
+/// [`OwnedStandardAttentionDecodeScratch`] for the same ownership /
+/// dispose pattern.
+pub struct OwnedDenseMlpDecodeScratch {
+    pub x_q8_1: DevicePtr,
+    pub gate_f32: DevicePtr,
+    pub up_f32: DevicePtr,
+    pub activated_f16: DevicePtr,
+    pub activated_q8_1: DevicePtr,
+    pub down_f32: DevicePtr,
+    pub down_f16: DevicePtr,
+}
+
+impl OwnedDenseMlpDecodeScratch {
+    pub fn view(&self) -> DenseMlpDecodeScratch {
+        DenseMlpDecodeScratch {
+            x_q8_1: self.x_q8_1,
+            gate_f32: self.gate_f32,
+            up_f32: self.up_f32,
+            activated_f16: self.activated_f16,
+            activated_q8_1: self.activated_q8_1,
+            down_f32: self.down_f32,
+            down_f16: self.down_f16,
+        }
+    }
+}
+
+/// Owned dense-FFN prefill scratch.
+pub struct OwnedDenseMlpPrefillScratch {
+    pub max_tokens: usize,
+    pub x_q8_1: DevicePtr,
+    pub x_q8_1_mmq: DevicePtr,
+    pub gate_f32: DevicePtr,
+    pub up_f32: DevicePtr,
+    pub activated_f16: DevicePtr,
+    pub activated_q8_1: DevicePtr,
+    pub activated_q8_1_mmq: DevicePtr,
+    pub down_f32: DevicePtr,
+    pub down_f16: DevicePtr,
+}
+
+impl OwnedDenseMlpPrefillScratch {
+    pub fn view(&self) -> DenseMlpPrefillScratch {
+        DenseMlpPrefillScratch {
+            max_tokens: self.max_tokens,
+            x_q8_1: self.x_q8_1,
+            x_q8_1_mmq: self.x_q8_1_mmq,
+            gate_f32: self.gate_f32,
+            up_f32: self.up_f32,
+            activated_f16: self.activated_f16,
+            activated_q8_1: self.activated_q8_1,
+            activated_q8_1_mmq: self.activated_q8_1_mmq,
+            down_f32: self.down_f32,
+            down_f16: self.down_f16,
+        }
+    }
 }
 
 /// Llama / Qwen3-style dense FFN block. Holds three matmul weights
@@ -96,6 +163,72 @@ impl DenseMlp {
             );
         }
         Ok(Self { ffn_gate, ffn_up, ffn_down, hidden, intermediate })
+    }
+
+    pub fn scratch_dims(&self) -> DenseMlpScratchDims {
+        DenseMlpScratchDims { hidden: self.hidden, intermediate: self.intermediate }
+    }
+
+    /// Allocate an [`OwnedDenseMlpDecodeScratch`] sized for `dims`. All
+    /// device buffers are tracked in `tracker`; dispose via
+    /// `tracker.dispose(device)`.
+    pub fn alloc_decode_scratch(
+        device: &HipDevice,
+        tracker: &mut RawAllocTracker,
+        dims: DenseMlpScratchDims,
+    ) -> Result<OwnedDenseMlpDecodeScratch> {
+        let DenseMlpScratchDims { hidden, intermediate } = dims;
+        let (x_q8_1, _) = tracker.alloc_q8_1(device, hidden)?;
+        let (gate_f32, _) = tracker.alloc_f32(device, intermediate)?;
+        let (up_f32, _) = tracker.alloc_f32(device, intermediate)?;
+        let (activated_f16, _) = tracker.alloc_f16(device, intermediate)?;
+        let (activated_q8_1, _) = tracker.alloc_q8_1(device, intermediate)?;
+        let (down_f32, _) = tracker.alloc_f32(device, hidden)?;
+        let (down_f16, _) = tracker.alloc_f16(device, hidden)?;
+        Ok(OwnedDenseMlpDecodeScratch {
+            x_q8_1,
+            gate_f32,
+            up_f32,
+            activated_f16,
+            activated_q8_1,
+            down_f32,
+            down_f16,
+        })
+    }
+
+    /// Allocate an [`OwnedDenseMlpPrefillScratch`] sized for `dims` ×
+    /// `max_tokens`.
+    pub fn alloc_prefill_scratch(
+        device: &HipDevice,
+        tracker: &mut RawAllocTracker,
+        dims: DenseMlpScratchDims,
+        max_tokens: usize,
+    ) -> Result<OwnedDenseMlpPrefillScratch> {
+        if max_tokens == 0 {
+            bail!("alloc_prefill_scratch: max_tokens must be >= 1");
+        }
+        let DenseMlpScratchDims { hidden, intermediate } = dims;
+        let (x_q8_1, _) = tracker.alloc_q8_1(device, max_tokens * hidden)?;
+        let (x_q8_1_mmq, _) = tracker.alloc_q8_1_mmq(device, max_tokens * hidden)?;
+        let (gate_f32, _) = tracker.alloc_f32(device, max_tokens * intermediate)?;
+        let (up_f32, _) = tracker.alloc_f32(device, max_tokens * intermediate)?;
+        let (activated_f16, _) = tracker.alloc_f16(device, max_tokens * intermediate)?;
+        let (activated_q8_1, _) = tracker.alloc_q8_1(device, max_tokens * intermediate)?;
+        let (activated_q8_1_mmq, _) = tracker.alloc_q8_1_mmq(device, max_tokens * intermediate)?;
+        let (down_f32, _) = tracker.alloc_f32(device, max_tokens * hidden)?;
+        let (down_f16, _) = tracker.alloc_f16(device, max_tokens * hidden)?;
+        Ok(OwnedDenseMlpPrefillScratch {
+            max_tokens,
+            x_q8_1,
+            x_q8_1_mmq,
+            gate_f32,
+            up_f32,
+            activated_f16,
+            activated_q8_1,
+            activated_q8_1_mmq,
+            down_f32,
+            down_f16,
+        })
     }
 
     /// Single-token decode through the dense FFN. The caller is

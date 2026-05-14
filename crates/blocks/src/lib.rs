@@ -26,25 +26,37 @@ pub mod sharding;
 pub mod topology;
 
 pub use attention::{
-    AttnDecodeSlots, AttnPrefillSlots, StandardAttention, StandardAttentionBatchedDecodeScratch,
-    StandardAttentionDecodeScratch, StandardAttentionPrefillScratch, WeightHandle,
-    MAX_SPLITK_CHUNKS,
+    AttentionScratchDims, AttnDecodeSlots, AttnPrefillSlots,
+    OwnedStandardAttentionBatchedDecodeScratch, OwnedStandardAttentionDecodeScratch,
+    OwnedStandardAttentionPrefillScratch, StandardAttention,
+    StandardAttentionBatchedDecodeScratch, StandardAttentionDecodeScratch,
+    StandardAttentionPrefillScratch, WeightHandle, MAX_SPLITK_CHUNKS,
 };
-pub use delta_net::{DeltaNetLayer, DeltaNetLayerDecodeScratch, DeltaNetLayerPrefillScratch};
+pub use delta_net::{
+    DeltaNetLayer, DeltaNetLayerDecodeScratch, DeltaNetLayerPrefillScratch, DeltaNetScratchDims,
+    OwnedDeltaNetLayerDecodeScratch, OwnedDeltaNetLayerPrefillScratch,
+};
 pub use driver_utils::{
     alloc_zeroed, embed_token_host, ggml_to_qdtype, row_bytes_for_dtype, upload_f16_ones,
     RawAllocTracker,
 };
-pub use dense_mlp::{DenseMlp, DenseMlpDecodeScratch, DenseMlpPrefillScratch, DenseMlpTp};
+pub use dense_mlp::{
+    DenseMlp, DenseMlpDecodeScratch, DenseMlpPrefillScratch, DenseMlpScratchDims, DenseMlpTp,
+    OwnedDenseMlpDecodeScratch, OwnedDenseMlpPrefillScratch,
+};
 pub use layer::{
     AttnBlock, AttnDecodeScratch, AttnPrefillScratch, AttnState, FfnBlock, FfnDecodeScratch,
     FfnPrefillScratch, LayerKind,
 };
 pub use moe_experts::{
-    Activation, MoeExperts, MoeExpertsDecodeScratch, MoeExpertsPrefillScratch, RouterInput,
-    RouterNormalize, RouterPolicy,
+    Activation, MoeExperts, MoeExpertsDecodeScratch, MoeExpertsPrefillScratch,
+    MoeExpertsScratchDims, OwnedMoeExpertsDecodeScratch, OwnedMoeExpertsPrefillScratch,
+    RouterInput, RouterNormalize, RouterPolicy,
 };
-pub use shared_expert::{SharedExpert, SharedExpertDecodeScratch, SharedExpertPrefillScratch};
+pub use shared_expert::{
+    OwnedSharedExpertDecodeScratch, OwnedSharedExpertPrefillScratch, SharedExpert,
+    SharedExpertDecodeScratch, SharedExpertPrefillScratch, SharedExpertScratchDims,
+};
 pub use sharding::{
     upload_replicated_norm_f32_to_f16, upload_replicated_tensor, upload_sharded_tensor,
     UploadedTensor,

@@ -25,121 +25,32 @@ use crate::weights::{DeviceTensor, GdnWeights};
 /// through the state update, the ssm_norm, and the gated output. Only
 /// the input activation coming in and the delta output going out are
 /// F16 — everything in between is F32.
+/// Workspace for one decode step of a GDN (DeltaNet) layer. Wraps
+/// [`flambeau_blocks::OwnedDeltaNetLayerDecodeScratch`]; field access
+/// flows through `Deref` to the inner block scratch.
 pub struct GdnScratch {
-    // Fused norm-and-quant output for attn_qkv/attn_gate/ssm_alpha/ssm_beta.
-    pub x_q8_1: DevicePtr,
-    // F32 mmvq outputs (re-used across projections where sizes permit).
-    pub qkv_mixed_f32: DevicePtr,   // [conv_channels]
-    pub z_f32: DevicePtr,           // [d_inner]
-    pub alpha_f32: DevicePtr,       // [num_v_heads]
-    pub beta_f32: DevicePtr,        // [num_v_heads]
-    // Conv1d staging: [conv_kernel, conv_channels] packed F32. First
-    // (conv_kernel-1) rows come from the layer's conv_history; last row
-    // is the current qkv_mixed.
-    pub conv_input: DevicePtr,
-    pub conv_out: DevicePtr,        // [conv_channels] — silu_in
-    pub silu_out: DevicePtr,        // [conv_channels] — post-silu conv-out (Q|K|V packed)
-    // L2-normalised Q and K per head (F32).
-    pub q_norm_f32: DevicePtr,      // [num_k_heads, head_k_dim]
-    pub k_norm_f32: DevicePtr,      // [num_k_heads, head_k_dim]
-    // State-step output (F32): [num_v_heads, head_v_dim].
-    pub state_out: DevicePtr,
-    // ssm_norm output and gated output (F32).
-    pub out_normed: DevicePtr,      // [num_v_heads, head_v_dim]
-    pub gated_f32: DevicePtr,       // [d_inner]
-    pub gated_q8_1: DevicePtr,      // Q8_1 blocks for ssm_out mmvq input
-    pub ssm_out_f32: DevicePtr,     // [hidden]
-    // Device gate + beta, consumed by `gdn_state_step_f32_s128`.
-    pub gate_device: DevicePtr,     // [num_v_heads] F32
-    pub beta_device: DevicePtr,     // [num_v_heads] F32
-    // Bookkeeping for teardown.
-    x_q8_1_bytes: usize,
-    conv_channels_f32_bytes: usize,
-    d_inner_f32_bytes: usize,
-    num_v_heads_f32_bytes: usize,
-    conv_input_bytes: usize,
-    qk_f32_bytes: usize,
-    v_f32_bytes: usize,
-    gated_q8_1_bytes: usize,
-    hidden_f32_bytes: usize,
+    inner: flambeau_blocks::OwnedDeltaNetLayerDecodeScratch,
+    tracker: flambeau_blocks::RawAllocTracker,
     disposed: bool,
 }
 
 impl GdnScratch {
     pub fn new(cfg: &Qwen3MoEConfig, device: &HipDevice) -> Result<Self> {
         let gdn = cfg.gdn.as_ref().context("GdnScratch requires cfg.gdn")?;
-        let hidden = cfg.hidden_size;
-        let d_inner = gdn.d_inner;
-        let num_v_heads = gdn.num_v_heads;
-        let num_k_heads = gdn.num_k_heads;
-        let head_k_dim = gdn.head_k_dim;
-        let head_v_dim = gdn.head_v_dim();
-        let conv_channels = gdn.conv_channels();
-        let conv_kernel = gdn.conv_kernel;
-
-        assert!(hidden % 32 == 0, "hidden must be a multiple of QK8_1=32");
-        assert!(
-            head_k_dim == 128 && head_v_dim == 128,
-            "gdn_state_step kernel only instantiated at S_v=128"
-        );
-
-        let x_q8_1_bytes = (hidden / 32) * std::mem::size_of::<BlockQ8_1>();
-        let conv_channels_f32_bytes = conv_channels * 4;
-        let d_inner_f32_bytes = d_inner * 4;
-        let num_v_heads_f32_bytes = num_v_heads * 4;
-        let conv_input_bytes = conv_kernel * conv_channels * 4;
-        let qk_f32_bytes = num_k_heads * head_k_dim * 4;
-        let v_f32_bytes = num_v_heads * head_v_dim * 4;
-        let gated_q8_1_bytes = (d_inner / 32) * std::mem::size_of::<BlockQ8_1>();
-        let hidden_f32_bytes = hidden * 4;
-
-        let x_q8_1 = device.alloc(x_q8_1_bytes)?;
-        let qkv_mixed_f32 = device.alloc(conv_channels_f32_bytes)?;
-        let z_f32 = device.alloc(d_inner_f32_bytes)?;
-        let alpha_f32 = device.alloc(num_v_heads_f32_bytes)?;
-        let beta_f32 = device.alloc(num_v_heads_f32_bytes)?;
-        let conv_input = device.alloc(conv_input_bytes)?;
-        let conv_out = device.alloc(conv_channels_f32_bytes)?;
-        let silu_out = device.alloc(conv_channels_f32_bytes)?;
-        let q_norm_f32 = device.alloc(qk_f32_bytes)?;
-        let k_norm_f32 = device.alloc(qk_f32_bytes)?;
-        let state_out = device.alloc(v_f32_bytes)?;
-        let out_normed = device.alloc(v_f32_bytes)?;
-        let gated_f32 = device.alloc(d_inner_f32_bytes)?;
-        let gated_q8_1 = device.alloc(gated_q8_1_bytes)?;
-        let ssm_out_f32 = device.alloc(hidden_f32_bytes)?;
-        let gate_device = device.alloc(num_v_heads_f32_bytes)?;
-        let beta_device = device.alloc(num_v_heads_f32_bytes)?;
-
-        Ok(Self {
-            x_q8_1,
-            qkv_mixed_f32,
-            z_f32,
-            alpha_f32,
-            beta_f32,
-            conv_input,
-            conv_out,
-            silu_out,
-            q_norm_f32,
-            k_norm_f32,
-            state_out,
-            out_normed,
-            gated_f32,
-            gated_q8_1,
-            ssm_out_f32,
-            gate_device,
-            beta_device,
-            x_q8_1_bytes,
-            conv_channels_f32_bytes,
-            d_inner_f32_bytes,
-            num_v_heads_f32_bytes,
-            conv_input_bytes,
-            qk_f32_bytes,
-            v_f32_bytes,
-            gated_q8_1_bytes,
-            hidden_f32_bytes,
-            disposed: false,
-        })
+        let mut tracker = flambeau_blocks::RawAllocTracker::new();
+        let dims = flambeau_blocks::DeltaNetScratchDims {
+            hidden: cfg.hidden_size,
+            d_inner: gdn.d_inner,
+            num_v_heads: gdn.num_v_heads,
+            num_k_heads: gdn.num_k_heads,
+            head_k_dim: gdn.head_k_dim,
+            head_v_dim: gdn.head_v_dim(),
+            conv_channels: gdn.conv_channels(),
+            conv_kernel: gdn.conv_kernel,
+        };
+        let inner =
+            flambeau_blocks::DeltaNetLayer::alloc_decode_scratch(device, &mut tracker, dims)?;
+        Ok(Self { inner, tracker, disposed: false })
     }
 
     pub fn dispose(mut self, device: &HipDevice) -> Result<()> {
@@ -147,63 +58,24 @@ impl GdnScratch {
             return Ok(());
         }
         self.disposed = true;
-        // SAFETY: every pointer came from `device.alloc(bytes)` above.
-        unsafe {
-            device.dealloc(self.x_q8_1, self.x_q8_1_bytes)?;
-            device.dealloc(self.qkv_mixed_f32, self.conv_channels_f32_bytes)?;
-            device.dealloc(self.z_f32, self.d_inner_f32_bytes)?;
-            device.dealloc(self.alpha_f32, self.num_v_heads_f32_bytes)?;
-            device.dealloc(self.beta_f32, self.num_v_heads_f32_bytes)?;
-            device.dealloc(self.conv_input, self.conv_input_bytes)?;
-            device.dealloc(self.conv_out, self.conv_channels_f32_bytes)?;
-            device.dealloc(self.silu_out, self.conv_channels_f32_bytes)?;
-            device.dealloc(self.q_norm_f32, self.qk_f32_bytes)?;
-            device.dealloc(self.k_norm_f32, self.qk_f32_bytes)?;
-            device.dealloc(self.state_out, self.v_f32_bytes)?;
-            device.dealloc(self.out_normed, self.v_f32_bytes)?;
-            device.dealloc(self.gated_f32, self.d_inner_f32_bytes)?;
-            device.dealloc(self.gated_q8_1, self.gated_q8_1_bytes)?;
-            device.dealloc(self.ssm_out_f32, self.hidden_f32_bytes)?;
-            device.dealloc(self.gate_device, self.num_v_heads_f32_bytes)?;
-            device.dealloc(self.beta_device, self.num_v_heads_f32_bytes)?;
-        }
-        Ok(())
+        self.tracker.dispose(device)
     }
-}
 
-impl Drop for GdnScratch {
-    fn drop(&mut self) {
-        if !self.disposed {
-            tracing::warn!(
-                target: "flambeau_qwen3_moe::forward",
-                "GdnScratch dropped without dispose(device); device buffers leaked"
-            );
-        }
-    }
-}
-
-impl GdnScratch {
-    /// Build a by-value view shaped for
-    /// `flambeau_blocks::DeltaNetLayer::forward_decode`. All fields
-    /// are `Copy`, so the view passes by value.
     pub fn view(&self) -> flambeau_blocks::DeltaNetLayerDecodeScratch {
-        flambeau_blocks::DeltaNetLayerDecodeScratch {
-            x_q8_1: self.x_q8_1,
-            qkv_mixed_f32: self.qkv_mixed_f32,
-            z_f32: self.z_f32,
-            alpha_f32: self.alpha_f32,
-            beta_f32: self.beta_f32,
-            conv_input: self.conv_input,
-            conv_out: self.conv_out,
-            silu_out: self.silu_out,
-            q_norm_f32: self.q_norm_f32,
-            k_norm_f32: self.k_norm_f32,
-            state_out: self.state_out,
-            out_normed: self.out_normed,
-            gated_f32: self.gated_f32,
-            gated_q8_1: self.gated_q8_1,
-            ssm_out_f32: self.ssm_out_f32,
-        }
+        self.inner.view()
+    }
+}
+
+impl std::ops::Deref for GdnScratch {
+    type Target = flambeau_blocks::OwnedDeltaNetLayerDecodeScratch;
+    fn deref(&self) -> &Self::Target {
+        &self.inner
+    }
+}
+
+impl std::ops::DerefMut for GdnScratch {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.inner
     }
 }
 

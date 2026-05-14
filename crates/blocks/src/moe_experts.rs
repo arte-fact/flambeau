@@ -25,10 +25,12 @@
 //!   Q8_0, Q4_1, Q5_K, Q6_K), each with its own super-block stride.
 
 use anyhow::{bail, Context, Result};
+use flambeau_backend_hip::HipDevice;
 use flambeau_core::device::DevicePtr;
 use flambeau_core::op::QDtype;
 use flambeau_ops::Ops;
 
+use crate::driver_utils::RawAllocTracker;
 use crate::WeightHandle;
 
 /// Borrowed-by-value view of a caller-owned MoE decode scratch.
@@ -70,6 +72,91 @@ pub struct MoeExpertsPrefillScratch {
 }
 
 const QK_K: usize = 256;
+
+/// Shape inputs needed to size a `MoeExperts` decode scratch.
+#[derive(Copy, Clone, Debug)]
+pub struct MoeExpertsScratchDims {
+    pub hidden: usize,
+    pub intermediate: usize,
+    pub n_experts: usize,
+    pub top_k: usize,
+}
+
+/// Owned MoE decode scratch.
+pub struct OwnedMoeExpertsDecodeScratch {
+    pub x_q8_1: DevicePtr,
+    pub router_logits: DevicePtr,
+    pub expert_ids: DevicePtr,
+    pub expert_weights: DevicePtr,
+    pub gate_out_f32: DevicePtr,
+    pub up_out_f32: DevicePtr,
+    pub activated_f16: DevicePtr,
+    pub activated_q8_1: DevicePtr,
+    pub down_f32: DevicePtr,
+    pub down_f16: DevicePtr,
+}
+
+impl OwnedMoeExpertsDecodeScratch {
+    pub fn view(&self) -> MoeExpertsDecodeScratch {
+        MoeExpertsDecodeScratch {
+            x_q8_1: self.x_q8_1,
+            router_logits: self.router_logits,
+            expert_ids: self.expert_ids,
+            expert_weights: self.expert_weights,
+            gate_out_f32: self.gate_out_f32,
+            up_out_f32: self.up_out_f32,
+            activated_f16: self.activated_f16,
+            activated_q8_1: self.activated_q8_1,
+            down_f32: self.down_f32,
+            down_f16: self.down_f16,
+        }
+    }
+}
+
+/// Owned MoE prefill scratch.
+pub struct OwnedMoeExpertsPrefillScratch {
+    pub max_tokens: usize,
+    pub x_q8_1: DevicePtr,
+    pub router_logits: DevicePtr,
+    pub expert_ids: DevicePtr,
+    pub expert_weights: DevicePtr,
+    pub gate_out_f32: DevicePtr,
+    pub up_out_f32: DevicePtr,
+    pub activated_f16: DevicePtr,
+    pub activated_q8_1: DevicePtr,
+    pub down_f32: DevicePtr,
+    pub down_f16: DevicePtr,
+    pub sort_counts: DevicePtr,
+    pub sort_offsets: DevicePtr,
+    pub sort_cursors: DevicePtr,
+    pub sort_sorted_pair_idx: DevicePtr,
+    pub sort_padded_offsets: DevicePtr,
+    pub sort_sorted_pair_idx_padded: DevicePtr,
+}
+
+impl OwnedMoeExpertsPrefillScratch {
+    pub fn view(&self) -> MoeExpertsPrefillScratch {
+        MoeExpertsPrefillScratch {
+            max_tokens: self.max_tokens,
+            x_q8_1: self.x_q8_1,
+            router_logits: self.router_logits,
+            expert_ids: self.expert_ids,
+            expert_weights: self.expert_weights,
+            gate_out_f32: self.gate_out_f32,
+            up_out_f32: self.up_out_f32,
+            activated_f16: self.activated_f16,
+            activated_q8_1: self.activated_q8_1,
+            down_f32: self.down_f32,
+            down_f16: self.down_f16,
+            sort_counts: self.sort_counts,
+            sort_offsets: self.sort_offsets,
+            sort_cursors: self.sort_cursors,
+            sort_sorted_pair_idx: self.sort_sorted_pair_idx,
+            sort_padded_offsets: self.sort_padded_offsets,
+            sort_sorted_pair_idx_padded: self.sort_sorted_pair_idx_padded,
+        }
+    }
+}
 
 /// Source of the router input. Qwen3.x routes on the post-norm
 /// hidden (`Cur`); Gemma4 routes on the residual stream `attn_out`.
@@ -234,6 +321,100 @@ impl MoeExperts {
     pub fn with_tile8_min_tokens(mut self, n: usize) -> Self {
         self.tile8_min_tokens = Some(n);
         self
+    }
+
+    pub fn scratch_dims(&self) -> MoeExpertsScratchDims {
+        MoeExpertsScratchDims {
+            hidden: self.hidden,
+            intermediate: self.intermediate,
+            n_experts: self.n_experts,
+            top_k: self.top_k,
+        }
+    }
+
+    /// Allocate an [`OwnedMoeExpertsPrefillScratch`] sized for `dims`
+    /// × `max_tokens`.
+    pub fn alloc_prefill_scratch(
+        device: &HipDevice,
+        tracker: &mut RawAllocTracker,
+        dims: MoeExpertsScratchDims,
+        max_tokens: usize,
+    ) -> Result<OwnedMoeExpertsPrefillScratch> {
+        if max_tokens == 0 {
+            bail!("alloc_prefill_scratch: max_tokens must be >= 1");
+        }
+        let MoeExpertsScratchDims { hidden, intermediate, n_experts, top_k } = dims;
+        let (x_q8_1, _) = tracker.alloc_q8_1(device, max_tokens * hidden)?;
+        let (router_logits, _) = tracker.alloc_f32(device, max_tokens * n_experts)?;
+        let (expert_ids, _) = tracker.alloc_i32(device, max_tokens * top_k)?;
+        let (expert_weights, _) = tracker.alloc_f32(device, max_tokens * top_k)?;
+        let (gate_out_f32, _) = tracker.alloc_f32(device, max_tokens * top_k * intermediate)?;
+        let (up_out_f32, _) = tracker.alloc_f32(device, max_tokens * top_k * intermediate)?;
+        let (activated_f16, _) = tracker.alloc_f16(device, max_tokens * top_k * intermediate)?;
+        let (activated_q8_1, _) =
+            tracker.alloc_q8_1(device, max_tokens * top_k * intermediate)?;
+        let (down_f32, _) = tracker.alloc_f32(device, max_tokens * top_k * hidden)?;
+        let (down_f16, _) = tracker.alloc_f16(device, max_tokens * top_k * hidden)?;
+        let (sort_counts, _) = tracker.alloc_i32(device, n_experts)?;
+        let (sort_offsets, _) = tracker.alloc_i32(device, n_experts + 1)?;
+        let (sort_cursors, _) = tracker.alloc_i32(device, n_experts)?;
+        let (sort_sorted_pair_idx, _) = tracker.alloc_i32(device, max_tokens * top_k)?;
+        let (sort_padded_offsets, _) = tracker.alloc_i32(device, n_experts + 1)?;
+        let (sort_sorted_pair_idx_padded, _) =
+            tracker.alloc_i32(device, max_tokens * top_k + n_experts * 16)?;
+        Ok(OwnedMoeExpertsPrefillScratch {
+            max_tokens,
+            x_q8_1,
+            router_logits,
+            expert_ids,
+            expert_weights,
+            gate_out_f32,
+            up_out_f32,
+            activated_f16,
+            activated_q8_1,
+            down_f32,
+            down_f16,
+            sort_counts,
+            sort_offsets,
+            sort_cursors,
+            sort_sorted_pair_idx,
+            sort_padded_offsets,
+            sort_sorted_pair_idx_padded,
+        })
+    }
+
+    /// Allocate an [`OwnedMoeExpertsDecodeScratch`] sized for `dims`.
+    /// `x_q8_1` is sized for `hidden` (single-token router input);
+    /// per-slot buffers are sized `top_k * intermediate` / `top_k *
+    /// hidden`.
+    pub fn alloc_decode_scratch(
+        device: &HipDevice,
+        tracker: &mut RawAllocTracker,
+        dims: MoeExpertsScratchDims,
+    ) -> Result<OwnedMoeExpertsDecodeScratch> {
+        let MoeExpertsScratchDims { hidden, intermediate, n_experts, top_k } = dims;
+        let (x_q8_1, _) = tracker.alloc_q8_1(device, hidden)?;
+        let (router_logits, _) = tracker.alloc_f32(device, n_experts)?;
+        let (expert_ids, _) = tracker.alloc_i32(device, top_k)?;
+        let (expert_weights, _) = tracker.alloc_f32(device, top_k)?;
+        let (gate_out_f32, _) = tracker.alloc_f32(device, top_k * intermediate)?;
+        let (up_out_f32, _) = tracker.alloc_f32(device, top_k * intermediate)?;
+        let (activated_f16, _) = tracker.alloc_f16(device, top_k * intermediate)?;
+        let (activated_q8_1, _) = tracker.alloc_q8_1(device, top_k * intermediate)?;
+        let (down_f32, _) = tracker.alloc_f32(device, top_k * hidden)?;
+        let (down_f16, _) = tracker.alloc_f16(device, top_k * hidden)?;
+        Ok(OwnedMoeExpertsDecodeScratch {
+            x_q8_1,
+            router_logits,
+            expert_ids,
+            expert_weights,
+            gate_out_f32,
+            up_out_f32,
+            activated_f16,
+            activated_q8_1,
+            down_f32,
+            down_f16,
+        })
     }
 
     /// Run the dense-router GEMV + topk that populates

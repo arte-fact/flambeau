@@ -24,6 +24,8 @@ use flambeau_runtime::{CacheLayout, F16Contig, KvCache, Q8Contig};
 
 use flambeau_core::op::QDtype;
 
+use crate::driver_utils::RawAllocTracker;
+
 /// Graph-capture slot bundle for one decode call. When passed to
 /// `StandardAttention::forward_decode` (or via `AttnBlock::Standard`),
 /// the block calls slot-tagged kernels so the recorder can bind each
@@ -161,6 +163,179 @@ pub struct StandardAttentionBatchedDecodeScratch<'a> {
 /// context up to 16 384 tokens. Bump alongside the dispatch threshold
 /// if context ever exceeds. Mirrors qwen3-moe's `MAX_SPLITK_CHUNKS`.
 pub const MAX_SPLITK_CHUNKS: usize = 32;
+
+/// Shape inputs needed to size a `StandardAttention` scratch. Models
+/// pass their **max-across-layers** dims here — the scratch is reused
+/// across every full-attn layer in a stage. For uniform-arch models
+/// (qwen3moe), call [`StandardAttention::scratch_dims`] on any per-call
+/// block. For multi-shape archs (gemma4 with `head_dim_swa != head_dim`),
+/// compute the max yourself and construct manually.
+#[derive(Copy, Clone, Debug)]
+pub struct AttentionScratchDims {
+    pub hidden: usize,
+    pub n_heads: usize,
+    pub n_kv_heads: usize,
+    pub head_dim: usize,
+}
+
+/// Owned attention decode scratch. The block knows its own size math;
+/// models call [`StandardAttention::alloc_decode_scratch`] and use
+/// [`OwnedStandardAttentionDecodeScratch::view_mut`] for the borrowed
+/// view the forward path consumes.
+///
+/// All device allocations are routed through the caller's
+/// [`RawAllocTracker`], so dispose follows the existing one-tracker-
+/// per-stage pattern. This struct holds **no** size or dtype fields —
+/// dispose lives on the tracker.
+pub struct OwnedStandardAttentionDecodeScratch {
+    pub x_q8_1: DevicePtr,
+    pub mmvq_f32: DevicePtr,
+    pub q_fused_f16: DevicePtr,
+    pub q_f16: DevicePtr,
+    pub gate_f16: DevicePtr,
+    pub k_f16: DevicePtr,
+    pub v_f16: DevicePtr,
+    pub k_q8_0: DevicePtr,
+    pub v_q8_0: DevicePtr,
+    pub attn_out_f16: DevicePtr,
+    pub gated_out_f16: DevicePtr,
+    pub positions: DevicePtr,
+    pub positions_host: Vec<i32>,
+    pub splitk_partials_m: DevicePtr,
+    pub splitk_partials_s: DevicePtr,
+    pub splitk_partials_o: DevicePtr,
+}
+
+impl OwnedStandardAttentionDecodeScratch {
+    /// Build the borrowed view consumed by
+    /// `StandardAttention::forward_decode`. All `DevicePtr` fields are
+    /// `Copy`; only `positions_host` borrows mutably.
+    pub fn view_mut(&mut self) -> StandardAttentionDecodeScratch<'_> {
+        StandardAttentionDecodeScratch {
+            x_q8_1: self.x_q8_1,
+            mmvq_f32: self.mmvq_f32,
+            q_fused_f16: self.q_fused_f16,
+            q_f16: self.q_f16,
+            gate_f16: self.gate_f16,
+            k_f16: self.k_f16,
+            v_f16: self.v_f16,
+            k_q8_0: self.k_q8_0,
+            v_q8_0: self.v_q8_0,
+            attn_out_f16: self.attn_out_f16,
+            gated_out_f16: self.gated_out_f16,
+            positions: self.positions,
+            positions_host: &mut self.positions_host,
+            splitk_partials_m: self.splitk_partials_m,
+            splitk_partials_s: self.splitk_partials_s,
+            splitk_partials_o: self.splitk_partials_o,
+        }
+    }
+}
+
+/// Owned attention prefill scratch. Sized per `max_tokens` (the upper
+/// bound of one prefill chunk; the caller chunks long prompts).
+pub struct OwnedStandardAttentionPrefillScratch {
+    pub max_tokens: usize,
+    pub x_norm_f16: DevicePtr,
+    pub x_q8_1: DevicePtr,
+    pub x_q8_1_mmq: DevicePtr,
+    pub mmvq_f32: DevicePtr,
+    pub q_fused_f16: DevicePtr,
+    pub q_f16: DevicePtr,
+    pub gate_f16: DevicePtr,
+    pub k_f16: DevicePtr,
+    pub v_f16: DevicePtr,
+    pub attn_out_f16: DevicePtr,
+    pub gated_out_f16: DevicePtr,
+    pub positions: DevicePtr,
+    pub gated_q8_1: DevicePtr,
+    pub gated_q8_1_mmq: DevicePtr,
+    pub positions_host: Vec<i32>,
+}
+
+impl OwnedStandardAttentionPrefillScratch {
+    pub fn view_mut(&mut self) -> StandardAttentionPrefillScratch<'_> {
+        StandardAttentionPrefillScratch {
+            max_tokens: self.max_tokens,
+            x_norm_f16: self.x_norm_f16,
+            x_q8_1: self.x_q8_1,
+            x_q8_1_mmq: self.x_q8_1_mmq,
+            mmvq_f32: self.mmvq_f32,
+            q_fused_f16: self.q_fused_f16,
+            q_f16: self.q_f16,
+            gate_f16: self.gate_f16,
+            k_f16: self.k_f16,
+            v_f16: self.v_f16,
+            attn_out_f16: self.attn_out_f16,
+            gated_out_f16: self.gated_out_f16,
+            positions: self.positions,
+            gated_q8_1: self.gated_q8_1,
+            gated_q8_1_mmq: self.gated_q8_1_mmq,
+            positions_host: &mut self.positions_host,
+        }
+    }
+}
+
+/// Owned attention batched-decode scratch. Extends the prefill scratch
+/// with per-slot tables that the batched-KV-append + batched-attention
+/// kernels read.
+pub struct OwnedStandardAttentionBatchedDecodeScratch {
+    pub max_tokens: usize,
+    pub x_norm_f16: DevicePtr,
+    pub x_q8_1: DevicePtr,
+    pub x_q8_1_mmq: DevicePtr,
+    pub mmvq_f32: DevicePtr,
+    pub q_fused_f16: DevicePtr,
+    pub q_f16: DevicePtr,
+    pub gate_f16: DevicePtr,
+    pub k_f16: DevicePtr,
+    pub v_f16: DevicePtr,
+    pub attn_out_f16: DevicePtr,
+    pub gated_out_f16: DevicePtr,
+    pub positions: DevicePtr,
+    pub gated_q8_1: DevicePtr,
+    pub gated_q8_1_mmq: DevicePtr,
+    pub positions_host: Vec<i32>,
+    pub slot_k_ptrs: DevicePtr,
+    pub slot_v_ptrs: DevicePtr,
+    pub slot_n_tokens_kv: DevicePtr,
+    pub slot_write_pos: DevicePtr,
+    pub slot_k_ptrs_host: Vec<u64>,
+    pub slot_v_ptrs_host: Vec<u64>,
+    pub slot_n_tokens_kv_host: Vec<i32>,
+    pub slot_write_pos_host: Vec<i32>,
+}
+
+impl OwnedStandardAttentionBatchedDecodeScratch {
+    pub fn view_mut(&mut self) -> StandardAttentionBatchedDecodeScratch<'_> {
+        StandardAttentionBatchedDecodeScratch {
+            max_tokens: self.max_tokens,
+            x_norm_f16: self.x_norm_f16,
+            x_q8_1: self.x_q8_1,
+            x_q8_1_mmq: self.x_q8_1_mmq,
+            mmvq_f32: self.mmvq_f32,
+            q_fused_f16: self.q_fused_f16,
+            q_f16: self.q_f16,
+            gate_f16: self.gate_f16,
+            k_f16: self.k_f16,
+            v_f16: self.v_f16,
+            attn_out_f16: self.attn_out_f16,
+            gated_out_f16: self.gated_out_f16,
+            positions: self.positions,
+            gated_q8_1: self.gated_q8_1,
+            gated_q8_1_mmq: self.gated_q8_1_mmq,
+            positions_host: &mut self.positions_host,
+            slot_k_ptrs: self.slot_k_ptrs,
+            slot_v_ptrs: self.slot_v_ptrs,
+            slot_n_tokens_kv: self.slot_n_tokens_kv,
+            slot_write_pos: self.slot_write_pos,
+            slot_k_ptrs_host: &mut self.slot_k_ptrs_host,
+            slot_v_ptrs_host: &mut self.slot_v_ptrs_host,
+            slot_n_tokens_kv_host: &mut self.slot_n_tokens_kv_host,
+            slot_write_pos_host: &mut self.slot_write_pos_host,
+        }
+    }
+}
 
 /// Qwen3-style full attention block. Two shapes share one type:
 ///
@@ -324,6 +499,175 @@ impl StandardAttention {
     pub fn with_window_size(mut self, window: u32) -> Self {
         self.window_size = Some(window);
         self
+    }
+
+    /// Snapshot of the block's shape inputs for sizing scratch
+    /// buffers. For multi-shape models (e.g. gemma4 SWA / full-attn
+    /// interleave) call sites should construct `AttentionScratchDims`
+    /// manually with the per-layer max instead.
+    pub fn scratch_dims(&self) -> AttentionScratchDims {
+        AttentionScratchDims {
+            hidden: self.hidden,
+            n_heads: self.n_heads,
+            n_kv_heads: self.n_kv_heads,
+            head_dim: self.head_dim,
+        }
+    }
+
+    /// Allocate an [`OwnedStandardAttentionDecodeScratch`] sized for
+    /// `dims`. All device buffers are recorded in `tracker`; dispose
+    /// happens via `tracker.dispose(device)` when the owning stage
+    /// tears down.
+    ///
+    /// The allocation is uniform in `gated` — `q_fused_f16` is sized
+    /// at `2 * q_width` regardless. The non-gated path leaves the
+    /// upper half unread; the small over-allocation matches the
+    /// pre-existing borrowed-view shape so models that swap from
+    /// hand-rolled `*Scratch` types see byte-identical sizes.
+    pub fn alloc_decode_scratch(
+        device: &HipDevice,
+        tracker: &mut RawAllocTracker,
+        dims: AttentionScratchDims,
+    ) -> Result<OwnedStandardAttentionDecodeScratch> {
+        let AttentionScratchDims { hidden, n_heads, n_kv_heads, head_dim } = dims;
+        let q_width = n_heads * head_dim;
+        let kv_width = n_kv_heads * head_dim;
+        let q_fused_width = 2 * q_width;
+
+        let x_q8_1_elems = hidden.max(q_width);
+        let mmvq_max = q_fused_width.max(hidden);
+
+        let (x_q8_1, _) = tracker.alloc_q8_1(device, x_q8_1_elems)?;
+        let (mmvq_f32, _) = tracker.alloc_f32(device, mmvq_max)?;
+        let (q_fused_f16, _) = tracker.alloc_f16(device, q_fused_width)?;
+        let (q_f16, _) = tracker.alloc_f16(device, q_width)?;
+        let (gate_f16, _) = tracker.alloc_f16(device, q_width)?;
+        let (k_f16, _) = tracker.alloc_f16(device, kv_width)?;
+        let (v_f16, _) = tracker.alloc_f16(device, kv_width)?;
+        let (k_q8_0, _) = tracker.alloc_q8_0(device, kv_width)?;
+        let (v_q8_0, _) = tracker.alloc_q8_0(device, kv_width)?;
+        let (attn_out_f16, _) = tracker.alloc_f16(device, q_width)?;
+        let (gated_out_f16, _) = tracker.alloc_f16(device, q_width)?;
+        let (positions, _) = tracker.alloc_i32(device, 1)?;
+        let (splitk_partials_m, _) =
+            tracker.alloc_f32(device, n_heads * MAX_SPLITK_CHUNKS)?;
+        let (splitk_partials_s, _) =
+            tracker.alloc_f32(device, n_heads * MAX_SPLITK_CHUNKS)?;
+        let (splitk_partials_o, _) =
+            tracker.alloc_f32(device, n_heads * MAX_SPLITK_CHUNKS * head_dim)?;
+
+        Ok(OwnedStandardAttentionDecodeScratch {
+            x_q8_1,
+            mmvq_f32,
+            q_fused_f16,
+            q_f16,
+            gate_f16,
+            k_f16,
+            v_f16,
+            k_q8_0,
+            v_q8_0,
+            attn_out_f16,
+            gated_out_f16,
+            positions,
+            positions_host: vec![0i32; 1],
+            splitk_partials_m,
+            splitk_partials_s,
+            splitk_partials_o,
+        })
+    }
+
+    /// Allocate an [`OwnedStandardAttentionPrefillScratch`] sized for
+    /// `dims` × `max_tokens`.
+    pub fn alloc_prefill_scratch(
+        device: &HipDevice,
+        tracker: &mut RawAllocTracker,
+        dims: AttentionScratchDims,
+        max_tokens: usize,
+    ) -> Result<OwnedStandardAttentionPrefillScratch> {
+        if max_tokens == 0 {
+            bail!("alloc_prefill_scratch: max_tokens must be >= 1");
+        }
+        let AttentionScratchDims { hidden, n_heads, n_kv_heads, head_dim } = dims;
+        let q_width = n_heads * head_dim;
+        let kv_width = n_kv_heads * head_dim;
+        let q_fused_width = 2 * q_width;
+        let mmvq_max = q_fused_width.max(hidden);
+
+        let (x_norm_f16, _) = tracker.alloc_f16(device, max_tokens * hidden)?;
+        let (x_q8_1, _) = tracker.alloc_q8_1(device, max_tokens * hidden)?;
+        let (x_q8_1_mmq, _) = tracker.alloc_q8_1_mmq(device, max_tokens * hidden)?;
+        let (mmvq_f32, _) = tracker.alloc_f32(device, max_tokens * mmvq_max)?;
+        let (q_fused_f16, _) = tracker.alloc_f16(device, max_tokens * q_fused_width)?;
+        let (q_f16, _) = tracker.alloc_f16(device, max_tokens * q_width)?;
+        let (gate_f16, _) = tracker.alloc_f16(device, max_tokens * q_width)?;
+        let (k_f16, _) = tracker.alloc_f16(device, max_tokens * kv_width)?;
+        let (v_f16, _) = tracker.alloc_f16(device, max_tokens * kv_width)?;
+        let (attn_out_f16, _) = tracker.alloc_f16(device, max_tokens * q_width)?;
+        let (gated_out_f16, _) = tracker.alloc_f16(device, max_tokens * q_width)?;
+        let (positions, _) = tracker.alloc_i32(device, max_tokens)?;
+        let (gated_q8_1, _) = tracker.alloc_q8_1(device, max_tokens * q_width)?;
+        let (gated_q8_1_mmq, _) = tracker.alloc_q8_1_mmq(device, max_tokens * q_width)?;
+
+        Ok(OwnedStandardAttentionPrefillScratch {
+            max_tokens,
+            x_norm_f16,
+            x_q8_1,
+            x_q8_1_mmq,
+            mmvq_f32,
+            q_fused_f16,
+            q_f16,
+            gate_f16,
+            k_f16,
+            v_f16,
+            attn_out_f16,
+            gated_out_f16,
+            positions,
+            gated_q8_1,
+            gated_q8_1_mmq,
+            positions_host: vec![0i32; max_tokens],
+        })
+    }
+
+    /// Allocate an [`OwnedStandardAttentionBatchedDecodeScratch`] sized
+    /// for `dims` × `max_tokens` (where `max_tokens` is the max number
+    /// of concurrent decode slots the scratch will serve).
+    pub fn alloc_batched_decode_scratch(
+        device: &HipDevice,
+        tracker: &mut RawAllocTracker,
+        dims: AttentionScratchDims,
+        max_tokens: usize,
+    ) -> Result<OwnedStandardAttentionBatchedDecodeScratch> {
+        let prefill = Self::alloc_prefill_scratch(device, tracker, dims, max_tokens)?;
+        let (slot_k_ptrs, _) = tracker.alloc_u64(device, max_tokens)?;
+        let (slot_v_ptrs, _) = tracker.alloc_u64(device, max_tokens)?;
+        let (slot_n_tokens_kv, _) = tracker.alloc_i32(device, max_tokens)?;
+        let (slot_write_pos, _) = tracker.alloc_i32(device, max_tokens)?;
+        Ok(OwnedStandardAttentionBatchedDecodeScratch {
+            max_tokens: prefill.max_tokens,
+            x_norm_f16: prefill.x_norm_f16,
+            x_q8_1: prefill.x_q8_1,
+            x_q8_1_mmq: prefill.x_q8_1_mmq,
+            mmvq_f32: prefill.mmvq_f32,
+            q_fused_f16: prefill.q_fused_f16,
+            q_f16: prefill.q_f16,
+            gate_f16: prefill.gate_f16,
+            k_f16: prefill.k_f16,
+            v_f16: prefill.v_f16,
+            attn_out_f16: prefill.attn_out_f16,
+            gated_out_f16: prefill.gated_out_f16,
+            positions: prefill.positions,
+            gated_q8_1: prefill.gated_q8_1,
+            gated_q8_1_mmq: prefill.gated_q8_1_mmq,
+            positions_host: prefill.positions_host,
+            slot_k_ptrs,
+            slot_v_ptrs,
+            slot_n_tokens_kv,
+            slot_write_pos,
+            slot_k_ptrs_host: vec![0u64; max_tokens],
+            slot_v_ptrs_host: vec![0u64; max_tokens],
+            slot_n_tokens_kv_host: vec![0i32; max_tokens],
+            slot_write_pos_host: vec![0i32; max_tokens],
+        })
     }
 
     /// Single-token decode through the attention block. The K/V row

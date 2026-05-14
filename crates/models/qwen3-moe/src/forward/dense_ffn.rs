@@ -31,69 +31,26 @@ use crate::weights::DenseFfnWeights;
 // later.
 // ---------------------------------------------------------------------------
 
+/// Wrapper that owns an [`flambeau_blocks::OwnedDenseMlpDecodeScratch`]
+/// + the per-stage [`flambeau_blocks::RawAllocTracker`] holding its
+/// allocations. Field access (`scratch.x_q8_1`, `scratch.gate_f32`, …)
+/// flows through `Deref` to the inner block scratch.
 pub struct DenseFfnScratch {
-    // Q8_1 of `x_norm`, shared across gate/up matmuls.
-    pub x_q8_1: DevicePtr,
-    // Dense gate/up matmul outputs, F32 [inter].
-    pub gate_f32: DevicePtr,
-    pub up_f32: DevicePtr,
-    // SwiGLU output + F16 round-trip for the down matmul input.
-    pub activated_f32: DevicePtr,
-    pub activated_f16: DevicePtr,
-    pub activated_q8_1: DevicePtr,
-    // Down matmul outputs (F32 → F16) for the residual add.
-    pub down_f32: DevicePtr,
-    pub down_f16: DevicePtr,
-    // Bookkeeping.
-    x_q8_1_bytes: usize,
-    inter_f32_bytes: usize,
-    inter_f16_bytes: usize,
-    inter_q8_1_bytes: usize,
-    hidden_f32_bytes: usize,
-    hidden_f16_bytes: usize,
+    inner: flambeau_blocks::OwnedDenseMlpDecodeScratch,
+    tracker: flambeau_blocks::RawAllocTracker,
     disposed: bool,
 }
 
 impl DenseFfnScratch {
     pub fn new(cfg: &Qwen3MoEConfig, device: &HipDevice) -> Result<Self> {
-        let hidden = cfg.hidden_size;
-        let inter = cfg.moe_intermediate_size;
-        assert!(hidden % 32 == 0, "hidden must be a multiple of QK8_1=32");
-        assert!(inter % 32 == 0, "inter (moe_intermediate_size) must be a multiple of QK8_1=32");
-
-        let x_q8_1_bytes = (hidden / 32) * std::mem::size_of::<BlockQ8_1>();
-        let inter_f32_bytes = inter * 4;
-        let inter_f16_bytes = inter * 2;
-        let inter_q8_1_bytes = (inter / 32) * std::mem::size_of::<BlockQ8_1>();
-        let hidden_f32_bytes = hidden * 4;
-        let hidden_f16_bytes = hidden * 2;
-
-        let x_q8_1 = device.alloc(x_q8_1_bytes)?;
-        let gate_f32 = device.alloc(inter_f32_bytes)?;
-        let up_f32 = device.alloc(inter_f32_bytes)?;
-        let activated_f32 = device.alloc(inter_f32_bytes)?;
-        let activated_f16 = device.alloc(inter_f16_bytes)?;
-        let activated_q8_1 = device.alloc(inter_q8_1_bytes)?;
-        let down_f32 = device.alloc(hidden_f32_bytes)?;
-        let down_f16 = device.alloc(hidden_f16_bytes)?;
-
-        Ok(Self {
-            x_q8_1,
-            gate_f32,
-            up_f32,
-            activated_f32,
-            activated_f16,
-            activated_q8_1,
-            down_f32,
-            down_f16,
-            x_q8_1_bytes,
-            inter_f32_bytes,
-            inter_f16_bytes,
-            inter_q8_1_bytes,
-            hidden_f32_bytes,
-            hidden_f16_bytes,
-            disposed: false,
-        })
+        let mut tracker = flambeau_blocks::RawAllocTracker::new();
+        let dims = flambeau_blocks::DenseMlpScratchDims {
+            hidden: cfg.hidden_size,
+            intermediate: cfg.moe_intermediate_size,
+        };
+        let inner =
+            flambeau_blocks::DenseMlp::alloc_decode_scratch(device, &mut tracker, dims)?;
+        Ok(Self { inner, tracker, disposed: false })
     }
 
     pub fn dispose(mut self, device: &HipDevice) -> Result<()> {
@@ -101,45 +58,26 @@ impl DenseFfnScratch {
             return Ok(());
         }
         self.disposed = true;
-        unsafe {
-            device.dealloc(self.x_q8_1, self.x_q8_1_bytes)?;
-            device.dealloc(self.gate_f32, self.inter_f32_bytes)?;
-            device.dealloc(self.up_f32, self.inter_f32_bytes)?;
-            device.dealloc(self.activated_f32, self.inter_f32_bytes)?;
-            device.dealloc(self.activated_f16, self.inter_f16_bytes)?;
-            device.dealloc(self.activated_q8_1, self.inter_q8_1_bytes)?;
-            device.dealloc(self.down_f32, self.hidden_f32_bytes)?;
-            device.dealloc(self.down_f16, self.hidden_f16_bytes)?;
-        }
-        Ok(())
+        self.tracker.dispose(device)
     }
-}
 
-impl Drop for DenseFfnScratch {
-    fn drop(&mut self) {
-        if !self.disposed {
-            tracing::warn!(
-                target: "flambeau_qwen3_moe::forward",
-                "DenseFfnScratch dropped without dispose(device); device buffers leaked"
-            );
-        }
-    }
-}
-
-impl DenseFfnScratch {
     /// Build a by-value view shaped for
-    /// `flambeau_blocks::DenseMlp::forward_decode`. All fields are
-    /// `Copy`, so the view can be passed by value (no `&mut`).
+    /// `flambeau_blocks::DenseMlp::forward_decode`.
     pub fn view(&self) -> flambeau_blocks::DenseMlpDecodeScratch {
-        flambeau_blocks::DenseMlpDecodeScratch {
-            x_q8_1: self.x_q8_1,
-            gate_f32: self.gate_f32,
-            up_f32: self.up_f32,
-            activated_f16: self.activated_f16,
-            activated_q8_1: self.activated_q8_1,
-            down_f32: self.down_f32,
-            down_f16: self.down_f16,
-        }
+        self.inner.view()
+    }
+}
+
+impl std::ops::Deref for DenseFfnScratch {
+    type Target = flambeau_blocks::OwnedDenseMlpDecodeScratch;
+    fn deref(&self) -> &Self::Target {
+        &self.inner
+    }
+}
+
+impl std::ops::DerefMut for DenseFfnScratch {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.inner
     }
 }
 

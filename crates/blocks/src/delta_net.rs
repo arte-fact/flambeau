@@ -46,6 +46,7 @@ use flambeau_core::{CopyDirection, Device, DevicePtr};
 use flambeau_core::op::QDtype;
 use flambeau_ops::Ops;
 
+use crate::driver_utils::RawAllocTracker;
 use crate::WeightHandle;
 
 /// Borrowed-by-value view over a caller-owned GDN decode scratch.
@@ -66,6 +67,111 @@ pub struct DeltaNetLayerDecodeScratch {
     pub gated_f32: DevicePtr,       // [d_inner]
     pub gated_q8_1: DevicePtr,      // Q8_1 [d_inner / 32]
     pub ssm_out_f32: DevicePtr,     // [hidden]
+}
+
+/// Shape inputs needed to size a `DeltaNetLayer` decode scratch.
+#[derive(Copy, Clone, Debug)]
+pub struct DeltaNetScratchDims {
+    pub hidden: usize,
+    pub d_inner: usize,
+    pub num_v_heads: usize,
+    pub num_k_heads: usize,
+    pub head_k_dim: usize,
+    pub head_v_dim: usize,
+    pub conv_channels: usize,
+    pub conv_kernel: usize,
+}
+
+/// Owned GDN decode scratch.
+pub struct OwnedDeltaNetLayerDecodeScratch {
+    pub x_q8_1: DevicePtr,
+    pub qkv_mixed_f32: DevicePtr,
+    pub z_f32: DevicePtr,
+    pub alpha_f32: DevicePtr,
+    pub beta_f32: DevicePtr,
+    pub conv_input: DevicePtr,
+    pub conv_out: DevicePtr,
+    pub silu_out: DevicePtr,
+    pub q_norm_f32: DevicePtr,
+    pub k_norm_f32: DevicePtr,
+    pub state_out: DevicePtr,
+    pub out_normed: DevicePtr,
+    pub gated_f32: DevicePtr,
+    pub gated_q8_1: DevicePtr,
+    pub ssm_out_f32: DevicePtr,
+}
+
+impl OwnedDeltaNetLayerDecodeScratch {
+    pub fn view(&self) -> DeltaNetLayerDecodeScratch {
+        DeltaNetLayerDecodeScratch {
+            x_q8_1: self.x_q8_1,
+            qkv_mixed_f32: self.qkv_mixed_f32,
+            z_f32: self.z_f32,
+            alpha_f32: self.alpha_f32,
+            beta_f32: self.beta_f32,
+            conv_input: self.conv_input,
+            conv_out: self.conv_out,
+            silu_out: self.silu_out,
+            q_norm_f32: self.q_norm_f32,
+            k_norm_f32: self.k_norm_f32,
+            state_out: self.state_out,
+            out_normed: self.out_normed,
+            gated_f32: self.gated_f32,
+            gated_q8_1: self.gated_q8_1,
+            ssm_out_f32: self.ssm_out_f32,
+        }
+    }
+}
+
+/// Owned GDN prefill scratch.
+pub struct OwnedDeltaNetLayerPrefillScratch {
+    pub max_tokens: usize,
+    pub x_norm_f16: DevicePtr,
+    pub x_q8_1: DevicePtr,
+    pub x_q8_1_mmq: DevicePtr,
+    pub qkv_mixed_f32: DevicePtr,
+    pub z_f32: DevicePtr,
+    pub alpha_f32: DevicePtr,
+    pub beta_f32: DevicePtr,
+    pub conv_input: DevicePtr,
+    pub conv_out: DevicePtr,
+    pub silu_out: DevicePtr,
+    pub q_norm_f32: DevicePtr,
+    pub k_norm_f32: DevicePtr,
+    pub v_f32: DevicePtr,
+    pub state_out: DevicePtr,
+    pub out_normed: DevicePtr,
+    pub gated_f32: DevicePtr,
+    pub gated_q8_1: DevicePtr,
+    pub gated_q8_1_mmq: DevicePtr,
+    pub ssm_out_f32: DevicePtr,
+}
+
+impl OwnedDeltaNetLayerPrefillScratch {
+    pub fn view(&self) -> DeltaNetLayerPrefillScratch {
+        DeltaNetLayerPrefillScratch {
+            max_tokens: self.max_tokens,
+            x_norm_f16: self.x_norm_f16,
+            x_q8_1: self.x_q8_1,
+            x_q8_1_mmq: self.x_q8_1_mmq,
+            qkv_mixed_f32: self.qkv_mixed_f32,
+            z_f32: self.z_f32,
+            alpha_f32: self.alpha_f32,
+            beta_f32: self.beta_f32,
+            conv_input: self.conv_input,
+            conv_out: self.conv_out,
+            silu_out: self.silu_out,
+            q_norm_f32: self.q_norm_f32,
+            k_norm_f32: self.k_norm_f32,
+            v_f32: self.v_f32,
+            state_out: self.state_out,
+            out_normed: self.out_normed,
+            gated_f32: self.gated_f32,
+            gated_q8_1: self.gated_q8_1,
+            gated_q8_1_mmq: self.gated_q8_1_mmq,
+            ssm_out_f32: self.ssm_out_f32,
+        }
+    }
 }
 
 /// Borrowed-by-value view over a caller-owned GDN prefill scratch.
@@ -179,6 +285,140 @@ impl DeltaNetLayer {
             conv_kernel,
             rms_norm_eps,
             rep_inner_layout,
+        })
+    }
+
+    pub fn scratch_dims(&self) -> DeltaNetScratchDims {
+        DeltaNetScratchDims {
+            hidden: self.hidden,
+            d_inner: self.d_inner,
+            num_v_heads: self.num_v_heads,
+            num_k_heads: self.num_k_heads,
+            head_k_dim: self.head_k_dim,
+            head_v_dim: self.head_v_dim,
+            conv_channels: self.conv_channels,
+            conv_kernel: self.conv_kernel,
+        }
+    }
+
+    /// Allocate an [`OwnedDeltaNetLayerDecodeScratch`] sized for `dims`.
+    pub fn alloc_decode_scratch(
+        device: &HipDevice,
+        tracker: &mut RawAllocTracker,
+        dims: DeltaNetScratchDims,
+    ) -> Result<OwnedDeltaNetLayerDecodeScratch> {
+        let DeltaNetScratchDims {
+            hidden,
+            d_inner,
+            num_v_heads,
+            num_k_heads,
+            head_k_dim,
+            head_v_dim,
+            conv_channels,
+            conv_kernel,
+        } = dims;
+        let qk_size = num_k_heads * head_k_dim;
+        let v_size = num_v_heads * head_v_dim;
+        let (x_q8_1, _) = tracker.alloc_q8_1(device, hidden)?;
+        let (qkv_mixed_f32, _) = tracker.alloc_f32(device, conv_channels)?;
+        let (z_f32, _) = tracker.alloc_f32(device, d_inner)?;
+        let (alpha_f32, _) = tracker.alloc_f32(device, num_v_heads)?;
+        let (beta_f32, _) = tracker.alloc_f32(device, num_v_heads)?;
+        let (conv_input, _) = tracker.alloc_f32(device, conv_kernel * conv_channels)?;
+        let (conv_out, _) = tracker.alloc_f32(device, conv_channels)?;
+        let (silu_out, _) = tracker.alloc_f32(device, conv_channels)?;
+        let (q_norm_f32, _) = tracker.alloc_f32(device, qk_size)?;
+        let (k_norm_f32, _) = tracker.alloc_f32(device, qk_size)?;
+        let (state_out, _) = tracker.alloc_f32(device, v_size)?;
+        let (out_normed, _) = tracker.alloc_f32(device, v_size)?;
+        let (gated_f32, _) = tracker.alloc_f32(device, d_inner)?;
+        let (gated_q8_1, _) = tracker.alloc_q8_1(device, d_inner)?;
+        let (ssm_out_f32, _) = tracker.alloc_f32(device, hidden)?;
+        Ok(OwnedDeltaNetLayerDecodeScratch {
+            x_q8_1,
+            qkv_mixed_f32,
+            z_f32,
+            alpha_f32,
+            beta_f32,
+            conv_input,
+            conv_out,
+            silu_out,
+            q_norm_f32,
+            k_norm_f32,
+            state_out,
+            out_normed,
+            gated_f32,
+            gated_q8_1,
+            ssm_out_f32,
+        })
+    }
+
+    /// Allocate an [`OwnedDeltaNetLayerPrefillScratch`] sized for
+    /// `dims` × `max_tokens`. The conv history is sized as
+    /// `(K-1) + max_tokens` rows so that one prefill chunk plus the
+    /// trailing history fits in `conv_input`.
+    pub fn alloc_prefill_scratch(
+        device: &HipDevice,
+        tracker: &mut RawAllocTracker,
+        dims: DeltaNetScratchDims,
+        max_tokens: usize,
+    ) -> Result<OwnedDeltaNetLayerPrefillScratch> {
+        if max_tokens == 0 {
+            bail!("alloc_prefill_scratch: max_tokens must be >= 1");
+        }
+        let DeltaNetScratchDims {
+            hidden,
+            d_inner,
+            num_v_heads,
+            num_k_heads,
+            head_k_dim,
+            head_v_dim,
+            conv_channels,
+            conv_kernel,
+        } = dims;
+        let qk_size = num_k_heads * head_k_dim;
+        let v_size = num_v_heads * head_v_dim;
+        let (x_norm_f16, _) = tracker.alloc_f16(device, max_tokens * hidden)?;
+        let (x_q8_1, _) = tracker.alloc_q8_1(device, max_tokens * hidden)?;
+        let (x_q8_1_mmq, _) = tracker.alloc_q8_1_mmq(device, max_tokens * hidden)?;
+        let (qkv_mixed_f32, _) = tracker.alloc_f32(device, max_tokens * conv_channels)?;
+        let (z_f32, _) = tracker.alloc_f32(device, max_tokens * d_inner)?;
+        let (alpha_f32, _) = tracker.alloc_f32(device, max_tokens * num_v_heads)?;
+        let (beta_f32, _) = tracker.alloc_f32(device, max_tokens * num_v_heads)?;
+        let (conv_input, _) =
+            tracker.alloc_f32(device, ((conv_kernel - 1) + max_tokens) * conv_channels)?;
+        let (conv_out, _) = tracker.alloc_f32(device, max_tokens * conv_channels)?;
+        let (silu_out, _) = tracker.alloc_f32(device, max_tokens * conv_channels)?;
+        let (q_norm_f32, _) = tracker.alloc_f32(device, max_tokens * qk_size)?;
+        let (k_norm_f32, _) = tracker.alloc_f32(device, max_tokens * qk_size)?;
+        let (v_f32, _) = tracker.alloc_f32(device, max_tokens * v_size)?;
+        let (state_out, _) = tracker.alloc_f32(device, max_tokens * v_size)?;
+        let (out_normed, _) = tracker.alloc_f32(device, max_tokens * v_size)?;
+        let (gated_f32, _) = tracker.alloc_f32(device, max_tokens * d_inner)?;
+        let (gated_q8_1, _) = tracker.alloc_q8_1(device, max_tokens * d_inner)?;
+        let (gated_q8_1_mmq, _) = tracker.alloc_q8_1_mmq(device, max_tokens * d_inner)?;
+        let (ssm_out_f32, _) = tracker.alloc_f32(device, max_tokens * hidden)?;
+        Ok(OwnedDeltaNetLayerPrefillScratch {
+            max_tokens,
+            x_norm_f16,
+            x_q8_1,
+            x_q8_1_mmq,
+            qkv_mixed_f32,
+            z_f32,
+            alpha_f32,
+            beta_f32,
+            conv_input,
+            conv_out,
+            silu_out,
+            q_norm_f32,
+            k_norm_f32,
+            v_f32,
+            state_out,
+            out_normed,
+            gated_f32,
+            gated_q8_1,
+            gated_q8_1_mmq,
+            ssm_out_f32,
         })
     }
 

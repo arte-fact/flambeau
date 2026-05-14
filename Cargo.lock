@@ -460,6 +460,7 @@ dependencies = [
  "clap",
  "flambeau-bench",
  "flambeau-core",
+ "flambeau-gemma4",
  "flambeau-quant",
  "flambeau-qwen3-moe",
  "flambeau-runtime",

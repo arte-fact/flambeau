@@ -26,161 +26,36 @@ use crate::session::LayerCache;
 use crate::weights::{DenseAttnWeights, DeviceTensor, FullAttnWeights};
 
 /// Workspace buffers needed by one decode step of a full-attention layer.
-/// Sized once at session init against the model config; shared across all
-/// full-attn layers (they all have the same intermediate dims).
+/// Thin wrapper over [`flambeau_blocks::OwnedStandardAttentionDecodeScratch`]:
+/// the block owns the device buffers; this struct keeps the per-stage
+/// [`flambeau_blocks::RawAllocTracker`] so `dispose(device)` walks every
+/// allocation in one place.
 pub struct FullAttnScratch {
-    pub x_norm: DevicePtr,         // F16 [H]
-    pub x_q8_1: DevicePtr,         // Q8_1 blocks [H / 32]
-    pub mmvq_f32: DevicePtr,       // F32 [max(fused_q_width, H)]
-    pub q_fused_f16: DevicePtr,    // F16 [2 * n_heads * head_dim]
-    pub q_f16: DevicePtr,          // F16 [n_heads * head_dim]
-    pub gate_f16: DevicePtr,       // F16 [n_heads * head_dim]
-    pub k_f16: DevicePtr,          // F16 [n_kv_heads * head_dim]
-    pub v_f16: DevicePtr,          // F16 [n_kv_heads * head_dim]
-    /// Q8_0 staging for KvCache<Q8Contig>. Sized for
-    /// `n_kv_heads * head_dim / 32` Q8_0 blocks (18 B each). Unused on the
-    /// F16-KV path; tiny relative to the F16 buffers (16× smaller per-row
-    /// since 18 B vs 32 B per block).
-    pub k_q8_0: DevicePtr,         // Q8_0 blocks [n_kv_heads * head_dim / 32]
-    pub v_q8_0: DevicePtr,         // Q8_0 blocks [n_kv_heads * head_dim / 32]
-    pub attn_out_f16: DevicePtr,   // F16 [n_heads * head_dim]
-    pub gated_out_f16: DevicePtr,  // F16 [n_heads * head_dim]
-    pub positions: DevicePtr,      // i32 [1] — position for the current token
-    /// 7.a-i2b — persistent host-side 1-slot position backing. Same
-    /// motivation as 6.a-i5a's `positions_host` for prefill: the
-    /// per-layer `upload_position` HtoD memcpy's source was a stack-local
-    /// `[i32; 1]` requiring an internal `stream.synchronize()` to keep
-    /// it alive across the copy — a per-layer per-token barrier of ~50 µs
-    /// (~5 % of decode wall at 53 tok/s on Mesh<4>). The persistent Vec
-    /// lets us drop the sync and keeps the memcpy source stable for
-    /// 7.a-i3's graph-capture path.
-    pub(crate) positions_host: Vec<i32>,
-    // 9.b — split-K (flash-decoding) partials. Sized for
-    // `MAX_SPLITK_CHUNKS` chunks so the scratch can serve any context up to
-    // `MAX_SPLITK_CHUNKS * SPLITK_CHUNK_SIZE_LONG` tokens; dispatch asserts
-    // `n_chunks <= MAX_SPLITK_CHUNKS`.
-    pub splitk_partials_m: DevicePtr,  // F32 [n_heads * MAX_SPLITK_CHUNKS]
-    pub splitk_partials_s: DevicePtr,  // F32 [n_heads * MAX_SPLITK_CHUNKS]
-    pub splitk_partials_o: DevicePtr,  // F32 [n_heads * MAX_SPLITK_CHUNKS * head_dim]
-    // Sizes for teardown + sanity asserts.
-    x_norm_bytes: usize,
-    x_q8_1_bytes: usize,
-    mmvq_f32_bytes: usize,
-    q_fused_bytes: usize,
-    qk_bytes: usize,
-    kv_bytes: usize,
-    kv_q8_0_bytes: usize,
-    attn_bytes: usize,
-    positions_bytes: usize,
-    splitk_ms_bytes: usize,
-    splitk_o_bytes: usize,
+    inner: flambeau_blocks::OwnedStandardAttentionDecodeScratch,
+    tracker: flambeau_blocks::RawAllocTracker,
     disposed: bool,
 }
 
-/// 9.b — partials scratch budget. 32 chunks × 512 tokens/chunk = 16 384
-/// tokens max context covered by split-K (≥ anything practical on gfx906
-/// decode). Bump alongside the dispatch threshold if context ever exceeds.
-pub const MAX_SPLITK_CHUNKS: usize = 32;
+/// Re-export of the block's split-K partial budget so callers that
+/// reach into `flambeau_qwen3_moe::forward::attn::MAX_SPLITK_CHUNKS`
+/// continue to compile after the migration.
+pub use flambeau_blocks::MAX_SPLITK_CHUNKS;
 
 impl FullAttnScratch {
     pub fn new(cfg: &Qwen3MoEConfig, device: &HipDevice) -> Result<Self> {
-        let hidden = cfg.hidden_size;
-        let head_dim = cfg.head_dim;
-        let n_heads = cfg.num_heads;
-        let n_kv_heads = cfg.num_kv_heads;
-
-        let q_fused_width = 2 * n_heads * head_dim;
-        let q_width = n_heads * head_dim;
-        let kv_width = n_kv_heads * head_dim;
-
-        assert!(hidden % 32 == 0, "hidden must be a multiple of QK8_1=32");
-
-        let x_norm_bytes = hidden * 2;
-        // `x_q8_1` is reused for two activations: the RMSNorm-output quant
-        // of `hidden` elements (feeds Q/K/V matmuls), and the post-attn
-        // gated_out quant of `n_heads*head_dim` elements (feeds the output
-        // matmul). Size for the max — Qwen3.6 has `n_heads*head_dim=4096 >
-        // hidden=2048`, so budgeting only `hidden/32` blocks OOB-writes.
-        let x_q8_1_elems = hidden.max(q_width);
-        assert!(x_q8_1_elems % 32 == 0, "x_q8_1 elems must be multiple of QK8_1=32");
-        let x_q8_1_bytes = (x_q8_1_elems / 32) * std::mem::size_of::<BlockQ8_1>();
-        // Max MMVQ output width across all layer matmuls:
-        // attn_q: q_fused_width (8192)
-        // attn_output: hidden (2048)
-        // attn_k/v: kv_width (512)
-        let mmvq_f32_bytes = q_fused_width.max(hidden) * 4;
-        let q_fused_bytes = q_fused_width * 2;
-        let qk_bytes = q_width * 2;
-        let kv_bytes = kv_width * 2;
-        // Q8_0 staging for the q8_contig KV path. Each
-        // 32-element block is 34 B (2-byte fp16 scale + 32 int8 quants =
-        // `sizeof(flambeau_block_q8_0)`). Allocated unconditionally so
-        // dispatch on L::NAME can pick the right buffer without touching
-        // scratch construction.
-        // fix: was 18 B/block (wrong arithmetic — assumed
-        // 16 int8 quants instead of QK8_0=32). Q8 KV path was OOB-writing
-        // 1088 B into a 576 B staging slab, corrupting the next allocation
-        // and writing only ~17/32 blocks worth of data into the cache.
-        // First-token logits looked plausible because attn_out_f16 is
-        // overwritten by the attention kernel after; from token 1 onward
-        // the cache held mismatched data and logits collapsed to ~0.
-        assert!(kv_width % 32 == 0, "kv_width must be a multiple of QK8_0=32 for Q8 KV staging");
-        let kv_q8_0_bytes = (kv_width / 32) * flambeau_runtime::Q8_0_BLOCK_BYTES;
-        let attn_bytes = q_width * 2;
-        let positions_bytes = 4;
-        // splitk partials: f32 × [n_heads, MAX_CHUNKS] (m, s) and
-        // f32 × [n_heads, MAX_CHUNKS, head_dim] (o).
-        let splitk_ms_bytes = n_heads * MAX_SPLITK_CHUNKS * 4;
-        let splitk_o_bytes = n_heads * MAX_SPLITK_CHUNKS * head_dim * 4;
-
-        let x_norm = device.alloc(x_norm_bytes)?;
-        let x_q8_1 = device.alloc(x_q8_1_bytes)?;
-        let mmvq_f32 = device.alloc(mmvq_f32_bytes)?;
-        let q_fused_f16 = device.alloc(q_fused_bytes)?;
-        let q_f16 = device.alloc(qk_bytes)?;
-        let gate_f16 = device.alloc(qk_bytes)?;
-        let k_f16 = device.alloc(kv_bytes)?;
-        let v_f16 = device.alloc(kv_bytes)?;
-        let k_q8_0 = device.alloc(kv_q8_0_bytes)?;
-        let v_q8_0 = device.alloc(kv_q8_0_bytes)?;
-        let attn_out_f16 = device.alloc(attn_bytes)?;
-        let gated_out_f16 = device.alloc(attn_bytes)?;
-        let positions = device.alloc(positions_bytes)?;
-        let splitk_partials_m = device.alloc(splitk_ms_bytes)?;
-        let splitk_partials_s = device.alloc(splitk_ms_bytes)?;
-        let splitk_partials_o = device.alloc(splitk_o_bytes)?;
-
-        Ok(Self {
-            x_norm,
-            x_q8_1,
-            mmvq_f32,
-            q_fused_f16,
-            q_f16,
-            gate_f16,
-            k_f16,
-            v_f16,
-            k_q8_0,
-            v_q8_0,
-            attn_out_f16,
-            gated_out_f16,
-            positions,
-            positions_host: vec![0i32; 1],
-            splitk_partials_m,
-            splitk_partials_s,
-            splitk_partials_o,
-            x_norm_bytes,
-            x_q8_1_bytes,
-            mmvq_f32_bytes,
-            q_fused_bytes,
-            qk_bytes,
-            kv_bytes,
-            kv_q8_0_bytes,
-            attn_bytes,
-            positions_bytes,
-            splitk_ms_bytes,
-            splitk_o_bytes,
-            disposed: false,
-        })
+        let mut tracker = flambeau_blocks::RawAllocTracker::new();
+        let dims = flambeau_blocks::AttentionScratchDims {
+            hidden: cfg.hidden_size,
+            n_heads: cfg.num_heads,
+            n_kv_heads: cfg.num_kv_heads,
+            head_dim: cfg.head_dim,
+        };
+        let inner = flambeau_blocks::StandardAttention::alloc_decode_scratch(
+            device,
+            &mut tracker,
+            dims,
+        )?;
+        Ok(Self { inner, tracker, disposed: false })
     }
 
     pub fn dispose(mut self, device: &HipDevice) -> Result<()> {
@@ -188,65 +63,13 @@ impl FullAttnScratch {
             return Ok(());
         }
         self.disposed = true;
-        // SAFETY: every pointer came from `device.alloc(bytes)` above.
-        unsafe {
-            device.dealloc(self.x_norm, self.x_norm_bytes)?;
-            device.dealloc(self.x_q8_1, self.x_q8_1_bytes)?;
-            device.dealloc(self.mmvq_f32, self.mmvq_f32_bytes)?;
-            device.dealloc(self.q_fused_f16, self.q_fused_bytes)?;
-            device.dealloc(self.q_f16, self.qk_bytes)?;
-            device.dealloc(self.gate_f16, self.qk_bytes)?;
-            device.dealloc(self.k_f16, self.kv_bytes)?;
-            device.dealloc(self.v_f16, self.kv_bytes)?;
-            device.dealloc(self.k_q8_0, self.kv_q8_0_bytes)?;
-            device.dealloc(self.v_q8_0, self.kv_q8_0_bytes)?;
-            device.dealloc(self.attn_out_f16, self.attn_bytes)?;
-            device.dealloc(self.gated_out_f16, self.attn_bytes)?;
-            device.dealloc(self.positions, self.positions_bytes)?;
-            device.dealloc(self.splitk_partials_m, self.splitk_ms_bytes)?;
-            device.dealloc(self.splitk_partials_s, self.splitk_ms_bytes)?;
-            device.dealloc(self.splitk_partials_o, self.splitk_o_bytes)?;
-        }
-        Ok(())
+        self.tracker.dispose(device)
     }
-}
 
-impl Drop for FullAttnScratch {
-    fn drop(&mut self) {
-        if !self.disposed {
-            tracing::warn!(
-                target: "flambeau_qwen3_moe::forward",
-                "FullAttnScratch dropped without dispose(device); device buffers leaked"
-            );
-        }
-    }
-}
-
-impl FullAttnScratch {
     /// Build a borrowed view over this scratch shaped to feed into
-    /// `flambeau_blocks::StandardAttention::forward_decode`. All
-    /// `DevicePtr` fields are copied; only `positions_host` is
-    /// borrowed mutably (its address must stay stable across the HtoD
-    /// memcpy inside the block).
+    /// `flambeau_blocks::StandardAttention::forward_decode`.
     pub fn view_mut(&mut self) -> flambeau_blocks::StandardAttentionDecodeScratch<'_> {
-        flambeau_blocks::StandardAttentionDecodeScratch {
-            x_q8_1: self.x_q8_1,
-            mmvq_f32: self.mmvq_f32,
-            q_fused_f16: self.q_fused_f16,
-            q_f16: self.q_f16,
-            gate_f16: self.gate_f16,
-            k_f16: self.k_f16,
-            v_f16: self.v_f16,
-            k_q8_0: self.k_q8_0,
-            v_q8_0: self.v_q8_0,
-            attn_out_f16: self.attn_out_f16,
-            gated_out_f16: self.gated_out_f16,
-            positions: self.positions,
-            positions_host: &mut self.positions_host,
-            splitk_partials_m: self.splitk_partials_m,
-            splitk_partials_s: self.splitk_partials_s,
-            splitk_partials_o: self.splitk_partials_o,
-        }
+        self.inner.view_mut()
     }
 }
 

@@ -40,97 +40,28 @@ use crate::weights::DeviceTensor;
 // d1 — routed MoE FFN decode step.
 // ---------------------------------------------------------------------------
 
-/// Workspace for one decode step of the routed MoE FFN (no shared expert —
-/// that lands in d2, no router — d3). Sized against
-/// `(hidden, moe_intermediate_size, num_experts_per_tok=top_k)`.
+/// Workspace for one decode step of the routed MoE FFN. Wraps
+/// [`flambeau_blocks::OwnedMoeExpertsDecodeScratch`]; field access
+/// (`scratch.x_q8_1`, `scratch.expert_ids`, …) flows through `Deref` to
+/// the inner block scratch.
 pub struct MoeScratch {
-    // Q8_1 of layer input, shared across all top_k experts' gate/up matmuls.
-    pub x_q8_1: DevicePtr,
-    // Router logits (F32 [n_experts]) → populated by `forward_router_decode`.
-    pub router_logits: DevicePtr,
-    // Expert ids / weights — populated by the router (or the caller).
-    pub expert_ids: DevicePtr,        // i32 [top_k]
-    pub expert_weights: DevicePtr,    // F32 [top_k]
-    // Fused gate+up MMVQ outputs: F32 [top_k, moe_inter] each.
-    pub gate_out_f32: DevicePtr,
-    pub up_out_f32: DevicePtr,
-    // swiglu(gate, up) result: F32 [top_k, moe_inter], then cast to F16,
-    // then quantised to Q8_1 (flat [top_k, moe_inter/32]) for the down step.
-    pub activated_f32: DevicePtr,
-    pub activated_f16: DevicePtr,
-    pub activated_q8_1: DevicePtr,
-    // Down MMVQ output: F32 [top_k, hidden], then cast to F16 for combine.
-    pub down_f32: DevicePtr,
-    pub down_f16: DevicePtr,
-    // Bookkeeping.
-    x_q8_1_bytes: usize,
-    router_logits_bytes: usize,
-    expert_ids_bytes: usize,
-    expert_weights_bytes: usize,
-    gate_up_bytes: usize,
-    activated_f32_bytes: usize,
-    activated_f16_bytes: usize,
-    activated_q8_1_bytes: usize,
-    down_f32_bytes: usize,
-    down_f16_bytes: usize,
+    inner: flambeau_blocks::OwnedMoeExpertsDecodeScratch,
+    tracker: flambeau_blocks::RawAllocTracker,
     disposed: bool,
 }
 
 impl MoeScratch {
     pub fn new(cfg: &Qwen3MoEConfig, device: &HipDevice) -> Result<Self> {
-        let hidden = cfg.hidden_size;
-        let inter = cfg.moe_intermediate_size;
-        let top_k = cfg.num_experts_per_tok;
-        assert!(hidden % 32 == 0, "hidden must be a multiple of QK8_1=32");
-        assert!(inter % 32 == 0, "moe_intermediate_size must be a multiple of QK8_1=32");
-
-        let x_q8_1_bytes = (hidden / 32) * std::mem::size_of::<BlockQ8_1>();
-        let router_logits_bytes = cfg.num_experts * 4;
-        let expert_ids_bytes = top_k * 4;
-        let expert_weights_bytes = top_k * 4;
-        let gate_up_bytes = top_k * inter * 4;
-        let activated_f32_bytes = top_k * inter * 4;
-        let activated_f16_bytes = top_k * inter * 2;
-        let activated_q8_1_bytes = top_k * (inter / 32) * std::mem::size_of::<BlockQ8_1>();
-        let down_f32_bytes = top_k * hidden * 4;
-        let down_f16_bytes = top_k * hidden * 2;
-
-        let x_q8_1 = device.alloc(x_q8_1_bytes)?;
-        let router_logits = device.alloc(router_logits_bytes)?;
-        let expert_ids = device.alloc(expert_ids_bytes)?;
-        let expert_weights = device.alloc(expert_weights_bytes)?;
-        let gate_out_f32 = device.alloc(gate_up_bytes)?;
-        let up_out_f32 = device.alloc(gate_up_bytes)?;
-        let activated_f32 = device.alloc(activated_f32_bytes)?;
-        let activated_f16 = device.alloc(activated_f16_bytes)?;
-        let activated_q8_1 = device.alloc(activated_q8_1_bytes)?;
-        let down_f32 = device.alloc(down_f32_bytes)?;
-        let down_f16 = device.alloc(down_f16_bytes)?;
-
-        Ok(Self {
-            x_q8_1,
-            router_logits,
-            expert_ids,
-            expert_weights,
-            gate_out_f32,
-            up_out_f32,
-            activated_f32,
-            activated_f16,
-            activated_q8_1,
-            down_f32,
-            down_f16,
-            x_q8_1_bytes,
-            router_logits_bytes,
-            expert_ids_bytes,
-            expert_weights_bytes,
-            gate_up_bytes,
-            activated_f32_bytes,
-            activated_f16_bytes,
-            activated_q8_1_bytes,
-            down_f32_bytes,
-            down_f16_bytes,
-            disposed: false,
-        })
+        let mut tracker = flambeau_blocks::RawAllocTracker::new();
+        let dims = flambeau_blocks::MoeExpertsScratchDims {
+            hidden: cfg.hidden_size,
+            intermediate: cfg.moe_intermediate_size,
+            n_experts: cfg.num_experts,
+            top_k: cfg.num_experts_per_tok,
+        };
+        let inner =
+            flambeau_blocks::MoeExperts::alloc_decode_scratch(device, &mut tracker, dims)?;
+        Ok(Self { inner, tracker, disposed: false })
     }
 
     pub fn dispose(mut self, device: &HipDevice) -> Result<()> {
@@ -138,49 +69,25 @@ impl MoeScratch {
             return Ok(());
         }
         self.disposed = true;
-        unsafe {
-            device.dealloc(self.x_q8_1, self.x_q8_1_bytes)?;
-            device.dealloc(self.router_logits, self.router_logits_bytes)?;
-            device.dealloc(self.expert_ids, self.expert_ids_bytes)?;
-            device.dealloc(self.expert_weights, self.expert_weights_bytes)?;
-            device.dealloc(self.gate_out_f32, self.gate_up_bytes)?;
-            device.dealloc(self.up_out_f32, self.gate_up_bytes)?;
-            device.dealloc(self.activated_f32, self.activated_f32_bytes)?;
-            device.dealloc(self.activated_f16, self.activated_f16_bytes)?;
-            device.dealloc(self.activated_q8_1, self.activated_q8_1_bytes)?;
-            device.dealloc(self.down_f32, self.down_f32_bytes)?;
-            device.dealloc(self.down_f16, self.down_f16_bytes)?;
-        }
-        Ok(())
+        self.tracker.dispose(device)
     }
-}
 
-impl Drop for MoeScratch {
-    fn drop(&mut self) {
-        if !self.disposed {
-            tracing::warn!(
-                target: "flambeau_qwen3_moe::forward",
-                "MoeScratch dropped without dispose(device); device buffers leaked"
-            );
-        }
-    }
-}
-
-impl MoeScratch {
     /// View shaped for `flambeau_blocks::MoeExperts` decode methods.
     pub fn view(&self) -> flambeau_blocks::MoeExpertsDecodeScratch {
-        flambeau_blocks::MoeExpertsDecodeScratch {
-            x_q8_1: self.x_q8_1,
-            router_logits: self.router_logits,
-            expert_ids: self.expert_ids,
-            expert_weights: self.expert_weights,
-            gate_out_f32: self.gate_out_f32,
-            up_out_f32: self.up_out_f32,
-            activated_f16: self.activated_f16,
-            activated_q8_1: self.activated_q8_1,
-            down_f32: self.down_f32,
-            down_f16: self.down_f16,
-        }
+        self.inner.view()
+    }
+}
+
+impl std::ops::Deref for MoeScratch {
+    type Target = flambeau_blocks::OwnedMoeExpertsDecodeScratch;
+    fn deref(&self) -> &Self::Target {
+        &self.inner
+    }
+}
+
+impl std::ops::DerefMut for MoeScratch {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.inner
     }
 }
 
@@ -292,75 +199,28 @@ pub fn forward_moe_ffn_decode(
 // ---------------------------------------------------------------------------
 
 /// Workspace for one decode step of the shared expert (dense FFN +
-/// per-token sigmoid gate scaling). Sized against
-/// `(hidden, shared_expert_intermediate_size)`.
+/// per-token sigmoid gate scaling). Wraps
+/// [`flambeau_blocks::OwnedSharedExpertDecodeScratch`]; field access
+/// flows through `Deref` to the inner block scratch.
 pub struct SharedExpertScratch {
-    // Q8_1 of `x_norm`, shared across gate/up matmuls.
-    pub x_q8_1: DevicePtr,
-    // Dense gate/up matmul outputs, F32 [shared_inter].
-    pub gate_f32: DevicePtr,
-    pub up_f32: DevicePtr,
-    // SwiGLU output + F16 round-trip for the down matmul input.
-    pub activated_f32: DevicePtr,
-    pub activated_f16: DevicePtr,
-    pub activated_q8_1: DevicePtr,
-    // Down matmul output (F32), scaled in place by `shared_expert_scale_f32`.
-    pub down_f32: DevicePtr,
-    // F32 view of `x_norm` — the gate-scale kernel dots it against
-    // `ffn_gate_inp_shexp` to produce the per-token gate scalar.
-    pub x_norm_f32: DevicePtr,
-    // Bookkeeping.
-    x_q8_1_bytes: usize,
-    inter_f32_bytes: usize,
-    inter_f16_bytes: usize,
-    inter_q8_1_bytes: usize,
-    hidden_f32_bytes: usize,
+    inner: flambeau_blocks::OwnedSharedExpertDecodeScratch,
+    tracker: flambeau_blocks::RawAllocTracker,
     disposed: bool,
 }
 
 impl SharedExpertScratch {
     pub fn new(cfg: &Qwen3MoEConfig, device: &HipDevice) -> Result<Self> {
-        let hidden = cfg.hidden_size;
-        let inter = cfg
+        let intermediate = cfg
             .shared_expert_intermediate_size
             .context("SharedExpertScratch requires cfg.shared_expert_intermediate_size")?;
-        assert!(hidden % 32 == 0, "hidden must be a multiple of QK8_1=32");
-        assert!(
-            inter % 32 == 0,
-            "shared_expert_intermediate_size must be a multiple of QK8_1=32"
-        );
-
-        let x_q8_1_bytes = (hidden / 32) * std::mem::size_of::<BlockQ8_1>();
-        let inter_f32_bytes = inter * 4;
-        let inter_f16_bytes = inter * 2;
-        let inter_q8_1_bytes = (inter / 32) * std::mem::size_of::<BlockQ8_1>();
-        let hidden_f32_bytes = hidden * 4;
-
-        let x_q8_1 = device.alloc(x_q8_1_bytes)?;
-        let gate_f32 = device.alloc(inter_f32_bytes)?;
-        let up_f32 = device.alloc(inter_f32_bytes)?;
-        let activated_f32 = device.alloc(inter_f32_bytes)?;
-        let activated_f16 = device.alloc(inter_f16_bytes)?;
-        let activated_q8_1 = device.alloc(inter_q8_1_bytes)?;
-        let down_f32 = device.alloc(hidden_f32_bytes)?;
-        let x_norm_f32 = device.alloc(hidden_f32_bytes)?;
-
-        Ok(Self {
-            x_q8_1,
-            gate_f32,
-            up_f32,
-            activated_f32,
-            activated_f16,
-            activated_q8_1,
-            down_f32,
-            x_norm_f32,
-            x_q8_1_bytes,
-            inter_f32_bytes,
-            inter_f16_bytes,
-            inter_q8_1_bytes,
-            hidden_f32_bytes,
-            disposed: false,
-        })
+        let mut tracker = flambeau_blocks::RawAllocTracker::new();
+        let dims = flambeau_blocks::SharedExpertScratchDims {
+            hidden: cfg.hidden_size,
+            intermediate,
+        };
+        let inner =
+            flambeau_blocks::SharedExpert::alloc_decode_scratch(device, &mut tracker, dims)?;
+        Ok(Self { inner, tracker, disposed: false })
     }
 
     pub fn dispose(mut self, device: &HipDevice) -> Result<()> {
@@ -368,44 +228,25 @@ impl SharedExpertScratch {
             return Ok(());
         }
         self.disposed = true;
-        // SAFETY: every pointer came from `device.alloc(bytes)` above.
-        unsafe {
-            device.dealloc(self.x_q8_1, self.x_q8_1_bytes)?;
-            device.dealloc(self.gate_f32, self.inter_f32_bytes)?;
-            device.dealloc(self.up_f32, self.inter_f32_bytes)?;
-            device.dealloc(self.activated_f32, self.inter_f32_bytes)?;
-            device.dealloc(self.activated_f16, self.inter_f16_bytes)?;
-            device.dealloc(self.activated_q8_1, self.inter_q8_1_bytes)?;
-            device.dealloc(self.down_f32, self.hidden_f32_bytes)?;
-            device.dealloc(self.x_norm_f32, self.hidden_f32_bytes)?;
-        }
-        Ok(())
+        self.tracker.dispose(device)
     }
-}
 
-impl Drop for SharedExpertScratch {
-    fn drop(&mut self) {
-        if !self.disposed {
-            tracing::warn!(
-                target: "flambeau_qwen3_moe::forward",
-                "SharedExpertScratch dropped without dispose(device); device buffers leaked"
-            );
-        }
-    }
-}
-
-impl SharedExpertScratch {
     /// View shaped for `flambeau_blocks::SharedExpert::forward_decode`.
     pub fn view(&self) -> flambeau_blocks::SharedExpertDecodeScratch {
-        flambeau_blocks::SharedExpertDecodeScratch {
-            x_q8_1: self.x_q8_1,
-            gate_f32: self.gate_f32,
-            up_f32: self.up_f32,
-            activated_f16: self.activated_f16,
-            activated_q8_1: self.activated_q8_1,
-            down_f32: self.down_f32,
-            x_norm_f32: self.x_norm_f32,
-        }
+        self.inner.view()
+    }
+}
+
+impl std::ops::Deref for SharedExpertScratch {
+    type Target = flambeau_blocks::OwnedSharedExpertDecodeScratch;
+    fn deref(&self) -> &Self::Target {
+        &self.inner
+    }
+}
+
+impl std::ops::DerefMut for SharedExpertScratch {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.inner
     }
 }
 

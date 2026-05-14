@@ -14,10 +14,12 @@
 //! 8. `cast_f32_to_f16` → `shared_out`
 
 use anyhow::{bail, Context, Result};
+use flambeau_backend_hip::HipDevice;
 use flambeau_core::device::DevicePtr;
 use flambeau_core::op::QDtype;
 use flambeau_ops::Ops;
 
+use crate::driver_utils::RawAllocTracker;
 use crate::WeightHandle;
 
 #[derive(Copy, Clone)]
@@ -41,6 +43,65 @@ pub struct SharedExpertPrefillScratch {
     pub activated_q8_1: DevicePtr, // Q8_1 [max_tokens * intermediate / 32]
     pub down_f32: DevicePtr,       // F32 [max_tokens, hidden] — scaled in place
     pub x_norm_f32: DevicePtr,     // F32 [max_tokens, hidden]
+}
+
+/// Shape inputs needed to size a `SharedExpert` decode scratch.
+#[derive(Copy, Clone, Debug)]
+pub struct SharedExpertScratchDims {
+    pub hidden: usize,
+    pub intermediate: usize,
+}
+
+/// Owned SharedExpert decode scratch.
+pub struct OwnedSharedExpertDecodeScratch {
+    pub x_q8_1: DevicePtr,
+    pub gate_f32: DevicePtr,
+    pub up_f32: DevicePtr,
+    pub activated_f16: DevicePtr,
+    pub activated_q8_1: DevicePtr,
+    pub down_f32: DevicePtr,
+    pub x_norm_f32: DevicePtr,
+}
+
+impl OwnedSharedExpertDecodeScratch {
+    pub fn view(&self) -> SharedExpertDecodeScratch {
+        SharedExpertDecodeScratch {
+            x_q8_1: self.x_q8_1,
+            gate_f32: self.gate_f32,
+            up_f32: self.up_f32,
+            activated_f16: self.activated_f16,
+            activated_q8_1: self.activated_q8_1,
+            down_f32: self.down_f32,
+            x_norm_f32: self.x_norm_f32,
+        }
+    }
+}
+
+/// Owned SharedExpert prefill scratch.
+pub struct OwnedSharedExpertPrefillScratch {
+    pub max_tokens: usize,
+    pub x_q8_1: DevicePtr,
+    pub gate_f32: DevicePtr,
+    pub up_f32: DevicePtr,
+    pub activated_f16: DevicePtr,
+    pub activated_q8_1: DevicePtr,
+    pub down_f32: DevicePtr,
+    pub x_norm_f32: DevicePtr,
+}
+
+impl OwnedSharedExpertPrefillScratch {
+    pub fn view(&self) -> SharedExpertPrefillScratch {
+        SharedExpertPrefillScratch {
+            max_tokens: self.max_tokens,
+            x_q8_1: self.x_q8_1,
+            gate_f32: self.gate_f32,
+            up_f32: self.up_f32,
+            activated_f16: self.activated_f16,
+            activated_q8_1: self.activated_q8_1,
+            down_f32: self.down_f32,
+            x_norm_f32: self.x_norm_f32,
+        }
+    }
 }
 
 pub struct SharedExpert {
@@ -97,6 +158,66 @@ impl SharedExpert {
             ffn_down_shexp,
             hidden,
             intermediate,
+        })
+    }
+
+    pub fn scratch_dims(&self) -> SharedExpertScratchDims {
+        SharedExpertScratchDims { hidden: self.hidden, intermediate: self.intermediate }
+    }
+
+    /// Allocate an [`OwnedSharedExpertDecodeScratch`] sized for `dims`.
+    pub fn alloc_decode_scratch(
+        device: &HipDevice,
+        tracker: &mut RawAllocTracker,
+        dims: SharedExpertScratchDims,
+    ) -> Result<OwnedSharedExpertDecodeScratch> {
+        let SharedExpertScratchDims { hidden, intermediate } = dims;
+        let (x_q8_1, _) = tracker.alloc_q8_1(device, hidden)?;
+        let (gate_f32, _) = tracker.alloc_f32(device, intermediate)?;
+        let (up_f32, _) = tracker.alloc_f32(device, intermediate)?;
+        let (activated_f16, _) = tracker.alloc_f16(device, intermediate)?;
+        let (activated_q8_1, _) = tracker.alloc_q8_1(device, intermediate)?;
+        let (down_f32, _) = tracker.alloc_f32(device, hidden)?;
+        let (x_norm_f32, _) = tracker.alloc_f32(device, hidden)?;
+        Ok(OwnedSharedExpertDecodeScratch {
+            x_q8_1,
+            gate_f32,
+            up_f32,
+            activated_f16,
+            activated_q8_1,
+            down_f32,
+            x_norm_f32,
+        })
+    }
+
+    /// Allocate an [`OwnedSharedExpertPrefillScratch`] sized for
+    /// `dims` × `max_tokens`.
+    pub fn alloc_prefill_scratch(
+        device: &HipDevice,
+        tracker: &mut RawAllocTracker,
+        dims: SharedExpertScratchDims,
+        max_tokens: usize,
+    ) -> Result<OwnedSharedExpertPrefillScratch> {
+        if max_tokens == 0 {
+            bail!("alloc_prefill_scratch: max_tokens must be >= 1");
+        }
+        let SharedExpertScratchDims { hidden, intermediate } = dims;
+        let (x_q8_1, _) = tracker.alloc_q8_1(device, max_tokens * hidden)?;
+        let (gate_f32, _) = tracker.alloc_f32(device, max_tokens * intermediate)?;
+        let (up_f32, _) = tracker.alloc_f32(device, max_tokens * intermediate)?;
+        let (activated_f16, _) = tracker.alloc_f16(device, max_tokens * intermediate)?;
+        let (activated_q8_1, _) = tracker.alloc_q8_1(device, max_tokens * intermediate)?;
+        let (down_f32, _) = tracker.alloc_f32(device, max_tokens * hidden)?;
+        let (x_norm_f32, _) = tracker.alloc_f32(device, max_tokens * hidden)?;
+        Ok(OwnedSharedExpertPrefillScratch {
+            max_tokens,
+            x_q8_1,
+            gate_f32,
+            up_f32,
+            activated_f16,
+            activated_q8_1,
+            down_f32,
+            x_norm_f32,
         })
     }
 
