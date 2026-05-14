@@ -103,6 +103,9 @@ struct LayerScratchPtrs {
     post_ffw_norm_f16: (DevicePtr, usize),
     positions: (DevicePtr, usize),
     v_ones_f16: (DevicePtr, usize),
+    splitk_partials_m: (DevicePtr, usize),
+    splitk_partials_s: (DevicePtr, usize),
+    splitk_partials_o: (DevicePtr, usize),
 }
 
 /// Per-stage prefill scratch, sized for `max_tokens` rows.
@@ -286,6 +289,12 @@ impl Gemma4PpStage {
 
         let v_ones_ptr = upload_f16_ones(device, head_dim_max)?;
         raw_alloc.track(v_ones_ptr, head_dim_max * 2);
+        let n_heads_max_stage = global_layer_indices
+            .iter()
+            .map(|&gi| layout.layers[gi].n_heads)
+            .max()
+            .unwrap_or(1);
+        let splitk_chunks = flambeau_blocks::MAX_SPLITK_CHUNKS;
         let scratch = LayerScratchPtrs {
             x_q8_1: raw_alloc.alloc_q8_1(device, x_q8_1_n)?,
             mmvq_f32: raw_alloc.alloc_f32(device, mmvq_max)?,
@@ -304,6 +313,10 @@ impl Gemma4PpStage {
             post_ffw_norm_f16: raw_alloc.alloc_f16(device, hidden)?,
             positions: raw_alloc.alloc_i32(device, 1)?,
             v_ones_f16: (v_ones_ptr, head_dim_max * 2),
+            splitk_partials_m: raw_alloc.alloc_f32(device, n_heads_max_stage * splitk_chunks)?,
+            splitk_partials_s: raw_alloc.alloc_f32(device, n_heads_max_stage * splitk_chunks)?,
+            splitk_partials_o: raw_alloc
+                .alloc_f32(device, n_heads_max_stage * splitk_chunks * head_dim_max)?,
         };
 
         // hidden_a / hidden_b sized for L=max_tokens prefill rows
@@ -402,6 +415,9 @@ impl Gemma4PpStage {
             positions: self.scratch.positions.0,
             positions_host: &mut self.positions_host,
             v_ones_f16: self.scratch.v_ones_f16.0,
+            splitk_partials_m: self.scratch.splitk_partials_m.0,
+            splitk_partials_s: self.scratch.splitk_partials_s.0,
+            splitk_partials_o: self.scratch.splitk_partials_o.0,
         }
     }
 

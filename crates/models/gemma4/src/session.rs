@@ -42,6 +42,9 @@ struct LayerScratchPtrs {
     post_ffw_norm_f16: DevicePtr,
     positions: DevicePtr,
     v_ones_f16: DevicePtr,
+    splitk_partials_m: DevicePtr,
+    splitk_partials_s: DevicePtr,
+    splitk_partials_o: DevicePtr,
 }
 
 struct OuterScratchPtrs {
@@ -174,6 +177,13 @@ impl Gemma4Session {
 
         let mut raw_alloc = RawAllocTracker::new();
 
+        let n_heads_max = layout
+            .layers
+            .iter()
+            .map(|s| s.n_heads)
+            .max()
+            .unwrap_or(1);
+        let splitk_chunks = flambeau_blocks::MAX_SPLITK_CHUNKS;
         let layer_scratch = LayerScratchPtrs {
             x_q8_1: raw_alloc.alloc_q8_1(device, x_q8_1_n)?.0,
             mmvq_f32: raw_alloc.alloc_f32(device, mmvq_max)?.0,
@@ -192,6 +202,11 @@ impl Gemma4Session {
             post_ffw_norm_f16: raw_alloc.alloc_f16(device, hidden)?.0,
             positions: raw_alloc.alloc_i32(device, 1)?.0,
             v_ones_f16: raw_alloc.alloc_f16(device, head_dim_max)?.0,
+            splitk_partials_m: raw_alloc.alloc_f32(device, n_heads_max * splitk_chunks)?.0,
+            splitk_partials_s: raw_alloc.alloc_f32(device, n_heads_max * splitk_chunks)?.0,
+            splitk_partials_o: raw_alloc
+                .alloc_f32(device, n_heads_max * splitk_chunks * head_dim_max)?
+                .0,
         };
 
         // Fill the v_ones buffer with 1.0 in F16.
@@ -352,6 +367,9 @@ impl Gemma4Session {
             positions: self.layer_scratch.positions,
             positions_host: &mut self.positions_host,
             v_ones_f16: self.layer_scratch.v_ones_f16,
+            splitk_partials_m: self.layer_scratch.splitk_partials_m,
+            splitk_partials_s: self.layer_scratch.splitk_partials_s,
+            splitk_partials_o: self.layer_scratch.splitk_partials_o,
         }
     }
 

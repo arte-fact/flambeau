@@ -222,6 +222,18 @@ fn build_scratch<'a>(dev: &HipDevice, positions_host: &'a mut [i32]) -> LayerDec
         positions: alloc_zeroed(dev, 4),
         positions_host,
         v_ones_f16: alloc_f16_ones(dev, HEAD_DIM),
+        splitk_partials_m: alloc_zeroed(
+            dev,
+            N_HEADS * flambeau_blocks::MAX_SPLITK_CHUNKS * 4,
+        ),
+        splitk_partials_s: alloc_zeroed(
+            dev,
+            N_HEADS * flambeau_blocks::MAX_SPLITK_CHUNKS * 4,
+        ),
+        splitk_partials_o: alloc_zeroed(
+            dev,
+            N_HEADS * flambeau_blocks::MAX_SPLITK_CHUNKS * HEAD_DIM * 4,
+        ),
     }
 }
 

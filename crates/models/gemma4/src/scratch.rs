@@ -52,6 +52,12 @@ pub struct LayerDecodeScratch<'a> {
     /// when the layer has its own V proj **and** no V-norm is needed
     /// (gemma4 always normalises V, so callers populate it).
     pub v_ones_f16: DevicePtr,
+    /// Split-K (flash-decoding) partials consumed by
+    /// `StandardAttention::forward_decode` at long contexts. Sized for
+    /// `n_heads_max * MAX_SPLITK_CHUNKS * (1, 1, head_dim_max)` F32.
+    pub splitk_partials_m: DevicePtr,
+    pub splitk_partials_s: DevicePtr,
+    pub splitk_partials_o: DevicePtr,
 }
 
 /// Borrowed view of a caller-owned per-layer **prefill** scratch.
