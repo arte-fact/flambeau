@@ -11,6 +11,7 @@ flambeau-core = { path = "../core" }
 flambeau-runtime = { path = "../runtime" }
 flambeau-quant = { path = "../quant" }
 flambeau-qwen3-moe = { path = "../models/qwen3-moe" }
+flambeau-blocks = { path = "../blocks", optional = true }
 flambeau-ops = { path = "../ops" }
 anyhow.workspace = true
 axum.workspace = true
@@ -31,6 +32,8 @@ default = []
 # HIP inference backend. Off by default so `cargo check` works without ROCm.
 hip = [
     "dep:flambeau-backend-hip",
+    "dep:flambeau-blocks",
+    "flambeau-blocks/hip",
     "flambeau-ops/hip",
     "flambeau-qwen3-moe/hip",
 ]

@@ -63,7 +63,7 @@ pub fn forward_prefill_hybrid_logits(
     model: &Qwen3MoEHybridModel,
     scratch: &mut ShardedForwardOneTokenScratchHybrid,
     global_cluster: &HipCluster,
-    stage_ars: &[BarP2pAllReduce],
+    stage_ars: &[&BarP2pAllReduce],
     session: &mut Qwen3MoEHybridSession,
     prompt_ids: &[u32],
     start_position: usize,
@@ -140,7 +140,7 @@ struct Qwen3MoEHybridPrefillDriver<'a> {
     model: &'a Qwen3MoEHybridModel,
     scratch: &'a mut ShardedForwardPrefillScratchHybrid,
     global_cluster: &'a HipCluster,
-    stage_ars: &'a [BarP2pAllReduce],
+    stage_ars: &'a [&'a BarP2pAllReduce],
     session: &'a mut Qwen3MoEHybridSession,
     tp_size: usize,
     world: u32,
@@ -151,7 +151,7 @@ impl<'a> Qwen3MoEHybridPrefillDriver<'a> {
         model: &'a Qwen3MoEHybridModel,
         scratch: &'a mut ShardedForwardPrefillScratchHybrid,
         global_cluster: &'a HipCluster,
-        stage_ars: &'a [BarP2pAllReduce],
+        stage_ars: &'a [&'a BarP2pAllReduce],
         session: &'a mut Qwen3MoEHybridSession,
     ) -> Result<Self> {
         let n_stages = model.stages.len();
@@ -310,7 +310,7 @@ impl<'a> flambeau_blocks::HybridPrefillDriver for Qwen3MoEHybridPrefillDriver<'a
         let s = &self.model.stages[stage];
         let stage_scratch = &mut self.scratch.per_stage[stage];
         let stage_session = &mut self.session.stages[stage];
-        let stage_ar = &self.stage_ars[stage];
+        let stage_ar = self.stage_ars[stage];
         forward_prefill_tp_batched_layers(
             &s.tp_model,
             stage_scratch,
@@ -402,7 +402,7 @@ impl<'a> flambeau_blocks::HybridPrefillDriver for Qwen3MoEHybridPrefillDriver<'a
 pub fn forward_prefill_hybrid_batched_logits(
     model: &Qwen3MoEHybridModel,
     global_cluster: &HipCluster,
-    stage_ars: &[BarP2pAllReduce],
+    stage_ars: &[&BarP2pAllReduce],
     session: &mut Qwen3MoEHybridSession,
     prompt_ids: &[u32],
     start_position: usize,
@@ -449,7 +449,7 @@ struct Qwen3MoEHybridDriver<'a> {
     model: &'a Qwen3MoEHybridModel,
     scratch: &'a mut ShardedForwardOneTokenScratchHybrid,
     global_cluster: &'a HipCluster,
-    stage_ars: &'a [BarP2pAllReduce],
+    stage_ars: &'a [&'a BarP2pAllReduce],
     session: &'a mut Qwen3MoEHybridSession,
     tp_size: usize,
     world: u32,
@@ -460,7 +460,7 @@ impl<'a> Qwen3MoEHybridDriver<'a> {
         model: &'a Qwen3MoEHybridModel,
         scratch: &'a mut ShardedForwardOneTokenScratchHybrid,
         global_cluster: &'a HipCluster,
-        stage_ars: &'a [BarP2pAllReduce],
+        stage_ars: &'a [&'a BarP2pAllReduce],
         session: &'a mut Qwen3MoEHybridSession,
     ) -> Result<Self> {
         let n_stages = model.stages.len();
@@ -639,7 +639,7 @@ impl<'a> flambeau_blocks::HybridDecodeDriver for Qwen3MoEHybridDriver<'a> {
         let stage_stream0 = stage_dev0.default_stream();
         let stage_scratch = &mut self.scratch.per_stage[stage];
         let stage_session = &mut self.session.stages[stage];
-        let stage_ar = &self.stage_ars[stage];
+        let stage_ar = self.stage_ars[stage];
         if cfg.is_recurrent(il) {
             forward_gdn_layer_tp(
                 &s.tp_model,
@@ -774,7 +774,7 @@ pub fn forward_one_token_hybrid(
     model: &Qwen3MoEHybridModel,
     scratch: &mut ShardedForwardOneTokenScratchHybrid,
     global_cluster: &HipCluster,
-    stage_ars: &[BarP2pAllReduce],
+    stage_ars: &[&BarP2pAllReduce],
     session: &mut Qwen3MoEHybridSession,
     token_id: u32,
     position: usize,
@@ -793,7 +793,7 @@ pub fn forward_one_token_hybrid_logits(
     model: &Qwen3MoEHybridModel,
     scratch: &mut ShardedForwardOneTokenScratchHybrid,
     global_cluster: &HipCluster,
-    stage_ars: &[BarP2pAllReduce],
+    stage_ars: &[&BarP2pAllReduce],
     session: &mut Qwen3MoEHybridSession,
     token_id: u32,
     position: usize,
@@ -814,7 +814,7 @@ pub fn forward_one_token_hybrid_keep_logits_on_device(
     model: &Qwen3MoEHybridModel,
     scratch: &mut ShardedForwardOneTokenScratchHybrid,
     global_cluster: &HipCluster,
-    stage_ars: &[BarP2pAllReduce],
+    stage_ars: &[&BarP2pAllReduce],
     session: &mut Qwen3MoEHybridSession,
     token_id: u32,
     position: usize,
@@ -852,7 +852,7 @@ pub fn forward_decode_batched_hybrid(
     model: &Qwen3MoEHybridModel,
     sessions: &mut [&mut Qwen3MoEHybridSession],
     global_cluster: &HipCluster,
-    stage_ars: &[BarP2pAllReduce],
+    stage_ars: &[&BarP2pAllReduce],
     scratch: &mut ShardedForwardPrefillScratchHybrid,
     slots: &[super::batched::BatchSlot],
     logits_out: &mut [&mut Vec<f32>],
@@ -952,7 +952,7 @@ pub fn forward_decode_batched_hybrid(
     for stage_idx in 0..n_stages {
         let stage = &model.stages[stage_idx];
         let stage_scratch = &mut scratch.per_stage[stage_idx];
-        let stage_ar = &stage_ars[stage_idx];
+        let stage_ar = stage_ars[stage_idx];
         let stage_model = &stage.tp_model;
         let sub_cluster = &stage.sub_cluster;
 

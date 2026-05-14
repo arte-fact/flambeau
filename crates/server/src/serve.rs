@@ -7,7 +7,7 @@ use std::sync::Arc;
 use anyhow::{bail, Context, Result};
 use axum::routing::{get, post};
 use axum::Router;
-use flambeau_backend_hip::{device_count, BarP2pAllReduce, HipCluster};
+use flambeau_backend_hip::{device_count, HipCluster};
 use flambeau_quant::{ChatTemplate, GgufFile};
 use flambeau_qwen3_moe::{
     HybridMeshSpec, Qwen35DenseTpLayout, Qwen3MoEConfig, Qwen3MoEHybridModel,
@@ -269,11 +269,11 @@ pub async fn serve(cfg: ServeConfig, registry: Registry) -> Result<()> {
             if m.config.context_length > model_cfg.context_length {
                 m.config.context_length = model_cfg.context_length;
             }
-            let ar = BarP2pAllReduce::new(Arc::clone(&cluster))
-                .context("BarP2pAllReduce::new (requires fully-connected peer-access matrix)")?;
+            let tp = flambeau_blocks::TpCluster::from_arc(Arc::clone(&cluster))
+                .context("TpCluster::from_arc (requires fully-connected peer-access matrix)")?;
             (
                 cluster,
-                std::sync::Arc::new(crate::model::TpHipModel { model: m, ar }) as LoadedModel,
+                std::sync::Arc::new(crate::model::TpHipModel { model: m, tp }) as LoadedModel,
             )
         }
         MeshMode::Hybrid { pp_size, tp_size } => {
@@ -311,33 +311,33 @@ pub async fn serve(cfg: ServeConfig, registry: Registry) -> Result<()> {
             if hybrid.config.context_length > model_cfg.context_length {
                 hybrid.config.context_length = model_cfg.context_length;
             }
-            // 2. Per-stage AllReduce, each on its own sub-cluster.
-            let mut stage_ars: Vec<BarP2pAllReduce> = Vec::with_capacity(hybrid.stages.len());
-            for stage in &hybrid.stages {
-                let ar = BarP2pAllReduce::new(Arc::clone(&stage.sub_cluster))
-                    .with_context(|| {
-                        format!(
-                            "BarP2pAllReduce::new for stage {} (devices need fully-\
-                             connected BAR1 peer access)",
-                            stage.stage_idx
-                        )
-                    })?;
-                stage_ars.push(ar);
-            }
-            // 3. Global cluster LAST — used only for inter-stage
-            // `peer_copy_via_host` hand-off. Constructing it before
-            // the per-stage sub-clusters/ARs disables BAR1 on the
-            // sub-cluster off-diagonal (project_hybrid_cluster_order).
-            let cluster: Arc<HipCluster> = Arc::new(
+            // 2. Build the global cluster, then construct `HybridCluster`
+            // which enforces the sub-cluster-before-global ordering as
+            // a type invariant. `HybridCluster::new` takes the
+            // sub-cluster Arcs first, builds each stage's
+            // `BarP2pAllReduce` on the still-fresh sub-cluster, then
+            // accepts the global cluster — matching the legacy hand-
+            // rolled order and the `project_hybrid_cluster_order`
+            // memory note.
+            let global_cluster: Arc<HipCluster> = Arc::new(
                 HipCluster::new(&cfg.device_ids)
                     .context("HipCluster::new (global, for inter-stage hand-off)")?,
             );
+            let sub_clusters: Vec<Arc<HipCluster>> = hybrid
+                .stages
+                .iter()
+                .map(|s| Arc::clone(&s.sub_cluster))
+                .collect();
+            let hc = flambeau_blocks::HybridCluster::new(
+                sub_clusters,
+                Arc::clone(&global_cluster),
+                tp_size as usize,
+            )
+            .context("HybridCluster::new (per-stage ARs + global cluster)")?;
             (
-                cluster,
-                std::sync::Arc::new(crate::model::HybridHipModel {
-                    model: hybrid,
-                    stage_ars,
-                }) as LoadedModel,
+                global_cluster,
+                std::sync::Arc::new(crate::model::HybridHipModel { model: hybrid, hc })
+                    as LoadedModel,
             )
         }
     };

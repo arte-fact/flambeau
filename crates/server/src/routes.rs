@@ -1004,7 +1004,7 @@ impl ServerState {
             .context("forward_decode_batched_pp under scheduler")?;
         } else if let Some(tp_model) = self.model.as_tp() {
             let model = &tp_model.model;
-            let ar = &tp_model.ar;
+            let ar = tp_model.ar();
             // **P2.9b-i2-C-wire** — TP uses a shared per-server batched
             // scratch (sized for max_inflight_slots, lazy-init).
             let mut sessions: Vec<&mut flambeau_qwen3_moe::Qwen3MoETpSession> =
@@ -1053,7 +1053,7 @@ impl ServerState {
             .context("forward_decode_batched_tp under scheduler")?;
         } else if let Some(hybrid_model) = self.model.as_hybrid() {
             let model = &hybrid_model.model;
-            let stage_ars = &hybrid_model.stage_ars;
+            let stage_ars = &hybrid_model.stage_ars();
             use flambeau_qwen3_moe::forward::forward_decode_batched_hybrid;
             let mut sessions: Vec<&mut flambeau_qwen3_moe::Qwen3MoEHybridSession> =
                 Vec::with_capacity(n);

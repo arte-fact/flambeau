@@ -34,18 +34,46 @@ pub struct PpHipModel {
 
 /// Tensor-parallel sharded model. Every rank holds every layer
 /// (sliced); intra-layer Megatron splits + BAR1 P2P AllReduce.
+///
+/// `tp: TpCluster` bundles the `Arc<HipCluster>` + `BarP2pAllReduce`
+/// pair so callers thread one handle through forward APIs instead of
+/// the previous `(&HipCluster, &BarP2pAllReduce)` pair. Use
+/// `model.tp.cluster()` for device lookups and `model.tp.ar()` for
+/// AllReduce calls. The struct-field name preserves the `model.tp`
+/// access pattern used by routes.rs / model_handle.rs.
 pub struct TpHipModel {
     pub model: Qwen3MoETpModel,
-    pub ar: BarP2pAllReduce,
+    pub tp: flambeau_blocks::TpCluster,
+}
+
+impl TpHipModel {
+    /// Backwards-compatible accessor for sites that read `&model.ar`
+    /// directly. Prefer threading `&model.tp` instead.
+    pub fn ar(&self) -> &BarP2pAllReduce {
+        self.tp.ar()
+    }
 }
 
 /// Hybrid PP-of-TP. `pp_size` contiguous layer stages, each owning a
-/// `tp_size`-rank TP subgroup. The per-stage `BarP2pAllReduce`
-/// instances live alongside the model; inter-stage hand-off uses the
-/// server-owned global `HipCluster`.
+/// `tp_size`-rank TP subgroup. `hc: HybridCluster` carries the per-
+/// stage sub-clusters + per-stage ARs + the global cluster. The
+/// `HybridCluster::new` constructor enforces the sub-cluster-before-
+/// global construction order as a type invariant (the gotcha captured
+/// in `project_hybrid_cluster_order`: building global first disables
+/// BAR1 on the sub-cluster off-diagonal).
 pub struct HybridHipModel {
     pub model: Qwen3MoEHybridModel,
-    pub stage_ars: Vec<BarP2pAllReduce>,
+    pub hc: flambeau_blocks::HybridCluster,
+}
+
+impl HybridHipModel {
+    /// Backwards-compatible accessor returning per-stage AR borrows in
+    /// stage-index order. Callers that took `&[BarP2pAllReduce]`
+    /// receive `&[&BarP2pAllReduce]` — slice-of-refs since
+    /// `BarP2pAllReduce` is not `Clone`.
+    pub fn stage_ars(&self) -> Vec<&BarP2pAllReduce> {
+        self.hc.stages().iter().map(|s| &s.ar).collect()
+    }
 }
 
 /// Loaded weights + per-topology auxiliary state. `Arc<dyn HipModel>`
@@ -455,7 +483,7 @@ pub fn prefill_logits(
         }
     } else if let (Some(t), Some(tp_s)) = (model.as_tp(), inflight.as_tp_mut()) {
         let model = &t.model;
-        let ar = &t.ar;
+        let ar = t.ar();
         let session = &mut tp_s.session;
         let decode = &mut tp_s.decode;
         {
@@ -552,7 +580,7 @@ pub fn prefill_logits(
         }
     } else if let (Some(h), Some(hyb_s)) = (model.as_hybrid(), inflight.as_hybrid_mut()) {
         let hmodel = &h.model;
-        let stage_ars = &h.stage_ars;
+        let stage_ars = &h.stage_ars();
         let session = &mut hyb_s.session;
         let decode = &mut hyb_s.decode;
         {
@@ -637,7 +665,7 @@ pub fn decode_logits(
             &t.model,
             &mut s.decode,
             cluster,
-            &t.ar,
+            t.ar(),
             &mut s.session.caches,
             token,
             position,
@@ -649,7 +677,7 @@ pub fn decode_logits(
             &h.model,
             &mut s.decode,
             cluster,
-            &h.stage_ars,
+            &h.stage_ars(),
             &mut s.session,
             token,
             position,
@@ -685,7 +713,7 @@ pub fn decode_keep_logits_on_device(
             &t.model,
             &mut s.decode,
             cluster,
-            &t.ar,
+            t.ar(),
             &mut s.session.caches,
             token,
             position,
@@ -696,7 +724,7 @@ pub fn decode_keep_logits_on_device(
             &h.model,
             &mut s.decode,
             cluster,
-            &h.stage_ars,
+            &h.stage_ars(),
             &mut s.session,
             token,
             position,

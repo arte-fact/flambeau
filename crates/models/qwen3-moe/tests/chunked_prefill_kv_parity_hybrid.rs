@@ -67,13 +67,17 @@ fn chunked_prefill_kv_parity_hybrid_pp2tp2() -> Result<()> {
     let model = Qwen3MoEHybridModel::load(&file, &dev_ids, spec)?;
     let global_cluster: Arc<HipCluster> = Arc::new(HipCluster::new(&dev_ids)?);
 
-    let mut stage_ars: Vec<BarP2pAllReduce> = Vec::with_capacity(model.stages.len());
+    let mut stage_ars_owned: Vec<BarP2pAllReduce> = Vec::with_capacity(model.stages.len());
     for stage in &model.stages {
         let ar = BarP2pAllReduce::new(Arc::clone(&stage.sub_cluster)).with_context(|| {
             format!("BarP2pAllReduce::new for stage {}", stage.stage_idx)
         })?;
-        stage_ars.push(ar);
+        stage_ars_owned.push(ar);
     }
+    // Borrow into the slice-of-refs shape forward_prefill_hybrid_logits
+    // now takes (BarP2pAllReduce is not Clone, so owners stay in
+    // stage_ars_owned and the slice carries refs).
+    let stage_ars: Vec<&BarP2pAllReduce> = stage_ars_owned.iter().collect();
 
     let l: usize = std::env::var("FLAMBEAU_TEST_L")
         .ok()
