@@ -320,6 +320,26 @@ pub unsafe fn tp_allreduce_sum_into(
     Ok(())
 }
 
+/// Barrier-fused [`tp_allreduce_sum`]: runs
+/// [`crate::cross_rank_event_barrier`] on the per-rank `cores` then
+/// the typed AR-sum in one call. Eliminates the inline barrier-then-AR
+/// pair at gemma4 `tp.rs` Phases 2/5.
+///
+/// # Safety
+/// Inherits the contract of [`tp_allreduce_sum`].
+pub unsafe fn tp_allreduce_sum_synced<const DIM: usize>(
+    ar: &BarP2pAllReduce,
+    cluster: &flambeau_backend_hip::HipCluster,
+    cores: &[&crate::tp_rank_core::TpRankCore],
+    partials: &[crate::tensor_view::Buffer<crate::tensor_view::F16, crate::tensor_view::RowParallel<DIM>>],
+    streams: &[&HipStream],
+) -> Result<Vec<crate::tensor_view::Buffer<crate::tensor_view::F16, crate::tensor_view::Replicated>>> {
+    crate::tp_sync::cross_rank_event_barrier(cluster, cores)?;
+    // SAFETY: caller upholds the BAR1 + streams + ordering contract.
+    // The barrier above adds the cross-rank ordering edge.
+    unsafe { tp_allreduce_sum::<DIM>(ar, partials, streams) }
+}
+
 /// Typed AllReduce-sum: consumes per-rank `Buffer<F16, RowParallel<DIM>>`
 /// partials, performs the BAR1 AllReduce, and returns the same buffers
 /// retagged as `Buffer<F16, Replicated>`. The typestate transition is

@@ -35,12 +35,12 @@ use std::sync::Arc;
 use anyhow::{anyhow, bail, Context, Result};
 use flambeau_backend_hip::{HipCluster, HipDevice};
 use flambeau_blocks::{
-    cross_rank_event_barrier, embed_token_host, forward_one_token_tp, post_norm_residual_f16,
-    tp_allreduce_sum, upload_f16_ones, AttnK, AttnKNorm, AttnNorm, AttnOutput, AttnQ, AttnQNorm,
-    AttnV, Buffer, FfnDown, FfnGate, FfnNorm, FfnUp, LmHead, OutputNorm, PostAttnNorm,
-    PostFfwNorm, RowParallel, TokenEmbd, TpRankCore, Activation, DenseMlpDecodeScratch,
-    DenseMlpTp, RawAllocTracker, F16, StandardAttentionDecodeScratch, TpCluster, TpDecodeDriver,
-    UploadedTensor, WeightHandle, WeightUploader,
+    embed_token_host, forward_one_token_tp, post_norm_residual_f16, tp_allreduce_sum_synced,
+    upload_f16_ones, AttnK, AttnKNorm, AttnNorm, AttnOutput, AttnQ, AttnQNorm, AttnV, Buffer,
+    FfnDown, FfnGate, FfnNorm, FfnUp, LmHead, OutputNorm, PostAttnNorm, PostFfwNorm, RowParallel,
+    TokenEmbd, TpRankCore, Activation, DenseMlpDecodeScratch, DenseMlpTp, RawAllocTracker, F16,
+    StandardAttentionDecodeScratch, TpCluster, TpDecodeDriver, UploadedTensor, WeightHandle,
+    WeightUploader,
 };
 use flambeau_core::{CopyDirection, Device, DevicePtr, Stream};
 use flambeau_ops::hip::{HipOps, OpsRegistry};
@@ -560,21 +560,15 @@ fn forward_layer_decode_tp(
                 &format!("L{il} P1 partial_attn rank{r}"));
         }
     }
-    // Phase 2: AR-sum partial_attn across ranks via the typed
-    // transition. The `sum_tp2` BAR1 reads are ordered behind every
-    // peer's Phase-1 writes via the shared event barrier.
+    // Phase 2: AR-sum partial_attn across ranks via the barrier-fused
+    // typed transition. `tp_allreduce_sum_synced` runs the cross-rank
+    // event barrier (so `sum_tp2`'s BAR1 reads land on post-Phase-1
+    // bytes) then the AR kernel.
     {
-        let cores: Vec<&TpRankCore> =
-            driver.stages.iter().map(|s| &s.core).collect();
-        cross_rank_event_barrier(driver.tp.cluster(), &cores)
-            .context("event barrier before AR sum partial_attn")?;
-    }
-    {
-        // SAFETY: partial_attn is hidden F16 elems per rank; streams outlive
-        // this call; `cross_rank_event_barrier` above serialises each AR
-        // launch behind every peer's Phase-1 writes, so BAR1 reads land on
-        // post-Phase-1 bytes. Phase-3 reads on each rank are serialised on
-        // that rank's stream.
+        let cores: Vec<&TpRankCore> = driver.stages.iter().map(|s| &s.core).collect();
+        // SAFETY: partial_attn is hidden F16 elems per rank; streams
+        // outlive this call; the synced helper adds the cross-rank
+        // ordering edge before the AR launch.
         let _replicated = unsafe {
             let partials: [Buffer<F16, RowParallel<0>>; 2] = [
                 Buffer::from_raw_unchecked(driver.stages[0].partial_attn, hidden),
@@ -584,9 +578,15 @@ fn forward_layer_decode_tp(
                 driver.tp.cluster().device(0).default_stream(),
                 driver.tp.cluster().device(1).default_stream(),
             ];
-            tp_allreduce_sum::<0>(driver.tp.ar(), &partials, &streams)
+            tp_allreduce_sum_synced::<0>(
+                driver.tp.ar(),
+                driver.tp.cluster(),
+                &cores,
+                &partials,
+                &streams,
+            )
         }
-        .context("AR sum partial_attn (typed)")?;
+        .context("AR sum partial_attn (synced typed)")?;
     }
 
     if std::env::var_os("FLAMBEAU_TP_DEBUG_PHASES").is_some() && il < 2 {
@@ -688,15 +688,10 @@ fn forward_layer_decode_tp(
                 &format!("L{il} P4 partial_ffn rank{r}"));
         }
     }
-    // Phase 5: AR-sum partial_ffn via the typed transition (same
-    // pattern as Phase 2 above; same cross-rank sync rationale).
+    // Phase 5: AR-sum partial_ffn via the barrier-fused typed
+    // transition (same as Phase 2 above).
     {
-        let cores: Vec<&TpRankCore> =
-            driver.stages.iter().map(|s| &s.core).collect();
-        cross_rank_event_barrier(driver.tp.cluster(), &cores)
-            .context("event barrier before AR sum partial_ffn")?;
-    }
-    {
+        let cores: Vec<&TpRankCore> = driver.stages.iter().map(|s| &s.core).collect();
         // SAFETY: same as Phase 2.
         let _replicated = unsafe {
             let partials_ffn: [Buffer<F16, RowParallel<0>>; 2] = [
@@ -707,9 +702,15 @@ fn forward_layer_decode_tp(
                 driver.tp.cluster().device(0).default_stream(),
                 driver.tp.cluster().device(1).default_stream(),
             ];
-            tp_allreduce_sum::<0>(driver.tp.ar(), &partials_ffn, &streams)
+            tp_allreduce_sum_synced::<0>(
+                driver.tp.ar(),
+                driver.tp.cluster(),
+                &cores,
+                &partials_ffn,
+                &streams,
+            )
         }
-        .context("AR sum partial_ffn (typed)")?;
+        .context("AR sum partial_ffn (synced typed)")?;
     }
 
     // Phase 6: post_ffw_norm + residual add (with attn_residual) → next-layer hidden.
