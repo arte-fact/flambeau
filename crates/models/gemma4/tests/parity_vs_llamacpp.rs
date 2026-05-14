@@ -228,6 +228,108 @@ fn flambeau_decode_tp(
     Ok((prompt_ids, decoded))
 }
 
+/// Probe: TP forward one decode step, then download rank-0 and rank-1's
+/// `stage.hidden` and compare. After a successful AR-reduce + residual
+/// add, the hidden state must match bit-for-bit across ranks (TP is
+/// replicated post-AR). If they differ, AR-reduce is broken or one
+/// rank's per-layer contribution is wrong.
+#[test]
+fn tp_hidden_cross_rank_match_after_one_token() {
+    use flambeau_core::{CopyDirection, Device, DevicePtr, Stream};
+    let Some(file) = open_or_skip("gemma-4-31B-it-Q4_0.gguf") else {
+        return;
+    };
+    if device_count().map(|n| n < 2).unwrap_or(true) {
+        return;
+    }
+    let file = Arc::new(file);
+    let cluster = ArcGuard::new(HipCluster::new(&[0, 2]).expect("cluster"));
+    let cfg = Gemma4Config::from_gguf(&file).expect("cfg");
+    let hidden = cfg.hidden_size;
+    let mut layout = ModelLayout::from_config(&cfg);
+    let _ = layout.resolve_kv_sharing();
+    eprintln!(
+        "cfg: hidden={} num_heads={} head_dim={} head_dim_swa={} ff_len={} num_kv_heads[0..4]={:?} swa_layers[0..4]={:?}",
+        cfg.hidden_size,
+        cfg.num_heads,
+        cfg.head_dim,
+        cfg.head_dim_swa,
+        cfg.feed_forward_length,
+        &cfg.num_kv_heads[..4.min(cfg.num_kv_heads.len())],
+        &cfg.swa_layers[..4.min(cfg.swa_layers.len())],
+    );
+    for i in 0..3.min(layout.layers.len()) {
+        let s = &layout.layers[i];
+        eprintln!(
+            "  layer {i}: head_dim={} n_heads={} n_kv_heads={} window={} has_kv={} ffn_kind={:?}",
+            s.head_dim, s.n_heads, s.n_kv_heads, s.window, s.has_kv, s.ffn_kind
+        );
+    }
+    let mut driver = Gemma4TpDriver::upload(&file, cfg, layout, cluster, MAX_TOKENS)
+        .expect("TP upload");
+
+    let _ = driver.forward_one_token(2, 0).expect("forward");
+
+    // Download both ranks' hidden state.
+    let mut buffers: [Vec<half::f16>; 2] = [
+        vec![half::f16::from_f32(0.0); hidden],
+        vec![half::f16::from_f32(0.0); hidden],
+    ];
+    for (rank, buf) in buffers.iter_mut().enumerate() {
+        let device = driver.cluster.device(rank);
+        device.bind().expect("bind");
+        let stage = &driver.stages[rank];
+        // SAFETY: stage.hidden owns `hidden * 2` bytes; buf sized identically.
+        unsafe {
+            device
+                .memcpy_async(
+                    device.default_stream(),
+                    CopyDirection::DeviceToHost,
+                    DevicePtr(buf.as_mut_ptr() as usize),
+                    stage.hidden,
+                    hidden * 2,
+                )
+                .expect("memcpy");
+        }
+        device.default_stream().synchronize().expect("sync");
+    }
+
+    let mut max_abs_diff = 0.0f32;
+    let mut zero_count_r0 = 0usize;
+    let mut zero_count_r1 = 0usize;
+    let mut nan_count = 0usize;
+    for i in 0..hidden {
+        let a = buffers[0][i].to_f32();
+        let b = buffers[1][i].to_f32();
+        if a == 0.0 {
+            zero_count_r0 += 1;
+        }
+        if b == 0.0 {
+            zero_count_r1 += 1;
+        }
+        if a.is_nan() || b.is_nan() {
+            nan_count += 1;
+        }
+        let d = (a - b).abs();
+        if d > max_abs_diff {
+            max_abs_diff = d;
+        }
+    }
+    eprintln!("=== TP cross-rank hidden diff after 1 forward ===");
+    eprintln!("  hidden = {hidden}");
+    eprintln!("  rank0 first 8: {:?}", &buffers[0][..8].iter().map(|h| h.to_f32()).collect::<Vec<_>>());
+    eprintln!("  rank1 first 8: {:?}", &buffers[1][..8].iter().map(|h| h.to_f32()).collect::<Vec<_>>());
+    eprintln!("  rank0 zeros: {zero_count_r0}, rank1 zeros: {zero_count_r1}, NaN count: {nan_count}");
+    eprintln!("  max |rank0 - rank1| = {max_abs_diff}");
+
+    driver.dispose().expect("dispose");
+
+    assert!(
+        max_abs_diff < 1e-3,
+        "TP rank-0 hidden != rank-1 hidden post-forward; AR-reduce or residual broken"
+    );
+}
+
 /// Probe: TP forward one decode step and dump the logits stats. Used
 /// to see if logits have signal (and which token dominates).
 #[test]

@@ -605,6 +605,12 @@ fn forward_layer_decode_tp(
         .context("StandardAttention::forward_decode (gemma4 TP)")?;
     }
 
+    if std::env::var_os("FLAMBEAU_TP_DEBUG_PHASES").is_some() && il < 2 {
+        for r in 0..n_ranks {
+            tp_dump_buffer(driver, r, driver.stages[r].partial_attn, hidden,
+                &format!("L{il} P1 partial_attn rank{r}"));
+        }
+    }
     // Phase 2: AR-sum partial_attn across ranks. After this every rank's
     // `partial_attn` holds the full hidden-dim attn-out.
     let partials: [DevicePtr; 2] = [driver.stages[0].partial_attn, driver.stages[1].partial_attn];
@@ -620,6 +626,10 @@ fn forward_layer_decode_tp(
             .map_err(|e| anyhow!("AR sum_tp2 attn: {e}"))?;
     }
 
+    if std::env::var_os("FLAMBEAU_TP_DEBUG_PHASES").is_some() && il < 2 {
+        tp_dump_buffer(driver, 0, driver.stages[0].partial_attn, hidden,
+            &format!("L{il} P2 partial_attn rank0 (post-AR)"));
+    }
     // Phase 3: per-rank post_attention_norm + residual add → attn_residual.
     for r in 0..n_ranks {
         let dev = driver.cluster.device(r);
@@ -648,6 +658,10 @@ fn forward_layer_decode_tp(
         .context("attn residual add (TP)")?;
     }
 
+    if std::env::var_os("FLAMBEAU_TP_DEBUG_PHASES").is_some() && il < 2 {
+        tp_dump_buffer(driver, 0, driver.stages[0].scratch.attn_residual_f16.0, hidden,
+            &format!("L{il} P3 attn_residual rank0"));
+    }
     // Phase 4: per-rank ffn_norm + gate/up + GELU + down (row-parallel) → partial_ffn.
     // Delegates the FFN tail (gate/up/activation/down/cast) to
     // `DenseMlpTp` so it shares the kernel sequence with qwen3-moe's
@@ -709,6 +723,12 @@ fn forward_layer_decode_tp(
         .context("DenseMlpTp::forward_decode (gemma4 TP)")?;
     }
 
+    if std::env::var_os("FLAMBEAU_TP_DEBUG_PHASES").is_some() && il < 2 {
+        for r in 0..n_ranks {
+            tp_dump_buffer(driver, r, driver.stages[r].partial_ffn, hidden,
+                &format!("L{il} P4 partial_ffn rank{r}"));
+        }
+    }
     // Phase 5: AR-sum partial_ffn.
     let partials_ffn: [DevicePtr; 2] = [driver.stages[0].partial_ffn, driver.stages[1].partial_ffn];
     let streams = [
@@ -749,6 +769,17 @@ fn forward_layer_decode_tp(
             hidden,
         )
         .context("ffn residual add (TP)")?;
+        // Per-layer scalar `layer_output_scale` (mirrors
+        // `layer.rs::forward_layer_decode` step 14). Gemma4 31B uses
+        // this to keep the residual stream's magnitude bounded across
+        // 60 layers; without it values explode → Inf → NaN around
+        // layer 5-10 (caught by tp_hidden_cross_rank_match diagnostic).
+        if let Some(scale_v) = weights.layer_output_scale {
+            if scale_v != 1.0 {
+                ops.scale_f16(stage.hidden, stage.hidden, hidden, scale_v)
+                    .context("layer_output_scale (TP)")?;
+            }
+        }
     }
 
     Ok(())
@@ -799,6 +830,28 @@ impl TpDecodeDriver for Gemma4TpDriver {
             (self.cfg.hidden_size as f32).sqrt(),
         )
         .context("TP embed_token sqrt(n_embd) scale")?;
+        if std::env::var_os("FLAMBEAU_TP_DEBUG_EMBED").is_some() {
+            use flambeau_core::CopyDirection;
+            let hidden = self.cfg.hidden_size;
+            let mut host = vec![half::f16::from_f32(0.0); hidden];
+            // SAFETY: stage.hidden owns hidden*2 bytes.
+            unsafe {
+                device.memcpy_async(
+                    stream,
+                    CopyDirection::DeviceToHost,
+                    DevicePtr(host.as_mut_ptr() as usize),
+                    stage.hidden,
+                    hidden * 2,
+                )?;
+            }
+            stream.synchronize()?;
+            let max_abs = host.iter().map(|h| h.to_f32().abs()).fold(0.0f32, f32::max);
+            let nan_count = host.iter().filter(|h| h.to_f32().is_nan()).count();
+            eprintln!(
+                "  [TP_DEBUG_EMBED] rank={rank} token={token_id} | max_abs={max_abs:.4} nans={nan_count} first8={:?}",
+                &host[..8].iter().map(|h| h.to_f32()).collect::<Vec<_>>()
+            );
+        }
         Ok(())
     }
 
@@ -1277,6 +1330,32 @@ fn upload_row_parallel(
         dtype: info.dtype,
         bytes: total_local_bytes,
     })
+}
+
+fn tp_dump_buffer(driver: &Gemma4TpDriver, rank: usize, ptr: DevicePtr, n: usize, label: &str) {
+    use flambeau_core::CopyDirection;
+    let device = driver.cluster.device(rank);
+    let _ = device.bind();
+    let mut host = vec![half::f16::from_f32(0.0); n];
+    // SAFETY: caller guarantees ptr owns n*2 bytes.
+    unsafe {
+        let _ = device.memcpy_async(
+            device.default_stream(),
+            CopyDirection::DeviceToHost,
+            DevicePtr(host.as_mut_ptr() as usize),
+            ptr,
+            n * 2,
+        );
+    }
+    let _ = device.default_stream().synchronize();
+    let max_abs = host.iter().map(|h| h.to_f32().abs()).fold(0.0f32, f32::max);
+    let nans = host.iter().filter(|h| h.to_f32().is_nan()).count();
+    let infs = host.iter().filter(|h| h.to_f32().is_infinite()).count();
+    let zeros = host.iter().filter(|h| h.to_f32() == 0.0).count();
+    eprintln!(
+        "  [TP_PHASE] {label} | max_abs={max_abs:.4} nans={nans} infs={infs} zeros={zeros}/{n} first4={:?}",
+        &host[..4].iter().map(|h| h.to_f32()).collect::<Vec<_>>()
+    );
 }
 
 fn ggml_to_qdtype(d: GgmlDType) -> Result<flambeau_core::op::QDtype> {
