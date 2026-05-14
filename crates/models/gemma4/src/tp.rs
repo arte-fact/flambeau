@@ -548,9 +548,15 @@ fn forward_decode_layer_tp_moe(
     let rms_eps = driver.cfg.rms_norm_eps;
     let ff_len_local = driver.cfg.feed_forward_length / n;
 
+    let probe = std::env::var_os("FLAMBEAU_TP_MOE_DEBUG").is_some() && il == 0;
+
     // ---- Attention half (Phases 1-3) — same as dense composer. ----
     for r in 0..n {
         <Gemma4TpDriver as LayerComposerTp>::forward_attn(driver, r, position, il)?;
+    }
+    if probe {
+        tp_dump_buffer(driver, 0, driver.stages[0].partial_attn, hidden,
+            &format!("L{il} P1 partial_attn rank0"));
     }
     {
         let cores: Vec<&TpRankCore> = driver.stages.iter().map(|s| &s.core).collect();
@@ -575,8 +581,20 @@ fn forward_decode_layer_tp_moe(
         }
         .context("MoE AR sum partial_attn")?;
     }
+    if probe {
+        tp_dump_buffer(driver, 0, driver.stages[0].partial_attn, hidden,
+            &format!("L{il} P2 partial_attn rank0 (post-AR)"));
+        tp_dump_buffer(driver, 1, driver.stages[1].partial_attn, hidden,
+            &format!("L{il} P2 partial_attn rank1 (post-AR)"));
+    }
     for r in 0..n {
         <Gemma4TpDriver as LayerComposerTp>::post_norm_residual_attn(driver, r, il)?;
+    }
+    if probe {
+        tp_dump_buffer(driver, 0, driver.stages[0].scratch.attn_residual_f16.0, hidden,
+            &format!("L{il} P3 attn_residual rank0"));
+        tp_dump_buffer(driver, 1, driver.stages[1].scratch.attn_residual_f16.0, hidden,
+            &format!("L{il} P3 attn_residual rank1"));
     }
 
     // ---- FFN half (Phases 4 / 5a-e / 6) — MoE-specific. ----
@@ -617,6 +635,39 @@ fn forward_decode_layer_tp_moe(
         )
         .with_context(|| format!("MoE per-rank FFN layer {il} rank {r}"))?;
     }
+    if probe {
+        // First-bytes probe on the per-rank ffn_gate weight — confirms
+        // the per-rank slice differs (i.e., upload sharding is wired).
+        let ffg0 = driver.stages[0].layer_weights[il].ffn_gate.ptr;
+        let ffg1 = driver.stages[1].layer_weights[il].ffn_gate.ptr;
+        for (r, ptr) in [(0usize, ffg0), (1, ffg1)] {
+            use flambeau_core::CopyDirection;
+            let dev = driver.tp.cluster().device(r);
+            dev.bind().ok();
+            let mut buf = [0u8; 16];
+            unsafe {
+                let _ = dev.memcpy_async(
+                    dev.default_stream(),
+                    CopyDirection::DeviceToHost,
+                    DevicePtr(buf.as_mut_ptr() as usize),
+                    ptr,
+                    16,
+                );
+            }
+            dev.default_stream().synchronize().ok();
+            eprintln!("  [TP_PROBE] L{il} ffn_gate rank{r} first16: {:?}", buf);
+        }
+        tp_dump_buffer(driver, 0, driver.stages[0].partial_ffn, hidden,
+            &format!("L{il} P4 partial_shared_mlp rank0 (pre-AR)"));
+        tp_dump_buffer(driver, 1, driver.stages[1].partial_ffn, hidden,
+            &format!("L{il} P4 partial_shared_mlp rank1 (pre-AR)"));
+        let p_moe0 = driver.stages[0].tp_moe_scratch.as_ref().unwrap().partial_moe_f16;
+        let p_moe1 = driver.stages[1].tp_moe_scratch.as_ref().unwrap().partial_moe_f16;
+        tp_dump_buffer(driver, 0, p_moe0, hidden,
+            &format!("L{il} P4 partial_moe rank0 (pre-AR)"));
+        tp_dump_buffer(driver, 1, p_moe1, hidden,
+            &format!("L{il} P4 partial_moe rank1 (pre-AR)"));
+    }
 
     // Phase 5a: AR-sum partial_ffn (shared-MLP).
     {
@@ -639,6 +690,12 @@ fn forward_decode_layer_tp_moe(
             )
         }
         .context("MoE AR sum partial_ffn (shared MLP)")?;
+    }
+    if probe {
+        tp_dump_buffer(driver, 0, driver.stages[0].partial_ffn, hidden,
+            &format!("L{il} P5a partial_ffn rank0 (post-AR shared MLP)"));
+        tp_dump_buffer(driver, 1, driver.stages[1].partial_ffn, hidden,
+            &format!("L{il} P5a partial_ffn rank1 (post-AR shared MLP)"));
     }
 
     // Phase 5b: per-rank rmsnorm(partial_ffn, post_ffw_norm_1) → cur_mlp_f16.
@@ -666,6 +723,11 @@ fn forward_decode_layer_tp_moe(
             rms_eps,
         )
         .context("MoE post_ffw_norm_1")?;
+    }
+    if probe {
+        let cur_mlp = driver.stages[0].tp_moe_scratch.as_ref().unwrap().cur_mlp_f16;
+        tp_dump_buffer(driver, 0, cur_mlp, hidden,
+            &format!("L{il} P5b cur_mlp rank0"));
     }
 
     // Phase 5c: AR-sum partial_moe_f16 (routed-MoE).
@@ -702,6 +764,11 @@ fn forward_decode_layer_tp_moe(
         }
         .context("MoE AR sum partial_moe (routed)")?;
     }
+    if probe {
+        let p_moe = driver.stages[0].tp_moe_scratch.as_ref().unwrap().partial_moe_f16;
+        tp_dump_buffer(driver, 0, p_moe, hidden,
+            &format!("L{il} P5c partial_moe rank0 (post-AR routed)"));
+    }
 
     // Phase 5d: per-rank rmsnorm(partial_moe, post_ffw_norm_2) → cur_moe_f16.
     for r in 0..n {
@@ -728,6 +795,11 @@ fn forward_decode_layer_tp_moe(
             rms_eps,
         )
         .context("MoE post_ffw_norm_2")?;
+    }
+    if probe {
+        let cur_moe = driver.stages[0].tp_moe_scratch.as_ref().unwrap().cur_moe_f16;
+        tp_dump_buffer(driver, 0, cur_moe, hidden,
+            &format!("L{il} P5d cur_moe rank0"));
     }
 
     // Phase 5e: per-rank cur_combined = cur_mlp + cur_moe.
@@ -783,6 +855,10 @@ fn forward_decode_layer_tp_moe(
                     .context("MoE layer_output_scale")?;
             }
         }
+    }
+    if probe {
+        tp_dump_buffer(driver, 0, driver.stages[0].hidden, hidden,
+            &format!("L{il} P6 next-layer hidden rank0"));
     }
 
     Ok(())
@@ -1258,7 +1334,11 @@ fn upload_layer_tp(
             if raw.len() < 4 {
                 bail!("layer {il}: layer_output_scale < 4 bytes");
             }
-            Some(f32::from_le_bytes([raw[0], raw[1], raw[2], raw[3]]))
+            let v = f32::from_le_bytes([raw[0], raw[1], raw[2], raw[3]]);
+            if std::env::var_os("FLAMBEAU_TP_MOE_DEBUG").is_some() && rank == 0 {
+                eprintln!("  [scale] layer {il}: layer_output_scale = {v}");
+            }
+            Some(v)
         } else {
             None
         }
