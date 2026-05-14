@@ -28,11 +28,11 @@
 use std::sync::Arc;
 
 use anyhow::{anyhow, bail, Context, Result};
-use flambeau_backend_hip::{BarP2pAllReduce, HipCluster, HipDevice};
+use flambeau_backend_hip::{HipCluster, HipDevice};
 use flambeau_blocks::{
     embed_token_host, forward_one_token_hybrid, upload_f16_ones, Activation,
-    DenseMlpDecodeScratch, DenseMlpTp, HybridDecodeDriver, RawAllocTracker, StandardAttention,
-    StandardAttentionDecodeScratch, WeightHandle,
+    DenseMlpDecodeScratch, DenseMlpTp, HybridCluster, HybridDecodeDriver, RawAllocTracker,
+    StandardAttention, StandardAttentionDecodeScratch, WeightHandle,
 };
 use flambeau_core::{CopyDirection, Device, DevicePtr, Stream};
 use flambeau_ops::hip::{HipOps, OpsRegistry};
@@ -91,31 +91,29 @@ struct HybridScratchPtrs {
     splitk_partials_o: (DevicePtr, usize),
 }
 
-/// One PP stage. Owns its own TP sub-cluster + per-rank state +
-/// `BarP2pAllReduce` over the sub-cluster.
+/// One PP stage. Per-stage TP machinery (sub_cluster + AR) lives on
+/// the driver's [`HybridCluster`]; this struct only carries the
+/// stage's layer assignment + per-rank state + registries.
 pub struct Gemma4HybridStage {
     pub stage_idx: usize,
-    pub sub_cluster: Arc<HipCluster>,
     /// Layers in this stage (global indices, ascending).
     pub layers_global: Vec<usize>,
     pub rank_state: Vec<HybridRankState>,
-    /// AR primitive over this stage's sub-cluster.
-    ar: BarP2pAllReduce,
     /// Per-rank `OpsRegistry` over the sub-cluster.
     regs: Vec<OpsRegistry>,
 }
 
-/// Hybrid driver. Holds the global cluster (for inter-stage peer
-/// copies) and per-stage TP machinery.
+/// Hybrid driver. Owns the [`HybridCluster`] (sub-clusters + global
+/// cluster + per-stage `BarP2pAllReduce`, all built in the correct
+/// construction order) and per-stage layer / rank-state machinery.
 pub struct Gemma4HybridDriver {
-    pub global_cluster: Arc<HipCluster>,
+    pub hc: HybridCluster,
     pub cfg: Gemma4Config,
     pub layout: ModelLayout,
     pub stages: Vec<Gemma4HybridStage>,
     pub layer_to_stage: Vec<usize>,
     pub head_stage_idx: usize,
     pub head_rank_in_head_stage_idx: usize,
-    pub tp_size: usize,
     logits_host: Vec<f32>,
 }
 
@@ -333,9 +331,12 @@ impl Drop for HybridRankState {
 }
 
 impl Gemma4HybridStage {
+    /// Build the per-stage rank state + OpsRegistry vector. The
+    /// sub-cluster + AR live on the driver's [`HybridCluster`]; pass
+    /// the same `sub_cluster` here for the bind/registry walk.
     pub fn new(
         stage_idx: usize,
-        sub_cluster: Arc<HipCluster>,
+        sub_cluster: &Arc<HipCluster>,
         layers_global: Vec<usize>,
         rank_state: Vec<HybridRankState>,
     ) -> Result<Self> {
@@ -346,8 +347,6 @@ impl Gemma4HybridStage {
                 rank_state.len()
             );
         }
-        let ar = BarP2pAllReduce::new(sub_cluster.clone())
-            .map_err(|e| anyhow!("BarP2pAllReduce stage {stage_idx}: {e}"))?;
         let mut regs = Vec::with_capacity(n_ranks);
         for r in 0..n_ranks {
             let dev = sub_cluster.device(r);
@@ -356,18 +355,16 @@ impl Gemma4HybridStage {
         }
         Ok(Self {
             stage_idx,
-            sub_cluster,
             layers_global,
             rank_state,
-            ar,
             regs,
         })
     }
 
-    fn dispose(&mut self) -> Result<()> {
-        let n = self.sub_cluster.ranks();
+    fn dispose(&mut self, sub_cluster: &Arc<HipCluster>) -> Result<()> {
+        let n = sub_cluster.ranks();
         for r in 0..n {
-            let dev = self.sub_cluster.device(r);
+            let dev = sub_cluster.device(r);
             self.rank_state[r].dispose(dev)?;
         }
         Ok(())
@@ -380,12 +377,11 @@ impl Gemma4HybridDriver {
     /// sub-cluster of `tp_size` ranks. The global rank for
     /// `(stage=s, rank=r)` is `s * tp_size + r`.
     pub fn from_pieces(
-        global_cluster: Arc<HipCluster>,
+        hc: HybridCluster,
         cfg: Gemma4Config,
         layout: ModelLayout,
         stages: Vec<Gemma4HybridStage>,
         layer_to_stage: Vec<usize>,
-        tp_size: usize,
         head_stage_idx: usize,
         head_rank_in_head_stage_idx: usize,
     ) -> Result<Self> {
@@ -393,44 +389,50 @@ impl Gemma4HybridDriver {
         if n_stages == 0 {
             bail!("Gemma4HybridDriver: 0 stages");
         }
-        let expected_ranks = n_stages * tp_size;
-        if global_cluster.ranks() != expected_ranks {
+        if n_stages != hc.n_stages() {
             bail!(
-                "Gemma4HybridDriver: global_cluster ranks {} != n_stages*tp_size {}",
-                global_cluster.ranks(),
-                expected_ranks
+                "Gemma4HybridDriver: stages {n_stages} != HybridCluster n_stages {}",
+                hc.n_stages()
             );
         }
         if head_stage_idx >= n_stages {
             bail!("Gemma4HybridDriver: head_stage_idx {head_stage_idx} OOB");
         }
-        if head_rank_in_head_stage_idx >= tp_size {
+        if head_rank_in_head_stage_idx >= hc.tp_size() {
             bail!(
                 "Gemma4HybridDriver: head_rank_in_head_stage_idx {head_rank_in_head_stage_idx} OOB"
             );
         }
         let logits_host = vec![0.0f32; cfg.vocab_size];
         Ok(Self {
-            global_cluster,
+            hc,
             cfg,
             layout,
             stages,
             layer_to_stage,
             head_stage_idx,
             head_rank_in_head_stage_idx,
-            tp_size,
             logits_host,
         })
     }
 
+    pub fn tp_size(&self) -> usize {
+        self.hc.tp_size()
+    }
+
+    pub fn global_cluster(&self) -> &Arc<HipCluster> {
+        self.hc.global_cluster()
+    }
+
     /// Map (stage, rank_in_stage) → global rank in `global_cluster`.
     pub fn global_rank(&self, stage: usize, rank_in_stage: usize) -> usize {
-        stage * self.tp_size + rank_in_stage
+        self.hc.global_rank_of(stage, rank_in_stage)
     }
 
     pub fn dispose(&mut self) -> Result<()> {
         for stage in &mut self.stages {
-            stage.dispose()?;
+            let sub = self.hc.stage(stage.stage_idx).sub_cluster.clone();
+            stage.dispose(&sub)?;
         }
         Ok(())
     }
@@ -462,8 +464,14 @@ fn forward_layer_decode_hybrid(
     position: usize,
 ) -> Result<()> {
     let cfg = driver.cfg.clone();
+    // Split-borrow: `driver.stages` (mut) and `driver.hc` (shared) live
+    // on distinct fields and can be borrowed independently.
+    let hc = &driver.hc;
+    let stage_cluster = hc.stage(stage_idx);
+    let sub_cluster = &stage_cluster.sub_cluster;
+    let ar = &stage_cluster.ar;
     let stage = &mut driver.stages[stage_idx];
-    let n_ranks = stage.sub_cluster.ranks();
+    let n_ranks = sub_cluster.ranks();
     if n_ranks != 2 {
         bail!("forward_layer_decode_hybrid: TP{n_ranks} not supported in S10-A; only tp2");
     }
@@ -489,7 +497,7 @@ fn forward_layer_decode_hybrid(
     // output projection → cast) handed off to
     // `flambeau_blocks::StandardAttention::forward_decode`.
     for r in 0..n_ranks {
-        let dev = stage.sub_cluster.device(r);
+        let dev = sub_cluster.device(r);
         dev.bind()?;
         let stream = dev.default_stream();
         let reg = &stage.regs[r];
@@ -589,20 +597,18 @@ fn forward_layer_decode_hybrid(
     // Phase 2: AR over the stage's sub-cluster.
     let partials: [DevicePtr; 2] = [stage.rank_state[0].partial_attn, stage.rank_state[1].partial_attn];
     let streams = [
-        stage.sub_cluster.device(0).default_stream(),
-        stage.sub_cluster.device(1).default_stream(),
+        sub_cluster.device(0).default_stream(),
+        sub_cluster.device(1).default_stream(),
     ];
     // SAFETY: each partial_attn is hidden F16 elems on its rank's device.
     unsafe {
-        stage
-            .ar
-            .sum_tp2(&partials, hidden as u32, &streams)
+        ar.sum_tp2(&partials, hidden as u32, &streams)
             .map_err(|e| anyhow!("AR sum_tp2 attn stage {stage_idx}: {e}"))?;
     }
 
     // Phase 3: per-rank post_attention_norm + residual.
     for r in 0..n_ranks {
-        let dev = stage.sub_cluster.device(r);
+        let dev = sub_cluster.device(r);
         dev.bind()?;
         let stream = dev.default_stream();
         let reg = &stage.regs[r];
@@ -631,7 +637,7 @@ fn forward_layer_decode_hybrid(
     // inline (block API doesn't own the norm), gate/up/activation/
     // down/cast through `DenseMlpTp`.
     for r in 0..n_ranks {
-        let dev = stage.sub_cluster.device(r);
+        let dev = sub_cluster.device(r);
         dev.bind()?;
         let stream = dev.default_stream();
         let reg = &stage.regs[r];
@@ -688,20 +694,18 @@ fn forward_layer_decode_hybrid(
     // Phase 5: AR FFN.
     let partials_ffn: [DevicePtr; 2] = [stage.rank_state[0].partial_ffn, stage.rank_state[1].partial_ffn];
     let streams = [
-        stage.sub_cluster.device(0).default_stream(),
-        stage.sub_cluster.device(1).default_stream(),
+        sub_cluster.device(0).default_stream(),
+        sub_cluster.device(1).default_stream(),
     ];
     // SAFETY: same as phase 2.
     unsafe {
-        stage
-            .ar
-            .sum_tp2(&partials_ffn, hidden as u32, &streams)
+        ar.sum_tp2(&partials_ffn, hidden as u32, &streams)
             .map_err(|e| anyhow!("AR sum_tp2 ffn stage {stage_idx}: {e}"))?;
     }
 
     // Phase 6: per-rank post_ffw_norm + residual.
     for r in 0..n_ranks {
-        let dev = stage.sub_cluster.device(r);
+        let dev = sub_cluster.device(r);
         dev.bind()?;
         let stream = dev.default_stream();
         let reg = &stage.regs[r];
@@ -733,7 +737,7 @@ impl HybridDecodeDriver for Gemma4HybridDriver {
     }
 
     fn ranks_per_stage(&self, stage: usize) -> usize {
-        self.stages[stage].sub_cluster.ranks()
+        self.hc.stage(stage).sub_cluster.ranks()
     }
 
     fn n_layers_in_stage(&self, stage: usize) -> usize {
@@ -749,14 +753,14 @@ impl HybridDecodeDriver for Gemma4HybridDriver {
     }
 
     fn bind(&self, stage: usize, rank: usize) -> Result<()> {
-        self.stages[stage].sub_cluster.device(rank).bind()?;
+        self.hc.stage(stage).sub_cluster.device(rank).bind()?;
         Ok(())
     }
 
     fn embed_token(&mut self, stage: usize, rank: usize, token_id: u32) -> Result<()> {
         let cfg = self.cfg.clone();
+        let device = self.hc.stage(stage).sub_cluster.device(rank);
         let stage_ref = &mut self.stages[stage];
-        let device = stage_ref.sub_cluster.device(rank);
         let stream = device.default_stream();
         let rs = &mut stage_ref.rank_state[rank];
         let tok = rs
@@ -790,7 +794,7 @@ impl HybridDecodeDriver for Gemma4HybridDriver {
         let src_global_rank = self.global_rank(stage, 0);
         let src_ptr = self.stages[stage].rank_state[0].hidden;
         let dst_stage = stage + 1;
-        let dst_n_ranks = self.stages[dst_stage].sub_cluster.ranks();
+        let dst_n_ranks = self.hc.stage(dst_stage).sub_cluster.ranks();
         for dst_r in 0..dst_n_ranks {
             let dst_global = self.global_rank(dst_stage, dst_r);
             let dst_ptr = self.stages[dst_stage].rank_state[dst_r].hidden;
@@ -798,7 +802,8 @@ impl HybridDecodeDriver for Gemma4HybridDriver {
             // its rank's device; the global cluster's
             // peer_copy_via_host validates source/destination ranks.
             unsafe {
-                self.global_cluster
+                self.hc
+                    .global_cluster()
                     .peer_copy_via_host(dst_ptr, dst_global, src_ptr, src_global_rank, hidden_bytes)
                     .map_err(|e| {
                         anyhow!(
@@ -814,8 +819,8 @@ impl HybridDecodeDriver for Gemma4HybridDriver {
         let stage = self.head_stage_idx;
         let rank = self.head_rank_in_head_stage_idx;
         let cfg = &self.cfg;
+        let device = self.hc.stage(stage).sub_cluster.device(rank);
         let stage_ref = &mut self.stages[stage];
-        let device = stage_ref.sub_cluster.device(rank);
         let stream = device.default_stream();
         let reg = &stage_ref.regs[rank];
         let ops = HipOps::new(reg, stream);

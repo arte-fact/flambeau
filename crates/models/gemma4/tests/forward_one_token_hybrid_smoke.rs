@@ -21,7 +21,7 @@
 use std::sync::Arc;
 
 use flambeau_backend_hip::{device_count, HipCluster, HipDevice};
-use flambeau_blocks::WeightHandle;
+use flambeau_blocks::{HybridCluster, WeightHandle};
 use flambeau_core::op::QDtype;
 use flambeau_core::{CopyDirection, Device, DevicePtr, Stream};
 use flambeau_gemma4::{
@@ -262,18 +262,18 @@ fn build_driver(sub_clusters: Vec<Arc<HipCluster>>, global: Arc<HipCluster>) -> 
             .expect("rank state");
             rank_state.push(rs);
         }
-        let stage = Gemma4HybridStage::new(stage_idx, sub, layers_global, rank_state)
+        let stage = Gemma4HybridStage::new(stage_idx, &sub, layers_global, rank_state)
             .expect("stage");
         stages.push(stage);
     }
 
+    let hc = HybridCluster::new(sub_clusters, global, TP_SIZE).expect("HybridCluster");
     Gemma4HybridDriver::from_pieces(
-        global,
+        hc,
         cfg,
         layout,
         stages,
         layer_to_stage,
-        TP_SIZE,
         head_stage_idx,
         head_rank_in_head_stage_idx,
     )

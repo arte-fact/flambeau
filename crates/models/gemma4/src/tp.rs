@@ -33,12 +33,12 @@
 use std::sync::Arc;
 
 use anyhow::{anyhow, bail, Context, Result};
-use flambeau_backend_hip::{BarP2pAllReduce, HipCluster, HipDevice};
+use flambeau_backend_hip::{HipCluster, HipDevice};
 use flambeau_blocks::{
     embed_token_host, forward_one_token_tp, post_norm_residual_f16, tp_allreduce_sum_into,
     upload_f16_ones, upload_replicated_norm_f32_to_f16, upload_replicated_tensor,
     upload_sharded_tensor, Activation, DenseMlpDecodeScratch, DenseMlpTp, RawAllocTracker,
-    StandardAttentionDecodeScratch, TpDecodeDriver, UploadedTensor, WeightHandle,
+    StandardAttentionDecodeScratch, TpCluster, TpDecodeDriver, UploadedTensor, WeightHandle,
 };
 use flambeau_core::{CopyDirection, Device, DevicePtr, Stream};
 use flambeau_ops::hip::{HipOps, OpsRegistry};
@@ -111,14 +111,13 @@ struct TpScratchPtrs {
 /// parallel attention + FFN and BAR1 P2P AllReduce after the two
 /// row-parallel projections (attn_output + ffn_down).
 pub struct Gemma4TpDriver {
-    pub cluster: Arc<HipCluster>,
+    pub tp: TpCluster,
     pub cfg: Gemma4Config,
     pub layout: ModelLayout,
     pub stages: Vec<Gemma4TpStage>,
     /// Rank that runs the LM head; head_rank == 0 in V1.
     pub head_rank: usize,
     regs: Vec<OpsRegistry>,
-    ar: BarP2pAllReduce,
     logits_host: Vec<f32>,
 }
 
@@ -352,30 +351,28 @@ impl Gemma4TpDriver {
         }
         Gemma4TpStage::validate_shardable(&cfg, n_ranks)?;
 
-        let ar = BarP2pAllReduce::new(cluster.clone())
-            .map_err(|e| anyhow!("BarP2pAllReduce: {e}"))?;
+        let tp = TpCluster::from_arc(cluster)?;
         let mut regs = Vec::with_capacity(n_ranks);
         for r in 0..n_ranks {
-            let dev = cluster.device(r);
+            let dev = tp.cluster().device(r);
             dev.bind()?;
             regs.push(OpsRegistry::new(dev).map_err(|e| anyhow!("registry rank {r}: {e}"))?);
         }
         let logits_host = vec![0.0f32; cfg.vocab_size];
         Ok(Self {
-            cluster,
+            tp,
             cfg,
             layout,
             stages,
             head_rank,
             regs,
-            ar,
             logits_host,
         })
     }
 
     pub fn dispose(&mut self) -> Result<()> {
         for (r, stage) in self.stages.iter_mut().enumerate() {
-            let dev = self.cluster.device(r);
+            let dev = self.tp.cluster().device(r);
             stage.dispose(dev)?;
         }
         Ok(())
@@ -494,7 +491,7 @@ fn forward_layer_decode_tp(
     // unit-weight buffer, and softmax_scale=1.0 + window_size for SWA.
     // Splitk dispatches automatically at n_tokens_kv > 256.
     for r in 0..n_ranks {
-        let dev = driver.cluster.device(r);
+        let dev = driver.tp.cluster().device(r);
         dev.bind()?;
         let stream = dev.default_stream();
         let reg = &driver.regs[r];
@@ -559,13 +556,13 @@ fn forward_layer_decode_tp(
         let partials: [DevicePtr; 2] =
             [driver.stages[0].partial_attn, driver.stages[1].partial_attn];
         let streams: [&_; 2] = [
-            driver.cluster.device(0).default_stream(),
-            driver.cluster.device(1).default_stream(),
+            driver.tp.cluster().device(0).default_stream(),
+            driver.tp.cluster().device(1).default_stream(),
         ];
         // SAFETY: partial_attn is hidden F16 elems per rank; streams outlive
         // this call; subsequent Phase-3 reads on each rank are serialised on
         // that rank's stream.
-        unsafe { tp_allreduce_sum_into(&driver.ar, &partials, hidden, &streams) }
+        unsafe { tp_allreduce_sum_into(&driver.tp.ar(), &partials, hidden, &streams) }
             .context("AR sum partial_attn")?;
     }
 
@@ -575,7 +572,7 @@ fn forward_layer_decode_tp(
     }
     // Phase 3: per-rank post_attention_norm + residual add → attn_residual.
     for r in 0..n_ranks {
-        let dev = driver.cluster.device(r);
+        let dev = driver.tp.cluster().device(r);
         dev.bind()?;
         let stream = dev.default_stream();
         let reg = &driver.regs[r];
@@ -607,7 +604,7 @@ fn forward_layer_decode_tp(
     // TP path. The ffn_norm + Q8_1 quantise stays inline here because
     // the block API only owns gate/up/down.
     for r in 0..n_ranks {
-        let dev = driver.cluster.device(r);
+        let dev = driver.tp.cluster().device(r);
         dev.bind()?;
         let stream = dev.default_stream();
         let reg = &driver.regs[r];
@@ -673,17 +670,17 @@ fn forward_layer_decode_tp(
         let partials_ffn: [DevicePtr; 2] =
             [driver.stages[0].partial_ffn, driver.stages[1].partial_ffn];
         let streams: [&_; 2] = [
-            driver.cluster.device(0).default_stream(),
-            driver.cluster.device(1).default_stream(),
+            driver.tp.cluster().device(0).default_stream(),
+            driver.tp.cluster().device(1).default_stream(),
         ];
         // SAFETY: same as Phase 2.
-        unsafe { tp_allreduce_sum_into(&driver.ar, &partials_ffn, hidden, &streams) }
+        unsafe { tp_allreduce_sum_into(&driver.tp.ar(), &partials_ffn, hidden, &streams) }
             .context("AR sum partial_ffn")?;
     }
 
     // Phase 6: post_ffw_norm + residual add (with attn_residual) → next-layer hidden.
     for r in 0..n_ranks {
-        let dev = driver.cluster.device(r);
+        let dev = driver.tp.cluster().device(r);
         dev.bind()?;
         let stream = dev.default_stream();
         let reg = &driver.regs[r];
@@ -725,7 +722,7 @@ fn forward_layer_decode_tp(
 
 impl TpDecodeDriver for Gemma4TpDriver {
     fn cluster(&self) -> &HipCluster {
-        &self.cluster
+        self.tp.cluster()
     }
 
     fn n_layers(&self) -> usize {
@@ -737,7 +734,7 @@ impl TpDecodeDriver for Gemma4TpDriver {
     }
 
     fn embed_token(&mut self, rank: usize, token_id: u32) -> Result<()> {
-        let device = self.cluster.device(rank);
+        let device = self.tp.cluster().device(rank);
         let stream = device.default_stream();
         let stage = &mut self.stages[rank];
         embed_token_host(
@@ -795,7 +792,7 @@ impl TpDecodeDriver for Gemma4TpDriver {
 
     fn output_head(&mut self) -> Result<()> {
         let rank = self.head_rank;
-        let device = self.cluster.device(rank);
+        let device = self.tp.cluster().device(rank);
         let stream = device.default_stream();
         let reg = &self.regs[rank];
         let ops = HipOps::new(reg, stream);
@@ -1138,7 +1135,7 @@ fn uploaded_to_device_tensor(u: UploadedTensor) -> DeviceTensor {
 
 fn tp_dump_buffer(driver: &Gemma4TpDriver, rank: usize, ptr: DevicePtr, n: usize, label: &str) {
     use flambeau_core::CopyDirection;
-    let device = driver.cluster.device(rank);
+    let device = driver.tp.cluster().device(rank);
     let _ = device.bind();
     let mut host = vec![half::f16::from_f32(0.0); n];
     // SAFETY: caller guarantees ptr owns n*2 bytes.

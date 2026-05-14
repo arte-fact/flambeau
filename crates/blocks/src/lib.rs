@@ -18,6 +18,7 @@
 pub mod attention;
 pub mod delta_net;
 pub mod dense_mlp;
+pub mod driver_base;
 pub mod driver_utils;
 pub mod layer;
 pub mod moe_experts;
@@ -36,6 +37,7 @@ pub use delta_net::{
     DeltaNetLayer, DeltaNetLayerDecodeScratch, DeltaNetLayerPrefillScratch, DeltaNetScratchDims,
     OwnedDeltaNetLayerDecodeScratch, OwnedDeltaNetLayerPrefillScratch,
 };
+pub use driver_base::{HybridCluster, HybridStageCluster, TpCluster};
 pub use driver_utils::{
     alloc_zeroed, embed_token_host, ggml_to_qdtype, row_bytes_for_dtype, upload_f16_ones,
     RawAllocTracker,
