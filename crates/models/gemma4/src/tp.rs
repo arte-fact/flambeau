@@ -35,10 +35,10 @@ use std::sync::Arc;
 use anyhow::{anyhow, bail, Context, Result};
 use flambeau_backend_hip::{BarP2pAllReduce, HipCluster, HipDevice};
 use flambeau_blocks::{
-    embed_token_host, forward_one_token_tp, upload_f16_ones, upload_replicated_norm_f32_to_f16,
-    upload_replicated_tensor, upload_sharded_tensor, Activation, DenseMlpDecodeScratch, DenseMlpTp,
-    RawAllocTracker, StandardAttentionDecodeScratch, TpDecodeDriver,
-    UploadedTensor, WeightHandle,
+    embed_token_host, forward_one_token_tp, post_norm_residual_f16, tp_allreduce_sum_into,
+    upload_f16_ones, upload_replicated_norm_f32_to_f16, upload_replicated_tensor,
+    upload_sharded_tensor, Activation, DenseMlpDecodeScratch, DenseMlpTp, RawAllocTracker,
+    StandardAttentionDecodeScratch, TpDecodeDriver, UploadedTensor, WeightHandle,
 };
 use flambeau_core::{CopyDirection, Device, DevicePtr, Stream};
 use flambeau_ops::hip::{HipOps, OpsRegistry};
@@ -555,17 +555,18 @@ fn forward_layer_decode_tp(
     }
     // Phase 2: AR-sum partial_attn across ranks. After this every rank's
     // `partial_attn` holds the full hidden-dim attn-out.
-    let partials: [DevicePtr; 2] = [driver.stages[0].partial_attn, driver.stages[1].partial_attn];
-    let streams = [
-        driver.cluster.device(0).default_stream(),
-        driver.cluster.device(1).default_stream(),
-    ];
-    // SAFETY: partial_attn is hidden F16 elems per rank.
-    unsafe {
-        driver
-            .ar
-            .sum_tp2(&partials, hidden as u32, &streams)
-            .map_err(|e| anyhow!("AR sum_tp2 attn: {e}"))?;
+    {
+        let partials: [DevicePtr; 2] =
+            [driver.stages[0].partial_attn, driver.stages[1].partial_attn];
+        let streams: [&_; 2] = [
+            driver.cluster.device(0).default_stream(),
+            driver.cluster.device(1).default_stream(),
+        ];
+        // SAFETY: partial_attn is hidden F16 elems per rank; streams outlive
+        // this call; subsequent Phase-3 reads on each rank are serialised on
+        // that rank's stream.
+        unsafe { tp_allreduce_sum_into(&driver.ar, &partials, hidden, &streams) }
+            .context("AR sum partial_attn")?;
     }
 
     if std::env::var_os("FLAMBEAU_TP_DEBUG_PHASES").is_some() && il < 2 {
@@ -582,22 +583,18 @@ fn forward_layer_decode_tp(
         let stage = &mut driver.stages[r];
         let weights = &stage.layer_weights[il];
         let scratch = &mut stage.scratch;
-        ops.rmsnorm_f16(
+        post_norm_residual_f16(
+            &ops,
             stage.partial_attn,
             weights.post_attention_norm,
             scratch.attn_out_local.0,
+            stage.hidden,
+            scratch.attn_residual_f16.0,
             1,
             hidden,
             rms_eps,
         )
-        .context("post_attention_norm (TP)")?;
-        ops.add_f16(
-            stage.hidden,
-            scratch.attn_out_local.0,
-            scratch.attn_residual_f16.0,
-            hidden,
-        )
-        .context("attn residual add (TP)")?;
+        .context("post_attention_norm + residual (TP)")?;
     }
 
     if std::env::var_os("FLAMBEAU_TP_DEBUG_PHASES").is_some() && il < 2 {
@@ -672,17 +669,16 @@ fn forward_layer_decode_tp(
         }
     }
     // Phase 5: AR-sum partial_ffn.
-    let partials_ffn: [DevicePtr; 2] = [driver.stages[0].partial_ffn, driver.stages[1].partial_ffn];
-    let streams = [
-        driver.cluster.device(0).default_stream(),
-        driver.cluster.device(1).default_stream(),
-    ];
-    // SAFETY: same as Phase 2.
-    unsafe {
-        driver
-            .ar
-            .sum_tp2(&partials_ffn, hidden as u32, &streams)
-            .map_err(|e| anyhow!("AR sum_tp2 ffn: {e}"))?;
+    {
+        let partials_ffn: [DevicePtr; 2] =
+            [driver.stages[0].partial_ffn, driver.stages[1].partial_ffn];
+        let streams: [&_; 2] = [
+            driver.cluster.device(0).default_stream(),
+            driver.cluster.device(1).default_stream(),
+        ];
+        // SAFETY: same as Phase 2.
+        unsafe { tp_allreduce_sum_into(&driver.ar, &partials_ffn, hidden, &streams) }
+            .context("AR sum partial_ffn")?;
     }
 
     // Phase 6: post_ffw_norm + residual add (with attn_residual) → next-layer hidden.
@@ -695,22 +691,18 @@ fn forward_layer_decode_tp(
         let stage = &mut driver.stages[r];
         let weights = &stage.layer_weights[il];
         let scratch = &mut stage.scratch;
-        ops.rmsnorm_f16(
+        post_norm_residual_f16(
+            &ops,
             stage.partial_ffn,
             weights.post_ffw_norm,
             scratch.attn_out_local.0,
+            scratch.attn_residual_f16.0,
+            stage.hidden,
             1,
             hidden,
             rms_eps,
         )
-        .context("post_ffw_norm (TP)")?;
-        ops.add_f16(
-            scratch.attn_residual_f16.0,
-            scratch.attn_out_local.0,
-            stage.hidden,
-            hidden,
-        )
-        .context("ffn residual add (TP)")?;
+        .context("post_ffw_norm + residual (TP)")?;
         // Per-layer scalar `layer_output_scale` (mirrors
         // `layer.rs::forward_layer_decode` step 14). Gemma4 31B uses
         // this to keep the residual stream's magnitude bounded across

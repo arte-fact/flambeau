@@ -43,7 +43,7 @@
 use anyhow::{bail, Context, Result};
 use flambeau_backend_hip::{HipDevice, HipStream};
 use flambeau_blocks::{
-    StandardAttention, StandardAttentionDecodeScratch, WeightHandle,
+    post_norm_residual_f16, StandardAttention, StandardAttentionDecodeScratch, WeightHandle,
 };
 use flambeau_core::{CopyDirection, Device, DevicePtr, Stream};
 use flambeau_ops::Ops;
@@ -369,22 +369,18 @@ pub fn forward_layer_decode<L: CacheLayout, O: Ops>(
     }
 
     // 11. post_attention_norm RMSNorm on attn_out, then add residual.
-    ops.rmsnorm_f16(
+    post_norm_residual_f16(
+        ops,
         scratch.attn_out_f16,
         weights.post_attention_norm,
         scratch.post_attn_norm_f16,
+        x_in,
+        scratch.attn_residual_f16,
         1,
         hidden,
         rms_norm_eps,
     )
-    .context("post_attention_norm")?;
-    ops.add_f16(
-        x_in,
-        scratch.post_attn_norm_f16,
-        scratch.attn_residual_f16,
-        hidden,
-    )
-    .context("residual_add post-attn")?;
+    .context("post_attention_norm + residual_add post-attn")?;
     if std::env::var_os("FLAMBEAU_LAYER_PROBE").is_some() && spec.index < 2 {
         use flambeau_core::CopyDirection;
         let mut host = vec![half::f16::from_f32(0.0); hidden];
@@ -487,22 +483,18 @@ pub fn forward_layer_decode<L: CacheLayout, O: Ops>(
             .context("cast ffn_down → f16")?;
 
         // 16. post_ffw_norm + residual add.
-        ops.rmsnorm_f16(
+        post_norm_residual_f16(
+            ops,
             scratch.post_ffw_norm_f16,
             weights.post_ffw_norm,
             scratch.post_ffw_norm_f16,
+            scratch.attn_residual_f16,
+            x_out,
             1,
             hidden,
             rms_norm_eps,
         )
-        .context("post_ffw_norm")?;
-        ops.add_f16(
-            scratch.attn_residual_f16,
-            scratch.post_ffw_norm_f16,
-            x_out,
-            hidden,
-        )
-        .context("residual_add post-ffn")?;
+        .context("post_ffw_norm + residual_add post-ffn")?;
     }
 
     // 17. Optional per-layer side-channel embedding (E2B / E4B).
@@ -639,19 +631,16 @@ pub fn forward_layer_prefill<L: CacheLayout, O: Ops>(
         .context("StandardAttention::forward_prefill (gemma4 layer)")?;
 
     // 10. post_attention_norm + residual.
-    ops.rmsnorm_f16(
+    post_norm_residual_f16(
+        ops,
         scratch.attn_out_f16,
         weights.post_attention_norm,
         scratch.post_attn_norm_f16,
+        x_in,
+        scratch.attn_residual_f16,
         n_tokens,
         hidden,
         rms_norm_eps,
-    )?;
-    ops.add_f16(
-        x_in,
-        scratch.post_attn_norm_f16,
-        scratch.attn_residual_f16,
-        n_tokens * hidden,
     )?;
 
     // 11. ffn_norm + dense FFN with GELU.
@@ -706,19 +695,16 @@ pub fn forward_layer_prefill<L: CacheLayout, O: Ops>(
     ops.cast_f32_to_f16(scratch.mmvq_f32, scratch.post_ffw_norm_f16, n_tokens * hidden)?;
 
     // 12. post_ffw_norm + final residual.
-    ops.rmsnorm_f16(
+    post_norm_residual_f16(
+        ops,
         scratch.post_ffw_norm_f16,
         weights.post_ffw_norm,
         scratch.post_ffw_norm_f16,
+        scratch.attn_residual_f16,
+        x_out,
         n_tokens,
         hidden,
         rms_norm_eps,
-    )?;
-    ops.add_f16(
-        scratch.attn_residual_f16,
-        scratch.post_ffw_norm_f16,
-        x_out,
-        n_tokens * hidden,
     )?;
 
     // 13. Optional layer_output_scale (broadcast scalar over all rows).

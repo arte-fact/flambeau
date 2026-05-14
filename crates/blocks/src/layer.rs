@@ -9,7 +9,7 @@
 //! `(block, state, scratch)` triples bail at runtime.
 
 use anyhow::{bail, Result};
-use flambeau_backend_hip::{HipDevice, HipStream};
+use flambeau_backend_hip::{BarP2pAllReduce, HipDevice, HipStream};
 use flambeau_core::DevicePtr;
 use flambeau_ops::Ops;
 use flambeau_runtime::{F16Contig, KvCache, Q8Contig};
@@ -244,5 +244,74 @@ impl<'a> AttnState<'a> {
     pub fn recurrent(state: DevicePtr, conv_history: DevicePtr) -> Self {
         Self::Recurrent { state, conv_history }
     }
+}
+
+/// `out = residual_in + rmsnorm_f16(x, norm_w)` over `n_tokens * hidden`
+/// F16 elements. `norm_out_tmp` is the intermediate the RMSNorm writes
+/// to; pass the same pointer as `x` for an in-place norm.
+///
+/// Covers the gemma4 "post_attention_norm + residual add" pattern
+/// (called twice per layer: post-attn and post-FFW) used by the PP,
+/// single-device, and TP composers.
+#[allow(clippy::too_many_arguments)]
+pub fn post_norm_residual_f16<O: Ops>(
+    ops: &O,
+    x: DevicePtr,
+    norm_w: DevicePtr,
+    norm_out_tmp: DevicePtr,
+    residual_in: DevicePtr,
+    out: DevicePtr,
+    n_tokens: usize,
+    hidden: usize,
+    rms_eps: f32,
+) -> Result<()> {
+    ops.rmsnorm_f16(x, norm_w, norm_out_tmp, n_tokens, hidden, rms_eps)?;
+    ops.add_f16(residual_in, norm_out_tmp, out, n_tokens * hidden)?;
+    Ok(())
+}
+
+/// AllReduce-sum the per-rank `partials[]` (in place — each rank ends up
+/// holding the full-hidden sum) over the matching `streams[]`. Wraps
+/// `BarP2pAllReduce::sum_tp{2,4}` so model crates stop replicating the
+/// `[DevicePtr; N]` / `[&HipStream; N]` plumbing and the rank-count
+/// match arm.
+///
+/// # Safety
+/// Inherits the contract of [`BarP2pAllReduce::sum_tp2`] /
+/// [`BarP2pAllReduce::sum_tp4`]:
+/// - every `partials[r]` must point at a buffer of at least `n_elems` F16
+///   on rank `r`;
+/// - the caller must order subsequent reads of `partials[r]` after the
+///   `streams[r]` work completes;
+/// - the streams must outlive the launch.
+pub unsafe fn tp_allreduce_sum_into(
+    ar: &BarP2pAllReduce,
+    partials: &[DevicePtr],
+    n_elems: usize,
+    streams: &[&HipStream],
+) -> Result<()> {
+    if partials.len() != streams.len() {
+        bail!(
+            "tp_allreduce_sum_into: partials.len()={} != streams.len()={}",
+            partials.len(),
+            streams.len(),
+        );
+    }
+    match partials.len() {
+        2 => {
+            let p: [DevicePtr; 2] = [partials[0], partials[1]];
+            let s: [&HipStream; 2] = [streams[0], streams[1]];
+            unsafe { ar.sum_tp2(&p, n_elems as u32, &s) }
+                .map_err(|e| anyhow::anyhow!("AR sum_tp2: {e}"))?;
+        }
+        4 => {
+            let p: [DevicePtr; 4] = [partials[0], partials[1], partials[2], partials[3]];
+            let s: [&HipStream; 4] = [streams[0], streams[1], streams[2], streams[3]];
+            unsafe { ar.sum_tp4(&p, n_elems as u32, &s) }
+                .map_err(|e| anyhow::anyhow!("AR sum_tp4: {e}"))?;
+        }
+        n => bail!("tp_allreduce_sum_into: unsupported tp_size {n}"),
+    }
+    Ok(())
 }
 

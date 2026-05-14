@@ -45,8 +45,8 @@ pub use dense_mlp::{
     OwnedDenseMlpDecodeScratch, OwnedDenseMlpPrefillScratch,
 };
 pub use layer::{
-    AttnBlock, AttnDecodeScratch, AttnPrefillScratch, AttnState, FfnBlock, FfnDecodeScratch,
-    FfnPrefillScratch, LayerKind,
+    post_norm_residual_f16, tp_allreduce_sum_into, AttnBlock, AttnDecodeScratch,
+    AttnPrefillScratch, AttnState, FfnBlock, FfnDecodeScratch, FfnPrefillScratch, LayerKind,
 };
 pub use moe_experts::{
     Activation, MoeExperts, MoeExpertsDecodeScratch, MoeExpertsPrefillScratch,
