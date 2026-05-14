@@ -43,7 +43,7 @@
 use anyhow::{bail, Context, Result};
 use flambeau_backend_hip::{HipDevice, HipStream};
 use flambeau_blocks::WeightHandle;
-use flambeau_core::{CopyDirection, Device, DevicePtr};
+use flambeau_core::{CopyDirection, Device, DevicePtr, Stream};
 use flambeau_ops::Ops;
 use flambeau_runtime::{CacheLayout, F16Contig, KvCache, Q8Contig};
 
@@ -393,6 +393,28 @@ pub fn forward_layer_decode<L: CacheLayout, O: Ops>(
         hidden,
     )
     .context("residual_add post-attn")?;
+    if std::env::var_os("FLAMBEAU_LAYER_PROBE").is_some() && spec.index < 2 {
+        use flambeau_core::CopyDirection;
+        let mut host = vec![half::f16::from_f32(0.0); hidden];
+        // SAFETY: attn_residual_f16 owns hidden*2 bytes.
+        unsafe {
+            let _ = device.memcpy_async(
+                stream,
+                CopyDirection::DeviceToHost,
+                flambeau_core::DevicePtr(host.as_mut_ptr() as usize),
+                scratch.attn_residual_f16,
+                hidden * 2,
+            );
+        }
+        let _ = stream.synchronize();
+        let max_abs = host.iter().map(|h| h.to_f32().abs()).fold(0.0f32, f32::max);
+        let nans = host.iter().filter(|h| h.to_f32().is_nan()).count();
+        eprintln!(
+            "  [LAYER_PROBE] L{} attn_residual | max_abs={max_abs:.4} nans={nans} first4={:?}",
+            spec.index,
+            &host[..4].iter().map(|h| h.to_f32()).collect::<Vec<_>>()
+        );
+    }
 
     // 12-16. FFN section. Dense and MoE branches both produce `x_out
     // = post_ffw_norm(FFN(attn_residual)) + attn_residual`. The dense
