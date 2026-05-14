@@ -42,7 +42,7 @@
 )]
 
 use anyhow::{bail, Context, Result};
-use flambeau_core::{CopyDirection, Device, DevicePtr, Stream};
+use flambeau_core::{CopyDirection, Device, DevicePtr};
 use flambeau_ops::hip::{
     cast::cast_f32_to_f16,
     conv::causal_conv1d_f32,
@@ -69,17 +69,6 @@ use super::gdn::{
 use crate::config::Qwen3MoEConfig;
 use crate::session::GdnLayerState;
 use crate::weights::DeviceTensor;
-
-#[cfg(feature = "dev_trace")]
-fn dev_flag(name: &str) -> bool {
-    std::env::var(name).is_ok()
-}
-#[cfg(not(feature = "dev_trace"))]
-#[inline(always)]
-fn dev_flag(_name: &str) -> bool {
-    false
-}
-
 
 /// Per-rank decode for one Gated-Delta-Net layer.
 /// All weight tensors are *already sliced* per the /
@@ -162,41 +151,6 @@ pub fn forward_gdn_decode_tp(
     // Both reduce to local_num_v_heads / local_num_k_heads.
     let n_rep = local_num_v_heads / local_num_k_heads;
 
-    let probe = dev_flag("FLAMBEAU_TP_PROBE");
-    macro_rules! probe_f32 {
-        ($label:literal, $ptr:expr, $n:expr) => {
-            if probe {
-                debug_probe_f32(device, stream, $label, $ptr, $n)?;
-            }
-        };
-    }
-    macro_rules! probe_f16 {
-        ($label:literal, $ptr:expr, $n:expr) => {
-            if probe {
-                debug_probe_f16(device, stream, $label, $ptr, $n)?;
-            }
-        };
-    }
-    probe_f16!("gdn x_in", x_in, hidden);
-    if probe {
-        eprintln!(
-            "    META attn_norm.dtype={:?} dims={:?} bytes={}",
-            attn_norm.dtype, attn_norm.dims, attn_norm.bytes
-        );
-        eprintln!(
-            "    META attn_qkv.dtype={:?} dims={:?} bytes={}",
-            attn_qkv.dtype, attn_qkv.dims, attn_qkv.bytes
-        );
-        if attn_norm.dtype == flambeau_quant::GgmlDType::F32 {
-            debug_probe_f32(device, stream, "gdn attn_norm.weight", attn_norm.ptr, attn_norm.dims[0] as usize)?;
-        } else if attn_norm.dtype == flambeau_quant::GgmlDType::F16 {
-            debug_probe_f16(device, stream, "gdn attn_norm.weight", attn_norm.ptr, attn_norm.dims[0] as usize)?;
-        }
-    }
-
-    if probe {
-        debug_probe_q8_1(device, stream, "gdn x_q8_1 PRE-rmsnorm", scratch.x_q8_1, hidden / 32)?;
-    }
     // 1. Fused rmsnorm(x_in) + Q8_1 quantise.
     rmsnorm_quant_q8_1(
         ops,
@@ -209,15 +163,6 @@ pub fn forward_gdn_decode_tp(
         cfg.rms_norm_eps,
     )
     .context("gdn (TP) attn_norm + quant")?;
-    if probe {
-        // x_q8_1 has Q8_1 block layout (4 bytes scale + 4 bytes ds + 32 i8 weights = 40 B/block).
-        // hidden=4096 -> 128 blocks. Just dump byte stats.
-        debug_probe_q8_1(device, stream, "gdn x_q8_1 POST-rmsnorm", scratch.x_q8_1, hidden / 32)?;
-        let n_qkv_bytes = (hidden / attn_qkv.dtype.block_size() as usize)
-            * attn_qkv.dtype.type_size() as usize
-            * 4;
-        debug_probe_quant_bytes(device, stream, "gdn attn_qkv first 4 rows", attn_qkv.ptr, n_qkv_bytes)?;
-    }
 
     // 2..3. attn_qkv (FusedQkvParallel sliced) + attn_gate (ColParallel sliced)
     // projections. Output dims are local_conv_channels and local_d_inner.
@@ -304,8 +249,6 @@ pub fn forward_gdn_decode_tp(
             "attn_gate (TP)",
         )?;
     }
-    probe_f32!("gdn qkv_mixed_f32", scratch.qkv_mixed_f32, local_conv_channels);
-    probe_f32!("gdn z_f32", scratch.z_f32, local_d_inner);
 
     // 4..5. ssm_alpha + ssm_beta (both ColParallel, [local_num_v_heads, hidden]).
     let fuse_alpha_beta = ssm_alpha.dtype == flambeau_quant::GgmlDType::Q8_0
@@ -542,149 +485,9 @@ pub fn forward_gdn_decode_tp(
         local_d_inner,
         "ssm_out (TP)",
     )?;
-    probe_f32!("gdn ssm_out_f32 (pre-cast)", scratch.ssm_out_f32, hidden);
     cast_f32_to_f16(ops, stream, scratch.ssm_out_f32, partial_attn_out, hidden)
         .context("cast ssm_out → partial_attn_out (TP)")?;
 
-    Ok(())
-}
-
-fn debug_probe_q8_1(
-    device: &HipDevice,
-    stream: &HipStream,
-    label: &str,
-    ptr: DevicePtr,
-    n_blocks: usize,
-) -> Result<()> {
-    // Q8_1 block: half scale + half ds + i8[32] = 36 B
-    let block_bytes = 36;
-    let n = n_blocks * block_bytes;
-    let mut host = vec![0u8; n];
-    unsafe {
-        device.memcpy_async(
-            stream,
-            CopyDirection::DeviceToHost,
-            DevicePtr(host.as_mut_ptr() as usize),
-            ptr,
-            n,
-        )?;
-    }
-    stream.synchronize()?;
-    // Read scales of first 4 blocks
-    let scales: Vec<f32> = (0..n_blocks.min(4))
-        .map(|b| {
-            let off = b * block_bytes;
-            let bits = u16::from_le_bytes([host[off], host[off + 1]]);
-            half::f16::from_bits(bits).to_f32()
-        })
-        .collect();
-    let nan = scales.iter().filter(|v| v.is_nan()).count();
-    eprintln!("    Q8_1 {label:30}  blocks={n_blocks}  first4_scales={scales:?}  nan={nan}");
-    Ok(())
-}
-
-fn debug_probe_quant_bytes(
-    device: &HipDevice,
-    stream: &HipStream,
-    label: &str,
-    ptr: DevicePtr,
-    n_bytes: usize,
-) -> Result<()> {
-    let mut host = vec![0u8; n_bytes];
-    unsafe {
-        device.memcpy_async(
-            stream,
-            CopyDirection::DeviceToHost,
-            DevicePtr(host.as_mut_ptr() as usize),
-            ptr,
-            n_bytes,
-        )?;
-    }
-    stream.synchronize()?;
-    let nonzero = host.iter().filter(|&&b| b != 0).count();
-    let first16: Vec<u8> = host.iter().take(16).copied().collect();
-    eprintln!(
-        "    BYTES {label:30}  bytes={n_bytes}  nonzero={nonzero}  first16={first16:?}"
-    );
-    Ok(())
-}
-
-fn debug_probe_f32(
-    device: &HipDevice,
-    stream: &HipStream,
-    label: &str,
-    ptr: DevicePtr,
-    n: usize,
-) -> Result<()> {
-    let mut host = vec![0.0f32; n];
-    unsafe {
-        device.memcpy_async(
-            stream,
-            CopyDirection::DeviceToHost,
-            DevicePtr(host.as_mut_ptr() as usize),
-            ptr,
-            n * 4,
-        )?;
-    }
-    stream.synchronize()?;
-    let nan = host.iter().filter(|v| v.is_nan()).count();
-    let inf = host.iter().filter(|v| v.is_infinite()).count();
-    let zero = host.iter().filter(|&&v| v == 0.0).count();
-    let finite: Vec<f32> = host.iter().copied().filter(|v| v.is_finite()).collect();
-    let (min, max, mean) = if finite.is_empty() {
-        (f32::NAN, f32::NAN, f32::NAN)
-    } else {
-        let mn = finite.iter().cloned().fold(f32::INFINITY, f32::min);
-        let mx = finite.iter().cloned().fold(f32::NEG_INFINITY, f32::max);
-        let m = finite.iter().sum::<f32>() / finite.len() as f32;
-        (mn, mx, m)
-    };
-    eprintln!(
-        "    F32 {label:30}  n={n:>5}  nan={nan:>5}  inf={inf:>3}  zero={zero:>5}  min={min:.4}  max={max:.4}  mean={mean:.4}"
-    );
-    Ok(())
-}
-
-fn debug_probe_f16(
-    device: &HipDevice,
-    stream: &HipStream,
-    label: &str,
-    ptr: DevicePtr,
-    n: usize,
-) -> Result<()> {
-    let mut host = vec![0u16; n];
-    unsafe {
-        device.memcpy_async(
-            stream,
-            CopyDirection::DeviceToHost,
-            DevicePtr(host.as_mut_ptr() as usize),
-            ptr,
-            n * 2,
-        )?;
-    }
-    stream.synchronize()?;
-    let mut nan = 0;
-    let mut zero = 0;
-    let mut min = f32::INFINITY;
-    let mut max = f32::NEG_INFINITY;
-    let mut sum = 0.0f64;
-    let mut finite = 0;
-    for &b in &host {
-        let v = half::f16::from_bits(b).to_f32();
-        if v.is_nan() {
-            nan += 1;
-        } else {
-            if v == 0.0 { zero += 1; }
-            min = min.min(v);
-            max = max.max(v);
-            sum += v as f64;
-            finite += 1;
-        }
-    }
-    let mean = if finite > 0 { sum / finite as f64 } else { f64::NAN };
-    eprintln!(
-        "    F16 {label:30}  n={n:>5}  nan={nan:>5}  zero={zero:>5}  min={min:.4}  max={max:.4}  mean={mean:.4}"
-    );
     Ok(())
 }
 
