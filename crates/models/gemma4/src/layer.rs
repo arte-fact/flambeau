@@ -570,41 +570,15 @@ pub fn forward_layer_prefill<L: CacheLayout, O: Ops>(
     let window: i32 = spec.window as i32;
     let softmax_scale: f32 = 1.0;
 
-    // 1. RMSNorm(x_in, attn_norm) + dual Q8_1 quantise (std + MMQ).
-    ops.rmsnorm_f16(
-        x_in,
-        weights.attn_norm,
-        scratch.x_norm_f16,
-        n_tokens,
-        hidden,
-        rms_norm_eps,
-    )
-    .context("prefill attn_norm")?;
-    ops.quantize_f16_q8_1(scratch.x_norm_f16, scratch.x_q8_1, n_tokens * hidden)
-        .context("prefill x_norm → Q8_1")?;
-    ops.quantize_f16_q8_1_mmq(scratch.x_norm_f16, scratch.x_q8_1_mmq, hidden, n_tokens)
-        .context("prefill x_norm → Q8_1 (MMQ)")?;
-
-    // 2. Q projection.
-    ops.qmatmul(
-        weights.attn_q.ptr,
-        scratch.x_q8_1,
-        scratch.x_q8_1_mmq,
-        scratch.mmvq_f32,
-        n_tokens,
-        hidden,
-        q_width,
-        weights.attn_q.dtype,
-    )
-    .context("prefill qmatmul Q")?;
-    ops.cast_f32_to_f16(scratch.mmvq_f32, scratch.q_f16, n_tokens * q_width)?;
-
-    // 3+4. K, V projections.
+    // Steps 1-9 collapse into `StandardAttention::forward_prefill`.
+    // Mirrors the decode-side migration: the block runs rmsnorm + Q/K/V
+    // proj + per-head Q/K/V norms + RoPE + KV append + attention +
+    // output_proj. The block always appends to `kv_cache`, so the
+    // (rare) shared-KV-tail prefill case bails up front.
     if !spec.has_kv {
         bail!(
             "forward_layer_prefill: shared-KV tail (layer {}) — prefill of tail layers \
-             requires the source layer to be at the same call's KV cache; \
-             not supported in S8-B-A",
+             requires the source layer's KV at the same call site; not supported",
             spec.index
         );
     }
@@ -615,148 +589,83 @@ pub fn forward_layer_prefill<L: CacheLayout, O: Ops>(
     let attn_k_norm_w = weights
         .attn_k_norm
         .ok_or_else(|| anyhow::anyhow!("layer {}: attn_k_norm missing", spec.index))?;
-
-    ops.qmatmul(
-        attn_k.ptr,
-        scratch.x_q8_1,
-        scratch.x_q8_1_mmq,
-        scratch.mmvq_f32,
-        n_tokens,
-        hidden,
-        kv_width,
-        attn_k.dtype,
-    )
-    .context("prefill qmatmul K")?;
-    ops.cast_f32_to_f16(scratch.mmvq_f32, scratch.k_f16, n_tokens * kv_width)?;
-
-    if let Some(attn_v) = weights.attn_v.as_ref() {
-        ops.qmatmul(
-            attn_v.ptr,
-            scratch.x_q8_1,
-            scratch.x_q8_1_mmq,
-            scratch.mmvq_f32,
-            n_tokens,
-            hidden,
-            kv_width,
-            attn_v.dtype,
-        )
-        .context("prefill qmatmul V")?;
-        ops.cast_f32_to_f16(scratch.mmvq_f32, scratch.v_f16, n_tokens * kv_width)?;
-    } else {
-        // V = K (alt-attention).
-        // SAFETY: K and V buffers hold n_tokens * kv_width F16 each.
-        unsafe {
-            device.memcpy_async(
-                stream,
-                CopyDirection::DeviceToDevice,
-                scratch.v_f16,
-                scratch.k_f16,
-                n_tokens * kv_width * 2,
-            )?;
-        }
-    }
-
-    // 5. Per-head Q / K / V RMSNorms (V unlearned via unit weight).
-    ops.rmsnorm_f16(
-        scratch.q_f16,
+    let attn_v = weights.attn_v.as_ref().map(|v| WeightHandle {
+        ptr: v.ptr,
+        dtype: v.dtype,
+        dims: [kv_width, hidden],
+    });
+    let attn_q_handle = WeightHandle {
+        ptr: weights.attn_q.ptr,
+        dtype: weights.attn_q.dtype,
+        dims: [q_width, hidden],
+    };
+    let attn_k_handle = WeightHandle {
+        ptr: attn_k.ptr,
+        dtype: attn_k.dtype,
+        dims: [kv_width, hidden],
+    };
+    let attn_output_handle = WeightHandle {
+        ptr: weights.attn_output.ptr,
+        dtype: weights.attn_output.dtype,
+        dims: [hidden, q_width],
+    };
+    let block = StandardAttention::new(
+        attn_q_handle,
+        attn_k_handle,
+        attn_v,
+        attn_output_handle,
+        weights.attn_norm,
         weights.attn_q_norm,
-        scratch.q_f16,
-        n_tokens * n_heads,
-        head_dim,
-        rms_norm_eps,
-    )?;
-    ops.rmsnorm_f16(
-        scratch.k_f16,
         attn_k_norm_w,
-        scratch.k_f16,
-        n_tokens * n_kv_heads,
-        head_dim,
-        rms_norm_eps,
-    )?;
-    ops.rmsnorm_f16(
-        scratch.v_f16,
-        scratch.v_ones_f16,
-        scratch.v_f16,
-        n_tokens * n_kv_heads,
-        head_dim,
-        rms_norm_eps,
-    )?;
-
-    // 6. Position upload + RoPE on Q + K (V NOT rotated).
-    for i in 0..n_tokens {
-        scratch.positions_host[i] = (start_position + i) as i32;
-    }
-    // SAFETY: scratch.positions has n_tokens * 4 valid bytes; positions_host
-    // outlives the bounded synchronize.
-    unsafe {
-        device.memcpy_async(
-            stream,
-            CopyDirection::HostToDevice,
-            scratch.positions,
-            DevicePtr(scratch.positions_host.as_ptr() as usize),
-            n_tokens * 4,
-        )?;
-    }
-    ops.rope_neox_partial_f16(
-        scratch.q_f16,
-        scratch.positions,
-        spec.rope_freq_base,
-        n_tokens,
-        n_heads,
-        head_dim,
-        spec.rope_dim,
-    )?;
-    ops.rope_neox_partial_f16(
-        scratch.k_f16,
-        scratch.positions,
-        spec.rope_freq_base,
-        n_tokens,
-        n_kv_heads,
-        head_dim,
-        spec.rope_dim,
-    )?;
-
-    // 7. KV append.
-    // SAFETY: K, V buffers hold n_tokens * kv_width F16 each.
-    unsafe {
-        kv_cache
-            .append(device, stream, scratch.k_f16, scratch.v_f16, n_tokens)
-            .map_err(|e| anyhow::anyhow!("kv_cache.append: {e}"))?;
-    }
-    let n_k_tokens = kv_cache.current_tokens();
-
-    // 8. Attention (SWA-aware via window).
-    ops.attention_prefill_f16(
-        scratch.q_f16,
-        kv_cache.k_buffer(),
-        kv_cache.v_buffer(),
-        scratch.attn_out_f16,
-        n_tokens,
-        n_heads,
-        n_kv_heads,
-        head_dim,
-        n_k_tokens,
-        start_position,
-        softmax_scale,
-        window,
-    )
-    .context("attention_prefill_f16")?;
-
-    // 9. Output projection.
-    ops.quantize_f16_q8_1(scratch.attn_out_f16, scratch.x_q8_1, n_tokens * q_width)?;
-    ops.quantize_f16_q8_1_mmq(scratch.attn_out_f16, scratch.x_q8_1_mmq, q_width, n_tokens)?;
-    ops.qmatmul(
-        weights.attn_output.ptr,
-        scratch.x_q8_1,
-        scratch.x_q8_1_mmq,
-        scratch.mmvq_f32,
-        n_tokens,
-        q_width,
         hidden,
-        weights.attn_output.dtype,
+        n_heads,
+        n_kv_heads,
+        head_dim,
+        rms_norm_eps,
+        spec.rope_freq_base,
+        spec.rope_dim,
+        /* gated = */ false,
     )
-    .context("prefill qmatmul attn_output")?;
-    ops.cast_f32_to_f16(scratch.mmvq_f32, scratch.attn_out_f16, n_tokens * hidden)?;
+    .context("StandardAttention::new (gemma4 prefill)")?
+    .with_softmax_scale(softmax_scale)
+    .with_v_norm_w(scratch.v_ones_f16);
+    let block = if window > 0 {
+        block.with_window_size(window as u32)
+    } else {
+        block
+    };
+    let mut std_scratch = flambeau_blocks::StandardAttentionPrefillScratch {
+        max_tokens: scratch.max_tokens,
+        x_norm_f16: scratch.x_norm_f16,
+        x_q8_1: scratch.x_q8_1,
+        x_q8_1_mmq: scratch.x_q8_1_mmq,
+        mmvq_f32: scratch.mmvq_f32,
+        q_fused_f16: DevicePtr(0),
+        q_f16: scratch.q_f16,
+        gate_f16: DevicePtr(0),
+        k_f16: scratch.k_f16,
+        v_f16: scratch.v_f16,
+        attn_out_f16: scratch.attn_out_f16,
+        gated_out_f16: DevicePtr(0),
+        positions: scratch.positions,
+        gated_q8_1: scratch.gated_q8_1,
+        gated_q8_1_mmq: scratch.gated_q8_1_mmq,
+        positions_host: scratch.positions_host,
+    };
+    block
+        .forward_prefill(
+            ops,
+            device,
+            stream,
+            x_in,
+            scratch.attn_out_f16,
+            kv_cache,
+            &mut std_scratch,
+            n_tokens,
+            start_position,
+            /* slots = */ None,
+        )
+        .context("StandardAttention::forward_prefill (gemma4 layer)")?;
 
     // 10. post_attention_norm + residual.
     ops.rmsnorm_f16(

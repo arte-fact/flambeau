@@ -129,6 +129,8 @@ struct PrefillScratchPtrs {
     post_ffw_norm_f16: (DevicePtr, usize),
     positions: (DevicePtr, usize),
     v_ones_f16: (DevicePtr, usize),
+    gated_q8_1: (DevicePtr, usize),
+    gated_q8_1_mmq: (DevicePtr, usize),
     positions_host: Vec<i32>,
 }
 
@@ -360,6 +362,8 @@ impl Gemma4PpStage {
             post_ffw_norm_f16: raw_alloc.alloc_f16(device, max_tokens * hidden)?,
             positions: raw_alloc.alloc_i32(device, max_tokens)?,
             v_ones_f16: (v_ones_ptr, head_dim_max * 2),
+            gated_q8_1: raw_alloc.alloc_q8_1(device, max_tokens * n_heads_max)?,
+            gated_q8_1_mmq: raw_alloc.alloc_q8_1_mmq(device, max_tokens * n_heads_max)?,
             positions_host: vec![0i32; max_tokens],
         };
 
@@ -444,6 +448,8 @@ impl Gemma4PpStage {
             positions: self.prefill.positions.0,
             positions_host: &mut self.prefill.positions_host,
             v_ones_f16: self.prefill.v_ones_f16.0,
+            gated_q8_1: self.prefill.gated_q8_1.0,
+            gated_q8_1_mmq: self.prefill.gated_q8_1_mmq.0,
         }
     }
 

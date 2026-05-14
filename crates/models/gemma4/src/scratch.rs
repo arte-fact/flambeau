@@ -106,4 +106,13 @@ pub struct LayerPrefillScratch<'a> {
     /// Unit-weight `[head_dim_max]` F16 buffer used for V's unlearned
     /// RMSNorm.
     pub v_ones_f16: DevicePtr,
+    /// Q8_1 staging for the post-attn output_proj input. The
+    /// `StandardAttention::forward_prefill` block writes its
+    /// `quantize(attn_out → Q8_1)` output here (instead of reusing
+    /// `x_q8_1`, which the FFN side reads).
+    /// Sized: `max_tokens * q_width_max / 32` Q8_1 blocks.
+    pub gated_q8_1: DevicePtr,
+    /// MMQ sibling of `gated_q8_1`. Sized: `max_tokens * q_width_max / 128`
+    /// `BlockQ8_1Mmq` superblocks.
+    pub gated_q8_1_mmq: DevicePtr,
 }

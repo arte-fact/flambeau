@@ -1179,26 +1179,37 @@ impl StandardAttention {
         ops.cast_f32_to_f16(scratch.mmvq_f32, scratch.k_f16, n_tokens * kv_width)
             .context("prefill cast attn_k → f16")?;
 
-        // 5. V projection. Alt-V (gemma4 V=K) is not supported on the
-        // block's prefill path yet — gemma4 prefill uses its own
-        // `layer.rs::forward_layer_prefill` inline composition.
-        let attn_v_pref = self.attn_v.as_ref().ok_or_else(|| anyhow::anyhow!(
-            "StandardAttention::forward_prefill: attn_v is None (alt-attention prefill \
-             via this block not implemented; use the model's inline prefill)"
-        ))?;
-        ops.qmatmul(
-            attn_v_pref.ptr,
-            scratch.x_q8_1,
-            scratch.x_q8_1_mmq,
-            scratch.mmvq_f32,
-            n_tokens,
-            hidden,
-            kv_width,
-            attn_v_pref.dtype,
-        )
-        .context("prefill qmatmul attn_v")?;
-        ops.cast_f32_to_f16(scratch.mmvq_f32, scratch.v_f16, n_tokens * kv_width)
-            .context("prefill cast attn_v → f16")?;
+        // 5. V projection. Standard path runs `qmatmul attn_v`; gemma4
+        // alt-attention (`attn_v == None`) copies the pre-norm K row
+        // into V via a single DtoD memcpy. The copy must precede the
+        // per-head norms so V's RMSNorm (when present, unlearned for
+        // gemma4) runs on the raw K projection, not the K-normed one.
+        if let Some(attn_v_pref) = self.attn_v.as_ref() {
+            ops.qmatmul(
+                attn_v_pref.ptr,
+                scratch.x_q8_1,
+                scratch.x_q8_1_mmq,
+                scratch.mmvq_f32,
+                n_tokens,
+                hidden,
+                kv_width,
+                attn_v_pref.dtype,
+            )
+            .context("prefill qmatmul attn_v")?;
+            ops.cast_f32_to_f16(scratch.mmvq_f32, scratch.v_f16, n_tokens * kv_width)
+                .context("prefill cast attn_v → f16")?;
+        } else {
+            // SAFETY: k_f16 / v_f16 each hold n_tokens * kv_width F16 values.
+            unsafe {
+                device.memcpy_async(
+                    stream,
+                    CopyDirection::DeviceToDevice,
+                    scratch.v_f16,
+                    scratch.k_f16,
+                    n_tokens * kv_width * 2,
+                )?;
+            }
+        }
 
         // 6. Per-head Q / K / (optional V) rmsnorm.
         ops.rmsnorm_f16(
