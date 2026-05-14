@@ -23,10 +23,12 @@
 use std::path::Path;
 use std::sync::Arc;
 
+use std::sync::Arc as ArcGuard;
+
 use flambeau_backend_hip::{device_count, HipCluster, HipDevice};
 use flambeau_gemma4::{
     forward_one_token, partition_layers, Gemma4Config, Gemma4DeviceWeights, Gemma4PpDriver,
-    Gemma4Session, ModelLayout,
+    Gemma4Session, Gemma4TpDriver, ModelLayout,
 };
 use flambeau_quant::{load_from_gguf, GgufFile};
 
@@ -183,6 +185,72 @@ fn flambeau_decode_pp_pertoken(
 
     driver.dispose()?;
     Ok((prompt_ids, decoded))
+}
+
+/// TP variant: shards the 31B-Q4_0 weights across 2 ranks via
+/// `Gemma4TpDriver::upload`. Greedy decodes the same prompt and
+/// asserts the output contains "Paris".
+fn flambeau_decode_tp(
+    file: Arc<GgufFile>,
+    devices: &[i32],
+) -> anyhow::Result<(Vec<u32>, Vec<u32>)> {
+    let cluster = ArcGuard::new(HipCluster::new(devices)?);
+    let cfg = Gemma4Config::from_gguf(&file)?;
+    let mut layout = ModelLayout::from_config(&cfg);
+    let _ = layout.resolve_kv_sharing();
+
+    let tokenizer = load_from_gguf(&file)?;
+    let mut prompt_ids = tokenizer.encode(PROMPT)?;
+    if tokenizer.force_add_bos {
+        if let Some(bos) = tokenizer.bos_id {
+            prompt_ids.insert(0, bos);
+        }
+    }
+
+    let mut driver = Gemma4TpDriver::upload(&file, cfg, layout, cluster, MAX_TOKENS)?;
+
+    // TP path: decode-only (no batched-prefill kernel yet — feed each
+    // prompt token via forward_one_token).
+    let mut tok = prompt_ids[0];
+    for (i, &t) in prompt_ids.iter().enumerate() {
+        tok = driver.forward_one_token(t, i)?;
+    }
+    let mut decoded = Vec::with_capacity(N_DECODE);
+    decoded.push(tok);
+    let mut pos = prompt_ids.len();
+    while decoded.len() < N_DECODE {
+        tok = driver.forward_one_token(tok, pos)?;
+        decoded.push(tok);
+        pos += 1;
+    }
+
+    driver.dispose()?;
+    Ok((prompt_ids, decoded))
+}
+
+#[test]
+fn parity_31b_q4_0_tp2() {
+    let Some(file) = open_or_skip("gemma-4-31B-it-Q4_0.gguf") else {
+        return;
+    };
+    if device_count().map(|n| n < 2).unwrap_or(true) {
+        eprintln!("skipping — need 2 HIP devices");
+        return;
+    }
+    let file = Arc::new(file);
+    let (prompt_ids, fb_ids) =
+        flambeau_decode_tp(file.clone(), &[0, 2]).expect("flambeau decode TP2");
+    let tokenizer = load_from_gguf(&file).expect("tokenizer");
+    let fb_text = tokenizer.decode(&fb_ids).unwrap_or_default();
+    eprintln!("\n=== COHERENCE | 31B-Q4_0 TP2 (hip:0,2) ===");
+    eprintln!("  prompt   ({} ids): {prompt_ids:?}", prompt_ids.len());
+    eprintln!("  flambeau ({} ids): {fb_ids:?}", fb_ids.len());
+    eprintln!("  flambeau text: {fb_text:?}");
+    assert!(
+        fb_text.to_lowercase().contains("paris"),
+        "31B TP2 decode of 'The capital of France is' did NOT contain 'Paris'. \
+         Got: {fb_text:?}"
+    );
 }
 
 #[test]

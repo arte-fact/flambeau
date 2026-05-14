@@ -391,6 +391,54 @@ impl Gemma4TpDriver {
         Ok(())
     }
 
+    /// Upload `file` across `cluster.ranks()` TP ranks. Column-parallel
+    /// weights (Q / K / V / gate / up) are sliced contiguously by output
+    /// dim per rank; row-parallel weights (attn_output / ffn_down) are
+    /// gathered host-side then uploaded once per rank. Replicated
+    /// globals (token_embd, output_norm, LM head) are uploaded
+    /// independently on every rank. Norms cast F32 → F16 at upload.
+    /// Per-layer-embd and shared-KV-tail and MoE FFN are not yet
+    /// supported in the TP upload path (mirrors the synthetic
+    /// `from_pieces` constraints).
+    pub fn upload(
+        file: &flambeau_quant::GgufFile,
+        cfg: Gemma4Config,
+        layout: ModelLayout,
+        cluster: Arc<HipCluster>,
+        max_tokens: usize,
+    ) -> Result<Self> {
+        let n_ranks = cluster.ranks();
+        if n_ranks == 0 {
+            bail!("Gemma4TpDriver::upload: cluster has 0 ranks");
+        }
+        Gemma4TpStage::validate_shardable(&cfg, n_ranks)?;
+        if cfg.moe.is_some() {
+            bail!("Gemma4TpDriver::upload: MoE TP path is followup work");
+        }
+        if cfg.per_layer_embed.is_some() {
+            bail!("Gemma4TpDriver::upload: per-layer-embd TP path is followup work");
+        }
+        for spec in &layout.layers {
+            if !spec.has_kv {
+                bail!(
+                    "Gemma4TpDriver::upload: shared-KV tail layer {} unsupported (S9-B)",
+                    spec.index
+                );
+            }
+        }
+
+        let mut stages: Vec<Gemma4TpStage> = Vec::with_capacity(n_ranks);
+        for rank in 0..n_ranks {
+            let device = cluster.device(rank);
+            device.bind()?;
+            let stage =
+                upload_one_tp_stage(file, &cfg, &layout, rank, n_ranks, device, max_tokens)
+                    .with_context(|| format!("rank {rank} TP upload"))?;
+            stages.push(stage);
+        }
+        Self::from_pieces(cluster, cfg, layout, stages, 0)
+    }
+
     pub fn forward_one_token(&mut self, token_id: u32, position: usize) -> Result<u32> {
         forward_one_token_tp(self, token_id, position)?;
         // Argmax host-side.
@@ -737,7 +785,21 @@ impl TpDecodeDriver for Gemma4TpDriver {
             self.cfg.hidden_size,
             token_id,
             stage.hidden,
+        )?;
+        // Gemma4 input scale: `inpL = scale(inpL, sqrt(n_embd))`
+        // (`gemma4-iswa.cpp:20`). Same step as single-device and PP;
+        // without it every TP decode produces a degenerate fixed
+        // token (caught originally on PP by the parity test).
+        let reg = &self.regs[rank];
+        let ops = HipOps::new(reg, stream);
+        ops.scale_f16(
+            stage.hidden,
+            stage.hidden,
+            self.cfg.hidden_size,
+            (self.cfg.hidden_size as f32).sqrt(),
         )
+        .context("TP embed_token sqrt(n_embd) scale")?;
+        Ok(())
     }
 
     fn forward_layer_decode(&mut self, il: usize, position: usize) -> Result<()> {
@@ -785,4 +847,454 @@ impl TpDecodeDriver for Gemma4TpDriver {
         stream.synchronize()?;
         Ok(())
     }
+}
+
+// ---------------------------------------------------------------------------
+// Real-GGUF TP upload helpers
+// ---------------------------------------------------------------------------
+
+/// Upload + assemble one rank's stage from a GGUF file. Slices
+/// column- and row-parallel weights per rank; replicates globals.
+#[allow(clippy::too_many_arguments)]
+fn upload_one_tp_stage(
+    file: &flambeau_quant::GgufFile,
+    cfg: &Gemma4Config,
+    layout: &ModelLayout,
+    rank: usize,
+    n_ranks: usize,
+    device: &HipDevice,
+    max_tokens: usize,
+) -> Result<Gemma4TpStage> {
+    let stream = device.default_stream();
+    let g = crate::names::GlobalNames::default_names();
+
+    // Replicated globals.
+    let tok_info = file
+        .tensors
+        .get(&g.token_embd)
+        .ok_or_else(|| anyhow!("token_embd missing"))?;
+    let token_embd_dims = [
+        tok_info.dims[0] as usize,
+        tok_info.dims[1] as usize,
+    ];
+    let token_embd = raw_upload_dt(file, tok_info, device, stream)?;
+
+    let output_norm_info = file
+        .tensors
+        .get(&g.output_norm)
+        .ok_or_else(|| anyhow!("output_norm missing"))?;
+    let output_norm = norm_upload_f32_to_f16_dt(file, output_norm_info, cfg.hidden_size, device, stream)?;
+
+    let lm_head = if cfg.tied_lm_head {
+        None
+    } else if let Some(info) = file.tensors.get(&g.output) {
+        Some(raw_upload_dt(file, info, device, stream)?)
+    } else {
+        None
+    };
+
+    // Per-layer sharded weights.
+    let mut layer_weights = Vec::with_capacity(cfg.num_layers);
+    for spec in &layout.layers {
+        let lw = upload_layer_tp(file, spec, cfg, rank, n_ranks, device, stream)
+            .with_context(|| format!("layer {}", spec.index))?;
+        layer_weights.push(lw);
+    }
+
+    Gemma4TpStage::from_pieces(
+        device,
+        rank,
+        cfg,
+        layout,
+        n_ranks,
+        layer_weights,
+        token_embd,
+        token_embd_dims,
+        output_norm,
+        lm_head,
+        rank == 0,
+        max_tokens,
+    )
+}
+
+/// Upload sharded layer weights for one (rank, layer). Q/K/V/gate/up
+/// are column-parallel (output-dim slice = contiguous); attn_output and
+/// ffn_down are row-parallel (input-dim slice = host gather).
+#[allow(clippy::too_many_arguments)]
+fn upload_layer_tp(
+    file: &flambeau_quant::GgufFile,
+    spec: &crate::layout::LayerSpec,
+    cfg: &Gemma4Config,
+    rank: usize,
+    n_ranks: usize,
+    device: &HipDevice,
+    stream: &flambeau_backend_hip::HipStream,
+) -> Result<Gemma4LayerWeights> {
+    let an = crate::names::AttnNames::for_layer(spec.index);
+    let dn = crate::names::DenseFfnNames::for_layer(spec.index);
+
+    let hidden = cfg.hidden_size;
+    let ff_len = cfg.feed_forward_length;
+    let ff_local = ff_len / n_ranks;
+    let head_dim = spec.head_dim;
+    let q_width = spec.n_heads * head_dim;
+    let q_width_local = q_width / n_ranks;
+    let kv_width = spec.n_kv_heads * head_dim;
+    let kv_width_local = kv_width / n_ranks;
+
+    // attn_norm: replicated [hidden].
+    let attn_norm_info = file
+        .tensors
+        .get(&an.attn_norm)
+        .ok_or_else(|| anyhow!("{}", an.attn_norm))?;
+    let attn_norm = norm_upload_f32_to_f16_dt(file, attn_norm_info, hidden, device, stream)?.ptr;
+
+    // attn_q: column-parallel [q_width, hidden] → local [q_width_local, hidden].
+    let attn_q_info = file
+        .tensors
+        .get(&an.attn_q)
+        .ok_or_else(|| anyhow!("{}", an.attn_q))?;
+    let attn_q = upload_col_parallel(file, attn_q_info, q_width, hidden, rank, n_ranks, device, stream)
+        .with_context(|| format!("{}", an.attn_q))?;
+
+    // attn_k / attn_v: optional, column-parallel.
+    let attn_k = if let Some(info) = file.tensors.get(&an.attn_k) {
+        Some(upload_col_parallel(file, info, kv_width, hidden, rank, n_ranks, device, stream)
+            .with_context(|| format!("{}", an.attn_k))?)
+    } else {
+        if spec.has_kv {
+            bail!("layer {}: attn_k required but missing", spec.index);
+        }
+        None
+    };
+    let attn_v = if let Some(info) = file.tensors.get(&an.attn_v) {
+        Some(upload_col_parallel(file, info, kv_width, hidden, rank, n_ranks, device, stream)
+            .with_context(|| format!("{}", an.attn_v))?)
+    } else {
+        None
+    };
+
+    // attn_output: row-parallel [hidden, q_width] → local [hidden, q_width_local].
+    let attn_output_info = file
+        .tensors
+        .get(&an.attn_output)
+        .ok_or_else(|| anyhow!("{}", an.attn_output))?;
+    let attn_output = upload_row_parallel(file, attn_output_info, hidden, q_width, rank, n_ranks, device, stream)
+        .with_context(|| format!("{}", an.attn_output))?;
+
+    // Per-head norms: replicated [head_dim].
+    let attn_q_norm_info = file
+        .tensors
+        .get(&an.attn_q_norm)
+        .ok_or_else(|| anyhow!("{}", an.attn_q_norm))?;
+    let attn_q_norm = norm_upload_f32_to_f16_dt(file, attn_q_norm_info, head_dim, device, stream)?.ptr;
+    let attn_k_norm = if let Some(info) = file.tensors.get(&an.attn_k_norm) {
+        Some(norm_upload_f32_to_f16_dt(file, info, head_dim, device, stream)?.ptr)
+    } else {
+        if spec.has_kv {
+            bail!("layer {}: attn_k_norm required but missing", spec.index);
+        }
+        None
+    };
+    let post_attention_norm_info = file
+        .tensors
+        .get(&an.post_attention_norm)
+        .ok_or_else(|| anyhow!("{}", an.post_attention_norm))?;
+    let post_attention_norm =
+        norm_upload_f32_to_f16_dt(file, post_attention_norm_info, hidden, device, stream)?.ptr;
+    let layer_output_scale = if let Some(info) = file.tensors.get(&an.layer_output_scale) {
+        let raw = file.tensor_raw(&info.name)?;
+        if raw.len() < 4 {
+            bail!("layer {}: layer_output_scale < 4 bytes", spec.index);
+        }
+        Some(f32::from_le_bytes([raw[0], raw[1], raw[2], raw[3]]))
+    } else {
+        None
+    };
+
+    // Dense FFN.
+    let ffn_norm_info = file
+        .tensors
+        .get(&dn.ffn_norm)
+        .ok_or_else(|| anyhow!("{}", dn.ffn_norm))?;
+    let ffn_norm = norm_upload_f32_to_f16_dt(file, ffn_norm_info, hidden, device, stream)?.ptr;
+
+    let ffn_gate_info = file
+        .tensors
+        .get(&dn.ffn_gate)
+        .ok_or_else(|| anyhow!("{}", dn.ffn_gate))?;
+    let ffn_gate = upload_col_parallel(file, ffn_gate_info, ff_len, hidden, rank, n_ranks, device, stream)?;
+
+    let ffn_up_info = file
+        .tensors
+        .get(&dn.ffn_up)
+        .ok_or_else(|| anyhow!("{}", dn.ffn_up))?;
+    let ffn_up = upload_col_parallel(file, ffn_up_info, ff_len, hidden, rank, n_ranks, device, stream)?;
+
+    let ffn_down_info = file
+        .tensors
+        .get(&dn.ffn_down)
+        .ok_or_else(|| anyhow!("{}", dn.ffn_down))?;
+    let ffn_down = upload_row_parallel(file, ffn_down_info, hidden, ff_len, rank, n_ranks, device, stream)?;
+
+    let post_ffw_norm_info = file
+        .tensors
+        .get(&dn.post_ffw_norm)
+        .ok_or_else(|| anyhow!("{}", dn.post_ffw_norm))?;
+    let post_ffw_norm = norm_upload_f32_to_f16_dt(file, post_ffw_norm_info, hidden, device, stream)?.ptr;
+
+    Ok(Gemma4LayerWeights {
+        attn_norm,
+        attn_q: WeightHandle {
+            ptr: attn_q.ptr,
+            dtype: ggml_to_qdtype(attn_q.dtype)?,
+            dims: [q_width_local, hidden],
+        },
+        attn_k: attn_k.map(|t| {
+            ggml_to_qdtype(t.dtype).map(|d| WeightHandle {
+                ptr: t.ptr,
+                dtype: d,
+                dims: [kv_width_local, hidden],
+            })
+        }).transpose()?,
+        attn_v: attn_v.map(|t| {
+            ggml_to_qdtype(t.dtype).map(|d| WeightHandle {
+                ptr: t.ptr,
+                dtype: d,
+                dims: [kv_width_local, hidden],
+            })
+        }).transpose()?,
+        attn_output: WeightHandle {
+            ptr: attn_output.ptr,
+            dtype: ggml_to_qdtype(attn_output.dtype)?,
+            dims: [hidden, q_width_local],
+        },
+        attn_q_norm,
+        attn_k_norm,
+        post_attention_norm,
+        layer_output_scale,
+        ffn_norm,
+        ffn_gate: WeightHandle {
+            ptr: ffn_gate.ptr,
+            dtype: ggml_to_qdtype(ffn_gate.dtype)?,
+            dims: [ff_local, hidden],
+        },
+        ffn_up: WeightHandle {
+            ptr: ffn_up.ptr,
+            dtype: ggml_to_qdtype(ffn_up.dtype)?,
+            dims: [ff_local, hidden],
+        },
+        ffn_down: WeightHandle {
+            ptr: ffn_down.ptr,
+            dtype: ggml_to_qdtype(ffn_down.dtype)?,
+            dims: [hidden, ff_local],
+        },
+        post_ffw_norm,
+        per_layer_embed: None,
+        moe: None,
+    })
+}
+
+/// Raw upload of a whole tensor (replicated across ranks).
+fn raw_upload_dt(
+    file: &flambeau_quant::GgufFile,
+    info: &flambeau_quant::TensorInfo,
+    device: &HipDevice,
+    stream: &flambeau_backend_hip::HipStream,
+) -> Result<DeviceTensor> {
+    let bytes = info.size_in_bytes() as usize;
+    let raw = file.tensor_raw(&info.name)?;
+    if raw.len() < bytes {
+        bail!("`{}` mmap {} < expected {}", info.name, raw.len(), bytes);
+    }
+    let ptr = device.alloc(bytes).map_err(|e| anyhow!("alloc `{}`: {e}", info.name))?;
+    // SAFETY: ptr owns `bytes`; raw is mmap of ≥ bytes.
+    unsafe {
+        device.memcpy_async(
+            stream,
+            CopyDirection::HostToDevice,
+            ptr,
+            DevicePtr(raw.as_ptr() as usize),
+            bytes,
+        )?;
+    }
+    stream.synchronize()?;
+    Ok(DeviceTensor { ptr, dtype: info.dtype, bytes })
+}
+
+/// F32 norm → F16 upload (replicated across ranks).
+fn norm_upload_f32_to_f16_dt(
+    file: &flambeau_quant::GgufFile,
+    info: &flambeau_quant::TensorInfo,
+    expected_len: usize,
+    device: &HipDevice,
+    stream: &flambeau_backend_hip::HipStream,
+) -> Result<DeviceTensor> {
+    let elems: usize = info.dims.iter().product::<u64>() as usize;
+    if elems != expected_len {
+        bail!("norm `{}` elems {} != expected {}", info.name, elems, expected_len);
+    }
+    if info.dtype != flambeau_quant::GgmlDType::F32 {
+        bail!("norm `{}` expected F32, got {:?}", info.name, info.dtype);
+    }
+    let raw = file.tensor_raw(&info.name)?;
+    let src: &[f32] = bytemuck::cast_slice(&raw[..elems * 4]);
+    let host: Vec<half::f16> = src.iter().map(|&v| half::f16::from_f32(v)).collect();
+    let new_bytes = elems * 2;
+    let ptr = device.alloc(new_bytes).map_err(|e| anyhow!("alloc norm `{}`: {e}", info.name))?;
+    // SAFETY: ptr owns new_bytes; host outlives the bounded sync.
+    unsafe {
+        device.memcpy_async(
+            stream,
+            CopyDirection::HostToDevice,
+            ptr,
+            DevicePtr(host.as_ptr() as usize),
+            new_bytes,
+        )?;
+    }
+    stream.synchronize()?;
+    Ok(DeviceTensor {
+        ptr,
+        dtype: flambeau_quant::GgmlDType::F16,
+        bytes: new_bytes,
+    })
+}
+
+/// Column-parallel slice: weight `[out_global, in_size]` row-major; each
+/// rank gets rows `[rank * out_local, (rank+1) * out_local)`. The slice
+/// is contiguous in mmap, so this is a single bounded HtoD memcpy.
+#[allow(clippy::too_many_arguments)]
+fn upload_col_parallel(
+    file: &flambeau_quant::GgufFile,
+    info: &flambeau_quant::TensorInfo,
+    out_global: usize,
+    in_size: usize,
+    rank: usize,
+    n_ranks: usize,
+    device: &HipDevice,
+    stream: &flambeau_backend_hip::HipStream,
+) -> Result<DeviceTensor> {
+    if out_global % n_ranks != 0 {
+        bail!(
+            "col-parallel `{}` out_global {} % n_ranks {} != 0",
+            info.name,
+            out_global,
+            n_ranks
+        );
+    }
+    let out_local = out_global / n_ranks;
+    let bytes_per_row = flambeau_blocks::row_bytes_for_dtype(info.dtype, in_size)
+        .map_err(|e| anyhow!("col-parallel `{}` row_bytes: {e}", info.name))?;
+    let raw = file.tensor_raw(&info.name)?;
+    let start = rank * out_local * bytes_per_row;
+    let end = start + out_local * bytes_per_row;
+    if end > raw.len() {
+        bail!("col-parallel `{}` slice {}..{} OOB ({} bytes mmap)", info.name, start, end, raw.len());
+    }
+    let local_bytes = end - start;
+    let ptr = device
+        .alloc(local_bytes)
+        .map_err(|e| anyhow!("alloc col-parallel `{}`: {e}", info.name))?;
+    // SAFETY: ptr owns local_bytes; raw mmap covers start..end.
+    unsafe {
+        device.memcpy_async(
+            stream,
+            CopyDirection::HostToDevice,
+            ptr,
+            DevicePtr(raw[start..end].as_ptr() as usize),
+            local_bytes,
+        )?;
+    }
+    stream.synchronize()?;
+    Ok(DeviceTensor {
+        ptr,
+        dtype: info.dtype,
+        bytes: local_bytes,
+    })
+}
+
+/// Row-parallel slice: weight `[out_size, in_global]` row-major; each
+/// rank gets cols `[rank * in_local, (rank+1) * in_local)` of every row.
+/// Gathers row-by-row host-side then uploads with one HtoD memcpy.
+#[allow(clippy::too_many_arguments)]
+fn upload_row_parallel(
+    file: &flambeau_quant::GgufFile,
+    info: &flambeau_quant::TensorInfo,
+    out_size: usize,
+    in_global: usize,
+    rank: usize,
+    n_ranks: usize,
+    device: &HipDevice,
+    stream: &flambeau_backend_hip::HipStream,
+) -> Result<DeviceTensor> {
+    if in_global % n_ranks != 0 {
+        bail!(
+            "row-parallel `{}` in_global {} % n_ranks {} != 0",
+            info.name,
+            in_global,
+            n_ranks
+        );
+    }
+    let in_local = in_global / n_ranks;
+    let bytes_per_global_row = flambeau_blocks::row_bytes_for_dtype(info.dtype, in_global)
+        .map_err(|e| anyhow!("row-parallel `{}` global row_bytes: {e}", info.name))?;
+    let bytes_per_local_row = flambeau_blocks::row_bytes_for_dtype(info.dtype, in_local)
+        .map_err(|e| anyhow!("row-parallel `{}` local row_bytes: {e}", info.name))?;
+    let raw = file.tensor_raw(&info.name)?;
+    let total_local_bytes = out_size * bytes_per_local_row;
+    let mut host = Vec::<u8>::with_capacity(total_local_bytes);
+    for r in 0..out_size {
+        let src_row_start = r * bytes_per_global_row + rank * bytes_per_local_row;
+        let src_row_end = src_row_start + bytes_per_local_row;
+        if src_row_end > raw.len() {
+            bail!(
+                "row-parallel `{}` row {} slice {}..{} OOB ({} bytes mmap)",
+                info.name,
+                r,
+                src_row_start,
+                src_row_end,
+                raw.len()
+            );
+        }
+        host.extend_from_slice(&raw[src_row_start..src_row_end]);
+    }
+    let ptr = device
+        .alloc(total_local_bytes)
+        .map_err(|e| anyhow!("alloc row-parallel `{}`: {e}", info.name))?;
+    // SAFETY: ptr owns total_local_bytes; host outlives the bounded sync.
+    unsafe {
+        device.memcpy_async(
+            stream,
+            CopyDirection::HostToDevice,
+            ptr,
+            DevicePtr(host.as_ptr() as usize),
+            total_local_bytes,
+        )?;
+    }
+    stream.synchronize()?;
+    Ok(DeviceTensor {
+        ptr,
+        dtype: info.dtype,
+        bytes: total_local_bytes,
+    })
+}
+
+fn ggml_to_qdtype(d: GgmlDType) -> Result<flambeau_core::op::QDtype> {
+    use flambeau_core::op::QDtype;
+    Ok(match d {
+        GgmlDType::F32 => QDtype::F32,
+        GgmlDType::F16 => QDtype::F16,
+        GgmlDType::BF16 => QDtype::BF16,
+        GgmlDType::Q8_0 => QDtype::Q8_0,
+        GgmlDType::Q8_1 => QDtype::Q8_1,
+        GgmlDType::Q4_0 => QDtype::Q4_0,
+        GgmlDType::Q4_1 => QDtype::Q4_1,
+        GgmlDType::Q5_0 => QDtype::Q5_0,
+        GgmlDType::Q5_1 => QDtype::Q5_1,
+        GgmlDType::Q4K => QDtype::Q4_K,
+        GgmlDType::Q5K => QDtype::Q5_K,
+        GgmlDType::Q6K => QDtype::Q6_K,
+        GgmlDType::Q8K => QDtype::Q8_K,
+        other => bail!("ggml_to_qdtype: dtype {other:?} not yet handled for TP upload"),
+    })
 }
