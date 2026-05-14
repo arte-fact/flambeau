@@ -70,9 +70,12 @@ pub use tensor_view::{
     ReplicatedF16, RowParallel, RowPartialF16, SubClusterPartial, F16, F32, I32,
 };
 pub use weight_roles::{
-    AttnK, AttnKNorm, AttnNorm, AttnOutput, AttnQ, AttnQNorm, AttnV, DtypeFilter, FfnDown, FfnGate,
-    FfnNorm, FfnUp, LmHead, ModelConfig, OutputNorm, PostAttnNorm, PostFfwNorm, TokenEmbd,
-    WeightRole, WeightSpec, WeightUploader,
+    AttnGate, AttnK, AttnKBias, AttnKNorm, AttnNorm, AttnOutput, AttnQ, AttnQBias, AttnQNorm,
+    AttnV, AttnVBias, DtypeFilter, FfnDown, FfnGate, FfnNorm, FfnUp, FusedAttnQkv, LmHead,
+    ModelConfig, MoeExpertsDown, MoeExpertsGate, MoeExpertsUp, MoeRouter, OnUploadDoneFn,
+    OutputNorm, PostAttnNorm, PostFfwNorm, PreUploadFn, SharedExpertDown, SharedExpertGate,
+    SharedExpertRouter, SharedExpertUp, SsmA, SsmAlpha, SsmBa, SsmBeta, SsmConv1d, SsmDtBias,
+    SsmNorm, SsmOut, TokenEmbd, WeightRole, WeightSpec, WeightUploader, DEFAULT_WEIGHT_SPEC,
 };
 pub use topology::{
     forward_one_token_hybrid, forward_one_token_pp, forward_one_token_tp,
