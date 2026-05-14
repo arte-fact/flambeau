@@ -699,7 +699,11 @@ fn forward_decode_layer_tp_moe(
             &format!("L{il} P5a partial_ffn rank1 (post-AR shared MLP)"));
     }
 
-    // Phase 5b: per-rank rmsnorm(partial_ffn, post_ffw_norm_1) → cur_mlp_f16.
+    // Phase 5b: cast partial_ffn F16→F32, then `rmsnorm_f32(tmp_f32,
+    // post_ffw_norm_1_f32, cur_mlp_f32)`. F32 cascade through the
+    // post-norm pipeline matches llama.cpp's gemma4-iswa.cpp and
+    // prevents the F16 Inf overflow by layer 5 (see
+    // feedback_gemma4_moe_f16_overflow).
     for r in 0..n {
         let dev = driver.tp.cluster().device(r);
         dev.bind()?;
@@ -715,20 +719,17 @@ fn forward_decode_layer_tp_moe(
             .tp_moe_scratch
             .as_ref()
             .ok_or_else(|| anyhow!("rank {r}: tp_moe_scratch missing in Phase 5b"))?;
-        ops.rmsnorm_f16(
-            stage.partial_ffn,
-            tp_moe.post_ffw_norm_1,
-            tp_moe_scratch.cur_mlp_f16,
+        ops.cast_f16_to_f32(stage.partial_ffn, tp_moe_scratch.tmp_f32, hidden)
+            .context("MoE Phase 5b cast partial_ffn F16→F32")?;
+        ops.rmsnorm_f32(
+            tp_moe_scratch.tmp_f32,
+            tp_moe.post_ffw_norm_1_f32,
+            tp_moe_scratch.cur_mlp_f32,
             1,
             hidden,
             rms_eps,
         )
-        .context("MoE post_ffw_norm_1")?;
-    }
-    if probe {
-        let cur_mlp = driver.stages[0].tp_moe_scratch.as_ref().unwrap().cur_mlp_f16;
-        tp_dump_buffer(driver, 0, cur_mlp, hidden,
-            &format!("L{il} P5b cur_mlp rank0"));
+        .context("MoE post_ffw_norm_1 (F32)")?;
     }
 
     // Phase 5c: AR-sum partial_moe_f16 (routed-MoE).
@@ -771,7 +772,10 @@ fn forward_decode_layer_tp_moe(
             &format!("L{il} P5c partial_moe rank0 (post-AR routed)"));
     }
 
-    // Phase 5d: per-rank rmsnorm(partial_moe, post_ffw_norm_2) → cur_moe_f16.
+    // Phase 5d: cast partial_moe F16→F32, then `rmsnorm_f32(tmp_f32,
+    // post_ffw_norm_2_f32, cur_moe_f32)`. Same F32-cascade rationale
+    // as Phase 5b. `tmp_f32` is reused (sequential use; Phase 5b
+    // finished consuming it).
     for r in 0..n {
         let dev = driver.tp.cluster().device(r);
         dev.bind()?;
@@ -787,23 +791,25 @@ fn forward_decode_layer_tp_moe(
             .tp_moe_scratch
             .as_ref()
             .ok_or_else(|| anyhow!("rank {r}: tp_moe_scratch missing in Phase 5d"))?;
-        ops.rmsnorm_f16(
+        ops.cast_f16_to_f32(
             tp_moe_scratch.partial_moe_f16,
-            tp_moe.post_ffw_norm_2,
-            tp_moe_scratch.cur_moe_f16,
+            tp_moe_scratch.tmp_f32,
+            hidden,
+        )
+        .context("MoE Phase 5d cast partial_moe F16→F32")?;
+        ops.rmsnorm_f32(
+            tp_moe_scratch.tmp_f32,
+            tp_moe.post_ffw_norm_2_f32,
+            tp_moe_scratch.cur_moe_f32,
             1,
             hidden,
             rms_eps,
         )
-        .context("MoE post_ffw_norm_2")?;
-    }
-    if probe {
-        let cur_moe = driver.stages[0].tp_moe_scratch.as_ref().unwrap().cur_moe_f16;
-        tp_dump_buffer(driver, 0, cur_moe, hidden,
-            &format!("L{il} P5d cur_moe rank0"));
+        .context("MoE post_ffw_norm_2 (F32)")?;
     }
 
-    // Phase 5e: per-rank cur_combined = cur_mlp + cur_moe.
+    // Phase 5e: `cur_combined_f32 = cur_mlp_f32 + cur_moe_f32` (F32
+    // add — kept in F32 through the final norm in Phase 6).
     for r in 0..n {
         let dev = driver.tp.cluster().device(r);
         dev.bind()?;
@@ -815,13 +821,13 @@ fn forward_decode_layer_tp_moe(
             .tp_moe_scratch
             .as_ref()
             .ok_or_else(|| anyhow!("rank {r}: tp_moe_scratch missing in Phase 5e"))?;
-        ops.add_f16(
-            tp_moe_scratch.cur_mlp_f16,
-            tp_moe_scratch.cur_moe_f16,
-            tp_moe_scratch.cur_combined_f16,
+        ops.add_f32(
+            tp_moe_scratch.cur_mlp_f32,
+            tp_moe_scratch.cur_moe_f32,
+            tp_moe_scratch.cur_combined_f32,
             hidden,
         )
-        .context("MoE combine cur_mlp + cur_moe")?;
+        .context("MoE combine cur_mlp + cur_moe (F32)")?;
     }
 
     // Phase 6: per-rank post_ffw_norm + residual add → next-layer hidden.
@@ -834,22 +840,38 @@ fn forward_decode_layer_tp_moe(
         let stage = &mut driver.stages[r];
         let layer = &stage.layer_weights[il];
         let scratch = &stage.scratch;
+        let tp_moe = layer
+            .tp_moe
+            .as_ref()
+            .ok_or_else(|| anyhow!("layer {il} rank {r}: tp_moe missing in Phase 6"))?;
         let tp_moe_scratch = stage
             .tp_moe_scratch
             .as_ref()
             .ok_or_else(|| anyhow!("rank {r}: tp_moe_scratch missing in Phase 6"))?;
-        post_norm_residual_f16(
-            &ops,
-            tp_moe_scratch.cur_combined_f16,
-            layer.post_ffw_norm,
-            scratch.attn_out_local.0,
-            scratch.attn_residual_f16.0,
-            stage.hidden,
+        // 1. F32 rmsnorm of the combined F32 input under
+        //    `post_ffw_norm_f32` — keeps the post-norm cascade in F32.
+        ops.rmsnorm_f32(
+            tp_moe_scratch.cur_combined_f32,
+            tp_moe.post_ffw_norm_f32,
+            tp_moe_scratch.tmp_f32,
             1,
             hidden,
             rms_eps,
         )
-        .context("MoE post_ffw_norm + residual")?;
+        .context("MoE post_ffw_norm (F32)")?;
+        // 2. Cast F32 norm output → F16 staging (`attn_out_local` —
+        //    free after Phase 1).
+        ops.cast_f32_to_f16(tp_moe_scratch.tmp_f32, scratch.attn_out_local.0, hidden)
+            .context("MoE Phase 6 cast normed F32→F16")?;
+        // 3. Residual add into `stage.hidden`. Output is F16 — the
+        //    residual stream stays F16 (bounded by `layer_output_scale`).
+        ops.add_f16(
+            scratch.attn_residual_f16.0,
+            scratch.attn_out_local.0,
+            stage.hidden,
+            hidden,
+        )
+        .context("MoE Phase 6 residual add")?;
         if let Some(scale_v) = layer.layer_output_scale {
             if scale_v != 1.0 {
                 ops.scale_f16(stage.hidden, stage.hidden, hidden, scale_v)

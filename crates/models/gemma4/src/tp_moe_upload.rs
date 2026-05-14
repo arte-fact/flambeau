@@ -52,23 +52,36 @@ use crate::weights_hip::DeviceTensor;
 #[derive(Copy, Clone)]
 pub struct Gemma4TpMoeScratch {
     /// F16 `[hidden]` — `rmsnorm_f16(attn_residual, pre_router_weight)`.
+    /// Routes to the F16 MoE router GEMV.
     pub router_input_f16: DevicePtr,
-    /// F16 `[hidden]` — post-shared-MLP norm output (full hidden, AR'd).
-    pub cur_mlp_f16: DevicePtr,
-    /// F16 `[hidden]` — pre-MoE input / post-MoE norm output.
-    pub cur_moe_f16: DevicePtr,
-    /// F16 `[hidden]` — `cur_mlp + cur_moe` intermediate (before final
-    /// `post_ffw_norm` + residual add).
-    pub cur_combined_f16: DevicePtr,
+    /// F16 `[hidden]` — pre-MoE-norm output (`rmsnorm_f16(attn_residual,
+    /// pre_ffw_norm_2)`). Routes to F16 `MoeExperts::forward_decode_tp`.
+    pub cur_moe_input_f16: DevicePtr,
     /// F16 `[hidden]` — read-only zero buffer fed as `residual` to
     /// `MoeExperts::forward_decode_tp` (no fused residual; the
     /// per-branch norm + residual add happen in the composer).
     pub zero_hidden_f16: DevicePtr,
     /// F16 `[hidden]` — second row-parallel partial. The shared-MLP
     /// branch reuses `stage.partial_ffn`; the MoE branch writes here.
-    /// AR'd in Phase 5b (separately from `partial_ffn`) under
+    /// AR'd in Phase 5c (separately from `partial_ffn`) under
     /// `post_ffw_norm_2`.
     pub partial_moe_f16: DevicePtr,
+    /// F32 `[hidden]` — staging for F16→F32 cast of AR'd row-parallel
+    /// partials before the F32 cascade rmsnorm. Reused across Phase
+    /// 5b/5d/6 (single buffer; sequential use).
+    pub tmp_f32: DevicePtr,
+    /// F32 `[hidden]` — `rmsnorm_f32(partial_ffn_post_AR,
+    /// post_ffw_norm_1_f32)`. Shared-MLP branch in F32 to prevent F16
+    /// overflow in the post-norm cascade (see
+    /// `feedback_gemma4_moe_f16_overflow`).
+    pub cur_mlp_f32: DevicePtr,
+    /// F32 `[hidden]` — `rmsnorm_f32(partial_moe_post_AR,
+    /// post_ffw_norm_2_f32)`. Routed MoE branch in F32.
+    pub cur_moe_f32: DevicePtr,
+    /// F32 `[hidden]` — `cur_mlp_f32 + cur_moe_f32`. Combined input to
+    /// the final `post_ffw_norm` (F32) before cast-back to F16 +
+    /// residual add into `stage.hidden`.
+    pub cur_combined_f32: DevicePtr,
     /// `MoeExperts` decode scratch view, sized for `local_inter`.
     pub moe_scratch: MoeExpertsDecodeScratch,
 }
@@ -95,11 +108,13 @@ impl Gemma4TpMoeScratch {
             );
         }
         let router_input_f16 = raw_alloc.alloc_f16(device, hidden)?.0;
-        let cur_mlp_f16 = raw_alloc.alloc_f16(device, hidden)?.0;
-        let cur_moe_f16 = raw_alloc.alloc_f16(device, hidden)?.0;
-        let cur_combined_f16 = raw_alloc.alloc_f16(device, hidden)?.0;
+        let cur_moe_input_f16 = raw_alloc.alloc_f16(device, hidden)?.0;
         let zero_hidden_f16 = raw_alloc.alloc_f16(device, hidden)?.0; // zeroed by alloc_f16
         let partial_moe_f16 = raw_alloc.alloc_f16(device, hidden)?.0;
+        let tmp_f32 = raw_alloc.alloc_f32(device, hidden)?.0;
+        let cur_mlp_f32 = raw_alloc.alloc_f32(device, hidden)?.0;
+        let cur_moe_f32 = raw_alloc.alloc_f32(device, hidden)?.0;
+        let cur_combined_f32 = raw_alloc.alloc_f32(device, hidden)?.0;
 
         let moe_scratch = MoeExpertsDecodeScratch {
             x_q8_1: raw_alloc.alloc_q8_1(device, hidden)?.0,
@@ -116,11 +131,13 @@ impl Gemma4TpMoeScratch {
 
         Ok(Self {
             router_input_f16,
-            cur_mlp_f16,
-            cur_moe_f16,
-            cur_combined_f16,
+            cur_moe_input_f16,
             zero_hidden_f16,
             partial_moe_f16,
+            tmp_f32,
+            cur_mlp_f32,
+            cur_moe_f32,
+            cur_combined_f32,
             moe_scratch,
         })
     }
@@ -139,11 +156,26 @@ pub struct Gemma4TpMoeFfnWeights {
     /// pre-multiplied. Replicated.
     pub pre_router_weight_f16: DevicePtr,
     /// F16 `[hidden]` — pre-MoE-branch RMSNorm weight. Replicated.
+    /// Applied as F16 (rmsnorm output feeds MoE forward which consumes
+    /// F16; the immediate matmul absorbs any single-norm amplification).
     pub pre_ffw_norm_2: DevicePtr,
-    /// F16 `[hidden]` — post-shared-MLP RMSNorm weight. Replicated.
-    pub post_ffw_norm_1: DevicePtr,
-    /// F16 `[hidden]` — post-MoE-branch RMSNorm weight. Replicated.
-    pub post_ffw_norm_2: DevicePtr,
+    /// F32 `[hidden]` — post-shared-MLP RMSNorm weight. Replicated.
+    /// Kept F32 (not the standard F32→F16 cast) so the post-norm
+    /// cascade (`post_ffw_norm_1` → `post_ffw_norm_2` → `post_ffw_norm`)
+    /// runs end-to-end in F32 — matching llama.cpp's gemma4-iswa.cpp
+    /// pipeline. F16 here triggers an Inf cascade by layer 5 as the
+    /// triple-rmsnorm amplifies activation spikes past F16's 65504
+    /// ceiling.
+    pub post_ffw_norm_1_f32: DevicePtr,
+    /// F32 `[hidden]` — post-MoE-branch RMSNorm weight. Replicated.
+    /// Same F32-cascade rationale as `post_ffw_norm_1_f32`.
+    pub post_ffw_norm_2_f32: DevicePtr,
+    /// F32 `[hidden]` — gemma4 `post_ffw_norm` for the MoE layer.
+    /// Replicated. Duplicated alongside the F16 copy on
+    /// [`crate::layer::Gemma4LayerWeights::post_ffw_norm`] (used by
+    /// the dense composer); MoE-mode reads this F32 variant to keep
+    /// the post-norm cascade in F32.
+    pub post_ffw_norm_f32: DevicePtr,
 }
 
 /// Upload one MoE FFN layer's weights TP-sharded for `rank` of `world`.
@@ -283,7 +315,15 @@ pub(crate) fn upload_moe_layer_tp(
         tracker,
     )?);
 
-    // 5. Three extra MoE norms (F32→F16 cast) — Replicated.
+    // 5. MoE norms.
+    //    - `pre_ffw_norm_2` stays F16 (rmsnorm output feeds MoE forward
+    //      which consumes F16; the matmul absorbs any single-norm
+    //      amplification).
+    //    - `post_ffw_norm_1` / `post_ffw_norm_2` / `post_ffw_norm` STAY
+    //      F32 (raw replicated upload) so the triple-rmsnorm post-norm
+    //      cascade matches llama.cpp's F32 pipeline — F16 here triggers
+    //      an Inf overflow by ~layer 5 (see feedback note
+    //      `feedback_gemma4_moe_f16_overflow`).
     let pre_ffw_norm_2 = ut_to_dt(upload_replicated_norm_f32_to_f16(
         file,
         file.tensors
@@ -294,22 +334,33 @@ pub(crate) fn upload_moe_layer_tp(
         stream,
         tracker,
     )?);
-    let post_ffw_norm_1 = ut_to_dt(upload_replicated_norm_f32_to_f16(
+    let post_ffw_norm_1_f32 = ut_to_dt(upload_replicated_tensor(
         file,
         file.tensors
             .get(&names.post_ffw_norm_1)
             .ok_or_else(|| anyhow!("{} missing", names.post_ffw_norm_1))?,
-        hidden,
         device,
         stream,
         tracker,
     )?);
-    let post_ffw_norm_2 = ut_to_dt(upload_replicated_norm_f32_to_f16(
+    let post_ffw_norm_2_f32 = ut_to_dt(upload_replicated_tensor(
         file,
         file.tensors
             .get(&names.post_ffw_norm_2)
             .ok_or_else(|| anyhow!("{} missing", names.post_ffw_norm_2))?,
-        hidden,
+        device,
+        stream,
+        tracker,
+    )?);
+    // `post_ffw_norm` is the gemma4 layer's outer post-norm. The dense
+    // path uses an F16 copy on `Gemma4LayerWeights::post_ffw_norm`; the
+    // MoE composer needs the F32 variant alongside.
+    let post_ffw_norm_name = crate::names::DenseFfnNames::for_layer(layer_index).post_ffw_norm;
+    let post_ffw_norm_f32 = ut_to_dt(upload_replicated_tensor(
+        file,
+        file.tensors
+            .get(&post_ffw_norm_name)
+            .ok_or_else(|| anyhow!("{post_ffw_norm_name} missing"))?,
         device,
         stream,
         tracker,
@@ -352,8 +403,9 @@ pub(crate) fn upload_moe_layer_tp(
         moe,
         pre_router_weight_f16: pre_router_ptr,
         pre_ffw_norm_2: pre_ffw_norm_2.ptr,
-        post_ffw_norm_1: post_ffw_norm_1.ptr,
-        post_ffw_norm_2: post_ffw_norm_2.ptr,
+        post_ffw_norm_1_f32: post_ffw_norm_1_f32.ptr,
+        post_ffw_norm_2_f32: post_ffw_norm_2_f32.ptr,
+        post_ffw_norm_f32: post_ffw_norm_f32.ptr,
     })
 }
 
@@ -627,10 +679,12 @@ pub fn forward_ffn_moe_tp_per_rank<O: Ops>(
 
     // 4. Pre-MoE-branch norm: cur_moe_input = rmsnorm(attn_residual,
     //    pre_ffw_norm_2). Per-row norm preserves the replicated layout.
+    //    Stays F16 — the immediate consumer (MoE forward) needs F16 and
+    //    the matmul that follows absorbs any single-norm amplification.
     ops.rmsnorm_f16(
         attn_residual,
         tp_moe.pre_ffw_norm_2,
-        scratch.cur_moe_f16,
+        scratch.cur_moe_input_f16,
         1,
         hidden,
         rms_norm_eps,
@@ -655,7 +709,12 @@ pub fn forward_ffn_moe_tp_per_rank<O: Ops>(
     } else {
         tp_moe
             .moe
-            .forward_decode_tp(ops, scratch.cur_moe_f16, scratch.partial_moe_f16, scratch.moe_scratch)
+            .forward_decode_tp(
+                ops,
+                scratch.cur_moe_input_f16,
+                scratch.partial_moe_f16,
+                scratch.moe_scratch,
+            )
             .context("MoE TP forward_decode_tp")?;
     }
 
