@@ -35,10 +35,10 @@ use std::sync::Arc;
 use anyhow::{anyhow, bail, Context, Result};
 use flambeau_backend_hip::{HipCluster, HipDevice};
 use flambeau_blocks::{
-    embed_token_host, forward_one_token_tp, post_norm_residual_f16, tp_allreduce_sum_into,
-    upload_f16_ones, AttnK, AttnKNorm, AttnNorm, AttnOutput, AttnQ, AttnQNorm, AttnV, FfnDown,
-    FfnGate, FfnNorm, FfnUp, LmHead, OutputNorm, PostAttnNorm, PostFfwNorm, TokenEmbd,
-    Activation, DenseMlpDecodeScratch, DenseMlpTp, RawAllocTracker,
+    embed_token_host, forward_one_token_tp, post_norm_residual_f16, tp_allreduce_sum,
+    upload_f16_ones, AttnK, AttnKNorm, AttnNorm, AttnOutput, AttnQ, AttnQNorm, AttnV, Buffer,
+    FfnDown, FfnGate, FfnNorm, FfnUp, LmHead, OutputNorm, PostAttnNorm, PostFfwNorm, RowParallel,
+    TokenEmbd, Activation, DenseMlpDecodeScratch, DenseMlpTp, RawAllocTracker, F16,
     StandardAttentionDecodeScratch, TpCluster, TpDecodeDriver, UploadedTensor, WeightHandle,
     WeightUploader,
 };
@@ -552,11 +552,21 @@ fn forward_layer_decode_tp(
                 &format!("L{il} P1 partial_attn rank{r}"));
         }
     }
-    // Phase 2: AR-sum partial_attn across ranks. After this every rank's
-    // `partial_attn` holds the full hidden-dim attn-out.
+    // Phase 2: AR-sum partial_attn across ranks via the typed
+    // transition. After this every rank's `partial_attn` buffer holds
+    // the full hidden-dim attn-out — typestate-tagged `Replicated`.
+    //
+    // Field-type migration to `Buffer<F16, RowParallel<0>>` storage is
+    // deferred (Phase 8d) since it cascades through ~12 read sites
+    // each for `hidden` / `partial_attn` / `partial_ffn`. The typed
+    // wrapper at the AR boundary is the proof-of-concept (Phase 8b)
+    // — it demonstrates the compile-time transition flow without
+    // forcing the larger field-type churn.
     {
-        let partials: [DevicePtr; 2] =
-            [driver.stages[0].partial_attn, driver.stages[1].partial_attn];
+        let partials: [Buffer<F16, RowParallel<0>>; 2] = [
+            Buffer::from_raw_unchecked(driver.stages[0].partial_attn, hidden),
+            Buffer::from_raw_unchecked(driver.stages[1].partial_attn, hidden),
+        ];
         let streams: [&_; 2] = [
             driver.tp.cluster().device(0).default_stream(),
             driver.tp.cluster().device(1).default_stream(),
@@ -564,8 +574,14 @@ fn forward_layer_decode_tp(
         // SAFETY: partial_attn is hidden F16 elems per rank; streams outlive
         // this call; subsequent Phase-3 reads on each rank are serialised on
         // that rank's stream.
-        unsafe { tp_allreduce_sum_into(&driver.tp.ar(), &partials, hidden, &streams) }
-            .context("AR sum partial_attn")?;
+        let _replicated = unsafe {
+            tp_allreduce_sum::<0>(driver.tp.ar(), &partials, &streams)
+        }
+        .context("AR sum partial_attn (typed)")?;
+        // `_replicated` is `Vec<Buffer<F16, Replicated>>` tagging the
+        // same allocations as Replicated. Phase-3 reads consume them
+        // via the raw `stage.partial_attn` pointer (the typed flow
+        // ends at the AR transition for this proof-of-concept).
     }
 
     if std::env::var_os("FLAMBEAU_TP_DEBUG_PHASES").is_some() && il < 2 {
@@ -667,17 +683,22 @@ fn forward_layer_decode_tp(
                 &format!("L{il} P4 partial_ffn rank{r}"));
         }
     }
-    // Phase 5: AR-sum partial_ffn.
+    // Phase 5: AR-sum partial_ffn via the typed transition (same
+    // pattern as Phase 2 above).
     {
-        let partials_ffn: [DevicePtr; 2] =
-            [driver.stages[0].partial_ffn, driver.stages[1].partial_ffn];
+        let partials_ffn: [Buffer<F16, RowParallel<0>>; 2] = [
+            Buffer::from_raw_unchecked(driver.stages[0].partial_ffn, hidden),
+            Buffer::from_raw_unchecked(driver.stages[1].partial_ffn, hidden),
+        ];
         let streams: [&_; 2] = [
             driver.tp.cluster().device(0).default_stream(),
             driver.tp.cluster().device(1).default_stream(),
         ];
         // SAFETY: same as Phase 2.
-        unsafe { tp_allreduce_sum_into(&driver.tp.ar(), &partials_ffn, hidden, &streams) }
-            .context("AR sum partial_ffn")?;
+        let _replicated = unsafe {
+            tp_allreduce_sum::<0>(driver.tp.ar(), &partials_ffn, &streams)
+        }
+        .context("AR sum partial_ffn (typed)")?;
     }
 
     // Phase 6: post_ffw_norm + residual add (with attn_residual) → next-layer hidden.
