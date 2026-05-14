@@ -478,6 +478,62 @@ fn parity_31b_q4_0_tp2() {
     );
 }
 
+/// Smoke test for Gemma4-26B-A4B (MoE) on TP2. Asserts decode runs
+/// to completion without crash + produces in-vocab tokens for every
+/// step. Does NOT assert text match — the gemma4 MoE path uses
+/// `RouterNormalize::TopkRenorm` instead of the spec's
+/// `softmax-then-topk` (pending kernel), so output is finite +
+/// plausible but not bit-exact vs llama.cpp. Real parity comes in a
+/// follow-up (10c-G) after the softmax_topk_f32 kernel lands.
+#[test]
+fn smoke_26b_a4b_q8_0_tp2() {
+    let Some(file) = open_or_skip("gemma-4-26B-A4B-it-Q8_0.gguf") else {
+        return;
+    };
+    if device_count().map(|n| n < 2).unwrap_or(true) {
+        eprintln!("skipping — need 2 HIP devices");
+        return;
+    }
+    let file = Arc::new(file);
+    let cfg = Gemma4Config::from_gguf(&file).expect("cfg");
+    let vocab = cfg.vocab_size;
+    let (prompt_ids, fb_ids) = match flambeau_decode_tp(file.clone(), &[0, 2]) {
+        Ok(r) => r,
+        Err(e) => {
+            eprintln!("26B-A4B TP2 decode failed: {e}");
+            panic!("flambeau decode TP2 (MoE)");
+        }
+    };
+    let tokenizer = load_from_gguf(&file).expect("tokenizer");
+    let fb_text = tokenizer.decode(&fb_ids).unwrap_or_default();
+    eprintln!("\n=== SMOKE | 26B-A4B-Q8_0 TP2 (hip:0,2) ===");
+    eprintln!("  prompt   ({} ids): {prompt_ids:?}", prompt_ids.len());
+    eprintln!("  flambeau ({} ids): {fb_ids:?}", fb_ids.len());
+    eprintln!("  flambeau text: {fb_text:?}");
+
+    assert_eq!(fb_ids.len(), N_DECODE, "decoded fewer than {N_DECODE} tokens");
+    for (i, &t) in fb_ids.iter().enumerate() {
+        assert!(
+            (t as usize) < vocab,
+            "decoded token #{i} = {t} >= vocab_size {vocab}"
+        );
+    }
+    // Diagnostic — log degenerate output (constant logits) but do
+    // NOT panic. This smoke gates on "no crash + N tokens + in-vocab";
+    // text-quality / parity vs llama.cpp lives in the follow-up
+    // (10c-G) after the gemma4 MoE forward is debugged + the
+    // softmax_topk_f32 kernel ships.
+    let first = fb_ids[0];
+    let all_same = fb_ids.iter().all(|&t| t == first);
+    if all_same {
+        eprintln!(
+            "  [WARN] all {} decoded tokens identical ({first}); MoE forward likely \
+             producing constant logits — see 10c-G for debugging",
+            fb_ids.len()
+        );
+    }
+}
+
 #[test]
 fn parity_31b_q4_0_pp2_pertoken() {
     let Some(file) = open_or_skip("gemma-4-31B-it-Q4_0.gguf") else {
