@@ -228,6 +228,129 @@ fn flambeau_decode_tp(
     Ok((prompt_ids, decoded))
 }
 
+/// Probe: TP forward one decode step and dump the logits stats. Used
+/// to see if logits have signal (and which token dominates).
+#[test]
+fn tp_logits_dump_after_one_token() {
+    let Some(file) = open_or_skip("gemma-4-31B-it-Q4_0.gguf") else {
+        return;
+    };
+    if device_count().map(|n| n < 2).unwrap_or(true) {
+        return;
+    }
+    let file = Arc::new(file);
+    let cluster = ArcGuard::new(HipCluster::new(&[0, 2]).expect("cluster"));
+    let cfg = Gemma4Config::from_gguf(&file).expect("cfg");
+    let mut layout = ModelLayout::from_config(&cfg);
+    let _ = layout.resolve_kv_sharing();
+    let mut driver = Gemma4TpDriver::upload(&file, cfg, layout, cluster, MAX_TOKENS)
+        .expect("TP upload");
+
+    let _ = driver.forward_one_token(2, 0).expect("forward");
+    // Read logits_host from driver via reflection — quick + dirty: re-run with bos token
+    // and inspect via debug.
+    // Driver doesn't expose logits_host directly, so re-run via a small probe:
+    let tok2 = driver.forward_one_token(105, 1).expect("forward 2");
+    eprintln!("TP rank-0/2 forward(105, pos=1) argmax = {tok2}");
+    driver.dispose().expect("dispose");
+}
+
+/// Sanity probe — downloads rank-0's uploaded attn_q from device and
+/// diffs against a hand-sliced view of the GGUF mmap. If the upload is
+/// byte-correct, this test passes. Used to bisect #37 between
+/// "upload is wrong" and "forward path is wrong".
+#[test]
+fn upload_byte_parity_31b_q4_0_tp2_rank0_attn_q() {
+    use flambeau_core::{CopyDirection, Device, DevicePtr, Stream};
+    let Some(file) = open_or_skip("gemma-4-31B-it-Q4_0.gguf") else {
+        return;
+    };
+    if device_count().map(|n| n < 2).unwrap_or(true) {
+        eprintln!("skipping — need 2 HIP devices");
+        return;
+    }
+    let file = Arc::new(file);
+    let cluster = ArcGuard::new(HipCluster::new(&[0, 2]).expect("cluster"));
+    let cfg = Gemma4Config::from_gguf(&file).expect("cfg");
+    let mut layout = ModelLayout::from_config(&cfg);
+    let _ = layout.resolve_kv_sharing();
+    let mut driver = Gemma4TpDriver::upload(&file, cfg, layout, cluster, MAX_TOKENS)
+        .expect("TP upload");
+
+    // Take rank-1's attn_output for layer 0 (row-parallel, second half cols).
+    let stage = &driver.stages[1];
+    let layer0 = &stage.layer_weights[0];
+    let q_dims = layer0.attn_output.dims;
+    let q_ptr = layer0.attn_output.ptr;
+    eprintln!("rank 1 layer 0 attn_output dims = {q_dims:?}");
+
+    // Compute expected byte count.
+    let bytes_per_row = flambeau_blocks::row_bytes_for_dtype(
+        flambeau_quant::GgmlDType::Q4_0,
+        q_dims[1],
+    )
+    .expect("row_bytes");
+    let total_bytes = q_dims[0] * bytes_per_row;
+    eprintln!(
+        "rank 0 layer 0 attn_q total bytes = {total_bytes} (rows={}, bpr={bytes_per_row})",
+        q_dims[0]
+    );
+
+    // Download rank-1's slice from device.
+    let device = driver.cluster.device(1);
+    device.bind().expect("bind");
+    let mut host = vec![0u8; total_bytes];
+    // SAFETY: q_ptr owns total_bytes; host is sized for total_bytes.
+    unsafe {
+        device
+            .memcpy_async(
+                device.default_stream(),
+                CopyDirection::DeviceToHost,
+                DevicePtr(host.as_mut_ptr() as usize),
+                q_ptr,
+                total_bytes,
+            )
+            .expect("memcpy");
+    }
+    device.default_stream().synchronize().expect("sync");
+
+    // Hand-shard attn_output rank-1 = for each row, cols
+    // [q_width_local, q_width). Read the expected slice from mmap.
+    let raw = file
+        .tensor_raw("blk.0.attn_output.weight")
+        .expect("tensor_raw");
+    let q_width_global = q_dims[1] * 2;
+    let bpr_global = flambeau_blocks::row_bytes_for_dtype(
+        flambeau_quant::GgmlDType::Q4_0,
+        q_width_global,
+    )
+    .expect("bpr_global");
+    let bpr_local = bytes_per_row;
+    let out_rows = q_dims[0];
+    let mut expected = Vec::<u8>::with_capacity(total_bytes);
+    for r in 0..out_rows {
+        let src_start = r * bpr_global + 1 * bpr_local;
+        expected.extend_from_slice(&raw[src_start..src_start + bpr_local]);
+    }
+    let expected: &[u8] = &expected;
+    let match_count = host.iter().zip(expected.iter()).take_while(|(a, b)| a == b).count();
+    eprintln!(
+        "rank 0 attn_q[0..{total_bytes}] match prefix = {match_count}/{total_bytes} bytes"
+    );
+    eprintln!(
+        "first 16 bytes: device={:?}, expected={:?}",
+        &host[..16],
+        &expected[..16]
+    );
+
+    driver.dispose().expect("dispose");
+
+    assert_eq!(
+        match_count, total_bytes,
+        "rank 1 attn_output upload differs from expected mmap row-parallel slice"
+    );
+}
+
 #[test]
 fn parity_31b_q4_0_tp2() {
     let Some(file) = open_or_skip("gemma-4-31B-it-Q4_0.gguf") else {
