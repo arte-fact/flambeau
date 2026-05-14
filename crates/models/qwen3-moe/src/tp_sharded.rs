@@ -31,6 +31,13 @@ use std::sync::Arc;
 
 use anyhow::{anyhow, bail, Context, Result};
 use flambeau_backend_hip::{HipCluster, HipDevice};
+use flambeau_blocks::{
+    AttnGate, AttnK, AttnKBias, AttnKNorm, AttnNorm, AttnOutput, AttnQ, AttnQBias, AttnQNorm,
+    AttnV, AttnVBias, FfnDown, FfnGate, FfnNorm, FfnUp, FusedAttnQkv, LmHead, MoeExpertsDown,
+    MoeExpertsGate, MoeExpertsUp, MoeRouter, OutputNorm, PostAttnNorm, RawAllocTracker,
+    SharedExpertDown, SharedExpertGate, SharedExpertRouter, SharedExpertUp, SsmA, SsmAlpha,
+    SsmBeta, SsmConv1d, SsmDtBias, SsmNorm, SsmOut, TokenEmbd, WeightRole, WeightUploader,
+};
 use flambeau_core::{CopyDirection, Device, DevicePtr, Stream};
 use flambeau_quant::{GgmlDType, GgufFile};
 use flambeau_runtime::{LayerAssignment, RankId, WeightLayout};
@@ -294,19 +301,30 @@ impl Qwen3MoETpModel {
             // Globals — gated by opts (always-on for pure-TP, per-stage
             // for hybrid). Skipped tensors get a NULL placeholder so the
             // shard still compiles; dispose treats NULL ptrs as no-ops.
+            // Globals: typed-role dispatch with legacy fallback for the
+            // same special-case dtypes the per-layer loop handles.
+            let upload_global = |name: &str| -> Result<(DeviceTensor, usize)> {
+                if let Some((t, b, _layout)) =
+                    upload_tp_global_typed(file, &config, name, &tp, rank_idx, device)?
+                {
+                    Ok((t, b))
+                } else {
+                    upload_tp(file, name, &tp, rank_idx, device)
+                }
+            };
             let (token_embd, b1) = if opts.load_token_embd {
-                upload_tp(file, &layout.token_embd.name, &tp, rank_idx, device)?
+                upload_global(&layout.token_embd.name)?
             } else {
                 (null_device_tensor(&layout.token_embd.name), 0)
             };
             let (output_norm, b2) = if opts.load_output_head {
-                upload_tp(file, &layout.output_norm.name, &tp, rank_idx, device)?
+                upload_global(&layout.output_norm.name)?
             } else {
                 (null_device_tensor(&layout.output_norm.name), 0)
             };
             let (output, b3) = if let Some(o) = &layout.output {
                 if opts.load_output_head {
-                    let (t, b) = upload_tp(file, &o.name, &tp, rank_idx, device)?;
+                    let (t, b) = upload_global(&o.name)?;
                     (Some(t), b)
                 } else {
                     (None, 0)
@@ -354,8 +372,25 @@ impl Qwen3MoETpModel {
                         });
                         continue;
                     }
-                    let (tensor, b, layout_for) =
-                        upload_tp_with_layout(file, &name, &tp, rank_idx, device)?;
+                    // Typed-role dispatch first; fall back to the legacy
+                    // bulk loop on (a) unknown tensor names, (b) special-
+                    // case dtypes (MXFP4 / BF16) that need the legacy
+                    // dequant/quant transcoding, or (c) K-quant MoE
+                    // expert block-misalignment which triggers the
+                    // Replicated fallback in upload_tp_with_layout.
+                    let (tensor, b, layout_for) = if let Some(triple) = upload_tp_typed_dispatch(
+                        file,
+                        &config,
+                        &name,
+                        desc.layer_idx,
+                        &tp,
+                        rank_idx,
+                        device,
+                    )? {
+                        triple
+                    } else {
+                        upload_tp_with_layout(file, &name, &tp, rank_idx, device)?
+                    };
                     total_bytes += b;
                     layer_tensors.push(TpLayerTensor {
                         name: Arc::from(name.as_str()),
@@ -950,6 +985,197 @@ fn upload_tp(
 ) -> Result<(DeviceTensor, usize)> {
     let (t, b, _layout) = upload_tp_with_layout(file, name, tp, rank, device)?;
     Ok((t, b))
+}
+
+/// Upload one tensor via a typed `WeightRole` on the TP path. The role
+/// drives the layout decision (via `cfg.gdn_kq_replicated(world)` etc.)
+/// and the dtype filter / pre_upload hook; the result is packaged as a
+/// `DeviceTensor` with per-rank dims so it slots into the existing
+/// `TpLayerTensor` storage without changing the forward path's
+/// name-based lookup.
+fn upload_tp_via_role<R: WeightRole>(
+    file: &GgufFile,
+    cfg: &Qwen3MoEConfig,
+    name: &str,
+    layer_idx: usize,
+    tp: &Qwen35DenseTpLayout,
+    rank: u32,
+    device: &HipDevice,
+) -> Result<(DeviceTensor, usize, WeightLayout)> {
+    let info = file
+        .info(name)
+        .with_context(|| format!("info `{name}`"))?;
+    let stream = device.default_stream();
+    let mut tracker = RawAllocTracker::new();
+    let mut up = WeightUploader {
+        device,
+        stream,
+        tracker: &mut tracker,
+        file,
+        cfg,
+        world: tp.world(),
+        rank,
+    };
+    let uploaded = up.upload_required::<R>(layer_idx)?;
+    drop(up);
+    let _ = tracker.forget_allocs();
+    file.advise_drop_tensor(name);
+    let layout = (<R as WeightRole>::SPEC.layout_for)(cfg, layer_idx, tp.world());
+    let per_rank_dims = compute_per_rank_dims(&info.dims, layout);
+    Ok((
+        DeviceTensor {
+            ptr: uploaded.ptr,
+            dtype: uploaded.dtype,
+            dims: per_rank_dims,
+            bytes: uploaded.bytes,
+            name: Arc::from(name),
+        },
+        uploaded.bytes,
+        layout,
+    ))
+}
+
+/// Decide whether `name` has a typed `WeightRole` registered + dispatch
+/// the upload via it. Returns `Ok(Some(..))` on a successful typed
+/// upload, `Ok(None)` when the caller should fall through to
+/// [`upload_tp_with_layout`] (special cases: MXFP4 dequant, BF16→Q8_0
+/// transparent quant, K-quant MoE expert block-misalignment Replicated
+/// fallback, and unknown tensor names).
+///
+/// Per-layer tensor name format is `blk.{layer}.{suffix}`; this fn
+/// strips the prefix and matches on the suffix.
+fn upload_tp_typed_dispatch(
+    file: &GgufFile,
+    cfg: &Qwen3MoEConfig,
+    name: &str,
+    layer_idx: usize,
+    tp: &Qwen35DenseTpLayout,
+    rank: u32,
+    device: &HipDevice,
+) -> Result<Option<(DeviceTensor, usize, WeightLayout)>> {
+    let info = file
+        .info(name)
+        .with_context(|| format!("info `{name}`"))?;
+    // Special-case dtypes: legacy path handles these.
+    // - MXFP4: needs `upload_tp_via_dequant_to_q8_0`.
+    // - BF16:  needs `quantize_bf16_to_q8_0` host-side.
+    if matches!(info.dtype, GgmlDType::Mxfp4 | GgmlDType::BF16) {
+        return Ok(None);
+    }
+    // Extract the suffix (everything after `blk.N.`).
+    let suffix = match name.strip_prefix("blk.") {
+        Some(rest) => match rest.find('.') {
+            Some(idx) => &rest[idx + 1..],
+            None => return Ok(None),
+        },
+        None => return Ok(None), // non-layer tensor; globals dispatched separately
+    };
+
+    macro_rules! dispatch {
+        ($role:ty) => {{
+            match upload_tp_via_role::<$role>(file, cfg, name, layer_idx, tp, rank, device) {
+                Ok(triple) => Ok(Some(triple)),
+                Err(e) if is_moe_block_misalignment(&e, name) => {
+                    tracing::warn!(
+                        target: "flambeau_qwen3_moe::tp_sharded",
+                        tensor = name,
+                        rank,
+                        "K-quant MoE expert misalignment — falling back to legacy Replicated path"
+                    );
+                    Ok(None)
+                }
+                Err(e) => Err(e),
+            }
+        }};
+    }
+
+    match suffix {
+        // Standard attention block (shared roles).
+        "attn_norm.weight" => dispatch!(AttnNorm),
+        "post_attention_norm.weight" => dispatch!(PostAttnNorm),
+        "ffn_norm.weight" => dispatch!(FfnNorm),
+        "attn_q.weight" => dispatch!(AttnQ),
+        "attn_k.weight" => dispatch!(AttnK),
+        "attn_v.weight" => dispatch!(AttnV),
+        "attn_output.weight" => dispatch!(AttnOutput),
+        "attn_q_norm.weight" => dispatch!(AttnQNorm),
+        "attn_k_norm.weight" => dispatch!(AttnKNorm),
+        "attn_q.bias" => dispatch!(AttnQBias),
+        "attn_k.bias" => dispatch!(AttnKBias),
+        "attn_v.bias" => dispatch!(AttnVBias),
+        // GDN block.
+        "attn_qkv.weight" => dispatch!(FusedAttnQkv),
+        "attn_gate.weight" => dispatch!(AttnGate),
+        "ssm_alpha.weight" => dispatch!(SsmAlpha),
+        "ssm_beta.weight" => dispatch!(SsmBeta),
+        // ssm_ba is split via `upload_tp_ssm_ba_split` upstream of this dispatch.
+        "ssm_a" => dispatch!(SsmA),
+        "ssm_dt.bias" => dispatch!(SsmDtBias),
+        "ssm_conv1d.weight" => dispatch!(SsmConv1d),
+        "ssm_norm.weight" => dispatch!(SsmNorm),
+        "ssm_out.weight" => dispatch!(SsmOut),
+        // Dense FFN (qwen35 hybrid path).
+        "ffn_gate.weight" => dispatch!(FfnGate),
+        "ffn_up.weight" => dispatch!(FfnUp),
+        "ffn_down.weight" => dispatch!(FfnDown),
+        // MoE FFN.
+        "ffn_gate_inp.weight" => {
+            // Router: typed `MoeRouter` declares `F32ToF16Norm`; some
+            // GGUFs ship pre-quantised routers. Fall through to legacy
+            // on non-F32/F16 source.
+            if info.dtype == GgmlDType::F32 || info.dtype == GgmlDType::F16 {
+                dispatch!(MoeRouter)
+            } else {
+                Ok(None)
+            }
+        }
+        "ffn_gate_exps.weight" => dispatch!(MoeExpertsGate),
+        "ffn_up_exps.weight" => dispatch!(MoeExpertsUp),
+        "ffn_down_exps.weight" => dispatch!(MoeExpertsDown),
+        // Shared expert.
+        "ffn_gate_inp_shexp.weight" => dispatch!(SharedExpertRouter),
+        "ffn_gate_shexp.weight" => dispatch!(SharedExpertGate),
+        "ffn_up_shexp.weight" => dispatch!(SharedExpertUp),
+        "ffn_down_shexp.weight" => dispatch!(SharedExpertDown),
+        _ => Ok(None),
+    }
+}
+
+/// Global-tensor dispatch — token_embd / output_norm / output. Same
+/// pattern as [`upload_tp_typed_dispatch`] but the role's
+/// `tensor_name(_)` ignores layer index.
+fn upload_tp_global_typed(
+    file: &GgufFile,
+    cfg: &Qwen3MoEConfig,
+    name: &str,
+    tp: &Qwen35DenseTpLayout,
+    rank: u32,
+    device: &HipDevice,
+) -> Result<Option<(DeviceTensor, usize, WeightLayout)>> {
+    let info = file
+        .info(name)
+        .with_context(|| format!("info `{name}`"))?;
+    if matches!(info.dtype, GgmlDType::Mxfp4 | GgmlDType::BF16) {
+        return Ok(None);
+    }
+    match name {
+        "token_embd.weight" => {
+            Ok(Some(upload_tp_via_role::<TokenEmbd>(
+                file, cfg, name, 0, tp, rank, device,
+            )?))
+        }
+        "output_norm.weight" => {
+            Ok(Some(upload_tp_via_role::<OutputNorm>(
+                file, cfg, name, 0, tp, rank, device,
+            )?))
+        }
+        "output.weight" => {
+            Ok(Some(upload_tp_via_role::<LmHead>(
+                file, cfg, name, 0, tp, rank, device,
+            )?))
+        }
+        _ => Ok(None),
+    }
 }
 
 /// like [`upload_tp`] but returns the layout that was
