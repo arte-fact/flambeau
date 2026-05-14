@@ -35,12 +35,11 @@ use std::sync::Arc;
 use anyhow::{anyhow, bail, Context, Result};
 use flambeau_backend_hip::{HipCluster, HipDevice};
 use flambeau_blocks::{
-    embed_token_host, forward_one_token_tp, post_norm_residual_f16, tp_allreduce_sum_synced,
-    upload_f16_ones, AttnK, AttnKNorm, AttnNorm, AttnOutput, AttnQ, AttnQNorm, AttnV, Buffer,
-    FfnDown, FfnGate, FfnNorm, FfnUp, LmHead, OutputNorm, PostAttnNorm, PostFfwNorm, RowParallel,
-    TokenEmbd, TpRankCore, Activation, DenseMlpDecodeScratch, DenseMlpTp, RawAllocTracker, F16,
-    StandardAttentionDecodeScratch, TpCluster, TpDecodeDriver, UploadedTensor, WeightHandle,
-    WeightUploader,
+    embed_token_host, forward_one_token_tp, post_norm_residual_f16, upload_f16_ones, AttnK,
+    AttnKNorm, AttnNorm, AttnOutput, AttnQ, AttnQNorm, AttnV, FfnDown, FfnGate, FfnNorm, FfnUp,
+    LayerComposerTp, LmHead, OutputNorm, PostAttnNorm, PostFfwNorm, TokenEmbd, TpRankCore,
+    Activation, DenseMlpDecodeScratch, DenseMlpTp, RawAllocTracker, StandardAttentionDecodeScratch,
+    TpCluster, TpDecodeDriver, UploadedTensor, WeightHandle, WeightUploader,
 };
 use flambeau_core::{CopyDirection, Device, DevicePtr, Stream};
 use flambeau_ops::hip::{HipOps, OpsRegistry};
@@ -463,50 +462,75 @@ impl Drop for Gemma4TpDriver {
 // Per-layer TP composition
 // ---------------------------------------------------------------------------
 
-/// One layer's TP decode. Phases:
+/// One layer's TP decode. Phases (driven by
+/// [`flambeau_blocks::forward_decode_layer_tp`]):
 /// 1. Per-rank: attn-norm + Q/K/V proj + per-head norms + RoPE + KV
 ///    append + local attention + row-parallel output proj (partial).
-/// 2. AR-sum partial_attn across ranks.
+/// 2. Barrier-fused AR-sum partial_attn → Replicated.
 /// 3. Per-rank: post_attention_norm + residual add → attn_residual.
 /// 4. Per-rank: ffn_norm + gate/up + GELU + row-parallel down (partial).
-/// 5. AR-sum partial_ffn across ranks.
-/// 6. Per-rank: post_ffw_norm + residual add → hidden (next layer input).
-#[allow(clippy::too_many_arguments)]
+/// 5. Barrier-fused AR-sum partial_ffn → Replicated.
+/// 6. Per-rank: post_ffw_norm + residual add → next-layer hidden.
 fn forward_layer_decode_tp(
     driver: &mut Gemma4TpDriver,
     il: usize,
     position: usize,
 ) -> Result<()> {
-    let cfg = driver.cfg.clone();
-    let spec = driver.layout.layers[il];
     let n_ranks = driver.stages.len();
     if n_ranks != 2 {
         // S9-A: only TP2 supported. TP4 is just adding AR-residual_tp4
         // hookups; left for S9-B.
         bail!("forward_layer_decode_tp: TP{n_ranks} not supported in S9-A; only TP2");
     }
+    flambeau_blocks::forward_decode_layer_tp(driver, position, il)
+}
 
-    let hidden = cfg.hidden_size;
-    let head_dim = spec.head_dim;
-    let n_heads_local = spec.n_heads / n_ranks;
-    let n_kv_local = spec.n_kv_heads / n_ranks;
-    let ff_len = cfg.feed_forward_length;
-    let ff_len_local = ff_len / n_ranks;
-    let rms_eps = cfg.rms_norm_eps;
+// `LayerComposerTp` impl — model-specific per-rank hooks. The
+// composer drives the 6-phase order + the typed AR transitions.
+impl LayerComposerTp for Gemma4TpDriver {
+    fn n_ranks(&self) -> usize {
+        self.stages.len()
+    }
 
-    // Phase 1: per-rank → partial_attn (row-parallel output proj).
-    // Delegates the full kernel sequence to
-    // `flambeau_blocks::StandardAttention::forward_decode` with
-    // per-rank sliced shapes, alt-V via `attn_v: None`, V-norm via the
-    // unit-weight buffer, and softmax_scale=1.0 + window_size for SWA.
-    // Splitk dispatches automatically at n_tokens_kv > 256.
-    for r in 0..n_ranks {
-        let dev = driver.tp.cluster().device(r);
+    fn hidden_size(&self) -> usize {
+        self.cfg.hidden_size
+    }
+
+    fn ar(&self) -> &flambeau_backend_hip::BarP2pAllReduce {
+        self.tp.ar()
+    }
+
+    fn cluster(&self) -> &HipCluster {
+        self.tp.cluster()
+    }
+
+    fn core(&self, rank: usize) -> &TpRankCore {
+        &self.stages[rank].core
+    }
+
+    fn partial_attn_ptr(&self, rank: usize) -> DevicePtr {
+        self.stages[rank].partial_attn
+    }
+
+    fn partial_ffn_ptr(&self, rank: usize) -> DevicePtr {
+        self.stages[rank].partial_ffn
+    }
+
+    fn forward_attn(&mut self, r: usize, position: usize, il: usize) -> Result<()> {
+        let spec = self.layout.layers[il];
+        let n_ranks = self.stages.len();
+        let hidden = self.cfg.hidden_size;
+        let head_dim = spec.head_dim;
+        let n_heads_local = spec.n_heads / n_ranks;
+        let n_kv_local = spec.n_kv_heads / n_ranks;
+        let rms_eps = self.cfg.rms_norm_eps;
+
+        let dev = self.tp.cluster().device(r);
         dev.bind()?;
         let stream = dev.default_stream();
-        let reg = &driver.regs[r];
+        let reg = &self.regs[r];
         let ops = HipOps::new(reg, stream);
-        let stage = &mut driver.stages[r];
+        let stage = &mut self.stages[r];
         let weights = &stage.layer_weights[il];
         let x_in = stage.hidden;
         let block = weights.build_attn_block(
@@ -552,55 +576,18 @@ fn forward_layer_decode_tp(
             /* slots = */ None,
         )
         .context("StandardAttention::forward_decode (gemma4 TP)")?;
+        Ok(())
     }
 
-    if std::env::var_os("FLAMBEAU_TP_DEBUG_PHASES").is_some() && il < 2 {
-        for r in 0..n_ranks {
-            tp_dump_buffer(driver, r, driver.stages[r].partial_attn, hidden,
-                &format!("L{il} P1 partial_attn rank{r}"));
-        }
-    }
-    // Phase 2: AR-sum partial_attn across ranks via the barrier-fused
-    // typed transition. `tp_allreduce_sum_synced` runs the cross-rank
-    // event barrier (so `sum_tp2`'s BAR1 reads land on post-Phase-1
-    // bytes) then the AR kernel.
-    {
-        let cores: Vec<&TpRankCore> = driver.stages.iter().map(|s| &s.core).collect();
-        // SAFETY: partial_attn is hidden F16 elems per rank; streams
-        // outlive this call; the synced helper adds the cross-rank
-        // ordering edge before the AR launch.
-        let _replicated = unsafe {
-            let partials: [Buffer<F16, RowParallel<0>>; 2] = [
-                Buffer::from_raw_unchecked(driver.stages[0].partial_attn, hidden),
-                Buffer::from_raw_unchecked(driver.stages[1].partial_attn, hidden),
-            ];
-            let streams: [&_; 2] = [
-                driver.tp.cluster().device(0).default_stream(),
-                driver.tp.cluster().device(1).default_stream(),
-            ];
-            tp_allreduce_sum_synced::<0>(
-                driver.tp.ar(),
-                driver.tp.cluster(),
-                &cores,
-                &partials,
-                &streams,
-            )
-        }
-        .context("AR sum partial_attn (synced typed)")?;
-    }
-
-    if std::env::var_os("FLAMBEAU_TP_DEBUG_PHASES").is_some() && il < 2 {
-        tp_dump_buffer(driver, 0, driver.stages[0].partial_attn, hidden,
-            &format!("L{il} P2 partial_attn rank0 (post-AR)"));
-    }
-    // Phase 3: per-rank post_attention_norm + residual add → attn_residual.
-    for r in 0..n_ranks {
-        let dev = driver.tp.cluster().device(r);
+    fn post_norm_residual_attn(&mut self, r: usize, il: usize) -> Result<()> {
+        let hidden = self.cfg.hidden_size;
+        let rms_eps = self.cfg.rms_norm_eps;
+        let dev = self.tp.cluster().device(r);
         dev.bind()?;
         let stream = dev.default_stream();
-        let reg = &driver.regs[r];
+        let reg = &self.regs[r];
         let ops = HipOps::new(reg, stream);
-        let stage = &mut driver.stages[r];
+        let stage = &mut self.stages[r];
         let weights = &stage.layer_weights[il];
         let scratch = &mut stage.scratch;
         post_norm_residual_f16(
@@ -614,25 +601,20 @@ fn forward_layer_decode_tp(
             hidden,
             rms_eps,
         )
-        .context("post_attention_norm + residual (TP)")?;
+        .context("post_attention_norm + residual (TP)")
     }
 
-    if std::env::var_os("FLAMBEAU_TP_DEBUG_PHASES").is_some() && il < 2 {
-        tp_dump_buffer(driver, 0, driver.stages[0].scratch.attn_residual_f16.0, hidden,
-            &format!("L{il} P3 attn_residual rank0"));
-    }
-    // Phase 4: per-rank ffn_norm + gate/up + GELU + down (row-parallel) → partial_ffn.
-    // Delegates the FFN tail (gate/up/activation/down/cast) to
-    // `DenseMlpTp` so it shares the kernel sequence with qwen3-moe's
-    // TP path. The ffn_norm + Q8_1 quantise stays inline here because
-    // the block API only owns gate/up/down.
-    for r in 0..n_ranks {
-        let dev = driver.tp.cluster().device(r);
+    fn forward_ffn(&mut self, r: usize, il: usize) -> Result<()> {
+        let n_ranks = self.stages.len();
+        let hidden = self.cfg.hidden_size;
+        let ff_len_local = self.cfg.feed_forward_length / n_ranks;
+        let rms_eps = self.cfg.rms_norm_eps;
+        let dev = self.tp.cluster().device(r);
         dev.bind()?;
         let stream = dev.default_stream();
-        let reg = &driver.regs[r];
+        let reg = &self.regs[r];
         let ops = HipOps::new(reg, stream);
-        let stage = &mut driver.stages[r];
+        let stage = &mut self.stages[r];
         let weights = &stage.layer_weights[il];
         let scratch = &mut stage.scratch;
         ops.rmsnorm_quant_q8_1(
@@ -679,48 +661,18 @@ fn forward_layer_decode_tp(
             block_scratch,
             /* pre_quantized = */ true,
         )
-        .context("DenseMlpTp::forward_decode (gemma4 TP)")?;
+        .context("DenseMlpTp::forward_decode (gemma4 TP)")
     }
 
-    if std::env::var_os("FLAMBEAU_TP_DEBUG_PHASES").is_some() && il < 2 {
-        for r in 0..n_ranks {
-            tp_dump_buffer(driver, r, driver.stages[r].partial_ffn, hidden,
-                &format!("L{il} P4 partial_ffn rank{r}"));
-        }
-    }
-    // Phase 5: AR-sum partial_ffn via the barrier-fused typed
-    // transition (same as Phase 2 above).
-    {
-        let cores: Vec<&TpRankCore> = driver.stages.iter().map(|s| &s.core).collect();
-        // SAFETY: same as Phase 2.
-        let _replicated = unsafe {
-            let partials_ffn: [Buffer<F16, RowParallel<0>>; 2] = [
-                Buffer::from_raw_unchecked(driver.stages[0].partial_ffn, hidden),
-                Buffer::from_raw_unchecked(driver.stages[1].partial_ffn, hidden),
-            ];
-            let streams: [&_; 2] = [
-                driver.tp.cluster().device(0).default_stream(),
-                driver.tp.cluster().device(1).default_stream(),
-            ];
-            tp_allreduce_sum_synced::<0>(
-                driver.tp.ar(),
-                driver.tp.cluster(),
-                &cores,
-                &partials_ffn,
-                &streams,
-            )
-        }
-        .context("AR sum partial_ffn (synced typed)")?;
-    }
-
-    // Phase 6: post_ffw_norm + residual add (with attn_residual) → next-layer hidden.
-    for r in 0..n_ranks {
-        let dev = driver.tp.cluster().device(r);
+    fn post_norm_residual_ffn(&mut self, r: usize, il: usize) -> Result<()> {
+        let hidden = self.cfg.hidden_size;
+        let rms_eps = self.cfg.rms_norm_eps;
+        let dev = self.tp.cluster().device(r);
         dev.bind()?;
         let stream = dev.default_stream();
-        let reg = &driver.regs[r];
+        let reg = &self.regs[r];
         let ops = HipOps::new(reg, stream);
-        let stage = &mut driver.stages[r];
+        let stage = &mut self.stages[r];
         let weights = &stage.layer_weights[il];
         let scratch = &mut stage.scratch;
         post_norm_residual_f16(
@@ -739,16 +691,15 @@ fn forward_layer_decode_tp(
         // `layer.rs::forward_layer_decode` step 14). Gemma4 31B uses
         // this to keep the residual stream's magnitude bounded across
         // 60 layers; without it values explode → Inf → NaN around
-        // layer 5-10 (caught by tp_hidden_cross_rank_match diagnostic).
+        // layer 5-10.
         if let Some(scale_v) = weights.layer_output_scale {
             if scale_v != 1.0 {
                 ops.scale_f16(stage.hidden, stage.hidden, hidden, scale_v)
                     .context("layer_output_scale (TP)")?;
             }
         }
+        Ok(())
     }
-
-    Ok(())
 }
 
 // ---------------------------------------------------------------------------
