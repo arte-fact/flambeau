@@ -293,8 +293,17 @@ impl BarP2pAllReduce {
         self.expect_ranks(4)?;
         let cfg = launch_cfg(elem_count);
         for r in 0..4 {
+            // Per-rank local write target. See `sum_tp2` for the
+            // rationale: `partial_local` is the kernel's write target,
+            // so it must be rank r's own buffer; otherwise rank r's
+            // local partial stays at the pre-AR value while the sum
+            // gets BAR1-written into rank 0's buffer.
+            let peers = [
+                partial[(r + 1) % 4],
+                partial[(r + 2) % 4],
+                partial[(r + 3) % 4],
+            ];
             // SAFETY: forwarded from the public-method contract.
-            // **B5 fix** — canonical-order partials. See residual_tp2 / tp4.
             unsafe {
                 self.launch_one(
                     ArKind::SumTp4,
@@ -302,8 +311,8 @@ impl BarP2pAllReduce {
                     cfg,
                     streams[r],
                     ArArgs::Sum {
-                        partial_local: partial[0],
-                        peers: [partial[1], partial[2], partial[3]],
+                        partial_local: partial[r],
+                        peers,
                     },
                     elem_count,
                 )?;
@@ -526,8 +535,16 @@ impl BarP2pAllReduce {
         self.expect_ranks(2)?;
         let cfg = launch_cfg(elem_count);
         for r in 0..2 {
+            // The `partial_local` arg is *written to* by the kernel
+            // (`partial_local = partial_local + peer`). For both ranks
+            // to end up with the sum locally, rank r must point
+            // `partial_local` at `partial[r]` — passing the same
+            // partial[0] on every rank means rank 1 would write via
+            // BAR1 to rank 0's buffer and rank 1's own buffer would
+            // stay at the pre-AR value. The peer is the OTHER rank's
+            // partial.
+            let peer = partial[1 - r];
             // SAFETY: forwarded from the public-method contract.
-            // **B5 fix** — canonical-order partials. See residual_tp2.
             unsafe {
                 self.launch_one(
                     ArKind::SumTp2,
@@ -535,8 +552,8 @@ impl BarP2pAllReduce {
                     cfg,
                     streams[r],
                     ArArgs::Sum {
-                        partial_local: partial[0],
-                        peers: [partial[1], DevicePtr(0), DevicePtr(0)],
+                        partial_local: partial[r],
+                        peers: [peer, DevicePtr(0), DevicePtr(0)],
                     },
                     elem_count,
                 )?;

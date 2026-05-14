@@ -553,19 +553,23 @@ fn forward_layer_decode_tp(
         }
     }
     // Phase 2: AR-sum partial_attn across ranks via the typed
-    // transition. After this every rank's `partial_attn` buffer holds
-    // the full hidden-dim attn-out — typestate-tagged `Replicated`.
+    // transition.
     //
-    // Field-type migration to `Buffer<F16, RowParallel<0>>` storage is
-    // deferred (Phase 8d) since it cascades through ~12 read sites
-    // each for `hidden` / `partial_attn` / `partial_ffn`. The typed
-    // wrapper at the AR boundary is the proof-of-concept (Phase 8b)
-    // — it demonstrates the compile-time transition flow without
-    // forcing the larger field-type churn.
+    // Cross-rank sync: the `sum_tp2` kernel reads peer partials over
+    // BAR1 — without explicit ordering, rank 0's AR can launch before
+    // rank 1's Phase-1 writes are visible to BAR1 (and vice versa),
+    // resulting in stale-peer reads + diverging post-AR hidden
+    // across ranks (caught by `tp_hidden_cross_rank_match`). Host-
+    // sync every rank's stream before the AR launches so the
+    // partial[r] buffers are fully populated cluster-wide.
+    for r in 0..n_ranks {
+        driver.tp.cluster().device(r).default_stream().synchronize()?;
+    }
     {
         // SAFETY: partial_attn is hidden F16 elems per rank; streams outlive
-        // this call; subsequent Phase-3 reads on each rank are serialised on
-        // that rank's stream.
+        // this call; pre-AR streams sync'd above, so peer BAR1 reads land
+        // on post-Phase-1 bytes. Phase-3 reads on each rank are serialised
+        // on that rank's stream.
         let _replicated = unsafe {
             let partials: [Buffer<F16, RowParallel<0>>; 2] = [
                 Buffer::from_raw_unchecked(driver.stages[0].partial_attn, hidden),
@@ -578,10 +582,6 @@ fn forward_layer_decode_tp(
             tp_allreduce_sum::<0>(driver.tp.ar(), &partials, &streams)
         }
         .context("AR sum partial_attn (typed)")?;
-        // `_replicated` is `Vec<Buffer<F16, Replicated>>` tagging the
-        // same allocations as Replicated. Phase-3 reads consume them
-        // via the raw `stage.partial_attn` pointer (the typed flow
-        // ends at the AR transition for this proof-of-concept).
     }
 
     if std::env::var_os("FLAMBEAU_TP_DEBUG_PHASES").is_some() && il < 2 {
@@ -684,7 +684,10 @@ fn forward_layer_decode_tp(
         }
     }
     // Phase 5: AR-sum partial_ffn via the typed transition (same
-    // pattern as Phase 2 above).
+    // pattern as Phase 2 above; same cross-rank sync rationale).
+    for r in 0..n_ranks {
+        driver.tp.cluster().device(r).default_stream().synchronize()?;
+    }
     {
         // SAFETY: same as Phase 2.
         let _replicated = unsafe {
