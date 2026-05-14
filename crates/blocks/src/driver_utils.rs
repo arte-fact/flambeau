@@ -306,6 +306,21 @@ impl RawAllocTracker {
         self.disposed
     }
 
+    /// Drain the tracked allocs and mark the tracker disposed without
+    /// freeing any of them. Use when the caller has taken ownership of
+    /// the (`ptr`, `bytes`) pairs via [`UploadedTensor`] (or similar)
+    /// and is tracking them on its own — e.g. qwen3-moe's per-shard
+    /// byte counter + DeviceTensor list, or gemma4's PP `raw:
+    /// &mut Vec<(DevicePtr, usize)>`. Returns the drained alloc list
+    /// so the caller can integrate it.
+    ///
+    /// After this call the tracker behaves as if `dispose` had been
+    /// called — `Drop` won't log, subsequent `dispose` is a no-op.
+    pub fn forget_allocs(&mut self) -> Vec<(DevicePtr, usize)> {
+        self.disposed = true;
+        std::mem::take(&mut self.allocs)
+    }
+
     /// Free every tracked allocation on `device` and mark disposed.
     /// Idempotent — a second call is a no-op.
     pub fn dispose(&mut self, device: &HipDevice) -> Result<()> {

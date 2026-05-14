@@ -28,6 +28,7 @@
 
 use anyhow::{anyhow, bail, Context, Result};
 use flambeau_backend_hip::{HipCluster, HipDevice};
+use flambeau_blocks::{LmHead, OutputNorm, RawAllocTracker, TokenEmbd, WeightRole, WeightUploader};
 use flambeau_core::{CopyDirection, Device, DevicePtr, Stream};
 use flambeau_ops::hip::OpsRegistry;
 use flambeau_quant::{GgmlDType, GgufFile, QK8_0};
@@ -263,19 +264,22 @@ impl Qwen3MoEShardedModel {
                 layers.push(lw);
             }
 
-            // 2. Upload the globals this rank needs.
+            // 2. Upload the globals this rank needs — typed `WeightRole`
+            // dispatch picks the right primitive (raw memcpy for token_embd
+            // + output, F32→F16 cast for output_norm).
             let is_first = assignment.is_first(rank);
             let is_last = assignment.is_last(rank);
             let token_embd = if is_first || (is_last && config.tied_lm_head) {
-                let (t, b) = upload_one(file, &layout.token_embd, device)?;
+                let (t, b) =
+                    upload_global_role::<TokenEmbd>(file, &config, device, &layout.token_embd)?;
                 bytes += b;
                 Some(t)
             } else {
                 None
             };
             let output_norm = if is_last {
-                // Global norm: F32 in Qwen3.6; cast to F16 so rmsnorm_quant_q8_1 reads it correctly.
-                let (t, b) = upload_as_f16(file, &layout.output_norm, device)?;
+                let (t, b) =
+                    upload_global_role::<OutputNorm>(file, &config, device, &layout.output_norm)?;
                 bytes += b;
                 Some(t)
             } else {
@@ -283,7 +287,7 @@ impl Qwen3MoEShardedModel {
             };
             let output = if is_last {
                 if let Some(r) = &layout.output {
-                    let (t, b) = upload_one(file, r, device)?;
+                    let (t, b) = upload_global_role::<LmHead>(file, &config, device, r)?;
                     bytes += b;
                     Some(t)
                 } else {
@@ -479,6 +483,46 @@ fn iter_layer_tensor_bytes(l: &LayerWeights) -> Vec<usize> {
 
 /// Upload one `ResolvedTensor` to `device`. Returns the `DeviceTensor` +
 /// byte count. Fails if the mmap slice is shorter than declared.
+/// Upload a global tensor via the typed `WeightRole` uploader. The
+/// per-rank shard still tracks the resulting alloc through its own
+/// `total_bytes` counter + the `DeviceTensor` returned here; the
+/// tracker created inside is drained via `forget_allocs` so its `Drop`
+/// doesn't double-free.
+fn upload_global_role<R: WeightRole>(
+    file: &GgufFile,
+    cfg: &Qwen3MoEConfig,
+    device: &HipDevice,
+    layout_tensor: &ResolvedTensor,
+) -> Result<(DeviceTensor, usize)> {
+    let stream = device.default_stream();
+    let mut tracker = RawAllocTracker::new();
+    let mut up = WeightUploader {
+        device,
+        stream,
+        tracker: &mut tracker,
+        file,
+        cfg,
+        world: 1,
+        rank: 0,
+    };
+    let uploaded = up.upload_required::<R>(0)?;
+    drop(up);
+    // Tracker still holds the (ptr, bytes) record from the upload.
+    // The shard takes ownership via DeviceTensor below, so drain
+    // without freeing.
+    let _ = tracker.forget_allocs();
+    Ok((
+        DeviceTensor {
+            ptr: uploaded.ptr,
+            dtype: uploaded.dtype,
+            dims: layout_tensor.dims.clone(),
+            bytes: uploaded.bytes,
+            name: std::sync::Arc::from(layout_tensor.name.as_str()),
+        },
+        uploaded.bytes,
+    ))
+}
+
 fn upload_one(
     file: &GgufFile,
     r: &ResolvedTensor,
@@ -1065,7 +1109,7 @@ fn upload_layer(
 
     let attn = match &desc.attn {
         LayerAttnBlock::Dense(d) => {
-            AttnWeights::Dense(upload_dense(d, file, device, &mut bytes)?)
+            AttnWeights::Dense(upload_dense(d, file, desc.layer_idx, cfg, device, &mut bytes)?)
         }
         LayerAttnBlock::FullAttn(f) => {
             AttnWeights::FullAttn(upload_full(f, file, device, &mut bytes)?)
@@ -1133,35 +1177,116 @@ fn up_q8_0(
     Ok(t)
 }
 
+/// Upload one tensor via a typed `WeightRole`, fold the byte count into
+/// `total`, and fire `advise_drop_tensor` to free the mmap page cache
+/// (matches the legacy `up_raw` / `up_f16` behaviour). Used for the
+/// per-layer dense-attn migration.
+fn up_role<R: WeightRole>(
+    file: &GgufFile,
+    cfg: &Qwen3MoEConfig,
+    r: &ResolvedTensor,
+    layer_idx: usize,
+    device: &HipDevice,
+    total: &mut usize,
+) -> Result<DeviceTensor> {
+    let stream = device.default_stream();
+    let mut tracker = RawAllocTracker::new();
+    let mut up = WeightUploader {
+        device,
+        stream,
+        tracker: &mut tracker,
+        file,
+        cfg,
+        world: 1,
+        rank: 0,
+    };
+    let uploaded = up.upload_required::<R>(layer_idx)?;
+    drop(up);
+    let _ = tracker.forget_allocs();
+    *total += uploaded.bytes;
+    file.advise_drop_tensor(&r.name);
+    Ok(DeviceTensor {
+        ptr: uploaded.ptr,
+        dtype: uploaded.dtype,
+        dims: r.dims.clone(),
+        bytes: uploaded.bytes,
+        name: std::sync::Arc::from(r.name.as_str()),
+    })
+}
+
+/// Optional variant — returns `None` when the role's tensor is absent
+/// from the GGUF.
+fn up_role_opt<R: WeightRole>(
+    file: &GgufFile,
+    cfg: &Qwen3MoEConfig,
+    r: &ResolvedTensor,
+    layer_idx: usize,
+    device: &HipDevice,
+    total: &mut usize,
+) -> Result<Option<DeviceTensor>> {
+    let stream = device.default_stream();
+    let mut tracker = RawAllocTracker::new();
+    let mut up = WeightUploader {
+        device,
+        stream,
+        tracker: &mut tracker,
+        file,
+        cfg,
+        world: 1,
+        rank: 0,
+    };
+    let result = up.upload::<R>(layer_idx)?;
+    drop(up);
+    let _ = tracker.forget_allocs();
+    Ok(result.map(|uploaded| {
+        *total += uploaded.bytes;
+        file.advise_drop_tensor(&r.name);
+        DeviceTensor {
+            ptr: uploaded.ptr,
+            dtype: uploaded.dtype,
+            dims: r.dims.clone(),
+            bytes: uploaded.bytes,
+            name: std::sync::Arc::from(r.name.as_str()),
+        }
+    }))
+}
+
 fn upload_dense(
     d: &DenseAttnTensors,
     file: &GgufFile,
+    layer_idx: usize,
+    cfg: &Qwen3MoEConfig,
     device: &HipDevice,
     total: &mut usize,
 ) -> Result<DenseAttnWeights> {
+    use flambeau_blocks::{AttnK, AttnKBias, AttnKNorm, AttnOutput, AttnQ, AttnQBias, AttnQNorm, AttnV, AttnVBias};
     Ok(DenseAttnWeights {
-        attn_q: up_raw(file, &d.attn_q, device, total)?,
-        attn_k: up_raw(file, &d.attn_k, device, total)?,
-        attn_v: up_raw(file, &d.attn_v, device, total)?,
-        attn_output: up_raw(file, &d.attn_output, device, total)?,
-        // Per-head Q/K rmsnorm weights — F32 in Qwen3.6, F16 elsewhere.
-        attn_q_norm: up_f16(file, &d.attn_q_norm, device, total)?,
-        attn_k_norm: up_f16(file, &d.attn_k_norm, device, total)?,
+        attn_q: up_role::<AttnQ>(file, cfg, &d.attn_q, layer_idx, device, total)?,
+        attn_k: up_role::<AttnK>(file, cfg, &d.attn_k, layer_idx, device, total)?,
+        attn_v: up_role::<AttnV>(file, cfg, &d.attn_v, layer_idx, device, total)?,
+        attn_output: up_role::<AttnOutput>(file, cfg, &d.attn_output, layer_idx, device, total)?,
+        // Per-head Q/K rmsnorm weights — F32 in Qwen3.6, F16 elsewhere
+        // (the role's F32ToF16Norm filter handles both).
+        attn_q_norm: up_role::<AttnQNorm>(file, cfg, &d.attn_q_norm, layer_idx, device, total)?,
+        attn_k_norm: up_role::<AttnKNorm>(file, cfg, &d.attn_k_norm, layer_idx, device, total)?,
         attn_q_bias: d
             .attn_q_bias
             .as_ref()
-            .map(|t| up_raw(file, t, device, total))
-            .transpose()?,
+            .map(|t| up_role_opt::<AttnQBias>(file, cfg, t, layer_idx, device, total))
+            .transpose()?
+            .flatten(),
         attn_k_bias: d
             .attn_k_bias
             .as_ref()
-            .map(|t| up_raw(file, t, device, total))
-            .transpose()?,
+            .map(|t| up_role_opt::<AttnKBias>(file, cfg, t, layer_idx, device, total))
+            .transpose()?
+            .flatten(),
         attn_v_bias: d
             .attn_v_bias
             .as_ref()
-            .map(|t| up_raw(file, t, device, total))
-            .transpose()?,
+            .map(|t| up_role_opt::<AttnVBias>(file, cfg, t, layer_idx, device, total))
+            .transpose()?
+            .flatten(),
     })
 }
 

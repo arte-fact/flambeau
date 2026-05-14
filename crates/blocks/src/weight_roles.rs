@@ -79,7 +79,14 @@ pub trait ModelConfig {
     /// replicated across ranks (rep_outer: qwen3.5/3.6 MoE). `false`
     /// for arches where contiguous TP K/Q split works (rep_inner:
     /// qwen3next).
-    fn gdn_kq_replicated(&self) -> bool {
+    ///
+    /// `world` is the TP world size — the geometry gate
+    /// `local_num_v_heads % num_k_heads == 0` is part of the
+    /// rep_outer decision (Qwen3.6-27B has num_v=48/num_k=16 → tp=2
+    /// gives local_v=24/k=16=1.5 which collapses to OOB in the
+    /// replicated kernel; falls back to contiguous-split there).
+    fn gdn_kq_replicated(&self, world: u32) -> bool {
+        let _ = world;
         false
     }
 
@@ -756,7 +763,7 @@ impl WeightRole for FusedAttnQkv {
                     num_k_heads: cfg.gdn_num_k_heads().unwrap_or(0) as u32,
                     head_v_dim: cfg.gdn_head_v_dim().unwrap_or(0) as u32,
                     head_k_dim: cfg.gdn_head_k_dim().unwrap_or(0) as u32,
-                    kq_replicated: cfg.gdn_kq_replicated(),
+                    kq_replicated: cfg.gdn_kq_replicated(world),
                 }
             }
         },

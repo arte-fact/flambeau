@@ -355,3 +355,87 @@ fn read_rope_sections(
     }
     Ok(Some(out))
 }
+
+#[cfg(feature = "hip")]
+impl flambeau_blocks::ModelConfig for Qwen3MoEConfig {
+    fn hidden(&self) -> usize {
+        self.hidden_size
+    }
+    fn ff_len(&self) -> usize {
+        // For MoE arches, the dense `ffn_*` shapes don't apply per-layer;
+        // the routed-expert intermediate is `moe_intermediate_size`. The
+        // shared roles' `FfnGate/Up/Down` are only used by `qwen3moe`
+        // (pure-dense, the only arch where ffn_gate / ffn_up / ffn_down
+        // exist directly).
+        self.moe_intermediate_size
+    }
+    fn n_heads(&self, _layer: usize) -> usize {
+        self.num_heads
+    }
+    fn n_kv_heads(&self, _layer: usize) -> usize {
+        self.num_kv_heads
+    }
+    fn head_dim(&self, _layer: usize) -> usize {
+        self.head_dim
+    }
+    fn rms_norm_eps(&self) -> f32 {
+        self.rms_norm_eps
+    }
+    fn vocab_size(&self) -> usize {
+        self.vocab_size
+    }
+
+    // --- GDN extensions ---
+    fn gdn_num_v_heads(&self) -> Option<usize> {
+        self.gdn.as_ref().map(|d| d.num_v_heads)
+    }
+    fn gdn_num_k_heads(&self) -> Option<usize> {
+        self.gdn.as_ref().map(|d| d.num_k_heads)
+    }
+    fn gdn_head_v_dim(&self) -> Option<usize> {
+        self.gdn.as_ref().map(|d| d.head_v_dim())
+    }
+    fn gdn_head_k_dim(&self) -> Option<usize> {
+        self.gdn.as_ref().map(|d| d.head_k_dim)
+    }
+    /// Mirrors `tp_layout.rs::Qwen35DenseTpLayout::new` — rep_outer arches
+    /// (qwen35 / qwen35moe / qwen36moe) gate kq_replicated on whether the
+    /// geometry divides cleanly. qwen3next + qwen3 stay rep_inner.
+    fn gdn_kq_replicated(&self, world: u32) -> bool {
+        let arch_supports = matches!(
+            self.arch.as_str(),
+            "qwen35" | "qwen35moe" | "qwen36moe"
+        );
+        if !arch_supports {
+            return false;
+        }
+        let Some(d) = self.gdn.as_ref() else {
+            return true; // pure-dense (no GDN) — flag is unused, match legacy behaviour
+        };
+        let nk = d.num_k_heads as u32;
+        if nk == 0 {
+            return false;
+        }
+        let local_v = (d.num_v_heads as u32) / world;
+        local_v % nk == 0
+    }
+
+    // --- MoE extensions ---
+    fn moe_num_experts(&self) -> Option<usize> {
+        if self.num_experts == 0 {
+            None
+        } else {
+            Some(self.num_experts)
+        }
+    }
+    fn moe_intermediate(&self) -> Option<usize> {
+        if self.num_experts == 0 {
+            None
+        } else {
+            Some(self.moe_intermediate_size)
+        }
+    }
+    fn shared_expert_intermediate(&self) -> Option<usize> {
+        self.shared_expert_intermediate_size
+    }
+}
