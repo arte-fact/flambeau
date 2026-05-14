@@ -155,9 +155,9 @@ pub fn forward_decode_batched_pp(
             // ≥ chunk_bytes; no other stream touches them here.
             unsafe {
                 cluster.peer_copy_via_host(
-                    scratch.per_rank[rank_idx].hidden_a,
+                    scratch.per_rank[rank_idx].hidden_a.ptr(),
                     rank_idx,
-                    scratch.per_rank[rank_idx - 1].hidden_a,
+                    scratch.per_rank[rank_idx - 1].hidden_a.ptr(),
                     rank_idx - 1,
                     chunk_bytes,
                 )?;
@@ -173,7 +173,7 @@ pub fn forward_decode_batched_pp(
             .context("RankForwardPrefillScratch.layer missing")?;
 
         // Walk the rank's local layers, ping-pong through hidden_a/hidden_b.
-        let (mut x_in, mut x_out) = (rank_scratch.hidden_a, rank_scratch.hidden_b);
+        let (mut x_in, mut x_out) = (rank_scratch.hidden_a.ptr(), rank_scratch.hidden_b.ptr());
         // We'll need to access each session's per-rank LayerCache vec for
         // each layer; gather mutable references slot-by-slot, layer-by-layer.
         for (local_idx, layer_weights) in shard.layers.iter().enumerate() {
@@ -207,13 +207,13 @@ pub fn forward_decode_batched_pp(
             std::mem::swap(&mut x_in, &mut x_out);
         }
         // Land final hidden in hidden_a for the next peer-copy / output head.
-        if x_in != rank_scratch.hidden_a {
+        if x_in != rank_scratch.hidden_a.ptr() {
             // SAFETY: both pointers live for this scope; size = chunk_bytes.
             unsafe {
                 device.memcpy_async(
                     device.default_stream(),
                     CopyDirection::DeviceToDevice,
-                    rank_scratch.hidden_a,
+                    rank_scratch.hidden_a.ptr(),
                     x_in,
                     chunk_bytes,
                 )?;

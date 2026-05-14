@@ -215,6 +215,19 @@ impl<T: ElemType, D: Distribution> Clone for Buffer<T, D> {
 }
 impl<T: ElemType, D: Distribution> Copy for Buffer<T, D> {}
 
+// Auto-deref to `DevicePtr` so existing `.offset_bytes(...)` /
+// `.as_usize()` / etc. method calls on the underlying pointer keep
+// compiling when a `DevicePtr` field is migrated to `Buffer<T, D>`.
+// At by-value call sites (fns taking `DevicePtr` directly), callers
+// still need `.ptr()` or `.into_raw()` — the deref coercion only
+// applies to method dispatch.
+impl<T: ElemType, D: Distribution> std::ops::Deref for Buffer<T, D> {
+    type Target = DevicePtr;
+    fn deref(&self) -> &DevicePtr {
+        &self.ptr
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Convenience aliases for the most common buffer shapes.
 // ---------------------------------------------------------------------------

@@ -33,8 +33,8 @@ use crate::config::Qwen3MoEConfig;
 /// the per-layer loop) + the per-layer composition scratches + the output
 /// head scratch. Allocates all once per session.
 pub struct ForwardOneTokenScratch {
-    pub hidden_a: DevicePtr,    // F16 [hidden]
-    pub hidden_b: DevicePtr,    // F16 [hidden]
+    pub hidden_a: flambeau_blocks::Buffer<flambeau_blocks::F16, flambeau_blocks::Local>,
+    pub hidden_b: flambeau_blocks::Buffer<flambeau_blocks::F16, flambeau_blocks::Local>,
     pub layer: Option<LayerForwardScratch>,
     pub output_head: Option<OutputHeadScratch>,
     hidden_bytes: usize,
@@ -44,8 +44,10 @@ pub struct ForwardOneTokenScratch {
 impl ForwardOneTokenScratch {
     pub fn new(cfg: &Qwen3MoEConfig, device: &HipDevice) -> Result<Self> {
         let hidden_bytes = cfg.hidden_size * 2;
-        let hidden_a = device.alloc(hidden_bytes)?;
-        let hidden_b = device.alloc(hidden_bytes)?;
+        let hidden_a_ptr = device.alloc(hidden_bytes)?;
+        let hidden_a = flambeau_blocks::Buffer::from_raw_unchecked(hidden_a_ptr, hidden_bytes / 2);
+        let hidden_b_ptr = device.alloc(hidden_bytes)?;
+        let hidden_b = flambeau_blocks::Buffer::from_raw_unchecked(hidden_b_ptr, hidden_bytes / 2);
         let layer = Some(LayerForwardScratch::new(cfg, device)?);
         let output_head = Some(OutputHeadScratch::new(cfg, device)?);
         Ok(Self {
@@ -64,8 +66,8 @@ impl ForwardOneTokenScratch {
         }
         self.disposed = true;
         unsafe {
-            device.dealloc(self.hidden_a, self.hidden_bytes)?;
-            device.dealloc(self.hidden_b, self.hidden_bytes)?;
+            device.dealloc(self.hidden_a.ptr(), self.hidden_bytes)?;
+            device.dealloc(self.hidden_b.ptr(), self.hidden_bytes)?;
         }
         if let Some(s) = self.layer.take() {
             s.dispose(device)?;
@@ -118,7 +120,7 @@ pub fn forward_one_token(
         stream,
         &weights.token_embd,
         token_id,
-        scratch.hidden_a,
+        scratch.hidden_a.ptr(),
         hidden,
     )?;
 
@@ -128,7 +130,7 @@ pub fn forward_one_token(
         .layer
         .as_mut()
         .context("ForwardOneTokenScratch.layer missing")?;
-    let (mut x_in, mut x_out) = (scratch.hidden_a, scratch.hidden_b);
+    let (mut x_in, mut x_out) = (scratch.hidden_a.ptr(), scratch.hidden_b.ptr());
     for (il, layer_weights) in weights.layers.iter().enumerate() {
         let layer_cache = &mut session.layers_mut()[il];
         forward_layer_decode(
@@ -176,8 +178,8 @@ pub fn forward_one_token(
 
 pub struct ForwardPrefillScratch {
     pub max_tokens: usize,
-    pub hidden_a: DevicePtr,
-    pub hidden_b: DevicePtr,
+    pub hidden_a: flambeau_blocks::Buffer<flambeau_blocks::F16, flambeau_blocks::Local>,
+    pub hidden_b: flambeau_blocks::Buffer<flambeau_blocks::F16, flambeau_blocks::Local>,
     pub layer: Option<LayerPrefillScratch>,
     pub output_head: Option<OutputHeadScratch>,
     hidden_bytes: usize,
@@ -191,8 +193,10 @@ impl ForwardPrefillScratch {
         max_tokens: usize,
     ) -> Result<Self> {
         let hidden_bytes = max_tokens * cfg.hidden_size * 2;
-        let hidden_a = device.alloc(hidden_bytes)?;
-        let hidden_b = device.alloc(hidden_bytes)?;
+        let hidden_a_ptr = device.alloc(hidden_bytes)?;
+        let hidden_a = flambeau_blocks::Buffer::from_raw_unchecked(hidden_a_ptr, hidden_bytes / 2);
+        let hidden_b_ptr = device.alloc(hidden_bytes)?;
+        let hidden_b = flambeau_blocks::Buffer::from_raw_unchecked(hidden_b_ptr, hidden_bytes / 2);
         let layer = Some(LayerPrefillScratch::new(cfg, device, max_tokens)?);
         let output_head = Some(OutputHeadScratch::new(cfg, device)?);
         Ok(Self {
@@ -212,8 +216,8 @@ impl ForwardPrefillScratch {
         }
         self.disposed = true;
         unsafe {
-            device.dealloc(self.hidden_a, self.hidden_bytes)?;
-            device.dealloc(self.hidden_b, self.hidden_bytes)?;
+            device.dealloc(self.hidden_a.ptr(), self.hidden_bytes)?;
+            device.dealloc(self.hidden_b.ptr(), self.hidden_bytes)?;
         }
         if let Some(s) = self.layer.take() {
             s.dispose(device)?;
@@ -290,7 +294,7 @@ pub fn forward_prefill(
         .layer
         .as_mut()
         .context("ForwardPrefillScratch.layer missing")?;
-    let (mut x_in, mut x_out) = (scratch.hidden_a, scratch.hidden_b);
+    let (mut x_in, mut x_out) = (scratch.hidden_a.ptr(), scratch.hidden_b.ptr());
     for (il, layer_weights) in weights.layers.iter().enumerate() {
         let layer_cache = &mut session.layers_mut()[il];
         forward_layer_prefill(

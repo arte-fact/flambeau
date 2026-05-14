@@ -40,18 +40,24 @@ pub struct RankForwardScratchTp {
     pub rank: RankId,
     pub device_id: i32,
     /// Replicated hidden state. AR-reduced after each layer step.
-    pub hidden_a: DevicePtr,
+    /// Typed `Buffer<F16, Replicated>` — the post-AR canonical hidden
+    /// stream. Auto-derefs to `DevicePtr` so existing
+    /// `.offset_bytes(...)` / `.as_usize()` calls compile unchanged;
+    /// by-value passes to fns taking `DevicePtr` use `.ptr()`.
+    pub hidden_a: flambeau_blocks::Buffer<flambeau_blocks::F16, flambeau_blocks::Replicated>,
     /// Ping-pong companion. Used by intra-layer ops that need a
-    /// non-aliasing destination (rmsnorm, residual-add).
-    pub hidden_b: DevicePtr,
+    /// non-aliasing destination (rmsnorm, residual-add). Also
+    /// Replicated post-rmsnorm.
+    pub hidden_b: flambeau_blocks::Buffer<flambeau_blocks::F16, flambeau_blocks::Replicated>,
     /// Rank-local attention output partial. Sized `hidden × max_batch`
     /// because the row-parallel `attn_output` matmul emits a full-`H`
     /// vector that's only this rank's contribution to the global sum.
-    /// AllReduce-residual on this buffer adds it (and 3 peers') into
-    /// `hidden_a`.
-    pub partial_attn_out: DevicePtr,
+    /// Typed `Buffer<F16, RowParallel<0>>` — must be folded into
+    /// `hidden_a` via `tp_allreduce_residual<0>` before downstream
+    /// ops can consume it as full-hidden.
+    pub partial_attn_out: flambeau_blocks::Buffer<flambeau_blocks::F16, flambeau_blocks::RowParallel<0>>,
     /// Rank-local FFN output partial. Same shape + role as above.
-    pub partial_ffn_out: DevicePtr,
+    pub partial_ffn_out: flambeau_blocks::Buffer<flambeau_blocks::F16, flambeau_blocks::RowParallel<0>>,
     /// Per-layer ops scratch. For now reuses the PP-shaped allocation;
     /// may shrink head-sized slabs to per-rank head count.
     pub layer: Option<LayerForwardScratch>,
@@ -83,10 +89,10 @@ impl RankForwardScratchTp {
         // SAFETY: every pointer came from the matching `device.alloc()`
         // in `ShardedForwardOneTokenScratchTp::new`. No aliasing.
         unsafe {
-            device.dealloc(self.hidden_a, self.hidden_bytes)?;
-            device.dealloc(self.hidden_b, self.hidden_bytes)?;
-            device.dealloc(self.partial_attn_out, self.partial_bytes)?;
-            device.dealloc(self.partial_ffn_out, self.partial_bytes)?;
+            device.dealloc(self.hidden_a.ptr(), self.hidden_bytes)?;
+            device.dealloc(self.hidden_b.ptr(), self.hidden_bytes)?;
+            device.dealloc(self.partial_attn_out.ptr(), self.partial_bytes)?;
+            device.dealloc(self.partial_ffn_out.ptr(), self.partial_bytes)?;
         }
         if let Some(s) = self.layer.take() {
             s.dispose(device)?;
@@ -164,10 +170,12 @@ impl ShardedForwardOneTokenScratchTp {
         for rank_idx in 0..cluster.ranks() {
             let device = cluster.device(rank_idx);
             device.bind()?;
-            let hidden_a = device.alloc(hidden_bytes)?;
-            let hidden_b = device.alloc(hidden_bytes)?;
-            let partial_attn_out = device.alloc(partial_bytes)?;
-            let partial_ffn_out = device.alloc(partial_bytes)?;
+            let hidden_a_ptr = device.alloc(hidden_bytes)?;
+            let hidden_b_ptr = device.alloc(hidden_bytes)?;
+            let partial_attn_ptr = device.alloc(partial_bytes)?;
+            let partial_ffn_ptr = device.alloc(partial_bytes)?;
+            let hidden_elems = hidden_bytes / 2; // F16
+            let partial_elems = partial_bytes / 2;
             let layer = Some(LayerForwardScratch::new(cfg, device)?);
             let output_head = if rank_idx as u32 == head_rank.0 {
                 Some(OutputHeadScratch::new(cfg, device)?)
@@ -178,10 +186,16 @@ impl ShardedForwardOneTokenScratchTp {
             per_rank.push(RankForwardScratchTp {
                 rank: RankId(rank_idx as u32),
                 device_id: device.id(),
-                hidden_a,
-                hidden_b,
-                partial_attn_out,
-                partial_ffn_out,
+                hidden_a: flambeau_blocks::Buffer::from_raw_unchecked(hidden_a_ptr, hidden_elems),
+                hidden_b: flambeau_blocks::Buffer::from_raw_unchecked(hidden_b_ptr, hidden_elems),
+                partial_attn_out: flambeau_blocks::Buffer::from_raw_unchecked(
+                    partial_attn_ptr,
+                    partial_elems,
+                ),
+                partial_ffn_out: flambeau_blocks::Buffer::from_raw_unchecked(
+                    partial_ffn_ptr,
+                    partial_elems,
+                ),
                 layer,
                 output_head,
                 producer_done_event,
@@ -235,13 +249,15 @@ pub struct RankForwardPrefillScratchTp {
     pub device_id: i32,
     pub max_tokens: usize,
     /// F16 `[max_tokens, hidden]` — replicated residual stream (post-AR).
-    pub hidden_a: DevicePtr,
+    /// Typed `Buffer<F16, Replicated>` (auto-derefs to `DevicePtr` for
+    /// existing `.offset_bytes(...)` calls).
+    pub hidden_a: flambeau_blocks::Buffer<flambeau_blocks::F16, flambeau_blocks::Replicated>,
     /// F16 `[max_tokens, hidden]` — ping-pong partner for `hidden_a`.
-    pub hidden_b: DevicePtr,
+    pub hidden_b: flambeau_blocks::Buffer<flambeau_blocks::F16, flambeau_blocks::Replicated>,
     /// F16 `[max_tokens, hidden]` — pre-AR per-rank attn partial.
-    pub partial_attn_out: DevicePtr,
+    pub partial_attn_out: flambeau_blocks::Buffer<flambeau_blocks::F16, flambeau_blocks::RowParallel<0>>,
     /// F16 `[max_tokens, hidden]` — pre-AR per-rank FFN partial.
-    pub partial_ffn_out: DevicePtr,
+    pub partial_ffn_out: flambeau_blocks::Buffer<flambeau_blocks::F16, flambeau_blocks::RowParallel<0>>,
     pub layer: Option<super::layer::LayerPrefillScratch>,
     pub output_head: Option<super::io::OutputHeadScratch>,
     /// **P2.9b-i2-C-wire** — single shared `GdnScratch` (single-token
@@ -279,10 +295,10 @@ impl RankForwardPrefillScratchTp {
         self.disposed = true;
         // SAFETY: every pointer came from `device.alloc` in `new_with_head_rank`.
         unsafe {
-            device.dealloc(self.hidden_a, self.hidden_bytes)?;
-            device.dealloc(self.hidden_b, self.hidden_bytes)?;
-            device.dealloc(self.partial_attn_out, self.partial_bytes)?;
-            device.dealloc(self.partial_ffn_out, self.partial_bytes)?;
+            device.dealloc(self.hidden_a.ptr(), self.hidden_bytes)?;
+            device.dealloc(self.hidden_b.ptr(), self.hidden_bytes)?;
+            device.dealloc(self.partial_attn_out.ptr(), self.partial_bytes)?;
+            device.dealloc(self.partial_ffn_out.ptr(), self.partial_bytes)?;
         }
         if let Some(s) = self.layer.take() {
             s.dispose(device)?;
@@ -368,10 +384,18 @@ impl ShardedForwardPrefillScratchTp {
         for rank_idx in 0..cluster.ranks() {
             let device = cluster.device(rank_idx);
             device.bind()?;
-            let hidden_a = device.alloc(hidden_bytes)?;
-            let hidden_b = device.alloc(hidden_bytes)?;
-            let partial_attn_out = device.alloc(partial_bytes)?;
-            let partial_ffn_out = device.alloc(partial_bytes)?;
+            let hidden_a_ptr = device.alloc(hidden_bytes)?;
+            let hidden_b_ptr = device.alloc(hidden_bytes)?;
+            let partial_attn_ptr = device.alloc(partial_bytes)?;
+            let partial_ffn_ptr = device.alloc(partial_bytes)?;
+            let hidden_elems = hidden_bytes / 2;
+            let partial_elems = partial_bytes / 2;
+            let hidden_a = flambeau_blocks::Buffer::from_raw_unchecked(hidden_a_ptr, hidden_elems);
+            let hidden_b = flambeau_blocks::Buffer::from_raw_unchecked(hidden_b_ptr, hidden_elems);
+            let partial_attn_out =
+                flambeau_blocks::Buffer::from_raw_unchecked(partial_attn_ptr, partial_elems);
+            let partial_ffn_out =
+                flambeau_blocks::Buffer::from_raw_unchecked(partial_ffn_ptr, partial_elems);
             let layer = Some(super::layer::LayerPrefillScratch::new(cfg, device, max_tokens)?);
             let output_head = if rank_idx as u32 == head_rank.0 {
                 Some(super::io::OutputHeadScratch::new(cfg, device)?)
@@ -595,7 +619,7 @@ fn debug_probe_rank_hidden(
             stream,
             CopyDirection::DeviceToHost,
             DevicePtr(host.as_mut_ptr() as usize),
-            scratch.per_rank[rank].hidden_a,
+            scratch.per_rank[rank].hidden_a.ptr(),
             n_bytes,
         )?;
     }
@@ -648,7 +672,7 @@ fn debug_probe_rank0_hidden(
             stream,
             CopyDirection::DeviceToHost,
             DevicePtr(host.as_mut_ptr() as usize),
-            scratch.per_rank[0].hidden_a,
+            scratch.per_rank[0].hidden_a.ptr(),
             n_bytes,
         )?;
     }
@@ -923,7 +947,7 @@ impl<'a> flambeau_blocks::TpPrefillDriver for Qwen3MoETpPrefillDriver<'a> {
         let device = self.cluster.device(rank);
         let stream = device.default_stream();
         let row_bytes = self.model.config.hidden_size * 2;
-        let dst_base = self.scratch.per_rank[rank].hidden_a;
+        let dst_base = self.scratch.per_rank[rank].hidden_a.ptr();
         for (i, &tok) in tokens.iter().enumerate() {
             let dst_row = DevicePtr(dst_base.as_usize() + i * row_bytes);
             forward_embed_decode_host(
@@ -1121,8 +1145,8 @@ pub fn forward_prefill_tp_batched_layers(
             device.bind()?;
             let stream = device.default_stream();
             let layer_tensors = &model.shards[r].layers[il];
-            let hidden_a = scratch_ref.per_rank[r].hidden_a;
-            let partial_attn_out = scratch_ref.per_rank[r].partial_attn_out;
+            let hidden_a = scratch_ref.per_rank[r].hidden_a.ptr();
+            let partial_attn_out = scratch_ref.per_rank[r].partial_attn_out.ptr();
             let layer_scratch = scratch_ref.per_rank[r]
                 .layer
                 .as_mut()
@@ -1233,7 +1257,7 @@ pub fn forward_prefill_tp_batched_layers(
             let layer_tensors = &model.shards[r].layers[il];
             let ffn_norm = find_by_suffix(layer_tensors, il, "ffn_norm.weight")
                 .or_else(|_| find_by_suffix(layer_tensors, il, "post_attention_norm.weight"))?;
-            let hidden_a = scratch_ref.per_rank[r].hidden_a;
+            let hidden_a = scratch_ref.per_rank[r].hidden_a.ptr();
             let layer_scratch = scratch_ref.per_rank[r]
                 .layer
                 .as_mut()
@@ -1267,7 +1291,7 @@ pub fn forward_prefill_tp_batched_layers(
                 let ffn_gate = find_by_suffix(layer_tensors, il, "ffn_gate.weight")?;
                 let ffn_up = find_by_suffix(layer_tensors, il, "ffn_up.weight")?;
                 let ffn_down = find_by_suffix(layer_tensors, il, "ffn_down.weight")?;
-                let partial_ffn_out = scratch_ref.per_rank[r].partial_ffn_out;
+                let partial_ffn_out = scratch_ref.per_rank[r].partial_ffn_out.ptr();
                 let layer_scratch = scratch_ref.per_rank[r]
                     .layer
                     .as_mut()
@@ -1305,7 +1329,7 @@ pub fn forward_prefill_tp_batched_layers(
                 let ffn_gate_exps = find_by_suffix(layer_tensors, il, "ffn_gate_exps.weight")?;
                 let ffn_up_exps = find_by_suffix(layer_tensors, il, "ffn_up_exps.weight")?;
                 let ffn_down_exps = find_by_suffix(layer_tensors, il, "ffn_down_exps.weight")?;
-                let partial_ffn_out = scratch_ref.per_rank[r].partial_ffn_out;
+                let partial_ffn_out = scratch_ref.per_rank[r].partial_ffn_out.ptr();
                 let shared_delta_f16 = scratch_ref.per_rank[r]
                     .layer
                     .as_ref()
@@ -1434,9 +1458,9 @@ pub fn forward_prefill_tp_batched_layers(
                 flambeau_ops::hip::mlp::add_f16(
                     ops,
                     stream,
-                    scratch_ref.per_rank[r].hidden_a,
-                    scratch_ref.per_rank[r].partial_ffn_out,
-                    scratch_ref.per_rank[r].hidden_a,
+                    scratch_ref.per_rank[r].hidden_a.ptr(),
+                    scratch_ref.per_rank[r].partial_ffn_out.ptr(),
+                    scratch_ref.per_rank[r].hidden_a.ptr(),
                     n_tokens * hidden,
                 )
                 .with_context(|| format!("post-MoE replicated add_f16 layer {il}"))?;
@@ -1468,10 +1492,10 @@ fn ar_residual_prefill(
     use flambeau_core::Stream;
 
     let partial_ptr = |r: usize| match kind {
-        AttnOrFfn::Attn => scratch.per_rank[r].partial_attn_out,
-        AttnOrFfn::Ffn => scratch.per_rank[r].partial_ffn_out,
+        AttnOrFfn::Attn => scratch.per_rank[r].partial_attn_out.ptr(),
+        AttnOrFfn::Ffn => scratch.per_rank[r].partial_ffn_out.ptr(),
     };
-    let hidden_ptr = |r: usize| scratch.per_rank[r].hidden_a;
+    let hidden_ptr = |r: usize| scratch.per_rank[r].hidden_a.ptr();
 
     // 1. Sync each rank's stream so peer reads see the partial-write
     // completed (event-based ordering is the decode optimization;
@@ -1639,7 +1663,7 @@ impl<'a> flambeau_blocks::TpDecodeDriver for Qwen3MoETpDriver<'a> {
             device.default_stream(),
             &self.model.shards[rank].token_embd,
             token_id,
-            self.scratch.per_rank[rank].hidden_a,
+            self.scratch.per_rank[rank].hidden_a.ptr(),
             self.model.config.hidden_size,
         )
         .with_context(|| format!("rank {rank} embed"))
@@ -1701,7 +1725,7 @@ impl<'a> flambeau_blocks::TpDecodeDriver for Qwen3MoETpDriver<'a> {
         let stream = device.default_stream();
         let head_shard = &self.model.shards[head_rank];
         let lm_head = head_shard.output.as_ref().unwrap_or(&head_shard.token_embd);
-        let hidden_a = self.scratch.per_rank[head_rank].hidden_a;
+        let hidden_a = self.scratch.per_rank[head_rank].hidden_a.ptr();
         let head_scratch = self.scratch.per_rank[head_rank]
             .output_head
             .as_mut()
@@ -1760,8 +1784,8 @@ pub(crate) fn forward_full_attn_layer_tp(
         // dispatch on cache variant; the generic
         // `forward_full_attn_decode_tp<L>` body picks the right
         // attention kernel (F16 vs Q8_0) via L::NAME.
-        let hidden_a = scratch.per_rank[r].hidden_a;
-        let partial_attn_out = scratch.per_rank[r].partial_attn_out;
+        let hidden_a = scratch.per_rank[r].hidden_a.ptr();
+        let partial_attn_out = scratch.per_rank[r].partial_attn_out.ptr();
         let layer_scratch = scratch.per_rank[r]
             .layer
             .as_mut()
@@ -1787,7 +1811,7 @@ pub(crate) fn forward_full_attn_layer_tp(
         }
     }
     if dev_flag("FLAMBEAU_TP_PROBE") {
-        let p = scratch.per_rank[0].partial_attn_out;
+        let p = scratch.per_rank[0].partial_attn_out.ptr();
         debug_probe_rank0_named(scratch, cluster, "post-attn partial", il, p)?;
     }
 
@@ -1834,15 +1858,15 @@ pub(crate) fn forward_full_attn_layer_tp(
             flambeau_ops::hip::mlp::add_f16(
                 &ops,
                 stream,
-                scratch.per_rank[r].hidden_a,
-                scratch.per_rank[r].partial_attn_out,
-                scratch.per_rank[r].hidden_a,
+                scratch.per_rank[r].hidden_a.ptr(),
+                scratch.per_rank[r].partial_attn_out.ptr(),
+                scratch.per_rank[r].hidden_a.ptr(),
                 cfg.hidden_size,
             )?;
             rmsnorm_f16(
                 &ops,
                 stream,
-                scratch.per_rank[r].hidden_a,
+                scratch.per_rank[r].hidden_a.ptr(),
                 post_norm_ptrs[r],
                 mid_norm_ptrs[r],
                 1,
@@ -1878,7 +1902,7 @@ pub(crate) fn forward_full_attn_layer_tp(
         model, scratch, cluster, &mid_norm_ptrs, il, ffn_world, false,
     )?;
     if probe {
-        let p = scratch.per_rank[0].partial_ffn_out;
+        let p = scratch.per_rank[0].partial_ffn_out.ptr();
         debug_probe_rank0_named(scratch, cluster, "post-ffn partial", il, p)?;
     }
 
@@ -1895,9 +1919,9 @@ pub(crate) fn forward_full_attn_layer_tp(
             flambeau_ops::hip::mlp::add_f16(
                 &ops,
                 stream,
-                scratch.per_rank[r].hidden_a,
-                scratch.per_rank[r].partial_ffn_out,
-                scratch.per_rank[r].hidden_a,
+                scratch.per_rank[r].hidden_a.ptr(),
+                scratch.per_rank[r].partial_ffn_out.ptr(),
+                scratch.per_rank[r].hidden_a.ptr(),
                 cfg.hidden_size,
             )?;
         }
@@ -1966,10 +1990,10 @@ fn ar_residual(
 
     // Build the per-rank pointer arrays.
     let partial_ptr = |r: usize| match which {
-        AttnOrFfn::Attn => scratch.per_rank[r].partial_attn_out,
-        AttnOrFfn::Ffn => scratch.per_rank[r].partial_ffn_out,
+        AttnOrFfn::Attn => scratch.per_rank[r].partial_attn_out.ptr(),
+        AttnOrFfn::Ffn => scratch.per_rank[r].partial_ffn_out.ptr(),
     };
-    let hidden_ptr = |r: usize| scratch.per_rank[r].hidden_a;
+    let hidden_ptr = |r: usize| scratch.per_rank[r].hidden_a.ptr();
 
     // 1. Each rank records its producer-done event on its own stream
     // after the partial-write kernel. record() is host-non-blocking.
@@ -2063,7 +2087,7 @@ fn forward_ffn_block_tp(
             let ffn_gate = find_by_suffix(layer_tensors, il, "ffn_gate.weight")?;
             let ffn_up = find_by_suffix(layer_tensors, il, "ffn_up.weight")?;
             let ffn_down = find_by_suffix(layer_tensors, il, "ffn_down.weight")?;
-            let partial_ffn_out = scratch.per_rank[r].partial_ffn_out;
+            let partial_ffn_out = scratch.per_rank[r].partial_ffn_out.ptr();
             let mid_norm_f16 = mid_norm_ptrs[r];
             let layer_scratch = scratch.per_rank[r].layer.as_mut().unwrap();
             let dense_scratch = layer_scratch
@@ -2096,7 +2120,7 @@ fn forward_ffn_block_tp(
             let ffn_gate_exps = find_by_suffix(layer_tensors, il, "ffn_gate_exps.weight")?;
             let ffn_up_exps = find_by_suffix(layer_tensors, il, "ffn_up_exps.weight")?;
             let ffn_down_exps = find_by_suffix(layer_tensors, il, "ffn_down_exps.weight")?;
-            let partial_ffn_out = scratch.per_rank[r].partial_ffn_out;
+            let partial_ffn_out = scratch.per_rank[r].partial_ffn_out.ptr();
             let mid_norm_f16 = mid_norm_ptrs[r];
             // Snapshot all DevicePtrs we'll need before taking the
             // mutable layer_scratch borrow (which may sub-borrow moe_scratch
@@ -2282,10 +2306,10 @@ fn ar_residual_rmsnorm(
     eps: f32,
 ) -> anyhow::Result<()> {
     let partial_ptr = |r: usize| match which {
-        AttnOrFfn::Attn => scratch.per_rank[r].partial_attn_out,
-        AttnOrFfn::Ffn => scratch.per_rank[r].partial_ffn_out,
+        AttnOrFfn::Attn => scratch.per_rank[r].partial_attn_out.ptr(),
+        AttnOrFfn::Ffn => scratch.per_rank[r].partial_ffn_out.ptr(),
     };
-    let hidden_ptr = |r: usize| scratch.per_rank[r].hidden_a;
+    let hidden_ptr = |r: usize| scratch.per_rank[r].hidden_a.ptr();
 
     // 1. Per-rank producer-done event record (host non-blocking).
     for r in 0..cluster.ranks() {
@@ -2408,8 +2432,8 @@ pub(crate) fn forward_gdn_layer_tp(
             _ => bail!("rank {r} layer {il}: expected Gdn cache (got non-Gdn variant)"),
         };
         // Snapshot Copy DevicePtrs before mutable borrow on layer scratch.
-        let hidden_a = scratch.per_rank[r].hidden_a;
-        let partial_attn_out = scratch.per_rank[r].partial_attn_out;
+        let hidden_a = scratch.per_rank[r].hidden_a.ptr();
+        let partial_attn_out = scratch.per_rank[r].partial_attn_out.ptr();
         let layer_scratch = scratch.per_rank[r]
             .layer
             .as_mut()
@@ -2445,7 +2469,7 @@ pub(crate) fn forward_gdn_layer_tp(
     }
     if probe {
         for r in 0..cluster.ranks() {
-            let p = scratch.per_rank[r].partial_attn_out;
+            let p = scratch.per_rank[r].partial_attn_out.ptr();
             // Reuse the F32 / F16 probe path with rank-r device bound by reading
             // bytes from rank r's pointer.
             debug_probe_named_rank(scratch, cluster, "post-gdn partial", il, p, r)?;
@@ -2489,15 +2513,15 @@ pub(crate) fn forward_gdn_layer_tp(
             flambeau_ops::hip::mlp::add_f16(
                 &ops,
                 stream,
-                scratch.per_rank[r].hidden_a,
-                scratch.per_rank[r].partial_attn_out,
-                scratch.per_rank[r].hidden_a,
+                scratch.per_rank[r].hidden_a.ptr(),
+                scratch.per_rank[r].partial_attn_out.ptr(),
+                scratch.per_rank[r].hidden_a.ptr(),
                 cfg.hidden_size,
             )?;
             rmsnorm_f16(
                 &ops,
                 stream,
-                scratch.per_rank[r].hidden_a,
+                scratch.per_rank[r].hidden_a.ptr(),
                 post_norm_ptrs[r],
                 mid_norm_ptrs[r],
                 1,
@@ -2543,9 +2567,9 @@ pub(crate) fn forward_gdn_layer_tp(
             flambeau_ops::hip::mlp::add_f16(
                 &ops,
                 stream,
-                scratch.per_rank[r].hidden_a,
-                scratch.per_rank[r].partial_ffn_out,
-                scratch.per_rank[r].hidden_a,
+                scratch.per_rank[r].hidden_a.ptr(),
+                scratch.per_rank[r].partial_ffn_out.ptr(),
+                scratch.per_rank[r].hidden_a.ptr(),
                 cfg.hidden_size,
             )?;
         }
@@ -2673,8 +2697,8 @@ pub fn forward_decode_batched_tp(
             device.bind()?;
             let stream = device.default_stream();
             let layer_tensors = &model.shards[r].layers[il];
-            let hidden_a = scratch.per_rank[r].hidden_a;
-            let partial_attn_out = scratch.per_rank[r].partial_attn_out;
+            let hidden_a = scratch.per_rank[r].hidden_a.ptr();
+            let partial_attn_out = scratch.per_rank[r].partial_attn_out.ptr();
             let layer_scratch = scratch.per_rank[r]
                 .layer
                 .as_mut()
@@ -2827,7 +2851,7 @@ pub fn forward_decode_batched_tp(
             let layer_tensors = &model.shards[r].layers[il];
             let ffn_norm = find_by_suffix(layer_tensors, il, "ffn_norm.weight")
                 .or_else(|_| find_by_suffix(layer_tensors, il, "post_attention_norm.weight"))?;
-            let hidden_a = scratch.per_rank[r].hidden_a;
+            let hidden_a = scratch.per_rank[r].hidden_a.ptr();
             let layer_scratch = scratch.per_rank[r]
                 .layer
                 .as_mut()
@@ -2861,7 +2885,7 @@ pub fn forward_decode_batched_tp(
                 let ffn_gate = find_by_suffix(layer_tensors, il, "ffn_gate.weight")?;
                 let ffn_up = find_by_suffix(layer_tensors, il, "ffn_up.weight")?;
                 let ffn_down = find_by_suffix(layer_tensors, il, "ffn_down.weight")?;
-                let partial_ffn_out = scratch.per_rank[r].partial_ffn_out;
+                let partial_ffn_out = scratch.per_rank[r].partial_ffn_out.ptr();
                 let layer_scratch = scratch.per_rank[r]
                     .layer
                     .as_mut()
@@ -2899,7 +2923,7 @@ pub fn forward_decode_batched_tp(
                 let ffn_gate_exps = find_by_suffix(layer_tensors, il, "ffn_gate_exps.weight")?;
                 let ffn_up_exps = find_by_suffix(layer_tensors, il, "ffn_up_exps.weight")?;
                 let ffn_down_exps = find_by_suffix(layer_tensors, il, "ffn_down_exps.weight")?;
-                let partial_ffn_out = scratch.per_rank[r].partial_ffn_out;
+                let partial_ffn_out = scratch.per_rank[r].partial_ffn_out.ptr();
                 let shared_delta_f16 = scratch.per_rank[r]
                     .layer
                     .as_ref()
@@ -2995,9 +3019,9 @@ pub fn forward_decode_batched_tp(
                 flambeau_ops::hip::mlp::add_f16(
                     ops,
                     stream,
-                    scratch.per_rank[r].hidden_a,
-                    scratch.per_rank[r].partial_ffn_out,
-                    scratch.per_rank[r].hidden_a,
+                    scratch.per_rank[r].hidden_a.ptr(),
+                    scratch.per_rank[r].partial_ffn_out.ptr(),
+                    scratch.per_rank[r].hidden_a.ptr(),
                     n * hidden,
                 )
                 .with_context(|| format!("TP batched-decode replicated ffn add layer {il}"))?;
@@ -3012,7 +3036,7 @@ pub fn forward_decode_batched_tp(
     let head_shard = &model.shards[head_rank];
     let output_norm = &head_shard.output_norm;
     let lm_head = head_shard.output.as_ref().unwrap_or(&head_shard.token_embd);
-    let head_hidden_a = scratch.per_rank[head_rank].hidden_a;
+    let head_hidden_a = scratch.per_rank[head_rank].hidden_a.ptr();
     let head_scratch = scratch.per_rank[head_rank]
         .output_head
         .as_mut()

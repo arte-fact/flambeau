@@ -45,8 +45,11 @@ fn dev_flag(_name: &str) -> bool {
 pub struct RankForwardScratch {
     pub rank: flambeau_runtime::RankId,
     pub device_id: i32,
-    pub hidden_a: DevicePtr,
-    pub hidden_b: DevicePtr,
+    /// Typed `Buffer<F16, Local>` — PP scratch is per-rank private (no
+    /// AR). Auto-derefs to `DevicePtr` for existing `.method()` calls;
+    /// by-value passes use `.ptr()`.
+    pub hidden_a: flambeau_blocks::Buffer<flambeau_blocks::F16, flambeau_blocks::Local>,
+    pub hidden_b: flambeau_blocks::Buffer<flambeau_blocks::F16, flambeau_blocks::Local>,
     pub layer: Option<LayerForwardScratch>,
     pub output_head: Option<OutputHeadScratch>,
     hidden_bytes: usize,
@@ -60,8 +63,8 @@ impl RankForwardScratch {
         }
         self.disposed = true;
         unsafe {
-            device.dealloc(self.hidden_a, self.hidden_bytes)?;
-            device.dealloc(self.hidden_b, self.hidden_bytes)?;
+            device.dealloc(self.hidden_a.ptr(), self.hidden_bytes)?;
+            device.dealloc(self.hidden_b.ptr(), self.hidden_bytes)?;
         }
         if let Some(s) = self.layer.take() {
             s.dispose(device)?;
@@ -122,8 +125,11 @@ impl ShardedForwardOneTokenScratch {
         for rank_idx in 0..cluster.ranks() {
             let device = cluster.device(rank_idx);
             device.bind()?;
-            let hidden_a = device.alloc(hidden_bytes)?;
-            let hidden_b = device.alloc(hidden_bytes)?;
+            let hidden_a_ptr = device.alloc(hidden_bytes)?;
+            let hidden_b_ptr = device.alloc(hidden_bytes)?;
+            let hidden_elems = hidden_bytes / 2;
+            let hidden_a = flambeau_blocks::Buffer::from_raw_unchecked(hidden_a_ptr, hidden_elems);
+            let hidden_b = flambeau_blocks::Buffer::from_raw_unchecked(hidden_b_ptr, hidden_elems);
             let layer = Some(LayerForwardScratch::new(&model.config, device)?);
             let output_head = if rank_idx == cluster.ranks() - 1 {
                 Some(OutputHeadScratch::new(&model.config, device)?)
@@ -203,11 +209,11 @@ impl<'a> flambeau_blocks::PpDecodeDriver for Qwen3MoEPpDriver<'a> {
     }
 
     fn hidden_a(&self, rank: usize) -> DevicePtr {
-        self.scratch.per_rank[rank].hidden_a
+        self.scratch.per_rank[rank].hidden_a.ptr()
     }
 
     fn hidden_b(&self, rank: usize) -> DevicePtr {
-        self.scratch.per_rank[rank].hidden_b
+        self.scratch.per_rank[rank].hidden_b.ptr()
     }
 
     fn hidden_bytes(&self) -> usize {
@@ -227,7 +233,7 @@ impl<'a> flambeau_blocks::PpDecodeDriver for Qwen3MoEPpDriver<'a> {
             rank0.default_stream(),
             token_embd,
             token_id,
-            scratch0.hidden_a,
+            scratch0.hidden_a.ptr(),
             self.model.config.hidden_size,
         )
     }
@@ -324,7 +330,7 @@ impl<'a> flambeau_blocks::PpDecodeDriver for Qwen3MoEPpDriver<'a> {
             output_norm,
             lm_head,
             head_scratch,
-            last_scratch.hidden_a,
+            last_scratch.hidden_a.ptr(),
         )
     }
 
@@ -449,7 +455,7 @@ fn forward_one_token_pp_inner(
             rank0.default_stream(),
             token_embd,
             token_id,
-            scratch0.hidden_a,
+            scratch0.hidden_a.ptr(),
             hidden,
         )?;
         flambeau_backend_hip::profile::mark("embed_done", rank0, rank0.default_stream())?;
@@ -463,9 +469,9 @@ fn forward_one_token_pp_inner(
             // DtoH below; the dst stream picks up the bytes via FIFO.
             unsafe {
                 cluster.peer_copy_via_host_event(
-                    scratch.per_rank[rank_idx].hidden_a,
+                    scratch.per_rank[rank_idx].hidden_a.ptr(),
                     rank_idx,
-                    scratch.per_rank[rank_idx - 1].hidden_a,
+                    scratch.per_rank[rank_idx - 1].hidden_a.ptr(),
                     rank_idx - 1,
                     hidden_bytes,
                     None,
@@ -487,7 +493,7 @@ fn forward_one_token_pp_inner(
             .as_mut()
             .context("per-rank LayerForwardScratch missing")?;
 
-        let (mut x_in, mut x_out) = (rank_scratch.hidden_a, rank_scratch.hidden_b);
+        let (mut x_in, mut x_out) = (rank_scratch.hidden_a.ptr(), rank_scratch.hidden_b.ptr());
         let pp_probe = dev_flag("FLAMBEAU_PP_PROBE");
         for (local_idx, layer_weights) in shard.layers.iter().enumerate() {
             let layer_cache = &mut rank_session.caches[local_idx];
@@ -563,12 +569,12 @@ fn forward_one_token_pp_inner(
                 );
             }
         }
-        if x_in != rank_scratch.hidden_a {
+        if x_in != rank_scratch.hidden_a.ptr() {
             unsafe {
                 device.memcpy_async(
                     device.default_stream(),
                     CopyDirection::DeviceToDevice,
-                    rank_scratch.hidden_a,
+                    rank_scratch.hidden_a.ptr(),
                     x_in,
                     hidden_bytes,
                 )?;
@@ -611,7 +617,7 @@ fn forward_one_token_pp_inner(
         output_norm,
         lm_head,
         output_head_scratch,
-        last_scratch.hidden_a,
+        last_scratch.hidden_a.ptr(),
     )?;
 
     match sink {
@@ -649,8 +655,8 @@ fn forward_one_token_pp_inner(
 /// holds `u_lanes` of these so 5.d can pipeline ubatches across ranks
 /// without aliasing intermediate buffers.
 pub struct UbatchLane {
-    pub hidden_a: DevicePtr,
-    pub hidden_b: DevicePtr,
+    pub hidden_a: flambeau_blocks::Buffer<flambeau_blocks::F16, flambeau_blocks::Local>,
+    pub hidden_b: flambeau_blocks::Buffer<flambeau_blocks::F16, flambeau_blocks::Local>,
     pub layer: LayerPrefillScratch,
     hidden_bytes: usize,
 }
@@ -662,16 +668,19 @@ impl UbatchLane {
         ubatch_size: usize,
     ) -> Result<Self> {
         let hidden_bytes = ubatch_size * cfg.hidden_size * 2;
-        let hidden_a = device.alloc(hidden_bytes)?;
-        let hidden_b = device.alloc(hidden_bytes)?;
+        let hidden_a_ptr = device.alloc(hidden_bytes)?;
+        let hidden_b_ptr = device.alloc(hidden_bytes)?;
+        let hidden_elems = hidden_bytes / 2;
+        let hidden_a = flambeau_blocks::Buffer::from_raw_unchecked(hidden_a_ptr, hidden_elems);
+        let hidden_b = flambeau_blocks::Buffer::from_raw_unchecked(hidden_b_ptr, hidden_elems);
         let layer = LayerPrefillScratch::new(cfg, device, ubatch_size)?;
         Ok(Self { hidden_a, hidden_b, layer, hidden_bytes })
     }
 
     fn dispose(self, device: &HipDevice) -> Result<()> {
         unsafe {
-            device.dealloc(self.hidden_a, self.hidden_bytes)?;
-            device.dealloc(self.hidden_b, self.hidden_bytes)?;
+            device.dealloc(self.hidden_a.ptr(), self.hidden_bytes)?;
+            device.dealloc(self.hidden_b.ptr(), self.hidden_bytes)?;
         }
         self.layer.dispose(device)?;
         Ok(())
@@ -690,8 +699,8 @@ pub struct RankForwardPrefillScratch {
     pub rank: flambeau_runtime::RankId,
     pub device_id: i32,
     pub max_tokens: usize,
-    pub hidden_a: DevicePtr,
-    pub hidden_b: DevicePtr,
+    pub hidden_a: flambeau_blocks::Buffer<flambeau_blocks::F16, flambeau_blocks::Local>,
+    pub hidden_b: flambeau_blocks::Buffer<flambeau_blocks::F16, flambeau_blocks::Local>,
     pub layer: Option<LayerPrefillScratch>,
     pub output_head: Option<OutputHeadScratch>,
     /// 5.c — additional ubatch lanes beyond lane 0 (= the above
@@ -723,15 +732,15 @@ impl RankForwardPrefillScratch {
     /// 5.c — total ubatch lanes (includes lane 0 = the direct fields).
     pub fn u_lanes(&self) -> usize { 1 + self.extra_lanes.len() }
 
-    /// 5.c — hidden_a for lane `idx`. Lane 0 = `self.hidden_a`;
-    /// lane i>0 = `self.extra_lanes[i-1].hidden_a`.
+    /// 5.c — hidden_a for lane `idx`. Lane 0 = `self.hidden_a.ptr()`;
+    /// lane i>0 = `self.extra_lanes[i-1].hidden_a.ptr()`.
     pub fn lane_hidden_a(&self, idx: usize) -> DevicePtr {
-        if idx == 0 { self.hidden_a } else { self.extra_lanes[idx - 1].hidden_a }
+        if idx == 0 { self.hidden_a.ptr() } else { self.extra_lanes[idx - 1].hidden_a.ptr() }
     }
 
     /// 5.c — hidden_b for lane `idx`.
     pub fn lane_hidden_b(&self, idx: usize) -> DevicePtr {
-        if idx == 0 { self.hidden_b } else { self.extra_lanes[idx - 1].hidden_b }
+        if idx == 0 { self.hidden_b.ptr() } else { self.extra_lanes[idx - 1].hidden_b.ptr() }
     }
 
     /// 5.c — mutable LayerPrefillScratch for lane `idx`.
@@ -749,8 +758,8 @@ impl RankForwardPrefillScratch {
         }
         self.disposed = true;
         unsafe {
-            device.dealloc(self.hidden_a, self.hidden_bytes)?;
-            device.dealloc(self.hidden_b, self.hidden_bytes)?;
+            device.dealloc(self.hidden_a.ptr(), self.hidden_bytes)?;
+            device.dealloc(self.hidden_b.ptr(), self.hidden_bytes)?;
         }
         // release per-GDN-layer snapshot buffers.
         for snap in self.gdn_input_snapshots.drain(..) {
@@ -859,8 +868,11 @@ impl ShardedForwardPrefillScratch {
             let device = cluster.device(rank_idx);
             device.bind()?;
             // Lane 0 — the legacy fields.
-            let hidden_a = device.alloc(hidden_bytes)?;
-            let hidden_b = device.alloc(hidden_bytes)?;
+            let hidden_a_ptr = device.alloc(hidden_bytes)?;
+            let hidden_b_ptr = device.alloc(hidden_bytes)?;
+            let hidden_elems = hidden_bytes / 2;
+            let hidden_a = flambeau_blocks::Buffer::from_raw_unchecked(hidden_a_ptr, hidden_elems);
+            let hidden_b = flambeau_blocks::Buffer::from_raw_unchecked(hidden_b_ptr, hidden_elems);
             let layer = Some(LayerPrefillScratch::new(&model.config, device, ubatch_size)?);
             // Extra lanes — one fresh UbatchLane per additional u_lane.
             let mut extra_lanes = Vec::with_capacity(u_lanes.saturating_sub(1));
@@ -1047,11 +1059,11 @@ impl<'a> flambeau_blocks::PpPrefillDriver for Qwen3MoEPpPrefillDriver<'a> {
     }
 
     fn hidden_a(&self, rank: usize) -> DevicePtr {
-        self.scratch.per_rank[rank].hidden_a
+        self.scratch.per_rank[rank].hidden_a.ptr()
     }
 
     fn hidden_b(&self, rank: usize) -> DevicePtr {
-        self.scratch.per_rank[rank].hidden_b
+        self.scratch.per_rank[rank].hidden_b.ptr()
     }
 
     fn hidden_row_bytes(&self) -> usize {
@@ -1653,9 +1665,9 @@ pub fn forward_prefill_pp_logits_paired_l2(
         if rank_idx > 0 {
             unsafe {
                 cluster.peer_copy_via_host(
-                    scratch.per_rank[rank_idx].hidden_a,
+                    scratch.per_rank[rank_idx].hidden_a.ptr(),
                     rank_idx,
-                    scratch.per_rank[rank_idx - 1].hidden_a,
+                    scratch.per_rank[rank_idx - 1].hidden_a.ptr(),
                     rank_idx - 1,
                     chunk_bytes,
                 )?;
@@ -1680,7 +1692,7 @@ pub fn forward_prefill_pp_logits_paired_l2(
             .as_mut()
             .context("per-rank LayerPrefillScratch missing")?;
 
-        let (mut x_in, mut x_out) = (rank_scratch.hidden_a, rank_scratch.hidden_b);
+        let (mut x_in, mut x_out) = (rank_scratch.hidden_a.ptr(), rank_scratch.hidden_b.ptr());
         for (local_idx, layer_weights) in shard.layers.iter().enumerate() {
             // for GDN-bearing layers, save x_in (position 0
             // only) to the per-layer snapshot buffer for the spec-decode
@@ -1727,12 +1739,12 @@ pub fn forward_prefill_pp_logits_paired_l2(
             })?;
             std::mem::swap(&mut x_in, &mut x_out);
         }
-        if x_in != rank_scratch.hidden_a {
+        if x_in != rank_scratch.hidden_a.ptr() {
             unsafe {
                 device.memcpy_async(
                     device.default_stream(),
                     CopyDirection::DeviceToDevice,
-                    rank_scratch.hidden_a,
+                    rank_scratch.hidden_a.ptr(),
                     x_in,
                     chunk_bytes,
                 )?;
@@ -1772,7 +1784,7 @@ pub fn forward_prefill_pp_logits_paired_l2(
         .context("last rank missing output_head scratch")?;
 
     // Position 0 of the L=2 batch.
-    let h_pos0 = last_scratch.hidden_a;
+    let h_pos0 = last_scratch.hidden_a.ptr();
     forward_output_head_decode(
         &last_shard.ops,
         last_device.default_stream(),
@@ -1828,7 +1840,7 @@ pub fn forward_prefill_pp_logits_paired_l2(
 }
 
 /// run the LM head on a single hidden row located at
-/// `last_scratch.hidden_a + position * hidden_bytes`. Used by the spec
+/// `last_scratch.hidden_a.ptr() + position * hidden_bytes`. Used by the spec
 /// driver to lazily compute pos1 logits only on accept.
 pub fn forward_output_head_at_pp(
     model: &crate::sharded::Qwen3MoEShardedModel,

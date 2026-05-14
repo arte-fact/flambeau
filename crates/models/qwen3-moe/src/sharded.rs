@@ -1613,7 +1613,7 @@ impl Qwen3MoEShardedSession {
                 .gdn
                 .as_mut()
                 .context("LayerForwardScratch.gdn missing")?;
-            let delta_out = rank_scratch.hidden_b;
+            let delta_out = rank_scratch.hidden_b.ptr();
             let pre_rank = prefill_scratch
                 .per_rank
                 .get(rank_idx)

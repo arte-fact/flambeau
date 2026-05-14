@@ -259,7 +259,7 @@ impl EmbeddingModel {
     /// Errors when `tokens.len() > max_tokens` or `tokens` is empty.
     /// Implementation:
     /// 1. Reset session (clear KV `current_tokens`).
-    /// 2. Embed L tokens row-by-row into `prefill.hidden_a`.
+    /// 2. Embed L tokens row-by-row into `prefill.hidden_a.ptr()`.
     /// 3. Per-layer loop: `forward_layer_prefill` ping-ponging
     /// `(hidden_a, hidden_b)`.
     /// 4. Take the LAST token's F16 hidden vector (offset
@@ -334,7 +334,7 @@ impl EmbeddingModel {
             .layer
             .as_mut()
             .context("ForwardPrefillScratch.layer missing")?;
-        let (mut x_in, mut x_out) = (prefill.hidden_a, prefill.hidden_b);
+        let (mut x_in, mut x_out) = (prefill.hidden_a.ptr(), prefill.hidden_b.ptr());
         for (il, layer_weights) in inner_ref.weights.layers.iter().enumerate() {
             let layer_cache = &mut session.layers_mut()[il];
             forward_layer_prefill(

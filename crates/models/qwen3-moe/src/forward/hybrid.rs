@@ -284,7 +284,7 @@ impl<'a> flambeau_blocks::HybridPrefillDriver for Qwen3MoEHybridPrefillDriver<'a
         let device = s.sub_cluster.device(rank);
         let stream = device.default_stream();
         let row_bytes = self.model.config.hidden_size * 2;
-        let dst_base = self.scratch.per_stage[stage].per_rank[rank].hidden_a;
+        let dst_base = self.scratch.per_stage[stage].per_rank[rank].hidden_a.ptr();
         for (i, &tok) in tokens.iter().enumerate() {
             let dst_row = flambeau_core::DevicePtr(dst_base.as_usize() + i * row_bytes);
             forward_embed_decode_host(
@@ -333,13 +333,13 @@ impl<'a> flambeau_blocks::HybridPrefillDriver for Qwen3MoEHybridPrefillDriver<'a
         prod_dev.default_stream().synchronize()?;
 
         let src_global_rank = stage * self.tp_size;
-        let src_ptr = self.scratch.per_stage[stage].per_rank[0].hidden_a;
+        let src_ptr = self.scratch.per_stage[stage].per_rank[0].hidden_a.ptr();
         let bytes = prompt_len * self.model.config.hidden_size * 2;
         let next_ranks = self.model.stages[stage + 1].sub_cluster.ranks();
 
         for dst_local in 0..next_ranks {
             let dst_global_rank = (stage + 1) * self.tp_size + dst_local;
-            let dst_ptr = self.scratch.per_stage[stage + 1].per_rank[dst_local].hidden_a;
+            let dst_ptr = self.scratch.per_stage[stage + 1].per_rank[dst_local].hidden_a.ptr();
             // SAFETY: src/dst are live [L, hidden] * F16 allocations
             // on their devices; both ranks belong to global_cluster;
             // producer sync above covers source freshness; destinations
@@ -619,7 +619,7 @@ impl<'a> flambeau_blocks::HybridDecodeDriver for Qwen3MoEHybridDriver<'a> {
             stream,
             &s.tp_model.shards[rank].token_embd,
             token_id,
-            self.scratch.per_stage[stage].per_rank[rank].hidden_a,
+            self.scratch.per_stage[stage].per_rank[rank].hidden_a.ptr(),
             self.model.config.hidden_size,
         )
         .with_context(|| format!("hybrid stage {stage} rank {rank} embed"))
@@ -690,13 +690,13 @@ impl<'a> flambeau_blocks::HybridDecodeDriver for Qwen3MoEHybridDriver<'a> {
         prod_dev.default_stream().synchronize()?;
 
         let src_global_rank = stage * self.tp_size;
-        let src_ptr = self.scratch.per_stage[stage].per_rank[0].hidden_a;
+        let src_ptr = self.scratch.per_stage[stage].per_rank[0].hidden_a.ptr();
         let bytes = self.model.config.hidden_size * 2;
         let next_ranks = self.model.stages[stage + 1].sub_cluster.ranks();
 
         for dst_local in 0..next_ranks {
             let dst_global_rank = (stage + 1) * self.tp_size + dst_local;
-            let dst_ptr = self.scratch.per_stage[stage + 1].per_rank[dst_local].hidden_a;
+            let dst_ptr = self.scratch.per_stage[stage + 1].per_rank[dst_local].hidden_a.ptr();
             // The next stage's compute on this dst rank runs on the
             // sub_cluster's default stream — different HipStream handle
             // than the global_cluster's dst default stream where the
@@ -739,7 +739,7 @@ impl<'a> flambeau_blocks::HybridDecodeDriver for Qwen3MoEHybridDriver<'a> {
         let stream = device.default_stream();
         let head_shard = &last.tp_model.shards[head_r];
         let lm_head = head_shard.output.as_ref().unwrap_or(&head_shard.token_embd);
-        let hidden_a = self.scratch.per_stage[head_s].per_rank[head_r].hidden_a;
+        let hidden_a = self.scratch.per_stage[head_s].per_rank[head_r].hidden_a.ptr();
         let head_scratch = self.scratch.per_stage[head_s].per_rank[head_r]
             .output_head
             .as_mut()
@@ -933,7 +933,7 @@ pub fn forward_decode_batched_hybrid(
             let device = stage0.sub_cluster.device(r);
             device.bind()?;
             let stream = device.default_stream();
-            let dst_base = stage_scratch.per_rank[r].hidden_a;
+            let dst_base = stage_scratch.per_rank[r].hidden_a.ptr();
             for (s_pos, slot) in slots.iter().enumerate() {
                 super::io::forward_embed_decode_host(
                     device,
@@ -969,7 +969,7 @@ pub fn forward_decode_batched_hybrid(
                     entry_dev.default_stream(),
                     flambeau_core::CopyDirection::DeviceToHost,
                     flambeau_core::DevicePtr(host.as_mut_ptr() as usize),
-                    stage_scratch.per_rank[0].hidden_a,
+                    stage_scratch.per_rank[0].hidden_a.ptr(),
                     n * hidden * 2,
                 )?;
             }
@@ -1002,8 +1002,8 @@ pub fn forward_decode_batched_hybrid(
                 device.bind()?;
                 let stream = device.default_stream();
                 let layer_tensors = &stage_model.shards[r].layers[il];
-                let hidden_a = stage_scratch.per_rank[r].hidden_a;
-                let partial_attn_out = stage_scratch.per_rank[r].partial_attn_out;
+                let hidden_a = stage_scratch.per_rank[r].hidden_a.ptr();
+                let partial_attn_out = stage_scratch.per_rank[r].partial_attn_out.ptr();
                 let layer_scratch = stage_scratch.per_rank[r]
                     .layer
                     .as_mut()
@@ -1149,7 +1149,7 @@ pub fn forward_decode_batched_hybrid(
                         dump_dev.default_stream(),
                         flambeau_core::CopyDirection::DeviceToHost,
                         flambeau_core::DevicePtr(host.as_mut_ptr() as usize),
-                        stage_scratch.per_rank[0].partial_attn_out,
+                        stage_scratch.per_rank[0].partial_attn_out.ptr(),
                         n * hidden * 2,
                     )?;
                 }
@@ -1190,7 +1190,7 @@ pub fn forward_decode_batched_hybrid(
                         dump_dev.default_stream(),
                         flambeau_core::CopyDirection::DeviceToHost,
                         flambeau_core::DevicePtr(host.as_mut_ptr() as usize),
-                        stage_scratch.per_rank[0].hidden_a,
+                        stage_scratch.per_rank[0].hidden_a.ptr(),
                         n * hidden * 2,
                     )?;
                 }
@@ -1220,7 +1220,7 @@ pub fn forward_decode_batched_hybrid(
                     .or_else(|_| {
                         find_tensor_in_layer(layer_tensors, il, "post_attention_norm.weight")
                     })?;
-                let hidden_a = stage_scratch.per_rank[r].hidden_a;
+                let hidden_a = stage_scratch.per_rank[r].hidden_a.ptr();
                 let layer_scratch = stage_scratch.per_rank[r]
                     .layer
                     .as_mut()
@@ -1252,7 +1252,7 @@ pub fn forward_decode_batched_hybrid(
                     let ffn_gate = find_tensor_in_layer(layer_tensors, il, "ffn_gate.weight")?;
                     let ffn_up = find_tensor_in_layer(layer_tensors, il, "ffn_up.weight")?;
                     let ffn_down = find_tensor_in_layer(layer_tensors, il, "ffn_down.weight")?;
-                    let partial_ffn_out = stage_scratch.per_rank[r].partial_ffn_out;
+                    let partial_ffn_out = stage_scratch.per_rank[r].partial_ffn_out.ptr();
                     let layer_scratch = stage_scratch.per_rank[r]
                         .layer
                         .as_mut()
@@ -1285,7 +1285,7 @@ pub fn forward_decode_batched_hybrid(
                         find_tensor_in_layer(layer_tensors, il, "ffn_up_exps.weight")?;
                     let ffn_down_exps =
                         find_tensor_in_layer(layer_tensors, il, "ffn_down_exps.weight")?;
-                    let partial_ffn_out = stage_scratch.per_rank[r].partial_ffn_out;
+                    let partial_ffn_out = stage_scratch.per_rank[r].partial_ffn_out.ptr();
                     let shared_delta_f16 = stage_scratch.per_rank[r]
                         .layer
                         .as_ref()
@@ -1378,9 +1378,9 @@ pub fn forward_decode_batched_hybrid(
                     flambeau_ops::hip::mlp::add_f16(
                         ops,
                         stream,
-                        stage_scratch.per_rank[r].hidden_a,
-                        stage_scratch.per_rank[r].partial_ffn_out,
-                        stage_scratch.per_rank[r].hidden_a,
+                        stage_scratch.per_rank[r].hidden_a.ptr(),
+                        stage_scratch.per_rank[r].partial_ffn_out.ptr(),
+                        stage_scratch.per_rank[r].hidden_a.ptr(),
                         n * hidden,
                     )
                     .with_context(|| {
@@ -1399,7 +1399,7 @@ pub fn forward_decode_batched_hybrid(
             dump_dev.bind()?;
             dump_dev.default_stream().synchronize()?;
             let mut host = vec![half::f16::from_f32(0.0); n * hidden];
-            let dump_ptr = scratch.per_stage[stage_idx].per_rank[0].hidden_a;
+            let dump_ptr = scratch.per_stage[stage_idx].per_rank[0].hidden_a.ptr();
             // SAFETY: dump_ptr is [N, hidden] F16 on dump_dev; sync above.
             unsafe {
                 dump_dev.memcpy_async(
@@ -1589,10 +1589,10 @@ pub fn forward_decode_batched_hybrid(
             prod_dev.bind()?;
             prod_dev.default_stream().synchronize()?;
             let src_global_rank = stage_idx * tp_size;
-            let src_ptr = scratch.per_stage[stage_idx].per_rank[0].hidden_a;
+            let src_ptr = scratch.per_stage[stage_idx].per_rank[0].hidden_a.ptr();
             for dst_local in 0..tp_size {
                 let dst_global_rank = (stage_idx + 1) * tp_size + dst_local;
-                let dst_ptr = scratch.per_stage[stage_idx + 1].per_rank[dst_local].hidden_a;
+                let dst_ptr = scratch.per_stage[stage_idx + 1].per_rank[dst_local].hidden_a.ptr();
                 // SAFETY: src/dst are [N, hidden] F16 buffers on
                 // their respective devices; producer-side stream
                 // synced above.
@@ -1635,7 +1635,7 @@ pub fn forward_decode_batched_hybrid(
     let stream = device.default_stream();
     let head_shard = &last_stage.tp_model.shards[head_rank];
     let lm_head = head_shard.output.as_ref().unwrap_or(&head_shard.token_embd);
-    let head_hidden_base = last_scratch.per_rank[head_rank].hidden_a;
+    let head_hidden_base = last_scratch.per_rank[head_rank].hidden_a.ptr();
     let head_scratch = last_scratch.per_rank[head_rank]
         .output_head
         .as_mut()
