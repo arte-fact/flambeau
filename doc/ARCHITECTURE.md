@@ -274,6 +274,79 @@ New repo. Representative, not exhaustive:
 - `cargo run -p bench -- matrix` reproduces the candle-bench `matrix` subcommand semantics: one `(model, dtype, kv_layout, prompt_len, tg_len)` row per target → pp / tg numbers, regressions flagged against the last snapshot.
 - `cargo run -p cli -- serve --model=mistral-7b-q4_k --port=8080` boots the server; a `curl` chat-completions round-trip and an SSE streaming round-trip are asserted in CI (`bench/server_smoke.sh`).
 
+## Typed buffer flow (Phase 7 + Phase 8)
+
+Activation buffers carry a *distribution* typestate that the
+compiler tracks through the forward pass. The vocabulary in
+`crates/blocks/src/tensor_view.rs`:
+
+- `Buffer<T, D>` — `Copy` wrapper over `DevicePtr` + `n_elems` + two
+  phantom markers (`T: ElemType` for `F16`/`F32`/`I32`, `D:
+  Distribution`).
+- Distribution markers: `Local` (per-rank private — scratch, KV
+  append), `Replicated` (byte-identical across ranks — the
+  canonical full-hidden activation between layers),
+  `ColParallel<DIM>` (column-sliced — Q/K/V projection outputs in
+  Megatron-style TP), `RowParallel<DIM>` (per-rank partial that
+  *must* be AllReduced before consumption as full-hidden —
+  attn_output / ffn_down outputs), `SubClusterPartial` (hybrid
+  stage-local).
+
+The distribution is a compile-time *invariant*. Ops that need a
+full-hidden input declare `Buffer<F16, Replicated>` in their
+signature; passing a `Buffer<F16, RowParallel<DIM>>` is a compile
+error. The AR transition is the gateway:
+
+```rust
+// `tp_allreduce_sum<DIM>` consumes per-rank RowParallel partials
+// and produces per-rank Replicated buffers — typestate transition
+// at the AR boundary.
+let partials: [Buffer<F16, RowParallel<0>>; 2] = [
+    Buffer::from_raw_unchecked(stage[0].partial_attn, hidden),
+    Buffer::from_raw_unchecked(stage[1].partial_attn, hidden),
+];
+let replicated: Vec<Buffer<F16, Replicated>> = unsafe {
+    tp_allreduce_sum::<0>(driver.tp.ar(), &partials, &streams)
+}?;
+// `replicated[r]` can now be read as full-hidden by ops whose
+// signature requires `Buffer<F16, Replicated>` — the
+// `project_tp4d_i3`-class bug (reading an un-folded RowParallel
+// as full-hidden) is a compile error.
+```
+
+Four typed AR transitions live in `blocks::layer`:
+
+- `tp_allreduce_sum<DIM>` — pure AR-sum (RowParallel → Replicated).
+- `tp_allreduce_residual<DIM>` — AR-sum + in-place residual fold
+  into Replicated `hidden`.
+- `tp_allreduce_residual_rmsnorm<DIM>` — fused AR-sum + residual +
+  RMSNorm in one kernel.
+- `tp_allreduce_sum_into`, `tp_allreduce_residual_into`,
+  `tp_allreduce_residual_rmsnorm_into` — untyped wrappers around
+  the same `BarP2pAllReduce::sum_tp2/4 + residual_tp2/4 +
+  residual_rmsnorm_tp2/4` kernels for call sites that haven't
+  migrated to typed buffers.
+
+Typed distribution-preserving ops live in `blocks::typed_ops`
+(`rmsnorm_f16<D>`, `add_f16<D>`, `scale_f16<D>`,
+`quantize_f16_q8_1<D>`, `cast_f32_to_f16<D>`,
+`gelu_f32_to_f16<D>`, `swiglu_f32_to_f16<D>`). Matmul + attention
+ops that change distribution are not yet typed.
+
+`Buffer::from_raw_unchecked` is the boundary constructor — used at
+upload (raw allocs → typed buffers) and at FFI / kernel-launch
+boundaries where the kernel takes a raw `DevicePtr`. It's not
+`unsafe` today; tightening that is on the Phase-8-cleanup
+shortlist if the escape hatch starts being abused.
+
+**Where to opt in:** new arch code should use the typed AR
+transitions at every AllReduce call site — it's a 3-line typed
+wrap that catches the highest-value bug class for ~0 runtime cost.
+Deeper typing (typed scratch fields, typed op signatures through
+the whole forward pass) is gradual; gemma4 TP and qwen3-moe TP
+both demonstrate the typed AR boundary (commits 20ce15b, 9db72ab)
+while keeping internal scratch fields as raw `DevicePtr`.
+
 ## Decisions locked
 
 1. **HIP+CUDA source sharing** → separate `kernels-hip/` and `kernels-cuda/` trees with `kernels-shared/` for algorithmic-core `.cuh`. Each kernel family authored twice; cert harness is the equivalence contract.
