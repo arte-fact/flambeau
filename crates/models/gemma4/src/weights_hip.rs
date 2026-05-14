@@ -797,6 +797,7 @@ impl Gemma4DeviceWeights {
                 post_ffw_norm: post_ffw_norm.ptr,
                 per_layer_embed,
                 moe,
+                tp_moe: None,
             });
         }
 

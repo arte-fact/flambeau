@@ -81,6 +81,11 @@ pub struct Gemma4TpStage {
     scratch: TpScratchPtrs,
     /// Optional output-head scratch (head rank only).
     pub output_head_scratch: Option<OutputHeadScratch>,
+    /// Per-rank MoE scratch — allocated when any layer is MoE
+    /// (`cfg.moe.is_some()`); shared across MoE layers since the
+    /// scratch dims (`hidden`, `local_inter`, `n_experts`, `top_k`)
+    /// are uniform within a gemma4 26B-A4B model.
+    pub tp_moe_scratch: Option<crate::tp_moe_upload::Gemma4TpMoeScratch>,
     /// Universal TP per-rank sync identity (rank id, device id,
     /// `producer_done_event`). Consumed by
     /// [`flambeau_blocks::cross_rank_event_barrier`] at every AR
@@ -266,6 +271,20 @@ impl Gemma4TpStage {
             None
         };
 
+        let tp_moe_scratch = if let Some(moe_dims) = cfg.moe {
+            let local_inter = moe_dims.moe_intermediate_size / n_ranks;
+            Some(crate::tp_moe_upload::Gemma4TpMoeScratch::alloc(
+                device,
+                hidden,
+                local_inter,
+                moe_dims.num_experts,
+                moe_dims.num_experts_per_tok,
+                &mut raw_alloc,
+            )?)
+        } else {
+            None
+        };
+
         let core = TpRankCore::new(rank, device.id())?;
 
         Ok(Self {
@@ -281,6 +300,7 @@ impl Gemma4TpStage {
             partial_ffn,
             scratch,
             output_head_scratch,
+            tp_moe_scratch,
             core,
             positions_host: vec![0i32; 1],
             raw_alloc,
@@ -978,6 +998,7 @@ fn upload_layer_tp(
         post_ffw_norm,
         per_layer_embed: None,
         moe: None,
+        tp_moe: None,
     })
 }
 

@@ -134,6 +134,7 @@ fn make_layer(dev: &HipDevice) -> Gemma4LayerWeights {
         post_ffw_norm,
         per_layer_embed: None,
         moe: None,
+        tp_moe: None,
     }
 }
 

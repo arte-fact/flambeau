@@ -153,6 +153,7 @@ fn build_layer_weights(dev: &HipDevice) -> Gemma4LayerWeights {
         post_ffw_norm: alloc_f16_ones(dev, HIDDEN),
         per_layer_embed: None,
         moe: None,
+        tp_moe: None,
     }
 }
 

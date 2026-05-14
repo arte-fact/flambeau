@@ -1174,6 +1174,7 @@ fn upload_layer_pp(
         post_ffw_norm,
         per_layer_embed: None,
         moe,
+        tp_moe: None,
     })
 }
 

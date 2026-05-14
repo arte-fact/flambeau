@@ -25,7 +25,7 @@ use anyhow::{anyhow, bail, Context, Result};
 use flambeau_blocks::{
     ggml_to_qdtype as blocks_ggml_to_qdtype, row_bytes_for_dtype as blocks_row_bytes,
     upload_replicated_norm_f32_to_f16, upload_replicated_tensor, upload_sharded_tensor, Activation,
-    MoeExperts, RawAllocTracker, WeightHandle,
+    MoeExperts, MoeExpertsDecodeScratch, RawAllocTracker, WeightHandle,
 };
 use flambeau_core::{CopyDirection, Device, DevicePtr, Stream};
 use flambeau_ops::hip::HipDevice;
@@ -36,6 +36,85 @@ use half::f16;
 use crate::config::MoeDims;
 use crate::names::MoeFfnNames;
 use crate::weights_hip::DeviceTensor;
+
+/// Per-rank decode scratch for the gemma4 MoE FFN composer. Sized
+/// for `hidden` + `local_inter` + `n_experts` + `top_k`; allocated
+/// once per rank when `cfg.moe.is_some()` (all 26B-A4B layers are
+/// MoE so sharing one scratch across the layer loop is correct).
+///
+/// Pointer fields hold the gemma4-specific intermediate buffers
+/// (mirroring `Gemma4MoeScratch` for the single-device path) plus
+/// the embedded `MoeExpertsDecodeScratch` view consumed by
+/// `MoeExperts::forward_decode_tp`.
+#[derive(Copy, Clone)]
+pub struct Gemma4TpMoeScratch {
+    /// F16 `[hidden]` — `rmsnorm_f16(attn_residual, pre_router_weight)`.
+    pub router_input_f16: DevicePtr,
+    /// F16 `[hidden]` — post-shared-MLP norm output (full hidden, AR'd).
+    pub cur_mlp_f16: DevicePtr,
+    /// F16 `[hidden]` — pre-MoE input / post-MoE norm output.
+    pub cur_moe_f16: DevicePtr,
+    /// F16 `[hidden]` — `cur_mlp + cur_moe` intermediate (before final
+    /// `post_ffw_norm` + residual add).
+    pub cur_combined_f16: DevicePtr,
+    /// F16 `[hidden]` — read-only zero buffer fed as `residual` to
+    /// `MoeExperts::forward_decode_tp` (no fused residual; the
+    /// per-branch norm + residual add happen in the composer).
+    pub zero_hidden_f16: DevicePtr,
+    /// `MoeExperts` decode scratch view, sized for `local_inter`.
+    pub moe_scratch: MoeExpertsDecodeScratch,
+}
+
+impl Gemma4TpMoeScratch {
+    /// Allocate per-rank scratch on `device`. Allocations are tracked
+    /// in `raw_alloc` so the stage's `dispose()` frees them in one
+    /// pass.
+    pub fn alloc(
+        device: &HipDevice,
+        hidden: usize,
+        local_inter: usize,
+        n_experts: usize,
+        top_k: usize,
+        raw_alloc: &mut RawAllocTracker,
+    ) -> Result<Self> {
+        if hidden % 32 != 0 {
+            bail!("Gemma4TpMoeScratch::alloc: hidden={hidden} not a multiple of 32");
+        }
+        let inter_total = top_k * local_inter;
+        if inter_total % 32 != 0 {
+            bail!(
+                "Gemma4TpMoeScratch::alloc: top_k*local_inter={inter_total} not a multiple of 32"
+            );
+        }
+        let router_input_f16 = raw_alloc.alloc_f16(device, hidden)?.0;
+        let cur_mlp_f16 = raw_alloc.alloc_f16(device, hidden)?.0;
+        let cur_moe_f16 = raw_alloc.alloc_f16(device, hidden)?.0;
+        let cur_combined_f16 = raw_alloc.alloc_f16(device, hidden)?.0;
+        let zero_hidden_f16 = raw_alloc.alloc_f16(device, hidden)?.0; // zeroed by alloc_f16
+
+        let moe_scratch = MoeExpertsDecodeScratch {
+            x_q8_1: raw_alloc.alloc_q8_1(device, hidden)?.0,
+            router_logits: raw_alloc.alloc_f32(device, n_experts)?.0,
+            expert_ids: raw_alloc.alloc_i32(device, top_k)?.0,
+            expert_weights: raw_alloc.alloc_f32(device, top_k)?.0,
+            gate_out_f32: raw_alloc.alloc_f32(device, inter_total)?.0,
+            up_out_f32: raw_alloc.alloc_f32(device, inter_total)?.0,
+            activated_f16: raw_alloc.alloc_f16(device, inter_total)?.0,
+            activated_q8_1: raw_alloc.alloc_q8_1(device, inter_total)?.0,
+            down_f32: raw_alloc.alloc_f32(device, top_k * hidden)?.0,
+            down_f16: raw_alloc.alloc_f16(device, top_k * hidden)?.0,
+        };
+
+        Ok(Self {
+            router_input_f16,
+            cur_mlp_f16,
+            cur_moe_f16,
+            cur_combined_f16,
+            zero_hidden_f16,
+            moe_scratch,
+        })
+    }
+}
 
 /// Per-rank MoE FFN weights for one TP-sharded gemma4 26B-A4B layer.
 /// Same field shape as [`crate::moe::Gemma4MoeFfnWeights`] but the

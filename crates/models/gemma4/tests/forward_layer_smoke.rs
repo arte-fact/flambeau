@@ -181,6 +181,7 @@ fn build_weights(dev: &HipDevice, with_v_proj: bool) -> Gemma4LayerWeights {
         post_ffw_norm: alloc_f16_ones(dev, HIDDEN),
         per_layer_embed: None,
         moe: None,
+        tp_moe: None,
     }
 }
 

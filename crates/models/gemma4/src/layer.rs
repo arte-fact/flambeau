@@ -84,7 +84,16 @@ pub struct Gemma4LayerWeights {
     /// `ffn_down` fields above are then **also** present (they serve
     /// as the parallel shared-MLP branch of the MoE composer — see
     /// `gemma4/src/moe.rs::forward_ffn_moe`).
+    /// Single-device / PP paths populate this; mutually exclusive
+    /// with `tp_moe` below (TP uses the per-rank-sliced variant).
     pub moe: Option<crate::moe::Gemma4MoeFfnWeights>,
+
+    /// TP-sharded MoE weights (26B-A4B on TP). Per-rank-sliced
+    /// `MoeExperts` block (sized for `local_inter = n_ff_exp /
+    /// world`) + replicated router + 3 norms. Mutually exclusive
+    /// with `moe` above; only populated by
+    /// `tp_moe_upload::upload_moe_layer_tp`.
+    pub tp_moe: Option<crate::tp_moe_upload::Gemma4TpMoeFfnWeights>,
 }
 
 impl Gemma4LayerWeights {
