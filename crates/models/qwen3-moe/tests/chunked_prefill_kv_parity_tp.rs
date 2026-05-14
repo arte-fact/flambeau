@@ -21,7 +21,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use anyhow::Result;
-use flambeau_backend_hip::{device_count, BarP2pAllReduce, HipCluster};
+use flambeau_backend_hip::{device_count, HipCluster};
 use flambeau_quant::GgufFile;
 use flambeau_qwen3_moe::forward::{
     forward_prefill_tp_logits, ShardedForwardOneTokenScratchTp,
@@ -149,7 +149,7 @@ fn chunked_prefill_kv_parity_tp2() -> Result<()> {
     let cluster: Arc<HipCluster> = Arc::new(HipCluster::new(&[0i32, 1])?);
     let layout = Qwen35DenseTpLayout::new(&cfg, world)?;
     let model = Qwen3MoETpModel::load(&file, &cluster, layout)?;
-    let ar = BarP2pAllReduce::new(Arc::clone(&cluster))?;
+    let tp = flambeau_blocks::TpCluster::from_arc(Arc::clone(&cluster))?;
 
     // Same m-bucket (>=128 → MMQ on Q4_1) for both runs.
     // Try larger L to see if many-chunk runs diverge.
@@ -170,8 +170,7 @@ fn chunked_prefill_kv_parity_tp2() -> Result<()> {
     forward_prefill_tp_logits(
         &model,
         &mut decode_a,
-        &cluster,
-        &ar,
+        &tp,
         &mut sess_a.caches,
         &prompt,
         0,
@@ -192,8 +191,7 @@ fn chunked_prefill_kv_parity_tp2() -> Result<()> {
         if let Err(e) = forward_prefill_tp_logits(
             &model,
             &mut decode_b,
-            &cluster,
-            &ar,
+            &tp,
             &mut sess_b.caches,
             &prompt[start..end],
             start,
@@ -212,7 +210,7 @@ fn chunked_prefill_kv_parity_tp2() -> Result<()> {
     let _ = decode_b.dispose(&cluster);
     let _ = sess_b.dispose(&cluster);
 
-    let _ = ar; // disposed automatically when dropped (noop here)
+    let _ = tp; // disposed automatically when dropped (noop here)
     if let Some(e) = chunk_err {
         return Err(e);
     }

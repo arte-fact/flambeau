@@ -483,7 +483,7 @@ pub fn prefill_logits(
         }
     } else if let (Some(t), Some(tp_s)) = (model.as_tp(), inflight.as_tp_mut()) {
         let model = &t.model;
-        let ar = t.ar();
+        let tp = &t.tp;
         let session = &mut tp_s.session;
         let decode = &mut tp_s.decode;
         {
@@ -504,7 +504,7 @@ pub fn prefill_logits(
             if let Some(pool) = tp_pool_prefill {
                 if l <= chunk {
                     forward_prefill_tp_logits_pooled(
-                        model, decode, pool, cluster, ar, &mut session.caches,
+                        model, decode, pool, tp, &mut session.caches,
                         prompt_ids, start_position, logits_out,
                     )
                     .context("TP prefill_logits (pooled)")?;
@@ -524,7 +524,7 @@ pub fn prefill_logits(
                         let dst: &mut Vec<f32> =
                             if is_last { &mut *logits_out } else { &mut sink };
                         forward_prefill_tp_logits_pooled(
-                            model, decode, pool, cluster, ar, &mut session.caches,
+                            model, decode, pool, tp, &mut session.caches,
                             &prompt_ids[start..end], start_position + start, dst,
                         )
                         .with_context(|| {
@@ -542,7 +542,7 @@ pub fn prefill_logits(
                 }
             } else if l <= chunk {
                 forward_prefill_tp_logits(
-                    model, decode, cluster, ar, &mut session.caches,
+                    model, decode, tp, &mut session.caches,
                     prompt_ids, start_position, logits_out,
                 )
                 .context("TP prefill_logits")?;
@@ -562,7 +562,7 @@ pub fn prefill_logits(
                     let dst: &mut Vec<f32> =
                         if is_last { &mut *logits_out } else { &mut sink };
                     forward_prefill_tp_logits(
-                        model, decode, cluster, ar, &mut session.caches,
+                        model, decode, tp, &mut session.caches,
                         &prompt_ids[start..end], start_position + start, dst,
                     )
                     .with_context(|| format!("TP prefill_logits chunk [{start}..{end})"))?;
@@ -664,8 +664,7 @@ pub fn decode_logits(
         forward_one_token_tp_logits(
             &t.model,
             &mut s.decode,
-            cluster,
-            t.ar(),
+            &t.tp,
             &mut s.session.caches,
             token,
             position,
@@ -712,8 +711,7 @@ pub fn decode_keep_logits_on_device(
         forward_one_token_tp_keep_logits_on_device(
             &t.model,
             &mut s.decode,
-            cluster,
-            t.ar(),
+            &t.tp,
             &mut s.session.caches,
             token,
             position,

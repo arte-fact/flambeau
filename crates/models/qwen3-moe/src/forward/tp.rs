@@ -698,13 +698,13 @@ fn debug_probe_rank0_hidden(
 pub fn forward_one_token_tp(
     model: &Qwen3MoETpModel,
     scratch: &mut ShardedForwardOneTokenScratchTp,
-    cluster: &flambeau_backend_hip::HipCluster,
-    ar: &BarP2pAllReduce,
+    tp: &flambeau_blocks::TpCluster,
     layer_caches: &mut [Vec<LayerCache>],
     token_id: u32,
     position: usize,
 ) -> anyhow::Result<u32> {
-    let mut driver = Qwen3MoETpDriver::new(model, scratch, cluster, ar, layer_caches)?;
+    let mut driver =
+        Qwen3MoETpDriver::new(model, scratch, tp.cluster(), tp.ar(), layer_caches)?;
     flambeau_blocks::forward_one_token_tp(&mut driver, token_id, position)?;
     driver.finalize_argmax()
 }
@@ -717,14 +717,14 @@ pub fn forward_one_token_tp(
 pub fn forward_one_token_tp_logits(
     model: &Qwen3MoETpModel,
     scratch: &mut ShardedForwardOneTokenScratchTp,
-    cluster: &flambeau_backend_hip::HipCluster,
-    ar: &BarP2pAllReduce,
+    tp: &flambeau_blocks::TpCluster,
     layer_caches: &mut [Vec<LayerCache>],
     token_id: u32,
     position: usize,
     logits_out: &mut Vec<f32>,
 ) -> anyhow::Result<()> {
-    let mut driver = Qwen3MoETpDriver::new(model, scratch, cluster, ar, layer_caches)?;
+    let mut driver =
+        Qwen3MoETpDriver::new(model, scratch, tp.cluster(), tp.ar(), layer_caches)?;
     flambeau_blocks::forward_one_token_tp(&mut driver, token_id, position)?;
     driver.finalize_logits(logits_out)
 }
@@ -740,13 +740,13 @@ pub fn forward_one_token_tp_logits(
 pub fn forward_one_token_tp_keep_logits_on_device(
     model: &Qwen3MoETpModel,
     scratch: &mut ShardedForwardOneTokenScratchTp,
-    cluster: &flambeau_backend_hip::HipCluster,
-    ar: &BarP2pAllReduce,
+    tp: &flambeau_blocks::TpCluster,
     layer_caches: &mut [Vec<LayerCache>],
     token_id: u32,
     position: usize,
 ) -> anyhow::Result<()> {
-    let mut driver = Qwen3MoETpDriver::new(model, scratch, cluster, ar, layer_caches)?;
+    let mut driver =
+        Qwen3MoETpDriver::new(model, scratch, tp.cluster(), tp.ar(), layer_caches)?;
     flambeau_blocks::forward_one_token_tp(&mut driver, token_id, position)
     // Keep-on-device leaves the F32 logits in head_scratch.logits_f32;
     // caller's downstream kernel (topk on the same default stream)
@@ -779,8 +779,7 @@ pub fn forward_prefill_tp_logits_pooled(
     model: &Qwen3MoETpModel,
     scratch: &mut ShardedForwardOneTokenScratchTp,
     pool_prefill: &mut ShardedForwardPrefillScratchTp,
-    cluster: &flambeau_backend_hip::HipCluster,
-    ar: &BarP2pAllReduce,
+    tp: &flambeau_blocks::TpCluster,
     layer_caches: &mut [Vec<LayerCache>],
     prompt_ids: &[u32],
     start_position: usize,
@@ -796,8 +795,8 @@ pub fn forward_prefill_tp_logits_pooled(
     if use_batched && prompt_ids.len() >= 8 {
         return forward_prefill_tp_batched_logits(
             model,
-            cluster,
-            ar,
+            tp.cluster(),
+            tp.ar(),
             layer_caches,
             prompt_ids,
             start_position,
@@ -808,10 +807,8 @@ pub fn forward_prefill_tp_logits_pooled(
     }
     for (i, &tok) in prompt_ids.iter().enumerate() {
         let pos = start_position + i;
-        forward_one_token_tp_logits(
-            model, scratch, cluster, ar, layer_caches, tok, pos, logits_out,
-        )
-        .with_context(|| format!("TP prefill loop @ pos {pos} (pooled)"))?;
+        forward_one_token_tp_logits(model, scratch, tp, layer_caches, tok, pos, logits_out)
+            .with_context(|| format!("TP prefill loop @ pos {pos} (pooled)"))?;
     }
     Ok(())
 }
@@ -819,8 +816,7 @@ pub fn forward_prefill_tp_logits_pooled(
 pub fn forward_prefill_tp_logits(
     model: &Qwen3MoETpModel,
     scratch: &mut ShardedForwardOneTokenScratchTp,
-    cluster: &flambeau_backend_hip::HipCluster,
-    ar: &BarP2pAllReduce,
+    tp: &flambeau_blocks::TpCluster,
     layer_caches: &mut [Vec<LayerCache>],
     prompt_ids: &[u32],
     start_position: usize,
@@ -855,8 +851,8 @@ pub fn forward_prefill_tp_logits(
     if use_batched && prompt_ids.len() >= 8 {
         return forward_prefill_tp_batched_logits(
             model,
-            cluster,
-            ar,
+            tp.cluster(),
+            tp.ar(),
             layer_caches,
             prompt_ids,
             start_position,
@@ -867,10 +863,8 @@ pub fn forward_prefill_tp_logits(
     }
     for (i, &tok) in prompt_ids.iter().enumerate() {
         let pos = start_position + i;
-        forward_one_token_tp_logits(
-            model, scratch, cluster, ar, layer_caches, tok, pos, logits_out,
-        )
-        .with_context(|| format!("TP prefill loop @ pos {pos}"))?;
+        forward_one_token_tp_logits(model, scratch, tp, layer_caches, tok, pos, logits_out)
+            .with_context(|| format!("TP prefill loop @ pos {pos}"))?;
     }
     Ok(())
 }
@@ -2593,12 +2587,16 @@ pub(crate) fn forward_gdn_layer_tp(
 pub fn forward_decode_batched_tp(
     model: &Qwen3MoETpModel,
     sessions: &mut [&mut crate::tp_sharded::Qwen3MoETpSession],
-    cluster: &flambeau_backend_hip::HipCluster,
-    ar: &BarP2pAllReduce,
+    tp: &flambeau_blocks::TpCluster,
     scratch: &mut ShardedForwardPrefillScratchTp,
     slots: &[super::batched::BatchSlot],
     logits_out: &mut [&mut Vec<f32>],
 ) -> Result<()> {
+    // Decompose the typed cluster handle for internal use — the
+    // existing body threads `cluster` + `ar` through ~25 sites; keeping
+    // the locals minimises diff churn.
+    let cluster = tp.cluster();
+    let ar = tp.ar();
     let n = slots.len();
     if n == 0 {
         bail!("forward_decode_batched_tp: empty slot list");

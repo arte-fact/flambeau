@@ -1044,8 +1044,7 @@ impl ServerState {
             forward_decode_batched_tp(
                 model,
                 sessions.as_mut_slice(),
-                cluster,
-                ar,
+                &tp_model.tp,
                 scratch,
                 &slots,
                 logits_refs.as_mut_slice(),
