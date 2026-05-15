@@ -409,7 +409,7 @@ pub async fn serve(cfg: ServeConfig, registry: Registry) -> Result<()> {
         // factory in serve.rs's arch-dispatch branch.
         let slot = crate::create_qwen3moe_session(
             model.clone(),
-            &cluster,
+            cluster.clone(),
             prefill_ubatch,
             flambeau_qwen3_moe::session::KvLayout::from_str(&cfg.kv),
         )

@@ -77,7 +77,6 @@ pub trait Session: Send {
     #[allow(clippy::too_many_arguments)]
     fn prefill_logits(
         &mut self,
-        cluster: &HipCluster,
         prompt_ids: &[u32],
         start_position: usize,
         logits_out: &mut Vec<f32>,
@@ -86,9 +85,9 @@ pub trait Session: Send {
         prefill_ubatch: usize,
     ) -> Result<()>;
 
-    fn reset_for_next_request(&mut self, cluster: &HipCluster) -> Result<()>;
+    fn reset_for_next_request(&mut self) -> Result<()>;
 
-    fn dispose(self: Box<Self>, cluster: &HipCluster) -> Result<()>;
+    fn dispose(self: Box<Self>) -> Result<()>;
 
     /// Concrete-session accessors, mirror of `Model::as_pp`. Server
     /// uses these in spec-decode init / GPU-sampler scratch
@@ -144,27 +143,39 @@ pub trait Session: Send {
     }
 }
 
-/// Self-sufficient session: bundles an `Inflight` with a back-reference
-/// to its parent `LoadedModel` (which is itself an `Arc<dyn Model>`,
-/// so the back-ref is a cheap clone). Constructed via
-/// [`create_qwen3moe_session`]; the server holds it as `Box<dyn Session>`
-/// so call sites stop matching on a topology variant.
+/// Self-sufficient qwen3-moe session: bundles an `Inflight`
+/// (KV state + scratches) with a back-reference to its parent
+/// `LoadedModel` and an `Arc<HipCluster>` clone so the trait methods
+/// don't need a cluster passed in. Constructed via
+/// [`create_qwen3moe_session`]; the server holds it as
+/// `Box<dyn Session>` so call sites stay arch-agnostic.
 pub struct Qwen3MoeOwnedSession {
     pub model: LoadedModel,
     pub inflight: Inflight,
+    /// #117 step 2 — owned cluster reference so `Session` trait
+    /// method signatures don't carry `cluster: &HipCluster`. Shared
+    /// with `ServerState.cluster`; cheap Arc clone at session
+    /// construction.
+    pub cluster: std::sync::Arc<HipCluster>,
 }
 
 /// Build a per-request session bound to `model`. `prefill_ubatch` sizes
 /// the PP prefill scratch (ignored for TP/Hybrid); `kv_layout` selects
-/// between F16 / Q8 / turbo-quant KV.
+/// between F16 / Q8 / turbo-quant KV. `cluster` is cloned-Arc'd onto
+/// the returned session so trait methods can run without a cluster
+/// parameter.
 pub fn create_qwen3moe_session(
     model: LoadedModel,
-    cluster: &HipCluster,
+    cluster: std::sync::Arc<HipCluster>,
     prefill_ubatch: usize,
     kv_layout: KvLayout,
 ) -> Result<Box<dyn Session>> {
-    let inflight = Inflight::new(&model, cluster, prefill_ubatch, kv_layout)?;
-    Ok(Box::new(Qwen3MoeOwnedSession { model, inflight }))
+    let inflight = Inflight::new(&model, &cluster, prefill_ubatch, kv_layout)?;
+    Ok(Box::new(Qwen3MoeOwnedSession {
+        model,
+        inflight,
+        cluster,
+    }))
 }
 
 impl Model for PpHipModel {
@@ -197,7 +208,6 @@ impl Model for HybridHipModel {
 impl Session for Qwen3MoeOwnedSession {
     fn prefill_logits(
         &mut self,
-        cluster: &HipCluster,
         prompt_ids: &[u32],
         start_position: usize,
         logits_out: &mut Vec<f32>,
@@ -205,13 +215,14 @@ impl Session for Qwen3MoeOwnedSession {
         on_boundary: Option<BoundaryCallback<'_>>,
         prefill_ubatch: usize,
     ) -> Result<()> {
-        // Phase 12.8 — clone the model Arc out before reborrowing `self`
+        // Clone the model + cluster Arcs out before reborrowing `self`
         // as `&mut dyn Session`, so the free function gets disjoint
-        // model + inflight refs.
+        // model + cluster + inflight refs.
         let model = self.model.clone();
+        let cluster = self.cluster.clone();
         crate::model::prefill_logits(
             &model,
-            cluster,
+            &cluster,
             self,
             prompt_ids,
             start_position,
@@ -222,13 +233,18 @@ impl Session for Qwen3MoeOwnedSession {
         )
     }
 
-    fn reset_for_next_request(&mut self, cluster: &HipCluster) -> Result<()> {
-        self.inflight.reset_for_next_request(cluster, &self.model)
+    fn reset_for_next_request(&mut self) -> Result<()> {
+        let cluster = self.cluster.clone();
+        self.inflight.reset_for_next_request(&cluster, &self.model)
     }
 
-    fn dispose(self: Box<Self>, cluster: &HipCluster) -> Result<()> {
-        let Qwen3MoeOwnedSession { model, inflight } = *self;
-        inflight.dispose(cluster, &model)
+    fn dispose(self: Box<Self>) -> Result<()> {
+        let Qwen3MoeOwnedSession {
+            model,
+            inflight,
+            cluster,
+        } = *self;
+        inflight.dispose(&cluster, &model)
     }
 
     fn as_pp(&self) -> Option<&PpHipSession> {

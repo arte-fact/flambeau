@@ -3270,7 +3270,7 @@ fn run_completion_scheduler_pp_blocking(
         let first_next = {
             let mut guard = state.inflight_pool[slot_idx].blocking_lock();
             guard
-                .reset_for_next_request(cluster)
+                .reset_for_next_request()
                 .context("reset inflight for new request")?;
             let mut logits_buf: Vec<f32> = Vec::with_capacity(vocab);
             // **#321** — TP/Hybrid prefill alloc serialiser. See field
@@ -3530,7 +3530,7 @@ fn run_completion_blocking_ids(
     // prefill — clears full-attn `current_tokens` and zeros GDN
     // recurrent state without freeing scratch buffers.
     inflight_guard
-        .reset_for_next_request(cluster)
+        .reset_for_next_request()
         .context("reset inflight for new request")?;
     // Shadow with a reborrow so existing `&mut inflight` / `&inflight`
     // call-site syntax works unchanged.
@@ -4110,7 +4110,7 @@ fn run_completion_blocking_streaming(
     let is_stop = |t: u32| stop_ids.contains(&t);
 
     inflight_guard
-        .reset_for_next_request(cluster)
+        .reset_for_next_request()
         .context("reset inflight for new streaming request")?;
     let inflight: &mut dyn crate::Session = &mut **inflight_guard;
 

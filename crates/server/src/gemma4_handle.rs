@@ -13,7 +13,6 @@
 #![cfg(feature = "hip")]
 
 use anyhow::Result;
-use flambeau_backend_hip::HipCluster;
 use flambeau_gemma4::Gemma4Config;
 use flambeau_qwen3_moe::forward::ShardedForwardPrefillScratchTp;
 use flambeau_runtime::ModelDriver;
@@ -72,7 +71,6 @@ pub struct Gemma4Session {
 impl Session for Gemma4Session {
     fn prefill_logits(
         &mut self,
-        _cluster: &HipCluster,
         prompt_ids: &[u32],
         start_position: usize,
         logits_out: &mut Vec<f32>,
@@ -115,7 +113,7 @@ impl Session for Gemma4Session {
             .forward_prefill_logits(prompt_slice, start_position, logits_out)
     }
 
-    fn reset_for_next_request(&mut self, _cluster: &HipCluster) -> Result<()> {
+    fn reset_for_next_request(&mut self) -> Result<()> {
         // V1: gemma4 drivers don't yet expose a KV-reset hook on the
         // ModelDriver trait. First request always works (KV starts
         // empty); second request reuses the slot WITHOUT clearing,
@@ -126,7 +124,7 @@ impl Session for Gemma4Session {
         Ok(())
     }
 
-    fn dispose(self: Box<Self>, _cluster: &HipCluster) -> Result<()> {
+    fn dispose(self: Box<Self>) -> Result<()> {
         let mut driver = self.driver;
         driver.dispose()
     }
