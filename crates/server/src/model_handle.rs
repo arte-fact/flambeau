@@ -160,10 +160,14 @@ impl HipSession for OwnedHipSession {
         on_boundary: Option<BoundaryCallback<'_>>,
         prefill_ubatch: usize,
     ) -> Result<()> {
+        // Phase 12.8 — clone the model Arc out before reborrowing `self`
+        // as `&mut dyn HipSession`, so the free function gets disjoint
+        // model + inflight refs.
+        let model = self.model.clone();
         crate::model::prefill_logits(
-            &self.model,
+            &model,
             cluster,
-            &mut self.inflight,
+            self,
             prompt_ids,
             start_position,
             logits_out,

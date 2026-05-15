@@ -383,16 +383,20 @@ pub async fn serve(cfg: ServeConfig, registry: Registry) -> Result<()> {
         max_queue_depth,
         "pre-allocating inflight slot pool"
     );
-    let mut inflight_pool: Vec<Mutex<crate::model::Inflight>> =
+    let mut inflight_pool: Vec<Mutex<Box<dyn crate::HipSession>>> =
         Vec::with_capacity(inflight_slots);
     for slot_idx in 0..inflight_slots {
-        let slot = crate::model::Inflight::new(
-            &model,
+        // Phase 12.8 — pool holds the model-agnostic `HipSession` trait.
+        // `create_hip_session` builds the qwen3-moe-typed `OwnedHipSession`
+        // and erases it behind the trait. Gemma4 will add a parallel
+        // factory in serve.rs's arch-dispatch branch.
+        let slot = crate::create_hip_session(
+            model.clone(),
             &cluster,
             prefill_ubatch,
             flambeau_qwen3_moe::session::KvLayout::from_str(&cfg.kv),
         )
-            .with_context(|| format!("pre-alloc Inflight slot {slot_idx} at boot"))?;
+            .with_context(|| format!("pre-alloc inflight slot {slot_idx} at boot"))?;
         inflight_pool.push(Mutex::new(slot));
     }
 

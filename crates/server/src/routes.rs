@@ -24,7 +24,7 @@ use crate::api::*;
 use crate::gpu_sampler::{self, GpuSamplerScratch};
 use crate::model::{
     capture_kv_from_inflight, prefill_logits, restore_kv_into_inflight, snapshot_bytes,
-    Inflight, LoadedModel,
+    LoadedModel,
 };
 use crate::prefix_cache::{PrefixCache, PrefixKeys, TopologyTag};
 
@@ -83,15 +83,18 @@ pub struct ServerState {
     pub cluster: Arc<HipCluster>,
     pub tokenizer: GgufTokenizer,
     pub chat_template: ChatTemplate,
-    /// **P2.9b-i1 (multi-slot pool)** — N pre-allocated `Inflight`
-    /// slots sized to `FLAMBEAU_INFLIGHT_SLOTS` (default 1). A request
-    /// acquires any free slot via `acquire_inflight_blocking()` (try-
-    /// lock round-robin, then block on slot 0 if all busy). Holding
-    /// the guard means "this request owns the slot"; releasing it
-    /// returns the slot to the pool. Decode kernels still serialise
-    /// on the GPU stream — true batched throughput is P2.9b-i2-B
-    /// (the scheduler below).
-    pub inflight_pool: Vec<Mutex<Inflight>>,
+    /// **P2.9b-i1 (multi-slot pool)** — N pre-allocated per-request
+    /// sessions sized to `FLAMBEAU_INFLIGHT_SLOTS` (default 1). A
+    /// request acquires any free slot via `acquire_inflight_blocking()`
+    /// (try-lock round-robin, then block on slot 0 if all busy).
+    /// Holding the guard means "this request owns the slot"; releasing
+    /// it returns the slot to the pool. The element type is the
+    /// model-agnostic `HipSession` trait so future model crates (e.g.
+    /// gemma4) can plug in without churn at the pool / handler layer.
+    /// Concrete qwen3-moe forward-pass dispatch still drills down via
+    /// `as_pp_mut()` / `as_tp_mut()` / `as_hybrid_mut()` trait
+    /// accessors.
+    pub inflight_pool: Vec<Mutex<Box<dyn crate::HipSession>>>,
     /// **P2.9b-i2-B (scheduler)** — request-lifetime claim flag for
     /// each slot. Distinct from `inflight_pool`'s mutex: the mutex
     /// guards short-term *exclusive access* to the `Inflight`; this
@@ -388,7 +391,7 @@ impl ServerState {
     /// - Restore fails (logged + downgraded to miss).
     pub fn prefix_cache_try_restore(
         &self,
-        inflight: &mut Inflight,
+        inflight: &mut dyn crate::HipSession,
         prompt_ids: &[u32],
     ) -> anyhow::Result<PrefixCacheRestore> {
         tracing::debug!(
@@ -562,7 +565,7 @@ impl ServerState {
     /// - Prompt ≥ 50 tokens AND at least one full chunk in the chain.
     pub fn prefix_cache_try_capture_full(
         &self,
-        inflight: &Inflight,
+        inflight: &dyn crate::HipSession,
         prompt_ids: &[u32],
         last_logits: &[f32],
     ) {
@@ -684,7 +687,7 @@ impl ServerState {
     /// the request.
     pub fn acquire_inflight_blocking(
         &self,
-    ) -> (usize, tokio::sync::MutexGuard<'_, Inflight>) {
+    ) -> (usize, tokio::sync::MutexGuard<'_, Box<dyn crate::HipSession>>) {
         for (idx, slot) in self.inflight_pool.iter().enumerate() {
             if let Ok(g) = slot.try_lock() {
                 return (idx, g);
@@ -801,7 +804,7 @@ impl ServerState {
             tr!("FAST_PATH lock_inflight start");
             let mut guard = self.inflight_pool[slot_idx].blocking_lock();
             tr!("FAST_PATH lock_inflight done; decode start");
-            self.dispatch_decode_one(&mut *guard, token, position, logits_out)
+            self.dispatch_decode_one(&mut **guard, token, position, logits_out)
                 .context("decode_via_scheduler single-user fast path")?;
             tr!("FAST_PATH decode done; return");
             return Ok(());
@@ -938,7 +941,8 @@ impl ServerState {
         // safe — the request handlers have *released* the mutex
         // before pushing pending (their long-term claim is
         // `slot_in_use`, not the mutex).
-        let mut guards: Vec<tokio::sync::MutexGuard<'_, Inflight>> = Vec::with_capacity(pending.len());
+        let mut guards: Vec<tokio::sync::MutexGuard<'_, Box<dyn crate::HipSession>>> =
+            Vec::with_capacity(pending.len());
         for p in pending {
             tr_d!("locking inflight slot={}", p.slot_idx);
             guards.push(self.inflight_pool[p.slot_idx].blocking_lock());
@@ -961,11 +965,16 @@ impl ServerState {
             .map(|_| Vec::with_capacity(vocab))
             .collect();
 
-        // Deref each MutexGuard to a `&mut Inflight` and hand the
-        // distinct-by-index slice to the shared batched dispatcher.
-        let mut inflights: Vec<&mut Inflight> =
-            guards.iter_mut().map(|g| &mut **g).collect();
+        // Deref each MutexGuard<Box<dyn HipSession>> to a
+        // `&mut dyn HipSession` and hand the distinct-by-index slice to
+        // the shared batched dispatcher. Scope the reborrow so the
+        // mutable borrow of `guards` ends before the explicit `drop`.
         {
+            let mut inflights: Vec<&mut dyn crate::HipSession> = Vec::with_capacity(n);
+            for g in guards.iter_mut() {
+                let inflight: &mut dyn crate::HipSession = &mut ***g;
+                inflights.push(inflight);
+            }
             let mut logits_refs: Vec<&mut Vec<f32>> =
                 logits_owned.iter_mut().collect();
             self.forward_decode_batched_with_inflights(
@@ -995,7 +1004,7 @@ impl ServerState {
     /// and `dispatch_decode_one` (N=1, legacy single-decode path).
     fn forward_decode_batched_with_inflights(
         &self,
-        inflights: &mut [&mut Inflight],
+        inflights: &mut [&mut dyn crate::HipSession],
         slots: &[flambeau_qwen3_moe::forward::BatchSlot],
         logits_refs: &mut [&mut Vec<f32>],
     ) -> anyhow::Result<()> {
@@ -1019,7 +1028,7 @@ impl ServerState {
             // disjoint from the `session` borrows below.
             let prefill_scratch: &mut flambeau_qwen3_moe::forward::ShardedForwardPrefillScratch = {
                 unsafe {
-                    let g0: &mut Inflight = &mut **inflights_ptr;
+                    let g0: &mut dyn crate::HipSession = &mut **inflights_ptr;
                     &mut g0
                         .as_pp_mut()
                         .context("batched decode: leader slot is not Inflight::Pp")?
@@ -1029,7 +1038,7 @@ impl ServerState {
             for s in 0..n {
                 // SAFETY: s in 0..n; inflights distinct by index.
                 unsafe {
-                    let g: &mut Inflight = &mut **inflights_ptr.add(s);
+                    let g: &mut dyn crate::HipSession = &mut **inflights_ptr.add(s);
                     let pp = g.as_pp_mut().with_context(|| {
                         format!("batched decode: slot {s} is not Inflight::Pp")
                     })?;
@@ -1052,7 +1061,7 @@ impl ServerState {
             for s in 0..n {
                 // SAFETY: s in 0..n; inflights distinct.
                 unsafe {
-                    let g: &mut Inflight = &mut **inflights_ptr.add(s);
+                    let g: &mut dyn crate::HipSession = &mut **inflights_ptr.add(s);
                     let tp = g.as_tp_mut().with_context(|| {
                         format!("batched decode: slot {s} is not Inflight::Tp")
                     })?;
@@ -1095,7 +1104,7 @@ impl ServerState {
             for s in 0..n {
                 // SAFETY: s in 0..n; inflights distinct.
                 unsafe {
-                    let g: &mut Inflight = &mut **inflights_ptr.add(s);
+                    let g: &mut dyn crate::HipSession = &mut **inflights_ptr.add(s);
                     let hyb = g.as_hybrid_mut().with_context(|| {
                         format!("batched decode: slot {s} is not Inflight::Hybrid")
                     })?;
@@ -1139,7 +1148,7 @@ impl ServerState {
     /// borrowed from the guard).
     pub fn dispatch_decode_one(
         &self,
-        inflight: &mut Inflight,
+        inflight: &mut dyn crate::HipSession,
         token: u32,
         position: usize,
         logits_out: &mut Vec<f32>,
@@ -1155,7 +1164,7 @@ impl ServerState {
             logits_out.reserve(vocab - logits_out.capacity());
         }
         logits_out.clear();
-        let mut inflights_arr: [&mut Inflight; 1] = [inflight];
+        let mut inflights_arr: [&mut dyn crate::HipSession; 1] = [inflight];
         let mut logits_refs: [&mut Vec<f32>; 1] = [logits_out];
         self.forward_decode_batched_with_inflights(
             &mut inflights_arr,
@@ -3230,7 +3239,7 @@ fn run_completion_scheduler_pp_blocking(
         let first_next = {
             let mut guard = state.inflight_pool[slot_idx].blocking_lock();
             guard
-                .reset_for_next_request(cluster, model)
+                .reset_for_next_request(cluster)
                 .context("reset inflight for new request")?;
             let mut logits_buf: Vec<f32> = Vec::with_capacity(vocab);
             // **#321** — TP/Hybrid prefill alloc serialiser. See field
@@ -3257,7 +3266,7 @@ fn run_completion_scheduler_pp_blocking(
             // Miss: full fresh prefill, capture both intermediate
             // (chunk-boundary) and final (full prompt) entries.
             let restore =
-                state.prefix_cache_try_restore(&mut *guard, &prompt_ids)?;
+                state.prefix_cache_try_restore(&mut **guard, &prompt_ids)?;
             match restore {
                 PrefixCacheRestore::FullHit { logits } => {
                     logits_buf.clear();
@@ -3267,7 +3276,7 @@ fn run_completion_scheduler_pp_blocking(
                     crate::model::prefill_logits(
                         model,
                         cluster,
-                        &mut *guard,
+                        &mut **guard,
                         &prompt_ids[n_matched..],
                         n_matched,
                         &mut logits_buf,
@@ -3279,7 +3288,7 @@ fn run_completion_scheduler_pp_blocking(
                     // After tail prefill we have full state — capture
                     // the FULL entry (with logits) for future requests.
                     state.prefix_cache_try_capture_full(
-                        &*guard,
+                        &**guard,
                         &prompt_ids,
                         &logits_buf,
                     );
@@ -3302,7 +3311,7 @@ fn run_completion_scheduler_pp_blocking(
                     crate::model::prefill_logits(
                         model,
                         cluster,
-                        &mut *guard,
+                        &mut **guard,
                         &prompt_ids,
                         0,
                         &mut logits_buf,
@@ -3312,7 +3321,7 @@ fn run_completion_scheduler_pp_blocking(
                     )
                     .context("scheduler-path prefill")?;
                     state.prefix_cache_try_capture_full(
-                        &*guard,
+                        &**guard,
                         &prompt_ids,
                         &logits_buf,
                     );
@@ -3485,11 +3494,11 @@ fn run_completion_blocking_ids(
     // prefill — clears full-attn `current_tokens` and zeros GDN
     // recurrent state without freeing scratch buffers.
     inflight_guard
-        .reset_for_next_request(cluster, model)
+        .reset_for_next_request(cluster)
         .context("reset inflight for new request")?;
     // Shadow with a reborrow so existing `&mut inflight` / `&inflight`
     // call-site syntax works unchanged.
-    let mut inflight: &mut Inflight = &mut *inflight_guard;
+    let inflight: &mut dyn crate::HipSession = &mut **inflight_guard;
 
     // Sampler holds vocab-sized scratch reused across all decode steps
     // (C2 in RUST-PERF-CORRECTIONS.md). Reserve upfront to avoid the
@@ -3605,7 +3614,7 @@ fn run_completion_blocking_ids(
     // active.
     let cache_eligible = params.collect_logprobs.is_none();
     let restore = if cache_eligible {
-        state.prefix_cache_try_restore(&mut inflight, &prompt_ids)?
+        state.prefix_cache_try_restore(&mut *inflight, &prompt_ids)?
     } else {
         PrefixCacheRestore::Miss
     };
@@ -3618,7 +3627,7 @@ fn run_completion_blocking_ids(
             prefill_logits(
                 model,
                 cluster,
-                &mut inflight,
+                &mut *inflight,
                 &prompt_ids[n_matched..],
                 n_matched,
                 &mut logits_buf,
@@ -3627,7 +3636,7 @@ fn run_completion_blocking_ids(
                 state.prefill_ubatch,
             )
             .context("legacy-path tail prefill (after prefix-hit)")?;
-            state.prefix_cache_try_capture_full(&inflight, &prompt_ids, &logits_buf);
+            state.prefix_cache_try_capture_full(&*inflight, &prompt_ids, &logits_buf);
         }
         PrefixCacheRestore::Miss => {
             let mut boundary_cb = |snap, n_tok| {
@@ -3643,7 +3652,7 @@ fn run_completion_blocking_ids(
             prefill_logits(
                 model,
                 cluster,
-                &mut inflight,
+                &mut *inflight,
                 &prompt_ids,
                 0,
                 &mut logits_buf,
@@ -3653,7 +3662,7 @@ fn run_completion_blocking_ids(
             )
             .context("prefill logits")?;
             if cache_eligible {
-                state.prefix_cache_try_capture_full(&inflight, &prompt_ids, &logits_buf);
+                state.prefix_cache_try_capture_full(&*inflight, &prompt_ids, &logits_buf);
             }
         }
     }
@@ -3671,7 +3680,10 @@ fn run_completion_blocking_ids(
     // onwards once the decode forward populates the right buffer.
     // (One-shot first token doesn't matter perf-wise; D3 Phase B's
     // bigger win is the per-step decode DtoH-skip.)
-    let inv_temp = if sampling.temperature > 0.0 {
+    // Phase 12.5 — `inv_temp` was the GPU-sampler entry, retired with
+    // the keep-on-device branch. Re-introduce when `run_gpu_topk` re-
+    // wires onto the batched output buffer.
+    let _inv_temp = if sampling.temperature > 0.0 {
         1.0 / sampling.temperature
     } else {
         1.0
@@ -3823,7 +3835,7 @@ fn run_completion_blocking_ids(
         let next = {
             state
                 .dispatch_decode_one(
-                    &mut inflight,
+                    &mut *inflight,
                     last_token,
                     prompt_ids.len() + step,
                     &mut logits_buf,
@@ -4057,9 +4069,9 @@ fn run_completion_blocking_streaming(
     let is_stop = |t: u32| stop_ids.contains(&t);
 
     inflight_guard
-        .reset_for_next_request(cluster, model)
+        .reset_for_next_request(cluster)
         .context("reset inflight for new streaming request")?;
-    let mut inflight: &mut Inflight = &mut *inflight_guard;
+    let inflight: &mut dyn crate::HipSession = &mut **inflight_guard;
 
     let mut sampler = Sampler::from_seed(params.seed);
     sampler.reserve(state.cfg.vocab_size);
@@ -4090,7 +4102,7 @@ fn run_completion_blocking_streaming(
     > = tp_scratch_g.as_mut().and_then(|g| g.as_mut());
     // **#229 prefix-cache restore (streaming path).
     let restore_stream =
-        state.prefix_cache_try_restore(&mut inflight, &prompt_ids)?;
+        state.prefix_cache_try_restore(&mut *inflight, &prompt_ids)?;
     match restore_stream {
         PrefixCacheRestore::FullHit { logits } => {
             logits_buf.clear();
@@ -4100,7 +4112,7 @@ fn run_completion_blocking_streaming(
             prefill_logits(
                 model,
                 cluster,
-                &mut inflight,
+                &mut *inflight,
                 &prompt_ids[n_matched..],
                 n_matched,
                 &mut logits_buf,
@@ -4109,7 +4121,7 @@ fn run_completion_blocking_streaming(
                 state.prefill_ubatch,
             )
             .context("streaming-path tail prefill (after prefix-hit)")?;
-            state.prefix_cache_try_capture_full(&inflight, &prompt_ids, &logits_buf);
+            state.prefix_cache_try_capture_full(&*inflight, &prompt_ids, &logits_buf);
         }
         PrefixCacheRestore::Miss => {
             let mut boundary_cb = |snap, n_tok| {
@@ -4125,7 +4137,7 @@ fn run_completion_blocking_streaming(
             prefill_logits(
                 model,
                 cluster,
-                &mut inflight,
+                &mut *inflight,
                 &prompt_ids,
                 0,
                 &mut logits_buf,
@@ -4134,7 +4146,7 @@ fn run_completion_blocking_streaming(
                 state.prefill_ubatch,
             )
             .context("prefill logits")?;
-            state.prefix_cache_try_capture_full(&inflight, &prompt_ids, &logits_buf);
+            state.prefix_cache_try_capture_full(&*inflight, &prompt_ids, &logits_buf);
         }
     }
     drop(tp_scratch_g);
@@ -4308,7 +4320,7 @@ fn run_completion_blocking_streaming(
         let hp_step_t0 = if host_profile_on { Some(Instant::now()) } else { None };
         state
             .dispatch_decode_one(
-                &mut inflight,
+                &mut *inflight,
                 last_token,
                 prompt_ids.len() + step,
                 &mut logits_buf,

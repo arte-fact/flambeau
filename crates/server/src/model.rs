@@ -399,7 +399,7 @@ fn snapshot_hybrid_session(
 pub fn prefill_logits(
     model: &LoadedModel,
     cluster: &HipCluster,
-    inflight: &mut Inflight,
+    inflight: &mut dyn crate::HipSession,
     prompt_ids: &[u32],
     start_position: usize,
     logits_out: &mut Vec<f32>,
@@ -639,18 +639,18 @@ pub fn prefill_logits(
 /// inverse H→D pays the same — still a net win vs the ~2-3 s prefill
 /// it replaces.
 pub fn capture_kv_from_inflight(
-    inflight: &Inflight,
+    inflight: &dyn crate::HipSession,
     cluster: &HipCluster,
     model: &LoadedModel,
 ) -> Result<Vec<Vec<LayerCacheSnapshot>>> {
     use crate::model_extensions::KvSnapshot;
-    if let (Inflight::Pp(s), Some(_)) = (inflight, model.as_pp()) {
+    if let (Some(s), Some(_)) = (inflight.as_pp(), model.as_pp()) {
         return s.capture(cluster);
     }
-    if let (Inflight::Tp(s), Some(_)) = (inflight, model.as_tp()) {
+    if let (Some(s), Some(_)) = (inflight.as_tp(), model.as_tp()) {
         return s.capture(cluster);
     }
-    if let (Inflight::Hybrid(s), Some(h)) = (inflight, model.as_hybrid()) {
+    if let (Some(s), Some(h)) = (inflight.as_hybrid(), model.as_hybrid()) {
         return s.capture_with_model(h);
     }
     bail!("capture_kv_from_inflight: model/inflight variant mismatch")
@@ -735,19 +735,19 @@ pub fn truncate_snapshot_to_tokens(
 /// per-rank shape doesn't match the flat `Vec<RankSnapshot>` layout).
 /// Callers should skip prefix-cache restore for hybrid models in V1.
 pub fn restore_kv_into_inflight(
-    inflight: &mut Inflight,
+    inflight: &mut dyn crate::HipSession,
     cluster: &HipCluster,
     snapshot: &[Vec<LayerCacheSnapshot>],
     model: &LoadedModel,
 ) -> Result<()> {
     use crate::model_extensions::KvSnapshot;
-    if let (Inflight::Pp(s), Some(_)) = (&mut *inflight, model.as_pp()) {
+    if let (Some(s), Some(_)) = (inflight.as_pp_mut(), model.as_pp()) {
         return s.restore(cluster, snapshot);
     }
-    if let (Inflight::Tp(s), Some(_)) = (&mut *inflight, model.as_tp()) {
+    if let (Some(s), Some(_)) = (inflight.as_tp_mut(), model.as_tp()) {
         return s.restore(cluster, snapshot);
     }
-    if let (Inflight::Hybrid(s), Some(h)) = (&mut *inflight, model.as_hybrid()) {
+    if let (Some(s), Some(h)) = (inflight.as_hybrid_mut(), model.as_hybrid()) {
         return s.restore_with_model(h, snapshot);
     }
     bail!("restore_kv_into_inflight: model/inflight variant mismatch")
