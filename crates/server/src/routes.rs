@@ -12,7 +12,7 @@ use axum::response::{IntoResponse, Response};
 use axum::Json;
 use flambeau_backend_hip::HipCluster;
 use flambeau_core::Device;
-use flambeau_qwen3_moe::Qwen3MoEConfig;
+use crate::model_cfg::ServerModelCfg;
 use flambeau_quant::{ChatTemplate, GgufTokenizer};
 use flambeau_runtime::json_grammar::JsonState;
 use flambeau_runtime::Sampler;
@@ -72,7 +72,7 @@ use crate::state::{parse_stop, SamplingParams};
 /// Server-wide shared state — built once at startup.
 pub struct ServerState {
     pub model_id: String,
-    pub cfg: Qwen3MoEConfig,
+    pub cfg: ServerModelCfg,
     /// PP or TP loaded model. Handlers dispatch via the
     /// `crate::model::{prefill_logits, decode_logits}` helpers; they
     /// don't need to inspect this variant directly.

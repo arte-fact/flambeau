@@ -23,7 +23,6 @@ use anyhow::Result;
 use flambeau_backend_hip::HipCluster;
 use flambeau_qwen3_moe::forward::ShardedForwardPrefillScratchTp;
 use flambeau_qwen3_moe::session::KvLayout;
-use flambeau_qwen3_moe::Qwen3MoEConfig;
 
 use crate::model::{
     BoundaryCallback, HybridHipModel, HybridHipSession, Inflight, LoadedModel, PpHipModel,
@@ -31,7 +30,6 @@ use crate::model::{
 };
 
 pub trait HipModel: Send + Sync + 'static {
-    fn config(&self) -> &Qwen3MoEConfig;
     /// Topology label for handler metrics: `"pp"`, `"tp"`, `"pp+tp"`.
     fn topology(&self) -> &'static str;
 
@@ -143,9 +141,6 @@ pub fn create_hip_session(
 }
 
 impl HipModel for PpHipModel {
-    fn config(&self) -> &Qwen3MoEConfig {
-        &self.model.config
-    }
     fn topology(&self) -> &'static str {
         "pp"
     }
@@ -155,9 +150,6 @@ impl HipModel for PpHipModel {
 }
 
 impl HipModel for TpHipModel {
-    fn config(&self) -> &Qwen3MoEConfig {
-        &self.model.config
-    }
     fn topology(&self) -> &'static str {
         "tp"
     }
@@ -167,9 +159,6 @@ impl HipModel for TpHipModel {
 }
 
 impl HipModel for HybridHipModel {
-    fn config(&self) -> &Qwen3MoEConfig {
-        &self.model.config
-    }
     fn topology(&self) -> &'static str {
         "pp+tp"
     }

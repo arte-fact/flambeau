@@ -525,7 +525,7 @@ pub async fn serve(cfg: ServeConfig, registry: Registry) -> Result<()> {
 
     let state: SharedState = Arc::new(ServerState {
         model_id: cfg.model_id.clone(),
-        cfg: model_cfg,
+        cfg: crate::model_cfg::ServerModelCfg::from(&model_cfg),
         model,
         cluster,
         tokenizer,

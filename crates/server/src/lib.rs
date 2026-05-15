@@ -20,6 +20,8 @@ pub mod gpu_sampler;
 #[cfg(feature = "hip")]
 pub mod model;
 #[cfg(feature = "hip")]
+pub mod model_cfg;
+#[cfg(feature = "hip")]
 pub mod model_extensions;
 #[cfg(feature = "hip")]
 pub mod model_handle;
