@@ -46,6 +46,12 @@ pub mod embedding;
 pub mod weights;
 
 #[cfg(feature = "hip")]
+pub mod driver;
+
+#[cfg(feature = "hip")]
+pub use driver::Qwen3MoEPpDriver;
+
+#[cfg(feature = "hip")]
 pub use model::Qwen3MoEModel;
 
 #[cfg(feature = "hip")]

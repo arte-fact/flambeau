@@ -397,9 +397,12 @@ fn infer_main(
         "gemma4" => {
             build_gemma4_driver(file.clone(), &device_ids, prompt_ids.len() + max_tokens, mesh)?
         }
+        "qwen35" | "qwen35moe" | "qwen3moe" | "qwen3next" => {
+            build_qwen3_moe_driver(&file, &device_ids, prompt_ids.len() + max_tokens, mesh)?
+        }
         other => anyhow::bail!(
             "`flambeau infer` does not yet route arch `{other}` through ModelDriver. \
-             Supported: gemma4."
+             Supported: gemma4, qwen35/qwen35moe/qwen3moe/qwen3next (PP only for the Qwen family)."
         ),
     };
 
@@ -448,6 +451,26 @@ fn build_gemma4_driver(
             let driver = Gemma4TpDriver::upload(&file, cfg, layout, cluster, max_tokens)?;
             Ok(Box::new(driver))
         }
+    }
+}
+
+#[cfg(feature = "hip_infer")]
+fn build_qwen3_moe_driver(
+    file: &GgufFile,
+    device_ids: &[i32],
+    max_tokens: usize,
+    mesh: InferMesh,
+) -> Result<Box<dyn flambeau_runtime::ModelDriver>> {
+    use flambeau_qwen3_moe::{session::KvLayout, Qwen3MoEPpDriver};
+    match mesh {
+        InferMesh::Pp => {
+            let driver = Qwen3MoEPpDriver::load(file, device_ids, max_tokens, KvLayout::F16)?;
+            Ok(Box::new(driver))
+        }
+        InferMesh::Tp => anyhow::bail!(
+            "qwen3-moe TP path is not yet wrapped in ModelDriver — Phase 12 part 3 \
+             ships PP only. Use --mesh-mode pp."
+        ),
     }
 }
 

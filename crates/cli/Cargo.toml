@@ -18,7 +18,7 @@ hip_sweep = ["flambeau-bench/hip"]
 hip_serve = ["flambeau-server/hip"]
 # Enables `flambeau infer` — single-prompt inference on HIP devices.
 # Gemma4 path uses `Gemma4PpDriver`; runs single-device or PP.
-hip_infer = ["flambeau-gemma4/hip", "dep:flambeau-backend-hip"]
+hip_infer = ["flambeau-gemma4/hip", "flambeau-qwen3-moe/hip", "dep:flambeau-backend-hip"]
 # Enables debug FLAMBEAU_* env-var reads (probes, dumps, traces).
 # Off by default; production binaries elide all gated reads.
 # (flambeau-server propagates the flag to flambeau-qwen3-moe and
