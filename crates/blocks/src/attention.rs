@@ -1108,6 +1108,136 @@ impl StandardAttention {
         Ok(())
     }
 
+    /// Decode for a shared-KV tail layer — the layer reuses another
+    /// layer's KV cache instead of computing its own. Skips K/V
+    /// projection + V norm + KV append; runs only:
+    /// `attn_norm → Q proj → Q norm → RoPE Q → attention read →
+    ///  output_proj`.
+    ///
+    /// `kv_cache` is the routed source layer's cache; this method
+    /// only reads from it. Honours `softmax_scale`, `window_size`,
+    /// and `f32_output_proj` like `forward_decode`.
+    ///
+    /// Used by gemma4 E4B's shared-KV tail layers.
+    pub fn forward_decode_shared_kv<L: CacheLayout, O: Ops>(
+        &self,
+        ops: &O,
+        device: &HipDevice,
+        stream: &HipStream,
+        x_in: DevicePtr,
+        delta_out: DevicePtr,
+        kv_cache: &KvCache<L, HipDevice>,
+        scratch: &mut StandardAttentionDecodeScratch<'_>,
+        position: usize,
+    ) -> Result<()> {
+        let hidden = self.hidden;
+        let head_dim = self.head_dim;
+        let n_heads = self.n_heads;
+        let n_kv_heads = self.n_kv_heads;
+        let q_width = n_heads * head_dim;
+
+        // 1. attn_norm + Q8_1 quantise.
+        ops.rmsnorm_quant_q8_1(
+            x_in,
+            self.attn_norm_w,
+            scratch.x_q8_1,
+            1,
+            hidden,
+            self.rms_norm_eps,
+        )
+        .context("shared-kv attn_norm + quant")?;
+
+        // 2. Q projection.
+        ops.mmvq(
+            self.attn_q.ptr,
+            scratch.x_q8_1,
+            scratch.mmvq_f32,
+            q_width,
+            hidden,
+            self.attn_q.dtype,
+        )
+        .context("shared-kv mmvq attn_q")?;
+        ops.cast_f32_to_f16(scratch.mmvq_f32, scratch.q_f16, q_width)
+            .context("shared-kv cast Q → f16")?;
+
+        // 3. Per-head Q norm.
+        ops.rmsnorm_f16(
+            scratch.q_f16,
+            self.attn_q_norm_w,
+            scratch.q_f16,
+            n_heads,
+            head_dim,
+            self.rms_norm_eps,
+        )
+        .context("shared-kv attn_q_norm")?;
+
+        // 4. Position upload + RoPE Q.
+        scratch.positions_host[0] = position as i32;
+        // SAFETY: scratch.positions is i32 [1]; positions_host outlives sync.
+        unsafe {
+            device.memcpy_async(
+                stream,
+                flambeau_core::CopyDirection::HostToDevice,
+                scratch.positions,
+                DevicePtr(scratch.positions_host.as_ptr() as usize),
+                4,
+            )?;
+        }
+        ops.rope_neox_partial_f16(
+            scratch.q_f16,
+            scratch.positions,
+            self.rope_freq_base,
+            1,
+            n_heads,
+            head_dim,
+            self.rope_rotated_dims,
+        )
+        .context("shared-kv rope Q")?;
+
+        // 5. Attention read against the routed cache.
+        let n_tokens_kv = kv_cache.current_tokens();
+        let scale = self
+            .softmax_scale
+            .unwrap_or_else(|| (head_dim as f32).sqrt().recip());
+        let window = self.window_size.map(|w| w as i32).unwrap_or(0);
+        ops.attention_decode_f16(
+            scratch.q_f16,
+            kv_cache.k_buffer(),
+            kv_cache.v_buffer(),
+            scratch.attn_out_f16,
+            n_heads,
+            n_kv_heads,
+            head_dim,
+            n_tokens_kv,
+            scale,
+            window,
+        )
+        .context("shared-kv attention_decode_f16")?;
+
+        // 6. Output projection.
+        ops.quantize_f16_q8_1(scratch.attn_out_f16, scratch.x_q8_1, q_width)
+            .context("shared-kv quantize attn_out → Q8_1")?;
+        let mmvq_out = if self.f32_output_proj {
+            delta_out
+        } else {
+            scratch.mmvq_f32
+        };
+        ops.mmvq(
+            self.attn_output.ptr,
+            scratch.x_q8_1,
+            mmvq_out,
+            hidden,
+            q_width,
+            self.attn_output.dtype,
+        )
+        .context("shared-kv mmvq attn_output")?;
+        if !self.f32_output_proj {
+            ops.cast_f32_to_f16(scratch.mmvq_f32, delta_out, hidden)
+                .context("shared-kv cast attn_output → f16")?;
+        }
+        Ok(())
+    }
+
     /// Multi-token prefill. `start_position` is the cache tail length
     /// before this chunk's K/V are appended.
     pub fn forward_prefill<L: CacheLayout, O: Ops>(

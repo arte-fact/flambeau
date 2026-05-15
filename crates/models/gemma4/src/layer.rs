@@ -312,93 +312,47 @@ pub fn forward_layer_decode<L: CacheLayout, O: Ops>(
             )
             .context("StandardAttention::forward_decode (gemma4 layer)")?;
     } else {
-        let kv_width = n_kv_heads * head_dim;
-        let _ = kv_width;
-        let softmax_scale: f32 = 1.0;
-        // Shared-KV tail (has_kv == false): Q runs through this layer's
-        // own attn_norm + Q proj + attn_q_norm + RoPE Q, but K/V/append
-        // are skipped (the routed cache already holds them from the
-        // source layer). Attention reads the routed cache; output_proj
-        // runs against this layer's `attn_output`. The
-        // `StandardAttention` block always appends, so the tail path
-        // stays inline.
-        ops.rmsnorm_quant_q8_1(
-            x_in,
-            weights.attn_norm,
-            scratch.x_q8_1,
-            1,
-            hidden,
-            rms_norm_eps,
-        )
-        .context("attn_norm + quant (shared-KV tail)")?;
-        ops.mmvq(
-            weights.attn_q.ptr,
-            scratch.x_q8_1,
-            scratch.mmvq_f32,
-            q_width,
-            hidden,
-            weights.attn_q.dtype,
-        )
-        .context("mmvq attn_q (shared-KV tail)")?;
-        ops.cast_f32_to_f16(scratch.mmvq_f32, scratch.q_f16, q_width)
-            .context("cast Q → f16 (shared-KV tail)")?;
-        ops.rmsnorm_f16(
-            scratch.q_f16,
-            weights.attn_q_norm,
-            scratch.q_f16,
-            n_heads,
-            head_dim,
-            rms_norm_eps,
-        )
-        .context("attn_q_norm (shared-KV tail)")?;
-        scratch.positions_host[0] = position as i32;
-        // SAFETY: scratch.positions is i32 [1]; positions_host outlives the bounded sync.
-        unsafe {
-            device.memcpy_async(
-                stream,
-                CopyDirection::HostToDevice,
-                scratch.positions,
-                DevicePtr(scratch.positions_host.as_ptr() as usize),
-                4,
-            )?;
-        }
-        ops.rope_neox_partial_f16(
-            scratch.q_f16,
-            scratch.positions,
-            spec.rope_freq_base,
-            1,
-            n_heads,
-            head_dim,
-            spec.rope_dim,
-        )
-        .context("rope Q (shared-KV tail)")?;
-        let n_tokens_kv = kv_cache.current_tokens();
-        ops.attention_decode_f16(
-            scratch.q_f16,
-            kv_cache.k_buffer(),
-            kv_cache.v_buffer(),
-            scratch.attn_out_f16,
-            n_heads,
-            n_kv_heads,
-            head_dim,
-            n_tokens_kv,
-            softmax_scale,
-            window,
-        )
-        .context("attention_decode_f16 (shared-KV tail)")?;
-        ops.quantize_f16_q8_1(scratch.attn_out_f16, scratch.x_q8_1, q_width)
-            .context("quantize attn_out → Q8_1 (shared-KV tail)")?;
-        ops.mmvq(
-            weights.attn_output.ptr,
-            scratch.x_q8_1,
-            scratch.mmvq_f32,
-            hidden,
-            q_width,
-            weights.attn_output.dtype,
-        )
-        .context("mmvq attn_output (shared-KV tail)")?;
-        ops.cast_f32_to_f16(scratch.mmvq_f32, scratch.attn_out_f16, hidden)
-            .context("cast attn_output → f16 (shared-KV tail)")?;
+        // Shared-KV tail (`has_kv == false`): runs the
+        // `StandardAttention::forward_decode_shared_kv` path which
+        // reuses the routed source layer's KV cache. Caller has
+        // already pointed `kv_cache` at the source-layer slot via
+        // `spec.kv_share_src`.
+        let block = weights.build_attn_block(
+            spec, hidden, n_heads, n_kv_heads, head_dim, rms_norm_eps, scratch.v_ones_f16,
+        )?;
+        let block = if use_f32_output {
+            block.with_f32_output_proj(true)
+        } else {
+            block
+        };
+        let mut std_scratch = StandardAttentionDecodeScratch {
+            x_q8_1: scratch.x_q8_1,
+            mmvq_f32: scratch.mmvq_f32,
+            q_fused_f16: DevicePtr(0),
+            q_f16: scratch.q_f16,
+            gate_f16: DevicePtr(0),
+            k_f16: scratch.k_f16,
+            v_f16: scratch.v_f16,
+            k_q8_0: DevicePtr(0),
+            v_q8_0: DevicePtr(0),
+            attn_out_f16: scratch.attn_out_f16,
+            gated_out_f16: DevicePtr(0),
+            positions: scratch.positions,
+            positions_host: scratch.positions_host,
+            splitk_partials_m: scratch.splitk_partials_m,
+            splitk_partials_s: scratch.splitk_partials_s,
+            splitk_partials_o: scratch.splitk_partials_o,
+        };
+        let delta_out = if use_f32_output {
+            scratch.mmvq_f32
+        } else {
+            scratch.attn_out_f16
+        };
+        block
+            .forward_decode_shared_kv(
+                ops, device, stream, x_in, delta_out, kv_cache, &mut std_scratch, position,
+            )
+            .context("StandardAttention::forward_decode_shared_kv (gemma4 tail)")?;
     }
 
     // 11. post_attention_norm RMSNorm on attn_out, then add residual.
