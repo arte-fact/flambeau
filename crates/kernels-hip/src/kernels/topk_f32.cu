@@ -132,3 +132,17 @@ extern "C" __global__ void flambeau_topk_softmax_f32(
         out_weights[(size_t) token * k + tid] = my_w;
     }
 }
+
+// Note: `softmax-then-topk-then-renormalize` is mathematically
+// equivalent to `topk-then-softmax-of-k` (the algorithm above) when
+// the renormalize step divides by the sum of top-k softmax probs.
+// Proof:
+//   softmax-then-topk: p_i = exp(l_i - M) / Σ_all exp(l_j - M); take
+//   top-k by p_i (≡ top-k by l_i since softmax monotonic).
+//   Renormalize: np_i = p_i / Σ_topk p_j
+//                     = exp(l_i - M) / Σ_topk exp(l_j - M).
+//   Equivalent to softmax-of-top-k raw logits (max(l in topk) == M
+//   because top-k contains the global max).
+// So gemma4 `LLAMA_EXPERT_GATING_FUNC_TYPE_SOFTMAX` with `norm_w=true`
+// (its actual setting per `src/models/gemma4-iswa.cpp:165`) IS what
+// `flambeau_topk_softmax_f32` above computes. No new kernel needed.
