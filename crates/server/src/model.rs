@@ -410,6 +410,47 @@ pub fn prefill_logits(
     if prompt_ids.is_empty() {
         bail!("prefill_logits: empty prompt");
     }
+    // Phase 12.9 — gemma4 routes through ModelDriver, bypassing the
+    // qwen3-moe sharded-session machinery. The driver owns its own
+    // cluster + chunked-prefill story, so we ignore `tp_pool_prefill`
+    // / `on_boundary` / `prefill_ubatch` here (per-arch follow-ups).
+    // BOS prepend: gemma4 mandates BOS as token 0; the server-side
+    // tokenizer doesn't add specials, so we consult the session's
+    // recorded BOS id and prepend on a fresh prefill (start_position
+    // == 0). Aligning the cache tail to N+1 makes the subsequent
+    // decode positions from routes.rs (`prompt_ids.len() + step`)
+    // land on the right slots.
+    if inflight.as_gemma4_driver_mut().is_some() {
+        let _ = (cluster, tp_pool_prefill, prefill_ubatch);
+        let _ = on_boundary;
+        let bos_id = inflight.gemma4_bos_id();
+        let owned: Vec<u32>;
+        let prompt_slice: &[u32] = if start_position == 0
+            && bos_id.is_some()
+            && prompt_ids.first() != bos_id.as_ref()
+        {
+            let bos = bos_id.expect("checked Some above");
+            owned = std::iter::once(bos).chain(prompt_ids.iter().copied()).collect();
+            owned.as_slice()
+        } else {
+            prompt_ids
+        };
+        tracing::debug!(
+            target: "server.gemma4",
+            in_len = prompt_ids.len(),
+            out_len = prompt_slice.len(),
+            start_position,
+            bos = ?bos_id,
+            "gemma4 prefill (BOS-prepended: {})",
+            prompt_slice.len() > prompt_ids.len()
+        );
+        let driver = inflight
+            .as_gemma4_driver_mut()
+            .expect("checked above");
+        return driver
+            .forward_prefill_logits(prompt_slice, start_position, logits_out)
+            .context("gemma4 forward_prefill_logits");
+    }
     if let (Some(p), Some(pp_s)) = (model.as_pp(), inflight.as_pp_mut()) {
         let m = &p.model;
         let session = &mut pp_s.session;

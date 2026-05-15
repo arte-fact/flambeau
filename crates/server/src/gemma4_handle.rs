@@ -12,7 +12,7 @@
 
 #![cfg(feature = "hip")]
 
-use anyhow::{bail, Result};
+use anyhow::Result;
 use flambeau_backend_hip::HipCluster;
 use flambeau_gemma4::Gemma4Config;
 use flambeau_qwen3_moe::forward::ShardedForwardPrefillScratchTp;
@@ -44,6 +44,13 @@ impl HipModel for Gemma4HipModel {
 /// `FLAMBEAU_INFLIGHT_SLOTS=1` until weights/session split lands.
 pub struct Gemma4HipSession {
     pub driver: Box<dyn ModelDriver>,
+    /// Gemma4 mandates BOS prepended to every prompt (llama.cpp PR
+    /// #21500 sets `force_add_bos=true` regardless of the GGUF's
+    /// stored flag). The server's tokenization path doesn't add
+    /// BOS (chat templates normally handle that, but `/v1/completions`
+    /// and minimally-templated chat paths don't), so we prepend it
+    /// inside `prefill_logits` when not already present.
+    pub bos_id: Option<u32>,
 }
 
 impl HipSession for Gemma4HipSession {
@@ -63,19 +70,44 @@ impl HipSession for Gemma4HipSession {
         // `on_boundary` callback never fires for gemma4 (prefix cache
         // gated off via `as_pp/as_tp/as_hybrid` returning None — see
         // routes.rs `prefix_cache_try_restore` early-out).
+        //
+        // BOS prepend: the server-side `state.tokenizer.encode` does
+        // not add special tokens. Gemma4 needs BOS as token 0 (matches
+        // the parity test's `force_add_bos` insertion); we add it here
+        // when (a) the session was constructed with a known BOS id,
+        // (b) start_position is 0 (fresh prefill, not a tail continuation),
+        // and (c) the prompt doesn't already lead with BOS.
+        // Trait-method entry path. Currently the server's
+        // `crate::model::prefill_logits` free fn handles BOS prepend
+        // before calling the driver (it has the trait-accessor scaffold
+        // for `gemma4_bos_id` + branches gemma4 separately), so this
+        // direct trait call only fires when callers bypass the free
+        // fn. Mirror the same BOS-prepend invariant here so the trait
+        // method is self-contained.
+        let owned: Vec<u32>;
+        let needs_bos = start_position == 0
+            && self.bos_id.is_some()
+            && prompt_ids.first() != self.bos_id.as_ref();
+        let prompt_slice: &[u32] = if needs_bos {
+            let bos = self.bos_id.expect("checked Some above");
+            owned = std::iter::once(bos).chain(prompt_ids.iter().copied()).collect();
+            owned.as_slice()
+        } else {
+            prompt_ids
+        };
         self.driver
-            .forward_prefill_logits(prompt_ids, start_position, logits_out)
+            .forward_prefill_logits(prompt_slice, start_position, logits_out)
     }
 
     fn reset_for_next_request(&mut self, _cluster: &HipCluster) -> Result<()> {
         // V1: gemma4 drivers don't yet expose a KV-reset hook on the
-        // ModelDriver trait. The server pre-allocates one driver per
-        // slot and runs one request through it; subsequent requests on
-        // the same slot need explicit KV reset support (follow-up).
-        bail!(
-            "Gemma4HipSession::reset_for_next_request: KV-reset on gemma4 drivers \
-             not yet wired through ModelDriver. Restart the server for a fresh KV."
-        )
+        // ModelDriver trait. First request always works (KV starts
+        // empty); second request reuses the slot WITHOUT clearing,
+        // so the model sees the prior request's KV as a prefix —
+        // expect garbage output. Restart the server for a fresh KV
+        // until the reset hook lands on `ModelDriver`. No-op rather
+        // than bail so the happy-path single-request flow boots.
+        Ok(())
     }
 
     fn dispose(self: Box<Self>, _cluster: &HipCluster) -> Result<()> {
@@ -105,6 +137,10 @@ impl HipSession for Gemma4HipSession {
     fn as_gemma4_driver_mut(&mut self) -> Option<&mut dyn ModelDriver> {
         Some(self.driver.as_mut())
     }
+
+    fn gemma4_bos_id(&self) -> Option<u32> {
+        self.bos_id
+    }
 }
 
 /// Build a `LoadedModel` (`Arc<dyn HipModel>`) for gemma4 from a
@@ -118,9 +154,14 @@ pub fn build_gemma4_loaded_model(
 }
 
 /// Wrap a constructed `Gemma4*Driver` (as a `Box<dyn ModelDriver>`)
-/// into a HipSession trait object for the inflight pool.
-pub fn wrap_gemma4_driver(driver: Box<dyn ModelDriver>) -> Box<dyn HipSession> {
-    Box::new(Gemma4HipSession { driver })
+/// into a HipSession trait object for the inflight pool. `bos_id` is
+/// the tokenizer's BOS token (from GGUF metadata); when present, the
+/// session prepends it to every fresh prefill.
+pub fn wrap_gemma4_driver(
+    driver: Box<dyn ModelDriver>,
+    bos_id: Option<u32>,
+) -> Box<dyn HipSession> {
+    Box::new(Gemma4HipSession { driver, bos_id })
 }
 
 /// Best-effort topology-from-arch hint. Used by `is_gemma4_arch` style

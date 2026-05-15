@@ -1156,6 +1156,12 @@ impl ServerState {
                     .context("gemma4 decode: session is not Gemma4HipSession")?
             };
             let slot = &slots[0];
+            // Phase 12.9 — routes.rs passes `position = prompt_ids.len() +
+            // step` (step starts at 1, so position=N+1 for first decode).
+            // This is correct for gemma4 because the gemma4 wrapper
+            // prepends BOS in `prefill_logits`, making the actual cache
+            // tail after prefill = N+1. The first decode at position N+1
+            // therefore lands in the right slot.
             let out: &mut Vec<f32> = logits_refs[0];
             out.clear();
             driver

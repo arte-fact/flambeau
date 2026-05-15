@@ -114,6 +114,15 @@ pub trait HipSession: Send {
     fn as_gemma4_driver_mut(&mut self) -> Option<&mut dyn flambeau_runtime::ModelDriver> {
         None
     }
+
+    /// Gemma4 mandates BOS prepended to every prompt; the server-side
+    /// `state.tokenizer.encode` does not add specials, so the prefill
+    /// path consults this accessor and prepends when present. Returns
+    /// `None` for non-gemma4 sessions (or gemma4 sessions constructed
+    /// without a BOS id).
+    fn gemma4_bos_id(&self) -> Option<u32> {
+        None
+    }
 }
 
 /// Self-sufficient session: bundles an `Inflight` with a back-reference

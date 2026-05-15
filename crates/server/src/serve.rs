@@ -718,7 +718,7 @@ async fn serve_inner_gemma4(
     .context("Gemma4PpDriver::upload")?;
 
     let model = build_gemma4_loaded_model(cfg_g4.clone(), "pp");
-    let session = wrap_gemma4_driver(Box::new(driver));
+    let session = wrap_gemma4_driver(Box::new(driver), tokenizer.bos_id);
     let inflight_pool: Vec<Mutex<Box<dyn crate::HipSession>>> = vec![Mutex::new(session)];
 
     let slot_in_use: Vec<std::sync::atomic::AtomicBool> = (0..inflight_slots)
