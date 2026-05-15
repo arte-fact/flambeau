@@ -823,6 +823,73 @@ impl MoeExperts {
         Ok(())
     }
 
+    /// F32-output sibling of [`Self::forward_decode_tp`]. Skips the
+    /// `cast_f32_to_f16(down_f32, down_f16)` step and emits a F32 partial
+    /// via `moe_combine_no_residual_f32`. Required by the gemma4
+    /// head_dim=512 + Q8_0 path where V-norm spikes propagate into down
+    /// outputs and the F16 cast saturates. Caller pairs this with an F32
+    /// AllReduce (`tp_allreduce_sum_f32`) and a F32 post-norm cascade.
+    pub fn forward_decode_tp_f32<O: Ops>(
+        &self,
+        ops: &O,
+        x_norm: DevicePtr,
+        partial_out_f32: DevicePtr,
+        scratch: MoeExpertsDecodeScratch,
+    ) -> Result<()> {
+        let hidden = self.hidden;
+        let inter = self.intermediate;
+        let top_k = self.top_k;
+
+        ops.quantize_f16_q8_1(x_norm, scratch.x_q8_1, hidden)
+            .context("moe (TP-F32) x_norm → Q8_1")?;
+        self.gate_up(ops, scratch)?;
+        let n_total = top_k * inter;
+        let fuse_swiglu_quant =
+            matches!(self.activation, Activation::SwiGLU) && n_total % 32 == 0;
+        if fuse_swiglu_quant {
+            ops.swiglu_f32_to_q8_1(
+                scratch.gate_out_f32,
+                scratch.up_out_f32,
+                scratch.activated_q8_1,
+                n_total,
+            )
+            .context("moe (TP-F32) swiglu_f32_to_q8_1")?;
+        } else {
+            match self.activation {
+                Activation::SwiGLU => ops
+                    .swiglu_f32_to_f16(
+                        scratch.gate_out_f32,
+                        scratch.up_out_f32,
+                        scratch.activated_f16,
+                        n_total,
+                    )
+                    .context("moe (TP-F32) swiglu_f32_to_f16")?,
+                Activation::Gelu => ops
+                    .gelu_f32_to_f16(
+                        scratch.gate_out_f32,
+                        scratch.up_out_f32,
+                        scratch.activated_f16,
+                        n_total,
+                    )
+                    .context("moe (TP-F32) gelu_f32_to_f16")?,
+            }
+            ops.quantize_f16_q8_1(scratch.activated_f16, scratch.activated_q8_1, n_total)
+                .context("moe (TP-F32) quantize activated → Q8_1")?;
+        }
+        self.down(ops, scratch)?;
+        // F32 combine: read F32 down outputs directly, write F32 partial.
+        ops.moe_combine_no_residual_f32(
+            scratch.down_f32,
+            scratch.expert_weights,
+            partial_out_f32,
+            1,
+            top_k,
+            hidden,
+        )
+        .context("moe (TP-F32) combine_no_residual_f32")?;
+        Ok(())
+    }
+
     /// Multi-token router. Same shape as `route_decode` but uses the
     /// batched dense_gemv kernel + L-aware topk.
     pub fn route_prefill<O: Ops>(

@@ -387,6 +387,15 @@ pub struct StandardAttention {
     /// variants land in S3 — the field is stored on the block now so
     /// callers can configure it without a second API change.
     pub window_size: Option<u32>,
+    /// When `true`, the output projection skips the final
+    /// `cast_f32_to_f16(mmvq_f32, delta_out)` and instead writes the
+    /// F32 result directly into `delta_out` (caller must size
+    /// `delta_out` as F32 `hidden * 4 bytes`). Used by gemma4 26B-A4B
+    /// full-attention layers where V_norm + head_dim=512 produces a
+    /// sqrt(head_dim)≈22 spike that overflows the F16 cast on the
+    /// row-parallel output projection sum (see
+    /// `feedback_gemma4_attn_output_proj_f16_saturate`).
+    pub f32_output_proj: bool,
 }
 
 impl StandardAttention {
@@ -474,6 +483,7 @@ impl StandardAttention {
             gated,
             softmax_scale: None,
             window_size: None,
+            f32_output_proj: false,
         })
     }
 
@@ -498,6 +508,16 @@ impl StandardAttention {
     /// standard causal path.
     pub fn with_window_size(mut self, window: u32) -> Self {
         self.window_size = Some(window);
+        self
+    }
+
+    /// Toggle the F32 output-projection path. When enabled,
+    /// `forward_decode`'s output projection writes F32 directly into
+    /// `delta_out` (caller must size as `hidden * 4 bytes`) and skips
+    /// the final `cast_f32_to_f16`. The downstream AR and post-norm
+    /// must consume F32. Used by gemma4 26B-A4B full-attention layers.
+    pub fn with_f32_output_proj(mut self, enabled: bool) -> Self {
+        self.f32_output_proj = enabled;
         self
     }
 
@@ -1061,18 +1081,29 @@ impl StandardAttention {
         ops.quantize_f16_q8_1(post_attn_f16, scratch.x_q8_1, q_width)
             .context("quantize post-attn → Q8_1")?;
 
-        // 12. Output projection [hidden, q_width].
+        // 12. Output projection [hidden, q_width]. F32 mmvq output.
+        // When `f32_output_proj`, write directly into `delta_out`
+        // (caller-sized F32) and skip the saturating F16 cast —
+        // gemma4 26B-A4B full-attention V_norm spike + Q8_0 + head_dim=512
+        // can push the F32 sum past F16 max.
+        let mmvq_out = if self.f32_output_proj {
+            delta_out
+        } else {
+            scratch.mmvq_f32
+        };
         ops.mmvq(
             self.attn_output.ptr,
             scratch.x_q8_1,
-            scratch.mmvq_f32,
+            mmvq_out,
             hidden,
             q_width,
             self.attn_output.dtype,
         )
         .context("mmvq attn_output")?;
-        ops.cast_f32_to_f16(scratch.mmvq_f32, delta_out, hidden)
-            .context("cast attn_output → f16")?;
+        if !self.f32_output_proj {
+            ops.cast_f32_to_f16(scratch.mmvq_f32, delta_out, hidden)
+                .context("cast attn_output → f16")?;
+        }
 
         Ok(())
     }

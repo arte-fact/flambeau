@@ -66,6 +66,19 @@ pub struct Gemma4TpMoeScratch {
     /// AR'd in Phase 5c (separately from `partial_ffn`) under
     /// `post_ffw_norm_2`.
     pub partial_moe_f16: DevicePtr,
+    /// F32 `[hidden]` — F32 sibling of `partial_moe_f16`. Used for the
+    /// Q8_0 + head_dim=512 path where the F16 combine + AR loses
+    /// precision on V-norm spikes carried into the expert down outputs.
+    /// Filled by `MoeExperts::forward_decode_tp_f32` and AR'd via
+    /// `tp_allreduce_sum_f32`. Q4_0 path still uses `partial_moe_f16`
+    /// (Q4_0 rounding masks the spikes).
+    pub partial_moe_f32: DevicePtr,
+    /// F32 `[hidden]` — F32 sibling of `stage.partial_ffn` (shared MLP
+    /// row-parallel partial). Same Q8_0 + head_dim=512 rationale as
+    /// `partial_moe_f32`: the V-norm spike rides the residual into the
+    /// shared MLP's down output, and F16 saturates the per-rank partial
+    /// before the AR. Filled by `DenseMlpTp::forward_decode_f32`.
+    pub partial_shared_mlp_f32: DevicePtr,
     /// F32 `[hidden]` — staging for F16→F32 cast of AR'd row-parallel
     /// partials before the F32 cascade rmsnorm. Reused across Phase
     /// 5b/5d/6 (single buffer; sequential use).
@@ -111,6 +124,8 @@ impl Gemma4TpMoeScratch {
         let cur_moe_input_f16 = raw_alloc.alloc_f16(device, hidden)?.0;
         let zero_hidden_f16 = raw_alloc.alloc_f16(device, hidden)?.0; // zeroed by alloc_f16
         let partial_moe_f16 = raw_alloc.alloc_f16(device, hidden)?.0;
+        let partial_moe_f32 = raw_alloc.alloc_f32(device, hidden)?.0;
+        let partial_shared_mlp_f32 = raw_alloc.alloc_f32(device, hidden)?.0;
         let tmp_f32 = raw_alloc.alloc_f32(device, hidden)?.0;
         let cur_mlp_f32 = raw_alloc.alloc_f32(device, hidden)?.0;
         let cur_moe_f32 = raw_alloc.alloc_f32(device, hidden)?.0;
@@ -134,6 +149,8 @@ impl Gemma4TpMoeScratch {
             cur_moe_input_f16,
             zero_hidden_f16,
             partial_moe_f16,
+            partial_moe_f32,
+            partial_shared_mlp_f32,
             tmp_f32,
             cur_mlp_f32,
             cur_moe_f32,
@@ -638,11 +655,14 @@ pub fn forward_ffn_moe_tp_per_rank<O: Ops>(
     layer_activated_q8_1: DevicePtr,
     layer_down_f32: DevicePtr,
     attn_residual: DevicePtr,
-    partial_shared_mlp_out: DevicePtr,
     hidden: usize,
     ff_len_local: usize,
     rms_norm_eps: f32,
 ) -> Result<()> {
+    // Shared MLP partial now writes to `scratch.partial_shared_mlp_f32`
+    // (F32-throughout). The F16 partial_ffn buffer is no longer the
+    // shared-MLP target — see Phase 5a in the composer.
+    let _ = layer_down_f32;
     // 1. Router input — folded rmsnorm + scale + mul (pre_router_weight
     //    already carries (1/sqrt(hidden)) * ffn_gate_inp.scale).
     ops.rmsnorm_f16(
@@ -714,18 +734,22 @@ pub fn forward_ffn_moe_tp_per_rank<O: Ops>(
         up_f32: layer_up_f32,
         activated_f16: layer_activated_f16,
         activated_q8_1: layer_activated_q8_1,
-        down_f32: layer_down_f32,
+        down_f32: DevicePtr(0), // unused on the F32 path (down writes
+                                // directly into partial_shared_mlp_f32)
         down_f16: DevicePtr(0),
     };
+    // F32-throughout shared MLP: skip the cast_f32_to_f16 + write the
+    // down output straight into the F32 partial buffer. Same rationale
+    // as `forward_decode_tp_f32` on the routed MoE branch.
     block
-        .forward_decode(
+        .forward_decode_f32(
             ops,
             /* x_norm = */ DevicePtr(0),
-            partial_shared_mlp_out,
+            scratch.partial_shared_mlp_f32,
             dense_scratch,
             /* pre_quantized = */ true,
         )
-        .context("MoE TP shared-MLP DenseMlpTp::forward_decode")?;
+        .context("MoE TP shared-MLP DenseMlpTp::forward_decode_f32")?;
 
     // 4. Pre-MoE-branch norm: cur_moe_input = rmsnorm(attn_residual,
     //    pre_ffw_norm_2). Per-row norm preserves the replicated layout.
@@ -742,31 +766,21 @@ pub fn forward_ffn_moe_tp_per_rank<O: Ops>(
     .context("MoE TP pre_ffw_norm_2")?;
 
     // 5. Routed MoE forward (per-rank sliced experts). Writes
-    //    `partial_moe_f16` = Σ_k w_k · down_local[k, :].
+    //    `partial_moe_f32` = Σ_k w_k · down_local[k, :].
     //
-    // Diagnostic bypass: `FLAMBEAU_TP_MOE_BYPASS_ROUTED=1` skips the
-    // routed branch and zeros the partial. Used by Phase 10c-G to
-    // isolate whether the F16 overflow at layer 5 originates in the
-    // shared MLP TP path or the routed MoE TP path.
-    if std::env::var_os("FLAMBEAU_TP_MOE_BYPASS_ROUTED").is_some() {
-        ops.scale_f16(
-            scratch.partial_moe_f16,
-            scratch.partial_moe_f16,
-            hidden,
-            0.0,
+    //    F32 partial (not F16): on Q8_0 + head_dim=512 the V-norm spike
+    //    propagates through attention output → MoE input → expert down
+    //    output, where an F16 cast saturates. AR'd in F32 + post-norm
+    //    cascade stays F32 through Phase 6.
+    tp_moe
+        .moe
+        .forward_decode_tp_f32(
+            ops,
+            scratch.cur_moe_input_f16,
+            scratch.partial_moe_f32,
+            scratch.moe_scratch,
         )
-        .context("MoE TP bypass (zero partial_moe)")?;
-    } else {
-        tp_moe
-            .moe
-            .forward_decode_tp(
-                ops,
-                scratch.cur_moe_input_f16,
-                scratch.partial_moe_f16,
-                scratch.moe_scratch,
-            )
-            .context("MoE TP forward_decode_tp")?;
-    }
+        .context("MoE TP forward_decode_tp_f32")?;
 
     Ok(())
 }

@@ -616,6 +616,85 @@ impl DenseMlpTp {
         Ok(())
     }
 
+    /// F32-output sibling of [`Self::forward_decode`]. Skips the
+    /// `cast_f32_to_f16` step and writes the F32 down output directly
+    /// into `partial_ffn_out_f32`. Used by gemma4 head_dim=512 + Q8_0
+    /// paths where the F16 cast saturates on V-norm spikes carried
+    /// through the residual into the shared MLP's down output.
+    pub fn forward_decode_f32<O: Ops>(
+        &self,
+        ops: &O,
+        x_norm: DevicePtr,
+        partial_ffn_out_f32: DevicePtr,
+        scratch: DenseMlpDecodeScratch,
+        pre_quantized: bool,
+    ) -> Result<()> {
+        let hidden = self.hidden;
+        let inter = self.intermediate_local;
+
+        if !pre_quantized {
+            ops.quantize_f16_q8_1(x_norm, scratch.x_q8_1, hidden)
+                .context("DenseMlpTp (F32) x_norm → Q8_1")?;
+        } else {
+            let _ = x_norm;
+        }
+        let gate_dt = self.ffn_gate.dtype;
+        let up_dt = self.ffn_up.dtype;
+        let fuse_q8 = gate_dt == flambeau_core::op::QDtype::Q8_0
+            && up_dt == flambeau_core::op::QDtype::Q8_0;
+        let fuse_q4_0 = gate_dt == flambeau_core::op::QDtype::Q4_0
+            && up_dt == flambeau_core::op::QDtype::Q4_0;
+        let fuse_q4_1 = gate_dt == flambeau_core::op::QDtype::Q4_1
+            && up_dt == flambeau_core::op::QDtype::Q4_1;
+        if fuse_q8 {
+            ops.mmvq_q8_0_gate_up(
+                self.ffn_gate.ptr, self.ffn_up.ptr, scratch.x_q8_1,
+                scratch.gate_f32, scratch.up_f32, inter, inter, hidden,
+            ).context("DenseMlpTp (F32) gate+up fused mmvq_q8_0")?;
+        } else if fuse_q4_0 {
+            ops.mmvq_q4_0_gate_up_t128(
+                self.ffn_gate.ptr, self.ffn_up.ptr, scratch.x_q8_1,
+                scratch.gate_f32, scratch.up_f32, inter, inter, hidden,
+            ).context("DenseMlpTp (F32) gate+up fused mmvq_q4_0_t128")?;
+        } else if fuse_q4_1 {
+            ops.mmvq_q4_1_gate_up(
+                self.ffn_gate.ptr, self.ffn_up.ptr, scratch.x_q8_1,
+                scratch.gate_f32, scratch.up_f32, inter, inter, hidden,
+            ).context("DenseMlpTp (F32) gate+up fused mmvq_q4_1")?;
+        } else {
+            ops.qmatmul(
+                self.ffn_gate.ptr, scratch.x_q8_1, DevicePtr(0),
+                scratch.gate_f32, 1, hidden, inter, gate_dt,
+            ).context("DenseMlpTp (F32) gate qmatmul")?;
+            ops.qmatmul(
+                self.ffn_up.ptr, scratch.x_q8_1, DevicePtr(0),
+                scratch.up_f32, 1, hidden, inter, up_dt,
+            ).context("DenseMlpTp (F32) up qmatmul")?;
+        }
+        match self.activation {
+            Activation::SwiGLU => ops
+                .swiglu_f32_to_f16(scratch.gate_f32, scratch.up_f32, scratch.activated_f16, inter)
+                .context("DenseMlpTp (F32) swiglu_f32_to_f16")?,
+            Activation::Gelu => ops
+                .gelu_f32_to_f16(scratch.gate_f32, scratch.up_f32, scratch.activated_f16, inter)
+                .context("DenseMlpTp (F32) gelu_f32_to_f16")?,
+        }
+        ops.quantize_f16_q8_1(scratch.activated_f16, scratch.activated_q8_1, inter)
+            .context("DenseMlpTp (F32) activated → Q8_1")?;
+        // Down qmatmul directly into the F32 partial buffer (skip the
+        // intermediate scratch.down_f32 + cast).
+        ops.qmatmul(
+            self.ffn_down.ptr,
+            scratch.activated_q8_1,
+            DevicePtr(0),
+            partial_ffn_out_f32,
+            1, inter, hidden,
+            self.ffn_down.dtype,
+        )
+        .context("DenseMlpTp (F32) down qmatmul → partial_ffn_out_f32")?;
+        Ok(())
+    }
+
     /// Multi-token TP prefill. Mirrors [`DenseMlp::forward_prefill`]
     /// but on the local intermediate slab; emits to `partial_ffn_out`.
     pub fn forward_prefill<O: Ops>(

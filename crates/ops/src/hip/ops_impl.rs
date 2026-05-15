@@ -1615,6 +1615,20 @@ impl<'a> Ops for HipOps<'a> {
         )
     }
 
+    fn moe_combine_no_residual_f32(
+        &self,
+        expert_outs: DevicePtr,
+        weights: DevicePtr,
+        out: DevicePtr,
+        n_tokens: usize,
+        top_k: usize,
+        hidden: usize,
+    ) -> Result<()> {
+        super::moe::moe_combine_no_residual_f32(
+            self.reg, self.stream, expert_outs, weights, out, n_tokens, top_k, hidden,
+        )
+    }
+
     fn moe_combine_two_residuals_f16(
         &self,
         expert_outs: DevicePtr,

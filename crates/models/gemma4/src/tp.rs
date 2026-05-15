@@ -581,8 +581,7 @@ fn forward_decode_layer_tp_moe(
     position: usize,
 ) -> Result<()> {
     use flambeau_blocks::{
-        cross_rank_event_barrier, tp_allreduce_sum_f32_synced, tp_allreduce_sum_synced, Buffer,
-        LayerComposerTp, RowParallel, F16,
+        tp_allreduce_sum_f32_synced, tp_allreduce_sum_synced, Buffer, RowParallel, F16,
     };
 
     let n = driver.stages.len();
@@ -591,25 +590,6 @@ fn forward_decode_layer_tp_moe(
     let ff_len_local = driver.cfg.feed_forward_length / n;
     let is_full_attn = !driver.layout.layers[il].is_swa;
 
-    let probe = std::env::var_os("FLAMBEAU_TP_MOE_DEBUG").is_some()
-        && (il == 0 || il == 4 || il == 5 || il + 1 == driver.cfg.num_layers);
-    if std::env::var_os("FLAMBEAU_TP_MOE_DEBUG").is_some() && il == 0 && position == 0 {
-        let pat: String = (0..driver.cfg.num_layers)
-            .map(|i| if driver.cfg.is_swa(i) { 'S' } else { 'F' })
-            .collect();
-        eprintln!("  [LAYER_PATTERN] {pat} (S=SWA head_dim={}, F=full head_dim={})",
-            driver.cfg.head_dim_swa, driver.cfg.head_dim);
-        eprintln!("  [CFG] num_heads={} num_kv_heads[..6]={:?} world={n}",
-            driver.cfg.num_heads,
-            &driver.cfg.num_kv_heads[..6]);
-    }
-
-    // ---- Attention half (Phases 1-3) — same as dense composer. ----
-    if probe && position == 0 && il >= 4 {
-        // probe stage.hidden BEFORE attention runs (input to L5 attn).
-        tp_dump_buffer(driver, 0, driver.stages[0].hidden, hidden,
-            &format!("L{il} P0 stage.hidden rank0 (pre-attention input)"));
-    }
     // Phase 1: per-rank attention. Full-attention layers (head_dim=512
     // on 26B-A4B) use the F32 output_proj path so the row-parallel
     // partial doesn't saturate F16 when V has a sqrt(head_dim)≈22
@@ -622,37 +602,6 @@ fn forward_decode_layer_tp_moe(
         for r in 0..n {
             <Gemma4TpDriver as LayerComposerTp>::forward_attn(driver, r, position, il)?;
         }
-    }
-    if probe {
-        if is_full_attn {
-            // F32 partial — read as F32 (probe utility is F16-only; skip).
-            eprintln!("  [TP_PHASE] L{il} P1 partial_attn_f32 rank0 (F32 buffer, probe skipped)");
-        } else {
-            tp_dump_buffer(driver, 0, driver.stages[0].partial_attn, hidden,
-                &format!("L{il} P1 partial_attn rank0"));
-        }
-    }
-    if probe && position == 0 && il == 5 {
-        // L5 specifically: head_dim=512 full-attention layer (per
-        // SSSSSFSSSSSF SWA pattern). Probe the attention internals
-        // — Q, K, V projections + attention output (pre output_proj) —
-        // to localize where Inf appears.
-        let spec = driver.layout.layers[il];
-        let head_dim = spec.head_dim;
-        let n_kv_local = spec.n_kv_heads / n;
-        let n_heads_local = spec.n_heads / n;
-        let q_width_local = n_heads_local * head_dim;
-        let kv_width_local = n_kv_local * head_dim;
-        let s0 = &driver.stages[0];
-        eprintln!("  [L5_ATTN] head_dim={head_dim} n_heads_local={n_heads_local} n_kv_local={n_kv_local} q_width_local={q_width_local} kv_width_local={kv_width_local}");
-        tp_dump_buffer(driver, 0, s0.scratch.q_f16.0, q_width_local,
-            "L5 q_f16 rank0 (post Q-proj+norm+RoPE)");
-        tp_dump_buffer(driver, 0, s0.scratch.k_f16.0, kv_width_local,
-            "L5 k_f16 rank0 (post K-proj+norm+RoPE)");
-        tp_dump_buffer(driver, 0, s0.scratch.v_f16.0, kv_width_local,
-            "L5 v_f16 rank0 (post V-proj+norm)");
-        tp_dump_buffer(driver, 0, s0.scratch.attn_out_local.0, q_width_local,
-            "L5 attn_out_local rank0 (pre output_proj)");
     }
     // Phase 2: AR-sum partial_attn across ranks. F32 path on
     // full-attention layers (so the F32 mmvq output stays bounded
@@ -704,14 +653,6 @@ fn forward_decode_layer_tp_moe(
         }
         .context("MoE AR sum partial_attn (SWA)")?;
     }
-    if probe {
-        if !is_full_attn {
-            tp_dump_buffer(driver, 0, driver.stages[0].partial_attn, hidden,
-                &format!("L{il} P2 partial_attn rank0 (post-AR)"));
-            tp_dump_buffer(driver, 1, driver.stages[1].partial_attn, hidden,
-                &format!("L{il} P2 partial_attn rank1 (post-AR)"));
-        }
-    }
     // Phase 3: post-attn-norm + residual add → attn_residual_f16.
     // Full-attn: F32 rmsnorm + cast + F16 add. SWA: trait method.
     if is_full_attn {
@@ -722,12 +663,6 @@ fn forward_decode_layer_tp_moe(
         for r in 0..n {
             <Gemma4TpDriver as LayerComposerTp>::post_norm_residual_attn(driver, r, il)?;
         }
-    }
-    if probe {
-        tp_dump_buffer(driver, 0, driver.stages[0].scratch.attn_residual_f16.0, hidden,
-            &format!("L{il} P3 attn_residual rank0"));
-        tp_dump_buffer(driver, 1, driver.stages[1].scratch.attn_residual_f16.0, hidden,
-            &format!("L{il} P3 attn_residual rank1"));
     }
 
     // ---- FFN half (Phases 4 / 5a-e / 6) — MoE-specific. ----
@@ -761,81 +696,53 @@ fn forward_decode_layer_tp_moe(
             scratch.activated_q8_1.0,
             scratch.mmvq_f32.0,
             scratch.attn_residual_f16.0,
-            stage.partial_ffn,
             hidden,
             ff_len_local,
             rms_eps,
         )
         .with_context(|| format!("MoE per-rank FFN layer {il} rank {r}"))?;
     }
-    if probe {
-        // First-bytes probe on the per-rank ffn_gate weight — confirms
-        // the per-rank slice differs (i.e., upload sharding is wired).
-        let ffg0 = driver.stages[0].layer_weights[il].ffn_gate.ptr;
-        let ffg1 = driver.stages[1].layer_weights[il].ffn_gate.ptr;
-        for (r, ptr) in [(0usize, ffg0), (1, ffg1)] {
-            use flambeau_core::CopyDirection;
-            let dev = driver.tp.cluster().device(r);
-            dev.bind().ok();
-            let mut buf = [0u8; 16];
-            unsafe {
-                let _ = dev.memcpy_async(
-                    dev.default_stream(),
-                    CopyDirection::DeviceToHost,
-                    DevicePtr(buf.as_mut_ptr() as usize),
-                    ptr,
-                    16,
-                );
-            }
-            dev.default_stream().synchronize().ok();
-            eprintln!("  [TP_PROBE] L{il} ffn_gate rank{r} first16: {:?}", buf);
-        }
-        tp_dump_buffer(driver, 0, driver.stages[0].partial_ffn, hidden,
-            &format!("L{il} P4 partial_shared_mlp rank0 (pre-AR)"));
-        tp_dump_buffer(driver, 1, driver.stages[1].partial_ffn, hidden,
-            &format!("L{il} P4 partial_shared_mlp rank1 (pre-AR)"));
-        let p_moe0 = driver.stages[0].tp_moe_scratch.as_ref().unwrap().partial_moe_f16;
-        let p_moe1 = driver.stages[1].tp_moe_scratch.as_ref().unwrap().partial_moe_f16;
-        tp_dump_buffer(driver, 0, p_moe0, hidden,
-            &format!("L{il} P4 partial_moe rank0 (pre-AR)"));
-        tp_dump_buffer(driver, 1, p_moe1, hidden,
-            &format!("L{il} P4 partial_moe rank1 (pre-AR)"));
-    }
 
-    // Phase 5a: AR-sum partial_ffn (shared-MLP).
+    // Phase 5a: AR-sum partial_shared_mlp_f32 (shared MLP, F32 path).
+    // F32 AR to match the F32 down qmatmul output from
+    // `DenseMlpTp::forward_decode_f32`. Pairs with the F32 MoE branch
+    // and F32 attention residual on head_dim=512 + Q8_0 paths.
     {
         let cores: Vec<&TpRankCore> = driver.stages.iter().map(|s| &s.core).collect();
-        let _ = unsafe {
-            let partials: [Buffer<F16, RowParallel<0>>; 2] = [
-                Buffer::from_raw_unchecked(driver.stages[0].partial_ffn, hidden),
-                Buffer::from_raw_unchecked(driver.stages[1].partial_ffn, hidden),
-            ];
-            let streams: [&_; 2] = [
-                driver.tp.cluster().device(0).default_stream(),
-                driver.tp.cluster().device(1).default_stream(),
-            ];
-            tp_allreduce_sum_synced::<0>(
+        let sm_partials: [DevicePtr; 2] = [
+            driver.stages[0]
+                .tp_moe_scratch
+                .as_ref()
+                .ok_or_else(|| anyhow!("rank 0: tp_moe_scratch missing in Phase 5a"))?
+                .partial_shared_mlp_f32,
+            driver.stages[1]
+                .tp_moe_scratch
+                .as_ref()
+                .ok_or_else(|| anyhow!("rank 1: tp_moe_scratch missing in Phase 5a"))?
+                .partial_shared_mlp_f32,
+        ];
+        let streams: [&_; 2] = [
+            driver.tp.cluster().device(0).default_stream(),
+            driver.tp.cluster().device(1).default_stream(),
+        ];
+        // SAFETY: partial_shared_mlp_f32 buffers own hidden*4 bytes per
+        // rank; streams correspond to those ranks; cores carry the
+        // producer_done events that the synced helper records.
+        unsafe {
+            tp_allreduce_sum_f32_synced(
                 driver.tp.ar(),
                 driver.tp.cluster(),
                 &cores,
-                &partials,
+                &sm_partials,
+                hidden,
                 &streams,
             )
         }
-        .context("MoE AR sum partial_ffn (shared MLP)")?;
-    }
-    if probe {
-        tp_dump_buffer(driver, 0, driver.stages[0].partial_ffn, hidden,
-            &format!("L{il} P5a partial_ffn rank0 (post-AR shared MLP)"));
-        tp_dump_buffer(driver, 1, driver.stages[1].partial_ffn, hidden,
-            &format!("L{il} P5a partial_ffn rank1 (post-AR shared MLP)"));
+        .context("MoE AR sum partial_shared_mlp_f32")?;
     }
 
-    // Phase 5b: cast partial_ffn F16→F32, then `rmsnorm_f32(tmp_f32,
-    // post_ffw_norm_1_f32, cur_mlp_f32)`. F32 cascade through the
-    // post-norm pipeline matches llama.cpp's gemma4-iswa.cpp and
-    // prevents the F16 Inf overflow by layer 5 (see
-    // feedback_gemma4_moe_f16_overflow).
+    // Phase 5b: `rmsnorm_f32(partial_shared_mlp_f32, post_ffw_norm_1_f32,
+    // cur_mlp_f32)` — direct F32-in / F32-out (no F16→F32 cast needed).
     for r in 0..n {
         let dev = driver.tp.cluster().device(r);
         dev.bind()?;
@@ -851,20 +758,22 @@ fn forward_decode_layer_tp_moe(
             .tp_moe_scratch
             .as_ref()
             .ok_or_else(|| anyhow!("rank {r}: tp_moe_scratch missing in Phase 5b"))?;
-        ops.cast_f16_to_f32(stage.partial_ffn, tp_moe_scratch.tmp_f32, hidden)
-            .context("MoE Phase 5b cast partial_ffn F16→F32")?;
         ops.rmsnorm_f32(
-            tp_moe_scratch.tmp_f32,
+            tp_moe_scratch.partial_shared_mlp_f32,
             tp_moe.post_ffw_norm_1_f32,
             tp_moe_scratch.cur_mlp_f32,
             1,
             hidden,
             rms_eps,
         )
-        .context("MoE post_ffw_norm_1 (F32)")?;
+        .context("MoE post_ffw_norm_1 (F32, direct from F32 AR)")?;
     }
 
-    // Phase 5c: AR-sum partial_moe_f16 (routed-MoE).
+    // Phase 5c: AR-sum partial_moe_f32 (routed-MoE, F32 path).
+    // F32 AR matches the F32 combine output from
+    // `MoeExperts::forward_decode_tp_f32` — keeps the V-norm spike
+    // intact instead of clipping it through F16. Pairs with the F32
+    // attention output path (commit 6b85f29).
     {
         let cores: Vec<&TpRankCore> = driver.stages.iter().map(|s| &s.core).collect();
         let moe_partials: [DevicePtr; 2] = [
@@ -872,42 +781,36 @@ fn forward_decode_layer_tp_moe(
                 .tp_moe_scratch
                 .as_ref()
                 .ok_or_else(|| anyhow!("rank 0: tp_moe_scratch missing in Phase 5c"))?
-                .partial_moe_f16,
+                .partial_moe_f32,
             driver.stages[1]
                 .tp_moe_scratch
                 .as_ref()
                 .ok_or_else(|| anyhow!("rank 1: tp_moe_scratch missing in Phase 5c"))?
-                .partial_moe_f16,
+                .partial_moe_f32,
         ];
-        let _ = unsafe {
-            let partials: [Buffer<F16, RowParallel<0>>; 2] = [
-                Buffer::from_raw_unchecked(moe_partials[0], hidden),
-                Buffer::from_raw_unchecked(moe_partials[1], hidden),
-            ];
-            let streams: [&_; 2] = [
-                driver.tp.cluster().device(0).default_stream(),
-                driver.tp.cluster().device(1).default_stream(),
-            ];
-            tp_allreduce_sum_synced::<0>(
+        let streams: [&_; 2] = [
+            driver.tp.cluster().device(0).default_stream(),
+            driver.tp.cluster().device(1).default_stream(),
+        ];
+        // SAFETY: partial_moe_f32 buffers own hidden*4 bytes per rank;
+        // streams correspond to those ranks; cores carry the
+        // producer_done events that the synced helper records.
+        unsafe {
+            tp_allreduce_sum_f32_synced(
                 driver.tp.ar(),
                 driver.tp.cluster(),
                 &cores,
-                &partials,
+                &moe_partials,
+                hidden,
                 &streams,
             )
         }
-        .context("MoE AR sum partial_moe (routed)")?;
-    }
-    if probe {
-        let p_moe = driver.stages[0].tp_moe_scratch.as_ref().unwrap().partial_moe_f16;
-        tp_dump_buffer(driver, 0, p_moe, hidden,
-            &format!("L{il} P5c partial_moe rank0 (post-AR routed)"));
+        .context("MoE AR sum partial_moe_f32 (routed)")?;
     }
 
-    // Phase 5d: cast partial_moe F16→F32, then `rmsnorm_f32(tmp_f32,
-    // post_ffw_norm_2_f32, cur_moe_f32)`. Same F32-cascade rationale
-    // as Phase 5b. `tmp_f32` is reused (sequential use; Phase 5b
-    // finished consuming it).
+    // Phase 5d: `rmsnorm_f32(partial_moe_f32, post_ffw_norm_2_f32,
+    // cur_moe_f32)`. Direct F32-in / F32-out — no F16 cast needed,
+    // since Phase 5c AR'd in F32.
     for r in 0..n {
         let dev = driver.tp.cluster().device(r);
         dev.bind()?;
@@ -923,21 +826,15 @@ fn forward_decode_layer_tp_moe(
             .tp_moe_scratch
             .as_ref()
             .ok_or_else(|| anyhow!("rank {r}: tp_moe_scratch missing in Phase 5d"))?;
-        ops.cast_f16_to_f32(
-            tp_moe_scratch.partial_moe_f16,
-            tp_moe_scratch.tmp_f32,
-            hidden,
-        )
-        .context("MoE Phase 5d cast partial_moe F16→F32")?;
         ops.rmsnorm_f32(
-            tp_moe_scratch.tmp_f32,
+            tp_moe_scratch.partial_moe_f32,
             tp_moe.post_ffw_norm_2_f32,
             tp_moe_scratch.cur_moe_f32,
             1,
             hidden,
             rms_eps,
         )
-        .context("MoE post_ffw_norm_2 (F32)")?;
+        .context("MoE post_ffw_norm_2 (F32, direct from F32 AR)")?;
     }
 
     // Phase 5e: `cur_combined_f32 = cur_mlp_f32 + cur_moe_f32` (F32
@@ -1010,10 +907,6 @@ fn forward_decode_layer_tp_moe(
                     .context("MoE layer_output_scale")?;
             }
         }
-    }
-    if probe {
-        tp_dump_buffer(driver, 0, driver.stages[0].hidden, hidden,
-            &format!("L{il} P6 next-layer hidden rank0"));
     }
 
     Ok(())
@@ -1612,9 +1505,6 @@ fn upload_layer_tp(
                 bail!("layer {il}: layer_output_scale < 4 bytes");
             }
             let v = f32::from_le_bytes([raw[0], raw[1], raw[2], raw[3]]);
-            if std::env::var_os("FLAMBEAU_TP_MOE_DEBUG").is_some() && rank == 0 {
-                eprintln!("  [scale] layer {il}: layer_output_scale = {v}");
-            }
             Some(v)
         } else {
             None
@@ -1696,31 +1586,5 @@ fn uploaded_to_device_tensor(u: UploadedTensor) -> DeviceTensor {
         dtype: u.dtype,
         bytes: u.bytes,
     }
-}
-
-fn tp_dump_buffer(driver: &Gemma4TpDriver, rank: usize, ptr: DevicePtr, n: usize, label: &str) {
-    use flambeau_core::CopyDirection;
-    let device = driver.tp.cluster().device(rank);
-    let _ = device.bind();
-    let mut host = vec![half::f16::from_f32(0.0); n];
-    // SAFETY: caller guarantees ptr owns n*2 bytes.
-    unsafe {
-        let _ = device.memcpy_async(
-            device.default_stream(),
-            CopyDirection::DeviceToHost,
-            DevicePtr(host.as_mut_ptr() as usize),
-            ptr,
-            n * 2,
-        );
-    }
-    let _ = device.default_stream().synchronize();
-    let max_abs = host.iter().map(|h| h.to_f32().abs()).fold(0.0f32, f32::max);
-    let nans = host.iter().filter(|h| h.to_f32().is_nan()).count();
-    let infs = host.iter().filter(|h| h.to_f32().is_infinite()).count();
-    let zeros = host.iter().filter(|h| h.to_f32() == 0.0).count();
-    eprintln!(
-        "  [TP_PHASE] {label} | max_abs={max_abs:.4} nans={nans} infs={infs} zeros={zeros}/{n} first4={:?}",
-        &host[..4].iter().map(|h| h.to_f32()).collect::<Vec<_>>()
-    );
 }
 

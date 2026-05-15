@@ -3270,6 +3270,44 @@ pub fn moe_combine_no_residual_f16(
     Ok(())
 }
 
+/// F32-throughout sibling of `moe_combine_no_residual_f16`. Reads F32
+/// expert outputs and writes F32 partial. Required by the gemma4
+/// head_dim=512 + Q8_0 path where V-norm spikes propagate into down
+/// outputs and F16 cast saturates.
+pub fn moe_combine_no_residual_f32(
+    reg: &OpsRegistry,
+    stream: &HipStream,
+    expert_outs: DevicePtr,
+    weights: DevicePtr,
+    out: DevicePtr,
+    n_tokens: usize,
+    top_k: usize,
+    hidden: usize,
+) -> Result<()> {
+    let module = reg.expect_module("moe_combine_no_residual_f32")?;
+    let kernel = module.kernel("flambeau_moe_combine_no_residual_f32")?;
+
+    let n_tokens_i = n_tokens as i32;
+    let top_k_i = top_k as i32;
+    let hidden_i = hidden as i32;
+    let e_ptr: u64 = expert_outs.as_usize() as u64;
+    let w_ptr: u64 = weights.as_usize() as u64;
+    let o_ptr: u64 = out.as_usize() as u64;
+    let mut args = KernelArgs::new();
+    args.push(&e_ptr);
+    args.push(&w_ptr);
+    args.push(&o_ptr);
+    args.push(&n_tokens_i);
+    args.push(&top_k_i);
+    args.push(&hidden_i);
+    let total = n_tokens * hidden;
+    let cfg = LaunchCfg::one_d(total.div_ceil(256) as u32, 256);
+    // SAFETY: args reference live device pointers + CPU values; kernel
+    // writes hidden-element F32 output. Caller's contract.
+    unsafe { kernel.launch(stream, cfg, args)? };
+    Ok(())
+}
+
 /// 3.a.2 — `moe_combine_f16` variant that accepts two F16 residuals and
 /// sums them inline. Saves one `add_f16` launch per layer per token on the
 /// shared-expert path (`moe_residual = mid + shared_delta`).

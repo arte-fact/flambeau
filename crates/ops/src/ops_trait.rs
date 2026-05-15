@@ -1228,6 +1228,16 @@ pub trait Ops {
         hidden: usize,
     ) -> Result<()>;
 
+    fn moe_combine_no_residual_f32(
+        &self,
+        expert_outs: DevicePtr,
+        weights: DevicePtr,
+        out: DevicePtr,
+        n_tokens: usize,
+        top_k: usize,
+        hidden: usize,
+    ) -> Result<()>;
+
     fn moe_combine_two_residuals_f16(
         &self,
         expert_outs: DevicePtr,
