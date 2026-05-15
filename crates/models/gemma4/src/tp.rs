@@ -550,14 +550,51 @@ fn forward_decode_layer_tp_moe(
 
     let probe = std::env::var_os("FLAMBEAU_TP_MOE_DEBUG").is_some()
         && (il == 0 || il == 4 || il == 5 || il + 1 == driver.cfg.num_layers);
+    if std::env::var_os("FLAMBEAU_TP_MOE_DEBUG").is_some() && il == 0 && position == 0 {
+        let pat: String = (0..driver.cfg.num_layers)
+            .map(|i| if driver.cfg.is_swa(i) { 'S' } else { 'F' })
+            .collect();
+        eprintln!("  [LAYER_PATTERN] {pat} (S=SWA head_dim={}, F=full head_dim={})",
+            driver.cfg.head_dim_swa, driver.cfg.head_dim);
+        eprintln!("  [CFG] num_heads={} num_kv_heads[..6]={:?} world={n}",
+            driver.cfg.num_heads,
+            &driver.cfg.num_kv_heads[..6]);
+    }
 
     // ---- Attention half (Phases 1-3) — same as dense composer. ----
+    if probe && position == 0 && il >= 4 {
+        // probe stage.hidden BEFORE attention runs (input to L5 attn).
+        tp_dump_buffer(driver, 0, driver.stages[0].hidden, hidden,
+            &format!("L{il} P0 stage.hidden rank0 (pre-attention input)"));
+    }
     for r in 0..n {
         <Gemma4TpDriver as LayerComposerTp>::forward_attn(driver, r, position, il)?;
     }
     if probe {
         tp_dump_buffer(driver, 0, driver.stages[0].partial_attn, hidden,
             &format!("L{il} P1 partial_attn rank0"));
+    }
+    if probe && position == 0 && il == 5 {
+        // L5 specifically: head_dim=512 full-attention layer (per
+        // SSSSSFSSSSSF SWA pattern). Probe the attention internals
+        // — Q, K, V projections + attention output (pre output_proj) —
+        // to localize where Inf appears.
+        let spec = driver.layout.layers[il];
+        let head_dim = spec.head_dim;
+        let n_kv_local = spec.n_kv_heads / n;
+        let n_heads_local = spec.n_heads / n;
+        let q_width_local = n_heads_local * head_dim;
+        let kv_width_local = n_kv_local * head_dim;
+        let s0 = &driver.stages[0];
+        eprintln!("  [L5_ATTN] head_dim={head_dim} n_heads_local={n_heads_local} n_kv_local={n_kv_local} q_width_local={q_width_local} kv_width_local={kv_width_local}");
+        tp_dump_buffer(driver, 0, s0.scratch.q_f16.0, q_width_local,
+            "L5 q_f16 rank0 (post Q-proj+norm+RoPE)");
+        tp_dump_buffer(driver, 0, s0.scratch.k_f16.0, kv_width_local,
+            "L5 k_f16 rank0 (post K-proj+norm+RoPE)");
+        tp_dump_buffer(driver, 0, s0.scratch.v_f16.0, kv_width_local,
+            "L5 v_f16 rank0 (post V-proj+norm)");
+        tp_dump_buffer(driver, 0, s0.scratch.attn_out_local.0, q_width_local,
+            "L5 attn_out_local rank0 (pre output_proj)");
     }
     {
         let cores: Vec<&TpRankCore> = driver.stages.iter().map(|s| &s.core).collect();
