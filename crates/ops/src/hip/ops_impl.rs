@@ -879,6 +879,23 @@ impl<'a> Ops for HipOps<'a> {
         )
     }
 
+    fn apply_per_expert_scale_f32(
+        &self,
+        expert_weights: DevicePtr,
+        expert_ids: DevicePtr,
+        expert_scales: DevicePtr,
+        top_k: usize,
+    ) -> Result<()> {
+        super::moe::apply_per_expert_scale_f32(
+            self.reg,
+            self.stream,
+            expert_weights,
+            expert_ids,
+            expert_scales,
+            top_k,
+        )
+    }
+
     fn indexed_moe_mmvq_q4_k_r2(
         &self,
         w: DevicePtr,

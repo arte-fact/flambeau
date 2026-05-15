@@ -247,6 +247,7 @@ pub const KERNEL_STEMS: &[&str] = &[
     "attention_prefill_flash_tile_q8_kv",
     // MoE.
     "topk_f32",
+    "apply_per_expert_scale_f32",
     "indexed_moe_mmvq_q4_k",
     "indexed_moe_mmvq_q4_k_r2",
     "indexed_moe_mmvq_q4_k_gate_up",

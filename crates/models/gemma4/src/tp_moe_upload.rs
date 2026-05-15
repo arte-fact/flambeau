@@ -176,6 +176,13 @@ pub struct Gemma4TpMoeFfnWeights {
     /// the dense composer); MoE-mode reads this F32 variant to keep
     /// the post-norm cascade in F32.
     pub post_ffw_norm_f32: DevicePtr,
+    /// F32 `[n_experts]` — gemma4 `ffn_down_exps.scale`. Per-expert
+    /// scalar applied post down-projection (llama.cpp's
+    /// `build_moe_ffn::down_exps_s`, candle's
+    /// `quantized_gemma4.rs:2521`). Folded into the routing weights
+    /// in `forward_ffn_moe_tp_per_rank` so the existing
+    /// `moe_combine_*` kernels apply the scale for free.
+    pub ffn_down_exps_scale_f32: DevicePtr,
 }
 
 /// Upload one MoE FFN layer's weights TP-sharded for `rank` of `world`.
@@ -366,6 +373,34 @@ pub(crate) fn upload_moe_layer_tp(
         tracker,
     )?);
 
+    // Per-expert down scale (F32 [n_experts]). llama.cpp applies it
+    // as `experts *= ffn_down_exps_s` post-down-projection; we fold
+    // it into expert_weights before moe_combine for the same result.
+    let down_scale_name = format!("blk.{layer_index}.ffn_down_exps.scale");
+    let ffn_down_exps_scale_info = file
+        .tensors
+        .get(&down_scale_name)
+        .ok_or_else(|| anyhow!("{down_scale_name} missing"))?;
+    if ffn_down_exps_scale_info.dtype != GgmlDType::F32 {
+        bail!(
+            "{down_scale_name}: expected F32, got {:?}",
+            ffn_down_exps_scale_info.dtype
+        );
+    }
+    if ffn_down_exps_scale_info.dims != [n_experts as u64] {
+        bail!(
+            "{down_scale_name}: dims {:?} != [{n_experts}]",
+            ffn_down_exps_scale_info.dims
+        );
+    }
+    let ffn_down_exps_scale_f32 = ut_to_dt(upload_replicated_tensor(
+        file,
+        ffn_down_exps_scale_info,
+        device,
+        stream,
+        tracker,
+    )?);
+
     // 6. Build per-rank `MoeExperts` block. `local_inter` sizes the
     //    block; the gate/up/down handles describe the per-rank sliced
     //    weight shapes. `MoeExperts::forward_decode_tp` produces a
@@ -406,6 +441,7 @@ pub(crate) fn upload_moe_layer_tp(
         post_ffw_norm_1_f32: post_ffw_norm_1_f32.ptr,
         post_ffw_norm_2_f32: post_ffw_norm_2_f32.ptr,
         post_ffw_norm_f32: post_ffw_norm_f32.ptr,
+        ffn_down_exps_scale_f32: ffn_down_exps_scale_f32.ptr,
     })
 }
 
@@ -625,6 +661,20 @@ pub fn forward_ffn_moe_tp_per_rank<O: Ops>(
         .moe
         .route_decode(ops, scratch.router_input_f16, scratch.moe_scratch)
         .context("MoE TP route_decode")?;
+
+    // 2.5. Fold gemma4's `ffn_down_exps.scale` into the routing
+    //      weights: `expert_weights[k] *= ffn_down_exps_scale[expert_ids[k]]`.
+    //      Mathematically equivalent to multiplying each expert's down
+    //      output by the per-expert scalar before the weighted sum
+    //      (llama.cpp's `build_moe_ffn::down_exps_s` / candle's
+    //      `quantized_gemma4.rs:2521`).
+    ops.apply_per_expert_scale_f32(
+        scratch.moe_scratch.expert_weights,
+        scratch.moe_scratch.expert_ids,
+        tp_moe.ffn_down_exps_scale_f32,
+        tp_moe.moe.top_k,
+    )
+    .context("MoE TP apply ffn_down_exps.scale to expert_weights")?;
 
     // 3. Shared MLP TP forward (parallel branch). Mirrors the dense
     //    `forward_ffn` body in `tp.rs::Gemma4TpDriver::forward_ffn`.

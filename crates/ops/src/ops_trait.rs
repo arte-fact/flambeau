@@ -702,6 +702,20 @@ pub trait Ops {
         k: usize,
     ) -> Result<()>;
 
+    /// `expert_weights[k] *= expert_scales[expert_ids[k]]` for k in 0..top_k.
+    /// Folds gemma4's per-expert `ffn_down_exps.scale` into the routing
+    /// weights so `moe_combine_*` picks up the post-down scaling for free
+    /// (equivalent to multiplying each expert's down output by the
+    /// scalar before the weighted sum — see candle's `quantized_gemma4`
+    /// reference at line 2521 of `quantized_gemma4.rs`).
+    fn apply_per_expert_scale_f32(
+        &self,
+        expert_weights: DevicePtr,
+        expert_ids: DevicePtr,
+        expert_scales: DevicePtr,
+        top_k: usize,
+    ) -> Result<()>;
+
     fn indexed_moe_mmvq_q4_k_r2(
         &self,
         w: DevicePtr,

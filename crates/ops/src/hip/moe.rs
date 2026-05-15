@@ -95,6 +95,41 @@ pub fn topk_f32(
     Ok(())
 }
 
+/// Apply per-expert scalar to routing weights:
+/// `expert_weights[k] *= expert_scales[expert_ids[k]]` for k in 0..top_k.
+///
+/// Folds gemma4's `ffn_down_exps.scale` (F32 [n_experts]) into the
+/// routing weights so the existing `moe_combine_*` kernels apply the
+/// per-expert post-down scaling for free. Mathematically equivalent
+/// to candle's `quantized_gemma4.rs:2521` (`moe_out.broadcast_mul(
+/// expert_scales)` before the weighted-sum).
+pub fn apply_per_expert_scale_f32(
+    reg: &OpsRegistry,
+    stream: &HipStream,
+    expert_weights: DevicePtr,
+    expert_ids: DevicePtr,
+    expert_scales: DevicePtr,
+    top_k: usize,
+) -> Result<()> {
+    assert!(top_k > 0 && top_k <= 64, "apply_per_expert_scale_f32: top_k {top_k} not in 1..=64");
+    let module = reg.expect_module("apply_per_expert_scale_f32")?;
+    let kernel = module.kernel("flambeau_apply_per_expert_scale_f32")?;
+    let w_ptr: u64 = expert_weights.as_usize() as u64;
+    let i_ptr: u64 = expert_ids.as_usize() as u64;
+    let s_ptr: u64 = expert_scales.as_usize() as u64;
+    let k_i = top_k as i32;
+    let mut args = KernelArgs::new();
+    args.push(&w_ptr);
+    args.push(&i_ptr);
+    args.push(&s_ptr);
+    args.push(&k_i);
+    // 1 block × 64 threads (the kernel guards `k < top_k` so unused
+    // threads idle). top_k=8 on gemma4 26B-A4B.
+    let cfg = LaunchCfg::one_d(1, 64);
+    unsafe { kernel.launch(stream, cfg, args)? };
+    Ok(())
+}
+
 /// Indexed MoE MMVQ (r2 variant) — the decode-path MoE matmul. Half the
 /// launches of single-row, 2 output rows per wave64.
 /// Shapes:
