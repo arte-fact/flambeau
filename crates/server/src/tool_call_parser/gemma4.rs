@@ -58,7 +58,7 @@ enum State {
 
 /// Tags watched while in [`State::Text`]. Order doesn't matter; the
 /// parser picks the earliest match.
-const TEXT_OPEN_TAGS: &[&str] = &["<|tool_call>", "<|channel>"];
+const TEXT_OPEN_TAGS: &[&str] = &["<|tool_call>", "<|channel>", CHANNEL_CLOSE];
 
 const CALL_PREFIX: &str = "call:";
 const STRING_QUOTE: &str = "<|\"|>";
@@ -145,6 +145,11 @@ impl Gemma4ToolCallParser {
             self.state = match tag {
                 "<|tool_call>" => State::InCallHeader,
                 "<|channel>" => State::InChannel,
+                // The chat template ends with `<|channel>thought\n<channel|>`,
+                // so the model's first emitted token is often a stuttered
+                // `<channel|>`. With no preceding `<|channel>` open, we're
+                // already in State::Text — drop the close marker and stay.
+                t if t == CHANNEL_CLOSE => State::Text,
                 _ => unreachable!("unexpected tag matched: {tag}"),
             };
             return true;
@@ -713,6 +718,27 @@ mod tests {
         assert!(events
             .iter()
             .any(|e| matches!(e, ParserEvent::ToolCallOpen { name, .. } if name == "f")));
+    }
+
+    #[test]
+    fn leading_channel_close_is_dropped() {
+        // Gemma4's chat template ends `...<|channel>thought\n<channel|>`,
+        // so the model often emits a stuttered `<channel|>` as its first
+        // token. With no preceding `<|channel>` in the model output, the
+        // parser stays in State::Text and just drops the close marker.
+        let events = collect("<channel|>Hello world");
+        assert!(events
+            .iter()
+            .any(|e| matches!(e, ParserEvent::TextDelta(s) if s == "Hello world")));
+        // No ThinkDelta should fire — there was no real reasoning content.
+        assert!(events
+            .iter()
+            .all(|e| !matches!(e, ParserEvent::ThinkDelta(_))));
+        // And the literal `<channel|>` should not appear in any TextDelta.
+        assert!(events.iter().all(|e| !matches!(
+            e,
+            ParserEvent::TextDelta(s) if s.contains("<channel|>")
+        )));
     }
 
     #[test]
