@@ -320,6 +320,68 @@ pub unsafe fn tp_allreduce_sum_into(
     Ok(())
 }
 
+/// F32 AllReduce-sum: per-rank partials are F32 vectors; each rank
+/// receives `partial[r] += Σ_{p≠r} partial[p]` in place. Dispatches
+/// `BarP2pAllReduce::sum_tp{2,4}_f32`.
+///
+/// Used by the gemma4 attention output projection path: the F32
+/// mmvq output stays F32 through AR so the F32→F16 cast doesn't
+/// saturate when V has a sqrt(head_dim) spike post-norm.
+///
+/// # Safety
+/// Same per-pointer + streams + ordering contract as
+/// [`tp_allreduce_sum_into`].
+pub unsafe fn tp_allreduce_sum_f32_into(
+    ar: &BarP2pAllReduce,
+    partials: &[DevicePtr],
+    n_elems: usize,
+    streams: &[&HipStream],
+) -> Result<()> {
+    if partials.len() != streams.len() {
+        bail!(
+            "tp_allreduce_sum_f32_into: partials.len()={} != streams.len()={}",
+            partials.len(),
+            streams.len(),
+        );
+    }
+    match partials.len() {
+        2 => {
+            let p: [DevicePtr; 2] = [partials[0], partials[1]];
+            let s: [&HipStream; 2] = [streams[0], streams[1]];
+            unsafe { ar.sum_tp2_f32(&p, n_elems as u32, &s) }
+                .map_err(|e| anyhow::anyhow!("AR sum_tp2_f32: {e}"))?;
+        }
+        4 => {
+            let p: [DevicePtr; 4] = [partials[0], partials[1], partials[2], partials[3]];
+            let s: [&HipStream; 4] = [streams[0], streams[1], streams[2], streams[3]];
+            unsafe { ar.sum_tp4_f32(&p, n_elems as u32, &s) }
+                .map_err(|e| anyhow::anyhow!("AR sum_tp4_f32: {e}"))?;
+        }
+        n => bail!("tp_allreduce_sum_f32_into: unsupported tp_size {n}"),
+    }
+    Ok(())
+}
+
+/// Barrier-fused F32 AR-sum. Runs
+/// [`crate::cross_rank_event_barrier`] on the per-rank `cores` then
+/// the F32 AR-sum kernel in one call.
+///
+/// # Safety
+/// Inherits the contract of [`tp_allreduce_sum_f32_into`].
+pub unsafe fn tp_allreduce_sum_f32_synced(
+    ar: &BarP2pAllReduce,
+    cluster: &flambeau_backend_hip::HipCluster,
+    cores: &[&crate::tp_rank_core::TpRankCore],
+    partials: &[DevicePtr],
+    n_elems: usize,
+    streams: &[&HipStream],
+) -> Result<()> {
+    crate::tp_sync::cross_rank_event_barrier(cluster, cores)?;
+    // SAFETY: caller upholds the BAR1 + streams + ordering contract;
+    // the barrier above adds the cross-rank ordering edge.
+    unsafe { tp_allreduce_sum_f32_into(ar, partials, n_elems, streams) }
+}
+
 /// Barrier-fused [`tp_allreduce_sum`]: runs
 /// [`crate::cross_rank_event_barrier`] on the per-rank `cores` then
 /// the typed AR-sum in one call. Eliminates the inline barrier-then-AR

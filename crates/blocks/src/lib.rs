@@ -56,8 +56,9 @@ pub use dense_mlp::{
 pub use layer::{
     post_norm_residual_f16, tp_allreduce_residual, tp_allreduce_residual_into,
     tp_allreduce_residual_rmsnorm, tp_allreduce_residual_rmsnorm_into, tp_allreduce_sum,
-    tp_allreduce_sum_into, tp_allreduce_sum_synced, AttnBlock, AttnDecodeScratch,
-    AttnPrefillScratch, AttnState, FfnBlock, FfnDecodeScratch, FfnPrefillScratch, LayerKind,
+    tp_allreduce_sum_f32_into, tp_allreduce_sum_f32_synced, tp_allreduce_sum_into,
+    tp_allreduce_sum_synced, AttnBlock, AttnDecodeScratch, AttnPrefillScratch, AttnState,
+    FfnBlock, FfnDecodeScratch, FfnPrefillScratch, LayerKind,
 };
 pub use moe_experts::{
     Activation, MoeExperts, MoeExpertsDecodeScratch, MoeExpertsPrefillScratch,

@@ -174,3 +174,43 @@ void flambeau_p2p_allreduce_sum_tp2(
             __half2float(partial_local[idx]) + __half2float(partial_peer0[idx]));
     }
 }
+
+// ------------------------------------------------------------------------
+// TP=2 sum (F32): partial_local += partial_peer0
+// F32 variant of the F16 kernel above. Used by the gemma4 attention
+// output path (head_dim≥256 + sharp V spikes overflow F16 in the
+// F32→F16 cast; F32 AR keeps the mmvq output bounded until the
+// post-norm absorbs the spike). See
+// `feedback_gemma4_attn_output_proj_f16_saturate`.
+// ------------------------------------------------------------------------
+extern "C" __global__ __launch_bounds__(P2P_AR_THREADS)
+void flambeau_p2p_allreduce_sum_tp2_f32(
+    float* __restrict__ partial_local,
+    const float* __restrict__ partial_peer0,
+    const unsigned int n
+) {
+    const unsigned int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx < n) {
+        partial_local[idx] = partial_local[idx] + partial_peer0[idx];
+    }
+}
+
+// ------------------------------------------------------------------------
+// TP=4 sum (F32): partial_local += Σ partial_peer{0,1,2}
+// ------------------------------------------------------------------------
+extern "C" __global__ __launch_bounds__(P2P_AR_THREADS)
+void flambeau_p2p_allreduce_sum_tp4_f32(
+    float* __restrict__ partial_local,
+    const float* __restrict__ partial_peer0,
+    const float* __restrict__ partial_peer1,
+    const float* __restrict__ partial_peer2,
+    const unsigned int n
+) {
+    const unsigned int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx < n) {
+        partial_local[idx] = partial_local[idx]
+                           + partial_peer0[idx]
+                           + partial_peer1[idx]
+                           + partial_peer2[idx];
+    }
+}

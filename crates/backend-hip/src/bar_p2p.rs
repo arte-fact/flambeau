@@ -47,6 +47,8 @@ const FN_RESIDUAL_TP4: &str = "flambeau_p2p_allreduce_residual_tp4";
 const FN_RESIDUAL_TP2: &str = "flambeau_p2p_allreduce_residual_tp2";
 const FN_SUM_TP4: &str = "flambeau_p2p_allreduce_sum_tp4";
 const FN_SUM_TP2: &str = "flambeau_p2p_allreduce_sum_tp2";
+const FN_SUM_TP4_F32: &str = "flambeau_p2p_allreduce_sum_tp4_f32";
+const FN_SUM_TP2_F32: &str = "flambeau_p2p_allreduce_sum_tp2_f32";
 const FN_RESIDUAL_RMSNORM_TP4: &str = "flambeau_p2p_allreduce_residual_rmsnorm_tp4";
 const FN_RESIDUAL_RMSNORM_TP2: &str = "flambeau_p2p_allreduce_residual_rmsnorm_tp2";
 const FN_RESIDUAL_RMSNORM_Q8_1_TP4: &str = "flambeau_p2p_allreduce_residual_rmsnorm_q8_1_tp4";
@@ -69,6 +71,8 @@ enum ArKind {
     ResidualTp2,
     SumTp4,
     SumTp2,
+    SumTp4F32,
+    SumTp2F32,
     ResidualRmsNormTp4,
     ResidualRmsNormTp2,
     ResidualRmsNormQ8_1Tp4,
@@ -82,12 +86,29 @@ impl ArKind {
             ArKind::ResidualTp2 => FN_RESIDUAL_TP2,
             ArKind::SumTp4 => FN_SUM_TP4,
             ArKind::SumTp2 => FN_SUM_TP2,
+            ArKind::SumTp4F32 => FN_SUM_TP4_F32,
+            ArKind::SumTp2F32 => FN_SUM_TP2_F32,
             ArKind::ResidualRmsNormTp4 => FN_RESIDUAL_RMSNORM_TP4,
             ArKind::ResidualRmsNormTp2 => FN_RESIDUAL_RMSNORM_TP2,
             ArKind::ResidualRmsNormQ8_1Tp4 => FN_RESIDUAL_RMSNORM_Q8_1_TP4,
             ArKind::ResidualRmsNormQ8_1Tp2 => FN_RESIDUAL_RMSNORM_Q8_1_TP2,
         }
     }
+
+    /// Elements processed per thread. F16 kernels pack via `half2`
+    /// (2 elements / thread); F32 kernels run scalar (1 elem / thread).
+    fn elems_per_thread(self) -> u32 {
+        match self {
+            ArKind::SumTp4F32 | ArKind::SumTp2F32 => 1,
+            _ => 2,
+        }
+    }
+}
+
+fn launch_cfg_for(kind: ArKind, elem_count: u32) -> LaunchCfg {
+    let elems_per_block = BLOCK_THREADS * kind.elems_per_thread();
+    let blocks = elem_count.div_ceil(elems_per_block);
+    LaunchCfg::one_d(blocks, BLOCK_THREADS)
 }
 
 /// BAR1 P2P AllReduce primitive.
@@ -523,6 +544,78 @@ impl BarP2pAllReduce {
         Ok(())
     }
 
+    /// TP=2 F32 sum: per-rank `partial[r] += partial[1-r]` over `n`
+    /// F32 elements. Sibling of [`Self::sum_tp2`] for callers that
+    /// keep partials in F32 (gemma4 attention output projection —
+    /// the F32→F16 cast at the row-parallel matmul output saturates
+    /// on V-spike inputs; F32 AR preserves the magnitudes until the
+    /// next rmsnorm normalises them).
+    /// # Safety
+    /// Same per-pointer + ordering contract as [`Self::sum_tp2`].
+    pub unsafe fn sum_tp2_f32(
+        &self,
+        partial: &[DevicePtr; 2],
+        elem_count: u32,
+        streams: &[&HipStream; 2],
+    ) -> DeviceResult<()> {
+        self.expect_ranks(2)?;
+        let cfg = launch_cfg_for(ArKind::SumTp2F32, elem_count);
+        for r in 0..2 {
+            let peer = partial[1 - r];
+            // SAFETY: forwarded from the public-method contract.
+            unsafe {
+                self.launch_one(
+                    ArKind::SumTp2F32,
+                    r,
+                    cfg,
+                    streams[r],
+                    ArArgs::Sum {
+                        partial_local: partial[r],
+                        peers: [peer, DevicePtr(0), DevicePtr(0)],
+                    },
+                    elem_count,
+                )?;
+            }
+        }
+        Ok(())
+    }
+
+    /// TP=4 F32 sum: per-rank `partial[r] += Σ_{p≠r} partial[p]` over
+    /// `n` F32 elements. Sibling of [`Self::sum_tp4`].
+    /// # Safety
+    /// Same per-pointer + ordering contract as [`Self::sum_tp4`].
+    pub unsafe fn sum_tp4_f32(
+        &self,
+        partial: &[DevicePtr; 4],
+        elem_count: u32,
+        streams: &[&HipStream; 4],
+    ) -> DeviceResult<()> {
+        self.expect_ranks(4)?;
+        let cfg = launch_cfg_for(ArKind::SumTp4F32, elem_count);
+        for r in 0..4 {
+            let peers = [
+                partial[(r + 1) % 4],
+                partial[(r + 2) % 4],
+                partial[(r + 3) % 4],
+            ];
+            // SAFETY: forwarded from the public-method contract.
+            unsafe {
+                self.launch_one(
+                    ArKind::SumTp4F32,
+                    r,
+                    cfg,
+                    streams[r],
+                    ArArgs::Sum {
+                        partial_local: partial[r],
+                        peers,
+                    },
+                    elem_count,
+                )?;
+            }
+        }
+        Ok(())
+    }
+
     /// TP=2 sum.
     /// # Safety
     /// Same per-pointer + ordering contract as `residual_tp4`.
@@ -623,7 +716,7 @@ impl BarP2pAllReduce {
                 let mut k_args = KernelArgs::new();
                 k_args.push(&pl);
                 k_args.push(&p0);
-                if matches!(kind, ArKind::SumTp4) {
+                if matches!(kind, ArKind::SumTp4 | ArKind::SumTp4F32) {
                     k_args.push(&p1);
                     k_args.push(&p2);
                 }
