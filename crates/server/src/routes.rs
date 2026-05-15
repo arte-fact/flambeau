@@ -69,6 +69,45 @@ pub enum PrefixCacheRestore {
 use crate::state::{parse_stop, SamplingParams};
 
 
+/// qwen3-moe-specific shared workspaces lazy-attached to
+/// `ServerState`. Lives in `ServerState::qwen3_moe: Option<_>` so
+/// non-qwen3-moe boots (gemma4) don't carry the qwen3-moe-typed
+/// scratch fields.
+pub struct Qwen3MoeServerExtras {
+    /// **P2.9b-i2-C-wire** — shared TP batched-decode workspace,
+    /// lazy-initialised on first TP scheduler dispatch. Only the
+    /// dispatcher leader touches it (gated by `batched_dispatcher`);
+    /// the inner `Mutex` is just for safe lazy-init.
+    pub tp_batched_scratch:
+        std::sync::Mutex<Option<flambeau_qwen3_moe::forward::ShardedForwardPrefillScratchTp>>,
+    /// **P2.9b-i2-D-wire** — shared Hybrid (PP+TP) batched-decode
+    /// workspace. Same lazy-init contract as `tp_batched_scratch`.
+    pub hybrid_batched_scratch:
+        std::sync::Mutex<Option<flambeau_qwen3_moe::ShardedForwardPrefillScratchHybrid>>,
+    /// **#321** — TP / Hybrid prefill serialiser. Caps peak per-call
+    /// scratch alloc (~35 MB at chunk=512 for Qwen3.6-27B) at one
+    /// instance regardless of N concurrent requests; the GPU stream
+    /// is serial anyway so this only serialises host-side launch +
+    /// alloc.
+    pub prefill_serialiser: std::sync::Mutex<()>,
+    /// **#324** — shared TP prefill scratch, lazy-initialised on first
+    /// TP prefill. Reused across every TP prefill call to eliminate
+    /// the ~35 MB alloc/dispose churn that motivated #321.
+    pub tp_prefill_scratch:
+        std::sync::Mutex<Option<flambeau_qwen3_moe::forward::ShardedForwardPrefillScratchTp>>,
+}
+
+impl Default for Qwen3MoeServerExtras {
+    fn default() -> Self {
+        Self {
+            tp_batched_scratch: std::sync::Mutex::new(None),
+            hybrid_batched_scratch: std::sync::Mutex::new(None),
+            prefill_serialiser: std::sync::Mutex::new(()),
+            tp_prefill_scratch: std::sync::Mutex::new(None),
+        }
+    }
+}
+
 /// Server-wide shared state — built once at startup.
 pub struct ServerState {
     pub model_id: String,
@@ -124,43 +163,15 @@ pub struct ServerState {
     /// ⇒ blocking_lock the relevant slots ⇒ batched forward ⇒
     /// distribute responses ⇒ unlock).
     pub batched_dispatcher: std::sync::Mutex<()>,
-    /// **P2.9b-i2-C-wire** — shared TP batched-decode workspace,
-    /// lazy-initialized on first TP scheduler dispatch. Sized for
-    /// max_inflight_slots (small relative to prefill ubatch =>
-    /// negligible VRAM). Only the dispatcher leader touches it (gated
-    /// by `batched_dispatcher`); the inner Mutex is just for safe
-    /// lazy-init, not contended.
-    pub tp_batched_scratch:
-        std::sync::Mutex<Option<flambeau_qwen3_moe::forward::ShardedForwardPrefillScratchTp>>,
-    /// **P2.9b-i2-D-wire** — shared Hybrid (PP+TP) batched-decode
-    /// workspace. Same lazy-init contract as `tp_batched_scratch`;
-    /// holds per-stage TP scratches sized for max_inflight_slots.
-    pub hybrid_batched_scratch:
-        std::sync::Mutex<Option<flambeau_qwen3_moe::ShardedForwardPrefillScratchHybrid>>,
-    /// **#321** — TP / Hybrid prefill serialiser. The TP batched-prefill
-    /// driver (`forward_prefill_tp_batched_logits`) currently allocates
-    /// `ShardedForwardPrefillScratchTp` per call (~35 MB at chunk=512
-    /// for Qwen3.6-27B). On TP=2 with a dense 27B model the per-rank
-    /// VRAM headroom after weights + KV is ~7.5 GB; N concurrent
-    /// prefills race for the same allocator and the second/third get
-    /// `out of memory`. Holding this mutex across `prefill_logits`
-    /// caps peak alloc at one scratch instance regardless of N.
-    /// Negligible perf impact: the GPU stream is serial anyway, the
-    /// only thing serialised here is the host-side launch + alloc.
-    /// PP-only path doesn't use this (its prefill scratches are
-    /// pre-allocated on the inflight session).
-    pub prefill_serialiser: std::sync::Mutex<()>,
-    /// **#324** — shared TP prefill scratch, lazy-initialised on first
-    /// TP prefill. Sized for `FLAMBEAU_PREFILL_UBATCH` (default 512).
-    /// Reused across every TP prefill call in the server's lifetime,
-    /// eliminating the ~35 MB alloc/dispose churn that motivated #321.
-    /// Access is gated by `prefill_serialiser`: the chat handler holds
-    /// that across `prefill_logits`, and only one prefill can use the
-    /// scratch at a time, which is fine because the GPU stream is
-    /// serial anyway. Hybrid (pp+tp) doesn't use this — it has its
-    /// own per-stage scratch story which is V2 work.
-    pub tp_prefill_scratch:
-        std::sync::Mutex<Option<flambeau_qwen3_moe::forward::ShardedForwardPrefillScratchTp>>,
+    /// **#116 step 1** — qwen3-moe-specific shared workspaces +
+    /// serialisers. `Some` on the qwen3-moe boot path; `None` on the
+    /// gemma4 boot path. Routes.rs's qwen3-moe-typed dispatch branches
+    /// reach into this via `state.qwen3_moe.as_ref().expect(...)`
+    /// after their `model.as_pp()` / `as_tp()` / `as_hybrid()` gate.
+    /// CLAUDE.md rule 13: arch-specific state stays out of the shared
+    /// `ServerState` shape; non-qwen3-moe boots don't pay the type or
+    /// memory cost.
+    pub qwen3_moe: Option<Qwen3MoeServerExtras>,
     /// **#229 P2.10c** — process-local prompt prefix cache. Always
     /// constructed; methods short-circuit when `state.prefix_cache.enabled()`
     /// is false (default OFF; flip via `FLAMBEAU_PREFIX_CACHE=1`).
@@ -352,7 +363,11 @@ impl ServerState {
             Option<flambeau_qwen3_moe::forward::ShardedForwardPrefillScratchTp>,
         >,
     > {
-        let mut guard = self.tp_prefill_scratch.lock().unwrap();
+        let qwen3_moe = self
+            .qwen3_moe
+            .as_ref()
+            .context("lock_tp_prefill_scratch on non-qwen3-moe boot")?;
+        let mut guard = qwen3_moe.tp_prefill_scratch.lock().unwrap();
         if guard.is_none() {
             let prefill_ubatch = self.prefill_ubatch;
             let cfg = &self
@@ -799,8 +814,16 @@ impl ServerState {
             // decode_logits so a concurrent prefill on a sibling slot
             // can't race shared HipCluster scratch mid-decode. Cheap
             // (microseconds) on the fast-path; the lock is uncontended
-            // when n_others_active==0.
-            let _prefill_lock = self.prefill_serialiser.lock().unwrap();
+            // when n_others_active==0. Scheduler-path is qwen3-moe-only
+            // (gated on `as_pp/as_tp/as_hybrid` upstream), so the
+            // qwen3_moe Some is guaranteed here.
+            let _prefill_lock = self
+                .qwen3_moe
+                .as_ref()
+                .expect("scheduler path: qwen3_moe extras present")
+                .prefill_serialiser
+                .lock()
+                .unwrap();
             tr!("FAST_PATH lock_inflight start");
             let mut guard = self.inflight_pool[slot_idx].blocking_lock();
             tr!("FAST_PATH lock_inflight done; decode start");
@@ -1069,7 +1092,11 @@ impl ServerState {
                 }
             }
             // Lazy-allocate the shared TP batched scratch on first call.
-            let mut scratch_guard = self
+            let qwen3_moe = self
+                .qwen3_moe
+                .as_ref()
+                .expect("TP batched dispatch requires qwen3-moe boot");
+            let mut scratch_guard = qwen3_moe
                 .tp_batched_scratch
                 .lock()
                 .expect("tp_batched_scratch poisoned");
@@ -1111,7 +1138,11 @@ impl ServerState {
                     sessions.push(&mut hyb.session);
                 }
             }
-            let mut scratch_guard = self
+            let qwen3_moe = self
+                .qwen3_moe
+                .as_ref()
+                .expect("Hybrid batched dispatch requires qwen3-moe boot");
+            let mut scratch_guard = qwen3_moe
                 .hybrid_batched_scratch
                 .lock()
                 .expect("hybrid_batched_scratch poisoned");
@@ -3276,7 +3307,7 @@ fn run_completion_scheduler_pp_blocking(
             // **#321** — TP/Hybrid prefill alloc serialiser. See field
             // doc on ServerState::prefill_serialiser.
             let _prefill_lock = if model.as_tp().is_some() || model.as_hybrid().is_some() {
-                Some(state.prefill_serialiser.lock().unwrap())
+                Some(state.qwen3_moe.as_ref().expect("TP/Hybrid serialiser requires qwen3-moe boot").prefill_serialiser.lock().unwrap())
             } else {
                 None
             };
@@ -3632,7 +3663,7 @@ fn run_completion_blocking_ids(
     // **#321** — TP/Hybrid prefill alloc serialiser. See field
     // doc on ServerState::prefill_serialiser.
     let _prefill_lock = if model.as_tp().is_some() || model.as_hybrid().is_some() {
-        Some(state.prefill_serialiser.lock().unwrap())
+        Some(state.qwen3_moe.as_ref().expect("TP/Hybrid serialiser requires qwen3-moe boot").prefill_serialiser.lock().unwrap())
     } else {
         None
     };
@@ -4128,7 +4159,7 @@ fn run_completion_blocking_streaming(
     // **#321** — TP/Hybrid prefill alloc serialiser. See field
     // doc on ServerState::prefill_serialiser.
     let _prefill_lock = if model.as_tp().is_some() || model.as_hybrid().is_some() {
-        Some(state.prefill_serialiser.lock().unwrap())
+        Some(state.qwen3_moe.as_ref().expect("TP/Hybrid serialiser requires qwen3-moe boot").prefill_serialiser.lock().unwrap())
     } else {
         None
     };

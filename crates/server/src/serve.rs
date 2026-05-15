@@ -555,10 +555,7 @@ pub async fn serve(cfg: ServeConfig, registry: Registry) -> Result<()> {
         slot_in_use,
         batched_pending: std::sync::Mutex::new(Vec::new()),
         batched_dispatcher: std::sync::Mutex::new(()),
-        tp_batched_scratch: std::sync::Mutex::new(None),
-        hybrid_batched_scratch: std::sync::Mutex::new(None),
-        prefill_serialiser: std::sync::Mutex::new(()),
-        tp_prefill_scratch: std::sync::Mutex::new(None),
+        qwen3_moe: Some(crate::routes::Qwen3MoeServerExtras::default()),
         prefix_cache,
         prefix_cache_chunk_tokens: prefill_ubatch,
         topology_tag,
@@ -806,10 +803,12 @@ async fn serve_inner_gemma4(
         slot_in_use,
         batched_pending: std::sync::Mutex::new(Vec::new()),
         batched_dispatcher: std::sync::Mutex::new(()),
-        tp_batched_scratch: std::sync::Mutex::new(None),
-        hybrid_batched_scratch: std::sync::Mutex::new(None),
-        prefill_serialiser: std::sync::Mutex::new(()),
-        tp_prefill_scratch: std::sync::Mutex::new(None),
+        // #116 step 1 — gemma4 boot doesn't allocate the qwen3-moe-
+        // typed shared scratches (`tp_batched_scratch`,
+        // `hybrid_batched_scratch`, `prefill_serialiser`,
+        // `tp_prefill_scratch`). All paths that reach into
+        // `state.qwen3_moe` are arch-gated upstream.
+        qwen3_moe: None,
         prefix_cache,
         prefix_cache_chunk_tokens: prefill_ubatch,
         topology_tag,
