@@ -89,12 +89,12 @@ pub struct ServerState {
     /// (try-lock round-robin, then block on slot 0 if all busy).
     /// Holding the guard means "this request owns the slot"; releasing
     /// it returns the slot to the pool. The element type is the
-    /// model-agnostic `HipSession` trait so future model crates (e.g.
+    /// model-agnostic `Session` trait so future model crates (e.g.
     /// gemma4) can plug in without churn at the pool / handler layer.
     /// Concrete qwen3-moe forward-pass dispatch still drills down via
     /// `as_pp_mut()` / `as_tp_mut()` / `as_hybrid_mut()` trait
     /// accessors.
-    pub inflight_pool: Vec<Mutex<Box<dyn crate::HipSession>>>,
+    pub inflight_pool: Vec<Mutex<Box<dyn crate::Session>>>,
     /// **P2.9b-i2-B (scheduler)** — request-lifetime claim flag for
     /// each slot. Distinct from `inflight_pool`'s mutex: the mutex
     /// guards short-term *exclusive access* to the `Inflight`; this
@@ -391,7 +391,7 @@ impl ServerState {
     /// - Restore fails (logged + downgraded to miss).
     pub fn prefix_cache_try_restore(
         &self,
-        inflight: &mut dyn crate::HipSession,
+        inflight: &mut dyn crate::Session,
         prompt_ids: &[u32],
     ) -> anyhow::Result<PrefixCacheRestore> {
         tracing::debug!(
@@ -565,7 +565,7 @@ impl ServerState {
     /// - Prompt ≥ 50 tokens AND at least one full chunk in the chain.
     pub fn prefix_cache_try_capture_full(
         &self,
-        inflight: &dyn crate::HipSession,
+        inflight: &dyn crate::Session,
         prompt_ids: &[u32],
         last_logits: &[f32],
     ) {
@@ -687,7 +687,7 @@ impl ServerState {
     /// the request.
     pub fn acquire_inflight_blocking(
         &self,
-    ) -> (usize, tokio::sync::MutexGuard<'_, Box<dyn crate::HipSession>>) {
+    ) -> (usize, tokio::sync::MutexGuard<'_, Box<dyn crate::Session>>) {
         for (idx, slot) in self.inflight_pool.iter().enumerate() {
             if let Ok(g) = slot.try_lock() {
                 return (idx, g);
@@ -941,7 +941,7 @@ impl ServerState {
         // safe — the request handlers have *released* the mutex
         // before pushing pending (their long-term claim is
         // `slot_in_use`, not the mutex).
-        let mut guards: Vec<tokio::sync::MutexGuard<'_, Box<dyn crate::HipSession>>> =
+        let mut guards: Vec<tokio::sync::MutexGuard<'_, Box<dyn crate::Session>>> =
             Vec::with_capacity(pending.len());
         for p in pending {
             tr_d!("locking inflight slot={}", p.slot_idx);
@@ -965,14 +965,14 @@ impl ServerState {
             .map(|_| Vec::with_capacity(vocab))
             .collect();
 
-        // Deref each MutexGuard<Box<dyn HipSession>> to a
-        // `&mut dyn HipSession` and hand the distinct-by-index slice to
+        // Deref each MutexGuard<Box<dyn Session>> to a
+        // `&mut dyn Session` and hand the distinct-by-index slice to
         // the shared batched dispatcher. Scope the reborrow so the
         // mutable borrow of `guards` ends before the explicit `drop`.
         {
-            let mut inflights: Vec<&mut dyn crate::HipSession> = Vec::with_capacity(n);
+            let mut inflights: Vec<&mut dyn crate::Session> = Vec::with_capacity(n);
             for g in guards.iter_mut() {
-                let inflight: &mut dyn crate::HipSession = &mut ***g;
+                let inflight: &mut dyn crate::Session = &mut ***g;
                 inflights.push(inflight);
             }
             let mut logits_refs: Vec<&mut Vec<f32>> =
@@ -1004,7 +1004,7 @@ impl ServerState {
     /// and `dispatch_decode_one` (N=1, legacy single-decode path).
     fn forward_decode_batched_with_inflights(
         &self,
-        inflights: &mut [&mut dyn crate::HipSession],
+        inflights: &mut [&mut dyn crate::Session],
         slots: &[flambeau_qwen3_moe::forward::BatchSlot],
         logits_refs: &mut [&mut Vec<f32>],
     ) -> anyhow::Result<()> {
@@ -1028,7 +1028,7 @@ impl ServerState {
             // disjoint from the `session` borrows below.
             let prefill_scratch: &mut flambeau_qwen3_moe::forward::ShardedForwardPrefillScratch = {
                 unsafe {
-                    let g0: &mut dyn crate::HipSession = &mut **inflights_ptr;
+                    let g0: &mut dyn crate::Session = &mut **inflights_ptr;
                     &mut g0
                         .as_pp_mut()
                         .context("batched decode: leader slot is not Inflight::Pp")?
@@ -1038,7 +1038,7 @@ impl ServerState {
             for s in 0..n {
                 // SAFETY: s in 0..n; inflights distinct by index.
                 unsafe {
-                    let g: &mut dyn crate::HipSession = &mut **inflights_ptr.add(s);
+                    let g: &mut dyn crate::Session = &mut **inflights_ptr.add(s);
                     let pp = g.as_pp_mut().with_context(|| {
                         format!("batched decode: slot {s} is not Inflight::Pp")
                     })?;
@@ -1061,7 +1061,7 @@ impl ServerState {
             for s in 0..n {
                 // SAFETY: s in 0..n; inflights distinct.
                 unsafe {
-                    let g: &mut dyn crate::HipSession = &mut **inflights_ptr.add(s);
+                    let g: &mut dyn crate::Session = &mut **inflights_ptr.add(s);
                     let tp = g.as_tp_mut().with_context(|| {
                         format!("batched decode: slot {s} is not Inflight::Tp")
                     })?;
@@ -1104,7 +1104,7 @@ impl ServerState {
             for s in 0..n {
                 // SAFETY: s in 0..n; inflights distinct.
                 unsafe {
-                    let g: &mut dyn crate::HipSession = &mut **inflights_ptr.add(s);
+                    let g: &mut dyn crate::Session = &mut **inflights_ptr.add(s);
                     let hyb = g.as_hybrid_mut().with_context(|| {
                         format!("batched decode: slot {s} is not Inflight::Hybrid")
                     })?;
@@ -1151,9 +1151,9 @@ impl ServerState {
             }
             // SAFETY: n == 1; index 0 only.
             let driver = unsafe {
-                let g: &mut dyn crate::HipSession = &mut **inflights_ptr;
+                let g: &mut dyn crate::Session = &mut **inflights_ptr;
                 g.as_gemma4_driver_mut()
-                    .context("gemma4 decode: session is not Gemma4HipSession")?
+                    .context("gemma4 decode: session is not Gemma4Session")?
             };
             let slot = &slots[0];
             // Phase 12.9 — routes.rs passes `position = prompt_ids.len() +
@@ -1179,7 +1179,7 @@ impl ServerState {
     /// borrowed from the guard).
     pub fn dispatch_decode_one(
         &self,
-        inflight: &mut dyn crate::HipSession,
+        inflight: &mut dyn crate::Session,
         token: u32,
         position: usize,
         logits_out: &mut Vec<f32>,
@@ -1195,7 +1195,7 @@ impl ServerState {
             logits_out.reserve(vocab - logits_out.capacity());
         }
         logits_out.clear();
-        let mut inflights_arr: [&mut dyn crate::HipSession; 1] = [inflight];
+        let mut inflights_arr: [&mut dyn crate::Session; 1] = [inflight];
         let mut logits_refs: [&mut Vec<f32>; 1] = [logits_out];
         self.forward_decode_batched_with_inflights(
             &mut inflights_arr,
@@ -3534,7 +3534,7 @@ fn run_completion_blocking_ids(
         .context("reset inflight for new request")?;
     // Shadow with a reborrow so existing `&mut inflight` / `&inflight`
     // call-site syntax works unchanged.
-    let inflight: &mut dyn crate::HipSession = &mut **inflight_guard;
+    let inflight: &mut dyn crate::Session = &mut **inflight_guard;
 
     // Sampler holds vocab-sized scratch reused across all decode steps
     // (C2 in RUST-PERF-CORRECTIONS.md). Reserve upfront to avoid the
@@ -4112,7 +4112,7 @@ fn run_completion_blocking_streaming(
     inflight_guard
         .reset_for_next_request(cluster)
         .context("reset inflight for new streaming request")?;
-    let inflight: &mut dyn crate::HipSession = &mut **inflight_guard;
+    let inflight: &mut dyn crate::Session = &mut **inflight_guard;
 
     let mut sampler = Sampler::from_seed(params.seed);
     sampler.reserve(state.cfg.vocab_size);
@@ -4590,7 +4590,7 @@ fn finalise(
             }
         }
         // Arch-specific chat-template fragment truncation. Each model
-        // exposes its set via `HipModel::chat_stop_markers` (empty for
+        // exposes its set via `Model::chat_stop_markers` (empty for
         // qwen3-moe; populated for gemma4 — see `gemma4_handle.rs`).
         // We've already string-stopped on these in the decode loop, but
         // the marker itself can land in `text` if it slipped into the

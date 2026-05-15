@@ -73,9 +73,9 @@ impl HybridHipModel {
     }
 }
 
-/// Loaded weights + per-topology auxiliary state. `Arc<dyn HipModel>`
+/// Loaded weights + per-topology auxiliary state. `Arc<dyn Model>`
 /// so per-request sessions can hold a cheap back-reference.
-pub type LoadedModel = std::sync::Arc<dyn crate::model_handle::HipModel>;
+pub type LoadedModel = std::sync::Arc<dyn crate::model_handle::Model>;
 
 pub struct PpHipSession {
     pub session: Qwen3MoEShardedSession,
@@ -207,7 +207,7 @@ impl Inflight {
             };
             Ok(Inflight::Hybrid(HybridHipSession { session, decode }))
         } else {
-            bail!("Inflight::new: model topology has no registered HipModel impl")
+            bail!("Inflight::new: model topology has no registered Model impl")
         }
     }
 
@@ -399,7 +399,7 @@ fn snapshot_hybrid_session(
 pub fn prefill_logits(
     model: &LoadedModel,
     cluster: &HipCluster,
-    inflight: &mut dyn crate::HipSession,
+    inflight: &mut dyn crate::Session,
     prompt_ids: &[u32],
     start_position: usize,
     logits_out: &mut Vec<f32>,
@@ -680,7 +680,7 @@ pub fn prefill_logits(
 /// inverse H→D pays the same — still a net win vs the ~2-3 s prefill
 /// it replaces.
 pub fn capture_kv_from_inflight(
-    inflight: &dyn crate::HipSession,
+    inflight: &dyn crate::Session,
     cluster: &HipCluster,
     model: &LoadedModel,
 ) -> Result<Vec<Vec<LayerCacheSnapshot>>> {
@@ -776,7 +776,7 @@ pub fn truncate_snapshot_to_tokens(
 /// per-rank shape doesn't match the flat `Vec<RankSnapshot>` layout).
 /// Callers should skip prefix-cache restore for hybrid models in V1.
 pub fn restore_kv_into_inflight(
-    inflight: &mut dyn crate::HipSession,
+    inflight: &mut dyn crate::Session,
     cluster: &HipCluster,
     snapshot: &[Vec<LayerCacheSnapshot>],
     model: &LoadedModel,

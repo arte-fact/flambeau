@@ -400,14 +400,14 @@ pub async fn serve(cfg: ServeConfig, registry: Registry) -> Result<()> {
         max_queue_depth,
         "pre-allocating inflight slot pool"
     );
-    let mut inflight_pool: Vec<Mutex<Box<dyn crate::HipSession>>> =
+    let mut inflight_pool: Vec<Mutex<Box<dyn crate::Session>>> =
         Vec::with_capacity(inflight_slots);
     for slot_idx in 0..inflight_slots {
-        // Phase 12.8 — pool holds the model-agnostic `HipSession` trait.
-        // `create_hip_session` builds the qwen3-moe-typed `OwnedHipSession`
+        // Phase 12.8 — pool holds the model-agnostic `Session` trait.
+        // `create_qwen3moe_session` builds the qwen3-moe-typed `Qwen3MoeOwnedSession`
         // and erases it behind the trait. Gemma4 will add a parallel
         // factory in serve.rs's arch-dispatch branch.
-        let slot = crate::create_hip_session(
+        let slot = crate::create_qwen3moe_session(
             model.clone(),
             &cluster,
             prefill_ubatch,
@@ -759,7 +759,7 @@ async fn serve_inner_gemma4(
 
     let model = build_gemma4_loaded_model(cfg_g4.clone(), topology_label);
     let session = wrap_gemma4_driver(driver, tokenizer.bos_id);
-    let inflight_pool: Vec<Mutex<Box<dyn crate::HipSession>>> = vec![Mutex::new(session)];
+    let inflight_pool: Vec<Mutex<Box<dyn crate::Session>>> = vec![Mutex::new(session)];
 
     let slot_in_use: Vec<std::sync::atomic::AtomicBool> = (0..inflight_slots)
         .map(|_| std::sync::atomic::AtomicBool::new(false))

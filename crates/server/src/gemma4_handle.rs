@@ -1,7 +1,7 @@
 //! Gemma4 server binding.
 //!
-//! Mirrors the qwen3-moe `model_handle` shape: a `Gemma4HipModel`
-//! marker plus a `Gemma4HipSession` that wraps `Box<dyn ModelDriver>`.
+//! Mirrors the qwen3-moe `model_handle` shape: a `Gemma4Model`
+//! marker plus a `Gemma4Session` that wraps `Box<dyn ModelDriver>`.
 //!
 //! Phase 12.9 MVP: gemma4 drivers (`Gemma4PpDriver` / `Gemma4TpDriver`
 //! / `Gemma4HybridDriver`) bundle weights + KV cache state inside one
@@ -19,17 +19,17 @@ use flambeau_qwen3_moe::forward::ShardedForwardPrefillScratchTp;
 use flambeau_runtime::ModelDriver;
 
 use crate::model::{BoundaryCallback, HybridHipSession, PpHipSession, TpHipSession};
-use crate::model_handle::{HipModel, HipSession};
+use crate::model_handle::{Model, Session};
 
 /// Marker model handle for gemma4. The actual driver lives on the
-/// per-request `Gemma4HipSession` (gemma4 weights + KV are bundled
+/// per-request `Gemma4Session` (gemma4 weights + KV are bundled
 /// inside the driver — splitting them is a follow-up).
-pub struct Gemma4HipModel {
+pub struct Gemma4Model {
     pub cfg: Gemma4Config,
     pub topology: &'static str,
 }
 
-impl HipModel for Gemma4HipModel {
+impl Model for Gemma4Model {
     fn topology(&self) -> &'static str {
         self.topology
     }
@@ -37,7 +37,7 @@ impl HipModel for Gemma4HipModel {
         true
     }
     fn chat_stop_markers(&self) -> &'static [&'static str] {
-        // Kept in sync with `Gemma4HipSession::chat_stop_markers`; see
+        // Kept in sync with `Gemma4Session::chat_stop_markers`; see
         // that impl for the rationale on each fragment.
         &[
             "<end_of_turn>",
@@ -58,7 +58,7 @@ impl HipModel for Gemma4HipModel {
 /// because gemma4's weights and KV-state are bundled in one struct,
 /// each inflight slot has its own driver. Use
 /// `FLAMBEAU_INFLIGHT_SLOTS=1` until weights/session split lands.
-pub struct Gemma4HipSession {
+pub struct Gemma4Session {
     pub driver: Box<dyn ModelDriver>,
     /// Gemma4 mandates BOS prepended to every prompt (llama.cpp PR
     /// #21500 sets `force_add_bos=true` regardless of the GGUF's
@@ -69,7 +69,7 @@ pub struct Gemma4HipSession {
     pub bos_id: Option<u32>,
 }
 
-impl HipSession for Gemma4HipSession {
+impl Session for Gemma4Session {
     fn prefill_logits(
         &mut self,
         _cluster: &HipCluster,
@@ -196,25 +196,25 @@ impl HipSession for Gemma4HipSession {
     }
 }
 
-/// Build a `LoadedModel` (`Arc<dyn HipModel>`) for gemma4 from a
+/// Build a `LoadedModel` (`Arc<dyn Model>`) for gemma4 from a
 /// `Gemma4Config` + topology string. Mirror of qwen3-moe's
 /// `LoadedModel` construction at server boot.
 pub fn build_gemma4_loaded_model(
     cfg: Gemma4Config,
     topology: &'static str,
 ) -> crate::model::LoadedModel {
-    std::sync::Arc::new(Gemma4HipModel { cfg, topology })
+    std::sync::Arc::new(Gemma4Model { cfg, topology })
 }
 
 /// Wrap a constructed `Gemma4*Driver` (as a `Box<dyn ModelDriver>`)
-/// into a HipSession trait object for the inflight pool. `bos_id` is
+/// into a Session trait object for the inflight pool. `bos_id` is
 /// the tokenizer's BOS token (from GGUF metadata); when present, the
 /// session prepends it to every fresh prefill.
 pub fn wrap_gemma4_driver(
     driver: Box<dyn ModelDriver>,
     bos_id: Option<u32>,
-) -> Box<dyn HipSession> {
-    Box::new(Gemma4HipSession { driver, bos_id })
+) -> Box<dyn Session> {
+    Box::new(Gemma4Session { driver, bos_id })
 }
 
 /// Best-effort topology-from-arch hint. Used by `is_gemma4_arch` style

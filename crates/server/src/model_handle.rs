@@ -1,21 +1,19 @@
-//! HIP-bound model + session traits.
+//! Server-side `Model` + `Session` trait surface.
 //!
-//! `flambeau-runtime`'s `Model` trait is backend-agnostic (capability
-//! metadata only — a runtime↔backend-hip dependency cycle prevents
-//! the runtime from holding `HipCluster`). The HIP binding lives here
-//! in the server crate, alongside the qwen3-moe types it dispatches.
+//! Two traits — both backend-agnostic in name and shape (CLAUDE.md
+//! rules 12 + 13):
+//! * `Model` — load-time entry. Owns weights + per-topology auxiliary
+//!   state. Reports topology + arch capability hints.
+//! * `Session` — per-request handle. Owns KV caches + scratches +
+//!   a back-reference to its parent `Model`. `prefill_logits` advances
+//!   generation; `dispose` frees device buffers.
 //!
-//! Two traits:
-//! * `HipModel` — load-time entry. Owns weights + per-topology
-//!   auxiliary state (`BarP2pAllReduce`, sub-cluster handles).
-//!   Reports topology + config.
-//! * `HipSession` — per-request handle. Owns KV caches + scratches and
-//!   a back-reference to its parent `HipModel`. `prefill_logits` /
-//!   `decode_logits` advance generation; `dispose` frees device buffers.
-//!
-//! KV snapshot/restore is qwen3-moe-specific and stays as free helpers
-//! in `model.rs` (extension-trait wiring lands when a second model
-//! crate needs it).
+//! Concrete impls (`Qwen3MoeOwnedSession`, `Gemma4Session`) live in the
+//! arch-specific glue modules and hold their own `Arc<HipCluster>`.
+//! Cluster decoupling from trait method signatures + crate extraction
+//! to a backend-neutral `flambeau-server-core` are follow-up steps on
+//! task #117. Today the trait still mentions `HipCluster` via method
+//! parameters; that lands next.
 
 #![cfg(feature = "hip")]
 
@@ -29,7 +27,7 @@ use crate::model::{
     PpHipSession, TpHipModel, TpHipSession,
 };
 
-pub trait HipModel: Send + Sync + 'static {
+pub trait Model: Send + Sync + 'static {
     /// Topology label for handler metrics: `"pp"`, `"tp"`, `"pp+tp"`.
     fn topology(&self) -> &'static str;
 
@@ -37,7 +35,7 @@ pub trait HipModel: Send + Sync + 'static {
     /// these to return `Some(self)`; the others stay at the default
     /// `None`. Server call sites use these in place of pattern-matching
     /// on a closed enum, so adding a new model topology in the future
-    /// only requires implementing `HipModel` (no enum-variant churn).
+    /// only requires implementing `Model` (no enum-variant churn).
     fn as_pp(&self) -> Option<&PpHipModel> {
         None
     }
@@ -49,7 +47,7 @@ pub trait HipModel: Send + Sync + 'static {
     }
 
     /// Phase 12.9 — arch tag for non-qwen3-moe model families. Returns
-    /// `true` for gemma4 model handles (`Gemma4HipModel`). Default
+    /// `true` for gemma4 model handles (`Gemma4Model`). Default
     /// `false` for the qwen3-moe topology handles. Routes.rs uses this
     /// at the dispatch level to branch into the gemma4 path.
     fn is_gemma4(&self) -> bool {
@@ -58,7 +56,7 @@ pub trait HipModel: Send + Sync + 'static {
 
     /// Arch-specific byte-level chat-template fragments that should
     /// stop generation when present in the decoded text. Mirrored from
-    /// `HipSession::chat_stop_markers`; lives here too so the decode
+    /// `Session::chat_stop_markers`; lives here too so the decode
     /// loop and `finalise` can read it via `&state.model` without
     /// holding the inflight mutex. Default `&[]`.
     fn chat_stop_markers(&self) -> &'static [&'static str] {
@@ -66,7 +64,7 @@ pub trait HipModel: Send + Sync + 'static {
     }
 }
 
-pub trait HipSession: Send {
+pub trait Session: Send {
     /// Ingest a (chunked-as-needed) prompt and write the last
     /// position's logits into `logits_out`. `start_position` is the
     /// absolute position of `prompt_ids[0]` inside the original full
@@ -92,7 +90,7 @@ pub trait HipSession: Send {
 
     fn dispose(self: Box<Self>, cluster: &HipCluster) -> Result<()>;
 
-    /// Concrete-session accessors, mirror of `HipModel::as_pp`. Server
+    /// Concrete-session accessors, mirror of `Model::as_pp`. Server
     /// uses these in spec-decode init / GPU-sampler scratch
     /// resolution / batched-dispatch field access without matching on
     /// the now-retired `Inflight` enum.
@@ -115,7 +113,7 @@ pub trait HipSession: Send {
         None
     }
 
-    /// Phase 12.9 — gemma4 driver accessor. `Gemma4HipSession` returns
+    /// Phase 12.9 — gemma4 driver accessor. `Gemma4Session` returns
     /// `Some(&mut dyn ModelDriver)`; qwen3-moe sessions return `None`.
     /// Routes.rs uses this to dispatch decode through the gemma4
     /// `forward_one_token_logits` path (N=1 only until weights/session
@@ -147,11 +145,11 @@ pub trait HipSession: Send {
 }
 
 /// Self-sufficient session: bundles an `Inflight` with a back-reference
-/// to its parent `LoadedModel` (which is itself an `Arc<dyn HipModel>`,
+/// to its parent `LoadedModel` (which is itself an `Arc<dyn Model>`,
 /// so the back-ref is a cheap clone). Constructed via
-/// [`create_hip_session`]; the server holds it as `Box<dyn HipSession>`
+/// [`create_qwen3moe_session`]; the server holds it as `Box<dyn Session>`
 /// so call sites stop matching on a topology variant.
-pub struct OwnedHipSession {
+pub struct Qwen3MoeOwnedSession {
     pub model: LoadedModel,
     pub inflight: Inflight,
 }
@@ -159,17 +157,17 @@ pub struct OwnedHipSession {
 /// Build a per-request session bound to `model`. `prefill_ubatch` sizes
 /// the PP prefill scratch (ignored for TP/Hybrid); `kv_layout` selects
 /// between F16 / Q8 / turbo-quant KV.
-pub fn create_hip_session(
+pub fn create_qwen3moe_session(
     model: LoadedModel,
     cluster: &HipCluster,
     prefill_ubatch: usize,
     kv_layout: KvLayout,
-) -> Result<Box<dyn HipSession>> {
+) -> Result<Box<dyn Session>> {
     let inflight = Inflight::new(&model, cluster, prefill_ubatch, kv_layout)?;
-    Ok(Box::new(OwnedHipSession { model, inflight }))
+    Ok(Box::new(Qwen3MoeOwnedSession { model, inflight }))
 }
 
-impl HipModel for PpHipModel {
+impl Model for PpHipModel {
     fn topology(&self) -> &'static str {
         "pp"
     }
@@ -178,7 +176,7 @@ impl HipModel for PpHipModel {
     }
 }
 
-impl HipModel for TpHipModel {
+impl Model for TpHipModel {
     fn topology(&self) -> &'static str {
         "tp"
     }
@@ -187,7 +185,7 @@ impl HipModel for TpHipModel {
     }
 }
 
-impl HipModel for HybridHipModel {
+impl Model for HybridHipModel {
     fn topology(&self) -> &'static str {
         "pp+tp"
     }
@@ -196,7 +194,7 @@ impl HipModel for HybridHipModel {
     }
 }
 
-impl HipSession for OwnedHipSession {
+impl Session for Qwen3MoeOwnedSession {
     fn prefill_logits(
         &mut self,
         cluster: &HipCluster,
@@ -208,7 +206,7 @@ impl HipSession for OwnedHipSession {
         prefill_ubatch: usize,
     ) -> Result<()> {
         // Phase 12.8 — clone the model Arc out before reborrowing `self`
-        // as `&mut dyn HipSession`, so the free function gets disjoint
+        // as `&mut dyn Session`, so the free function gets disjoint
         // model + inflight refs.
         let model = self.model.clone();
         crate::model::prefill_logits(
@@ -229,7 +227,7 @@ impl HipSession for OwnedHipSession {
     }
 
     fn dispose(self: Box<Self>, cluster: &HipCluster) -> Result<()> {
-        let OwnedHipSession { model, inflight } = *self;
+        let Qwen3MoeOwnedSession { model, inflight } = *self;
         inflight.dispose(cluster, &model)
     }
 

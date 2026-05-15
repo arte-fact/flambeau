@@ -45,6 +45,6 @@ pub use model::{prefill_logits, Inflight, LoadedModel};
 #[cfg(feature = "hip")]
 pub use model_extensions::KvSnapshot;
 #[cfg(feature = "hip")]
-pub use model_handle::{create_hip_session, HipModel, HipSession, OwnedHipSession};
+pub use model_handle::{create_qwen3moe_session, Model, Session, Qwen3MoeOwnedSession};
 #[cfg(feature = "hip")]
 pub use serve::{serve, MeshMode, ServeConfig};
