@@ -233,7 +233,12 @@ fn main() -> Result<()> {
         Cmd::InspectGguf { path } => inspect_gguf(&path)?,
         Cmd::ExtractChatTemplate { path, out } => extract_chat_template(&path, out.as_deref())?,
         Cmd::InspectHsaco { path } => todo!("implement inspect-hsaco for {path}"),
-        Cmd::Infer { model, .. } => todo!("implement infer for {model}"),
+        Cmd::Infer {
+            model,
+            prompt,
+            max_tokens,
+            devices,
+        } => infer_main(&model, &prompt, max_tokens, &devices)?,
         Cmd::Serve {
             model,
             devices,
@@ -311,6 +316,93 @@ fn serve_cmd(_args: ServeArgs) -> Result<()> {
     anyhow::bail!(
         "`flambeau serve` requires building with --features hip_serve (needs ROCm + HIP devices)"
     );
+}
+
+#[cfg(not(feature = "hip_infer"))]
+fn infer_main(_model: &str, _prompt: &str, _max_tokens: usize, _devices: &str) -> Result<()> {
+    anyhow::bail!(
+        "`flambeau infer` requires building with --features hip_infer (needs ROCm + HIP devices)"
+    );
+}
+
+#[cfg(feature = "hip_infer")]
+fn infer_main(model_path: &str, prompt: &str, max_tokens: usize, devices: &str) -> Result<()> {
+    use std::sync::Arc;
+    use flambeau_runtime::ModelDriver;
+
+    let dev_str = devices.strip_prefix("hip:").unwrap_or(devices);
+    let device_ids: Vec<i32> = dev_str
+        .split(',')
+        .filter(|s| !s.is_empty())
+        .map(|s| s.trim().parse::<i32>())
+        .collect::<std::result::Result<_, _>>()
+        .map_err(|e| anyhow::anyhow!("--devices parse error: {e}"))?;
+    if device_ids.is_empty() {
+        anyhow::bail!("--devices must list at least one device ID");
+    }
+
+    let file = Arc::new(
+        GgufFile::open(model_path)
+            .map_err(|e| anyhow::anyhow!("open `{model_path}`: {e}"))?,
+    );
+    let arch = file
+        .architecture()
+        .ok_or_else(|| anyhow::anyhow!("GGUF missing `general.architecture`"))?
+        .to_string();
+
+    let tokenizer = flambeau_quant::load_from_gguf(&file)?;
+    let mut prompt_ids = tokenizer.encode(prompt)?;
+    if tokenizer.force_add_bos {
+        if let Some(bos) = tokenizer.bos_id {
+            prompt_ids.insert(0, bos);
+        }
+    }
+    if prompt_ids.is_empty() {
+        anyhow::bail!("tokenizer produced empty prompt id list");
+    }
+
+    let mut driver: Box<dyn ModelDriver> = match arch.as_str() {
+        "gemma4" => build_gemma4_driver(file.clone(), &device_ids, prompt_ids.len() + max_tokens)?,
+        other => anyhow::bail!(
+            "`flambeau infer` does not yet route arch `{other}` through ModelDriver. \
+             Supported: gemma4."
+        ),
+    };
+
+    let first = driver.forward_prefill(&prompt_ids, 0)?;
+    let mut decoded: Vec<u32> = Vec::with_capacity(max_tokens);
+    decoded.push(first);
+    let mut tok = first;
+    let mut pos = prompt_ids.len();
+    while decoded.len() < max_tokens {
+        tok = driver.forward_one_token(tok, pos)?;
+        decoded.push(tok);
+        pos += 1;
+    }
+    driver.dispose()?;
+
+    let text = tokenizer.decode(&decoded).unwrap_or_default();
+    println!("{text}");
+    Ok(())
+}
+
+#[cfg(feature = "hip_infer")]
+fn build_gemma4_driver(
+    file: std::sync::Arc<GgufFile>,
+    device_ids: &[i32],
+    max_tokens: usize,
+) -> Result<Box<dyn flambeau_runtime::ModelDriver>> {
+    use flambeau_backend_hip::HipCluster;
+    use flambeau_gemma4::{partition_layers, Gemma4Config, Gemma4PpDriver, ModelLayout};
+
+    let cluster = HipCluster::new(device_ids)?;
+    let cfg = Gemma4Config::from_gguf(&file)
+        .map_err(|e| anyhow::anyhow!("Gemma4Config::from_gguf: {e}"))?;
+    let mut layout = ModelLayout::from_config(&cfg);
+    let _ = layout.resolve_kv_sharing();
+    let layer_to_rank = partition_layers(device_ids.len(), &layout)?;
+    let driver = Gemma4PpDriver::upload(&file, cfg, layout, layer_to_rank, cluster, max_tokens)?;
+    Ok(Box::new(driver))
 }
 
 #[cfg(feature = "hip_serve")]

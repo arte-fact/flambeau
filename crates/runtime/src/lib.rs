@@ -25,7 +25,7 @@ pub use kv_cache::{
     CacheLayout, F16Contig, KvCache, KvCacheError, KvCacheResult, Q8Contig, Q8_0_BLOCK_BYTES,
 };
 pub use mesh::{CollectiveCfg, CollectiveDType, LayerAssignment, Mesh, RankId, ReduceOp};
-pub use model::Model;
+pub use model::{Model, ModelDriver};
 pub use registry::{Registry, RegistryError};
 pub use sampling::{sample, Rng, Sampler, Sampling};
 pub use tp_layout::{LayoutError, WeightLayout};

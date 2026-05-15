@@ -746,6 +746,18 @@ impl Gemma4PpDriver {
     }
 }
 
+impl flambeau_runtime::ModelDriver for Gemma4PpDriver {
+    fn forward_prefill(&mut self, tokens: &[u32], start_position: usize) -> Result<u32> {
+        Gemma4PpDriver::forward_prefill(self, tokens, start_position)
+    }
+    fn forward_one_token(&mut self, token_id: u32, position: usize) -> Result<u32> {
+        Gemma4PpDriver::forward_one_token(self, token_id, position)
+    }
+    fn dispose(&mut self) -> Result<()> {
+        Gemma4PpDriver::dispose(self)
+    }
+}
+
 impl Drop for Gemma4PpDriver {
     fn drop(&mut self) {
         // Best-effort cleanup; warn on leak.

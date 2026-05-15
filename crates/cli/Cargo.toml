@@ -16,6 +16,9 @@ default = []
 hip_sweep = ["flambeau-bench/hip"]
 # Enables `flambeau serve` — loads a real model on HIP devices.
 hip_serve = ["flambeau-server/hip"]
+# Enables `flambeau infer` — single-prompt inference on HIP devices.
+# Gemma4 path uses `Gemma4PpDriver`; runs single-device or PP.
+hip_infer = ["flambeau-gemma4/hip", "dep:flambeau-backend-hip"]
 # Enables debug FLAMBEAU_* env-var reads (probes, dumps, traces).
 # Off by default; production binaries elide all gated reads.
 # (flambeau-server propagates the flag to flambeau-qwen3-moe and
@@ -37,6 +40,10 @@ flambeau-server = { path = "../server" }
 # struct + trait impl don't need device code.
 flambeau-qwen3-moe = { path = "../models/qwen3-moe" }
 flambeau-gemma4 = { path = "../models/gemma4" }
+# `flambeau infer` needs the HipCluster constructor to build a
+# gemma4 driver. Gated behind `hip_infer` so the non-hip CLI build
+# (lint host) keeps compiling without ROCm.
+flambeau-backend-hip = { path = "../backend-hip", optional = true }
 anyhow.workspace = true
 clap.workspace = true
 tokio.workspace = true

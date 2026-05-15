@@ -458,6 +458,7 @@ version = "0.1.0-dev"
 dependencies = [
  "anyhow",
  "clap",
+ "flambeau-backend-hip",
  "flambeau-bench",
  "flambeau-core",
  "flambeau-gemma4",
