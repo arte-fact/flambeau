@@ -478,6 +478,66 @@ fn parity_31b_q4_0_tp2() {
     );
 }
 
+/// Q8_0 quantization probe — same dense model as `parity_31b_q4_0_tp2`
+/// but at Q8_0 instead of Q4_0. Tests whether the F16 saturation
+/// in the full-attention layers (head_dim=512) surfaces on dense
+/// models when Q4_0's spike-rounding is replaced by Q8_0's
+/// higher-precision rounding. If 31B-Q8_0 produces coherent
+/// output, F16 dense paths are immune; if it degenerates the
+/// same as 26B-A4B did pre-fix, the dense LayerComposerTp also
+/// needs the F32 attention output path.
+#[test]
+fn smoke_31b_q8_0_tp2() {
+    let Some(file) = open_or_skip("gemma-4-31B-it-Q8_0.gguf") else {
+        return;
+    };
+    if device_count().map(|n| n < 2).unwrap_or(true) {
+        eprintln!("skipping — need 2 HIP devices");
+        return;
+    }
+    let file = Arc::new(file);
+    let cfg = Gemma4Config::from_gguf(&file).expect("cfg");
+    let vocab = cfg.vocab_size;
+    let (prompt_ids, fb_ids) = match flambeau_decode_tp(file.clone(), &[0, 2]) {
+        Ok(r) => r,
+        Err(e) => {
+            let full = format!("{e:#}");
+            if full.contains("out of memory") || full.contains("OutOfMemory") || full.contains("rank 0 TP upload") {
+                eprintln!(
+                    "skipping — 31B-Q8_0 likely OOMs at TP2 on 16 GB MI50s \
+                     (~33 GB Q8_0 weights → ~16.5 GB/rank, too tight): {full}"
+                );
+                return;
+            }
+            eprintln!("31B-Q8_0 TP2 decode failed: {full}");
+            panic!("flambeau decode TP2 (31B-Q8_0)");
+        }
+    };
+    let tokenizer = load_from_gguf(&file).expect("tokenizer");
+    let fb_text = tokenizer.decode(&fb_ids).unwrap_or_default();
+    eprintln!("\n=== SMOKE | 31B-Q8_0 TP2 (hip:0,2) ===");
+    eprintln!("  prompt   ({} ids): {prompt_ids:?}", prompt_ids.len());
+    eprintln!("  flambeau ({} ids): {fb_ids:?}", fb_ids.len());
+    eprintln!("  flambeau text: {fb_text:?}");
+    assert_eq!(fb_ids.len(), N_DECODE);
+    for (i, &t) in fb_ids.iter().enumerate() {
+        assert!((t as usize) < vocab, "step {i}: token {t} >= vocab {vocab}");
+    }
+    let first = fb_ids[0];
+    let all_same = fb_ids.iter().all(|&t| t == first);
+    if all_same {
+        eprintln!(
+            "  [WARN] all {} tokens identical ({first}) — Q8_0 surfaces F16 saturation \
+             on dense 31B too; dense composer also needs the F32 attention path",
+            fb_ids.len()
+        );
+    } else if fb_text.to_lowercase().contains("paris") {
+        eprintln!("  [OK] coherent: Q8_0 dense path produces correct output");
+    } else {
+        eprintln!("  [PARTIAL] varied but non-topical — F16 cascade has subtler bug");
+    }
+}
+
 /// Phase 10c-G bisect: 26B-A4B-Q8_0 on PP2 (layer-split). Single-
 /// device OOMs at 27 GB on a 16 GB MI50; PP2 splits layers so each
 /// rank holds ~13.5 GB. If PP-MoE produces coherent (non-pad) output
