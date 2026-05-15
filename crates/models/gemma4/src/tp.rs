@@ -519,6 +519,29 @@ impl Gemma4TpDriver {
     }
 }
 
+impl flambeau_runtime::ModelDriver for Gemma4TpDriver {
+    fn forward_prefill(&mut self, tokens: &[u32], start_position: usize) -> Result<u32> {
+        // TP driver has no batched-prefill entry; feed tokens one at a
+        // time through `forward_one_token` and return the argmax of
+        // the final token. Matches `flambeau_decode_tp` in the parity
+        // tests.
+        if tokens.is_empty() {
+            bail!("Gemma4TpDriver::forward_prefill: empty tokens");
+        }
+        let mut last: u32 = 0;
+        for (i, &t) in tokens.iter().enumerate() {
+            last = Gemma4TpDriver::forward_one_token(self, t, start_position + i)?;
+        }
+        Ok(last)
+    }
+    fn forward_one_token(&mut self, token_id: u32, position: usize) -> Result<u32> {
+        Gemma4TpDriver::forward_one_token(self, token_id, position)
+    }
+    fn dispose(&mut self) -> Result<()> {
+        Gemma4TpDriver::dispose(self)
+    }
+}
+
 impl Drop for Gemma4TpDriver {
     fn drop(&mut self) {
         if self.stages.iter().any(|s| !s.disposed) {

@@ -451,6 +451,28 @@ impl Gemma4HybridDriver {
     }
 }
 
+impl flambeau_runtime::ModelDriver for Gemma4HybridDriver {
+    fn forward_prefill(&mut self, tokens: &[u32], start_position: usize) -> Result<u32> {
+        // Hybrid has no batched-prefill entry; feed tokens
+        // one-at-a-time through forward_one_token. Returns the
+        // argmax of the final token.
+        if tokens.is_empty() {
+            bail!("Gemma4HybridDriver::forward_prefill: empty tokens");
+        }
+        let mut last: u32 = 0;
+        for (i, &t) in tokens.iter().enumerate() {
+            last = Gemma4HybridDriver::forward_one_token(self, t, start_position + i)?;
+        }
+        Ok(last)
+    }
+    fn forward_one_token(&mut self, token_id: u32, position: usize) -> Result<u32> {
+        Gemma4HybridDriver::forward_one_token(self, token_id, position)
+    }
+    fn dispose(&mut self) -> Result<()> {
+        Gemma4HybridDriver::dispose(self)
+    }
+}
+
 impl Drop for Gemma4HybridDriver {
     fn drop(&mut self) {
         // Best-effort; stages warn themselves if leaked.

@@ -64,6 +64,10 @@ enum Cmd {
         /// Comma-separated device list, e.g. `hip:0,1,2,3`.
         #[arg(long, default_value = "hip:0")]
         devices: String,
+        /// Topology — `pp` (pipeline-parallel, default) or `tp`
+        /// (tensor-parallel). Single-device collapses both.
+        #[arg(long, default_value = "pp")]
+        mesh_mode: String,
     },
     /// OpenAI-compatible HTTP server () + optional MCP upstream
     /// client (7 — ROADMAP-V2 §M2.1).
@@ -238,7 +242,8 @@ fn main() -> Result<()> {
             prompt,
             max_tokens,
             devices,
-        } => infer_main(&model, &prompt, max_tokens, &devices)?,
+            mesh_mode,
+        } => infer_main(&model, &prompt, max_tokens, &devices, &mesh_mode)?,
         Cmd::Serve {
             model,
             devices,
@@ -319,14 +324,33 @@ fn serve_cmd(_args: ServeArgs) -> Result<()> {
 }
 
 #[cfg(not(feature = "hip_infer"))]
-fn infer_main(_model: &str, _prompt: &str, _max_tokens: usize, _devices: &str) -> Result<()> {
+fn infer_main(
+    _model: &str,
+    _prompt: &str,
+    _max_tokens: usize,
+    _devices: &str,
+    _mesh_mode: &str,
+) -> Result<()> {
     anyhow::bail!(
         "`flambeau infer` requires building with --features hip_infer (needs ROCm + HIP devices)"
     );
 }
 
 #[cfg(feature = "hip_infer")]
-fn infer_main(model_path: &str, prompt: &str, max_tokens: usize, devices: &str) -> Result<()> {
+#[derive(Clone, Copy)]
+enum InferMesh {
+    Pp,
+    Tp,
+}
+
+#[cfg(feature = "hip_infer")]
+fn infer_main(
+    model_path: &str,
+    prompt: &str,
+    max_tokens: usize,
+    devices: &str,
+    mesh_mode: &str,
+) -> Result<()> {
     use std::sync::Arc;
     use flambeau_runtime::ModelDriver;
 
@@ -340,6 +364,14 @@ fn infer_main(model_path: &str, prompt: &str, max_tokens: usize, devices: &str) 
     if device_ids.is_empty() {
         anyhow::bail!("--devices must list at least one device ID");
     }
+
+    let mesh = match mesh_mode {
+        "pp" => InferMesh::Pp,
+        "tp" => InferMesh::Tp,
+        other => anyhow::bail!(
+            "--mesh-mode {other:?} not supported (use `pp` or `tp`)"
+        ),
+    };
 
     let file = Arc::new(
         GgufFile::open(model_path)
@@ -362,7 +394,9 @@ fn infer_main(model_path: &str, prompt: &str, max_tokens: usize, devices: &str) 
     }
 
     let mut driver: Box<dyn ModelDriver> = match arch.as_str() {
-        "gemma4" => build_gemma4_driver(file.clone(), &device_ids, prompt_ids.len() + max_tokens)?,
+        "gemma4" => {
+            build_gemma4_driver(file.clone(), &device_ids, prompt_ids.len() + max_tokens, mesh)?
+        }
         other => anyhow::bail!(
             "`flambeau infer` does not yet route arch `{other}` through ModelDriver. \
              Supported: gemma4."
@@ -391,18 +425,30 @@ fn build_gemma4_driver(
     file: std::sync::Arc<GgufFile>,
     device_ids: &[i32],
     max_tokens: usize,
+    mesh: InferMesh,
 ) -> Result<Box<dyn flambeau_runtime::ModelDriver>> {
     use flambeau_backend_hip::HipCluster;
-    use flambeau_gemma4::{partition_layers, Gemma4Config, Gemma4PpDriver, ModelLayout};
+    use flambeau_gemma4::{partition_layers, Gemma4Config, Gemma4PpDriver, Gemma4TpDriver, ModelLayout};
 
-    let cluster = HipCluster::new(device_ids)?;
     let cfg = Gemma4Config::from_gguf(&file)
         .map_err(|e| anyhow::anyhow!("Gemma4Config::from_gguf: {e}"))?;
     let mut layout = ModelLayout::from_config(&cfg);
     let _ = layout.resolve_kv_sharing();
-    let layer_to_rank = partition_layers(device_ids.len(), &layout)?;
-    let driver = Gemma4PpDriver::upload(&file, cfg, layout, layer_to_rank, cluster, max_tokens)?;
-    Ok(Box::new(driver))
+
+    match mesh {
+        InferMesh::Pp => {
+            let cluster = HipCluster::new(device_ids)?;
+            let layer_to_rank = partition_layers(device_ids.len(), &layout)?;
+            let driver =
+                Gemma4PpDriver::upload(&file, cfg, layout, layer_to_rank, cluster, max_tokens)?;
+            Ok(Box::new(driver))
+        }
+        InferMesh::Tp => {
+            let cluster = std::sync::Arc::new(HipCluster::new(device_ids)?);
+            let driver = Gemma4TpDriver::upload(&file, cfg, layout, cluster, max_tokens)?;
+            Ok(Box::new(driver))
+        }
+    }
 }
 
 #[cfg(feature = "hip_serve")]
