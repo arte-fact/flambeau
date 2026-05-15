@@ -1166,6 +1166,7 @@ fn upload_layer_pp(
         attn_q_norm,
         attn_k_norm,
         post_attention_norm,
+        post_attention_norm_f32: None,
         layer_output_scale,
         ffn_norm,
         ffn_gate,

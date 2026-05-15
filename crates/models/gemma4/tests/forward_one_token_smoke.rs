@@ -123,6 +123,7 @@ fn make_layer(dev: &HipDevice, raw: &mut Vec<DeviceTensor>) -> Gemma4LayerWeight
         attn_q_norm: make_f16_ones_tensor(dev, HEAD_DIM, raw),
         attn_k_norm: Some(make_f16_ones_tensor(dev, HEAD_DIM, raw)),
         post_attention_norm: make_f16_ones_tensor(dev, HIDDEN, raw),
+        post_attention_norm_f32: None,
         layer_output_scale: None,
         ffn_norm: make_f16_ones_tensor(dev, HIDDEN, raw),
         ffn_gate,

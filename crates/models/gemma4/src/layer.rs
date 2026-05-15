@@ -65,6 +65,13 @@ pub struct Gemma4LayerWeights {
     pub attn_q_norm: DevicePtr,
     pub attn_k_norm: Option<DevicePtr>,
     pub post_attention_norm: DevicePtr,
+    /// F32 copy of `post_attention_norm` for the F32 attention output
+    /// path (gemma4 MoE 26B-A4B full-attention layers). Uploaded
+    /// alongside the F16 weight when needed; `None` for SWA layers,
+    /// E4B, 31B dense, etc. Read by `forward_decode_layer_tp_moe`
+    /// when running F32 attention to avoid the F16 saturation at the
+    /// output_proj F32→F16 cast.
+    pub post_attention_norm_f32: Option<DevicePtr>,
     /// Optional per-layer scalar (gemma4 `layer_output_scale`, F32 [1]).
     /// Downloaded at upload time so we can apply it via `scale_f16`
     /// without an extra device-side broadcast op.

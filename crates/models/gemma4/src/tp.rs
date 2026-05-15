@@ -74,6 +74,23 @@ pub struct Gemma4TpStage {
     /// F16 [hidden] buffer holding this rank's partial attn-out
     /// contribution after the row-parallel output proj.
     pub partial_attn: DevicePtr,
+    /// F32 [hidden] buffer for the row-parallel attn-output partial
+    /// on **full-attention** layers (head_dim=512 on 26B-A4B). The
+    /// F32 path skips the saturating cast at output_proj end + uses
+    /// `tp_allreduce_sum_f32_synced` for AR — see
+    /// `feedback_gemma4_attn_output_proj_f16_saturate`. Allocated
+    /// only on MoE models (no full-attn layers ⇒ stays `DevicePtr::NULL`).
+    pub partial_attn_f32: DevicePtr,
+    /// F32 [hidden] staging buffer for the F32 rmsnorm output on
+    /// full-attention layers. Holds `rmsnorm_f32(partial_attn_f32,
+    /// post_attention_norm_f32)` before the F32→F16 cast (safe since
+    /// rmsnorm output is bounded).
+    pub attn_normed_f32_tmp: DevicePtr,
+    /// Per-layer F32 copy of `post_attention_norm`. Populated only
+    /// for full-attention layers (SWA layers use the F16 weight on
+    /// `layer.layer_weights[il].post_attention_norm`). `DevicePtr::NULL`
+    /// for SWA layers and for non-MoE models.
+    pub post_attention_norm_f32: Vec<DevicePtr>,
     /// F16 [hidden] buffer holding this rank's partial FFN-out
     /// contribution after the row-parallel down proj.
     pub partial_ffn: DevicePtr,
@@ -258,6 +275,28 @@ impl Gemma4TpStage {
         let partial_attn = raw_alloc.alloc_f16(device, hidden)?.0;
         let partial_ffn = raw_alloc.alloc_f16(device, hidden)?.0;
 
+        // F32 attention output path scratch — allocated only when the
+        // model has full-attention layers (cfg.moe.is_some() ⇒ 26B-A4B
+        // SSSSSF pattern with head_dim=512 layers). SWA-only models
+        // (or non-MoE) don't engage this path.
+        let has_full_attn_layers = cfg.moe.is_some()
+            && layout.layers.iter().any(|s| !s.is_swa);
+        let (partial_attn_f32, attn_normed_f32_tmp) = if has_full_attn_layers {
+            (
+                raw_alloc.alloc_f32(device, hidden)?.0,
+                raw_alloc.alloc_f32(device, hidden)?.0,
+            )
+        } else {
+            (DevicePtr::NULL, DevicePtr::NULL)
+        };
+        // Per-layer F32 norm weights — populated from each layer's
+        // `Gemma4LayerWeights::post_attention_norm_f32` (Some only for
+        // MoE full-attention layers; SWA + non-MoE layers stay NULL).
+        let post_attention_norm_f32: Vec<DevicePtr> = layer_weights
+            .iter()
+            .map(|lw| lw.post_attention_norm_f32.unwrap_or(DevicePtr::NULL))
+            .collect();
+
         let output_head_scratch = if is_head_rank {
             Some(OutputHeadScratch {
                 x_norm_f16: raw_alloc.alloc_f16(device, hidden)?.0,
@@ -294,6 +333,9 @@ impl Gemma4TpStage {
             lm_head,
             hidden: hidden_ptr,
             partial_attn,
+            partial_attn_f32,
+            attn_normed_f32_tmp,
+            post_attention_norm_f32,
             partial_ffn,
             scratch,
             output_head_scratch,
@@ -539,14 +581,15 @@ fn forward_decode_layer_tp_moe(
     position: usize,
 ) -> Result<()> {
     use flambeau_blocks::{
-        cross_rank_event_barrier, tp_allreduce_sum_synced, Buffer, LayerComposerTp, RowParallel,
-        F16,
+        cross_rank_event_barrier, tp_allreduce_sum_f32_synced, tp_allreduce_sum_synced, Buffer,
+        LayerComposerTp, RowParallel, F16,
     };
 
     let n = driver.stages.len();
     let hidden = driver.cfg.hidden_size;
     let rms_eps = driver.cfg.rms_norm_eps;
     let ff_len_local = driver.cfg.feed_forward_length / n;
+    let is_full_attn = !driver.layout.layers[il].is_swa;
 
     let probe = std::env::var_os("FLAMBEAU_TP_MOE_DEBUG").is_some()
         && (il == 0 || il == 4 || il == 5 || il + 1 == driver.cfg.num_layers);
@@ -567,12 +610,27 @@ fn forward_decode_layer_tp_moe(
         tp_dump_buffer(driver, 0, driver.stages[0].hidden, hidden,
             &format!("L{il} P0 stage.hidden rank0 (pre-attention input)"));
     }
-    for r in 0..n {
-        <Gemma4TpDriver as LayerComposerTp>::forward_attn(driver, r, position, il)?;
+    // Phase 1: per-rank attention. Full-attention layers (head_dim=512
+    // on 26B-A4B) use the F32 output_proj path so the row-parallel
+    // partial doesn't saturate F16 when V has a sqrt(head_dim)≈22
+    // spike (see feedback_gemma4_attn_output_proj_f16_saturate).
+    if is_full_attn {
+        for r in 0..n {
+            forward_attn_f32_output(driver, r, position, il)?;
+        }
+    } else {
+        for r in 0..n {
+            <Gemma4TpDriver as LayerComposerTp>::forward_attn(driver, r, position, il)?;
+        }
     }
     if probe {
-        tp_dump_buffer(driver, 0, driver.stages[0].partial_attn, hidden,
-            &format!("L{il} P1 partial_attn rank0"));
+        if is_full_attn {
+            // F32 partial — read as F32 (probe utility is F16-only; skip).
+            eprintln!("  [TP_PHASE] L{il} P1 partial_attn_f32 rank0 (F32 buffer, probe skipped)");
+        } else {
+            tp_dump_buffer(driver, 0, driver.stages[0].partial_attn, hidden,
+                &format!("L{il} P1 partial_attn rank0"));
+        }
     }
     if probe && position == 0 && il == 5 {
         // L5 specifically: head_dim=512 full-attention layer (per
@@ -596,7 +654,34 @@ fn forward_decode_layer_tp_moe(
         tp_dump_buffer(driver, 0, s0.scratch.attn_out_local.0, q_width_local,
             "L5 attn_out_local rank0 (pre output_proj)");
     }
-    {
+    // Phase 2: AR-sum partial_attn across ranks. F32 path on
+    // full-attention layers (so the F32 mmvq output stays bounded
+    // through AR; cast to F16 happens only after post-norm absorbs
+    // the spike).
+    if is_full_attn {
+        let cores: Vec<&TpRankCore> = driver.stages.iter().map(|s| &s.core).collect();
+        let partials: [DevicePtr; 2] = [
+            driver.stages[0].partial_attn_f32,
+            driver.stages[1].partial_attn_f32,
+        ];
+        let streams: [&_; 2] = [
+            driver.tp.cluster().device(0).default_stream(),
+            driver.tp.cluster().device(1).default_stream(),
+        ];
+        // SAFETY: partial_attn_f32 is hidden F32 elems per rank;
+        // synced helper orders BAR1 reads behind producer events.
+        unsafe {
+            tp_allreduce_sum_f32_synced(
+                driver.tp.ar(),
+                driver.tp.cluster(),
+                &cores,
+                &partials,
+                hidden,
+                &streams,
+            )
+        }
+        .context("MoE AR sum partial_attn_f32 (full-attn)")?;
+    } else {
         let cores: Vec<&TpRankCore> = driver.stages.iter().map(|s| &s.core).collect();
         // SAFETY: partial_attn is hidden F16 elems per rank; streams
         // outlive this call; synced helper adds the cross-rank edge.
@@ -617,16 +702,26 @@ fn forward_decode_layer_tp_moe(
                 &streams,
             )
         }
-        .context("MoE AR sum partial_attn")?;
+        .context("MoE AR sum partial_attn (SWA)")?;
     }
     if probe {
-        tp_dump_buffer(driver, 0, driver.stages[0].partial_attn, hidden,
-            &format!("L{il} P2 partial_attn rank0 (post-AR)"));
-        tp_dump_buffer(driver, 1, driver.stages[1].partial_attn, hidden,
-            &format!("L{il} P2 partial_attn rank1 (post-AR)"));
+        if !is_full_attn {
+            tp_dump_buffer(driver, 0, driver.stages[0].partial_attn, hidden,
+                &format!("L{il} P2 partial_attn rank0 (post-AR)"));
+            tp_dump_buffer(driver, 1, driver.stages[1].partial_attn, hidden,
+                &format!("L{il} P2 partial_attn rank1 (post-AR)"));
+        }
     }
-    for r in 0..n {
-        <Gemma4TpDriver as LayerComposerTp>::post_norm_residual_attn(driver, r, il)?;
+    // Phase 3: post-attn-norm + residual add → attn_residual_f16.
+    // Full-attn: F32 rmsnorm + cast + F16 add. SWA: trait method.
+    if is_full_attn {
+        for r in 0..n {
+            post_norm_residual_attn_f32(driver, r, il)?;
+        }
+    } else {
+        for r in 0..n {
+            <Gemma4TpDriver as LayerComposerTp>::post_norm_residual_attn(driver, r, il)?;
+        }
     }
     if probe {
         tp_dump_buffer(driver, 0, driver.stages[0].scratch.attn_residual_f16.0, hidden,
@@ -921,6 +1016,128 @@ fn forward_decode_layer_tp_moe(
             &format!("L{il} P6 next-layer hidden rank0"));
     }
 
+    Ok(())
+}
+
+/// Per-rank attention with F32 output projection. Used by
+/// [`forward_decode_layer_tp_moe`] on full-attention layers
+/// (head_dim=512 on 26B-A4B) where the F16 output_proj saturates
+/// due to V_norm's structural sqrt(head_dim) spike. Writes the F32
+/// mmvq result directly into `stage.partial_attn_f32`; the caller
+/// AR-sums F32 across ranks via `tp_allreduce_sum_f32_synced`.
+fn forward_attn_f32_output(
+    driver: &mut Gemma4TpDriver,
+    r: usize,
+    position: usize,
+    il: usize,
+) -> Result<()> {
+    let spec = driver.layout.layers[il];
+    let n_ranks = driver.stages.len();
+    let hidden = driver.cfg.hidden_size;
+    let head_dim = spec.head_dim;
+    let n_heads_local = spec.n_heads / n_ranks;
+    let n_kv_local = spec.n_kv_heads / n_ranks;
+    let rms_eps = driver.cfg.rms_norm_eps;
+    let dev = driver.tp.cluster().device(r);
+    dev.bind()?;
+    let stream = dev.default_stream();
+    let reg = &driver.regs[r];
+    let ops = HipOps::new(reg, stream);
+    let stage = &mut driver.stages[r];
+    let weights = &stage.layer_weights[il];
+    let x_in = stage.hidden;
+    let block = weights
+        .build_attn_block(
+            &spec,
+            hidden,
+            n_heads_local,
+            n_kv_local,
+            head_dim,
+            rms_eps,
+            stage.scratch.v_ones_f16.0,
+        )?
+        .with_f32_output_proj(true);
+    let kv = stage.kv_caches[il]
+        .as_mut()
+        .expect("S9-A requires per-layer KV");
+    let mut std_scratch = StandardAttentionDecodeScratch {
+        x_q8_1: stage.scratch.x_q8_1.0,
+        mmvq_f32: stage.scratch.mmvq_f32.0,
+        q_fused_f16: DevicePtr(0),
+        q_f16: stage.scratch.q_f16.0,
+        gate_f16: DevicePtr(0),
+        k_f16: stage.scratch.k_f16.0,
+        v_f16: stage.scratch.v_f16.0,
+        k_q8_0: DevicePtr(0),
+        v_q8_0: DevicePtr(0),
+        attn_out_f16: stage.scratch.attn_out_local.0,
+        gated_out_f16: DevicePtr(0),
+        positions: stage.scratch.positions.0,
+        positions_host: &mut stage.positions_host,
+        splitk_partials_m: stage.scratch.splitk_partials_m.0,
+        splitk_partials_s: stage.scratch.splitk_partials_s.0,
+        splitk_partials_o: stage.scratch.splitk_partials_o.0,
+    };
+    // Pass `partial_attn_f32` (F32 [hidden]) as the delta_out — the
+    // F32-output-proj block writes the F32 mmvq result directly here,
+    // skipping the saturating F16 cast.
+    block
+        .forward_decode(
+            &ops,
+            dev,
+            stream,
+            x_in,
+            stage.partial_attn_f32,
+            kv,
+            &mut std_scratch,
+            position,
+            /* slots = */ None,
+        )
+        .context("StandardAttention::forward_decode F32-output (gemma4 MoE full-attn)")
+}
+
+/// Per-rank F32 post-attention-norm + residual add. F32 rmsnorm
+/// (with F32 `post_attention_norm_f32`) → F32 staging → F16 cast
+/// (safe: rmsnorm output is bounded) → F16 add to stage.hidden.
+fn post_norm_residual_attn_f32(driver: &mut Gemma4TpDriver, r: usize, il: usize) -> Result<()> {
+    let hidden = driver.cfg.hidden_size;
+    let rms_eps = driver.cfg.rms_norm_eps;
+    let dev = driver.tp.cluster().device(r);
+    dev.bind()?;
+    let stream = dev.default_stream();
+    let reg = &driver.regs[r];
+    let ops = HipOps::new(reg, stream);
+    let stage = &mut driver.stages[r];
+    let layer = &stage.layer_weights[il];
+    let norm_f32 = layer
+        .post_attention_norm_f32
+        .ok_or_else(|| anyhow!("layer {il} rank {r}: post_attention_norm_f32 missing"))?;
+    // 1. F32 rmsnorm: partial_attn_f32 / RMS · post_attention_norm_f32 → attn_normed_f32_tmp.
+    ops.rmsnorm_f32(
+        stage.partial_attn_f32,
+        norm_f32,
+        stage.attn_normed_f32_tmp,
+        1,
+        hidden,
+        rms_eps,
+    )
+    .context("F32 post_attention_norm (full-attn)")?;
+    // 2. Cast F32 → F16 (safe; rmsnorm output is bounded). Reuse
+    //    `attn_out_local` as the F16 staging.
+    ops.cast_f32_to_f16(
+        stage.attn_normed_f32_tmp,
+        stage.scratch.attn_out_local.0,
+        hidden,
+    )
+    .context("F32→F16 cast post-attn-norm (full-attn)")?;
+    // 3. F16 residual add → attn_residual_f16.
+    ops.add_f16(
+        stage.hidden,
+        stage.scratch.attn_out_local.0,
+        stage.scratch.attn_residual_f16.0,
+        hidden,
+    )
+    .context("F16 residual add (full-attn)")?;
     Ok(())
 }
 
@@ -1427,6 +1644,26 @@ fn upload_layer_tp(
         None
     };
 
+    // F32 copy of `post_attention_norm` for the F32 attention output
+    // path. Uploaded for MoE full-attention layers (head_dim=512 path
+    // that overflows F16 in the row-parallel output_proj F32→F16
+    // cast). SWA layers stay F16 (head_dim=256 doesn't trigger the
+    // saturation).
+    let post_attention_norm_f32 = if cfg.moe.is_some() && !spec.is_swa {
+        let name = crate::names::AttnNames::for_layer(il).post_attention_norm;
+        let info = file
+            .tensors
+            .get(&name)
+            .ok_or_else(|| anyhow!("{name} missing for F32 upload"))?;
+        Some(
+            flambeau_blocks::upload_replicated_tensor(file, info, device, stream, tracker)
+                .with_context(|| format!("upload F32 post_attention_norm layer {il}"))?
+                .ptr,
+        )
+    } else {
+        None
+    };
+
     Ok(Gemma4LayerWeights {
         attn_norm,
         attn_q,
@@ -1436,6 +1673,7 @@ fn upload_layer_tp(
         attn_q_norm,
         attn_k_norm,
         post_attention_norm,
+        post_attention_norm_f32,
         layer_output_scale,
         ffn_norm,
         ffn_gate,

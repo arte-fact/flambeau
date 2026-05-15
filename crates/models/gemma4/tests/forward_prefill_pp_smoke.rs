@@ -126,6 +126,7 @@ fn make_layer(dev: &HipDevice) -> Gemma4LayerWeights {
         attn_q_norm,
         attn_k_norm: Some(attn_k_norm),
         post_attention_norm,
+        post_attention_norm_f32: None,
         layer_output_scale: None,
         ffn_norm,
         ffn_gate,

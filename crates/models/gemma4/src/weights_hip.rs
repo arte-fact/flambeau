@@ -789,6 +789,7 @@ impl Gemma4DeviceWeights {
                 attn_q_norm: attn_q_norm.ptr,
                 attn_k_norm: attn_k_norm.map(|dt| dt.ptr),
                 post_attention_norm: post_attention_norm.ptr,
+                post_attention_norm_f32: None,
                 layer_output_scale: layer_output_scale_value,
                 ffn_norm: ffn_norm.ptr,
                 ffn_gate: ffn_gate.as_weight_handle(ffn_gate_dims)?,

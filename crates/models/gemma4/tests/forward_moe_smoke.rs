@@ -133,6 +133,7 @@ fn build_layer_weights(dev: &HipDevice) -> Gemma4LayerWeights {
         attn_q_norm: alloc_f16_ones(dev, HEAD_DIM),
         attn_k_norm: Some(alloc_f16_ones(dev, HEAD_DIM)),
         post_attention_norm: alloc_f16_ones(dev, HIDDEN),
+        post_attention_norm_f32: None,
         layer_output_scale: None,
         ffn_norm: alloc_f16_ones(dev, HIDDEN),
         ffn_gate: WeightHandle {
