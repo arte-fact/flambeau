@@ -22,8 +22,8 @@ use flambeau_quant::GgufFile;
 use flambeau_runtime::{LayerAssignment, ModelDriver};
 
 use crate::forward::pp::{
-    forward_one_token_pp, forward_prefill_pp, ShardedForwardOneTokenScratch,
-    ShardedForwardPrefillScratch,
+    forward_one_token_pp, forward_one_token_pp_logits, forward_prefill_pp,
+    forward_prefill_pp_logits, ShardedForwardOneTokenScratch, ShardedForwardPrefillScratch,
 };
 use crate::session::KvLayout;
 use crate::sharded::{Qwen3MoEShardedModel, Qwen3MoEShardedSession};
@@ -100,6 +100,59 @@ impl ModelDriver for Qwen3MoEPpDriver {
             .as_mut()
             .ok_or_else(|| anyhow!("driver disposed"))?;
         forward_one_token_pp(model, session, cluster, scratch, token_id, position)
+    }
+
+    fn forward_prefill_logits(
+        &mut self,
+        tokens: &[u32],
+        start_position: usize,
+        logits_out: &mut Vec<f32>,
+    ) -> Result<()> {
+        let model = self.model.as_ref().ok_or_else(|| anyhow!("driver disposed"))?;
+        let session = self
+            .session
+            .as_mut()
+            .ok_or_else(|| anyhow!("driver disposed"))?;
+        let cluster = self
+            .cluster
+            .as_ref()
+            .ok_or_else(|| anyhow!("driver disposed"))?;
+        let scratch = self
+            .prefill_scratch
+            .as_mut()
+            .ok_or_else(|| anyhow!("driver disposed"))?;
+        forward_prefill_pp_logits(model, session, cluster, scratch, tokens, start_position, logits_out)
+    }
+
+    fn forward_one_token_logits(
+        &mut self,
+        token_id: u32,
+        position: usize,
+        logits_out: &mut Vec<f32>,
+    ) -> Result<()> {
+        let model = self.model.as_ref().ok_or_else(|| anyhow!("driver disposed"))?;
+        let session = self
+            .session
+            .as_mut()
+            .ok_or_else(|| anyhow!("driver disposed"))?;
+        let cluster = self
+            .cluster
+            .as_ref()
+            .ok_or_else(|| anyhow!("driver disposed"))?;
+        let scratch = self
+            .decode_scratch
+            .as_mut()
+            .ok_or_else(|| anyhow!("driver disposed"))?;
+        forward_one_token_pp_logits(
+            model, session, cluster, scratch, token_id, position, logits_out,
+        )
+    }
+
+    fn vocab_size(&self) -> usize {
+        self.model
+            .as_ref()
+            .map(|m| m.config.vocab_size)
+            .unwrap_or(0)
     }
 
     fn dispose(&mut self) -> Result<()> {

@@ -753,9 +753,37 @@ impl flambeau_runtime::ModelDriver for Gemma4PpDriver {
     fn forward_one_token(&mut self, token_id: u32, position: usize) -> Result<u32> {
         Gemma4PpDriver::forward_one_token(self, token_id, position)
     }
+    fn forward_prefill_logits(
+        &mut self,
+        tokens: &[u32],
+        start_position: usize,
+        logits_out: &mut Vec<f32>,
+    ) -> Result<()> {
+        let _ = Gemma4PpDriver::forward_prefill(self, tokens, start_position)?;
+        copy_logits_into(&self.logits_host, logits_out);
+        Ok(())
+    }
+    fn forward_one_token_logits(
+        &mut self,
+        token_id: u32,
+        position: usize,
+        logits_out: &mut Vec<f32>,
+    ) -> Result<()> {
+        let _ = Gemma4PpDriver::forward_one_token(self, token_id, position)?;
+        copy_logits_into(&self.logits_host, logits_out);
+        Ok(())
+    }
+    fn vocab_size(&self) -> usize {
+        self.cfg.vocab_size
+    }
     fn dispose(&mut self) -> Result<()> {
         Gemma4PpDriver::dispose(self)
     }
+}
+
+fn copy_logits_into(src: &[f32], dst: &mut Vec<f32>) {
+    dst.clear();
+    dst.extend_from_slice(src);
 }
 
 impl Drop for Gemma4PpDriver {

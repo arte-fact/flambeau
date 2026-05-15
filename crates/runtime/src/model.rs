@@ -49,6 +49,41 @@ pub trait ModelDriver: Send + 'static {
     /// `token_id`'s K/V are appended.
     fn forward_one_token(&mut self, token_id: u32, position: usize) -> anyhow::Result<u32>;
 
+    /// Prefill variant that copies the final-token F32 logits into
+    /// `logits_out` (caller-owned, resized to vocab) instead of
+    /// argmax-ing on host. Lets samplers (top-k / top-p / temperature)
+    /// consume raw logits.
+    ///
+    /// Default impl bails so existing greedy-only drivers compile
+    /// without churn. Impls that support sampling should override.
+    fn forward_prefill_logits(
+        &mut self,
+        _tokens: &[u32],
+        _start_position: usize,
+        _logits_out: &mut Vec<f32>,
+    ) -> anyhow::Result<()> {
+        anyhow::bail!("ModelDriver: forward_prefill_logits not implemented by this driver")
+    }
+
+    /// Decode variant that copies the new-token F32 logits into
+    /// `logits_out` instead of argmax-ing on host.
+    ///
+    /// Default impl bails — see [`Self::forward_prefill_logits`].
+    fn forward_one_token_logits(
+        &mut self,
+        _token_id: u32,
+        _position: usize,
+        _logits_out: &mut Vec<f32>,
+    ) -> anyhow::Result<()> {
+        anyhow::bail!("ModelDriver: forward_one_token_logits not implemented by this driver")
+    }
+
+    /// Vocab size — needed by callers to pre-size the `logits_out`
+    /// buffer. Default impl bails so existing impls can opt in.
+    fn vocab_size(&self) -> usize {
+        0
+    }
+
     /// Free all device allocations. Idempotent.
     fn dispose(&mut self) -> anyhow::Result<()>;
 }

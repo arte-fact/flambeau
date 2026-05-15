@@ -537,6 +537,36 @@ impl flambeau_runtime::ModelDriver for Gemma4TpDriver {
     fn forward_one_token(&mut self, token_id: u32, position: usize) -> Result<u32> {
         Gemma4TpDriver::forward_one_token(self, token_id, position)
     }
+    fn forward_prefill_logits(
+        &mut self,
+        tokens: &[u32],
+        start_position: usize,
+        logits_out: &mut Vec<f32>,
+    ) -> Result<()> {
+        if tokens.is_empty() {
+            bail!("Gemma4TpDriver::forward_prefill_logits: empty tokens");
+        }
+        for (i, &t) in tokens.iter().enumerate() {
+            let _ = Gemma4TpDriver::forward_one_token(self, t, start_position + i)?;
+        }
+        logits_out.clear();
+        logits_out.extend_from_slice(&self.logits_host);
+        Ok(())
+    }
+    fn forward_one_token_logits(
+        &mut self,
+        token_id: u32,
+        position: usize,
+        logits_out: &mut Vec<f32>,
+    ) -> Result<()> {
+        let _ = Gemma4TpDriver::forward_one_token(self, token_id, position)?;
+        logits_out.clear();
+        logits_out.extend_from_slice(&self.logits_host);
+        Ok(())
+    }
+    fn vocab_size(&self) -> usize {
+        self.cfg.vocab_size
+    }
     fn dispose(&mut self) -> Result<()> {
         Gemma4TpDriver::dispose(self)
     }
