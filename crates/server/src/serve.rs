@@ -643,9 +643,6 @@ async fn serve_inner_gemma4(
     supports_thinking: bool,
     quantization: Option<String>,
 ) -> Result<()> {
-    use axum::routing::{get, post};
-    use axum::Router;
-    use flambeau_backend_hip::HipCluster;
     use flambeau_gemma4::{partition_layers, Gemma4Config, Gemma4PpDriver, ModelLayout};
 
     use crate::gemma4_handle::{build_gemma4_loaded_model, wrap_gemma4_driver};
@@ -653,9 +650,8 @@ async fn serve_inner_gemma4(
     // PP only at MVP.
     if !matches!(cfg.mesh_mode, MeshMode::Pp) {
         bail!(
-            "gemma4 serve: only --mesh-mode pp supported in MVP \
-             (got {:?}). TP / Hybrid follow-up."
-        ,
+            "gemma4 serve: only --mesh-mode pp supported in MVP (got {:?}). \
+             TP / Hybrid follow-up.",
             cfg.mesh_mode
         );
     }
