@@ -643,18 +643,22 @@ async fn serve_inner_gemma4(
     supports_thinking: bool,
     quantization: Option<String>,
 ) -> Result<()> {
-    use flambeau_gemma4::{partition_layers, Gemma4Config, Gemma4PpDriver, ModelLayout};
+    use flambeau_gemma4::{
+        partition_layers, Gemma4Config, Gemma4PpDriver, Gemma4TpDriver, ModelLayout,
+    };
+    use flambeau_runtime::ModelDriver;
 
     use crate::gemma4_handle::{build_gemma4_loaded_model, wrap_gemma4_driver};
 
-    // PP only at MVP.
-    if !matches!(cfg.mesh_mode, MeshMode::Pp) {
-        bail!(
-            "gemma4 serve: only --mesh-mode pp supported in MVP (got {:?}). \
-             TP / Hybrid follow-up.",
+    // PP and TP supported at MVP. Hybrid follow-up.
+    let topology_label: &'static str = match cfg.mesh_mode {
+        MeshMode::Pp => "pp",
+        MeshMode::Tp { .. } => "tp",
+        MeshMode::Hybrid { .. } => bail!(
+            "gemma4 serve: --mesh-mode pp+tp not yet supported (got {:?}). Follow-up.",
             cfg.mesh_mode
-        );
-    }
+        ),
+    };
 
     let mut cfg_g4 = Gemma4Config::from_gguf(&gguf).context("Gemma4Config::from_gguf")?;
     if let Some(cap) = cfg.ctx_cap {
@@ -686,39 +690,75 @@ async fn serve_inner_gemma4(
     let prefill_ubatch = cfg.prefill_ubatch.max(128);
     let max_queue_depth = cfg.max_queue_depth;
 
-    // Build two HipClusters: one for the gemma4 driver (consumed by
-    // value into `Gemma4PpDriver::upload`); one (Arc-wrapped) for
-    // `ServerState.cluster` so its field type-checks. The state-side
-    // cluster is unused at runtime for gemma4 — handler paths that
-    // touch it are qwen3-moe-only and gated via `as_pp/as_tp` accessors
-    // that return None on `Gemma4HipSession`.
-    let state_cluster: Arc<HipCluster> =
-        Arc::new(HipCluster::new(&cfg.device_ids).context("HipCluster::new (state side)")?);
-    let driver_cluster = HipCluster::new(&cfg.device_ids).context("HipCluster::new (driver)")?;
+    // Build the driver per topology.
+    // - PP: `Gemma4PpDriver::upload` consumes its cluster by value, so
+    //   we build a SECOND, state-side `Arc<HipCluster>` whose only
+    //   purpose is satisfying `ServerState.cluster`'s type (the
+    //   handler paths that read it are all qwen3-moe-gated).
+    // - TP: `Gemma4TpDriver::upload` takes `Arc<HipCluster>`, so the
+    //   state-side cluster and the driver's cluster are the same Arc.
+    let (state_cluster, driver): (Arc<HipCluster>, Box<dyn ModelDriver>) = match cfg.mesh_mode {
+        MeshMode::Pp => {
+            let state_cluster: Arc<HipCluster> = Arc::new(
+                HipCluster::new(&cfg.device_ids).context("HipCluster::new (state side)")?,
+            );
+            let driver_cluster =
+                HipCluster::new(&cfg.device_ids).context("HipCluster::new (driver)")?;
+            let mut layout = ModelLayout::from_config(&cfg_g4);
+            let _shared_kv = layout.resolve_kv_sharing();
+            let layer_to_rank = partition_layers(cfg.device_ids.len(), &layout)
+                .context("partition_layers for gemma4 PP")?;
+            info!(
+                num_layers = cfg_g4.num_layers,
+                ranks = cfg.device_ids.len(),
+                topology = "pp",
+                arch = cfg_g4.arch.as_str(),
+                "loading gemma4 weights"
+            );
+            let pp_driver = Gemma4PpDriver::upload(
+                &gguf,
+                cfg_g4.clone(),
+                layout,
+                layer_to_rank,
+                driver_cluster,
+                prefill_ubatch,
+            )
+            .context("Gemma4PpDriver::upload")?;
+            (state_cluster, Box::new(pp_driver))
+        }
+        MeshMode::Tp { world } => {
+            let shared_cluster: Arc<HipCluster> =
+                Arc::new(HipCluster::new(&cfg.device_ids).context("HipCluster::new")?);
+            if shared_cluster.ranks() as u32 != world {
+                bail!(
+                    "--mesh-mode tp: --tp-size {world} but cluster has {} ranks",
+                    shared_cluster.ranks()
+                );
+            }
+            let mut layout = ModelLayout::from_config(&cfg_g4);
+            let _shared_kv = layout.resolve_kv_sharing();
+            info!(
+                num_layers = cfg_g4.num_layers,
+                ranks = shared_cluster.ranks(),
+                topology = "tp",
+                arch = cfg_g4.arch.as_str(),
+                "loading gemma4 weights"
+            );
+            let tp_driver = Gemma4TpDriver::upload(
+                &gguf,
+                cfg_g4.clone(),
+                layout,
+                shared_cluster.clone(),
+                prefill_ubatch,
+            )
+            .context("Gemma4TpDriver::upload")?;
+            (shared_cluster, Box::new(tp_driver))
+        }
+        MeshMode::Hybrid { .. } => unreachable!("guarded above"),
+    };
 
-    let mut layout = ModelLayout::from_config(&cfg_g4);
-    let _shared_kv = layout.resolve_kv_sharing();
-    let layer_to_rank = partition_layers(cfg.device_ids.len(), &layout)
-        .context("partition_layers for gemma4 PP")?;
-    info!(
-        num_layers = cfg_g4.num_layers,
-        ranks = cfg.device_ids.len(),
-        topology = "pp",
-        arch = cfg_g4.arch.as_str(),
-        "loading gemma4 weights"
-    );
-    let driver = Gemma4PpDriver::upload(
-        &gguf,
-        cfg_g4.clone(),
-        layout,
-        layer_to_rank,
-        driver_cluster,
-        prefill_ubatch,
-    )
-    .context("Gemma4PpDriver::upload")?;
-
-    let model = build_gemma4_loaded_model(cfg_g4.clone(), "pp");
-    let session = wrap_gemma4_driver(Box::new(driver), tokenizer.bos_id);
+    let model = build_gemma4_loaded_model(cfg_g4.clone(), topology_label);
+    let session = wrap_gemma4_driver(driver, tokenizer.bos_id);
     let inflight_pool: Vec<Mutex<Box<dyn crate::HipSession>>> = vec![Mutex::new(session)];
 
     let slot_in_use: Vec<std::sync::atomic::AtomicBool> = (0..inflight_slots)
@@ -732,11 +772,20 @@ async fn serve_inner_gemma4(
         crate::prefix_cache::PrefixCache::gb_to_bytes(cfg.prefix_cache_max_gb),
         cfg.prefix_cache,
     ));
-    let topology_tag = crate::prefix_cache::TopologyTag {
-        mesh_kind: "pp",
-        ranks: cfg.device_ids.len() as u32,
-        pp_size: cfg.device_ids.len() as u32,
-        tp_size: 1,
+    let topology_tag = match cfg.mesh_mode {
+        MeshMode::Pp => crate::prefix_cache::TopologyTag {
+            mesh_kind: "pp",
+            ranks: cfg.device_ids.len() as u32,
+            pp_size: cfg.device_ids.len() as u32,
+            tp_size: 1,
+        },
+        MeshMode::Tp { world } => crate::prefix_cache::TopologyTag {
+            mesh_kind: "tp",
+            ranks: world,
+            pp_size: 1,
+            tp_size: world,
+        },
+        MeshMode::Hybrid { .. } => unreachable!("guarded above"),
     };
 
     let model_defaults = crate::state::ModelDefaults::from_gguf(&gguf);

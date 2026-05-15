@@ -3448,11 +3448,16 @@ fn run_completion_scheduler_pp_blocking(
                             || tail.contains("<end_thought>")
                             || tail.contains("<end_think>")
                             || tail.contains("</thought>"));
+                    let arch_hit = state
+                        .model
+                        .chat_stop_markers()
+                        .iter()
+                        .any(|m| tail.contains(*m));
                     let user_hit = params
                         .stop_strings
                         .iter()
                         .any(|s| tail.contains(s.as_str()));
-                    if marker_hit || user_hit {
+                    if marker_hit || arch_hit || user_hit {
                         finish_reason = "stop";
                         break;
                     }
@@ -3965,11 +3970,16 @@ fn run_completion_blocking_ids(
                         || tail.contains("<end_thought>")
                         || tail.contains("<end_think>")
                         || tail.contains("</thought>"));
+                let arch_hit = state
+                    .model
+                    .chat_stop_markers()
+                    .iter()
+                    .any(|m| tail.contains(*m));
                 let user_hit = params
                     .stop_strings
                     .iter()
                     .any(|s| tail.contains(s.as_str()));
-                if marker_hit || user_hit {
+                if marker_hit || arch_hit || user_hit {
                     finish_reason = "stop";
                     break;
                 }
@@ -4576,6 +4586,17 @@ fn finalise(
         // clean response.
         for marker in ["</think>", "<end_thought>", "<end_think>", "</thought>"] {
             if let Some(idx) = text.find(marker) {
+                text.truncate(idx);
+            }
+        }
+        // Arch-specific chat-template fragment truncation. Each model
+        // exposes its set via `HipModel::chat_stop_markers` (empty for
+        // qwen3-moe; populated for gemma4 — see `gemma4_handle.rs`).
+        // We've already string-stopped on these in the decode loop, but
+        // the marker itself can land in `text` if it slipped into the
+        // tail window or split a chunk boundary.
+        for marker in state.model.chat_stop_markers() {
+            if let Some(idx) = text.find(*marker) {
                 text.truncate(idx);
             }
         }

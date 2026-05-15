@@ -36,6 +36,22 @@ impl HipModel for Gemma4HipModel {
     fn is_gemma4(&self) -> bool {
         true
     }
+    fn chat_stop_markers(&self) -> &'static [&'static str] {
+        // Kept in sync with `Gemma4HipSession::chat_stop_markers`; see
+        // that impl for the rationale on each fragment.
+        &[
+            "<end_of_turn>",
+            "<turn|>",
+            "<|turn>",
+            "<|end_of_turn|>",
+            "<|turn|>",
+            "<|endoftext|>",
+            "<endoftext>",
+            "<|channel>",
+            "<channel|>",
+            "<|thought",
+        ]
+    }
 }
 
 /// Per-request gemma4 session. Owns the entire driver instance —
@@ -140,6 +156,43 @@ impl HipSession for Gemma4HipSession {
 
     fn gemma4_bos_id(&self) -> Option<u32> {
         self.bos_id
+    }
+
+    fn chat_stop_markers(&self) -> &'static [&'static str] {
+        // Gemma4 chat template terminates with `<turn|>` (vocab id 106
+        // = EOS) and contains `<|channel>thought\n<channel|>` to render
+        // an empty hidden reasoning block. The 26B-A4B Q8_0 MoE quant
+        // sometimes drifts off the EOS softmax and emits byte-level
+        // fragments instead of the proper vocab tokens, producing
+        // literals like `<|end_of_turn|>` (NOT a vocab entry; note
+        // the extra `|`s vs `<end_of_turn>` id 106 or `<turn|>`). We
+        // catch every variant we've observed in the wild so the
+        // decode loop can string-stop instead of running the full
+        // `max_tokens` budget on post-EOS repetition.
+        &[
+            // Proper vocab tokens (also caught via stop_ids, but
+            // listed here for completeness when they slip in as
+            // byte-level fragments).
+            "<end_of_turn>",
+            "<turn|>",
+            "<|turn>",
+            // Byte-level leakage variants the 26B-A4B Q8_0 emits
+            // when softmax drifts off the proper EOS token.
+            "<|end_of_turn|>",
+            "<|turn|>",
+            "<|endoftext|>",
+            "<endoftext>",
+            // Channel / reasoning-block markers. The chat template
+            // ends with `<|channel>thought\n<channel|>` to render an
+            // empty hidden reasoning block; under degeneration the
+            // model echoes the OPEN form (`<|channel>` or the BPE
+            // fragment `<|thought`) mid-content. We treat ANY of
+            // them as a stop because legitimate reasoning blocks
+            // require `enable_thinking=true` opt-in.
+            "<|channel>",
+            "<channel|>",
+            "<|thought",
+        ]
     }
 }
 

@@ -55,6 +55,15 @@ pub trait HipModel: Send + Sync + 'static {
     fn is_gemma4(&self) -> bool {
         false
     }
+
+    /// Arch-specific byte-level chat-template fragments that should
+    /// stop generation when present in the decoded text. Mirrored from
+    /// `HipSession::chat_stop_markers`; lives here too so the decode
+    /// loop and `finalise` can read it via `&state.model` without
+    /// holding the inflight mutex. Default `&[]`.
+    fn chat_stop_markers(&self) -> &'static [&'static str] {
+        &[]
+    }
 }
 
 pub trait HipSession: Send {
@@ -122,6 +131,18 @@ pub trait HipSession: Send {
     /// without a BOS id).
     fn gemma4_bos_id(&self) -> Option<u32> {
         None
+    }
+
+    /// Arch-specific byte-level chat-template fragments that should
+    /// stop generation when they appear in the decoded text. Used by
+    /// `routes.rs::run_completion_blocking_ids` and its sibling
+    /// scheduler-aware variant for mid-flight string-stop detection,
+    /// and by `finalise` to truncate any leak that slipped past the
+    /// in-loop check. Default `&[]` (no extra markers); gemma4
+    /// implementations return their template's turn / channel / EOS
+    /// fragments. Lets routes.rs stay arch-agnostic.
+    fn chat_stop_markers(&self) -> &'static [&'static str] {
+        &[]
     }
 }
 
