@@ -110,7 +110,11 @@ pub fn forward_one_token_logits(
     // append in that branch.
     let snapshot_layers: Vec<crate::layout::LayerSpec> = session.layout.layers.clone();
     let pe_n_embd_per_layer = session.cfg.per_layer_embed.as_ref().map(|p| p.n_embd_per_layer);
-    let moe_scratch_view = session.moe_scratch_view();
+    // moe_scratch_view returns Option<&Gemma4MoeScratch>; capture by
+    // raw ptr so the per-layer scratch view (which borrows session
+    // disjointly) doesn't conflict.
+    let moe_scratch_ptr: Option<*const crate::moe::Gemma4MoeScratch> =
+        session.moe_scratch_view().map(|s| s as *const _);
     for spec in snapshot_layers {
         let weights_ref =
             &session.weights.layers[spec.index] as *const crate::layer::Gemma4LayerWeights;
@@ -146,11 +150,14 @@ pub fn forward_one_token_logits(
         let per_layer_slice = pe_table_base
             .zip(pe_n_embd_per_layer)
             .map(|(base, pe)| (table_slice_ptr(base, spec.index, pe), pe));
+        // SAFETY: moe_scratch lives on session and is disjoint from
+        // the per-layer scratch view's borrows.
+        let moe_scratch_ref = moe_scratch_ptr.map(|p| unsafe { &*p });
         forward_layer_decode(
             &ops, device, stream, weights, &spec, rms_eps, ff_len, hidden,
             kv, &mut scratch, in_ptr, out_ptr, position,
             per_layer_slice,
-            moe_scratch_view.as_ref(),
+            moe_scratch_ref,
         )?;
         session.swap_residual();
     }

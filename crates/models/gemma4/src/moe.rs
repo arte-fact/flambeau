@@ -23,9 +23,10 @@
 
 #![cfg(feature = "hip")]
 
-use anyhow::{Context, Result};
-use flambeau_blocks::{MoeExperts, MoeExpertsDecodeScratch};
+use anyhow::{anyhow, Context, Result};
+use flambeau_blocks::{MoeExperts, MoeExpertsDecodeScratch, RawAllocTracker};
 use flambeau_core::DevicePtr;
+use flambeau_ops::hip::HipDevice;
 use flambeau_ops::Ops;
 
 use crate::layer::Gemma4LayerWeights;
@@ -46,45 +47,128 @@ pub struct Gemma4MoeFfnWeights {
     pub pre_router_weight_f16: DevicePtr,
     /// F16 [hidden] — pre-MoE-branch RMSNorm weight.
     pub pre_ffw_norm_2: DevicePtr,
-    /// F16 [hidden] — post-shared-MLP RMSNorm weight.
-    pub post_ffw_norm_1: DevicePtr,
-    /// F16 [hidden] — post-MoE-branch RMSNorm weight.
-    pub post_ffw_norm_2: DevicePtr,
+    /// F32 [hidden] — post-shared-MLP RMSNorm weight. F32 (not F16)
+    /// to keep the post-norm cascade in F32 — mirror of the TP path
+    /// (see `feedback_gemma4_moe_f16_overflow`).
+    pub post_ffw_norm_1_f32: DevicePtr,
+    /// F32 [hidden] — post-MoE-branch RMSNorm weight. Same F32-cascade
+    /// rationale as `post_ffw_norm_1_f32`.
+    pub post_ffw_norm_2_f32: DevicePtr,
+    /// F32 [hidden] — gemma4 `post_ffw_norm` (final). Duplicated
+    /// alongside the F16 copy on `Gemma4LayerWeights::post_ffw_norm`
+    /// (used by the dense composer); MoE-mode reads this F32 variant.
+    pub post_ffw_norm_f32: DevicePtr,
+    /// F32 [n_experts] — gemma4 `ffn_down_exps.scale`. Per-expert
+    /// scalar applied post down-projection; folded into the routing
+    /// weights before combine. Same shape as TP path.
+    pub ffn_down_exps_scale_f32: DevicePtr,
 }
 
 /// Per-call MoE composer scratch (in addition to the layer scratch
 /// already passed to `forward_layer_decode`). Owned by the caller.
+/// All cascade buffers are F32 — mirrors the TP path's F32 cascade.
 pub struct Gemma4MoeScratch {
     /// F16 [hidden] — router input (`rmsnorm_f16(attn_residual,
     /// pre_router_weight)`).
     pub router_input_f16: DevicePtr,
-    /// F16 [hidden] — `cur_mlp` post-shared-MLP-norm output.
-    pub cur_mlp_f16: DevicePtr,
-    /// F16 [hidden] — `cur_moe` post-MoE-norm output.
-    pub cur_moe_f16: DevicePtr,
-    /// F16 [hidden] — combined `cur_mlp + cur_moe` (intermediate).
-    pub cur_combined_f16: DevicePtr,
-    /// F16 [hidden] — read-only zero buffer fed as `residual` to
-    /// `MoeExperts::forward_decode` so the combine kernel does the
-    /// straight weighted sum (no residual fold). Uploaded once at
-    /// session init; never written.
-    pub zero_hidden_f16: DevicePtr,
+    /// F16 [hidden] — pre-MoE-branch rmsnorm output, fed as F16 input
+    /// to the MoE forward gate/up matmul.
+    pub cur_moe_input_f16: DevicePtr,
+    /// F32 [hidden] — shared-MLP row-parallel partial (F32 throughout,
+    /// no F16 cast at the down output).
+    pub partial_shared_mlp_f32: DevicePtr,
+    /// F32 [hidden] — routed-MoE partial (F32 combine output).
+    pub partial_moe_f32: DevicePtr,
+    /// F32 [hidden] — `rmsnorm_f32(partial_shared_mlp_f32, post_ffw_norm_1_f32)`.
+    pub cur_mlp_f32: DevicePtr,
+    /// F32 [hidden] — `rmsnorm_f32(partial_moe_f32, post_ffw_norm_2_f32)`.
+    pub cur_moe_f32: DevicePtr,
+    /// F32 [hidden] — `cur_mlp_f32 + cur_moe_f32`.
+    pub cur_combined_f32: DevicePtr,
+    /// F32 [hidden] — `rmsnorm_f32(cur_combined_f32, post_ffw_norm_f32)`
+    /// before the F16 cast + residual add.
+    pub tmp_f32: DevicePtr,
     /// blocks::MoeExperts decode scratch.
     pub moe_scratch: MoeExpertsDecodeScratch,
 }
 
-/// Run the gemma4 MoE FFN for one decode token.
+impl Gemma4MoeScratch {
+    /// Allocate per-rank scratch on `device`. Sizes mirror the TP
+    /// composer's `Gemma4TpMoeScratch::alloc` but with full
+    /// `n_ff_exp` (no per-rank slicing).
+    pub fn alloc(
+        device: &HipDevice,
+        hidden: usize,
+        n_ff_exp: usize,
+        n_experts: usize,
+        top_k: usize,
+        raw_alloc: &mut RawAllocTracker,
+    ) -> Result<Self> {
+        if hidden % 32 != 0 {
+            return Err(anyhow!(
+                "Gemma4MoeScratch::alloc: hidden={hidden} not a multiple of 32"
+            ));
+        }
+        let inter_total = top_k * n_ff_exp;
+        if inter_total % 32 != 0 {
+            return Err(anyhow!(
+                "Gemma4MoeScratch::alloc: top_k*n_ff_exp={inter_total} not a multiple of 32"
+            ));
+        }
+        let router_input_f16 = raw_alloc.alloc_f16(device, hidden)?.0;
+        let cur_moe_input_f16 = raw_alloc.alloc_f16(device, hidden)?.0;
+        let partial_shared_mlp_f32 = raw_alloc.alloc_f32(device, hidden)?.0;
+        let partial_moe_f32 = raw_alloc.alloc_f32(device, hidden)?.0;
+        let cur_mlp_f32 = raw_alloc.alloc_f32(device, hidden)?.0;
+        let cur_moe_f32 = raw_alloc.alloc_f32(device, hidden)?.0;
+        let cur_combined_f32 = raw_alloc.alloc_f32(device, hidden)?.0;
+        let tmp_f32 = raw_alloc.alloc_f32(device, hidden)?.0;
+        let moe_scratch = MoeExpertsDecodeScratch {
+            x_q8_1: raw_alloc.alloc_q8_1(device, hidden)?.0,
+            router_logits: raw_alloc.alloc_f32(device, n_experts)?.0,
+            expert_ids: raw_alloc.alloc_i32(device, top_k)?.0,
+            expert_weights: raw_alloc.alloc_f32(device, top_k)?.0,
+            gate_out_f32: raw_alloc.alloc_f32(device, inter_total)?.0,
+            up_out_f32: raw_alloc.alloc_f32(device, inter_total)?.0,
+            activated_f16: raw_alloc.alloc_f16(device, inter_total)?.0,
+            activated_q8_1: raw_alloc.alloc_q8_1(device, inter_total)?.0,
+            down_f32: raw_alloc.alloc_f32(device, top_k * hidden)?.0,
+            down_f16: raw_alloc.alloc_f16(device, top_k * hidden)?.0,
+        };
+        Ok(Self {
+            router_input_f16,
+            cur_moe_input_f16,
+            partial_shared_mlp_f32,
+            partial_moe_f32,
+            cur_mlp_f32,
+            cur_moe_f32,
+            cur_combined_f32,
+            tmp_f32,
+            moe_scratch,
+        })
+    }
+}
+
+/// Run the gemma4 MoE FFN for one decode token (single-device / PP).
 ///
-/// Pipeline:
+/// F32-cascade pipeline (mirror of the TP composer; see
+/// `feedback_gemma4_moe_f16_overflow` +
+/// `feedback_gemma4_attn_output_proj_f16_saturate`):
 /// ```text
 /// router_input = rmsnorm_f16(attn_residual, pre_router_weight)
-/// cur_mlp = rmsnorm_quant(attn_residual, ffn_norm) → gate/up/GELU/down → rmsnorm(post_ffw_norm_1)
-/// cur_moe_input = rmsnorm_f16(attn_residual, pre_ffw_norm_2)
-/// {expert_ids, expert_weights} = MoE::route_decode(router_input)
-/// cur_moe = MoE::forward_decode(cur_moe_input, residual=0, expert_*) → rmsnorm(post_ffw_norm_2)
-/// cur_combined = cur_mlp + cur_moe
-/// cur = rmsnorm(cur_combined, post_ffw_norm)
-/// x_out = cur + attn_residual
+/// {ids, w} = MoE::route_decode(router_input); w *= ffn_down_exps_scale
+/// // Shared MLP (F32 partial throughout)
+/// rmsnorm_quant_q8_1(attn_residual, ffn_norm) → gate/up/GELU/down →
+///   partial_shared_mlp_f32   (no F16 cast at the end)
+/// cur_mlp_f32 = rmsnorm_f32(partial_shared_mlp_f32, post_ffw_norm_1_f32)
+/// // Routed MoE (F32 partial throughout)
+/// cur_moe_input_f16 = rmsnorm_f16(attn_residual, pre_ffw_norm_2)
+/// partial_moe_f32   = MoE::forward_decode_tp_f32(cur_moe_input_f16)
+/// cur_moe_f32       = rmsnorm_f32(partial_moe_f32, post_ffw_norm_2_f32)
+/// // Combine + final post-norm + residual
+/// cur_combined_f32  = cur_mlp_f32 + cur_moe_f32
+/// tmp_f32           = rmsnorm_f32(cur_combined_f32, post_ffw_norm_f32)
+/// x_out = attn_residual + cast_f32_to_f16(tmp_f32)   (F16 residual stream)
 /// ```
 #[allow(clippy::too_many_arguments)]
 pub fn forward_ffn_moe<O: Ops>(
@@ -97,7 +181,7 @@ pub fn forward_ffn_moe<O: Ops>(
     layer_scratch_up_f32: DevicePtr,
     layer_scratch_activated_f16: DevicePtr,
     layer_scratch_activated_q8_1: DevicePtr,
-    layer_scratch_down_f32: DevicePtr,
+    _layer_scratch_down_f32: DevicePtr,
     moe_scratch: &Gemma4MoeScratch,
     attn_residual: DevicePtr,
     x_out: DevicePtr,
@@ -116,8 +200,20 @@ pub fn forward_ffn_moe<O: Ops>(
     )
     .context("MoE router_input rmsnorm")?;
 
-    // 2. Shared MLP branch.
-    //    cur_mlp = rmsnorm_quant_q8_1(attn_residual, ffn_norm) → gate/up/GELU/down → norm.
+    // 2. Router top-k + per-expert scale fold.
+    moe.moe
+        .route_decode(ops, moe_scratch.router_input_f16, moe_scratch.moe_scratch)
+        .context("MoE route_decode")?;
+    ops.apply_per_expert_scale_f32(
+        moe_scratch.moe_scratch.expert_weights,
+        moe_scratch.moe_scratch.expert_ids,
+        moe.ffn_down_exps_scale_f32,
+        moe.moe.top_k,
+    )
+    .context("MoE apply ffn_down_exps.scale")?;
+
+    // 3. Shared MLP branch — F32 down output directly into
+    //    partial_shared_mlp_f32 (no F16 cast).
     ops.rmsnorm_quant_q8_1(
         attn_residual,
         layer.ffn_norm,
@@ -160,96 +256,77 @@ pub fn forward_ffn_moe<O: Ops>(
     ops.mmvq(
         layer.ffn_down.ptr,
         layer_scratch_activated_q8_1,
-        layer_scratch_down_f32,
+        moe_scratch.partial_shared_mlp_f32,
         hidden,
         ff_len,
         layer.ffn_down.dtype,
     )
-    .context("MoE shared mmvq down")?;
-    ops.cast_f32_to_f16(layer_scratch_down_f32, moe_scratch.cur_mlp_f16, hidden)?;
-    // Post-shared-MLP norm (in place).
-    ops.rmsnorm_f16(
-        moe_scratch.cur_mlp_f16,
-        moe.post_ffw_norm_1,
-        moe_scratch.cur_mlp_f16,
+    .context("MoE shared mmvq down → partial_shared_mlp_f32")?;
+    ops.rmsnorm_f32(
+        moe_scratch.partial_shared_mlp_f32,
+        moe.post_ffw_norm_1_f32,
+        moe_scratch.cur_mlp_f32,
         1,
         hidden,
         rms_norm_eps,
     )
-    .context("MoE shared post_ffw_norm_1")?;
+    .context("MoE shared post_ffw_norm_1 (F32)")?;
 
-    // 3. MoE branch.
-    //    Pre-MoE norm (rmsnorm of attn_residual with pre_ffw_norm_2).
-    //    Result goes into cur_moe_f16 as the input to MoE::forward_decode.
+    // 4. Routed MoE branch — F32 partial via forward_decode_tp_f32
+    //    (reusable on single-device when intermediate is the full
+    //    n_ff_exp, no per-rank slicing).
     ops.rmsnorm_f16(
         attn_residual,
         moe.pre_ffw_norm_2,
-        moe_scratch.cur_moe_f16,
+        moe_scratch.cur_moe_input_f16,
         1,
         hidden,
         rms_norm_eps,
     )
     .context("MoE branch pre_ffw_norm_2")?;
-
-    // Router: compute logits + top-k. NOTE: blocks::MoeExperts.route_decode
-    // uses `RouterNormalize::TopkRenorm` (the default) for S6-B-A. The
-    // gemma4 spec calls for `Softmax` (no renorm); parity gap documented.
     moe.moe
-        .route_decode(ops, moe_scratch.router_input_f16, moe_scratch.moe_scratch)
-        .context("MoE route_decode")?;
-
-    // Expert forward. The block's combine adds `residual + Σ w_k ·
-    // expert_out_k`; we want only the Σ (the final residual fold uses
-    // `attn_residual` after `post_ffw_norm`), so feed a dedicated
-    // session-init-zeroed buffer as `residual`.
-    moe.moe
-        .forward_decode(
+        .forward_decode_tp_f32(
             ops,
-            moe_scratch.cur_moe_f16,        // x_norm
-            moe_scratch.zero_hidden_f16,    // residual = zeros
-            None,                            // no extra residual
-            moe_scratch.cur_moe_f16,        // out (overwritten)
+            moe_scratch.cur_moe_input_f16,
+            moe_scratch.partial_moe_f32,
             moe_scratch.moe_scratch,
         )
-        .context("MoE forward_decode")?;
-    // Post-MoE norm (in place).
-    ops.rmsnorm_f16(
-        moe_scratch.cur_moe_f16,
-        moe.post_ffw_norm_2,
-        moe_scratch.cur_moe_f16,
+        .context("MoE forward_decode_tp_f32")?;
+    ops.rmsnorm_f32(
+        moe_scratch.partial_moe_f32,
+        moe.post_ffw_norm_2_f32,
+        moe_scratch.cur_moe_f32,
         1,
         hidden,
         rms_norm_eps,
     )
-    .context("MoE branch post_ffw_norm_2")?;
+    .context("MoE branch post_ffw_norm_2 (F32)")?;
 
-    // 4. Combine: cur_combined = cur_mlp + cur_moe.
-    ops.add_f16(
-        moe_scratch.cur_mlp_f16,
-        moe_scratch.cur_moe_f16,
-        moe_scratch.cur_combined_f16,
+    // 5. Combine: cur_combined_f32 = cur_mlp_f32 + cur_moe_f32.
+    ops.add_f32(
+        moe_scratch.cur_mlp_f32,
+        moe_scratch.cur_moe_f32,
+        moe_scratch.cur_combined_f32,
         hidden,
     )
-    .context("MoE combined add")?;
+    .context("MoE combine cur_mlp + cur_moe (F32)")?;
 
-    // 5. Final post_ffw_norm + residual add. Layer's `post_ffw_norm`
-    // applies here (shared between MoE / Dense paths).
-    ops.rmsnorm_f16(
-        moe_scratch.cur_combined_f16,
-        layer.post_ffw_norm,
-        moe_scratch.cur_combined_f16,
+    // 6. Final post_ffw_norm (F32) + cast to F16 + residual add.
+    ops.rmsnorm_f32(
+        moe_scratch.cur_combined_f32,
+        moe.post_ffw_norm_f32,
+        moe_scratch.tmp_f32,
         1,
         hidden,
         rms_norm_eps,
     )
-    .context("MoE post_ffw_norm")?;
-    ops.add_f16(
-        attn_residual,
-        moe_scratch.cur_combined_f16,
-        x_out,
-        hidden,
-    )
-    .context("MoE final residual add")?;
+    .context("MoE post_ffw_norm (F32)")?;
+    // Cast into x_out (F16) then add the residual in place. Saves a
+    // dedicated F16 cast scratch — x_out is the layer output buffer.
+    ops.cast_f32_to_f16(moe_scratch.tmp_f32, x_out, hidden)
+        .context("MoE final cast F32→F16")?;
+    ops.add_f16(attn_residual, x_out, x_out, hidden)
+        .context("MoE final residual add")?;
 
     Ok(())
 }

@@ -254,15 +254,24 @@ pub fn forward_layer_decode<L: CacheLayout, O: Ops>(
         bail!("forward_layer_decode: unsupported KV layout {kv_layout}");
     }
 
+    // Full-attention layers on gemma4 26B-A4B Q8_0 (head_dim=512 +
+    // V_norm sqrt(d_k)≈22 spike) take the F32 output_proj path so the
+    // row-parallel output sum doesn't saturate F16 — same fix as the
+    // TP composer's `forward_attn_f32_output`. Toggle by the F32
+    // post-attention norm weight's presence (uploaded only for those
+    // layers; `None` elsewhere keeps the F16 fast path).
+    let use_f32_output = weights.post_attention_norm_f32.is_some();
     if spec.has_kv {
         // Standard attention path. Steps 1-10 collapse into
-        // `StandardAttention::forward_decode`, which runs:
-        //   rmsnorm+Q8_1 → Q proj → K proj → V proj (or alt-V from K)
-        //   → Q/K/V per-head norms (V uses the unit-weight buffer)
-        //   → RoPE Q+K → KV append → attention → output_proj.
+        // `StandardAttention::forward_decode`.
         let block = weights.build_attn_block(
             spec, hidden, n_heads, n_kv_heads, head_dim, rms_norm_eps, scratch.v_ones_f16,
         )?;
+        let block = if use_f32_output {
+            block.with_f32_output_proj(true)
+        } else {
+            block
+        };
         let mut std_scratch = StandardAttentionDecodeScratch {
             x_q8_1: scratch.x_q8_1,
             mmvq_f32: scratch.mmvq_f32,
@@ -281,13 +290,21 @@ pub fn forward_layer_decode<L: CacheLayout, O: Ops>(
             splitk_partials_s: scratch.splitk_partials_s,
             splitk_partials_o: scratch.splitk_partials_o,
         };
+        // F32-output path writes F32 directly into `delta_out`. Reuse
+        // `scratch.mmvq_f32` as the F32 partial (sized >= hidden*4 by
+        // the scratch allocator).
+        let delta_out = if use_f32_output {
+            scratch.mmvq_f32
+        } else {
+            scratch.attn_out_f16
+        };
         block
             .forward_decode(
                 ops,
                 device,
                 stream,
                 x_in,
-                scratch.attn_out_f16,
+                delta_out,
                 kv_cache,
                 &mut std_scratch,
                 position,
@@ -385,18 +402,43 @@ pub fn forward_layer_decode<L: CacheLayout, O: Ops>(
     }
 
     // 11. post_attention_norm RMSNorm on attn_out, then add residual.
-    post_norm_residual_f16(
-        ops,
-        scratch.attn_out_f16,
-        weights.post_attention_norm,
-        scratch.post_attn_norm_f16,
-        x_in,
-        scratch.attn_residual_f16,
-        1,
-        hidden,
-        rms_norm_eps,
-    )
-    .context("post_attention_norm + residual_add post-attn")?;
+    if use_f32_output {
+        // F32 path: input partial is in `scratch.mmvq_f32` (F32).
+        // rmsnorm_f32 with the F32 weight clamps the magnitude before
+        // we collapse to F16 for the residual stream. Without this
+        // ordering the F16 cast saturates on the V-norm spike.
+        let post_norm_w_f32 = weights
+            .post_attention_norm_f32
+            .expect("use_f32_output guards on post_attention_norm_f32.is_some()");
+        // Reuse mmvq_f32 for both input and output (rmsnorm is in-place
+        // safe — reads one element at a time, writes the normed value).
+        ops.rmsnorm_f32(
+            scratch.mmvq_f32,
+            post_norm_w_f32,
+            scratch.mmvq_f32,
+            1,
+            hidden,
+            rms_norm_eps,
+        )
+        .context("post_attention_norm (F32, gemma4 full-attn)")?;
+        ops.cast_f32_to_f16(scratch.mmvq_f32, scratch.post_attn_norm_f16, hidden)
+            .context("cast post_attn_norm F32→F16 (gemma4 full-attn)")?;
+        ops.add_f16(x_in, scratch.post_attn_norm_f16, scratch.attn_residual_f16, hidden)
+            .context("residual_add post-attn (gemma4 full-attn)")?;
+    } else {
+        post_norm_residual_f16(
+            ops,
+            scratch.attn_out_f16,
+            weights.post_attention_norm,
+            scratch.post_attn_norm_f16,
+            x_in,
+            scratch.attn_residual_f16,
+            1,
+            hidden,
+            rms_norm_eps,
+        )
+        .context("post_attention_norm + residual_add post-attn")?;
+    }
     if std::env::var_os("FLAMBEAU_LAYER_PROBE").is_some() && spec.index < 2 {
         use flambeau_core::CopyDirection;
         let mut host = vec![half::f16::from_f32(0.0); hidden];

@@ -364,7 +364,10 @@ pub(crate) fn upload_moe_layer(
     }
     let down = ut_to_dt(upload_replicated_tensor(file, down_info, device, stream, tracker)?);
 
-    // 5. Three extra MoE norms (F32→F16 cast).
+    // 5. Pre-MoE norm (F16, fed into the F16 MoE forward input rmsnorm)
+    //    plus three F32-preserving post-norm weights for the F32 cascade
+    //    (mirrors the TP path; see `feedback_gemma4_moe_f16_overflow` and
+    //    `feedback_gemma4_attn_output_proj_f16_saturate`).
     let pre_ffw_norm_2 = ut_to_dt(upload_replicated_norm_f32_to_f16(
         file,
         file.tensors
@@ -375,22 +378,59 @@ pub(crate) fn upload_moe_layer(
         stream,
         tracker,
     )?);
-    let post_ffw_norm_1 = ut_to_dt(upload_replicated_norm_f32_to_f16(
+    let post_ffw_norm_1_f32 = ut_to_dt(upload_replicated_tensor(
         file,
         file.tensors
             .get(&names.post_ffw_norm_1)
             .ok_or_else(|| anyhow!("{} missing", names.post_ffw_norm_1))?,
-        hidden,
         device,
         stream,
         tracker,
     )?);
-    let post_ffw_norm_2 = ut_to_dt(upload_replicated_norm_f32_to_f16(
+    let post_ffw_norm_2_f32 = ut_to_dt(upload_replicated_tensor(
         file,
         file.tensors
             .get(&names.post_ffw_norm_2)
             .ok_or_else(|| anyhow!("{} missing", names.post_ffw_norm_2))?,
-        hidden,
+        device,
+        stream,
+        tracker,
+    )?);
+    // F32 copy of the gemma4 layer's outer `post_ffw_norm` (the dense
+    // path uses an F16 copy on Gemma4LayerWeights::post_ffw_norm; the
+    // MoE composer needs the F32 variant for the cascade).
+    let post_ffw_norm_name = crate::names::DenseFfnNames::for_layer(layer_index).post_ffw_norm;
+    let post_ffw_norm_f32 = ut_to_dt(upload_replicated_tensor(
+        file,
+        file.tensors
+            .get(&post_ffw_norm_name)
+            .ok_or_else(|| anyhow!("{post_ffw_norm_name} missing"))?,
+        device,
+        stream,
+        tracker,
+    )?);
+    // Per-expert down scale (F32 [n_experts]) — folded into routing
+    // weights before combine, same as the TP path.
+    let down_scale_name = format!("blk.{layer_index}.ffn_down_exps.scale");
+    let ffn_down_exps_scale_info = file
+        .tensors
+        .get(&down_scale_name)
+        .ok_or_else(|| anyhow!("{down_scale_name} missing"))?;
+    if ffn_down_exps_scale_info.dtype != GgmlDType::F32 {
+        bail!(
+            "{down_scale_name}: expected F32, got {:?}",
+            ffn_down_exps_scale_info.dtype
+        );
+    }
+    if ffn_down_exps_scale_info.dims != [n_experts as u64] {
+        bail!(
+            "{down_scale_name}: dims {:?} != [{n_experts}]",
+            ffn_down_exps_scale_info.dims
+        );
+    }
+    let ffn_down_exps_scale_f32 = ut_to_dt(upload_replicated_tensor(
+        file,
+        ffn_down_exps_scale_info,
         device,
         stream,
         tracker,
@@ -436,8 +476,10 @@ pub(crate) fn upload_moe_layer(
         moe,
         pre_router_weight_f16: pre_router_ptr,
         pre_ffw_norm_2: pre_ffw_norm_2.ptr,
-        post_ffw_norm_1: post_ffw_norm_1.ptr,
-        post_ffw_norm_2: post_ffw_norm_2.ptr,
+        post_ffw_norm_1_f32: post_ffw_norm_1_f32.ptr,
+        post_ffw_norm_2_f32: post_ffw_norm_2_f32.ptr,
+        post_ffw_norm_f32: post_ffw_norm_f32.ptr,
+        ffn_down_exps_scale_f32: ffn_down_exps_scale_f32.ptr,
     })
 }
 
@@ -672,6 +714,31 @@ impl Gemma4DeviceWeights {
                 stream,
                 &mut tracker,
             )?;
+            // F32 copy of `post_attention_norm` for the F32 attention
+            // output path. Uploaded for MoE full-attention layers
+            // (head_dim=512 — gemma4 26B-A4B Q8_0); SWA layers stay
+            // F16. Mirrors `tp.rs` upload.
+            let post_attention_norm_f32_ptr: Option<DevicePtr> =
+                if cfg.moe.is_some() && !spec.is_swa {
+                    let info = file
+                        .tensors
+                        .get(&an.post_attention_norm)
+                        .ok_or_else(|| anyhow!("{}", an.post_attention_norm))?;
+                    Some(
+                        flambeau_blocks::upload_replicated_tensor(
+                            file, info, device, stream, &mut tracker,
+                        )
+                        .with_context(|| {
+                            format!(
+                                "upload F32 post_attention_norm layer {}",
+                                spec.index
+                            )
+                        })?
+                        .ptr,
+                    )
+                } else {
+                    None
+                };
             // `layer_output_scale` is F32 [1]. Read its value host-side
             // (it's a constant during inference) so the layer composer
             // can apply it via `scale_f16` without an extra
@@ -789,7 +856,7 @@ impl Gemma4DeviceWeights {
                 attn_q_norm: attn_q_norm.ptr,
                 attn_k_norm: attn_k_norm.map(|dt| dt.ptr),
                 post_attention_norm: post_attention_norm.ptr,
-                post_attention_norm_f32: None,
+                post_attention_norm_f32: post_attention_norm_f32_ptr,
                 layer_output_scale: layer_output_scale_value,
                 ffn_norm: ffn_norm.ptr,
                 ffn_gate: ffn_gate.as_weight_handle(ffn_gate_dims)?,

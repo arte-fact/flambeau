@@ -54,28 +54,6 @@ struct OuterScratchPtrs {
     x_next_f16: DevicePtr,
 }
 
-/// Persistent device scratch for the MoE branch (26B-A4B only).
-/// Allocated when `cfg.moe.is_some()`. `zero_hidden_f16` is uploaded
-/// once at session init and never written — fed as `residual=0` to
-/// `MoeExperts::forward_decode`.
-struct MoeScratchPtrs {
-    router_input_f16: DevicePtr,
-    cur_mlp_f16: DevicePtr,
-    cur_moe_f16: DevicePtr,
-    cur_combined_f16: DevicePtr,
-    zero_hidden_f16: DevicePtr,
-    /// Sized for `[top_k, intermediate]`-shaped expert buffers.
-    x_q8_1: DevicePtr,
-    router_logits: DevicePtr,
-    expert_ids: DevicePtr,
-    expert_weights: DevicePtr,
-    gate_out_f32: DevicePtr,
-    up_out_f32: DevicePtr,
-    activated_f16: DevicePtr,
-    activated_q8_1: DevicePtr,
-    down_f32: DevicePtr,
-    down_f16: DevicePtr,
-}
 
 pub struct Gemma4Session {
     pub cfg: Gemma4Config,
@@ -92,7 +70,7 @@ pub struct Gemma4Session {
     raw_alloc: RawAllocTracker,
     /// `Some` when `cfg.moe.is_some()`; the MoE composer reads it via
     /// [`Gemma4Session::moe_scratch_view`].
-    moe_scratch: Option<MoeScratchPtrs>,
+    moe_scratch: Option<Gemma4MoeScratch>,
     output_head: OutputHeadScratch,
     /// 1-slot position buffer (host).
     positions_host: Vec<i32>,
@@ -230,66 +208,17 @@ impl Gemma4Session {
             x_next_f16: raw_alloc.alloc_f16(device, hidden)?.0,
         };
 
-        // MoE composer scratch (26B-A4B only). `zero_hidden_f16` is
-        // uploaded once with zeros and fed read-only as the `residual=0`
-        // input to `MoeExperts::forward_decode`.
+        // MoE composer scratch (26B-A4B only). F32-throughout cascade
+        // shared with the PP composer (see `crate::moe::Gemma4MoeScratch`).
         let moe_scratch = if let Some(moe_dims) = cfg.moe {
-            let top_k = moe_dims.num_experts_per_tok;
-            let n_experts = moe_dims.num_experts;
-            let intermediate = moe_dims.moe_intermediate_size;
-
-            let router_input_f16 = raw_alloc.alloc_f16(device, hidden)?.0;
-            let cur_mlp_f16 = raw_alloc.alloc_f16(device, hidden)?.0;
-            let cur_moe_f16 = raw_alloc.alloc_f16(device, hidden)?.0;
-            let cur_combined_f16 = raw_alloc.alloc_f16(device, hidden)?.0;
-            let zero_hidden_f16 = raw_alloc.alloc_f16(device, hidden)?.0;
-
-            let x_q8_1 = raw_alloc.alloc_q8_1(device, hidden.div_ceil(32) * 32)?.0;
-            let router_logits = raw_alloc.alloc_f32(device, n_experts)?.0;
-            let expert_ids = raw_alloc.alloc_i32(device, top_k)?.0;
-            let expert_weights = raw_alloc.alloc_f32(device, top_k)?.0;
-            let gate_out_f32 = raw_alloc.alloc_f32(device, top_k * intermediate)?.0;
-            let up_out_f32 = raw_alloc.alloc_f32(device, top_k * intermediate)?.0;
-            let activated_f16 = raw_alloc.alloc_f16(device, top_k * intermediate)?.0;
-            let activated_q8_1 = raw_alloc
-                .alloc_q8_1(device, top_k * intermediate.div_ceil(32) * 32)?
-                .0;
-            let down_f32 = raw_alloc.alloc_f32(device, top_k * hidden)?.0;
-            let down_f16 = raw_alloc.alloc_f16(device, top_k * hidden)?.0;
-
-            // Upload zeros to zero_hidden_f16.
-            let zeros: Vec<f16> = vec![f16::from_f32(0.0); hidden];
-            // SAFETY: zeros lives until the bounded synchronize below;
-            // zero_hidden_f16 owns hidden*2 bytes.
-            unsafe {
-                device.memcpy_async(
-                    device.default_stream(),
-                    flambeau_core::CopyDirection::HostToDevice,
-                    zero_hidden_f16,
-                    DevicePtr(zeros.as_ptr() as usize),
-                    hidden * 2,
-                )?;
-            }
-            device.default_stream().synchronize()?;
-            drop(zeros);
-
-            Some(MoeScratchPtrs {
-                router_input_f16,
-                cur_mlp_f16,
-                cur_moe_f16,
-                cur_combined_f16,
-                zero_hidden_f16,
-                x_q8_1,
-                router_logits,
-                expert_ids,
-                expert_weights,
-                gate_out_f32,
-                up_out_f32,
-                activated_f16,
-                activated_q8_1,
-                down_f32,
-                down_f16,
-            })
+            Some(Gemma4MoeScratch::alloc(
+                device,
+                hidden,
+                moe_dims.moe_intermediate_size,
+                moe_dims.num_experts,
+                moe_dims.num_experts_per_tok,
+                &mut raw_alloc,
+            )?)
         } else {
             None
         };
@@ -392,30 +321,9 @@ impl Gemma4Session {
         &mut self.output_head
     }
 
-    /// MoE composer scratch view. Returns `None` on dense variants.
-    /// Lifetime is `'self` — the underlying buffers live on the
-    /// session and are freed by `dispose`.
-    pub(crate) fn moe_scratch_view(&self) -> Option<Gemma4MoeScratch> {
-        let m = self.moe_scratch.as_ref()?;
-        Some(Gemma4MoeScratch {
-            router_input_f16: m.router_input_f16,
-            cur_mlp_f16: m.cur_mlp_f16,
-            cur_moe_f16: m.cur_moe_f16,
-            cur_combined_f16: m.cur_combined_f16,
-            zero_hidden_f16: m.zero_hidden_f16,
-            moe_scratch: MoeExpertsDecodeScratch {
-                x_q8_1: m.x_q8_1,
-                router_logits: m.router_logits,
-                expert_ids: m.expert_ids,
-                expert_weights: m.expert_weights,
-                gate_out_f32: m.gate_out_f32,
-                up_out_f32: m.up_out_f32,
-                activated_f16: m.activated_f16,
-                activated_q8_1: m.activated_q8_1,
-                down_f32: m.down_f32,
-                down_f16: m.down_f16,
-            },
-        })
+    /// MoE composer scratch reference. Returns `None` on dense variants.
+    pub(crate) fn moe_scratch_view(&self) -> Option<&Gemma4MoeScratch> {
+        self.moe_scratch.as_ref()
     }
 
     /// Free every device allocation. Caller passes the device handle

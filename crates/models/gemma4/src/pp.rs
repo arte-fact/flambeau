@@ -167,6 +167,10 @@ pub struct Gemma4PpStage {
     /// Last-rank only.
     pub output_head_scratch: Option<OutputHeadScratch>,
     scratch: LayerScratchPtrs,
+    /// MoE composer scratch — `Some` when this stage owns at least one
+    /// MoE layer (26B-A4B). Shared across layers since gemma4 26B-A4B
+    /// has uniform MoE shape (`n_ff_exp`, `n_experts`, `top_k`).
+    moe_scratch: Option<crate::moe::Gemma4MoeScratch>,
     /// Per-stage prefill scratch, sized for `max_tokens` rows.
     prefill: PrefillScratchPtrs,
     /// One 1-element host position slot per rank (HtoD'd into
@@ -379,6 +383,27 @@ impl Gemma4PpStage {
             None
         };
 
+        // MoE scratch: allocate once if any of this stage's layers is
+        // MoE. 26B-A4B is all-MoE so every stage hits this branch.
+        let any_moe = global_layer_indices
+            .iter()
+            .any(|&gi| layout.layers[gi].ffn_kind == crate::layout::FfnKind::Moe);
+        let moe_scratch = if any_moe {
+            let dims = cfg
+                .moe
+                .ok_or_else(|| anyhow!("rank {rank}: MoE layer present but cfg.moe is None"))?;
+            Some(crate::moe::Gemma4MoeScratch::alloc(
+                device,
+                hidden,
+                dims.moe_intermediate_size,
+                dims.num_experts,
+                dims.num_experts_per_tok,
+                &mut raw_alloc,
+            )?)
+        } else {
+            None
+        };
+
         Ok(Self {
             rank,
             global_layer_indices,
@@ -393,6 +418,7 @@ impl Gemma4PpStage {
             output,
             output_head_scratch,
             scratch,
+            moe_scratch,
             prefill,
             positions_host: vec![0i32; 1],
             max_tokens,
@@ -827,6 +853,14 @@ impl PpDecodeDriver for Gemma4PpDriver {
         let kv_local_idx = stage.local_kv_share_src[local_idx];
         let kv_ptr: *mut Option<KvCache<F16Contig, HipDevice>> =
             &mut stage.kv_caches[kv_local_idx];
+        // Borrow moe_scratch by raw pointer so the scratch view (which
+        // captures &mut on other fields) doesn't conflict.
+        let moe_scratch_ref: Option<&crate::moe::Gemma4MoeScratch> =
+            stage.moe_scratch.as_ref().map(|s| s as *const _).map(|p| {
+                // SAFETY: moe_scratch field is disjoint from the
+                // fields the scratch view touches.
+                unsafe { &*p }
+            });
         let mut scratch = stage.layer_scratch_view();
         // SAFETY: kv_ptr borrows stage.kv_caches[kv_local_idx] disjointly
         // from the other fields the scratch view touches.
@@ -850,7 +884,7 @@ impl PpDecodeDriver for Gemma4PpDriver {
             x_out,
             position,
             /*per_layer_slice=*/ None,
-            /*moe_scratch=*/ None,
+            moe_scratch_ref,
         )
     }
 
@@ -1104,6 +1138,27 @@ fn upload_layer_pp(
     let attn_q_norm = up.upload_norm_required::<AttnQNorm>(il)?;
     let attn_k_norm = up.upload_norm::<AttnKNorm>(il)?;
     let post_attention_norm = up.upload_norm_required::<PostAttnNorm>(il)?;
+    // F32 copy of `post_attention_norm` for the F32 attention output
+    // path. Uploaded for MoE full-attention layers (head_dim=512 —
+    // gemma4 26B-A4B Q8_0 path that saturates F16 at the row-parallel
+    // output_proj sum). SWA layers stay F16.
+    let post_attention_norm_f32_ptr: Option<DevicePtr> =
+        if cfg.moe.is_some() && !spec.is_swa {
+            let name = crate::names::AttnNames::for_layer(il).post_attention_norm;
+            let info = file
+                .tensors
+                .get(&name)
+                .ok_or_else(|| anyhow!("{name} missing for F32 upload"))?;
+            Some(
+                flambeau_blocks::upload_replicated_tensor(
+                    file, info, device, stream, up.tracker,
+                )
+                .with_context(|| format!("upload F32 post_attention_norm layer {il}"))?
+                .ptr,
+            )
+        } else {
+            None
+        };
     let ffn_norm = up.upload_norm_required::<FfnNorm>(il)?;
     let ffn_gate = up.upload_matmul_required::<FfnGate>(il)?;
     let ffn_up = up.upload_matmul_required::<FfnUp>(il)?;
@@ -1166,7 +1221,7 @@ fn upload_layer_pp(
         attn_q_norm,
         attn_k_norm,
         post_attention_norm,
-        post_attention_norm_f32: None,
+        post_attention_norm_f32: post_attention_norm_f32_ptr,
         layer_output_scale,
         ffn_norm,
         ffn_gate,
