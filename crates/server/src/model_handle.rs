@@ -47,6 +47,14 @@ pub trait HipModel: Send + Sync + 'static {
     fn as_hybrid(&self) -> Option<&HybridHipModel> {
         None
     }
+
+    /// Phase 12.9 — arch tag for non-qwen3-moe model families. Returns
+    /// `true` for gemma4 model handles (`Gemma4HipModel`). Default
+    /// `false` for the qwen3-moe topology handles. Routes.rs uses this
+    /// at the dispatch level to branch into the gemma4 path.
+    fn is_gemma4(&self) -> bool {
+        false
+    }
 }
 
 pub trait HipSession: Send {
@@ -95,6 +103,15 @@ pub trait HipSession: Send {
         None
     }
     fn as_hybrid_mut(&mut self) -> Option<&mut HybridHipSession> {
+        None
+    }
+
+    /// Phase 12.9 — gemma4 driver accessor. `Gemma4HipSession` returns
+    /// `Some(&mut dyn ModelDriver)`; qwen3-moe sessions return `None`.
+    /// Routes.rs uses this to dispatch decode through the gemma4
+    /// `forward_one_token_logits` path (N=1 only until weights/session
+    /// split lands).
+    fn as_gemma4_driver_mut(&mut self) -> Option<&mut dyn flambeau_runtime::ModelDriver> {
         None
     }
 }

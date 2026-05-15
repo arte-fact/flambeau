@@ -587,6 +587,7 @@ dependencies = [
  "flambeau-backend-hip",
  "flambeau-blocks",
  "flambeau-core",
+ "flambeau-gemma4",
  "flambeau-ops",
  "flambeau-quant",
  "flambeau-qwen3-moe",

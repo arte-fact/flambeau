@@ -190,6 +190,23 @@ pub async fn serve(cfg: ServeConfig, registry: Registry) -> Result<()> {
         }
     }
 
+    // Phase 12.9 — gemma4 boot path. The qwen3-moe `Qwen3MoEConfig::from_gguf`
+    // call below would fail with a config-mismatch error for gemma4 GGUFs;
+    // detect the arch up-front and dispatch into the gemma4 inner before
+    // touching qwen3-moe-specific code.
+    if crate::gemma4_handle::arch_matches(gguf_arch) {
+        return serve_inner_gemma4(
+            cfg,
+            gguf,
+            tokenizer,
+            chat_template,
+            tool_call_format_default,
+            supports_thinking,
+            quantization,
+        )
+        .await;
+    }
+
     let mut model_cfg = Qwen3MoEConfig::from_gguf(&gguf).context("model config from GGUF")?;
     // Allow operators to clamp the model's KV-cache provisioning ceiling
     // (mirrors the test-side FLAMBEAU_CTX_CAP). The on-disk
@@ -591,6 +608,199 @@ pub async fn serve(cfg: ServeConfig, registry: Registry) -> Result<()> {
         .with_state(state);
 
     info!(bind = %cfg.bind_addr, "serving");
+    let listener = tokio::net::TcpListener::bind(cfg.bind_addr)
+        .await
+        .context("bind listener")?;
+    axum::serve(listener, app)
+        .await
+        .context("axum::serve failed")?;
+    Ok(())
+}
+
+/// Phase 12.9 — gemma4 boot path. Branched into from `serve_inner`
+/// when `gguf.architecture()` matches a gemma4 family.
+///
+/// MVP constraints (each tracked as a follow-up):
+/// - PP only. TP / Hybrid drivers exist in gemma4 crate but their
+///   server arch dispatch isn't plumbed yet.
+/// - `FLAMBEAU_INFLIGHT_SLOTS=1` enforced. Gemma4 drivers bundle
+///   weights + KV cache state in one struct; multi-slot would need
+///   splitting (separate session-state struct) or N copies of weights.
+/// - Prefix cache silently misses (gated upstream via the
+///   `as_pp/as_tp/as_hybrid` early-out in `prefix_cache_try_restore`).
+/// - GPU sampler disabled (`use_gpu_sampler=false`); host sampler runs.
+/// - Embedding endpoint returns 503 (qwen3-only embedding model).
+/// - `reset_for_next_request` bails — the slot can't be reused after
+///   the first request. Stops the server from looping in production;
+///   restart for a fresh request. Trade-off for shipping the MVP.
+#[allow(clippy::too_many_arguments)]
+async fn serve_inner_gemma4(
+    cfg: ServeConfig,
+    gguf: GgufFile,
+    tokenizer: flambeau_quant::GgufTokenizer,
+    chat_template: ChatTemplate,
+    tool_call_format_default: crate::tool_call_parser::ToolCallFormat,
+    supports_thinking: bool,
+    quantization: Option<String>,
+) -> Result<()> {
+    use axum::routing::{get, post};
+    use axum::Router;
+    use flambeau_backend_hip::HipCluster;
+    use flambeau_gemma4::{partition_layers, Gemma4Config, Gemma4PpDriver, ModelLayout};
+
+    use crate::gemma4_handle::{build_gemma4_loaded_model, wrap_gemma4_driver};
+
+    // PP only at MVP.
+    if !matches!(cfg.mesh_mode, MeshMode::Pp) {
+        bail!(
+            "gemma4 serve: only --mesh-mode pp supported in MVP \
+             (got {:?}). TP / Hybrid follow-up."
+        ,
+            cfg.mesh_mode
+        );
+    }
+
+    let mut cfg_g4 = Gemma4Config::from_gguf(&gguf).context("Gemma4Config::from_gguf")?;
+    if let Some(cap) = cfg.ctx_cap {
+        if cap > 0 && cap < cfg_g4.context_length {
+            info!(
+                from = cfg_g4.context_length,
+                to = cap,
+                "ctx-cap shrinking gemma4 context_length"
+            );
+            cfg_g4.context_length = cap;
+        }
+    }
+
+    // Sanity: device_ids valid.
+    let n_available = device_count().unwrap_or(0);
+    for d in &cfg.device_ids {
+        if *d < 0 || *d >= n_available {
+            bail!("device {d} not available (have {n_available} HIP devices)");
+        }
+    }
+
+    let inflight_slots = cfg.inflight_slots.clamp(1, 32);
+    if inflight_slots != 1 {
+        bail!(
+            "gemma4 serve: FLAMBEAU_INFLIGHT_SLOTS must be 1 (got {inflight_slots}). \
+             Multi-slot needs gemma4 weights/session split — follow-up."
+        );
+    }
+    let prefill_ubatch = cfg.prefill_ubatch.max(128);
+    let max_queue_depth = cfg.max_queue_depth;
+
+    // Build two HipClusters: one for the gemma4 driver (consumed by
+    // value into `Gemma4PpDriver::upload`); one (Arc-wrapped) for
+    // `ServerState.cluster` so its field type-checks. The state-side
+    // cluster is unused at runtime for gemma4 — handler paths that
+    // touch it are qwen3-moe-only and gated via `as_pp/as_tp` accessors
+    // that return None on `Gemma4HipSession`.
+    let state_cluster: Arc<HipCluster> =
+        Arc::new(HipCluster::new(&cfg.device_ids).context("HipCluster::new (state side)")?);
+    let driver_cluster = HipCluster::new(&cfg.device_ids).context("HipCluster::new (driver)")?;
+
+    let mut layout = ModelLayout::from_config(&cfg_g4);
+    let _shared_kv = layout.resolve_kv_sharing();
+    let layer_to_rank = partition_layers(cfg.device_ids.len(), &layout)
+        .context("partition_layers for gemma4 PP")?;
+    info!(
+        num_layers = cfg_g4.num_layers,
+        ranks = cfg.device_ids.len(),
+        topology = "pp",
+        arch = cfg_g4.arch.as_str(),
+        "loading gemma4 weights"
+    );
+    let driver = Gemma4PpDriver::upload(
+        &gguf,
+        cfg_g4.clone(),
+        layout,
+        layer_to_rank,
+        driver_cluster,
+        prefill_ubatch,
+    )
+    .context("Gemma4PpDriver::upload")?;
+
+    let model = build_gemma4_loaded_model(cfg_g4.clone(), "pp");
+    let session = wrap_gemma4_driver(Box::new(driver));
+    let inflight_pool: Vec<Mutex<Box<dyn crate::HipSession>>> = vec![Mutex::new(session)];
+
+    let slot_in_use: Vec<std::sync::atomic::AtomicBool> = (0..inflight_slots)
+        .map(|_| std::sync::atomic::AtomicBool::new(false))
+        .collect();
+
+    // Prefix cache — keep the field populated but disabled by
+    // default; gemma4 sessions skip via the `as_pp/as_tp/as_hybrid`
+    // early-out in `prefix_cache_try_restore`.
+    let prefix_cache = Arc::new(crate::prefix_cache::PrefixCache::new(
+        crate::prefix_cache::PrefixCache::gb_to_bytes(cfg.prefix_cache_max_gb),
+        cfg.prefix_cache,
+    ));
+    let topology_tag = crate::prefix_cache::TopologyTag {
+        mesh_kind: "pp",
+        ranks: cfg.device_ids.len() as u32,
+        pp_size: cfg.device_ids.len() as u32,
+        tp_size: 1,
+    };
+
+    let model_defaults = crate::state::ModelDefaults::from_gguf(&gguf);
+    let default_system = cfg
+        .default_system
+        .as_ref()
+        .filter(|s| !s.is_empty())
+        .cloned();
+
+    let state: SharedState = Arc::new(ServerState {
+        model_id: cfg.model_id.clone(),
+        cfg: crate::model_cfg::ServerModelCfg::from(&cfg_g4),
+        model,
+        cluster: state_cluster,
+        tokenizer,
+        chat_template,
+        inflight_pool,
+        slot_in_use,
+        batched_pending: std::sync::Mutex::new(Vec::new()),
+        batched_dispatcher: std::sync::Mutex::new(()),
+        tp_batched_scratch: std::sync::Mutex::new(None),
+        hybrid_batched_scratch: std::sync::Mutex::new(None),
+        prefill_serialiser: std::sync::Mutex::new(()),
+        tp_prefill_scratch: std::sync::Mutex::new(None),
+        prefix_cache,
+        prefix_cache_chunk_tokens: prefill_ubatch,
+        topology_tag,
+        embedding_model: None,
+        embedding_tokenizer: None,
+        embedding_rank: None,
+        in_flight: std::sync::atomic::AtomicUsize::new(0),
+        max_queue_depth,
+        prefill_ubatch,
+        gpu_sampler: false,
+        batched_decode: cfg.batched_decode,
+        agent_stats: crate::agent_stats::AgentStatsRing::default(),
+        tool_call_format_default,
+        supports_thinking,
+        quantization,
+        model_defaults,
+        default_system,
+    });
+
+    let app = Router::new()
+        .route("/health", get(health))
+        .route("/v1/models", get(models))
+        .route("/v1/chat/completions", post(chat_completions))
+        .route("/v1/completions", post(completions))
+        .route("/v1/embeddings", post(embeddings))
+        .route("/infill", post(infill))
+        .route("/v1/infill", post(infill))
+        .route("/tokenize", post(tokenize))
+        .route("/v1/tokenize", post(tokenize))
+        .route("/detokenize", post(detokenize))
+        .route("/v1/detokenize", post(detokenize))
+        .route("/v1/messages", post(messages_anthropic))
+        .route("/v1/agent/stats", get(agent_stats))
+        .with_state(state);
+
+    info!(bind = %cfg.bind_addr, "serving (gemma4)");
     let listener = tokio::net::TcpListener::bind(cfg.bind_addr)
         .await
         .context("bind listener")?;

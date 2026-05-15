@@ -11,6 +11,7 @@ flambeau-core = { path = "../core" }
 flambeau-runtime = { path = "../runtime" }
 flambeau-quant = { path = "../quant" }
 flambeau-qwen3-moe = { path = "../models/qwen3-moe" }
+flambeau-gemma4 = { path = "../models/gemma4", optional = true }
 flambeau-blocks = { path = "../blocks", optional = true }
 flambeau-ops = { path = "../ops" }
 anyhow.workspace = true
@@ -33,9 +34,11 @@ default = []
 hip = [
     "dep:flambeau-backend-hip",
     "dep:flambeau-blocks",
+    "dep:flambeau-gemma4",
     "flambeau-blocks/hip",
     "flambeau-ops/hip",
     "flambeau-qwen3-moe/hip",
+    "flambeau-gemma4/hip",
 ]
 # Enables debug FLAMBEAU_* env-var reads (TRACE_BATCH, DUMP_PROMPT,
 # DUMP_RAW_REQ, DEBUG_TOOL_RAW, PROFILE_DECODE, HOST_PROFILE) in release

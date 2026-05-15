@@ -26,6 +26,8 @@ pub mod model_extensions;
 #[cfg(feature = "hip")]
 pub mod model_handle;
 #[cfg(feature = "hip")]
+pub mod gemma4_handle;
+#[cfg(feature = "hip")]
 pub mod routes;
 #[cfg(feature = "hip")]
 pub mod serve;

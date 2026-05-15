@@ -1136,6 +1136,31 @@ impl ServerState {
                 logits_refs,
             )
             .context("forward_decode_batched_hybrid")?;
+        } else if self.model.is_gemma4() {
+            // Phase 12.9 MVP — gemma4 decode goes one slot at a time
+            // through the existing `ModelDriver::forward_one_token_logits`.
+            // True batched-N>1 needs splitting gemma4 weights from
+            // session state (separate kernel arc); for now we enforce
+            // N==1.
+            if n != 1 {
+                bail!(
+                    "gemma4 batched decode: N>1 not yet supported (got {n}). \
+                     Multi-slot needs gemma4 batched-decode kernels — \
+                     run with FLAMBEAU_INFLIGHT_SLOTS=1."
+                );
+            }
+            // SAFETY: n == 1; index 0 only.
+            let driver = unsafe {
+                let g: &mut dyn crate::HipSession = &mut **inflights_ptr;
+                g.as_gemma4_driver_mut()
+                    .context("gemma4 decode: session is not Gemma4HipSession")?
+            };
+            let slot = &slots[0];
+            let out: &mut Vec<f32> = logits_refs[0];
+            out.clear();
+            driver
+                .forward_one_token_logits(slot.token_id, slot.position, out)
+                .context("gemma4 forward_one_token_logits")?;
         } else {
             bail!("forward_decode_batched_with_inflights: unknown topology");
         }

@@ -38,3 +38,15 @@ impl From<&Qwen3MoEConfig> for ServerModelCfg {
         }
     }
 }
+
+#[cfg(feature = "hip")]
+impl From<&flambeau_gemma4::Gemma4Config> for ServerModelCfg {
+    fn from(cfg: &flambeau_gemma4::Gemma4Config) -> Self {
+        Self {
+            arch: cfg.arch.clone(),
+            vocab_size: cfg.vocab_size,
+            context_length: cfg.context_length,
+            num_layers: cfg.num_layers,
+        }
+    }
+}
