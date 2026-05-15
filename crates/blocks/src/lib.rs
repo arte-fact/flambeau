@@ -22,6 +22,7 @@ pub mod driver_base;
 pub mod driver_utils;
 pub mod layer;
 pub mod moe_experts;
+pub mod per_layer_embd;
 pub mod shared_expert;
 pub mod sharding;
 pub mod layer_composer_tp;
@@ -64,6 +65,10 @@ pub use moe_experts::{
     Activation, MoeExperts, MoeExpertsDecodeScratch, MoeExpertsPrefillScratch,
     MoeExpertsScratchDims, OwnedMoeExpertsDecodeScratch, OwnedMoeExpertsPrefillScratch,
     RouterInput, RouterNormalize, RouterPolicy,
+};
+pub use per_layer_embd::{
+    table_slice_ptr as per_layer_table_slice_ptr, PerLayerEmbedBlock, PerLayerEmbedDecodeScratch,
+    PerLayerEmbedLayerWeights,
 };
 pub use shared_expert::{
     OwnedSharedExpertDecodeScratch, OwnedSharedExpertPrefillScratch, SharedExpert,

@@ -559,22 +559,17 @@ pub fn forward_layer_decode<L: CacheLayout, O: Ops>(
     if let (Some(pe_w), Some((slice, pe))) =
         (weights.per_layer_embed, per_layer_slice)
     {
-        crate::per_layer_embd::forward_per_layer_post_block(
-            ops,
-            pe_w,
-            x_out,                              // pe_in = current layer output
-            slice,                              // table_slice [pe] F32
-            scratch.gate_f32,                   // gate_out_f32 (sized ff_len ≥ pe)
-            scratch.up_f32,                     // activated_f32 (ff_len ≥ pe)
-            scratch.activated_f16,              // activated_f16 (ff_len ≥ pe)
-            scratch.down_f32,                   // proj_out_f32 (hidden)
-            scratch.post_attn_norm_f16,         // proj_out_f16 (hidden) — reused
-            scratch.ffn_norm_f16,               // normed_f16 (hidden) — reused
-            x_out,                              // result (in-place residual add)
-            pe,
-            hidden,
-            rms_norm_eps,
-        )?;
+        use flambeau_blocks::{PerLayerEmbedBlock, PerLayerEmbedDecodeScratch};
+        let block = PerLayerEmbedBlock::new(pe_w, pe, hidden, rms_norm_eps);
+        let pe_scratch = PerLayerEmbedDecodeScratch {
+            gate_out_f32: scratch.gate_f32,               // ff_len ≥ pe
+            activated_f32: scratch.up_f32,                // ff_len ≥ pe
+            activated_f16: scratch.activated_f16,         // ff_len ≥ pe
+            proj_out_f32: scratch.down_f32,               // hidden
+            proj_out_f16: scratch.post_attn_norm_f16,     // hidden — reused
+            normed_f16: scratch.ffn_norm_f16,             // hidden — reused
+        };
+        block.forward_decode(ops, x_out, slice, pe_scratch, x_out)?;
     }
 
     // 18. Optional per-layer output scalar.

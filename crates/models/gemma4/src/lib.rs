@@ -60,9 +60,9 @@ pub use moe::{forward_ffn_moe, Gemma4MoeFfnWeights, Gemma4MoeScratch};
 pub use output_head::{forward_output_head, OutputHeadScratch};
 #[cfg(feature = "hip")]
 pub use per_layer_embd::{
-    build_inp_per_layer_table, forward_per_layer_post_block, per_layer_token_embd_row_bytes,
-    table_slice_ptr, upload_inp_per_layer_table, PerLayerEmbedGlobals,
-    PerLayerEmbedLayerWeights,
+    build_inp_per_layer_table, per_layer_token_embd_row_bytes, table_slice_ptr,
+    upload_inp_per_layer_table, PerLayerEmbedBlock, PerLayerEmbedDecodeScratch,
+    PerLayerEmbedGlobals, PerLayerEmbedLayerWeights,
 };
 #[cfg(feature = "hip")]
 pub use scratch::{LayerDecodeScratch, LayerPrefillScratch};

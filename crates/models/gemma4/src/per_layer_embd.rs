@@ -1,4 +1,8 @@
-//! Per-layer side-channel embedding (E2B / E4B only).
+//! Per-layer side-channel embedding (E2B / E4B only) — gemma4-specific
+//! host-side build + GGUF coupling. The per-layer apply (block-shaped
+//! kernel sequence) lives in `flambeau-blocks::per_layer_embd`; this
+//! module re-exports the block types and adds the gemma4-specific
+//! tensor names + table build.
 //!
 //! Two phases per forward step:
 //!
@@ -8,36 +12,26 @@
 //!    (BF16 × F16 → F32) scaled by `1/sqrt(n_embd)`, RMSNorm'd via
 //!    `per_layer_proj_norm`, then `(table + proj) * (1/sqrt(2))`.
 //!    Output: F32 `[n_layer × pe]`, uploaded once per token, sliced
-//!    per layer at decode time. Mirrors llama.cpp PR #21612 which
-//!    moves this projection out of the layer loop.
+//!    per layer at decode time.
 //!
-//! 2. **Per-layer post-block apply** — at the end of each layer:
-//!    `pe_in = cur` (F16 hidden), then GELU(`inp_gate @ pe_in`) *
-//!    `table_slice` → cast → `proj @ activated` → cast → `rmsnorm`
-//!    with `post_norm` → `add pe_in`.
+//! 2. **Per-layer post-block apply** — runs the
+//!    [`flambeau_blocks::PerLayerEmbedBlock`] forward sequence
+//!    (GELU(gate × pe_in) * table_slice → proj → norm → residual_add).
 
 #![cfg(feature = "hip")]
 
-use anyhow::{anyhow, bail, Context, Result};
+use anyhow::{anyhow, bail, Result};
 use flambeau_core::{CopyDirection, Device, DevicePtr, Stream};
 use flambeau_ops::hip::{HipDevice, HipStream};
-use flambeau_ops::Ops;
 use flambeau_quant::{GgmlDType, TensorInfo};
 use half::f16;
 
-use crate::weights_hip::DeviceTensor;
+pub use flambeau_blocks::{
+    per_layer_table_slice_ptr as table_slice_ptr, PerLayerEmbedBlock,
+    PerLayerEmbedDecodeScratch, PerLayerEmbedLayerWeights,
+};
 
-/// Per-layer-embd weights for one layer. All F32 on disk; norm gets
-/// cast to F16 at upload to match `rmsnorm_f16`'s contract.
-#[derive(Debug, Clone, Copy)]
-pub struct PerLayerEmbedLayerWeights {
-    /// F32 `[pe, hidden]`.
-    pub inp_gate: DevicePtr,
-    /// F32 `[hidden, pe]`.
-    pub proj: DevicePtr,
-    /// F16 `[hidden]` (cast from on-disk F32).
-    pub post_norm_f16: DevicePtr,
-}
+use crate::weights_hip::DeviceTensor;
 
 /// Per-layer-embd globals (E2B / E4B only). For host-side build steps
 /// we read directly from the GGUF mmap; the device-resident copy is
@@ -195,54 +189,6 @@ pub fn upload_inp_per_layer_table(
     }
     stream.synchronize()?;
     Ok(())
-}
-
-/// Per-layer post-block side-channel apply. Writes the new residual
-/// to `x_out`. Caller pre-allocates the seven scratch buffers.
-#[allow(clippy::too_many_arguments)]
-pub fn forward_per_layer_post_block<O: Ops>(
-    ops: &O,
-    weights: PerLayerEmbedLayerWeights,
-    pe_in: DevicePtr,
-    table_slice: DevicePtr,
-    gate_out_f32: DevicePtr,
-    activated_f32: DevicePtr,
-    activated_f16: DevicePtr,
-    proj_out_f32: DevicePtr,
-    proj_out_f16: DevicePtr,
-    normed_f16: DevicePtr,
-    x_out: DevicePtr,
-    pe: usize,
-    hidden: usize,
-    rms_norm_eps: f32,
-) -> Result<()> {
-    ops.dense_gemv_f32_f16(weights.inp_gate, pe_in, gate_out_f32, pe, hidden)
-        .context("per_layer_embd inp_gate")?;
-    ops.gelu_mul_f32(gate_out_f32, table_slice, activated_f32, pe)
-        .context("per_layer_embd gelu_mul")?;
-    ops.cast_f32_to_f16(activated_f32, activated_f16, pe)
-        .context("per_layer_embd cast activated → f16")?;
-    ops.dense_gemv_f32_f16(weights.proj, activated_f16, proj_out_f32, hidden, pe)
-        .context("per_layer_embd proj")?;
-    ops.cast_f32_to_f16(proj_out_f32, proj_out_f16, hidden)
-        .context("per_layer_embd cast proj → f16")?;
-    ops.rmsnorm_f16(
-        proj_out_f16,
-        weights.post_norm_f16,
-        normed_f16,
-        1,
-        hidden,
-        rms_norm_eps,
-    )
-    .context("per_layer_embd post_norm")?;
-    ops.add_f16(pe_in, normed_f16, x_out, hidden)
-        .context("per_layer_embd residual add")?;
-    Ok(())
-}
-
-/// Compute the device pointer for `inp_per_layer_table[il]`.
-pub fn table_slice_ptr(table_base: DevicePtr, il: usize, pe: usize) -> DevicePtr {
-    table_base.offset_bytes(il * pe * 4)
 }
 
 /// Helper: raw byte width of one `per_layer_token_embd` row.

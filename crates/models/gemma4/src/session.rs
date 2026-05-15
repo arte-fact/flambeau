@@ -19,7 +19,7 @@ use crate::layout::ModelLayout;
 use crate::moe::Gemma4MoeScratch;
 use crate::output_head::OutputHeadScratch;
 use crate::weights_hip::Gemma4DeviceWeights;
-use flambeau_blocks::{MoeExpertsDecodeScratch, RawAllocTracker};
+use flambeau_blocks::RawAllocTracker;
 
 /// Persistent device scratch for one decode step. Allocated once at
 /// session-init; the per-call [`crate::scratch::LayerDecodeScratch`]
