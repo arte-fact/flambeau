@@ -21,6 +21,7 @@ pub mod dense_mlp;
 pub mod driver_base;
 pub mod driver_utils;
 pub mod layer;
+pub mod layer_output_scale;
 pub mod moe_experts;
 pub mod per_layer_embd;
 pub mod shared_expert;
@@ -83,6 +84,7 @@ pub use tensor_view::{
     ReplicatedF16, RowParallel, RowPartialF16, SubClusterPartial, F16, F32, I32,
 };
 pub use layer_composer_tp::{forward_decode_layer_tp, LayerComposerTp};
+pub use layer_output_scale::apply_layer_output_scale_f16;
 pub use softcap::apply_logit_softcap_f32;
 pub use tp_rank_core::TpRankCore;
 pub use tp_sync::cross_rank_event_barrier;

@@ -96,11 +96,9 @@ pub struct Gemma4Config {
     pub num_kv_heads: Vec<usize>,
     /// Per-head k length for full-attention layers
     /// (`gemma4.attention.key_length`, fed directly into
-    /// `n_embd_head_k` per llama.cpp `model.cpp:832`).
+    /// `n_embd_head_k` per llama.cpp `model.cpp:832`). SWA layers use
+    /// [`SwaAlternationPolicy::head_dim_swa`] instead.
     pub head_dim: usize,
-    /// Per-head k length for SWA layers
-    /// (`gemma4.attention.key_length_swa`).
-    pub head_dim_swa: usize,
     pub context_length: usize,
     pub rms_norm_eps: f32,
 
@@ -110,24 +108,18 @@ pub struct Gemma4Config {
     pub feed_forward_length: usize,
 
     /// RoPE frequency base for full-attention layers
-    /// (`gemma4.rope.freq_base`). Distinct from `rope_freq_base_swa`.
+    /// (`gemma4.rope.freq_base`). The SWA counterpart lives on
+    /// [`Self::swa`] (`swa.rope_freq_base_swa`).
     pub rope_freq_base: f32,
-    /// RoPE frequency base for SWA layers (`gemma4.rope.freq_base_swa`).
-    pub rope_freq_base_swa: f32,
     /// Rotated dim count for full-attn layers
-    /// (`gemma4.rope.dimension_count`).
+    /// (`gemma4.rope.dimension_count`). SWA counterpart on
+    /// [`Self::swa`].
     pub rope_dim: usize,
-    /// Rotated dim count for SWA layers
-    /// (`gemma4.rope.dimension_count_swa`).
-    pub rope_dim_swa: usize,
 
-    /// Per-layer iSWA flag — `swa_layers[il] = true` iff layer `il` is
-    /// a sliding-window-attention layer. Read from
-    /// `gemma4.attention.sliding_window_pattern` (per-layer bool array).
-    pub swa_layers: Vec<bool>,
-    /// SWA radius (`gemma4.attention.sliding_window`). Only meaningful
-    /// when at least one entry of `swa_layers` is `true`.
-    pub sliding_window: usize,
+    /// Sliding-window-attention alternation policy — per-layer flag,
+    /// window radius, and SWA-only `head_dim` / `rope_dim` /
+    /// `rope_freq_base` overrides.
+    pub swa: crate::swa_policy::SwaAlternationPolicy,
 
     /// Count of "shared-KV tail" layers. The last
     /// `shared_kv_layers` layers do NOT own a KV cache; they read from
@@ -245,6 +237,13 @@ impl Gemma4Config {
             })?;
         let tied_lm_head = file.info("output.weight").is_err();
 
+        let swa = crate::swa_policy::SwaAlternationPolicy {
+            swa_layers,
+            sliding_window,
+            head_dim_swa,
+            rope_dim_swa,
+            rope_freq_base_swa,
+        };
         Ok(Self {
             arch,
             variant,
@@ -254,16 +253,12 @@ impl Gemma4Config {
             num_heads,
             num_kv_heads,
             head_dim,
-            head_dim_swa,
             context_length,
             rms_norm_eps,
             feed_forward_length,
             rope_freq_base,
-            rope_freq_base_swa,
             rope_dim,
-            rope_dim_swa,
-            swa_layers,
-            sliding_window,
+            swa,
             shared_kv_layers,
             moe,
             per_layer_embed,
@@ -274,7 +269,7 @@ impl Gemma4Config {
 
     /// `true` iff layer `il` is a sliding-window-attention layer.
     pub fn is_swa(&self, il: usize) -> bool {
-        self.swa_layers.get(il).copied().unwrap_or(false)
+        self.swa.is_swa(il)
     }
 
     /// `true` iff layer `il` owns its own KV cache. Tail layers in the
@@ -289,27 +284,27 @@ impl Gemma4Config {
         self.num_kv_heads[il]
     }
 
-    /// Per-layer head_dim — `head_dim_swa` when the layer is SWA,
+    /// Per-layer head_dim — `swa.head_dim_swa` when the layer is SWA,
     /// `head_dim` otherwise.
     pub fn head_dim_for_layer(&self, il: usize) -> usize {
-        if self.is_swa(il) { self.head_dim_swa } else { self.head_dim }
+        self.swa.head_dim_for(il, self.head_dim)
     }
 
     /// Per-layer rotated-dim count for RoPE.
     pub fn rope_dim_for_layer(&self, il: usize) -> usize {
-        if self.is_swa(il) { self.rope_dim_swa } else { self.rope_dim }
+        self.swa.rope_dim_for(il, self.rope_dim)
     }
 
     /// Per-layer RoPE frequency base.
     pub fn rope_freq_base_for_layer(&self, il: usize) -> f32 {
-        if self.is_swa(il) { self.rope_freq_base_swa } else { self.rope_freq_base }
+        self.swa.rope_freq_base_for(il, self.rope_freq_base)
     }
 
     /// Count of full-attention layers (used for `rope_freqs` tensor
     /// allocation in llama.cpp; flambeau loader can ignore beyond
     /// validating the per-layer flag).
     pub fn num_full_attn_layers(&self) -> usize {
-        self.swa_layers.iter().filter(|b| !**b).count()
+        self.swa.num_full_attn_layers()
     }
 }
 

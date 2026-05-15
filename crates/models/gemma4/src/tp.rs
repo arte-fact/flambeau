@@ -205,7 +205,7 @@ impl Gemma4TpStage {
         }
 
         let hidden = cfg.hidden_size;
-        let head_dim = cfg.head_dim.max(cfg.head_dim_swa);
+        let head_dim = cfg.head_dim.max(cfg.swa.head_dim_swa);
         let n_heads_local_max = cfg.num_heads / n_ranks;
         let n_kv_local_max = cfg
             .num_kv_heads
@@ -901,12 +901,13 @@ fn forward_decode_layer_tp_moe(
             hidden,
         )
         .context("MoE Phase 6 residual add")?;
-        if let Some(scale_v) = layer.layer_output_scale {
-            if scale_v != 1.0 {
-                ops.scale_f16(stage.hidden, stage.hidden, hidden, scale_v)
-                    .context("MoE layer_output_scale")?;
-            }
-        }
+        flambeau_blocks::apply_layer_output_scale_f16(
+            &ops,
+            stage.hidden,
+            hidden,
+            layer.layer_output_scale,
+        )
+        .context("MoE layer_output_scale")?;
     }
 
     Ok(())
@@ -1241,12 +1242,13 @@ impl LayerComposerTp for Gemma4TpDriver {
         // this to keep the residual stream's magnitude bounded across
         // 60 layers; without it values explode → Inf → NaN around
         // layer 5-10.
-        if let Some(scale_v) = weights.layer_output_scale {
-            if scale_v != 1.0 {
-                ops.scale_f16(stage.hidden, stage.hidden, hidden, scale_v)
-                    .context("layer_output_scale (TP)")?;
-            }
-        }
+        flambeau_blocks::apply_layer_output_scale_f16(
+            &ops,
+            stage.hidden,
+            hidden,
+            weights.layer_output_scale,
+        )
+        .context("layer_output_scale (TP)")?;
         Ok(())
     }
 }

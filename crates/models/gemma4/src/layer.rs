@@ -527,12 +527,7 @@ pub fn forward_layer_decode<L: CacheLayout, O: Ops>(
     }
 
     // 18. Optional per-layer output scalar.
-    if let Some(scale_v) = weights.layer_output_scale {
-        if scale_v != 1.0 {
-            ops.scale_f16(x_out, x_out, hidden, scale_v)
-                .context("layer_output_scale")?;
-        }
-    }
+    flambeau_blocks::apply_layer_output_scale_f16(ops, x_out, hidden, weights.layer_output_scale)?;
 
     Ok(())
 }
@@ -715,10 +710,11 @@ pub fn forward_layer_prefill<L: CacheLayout, O: Ops>(
     )?;
 
     // 13. Optional layer_output_scale (broadcast scalar over all rows).
-    if let Some(scale_v) = weights.layer_output_scale {
-        if scale_v != 1.0 {
-            ops.scale_f16(x_out, x_out, n_tokens * hidden, scale_v)?;
-        }
-    }
+    flambeau_blocks::apply_layer_output_scale_f16(
+        ops,
+        x_out,
+        n_tokens * hidden,
+        weights.layer_output_scale,
+    )?;
     Ok(())
 }

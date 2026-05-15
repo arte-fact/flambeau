@@ -33,8 +33,8 @@ fn parse_e4b_q4_0() {
     // n_kv=2 across all layers but the per-head dim differs.
     assert!(cfg.num_kv_heads.iter().all(|&v| v == 2));
     assert_eq!(cfg.head_dim, 512);
-    assert_eq!(cfg.head_dim_swa, 256);
-    assert_eq!(cfg.sliding_window, 512);
+    assert_eq!(cfg.swa.head_dim_swa, 256);
+    assert_eq!(cfg.swa.sliding_window, 512);
     assert_eq!(cfg.shared_kv_layers, 18);
     assert_eq!(cfg.feed_forward_length, 10240);
     assert!(cfg.moe.is_none());
@@ -42,9 +42,9 @@ fn parse_e4b_q4_0() {
     assert_eq!(per.n_embd_per_layer, 256);
     assert_eq!(cfg.final_logit_softcap, 30.0);
     assert!(cfg.tied_lm_head);
-    assert_eq!(cfg.swa_layers.len(), cfg.num_layers);
+    assert_eq!(cfg.swa.swa_layers.len(), cfg.num_layers);
     // At least one full-attn layer (rope_freqs tensor exists in the file).
-    assert!(cfg.swa_layers.iter().any(|b| !b));
+    assert!(cfg.swa.swa_layers.iter().any(|b| !b));
     // Tail shared-KV count matches metadata.
     let no_kv = (0..cfg.num_layers).filter(|&il| !cfg.has_kv(il)).count();
     assert_eq!(no_kv, cfg.shared_kv_layers);
@@ -67,8 +67,8 @@ fn parse_26b_a4b_q8_0() {
     assert_eq!(n_kv_swa + n_kv_full, cfg.num_layers);
     assert_eq!(n_kv_full, 5);
     assert_eq!(cfg.head_dim, 512);
-    assert_eq!(cfg.head_dim_swa, 256);
-    assert_eq!(cfg.sliding_window, 1024);
+    assert_eq!(cfg.swa.head_dim_swa, 256);
+    assert_eq!(cfg.swa.sliding_window, 1024);
     assert_eq!(cfg.shared_kv_layers, 0);
     let m = cfg.moe.expect("MoE variant must carry moe");
     assert_eq!(m.num_experts, 128);
@@ -96,8 +96,8 @@ fn parse_31b_q4_0() {
     assert_eq!(n_kv_swa + n_kv_full, cfg.num_layers);
     assert_eq!(n_kv_full, 10);
     assert_eq!(cfg.head_dim, 512);
-    assert_eq!(cfg.head_dim_swa, 256);
-    assert_eq!(cfg.sliding_window, 1024);
+    assert_eq!(cfg.swa.head_dim_swa, 256);
+    assert_eq!(cfg.swa.sliding_window, 1024);
     assert_eq!(cfg.shared_kv_layers, 0);
     assert!(cfg.moe.is_none());
     assert_eq!(cfg.feed_forward_length, 21504);

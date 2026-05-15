@@ -190,7 +190,7 @@ impl HybridRankState {
             );
         }
         let hidden = cfg.hidden_size;
-        let head_dim = cfg.head_dim.max(cfg.head_dim_swa);
+        let head_dim = cfg.head_dim.max(cfg.swa.head_dim_swa);
         let n_heads_local_max = cfg.num_heads / tp_size;
         let n_kv_local_max = layers_global
             .iter()

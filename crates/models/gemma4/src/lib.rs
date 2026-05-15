@@ -6,6 +6,7 @@
 
 pub mod config;
 pub mod layout;
+pub mod swa_policy;
 pub mod model_arch;
 pub mod names;
 pub mod weights;

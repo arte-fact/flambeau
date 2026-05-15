@@ -186,16 +186,18 @@ fn synthetic_cfg() -> Gemma4Config {
         num_heads: N_HEADS,
         num_kv_heads: vec![N_KV_HEADS; N_LAYERS],
         head_dim: HEAD_DIM,
-        head_dim_swa: HEAD_DIM,
         context_length: 16,
         rms_norm_eps: 1e-6,
         feed_forward_length: FF_LEN,
         rope_freq_base: 10_000.0,
-        rope_freq_base_swa: 10_000.0,
         rope_dim: HEAD_DIM,
-        rope_dim_swa: HEAD_DIM,
-        swa_layers: vec![false; N_LAYERS],
-        sliding_window: 0,
+        swa: ::flambeau_gemma4::swa_policy::SwaAlternationPolicy {
+            swa_layers: vec![false; N_LAYERS],
+            sliding_window: 0,
+            head_dim_swa: HEAD_DIM,
+            rope_dim_swa: HEAD_DIM,
+            rope_freq_base_swa: 10_000.0,
+        },
         shared_kv_layers: 0,
         moe: None,
         per_layer_embed: None,
@@ -314,7 +316,7 @@ fn partition_pp_rejects_invalid_shared_kv_split() {
     let mut cfg = synthetic_cfg();
     cfg.num_layers = 4;
     cfg.num_kv_heads = vec![N_KV_HEADS; 4];
-    cfg.swa_layers = vec![false; 4];
+    cfg.swa.swa_layers = vec![false; 4];
     cfg.shared_kv_layers = 2; // tail layers 2,3 borrow from earlier
     let mut layout = ModelLayout::from_config(&cfg);
     let _ = layout.resolve_kv_sharing();

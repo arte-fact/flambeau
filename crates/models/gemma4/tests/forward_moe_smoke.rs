@@ -89,6 +89,10 @@ fn alloc_f16_ones(dev: &HipDevice, n: usize) -> DevicePtr {
     upload(dev, &vec![f16::from_f32(1.0); n])
 }
 
+fn alloc_f32_ones(dev: &HipDevice, n: usize) -> DevicePtr {
+    upload(dev, &vec![1.0f32; n])
+}
+
 fn alloc_f32_const(dev: &HipDevice, n: usize, value: f32) -> DevicePtr {
     upload(dev, &vec![value; n])
 }
@@ -202,8 +206,10 @@ fn build_moe_weights(dev: &HipDevice) -> Gemma4MoeFfnWeights {
         moe,
         pre_router_weight_f16,
         pre_ffw_norm_2: alloc_f16_ones(dev, HIDDEN),
-        post_ffw_norm_1: alloc_f16_ones(dev, HIDDEN),
-        post_ffw_norm_2: alloc_f16_ones(dev, HIDDEN),
+        post_ffw_norm_1_f32: alloc_f32_ones(dev, HIDDEN),
+        post_ffw_norm_2_f32: alloc_f32_ones(dev, HIDDEN),
+        post_ffw_norm_f32: alloc_f32_ones(dev, HIDDEN),
+        ffn_down_exps_scale_f32: alloc_f32_ones(dev, N_EXPERTS),
     }
 }
 
@@ -214,10 +220,13 @@ fn build_moe_scratch(dev: &HipDevice) -> Gemma4MoeScratch {
     let q8_1_bytes_per_block = 36;
     Gemma4MoeScratch {
         router_input_f16: alloc_zeroed(dev, HIDDEN * 2),
-        cur_mlp_f16: alloc_zeroed(dev, HIDDEN * 2),
-        cur_moe_f16: alloc_zeroed(dev, HIDDEN * 2),
-        cur_combined_f16: alloc_zeroed(dev, HIDDEN * 2),
-        zero_hidden_f16: alloc_zeroed(dev, HIDDEN * 2),
+        cur_moe_input_f16: alloc_zeroed(dev, HIDDEN * 2),
+        partial_shared_mlp_f32: alloc_zeroed(dev, HIDDEN * 4),
+        partial_moe_f32: alloc_zeroed(dev, HIDDEN * 4),
+        cur_mlp_f32: alloc_zeroed(dev, HIDDEN * 4),
+        cur_moe_f32: alloc_zeroed(dev, HIDDEN * 4),
+        cur_combined_f32: alloc_zeroed(dev, HIDDEN * 4),
+        tmp_f32: alloc_zeroed(dev, HIDDEN * 4),
         moe_scratch: MoeExpertsDecodeScratch {
             x_q8_1: alloc_zeroed(dev, q8_1_blocks_hidden * q8_1_bytes_per_block),
             router_logits: alloc_zeroed(dev, N_EXPERTS * 4),

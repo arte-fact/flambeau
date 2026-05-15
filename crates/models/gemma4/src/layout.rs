@@ -73,7 +73,7 @@ impl ModelLayout {
                 let is_swa = cfg.is_swa(il);
                 LayerSpec {
                     index: il,
-                    window: if is_swa { cfg.sliding_window as u32 } else { 0 },
+                    window: cfg.swa.window_for(il),
                     is_swa,
                     has_kv: cfg.has_kv(il),
                     kv_share_src: None,

@@ -253,10 +253,10 @@ fn tp_hidden_cross_rank_match_after_one_token() {
         cfg.hidden_size,
         cfg.num_heads,
         cfg.head_dim,
-        cfg.head_dim_swa,
+        cfg.swa.head_dim_swa,
         cfg.feed_forward_length,
         &cfg.num_kv_heads[..4.min(cfg.num_kv_heads.len())],
-        &cfg.swa_layers[..4.min(cfg.swa_layers.len())],
+        &cfg.swa.swa_layers[..4.min(cfg.swa.swa_layers.len())],
     );
     for i in 0..3.min(layout.layers.len()) {
         let s = &layout.layers[i];
