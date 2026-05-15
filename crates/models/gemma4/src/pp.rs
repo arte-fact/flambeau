@@ -1139,11 +1139,14 @@ fn upload_layer_pp(
     let attn_k_norm = up.upload_norm::<AttnKNorm>(il)?;
     let post_attention_norm = up.upload_norm_required::<PostAttnNorm>(il)?;
     // F32 copy of `post_attention_norm` for the F32 attention output
-    // path. Uploaded for MoE full-attention layers (head_dim=512 —
-    // gemma4 26B-A4B Q8_0 path that saturates F16 at the row-parallel
-    // output_proj sum). SWA layers stay F16.
+    // path. PP single-rank runs the full q_width output_proj F32 mmvq
+    // → F16 cast, which saturates on Q8_0 + head_dim≥256 even for SWA
+    // layers (the TP path doesn't saturate because the per-rank partial
+    // mmvq output is half the sum). Upload F32 norm for every MoE
+    // layer in the PP path. Non-MoE PP (31B Q4_0) is unaffected
+    // because Q4_0 rounds the V-norm spike.
     let post_attention_norm_f32_ptr: Option<DevicePtr> =
-        if cfg.moe.is_some() && !spec.is_swa {
+        if cfg.moe.is_some() {
             let name = crate::names::AttnNames::for_layer(il).post_attention_norm;
             let info = file
                 .tensors
