@@ -39,7 +39,7 @@ pub use api::{
 pub use state::{ModelDefaults, SamplingParams};
 
 #[cfg(feature = "hip")]
-pub use model::{decode_logits, prefill_logits, Inflight, LoadedModel};
+pub use model::{prefill_logits, Inflight, LoadedModel};
 #[cfg(feature = "hip")]
 pub use model_extensions::KvSnapshot;
 #[cfg(feature = "hip")]

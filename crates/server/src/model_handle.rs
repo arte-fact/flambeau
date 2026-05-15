@@ -71,24 +71,6 @@ pub trait HipSession: Send {
         prefill_ubatch: usize,
     ) -> Result<()>;
 
-    fn decode_logits(
-        &mut self,
-        cluster: &HipCluster,
-        token: u32,
-        position: usize,
-        logits_out: &mut Vec<f32>,
-    ) -> Result<()>;
-
-    /// Skip the F32-logits DtoH; logits remain on the head rank's
-    /// device pointer for the GPU sampler to consume in place. TP and
-    /// Hybrid only — PP returns an error.
-    fn decode_keep_logits_on_device(
-        &mut self,
-        cluster: &HipCluster,
-        token: u32,
-        position: usize,
-    ) -> Result<()>;
-
     fn reset_for_next_request(&mut self, cluster: &HipCluster) -> Result<()>;
 
     fn dispose(self: Box<Self>, cluster: &HipCluster) -> Result<()>;
@@ -188,38 +170,6 @@ impl HipSession for OwnedHipSession {
             tp_pool_prefill,
             on_boundary,
             prefill_ubatch,
-        )
-    }
-
-    fn decode_logits(
-        &mut self,
-        cluster: &HipCluster,
-        token: u32,
-        position: usize,
-        logits_out: &mut Vec<f32>,
-    ) -> Result<()> {
-        crate::model::decode_logits(
-            &self.model,
-            cluster,
-            &mut self.inflight,
-            token,
-            position,
-            logits_out,
-        )
-    }
-
-    fn decode_keep_logits_on_device(
-        &mut self,
-        cluster: &HipCluster,
-        token: u32,
-        position: usize,
-    ) -> Result<()> {
-        crate::model::decode_keep_logits_on_device(
-            &self.model,
-            cluster,
-            &mut self.inflight,
-            token,
-            position,
         )
     }
 

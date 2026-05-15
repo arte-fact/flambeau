@@ -23,8 +23,8 @@ use tokio_stream::wrappers::ReceiverStream;
 use crate::api::*;
 use crate::gpu_sampler::{self, GpuSamplerScratch};
 use crate::model::{
-    capture_kv_from_inflight, decode_keep_logits_on_device, decode_logits, prefill_logits,
-    restore_kv_into_inflight, snapshot_bytes, Inflight, LoadedModel,
+    capture_kv_from_inflight, prefill_logits, restore_kv_into_inflight, snapshot_bytes,
+    Inflight, LoadedModel,
 };
 use crate::prefix_cache::{PrefixCache, PrefixKeys, TopologyTag};
 
@@ -784,17 +784,10 @@ impl ServerState {
             let _prefill_lock = self.prefill_serialiser.lock().unwrap();
             tr!("FAST_PATH lock_inflight start");
             let mut guard = self.inflight_pool[slot_idx].blocking_lock();
-            tr!("FAST_PATH lock_inflight done; decode_logits start");
-            crate::model::decode_logits(
-                &self.model,
-                &self.cluster,
-                &mut *guard,
-                token,
-                position,
-                logits_out,
-            )
-            .context("decode_via_scheduler single-user fast path")?;
-            tr!("FAST_PATH decode_logits done; return");
+            tr!("FAST_PATH lock_inflight done; decode start");
+            self.dispatch_decode_one(&mut *guard, token, position, logits_out)
+                .context("decode_via_scheduler single-user fast path")?;
+            tr!("FAST_PATH decode done; return");
             return Ok(());
         }
 
@@ -912,9 +905,7 @@ impl ServerState {
         &self,
         pending: &[PendingDecode],
     ) -> anyhow::Result<()> {
-        use flambeau_qwen3_moe::forward::{
-            forward_decode_batched_pp, forward_decode_batched_tp, BatchSlot,
-        };
+        use flambeau_qwen3_moe::forward::BatchSlot;
         let trace = dev_flag("FLAMBEAU_TRACE_BATCH");
         macro_rules! tr_d {
             ($($arg:tt)*) => {
@@ -938,16 +929,7 @@ impl ServerState {
             tr_d!("locked  inflight slot={}", p.slot_idx);
         }
 
-        let cluster: &flambeau_backend_hip::HipCluster = &self.cluster;
-
         let n = pending.len();
-        // SAFETY rationale: `guards` is a Vec of distinct MutexGuards,
-        // each pointing at a unique `Inflight` in `self.inflight_pool`.
-        // We form disjoint &mut borrows to each guard's interior via
-        // raw-pointer split (the borrow checker can't see indices are
-        // distinct).
-        let guards_ptr = guards.as_mut_ptr();
-
         let slots: Vec<BatchSlot> = pending
             .iter()
             .enumerate()
@@ -962,33 +944,78 @@ impl ServerState {
         let mut logits_owned: Vec<Vec<f32>> = (0..n)
             .map(|_| Vec::with_capacity(vocab))
             .collect();
-        let mut logits_refs: Vec<&mut Vec<f32>> =
-            logits_owned.iter_mut().collect();
+
+        // Deref each MutexGuard to a `&mut Inflight` and hand the
+        // distinct-by-index slice to the shared batched dispatcher.
+        let mut inflights: Vec<&mut Inflight> =
+            guards.iter_mut().map(|g| &mut **g).collect();
+        {
+            let mut logits_refs: Vec<&mut Vec<f32>> =
+                logits_owned.iter_mut().collect();
+            self.forward_decode_batched_with_inflights(
+                inflights.as_mut_slice(),
+                &slots,
+                logits_refs.as_mut_slice(),
+            )?;
+        }
+
+        for (s, p) in pending.iter().enumerate() {
+            let logits = std::mem::take(&mut logits_owned[s]);
+            tr_d!("send response slot={} logits_len={}", p.slot_idx, logits.len());
+            let _ = p.response.send(Ok(logits));
+        }
+        tr_d!("dispatch_done dropping guards");
+        drop(guards);
+        Ok(())
+    }
+
+    /// Shared batched-decode dispatcher. Drives `slots.len()` concurrent
+    /// decode steps through whichever topology is active, writing each
+    /// slot's logits row into `logits_refs[slot.idx]`. The mutexes
+    /// protecting each `Inflight` must be held by the caller for the
+    /// duration of this call; pass distinct `&mut Inflight` refs
+    /// (deref'd from the held `MutexGuard`s).
+    /// Used by both `dispatch_batched_pending` (N≥1, scheduler-aware)
+    /// and `dispatch_decode_one` (N=1, legacy single-decode path).
+    fn forward_decode_batched_with_inflights(
+        &self,
+        inflights: &mut [&mut Inflight],
+        slots: &[flambeau_qwen3_moe::forward::BatchSlot],
+        logits_refs: &mut [&mut Vec<f32>],
+    ) -> anyhow::Result<()> {
+        use flambeau_qwen3_moe::forward::{
+            forward_decode_batched_pp, forward_decode_batched_tp,
+        };
+        let cluster: &flambeau_backend_hip::HipCluster = &self.cluster;
+        let n = inflights.len();
+        if n == 0 {
+            bail!("forward_decode_batched_with_inflights: empty inflight slice");
+        }
+        // Raw pointer for disjoint &mut access across indices (the
+        // borrow checker can't see the indices are distinct).
+        let inflights_ptr = inflights.as_mut_ptr();
 
         if let Some(pp_model) = self.model.as_pp() {
             let model = &pp_model.model;
             let mut sessions: Vec<&mut flambeau_qwen3_moe::Qwen3MoEShardedSession> =
                 Vec::with_capacity(n);
-            // Use the first guard's prefill scratch as the batched
-            // workspace; loop below only touches each guard's
-            // `session` field (disjoint from `prefill`).
+            // SAFETY: n >= 1; reborrow inflights[0]'s `prefill` field,
+            // disjoint from the `session` borrows below.
             let prefill_scratch: &mut flambeau_qwen3_moe::forward::ShardedForwardPrefillScratch = {
-                // SAFETY: n >= 1; reborrow guards[0]'s `prefill`
-                // field, disjoint from the `session` borrows below.
                 unsafe {
-                    let g0: &mut Inflight = &mut **guards_ptr;
+                    let g0: &mut Inflight = &mut **inflights_ptr;
                     &mut g0
                         .as_pp_mut()
-                        .context("dispatch_batched_pending: leader slot is not Inflight::Pp")?
+                        .context("batched decode: leader slot is not Inflight::Pp")?
                         .prefill
                 }
             };
             for s in 0..n {
-                // SAFETY: s in 0..n; guards distinct by index.
+                // SAFETY: s in 0..n; inflights distinct by index.
                 unsafe {
-                    let g: &mut Inflight = &mut **guards_ptr.add(s);
+                    let g: &mut Inflight = &mut **inflights_ptr.add(s);
                     let pp = g.as_pp_mut().with_context(|| {
-                        format!("dispatch_batched_pending: slot {s} is not Inflight::Pp")
+                        format!("batched decode: slot {s} is not Inflight::Pp")
                     })?;
                     sessions.push(&mut pp.session);
                 }
@@ -998,32 +1025,25 @@ impl ServerState {
                 sessions.as_mut_slice(),
                 cluster,
                 prefill_scratch,
-                &slots,
-                logits_refs.as_mut_slice(),
+                slots,
+                logits_refs,
             )
-            .context("forward_decode_batched_pp under scheduler")?;
+            .context("forward_decode_batched_pp")?;
         } else if let Some(tp_model) = self.model.as_tp() {
             let model = &tp_model.model;
-            let ar = tp_model.ar();
-            // **P2.9b-i2-C-wire** — TP uses a shared per-server batched
-            // scratch (sized for max_inflight_slots, lazy-init).
             let mut sessions: Vec<&mut flambeau_qwen3_moe::Qwen3MoETpSession> =
                 Vec::with_capacity(n);
             for s in 0..n {
-                // SAFETY: s in 0..n; guards distinct.
+                // SAFETY: s in 0..n; inflights distinct.
                 unsafe {
-                    let g: &mut Inflight = &mut **guards_ptr.add(s);
+                    let g: &mut Inflight = &mut **inflights_ptr.add(s);
                     let tp = g.as_tp_mut().with_context(|| {
-                        format!("dispatch_batched_pending: slot {s} is not Inflight::Tp")
+                        format!("batched decode: slot {s} is not Inflight::Tp")
                     })?;
                     sessions.push(&mut tp.session);
                 }
             }
-            // Lazy-allocate the shared batched scratch on first
-            // dispatch. Sized for `inflight_pool.len()` slots — a
-            // tight upper bound, much smaller than the prefill
-            // ubatch, so VRAM cost is negligible (~80 KB / rank /
-            // layer).
+            // Lazy-allocate the shared TP batched scratch on first call.
             let mut scratch_guard = self
                 .tp_batched_scratch
                 .lock()
@@ -1046,10 +1066,10 @@ impl ServerState {
                 sessions.as_mut_slice(),
                 &tp_model.tp,
                 scratch,
-                &slots,
-                logits_refs.as_mut_slice(),
+                slots,
+                logits_refs,
             )
-            .context("forward_decode_batched_tp under scheduler")?;
+            .context("forward_decode_batched_tp")?;
         } else if let Some(hybrid_model) = self.model.as_hybrid() {
             let model = &hybrid_model.model;
             let stage_ars = &hybrid_model.stage_ars();
@@ -1057,16 +1077,15 @@ impl ServerState {
             let mut sessions: Vec<&mut flambeau_qwen3_moe::Qwen3MoEHybridSession> =
                 Vec::with_capacity(n);
             for s in 0..n {
-                // SAFETY: s in 0..n; guards distinct.
+                // SAFETY: s in 0..n; inflights distinct.
                 unsafe {
-                    let g: &mut Inflight = &mut **guards_ptr.add(s);
+                    let g: &mut Inflight = &mut **inflights_ptr.add(s);
                     let hyb = g.as_hybrid_mut().with_context(|| {
-                        format!("dispatch_batched_pending: slot {s} is not Inflight::Hybrid")
+                        format!("batched decode: slot {s} is not Inflight::Hybrid")
                     })?;
                     sessions.push(&mut hyb.session);
                 }
             }
-            // Lazy-allocate the shared Hybrid batched scratch.
             let mut scratch_guard = self
                 .hybrid_batched_scratch
                 .lock()
@@ -1082,31 +1101,52 @@ impl ServerState {
             let scratch = scratch_guard
                 .as_mut()
                 .expect("just initialised");
-            tr_d!("dispatch hybrid batched N={n}");
             forward_decode_batched_hybrid(
                 model,
                 sessions.as_mut_slice(),
                 cluster,
                 stage_ars,
                 scratch,
-                &slots,
-                logits_refs.as_mut_slice(),
+                slots,
+                logits_refs,
             )
-            .context("forward_decode_batched_hybrid under scheduler")?;
+            .context("forward_decode_batched_hybrid")?;
         } else {
-            bail!("dispatch_batched_pending: unknown topology");
+            bail!("forward_decode_batched_with_inflights: unknown topology");
         }
-
-        for (s, p) in pending.iter().enumerate() {
-            let logits = std::mem::take(&mut logits_owned[s]);
-            tr_d!("send response slot={} logits_len={}", p.slot_idx, logits.len());
-            let _ = p.response.send(Ok(logits));
-        }
-        tr_d!("dispatch_done dropping guards");
-        drop(guards);
         Ok(())
     }
 
+    /// Phase 12.5 — single-slot decode through the batched path. Replaces
+    /// the legacy `crate::model::decode_logits` free function. Caller
+    /// must hold the slot's mutex (passing the live `&mut Inflight`
+    /// borrowed from the guard).
+    pub fn dispatch_decode_one(
+        &self,
+        inflight: &mut Inflight,
+        token: u32,
+        position: usize,
+        logits_out: &mut Vec<f32>,
+    ) -> anyhow::Result<()> {
+        use flambeau_qwen3_moe::forward::BatchSlot;
+        let slots = [BatchSlot {
+            idx: 0,
+            token_id: token,
+            position,
+        }];
+        let vocab = self.cfg.vocab_size;
+        if logits_out.capacity() < vocab {
+            logits_out.reserve(vocab - logits_out.capacity());
+        }
+        logits_out.clear();
+        let mut inflights_arr: [&mut Inflight; 1] = [inflight];
+        let mut logits_refs: [&mut Vec<f32>; 1] = [logits_out];
+        self.forward_decode_batched_with_inflights(
+            &mut inflights_arr,
+            &slots,
+            &mut logits_refs,
+        )
+    }
 }
 
 /// GET /health — constant, no locks.
@@ -3459,11 +3499,16 @@ fn run_completion_blocking_ids(
     // - Hybrid: head stage's sub_cluster's head TP-rank device
     // (head_stage = pp_size - 1; head_rank within stage
     // defaults to 0 per ShardedForwardOneTokenScratchHybrid).
-    let use_gpu_sampler = state.gpu_sampler
-        && (model.as_pp().is_some()
-            || model.as_tp().is_some()
-            || model.as_hybrid().is_some())
-        && !sampling.is_greedy();
+    // Phase 12.5 — temporarily disabled. The keep-logits-on-device
+    // optimisation reads `pp/tp/hybrid_session.decode.per_rank[head].
+    // output_head.logits_f32`, which was populated by the legacy
+    // `forward_one_token_*_keep_logits_on_device` kernels. With decode
+    // collapsed onto `forward_decode_batched_*`, those buffers go stale
+    // (the batched output head writes to the *batched* scratch's
+    // `output_head.logits_f32` instead). Re-wiring `resolve_head_logits`
+    // to read the batched scratch's buffer is its own follow-up.
+    let use_gpu_sampler = false;
+    let _ = state.gpu_sampler;
     let mut gpu_scratch: Option<GpuSamplerScratch> = if use_gpu_sampler {
         // Resolve the head device for whichever topology is active.
         let head_device = if let (Some(p), Some(_)) = (model.as_pp(), inflight.as_pp()) {
@@ -3756,70 +3801,18 @@ fn run_completion_blocking_ids(
     const STOP_BIAS: f32 = 3.0;
     for step in 1..params.max_tokens as usize {
         let force_mask = step < MIN_RESPONSE_TOKENS && !relax_stop_mask;
-        // **Sampler-D3 Phase B** — GPU sampler path skips the
-        // 600 KB host-logits DtoH entirely; logits stay on device
-        // and `run_gpu_topk` consumes them via topk_softmax_f32.
-        // Host path keeps the existing `decode_logits` DtoH so
-        // penalty / non-TP / fallback callers still get host
-        // logits.
-        let next = if let Some(scratch) = gpu_scratch.as_mut() {
-            decode_keep_logits_on_device(
-                model,
-                cluster,
-                &mut inflight,
-                last_token,
-                prompt_ids.len() + step,
-            )
-            .context("decode step keep-on-device")?;
-            if sampling.has_penalties() {
-                // D4 — apply penalties on GPU before topk.
-                gpu_sampler::run_gpu_topk_with_penalties(
-                    model,
-                    cluster,
-                    &inflight,
-                    scratch,
-                    &generated,
-                    sampling,
-                    inv_temp,
+        // Phase 12.5 — decode goes through the host-path DtoH always.
+        // The GPU sampler keep-on-device branch was retired with the
+        // decode/batched collapse (see `use_gpu_sampler` initialiser).
+        let next = {
+            state
+                .dispatch_decode_one(
+                    &mut inflight,
+                    last_token,
+                    prompt_ids.len() + step,
+                    &mut logits_buf,
                 )
-                .context("decode-step GPU topk (with penalties)")?;
-            } else {
-                gpu_sampler::run_gpu_topk(
-                    model, cluster, &inflight, scratch, inv_temp,
-                )
-                .context("decode-step GPU topk")?;
-            }
-            if force_mask && !relax_stop_mask {
-                gpu_sampler::apply_stop_mask(
-                    &scratch.host_ids,
-                    &mut scratch.host_probs,
-                    stop_ids,
-                );
-            }
-            // P0.1 — JSON-grammar mask before multinomial.
-            if let Some(js) = json_state.as_ref() {
-                gpu_sampler::apply_json_mask(
-                    js,
-                    &state.tokenizer,
-                    &scratch.host_ids,
-                    &mut scratch.host_probs,
-                );
-            }
-            sampler.sample_from_topk(
-                &scratch.host_ids,
-                &scratch.host_probs,
-                sampling,
-            )
-        } else {
-            decode_logits(
-                model,
-                cluster,
-                &mut inflight,
-                last_token,
-                prompt_ids.len() + step,
-                &mut logits_buf,
-            )
-            .context("decode step logits")?;
+                .context("decode step logits")?;
             if !relax_stop_mask {
                 for &sid in stop_ids {
                     if (sid as usize) < logits_buf.len() {
@@ -4297,15 +4290,14 @@ fn run_completion_blocking_streaming(
         // T4.1: same relax-stop-mask behaviour as the non-streaming path.
         let force_mask = step < MIN_RESPONSE_TOKENS && !relax_stop_mask;
         let hp_step_t0 = if host_profile_on { Some(Instant::now()) } else { None };
-        decode_logits(
-            model,
-            cluster,
-            &mut inflight,
-            last_token,
-            prompt_ids.len() + step,
-            &mut logits_buf,
-        )
-        .context("decode step logits")?;
+        state
+            .dispatch_decode_one(
+                &mut inflight,
+                last_token,
+                prompt_ids.len() + step,
+                &mut logits_buf,
+            )
+            .context("decode step logits")?;
         let hp_after_decode = if host_profile_on { Some(Instant::now()) } else { None };
         if !relax_stop_mask {
             for &sid in stop_ids {

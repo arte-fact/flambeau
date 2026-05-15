@@ -11,9 +11,6 @@
 use anyhow::{bail, Context, Result};
 use flambeau_backend_hip::{BarP2pAllReduce, HipCluster};
 use flambeau_qwen3_moe::forward::{
-    forward_one_token_hybrid_keep_logits_on_device, forward_one_token_hybrid_logits,
-    forward_one_token_pp_keep_logits_on_device, forward_one_token_pp_logits,
-    forward_one_token_tp_keep_logits_on_device, forward_one_token_tp_logits,
     forward_prefill_hybrid_logits, forward_prefill_pp, forward_prefill_pp_logits,
     forward_prefill_tp_logits, forward_prefill_tp_logits_pooled,
     ShardedForwardOneTokenScratch, ShardedForwardOneTokenScratchHybrid,
@@ -629,107 +626,6 @@ pub fn prefill_logits(
         }
     } else {
         bail!("LoadedModel/Inflight variant mismatch")
-    }
-}
-
-/// Advance one token; write that position's logits into `logits_out`.
-pub fn decode_logits(
-    model: &LoadedModel,
-    cluster: &HipCluster,
-    inflight: &mut Inflight,
-    token: u32,
-    position: usize,
-    logits_out: &mut Vec<f32>,
-) -> Result<()> {
-    // **Cleanup (post-i2-B-wire)** — the old i2-A1 env-flag dispatch
-    // here was a stepping stone that engaged the new batched code
-    // path for PP at N=1 before the scheduler shipped. Now that the
-    // scheduler-aware handler in `routes.rs::run_completion_scheduler_pp_blocking`
-    // exists for PP / TP / Hybrid, the env flag belongs entirely at
-    // handler entry (`scheduler_can_engage`). `decode_logits` itself
-    // is the legacy fallback path — invariant: takes a held mutex
-    // guard and runs the single-slot forward.
-    if let (Some(p), Some(s)) = (model.as_pp(), inflight.as_pp_mut()) {
-        forward_one_token_pp_logits(
-            &p.model,
-            &mut s.session,
-            cluster,
-            &mut s.decode,
-            token,
-            position,
-            logits_out,
-        )
-        .context("PP decode_logits")
-    } else if let (Some(t), Some(s)) = (model.as_tp(), inflight.as_tp_mut()) {
-        forward_one_token_tp_logits(
-            &t.model,
-            &mut s.decode,
-            &t.tp,
-            &mut s.session.caches,
-            token,
-            position,
-            logits_out,
-        )
-        .context("TP decode_logits")
-    } else if let (Some(h), Some(s)) = (model.as_hybrid(), inflight.as_hybrid_mut()) {
-        forward_one_token_hybrid_logits(
-            &h.model,
-            &mut s.decode,
-            cluster,
-            &h.stage_ars(),
-            &mut s.session,
-            token,
-            position,
-            logits_out,
-        )
-        .context("hybrid decode_logits")
-    } else {
-        bail!("LoadedModel/Inflight variant mismatch")
-    }
-}
-
-/// Like [`decode_logits`] but skips the F32 logits DtoH; the row stays
-/// in the head rank's `output_head.logits_f32` for the GPU sampler.
-pub fn decode_keep_logits_on_device(
-    model: &LoadedModel,
-    cluster: &HipCluster,
-    inflight: &mut Inflight,
-    token: u32,
-    position: usize,
-) -> Result<()> {
-    if let (Some(p), Some(s)) = (model.as_pp(), inflight.as_pp_mut()) {
-        forward_one_token_pp_keep_logits_on_device(
-            &p.model,
-            &mut s.session,
-            cluster,
-            &mut s.decode,
-            token,
-            position,
-        )
-        .context("PP decode_keep_logits_on_device")
-    } else if let (Some(t), Some(s)) = (model.as_tp(), inflight.as_tp_mut()) {
-        forward_one_token_tp_keep_logits_on_device(
-            &t.model,
-            &mut s.decode,
-            &t.tp,
-            &mut s.session.caches,
-            token,
-            position,
-        )
-        .context("TP decode_keep_logits_on_device")
-    } else if let (Some(h), Some(s)) = (model.as_hybrid(), inflight.as_hybrid_mut()) {
-        forward_one_token_hybrid_keep_logits_on_device(
-            &h.model,
-            &mut s.decode,
-            cluster,
-            &h.stage_ars(),
-            &mut s.session,
-            token,
-            position,
-        )
-        .context("Hybrid decode_keep_logits_on_device")
-    } else {
-        bail!("decode_keep_logits_on_device: model topology has no GPU sampler wiring")
     }
 }
 
