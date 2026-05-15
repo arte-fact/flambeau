@@ -401,6 +401,15 @@ impl ServerState {
         if !self.prefix_cache.enabled() {
             return Ok(PrefixCacheRestore::Miss);
         }
+        // Phase 12.7 — prefix cache stays qwen3-moe-typed in V1.
+        // Sessions from other archs (gemma4) silently skip without the
+        // capture/restore warn-log churn.
+        if inflight.as_pp().is_none()
+            && inflight.as_tp().is_none()
+            && inflight.as_hybrid().is_none()
+        {
+            return Ok(PrefixCacheRestore::Miss);
+        }
         let chunk_tokens = self.prefix_cache_chunk_tokens;
         if prompt_ids.len() < chunk_tokens {
             return Ok(PrefixCacheRestore::Miss);
@@ -566,6 +575,13 @@ impl ServerState {
             "prefix_cache_try_capture_full called"
         );
         if !self.prefix_cache.enabled() {
+            return;
+        }
+        // Phase 12.7 — see `prefix_cache_try_restore` early-out doc.
+        if inflight.as_pp().is_none()
+            && inflight.as_tp().is_none()
+            && inflight.as_hybrid().is_none()
+        {
             return;
         }
         const MIN_PROMPT_TOKENS: usize = 50;
