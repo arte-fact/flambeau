@@ -1,10 +1,7 @@
-//! server-side LoadedModel + Inflight session abstractions.
-//! Both the PP and TP topologies expose a same-shape surface to the
-//! request handlers: `Inflight::new(...)` allocates per-request
-//! session + scratch, `prefill_logits(...)` ingests the prompt, and
-//! `decode_logits(...)` advances by one token at a time. The handlers
-//! call those helpers without caring which topology the cluster is
-//! configured for; the dispatch lives here.
+//! Qwen3-moe-specific glue: per-request `Inflight` session, the
+//! prefill / decode free functions, the shared `Qwen3MoeServerExtras`
+//! workspaces, and the `qwen3moe_forward_decode_batched` dispatcher
+//! called by `Model::forward_decode_batched`'s default impl.
 
 #![cfg(feature = "hip")]
 
@@ -22,6 +19,42 @@ use flambeau_qwen3_moe::{
     Qwen3MoEHybridModel, Qwen3MoEHybridSession, Qwen3MoEShardedModel, Qwen3MoEShardedSession,
     Qwen3MoETpModel, Qwen3MoETpSession,
 };
+
+/// Qwen3-moe-specific shared workspaces lazy-attached to
+/// `ServerState`. `Some` on the qwen3-moe boot path; `None` on
+/// non-qwen3-moe boots (gemma4) so they don't carry the
+/// qwen3-moe-typed scratch fields.
+pub struct Qwen3MoeServerExtras {
+    /// Shared TP batched-decode workspace, lazy-init on first TP
+    /// scheduler dispatch. Only the dispatcher leader touches it
+    /// (gated by `ServerState::batched_dispatcher`); inner `Mutex`
+    /// is just for safe lazy-init.
+    pub tp_batched_scratch:
+        std::sync::Mutex<Option<ShardedForwardPrefillScratchTp>>,
+    /// Shared Hybrid (PP+TP) batched-decode workspace.
+    pub hybrid_batched_scratch:
+        std::sync::Mutex<Option<flambeau_qwen3_moe::ShardedForwardPrefillScratchHybrid>>,
+    /// TP / Hybrid prefill serialiser. Caps peak per-call scratch
+    /// alloc (~35 MB at chunk=512 for Qwen3.6-27B) at one instance
+    /// regardless of N concurrent requests; the GPU stream is serial
+    /// anyway, so this only serialises host-side launch + alloc.
+    pub prefill_serialiser: std::sync::Mutex<()>,
+    /// Shared TP prefill scratch, lazy-init on first TP prefill.
+    /// Reused across every TP prefill call.
+    pub tp_prefill_scratch:
+        std::sync::Mutex<Option<ShardedForwardPrefillScratchTp>>,
+}
+
+impl Default for Qwen3MoeServerExtras {
+    fn default() -> Self {
+        Self {
+            tp_batched_scratch: std::sync::Mutex::new(None),
+            hybrid_batched_scratch: std::sync::Mutex::new(None),
+            prefill_serialiser: std::sync::Mutex::new(()),
+            tp_prefill_scratch: std::sync::Mutex::new(None),
+        }
+    }
+}
 
 /// Pipeline-parallel sharded model. One whole layer per rank stage;
 /// cross-stage hand-off via host-bounce peer copy.
@@ -793,5 +826,143 @@ pub fn restore_kv_into_inflight(
     }
     bail!("restore_kv_into_inflight: model/inflight variant mismatch")
 }
+
+/// Qwen3-moe batched-decode dispatcher. Caller has already verified
+/// the model is one of `PpHipModel` / `TpHipModel` / `HybridHipModel`
+/// (via `Model::forward_decode_batched`'s `as_pp/_tp/_hybrid` gate)
+/// and that `state.qwen3_moe` is `Some`. Each inflight downcasts to
+/// its concrete qwen3-moe session type; the shared scratch comes from
+/// `state.qwen3_moe` (lazy-allocated on first call).
+pub fn qwen3moe_forward_decode_batched(
+    state: &crate::routes::ServerState,
+    inflights: &mut [&mut dyn crate::Session],
+    slots: &[flambeau_qwen3_moe::forward::BatchSlot],
+    logits_refs: &mut [&mut Vec<f32>],
+) -> Result<()> {
+    use flambeau_qwen3_moe::forward::{
+        forward_decode_batched_hybrid, forward_decode_batched_pp, forward_decode_batched_tp,
+    };
+    let cluster: &HipCluster = &state.cluster;
+    let n = inflights.len();
+    if n == 0 {
+        bail!("qwen3moe_forward_decode_batched: empty inflight slice");
+    }
+    let inflights_ptr = inflights.as_mut_ptr();
+
+    if let Some(pp_model) = state.model.as_pp() {
+        let model = &pp_model.model;
+        let mut sessions: Vec<&mut Qwen3MoEShardedSession> = Vec::with_capacity(n);
+        // SAFETY: n >= 1; disjoint reborrow of slot 0's `prefill` field
+        // from the per-slot `session` borrows below.
+        let prefill_scratch: &mut ShardedForwardPrefillScratch = unsafe {
+            let g0: &mut dyn crate::Session = &mut **inflights_ptr;
+            &mut g0
+                .as_pp_mut()
+                .context("batched decode: leader slot is not PP")?
+                .prefill
+        };
+        for s in 0..n {
+            // SAFETY: s in 0..n; inflights distinct by index.
+            unsafe {
+                let g: &mut dyn crate::Session = &mut **inflights_ptr.add(s);
+                let pp = g
+                    .as_pp_mut()
+                    .with_context(|| format!("batched decode: slot {s} is not PP"))?;
+                sessions.push(&mut pp.session);
+            }
+        }
+        forward_decode_batched_pp(
+            model,
+            sessions.as_mut_slice(),
+            cluster,
+            prefill_scratch,
+            slots,
+            logits_refs,
+        )
+        .context("forward_decode_batched_pp")
+    } else if let Some(tp_model) = state.model.as_tp() {
+        let model = &tp_model.model;
+        let mut sessions: Vec<&mut flambeau_qwen3_moe::Qwen3MoETpSession> =
+            Vec::with_capacity(n);
+        for s in 0..n {
+            // SAFETY: s in 0..n; inflights distinct.
+            unsafe {
+                let g: &mut dyn crate::Session = &mut **inflights_ptr.add(s);
+                let tp = g
+                    .as_tp_mut()
+                    .with_context(|| format!("batched decode: slot {s} is not TP"))?;
+                sessions.push(&mut tp.session);
+            }
+        }
+        let qwen3_moe = state
+            .qwen3_moe
+            .as_ref()
+            .context("TP batched dispatch requires qwen3-moe boot")?;
+        let mut scratch_guard = qwen3_moe
+            .tp_batched_scratch
+            .lock()
+            .expect("tp_batched_scratch poisoned");
+        if scratch_guard.is_none() {
+            let max_slots = state.inflight_pool.len().max(n);
+            *scratch_guard = Some(
+                ShardedForwardPrefillScratchTp::new(&model.config, cluster, max_slots)
+                    .context("alloc tp_batched_scratch")?,
+            );
+        }
+        let scratch = scratch_guard.as_mut().expect("just initialised");
+        forward_decode_batched_tp(
+            model,
+            sessions.as_mut_slice(),
+            &tp_model.tp,
+            scratch,
+            slots,
+            logits_refs,
+        )
+        .context("forward_decode_batched_tp")
+    } else if let Some(hybrid_model) = state.model.as_hybrid() {
+        let model = &hybrid_model.model;
+        let stage_ars = &hybrid_model.stage_ars();
+        let mut sessions: Vec<&mut Qwen3MoEHybridSession> = Vec::with_capacity(n);
+        for s in 0..n {
+            // SAFETY: s in 0..n; inflights distinct.
+            unsafe {
+                let g: &mut dyn crate::Session = &mut **inflights_ptr.add(s);
+                let hyb = g
+                    .as_hybrid_mut()
+                    .with_context(|| format!("batched decode: slot {s} is not Hybrid"))?;
+                sessions.push(&mut hyb.session);
+            }
+        }
+        let qwen3_moe = state
+            .qwen3_moe
+            .as_ref()
+            .context("Hybrid batched dispatch requires qwen3-moe boot")?;
+        let mut scratch_guard = qwen3_moe
+            .hybrid_batched_scratch
+            .lock()
+            .expect("hybrid_batched_scratch poisoned");
+        if scratch_guard.is_none() {
+            let max_slots = state.inflight_pool.len().max(n);
+            *scratch_guard = Some(
+                flambeau_qwen3_moe::ShardedForwardPrefillScratchHybrid::new(model, max_slots)
+                    .context("alloc hybrid_batched_scratch")?,
+            );
+        }
+        let scratch = scratch_guard.as_mut().expect("just initialised");
+        forward_decode_batched_hybrid(
+            model,
+            sessions.as_mut_slice(),
+            cluster,
+            stage_ars,
+            scratch,
+            slots,
+            logits_refs,
+        )
+        .context("forward_decode_batched_hybrid")
+    } else {
+        bail!("qwen3moe_forward_decode_batched: model is not a qwen3-moe topology")
+    }
+}
+
 
 

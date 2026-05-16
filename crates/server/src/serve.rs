@@ -803,11 +803,7 @@ async fn serve_inner_gemma4(
         slot_in_use,
         batched_pending: std::sync::Mutex::new(Vec::new()),
         batched_dispatcher: std::sync::Mutex::new(()),
-        // #116 step 1 — gemma4 boot doesn't allocate the qwen3-moe-
-        // typed shared scratches (`tp_batched_scratch`,
-        // `hybrid_batched_scratch`, `prefill_serialiser`,
-        // `tp_prefill_scratch`). All paths that reach into
-        // `state.qwen3_moe` are arch-gated upstream.
+        // Gemma4 boot skips the qwen3-moe-typed shared scratches.
         qwen3_moe: None,
         prefix_cache,
         prefix_cache_chunk_tokens: prefill_ubatch,

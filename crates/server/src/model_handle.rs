@@ -1,19 +1,13 @@
 //! Server-side `Model` + `Session` trait surface.
 //!
-//! Two traits — both backend-agnostic in name and shape (CLAUDE.md
-//! rules 12 + 13):
-//! * `Model` — load-time entry. Owns weights + per-topology auxiliary
+//! - `Model` — load-time entry. Owns weights + per-topology auxiliary
 //!   state. Reports topology + arch capability hints.
-//! * `Session` — per-request handle. Owns KV caches + scratches +
-//!   a back-reference to its parent `Model`. `prefill_logits` advances
+//! - `Session` — per-request handle. Owns KV caches + scratches and a
+//!   back-reference to its parent `Model`. `prefill_logits` advances
 //!   generation; `dispose` frees device buffers.
 //!
 //! Concrete impls (`Qwen3MoeOwnedSession`, `Gemma4Session`) live in the
-//! arch-specific glue modules and hold their own `Arc<HipCluster>`.
-//! Cluster decoupling from trait method signatures + crate extraction
-//! to a backend-neutral `flambeau-server-core` are follow-up steps on
-//! task #117. Today the trait still mentions `HipCluster` via method
-//! parameters; that lands next.
+//! arch-specific glue modules.
 
 #![cfg(feature = "hip")]
 
@@ -62,6 +56,38 @@ pub trait Model: Send + Sync + 'static {
     fn chat_stop_markers(&self) -> &'static [&'static str] {
         &[]
     }
+
+    /// Batched-decode entry point. Default handles N=1 by delegating
+    /// to [`Session::decode_one_logits`]; N>1 bails. Archs with a
+    /// multi-slot impl take the `as_pp/_tp/_hybrid` Some branch.
+    fn forward_decode_batched(
+        &self,
+        state: &crate::routes::ServerState,
+        inflights: &mut [&mut dyn Session],
+        slots: &[flambeau_qwen3_moe::forward::BatchSlot],
+        logits_refs: &mut [&mut Vec<f32>],
+    ) -> Result<()> {
+        if self.as_pp().is_some() || self.as_tp().is_some() || self.as_hybrid().is_some() {
+            return crate::model::qwen3moe_forward_decode_batched(
+                state,
+                inflights,
+                slots,
+                logits_refs,
+            );
+        }
+        if slots.len() != 1 {
+            anyhow::bail!(
+                "Model::forward_decode_batched: N={} not supported by this arch \
+                 (default impl is N=1 only). Run with `FLAMBEAU_INFLIGHT_SLOTS=1` \
+                 or override the trait method.",
+                slots.len(),
+            );
+        }
+        let slot = &slots[0];
+        let out: &mut Vec<f32> = logits_refs[0];
+        out.clear();
+        inflights[0].decode_one_logits(slot.token_id, slot.position, out)
+    }
 }
 
 pub trait Session: Send {
@@ -88,6 +114,23 @@ pub trait Session: Send {
     fn reset_for_next_request(&mut self) -> Result<()>;
 
     fn dispose(self: Box<Self>) -> Result<()>;
+
+    /// Single-token decode. Default bails — only archs whose
+    /// `Model::forward_decode_batched` falls through to the trait
+    /// default need a real impl (gemma4 today). qwen3-moe sessions
+    /// take the `as_pp/_tp/_hybrid` branch in
+    /// `Model::forward_decode_batched` and never reach here.
+    fn decode_one_logits(
+        &mut self,
+        _token: u32,
+        _position: usize,
+        _logits_out: &mut Vec<f32>,
+    ) -> Result<()> {
+        anyhow::bail!(
+            "Session::decode_one_logits: no impl on this session type. \
+             Either override or route through `Model::forward_decode_batched`."
+        )
+    }
 
     /// Concrete-session accessors, mirror of `Model::as_pp`. Server
     /// uses these in spec-decode init / GPU-sampler scratch
@@ -152,10 +195,9 @@ pub trait Session: Send {
 pub struct Qwen3MoeOwnedSession {
     pub model: LoadedModel,
     pub inflight: Inflight,
-    /// #117 step 2 — owned cluster reference so `Session` trait
-    /// method signatures don't carry `cluster: &HipCluster`. Shared
-    /// with `ServerState.cluster`; cheap Arc clone at session
-    /// construction.
+    /// Owned cluster Arc, shared with `ServerState.cluster` and
+    /// `Inflight`'s per-rank scratches. Lets `Session` trait methods
+    /// run without a `cluster: &HipCluster` parameter.
     pub cluster: std::sync::Arc<HipCluster>,
 }
 

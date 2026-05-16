@@ -250,14 +250,24 @@ implementing.
   and a lower bound. If we hit the silicon ceiling and llama.cpp is
   faster, they have room; we file the diagnosis, we do not ship a
   regression to "catch up".
-- **No narrative comments.** Code comments describe what the code does
-  or why a non-obvious choice was made — they do not narrate the
-  refactor that produced them. No `// L1` / `// **#229**` / "Mirrors
-  llama.cpp X" / "saves 200 µs" / "memory note says…" / phase-number
-  markers. Session prose, ROI claims, and roadmap references belong in
-  the commit message, not the source file. Strip them before commit.
-  Bare technical minimum: invariants, safety, hidden constraints —
-  nothing else.
+- **No narrative comments. Strictly necessary commenting only.** Code
+  comments describe what the code does or why a non-obvious choice was
+  made — they do not narrate the refactor that produced them. No
+  `// L1` / `// **#229**` / `// #116 step 2 —` / "Mirrors llama.cpp X"
+  / "saves 200 µs" / "memory note says…" / phase-number markers / task
+  numbers / commit-shas. Session prose, ROI claims, roadmap
+  references, and task-list cross-refs belong in the commit message,
+  not the source file.
+  - **If you see a narrative comment, refactor it.** Don't preserve
+    the rot just because it was there. Strip / rewrite as you pass
+    by. Treat it the same as commented-out code.
+  - **If you are about to write a narrative comment, don't.** Ask
+    "does removing this comment confuse a future reader who can see
+    only the code?" — if no, drop it. The bar is: invariants, safety
+    notes, hidden constraints, non-obvious choices. Nothing else.
+  - Whitespace + naming carries most of what bad comments try to
+    explain. Rename the variable, split the function, lift the
+    constant.
 - **Architectural-rule audit before each substantive commit.** "Make
   the test pass" is not the only constraint — the rules above ARE the
   durable direction. Before landing non-trivial code, run a single

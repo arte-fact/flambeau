@@ -36,8 +36,13 @@ impl Model for Gemma4Model {
         true
     }
     fn chat_stop_markers(&self) -> &'static [&'static str] {
-        // Kept in sync with `Gemma4Session::chat_stop_markers`; see
-        // that impl for the rationale on each fragment.
+        // Kept in sync with `Gemma4Session::chat_stop_markers`.
+        // `<channel|>` / `<|channel>` / `<|thought` are deliberately
+        // EXCLUDED — the gemma4 tool-call parser strips them from the
+        // response. Including them here would have `finalise` truncate
+        // the whole answer when the model emits the leading
+        // `<channel|>` close right after the chat template's
+        // `<|channel>thought\n` block.
         &[
             "<end_of_turn>",
             "<turn|>",
@@ -46,9 +51,6 @@ impl Model for Gemma4Model {
             "<|turn|>",
             "<|endoftext|>",
             "<endoftext>",
-            "<|channel>",
-            "<channel|>",
-            "<|thought",
         ]
     }
 }
@@ -152,44 +154,46 @@ impl Session for Gemma4Session {
         Some(self.driver.as_mut())
     }
 
+    fn decode_one_logits(
+        &mut self,
+        token: u32,
+        position: usize,
+        logits_out: &mut Vec<f32>,
+    ) -> Result<()> {
+        // routes.rs sends `position = prompt_ids.len() + step` with
+        // step starting at 1, so the first decode position is N+1.
+        // The BOS prepend in `prefill_logits` advances the cache tail
+        // to N+1 too, so the positions align with the driver's literal
+        // write-slot semantics.
+        logits_out.clear();
+        self.driver
+            .forward_one_token_logits(token, position, logits_out)
+    }
+
     fn gemma4_bos_id(&self) -> Option<u32> {
         self.bos_id
     }
 
     fn chat_stop_markers(&self) -> &'static [&'static str] {
-        // Gemma4 chat template terminates with `<turn|>` (vocab id 106
-        // = EOS) and contains `<|channel>thought\n<channel|>` to render
-        // an empty hidden reasoning block. The 26B-A4B Q8_0 MoE quant
-        // sometimes drifts off the EOS softmax and emits byte-level
-        // fragments instead of the proper vocab tokens, producing
-        // literals like `<|end_of_turn|>` (NOT a vocab entry; note
-        // the extra `|`s vs `<end_of_turn>` id 106 or `<turn|>`). We
-        // catch every variant we've observed in the wild so the
-        // decode loop can string-stop instead of running the full
-        // `max_tokens` budget on post-EOS repetition.
+        // HARD stops: byte-level chat-template fragments the 26B-A4B
+        // Q8_0 MoE emits when its softmax drifts off the proper EOS
+        // token (`<turn|>` id 106). Catching them as strings prevents
+        // post-EOS repetition burning the `max_tokens` budget.
+        //
+        // `<channel|>` / `<|channel>` / `<|thought` are NOT here —
+        // those are normal chat-template fragments that the gemma4
+        // tool-call parser strips downstream. Putting them in this
+        // list eats the whole answer when the model emits the
+        // leading `<channel|>` close right after the prompt-side
+        // `<|channel>thought\n` block.
         &[
-            // Proper vocab tokens (also caught via stop_ids, but
-            // listed here for completeness when they slip in as
-            // byte-level fragments).
             "<end_of_turn>",
             "<turn|>",
             "<|turn>",
-            // Byte-level leakage variants the 26B-A4B Q8_0 emits
-            // when softmax drifts off the proper EOS token.
             "<|end_of_turn|>",
             "<|turn|>",
             "<|endoftext|>",
             "<endoftext>",
-            // Channel / reasoning-block markers. The chat template
-            // ends with `<|channel>thought\n<channel|>` to render an
-            // empty hidden reasoning block; under degeneration the
-            // model echoes the OPEN form (`<|channel>` or the BPE
-            // fragment `<|thought`) mid-content. We treat ANY of
-            // them as a stop because legitimate reasoning blocks
-            // require `enable_thinking=true` opt-in.
-            "<|channel>",
-            "<channel|>",
-            "<|thought",
         ]
     }
 }
