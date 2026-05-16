@@ -81,6 +81,23 @@ struct BlockQ4_1 {
 
 #[repr(C)]
 #[derive(Copy, Clone, Default)]
+struct BlockQ5_0 {
+    d: u16,
+    qh: [u8; 4],
+    qs: [u8; 16],
+}
+
+#[repr(C)]
+#[derive(Copy, Clone, Default)]
+struct BlockQ5_1 {
+    d: u16,
+    m: u16,
+    qh: [u8; 4],
+    qs: [u8; 16],
+}
+
+#[repr(C)]
+#[derive(Copy, Clone, Default)]
 struct BlockQ8_0 {
     d: u16,
     qs: [i8; 32],
@@ -126,6 +143,72 @@ fn build_q4_1(n_rows: usize, n_blocks: usize) -> Vec<BlockQ4_1> {
             w.push(BlockQ4_1 {
                 d: d.to_bits(),
                 m: m.to_bits(),
+                qs,
+            });
+        }
+    }
+    w
+}
+
+fn build_q5_0(n_rows: usize, n_blocks: usize) -> Vec<BlockQ5_0> {
+    let mut w = Vec::with_capacity(n_rows * n_blocks);
+    for r in 0..n_rows {
+        for b in 0..n_blocks {
+            let mut qs = [0u8; 16];
+            for i in 0..16 {
+                let lo = ((r * 11 + b * 7 + i) % 14) as u8;
+                let hi = ((r * 13 + b * 5 + i + 3) % 14) as u8;
+                qs[i] = (hi << 4) | (lo & 0x0F);
+            }
+            let mut qh = [0u8; 4];
+            for byte_idx in 0..4 {
+                let mut v: u8 = 0;
+                for bit_idx in 0..8 {
+                    let global_bit = byte_idx * 8 + bit_idx;
+                    if (r * 17 + b * 5 + global_bit) % 5 == 0 {
+                        v |= 1 << bit_idx;
+                    }
+                }
+                qh[byte_idx] = v;
+            }
+            let d = f16::from_f32(0.04);
+            w.push(BlockQ5_0 {
+                d: d.to_bits(),
+                qh,
+                qs,
+            });
+        }
+    }
+    w
+}
+
+fn build_q5_1(n_rows: usize, n_blocks: usize) -> Vec<BlockQ5_1> {
+    let mut w = Vec::with_capacity(n_rows * n_blocks);
+    for r in 0..n_rows {
+        for b in 0..n_blocks {
+            let mut qs = [0u8; 16];
+            for i in 0..16 {
+                let lo = ((r * 11 + b * 7 + i) % 15) as u8;
+                let hi = ((r * 13 + b * 5 + i + 3) % 15) as u8;
+                qs[i] = (hi << 4) | (lo & 0x0F);
+            }
+            let mut qh = [0u8; 4];
+            for byte_idx in 0..4 {
+                let mut v: u8 = 0;
+                for bit_idx in 0..8 {
+                    let global_bit = byte_idx * 8 + bit_idx;
+                    if (r * 19 + b * 7 + global_bit) % 5 == 0 {
+                        v |= 1 << bit_idx;
+                    }
+                }
+                qh[byte_idx] = v;
+            }
+            let d = f16::from_f32(0.04);
+            let m = f16::from_f32(-0.6);
+            w.push(BlockQ5_1 {
+                d: d.to_bits(),
+                m: m.to_bits(),
+                qh,
                 qs,
             });
         }
@@ -182,6 +265,16 @@ fn run_parity(dev: &HipDevice, dtype: QDtype, n_rows: usize, k: usize) -> Result
         }
         QDtype::Q4_1 => {
             let w = build_q4_1(n_rows, n_blocks);
+            let bytes = std::mem::size_of_val(w.as_slice());
+            unsafe { std::slice::from_raw_parts(w.as_ptr() as *const u8, bytes) }.to_vec()
+        }
+        QDtype::Q5_0 => {
+            let w = build_q5_0(n_rows, n_blocks);
+            let bytes = std::mem::size_of_val(w.as_slice());
+            unsafe { std::slice::from_raw_parts(w.as_ptr() as *const u8, bytes) }.to_vec()
+        }
+        QDtype::Q5_1 => {
+            let w = build_q5_1(n_rows, n_blocks);
             let bytes = std::mem::size_of_val(w.as_slice());
             unsafe { std::slice::from_raw_parts(w.as_ptr() as *const u8, bytes) }.to_vec()
         }
@@ -256,7 +349,7 @@ fn mmvq_f16_direct_matches_cast() -> Result<()> {
         return Ok(());
     };
     let shapes = [(64usize, 2048), (512, 2048), (4096, 5120)];
-    for dtype in [QDtype::Q4_0, QDtype::Q4_1, QDtype::Q8_0] {
+    for dtype in [QDtype::Q4_0, QDtype::Q4_1, QDtype::Q5_0, QDtype::Q5_1, QDtype::Q8_0] {
         for (n_rows, k) in shapes {
             run_parity(&dev, dtype, n_rows, k)?;
         }

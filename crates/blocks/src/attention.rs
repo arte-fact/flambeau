@@ -802,7 +802,10 @@ impl StandardAttention {
             ops.cast_f32_to_f16(v_f32_offset, scratch.v_f16, kv_width)
                 .context("cast attn_v → f16")?;
         } else {
-            if matches!(self.attn_k.dtype, QDtype::Q4_0 | QDtype::Q4_1 | QDtype::Q8_0) {
+            if matches!(
+                self.attn_k.dtype,
+                QDtype::Q4_0 | QDtype::Q4_1 | QDtype::Q5_0 | QDtype::Q5_1 | QDtype::Q8_0
+            ) {
                 ops.mmvq_f16_direct(
                     self.attn_k.ptr,
                     scratch.x_q8_1,
