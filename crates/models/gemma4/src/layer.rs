@@ -268,7 +268,13 @@ pub fn forward_layer_decode<L: CacheLayout, O: Ops>(
             spec, hidden, n_heads, n_kv_heads, head_dim, rms_norm_eps, scratch.v_ones_f16,
         )?;
         let block = if use_f32_output {
-            block.with_f32_output_proj(true)
+            // F32 output_proj AND F32 Q/K/V — same gate, both prevent
+            // F16 saturation on the gemma4-26B-A4B-Q8_0 PP attention
+            // path (#108). f32_qkv requires V present (alt-attention
+            // V-from-K is gated separately on `has_kv`).
+            block
+                .with_f32_output_proj(true)
+                .with_f32_qkv(true)
         } else {
             block
         };

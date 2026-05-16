@@ -474,6 +474,18 @@ impl<'a> Ops for HipOps<'a> {
         super::norm::rmsnorm_f32(self.reg, self.stream, x, weight, y, m, k, eps)
     }
 
+    fn rmsnorm_f32_in_f16_out(
+        &self,
+        x: DevicePtr,
+        weight: DevicePtr,
+        y: DevicePtr,
+        m: usize,
+        k: usize,
+        eps: f32,
+    ) -> Result<()> {
+        super::norm::rmsnorm_f32_in_f16_out(self.reg, self.stream, x, weight, y, m, k, eps)
+    }
+
     fn l2_norm_f32(
         &self,
         x: DevicePtr,

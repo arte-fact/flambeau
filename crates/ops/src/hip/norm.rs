@@ -156,6 +156,41 @@ pub fn rmsnorm_f32(
     Ok(())
 }
 
+/// Per-row RMSNorm with F32 input + F16 weight + saturating F16 output.
+/// Used by gemma4 26B-A4B-Q8_0 PP path's `with_f32_qkv(true)`:
+/// keeps Q/K/V in F32 across the per-head rmsnorm and only down-casts
+/// to F16 at the rmsnorm output store. Matches llama.cpp's gemma4 path
+/// where Q/K/V stay F32 until the KV cache append / attention input
+/// boundary. #108.
+pub fn rmsnorm_f32_in_f16_out(
+    reg: &OpsRegistry,
+    stream: &HipStream,
+    x_f32: DevicePtr,
+    weight_f16: DevicePtr,
+    y_f16: DevicePtr,
+    m: usize,
+    k: usize,
+    eps: f32,
+) -> Result<()> {
+    let module = reg.expect_module("rmsnorm_f32_in_f16_out")?;
+    let kernel = module.kernel("flambeau_rmsnorm_f32_in_f16_out")?;
+    let m_i = m as i32;
+    let k_i = k as i32;
+    let x_ptr: u64 = x_f32.as_usize() as u64;
+    let w_ptr: u64 = weight_f16.as_usize() as u64;
+    let y_ptr: u64 = y_f16.as_usize() as u64;
+    let mut args = KernelArgs::new();
+    args.push(&x_ptr);
+    args.push(&w_ptr);
+    args.push(&y_ptr);
+    args.push(&m_i);
+    args.push(&k_i);
+    args.push(&eps);
+    let cfg = LaunchCfg::one_d(m as u32, 256);
+    unsafe { kernel.launch(stream, cfg, args)? };
+    Ok(())
+}
+
 /// L2 normalization along the last dimension. `y[i] = x[i] / sqrt(sum(x^2) + eps)`.
 /// F32 in/out. Used by GDN on Q and K before the recurrent state update.
 /// Launch: one block/row, 256 threads.

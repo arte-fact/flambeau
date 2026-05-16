@@ -396,6 +396,16 @@ pub struct StandardAttention {
     /// row-parallel output projection sum (see
     /// `feedback_gemma4_attn_output_proj_f16_saturate`).
     pub f32_output_proj: bool,
+    /// `true` ⇒ keep Q/K/V projection output in F32 across the per-head
+    /// rmsnorm, only down-casting to F16 (saturating) at the rmsnorm
+    /// output store. Matches llama.cpp / candle gemma4 behaviour. Used
+    /// by gemma4 26B-A4B-Q8_0 PP path to fix #108 where the early F16
+    /// down-cast of F32-range projection outputs information-loses
+    /// large values to identical saturated F16 and produces NaN
+    /// downstream. Requires `attn_v_norm_w` to be set (V-norm weight,
+    /// typically a unit-ones buffer for gemma4). Mutually exclusive
+    /// with `gated` and with the alt-attention V-absent path.
+    pub f32_qkv: bool,
 }
 
 /// `true` iff `Ops::mmvq_f16_direct` has a kernel for `dtype`. Covers
@@ -516,6 +526,7 @@ impl StandardAttention {
             softmax_scale: None,
             window_size: None,
             f32_output_proj: false,
+            f32_qkv: false,
         })
     }
 
@@ -550,6 +561,22 @@ impl StandardAttention {
     /// must consume F32. Used by gemma4 26B-A4B full-attention layers.
     pub fn with_f32_output_proj(mut self, enabled: bool) -> Self {
         self.f32_output_proj = enabled;
+        self
+    }
+
+    /// Toggle the F32 Q/K/V projection path. When enabled, Q/K/V
+    /// projections write F32 into `scratch.mmvq_f32` and the per-head
+    /// rmsnorm is run via `rmsnorm_f32_in_f16_out` (F32 input, F16
+    /// output, saturating). The standard per-head `rmsnorm_f16` step
+    /// is then skipped because the F32-in variant already produced
+    /// normed F16 Q/K/V. Mutually exclusive with `gated`. Requires
+    /// `attn_v_norm_w` (the V-norm weight, typically a `[head_dim]`
+    /// unit-ones buffer for gemma4). Used by gemma4 26B-A4B-Q8_0 PP
+    /// to fix #108. Bails for alt-attention (V absent) — that path
+    /// needs to copy K's pre-norm row before K's norm runs, which
+    /// the F32-in path collapses into one kernel.
+    pub fn with_f32_qkv(mut self, enabled: bool) -> Self {
+        self.f32_qkv = enabled;
         self
     }
 
@@ -756,6 +783,150 @@ impl StandardAttention {
         )
         .context("attn_norm + quant")?;
 
+        // F32 Q/K/V short-circuit: write F32 mmvq output and fold the
+        // F16 cast into the per-head rmsnorm via `rmsnorm_f32_in_f16_out`.
+        // Mutually exclusive with `gated`. Supports V-absent
+        // alt-attention by running V-norm on the F32 K projection
+        // (pre-K-norm) before K-norm overwrites k_f16.
+        if self.f32_qkv {
+            if self.gated {
+                bail!("StandardAttention: f32_qkv + gated path not supported");
+            }
+            let attn_v_ref = self.attn_v.as_ref();
+            let v_norm_w = self.attn_v_norm_w.ok_or_else(|| {
+                anyhow::anyhow!(
+                    "StandardAttention: f32_qkv requires `attn_v_norm_w` (unit-ones buffer for gemma4)"
+                )
+            })?;
+            // Q: F32 mmvq → rmsnorm_f32_in_f16_out → q_f16.
+            ops.mmvq(
+                self.attn_q.ptr,
+                scratch.x_q8_1,
+                scratch.mmvq_f32,
+                q_proj_rows,
+                hidden,
+                self.attn_q.dtype,
+            )
+            .context("f32_qkv: mmvq attn_q")?;
+            ops.rmsnorm_f32_in_f16_out(
+                scratch.mmvq_f32,
+                self.attn_q_norm_w,
+                scratch.q_f16,
+                n_heads,
+                head_dim,
+                self.rms_norm_eps,
+            )
+            .context("f32_qkv: attn_q_norm (F32→F16 sat)")?;
+            // K + V: prefer fused Q8_0 path when both K and V are
+            // present + Q8_0 (writes F32 K + F32 V to the slab in one
+            // launch). Falls back to two unfused mmvqs for mixed
+            // dtypes. For alt-attention (V absent) V's rmsnorm reads
+            // the F32 K projection BEFORE K's own rmsnorm overwrites
+            // (V = K's pre-norm row, matches the legacy F16
+            // DtoD-memcpy-from-k_f16 semantics).
+            let fuse_q8_0 = attn_v_ref
+                .map(|v| self.attn_k.dtype == QDtype::Q8_0 && v.dtype == QDtype::Q8_0)
+                .unwrap_or(false);
+            if fuse_q8_0 {
+                let v = attn_v_ref.expect("fuse_q8_0 implies V present");
+                let v_f32_offset = scratch.mmvq_f32.offset_bytes(kv_width * 4);
+                ops.mmvq_q8_0_gate_up(
+                    self.attn_k.ptr,
+                    v.ptr,
+                    scratch.x_q8_1,
+                    scratch.mmvq_f32,
+                    v_f32_offset,
+                    kv_width,
+                    kv_width,
+                    hidden,
+                )
+                .context("f32_qkv: fused Q8_0 K+V mmvq")?;
+                ops.rmsnorm_f32_in_f16_out(
+                    scratch.mmvq_f32,
+                    self.attn_k_norm_w,
+                    scratch.k_f16,
+                    n_kv_heads,
+                    head_dim,
+                    self.rms_norm_eps,
+                )
+                .context("f32_qkv: attn_k_norm (F32→F16 sat, Q8_0 fused)")?;
+                ops.rmsnorm_f32_in_f16_out(
+                    v_f32_offset,
+                    v_norm_w,
+                    scratch.v_f16,
+                    n_kv_heads,
+                    head_dim,
+                    self.rms_norm_eps,
+                )
+                .context("f32_qkv: attn_v_norm (F32→F16 sat, Q8_0 fused)")?;
+            } else {
+                ops.mmvq(
+                    self.attn_k.ptr,
+                    scratch.x_q8_1,
+                    scratch.mmvq_f32,
+                    kv_width,
+                    hidden,
+                    self.attn_k.dtype,
+                )
+                .context("f32_qkv: mmvq attn_k")?;
+                if let Some(v) = attn_v_ref {
+                    // K-rmsnorm first (uses then-overwrites mmvq_f32),
+                    // then V mmvq + V-rmsnorm. Sequential reuse of slab.
+                    ops.rmsnorm_f32_in_f16_out(
+                        scratch.mmvq_f32,
+                        self.attn_k_norm_w,
+                        scratch.k_f16,
+                        n_kv_heads,
+                        head_dim,
+                        self.rms_norm_eps,
+                    )
+                    .context("f32_qkv: attn_k_norm (F32→F16 sat)")?;
+                    ops.mmvq(
+                        v.ptr,
+                        scratch.x_q8_1,
+                        scratch.mmvq_f32,
+                        kv_width,
+                        hidden,
+                        v.dtype,
+                    )
+                    .context("f32_qkv: mmvq attn_v")?;
+                    ops.rmsnorm_f32_in_f16_out(
+                        scratch.mmvq_f32,
+                        v_norm_w,
+                        scratch.v_f16,
+                        n_kv_heads,
+                        head_dim,
+                        self.rms_norm_eps,
+                    )
+                    .context("f32_qkv: attn_v_norm (F32→F16 sat)")?;
+                } else {
+                    // Alt-attention: V = K's pre-norm F32 projection.
+                    // V-rmsnorm reads mmvq_f32 (still holds K) and writes
+                    // to v_f16; THEN K-rmsnorm reads same mmvq_f32 and
+                    // writes to k_f16. Both reads are read-only on
+                    // mmvq_f32 so order doesn't matter; the F32 buffer
+                    // is freed after both.
+                    ops.rmsnorm_f32_in_f16_out(
+                        scratch.mmvq_f32,
+                        v_norm_w,
+                        scratch.v_f16,
+                        n_kv_heads,
+                        head_dim,
+                        self.rms_norm_eps,
+                    )
+                    .context("f32_qkv: attn_v_norm (V=K pre-norm, F32→F16 sat)")?;
+                    ops.rmsnorm_f32_in_f16_out(
+                        scratch.mmvq_f32,
+                        self.attn_k_norm_w,
+                        scratch.k_f16,
+                        n_kv_heads,
+                        head_dim,
+                        self.rms_norm_eps,
+                    )
+                    .context("f32_qkv: attn_k_norm (post V-from-K, F32→F16 sat)")?;
+                }
+            }
+        } else {
         // 2. Q projection. `gated`: fused Q+gate at `2 * q_width`
         // rows, written into the fused F16 buffer for the split below.
         // Plain: Q-only at `q_width` rows, written directly into q_f16
@@ -913,9 +1084,13 @@ impl StandardAttention {
                 }
             }
         }
+        } // end of `if self.f32_qkv { ... } else { ... }`
 
         // 6. Per-head Q / K rmsnorm. V-norm (unlearned, gemma4) runs
-        // only when `attn_v_norm_w` is set.
+        // only when `attn_v_norm_w` is set. Skipped entirely under
+        // `f32_qkv` — that path's `rmsnorm_f32_in_f16_out` already
+        // produced normed F16 Q/K/V.
+        if !self.f32_qkv {
         ops.rmsnorm_f16(
             scratch.q_f16,
             self.attn_q_norm_w,
@@ -945,6 +1120,7 @@ impl StandardAttention {
             )
             .context("attn_v_norm (unlearned)")?;
         }
+        } // end of `if !self.f32_qkv { ... }`
 
         // 7. Upload position (1-slot) and apply RoPE on Q + K.
         scratch.positions_host[0] = position as i32;

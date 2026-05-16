@@ -377,6 +377,20 @@ pub trait Ops {
         eps: f32,
     ) -> Result<()>;
 
+    /// Per-row RMSNorm with F32 input + F16 weight + saturating F16
+    /// output. Used by gemma4 26B-A4B-Q8_0 PP path's `with_f32_qkv` to
+    /// keep Q/K/V F32 across the per-head rmsnorm and down-cast only
+    /// at the rmsnorm output store. #108.
+    fn rmsnorm_f32_in_f16_out(
+        &self,
+        x: DevicePtr,
+        weight: DevicePtr,
+        y: DevicePtr,
+        m: usize,
+        k: usize,
+        eps: f32,
+    ) -> Result<()>;
+
     fn l2_norm_f32(
         &self,
         x: DevicePtr,

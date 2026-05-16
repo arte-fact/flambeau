@@ -546,6 +546,57 @@ fn smoke_31b_q8_0_tp2() {
 /// is TP-specific (likely in the per-branch norm composition for
 /// shared-MLP + routed-MoE). If PP-MoE ALSO overflows, the bug is
 /// gemma4-general.
+/// Isolation probe for #108 — gemma4-31B-Q8_0 PP2. Same forward block
+/// (StandardAttention::forward_decode) as 26B-A4B-Q8_0 PP2 but **dense
+/// (no MoE)** at the same Q8_0 quant. If this works → bug is MoE-
+/// specific; if this fails → bug is Q8_0 in the attention block itself.
+#[test]
+fn isolate_31b_q8_0_pp2_dense_vs_moe() {
+    let Some(file) = open_or_skip("gemma-4-31B-it-Q8_0.gguf") else {
+        return;
+    };
+    if device_count().map(|n| n < 2).unwrap_or(true) {
+        eprintln!("skipping — need 2 HIP devices");
+        return;
+    }
+    let file = Arc::new(file);
+    let cfg = Gemma4Config::from_gguf(&file).expect("cfg");
+    let vocab = cfg.vocab_size;
+    // PP3 — 31B Q8_0 weights are ~33 GB. PP2 OOMs (~16 GB/rank);
+    // PP4 on this rig hits a non-gfx906 mid-arch kernel-load issue
+    // unrelated to #108. PP3 on 0/2/3 = ~11 GB/rank fits comfortably.
+    let (prompt_ids, fb_ids) = match flambeau_decode_pp_pertoken(file.clone(), &[0, 2, 3]) {
+        Ok(r) => r,
+        Err(e) => {
+            let full = format!("{e:#}");
+            if full.contains("out of memory") || full.contains("OutOfMemory") {
+                eprintln!("skipping — 31B-Q8_0 PP4 OOM: {full}");
+                return;
+            }
+            eprintln!("31B-Q8_0 PP4 decode failed: {full}");
+            panic!("flambeau decode PP4 (31B-Q8_0)");
+        }
+    };
+    let tokenizer = load_from_gguf(&file).expect("tokenizer");
+    let fb_text = tokenizer.decode(&fb_ids).unwrap_or_default();
+    eprintln!("\n=== ISOLATE | 31B-Q8_0 PP2 (hip:0,2) per-token ===");
+    eprintln!("  prompt   ({} ids): {prompt_ids:?}", prompt_ids.len());
+    eprintln!("  flambeau ({} ids): {fb_ids:?}", fb_ids.len());
+    eprintln!("  flambeau text: {fb_text:?}");
+    let first = fb_ids[0];
+    let all_same = fb_ids.iter().all(|&t| t == first);
+    if all_same {
+        eprintln!("  [SAME-FAILURE] all {} tokens identical ({first}) — bug is Q8_0 attention path, not MoE", fb_ids.len());
+    } else if fb_text.to_lowercase().contains("paris") {
+        eprintln!("  [OK] coherent — bug is MoE-specific, not Q8_0-attention");
+    } else {
+        eprintln!("  [PARTIAL] varied but non-topical");
+    }
+    for (i, &t) in fb_ids.iter().enumerate() {
+        assert!((t as usize) < vocab, "step {i}: token {t} >= vocab {vocab}");
+    }
+}
+
 /// Per-iteration logits-health probe for the 26B-A4B-Q8_0 PP MoE NaN
 /// debug (#108). Runs the prompt token by token and after each step
 /// reports max|logit|, NaN count, top-3 ids. Goal: localise *which*
@@ -645,7 +696,7 @@ fn smoke_26b_a4b_q8_0_pp2() {
                 );
                 return;
             }
-            eprintln!("26B-A4B PP2 decode failed: {e}");
+            eprintln!("26B-A4B PP2 decode failed: {e:#}");
             panic!("flambeau decode PP2 (MoE)");
         }
     };
