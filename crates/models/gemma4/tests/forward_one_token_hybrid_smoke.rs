@@ -262,6 +262,7 @@ fn build_driver(sub_clusters: Vec<Arc<HipCluster>>, global: Arc<HipCluster>) -> 
                 lm_dims,
                 is_head_rank,
                 /*max_tokens=*/ 16,
+                flambeau_blocks::RawAllocTracker::new(),
             )
             .expect("rank state");
             rank_state.push(rs);

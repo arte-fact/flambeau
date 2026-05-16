@@ -30,9 +30,11 @@ use std::sync::Arc;
 use anyhow::{anyhow, bail, Context, Result};
 use flambeau_backend_hip::{HipCluster, HipDevice};
 use flambeau_blocks::{
-    embed_token_host, forward_one_token_hybrid, tp_allreduce_sum, upload_f16_ones, Activation,
-    Buffer, DenseMlpDecodeScratch, DenseMlpTp, HybridCluster, HybridDecodeDriver, RawAllocTracker,
-    RowParallel, StandardAttention, StandardAttentionDecodeScratch, WeightHandle, F16,
+    apply_layer_output_scale_f16, embed_token_host, forward_one_token_hybrid, tp_allreduce_sum,
+    tp_allreduce_sum_f32_synced, tp_allreduce_sum_synced, upload_f16_ones, Activation, Buffer,
+    DenseMlpDecodeScratch, DenseMlpTp, HybridCluster, HybridDecodeDriver, LmHead, OutputNorm,
+    RawAllocTracker, RowParallel, StandardAttention, StandardAttentionDecodeScratch, TokenEmbd,
+    TpRankCore, WeightHandle, WeightUploader, F16,
 };
 use flambeau_core::{CopyDirection, Device, DevicePtr, Stream};
 use flambeau_ops::hip::{HipOps, OpsRegistry};
@@ -62,6 +64,15 @@ pub struct HybridRankState {
     pub hidden: DevicePtr,
     pub partial_attn: DevicePtr,
     pub partial_ffn: DevicePtr,
+    /// F32 attention path scratch (allocated only when the stage owns
+    /// at least one full-attention MoE layer; head_dim=512 + Q8_0
+    /// saturates F16 — see `feedback_gemma4_attn_output_proj_f16_saturate`).
+    pub partial_attn_f32: DevicePtr,
+    pub attn_normed_f32_tmp: DevicePtr,
+    /// MoE FFN cascade scratch (allocated only when `cfg.moe.is_some()`).
+    pub tp_moe_scratch: Option<crate::tp_moe_upload::Gemma4TpMoeScratch>,
+    /// Producer-done event for synced AR helpers.
+    pub core: TpRankCore,
     scratch: HybridScratchPtrs,
     /// Head rank only.
     pub output_head_scratch: Option<OutputHeadScratch>,
@@ -180,6 +191,7 @@ impl HybridRankState {
         lm_head_dims: Option<[usize; 2]>,
         is_head_rank: bool,
         max_tokens: usize,
+        mut raw_alloc: RawAllocTracker,
     ) -> Result<Self> {
         device.bind()?;
         if layer_weights.len() != layers_global.len() {
@@ -206,10 +218,7 @@ impl HybridRankState {
         for &gi in layers_global {
             let spec = &layout.layers[gi];
             if !spec.has_kv {
-                bail!("HybridRankState: shared-KV tail layer {gi} not supported in S10-A");
-            }
-            if spec.ffn_kind != FfnKind::Dense {
-                bail!("HybridRankState: MoE layer {gi} not supported in S10-A");
+                bail!("HybridRankState: shared-KV tail layer {gi} not supported in S10-H");
             }
             let n_kv_local = spec.n_kv_heads / tp_size;
             let kv = KvCache::<F16Contig, HipDevice>::new(
@@ -221,8 +230,6 @@ impl HybridRankState {
             .map_err(|e| anyhow!("kv alloc layer {gi}: {e}"))?;
             kv_caches.push(Some(kv));
         }
-
-        let mut raw_alloc = RawAllocTracker::new();
 
         let mmvq_max = q_width_local_max
             .max(kv_width_local_max)
@@ -258,6 +265,32 @@ impl HybridRankState {
         let hidden_ptr = raw_alloc.alloc_f16(device, hidden)?.0;
         let partial_attn = raw_alloc.alloc_f16(device, hidden)?.0;
         let partial_ffn = raw_alloc.alloc_f16(device, hidden)?.0;
+
+        let has_full_attn_layers = cfg.moe.is_some()
+            && layers_global.iter().any(|&gi| !layout.layers[gi].is_swa);
+        let (partial_attn_f32, attn_normed_f32_tmp) = if has_full_attn_layers {
+            (
+                raw_alloc.alloc_f32(device, hidden)?.0,
+                raw_alloc.alloc_f32(device, hidden)?.0,
+            )
+        } else {
+            (DevicePtr::NULL, DevicePtr::NULL)
+        };
+
+        let tp_moe_scratch = if let Some(moe_dims) = cfg.moe {
+            let local_inter = moe_dims.moe_intermediate_size / tp_size;
+            Some(crate::tp_moe_upload::Gemma4TpMoeScratch::alloc(
+                device,
+                hidden,
+                local_inter,
+                moe_dims.num_experts,
+                moe_dims.num_experts_per_tok,
+                &mut raw_alloc,
+            )?)
+        } else {
+            None
+        };
+
         let output_head_scratch = if is_head_rank {
             Some(OutputHeadScratch {
                 x_norm_f16: raw_alloc.alloc_f16(device, hidden)?.0,
@@ -267,6 +300,9 @@ impl HybridRankState {
         } else {
             None
         };
+
+        let core = TpRankCore::new(rank_in_stage, device.id())
+            .map_err(|e| anyhow!("HybridRankState core: {e}"))?;
 
         Ok(Self {
             rank_in_stage,
@@ -280,6 +316,10 @@ impl HybridRankState {
             hidden: hidden_ptr,
             partial_attn,
             partial_ffn,
+            partial_attn_f32,
+            attn_normed_f32_tmp,
+            tp_moe_scratch,
+            core,
             scratch,
             output_head_scratch,
             positions_host: vec![0i32; 1],
@@ -416,6 +456,95 @@ impl Gemma4HybridDriver {
         })
     }
 
+    /// Real-GGUF upload entry. Uses [`partition_layers_pp`] for the
+    /// stage assignment; head stage = last stage, head rank = 0 (the
+    /// TP convention — every rank in the head stage has output_norm /
+    /// lm_head replicated, but rank 0 owns the head-rank slot).
+    pub fn upload(
+        file: &flambeau_quant::GgufFile,
+        cfg: Gemma4Config,
+        layout: ModelLayout,
+        hc: HybridCluster,
+        max_tokens: usize,
+    ) -> Result<Self> {
+        let n_stages = hc.n_stages();
+        let tp_size = hc.tp_size();
+        if n_stages == 0 || tp_size == 0 {
+            bail!("Gemma4HybridDriver::upload: n_stages={n_stages} tp_size={tp_size}");
+        }
+        // Same shardability invariants as TP path.
+        crate::tp::Gemma4TpStage::validate_shardable(&cfg, tp_size)?;
+        if let Some(moe) = &cfg.moe {
+            if moe.moe_intermediate_size % tp_size != 0 {
+                bail!(
+                    "Gemma4HybridDriver::upload: moe_intermediate_size {} not divisible by tp_size {}",
+                    moe.moe_intermediate_size,
+                    tp_size
+                );
+            }
+        }
+        if cfg.per_layer_embed.is_some() {
+            bail!("Gemma4HybridDriver::upload: per-layer-embd is followup work");
+        }
+        for spec in &layout.layers {
+            if !spec.has_kv {
+                bail!(
+                    "Gemma4HybridDriver::upload: shared-KV tail layer {} unsupported (S10-H)",
+                    spec.index
+                );
+            }
+        }
+
+        let layer_to_stage = partition_layers_pp(n_stages, &layout)?;
+        // Per-stage `layers_global` (ascending).
+        let mut layers_per_stage: Vec<Vec<usize>> = vec![Vec::new(); n_stages];
+        for (i, &s) in layer_to_stage.iter().enumerate() {
+            layers_per_stage[s].push(i);
+        }
+        let head_stage_idx = n_stages - 1;
+        let head_rank_in_head_stage_idx = 0usize;
+
+        let mut stages: Vec<Gemma4HybridStage> = Vec::with_capacity(n_stages);
+        for s in 0..n_stages {
+            let sub_cluster = hc.stage(s).sub_cluster.clone();
+            let layers_global = layers_per_stage[s].clone();
+            let is_stage_0 = s == 0;
+            let is_head_stage = s == head_stage_idx;
+            let mut rank_state: Vec<HybridRankState> = Vec::with_capacity(tp_size);
+            for r in 0..tp_size {
+                let device = sub_cluster.device(r);
+                device.bind()?;
+                let is_head_rank = is_head_stage && r == head_rank_in_head_stage_idx;
+                let rs = upload_one_hybrid_stage_rank(
+                    file,
+                    &cfg,
+                    &layout,
+                    &layers_global,
+                    r,
+                    tp_size,
+                    device,
+                    max_tokens,
+                    is_stage_0,
+                    is_head_rank,
+                )
+                .with_context(|| format!("stage {s} rank {r} hybrid upload"))?;
+                rank_state.push(rs);
+            }
+            let stage = Gemma4HybridStage::new(s, &sub_cluster, layers_global, rank_state)?;
+            stages.push(stage);
+        }
+
+        Self::from_pieces(
+            hc,
+            cfg,
+            layout,
+            stages,
+            layer_to_stage,
+            head_stage_idx,
+            head_rank_in_head_stage_idx,
+        )
+    }
+
     pub fn tp_size(&self) -> usize {
         self.hc.tp_size()
     }
@@ -509,12 +638,119 @@ impl Drop for Gemma4HybridDriver {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
+fn upload_one_hybrid_stage_rank(
+    file: &flambeau_quant::GgufFile,
+    cfg: &Gemma4Config,
+    layout: &ModelLayout,
+    layers_global: &[usize],
+    rank: usize,
+    n_ranks: usize,
+    device: &HipDevice,
+    max_tokens: usize,
+    is_stage_0: bool,
+    is_head_rank: bool,
+) -> Result<HybridRankState> {
+    let stream = device.default_stream();
+    let mut tracker = RawAllocTracker::new();
+
+    // Globals via typed roles. Stage 0 owns token_embd; head-stage's
+    // head rank owns output_norm + (untied) lm_head. `world=1` for
+    // globals: the per-rank replica is uploaded as-is.
+    let token_embd_dims: [usize; 2] = {
+        let info = file
+            .tensors
+            .get("token_embd.weight")
+            .ok_or_else(|| anyhow!("token_embd missing"))?;
+        [info.dims[0] as usize, info.dims[1] as usize]
+    };
+    let mut up = WeightUploader {
+        device,
+        stream,
+        tracker: &mut tracker,
+        file,
+        cfg,
+        world: 1,
+        rank: 0,
+    };
+    // Stage 0 ranks need token_embd for input embedding lookup. The
+    // head-stage's head rank ALSO needs token_embd when tied
+    // (`output_head_for_hybrid` reads `lm_head.or(token_embd)`), so
+    // upload a per-rank replica there too (matches PP's pattern).
+    let needs_token_embd = is_stage_0 || (is_head_rank && cfg.tied_lm_head);
+    let token_embd = if needs_token_embd {
+        Some(crate::tp::uploaded_to_device_tensor(
+            up.upload_required::<TokenEmbd>(0)?,
+        ))
+    } else {
+        None
+    };
+    let (output_norm, lm_head) = if is_head_rank {
+        let on = crate::tp::uploaded_to_device_tensor(up.upload_required::<OutputNorm>(0)?);
+        let lm = if cfg.tied_lm_head {
+            None
+        } else {
+            up.upload::<LmHead>(0)?
+                .map(crate::tp::uploaded_to_device_tensor)
+        };
+        (Some(on), lm)
+    } else {
+        (None, None)
+    };
+    drop(up);
+
+    // Per-assigned-layer sharded weights.
+    let mut layer_weights = Vec::with_capacity(layers_global.len());
+    for &gi in layers_global {
+        let spec = &layout.layers[gi];
+        let lw = crate::tp::upload_layer_tp(
+            file, spec, cfg, rank, n_ranks, device, stream, &mut tracker,
+        )
+        .with_context(|| format!("layer {gi}"))?;
+        layer_weights.push(lw);
+    }
+
+    let lm_head_dims = if is_head_rank {
+        Some(token_embd_dims)
+    } else {
+        None
+    };
+
+    let token_embd_dims_opt = if needs_token_embd {
+        Some(token_embd_dims)
+    } else {
+        None
+    };
+
+    HybridRankState::from_pieces(
+        device,
+        rank,
+        cfg,
+        layout,
+        layers_global,
+        n_ranks,
+        layer_weights,
+        token_embd,
+        token_embd_dims_opt,
+        output_norm,
+        lm_head,
+        lm_head_dims,
+        is_head_rank,
+        max_tokens,
+        tracker,
+    )
+}
+
 fn forward_layer_decode_hybrid(
     driver: &mut Gemma4HybridDriver,
     stage_idx: usize,
     il_in_stage: usize,
     position: usize,
 ) -> Result<()> {
+    let global_il = driver.stages[stage_idx].layers_global[il_in_stage];
+    if driver.layout.layers[global_il].ffn_kind == FfnKind::Moe {
+        return forward_layer_decode_hybrid_moe(driver, stage_idx, il_in_stage, position);
+    }
     let cfg = driver.cfg.clone();
     // Split-borrow: `driver.stages` (mut) and `driver.hc` (shared) live
     // on distinct fields and can be borrowed independently.
@@ -527,7 +763,6 @@ fn forward_layer_decode_hybrid(
     if n_ranks != 2 {
         bail!("forward_layer_decode_hybrid: TP{n_ranks} not supported in S10-A; only tp2");
     }
-    let global_il = stage.layers_global[il_in_stage];
     let spec = driver.layout.layers[global_il];
 
     let hidden = cfg.hidden_size;
@@ -790,6 +1025,394 @@ fn forward_layer_decode_hybrid(
             hidden,
         )?;
     }
+    Ok(())
+}
+
+/// MoE-aware decode-layer composer for hybrid (pp+tp). Mirrors
+/// `gemma4::tp::forward_decode_layer_tp_moe` but every AR is per-stage
+/// (against the sub-cluster + per-stage `BarP2pAllReduce`). Full-attn
+/// layers (head_dim=512 on 26B-A4B) go through the F32 attention output
+/// path; SWA layers stay on the F16 path.
+fn forward_layer_decode_hybrid_moe(
+    driver: &mut Gemma4HybridDriver,
+    stage_idx: usize,
+    il_in_stage: usize,
+    position: usize,
+) -> Result<()> {
+    let cfg = driver.cfg.clone();
+    let hc = &driver.hc;
+    let stage_cluster = hc.stage(stage_idx);
+    let sub_cluster = &stage_cluster.sub_cluster;
+    let ar = &stage_cluster.ar;
+    let stage = &mut driver.stages[stage_idx];
+    let n_ranks = sub_cluster.ranks();
+    if n_ranks != 2 {
+        bail!("forward_layer_decode_hybrid_moe: TP{n_ranks} unsupported in S10-H; only tp2");
+    }
+    let global_il = stage.layers_global[il_in_stage];
+    let spec = driver.layout.layers[global_il];
+
+    let hidden = cfg.hidden_size;
+    let head_dim = spec.head_dim;
+    let n_heads_local = spec.n_heads / n_ranks;
+    let n_kv_local = spec.n_kv_heads / n_ranks;
+    let ff_len = cfg.feed_forward_length;
+    let ff_len_local = ff_len / n_ranks;
+    let window: i32 = spec.window as i32;
+    let rms_eps = cfg.rms_norm_eps;
+    let is_full_attn = !spec.is_swa;
+
+    // Phase 1: per-rank attention. Full-attn uses F32 output_proj.
+    for r in 0..n_ranks {
+        let dev = sub_cluster.device(r);
+        dev.bind()?;
+        let stream = dev.default_stream();
+        let reg = &stage.regs[r];
+        let ops = HipOps::new(reg, stream);
+        let rs = &mut stage.rank_state[r];
+        let weights = &rs.layer_weights[il_in_stage];
+        let x_in = rs.hidden;
+        let block = weights
+            .build_attn_block(
+                &spec,
+                hidden,
+                n_heads_local,
+                n_kv_local,
+                head_dim,
+                rms_eps,
+                rs.scratch.v_ones_f16.0,
+            )?;
+        let block = if is_full_attn {
+            block.with_f32_output_proj(true)
+        } else {
+            block
+        };
+        let block = if window > 0 {
+            block.with_window_size(window as u32)
+        } else {
+            block
+        };
+        let delta_out = if is_full_attn {
+            rs.partial_attn_f32
+        } else {
+            rs.partial_attn
+        };
+        let kv = rs.kv_caches[il_in_stage]
+            .as_mut()
+            .expect("S10-H requires per-layer KV");
+        let mut std_scratch = StandardAttentionDecodeScratch {
+            x_q8_1: rs.scratch.x_q8_1.0,
+            mmvq_f32: rs.scratch.mmvq_f32.0,
+            q_fused_f16: DevicePtr(0),
+            q_f16: rs.scratch.q_f16.0,
+            gate_f16: DevicePtr(0),
+            k_f16: rs.scratch.k_f16.0,
+            v_f16: rs.scratch.v_f16.0,
+            k_q8_0: DevicePtr(0),
+            v_q8_0: DevicePtr(0),
+            attn_out_f16: rs.scratch.attn_out_local.0,
+            gated_out_f16: DevicePtr(0),
+            positions: rs.scratch.positions.0,
+            positions_host: &mut rs.positions_host,
+            splitk_partials_m: rs.scratch.splitk_partials_m.0,
+            splitk_partials_s: rs.scratch.splitk_partials_s.0,
+            splitk_partials_o: rs.scratch.splitk_partials_o.0,
+        };
+        block
+            .forward_decode(
+                &ops, dev, stream, x_in, delta_out, kv, &mut std_scratch, position,
+                /* slots = */ None,
+            )
+            .context("StandardAttention::forward_decode (gemma4 hybrid MoE)")?;
+    }
+
+    // Phase 2: AR-sum attention partial (F32 on full-attn, F16 on SWA).
+    {
+        let cores: Vec<&TpRankCore> = stage.rank_state.iter().map(|rs| &rs.core).collect();
+        let streams: [&_; 2] = [
+            sub_cluster.device(0).default_stream(),
+            sub_cluster.device(1).default_stream(),
+        ];
+        if is_full_attn {
+            let partials: [DevicePtr; 2] = [
+                stage.rank_state[0].partial_attn_f32,
+                stage.rank_state[1].partial_attn_f32,
+            ];
+            // SAFETY: partial_attn_f32 owns `hidden` F32 elements per
+            // rank; streams correspond to those ranks; cores carry the
+            // producer_done events the synced helper records before AR.
+            unsafe {
+                tp_allreduce_sum_f32_synced(ar, sub_cluster, &cores, &partials, hidden, &streams)
+            }
+            .context("hybrid MoE AR sum partial_attn_f32 (full-attn)")?;
+        } else {
+            // SAFETY: partial_attn is `hidden` F16 elements per rank;
+            // same ordering contract as the F32 branch.
+            let _ = unsafe {
+                let partials: [Buffer<F16, RowParallel<0>>; 2] = [
+                    Buffer::from_raw_unchecked(stage.rank_state[0].partial_attn, hidden),
+                    Buffer::from_raw_unchecked(stage.rank_state[1].partial_attn, hidden),
+                ];
+                tp_allreduce_sum_synced::<0>(ar, sub_cluster, &cores, &partials, &streams)
+            }
+            .context("hybrid MoE AR sum partial_attn (SWA)")?;
+        }
+    }
+
+    // Phase 3: per-rank post_attention_norm + residual → attn_residual_f16.
+    for r in 0..n_ranks {
+        let dev = sub_cluster.device(r);
+        dev.bind()?;
+        let stream = dev.default_stream();
+        let reg = &stage.regs[r];
+        let ops = HipOps::new(reg, stream);
+        let rs = &mut stage.rank_state[r];
+        let weights = &rs.layer_weights[il_in_stage];
+        let scratch = &mut rs.scratch;
+        if is_full_attn {
+            let norm_f32 = weights.post_attention_norm_f32.ok_or_else(|| {
+                anyhow!("layer {global_il} rank {r}: post_attention_norm_f32 missing (hybrid MoE full-attn)")
+            })?;
+            ops.rmsnorm_f32(
+                rs.partial_attn_f32,
+                norm_f32,
+                rs.attn_normed_f32_tmp,
+                1,
+                hidden,
+                rms_eps,
+            )
+            .context("hybrid MoE F32 post_attention_norm")?;
+            ops.cast_f32_to_f16(rs.attn_normed_f32_tmp, scratch.attn_out_local.0, hidden)
+                .context("hybrid MoE F32→F16 cast post-attn-norm")?;
+            ops.add_f16(
+                rs.hidden,
+                scratch.attn_out_local.0,
+                scratch.attn_residual_f16.0,
+                hidden,
+            )
+            .context("hybrid MoE F16 residual add (full-attn)")?;
+        } else {
+            ops.rmsnorm_f16(
+                rs.partial_attn,
+                weights.post_attention_norm,
+                scratch.attn_out_local.0,
+                1,
+                hidden,
+                rms_eps,
+            )
+            .context("hybrid MoE F16 post_attention_norm (SWA)")?;
+            ops.add_f16(
+                rs.hidden,
+                scratch.attn_out_local.0,
+                scratch.attn_residual_f16.0,
+                hidden,
+            )
+            .context("hybrid MoE F16 residual add (SWA)")?;
+        }
+    }
+
+    // Phase 4: per-rank MoE FFN → partial_shared_mlp_f32 + partial_moe_f32.
+    for r in 0..n_ranks {
+        let dev = sub_cluster.device(r);
+        dev.bind()?;
+        let stream = dev.default_stream();
+        let reg = &stage.regs[r];
+        let ops = HipOps::new(reg, stream);
+        let rs = &mut stage.rank_state[r];
+        let layer = &rs.layer_weights[il_in_stage];
+        let tp_moe = layer.tp_moe.as_ref().ok_or_else(|| {
+            anyhow!("layer {global_il} rank {r}: tp_moe weights missing for MoE layer (hybrid)")
+        })?;
+        let tp_moe_scratch = rs.tp_moe_scratch.as_ref().ok_or_else(|| {
+            anyhow!("rank {r}: tp_moe_scratch missing for hybrid MoE forward")
+        })?;
+        let scratch = &rs.scratch;
+        crate::tp_moe_upload::forward_ffn_moe_tp_per_rank(
+            &ops,
+            layer,
+            tp_moe,
+            tp_moe_scratch,
+            scratch.x_q8_1.0,
+            scratch.gate_f32.0,
+            scratch.up_f32.0,
+            scratch.activated_f16.0,
+            scratch.activated_q8_1.0,
+            scratch.mmvq_f32.0,
+            scratch.attn_residual_f16.0,
+            hidden,
+            ff_len_local,
+            rms_eps,
+        )
+        .with_context(|| format!("hybrid MoE per-rank FFN layer {global_il} rank {r}"))?;
+    }
+
+    // Phase 5a: AR-sum partial_shared_mlp_f32 (shared MLP, F32).
+    {
+        let cores: Vec<&TpRankCore> = stage.rank_state.iter().map(|rs| &rs.core).collect();
+        let streams: [&_; 2] = [
+            sub_cluster.device(0).default_stream(),
+            sub_cluster.device(1).default_stream(),
+        ];
+        let sm_partials: [DevicePtr; 2] = [
+            stage.rank_state[0]
+                .tp_moe_scratch
+                .as_ref()
+                .ok_or_else(|| anyhow!("rank 0: tp_moe_scratch missing in hybrid Phase 5a"))?
+                .partial_shared_mlp_f32,
+            stage.rank_state[1]
+                .tp_moe_scratch
+                .as_ref()
+                .ok_or_else(|| anyhow!("rank 1: tp_moe_scratch missing in hybrid Phase 5a"))?
+                .partial_shared_mlp_f32,
+        ];
+        // SAFETY: matches Phase 2 F32 contract.
+        unsafe {
+            tp_allreduce_sum_f32_synced(ar, sub_cluster, &cores, &sm_partials, hidden, &streams)
+        }
+        .context("hybrid MoE AR sum partial_shared_mlp_f32")?;
+    }
+
+    // Phase 5b: per-rank rmsnorm_f32(partial_shared_mlp_f32, post_ffw_norm_1_f32) → cur_mlp_f32.
+    for r in 0..n_ranks {
+        let dev = sub_cluster.device(r);
+        dev.bind()?;
+        let stream = dev.default_stream();
+        let reg = &stage.regs[r];
+        let ops = HipOps::new(reg, stream);
+        let rs = &stage.rank_state[r];
+        let tp_moe = rs.layer_weights[il_in_stage]
+            .tp_moe
+            .as_ref()
+            .ok_or_else(|| anyhow!("layer {global_il} rank {r}: tp_moe missing in hybrid Phase 5b"))?;
+        let tp_moe_scratch = rs
+            .tp_moe_scratch
+            .as_ref()
+            .ok_or_else(|| anyhow!("rank {r}: tp_moe_scratch missing in hybrid Phase 5b"))?;
+        ops.rmsnorm_f32(
+            tp_moe_scratch.partial_shared_mlp_f32,
+            tp_moe.post_ffw_norm_1_f32,
+            tp_moe_scratch.cur_mlp_f32,
+            1,
+            hidden,
+            rms_eps,
+        )
+        .context("hybrid MoE post_ffw_norm_1 (F32)")?;
+    }
+
+    // Phase 5c: AR-sum partial_moe_f32 (routed-MoE, F32).
+    {
+        let cores: Vec<&TpRankCore> = stage.rank_state.iter().map(|rs| &rs.core).collect();
+        let streams: [&_; 2] = [
+            sub_cluster.device(0).default_stream(),
+            sub_cluster.device(1).default_stream(),
+        ];
+        let moe_partials: [DevicePtr; 2] = [
+            stage.rank_state[0]
+                .tp_moe_scratch
+                .as_ref()
+                .ok_or_else(|| anyhow!("rank 0: tp_moe_scratch missing in hybrid Phase 5c"))?
+                .partial_moe_f32,
+            stage.rank_state[1]
+                .tp_moe_scratch
+                .as_ref()
+                .ok_or_else(|| anyhow!("rank 1: tp_moe_scratch missing in hybrid Phase 5c"))?
+                .partial_moe_f32,
+        ];
+        // SAFETY: matches Phase 2 F32 contract.
+        unsafe {
+            tp_allreduce_sum_f32_synced(ar, sub_cluster, &cores, &moe_partials, hidden, &streams)
+        }
+        .context("hybrid MoE AR sum partial_moe_f32 (routed)")?;
+    }
+
+    // Phase 5d: per-rank rmsnorm_f32(partial_moe_f32, post_ffw_norm_2_f32) → cur_moe_f32.
+    for r in 0..n_ranks {
+        let dev = sub_cluster.device(r);
+        dev.bind()?;
+        let stream = dev.default_stream();
+        let reg = &stage.regs[r];
+        let ops = HipOps::new(reg, stream);
+        let rs = &stage.rank_state[r];
+        let tp_moe = rs.layer_weights[il_in_stage]
+            .tp_moe
+            .as_ref()
+            .ok_or_else(|| anyhow!("layer {global_il} rank {r}: tp_moe missing in hybrid Phase 5d"))?;
+        let tp_moe_scratch = rs
+            .tp_moe_scratch
+            .as_ref()
+            .ok_or_else(|| anyhow!("rank {r}: tp_moe_scratch missing in hybrid Phase 5d"))?;
+        ops.rmsnorm_f32(
+            tp_moe_scratch.partial_moe_f32,
+            tp_moe.post_ffw_norm_2_f32,
+            tp_moe_scratch.cur_moe_f32,
+            1,
+            hidden,
+            rms_eps,
+        )
+        .context("hybrid MoE post_ffw_norm_2 (F32)")?;
+    }
+
+    // Phase 5e: per-rank cur_combined_f32 = cur_mlp_f32 + cur_moe_f32.
+    for r in 0..n_ranks {
+        let dev = sub_cluster.device(r);
+        dev.bind()?;
+        let stream = dev.default_stream();
+        let reg = &stage.regs[r];
+        let ops = HipOps::new(reg, stream);
+        let rs = &stage.rank_state[r];
+        let tp_moe_scratch = rs
+            .tp_moe_scratch
+            .as_ref()
+            .ok_or_else(|| anyhow!("rank {r}: tp_moe_scratch missing in hybrid Phase 5e"))?;
+        ops.add_f32(
+            tp_moe_scratch.cur_mlp_f32,
+            tp_moe_scratch.cur_moe_f32,
+            tp_moe_scratch.cur_combined_f32,
+            hidden,
+        )
+        .context("hybrid MoE combine cur_mlp + cur_moe (F32)")?;
+    }
+
+    // Phase 6: per-rank post_ffw_norm (F32) → cast F16 → residual add → layer_output_scale.
+    for r in 0..n_ranks {
+        let dev = sub_cluster.device(r);
+        dev.bind()?;
+        let stream = dev.default_stream();
+        let reg = &stage.regs[r];
+        let ops = HipOps::new(reg, stream);
+        let rs = &mut stage.rank_state[r];
+        let layer = &rs.layer_weights[il_in_stage];
+        let tp_moe = layer
+            .tp_moe
+            .as_ref()
+            .ok_or_else(|| anyhow!("layer {global_il} rank {r}: tp_moe missing in hybrid Phase 6"))?;
+        let tp_moe_scratch = rs
+            .tp_moe_scratch
+            .as_ref()
+            .ok_or_else(|| anyhow!("rank {r}: tp_moe_scratch missing in hybrid Phase 6"))?;
+        let scratch = &rs.scratch;
+        ops.rmsnorm_f32(
+            tp_moe_scratch.cur_combined_f32,
+            tp_moe.post_ffw_norm_f32,
+            tp_moe_scratch.tmp_f32,
+            1,
+            hidden,
+            rms_eps,
+        )
+        .context("hybrid MoE post_ffw_norm (F32)")?;
+        ops.cast_f32_to_f16(tp_moe_scratch.tmp_f32, scratch.attn_out_local.0, hidden)
+            .context("hybrid MoE Phase 6 cast normed F32→F16")?;
+        ops.add_f16(
+            scratch.attn_residual_f16.0,
+            scratch.attn_out_local.0,
+            rs.hidden,
+            hidden,
+        )
+        .context("hybrid MoE Phase 6 residual add")?;
+        apply_layer_output_scale_f16(&ops, rs.hidden, hidden, layer.layer_output_scale)
+            .context("hybrid MoE layer_output_scale")?;
+    }
+
     Ok(())
 }
 

@@ -1507,7 +1507,7 @@ fn upload_one_tp_stage(
 /// [`blocks::sharding::upload_sharded_tensor`]; per-head + per-layer
 /// norms go through `upload_replicated_norm_f32_to_f16`.
 #[allow(clippy::too_many_arguments)]
-fn upload_layer_tp(
+pub(crate) fn upload_layer_tp(
     file: &flambeau_quant::GgufFile,
     spec: &crate::layout::LayerSpec,
     cfg: &Gemma4Config,
@@ -1635,7 +1635,7 @@ fn upload_layer_tp(
 /// model-crate [`DeviceTensor`]. The fields match by definition; this
 /// is here so call sites that still take `DeviceTensor` (synthetic
 /// tests, `from_pieces` API) stay unchanged.
-fn uploaded_to_device_tensor(u: UploadedTensor) -> DeviceTensor {
+pub(crate) fn uploaded_to_device_tensor(u: UploadedTensor) -> DeviceTensor {
     DeviceTensor {
         ptr: u.ptr,
         dtype: u.dtype,
