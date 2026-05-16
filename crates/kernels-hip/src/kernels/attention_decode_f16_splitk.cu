@@ -23,7 +23,7 @@
 
 typedef _Float16 fb_fp16_t;
 
-#define ATTN_SK_MAX_HEAD_DIM 256
+#define ATTN_SK_MAX_HEAD_DIM 512
 #define ATTN_SK_MAX_WARPS (ATTN_SK_MAX_HEAD_DIM / 64)
 
 // Pass 1 — each block (blockIdx.x = q_head, blockIdx.y = chunk) processes

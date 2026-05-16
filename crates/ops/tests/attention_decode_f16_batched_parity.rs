@@ -12,7 +12,7 @@
 //! per-slot loop bound in the kernel)
 //! - (n_heads_q, n_heads_kv): (32, 4) for Qwen3.5 GQA-32/4 and
 //! (16, 2) for Qwen3.6 GQA-16/2
-//! - head_dim ∈ {128, 256}
+//! - head_dim ∈ {128, 256, 512} — 512 covers gemma4 full-attn layers
 
 #![cfg(feature = "hip")]
 #![expect(
@@ -177,6 +177,7 @@ fn run_parity(
             head_dim,
             slot_kv_lens[s],
             scale,
+            /* window_size = */ 0,
             None,
         )?;
     }
@@ -289,6 +290,25 @@ fn parity_qwen36_gqa16_2_hd256() -> Result<()> {
         8,
         &[256, 512, 1024, 2048, 1024, 512, 256, 4096],
         0xB8,
+    )?;
+    Ok(())
+}
+
+/// Gemma4 26B-A4B full-attention layer shape: head_dim=512, GQA-16/2.
+/// The cap was 256 until Phase 13 extended splitk/batched/q8_kv to 512;
+/// this case keeps that extension green and proves the batched path
+/// works at the new max head_dim alongside the smaller models.
+#[test]
+fn parity_gemma4_full_attn_gqa16_2_hd512() -> Result<()> {
+    let shape = Shape { n_heads_q: 16, n_heads_kv: 2, head_dim: 512 };
+    run_parity("Gemma4-26B-A4B/N=1/kv=128", shape, 1, &[128], 0xD5)?;
+    run_parity("Gemma4-26B-A4B/N=2/kv=mix", shape, 2, &[256, 1024], 0xD6)?;
+    run_parity(
+        "Gemma4-26B-A4B/N=4/kv=mix",
+        shape,
+        4,
+        &[128, 512, 1024, 2048],
+        0xD7,
     )?;
     Ok(())
 }

@@ -148,8 +148,8 @@ pub fn attention_decode_f16_batched(
     scale: f32,
 ) -> Result<()> {
     assert!(
-        head_dim == 64 || head_dim == 128 || head_dim == 256,
-        "attention_decode_f16_batched: head_dim {head_dim} not supported (expected 64, 128, or 256)"
+        head_dim == 64 || head_dim == 128 || head_dim == 256 || head_dim == 512,
+        "attention_decode_f16_batched: head_dim {head_dim} not supported (expected 64, 128, 256, or 512)"
     );
     assert!(
         n_slots >= 1 && n_slots <= 32,
@@ -276,7 +276,7 @@ pub fn attention_decode_f16_splitk(
     window_size: i32,
 ) -> Result<()> {
     assert!(
-        head_dim == 64 || head_dim == 128 || head_dim == 256,
+        head_dim == 64 || head_dim == 128 || head_dim == 256 || head_dim == 512,
         "attention_decode_f16_splitk: head_dim {head_dim} not supported"
     );
     assert!(chunk_size > 0);
@@ -379,8 +379,12 @@ pub fn attention_decode_q8_kv(
     n_tokens_kv: usize,
     scale: f32,
 ) -> Result<()> {
-    // Kernel supports head_dim ∈ {64, 128, 256}; block = head_dim so each
-    // thread owns one output lane + one int8 within a Q8_0 block.
+    // Kernel supports head_dim ∈ {64, 128, 256}; block = head_dim/4
+    // threads (= 16/32/64 — one wavefront at d=256). The inter-block-
+    // of-Q8_0 reduction is wave-bounded `__shfl_xor` with stride up to
+    // 32; head_dim=512 needs 128 threads (2 waves) and cross-wave LDS
+    // reduction. Defer: gemma4 (the only d=512 target) uses F16 KV;
+    // restructure when a d=512 Q8-KV consumer arrives.
     assert!(
         head_dim == 64 || head_dim == 128 || head_dim == 256,
         "attention_decode_q8_kv: head_dim {head_dim} not supported (expected 64, 128, or 256)"
@@ -437,6 +441,8 @@ pub fn attention_decode_q8_kv_splitk(
     chunk_size: usize,
     scale: f32,
 ) -> Result<()> {
+    // Same wave64-bounded reduction shape as `attention_decode_q8_kv`
+    // — head_dim=512 deferred until a Q8-KV d=512 consumer arrives.
     assert!(
         head_dim == 64 || head_dim == 128 || head_dim == 256,
         "attention_decode_q8_kv_splitk: head_dim {head_dim} not supported"
@@ -531,6 +537,8 @@ pub fn attention_prefill_q8_kv(
     q_offset: usize,
     scale: f32,
 ) -> Result<()> {
+    // Same wave64-bounded reduction shape as `attention_decode_q8_kv`
+    // — head_dim=512 deferred until a Q8-KV d=512 consumer arrives.
     assert!(
         head_dim == 64 || head_dim == 128 || head_dim == 256,
         "attention_prefill_q8_kv: head_dim {head_dim} not supported"

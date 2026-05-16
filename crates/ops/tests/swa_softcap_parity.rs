@@ -277,6 +277,74 @@ fn swa_decode_window_geq_ntokens_matches_unbounded() {
     }
 }
 
+/// Gemma4 26B-A4B full-attention layer shape: head_dim=512, GQA-16/2,
+/// SWA window not used (full-attn). Force splitk by n_tokens > 256.
+/// Phase 13: ATTN_SK_MAX_HEAD_DIM bumped 256→512.
+#[test]
+fn splitk_matches_single_pass_gemma4_hd512() {
+    let Some(dev) = dev_or_skip() else { return; };
+    let reg = OpsRegistry::new(&dev).unwrap();
+
+    let head_dim = 512usize;
+    let n_heads_q = 16usize;
+    let n_heads_kv = 2usize;
+    let n_tokens = 512usize;
+    let window = 0i32;
+
+    let q_f32 = seeded_f32(0x5D0, n_heads_q * head_dim, 0.3);
+    let k_f32 = seeded_f32(0x5D1, n_tokens * n_heads_kv * head_dim, 0.3);
+    let v_f32 = seeded_f32(0x5D2, n_tokens * n_heads_kv * head_dim, 0.3);
+    let q_f16: Vec<f16> = q_f32.iter().map(|v| f16::from_f32(*v)).collect();
+    let k_f16: Vec<f16> = k_f32.iter().map(|v| f16::from_f32(*v)).collect();
+    let v_f16: Vec<f16> = v_f32.iter().map(|v| f16::from_f32(*v)).collect();
+
+    let d_q = upload_f16(&dev, &q_f16);
+    let d_k = upload_f16(&dev, &k_f16);
+    let d_v = upload_f16(&dev, &v_f16);
+    let out_n = n_heads_q * head_dim;
+    let d_out_single = dev.alloc(out_n * 2).unwrap();
+    let d_out_split = dev.alloc(out_n * 2).unwrap();
+
+    let chunk_size = 128usize;
+    let n_chunks = n_tokens.div_ceil(chunk_size);
+    let d_part_m = dev.alloc(n_heads_q * n_chunks * 4).unwrap();
+    let d_part_s = dev.alloc(n_heads_q * n_chunks * 4).unwrap();
+    let d_part_o = dev.alloc(n_heads_q * n_chunks * head_dim * 4).unwrap();
+
+    let scale = 1.0 / (head_dim as f32).sqrt();
+    attention_decode_f16(
+        &reg, dev.default_stream(), d_q, d_k, d_v, d_out_single,
+        n_heads_q, n_heads_kv, head_dim, n_tokens, scale, window,
+    )
+    .unwrap();
+    attention_decode_f16_splitk(
+        &reg, dev.default_stream(), d_q, d_k, d_v, d_out_split,
+        d_part_m, d_part_s, d_part_o,
+        n_heads_q, n_heads_kv, head_dim, n_tokens, chunk_size, scale, window,
+    )
+    .unwrap();
+    dev.default_stream().synchronize().unwrap();
+    let single = download_f16(&dev, d_out_single, out_n);
+    let split = download_f16(&dev, d_out_split, out_n);
+    let mut max_abs = 0.0f32;
+    for (a, b) in single.iter().zip(split.iter()) {
+        let d = (a.to_f32() - b.to_f32()).abs();
+        if d > max_abs { max_abs = d; }
+    }
+    assert!(max_abs < 5e-3, "splitk hd=512 vs single-pass max-abs-diff {max_abs} too high");
+
+    unsafe {
+        dev.dealloc(d_q, q_f16.len() * 2).unwrap();
+        dev.dealloc(d_k, k_f16.len() * 2).unwrap();
+        dev.dealloc(d_v, v_f16.len() * 2).unwrap();
+        dev.dealloc(d_out_single, out_n * 2).unwrap();
+        dev.dealloc(d_out_split, out_n * 2).unwrap();
+        dev.dealloc(d_part_m, n_heads_q * n_chunks * 4).unwrap();
+        dev.dealloc(d_part_s, n_heads_q * n_chunks * 4).unwrap();
+        dev.dealloc(d_part_o, n_heads_q * n_chunks * head_dim * 4).unwrap();
+    }
+}
+
 #[test]
 fn swa_decode_splitk_matches_window_4() {
     // splitk + SWA should produce the same output as single-pass + SWA.

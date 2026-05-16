@@ -39,7 +39,7 @@ typedef _Float16 fb_fp16_t;
 
 // Max head_dim the kernel tolerates. Must match the dispatcher / ops-layer
 // guard. Bump alongside both, never silently.
-#define ATTN_MAX_HEAD_DIM 256
+#define ATTN_MAX_HEAD_DIM 512
 // Max warps per block = ATTN_MAX_HEAD_DIM / wave64.
 #define ATTN_MAX_WARPS (ATTN_MAX_HEAD_DIM / 64)
 
