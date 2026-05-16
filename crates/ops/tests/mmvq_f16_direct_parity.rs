@@ -79,6 +79,63 @@ struct BlockQ4_1 {
     qs: [u8; 16],
 }
 
+const QK_K: usize = 256;
+const K_SCALE_SIZE: usize = 12;
+
+#[repr(C)]
+#[derive(Copy, Clone)]
+struct BlockQ2K {
+    scales: [u8; QK_K / 16],
+    qs: [u8; QK_K / 4],
+    d: u16,
+    dmin: u16,
+}
+
+#[repr(C)]
+#[derive(Copy, Clone)]
+struct BlockQ3K {
+    hmask: [u8; QK_K / 8],
+    qs: [u8; QK_K / 4],
+    scales: [u8; 12],
+    d: u16,
+}
+
+#[repr(C)]
+#[derive(Copy, Clone)]
+struct BlockQ4K {
+    d: u16,
+    dmin: u16,
+    scales: [u8; K_SCALE_SIZE],
+    qs: [u8; QK_K / 2],
+}
+
+#[repr(C)]
+#[derive(Copy, Clone)]
+struct BlockQ5K {
+    d: u16,
+    dmin: u16,
+    scales: [u8; K_SCALE_SIZE],
+    qh: [u8; QK_K / 8],
+    qs: [u8; QK_K / 2],
+}
+
+#[repr(C)]
+#[derive(Copy, Clone)]
+struct BlockQ6K {
+    ql: [u8; QK_K / 2],
+    qh: [u8; QK_K / 4],
+    scales: [i8; QK_K / 16],
+    d: u16,
+}
+
+#[repr(C)]
+#[derive(Copy, Clone)]
+struct BlockQ8K {
+    d: f32,
+    qs: [i8; QK_K],
+    bsums: [i16; QK_K / 16],
+}
+
 #[repr(C)]
 #[derive(Copy, Clone, Default)]
 struct BlockQ5_0 {
@@ -216,6 +273,177 @@ fn build_q5_1(n_rows: usize, n_blocks: usize) -> Vec<BlockQ5_1> {
     w
 }
 
+fn build_q2_k(n_rows: usize, n_super: usize) -> Vec<BlockQ2K> {
+    let mut w = Vec::with_capacity(n_rows * n_super);
+    for r in 0..n_rows {
+        for b in 0..n_super {
+            let mut scales = [0u8; QK_K / 16];
+            for i in 0..(QK_K / 16) {
+                let sc = ((r * 11 + b * 7 + i) % 13) as u8;
+                let m = ((r * 5 + b * 3 + i + 1) % 11) as u8;
+                scales[i] = (m << 4) | (sc & 0x0F);
+            }
+            let mut qs = [0u8; QK_K / 4];
+            for i in 0..(QK_K / 4) {
+                qs[i] = ((r * 17 + b * 5 + i) % 255) as u8;
+            }
+            let d = f16::from_f32(0.05);
+            let dmin = f16::from_f32(0.012);
+            w.push(BlockQ2K {
+                scales,
+                qs,
+                d: d.to_bits(),
+                dmin: dmin.to_bits(),
+            });
+        }
+    }
+    w
+}
+
+fn build_q3_k(n_rows: usize, n_super: usize) -> Vec<BlockQ3K> {
+    let mut w = Vec::with_capacity(n_rows * n_super);
+    for r in 0..n_rows {
+        for b in 0..n_super {
+            let mut hmask = [0u8; QK_K / 8];
+            for i in 0..(QK_K / 8) {
+                hmask[i] = ((r * 7 + b * 3 + i) % 255) as u8;
+            }
+            let mut qs = [0u8; QK_K / 4];
+            for i in 0..(QK_K / 4) {
+                qs[i] = ((r * 13 + b * 5 + i) % 255) as u8;
+            }
+            // Packed 6-bit scales — any random 12 bytes are a valid encoding.
+            let mut scales = [0u8; 12];
+            for i in 0..12 {
+                scales[i] = ((r * 19 + b * 11 + i) % 255) as u8;
+            }
+            let d = f16::from_f32(0.04);
+            w.push(BlockQ3K {
+                hmask,
+                qs,
+                scales,
+                d: d.to_bits(),
+            });
+        }
+    }
+    w
+}
+
+fn build_q4_k(n_rows: usize, n_super: usize) -> Vec<BlockQ4K> {
+    let mut w = Vec::with_capacity(n_rows * n_super);
+    for r in 0..n_rows {
+        for b in 0..n_super {
+            let mut scales = [0u8; K_SCALE_SIZE];
+            for i in 0..K_SCALE_SIZE {
+                scales[i] = ((r * 23 + b * 7 + i) % 255) as u8;
+            }
+            let mut qs = [0u8; QK_K / 2];
+            for i in 0..(QK_K / 2) {
+                let lo = ((r * 11 + b * 7 + i) % 14) as u8;
+                let hi = ((r * 13 + b * 5 + i + 3) % 14) as u8;
+                qs[i] = (hi << 4) | (lo & 0x0F);
+            }
+            let d = f16::from_f32(0.03);
+            let dmin = f16::from_f32(0.008);
+            w.push(BlockQ4K {
+                d: d.to_bits(),
+                dmin: dmin.to_bits(),
+                scales,
+                qs,
+            });
+        }
+    }
+    w
+}
+
+fn build_q5_k(n_rows: usize, n_super: usize) -> Vec<BlockQ5K> {
+    let mut w = Vec::with_capacity(n_rows * n_super);
+    for r in 0..n_rows {
+        for b in 0..n_super {
+            let mut scales = [0u8; K_SCALE_SIZE];
+            for i in 0..K_SCALE_SIZE {
+                scales[i] = ((r * 23 + b * 7 + i) % 255) as u8;
+            }
+            let mut qh = [0u8; QK_K / 8];
+            for i in 0..(QK_K / 8) {
+                qh[i] = ((r * 5 + b * 3 + i) % 255) as u8;
+            }
+            let mut qs = [0u8; QK_K / 2];
+            for i in 0..(QK_K / 2) {
+                let lo = ((r * 11 + b * 7 + i) % 14) as u8;
+                let hi = ((r * 13 + b * 5 + i + 3) % 14) as u8;
+                qs[i] = (hi << 4) | (lo & 0x0F);
+            }
+            let d = f16::from_f32(0.03);
+            let dmin = f16::from_f32(0.008);
+            w.push(BlockQ5K {
+                d: d.to_bits(),
+                dmin: dmin.to_bits(),
+                scales,
+                qh,
+                qs,
+            });
+        }
+    }
+    w
+}
+
+fn build_q6_k(n_rows: usize, n_super: usize) -> Vec<BlockQ6K> {
+    let mut w = Vec::with_capacity(n_rows * n_super);
+    for r in 0..n_rows {
+        for b in 0..n_super {
+            let mut ql = [0u8; QK_K / 2];
+            for i in 0..(QK_K / 2) {
+                let lo = ((r * 11 + b * 7 + i) % 14) as u8;
+                let hi = ((r * 13 + b * 5 + i + 3) % 14) as u8;
+                ql[i] = (hi << 4) | (lo & 0x0F);
+            }
+            let mut qh = [0u8; QK_K / 4];
+            for i in 0..(QK_K / 4) {
+                qh[i] = ((r * 7 + b * 3 + i) % 255) as u8;
+            }
+            let mut scales = [0i8; QK_K / 16];
+            for i in 0..(QK_K / 16) {
+                scales[i] = (((r * 19 + b * 11 + i) % 64) as i32 - 32) as i8;
+            }
+            let d = f16::from_f32(0.04);
+            w.push(BlockQ6K {
+                ql,
+                qh,
+                scales,
+                d: d.to_bits(),
+            });
+        }
+    }
+    w
+}
+
+fn build_q8_k(n_rows: usize, n_super: usize) -> Vec<BlockQ8K> {
+    let mut w = Vec::with_capacity(n_rows * n_super);
+    for r in 0..n_rows {
+        for b in 0..n_super {
+            let mut qs = [0i8; QK_K];
+            let mut sums16 = [0i16; QK_K / 16];
+            for grp in 0..(QK_K / 16) {
+                let mut s: i32 = 0;
+                for j in 0..16 {
+                    let i = grp * 16 + j;
+                    let v = (((r * 17 + b * 7 + i * 3) % 31) as i32) - 15;
+                    qs[i] = v as i8;
+                    s += v;
+                }
+                sums16[grp] = s as i16;
+            }
+            w.push(BlockQ8K {
+                d: 0.03,
+                qs,
+                bsums: sums16,
+            });
+        }
+    }
+    w
+}
+
 fn build_q8_0(n_rows: usize, n_blocks: usize) -> Vec<BlockQ8_0> {
     let mut w = Vec::with_capacity(n_rows * n_blocks);
     for r in 0..n_rows {
@@ -255,6 +483,7 @@ fn build_q8_1_act(n_blocks: usize) -> Vec<BlockQ8_1> {
 
 fn run_parity(dev: &HipDevice, dtype: QDtype, n_rows: usize, k: usize) -> Result<()> {
     let n_blocks = k / 32;
+    let n_super = k / 256;
     let act = build_q8_1_act(n_blocks);
 
     let w_bytes: Vec<u8> = match dtype {
@@ -280,6 +509,36 @@ fn run_parity(dev: &HipDevice, dtype: QDtype, n_rows: usize, k: usize) -> Result
         }
         QDtype::Q8_0 => {
             let w = build_q8_0(n_rows, n_blocks);
+            let bytes = std::mem::size_of_val(w.as_slice());
+            unsafe { std::slice::from_raw_parts(w.as_ptr() as *const u8, bytes) }.to_vec()
+        }
+        QDtype::Q2_K => {
+            let w = build_q2_k(n_rows, n_super);
+            let bytes = std::mem::size_of_val(w.as_slice());
+            unsafe { std::slice::from_raw_parts(w.as_ptr() as *const u8, bytes) }.to_vec()
+        }
+        QDtype::Q3_K => {
+            let w = build_q3_k(n_rows, n_super);
+            let bytes = std::mem::size_of_val(w.as_slice());
+            unsafe { std::slice::from_raw_parts(w.as_ptr() as *const u8, bytes) }.to_vec()
+        }
+        QDtype::Q4_K => {
+            let w = build_q4_k(n_rows, n_super);
+            let bytes = std::mem::size_of_val(w.as_slice());
+            unsafe { std::slice::from_raw_parts(w.as_ptr() as *const u8, bytes) }.to_vec()
+        }
+        QDtype::Q5_K => {
+            let w = build_q5_k(n_rows, n_super);
+            let bytes = std::mem::size_of_val(w.as_slice());
+            unsafe { std::slice::from_raw_parts(w.as_ptr() as *const u8, bytes) }.to_vec()
+        }
+        QDtype::Q6_K => {
+            let w = build_q6_k(n_rows, n_super);
+            let bytes = std::mem::size_of_val(w.as_slice());
+            unsafe { std::slice::from_raw_parts(w.as_ptr() as *const u8, bytes) }.to_vec()
+        }
+        QDtype::Q8_K => {
+            let w = build_q8_k(n_rows, n_super);
             let bytes = std::mem::size_of_val(w.as_slice());
             unsafe { std::slice::from_raw_parts(w.as_ptr() as *const u8, bytes) }.to_vec()
         }
@@ -349,7 +608,19 @@ fn mmvq_f16_direct_matches_cast() -> Result<()> {
         return Ok(());
     };
     let shapes = [(64usize, 2048), (512, 2048), (4096, 5120)];
-    for dtype in [QDtype::Q4_0, QDtype::Q4_1, QDtype::Q5_0, QDtype::Q5_1, QDtype::Q8_0] {
+    for dtype in [
+        QDtype::Q4_0,
+        QDtype::Q4_1,
+        QDtype::Q5_0,
+        QDtype::Q5_1,
+        QDtype::Q8_0,
+        QDtype::Q2_K,
+        QDtype::Q3_K,
+        QDtype::Q4_K,
+        QDtype::Q5_K,
+        QDtype::Q6_K,
+        QDtype::Q8_K,
+    ] {
         for (n_rows, k) in shapes {
             run_parity(&dev, dtype, n_rows, k)?;
         }

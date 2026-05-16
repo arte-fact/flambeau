@@ -112,6 +112,8 @@ pub fn qmatmul(
         };
         let act_row_bytes = (k / 32) * std::mem::size_of::<flambeau_quant::BlockQ8_1>();
         let dst_row_bytes = n * 4;
+        assert_eq!(k % 32, 0, "{stem} requires k % 32 == 0");
+        let n_blocks = k / 32;
         for i in 0..m {
             mmvq_simple_launch(
                 reg,
@@ -122,8 +124,9 @@ pub fn qmatmul(
                 act_q8_1.offset_bytes(i * act_row_bytes),
                 dst.offset_bytes(i * dst_row_bytes),
                 n,
-                k,
+                n_blocks,
                 threads,
+                1,
             )?;
         }
         let _ = act_q8_1_mmq;
@@ -933,22 +936,24 @@ pub fn mmvq(
     // decode regression AND a logit re-accumulation-order argmax shift on
     // seed 9419. The candle P29 r2 pattern wins on K-quants (sub-block
     // scales block DP4A) but strictly loses on Q4_0's flat-block DP4A path.
+    assert_eq!(k % 32, 0, "MMVQ requires k % 32 == 0");
+    let n_blocks_q32 = k / 32;
     if dtype_weight == QDtype::Q4_0 {
         return mmvq_simple_launch(
             reg, stream, "mmvq_q4_0", "flambeau_mmvq_q4_0_q8_1",
-            weights, act_q8_1, dst, n_rows, k, 256,
+            weights, act_q8_1, dst, n_rows, n_blocks_q32, 256, 1,
         );
     }
     if dtype_weight == QDtype::Q5_0 {
         return mmvq_simple_launch(
             reg, stream, "mmvq_q5_0", "flambeau_mmvq_q5_0_q8_1",
-            weights, act_q8_1, dst, n_rows, k, 256,
+            weights, act_q8_1, dst, n_rows, n_blocks_q32, 256, 1,
         );
     }
     if dtype_weight == QDtype::Q5_1 {
         return mmvq_simple_launch(
             reg, stream, "mmvq_q5_1", "flambeau_mmvq_q5_1_q8_1",
-            weights, act_q8_1, dst, n_rows, k, 256,
+            weights, act_q8_1, dst, n_rows, n_blocks_q32, 256, 1,
         );
     }
     let cfg = QMatMulCfg {
@@ -989,33 +994,54 @@ pub fn mmvq_f16_direct(
     k: usize,
     dtype_weight: QDtype,
 ) -> Result<()> {
-    let (stem, entry, threads) = match dtype_weight {
-        QDtype::Q4_0 => ("mmvq_q4_0", "flambeau_mmvq_q4_0_q8_1_f16", 256u32),
-        QDtype::Q4_1 => ("mmvq_q4_1_t128", "flambeau_mmvq_q4_1_t128_q8_1_f16", 128),
-        QDtype::Q5_0 => ("mmvq_q5_0", "flambeau_mmvq_q5_0_q8_1_f16", 256),
-        QDtype::Q5_1 => ("mmvq_q5_1", "flambeau_mmvq_q5_1_q8_1_f16", 256),
+    // Per-dtype (stem, entry, threads, rows_per_block, units_per_row).
+    // units_per_row matches the kernel's second-to-last int param:
+    //   - Q4_0..Q8_0  → n_blocks_per_row     = k / 32
+    //   - Q2_K..Q8_K  → n_superblocks_per_row = k / QK_K (256)
+    assert_eq!(k % 32, 0, "mmvq_f16_direct requires k % 32 == 0");
+    let n_blocks_q32 = k / 32;
+    let n_superblocks = k / 256;
+    let (stem, entry, threads, rows_per_block, units) = match dtype_weight {
+        QDtype::Q4_0 => ("mmvq_q4_0", "flambeau_mmvq_q4_0_q8_1_f16", 256u32, 1u32, n_blocks_q32),
+        QDtype::Q4_1 => ("mmvq_q4_1_t128", "flambeau_mmvq_q4_1_t128_q8_1_f16", 128, 1, n_blocks_q32),
+        QDtype::Q5_0 => ("mmvq_q5_0", "flambeau_mmvq_q5_0_q8_1_f16", 256, 1, n_blocks_q32),
+        QDtype::Q5_1 => ("mmvq_q5_1", "flambeau_mmvq_q5_1_q8_1_f16", 256, 1, n_blocks_q32),
         QDtype::Q8_0 => (
             "mmvq_q8_0_t128_vdr2",
             "flambeau_mmvq_q8_0_t128_vdr2_q8_1_f16",
             128,
+            1,
+            n_blocks_q32,
         ),
+        QDtype::Q2_K => ("mmvq_q2_k_r2", "flambeau_mmvq_q2_K_r2_q8_1_f16", 64, 2, n_superblocks),
+        QDtype::Q3_K => ("mmvq_q3_k_r2", "flambeau_mmvq_q3_k_r2_q8_1_f16", 64, 2, n_superblocks),
+        QDtype::Q4_K => ("mmvq_q4_k_r2", "flambeau_mmvq_q4_k_r2_q8_1_f16", 64, 2, n_superblocks),
+        QDtype::Q5_K => ("mmvq_q5_k_r2", "flambeau_mmvq_q5_k_r2_q8_1_f16", 64, 2, n_superblocks),
+        QDtype::Q6_K => ("mmvq_q6_k_dp4a", "flambeau_mmvq_q6_k_dp4a_q8_1_f16", 64, 1, n_superblocks),
+        QDtype::Q8_K => ("mmvq_q8_k", "flambeau_mmvq_q8_K_q8_1_f16", 256, 1, n_superblocks),
         other => bail!(
-            "mmvq_f16_direct: no F16-direct kernel for {} (supported: Q4_0, Q4_1, Q5_0, Q5_1, Q8_0)",
+            "mmvq_f16_direct: no F16-direct kernel for {} \
+             (supported: Q4_0, Q4_1, Q5_0, Q5_1, Q8_0, Q2_K, Q3_K, Q4_K, Q5_K, Q6_K, Q8_K)",
             other.name()
         ),
     };
-    mmvq_simple_launch(reg, stream, stem, entry, weights, act_q8_1, dst_f16, n_rows, k, threads)
+    mmvq_simple_launch(
+        reg, stream, stem, entry, weights, act_q8_1, dst_f16, n_rows, units, threads, rows_per_block,
+    )
 }
 
-/// Common launch path for single-block-per-row Q-weight MMVQ kernels
-/// taking (w, y_q8_1, dst, n_rows, n_blocks_per_row).
+/// Common launch path for Q-weight MMVQ kernels taking
+/// (w, y_q8_1, dst, n_rows, n_units_per_row).
 ///
-/// Caller must pass the kernel's `blockDim.x` explicitly — the kernel's
-/// own `__launch_bounds__` (or implicit shared-memory / warp-count math)
-/// constrains this and over-launching silently mis-runs the kernel
-/// (extra threads write OOB to per-warp shared slots, or HIP returns
-/// `hipModuleLaunchKernel: unspecified launch failure` if the bound is
-/// declared). #120-followup.
+/// Caller must pass `(threads, rows_per_block)` explicitly. `threads`
+/// is the kernel's `blockDim.x`; over-launching against a kernel with
+/// `__launch_bounds__` triggers a HIP launch failure, under-launching
+/// silently produces wrong results (warp-count math reads stale lanes).
+/// `rows_per_block` is how many output rows a single block writes —
+/// 1 for traditional single-row kernels, 2 for r2 K-quant multi-row.
+/// Grid = `ceil(n_rows / rows_per_block)`. `units_per_row` is the
+/// caller-defined inner-loop count (n_blocks for 32-element-block
+/// dtypes, n_superblocks for K-quants). #120 / #120-followup.
 fn mmvq_simple_launch(
     reg: &OpsRegistry,
     stream: &HipStream,
@@ -1025,14 +1051,14 @@ fn mmvq_simple_launch(
     act_q8_1: DevicePtr,
     dst: DevicePtr,
     n_rows: usize,
-    k: usize,
+    units_per_row: usize,
     threads: u32,
+    rows_per_block: u32,
 ) -> Result<()> {
-    assert_eq!(k % 32, 0, "{module_stem} requires k % 32 == 0");
     let module = reg.expect_module(module_stem)?;
     let kernel = module.kernel(kernel_entry)?;
     let n_rows_i = n_rows as i32;
-    let n_blocks_i = (k / 32) as i32;
+    let n_units_i = units_per_row as i32;
     let w_ptr: u64 = weights.as_usize() as u64;
     let y_ptr: u64 = act_q8_1.as_usize() as u64;
     let d_ptr: u64 = dst.as_usize() as u64;
@@ -1041,8 +1067,9 @@ fn mmvq_simple_launch(
     args.push(&y_ptr);
     args.push(&d_ptr);
     args.push(&n_rows_i);
-    args.push(&n_blocks_i);
-    let cfg = LaunchCfg::one_d(n_rows as u32, threads);
+    args.push(&n_units_i);
+    let grid = (n_rows as u32).div_ceil(rows_per_block);
+    let cfg = LaunchCfg::one_d(grid, threads);
     unsafe { kernel.launch(stream, cfg, args)? };
     Ok(())
 }
