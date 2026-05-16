@@ -290,7 +290,11 @@ impl Gemma4PpStage {
             .max()
             .unwrap_or(64);
         let mmvq_max = q_width_max.max(kv_width_max).max(hidden).max(ff_len);
-        let x_q8_1_n = hidden.max(ff_len).div_ceil(32) * 32;
+        // x_q8_1 is reused as the Q8_1 input for every projection in the
+        // layer: attn_norm(hidden), output_proj(q_width), MoE shared
+        // MLP(hidden), dense FFN down(ff_len). q_width can exceed ff_len
+        // on MoE arches where ff_len is per-expert (small).
+        let x_q8_1_n = hidden.max(ff_len).max(q_width_max).div_ceil(32) * 32;
         let activated_q8_1_n = ff_len.div_ceil(32) * 32;
 
         let mut raw_alloc = RawAllocTracker::new();

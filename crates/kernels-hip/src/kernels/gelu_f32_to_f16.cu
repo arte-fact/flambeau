@@ -26,10 +26,8 @@ extern "C" __global__ void flambeau_gelu_f32_to_f16(
     const float t = GELU_SQRT_2_OVER_PI * x * (1.0f + GELU_COEF_A * x * x);
     const float gelu = 0.5f * x * (1.0f + tanhf(t));
     float v = gelu * b[i];
-    // Saturate at ±F16_MAX — F32-overflow as +inf in F16 poisons the
-    // downstream `quantize_f16_q8_1`'s per-block `d` and cascades to
-    // all-NaN partial. Matches the saturating clamp in cast_f32_f16
-    // and mmvq_store<fb_fp16_t>. (#108)
+    // Saturate at ±F16_MAX — ±inf in F16 poisons the downstream
+    // quantize_f16_q8_1's per-block d, cascading to NaN F32 partials.
     if (v > 65504.0f) v = 65504.0f;
     else if (v < -65504.0f) v = -65504.0f;
     y[i] = (fb_fp16_t) v;

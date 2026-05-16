@@ -21,7 +21,7 @@ extern "C" __global__ void flambeau_swiglu_f32_to_f16(
     const float av = a[i];
     const float silu = av / (1.0f + __expf(-av));
     float v = silu * b[i];
-    // Saturate at ±F16_MAX — see cast_f32_f16 / gelu_f32_to_f16 (#108).
+    // Saturate at ±F16_MAX — see cast_f32_f16 / gelu_f32_to_f16.
     if (v > 65504.0f) v = 65504.0f;
     else if (v < -65504.0f) v = -65504.0f;
     y[i] = (fb_fp16_t) v;

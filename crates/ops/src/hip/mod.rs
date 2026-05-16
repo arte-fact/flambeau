@@ -212,7 +212,6 @@ pub const KERNEL_STEMS: &[&str] = &[
     "rmsnorm_f16",
     "rmsnorm_f16_add_residual",
     "rmsnorm_f32",
-    "rmsnorm_f32_in_f16_out",
     "rmsnorm_q8_1_fused",
     "l2_norm_f32",
     "causal_conv1d_f32",

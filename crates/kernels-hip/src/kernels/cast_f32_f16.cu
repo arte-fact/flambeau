@@ -1,10 +1,8 @@
 // cast_f32_f16 — pointwise F32 → F16, saturating at ±F16_MAX.
-// Decode-path bridge: MMVQ writes its accumulator in F32; attention /
-// rmsnorm / swiglu consume F16. Saturating clamp matches the saturating
-// store in `mmvq_f16_direct` (#120) — prevents F32 values exceeding
-// F16 range from becoming ±inf in downstream F16 buffers (which would
-// then NaN through rmsnorm / attention softmax). NaN inputs pass
-// through (clamp comparisons against NaN are false). #108.
+// Decode-path bridge: MMVQ accumulates in F32; attention / rmsnorm /
+// swiglu consume F16. Saturating clamp prevents ±inf from poisoning
+// downstream F16 buffers (NaN through rmsnorm variance). NaN inputs
+// pass through (clamp comparisons against NaN are false).
 // Launch: 1D, ceil(n/256) blocks × 256 threads. One element per thread.
 
 #include <hip/hip_runtime.h>

@@ -268,13 +268,7 @@ pub fn forward_layer_decode<L: CacheLayout, O: Ops>(
             spec, hidden, n_heads, n_kv_heads, head_dim, rms_norm_eps, scratch.v_ones_f16,
         )?;
         let block = if use_f32_output {
-            // F32 output_proj AND F32 Q/K/V — same gate, both prevent
-            // F16 saturation on the gemma4-26B-A4B-Q8_0 PP attention
-            // path (#108). f32_qkv requires V present (alt-attention
-            // V-from-K is gated separately on `has_kv`).
-            block
-                .with_f32_output_proj(true)
-                .with_f32_qkv(true)
+            block.with_f32_output_proj(true)
         } else {
             block
         };
@@ -361,37 +355,6 @@ pub fn forward_layer_decode<L: CacheLayout, O: Ops>(
             .context("StandardAttention::forward_decode_shared_kv (gemma4 tail)")?;
     }
 
-    // #108 debug — probe the F32 attention partial right after the block
-    // finishes (before any post-norm / cast). Pinpoints whether NaN
-    // enters at attention itself vs the rmsnorm+cast post-chain.
-    if std::env::var_os("FLAMBEAU_LAYER_PROBE").is_some()
-        && use_f32_output
-        && std::env::var("FLAMBEAU_LAYER_PROBE_AT")
-            .ok()
-            .and_then(|s| s.parse::<usize>().ok())
-            .map(|t| t == spec.index)
-            .unwrap_or(false)
-    {
-        use flambeau_core::{CopyDirection, Stream};
-        let mut host = vec![0f32; hidden];
-        unsafe {
-            let _ = device.memcpy_async(
-                stream,
-                CopyDirection::DeviceToHost,
-                flambeau_core::DevicePtr(host.as_mut_ptr() as usize),
-                scratch.mmvq_f32,
-                hidden * 4,
-            );
-        }
-        let _ = stream.synchronize();
-        let nan = host.iter().filter(|v| v.is_nan()).count();
-        let inf = host.iter().filter(|v| v.is_infinite()).count();
-        let max_abs = host.iter().filter(|v| v.is_finite()).map(|v| v.abs()).fold(0f32, f32::max);
-        eprintln!(
-            "  [POST_ATTN_PROBE] L{} F32_partial(post output_proj) | nan={nan} inf={inf} max_abs={max_abs:.4}",
-            spec.index,
-        );
-    }
     // 11. post_attention_norm RMSNorm on attn_out, then add residual.
     if use_f32_output {
         // F32 path: input partial is in `scratch.mmvq_f32` (F32).
@@ -430,34 +393,6 @@ pub fn forward_layer_decode<L: CacheLayout, O: Ops>(
         )
         .context("post_attention_norm + residual_add post-attn")?;
     }
-    if std::env::var_os("FLAMBEAU_LAYER_PROBE").is_some()
-        && (std::env::var("FLAMBEAU_LAYER_PROBE_AT")
-            .ok()
-            .and_then(|s| s.parse::<usize>().ok())
-            .map(|t| t == spec.index)
-            .unwrap_or(true))
-    {
-        use flambeau_core::CopyDirection;
-        let mut host = vec![half::f16::from_f32(0.0); hidden];
-        // SAFETY: attn_residual_f16 owns hidden*2 bytes.
-        unsafe {
-            let _ = device.memcpy_async(
-                stream,
-                CopyDirection::DeviceToHost,
-                flambeau_core::DevicePtr(host.as_mut_ptr() as usize),
-                scratch.attn_residual_f16,
-                hidden * 2,
-            );
-        }
-        let _ = stream.synchronize();
-        let max_abs = host.iter().map(|h| h.to_f32().abs()).fold(0.0f32, f32::max);
-        let nans = host.iter().filter(|h| h.to_f32().is_nan()).count();
-        eprintln!(
-            "  [LAYER_PROBE] L{} attn_residual is_swa={} ffn_kind={:?} | max_abs={max_abs:.4} nans={nans}",
-            spec.index, spec.is_swa, spec.ffn_kind,
-        );
-    }
-
     // 12-16. FFN section. Dense and MoE branches both produce `x_out
     // = post_ffw_norm(FFN(attn_residual)) + attn_residual`. The dense
     // branch is the inline gate/up/GELU/down sequence; the MoE branch
