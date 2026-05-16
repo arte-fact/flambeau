@@ -16,7 +16,6 @@ use anyhow::Result;
 use flambeau_gemma4::Gemma4Config;
 use flambeau_runtime::ModelDriver;
 
-use crate::model::BoundaryCallback;
 use crate::model_handle::{Model, Session};
 
 /// Marker model handle for gemma4. The actual driver lives on the
@@ -70,50 +69,6 @@ pub struct Gemma4Session {
 }
 
 impl Session for Gemma4Session {
-    fn prefill_logits(
-        &mut self,
-        prompt_ids: &[u32],
-        start_position: usize,
-        logits_out: &mut Vec<f32>,
-        _tp_pool_prefill: Option<&mut dyn std::any::Any>,
-        _on_boundary: Option<BoundaryCallback<'_>>,
-        _prefill_ubatch: usize,
-    ) -> Result<()> {
-        // Gemma4 drivers own their own cluster + stream and don't yet
-        // chunk-prefill via `prefill_ubatch`; we pass the whole prompt
-        // through `forward_prefill_logits`. The prefix-cache
-        // `on_boundary` callback never fires for gemma4 (prefix cache
-        // gated off via `as_pp/as_tp/as_hybrid` returning None — see
-        // routes.rs `prefix_cache_try_restore` early-out).
-        //
-        // BOS prepend: the server-side `state.tokenizer.encode` does
-        // not add special tokens. Gemma4 needs BOS as token 0 (matches
-        // the parity test's `force_add_bos` insertion); we add it here
-        // when (a) the session was constructed with a known BOS id,
-        // (b) start_position is 0 (fresh prefill, not a tail continuation),
-        // and (c) the prompt doesn't already lead with BOS.
-        // Trait-method entry path. Currently the server's
-        // `crate::model::prefill_logits` free fn handles BOS prepend
-        // before calling the driver (it has the trait-accessor scaffold
-        // for `gemma4_bos_id` + branches gemma4 separately), so this
-        // direct trait call only fires when callers bypass the free
-        // fn. Mirror the same BOS-prepend invariant here so the trait
-        // method is self-contained.
-        let owned: Vec<u32>;
-        let needs_bos = start_position == 0
-            && self.bos_id.is_some()
-            && prompt_ids.first() != self.bos_id.as_ref();
-        let prompt_slice: &[u32] = if needs_bos {
-            let bos = self.bos_id.expect("checked Some above");
-            owned = std::iter::once(bos).chain(prompt_ids.iter().copied()).collect();
-            owned.as_slice()
-        } else {
-            prompt_ids
-        };
-        self.driver
-            .forward_prefill_logits(prompt_slice, start_position, logits_out)
-    }
-
     fn reset_for_next_request(&mut self) -> Result<()> {
         // V1: gemma4 drivers don't yet expose a KV-reset hook on the
         // ModelDriver trait. First request always works (KV starts

@@ -9,6 +9,7 @@ description = "OpenAI-compatible HTTP server (/v1/chat/completions, /v1/completi
 [dependencies]
 flambeau-core = { path = "../core" }
 flambeau-runtime = { path = "../runtime" }
+flambeau-server-core = { path = "../server-core" }
 flambeau-quant = { path = "../quant" }
 flambeau-qwen3-moe = { path = "../models/qwen3-moe" }
 flambeau-gemma4 = { path = "../models/gemma4", optional = true }
@@ -39,6 +40,7 @@ hip = [
     "flambeau-ops/hip",
     "flambeau-qwen3-moe/hip",
     "flambeau-gemma4/hip",
+    "flambeau-server-core/hip",
 ]
 # Enables debug FLAMBEAU_* env-var reads (TRACE_BATCH, DUMP_PROMPT,
 # DUMP_RAW_REQ, DEBUG_TOOL_RAW, PROFILE_DECODE, HOST_PROFILE) in release

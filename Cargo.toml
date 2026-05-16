@@ -12,6 +12,7 @@ members = [
     "crates/models/gemma4",
     "crates/runtime",
     "crates/bench",
+    "crates/server-core",
     "crates/server",
     "crates/cli",
 ]

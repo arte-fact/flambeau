@@ -269,6 +269,18 @@ fn strip_trailing_assistant_terminator(prompt: &str) -> String {
     }
 }
 
+impl crate::model_handle::SessionContext for ServerState {
+    fn cluster(&self) -> &flambeau_backend_hip::HipCluster {
+        &self.cluster
+    }
+    fn max_inflight_slots(&self) -> usize {
+        self.inflight_pool.len()
+    }
+    fn extras(&self) -> Option<&dyn std::any::Any> {
+        self.qwen3_moe.as_ref().map(|e| e as &dyn std::any::Any)
+    }
+}
+
 impl ServerState {
     /// **#324** — lock the shared TP prefill scratch, lazy-initialising
     /// on first call. Caller MUST already hold `prefill_serialiser` to
