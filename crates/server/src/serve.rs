@@ -642,20 +642,16 @@ async fn serve_inner_gemma4(
     quantization: Option<String>,
 ) -> Result<()> {
     use flambeau_gemma4::{
-        partition_layers, Gemma4Config, Gemma4PpDriver, Gemma4TpDriver, ModelLayout,
+        partition_layers, Gemma4Config, Gemma4HybridDriver, Gemma4PpDriver, Gemma4TpDriver, ModelLayout,
     };
     use flambeau_runtime::ModelDriver;
 
     use crate::gemma4_handle::{build_gemma4_loaded_model, wrap_gemma4_driver};
 
-    // PP and TP supported at MVP. Hybrid follow-up.
     let topology_label: &'static str = match cfg.mesh_mode {
         MeshMode::Pp => "pp",
         MeshMode::Tp { .. } => "tp",
-        MeshMode::Hybrid { .. } => bail!(
-            "gemma4 serve: --mesh-mode pp+tp not yet supported (got {:?}). Follow-up.",
-            cfg.mesh_mode
-        ),
+        MeshMode::Hybrid { .. } => "pp+tp",
     };
 
     let mut cfg_g4 = Gemma4Config::from_gguf(&gguf).context("Gemma4Config::from_gguf")?;
@@ -713,13 +709,17 @@ async fn serve_inner_gemma4(
                 arch = cfg_g4.arch.as_str(),
                 "loading gemma4 weights"
             );
+            // KV cache sizing — pass the full `context_length` (clamped
+            // by --ctx-cap above), NOT `prefill_ubatch`. Prior code
+            // passed prefill_ubatch (default 512) which capped the KV
+            // cache at 512 tokens regardless of --ctx-cap.
             let pp_driver = Gemma4PpDriver::upload(
                 &gguf,
                 cfg_g4.clone(),
                 layout,
                 layer_to_rank,
                 driver_cluster,
-                prefill_ubatch,
+                cfg_g4.context_length,
             )
             .context("Gemma4PpDriver::upload")?;
             (state_cluster, Box::new(pp_driver))
@@ -747,12 +747,62 @@ async fn serve_inner_gemma4(
                 cfg_g4.clone(),
                 layout,
                 shared_cluster.clone(),
-                prefill_ubatch,
+                cfg_g4.context_length,
             )
             .context("Gemma4TpDriver::upload")?;
             (shared_cluster, Box::new(tp_driver))
         }
-        MeshMode::Hybrid { .. } => unreachable!("guarded above"),
+        MeshMode::Hybrid { pp_size, tp_size } => {
+            let pp = pp_size as usize;
+            let tp = tp_size as usize;
+            if pp * tp != cfg.device_ids.len() {
+                bail!(
+                    "--mesh-mode pp+tp: pp_size*tp_size ({pp}*{tp}) != device count ({})",
+                    cfg.device_ids.len()
+                );
+            }
+            // Per-stage sub-clusters (device-major: stage s owns
+            // device_ids[s*tp .. (s+1)*tp]). Built BEFORE the global
+            // cluster so HybridCluster::new can record the construction
+            // order invariant (MEMORY.md `hybrid_cluster_order`).
+            let mut sub_clusters: Vec<Arc<HipCluster>> = Vec::with_capacity(pp);
+            for s in 0..pp {
+                let stage_ids = &cfg.device_ids[s * tp..(s + 1) * tp];
+                sub_clusters.push(Arc::new(
+                    HipCluster::new(stage_ids)
+                        .with_context(|| format!("HipCluster::new (sub_cluster stage {s})"))?,
+                ));
+            }
+            let global_cluster: Arc<HipCluster> = Arc::new(
+                HipCluster::new(&cfg.device_ids)
+                    .context("HipCluster::new (global, for inter-stage hand-off)")?,
+            );
+            let hc = flambeau_blocks::HybridCluster::new(
+                sub_clusters,
+                Arc::clone(&global_cluster),
+                tp,
+            )
+            .context("HybridCluster::new")?;
+            let mut layout = ModelLayout::from_config(&cfg_g4);
+            let _shared_kv = layout.resolve_kv_sharing();
+            info!(
+                num_layers = cfg_g4.num_layers,
+                pp_size = pp,
+                tp_size = tp,
+                topology = "pp+tp",
+                arch = cfg_g4.arch.as_str(),
+                "loading gemma4 weights"
+            );
+            let hybrid_driver = Gemma4HybridDriver::upload(
+                &gguf,
+                cfg_g4.clone(),
+                layout,
+                hc,
+                cfg_g4.context_length,
+            )
+            .context("Gemma4HybridDriver::upload")?;
+            (global_cluster, Box::new(hybrid_driver))
+        }
     };
 
     let model = build_gemma4_loaded_model(cfg_g4.clone(), topology_label);
@@ -783,7 +833,12 @@ async fn serve_inner_gemma4(
             pp_size: 1,
             tp_size: world,
         },
-        MeshMode::Hybrid { .. } => unreachable!("guarded above"),
+        MeshMode::Hybrid { pp_size, tp_size } => crate::prefix_cache::TopologyTag {
+            mesh_kind: "pp+tp",
+            ranks: pp_size * tp_size,
+            pp_size,
+            tp_size,
+        },
     };
 
     let model_defaults = crate::state::ModelDefaults::from_gguf(&gguf);
