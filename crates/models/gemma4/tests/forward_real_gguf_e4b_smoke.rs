@@ -6,35 +6,15 @@
 
 #![cfg(feature = "hip")]
 
-use std::path::Path;
-use std::sync::Arc;
+mod common;
 
-use flambeau_backend_hip::{device_count, HipDevice};
 use flambeau_gemma4::{
     forward_one_token, Gemma4Config, Gemma4DeviceWeights, Gemma4Session, ModelLayout,
 };
-use flambeau_quant::GgufFile;
 
-const MODELS_DIR: &str = "/artefact/models";
+use common::{device_or_skip, open_or_skip};
+
 const MAX_TOKENS: usize = 64;
-
-fn open_or_skip(name: &str) -> Option<Arc<GgufFile>> {
-    let p = Path::new(MODELS_DIR).join(name);
-    if !p.exists() {
-        eprintln!("skipping — {name} not present at {MODELS_DIR}");
-        return None;
-    }
-    GgufFile::open(&p).ok().map(Arc::new)
-}
-
-fn device_or_skip() -> Option<HipDevice> {
-    let n = device_count().ok()?;
-    if n < 1 {
-        eprintln!("skipping — no HIP devices");
-        return None;
-    }
-    HipDevice::new(0).ok()
-}
 
 #[test]
 fn real_gguf_e4b_q4_0_single_device_smoke() {

@@ -20,7 +20,8 @@
 
 #![cfg(feature = "hip")]
 
-use std::path::Path;
+mod common;
+
 use std::sync::Arc;
 
 use std::sync::Arc as ArcGuard;
@@ -32,22 +33,17 @@ use flambeau_gemma4::{
 };
 use flambeau_quant::{load_from_gguf, GgufFile};
 
-const MODELS_DIR: &str = "/artefact/models";
-const PROMPT: &str = "The capital of France is";
+use common::{
+    assert_parity_or_keyword, greedy_decode, open_or_skip, tokenize_prompt, MODELS_DIR, PROMPT,
+};
+
 const N_DECODE: usize = 16;
 const MAX_TOKENS: usize = 128;
 
-fn open_or_skip(name: &str) -> Option<GgufFile> {
-    let p = Path::new(MODELS_DIR).join(name);
-    if !p.exists() {
-        eprintln!("skipping — {name} not present at {MODELS_DIR}");
-        return None;
-    }
-    GgufFile::open(&p).ok()
-}
-
 /// Run flambeau greedy decode on the single-device path. Returns
-/// `(prompt_ids, decoded_ids)`.
+/// `(prompt_ids, decoded_ids)`. Single-device uses `Gemma4Session`'s
+/// own `forward_one_token` (not the `ModelDriver` trait), so the loop
+/// is open-coded here rather than going through [`greedy_decode`].
 fn flambeau_decode_single(file: Arc<GgufFile>) -> anyhow::Result<(Vec<u32>, Vec<u32>)> {
     let device = HipDevice::new(0)?;
     device.bind()?;
@@ -56,13 +52,7 @@ fn flambeau_decode_single(file: Arc<GgufFile>) -> anyhow::Result<(Vec<u32>, Vec<
     let mut layout = ModelLayout::from_config(&cfg);
     let _ = layout.resolve_kv_sharing();
 
-    let tokenizer = load_from_gguf(&file)?;
-    let mut prompt_ids = tokenizer.encode(PROMPT)?;
-    if tokenizer.force_add_bos {
-        if let Some(bos) = tokenizer.bos_id {
-            prompt_ids.insert(0, bos);
-        }
-    }
+    let prompt_ids = tokenize_prompt(&file, PROMPT)?;
 
     let weights = Gemma4DeviceWeights::upload(&file, &cfg, &layout, &device)?;
     let mut session = if cfg.per_layer_embed.is_some() {
@@ -78,14 +68,10 @@ fn flambeau_decode_single(file: Arc<GgufFile>) -> anyhow::Result<(Vec<u32>, Vec<
         Gemma4Session::new(&device, weights, cfg.clone(), layout, MAX_TOKENS)?
     };
 
-    // Prefill: feed each prompt token at its position.
     let mut tok = prompt_ids[0];
     for (i, &t) in prompt_ids.iter().enumerate() {
         tok = forward_one_token(&mut session, &device, t, i)?;
     }
-    // The forward of the *last* prompt token produces the first
-    // generated token (argmax of post-prompt logits). Capture it
-    // outside the loop body — we want all N_DECODE generated tokens.
     let mut decoded = Vec::with_capacity(N_DECODE);
     decoded.push(tok);
     let mut pos = prompt_ids.len();
@@ -99,23 +85,16 @@ fn flambeau_decode_single(file: Arc<GgufFile>) -> anyhow::Result<(Vec<u32>, Vec<
     Ok((prompt_ids, decoded))
 }
 
-/// Run flambeau greedy decode on the PP path. Returns
-/// `(prompt_ids, decoded_ids)`.
+/// Run flambeau greedy decode on the PP path. Uses
+/// `forward_prefill` for the prompt (batched) and `forward_one_token`
+/// for decode.
 fn flambeau_decode_pp(file: Arc<GgufFile>, devices: &[i32]) -> anyhow::Result<(Vec<u32>, Vec<u32>)> {
     let cluster = HipCluster::new(devices)?;
     let cfg = Gemma4Config::from_gguf(&file)?;
     let mut layout = ModelLayout::from_config(&cfg);
     let _ = layout.resolve_kv_sharing();
     let layer_to_rank = partition_layers(devices.len(), &layout)?;
-
-    let tokenizer = load_from_gguf(&file)?;
-    let mut prompt_ids = tokenizer.encode(PROMPT)?;
-    if tokenizer.force_add_bos {
-        if let Some(bos) = tokenizer.bos_id {
-            prompt_ids.insert(0, bos);
-        }
-    }
-
+    let prompt_ids = tokenize_prompt(&file, PROMPT)?;
     let mut driver = Gemma4PpDriver::upload(
         &file,
         cfg.clone(),
@@ -124,7 +103,6 @@ fn flambeau_decode_pp(file: Arc<GgufFile>, devices: &[i32]) -> anyhow::Result<(V
         cluster,
         MAX_TOKENS,
     )?;
-
     let first = driver.forward_prefill(&prompt_ids, 0)?;
     let mut decoded = Vec::with_capacity(N_DECODE);
     decoded.push(first);
@@ -135,13 +113,11 @@ fn flambeau_decode_pp(file: Arc<GgufFile>, devices: &[i32]) -> anyhow::Result<(V
         decoded.push(tok);
         pos += 1;
     }
-
     driver.dispose()?;
     Ok((prompt_ids, decoded))
 }
 
-/// PP variant that feeds the prompt one token at a time (using
-/// `forward_one_token` for prefill too) — bypasses
+/// PP variant that feeds the prompt one token at a time — bypasses
 /// `forward_prefill_pp` to isolate batched-prefill bugs.
 fn flambeau_decode_pp_pertoken(
     file: Arc<GgufFile>,
@@ -152,15 +128,7 @@ fn flambeau_decode_pp_pertoken(
     let mut layout = ModelLayout::from_config(&cfg);
     let _ = layout.resolve_kv_sharing();
     let layer_to_rank = partition_layers(devices.len(), &layout)?;
-
-    let tokenizer = load_from_gguf(&file)?;
-    let mut prompt_ids = tokenizer.encode(PROMPT)?;
-    if tokenizer.force_add_bos {
-        if let Some(bos) = tokenizer.bos_id {
-            prompt_ids.insert(0, bos);
-        }
-    }
-
+    let prompt_ids = tokenize_prompt(&file, PROMPT)?;
     let mut driver = Gemma4PpDriver::upload(
         &file,
         cfg.clone(),
@@ -169,27 +137,14 @@ fn flambeau_decode_pp_pertoken(
         cluster,
         MAX_TOKENS,
     )?;
-
-    let mut tok = prompt_ids[0];
-    for (i, &t) in prompt_ids.iter().enumerate() {
-        tok = driver.forward_one_token(t, i)?;
-    }
-    let mut decoded = Vec::with_capacity(N_DECODE);
-    decoded.push(tok);
-    let mut pos = prompt_ids.len();
-    while decoded.len() < N_DECODE {
-        tok = driver.forward_one_token(tok, pos)?;
-        decoded.push(tok);
-        pos += 1;
-    }
-
+    let decoded = greedy_decode(&mut driver, &prompt_ids, N_DECODE)?;
     driver.dispose()?;
     Ok((prompt_ids, decoded))
 }
 
-/// TP variant: shards the 31B-Q4_0 weights across 2 ranks via
-/// `Gemma4TpDriver::upload`. Greedy decodes the same prompt and
-/// asserts the output contains "Paris".
+/// TP variant: shards weights across `devices.len()` ranks via
+/// `Gemma4TpDriver::upload`. Decode-only (no batched-prefill kernel
+/// for TP yet).
 fn flambeau_decode_tp(
     file: Arc<GgufFile>,
     devices: &[i32],
@@ -198,32 +153,37 @@ fn flambeau_decode_tp(
     let cfg = Gemma4Config::from_gguf(&file)?;
     let mut layout = ModelLayout::from_config(&cfg);
     let _ = layout.resolve_kv_sharing();
+    let prompt_ids = tokenize_prompt(&file, PROMPT)?;
+    let mut driver = Gemma4TpDriver::upload(&file, cfg, layout, cluster, MAX_TOKENS)?;
+    let decoded = greedy_decode(&mut driver, &prompt_ids, N_DECODE)?;
+    driver.dispose()?;
+    Ok((prompt_ids, decoded))
+}
 
-    let tokenizer = load_from_gguf(&file)?;
-    let mut prompt_ids = tokenizer.encode(PROMPT)?;
-    if tokenizer.force_add_bos {
-        if let Some(bos) = tokenizer.bos_id {
-            prompt_ids.insert(0, bos);
+/// Hybrid (pp+tp) variant via `Gemma4HybridDriver::upload`. Decode-
+/// only. `stage_ids[s]` lists the device ids for stage `s`; the
+/// hybrid driver builds a sub_cluster per stage + a global cluster.
+fn flambeau_decode_hybrid(
+    file: Arc<GgufFile>,
+    stage_ids: &[&[i32]],
+) -> anyhow::Result<(Vec<u32>, Vec<u32>)> {
+    use flambeau_blocks::HybridCluster;
+    use flambeau_gemma4::Gemma4HybridDriver;
+    let tp_size = stage_ids[0].len();
+    for s in stage_ids {
+        if s.len() != tp_size {
+            anyhow::bail!("flambeau_decode_hybrid: non-uniform tp_size across stages");
         }
     }
-
-    let mut driver = Gemma4TpDriver::upload(&file, cfg, layout, cluster, MAX_TOKENS)?;
-
-    // TP path: decode-only (no batched-prefill kernel yet — feed each
-    // prompt token via forward_one_token).
-    let mut tok = prompt_ids[0];
-    for (i, &t) in prompt_ids.iter().enumerate() {
-        tok = driver.forward_one_token(t, i)?;
-    }
-    let mut decoded = Vec::with_capacity(N_DECODE);
-    decoded.push(tok);
-    let mut pos = prompt_ids.len();
-    while decoded.len() < N_DECODE {
-        tok = driver.forward_one_token(tok, pos)?;
-        decoded.push(tok);
-        pos += 1;
-    }
-
+    let cfg = Gemma4Config::from_gguf(&file)?;
+    let mut layout = ModelLayout::from_config(&cfg);
+    let _ = layout.resolve_kv_sharing();
+    let prompt_ids = tokenize_prompt(&file, PROMPT)?;
+    let (subs, global, _mesh) = common::hybrid_clusters_or_skip(stage_ids)
+        .ok_or_else(|| anyhow::anyhow!("hybrid cluster setup skipped"))?;
+    let hc = HybridCluster::new(subs, global, tp_size)?;
+    let mut driver = Gemma4HybridDriver::upload(&file, cfg, layout, hc, MAX_TOKENS)?;
+    let decoded = greedy_decode(&mut driver, &prompt_ids, N_DECODE)?;
     driver.dispose()?;
     Ok((prompt_ids, decoded))
 }
@@ -242,7 +202,6 @@ fn tp_hidden_cross_rank_match_after_one_token() {
     if device_count().map(|n| n < 2).unwrap_or(true) {
         return;
     }
-    let file = Arc::new(file);
     let cluster = ArcGuard::new(HipCluster::new(&[0, 2]).expect("cluster"));
     let cfg = Gemma4Config::from_gguf(&file).expect("cfg");
     let hidden = cfg.hidden_size;
@@ -340,7 +299,6 @@ fn tp_logits_dump_after_one_token() {
     if device_count().map(|n| n < 2).unwrap_or(true) {
         return;
     }
-    let file = Arc::new(file);
     let cluster = ArcGuard::new(HipCluster::new(&[0, 2]).expect("cluster"));
     let cfg = Gemma4Config::from_gguf(&file).expect("cfg");
     let mut layout = ModelLayout::from_config(&cfg);
@@ -371,7 +329,6 @@ fn upload_byte_parity_31b_q4_0_tp2_rank0_attn_q() {
         eprintln!("skipping — need 2 HIP devices");
         return;
     }
-    let file = Arc::new(file);
     let cluster = ArcGuard::new(HipCluster::new(&[0, 2]).expect("cluster"));
     let cfg = Gemma4Config::from_gguf(&file).expect("cfg");
     let mut layout = ModelLayout::from_config(&cfg);
@@ -462,19 +419,88 @@ fn parity_31b_q4_0_tp2() {
         eprintln!("skipping — need 2 HIP devices");
         return;
     }
-    let file = Arc::new(file);
     let (prompt_ids, fb_ids) =
         flambeau_decode_tp(file.clone(), &[0, 2]).expect("flambeau decode TP2");
     let tokenizer = load_from_gguf(&file).expect("tokenizer");
-    let fb_text = tokenizer.decode(&fb_ids).unwrap_or_default();
-    eprintln!("\n=== COHERENCE | 31B-Q4_0 TP2 (hip:0,2) ===");
-    eprintln!("  prompt   ({} ids): {prompt_ids:?}", prompt_ids.len());
-    eprintln!("  flambeau ({} ids): {fb_ids:?}", fb_ids.len());
-    eprintln!("  flambeau text: {fb_text:?}");
-    assert!(
-        fb_text.to_lowercase().contains("paris"),
-        "31B TP2 decode of 'The capital of France is' did NOT contain 'Paris'. \
-         Got: {fb_text:?}"
+    assert_parity_or_keyword(
+        "PARITY | 31B-Q4_0 TP2 (hip:0,2)",
+        &format!("{MODELS_DIR}/gemma-4-31B-it-Q4_0.gguf"),
+        &prompt_ids,
+        &fb_ids,
+        &tokenizer,
+        4,
+        "Paris",
+    );
+}
+
+/// 26B-A4B-Q8_0 TP2 parity — exercises the gemma4 MoE composer
+/// (Phase 10c-G shipped F32 attention output + F32 MoE cascade so
+/// this gates against regressions in those paths).
+#[test]
+fn parity_26b_a4b_q8_0_tp2() {
+    let Some(file) = open_or_skip("gemma-4-26B-A4B-it-Q8_0.gguf") else {
+        return;
+    };
+    if device_count().map(|n| n < 2).unwrap_or(true) {
+        eprintln!("skipping — need 2 HIP devices");
+        return;
+    }
+    let (prompt_ids, fb_ids) = match flambeau_decode_tp(file.clone(), &[0, 2]) {
+        Ok(r) => r,
+        Err(e) => {
+            let full = format!("{e:#}");
+            if full.contains("out of memory") || full.contains("OutOfMemory") {
+                eprintln!("skipping — 26B-A4B-Q8_0 TP2 OOM: {full}");
+                return;
+            }
+            panic!("flambeau decode TP2 (26B-A4B-Q8_0): {full}");
+        }
+    };
+    let tokenizer = load_from_gguf(&file).expect("tokenizer");
+    assert_parity_or_keyword(
+        "PARITY | 26B-A4B-Q8_0 TP2 (hip:0,2)",
+        &format!("{MODELS_DIR}/gemma-4-26B-A4B-it-Q8_0.gguf"),
+        &prompt_ids,
+        &fb_ids,
+        &tokenizer,
+        4,
+        "Paris",
+    );
+}
+
+/// 26B-A4B-Q8_0 pp2tp2 parity — exercises today's hybrid MoE
+/// composer (Phase 10c-H). Production 4-GPU topology on
+/// `hip:0,2,1,3` (MEMORY.md `never_tp4_use_pp2tp2`).
+#[test]
+fn parity_26b_a4b_q8_0_pp2tp2() {
+    let Some(file) = open_or_skip("gemma-4-26B-A4B-it-Q8_0.gguf") else {
+        return;
+    };
+    let stage_ids: [&[i32]; 2] = [&[0, 2], &[1, 3]];
+    let (prompt_ids, fb_ids) = match flambeau_decode_hybrid(file.clone(), &stage_ids) {
+        Ok(r) => r,
+        Err(e) => {
+            let full = format!("{e:#}");
+            if full.contains("skipped") {
+                eprintln!("skipping — hybrid cluster setup: {full}");
+                return;
+            }
+            if full.contains("out of memory") || full.contains("OutOfMemory") {
+                eprintln!("skipping — 26B-A4B-Q8_0 pp2tp2 OOM: {full}");
+                return;
+            }
+            panic!("flambeau hybrid decode (26B-A4B-Q8_0 pp2tp2): {full}");
+        }
+    };
+    let tokenizer = load_from_gguf(&file).expect("tokenizer");
+    assert_parity_or_keyword(
+        "PARITY | 26B-A4B-Q8_0 pp2tp2 (hip:0,2,1,3)",
+        &format!("{MODELS_DIR}/gemma-4-26B-A4B-it-Q8_0.gguf"),
+        &prompt_ids,
+        &fb_ids,
+        &tokenizer,
+        4,
+        "Paris",
     );
 }
 
@@ -495,7 +521,6 @@ fn smoke_31b_q8_0_tp2() {
         eprintln!("skipping — need 2 HIP devices");
         return;
     }
-    let file = Arc::new(file);
     let cfg = Gemma4Config::from_gguf(&file).expect("cfg");
     let vocab = cfg.vocab_size;
     let (prompt_ids, fb_ids) = match flambeau_decode_tp(file.clone(), &[0, 2]) {
@@ -554,7 +579,6 @@ fn smoke_26b_a4b_q8_0_pp2() {
         eprintln!("skipping — need 2 HIP devices");
         return;
     }
-    let file = Arc::new(file);
     let cfg = Gemma4Config::from_gguf(&file).expect("cfg");
     let vocab = cfg.vocab_size;
     // Per-token decode avoids the MoE prefill bail (#23). Each prompt
@@ -621,7 +645,6 @@ fn smoke_26b_a4b_q8_0_tp2() {
         eprintln!("skipping — need 2 HIP devices");
         return;
     }
-    let file = Arc::new(file);
     let cfg = Gemma4Config::from_gguf(&file).expect("cfg");
     let vocab = cfg.vocab_size;
     let (prompt_ids, fb_ids) = match flambeau_decode_tp(file.clone(), &[0, 2]) {
@@ -670,7 +693,6 @@ fn parity_31b_q4_0_pp2_pertoken() {
         eprintln!("skipping — need 2 HIP devices");
         return;
     }
-    let file = Arc::new(file);
     let (prompt_ids, fb_ids) =
         flambeau_decode_pp_pertoken(file.clone(), &[0, 2]).expect("flambeau decode PP2 per-token");
     let tokenizer = load_from_gguf(&file).expect("tokenizer");
@@ -686,90 +708,6 @@ fn parity_31b_q4_0_pp2_pertoken() {
     );
 }
 
-/// Run `llama-cli` greedy decode on the same model + prompt. Returns
-/// `decoded_ids` (just the generated tokens — prompt ids stripped).
-fn llamacpp_decode(model_path: &str) -> anyhow::Result<Vec<u32>> {
-    use std::process::{Command, Stdio};
-    let bin = "/artefact/llama.cpp/build/bin/llama-cli";
-    if !Path::new(bin).exists() {
-        anyhow::bail!("{bin} not present — skipping llama.cpp parity leg");
-    }
-    let out = Command::new(bin)
-        .env("LD_LIBRARY_PATH", "/opt/rocm-host/lib")
-        .env(
-            "ROCBLAS_TENSILE_LIBPATH",
-            "/opt/rocm-host/lib/rocblas/library",
-        )
-        .args([
-            "-m",
-            model_path,
-            "-p",
-            PROMPT,
-            "-n",
-            &format!("{N_DECODE}"),
-            "--temp",
-            "0",
-            "--top-k",
-            "1",
-            "-ngl",
-            "99",
-            "--seed",
-            "0",
-            "-sm",
-            "layer",
-            "-ts",
-            "1/1/1/1",
-            "-no-cnv",
-            "--single-turn",
-            "--no-warmup",
-            "--no-display-prompt",
-            "--log-disable",
-        ])
-        .stdin(Stdio::null())
-        .output()?;
-    if !out.status.success() {
-        anyhow::bail!(
-            "llama-cli failed: status={}, stderr={}",
-            out.status,
-            String::from_utf8_lossy(&out.stderr)
-        );
-    }
-    // llama-cli with --verbose-prompt prints generated tokens on stdout
-    // (just the text). We re-tokenize the stdout via the GGUF tokenizer
-    // to get ids. That's a closed loop using flambeau's encoder for both
-    // sides, which is fine for parity since we're checking ARITHMETIC
-    // drift, not tokenizer drift.
-    let text = String::from_utf8_lossy(&out.stdout).to_string();
-    let trimmed = text.trim();
-    eprintln!("  llama-cli output: {trimmed:?}");
-    // Re-encode through flambeau tokenizer for direct id comparison.
-    let gguf = GgufFile::open(model_path)?;
-    let tokenizer = load_from_gguf(&gguf)?;
-    let ids = tokenizer.encode(trimmed)?;
-    Ok(ids)
-}
-
-/// Compare two id sequences, return the length of the matching prefix.
-fn matching_prefix_len(a: &[u32], b: &[u32]) -> usize {
-    a.iter().zip(b.iter()).take_while(|(x, y)| x == y).count()
-}
-
-fn report(label: &str, prompt: &[u32], flambeau: &[u32], llamacpp: &[u32], tokenizer: &flambeau_quant::GgufTokenizer) {
-    let match_n = matching_prefix_len(flambeau, llamacpp);
-    let fb_text = tokenizer.decode(flambeau).unwrap_or_default();
-    let lc_text = tokenizer.decode(llamacpp).unwrap_or_default();
-    eprintln!("\n=== PARITY | {label} ===");
-    eprintln!("  prompt   ({} ids): {prompt:?}", prompt.len());
-    eprintln!("  flambeau ({} ids): {flambeau:?}", flambeau.len());
-    eprintln!("  flambeau text: {fb_text:?}");
-    eprintln!("  llamacpp ({} ids): {llamacpp:?}", llamacpp.len());
-    eprintln!("  llamacpp text: {lc_text:?}");
-    eprintln!(
-        "  matching prefix: {match_n} / {} tokens",
-        flambeau.len().min(llamacpp.len())
-    );
-}
-
 #[test]
 fn parity_e4b_q4_0_single() {
     let Some(file) = open_or_skip("gemma-4-E4B-it-Q4_0.gguf") else {
@@ -779,39 +717,17 @@ fn parity_e4b_q4_0_single() {
         eprintln!("skipping — no HIP device");
         return;
     }
-    let file = Arc::new(file);
     let (prompt_ids, fb_ids) = flambeau_decode_single(file.clone()).expect("flambeau decode");
     let tokenizer = load_from_gguf(&file).expect("tokenizer");
-    let fb_text = tokenizer.decode(&fb_ids).unwrap_or_default();
-    eprintln!("\n=== PARITY | E4B-Q4_0 single ===");
-    eprintln!("  prompt   ({} ids): {prompt_ids:?}", prompt_ids.len());
-    eprintln!("  flambeau ({} ids): {fb_ids:?}", fb_ids.len());
-    eprintln!("  flambeau text: {fb_text:?}");
-    match llamacpp_decode("/artefact/models/gemma-4-E4B-it-Q4_0.gguf") {
-        Ok(lc_ids) => {
-            let lc_text = tokenizer.decode(&lc_ids).unwrap_or_default();
-            let match_n = matching_prefix_len(&fb_ids, &lc_ids);
-            eprintln!("  llamacpp ({} ids): {lc_ids:?}", lc_ids.len());
-            eprintln!("  llamacpp text: {lc_text:?}");
-            eprintln!(
-                "  matching prefix: {match_n} / {} tokens",
-                fb_ids.len().min(lc_ids.len())
-            );
-            assert!(
-                match_n >= 4,
-                "fewer than 4 tokens match — likely arithmetic drift"
-            );
-        }
-        Err(e) => {
-            eprintln!("  llama.cpp leg unavailable: {e}");
-            eprintln!("  → coherence-only check: flambeau output should contain 'Paris'");
-            assert!(
-                fb_text.to_lowercase().contains("paris"),
-                "flambeau output for 'The capital of France is' did NOT contain 'Paris' — \
-                 strong signal of model corruption or arithmetic drift. Got: {fb_text:?}"
-            );
-        }
-    }
+    assert_parity_or_keyword(
+        "PARITY | E4B-Q4_0 single",
+        &format!("{MODELS_DIR}/gemma-4-E4B-it-Q4_0.gguf"),
+        &prompt_ids,
+        &fb_ids,
+        &tokenizer,
+        /*min_prefix=*/ 4,
+        /*coherence_kw=*/ "Paris",
+    );
 }
 
 #[test]
@@ -823,38 +739,16 @@ fn parity_31b_q4_0_pp2() {
         eprintln!("skipping — need 2 HIP devices");
         return;
     }
-    let file = Arc::new(file);
     let (prompt_ids, fb_ids) =
         flambeau_decode_pp(file.clone(), &[0, 2]).expect("flambeau decode PP2");
     let tokenizer = load_from_gguf(&file).expect("tokenizer");
-    let fb_text = tokenizer.decode(&fb_ids).unwrap_or_default();
-    eprintln!("\n=== PARITY | 31B-Q4_0 PP2 ===");
-    eprintln!("  prompt   ({} ids): {prompt_ids:?}", prompt_ids.len());
-    eprintln!("  flambeau ({} ids): {fb_ids:?}", fb_ids.len());
-    eprintln!("  flambeau text: {fb_text:?}");
-    match llamacpp_decode("/artefact/models/gemma-4-31B-it-Q4_0.gguf") {
-        Ok(lc_ids) => {
-            let lc_text = tokenizer.decode(&lc_ids).unwrap_or_default();
-            let match_n = matching_prefix_len(&fb_ids, &lc_ids);
-            eprintln!("  llamacpp ({} ids): {lc_ids:?}", lc_ids.len());
-            eprintln!("  llamacpp text: {lc_text:?}");
-            eprintln!(
-                "  matching prefix: {match_n} / {} tokens",
-                fb_ids.len().min(lc_ids.len())
-            );
-            assert!(
-                match_n >= 4,
-                "fewer than 4 tokens match — likely arithmetic drift"
-            );
-        }
-        Err(e) => {
-            eprintln!("  llama.cpp leg unavailable: {e}");
-            eprintln!("  → coherence-only check: flambeau output should contain 'Paris'");
-            assert!(
-                fb_text.to_lowercase().contains("paris"),
-                "flambeau output for 'The capital of France is' did NOT contain 'Paris' — \
-                 strong signal of model corruption or arithmetic drift. Got: {fb_text:?}"
-            );
-        }
-    }
+    assert_parity_or_keyword(
+        "PARITY | 31B-Q4_0 PP2",
+        &format!("{MODELS_DIR}/gemma-4-31B-it-Q4_0.gguf"),
+        &prompt_ids,
+        &fb_ids,
+        &tokenizer,
+        4,
+        "Paris",
+    );
 }
