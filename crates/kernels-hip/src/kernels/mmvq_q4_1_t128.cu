@@ -7,9 +7,14 @@
 // iteration. For Qwen3.5-9B hidden=5120 → n_blocks_per_row=160, each
 // thread loops 160/32 = 5 iterations — ~5 DP4A pairs per thread, still
 // small per-thread work but amortised across more grid.x blocks.
+//
+// Two output dtypes via templated __device__ body (#120):
+//   flambeau_mmvq_q4_1_t128_q8_1      → F32 dst (legacy scratch-then-cast)
+//   flambeau_mmvq_q4_1_t128_q8_1_f16  → F16 dst (saturating; direct store)
 
 #include "block_quant.cuh"
 #include "gfx906.cuh"
+#include "mmvq_store.cuh"
 
 #define MMVQ_Q4_1_T128_THREADS 128
 #define MMVQ_Q4_1_T128_WARPS (MMVQ_Q4_1_T128_THREADS / WARP_SIZE)
@@ -19,10 +24,11 @@ static __device__ __forceinline__ int flambeau_q4_1_t128_dp4a(int a, int b, int 
     return __builtin_amdgcn_sdot4(a, b, c, false);
 }
 
-extern "C" __global__ void flambeau_mmvq_q4_1_t128_q8_1(
+template<typename OutT>
+__device__ void mmvq_q4_1_t128_q8_1_body(
     const flambeau_block_q4_1* __restrict__ x,
     const flambeau_block_q8_1* __restrict__ y,
-    float* __restrict__ dst,
+    OutT* __restrict__ dst,
     const int n_rows,
     const int n_blocks_per_row
 ) {
@@ -76,7 +82,27 @@ extern "C" __global__ void flambeau_mmvq_q4_1_t128_q8_1(
             v += __shfl_xor(v, off, WARP_SIZE);
         }
         if (lane == 0) {
-            dst[row] = v;
+            mmvq_store<OutT>(dst, row, v);
         }
     }
+}
+
+extern "C" __global__ void flambeau_mmvq_q4_1_t128_q8_1(
+    const flambeau_block_q4_1* __restrict__ x,
+    const flambeau_block_q8_1* __restrict__ y,
+    float* __restrict__ dst,
+    const int n_rows,
+    const int n_blocks_per_row
+) {
+    mmvq_q4_1_t128_q8_1_body<float>(x, y, dst, n_rows, n_blocks_per_row);
+}
+
+extern "C" __global__ void flambeau_mmvq_q4_1_t128_q8_1_f16(
+    const flambeau_block_q4_1* __restrict__ x,
+    const flambeau_block_q8_1* __restrict__ y,
+    fb_fp16_t* __restrict__ dst,
+    const int n_rows,
+    const int n_blocks_per_row
+) {
+    mmvq_q4_1_t128_q8_1_body<fb_fp16_t>(x, y, dst, n_rows, n_blocks_per_row);
 }

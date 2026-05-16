@@ -126,17 +126,19 @@ pub trait Ops {
         dtype_weight: QDtype,
     ) -> Result<()>;
 
-    /// Q4_0 × Q8_1 MMVQ writing directly into an F16 destination (saturating
-    /// at ±65504). Skips the F32 scratch + `cast_f32_to_f16` two-step path
-    /// for consumers whose downstream kernel expects F16 (e.g. K projection
-    /// feeding `rmsnorm_f16`). #120.
-    fn mmvq_q4_0_f16_direct(
+    /// Weight × Q8_1 MMVQ writing directly into an F16 destination
+    /// (saturating at ±65504). Skips the F32 scratch + `cast_f32_to_f16`
+    /// two-step path for consumers whose downstream kernel expects F16
+    /// (e.g. K projection feeding `rmsnorm_f16`). Supports Q4_0 / Q4_1
+    /// / Q8_0 today; other dtypes bail. #120.
+    fn mmvq_f16_direct(
         &self,
         weights: DevicePtr,
         act_q8_1: DevicePtr,
         dst_f16: DevicePtr,
         n_rows: usize,
         k: usize,
+        dtype_weight: QDtype,
     ) -> Result<()>;
 
     fn mmq(

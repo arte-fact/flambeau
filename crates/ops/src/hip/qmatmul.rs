@@ -968,13 +968,17 @@ pub fn mmvq(
     mmvq_launch(reg, stream, recipe, weights, act_q8_1, dst, n_rows, nb_per_row)
 }
 
-/// Q4_0 × Q8_1 MMVQ writing directly into an F16 destination, saturating
-/// at ±F16_MAX. Equivalent shape to [`mmvq`] for `QDtype::Q4_0` but skips
-/// the `mmvq_f32` scratch + the separate `cast_f32_to_f16` launch. The
-/// kernel body is shared with the F32 variant via a templated `__device__`
-/// thunk in `mmvq_q4_0.cu`; this entry point is opt-in per consumer
+/// Weight × Q8_1 MMVQ writing directly into an F16 destination, saturating
+/// at ±F16_MAX. Equivalent shape to [`mmvq`] but skips the `mmvq_f32`
+/// scratch + the separate `cast_f32_to_f16` launch. Kernel bodies are
+/// shared with the F32 variants via templated `__device__` thunks in
+/// `mmvq_q{4_0, 4_1, 8_0}*.cu`; this entry point is opt-in per consumer
 /// (#120). Caller must ensure `dst_f16` is sized `n_rows × sizeof(fp16)`.
-pub fn mmvq_q4_0_f16_direct(
+///
+/// Supported dtypes: `Q4_0`, `Q4_1`, `Q8_0`. Other dtypes bail —
+/// extending the set is mechanical (add the templated thunk in the
+/// kernel + a `match` arm here).
+pub fn mmvq_f16_direct(
     reg: &OpsRegistry,
     stream: &HipStream,
     weights: DevicePtr,
@@ -982,18 +986,38 @@ pub fn mmvq_q4_0_f16_direct(
     dst_f16: DevicePtr,
     n_rows: usize,
     k: usize,
+    dtype_weight: QDtype,
 ) -> Result<()> {
-    mmvq_simple_launch(
-        reg,
-        stream,
-        "mmvq_q4_0",
-        "flambeau_mmvq_q4_0_q8_1_f16",
-        weights,
-        act_q8_1,
-        dst_f16,
-        n_rows,
-        k,
-    )
+    let (stem, entry, threads) = match dtype_weight {
+        QDtype::Q4_0 => ("mmvq_q4_0", "flambeau_mmvq_q4_0_q8_1_f16", 256u32),
+        QDtype::Q4_1 => ("mmvq_q4_1_t128", "flambeau_mmvq_q4_1_t128_q8_1_f16", 128),
+        QDtype::Q8_0 => (
+            "mmvq_q8_0_t128_vdr2",
+            "flambeau_mmvq_q8_0_t128_vdr2_q8_1_f16",
+            128,
+        ),
+        other => bail!(
+            "mmvq_f16_direct: no F16-direct kernel for {} (supported: Q4_0, Q4_1, Q8_0)",
+            other.name()
+        ),
+    };
+    assert_eq!(k % 32, 0, "{stem} requires k % 32 == 0");
+    let module = reg.expect_module(stem)?;
+    let kernel = module.kernel(entry)?;
+    let n_rows_i = n_rows as i32;
+    let n_blocks_i = (k / 32) as i32;
+    let w_ptr: u64 = weights.as_usize() as u64;
+    let y_ptr: u64 = act_q8_1.as_usize() as u64;
+    let d_ptr: u64 = dst_f16.as_usize() as u64;
+    let mut args = KernelArgs::new();
+    args.push(&w_ptr);
+    args.push(&y_ptr);
+    args.push(&d_ptr);
+    args.push(&n_rows_i);
+    args.push(&n_blocks_i);
+    let cfg = LaunchCfg::one_d(n_rows as u32, threads);
+    unsafe { kernel.launch(stream, cfg, args)? };
+    Ok(())
 }
 
 /// 3.a — common launch path for single-block-per-row Q-weight MMVQ
