@@ -1062,6 +1062,18 @@ fn upload_tp_typed_dispatch(
     rank: u32,
     device: &HipDevice,
 ) -> Result<Option<(DeviceTensor, usize, WeightLayout)>> {
+    // Typed-role upload is disabled pending a correctness fix: live
+    // /v1/completions on Qwen3.5-9B-Q4_1 / TP2 produces garbage when
+    // weights are uploaded via `upload_tp_via_role`, while the legacy
+    // `upload_tp_with_layout` path returns the correct " Paris."
+    // continuation. The chunked-prefill KV parity test (synthetic
+    // tokens) passes for both paths because the bug is in absolute
+    // weight values, not per-rank slicing consistency. Bypass via
+    // `Ok(None)` makes every per-layer tensor fall through to the
+    // legacy uploader until the typed path is fixed. Followup task.
+    let _ = (file, cfg, name, layer_idx, tp, rank, device);
+    return Ok(None);
+    #[allow(unreachable_code)]
     let info = file
         .info(name)
         .with_context(|| format!("info `{name}`"))?;
@@ -1161,6 +1173,10 @@ fn upload_tp_global_typed(
     rank: u32,
     device: &HipDevice,
 ) -> Result<Option<(DeviceTensor, usize, WeightLayout)>> {
+    // Disabled — see `upload_tp_typed_dispatch` for rationale.
+    let _ = (file, cfg, name, tp, rank, device);
+    return Ok(None);
+    #[allow(unreachable_code)]
     let info = file
         .info(name)
         .with_context(|| format!("info `{name}`"))?;
