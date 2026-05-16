@@ -57,24 +57,16 @@ pub trait Model: Send + Sync + 'static {
         &[]
     }
 
-    /// Batched-decode entry point. Default handles N=1 by delegating
-    /// to [`Session::decode_one_logits`]; N>1 bails. Archs with a
-    /// multi-slot impl take the `as_pp/_tp/_hybrid` Some branch.
+    /// Batched-decode entry point. Default handles N=1 only by
+    /// delegating to [`Session::decode_one_logits`] — multi-slot archs
+    /// (qwen3-moe PP/TP/Hybrid) override this method.
     fn forward_decode_batched(
         &self,
-        state: &crate::routes::ServerState,
+        _state: &crate::routes::ServerState,
         inflights: &mut [&mut dyn Session],
         slots: &[flambeau_qwen3_moe::forward::BatchSlot],
         logits_refs: &mut [&mut Vec<f32>],
     ) -> Result<()> {
-        if self.as_pp().is_some() || self.as_tp().is_some() || self.as_hybrid().is_some() {
-            return crate::model::qwen3moe_forward_decode_batched(
-                state,
-                inflights,
-                slots,
-                logits_refs,
-            );
-        }
         if slots.len() != 1 {
             anyhow::bail!(
                 "Model::forward_decode_batched: N={} not supported by this arch \
@@ -227,6 +219,15 @@ impl Model for PpHipModel {
     fn as_pp(&self) -> Option<&PpHipModel> {
         Some(self)
     }
+    fn forward_decode_batched(
+        &self,
+        state: &crate::routes::ServerState,
+        inflights: &mut [&mut dyn Session],
+        slots: &[flambeau_qwen3_moe::forward::BatchSlot],
+        logits_refs: &mut [&mut Vec<f32>],
+    ) -> Result<()> {
+        crate::model::qwen3moe_forward_decode_batched(state, inflights, slots, logits_refs)
+    }
 }
 
 impl Model for TpHipModel {
@@ -236,6 +237,15 @@ impl Model for TpHipModel {
     fn as_tp(&self) -> Option<&TpHipModel> {
         Some(self)
     }
+    fn forward_decode_batched(
+        &self,
+        state: &crate::routes::ServerState,
+        inflights: &mut [&mut dyn Session],
+        slots: &[flambeau_qwen3_moe::forward::BatchSlot],
+        logits_refs: &mut [&mut Vec<f32>],
+    ) -> Result<()> {
+        crate::model::qwen3moe_forward_decode_batched(state, inflights, slots, logits_refs)
+    }
 }
 
 impl Model for HybridHipModel {
@@ -244,6 +254,15 @@ impl Model for HybridHipModel {
     }
     fn as_hybrid(&self) -> Option<&HybridHipModel> {
         Some(self)
+    }
+    fn forward_decode_batched(
+        &self,
+        state: &crate::routes::ServerState,
+        inflights: &mut [&mut dyn Session],
+        slots: &[flambeau_qwen3_moe::forward::BatchSlot],
+        logits_refs: &mut [&mut Vec<f32>],
+    ) -> Result<()> {
+        crate::model::qwen3moe_forward_decode_batched(state, inflights, slots, logits_refs)
     }
 }
 
