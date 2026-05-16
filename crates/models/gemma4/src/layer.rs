@@ -355,6 +355,37 @@ pub fn forward_layer_decode<L: CacheLayout, O: Ops>(
             .context("StandardAttention::forward_decode_shared_kv (gemma4 tail)")?;
     }
 
+    // #108 debug — probe the F32 attention partial right after the block
+    // finishes (before any post-norm / cast). Pinpoints whether NaN
+    // enters at attention itself vs the rmsnorm+cast post-chain.
+    if std::env::var_os("FLAMBEAU_LAYER_PROBE").is_some()
+        && use_f32_output
+        && std::env::var("FLAMBEAU_LAYER_PROBE_AT")
+            .ok()
+            .and_then(|s| s.parse::<usize>().ok())
+            .map(|t| t == spec.index)
+            .unwrap_or(false)
+    {
+        use flambeau_core::{CopyDirection, Stream};
+        let mut host = vec![0f32; hidden];
+        unsafe {
+            let _ = device.memcpy_async(
+                stream,
+                CopyDirection::DeviceToHost,
+                flambeau_core::DevicePtr(host.as_mut_ptr() as usize),
+                scratch.mmvq_f32,
+                hidden * 4,
+            );
+        }
+        let _ = stream.synchronize();
+        let nan = host.iter().filter(|v| v.is_nan()).count();
+        let inf = host.iter().filter(|v| v.is_infinite()).count();
+        let max_abs = host.iter().filter(|v| v.is_finite()).map(|v| v.abs()).fold(0f32, f32::max);
+        eprintln!(
+            "  [POST_ATTN_PROBE] L{} F32_partial(post output_proj) | nan={nan} inf={inf} max_abs={max_abs:.4}",
+            spec.index,
+        );
+    }
     // 11. post_attention_norm RMSNorm on attn_out, then add residual.
     if use_f32_output {
         // F32 path: input partial is in `scratch.mmvq_f32` (F32).
@@ -393,7 +424,13 @@ pub fn forward_layer_decode<L: CacheLayout, O: Ops>(
         )
         .context("post_attention_norm + residual_add post-attn")?;
     }
-    if std::env::var_os("FLAMBEAU_LAYER_PROBE").is_some() {
+    if std::env::var_os("FLAMBEAU_LAYER_PROBE").is_some()
+        && (std::env::var("FLAMBEAU_LAYER_PROBE_AT")
+            .ok()
+            .and_then(|s| s.parse::<usize>().ok())
+            .map(|t| t == spec.index)
+            .unwrap_or(true))
+    {
         use flambeau_core::CopyDirection;
         let mut host = vec![half::f16::from_f32(0.0); hidden];
         // SAFETY: attn_residual_f16 owns hidden*2 bytes.

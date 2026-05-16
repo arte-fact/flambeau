@@ -1132,6 +1132,37 @@ impl StandardAttention {
             bail!("StandardAttention: unsupported KV layout {kv_layout}");
         }
 
+        // #108 debug — scan attn_out_f16 (output of attention_decode_f16).
+        // NaN here ⇒ attention dot+softmax+V kernel produced it; NaN
+        // appearing only later ⇒ sigmoid gate / quantise / output_proj.
+        if std::env::var_os("FLAMBEAU_ATTN_PROBE").is_some() {
+            use flambeau_core::{CopyDirection, Device, Stream};
+            let n = n_heads * head_dim;
+            let mut host = vec![0u16; n];
+            unsafe {
+                let _ = device.memcpy_async(
+                    stream,
+                    CopyDirection::DeviceToHost,
+                    DevicePtr(host.as_mut_ptr() as usize),
+                    scratch.attn_out_f16,
+                    n * 2,
+                );
+            }
+            let _ = stream.synchronize();
+            let mut nan = 0usize;
+            let mut inf = 0usize;
+            let mut max_abs = 0f32;
+            for &b in &host {
+                let v = half::f16::from_bits(b).to_f32();
+                if v.is_nan() { nan += 1; }
+                else if v.is_infinite() { inf += 1; }
+                else if v.abs() > max_abs { max_abs = v.abs(); }
+            }
+            eprintln!(
+                "  [ATTN_PROBE] attn_out_f16 n_heads={n_heads} head_dim={head_dim} | nan={nan} inf={inf} max_abs={max_abs:.4}"
+            );
+        }
+
         // 10. Post-attn sigmoid gate (gated path only). Plain path
         // feeds attn_out_f16 straight into the output projection.
         let post_attn_f16 = if self.gated {
