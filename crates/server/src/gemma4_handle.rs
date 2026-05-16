@@ -17,7 +17,7 @@ use flambeau_gemma4::Gemma4Config;
 use flambeau_qwen3_moe::forward::ShardedForwardPrefillScratchTp;
 use flambeau_runtime::ModelDriver;
 
-use crate::model::{BoundaryCallback, HybridHipSession, PpHipSession, TpHipSession};
+use crate::model::BoundaryCallback;
 use crate::model_handle::{Model, Session};
 
 /// Marker model handle for gemma4. The actual driver lives on the
@@ -31,6 +31,9 @@ pub struct Gemma4Model {
 impl Model for Gemma4Model {
     fn topology(&self) -> &'static str {
         self.topology
+    }
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
     }
     fn chat_stop_markers(&self) -> &'static [&'static str] {
         // Kept in sync with `Gemma4Session::chat_stop_markers`.
@@ -128,26 +131,14 @@ impl Session for Gemma4Session {
         driver.dispose()
     }
 
-    fn as_pp(&self) -> Option<&PpHipSession> {
-        None
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
     }
-    fn as_pp_mut(&mut self) -> Option<&mut PpHipSession> {
-        None
-    }
-    fn as_tp(&self) -> Option<&TpHipSession> {
-        None
-    }
-    fn as_tp_mut(&mut self) -> Option<&mut TpHipSession> {
-        None
-    }
-    fn as_hybrid(&self) -> Option<&HybridHipSession> {
-        None
-    }
-    fn as_hybrid_mut(&mut self) -> Option<&mut HybridHipSession> {
-        None
+    fn as_any_mut(&mut self) -> &mut dyn std::any::Any {
+        self
     }
 
-    fn as_gemma4_driver_mut(&mut self) -> Option<&mut dyn ModelDriver> {
+    fn as_model_driver_mut(&mut self) -> Option<&mut dyn ModelDriver> {
         Some(self.driver.as_mut())
     }
 
@@ -160,14 +151,14 @@ impl Session for Gemma4Session {
         // routes.rs sends `position = prompt_ids.len() + step` with
         // step starting at 1, so the first decode position is N+1.
         // The BOS prepend in `prefill_logits` advances the cache tail
-        // to N+1 too, so the positions align with the driver's literal
+        // to N+1 too, so positions align with the driver's literal
         // write-slot semantics.
         logits_out.clear();
         self.driver
             .forward_one_token_logits(token, position, logits_out)
     }
 
-    fn gemma4_bos_id(&self) -> Option<u32> {
+    fn bos_id(&self) -> Option<u32> {
         self.bos_id
     }
 

@@ -10,6 +10,7 @@ use tokio::sync::Mutex;
 
 use crate::model::{
     capture_kv_from_inflight, restore_kv_into_inflight, snapshot_bytes, LoadedModel,
+    Qwen3MoeModelExt, Qwen3MoeSessionExt,
 };
 use crate::prefix_cache::{PrefixCache, PrefixKeys, TopologyTag};
 

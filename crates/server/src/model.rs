@@ -110,6 +110,73 @@ impl HybridHipModel {
 /// so per-request sessions can hold a cheap back-reference.
 pub type LoadedModel = std::sync::Arc<dyn crate::model_handle::Model>;
 
+/// Extension trait for qwen3-moe model topology accessors. Imported
+/// by qwen3-moe-typed callers; downcasts through the trait's
+/// `as_any()` hatch. Keeps the [`Model`](crate::model_handle::Model)
+/// trait surface arch-clean (CLAUDE.md rule 12 + 13).
+pub trait Qwen3MoeModelExt {
+    fn as_pp(&self) -> Option<&PpHipModel>;
+    fn as_tp(&self) -> Option<&TpHipModel>;
+    fn as_hybrid(&self) -> Option<&HybridHipModel>;
+}
+
+impl<T: ?Sized + crate::model_handle::Model> Qwen3MoeModelExt for T {
+    fn as_pp(&self) -> Option<&PpHipModel> {
+        self.as_any().downcast_ref()
+    }
+    fn as_tp(&self) -> Option<&TpHipModel> {
+        self.as_any().downcast_ref()
+    }
+    fn as_hybrid(&self) -> Option<&HybridHipModel> {
+        self.as_any().downcast_ref()
+    }
+}
+
+/// Extension trait for qwen3-moe session accessors. Imported by
+/// qwen3-moe-typed callers; downcasts through `Session::as_any` /
+/// `as_any_mut`.
+pub trait Qwen3MoeSessionExt {
+    fn as_pp(&self) -> Option<&PpHipSession>;
+    fn as_pp_mut(&mut self) -> Option<&mut PpHipSession>;
+    fn as_tp(&self) -> Option<&TpHipSession>;
+    fn as_tp_mut(&mut self) -> Option<&mut TpHipSession>;
+    fn as_hybrid(&self) -> Option<&HybridHipSession>;
+    fn as_hybrid_mut(&mut self) -> Option<&mut HybridHipSession>;
+}
+
+impl<T: ?Sized + crate::model_handle::Session> Qwen3MoeSessionExt for T {
+    fn as_pp(&self) -> Option<&PpHipSession> {
+        self.as_any()
+            .downcast_ref::<crate::model_handle::Qwen3MoeOwnedSession>()
+            .and_then(|s| s.inflight.as_pp())
+    }
+    fn as_pp_mut(&mut self) -> Option<&mut PpHipSession> {
+        self.as_any_mut()
+            .downcast_mut::<crate::model_handle::Qwen3MoeOwnedSession>()
+            .and_then(|s| s.inflight.as_pp_mut())
+    }
+    fn as_tp(&self) -> Option<&TpHipSession> {
+        self.as_any()
+            .downcast_ref::<crate::model_handle::Qwen3MoeOwnedSession>()
+            .and_then(|s| s.inflight.as_tp())
+    }
+    fn as_tp_mut(&mut self) -> Option<&mut TpHipSession> {
+        self.as_any_mut()
+            .downcast_mut::<crate::model_handle::Qwen3MoeOwnedSession>()
+            .and_then(|s| s.inflight.as_tp_mut())
+    }
+    fn as_hybrid(&self) -> Option<&HybridHipSession> {
+        self.as_any()
+            .downcast_ref::<crate::model_handle::Qwen3MoeOwnedSession>()
+            .and_then(|s| s.inflight.as_hybrid())
+    }
+    fn as_hybrid_mut(&mut self) -> Option<&mut HybridHipSession> {
+        self.as_any_mut()
+            .downcast_mut::<crate::model_handle::Qwen3MoeOwnedSession>()
+            .and_then(|s| s.inflight.as_hybrid_mut())
+    }
+}
+
 pub struct PpHipSession {
     pub session: Qwen3MoEShardedSession,
     pub prefill: ShardedForwardPrefillScratch,
@@ -453,10 +520,10 @@ pub fn prefill_logits(
     // == 0). Aligning the cache tail to N+1 makes the subsequent
     // decode positions from routes.rs (`prompt_ids.len() + step`)
     // land on the right slots.
-    if inflight.as_gemma4_driver_mut().is_some() {
+    if inflight.as_model_driver_mut().is_some() {
         let _ = (cluster, tp_pool_prefill, prefill_ubatch);
         let _ = on_boundary;
-        let bos_id = inflight.gemma4_bos_id();
+        let bos_id = inflight.bos_id();
         let owned: Vec<u32>;
         let prompt_slice: &[u32] = if start_position == 0
             && bos_id.is_some()
@@ -478,7 +545,7 @@ pub fn prefill_logits(
             prompt_slice.len() > prompt_ids.len()
         );
         let driver = inflight
-            .as_gemma4_driver_mut()
+            .as_model_driver_mut()
             .expect("checked above");
         return driver
             .forward_prefill_logits(prompt_slice, start_position, logits_out)
