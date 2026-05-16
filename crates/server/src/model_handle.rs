@@ -40,11 +40,28 @@ pub trait Model: Send + Sync + 'static {
         None
     }
 
-    /// Phase 12.9 — arch tag for non-qwen3-moe model families. Returns
-    /// `true` for gemma4 model handles (`Gemma4Model`). Default
-    /// `false` for the qwen3-moe topology handles. Routes.rs uses this
-    /// at the dispatch level to branch into the gemma4 path.
-    fn is_gemma4(&self) -> bool {
+    /// True when the model arch supports the batched-decode scheduler.
+    /// Qwen3-moe (PP/TP/Hybrid) overrides to true; gemma4 + future N=1
+    /// archs leave it false so the legacy single-stream decode handler
+    /// is selected. JSON / logprobs paths bypass the scheduler
+    /// regardless via the orthogonal gates in `scheduler_can_engage`.
+    fn supports_scheduler_batching(&self) -> bool {
+        false
+    }
+
+    /// True when the model arch requires the TP/Hybrid prefill
+    /// serialiser lock held across a `prefill_logits` call (caps peak
+    /// scratch alloc to one chunk's worth across N concurrent
+    /// requests). Qwen3-moe TP + Hybrid override to true.
+    fn requires_prefill_serialiser(&self) -> bool {
+        false
+    }
+
+    /// True when the model arch consumes a pre-allocated TP prefill
+    /// scratch (`ShardedForwardPrefillScratchTp`) handed in via
+    /// `Session::prefill_logits`'s `tp_pool_prefill` parameter. Only
+    /// qwen3-moe TP returns true.
+    fn requires_tp_prefill_scratch(&self) -> bool {
         false
     }
 
@@ -219,6 +236,9 @@ impl Model for PpHipModel {
     fn as_pp(&self) -> Option<&PpHipModel> {
         Some(self)
     }
+    fn supports_scheduler_batching(&self) -> bool {
+        true
+    }
     fn forward_decode_batched(
         &self,
         state: &crate::routes::ServerState,
@@ -237,6 +257,15 @@ impl Model for TpHipModel {
     fn as_tp(&self) -> Option<&TpHipModel> {
         Some(self)
     }
+    fn supports_scheduler_batching(&self) -> bool {
+        true
+    }
+    fn requires_prefill_serialiser(&self) -> bool {
+        true
+    }
+    fn requires_tp_prefill_scratch(&self) -> bool {
+        true
+    }
     fn forward_decode_batched(
         &self,
         state: &crate::routes::ServerState,
@@ -254,6 +283,12 @@ impl Model for HybridHipModel {
     }
     fn as_hybrid(&self) -> Option<&HybridHipModel> {
         Some(self)
+    }
+    fn supports_scheduler_batching(&self) -> bool {
+        true
+    }
+    fn requires_prefill_serialiser(&self) -> bool {
+        true
     }
     fn forward_decode_batched(
         &self,

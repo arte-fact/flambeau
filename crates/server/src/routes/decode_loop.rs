@@ -316,14 +316,10 @@ fn scheduler_can_engage(state: &ServerState, params: &SamplingParams) -> bool {
     if !state.batched_decode {
         return false;
     }
-    // PP, TP, and Hybrid all supported. JSON / logprobs paths still go
-    // through the legacy handler — those features carry extra device-
-    // side state (JSON DFA, top-K logprobs grab) that isn't yet plumbed
-    // through the scheduler-aware handler.
-    let topo_ok = state.model.as_pp().is_some()
-        || state.model.as_tp().is_some()
-        || state.model.as_hybrid().is_some();
-    if !topo_ok {
+    // JSON / logprobs paths still go through the legacy handler —
+    // those features carry extra device-side state (JSON DFA, top-K
+    // logprobs grab) that isn't yet plumbed through the scheduler.
+    if !state.model.supports_scheduler_batching() {
         return false;
     }
     !params.json_mode && params.collect_logprobs.is_none()
@@ -384,14 +380,14 @@ fn run_completion_scheduler_pp_blocking(
             let mut logits_buf: Vec<f32> = Vec::with_capacity(vocab);
             // **#321** — TP/Hybrid prefill alloc serialiser. See field
             // doc on ServerState::prefill_serialiser.
-            let _prefill_lock = if model.as_tp().is_some() || model.as_hybrid().is_some() {
+            let _prefill_lock = if model.requires_prefill_serialiser() {
                 Some(state.qwen3_moe.as_ref().expect("TP/Hybrid serialiser requires qwen3-moe boot").prefill_serialiser.lock().unwrap())
             } else {
                 None
             };
             // **#324** — for TP, hand the shared pre-allocated scratch
             // through so prefill_logits skips the per-call alloc.
-            let mut tp_scratch_g = if model.as_tp().is_some() {
+            let mut tp_scratch_g = if model.requires_tp_prefill_scratch() {
                 Some(state.lock_tp_prefill_scratch()?)
             } else {
                 None
@@ -658,80 +654,15 @@ fn run_completion_blocking_ids(
     // EOS mask regardless of sampling mode.
     let mut logits_buf: Vec<f32> = Vec::with_capacity(vocab);
 
-    // **Sampler-D3 / D4 / Hybrid** — GPU-side top-K sampler. Opts in
-    // via `FLAMBEAU_GPU_SAMPLER=1` for any non-greedy TP or Hybrid
-    // request; the penalty-active path goes through
-    // `run_gpu_topk_with_penalties` (D4 — applies repetition /
-    // presence / frequency on device before topk) instead of
-    // `run_gpu_topk` (D3 — bare topk). Resolves the head device
-    // differently per topology:
-    // - TP: global cluster's `decode.head_rank` device
-    // - Hybrid: head stage's sub_cluster's head TP-rank device
-    // (head_stage = pp_size - 1; head_rank within stage
-    // defaults to 0 per ShardedForwardOneTokenScratchHybrid).
-    // Phase 12.5 — temporarily disabled. The keep-logits-on-device
-    // optimisation reads `pp/tp/hybrid_session.decode.per_rank[head].
-    // output_head.logits_f32`, which was populated by the legacy
-    // `forward_one_token_*_keep_logits_on_device` kernels. With decode
-    // collapsed onto `forward_decode_batched_*`, those buffers go stale
-    // (the batched output head writes to the *batched* scratch's
-    // `output_head.logits_f32` instead). Re-wiring `resolve_head_logits`
-    // to read the batched scratch's buffer is its own follow-up.
-    let use_gpu_sampler = false;
+    // GPU sampler scratch alloc is gated on the keep-logits-on-device
+    // optimisation, which was disabled when decode collapsed onto
+    // `forward_decode_batched_*` (Phase 12.5) — the batched output head
+    // writes to a different scratch buffer than the keep-on-device
+    // kernels read from. Re-wiring `resolve_head_logits` to the batched
+    // scratch is a follow-up; for now scratch stays `None`.
     let _ = state.gpu_sampler;
-    let mut gpu_scratch: Option<GpuSamplerScratch> = if use_gpu_sampler {
-        // Resolve the head device for whichever topology is active.
-        let head_device = if let (Some(p), Some(_)) = (model.as_pp(), inflight.as_pp()) {
-            // PP head rank is the last shard.
-            let head_rank = p.model.shards.len().saturating_sub(1);
-            if head_rank >= cluster.ranks() {
-                bail!(
-                    "GPU sampler: PP head_rank={head_rank} >= cluster ranks {}",
-                    cluster.ranks()
-                );
-            }
-            cluster.device(head_rank)
-        } else if let (Some(_), Some(s)) = (model.as_tp(), inflight.as_tp()) {
-            let head_rank = s.decode.head_rank.0 as usize;
-            if head_rank >= cluster.ranks() {
-                bail!(
-                    "GPU sampler: TP head_rank={head_rank} >= cluster ranks {}",
-                    cluster.ranks()
-                );
-            }
-            cluster.device(head_rank)
-        } else if let (Some(hm), Some(s)) = (model.as_hybrid(), inflight.as_hybrid()) {
-            let decode = &s.decode;
-            let head_stage = decode.head_stage as usize;
-            let stage_model = hm.model.stages.get(head_stage).ok_or_else(|| {
-                anyhow!("GPU sampler: hybrid head_stage {head_stage} out of range")
-            })?;
-            let stage_scratch = decode
-                .per_stage
-                .get(head_stage)
-                .ok_or_else(|| anyhow!("GPU sampler: hybrid decode missing head_stage"))?;
-            let head_rank = stage_scratch.head_rank.0 as usize;
-            if head_rank >= stage_model.sub_cluster.ranks() {
-                bail!(
-                    "GPU sampler: hybrid head_rank={head_rank} >= stage sub-cluster ranks {}",
-                    stage_model.sub_cluster.ranks()
-                );
-            }
-            stage_model.sub_cluster.device(head_rank)
-        } else {
-            bail!("GPU sampler: unsupported (model, inflight) combination");
-        };
-        Some(
-            // K=2048 matches Sampler-A's `effective_top_k` default
-            // for `top_p`/`min_p` callers without explicit `top_k`.
-            // Smaller K caused the GPU sampler to bias multinomial
-            // toward EOS at natural-endpoint positions.
-            GpuSamplerScratch::new(head_device, 2048)
-                .context("alloc GpuSamplerScratch")?,
-        )
-    } else {
-        None
-    };
+    let use_gpu_sampler = false;
+    let mut gpu_scratch: Option<GpuSamplerScratch> = None;
 
     // Prefill. Always download logits so we can mask stop tokens on the
     // first generated token — Qwen3.6 sometimes argmaxes `<|im_end|>` as
@@ -740,13 +671,13 @@ fn run_completion_blocking_ids(
     let prefill_start = Instant::now();
     // **#321** — TP/Hybrid prefill alloc serialiser. See field
     // doc on ServerState::prefill_serialiser.
-    let _prefill_lock = if model.as_tp().is_some() || model.as_hybrid().is_some() {
+    let _prefill_lock = if model.requires_prefill_serialiser() {
         Some(state.qwen3_moe.as_ref().expect("TP/Hybrid serialiser requires qwen3-moe boot").prefill_serialiser.lock().unwrap())
     } else {
         None
     };
     // **#324** — for TP, hand the shared pre-allocated scratch through.
-    let mut tp_scratch_g = if model.as_tp().is_some() {
+    let mut tp_scratch_g = if model.requires_tp_prefill_scratch() {
         Some(state.lock_tp_prefill_scratch()?)
     } else {
         None
@@ -1096,35 +1027,10 @@ fn run_completion_blocking_ids(
         }
     }
 
-    // Dispose GPU sampler scratch (if allocated) before tearing down
-    // the inflight session. The dispose device must match the device
-    // the scratch was allocated on (recorded at construction time);
-    // resolve it the same way the constructor did, depending on
-    // topology.
-    if let Some(scratch) = gpu_scratch.take() {
-        let head_device = if let (Some(p), Some(_)) = (model.as_pp(), inflight.as_pp()) {
-            cluster.device(p.model.shards.len().saturating_sub(1))
-        } else if let (Some(_), Some(s)) = (model.as_tp(), inflight.as_tp()) {
-            cluster.device(s.decode.head_rank.0 as usize)
-        } else if let (Some(hm), Some(s)) = (model.as_hybrid(), inflight.as_hybrid()) {
-            let decode = &s.decode;
-            let head_stage = decode.head_stage as usize;
-            let stage_model = hm.model.stages.get(head_stage).ok_or_else(|| {
-                anyhow!("dispose GpuSamplerScratch: hybrid head_stage out of range")
-            })?;
-            let stage_scratch = decode.per_stage.get(head_stage).ok_or_else(|| {
-                anyhow!("dispose GpuSamplerScratch: hybrid decode missing head_stage")
-            })?;
-            stage_model
-                .sub_cluster
-                .device(stage_scratch.head_rank.0 as usize)
-        } else {
-            bail!("dispose GpuSamplerScratch: unsupported topology");
-        };
-        scratch
-            .dispose(head_device)
-            .context("dispose GpuSamplerScratch")?;
-    }
+    // gpu_scratch is always None today (see initialiser above); dispose
+    // wiring will land when the keep-logits-on-device path is re-wired
+    // for the batched decode kernels.
+    let _ = gpu_scratch.take();
 
     // **P2.9a (slot pool)** — no dispose. The pooled inflight stays
     // allocated; releasing the mutex returns the slot to the pool
@@ -1222,13 +1128,13 @@ pub(crate) fn run_completion_blocking_streaming(
     let prefill_start = Instant::now();
     // **#321** — TP/Hybrid prefill alloc serialiser. See field
     // doc on ServerState::prefill_serialiser.
-    let _prefill_lock = if model.as_tp().is_some() || model.as_hybrid().is_some() {
+    let _prefill_lock = if model.requires_prefill_serialiser() {
         Some(state.qwen3_moe.as_ref().expect("TP/Hybrid serialiser requires qwen3-moe boot").prefill_serialiser.lock().unwrap())
     } else {
         None
     };
     // **#324** — for TP, hand the shared pre-allocated scratch through.
-    let mut tp_scratch_g = if model.as_tp().is_some() {
+    let mut tp_scratch_g = if model.requires_tp_prefill_scratch() {
         Some(state.lock_tp_prefill_scratch()?)
     } else {
         None

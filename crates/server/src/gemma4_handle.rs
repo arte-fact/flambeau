@@ -32,9 +32,6 @@ impl Model for Gemma4Model {
     fn topology(&self) -> &'static str {
         self.topology
     }
-    fn is_gemma4(&self) -> bool {
-        true
-    }
     fn chat_stop_markers(&self) -> &'static [&'static str] {
         // Kept in sync with `Gemma4Session::chat_stop_markers`.
         // `<channel|>` / `<|channel>` / `<|thought` are deliberately
