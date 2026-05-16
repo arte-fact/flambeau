@@ -802,17 +802,28 @@ impl StandardAttention {
             ops.cast_f32_to_f16(v_f32_offset, scratch.v_f16, kv_width)
                 .context("cast attn_v → f16")?;
         } else {
-            ops.mmvq(
-                self.attn_k.ptr,
-                scratch.x_q8_1,
-                scratch.mmvq_f32,
-                kv_width,
-                hidden,
-                self.attn_k.dtype,
-            )
-            .context("mmvq attn_k")?;
-            ops.cast_f32_to_f16(scratch.mmvq_f32, scratch.k_f16, kv_width)
-                .context("cast attn_k → f16")?;
+            if self.attn_k.dtype == QDtype::Q4_0 {
+                ops.mmvq_q4_0_f16_direct(
+                    self.attn_k.ptr,
+                    scratch.x_q8_1,
+                    scratch.k_f16,
+                    kv_width,
+                    hidden,
+                )
+                .context("mmvq attn_k Q4_0 → f16 direct")?;
+            } else {
+                ops.mmvq(
+                    self.attn_k.ptr,
+                    scratch.x_q8_1,
+                    scratch.mmvq_f32,
+                    kv_width,
+                    hidden,
+                    self.attn_k.dtype,
+                )
+                .context("mmvq attn_k")?;
+                ops.cast_f32_to_f16(scratch.mmvq_f32, scratch.k_f16, kv_width)
+                    .context("cast attn_k → f16")?;
+            }
             if let Some(v) = attn_v_ref {
                 ops.mmvq(
                     v.ptr,

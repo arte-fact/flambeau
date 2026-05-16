@@ -167,6 +167,19 @@ impl<'a> Ops for HipOps<'a> {
         )
     }
 
+    fn mmvq_q4_0_f16_direct(
+        &self,
+        weights: DevicePtr,
+        act_q8_1: DevicePtr,
+        dst_f16: DevicePtr,
+        n_rows: usize,
+        k: usize,
+    ) -> Result<()> {
+        super::qmatmul::mmvq_q4_0_f16_direct(
+            self.reg, self.stream, weights, act_q8_1, dst_f16, n_rows, k,
+        )
+    }
+
     fn mmq(
         &self,
         weights: DevicePtr,
