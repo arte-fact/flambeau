@@ -474,7 +474,7 @@ pub async fn serve(cfg: ServeConfig, registry: Registry) -> Result<()> {
     // disable.
     let mut embedding_rank: Option<usize> = None;
     let embedding_model: Option<(
-        Arc<tokio::sync::Mutex<flambeau_qwen3_moe::EmbeddingModel>>,
+        Arc<tokio::sync::Mutex<Box<dyn crate::embedding::EmbeddingHandle>>>,
         Arc<flambeau_quant::GgufTokenizer>,
     )> =
         if let Some(path) = cfg.embedding_gguf_path.as_ref() {
@@ -528,8 +528,9 @@ pub async fn serve(cfg: ServeConfig, registry: Registry) -> Result<()> {
                 device_id,
                 "embedding model loaded"
             );
+            let boxed: Box<dyn crate::embedding::EmbeddingHandle> = Box::new(em);
             Some((
-                Arc::new(tokio::sync::Mutex::new(em)),
+                Arc::new(tokio::sync::Mutex::new(boxed)),
                 Arc::new(embedding_tokenizer),
             ))
         } else {
@@ -537,7 +538,7 @@ pub async fn serve(cfg: ServeConfig, registry: Registry) -> Result<()> {
             None
         };
     let (embedding_model, embedding_tokenizer): (
-        Option<Arc<tokio::sync::Mutex<flambeau_qwen3_moe::EmbeddingModel>>>,
+        Option<Arc<tokio::sync::Mutex<Box<dyn crate::embedding::EmbeddingHandle>>>>,
         Option<Arc<flambeau_quant::GgufTokenizer>>,
     ) = match embedding_model {
         Some((m, t)) => (Some(m), Some(t)),

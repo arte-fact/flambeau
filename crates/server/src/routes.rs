@@ -154,7 +154,7 @@ pub struct ServerState {
     /// must serialise — embedding inference is fast enough on a
     /// 0.6B model that V1 doesn't bother with multi-slot pooling.
     pub embedding_model:
-        Option<Arc<tokio::sync::Mutex<flambeau_qwen3_moe::EmbeddingModel>>>,
+        Option<Arc<tokio::sync::Mutex<Box<dyn crate::embedding::EmbeddingHandle>>>>,
     /// **#231 quality fix** — embedding model's own tokenizer.
     /// Qwen3-Embedding ships a vocab (151669) that diverges from
     /// chat-side tokenizers (151424 on Qwen3.5-9B); reusing the chat
@@ -1226,7 +1226,7 @@ pub async fn embeddings(
         let stream = device.default_stream();
         let mut out: Vec<Vec<f32>> = Vec::with_capacity(all_tokens.len());
         for toks in &all_tokens {
-            let max = em.max_tokens;
+            let max = em.max_tokens();
             let slice: &[u32] = if toks.len() > max {
                 tracing::warn!(
                     target: "server.embeddings",

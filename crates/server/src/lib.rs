@@ -24,6 +24,8 @@ pub mod model_cfg;
 #[cfg(feature = "hip")]
 pub mod model_extensions;
 #[cfg(feature = "hip")]
+pub mod embedding;
+#[cfg(feature = "hip")]
 pub mod model_handle;
 #[cfg(feature = "hip")]
 pub mod gemma4_handle;
