@@ -1447,6 +1447,7 @@ impl HybridDecodeDriver for Gemma4HybridDriver {
         let device = self.hc.stage(stage).sub_cluster.device(rank);
         let stage_ref = &mut self.stages[stage];
         let stream = device.default_stream();
+        let reg = &stage_ref.regs[rank];
         let rs = &mut stage_ref.rank_state[rank];
         let tok = rs
             .token_embd
@@ -1462,7 +1463,19 @@ impl HybridDecodeDriver for Gemma4HybridDriver {
             cfg.hidden_size,
             token_id,
             rs.hidden,
+        )?;
+        // Gemma4 input scale: `inpL = scale(inpL, sqrt(n_embd))`
+        // (gemma4-iswa.cpp:20). PP / TP apply this; the hybrid path
+        // was missing it — caught by `parity_26b_a4b_q8_0_pp2tp2`
+        // (MEMORY.md `parity_vs_argmax_in_vocab`).
+        let ops = HipOps::new(reg, stream);
+        ops.scale_f16(
+            rs.hidden,
+            rs.hidden,
+            cfg.hidden_size,
+            (cfg.hidden_size as f32).sqrt(),
         )
+        .context("hybrid embed_token sqrt(n_embd) scale")
     }
 
     fn forward_layer_decode(
@@ -1480,6 +1493,21 @@ impl HybridDecodeDriver for Gemma4HybridDriver {
         let src_ptr = self.stages[stage].rank_state[0].hidden;
         let dst_stage = stage + 1;
         let dst_n_ranks = self.hc.stage(dst_stage).sub_cluster.ranks();
+        // Drain the source stage's sub-cluster streams before peer_copy
+        // — sub_cluster.default_stream() and global_cluster.default_stream()
+        // are different `HipStream` handles for the same physical device
+        // (MEMORY.md `hipcluster_stream_handles`). Without this, the
+        // peer_copy_via_host DtoH (on global_cluster's stream) races
+        // pending sub-cluster work and reads stale `rs.hidden` —
+        // produces nondeterministic gibberish (#275 pattern; surfaced
+        // by `parity_26b_a4b_q8_0_pp2tp2` where the heavier F32 MoE
+        // cascade widened the race window).
+        let src_sub = self.hc.stage(stage).sub_cluster.clone();
+        for r in 0..src_sub.ranks() {
+            let dev = src_sub.device(r);
+            dev.bind()?;
+            dev.default_stream().synchronize()?;
+        }
         for dst_r in 0..dst_n_ranks {
             let dst_global = self.global_rank(dst_stage, dst_r);
             let dst_ptr = self.stages[dst_stage].rank_state[dst_r].hidden;
