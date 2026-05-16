@@ -472,7 +472,7 @@ impl ServerState {
         &self,
         prompt_ids: &[u32],
         n_tokens_completed: usize,
-        snap: Vec<Vec<flambeau_qwen3_moe::session::LayerCacheSnapshot>>,
+        snap: Vec<crate::prefix_cache::RankSnapshot>,
     ) {
         if !self.prefix_cache.enabled() {
             return;
