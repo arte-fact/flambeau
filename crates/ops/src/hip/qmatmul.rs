@@ -968,6 +968,34 @@ pub fn mmvq(
     mmvq_launch(reg, stream, recipe, weights, act_q8_1, dst, n_rows, nb_per_row)
 }
 
+/// Q4_0 × Q8_1 MMVQ writing directly into an F16 destination, saturating
+/// at ±F16_MAX. Equivalent shape to [`mmvq`] for `QDtype::Q4_0` but skips
+/// the `mmvq_f32` scratch + the separate `cast_f32_to_f16` launch. The
+/// kernel body is shared with the F32 variant via a templated `__device__`
+/// thunk in `mmvq_q4_0.cu`; this entry point is opt-in per consumer
+/// (#120). Caller must ensure `dst_f16` is sized `n_rows × sizeof(fp16)`.
+pub fn mmvq_q4_0_f16_direct(
+    reg: &OpsRegistry,
+    stream: &HipStream,
+    weights: DevicePtr,
+    act_q8_1: DevicePtr,
+    dst_f16: DevicePtr,
+    n_rows: usize,
+    k: usize,
+) -> Result<()> {
+    mmvq_simple_launch(
+        reg,
+        stream,
+        "mmvq_q4_0",
+        "flambeau_mmvq_q4_0_q8_1_f16",
+        weights,
+        act_q8_1,
+        dst_f16,
+        n_rows,
+        k,
+    )
+}
+
 /// 3.a — common launch path for single-block-per-row Q-weight MMVQ
 /// kernels that take (w, y_q8_1, dst, n_rows, n_blocks_per_row) and expect
 /// 256 threads. Used for Q4_0, Q5_0 and (via `mmvq()` short-circuit) any
