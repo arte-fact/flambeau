@@ -903,12 +903,22 @@ pub fn restore_kv_into_inflight(
 pub fn qwen3moe_forward_decode_batched(
     state: &crate::routes::ServerState,
     inflights: &mut [&mut dyn crate::Session],
-    slots: &[flambeau_qwen3_moe::forward::BatchSlot],
+    slots: &[crate::model_handle::BatchSlot],
     logits_refs: &mut [&mut Vec<f32>],
 ) -> Result<()> {
     use flambeau_qwen3_moe::forward::{
         forward_decode_batched_hybrid, forward_decode_batched_pp, forward_decode_batched_tp,
+        BatchSlot as QwenBatchSlot,
     };
+    let slots: Vec<QwenBatchSlot> = slots
+        .iter()
+        .map(|s| QwenBatchSlot {
+            idx: s.idx,
+            token_id: s.token_id,
+            position: s.position,
+        })
+        .collect();
+    let slots = slots.as_slice();
     let cluster: &HipCluster = &state.cluster;
     let n = inflights.len();
     if n == 0 {

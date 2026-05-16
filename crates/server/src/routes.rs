@@ -870,7 +870,7 @@ impl ServerState {
         &self,
         pending: &[PendingDecode],
     ) -> anyhow::Result<()> {
-        use flambeau_qwen3_moe::forward::BatchSlot;
+        use crate::model_handle::BatchSlot;
         let trace = dev_flag("FLAMBEAU_TRACE_BATCH");
         macro_rules! tr_d {
             ($($arg:tt)*) => {
@@ -951,7 +951,7 @@ impl ServerState {
     fn forward_decode_batched_with_inflights(
         &self,
         inflights: &mut [&mut dyn crate::Session],
-        slots: &[flambeau_qwen3_moe::forward::BatchSlot],
+        slots: &[crate::model_handle::BatchSlot],
         logits_refs: &mut [&mut Vec<f32>],
     ) -> anyhow::Result<()> {
         if inflights.is_empty() {
@@ -972,7 +972,7 @@ impl ServerState {
         position: usize,
         logits_out: &mut Vec<f32>,
     ) -> anyhow::Result<()> {
-        use flambeau_qwen3_moe::forward::BatchSlot;
+        use crate::model_handle::BatchSlot;
         let slots = [BatchSlot {
             idx: 0,
             token_id: token,

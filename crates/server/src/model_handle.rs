@@ -17,12 +17,25 @@ use std::any::Any;
 
 use anyhow::Result;
 use flambeau_backend_hip::HipCluster;
-use flambeau_qwen3_moe::forward::ShardedForwardPrefillScratchTp;
 use flambeau_qwen3_moe::session::KvLayout;
 
 use crate::model::{
     BoundaryCallback, HybridHipModel, Inflight, LoadedModel, PpHipModel, TpHipModel,
 };
+
+/// One queued slot in a batched decode dispatch. Arch-neutral mirror
+/// of qwen3-moe's `flambeau_qwen3_moe::forward::BatchSlot`; qwen3-moe
+/// dispatchers convert at the boundary so the generic trait surface
+/// stays arch-clean.
+#[derive(Debug, Clone, Copy)]
+pub struct BatchSlot {
+    /// Index into the caller's `inflights` / `logits_refs` parallel array.
+    pub idx: usize,
+    /// Token to decode this step.
+    pub token_id: u32,
+    /// Cache position to decode at.
+    pub position: usize,
+}
 
 pub trait Model: Send + Sync + 'static {
     /// Topology label for handler metrics: `"pp"`, `"tp"`, `"pp+tp"`,
@@ -70,7 +83,7 @@ pub trait Model: Send + Sync + 'static {
         &self,
         _state: &crate::routes::ServerState,
         inflights: &mut [&mut dyn Session],
-        slots: &[flambeau_qwen3_moe::forward::BatchSlot],
+        slots: &[BatchSlot],
         logits_refs: &mut [&mut Vec<f32>],
     ) -> Result<()> {
         if slots.len() != 1 {
@@ -109,7 +122,7 @@ pub trait Session: Send + 'static {
         prompt_ids: &[u32],
         start_position: usize,
         logits_out: &mut Vec<f32>,
-        tp_pool_prefill: Option<&mut ShardedForwardPrefillScratchTp>,
+        tp_pool_prefill: Option<&mut dyn Any>,
         on_boundary: Option<BoundaryCallback<'_>>,
         prefill_ubatch: usize,
     ) -> Result<()>;
@@ -197,7 +210,7 @@ impl Model for PpHipModel {
         &self,
         state: &crate::routes::ServerState,
         inflights: &mut [&mut dyn Session],
-        slots: &[flambeau_qwen3_moe::forward::BatchSlot],
+        slots: &[BatchSlot],
         logits_refs: &mut [&mut Vec<f32>],
     ) -> Result<()> {
         crate::model::qwen3moe_forward_decode_batched(state, inflights, slots, logits_refs)
@@ -224,7 +237,7 @@ impl Model for TpHipModel {
         &self,
         state: &crate::routes::ServerState,
         inflights: &mut [&mut dyn Session],
-        slots: &[flambeau_qwen3_moe::forward::BatchSlot],
+        slots: &[BatchSlot],
         logits_refs: &mut [&mut Vec<f32>],
     ) -> Result<()> {
         crate::model::qwen3moe_forward_decode_batched(state, inflights, slots, logits_refs)
@@ -248,7 +261,7 @@ impl Model for HybridHipModel {
         &self,
         state: &crate::routes::ServerState,
         inflights: &mut [&mut dyn Session],
-        slots: &[flambeau_qwen3_moe::forward::BatchSlot],
+        slots: &[BatchSlot],
         logits_refs: &mut [&mut Vec<f32>],
     ) -> Result<()> {
         crate::model::qwen3moe_forward_decode_batched(state, inflights, slots, logits_refs)
@@ -268,12 +281,15 @@ impl Session for Qwen3MoeOwnedSession {
         prompt_ids: &[u32],
         start_position: usize,
         logits_out: &mut Vec<f32>,
-        tp_pool_prefill: Option<&mut ShardedForwardPrefillScratchTp>,
+        tp_pool_prefill: Option<&mut dyn Any>,
         on_boundary: Option<BoundaryCallback<'_>>,
         prefill_ubatch: usize,
     ) -> Result<()> {
         let model = self.model.clone();
         let cluster = self.cluster.clone();
+        let typed = tp_pool_prefill.and_then(|p| {
+            p.downcast_mut::<flambeau_qwen3_moe::forward::ShardedForwardPrefillScratchTp>()
+        });
         crate::model::prefill_logits(
             &model,
             &cluster,
@@ -281,7 +297,7 @@ impl Session for Qwen3MoeOwnedSession {
             prompt_ids,
             start_position,
             logits_out,
-            tp_pool_prefill,
+            typed,
             on_boundary,
             prefill_ubatch,
         )

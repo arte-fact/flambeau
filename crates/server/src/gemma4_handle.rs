@@ -14,7 +14,6 @@
 
 use anyhow::Result;
 use flambeau_gemma4::Gemma4Config;
-use flambeau_qwen3_moe::forward::ShardedForwardPrefillScratchTp;
 use flambeau_runtime::ModelDriver;
 
 use crate::model::BoundaryCallback;
@@ -76,7 +75,7 @@ impl Session for Gemma4Session {
         prompt_ids: &[u32],
         start_position: usize,
         logits_out: &mut Vec<f32>,
-        _tp_pool_prefill: Option<&mut ShardedForwardPrefillScratchTp>,
+        _tp_pool_prefill: Option<&mut dyn std::any::Any>,
         _on_boundary: Option<BoundaryCallback<'_>>,
         _prefill_ubatch: usize,
     ) -> Result<()> {
