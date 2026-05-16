@@ -393,7 +393,7 @@ pub fn forward_layer_decode<L: CacheLayout, O: Ops>(
         )
         .context("post_attention_norm + residual_add post-attn")?;
     }
-    if std::env::var_os("FLAMBEAU_LAYER_PROBE").is_some() && spec.index < 2 {
+    if std::env::var_os("FLAMBEAU_LAYER_PROBE").is_some() {
         use flambeau_core::CopyDirection;
         let mut host = vec![half::f16::from_f32(0.0); hidden];
         // SAFETY: attn_residual_f16 owns hidden*2 bytes.
@@ -410,9 +410,8 @@ pub fn forward_layer_decode<L: CacheLayout, O: Ops>(
         let max_abs = host.iter().map(|h| h.to_f32().abs()).fold(0.0f32, f32::max);
         let nans = host.iter().filter(|h| h.to_f32().is_nan()).count();
         eprintln!(
-            "  [LAYER_PROBE] L{} attn_residual | max_abs={max_abs:.4} nans={nans} first4={:?}",
-            spec.index,
-            &host[..4].iter().map(|h| h.to_f32()).collect::<Vec<_>>()
+            "  [LAYER_PROBE] L{} attn_residual is_swa={} ffn_kind={:?} | max_abs={max_abs:.4} nans={nans}",
+            spec.index, spec.is_swa, spec.ffn_kind,
         );
     }
 

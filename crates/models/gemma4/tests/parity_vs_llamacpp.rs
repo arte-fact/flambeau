@@ -31,6 +31,7 @@ use flambeau_gemma4::{
     Gemma4Session, Gemma4TpDriver, ModelLayout,
 };
 use flambeau_quant::{load_from_gguf, GgufFile};
+use flambeau_runtime::ModelDriver;
 
 const MODELS_DIR: &str = "/artefact/models";
 const PROMPT: &str = "The capital of France is";
@@ -545,6 +546,73 @@ fn smoke_31b_q8_0_tp2() {
 /// is TP-specific (likely in the per-branch norm composition for
 /// shared-MLP + routed-MoE). If PP-MoE ALSO overflows, the bug is
 /// gemma4-general.
+/// Per-iteration logits-health probe for the 26B-A4B-Q8_0 PP MoE NaN
+/// debug (#108). Runs the prompt token by token and after each step
+/// reports max|logit|, NaN count, top-3 ids. Goal: localise *which*
+/// prompt position first introduces NaN.
+#[test]
+fn debug_26b_a4b_q8_0_pp2_logits_per_iter() {
+    let Some(file) = open_or_skip("gemma-4-26B-A4B-it-Q8_0.gguf") else {
+        return;
+    };
+    if device_count().map(|n| n < 2).unwrap_or(true) {
+        eprintln!("skipping — need 2 HIP devices");
+        return;
+    }
+    let file = Arc::new(file);
+    let cfg = Gemma4Config::from_gguf(&file).expect("cfg");
+    let cluster = HipCluster::new(&[0, 2]).expect("cluster");
+    let mut layout = ModelLayout::from_config(&cfg);
+    let _ = layout.resolve_kv_sharing();
+    let layer_to_rank = partition_layers(2, &layout).expect("partition");
+
+    let tokenizer = load_from_gguf(&file).expect("tokenizer");
+    let mut prompt_ids = tokenizer.encode(PROMPT).expect("encode");
+    if tokenizer.force_add_bos {
+        if let Some(bos) = tokenizer.bos_id {
+            prompt_ids.insert(0, bos);
+        }
+    }
+
+    let mut driver = Gemma4PpDriver::upload(
+        &file,
+        cfg.clone(),
+        layout,
+        layer_to_rank,
+        cluster,
+        MAX_TOKENS,
+    )
+    .expect("upload");
+
+    eprintln!("\n=== DEBUG | 26B-A4B-Q8_0 PP2 logits-per-iter ===");
+    eprintln!("  prompt ids: {prompt_ids:?}");
+    let mut logits: Vec<f32> = Vec::new();
+    for (i, &t) in prompt_ids.iter().enumerate() {
+        driver
+            .forward_one_token_logits(t, i, &mut logits)
+            .expect("forward");
+        let n_nan = logits.iter().filter(|v| v.is_nan()).count();
+        let n_inf = logits.iter().filter(|v| v.is_infinite()).count();
+        let finite_max = logits
+            .iter()
+            .filter(|v| v.is_finite())
+            .fold(f32::NEG_INFINITY, |a, &b| a.max(b.abs()));
+        let mut indexed: Vec<(usize, f32)> = logits
+            .iter()
+            .enumerate()
+            .map(|(i, v)| (i, *v))
+            .filter(|(_, v)| v.is_finite())
+            .collect();
+        indexed.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+        let top3: Vec<(usize, f32)> = indexed.into_iter().take(3).collect();
+        eprintln!(
+            "  iter={i} pos={i} tok={t} | n_nan={n_nan} n_inf={n_inf} \
+             finite_max_abs={finite_max:.2} top3={top3:?}"
+        );
+    }
+    let _ = driver.dispose();
+}
+
 #[test]
 fn smoke_26b_a4b_q8_0_pp2() {
     let Some(file) = open_or_skip("gemma-4-26B-A4B-it-Q8_0.gguf") else {

@@ -18,7 +18,14 @@ extern "C" __global__ void flambeau_add_f16(
     if (i >= n) return;
     // Up-cast to F32 for the sum so F16 denormals / subtracts don't bite.
     // The result casts back to F16 with the compiler's ties-to-even rule.
+    // Saturate at ±F16_MAX — un-saturated sum of two near-F16-max values
+    // overflows F16 → ±inf, which then NaNs through downstream rmsnorm
+    // (variance = inf - inf). Matches the saturating clamp in
+    // cast_f32_f16 / gelu_f32_to_f16 / swiglu_f32_to_f16 (#108).
     const float av = (float) a[i];
     const float bv = (float) b[i];
-    y[i] = (fb_fp16_t) (av + bv);
+    float v = av + bv;
+    if (v > 65504.0f) v = 65504.0f;
+    else if (v < -65504.0f) v = -65504.0f;
+    y[i] = (fb_fp16_t) v;
 }
