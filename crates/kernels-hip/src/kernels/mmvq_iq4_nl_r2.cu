@@ -13,11 +13,13 @@
 
 #include "block_quant.cuh"
 #include "gfx906.cuh"
+#include "mmvq_store.cuh"
 
-extern "C" __global__ void flambeau_mmvq_iq4_nl_r2_q8_1(
+template<typename OutT>
+__device__ void mmvq_iq4_nl_r2_q8_1_body(
     const flambeau_block_iq4_nl* __restrict__ x,
     const flambeau_block_q8_1*   __restrict__ y,
-    float* __restrict__ dst,
+    OutT* __restrict__ dst,
     const int n_rows,
     const int n_blocks_per_row
 ) {
@@ -55,6 +57,26 @@ extern "C" __global__ void flambeau_mmvq_iq4_nl_r2_q8_1(
     acc = gfx906_half_warp_reduce_sum(acc);
 
     if (lane_lo == 0) {
-        dst[row] = acc;
+        mmvq_store<OutT>(dst, row, acc);
     }
+}
+
+extern "C" __global__ void flambeau_mmvq_iq4_nl_r2_q8_1(
+    const flambeau_block_iq4_nl* __restrict__ x,
+    const flambeau_block_q8_1* __restrict__ y,
+    float* __restrict__ dst,
+    const int n_rows,
+    const int n_blocks_per_row
+) {
+    mmvq_iq4_nl_r2_q8_1_body<float>(x, y, dst, n_rows, n_blocks_per_row);
+}
+
+extern "C" __global__ void flambeau_mmvq_iq4_nl_r2_q8_1_f16(
+    const flambeau_block_iq4_nl* __restrict__ x,
+    const flambeau_block_q8_1* __restrict__ y,
+    fb_fp16_t* __restrict__ dst,
+    const int n_rows,
+    const int n_blocks_per_row
+) {
+    mmvq_iq4_nl_r2_q8_1_body<fb_fp16_t>(x, y, dst, n_rows, n_blocks_per_row);
 }

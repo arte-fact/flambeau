@@ -444,6 +444,51 @@ fn build_q8_k(n_rows: usize, n_super: usize) -> Vec<BlockQ8K> {
     w
 }
 
+/// Per-block byte size for IQ dtypes — see `block_quant.cuh` static_asserts.
+fn iq_block_bytes(dtype: QDtype) -> usize {
+    match dtype {
+        QDtype::IQ1_S => 2 + QK_K / 8 + 2 * QK_K / 32,       // 50
+        QDtype::IQ1_M => QK_K / 8 + QK_K / 16 + QK_K / 32,    // 56
+        QDtype::IQ2_XXS => 2 + 2 * QK_K / 8,                  // 66
+        QDtype::IQ2_XS => 2 + 2 * QK_K / 8 + QK_K / 32,       // 74
+        QDtype::IQ2_S => 2 + QK_K / 4 + QK_K / 32 + QK_K / 32, // 82
+        QDtype::IQ3_XXS => 2 + QK_K / 4 + QK_K / 8,           // 98
+        QDtype::IQ3_S => 2 + QK_K / 4 + QK_K / 32 + QK_K / 8 + QK_K / 64, // 110
+        QDtype::IQ4_NL => 2 + 32 / 2,                          // 18 (32-elem block)
+        QDtype::IQ4_XS => 2 + 2 + QK_K / 64 + QK_K / 2,        // 136
+        _ => unreachable!(),
+    }
+}
+
+/// Build n_rows × n_units worth of deterministic bytes, with the first
+/// 2 bytes of each block set to a small F16 `d = 0.03`. Codebook
+/// indices / qh / scales are pseudo-random bytes — both F32 and F16
+/// paths decode them deterministically through the same body, so the
+/// parity assertion holds regardless of whether the indices represent
+/// "natural" weights. Only requirement: any out-of-bounds-index path
+/// would NaN-trap, but the codebook arrays are statically sized and
+/// every index is masked to the LUT bit-width.
+fn build_iq_bytes(n_rows: usize, n_units: usize, block_bytes: usize) -> Vec<u8> {
+    let total = n_rows * n_units * block_bytes;
+    let mut out = vec![0u8; total];
+    let d_bits = f16::from_f32(0.03).to_bits().to_le_bytes();
+    for r in 0..n_rows {
+        for b in 0..n_units {
+            let off = (r * n_units + b) * block_bytes;
+            // 2-byte F16 d at offset 0 — correct for every IQ block except
+            // IQ1_M, where `d` is reassembled from scales[]; for IQ1_M
+            // these two bytes are part of `qs` (codebook idx low-8), and
+            // a `0x6499`-shaped pattern is a valid in-range value.
+            out[off] = d_bits[0];
+            out[off + 1] = d_bits[1];
+            for i in 2..block_bytes {
+                out[off + i] = ((r * 17 + b * 7 + i * 3) % 251) as u8;
+            }
+        }
+    }
+    out
+}
+
 fn build_q8_0(n_rows: usize, n_blocks: usize) -> Vec<BlockQ8_0> {
     let mut w = Vec::with_capacity(n_rows * n_blocks);
     for r in 0..n_rows {
@@ -542,6 +587,24 @@ fn run_parity(dev: &HipDevice, dtype: QDtype, n_rows: usize, k: usize) -> Result
             let bytes = std::mem::size_of_val(w.as_slice());
             unsafe { std::slice::from_raw_parts(w.as_ptr() as *const u8, bytes) }.to_vec()
         }
+        // IQ family — opaque-bytes parity. Block layouts have codebook
+        // indices into static device LUTs; any in-range bytes resolve to
+        // deterministic F32 acc values. Both F32 and F16 paths read the
+        // same bytes, so the test asserts bit-identical F16 output (not
+        // correctness vs a numerical reference).
+        QDtype::IQ1_S
+        | QDtype::IQ1_M
+        | QDtype::IQ2_XXS
+        | QDtype::IQ2_XS
+        | QDtype::IQ2_S
+        | QDtype::IQ3_XXS
+        | QDtype::IQ3_S
+        | QDtype::IQ4_NL
+        | QDtype::IQ4_XS => {
+            let block_bytes = iq_block_bytes(dtype);
+            let units = if dtype == QDtype::IQ4_NL { n_blocks } else { n_super };
+            build_iq_bytes(n_rows, units, block_bytes)
+        }
         _ => unreachable!(),
     };
     let act_bytes_len = std::mem::size_of_val(act.as_slice());
@@ -566,38 +629,75 @@ fn run_parity(dev: &HipDevice, dtype: QDtype, n_rows: usize, k: usize) -> Result
     let direct: Vec<u16> = download(dev, dst_f16_direct, n_rows);
     let f32_ref: Vec<f32> = download(dev, dst_f32, n_rows);
 
-    let mut max_abs: f32 = 0.0;
-    let mut first_diff: Option<usize> = None;
+    // Two valid regimes for the per-row pair (via_cast, direct):
+    //   (a) |F32 acc| ≤ F16_MAX → both paths produce the same F16 value
+    //       (bit-identical; round-to-nearest-even on a finite F32 is
+    //       deterministic).
+    //   (b) |F32 acc| >  F16_MAX → via_cast = ±inf (un-saturated cast);
+    //       direct = ±65504 (saturated). This is the intended divergence:
+    //       the saturating clamp is the whole point of the F16-direct
+    //       path — it prevents ±inf from poisoning the KV cache.
+    // Anything else (NaN mismatch, finite vs finite diff) is a bug.
+    const F16_MAX: f32 = 65504.0;
+    let mut max_normal_diff: f32 = 0.0;
+    let mut sat_rows: usize = 0;
+    let mut nan_rows: usize = 0;
+    let mut bug_rows: Vec<(usize, f32, f32, f32)> = Vec::new();
     for i in 0..n_rows {
-        let a = f16::from_bits(via_cast[i]).to_f32();
-        let b = f16::from_bits(direct[i]).to_f32();
-        let d = (a - b).abs();
-        if d > max_abs {
-            max_abs = d;
+        let a_bits = via_cast[i];
+        let b_bits = direct[i];
+        let a = f16::from_bits(a_bits).to_f32();
+        let b = f16::from_bits(b_bits).to_f32();
+        let f = f32_ref[i];
+        // NaN regime — degenerate test input (random bytes through a
+        // codebook arithmetic that hit a 0×inf). Both paths should
+        // produce NaN; accept any matching NaN bit pattern.
+        if a.is_nan() && b.is_nan() {
+            nan_rows += 1;
+            continue;
         }
-        if d > 0.0 && first_diff.is_none() {
-            first_diff = Some(i);
+        if f.abs() > F16_MAX {
+            // Saturation regime — direct must clamp to ±F16_MAX.
+            let expected = F16_MAX.copysign(f);
+            if b == expected {
+                sat_rows += 1;
+                continue;
+            } else {
+                bug_rows.push((i, a, b, f));
+                continue;
+            }
+        }
+        // Normal regime — must be bit-identical.
+        if a_bits == b_bits {
+            let d = (a - b).abs();
+            if d > max_normal_diff {
+                max_normal_diff = d;
+            }
+        } else {
+            bug_rows.push((i, a, b, f));
         }
     }
     eprintln!(
-        "{dtype:?} n_rows={n_rows} k={k}: max |F16(via cast) − F16(direct)| = {max_abs}; \
+        "{dtype:?} n_rows={n_rows} k={k}: normal_rows max_diff={max_normal_diff}, \
+         saturated_rows={sat_rows}, nan_rows={nan_rows}, bug_rows={}; \
          f32_ref[0]={} via_cast[0]={} direct[0]={}",
+        bug_rows.len(),
         f32_ref[0],
         f16::from_bits(via_cast[0]).to_f32(),
         f16::from_bits(direct[0]).to_f32(),
     );
-    if let Some(idx) = first_diff {
-        let a = f16::from_bits(via_cast[idx]).to_f32();
-        let b = f16::from_bits(direct[idx]).to_f32();
-        eprintln!(
-            "  first diff row={idx}: via_cast={a} direct={b} f32_ref={}",
-            f32_ref[idx]
+    if !bug_rows.is_empty() {
+        for (idx, a, b, f) in bug_rows.iter().take(4) {
+            eprintln!(
+                "  bug row={idx}: via_cast={a} direct={b} f32_ref={f}"
+            );
+        }
+        panic!(
+            "{dtype:?}: F16-direct diverges from F32+cast in normal regime (or fails to saturate \
+             at ±65504): {} bug rows",
+            bug_rows.len()
         );
     }
-    assert!(
-        max_abs == 0.0,
-        "{dtype:?}: F16-direct diverges from F32+cast (max abs {max_abs})"
-    );
     Ok(())
 }
 
@@ -620,6 +720,15 @@ fn mmvq_f16_direct_matches_cast() -> Result<()> {
         QDtype::Q5_K,
         QDtype::Q6_K,
         QDtype::Q8_K,
+        QDtype::IQ1_S,
+        QDtype::IQ1_M,
+        QDtype::IQ2_XXS,
+        QDtype::IQ2_XS,
+        QDtype::IQ2_S,
+        QDtype::IQ3_XXS,
+        QDtype::IQ3_S,
+        QDtype::IQ4_NL,
+        QDtype::IQ4_XS,
     ] {
         for (n_rows, k) in shapes {
             run_parity(&dev, dtype, n_rows, k)?;

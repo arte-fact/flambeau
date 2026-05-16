@@ -399,9 +399,11 @@ pub struct StandardAttention {
 }
 
 /// `true` iff `Ops::mmvq_f16_direct` has a kernel for `dtype`. Covers
-/// the full 32-element-block family (Q4_0/Q4_1/Q5_0/Q5_1/Q8_0) and the
-/// K-quant family (Q2_K/Q3_K/Q4_K/Q5_K/Q6_K/Q8_K). Other dtypes fall
-/// through to the legacy `mmvq + cast_f32_to_f16` two-step. #120.
+/// the 32-element-block family (Q4_0/Q4_1/Q5_0/Q5_1/Q8_0), the K-quant
+/// family (Q2_K/Q3_K/Q4_K/Q5_K/Q6_K/Q8_K), and the IQ family
+/// (IQ1_S/M, IQ2_XXS/XS/S, IQ3_XXS/S, IQ4_NL/XS). Other dtypes (F16,
+/// BF16, MXFP4) fall through to the legacy `mmvq + cast_f32_to_f16`
+/// two-step. #120.
 fn f16_direct_supported(dtype: QDtype) -> bool {
     matches!(
         dtype,
@@ -416,6 +418,15 @@ fn f16_direct_supported(dtype: QDtype) -> bool {
             | QDtype::Q5_K
             | QDtype::Q6_K
             | QDtype::Q8_K
+            | QDtype::IQ1_S
+            | QDtype::IQ1_M
+            | QDtype::IQ2_XXS
+            | QDtype::IQ2_XS
+            | QDtype::IQ2_S
+            | QDtype::IQ3_XXS
+            | QDtype::IQ3_S
+            | QDtype::IQ4_NL
+            | QDtype::IQ4_XS
     )
 }
 

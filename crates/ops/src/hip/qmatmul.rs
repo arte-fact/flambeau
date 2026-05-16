@@ -1019,9 +1019,17 @@ pub fn mmvq_f16_direct(
         QDtype::Q5_K => ("mmvq_q5_k_r2", "flambeau_mmvq_q5_k_r2_q8_1_f16", 64, 2, n_superblocks),
         QDtype::Q6_K => ("mmvq_q6_k_dp4a", "flambeau_mmvq_q6_k_dp4a_q8_1_f16", 64, 1, n_superblocks),
         QDtype::Q8_K => ("mmvq_q8_k", "flambeau_mmvq_q8_K_q8_1_f16", 256, 1, n_superblocks),
+        QDtype::IQ1_S => ("mmvq_iq1_s_r2", "flambeau_mmvq_iq1_s_r2_q8_1_f16", 64, 2, n_superblocks),
+        QDtype::IQ1_M => ("mmvq_iq1_m_r2", "flambeau_mmvq_iq1_m_r2_q8_1_f16", 64, 2, n_superblocks),
+        QDtype::IQ2_XXS => ("mmvq_iq2_xxs_r2", "flambeau_mmvq_iq2_xxs_r2_q8_1_f16", 64, 2, n_superblocks),
+        QDtype::IQ2_XS => ("mmvq_iq2_xs_r2", "flambeau_mmvq_iq2_xs_r2_q8_1_f16", 64, 2, n_superblocks),
+        QDtype::IQ2_S => ("mmvq_iq2_s_r2", "flambeau_mmvq_iq2_s_r2_q8_1_f16", 64, 2, n_superblocks),
+        QDtype::IQ3_XXS => ("mmvq_iq3_xxs_r2", "flambeau_mmvq_iq3_xxs_r2_q8_1_f16", 64, 2, n_superblocks),
+        QDtype::IQ3_S => ("mmvq_iq3_s_r2", "flambeau_mmvq_iq3_s_r2_q8_1_f16", 64, 2, n_superblocks),
+        QDtype::IQ4_NL => ("mmvq_iq4_nl_r2", "flambeau_mmvq_iq4_nl_r2_q8_1_f16", 64, 2, n_blocks_q32),
+        QDtype::IQ4_XS => ("mmvq_iq4_xs_r2", "flambeau_mmvq_iq4_xs_r2_q8_1_f16", 64, 2, n_superblocks),
         other => bail!(
-            "mmvq_f16_direct: no F16-direct kernel for {} \
-             (supported: Q4_0, Q4_1, Q5_0, Q5_1, Q8_0, Q2_K, Q3_K, Q4_K, Q5_K, Q6_K, Q8_K)",
+            "mmvq_f16_direct: no F16-direct kernel for {}",
             other.name()
         ),
     };
