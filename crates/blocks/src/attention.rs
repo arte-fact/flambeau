@@ -398,6 +398,16 @@ pub struct StandardAttention {
     pub f32_output_proj: bool,
 }
 
+/// `true` iff `Ops::mmvq_f16_direct` has a kernel for `dtype`. Q4_0 /
+/// Q4_1 / Q5_0 / Q5_1 / Q8_0 today; other dtypes fall through to the
+/// legacy `mmvq + cast_f32_to_f16` two-step path. #120.
+fn f16_direct_supported(dtype: QDtype) -> bool {
+    matches!(
+        dtype,
+        QDtype::Q4_0 | QDtype::Q4_1 | QDtype::Q5_0 | QDtype::Q5_1 | QDtype::Q8_0
+    )
+}
+
 impl StandardAttention {
     /// Construct a new block. Q-weight rows are
     /// `2 * n_heads * head_dim` when `gated` and `n_heads * head_dim`
@@ -725,21 +735,38 @@ impl StandardAttention {
         .context("attn_norm + quant")?;
 
         // 2. Q projection. `gated`: fused Q+gate at `2 * q_width`
-        // rows, cast into the fused F16 buffer for the split below.
-        // Plain: Q-only at `q_width` rows, cast directly into q_f16
+        // rows, written into the fused F16 buffer for the split below.
+        // Plain: Q-only at `q_width` rows, written directly into q_f16
         // (no split, no gate).
-        ops.mmvq(
-            self.attn_q.ptr,
-            scratch.x_q8_1,
-            scratch.mmvq_f32,
-            q_proj_rows,
-            hidden,
-            self.attn_q.dtype,
-        )
-        .context("mmvq attn_q")?;
-        if self.gated {
-            ops.cast_f32_to_f16(scratch.mmvq_f32, scratch.q_fused_f16, q_proj_rows)
+        let q_dst_f16 = if self.gated {
+            scratch.q_fused_f16
+        } else {
+            scratch.q_f16
+        };
+        if f16_direct_supported(self.attn_q.dtype) {
+            ops.mmvq_f16_direct(
+                self.attn_q.ptr,
+                scratch.x_q8_1,
+                q_dst_f16,
+                q_proj_rows,
+                hidden,
+                self.attn_q.dtype,
+            )
+            .context("mmvq attn_q → f16 direct")?;
+        } else {
+            ops.mmvq(
+                self.attn_q.ptr,
+                scratch.x_q8_1,
+                scratch.mmvq_f32,
+                q_proj_rows,
+                hidden,
+                self.attn_q.dtype,
+            )
+            .context("mmvq attn_q")?;
+            ops.cast_f32_to_f16(scratch.mmvq_f32, q_dst_f16, q_proj_rows)
                 .context("cast attn_q → f16")?;
+        }
+        if self.gated {
             // 3. Split fused [Q | gate] → q_f16, gate_f16.
             ops.split_q_gate_f16(
                 scratch.q_fused_f16,
@@ -750,9 +777,6 @@ impl StandardAttention {
                 head_dim,
             )
             .context("split_q_gate")?;
-        } else {
-            ops.cast_f32_to_f16(scratch.mmvq_f32, scratch.q_f16, q_proj_rows)
-                .context("cast attn_q → f16")?;
         }
 
         // 4+5. K and V projections. Three paths:
@@ -802,10 +826,7 @@ impl StandardAttention {
             ops.cast_f32_to_f16(v_f32_offset, scratch.v_f16, kv_width)
                 .context("cast attn_v → f16")?;
         } else {
-            if matches!(
-                self.attn_k.dtype,
-                QDtype::Q4_0 | QDtype::Q4_1 | QDtype::Q5_0 | QDtype::Q5_1 | QDtype::Q8_0
-            ) {
+            if f16_direct_supported(self.attn_k.dtype) {
                 ops.mmvq_f16_direct(
                     self.attn_k.ptr,
                     scratch.x_q8_1,
@@ -829,17 +850,29 @@ impl StandardAttention {
                     .context("cast attn_k → f16")?;
             }
             if let Some(v) = attn_v_ref {
-                ops.mmvq(
-                    v.ptr,
-                    scratch.x_q8_1,
-                    scratch.mmvq_f32,
-                    kv_width,
-                    hidden,
-                    v.dtype,
-                )
-                .context("mmvq attn_v")?;
-                ops.cast_f32_to_f16(scratch.mmvq_f32, scratch.v_f16, kv_width)
-                    .context("cast attn_v → f16")?;
+                if f16_direct_supported(v.dtype) {
+                    ops.mmvq_f16_direct(
+                        v.ptr,
+                        scratch.x_q8_1,
+                        scratch.v_f16,
+                        kv_width,
+                        hidden,
+                        v.dtype,
+                    )
+                    .context("mmvq attn_v → f16 direct")?;
+                } else {
+                    ops.mmvq(
+                        v.ptr,
+                        scratch.x_q8_1,
+                        scratch.mmvq_f32,
+                        kv_width,
+                        hidden,
+                        v.dtype,
+                    )
+                    .context("mmvq attn_v")?;
+                    ops.cast_f32_to_f16(scratch.mmvq_f32, scratch.v_f16, kv_width)
+                        .context("cast attn_v → f16")?;
+                }
             } else {
                 // Alt-attention (gemma4): V = K's pre-norm row. Done
                 // BEFORE the per-head norms so V's RMSNorm (when
