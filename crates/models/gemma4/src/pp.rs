@@ -136,30 +136,23 @@ struct PrefillScratchPtrs {
     positions_host: Vec<i32>,
 }
 
-/// Per-rank pipeline stage. Holds this rank's layers + KV caches +
-/// scratches. Rank-0 holds `token_embd`; last-rank holds `output_norm`
-/// and the output-head scratch.
-pub struct Gemma4PpStage {
-    /// Shared per-rank bookkeeping (rank/device id, RawAllocTracker,
-    /// disposed latch). Scratch + weight allocations land in
-    /// `common.raw_alloc`; `common.dispose(device)` drains the lot.
+/// Per-rank model state (weights only — Arc-shareable across multiple
+/// concurrent `Gemma4PpSession` slots).
+pub struct Gemma4PpModelStage {
+    /// Shared bookkeeping for **weight** allocations on this rank.
+    /// `common.raw_alloc` holds every device alloc that backs a
+    /// `Gemma4LayerWeights` / `token_embd` / `output_norm` / `output`
+    /// tensor; `dispose(device)` frees them all in one pass.
     pub common: StageCommon,
     /// Indices into [`ModelLayout::layers`] for this rank's layers,
     /// in ascending order.
     pub global_layer_indices: Vec<usize>,
     /// One [`Gemma4LayerWeights`] per `global_layer_indices` entry.
     pub layer_weights: Vec<Gemma4LayerWeights>,
-    /// One KV cache per local layer; `None` for shared-KV tail layers
-    /// (which read from another local entry resolved via
-    /// `local_kv_share_src`).
-    pub kv_caches: Vec<Option<KvCache<F16Contig, HipDevice>>>,
     /// Maps each local layer index to the LOCAL index of its
-    /// `kv_share_src` (or itself when `has_kv == true`).
-    local_kv_share_src: Vec<usize>,
-    /// F16 [hidden] hidden ping-pong slot A.
-    pub hidden_a: DevicePtr,
-    /// F16 [hidden] hidden ping-pong slot B.
-    pub hidden_b: DevicePtr,
+    /// `kv_share_src` (or itself when `has_kv == true`). A model-side
+    /// invariant of the partition; sessions allocate KV slots accordingly.
+    pub local_kv_share_src: Vec<usize>,
     /// Rank-0 only: device-resident `token_embd`.
     pub token_embd: Option<DeviceTensor>,
     pub token_embd_dims: Option<[usize; 2]>,
@@ -167,6 +160,58 @@ pub struct Gemma4PpStage {
     pub output_norm: Option<DeviceTensor>,
     /// Last-rank only: optional separate `output` (gemma4 ties).
     pub output: Option<DeviceTensor>,
+}
+
+impl Gemma4PpModelStage {
+    pub fn rank(&self) -> usize {
+        self.common.rank as usize
+    }
+
+    /// Free this rank's weight allocations.
+    pub fn dispose(&mut self, device: &HipDevice) -> Result<()> {
+        if self.common.is_disposed() {
+            return Ok(());
+        }
+        self.common
+            .dispose(device)
+            .map_err(|e| anyhow!("model raw_alloc dispose: {e}"))?;
+        // Globals were uploaded into their own DeviceTensors; free them.
+        for t in self.token_embd.take().into_iter()
+            .chain(self.output_norm.take().into_iter())
+            .chain(self.output.take().into_iter())
+        {
+            if !t.ptr.is_null() && t.bytes > 0 {
+                unsafe {
+                    let _ = device.dealloc(t.ptr, t.bytes);
+                }
+            }
+        }
+        Ok(())
+    }
+}
+
+impl Drop for Gemma4PpModelStage {
+    fn drop(&mut self) {
+        self.common
+            .warn_on_leak("flambeau_gemma4::pp::Gemma4PpModelStage");
+    }
+}
+
+/// Per-rank session state (KV caches + scratch — per request).
+pub struct Gemma4PpSessionStage {
+    /// Shared bookkeeping for **scratch + KV-scratch** allocations on
+    /// this rank. `common.raw_alloc` holds the device buffers backing
+    /// `scratch`, `prefill`, `hidden_a`, `hidden_b`, `output_head_scratch`,
+    /// `moe_scratch`. KV caches live in their own `KvCache` objects.
+    pub common: StageCommon,
+    /// One KV cache per local layer; `None` for shared-KV tail layers
+    /// (which read from another local entry resolved via the model
+    /// stage's `local_kv_share_src`).
+    pub kv_caches: Vec<Option<KvCache<F16Contig, HipDevice>>>,
+    /// F16 [hidden] hidden ping-pong slot A.
+    pub hidden_a: DevicePtr,
+    /// F16 [hidden] hidden ping-pong slot B.
+    pub hidden_b: DevicePtr,
     /// Last-rank only.
     pub output_head_scratch: Option<OutputHeadScratch>,
     scratch: LayerScratchPtrs,
@@ -184,255 +229,9 @@ pub struct Gemma4PpStage {
     pub max_tokens: usize,
 }
 
-impl Gemma4PpStage {
+impl Gemma4PpSessionStage {
     pub fn rank(&self) -> usize {
         self.common.rank as usize
-    }
-}
-
-/// Pipeline-parallel driver. Owns the cluster and one stage per rank.
-pub struct Gemma4PpDriver {
-    pub cluster: HipCluster,
-    pub cfg: Gemma4Config,
-    pub layout: ModelLayout,
-    pub layer_to_rank: Vec<usize>,
-    pub stages: Vec<Gemma4PpStage>,
-    /// One `OpsRegistry` per rank. Built once at driver init.
-    regs: Vec<OpsRegistry>,
-    /// Last-rank logits scratch host buffer (vocab F32) for argmax.
-    logits_host: Vec<f32>,
-}
-
-impl Gemma4PpStage {
-    /// Build per-rank scratch + KV cache pool for the layers assigned
-    /// to `rank`. Does NOT upload weights — the caller is expected to
-    /// pass in pre-populated `layer_weights` and tail-token/norm
-    /// tensors (test-friendly constructor; the real-GGUF
-    /// `Gemma4PpDriver::upload` lands in S8-B).
-    #[allow(clippy::too_many_arguments)]
-    #[allow(clippy::too_many_arguments)]
-    pub fn from_pieces(
-        device: &HipDevice,
-        rank: usize,
-        cfg: &Gemma4Config,
-        layout: &ModelLayout,
-        layer_to_rank: &[usize],
-        layer_weights: Vec<Gemma4LayerWeights>,
-        token_embd: Option<DeviceTensor>,
-        token_embd_dims: Option<[usize; 2]>,
-        output_norm: Option<DeviceTensor>,
-        output: Option<DeviceTensor>,
-        max_tokens: usize,
-    ) -> Result<Self> {
-        device.bind()?;
-        let global_layer_indices: Vec<usize> = (0..layout.layers.len())
-            .filter(|&i| layer_to_rank[i] == rank)
-            .collect();
-        if global_layer_indices.len() != layer_weights.len() {
-            bail!(
-                "Gemma4PpStage::from_pieces: rank {rank} owns {} layers but got {} weights",
-                global_layer_indices.len(),
-                layer_weights.len()
-            );
-        }
-
-        // Map global → local index for this rank.
-        let mut global_to_local = vec![usize::MAX; layout.layers.len()];
-        for (li, &gi) in global_layer_indices.iter().enumerate() {
-            global_to_local[gi] = li;
-        }
-        // For tail layers, resolve the LOCAL index of their kv_share_src.
-        let mut local_kv_share_src = vec![0usize; global_layer_indices.len()];
-        for (li, &gi) in global_layer_indices.iter().enumerate() {
-            let spec = &layout.layers[gi];
-            if spec.has_kv {
-                local_kv_share_src[li] = li;
-            } else {
-                let src_g = spec.kv_share_src.expect("partition validated this");
-                let src_l = global_to_local[src_g];
-                if src_l == usize::MAX {
-                    bail!(
-                        "Gemma4PpStage::from_pieces: rank {rank} layer {gi} \
-                         kv_share_src={src_g} not on same rank",
-                    );
-                }
-                local_kv_share_src[li] = src_l;
-            }
-        }
-
-        // KV caches: one per owning local layer; None for tail.
-        let mut kv_caches = Vec::with_capacity(global_layer_indices.len());
-        for &gi in &global_layer_indices {
-            let spec = &layout.layers[gi];
-            if spec.has_kv {
-                let kv =
-                    KvCache::<F16Contig, HipDevice>::new(device, spec.n_kv_heads, spec.head_dim, max_tokens)
-                        .map_err(|e| anyhow!("kv alloc layer {gi}: {e}"))?;
-                kv_caches.push(Some(kv));
-            } else {
-                kv_caches.push(None);
-            }
-        }
-
-        // Per-stage layer scratch. Sizes are widest over THIS stage's
-        // layers — different stages may carry layers with different
-        // shapes (per-layer head_dim/n_kv_heads).
-        let hidden = cfg.hidden_size;
-        let ff_len = cfg.feed_forward_length;
-        let q_width_max = global_layer_indices
-            .iter()
-            .map(|&gi| layout.layers[gi].n_heads * layout.layers[gi].head_dim)
-            .max()
-            .unwrap_or(hidden);
-        let kv_width_max = global_layer_indices
-            .iter()
-            .map(|&gi| layout.layers[gi].n_kv_heads * layout.layers[gi].head_dim)
-            .max()
-            .unwrap_or(hidden);
-        let head_dim_max = global_layer_indices
-            .iter()
-            .map(|&gi| layout.layers[gi].head_dim)
-            .max()
-            .unwrap_or(64);
-        let mmvq_max = q_width_max.max(kv_width_max).max(hidden).max(ff_len);
-        // x_q8_1 is reused as the Q8_1 input for every projection in the
-        // layer: attn_norm(hidden), output_proj(q_width), MoE shared
-        // MLP(hidden), dense FFN down(ff_len). q_width can exceed ff_len
-        // on MoE arches where ff_len is per-expert (small).
-        let x_q8_1_n = hidden.max(ff_len).max(q_width_max).div_ceil(32) * 32;
-        let activated_q8_1_n = ff_len.div_ceil(32) * 32;
-
-        let mut common = StageCommon::new(rank as u32, device.id());
-        let raw_alloc = &mut common.raw_alloc;
-
-        let v_ones_ptr = upload_f16_ones(device, head_dim_max)?;
-        raw_alloc.track(v_ones_ptr, head_dim_max * 2);
-        let n_heads_max_stage = global_layer_indices
-            .iter()
-            .map(|&gi| layout.layers[gi].n_heads)
-            .max()
-            .unwrap_or(1);
-        let splitk_chunks = flambeau_blocks::MAX_SPLITK_CHUNKS;
-        let scratch = LayerScratchPtrs {
-            x_q8_1: raw_alloc.alloc_q8_1(device, x_q8_1_n)?,
-            mmvq_f32: raw_alloc.alloc_f32(device, mmvq_max)?,
-            q_f16: raw_alloc.alloc_f16(device, q_width_max)?,
-            k_f16: raw_alloc.alloc_f16(device, kv_width_max)?,
-            v_f16: raw_alloc.alloc_f16(device, kv_width_max)?,
-            attn_out_f16: raw_alloc.alloc_f16(device, q_width_max.max(hidden))?,
-            post_attn_norm_f16: raw_alloc.alloc_f16(device, hidden)?,
-            attn_residual_f16: raw_alloc.alloc_f16(device, hidden)?,
-            ffn_norm_f16: raw_alloc.alloc_f16(device, hidden)?,
-            gate_f32: raw_alloc.alloc_f32(device, ff_len)?,
-            up_f32: raw_alloc.alloc_f32(device, ff_len)?,
-            activated_f16: raw_alloc.alloc_f16(device, ff_len)?,
-            activated_q8_1: raw_alloc.alloc_q8_1(device, activated_q8_1_n)?,
-            down_f32: raw_alloc.alloc_f32(device, hidden)?,
-            post_ffw_norm_f16: raw_alloc.alloc_f16(device, hidden)?,
-            positions: raw_alloc.alloc_i32(device, 1)?,
-            v_ones_f16: (v_ones_ptr, head_dim_max * 2),
-            splitk_partials_m: raw_alloc.alloc_f32(device, n_heads_max_stage * splitk_chunks)?,
-            splitk_partials_s: raw_alloc.alloc_f32(device, n_heads_max_stage * splitk_chunks)?,
-            splitk_partials_o: raw_alloc
-                .alloc_f32(device, n_heads_max_stage * splitk_chunks * head_dim_max)?,
-        };
-
-        // hidden_a / hidden_b sized for L=max_tokens prefill rows
-        // (decode reuses the head as a 1-row view).
-        let hidden_a = raw_alloc.alloc_f16(device, max_tokens * hidden)?.0;
-        let hidden_b = raw_alloc.alloc_f16(device, max_tokens * hidden)?.0;
-
-        // Prefill scratches sized for max_tokens.
-        let n_heads_max = layout
-            .layers
-            .iter()
-            .map(|l| l.n_heads * l.head_dim)
-            .max()
-            .unwrap_or(hidden);
-        let kv_width_max = layout
-            .layers
-            .iter()
-            .map(|l| l.n_kv_heads * l.head_dim)
-            .max()
-            .unwrap_or(hidden);
-        let mmvq_max_p = n_heads_max.max(kv_width_max).max(hidden).max(ff_len);
-        let pf_x_q8_1_n = max_tokens * x_q8_1_n;
-        let pf_activated_q8_1_n = max_tokens * activated_q8_1_n;
-        let prefill = PrefillScratchPtrs {
-            x_norm_f16: raw_alloc.alloc_f16(device, max_tokens * hidden)?,
-            x_q8_1: raw_alloc.alloc_q8_1(device, pf_x_q8_1_n)?,
-            x_q8_1_mmq: raw_alloc.alloc_q8_1(device, pf_x_q8_1_n)?,
-            mmvq_f32: raw_alloc.alloc_f32(device, max_tokens * mmvq_max_p)?,
-            q_f16: raw_alloc.alloc_f16(device, max_tokens * n_heads_max)?,
-            k_f16: raw_alloc.alloc_f16(device, max_tokens * kv_width_max)?,
-            v_f16: raw_alloc.alloc_f16(device, max_tokens * kv_width_max)?,
-            attn_out_f16: raw_alloc.alloc_f16(device, max_tokens * n_heads_max.max(hidden))?,
-            post_attn_norm_f16: raw_alloc.alloc_f16(device, max_tokens * hidden)?,
-            attn_residual_f16: raw_alloc.alloc_f16(device, max_tokens * hidden)?,
-            gate_f32: raw_alloc.alloc_f32(device, max_tokens * ff_len)?,
-            up_f32: raw_alloc.alloc_f32(device, max_tokens * ff_len)?,
-            activated_f16: raw_alloc.alloc_f16(device, max_tokens * ff_len)?,
-            activated_q8_1: raw_alloc.alloc_q8_1(device, pf_activated_q8_1_n)?,
-            activated_q8_1_mmq: raw_alloc.alloc_q8_1(device, pf_activated_q8_1_n)?,
-            down_f32: raw_alloc.alloc_f32(device, max_tokens * hidden)?,
-            post_ffw_norm_f16: raw_alloc.alloc_f16(device, max_tokens * hidden)?,
-            positions: raw_alloc.alloc_i32(device, max_tokens)?,
-            v_ones_f16: (v_ones_ptr, head_dim_max * 2),
-            gated_q8_1: raw_alloc.alloc_q8_1(device, max_tokens * n_heads_max)?,
-            gated_q8_1_mmq: raw_alloc.alloc_q8_1_mmq(device, max_tokens * n_heads_max)?,
-            positions_host: vec![0i32; max_tokens],
-        };
-
-        let output_head_scratch = if output_norm.is_some() {
-            Some(OutputHeadScratch {
-                x_norm_f16: raw_alloc.alloc_f16(device, hidden)?.0,
-                x_q8_1: raw_alloc.alloc_q8_1(device, x_q8_1_n)?.0,
-                logits_f32: raw_alloc.alloc_f32(device, cfg.vocab_size)?.0,
-            })
-        } else {
-            None
-        };
-
-        // MoE scratch: allocate once if any of this stage's layers is
-        // MoE. 26B-A4B is all-MoE so every stage hits this branch.
-        let any_moe = global_layer_indices
-            .iter()
-            .any(|&gi| layout.layers[gi].ffn_kind == crate::layout::FfnKind::Moe);
-        let moe_scratch = if any_moe {
-            let dims = cfg
-                .moe
-                .ok_or_else(|| anyhow!("rank {rank}: MoE layer present but cfg.moe is None"))?;
-            Some(crate::moe::Gemma4MoeScratch::alloc(
-                device,
-                hidden,
-                dims.moe_intermediate_size,
-                dims.num_experts,
-                dims.num_experts_per_tok,
-                raw_alloc,
-            )?)
-        } else {
-            None
-        };
-
-        Ok(Self {
-            common,
-            global_layer_indices,
-            layer_weights,
-            kv_caches,
-            local_kv_share_src,
-            hidden_a,
-            hidden_b,
-            token_embd,
-            token_embd_dims,
-            output_norm,
-            output,
-            output_head_scratch,
-            scratch,
-            moe_scratch,
-            prefill,
-            positions_host: vec![0i32; 1],
-            max_tokens,
-        })
     }
 
     fn layer_scratch_view(&mut self) -> LayerDecodeScratch<'_> {
@@ -489,6 +288,7 @@ impl Gemma4PpStage {
         }
     }
 
+    /// Free this rank's session allocations (KV caches + scratch).
     pub fn dispose(&mut self, device: &HipDevice) -> Result<()> {
         if self.common.is_disposed() {
             return Ok(());
@@ -499,26 +299,433 @@ impl Gemma4PpStage {
         }
         self.common
             .dispose(device)
-            .map_err(|e| anyhow!("raw_alloc dispose: {e}"))?;
-        // Token embd / output_norm / output were uploaded by the
-        // driver; their bytes are tracked in their owning DeviceTensor.
-        for t in self.token_embd.take().into_iter()
-            .chain(self.output_norm.take().into_iter())
-            .chain(self.output.take().into_iter())
-        {
-            if !t.ptr.is_null() && t.bytes > 0 {
-                unsafe {
-                    let _ = device.dealloc(t.ptr, t.bytes);
-                }
-            }
-        }
+            .map_err(|e| anyhow!("session raw_alloc dispose: {e}"))?;
         Ok(())
     }
 }
 
-impl Drop for Gemma4PpStage {
+impl Drop for Gemma4PpSessionStage {
     fn drop(&mut self) {
-        self.common.warn_on_leak("flambeau_gemma4::pp::Gemma4PpStage");
+        self.common
+            .warn_on_leak("flambeau_gemma4::pp::Gemma4PpSessionStage");
+    }
+}
+
+/// Per-rank pipeline stage. Bundles the weight half (`model`) and the
+/// per-request half (`session`). Test fixtures + `Gemma4PpDriver`
+/// construct this; production callers that want `Arc<Gemma4PpModel>`
+/// sharing across multiple sessions split via
+/// `Gemma4PpStage::into_halves`.
+pub struct Gemma4PpStage {
+    pub model: Gemma4PpModelStage,
+    pub session: Gemma4PpSessionStage,
+}
+
+impl Gemma4PpStage {
+    pub fn rank(&self) -> usize {
+        self.model.rank()
+    }
+
+    /// Split the bundle into its (model, session) halves. Used by
+    /// `Gemma4PpDriver::upload` to hand the Model half to `Arc::new`
+    /// and keep the Session half as per-request state.
+    pub fn into_halves(self) -> (Gemma4PpModelStage, Gemma4PpSessionStage) {
+        (self.model, self.session)
+    }
+}
+
+/// Pipeline-parallel model. Owns the cluster + per-rank weights +
+/// per-rank `OpsRegistry`. Arc-shareable across multiple concurrent
+/// `Gemma4PpSession`s.
+pub struct Gemma4PpModel {
+    pub cluster: HipCluster,
+    pub cfg: Gemma4Config,
+    pub layout: ModelLayout,
+    pub layer_to_rank: Vec<usize>,
+    pub stages: Vec<Gemma4PpModelStage>,
+    /// One `OpsRegistry` per rank. Built once at driver init; bound
+    /// to the device, reusable across requests.
+    pub regs: Vec<OpsRegistry>,
+}
+
+impl Gemma4PpModel {
+    /// Free every rank's weight allocations. Idempotent.
+    pub fn dispose(&mut self) -> Result<()> {
+        let mut first_err: Option<anyhow::Error> = None;
+        for (rank, stage) in self.stages.iter_mut().enumerate() {
+            let dev = self.cluster.device(rank);
+            if let Err(e) = stage.dispose(dev) {
+                if first_err.is_none() {
+                    first_err = Some(e);
+                }
+            }
+        }
+        first_err.map_or(Ok(()), Err)
+    }
+}
+
+impl Drop for Gemma4PpModel {
+    fn drop(&mut self) {
+        if self
+            .stages
+            .iter()
+            .any(|s| !s.common.is_disposed())
+        {
+            tracing::warn!("Gemma4PpModel dropped without dispose()");
+        }
+    }
+}
+
+/// Per-request pipeline-parallel session. Owns the KV caches + scratch
+/// for every rank; borrows weights through `&Gemma4PpModel`.
+pub struct Gemma4PpSession {
+    pub stages: Vec<Gemma4PpSessionStage>,
+    /// Last-rank logits scratch host buffer (vocab F32) for argmax.
+    pub logits_host: Vec<f32>,
+}
+
+impl Gemma4PpSession {
+    /// Allocate per-rank KV caches + scratch sized for `max_tokens`,
+    /// using the model's layout/cluster.
+    pub fn new(model: &Gemma4PpModel, max_tokens: usize) -> Result<Self> {
+        let mut stages = Vec::with_capacity(model.stages.len());
+        for (rank, model_stage) in model.stages.iter().enumerate() {
+            let device = model.cluster.device(rank);
+            stages.push(Gemma4PpSessionStage::from_pieces(
+                device,
+                &model.cfg,
+                &model.layout,
+                model_stage,
+                max_tokens,
+            )?);
+        }
+        let logits_host = vec![0.0f32; model.cfg.vocab_size];
+        Ok(Self {
+            stages,
+            logits_host,
+        })
+    }
+
+    /// Free every rank's session allocations against `model.cluster`.
+    pub fn dispose(&mut self, model: &Gemma4PpModel) -> Result<()> {
+        let mut first_err: Option<anyhow::Error> = None;
+        for (rank, stage) in self.stages.iter_mut().enumerate() {
+            let dev = model.cluster.device(rank);
+            if let Err(e) = stage.dispose(dev) {
+                if first_err.is_none() {
+                    first_err = Some(e);
+                }
+            }
+        }
+        first_err.map_or(Ok(()), Err)
+    }
+}
+
+/// Borrowed bundle that `PpDecodeDriver` / `PpPrefillDriver` is
+/// implemented on. Constructed per forward call from a
+/// `(&Gemma4PpModel, &mut Gemma4PpSession)` pair so the topology
+/// orchestrators in `flambeau-blocks` can drive a session over shared
+/// weights.
+pub struct Gemma4PpHandle<'a> {
+    pub model: &'a Gemma4PpModel,
+    pub session: &'a mut Gemma4PpSession,
+}
+
+/// Pipeline-parallel driver. Bundles `Arc<Gemma4PpModel>` (shared
+/// weights) and `Gemma4PpSession` (per-request KV+scratch). Existing
+/// single-request callers construct one Driver; multi-slot callers
+/// construct one `Arc<Gemma4PpModel>` + N `Gemma4PpSession`s and use
+/// `Gemma4PpHandle` directly.
+pub struct Gemma4PpDriver {
+    pub model: std::sync::Arc<Gemma4PpModel>,
+    pub session: Gemma4PpSession,
+}
+
+impl Gemma4PpModelStage {
+    /// Build the model-side stage for `rank`: resolves
+    /// `global_layer_indices` + `local_kv_share_src` from the
+    /// partition, wraps the passed-in pre-uploaded weights, and
+    /// initialises an empty weight tracker (caller appends weight
+    /// allocs via `common.raw_alloc.track`).
+    #[allow(clippy::too_many_arguments)]
+    pub fn from_pieces(
+        device: &HipDevice,
+        rank: usize,
+        layout: &ModelLayout,
+        layer_to_rank: &[usize],
+        layer_weights: Vec<Gemma4LayerWeights>,
+        token_embd: Option<DeviceTensor>,
+        token_embd_dims: Option<[usize; 2]>,
+        output_norm: Option<DeviceTensor>,
+        output: Option<DeviceTensor>,
+    ) -> Result<Self> {
+        let global_layer_indices: Vec<usize> = (0..layout.layers.len())
+            .filter(|&i| layer_to_rank[i] == rank)
+            .collect();
+        if global_layer_indices.len() != layer_weights.len() {
+            bail!(
+                "Gemma4PpModelStage::from_pieces: rank {rank} owns {} layers but got {} weights",
+                global_layer_indices.len(),
+                layer_weights.len()
+            );
+        }
+        let mut global_to_local = vec![usize::MAX; layout.layers.len()];
+        for (li, &gi) in global_layer_indices.iter().enumerate() {
+            global_to_local[gi] = li;
+        }
+        let mut local_kv_share_src = vec![0usize; global_layer_indices.len()];
+        for (li, &gi) in global_layer_indices.iter().enumerate() {
+            let spec = &layout.layers[gi];
+            if spec.has_kv {
+                local_kv_share_src[li] = li;
+            } else {
+                let src_g = spec.kv_share_src.expect("partition validated this");
+                let src_l = global_to_local[src_g];
+                if src_l == usize::MAX {
+                    bail!(
+                        "Gemma4PpModelStage::from_pieces: rank {rank} layer {gi} \
+                         kv_share_src={src_g} not on same rank",
+                    );
+                }
+                local_kv_share_src[li] = src_l;
+            }
+        }
+        Ok(Self {
+            common: StageCommon::new(rank as u32, device.id()),
+            global_layer_indices,
+            layer_weights,
+            local_kv_share_src,
+            token_embd,
+            token_embd_dims,
+            output_norm,
+            output,
+        })
+    }
+}
+
+impl Gemma4PpSessionStage {
+    /// Build the per-request session stage for `rank`. Reads layer
+    /// shapes through `model` to size scratch / KV slots; allocates
+    /// scratch into `common.raw_alloc`. `max_tokens` caps prefill
+    /// chunk size.
+    pub fn from_pieces(
+        device: &HipDevice,
+        cfg: &Gemma4Config,
+        layout: &ModelLayout,
+        model: &Gemma4PpModelStage,
+        max_tokens: usize,
+    ) -> Result<Self> {
+        device.bind()?;
+
+        // KV caches: one per owning local layer; None for tail.
+        let mut kv_caches = Vec::with_capacity(model.global_layer_indices.len());
+        for &gi in &model.global_layer_indices {
+            let spec = &layout.layers[gi];
+            if spec.has_kv {
+                let kv =
+                    KvCache::<F16Contig, HipDevice>::new(device, spec.n_kv_heads, spec.head_dim, max_tokens)
+                        .map_err(|e| anyhow!("kv alloc layer {gi}: {e}"))?;
+                kv_caches.push(Some(kv));
+            } else {
+                kv_caches.push(None);
+            }
+        }
+
+        // Per-stage layer scratch. Sizes are widest over THIS stage's
+        // layers — different stages may carry layers with different
+        // shapes (per-layer head_dim/n_kv_heads).
+        let hidden = cfg.hidden_size;
+        let ff_len = cfg.feed_forward_length;
+        let q_width_max = model
+            .global_layer_indices
+            .iter()
+            .map(|&gi| layout.layers[gi].n_heads * layout.layers[gi].head_dim)
+            .max()
+            .unwrap_or(hidden);
+        let kv_width_max_stage = model
+            .global_layer_indices
+            .iter()
+            .map(|&gi| layout.layers[gi].n_kv_heads * layout.layers[gi].head_dim)
+            .max()
+            .unwrap_or(hidden);
+        let head_dim_max = model
+            .global_layer_indices
+            .iter()
+            .map(|&gi| layout.layers[gi].head_dim)
+            .max()
+            .unwrap_or(64);
+        let mmvq_max = q_width_max.max(kv_width_max_stage).max(hidden).max(ff_len);
+        let x_q8_1_n = hidden.max(ff_len).max(q_width_max).div_ceil(32) * 32;
+        let activated_q8_1_n = ff_len.div_ceil(32) * 32;
+
+        let mut common = StageCommon::new(model.common.rank, device.id());
+        let raw_alloc = &mut common.raw_alloc;
+
+        let v_ones_ptr = upload_f16_ones(device, head_dim_max)?;
+        raw_alloc.track(v_ones_ptr, head_dim_max * 2);
+        let n_heads_max_stage = model
+            .global_layer_indices
+            .iter()
+            .map(|&gi| layout.layers[gi].n_heads)
+            .max()
+            .unwrap_or(1);
+        let splitk_chunks = flambeau_blocks::MAX_SPLITK_CHUNKS;
+        let scratch = LayerScratchPtrs {
+            x_q8_1: raw_alloc.alloc_q8_1(device, x_q8_1_n)?,
+            mmvq_f32: raw_alloc.alloc_f32(device, mmvq_max)?,
+            q_f16: raw_alloc.alloc_f16(device, q_width_max)?,
+            k_f16: raw_alloc.alloc_f16(device, kv_width_max_stage)?,
+            v_f16: raw_alloc.alloc_f16(device, kv_width_max_stage)?,
+            attn_out_f16: raw_alloc.alloc_f16(device, q_width_max.max(hidden))?,
+            post_attn_norm_f16: raw_alloc.alloc_f16(device, hidden)?,
+            attn_residual_f16: raw_alloc.alloc_f16(device, hidden)?,
+            ffn_norm_f16: raw_alloc.alloc_f16(device, hidden)?,
+            gate_f32: raw_alloc.alloc_f32(device, ff_len)?,
+            up_f32: raw_alloc.alloc_f32(device, ff_len)?,
+            activated_f16: raw_alloc.alloc_f16(device, ff_len)?,
+            activated_q8_1: raw_alloc.alloc_q8_1(device, activated_q8_1_n)?,
+            down_f32: raw_alloc.alloc_f32(device, hidden)?,
+            post_ffw_norm_f16: raw_alloc.alloc_f16(device, hidden)?,
+            positions: raw_alloc.alloc_i32(device, 1)?,
+            v_ones_f16: (v_ones_ptr, head_dim_max * 2),
+            splitk_partials_m: raw_alloc.alloc_f32(device, n_heads_max_stage * splitk_chunks)?,
+            splitk_partials_s: raw_alloc.alloc_f32(device, n_heads_max_stage * splitk_chunks)?,
+            splitk_partials_o: raw_alloc
+                .alloc_f32(device, n_heads_max_stage * splitk_chunks * head_dim_max)?,
+        };
+
+        let hidden_a = raw_alloc.alloc_f16(device, max_tokens * hidden)?.0;
+        let hidden_b = raw_alloc.alloc_f16(device, max_tokens * hidden)?.0;
+
+        let n_heads_max = layout
+            .layers
+            .iter()
+            .map(|l| l.n_heads * l.head_dim)
+            .max()
+            .unwrap_or(hidden);
+        let kv_width_max_all = layout
+            .layers
+            .iter()
+            .map(|l| l.n_kv_heads * l.head_dim)
+            .max()
+            .unwrap_or(hidden);
+        let mmvq_max_p = n_heads_max.max(kv_width_max_all).max(hidden).max(ff_len);
+        let pf_x_q8_1_n = max_tokens * x_q8_1_n;
+        let pf_activated_q8_1_n = max_tokens * activated_q8_1_n;
+        let prefill = PrefillScratchPtrs {
+            x_norm_f16: raw_alloc.alloc_f16(device, max_tokens * hidden)?,
+            x_q8_1: raw_alloc.alloc_q8_1(device, pf_x_q8_1_n)?,
+            x_q8_1_mmq: raw_alloc.alloc_q8_1(device, pf_x_q8_1_n)?,
+            mmvq_f32: raw_alloc.alloc_f32(device, max_tokens * mmvq_max_p)?,
+            q_f16: raw_alloc.alloc_f16(device, max_tokens * n_heads_max)?,
+            k_f16: raw_alloc.alloc_f16(device, max_tokens * kv_width_max_all)?,
+            v_f16: raw_alloc.alloc_f16(device, max_tokens * kv_width_max_all)?,
+            attn_out_f16: raw_alloc.alloc_f16(device, max_tokens * n_heads_max.max(hidden))?,
+            post_attn_norm_f16: raw_alloc.alloc_f16(device, max_tokens * hidden)?,
+            attn_residual_f16: raw_alloc.alloc_f16(device, max_tokens * hidden)?,
+            gate_f32: raw_alloc.alloc_f32(device, max_tokens * ff_len)?,
+            up_f32: raw_alloc.alloc_f32(device, max_tokens * ff_len)?,
+            activated_f16: raw_alloc.alloc_f16(device, max_tokens * ff_len)?,
+            activated_q8_1: raw_alloc.alloc_q8_1(device, pf_activated_q8_1_n)?,
+            activated_q8_1_mmq: raw_alloc.alloc_q8_1(device, pf_activated_q8_1_n)?,
+            down_f32: raw_alloc.alloc_f32(device, max_tokens * hidden)?,
+            post_ffw_norm_f16: raw_alloc.alloc_f16(device, max_tokens * hidden)?,
+            positions: raw_alloc.alloc_i32(device, max_tokens)?,
+            v_ones_f16: (v_ones_ptr, head_dim_max * 2),
+            gated_q8_1: raw_alloc.alloc_q8_1(device, max_tokens * n_heads_max)?,
+            gated_q8_1_mmq: raw_alloc.alloc_q8_1_mmq(device, max_tokens * n_heads_max)?,
+            positions_host: vec![0i32; max_tokens],
+        };
+
+        let output_head_scratch = if model.output_norm.is_some() {
+            Some(OutputHeadScratch {
+                x_norm_f16: raw_alloc.alloc_f16(device, hidden)?.0,
+                x_q8_1: raw_alloc.alloc_q8_1(device, x_q8_1_n)?.0,
+                logits_f32: raw_alloc.alloc_f32(device, cfg.vocab_size)?.0,
+            })
+        } else {
+            None
+        };
+
+        let any_moe = model
+            .global_layer_indices
+            .iter()
+            .any(|&gi| layout.layers[gi].ffn_kind == crate::layout::FfnKind::Moe);
+        let moe_scratch = if any_moe {
+            let dims = cfg
+                .moe
+                .ok_or_else(|| anyhow!("rank {}: MoE layer present but cfg.moe is None", model.common.rank))?;
+            Some(crate::moe::Gemma4MoeScratch::alloc(
+                device,
+                hidden,
+                dims.moe_intermediate_size,
+                dims.num_experts,
+                dims.num_experts_per_tok,
+                raw_alloc,
+            )?)
+        } else {
+            None
+        };
+
+        Ok(Self {
+            common,
+            kv_caches,
+            hidden_a,
+            hidden_b,
+            output_head_scratch,
+            scratch,
+            moe_scratch,
+            prefill,
+            positions_host: vec![0i32; 1],
+            max_tokens,
+        })
+    }
+}
+
+impl Gemma4PpStage {
+    /// Build the bundled stage. Test-friendly constructor that wraps
+    /// model + session halves into one struct (the real-GGUF
+    /// `Gemma4PpDriver::upload` path lands in S8-B and now splits the
+    /// halves into `Arc<Gemma4PpModel>` + `Gemma4PpSession`).
+    #[allow(clippy::too_many_arguments)]
+    pub fn from_pieces(
+        device: &HipDevice,
+        rank: usize,
+        cfg: &Gemma4Config,
+        layout: &ModelLayout,
+        layer_to_rank: &[usize],
+        layer_weights: Vec<Gemma4LayerWeights>,
+        token_embd: Option<DeviceTensor>,
+        token_embd_dims: Option<[usize; 2]>,
+        output_norm: Option<DeviceTensor>,
+        output: Option<DeviceTensor>,
+        max_tokens: usize,
+    ) -> Result<Self> {
+        device.bind()?;
+        let model = Gemma4PpModelStage::from_pieces(
+            device,
+            rank,
+            layout,
+            layer_to_rank,
+            layer_weights,
+            token_embd,
+            token_embd_dims,
+            output_norm,
+            output,
+        )?;
+        let session = Gemma4PpSessionStage::from_pieces(device, cfg, layout, &model, max_tokens)?;
+        Ok(Self { model, session })
+    }
+
+    /// Dispose both halves. Test-fixture convenience — production code
+    /// goes through `Gemma4PpModel::dispose` + `Gemma4PpSession::dispose`
+    /// separately.
+    pub fn dispose(&mut self, device: &HipDevice) -> Result<()> {
+        // Session first (KV caches frees first since they reference
+        // the same device as the stage's allocations).
+        self.session.dispose(device)?;
+        self.model.dispose(device)?;
+        Ok(())
     }
 }
 
@@ -527,7 +734,10 @@ impl Gemma4PpDriver {
     /// responsible for setting up `cluster.device(rank)` correctly
     /// (e.g. via `HipCluster::new(&device_ids)`) and for uploading
     /// the per-stage weights / globals matching the partition. The
-    /// stages must have been built on the matching device.
+    /// stages must have been built on the matching device. Splits
+    /// each bundled `Gemma4PpStage` into its model + session halves;
+    /// the model halves go into `Arc<Gemma4PpModel>`, the session
+    /// halves into `Gemma4PpSession`.
     pub fn from_pieces(
         cluster: HipCluster,
         cfg: Gemma4Config,
@@ -546,10 +756,10 @@ impl Gemma4PpDriver {
                 n_ranks
             );
         }
-        if stages[0].token_embd.is_none() {
+        if stages[0].model.token_embd.is_none() {
             bail!("Gemma4PpDriver::from_pieces: rank 0 must own token_embd");
         }
-        if stages[n_ranks - 1].output_norm.is_none() {
+        if stages[n_ranks - 1].model.output_norm.is_none() {
             bail!("Gemma4PpDriver::from_pieces: last rank must own output_norm");
         }
 
@@ -561,14 +771,29 @@ impl Gemma4PpDriver {
             regs.push(reg);
         }
         let logits_host = vec![0.0f32; cfg.vocab_size];
-        Ok(Self {
+
+        let mut model_stages = Vec::with_capacity(n_ranks);
+        let mut session_stages = Vec::with_capacity(n_ranks);
+        for stage in stages.into_iter() {
+            let (m, s) = stage.into_halves();
+            model_stages.push(m);
+            session_stages.push(s);
+        }
+        let model = Gemma4PpModel {
             cluster,
             cfg,
             layout,
             layer_to_rank,
-            stages,
+            stages: model_stages,
             regs,
+        };
+        let session = Gemma4PpSession {
+            stages: session_stages,
             logits_host,
+        };
+        Ok(Self {
+            model: std::sync::Arc::new(model),
+            session,
         })
     }
 
@@ -685,9 +910,9 @@ impl Gemma4PpDriver {
                 (None, None)
             };
 
-            // Build the stage scratch + KV with from_pieces; it tracks
-            // its own scratch allocations. Then append the raw layer
-            // allocations we just made so dispose frees them.
+            // Build the bundled stage; its model half tracks weight
+            // allocs (via `raw` appended below), its session half
+            // tracks scratch allocs.
             let mut stage = Gemma4PpStage::from_pieces(
                 device,
                 rank,
@@ -702,13 +927,13 @@ impl Gemma4PpDriver {
                 max_tokens,
             )?;
             for (ptr, bytes) in raw {
-                stage.common.raw_alloc.track(ptr, bytes);
+                stage.model.common.raw_alloc.track(ptr, bytes);
             }
             // Last rank also needs token_embd_dims for the LM-head GEMM
             // shape (we keep it on every rank so callers can introspect,
             // but only the last rank consumes it in `output_head`).
-            if rank == n_ranks - 1 && stage.token_embd_dims.is_none() {
-                stage.token_embd_dims = Some(token_embd_dims);
+            if rank == n_ranks - 1 && stage.model.token_embd_dims.is_none() {
+                stage.model.token_embd_dims = Some(token_embd_dims);
             }
             stages.push(stage);
         }
@@ -716,11 +941,21 @@ impl Gemma4PpDriver {
         Self::from_pieces(cluster, cfg, layout, layer_to_rank, stages)
     }
 
-    /// Free every device allocation. Idempotent.
+    /// Free every device allocation. Idempotent. Requires unique
+    /// ownership of the Model `Arc` (i.e. no other Sessions reference
+    /// the same weights) to dispose the model half.
     pub fn dispose(&mut self) -> Result<()> {
-        for (rank, stage) in self.stages.iter_mut().enumerate() {
-            let dev = self.cluster.device(rank);
-            stage.dispose(dev)?;
+        // Session first (KV caches before scratch tracker).
+        self.session.dispose(&self.model)?;
+        // Then the model — requires sole ownership of the Arc.
+        match std::sync::Arc::get_mut(&mut self.model) {
+            Some(m) => m.dispose()?,
+            None => {
+                tracing::warn!(
+                    "Gemma4PpDriver::dispose: model Arc has other refs; \
+                     model weights leak until all Sessions drop"
+                );
+            }
         }
         Ok(())
     }
@@ -728,17 +963,27 @@ impl Gemma4PpDriver {
     /// Forward one decode token through the pipeline. Returns the
     /// argmax token id.
     pub fn forward_one_token(&mut self, token_id: u32, position: usize) -> Result<u32> {
-        forward_one_token_pp(self, token_id, position)
+        let mut handle = Gemma4PpHandle {
+            model: &self.model,
+            session: &mut self.session,
+        };
+        forward_one_token_pp(&mut handle, token_id, position)
     }
 
     /// Multi-token prefill across the pipeline. Output is the LM-head
     /// logits' argmax for the LAST token of the chunk (consumed
     /// host-side from the driver's logits buffer after the call).
     pub fn forward_prefill(&mut self, tokens: &[u32], start_position: usize) -> Result<u32> {
-        forward_prefill_pp(self, tokens, start_position)?;
+        {
+            let mut handle = Gemma4PpHandle {
+                model: &self.model,
+                session: &mut self.session,
+            };
+            forward_prefill_pp(&mut handle, tokens, start_position)?;
+        }
         let mut best_i = 0u32;
         let mut best_v = f32::NEG_INFINITY;
-        for (i, &v) in self.logits_host.iter().enumerate() {
+        for (i, &v) in self.session.logits_host.iter().enumerate() {
             if v > best_v {
                 best_v = v;
                 best_i = i as u32;
@@ -762,7 +1007,7 @@ impl flambeau_runtime::ModelDriver for Gemma4PpDriver {
         logits_out: &mut Vec<f32>,
     ) -> Result<()> {
         let _ = Gemma4PpDriver::forward_prefill(self, tokens, start_position)?;
-        copy_logits_into(&self.logits_host, logits_out);
+        copy_logits_into(&self.session.logits_host, logits_out);
         Ok(())
     }
     fn forward_one_token_logits(
@@ -772,11 +1017,11 @@ impl flambeau_runtime::ModelDriver for Gemma4PpDriver {
         logits_out: &mut Vec<f32>,
     ) -> Result<()> {
         let _ = Gemma4PpDriver::forward_one_token(self, token_id, position)?;
-        copy_logits_into(&self.logits_host, logits_out);
+        copy_logits_into(&self.session.logits_host, logits_out);
         Ok(())
     }
     fn vocab_size(&self) -> usize {
-        self.cfg.vocab_size
+        self.model.cfg.vocab_size
     }
     fn dispose(&mut self) -> Result<()> {
         Gemma4PpDriver::dispose(self)
@@ -791,11 +1036,17 @@ fn copy_logits_into(src: &[f32], dst: &mut Vec<f32>) {
 impl Drop for Gemma4PpDriver {
     fn drop(&mut self) {
         // Best-effort cleanup; warn on leak.
-        if self
+        let model_leaked = self
+            .model
             .stages
             .iter()
-            .any(|s| !s.common.is_disposed())
-        {
+            .any(|s| !s.common.is_disposed());
+        let session_leaked = self
+            .session
+            .stages
+            .iter()
+            .any(|s| !s.common.is_disposed());
+        if model_leaked || session_leaked {
             tracing::warn!("Gemma4PpDriver dropped without dispose()");
         }
     }
@@ -805,36 +1056,37 @@ impl Drop for Gemma4PpDriver {
 // PpDecodeDriver impl
 // ---------------------------------------------------------------------------
 
-impl PpDecodeDriver for Gemma4PpDriver {
+impl PpDecodeDriver for Gemma4PpHandle<'_> {
     fn n_ranks(&self) -> usize {
-        self.stages.len()
+        self.model.stages.len()
     }
 
     fn layers_per_rank(&self, rank: usize) -> usize {
-        self.stages[rank].global_layer_indices.len()
+        self.model.stages[rank].global_layer_indices.len()
     }
 
     fn cluster(&self) -> &HipCluster {
-        &self.cluster
+        &self.model.cluster
     }
 
     fn hidden_a(&self, rank: usize) -> DevicePtr {
-        self.stages[rank].hidden_a
+        self.session.stages[rank].hidden_a
     }
 
     fn hidden_b(&self, rank: usize) -> DevicePtr {
-        self.stages[rank].hidden_b
+        self.session.stages[rank].hidden_b
     }
 
     fn hidden_bytes(&self) -> usize {
-        self.cfg.hidden_size * 2
+        self.model.cfg.hidden_size * 2
     }
 
     fn embed_token(&mut self, token_id: u32) -> Result<()> {
-        let stage = &mut self.stages[0];
-        let device = self.cluster.device(0);
+        let device = self.model.cluster.device(0);
         let stream = device.default_stream();
-        let tok_embd = stage
+        let model_stage = &self.model.stages[0];
+        let session_stage = &mut self.session.stages[0];
+        let tok_embd = model_stage
             .token_embd
             .as_ref()
             .ok_or_else(|| anyhow!("embed_token: rank 0 missing token_embd"))?;
@@ -844,26 +1096,23 @@ impl PpDecodeDriver for Gemma4PpDriver {
             tok_embd.ptr,
             tok_embd.dtype,
             tok_embd.bytes,
-            self.cfg.vocab_size,
-            self.cfg.hidden_size,
+            self.model.cfg.vocab_size,
+            self.model.cfg.hidden_size,
             token_id,
-            stage.hidden_a,
+            session_stage.hidden_a,
         )?;
         // Gemma4 input scale: `inpL = scale(inpL, sqrt(n_embd))`
-        // (`gemma4-iswa.cpp:20`). Mirrors the same step in
-        // `single_device::forward_one_token_logits`. Without this, the
-        // residual magnitude is too small, every downstream rmsnorm
-        // computes the wrong scale, and the output converges to a
-        // degenerate token (caught by parity test #36 on 31B Q4_0).
-        let reg = flambeau_ops::hip::OpsRegistry::new(device)
-            .map_err(|e| anyhow!("embed_token registry: {e}"))?;
-        let ops = flambeau_ops::hip::HipOps::new(&reg, stream);
+        // (`gemma4-iswa.cpp:20`). Without this, every downstream rmsnorm
+        // computes the wrong scale (parity test #36 caught this on 31B
+        // Q4_0).
+        let reg = &self.model.regs[0];
+        let ops = flambeau_ops::hip::HipOps::new(reg, stream);
         use flambeau_ops::Ops;
         ops.scale_f16(
-            stage.hidden_a,
-            stage.hidden_a,
-            self.cfg.hidden_size,
-            (self.cfg.hidden_size as f32).sqrt(),
+            session_stage.hidden_a,
+            session_stage.hidden_a,
+            self.model.cfg.hidden_size,
+            (self.model.cfg.hidden_size as f32).sqrt(),
         )
         .context("embed_token sqrt(n_embd) scale")?;
         Ok(())
@@ -877,35 +1126,35 @@ impl PpDecodeDriver for Gemma4PpDriver {
         x_out: DevicePtr,
         position: usize,
     ) -> Result<()> {
-        let device = self.cluster.device(rank);
+        let device = self.model.cluster.device(rank);
         let stream = device.default_stream();
-        let reg = &self.regs[rank];
+        let reg = &self.model.regs[rank];
         let ops = HipOps::new(reg, stream);
 
-        let stage = &mut self.stages[rank];
-        let global_idx = stage.global_layer_indices[local_idx];
-        let spec = self.layout.layers[global_idx];
+        let model_stage = &self.model.stages[rank];
+        let session_stage = &mut self.session.stages[rank];
+        let global_idx = model_stage.global_layer_indices[local_idx];
+        let spec = self.model.layout.layers[global_idx];
+        let weights = &model_stage.layer_weights[local_idx];
 
-        let weights_ref =
-            &stage.layer_weights[local_idx] as *const Gemma4LayerWeights;
-        // SAFETY: weights immutable; subsequent mutations touch other
-        // fields (kv_caches, scratch).
-        let weights = unsafe { &*weights_ref };
-
-        let kv_local_idx = stage.local_kv_share_src[local_idx];
+        let kv_local_idx = model_stage.local_kv_share_src[local_idx];
         let kv_ptr: *mut Option<KvCache<F16Contig, HipDevice>> =
-            &mut stage.kv_caches[kv_local_idx];
+            &mut session_stage.kv_caches[kv_local_idx];
         // Borrow moe_scratch by raw pointer so the scratch view (which
         // captures &mut on other fields) doesn't conflict.
         let moe_scratch_ref: Option<&crate::moe::Gemma4MoeScratch> =
-            stage.moe_scratch.as_ref().map(|s| s as *const _).map(|p| {
-                // SAFETY: moe_scratch field is disjoint from the
-                // fields the scratch view touches.
-                unsafe { &*p }
-            });
-        let mut scratch = stage.layer_scratch_view();
-        // SAFETY: kv_ptr borrows stage.kv_caches[kv_local_idx] disjointly
-        // from the other fields the scratch view touches.
+            session_stage
+                .moe_scratch
+                .as_ref()
+                .map(|s| s as *const _)
+                .map(|p| {
+                    // SAFETY: moe_scratch field is disjoint from the
+                    // fields the scratch view touches.
+                    unsafe { &*p }
+                });
+        let mut scratch = session_stage.layer_scratch_view();
+        // SAFETY: kv_ptr borrows session_stage.kv_caches[kv_local_idx]
+        // disjointly from the other fields the scratch view touches.
         let kv = unsafe { &mut *kv_ptr };
         let kv = kv
             .as_mut()
@@ -917,9 +1166,9 @@ impl PpDecodeDriver for Gemma4PpDriver {
             stream,
             weights,
             &spec,
-            self.cfg.rms_norm_eps,
-            self.cfg.feed_forward_length,
-            self.cfg.hidden_size,
+            self.model.cfg.rms_norm_eps,
+            self.model.cfg.feed_forward_length,
+            self.model.cfg.hidden_size,
             kv,
             &mut scratch,
             x_in,
@@ -931,38 +1180,33 @@ impl PpDecodeDriver for Gemma4PpDriver {
     }
 
     fn output_head(&mut self) -> Result<()> {
-        let last = self.stages.len() - 1;
-        let device = self.cluster.device(last);
+        let last = self.model.stages.len() - 1;
+        let device = self.model.cluster.device(last);
         let stream = device.default_stream();
-        let reg = &self.regs[last];
+        let reg = &self.model.regs[last];
         let ops = HipOps::new(reg, stream);
 
-        let cfg = &self.cfg;
-        let stage = &mut self.stages[last];
-        let scratch = stage
+        let cfg = &self.model.cfg;
+        let model_stage = &self.model.stages[last];
+        let session_stage = &mut self.session.stages[last];
+        let scratch = session_stage
             .output_head_scratch
             .as_mut()
             .ok_or_else(|| anyhow!("output_head: last rank missing scratch"))?;
-        let output_norm = stage
+        let output_norm = model_stage
             .output_norm
             .as_ref()
             .ok_or_else(|| anyhow!("output_head: last rank missing output_norm"))?;
-        // LM head: tied to token_embd (which lives on rank 0). For
-        // S8-A we require the LM head weight to be replicated on the
-        // last rank — caller passes it as `output` on the last rank.
-        // Tied gemma4 files set this to the same Q8_0 token_embd
-        // tensor uploaded to the last rank. Untied models (none
-        // observed in our 5 audited GGUFs) use `output`.
-        let lm_head_t = stage
+        let lm_head_t = model_stage
             .output
             .as_ref()
-            .or(stage.token_embd.as_ref())
+            .or(model_stage.token_embd.as_ref())
             .ok_or_else(|| anyhow!("output_head: last rank missing LM head weight"))?;
-        let lm_head_dims = stage
+        let lm_head_dims = model_stage
             .token_embd_dims
             .ok_or_else(|| anyhow!("output_head: last rank missing token_embd_dims"))?;
         let lm_head = lm_head_t.as_weight_handle(lm_head_dims)?;
-        let in_ptr = stage.hidden_a;
+        let in_ptr = session_stage.hidden_a;
         let logits = forward_output_head(
             &ops,
             in_ptr,
@@ -974,19 +1218,17 @@ impl PpDecodeDriver for Gemma4PpDriver {
             cfg.vocab_size,
             cfg.rms_norm_eps,
         )?;
-        // Download logits into host buffer for argmax.
         // SAFETY: logits points at vocab*4 device bytes; host buffer matches.
         unsafe {
             device.memcpy_async(
                 stream,
                 CopyDirection::DeviceToHost,
-                DevicePtr(self.logits_host.as_mut_ptr() as usize),
+                DevicePtr(self.session.logits_host.as_mut_ptr() as usize),
                 logits,
                 cfg.vocab_size * 4,
             )?;
         }
         stream.synchronize()?;
-        // After softcap, ensure no in-place hazard for next call.
         let _ = apply_logit_softcap::<HipOps>;
         Ok(())
     }
@@ -994,7 +1236,7 @@ impl PpDecodeDriver for Gemma4PpDriver {
     fn argmax(&self) -> Result<u32> {
         let mut best_i = 0u32;
         let mut best_v = f32::NEG_INFINITY;
-        for (i, &v) in self.logits_host.iter().enumerate() {
+        for (i, &v) in self.session.logits_host.iter().enumerate() {
             if v > best_v {
                 best_v = v;
                 best_i = i as u32;
@@ -1289,46 +1531,47 @@ fn _context_keepalive<E>(e: Result<()>) -> Result<()> {
 // PpPrefillDriver impl
 // ---------------------------------------------------------------------------
 
-impl PpPrefillDriver for Gemma4PpDriver {
+impl PpPrefillDriver for Gemma4PpHandle<'_> {
     fn n_ranks(&self) -> usize {
-        self.stages.len()
+        self.model.stages.len()
     }
 
     fn layers_per_rank(&self, rank: usize) -> usize {
-        self.stages[rank].global_layer_indices.len()
+        self.model.stages[rank].global_layer_indices.len()
     }
 
     fn cluster(&self) -> &HipCluster {
-        &self.cluster
+        &self.model.cluster
     }
 
     fn hidden_a(&self, rank: usize) -> DevicePtr {
-        self.stages[rank].hidden_a
+        self.session.stages[rank].hidden_a
     }
 
     fn hidden_b(&self, rank: usize) -> DevicePtr {
-        self.stages[rank].hidden_b
+        self.session.stages[rank].hidden_b
     }
 
     fn hidden_row_bytes(&self) -> usize {
-        self.cfg.hidden_size * 2
+        self.model.cfg.hidden_size * 2
     }
 
     fn max_tokens(&self) -> usize {
-        // All stages allocated with the same max_tokens.
-        self.stages[0].max_tokens
+        // All session stages allocated with the same max_tokens.
+        self.session.stages[0].max_tokens
     }
 
     fn embed_tokens(&mut self, tokens: &[u32]) -> Result<()> {
-        let stage = &mut self.stages[0];
-        let device = self.cluster.device(0);
+        let device = self.model.cluster.device(0);
         let stream = device.default_stream();
-        let tok_embd = stage
+        let model_stage = &self.model.stages[0];
+        let session_stage = &mut self.session.stages[0];
+        let tok_embd = model_stage
             .token_embd
             .as_ref()
             .ok_or_else(|| anyhow!("embed_tokens: rank 0 missing token_embd"))?;
-        let hidden = self.cfg.hidden_size;
-        let vocab = self.cfg.vocab_size;
+        let hidden = self.model.cfg.hidden_size;
+        let vocab = self.model.cfg.vocab_size;
         let row_bytes = row_bytes_for_dtype(tok_embd.dtype, hidden)?;
         let mut host = vec![half::f16::from_f32(0.0); tokens.len() * hidden];
         for (i, &tok) in tokens.iter().enumerate() {
@@ -1369,14 +1612,14 @@ impl PpPrefillDriver for Gemma4PpDriver {
             *v = half::f16::from_f32(v.to_f32() * scale);
         }
         let bytes = host.len() * 2;
-        // SAFETY: stage.hidden_a sized max_tokens * hidden * 2 bytes;
-        // tokens.len() * hidden * 2 <= bytes (checked by driver
+        // SAFETY: session_stage.hidden_a sized max_tokens * hidden * 2
+        // bytes; tokens.len() * hidden * 2 <= bytes (checked by driver
         // orchestrator before this call).
         unsafe {
             device.memcpy_async(
                 stream,
                 CopyDirection::HostToDevice,
-                stage.hidden_a,
+                session_stage.hidden_a,
                 DevicePtr(host.as_ptr() as usize),
                 bytes,
             )?;
@@ -1394,24 +1637,21 @@ impl PpPrefillDriver for Gemma4PpDriver {
         n_tokens: usize,
         start_position: usize,
     ) -> Result<()> {
-        let device = self.cluster.device(rank);
+        let device = self.model.cluster.device(rank);
         let stream = device.default_stream();
-        let reg = &self.regs[rank];
+        let reg = &self.model.regs[rank];
         let ops = HipOps::new(reg, stream);
 
-        let stage = &mut self.stages[rank];
-        let global_idx = stage.global_layer_indices[local_idx];
-        let spec = self.layout.layers[global_idx];
+        let model_stage = &self.model.stages[rank];
+        let session_stage = &mut self.session.stages[rank];
+        let global_idx = model_stage.global_layer_indices[local_idx];
+        let spec = self.model.layout.layers[global_idx];
+        let weights = &model_stage.layer_weights[local_idx];
 
-        let weights_ref =
-            &stage.layer_weights[local_idx] as *const Gemma4LayerWeights;
-        // SAFETY: subsequent mutations touch other fields.
-        let weights = unsafe { &*weights_ref };
-
-        let kv_local_idx = stage.local_kv_share_src[local_idx];
+        let kv_local_idx = model_stage.local_kv_share_src[local_idx];
         let kv_ptr: *mut Option<KvCache<F16Contig, HipDevice>> =
-            &mut stage.kv_caches[kv_local_idx];
-        let mut scratch = stage.prefill_scratch_view();
+            &mut session_stage.kv_caches[kv_local_idx];
+        let mut scratch = session_stage.prefill_scratch_view();
         // SAFETY: kv_ptr disjoint from prefill scratch fields.
         let kv = unsafe { &mut *kv_ptr };
         let kv = kv
@@ -1424,9 +1664,9 @@ impl PpPrefillDriver for Gemma4PpDriver {
             stream,
             weights,
             &spec,
-            self.cfg.rms_norm_eps,
-            self.cfg.feed_forward_length,
-            self.cfg.hidden_size,
+            self.model.cfg.rms_norm_eps,
+            self.model.cfg.feed_forward_length,
+            self.model.cfg.hidden_size,
             kv,
             &mut scratch,
             x_in,
@@ -1437,35 +1677,33 @@ impl PpPrefillDriver for Gemma4PpDriver {
     }
 
     fn output_head_last_token(&mut self, l: usize) -> Result<()> {
-        // Same as decode `output_head`, but reads from the last-token
-        // row of `hidden_a`.
-        let last = self.stages.len() - 1;
-        let device = self.cluster.device(last);
+        let last = self.model.stages.len() - 1;
+        let device = self.model.cluster.device(last);
         let stream = device.default_stream();
-        let reg = &self.regs[last];
+        let reg = &self.model.regs[last];
         let ops = HipOps::new(reg, stream);
-        let cfg = &self.cfg;
-        let stage = &mut self.stages[last];
-        let scratch = stage
+        let cfg = &self.model.cfg;
+        let model_stage = &self.model.stages[last];
+        let session_stage = &mut self.session.stages[last];
+        let scratch = session_stage
             .output_head_scratch
             .as_mut()
             .ok_or_else(|| anyhow!("output_head: last rank missing scratch"))?;
-        let output_norm = stage
+        let output_norm = model_stage
             .output_norm
             .as_ref()
             .ok_or_else(|| anyhow!("output_head: last rank missing output_norm"))?;
-        let lm_head_t = stage
+        let lm_head_t = model_stage
             .output
             .as_ref()
-            .or(stage.token_embd.as_ref())
+            .or(model_stage.token_embd.as_ref())
             .ok_or_else(|| anyhow!("output_head: last rank missing LM head weight"))?;
-        let lm_head_dims = stage
+        let lm_head_dims = model_stage
             .token_embd_dims
             .ok_or_else(|| anyhow!("output_head: last rank missing token_embd_dims"))?;
         let lm_head = lm_head_t.as_weight_handle(lm_head_dims)?;
-        // Last-token row offset = (l - 1) * hidden * 2 bytes.
         let last_row_offset = (l - 1) * cfg.hidden_size * 2;
-        let in_ptr = stage.hidden_a.offset_bytes(last_row_offset);
+        let in_ptr = session_stage.hidden_a.offset_bytes(last_row_offset);
         let logits = forward_output_head(
             &ops,
             in_ptr,
@@ -1482,13 +1720,13 @@ impl PpPrefillDriver for Gemma4PpDriver {
             device.memcpy_async(
                 stream,
                 CopyDirection::DeviceToHost,
-                DevicePtr(self.logits_host.as_mut_ptr() as usize),
+                DevicePtr(self.session.logits_host.as_mut_ptr() as usize),
                 logits,
                 cfg.vocab_size * 4,
             )?;
         }
         stream.synchronize()?;
-        let _ = apply_logit_softcap::<HipOps>; // keepalive for the import
+        let _ = apply_logit_softcap::<HipOps>;
         Ok(())
     }
 }

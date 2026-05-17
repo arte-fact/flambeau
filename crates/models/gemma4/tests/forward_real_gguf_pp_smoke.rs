@@ -64,31 +64,34 @@ fn real_gguf_pp_upload_and_decode_31b_q4_0() {
     .expect("upload");
 
     // Stage ownership invariants.
-    assert_eq!(driver.stages.len(), N_RANKS);
+    assert_eq!(driver.model.stages.len(), N_RANKS);
     let total_layers: usize = driver
+        .model
         .stages
         .iter()
         .map(|s| s.global_layer_indices.len())
         .sum();
     assert_eq!(total_layers, cfg.num_layers, "uploaded layer total");
 
-    let s0 = &driver.stages[0];
+    let s0 = &driver.model.stages[0];
     assert!(s0.token_embd.is_some(), "rank 0 owns token_embd");
     assert!(s0.token_embd_dims.is_some(), "rank 0 token_embd_dims");
-    let last = &driver.stages[N_RANKS - 1];
+    let last = &driver.model.stages[N_RANKS - 1];
     assert!(last.output_norm.is_some(), "last rank owns output_norm");
     assert!(last.output.is_some(), "last rank owns LM-head replica");
+    let last_session = &driver.session.stages[N_RANKS - 1];
     assert!(
-        last.output_head_scratch.is_some(),
+        last_session.output_head_scratch.is_some(),
         "last rank owns output-head scratch"
     );
-    for (rank, stage) in driver.stages.iter().enumerate() {
+    for (rank, model_stage) in driver.model.stages.iter().enumerate() {
+        let session_stage = &driver.session.stages[rank];
         assert_eq!(
-            stage.kv_caches.len(),
-            stage.global_layer_indices.len(),
+            session_stage.kv_caches.len(),
+            model_stage.global_layer_indices.len(),
             "rank {rank} kv_caches len"
         );
-        for (li, kv) in stage.kv_caches.iter().enumerate() {
+        for (li, kv) in session_stage.kv_caches.iter().enumerate() {
             assert!(
                 kv.is_some(),
                 "rank {rank} local layer {li} expected KV (no shared-KV on 31B)"
@@ -122,7 +125,7 @@ fn real_gguf_pp_upload_and_decode_31b_q4_0() {
     }
 
     let total = prompt_len + 6;
-    let r0_first = driver.stages[0].kv_caches[0]
+    let r0_first = driver.session.stages[0].kv_caches[0]
         .as_ref()
         .expect("rank 0 first KV")
         .current_tokens();

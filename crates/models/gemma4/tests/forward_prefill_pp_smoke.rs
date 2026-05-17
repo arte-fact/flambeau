@@ -206,8 +206,8 @@ fn build_driver(cluster: HipCluster) -> Gemma4PpDriver {
             MAX_TOKENS,
         )
         .expect("stage");
-        if rank == N_RANKS - 1 && stage.token_embd_dims.is_none() {
-            stage.token_embd_dims = Some([VOCAB, HIDDEN]);
+        if rank == N_RANKS - 1 && stage.model.token_embd_dims.is_none() {
+            stage.model.token_embd_dims = Some([VOCAB, HIDDEN]);
         }
         stages.push(stage);
     }
@@ -221,15 +221,18 @@ fn forward_prefill_pp_smoke() {
 
     let tokens: Vec<u32> = (0..PROMPT_LEN as u32).collect();
     let tok = driver.forward_prefill(&tokens, 0).expect("prefill");
-    assert!((tok as usize) < driver.cfg.vocab_size, "argmax oob: {tok}");
+    assert!(
+        (tok as usize) < driver.model.cfg.vocab_size,
+        "argmax oob: {tok}"
+    );
 
     // Per-rank KV caches should have grown by PROMPT_LEN tokens.
-    let l0 = driver.stages[0].kv_caches[0]
+    let l0 = driver.session.stages[0].kv_caches[0]
         .as_ref()
         .expect("rank 0 layer 0 has KV")
         .current_tokens();
     assert_eq!(l0, PROMPT_LEN, "rank 0 layer 0 KV after prefill");
-    let l3_local = driver.stages[1].kv_caches[1]
+    let l3_local = driver.session.stages[1].kv_caches[1]
         .as_ref()
         .expect("rank 1 last layer kv")
         .current_tokens();
@@ -248,10 +251,12 @@ fn forward_prefill_pp_chunked_smoke() {
     let chunk_a: Vec<u32> = (0..4u32).collect();
     let chunk_b: Vec<u32> = (4..8u32).collect();
     driver.forward_prefill(&chunk_a, 0).expect("chunk a");
-    let tok = driver.forward_prefill(&chunk_b, chunk_a.len()).expect("chunk b");
-    assert!((tok as usize) < driver.cfg.vocab_size);
+    let tok = driver
+        .forward_prefill(&chunk_b, chunk_a.len())
+        .expect("chunk b");
+    assert!((tok as usize) < driver.model.cfg.vocab_size);
 
-    let kv_after = driver.stages[0].kv_caches[0]
+    let kv_after = driver.session.stages[0].kv_caches[0]
         .as_ref()
         .expect("KV")
         .current_tokens();

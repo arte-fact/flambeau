@@ -239,7 +239,7 @@ fn bench_31b_pp(model: &str, topo_id: &str, devices: &[i32]) {
 }
 
 fn clear_driver_kv(driver: &mut Gemma4PpDriver) {
-    for stage in driver.stages.iter_mut() {
+    for stage in driver.session.stages.iter_mut() {
         for slot in stage.kv_caches.iter_mut() {
             if let Some(kv) = slot {
                 kv.clear();

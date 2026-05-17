@@ -228,8 +228,8 @@ fn build_synthetic_pp_driver(cluster: HipCluster) -> Gemma4PpDriver {
         // Override token_embd_dims on last rank so output_head can
         // compute the LM-head dims from a tied/untied tensor uniformly.
         let mut stage = stage;
-        if rank == N_RANKS - 1 && stage.token_embd_dims.is_none() {
-            stage.token_embd_dims = Some([VOCAB, HIDDEN]);
+        if rank == N_RANKS - 1 && stage.model.token_embd_dims.is_none() {
+            stage.model.token_embd_dims = Some([VOCAB, HIDDEN]);
         }
         stages.push(stage);
     }
@@ -246,15 +246,18 @@ fn forward_one_token_pp_smoke() {
     let mut tok = 0u32;
     for pos in 0..4 {
         tok = driver.forward_one_token(tok, pos).expect("forward");
-        assert!((tok as usize) < driver.cfg.vocab_size, "argmax oob: {tok}");
+        assert!(
+            (tok as usize) < driver.model.cfg.vocab_size,
+            "argmax oob: {tok}"
+        );
     }
     // Per-rank KV caches grew.
-    let r0_layer0 = driver.stages[0].kv_caches[0]
+    let r0_layer0 = driver.session.stages[0].kv_caches[0]
         .as_ref()
         .expect("rank 0 layer 0 has KV")
         .current_tokens();
     assert_eq!(r0_layer0, 4, "rank 0 layer 0 should have 4 tokens");
-    let r1_layer3_local = driver.stages[1].kv_caches[1]
+    let r1_layer3_local = driver.session.stages[1].kv_caches[1]
         .as_ref()
         .expect("rank 1 has KV for its layers")
         .current_tokens();
