@@ -33,6 +33,18 @@ impl Model for Gemma4Model {
     fn as_any(&self) -> &dyn std::any::Any {
         self
     }
+    fn supports_scheduler_batching(&self) -> bool {
+        // Phase D — unify scheduler engagement across arches. Gemma4
+        // inflights are hard-capped at N=1 (driver bundles weights+KV),
+        // and the trait default `forward_decode_batched` handles N=1 by
+        // delegating to `Session::decode_one_logits`, which
+        // `Gemma4Session` implements. So the scheduler path is safe to
+        // engage: at N=1 it's identical to the legacy path (single
+        // slot, no real batching opportunity), but both arches now flow
+        // through the same handler. Lifting INFLIGHT_SLOTS > 1 still
+        // requires Phase B7's Model/Session value-type split.
+        true
+    }
     fn chat_stop_markers(&self) -> &'static [&'static str] {
         // Kept in sync with `Gemma4Session::chat_stop_markers`.
         // `<channel|>` / `<|channel>` / `<|thought` are deliberately
