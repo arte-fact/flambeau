@@ -402,14 +402,11 @@ pub fn forward_one_token_pp_keep_logits_on_device(
     .map(|_| ())
 }
 
-/// Logits sink for [`forward_one_token_pp_inner`]:
-/// `Host` DtoH-s the row, `Argmax` returns the argmax token id,
-/// `KeepOnDevice` leaves the row on the head rank for a GPU sampler.
-pub enum PpLogitsSink<'a> {
-    Host(&'a mut Vec<f32>),
-    Argmax,
-    KeepOnDevice,
-}
+/// Re-export of the shared `LogitsSink` for backwards-compat. Callers
+/// inside qwen3-moe (and the tests) can keep referring to
+/// `PpLogitsSink::{Host, Argmax, KeepOnDevice}` while we migrate to
+/// the canonical name. **Deprecated** — prefer `flambeau_blocks::LogitsSink`.
+pub use flambeau_blocks::LogitsSink as PpLogitsSink;
 
 /// Shared body for the three single-token PP entry points. Returns the
 /// sampled token id on `Argmax`, `0` on the other two sinks.
@@ -420,7 +417,7 @@ fn forward_one_token_pp_inner(
     scratch: &mut ShardedForwardOneTokenScratch,
     token_id: u32,
     position: usize,
-    sink: PpLogitsSink<'_>,
+    sink: flambeau_blocks::LogitsSink<'_>,
 ) -> Result<u32> {
     // Re-run the same composition as `forward_one_token_pp`, but branch on
     // the final reducer. Copy-paste is deliberate — the body is ~150 lines

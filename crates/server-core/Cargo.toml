@@ -14,9 +14,13 @@ flambeau-runtime = { path = "../runtime" }
 path = "../backend-hip"
 optional = true
 
+[dependencies.flambeau-blocks]
+path = "../blocks"
+optional = true
+
 [features]
 default = []
-hip = ["dep:flambeau-backend-hip"]
+hip = ["dep:flambeau-backend-hip", "dep:flambeau-blocks", "flambeau-blocks/hip"]
 
 [lints]
 workspace = true

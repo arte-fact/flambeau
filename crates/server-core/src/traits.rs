@@ -1,9 +1,13 @@
 //! Core trait surface: `Model`, `Session`, `SessionContext`, `BatchSlot`.
+//! `LogitsSink` lives in `flambeau-blocks` so model crates can use it
+//! without taking a server-core dep; re-exported here for convenience.
 
 use std::any::Any;
 
 use anyhow::Result;
 use flambeau_backend_hip::HipCluster;
+
+pub use flambeau_blocks::LogitsSink;
 
 /// One queued slot in a batched decode dispatch. Arch-neutral mirror of
 /// `flambeau_qwen3_moe::forward::BatchSlot`; qwen3-moe dispatchers

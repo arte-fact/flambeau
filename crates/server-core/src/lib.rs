@@ -16,4 +16,4 @@
 mod traits;
 
 #[cfg(feature = "hip")]
-pub use traits::{BatchSlot, Model, Session, SessionContext};
+pub use traits::{BatchSlot, LogitsSink, Model, Session, SessionContext};
