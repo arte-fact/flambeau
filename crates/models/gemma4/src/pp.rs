@@ -960,6 +960,30 @@ impl Gemma4PpDriver {
         Ok(())
     }
 
+    /// Build a fresh per-request driver over a shared `Arc<Gemma4PpModel>`.
+    /// Allocates a new `Gemma4PpSession` (KV + scratch sized for
+    /// `max_tokens`) without re-uploading weights. Used by the server's
+    /// inflight pool to spin up N concurrent slots over one weight
+    /// upload.
+    pub fn new_session(
+        model: std::sync::Arc<Gemma4PpModel>,
+        max_tokens: usize,
+    ) -> Result<Self> {
+        let session = Gemma4PpSession::new(&model, max_tokens)?;
+        Ok(Self { model, session })
+    }
+
+    /// Reset per-request state (KV write tails) so the slot can take a
+    /// new request. Weights stay in place.
+    pub fn reset_kv(&mut self) -> Result<()> {
+        for stage in self.session.stages.iter_mut() {
+            for kv in stage.kv_caches.iter_mut().flatten() {
+                kv.clear();
+            }
+        }
+        Ok(())
+    }
+
     /// Forward one decode token through the pipeline. Returns the
     /// argmax token id.
     pub fn forward_one_token(&mut self, token_id: u32, position: usize) -> Result<u32> {
@@ -1022,6 +1046,9 @@ impl flambeau_runtime::ModelDriver for Gemma4PpDriver {
     }
     fn vocab_size(&self) -> usize {
         self.model.cfg.vocab_size
+    }
+    fn reset_kv(&mut self) -> Result<()> {
+        Gemma4PpDriver::reset_kv(self)
     }
     fn dispose(&mut self) -> Result<()> {
         Gemma4PpDriver::dispose(self)

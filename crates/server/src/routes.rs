@@ -749,16 +749,13 @@ impl ServerState {
             // decode_logits so a concurrent prefill on a sibling slot
             // can't race shared HipCluster scratch mid-decode. Cheap
             // (microseconds) on the fast-path; the lock is uncontended
-            // when n_others_active==0. Scheduler-path is qwen3-moe-only
-            // (gated on `as_pp/as_tp/as_hybrid` upstream), so the
-            // qwen3_moe Some is guaranteed here.
+            // when n_others_active==0. The lock lives in `qwen3_moe`
+            // extras (qwen3-moe TP/Hybrid need it); gemma4 boots
+            // without those extras, so we just skip the lock there.
             let _prefill_lock = self
                 .qwen3_moe
                 .as_ref()
-                .expect("scheduler path: qwen3_moe extras present")
-                .prefill_serialiser
-                .lock()
-                .unwrap();
+                .map(|x| x.prefill_serialiser.lock().unwrap());
             tr!("FAST_PATH lock_inflight start");
             let mut guard = self.inflight_pool[slot_idx].blocking_lock();
             tr!("FAST_PATH lock_inflight done; decode start");

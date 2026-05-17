@@ -781,6 +781,57 @@ impl Gemma4HybridDriver {
         Ok(())
     }
 
+    /// Build a fresh per-request driver over a shared `Arc<Gemma4HybridModel>`.
+    pub fn new_session(
+        model: std::sync::Arc<Gemma4HybridModel>,
+        max_tokens: usize,
+    ) -> Result<Self> {
+        let tp_size = model.hc.tp_size();
+        let mut stages = Vec::with_capacity(model.stages.len());
+        for model_stage in model.stages.iter() {
+            let stage_idx = model_stage.stage_idx;
+            let sub = &model.hc.stage(stage_idx).sub_cluster;
+            let is_head_stage = stage_idx == model.head_stage_idx;
+            let mut rank_state = Vec::with_capacity(tp_size);
+            for r in 0..tp_size {
+                let device = sub.device(r);
+                let is_head_rank = is_head_stage && r == model.head_rank_in_head_stage_idx;
+                rank_state.push(HybridRankSession::from_pieces(
+                    device,
+                    r,
+                    &model.cfg,
+                    &model.layout,
+                    &model_stage.layers_global,
+                    tp_size,
+                    is_head_rank,
+                    max_tokens,
+                )?);
+            }
+            stages.push(Gemma4HybridSessionStage {
+                stage_idx,
+                rank_state,
+            });
+        }
+        let logits_host = vec![0.0f32; model.cfg.vocab_size];
+        let session = Gemma4HybridSession {
+            stages,
+            logits_host,
+        };
+        Ok(Self { model, session })
+    }
+
+    /// Reset per-request state (KV write tails across every stage/rank).
+    pub fn reset_kv(&mut self) -> Result<()> {
+        for stage in self.session.stages.iter_mut() {
+            for rs in stage.rank_state.iter_mut() {
+                for kv in rs.kv_caches.iter_mut().flatten() {
+                    kv.clear();
+                }
+            }
+        }
+        Ok(())
+    }
+
     pub fn forward_one_token(&mut self, token_id: u32, position: usize) -> Result<u32> {
         forward_one_token_hybrid(self, token_id, position)?;
         let mut best_i = 0u32;
@@ -841,6 +892,9 @@ impl flambeau_runtime::ModelDriver for Gemma4HybridDriver {
     }
     fn vocab_size(&self) -> usize {
         self.model.cfg.vocab_size
+    }
+    fn reset_kv(&mut self) -> Result<()> {
+        Gemma4HybridDriver::reset_kv(self)
     }
     fn dispose(&mut self) -> Result<()> {
         Gemma4HybridDriver::dispose(self)

@@ -34,16 +34,35 @@ impl Model for Gemma4Model {
         self
     }
     fn supports_scheduler_batching(&self) -> bool {
-        // Phase D — unify scheduler engagement across arches. Gemma4
-        // inflights are hard-capped at N=1 (driver bundles weights+KV),
-        // and the trait default `forward_decode_batched` handles N=1 by
-        // delegating to `Session::decode_one_logits`, which
-        // `Gemma4Session` implements. So the scheduler path is safe to
-        // engage: at N=1 it's identical to the legacy path (single
-        // slot, no real batching opportunity), but both arches now flow
-        // through the same handler. Lifting INFLIGHT_SLOTS > 1 still
-        // requires Phase B7's Model/Session value-type split.
         true
+    }
+    /// Gemma4 has no batched-decode kernel (one slot per forward call),
+    /// so when the scheduler aggregates N > 1 pending decodes we issue
+    /// them sequentially. The GPU stream serialises every kernel anyway
+    /// — the aggregation's value is host-side overlap (tokenize,
+    /// sampler, queue release), not kernel-level batching.
+    fn forward_decode_batched(
+        &self,
+        _ctx: &dyn crate::model_handle::SessionContext,
+        inflights: &mut [&mut dyn crate::model_handle::Session],
+        slots: &[crate::model_handle::BatchSlot],
+        logits_refs: &mut [&mut Vec<f32>],
+    ) -> Result<()> {
+        if slots.len() != inflights.len() || slots.len() != logits_refs.len() {
+            anyhow::bail!(
+                "Gemma4Model::forward_decode_batched: mismatched slice lengths \
+                 (slots={}, inflights={}, logits_refs={})",
+                slots.len(),
+                inflights.len(),
+                logits_refs.len(),
+            );
+        }
+        for (i, slot) in slots.iter().enumerate() {
+            let out: &mut Vec<f32> = logits_refs[i];
+            out.clear();
+            inflights[i].decode_one_logits(slot.token_id, slot.position, out)?;
+        }
+        Ok(())
     }
     fn chat_stop_markers(&self) -> &'static [&'static str] {
         // Kept in sync with `Gemma4Session::chat_stop_markers`.
@@ -82,14 +101,7 @@ pub struct Gemma4Session {
 
 impl Session for Gemma4Session {
     fn reset_for_next_request(&mut self) -> Result<()> {
-        // V1: gemma4 drivers don't yet expose a KV-reset hook on the
-        // ModelDriver trait. First request always works (KV starts
-        // empty); second request reuses the slot WITHOUT clearing,
-        // so the model sees the prior request's KV as a prefix —
-        // expect garbage output. Restart the server for a fresh KV
-        // until the reset hook lands on `ModelDriver`. No-op rather
-        // than bail so the happy-path single-request flow boots.
-        Ok(())
+        self.driver.reset_kv()
     }
 
     fn dispose(self: Box<Self>) -> Result<()> {

@@ -683,6 +683,45 @@ impl Gemma4TpDriver {
         Self::from_pieces(cluster, cfg, layout, stages, 0)
     }
 
+    /// Build a fresh per-request driver over a shared `Arc<Gemma4TpModel>`.
+    pub fn new_session(
+        model: std::sync::Arc<Gemma4TpModel>,
+        max_tokens: usize,
+    ) -> Result<Self> {
+        let n_ranks = model.tp.cluster().ranks();
+        let mut stages = Vec::with_capacity(n_ranks);
+        for r in 0..n_ranks {
+            let device = model.tp.cluster().device(r);
+            let is_head_rank = r == model.head_rank;
+            let session_stage = Gemma4TpSessionStage::from_pieces(
+                device,
+                r,
+                &model.cfg,
+                &model.layout,
+                n_ranks,
+                is_head_rank,
+                max_tokens,
+            )?;
+            stages.push(session_stage);
+        }
+        let logits_host = vec![0.0f32; model.cfg.vocab_size];
+        let session = Gemma4TpSession {
+            stages,
+            logits_host,
+        };
+        Ok(Self { model, session })
+    }
+
+    /// Reset per-request state (KV write tails).
+    pub fn reset_kv(&mut self) -> Result<()> {
+        for stage in self.session.stages.iter_mut() {
+            for kv in stage.kv_caches.iter_mut().flatten() {
+                kv.clear();
+            }
+        }
+        Ok(())
+    }
+
     pub fn forward_one_token(&mut self, token_id: u32, position: usize) -> Result<u32> {
         forward_one_token_tp(self, token_id, position)?;
         // Argmax host-side.
@@ -745,6 +784,9 @@ impl flambeau_runtime::ModelDriver for Gemma4TpDriver {
     }
     fn vocab_size(&self) -> usize {
         self.model.cfg.vocab_size
+    }
+    fn reset_kv(&mut self) -> Result<()> {
+        Gemma4TpDriver::reset_kv(self)
     }
     fn dispose(&mut self) -> Result<()> {
         Gemma4TpDriver::dispose(self)

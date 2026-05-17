@@ -615,22 +615,14 @@ pub async fn serve(cfg: ServeConfig, registry: Registry) -> Result<()> {
     Ok(())
 }
 
-/// Phase 12.9 — gemma4 boot path. Branched into from `serve_inner`
-/// when `gguf.architecture()` matches a gemma4 family.
+/// Gemma4 boot path. Branched into from `serve_inner` when
+/// `gguf.architecture()` matches a gemma4 family.
 ///
-/// MVP constraints (each tracked as a follow-up):
-/// - PP only. TP / Hybrid drivers exist in gemma4 crate but their
-///   server arch dispatch isn't plumbed yet.
-/// - `FLAMBEAU_INFLIGHT_SLOTS=1` enforced. Gemma4 drivers bundle
-///   weights + KV cache state in one struct; multi-slot would need
-///   splitting (separate session-state struct) or N copies of weights.
-/// - Prefix cache silently misses (gated upstream via the
-///   `as_pp/as_tp/as_hybrid` early-out in `prefix_cache_try_restore`).
+/// Remaining MVP constraints:
+/// - Prefix cache silently misses for gemma4 sessions (gated upstream
+///   in `prefix_cache_try_restore` by the qwen3-moe-typed early-out).
 /// - GPU sampler disabled (`use_gpu_sampler=false`); host sampler runs.
 /// - Embedding endpoint returns 503 (qwen3-only embedding model).
-/// - `reset_for_next_request` bails — the slot can't be reused after
-///   the first request. Stops the server from looping in production;
-///   restart for a fresh request. Trade-off for shipping the MVP.
 #[allow(clippy::too_many_arguments)]
 async fn serve_inner_gemma4(
     cfg: ServeConfig,
@@ -675,23 +667,21 @@ async fn serve_inner_gemma4(
     }
 
     let inflight_slots = cfg.inflight_slots.clamp(1, 32);
-    if inflight_slots != 1 {
-        bail!(
-            "gemma4 serve: FLAMBEAU_INFLIGHT_SLOTS must be 1 (got {inflight_slots}). \
-             Multi-slot needs gemma4 weights/session split — follow-up."
-        );
-    }
     let prefill_ubatch = cfg.prefill_ubatch.max(128);
     let max_queue_depth = cfg.max_queue_depth;
 
-    // Build the driver per topology.
-    // - PP: `Gemma4PpDriver::upload` consumes its cluster by value, so
-    //   we build a SECOND, state-side `Arc<HipCluster>` whose only
-    //   purpose is satisfying `ServerState.cluster`'s type (the
-    //   handler paths that read it are all qwen3-moe-gated).
-    // - TP: `Gemma4TpDriver::upload` takes `Arc<HipCluster>`, so the
-    //   state-side cluster and the driver's cluster are the same Arc.
-    let (state_cluster, driver): (Arc<HipCluster>, Box<dyn ModelDriver>) = match cfg.mesh_mode {
+    // Build N slot-drivers per topology, each sharing one
+    // `Arc<Gemma4*Model>` (weights uploaded once) plus its own
+    // `Gemma4*Session` (KV + scratch).
+    //   - PP: `Gemma4PpDriver::upload` consumes its cluster by value;
+    //     we keep a SECOND state-side `Arc<HipCluster>` whose only
+    //     purpose is satisfying `ServerState.cluster`'s type (handler
+    //     paths that read it are qwen3-moe-gated).
+    //   - TP / Hybrid: cluster goes inside the model, the state-side
+    //     handle is the same Arc / global cluster.
+    let (state_cluster, drivers): (Arc<HipCluster>, Vec<Box<dyn ModelDriver>>) = match cfg
+        .mesh_mode
+    {
         MeshMode::Pp => {
             let state_cluster: Arc<HipCluster> = Arc::new(
                 HipCluster::new(&cfg.device_ids).context("HipCluster::new (state side)")?,
@@ -707,13 +697,11 @@ async fn serve_inner_gemma4(
                 ranks = cfg.device_ids.len(),
                 topology = "pp",
                 arch = cfg_g4.arch.as_str(),
+                inflight_slots,
                 "loading gemma4 weights"
             );
-            // KV cache sizing — pass the full `context_length` (clamped
-            // by --ctx-cap above), NOT `prefill_ubatch`. Prior code
-            // passed prefill_ubatch (default 512) which capped the KV
-            // cache at 512 tokens regardless of --ctx-cap.
-            let pp_driver = Gemma4PpDriver::upload(
+            // Slot 0 uploads weights; slots 1..N borrow them via Arc.
+            let driver0 = Gemma4PpDriver::upload(
                 &gguf,
                 cfg_g4.clone(),
                 layout,
@@ -722,7 +710,15 @@ async fn serve_inner_gemma4(
                 cfg_g4.context_length,
             )
             .context("Gemma4PpDriver::upload")?;
-            (state_cluster, Box::new(pp_driver))
+            let model = Arc::clone(&driver0.model);
+            let mut drivers: Vec<Box<dyn ModelDriver>> = Vec::with_capacity(inflight_slots);
+            drivers.push(Box::new(driver0));
+            for slot in 1..inflight_slots {
+                let d = Gemma4PpDriver::new_session(Arc::clone(&model), cfg_g4.context_length)
+                    .with_context(|| format!("Gemma4PpDriver::new_session slot {slot}"))?;
+                drivers.push(Box::new(d));
+            }
+            (state_cluster, drivers)
         }
         MeshMode::Tp { world } => {
             let shared_cluster: Arc<HipCluster> =
@@ -740,9 +736,10 @@ async fn serve_inner_gemma4(
                 ranks = shared_cluster.ranks(),
                 topology = "tp",
                 arch = cfg_g4.arch.as_str(),
+                inflight_slots,
                 "loading gemma4 weights"
             );
-            let tp_driver = Gemma4TpDriver::upload(
+            let driver0 = Gemma4TpDriver::upload(
                 &gguf,
                 cfg_g4.clone(),
                 layout,
@@ -750,7 +747,15 @@ async fn serve_inner_gemma4(
                 cfg_g4.context_length,
             )
             .context("Gemma4TpDriver::upload")?;
-            (shared_cluster, Box::new(tp_driver))
+            let model = Arc::clone(&driver0.model);
+            let mut drivers: Vec<Box<dyn ModelDriver>> = Vec::with_capacity(inflight_slots);
+            drivers.push(Box::new(driver0));
+            for slot in 1..inflight_slots {
+                let d = Gemma4TpDriver::new_session(Arc::clone(&model), cfg_g4.context_length)
+                    .with_context(|| format!("Gemma4TpDriver::new_session slot {slot}"))?;
+                drivers.push(Box::new(d));
+            }
+            (shared_cluster, drivers)
         }
         MeshMode::Hybrid { pp_size, tp_size } => {
             let pp = pp_size as usize;
@@ -791,23 +796,29 @@ async fn serve_inner_gemma4(
                 tp_size = tp,
                 topology = "pp+tp",
                 arch = cfg_g4.arch.as_str(),
+                inflight_slots,
                 "loading gemma4 weights"
             );
-            let hybrid_driver = Gemma4HybridDriver::upload(
-                &gguf,
-                cfg_g4.clone(),
-                layout,
-                hc,
-                cfg_g4.context_length,
-            )
-            .context("Gemma4HybridDriver::upload")?;
-            (global_cluster, Box::new(hybrid_driver))
+            let driver0 =
+                Gemma4HybridDriver::upload(&gguf, cfg_g4.clone(), layout, hc, cfg_g4.context_length)
+                    .context("Gemma4HybridDriver::upload")?;
+            let model = Arc::clone(&driver0.model);
+            let mut drivers: Vec<Box<dyn ModelDriver>> = Vec::with_capacity(inflight_slots);
+            drivers.push(Box::new(driver0));
+            for slot in 1..inflight_slots {
+                let d = Gemma4HybridDriver::new_session(Arc::clone(&model), cfg_g4.context_length)
+                    .with_context(|| format!("Gemma4HybridDriver::new_session slot {slot}"))?;
+                drivers.push(Box::new(d));
+            }
+            (global_cluster, drivers)
         }
     };
 
     let model = build_gemma4_loaded_model(cfg_g4.clone(), topology_label);
-    let session = wrap_gemma4_driver(driver, tokenizer.bos_id);
-    let inflight_pool: Vec<Mutex<Box<dyn crate::Session>>> = vec![Mutex::new(session)];
+    let inflight_pool: Vec<Mutex<Box<dyn crate::Session>>> = drivers
+        .into_iter()
+        .map(|d| Mutex::new(wrap_gemma4_driver(d, tokenizer.bos_id)))
+        .collect();
 
     let slot_in_use: Vec<std::sync::atomic::AtomicBool> = (0..inflight_slots)
         .map(|_| std::sync::atomic::AtomicBool::new(false))

@@ -84,6 +84,15 @@ pub trait ModelDriver: Send + 'static {
         0
     }
 
+    /// Reset per-request state (KV cache write tails, position
+    /// counters) so the next request starts fresh. Weights are
+    /// untouched. Default impl bails so the server's
+    /// `reset_for_next_request` can detect arches that haven't opted
+    /// in to slot reuse.
+    fn reset_kv(&mut self) -> anyhow::Result<()> {
+        anyhow::bail!("ModelDriver::reset_kv: not implemented for this arch")
+    }
+
     /// Free all device allocations. Idempotent.
     fn dispose(&mut self) -> anyhow::Result<()>;
 }
