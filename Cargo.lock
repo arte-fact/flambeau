@@ -609,6 +609,7 @@ version = "0.1.0-dev"
 dependencies = [
  "anyhow",
  "flambeau-backend-hip",
+ "flambeau-blocks",
  "flambeau-runtime",
 ]
 
