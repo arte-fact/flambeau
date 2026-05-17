@@ -24,7 +24,7 @@ use flambeau_blocks::{
     embed_token_host, forward_one_token_pp, forward_prefill_pp, row_bytes_for_dtype,
     upload_f16_ones, AttnK, AttnKNorm, AttnNorm, AttnOutput, AttnQ, AttnQNorm, AttnV, FfnDown,
     FfnGate, FfnNorm, FfnUp, PostAttnNorm, PostFfwNorm, PpDecodeDriver, PpPrefillDriver,
-    RawAllocTracker, WeightUploader,
+    RawAllocTracker, StageCommon, WeightUploader,
 };
 use flambeau_core::{CopyDirection, Device, DevicePtr, Stream};
 use flambeau_ops::hip::{HipOps, OpsRegistry};
@@ -140,7 +140,10 @@ struct PrefillScratchPtrs {
 /// scratches. Rank-0 holds `token_embd`; last-rank holds `output_norm`
 /// and the output-head scratch.
 pub struct Gemma4PpStage {
-    pub rank: usize,
+    /// Shared per-rank bookkeeping (rank/device id, RawAllocTracker,
+    /// disposed latch). Scratch + weight allocations land in
+    /// `common.raw_alloc`; `common.dispose(device)` drains the lot.
+    pub common: StageCommon,
     /// Indices into [`ModelLayout::layers`] for this rank's layers,
     /// in ascending order.
     pub global_layer_indices: Vec<usize>,
@@ -179,10 +182,12 @@ pub struct Gemma4PpStage {
     /// Maximum prefill chunk size (number of tokens) this stage can
     /// handle in a single `forward_layers_prefill_in_stage` call.
     pub max_tokens: usize,
-    /// Every device alloc the stage made — scratch buffers + weight
-    /// buffers — tracked here for `dispose()`.
-    raw_alloc: RawAllocTracker,
-    disposed: bool,
+}
+
+impl Gemma4PpStage {
+    pub fn rank(&self) -> usize {
+        self.common.rank as usize
+    }
 }
 
 /// Pipeline-parallel driver. Owns the cluster and one stage per rank.
@@ -297,7 +302,8 @@ impl Gemma4PpStage {
         let x_q8_1_n = hidden.max(ff_len).max(q_width_max).div_ceil(32) * 32;
         let activated_q8_1_n = ff_len.div_ceil(32) * 32;
 
-        let mut raw_alloc = RawAllocTracker::new();
+        let mut common = StageCommon::new(rank as u32, device.id());
+        let raw_alloc = &mut common.raw_alloc;
 
         let v_ones_ptr = upload_f16_ones(device, head_dim_max)?;
         raw_alloc.track(v_ones_ptr, head_dim_max * 2);
@@ -402,14 +408,14 @@ impl Gemma4PpStage {
                 dims.moe_intermediate_size,
                 dims.num_experts,
                 dims.num_experts_per_tok,
-                &mut raw_alloc,
+                raw_alloc,
             )?)
         } else {
             None
         };
 
         Ok(Self {
-            rank,
+            common,
             global_layer_indices,
             layer_weights,
             kv_caches,
@@ -426,8 +432,6 @@ impl Gemma4PpStage {
             prefill,
             positions_host: vec![0i32; 1],
             max_tokens,
-            raw_alloc,
-            disposed: false,
         })
     }
 
@@ -486,15 +490,14 @@ impl Gemma4PpStage {
     }
 
     pub fn dispose(&mut self, device: &HipDevice) -> Result<()> {
-        if self.disposed {
+        if self.common.is_disposed() {
             return Ok(());
         }
-        self.disposed = true;
         let kvs = std::mem::take(&mut self.kv_caches);
         for kv in kvs.into_iter().flatten() {
             kv.dispose(device).map_err(|e| anyhow!("kv dispose: {e}"))?;
         }
-        self.raw_alloc
+        self.common
             .dispose(device)
             .map_err(|e| anyhow!("raw_alloc dispose: {e}"))?;
         // Token embd / output_norm / output were uploaded by the
@@ -515,12 +518,7 @@ impl Gemma4PpStage {
 
 impl Drop for Gemma4PpStage {
     fn drop(&mut self) {
-        if !self.disposed {
-            tracing::warn!(
-                "Gemma4PpStage rank {} dropped without dispose(); resources leaked",
-                self.rank
-            );
-        }
+        self.common.warn_on_leak("flambeau_gemma4::pp::Gemma4PpStage");
     }
 }
 
@@ -704,7 +702,7 @@ impl Gemma4PpDriver {
                 max_tokens,
             )?;
             for (ptr, bytes) in raw {
-                stage.raw_alloc.track(ptr, bytes);
+                stage.common.raw_alloc.track(ptr, bytes);
             }
             // Last rank also needs token_embd_dims for the LM-head GEMM
             // shape (we keep it on every rank so callers can introspect,
@@ -796,7 +794,7 @@ impl Drop for Gemma4PpDriver {
         if self
             .stages
             .iter()
-            .any(|s| !s.disposed)
+            .any(|s| !s.common.is_disposed())
         {
             tracing::warn!("Gemma4PpDriver dropped without dispose()");
         }

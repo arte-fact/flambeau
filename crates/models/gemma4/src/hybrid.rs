@@ -33,8 +33,8 @@ use flambeau_blocks::{
     apply_layer_output_scale_f16, embed_token_host, forward_one_token_hybrid, tp_allreduce_sum,
     tp_allreduce_sum_f32_synced, tp_allreduce_sum_synced, upload_f16_ones, Activation, Buffer,
     DenseMlpDecodeScratch, DenseMlpTp, HybridCluster, HybridDecodeDriver, LmHead, OutputNorm,
-    RawAllocTracker, RowParallel, StandardAttention, StandardAttentionDecodeScratch, TokenEmbd,
-    TpRankCore, WeightHandle, WeightUploader, F16,
+    RawAllocTracker, RowParallel, StageCommon, StandardAttention, StandardAttentionDecodeScratch,
+    TokenEmbd, TpRankCore, WeightHandle, WeightUploader, F16,
 };
 use flambeau_core::{CopyDirection, Device, DevicePtr, Stream};
 use flambeau_ops::hip::{HipOps, OpsRegistry};
@@ -51,7 +51,10 @@ use crate::weights_hip::DeviceTensor;
 /// Per-rank state within a stage. Mirrors `Gemma4TpStage` but
 /// parameterised by stage layers + their sharded weights.
 pub struct HybridRankState {
-    pub rank_in_stage: usize,
+    /// Shared per-rank bookkeeping (`rank_in_stage` carried in
+    /// `common.rank`, sub-cluster device id in `common.device_id`,
+    /// `RawAllocTracker`, disposed latch).
+    pub common: StageCommon,
     pub layer_weights: Vec<Gemma4LayerWeights>,
     pub kv_caches: Vec<Option<KvCache<F16Contig, HipDevice>>>,
     /// Stage 0 only.
@@ -77,8 +80,12 @@ pub struct HybridRankState {
     /// Head rank only.
     pub output_head_scratch: Option<OutputHeadScratch>,
     positions_host: Vec<i32>,
-    raw_alloc: RawAllocTracker,
-    disposed: bool,
+}
+
+impl HybridRankState {
+    pub fn rank_in_stage(&self) -> usize {
+        self.common.rank as usize
+    }
 }
 
 struct HybridScratchPtrs {
@@ -191,7 +198,7 @@ impl HybridRankState {
         lm_head_dims: Option<[usize; 2]>,
         is_head_rank: bool,
         max_tokens: usize,
-        mut raw_alloc: RawAllocTracker,
+        weight_alloc: RawAllocTracker,
     ) -> Result<Self> {
         device.bind()?;
         if layer_weights.len() != layers_global.len() {
@@ -230,6 +237,10 @@ impl HybridRankState {
             .map_err(|e| anyhow!("kv alloc layer {gi}: {e}"))?;
             kv_caches.push(Some(kv));
         }
+
+        let mut common = StageCommon::new(rank_in_stage as u32, device.id());
+        common.raw_alloc = weight_alloc;
+        let raw_alloc = &mut common.raw_alloc;
 
         let mmvq_max = q_width_local_max
             .max(kv_width_local_max)
@@ -285,7 +296,7 @@ impl HybridRankState {
                 local_inter,
                 moe_dims.num_experts,
                 moe_dims.num_experts_per_tok,
-                &mut raw_alloc,
+                raw_alloc,
             )?)
         } else {
             None
@@ -305,7 +316,7 @@ impl HybridRankState {
             .map_err(|e| anyhow!("HybridRankState core: {e}"))?;
 
         Ok(Self {
-            rank_in_stage,
+            common,
             layer_weights,
             kv_caches,
             token_embd,
@@ -323,21 +334,18 @@ impl HybridRankState {
             scratch,
             output_head_scratch,
             positions_host: vec![0i32; 1],
-            raw_alloc,
-            disposed: false,
         })
     }
 
     fn dispose(&mut self, device: &HipDevice) -> Result<()> {
-        if self.disposed {
+        if self.common.is_disposed() {
             return Ok(());
         }
-        self.disposed = true;
         let kvs = std::mem::take(&mut self.kv_caches);
         for kv in kvs.into_iter().flatten() {
             kv.dispose(device).map_err(|e| anyhow!("kv dispose: {e}"))?;
         }
-        self.raw_alloc
+        self.common
             .dispose(device)
             .map_err(|e| anyhow!("raw_alloc dispose: {e}"))?;
         for t in [
@@ -361,12 +369,7 @@ impl HybridRankState {
 
 impl Drop for HybridRankState {
     fn drop(&mut self) {
-        if !self.disposed {
-            tracing::warn!(
-                "HybridRankState rank-in-stage {} dropped without dispose()",
-                self.rank_in_stage
-            );
-        }
+        self.common.warn_on_leak("flambeau_gemma4::hybrid::HybridRankState");
     }
 }
 

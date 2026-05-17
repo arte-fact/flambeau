@@ -37,9 +37,10 @@ use flambeau_backend_hip::{HipCluster, HipDevice};
 use flambeau_blocks::{
     embed_token_host, forward_one_token_tp, post_norm_residual_f16, upload_f16_ones, AttnK,
     AttnKNorm, AttnNorm, AttnOutput, AttnQ, AttnQNorm, AttnV, FfnDown, FfnGate, FfnNorm, FfnUp,
-    LayerComposerTp, LmHead, OutputNorm, PostAttnNorm, PostFfwNorm, TokenEmbd, TpRankCore,
-    Activation, DenseMlpDecodeScratch, DenseMlpTp, RawAllocTracker, StandardAttentionDecodeScratch,
-    TpCluster, TpDecodeDriver, UploadedTensor, WeightHandle, WeightUploader,
+    LayerComposerTp, LmHead, OutputNorm, PostAttnNorm, PostFfwNorm, StageCommon, TokenEmbd,
+    TpRankCore, Activation, DenseMlpDecodeScratch, DenseMlpTp, RawAllocTracker,
+    StandardAttentionDecodeScratch, TpCluster, TpDecodeDriver, UploadedTensor, WeightHandle,
+    WeightUploader,
 };
 use flambeau_core::{CopyDirection, Device, DevicePtr, Stream};
 use flambeau_ops::hip::{HipOps, OpsRegistry};
@@ -57,7 +58,10 @@ use crate::weights_hip::DeviceTensor;
 /// **sharded** weights for every layer (this rank's slice). KV caches
 /// are sized for the rank's local KV-head count.
 pub struct Gemma4TpStage {
-    pub rank: usize,
+    /// Shared per-rank bookkeeping (rank/device id, `RawAllocTracker`,
+    /// disposed latch). Weight + scratch allocations are tracked in
+    /// `common.raw_alloc`; `common.dispose(device)` frees the lot.
+    pub common: StageCommon,
     /// Per-layer sharded weights; ALL ranks carry weights for ALL layers.
     pub layer_weights: Vec<Gemma4LayerWeights>,
     /// Per-layer KV cache (each holds this rank's local KV head shard).
@@ -109,8 +113,12 @@ pub struct Gemma4TpStage {
     /// boundary.
     pub core: TpRankCore,
     positions_host: Vec<i32>,
-    raw_alloc: RawAllocTracker,
-    disposed: bool,
+}
+
+impl Gemma4TpStage {
+    pub fn rank(&self) -> usize {
+        self.common.rank as usize
+    }
 }
 
 struct TpScratchPtrs {
@@ -237,7 +245,11 @@ impl Gemma4TpStage {
             kv_caches.push(Some(kv));
         }
 
-        let mut raw_alloc = weight_alloc;
+        let mut common = StageCommon::new(rank as u32, device.id());
+        // Adopt the caller's weight-population tracker into common so
+        // every byte (weights + scratch) frees through one path.
+        common.raw_alloc = weight_alloc;
+        let raw_alloc = &mut common.raw_alloc;
 
         // Sized for the widest layer.
         let mmvq_max = q_width_local_max
@@ -315,7 +327,7 @@ impl Gemma4TpStage {
                 local_inter,
                 moe_dims.num_experts,
                 moe_dims.num_experts_per_tok,
-                &mut raw_alloc,
+                raw_alloc,
             )?)
         } else {
             None
@@ -324,7 +336,7 @@ impl Gemma4TpStage {
         let core = TpRankCore::new(rank, device.id())?;
 
         Ok(Self {
-            rank,
+            common,
             layer_weights,
             kv_caches,
             token_embd,
@@ -342,21 +354,18 @@ impl Gemma4TpStage {
             tp_moe_scratch,
             core,
             positions_host: vec![0i32; 1],
-            raw_alloc,
-            disposed: false,
         })
     }
 
     pub fn dispose(&mut self, device: &HipDevice) -> Result<()> {
-        if self.disposed {
+        if self.common.is_disposed() {
             return Ok(());
         }
-        self.disposed = true;
         let kvs = std::mem::take(&mut self.kv_caches);
         for kv in kvs.into_iter().flatten() {
             kv.dispose(device).map_err(|e| anyhow!("kv dispose: {e}"))?;
         }
-        self.raw_alloc
+        self.common
             .dispose(device)
             .map_err(|e| anyhow!("raw_alloc dispose: {e}"))?;
         for t in [
@@ -378,12 +387,7 @@ impl Gemma4TpStage {
 
 impl Drop for Gemma4TpStage {
     fn drop(&mut self) {
-        if !self.disposed {
-            tracing::warn!(
-                "Gemma4TpStage rank {} dropped without dispose(); resources leaked",
-                self.rank
-            );
-        }
+        self.common.warn_on_leak("flambeau_gemma4::tp::Gemma4TpStage");
     }
 }
 
@@ -574,7 +578,7 @@ impl flambeau_runtime::ModelDriver for Gemma4TpDriver {
 
 impl Drop for Gemma4TpDriver {
     fn drop(&mut self) {
-        if self.stages.iter().any(|s| !s.disposed) {
+        if self.stages.iter().any(|s| !s.common.is_disposed()) {
             tracing::warn!("Gemma4TpDriver dropped without dispose()");
         }
     }
