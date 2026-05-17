@@ -10,6 +10,7 @@
 
 #![cfg(feature = "hip")]
 
+pub mod core;
 pub mod ctx;
 pub mod hybrid;
 pub mod layer_range;
@@ -20,8 +21,9 @@ pub mod tp;
 #[cfg(test)]
 pub mod testing;
 
+pub use core::{NoopHooks, ScratchConfig, ScratchPool, TopologyHooks};
 pub use ctx::ForwardCtx;
 pub use hybrid::HybridForwardCtx;
 pub use pp::PpForwardCtx;
-pub use single_device::{ScratchConfig, ScratchPool, SingleDeviceForwardCtx};
+pub use single_device::SingleDeviceForwardCtx;
 pub use tp::TpForwardCtx;

@@ -19,6 +19,7 @@ use flambeau_qwen3_v2::{forward_one_token, load_from_gguf};
 use flambeau_quant::GgufFile;
 
 const MODEL_PATH: &str = "/artefact/models/Qwen3-Embedding-0.6B-Q8_0.gguf";
+const QWEN35_9B: &str = "/artefact/models/Qwen3.5-9B-Q4_1.gguf";
 
 #[test]
 fn forward_one_token_produces_finite_non_constant_logits() {
@@ -108,4 +109,31 @@ fn forward_one_token_produces_finite_non_constant_logits() {
 
     pool.dispose(&device).expect("pool dispose");
     model.dispose(&device).expect("model dispose");
+}
+
+/// Confirms the qwen3-v2 loader rejects qwen35 (hybrid GDN+full-attn)
+/// with a clear error. v2 doesn't yet have a GDN composite — that's a
+/// future phase before qwen3.5 / qwen3.6 can run.
+#[test]
+fn qwen35_9b_rejected_with_clear_arch_error() {
+    let path = PathBuf::from(QWEN35_9B);
+    if !path.exists() {
+        eprintln!("SKIP: {QWEN35_9B} not present");
+        return;
+    }
+    let file = GgufFile::open(&path).expect("open gguf");
+    let device = HipDevice::new(0).expect("HIP device 0");
+    device.bind().expect("bind");
+
+    match flambeau_qwen3_v2::load_from_gguf(&file, &device) {
+        Ok(_) => panic!("qwen3-v2 loader accepted a qwen35 GGUF — expected arch rejection"),
+        Err(e) => {
+            let msg = format!("{e:#}");
+            eprintln!("qwen3-v2 correctly rejected qwen35: {msg}");
+            assert!(
+                msg.contains("qwen3") && (msg.contains("qwen35") || msg.contains("WrongArchitecture")),
+                "expected arch-mismatch error, got: {msg}"
+            );
+        }
+    }
 }
