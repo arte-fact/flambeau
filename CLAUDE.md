@@ -116,6 +116,34 @@ implementing.
     polymorphically. If you need a new arch-specific hook on the
     shared trait, expect to refactor existing arch impls so the
     abstraction holds for ≥ 2 archs before landing.
+14. **Rule of three triggers a refactor — not "three similar lines
+    is fine".** The "three similar lines is better than premature
+    abstraction" maxim applies to *small* repetitions (three string
+    formats, three trivial enum match arms). It does **NOT** justify
+    duplicating 100-LOC blocks across 6 sites. The classic rule of
+    three is: *two is acceptable, three is the refactor signal*.
+    Flambeau's arch × topology product (qwen × {pp,tp,hyb} + gemma4
+    × {pp,tp,hyb} + tomorrow's mistral/qwen3-coder-next) means any
+    "I'll just copy-paste this driver pattern" reflex compounds to
+    6× or 9× duplication. **Don't cite "three similar lines" as a
+    reason to copy-paste a 200-LOC Stage struct across topologies
+    when 6 of them already exist.** When you spot a candidate site:
+    - Count existing duplicate sites. ≥3 = refactor; 2 = acceptable.
+    - Look for the actual shared shape first (a side-by-side
+      inventory of every field / method usually surfaces the
+      ~80/20 split between common skeleton and arch-specific
+      extension).
+    - Extract into `flambeau-blocks` via composition (each topology
+      *contains* the shared piece, not *is* — keeps topology-specific
+      knobs concrete).
+    - Validate the abstraction on the MOST-tested existing site
+      (qwen3-moe today) before adopting it for new code (gemma4
+      pending splits, future arches).
+    The premature-abstraction risk is real but small here: blocks /
+    runtime / backend-hip already define generic types
+    (`KvCache<L>`, `Buffer<T, D>`, `HipCluster`) that span every
+    arch — extending those with a `StageCommon<W, K>` shape is
+    consistent with existing architecture, not novel coupling.
 
 ## Measurement rules
 
