@@ -174,7 +174,7 @@ MODELS = [
         family="qwen",
         kind="moe",
         path="/artefact/models/Qwen_Qwen3.6-35B-A3B-Q4_0.gguf",
-        topologies=("pp2", "pp4", "pp2tp2"),
+        topologies=("tp2", "pp2", "pp4", "pp2tp2"),
     ),
     ModelSpec(
         id="gemma4-26b-a4b-q8_0",

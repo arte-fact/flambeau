@@ -1,0 +1,26 @@
+[
+  {
+    "engine": "flambeau",
+    "model": "qwen36-35b-a3b-q4_0",
+    "topo": "pp2",
+    "ptok": 360,
+    "ctok": 192,
+    "ttft_ms": 524.5370864868164,
+    "decode_ms_per_tok": 28.995728617563298,
+    "prefill_tps": 686.3194410354589,
+    "decode_tps": 34.48783830161384,
+    "err": null
+  },
+  {
+    "engine": "flambeau",
+    "model": "qwen36-35b-a3b-q4_0",
+    "topo": "pp4",
+    "ptok": 360,
+    "ctok": 192,
+    "ttft_ms": 514.3899917602539,
+    "decode_ms_per_tok": 31.09881266249412,
+    "prefill_tps": 699.8580955435623,
+    "decode_tps": 32.155568473069806,
+    "err": null
+  }
+]
