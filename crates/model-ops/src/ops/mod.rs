@@ -9,5 +9,4 @@
 //! `src/lib.rs` so consumers `use flambeau_model_ops::<op>;` without
 //! the `ops::` prefix.
 
-// (No ops landed yet — first op lands in P1's pattern-defining
-// commit.)
+pub mod rmsnorm;

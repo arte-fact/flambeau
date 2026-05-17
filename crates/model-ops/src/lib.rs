@@ -23,10 +23,4 @@ pub use dtype::{ElemType, F16, F32, I32, Q4_0, Q4_1, Q5_0, Q5_1, Q8_0, Q8_1};
 pub use error::{Error, Result};
 pub use tensor::Tensor;
 
-// Op re-exports follow as ops land. Each op file declares its
-// public function in `ops/<name>.rs` and is added to both
-// `ops::mod` and the flat `pub use` list here.
-//
-// Example (uncomment once `ops/rmsnorm.rs` lands):
-//
-// pub use ops::rmsnorm::rmsnorm_f16;
+pub use ops::rmsnorm::rmsnorm_f16;

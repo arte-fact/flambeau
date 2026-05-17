@@ -9,7 +9,8 @@
 
 use bytemuck::Pod;
 use flambeau_backend_hip::HipDevice;
-use flambeau_core::{CopyDirection, Device, DevicePtr};
+use flambeau_core::{CopyDirection, Device, DevicePtr, Stream};
+use flambeau_ops::hip::OpsRegistry;
 
 use crate::dtype::ElemType;
 use crate::tensor::Tensor;
@@ -20,6 +21,13 @@ use crate::tensor::Tensor;
 /// exercising P2P here, the parity checks are kernel-level).
 pub fn test_device() -> HipDevice {
     HipDevice::new(0).expect("HIP device 0 required for model-ops tests")
+}
+
+/// Build a fresh `OpsRegistry` bound to `device`. Each test owns its
+/// own registry; `OpsRegistry::new` is the per-rank kernel-module
+/// loader.
+pub fn test_ops_registry(device: &HipDevice) -> OpsRegistry {
+    OpsRegistry::new(device).expect("OpsRegistry::new")
 }
 
 /// Alloc `n_elems * T::bytes_per_elem()` zeroed bytes on the device,
