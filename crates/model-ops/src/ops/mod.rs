@@ -15,4 +15,6 @@ pub mod cast;
 pub mod qmatmul;
 pub mod quantize;
 pub mod rmsnorm;
+pub mod rope;
 pub mod scale;
+pub mod topk_softmax;
