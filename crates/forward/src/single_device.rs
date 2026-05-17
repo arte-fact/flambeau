@@ -120,7 +120,8 @@ impl ScratchPool {
         let v_f16 = alloc_bytes(kvw * f16)?;
         let attn_out_f16 = alloc_bytes(qw * f16)?;
         let attn_out_q8_1 = alloc_bytes(q8_1(qw))?;
-        let attn_proj_f32 = alloc_bytes(h * f32)?;
+        // Reused as Q (qw F32), K/V (kvw F32), and output-proj (h F32) target — size to the max.
+        let attn_proj_f32 = alloc_bytes(qw.max(kvw).max(h) * f32)?;
 
         let gate_f32 = alloc_bytes(m * f32)?;
         let up_f32 = alloc_bytes(m * f32)?;
@@ -279,7 +280,7 @@ impl ForwardCtx for SingleDeviceForwardCtx<'_> {
                 dst,
                 src,
                 row_bytes,
-            )?;
+            ).context("embed: DtoD row memcpy")?;
         }
         Ok(self.slot_f16(dst, hidden))
     }
@@ -359,50 +360,24 @@ impl ForwardCtx for SingleDeviceForwardCtx<'_> {
         let act_mmq_null = unsafe { Tensor::<Q8_1>::from_raw(DevicePtr::NULL, 0) };
         let q_f32_buf = self.pool.attn_proj_f32;
         let mut q_f32 = unsafe { Tensor::<F32>::from_raw(q_f32_buf, q_width) };
-        flambeau_model_ops::qmatmul_q8_0(
-            &weights.attn_q,
-            &norm_q8_1,
-            &act_mmq_null,
-            &mut q_f32,
-            1,
-            hidden,
-            q_width,
-            &ops,
-        )?;
+        weights
+            .attn_q
+            .qmatmul(&norm_q8_1, &act_mmq_null, &mut q_f32, 1, hidden, q_width, &ops)?;
         let mut q_f16 = unsafe { Tensor::<F16>::from_raw(self.pool.q_f16, q_width) };
         flambeau_model_ops::cast_f32_to_f16(&q_f32, &mut q_f16, q_width, &ops)?;
 
-        // Reuse the F32 buffer for K — sized to `hidden` F32 ≥ kv_width F32 for typical GQA.
-        if kv_width > hidden {
-            bail!(
-                "standard_attn: kv_width {kv_width} > hidden {hidden}; scratch F32 buf too small"
-            );
-        }
+        // Reuse the F32 buffer for K — sized at construction to max(q_width, kv_width, hidden) F32.
         let mut k_f32 = unsafe { Tensor::<F32>::from_raw(q_f32_buf, kv_width) };
-        flambeau_model_ops::qmatmul_q8_0(
-            &weights.attn_k,
-            &norm_q8_1,
-            &act_mmq_null,
-            &mut k_f32,
-            1,
-            hidden,
-            kv_width,
-            &ops,
-        )?;
+        weights
+            .attn_k
+            .qmatmul(&norm_q8_1, &act_mmq_null, &mut k_f32, 1, hidden, kv_width, &ops)?;
         let mut k_f16 = unsafe { Tensor::<F16>::from_raw(self.pool.k_f16, kv_width) };
         flambeau_model_ops::cast_f32_to_f16(&k_f32, &mut k_f16, kv_width, &ops)?;
 
         let mut v_f32 = unsafe { Tensor::<F32>::from_raw(q_f32_buf, kv_width) };
-        flambeau_model_ops::qmatmul_q8_0(
-            &weights.attn_v,
-            &norm_q8_1,
-            &act_mmq_null,
-            &mut v_f32,
-            1,
-            hidden,
-            kv_width,
-            &ops,
-        )?;
+        weights
+            .attn_v
+            .qmatmul(&norm_q8_1, &act_mmq_null, &mut v_f32, 1, hidden, kv_width, &ops)?;
         let mut v_f16 = unsafe { Tensor::<F16>::from_raw(self.pool.v_f16, kv_width) };
         flambeau_model_ops::cast_f32_to_f16(&v_f32, &mut v_f16, kv_width, &ops)?;
         let _ = q_f32_buf; // silence unused after final reuse
@@ -414,7 +389,7 @@ impl ForwardCtx for SingleDeviceForwardCtx<'_> {
             // Re-read and write through self.pool.q_f16 in place. The
             // existing rmsnorm_f16 doesn't support in-place, so route
             // through `norm` scratch as a temporary.
-            let mut tmp = unsafe { Tensor::<F16>::from_raw(self.pool.norm, q_width) };
+            let mut tmp = unsafe { Tensor::<F16>::from_raw(self.pool.attn_out_f16, q_width) };
             flambeau_model_ops::rmsnorm_f16(
                 &q_normed,
                 q_norm_w,
@@ -427,19 +402,21 @@ impl ForwardCtx for SingleDeviceForwardCtx<'_> {
             // DtoD memcpy tmp → q_f16.
             let bytes = q_width * 2;
             unsafe {
-                self.device.memcpy_async(
-                    self.stream,
-                    CopyDirection::DeviceToDevice,
-                    self.pool.q_f16,
-                    tmp.ptr,
-                    bytes,
-                )?;
+                self.device
+                    .memcpy_async(
+                        self.stream,
+                        CopyDirection::DeviceToDevice,
+                        self.pool.q_f16,
+                        tmp.ptr,
+                        bytes,
+                    )
+                    .context("standard_attn: q_norm DtoD copy back")?;
             }
             let _ = q_normed;
         }
         if let Some(k_norm_w) = weights.attn_k_norm.as_ref() {
             let k_normed = unsafe { Tensor::<F16>::from_raw(self.pool.k_f16, kv_width) };
-            let mut tmp = unsafe { Tensor::<F16>::from_raw(self.pool.norm, kv_width) };
+            let mut tmp = unsafe { Tensor::<F16>::from_raw(self.pool.attn_out_f16, kv_width) };
             flambeau_model_ops::rmsnorm_f16(
                 &k_normed,
                 k_norm_w,
@@ -451,13 +428,15 @@ impl ForwardCtx for SingleDeviceForwardCtx<'_> {
             )?;
             let bytes = kv_width * 2;
             unsafe {
-                self.device.memcpy_async(
-                    self.stream,
-                    CopyDirection::DeviceToDevice,
-                    self.pool.k_f16,
-                    tmp.ptr,
-                    bytes,
-                )?;
+                self.device
+                    .memcpy_async(
+                        self.stream,
+                        CopyDirection::DeviceToDevice,
+                        self.pool.k_f16,
+                        tmp.ptr,
+                        bytes,
+                    )
+                    .context("standard_attn: k_norm DtoD copy back")?;
             }
             let _ = k_normed;
         }
@@ -472,7 +451,7 @@ impl ForwardCtx for SingleDeviceForwardCtx<'_> {
                 self.pool.position_i32,
                 DevicePtr(pos_val.as_ptr() as usize),
                 4,
-            )?;
+            ).context("standard_attn: positions HtoD")?;
         }
         let positions = unsafe { Tensor::<I32>::from_raw(self.pool.position_i32, 1) };
         let mut q_f16_rope = unsafe { Tensor::<F16>::from_raw(self.pool.q_f16, q_width) };
@@ -570,8 +549,7 @@ impl ForwardCtx for SingleDeviceForwardCtx<'_> {
         // 8. Output projection: F32 result, cast back to F16 in `delta`.
         let mut proj_f32 =
             unsafe { Tensor::<F32>::from_raw(self.pool.attn_proj_f32, hidden) };
-        flambeau_model_ops::qmatmul_q8_0(
-            &weights.attn_output,
+        weights.attn_output.qmatmul(
             &attn_out_q8_1,
             &act_mmq_null,
             &mut proj_f32,
@@ -605,27 +583,13 @@ impl ForwardCtx for SingleDeviceForwardCtx<'_> {
 
         // 2. gate, up projections → F32.
         let mut gate_f32 = unsafe { Tensor::<F32>::from_raw(self.pool.gate_f32, m) };
-        flambeau_model_ops::qmatmul_q8_0(
-            &weights.ffn_gate,
-            &norm_q8_1,
-            &act_mmq_null,
-            &mut gate_f32,
-            1,
-            hidden,
-            m,
-            &ops,
-        )?;
+        weights
+            .ffn_gate
+            .qmatmul(&norm_q8_1, &act_mmq_null, &mut gate_f32, 1, hidden, m, &ops)?;
         let mut up_f32 = unsafe { Tensor::<F32>::from_raw(self.pool.up_f32, m) };
-        flambeau_model_ops::qmatmul_q8_0(
-            &weights.ffn_up,
-            &norm_q8_1,
-            &act_mmq_null,
-            &mut up_f32,
-            1,
-            hidden,
-            m,
-            &ops,
-        )?;
+        weights
+            .ffn_up
+            .qmatmul(&norm_q8_1, &act_mmq_null, &mut up_f32, 1, hidden, m, &ops)?;
 
         // 3. Activate (gate, up) → F16.
         let mut gated_f16 = unsafe { Tensor::<F16>::from_raw(self.pool.gated_f16, m) };
@@ -648,16 +612,9 @@ impl ForwardCtx for SingleDeviceForwardCtx<'_> {
         let mut gated_q8_1 = unsafe { Tensor::<Q8_1>::from_raw(self.pool.gated_q8_1, m) };
         flambeau_model_ops::quantize_f16_to_q8_1(&gated_f16, &mut gated_q8_1, m, &ops)?;
         let mut down_f32 = unsafe { Tensor::<F32>::from_raw(self.pool.down_f32, hidden) };
-        flambeau_model_ops::qmatmul_q8_0(
-            &weights.ffn_down,
-            &gated_q8_1,
-            &act_mmq_null,
-            &mut down_f32,
-            1,
-            m,
-            hidden,
-            &ops,
-        )?;
+        weights
+            .ffn_down
+            .qmatmul(&gated_q8_1, &act_mmq_null, &mut down_f32, 1, m, hidden, &ops)?;
         let mut delta = unsafe { Tensor::<F16>::from_raw(self.pool.delta, hidden) };
         flambeau_model_ops::cast_f32_to_f16(&down_f32, &mut delta, hidden, &ops)?;
         Ok(delta)
@@ -698,8 +655,7 @@ impl ForwardCtx for SingleDeviceForwardCtx<'_> {
         let act_mmq_null = unsafe { Tensor::<Q8_1>::from_raw(DevicePtr::NULL, 0) };
         let mut logits_f32 =
             unsafe { Tensor::<F32>::from_raw(self.pool.logits_f32_dev, vocab) };
-        flambeau_model_ops::qmatmul_q8_0(
-            &lm_head.lm_head,
+        lm_head.lm_head.qmatmul(
             &norm_q8_1,
             &act_mmq_null,
             &mut logits_f32,
@@ -729,7 +685,7 @@ impl ForwardCtx for SingleDeviceForwardCtx<'_> {
                 DevicePtr(self.logits_host.as_mut_ptr() as usize),
                 self.pool.logits_f32_dev,
                 bytes,
-            )?;
+            ).context("output_head: logits DtoH")?;
         }
         // Sync so the host slice is observable on return.
         flambeau_core::Stream::synchronize(self.stream)?;
@@ -795,7 +751,12 @@ mod tests {
             unsafe { Tensor::<F16>::from_raw(ptr, host_f16.len()) }
         }
 
-        fn upload_q8_0(&mut self, host_f32: &[f32], rows: usize, cols: usize) -> Tensor<flambeau_model_ops::Q8_0> {
+        fn upload_q8_0(
+            &mut self,
+            host_f32: &[f32],
+            rows: usize,
+            cols: usize,
+        ) -> crate::ctx::QuantWeight {
             assert_eq!(host_f32.len(), rows * cols);
             assert!(cols % 32 == 0, "Q8_0 needs cols % 32 == 0");
             let mut bytes: Vec<u8> = Vec::with_capacity(rows * cols / 32 * 34);
@@ -803,7 +764,9 @@ mod tests {
                 quantize_row_q8_0(&host_f32[r * cols..(r + 1) * cols], &mut bytes);
             }
             let (ptr, _) = self.upload(&bytes);
-            unsafe { Tensor::<flambeau_model_ops::Q8_0>::from_raw(ptr, rows * cols) }
+            let tensor =
+                unsafe { Tensor::<flambeau_model_ops::Q8_0>::from_raw(ptr, rows * cols) };
+            crate::ctx::QuantWeight::Q8_0(tensor)
         }
     }
 

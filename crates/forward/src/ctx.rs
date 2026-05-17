@@ -16,7 +16,7 @@
 //!   structs.
 
 use anyhow::Result;
-use flambeau_model_ops::{Tensor, F16, Q8_0};
+use flambeau_model_ops::{Tensor, F16, Q4_0, Q4_1, Q5_0, Q5_1, Q8_0};
 
 /// Forward-pass context. One impl per topology; the model writes
 /// `<C: ForwardCtx>` generic.
@@ -94,17 +94,59 @@ pub trait ForwardCtx {
 // ----------------------------------------------------------------
 // Weight handles.
 //
-// V1 hardcodes Q8_0 for the matmul-quant slots — the simplest GGUF
-// dtype that flambeau-quant ships a host quantizer for, so the P2
-// synthetic test can quantise mock weights without a real GGUF.
-// Generalising to a runtime-dispatched `QuantWeight` enum (covering
-// Q4_0/Q4_1/Q5_0/Q5_1/Q8_0) lands in P3 when the qwen35-v2 loader
-// hits a real GGUF.
+// Quant-typed matmul weights go through `QuantWeight`, a runtime-tagged
+// enum over the dtypes model-ops ships qmatmul wrappers for
+// (Q4_0/Q4_1/Q5_0/Q5_1/Q8_0). Norm weights stay typed as `Tensor<F16>`.
 // ----------------------------------------------------------------
 
-/// Token-embedding weight handle. P2 keeps the embedding F16 to avoid
-/// host-roundtrip dequant in the synthetic test; P3 lifts this to a
-/// runtime-tagged variant.
+/// Runtime-dispatched quant-weight handle. Covers the dtypes model-ops
+/// supports for `qmatmul_q*`. `QuantWeight::qmatmul` picks the right
+/// wrapper based on the runtime tag so model code stays dtype-agnostic.
+pub enum QuantWeight {
+    Q4_0(Tensor<Q4_0>),
+    Q4_1(Tensor<Q4_1>),
+    Q5_0(Tensor<Q5_0>),
+    Q5_1(Tensor<Q5_1>),
+    Q8_0(Tensor<Q8_0>),
+}
+
+impl QuantWeight {
+    /// `output[m, n] = self[n, k] @ act[m, k].T`. Dispatches to the
+    /// right `flambeau_model_ops::qmatmul_q*` based on this weight's
+    /// runtime dtype tag.
+    #[allow(clippy::too_many_arguments)]
+    pub fn qmatmul(
+        &self,
+        act_q8_1: &Tensor<flambeau_model_ops::Q8_1>,
+        act_q8_1_mmq: &Tensor<flambeau_model_ops::Q8_1>,
+        output: &mut Tensor<flambeau_model_ops::F32>,
+        m: usize,
+        k: usize,
+        n: usize,
+        ops: &flambeau_ops::HipOps<'_>,
+    ) -> Result<()> {
+        match self {
+            Self::Q4_0(w) => {
+                flambeau_model_ops::qmatmul_q4_0(w, act_q8_1, act_q8_1_mmq, output, m, k, n, ops)
+            }
+            Self::Q4_1(w) => {
+                flambeau_model_ops::qmatmul_q4_1(w, act_q8_1, act_q8_1_mmq, output, m, k, n, ops)
+            }
+            Self::Q5_0(w) => {
+                flambeau_model_ops::qmatmul_q5_0(w, act_q8_1, act_q8_1_mmq, output, m, k, n, ops)
+            }
+            Self::Q5_1(w) => {
+                flambeau_model_ops::qmatmul_q5_1(w, act_q8_1, act_q8_1_mmq, output, m, k, n, ops)
+            }
+            Self::Q8_0(w) => {
+                flambeau_model_ops::qmatmul_q8_0(w, act_q8_1, act_q8_1_mmq, output, m, k, n, ops)
+            }
+        }
+    }
+}
+
+/// Token-embedding weight handle. F16 on device; if the GGUF stores a
+/// quantised embedding the loader dequantises once at load time.
 pub struct EmbeddingWeights {
     pub token_embd: Tensor<F16>,
     pub vocab_size: usize,
@@ -113,14 +155,13 @@ pub struct EmbeddingWeights {
 
 /// Per-layer attention weight handle. Shape mirrors qwen3.5 dense:
 /// rmsnorm + Q/K/V/output projection + optional q/k norm + RoPE +
-/// optional SWA. The `partial_rotated_dims` slot selects between
-/// full-RoPE (`rotated_dims == head_dim`) and NeoX-partial RoPE.
+/// optional SWA. `rotated_dims < head_dim` selects NeoX-partial RoPE.
 pub struct AttnWeights {
     pub attn_norm: Tensor<F16>,
-    pub attn_q: Tensor<Q8_0>,
-    pub attn_k: Tensor<Q8_0>,
-    pub attn_v: Tensor<Q8_0>,
-    pub attn_output: Tensor<Q8_0>,
+    pub attn_q: QuantWeight,
+    pub attn_k: QuantWeight,
+    pub attn_v: QuantWeight,
+    pub attn_output: QuantWeight,
     pub attn_q_norm: Option<Tensor<F16>>,
     pub attn_k_norm: Option<Tensor<F16>>,
     pub n_heads: usize,
@@ -140,9 +181,9 @@ pub struct AttnWeights {
 /// Per-layer dense FFN weight handle (qwen-style gated MLP).
 pub struct FfnWeights {
     pub ffn_norm: Tensor<F16>,
-    pub ffn_gate: Tensor<Q8_0>,
-    pub ffn_up: Tensor<Q8_0>,
-    pub ffn_down: Tensor<Q8_0>,
+    pub ffn_gate: QuantWeight,
+    pub ffn_up: QuantWeight,
+    pub ffn_down: QuantWeight,
     pub activation: Activation,
     pub rms_eps: f32,
 }
@@ -165,7 +206,7 @@ pub struct MoeWeights {
 /// heads (gemma4); the loader sets up the alias.
 pub struct LmHeadWeights {
     pub output_norm: Tensor<F16>,
-    pub lm_head: Tensor<Q8_0>,
+    pub lm_head: QuantWeight,
     pub final_logit_softcap: Option<f32>,
     pub vocab_size: usize,
     pub hidden: usize,

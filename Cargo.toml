@@ -11,6 +11,7 @@ members = [
     "crates/forward",
     "crates/blocks",
     "crates/models/qwen3-moe",
+    "crates/models/qwen3-v2",
     "crates/models/gemma4",
     "crates/runtime",
     "crates/bench",
