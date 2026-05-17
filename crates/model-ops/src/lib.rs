@@ -23,7 +23,9 @@ pub use dtype::{ElemType, F16, F32, I32, Q4_0, Q4_1, Q5_0, Q5_1, Q8_0, Q8_1};
 pub use error::{Error, Result};
 pub use tensor::Tensor;
 
+pub use ops::activation::{gelu_mul_f32_to_f16, swiglu_f16, swiglu_f32_to_f16};
 pub use ops::add::{add_f16, add_f32};
 pub use ops::cast::{cast_f16_to_f32, cast_f32_to_f16};
+pub use ops::quantize::{quantize_f16_to_q8_1, quantize_f32_to_q8_1};
 pub use ops::rmsnorm::{rmsnorm_f16, rmsnorm_f32, rmsnorm_quant_q8_1};
 pub use ops::scale::scale_f16;

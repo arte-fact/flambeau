@@ -9,7 +9,9 @@
 //! `src/lib.rs` so consumers `use flambeau_model_ops::<op>;` without
 //! the `ops::` prefix.
 
+pub mod activation;
 pub mod add;
 pub mod cast;
+pub mod quantize;
 pub mod rmsnorm;
 pub mod scale;
