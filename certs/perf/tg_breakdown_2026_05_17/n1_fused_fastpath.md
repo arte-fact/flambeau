@@ -26,14 +26,30 @@ Batched path (N ≥ 2) is unchanged.
 
 ## Bench — qwen3.6-35B-A3B-Q4_0, single-stream chat (`temp=0.7 top_p=0.9 seed=0`)
 
-| topo | before | **after** | delta | llama.cpp | ratio |
-|---|---:|---:|---:|---:|---:|
-| tp2    | 35.66 | **57.09** | **+60.1%** | 43.63 | **1.31×** |
-| pp2    | 34.59 | **55.10** | +59.3% | 61.37 | 0.90× |
-| pp4    | 32.54 | **52.95** | +62.7% | 58.81 | 0.90× |
-| pp2tp2 | 30.26 | **51.84** | **+71.3%** | 58.99 | 0.88× |
+### Locked-in matrix (re-bench with both engines side-by-side)
 
-Prefill numbers are unchanged because prefill doesn't use this path.
+| topo | flambeau prefill | flambeau decode | llama prefill | llama decode | P ratio | **D ratio** |
+|---|---:|---:|---:|---:|---:|---:|
+| tp2    | 851.2 | **56.51** | 243.0 | 41.62 | 3.50× | **1.36×** |
+| pp2    | 680.9 | 54.40 | 321.3 | 62.00 | 2.12× | 0.88× |
+| pp4    | 695.8 | 52.62 | 215.8 | 59.40 | 3.22× | 0.89× |
+| pp2tp2¹ | 501.3 | 51.88 | 214.1 | 58.81 | 2.34× | 0.88× |
+
+¹ llama.cpp's pp2tp2 cell uses `-sm layer` on 4 GPUs (no native 2D mesh).
+
+### Δ vs pre-N=1-fused baseline (yesterday's `bench_matrix_2026_05_17`)
+
+| topo | before | after | delta | new vs llama |
+|---|---:|---:|---:|---:|
+| tp2    | 35.66 | **56.51** | +58.5% | 0.82× → **1.36×** |
+| pp2    | 34.59 | 54.40 | +57.3% | 0.56× → 0.88× |
+| pp4    | 32.54 | 52.62 | +61.7% | 0.55× → 0.89× |
+| pp2tp2 | 30.26 | 51.88 | +71.4% | 0.51× → 0.88× |
+
+Prefill unchanged because prefill doesn't use the per-token decode path.
+
+Llama.cpp's TP2 number is also 5% lower today (41.6 vs yesterday's 43.6) — typical
+±5% run-to-run noise; doesn't change the conclusion.
 
 ## Headlines
 
