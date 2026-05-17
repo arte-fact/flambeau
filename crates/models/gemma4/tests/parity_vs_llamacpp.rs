@@ -235,9 +235,9 @@ fn tp_hidden_cross_rank_match_after_one_token() {
         vec![half::f16::from_f32(0.0); hidden],
     ];
     for (rank, buf) in buffers.iter_mut().enumerate() {
-        let device = driver.tp.cluster().device(rank);
+        let device = driver.model.tp.cluster().device(rank);
         device.bind().expect("bind");
-        let stage = &driver.stages[rank];
+        let stage = &driver.session.stages[rank];
         // SAFETY: stage.hidden owns `hidden * 2` bytes; buf sized identically.
         unsafe {
             device
@@ -337,7 +337,7 @@ fn upload_byte_parity_31b_q4_0_tp2_rank0_attn_q() {
         .expect("TP upload");
 
     // Take rank-1's ffn_down for layer 0 (row-parallel Q4_1, second half cols).
-    let stage = &driver.stages[1];
+    let stage = &driver.model.stages[1];
     let layer0 = &stage.layer_weights[0];
     let q_dims = layer0.ffn_down.dims;
     let q_ptr = layer0.ffn_down.ptr;
@@ -356,7 +356,7 @@ fn upload_byte_parity_31b_q4_0_tp2_rank0_attn_q() {
     );
 
     // Download rank-1's slice from device.
-    let device = driver.tp.cluster().device(1);
+    let device = driver.model.tp.cluster().device(1);
     device.bind().expect("bind");
     let mut host = vec![0u8; total_bytes];
     // SAFETY: q_ptr owns total_bytes; host is sized for total_bytes.

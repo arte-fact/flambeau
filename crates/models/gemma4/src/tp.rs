@@ -54,18 +54,16 @@ use crate::layout::{FfnKind, ModelLayout};
 use crate::output_head::{forward_output_head, OutputHeadScratch};
 use crate::weights_hip::DeviceTensor;
 
-/// Per-rank state for a TP stage. `layer_weights` carries the
-/// **sharded** weights for every layer (this rank's slice). KV caches
-/// are sized for the rank's local KV-head count.
-pub struct Gemma4TpStage {
-    /// Shared per-rank bookkeeping (rank/device id, `RawAllocTracker`,
-    /// disposed latch). Weight + scratch allocations are tracked in
-    /// `common.raw_alloc`; `common.dispose(device)` frees the lot.
+/// Per-rank model state for a TP stage (weights only — Arc-shareable
+/// across multiple concurrent `Gemma4TpSession` slots).
+pub struct Gemma4TpModelStage {
+    /// Shared bookkeeping for **weight** allocations on this rank.
+    /// `common.raw_alloc` holds every device alloc that backs a
+    /// `Gemma4LayerWeights` / `token_embd` / `output_norm` / `lm_head`
+    /// tensor; `dispose(device)` frees them all in one pass.
     pub common: StageCommon,
     /// Per-layer sharded weights; ALL ranks carry weights for ALL layers.
     pub layer_weights: Vec<Gemma4LayerWeights>,
-    /// Per-layer KV cache (each holds this rank's local KV head shard).
-    pub kv_caches: Vec<Option<KvCache<F16Contig, HipDevice>>>,
     /// Replicated token_embd (each rank holds a full copy).
     pub token_embd: DeviceTensor,
     pub token_embd_dims: [usize; 2],
@@ -73,28 +71,69 @@ pub struct Gemma4TpStage {
     pub output_norm: DeviceTensor,
     /// Replicated LM head (gemma4 ties to `token_embd`).
     pub lm_head: Option<DeviceTensor>,
+    /// Per-layer F32 copy of `post_attention_norm`. Populated only
+    /// for full-attention layers (SWA layers use the F16 weight on
+    /// `layer.layer_weights[il].post_attention_norm`). `DevicePtr::NULL`
+    /// for SWA layers and for non-MoE models. Points into the layer-
+    /// weight uploads (model-side), not a per-session allocation.
+    pub post_attention_norm_f32: Vec<DevicePtr>,
+}
+
+impl Gemma4TpModelStage {
+    pub fn rank(&self) -> usize {
+        self.common.rank as usize
+    }
+
+    pub fn dispose(&mut self, device: &HipDevice) -> Result<()> {
+        if self.common.is_disposed() {
+            return Ok(());
+        }
+        self.common
+            .dispose(device)
+            .map_err(|e| anyhow!("model raw_alloc dispose: {e}"))?;
+        for t in [
+            std::mem::replace(&mut self.token_embd, dummy_dt()),
+            std::mem::replace(&mut self.output_norm, dummy_dt()),
+        ]
+        .into_iter()
+        .chain(self.lm_head.take())
+        {
+            if !t.ptr.is_null() && t.bytes > 0 {
+                unsafe {
+                    let _ = device.dealloc(t.ptr, t.bytes);
+                }
+            }
+        }
+        Ok(())
+    }
+}
+
+impl Drop for Gemma4TpModelStage {
+    fn drop(&mut self) {
+        self.common
+            .warn_on_leak("flambeau_gemma4::tp::Gemma4TpModelStage");
+    }
+}
+
+/// Per-rank session state for a TP stage (KV caches + scratch + per-
+/// request sync events — per request).
+pub struct Gemma4TpSessionStage {
+    /// Shared bookkeeping for **scratch + per-request** allocations.
+    pub common: StageCommon,
+    /// Per-layer KV cache (each holds this rank's local KV head shard).
+    pub kv_caches: Vec<Option<KvCache<F16Contig, HipDevice>>>,
     /// F16 [hidden] hidden buffer holding the current residual stream.
     pub hidden: DevicePtr,
     /// F16 [hidden] buffer holding this rank's partial attn-out
     /// contribution after the row-parallel output proj.
     pub partial_attn: DevicePtr,
     /// F32 [hidden] buffer for the row-parallel attn-output partial
-    /// on **full-attention** layers (head_dim=512 on 26B-A4B). The
-    /// F32 path skips the saturating cast at output_proj end + uses
-    /// `tp_allreduce_sum_f32_synced` for AR — see
-    /// `feedback_gemma4_attn_output_proj_f16_saturate`. Allocated
+    /// on **full-attention** layers (head_dim=512 on 26B-A4B). Allocated
     /// only on MoE models (no full-attn layers ⇒ stays `DevicePtr::NULL`).
     pub partial_attn_f32: DevicePtr,
     /// F32 [hidden] staging buffer for the F32 rmsnorm output on
-    /// full-attention layers. Holds `rmsnorm_f32(partial_attn_f32,
-    /// post_attention_norm_f32)` before the F32→F16 cast (safe since
-    /// rmsnorm output is bounded).
+    /// full-attention layers.
     pub attn_normed_f32_tmp: DevicePtr,
-    /// Per-layer F32 copy of `post_attention_norm`. Populated only
-    /// for full-attention layers (SWA layers use the F16 weight on
-    /// `layer.layer_weights[il].post_attention_norm`). `DevicePtr::NULL`
-    /// for SWA layers and for non-MoE models.
-    pub post_attention_norm_f32: Vec<DevicePtr>,
     /// F16 [hidden] buffer holding this rank's partial FFN-out
     /// contribution after the row-parallel down proj.
     pub partial_ffn: DevicePtr,
@@ -102,22 +141,57 @@ pub struct Gemma4TpStage {
     scratch: TpScratchPtrs,
     /// Optional output-head scratch (head rank only).
     pub output_head_scratch: Option<OutputHeadScratch>,
-    /// Per-rank MoE scratch — allocated when any layer is MoE
-    /// (`cfg.moe.is_some()`); shared across MoE layers since the
-    /// scratch dims (`hidden`, `local_inter`, `n_experts`, `top_k`)
-    /// are uniform within a gemma4 26B-A4B model.
+    /// Per-rank MoE scratch — allocated when any layer is MoE.
     pub tp_moe_scratch: Option<crate::tp_moe_upload::Gemma4TpMoeScratch>,
     /// Universal TP per-rank sync identity (rank id, device id,
-    /// `producer_done_event`). Consumed by
-    /// [`flambeau_blocks::cross_rank_event_barrier`] at every AR
-    /// boundary.
+    /// `producer_done_event`). Per-request because the event handle
+    /// tracks this session's stream progress; concurrent sessions need
+    /// distinct events.
     pub core: TpRankCore,
     positions_host: Vec<i32>,
 }
 
-impl Gemma4TpStage {
+impl Gemma4TpSessionStage {
     pub fn rank(&self) -> usize {
         self.common.rank as usize
+    }
+
+    pub fn dispose(&mut self, device: &HipDevice) -> Result<()> {
+        if self.common.is_disposed() {
+            return Ok(());
+        }
+        let kvs = std::mem::take(&mut self.kv_caches);
+        for kv in kvs.into_iter().flatten() {
+            kv.dispose(device).map_err(|e| anyhow!("kv dispose: {e}"))?;
+        }
+        self.common
+            .dispose(device)
+            .map_err(|e| anyhow!("session raw_alloc dispose: {e}"))?;
+        Ok(())
+    }
+}
+
+impl Drop for Gemma4TpSessionStage {
+    fn drop(&mut self) {
+        self.common
+            .warn_on_leak("flambeau_gemma4::tp::Gemma4TpSessionStage");
+    }
+}
+
+/// Per-rank state for a TP stage. Bundles model + session halves;
+/// test fixtures + `Gemma4TpDriver::from_pieces` construct this.
+pub struct Gemma4TpStage {
+    pub model: Gemma4TpModelStage,
+    pub session: Gemma4TpSessionStage,
+}
+
+impl Gemma4TpStage {
+    pub fn rank(&self) -> usize {
+        self.model.rank()
+    }
+
+    pub fn into_halves(self) -> (Gemma4TpModelStage, Gemma4TpSessionStage) {
+        (self.model, self.session)
     }
 }
 
@@ -143,18 +217,75 @@ struct TpScratchPtrs {
     splitk_partials_o: (DevicePtr, usize),
 }
 
-/// TP driver. Single-token decode across N ranks with column / row
-/// parallel attention + FFN and BAR1 P2P AllReduce after the two
-/// row-parallel projections (attn_output + ffn_down).
-pub struct Gemma4TpDriver {
+/// TP model — Arc-shareable across concurrent `Gemma4TpSession`s.
+/// Owns the `TpCluster` (cluster + BarP2pAllReduce), per-rank weights,
+/// and per-rank `OpsRegistry`.
+pub struct Gemma4TpModel {
     pub tp: TpCluster,
     pub cfg: Gemma4Config,
     pub layout: ModelLayout,
-    pub stages: Vec<Gemma4TpStage>,
+    pub stages: Vec<Gemma4TpModelStage>,
     /// Rank that runs the LM head; head_rank == 0 in V1.
     pub head_rank: usize,
-    regs: Vec<OpsRegistry>,
-    logits_host: Vec<f32>,
+    pub regs: Vec<OpsRegistry>,
+}
+
+impl Gemma4TpModel {
+    pub fn dispose(&mut self) -> Result<()> {
+        let mut first_err: Option<anyhow::Error> = None;
+        for (rank, stage) in self.stages.iter_mut().enumerate() {
+            let dev = self.tp.cluster().device(rank);
+            if let Err(e) = stage.dispose(dev) {
+                if first_err.is_none() {
+                    first_err = Some(e);
+                }
+            }
+        }
+        first_err.map_or(Ok(()), Err)
+    }
+}
+
+impl Drop for Gemma4TpModel {
+    fn drop(&mut self) {
+        if self
+            .stages
+            .iter()
+            .any(|s| !s.common.is_disposed())
+        {
+            tracing::warn!("Gemma4TpModel dropped without dispose()");
+        }
+    }
+}
+
+/// Per-request TP session. Allocates per-rank KV + scratch sized for
+/// `max_tokens` against the model's cluster.
+pub struct Gemma4TpSession {
+    pub stages: Vec<Gemma4TpSessionStage>,
+    pub logits_host: Vec<f32>,
+}
+
+impl Gemma4TpSession {
+    pub fn dispose(&mut self, model: &Gemma4TpModel) -> Result<()> {
+        let mut first_err: Option<anyhow::Error> = None;
+        for (rank, stage) in self.stages.iter_mut().enumerate() {
+            let dev = model.tp.cluster().device(rank);
+            if let Err(e) = stage.dispose(dev) {
+                if first_err.is_none() {
+                    first_err = Some(e);
+                }
+            }
+        }
+        first_err.map_or(Ok(()), Err)
+    }
+}
+
+/// TP driver. Bundles `Arc<Gemma4TpModel>` (shared weights) and
+/// `Gemma4TpSession` (per-request KV+scratch). Single-request callers
+/// construct one Driver; multi-slot callers build one `Arc<Model>` and
+/// per-slot Sessions (each wrapped in a Driver via `Arc::clone`).
+pub struct Gemma4TpDriver {
+    pub model: std::sync::Arc<Gemma4TpModel>,
+    pub session: Gemma4TpSession,
 }
 
 impl Gemma4TpStage {
@@ -183,10 +314,10 @@ impl Gemma4TpStage {
     /// Build per-rank scratch / KV caches / hidden buffers. Weights +
     /// global tensors are passed in pre-allocated (sliced by caller).
     /// `weight_alloc` is the [`RawAllocTracker`] the caller used to
-    /// upload the weight tensors — scratch + v_ones allocations are
-    /// appended to the same tracker so dispose frees everything in
-    /// one pass. Pass `RawAllocTracker::new()` when no weights are
-    /// pre-tracked (synthetic-weight tests).
+    /// upload the weight tensors — the weights tracker is moved into
+    /// the model half; scratch allocations land in the session half's
+    /// separate tracker. Pass `RawAllocTracker::new()` when no weights
+    /// are pre-tracked (synthetic-weight tests).
     #[allow(clippy::too_many_arguments)]
     pub fn from_pieces(
         device: &HipDevice,
@@ -203,14 +334,94 @@ impl Gemma4TpStage {
         max_tokens: usize,
         weight_alloc: RawAllocTracker,
     ) -> Result<Self> {
+        let model = Gemma4TpModelStage::from_pieces(
+            device,
+            rank,
+            cfg,
+            layer_weights,
+            token_embd,
+            token_embd_dims,
+            output_norm,
+            lm_head,
+            weight_alloc,
+        )?;
+        let session = Gemma4TpSessionStage::from_pieces(
+            device,
+            rank,
+            cfg,
+            layout,
+            n_ranks,
+            is_head_rank,
+            max_tokens,
+        )?;
+        Ok(Self { model, session })
+    }
+
+    pub fn dispose(&mut self, device: &HipDevice) -> Result<()> {
+        self.session.dispose(device)?;
+        self.model.dispose(device)?;
+        Ok(())
+    }
+}
+
+impl Gemma4TpModelStage {
+    /// Build a TP model stage. `weight_alloc` (the tracker the caller
+    /// populated during upload) is adopted into `common.raw_alloc`.
+    #[allow(clippy::too_many_arguments)]
+    fn from_pieces(
+        device: &HipDevice,
+        rank: usize,
+        cfg: &Gemma4Config,
+        layer_weights: Vec<Gemma4LayerWeights>,
+        token_embd: DeviceTensor,
+        token_embd_dims: [usize; 2],
+        output_norm: DeviceTensor,
+        lm_head: Option<DeviceTensor>,
+        weight_alloc: RawAllocTracker,
+    ) -> Result<Self> {
         device.bind()?;
         if layer_weights.len() != cfg.num_layers {
             bail!(
-                "Gemma4TpStage: expected {} layer weights, got {}",
+                "Gemma4TpModelStage: expected {} layer weights, got {}",
                 cfg.num_layers,
                 layer_weights.len()
             );
         }
+        let mut common = StageCommon::new(rank as u32, device.id());
+        common.raw_alloc = weight_alloc;
+        let post_attention_norm_f32: Vec<DevicePtr> = layer_weights
+            .iter()
+            .map(|lw| lw.post_attention_norm_f32.unwrap_or(DevicePtr::NULL))
+            .collect();
+        Ok(Self {
+            common,
+            layer_weights,
+            token_embd,
+            token_embd_dims,
+            output_norm,
+            lm_head,
+            post_attention_norm_f32,
+        })
+    }
+}
+
+impl Gemma4TpSessionStage {
+    /// Build the per-request session stage. Allocates KV caches +
+    /// per-rank scratch (`hidden`, `partial_attn`, `partial_ffn`,
+    /// optional F32 attention scratch on MoE models, optional output-
+    /// head scratch on head rank, optional MoE scratch) sized for
+    /// `max_tokens` against `device`.
+    #[allow(clippy::too_many_arguments)]
+    pub fn from_pieces(
+        device: &HipDevice,
+        rank: usize,
+        cfg: &Gemma4Config,
+        layout: &ModelLayout,
+        n_ranks: usize,
+        is_head_rank: bool,
+        max_tokens: usize,
+    ) -> Result<Self> {
+        device.bind()?;
 
         let hidden = cfg.hidden_size;
         let head_dim = cfg.head_dim.max(cfg.swa.head_dim_swa);
@@ -231,13 +442,10 @@ impl Gemma4TpStage {
         for spec in &layout.layers {
             if !spec.has_kv {
                 bail!(
-                    "Gemma4TpStage: shared-KV tail layer {} not supported in S9-A",
+                    "Gemma4TpSessionStage: shared-KV tail layer {} not supported in S9-A",
                     spec.index
                 );
             }
-            // MoE FFN layers now supported on TP — per-layer
-            // tp_moe weights uploaded by `upload_one_tp_stage` via
-            // `tp_moe_upload::upload_moe_layer_tp`.
             let n_kv_local = spec.n_kv_heads / n_ranks;
             let kv =
                 KvCache::<F16Contig, HipDevice>::new(device, n_kv_local, spec.head_dim, max_tokens)
@@ -246,12 +454,8 @@ impl Gemma4TpStage {
         }
 
         let mut common = StageCommon::new(rank as u32, device.id());
-        // Adopt the caller's weight-population tracker into common so
-        // every byte (weights + scratch) frees through one path.
-        common.raw_alloc = weight_alloc;
         let raw_alloc = &mut common.raw_alloc;
 
-        // Sized for the widest layer.
         let mmvq_max = q_width_local_max
             .max(kv_width_local_max)
             .max(hidden)
@@ -287,10 +491,6 @@ impl Gemma4TpStage {
         let partial_attn = raw_alloc.alloc_f16(device, hidden)?.0;
         let partial_ffn = raw_alloc.alloc_f16(device, hidden)?.0;
 
-        // F32 attention output path scratch — allocated only when the
-        // model has full-attention layers (cfg.moe.is_some() ⇒ 26B-A4B
-        // SSSSSF pattern with head_dim=512 layers). SWA-only models
-        // (or non-MoE) don't engage this path.
         let has_full_attn_layers = cfg.moe.is_some()
             && layout.layers.iter().any(|s| !s.is_swa);
         let (partial_attn_f32, attn_normed_f32_tmp) = if has_full_attn_layers {
@@ -301,13 +501,6 @@ impl Gemma4TpStage {
         } else {
             (DevicePtr::NULL, DevicePtr::NULL)
         };
-        // Per-layer F32 norm weights — populated from each layer's
-        // `Gemma4LayerWeights::post_attention_norm_f32` (Some only for
-        // MoE full-attention layers; SWA + non-MoE layers stay NULL).
-        let post_attention_norm_f32: Vec<DevicePtr> = layer_weights
-            .iter()
-            .map(|lw| lw.post_attention_norm_f32.unwrap_or(DevicePtr::NULL))
-            .collect();
 
         let output_head_scratch = if is_head_rank {
             Some(OutputHeadScratch {
@@ -337,17 +530,11 @@ impl Gemma4TpStage {
 
         Ok(Self {
             common,
-            layer_weights,
             kv_caches,
-            token_embd,
-            token_embd_dims,
-            output_norm,
-            lm_head,
             hidden: hidden_ptr,
             partial_attn,
             partial_attn_f32,
             attn_normed_f32_tmp,
-            post_attention_norm_f32,
             partial_ffn,
             scratch,
             output_head_scratch,
@@ -355,39 +542,6 @@ impl Gemma4TpStage {
             core,
             positions_host: vec![0i32; 1],
         })
-    }
-
-    pub fn dispose(&mut self, device: &HipDevice) -> Result<()> {
-        if self.common.is_disposed() {
-            return Ok(());
-        }
-        let kvs = std::mem::take(&mut self.kv_caches);
-        for kv in kvs.into_iter().flatten() {
-            kv.dispose(device).map_err(|e| anyhow!("kv dispose: {e}"))?;
-        }
-        self.common
-            .dispose(device)
-            .map_err(|e| anyhow!("raw_alloc dispose: {e}"))?;
-        for t in [
-            std::mem::replace(&mut self.token_embd, dummy_dt()),
-            std::mem::replace(&mut self.output_norm, dummy_dt()),
-        ]
-        .into_iter()
-        .chain(self.lm_head.take())
-        {
-            if !t.ptr.is_null() && t.bytes > 0 {
-                unsafe {
-                    let _ = device.dealloc(t.ptr, t.bytes);
-                }
-            }
-        }
-        Ok(())
-    }
-}
-
-impl Drop for Gemma4TpStage {
-    fn drop(&mut self) {
-        self.common.warn_on_leak("flambeau_gemma4::tp::Gemma4TpStage");
     }
 }
 
@@ -431,21 +585,42 @@ impl Gemma4TpDriver {
             regs.push(OpsRegistry::new(dev).map_err(|e| anyhow!("registry rank {r}: {e}"))?);
         }
         let logits_host = vec![0.0f32; cfg.vocab_size];
-        Ok(Self {
+
+        let mut model_stages = Vec::with_capacity(n_ranks);
+        let mut session_stages = Vec::with_capacity(n_ranks);
+        for stage in stages.into_iter() {
+            let (m, s) = stage.into_halves();
+            model_stages.push(m);
+            session_stages.push(s);
+        }
+        let model = Gemma4TpModel {
             tp,
             cfg,
             layout,
-            stages,
+            stages: model_stages,
             head_rank,
             regs,
+        };
+        let session = Gemma4TpSession {
+            stages: session_stages,
             logits_host,
+        };
+        Ok(Self {
+            model: Arc::new(model),
+            session,
         })
     }
 
     pub fn dispose(&mut self) -> Result<()> {
-        for (r, stage) in self.stages.iter_mut().enumerate() {
-            let dev = self.tp.cluster().device(r);
-            stage.dispose(dev)?;
+        self.session.dispose(&self.model)?;
+        match Arc::get_mut(&mut self.model) {
+            Some(m) => m.dispose()?,
+            None => {
+                tracing::warn!(
+                    "Gemma4TpDriver::dispose: model Arc has other refs; \
+                     model weights leak until all Sessions drop"
+                );
+            }
         }
         Ok(())
     }
@@ -513,7 +688,7 @@ impl Gemma4TpDriver {
         // Argmax host-side.
         let mut best_i = 0u32;
         let mut best_v = f32::NEG_INFINITY;
-        for (i, &v) in self.logits_host.iter().enumerate() {
+        for (i, &v) in self.session.logits_host.iter().enumerate() {
             if v > best_v {
                 best_v = v;
                 best_i = i as u32;
@@ -554,7 +729,7 @@ impl flambeau_runtime::ModelDriver for Gemma4TpDriver {
             let _ = Gemma4TpDriver::forward_one_token(self, t, start_position + i)?;
         }
         logits_out.clear();
-        logits_out.extend_from_slice(&self.logits_host);
+        logits_out.extend_from_slice(&self.session.logits_host);
         Ok(())
     }
     fn forward_one_token_logits(
@@ -565,11 +740,11 @@ impl flambeau_runtime::ModelDriver for Gemma4TpDriver {
     ) -> Result<()> {
         let _ = Gemma4TpDriver::forward_one_token(self, token_id, position)?;
         logits_out.clear();
-        logits_out.extend_from_slice(&self.logits_host);
+        logits_out.extend_from_slice(&self.session.logits_host);
         Ok(())
     }
     fn vocab_size(&self) -> usize {
-        self.cfg.vocab_size
+        self.model.cfg.vocab_size
     }
     fn dispose(&mut self) -> Result<()> {
         Gemma4TpDriver::dispose(self)
@@ -578,7 +753,17 @@ impl flambeau_runtime::ModelDriver for Gemma4TpDriver {
 
 impl Drop for Gemma4TpDriver {
     fn drop(&mut self) {
-        if self.stages.iter().any(|s| !s.common.is_disposed()) {
+        let model_leaked = self
+            .model
+            .stages
+            .iter()
+            .any(|s| !s.common.is_disposed());
+        let session_leaked = self
+            .session
+            .stages
+            .iter()
+            .any(|s| !s.common.is_disposed());
+        if model_leaked || session_leaked {
             tracing::warn!("Gemma4TpDriver dropped without dispose()");
         }
     }
@@ -602,7 +787,7 @@ fn forward_layer_decode_tp(
     il: usize,
     position: usize,
 ) -> Result<()> {
-    let n_ranks = driver.stages.len();
+    let n_ranks = driver.model.stages.len();
     if n_ranks != 2 {
         // S9-A: only TP2 supported. TP4 is just adding AR-residual_tp4
         // hookups; left for S9-B.
@@ -610,7 +795,7 @@ fn forward_layer_decode_tp(
     }
     // MoE layers use the parallel-branch composer (3 ARs/layer);
     // dense layers use the shared `LayerComposerTp` (2 ARs/layer).
-    if driver.layout.layers[il].ffn_kind == FfnKind::Moe {
+    if driver.model.layout.layers[il].ffn_kind == FfnKind::Moe {
         forward_decode_layer_tp_moe(driver, il, position)
     } else {
         flambeau_blocks::forward_decode_layer_tp(driver, position, il)
@@ -641,11 +826,11 @@ fn forward_decode_layer_tp_moe(
         tp_allreduce_sum_f32_synced, tp_allreduce_sum_synced, Buffer, RowParallel, F16,
     };
 
-    let n = driver.stages.len();
-    let hidden = driver.cfg.hidden_size;
-    let rms_eps = driver.cfg.rms_norm_eps;
-    let ff_len_local = driver.cfg.feed_forward_length / n;
-    let is_full_attn = !driver.layout.layers[il].is_swa;
+    let n = driver.model.stages.len();
+    let hidden = driver.model.cfg.hidden_size;
+    let rms_eps = driver.model.cfg.rms_norm_eps;
+    let ff_len_local = driver.model.cfg.feed_forward_length / n;
+    let is_full_attn = !driver.model.layout.layers[il].is_swa;
 
     // Phase 1: per-rank attention. Full-attention layers (head_dim=512
     // on 26B-A4B) use the F32 output_proj path so the row-parallel
@@ -665,21 +850,21 @@ fn forward_decode_layer_tp_moe(
     // through AR; cast to F16 happens only after post-norm absorbs
     // the spike).
     if is_full_attn {
-        let cores: Vec<&TpRankCore> = driver.stages.iter().map(|s| &s.core).collect();
+        let cores: Vec<&TpRankCore> = driver.session.stages.iter().map(|s| &s.core).collect();
         let partials: [DevicePtr; 2] = [
-            driver.stages[0].partial_attn_f32,
-            driver.stages[1].partial_attn_f32,
+            driver.session.stages[0].partial_attn_f32,
+            driver.session.stages[1].partial_attn_f32,
         ];
         let streams: [&_; 2] = [
-            driver.tp.cluster().device(0).default_stream(),
-            driver.tp.cluster().device(1).default_stream(),
+            driver.model.tp.cluster().device(0).default_stream(),
+            driver.model.tp.cluster().device(1).default_stream(),
         ];
         // SAFETY: partial_attn_f32 is hidden F32 elems per rank;
         // synced helper orders BAR1 reads behind producer events.
         unsafe {
             tp_allreduce_sum_f32_synced(
-                driver.tp.ar(),
-                driver.tp.cluster(),
+                driver.model.tp.ar(),
+                driver.model.tp.cluster(),
                 &cores,
                 &partials,
                 hidden,
@@ -688,21 +873,21 @@ fn forward_decode_layer_tp_moe(
         }
         .context("MoE AR sum partial_attn_f32 (full-attn)")?;
     } else {
-        let cores: Vec<&TpRankCore> = driver.stages.iter().map(|s| &s.core).collect();
+        let cores: Vec<&TpRankCore> = driver.session.stages.iter().map(|s| &s.core).collect();
         // SAFETY: partial_attn is hidden F16 elems per rank; streams
         // outlive this call; synced helper adds the cross-rank edge.
         let _ = unsafe {
             let partials: [Buffer<F16, RowParallel<0>>; 2] = [
-                Buffer::from_raw_unchecked(driver.stages[0].partial_attn, hidden),
-                Buffer::from_raw_unchecked(driver.stages[1].partial_attn, hidden),
+                Buffer::from_raw_unchecked(driver.session.stages[0].partial_attn, hidden),
+                Buffer::from_raw_unchecked(driver.session.stages[1].partial_attn, hidden),
             ];
             let streams: [&_; 2] = [
-                driver.tp.cluster().device(0).default_stream(),
-                driver.tp.cluster().device(1).default_stream(),
+                driver.model.tp.cluster().device(0).default_stream(),
+                driver.model.tp.cluster().device(1).default_stream(),
             ];
             tp_allreduce_sum_synced::<0>(
-                driver.tp.ar(),
-                driver.tp.cluster(),
+                driver.model.tp.ar(),
+                driver.model.tp.cluster(),
                 &cores,
                 &partials,
                 &streams,
@@ -725,22 +910,23 @@ fn forward_decode_layer_tp_moe(
     // ---- FFN half (Phases 4 / 5a-e / 6) — MoE-specific. ----
     // Phase 4: per-rank MoE FFN forward → two partials.
     for r in 0..n {
-        let dev = driver.tp.cluster().device(r);
+        let dev = driver.model.tp.cluster().device(r);
         dev.bind()?;
         let stream = dev.default_stream();
-        let reg = &driver.regs[r];
+        let reg = &driver.model.regs[r];
         let ops = HipOps::new(reg, stream);
-        let stage = &mut driver.stages[r];
-        let layer = &stage.layer_weights[il];
+        let model_stage = &driver.model.stages[r];
+        let session_stage = &driver.session.stages[r];
+        let layer = &model_stage.layer_weights[il];
         let tp_moe = layer
             .tp_moe
             .as_ref()
             .ok_or_else(|| anyhow!("layer {il} rank {r}: tp_moe weights missing for MoE layer"))?;
-        let tp_moe_scratch = stage
+        let tp_moe_scratch = session_stage
             .tp_moe_scratch
             .as_ref()
             .ok_or_else(|| anyhow!("rank {r}: tp_moe_scratch missing for MoE forward"))?;
-        let scratch = &stage.scratch;
+        let scratch = &session_stage.scratch;
         crate::tp_moe_upload::forward_ffn_moe_tp_per_rank(
             &ops,
             layer,
@@ -765,30 +951,30 @@ fn forward_decode_layer_tp_moe(
     // `DenseMlpTp::forward_decode_f32`. Pairs with the F32 MoE branch
     // and F32 attention residual on head_dim=512 + Q8_0 paths.
     {
-        let cores: Vec<&TpRankCore> = driver.stages.iter().map(|s| &s.core).collect();
+        let cores: Vec<&TpRankCore> = driver.session.stages.iter().map(|s| &s.core).collect();
         let sm_partials: [DevicePtr; 2] = [
-            driver.stages[0]
+            driver.session.stages[0]
                 .tp_moe_scratch
                 .as_ref()
                 .ok_or_else(|| anyhow!("rank 0: tp_moe_scratch missing in Phase 5a"))?
                 .partial_shared_mlp_f32,
-            driver.stages[1]
+            driver.session.stages[1]
                 .tp_moe_scratch
                 .as_ref()
                 .ok_or_else(|| anyhow!("rank 1: tp_moe_scratch missing in Phase 5a"))?
                 .partial_shared_mlp_f32,
         ];
         let streams: [&_; 2] = [
-            driver.tp.cluster().device(0).default_stream(),
-            driver.tp.cluster().device(1).default_stream(),
+            driver.model.tp.cluster().device(0).default_stream(),
+            driver.model.tp.cluster().device(1).default_stream(),
         ];
         // SAFETY: partial_shared_mlp_f32 buffers own hidden*4 bytes per
         // rank; streams correspond to those ranks; cores carry the
         // producer_done events that the synced helper records.
         unsafe {
             tp_allreduce_sum_f32_synced(
-                driver.tp.ar(),
-                driver.tp.cluster(),
+                driver.model.tp.ar(),
+                driver.model.tp.cluster(),
                 &cores,
                 &sm_partials,
                 hidden,
@@ -801,17 +987,18 @@ fn forward_decode_layer_tp_moe(
     // Phase 5b: `rmsnorm_f32(partial_shared_mlp_f32, post_ffw_norm_1_f32,
     // cur_mlp_f32)` — direct F32-in / F32-out (no F16→F32 cast needed).
     for r in 0..n {
-        let dev = driver.tp.cluster().device(r);
+        let dev = driver.model.tp.cluster().device(r);
         dev.bind()?;
         let stream = dev.default_stream();
-        let reg = &driver.regs[r];
+        let reg = &driver.model.regs[r];
         let ops = HipOps::new(reg, stream);
-        let stage = &driver.stages[r];
-        let tp_moe = stage.layer_weights[il]
+        let model_stage = &driver.model.stages[r];
+        let session_stage = &driver.session.stages[r];
+        let tp_moe = model_stage.layer_weights[il]
             .tp_moe
             .as_ref()
             .ok_or_else(|| anyhow!("layer {il} rank {r}: tp_moe missing in Phase 5b"))?;
-        let tp_moe_scratch = stage
+        let tp_moe_scratch = session_stage
             .tp_moe_scratch
             .as_ref()
             .ok_or_else(|| anyhow!("rank {r}: tp_moe_scratch missing in Phase 5b"))?;
@@ -832,30 +1019,30 @@ fn forward_decode_layer_tp_moe(
     // intact instead of clipping it through F16. Pairs with the F32
     // attention output path (commit 6b85f29).
     {
-        let cores: Vec<&TpRankCore> = driver.stages.iter().map(|s| &s.core).collect();
+        let cores: Vec<&TpRankCore> = driver.session.stages.iter().map(|s| &s.core).collect();
         let moe_partials: [DevicePtr; 2] = [
-            driver.stages[0]
+            driver.session.stages[0]
                 .tp_moe_scratch
                 .as_ref()
                 .ok_or_else(|| anyhow!("rank 0: tp_moe_scratch missing in Phase 5c"))?
                 .partial_moe_f32,
-            driver.stages[1]
+            driver.session.stages[1]
                 .tp_moe_scratch
                 .as_ref()
                 .ok_or_else(|| anyhow!("rank 1: tp_moe_scratch missing in Phase 5c"))?
                 .partial_moe_f32,
         ];
         let streams: [&_; 2] = [
-            driver.tp.cluster().device(0).default_stream(),
-            driver.tp.cluster().device(1).default_stream(),
+            driver.model.tp.cluster().device(0).default_stream(),
+            driver.model.tp.cluster().device(1).default_stream(),
         ];
         // SAFETY: partial_moe_f32 buffers own hidden*4 bytes per rank;
         // streams correspond to those ranks; cores carry the
         // producer_done events that the synced helper records.
         unsafe {
             tp_allreduce_sum_f32_synced(
-                driver.tp.ar(),
-                driver.tp.cluster(),
+                driver.model.tp.ar(),
+                driver.model.tp.cluster(),
                 &cores,
                 &moe_partials,
                 hidden,
@@ -869,17 +1056,18 @@ fn forward_decode_layer_tp_moe(
     // cur_moe_f32)`. Direct F32-in / F32-out — no F16 cast needed,
     // since Phase 5c AR'd in F32.
     for r in 0..n {
-        let dev = driver.tp.cluster().device(r);
+        let dev = driver.model.tp.cluster().device(r);
         dev.bind()?;
         let stream = dev.default_stream();
-        let reg = &driver.regs[r];
+        let reg = &driver.model.regs[r];
         let ops = HipOps::new(reg, stream);
-        let stage = &driver.stages[r];
-        let tp_moe = stage.layer_weights[il]
+        let model_stage = &driver.model.stages[r];
+        let session_stage = &driver.session.stages[r];
+        let tp_moe = model_stage.layer_weights[il]
             .tp_moe
             .as_ref()
             .ok_or_else(|| anyhow!("layer {il} rank {r}: tp_moe missing in Phase 5d"))?;
-        let tp_moe_scratch = stage
+        let tp_moe_scratch = session_stage
             .tp_moe_scratch
             .as_ref()
             .ok_or_else(|| anyhow!("rank {r}: tp_moe_scratch missing in Phase 5d"))?;
@@ -897,13 +1085,13 @@ fn forward_decode_layer_tp_moe(
     // Phase 5e: `cur_combined_f32 = cur_mlp_f32 + cur_moe_f32` (F32
     // add — kept in F32 through the final norm in Phase 6).
     for r in 0..n {
-        let dev = driver.tp.cluster().device(r);
+        let dev = driver.model.tp.cluster().device(r);
         dev.bind()?;
         let stream = dev.default_stream();
-        let reg = &driver.regs[r];
+        let reg = &driver.model.regs[r];
         let ops = HipOps::new(reg, stream);
-        let stage = &driver.stages[r];
-        let tp_moe_scratch = stage
+        let session_stage = &driver.session.stages[r];
+        let tp_moe_scratch = session_stage
             .tp_moe_scratch
             .as_ref()
             .ok_or_else(|| anyhow!("rank {r}: tp_moe_scratch missing in Phase 5e"))?;
@@ -918,19 +1106,20 @@ fn forward_decode_layer_tp_moe(
 
     // Phase 6: per-rank post_ffw_norm + residual add → next-layer hidden.
     for r in 0..n {
-        let dev = driver.tp.cluster().device(r);
+        let dev = driver.model.tp.cluster().device(r);
         dev.bind()?;
         let stream = dev.default_stream();
-        let reg = &driver.regs[r];
+        let reg = &driver.model.regs[r];
         let ops = HipOps::new(reg, stream);
-        let stage = &mut driver.stages[r];
-        let layer = &stage.layer_weights[il];
-        let scratch = &stage.scratch;
+        let model_stage = &driver.model.stages[r];
+        let session_stage = &mut driver.session.stages[r];
+        let layer = &model_stage.layer_weights[il];
+        let scratch = &session_stage.scratch;
         let tp_moe = layer
             .tp_moe
             .as_ref()
             .ok_or_else(|| anyhow!("layer {il} rank {r}: tp_moe missing in Phase 6"))?;
-        let tp_moe_scratch = stage
+        let tp_moe_scratch = session_stage
             .tp_moe_scratch
             .as_ref()
             .ok_or_else(|| anyhow!("rank {r}: tp_moe_scratch missing in Phase 6"))?;
@@ -949,18 +1138,18 @@ fn forward_decode_layer_tp_moe(
         //    free after Phase 1).
         ops.cast_f32_to_f16(tp_moe_scratch.tmp_f32, scratch.attn_out_local.0, hidden)
             .context("MoE Phase 6 cast normed F32→F16")?;
-        // 3. Residual add into `stage.hidden`. Output is F16 — the
-        //    residual stream stays F16 (bounded by `layer_output_scale`).
+        // 3. Residual add into `session_stage.hidden`. Output is F16 —
+        //    the residual stream stays F16 (bounded by `layer_output_scale`).
         ops.add_f16(
             scratch.attn_residual_f16.0,
             scratch.attn_out_local.0,
-            stage.hidden,
+            session_stage.hidden,
             hidden,
         )
         .context("MoE Phase 6 residual add")?;
         flambeau_blocks::apply_layer_output_scale_f16(
             &ops,
-            stage.hidden,
+            session_stage.hidden,
             hidden,
             layer.layer_output_scale,
         )
@@ -982,21 +1171,22 @@ fn forward_attn_f32_output(
     position: usize,
     il: usize,
 ) -> Result<()> {
-    let spec = driver.layout.layers[il];
-    let n_ranks = driver.stages.len();
-    let hidden = driver.cfg.hidden_size;
+    let spec = driver.model.layout.layers[il];
+    let n_ranks = driver.model.stages.len();
+    let hidden = driver.model.cfg.hidden_size;
     let head_dim = spec.head_dim;
     let n_heads_local = spec.n_heads / n_ranks;
     let n_kv_local = spec.n_kv_heads / n_ranks;
-    let rms_eps = driver.cfg.rms_norm_eps;
-    let dev = driver.tp.cluster().device(r);
+    let rms_eps = driver.model.cfg.rms_norm_eps;
+    let dev = driver.model.tp.cluster().device(r);
     dev.bind()?;
     let stream = dev.default_stream();
-    let reg = &driver.regs[r];
+    let reg = &driver.model.regs[r];
     let ops = HipOps::new(reg, stream);
-    let stage = &mut driver.stages[r];
-    let weights = &stage.layer_weights[il];
-    let x_in = stage.hidden;
+    let model_stage = &driver.model.stages[r];
+    let session_stage = &mut driver.session.stages[r];
+    let weights = &model_stage.layer_weights[il];
+    let x_in = session_stage.hidden;
     let block = weights
         .build_attn_block(
             &spec,
@@ -1005,29 +1195,29 @@ fn forward_attn_f32_output(
             n_kv_local,
             head_dim,
             rms_eps,
-            stage.scratch.v_ones_f16.0,
+            session_stage.scratch.v_ones_f16.0,
         )?
         .with_f32_output_proj(true);
-    let kv = stage.kv_caches[il]
+    let kv = session_stage.kv_caches[il]
         .as_mut()
         .expect("S9-A requires per-layer KV");
     let mut std_scratch = StandardAttentionDecodeScratch {
-        x_q8_1: stage.scratch.x_q8_1.0,
-        mmvq_f32: stage.scratch.mmvq_f32.0,
+        x_q8_1: session_stage.scratch.x_q8_1.0,
+        mmvq_f32: session_stage.scratch.mmvq_f32.0,
         q_fused_f16: DevicePtr(0),
-        q_f16: stage.scratch.q_f16.0,
+        q_f16: session_stage.scratch.q_f16.0,
         gate_f16: DevicePtr(0),
-        k_f16: stage.scratch.k_f16.0,
-        v_f16: stage.scratch.v_f16.0,
+        k_f16: session_stage.scratch.k_f16.0,
+        v_f16: session_stage.scratch.v_f16.0,
         k_q8_0: DevicePtr(0),
         v_q8_0: DevicePtr(0),
-        attn_out_f16: stage.scratch.attn_out_local.0,
+        attn_out_f16: session_stage.scratch.attn_out_local.0,
         gated_out_f16: DevicePtr(0),
-        positions: stage.scratch.positions.0,
-        positions_host: &mut stage.positions_host,
-        splitk_partials_m: stage.scratch.splitk_partials_m.0,
-        splitk_partials_s: stage.scratch.splitk_partials_s.0,
-        splitk_partials_o: stage.scratch.splitk_partials_o.0,
+        positions: session_stage.scratch.positions.0,
+        positions_host: &mut session_stage.positions_host,
+        splitk_partials_m: session_stage.scratch.splitk_partials_m.0,
+        splitk_partials_s: session_stage.scratch.splitk_partials_s.0,
+        splitk_partials_o: session_stage.scratch.splitk_partials_o.0,
     };
     // Pass `partial_attn_f32` (F32 [hidden]) as the delta_out — the
     // F32-output-proj block writes the F32 mmvq result directly here,
@@ -1038,7 +1228,7 @@ fn forward_attn_f32_output(
             dev,
             stream,
             x_in,
-            stage.partial_attn_f32,
+            session_stage.partial_attn_f32,
             kv,
             &mut std_scratch,
             position,
@@ -1051,23 +1241,24 @@ fn forward_attn_f32_output(
 /// (with F32 `post_attention_norm_f32`) → F32 staging → F16 cast
 /// (safe: rmsnorm output is bounded) → F16 add to stage.hidden.
 fn post_norm_residual_attn_f32(driver: &mut Gemma4TpDriver, r: usize, il: usize) -> Result<()> {
-    let hidden = driver.cfg.hidden_size;
-    let rms_eps = driver.cfg.rms_norm_eps;
-    let dev = driver.tp.cluster().device(r);
+    let hidden = driver.model.cfg.hidden_size;
+    let rms_eps = driver.model.cfg.rms_norm_eps;
+    let dev = driver.model.tp.cluster().device(r);
     dev.bind()?;
     let stream = dev.default_stream();
-    let reg = &driver.regs[r];
+    let reg = &driver.model.regs[r];
     let ops = HipOps::new(reg, stream);
-    let stage = &mut driver.stages[r];
-    let layer = &stage.layer_weights[il];
+    let model_stage = &driver.model.stages[r];
+    let session_stage = &mut driver.session.stages[r];
+    let layer = &model_stage.layer_weights[il];
     let norm_f32 = layer
         .post_attention_norm_f32
         .ok_or_else(|| anyhow!("layer {il} rank {r}: post_attention_norm_f32 missing"))?;
     // 1. F32 rmsnorm: partial_attn_f32 / RMS · post_attention_norm_f32 → attn_normed_f32_tmp.
     ops.rmsnorm_f32(
-        stage.partial_attn_f32,
+        session_stage.partial_attn_f32,
         norm_f32,
-        stage.attn_normed_f32_tmp,
+        session_stage.attn_normed_f32_tmp,
         1,
         hidden,
         rms_eps,
@@ -1076,16 +1267,16 @@ fn post_norm_residual_attn_f32(driver: &mut Gemma4TpDriver, r: usize, il: usize)
     // 2. Cast F32 → F16 (safe; rmsnorm output is bounded). Reuse
     //    `attn_out_local` as the F16 staging.
     ops.cast_f32_to_f16(
-        stage.attn_normed_f32_tmp,
-        stage.scratch.attn_out_local.0,
+        session_stage.attn_normed_f32_tmp,
+        session_stage.scratch.attn_out_local.0,
         hidden,
     )
     .context("F32→F16 cast post-attn-norm (full-attn)")?;
     // 3. F16 residual add → attn_residual_f16.
     ops.add_f16(
-        stage.hidden,
-        stage.scratch.attn_out_local.0,
-        stage.scratch.attn_residual_f16.0,
+        session_stage.hidden,
+        session_stage.scratch.attn_out_local.0,
+        session_stage.scratch.attn_residual_f16.0,
         hidden,
     )
     .context("F16 residual add (full-attn)")?;
@@ -1096,50 +1287,51 @@ fn post_norm_residual_attn_f32(driver: &mut Gemma4TpDriver, r: usize, il: usize)
 // composer drives the 6-phase order + the typed AR transitions.
 impl LayerComposerTp for Gemma4TpDriver {
     fn n_ranks(&self) -> usize {
-        self.stages.len()
+        self.model.stages.len()
     }
 
     fn hidden_size(&self) -> usize {
-        self.cfg.hidden_size
+        self.model.cfg.hidden_size
     }
 
     fn ar(&self) -> &flambeau_backend_hip::BarP2pAllReduce {
-        self.tp.ar()
+        self.model.tp.ar()
     }
 
     fn cluster(&self) -> &HipCluster {
-        self.tp.cluster()
+        self.model.tp.cluster()
     }
 
     fn core(&self, rank: usize) -> &TpRankCore {
-        &self.stages[rank].core
+        &self.session.stages[rank].core
     }
 
     fn partial_attn_ptr(&self, rank: usize) -> DevicePtr {
-        self.stages[rank].partial_attn
+        self.session.stages[rank].partial_attn
     }
 
     fn partial_ffn_ptr(&self, rank: usize) -> DevicePtr {
-        self.stages[rank].partial_ffn
+        self.session.stages[rank].partial_ffn
     }
 
     fn forward_attn(&mut self, r: usize, position: usize, il: usize) -> Result<()> {
-        let spec = self.layout.layers[il];
-        let n_ranks = self.stages.len();
-        let hidden = self.cfg.hidden_size;
+        let spec = self.model.layout.layers[il];
+        let n_ranks = self.model.stages.len();
+        let hidden = self.model.cfg.hidden_size;
         let head_dim = spec.head_dim;
         let n_heads_local = spec.n_heads / n_ranks;
         let n_kv_local = spec.n_kv_heads / n_ranks;
-        let rms_eps = self.cfg.rms_norm_eps;
+        let rms_eps = self.model.cfg.rms_norm_eps;
 
-        let dev = self.tp.cluster().device(r);
+        let dev = self.model.tp.cluster().device(r);
         dev.bind()?;
         let stream = dev.default_stream();
-        let reg = &self.regs[r];
+        let reg = &self.model.regs[r];
         let ops = HipOps::new(reg, stream);
-        let stage = &mut self.stages[r];
-        let weights = &stage.layer_weights[il];
-        let x_in = stage.hidden;
+        let model_stage = &self.model.stages[r];
+        let session_stage = &mut self.session.stages[r];
+        let weights = &model_stage.layer_weights[il];
+        let x_in = session_stage.hidden;
         let block = weights.build_attn_block(
             &spec,
             hidden,
@@ -1147,36 +1339,36 @@ impl LayerComposerTp for Gemma4TpDriver {
             n_kv_local,
             head_dim,
             rms_eps,
-            stage.scratch.v_ones_f16.0,
+            session_stage.scratch.v_ones_f16.0,
         )?;
 
-        let kv = stage.kv_caches[il]
+        let kv = session_stage.kv_caches[il]
             .as_mut()
             .expect("S9-A requires per-layer KV");
         let mut std_scratch = StandardAttentionDecodeScratch {
-            x_q8_1: stage.scratch.x_q8_1.0,
-            mmvq_f32: stage.scratch.mmvq_f32.0,
+            x_q8_1: session_stage.scratch.x_q8_1.0,
+            mmvq_f32: session_stage.scratch.mmvq_f32.0,
             q_fused_f16: DevicePtr(0),
-            q_f16: stage.scratch.q_f16.0,
+            q_f16: session_stage.scratch.q_f16.0,
             gate_f16: DevicePtr(0),
-            k_f16: stage.scratch.k_f16.0,
-            v_f16: stage.scratch.v_f16.0,
+            k_f16: session_stage.scratch.k_f16.0,
+            v_f16: session_stage.scratch.v_f16.0,
             k_q8_0: DevicePtr(0),
             v_q8_0: DevicePtr(0),
-            attn_out_f16: stage.scratch.attn_out_local.0,
+            attn_out_f16: session_stage.scratch.attn_out_local.0,
             gated_out_f16: DevicePtr(0),
-            positions: stage.scratch.positions.0,
-            positions_host: &mut stage.positions_host,
-            splitk_partials_m: stage.scratch.splitk_partials_m.0,
-            splitk_partials_s: stage.scratch.splitk_partials_s.0,
-            splitk_partials_o: stage.scratch.splitk_partials_o.0,
+            positions: session_stage.scratch.positions.0,
+            positions_host: &mut session_stage.positions_host,
+            splitk_partials_m: session_stage.scratch.splitk_partials_m.0,
+            splitk_partials_s: session_stage.scratch.splitk_partials_s.0,
+            splitk_partials_o: session_stage.scratch.splitk_partials_o.0,
         };
         block.forward_decode(
             &ops,
             dev,
             stream,
             x_in,
-            stage.partial_attn,
+            session_stage.partial_attn,
             kv,
             &mut std_scratch,
             position,
@@ -1187,22 +1379,23 @@ impl LayerComposerTp for Gemma4TpDriver {
     }
 
     fn post_norm_residual_attn(&mut self, r: usize, il: usize) -> Result<()> {
-        let hidden = self.cfg.hidden_size;
-        let rms_eps = self.cfg.rms_norm_eps;
-        let dev = self.tp.cluster().device(r);
+        let hidden = self.model.cfg.hidden_size;
+        let rms_eps = self.model.cfg.rms_norm_eps;
+        let dev = self.model.tp.cluster().device(r);
         dev.bind()?;
         let stream = dev.default_stream();
-        let reg = &self.regs[r];
+        let reg = &self.model.regs[r];
         let ops = HipOps::new(reg, stream);
-        let stage = &mut self.stages[r];
-        let weights = &stage.layer_weights[il];
-        let scratch = &mut stage.scratch;
+        let model_stage = &self.model.stages[r];
+        let session_stage = &mut self.session.stages[r];
+        let weights = &model_stage.layer_weights[il];
+        let scratch = &mut session_stage.scratch;
         post_norm_residual_f16(
             &ops,
-            stage.partial_attn,
+            session_stage.partial_attn,
             weights.post_attention_norm,
             scratch.attn_out_local.0,
-            stage.hidden,
+            session_stage.hidden,
             scratch.attn_residual_f16.0,
             1,
             hidden,
@@ -1212,18 +1405,19 @@ impl LayerComposerTp for Gemma4TpDriver {
     }
 
     fn forward_ffn(&mut self, r: usize, il: usize) -> Result<()> {
-        let n_ranks = self.stages.len();
-        let hidden = self.cfg.hidden_size;
-        let ff_len_local = self.cfg.feed_forward_length / n_ranks;
-        let rms_eps = self.cfg.rms_norm_eps;
-        let dev = self.tp.cluster().device(r);
+        let n_ranks = self.model.stages.len();
+        let hidden = self.model.cfg.hidden_size;
+        let ff_len_local = self.model.cfg.feed_forward_length / n_ranks;
+        let rms_eps = self.model.cfg.rms_norm_eps;
+        let dev = self.model.tp.cluster().device(r);
         dev.bind()?;
         let stream = dev.default_stream();
-        let reg = &self.regs[r];
+        let reg = &self.model.regs[r];
         let ops = HipOps::new(reg, stream);
-        let stage = &mut self.stages[r];
-        let weights = &stage.layer_weights[il];
-        let scratch = &mut stage.scratch;
+        let model_stage = &self.model.stages[r];
+        let session_stage = &mut self.session.stages[r];
+        let weights = &model_stage.layer_weights[il];
+        let scratch = &mut session_stage.scratch;
         ops.rmsnorm_quant_q8_1(
             scratch.attn_residual_f16.0,
             weights.ffn_norm,
@@ -1264,7 +1458,7 @@ impl LayerComposerTp for Gemma4TpDriver {
         block.forward_decode(
             &ops,
             /* x_norm = */ DevicePtr(0),
-            stage.partial_ffn,
+            session_stage.partial_ffn,
             block_scratch,
             /* pre_quantized = */ true,
         )
@@ -1272,23 +1466,24 @@ impl LayerComposerTp for Gemma4TpDriver {
     }
 
     fn post_norm_residual_ffn(&mut self, r: usize, il: usize) -> Result<()> {
-        let hidden = self.cfg.hidden_size;
-        let rms_eps = self.cfg.rms_norm_eps;
-        let dev = self.tp.cluster().device(r);
+        let hidden = self.model.cfg.hidden_size;
+        let rms_eps = self.model.cfg.rms_norm_eps;
+        let dev = self.model.tp.cluster().device(r);
         dev.bind()?;
         let stream = dev.default_stream();
-        let reg = &self.regs[r];
+        let reg = &self.model.regs[r];
         let ops = HipOps::new(reg, stream);
-        let stage = &mut self.stages[r];
-        let weights = &stage.layer_weights[il];
-        let scratch = &mut stage.scratch;
+        let model_stage = &self.model.stages[r];
+        let session_stage = &mut self.session.stages[r];
+        let weights = &model_stage.layer_weights[il];
+        let scratch = &mut session_stage.scratch;
         post_norm_residual_f16(
             &ops,
-            stage.partial_ffn,
+            session_stage.partial_ffn,
             weights.post_ffw_norm,
             scratch.attn_out_local.0,
             scratch.attn_residual_f16.0,
-            stage.hidden,
+            session_stage.hidden,
             1,
             hidden,
             rms_eps,
@@ -1301,7 +1496,7 @@ impl LayerComposerTp for Gemma4TpDriver {
         // layer 5-10.
         flambeau_blocks::apply_layer_output_scale_f16(
             &ops,
-            stage.hidden,
+            session_stage.hidden,
             hidden,
             weights.layer_output_scale,
         )
@@ -1316,56 +1511,57 @@ impl LayerComposerTp for Gemma4TpDriver {
 
 impl TpDecodeDriver for Gemma4TpDriver {
     fn cluster(&self) -> &HipCluster {
-        self.tp.cluster()
+        self.model.tp.cluster()
     }
 
     fn n_layers(&self) -> usize {
-        self.cfg.num_layers
+        self.model.cfg.num_layers
     }
 
     fn head_rank(&self) -> usize {
-        self.head_rank
+        self.model.head_rank
     }
 
     fn embed_token(&mut self, rank: usize, token_id: u32) -> Result<()> {
-        let device = self.tp.cluster().device(rank);
+        let device = self.model.tp.cluster().device(rank);
         let stream = device.default_stream();
-        let stage = &mut self.stages[rank];
+        let model_stage = &self.model.stages[rank];
+        let session_stage = &mut self.session.stages[rank];
         embed_token_host(
             device,
             stream,
-            stage.token_embd.ptr,
-            stage.token_embd.dtype,
-            stage.token_embd.bytes,
-            self.cfg.vocab_size,
-            self.cfg.hidden_size,
+            model_stage.token_embd.ptr,
+            model_stage.token_embd.dtype,
+            model_stage.token_embd.bytes,
+            self.model.cfg.vocab_size,
+            self.model.cfg.hidden_size,
             token_id,
-            stage.hidden,
+            session_stage.hidden,
         )?;
         // Gemma4 input scale: `inpL = scale(inpL, sqrt(n_embd))`
         // (`gemma4-iswa.cpp:20`). Same step as single-device and PP;
         // without it every TP decode produces a degenerate fixed
         // token (caught originally on PP by the parity test).
-        let reg = &self.regs[rank];
+        let reg = &self.model.regs[rank];
         let ops = HipOps::new(reg, stream);
         ops.scale_f16(
-            stage.hidden,
-            stage.hidden,
-            self.cfg.hidden_size,
-            (self.cfg.hidden_size as f32).sqrt(),
+            session_stage.hidden,
+            session_stage.hidden,
+            self.model.cfg.hidden_size,
+            (self.model.cfg.hidden_size as f32).sqrt(),
         )
         .context("TP embed_token sqrt(n_embd) scale")?;
         if std::env::var_os("FLAMBEAU_TP_DEBUG_EMBED").is_some() {
             use flambeau_core::CopyDirection;
-            let hidden = self.cfg.hidden_size;
+            let hidden = self.model.cfg.hidden_size;
             let mut host = vec![half::f16::from_f32(0.0); hidden];
-            // SAFETY: stage.hidden owns hidden*2 bytes.
+            // SAFETY: session_stage.hidden owns hidden*2 bytes.
             unsafe {
                 device.memcpy_async(
                     stream,
                     CopyDirection::DeviceToHost,
                     DevicePtr(host.as_mut_ptr() as usize),
-                    stage.hidden,
+                    session_stage.hidden,
                     hidden * 2,
                 )?;
             }
@@ -1385,26 +1581,27 @@ impl TpDecodeDriver for Gemma4TpDriver {
     }
 
     fn output_head(&mut self) -> Result<()> {
-        let rank = self.head_rank;
-        let device = self.tp.cluster().device(rank);
+        let rank = self.model.head_rank;
+        let device = self.model.tp.cluster().device(rank);
         let stream = device.default_stream();
-        let reg = &self.regs[rank];
+        let reg = &self.model.regs[rank];
         let ops = HipOps::new(reg, stream);
-        let cfg = &self.cfg;
-        let stage = &mut self.stages[rank];
-        let scratch = stage
+        let cfg = &self.model.cfg;
+        let model_stage = &self.model.stages[rank];
+        let session_stage = &mut self.session.stages[rank];
+        let scratch = session_stage
             .output_head_scratch
             .as_mut()
             .ok_or_else(|| anyhow!("output_head: head rank missing scratch"))?;
-        let lm_head_tensor = stage
+        let lm_head_tensor = model_stage
             .lm_head
             .as_ref()
-            .unwrap_or(&stage.token_embd);
-        let lm_head: WeightHandle = lm_head_tensor.as_weight_handle(stage.token_embd_dims)?;
+            .unwrap_or(&model_stage.token_embd);
+        let lm_head: WeightHandle = lm_head_tensor.as_weight_handle(model_stage.token_embd_dims)?;
         let logits = forward_output_head(
             &ops,
-            stage.hidden,
-            stage.output_norm.ptr,
+            session_stage.hidden,
+            model_stage.output_norm.ptr,
             lm_head,
             cfg.final_logit_softcap,
             scratch,
@@ -1417,7 +1614,7 @@ impl TpDecodeDriver for Gemma4TpDriver {
             device.memcpy_async(
                 stream,
                 CopyDirection::DeviceToHost,
-                DevicePtr(self.logits_host.as_mut_ptr() as usize),
+                DevicePtr(self.session.logits_host.as_mut_ptr() as usize),
                 logits,
                 cfg.vocab_size * 4,
             )?;

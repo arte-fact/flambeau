@@ -242,11 +242,14 @@ fn forward_one_token_tp_smoke() {
     let mut tok = 0u32;
     for pos in 0..4 {
         tok = driver.forward_one_token(tok, pos).expect("forward");
-        assert!((tok as usize) < driver.cfg.vocab_size, "argmax oob: {tok}");
+        assert!(
+            (tok as usize) < driver.model.cfg.vocab_size,
+            "argmax oob: {tok}"
+        );
     }
     // Per-rank KV caches grew to 4 tokens each.
     for r in 0..N_RANKS {
-        let kv = driver.stages[r].kv_caches[0]
+        let kv = driver.session.stages[r].kv_caches[0]
             .as_ref()
             .expect("layer 0 has KV");
         assert_eq!(kv.current_tokens(), 4, "rank {r} layer 0 kv count");
