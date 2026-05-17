@@ -102,16 +102,31 @@ pub fn forward_one_token_pp<D: PpDecodeDriver>(
     let hidden_bytes = driver.hidden_bytes();
     for rank_idx in 0..n_ranks {
         if rank_idx > 0 {
+            // Async event-bridged peer copy: src stream issues DtoH +
+            // records bridge event; dst stream stream-waits on bridge
+            // event + issues HtoD. No host sync, no
+            // `hipStreamSynchronize` round-trip in the per-token
+            // critical path. The helper also records an `htod_done`
+            // event and threads it through `peer_copy_htod_event[src]`
+            // so the next call's DtoH on src waits for the prior HtoD
+            // to drain the pinned bounce buffer — prevents bounce
+            // aliasing without a host barrier.
+            //
+            // `consumer_stream = None`: PP keeps all subsequent
+            // compute on the dst device's default stream — same
+            // stream as the HtoD — so stream ordering is implicit.
+            //
             // SAFETY: hidden_a buffers on each rank are sized
-            // `hidden_bytes` and not concurrently touched by other
-            // streams during this peer-copy.
+            // `hidden_bytes`; the helper's internal interlock prevents
+            // concurrent peer-copy aliasing of the pinned bounce.
             unsafe {
-                driver.cluster().peer_copy_via_host(
+                driver.cluster().peer_copy_via_host_event(
                     driver.hidden_a(rank_idx),
                     rank_idx,
                     driver.hidden_a(rank_idx - 1),
                     rank_idx - 1,
                     hidden_bytes,
+                    None,
                 )?;
             }
         }
