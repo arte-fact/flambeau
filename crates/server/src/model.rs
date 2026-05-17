@@ -933,6 +933,39 @@ pub fn qwen3moe_forward_decode_batched(
 
     if let Some(pp_model) = model.as_pp() {
         let model = &pp_model.model;
+        // N=1 fused fast-path. The batched `forward_decode_batched_pp`
+        // at N=1 replays prefill-flavoured kernels (separate rmsnorm +
+        // 2 quant variants per layer) that add ~7-8 ms/token of host
+        // launch + HBM round-trip overhead vs the fused
+        // `flambeau_rmsnorm_q8_1_fused` form used by the legacy
+        // `forward_one_token_pp_logits` decode path. The fused path
+        // owns its own `decode: ShardedForwardOneTokenScratch` scratch
+        // on each inflight (separate from `prefill` which the batched
+        // path uses), so N=1 routing through it is independent of any
+        // batched bookkeeping.
+        // See `certs/perf/tg_breakdown_2026_05_17/chat_path_breakdown.md`.
+        if n == 1 {
+            use flambeau_qwen3_moe::forward::forward_one_token_pp_logits;
+            let slot = &slots[0];
+            // SAFETY: n == 1; inflights[0] is the only borrow.
+            let pp = unsafe {
+                (&mut **inflights_ptr)
+                    .as_pp_mut()
+                    .context("N=1 fused PP: slot 0 is not PP")?
+            };
+            let logits_out: &mut Vec<f32> = logits_refs[0];
+            logits_out.clear();
+            return forward_one_token_pp_logits(
+                model,
+                &mut pp.session,
+                cluster,
+                &mut pp.decode,
+                slot.token_id,
+                slot.position,
+                logits_out,
+            )
+            .context("forward_one_token_pp_logits (N=1 fused fast-path)");
+        }
         let mut sessions: Vec<&mut Qwen3MoEShardedSession> = Vec::with_capacity(n);
         // SAFETY: n >= 1; disjoint reborrow of slot 0's `prefill` field
         // from the per-slot `session` borrows below.
@@ -964,6 +997,28 @@ pub fn qwen3moe_forward_decode_batched(
         .context("forward_decode_batched_pp")
     } else if let Some(tp_model) = model.as_tp() {
         let model = &tp_model.model;
+        // N=1 fused fast-path — same rationale as PP.
+        if n == 1 {
+            use flambeau_qwen3_moe::forward::forward_one_token_tp_logits;
+            let slot = &slots[0];
+            let tp = unsafe {
+                (&mut **inflights_ptr)
+                    .as_tp_mut()
+                    .context("N=1 fused TP: slot 0 is not TP")?
+            };
+            let logits_out: &mut Vec<f32> = logits_refs[0];
+            logits_out.clear();
+            return forward_one_token_tp_logits(
+                model,
+                &mut tp.decode,
+                &tp_model.tp,
+                &mut tp.session.caches,
+                slot.token_id,
+                slot.position,
+                logits_out,
+            )
+            .context("forward_one_token_tp_logits (N=1 fused fast-path)");
+        }
         let mut sessions: Vec<&mut flambeau_qwen3_moe::Qwen3MoETpSession> =
             Vec::with_capacity(n);
         for s in 0..n {
@@ -1001,6 +1056,29 @@ pub fn qwen3moe_forward_decode_batched(
     } else if let Some(hybrid_model) = model.as_hybrid() {
         let model = &hybrid_model.model;
         let stage_ars = &hybrid_model.stage_ars();
+        // N=1 fused fast-path — same rationale as PP.
+        if n == 1 {
+            use flambeau_qwen3_moe::forward::forward_one_token_hybrid_logits;
+            let slot = &slots[0];
+            let hyb = unsafe {
+                (&mut **inflights_ptr)
+                    .as_hybrid_mut()
+                    .context("N=1 fused Hybrid: slot 0 is not Hybrid")?
+            };
+            let logits_out: &mut Vec<f32> = logits_refs[0];
+            logits_out.clear();
+            return forward_one_token_hybrid_logits(
+                model,
+                &mut hyb.decode,
+                cluster,
+                stage_ars,
+                &mut hyb.session,
+                slot.token_id,
+                slot.position,
+                logits_out,
+            )
+            .context("forward_one_token_hybrid_logits (N=1 fused fast-path)");
+        }
         let mut sessions: Vec<&mut Qwen3MoEHybridSession> = Vec::with_capacity(n);
         for s in 0..n {
             // SAFETY: s in 0..n; inflights distinct.
