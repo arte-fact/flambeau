@@ -11,7 +11,10 @@
 
 pub mod activation;
 pub mod add;
+pub mod attn_decode;
+pub mod attn_prefill;
 pub mod cast;
+pub mod kv_append;
 pub mod qmatmul;
 pub mod quantize;
 pub mod rmsnorm;
