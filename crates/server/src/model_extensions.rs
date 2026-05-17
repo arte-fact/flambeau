@@ -16,7 +16,7 @@ use flambeau_qwen3_moe::session::{
     restore_layer_caches_from_host, snapshot_layer_caches_to_host, LayerCacheSnapshot,
 };
 
-use crate::model::{HybridHipModel, HybridHipSession, PpHipSession, TpHipSession};
+use crate::qwen3moe_handle::{HybridHipModel, HybridHipSession, PpHipSession, TpHipSession};
 
 pub trait KvSnapshot {
     fn capture(&self, cluster: &HipCluster) -> Result<Vec<Vec<LayerCacheSnapshot>>>;

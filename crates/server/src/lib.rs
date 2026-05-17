@@ -18,7 +18,7 @@ pub mod tool_call_parser;
 #[cfg(feature = "hip")]
 pub mod gpu_sampler;
 #[cfg(feature = "hip")]
-pub mod model;
+pub mod qwen3moe_handle;
 #[cfg(feature = "hip")]
 pub mod model_cfg;
 #[cfg(feature = "hip")]
@@ -43,7 +43,7 @@ pub use api::{
 pub use state::{ModelDefaults, SamplingParams};
 
 #[cfg(feature = "hip")]
-pub use model::{prefill_logits, Inflight, LoadedModel};
+pub use qwen3moe_handle::{prefill_logits, Inflight, LoadedModel};
 #[cfg(feature = "hip")]
 pub use model_extensions::KvSnapshot;
 #[cfg(feature = "hip")]

@@ -16,7 +16,7 @@ use flambeau_qwen3_moe::session::KvLayout;
 
 pub use flambeau_server_core::{BatchSlot, Model, Session, SessionContext};
 
-use crate::model::{HybridHipModel, Inflight, LoadedModel, PpHipModel, TpHipModel};
+use crate::qwen3moe_handle::{HybridHipModel, Inflight, LoadedModel, PpHipModel, TpHipModel};
 
 /// Self-sufficient qwen3-moe session: bundles an `Inflight`
 /// (KV state + scratches) with a back-reference to its parent
@@ -60,7 +60,7 @@ impl Model for PpHipModel {
         slots: &[BatchSlot],
         logits_refs: &mut [&mut Vec<f32>],
     ) -> Result<()> {
-        crate::model::qwen3moe_forward_decode_batched(self, ctx, inflights, slots, logits_refs)
+        crate::qwen3moe_handle::qwen3moe_forward_decode_batched(self, ctx, inflights, slots, logits_refs)
     }
 }
 
@@ -87,7 +87,7 @@ impl Model for TpHipModel {
         slots: &[BatchSlot],
         logits_refs: &mut [&mut Vec<f32>],
     ) -> Result<()> {
-        crate::model::qwen3moe_forward_decode_batched(self, ctx, inflights, slots, logits_refs)
+        crate::qwen3moe_handle::qwen3moe_forward_decode_batched(self, ctx, inflights, slots, logits_refs)
     }
 }
 
@@ -111,7 +111,7 @@ impl Model for HybridHipModel {
         slots: &[BatchSlot],
         logits_refs: &mut [&mut Vec<f32>],
     ) -> Result<()> {
-        crate::model::qwen3moe_forward_decode_batched(self, ctx, inflights, slots, logits_refs)
+        crate::qwen3moe_handle::qwen3moe_forward_decode_batched(self, ctx, inflights, slots, logits_refs)
     }
 }
 

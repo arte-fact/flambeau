@@ -17,7 +17,7 @@ use flambeau_runtime::{LayerAssignment, Registry};
 use tokio::sync::Mutex;
 use tracing::info;
 
-use crate::model::LoadedModel;
+use crate::qwen3moe_handle::LoadedModel;
 use crate::routes::{
     agent_stats, chat_completions, completions, detokenize, embeddings, health, infill,
     messages_anthropic, models, tokenize, ServerState, SharedState,
@@ -255,7 +255,7 @@ pub async fn serve(cfg: ServeConfig, registry: Registry) -> Result<()> {
 
             (
                 cluster,
-                std::sync::Arc::new(crate::model::PpHipModel { model: m }) as LoadedModel,
+                std::sync::Arc::new(crate::qwen3moe_handle::PpHipModel { model: m }) as LoadedModel,
             )
         }
         MeshMode::Tp { world } => {
@@ -290,7 +290,7 @@ pub async fn serve(cfg: ServeConfig, registry: Registry) -> Result<()> {
                 .context("TpCluster::from_arc (requires fully-connected peer-access matrix)")?;
             (
                 cluster,
-                std::sync::Arc::new(crate::model::TpHipModel { model: m, tp }) as LoadedModel,
+                std::sync::Arc::new(crate::qwen3moe_handle::TpHipModel { model: m, tp }) as LoadedModel,
             )
         }
         MeshMode::Hybrid { pp_size, tp_size } => {
@@ -353,7 +353,7 @@ pub async fn serve(cfg: ServeConfig, registry: Registry) -> Result<()> {
             .context("HybridCluster::new (per-stage ARs + global cluster)")?;
             (
                 global_cluster,
-                std::sync::Arc::new(crate::model::HybridHipModel { model: hybrid, hc })
+                std::sync::Arc::new(crate::qwen3moe_handle::HybridHipModel { model: hybrid, hc })
                     as LoadedModel,
             )
         }

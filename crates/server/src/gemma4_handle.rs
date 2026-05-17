@@ -146,7 +146,7 @@ impl Session for Gemma4Session {
 pub fn build_gemma4_loaded_model(
     cfg: Gemma4Config,
     topology: &'static str,
-) -> crate::model::LoadedModel {
+) -> crate::qwen3moe_handle::LoadedModel {
     std::sync::Arc::new(Gemma4Model { cfg, topology })
 }
 

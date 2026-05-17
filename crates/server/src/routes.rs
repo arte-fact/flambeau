@@ -8,7 +8,7 @@ use crate::model_cfg::ServerModelCfg;
 use flambeau_quant::{ChatTemplate, GgufTokenizer};
 use tokio::sync::Mutex;
 
-use crate::model::{
+use crate::qwen3moe_handle::{
     capture_kv_from_inflight, restore_kv_into_inflight, snapshot_bytes, LoadedModel,
     Qwen3MoeModelExt, Qwen3MoeSessionExt,
 };
@@ -52,14 +52,14 @@ pub enum PrefixCacheRestore {
     PrefixHit { n_matched: usize },
 }
 
-pub use crate::model::Qwen3MoeServerExtras;
+pub use crate::qwen3moe_handle::Qwen3MoeServerExtras;
 
 /// Server-wide shared state — built once at startup.
 pub struct ServerState {
     pub model_id: String,
     pub cfg: ServerModelCfg,
     /// PP or TP loaded model. Handlers dispatch via the
-    /// `crate::model::{prefill_logits, decode_logits}` helpers; they
+    /// `crate::qwen3moe_handle::{prefill_logits, decode_logits}` helpers; they
     /// don't need to inspect this variant directly.
     pub model: LoadedModel,
     /// `Arc` so the TP variant's `BarP2pAllReduce` can
@@ -974,7 +974,7 @@ impl ServerState {
     }
 
     /// Phase 12.5 — single-slot decode through the batched path. Replaces
-    /// the legacy `crate::model::decode_logits` free function. Caller
+    /// the legacy `crate::qwen3moe_handle::decode_logits` free function. Caller
     /// must hold the slot's mutex (passing the live `&mut Inflight`
     /// borrowed from the guard).
     pub fn dispatch_decode_one(

@@ -16,7 +16,7 @@ use flambeau_core::{CopyDirection, Device, DevicePtr, Stream};
 use flambeau_ops::hip::sampling::{apply_penalties_f32, topk_softmax_f32, SAMPLER_K_OUT_MAX};
 use flambeau_runtime::Sampling;
 
-use crate::model::{Inflight, LoadedModel, Qwen3MoeModelExt};
+use crate::qwen3moe_handle::{Inflight, LoadedModel, Qwen3MoeModelExt};
 
 /// **Sampler-D4 (#212)** — upper bound on the number of unique tokens
 /// the GPU penalty kernel can apply per call. The deduped history

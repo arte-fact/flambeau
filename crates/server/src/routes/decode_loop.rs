@@ -18,7 +18,7 @@ use tokio_stream::wrappers::ReceiverStream;
 
 use crate::api::*;
 use crate::gpu_sampler::{self, GpuSamplerScratch};
-use crate::model::prefill_logits;
+use crate::qwen3moe_handle::prefill_logits;
 use crate::routes::{
     dev_flag, dev_usize, now_unix, request_id, PrefixCacheRestore, ServerState, SharedState,
 };
@@ -409,7 +409,7 @@ fn run_completion_scheduler_pp_blocking(
                     logits_buf.extend_from_slice(logits.as_ref());
                 }
                 PrefixCacheRestore::PrefixHit { n_matched } => {
-                    crate::model::prefill_logits(
+                    crate::qwen3moe_handle::prefill_logits(
                         model,
                         cluster,
                         &mut **guard,
@@ -438,13 +438,13 @@ fn run_completion_scheduler_pp_blocking(
                         );
                         Ok(())
                     };
-                    let cb_opt: Option<crate::model::BoundaryCallback<'_>> =
+                    let cb_opt: Option<crate::qwen3moe_handle::BoundaryCallback<'_>> =
                         if state.prefix_cache.enabled() {
                             Some(&mut boundary_cb)
                         } else {
                             None
                         };
-                    crate::model::prefill_logits(
+                    crate::qwen3moe_handle::prefill_logits(
                         model,
                         cluster,
                         &mut **guard,
@@ -719,7 +719,7 @@ fn run_completion_blocking_ids(
                 state.prefix_cache_insert_intermediate(&prompt_ids, n_tok, snap);
                 Ok(())
             };
-            let cb_opt: Option<crate::model::BoundaryCallback<'_>> =
+            let cb_opt: Option<crate::qwen3moe_handle::BoundaryCallback<'_>> =
                 if cache_eligible && state.prefix_cache.enabled() {
                     Some(&mut boundary_cb)
                 } else {
@@ -1170,7 +1170,7 @@ pub(crate) fn run_completion_blocking_streaming(
                 state.prefix_cache_insert_intermediate(&prompt_ids, n_tok, snap);
                 Ok(())
             };
-            let cb_opt: Option<crate::model::BoundaryCallback<'_>> =
+            let cb_opt: Option<crate::qwen3moe_handle::BoundaryCallback<'_>> =
                 if state.prefix_cache.enabled() {
                     Some(&mut boundary_cb)
                 } else {
