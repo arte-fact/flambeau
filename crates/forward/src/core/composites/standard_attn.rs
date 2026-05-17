@@ -21,9 +21,16 @@ pub fn standard_attn_local<H: TopologyHooks>(
     position: usize,
 ) -> Result<Tensor<F16>> {
     let hidden = state.hidden();
-    if layer_idx >= state.pool.kv_caches.len() {
+    let local_idx = layer_idx.checked_sub(state.layer_idx_offset).ok_or_else(|| {
+        anyhow::anyhow!(
+            "standard_attn: layer_idx {layer_idx} < layer_idx_offset {}",
+            state.layer_idx_offset
+        )
+    })?;
+    if local_idx >= state.pool.kv_caches.len() {
         bail!(
-            "standard_attn: layer_idx {layer_idx} >= num_layers {}",
+            "standard_attn: local_idx {local_idx} (layer_idx {layer_idx} - offset {}) >= owned_layers {}",
+            state.layer_idx_offset,
             state.pool.kv_caches.len()
         );
     }
@@ -204,8 +211,9 @@ pub fn standard_attn_local<H: TopologyHooks>(
         )?;
     }
 
-    // 5. KV append at row `position`.
-    let kv = state.pool.kv_caches[layer_idx];
+    // 5. KV append at row `position`. Use the local KV slot (global
+    // layer_idx remapped to this rank's owned slice).
+    let kv = state.pool.kv_caches[local_idx];
     let mut k_cache =
         unsafe { Tensor::<F16>::from_raw(kv.k, state.pool.config.max_seq_len * kv_width) };
     let mut v_cache =

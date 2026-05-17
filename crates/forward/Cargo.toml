@@ -16,6 +16,7 @@ flambeau-model-ops = { path = "../model-ops" }
 flambeau-ops = { path = "../ops" }
 flambeau-backend-hip = { path = "../backend-hip", optional = true }
 anyhow.workspace = true
+half.workspace = true
 tracing.workspace = true
 
 [dev-dependencies]

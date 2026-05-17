@@ -22,6 +22,11 @@ pub struct CoreState<'a> {
     /// on the first `output_head` call (or by the model crate ahead of
     /// time).
     pub logits_host: Vec<f32>,
+    /// First global layer index this rank owns. Composites that index
+    /// `pool.kv_caches` subtract this offset so the model can pass a
+    /// global `layer_idx` and PP/Hybrid still hit slot 0 of their
+    /// owned-slice pool. SingleDevice / TP set this to 0.
+    pub layer_idx_offset: usize,
 }
 
 impl<'a> CoreState<'a> {
@@ -37,6 +42,7 @@ impl<'a> CoreState<'a> {
             reg,
             pool,
             logits_host: Vec::new(),
+            layer_idx_offset: 0,
         }
     }
 
