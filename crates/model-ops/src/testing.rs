@@ -1,9 +1,5 @@
-//! Test-only helpers shared across op tests.
-//!
-//! Each op file defines its own CPU reference function. This module
-//! provides the device-side scaffolding: alloc / upload / download /
-//! assert_close. All helpers panic on HIP errors — they are tests, not
-//! production code, and a HIP failure during a test is a test failure.
+//! Device-side test scaffolding (alloc / upload / download /
+//! assert_close). Panics on HIP errors — these are tests.
 
 #![cfg(test)]
 
@@ -15,25 +11,14 @@ use flambeau_ops::hip::OpsRegistry;
 use crate::dtype::ElemType;
 use crate::tensor::Tensor;
 
-/// Borrow rank 0's `HipDevice`. Every test in this crate uses a single
-/// device (multi-rank ops still parameterise over a slice of buffers,
-/// but the buffers can all live on device 0 for testing — we're not
-/// exercising P2P here, the parity checks are kernel-level).
 pub fn test_device() -> HipDevice {
     HipDevice::new(0).expect("HIP device 0 required for model-ops tests")
 }
 
-/// Build a fresh `OpsRegistry` bound to `device`. Each test owns its
-/// own registry; `OpsRegistry::new` is the per-rank kernel-module
-/// loader.
 pub fn test_ops_registry(device: &HipDevice) -> OpsRegistry {
     OpsRegistry::new(device).expect("OpsRegistry::new")
 }
 
-/// Alloc enough bytes on the device for `n_elems` logical elements
-/// of type `T` (rounded up to a block boundary for quantised dtypes)
-/// and wrap as `Tensor<T>`. Returns the tensor and the raw pointer
-/// so the test can free at the end.
 pub fn alloc<T: ElemType>(device: &HipDevice, n_elems: usize) -> (Tensor<T>, DevicePtr) {
     let bytes = T::bytes_for_n_elems(n_elems);
     let ptr = device.alloc(bytes).expect("device alloc");
@@ -42,11 +27,9 @@ pub fn alloc<T: ElemType>(device: &HipDevice, n_elems: usize) -> (Tensor<T>, Dev
     (t, ptr)
 }
 
-/// Upload a host slice into a fresh device buffer wrapped as `Tensor<T>`.
-/// `n_elems` is the LOGICAL element count carried on the tensor; the
-/// allocated byte count comes from `T::bytes_for_n_elems(n_elems)`
-/// (matches the host slice size for fixed-width dtypes; for quant
-/// dtypes the host must already be pre-packed).
+/// `n_elems` is the LOGICAL element count; allocated bytes come from
+/// `T::bytes_for_n_elems(n_elems)`. For quant dtypes the host slice
+/// must already be pre-packed in the GGUF block layout.
 pub fn upload<T: ElemType, P: Pod>(
     device: &HipDevice,
     host: &[P],
@@ -79,8 +62,7 @@ pub fn upload<T: ElemType, P: Pod>(
     (t, ptr)
 }
 
-/// Download a `Tensor<T>` to a fresh host `Vec<P>`. `P` must have a
-/// byte-compatible layout with `T` (e.g. `T = F16`, `P = half::f16`).
+/// `P` must be byte-compatible with `T` (e.g. `T=F16`, `P=half::f16`).
 pub fn download<T: ElemType, P: Pod + Default + Clone>(
     device: &HipDevice,
     tensor: &Tensor<T>,
@@ -105,8 +87,6 @@ pub fn download<T: ElemType, P: Pod + Default + Clone>(
     host
 }
 
-/// Free a tensor's backing allocation. Tests should call this for
-/// every `(_, ptr)` they got back from `alloc` / `upload`.
 pub fn free(device: &HipDevice, ptr: DevicePtr, bytes: usize) {
     if !ptr.is_null() && bytes > 0 {
         // SAFETY: ptr was produced by `device.alloc(bytes)` above.
@@ -116,10 +96,8 @@ pub fn free(device: &HipDevice, ptr: DevicePtr, bytes: usize) {
     }
 }
 
-/// Assert that two equal-length `f32` slices match elementwise within
-/// `abs_tol` OR `rel_tol`. Element-by-element check with a useful
-/// failure message (index, expected, got, abs/rel error). Used by
-/// every op test in the crate.
+/// Element-wise within `abs_tol` OR `rel_tol`; panics on the worst-
+/// abs mismatch.
 pub fn assert_close_f32(got: &[f32], expected: &[f32], abs_tol: f32, rel_tol: f32) {
     assert_eq!(
         got.len(),
@@ -148,9 +126,6 @@ pub fn assert_close_f32(got: &[f32], expected: &[f32], abs_tol: f32, rel_tol: f3
     }
 }
 
-/// Convenience: `assert_close_f32` after converting an `f16` slice to
-/// `f32`. Op tests usually upload `f32` host data, run a kernel that
-/// produces `f16`, download, convert to `f32` for the assert.
 pub fn assert_close_f16(got: &[half::f16], expected: &[f32], abs_tol: f32, rel_tol: f32) {
     let got_f32: Vec<f32> = got.iter().map(|h| h.to_f32()).collect();
     assert_close_f32(&got_f32, expected, abs_tol, rel_tol);

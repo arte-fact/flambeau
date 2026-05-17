@@ -1,15 +1,10 @@
-//! Rotary positional embedding, in-place on F16 `[n_tokens, n_heads, head_dim]`.
+//! In-place RoPE on F16 `[n_tokens, n_heads, head_dim]`.
 //!
-//! Two layouts:
-//! - `rope_f16` — interleaved pairs `(x[2i], x[2i+1])`. Used by Gemma-4
-//!   dense attention and other models that emit Q/K with consecutive
-//!   F16 lanes forming a rotating pair.
-//! - `rope_neox_partial_f16` — split pairs `(x[i], x[i + rot/2])` and
-//!   only the first `rotated_dims` of `head_dim` rotate (NeoX partial).
-//!   Used by Qwen3.5 / Qwen3.6 / Qwen3-Next full-attention layers.
-//!
-//! Positions are `I32` (one per token). Caller invokes separately for Q
-//! and K.
+//! - `rope_f16` — interleaved pairs `(x[2i], x[2i+1])` (Gemma4).
+//! - `rope_neox_partial_f16` — split pairs `(x[i], x[i + rot/2])`
+//!   over the first `rotated_dims` of `head_dim` (Qwen3.x / Next
+//!   full-attn). Positions are `I32`, one per token. Caller invokes
+//!   separately for Q and K.
 
 use anyhow::bail;
 use flambeau_ops::{HipOps, Ops};
@@ -18,8 +13,7 @@ use crate::dtype::{F16, I32};
 use crate::error::Result;
 use crate::tensor::Tensor;
 
-/// Interleaved-pair RoPE, in-place. `x` is `[n_tokens, n_heads, head_dim]`
-/// F16; `head_dim` must be even.
+/// `head_dim` must be even.
 pub fn rope_f16(
     x: &mut Tensor<F16>,
     positions: &Tensor<I32>,
@@ -45,10 +39,8 @@ pub fn rope_f16(
     ops.rope_f16(x.ptr, positions.ptr, theta_base, n_tokens, n_heads, head_dim)
 }
 
-/// NeoX-style partial RoPE, in-place. Rotates only the first
-/// `rotated_dims` of each `head_dim` (split pairs); dims
-/// `rotated_dims..head_dim` pass through. `rotated_dims` must be even
-/// and `<= head_dim`.
+/// Dims `rotated_dims..head_dim` pass through. `rotated_dims` must
+/// be even and ≤ `head_dim`.
 #[allow(clippy::too_many_arguments)]
 pub fn rope_neox_partial_f16(
     x: &mut Tensor<F16>,

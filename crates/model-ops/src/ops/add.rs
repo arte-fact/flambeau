@@ -1,9 +1,4 @@
-//! Elementwise add: `y[i] = a[i] + b[i]`. F16 / F32 variants.
-//!
-//! Used in residual paths. Caller-allocated output `Tensor` (no in-
-//! place variant exposed; if needed later, callers can pass the same
-//! tensor as `a` and `output` since the underlying kernel accepts
-//! aliasing — but that contract goes on the API surface explicitly).
+//! Elementwise `y[i] = a[i] + b[i]`. F16 / F32 variants.
 
 use anyhow::bail;
 use flambeau_ops::{HipOps, Ops};
@@ -12,7 +7,6 @@ use crate::dtype::{F16, F32};
 use crate::error::Result;
 use crate::tensor::Tensor;
 
-/// `output[i] = a[i] + b[i]` for `i in 0..n`, F16.
 pub fn add_f16(
     a: &Tensor<F16>,
     b: &Tensor<F16>,
@@ -32,7 +26,6 @@ pub fn add_f16(
     ops.add_f16(a.ptr, b.ptr, output.ptr, n)
 }
 
-/// `output[i] = a[i] + b[i]` for `i in 0..n`, F32.
 pub fn add_f32(
     a: &Tensor<F32>,
     b: &Tensor<F32>,

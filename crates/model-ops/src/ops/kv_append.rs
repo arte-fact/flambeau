@@ -1,11 +1,6 @@
-//! Append the current token(s)' K/V into the per-layer KV cache.
-//!
-//! This op is a DtoD memcpy, not a kernel launch — the K/V projection
-//! output (a contiguous `[n_tokens, kv_width]` F16 block) is copied into
-//! `k_cache + write_pos * kv_width` and `v_cache + write_pos * kv_width`.
-//! Because it's a memcpy it takes `&HipDevice + &HipStream` rather than
-//! `&HipOps`; everything else still follows the model-ops pattern (free
-//! function, typed inputs, no state).
+//! DtoD memcpy of `[n_tokens, kv_width]` K + V into the per-layer
+//! cache at row `write_pos`. Takes `&HipDevice + &HipStream` (not
+//! `&HipOps`) because it's a memcpy, not a kernel launch.
 
 use anyhow::bail;
 use flambeau_backend_hip::{HipDevice, HipStream};
@@ -15,9 +10,7 @@ use crate::dtype::F16;
 use crate::error::Result;
 use crate::tensor::Tensor;
 
-/// Append `[n_tokens, kv_width]` F16 K + V projections into a per-layer
-/// `[max_seq_len, kv_width]` F16 K-cache and V-cache at row offset
-/// `write_pos`. Two DtoD memcpys, stream-ordered.
+/// Two stream-ordered DtoD memcpys (K and V) into per-layer caches.
 #[allow(clippy::too_many_arguments)]
 pub fn kv_append_f16(
     k_src: &Tensor<F16>,

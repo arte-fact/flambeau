@@ -1,11 +1,5 @@
-//! Gated activations for FFN paths.
-//!
-//! SwiGLU: `y = silu(gate) * up = (gate * sigmoid(gate)) * up`. Used
-//! by Qwen3.5 / Qwen3.6 dense FFN.
-//!
-//! GELU (tanh approximation): `y = gelu(gate) * up` where
-//! `gelu(x) ≈ x * 0.5 * (1 + tanh(sqrt(2/π) * (x + 0.044715 * x³)))`.
-//! Used by Gemma4 dense FFN + per-layer-embd gate.
+//! SwiGLU `silu(gate)*up` (Qwen) and gated-GELU-tanh `gelu(gate)*up`
+//! (Gemma4) for FFN paths.
 
 use anyhow::bail;
 use flambeau_ops::{HipOps, Ops};
@@ -14,8 +8,7 @@ use crate::dtype::{F16, F32};
 use crate::error::Result;
 use crate::tensor::Tensor;
 
-/// `output[i] = silu(gate[i]) * up[i]`, all F16. Used by Qwen dense
-/// FFN gate path.
+/// `output[i] = silu(gate[i]) * up[i]`, all F16.
 pub fn swiglu_f16(
     gate: &Tensor<F16>,
     up: &Tensor<F16>,
@@ -39,8 +32,6 @@ pub fn swiglu_f16(
 }
 
 /// `output[i] = silu(gate[i]) * up[i]`, F32 gate/up → F16 output.
-/// Used after F32-accumulated matmuls (Q4_x → F32 → activate → Q8_1)
-/// before the down-projection matmul.
 pub fn swiglu_f32_to_f16(
     gate: &Tensor<F32>,
     up: &Tensor<F32>,
@@ -66,9 +57,8 @@ pub fn swiglu_f32_to_f16(
     ops.swiglu_f32_to_f16(gate.ptr, up.ptr, output.ptr, n)
 }
 
-/// `output[i] = gelu(gate[i]) * up[i]`, F32 gate/up → F16 output.
-/// Gemma4 dense FFN — GELU is the tanh approximation form (matches
-/// ggml's `ggml_gelu_inplace`).
+/// `output[i] = gelu_tanh(gate[i]) * up[i]`, F32 gate/up → F16 output.
+/// Tanh approximation matches `ggml_gelu_inplace`.
 pub fn gelu_mul_f32_to_f16(
     gate: &Tensor<F32>,
     up: &Tensor<F32>,

@@ -1,14 +1,8 @@
-//! Top-K + softmax over a logits vector (sampler primitive).
-//!
-//! Single-block kernel: descending top-K by `v * inv_temp` then writes
-//! each survivor's **full-vocab softmax probability**
-//! `exp(v * inv_temp - max_v) / sum_v exp(...)`. Probabilities are NOT
-//! renormalised over the kept K — the K probs sum to ≤ 1, which makes
-//! host-side top-p / min-p semantics match a full-V softmax. Caller
-//! renormalises when needed.
-//!
-//! `k` is capped at `SAMPLER_K_OUT_MAX` (currently 2048); the kernel's
-//! 4096-candidate LDS window can't go higher with the single-block layout.
+//! Top-K + softmax sampler primitive. Output probs are FULL-VOCAB
+//! softmax (`exp(v*inv_temp - max_v) / sum_v exp(...)`) — NOT
+//! renormalised over the kept K, so host-side top-p / min-p matches
+//! full-V semantics. Caller renormalises when needed.
+//! `k ≤ SAMPLER_K_OUT_MAX` (single-block 4096-candidate cap).
 
 use anyhow::bail;
 use flambeau_ops::{HipOps, Ops};
@@ -19,10 +13,7 @@ use crate::dtype::{F32, I32};
 use crate::error::Result;
 use crate::tensor::Tensor;
 
-/// Top-K + softmax over `logits[vocab]` F32. Writes the K winning token
-/// IDs into `out_ids` and the renormalised probabilities into
-/// `out_probs`. `inv_temp = 1.0 / temperature` (caller passes `1.0` when
-/// `temperature <= 0`).
+/// `inv_temp = 1.0 / temperature` (pass `1.0` when `temperature ≤ 0`).
 pub fn topk_softmax_f32(
     logits: &Tensor<F32>,
     out_ids: &mut Tensor<I32>,

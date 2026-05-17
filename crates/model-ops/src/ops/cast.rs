@@ -1,7 +1,4 @@
-//! Dtype casts between F16 and F32. Used in F32-accumulated paths
-//! (MoE F32 cascade, F32 attention output proj for head_dim≥256 +
-//! Q8 weights) where intermediate buffers are F32 and the residual
-//! stream is F16.
+//! F16 ↔ F32 casts.
 
 use anyhow::bail;
 use flambeau_ops::{HipOps, Ops};
@@ -10,8 +7,7 @@ use crate::dtype::{F16, F32};
 use crate::error::Result;
 use crate::tensor::Tensor;
 
-/// `output[i] = input[i] as f16` with saturating cast (Inf/NaN
-/// preserved as F16 specials; values outside F16 range clamp).
+/// Saturating cast: Inf/NaN preserved; out-of-range clamps.
 pub fn cast_f32_to_f16(
     input: &Tensor<F32>,
     output: &mut Tensor<F16>,

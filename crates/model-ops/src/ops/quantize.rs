@@ -1,11 +1,5 @@
-//! F32/F16 → Q8_1 quantization. Standalone (not fused with rmsnorm)
-//! variants used when the source is already-normed F32/F16 (e.g.
-//! between dense-MLP activation and the down-projection's qmatmul).
-//!
-//! Q8_1 block layout is GGUF-standard: `[d (fp16), s (fp16), qs[32] (i8)]`,
-//! 36 bytes per 32-element block. `quantize_*_mmq` variants emit the
-//! MMQ-tiled layout used by the 4-warp LDS-tiled prefill matmul; the
-//! plain Q8_1 emits the layout used by MMVQ decode.
+//! F32 / F16 → Q8_1 (MMVQ decode layout). Q8_1 block:
+//! `[d (fp16), s (fp16), qs[32] (i8)]`, 36 B / 32 elems.
 
 use anyhow::bail;
 use flambeau_ops::{HipOps, Ops};
@@ -14,7 +8,6 @@ use crate::dtype::{F16, F32, Q8_1};
 use crate::error::Result;
 use crate::tensor::Tensor;
 
-/// `output[i] = quant_q8_1(input[i])`. F32 in, Q8_1 out.
 pub fn quantize_f32_to_q8_1(
     input: &Tensor<F32>,
     output: &mut Tensor<Q8_1>,
@@ -33,7 +26,6 @@ pub fn quantize_f32_to_q8_1(
     ops.quantize_q8_1(input.ptr, output.ptr, n_elems)
 }
 
-/// `output[i] = quant_q8_1(input[i])`. F16 in, Q8_1 out.
 pub fn quantize_f16_to_q8_1(
     input: &Tensor<F16>,
     output: &mut Tensor<Q8_1>,

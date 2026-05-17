@@ -1,12 +1,6 @@
-//! Typed, individually-testable model ops.
-//!
-//! Each op is a free function over typed tensors with a co-located
-//! mock-data parity test against a CPU reference. See `README.md` for
-//! the design rationale and `CLAUDE.md` for the discipline rules.
-//!
-//! Consumers `use flambeau_model_ops::{rmsnorm_f16, qmatmul_q4_0,
-//! ...};` — flat namespace, no `ops::` prefix. Module structure is an
-//! implementation detail.
+//! Typed, individually-testable model ops. One op per file, flat
+//! public namespace, co-located CPU-reference parity tests. See
+//! `README.md` + `CLAUDE.md`.
 
 #![cfg(feature = "hip")]
 

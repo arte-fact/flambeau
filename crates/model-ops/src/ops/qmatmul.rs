@@ -1,14 +1,10 @@
-//! Quantised-weight matmul. One function per weight dtype; each
-//! forwards to `flambeau_ops::Ops::qmatmul` with the right `QDtype`
-//! tag.
+//! Quantised matmul, one fn per weight dtype.
 //!
-//! Shape convention: weight is `[n, k]` (one row per output channel),
-//! activation is `[m, k]` Q8_1-quantised, output is `[m, n]` F32.
-//! `act_q8_1` is the standard 36-B/block layout for MMVQ + 4-warp MMQ;
-//! `act_q8_1_mmq` is the DS4 144-B/block layout for the LDS-tiled MMQ
-//! kernel that wins at m >= 32. Decode-path callers (m = 1) can pass
-//! `act_q8_1_mmq` as a null tensor; the dispatcher routes through
-//! MMVQ and never reads it.
+//! Shape: weight `[n, k]`, act `[m, k]` Q8_1, output `[m, n]` F32.
+//! `act_q8_1` is the 36-B/block layout (MMVQ + 4-warp MMQ);
+//! `act_q8_1_mmq` is the 144-B/block layout (LDS-tiled MMQ, m ≥ 32).
+//! Decode (m=1) may pass `act_q8_1_mmq` as a null tensor — the
+//! dispatcher routes through MMVQ and never reads it.
 
 use anyhow::bail;
 use flambeau_core::op::QDtype;
@@ -179,9 +175,6 @@ mod tests {
     use flambeau_core::{Device, DevicePtr};
     use flambeau_quant::quantize_k::quantize_row_q8_0;
 
-    /// Q8_0 weight + Q8_1 activation. Host quantises both, uploads,
-    /// runs `qmatmul_q8_0`, downloads F32 output, compares to CPU
-    /// reference (dequant(weight) @ dequant(act)).
     #[test]
     fn qmatmul_q8_0_matches_cpu_reference_at_m1() {
         const M: usize = 1;
@@ -194,8 +187,7 @@ mod tests {
         let reg = test_ops_registry(&device);
         let ops = HipOps::new(&reg, stream);
 
-        // Weight: deterministic linspace, [N, K] row-major. Values
-        // span [-0.5, 0.5] to exercise Q8_0's signed range.
+        // Linspace [-0.5, 0.5] exercises Q8_0's signed range.
         let weight_f32: Vec<f32> = (0..N * K)
             .map(|i| {
                 let t = (i as f32) / (N * K - 1) as f32;
@@ -206,7 +198,6 @@ mod tests {
         for row in 0..N {
             quantize_row_q8_0(&weight_f32[row * K..(row + 1) * K], &mut weight_q8_0_bytes);
         }
-        // Host-side dequant gives the CPU reference matmul's weight side.
         let weight_dequant = flambeau_quant::dequantize_to_vec(
             flambeau_quant::GgmlDType::Q8_0,
             &weight_q8_0_bytes,
@@ -214,10 +205,8 @@ mod tests {
         )
         .expect("dequant Q8_0 weight");
 
-        // Activation: 1 row × K elems, F32.
         let act_f32: Vec<f32> = (0..M * K).map(|i| (i as f32) * 0.01 - 0.32).collect();
 
-        // CPU reference: dequant(weight) @ act.T → [M, N] F32.
         let mut expected = vec![0.0f32; M * N];
         for mi in 0..M {
             for ni in 0..N {
@@ -229,7 +218,6 @@ mod tests {
             }
         }
 
-        // Upload weight bytes and quantise activation on device.
         let (weight_t, weight_ptr) =
             upload::<Q8_0, u8>(&device, &weight_q8_0_bytes, N * K);
         let (act_f32_t, act_f32_ptr) = upload::<F32, f32>(&device, &act_f32, act_f32.len());
@@ -237,7 +225,7 @@ mod tests {
 
         quantize_f32_to_q8_1(&act_f32_t, &mut act_q8_1_t, M * K, &ops).expect("quant act");
 
-        // m=1 → MMVQ path; act_q8_1_mmq unused, pass a null tensor.
+        // m=1 → MMVQ; `act_q8_1_mmq` unused.
         // SAFETY: ptr is NULL and never dereferenced by the MMVQ launch.
         let act_mmq_null = unsafe { Tensor::<Q8_1>::from_raw(DevicePtr::NULL, 0) };
 
@@ -257,9 +245,7 @@ mod tests {
 
         let got: Vec<f32> = download::<F32, f32>(&device, &out_t);
 
-        // Tolerance: Q8_0 weight quantum (~ max(|w_row|)/127) + Q8_1
-        // activation quantum (~ 2*max(|a|)/255), accumulated over K
-        // multiplies. For our scales this lands around 1e-2 abs.
+        // Bound covers Q8_0 + Q8_1 quanta accumulated over K multiplies.
         assert_close_f32(&got, &expected, 5e-2, 5e-2);
 
         free(&device, weight_ptr, weight_t.bytes());

@@ -1,10 +1,4 @@
-//! `rmsnorm_f16` — row-wise RMSNorm with F16 input/weight/output.
-//!
-//! `y[r, c] = x[r, c] / sqrt(mean(x[r, ·]²) + eps) * weight[c]`
-//!
-//! All tensors row-major, contiguous, F16. One thread block per row,
-//! 256 threads/row (matches the underlying kernel's launch shape;
-//! caller doesn't need to know).
+//! Row-wise RMSNorm: `y[r,c] = x[r,c] / sqrt(mean(x[r,·]²) + eps) * weight[c]`.
 
 use anyhow::bail;
 use flambeau_ops::{HipOps, Ops};
@@ -13,12 +7,7 @@ use crate::dtype::{F16, F32, Q8_1};
 use crate::error::Result;
 use crate::tensor::Tensor;
 
-/// `output[r, c] = input[r, c] / sqrt(mean(input[r, ·]²) + eps) * weight[c]`.
-///
-/// Shapes:
-/// - `input`:  `[n_rows, hidden]`, F16
-/// - `weight`: `[hidden]`,         F16
-/// - `output`: `[n_rows, hidden]`, F16 (caller-allocated; written in place)
+/// `input`/`output`: `[n_rows, hidden]` F16; `weight`: `[hidden]` F16.
 pub fn rmsnorm_f16(
     input: &Tensor<F16>,
     weight: &Tensor<F16>,
@@ -52,10 +41,8 @@ pub fn rmsnorm_f16(
     ops.rmsnorm_f16(input.ptr, weight.ptr, output.ptr, n_rows, hidden, eps)
 }
 
-/// F32 variant: `output = rmsnorm_f32(input) * weight`. Used in the
-/// MoE F32 cascade (Gemma4 26B-A4B) and the F32 attention output path
-/// (head_dim=512 + Q8 weights — see project-root memory
-/// `gemma4_attn_output_proj_f16_saturate`).
+/// F32 variant. Used by the MoE F32 cascade and the F32 attention
+/// output path (memory: `gemma4_attn_output_proj_f16_saturate`).
 pub fn rmsnorm_f32(
     input: &Tensor<F32>,
     weight: &Tensor<F32>,
@@ -89,13 +76,8 @@ pub fn rmsnorm_f32(
     ops.rmsnorm_f32(input.ptr, weight.ptr, output.ptr, n_rows, hidden, eps)
 }
 
-/// Fused `output = rmsnorm(input) * weight` followed by F16→Q8_1
-/// quantization. Used at every attention/FFN input where the next
-/// op is a quantised matmul — saves a separate `rmsnorm_f16` +
-/// `quantize_f16_q8_1` round-trip through HBM.
-///
-/// `output` is Q8_1 with the GGUF-standard block layout
-/// `[d (fp16), s (fp16), qs[32] (i8)]` per block of 32 elems.
+/// Fused rmsnorm + F16→Q8_1 quantise. Saves an HBM round-trip vs
+/// running `rmsnorm_f16` then `quantize_f16_q8_1` separately.
 pub fn rmsnorm_quant_q8_1(
     input: &Tensor<F16>,
     weight: &Tensor<F16>,
@@ -129,8 +111,7 @@ pub fn rmsnorm_quant_q8_1(
     ops.rmsnorm_quant_q8_1(input.ptr, weight.ptr, output.ptr, n_rows, hidden, eps)
 }
 
-/// CPU reference. Plain Rust over F16 inputs, F32 accumulation. Used
-/// by the parity test below. Not exported — tests are the only consumer.
+/// CPU reference (F16 inputs, F32 accumulation).
 #[cfg(test)]
 fn cpu_rmsnorm_f16(
     input: &[half::f16],

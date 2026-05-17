@@ -1,14 +1,7 @@
-//! Decode-step attention (one Q token, full K/V context), F16.
-//!
-//! Fused flash-attention-v2 kernel: scores =
-//! `scale * (Q[q_head] · K[t, kv_head_of(q_head)])` per (q_head, t),
-//! then online softmax over t (with optional SWA window) and a
-//! V-weighted sum producing one output token per Q head. GQA is
-//! resolved via `kv_head_of(q) = q / (n_heads_q / n_heads_kv)`.
-//!
-//! Supported `head_dim`: 64, 128, 256, 512.
-//! `window_size`: 0 = unbounded causal; positive N = SWA over the last
-//! N+1 tokens.
+//! Flash-attention-v2 decode (1 Q token, full K/V), F16. GQA via
+//! `kv_head_of(q) = q / (n_heads_q / n_heads_kv)`. `head_dim` ∈
+//! {64,128,256,512}. `window_size`: 0 = unbounded causal; >0 = SWA
+//! over the last N tokens.
 
 use anyhow::bail;
 use flambeau_ops::{HipOps, Ops};
@@ -17,8 +10,7 @@ use crate::dtype::F16;
 use crate::error::Result;
 use crate::tensor::Tensor;
 
-/// Decode attention: Q has 1 token, K/V cover `n_tokens_kv`. Output is
-/// `[n_heads_q, head_dim]` F16.
+/// Q has 1 token, K/V cover `n_tokens_kv`. Output `[n_heads_q, head_dim]` F16.
 #[allow(clippy::too_many_arguments)]
 pub fn attn_decode_f16(
     q: &Tensor<F16>,
@@ -96,15 +88,13 @@ fn cpu_attn_decode(
     for q_head in 0..n_heads_q {
         let kv_head = q_head / group;
 
-        // SWA window: kernel's `t_start = (n_tokens-1) - window_size + 1`
-        // → keeps the last `window_size` tokens. 0 = no window (full range).
+        // SWA: keep the last `window_size` tokens; 0 = unbounded.
         let lo = if window_size > 0 {
             n_tokens.saturating_sub(window_size as usize)
         } else {
             0
         };
 
-        // Scores over tokens [lo, n_tokens).
         let mut scores = vec![0.0_f32; n_tokens - lo];
         for (i, t) in (lo..n_tokens).enumerate() {
             let mut s = 0.0_f32;
@@ -170,7 +160,7 @@ mod tests {
         let k_host_f16: Vec<f16> = k_host_f32.iter().map(|&v| f16::from_f32(v)).collect();
         let v_host_f16: Vec<f16> = v_host_f32.iter().map(|&v| f16::from_f32(v)).collect();
 
-        // Re-derive the F32 inputs that the kernel actually sees (after F16 round-trip).
+        // F32 the kernel sees post F16 round-trip.
         let q_kernel_f32: Vec<f32> = q_host_f16.iter().map(|v| v.to_f32()).collect();
         let k_kernel_f32: Vec<f32> = k_host_f16.iter().map(|v| v.to_f32()).collect();
         let v_kernel_f32: Vec<f32> = v_host_f16.iter().map(|v| v.to_f32()).collect();
@@ -208,9 +198,7 @@ mod tests {
         .expect("attn_decode_f16");
 
         let got: Vec<f16> = download::<F16, f16>(&device, &out_t);
-        // F16 attention accumulator: per-head sum of ~n_tokens
-        // F16-quantised products; tolerance grows with n_tokens. For
-        // n_tokens <= 64, 5e-3 abs covers it; rel kept matching.
+        // Bound scales with n_tokens; 5e-3 covers n_tokens ≤ 64.
         assert_close_f16(&got, &expected_f32, 5e-3, 1e-2);
 
         free(&device, q_ptr, q_t.bytes());
@@ -221,19 +209,16 @@ mod tests {
 
     #[test]
     fn attn_decode_f16_gqa_head_dim_128_no_swa() {
-        // Qwen3.5-style: GQA 32/4, head_dim 128. Scaled down: 4/2, 16 tokens.
         run_case(4, 2, 128, 16, 0);
     }
 
     #[test]
     fn attn_decode_f16_gqa_head_dim_64_with_swa() {
-        // Smaller head_dim + SWA radius 5 (window of 6 tokens).
         run_case(4, 2, 64, 20, 5);
     }
 
     #[test]
     fn attn_decode_f16_head_dim_256() {
-        // Qwen3.6-style: head_dim 256.
         run_case(2, 1, 256, 8, 0);
     }
 }

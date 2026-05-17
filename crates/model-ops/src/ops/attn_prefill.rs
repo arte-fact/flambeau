@@ -1,15 +1,10 @@
-//! Prefill attention (multi-token Q, causal mask, optional SWA), F16.
-//!
-//! Generalises [`crate::attn_decode_f16`] to `n_q_tokens > 1`. Each
-//! (q_token, q_head) pair attends to `[t_start, limit)` of K/V where:
-//! - `limit = min(q_offset + q_token + 1, n_k_tokens)` (causal mask)
-//! - `t_start = max(0, q_offset + q_token - window_size + 1)` if
-//!   `window_size > 0`, else 0
-//!
-//! `q_offset` is the global position of `Q[0]` in the sequence; for a
-//! fresh prefill it's 0, for a continuation prefill (KV already
-//! populated from a previous turn) it's the number of K/V tokens
-//! already in the cache.
+//! Multi-Q-token attention with causal mask + optional SWA, F16.
+//! `q_offset` = global position of `Q[0]` (0 for fresh prefill;
+//! prior-cache length for continuation). Each (q_token, q_head)
+//! attends to `[t_start, limit)` where
+//! `limit = min(q_offset + q_token + 1, n_k_tokens)` and
+//! `t_start = max(0, q_offset + q_token - window_size + 1)` if
+//! `window_size > 0`, else 0.
 
 use anyhow::bail;
 use flambeau_ops::{HipOps, Ops};
@@ -18,10 +13,8 @@ use crate::dtype::F16;
 use crate::error::Result;
 use crate::tensor::Tensor;
 
-/// Prefill attention. `q` is `[n_q_tokens, n_heads_q, head_dim]` F16;
-/// `k_cache`/`v_cache` are `[n_k_tokens, n_heads_kv, head_dim]` F16;
-/// `out` is `[n_q_tokens, n_heads_q, head_dim]` F16. Each Q token
-/// applies a causal mask anchored at global position `q_offset + qi`.
+/// `q`/`out` are `[n_q_tokens, n_heads_q, head_dim]` F16;
+/// `k_cache`/`v_cache` are `[n_k_tokens, n_heads_kv, head_dim]` F16.
 #[allow(clippy::too_many_arguments)]
 pub fn attn_prefill_f16(
     q: &Tensor<F16>,
@@ -238,22 +231,18 @@ mod tests {
 
     #[test]
     fn attn_prefill_f16_fresh_no_swa() {
-        // 8 Q tokens, 8 K tokens (fresh prefill), GQA 4/2, head_dim 128.
         run_case(8, 4, 2, 128, 8, 0, 0);
     }
 
     #[test]
     fn attn_prefill_f16_continuation() {
-        // Continuation prefill: 4 new Q tokens, KV already has 4 + 4 = 8.
         run_case(4, 4, 2, 128, 8, 4, 0);
     }
 
     #[test]
     fn attn_prefill_f16_with_swa() {
-        // Continuation at the tail of a 16-token context, 3 new Q tokens at
-        // positions 13..15, SWA radius 5. `n_q_tokens < 4` routes through
-        // the oracle prefill kernel (the flash_tile kernel's SWA path has
-        // a NaN-init issue when `block_swa_min` is not a multiple of BC).
+        // n_q_tokens < 4 → oracle kernel (flash_tile SWA has a
+        // NaN-init bug when `block_swa_min % BC != 0`).
         run_case(3, 4, 2, 64, 16, 13, 5);
     }
 }

@@ -1,10 +1,5 @@
-//! Elementwise scalar multiply: `y[i] = x[i] * scale`. F16 variant.
-//!
-//! Used by Gemma4 / Qwen35 for the `inpL = inpL * sqrt(n_embd)`
-//! input scaling at embed time (gemma3-iswa.cpp:20 in llama.cpp).
-//!
-//! Output may alias input — the kernel reads `x[i]` then writes
-//! `y[i]`, with one thread per index, so in-place is safe.
+//! Elementwise `y[i] = x[i] * scale`, F16. In-place safe (output may
+//! alias input).
 
 use anyhow::bail;
 use flambeau_ops::{HipOps, Ops};
@@ -13,7 +8,6 @@ use crate::dtype::F16;
 use crate::error::Result;
 use crate::tensor::Tensor;
 
-/// `output[i] = input[i] * scale` for `i in 0..n`, F16.
 pub fn scale_f16(
     input: &Tensor<F16>,
     output: &mut Tensor<F16>,
