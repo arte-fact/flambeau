@@ -13,10 +13,30 @@
 //! output_head. If you find yourself adding a hook that one topology
 //! returns `None` from, the abstraction is wrong — push back.
 
-/// Per-topology hook surface. Default impls match SingleDevice semantics.
+use anyhow::Result;
+use flambeau_backend_hip::{HipDevice, HipStream};
+use flambeau_core::DevicePtr;
+
+/// Per-topology hook surface. Default impls match SingleDevice semantics
+/// (no AR, no peer-copy, every rank owns everything).
 pub trait TopologyHooks {
-    // PP/TP-specific methods will land in P4/P5 with sensible defaults.
-    // P3.5 keeps the trait empty — SingleDevice needs zero hooks.
+    /// Reduce-sum `n_elems` F32 values in-place across ranks on the
+    /// given device buffer. Called after row-parallel matmuls
+    /// (output_proj in attention, down_proj in dense FFN) where each
+    /// rank produces an `[hidden]` F32 partial that must be summed
+    /// before being cast back to F16 delta.
+    ///
+    /// Default: no-op (SingleDevice / PP).
+    fn ar_sum_f32(
+        &mut self,
+        buf: DevicePtr,
+        n_elems: usize,
+        device: &HipDevice,
+        stream: &HipStream,
+    ) -> Result<()> {
+        let _ = (buf, n_elems, device, stream);
+        Ok(())
+    }
 }
 
 /// All-default hook bundle used by SingleDevice (and by tests that want

@@ -14,7 +14,7 @@ use crate::ctx::AttnWeights;
 
 pub fn standard_attn_local<H: TopologyHooks>(
     state: &mut CoreState<'_>,
-    _hooks: &mut H,
+    hooks: &mut H,
     input: &Tensor<F16>,
     weights: &AttnWeights,
     layer_idx: usize,
@@ -256,7 +256,10 @@ pub fn standard_attn_local<H: TopologyHooks>(
         unsafe { Tensor::<Q8_1>::from_raw(state.pool.attn_out_q8_1, q_width) };
     flambeau_model_ops::quantize_f16_to_q8_1(&attn_out, &mut attn_out_q8_1, q_width, &ops)?;
 
-    // 8. Output projection: F32 result, cast to F16 in `delta`.
+    // 8. Output projection: F32 result, AR-sum partials across ranks
+    // under TP (no-op under SingleDevice / PP), then cast to F16 in
+    // `delta`. Row-parallel weights → AR collapses the per-rank
+    // partials into the full hidden vector.
     let mut proj_f32 = unsafe { Tensor::<F32>::from_raw(state.pool.attn_proj_f32, hidden) };
     weights.attn_output.qmatmul(
         &attn_out_q8_1,
@@ -267,6 +270,7 @@ pub fn standard_attn_local<H: TopologyHooks>(
         hidden,
         &ops,
     )?;
+    hooks.ar_sum_f32(proj_f32.ptr, hidden, state.device, state.stream)?;
     let mut delta = unsafe { Tensor::<F16>::from_raw(state.pool.delta, hidden) };
     flambeau_model_ops::cast_f32_to_f16(&proj_f32, &mut delta, hidden, &ops)?;
     Ok(delta)

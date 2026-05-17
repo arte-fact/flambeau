@@ -12,6 +12,7 @@ hip = ["dep:flambeau-backend-hip", "flambeau-model-ops/hip", "flambeau-ops/hip"]
 
 [dependencies]
 flambeau-core = { path = "../core" }
+flambeau-quant = { path = "../quant" }
 flambeau-model-ops = { path = "../model-ops" }
 flambeau-ops = { path = "../ops" }
 flambeau-backend-hip = { path = "../backend-hip", optional = true }
@@ -20,8 +21,6 @@ half.workspace = true
 tracing.workspace = true
 
 [dev-dependencies]
-flambeau-quant = { path = "../quant" }
-half.workspace = true
 bytemuck.workspace = true
 
 [lints]

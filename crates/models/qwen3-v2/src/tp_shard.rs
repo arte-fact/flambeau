@@ -1,10 +1,19 @@
-//! GGUF → device-side weight handles for the qwen3 dense architecture.
+//! TP-sharded loader for the qwen3 dense architecture.
 //!
-//! Arch-specific glue: knows the tensor naming convention
-//! (`blk.<i>.attn_q.weight` / `blk.<i>.ffn_gate.weight` / …) and the
-//! shape that `flambeau-forward::ctx` weight handles expect. Every
-//! actual device-side upload primitive (raw HtoD, quant wrapping,
-//! F32→F16 dequant) lives in `flambeau_forward::loader`.
+//! Builds the same `Qwen3V2Model` shape as the single-device loader,
+//! but Q/K/V/gate/up are **column-sharded** along GGUF dim-0 (output
+//! rows) and `attn_output` / `ffn_down` are **row-sharded** along
+//! GGUF dim-1 (input cols). Norm weights / embedding / LM head stay
+//! replicated.
+//!
+//! Per-rank `AttnWeights.n_heads` is `model.n_heads / n_ranks`;
+//! `q_width` / `kv_width` shrink correspondingly. The composite
+//! engine sees the rank-local shapes and computes the right partials.
+//! After the row-parallel matmuls, the `TopologyHooks::ar_sum_f32`
+//! call sites in core/composites sum the partials across ranks.
+//!
+//! Every sharding primitive lives in `flambeau_forward::loader`; this
+//! file is just the qwen3 wiring (tensor names + per-axis pick).
 
 use anyhow::{bail, Context, Result};
 use flambeau_backend_hip::HipDevice;
@@ -12,57 +21,56 @@ use flambeau_core::{Device, DevicePtr};
 use flambeau_forward::ctx::{
     Activation, AttnWeights, EmbeddingWeights, FfnWeights, LmHeadWeights, ModelLayout,
 };
-use flambeau_forward::loader::{upload_dequant_to_f16, upload_quant_weight};
+use flambeau_forward::loader::{
+    upload_col_sharded_quant, upload_dequant_to_f16, upload_quant_weight,
+    upload_row_sharded_quant,
+};
 use flambeau_quant::GgufFile;
 
 use crate::config::Qwen3V2Config;
+use crate::loader::Qwen3V2Model;
 
-/// Loaded qwen3 model on device. Used by both the single-device
-/// (`load_from_gguf`) and TP-sharded (`tp_shard::load_tp_shard_from_gguf`)
-/// loaders — they differ only in *how* per-layer weights are
-/// uploaded, not in the struct shape.
-pub struct Qwen3V2Model {
-    pub config: Qwen3V2Config,
-    pub layout: ModelLayout,
-    pub embedding: EmbeddingWeights,
-    pub attn: Vec<AttnWeights>,
-    pub ffn: Vec<FfnWeights>,
-    pub lm_head: LmHeadWeights,
-
-    pub(crate) allocs: Vec<(DevicePtr, usize)>,
-    pub(crate) device_id: i32,
-}
-
-impl Qwen3V2Model {
-    pub fn dispose(&mut self, device: &HipDevice) -> Result<()> {
-        if device.default_stream().device_id() != self.device_id {
-            bail!(
-                "Qwen3V2Model::dispose: device mismatch (model on {}, called on {})",
-                self.device_id,
-                device.default_stream().device_id()
-            );
-        }
-        for (ptr, bytes) in self.allocs.drain(..) {
-            // SAFETY: ptr returned by `device.alloc(bytes)` via the loader.
-            unsafe { device.dealloc(ptr, bytes) }
-                .with_context(|| format!("dealloc {bytes} bytes"))?;
-        }
-        Ok(())
-    }
-}
-
-/// Load a qwen3 GGUF onto `device`. Full (non-sharded) weights; every
-/// rank under PP/single-device sees the same weights.
-pub fn load_from_gguf(file: &GgufFile, device: &HipDevice) -> Result<Qwen3V2Model> {
+/// Load this rank's TP shard of a qwen3 GGUF onto `device`.
+///
+/// Constraints: `n_heads` / `n_kv_heads` / `intermediate` must each be
+/// divisible by `n_ranks` (per-axis-shard requires equal splits). For
+/// qwen3-0.6B (n_heads=16, n_kv_heads=8, intermediate=3072), `n_ranks`
+/// up to 8 splits cleanly.
+pub fn load_tp_shard_from_gguf(
+    file: &GgufFile,
+    device: &HipDevice,
+    rank: usize,
+    n_ranks: usize,
+) -> Result<Qwen3V2Model> {
     let config = Qwen3V2Config::from_gguf(file).context("parse qwen3 config")?;
     let mut allocs: Vec<(DevicePtr, usize)> = Vec::new();
+
+    if rank >= n_ranks {
+        bail!("tp_shard: rank {rank} >= n_ranks {n_ranks}");
+    }
+    if config.n_heads % n_ranks != 0 || config.n_kv_heads % n_ranks != 0 {
+        bail!(
+            "tp_shard: n_heads {} and n_kv_heads {} must both be divisible by n_ranks {n_ranks}",
+            config.n_heads,
+            config.n_kv_heads
+        );
+    }
+    if config.intermediate % n_ranks != 0 {
+        bail!(
+            "tp_shard: intermediate {} not divisible by n_ranks {n_ranks}",
+            config.intermediate
+        );
+    }
 
     let hidden = config.hidden;
     let q_width = config.n_heads * config.head_dim;
     let kv_width = config.n_kv_heads * config.head_dim;
     let m = config.intermediate;
     let v = config.vocab_size;
+    let n_heads_local = config.n_heads / n_ranks;
+    let n_kv_heads_local = config.n_kv_heads / n_ranks;
 
+    // Embedding + LM head: replicated.
     let token_embd =
         upload_dequant_to_f16(file, device, "token_embd.weight", v * hidden, &mut allocs)?;
     let embedding = EmbeddingWeights {
@@ -74,47 +82,59 @@ pub fn load_from_gguf(file: &GgufFile, device: &HipDevice) -> Result<Qwen3V2Mode
     let mut attn: Vec<AttnWeights> = Vec::with_capacity(config.num_layers);
     let mut ffn: Vec<FfnWeights> = Vec::with_capacity(config.num_layers);
     for li in 0..config.num_layers {
-        let prefix = format!("blk.{li}");
+        let p = format!("blk.{li}");
 
         let attn_norm = upload_dequant_to_f16(
             file,
             device,
-            &format!("{prefix}.attn_norm.weight"),
+            &format!("{p}.attn_norm.weight"),
             hidden,
             &mut allocs,
         )?;
-        let attn_q = upload_quant_weight(
+        let attn_q = upload_col_sharded_quant(
             file,
             device,
-            &format!("{prefix}.attn_q.weight"),
-            q_width * hidden,
+            &format!("{p}.attn_q.weight"),
+            q_width,
+            hidden,
+            rank,
+            n_ranks,
             &mut allocs,
         )?;
-        let attn_k = upload_quant_weight(
+        let attn_k = upload_col_sharded_quant(
             file,
             device,
-            &format!("{prefix}.attn_k.weight"),
-            kv_width * hidden,
+            &format!("{p}.attn_k.weight"),
+            kv_width,
+            hidden,
+            rank,
+            n_ranks,
             &mut allocs,
         )?;
-        let attn_v = upload_quant_weight(
+        let attn_v = upload_col_sharded_quant(
             file,
             device,
-            &format!("{prefix}.attn_v.weight"),
-            kv_width * hidden,
+            &format!("{p}.attn_v.weight"),
+            kv_width,
+            hidden,
+            rank,
+            n_ranks,
             &mut allocs,
         )?;
-        let attn_output = upload_quant_weight(
+        let attn_output = upload_row_sharded_quant(
             file,
             device,
-            &format!("{prefix}.attn_output.weight"),
-            hidden * q_width,
+            &format!("{p}.attn_output.weight"),
+            hidden,
+            q_width,
+            rank,
+            n_ranks,
             &mut allocs,
         )?;
         let attn_q_norm = upload_dequant_to_f16(
             file,
             device,
-            &format!("{prefix}.attn_q_norm.weight"),
+            &format!("{p}.attn_q_norm.weight"),
             config.head_dim,
             &mut allocs,
         )
@@ -122,7 +142,7 @@ pub fn load_from_gguf(file: &GgufFile, device: &HipDevice) -> Result<Qwen3V2Mode
         let attn_k_norm = upload_dequant_to_f16(
             file,
             device,
-            &format!("{prefix}.attn_k_norm.weight"),
+            &format!("{p}.attn_k_norm.weight"),
             config.head_dim,
             &mut allocs,
         )
@@ -135,8 +155,8 @@ pub fn load_from_gguf(file: &GgufFile, device: &HipDevice) -> Result<Qwen3V2Mode
             attn_output,
             attn_q_norm,
             attn_k_norm,
-            n_heads: config.n_heads,
-            n_kv_heads: config.n_kv_heads,
+            n_heads: n_heads_local,
+            n_kv_heads: n_kv_heads_local,
             head_dim: config.head_dim,
             rotated_dims: config.rotated_dims,
             rope_theta: config.rope_theta,
@@ -148,29 +168,38 @@ pub fn load_from_gguf(file: &GgufFile, device: &HipDevice) -> Result<Qwen3V2Mode
         let ffn_norm = upload_dequant_to_f16(
             file,
             device,
-            &format!("{prefix}.ffn_norm.weight"),
+            &format!("{p}.ffn_norm.weight"),
             hidden,
             &mut allocs,
         )?;
-        let ffn_gate = upload_quant_weight(
+        let ffn_gate = upload_col_sharded_quant(
             file,
             device,
-            &format!("{prefix}.ffn_gate.weight"),
-            m * hidden,
+            &format!("{p}.ffn_gate.weight"),
+            m,
+            hidden,
+            rank,
+            n_ranks,
             &mut allocs,
         )?;
-        let ffn_up = upload_quant_weight(
+        let ffn_up = upload_col_sharded_quant(
             file,
             device,
-            &format!("{prefix}.ffn_up.weight"),
-            m * hidden,
+            &format!("{p}.ffn_up.weight"),
+            m,
+            hidden,
+            rank,
+            n_ranks,
             &mut allocs,
         )?;
-        let ffn_down = upload_quant_weight(
+        let ffn_down = upload_row_sharded_quant(
             file,
             device,
-            &format!("{prefix}.ffn_down.weight"),
-            hidden * m,
+            &format!("{p}.ffn_down.weight"),
+            hidden,
+            m,
+            rank,
+            n_ranks,
             &mut allocs,
         )?;
         ffn.push(FfnWeights {

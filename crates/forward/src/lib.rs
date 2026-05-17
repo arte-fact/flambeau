@@ -14,6 +14,7 @@ pub mod core;
 pub mod ctx;
 pub mod hybrid;
 pub mod layer_range;
+pub mod loader;
 pub mod pp;
 pub mod single_device;
 pub mod tp;

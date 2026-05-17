@@ -1,95 +1,147 @@
 //! `TpForwardCtx` — tensor-parallel forward context.
 //!
-//! Every rank runs every layer on its column / row shard. Composites
-//! that involve row-parallel projections (`standard_attn`'s output
-//! proj, `dense_ffn`'s down proj, `moe_ffn`'s combine) AR-sum
-//! partials across ranks before returning.
+//! Every rank runs every layer on its column / row shard of the
+//! weights. Composites are unchanged on this trait surface; the
+//! topology customisation lives in two places:
 //!
-//! Per-request state owned here:
-//! - rank id, n_ranks, BAR1 AllReduce handle
-//! - per-rank TP sync identity (producer-done event)
-//! - this rank's KV cache shard refs
-//! - scratch pool (rank-local widths)
-//! - position counter
-//! - host logits slot (head rank only)
+//! 1. The per-rank `AttnWeights` / `FfnWeights` are sharded by the
+//!    model crate before construction (col-shard Q/K/V/gate/up,
+//!    row-shard output_proj/down). Each rank's `AttnWeights.n_heads`
+//!    is `model.n_heads / tp_size`; `weights.attn_q` is just the
+//!    rank's slice of the original Q-projection columns.
+//! 2. After the row-parallel matmuls (output_proj, down), the
+//!    `TopologyHooks::ar_sum_f32` call sites in core/composites
+//!    reduce-sum the F32 partials across ranks.
 //!
-//! Concrete fields land as composites are written.
+//! `embed`, `rmsnorm`, `residual_add`, `output_head` are replicated:
+//! every rank computes the same thing on the (replicated) embedding /
+//! norm / LM-head weights. The trait method bodies delegate to the
+//! shared composites unchanged.
 
 use anyhow::Result;
+use flambeau_backend_hip::{HipDevice, HipStream};
 use flambeau_model_ops::{Tensor, F16};
+use flambeau_ops::OpsRegistry;
 
+use crate::core::{composites, CoreState, ScratchPool, TopologyHooks};
 use crate::ctx::{
     AttnWeights, EmbeddingWeights, FfnWeights, ForwardCtx, LmHeadWeights, ModelLayout,
     MoeWeights,
 };
 
-/// Tensor-parallel forward context. Borrows per-request state from
-/// the model crate that constructed it.
-pub struct TpForwardCtx<'a> {
+/// Topology hooks for TP. `ar_sum_f32` is provided by the caller (a
+/// real BAR1 P2P AllReduce in production; a host-roundtrip + Barrier
+/// for the parity test).
+pub struct TpHooks {
     pub rank: usize,
     pub n_ranks: usize,
-    // BAR1 AR handle, per-rank TP sync core, KV refs, scratch, ...
-    pub _todo_state: std::marker::PhantomData<&'a ()>,
+    /// Pluggable AR callback. `(rank, n_ranks, buf, n_elems, device, stream)`.
+    /// Set by the caller; the test wires a thread-safe host-roundtrip
+    /// implementation here.
+    pub ar_callback: Box<
+        dyn FnMut(
+                usize,
+                usize,
+                flambeau_core::DevicePtr,
+                usize,
+                &HipDevice,
+                &HipStream,
+            ) -> Result<()>
+            + Send,
+    >,
+}
+
+impl TopologyHooks for TpHooks {
+    fn ar_sum_f32(
+        &mut self,
+        buf: flambeau_core::DevicePtr,
+        n_elems: usize,
+        device: &HipDevice,
+        stream: &HipStream,
+    ) -> Result<()> {
+        if self.n_ranks <= 1 {
+            return Ok(());
+        }
+        (self.ar_callback)(self.rank, self.n_ranks, buf, n_elems, device, stream)
+    }
+}
+
+/// Tensor-parallel forward context.
+pub struct TpForwardCtx<'a> {
+    core: CoreState<'a>,
+    hooks: TpHooks,
+}
+
+impl<'a> TpForwardCtx<'a> {
+    pub fn new(
+        device: &'a HipDevice,
+        stream: &'a HipStream,
+        reg: &'a OpsRegistry,
+        pool: &'a mut ScratchPool,
+        hooks: TpHooks,
+    ) -> Self {
+        Self {
+            core: CoreState::new(device, stream, reg, pool),
+            hooks,
+        }
+    }
 }
 
 impl ForwardCtx for TpForwardCtx<'_> {
-    fn embed(&mut self, _token_embd: &EmbeddingWeights, _token_id: u32) -> Result<Tensor<F16>> {
-        todo!("TP: embed lookup on every rank (replicated token_embd) + sqrt(hidden) scale")
+    fn embed(&mut self, weights: &EmbeddingWeights, token_id: u32) -> Result<Tensor<F16>> {
+        composites::embed_local(&mut self.core, &mut self.hooks, weights, token_id)
     }
 
     fn rmsnorm(
         &mut self,
-        _input: &Tensor<F16>,
-        _weight: &Tensor<F16>,
-        _eps: f32,
+        input: &Tensor<F16>,
+        weight: &Tensor<F16>,
+        eps: f32,
     ) -> Result<Tensor<F16>> {
-        todo!("TP: rmsnorm replicated across ranks (each rank computes the same)")
+        composites::rmsnorm_local(&mut self.core, &mut self.hooks, input, weight, eps)
     }
 
-    fn residual_add(&mut self, _a: Tensor<F16>, _b: Tensor<F16>) -> Result<Tensor<F16>> {
-        todo!("TP: elementwise F16 add, replicated")
+    fn residual_add(&mut self, a: Tensor<F16>, b: Tensor<F16>) -> Result<Tensor<F16>> {
+        composites::residual_add_local(&mut self.core, &mut self.hooks, a, b)
     }
 
     fn standard_attn(
         &mut self,
-        _input: &Tensor<F16>,
-        _weights: &AttnWeights,
-        _layer_idx: usize,
-        _position: usize,
+        input: &Tensor<F16>,
+        weights: &AttnWeights,
+        layer_idx: usize,
+        position: usize,
     ) -> Result<Tensor<F16>> {
-        todo!(
-            "TP: column-parallel Q/K/V proj → RoPE → per-rank KV append → \
-             flash-attn on local head shard → row-parallel output_proj → \
-             tp_sum AR partials across ranks; \
-             full-attn + head_dim≥256 + Q8 weights → F32 output path \
-             (see project-root memory `gemma4_attn_output_proj_f16_saturate`)"
+        composites::standard_attn_local(
+            &mut self.core,
+            &mut self.hooks,
+            input,
+            weights,
+            layer_idx,
+            position,
         )
     }
 
-    fn dense_ffn(&mut self, _input: &Tensor<F16>, _weights: &FfnWeights) -> Result<Tensor<F16>> {
-        todo!("TP: col-parallel gate/up → activate → row-parallel down → tp_sum AR")
+    fn dense_ffn(&mut self, input: &Tensor<F16>, weights: &FfnWeights) -> Result<Tensor<F16>> {
+        composites::dense_ffn_local(&mut self.core, &mut self.hooks, input, weights)
     }
 
-    fn moe_ffn(&mut self, _input: &Tensor<F16>, _weights: &MoeWeights) -> Result<Tensor<F16>> {
-        todo!(
-            "TP: parallel-branch composer (shared-MLP partial + routed-MoE partial) \
-             with F32 AR on partials (`gemma4_moe_f16_overflow`)"
-        )
+    fn moe_ffn(&mut self, input: &Tensor<F16>, weights: &MoeWeights) -> Result<Tensor<F16>> {
+        composites::moe_ffn_local(&mut self.core, &mut self.hooks, input, weights)
     }
 
-    fn output_head(
-        &mut self,
-        _input: &Tensor<F16>,
-        _lm_head: &LmHeadWeights,
-    ) -> Result<()> {
-        todo!("TP: head rank only — rmsnorm + lm_head + softcap + DtoH")
+    fn output_head(&mut self, input: &Tensor<F16>, lm_head: &LmHeadWeights) -> Result<()> {
+        composites::output_head_local(&mut self.core, &mut self.hooks, input, lm_head)
     }
 
-    fn layer_range<'b>(&'b mut self, _layout: &'b ModelLayout) -> Box<dyn Iterator<Item = usize> + 'b> {
-        todo!("TP: yield 0..num_layers (every rank runs every layer)")
+    fn layer_range<'b>(
+        &'b mut self,
+        layout: &'b ModelLayout,
+    ) -> Box<dyn Iterator<Item = usize> + 'b> {
+        Box::new(0..layout.num_layers)
     }
 
     fn logits(&self) -> &[f32] {
-        todo!("TP: return head rank's host logits slot")
+        &self.core.logits_host
     }
 }

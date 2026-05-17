@@ -11,7 +11,7 @@ use crate::ctx::{Activation, FfnWeights};
 
 pub fn dense_ffn_local<H: TopologyHooks>(
     state: &mut CoreState<'_>,
-    _hooks: &mut H,
+    hooks: &mut H,
     input: &Tensor<F16>,
     weights: &FfnWeights,
 ) -> Result<Tensor<F16>> {
@@ -56,6 +56,8 @@ pub fn dense_ffn_local<H: TopologyHooks>(
     weights
         .ffn_down
         .qmatmul(&gated_q8_1, &act_mmq_null, &mut down_f32, 1, m, hidden, &ops)?;
+    // Row-parallel down → AR-sum partials across ranks (no-op SingleDevice/PP).
+    hooks.ar_sum_f32(down_f32.ptr, hidden, state.device, state.stream)?;
     let mut delta = unsafe { Tensor::<F16>::from_raw(state.pool.delta, hidden) };
     flambeau_model_ops::cast_f32_to_f16(&down_f32, &mut delta, hidden, &ops)?;
     Ok(delta)

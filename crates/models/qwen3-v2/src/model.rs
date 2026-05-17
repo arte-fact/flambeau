@@ -8,7 +8,7 @@
 use anyhow::Result;
 use flambeau_forward::ctx::ForwardCtx;
 
-pub use crate::loader::Qwen3V2Model;
+use crate::loader::Qwen3V2Model;
 
 /// Run one decode-step forward for `token_id` at sequence position
 /// `position`. Result lives in `ctx.logits()`.
