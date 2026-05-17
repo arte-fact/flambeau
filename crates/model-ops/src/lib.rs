@@ -26,6 +26,7 @@ pub use tensor::Tensor;
 pub use ops::activation::{gelu_mul_f32_to_f16, swiglu_f16, swiglu_f32_to_f16};
 pub use ops::add::{add_f16, add_f32};
 pub use ops::cast::{cast_f16_to_f32, cast_f32_to_f16};
+pub use ops::qmatmul::{qmatmul_q4_0, qmatmul_q4_1, qmatmul_q5_0, qmatmul_q5_1, qmatmul_q8_0};
 pub use ops::quantize::{quantize_f16_to_q8_1, quantize_f32_to_q8_1};
 pub use ops::rmsnorm::{rmsnorm_f16, rmsnorm_f32, rmsnorm_quant_q8_1};
 pub use ops::scale::scale_f16;

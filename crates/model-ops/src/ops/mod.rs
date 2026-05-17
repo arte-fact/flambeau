@@ -12,6 +12,7 @@
 pub mod activation;
 pub mod add;
 pub mod cast;
+pub mod qmatmul;
 pub mod quantize;
 pub mod rmsnorm;
 pub mod scale;
