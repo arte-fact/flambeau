@@ -102,12 +102,16 @@ impl StageCommon {
 
     /// Drop helper. `tag` is included as a structured field so logs
     /// can identify the arch / topology that leaked. Emits a one-line
-    /// warn when the stage was dropped without `dispose` AND the
-    /// tracker holds allocations — both checks because some test
-    /// fixtures build a Stage and intentionally drop it without
-    /// disposing.
+    /// warn whenever the stage was dropped without `dispose`. We
+    /// deliberately do NOT also gate on `raw_alloc.is_empty()` — not
+    /// every stage tracks its resources through the tracker (qwen3-moe
+    /// shards own `DeviceTensor` fields directly), and gating on the
+    /// tracker would silently suppress real leak warnings on those
+    /// stages. Test fixtures that legitimately build a Stage without
+    /// resources should call `dispose(device)` once at teardown
+    /// (it's a no-op on an empty tracker).
     pub fn warn_on_leak(&self, tag: &'static str) {
-        if !self.disposed && !self.raw_alloc.is_empty() {
+        if !self.disposed {
             tracing::warn!(
                 tag,
                 rank = self.rank,

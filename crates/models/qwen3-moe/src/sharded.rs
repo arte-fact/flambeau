@@ -28,7 +28,9 @@
 
 use anyhow::{anyhow, bail, Context, Result};
 use flambeau_backend_hip::{HipCluster, HipDevice};
-use flambeau_blocks::{LmHead, OutputNorm, RawAllocTracker, TokenEmbd, WeightRole, WeightUploader};
+use flambeau_blocks::{
+    LmHead, OutputNorm, RawAllocTracker, StageCommon, TokenEmbd, WeightRole, WeightUploader,
+};
 use flambeau_core::{CopyDirection, Device, DevicePtr, Stream};
 use flambeau_ops::hip::OpsRegistry;
 use flambeau_quant::{GgmlDType, GgufFile, QK8_0};
@@ -58,9 +60,10 @@ fn dev_flag(_name: &str) -> bool {
 /// One rank's slice of the sharded model. Owns the device memory for the
 /// layers assigned to this rank + the globals this rank uses.
 pub struct Qwen3MoERankShard {
-    pub rank: RankId,
-    /// HIP device id this shard's memory lives on.
-    pub device_id: i32,
+    /// Shared per-rank bookkeeping (rank id, device id, disposed latch).
+    /// qwen3-moe owns its `DeviceTensor` fields directly today; the
+    /// tracker inside `common` stays empty until a future migration.
+    pub common: StageCommon,
     /// Kernel registry bound to this rank's device.
     pub ops: OpsRegistry,
     /// `Some` only on rank 0 — the first stage embeds the input token.
@@ -81,20 +84,26 @@ pub struct Qwen3MoERankShard {
     /// Bytes uploaded to this rank. Useful for pre-OOM budgeting and the
     /// smoke test's per-rank invariant check.
     total_bytes: usize,
-    disposed: bool,
 }
 
 impl Qwen3MoERankShard {
+    pub fn rank(&self) -> RankId {
+        RankId(self.common.rank)
+    }
+
+    pub fn device_id(&self) -> i32 {
+        self.common.device_id
+    }
+
     pub fn total_bytes(&self) -> usize {
         self.total_bytes
     }
 
     /// Free every device allocation owned by this shard.
     pub fn dispose(mut self, device: &HipDevice) -> Result<()> {
-        if self.disposed {
+        if self.common.is_disposed() {
             return Ok(());
         }
-        self.disposed = true;
         let mut out: Result<()> = Ok(());
         let mut free = |t: &mut DeviceTensor| {
             if !t.ptr.is_null() && t.bytes > 0 {
@@ -189,20 +198,16 @@ impl Qwen3MoERankShard {
                 free(&mut d.ffn_down);
             }
         }
-        out
+        match self.common.dispose(device) {
+            Ok(()) => out,
+            Err(e) => out.and(Err(e)),
+        }
     }
 }
 
 impl Drop for Qwen3MoERankShard {
     fn drop(&mut self) {
-        if !self.disposed {
-            tracing::warn!(
-                target: "flambeau_qwen3_moe::sharded",
-                rank = self.rank.0,
-                bytes = self.total_bytes,
-                "Qwen3MoERankShard dropped without dispose(device); buffers leaked"
-            );
-        }
+        self.common.warn_on_leak("flambeau_qwen3_moe::sharded");
     }
 }
 
@@ -304,15 +309,13 @@ impl Qwen3MoEShardedModel {
                 .map_err(|e| anyhow::anyhow!("rank {}: OpsRegistry: {e}", rank_idx))?;
 
             shards.push(Qwen3MoERankShard {
-                rank,
-                device_id: device.id(),
+                common: StageCommon::new(rank.0, device.id()),
                 ops,
                 token_embd,
                 output_norm,
                 output,
                 layers,
                 total_bytes: bytes,
-                disposed: false,
             });
         }
 
@@ -329,7 +332,7 @@ impl Qwen3MoEShardedModel {
     pub fn dispose(mut self, cluster: &HipCluster) -> Result<()> {
         let mut first_err: Option<anyhow::Error> = None;
         for shard in self.shards.drain(..) {
-            let rank_idx = shard.rank.0 as usize;
+            let rank_idx = shard.common.rank as usize;
             let device = cluster.device(rank_idx);
             if let Err(e) = shard.dispose(device) {
                 if first_err.is_none() {
@@ -388,15 +391,13 @@ impl Qwen3MoEShardedModel {
                 .flat_map(iter_layer_tensor_bytes)
                 .sum::<usize>();
         Qwen3MoERankShard {
-            rank,
-            device_id,
+            common: StageCommon::new(rank.0, device_id),
             ops,
             token_embd,
             output_norm,
             output,
             layers,
             total_bytes,
-            disposed: false,
         }
     }
 }
@@ -1419,7 +1420,7 @@ impl Qwen3MoEShardedSession {
             }
             device.default_stream().synchronize()?;
             per_rank.push(Qwen3MoERankSession {
-                rank: shard.rank,
+                rank: shard.rank(),
                 device_id: device.id(),
                 caches,
                 disposed: false,

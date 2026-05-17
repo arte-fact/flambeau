@@ -31,6 +31,7 @@ use std::sync::Arc;
 
 use anyhow::{anyhow, bail, Context, Result};
 use flambeau_backend_hip::{HipCluster, HipDevice};
+use flambeau_blocks::StageCommon;
 use flambeau_core::{CopyDirection, Device, DevicePtr, Stream};
 use flambeau_quant::{GgmlDType, GgufFile};
 use flambeau_runtime::{LayerAssignment, RankId, WeightLayout};
@@ -71,10 +72,9 @@ impl Topology {
 /// Per-rank shard for the TP path. Mirrors
 /// [`crate::sharded::Qwen3MoERankShard`] but every rank carries every
 /// layer (sliced) plus replicated globals.
-#[derive(Debug)]
 pub struct Qwen3MoETpRankShard {
-    pub rank: RankId,
-    pub device_id: i32,
+    /// Shared per-rank bookkeeping (rank id, device id, disposed latch).
+    pub common: StageCommon,
     /// Replicated globals — present on every rank.
     pub token_embd: DeviceTensor,
     pub output_norm: DeviceTensor,
@@ -86,7 +86,20 @@ pub struct Qwen3MoETpRankShard {
     /// ColParallel/RowParallel are sliced; Replicated is full.
     pub layers: Vec<Vec<TpLayerTensor>>,
     pub total_bytes: usize,
-    disposed: bool,
+}
+
+impl std::fmt::Debug for Qwen3MoETpRankShard {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Qwen3MoETpRankShard")
+            .field("rank", &self.rank())
+            .field("device_id", &self.device_id())
+            .field("token_embd", &self.token_embd)
+            .field("output_norm", &self.output_norm)
+            .field("output", &self.output)
+            .field("layers", &self.layers)
+            .field("total_bytes", &self.total_bytes)
+            .finish()
+    }
 }
 
 /// One per-tensor entry inside a layer. Carries the resolved name,
@@ -100,12 +113,19 @@ pub struct TpLayerTensor {
 }
 
 impl Qwen3MoETpRankShard {
+    pub fn rank(&self) -> RankId {
+        RankId(self.common.rank)
+    }
+
+    pub fn device_id(&self) -> i32 {
+        self.common.device_id
+    }
+
     /// Free every device allocation in this shard.
     pub fn dispose(mut self, device: &HipDevice) -> Result<()> {
-        if self.disposed {
+        if self.common.is_disposed() {
             return Ok(());
         }
-        self.disposed = true;
         let mut first_err: Option<anyhow::Error> = None;
         let mut free = |t: &mut DeviceTensor| {
             if !t.ptr.is_null() && t.bytes > 0 {
@@ -129,20 +149,18 @@ impl Qwen3MoETpRankShard {
                 free(&mut tlt.tensor);
             }
         }
+        if let Err(e) = self.common.dispose(device) {
+            if first_err.is_none() {
+                first_err = Some(e);
+            }
+        }
         first_err.map_or(Ok(()), Err)
     }
 }
 
 impl Drop for Qwen3MoETpRankShard {
     fn drop(&mut self) {
-        if !self.disposed {
-            tracing::warn!(
-                target: "flambeau_qwen3_moe::tp_sharded",
-                rank = self.rank.0,
-                bytes = self.total_bytes,
-                "Qwen3MoETpRankShard dropped without dispose(device); device buffers leaked"
-            );
-        }
+        self.common.warn_on_leak("flambeau_qwen3_moe::tp_sharded");
     }
 }
 
@@ -371,14 +389,12 @@ impl Qwen3MoETpModel {
             device.default_stream().synchronize()?;
 
             shards.push(Qwen3MoETpRankShard {
-                rank,
-                device_id: device.id(),
+                common: StageCommon::new(rank.0, device.id()),
                 token_embd,
                 output_norm,
                 output,
                 layers,
                 total_bytes,
-                disposed: false,
             });
         }
 
@@ -429,7 +445,7 @@ impl Qwen3MoETpModel {
     pub fn dispose(mut self, cluster: &HipCluster) -> Result<()> {
         let mut first_err: Option<anyhow::Error> = None;
         for shard in self.shards.drain(..) {
-            let rank_idx = shard.rank.0 as usize;
+            let rank_idx = shard.common.rank as usize;
             let device = cluster.device(rank_idx);
             if let Err(e) = shard.dispose(device) {
                 if first_err.is_none() {
