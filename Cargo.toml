@@ -7,6 +7,8 @@ members = [
     "crates/kernels-hip",
     "crates/backend-hip",
     "crates/ops",
+    "crates/model-ops",
+    "crates/forward",
     "crates/blocks",
     "crates/models/qwen3-moe",
     "crates/models/gemma4",

@@ -1,0 +1,32 @@
+//! Typed, individually-testable model ops.
+//!
+//! Each op is a free function over typed tensors with a co-located
+//! mock-data parity test against a CPU reference. See `README.md` for
+//! the design rationale and `CLAUDE.md` for the discipline rules.
+//!
+//! Consumers `use flambeau_model_ops::{rmsnorm_f16, qmatmul_q4_0,
+//! ...};` — flat namespace, no `ops::` prefix. Module structure is an
+//! implementation detail.
+
+#![cfg(feature = "hip")]
+
+pub mod dtype;
+pub mod error;
+pub mod tensor;
+
+#[cfg(test)]
+pub(crate) mod testing;
+
+pub mod ops;
+
+pub use dtype::{ElemType, F16, F32, I32, Q4_0, Q4_1, Q5_0, Q5_1, Q8_0, Q8_1};
+pub use error::{Error, Result};
+pub use tensor::Tensor;
+
+// Op re-exports follow as ops land. Each op file declares its
+// public function in `ops/<name>.rs` and is added to both
+// `ops::mod` and the flat `pub use` list here.
+//
+// Example (uncomment once `ops/rmsnorm.rs` lands):
+//
+// pub use ops::rmsnorm::rmsnorm_f16;
