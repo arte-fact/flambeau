@@ -1,19 +1,6 @@
-//! TP-sharded loader for the qwen3 dense architecture.
-//!
-//! Builds the same `Qwen3V2Model` shape as the single-device loader,
-//! but Q/K/V/gate/up are **column-sharded** along GGUF dim-0 (output
-//! rows) and `attn_output` / `ffn_down` are **row-sharded** along
-//! GGUF dim-1 (input cols). Norm weights / embedding / LM head stay
-//! replicated.
-//!
-//! Per-rank `AttnWeights.n_heads` is `model.n_heads / n_ranks`;
-//! `q_width` / `kv_width` shrink correspondingly. The composite
-//! engine sees the rank-local shapes and computes the right partials.
-//! After the row-parallel matmuls, the `TopologyHooks::ar_sum_f32`
-//! call sites in core/composites sum the partials across ranks.
-//!
-//! Every sharding primitive lives in `flambeau_forward::loader`; this
-//! file is just the qwen3 wiring (tensor names + per-axis pick).
+//! TP loader: col-shard Q/K/V/gate/up (dim-0), row-shard
+//! attn_output/ffn_down (dim-1); norm + embedding + LM head replicated.
+//! Sharding primitives live in `flambeau_forward::loader`.
 
 use anyhow::{bail, Context, Result};
 use flambeau_backend_hip::HipDevice;
@@ -30,12 +17,8 @@ use flambeau_quant::GgufFile;
 use crate::config::Qwen3V2Config;
 use crate::loader::Qwen3V2Model;
 
-/// Load this rank's TP shard of a qwen3 GGUF onto `device`.
-///
-/// Constraints: `n_heads` / `n_kv_heads` / `intermediate` must each be
-/// divisible by `n_ranks` (per-axis-shard requires equal splits). For
-/// qwen3-0.6B (n_heads=16, n_kv_heads=8, intermediate=3072), `n_ranks`
-/// up to 8 splits cleanly.
+/// Load this rank's TP shard. `n_heads` / `n_kv_heads` / `intermediate`
+/// must each be divisible by `n_ranks`.
 pub fn load_tp_shard_from_gguf(
     file: &GgufFile,
     device: &HipDevice,

@@ -1,10 +1,5 @@
-//! GGUF → device-side weight handles for the qwen3 dense architecture.
-//!
-//! Arch-specific glue: knows the tensor naming convention
-//! (`blk.<i>.attn_q.weight` / `blk.<i>.ffn_gate.weight` / …) and the
-//! shape that `flambeau-forward::ctx` weight handles expect. Every
-//! actual device-side upload primitive (raw HtoD, quant wrapping,
-//! F32→F16 dequant) lives in `flambeau_forward::loader`.
+//! qwen3 GGUF → device weight handles. Knows tensor names + layout;
+//! all upload primitives come from `flambeau_forward::loader`.
 
 use anyhow::{bail, Context, Result};
 use flambeau_backend_hip::HipDevice;
@@ -17,10 +12,8 @@ use flambeau_quant::GgufFile;
 
 use crate::config::Qwen3V2Config;
 
-/// Loaded qwen3 model on device. Used by both the single-device
-/// (`load_from_gguf`) and TP-sharded (`tp_shard::load_tp_shard_from_gguf`)
-/// loaders — they differ only in *how* per-layer weights are
-/// uploaded, not in the struct shape.
+/// Same struct for SD + TP-sharded loaders — only the field values
+/// (sharded vs full weights) differ.
 pub struct Qwen3V2Model {
     pub config: Qwen3V2Config,
     pub layout: ModelLayout,
@@ -43,7 +36,7 @@ impl Qwen3V2Model {
             );
         }
         for (ptr, bytes) in self.allocs.drain(..) {
-            // SAFETY: ptr returned by `device.alloc(bytes)` via the loader.
+            // SAFETY: ptr returned by `device.alloc(bytes)` in the loader.
             unsafe { device.dealloc(ptr, bytes) }
                 .with_context(|| format!("dealloc {bytes} bytes"))?;
         }
@@ -51,8 +44,7 @@ impl Qwen3V2Model {
     }
 }
 
-/// Load a qwen3 GGUF onto `device`. Full (non-sharded) weights; every
-/// rank under PP/single-device sees the same weights.
+/// Full (non-sharded) weights for SingleDevice/PP.
 pub fn load_from_gguf(file: &GgufFile, device: &HipDevice) -> Result<Qwen3V2Model> {
     let config = Qwen3V2Config::from_gguf(file).context("parse qwen3 config")?;
     let mut allocs: Vec<(DevicePtr, usize)> = Vec::new();

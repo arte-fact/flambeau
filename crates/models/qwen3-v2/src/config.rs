@@ -1,7 +1,3 @@
-//! GGUF metadata → `Qwen3V2Config`. Mirrors the relevant subset of
-//! `flambeau-qwen3-moe::config::Qwen3MoEConfig`'s parsing logic for
-//! the `qwen3` architecture tag (pure dense full-attention).
-
 use flambeau_quant::GgufFile;
 use thiserror::Error;
 
@@ -15,7 +11,6 @@ pub enum Qwen3V2ConfigError {
     MissingTokenEmbd,
 }
 
-/// Static config for a loaded qwen3 dense model.
 #[derive(Debug, Clone)]
 pub struct Qwen3V2Config {
     pub hidden: usize,
@@ -29,8 +24,7 @@ pub struct Qwen3V2Config {
     pub vocab_size: usize,
     pub rms_eps: f32,
     pub context_length: usize,
-    /// `true` when the GGUF omits `output.weight` and the LM head must
-    /// be tied to `token_embd.weight`.
+    /// `output.weight` absent in GGUF → LM head ties to `token_embd.weight`.
     pub tied_lm_head: bool,
 }
 

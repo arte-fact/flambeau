@@ -1,22 +1,7 @@
-//! `TpForwardCtx` — tensor-parallel forward context.
-//!
-//! Every rank runs every layer on its column / row shard of the
-//! weights. Composites are unchanged on this trait surface; the
-//! topology customisation lives in two places:
-//!
-//! 1. The per-rank `AttnWeights` / `FfnWeights` are sharded by the
-//!    model crate before construction (col-shard Q/K/V/gate/up,
-//!    row-shard output_proj/down). Each rank's `AttnWeights.n_heads`
-//!    is `model.n_heads / tp_size`; `weights.attn_q` is just the
-//!    rank's slice of the original Q-projection columns.
-//! 2. After the row-parallel matmuls (output_proj, down), the
-//!    `TopologyHooks::ar_sum_f32` call sites in core/composites
-//!    reduce-sum the F32 partials across ranks.
-//!
-//! `embed`, `rmsnorm`, `residual_add`, `output_head` are replicated:
-//! every rank computes the same thing on the (replicated) embedding /
-//! norm / LM-head weights. The trait method bodies delegate to the
-//! shared composites unchanged.
+//! Tensor-parallel ctx. Per-rank sharded AttnWeights/FfnWeights
+//! (caller's loader handles the sharding); composites delegate to
+//! `core/` unchanged. The AR happens through `ar_sum_f32` after the
+//! row-parallel matmuls.
 
 use anyhow::Result;
 use flambeau_backend_hip::{HipDevice, HipStream};
@@ -29,15 +14,12 @@ use crate::ctx::{
     MoeWeights,
 };
 
-/// Topology hooks for TP. `ar_sum_f32` is provided by the caller (a
-/// real BAR1 P2P AllReduce in production; a host-roundtrip + Barrier
-/// for the parity test).
+/// `ar_callback` is `(rank, n_ranks, buf, n_elems, device, stream)`.
+/// Pluggable so production uses BAR1 P2P AllReduce while tests use a
+/// host-roundtrip Barrier.
 pub struct TpHooks {
     pub rank: usize,
     pub n_ranks: usize,
-    /// Pluggable AR callback. `(rank, n_ranks, buf, n_elems, device, stream)`.
-    /// Set by the caller; the test wires a thread-safe host-roundtrip
-    /// implementation here.
     pub ar_callback: Box<
         dyn FnMut(
                 usize,
@@ -66,7 +48,6 @@ impl TopologyHooks for TpHooks {
     }
 }
 
-/// Tensor-parallel forward context.
 pub struct TpForwardCtx<'a> {
     core: CoreState<'a>,
     hooks: TpHooks,

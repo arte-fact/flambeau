@@ -1,10 +1,4 @@
-//! `SingleDeviceForwardCtx` — single-GPU forward context.
-//!
-//! The simplest topology: one device, one stream, no AR, no peer-copy.
-//! `layer_range` yields `0..num_layers`; every composite runs locally.
-//!
-//! This is a thin wrapper around `core::composites::*`. SingleDevice's
-//! topology customisation surface is zero — it uses `NoopHooks`.
+//! Single-GPU forward context: one device, one stream, `NoopHooks`.
 
 use anyhow::Result;
 use flambeau_backend_hip::{HipDevice, HipStream};
@@ -17,11 +11,8 @@ use crate::ctx::{
     MoeWeights,
 };
 
-// Re-export so existing users (`use flambeau_forward::single_device::{ScratchConfig, ScratchPool, SingleDeviceForwardCtx}`)
-// keep working without an explicit `core::` hop.
 pub use crate::core::{ScratchConfig, ScratchPool};
 
-/// Single-GPU forward context.
 pub struct SingleDeviceForwardCtx<'a> {
     core: CoreState<'a>,
     hooks: NoopHooks,
@@ -40,8 +31,8 @@ impl<'a> SingleDeviceForwardCtx<'a> {
         }
     }
 
-    /// Reset internal slot-selection state between forward passes. KV
-    /// caches stay populated (caller's invariant: `position` matches).
+    /// Reset slot selection between forward passes. KV caches stay
+    /// populated; caller's invariant is that `position` matches.
     pub fn reset(&mut self) {
         self.core.pool.current_residual_is_a = true;
     }
@@ -105,11 +96,6 @@ impl ForwardCtx for SingleDeviceForwardCtx<'_> {
         &self.core.logits_host
     }
 }
-
-// =============================================================================
-// Synthetic-model smoke test — kept here because it exercises the full
-// trait surface on a real device.
-// =============================================================================
 
 #[cfg(test)]
 mod tests {

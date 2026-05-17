@@ -1,18 +1,7 @@
-//! `RecordingCtx` — a `ForwardCtx` impl that records each composite
-//! call as an `OpCall` instead of running it. Used by model unit
-//! tests to assert "this arch calls embed → rmsnorm → standard_attn
-//! → ... in the right order with the right layer indices" without
-//! requiring a HIP device.
-//!
-//! This is structural, not numerical. Real correctness comes from the
-//! topology-parity tests on real devices (one per concrete topology
-//! ctx, exercising every composite).
-//!
-//! Method bodies fill in the matching `OpCall` variant and return a
-//! dummy `Tensor<F16>` (null ptr, n_elems = 0 by default; tests can
-//! seed non-zero shapes if they care). The dummy tensor is never
-//! dereferenced — only passed back as ctx-relative tokens that the
-//! recording impl ignores.
+//! Device-free `ForwardCtx` that records the composite call sequence.
+//! Lets model unit tests assert op order + per-layer indices without
+//! a HIP device. Returned tensors are NULL/0 placeholders and never
+//! dereferenced by the recording impl.
 
 #![cfg(test)]
 
@@ -25,8 +14,6 @@ use crate::ctx::{
     MoeWeights,
 };
 
-/// Recorded composite call. One variant per `ForwardCtx` method.
-/// `Eq` for assert_eq! in tests; `Debug` for failure messages.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum OpCall {
     Embed { token: u32 },
@@ -38,15 +25,9 @@ pub enum OpCall {
     OutputHead,
 }
 
-/// Recording-mode forward context. Maintains the ordered list of
-/// composite calls.
 pub struct RecordingCtx {
     pub ops_called: Vec<OpCall>,
-    /// Layer indices to yield from `layer_range`. Tests configure
-    /// this to match the topology they're simulating (PP: a slice of
-    /// layer indices; TP: 0..num_layers; Hybrid: a stage's slice).
     pub layer_range_yield: Vec<usize>,
-    /// Logits slot returned by `logits()`. Test fixture.
     pub logits_buf: Vec<f32>,
 }
 
@@ -59,15 +40,13 @@ impl RecordingCtx {
         }
     }
 
-    /// Configure `layer_range` to yield exactly these layer indices.
     pub fn with_layers(mut self, layers: impl IntoIterator<Item = usize>) -> Self {
         self.layer_range_yield = layers.into_iter().collect();
         self
     }
 
     fn dummy_tensor() -> Tensor<F16> {
-        // SAFETY: pointer is NULL + n_elems is 0; this tensor is only
-        // ever passed back to a `RecordingCtx` which never dereferences it.
+        // SAFETY: NULL ptr / 0 len — never dereferenced by the recording impl.
         unsafe { Tensor::<F16>::from_raw(DevicePtr::NULL, 0) }
     }
 }
@@ -112,9 +91,6 @@ impl ForwardCtx for RecordingCtx {
     }
 
     fn dense_ffn(&mut self, _input: &Tensor<F16>, _weights: &FfnWeights) -> Result<Tensor<F16>> {
-        // layer_idx isn't a parameter of dense_ffn today; if a model
-        // needs it for routing, the trait method picks it up and this
-        // variant captures it.
         self.ops_called.push(OpCall::DenseFfn { layer_idx: 0 });
         Ok(Self::dummy_tensor())
     }

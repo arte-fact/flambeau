@@ -1,10 +1,5 @@
-//! Integration smoke test: load a real qwen3 GGUF, run one forward
-//! step through `SingleDeviceForwardCtx`, assert the logits are finite
-//! + non-constant.
-//!
-//! Skipped if `/artefact/models/Qwen3-Embedding-0.6B-Q8_0.gguf` is not
-//! present — we don't make this required for the rest of the test
-//! suite to run.
+//! Real-GGUF smoke for SingleDeviceForwardCtx. Skips if the model
+//! file isn't present locally.
 
 #![cfg(feature = "hip")]
 
@@ -25,9 +20,7 @@ const QWEN35_9B: &str = "/artefact/models/Qwen3.5-9B-Q4_1.gguf";
 fn forward_one_token_produces_finite_non_constant_logits() {
     let path = PathBuf::from(MODEL_PATH);
     if !path.exists() {
-        eprintln!(
-            "SKIP: {MODEL_PATH} not present — skipping qwen3-v2 single-device smoke test"
-        );
+        eprintln!("SKIP: {MODEL_PATH} not present");
         return;
     }
 
@@ -51,7 +44,6 @@ fn forward_one_token_produces_finite_non_constant_logits() {
     let reg = OpsRegistry::new(&device).expect("OpsRegistry::new");
     let stream = device.default_stream();
 
-    // Cap KV context to keep scratch alloc tractable for a smoke test.
     let max_seq_len = 64.min(model.config.context_length);
     let cfg = ScratchConfig {
         hidden: model.config.hidden,
@@ -67,9 +59,6 @@ fn forward_one_token_produces_finite_non_constant_logits() {
     {
         let mut ctx = SingleDeviceForwardCtx::new(&device, stream, &reg, &mut pool);
 
-        // Run a single-token forward at position 0. Token id 1 is a
-        // generic non-pad token; the model is small so we don't worry
-        // about whether it's a "good" BOS-like seed.
         if let Err(e) = forward_one_token(&model, &mut ctx, 1, 0) {
             eprintln!("forward_one_token FAILED, error chain:");
             for (i, cause) in e.chain().enumerate() {
@@ -111,9 +100,8 @@ fn forward_one_token_produces_finite_non_constant_logits() {
     model.dispose(&device).expect("model dispose");
 }
 
-/// Confirms the qwen3-v2 loader rejects qwen35 (hybrid GDN+full-attn)
-/// with a clear error. v2 doesn't yet have a GDN composite — that's a
-/// future phase before qwen3.5 / qwen3.6 can run.
+/// qwen35 is hybrid GDN+full-attn — out of scope until the GDN
+/// composite lands. Loader should reject with a clear arch error.
 #[test]
 fn qwen35_9b_rejected_with_clear_arch_error() {
     let path = PathBuf::from(QWEN35_9B);

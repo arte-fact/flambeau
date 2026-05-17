@@ -1,9 +1,5 @@
-//! Standard transformer attention block: rmsnorm-quant → Q/K/V proj
-//! (F32 → F16 cast) → optional Q/K norm → RoPE → KV append → flash-attn
-//! decode → quantise → output proj → cast to delta.
-//!
-//! Topology AR / peer-copy / rank-guard call sites land via the
-//! `TopologyHooks` parameter as PP / TP land.
+//! rmsnorm-quant → Q/K/V proj → optional Q/K norm → RoPE → KV append
+//! → attn_decode → quantise → output proj (with TP AR) → cast.
 
 use anyhow::{bail, Context, Result};
 use flambeau_core::{CopyDirection, Device, DevicePtr};
@@ -57,7 +53,6 @@ pub fn standard_attn_local<H: TopologyHooks>(
 
     let ops = state.ops();
 
-    // 1. rmsnorm-quant: input → Q8_1 row.
     let mut norm_q8_1 = unsafe { Tensor::<Q8_1>::from_raw(state.pool.norm_q8_1, hidden) };
     flambeau_model_ops::rmsnorm_quant_q8_1(
         input,
@@ -69,7 +64,6 @@ pub fn standard_attn_local<H: TopologyHooks>(
         &ops,
     )?;
 
-    // 2. Q/K/V projections — F32 output, then cast back to F16.
     let act_mmq_null = unsafe { Tensor::<Q8_1>::from_raw(DevicePtr::NULL, 0) };
     let q_f32_buf = state.pool.attn_proj_f32;
     let mut q_f32 = unsafe { Tensor::<F32>::from_raw(q_f32_buf, q_width) };
@@ -94,9 +88,8 @@ pub fn standard_attn_local<H: TopologyHooks>(
     flambeau_model_ops::cast_f32_to_f16(&v_f32, &mut v_f16, kv_width, &ops)?;
     let _ = q_f32_buf;
 
-    // 3. Optional Q/K norm (qwen3.x; gemma4 attn-norm path). Per-head
-    // rmsnorm: treats q_f16 as `n_heads` rows of `head_dim`. Routed
-    // through `attn_out_f16` (the only F16 slot sized to `q_width`).
+    // Per-head Q/K norm. Output routed through `attn_out_f16` (the
+    // only F16 slot sized to `q_width`) and copied back.
     if let Some(q_norm_w) = weights.attn_q_norm.as_ref() {
         let q_normed = unsafe { Tensor::<F16>::from_raw(state.pool.q_f16, q_width) };
         let mut tmp = unsafe { Tensor::<F16>::from_raw(state.pool.attn_out_f16, q_width) };
@@ -152,7 +145,6 @@ pub fn standard_attn_local<H: TopologyHooks>(
         let _ = k_normed;
     }
 
-    // 4. RoPE on Q and K. Position tensor lives in position_i32 (1 elem).
     let pos_val = [position as i32];
     unsafe {
         state
@@ -211,8 +203,6 @@ pub fn standard_attn_local<H: TopologyHooks>(
         )?;
     }
 
-    // 5. KV append at row `position`. Use the local KV slot (global
-    // layer_idx remapped to this rank's owned slice).
     let kv = state.pool.kv_caches[local_idx];
     let mut k_cache =
         unsafe { Tensor::<F16>::from_raw(kv.k, state.pool.config.max_seq_len * kv_width) };
@@ -231,7 +221,6 @@ pub fn standard_attn_local<H: TopologyHooks>(
         state.stream,
     )?;
 
-    // 6. Attention decode against the populated cache (rows [0, position+1)).
     let n_tokens_kv = position + 1;
     let mut attn_out = unsafe { Tensor::<F16>::from_raw(state.pool.attn_out_f16, q_width) };
     let scale = weights
@@ -251,15 +240,11 @@ pub fn standard_attn_local<H: TopologyHooks>(
         &ops,
     )?;
 
-    // 7. Quantise attn_out for output projection.
     let mut attn_out_q8_1 =
         unsafe { Tensor::<Q8_1>::from_raw(state.pool.attn_out_q8_1, q_width) };
     flambeau_model_ops::quantize_f16_to_q8_1(&attn_out, &mut attn_out_q8_1, q_width, &ops)?;
 
-    // 8. Output projection: F32 result, AR-sum partials across ranks
-    // under TP (no-op under SingleDevice / PP), then cast to F16 in
-    // `delta`. Row-parallel weights → AR collapses the per-rank
-    // partials into the full hidden vector.
+    // Row-parallel output proj — AR-sum collapses per-rank partials under TP.
     let mut proj_f32 = unsafe { Tensor::<F32>::from_raw(state.pool.attn_proj_f32, hidden) };
     weights.attn_output.qmatmul(
         &attn_out_q8_1,

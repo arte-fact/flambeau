@@ -1,5 +1,4 @@
-//! Output head: rmsnorm-quant of final residual → LM-head matmul → DtoH
-//! into the host logits buffer. Final softcap (gemma4) bails until P8.
+//! rmsnorm-quant → LM-head matmul → DtoH into `state.logits_host`.
 
 use anyhow::{bail, Context, Result};
 use flambeau_core::{CopyDirection, Device, DevicePtr};
@@ -42,7 +41,7 @@ pub fn output_head_local<H: TopologyHooks>(
         .qmatmul(&norm_q8_1, &act_mmq_null, &mut logits_f32, 1, hidden, vocab, &ops)?;
 
     if let Some(_cap) = lm_head.final_logit_softcap {
-        bail!("output_head: final_logit_softcap not implemented; lands with gemma4-v2 in P8");
+        bail!("output_head: final_logit_softcap not implemented");
     }
 
     if state.logits_host.len() != vocab {

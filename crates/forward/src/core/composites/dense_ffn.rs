@@ -1,6 +1,4 @@
-//! Gated dense FFN composite: rmsnorm-quant → gate/up matmul (F32 →
-//! gated F16) → activate (SwiGLU / GELU-tanh) → quantise → down matmul
-//! → cast to delta.
+//! rmsnorm-quant → gate/up → activate → quantise → down (with TP AR) → cast.
 
 use anyhow::Result;
 use flambeau_core::DevicePtr;
@@ -56,7 +54,6 @@ pub fn dense_ffn_local<H: TopologyHooks>(
     weights
         .ffn_down
         .qmatmul(&gated_q8_1, &act_mmq_null, &mut down_f32, 1, m, hidden, &ops)?;
-    // Row-parallel down → AR-sum partials across ranks (no-op SingleDevice/PP).
     hooks.ar_sum_f32(down_f32.ptr, hidden, state.device, state.stream)?;
     let mut delta = unsafe { Tensor::<F16>::from_raw(state.pool.delta, hidden) };
     flambeau_model_ops::cast_f32_to_f16(&down_f32, &mut delta, hidden, &ops)?;

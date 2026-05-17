@@ -1,16 +1,5 @@
-//! Pipeline-parallel parity vs single-device on Qwen3-Embedding-0.6B.
-//!
-//! Each rank runs ITS slice of layers using the same `forward_one_token`
-//! function and the same `Qwen3V2Model` weight handle (shared across
-//! ranks for test simplicity; a true multi-device load would shard
-//! weights per rank but isn't required to validate the trait surface).
-//!
-//! PP rank `r` reads its inbound residual from the shared `peer_buffer`
-//! at `embed` (rank 0 ignores) and writes its outbound residual at
-//! `output_head` (last rank ignores → does the real LM head).
-//!
-//! Expected outcome: logits bit-equal vs single-device. The host F16
-//! roundtrip introduces zero precision loss.
+//! pp_size=2 parity vs SD on Qwen3-Embedding-0.6B. Host F16 roundtrip
+//! is lossless → expect bit-equal logits.
 
 #![cfg(feature = "hip")]
 

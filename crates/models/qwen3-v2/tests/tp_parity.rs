@@ -1,17 +1,8 @@
-//! Tensor-parallel parity (tp_size=2) on Qwen3-Embedding-0.6B.
-//!
-//! Two threads, one per rank. Each thread loads its TP shard
-//! (col-shard Q/K/V/gate/up; row-shard attn_output/ffn_down), builds
-//! a TpForwardCtx, and runs forward_one_token. After each row-parallel
-//! matmul the composite calls the rank's AR hook; both ranks deposit
-//! their F32 partials into a shared host coordinator + barrier, then
-//! read back the summed result.
-//!
-//! Both ranks compute the SAME residual stream (post-AR) and the
-//! SAME logits. Asserts argmax matches the single-device baseline.
-//! Bit-equality isn't guaranteed because matmul reduction-tree order
-//! differs between SD (one matmul over q_width=2048) and TP (per-rank
-//! matmul over q_width/2=1024 + host sum) — F32 noise around 1e-4.
+//! tp_size=2 parity vs SD on Qwen3-Embedding-0.6B. One thread per
+//! rank; AR via shared `Mutex<partials>` + `Barrier` (host roundtrip).
+//! F32 reduction-tree order differs from SD so bit-equality isn't
+//! mathematically guaranteed — the test tolerates ≤ 5e-2 abs diff
+//! and asserts argmax match.
 
 #![cfg(feature = "hip")]
 
@@ -30,9 +21,6 @@ use flambeau_quant::GgufFile;
 
 const MODEL_PATH: &str = "/artefact/models/Qwen3-Embedding-0.6B-Q8_0.gguf";
 
-/// Host-roundtrip AR coordinator. Each call: DtoH partial → deposit →
-/// barrier → sum → barrier → HtoD result → barrier (reset slot for
-/// next AR step).
 struct ArCoordinator {
     n_ranks: usize,
     partials: Mutex<Vec<Option<Vec<f32>>>>,
@@ -59,7 +47,6 @@ fn ar_sum_via_coordinator(
     stream: &flambeau_backend_hip::HipStream,
 ) -> anyhow::Result<()> {
     let bytes = n_elems * 4;
-    // 1. DtoH the partial into a host vec.
     let mut host = vec![0.0_f32; n_elems];
     unsafe {
         device.memcpy_async(
@@ -72,14 +59,13 @@ fn ar_sum_via_coordinator(
     }
     flambeau_core::Stream::synchronize(stream)?;
 
-    // 2. Deposit + barrier-wait for the other rank.
     {
         let mut p = coord.partials.lock().unwrap();
         p[rank] = Some(host);
     }
     coord.barrier.wait();
 
-    // 3. Sum on every rank (both compute the same result; cheap).
+    // Every rank sums (cheap; result is identical across ranks).
     let summed: Vec<f32> = {
         let p = coord.partials.lock().unwrap();
         let mut s = p[0].as_ref().unwrap().clone();
@@ -92,11 +78,9 @@ fn ar_sum_via_coordinator(
         s
     };
 
-    // 4. Second barrier so no rank starts clearing partials before
-    //    every rank has read them.
+    // Second barrier: no rank may clear partials before all have read.
     coord.barrier.wait();
 
-    // 5. Rank 0 resets the deposit slots for the next AR call.
     if rank == 0 {
         let mut p = coord.partials.lock().unwrap();
         for r in 0..coord.n_ranks {
@@ -105,7 +89,6 @@ fn ar_sum_via_coordinator(
     }
     coord.barrier.wait();
 
-    // 6. HtoD the summed result back over the partial.
     unsafe {
         device.memcpy_async(
             stream,
@@ -128,9 +111,7 @@ fn tp_size_2_logits_match_single_device() {
     }
     let file = GgufFile::open(&path).expect("open gguf");
 
-    // -----------------------------------------------------------------
-    // Single-device baseline.
-    // -----------------------------------------------------------------
+    // SD baseline.
     let baseline: Vec<f32> = {
         let device = HipDevice::new(0).expect("HIP device 0");
         device.bind().expect("bind");
@@ -157,9 +138,7 @@ fn tp_size_2_logits_match_single_device() {
         logits
     };
 
-    // -----------------------------------------------------------------
     // tp_size=2.
-    // -----------------------------------------------------------------
     let n_ranks = 2;
     let coord = Arc::new(ArCoordinator::new(n_ranks));
     let mut handles = Vec::with_capacity(n_ranks);
@@ -225,7 +204,7 @@ fn tp_size_2_logits_match_single_device() {
     let tp_rank1 = per_rank_logits.remove(0);
     drop(per_rank_logits);
 
-    // Sanity: every rank should observe the same logits (output_head is replicated post-AR).
+    // output_head is replicated post-AR → every rank must agree.
     let mut inter_rank_diff = 0.0_f32;
     for (a, b) in tp_rank0.iter().zip(tp_rank1.iter()) {
         inter_rank_diff = inter_rank_diff.max((a - b).abs());
@@ -236,7 +215,6 @@ fn tp_size_2_logits_match_single_device() {
         "TP ranks diverged: {inter_rank_diff:.6} (AR not deterministic?)"
     );
 
-    // Parity vs SD.
     let mut max_abs_diff = 0.0_f32;
     let mut worst = 0;
     for (i, (&a, &b)) in tp_rank0.iter().zip(baseline.iter()).enumerate() {
@@ -264,12 +242,9 @@ fn tp_size_2_logits_match_single_device() {
         tp_rank0[worst]
     );
     assert_eq!(tp_argmax, baseline_argmax, "argmax differs SD vs TP");
-    // F32 reduction-tree noise: SD reduces over q_width=2048 / intermediate=3072
-    // in one tree; TP reduces over halves + host sum. Differences should be
-    // far below the smallest logit gap. Use a generous bound for the smoke
-    // test; tighten if perf cert work later wants tighter.
+    // Bound is generous; F32 noise from differing reduction-tree order.
     assert!(
         max_abs_diff < 5e-2,
-        "TP logits diverge from SD by {max_abs_diff:.6} at idx {worst} — exceeds F32 reduction-tree tolerance"
+        "TP logits diverge from SD by {max_abs_diff:.6} at idx {worst}"
     );
 }

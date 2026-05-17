@@ -1,17 +1,12 @@
-//! Pre-allocated device scratch + per-layer KV cache for a single
-//! inflight forward sequence.
+//! Pre-allocated device scratch + per-layer KV cache.
 
 use anyhow::{Context, Result};
 use flambeau_backend_hip::HipDevice;
 use flambeau_core::{Device, DevicePtr};
 
-/// Shape parameters needed to size the ctx's scratch + KV pools at
-/// construction time.
-///
-/// `q_width` / `kv_width` are the per-rank widths under TP (model
-/// width divided by tp_size); under SingleDevice / PP they are the
-/// model widths. The pool doesn't know which — the caller computes
-/// them appropriately.
+/// `q_width` / `kv_width` are PER-RANK under TP (caller divides by
+/// tp_size). `num_layers` is the count of owned KV slots — PP rank
+/// owning a layer slice passes the slice length, not the global total.
 #[derive(Clone, Copy, Debug)]
 pub struct ScratchConfig {
     pub hidden: usize,
@@ -23,19 +18,13 @@ pub struct ScratchConfig {
     pub num_layers: usize,
 }
 
-/// One layer's KV cache: F16 `[max_seq_len, kv_width]` for K and V.
 #[derive(Clone, Copy)]
 pub struct KvCache {
     pub k: DevicePtr,
     pub v: DevicePtr,
 }
 
-/// Pre-allocated device buffers used by every composite. Caller must
-/// invoke `dispose(device)` before drop to release HBM.
-///
-/// Holds the ping-pong residual selector (`current_residual_is_a`)
-/// because that's shared across composites — `embed` flips it, every
-/// `residual_add` flips it.
+/// Caller must invoke `dispose(device)` before drop to release HBM.
 pub struct ScratchPool {
     pub config: ScratchConfig,
 
@@ -98,7 +87,7 @@ impl ScratchPool {
         let v_f16 = alloc_bytes(kvw * f16)?;
         let attn_out_f16 = alloc_bytes(qw * f16)?;
         let attn_out_q8_1 = alloc_bytes(q8_1(qw))?;
-        // Reused as Q (qw F32), K/V (kvw F32), and output-proj (h F32) target — size to the max.
+        // Reused for Q / K / V / output-proj F32 — size to the max.
         let attn_proj_f32 = alloc_bytes(qw.max(kvw).max(h) * f32)?;
 
         let gate_f32 = alloc_bytes(m * f32)?;
@@ -143,20 +132,18 @@ impl ScratchPool {
         })
     }
 
-    /// Free every device buffer this pool allocated. Idempotent.
+    /// Idempotent.
     pub fn dispose(&mut self, device: &HipDevice) -> Result<()> {
         for (ptr, bytes) in self.allocs.drain(..) {
-            // SAFETY: `ptr` came from `device.alloc(bytes)`; not freed
-            // elsewhere, not aliased (caller's invariant for dispose is
-            // "no further forward calls").
+            // SAFETY: `ptr` came from `device.alloc(bytes)`; caller
+            // contract: no further forward calls past dispose.
             unsafe { device.dealloc(ptr, bytes) }.context("dealloc")?;
         }
         Ok(())
     }
 
-    /// Flip the residual-slot selector and return the new live slot's
-    /// device pointer. Composites that write a fresh residual call this
-    /// (embed, residual_add).
+    /// Flip residual ping-pong and return the live slot. Called by
+    /// `embed` and every `residual_add`.
     pub fn next_residual_slot(&mut self) -> DevicePtr {
         self.current_residual_is_a = !self.current_residual_is_a;
         if self.current_residual_is_a {

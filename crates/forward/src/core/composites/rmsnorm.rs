@@ -1,5 +1,3 @@
-//! RMSNorm composite: writes a fresh F16 row into the `norm` scratch slot.
-
 use anyhow::Result;
 use flambeau_model_ops::{Tensor, F16};
 

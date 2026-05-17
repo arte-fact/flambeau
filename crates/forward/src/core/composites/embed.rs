@@ -1,6 +1,3 @@
-//! Embedding lookup — DtoD memcpy of the F16 token_embd row into the
-//! next residual slot.
-
 use anyhow::{bail, Context, Result};
 use flambeau_core::{CopyDirection, Device};
 use flambeau_model_ops::{Tensor, F16};
@@ -42,8 +39,7 @@ pub fn embed_local<H: TopologyHooks>(
         .ptr
         .offset_bytes((token_id as usize) * row_bytes);
     let dst = state.pool.next_residual_slot();
-    // SAFETY: src points at >= row_bytes valid F16 weight bytes; dst is
-    // a pool slot sized for hidden F16 elems; stream is live.
+    // SAFETY: src points at row_bytes of token_embd; dst sized for hidden F16.
     unsafe {
         state
             .device

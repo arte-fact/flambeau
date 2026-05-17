@@ -1,5 +1,3 @@
-//! Elementwise F16 add into the next residual slot (slot pings/pongs).
-
 use anyhow::Result;
 use flambeau_model_ops::{Tensor, F16};
 

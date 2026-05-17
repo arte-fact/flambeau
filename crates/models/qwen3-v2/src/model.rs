@@ -1,17 +1,12 @@
-//! Qwen3 dense forward function.
-//!
-//! Generic over `ForwardCtx` — the same code runs under single-device,
-//! PP, TP, or hybrid topology executors. Topology placement (AR after
-//! row-parallel ops, peer-copy at PP stage boundaries) is the ctx's
-//! responsibility; this file only sequences the composites.
+//! qwen3 forward, `<C: ForwardCtx>`-generic. Topology placement is
+//! the ctx's job; this file only sequences composites.
 
 use anyhow::Result;
 use flambeau_forward::ctx::ForwardCtx;
 
 use crate::loader::Qwen3V2Model;
 
-/// Run one decode-step forward for `token_id` at sequence position
-/// `position`. Result lives in `ctx.logits()`.
+/// One decode step. Logits land in `ctx.logits()`.
 pub fn forward_one_token<C: ForwardCtx>(
     model: &Qwen3V2Model,
     ctx: &mut C,

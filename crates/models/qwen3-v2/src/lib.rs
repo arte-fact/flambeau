@@ -1,17 +1,6 @@
-//! Qwen3 dense-attention thin model (v2 stack).
-//!
-//! Implements the qwen3 GGUF architecture (pure dense — full-attention
-//! every layer, dense FFN, SwiGLU activation, optional Q/K norm,
-//! optional partial NeoX RoPE). The model crate's job is small:
-//!
-//! 1. Parse the GGUF metadata into a `Qwen3V2Config`.
-//! 2. Upload each tensor to device, wrap in the right `QuantWeight` /
-//!    `Tensor<F16>`.
-//! 3. Provide `forward_one_token<C: ForwardCtx>` that walks the
-//!    compose vocabulary in the right order.
-//!
-//! Topology is the executor's concern (`flambeau-forward`); this crate
-//! is topology-agnostic.
+//! qwen3 dense arch (v2 stack): full-attention every layer, dense
+//! FFN, SwiGLU, optional Q/K norm + partial NeoX RoPE. Topology lives
+//! in `flambeau-forward`.
 
 #![cfg(feature = "hip")]
 
