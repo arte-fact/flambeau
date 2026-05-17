@@ -454,7 +454,7 @@ impl HybridRankSession {
         for &gi in layers_global {
             let spec = &layout.layers[gi];
             if !spec.has_kv {
-                bail!("HybridRankSession: shared-KV tail layer {gi} not supported in S10-H");
+                bail!("HybridRankSession: shared-KV tail layer {gi}");
             }
             let n_kv_local = spec.n_kv_heads / tp_size;
             let kv = KvCache::<F16Contig, HipDevice>::new(
@@ -698,7 +698,7 @@ impl Gemma4HybridDriver {
         for spec in &layout.layers {
             if !spec.has_kv {
                 bail!(
-                    "Gemma4HybridDriver::upload: shared-KV tail layer {} unsupported (S10-H)",
+                    "Gemma4HybridDriver::upload: shared-KV tail layer {}",
                     spec.index
                 );
             }
@@ -977,9 +977,6 @@ fn forward_layer_decode_hybrid(
     let model_stage = &driver.model.stages[stage_idx];
     let session_stage = &mut driver.session.stages[stage_idx];
     let n_ranks = sub_cluster.ranks();
-    if n_ranks != 2 {
-        bail!("forward_layer_decode_hybrid: TP{n_ranks} not supported in S10-A; only tp2");
-    }
     let spec = driver.model.layout.layers[global_il];
 
     let hidden = cfg.hidden_size;
@@ -1065,7 +1062,7 @@ fn forward_layer_decode_hybrid(
 
         let kv = session_rs.kv_caches[il_in_stage]
             .as_mut()
-            .expect("S10-A requires per-layer KV");
+            .expect("per-layer KV required");
         let mut std_scratch = StandardAttentionDecodeScratch {
             x_q8_1: session_rs.scratch.x_q8_1.0,
             mmvq_f32: session_rs.scratch.mmvq_f32.0,
@@ -1104,15 +1101,13 @@ fn forward_layer_decode_hybrid(
     // partial_attn is hidden F16 elems on its rank's device; streams
     // outlive the AR; subsequent reads are serialised on each rank's
     // default stream.
+    let streams: Vec<&_> = (0..n_ranks).map(|r| sub_cluster.device(r).default_stream()).collect();
     let _replicated = unsafe {
-        let partials: [Buffer<F16, RowParallel<0>>; 2] = [
-            Buffer::from_raw_unchecked(session_stage.rank_state[0].partial_attn, hidden),
-            Buffer::from_raw_unchecked(session_stage.rank_state[1].partial_attn, hidden),
-        ];
-        let streams: [&_; 2] = [
-            sub_cluster.device(0).default_stream(),
-            sub_cluster.device(1).default_stream(),
-        ];
+        let partials: Vec<Buffer<F16, RowParallel<0>>> = session_stage
+            .rank_state
+            .iter()
+            .map(|rs| Buffer::from_raw_unchecked(rs.partial_attn, hidden))
+            .collect();
         tp_allreduce_sum::<0>(ar, &partials, &streams)
     }
     .map_err(|e| anyhow!("AR sum attn stage {stage_idx}: {e}"))?;
@@ -1205,14 +1200,11 @@ fn forward_layer_decode_hybrid(
     // Phase 5: typed AR FFN — same pattern as Phase 2 above.
     // SAFETY: same as Phase 2.
     let _replicated_ffn = unsafe {
-        let partials_ffn: [Buffer<F16, RowParallel<0>>; 2] = [
-            Buffer::from_raw_unchecked(session_stage.rank_state[0].partial_ffn, hidden),
-            Buffer::from_raw_unchecked(session_stage.rank_state[1].partial_ffn, hidden),
-        ];
-        let streams: [&_; 2] = [
-            sub_cluster.device(0).default_stream(),
-            sub_cluster.device(1).default_stream(),
-        ];
+        let partials_ffn: Vec<Buffer<F16, RowParallel<0>>> = session_stage
+            .rank_state
+            .iter()
+            .map(|rs| Buffer::from_raw_unchecked(rs.partial_ffn, hidden))
+            .collect();
         tp_allreduce_sum::<0>(ar, &partials_ffn, &streams)
     }
     .map_err(|e| anyhow!("AR sum ffn stage {stage_idx}: {e}"))?;
@@ -1264,9 +1256,6 @@ fn forward_layer_decode_hybrid_moe(
     let model_stage = &driver.model.stages[stage_idx];
     let session_stage = &mut driver.session.stages[stage_idx];
     let n_ranks = sub_cluster.ranks();
-    if n_ranks != 2 {
-        bail!("forward_layer_decode_hybrid_moe: TP{n_ranks} unsupported in S10-H; only tp2");
-    }
     let global_il = model_stage.layers_global[il_in_stage];
     let spec = driver.model.layout.layers[global_il];
 
@@ -1317,7 +1306,7 @@ fn forward_layer_decode_hybrid_moe(
         };
         let kv = session_rs.kv_caches[il_in_stage]
             .as_mut()
-            .expect("S10-H requires per-layer KV");
+            .expect("per-layer KV required");
         let mut std_scratch = StandardAttentionDecodeScratch {
             x_q8_1: session_rs.scratch.x_q8_1.0,
             mmvq_f32: session_rs.scratch.mmvq_f32.0,
@@ -1345,17 +1334,15 @@ fn forward_layer_decode_hybrid_moe(
     }
 
     // Phase 2: AR-sum attention partial (F32 on full-attn, F16 on SWA).
+    let streams: Vec<&_> = (0..n_ranks).map(|r| sub_cluster.device(r).default_stream()).collect();
     {
         let cores: Vec<&TpRankCore> = session_stage.rank_state.iter().map(|rs| &rs.core).collect();
-        let streams: [&_; 2] = [
-            sub_cluster.device(0).default_stream(),
-            sub_cluster.device(1).default_stream(),
-        ];
         if is_full_attn {
-            let partials: [DevicePtr; 2] = [
-                session_stage.rank_state[0].partial_attn_f32,
-                session_stage.rank_state[1].partial_attn_f32,
-            ];
+            let partials: Vec<DevicePtr> = session_stage
+                .rank_state
+                .iter()
+                .map(|rs| rs.partial_attn_f32)
+                .collect();
             // SAFETY: partial_attn_f32 owns `hidden` F32 elements per
             // rank; streams correspond to those ranks; cores carry the
             // producer_done events the synced helper records before AR.
@@ -1367,10 +1354,11 @@ fn forward_layer_decode_hybrid_moe(
             // SAFETY: partial_attn is `hidden` F16 elements per rank;
             // same ordering contract as the F32 branch.
             let _ = unsafe {
-                let partials: [Buffer<F16, RowParallel<0>>; 2] = [
-                    Buffer::from_raw_unchecked(session_stage.rank_state[0].partial_attn, hidden),
-                    Buffer::from_raw_unchecked(session_stage.rank_state[1].partial_attn, hidden),
-                ];
+                let partials: Vec<Buffer<F16, RowParallel<0>>> = session_stage
+                    .rank_state
+                    .iter()
+                    .map(|rs| Buffer::from_raw_unchecked(rs.partial_attn, hidden))
+                    .collect();
                 tp_allreduce_sum_synced::<0>(ar, sub_cluster, &cores, &partials, &streams)
             }
             .context("hybrid MoE AR sum partial_attn (SWA)")?;
@@ -1467,22 +1455,17 @@ fn forward_layer_decode_hybrid_moe(
     // Phase 5a: AR-sum partial_shared_mlp_f32 (shared MLP, F32).
     {
         let cores: Vec<&TpRankCore> = session_stage.rank_state.iter().map(|rs| &rs.core).collect();
-        let streams: [&_; 2] = [
-            sub_cluster.device(0).default_stream(),
-            sub_cluster.device(1).default_stream(),
-        ];
-        let sm_partials: [DevicePtr; 2] = [
-            session_stage.rank_state[0]
-                .tp_moe_scratch
-                .as_ref()
-                .ok_or_else(|| anyhow!("rank 0: tp_moe_scratch missing in hybrid Phase 5a"))?
-                .partial_shared_mlp_f32,
-            session_stage.rank_state[1]
-                .tp_moe_scratch
-                .as_ref()
-                .ok_or_else(|| anyhow!("rank 1: tp_moe_scratch missing in hybrid Phase 5a"))?
-                .partial_shared_mlp_f32,
-        ];
+        let sm_partials: Vec<DevicePtr> = session_stage
+            .rank_state
+            .iter()
+            .enumerate()
+            .map(|(r, rs)| -> Result<DevicePtr> {
+                Ok(rs.tp_moe_scratch
+                    .as_ref()
+                    .ok_or_else(|| anyhow!("rank {r}: tp_moe_scratch missing in hybrid Phase 5a"))?
+                    .partial_shared_mlp_f32)
+            })
+            .collect::<Result<_>>()?;
         // SAFETY: matches Phase 2 F32 contract.
         unsafe {
             tp_allreduce_sum_f32_synced(ar, sub_cluster, &cores, &sm_partials, hidden, &streams)
@@ -1520,22 +1503,17 @@ fn forward_layer_decode_hybrid_moe(
     // Phase 5c: AR-sum partial_moe_f32 (routed-MoE, F32).
     {
         let cores: Vec<&TpRankCore> = session_stage.rank_state.iter().map(|rs| &rs.core).collect();
-        let streams: [&_; 2] = [
-            sub_cluster.device(0).default_stream(),
-            sub_cluster.device(1).default_stream(),
-        ];
-        let moe_partials: [DevicePtr; 2] = [
-            session_stage.rank_state[0]
-                .tp_moe_scratch
-                .as_ref()
-                .ok_or_else(|| anyhow!("rank 0: tp_moe_scratch missing in hybrid Phase 5c"))?
-                .partial_moe_f32,
-            session_stage.rank_state[1]
-                .tp_moe_scratch
-                .as_ref()
-                .ok_or_else(|| anyhow!("rank 1: tp_moe_scratch missing in hybrid Phase 5c"))?
-                .partial_moe_f32,
-        ];
+        let moe_partials: Vec<DevicePtr> = session_stage
+            .rank_state
+            .iter()
+            .enumerate()
+            .map(|(r, rs)| -> Result<DevicePtr> {
+                Ok(rs.tp_moe_scratch
+                    .as_ref()
+                    .ok_or_else(|| anyhow!("rank {r}: tp_moe_scratch missing in hybrid Phase 5c"))?
+                    .partial_moe_f32)
+            })
+            .collect::<Result<_>>()?;
         // SAFETY: matches Phase 2 F32 contract.
         unsafe {
             tp_allreduce_sum_f32_synced(ar, sub_cluster, &cores, &moe_partials, hidden, &streams)

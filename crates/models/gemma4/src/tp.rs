@@ -442,7 +442,7 @@ impl Gemma4TpSessionStage {
         for spec in &layout.layers {
             if !spec.has_kv {
                 bail!(
-                    "Gemma4TpSessionStage: shared-KV tail layer {} not supported in S9-A",
+                    "Gemma4TpSessionStage: shared-KV tail layer {}",
                     spec.index
                 );
             }
@@ -665,7 +665,7 @@ impl Gemma4TpDriver {
         for spec in &layout.layers {
             if !spec.has_kv {
                 bail!(
-                    "Gemma4TpDriver::upload: shared-KV tail layer {} unsupported (S9-B)",
+                    "Gemma4TpDriver::upload: shared-KV tail layer {}",
                     spec.index
                 );
             }
@@ -788,11 +788,6 @@ fn forward_layer_decode_tp(
     position: usize,
 ) -> Result<()> {
     let n_ranks = driver.model.stages.len();
-    if n_ranks != 2 {
-        // S9-A: only TP2 supported. TP4 is just adding AR-residual_tp4
-        // hookups; left for S9-B.
-        bail!("forward_layer_decode_tp: TP{n_ranks} not supported in S9-A; only TP2");
-    }
     // MoE layers use the parallel-branch composer (3 ARs/layer);
     // dense layers use the shared `LayerComposerTp` (2 ARs/layer).
     if driver.model.layout.layers[il].ffn_kind == FfnKind::Moe {
@@ -849,51 +844,50 @@ fn forward_decode_layer_tp_moe(
     // full-attention layers (so the F32 mmvq output stays bounded
     // through AR; cast to F16 happens only after post-norm absorbs
     // the spike).
-    if is_full_attn {
+    {
+        let cluster = driver.model.tp.cluster();
+        let streams: Vec<&_> = (0..n).map(|r| cluster.device(r).default_stream()).collect();
         let cores: Vec<&TpRankCore> = driver.session.stages.iter().map(|s| &s.core).collect();
-        let partials: [DevicePtr; 2] = [
-            driver.session.stages[0].partial_attn_f32,
-            driver.session.stages[1].partial_attn_f32,
-        ];
-        let streams: [&_; 2] = [
-            driver.model.tp.cluster().device(0).default_stream(),
-            driver.model.tp.cluster().device(1).default_stream(),
-        ];
-        // SAFETY: partial_attn_f32 is hidden F32 elems per rank;
-        // synced helper orders BAR1 reads behind producer events.
-        unsafe {
-            tp_allreduce_sum_f32_synced(
-                driver.model.tp.ar(),
-                driver.model.tp.cluster(),
-                &cores,
-                &partials,
-                hidden,
-                &streams,
-            )
+        if is_full_attn {
+            let partials: Vec<DevicePtr> = driver
+                .session
+                .stages
+                .iter()
+                .map(|s| s.partial_attn_f32)
+                .collect();
+            // SAFETY: partial_attn_f32 is hidden F32 elems per rank;
+            // synced helper orders BAR1 reads behind producer events.
+            unsafe {
+                tp_allreduce_sum_f32_synced(
+                    driver.model.tp.ar(),
+                    cluster,
+                    &cores,
+                    &partials,
+                    hidden,
+                    &streams,
+                )
+            }
+            .context("MoE AR sum partial_attn_f32 (full-attn)")?;
+        } else {
+            // SAFETY: partial_attn is hidden F16 elems per rank; streams
+            // outlive this call; synced helper adds the cross-rank edge.
+            let _ = unsafe {
+                let partials: Vec<Buffer<F16, RowParallel<0>>> = driver
+                    .session
+                    .stages
+                    .iter()
+                    .map(|s| Buffer::from_raw_unchecked(s.partial_attn, hidden))
+                    .collect();
+                tp_allreduce_sum_synced::<0>(
+                    driver.model.tp.ar(),
+                    cluster,
+                    &cores,
+                    &partials,
+                    &streams,
+                )
+            }
+            .context("MoE AR sum partial_attn (SWA)")?;
         }
-        .context("MoE AR sum partial_attn_f32 (full-attn)")?;
-    } else {
-        let cores: Vec<&TpRankCore> = driver.session.stages.iter().map(|s| &s.core).collect();
-        // SAFETY: partial_attn is hidden F16 elems per rank; streams
-        // outlive this call; synced helper adds the cross-rank edge.
-        let _ = unsafe {
-            let partials: [Buffer<F16, RowParallel<0>>; 2] = [
-                Buffer::from_raw_unchecked(driver.session.stages[0].partial_attn, hidden),
-                Buffer::from_raw_unchecked(driver.session.stages[1].partial_attn, hidden),
-            ];
-            let streams: [&_; 2] = [
-                driver.model.tp.cluster().device(0).default_stream(),
-                driver.model.tp.cluster().device(1).default_stream(),
-            ];
-            tp_allreduce_sum_synced::<0>(
-                driver.model.tp.ar(),
-                driver.model.tp.cluster(),
-                &cores,
-                &partials,
-                &streams,
-            )
-        }
-        .context("MoE AR sum partial_attn (SWA)")?;
     }
     // Phase 3: post-attn-norm + residual add → attn_residual_f16.
     // Full-attn: F32 rmsnorm + cast + F16 add. SWA: trait method.
@@ -951,30 +945,28 @@ fn forward_decode_layer_tp_moe(
     // `DenseMlpTp::forward_decode_f32`. Pairs with the F32 MoE branch
     // and F32 attention residual on head_dim=512 + Q8_0 paths.
     {
+        let cluster = driver.model.tp.cluster();
+        let streams: Vec<&_> = (0..n).map(|r| cluster.device(r).default_stream()).collect();
         let cores: Vec<&TpRankCore> = driver.session.stages.iter().map(|s| &s.core).collect();
-        let sm_partials: [DevicePtr; 2] = [
-            driver.session.stages[0]
-                .tp_moe_scratch
-                .as_ref()
-                .ok_or_else(|| anyhow!("rank 0: tp_moe_scratch missing in Phase 5a"))?
-                .partial_shared_mlp_f32,
-            driver.session.stages[1]
-                .tp_moe_scratch
-                .as_ref()
-                .ok_or_else(|| anyhow!("rank 1: tp_moe_scratch missing in Phase 5a"))?
-                .partial_shared_mlp_f32,
-        ];
-        let streams: [&_; 2] = [
-            driver.model.tp.cluster().device(0).default_stream(),
-            driver.model.tp.cluster().device(1).default_stream(),
-        ];
+        let sm_partials: Vec<DevicePtr> = driver
+            .session
+            .stages
+            .iter()
+            .enumerate()
+            .map(|(r, s)| -> Result<DevicePtr> {
+                Ok(s.tp_moe_scratch
+                    .as_ref()
+                    .ok_or_else(|| anyhow!("rank {r}: tp_moe_scratch missing in Phase 5a"))?
+                    .partial_shared_mlp_f32)
+            })
+            .collect::<Result<_>>()?;
         // SAFETY: partial_shared_mlp_f32 buffers own hidden*4 bytes per
         // rank; streams correspond to those ranks; cores carry the
         // producer_done events that the synced helper records.
         unsafe {
             tp_allreduce_sum_f32_synced(
                 driver.model.tp.ar(),
-                driver.model.tp.cluster(),
+                cluster,
                 &cores,
                 &sm_partials,
                 hidden,
@@ -1019,30 +1011,28 @@ fn forward_decode_layer_tp_moe(
     // intact instead of clipping it through F16. Pairs with the F32
     // attention output path (commit 6b85f29).
     {
+        let cluster = driver.model.tp.cluster();
+        let streams: Vec<&_> = (0..n).map(|r| cluster.device(r).default_stream()).collect();
         let cores: Vec<&TpRankCore> = driver.session.stages.iter().map(|s| &s.core).collect();
-        let moe_partials: [DevicePtr; 2] = [
-            driver.session.stages[0]
-                .tp_moe_scratch
-                .as_ref()
-                .ok_or_else(|| anyhow!("rank 0: tp_moe_scratch missing in Phase 5c"))?
-                .partial_moe_f32,
-            driver.session.stages[1]
-                .tp_moe_scratch
-                .as_ref()
-                .ok_or_else(|| anyhow!("rank 1: tp_moe_scratch missing in Phase 5c"))?
-                .partial_moe_f32,
-        ];
-        let streams: [&_; 2] = [
-            driver.model.tp.cluster().device(0).default_stream(),
-            driver.model.tp.cluster().device(1).default_stream(),
-        ];
+        let moe_partials: Vec<DevicePtr> = driver
+            .session
+            .stages
+            .iter()
+            .enumerate()
+            .map(|(r, s)| -> Result<DevicePtr> {
+                Ok(s.tp_moe_scratch
+                    .as_ref()
+                    .ok_or_else(|| anyhow!("rank {r}: tp_moe_scratch missing in Phase 5c"))?
+                    .partial_moe_f32)
+            })
+            .collect::<Result<_>>()?;
         // SAFETY: partial_moe_f32 buffers own hidden*4 bytes per rank;
         // streams correspond to those ranks; cores carry the
         // producer_done events that the synced helper records.
         unsafe {
             tp_allreduce_sum_f32_synced(
                 driver.model.tp.ar(),
-                driver.model.tp.cluster(),
+                cluster,
                 &cores,
                 &moe_partials,
                 hidden,
@@ -1200,7 +1190,7 @@ fn forward_attn_f32_output(
         .with_f32_output_proj(true);
     let kv = session_stage.kv_caches[il]
         .as_mut()
-        .expect("S9-A requires per-layer KV");
+        .expect("per-layer KV required");
     let mut std_scratch = StandardAttentionDecodeScratch {
         x_q8_1: session_stage.scratch.x_q8_1.0,
         mmvq_f32: session_stage.scratch.mmvq_f32.0,
@@ -1344,7 +1334,7 @@ impl LayerComposerTp for Gemma4TpDriver {
 
         let kv = session_stage.kv_caches[il]
             .as_mut()
-            .expect("S9-A requires per-layer KV");
+            .expect("per-layer KV required");
         let mut std_scratch = StandardAttentionDecodeScratch {
             x_q8_1: session_stage.scratch.x_q8_1.0,
             mmvq_f32: session_stage.scratch.mmvq_f32.0,

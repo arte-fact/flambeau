@@ -816,7 +816,7 @@ impl Gemma4PpDriver {
         if cfg.per_layer_embed.is_some() {
             bail!(
                 "Gemma4PpDriver::upload: per-layer side-channel embedding \
-                 (E2B/E4B) needs the per-layer-embd upload path (followup #22)"
+                 (E2B/E4B) needs the per-layer-embd upload path"
             );
         }
         for spec in &layout.layers {

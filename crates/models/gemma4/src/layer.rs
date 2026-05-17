@@ -248,7 +248,7 @@ pub fn forward_layer_decode<L: CacheLayout, O: Ops>(
     // keep an early bail so the error message names the gemma4 layer).
     let kv_layout = L::NAME;
     if kv_layout == Q8Contig::NAME {
-        bail!("forward_layer_decode: Q8 KV layout not supported in S5-A");
+        bail!("forward_layer_decode: Q8 KV layout not supported");
     }
     if kv_layout != F16Contig::NAME {
         bail!("forward_layer_decode: unsupported KV layout {kv_layout}");
@@ -546,10 +546,10 @@ pub fn forward_layer_prefill<L: CacheLayout, O: Ops>(
         );
     }
     if spec.ffn_kind != FfnKind::Dense {
-        bail!("forward_layer_prefill: MoE prefill not supported in S8-B-A; see #23");
+        bail!("forward_layer_prefill: MoE prefill not supported");
     }
     if weights.per_layer_embed.is_some() {
-        bail!("forward_layer_prefill: per-layer-embd in prefill not supported in S8-B-A; see #22");
+        bail!("forward_layer_prefill: per-layer-embd in prefill not supported");
     }
     let kv_layout = L::NAME;
     if kv_layout == Q8Contig::NAME {
