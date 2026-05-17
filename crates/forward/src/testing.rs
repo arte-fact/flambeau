@@ -84,7 +84,12 @@ impl ForwardCtx for RecordingCtx {
         Ok(Self::dummy_tensor())
     }
 
-    fn rmsnorm(&mut self, _input: &Tensor<F16>, _weight: &Tensor<F16>) -> Result<Tensor<F16>> {
+    fn rmsnorm(
+        &mut self,
+        _input: &Tensor<F16>,
+        _weight: &Tensor<F16>,
+        _eps: f32,
+    ) -> Result<Tensor<F16>> {
         self.ops_called.push(OpCall::Rmsnorm);
         Ok(Self::dummy_tensor())
     }

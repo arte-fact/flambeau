@@ -37,7 +37,12 @@ impl ForwardCtx for TpForwardCtx<'_> {
         todo!("TP: embed lookup on every rank (replicated token_embd) + sqrt(hidden) scale")
     }
 
-    fn rmsnorm(&mut self, _input: &Tensor<F16>, _weight: &Tensor<F16>) -> Result<Tensor<F16>> {
+    fn rmsnorm(
+        &mut self,
+        _input: &Tensor<F16>,
+        _weight: &Tensor<F16>,
+        _eps: f32,
+    ) -> Result<Tensor<F16>> {
         todo!("TP: rmsnorm replicated across ranks (each rank computes the same)")
     }
 

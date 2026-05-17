@@ -38,7 +38,12 @@ impl ForwardCtx for PpForwardCtx<'_> {
         todo!("PP: embed lookup on rank 0; other ranks no-op + return placeholder")
     }
 
-    fn rmsnorm(&mut self, _input: &Tensor<F16>, _weight: &Tensor<F16>) -> Result<Tensor<F16>> {
+    fn rmsnorm(
+        &mut self,
+        _input: &Tensor<F16>,
+        _weight: &Tensor<F16>,
+        _eps: f32,
+    ) -> Result<Tensor<F16>> {
         todo!("PP: local rmsnorm call into flambeau-model-ops::rmsnorm_f16")
     }
 

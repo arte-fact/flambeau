@@ -8,41 +8,36 @@
 //! inside hybrid).
 //!
 //! Constraints (see `CLAUDE.md`):
-//! - Every method on this trait is implemented by all three impls.
-//!   No method exists on only one topology.
+//! - Every method on this trait is implemented by all four impls
+//!   (SingleDevice / Pp / Tp / Hybrid). No method exists on only one.
 //! - Each method bottoms out in `flambeau-model-ops` leaf primitives.
 //!   This trait does not call kernels directly.
 //! - Trait carries no state; per-request state lives on the impl
-//!   structs (`PpForwardCtx`, `TpForwardCtx`, `HybridForwardCtx`).
-//!
-//! The trait is intentionally minimal in this scaffold: only the
-//! method signatures + doc comments. Method bodies on each impl land
-//! as composites are written, in the order the first model needs
-//! them. Adding a composite means:
-//!
-//! 1. Add the signature here.
-//! 2. Implement it on `PpForwardCtx`, `TpForwardCtx`, `HybridForwardCtx`.
-//! 3. Add the matching `OpCall` variant to `RecordingCtx`.
-//! 4. Add a topology-parity test.
+//!   structs.
 
 use anyhow::Result;
-use flambeau_model_ops::{Tensor, F16};
+use flambeau_model_ops::{Tensor, F16, Q8_0};
 
 /// Forward-pass context. One impl per topology; the model writes
 /// `<C: ForwardCtx>` generic.
 ///
 /// All composites take `&mut self` because each call may advance the
-/// ctx's internal scratch pool / position counter. Return types use
-/// `Tensor<F16>` (the residual-stream dtype); ops that produce other
-/// dtypes (the LM-head logits, sampling outputs) write through the
-/// ctx's owned slot rather than returning a tensor.
+/// ctx's internal scratch cursor. Return types use `Tensor<F16>` (the
+/// residual-stream dtype); ops that produce other dtypes (the LM-head
+/// logits) write through the ctx's owned slot rather than returning a
+/// tensor.
 pub trait ForwardCtx {
     /// Embed `token_id` using `token_embd`. Writes a fresh F16 row
     /// (hidden) and returns it as the next-step residual.
     fn embed(&mut self, token_embd: &EmbeddingWeights, token_id: u32) -> Result<Tensor<F16>>;
 
     /// `output = rmsnorm(input) * weight`. Returns a fresh F16 row.
-    fn rmsnorm(&mut self, input: &Tensor<F16>, weight: &Tensor<F16>) -> Result<Tensor<F16>>;
+    fn rmsnorm(
+        &mut self,
+        input: &Tensor<F16>,
+        weight: &Tensor<F16>,
+        eps: f32,
+    ) -> Result<Tensor<F16>>;
 
     /// Elementwise F16 add. Used for residual paths.
     fn residual_add(&mut self, a: Tensor<F16>, b: Tensor<F16>) -> Result<Tensor<F16>>;
@@ -76,21 +71,19 @@ pub trait ForwardCtx {
     /// softcap → host download into ctx's logits slot. Returns ()
     /// because the model only ever reads the logits via `ctx.logits()`
     /// after this call.
-    fn output_head(
-        &mut self,
-        input: &Tensor<F16>,
-        lm_head: &LmHeadWeights,
-    ) -> Result<()>;
+    fn output_head(&mut self, input: &Tensor<F16>, lm_head: &LmHeadWeights) -> Result<()>;
 
     /// Iterator over the layer indices THIS rank/stage processes
-    /// in this forward call. PP: only this rank's assigned layers.
-    /// TP: all layers (every rank runs every layer). Hybrid: only
-    /// this stage's layers.
+    /// in this forward call. SingleDevice/TP: all layers. PP: only
+    /// this rank's assigned layers. Hybrid: only this stage's layers.
     ///
     /// The iterator's drop / final-yield site is where stage
     /// handoff (peer_copy + sync) lives on PP / Hybrid — the model
     /// sees only `for layer_idx in ctx.layer_range(layout) { ... }`.
-    fn layer_range<'a>(&'a mut self, layout: &'a ModelLayout) -> Box<dyn Iterator<Item = usize> + 'a>;
+    fn layer_range<'a>(
+        &'a mut self,
+        layout: &'a ModelLayout,
+    ) -> Box<dyn Iterator<Item = usize> + 'a>;
 
     /// Read the host-side F32 logits after `output_head`. Caller
     /// owns the lifetime; the slice is valid until the next forward
@@ -99,58 +92,90 @@ pub trait ForwardCtx {
 }
 
 // ----------------------------------------------------------------
-// Weight handles — placeholder shapes.
+// Weight handles.
 //
-// These are the public arg types passed to composites. Each holds
-// references / handles to weight `Tensor`s owned by the model crate.
-// Concrete shapes land alongside the first model-v2 (qwen35).
+// V1 hardcodes Q8_0 for the matmul-quant slots — the simplest GGUF
+// dtype that flambeau-quant ships a host quantizer for, so the P2
+// synthetic test can quantise mock weights without a real GGUF.
+// Generalising to a runtime-dispatched `QuantWeight` enum (covering
+// Q4_0/Q4_1/Q5_0/Q5_1/Q8_0) lands in P3 when the qwen35-v2 loader
+// hits a real GGUF.
 // ----------------------------------------------------------------
 
-/// Token-embedding weight handle.
+/// Token-embedding weight handle. P2 keeps the embedding F16 to avoid
+/// host-roundtrip dequant in the synthetic test; P3 lifts this to a
+/// runtime-tagged variant.
 pub struct EmbeddingWeights {
     pub token_embd: Tensor<F16>,
     pub vocab_size: usize,
     pub hidden: usize,
 }
 
-/// Per-layer attention weight handle. Shape captured at first model.
+/// Per-layer attention weight handle. Shape mirrors qwen3.5 dense:
+/// rmsnorm + Q/K/V/output projection + optional q/k norm + RoPE +
+/// optional SWA. The `partial_rotated_dims` slot selects between
+/// full-RoPE (`rotated_dims == head_dim`) and NeoX-partial RoPE.
 pub struct AttnWeights {
-    // attn_norm, attn_q, attn_k, attn_v, attn_output, optional
-    // q_norm / k_norm, RoPE params, head_dim, n_heads, n_kv_heads,
-    // window, ...
-    //
-    // Concrete fields land with the first composite that needs them.
-    // Kept minimal here so the trait surface can stabilise first.
-    pub _todo: (),
+    pub attn_norm: Tensor<F16>,
+    pub attn_q: Tensor<Q8_0>,
+    pub attn_k: Tensor<Q8_0>,
+    pub attn_v: Tensor<Q8_0>,
+    pub attn_output: Tensor<Q8_0>,
+    pub attn_q_norm: Option<Tensor<F16>>,
+    pub attn_k_norm: Option<Tensor<F16>>,
+    pub n_heads: usize,
+    pub n_kv_heads: usize,
+    pub head_dim: usize,
+    /// Width of the rotated dimension subset. Equals `head_dim` for
+    /// full-RoPE; less for NeoX-partial (qwen3.x full-attn layers).
+    pub rotated_dims: usize,
+    pub rope_theta: f32,
+    /// 0 = unbounded causal. Positive = SWA radius.
+    pub window_size: i32,
+    pub rms_eps: f32,
+    /// Optional explicit softmax scale. `None` ⇒ default `1/sqrt(head_dim)`.
+    pub softmax_scale: Option<f32>,
 }
 
-/// Per-layer FFN weight handle.
+/// Per-layer dense FFN weight handle (qwen-style gated MLP).
 pub struct FfnWeights {
-    // ffn_norm, ffn_gate, ffn_up, ffn_down, activation kind, ...
-    pub _todo: (),
+    pub ffn_norm: Tensor<F16>,
+    pub ffn_gate: Tensor<Q8_0>,
+    pub ffn_up: Tensor<Q8_0>,
+    pub ffn_down: Tensor<Q8_0>,
+    pub activation: Activation,
+    pub rms_eps: f32,
 }
 
-/// Per-layer MoE weight handle.
+/// FFN activation kind. SwiGLU for qwen / mistral; GELU-tanh for gemma4.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Activation {
+    SwiGLU,
+    GeluTanh,
+}
+
+/// Per-layer MoE weight handle. P2 keeps this minimal — qwen3.5
+/// dense + the synthetic test never call `moe_ffn`. Real fields land
+/// with qwen3.6-v2 in P7.
 pub struct MoeWeights {
-    // router_gate, expert_gate / up / down (stacked), router_norm
-    // policy, top_k, optional shared_expert weights, ...
-    pub _todo: (),
+    pub _placeholder: (),
 }
 
-/// LM-head weight handle.
+/// LM-head weight handle. `lm_head` may alias `token_embd` for tied
+/// heads (gemma4); the loader sets up the alias.
 pub struct LmHeadWeights {
     pub output_norm: Tensor<F16>,
-    pub lm_head: Tensor<F16>, // may alias token_embd for tied heads
+    pub lm_head: Tensor<Q8_0>,
     pub final_logit_softcap: Option<f32>,
     pub vocab_size: usize,
     pub hidden: usize,
+    pub rms_eps: f32,
 }
 
-/// Per-arch layout. Concrete shape lands with the first model.
+/// Per-arch layout. Carries everything the topology executor needs
+/// to size its scratch + KV slots without re-reading the GGUF.
 pub struct ModelLayout {
     pub num_layers: usize,
     pub hidden: usize,
-    // per-layer specs (n_heads, n_kv_heads, head_dim, is_swa, ffn_kind,
-    // window, ...) land with first model.
-    pub _todo: (),
+    pub kv_max_seq_len: usize,
 }

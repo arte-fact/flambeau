@@ -14,6 +14,7 @@ pub mod ctx;
 pub mod hybrid;
 pub mod layer_range;
 pub mod pp;
+pub mod single_device;
 pub mod tp;
 
 #[cfg(test)]
@@ -22,4 +23,5 @@ pub mod testing;
 pub use ctx::ForwardCtx;
 pub use hybrid::HybridForwardCtx;
 pub use pp::PpForwardCtx;
+pub use single_device::{ScratchConfig, ScratchPool, SingleDeviceForwardCtx};
 pub use tp::TpForwardCtx;

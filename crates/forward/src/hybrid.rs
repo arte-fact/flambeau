@@ -46,7 +46,12 @@ impl ForwardCtx for HybridForwardCtx<'_> {
         todo!("Hybrid: stage 0 only — embed + sqrt(hidden) scale on every TP rank")
     }
 
-    fn rmsnorm(&mut self, _input: &Tensor<F16>, _weight: &Tensor<F16>) -> Result<Tensor<F16>> {
+    fn rmsnorm(
+        &mut self,
+        _input: &Tensor<F16>,
+        _weight: &Tensor<F16>,
+        _eps: f32,
+    ) -> Result<Tensor<F16>> {
         todo!("Hybrid: rmsnorm replicated within stage")
     }
 
