@@ -1015,14 +1015,19 @@ impl WeightRole for MoeExpertsDown {
 
 // --- Shared expert (qwen3.5 / 3.6 hybrid arches) ---
 
-/// Shared-expert router scalar `[hidden]` F32. Replicated, F32→F16 cast.
+/// Shared-expert router scalar `[hidden]` F32. Replicated, dtype
+/// preserved (consumer kernel `shared_expert_scale_f32` reads F32).
+/// Originally specified `F32ToF16Norm` — that quietly cut the upload
+/// to F16 while the kernel still read 4 bytes/elem, OOB-ing past the
+/// allocation by exactly 2× and crashing every qwen3-moe model with
+/// a shared expert (35B-A3B). Fixed 2026-05-17.
 pub struct SharedExpertRouter;
 impl WeightRole for SharedExpertRouter {
     const SPEC: WeightSpec = WeightSpec {
         name_template: "blk.{layer}.ffn_gate_inp_shexp.weight",
         shape_for: |cfg, _| [cfg.hidden(), 1],
         layout_for: |_, _, _| WeightLayout::Replicated,
-        dtype: DtypeFilter::F32ToF16Norm,
+        dtype: DtypeFilter::Any,
         required: false,
         ..DEFAULT_WEIGHT_SPEC
     };
