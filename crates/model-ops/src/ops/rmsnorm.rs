@@ -9,7 +9,7 @@
 use anyhow::bail;
 use flambeau_ops::{HipOps, Ops};
 
-use crate::dtype::F16;
+use crate::dtype::{F16, F32, Q8_1};
 use crate::error::Result;
 use crate::tensor::Tensor;
 
@@ -52,6 +52,83 @@ pub fn rmsnorm_f16(
     ops.rmsnorm_f16(input.ptr, weight.ptr, output.ptr, n_rows, hidden, eps)
 }
 
+/// F32 variant: `output = rmsnorm_f32(input) * weight`. Used in the
+/// MoE F32 cascade (Gemma4 26B-A4B) and the F32 attention output path
+/// (head_dim=512 + Q8 weights — see project-root memory
+/// `gemma4_attn_output_proj_f16_saturate`).
+pub fn rmsnorm_f32(
+    input: &Tensor<F32>,
+    weight: &Tensor<F32>,
+    output: &mut Tensor<F32>,
+    n_rows: usize,
+    hidden: usize,
+    eps: f32,
+    ops: &HipOps<'_>,
+) -> Result<()> {
+    let need = n_rows * hidden;
+    if input.n_elems < need {
+        bail!(
+            "rmsnorm_f32: input has {} F32 elems, need >= {} ({n_rows}*{hidden})",
+            input.n_elems,
+            need
+        );
+    }
+    if weight.n_elems < hidden {
+        bail!(
+            "rmsnorm_f32: weight has {} F32 elems, need >= {hidden}",
+            weight.n_elems
+        );
+    }
+    if output.n_elems < need {
+        bail!(
+            "rmsnorm_f32: output has {} F32 elems, need >= {}",
+            output.n_elems,
+            need
+        );
+    }
+    ops.rmsnorm_f32(input.ptr, weight.ptr, output.ptr, n_rows, hidden, eps)
+}
+
+/// Fused `output = rmsnorm(input) * weight` followed by F16→Q8_1
+/// quantization. Used at every attention/FFN input where the next
+/// op is a quantised matmul — saves a separate `rmsnorm_f16` +
+/// `quantize_f16_q8_1` round-trip through HBM.
+///
+/// `output` is Q8_1 with the GGUF-standard block layout
+/// `[d (fp16), s (fp16), qs[32] (i8)]` per block of 32 elems.
+pub fn rmsnorm_quant_q8_1(
+    input: &Tensor<F16>,
+    weight: &Tensor<F16>,
+    output: &mut Tensor<Q8_1>,
+    n_rows: usize,
+    hidden: usize,
+    eps: f32,
+    ops: &HipOps<'_>,
+) -> Result<()> {
+    let need_in = n_rows * hidden;
+    if input.n_elems < need_in {
+        bail!(
+            "rmsnorm_quant_q8_1: input has {} F16 elems, need >= {} ({n_rows}*{hidden})",
+            input.n_elems,
+            need_in
+        );
+    }
+    if weight.n_elems < hidden {
+        bail!(
+            "rmsnorm_quant_q8_1: weight has {} F16 elems, need >= {hidden}",
+            weight.n_elems
+        );
+    }
+    // Q8_1 layout: 36 bytes / 32 elems. Caller sizes output in elems
+    // by the same convention `flambeau-quant` uses for q8_1 buffers
+    // (`ceil(n_elems/32) * 36 / 1` ≈ approximate; the underlying
+    // launch reads `n_rows`/`hidden` and computes block layout).
+    if output.n_elems == 0 {
+        bail!("rmsnorm_quant_q8_1: output tensor unallocated");
+    }
+    ops.rmsnorm_quant_q8_1(input.ptr, weight.ptr, output.ptr, n_rows, hidden, eps)
+}
+
 /// CPU reference. Plain Rust over F16 inputs, F32 accumulation. Used
 /// by the parity test below. Not exported — tests are the only consumer.
 #[cfg(test)]
@@ -78,10 +155,31 @@ fn cpu_rmsnorm_f16(
 }
 
 #[cfg(test)]
+fn cpu_rmsnorm_f32(
+    input: &[f32],
+    weight: &[f32],
+    n_rows: usize,
+    hidden: usize,
+    eps: f32,
+) -> Vec<f32> {
+    let mut out = vec![0.0f32; n_rows * hidden];
+    for r in 0..n_rows {
+        let row = &input[r * hidden..(r + 1) * hidden];
+        let sum_sq: f32 = row.iter().map(|x| x * x).sum();
+        let rms = (sum_sq / hidden as f32 + eps).sqrt();
+        for c in 0..hidden {
+            out[r * hidden + c] = row[c] / rms * weight[c];
+        }
+    }
+    out
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use crate::testing::{
-        alloc, assert_close_f16, download, free, test_device, test_ops_registry, upload,
+        alloc, assert_close_f16, assert_close_f32, download, free, test_device,
+        test_ops_registry, upload,
     };
     use flambeau_backend_hip::HipStream;
     use flambeau_core::Device;
@@ -119,8 +217,8 @@ mod tests {
 
         let expected = cpu_rmsnorm_f16(&input_host, &weight_host, N_ROWS, HIDDEN, EPS);
 
-        let (input_t, input_ptr) = upload::<F16, f16>(&device, &input_host);
-        let (weight_t, weight_ptr) = upload::<F16, f16>(&device, &weight_host);
+        let (input_t, input_ptr) = upload::<F16, f16>(&device, &input_host, input_host.len());
+        let (weight_t, weight_ptr) = upload::<F16, f16>(&device, &weight_host, weight_host.len());
         let (mut output_t, output_ptr) = alloc::<F16>(&device, N_ROWS * HIDDEN);
 
         rmsnorm_f16(
@@ -140,6 +238,111 @@ mod tests {
         // allow ~1e-3 absolute or ~1e-3 relative. Tighter than that
         // and F16 round-trip noise dominates.
         assert_close_f16(&got, &expected, 1e-3, 1e-3);
+
+        free(&device, input_ptr, input_t.bytes());
+        free(&device, weight_ptr, weight_t.bytes());
+        free(&device, output_ptr, output_t.bytes());
+    }
+
+    #[test]
+    fn rmsnorm_quant_q8_1_matches_cpu_reference_after_dequant() {
+        const N_ROWS: usize = 4;
+        const HIDDEN: usize = 64;
+        const EPS: f32 = 1e-5;
+
+        let device = test_device();
+        device.bind().expect("device bind");
+        let stream: &HipStream = device.default_stream();
+        let reg = test_ops_registry(&device);
+        let ops = HipOps::new(&reg, stream);
+
+        // Inputs match the rmsnorm_f16 test so the parity check covers
+        // exactly the kernel's fused path vs an unfused reference.
+        let input_host: Vec<f16> = (0..N_ROWS * HIDDEN)
+            .map(|i| {
+                let t = (i as f32) / (N_ROWS * HIDDEN - 1) as f32;
+                f16::from_f32(2.0 * t - 1.0)
+            })
+            .collect();
+        let weight_host: Vec<f16> = (0..HIDDEN)
+            .map(|c| f16::from_f32(1.0 + (c as f32) * 0.01))
+            .collect();
+        let expected_f32 = cpu_rmsnorm_f16(&input_host, &weight_host, N_ROWS, HIDDEN, EPS);
+
+        let (input_t, input_ptr) =
+            upload::<F16, f16>(&device, &input_host, input_host.len());
+        let (weight_t, weight_ptr) =
+            upload::<F16, f16>(&device, &weight_host, weight_host.len());
+        let (mut output_t, output_ptr) = alloc::<Q8_1>(&device, N_ROWS * HIDDEN);
+
+        rmsnorm_quant_q8_1(
+            &input_t,
+            &weight_t,
+            &mut output_t,
+            N_ROWS,
+            HIDDEN,
+            EPS,
+            &ops,
+        )
+        .expect("rmsnorm_quant_q8_1 launch");
+
+        // Q8_1 output: download raw bytes, dequant via flambeau-quant
+        // (the GGUF-canonical reference), compare to CPU rmsnorm.
+        let raw_bytes: Vec<u8> = download::<Q8_1, u8>(&device, &output_t);
+        let got_f32 = flambeau_quant::dequantize_to_vec(
+            flambeau_quant::GgmlDType::Q8_1,
+            &raw_bytes,
+            N_ROWS * HIDDEN,
+        )
+        .expect("dequant q8_1");
+
+        // Q8_1 quantum is ~ 2 * abs_max(row) / 255 per row. For our
+        // unit-scale post-rmsnorm rows that's ~ 0.01; allow 1e-2 abs.
+        assert_close_f32(&got_f32, &expected_f32, 1e-2, 5e-2);
+
+        free(&device, input_ptr, input_t.bytes());
+        free(&device, weight_ptr, weight_t.bytes());
+        free(&device, output_ptr, output_t.bytes());
+    }
+
+    #[test]
+    fn rmsnorm_f32_matches_cpu_reference() {
+        const N_ROWS: usize = 4;
+        const HIDDEN: usize = 64;
+        const EPS: f32 = 1e-5;
+
+        let device = test_device();
+        device.bind().expect("device bind");
+        let stream: &HipStream = device.default_stream();
+        let reg = test_ops_registry(&device);
+        let ops = HipOps::new(&reg, stream);
+
+        let input_host: Vec<f32> = (0..N_ROWS * HIDDEN)
+            .map(|i| {
+                let t = (i as f32) / (N_ROWS * HIDDEN - 1) as f32;
+                2.0 * t - 1.0
+            })
+            .collect();
+        let weight_host: Vec<f32> = (0..HIDDEN).map(|c| 1.0 + (c as f32) * 0.01).collect();
+        let expected = cpu_rmsnorm_f32(&input_host, &weight_host, N_ROWS, HIDDEN, EPS);
+
+        let (input_t, input_ptr) = upload::<F32, f32>(&device, &input_host, input_host.len());
+        let (weight_t, weight_ptr) = upload::<F32, f32>(&device, &weight_host, weight_host.len());
+        let (mut output_t, output_ptr) = alloc::<F32>(&device, N_ROWS * HIDDEN);
+
+        rmsnorm_f32(
+            &input_t,
+            &weight_t,
+            &mut output_t,
+            N_ROWS,
+            HIDDEN,
+            EPS,
+            &ops,
+        )
+        .expect("rmsnorm_f32 launch");
+
+        let got: Vec<f32> = download::<F32, f32>(&device, &output_t);
+        assert_close_f32(&got, &expected, 1e-5, 1e-5);
 
         free(&device, input_ptr, input_t.bytes());
         free(&device, weight_ptr, weight_t.bytes());

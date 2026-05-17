@@ -25,5 +25,5 @@ pub use tensor::Tensor;
 
 pub use ops::add::{add_f16, add_f32};
 pub use ops::cast::{cast_f16_to_f32, cast_f32_to_f16};
-pub use ops::rmsnorm::rmsnorm_f16;
+pub use ops::rmsnorm::{rmsnorm_f16, rmsnorm_f32, rmsnorm_quant_q8_1};
 pub use ops::scale::scale_f16;

@@ -77,7 +77,7 @@ mod tests {
         let input_host: Vec<f32> = (0..N).map(|i| (i as f32) * 0.05 - 6.4).collect();
         let expected: Vec<f32> = input_host.iter().map(|x| f16::from_f32(*x).to_f32()).collect();
 
-        let (input_t, input_ptr) = upload::<F32, f32>(&device, &input_host);
+        let (input_t, input_ptr) = upload::<F32, f32>(&device, &input_host, input_host.len());
         let (mut out_t, out_ptr) = alloc::<F16>(&device, N);
 
         cast_f32_to_f16(&input_t, &mut out_t, N, &ops).expect("cast_f32_to_f16");
@@ -104,7 +104,7 @@ mod tests {
             .collect();
         let expected: Vec<f32> = input_host.iter().map(|x| x.to_f32()).collect();
 
-        let (input_t, input_ptr) = upload::<F16, f16>(&device, &input_host);
+        let (input_t, input_ptr) = upload::<F16, f16>(&device, &input_host, input_host.len());
         let (mut out_t, out_ptr) = alloc::<F32>(&device, N);
 
         cast_f16_to_f32(&input_t, &mut out_t, N, &ops).expect("cast_f16_to_f32");

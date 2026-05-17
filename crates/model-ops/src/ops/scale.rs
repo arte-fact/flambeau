@@ -65,7 +65,7 @@ mod tests {
             .collect();
         let expected = cpu_scale_f16(&input_host, SCALE);
 
-        let (input_t, input_ptr) = upload::<F16, f16>(&device, &input_host);
+        let (input_t, input_ptr) = upload::<F16, f16>(&device, &input_host, input_host.len());
         let (mut out_t, out_ptr) = alloc::<F16>(&device, N);
 
         scale_f16(&input_t, &mut out_t, N, SCALE, &ops).expect("scale_f16");

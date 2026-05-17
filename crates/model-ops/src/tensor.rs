@@ -55,11 +55,10 @@ impl<T: ElemType> Tensor<T> {
     }
 
     /// Byte length of the addressable region. Equals
-    /// `n_elems * T::bytes_per_elem()` for fixed-width dtypes; for
-    /// quantised dtypes callers should derive byte counts through
-    /// `flambeau-quant` for block-exact sizing.
+    /// `n_elems * elem_bytes` for fixed-width dtypes; for block-
+    /// quantised dtypes rounds up to a block boundary.
     pub fn bytes(&self) -> usize {
-        self.n_elems * T::bytes_per_elem()
+        T::bytes_for_n_elems(self.n_elems)
     }
 
     /// Re-tag a tensor with a different element marker.

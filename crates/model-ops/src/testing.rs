@@ -30,11 +30,12 @@ pub fn test_ops_registry(device: &HipDevice) -> OpsRegistry {
     OpsRegistry::new(device).expect("OpsRegistry::new")
 }
 
-/// Alloc `n_elems * T::bytes_per_elem()` zeroed bytes on the device,
-/// wrap as a `Tensor<T>`. Returns the tensor and the raw pointer so
-/// the test can free at the end.
+/// Alloc enough bytes on the device for `n_elems` logical elements
+/// of type `T` (rounded up to a block boundary for quantised dtypes)
+/// and wrap as `Tensor<T>`. Returns the tensor and the raw pointer
+/// so the test can free at the end.
 pub fn alloc<T: ElemType>(device: &HipDevice, n_elems: usize) -> (Tensor<T>, DevicePtr) {
-    let bytes = n_elems * T::bytes_per_elem();
+    let bytes = T::bytes_for_n_elems(n_elems);
     let ptr = device.alloc(bytes).expect("device alloc");
     // SAFETY: ptr is a fresh device allocation of the expected size.
     let t = unsafe { Tensor::<T>::from_raw(ptr, n_elems) };
@@ -42,11 +43,25 @@ pub fn alloc<T: ElemType>(device: &HipDevice, n_elems: usize) -> (Tensor<T>, Dev
 }
 
 /// Upload a host slice into a fresh device buffer wrapped as `Tensor<T>`.
-pub fn upload<T: ElemType, P: Pod>(device: &HipDevice, host: &[P]) -> (Tensor<T>, DevicePtr) {
-    let bytes = std::mem::size_of_val(host);
-    let ptr = device.alloc(bytes).expect("device alloc");
+/// `n_elems` is the LOGICAL element count carried on the tensor; the
+/// allocated byte count comes from `T::bytes_for_n_elems(n_elems)`
+/// (matches the host slice size for fixed-width dtypes; for quant
+/// dtypes the host must already be pre-packed).
+pub fn upload<T: ElemType, P: Pod>(
+    device: &HipDevice,
+    host: &[P],
+    n_elems: usize,
+) -> (Tensor<T>, DevicePtr) {
+    let bytes_host = std::mem::size_of_val(host);
+    let bytes_alloc = T::bytes_for_n_elems(n_elems);
+    assert!(
+        bytes_host == bytes_alloc,
+        "upload: host bytes {bytes_host} != T::bytes_for_n_elems({n_elems})={bytes_alloc} for dtype {}",
+        T::name()
+    );
+    let ptr = device.alloc(bytes_alloc).expect("device alloc");
     let stream = device.default_stream();
-    // SAFETY: ptr owns `bytes`; `host.as_ptr()` valid for `bytes`.
+    // SAFETY: ptr owns `bytes_alloc`; `host.as_ptr()` valid for `bytes_host == bytes_alloc`.
     unsafe {
         device
             .memcpy_async(
@@ -54,13 +69,12 @@ pub fn upload<T: ElemType, P: Pod>(device: &HipDevice, host: &[P]) -> (Tensor<T>
                 CopyDirection::HostToDevice,
                 ptr,
                 DevicePtr(host.as_ptr() as usize),
-                bytes,
+                bytes_alloc,
             )
             .expect("memcpy HtoD");
     }
     stream.synchronize().expect("stream sync");
-    let n_elems = bytes / T::bytes_per_elem();
-    // SAFETY: ptr is a fresh allocation of `bytes`, matched n_elems.
+    // SAFETY: ptr is a fresh allocation of `bytes_alloc`, matched n_elems.
     let t = unsafe { Tensor::<T>::from_raw(ptr, n_elems) };
     (t, ptr)
 }

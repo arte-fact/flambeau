@@ -88,8 +88,8 @@ mod tests {
         let b_host: Vec<f16> = (0..N).map(|i| f16::from_f32((i as f32) * -0.05 + 1.0)).collect();
         let expected = cpu_add_f16(&a_host, &b_host);
 
-        let (a_t, a_ptr) = upload::<F16, f16>(&device, &a_host);
-        let (b_t, b_ptr) = upload::<F16, f16>(&device, &b_host);
+        let (a_t, a_ptr) = upload::<F16, f16>(&device, &a_host, a_host.len());
+        let (b_t, b_ptr) = upload::<F16, f16>(&device, &b_host, b_host.len());
         let (mut out_t, out_ptr) = alloc::<F16>(&device, N);
 
         add_f16(&a_t, &b_t, &mut out_t, N, &ops).expect("add_f16");
@@ -115,8 +115,8 @@ mod tests {
         let b_host: Vec<f32> = (0..N).map(|i| (i as f32) * -0.05 + 1.0).collect();
         let expected = cpu_add_f32(&a_host, &b_host);
 
-        let (a_t, a_ptr) = upload::<F32, f32>(&device, &a_host);
-        let (b_t, b_ptr) = upload::<F32, f32>(&device, &b_host);
+        let (a_t, a_ptr) = upload::<F32, f32>(&device, &a_host, a_host.len());
+        let (b_t, b_ptr) = upload::<F32, f32>(&device, &b_host, b_host.len());
         let (mut out_t, out_ptr) = alloc::<F32>(&device, N);
 
         add_f32(&a_t, &b_t, &mut out_t, N, &ops).expect("add_f32");

@@ -5,27 +5,32 @@
 //! the marker type, so the type-checker enforces "you can't pass an
 //! `F32` tensor to a kernel that expects `F16`".
 //!
-//! Markers are intentionally bare. They expose `bytes_per_elem()` (for
-//! buffer sizing) and a stable name (for diagnostics). They do NOT
-//! carry trait machinery for arithmetic — ops own the per-dtype kernel
-//! choice, not the type system.
+//! Markers are intentionally bare. They expose `bytes_for_n_elems(n)`
+//! (for buffer sizing — handles block-aligned quant dtypes) and a
+//! stable name (for diagnostics). They do NOT carry trait machinery
+//! for arithmetic — ops own the per-dtype kernel choice, not the
+//! type system.
 
 /// Element type marker. Implemented by the zero-sized structs below.
 pub trait ElemType: sealed::Sealed + 'static {
-    /// Bytes occupied by one element on the device.
-    fn bytes_per_elem() -> usize;
+    /// Bytes required to hold `n` logical elements of this type on
+    /// the device. Fixed-width dtypes return `n * elem_bytes`;
+    /// block-quantised dtypes round up to a block boundary and return
+    /// `ceil(n / block_size) * type_size`.
+    fn bytes_for_n_elems(n: usize) -> usize;
+
     /// Short stable name for diagnostics (`"f16"`, `"q4_0"`, …).
     fn name() -> &'static str;
 }
 
-macro_rules! elem_type {
+macro_rules! fixed_elem_type {
     ($name:ident, $bytes:expr, $label:literal) => {
         /// `ElemType` marker. See module docs.
         pub struct $name;
         impl sealed::Sealed for $name {}
         impl ElemType for $name {
-            fn bytes_per_elem() -> usize {
-                $bytes
+            fn bytes_for_n_elems(n: usize) -> usize {
+                n * $bytes
             }
             fn name() -> &'static str {
                 $label
@@ -34,20 +39,37 @@ macro_rules! elem_type {
     };
 }
 
-elem_type!(F32, 4, "f32");
-elem_type!(F16, 2, "f16");
-elem_type!(I32, 4, "i32");
+macro_rules! block_elem_type {
+    ($name:ident, $block_size:expr, $type_size:expr, $label:literal) => {
+        /// `ElemType` marker (block-quantised; bytes round up to a
+        /// block boundary). See module docs.
+        pub struct $name;
+        impl sealed::Sealed for $name {}
+        impl ElemType for $name {
+            fn bytes_for_n_elems(n: usize) -> usize {
+                let blocks = n.div_ceil($block_size);
+                blocks * $type_size
+            }
+            fn name() -> &'static str {
+                $label
+            }
+        }
+    };
+}
 
-// GGML quant families. Bytes-per-elem here is "bytes per logical
-// element" averaged over a block (block_size_in_bytes / block_n_elems);
-// callers that care about block alignment route through
-// `flambeau-quant` to compute exact buffer sizes.
-elem_type!(Q4_0, 1, "q4_0"); // 18 bytes / 32 elems = 0.5625 → rounded
-elem_type!(Q4_1, 1, "q4_1");
-elem_type!(Q5_0, 1, "q5_0");
-elem_type!(Q5_1, 1, "q5_1");
-elem_type!(Q8_0, 1, "q8_0");
-elem_type!(Q8_1, 1, "q8_1");
+fixed_elem_type!(F32, 4, "f32");
+fixed_elem_type!(F16, 2, "f16");
+fixed_elem_type!(I32, 4, "i32");
+
+// GGML quant block sizes (elements / bytes) — match
+// `flambeau-quant::GgmlDType::{block_size, type_size}`. If those
+// change upstream, update here.
+block_elem_type!(Q4_0, 32, 18, "q4_0");
+block_elem_type!(Q4_1, 32, 20, "q4_1");
+block_elem_type!(Q5_0, 32, 22, "q5_0");
+block_elem_type!(Q5_1, 32, 24, "q5_1");
+block_elem_type!(Q8_0, 32, 34, "q8_0");
+block_elem_type!(Q8_1, 32, 36, "q8_1");
 
 mod sealed {
     pub trait Sealed {}
