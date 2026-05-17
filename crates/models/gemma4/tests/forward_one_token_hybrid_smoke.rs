@@ -293,12 +293,15 @@ fn forward_one_token_hybrid_pp2tp2_smoke() {
     let mut tok = 0u32;
     for pos in 0..3 {
         tok = driver.forward_one_token(tok, pos).expect("forward");
-        assert!((tok as usize) < driver.cfg.vocab_size, "argmax oob: {tok}");
+        assert!(
+            (tok as usize) < driver.model.cfg.vocab_size,
+            "argmax oob: {tok}"
+        );
     }
     // Each rank's KV caches grew by 3 (within each stage's TP shard).
     for s in 0..PP_SIZE {
         for r in 0..TP_SIZE {
-            let rs = &driver.stages[s].rank_state[r];
+            let rs = &driver.session.stages[s].rank_state[r];
             for (il_local, kv) in rs.kv_caches.iter().enumerate() {
                 let kv = kv.as_ref().expect("layer has KV");
                 assert_eq!(
