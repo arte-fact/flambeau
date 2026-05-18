@@ -1,0 +1,27 @@
+[package]
+name = "flambeau-qwen35-v2"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "qwen35 dense-FFN hybrid (GDN+full-attn) model crate on the v2 stack."
+
+[features]
+default = []
+hip = ["dep:flambeau-backend-hip", "flambeau-forward/hip", "flambeau-model-ops/hip", "flambeau-ops/hip"]
+
+[dependencies]
+flambeau-core = { path = "../../core" }
+flambeau-quant = { path = "../../quant" }
+flambeau-model-ops = { path = "../../model-ops" }
+flambeau-ops = { path = "../../ops" }
+flambeau-forward = { path = "../../forward" }
+flambeau-backend-hip = { path = "../../backend-hip", optional = true }
+anyhow.workspace = true
+thiserror.workspace = true
+half.workspace = true
+bytemuck.workspace = true
+tracing.workspace = true
+
+[lints]
+workspace = true

@@ -116,6 +116,10 @@ pub fn upload_dequant_to_f16(
     upload_f16_from_f32(device, &f32_vec, allocs)
 }
 
+/// Upload a GGUF tensor as a `QuantWeight`. If the tensor's dtype is
+/// supported by model-ops's `qmatmul` set, upload bytes-as-is. Else
+/// (K-quants / IQ / MXFP4 / F16 / etc.) dequant on host → re-quantise
+/// to Q8_0 → upload. Same precedent as the V1 MXFP4 / Iq4_Xs paths.
 pub fn upload_quant_weight(
     file: &GgufFile,
     device: &HipDevice,
@@ -126,8 +130,42 @@ pub fn upload_quant_weight(
     let info = file
         .info(name)
         .with_context(|| format!("tensor info {name}"))?;
-    let ptr = upload_raw(file, device, name, allocs)?;
-    wrap_quant(ptr, n_elems, info.dtype)
+    if matches!(
+        info.dtype,
+        GgmlDType::Q4_0 | GgmlDType::Q4_1 | GgmlDType::Q5_0 | GgmlDType::Q5_1 | GgmlDType::Q8_0
+    ) {
+        let ptr = upload_raw(file, device, name, allocs)?;
+        return wrap_quant(ptr, n_elems, info.dtype);
+    }
+    // Fallback: host dequant → re-quantise to Q8_0 → upload.
+    let f32_vec = file
+        .dequantize_tensor(name)
+        .with_context(|| format!("dequantize {name}"))?;
+    if f32_vec.len() != n_elems {
+        bail!(
+            "{name}: dequant produced {} elems, expected {n_elems}",
+            f32_vec.len()
+        );
+    }
+    if n_elems % 32 != 0 {
+        bail!("{name}: Q8_0 fallback needs n_elems % 32 == 0 (got {n_elems})");
+    }
+    // The on-disk weight is `[rows, cols]`. The Q8_0 quantiser packs one
+    // row at a time; `cols` is known to be a divisor of n_elems but we
+    // don't have row-shape info here. Use a single contiguous quantise
+    // (matches GGUF's per-block layout — each Q8_0 block is 32 elems,
+    // and the row boundary is irrelevant to the matmul).
+    let mut q8_0_bytes: Vec<u8> = Vec::with_capacity(n_elems / 32 * 34);
+    let mut cursor = 0usize;
+    while cursor < n_elems {
+        flambeau_quant::quantize_k::quantize_row_q8_0(
+            &f32_vec[cursor..cursor + 32],
+            &mut q8_0_bytes,
+        );
+        cursor += 32;
+    }
+    let ptr = upload_bytes(device, &q8_0_bytes, allocs)?;
+    wrap_quant(ptr, n_elems, GgmlDType::Q8_0)
 }
 
 /// Col-shard along GGUF dim-0 (output rows). Contiguous byte slice
