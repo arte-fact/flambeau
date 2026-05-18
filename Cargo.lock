@@ -627,6 +627,23 @@ dependencies = [
 ]
 
 [[package]]
+name = "flambeau-qwen35moe-v2"
+version = "0.1.0-dev"
+dependencies = [
+ "anyhow",
+ "bytemuck",
+ "flambeau-backend-hip",
+ "flambeau-core",
+ "flambeau-forward",
+ "flambeau-model-ops",
+ "flambeau-ops",
+ "flambeau-quant",
+ "half",
+ "thiserror 2.0.18",
+ "tracing",
+]
+
+[[package]]
 name = "flambeau-runtime"
 version = "0.1.0-dev"
 dependencies = [
