@@ -1,6 +1,4 @@
-//! Shared helpers for the synth_*.rs integration tests. Each test
-//! binary runs in its own process so the multi-Session-per-process
-//! state leakage on qwen35-9B-style workloads doesn't interfere.
+//! Shared helpers for the synth_*.rs integration tests.
 
 #![cfg(feature = "hip")]
 #![allow(dead_code)] // each binary only uses a subset

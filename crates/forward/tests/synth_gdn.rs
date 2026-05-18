@@ -116,9 +116,9 @@ fn synth_gdn_one_token_forward() {
     };
     let mut pool = ScratchPool::new(&device, cfg).expect("ScratchPool::new");
 
-    // Belt-and-braces zero on recurrent state + conv history. The
-    // pool now zeros these in `ScratchPool::new` but the explicit
-    // sync here keeps the synth test independent of that fix.
+    // Recurrent state + conv history must be zero at position=0
+    // (the pool zeros them too; the explicit sync below keeps the
+    // synth test self-contained).
     for ls in &pool.gdn_state {
         let state_n = NUM_V_HEADS * HEAD_K_DIM * HEAD_V_DIM;
         let conv_n = (CONV_KERNEL - 1) * conv_channels;

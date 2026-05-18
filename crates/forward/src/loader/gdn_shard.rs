@@ -71,10 +71,8 @@ pub(super) fn pack_gdn_qkv_slab(
 }
 
 /// Upload a `[conv_channels, hidden]` GDN fused-QKV quant weight,
-/// sharded per `kq_replicated`. For `dtype_qmatmul_native` dtypes the
-/// per-rank Q|K|V slab is byte-sliced and uploaded as-is. For
-/// F16 / BF16 / F32 the tensor is dequantised on host, sliced on the
-/// row axis, and re-quantised to Q8_0.
+/// sharded per `kq_replicated`. Native dtypes ride bytes-as-is;
+/// F16 / BF16 / F32 fall back to dequant → Q8_0 on host.
 #[allow(clippy::too_many_arguments)]
 pub fn upload_gdn_fused_qkv_quant(
     file: &GgufFile,
@@ -116,8 +114,6 @@ pub fn upload_gdn_fused_qkv_quant(
         let ptr = upload_bytes(device, &packed, allocs)?;
         wrap_quant(ptr, per_rank_rows * hidden, info.dtype)
     } else {
-        // Dequant fallback: rebuild Q|K|V from F32 row-slices, then
-        // requantise to Q8_0.
         let v_part_full = num_v_heads * head_v_dim;
         let k_part_full = num_k_heads * head_k_dim;
         let outer_full = v_part_full + 2 * k_part_full;

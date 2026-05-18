@@ -45,10 +45,9 @@ pub fn upload_quant_weight(
     wrap_quant(ptr, n_elems, GgmlDType::Q8_0)
 }
 
-/// Col-shard along GGUF dim-0 (output rows). For
-/// `dtype_qmatmul_native` dtypes the rank reads a contiguous byte
-/// slice; for F16 / BF16 / F32 the tensor is dequantised on host,
-/// row-sliced, and re-quantised to Q8_0.
+/// Col-shard along GGUF dim-0 (output rows). Native dtypes ride a
+/// contiguous byte slice per rank; F16 / BF16 / F32 fall back to
+/// dequant → row-slice → Q8_0.
 #[allow(clippy::too_many_arguments)]
 pub fn upload_col_sharded_quant(
     file: &GgufFile,
@@ -174,7 +173,7 @@ pub fn upload_row_sharded_quant(
     }
 }
 
-/// Composer-internal dispatcher: replicate or col-shard along dim-0.
+/// Replicate or col-shard along dim-0 based on `shard`.
 pub(super) fn upload_col(
     file: &GgufFile,
     device: &HipDevice,
@@ -192,7 +191,7 @@ pub(super) fn upload_col(
     }
 }
 
-/// Composer-internal dispatcher: replicate or row-shard along dim-1.
+/// Replicate or row-shard along dim-1 based on `shard`.
 pub(super) fn upload_row(
     file: &GgufFile,
     device: &HipDevice,
