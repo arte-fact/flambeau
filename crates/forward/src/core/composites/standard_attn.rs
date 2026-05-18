@@ -283,16 +283,22 @@ pub fn standard_attn_local<H: TopologyHooks>(
         &ops,
     )?;
 
-    if weights.attn_q_gated {
+    let post_attn_ptr = if weights.attn_q_gated {
         let gate = unsafe { Tensor::<F16>::from_raw(state.pool.gate_f16, q_width) };
-        // Alias attn_out: sigmoid_mul writes back into the same slot.
         let attn_in = unsafe { Tensor::<F16>::from_raw(state.pool.attn_out_f16, q_width) };
-        flambeau_model_ops::sigmoid_mul_f16(&gate, &attn_in, &mut attn_out, q_width, &ops)?;
-    }
+        let mut gated_out =
+            unsafe { Tensor::<F16>::from_raw(state.pool.q_fused_f16, q_width) };
+        flambeau_model_ops::sigmoid_mul_f16(&gate, &attn_in, &mut gated_out, q_width, &ops)?;
+        state.pool.q_fused_f16
+    } else {
+        state.pool.attn_out_f16
+    };
+    let _ = attn_out;
+    let post_attn = unsafe { Tensor::<F16>::from_raw(post_attn_ptr, q_width) };
 
     let mut attn_out_q8_1 =
         unsafe { Tensor::<Q8_1>::from_raw(state.pool.attn_out_q8_1, q_width) };
-    flambeau_model_ops::quantize_f16_to_q8_1(&attn_out, &mut attn_out_q8_1, q_width, &ops)?;
+    flambeau_model_ops::quantize_f16_to_q8_1(&post_attn, &mut attn_out_q8_1, q_width, &ops)?;
 
     // Row-parallel output proj — AR-sum collapses per-rank partials under TP.
     let mut proj_f32 = unsafe { Tensor::<F32>::from_raw(state.pool.attn_proj_f32, hidden) };
