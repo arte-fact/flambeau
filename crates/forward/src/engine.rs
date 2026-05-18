@@ -13,11 +13,65 @@ use flambeau_model_ops::{Tensor, F16};
 use flambeau_ops::OpsRegistry;
 use half::f16;
 
-use crate::core::{composites, CoreState, ScratchPool, TopologyHooks};
+use crate::core::{composites, CoreState, NoopHooks, ScratchPool, TopologyHooks};
 use crate::ctx::{
     AttnWeights, EmbeddingWeights, FfnWeights, ForwardCtx, LmHeadWeights, ModelLayout,
     MoeWeights,
 };
+
+pub type ArCallback = Box<
+    dyn FnMut(
+            usize,
+            usize,
+            DevicePtr,
+            usize,
+            &HipDevice,
+            &HipStream,
+        ) -> Result<()>
+        + Send,
+>;
+
+pub struct TpHooks {
+    pub rank: usize,
+    pub n_ranks: usize,
+    pub ar_callback: ArCallback,
+}
+
+impl TopologyHooks for TpHooks {
+    fn ar_sum_f32(
+        &mut self,
+        buf: DevicePtr,
+        n_elems: usize,
+        device: &HipDevice,
+        stream: &HipStream,
+    ) -> Result<()> {
+        if self.n_ranks <= 1 {
+            return Ok(());
+        }
+        (self.ar_callback)(self.rank, self.n_ranks, buf, n_elems, device, stream)
+    }
+}
+
+pub struct HybridHooks {
+    pub rank_in_stage: usize,
+    pub tp_size: usize,
+    pub ar_callback: ArCallback,
+}
+
+impl TopologyHooks for HybridHooks {
+    fn ar_sum_f32(
+        &mut self,
+        buf: DevicePtr,
+        n_elems: usize,
+        device: &HipDevice,
+        stream: &HipStream,
+    ) -> Result<()> {
+        if self.tp_size <= 1 {
+            return Ok(());
+        }
+        (self.ar_callback)(self.rank_in_stage, self.tp_size, buf, n_elems, device, stream)
+    }
+}
 
 pub trait StageHooks {
     fn is_first(&self) -> bool;
@@ -245,7 +299,7 @@ pub struct ForwardEngine<'a, H: TopologyHooks, S: StageHooks> {
 }
 
 impl<'a, H: TopologyHooks, S: StageHooks> ForwardEngine<'a, H, S> {
-    pub fn new(
+    fn build(
         device: &'a HipDevice,
         stream: &'a HipStream,
         reg: &'a OpsRegistry,
@@ -257,6 +311,88 @@ impl<'a, H: TopologyHooks, S: StageHooks> ForwardEngine<'a, H, S> {
         let mut core = CoreState::new(device, stream, reg, pool);
         core.layer_idx_offset = layer_idx_offset;
         Self { core, hooks, stage }
+    }
+}
+
+impl<'a> ForwardEngine<'a, NoopHooks, SoloStage> {
+    pub fn new(
+        device: &'a HipDevice,
+        stream: &'a HipStream,
+        reg: &'a OpsRegistry,
+        pool: &'a mut ScratchPool,
+    ) -> Self {
+        Self::build(device, stream, reg, pool, NoopHooks, SoloStage, 0)
+    }
+}
+
+impl<'a> ForwardEngine<'a, TpHooks, SoloStage> {
+    pub fn new(
+        device: &'a HipDevice,
+        stream: &'a HipStream,
+        reg: &'a OpsRegistry,
+        pool: &'a mut ScratchPool,
+        hooks: TpHooks,
+    ) -> Self {
+        Self::build(device, stream, reg, pool, hooks, SoloStage, 0)
+    }
+}
+
+impl<'a> ForwardEngine<'a, NoopHooks, PpStage<'a>> {
+    #[allow(clippy::too_many_arguments)]
+    pub fn new(
+        device: &'a HipDevice,
+        stream: &'a HipStream,
+        reg: &'a OpsRegistry,
+        pool: &'a mut ScratchPool,
+        rank: usize,
+        n_ranks: usize,
+        layer_start: usize,
+        layer_end: usize,
+        peer_buffer: &'a mut Vec<f16>,
+    ) -> Self {
+        let stage = PpStage {
+            rank,
+            n_ranks,
+            layer_start,
+            layer_end,
+            peer_buffer,
+        };
+        Self::build(device, stream, reg, pool, NoopHooks, stage, layer_start)
+    }
+}
+
+impl<'a> ForwardEngine<'a, HybridHooks, HybStage> {
+    #[allow(clippy::too_many_arguments)]
+    pub fn new(
+        device: &'a HipDevice,
+        stream: &'a HipStream,
+        reg: &'a OpsRegistry,
+        pool: &'a mut ScratchPool,
+        stage_idx: usize,
+        n_stages: usize,
+        rank_in_stage: usize,
+        tp_size: usize,
+        layer_start: usize,
+        layer_end: usize,
+        ar_callback: ArCallback,
+        peer_buffer: Arc<Mutex<Vec<f16>>>,
+        handoff_barrier: Arc<Barrier>,
+    ) -> Self {
+        let hooks = HybridHooks {
+            rank_in_stage,
+            tp_size,
+            ar_callback,
+        };
+        let stage = HybStage {
+            stage_idx,
+            n_stages,
+            rank_in_stage,
+            layer_start,
+            layer_end,
+            peer_buffer,
+            handoff_barrier,
+        };
+        Self::build(device, stream, reg, pool, hooks, stage, layer_start)
     }
 }
 
@@ -336,7 +472,12 @@ impl<H: TopologyHooks, S: StageHooks> ForwardCtx for ForwardEngine<'_, H, S> {
     }
 }
 
-pub type SingleDeviceEngine<'a> = ForwardEngine<'a, crate::core::NoopHooks, SoloStage>;
-pub type TpEngine<'a> = ForwardEngine<'a, crate::tp::TpHooks, SoloStage>;
-pub type PpEngine<'a> = ForwardEngine<'a, crate::core::NoopHooks, PpStage<'a>>;
-pub type HybridEngine<'a> = ForwardEngine<'a, crate::hybrid::HybridHooks, HybStage>;
+pub type SingleDeviceEngine<'a> = ForwardEngine<'a, NoopHooks, SoloStage>;
+pub type TpEngine<'a> = ForwardEngine<'a, TpHooks, SoloStage>;
+pub type PpEngine<'a> = ForwardEngine<'a, NoopHooks, PpStage<'a>>;
+pub type HybridEngine<'a> = ForwardEngine<'a, HybridHooks, HybStage>;
+
+pub type SingleDeviceForwardCtx<'a> = SingleDeviceEngine<'a>;
+pub type TpForwardCtx<'a> = TpEngine<'a>;
+pub type PpForwardCtx<'a> = PpEngine<'a>;
+pub type HybridForwardCtx<'a> = HybridEngine<'a>;

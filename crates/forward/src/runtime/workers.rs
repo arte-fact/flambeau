@@ -16,11 +16,8 @@ use flambeau_ops::OpsRegistry;
 use flambeau_quant::GgufFile;
 
 use crate::core::ScratchPool;
-use crate::hybrid::HybridForwardCtx;
+use crate::engine::{HybridForwardCtx, PpForwardCtx, SingleDeviceForwardCtx, TpForwardCtx, TpHooks};
 use crate::loader::ShardMode;
-use crate::pp::PpForwardCtx;
-use crate::single_device::SingleDeviceForwardCtx;
-use crate::tp::{TpForwardCtx, TpHooks};
 use crate::ForwardCtx;
 
 use super::ar::{make_ar_callback, ArCoordinator, PeerBuffer};
