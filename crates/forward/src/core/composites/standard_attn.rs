@@ -15,11 +15,21 @@ pub fn standard_attn_local<H: TopologyHooks>(
     input: &Tensor<F16>,
     weights: &AttnWeights,
     layer_idx: usize,
-    start_position: usize,
-    n_tokens: usize,
+    positions: &[usize],
+    slot_ids: &[usize],
 ) -> Result<Tensor<F16>> {
     let hidden = state.hidden();
-    let n = n_tokens;
+    if positions.len() != slot_ids.len() {
+        bail!(
+            "standard_attn: positions.len {} != slot_ids.len {}",
+            positions.len(),
+            slot_ids.len()
+        );
+    }
+    let n = positions.len();
+    if n == 0 {
+        bail!("standard_attn: empty positions");
+    }
     let local_idx = layer_idx.checked_sub(state.layer_idx_offset).ok_or_else(|| {
         anyhow::anyhow!(
             "standard_attn: layer_idx {layer_idx} < layer_idx_offset {}",
@@ -33,11 +43,15 @@ pub fn standard_attn_local<H: TopologyHooks>(
             state.pool.kv_caches.len()
         );
     }
-    if start_position + n > state.pool.config.max_seq_len {
-        bail!(
-            "standard_attn: start_position {start_position} + n_tokens {n} > max_seq_len {}",
-            state.pool.config.max_seq_len
-        );
+    let max_seq_len = state.pool.config.max_seq_len;
+    let max_slots = state.pool.config.max_slots.max(1);
+    for (i, (&pos, &slot)) in positions.iter().zip(slot_ids.iter()).enumerate() {
+        if pos >= max_seq_len {
+            bail!("standard_attn: positions[{i}]={pos} >= max_seq_len {max_seq_len}");
+        }
+        if slot >= max_slots {
+            bail!("standard_attn: slot_ids[{i}]={slot} >= max_slots {max_slots}");
+        }
     }
     if n > state.pool.config.max_prefill_tokens {
         bail!(
@@ -45,6 +59,17 @@ pub fn standard_attn_local<H: TopologyHooks>(
             state.pool.config.max_prefill_tokens
         );
     }
+    // Detect the prefill-shape pattern: all tokens on the same slot,
+    // positions contiguous starting at positions[0]. That path uses the
+    // batched attn_prefill kernel + a single kv_append range write.
+    let single_slot = slot_ids.iter().all(|&s| s == slot_ids[0]);
+    let contiguous = positions
+        .iter()
+        .enumerate()
+        .all(|(i, &p)| p == positions[0] + i);
+    let prefill_shape = single_slot && contiguous;
+    let primary_slot = slot_ids[0];
+    let start_position = positions[0];
     let q_width = weights.n_heads * weights.head_dim;
     let kv_width = weights.n_kv_heads * weights.head_dim;
     if q_width > state.pool.config.q_width {
@@ -228,7 +253,7 @@ pub fn standard_attn_local<H: TopologyHooks>(
         let _ = k_normed;
     }
 
-    let positions: Vec<i32> = (0..n).map(|i| (start_position + i) as i32).collect();
+    let positions_i32: Vec<i32> = positions.iter().map(|&p| p as i32).collect();
     let pos_bytes = n * 4;
     // SAFETY: position_i32 sized max_prefill_tokens * i32.
     unsafe {
@@ -238,7 +263,7 @@ pub fn standard_attn_local<H: TopologyHooks>(
                 state.stream,
                 CopyDirection::HostToDevice,
                 state.pool.position_i32,
-                DevicePtr(positions.as_ptr() as usize),
+                DevicePtr(positions_i32.as_ptr() as usize),
                 pos_bytes,
             )
             .context("standard_attn: positions HtoD")?;
@@ -269,60 +294,119 @@ pub fn standard_attn_local<H: TopologyHooks>(
     let _ = weights.rope_variant;
 
     let kv = state.pool.kv_caches[local_idx];
-    let mut k_cache =
-        unsafe { Tensor::<F16>::from_raw(kv.k, state.pool.config.max_seq_len * kv_width) };
-    let mut v_cache =
-        unsafe { Tensor::<F16>::from_raw(kv.v, state.pool.config.max_seq_len * kv_width) };
-    let v_f16_view = unsafe { Tensor::<F16>::from_raw(state.pool.v_f16, n * kv_width) };
-    flambeau_model_ops::kv_append_f16(
-        &k_f16_rope,
-        &v_f16_view,
-        &mut k_cache,
-        &mut v_cache,
-        n,
-        kv_width,
-        start_position,
-        state.pool.config.max_seq_len,
-        state.device,
-        state.stream,
-    )?;
-
+    let slot_stride_elems = max_seq_len * kv_width;
+    let slot_stride_bytes = slot_stride_elems * 2;
     let scale = weights
         .softmax_scale
         .unwrap_or_else(|| (weights.head_dim as f32).sqrt().recip());
-    let mut attn_out = unsafe { Tensor::<F16>::from_raw(state.pool.attn_out_f16, n * q_width) };
-    if n == 1 {
-        let n_tokens_kv = start_position + 1;
-        flambeau_model_ops::attn_decode_f16(
-            &q_f16_rope,
-            &k_cache,
-            &v_cache,
-            &mut attn_out,
-            weights.n_heads,
-            weights.n_kv_heads,
-            weights.head_dim,
-            n_tokens_kv,
-            scale,
-            weights.window_size,
-            &ops,
-        )?;
-    } else {
-        let n_k_tokens = start_position + n;
-        flambeau_model_ops::attn_prefill_f16(
-            &q_f16_rope,
-            &k_cache,
-            &v_cache,
-            &mut attn_out,
+
+    if prefill_shape {
+        // Single-slot, contiguous positions → batched kv_append + attn_prefill.
+        let slot_offset = primary_slot * slot_stride_bytes;
+        let k_slot_ptr = kv.k.offset_bytes(slot_offset);
+        let v_slot_ptr = kv.v.offset_bytes(slot_offset);
+        let mut k_cache =
+            unsafe { Tensor::<F16>::from_raw(k_slot_ptr, slot_stride_elems) };
+        let mut v_cache =
+            unsafe { Tensor::<F16>::from_raw(v_slot_ptr, slot_stride_elems) };
+        let v_f16_view = unsafe { Tensor::<F16>::from_raw(state.pool.v_f16, n * kv_width) };
+        flambeau_model_ops::kv_append_f16(
+            &k_f16_rope,
+            &v_f16_view,
+            &mut k_cache,
+            &mut v_cache,
             n,
-            weights.n_heads,
-            weights.n_kv_heads,
-            weights.head_dim,
-            n_k_tokens,
+            kv_width,
             start_position,
-            scale,
-            weights.window_size,
-            &ops,
+            max_seq_len,
+            state.device,
+            state.stream,
         )?;
+        let mut attn_out =
+            unsafe { Tensor::<F16>::from_raw(state.pool.attn_out_f16, n * q_width) };
+        if n == 1 {
+            let n_tokens_kv = start_position + 1;
+            flambeau_model_ops::attn_decode_f16(
+                &q_f16_rope,
+                &k_cache,
+                &v_cache,
+                &mut attn_out,
+                weights.n_heads,
+                weights.n_kv_heads,
+                weights.head_dim,
+                n_tokens_kv,
+                scale,
+                weights.window_size,
+                &ops,
+            )?;
+        } else {
+            let n_k_tokens = start_position + n;
+            flambeau_model_ops::attn_prefill_f16(
+                &q_f16_rope,
+                &k_cache,
+                &v_cache,
+                &mut attn_out,
+                n,
+                weights.n_heads,
+                weights.n_kv_heads,
+                weights.head_dim,
+                n_k_tokens,
+                start_position,
+                scale,
+                weights.window_size,
+                &ops,
+            )?;
+        }
+    } else {
+        // Multi-slot or non-contiguous positions → per-token (slot, pos)
+        // kv_append + attn_decode. N is small (batched-decode N=2..8).
+        let q_row_bytes = q_width * 2;
+        let kv_row_bytes = kv_width * 2;
+        for i in 0..n {
+            let slot = slot_ids[i];
+            let pos = positions[i];
+            let slot_offset = slot * slot_stride_bytes;
+            let k_slot_ptr = kv.k.offset_bytes(slot_offset);
+            let v_slot_ptr = kv.v.offset_bytes(slot_offset);
+            let mut k_cache =
+                unsafe { Tensor::<F16>::from_raw(k_slot_ptr, slot_stride_elems) };
+            let mut v_cache =
+                unsafe { Tensor::<F16>::from_raw(v_slot_ptr, slot_stride_elems) };
+            let k_row_src =
+                unsafe { Tensor::<F16>::from_raw(state.pool.k_f16.offset_bytes(i * kv_row_bytes), kv_width) };
+            let v_row_src =
+                unsafe { Tensor::<F16>::from_raw(state.pool.v_f16.offset_bytes(i * kv_row_bytes), kv_width) };
+            flambeau_model_ops::kv_append_f16(
+                &k_row_src,
+                &v_row_src,
+                &mut k_cache,
+                &mut v_cache,
+                1,
+                kv_width,
+                pos,
+                max_seq_len,
+                state.device,
+                state.stream,
+            )?;
+            let q_row =
+                unsafe { Tensor::<F16>::from_raw(state.pool.q_f16.offset_bytes(i * q_row_bytes), q_width) };
+            let mut attn_row = unsafe {
+                Tensor::<F16>::from_raw(state.pool.attn_out_f16.offset_bytes(i * q_row_bytes), q_width)
+            };
+            flambeau_model_ops::attn_decode_f16(
+                &q_row,
+                &k_cache,
+                &v_cache,
+                &mut attn_row,
+                weights.n_heads,
+                weights.n_kv_heads,
+                weights.head_dim,
+                pos + 1,
+                scale,
+                weights.window_size,
+                &ops,
+            )?;
+        }
     }
 
     let post_attn_ptr = if weights.attn_q_gated {
@@ -335,7 +419,6 @@ pub fn standard_attn_local<H: TopologyHooks>(
     } else {
         state.pool.attn_out_f16
     };
-    let _ = attn_out;
     let post_attn = unsafe { Tensor::<F16>::from_raw(post_attn_ptr, n * q_width) };
 
     let mut attn_out_q8_1 =

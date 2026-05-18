@@ -91,7 +91,8 @@ impl WorkerRole {
 enum Command {
     Forward {
         tokens: Vec<u32>,
-        start_position: usize,
+        positions: Vec<usize>,
+        slot_ids: Vec<usize>,
         reply: SyncSender<Result<Vec<f32>>>,
     },
     ResetKv {
@@ -141,14 +142,16 @@ impl<A: Arch> WorkerHandle<A> {
                 match cmd {
                     Command::Forward {
                         tokens,
-                        start_position,
+                        positions,
+                        slot_ids,
                         reply,
                     } => {
                         let res = run_forward_once::<A>(
                             &mut state,
                             &role,
                             &tokens,
-                            start_position,
+                            &positions,
+                            &slot_ids,
                         );
                         let _ = reply.send(res);
                     }
@@ -186,13 +189,15 @@ impl<A: Arch> WorkerHandle<A> {
     pub fn send_forward(
         &self,
         tokens: Vec<u32>,
-        start_position: usize,
+        positions: Vec<usize>,
+        slot_ids: Vec<usize>,
     ) -> Result<Receiver<Result<Vec<f32>>>> {
         let (reply_tx, reply_rx) = mpsc::sync_channel::<Result<Vec<f32>>>(1);
         self.cmd_tx
             .send(Command::Forward {
                 tokens,
-                start_position,
+                positions,
+                slot_ids,
                 reply: reply_tx,
             })
             .map_err(|e| anyhow::anyhow!("worker channel closed: {e}"))?;
@@ -273,14 +278,15 @@ fn run_forward_once<A: Arch>(
     state: &mut RankState<A>,
     role: &WorkerRole,
     tokens: &[u32],
-    start_position: usize,
+    positions: &[usize],
+    slot_ids: &[usize],
 ) -> Result<Vec<f32>> {
     let stream = state.device.default_stream();
     match role {
         WorkerRole::Sd => {
             let mut ctx =
                 SingleDeviceForwardCtx::new(&state.device, stream, &state.reg, &mut state.pool);
-            A::forward(&state.model, &mut ctx, tokens, start_position)?;
+            A::forward(&state.model, &mut ctx, tokens, positions, slot_ids)?;
             Ok(ctx.logits().to_vec())
         }
         WorkerRole::Tp { rank, n_ranks, ar } => {
@@ -296,7 +302,7 @@ fn run_forward_once<A: Arch>(
                 &mut state.pool,
                 hooks,
             );
-            A::forward(&state.model, &mut ctx, tokens, start_position)?;
+            A::forward(&state.model, &mut ctx, tokens, positions, slot_ids)?;
             Ok(ctx.logits().to_vec())
         }
         WorkerRole::Pp {
@@ -320,7 +326,7 @@ fn run_forward_once<A: Arch>(
                 *layer_end,
                 &mut *buf,
             );
-            A::forward(&state.model, &mut ctx, tokens, start_position)?;
+            A::forward(&state.model, &mut ctx, tokens, positions, slot_ids)?;
             Ok(ctx.logits().to_vec())
         }
         WorkerRole::Hybrid {
@@ -349,7 +355,7 @@ fn run_forward_once<A: Arch>(
                 Arc::clone(peer_buffer),
                 Arc::clone(handoff),
             );
-            A::forward(&state.model, &mut ctx, tokens, start_position)?;
+            A::forward(&state.model, &mut ctx, tokens, positions, slot_ids)?;
             Ok(ctx.logits().to_vec())
         }
     }

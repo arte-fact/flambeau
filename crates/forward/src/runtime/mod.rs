@@ -78,14 +78,17 @@ pub trait Arch: Send + Sync + 'static {
         ctx_cap: Option<usize>,
     ) -> Result<Self::Model>;
 
-    /// Run forward over `tokens` (length 1 for decode; longer for
-    /// prefill). `start_position` is the KV write tail for `tokens[0]`.
-    /// Logits for the LAST token land in `ctx.logits()`.
+    /// Run forward over `tokens` (length 1 = single decode; >1 =
+    /// prefill chunk or batched-decode N slots). `positions[i]` is
+    /// the KV write row for `tokens[i]`; `slot_ids[i]` selects the
+    /// inflight slot whose KV/GDN slab receives that write. Logits
+    /// for the LAST token land in `ctx.logits()`.
     fn forward<C: ForwardCtx>(
         model: &Self::Model,
         ctx: &mut C,
         tokens: &[u32],
-        start_position: usize,
+        positions: &[usize],
+        slot_ids: &[usize],
     ) -> Result<()>;
 
     /// Build the ScratchPool config for this rank given the
@@ -154,25 +157,38 @@ impl<A: Arch> Session<A> {
         &self.topology
     }
 
-    /// Drive a forward pass across every rank. `tokens.len() == 1` is
-    /// decode; longer is prefill. Returns when the rank that owns the
-    /// LM head (SD: rank 0; PP/Hybrid: last stage; TP: any rank) finishes.
-    /// Logits for the LAST token land in `self.last_logits`.
-    pub fn forward(&mut self, tokens: &[u32], start_position: usize) -> Result<()> {
+    /// Drive a forward pass across every rank. `positions[i]` is the
+    /// KV write row for `tokens[i]`; `slot_ids[i]` is the inflight
+    /// slot. Logits for the LAST token land in `self.last_logits`.
+    pub fn forward(
+        &mut self,
+        tokens: &[u32],
+        positions: &[usize],
+        slot_ids: &[usize],
+    ) -> Result<()> {
         if tokens.is_empty() {
             anyhow::bail!("Session::forward: empty tokens");
+        }
+        if positions.len() != tokens.len() || slot_ids.len() != tokens.len() {
+            anyhow::bail!(
+                "Session::forward: positions.len {} / slot_ids.len {} != tokens.len {}",
+                positions.len(),
+                slot_ids.len(),
+                tokens.len()
+            );
         }
         self.last_logits = orchestrate::run_forward(
             &self.topology,
             &mut self.handles,
             tokens.to_vec(),
-            start_position,
+            positions.to_vec(),
+            slot_ids.to_vec(),
         )?;
         Ok(())
     }
 
     pub fn forward_one_token(&mut self, token: u32, position: usize) -> Result<()> {
-        self.forward(&[token], position)
+        self.forward(&[token], &[position], &[0])
     }
 
     pub fn forward_one_token_logits(
@@ -181,7 +197,7 @@ impl<A: Arch> Session<A> {
         position: usize,
         out: &mut Vec<f32>,
     ) -> Result<()> {
-        self.forward(&[token], position)?;
+        self.forward_one_token(token, position)?;
         out.clear();
         out.extend_from_slice(&self.last_logits);
         Ok(())
@@ -201,8 +217,11 @@ impl<A: Arch> Session<A> {
         let mut i = 0;
         while i < tokens.len() {
             let end = (i + chunk_size).min(tokens.len());
-            self.forward(&tokens[i..end], pos)?;
-            pos += end - i;
+            let chunk_len = end - i;
+            let chunk_positions: Vec<usize> = (0..chunk_len).map(|k| pos + k).collect();
+            let chunk_slots = vec![0usize; chunk_len];
+            self.forward(&tokens[i..end], &chunk_positions, &chunk_slots)?;
+            pos += chunk_len;
             i = end;
         }
         out.clear();

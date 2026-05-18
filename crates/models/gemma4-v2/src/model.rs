@@ -1,6 +1,4 @@
-//! Gemma-4 forward. Every layer is FullAttn (dense variant). Per-layer
-//! SWA/window comes from `AttnWeights.window_size`, picked up by
-//! standard_attn's kernel arg.
+//! Gemma-4 forward. Every layer is FullAttn (dense variant).
 
 use anyhow::Result;
 use flambeau_forward::ctx::ForwardCtx;
@@ -11,7 +9,8 @@ pub fn forward<C: ForwardCtx>(
     model: &Gemma4V2Model,
     ctx: &mut C,
     tokens: &[u32],
-    start_position: usize,
+    positions: &[usize],
+    slot_ids: &[usize],
 ) -> Result<()> {
     let n = tokens.len();
     let mut resid = ctx.embed(&model.embedding, tokens)?;
@@ -24,7 +23,7 @@ pub fn forward<C: ForwardCtx>(
             .as_ref()
             .expect("ffn weights missing for owned layer (PP slice mismatch)");
 
-        let delta = ctx.standard_attn(&resid, attn_w, li, start_position, n)?;
+        let delta = ctx.standard_attn(&resid, attn_w, li, positions, slot_ids)?;
         resid = ctx.residual_add(resid, delta, n)?;
 
         let delta = ctx.dense_ffn(&resid, ffn_w, n)?;

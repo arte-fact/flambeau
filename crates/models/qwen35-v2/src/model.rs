@@ -1,7 +1,7 @@
-//! qwen35 forward. Per-layer dispatch on `LayerKind`: GDN layers call
-//! `gdn_layer`; full-attn layers call `standard_attn`. Both share the
-//! same dense-FFN path afterward. `tokens.len() == 1` is decode;
-//! longer is prefill.
+//! qwen35 forward. Per-layer dispatch on `LayerKind`: GDN → `gdn_layer`,
+//! FullAttn → `standard_attn`. Dense-FFN afterward. `tokens.len() == 1`
+//! is decode; longer is prefill or batched-decode (decided by the
+//! caller via `slot_ids` uniformity).
 
 use anyhow::Result;
 use flambeau_forward::ctx::{ForwardCtx, LayerKind};
@@ -12,7 +12,8 @@ pub fn forward<C: ForwardCtx>(
     model: &Qwen35V2Model,
     ctx: &mut C,
     tokens: &[u32],
-    start_position: usize,
+    positions: &[usize],
+    slot_ids: &[usize],
 ) -> Result<()> {
     let n = tokens.len();
     let mut resid = ctx.embed(&model.embedding, tokens)?;
@@ -26,13 +27,13 @@ pub fn forward<C: ForwardCtx>(
                 let w = model.full_attn[li]
                     .as_ref()
                     .expect("layer_kinds says FullAttn but full_attn[li] is None");
-                ctx.standard_attn(&resid, w, li, start_position, n)?
+                ctx.standard_attn(&resid, w, li, positions, slot_ids)?
             }
             LayerKind::Gdn => {
                 let w = model.gdn[li]
                     .as_ref()
                     .expect("layer_kinds says Gdn but gdn[li] is None");
-                ctx.gdn_layer(&resid, w, li, n)?
+                ctx.gdn_layer(&resid, w, li, slot_ids)?
             }
         };
         resid = ctx.residual_add(resid, delta, n)?;

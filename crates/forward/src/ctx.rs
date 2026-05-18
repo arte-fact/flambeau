@@ -33,25 +33,28 @@ pub trait ForwardCtx {
         n_tokens: usize,
     ) -> Result<Tensor<F16>>;
 
-    /// `start_position` is the KV write tail for `tokens[0]`. Decode:
-    /// N=1, start_position = current decode step. Prefill: N=prompt
-    /// len, start_position = 0 (fresh) or prior KV length (continuation).
+    /// `positions[i]` is the KV write row for `tokens[i]`; `slot_ids[i]`
+    /// is the inflight-slot index whose KV slab receives that write.
+    /// Single decode: positions=[pos], slot_ids=[0]. Prefill chunk:
+    /// positions=[start..start+n], slot_ids=[slot;n]. Batched decode:
+    /// positions=[pos_0..pos_{N-1}], slot_ids=[0..N-1].
     fn standard_attn(
         &mut self,
         input: &Tensor<F16>,
         weights: &AttnWeights,
         layer_idx: usize,
-        start_position: usize,
-        n_tokens: usize,
+        positions: &[usize],
+        slot_ids: &[usize],
     ) -> Result<Tensor<F16>>;
 
-    /// Gated-Delta-Net recurrent layer (Qwen3.5 / 3.6 / 3-Next).
+    /// Gated-Delta-Net recurrent layer. `slot_ids[i]` selects the
+    /// per-slot recurrent state slab updated by token `i`.
     fn gdn_layer(
         &mut self,
         input: &Tensor<F16>,
         weights: &GdnWeights,
         layer_idx: usize,
-        n_tokens: usize,
+        slot_ids: &[usize],
     ) -> Result<Tensor<F16>>;
 
     fn dense_ffn(

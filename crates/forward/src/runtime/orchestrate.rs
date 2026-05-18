@@ -222,20 +222,20 @@ pub fn run_forward<A: Arch>(
     topology: &Topology,
     handles: &mut [WorkerHandle<A>],
     tokens: Vec<u32>,
-    start_position: usize,
+    positions: Vec<usize>,
+    slot_ids: Vec<usize>,
 ) -> Result<Vec<f32>> {
     match topology {
         Topology::SingleDevice { .. } => {
-            let rx = handles[0].send_forward(tokens, start_position)?;
+            let rx = handles[0].send_forward(tokens, positions, slot_ids)?;
             rx.recv()
                 .map_err(|e| anyhow!("SD reply channel closed: {e}"))?
         }
         Topology::Pp { .. } => {
-            // PP has no barrier — `embed` on rank > 0 strictly requires
-            // peer_buffer populated by rank N-1. Drive ranks in order.
             let mut last_logits = Vec::new();
             for h in handles.iter_mut() {
-                let rx = h.send_forward(tokens.clone(), start_position)?;
+                let rx =
+                    h.send_forward(tokens.clone(), positions.clone(), slot_ids.clone())?;
                 last_logits = rx
                     .recv()
                     .map_err(|e| anyhow!("PP reply channel closed: {e}"))??;
@@ -243,13 +243,13 @@ pub fn run_forward<A: Arch>(
             Ok(last_logits)
         }
         Topology::Tp { .. } | Topology::Hybrid { .. } => {
-            // Parallel dispatch — workers coordinate through
-            // ArCoordinator (TP) or ArCoordinator + handoff barrier
-            // (Hybrid). All ranks must be live concurrently or the
-            // barriers deadlock.
             let mut rxs = Vec::with_capacity(handles.len());
             for h in handles.iter_mut() {
-                rxs.push(h.send_forward(tokens.clone(), start_position)?);
+                rxs.push(h.send_forward(
+                    tokens.clone(),
+                    positions.clone(),
+                    slot_ids.clone(),
+                )?);
             }
             let mut last_nonempty: Option<Vec<f32>> = None;
             for rx in rxs {

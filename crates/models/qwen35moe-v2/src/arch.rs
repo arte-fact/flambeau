@@ -58,9 +58,10 @@ impl Arch for Qwen35MoeV2 {
         model: &Self::Model,
         ctx: &mut C,
         tokens: &[u32],
-        start_position: usize,
+        positions: &[usize],
+        slot_ids: &[usize],
     ) -> Result<()> {
-        forward(model, ctx, tokens, start_position)
+        forward(model, ctx, tokens, positions, slot_ids)
     }
 
     fn scratch_config(

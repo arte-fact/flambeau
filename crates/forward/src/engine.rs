@@ -433,8 +433,8 @@ impl<H: TopologyHooks, S: StageHooks> ForwardCtx for ForwardEngine<'_, H, S> {
         input: &Tensor<F16>,
         weights: &AttnWeights,
         layer_idx: usize,
-        start_position: usize,
-        n_tokens: usize,
+        positions: &[usize],
+        slot_ids: &[usize],
     ) -> Result<Tensor<F16>> {
         composites::standard_attn_local(
             &mut self.core,
@@ -442,8 +442,8 @@ impl<H: TopologyHooks, S: StageHooks> ForwardCtx for ForwardEngine<'_, H, S> {
             input,
             weights,
             layer_idx,
-            start_position,
-            n_tokens,
+            positions,
+            slot_ids,
         )
     }
 
@@ -452,7 +452,7 @@ impl<H: TopologyHooks, S: StageHooks> ForwardCtx for ForwardEngine<'_, H, S> {
         input: &Tensor<F16>,
         weights: &crate::ctx::GdnWeights,
         layer_idx: usize,
-        n_tokens: usize,
+        slot_ids: &[usize],
     ) -> Result<Tensor<F16>> {
         composites::gdn_layer_local(
             &mut self.core,
@@ -460,7 +460,7 @@ impl<H: TopologyHooks, S: StageHooks> ForwardCtx for ForwardEngine<'_, H, S> {
             input,
             weights,
             layer_idx,
-            n_tokens,
+            slot_ids,
         )
     }
 

@@ -1,6 +1,4 @@
-//! qwen35moe forward. Per-layer dispatch on `LayerKind`: GDN layers
-//! call `gdn_layer`; full-attn layers call `standard_attn`. FFN is
-//! routed MoE everywhere.
+//! qwen35moe forward. Per-layer dispatch on `LayerKind`. FFN is routed MoE.
 
 use anyhow::Result;
 use flambeau_forward::ctx::{ForwardCtx, LayerKind};
@@ -11,7 +9,8 @@ pub fn forward<C: ForwardCtx>(
     model: &Qwen35MoeV2Model,
     ctx: &mut C,
     tokens: &[u32],
-    start_position: usize,
+    positions: &[usize],
+    slot_ids: &[usize],
 ) -> Result<()> {
     let n = tokens.len();
     let mut resid = ctx.embed(&model.embedding, tokens)?;
@@ -25,13 +24,13 @@ pub fn forward<C: ForwardCtx>(
                 let w = model.full_attn[li]
                     .as_ref()
                     .expect("layer_kinds says FullAttn but full_attn[li] is None");
-                ctx.standard_attn(&resid, w, li, start_position, n)?
+                ctx.standard_attn(&resid, w, li, positions, slot_ids)?
             }
             LayerKind::Gdn => {
                 let w = model.gdn[li]
                     .as_ref()
                     .expect("layer_kinds says Gdn but gdn[li] is None");
-                ctx.gdn_layer(&resid, w, li, n)?
+                ctx.gdn_layer(&resid, w, li, slot_ids)?
             }
         };
         resid = ctx.residual_add(resid, delta, n)?;
