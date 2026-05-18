@@ -90,6 +90,7 @@ impl Arch for Qwen35V2 {
         model: &Self::Model,
         shard: ShardMode,
         prefill_ubatch: usize,
+        max_slots: usize,
     ) -> ScratchConfig {
         let cfg = &model.config;
         let n_ranks = shard.n_ranks();
@@ -113,6 +114,7 @@ impl Arch for Qwen35V2 {
             attn_q_gated: true,
             shared_intermediate: 0,
             max_prefill_tokens: prefill_ubatch,
+            max_slots,
         }
     }
 

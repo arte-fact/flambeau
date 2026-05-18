@@ -89,12 +89,15 @@ pub trait Arch: Send + Sync + 'static {
     ) -> Result<()>;
 
     /// Build the ScratchPool config for this rank given the
-    /// effective `ShardMode` (TP divides per-rank widths) and the
-    /// operator's prefill chunk size (sizes the per-token scratch slots).
+    /// effective `ShardMode` (TP divides per-rank widths), the
+    /// operator's prefill chunk size (sizes the per-token scratch
+    /// slots), and the number of inflight slots (sizes per-layer KV
+    /// + GDN state).
     fn scratch_config(
         model: &Self::Model,
         shard: ShardMode,
         prefill_ubatch: usize,
+        max_slots: usize,
     ) -> ScratchConfig;
 
     /// Per-layer attention kind (FullAttn / Gdn) if the arch is
@@ -124,11 +127,16 @@ impl<A: Arch> Session<A> {
         topology: Topology,
         ctx_cap: Option<usize>,
         prefill_ubatch: usize,
+        max_slots: usize,
     ) -> Result<Self> {
         if prefill_ubatch == 0 {
             anyhow::bail!("Session::new: prefill_ubatch must be > 0");
         }
-        let handles = orchestrate::launch::<A>(file, &topology, ctx_cap, prefill_ubatch)?;
+        if max_slots == 0 {
+            anyhow::bail!("Session::new: max_slots must be > 0");
+        }
+        let handles =
+            orchestrate::launch::<A>(file, &topology, ctx_cap, prefill_ubatch, max_slots)?;
         Ok(Self {
             topology,
             handles,

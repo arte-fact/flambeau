@@ -50,6 +50,7 @@ impl Arch for Gemma4V2 {
         model: &Self::Model,
         shard: ShardMode,
         prefill_ubatch: usize,
+        max_slots: usize,
     ) -> ScratchConfig {
         let cfg = &model.config;
         let n_ranks = match shard {
@@ -84,6 +85,7 @@ impl Arch for Gemma4V2 {
             attn_q_gated: false,
             shared_intermediate: 0,
             max_prefill_tokens: prefill_ubatch,
+            max_slots,
         }
     }
 

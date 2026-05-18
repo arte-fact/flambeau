@@ -725,6 +725,7 @@ pub(crate) async fn serve_inner_v2(
             topology.clone(),
             cfg.ctx_cap,
             prefill_ubatch,
+            1,
         )
         .with_context(|| format!("v2 driver slot {slot_idx} ({gguf_arch})"))?;
         let session: Box<dyn crate::Session> = Box::new(crate::v2_handle::V2Session {
@@ -841,6 +842,7 @@ fn create_v2_driver(
     topology: flambeau_forward::Topology,
     ctx_cap: Option<usize>,
     prefill_ubatch: usize,
+    max_slots: usize,
 ) -> Result<Box<dyn flambeau_runtime::ModelDriver>> {
     use flambeau_forward::Session;
     match gguf_arch {
@@ -850,6 +852,7 @@ fn create_v2_driver(
                 topology,
                 ctx_cap,
                 prefill_ubatch,
+                max_slots,
             )?;
             Ok(Box::new(s))
         }
@@ -859,6 +862,7 @@ fn create_v2_driver(
                 topology,
                 ctx_cap,
                 prefill_ubatch,
+                max_slots,
             )?;
             Ok(Box::new(s))
         }
@@ -868,6 +872,7 @@ fn create_v2_driver(
                 topology,
                 ctx_cap,
                 prefill_ubatch,
+                max_slots,
             )?;
             Ok(Box::new(s))
         }

@@ -52,6 +52,12 @@ pub struct ScratchConfig {
     /// shared_x_norm, router_logits, position_i32) is sized at
     /// `max_prefill_tokens * <per-token width>`.
     pub max_prefill_tokens: usize,
+    /// Number of independent inflight slots this pool reserves KV/GDN
+    /// state for. 1 = single-request decode + chunked prefill. >1 =
+    /// batched-decode across N concurrent slots. Each layer's
+    /// `kv_caches[li].k/v` is sized `[max_slots, max_seq_len, kv_width]`;
+    /// GDN per-layer state + conv_history multiply by `max_slots`.
+    pub max_slots: usize,
 }
 
 impl Default for ScratchConfig {
@@ -70,6 +76,7 @@ impl Default for ScratchConfig {
             attn_q_gated: false,
             shared_intermediate: 0,
             max_prefill_tokens: 1,
+            max_slots: 1,
         }
     }
 }
@@ -242,6 +249,7 @@ impl ScratchPool {
                 }
             }
         }
+        let n_slots = config.max_slots.max(1);
         let mut kv_caches = Vec::with_capacity(config.num_layers);
         for li in 0..config.num_layers {
             let slot_kvw = config
@@ -249,8 +257,8 @@ impl ScratchPool {
                 .as_ref()
                 .map(|p| p[li])
                 .unwrap_or(kvw);
-            let k = alloc_bytes(config.max_seq_len * slot_kvw * f16)?;
-            let v = alloc_bytes(config.max_seq_len * slot_kvw * f16)?;
+            let k = alloc_bytes(n_slots * config.max_seq_len * slot_kvw * f16)?;
+            let v = alloc_bytes(n_slots * config.max_seq_len * slot_kvw * f16)?;
             kv_caches.push(KvCache {
                 k,
                 v,
@@ -260,8 +268,8 @@ impl ScratchPool {
 
         let (gdn_state, gdn_decode_scratch) = if let Some(g) = config.gdn {
             let mut state_vec = Vec::with_capacity(config.num_layers);
-            let state_bytes = g.num_v_heads * g.head_k_dim * g.head_v_dim * f32;
-            let hist_bytes = (g.conv_kernel - 1) * g.conv_channels * f32;
+            let state_bytes = n_slots * g.num_v_heads * g.head_k_dim * g.head_v_dim * f32;
+            let hist_bytes = n_slots * (g.conv_kernel - 1) * g.conv_channels * f32;
             // Recurrent state + conv history must start at zero —
             // the step kernel reads them every call, including
             // position=0. `device.alloc` is uninitialised.
