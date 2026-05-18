@@ -1,13 +1,6 @@
-//! Gemma-4 dense (31B-like variants) on the v2 stack.
-//!
-//! Deltas vs qwen3 dense:
-//! - GELU-tanh FFN activation (not SwiGLU)
-//! - Final-logit softcap (typically 30.0)
-//! - Tied LM head (token_embd reused as lm_head)
-//! - `inpL = inpL * sqrt(n_embd)` post-embed scale
-//! - Per-layer SWA alternation: some layers are local (`window_size > 0`)
-//!   with separate `head_dim_swa` / `rope_theta_swa` / `rotated_dims_swa`;
-//!   others are global full-attention.
+//! Gemma-4 dense (31B-like variants) on the v2 stack. GELU-tanh,
+//! final-logit softcap, tied LM head, post-embed scale = sqrt(n_embd),
+//! per-layer SWA alternation, V-from-K (no attn_v on disk).
 //!
 //! MoE (26B-A4B) and per-layer-embd (E2B/E4B) variants are out of
 //! scope for the first cut.
@@ -19,5 +12,5 @@ pub mod loader;
 pub mod model;
 
 pub use config::{Gemma4V2Config, Gemma4V2ConfigError};
-pub use loader::{load_from_gguf, Gemma4V2Model};
+pub use loader::{load_from_gguf, load_tp_shard_from_gguf, Gemma4V2Model};
 pub use model::forward_one_token;

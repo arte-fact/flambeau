@@ -38,9 +38,14 @@ pub fn standard_attn_local<H: TopologyHooks>(
     }
     let q_width = weights.n_heads * weights.head_dim;
     let kv_width = weights.n_kv_heads * weights.head_dim;
+    // Per-layer-varying head_dim isn't supported yet — the KV cache
+    // slot stride is fixed at pool-construction. Gemma4's SWA+global
+    // alternation needs per-layer KV cache sizing (separate phase).
     if q_width != state.pool.config.q_width {
         bail!(
-            "standard_attn: weights q_width {q_width} != ctx.q_width {}",
+            "standard_attn: weights q_width {q_width} != ctx.q_width {} \
+             (per-layer-varying head_dim/kv_heads not yet supported in v2 — \
+             gemma4 SWA/global alternation needs per-layer KV cache sizing)",
             state.pool.config.q_width
         );
     }
