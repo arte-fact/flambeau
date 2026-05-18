@@ -137,6 +137,16 @@ pub struct ScratchPool {
     /// per-token gate scale step. NULL when no shared expert.
     pub shared_x_norm_f32: DevicePtr,
 
+    /// `[max_slots]` U64 — per-slot K-cache base pointers, filled
+    /// host-side per forward call and consumed by
+    /// `attn_decode_f16_batched`. NULL when `max_slots == 1`.
+    pub attn_slot_k_dst_ptrs: DevicePtr,
+    pub attn_slot_v_dst_ptrs: DevicePtr,
+    /// `[max_slots]` I32 — per-slot write position (= positions[i]).
+    pub attn_slot_write_pos: DevicePtr,
+    /// `[max_slots]` I32 — per-slot KV length (= positions[i] + 1).
+    pub attn_slot_n_kv: DevicePtr,
+
     /// `[max_experts_per_tok]` I32 — top-k expert indices. NULL when no MoE.
     pub moe_expert_ids: DevicePtr,
     /// `[max_experts_per_tok]` F32 — top-k normalised expert weights. NULL when no MoE.
@@ -249,6 +259,22 @@ impl ScratchPool {
         } else {
             DevicePtr::NULL
         };
+
+        // Batched-decode attention scratch. Per-slot pointer/scalar
+        // arrays consumed by `attn_decode_f16_batched` and
+        // `kv_append_f16_batched_slots`. Allocated only when N > 1
+        // (single-slot decode goes through the unbatched kernel).
+        let n_slots = config.max_slots.max(1);
+        let (attn_slot_k_dst_ptrs, attn_slot_v_dst_ptrs, attn_slot_write_pos, attn_slot_n_kv) =
+            if n_slots > 1 {
+                let kd = alloc_bytes(n_slots * 8)?;
+                let vd = alloc_bytes(n_slots * 8)?;
+                let wp = alloc_bytes(n_slots * i32_b)?;
+                let nk = alloc_bytes(n_slots * i32_b)?;
+                (kd, vd, wp, nk)
+            } else {
+                (DevicePtr::NULL, DevicePtr::NULL, DevicePtr::NULL, DevicePtr::NULL)
+            };
 
         // Indexed-MoE per-slot scratch. Sized for one decode token
         // × top_k. Prefill widens this when n_tokens > 1 (currently
@@ -412,6 +438,10 @@ impl ScratchPool {
             router_logits_f32,
             moe_accum_f16,
             shared_x_norm_f32,
+            attn_slot_k_dst_ptrs,
+            attn_slot_v_dst_ptrs,
+            attn_slot_write_pos,
+            attn_slot_n_kv,
             moe_expert_ids,
             moe_expert_weights,
             moe_gate_out_f32,

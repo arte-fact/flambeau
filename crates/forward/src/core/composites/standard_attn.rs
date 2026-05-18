@@ -358,55 +358,101 @@ pub fn standard_attn_local<H: TopologyHooks>(
             )?;
         }
     } else {
-        // Multi-slot or non-contiguous positions → per-token (slot, pos)
-        // kv_append + attn_decode. N is small (batched-decode N=2..8).
-        let q_row_bytes = q_width * 2;
-        let kv_row_bytes = kv_width * 2;
+        // Multi-slot or non-contiguous positions → one-shot batched
+        // KV-append + batched-decode attention. Caller's pool sized
+        // for `max_slots > 1` provided the host→device upload arrays.
+        if state.pool.attn_slot_k_dst_ptrs.as_usize() == 0 {
+            bail!(
+                "standard_attn: non-prefill shape requires max_slots > 1 in ScratchConfig \
+                 (got max_slots={})",
+                state.pool.config.max_slots
+            );
+        }
+        let mut host_k_ptrs: Vec<u64> = Vec::with_capacity(n);
+        let mut host_v_ptrs: Vec<u64> = Vec::with_capacity(n);
+        let mut host_write_pos: Vec<i32> = Vec::with_capacity(n);
+        let mut host_n_kv: Vec<i32> = Vec::with_capacity(n);
         for i in 0..n {
             let slot = slot_ids[i];
             let pos = positions[i];
             let slot_offset = slot * slot_stride_bytes;
-            let k_slot_ptr = kv.k.offset_bytes(slot_offset);
-            let v_slot_ptr = kv.v.offset_bytes(slot_offset);
-            let mut k_cache =
-                unsafe { Tensor::<F16>::from_raw(k_slot_ptr, slot_stride_elems) };
-            let mut v_cache =
-                unsafe { Tensor::<F16>::from_raw(v_slot_ptr, slot_stride_elems) };
-            let k_row_src =
-                unsafe { Tensor::<F16>::from_raw(state.pool.k_f16.offset_bytes(i * kv_row_bytes), kv_width) };
-            let v_row_src =
-                unsafe { Tensor::<F16>::from_raw(state.pool.v_f16.offset_bytes(i * kv_row_bytes), kv_width) };
-            flambeau_model_ops::kv_append_f16(
-                &k_row_src,
-                &v_row_src,
-                &mut k_cache,
-                &mut v_cache,
-                1,
-                kv_width,
-                pos,
-                max_seq_len,
-                state.device,
-                state.stream,
-            )?;
-            let q_row =
-                unsafe { Tensor::<F16>::from_raw(state.pool.q_f16.offset_bytes(i * q_row_bytes), q_width) };
-            let mut attn_row = unsafe {
-                Tensor::<F16>::from_raw(state.pool.attn_out_f16.offset_bytes(i * q_row_bytes), q_width)
-            };
-            flambeau_model_ops::attn_decode_f16(
-                &q_row,
-                &k_cache,
-                &v_cache,
-                &mut attn_row,
-                weights.n_heads,
-                weights.n_kv_heads,
-                weights.head_dim,
-                pos + 1,
-                scale,
-                weights.window_size,
-                &ops,
-            )?;
+            host_k_ptrs.push(kv.k.offset_bytes(slot_offset).as_usize() as u64);
+            host_v_ptrs.push(kv.v.offset_bytes(slot_offset).as_usize() as u64);
+            host_write_pos.push(pos as i32);
+            host_n_kv.push((pos + 1) as i32);
         }
+        unsafe {
+            state
+                .device
+                .memcpy_async(
+                    state.stream,
+                    CopyDirection::HostToDevice,
+                    state.pool.attn_slot_k_dst_ptrs,
+                    DevicePtr(host_k_ptrs.as_ptr() as usize),
+                    n * 8,
+                )
+                .context("standard_attn: attn_slot_k_dst_ptrs HtoD")?;
+            state
+                .device
+                .memcpy_async(
+                    state.stream,
+                    CopyDirection::HostToDevice,
+                    state.pool.attn_slot_v_dst_ptrs,
+                    DevicePtr(host_v_ptrs.as_ptr() as usize),
+                    n * 8,
+                )
+                .context("standard_attn: attn_slot_v_dst_ptrs HtoD")?;
+            state
+                .device
+                .memcpy_async(
+                    state.stream,
+                    CopyDirection::HostToDevice,
+                    state.pool.attn_slot_write_pos,
+                    DevicePtr(host_write_pos.as_ptr() as usize),
+                    n * 4,
+                )
+                .context("standard_attn: attn_slot_write_pos HtoD")?;
+            state
+                .device
+                .memcpy_async(
+                    state.stream,
+                    CopyDirection::HostToDevice,
+                    state.pool.attn_slot_n_kv,
+                    DevicePtr(host_n_kv.as_ptr() as usize),
+                    n * 4,
+                )
+                .context("standard_attn: attn_slot_n_kv HtoD")?;
+        }
+        flambeau_core::Stream::synchronize(state.stream)?;
+        let k_src_full = unsafe { Tensor::<F16>::from_raw(state.pool.k_f16, n * kv_width) };
+        let v_src_full = unsafe { Tensor::<F16>::from_raw(state.pool.v_f16, n * kv_width) };
+        flambeau_model_ops::kv_append_f16_batched_slots(
+            &k_src_full,
+            &v_src_full,
+            state.pool.attn_slot_k_dst_ptrs,
+            state.pool.attn_slot_v_dst_ptrs,
+            state.pool.attn_slot_write_pos,
+            n,
+            kv_width,
+            &ops,
+        )?;
+        let q_batched =
+            unsafe { Tensor::<F16>::from_raw(state.pool.q_f16, n * q_width) };
+        let mut attn_out_batched =
+            unsafe { Tensor::<F16>::from_raw(state.pool.attn_out_f16, n * q_width) };
+        flambeau_model_ops::attn_decode_f16_batched(
+            &q_batched,
+            state.pool.attn_slot_k_dst_ptrs,
+            state.pool.attn_slot_v_dst_ptrs,
+            &mut attn_out_batched,
+            state.pool.attn_slot_n_kv,
+            weights.n_heads,
+            weights.n_kv_heads,
+            weights.head_dim,
+            n,
+            scale,
+            &ops,
+        )?;
     }
 
     let post_attn_ptr = if weights.attn_q_gated {
