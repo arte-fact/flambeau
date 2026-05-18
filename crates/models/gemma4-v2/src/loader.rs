@@ -20,8 +20,8 @@ pub struct Gemma4V2Model {
     pub config: Gemma4V2Config,
     pub layout: ModelLayout,
     pub embedding: EmbeddingWeights,
-    pub attn: Vec<AttnWeights>,
-    pub ffn: Vec<FfnWeights>,
+    pub attn: Vec<Option<AttnWeights>>,
+    pub ffn: Vec<Option<FfnWeights>>,
     pub lm_head: LmHeadWeights,
 
     pub(crate) allocs: Vec<(DevicePtr, usize)>,
@@ -50,9 +50,13 @@ fn load_with_shard(
     file: &GgufFile,
     device: &HipDevice,
     shard: ShardMode,
+    layer_range: Option<(usize, usize)>,
 ) -> Result<Gemma4V2Model> {
     let config = Gemma4V2Config::from_gguf(file).context("parse gemma4 config")?;
     let mut allocs: Vec<(DevicePtr, usize)> = Vec::new();
+    let in_range = |li: usize| -> bool {
+        layer_range.map_or(true, |(s, e)| li >= s && li < e)
+    };
 
     // Gemma4: inpL *= sqrt(n_embd) post-embed.
     let embedding = load_embedding(
@@ -70,6 +74,11 @@ fn load_with_shard(
     let mut attn = Vec::with_capacity(config.num_layers);
     let mut ffn = Vec::with_capacity(config.num_layers);
     for li in 0..config.num_layers {
+        if !in_range(li) {
+            attn.push(None);
+            ffn.push(None);
+            continue;
+        }
         let p = format!("blk.{li}");
         let dims = config.attn[li];
         let n_kv_heads = config.num_kv_heads[li];
@@ -82,7 +91,7 @@ fn load_with_shard(
             format!("{p}.attn_q_norm.weight"),
             format!("{p}.attn_k_norm.weight"),
         );
-        attn.push(load_dense_attn_layer(
+        attn.push(Some(load_dense_attn_layer(
             file,
             device,
             &DenseAttnLayerSpec {
@@ -109,7 +118,7 @@ fn load_with_shard(
             },
             shard,
             &mut allocs,
-        )?);
+        )?));
 
         let (ffn_norm, ffn_gate, ffn_up, ffn_down) = (
             format!("{p}.post_attention_norm.weight"),
@@ -117,7 +126,7 @@ fn load_with_shard(
             format!("{p}.ffn_up.weight"),
             format!("{p}.ffn_down.weight"),
         );
-        ffn.push(load_dense_ffn_layer(
+        ffn.push(Some(load_dense_ffn_layer(
             file,
             device,
             &DenseFfnLayerSpec {
@@ -132,7 +141,7 @@ fn load_with_shard(
             },
             shard,
             &mut allocs,
-        )?);
+        )?));
     }
 
     let lm_head_name = if config.tied_lm_head {
@@ -177,8 +186,12 @@ fn load_with_shard(
     })
 }
 
-pub fn load_from_gguf(file: &GgufFile, device: &HipDevice) -> Result<Gemma4V2Model> {
-    load_with_shard(file, device, ShardMode::Replicated)
+pub fn load_from_gguf(
+    file: &GgufFile,
+    device: &HipDevice,
+    layer_range: Option<(usize, usize)>,
+) -> Result<Gemma4V2Model> {
+    load_with_shard(file, device, ShardMode::Replicated, layer_range)
 }
 
 pub fn load_tp_shard_from_gguf(
@@ -186,6 +199,7 @@ pub fn load_tp_shard_from_gguf(
     device: &HipDevice,
     rank: usize,
     n_ranks: usize,
+    layer_range: Option<(usize, usize)>,
 ) -> Result<Gemma4V2Model> {
-    load_with_shard(file, device, ShardMode::Tp { rank, n_ranks })
+    load_with_shard(file, device, ShardMode::Tp { rank, n_ranks }, layer_range)
 }

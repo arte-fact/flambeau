@@ -25,7 +25,7 @@ fn gemma4_31b_forward_one_token_produces_finite_non_constant_logits() {
     let device = HipDevice::new(0).expect("HIP device 0");
     device.bind().expect("bind");
 
-    let mut model = match load_from_gguf(&file, &device) {
+    let mut model = match load_from_gguf(&file, &device, None) {
         Ok(m) => m,
         Err(e) => {
             let msg = format!("{e:#}");
@@ -78,6 +78,7 @@ fn gemma4_31b_forward_one_token_produces_finite_non_constant_logits() {
         gdn: None,
         per_layer_kv_widths: None,
         attn_q_gated: false,
+        shared_intermediate: 0,
     };
     let mut pool = ScratchPool::new(&device, scratch_cfg).expect("ScratchPool::new");
 

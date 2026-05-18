@@ -22,11 +22,16 @@ impl Arch for Gemma4V2 {
         "gemma3"
     }
 
-    fn load(file: &GgufFile, device: &HipDevice, shard: ShardMode) -> Result<Self::Model> {
+    fn load(
+        file: &GgufFile,
+        device: &HipDevice,
+        shard: ShardMode,
+        layer_range: Option<(usize, usize)>,
+    ) -> Result<Self::Model> {
         match shard {
-            ShardMode::Replicated => load_from_gguf(file, device),
+            ShardMode::Replicated => load_from_gguf(file, device, layer_range),
             ShardMode::Tp { rank, n_ranks } => {
-                load_tp_shard_from_gguf(file, device, rank, n_ranks)
+                load_tp_shard_from_gguf(file, device, rank, n_ranks, layer_range)
             }
         }
     }

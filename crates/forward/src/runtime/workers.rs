@@ -234,7 +234,7 @@ fn init_rank<A: Arch>(
     let device = HipDevice::new(device_id).context("HipDevice::new")?;
     device.bind().context("device.bind")?;
     let shard = role.shard();
-    let model = A::load(file, &device, shard).context("Arch::load")?;
+    let model = A::load(file, &device, shard, role.layer_slice()).context("Arch::load")?;
     let mut cfg = A::scratch_config(&model, shard);
     if let Some((ls, le)) = role.layer_slice() {
         cfg.num_layers = le - ls;

@@ -64,11 +64,15 @@ pub trait Arch: Send + Sync + 'static {
 
     /// Load this rank's slice of weights. `ShardMode::Replicated` for
     /// SD/PP; `ShardMode::Tp { rank, n_ranks }` for TP/Hybrid (TP
-    /// being the inner ring of Hybrid stages).
+    /// being the inner ring of Hybrid stages). `layer_range` is
+    /// `Some((start, end))` for PP / Hybrid ranks (load only layers
+    /// `[start, end)` to keep per-rank VRAM bounded); `None` for SD /
+    /// TP (every layer loads).
     fn load(
         file: &GgufFile,
         device: &HipDevice,
         shard: ShardMode,
+        layer_range: Option<(usize, usize)>,
     ) -> Result<Self::Model>;
 
     /// Run one decode step. Logits land in `ctx.logits()`.

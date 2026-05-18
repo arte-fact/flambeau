@@ -26,7 +26,7 @@ pub struct Qwen35MoeV2Model {
     pub layer_kinds: Vec<LayerKind>,
     pub full_attn: Vec<Option<AttnWeights>>,
     pub gdn: Vec<Option<GdnWeights>>,
-    pub ffn: Vec<MoeWeights>,
+    pub ffn: Vec<Option<MoeWeights>>,
     pub lm_head: LmHeadWeights,
 
     pub(crate) allocs: Vec<(DevicePtr, usize)>,
@@ -55,10 +55,14 @@ fn load_with_shard(
     file: &GgufFile,
     device: &HipDevice,
     shard: ShardMode,
+    layer_range: Option<(usize, usize)>,
 ) -> Result<Qwen35MoeV2Model> {
     let config = Qwen35MoeV2Config::from_gguf(file).context("parse qwen35moe config")?;
     let mut allocs: Vec<(DevicePtr, usize)> = Vec::new();
     let g = config.gdn;
+    let in_range = |li: usize| -> bool {
+        layer_range.map_or(true, |(s, e)| li >= s && li < e)
+    };
 
     let embedding = load_embedding(
         file,
@@ -78,6 +82,17 @@ fn load_with_shard(
     let mut ffn = Vec::with_capacity(config.num_layers);
 
     for li in 0..config.num_layers {
+        if !in_range(li) {
+            full_attn.push(None);
+            gdn.push(None);
+            ffn.push(None);
+            layer_kinds.push(if config.is_recurrent(li) {
+                LayerKind::Gdn
+            } else {
+                LayerKind::FullAttn
+            });
+            continue;
+        }
         let p = format!("blk.{li}");
         let attn_norm_name = format!("{p}.attn_norm.weight");
 
@@ -256,7 +271,7 @@ fn load_with_shard(
         } else {
             None
         };
-        ffn.push(MoeWeights {
+        ffn.push(Some(MoeWeights {
             ffn_norm,
             router,
             experts_gate,
@@ -267,7 +282,7 @@ fn load_with_shard(
             activation: Activation::SwiGLU,
             rms_eps: config.rms_eps,
             shared,
-        });
+        }));
     }
 
     let lm_head_name = if config.tied_lm_head {
@@ -309,6 +324,10 @@ fn load_with_shard(
     })
 }
 
-pub fn load_from_gguf(file: &GgufFile, device: &HipDevice) -> Result<Qwen35MoeV2Model> {
-    load_with_shard(file, device, ShardMode::Replicated)
+pub fn load_from_gguf(
+    file: &GgufFile,
+    device: &HipDevice,
+    layer_range: Option<(usize, usize)>,
+) -> Result<Qwen35MoeV2Model> {
+    load_with_shard(file, device, ShardMode::Replicated, layer_range)
 }

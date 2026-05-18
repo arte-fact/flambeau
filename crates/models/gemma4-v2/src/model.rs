@@ -16,8 +16,12 @@ pub fn forward_one_token<C: ForwardCtx>(
     let mut resid = ctx.embed(&model.embedding, token_id)?;
     let layers: Vec<usize> = ctx.layer_range(&model.layout).collect();
     for li in layers {
-        let attn_w = &model.attn[li];
-        let ffn_w = &model.ffn[li];
+        let attn_w = model.attn[li]
+            .as_ref()
+            .expect("attn weights missing for owned layer (PP slice mismatch)");
+        let ffn_w = model.ffn[li]
+            .as_ref()
+            .expect("ffn weights missing for owned layer (PP slice mismatch)");
 
         let delta = ctx.standard_attn(&resid, attn_w, li, position)?;
         resid = ctx.residual_add(resid, delta)?;

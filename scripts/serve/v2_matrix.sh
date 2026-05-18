@@ -16,8 +16,12 @@ CASES=(
   "qwen35-9B-Q3_K_S SD                | /artefact/models/Qwen3.5-9B-Q3_K_S.gguf          | pp     | 0"
   "qwen35-27B-Q4_0 TP=2               | /artefact/models/Qwen3.5-27B-Q4_0.gguf           | tp     | 0,1"
   "qwen35-27B-Q4_1 TP=2               | /artefact/models/Qwen3.5-27B-Q4_1.gguf           | tp     | 0,1"
+  "qwen35-27B-Q8_0 PP=2               | /artefact/models/Qwen3.5-27B-Q8_0.gguf           | pp     | 0,1"
   "qwen36-27B-Q4_0 PP=2               | /artefact/models/Qwen3.6-27B-Q4_0.gguf           | pp     | 0,1"
+  "qwen36-27B-Q4_1 PP=2               | /artefact/models/Qwen3.6-27B-Q4_1.gguf           | pp     | 0,1"
   "qwen36-27B-UD-Q3_K_XL PP=2         | /artefact/models/Qwen3.6-27B-UD-Q3_K_XL.gguf     | pp     | 0,1"
+  "qwen36-27B-UD-Q4_K_XL PP=2         | /artefact/models/Qwen3.6-27B-UD-Q4_K_XL.gguf     | pp     | 0,1"
+  "qwen36-27B-Q8_0 pp2tp2             | /artefact/models/Qwen3.6-27B-Q8_0.gguf           | pp     | 0,1,2,3"
   "qwen36-35B-A3B-Q3_K_S PP=2         | /artefact/models/Qwen3.6-35B-A3B-Q3_K_S.gguf     | pp     | 0,1"
 )
 
