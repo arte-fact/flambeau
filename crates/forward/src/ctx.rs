@@ -4,7 +4,7 @@
 //! handoff). See `core/` for the shared composite engine.
 
 use anyhow::Result;
-use flambeau_model_ops::{Tensor, F16, F32, Q4_0, Q4_1, Q5_0, Q5_1, Q8_0};
+use flambeau_model_ops::{Tensor, F16, F32};
 
 /// One impl per topology; the model is `<C: ForwardCtx>` generic.
 pub trait ForwardCtx {
@@ -55,14 +55,16 @@ pub trait ForwardCtx {
     fn logits(&self) -> &[f32];
 }
 
-/// Runtime-tagged quant weight. `QuantWeight::qmatmul` dispatches to
-/// the matching `flambeau_model_ops::qmatmul_q*`.
-pub enum QuantWeight {
-    Q4_0(Tensor<Q4_0>),
-    Q4_1(Tensor<Q4_1>),
-    Q5_0(Tensor<Q5_0>),
-    Q5_1(Tensor<Q5_1>),
-    Q8_0(Tensor<Q8_0>),
+/// Runtime-tagged quant weight handle. Holds the device pointer plus
+/// the dtype tag the HIP kernel dispatcher needs; `qmatmul` is one
+/// call into `ops.qmatmul` regardless of dtype. Adding a new quant
+/// family is a single arm in `loader::ggml_to_qdtype`, not a fresh
+/// enum variant + match arm + typed wrapper.
+#[derive(Clone, Copy, Debug)]
+pub struct QuantWeight {
+    pub ptr: flambeau_core::DevicePtr,
+    pub dtype: flambeau_core::op::QDtype,
+    pub n_elems: usize,
 }
 
 impl QuantWeight {
@@ -77,23 +79,25 @@ impl QuantWeight {
         n: usize,
         ops: &flambeau_ops::HipOps<'_>,
     ) -> Result<()> {
-        match self {
-            Self::Q4_0(w) => {
-                flambeau_model_ops::qmatmul_q4_0(w, act_q8_1, act_q8_1_mmq, output, m, k, n, ops)
-            }
-            Self::Q4_1(w) => {
-                flambeau_model_ops::qmatmul_q4_1(w, act_q8_1, act_q8_1_mmq, output, m, k, n, ops)
-            }
-            Self::Q5_0(w) => {
-                flambeau_model_ops::qmatmul_q5_0(w, act_q8_1, act_q8_1_mmq, output, m, k, n, ops)
-            }
-            Self::Q5_1(w) => {
-                flambeau_model_ops::qmatmul_q5_1(w, act_q8_1, act_q8_1_mmq, output, m, k, n, ops)
-            }
-            Self::Q8_0(w) => {
-                flambeau_model_ops::qmatmul_q8_0(w, act_q8_1, act_q8_1_mmq, output, m, k, n, ops)
-            }
+        if output.n_elems < m * n {
+            anyhow::bail!(
+                "qmatmul ({:?}): output has {} F32 elems, need >= {m}*{n}={}",
+                self.dtype,
+                output.n_elems,
+                m * n
+            );
         }
+        <flambeau_ops::HipOps<'_> as flambeau_ops::Ops>::qmatmul(
+            ops,
+            self.ptr,
+            act_q8_1.ptr,
+            act_q8_1_mmq.ptr,
+            output.ptr,
+            m,
+            k,
+            n,
+            self.dtype,
+        )
     }
 }
 

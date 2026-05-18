@@ -168,8 +168,11 @@ mod tests {
                 quantize_row_q8_0(&host_f32[r * cols..(r + 1) * cols], &mut bytes);
             }
             let (ptr, _) = self.upload(&bytes);
-            let tensor = unsafe { Tensor::<Q8_0>::from_raw(ptr, rows * cols) };
-            QuantWeight::Q8_0(tensor)
+            QuantWeight {
+                ptr,
+                dtype: flambeau_core::op::QDtype::Q8_0,
+                n_elems: rows * cols,
+            }
         }
     }
 

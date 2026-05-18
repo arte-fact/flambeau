@@ -14,8 +14,9 @@
 
 use anyhow::{bail, Context, Result};
 use flambeau_backend_hip::HipDevice;
+use flambeau_core::op::QDtype;
 use flambeau_core::{CopyDirection, Device, DevicePtr};
-use flambeau_model_ops::{Tensor, F16, F32, Q4_0, Q4_1, Q5_0, Q5_1, Q8_0};
+use flambeau_model_ops::{Tensor, F16, F32};
 use flambeau_quant::{GgmlDType, GgufFile};
 use half::f16;
 
@@ -67,29 +68,51 @@ pub fn upload_f16_from_f32(
     Ok(unsafe { Tensor::<F16>::from_raw(ptr, f16_vec.len()) })
 }
 
-/// `(block_size_elems, type_size_bytes)` for GGUF dtypes model-ops's
-/// `qmatmul` supports.
-pub fn quant_block_info(dtype: GgmlDType) -> Result<(usize, usize)> {
+/// Map a GGUF dtype to the runtime `QDtype` the HIP qmatmul kernel
+/// dispatcher uses. Covers every dtype `flambeau_ops::Ops::qmatmul`
+/// has a kernel for. Float dtypes (F32 / F16 / BF16) are NOT in this
+/// set — they take the dequant-and-requantise-to-Q8_0 fallback path
+/// in `upload_quant_weight` because the qmatmul kernel only consumes
+/// quant weight layouts.
+pub fn ggml_to_qdtype(dtype: GgmlDType) -> Result<QDtype> {
+    use flambeau_quant::GgmlDType as G;
     Ok(match dtype {
-        GgmlDType::Q4_0 => (32, 18),
-        GgmlDType::Q4_1 => (32, 20),
-        GgmlDType::Q5_0 => (32, 22),
-        GgmlDType::Q5_1 => (32, 24),
-        GgmlDType::Q8_0 => (32, 34),
-        other => bail!(
-            "quant_block_info: dtype {other:?} not supported by model-ops::qmatmul"
-        ),
+        G::Q4_0 => QDtype::Q4_0,
+        G::Q4_1 => QDtype::Q4_1,
+        G::Q5_0 => QDtype::Q5_0,
+        G::Q5_1 => QDtype::Q5_1,
+        G::Q8_0 => QDtype::Q8_0,
+        G::Q2K => QDtype::Q2_K,
+        G::Q3K => QDtype::Q3_K,
+        G::Q4K => QDtype::Q4_K,
+        G::Q5K => QDtype::Q5_K,
+        G::Q6K => QDtype::Q6_K,
+        G::Q8K => QDtype::Q8_K,
+        G::Iq1S => QDtype::IQ1_S,
+        G::Iq1M => QDtype::IQ1_M,
+        G::Iq2Xxs => QDtype::IQ2_XXS,
+        G::Iq2Xs => QDtype::IQ2_XS,
+        G::Iq2S => QDtype::IQ2_S,
+        G::Iq3Xxs => QDtype::IQ3_XXS,
+        G::Iq3S => QDtype::IQ3_S,
+        G::Iq4Nl => QDtype::IQ4_NL,
+        G::Iq4Xs => QDtype::IQ4_XS,
+        other => bail!("ggml_to_qdtype: {other:?} has no qmatmul kernel; use dequant fallback"),
     })
 }
 
+/// Returns `true` when `flambeau_ops::Ops::qmatmul` has a kernel for
+/// `dtype`, i.e. the loader can upload it bytes-as-is. False for
+/// F16 / BF16 / F32 (handled by the dequant-to-Q8_0 fallback).
+pub fn dtype_qmatmul_native(dtype: GgmlDType) -> bool {
+    ggml_to_qdtype(dtype).is_ok()
+}
+
 pub fn wrap_quant(ptr: DevicePtr, n_elems: usize, dtype: GgmlDType) -> Result<QuantWeight> {
-    Ok(match dtype {
-        GgmlDType::Q4_0 => QuantWeight::Q4_0(unsafe { Tensor::<Q4_0>::from_raw(ptr, n_elems) }),
-        GgmlDType::Q4_1 => QuantWeight::Q4_1(unsafe { Tensor::<Q4_1>::from_raw(ptr, n_elems) }),
-        GgmlDType::Q5_0 => QuantWeight::Q5_0(unsafe { Tensor::<Q5_0>::from_raw(ptr, n_elems) }),
-        GgmlDType::Q5_1 => QuantWeight::Q5_1(unsafe { Tensor::<Q5_1>::from_raw(ptr, n_elems) }),
-        GgmlDType::Q8_0 => QuantWeight::Q8_0(unsafe { Tensor::<Q8_0>::from_raw(ptr, n_elems) }),
-        other => bail!("wrap_quant: dtype {other:?} not supported by model-ops::qmatmul"),
+    Ok(QuantWeight {
+        ptr,
+        dtype: ggml_to_qdtype(dtype)?,
+        n_elems,
     })
 }
 
@@ -140,14 +163,11 @@ pub fn upload_quant_weight(
     let info = file
         .info(name)
         .with_context(|| format!("tensor info {name}"))?;
-    if matches!(
-        info.dtype,
-        GgmlDType::Q4_0 | GgmlDType::Q4_1 | GgmlDType::Q5_0 | GgmlDType::Q5_1 | GgmlDType::Q8_0
-    ) {
+    if dtype_qmatmul_native(info.dtype) {
         let ptr = upload_raw(file, device, name, allocs)?;
         return wrap_quant(ptr, n_elems, info.dtype);
     }
-    // Fallback: host dequant → re-quantise to Q8_0 → upload.
+    // Fallback: F16 / BF16 / F32 → host dequant → re-quantise Q8_0.
     let f32_vec = file
         .dequantize_tensor(name)
         .with_context(|| format!("dequantize {name}"))?;
@@ -199,20 +219,10 @@ fn f32_to_q8_0_bytes(name: &str, f32_buf: &[f32]) -> Result<Vec<u8>> {
     Ok(bytes)
 }
 
-/// True when `dtype` rides bytes-as-is through `wrap_quant` (the
-/// model-ops `qmatmul` supported set). False → caller must dequant
-/// fallback to Q8_0.
-fn dtype_qmatmul_native(dtype: GgmlDType) -> bool {
-    matches!(
-        dtype,
-        GgmlDType::Q4_0 | GgmlDType::Q4_1 | GgmlDType::Q5_0 | GgmlDType::Q5_1 | GgmlDType::Q8_0
-    )
-}
-
-/// Col-shard along GGUF dim-0 (output rows). For native-supported
-/// dtypes the rank reads a contiguous byte slice; for K-quants /
-/// IQ / MXFP4 the tensor is dequantised on host, row-sliced, and
-/// re-quantised to Q8_0 — same fallback as `upload_quant_weight`.
+/// Col-shard along GGUF dim-0 (output rows). For
+/// `dtype_qmatmul_native` dtypes the rank reads a contiguous byte
+/// slice; for F16 / BF16 / F32 the tensor is dequantised on host,
+/// row-sliced, and re-quantised to Q8_0.
 #[allow(clippy::too_many_arguments)]
 pub fn upload_col_sharded_quant(
     file: &GgufFile,
@@ -232,7 +242,8 @@ pub fn upload_col_sharded_quant(
     let info = file.info(name).with_context(|| format!("info {name}"))?;
     let rows_per_rank = n_rows / n_ranks;
     if dtype_qmatmul_native(info.dtype) {
-        let (block_size, type_size) = quant_block_info(info.dtype)?;
+        let block_size = info.dtype.block_size();
+        let type_size = info.dtype.type_size();
         if n_cols % block_size != 0 {
             bail!(
                 "{name}: n_cols {n_cols} not divisible by block_size {block_size}"
@@ -295,7 +306,8 @@ pub fn upload_row_sharded_quant(
     let info = file.info(name).with_context(|| format!("info {name}"))?;
     let cols_per_rank = n_cols / n_ranks;
     if dtype_qmatmul_native(info.dtype) {
-        let (block_size, type_size) = quant_block_info(info.dtype)?;
+        let block_size = info.dtype.block_size();
+        let type_size = info.dtype.type_size();
         if cols_per_rank % block_size != 0 {
             bail!(
                 "{name}: cols_per_rank {cols_per_rank} not divisible by block_size {block_size}"
@@ -472,8 +484,10 @@ fn pack_gdn_qkv_slab(
 }
 
 /// Upload a `[conv_channels, hidden]` GDN fused-QKV quant weight,
-/// sharded per `kq_replicated`. The on-disk dtype is supported by
-/// model-ops's `qmatmul`; this helper does not dequantise.
+/// sharded per `kq_replicated`. For `dtype_qmatmul_native` dtypes the
+/// per-rank Q|K|V slab is byte-sliced and uploaded as-is. For
+/// F16 / BF16 / F32 the tensor is dequantised on host, sliced on the
+/// row axis, and re-quantised to Q8_0.
 #[allow(clippy::too_many_arguments)]
 pub fn upload_gdn_fused_qkv_quant(
     file: &GgufFile,
@@ -490,28 +504,70 @@ pub fn upload_gdn_fused_qkv_quant(
     allocs: &mut Vec<(DevicePtr, usize)>,
 ) -> Result<QuantWeight> {
     let info = file.info(name).with_context(|| format!("info {name}"))?;
-    let (block_size, type_size) = quant_block_info(info.dtype)?;
-    if hidden % block_size != 0 {
-        bail!("{name}: hidden {hidden} not block_size {block_size} aligned");
+    if dtype_qmatmul_native(info.dtype) {
+        let block_size = info.dtype.block_size();
+        let type_size = info.dtype.type_size();
+        if hidden % block_size != 0 {
+            bail!("{name}: hidden {hidden} not block_size {block_size} aligned");
+        }
+        let row_bytes = (hidden / block_size) * type_size;
+        let raw = file
+            .tensor_raw(name)
+            .with_context(|| format!("tensor_raw {name}"))?;
+        let (packed, per_rank_rows) = pack_gdn_qkv_slab(
+            name,
+            raw,
+            row_bytes,
+            num_v_heads,
+            num_k_heads,
+            head_v_dim,
+            head_k_dim,
+            kq_replicated,
+            rank,
+            n_ranks,
+        )?;
+        let ptr = upload_bytes(device, &packed, allocs)?;
+        wrap_quant(ptr, per_rank_rows * hidden, info.dtype)
+    } else {
+        // Dequant fallback: rebuild Q|K|V from F32 row-slices, then
+        // requantise to Q8_0. Slow at load but rare in practice
+        // (qwen35-9B / qwen36 / qwen3-Next ship attn_qkv as a quant).
+        let v_part_full = num_v_heads * head_v_dim;
+        let k_part_full = num_k_heads * head_k_dim;
+        let outer_full = v_part_full + 2 * k_part_full;
+        let f32_vec = file
+            .dequantize_tensor(name)
+            .with_context(|| format!("dequantize {name}"))?;
+        if f32_vec.len() != outer_full * hidden {
+            bail!(
+                "{name}: dequant produced {} elems, expected {}",
+                f32_vec.len(),
+                outer_full * hidden
+            );
+        }
+        if v_part_full % n_ranks != 0 {
+            bail!("{name}: v_part {v_part_full} not divisible by n_ranks {n_ranks}");
+        }
+        if !kq_replicated && k_part_full % n_ranks != 0 {
+            bail!("{name}: k_part {k_part_full} not divisible by n_ranks {n_ranks} (FullShard)");
+        }
+        let v_local = v_part_full / n_ranks;
+        let (q_rows, k_rows, q_off, k_off) = if kq_replicated {
+            (k_part_full, k_part_full, 0, k_part_full)
+        } else {
+            let k_local = k_part_full / n_ranks;
+            (k_local, k_local, rank * k_local, k_part_full + rank * k_local)
+        };
+        let v_off = 2 * k_part_full + rank * v_local;
+        let per_rank_rows = q_rows + k_rows + v_local;
+        let mut packed_f32: Vec<f32> = Vec::with_capacity(per_rank_rows * hidden);
+        packed_f32.extend_from_slice(&f32_vec[q_off * hidden..(q_off + q_rows) * hidden]);
+        packed_f32.extend_from_slice(&f32_vec[k_off * hidden..(k_off + k_rows) * hidden]);
+        packed_f32.extend_from_slice(&f32_vec[v_off * hidden..(v_off + v_local) * hidden]);
+        let bytes = f32_to_q8_0_bytes(name, &packed_f32)?;
+        let ptr = upload_bytes(device, &bytes, allocs)?;
+        wrap_quant(ptr, per_rank_rows * hidden, GgmlDType::Q8_0)
     }
-    let row_bytes = (hidden / block_size) * type_size;
-    let raw = file
-        .tensor_raw(name)
-        .with_context(|| format!("tensor_raw {name}"))?;
-    let (packed, per_rank_rows) = pack_gdn_qkv_slab(
-        name,
-        raw,
-        row_bytes,
-        num_v_heads,
-        num_k_heads,
-        head_v_dim,
-        head_k_dim,
-        kq_replicated,
-        rank,
-        n_ranks,
-    )?;
-    let ptr = upload_bytes(device, &packed, allocs)?;
-    wrap_quant(ptr, per_rank_rows * hidden, info.dtype)
 }
 
 /// Upload a `[conv_channels, conv_kernel]` F32 GDN fused-QKV tensor

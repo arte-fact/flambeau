@@ -6,7 +6,6 @@
 use anyhow::{bail, Result};
 use flambeau_backend_hip::{HipDevice, HipStream};
 use flambeau_blocks::{DeltaNetLayer, WeightHandle};
-use flambeau_core::op::QDtype;
 use flambeau_core::DevicePtr;
 use flambeau_model_ops::{Tensor, F16};
 
@@ -14,14 +13,11 @@ use crate::core::{CoreState, TopologyHooks};
 use crate::ctx::{GdnWeights, QuantWeight};
 
 fn quant_handle(qw: &QuantWeight, dims: [usize; 2]) -> WeightHandle {
-    let (ptr, dtype) = match qw {
-        QuantWeight::Q4_0(t) => (t.ptr, QDtype::Q4_0),
-        QuantWeight::Q4_1(t) => (t.ptr, QDtype::Q4_1),
-        QuantWeight::Q5_0(t) => (t.ptr, QDtype::Q5_0),
-        QuantWeight::Q5_1(t) => (t.ptr, QDtype::Q5_1),
-        QuantWeight::Q8_0(t) => (t.ptr, QDtype::Q8_0),
-    };
-    WeightHandle { ptr, dtype, dims }
+    WeightHandle {
+        ptr: qw.ptr,
+        dtype: qw.dtype,
+        dims,
+    }
 }
 
 pub fn gdn_layer_local<H: TopologyHooks>(
