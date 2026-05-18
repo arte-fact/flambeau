@@ -483,6 +483,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "flambeau-forward"
+version = "0.1.0-dev"
+dependencies = [
+ "anyhow",
+ "bytemuck",
+ "flambeau-backend-hip",
+ "flambeau-blocks",
+ "flambeau-core",
+ "flambeau-model-ops",
+ "flambeau-ops",
+ "flambeau-quant",
+ "half",
+ "tracing",
+]
+
+[[package]]
 name = "flambeau-gemma4"
 version = "0.1.0-dev"
 dependencies = [
@@ -500,6 +516,23 @@ dependencies = [
 ]
 
 [[package]]
+name = "flambeau-gemma4-v2"
+version = "0.1.0-dev"
+dependencies = [
+ "anyhow",
+ "bytemuck",
+ "flambeau-backend-hip",
+ "flambeau-core",
+ "flambeau-forward",
+ "flambeau-model-ops",
+ "flambeau-ops",
+ "flambeau-quant",
+ "half",
+ "thiserror 2.0.18",
+ "tracing",
+]
+
+[[package]]
 name = "flambeau-kernels-hip"
 version = "0.1.0-dev"
 dependencies = [
@@ -509,6 +542,20 @@ dependencies = [
 [[package]]
 name = "flambeau-kernels-shared"
 version = "0.1.0-dev"
+
+[[package]]
+name = "flambeau-model-ops"
+version = "0.1.0-dev"
+dependencies = [
+ "anyhow",
+ "bytemuck",
+ "flambeau-backend-hip",
+ "flambeau-core",
+ "flambeau-ops",
+ "flambeau-quant",
+ "half",
+ "tracing",
+]
 
 [[package]]
 name = "flambeau-ops"
@@ -558,6 +605,40 @@ dependencies = [
  "half",
  "serde",
  "serde_json",
+ "thiserror 2.0.18",
+ "tracing",
+]
+
+[[package]]
+name = "flambeau-qwen3-v2"
+version = "0.1.0-dev"
+dependencies = [
+ "anyhow",
+ "bytemuck",
+ "flambeau-backend-hip",
+ "flambeau-core",
+ "flambeau-forward",
+ "flambeau-model-ops",
+ "flambeau-ops",
+ "flambeau-quant",
+ "half",
+ "thiserror 2.0.18",
+ "tracing",
+]
+
+[[package]]
+name = "flambeau-qwen35-v2"
+version = "0.1.0-dev"
+dependencies = [
+ "anyhow",
+ "bytemuck",
+ "flambeau-backend-hip",
+ "flambeau-core",
+ "flambeau-forward",
+ "flambeau-model-ops",
+ "flambeau-ops",
+ "flambeau-quant",
+ "half",
  "thiserror 2.0.18",
  "tracing",
 ]

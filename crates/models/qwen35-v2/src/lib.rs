@@ -6,10 +6,12 @@
 
 #![cfg(feature = "hip")]
 
+pub mod arch;
 pub mod config;
 pub mod loader;
 pub mod model;
 
+pub use arch::Qwen35V2;
 pub use config::{Qwen35V2Config, Qwen35V2ConfigError};
 pub use loader::{load_from_gguf, Qwen35V2Model};
 pub use model::forward_one_token;
