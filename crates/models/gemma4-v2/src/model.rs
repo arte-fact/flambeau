@@ -19,12 +19,10 @@ pub fn forward_one_token<C: ForwardCtx>(
         let attn_w = &model.attn[li];
         let ffn_w = &model.ffn[li];
 
-        let normed = ctx.rmsnorm(&resid, &attn_w.attn_norm, attn_w.rms_eps)?;
-        let delta = ctx.standard_attn(&normed, attn_w, li, position)?;
+        let delta = ctx.standard_attn(&resid, attn_w, li, position)?;
         resid = ctx.residual_add(resid, delta)?;
 
-        let normed = ctx.rmsnorm(&resid, &ffn_w.ffn_norm, ffn_w.rms_eps)?;
-        let delta = ctx.dense_ffn(&normed, ffn_w)?;
+        let delta = ctx.dense_ffn(&resid, ffn_w)?;
         resid = ctx.residual_add(resid, delta)?;
     }
     ctx.output_head(&resid, &model.lm_head)?;

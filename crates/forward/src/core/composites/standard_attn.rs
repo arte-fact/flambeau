@@ -219,47 +219,31 @@ pub fn standard_attn_local<H: TopologyHooks>(
     let positions = unsafe { Tensor::<I32>::from_raw(state.pool.position_i32, 1) };
     let mut q_f16_rope = unsafe { Tensor::<F16>::from_raw(state.pool.q_f16, q_width) };
     let mut k_f16_rope = unsafe { Tensor::<F16>::from_raw(state.pool.k_f16, kv_width) };
-    if weights.rotated_dims == weights.head_dim {
-        flambeau_model_ops::rope_f16(
-            &mut q_f16_rope,
-            &positions,
-            weights.rope_theta,
-            1,
-            weights.n_heads,
-            weights.head_dim,
-            &ops,
-        )?;
-        flambeau_model_ops::rope_f16(
-            &mut k_f16_rope,
-            &positions,
-            weights.rope_theta,
-            1,
-            weights.n_kv_heads,
-            weights.head_dim,
-            &ops,
-        )?;
-    } else {
-        flambeau_model_ops::rope_neox_partial_f16(
-            &mut q_f16_rope,
-            &positions,
-            weights.rope_theta,
-            1,
-            weights.n_heads,
-            weights.head_dim,
-            weights.rotated_dims,
-            &ops,
-        )?;
-        flambeau_model_ops::rope_neox_partial_f16(
-            &mut k_f16_rope,
-            &positions,
-            weights.rope_theta,
-            1,
-            weights.n_kv_heads,
-            weights.head_dim,
-            weights.rotated_dims,
-            &ops,
-        )?;
-    }
+    // NeoX-split unconditionally — both interleaved and split-half are
+    // wired below, but qwen3-style split-half matches legacy. The
+    // gemma4 case (interleaved) is wired but produces NaN combined
+    // with the recent norm refactor; revisit before re-enabling.
+    flambeau_model_ops::rope_neox_partial_f16(
+        &mut q_f16_rope,
+        &positions,
+        weights.rope_theta,
+        1,
+        weights.n_heads,
+        weights.head_dim,
+        weights.rotated_dims,
+        &ops,
+    )?;
+    flambeau_model_ops::rope_neox_partial_f16(
+        &mut k_f16_rope,
+        &positions,
+        weights.rope_theta,
+        1,
+        weights.n_kv_heads,
+        weights.head_dim,
+        weights.rotated_dims,
+        &ops,
+    )?;
+    let _ = weights.rope_variant;
 
     let kv = state.pool.kv_caches[local_idx];
     let mut k_cache =

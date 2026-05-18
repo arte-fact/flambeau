@@ -22,21 +22,18 @@ pub fn forward_one_token<C: ForwardCtx>(
                 let w = model.full_attn[li]
                     .as_ref()
                     .expect("layer_kinds says FullAttn but full_attn[li] is None");
-                let normed = ctx.rmsnorm(&resid, &w.attn_norm, w.rms_eps)?;
-                ctx.standard_attn(&normed, w, li, position)?
+                ctx.standard_attn(&resid, w, li, position)?
             }
             LayerKind::Gdn => {
                 let w = model.gdn[li]
                     .as_ref()
                     .expect("layer_kinds says Gdn but gdn[li] is None");
-                let normed = ctx.rmsnorm(&resid, &w.attn_norm, w.rms_eps)?;
-                ctx.gdn_layer(&normed, w, li)?
+                ctx.gdn_layer(&resid, w, li)?
             }
         };
         resid = ctx.residual_add(resid, delta)?;
 
-        let normed = ctx.rmsnorm(&resid, &ffn_w.ffn_norm, ffn_w.rms_eps)?;
-        let delta = ctx.dense_ffn(&normed, ffn_w)?;
+        let delta = ctx.dense_ffn(&resid, ffn_w)?;
         resid = ctx.residual_add(resid, delta)?;
     }
     ctx.output_head(&resid, &model.lm_head)?;

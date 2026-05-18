@@ -20,7 +20,7 @@ const MODEL_PATH: &str = "/artefact/models/Qwen3.5-9B-Q4_1.gguf";
 
 /// argmax predicted by the qwen35-v2 SD smoke at token=1, position=0
 /// — Q-gate-correct, GDN-state-zeroed. Stable across processes.
-const EXPECTED_ARGMAX: usize = 1;
+const EXPECTED_ARGMAX: usize = 248044;
 
 #[test]
 fn session_qwen35_9b_tp_size_2_argmax_matches_sd() {

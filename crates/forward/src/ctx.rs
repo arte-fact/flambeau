@@ -110,6 +110,15 @@ pub struct EmbeddingWeights {
     pub post_scale: Option<f32>,
 }
 
+/// RoPE layout. `Interleaved` rotates `(x[2i], x[2i+1])` pairs
+/// (gemma4). `NeoxSplit` rotates `(x[i], x[i + rotated_dims/2])`
+/// over the first `rotated_dims` (qwen3, qwen3-next).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RopeVariant {
+    Interleaved,
+    NeoxSplit,
+}
+
 pub struct AttnWeights {
     pub attn_norm: Tensor<F16>,
     /// When `attn_q_gated`, the underlying tensor has
@@ -131,6 +140,7 @@ pub struct AttnWeights {
     /// Equals `head_dim` for full-RoPE; less for NeoX-partial.
     pub rotated_dims: usize,
     pub rope_theta: f32,
+    pub rope_variant: RopeVariant,
     /// 0 = unbounded causal. Positive = SWA radius.
     pub window_size: i32,
     pub rms_eps: f32,

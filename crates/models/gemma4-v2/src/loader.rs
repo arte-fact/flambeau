@@ -100,6 +100,7 @@ fn load_with_shard(
                 hidden: config.hidden,
                 rotated_dims: dims.rotated_dims,
                 rope_theta: dims.rope_theta,
+                rope_variant: flambeau_forward::ctx::RopeVariant::Interleaved,
                 window_size: dims.window_size,
                 rms_eps: config.rms_eps,
                 // Gemma4: softmax_scale = 1.0, not 1/sqrt(head_dim).

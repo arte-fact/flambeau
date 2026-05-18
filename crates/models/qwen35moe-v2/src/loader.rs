@@ -144,6 +144,7 @@ fn load_with_shard(
                     hidden: config.hidden,
                     rotated_dims: config.rotated_dims,
                     rope_theta: config.rope_theta,
+                    rope_variant: flambeau_forward::ctx::RopeVariant::NeoxSplit,
                     window_size: 0,
                     rms_eps: config.rms_eps,
                     softmax_scale: None,
