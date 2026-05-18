@@ -107,10 +107,27 @@ impl Default for MeshMode {
     }
 }
 
+/// Operator-visible forward-stack selector. `FLAMBEAU_V2=1` opts into
+/// the v2 stack (flambeau-forward + per-arch v2 model crates); anything
+/// else stays on the legacy qwen3-moe / gemma4 paths. Rule 1 of the
+/// project CLAUDE.md bans env-flag-based variant selection — this one
+/// is an explicit operator-facing migration switch, not a dispatch row.
+fn v2_stack_requested() -> bool {
+    matches!(
+        std::env::var("FLAMBEAU_V2").as_deref(),
+        Ok("1") | Ok("true") | Ok("yes")
+    )
+}
+
 /// Blocking serve loop — loads the model, starts the HTTP server, runs
 /// until terminated. Caller owns the tokio runtime.
 pub async fn serve(cfg: ServeConfig, registry: Registry) -> Result<()> {
-    info!(?cfg, "flambeau serve: loading model");
+    let v2 = v2_stack_requested();
+    info!(
+        forward_stack = if v2 { "v2" } else { "legacy" },
+        "flambeau serve: loading model"
+    );
+    info!(?cfg, "flambeau serve config");
 
     let gguf = GgufFile::open(&cfg.gguf_path)
         .with_context(|| format!("open GGUF at {}", cfg.gguf_path.display()))?;
@@ -127,6 +144,16 @@ pub async fn serve(cfg: ServeConfig, registry: Registry) -> Result<()> {
         handler = model_arch.description(),
         "GGUF arch validated against registry"
     );
+
+    if v2 {
+        bail!(
+            "FLAMBEAU_V2=1: v2 forward stack is not yet wired into the HTTP serve loop \
+             (no prefill / batching / session reuse). For the working v2 surface today, use:\n  \
+             cargo test -p flambeau-qwen3-v2 --features hip --release\n  \
+             cargo test -p flambeau-qwen35-v2 --features hip --release\n\
+             Unset FLAMBEAU_V2 (or set to 0) to use the legacy serve path."
+        );
+    }
 
     // Load tokenizer + chat template first (cheap, catch config errors early).
     let tokenizer = flambeau_quant::load_from_gguf(&gguf).context("load tokenizer")?;

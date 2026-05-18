@@ -373,7 +373,7 @@ impl QwenCoderXmlParser {
                 });
                 self.next_index += 1;
                 self.state = State::Text;
-                true
+               true
             }
             "func" => {
                 // **Forgiveness**: model forgot `</tool_call>` and went
