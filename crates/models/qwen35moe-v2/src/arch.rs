@@ -87,6 +87,7 @@ impl Arch for Qwen35MoeV2 {
             max_seq_len,
             num_layers: cfg.num_layers,
             max_experts: cfg.num_experts,
+            max_experts_per_tok: cfg.experts_per_tok,
             gdn: Some(local_gdn),
             per_layer_kv_widths: None,
             attn_q_gated: true,

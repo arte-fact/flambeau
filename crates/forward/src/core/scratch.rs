@@ -34,6 +34,11 @@ pub struct ScratchConfig {
     pub max_seq_len: usize,
     pub num_layers: usize,
     pub max_experts: usize,
+    /// Top-k value (e.g. 8 for Qwen3.6 MoE, 4 for gemma4-MoE). Sizes
+    /// the per-token `expert_ids` / `expert_weights` slots and the
+    /// per-slot indexed-MoE scratch (`gate_out` / `up_out` /
+    /// `activated` / `down`). `0` when no MoE.
+    pub max_experts_per_tok: usize,
     pub gdn: Option<GdnDims>,
     pub per_layer_kv_widths: Option<Vec<usize>>,
     /// `true` when the arch has gated full-attention (qwen3.5 /
@@ -71,6 +76,7 @@ impl Default for ScratchConfig {
             max_seq_len: 0,
             num_layers: 0,
             max_experts: 0,
+            max_experts_per_tok: 0,
             gdn: None,
             per_layer_kv_widths: None,
             attn_q_gated: false,
@@ -130,6 +136,19 @@ pub struct ScratchPool {
     /// `[hidden]` F32 — F32 cast of x_norm for the shared expert's
     /// per-token gate scale step. NULL when no shared expert.
     pub shared_x_norm_f32: DevicePtr,
+
+    /// `[max_experts_per_tok]` I32 — top-k expert indices. NULL when no MoE.
+    pub moe_expert_ids: DevicePtr,
+    /// `[max_experts_per_tok]` F32 — top-k normalised expert weights. NULL when no MoE.
+    pub moe_expert_weights: DevicePtr,
+    /// `[max_experts_per_tok * intermediate]` F32 — indexed gate output.
+    pub moe_gate_out_f32: DevicePtr,
+    pub moe_up_out_f32: DevicePtr,
+    pub moe_activated_f16: DevicePtr,
+    pub moe_activated_q8_1: DevicePtr,
+    /// `[max_experts_per_tok * hidden]` F32 — indexed down output before combine.
+    pub moe_down_f32: DevicePtr,
+    pub moe_down_f16: DevicePtr,
 
     pub kv_caches: Vec<KvCache>,
 
@@ -229,6 +248,43 @@ impl ScratchPool {
             alloc_bytes(n * h * f32)?
         } else {
             DevicePtr::NULL
+        };
+
+        // Indexed-MoE per-slot scratch. Sized for one decode token
+        // × top_k. Prefill widens this when n_tokens > 1 (currently
+        // not allocated here; v2 prefill still routes through the
+        // per-token loop in moe_ffn_loop).
+        let topk = config.max_experts_per_tok;
+        let (
+            moe_expert_ids,
+            moe_expert_weights,
+            moe_gate_out_f32,
+            moe_up_out_f32,
+            moe_activated_f16,
+            moe_activated_q8_1,
+            moe_down_f32,
+            moe_down_f16,
+        ) = if topk > 0 && config.max_experts > 0 {
+            let ids = alloc_bytes(topk * i32_b)?;
+            let weights = alloc_bytes(topk * f32)?;
+            let gate = alloc_bytes(topk * m * f32)?;
+            let up = alloc_bytes(topk * m * f32)?;
+            let act_f16 = alloc_bytes(topk * m * f16)?;
+            let act_q8 = alloc_bytes(q8_1(topk * m))?;
+            let dn_f32 = alloc_bytes(topk * h * f32)?;
+            let dn_f16 = alloc_bytes(topk * h * f16)?;
+            (ids, weights, gate, up, act_f16, act_q8, dn_f32, dn_f16)
+        } else {
+            (
+                DevicePtr::NULL,
+                DevicePtr::NULL,
+                DevicePtr::NULL,
+                DevicePtr::NULL,
+                DevicePtr::NULL,
+                DevicePtr::NULL,
+                DevicePtr::NULL,
+                DevicePtr::NULL,
+            )
         };
 
         if let Some(per) = config.per_layer_kv_widths.as_ref() {
@@ -356,6 +412,14 @@ impl ScratchPool {
             router_logits_f32,
             moe_accum_f16,
             shared_x_norm_f32,
+            moe_expert_ids,
+            moe_expert_weights,
+            moe_gate_out_f32,
+            moe_up_out_f32,
+            moe_activated_f16,
+            moe_activated_q8_1,
+            moe_down_f32,
+            moe_down_f16,
             kv_caches,
             gdn_state,
             gdn_decode_scratch,

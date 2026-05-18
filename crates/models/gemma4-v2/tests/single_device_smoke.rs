@@ -75,6 +75,7 @@ fn gemma4_31b_forward_one_token_produces_finite_non_constant_logits() {
         max_seq_len,
         num_layers: cfg.num_layers,
         max_experts: 0,
+            max_experts_per_tok: 0,
         gdn: None,
         per_layer_kv_widths: None,
         attn_q_gated: false,

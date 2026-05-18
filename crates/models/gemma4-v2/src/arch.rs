@@ -81,6 +81,7 @@ impl Arch for Gemma4V2 {
             max_seq_len,
             num_layers: cfg.num_layers,
             max_experts: 0,
+            max_experts_per_tok: 0,
             gdn: None,
             per_layer_kv_widths: Some(per_layer_kv),
             attn_q_gated: false,

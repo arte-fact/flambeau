@@ -1,0 +1,27 @@
+# D4 — batched-decode throughput (Qwen_Qwen3.6-35B-A3B-Q4_0.gguf, pp)
+
+## Setup
+- Model: `Qwen_Qwen3.6-35B-A3B-Q4_0.gguf`
+- Topology: `pp`  Devices: `0,2`
+- Generation: `24` tokens per stream, greedy (temp=0)
+- Runs per N: 2 (best-of)
+- Decode batch window: 1500 µs
+- Stack: v2 shared `Session<A>` with `max_slots = N_max`
+
+## Results
+
+|   N | wall (s) | per-stream tok/s | aggregate tok/s | speedup vs N=1 |
+|----:|---------:|-----------------:|----------------:|---------------:|
+|   1 |    1.212 |          19.80 |         19.80 |       1.00× |
+|   2 |    2.490 |           9.64 |         19.28 |       0.97× |
+|   4 |    4.745 |           5.06 |         20.23 |       1.02× |
+
+## Interpretation
+
+Aggregate tok/s is total generated tokens (N × tokens) divided by wall time for ALL N concurrent requests to complete. Per-stream tok/s is the slowest stream's rate (= aggregate / N when streams finish together, which they do under greedy + uniform request shape).
+
+Speedup vs N=1 indicates how well the shared-session batched-decode scheduler hides per-stream serialisation. Perfect batching is N×; real-world hits a per-slot ceiling (per-slot KV-append + attention loops, GDN state-step loop for hybrid archs).
+
+## Architecture context
+
+This cert measures the D3-A shared-session pool: one `Session<A>` with `max_slots = inflight_slots`, N `V2Conv` ticket handles, and `V2Model::forward_decode_batched` actually batching through one Session forward. Pre-D3-A the v2 pool held N independent sessions (N× weight copy, no batching).
