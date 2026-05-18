@@ -178,6 +178,21 @@ pub struct MoeWeights {
     pub experts_per_tok: usize,
     pub activation: Activation,
     pub rms_eps: f32,
+    /// Always-on shared expert (qwen3-moe family). When `Some`, its
+    /// per-token-sigmoid-gated dense FFN output is added to the routed
+    /// experts' accumulator before the residual.
+    pub shared: Option<SharedExpertWeights>,
+}
+
+pub struct SharedExpertWeights {
+    pub gate: QuantWeight,
+    pub up: QuantWeight,
+    pub down: QuantWeight,
+    /// F32 `[hidden]` per-token scalar gate for the dense output;
+    /// `Some` for Qwen3.6-35B-A3B and qwen3next, `None` for variants
+    /// that emit the dense output unscaled.
+    pub gate_inp: Option<Tensor<F32>>,
+    pub intermediate: usize,
 }
 
 /// `lm_head` may alias `token_embd` for tied heads.

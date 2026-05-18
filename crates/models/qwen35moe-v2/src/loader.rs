@@ -1,17 +1,18 @@
 //! qwen35moe GGUF → device. Per-layer dispatch on `is_recurrent`
-//! picks GDN or full-attn-gated; FFN is routed MoE on every layer
-//! (shared-expert support: TODO).
+//! picks GDN or full-attn-gated; FFN is routed MoE on every layer,
+//! plus an always-on shared expert when the GGUF carries the
+//! `ffn_*_shexp` tensors (Qwen3.6-35B-A3B).
 
 use anyhow::{bail, Context, Result};
 use flambeau_backend_hip::HipDevice;
 use flambeau_core::{Device, DevicePtr};
 use flambeau_forward::ctx::{
     Activation, AttnWeights, EmbeddingWeights, GdnWeights, LayerKind, LmHeadWeights, ModelLayout,
-    MoeWeights,
+    MoeWeights, SharedExpertWeights,
 };
 use flambeau_forward::loader::{
-    load_dense_attn_layer, load_embedding, load_gdn_layer, load_lm_head,
-    upload_dequant_to_f16, upload_moe_experts_stacked, upload_quant_weight, DenseAttnLayerSpec,
+    load_dense_attn_layer, load_embedding, load_gdn_layer, load_lm_head, upload_dequant_to_f16,
+    upload_f32_tensor, upload_moe_experts_stacked, upload_quant_weight, DenseAttnLayerSpec,
     EmbeddingSpec, GdnLayerSpec, GdnTpMode, LmHeadSpec, ShardMode,
 };
 use flambeau_quant::GgufFile;
@@ -205,6 +206,56 @@ fn load_with_shard(
             config.expert_intermediate,
             &mut allocs,
         )?;
+        let shared = if config.shared_expert_intermediate > 0 {
+            let gate_shexp_name = format!("{p}.ffn_gate_shexp.weight");
+            let up_shexp_name = format!("{p}.ffn_up_shexp.weight");
+            let down_shexp_name = format!("{p}.ffn_down_shexp.weight");
+            let gate_inp_shexp_name = format!("{p}.ffn_gate_inp_shexp.weight");
+            let inter = config.shared_expert_intermediate;
+            let gate = upload_quant_weight(
+                file,
+                device,
+                &gate_shexp_name,
+                inter * config.hidden,
+                &mut allocs,
+            )?;
+            let up = upload_quant_weight(
+                file,
+                device,
+                &up_shexp_name,
+                inter * config.hidden,
+                &mut allocs,
+            )?;
+            let down = upload_quant_weight(
+                file,
+                device,
+                &down_shexp_name,
+                config.hidden * inter,
+                &mut allocs,
+            )?;
+            let gate_inp = file
+                .info(&gate_inp_shexp_name)
+                .ok()
+                .map(|_| {
+                    upload_f32_tensor(
+                        file,
+                        device,
+                        &gate_inp_shexp_name,
+                        config.hidden,
+                        &mut allocs,
+                    )
+                })
+                .transpose()?;
+            Some(SharedExpertWeights {
+                gate,
+                up,
+                down,
+                gate_inp,
+                intermediate: inter,
+            })
+        } else {
+            None
+        };
         ffn.push(MoeWeights {
             ffn_norm,
             router,
@@ -215,6 +266,7 @@ fn load_with_shard(
             experts_per_tok: config.experts_per_tok,
             activation: Activation::SwiGLU,
             rms_eps: config.rms_eps,
+            shared,
         });
     }
 

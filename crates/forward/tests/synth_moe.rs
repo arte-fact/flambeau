@@ -115,6 +115,7 @@ fn synth_moe_one_token_forward() {
             experts_per_tok: EXPERTS_PER_TOK,
             activation: Activation::SwiGLU,
             rms_eps: RMS_EPS,
+            shared: None,
         });
     }
 
@@ -130,6 +131,7 @@ fn synth_moe_one_token_forward() {
         gdn: None,
         per_layer_kv_widths: None,
         attn_q_gated: false,
+            shared_intermediate: 0,
     };
     let mut pool = ScratchPool::new(&device, cfg).expect("ScratchPool::new");
     let layout = ModelLayout {

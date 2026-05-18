@@ -78,6 +78,7 @@ impl Arch for Qwen35MoeV2 {
             gdn: Some(local_gdn),
             per_layer_kv_widths: None,
             attn_q_gated: true,
+            shared_intermediate: cfg.shared_expert_intermediate,
         }
     }
 

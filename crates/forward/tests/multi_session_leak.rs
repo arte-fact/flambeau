@@ -139,6 +139,7 @@ fn run_gdn_forward() -> Vec<f32> {
         gdn: Some(dims),
         per_layer_kv_widths: None,
         attn_q_gated: false,
+            shared_intermediate: 0,
     };
     let mut pool = ScratchPool::new(&device, cfg).expect("ScratchPool::new");
     let layout = ModelLayout {
@@ -298,6 +299,7 @@ fn multi_session_leak_dense_then_gdn() {
             gdn: None,
             per_layer_kv_widths: None,
             attn_q_gated: false,
+            shared_intermediate: 0,
         };
         let mut pool = ScratchPool::new(&device, cfg).expect("ScratchPool::new");
         let layout = ModelLayout {

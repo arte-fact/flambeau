@@ -112,6 +112,7 @@ fn parity_snapshot_gdn_single_token() {
         gdn: Some(dims),
         per_layer_kv_widths: None,
         attn_q_gated: false,
+            shared_intermediate: 0,
     };
     let mut pool = ScratchPool::new(&device, cfg).expect("ScratchPool::new");
     let layout = ModelLayout {

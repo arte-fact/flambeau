@@ -41,6 +41,11 @@ pub struct ScratchConfig {
     /// `q_fused_f16` (2·q_width F16) + `gate_f16` (q_width F16)
     /// scratch slots the split-then-sigmoid-gate path needs.
     pub attn_q_gated: bool,
+    /// Per-layer shared-expert FFN intermediate size. `0` when the
+    /// MoE arch has no shared expert; positive when one is present
+    /// (Qwen3.6-35B-A3B = 512, qwen3next = ...). Drives `shared_x_norm_f32`
+    /// scratch sizing.
+    pub shared_intermediate: usize,
 }
 
 #[derive(Clone, Copy)]
@@ -86,6 +91,9 @@ pub struct ScratchPool {
     pub router_logits_f32: DevicePtr,
     /// `[hidden]` F16 MoE per-expert accumulator. NULL when `max_experts == 0`.
     pub moe_accum_f16: DevicePtr,
+    /// `[hidden]` F32 — F32 cast of x_norm for the shared expert's
+    /// per-token gate scale step. NULL when no shared expert.
+    pub shared_x_norm_f32: DevicePtr,
 
     pub kv_caches: Vec<KvCache>,
 
@@ -166,6 +174,11 @@ impl ScratchPool {
             (r, a)
         } else {
             (DevicePtr::NULL, DevicePtr::NULL)
+        };
+        let shared_x_norm_f32 = if config.shared_intermediate > 0 {
+            alloc_bytes(h * f32)?
+        } else {
+            DevicePtr::NULL
         };
 
         if let Some(per) = config.per_layer_kv_widths.as_ref() {
@@ -288,6 +301,7 @@ impl ScratchPool {
             position_i32,
             router_logits_f32,
             moe_accum_f16,
+            shared_x_norm_f32,
             kv_caches,
             gdn_state,
             gdn_decode_scratch,

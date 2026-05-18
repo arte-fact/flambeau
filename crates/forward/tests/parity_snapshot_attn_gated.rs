@@ -102,6 +102,7 @@ fn parity_snapshot_attn_gated_single_token() {
         gdn: None,
         per_layer_kv_widths: None,
         attn_q_gated: true,
+            shared_intermediate: 0,
     };
     let mut pool = ScratchPool::new(&device, cfg).expect("ScratchPool::new");
     let layout = ModelLayout {

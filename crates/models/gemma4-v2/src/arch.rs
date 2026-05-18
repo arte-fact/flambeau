@@ -72,6 +72,7 @@ impl Arch for Gemma4V2 {
             gdn: None,
             per_layer_kv_widths: Some(per_layer_kv),
             attn_q_gated: false,
+            shared_intermediate: 0,
         }
     }
 
