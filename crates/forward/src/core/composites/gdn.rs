@@ -4,8 +4,10 @@
 //! per-layer `gdn_state`.
 
 use anyhow::{bail, Result};
+use flambeau_backend_hip::{HipDevice, HipStream};
 use flambeau_blocks::{DeltaNetLayer, WeightHandle};
 use flambeau_core::op::QDtype;
+use flambeau_core::DevicePtr;
 use flambeau_model_ops::{Tensor, F16};
 
 use crate::core::{CoreState, TopologyHooks};
@@ -24,7 +26,7 @@ fn quant_handle(qw: &QuantWeight, dims: [usize; 2]) -> WeightHandle {
 
 pub fn gdn_layer_local<H: TopologyHooks>(
     state: &mut CoreState<'_>,
-    _hooks: &mut H,
+    hooks: &mut H,
     input: &Tensor<F16>,
     weights: &GdnWeights,
     layer_idx: usize,
@@ -76,7 +78,10 @@ pub fn gdn_layer_local<H: TopologyHooks>(
 
     let delta_ptr = state.pool.delta;
     let ops = state.ops();
-    block.forward_decode(
+    let mut ar_cb = |buf: DevicePtr, n_elems: usize, dev: &HipDevice, stm: &HipStream| -> Result<()> {
+        hooks.ar_sum_f32(buf, n_elems, dev, stm)
+    };
+    block.forward_decode_with_ar_hook(
         &ops,
         state.device,
         state.stream,
@@ -85,6 +90,7 @@ pub fn gdn_layer_local<H: TopologyHooks>(
         layer_state.state,
         layer_state.conv_history,
         scratch,
+        Some(&mut ar_cb),
     )?;
     // SAFETY: `delta_ptr` is the pool's `[hidden]` F16 slot.
     Ok(unsafe { Tensor::<F16>::from_raw(delta_ptr, hidden) })

@@ -437,6 +437,37 @@ impl DeltaNetLayer {
         conv_history: DevicePtr,
         scratch: DeltaNetLayerDecodeScratch,
     ) -> Result<()> {
+        self.forward_decode_with_ar_hook(
+            ops,
+            device,
+            stream,
+            x_in,
+            delta_out,
+            state,
+            conv_history,
+            scratch,
+            None,
+        )
+    }
+
+    /// Like `forward_decode`, but with an AR hook fired on the
+    /// `ssm_out_f32` partial-hidden buffer between the row-parallel
+    /// ssm_out mmvq and the F16 cast. Under TP the v2 composite
+    /// supplies a callback that AR-sums across ranks; under non-TP
+    /// topologies pass `None` (equivalent to `forward_decode`).
+    #[allow(clippy::too_many_arguments)]
+    pub fn forward_decode_with_ar_hook<O: Ops>(
+        &self,
+        ops: &O,
+        device: &HipDevice,
+        stream: &HipStream,
+        x_in: DevicePtr,
+        delta_out: DevicePtr,
+        state: DevicePtr,
+        conv_history: DevicePtr,
+        scratch: DeltaNetLayerDecodeScratch,
+        ar_partial_callback: Option<&mut dyn FnMut(DevicePtr, usize, &HipDevice, &HipStream) -> Result<()>>,
+    ) -> Result<()> {
         let hidden = self.hidden;
         let d_inner = self.d_inner;
         let num_v_heads = self.num_v_heads;
@@ -677,7 +708,8 @@ impl DeltaNetLayer {
                 .context("quantize gated → Q8_1")?;
         }
 
-        // 15. ssm_out projection.
+        // 15. ssm_out projection. Output is rank-local partial under
+        // TP (d_inner is per-rank); `ar_partial_callback` AR-sums it.
         ops.mmvq(
             self.ssm_out.ptr,
             scratch.gated_q8_1,
@@ -687,6 +719,11 @@ impl DeltaNetLayer {
             self.ssm_out.dtype,
         )
         .context("ssm_out mmvq")?;
+
+        if let Some(cb) = ar_partial_callback {
+            cb(scratch.ssm_out_f32, hidden, device, stream)
+                .context("gdn ar_partial_callback (ssm_out F32)")?;
+        }
 
         // 16. Cast F32 → F16.
         ops.cast_f32_to_f16(scratch.ssm_out_f32, delta_out, hidden)
