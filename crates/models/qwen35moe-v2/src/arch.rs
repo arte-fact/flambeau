@@ -44,9 +44,10 @@ impl Arch for Qwen35MoeV2 {
         device: &HipDevice,
         shard: ShardMode,
         layer_range: Option<(usize, usize)>,
+        ctx_cap: Option<usize>,
     ) -> Result<Self::Model> {
         match shard {
-            ShardMode::Replicated => load_from_gguf(file, device, layer_range),
+            ShardMode::Replicated => load_from_gguf(file, device, layer_range, ctx_cap),
             ShardMode::Tp { .. } => Err(anyhow!(
                 "qwen35moe-v2: TP loader not implemented yet (MoE expert sharding prerequisite)"
             )),
@@ -65,7 +66,7 @@ impl Arch for Qwen35MoeV2 {
     fn scratch_config(model: &Self::Model, shard: ShardMode) -> ScratchConfig {
         let cfg = &model.config;
         let n_ranks = shard.n_ranks();
-        let max_seq_len = 64.min(cfg.context_length);
+        let max_seq_len = cfg.context_length;
         let local_gdn = if n_ranks > 1 {
             per_rank_gdn_dims(cfg.gdn, n_ranks)
         } else {

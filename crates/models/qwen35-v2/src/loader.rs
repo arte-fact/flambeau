@@ -55,8 +55,14 @@ fn load_with_shard(
     device: &HipDevice,
     shard: ShardMode,
     layer_range: Option<(usize, usize)>,
+    ctx_cap: Option<usize>,
 ) -> Result<Qwen35V2Model> {
-    let config = Qwen35V2Config::from_gguf(file).context("parse qwen35 config")?;
+    let mut config = Qwen35V2Config::from_gguf(file).context("parse qwen35 config")?;
+    if let Some(cap) = ctx_cap {
+        if cap > 0 && cap < config.context_length {
+            config.context_length = cap;
+        }
+    }
     let mut allocs: Vec<(DevicePtr, usize)> = Vec::new();
     let n_ranks = shard.n_ranks();
     let tp_mode = gdn_tp_mode_for(config.gdn, n_ranks);
@@ -259,8 +265,9 @@ pub fn load_from_gguf(
     file: &GgufFile,
     device: &HipDevice,
     layer_range: Option<(usize, usize)>,
+    ctx_cap: Option<usize>,
 ) -> Result<Qwen35V2Model> {
-    load_with_shard(file, device, ShardMode::Replicated, layer_range)
+    load_with_shard(file, device, ShardMode::Replicated, layer_range, ctx_cap)
 }
 
 pub fn load_tp_shard_from_gguf(
@@ -269,6 +276,13 @@ pub fn load_tp_shard_from_gguf(
     rank: usize,
     n_ranks: usize,
     layer_range: Option<(usize, usize)>,
+    ctx_cap: Option<usize>,
 ) -> Result<Qwen35V2Model> {
-    load_with_shard(file, device, ShardMode::Tp { rank, n_ranks }, layer_range)
+    load_with_shard(
+        file,
+        device,
+        ShardMode::Tp { rank, n_ranks },
+        layer_range,
+        ctx_cap,
+    )
 }

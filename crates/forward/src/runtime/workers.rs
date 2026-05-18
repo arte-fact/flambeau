@@ -117,6 +117,7 @@ impl<A: Arch> WorkerHandle<A> {
         device_id: i32,
         role: WorkerRole,
         file: Arc<GgufFile>,
+        ctx_cap: Option<usize>,
     ) -> Result<Self> {
         let (cmd_tx, cmd_rx) = mpsc::channel::<Command>();
         let (ready_tx, ready_rx) = mpsc::sync_channel::<Result<()>>(1);
@@ -124,7 +125,7 @@ impl<A: Arch> WorkerHandle<A> {
         let thread = std::thread::spawn(move || {
             // Stage 1: bind device + load model. Report success/failure
             // synchronously through `ready_tx` before entering the loop.
-            let (mut state, init_err) = match init_rank::<A>(device_id, &role, &file) {
+            let (mut state, init_err) = match init_rank::<A>(device_id, &role, &file, ctx_cap) {
                 Ok(s) => (Some(s), None),
                 Err(e) => (None, Some(e)),
             };
@@ -230,11 +231,13 @@ fn init_rank<A: Arch>(
     device_id: i32,
     role: &WorkerRole,
     file: &GgufFile,
+    ctx_cap: Option<usize>,
 ) -> Result<RankState<A>> {
     let device = HipDevice::new(device_id).context("HipDevice::new")?;
     device.bind().context("device.bind")?;
     let shard = role.shard();
-    let model = A::load(file, &device, shard, role.layer_slice()).context("Arch::load")?;
+    let model = A::load(file, &device, shard, role.layer_slice(), ctx_cap)
+        .context("Arch::load")?;
     let mut cfg = A::scratch_config(&model, shard);
     if let Some((ls, le)) = role.layer_slice() {
         cfg.num_layers = le - ls;

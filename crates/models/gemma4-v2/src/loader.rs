@@ -51,8 +51,14 @@ fn load_with_shard(
     device: &HipDevice,
     shard: ShardMode,
     layer_range: Option<(usize, usize)>,
+    ctx_cap: Option<usize>,
 ) -> Result<Gemma4V2Model> {
-    let config = Gemma4V2Config::from_gguf(file).context("parse gemma4 config")?;
+    let mut config = Gemma4V2Config::from_gguf(file).context("parse gemma4 config")?;
+    if let Some(cap) = ctx_cap {
+        if cap > 0 && cap < config.context_length {
+            config.context_length = cap;
+        }
+    }
     let mut allocs: Vec<(DevicePtr, usize)> = Vec::new();
     let owns_embed = layer_range.map_or(true, |(s, _)| s == 0);
     let owns_lm_head = layer_range.map_or(true, |(_, e)| e == config.num_layers);
@@ -202,8 +208,9 @@ pub fn load_from_gguf(
     file: &GgufFile,
     device: &HipDevice,
     layer_range: Option<(usize, usize)>,
+    ctx_cap: Option<usize>,
 ) -> Result<Gemma4V2Model> {
-    load_with_shard(file, device, ShardMode::Replicated, layer_range)
+    load_with_shard(file, device, ShardMode::Replicated, layer_range, ctx_cap)
 }
 
 pub fn load_tp_shard_from_gguf(
@@ -212,6 +219,13 @@ pub fn load_tp_shard_from_gguf(
     rank: usize,
     n_ranks: usize,
     layer_range: Option<(usize, usize)>,
+    ctx_cap: Option<usize>,
 ) -> Result<Gemma4V2Model> {
-    load_with_shard(file, device, ShardMode::Tp { rank, n_ranks }, layer_range)
+    load_with_shard(
+        file,
+        device,
+        ShardMode::Tp { rank, n_ranks },
+        layer_range,
+        ctx_cap,
+    )
 }

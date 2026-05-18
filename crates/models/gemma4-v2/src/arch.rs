@@ -27,11 +27,12 @@ impl Arch for Gemma4V2 {
         device: &HipDevice,
         shard: ShardMode,
         layer_range: Option<(usize, usize)>,
+        ctx_cap: Option<usize>,
     ) -> Result<Self::Model> {
         match shard {
-            ShardMode::Replicated => load_from_gguf(file, device, layer_range),
+            ShardMode::Replicated => load_from_gguf(file, device, layer_range, ctx_cap),
             ShardMode::Tp { rank, n_ranks } => {
-                load_tp_shard_from_gguf(file, device, rank, n_ranks, layer_range)
+                load_tp_shard_from_gguf(file, device, rank, n_ranks, layer_range, ctx_cap)
             }
         }
     }
@@ -51,7 +52,7 @@ impl Arch for Gemma4V2 {
             ShardMode::Replicated => 1,
             ShardMode::Tp { n_ranks, .. } => n_ranks,
         };
-        let max_seq_len = 64.min(cfg.context_length);
+        let max_seq_len = cfg.context_length;
         let per_layer_kv: Vec<usize> = cfg
             .attn
             .iter()

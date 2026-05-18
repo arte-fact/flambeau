@@ -27,26 +27,36 @@ use super::{Arch, Topology};
 pub fn launch<A: Arch>(
     file: GgufFile,
     topology: &Topology,
+    ctx_cap: Option<usize>,
 ) -> Result<Vec<WorkerHandle<A>>> {
     let file = Arc::new(file);
     match topology {
         Topology::SingleDevice { device } => {
-            let h = WorkerHandle::<A>::spawn(*device, WorkerRole::Sd, Arc::clone(&file))?;
+            let h = WorkerHandle::<A>::spawn(
+                *device,
+                WorkerRole::Sd,
+                Arc::clone(&file),
+                ctx_cap,
+            )?;
             Ok(vec![h])
         }
-        Topology::Tp { devices } => launch_tp::<A>(devices, file),
+        Topology::Tp { devices } => launch_tp::<A>(devices, file, ctx_cap),
         Topology::Pp {
             devices,
             layer_split,
-        } => launch_pp::<A>(devices, layer_split.as_deref(), file),
+        } => launch_pp::<A>(devices, layer_split.as_deref(), file, ctx_cap),
         Topology::Hybrid {
             stages,
             layer_split,
-        } => launch_hybrid::<A>(stages, layer_split.as_deref(), file),
+        } => launch_hybrid::<A>(stages, layer_split.as_deref(), file, ctx_cap),
     }
 }
 
-fn launch_tp<A: Arch>(devices: &[i32], file: Arc<GgufFile>) -> Result<Vec<WorkerHandle<A>>> {
+fn launch_tp<A: Arch>(
+    devices: &[i32],
+    file: Arc<GgufFile>,
+    ctx_cap: Option<usize>,
+) -> Result<Vec<WorkerHandle<A>>> {
     let n = devices.len();
     let ar = Arc::new(ArCoordinator::new(n));
     let mut handles = Vec::with_capacity(n);
@@ -57,7 +67,7 @@ fn launch_tp<A: Arch>(devices: &[i32], file: Arc<GgufFile>) -> Result<Vec<Worker
             ar: Arc::clone(&ar),
         };
         handles.push(
-            WorkerHandle::<A>::spawn(dev, role, Arc::clone(&file))
+            WorkerHandle::<A>::spawn(dev, role, Arc::clone(&file), ctx_cap)
                 .with_context(|| format!("TP rank {rank} on hip:{dev}"))?,
         );
     }
@@ -68,6 +78,7 @@ fn launch_pp<A: Arch>(
     devices: &[i32],
     layer_split: Option<&[usize]>,
     file: Arc<GgufFile>,
+    ctx_cap: Option<usize>,
 ) -> Result<Vec<WorkerHandle<A>>> {
     let n = devices.len();
     let split = match layer_split {
@@ -108,7 +119,7 @@ fn launch_pp<A: Arch>(
             peer_buffer: Arc::clone(&peer),
         };
         handles.push(
-            WorkerHandle::<A>::spawn(dev, role, Arc::clone(&file))
+            WorkerHandle::<A>::spawn(dev, role, Arc::clone(&file), ctx_cap)
                 .with_context(|| format!("PP rank {rank} on hip:{dev}"))?,
         );
     }
@@ -119,6 +130,7 @@ fn launch_hybrid<A: Arch>(
     stages: &[Vec<i32>],
     layer_split: Option<&[usize]>,
     file: Arc<GgufFile>,
+    ctx_cap: Option<usize>,
 ) -> Result<Vec<WorkerHandle<A>>> {
     let n_stages = stages.len();
     let total_ranks: usize = stages.iter().map(|s| s.len()).sum();
@@ -163,9 +175,9 @@ fn launch_hybrid<A: Arch>(
                 handoff: Arc::clone(&handoff),
             };
             handles.push(
-                WorkerHandle::<A>::spawn(dev, role, Arc::clone(&file)).with_context(|| {
-                    format!("Hybrid stage {stage_idx} rank {rank_in_stage} on hip:{dev}")
-                })?,
+                WorkerHandle::<A>::spawn(dev, role, Arc::clone(&file), ctx_cap).with_context(
+                    || format!("Hybrid stage {stage_idx} rank {rank_in_stage} on hip:{dev}"),
+                )?,
             );
         }
     }

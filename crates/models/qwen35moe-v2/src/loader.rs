@@ -56,8 +56,14 @@ fn load_with_shard(
     device: &HipDevice,
     shard: ShardMode,
     layer_range: Option<(usize, usize)>,
+    ctx_cap: Option<usize>,
 ) -> Result<Qwen35MoeV2Model> {
-    let config = Qwen35MoeV2Config::from_gguf(file).context("parse qwen35moe config")?;
+    let mut config = Qwen35MoeV2Config::from_gguf(file).context("parse qwen35moe config")?;
+    if let Some(cap) = ctx_cap {
+        if cap > 0 && cap < config.context_length {
+            config.context_length = cap;
+        }
+    }
     let mut allocs: Vec<(DevicePtr, usize)> = Vec::new();
     let g = config.gdn;
     let owns_embed = layer_range.map_or(true, |(s, _)| s == 0);
@@ -338,6 +344,24 @@ pub fn load_from_gguf(
     file: &GgufFile,
     device: &HipDevice,
     layer_range: Option<(usize, usize)>,
+    ctx_cap: Option<usize>,
 ) -> Result<Qwen35MoeV2Model> {
-    load_with_shard(file, device, ShardMode::Replicated, layer_range)
+    load_with_shard(file, device, ShardMode::Replicated, layer_range, ctx_cap)
+}
+
+pub fn load_tp_shard_from_gguf(
+    file: &GgufFile,
+    device: &HipDevice,
+    rank: usize,
+    n_ranks: usize,
+    layer_range: Option<(usize, usize)>,
+    ctx_cap: Option<usize>,
+) -> Result<Qwen35MoeV2Model> {
+    load_with_shard(
+        file,
+        device,
+        ShardMode::Tp { rank, n_ranks },
+        layer_range,
+        ctx_cap,
+    )
 }

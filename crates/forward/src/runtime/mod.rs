@@ -67,12 +67,15 @@ pub trait Arch: Send + Sync + 'static {
     /// being the inner ring of Hybrid stages). `layer_range` is
     /// `Some((start, end))` for PP / Hybrid ranks (load only layers
     /// `[start, end)` to keep per-rank VRAM bounded); `None` for SD /
-    /// TP (every layer loads).
+    /// TP (every layer loads). `ctx_cap` clamps the model's GGUF
+    /// `context_length` to the operator's `--ctx-cap` so per-layer KV
+    /// slabs don't allocate for the full 128–256k context.
     fn load(
         file: &GgufFile,
         device: &HipDevice,
         shard: ShardMode,
         layer_range: Option<(usize, usize)>,
+        ctx_cap: Option<usize>,
     ) -> Result<Self::Model>;
 
     /// Run one decode step. Logits land in `ctx.logits()`.
@@ -110,8 +113,8 @@ pub struct Session<A: Arch> {
 }
 
 impl<A: Arch> Session<A> {
-    pub fn new(file: GgufFile, topology: Topology) -> Result<Self> {
-        let handles = orchestrate::launch::<A>(file, &topology)?;
+    pub fn new(file: GgufFile, topology: Topology, ctx_cap: Option<usize>) -> Result<Self> {
+        let handles = orchestrate::launch::<A>(file, &topology, ctx_cap)?;
         Ok(Self {
             topology,
             handles,
