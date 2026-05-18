@@ -59,9 +59,8 @@ fn load_with_shard(
     let config = Qwen35V2Config::from_gguf(file).context("parse qwen35 config")?;
     let mut allocs: Vec<(DevicePtr, usize)> = Vec::new();
     let n_ranks = shard.n_ranks();
-    // GDN dims handed to the loader are per-rank under TP. Norm
-    // weights are replicated; the loader's KReplicated path knows
-    // to keep the K/Q slabs full while sharding only V.
+    // Per-rank GdnDims under TP (KReplicated: V-heads shard, K-heads
+    // stay global). At n_ranks == 1 this is the identity.
     let g = if n_ranks > 1 {
         per_rank_gdn_dims(config.gdn, n_ranks)
     } else {

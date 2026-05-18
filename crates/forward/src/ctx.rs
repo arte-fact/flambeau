@@ -105,8 +105,8 @@ pub struct EmbeddingWeights {
     pub token_embd: Tensor<F16>,
     pub vocab_size: usize,
     pub hidden: usize,
-    /// Optional post-embed scalar multiply applied in-place. Gemma4
-    /// uses `sqrt(n_embd)` (memory: `parity_vs_argmax_in_vocab`).
+    /// Optional post-embed scalar multiply applied in-place
+    /// (gemma4 uses `sqrt(n_embd)`).
     pub post_scale: Option<f32>,
 }
 
@@ -156,10 +156,8 @@ pub enum Activation {
     GeluTanh,
 }
 
-/// Routing: TopkRenorm (top-k by raw logit, then softmax over k).
-/// Matches qwen3.x / gemma4 / DeepSeek conventions; algebraically
-/// identical to `softmax(all)→topk→renorm` (memory:
-/// `moe_topk_softmax_equivalence`).
+/// MoE routing: top-k by raw logit, then softmax over k
+/// (algebraically equivalent to `softmax(all) → topk → renorm`).
 pub struct MoeWeights {
     pub ffn_norm: Tensor<F16>,
     pub router: QuantWeight,
@@ -196,9 +194,6 @@ pub enum LayerKind {
     Gdn,
 }
 
-/// Per-layer GDN weight handle. Mirrors `flambeau_blocks::DeltaNetLayer`
-/// fields (the block this composite delegates to). All matmul weights
-/// go through `QuantWeight`; norm + SSM scalars are typed tensors.
 pub struct GdnWeights {
     pub attn_norm: Tensor<F16>,
     pub attn_qkv: QuantWeight,

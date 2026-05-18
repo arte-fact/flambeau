@@ -50,9 +50,9 @@ impl Topology {
     }
 }
 
-/// What an arch crate has to provide. The trait lives in the runtime
-/// module because the Session takes `A: Arch` generic; arch crates
-/// `impl Arch for ()` on a marker type (e.g. `pub struct Qwen3V2;`).
+/// What an arch crate has to provide. Arch crates declare a marker
+/// type (e.g. `pub struct Qwen35V2;`) and implement this trait on it;
+/// the Session takes `A: Arch` generic.
 pub trait Arch: Send + Sync + 'static {
     /// On-device model handle. Must be `Send` because workers own it
     /// across the channel boundary.

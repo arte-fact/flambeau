@@ -149,10 +149,9 @@ pub fn upload_dequant_to_f16(
     upload_f16_from_f32(device, &f32_vec, allocs)
 }
 
-/// Upload a GGUF tensor as a `QuantWeight`. If the tensor's dtype is
-/// supported by model-ops's `qmatmul` set, upload bytes-as-is. Else
-/// (K-quants / IQ / MXFP4 / F16 / etc.) dequant on host → re-quantise
-/// to Q8_0 → upload. Same precedent as the V1 MXFP4 / Iq4_Xs paths.
+/// Upload a GGUF tensor as a `QuantWeight`. Bytes-as-is when
+/// `dtype_qmatmul_native`; otherwise host dequant → re-quantise to
+/// Q8_0 (the F16 / BF16 / F32 path).
 pub fn upload_quant_weight(
     file: &GgufFile,
     device: &HipDevice,
@@ -180,11 +179,7 @@ pub fn upload_quant_weight(
     if n_elems % 32 != 0 {
         bail!("{name}: Q8_0 fallback needs n_elems % 32 == 0 (got {n_elems})");
     }
-    // The on-disk weight is `[rows, cols]`. The Q8_0 quantiser packs one
-    // row at a time; `cols` is known to be a divisor of n_elems but we
-    // don't have row-shape info here. Use a single contiguous quantise
-    // (matches GGUF's per-block layout — each Q8_0 block is 32 elems,
-    // and the row boundary is irrelevant to the matmul).
+    // Q8_0 block = 32 elements; row boundary is irrelevant to the matmul.
     let mut q8_0_bytes: Vec<u8> = Vec::with_capacity(n_elems / 32 * 34);
     let mut cursor = 0usize;
     while cursor < n_elems {
@@ -254,10 +249,9 @@ pub fn upload_col_sharded_quant(
             .tensor_raw(name)
             .with_context(|| format!("tensor_raw {name}"))?;
         let expected_total = n_rows * row_bytes;
-        // `>=`, not `==`: qwen35's `attn_q` is [2·n_heads·head_dim, hidden]
-        // (Q rows then a sigmoid-gate slab). The shared dense-attn
-        // loader interprets `n_rows = n_heads · head_dim` and reads
-        // only the Q-half, matching the Replicated path's behavior.
+        // `<`, not `!=`: qwen35's gated `attn_q` has 2× rows on disk
+        // (Q rows then a sigmoid-gate slab); the dense-attn composite
+        // reads only the Q-half via `n_rows = n_heads * head_dim`.
         if raw.len() < expected_total {
             bail!(
                 "{name}: raw bytes {} < expected {expected_total} (n_rows={n_rows}, row_bytes={row_bytes})",
@@ -530,8 +524,7 @@ pub fn upload_gdn_fused_qkv_quant(
         wrap_quant(ptr, per_rank_rows * hidden, info.dtype)
     } else {
         // Dequant fallback: rebuild Q|K|V from F32 row-slices, then
-        // requantise to Q8_0. Slow at load but rare in practice
-        // (qwen35-9B / qwen36 / qwen3-Next ship attn_qkv as a quant).
+        // requantise to Q8_0.
         let v_part_full = num_v_heads * head_v_dim;
         let k_part_full = num_k_heads * head_k_dim;
         let outer_full = v_part_full + 2 * k_part_full;

@@ -206,13 +206,9 @@ impl ScratchPool {
             let mut state_vec = Vec::with_capacity(config.num_layers);
             let state_bytes = g.num_v_heads * g.head_k_dim * g.head_v_dim * f32;
             let hist_bytes = (g.conv_kernel - 1) * g.conv_channels * f32;
-            // GDN's recurrent state + conv1d history accumulate across
-            // decode steps; the step kernel reads them every call. At
-            // position=0 they must be exactly zero (no prior context).
-            // `device.alloc` returns uninitialised memory — the first
-            // hipMalloc in a process often happens to be zero on Linux,
-            // but subsequent allocations after frees reuse pages with
-            // whatever the prior session wrote there. Zero explicitly.
+            // Recurrent state + conv history must start at zero —
+            // the step kernel reads them every call, including
+            // position=0. `device.alloc` is uninitialised.
             let zero_buf = vec![0u8; state_bytes.max(hist_bytes)];
             let stream = device.default_stream();
             for _ in 0..config.num_layers {
@@ -243,8 +239,8 @@ impl ScratchPool {
                 state_vec.push(GdnLayerState { state, conv_history });
             }
             flambeau_core::Stream::synchronize(stream).context("sync gdn zero")?;
-            // Per-decode scratch lives in a blocks-owned RawAllocTracker
-            // we then drain into our `allocs` list for a single dispose path.
+            // Drain the blocks-owned RawAllocTracker into our list
+            // so a single dispose walks every alloc.
             let mut tracker = flambeau_blocks::RawAllocTracker::new();
             let dims = flambeau_blocks::DeltaNetScratchDims {
                 hidden: h,
@@ -261,9 +257,7 @@ impl ScratchPool {
                 &mut tracker,
                 dims,
             )?;
-            // Fold the blocks-tracker allocs into our own list (the
-            // tracker's `allocs` field is public). Replace with empty
-            // so `RawAllocTracker::Drop` doesn't double-dispose.
+            // `mem::take` so `RawAllocTracker::Drop` doesn't double-dispose.
             allocs.extend(std::mem::take(&mut tracker.allocs));
             (state_vec, Some(owned))
         } else {

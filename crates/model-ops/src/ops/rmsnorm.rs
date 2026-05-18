@@ -41,8 +41,9 @@ pub fn rmsnorm_f16(
     ops.rmsnorm_f16(input.ptr, weight.ptr, output.ptr, n_rows, hidden, eps)
 }
 
-/// F32 variant. Used by the MoE F32 cascade and the F32 attention
-/// output path (memory: `gemma4_attn_output_proj_f16_saturate`).
+/// F32 variant — for the MoE F32 cascade and gemma4's F32-output
+/// attention path (F16 overflows the row-parallel hidden sum at
+/// head_dim ≥ 256).
 pub fn rmsnorm_f32(
     input: &Tensor<F32>,
     weight: &Tensor<F32>,

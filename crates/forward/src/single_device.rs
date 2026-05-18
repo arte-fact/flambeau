@@ -112,7 +112,6 @@ mod tests {
     use crate::ctx::{Activation, QuantWeight};
     use bytemuck::Pod;
     use flambeau_core::{CopyDirection, Device, DevicePtr, Stream};
-    use flambeau_model_ops::Q8_0;
     use flambeau_quant::quantize_k::quantize_row_q8_0;
     use half::f16;
 

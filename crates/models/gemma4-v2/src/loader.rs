@@ -54,7 +54,7 @@ fn load_with_shard(
     let config = Gemma4V2Config::from_gguf(file).context("parse gemma4 config")?;
     let mut allocs: Vec<(DevicePtr, usize)> = Vec::new();
 
-    // Gemma4: inpL *= sqrt(n_embd) after embed (memory: parity_vs_argmax_in_vocab).
+    // Gemma4: inpL *= sqrt(n_embd) post-embed.
     let embedding = load_embedding(
         file,
         device,
@@ -89,8 +89,7 @@ fn load_with_shard(
                 attn_norm_name: &norm,
                 attn_q_name: &q,
                 attn_k_name: &k,
-                // V from K via DtoD memcpy (no attn_v on disk; memory:
-                // gemma4_attn_output_proj_f16_saturate).
+                // V from K via DtoD memcpy (no attn_v on disk).
                 attn_v_name: None,
                 attn_output_name: &output,
                 attn_q_norm_name: Some(&q_norm),
