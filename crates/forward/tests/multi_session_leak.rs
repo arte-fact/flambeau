@@ -2,7 +2,7 @@
 //!
 //! Single-Session-per-process usage works correctly (production
 //! server pattern). The tests below show the failure surface for
-//! multi-Session-per-process workflows on rocm 6.x.
+//! multi-Session-per-process workflows.
 //!
 //! Findings:
 //! * Two identical GDN sessions back-to-back (`multi_session_leak_double_gdn`):
@@ -16,11 +16,13 @@
 //!   `HipDevice::alloc`) does NOT fix it. So the bug isn't
 //!   uninitialised memory reads — it's address-reuse-specific.
 //! * `hipDeviceSynchronize` in `HipDevice::Drop` doesn't fix it.
+//! * Reproduces identically on rocm 7.1.1 AND 7.2.1 — not a
+//!   version-specific regression.
 //!
 //! Empirical conclusion: hipMalloc returning HBM addresses that
 //! were freed earlier in the process triggers a HIP-driver-level
-//! correctness issue specific to our kernel set. Without driver
-//! internals we can't go further.
+//! correctness issue specific to our kernel set on gfx906/MI50.
+//! Persists across rocm 7.1.1 → 7.2.1.
 //!
 //! Production-safe: servers run one long-lived Session per process.
 //! Tests use one-binary-per-test-file (`crates/forward/tests/synth_*.rs`)
