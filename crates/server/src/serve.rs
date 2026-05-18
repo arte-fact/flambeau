@@ -709,7 +709,11 @@ pub(crate) async fn serve_inner_v2(
     drop(gguf);
     let gguf_path = cfg.gguf_path.clone();
     let chat_stops = crate::v2_handle::chat_stops_for(gguf_arch);
-    let bos_id = boot.tokenizer.bos_id;
+    let bos_id = if crate::v2_handle::wants_bos_prepend(gguf_arch) {
+        boot.tokenizer.bos_id
+    } else {
+        None
+    };
     let mut inflight_pool: Vec<Mutex<Box<dyn crate::Session>>> =
         Vec::with_capacity(inflight_slots);
     for slot_idx in 0..inflight_slots {

@@ -127,3 +127,16 @@ pub fn chat_stops_for(gguf_arch: &str) -> &'static [&'static str] {
         _ => &[],
     }
 }
+
+/// Whether this arch wants BOS prepended to every fresh prompt.
+/// Gemma4 mandates it (llama.cpp #21500 forces add_bos regardless of
+/// GGUF). Qwen3 / qwen35moe set `tokenizer.ggml.add_bos_token = false`
+/// — the chat template doesn't include BOS and prepending one shifts
+/// position embeddings and confuses some checkpoints (Qwen3.6-27B
+/// emits EOS immediately).
+pub fn wants_bos_prepend(gguf_arch: &str) -> bool {
+    matches!(
+        gguf_arch,
+        "gemma3" | "gemma4" | "gemma4-26b-a4b" | "gemma4-31b" | "gemma4-9b" | "gemma4-2b"
+    )
+}
