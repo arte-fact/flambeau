@@ -193,6 +193,15 @@ impl ForwardCtx for HybridForwardCtx<'_> {
         )
     }
 
+    fn gdn_layer(
+        &mut self,
+        input: &Tensor<F16>,
+        weights: &crate::ctx::GdnWeights,
+        layer_idx: usize,
+    ) -> Result<Tensor<F16>> {
+        composites::gdn_layer_local(&mut self.core, &mut self.hooks, input, weights, layer_idx)
+    }
+
     fn dense_ffn(&mut self, input: &Tensor<F16>, weights: &FfnWeights) -> Result<Tensor<F16>> {
         composites::dense_ffn_local(&mut self.core, &mut self.hooks, input, weights)
     }

@@ -8,7 +8,13 @@ description = "Topology executor for model forward passes. A model writes ONE fo
 
 [features]
 default = []
-hip = ["dep:flambeau-backend-hip", "flambeau-model-ops/hip", "flambeau-ops/hip"]
+hip = [
+    "dep:flambeau-backend-hip",
+    "dep:flambeau-blocks",
+    "flambeau-model-ops/hip",
+    "flambeau-ops/hip",
+    "flambeau-blocks/hip",
+]
 
 [dependencies]
 flambeau-core = { path = "../core" }
@@ -16,6 +22,10 @@ flambeau-quant = { path = "../quant" }
 flambeau-model-ops = { path = "../model-ops" }
 flambeau-ops = { path = "../ops" }
 flambeau-backend-hip = { path = "../backend-hip", optional = true }
+# blocks::DeltaNetLayer is reused as the GDN math primitive (~500 LOC
+# of orchestration we don't want to duplicate). v2 owns the composite
+# surface; blocks owns the math sequence.
+flambeau-blocks = { path = "../blocks", optional = true }
 anyhow.workspace = true
 half.workspace = true
 tracing.workspace = true

@@ -4,10 +4,14 @@ use anyhow::{Context, Result};
 use flambeau_backend_hip::HipDevice;
 use flambeau_core::{Device, DevicePtr};
 
+use crate::ctx::GdnDims;
+
 /// `q_width` / `kv_width` are PER-RANK under TP (caller divides by
 /// tp_size). `num_layers` is the count of owned KV slots — PP rank
 /// owning a layer slice passes the slice length, not the global total.
 /// `max_experts` sizes the MoE router logits slot; 0 for dense-only.
+/// `gdn` is Some for hybrid arches; sizes the per-layer state +
+/// conv-history slots (allocated once per owned layer).
 #[derive(Clone, Copy, Debug, Default)]
 pub struct ScratchConfig {
     pub hidden: usize,
@@ -18,6 +22,7 @@ pub struct ScratchConfig {
     pub max_seq_len: usize,
     pub num_layers: usize,
     pub max_experts: usize,
+    pub gdn: Option<GdnDims>,
 }
 
 #[derive(Clone, Copy)]
@@ -59,9 +64,24 @@ pub struct ScratchPool {
 
     pub kv_caches: Vec<KvCache>,
 
+    /// Per-owned-layer recurrent state + conv history. Empty when
+    /// `config.gdn` is None.
+    pub gdn_state: Vec<GdnLayerState>,
+    /// Shared GDN per-decode scratch wrapping blocks's owned scratch.
+    /// `None` when `config.gdn` is None.
+    pub gdn_decode_scratch: Option<flambeau_blocks::OwnedDeltaNetLayerDecodeScratch>,
+
     pub current_residual_is_a: bool,
 
     allocs: Vec<(DevicePtr, usize)>,
+}
+
+#[derive(Clone, Copy)]
+pub struct GdnLayerState {
+    /// `[num_v_heads, head_k_dim, head_v_dim]` F32 recurrent state.
+    pub state: DevicePtr,
+    /// `[conv_kernel - 1, conv_channels]` F32 conv1d history.
+    pub conv_history: DevicePtr,
 }
 
 impl ScratchPool {
@@ -121,6 +141,42 @@ impl ScratchPool {
             kv_caches.push(KvCache { k, v });
         }
 
+        let (gdn_state, gdn_decode_scratch) = if let Some(g) = config.gdn {
+            let mut state_vec = Vec::with_capacity(config.num_layers);
+            let state_bytes = g.num_v_heads * g.head_k_dim * g.head_v_dim * f32;
+            let hist_bytes = (g.conv_kernel - 1) * g.conv_channels * f32;
+            for _ in 0..config.num_layers {
+                let state = alloc_bytes(state_bytes)?;
+                let conv_history = alloc_bytes(hist_bytes)?;
+                state_vec.push(GdnLayerState { state, conv_history });
+            }
+            // Per-decode scratch lives in a blocks-owned RawAllocTracker
+            // we then drain into our `allocs` list for a single dispose path.
+            let mut tracker = flambeau_blocks::RawAllocTracker::new();
+            let dims = flambeau_blocks::DeltaNetScratchDims {
+                hidden: h,
+                d_inner: g.d_inner,
+                num_v_heads: g.num_v_heads,
+                num_k_heads: g.num_k_heads,
+                head_k_dim: g.head_k_dim,
+                head_v_dim: g.head_v_dim,
+                conv_channels: g.conv_channels,
+                conv_kernel: g.conv_kernel,
+            };
+            let owned = flambeau_blocks::DeltaNetLayer::alloc_decode_scratch(
+                device,
+                &mut tracker,
+                dims,
+            )?;
+            // Fold the blocks-tracker allocs into our own list (the
+            // tracker's `allocs` field is public). Replace with empty
+            // so `RawAllocTracker::Drop` doesn't double-dispose.
+            allocs.extend(std::mem::take(&mut tracker.allocs));
+            (state_vec, Some(owned))
+        } else {
+            (Vec::new(), None)
+        };
+
         Ok(Self {
             config,
             resid_a,
@@ -144,6 +200,8 @@ impl ScratchPool {
             router_logits_f32,
             moe_accum_f16,
             kv_caches,
+            gdn_state,
+            gdn_decode_scratch,
             current_residual_is_a: true,
             allocs,
         })

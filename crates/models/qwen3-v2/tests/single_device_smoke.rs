@@ -54,6 +54,7 @@ fn forward_one_token_produces_finite_non_constant_logits() {
         max_seq_len,
         num_layers: model.config.num_layers,
             max_experts: 0,
+            gdn: None,
     };
     let mut pool = ScratchPool::new(&device, cfg).expect("ScratchPool::new");
 

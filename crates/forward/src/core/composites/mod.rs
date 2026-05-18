@@ -4,6 +4,7 @@
 
 pub mod dense_ffn;
 pub mod embed;
+pub mod gdn;
 pub mod moe_ffn;
 pub mod output_head;
 pub mod residual_add;
@@ -12,6 +13,7 @@ pub mod standard_attn;
 
 pub use dense_ffn::dense_ffn_local;
 pub use embed::embed_local;
+pub use gdn::gdn_layer_local;
 pub use moe_ffn::moe_ffn_local;
 pub use output_head::output_head_local;
 pub use residual_add::residual_add_local;

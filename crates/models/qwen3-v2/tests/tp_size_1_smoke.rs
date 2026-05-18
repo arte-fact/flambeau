@@ -41,6 +41,7 @@ fn tp_size_1_logits_match_single_device() {
         max_seq_len,
         num_layers: model.config.num_layers,
             max_experts: 0,
+            gdn: None,
     };
 
     // Baseline.

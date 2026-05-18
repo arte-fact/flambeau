@@ -128,6 +128,7 @@ fn tp_size_2_logits_match_single_device() {
             max_seq_len,
             num_layers: model.config.num_layers,
             max_experts: 0,
+            gdn: None,
         };
         let mut pool = ScratchPool::new(&device, cfg).expect("SD pool");
         let mut ctx = SingleDeviceForwardCtx::new(&device, stream, &reg, &mut pool);
@@ -164,6 +165,7 @@ fn tp_size_2_logits_match_single_device() {
                 max_seq_len,
                 num_layers: model.config.num_layers,
             max_experts: 0,
+            gdn: None,
             };
             let mut pool = ScratchPool::new(&device, cfg)?;
             let coord_for_hook = Arc::clone(&coord);

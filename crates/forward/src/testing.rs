@@ -20,6 +20,7 @@ pub enum OpCall {
     Rmsnorm,
     ResidualAdd,
     StandardAttn { layer_idx: usize, position: usize },
+    GdnLayer { layer_idx: usize },
     DenseFfn { layer_idx: usize },
     MoeFfn { layer_idx: usize },
     OutputHead,
@@ -87,6 +88,16 @@ impl ForwardCtx for RecordingCtx {
     ) -> Result<Tensor<F16>> {
         self.ops_called
             .push(OpCall::StandardAttn { layer_idx, position });
+        Ok(Self::dummy_tensor())
+    }
+
+    fn gdn_layer(
+        &mut self,
+        _input: &Tensor<F16>,
+        _weights: &crate::ctx::GdnWeights,
+        layer_idx: usize,
+    ) -> Result<Tensor<F16>> {
+        self.ops_called.push(OpCall::GdnLayer { layer_idx });
         Ok(Self::dummy_tensor())
     }
 

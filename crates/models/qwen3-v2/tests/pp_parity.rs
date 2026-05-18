@@ -50,6 +50,7 @@ fn pp_size_2_logits_match_single_device() {
             max_seq_len,
             num_layers: model.config.num_layers,
             max_experts: 0,
+            gdn: None,
         };
         let mut pool_sd = ScratchPool::new(&device, cfg_sd).expect("ScratchPool::new SD");
         let mut ctx = SingleDeviceForwardCtx::new(&device, stream, &reg, &mut pool_sd);
@@ -79,6 +80,7 @@ fn pp_size_2_logits_match_single_device() {
         max_seq_len,
         num_layers: split,
             max_experts: 0,
+            gdn: None,
     };
     let cfg_r1 = ScratchConfig {
         hidden: h,
@@ -89,6 +91,7 @@ fn pp_size_2_logits_match_single_device() {
         max_seq_len,
         num_layers: model.config.num_layers - split,
             max_experts: 0,
+            gdn: None,
     };
     let mut pool_r0 = ScratchPool::new(&device, cfg_r0).expect("pool r0");
     let mut pool_r1 = ScratchPool::new(&device, cfg_r1).expect("pool r1");

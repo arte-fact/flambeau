@@ -4,7 +4,7 @@
 //! handoff). See `core/` for the shared composite engine.
 
 use anyhow::Result;
-use flambeau_model_ops::{Tensor, F16, Q4_0, Q4_1, Q5_0, Q5_1, Q8_0};
+use flambeau_model_ops::{Tensor, F16, F32, Q4_0, Q4_1, Q5_0, Q5_1, Q8_0};
 
 /// One impl per topology; the model is `<C: ForwardCtx>` generic.
 pub trait ForwardCtx {
@@ -26,6 +26,15 @@ pub trait ForwardCtx {
         weights: &AttnWeights,
         layer_idx: usize,
         position: usize,
+    ) -> Result<Tensor<F16>>;
+
+    /// Gated-Delta-Net recurrent layer (Qwen3.5 / 3.6 / 3-Next).
+    /// `layer_idx` selects the per-layer state + conv history slot.
+    fn gdn_layer(
+        &mut self,
+        input: &Tensor<F16>,
+        weights: &GdnWeights,
+        layer_idx: usize,
     ) -> Result<Tensor<F16>>;
 
     fn dense_ffn(&mut self, input: &Tensor<F16>, weights: &FfnWeights) -> Result<Tensor<F16>>;
@@ -160,4 +169,45 @@ pub struct ModelLayout {
     pub num_layers: usize,
     pub hidden: usize,
     pub kv_max_seq_len: usize,
+}
+
+/// Per-layer attention kind. Hybrid archs (qwen3.5 / 3.6 / 3-Next)
+/// alternate `FullAttn` and `Gdn`; pure-dense archs are all `FullAttn`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum LayerKind {
+    FullAttn,
+    Gdn,
+}
+
+/// Per-layer GDN weight handle. Mirrors `flambeau_blocks::DeltaNetLayer`
+/// fields (the block this composite delegates to). All matmul weights
+/// go through `QuantWeight`; norm + SSM scalars are typed tensors.
+pub struct GdnWeights {
+    pub attn_norm: Tensor<F16>,
+    pub attn_qkv: QuantWeight,
+    pub attn_gate: QuantWeight,
+    pub ssm_alpha: QuantWeight,
+    pub ssm_beta: QuantWeight,
+    pub ssm_out: QuantWeight,
+    pub ssm_dt_bias: Tensor<F32>,
+    pub ssm_a: Tensor<F32>,
+    pub ssm_conv1d: Tensor<F32>,
+    pub ssm_norm_w: Tensor<F16>,
+    pub dims: GdnDims,
+    pub rms_eps: f32,
+    /// `false` for cyclic `ggml_repeat_4d` (qwen3.5/3.6); `true` for
+    /// reshape-interleave (qwen3-Next). Wrong choice → degenerate logits.
+    pub rep_inner_layout: bool,
+}
+
+/// Shape parameters shared across every GDN layer in a model.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct GdnDims {
+    pub d_inner: usize,
+    pub num_v_heads: usize,
+    pub num_k_heads: usize,
+    pub head_k_dim: usize,
+    pub head_v_dim: usize,
+    pub conv_channels: usize,
+    pub conv_kernel: usize,
 }
