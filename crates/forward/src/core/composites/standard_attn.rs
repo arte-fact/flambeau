@@ -38,21 +38,27 @@ pub fn standard_attn_local<H: TopologyHooks>(
     }
     let q_width = weights.n_heads * weights.head_dim;
     let kv_width = weights.n_kv_heads * weights.head_dim;
-    // Per-layer-varying head_dim isn't supported yet — the KV cache
-    // slot stride is fixed at pool-construction. Gemma4's SWA+global
-    // alternation needs per-layer KV cache sizing (separate phase).
-    if q_width != state.pool.config.q_width {
+    // Shared Q / K / V / proj scratch is sized at MAX across layers
+    // (config.q_width / config.kv_width). Per-layer values must fit.
+    if q_width > state.pool.config.q_width {
         bail!(
-            "standard_attn: weights q_width {q_width} != ctx.q_width {} \
-             (per-layer-varying head_dim/kv_heads not yet supported in v2 — \
-             gemma4 SWA/global alternation needs per-layer KV cache sizing)",
+            "standard_attn: weights q_width {q_width} > ctx.q_width {} (scratch too small)",
             state.pool.config.q_width
         );
     }
-    if kv_width != state.pool.config.kv_width {
+    if kv_width > state.pool.config.kv_width {
         bail!(
-            "standard_attn: weights kv_width {kv_width} != ctx.kv_width {}",
+            "standard_attn: weights kv_width {kv_width} > ctx.kv_width {} (scratch too small)",
             state.pool.config.kv_width
+        );
+    }
+    // The KV cache slot is per-layer (gemma4 SWA layers carry less
+    // cache than global-attn layers); verify the slot matches.
+    let slot_kv_width = state.pool.kv_caches[local_idx].kv_width;
+    if slot_kv_width != kv_width {
+        bail!(
+            "standard_attn: kv_caches[{local_idx}].kv_width {slot_kv_width} != \
+             weights kv_width {kv_width} (per-layer KV cache sizing mismatch)"
         );
     }
 

@@ -269,6 +269,7 @@ mod tests {
             num_layers: NUM_LAYERS,
             max_experts: 0,
             gdn: None,
+            per_layer_kv_widths: None,
         };
         let mut pool = ScratchPool::new(&device, cfg).expect("ScratchPool::new");
         let layout = ModelLayout {
@@ -424,6 +425,7 @@ mod tests {
             num_layers: NUM_LAYERS,
             max_experts: 0,
             gdn: Some(dims),
+            per_layer_kv_widths: None,
         };
         let mut pool = ScratchPool::new(&device, cfg).expect("ScratchPool::new");
 
@@ -594,6 +596,7 @@ mod tests {
             num_layers: NUM_LAYERS,
             max_experts: N_EXPERTS,
             gdn: None,
+            per_layer_kv_widths: None,
         };
         let mut pool = ScratchPool::new(&device, cfg).expect("ScratchPool::new");
         let layout = ModelLayout {

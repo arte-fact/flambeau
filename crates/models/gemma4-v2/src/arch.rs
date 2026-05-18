@@ -47,19 +47,19 @@ impl Arch for Gemma4V2 {
             ShardMode::Tp { n_ranks, .. } => n_ranks,
         };
         let max_seq_len = 64.min(cfg.context_length);
+        let per_layer_kv: Vec<usize> = cfg
+            .attn
+            .iter()
+            .zip(cfg.num_kv_heads.iter())
+            .map(|(a, &nkv)| (nkv / n_ranks) * a.head_dim)
+            .collect();
         let q_width = cfg
             .attn
             .iter()
             .map(|a| (cfg.num_heads / n_ranks) * a.head_dim)
             .max()
             .unwrap_or(0);
-        let kv_width = cfg
-            .attn
-            .iter()
-            .zip(cfg.num_kv_heads.iter())
-            .map(|(a, &nkv)| (nkv / n_ranks) * a.head_dim)
-            .max()
-            .unwrap_or(0);
+        let kv_width = per_layer_kv.iter().copied().max().unwrap_or(0);
         ScratchConfig {
             hidden: cfg.hidden,
             intermediate: cfg.intermediate / n_ranks,
@@ -70,6 +70,7 @@ impl Arch for Gemma4V2 {
             num_layers: cfg.num_layers,
             max_experts: 0,
             gdn: None,
+            per_layer_kv_widths: Some(per_layer_kv),
         }
     }
 

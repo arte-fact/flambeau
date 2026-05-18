@@ -53,6 +53,7 @@ impl Arch for Qwen35V2 {
             num_layers: cfg.num_layers,
             max_experts: 0,
             gdn: Some(cfg.gdn),
+            per_layer_kv_widths: None,
         }
     }
 

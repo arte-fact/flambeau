@@ -42,11 +42,12 @@ fn tp_size_1_logits_match_single_device() {
         num_layers: model.config.num_layers,
             max_experts: 0,
             gdn: None,
+            per_layer_kv_widths: None,
     };
 
     // Baseline.
     let baseline: Vec<f32> = {
-        let mut pool = ScratchPool::new(&device, cfg).expect("SD pool");
+        let mut pool = ScratchPool::new(&device, cfg.clone()).expect("SD pool");
         let mut ctx = SingleDeviceForwardCtx::new(&device, stream, &reg, &mut pool);
         forward_one_token(&model, &mut ctx, 1, 0).expect("SD forward");
         let v = ctx.logits().to_vec();

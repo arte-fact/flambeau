@@ -7,12 +7,24 @@ use flambeau_core::{Device, DevicePtr};
 use crate::ctx::GdnDims;
 
 /// `q_width` / `kv_width` are PER-RANK under TP (caller divides by
-/// tp_size). `num_layers` is the count of owned KV slots — PP rank
-/// owning a layer slice passes the slice length, not the global total.
+/// tp_size) AND act as upper bounds across layers — they size the
+/// shared (ephemeral) Q / K / V / projection scratch slots, which
+/// every layer reuses. For uniform arches they equal the per-layer
+/// values; for gemma4-style SWA/global alternation they are the
+/// per-layer max.
+///
+/// `num_layers` is the count of owned KV slots — PP rank owning a
+/// layer slice passes the slice length, not the global total.
+///
+/// `per_layer_kv_widths`: when `Some`, length must equal `num_layers`
+/// and each entry sets that slot's KV-cache stride (used by gemma4
+/// SWA layers, which need half the cache of global-attention layers).
+/// When `None`, every slot is sized at `kv_width`.
+///
 /// `max_experts` sizes the MoE router logits slot; 0 for dense-only.
 /// `gdn` is Some for hybrid arches; sizes the per-layer state +
 /// conv-history slots (allocated once per owned layer).
-#[derive(Clone, Copy, Debug, Default)]
+#[derive(Clone, Debug, Default)]
 pub struct ScratchConfig {
     pub hidden: usize,
     pub intermediate: usize,
@@ -23,12 +35,14 @@ pub struct ScratchConfig {
     pub num_layers: usize,
     pub max_experts: usize,
     pub gdn: Option<GdnDims>,
+    pub per_layer_kv_widths: Option<Vec<usize>>,
 }
 
 #[derive(Clone, Copy)]
 pub struct KvCache {
     pub k: DevicePtr,
     pub v: DevicePtr,
+    pub kv_width: usize,
 }
 
 /// Caller must invoke `dispose(device)` before drop to release HBM.
@@ -134,11 +148,38 @@ impl ScratchPool {
             (DevicePtr::NULL, DevicePtr::NULL)
         };
 
+        if let Some(per) = config.per_layer_kv_widths.as_ref() {
+            if per.len() != config.num_layers {
+                anyhow::bail!(
+                    "per_layer_kv_widths.len() {} != num_layers {}",
+                    per.len(),
+                    config.num_layers
+                );
+            }
+            for (li, &w) in per.iter().enumerate() {
+                if w > kvw {
+                    anyhow::bail!(
+                        "per_layer_kv_widths[{li}] = {w} > kv_width {kvw} \
+                         (kv_width must be >= max per-layer kv_width — \
+                         it sizes the shared K/V scratch)",
+                    );
+                }
+            }
+        }
         let mut kv_caches = Vec::with_capacity(config.num_layers);
-        for _ in 0..config.num_layers {
-            let k = alloc_bytes(config.max_seq_len * kvw * f16)?;
-            let v = alloc_bytes(config.max_seq_len * kvw * f16)?;
-            kv_caches.push(KvCache { k, v });
+        for li in 0..config.num_layers {
+            let slot_kvw = config
+                .per_layer_kv_widths
+                .as_ref()
+                .map(|p| p[li])
+                .unwrap_or(kvw);
+            let k = alloc_bytes(config.max_seq_len * slot_kvw * f16)?;
+            let v = alloc_bytes(config.max_seq_len * slot_kvw * f16)?;
+            kv_caches.push(KvCache {
+                k,
+                v,
+                kv_width: slot_kvw,
+            });
         }
 
         let (gdn_state, gdn_decode_scratch) = if let Some(g) = config.gdn {

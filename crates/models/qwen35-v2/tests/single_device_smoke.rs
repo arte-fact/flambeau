@@ -57,6 +57,7 @@ fn qwen35_9b_forward_one_token_produces_finite_non_constant_logits() {
         num_layers: cfg.num_layers,
         max_experts: 0,
         gdn: Some(cfg.gdn),
+        per_layer_kv_widths: None,
     };
     let mut pool = ScratchPool::new(&device, scratch_cfg).expect("ScratchPool::new");
 

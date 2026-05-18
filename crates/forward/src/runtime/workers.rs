@@ -218,6 +218,18 @@ fn init_rank<A: Arch>(
     let mut cfg = A::scratch_config(&model, shard);
     if let Some((ls, le)) = role.layer_slice() {
         cfg.num_layers = le - ls;
+        // KV cache slots are per-owned-layer; slice the per-layer
+        // widths to match. Pool's `num_layers` must equal the slice's
+        // length under PP/Hybrid.
+        if let Some(per) = cfg.per_layer_kv_widths.as_ref() {
+            if le > per.len() {
+                anyhow::bail!(
+                    "layer range [{ls}..{le}) out of per_layer_kv_widths.len() {}",
+                    per.len()
+                );
+            }
+            cfg.per_layer_kv_widths = Some(per[ls..le].to_vec());
+        }
     }
     let pool = ScratchPool::new(&device, cfg).context("ScratchPool::new")?;
     let reg = OpsRegistry::new(&device).context("OpsRegistry::new")?;
