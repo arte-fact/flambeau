@@ -14,6 +14,7 @@ members = [
     "crates/models/qwen3-v2",
     "crates/models/qwen35-v2",
     "crates/models/gemma4",
+    "crates/models/gemma4-v2",
     "crates/runtime",
     "crates/bench",
     "crates/server-core",

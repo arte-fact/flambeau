@@ -80,12 +80,28 @@ pub fn standard_attn_local<H: TopologyHooks>(
     let mut k_f16 = unsafe { Tensor::<F16>::from_raw(state.pool.k_f16, kv_width) };
     flambeau_model_ops::cast_f32_to_f16(&k_f32, &mut k_f16, kv_width, &ops)?;
 
-    let mut v_f32 = unsafe { Tensor::<F32>::from_raw(q_f32_buf, kv_width) };
-    weights
-        .attn_v
-        .qmatmul(&norm_q8_1, &act_mmq_null, &mut v_f32, 1, hidden, kv_width, &ops)?;
-    let mut v_f16 = unsafe { Tensor::<F16>::from_raw(state.pool.v_f16, kv_width) };
-    flambeau_model_ops::cast_f32_to_f16(&v_f32, &mut v_f16, kv_width, &ops)?;
+    if let Some(v_w) = weights.attn_v.as_ref() {
+        let mut v_f32 = unsafe { Tensor::<F32>::from_raw(q_f32_buf, kv_width) };
+        v_w.qmatmul(&norm_q8_1, &act_mmq_null, &mut v_f32, 1, hidden, kv_width, &ops)?;
+        let mut v_f16 = unsafe { Tensor::<F16>::from_raw(state.pool.v_f16, kv_width) };
+        flambeau_model_ops::cast_f32_to_f16(&v_f32, &mut v_f16, kv_width, &ops)?;
+    } else {
+        // Gemma4 V-from-K: V = K (no separate projection).
+        let bytes = kv_width * 2;
+        // SAFETY: k_f16 and v_f16 slots are both sized for kv_width F16.
+        unsafe {
+            state
+                .device
+                .memcpy_async(
+                    state.stream,
+                    CopyDirection::DeviceToDevice,
+                    state.pool.v_f16,
+                    state.pool.k_f16,
+                    bytes,
+                )
+                .context("standard_attn: V-from-K DtoD memcpy")?;
+        }
+    }
     let _ = q_f32_buf;
 
     // Per-head Q/K norm. Output routed through `attn_out_f16` (the
@@ -208,9 +224,10 @@ pub fn standard_attn_local<H: TopologyHooks>(
         unsafe { Tensor::<F16>::from_raw(kv.k, state.pool.config.max_seq_len * kv_width) };
     let mut v_cache =
         unsafe { Tensor::<F16>::from_raw(kv.v, state.pool.config.max_seq_len * kv_width) };
+    let v_f16_view = unsafe { Tensor::<F16>::from_raw(state.pool.v_f16, kv_width) };
     flambeau_model_ops::kv_append_f16(
         &k_f16_rope,
-        &v_f16,
+        &v_f16_view,
         &mut k_cache,
         &mut v_cache,
         1,

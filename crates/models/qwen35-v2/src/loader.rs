@@ -104,6 +104,7 @@ pub fn load_from_gguf(file: &GgufFile, device: &HipDevice) -> Result<Qwen35V2Mod
         token_embd,
         vocab_size: v,
         hidden,
+        post_scale: None,
     };
 
     let mut layer_kinds: Vec<LayerKind> = Vec::with_capacity(config.num_layers);
@@ -283,7 +284,7 @@ pub fn load_from_gguf(file: &GgufFile, device: &HipDevice) -> Result<Qwen35V2Mod
                 attn_norm,
                 attn_q,
                 attn_k,
-                attn_v,
+                attn_v: Some(attn_v),
                 attn_output,
                 attn_q_norm,
                 attn_k_norm,

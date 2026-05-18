@@ -40,8 +40,17 @@ pub fn output_head_local<H: TopologyHooks>(
         .lm_head
         .qmatmul(&norm_q8_1, &act_mmq_null, &mut logits_f32, 1, hidden, vocab, &ops)?;
 
-    if let Some(_cap) = lm_head.final_logit_softcap {
-        bail!("output_head: final_logit_softcap not implemented");
+    if let Some(cap) = lm_head.final_logit_softcap {
+        let mut logits_inplace = unsafe {
+            Tensor::<F32>::from_raw(state.pool.logits_f32_dev, vocab)
+        };
+        flambeau_model_ops::apply_softcap_f32(
+            &logits_f32,
+            &mut logits_inplace,
+            vocab,
+            cap,
+            &ops,
+        )?;
     }
 
     if state.logits_host.len() != vocab {

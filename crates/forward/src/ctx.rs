@@ -101,13 +101,18 @@ pub struct EmbeddingWeights {
     pub token_embd: Tensor<F16>,
     pub vocab_size: usize,
     pub hidden: usize,
+    /// Optional post-embed scalar multiply applied in-place. Gemma4
+    /// uses `sqrt(n_embd)` (memory: `parity_vs_argmax_in_vocab`).
+    pub post_scale: Option<f32>,
 }
 
 pub struct AttnWeights {
     pub attn_norm: Tensor<F16>,
     pub attn_q: QuantWeight,
     pub attn_k: QuantWeight,
-    pub attn_v: QuantWeight,
+    /// `None` for gemma4-style "V = K via memcpy" layers (no attn_v
+    /// weight on disk). `Some` means run an independent V projection.
+    pub attn_v: Option<QuantWeight>,
     pub attn_output: QuantWeight,
     pub attn_q_norm: Option<Tensor<F16>>,
     pub attn_k_norm: Option<Tensor<F16>>,

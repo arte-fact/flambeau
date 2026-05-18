@@ -217,6 +217,7 @@ mod tests {
             token_embd: allocs.upload_f16(&det_signal(VOCAB * HIDDEN, 1)),
             vocab_size: VOCAB,
             hidden: HIDDEN,
+            post_scale: None,
         };
         let lm_head_weights = LmHeadWeights {
             output_norm: allocs.upload_f16(&vec![1.0_f32; HIDDEN]),
@@ -235,7 +236,7 @@ mod tests {
                 attn_norm: allocs.upload_f16(&vec![1.0_f32; HIDDEN]),
                 attn_q: allocs.upload_q8_0(&det_signal(q_width * HIDDEN, seed + 1), q_width, HIDDEN),
                 attn_k: allocs.upload_q8_0(&det_signal(kv_width * HIDDEN, seed + 2), kv_width, HIDDEN),
-                attn_v: allocs.upload_q8_0(&det_signal(kv_width * HIDDEN, seed + 3), kv_width, HIDDEN),
+                attn_v: Some(allocs.upload_q8_0(&det_signal(kv_width * HIDDEN, seed + 3), kv_width, HIDDEN)),
                 attn_output: allocs.upload_q8_0(&det_signal(HIDDEN * q_width, seed + 4), HIDDEN, q_width),
                 attn_q_norm: None,
                 attn_k_norm: None,
@@ -352,6 +353,7 @@ mod tests {
             token_embd: allocs.upload_f16(&det_signal(VOCAB * HIDDEN, 1)),
             vocab_size: VOCAB,
             hidden: HIDDEN,
+            post_scale: None,
         };
         let lm_head = LmHeadWeights {
             output_norm: allocs.upload_f16(&vec![1.0_f32; HIDDEN]),
@@ -515,6 +517,7 @@ mod tests {
             token_embd: allocs.upload_f16(&det_signal(VOCAB * HIDDEN, 1)),
             vocab_size: VOCAB,
             hidden: HIDDEN,
+            post_scale: None,
         };
         let lm_head_weights = LmHeadWeights {
             output_norm: allocs.upload_f16(&vec![1.0_f32; HIDDEN]),
@@ -533,7 +536,7 @@ mod tests {
                 attn_norm: allocs.upload_f16(&vec![1.0_f32; HIDDEN]),
                 attn_q: allocs.upload_q8_0(&det_signal(q_width * HIDDEN, seed + 1), q_width, HIDDEN),
                 attn_k: allocs.upload_q8_0(&det_signal(kv_width * HIDDEN, seed + 2), kv_width, HIDDEN),
-                attn_v: allocs.upload_q8_0(&det_signal(kv_width * HIDDEN, seed + 3), kv_width, HIDDEN),
+                attn_v: Some(allocs.upload_q8_0(&det_signal(kv_width * HIDDEN, seed + 3), kv_width, HIDDEN)),
                 attn_output: allocs.upload_q8_0(&det_signal(HIDDEN * q_width, seed + 4), HIDDEN, q_width),
                 attn_q_norm: None,
                 attn_k_norm: None,

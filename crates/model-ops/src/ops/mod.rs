@@ -12,4 +12,5 @@ pub mod quantize;
 pub mod rmsnorm;
 pub mod rope;
 pub mod scale;
+pub mod softcap;
 pub mod topk_softmax;

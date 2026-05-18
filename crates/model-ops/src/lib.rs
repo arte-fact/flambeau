@@ -28,4 +28,5 @@ pub use ops::quantize::{quantize_f16_to_q8_1, quantize_f32_to_q8_1};
 pub use ops::rmsnorm::{rmsnorm_f16, rmsnorm_f32, rmsnorm_quant_q8_1};
 pub use ops::rope::{rope_f16, rope_neox_partial_f16};
 pub use ops::scale::scale_f16;
+pub use ops::softcap::apply_softcap_f32;
 pub use ops::topk_softmax::{topk_softmax_f32, SAMPLER_K_OUT_MAX};

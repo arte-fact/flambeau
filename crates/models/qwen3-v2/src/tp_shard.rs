@@ -60,6 +60,7 @@ pub fn load_tp_shard_from_gguf(
         token_embd,
         vocab_size: v,
         hidden,
+        post_scale: None,
     };
 
     let mut attn: Vec<AttnWeights> = Vec::with_capacity(config.num_layers);
@@ -134,7 +135,7 @@ pub fn load_tp_shard_from_gguf(
             attn_norm,
             attn_q,
             attn_k,
-            attn_v,
+            attn_v: Some(attn_v),
             attn_output,
             attn_q_norm,
             attn_k_norm,

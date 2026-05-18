@@ -46,5 +46,12 @@ pub fn embed_local<H: TopologyHooks>(
             .memcpy_async(state.stream, CopyDirection::DeviceToDevice, dst, src, row_bytes)
             .context("embed: DtoD row memcpy")?;
     }
+    if let Some(scale) = weights.post_scale {
+        let mut t = slot_f16(dst, hidden);
+        let ops = state.ops();
+        // scale_f16 is in-place safe (one thread per index reads + writes).
+        let t_in = unsafe { Tensor::<F16>::from_raw(dst, hidden) };
+        flambeau_model_ops::scale_f16(&t_in, &mut t, hidden, scale, &ops)?;
+    }
     Ok(slot_f16(dst, hidden))
 }
