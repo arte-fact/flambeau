@@ -147,6 +147,11 @@ pub struct ScratchPool {
     /// `[max_slots]` I32 — per-slot KV length (= positions[i] + 1).
     pub attn_slot_n_kv: DevicePtr,
 
+    /// Shared MoE prefill scratch (`flambeau_blocks` owned, sized
+    /// `max_prefill_tokens × top_k × intermediate`). `None` when no MoE
+    /// or `max_prefill_tokens <= 1`.
+    pub moe_prefill_scratch: Option<flambeau_blocks::OwnedMoeExpertsPrefillScratch>,
+
     /// `[max_experts_per_tok]` I32 — top-k expert indices. NULL when no MoE.
     pub moe_expert_ids: DevicePtr,
     /// `[max_experts_per_tok]` F32 — top-k normalised expert weights. NULL when no MoE.
@@ -281,10 +286,6 @@ impl ScratchPool {
                 (DevicePtr::NULL, DevicePtr::NULL, DevicePtr::NULL, DevicePtr::NULL)
             };
 
-        // Indexed-MoE per-slot scratch. Sized for one decode token
-        // × top_k. Prefill widens this when n_tokens > 1 (currently
-        // not allocated here; v2 prefill still routes through the
-        // per-token loop in moe_ffn_loop).
         let topk = config.max_experts_per_tok;
         let (
             moe_expert_ids,
@@ -427,6 +428,33 @@ impl ScratchPool {
             (Vec::new(), None, None)
         };
 
+        // MoE prefill scratch — must happen AFTER the `alloc_bytes`
+        // closure's last use (allocs is captured-mutably; extending it
+        // here is the only safe spot once the closure has been
+        // dropped from the borrow checker's perspective).
+        let moe_prefill_scratch = if topk > 0
+            && config.max_experts > 0
+            && config.max_prefill_tokens > 1
+        {
+            let mut p_tracker = flambeau_blocks::RawAllocTracker::new();
+            let dims = flambeau_blocks::MoeExpertsScratchDims {
+                hidden: h,
+                intermediate: m,
+                n_experts: config.max_experts,
+                top_k: topk,
+            };
+            let owned = flambeau_blocks::MoeExperts::alloc_prefill_scratch(
+                device,
+                &mut p_tracker,
+                dims,
+                config.max_prefill_tokens,
+            )?;
+            allocs.extend(std::mem::take(&mut p_tracker.allocs));
+            Some(owned)
+        } else {
+            None
+        };
+
         Ok(Self {
             config,
             resid_a,
@@ -459,6 +487,7 @@ impl ScratchPool {
             attn_slot_v_dst_ptrs,
             attn_slot_write_pos,
             attn_slot_n_kv,
+            moe_prefill_scratch,
             moe_expert_ids,
             moe_expert_weights,
             moe_gate_out_f32,

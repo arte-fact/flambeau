@@ -231,6 +231,18 @@ pub fn moe_ffn_local<H: TopologyHooks>(
     Ok(unsafe { Tensor::<F16>::from_raw(state.pool.delta, hidden) })
 }
 
+/// Batched prefill MoE path. Used whenever `n_tokens > 1`. Mirrors the
+/// decode path in `moe_ffn_local` but at N tokens: one rmsnorm + one
+/// router qmatmul + one batched DtoH of router logits + per-token host
+/// topk (cheap CPU loop) + one HtoD of expert_ids/weights + one block
+/// `forward_prefill_tp_f32` call. The block dispatches MMQ tile8
+/// kernels at `n_pairs ≥ 8`.
+///
+/// Shared expert (when present): looped per token after the routed
+/// path. SharedExpert block has no prefill variant; the dense FFN
+/// inside still fires at n_tokens=1 per loop iteration, but it's a
+/// small per-layer add — the dominant cost is the routed path which
+/// is now batched.
 fn moe_ffn_loop<H: TopologyHooks>(
     state: &mut CoreState<'_>,
     hooks: &mut H,
@@ -239,36 +251,231 @@ fn moe_ffn_loop<H: TopologyHooks>(
     n_tokens: usize,
 ) -> Result<Tensor<F16>> {
     let hidden = state.hidden();
-    let row_bytes = hidden * 2;
-    let delta_ptr = state.pool.delta;
-    // Iterate in reverse so token 0's result lands naturally at delta[0..hidden]
-    // (the inner call always writes there); every other iteration's result
-    // gets copied to delta[i*hidden..(i+1)*hidden] before the next iteration
-    // overwrites delta[0..hidden].
-    for i in (0..n_tokens).rev() {
-        let in_i = unsafe {
-            Tensor::<F16>::from_raw(input.ptr.offset_bytes(i * row_bytes), hidden)
-        };
-        let _ = moe_ffn_local(state, hooks, &in_i, weights, 1)?;
-        if i > 0 {
-            let dst = delta_ptr.offset_bytes(i * row_bytes);
-            // SAFETY: delta is sized max_prefill_tokens * hidden * F16; src and
-            // dst rows are non-overlapping for i > 0 on the same stream.
-            unsafe {
-                state
-                    .device
-                    .memcpy_async(
-                        state.stream,
-                        CopyDirection::DeviceToDevice,
-                        dst,
-                        delta_ptr,
-                        row_bytes,
-                    )
-                    .context("moe_ffn_loop: per-token delta DtoD fanout")?;
-            }
+    let m = state.pool.config.intermediate;
+    let n_experts = weights.n_experts;
+    let k_top = weights.experts_per_tok;
+    if n_experts > state.pool.config.max_experts {
+        bail!(
+            "moe_ffn: n_experts {n_experts} > pool.max_experts {}",
+            state.pool.config.max_experts
+        );
+    }
+    if k_top == 0 || k_top > n_experts {
+        bail!("moe_ffn: experts_per_tok {k_top} must be in 1..={n_experts}");
+    }
+    if n_tokens > state.pool.config.max_prefill_tokens {
+        bail!(
+            "moe_ffn: n_tokens {n_tokens} > pool.max_prefill_tokens {}",
+            state.pool.config.max_prefill_tokens
+        );
+    }
+    let prefill_scratch = state
+        .pool
+        .moe_prefill_scratch
+        .as_ref()
+        .ok_or_else(|| {
+            anyhow::anyhow!(
+                "moe_ffn batched prefill: pool not configured (need max_prefill_tokens > 1)"
+            )
+        })?
+        .view();
+
+    let ops = state.ops();
+    let act_mmq_null = unsafe { Tensor::<Q8_1>::from_raw(DevicePtr::NULL, 0) };
+
+    // 1. rmsnorm at n_tokens=N → F16 norm scratch (pool.norm).
+    let x_norm_f16_ptr = state.pool.norm;
+    let input_view =
+        unsafe { Tensor::<F16>::from_raw(input.ptr, n_tokens * hidden) };
+    let mut x_norm_f16 =
+        unsafe { Tensor::<F16>::from_raw(x_norm_f16_ptr, n_tokens * hidden) };
+    flambeau_model_ops::rmsnorm_f16(
+        &input_view,
+        &weights.ffn_norm,
+        &mut x_norm_f16,
+        n_tokens,
+        hidden,
+        weights.rms_eps,
+        &ops,
+    )?;
+    // Quantise [N, hidden] → block's prefill x_q8_1 buffer.
+    let mut x_q8_1_n = unsafe {
+        Tensor::<Q8_1>::from_raw(prefill_scratch.x_q8_1, n_tokens * hidden)
+    };
+    flambeau_model_ops::quantize_f16_to_q8_1(
+        &x_norm_f16,
+        &mut x_q8_1_n,
+        n_tokens * hidden,
+        &ops,
+    )?;
+
+    // 2. Router qmatmul at n_tokens=N → router_logits [N, n_experts] F32.
+    let mut router_logits = unsafe {
+        Tensor::<F32>::from_raw(prefill_scratch.router_logits, n_tokens * n_experts)
+    };
+    weights.router.qmatmul(
+        &x_q8_1_n,
+        &act_mmq_null,
+        &mut router_logits,
+        n_tokens,
+        hidden,
+        n_experts,
+        &ops,
+    )?;
+
+    // 3. DtoH all N×n_experts logits in one transfer; host topk per row.
+    let mut logits_host = vec![0.0_f32; n_tokens * n_experts];
+    let logits_bytes = n_tokens * n_experts * 4;
+    unsafe {
+        state
+            .device
+            .memcpy_async(
+                state.stream,
+                CopyDirection::DeviceToHost,
+                DevicePtr(logits_host.as_mut_ptr() as usize),
+                router_logits.ptr,
+                logits_bytes,
+            )
+            .context("moe_ffn prefill: router logits DtoH")?;
+    }
+    flambeau_core::Stream::synchronize(state.stream)?;
+    let mut host_ids: Vec<i32> = Vec::with_capacity(n_tokens * k_top);
+    let mut host_weights: Vec<f32> = Vec::with_capacity(n_tokens * k_top);
+    for t in 0..n_tokens {
+        let row = &logits_host[t * n_experts..(t + 1) * n_experts];
+        let mut topk: Vec<(usize, f32)> =
+            row.iter().copied().enumerate().collect();
+        topk.select_nth_unstable_by(k_top - 1, |a, b| {
+            b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal)
+        });
+        topk.truncate(k_top);
+        topk.sort_by(|a, b| {
+            b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal)
+        });
+        let max_logit = topk[0].1;
+        let mut exps: Vec<f32> = topk.iter().map(|(_, v)| (v - max_logit).exp()).collect();
+        let sum: f32 = exps.iter().sum();
+        for e in &mut exps {
+            *e /= sum;
+        }
+        for (slot, &(e, _)) in topk.iter().enumerate() {
+            host_ids.push(e as i32);
+            host_weights.push(exps[slot]);
         }
     }
-    Ok(unsafe { Tensor::<F16>::from_raw(delta_ptr, n_tokens * hidden) })
+
+    // 4. HtoD upload [N, top_k] ids + weights into the prefill scratch.
+    unsafe {
+        state
+            .device
+            .memcpy_async(
+                state.stream,
+                CopyDirection::HostToDevice,
+                prefill_scratch.expert_ids,
+                DevicePtr(host_ids.as_ptr() as usize),
+                n_tokens * k_top * 4,
+            )
+            .context("moe_ffn prefill: expert_ids HtoD")?;
+        state
+            .device
+            .memcpy_async(
+                state.stream,
+                CopyDirection::HostToDevice,
+                prefill_scratch.expert_weights,
+                DevicePtr(host_weights.as_ptr() as usize),
+                n_tokens * k_top * 4,
+            )
+            .context("moe_ffn prefill: expert_weights HtoD")?;
+    }
+    flambeau_core::Stream::synchronize(state.stream)?;
+
+    // 5. Batched indexed-MoE forward + F32 partial AR.
+    let gate_dt = weights.experts_gate[0].dtype;
+    let up_dt = weights.experts_up[0].dtype;
+    let down_dt = weights.experts_down[0].dtype;
+    let router_dt = weights.router.dtype;
+    let block = MoeExperts::new(
+        WeightHandle { ptr: weights.router.ptr, dtype: router_dt, dims: [n_experts, hidden] },
+        WeightHandle {
+            ptr: weights.experts_gate[0].ptr,
+            dtype: gate_dt,
+            dims: [n_experts * m, hidden],
+        },
+        WeightHandle {
+            ptr: weights.experts_up[0].ptr,
+            dtype: up_dt,
+            dims: [n_experts * m, hidden],
+        },
+        WeightHandle {
+            ptr: weights.experts_down[0].ptr,
+            dtype: down_dt,
+            dims: [n_experts * hidden, m],
+        },
+        hidden,
+        m,
+        n_experts,
+        k_top,
+    )?
+    .with_router_policy(RouterPolicy::default())
+    .with_activation(match weights.activation {
+        Activation::SwiGLU => BlockActivation::SwiGLU,
+        Activation::GeluTanh => BlockActivation::Gelu,
+    });
+
+    // `pool.down_f32` is sized `n * h * f32` = max_prefill_tokens × hidden,
+    // sufficient for N×hidden F32 partial out.
+    block.forward_prefill_tp_f32(
+        &ops,
+        x_norm_f16_ptr,
+        state.pool.down_f32,
+        n_tokens,
+        prefill_scratch,
+    )?;
+    hooks.ar_sum_f32(state.pool.down_f32, n_tokens * hidden, state.device, state.stream)?;
+    let down_full = unsafe { Tensor::<F32>::from_raw(state.pool.down_f32, n_tokens * hidden) };
+    let mut delta_full =
+        unsafe { Tensor::<F16>::from_raw(state.pool.delta, n_tokens * hidden) };
+    flambeau_model_ops::cast_f32_to_f16(
+        &down_full,
+        &mut delta_full,
+        n_tokens * hidden,
+        &ops,
+    )?;
+
+    // 6. Shared expert (per-token; block has no prefill variant). Adds
+    // each token's shared_out into delta[t].
+    if let Some(sh) = weights.shared.as_ref() {
+        if state.pool.shared_x_norm_f32.as_usize() == 0 && sh.gate_inp.is_some() {
+            bail!(
+                "moe_ffn: shared expert with per-token gate present but \
+                 pool.shared_x_norm_f32 unallocated — set ScratchConfig.shared_intermediate"
+            );
+        }
+        let shared_block = build_shared_expert_block(sh, hidden)?;
+        let row_bytes = hidden * 2;
+        for t in 0..n_tokens {
+            let x_row = x_norm_f16_ptr.offset_bytes(t * row_bytes);
+            let shared_view = flambeau_blocks::SharedExpertDecodeScratch {
+                x_q8_1: state.pool.norm_q8_1,
+                gate_f32: state.pool.gate_f32,
+                up_f32: state.pool.up_f32,
+                activated_f16: state.pool.gated_f16,
+                activated_q8_1: state.pool.gated_q8_1,
+                down_f32: state.pool.down_f32,
+                x_norm_f32: state.pool.shared_x_norm_f32,
+            };
+            let shared_out = state.pool.q_f16;
+            shared_block.forward_decode(&ops, x_row, shared_out, shared_view)?;
+            let shared_t = unsafe { Tensor::<F16>::from_raw(shared_out, hidden) };
+            let delta_row = state.pool.delta.offset_bytes(t * row_bytes);
+            let delta_t_in = unsafe { Tensor::<F16>::from_raw(delta_row, hidden) };
+            let mut delta_t_out = unsafe { Tensor::<F16>::from_raw(delta_row, hidden) };
+            flambeau_model_ops::add_f16(&delta_t_in, &shared_t, &mut delta_t_out, hidden, &ops)?;
+        }
+    }
+
+    let _ = (act_mmq_null, gate_dt, up_dt, down_dt, router_dt);
+    Ok(unsafe { Tensor::<F16>::from_raw(state.pool.delta, n_tokens * hidden) })
 }
 
 fn build_shared_expert_block(

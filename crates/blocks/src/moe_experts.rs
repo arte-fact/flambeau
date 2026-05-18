@@ -997,6 +997,34 @@ impl MoeExperts {
         .context("prefill (TP) combine_no_residual_f16")
     }
 
+    /// F32-output sibling of [`Self::forward_prefill_tp`]. Reads
+    /// `scratch.down_f32` directly (skipping the cast that
+    /// `prefill_compute_expert_outs` performs at the end into
+    /// `down_f16`) and emits a `[prompt_len, hidden]` F32 partial via
+    /// `moe_combine_no_residual_f32`. Caller pairs this with an F32
+    /// AllReduce (`tp_allreduce_sum_f32` on SD/PP no-op) and a F32→F16
+    /// cast for the residual path. Matches the v2 forward composite's
+    /// `forward_decode_tp_f32` shape.
+    pub fn forward_prefill_tp_f32<O: Ops>(
+        &self,
+        ops: &O,
+        x_norm: DevicePtr,
+        partial_out_f32: DevicePtr,
+        prompt_len: usize,
+        scratch: MoeExpertsPrefillScratch,
+    ) -> Result<()> {
+        self.prefill_compute_expert_outs(ops, x_norm, prompt_len, scratch)?;
+        ops.moe_combine_no_residual_f32(
+            scratch.down_f32,
+            scratch.expert_weights,
+            partial_out_f32,
+            prompt_len,
+            self.top_k,
+            self.hidden,
+        )
+        .context("prefill (TP-F32) combine_no_residual_f32")
+    }
+
     /// Steps 1-6 of the prefill pipeline. Writes the per-pair F16
     /// expert outputs into `scratch.down_f16` (`[prompt_len * top_k,
     /// hidden]`). Routing decisions in `scratch.expert_ids` /
