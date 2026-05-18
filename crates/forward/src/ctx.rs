@@ -110,6 +110,23 @@ pub struct EmbeddingWeights {
     pub post_scale: Option<f32>,
 }
 
+impl EmbeddingWeights {
+    /// NULL-ptr placeholder for PP ranks that don't own layer 0.
+    /// `PpForwardCtx::embed` only dereferences the weights on the
+    /// first rank; non-first ranks peer-receive into the residual
+    /// slot and never touch the token_embd tensor.
+    pub fn placeholder(vocab_size: usize, hidden: usize) -> Self {
+        Self {
+            // SAFETY: NULL ptr + 0 elems makes the tensor opaque;
+            // safe construction since no read ever fires on it.
+            token_embd: unsafe { Tensor::<F16>::from_raw(flambeau_core::DevicePtr::NULL, 0) },
+            vocab_size,
+            hidden,
+            post_scale: None,
+        }
+    }
+}
+
 /// RoPE layout. `Interleaved` rotates `(x[2i], x[2i+1])` pairs
 /// (gemma4). `NeoxSplit` rotates `(x[i], x[i + rotated_dims/2])`
 /// over the first `rotated_dims` (qwen3, qwen3-next).
@@ -203,6 +220,31 @@ pub struct LmHeadWeights {
     pub vocab_size: usize,
     pub hidden: usize,
     pub rms_eps: f32,
+}
+
+impl LmHeadWeights {
+    /// NULL-ptr placeholder for PP ranks that don't own the last layer.
+    /// `PpForwardCtx::output_head` only dereferences the weights on the
+    /// last rank; non-last ranks peer-send the post-final-layer hidden
+    /// state and never invoke `output_head_local`.
+    pub fn placeholder(vocab_size: usize, hidden: usize, rms_eps: f32) -> Self {
+        use flambeau_core::op::QDtype;
+        Self {
+            // SAFETY: NULL ptr + 0 elems is opaque; never read.
+            output_norm: unsafe {
+                Tensor::<F16>::from_raw(flambeau_core::DevicePtr::NULL, 0)
+            },
+            lm_head: QuantWeight {
+                ptr: flambeau_core::DevicePtr::NULL,
+                dtype: QDtype::F16,
+                n_elems: 0,
+            },
+            final_logit_softcap: None,
+            vocab_size,
+            hidden,
+            rms_eps,
+        }
+    }
 }
 
 pub struct ModelLayout {

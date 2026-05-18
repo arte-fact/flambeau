@@ -60,21 +60,27 @@ fn load_with_shard(
     let config = Qwen35MoeV2Config::from_gguf(file).context("parse qwen35moe config")?;
     let mut allocs: Vec<(DevicePtr, usize)> = Vec::new();
     let g = config.gdn;
+    let owns_embed = layer_range.map_or(true, |(s, _)| s == 0);
+    let owns_lm_head = layer_range.map_or(true, |(_, e)| e == config.num_layers);
     let in_range = |li: usize| -> bool {
         layer_range.map_or(true, |(s, e)| li >= s && li < e)
     };
 
-    let embedding = load_embedding(
-        file,
-        device,
-        &EmbeddingSpec {
-            token_embd_name: "token_embd.weight",
-            vocab_size: config.vocab_size,
-            hidden: config.hidden,
-            post_scale: None,
-        },
-        &mut allocs,
-    )?;
+    let embedding = if owns_embed {
+        load_embedding(
+            file,
+            device,
+            &EmbeddingSpec {
+                token_embd_name: "token_embd.weight",
+                vocab_size: config.vocab_size,
+                hidden: config.hidden,
+                post_scale: None,
+            },
+            &mut allocs,
+        )?
+    } else {
+        EmbeddingWeights::placeholder(config.vocab_size, config.hidden)
+    };
 
     let mut layer_kinds = Vec::with_capacity(config.num_layers);
     let mut full_attn = Vec::with_capacity(config.num_layers);
@@ -285,24 +291,28 @@ fn load_with_shard(
         }));
     }
 
-    let lm_head_name = if config.tied_lm_head {
-        "token_embd.weight"
+    let lm_head = if owns_lm_head {
+        let lm_head_name = if config.tied_lm_head {
+            "token_embd.weight"
+        } else {
+            "output.weight"
+        };
+        load_lm_head(
+            file,
+            device,
+            &LmHeadSpec {
+                output_norm_name: "output_norm.weight",
+                lm_head_name,
+                vocab_size: config.vocab_size,
+                hidden: config.hidden,
+                rms_eps: config.rms_eps,
+                final_logit_softcap: None,
+            },
+            &mut allocs,
+        )?
     } else {
-        "output.weight"
+        LmHeadWeights::placeholder(config.vocab_size, config.hidden, config.rms_eps)
     };
-    let lm_head = load_lm_head(
-        file,
-        device,
-        &LmHeadSpec {
-            output_norm_name: "output_norm.weight",
-            lm_head_name,
-            vocab_size: config.vocab_size,
-            hidden: config.hidden,
-            rms_eps: config.rms_eps,
-            final_logit_softcap: None,
-        },
-        &mut allocs,
-    )?;
 
     let layout = ModelLayout {
         num_layers: config.num_layers,

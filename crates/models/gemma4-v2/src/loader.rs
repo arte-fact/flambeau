@@ -54,22 +54,30 @@ fn load_with_shard(
 ) -> Result<Gemma4V2Model> {
     let config = Gemma4V2Config::from_gguf(file).context("parse gemma4 config")?;
     let mut allocs: Vec<(DevicePtr, usize)> = Vec::new();
+    let owns_embed = layer_range.map_or(true, |(s, _)| s == 0);
+    let owns_lm_head = layer_range.map_or(true, |(_, e)| e == config.num_layers);
     let in_range = |li: usize| -> bool {
         layer_range.map_or(true, |(s, e)| li >= s && li < e)
     };
 
     // Gemma4: inpL *= sqrt(n_embd) post-embed.
-    let embedding = load_embedding(
-        file,
-        device,
-        &EmbeddingSpec {
-            token_embd_name: "token_embd.weight",
-            vocab_size: config.vocab_size,
-            hidden: config.hidden,
-            post_scale: Some((config.hidden as f32).sqrt()),
-        },
-        &mut allocs,
-    )?;
+    let embedding = if owns_embed {
+        load_embedding(
+            file,
+            device,
+            &EmbeddingSpec {
+                token_embd_name: "token_embd.weight",
+                vocab_size: config.vocab_size,
+                hidden: config.hidden,
+                post_scale: Some((config.hidden as f32).sqrt()),
+            },
+            &mut allocs,
+        )?
+    } else {
+        let mut placeholder = EmbeddingWeights::placeholder(config.vocab_size, config.hidden);
+        placeholder.post_scale = Some((config.hidden as f32).sqrt());
+        placeholder
+    };
 
     let mut attn = Vec::with_capacity(config.num_layers);
     let mut ffn = Vec::with_capacity(config.num_layers);
@@ -144,29 +152,33 @@ fn load_with_shard(
         )?));
     }
 
-    let lm_head_name = if config.tied_lm_head {
-        "token_embd.weight"
+    let lm_head = if owns_lm_head {
+        let lm_head_name = if config.tied_lm_head {
+            "token_embd.weight"
+        } else {
+            "output.weight"
+        };
+        let final_logit_softcap = if config.final_logit_softcap > 0.0 {
+            Some(config.final_logit_softcap)
+        } else {
+            None
+        };
+        load_lm_head(
+            file,
+            device,
+            &LmHeadSpec {
+                output_norm_name: "output_norm.weight",
+                lm_head_name,
+                vocab_size: config.vocab_size,
+                hidden: config.hidden,
+                rms_eps: config.rms_eps,
+                final_logit_softcap,
+            },
+            &mut allocs,
+        )?
     } else {
-        "output.weight"
+        LmHeadWeights::placeholder(config.vocab_size, config.hidden, config.rms_eps)
     };
-    let final_logit_softcap = if config.final_logit_softcap > 0.0 {
-        Some(config.final_logit_softcap)
-    } else {
-        None
-    };
-    let lm_head = load_lm_head(
-        file,
-        device,
-        &LmHeadSpec {
-            output_norm_name: "output_norm.weight",
-            lm_head_name,
-            vocab_size: config.vocab_size,
-            hidden: config.hidden,
-            rms_eps: config.rms_eps,
-            final_logit_softcap,
-        },
-        &mut allocs,
-    )?;
 
     let layout = ModelLayout {
         num_layers: config.num_layers,
