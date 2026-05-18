@@ -737,6 +737,14 @@ pub(crate) async fn serve_inner_v2(
     let prefix_cache =
         crate::serve_common::build_prefix_cache(&cfg, topology_tag.mesh_kind);
 
+    // `--embedding-model` plumbing is topology-independent — the
+    // embedding GGUF loads onto a single device and the handle runs
+    // its own pooled-forward. Wire it in here so v2 chat servers
+    // can serve `/v1/embeddings` alongside `/v1/chat/completions`.
+    let embedding = load_embedding_qwen3(&cfg, &cluster)?;
+    let embedding_rank = embedding.as_ref().map(|(_, _, r)| *r);
+    let embedding = embedding.map(|(m, t, _)| (m, t));
+
     let model = std::sync::Arc::new(crate::v2_handle::V2Model {
         gguf_arch: gguf_arch_to_static(gguf_arch),
         topology: topology_label,
@@ -751,8 +759,8 @@ pub(crate) async fn serve_inner_v2(
             cluster,
             inflight_pool,
             qwen3_moe: None,
-            embedding: None,
-            embedding_rank: None,
+            embedding,
+            embedding_rank,
             gpu_sampler: false,
             batched_decode: false,
             max_queue_depth,
