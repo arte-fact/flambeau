@@ -130,6 +130,11 @@ def main() -> int:
     ap.add_argument("--warmup", type=int, default=1)
     ap.add_argument("--decode-batch-window-us", type=int, default=1500)
     ap.add_argument("--ctx-cap", type=int, default=4096)
+    ap.add_argument(
+        "--legacy",
+        action="store_true",
+        help="boot WITHOUT FLAMBEAU_V2=1 (compares against legacy stack)",
+    )
     ap.add_argument("--out", default=None, help="optional path to write cert markdown")
     args = ap.parse_args()
 
@@ -162,7 +167,10 @@ def main() -> int:
         cmd += ["--pp-size", str(args.pp_size), "--tp-size", str(args.tp_size)]
 
     env = os.environ.copy()
-    env["FLAMBEAU_V2"] = "1"
+    if not args.legacy:
+        env["FLAMBEAU_V2"] = "1"
+    else:
+        env.pop("FLAMBEAU_V2", None)
     log_path = Path(f"/tmp/d4_bench_{port}.log")
     log_f = open(log_path, "w")
     print(f"server log: {log_path}", file=sys.stderr)
