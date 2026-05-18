@@ -149,8 +149,8 @@ pub async fn serve(cfg: ServeConfig, registry: Registry) -> Result<()> {
         bail!(
             "FLAMBEAU_V2=1: v2 forward stack is not yet wired into the HTTP serve loop \
              (no prefill / batching / session reuse). For the working v2 surface today, use:\n  \
-             cargo test -p flambeau-qwen3-v2 --features hip --release\n  \
-             cargo test -p flambeau-qwen35-v2 --features hip --release\n\
+             cargo test -p flambeau-qwen35-v2 --features hip --release\n  \
+             cargo test -p flambeau-gemma4-v2 --features hip --release\n\
              Unset FLAMBEAU_V2 (or set to 0) to use the legacy serve path."
         );
     }

@@ -198,12 +198,15 @@ impl<A: Arch> WorkerHandle<A> {
     }
 }
 
-/// Per-rank state owned by the worker thread.
+/// Per-rank state owned by the worker thread. Fields drop in
+/// declaration order — model + pool + reg release HIP resources
+/// (hipFree, hipModuleUnload) that need the device's context alive,
+/// so `device` is declared LAST.
 struct RankState<A: Arch> {
-    device: HipDevice,
+    model: A::Model,
     pool: ScratchPool,
     reg: OpsRegistry,
-    model: A::Model,
+    device: HipDevice,
 }
 
 fn init_rank<A: Arch>(

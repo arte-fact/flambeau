@@ -2,7 +2,7 @@
 
 use anyhow::{Context, Result};
 use flambeau_backend_hip::HipDevice;
-use flambeau_core::{Device, DevicePtr};
+use flambeau_core::{CopyDirection, Device, DevicePtr};
 
 use crate::ctx::GdnDims;
 
@@ -206,11 +206,43 @@ impl ScratchPool {
             let mut state_vec = Vec::with_capacity(config.num_layers);
             let state_bytes = g.num_v_heads * g.head_k_dim * g.head_v_dim * f32;
             let hist_bytes = (g.conv_kernel - 1) * g.conv_channels * f32;
+            // GDN's recurrent state + conv1d history accumulate across
+            // decode steps; the step kernel reads them every call. At
+            // position=0 they must be exactly zero (no prior context).
+            // `device.alloc` returns uninitialised memory — the first
+            // hipMalloc in a process often happens to be zero on Linux,
+            // but subsequent allocations after frees reuse pages with
+            // whatever the prior session wrote there. Zero explicitly.
+            let zero_buf = vec![0u8; state_bytes.max(hist_bytes)];
+            let stream = device.default_stream();
             for _ in 0..config.num_layers {
                 let state = alloc_bytes(state_bytes)?;
                 let conv_history = alloc_bytes(hist_bytes)?;
+                // SAFETY: state owns state_bytes, conv_history owns
+                // hist_bytes, zero_buf has >= max(state_bytes, hist_bytes).
+                unsafe {
+                    device
+                        .memcpy_async(
+                            stream,
+                            CopyDirection::HostToDevice,
+                            state,
+                            DevicePtr(zero_buf.as_ptr() as usize),
+                            state_bytes,
+                        )
+                        .context("zero gdn state")?;
+                    device
+                        .memcpy_async(
+                            stream,
+                            CopyDirection::HostToDevice,
+                            conv_history,
+                            DevicePtr(zero_buf.as_ptr() as usize),
+                            hist_bytes,
+                        )
+                        .context("zero gdn conv_history")?;
+                }
                 state_vec.push(GdnLayerState { state, conv_history });
             }
+            flambeau_core::Stream::synchronize(stream).context("sync gdn zero")?;
             // Per-decode scratch lives in a blocks-owned RawAllocTracker
             // we then drain into our `allocs` list for a single dispose path.
             let mut tracker = flambeau_blocks::RawAllocTracker::new();

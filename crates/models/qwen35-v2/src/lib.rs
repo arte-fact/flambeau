@@ -1,8 +1,7 @@
 //! qwen35 hybrid arch (GDN + full-attn alternating + dense FFN) on
-//! the v2 stack. The qwen3-Embedding pure-dense variant lives in
-//! `flambeau-qwen3-v2`; the MoE variants (qwen35moe / qwen36moe /
-//! qwen3next) will land here once `moe_ffn` integrates with the
-//! per-layer dispatch.
+//! the v2 stack. The MoE variants (qwen35moe / qwen36moe / qwen3next)
+//! will land here once `moe_ffn` integrates with the per-layer
+//! dispatch.
 
 #![cfg(feature = "hip")]
 
