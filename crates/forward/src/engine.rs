@@ -486,7 +486,7 @@ impl<H: TopologyHooks, S: StageHooks> ForwardCtx for ForwardEngine<'_, H, S> {
         &mut self,
         input: &Tensor<F16>,
         lm_head: &LmHeadWeights,
-        n_tokens: usize,
+        slot_ids: &[usize],
     ) -> Result<()> {
         if self.stage.is_last() {
             composites::output_head_local(
@@ -494,10 +494,10 @@ impl<H: TopologyHooks, S: StageHooks> ForwardCtx for ForwardEngine<'_, H, S> {
                 &mut self.hooks,
                 input,
                 lm_head,
-                n_tokens,
+                slot_ids,
             )
         } else {
-            self.stage.peer_send(&mut self.core, input, n_tokens)
+            self.stage.peer_send(&mut self.core, input, slot_ids.len())
         }
     }
 

@@ -215,7 +215,7 @@ impl ScratchPool {
         };
         let down_f32 = alloc_bytes(n * h * f32)?;
 
-        let logits_f32_dev = alloc_bytes(config.vocab * f32)?;
+        let logits_f32_dev = alloc_bytes(config.max_slots.max(1) * config.vocab * f32)?;
         let position_i32 = alloc_bytes(n * i32_b)?;
 
         let (router_logits_f32, moe_accum_f16) = if config.max_experts > 0 {

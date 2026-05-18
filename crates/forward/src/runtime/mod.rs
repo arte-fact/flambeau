@@ -245,16 +245,44 @@ impl<A: Arch> Session<A> {
         Ok(())
     }
 
-    /// The logits emitted by the most recent `forward_one_token`.
+    /// Logits emitted by the most recent forward call. For prefill /
+    /// single decode this is a single `vocab` row. For batched-decode
+    /// (distinct slot_ids) it is `N * vocab` row-major.
     pub fn logits(&self) -> &[f32] {
         &self.last_logits
     }
 
-    /// Vocab size — `self.last_logits.len()` after the first forward,
-    /// `0` before. Callers needing a pre-forward value must look at the
-    /// model handle directly (`A::Model` exposes it).
+    /// Slice the `i`-th token's logits row from the most recent forward.
+    /// `vocab` must match the model's emit width (use `Session::logits().len() / n_rows`).
+    pub fn logits_row(&self, i: usize, vocab: usize) -> &[f32] {
+        &self.last_logits[i * vocab..(i + 1) * vocab]
+    }
+
     pub fn vocab_size(&self) -> usize {
         self.last_logits.len()
+    }
+
+    /// Batched-decode entry: forwards N pairs of (token, position) each
+    /// targeting its slot's KV history; emits N logits rows in
+    /// `self.last_logits` row-major `[N, vocab]`.
+    pub fn forward_decode_batched(
+        &mut self,
+        slots: &[(u32, usize, usize)],
+    ) -> Result<()> {
+        if slots.is_empty() {
+            anyhow::bail!("Session::forward_decode_batched: empty slots");
+        }
+        let tokens: Vec<u32> = slots.iter().map(|s| s.0).collect();
+        let positions: Vec<usize> = slots.iter().map(|s| s.1).collect();
+        let slot_ids: Vec<usize> = slots.iter().map(|s| s.2).collect();
+        // Guard: distinct slot_ids so output_head emits all N logits rows.
+        if tokens.len() > 1 && slot_ids.iter().all(|&s| s == slot_ids[0]) {
+            anyhow::bail!(
+                "Session::forward_decode_batched: slot_ids all equal — \
+                 use forward_prefill_logits for single-slot multi-token"
+            );
+        }
+        self.forward(&tokens, &positions, &slot_ids)
     }
 
     /// Shut workers down + free device memory.

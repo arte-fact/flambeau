@@ -29,6 +29,6 @@ pub fn forward<C: ForwardCtx>(
         let delta = ctx.dense_ffn(&resid, ffn_w, n)?;
         resid = ctx.residual_add(resid, delta, n)?;
     }
-    ctx.output_head(&resid, &model.lm_head, n)?;
+    ctx.output_head(&resid, &model.lm_head, slot_ids)?;
     Ok(())
 }

@@ -1,5 +1,6 @@
-//! rmsnorm-quant → LM-head matmul → DtoH into `state.logits_host`.
-//! Only the LAST token's logits are emitted (sampler needs that one).
+//! rmsnorm + LM-head matmul + DtoH into `state.logits_host`. Decode /
+//! prefill emits 1 row (last token); batched-decode (distinct slot
+//! ids) emits N rows in row-major `[N, vocab]` order.
 
 use anyhow::{bail, Context, Result};
 use flambeau_core::{CopyDirection, Device, DevicePtr};
@@ -13,7 +14,7 @@ pub fn output_head_local<H: TopologyHooks>(
     _hooks: &mut H,
     input: &Tensor<F16>,
     lm_head: &LmHeadWeights,
-    n_tokens: usize,
+    slot_ids: &[usize],
 ) -> Result<()> {
     let hidden = state.hidden();
     if hidden != lm_head.hidden {
@@ -22,47 +23,72 @@ pub fn output_head_local<H: TopologyHooks>(
             lm_head.hidden
         );
     }
+    let n_tokens = slot_ids.len();
+    if n_tokens == 0 {
+        bail!("output_head: empty slot_ids");
+    }
     let vocab = lm_head.vocab_size;
     let ops = state.ops();
+    let emit_all = n_tokens > 1 && slot_ids.iter().any(|&s| s != slot_ids[0]);
+    let n_emit = if emit_all { n_tokens } else { 1 };
+    if n_emit > state.pool.config.max_slots.max(1) {
+        bail!(
+            "output_head: n_emit {n_emit} > max_slots {} (pool.logits_f32_dev too small)",
+            state.pool.config.max_slots.max(1)
+        );
+    }
 
-    // Slice the last token's hidden vector and run norm + matmul on it only.
-    let last_input_ptr = input.ptr.offset_bytes((n_tokens - 1) * hidden * 2);
-    let last_input = unsafe { Tensor::<F16>::from_raw(last_input_ptr, hidden) };
+    let input_slice_ptr = if emit_all {
+        input.ptr
+    } else {
+        input.ptr.offset_bytes((n_tokens - 1) * hidden * 2)
+    };
+    let input_slice =
+        unsafe { Tensor::<F16>::from_raw(input_slice_ptr, n_emit * hidden) };
 
-    let mut norm_q8_1 = unsafe { Tensor::<Q8_1>::from_raw(state.pool.norm_q8_1, hidden) };
+    let mut norm_q8_1 =
+        unsafe { Tensor::<Q8_1>::from_raw(state.pool.norm_q8_1, n_emit * hidden) };
     flambeau_model_ops::rmsnorm_quant_q8_1(
-        &last_input,
+        &input_slice,
         &lm_head.output_norm,
         &mut norm_q8_1,
-        1,
+        n_emit,
         hidden,
         lm_head.rms_eps,
         &ops,
     )?;
 
     let act_mmq_null = unsafe { Tensor::<Q8_1>::from_raw(DevicePtr::NULL, 0) };
-    let mut logits_f32 = unsafe { Tensor::<F32>::from_raw(state.pool.logits_f32_dev, vocab) };
-    lm_head
-        .lm_head
-        .qmatmul(&norm_q8_1, &act_mmq_null, &mut logits_f32, 1, hidden, vocab, &ops)?;
+    let mut logits_f32 =
+        unsafe { Tensor::<F32>::from_raw(state.pool.logits_f32_dev, n_emit * vocab) };
+    lm_head.lm_head.qmatmul(
+        &norm_q8_1,
+        &act_mmq_null,
+        &mut logits_f32,
+        n_emit,
+        hidden,
+        vocab,
+        &ops,
+    )?;
 
     if let Some(cap) = lm_head.final_logit_softcap {
         let mut logits_inplace = unsafe {
-            Tensor::<F32>::from_raw(state.pool.logits_f32_dev, vocab)
+            Tensor::<F32>::from_raw(state.pool.logits_f32_dev, n_emit * vocab)
         };
         flambeau_model_ops::apply_softcap_f32(
             &logits_f32,
             &mut logits_inplace,
-            vocab,
+            n_emit * vocab,
             cap,
             &ops,
         )?;
     }
 
-    if state.logits_host.len() != vocab {
-        state.logits_host = vec![0.0_f32; vocab];
+    let n_elems = n_emit * vocab;
+    if state.logits_host.len() != n_elems {
+        state.logits_host = vec![0.0_f32; n_elems];
     }
-    let bytes = vocab * 4;
+    let bytes = n_elems * 4;
     unsafe {
         state
             .device

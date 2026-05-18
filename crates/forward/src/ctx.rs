@@ -71,13 +71,16 @@ pub trait ForwardCtx {
         n_tokens: usize,
     ) -> Result<Tensor<F16>>;
 
-    /// Logits for the LAST token land in `ctx.logits()` — at prefill
-    /// only the next-token sampler needs the final row.
+    /// When `slot_ids` are all equal (prefill / single decode), only
+    /// the LAST token's logits land in `ctx.logits()` (vocab elems).
+    /// When all distinct (batched-decode), N rows of logits land in
+    /// `ctx.logits()` in row-major `[N, vocab]` order — caller slices
+    /// `slot_ids[i]`'s logits from row `i`.
     fn output_head(
         &mut self,
         input: &Tensor<F16>,
         lm_head: &LmHeadWeights,
-        n_tokens: usize,
+        slot_ids: &[usize],
     ) -> Result<()>;
 
     fn layer_range<'a>(
