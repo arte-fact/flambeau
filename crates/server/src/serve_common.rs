@@ -180,6 +180,7 @@ pub struct ServerStateInputs {
     pub topology_tag: TopologyTag,
     pub prefix_cache: Arc<PrefixCache>,
     pub boot: BootMetadata,
+    pub decode_batch_window_us: u64,
 }
 
 pub fn build_server_state(inputs: ServerStateInputs) -> SharedState {
@@ -199,6 +200,7 @@ pub fn build_server_state(inputs: ServerStateInputs) -> SharedState {
         topology_tag,
         prefix_cache,
         boot,
+        decode_batch_window_us,
     } = inputs;
     let slot_in_use: Vec<std::sync::atomic::AtomicBool> = (0..inflight_pool.len())
         .map(|_| std::sync::atomic::AtomicBool::new(false))
@@ -230,6 +232,7 @@ pub fn build_server_state(inputs: ServerStateInputs) -> SharedState {
         prefill_ubatch,
         gpu_sampler,
         batched_decode,
+        decode_batch_window_us,
         agent_stats: crate::agent_stats::AgentStatsRing::default(),
         tool_call_format_default: boot.tool_call_format_default,
         supports_thinking: boot.supports_thinking,

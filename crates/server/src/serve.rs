@@ -71,6 +71,12 @@ pub struct ServeConfig {
     /// #232 admission-control queue depth beyond the inflight pool. 0
     /// disables (legacy unbounded queue). Default 16.
     pub max_queue_depth: usize,
+    /// Decode-batching coalescence window (microseconds). The leader
+    /// thread sleeps this long before draining `batched_pending` so
+    /// concurrent decode requests join the same batched forward.
+    /// Default 1500 µs; raise for higher concurrency at the cost of
+    /// per-step latency.
+    pub decode_batch_window_us: u64,
     /// Clamp the model's `context_length`. `None` keeps the GGUF's
     /// architectural max; many GGUFs ship 262 144 which OOMs the per-rank
     /// KV cache on 16 GB MI50. Only shrinks.
@@ -365,6 +371,7 @@ pub async fn serve(cfg: ServeConfig, registry: Registry) -> Result<()> {
             topology_tag,
             prefix_cache,
             boot,
+            decode_batch_window_us: cfg.decode_batch_window_us,
         },
     );
 
@@ -646,6 +653,7 @@ async fn serve_inner_gemma4(
             topology_tag,
             prefix_cache,
             boot,
+            decode_batch_window_us: cfg.decode_batch_window_us,
         },
     );
 
@@ -666,8 +674,6 @@ pub(crate) async fn serve_inner_v2(
     gguf: GgufFile,
     boot: crate::serve_common::BootMetadata,
 ) -> Result<()> {
-    use flambeau_runtime::ModelDriver;
-
     let gguf_arch_owned = gguf
         .metadata_str("general.architecture")
         .unwrap_or("")
@@ -698,14 +704,9 @@ pub(crate) async fn serve_inner_v2(
         inflight_slots,
         prefill_ubatch,
         max_queue_depth,
-        "v2: pre-allocating inflight slot pool"
+        "v2: building shared Session with max_slots=N"
     );
 
-    // `GgufFile` is single-owner (mmap handle), but `Session<A>::new`
-    // wraps it in `Arc` internally; re-opening per slot is the
-    // simplest way to feed N owned `GgufFile`s without making the
-    // type Cloneable. Open cost is two syscalls + an mmap walk —
-    // dominated by the per-slot weight-upload that follows.
     drop(gguf);
     let gguf_path = cfg.gguf_path.clone();
     let chat_stops = crate::v2_handle::chat_stops_for(gguf_arch);
@@ -714,26 +715,31 @@ pub(crate) async fn serve_inner_v2(
     } else {
         None
     };
+
+    let shared_gguf = GgufFile::open(&gguf_path)
+        .with_context(|| "v2: re-open GGUF for shared Session".to_string())?;
+    let shared_session: Box<dyn crate::v2_handle::V2BatchableSession> = create_v2_shared_session(
+        gguf_arch,
+        shared_gguf,
+        topology.clone(),
+        cfg.ctx_cap,
+        prefill_ubatch,
+        inflight_slots,
+    )
+    .with_context(|| format!("v2 shared session ({gguf_arch})"))?;
+    let shared: crate::v2_handle::SharedV2Session =
+        Arc::new(Mutex::new(shared_session));
+
     let mut inflight_pool: Vec<Mutex<Box<dyn crate::Session>>> =
         Vec::with_capacity(inflight_slots);
     for slot_idx in 0..inflight_slots {
-        let slot_gguf = GgufFile::open(&gguf_path)
-            .with_context(|| format!("re-open GGUF for v2 slot {slot_idx}"))?;
-        let driver: Box<dyn ModelDriver> = create_v2_driver(
-            gguf_arch,
-            slot_gguf,
-            topology.clone(),
-            cfg.ctx_cap,
-            prefill_ubatch,
-            1,
-        )
-        .with_context(|| format!("v2 driver slot {slot_idx} ({gguf_arch})"))?;
-        let session: Box<dyn crate::Session> = Box::new(crate::v2_handle::V2Session {
-            driver,
+        let conv: Box<dyn crate::Session> = Box::new(crate::v2_handle::V2Conv {
+            shared: Arc::clone(&shared),
+            slot_id: slot_idx,
             bos_id,
             chat_stops,
         });
-        inflight_pool.push(Mutex::new(session));
+        inflight_pool.push(Mutex::new(conv));
     }
 
     let cluster: Arc<HipCluster> =
@@ -743,10 +749,6 @@ pub(crate) async fn serve_inner_v2(
     let prefix_cache =
         crate::serve_common::build_prefix_cache(&cfg, topology_tag.mesh_kind);
 
-    // `--embedding-model` plumbing is topology-independent — the
-    // embedding GGUF loads onto a single device and the handle runs
-    // its own pooled-forward. Wire it in here so v2 chat servers
-    // can serve `/v1/embeddings` alongside `/v1/chat/completions`.
     let embedding = load_embedding_qwen3(&cfg, &cluster)?;
     let embedding_rank = embedding.as_ref().map(|(_, _, r)| *r);
     let embedding = embedding.map(|(m, t, _)| (m, t));
@@ -755,6 +757,8 @@ pub(crate) async fn serve_inner_v2(
         gguf_arch: gguf_arch_to_static(gguf_arch),
         topology: topology_label,
         chat_stops,
+        shared: Arc::clone(&shared),
+        vocab: model_cfg.vocab_size,
     }) as crate::qwen3moe_handle::LoadedModel;
 
     let state = crate::serve_common::build_server_state(
@@ -768,12 +772,13 @@ pub(crate) async fn serve_inner_v2(
             embedding,
             embedding_rank,
             gpu_sampler: false,
-            batched_decode: false,
+            batched_decode: true,
             max_queue_depth,
             prefill_ubatch,
             topology_tag,
             prefix_cache,
             boot,
+            decode_batch_window_us: cfg.decode_batch_window_us,
         },
     );
 
@@ -836,14 +841,14 @@ fn topology_from_mesh(
     }
 }
 
-fn create_v2_driver(
+fn create_v2_shared_session(
     gguf_arch: &str,
     file: GgufFile,
     topology: flambeau_forward::Topology,
     ctx_cap: Option<usize>,
     prefill_ubatch: usize,
     max_slots: usize,
-) -> Result<Box<dyn flambeau_runtime::ModelDriver>> {
+) -> Result<Box<dyn crate::v2_handle::V2BatchableSession>> {
     use flambeau_forward::Session;
     match gguf_arch {
         "qwen35" => {

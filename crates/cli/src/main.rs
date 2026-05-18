@@ -124,6 +124,11 @@ enum Cmd {
         /// returning 503 + Retry-After. 0 disables (legacy).
         #[arg(long = "max-queue-depth", env = "FLAMBEAU_MAX_QUEUE_DEPTH", default_value_t = 16)]
         max_queue_depth: usize,
+        /// Decode-batching coalescence window (microseconds). The
+        /// leader sleeps this long before draining the pending-decode
+        /// queue so concurrent requests join the same batched forward.
+        #[arg(long = "decode-batch-window-us", env = "FLAMBEAU_DECODE_BATCH_WINDOW_US", default_value_t = 1500)]
+        decode_batch_window_us: u64,
         /// Clamp the model's `context_length` to this many tokens.
         /// Useful for preventing per-slot KV-cache OOM on consumer VRAM.
         /// Only shrinks; explicit increases are ignored.
@@ -256,6 +261,7 @@ fn main() -> Result<()> {
             inflight_slots,
             prefill_ubatch,
             max_queue_depth,
+            decode_batch_window_us,
             ctx_cap,
             no_gpu_sampler,
             no_batched_decode,
@@ -276,6 +282,7 @@ fn main() -> Result<()> {
             inflight_slots,
             prefill_ubatch,
             max_queue_depth,
+            decode_batch_window_us,
             ctx_cap,
             gpu_sampler: !no_gpu_sampler,
             batched_decode: !no_batched_decode,
@@ -306,6 +313,7 @@ struct ServeArgs {
     inflight_slots: usize,
     prefill_ubatch: usize,
     max_queue_depth: usize,
+    decode_batch_window_us: u64,
     ctx_cap: Option<usize>,
     gpu_sampler: bool,
     batched_decode: bool,
@@ -491,6 +499,7 @@ fn serve_cmd(args: ServeArgs) -> Result<()> {
         inflight_slots,
         prefill_ubatch,
         max_queue_depth,
+        decode_batch_window_us,
         ctx_cap,
         gpu_sampler,
         batched_decode,
@@ -585,6 +594,7 @@ fn serve_cmd(args: ServeArgs) -> Result<()> {
         inflight_slots,
         prefill_ubatch,
         max_queue_depth,
+        decode_batch_window_us,
         ctx_cap,
         gpu_sampler,
         batched_decode,

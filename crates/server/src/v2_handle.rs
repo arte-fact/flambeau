@@ -1,23 +1,117 @@
-//! Server binding for the v2 forward stack. `V2Model` + `V2Session`
-//! wrap any `Box<dyn ModelDriver>` produced from a `Session<A>` — the
-//! arch dispatch lives in `serve::create_v2_driver`. Mirrors the
-//! `gemma4_handle` shape; once the legacy gemma4 path retires, this
-//! is the only adapter.
+//! v2 server binding. One shared `Session<A>` carries N inflight
+//! conversation slots; each `V2Conv` is a per-conversation handle
+//! (slot_id + Arc to the shared session) that the server's inflight
+//! pool stores as `Box<dyn crate::Session>`.
+//!
+//! `V2BatchableSession` is an `A`-erasing trait so the type-erased
+//! pool can dispatch batched decodes without the server crate growing
+//! a generic parameter. `Session<A>` for every arch satisfies it via
+//! the blanket impl below.
 
 #![cfg(feature = "hip")]
 
+use std::sync::Arc;
+
 use anyhow::Result;
+use flambeau_forward::runtime::{Arch, Session};
 use flambeau_runtime::ModelDriver;
+use tokio::sync::Mutex;
 
-use crate::model_handle::{Model, Session};
+use crate::model_handle::{Model, Session as ServerSession};
 
-/// Topology-tag-bearing model marker for every v2 arch. The actual
-/// driver lives on each `V2Session` (Session<A> bundles weights + KV
-/// per-worker, so each inflight slot has its own Session<A>).
+/// Arch-erased trait around `Session<A>` so the server's v2 pool can
+/// dispatch slot-aware forward calls without knowing which `A` is
+/// underneath. Every method routes to the matching `Session<A>` API.
+pub trait V2BatchableSession: Send {
+    fn forward_one_token_into_slot(
+        &mut self,
+        token: u32,
+        position: usize,
+        slot_id: usize,
+        out: &mut Vec<f32>,
+    ) -> Result<()>;
+
+    fn forward_prefill_into_slot(
+        &mut self,
+        tokens: &[u32],
+        start_position: usize,
+        slot_id: usize,
+        out: &mut Vec<f32>,
+    ) -> Result<()>;
+
+    /// Drive N concurrent decodes through one Session forward. After
+    /// return, logits rows are reachable via [`Self::logits_row`] with
+    /// the model's vocab. Slot ids must be distinct.
+    fn forward_decode_batched(
+        &mut self,
+        slots: &[(u32, usize, usize)],
+    ) -> Result<()>;
+
+    fn logits_row(&self, i: usize, vocab: usize) -> &[f32];
+
+    fn reset_kv_slot(&mut self, slot_id: usize) -> Result<()>;
+
+    fn dispose_in_place(&mut self) -> Result<()>;
+}
+
+impl<A: Arch> V2BatchableSession for Session<A> {
+    fn forward_one_token_into_slot(
+        &mut self,
+        token: u32,
+        position: usize,
+        slot_id: usize,
+        out: &mut Vec<f32>,
+    ) -> Result<()> {
+        Session::forward_one_token_logits_slot(self, token, position, slot_id, out)
+    }
+
+    fn forward_prefill_into_slot(
+        &mut self,
+        tokens: &[u32],
+        start_position: usize,
+        slot_id: usize,
+        out: &mut Vec<f32>,
+    ) -> Result<()> {
+        Session::forward_prefill_logits_slot(self, tokens, start_position, slot_id, out)
+    }
+
+    fn forward_decode_batched(
+        &mut self,
+        slots: &[(u32, usize, usize)],
+    ) -> Result<()> {
+        Session::forward_decode_batched(self, slots)
+    }
+
+    fn logits_row(&self, i: usize, vocab: usize) -> &[f32] {
+        Session::logits_row(self, i, vocab)
+    }
+
+    fn reset_kv_slot(&mut self, slot_id: usize) -> Result<()> {
+        Session::reset_kv_slot(self, slot_id)
+    }
+
+    fn dispose_in_place(&mut self) -> Result<()> {
+        Session::dispose_in_place(self)
+    }
+}
+
+/// Handle to the single shared v2 session. Wrapped in `tokio::sync::Mutex`
+/// so handlers can `blocking_lock` from sync code; the lock is held for
+/// the duration of one forward call.
+pub type SharedV2Session = Arc<Mutex<Box<dyn V2BatchableSession>>>;
+
+/// Topology-tag-bearing model marker for every v2 arch. Holds the
+/// shared session so `Model::forward_decode_batched` can dispatch N
+/// concurrent decodes through one Session forward.
 pub struct V2Model {
     pub gguf_arch: &'static str,
     pub topology: &'static str,
     pub chat_stops: &'static [&'static str],
+    pub shared: SharedV2Session,
+    /// Model vocab — set at boot from GGUF metadata so the
+    /// `forward_decode_batched` impl can slice the `[N, vocab]` logits
+    /// buffer without re-reading.
+    pub vocab: usize,
 }
 
 impl Model for V2Model {
@@ -27,32 +121,48 @@ impl Model for V2Model {
     fn as_any(&self) -> &dyn std::any::Any {
         self
     }
-    /// v2 has no batched-decode kernel yet. Fall through to N=1 via
-    /// `Session::decode_one_logits` for each pending slot.
-    /// Tracked as [P9-OUT batched-decode].
     fn supports_scheduler_batching(&self) -> bool {
-        false
+        true
     }
     fn forward_decode_batched(
         &self,
         _ctx: &dyn crate::model_handle::SessionContext,
-        inflights: &mut [&mut dyn crate::model_handle::Session],
+        _inflights: &mut [&mut dyn ServerSession],
         slots: &[crate::model_handle::BatchSlot],
         logits_refs: &mut [&mut Vec<f32>],
     ) -> Result<()> {
-        if slots.len() != inflights.len() || slots.len() != logits_refs.len() {
+        if slots.len() != logits_refs.len() {
             anyhow::bail!(
-                "V2Model::forward_decode_batched: mismatched slice lengths \
-                 (slots={}, inflights={}, logits_refs={})",
+                "V2Model::forward_decode_batched: slots={} logits_refs={}",
                 slots.len(),
-                inflights.len(),
                 logits_refs.len(),
             );
         }
-        for (i, slot) in slots.iter().enumerate() {
+        if slots.is_empty() {
+            return Ok(());
+        }
+        let n = slots.len();
+        let tuples: Vec<(u32, usize, usize)> = slots
+            .iter()
+            .map(|s| (s.token_id, s.position, s.idx))
+            .collect();
+        let single_slot = n == 1;
+        let vocab = self.vocab;
+        let mut shared = self.shared.blocking_lock();
+        if single_slot {
+            // N=1: Session::forward_decode_batched would refuse (its
+            // sanity check forces distinct slot_ids for N>1); route
+            // through forward_one_token_into_slot directly.
+            let (token, position, slot_id) = tuples[0];
+            let out: &mut Vec<f32> = logits_refs[0];
+            return shared.forward_one_token_into_slot(token, position, slot_id, out);
+        }
+        shared.forward_decode_batched(&tuples)?;
+        for i in 0..n {
+            let row = shared.logits_row(i, vocab);
             let out: &mut Vec<f32> = logits_refs[i];
             out.clear();
-            inflights[i].decode_one_logits(slot.token_id, slot.position, out)?;
+            out.extend_from_slice(row);
         }
         Ok(())
     }
@@ -61,20 +171,24 @@ impl Model for V2Model {
     }
 }
 
-pub struct V2Session {
-    pub driver: Box<dyn ModelDriver>,
+/// Per-conversation handle in the v2 inflight pool. Owns nothing
+/// device-side; the shared session is held collectively by V2Model +
+/// every V2Conv via Arc.
+pub struct V2Conv {
+    pub shared: SharedV2Session,
+    pub slot_id: usize,
     pub bos_id: Option<u32>,
     pub chat_stops: &'static [&'static str],
 }
 
-impl Session for V2Session {
+impl ServerSession for V2Conv {
     fn reset_for_next_request(&mut self) -> Result<()> {
-        self.driver.reset_kv()
+        let mut shared = self.shared.blocking_lock();
+        shared.reset_kv_slot(self.slot_id)
     }
 
     fn dispose(self: Box<Self>) -> Result<()> {
-        let mut driver = self.driver;
-        driver.dispose()
+        Ok(())
     }
 
     fn as_any(&self) -> &dyn std::any::Any {
@@ -85,7 +199,7 @@ impl Session for V2Session {
     }
 
     fn as_model_driver_mut(&mut self) -> Option<&mut dyn ModelDriver> {
-        Some(self.driver.as_mut())
+        Some(self as &mut dyn ModelDriver)
     }
 
     fn decode_one_logits(
@@ -95,8 +209,8 @@ impl Session for V2Session {
         logits_out: &mut Vec<f32>,
     ) -> Result<()> {
         logits_out.clear();
-        self.driver
-            .forward_one_token_logits(token, position, logits_out)
+        let mut shared = self.shared.blocking_lock();
+        shared.forward_one_token_into_slot(token, position, self.slot_id, logits_out)
     }
 
     fn bos_id(&self) -> Option<u32> {
@@ -108,32 +222,82 @@ impl Session for V2Session {
     }
 }
 
+fn argmax(logits: &[f32]) -> u32 {
+    let (mut best_i, mut best_v) = (0_u32, f32::NEG_INFINITY);
+    for (i, &l) in logits.iter().enumerate() {
+        if l > best_v {
+            best_v = l;
+            best_i = i as u32;
+        }
+    }
+    best_i
+}
+
+impl ModelDriver for V2Conv {
+    fn forward_prefill(&mut self, tokens: &[u32], start_position: usize) -> Result<u32> {
+        let mut buf = Vec::new();
+        self.forward_prefill_logits(tokens, start_position, &mut buf)?;
+        Ok(argmax(&buf))
+    }
+
+    fn forward_one_token(&mut self, token_id: u32, position: usize) -> Result<u32> {
+        let mut buf = Vec::new();
+        self.forward_one_token_logits(token_id, position, &mut buf)?;
+        Ok(argmax(&buf))
+    }
+
+    fn forward_prefill_logits(
+        &mut self,
+        tokens: &[u32],
+        start_position: usize,
+        logits_out: &mut Vec<f32>,
+    ) -> Result<()> {
+        let mut shared = self.shared.blocking_lock();
+        shared.forward_prefill_into_slot(tokens, start_position, self.slot_id, logits_out)
+    }
+
+    fn forward_one_token_logits(
+        &mut self,
+        token_id: u32,
+        position: usize,
+        logits_out: &mut Vec<f32>,
+    ) -> Result<()> {
+        let mut shared = self.shared.blocking_lock();
+        shared.forward_one_token_into_slot(token_id, position, self.slot_id, logits_out)
+    }
+
+    fn vocab_size(&self) -> usize {
+        0
+    }
+
+    fn reset_kv(&mut self) -> Result<()> {
+        let mut shared = self.shared.blocking_lock();
+        shared.reset_kv_slot(self.slot_id)
+    }
+
+    fn dispose(&mut self) -> Result<()> {
+        Ok(())
+    }
+}
+
 /// Chat-template stop markers per supported v2 arch. Empty slice for
 /// archs whose tokenizers' EOS handling is sufficient.
 pub fn chat_stops_for(gguf_arch: &str) -> &'static [&'static str] {
     match gguf_arch {
-        "gemma3" | "gemma4" | "gemma4-26b-a4b" | "gemma4-31b" | "gemma4-9b" | "gemma4-2b" => {
-            // Mirror of `gemma4_handle::Gemma4Session::chat_stop_markers`.
-            &[
-                "<end_of_turn>",
-                "<turn|>",
-                "<|turn>",
-                "<|end_of_turn|>",
-                "<|turn|>",
-                "<|endoftext|>",
-                "<endoftext>",
-            ]
-        }
+        "gemma3" | "gemma4" | "gemma4-26b-a4b" | "gemma4-31b" | "gemma4-9b" | "gemma4-2b" => &[
+            "<end_of_turn>",
+            "<turn|>",
+            "<|turn>",
+            "<|end_of_turn|>",
+            "<|turn|>",
+            "<|endoftext|>",
+            "<endoftext>",
+        ],
         _ => &[],
     }
 }
 
 /// Whether this arch wants BOS prepended to every fresh prompt.
-/// Gemma4 mandates it (llama.cpp #21500 forces add_bos regardless of
-/// GGUF). Qwen3 / qwen35moe set `tokenizer.ggml.add_bos_token = false`
-/// — the chat template doesn't include BOS and prepending one shifts
-/// position embeddings and confuses some checkpoints (Qwen3.6-27B
-/// emits EOS immediately).
 pub fn wants_bos_prepend(gguf_arch: &str) -> bool {
     matches!(
         gguf_arch,

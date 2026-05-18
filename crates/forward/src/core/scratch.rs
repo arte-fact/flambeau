@@ -397,13 +397,12 @@ impl ScratchPool {
             return Ok(());
         }
         let f32 = 4;
-        let state_bytes = g.num_v_heads * g.head_k_dim * g.head_v_dim * f32;
-        let hist_bytes = (g.conv_kernel - 1) * g.conv_channels * f32;
+        let n_slots = self.config.max_slots.max(1);
+        let state_bytes = n_slots * g.num_v_heads * g.head_k_dim * g.head_v_dim * f32;
+        let hist_bytes = n_slots * (g.conv_kernel - 1) * g.conv_channels * f32;
         let zero_buf = vec![0u8; state_bytes.max(hist_bytes)];
         let stream = device.default_stream();
         for ls in &self.gdn_state {
-            // SAFETY: `ls.state` / `ls.conv_history` were allocated for
-            // state_bytes / hist_bytes in `new`; zero_buf >= both.
             unsafe {
                 device
                     .memcpy_async(
@@ -426,6 +425,56 @@ impl ScratchPool {
             }
         }
         flambeau_core::Stream::synchronize(stream).context("sync gdn reset")?;
+        Ok(())
+    }
+
+    /// Zero one slot's GDN state + conv-history across every layer.
+    /// Used by the server's shared-Session pool to reset a single
+    /// conversation slot without touching others. No-op for non-GDN
+    /// archs or when the slot index is out of range.
+    pub fn reset_gdn_state_slot(&self, slot_id: usize, device: &HipDevice) -> Result<()> {
+        let Some(g) = self.config.gdn else {
+            return Ok(());
+        };
+        if self.gdn_state.is_empty() {
+            return Ok(());
+        }
+        let n_slots = self.config.max_slots.max(1);
+        if slot_id >= n_slots {
+            anyhow::bail!(
+                "reset_gdn_state_slot: slot_id {slot_id} >= max_slots {n_slots}"
+            );
+        }
+        let f32 = 4;
+        let state_bytes_per_slot = g.num_v_heads * g.head_k_dim * g.head_v_dim * f32;
+        let hist_bytes_per_slot = (g.conv_kernel - 1) * g.conv_channels * f32;
+        let zero_buf = vec![0u8; state_bytes_per_slot.max(hist_bytes_per_slot)];
+        let stream = device.default_stream();
+        for ls in &self.gdn_state {
+            let state_off = ls.state.offset_bytes(slot_id * state_bytes_per_slot);
+            let hist_off = ls.conv_history.offset_bytes(slot_id * hist_bytes_per_slot);
+            unsafe {
+                device
+                    .memcpy_async(
+                        stream,
+                        CopyDirection::HostToDevice,
+                        state_off,
+                        DevicePtr(zero_buf.as_ptr() as usize),
+                        state_bytes_per_slot,
+                    )
+                    .context("reset gdn state slot")?;
+                device
+                    .memcpy_async(
+                        stream,
+                        CopyDirection::HostToDevice,
+                        hist_off,
+                        DevicePtr(zero_buf.as_ptr() as usize),
+                        hist_bytes_per_slot,
+                    )
+                    .context("reset gdn conv_history slot")?;
+            }
+        }
+        flambeau_core::Stream::synchronize(stream).context("sync gdn reset slot")?;
         Ok(())
     }
 }

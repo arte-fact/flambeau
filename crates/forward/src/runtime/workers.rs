@@ -98,6 +98,10 @@ enum Command {
     ResetKv {
         reply: SyncSender<Result<()>>,
     },
+    ResetKvSlot {
+        slot_id: usize,
+        reply: SyncSender<Result<()>>,
+    },
     Shutdown,
 }
 
@@ -159,6 +163,10 @@ impl<A: Arch> WorkerHandle<A> {
                         let res = state.pool.reset_gdn_state(&state.device);
                         let _ = reply.send(res);
                     }
+                    Command::ResetKvSlot { slot_id, reply } => {
+                        let res = state.pool.reset_gdn_state_slot(slot_id, &state.device);
+                        let _ = reply.send(res);
+                    }
                     Command::Shutdown => break,
                 }
             }
@@ -210,6 +218,19 @@ impl<A: Arch> WorkerHandle<A> {
         let (reply_tx, reply_rx) = mpsc::sync_channel::<Result<()>>(1);
         self.cmd_tx
             .send(Command::ResetKv { reply: reply_tx })
+            .map_err(|e| anyhow::anyhow!("worker channel closed: {e}"))?;
+        Ok(reply_rx)
+    }
+
+    /// Queue a per-slot ResetKv command. Each worker zeroes only the
+    /// requested slot's GDN state + conv-history across every layer.
+    pub fn send_reset_kv_slot(&self, slot_id: usize) -> Result<Receiver<Result<()>>> {
+        let (reply_tx, reply_rx) = mpsc::sync_channel::<Result<()>>(1);
+        self.cmd_tx
+            .send(Command::ResetKvSlot {
+                slot_id,
+                reply: reply_tx,
+            })
             .map_err(|e| anyhow::anyhow!("worker channel closed: {e}"))?;
         Ok(reply_rx)
     }

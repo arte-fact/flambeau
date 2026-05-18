@@ -176,6 +176,10 @@ pub struct ServerState {
     /// `--batched-decode` (default true). When true, concurrent decode
     /// requests aggregate via the scheduler leader.
     pub batched_decode: bool,
+    /// `--decode-batch-window-us` (default 1500). Leader sleep before
+    /// draining the pending-decode queue, so concurrent requests join
+    /// the same batched forward.
+    pub decode_batch_window_us: u64,
     /// Per-iteration agent-loop telemetry. Ring buffer; surfaced
     /// read-only at `GET /v1/agent/stats`.
     pub agent_stats: crate::agent_stats::AgentStatsRing,
@@ -800,7 +804,9 @@ impl ServerState {
                 })
                 .count();
             if n_others_active > 0 {
-                std::thread::sleep(std::time::Duration::from_micros(1500));
+                std::thread::sleep(std::time::Duration::from_micros(
+                    self.decode_batch_window_us,
+                ));
             }
 
             // **#276 fix** — drain-dispatch-loop with atomic empty-drop.

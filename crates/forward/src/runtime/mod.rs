@@ -245,6 +245,68 @@ impl<A: Arch> Session<A> {
         Ok(())
     }
 
+    /// Zero GDN state + conv history for one inflight slot only. Used
+    /// by the server's shared-Session pool when a single conversation
+    /// resets without disturbing peers.
+    pub fn reset_kv_slot(&mut self, slot_id: usize) -> Result<()> {
+        let rxs: Vec<_> = self
+            .handles
+            .iter()
+            .map(|h| h.send_reset_kv_slot(slot_id))
+            .collect::<Result<_>>()?;
+        for rx in rxs {
+            rx.recv()
+                .map_err(|e| anyhow!("reset_kv_slot reply channel closed: {e}"))??;
+        }
+        Ok(())
+    }
+
+    /// Single-token decode into a specific KV/GDN slot. Mirrors
+    /// `forward_one_token_logits` but routes the write to `slot_id`.
+    pub fn forward_one_token_logits_slot(
+        &mut self,
+        token: u32,
+        position: usize,
+        slot_id: usize,
+        out: &mut Vec<f32>,
+    ) -> Result<()> {
+        self.forward(&[token], &[position], &[slot_id])?;
+        out.clear();
+        out.extend_from_slice(&self.last_logits);
+        Ok(())
+    }
+
+    /// Chunked prefill into a specific slot. Each chunk is forwarded
+    /// with `slot_ids = [slot_id; chunk_len]`; the slot's KV slab
+    /// receives the full prompt's K/V rows, and GDN state advances
+    /// only for that slot.
+    pub fn forward_prefill_logits_slot(
+        &mut self,
+        tokens: &[u32],
+        start_position: usize,
+        slot_id: usize,
+        out: &mut Vec<f32>,
+    ) -> Result<()> {
+        if tokens.is_empty() {
+            anyhow::bail!("Session::forward_prefill_logits_slot: empty tokens");
+        }
+        let chunk_size = self.prefill_ubatch;
+        let mut pos = start_position;
+        let mut i = 0;
+        while i < tokens.len() {
+            let end = (i + chunk_size).min(tokens.len());
+            let chunk_len = end - i;
+            let chunk_positions: Vec<usize> = (0..chunk_len).map(|k| pos + k).collect();
+            let chunk_slots = vec![slot_id; chunk_len];
+            self.forward(&tokens[i..end], &chunk_positions, &chunk_slots)?;
+            pos += chunk_len;
+            i = end;
+        }
+        out.clear();
+        out.extend_from_slice(&self.last_logits);
+        Ok(())
+    }
+
     /// Logits emitted by the most recent forward call. For prefill /
     /// single decode this is a single `vocab` row. For batched-decode
     /// (distinct slot_ids) it is `N * vocab` row-major.
