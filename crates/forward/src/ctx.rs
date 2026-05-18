@@ -214,7 +214,7 @@ pub struct GdnWeights {
     pub ssm_dt_bias: Tensor<F32>,
     pub ssm_a: Tensor<F32>,
     pub ssm_conv1d: Tensor<F32>,
-    pub ssm_norm_w: Tensor<F16>,
+    pub ssm_norm_w: Tensor<F32>,
     pub dims: GdnDims,
     pub rms_eps: f32,
     /// `false` for cyclic `ggml_repeat_4d` (qwen3.5/3.6); `true` for

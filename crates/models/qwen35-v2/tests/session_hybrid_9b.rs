@@ -14,7 +14,7 @@ use flambeau_quant::GgufFile;
 use flambeau_qwen35_v2::Qwen35V2;
 
 const MODEL_PATH: &str = "/artefact/models/Qwen3.5-9B-Q4_1.gguf";
-const EXPECTED_ARGMAX: usize = 248044;
+const EXPECTED_ARGMAX: usize = 5328;
 
 #[test]
 fn session_qwen35_9b_pp2tp2_argmax_matches_sd() {

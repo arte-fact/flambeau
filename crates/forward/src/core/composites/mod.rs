@@ -7,7 +7,6 @@ pub mod embed;
 pub mod gdn;
 pub mod moe_ffn;
 pub mod output_head;
-pub mod probe;
 pub mod residual_add;
 pub mod rmsnorm;
 pub mod standard_attn;

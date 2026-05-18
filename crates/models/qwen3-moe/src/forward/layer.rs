@@ -354,6 +354,31 @@ pub fn forward_layer_decode(
     )
     .context("fused post-attn add+rmsnorm")?;
     flambeau_backend_hip::profile::mark("layer_post_norm", device, stream)?;
+    if let Ok(target) = std::env::var("FLAMBEAU_PROBE_LEGACY_MID_F16")
+        .map_err(|_| ())
+        .and_then(|s| s.parse::<usize>().map_err(|_| ()))
+    {
+        if target == il {
+            use flambeau_core::{CopyDirection, Device, DevicePtr, Stream};
+            let n = hidden.min(16);
+            let mut host = vec![0u16; n];
+            unsafe {
+                device.memcpy_async(
+                    stream,
+                    CopyDirection::DeviceToHost,
+                    DevicePtr(host.as_mut_ptr() as usize),
+                    scratch.mid_f16,
+                    n * 2,
+                )?;
+            }
+            Stream::synchronize(stream)?;
+            let head: Vec<f32> = host
+                .iter()
+                .map(|&b| half::f16::from_bits(b).to_f32())
+                .collect();
+            eprintln!("[legacy mid_f16 il={il}] head[0..{n}] = {head:?}");
+        }
+    }
     if dev_flag("FLAMBEAU_TP_LAYER0_BISECT") && il == 0 {
         use flambeau_core::CopyDirection;
         for (label, ptr) in [

@@ -106,8 +106,12 @@ pub fn load_gdn_layer(
 
     let attn_norm =
         upload_dequant_to_f16(file, device, spec.attn_norm_name, spec.hidden, allocs)?;
-    let ssm_norm_w =
-        upload_dequant_to_f16(file, device, spec.ssm_norm_name, g.head_v_dim, allocs)?;
+    // ssm_norm is consumed by `rmsnorm_f32` inside the GDN block,
+    // so the weight must be uploaded as F32. (Earlier dequant-to-F16
+    // landed in this slot was the v2 chained-prefill bug — the
+    // kernel reads F32 bytes; F16 bytes get reinterpreted as
+    // ~1/250 the correct values, collapsing the GDN output.)
+    let ssm_norm_w = upload_f32_tensor(file, device, spec.ssm_norm_name, g.head_v_dim, allocs)?;
 
     // Global K-head count for the fused-QKV unpacking: under
     // KReplicated `g.num_k_heads` is already the global count; under
