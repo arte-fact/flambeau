@@ -7,7 +7,8 @@ use flambeau_core::{Device, DevicePtr};
 /// `q_width` / `kv_width` are PER-RANK under TP (caller divides by
 /// tp_size). `num_layers` is the count of owned KV slots — PP rank
 /// owning a layer slice passes the slice length, not the global total.
-#[derive(Clone, Copy, Debug)]
+/// `max_experts` sizes the MoE router logits slot; 0 for dense-only.
+#[derive(Clone, Copy, Debug, Default)]
 pub struct ScratchConfig {
     pub hidden: usize,
     pub intermediate: usize,
@@ -16,6 +17,7 @@ pub struct ScratchConfig {
     pub vocab: usize,
     pub max_seq_len: usize,
     pub num_layers: usize,
+    pub max_experts: usize,
 }
 
 #[derive(Clone, Copy)]
@@ -49,6 +51,11 @@ pub struct ScratchPool {
 
     pub logits_f32_dev: DevicePtr,
     pub position_i32: DevicePtr,
+
+    /// `[max_experts]` F32. NULL when `config.max_experts == 0`.
+    pub router_logits_f32: DevicePtr,
+    /// `[hidden]` F16 MoE per-expert accumulator. NULL when `max_experts == 0`.
+    pub moe_accum_f16: DevicePtr,
 
     pub kv_caches: Vec<KvCache>,
 
@@ -99,6 +106,14 @@ impl ScratchPool {
         let logits_f32_dev = alloc_bytes(config.vocab * f32)?;
         let position_i32 = alloc_bytes(i32_b)?;
 
+        let (router_logits_f32, moe_accum_f16) = if config.max_experts > 0 {
+            let r = alloc_bytes(config.max_experts * f32)?;
+            let a = alloc_bytes(h * f16)?;
+            (r, a)
+        } else {
+            (DevicePtr::NULL, DevicePtr::NULL)
+        };
+
         let mut kv_caches = Vec::with_capacity(config.num_layers);
         for _ in 0..config.num_layers {
             let k = alloc_bytes(config.max_seq_len * kvw * f16)?;
@@ -126,6 +141,8 @@ impl ScratchPool {
             down_f32,
             logits_f32_dev,
             position_i32,
+            router_logits_f32,
+            moe_accum_f16,
             kv_caches,
             current_residual_is_a: true,
             allocs,

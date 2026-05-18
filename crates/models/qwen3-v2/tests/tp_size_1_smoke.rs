@@ -40,6 +40,7 @@ fn tp_size_1_logits_match_single_device() {
         vocab: model.config.vocab_size,
         max_seq_len,
         num_layers: model.config.num_layers,
+            max_experts: 0,
     };
 
     // Baseline.

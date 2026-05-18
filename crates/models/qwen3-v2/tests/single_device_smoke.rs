@@ -53,6 +53,7 @@ fn forward_one_token_produces_finite_non_constant_logits() {
         vocab: model.config.vocab_size,
         max_seq_len,
         num_layers: model.config.num_layers,
+            max_experts: 0,
     };
     let mut pool = ScratchPool::new(&device, cfg).expect("ScratchPool::new");
 

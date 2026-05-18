@@ -119,6 +119,7 @@ fn pp2_tp2_logits_match_single_device() {
             vocab: model.config.vocab_size,
             max_seq_len,
             num_layers: model.config.num_layers,
+            max_experts: 0,
         };
         let mut pool = ScratchPool::new(&device, cfg).expect("SD pool");
         let mut ctx = SingleDeviceForwardCtx::new(&device, stream, &reg, &mut pool);
@@ -182,6 +183,7 @@ fn pp2_tp2_logits_match_single_device() {
                     vocab: model.config.vocab_size,
                     max_seq_len,
                     num_layers: layer_end - layer_start,
+            max_experts: 0,
                 };
                 let mut pool = ScratchPool::new(&device, cfg)?;
 

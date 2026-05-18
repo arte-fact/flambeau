@@ -130,8 +130,20 @@ pub enum Activation {
     GeluTanh,
 }
 
+/// Routing: TopkRenorm (top-k by raw logit, then softmax over k).
+/// Matches qwen3.x / gemma4 / DeepSeek conventions; algebraically
+/// identical to `softmax(all)→topk→renorm` (memory:
+/// `moe_topk_softmax_equivalence`).
 pub struct MoeWeights {
-    pub _placeholder: (),
+    pub ffn_norm: Tensor<F16>,
+    pub router: QuantWeight,
+    pub experts_gate: Vec<QuantWeight>,
+    pub experts_up: Vec<QuantWeight>,
+    pub experts_down: Vec<QuantWeight>,
+    pub n_experts: usize,
+    pub experts_per_tok: usize,
+    pub activation: Activation,
+    pub rms_eps: f32,
 }
 
 /// `lm_head` may alias `token_embd` for tied heads.
