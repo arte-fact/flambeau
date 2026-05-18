@@ -99,6 +99,7 @@ fn load_with_shard(
                 window_size: 0,
                 rms_eps: config.rms_eps,
                 softmax_scale: None,
+                attn_q_gated: false,
             },
             shard,
             &mut allocs,

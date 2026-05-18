@@ -744,6 +744,13 @@ pub struct DenseAttnLayerSpec<'a> {
     pub window_size: i32,
     pub rms_eps: f32,
     pub softmax_scale: Option<f32>,
+    /// qwen3.5 / qwen3.6 / qwen3-Next: `attn_q` on disk has
+    /// `[2 * n_heads * head_dim, hidden]` rows in head-interleaved
+    /// `[head_i_Q | head_i_gate]` layout. The composite splits the
+    /// Q-projection output per head and applies a sigmoid gate after
+    /// attention. `false` for plain-Q arches (qwen3-Embedding,
+    /// gemma4 dense).
+    pub attn_q_gated: bool,
 }
 
 /// Builds per-rank `AttnWeights`. Under `ShardMode::Tp`, `n_heads` /
@@ -777,11 +784,14 @@ pub fn load_dense_attn_layer(
     let n_kv_heads_local = spec.n_kv_heads / n_ranks;
 
     let attn_norm = upload_dequant_to_f16(file, device, spec.attn_norm_name, spec.hidden, allocs)?;
+    // Gated `attn_q`: head-interleaved layout, so col-shard with
+    // doubled n_rows cleanly partitions heads + their gates.
+    let attn_q_rows = if spec.attn_q_gated { 2 * q_width } else { q_width };
     let attn_q = upload_col(
         file,
         device,
         spec.attn_q_name,
-        q_width,
+        attn_q_rows,
         spec.hidden,
         shard,
         allocs,
@@ -838,6 +848,7 @@ pub fn load_dense_attn_layer(
         window_size: spec.window_size,
         rms_eps: spec.rms_eps,
         softmax_scale: spec.softmax_scale,
+        attn_q_gated: spec.attn_q_gated,
     })
 }
 

@@ -108,6 +108,11 @@ pub struct EmbeddingWeights {
 
 pub struct AttnWeights {
     pub attn_norm: Tensor<F16>,
+    /// When `attn_q_gated`, the underlying tensor has
+    /// `[2 * n_heads * head_dim, hidden]` rows in head-interleaved
+    /// `[head_i_Q | head_i_gate]` layout; the composite splits the
+    /// matmul output per head and applies a sigmoid gate after
+    /// attention. Plain Q-only otherwise.
     pub attn_q: QuantWeight,
     pub attn_k: QuantWeight,
     /// `None` for gemma4-style "V = K via memcpy" layers (no attn_v
@@ -127,6 +132,9 @@ pub struct AttnWeights {
     pub rms_eps: f32,
     /// `None` ⇒ default `1/sqrt(head_dim)`.
     pub softmax_scale: Option<f32>,
+    /// `true` for qwen3.5 / qwen3.6 / qwen3-Next full-attention
+    /// layers (fused Q+gate in `attn_q`). `false` for plain Q.
+    pub attn_q_gated: bool,
 }
 
 pub struct FfnWeights {

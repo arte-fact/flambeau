@@ -22,6 +22,7 @@ pub use ops::add::{add_f16, add_f32};
 pub use ops::attn_decode::attn_decode_f16;
 pub use ops::attn_prefill::attn_prefill_f16;
 pub use ops::cast::{cast_f16_to_f32, cast_f32_to_f16};
+pub use ops::gated_attn::{sigmoid_mul_f16, split_q_gate_f16};
 pub use ops::kv_append::kv_append_f16;
 pub use ops::qmatmul::{qmatmul_q4_0, qmatmul_q4_1, qmatmul_q5_0, qmatmul_q5_1, qmatmul_q8_0};
 pub use ops::quantize::{quantize_f16_to_q8_1, quantize_f32_to_q8_1};

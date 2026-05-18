@@ -17,14 +17,6 @@ use flambeau_qwen35_v2::Qwen35V2;
 
 const MODEL_PATH: &str = "/artefact/models/Qwen3.5-9B-Q4_1.gguf";
 
-// Ignored: TP code path produces NaN logits on qwen35-9B-Q4_1 — the
-// loader changes are byte-equivalent at n_ranks=1 (verified by
-// short-circuiting to Replicated), so the divergence is upstream of
-// the GDN sharding. Most likely culprit: qwen35's gated `attn_q` (the
-// shared dense-attn loader reads only the Q half and ignores the
-// sigmoid-gate half; SD silently absorbs this, TP doesn't). Un-ignore
-// once dense-attn Q-gate handling lands.
-#[ignore]
 #[test]
 fn session_qwen35_9b_tp_size_2_runs() {
     let path = PathBuf::from(MODEL_PATH);

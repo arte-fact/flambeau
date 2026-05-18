@@ -248,6 +248,7 @@ mod tests {
                 window_size: 0,
                 rms_eps: RMS_EPS,
                 softmax_scale: None,
+                attn_q_gated: false,
             });
             ffn_weights.push(FfnWeights {
                 ffn_norm: allocs.upload_f16(&vec![1.0_f32; HIDDEN]),
@@ -270,6 +271,7 @@ mod tests {
             max_experts: 0,
             gdn: None,
             per_layer_kv_widths: None,
+            attn_q_gated: false,
         };
         let mut pool = ScratchPool::new(&device, cfg).expect("ScratchPool::new");
         let layout = ModelLayout {
@@ -426,6 +428,7 @@ mod tests {
             max_experts: 0,
             gdn: Some(dims),
             per_layer_kv_widths: None,
+            attn_q_gated: false,
         };
         let mut pool = ScratchPool::new(&device, cfg).expect("ScratchPool::new");
 
@@ -550,6 +553,7 @@ mod tests {
                 window_size: 0,
                 rms_eps: RMS_EPS,
                 softmax_scale: None,
+                attn_q_gated: false,
             });
 
             let mut experts_gate = Vec::with_capacity(N_EXPERTS);
@@ -597,6 +601,7 @@ mod tests {
             max_experts: N_EXPERTS,
             gdn: None,
             per_layer_kv_widths: None,
+            attn_q_gated: false,
         };
         let mut pool = ScratchPool::new(&device, cfg).expect("ScratchPool::new");
         let layout = ModelLayout {

@@ -80,6 +80,7 @@ impl Arch for Qwen35V2 {
             max_experts: 0,
             gdn: Some(local_gdn),
             per_layer_kv_widths: None,
+            attn_q_gated: true,
         }
     }
 

@@ -56,6 +56,7 @@ impl Arch for Qwen3V2 {
             max_experts: 0,
             gdn: None,
             per_layer_kv_widths: None,
+            attn_q_gated: false,
         }
     }
 

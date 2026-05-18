@@ -43,6 +43,7 @@ fn tp_size_1_logits_match_single_device() {
             max_experts: 0,
             gdn: None,
             per_layer_kv_widths: None,
+            attn_q_gated: false,
     };
 
     // Baseline.

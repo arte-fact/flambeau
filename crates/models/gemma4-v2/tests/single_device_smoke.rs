@@ -77,6 +77,7 @@ fn gemma4_31b_forward_one_token_produces_finite_non_constant_logits() {
         max_experts: 0,
         gdn: None,
         per_layer_kv_widths: None,
+        attn_q_gated: false,
     };
     let mut pool = ScratchPool::new(&device, scratch_cfg).expect("ScratchPool::new");
 

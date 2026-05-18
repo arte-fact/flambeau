@@ -77,12 +77,43 @@ pub fn standard_attn_local<H: TopologyHooks>(
 
     let act_mmq_null = unsafe { Tensor::<Q8_1>::from_raw(DevicePtr::NULL, 0) };
     let q_f32_buf = state.pool.attn_proj_f32;
-    let mut q_f32 = unsafe { Tensor::<F32>::from_raw(q_f32_buf, q_width) };
-    weights
-        .attn_q
-        .qmatmul(&norm_q8_1, &act_mmq_null, &mut q_f32, 1, hidden, q_width, &ops)?;
-    let mut q_f16 = unsafe { Tensor::<F16>::from_raw(state.pool.q_f16, q_width) };
-    flambeau_model_ops::cast_f32_to_f16(&q_f32, &mut q_f16, q_width, &ops)?;
+    if weights.attn_q_gated {
+        // Gated Q: matmul output is `[2 * q_width]` in head-interleaved
+        // `[head_i_Q | head_i_gate]` layout. Cast to F16 into the
+        // pool's `q_fused_f16` slot, then deinterleave per head.
+        let fused_n = 2 * q_width;
+        let mut q_fused_f32 = unsafe { Tensor::<F32>::from_raw(q_f32_buf, fused_n) };
+        weights.attn_q.qmatmul(
+            &norm_q8_1,
+            &act_mmq_null,
+            &mut q_fused_f32,
+            1,
+            hidden,
+            fused_n,
+            &ops,
+        )?;
+        let q_fused = unsafe { Tensor::<F16>::from_raw(state.pool.q_fused_f16, fused_n) };
+        let mut q_fused_mut = unsafe { Tensor::<F16>::from_raw(state.pool.q_fused_f16, fused_n) };
+        flambeau_model_ops::cast_f32_to_f16(&q_fused_f32, &mut q_fused_mut, fused_n, &ops)?;
+        let mut q_f16 = unsafe { Tensor::<F16>::from_raw(state.pool.q_f16, q_width) };
+        let mut gate_f16 = unsafe { Tensor::<F16>::from_raw(state.pool.gate_f16, q_width) };
+        flambeau_model_ops::split_q_gate_f16(
+            &q_fused,
+            &mut q_f16,
+            &mut gate_f16,
+            1,
+            weights.n_heads,
+            weights.head_dim,
+            &ops,
+        )?;
+    } else {
+        let mut q_f32 = unsafe { Tensor::<F32>::from_raw(q_f32_buf, q_width) };
+        weights
+            .attn_q
+            .qmatmul(&norm_q8_1, &act_mmq_null, &mut q_f32, 1, hidden, q_width, &ops)?;
+        let mut q_f16 = unsafe { Tensor::<F16>::from_raw(state.pool.q_f16, q_width) };
+        flambeau_model_ops::cast_f32_to_f16(&q_f32, &mut q_f16, q_width, &ops)?;
+    }
 
     let mut k_f32 = unsafe { Tensor::<F32>::from_raw(q_f32_buf, kv_width) };
     weights
@@ -267,6 +298,13 @@ pub fn standard_attn_local<H: TopologyHooks>(
         weights.window_size,
         &ops,
     )?;
+
+    if weights.attn_q_gated {
+        let gate = unsafe { Tensor::<F16>::from_raw(state.pool.gate_f16, q_width) };
+        // Alias attn_out: sigmoid_mul writes back into the same slot.
+        let attn_in = unsafe { Tensor::<F16>::from_raw(state.pool.attn_out_f16, q_width) };
+        flambeau_model_ops::sigmoid_mul_f16(&gate, &attn_in, &mut attn_out, q_width, &ops)?;
+    }
 
     let mut attn_out_q8_1 =
         unsafe { Tensor::<Q8_1>::from_raw(state.pool.attn_out_q8_1, q_width) };

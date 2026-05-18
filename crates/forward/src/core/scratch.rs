@@ -36,6 +36,11 @@ pub struct ScratchConfig {
     pub max_experts: usize,
     pub gdn: Option<GdnDims>,
     pub per_layer_kv_widths: Option<Vec<usize>>,
+    /// `true` when the arch has gated full-attention (qwen3.5 /
+    /// qwen3.6 / qwen3-Next). Drives allocation of the extra
+    /// `q_fused_f16` (2·q_width F16) + `gate_f16` (q_width F16)
+    /// scratch slots the split-then-sigmoid-gate path needs.
+    pub attn_q_gated: bool,
 }
 
 #[derive(Clone, Copy)]
@@ -58,6 +63,12 @@ pub struct ScratchPool {
     pub q_f16: DevicePtr,
     pub k_f16: DevicePtr,
     pub v_f16: DevicePtr,
+    /// `[2 * q_width]` F16 — fused `[Q | gate]` projection output for
+    /// gated full-attention arches. `DevicePtr::NULL` otherwise.
+    pub q_fused_f16: DevicePtr,
+    /// `[q_width]` F16 — per-head sigmoid gate for gated full-attn.
+    /// `DevicePtr::NULL` otherwise.
+    pub gate_f16: DevicePtr,
     pub attn_out_f16: DevicePtr,
     pub attn_out_q8_1: DevicePtr,
     pub attn_proj_f32: DevicePtr,
@@ -126,10 +137,19 @@ impl ScratchPool {
         let q_f16 = alloc_bytes(qw * f16)?;
         let k_f16 = alloc_bytes(kvw * f16)?;
         let v_f16 = alloc_bytes(kvw * f16)?;
+        let (q_fused_f16, gate_f16) = if config.attn_q_gated {
+            (alloc_bytes(2 * qw * f16)?, alloc_bytes(qw * f16)?)
+        } else {
+            (DevicePtr::NULL, DevicePtr::NULL)
+        };
         let attn_out_f16 = alloc_bytes(qw * f16)?;
         let attn_out_q8_1 = alloc_bytes(q8_1(qw))?;
-        // Reused for Q / K / V / output-proj F32 — size to the max.
-        let attn_proj_f32 = alloc_bytes(qw.max(kvw).max(h) * f32)?;
+        // Reused for Q / K / V / output-proj F32. Sized to fit the
+        // largest matmul output: 2·q_width under gated arches (the
+        // fused [Q | gate] projection), q_width / kv_width / hidden
+        // otherwise.
+        let q_or_fused = if config.attn_q_gated { 2 * qw } else { qw };
+        let attn_proj_f32 = alloc_bytes(q_or_fused.max(kvw).max(h) * f32)?;
 
         let gate_f32 = alloc_bytes(m * f32)?;
         let up_f32 = alloc_bytes(m * f32)?;
@@ -228,6 +248,8 @@ impl ScratchPool {
             q_f16,
             k_f16,
             v_f16,
+            q_fused_f16,
+            gate_f16,
             attn_out_f16,
             attn_out_q8_1,
             attn_proj_f32,

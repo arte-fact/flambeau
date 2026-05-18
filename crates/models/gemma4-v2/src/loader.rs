@@ -105,6 +105,7 @@ fn load_with_shard(
                 rms_eps: config.rms_eps,
                 // Gemma4: softmax_scale = 1.0, not 1/sqrt(head_dim).
                 softmax_scale: Some(1.0),
+                attn_q_gated: false,
             },
             shard,
             &mut allocs,
