@@ -28,6 +28,7 @@ pub fn launch<A: Arch>(
     file: GgufFile,
     topology: &Topology,
     ctx_cap: Option<usize>,
+    prefill_ubatch: usize,
 ) -> Result<Vec<WorkerHandle<A>>> {
     let file = Arc::new(file);
     match topology {
@@ -37,18 +38,19 @@ pub fn launch<A: Arch>(
                 WorkerRole::Sd,
                 Arc::clone(&file),
                 ctx_cap,
+                prefill_ubatch,
             )?;
             Ok(vec![h])
         }
-        Topology::Tp { devices } => launch_tp::<A>(devices, file, ctx_cap),
+        Topology::Tp { devices } => launch_tp::<A>(devices, file, ctx_cap, prefill_ubatch),
         Topology::Pp {
             devices,
             layer_split,
-        } => launch_pp::<A>(devices, layer_split.as_deref(), file, ctx_cap),
+        } => launch_pp::<A>(devices, layer_split.as_deref(), file, ctx_cap, prefill_ubatch),
         Topology::Hybrid {
             stages,
             layer_split,
-        } => launch_hybrid::<A>(stages, layer_split.as_deref(), file, ctx_cap),
+        } => launch_hybrid::<A>(stages, layer_split.as_deref(), file, ctx_cap, prefill_ubatch),
     }
 }
 
@@ -56,6 +58,7 @@ fn launch_tp<A: Arch>(
     devices: &[i32],
     file: Arc<GgufFile>,
     ctx_cap: Option<usize>,
+    prefill_ubatch: usize,
 ) -> Result<Vec<WorkerHandle<A>>> {
     let n = devices.len();
     let ar = Arc::new(ArCoordinator::new(n));
@@ -67,7 +70,7 @@ fn launch_tp<A: Arch>(
             ar: Arc::clone(&ar),
         };
         handles.push(
-            WorkerHandle::<A>::spawn(dev, role, Arc::clone(&file), ctx_cap)
+            WorkerHandle::<A>::spawn(dev, role, Arc::clone(&file), ctx_cap, prefill_ubatch)
                 .with_context(|| format!("TP rank {rank} on hip:{dev}"))?,
         );
     }
@@ -79,6 +82,7 @@ fn launch_pp<A: Arch>(
     layer_split: Option<&[usize]>,
     file: Arc<GgufFile>,
     ctx_cap: Option<usize>,
+    prefill_ubatch: usize,
 ) -> Result<Vec<WorkerHandle<A>>> {
     let n = devices.len();
     let split = match layer_split {
@@ -119,7 +123,7 @@ fn launch_pp<A: Arch>(
             peer_buffer: Arc::clone(&peer),
         };
         handles.push(
-            WorkerHandle::<A>::spawn(dev, role, Arc::clone(&file), ctx_cap)
+            WorkerHandle::<A>::spawn(dev, role, Arc::clone(&file), ctx_cap, prefill_ubatch)
                 .with_context(|| format!("PP rank {rank} on hip:{dev}"))?,
         );
     }
@@ -131,6 +135,7 @@ fn launch_hybrid<A: Arch>(
     layer_split: Option<&[usize]>,
     file: Arc<GgufFile>,
     ctx_cap: Option<usize>,
+    prefill_ubatch: usize,
 ) -> Result<Vec<WorkerHandle<A>>> {
     let n_stages = stages.len();
     let total_ranks: usize = stages.iter().map(|s| s.len()).sum();
@@ -175,9 +180,16 @@ fn launch_hybrid<A: Arch>(
                 handoff: Arc::clone(&handoff),
             };
             handles.push(
-                WorkerHandle::<A>::spawn(dev, role, Arc::clone(&file), ctx_cap).with_context(
-                    || format!("Hybrid stage {stage_idx} rank {rank_in_stage} on hip:{dev}"),
-                )?,
+                WorkerHandle::<A>::spawn(
+                    dev,
+                    role,
+                    Arc::clone(&file),
+                    ctx_cap,
+                    prefill_ubatch,
+                )
+                .with_context(|| {
+                    format!("Hybrid stage {stage_idx} rank {rank_in_stage} on hip:{dev}")
+                })?,
             );
         }
     }
@@ -187,22 +199,21 @@ fn launch_hybrid<A: Arch>(
 pub fn run_forward<A: Arch>(
     topology: &Topology,
     handles: &mut [WorkerHandle<A>],
-    token: u32,
-    position: usize,
+    tokens: Vec<u32>,
+    start_position: usize,
 ) -> Result<Vec<f32>> {
     match topology {
         Topology::SingleDevice { .. } => {
-            let rx = handles[0].send_forward(token, position)?;
+            let rx = handles[0].send_forward(tokens, start_position)?;
             rx.recv()
                 .map_err(|e| anyhow!("SD reply channel closed: {e}"))?
         }
         Topology::Pp { .. } => {
             // PP has no barrier — `embed` on rank > 0 strictly requires
-            // peer_buffer populated by rank N-1. Drive ranks in order:
-            // send to rank R, wait for its reply, then send to R+1.
+            // peer_buffer populated by rank N-1. Drive ranks in order.
             let mut last_logits = Vec::new();
             for h in handles.iter_mut() {
-                let rx = h.send_forward(token, position)?;
+                let rx = h.send_forward(tokens.clone(), start_position)?;
                 last_logits = rx
                     .recv()
                     .map_err(|e| anyhow!("PP reply channel closed: {e}"))??;
@@ -216,7 +227,7 @@ pub fn run_forward<A: Arch>(
             // barriers deadlock.
             let mut rxs = Vec::with_capacity(handles.len());
             for h in handles.iter_mut() {
-                rxs.push(h.send_forward(token, position)?);
+                rxs.push(h.send_forward(tokens.clone(), start_position)?);
             }
             let mut last_nonempty: Option<Vec<f32>> = None;
             for rx in rxs {

@@ -10,5 +10,5 @@ pub mod model;
 
 pub use arch::Qwen35MoeV2;
 pub use config::{Qwen35MoeV2Config, Qwen35MoeV2ConfigError};
-pub use loader::{load_from_gguf, Qwen35MoeV2Model};
-pub use model::forward_one_token;
+pub use loader::{load_from_gguf, load_tp_shard_from_gguf, Qwen35MoeV2Model};
+pub use model::forward;

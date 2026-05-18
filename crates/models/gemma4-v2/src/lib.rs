@@ -15,4 +15,4 @@ pub mod model;
 pub use arch::Gemma4V2;
 pub use config::{Gemma4V2Config, Gemma4V2ConfigError};
 pub use loader::{load_from_gguf, load_tp_shard_from_gguf, Gemma4V2Model};
-pub use model::forward_one_token;
+pub use model::forward;

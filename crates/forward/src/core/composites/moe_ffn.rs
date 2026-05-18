@@ -16,8 +16,12 @@ pub fn moe_ffn_local<H: TopologyHooks>(
     hooks: &mut H,
     input: &Tensor<F16>,
     weights: &MoeWeights,
+    n_tokens: usize,
 ) -> Result<Tensor<F16>> {
     let hidden = state.hidden();
+    if n_tokens > 1 {
+        return moe_ffn_loop(state, hooks, input, weights, n_tokens);
+    }
     let m = state.pool.config.intermediate;
     let n_experts = weights.n_experts;
     let k_top = weights.experts_per_tok;
@@ -251,6 +255,46 @@ pub fn moe_ffn_local<H: TopologyHooks>(
             .context("moe_ffn: accumulator → delta")?;
     }
     Ok(unsafe { Tensor::<F16>::from_raw(state.pool.delta, hidden) })
+}
+
+fn moe_ffn_loop<H: TopologyHooks>(
+    state: &mut CoreState<'_>,
+    hooks: &mut H,
+    input: &Tensor<F16>,
+    weights: &MoeWeights,
+    n_tokens: usize,
+) -> Result<Tensor<F16>> {
+    let hidden = state.hidden();
+    let row_bytes = hidden * 2;
+    let delta_ptr = state.pool.delta;
+    // Iterate in reverse so token 0's result lands naturally at delta[0..hidden]
+    // (the inner call always writes there); every other iteration's result
+    // gets copied to delta[i*hidden..(i+1)*hidden] before the next iteration
+    // overwrites delta[0..hidden].
+    for i in (0..n_tokens).rev() {
+        let in_i = unsafe {
+            Tensor::<F16>::from_raw(input.ptr.offset_bytes(i * row_bytes), hidden)
+        };
+        let _ = moe_ffn_local(state, hooks, &in_i, weights, 1)?;
+        if i > 0 {
+            let dst = delta_ptr.offset_bytes(i * row_bytes);
+            // SAFETY: delta is sized max_prefill_tokens * hidden * F16; src and
+            // dst rows are non-overlapping for i > 0 on the same stream.
+            unsafe {
+                state
+                    .device
+                    .memcpy_async(
+                        state.stream,
+                        CopyDirection::DeviceToDevice,
+                        dst,
+                        delta_ptr,
+                        row_bytes,
+                    )
+                    .context("moe_ffn_loop: per-token delta DtoD fanout")?;
+            }
+        }
+    }
+    Ok(unsafe { Tensor::<F16>::from_raw(delta_ptr, n_tokens * hidden) })
 }
 
 fn build_shared_expert_block(

@@ -24,7 +24,7 @@ use crate::ctx::GdnDims;
 /// `max_experts` sizes the MoE router logits slot; 0 for dense-only.
 /// `gdn` is Some for hybrid arches; sizes the per-layer state +
 /// conv-history slots (allocated once per owned layer).
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug)]
 pub struct ScratchConfig {
     pub hidden: usize,
     pub intermediate: usize,
@@ -46,6 +46,32 @@ pub struct ScratchConfig {
     /// (Qwen3.6-35B-A3B = 512, qwen3next = ...). Drives `shared_x_norm_f32`
     /// scratch sizing.
     pub shared_intermediate: usize,
+    /// Upper bound on tokens-per-forward. 1 for decode-only; >1 for
+    /// chunked prefill. Every per-token scratch slot (resid, norm,
+    /// q/k/v, gate, attn_out, gate_f32/up_f32/gated, down, moe_accum,
+    /// shared_x_norm, router_logits, position_i32) is sized at
+    /// `max_prefill_tokens * <per-token width>`.
+    pub max_prefill_tokens: usize,
+}
+
+impl Default for ScratchConfig {
+    fn default() -> Self {
+        Self {
+            hidden: 0,
+            intermediate: 0,
+            q_width: 0,
+            kv_width: 0,
+            vocab: 0,
+            max_seq_len: 0,
+            num_layers: 0,
+            max_experts: 0,
+            gdn: None,
+            per_layer_kv_widths: None,
+            attn_q_gated: false,
+            shared_intermediate: 0,
+            max_prefill_tokens: 1,
+        }
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -65,6 +91,7 @@ pub struct ScratchPool {
     pub delta: DevicePtr,
 
     pub norm_q8_1: DevicePtr,
+    pub norm_q8_1_mmq: DevicePtr,
     pub q_f16: DevicePtr,
     pub k_f16: DevicePtr,
     pub v_f16: DevicePtr,
@@ -76,12 +103,14 @@ pub struct ScratchPool {
     pub gate_f16: DevicePtr,
     pub attn_out_f16: DevicePtr,
     pub attn_out_q8_1: DevicePtr,
+    pub attn_out_q8_1_mmq: DevicePtr,
     pub attn_proj_f32: DevicePtr,
 
     pub gate_f32: DevicePtr,
     pub up_f32: DevicePtr,
     pub gated_f16: DevicePtr,
     pub gated_q8_1: DevicePtr,
+    pub gated_q8_1_mmq: DevicePtr,
     pub down_f32: DevicePtr,
 
     pub logits_f32_dev: DevicePtr,
@@ -130,53 +159,67 @@ impl ScratchPool {
         let f32 = 4;
         let i32_b = 4;
         let q8_1 = |n: usize| n.div_ceil(32) * 36;
+        // MMQ block: 144 B per 128 elements, row-major over (ncols/128, total_b).
+        let q8_1_mmq = |cols: usize, rows: usize| cols.div_ceil(128) * rows * 144;
 
         let h = config.hidden;
         let m = config.intermediate;
         let qw = config.q_width;
         let kvw = config.kv_width;
+        let n = config.max_prefill_tokens.max(1);
 
-        let resid_a = alloc_bytes(h * f16)?;
-        let resid_b = alloc_bytes(h * f16)?;
-        let norm = alloc_bytes(h * f16)?;
-        let delta = alloc_bytes(h * f16)?;
+        let resid_a = alloc_bytes(n * h * f16)?;
+        let resid_b = alloc_bytes(n * h * f16)?;
+        let norm = alloc_bytes(n * h * f16)?;
+        let delta = alloc_bytes(n * h * f16)?;
 
-        let norm_q8_1 = alloc_bytes(q8_1(h))?;
-        let q_f16 = alloc_bytes(qw * f16)?;
-        let k_f16 = alloc_bytes(kvw * f16)?;
-        let v_f16 = alloc_bytes(kvw * f16)?;
+        let norm_q8_1 = alloc_bytes(q8_1(n * h))?;
+        let norm_q8_1_mmq = if n > 1 {
+            alloc_bytes(q8_1_mmq(h, n))?
+        } else {
+            DevicePtr::NULL
+        };
+        let q_f16 = alloc_bytes(n * qw * f16)?;
+        let k_f16 = alloc_bytes(n * kvw * f16)?;
+        let v_f16 = alloc_bytes(n * kvw * f16)?;
         let (q_fused_f16, gate_f16) = if config.attn_q_gated {
-            (alloc_bytes(2 * qw * f16)?, alloc_bytes(qw * f16)?)
+            (alloc_bytes(n * 2 * qw * f16)?, alloc_bytes(n * qw * f16)?)
         } else {
             (DevicePtr::NULL, DevicePtr::NULL)
         };
-        let attn_out_f16 = alloc_bytes(qw * f16)?;
-        let attn_out_q8_1 = alloc_bytes(q8_1(qw))?;
-        // Reused for Q / K / V / output-proj F32. Sized to fit the
-        // largest matmul output: 2·q_width under gated arches (the
-        // fused [Q | gate] projection), q_width / kv_width / hidden
-        // otherwise.
+        let attn_out_f16 = alloc_bytes(n * qw * f16)?;
+        let attn_out_q8_1 = alloc_bytes(q8_1(n * qw))?;
+        let attn_out_q8_1_mmq = if n > 1 {
+            alloc_bytes(q8_1_mmq(qw, n))?
+        } else {
+            DevicePtr::NULL
+        };
         let q_or_fused = if config.attn_q_gated { 2 * qw } else { qw };
-        let attn_proj_f32 = alloc_bytes(q_or_fused.max(kvw).max(h) * f32)?;
+        let attn_proj_f32 = alloc_bytes(n * q_or_fused.max(kvw).max(h) * f32)?;
 
-        let gate_f32 = alloc_bytes(m * f32)?;
-        let up_f32 = alloc_bytes(m * f32)?;
-        let gated_f16 = alloc_bytes(m * f16)?;
-        let gated_q8_1 = alloc_bytes(q8_1(m))?;
-        let down_f32 = alloc_bytes(h * f32)?;
+        let gate_f32 = alloc_bytes(n * m * f32)?;
+        let up_f32 = alloc_bytes(n * m * f32)?;
+        let gated_f16 = alloc_bytes(n * m * f16)?;
+        let gated_q8_1 = alloc_bytes(q8_1(n * m))?;
+        let gated_q8_1_mmq = if n > 1 {
+            alloc_bytes(q8_1_mmq(m, n))?
+        } else {
+            DevicePtr::NULL
+        };
+        let down_f32 = alloc_bytes(n * h * f32)?;
 
         let logits_f32_dev = alloc_bytes(config.vocab * f32)?;
-        let position_i32 = alloc_bytes(i32_b)?;
+        let position_i32 = alloc_bytes(n * i32_b)?;
 
         let (router_logits_f32, moe_accum_f16) = if config.max_experts > 0 {
-            let r = alloc_bytes(config.max_experts * f32)?;
-            let a = alloc_bytes(h * f16)?;
+            let r = alloc_bytes(n * config.max_experts * f32)?;
+            let a = alloc_bytes(n * h * f16)?;
             (r, a)
         } else {
             (DevicePtr::NULL, DevicePtr::NULL)
         };
         let shared_x_norm_f32 = if config.shared_intermediate > 0 {
-            alloc_bytes(h * f32)?
+            alloc_bytes(n * h * f32)?
         } else {
             DevicePtr::NULL
         };
@@ -284,6 +327,7 @@ impl ScratchPool {
             norm,
             delta,
             norm_q8_1,
+            norm_q8_1_mmq,
             q_f16,
             k_f16,
             v_f16,
@@ -291,11 +335,13 @@ impl ScratchPool {
             gate_f16,
             attn_out_f16,
             attn_out_q8_1,
+            attn_out_q8_1_mmq,
             attn_proj_f32,
             gate_f32,
             up_f32,
             gated_f16,
             gated_q8_1,
+            gated_q8_1_mmq,
             down_f32,
             logits_f32_dev,
             position_i32,

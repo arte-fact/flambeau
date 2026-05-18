@@ -44,6 +44,29 @@ pub fn quantize_f16_to_q8_1(
     ops.quantize_f16_q8_1(input.ptr, output.ptr, n_elems)
 }
 
+/// MMQ-layout quantize: `ncols` columns per row, `total_b` rows. Output
+/// has 144 B per 128-element block, row-major over the `(ncols/128, total_b)` grid.
+/// `ncols` must be a multiple of 128.
+pub fn quantize_f16_to_q8_1_mmq(
+    input: &Tensor<F16>,
+    output: &mut Tensor<Q8_1>,
+    ncols: usize,
+    total_b: usize,
+    ops: &HipOps<'_>,
+) -> Result<()> {
+    if input.n_elems < ncols * total_b {
+        bail!(
+            "quantize_f16_to_q8_1_mmq: input has {} F16 elems, need >= {}",
+            input.n_elems,
+            ncols * total_b
+        );
+    }
+    if output.n_elems == 0 {
+        bail!("quantize_f16_to_q8_1_mmq: output tensor unallocated");
+    }
+    ops.quantize_f16_q8_1_mmq(input.ptr, output.ptr, ncols, total_b)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

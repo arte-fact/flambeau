@@ -11,7 +11,7 @@ use flambeau_forward::runtime::Arch;
 use flambeau_forward::ScratchConfig;
 use flambeau_quant::GgufFile;
 
-use crate::{forward_one_token, load_from_gguf, load_tp_shard_from_gguf, Gemma4V2Model};
+use crate::{forward, load_from_gguf, load_tp_shard_from_gguf, Gemma4V2Model};
 
 pub struct Gemma4V2;
 
@@ -40,13 +40,17 @@ impl Arch for Gemma4V2 {
     fn forward<C: ForwardCtx>(
         model: &Self::Model,
         ctx: &mut C,
-        token: u32,
-        position: usize,
+        tokens: &[u32],
+        start_position: usize,
     ) -> Result<()> {
-        forward_one_token(model, ctx, token, position)
+        forward(model, ctx, tokens, start_position)
     }
 
-    fn scratch_config(model: &Self::Model, shard: ShardMode) -> ScratchConfig {
+    fn scratch_config(
+        model: &Self::Model,
+        shard: ShardMode,
+        prefill_ubatch: usize,
+    ) -> ScratchConfig {
         let cfg = &model.config;
         let n_ranks = match shard {
             ShardMode::Replicated => 1,
@@ -79,6 +83,7 @@ impl Arch for Gemma4V2 {
             per_layer_kv_widths: Some(per_layer_kv),
             attn_q_gated: false,
             shared_intermediate: 0,
+            max_prefill_tokens: prefill_ubatch,
         }
     }
 

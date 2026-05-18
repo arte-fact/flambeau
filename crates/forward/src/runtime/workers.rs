@@ -90,8 +90,8 @@ impl WorkerRole {
 
 enum Command {
     Forward {
-        token: u32,
-        position: usize,
+        tokens: Vec<u32>,
+        start_position: usize,
         reply: SyncSender<Result<Vec<f32>>>,
     },
     ResetKv {
@@ -115,14 +115,14 @@ impl<A: Arch> WorkerHandle<A> {
         role: WorkerRole,
         file: Arc<GgufFile>,
         ctx_cap: Option<usize>,
+        prefill_ubatch: usize,
     ) -> Result<Self> {
         let (cmd_tx, cmd_rx) = mpsc::channel::<Command>();
         let (ready_tx, ready_rx) = mpsc::sync_channel::<Result<()>>(1);
 
         let thread = std::thread::spawn(move || {
-            // Stage 1: bind device + load model. Report success/failure
-            // synchronously through `ready_tx` before entering the loop.
-            let (mut state, init_err) = match init_rank::<A>(device_id, &role, &file, ctx_cap) {
+            let (mut state, init_err) =
+                match init_rank::<A>(device_id, &role, &file, ctx_cap, prefill_ubatch) {
                 Ok(s) => (Some(s), None),
                 Err(e) => (None, Some(e)),
             };
@@ -139,11 +139,16 @@ impl<A: Arch> WorkerHandle<A> {
             while let Ok(cmd) = cmd_rx.recv() {
                 match cmd {
                     Command::Forward {
-                        token,
-                        position,
+                        tokens,
+                        start_position,
                         reply,
                     } => {
-                        let res = run_forward_once::<A>(&mut state, &role, token, position);
+                        let res = run_forward_once::<A>(
+                            &mut state,
+                            &role,
+                            &tokens,
+                            start_position,
+                        );
                         let _ = reply.send(res);
                     }
                     Command::ResetKv { reply } => {
@@ -179,14 +184,14 @@ impl<A: Arch> WorkerHandle<A> {
     /// Queue a Forward command; returns the reply receiver.
     pub fn send_forward(
         &self,
-        token: u32,
-        position: usize,
+        tokens: Vec<u32>,
+        start_position: usize,
     ) -> Result<Receiver<Result<Vec<f32>>>> {
         let (reply_tx, reply_rx) = mpsc::sync_channel::<Result<Vec<f32>>>(1);
         self.cmd_tx
             .send(Command::Forward {
-                token,
-                position,
+                tokens,
+                start_position,
                 reply: reply_tx,
             })
             .map_err(|e| anyhow::anyhow!("worker channel closed: {e}"))?;
@@ -229,13 +234,14 @@ fn init_rank<A: Arch>(
     role: &WorkerRole,
     file: &GgufFile,
     ctx_cap: Option<usize>,
+    prefill_ubatch: usize,
 ) -> Result<RankState<A>> {
     let device = HipDevice::new(device_id).context("HipDevice::new")?;
     device.bind().context("device.bind")?;
     let shard = role.shard();
     let model = A::load(file, &device, shard, role.layer_slice(), ctx_cap)
         .context("Arch::load")?;
-    let mut cfg = A::scratch_config(&model, shard);
+    let mut cfg = A::scratch_config(&model, shard, prefill_ubatch);
     if let Some((ls, le)) = role.layer_slice() {
         cfg.num_layers = le - ls;
         // KV cache slots are per-owned-layer; slice the per-layer
@@ -264,15 +270,15 @@ fn init_rank<A: Arch>(
 fn run_forward_once<A: Arch>(
     state: &mut RankState<A>,
     role: &WorkerRole,
-    token: u32,
-    position: usize,
+    tokens: &[u32],
+    start_position: usize,
 ) -> Result<Vec<f32>> {
     let stream = state.device.default_stream();
     match role {
         WorkerRole::Sd => {
             let mut ctx =
                 SingleDeviceForwardCtx::new(&state.device, stream, &state.reg, &mut state.pool);
-            A::forward(&state.model, &mut ctx, token, position)?;
+            A::forward(&state.model, &mut ctx, tokens, start_position)?;
             Ok(ctx.logits().to_vec())
         }
         WorkerRole::Tp { rank, n_ranks, ar } => {
@@ -288,7 +294,7 @@ fn run_forward_once<A: Arch>(
                 &mut state.pool,
                 hooks,
             );
-            A::forward(&state.model, &mut ctx, token, position)?;
+            A::forward(&state.model, &mut ctx, tokens, start_position)?;
             Ok(ctx.logits().to_vec())
         }
         WorkerRole::Pp {
@@ -312,7 +318,7 @@ fn run_forward_once<A: Arch>(
                 *layer_end,
                 &mut *buf,
             );
-            A::forward(&state.model, &mut ctx, token, position)?;
+            A::forward(&state.model, &mut ctx, tokens, start_position)?;
             Ok(ctx.logits().to_vec())
         }
         WorkerRole::Hybrid {
@@ -341,7 +347,7 @@ fn run_forward_once<A: Arch>(
                 Arc::clone(peer_buffer),
                 Arc::clone(handoff),
             );
-            A::forward(&state.model, &mut ctx, token, position)?;
+            A::forward(&state.model, &mut ctx, tokens, start_position)?;
             Ok(ctx.logits().to_vec())
         }
     }

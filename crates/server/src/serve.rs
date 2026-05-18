@@ -719,9 +719,14 @@ pub(crate) async fn serve_inner_v2(
     for slot_idx in 0..inflight_slots {
         let slot_gguf = GgufFile::open(&gguf_path)
             .with_context(|| format!("re-open GGUF for v2 slot {slot_idx}"))?;
-        let driver: Box<dyn ModelDriver> =
-            create_v2_driver(gguf_arch, slot_gguf, topology.clone(), cfg.ctx_cap)
-                .with_context(|| format!("v2 driver slot {slot_idx} ({gguf_arch})"))?;
+        let driver: Box<dyn ModelDriver> = create_v2_driver(
+            gguf_arch,
+            slot_gguf,
+            topology.clone(),
+            cfg.ctx_cap,
+            prefill_ubatch,
+        )
+        .with_context(|| format!("v2 driver slot {slot_idx} ({gguf_arch})"))?;
         let session: Box<dyn crate::Session> = Box::new(crate::v2_handle::V2Session {
             driver,
             bos_id,
@@ -835,19 +840,35 @@ fn create_v2_driver(
     file: GgufFile,
     topology: flambeau_forward::Topology,
     ctx_cap: Option<usize>,
+    prefill_ubatch: usize,
 ) -> Result<Box<dyn flambeau_runtime::ModelDriver>> {
     use flambeau_forward::Session;
     match gguf_arch {
         "qwen35" => {
-            let s = Session::<flambeau_qwen35_v2::Qwen35V2>::new(file, topology, ctx_cap)?;
+            let s = Session::<flambeau_qwen35_v2::Qwen35V2>::new(
+                file,
+                topology,
+                ctx_cap,
+                prefill_ubatch,
+            )?;
             Ok(Box::new(s))
         }
         "qwen35moe" => {
-            let s = Session::<flambeau_qwen35moe_v2::Qwen35MoeV2>::new(file, topology, ctx_cap)?;
+            let s = Session::<flambeau_qwen35moe_v2::Qwen35MoeV2>::new(
+                file,
+                topology,
+                ctx_cap,
+                prefill_ubatch,
+            )?;
             Ok(Box::new(s))
         }
         "gemma3" | "gemma4" | "gemma4-26b-a4b" | "gemma4-31b" | "gemma4-9b" | "gemma4-2b" => {
-            let s = Session::<flambeau_gemma4_v2::Gemma4V2>::new(file, topology, ctx_cap)?;
+            let s = Session::<flambeau_gemma4_v2::Gemma4V2>::new(
+                file,
+                topology,
+                ctx_cap,
+                prefill_ubatch,
+            )?;
             Ok(Box::new(s))
         }
         other => bail!("v2 serve: unsupported GGUF arch `{other}`"),

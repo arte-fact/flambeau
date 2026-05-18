@@ -10,11 +10,12 @@ pub fn residual_add_local<H: TopologyHooks>(
     _hooks: &mut H,
     a: Tensor<F16>,
     b: Tensor<F16>,
+    n_tokens: usize,
 ) -> Result<Tensor<F16>> {
-    let hidden = state.hidden();
+    let n_elems = n_tokens * state.hidden();
     let out_ptr = state.pool.next_residual_slot();
-    let mut out = slot_f16(out_ptr, hidden);
+    let mut out = slot_f16(out_ptr, n_elems);
     let ops = state.ops();
-    flambeau_model_ops::add_f16(&a, &b, &mut out, hidden, &ops)?;
+    flambeau_model_ops::add_f16(&a, &b, &mut out, n_elems, &ops)?;
     Ok(out)
 }

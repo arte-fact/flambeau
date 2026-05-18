@@ -7,51 +7,81 @@ use anyhow::Result;
 use flambeau_model_ops::{Tensor, F16, F32};
 
 /// One impl per topology; the model is `<C: ForwardCtx>` generic.
+/// `n_tokens` is the runtime token-batch dim: `1` for decode,
+/// `prompt.len()` (or chunk size) for prefill. Composites use the same
+/// kernels at N=1 and N>1; the leaf-kernel branch (e.g. attn_decode vs
+/// attn_prefill) lives inside the composite, not in this trait.
 pub trait ForwardCtx {
-    fn embed(&mut self, token_embd: &EmbeddingWeights, token_id: u32) -> Result<Tensor<F16>>;
+    fn embed(
+        &mut self,
+        token_embd: &EmbeddingWeights,
+        tokens: &[u32],
+    ) -> Result<Tensor<F16>>;
 
     fn rmsnorm(
         &mut self,
         input: &Tensor<F16>,
         weight: &Tensor<F16>,
         eps: f32,
+        n_tokens: usize,
     ) -> Result<Tensor<F16>>;
 
-    fn residual_add(&mut self, a: Tensor<F16>, b: Tensor<F16>) -> Result<Tensor<F16>>;
+    fn residual_add(
+        &mut self,
+        a: Tensor<F16>,
+        b: Tensor<F16>,
+        n_tokens: usize,
+    ) -> Result<Tensor<F16>>;
 
-    /// `layer_idx` selects the KV slot; `position` is the KV write tail.
+    /// `start_position` is the KV write tail for `tokens[0]`. Decode:
+    /// N=1, start_position = current decode step. Prefill: N=prompt
+    /// len, start_position = 0 (fresh) or prior KV length (continuation).
     fn standard_attn(
         &mut self,
         input: &Tensor<F16>,
         weights: &AttnWeights,
         layer_idx: usize,
-        position: usize,
+        start_position: usize,
+        n_tokens: usize,
     ) -> Result<Tensor<F16>>;
 
     /// Gated-Delta-Net recurrent layer (Qwen3.5 / 3.6 / 3-Next).
-    /// `layer_idx` selects the per-layer state + conv history slot.
     fn gdn_layer(
         &mut self,
         input: &Tensor<F16>,
         weights: &GdnWeights,
         layer_idx: usize,
+        n_tokens: usize,
     ) -> Result<Tensor<F16>>;
 
-    fn dense_ffn(&mut self, input: &Tensor<F16>, weights: &FfnWeights) -> Result<Tensor<F16>>;
+    fn dense_ffn(
+        &mut self,
+        input: &Tensor<F16>,
+        weights: &FfnWeights,
+        n_tokens: usize,
+    ) -> Result<Tensor<F16>>;
 
-    fn moe_ffn(&mut self, input: &Tensor<F16>, weights: &MoeWeights) -> Result<Tensor<F16>>;
+    fn moe_ffn(
+        &mut self,
+        input: &Tensor<F16>,
+        weights: &MoeWeights,
+        n_tokens: usize,
+    ) -> Result<Tensor<F16>>;
 
-    /// Logits land in `ctx.logits()` after this returns.
-    fn output_head(&mut self, input: &Tensor<F16>, lm_head: &LmHeadWeights) -> Result<()>;
+    /// Logits for the LAST token land in `ctx.logits()` — at prefill
+    /// only the next-token sampler needs the final row.
+    fn output_head(
+        &mut self,
+        input: &Tensor<F16>,
+        lm_head: &LmHeadWeights,
+        n_tokens: usize,
+    ) -> Result<()>;
 
-    /// Layer indices THIS rank/stage processes. SingleDevice/TP: all.
-    /// PP: this rank's slice. Hybrid: this stage's slice.
     fn layer_range<'a>(
         &'a mut self,
         layout: &'a ModelLayout,
     ) -> Box<dyn Iterator<Item = usize> + 'a>;
 
-    /// Host-side F32 logits. Valid until the next forward step.
     fn logits(&self) -> &[f32];
 }
 

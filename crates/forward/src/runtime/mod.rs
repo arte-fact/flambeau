@@ -78,17 +78,24 @@ pub trait Arch: Send + Sync + 'static {
         ctx_cap: Option<usize>,
     ) -> Result<Self::Model>;
 
-    /// Run one decode step. Logits land in `ctx.logits()`.
+    /// Run forward over `tokens` (length 1 for decode; longer for
+    /// prefill). `start_position` is the KV write tail for `tokens[0]`.
+    /// Logits for the LAST token land in `ctx.logits()`.
     fn forward<C: ForwardCtx>(
         model: &Self::Model,
         ctx: &mut C,
-        token: u32,
-        position: usize,
+        tokens: &[u32],
+        start_position: usize,
     ) -> Result<()>;
 
     /// Build the ScratchPool config for this rank given the
-    /// effective `ShardMode` (TP divides per-rank widths).
-    fn scratch_config(model: &Self::Model, shard: ShardMode) -> ScratchConfig;
+    /// effective `ShardMode` (TP divides per-rank widths) and the
+    /// operator's prefill chunk size (sizes the per-token scratch slots).
+    fn scratch_config(
+        model: &Self::Model,
+        shard: ShardMode,
+        prefill_ubatch: usize,
+    ) -> ScratchConfig;
 
     /// Per-layer attention kind (FullAttn / Gdn) if the arch is
     /// hybrid; `None` if every layer is uniform (qwen3 dense, gemma4
@@ -106,54 +113,72 @@ pub trait Arch: Send + Sync + 'static {
 pub struct Session<A: Arch> {
     topology: Topology,
     handles: Vec<workers::WorkerHandle<A>>,
-    /// Last forward step's logits, captured from the rank that owns
-    /// them (last PP stage / any TP rank / SD).
     last_logits: Vec<f32>,
+    prefill_ubatch: usize,
     _phantom: std::marker::PhantomData<A>,
 }
 
 impl<A: Arch> Session<A> {
-    pub fn new(file: GgufFile, topology: Topology, ctx_cap: Option<usize>) -> Result<Self> {
-        let handles = orchestrate::launch::<A>(file, &topology, ctx_cap)?;
+    pub fn new(
+        file: GgufFile,
+        topology: Topology,
+        ctx_cap: Option<usize>,
+        prefill_ubatch: usize,
+    ) -> Result<Self> {
+        if prefill_ubatch == 0 {
+            anyhow::bail!("Session::new: prefill_ubatch must be > 0");
+        }
+        let handles = orchestrate::launch::<A>(file, &topology, ctx_cap, prefill_ubatch)?;
         Ok(Self {
             topology,
             handles,
             last_logits: Vec::new(),
+            prefill_ubatch,
             _phantom: std::marker::PhantomData,
         })
+    }
+
+    pub fn prefill_ubatch(&self) -> usize {
+        self.prefill_ubatch
     }
 
     pub fn topology(&self) -> &Topology {
         &self.topology
     }
 
-    /// Drive one decode step across every rank. Returns when the
-    /// rank that owns the LM head (SD: rank 0; PP/Hybrid: last
-    /// stage; TP: any rank) finishes.
-    pub fn forward_one_token(&mut self, token: u32, position: usize) -> Result<()> {
-        self.last_logits = orchestrate::run_forward(&self.topology, &mut self.handles, token, position)?;
+    /// Drive a forward pass across every rank. `tokens.len() == 1` is
+    /// decode; longer is prefill. Returns when the rank that owns the
+    /// LM head (SD: rank 0; PP/Hybrid: last stage; TP: any rank) finishes.
+    /// Logits for the LAST token land in `self.last_logits`.
+    pub fn forward(&mut self, tokens: &[u32], start_position: usize) -> Result<()> {
+        if tokens.is_empty() {
+            anyhow::bail!("Session::forward: empty tokens");
+        }
+        self.last_logits = orchestrate::run_forward(
+            &self.topology,
+            &mut self.handles,
+            tokens.to_vec(),
+            start_position,
+        )?;
         Ok(())
     }
 
-    /// Decode wrapper that returns last-token logits via `out` (caller-
-    /// owned). Matches the `ModelDriver::forward_one_token_logits`
-    /// shape so server adapters call one method per request step.
+    pub fn forward_one_token(&mut self, token: u32, position: usize) -> Result<()> {
+        self.forward(&[token], position)
+    }
+
     pub fn forward_one_token_logits(
         &mut self,
         token: u32,
         position: usize,
         out: &mut Vec<f32>,
     ) -> Result<()> {
-        self.forward_one_token(token, position)?;
+        self.forward(&[token], position)?;
         out.clear();
         out.extend_from_slice(&self.last_logits);
         Ok(())
     }
 
-    /// Multi-token prefill returning the LAST token's logits via `out`.
-    /// v1 implementation loops `forward_one_token` for each prompt
-    /// token; tracked as [P9-OUT real batched-prefill kernel] —
-    /// switching to a single prefill pass per layer is the lever.
     pub fn forward_prefill_logits(
         &mut self,
         tokens: &[u32],
@@ -163,8 +188,14 @@ impl<A: Arch> Session<A> {
         if tokens.is_empty() {
             anyhow::bail!("Session::forward_prefill_logits: empty tokens");
         }
-        for (i, &t) in tokens.iter().enumerate() {
-            self.forward_one_token(t, start_position + i)?;
+        let chunk_size = self.prefill_ubatch;
+        let mut pos = start_position;
+        let mut i = 0;
+        while i < tokens.len() {
+            let end = (i + chunk_size).min(tokens.len());
+            self.forward(&tokens[i..end], pos)?;
+            pos += end - i;
+            i = end;
         }
         out.clear();
         out.extend_from_slice(&self.last_logits);

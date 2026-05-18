@@ -11,47 +11,51 @@ pub fn embed_local<H: TopologyHooks>(
     state: &mut CoreState<'_>,
     _hooks: &mut H,
     weights: &EmbeddingWeights,
-    token_id: u32,
+    tokens: &[u32],
 ) -> Result<Tensor<F16>> {
     let hidden = state.hidden();
     if hidden != weights.hidden {
-        bail!(
-            "embed: ctx hidden {hidden} != weights.hidden {}",
-            weights.hidden
-        );
+        bail!("embed: ctx hidden {hidden} != weights.hidden {}", weights.hidden);
     }
-    if (token_id as usize) >= weights.vocab_size {
-        bail!(
-            "embed: token_id {token_id} >= vocab_size {}",
-            weights.vocab_size
-        );
+    if tokens.is_empty() {
+        bail!("embed: tokens empty");
     }
-    if weights.token_embd.n_elems < weights.vocab_size * hidden {
+    let max = weights.vocab_size;
+    for &t in tokens {
+        if (t as usize) >= max {
+            bail!("embed: token_id {t} >= vocab_size {max}");
+        }
+    }
+    if weights.token_embd.n_elems < max * hidden {
         bail!(
             "embed: token_embd has {} F16 elems, need >= {}",
             weights.token_embd.n_elems,
-            weights.vocab_size * hidden
+            max * hidden
         );
     }
     let row_bytes = hidden * 2;
-    let src = weights
-        .token_embd
-        .ptr
-        .offset_bytes((token_id as usize) * row_bytes);
     let dst = state.pool.next_residual_slot();
-    // SAFETY: src points at row_bytes of token_embd; dst sized for hidden F16.
-    unsafe {
-        state
-            .device
-            .memcpy_async(state.stream, CopyDirection::DeviceToDevice, dst, src, row_bytes)
-            .context("embed: DtoD row memcpy")?;
+    let n_elems = tokens.len() * hidden;
+    for (i, &t) in tokens.iter().enumerate() {
+        let src = weights
+            .token_embd
+            .ptr
+            .offset_bytes((t as usize) * row_bytes);
+        let row_dst = dst.offset_bytes(i * row_bytes);
+        // SAFETY: src points at row_bytes of token_embd; dst residual
+        // slot is sized for max_prefill_tokens * hidden F16.
+        unsafe {
+            state
+                .device
+                .memcpy_async(state.stream, CopyDirection::DeviceToDevice, row_dst, src, row_bytes)
+                .context("embed: DtoD row memcpy")?;
+        }
     }
     if let Some(scale) = weights.post_scale {
-        let mut t = slot_f16(dst, hidden);
+        let mut t = slot_f16(dst, n_elems);
         let ops = state.ops();
-        // scale_f16 is in-place safe (one thread per index reads + writes).
-        let t_in = unsafe { Tensor::<F16>::from_raw(dst, hidden) };
-        flambeau_model_ops::scale_f16(&t_in, &mut t, hidden, scale, &ops)?;
+        let t_in = unsafe { Tensor::<F16>::from_raw(dst, n_elems) };
+        flambeau_model_ops::scale_f16(&t_in, &mut t, n_elems, scale, &ops)?;
     }
-    Ok(slot_f16(dst, hidden))
+    Ok(slot_f16(dst, n_elems))
 }

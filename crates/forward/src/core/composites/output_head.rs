@@ -1,4 +1,5 @@
 //! rmsnorm-quant → LM-head matmul → DtoH into `state.logits_host`.
+//! Only the LAST token's logits are emitted (sampler needs that one).
 
 use anyhow::{bail, Context, Result};
 use flambeau_core::{CopyDirection, Device, DevicePtr};
@@ -12,6 +13,7 @@ pub fn output_head_local<H: TopologyHooks>(
     _hooks: &mut H,
     input: &Tensor<F16>,
     lm_head: &LmHeadWeights,
+    n_tokens: usize,
 ) -> Result<()> {
     let hidden = state.hidden();
     if hidden != lm_head.hidden {
@@ -23,9 +25,13 @@ pub fn output_head_local<H: TopologyHooks>(
     let vocab = lm_head.vocab_size;
     let ops = state.ops();
 
+    // Slice the last token's hidden vector and run norm + matmul on it only.
+    let last_input_ptr = input.ptr.offset_bytes((n_tokens - 1) * hidden * 2);
+    let last_input = unsafe { Tensor::<F16>::from_raw(last_input_ptr, hidden) };
+
     let mut norm_q8_1 = unsafe { Tensor::<Q8_1>::from_raw(state.pool.norm_q8_1, hidden) };
     flambeau_model_ops::rmsnorm_quant_q8_1(
-        input,
+        &last_input,
         &lm_head.output_norm,
         &mut norm_q8_1,
         1,

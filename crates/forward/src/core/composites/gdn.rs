@@ -1,7 +1,7 @@
-//! GDN (Gated-Delta-Net) recurrent layer. Builds a
-//! `flambeau_blocks::DeltaNetLayer` from typed `GdnWeights` and calls
-//! its `forward_decode`. State + conv-history live in the pool's
-//! per-layer `gdn_state`.
+//! GDN (Gated-Delta-Net) recurrent layer. N>1 loops the per-token
+//! decode step internally — the recurrent state update is sequential.
+//! Batched-GDN (project all N tokens then sequentially state-step) is
+//! a perf follow-up; this is correctness-only.
 
 use anyhow::{bail, Result};
 use flambeau_backend_hip::{HipDevice, HipStream};
@@ -26,6 +26,7 @@ pub fn gdn_layer_local<H: TopologyHooks>(
     input: &Tensor<F16>,
     weights: &GdnWeights,
     layer_idx: usize,
+    n_tokens: usize,
 ) -> Result<Tensor<F16>> {
     let hidden = state.hidden();
     let local_idx = layer_idx.checked_sub(state.layer_idx_offset).ok_or_else(|| {
@@ -73,21 +74,26 @@ pub fn gdn_layer_local<H: TopologyHooks>(
     )?;
 
     let delta_ptr = state.pool.delta;
+    let row_bytes = hidden * 2;
     let ops = state.ops();
     let mut ar_cb = |buf: DevicePtr, n_elems: usize, dev: &HipDevice, stm: &HipStream| -> Result<()> {
         hooks.ar_sum_f32(buf, n_elems, dev, stm)
     };
-    block.forward_decode_with_ar_hook(
-        &ops,
-        state.device,
-        state.stream,
-        input.ptr,
-        delta_ptr,
-        layer_state.state,
-        layer_state.conv_history,
-        scratch,
-        Some(&mut ar_cb),
-    )?;
-    // SAFETY: `delta_ptr` is the pool's `[hidden]` F16 slot.
-    Ok(unsafe { Tensor::<F16>::from_raw(delta_ptr, hidden) })
+    for i in 0..n_tokens {
+        let in_i = input.ptr.offset_bytes(i * row_bytes);
+        let out_i = delta_ptr.offset_bytes(i * row_bytes);
+        block.forward_decode_with_ar_hook(
+            &ops,
+            state.device,
+            state.stream,
+            in_i,
+            out_i,
+            layer_state.state,
+            layer_state.conv_history,
+            scratch,
+            Some(&mut ar_cb),
+        )?;
+    }
+    // SAFETY: `delta_ptr` is the pool's `n_tokens * hidden` F16 slot.
+    Ok(unsafe { Tensor::<F16>::from_raw(delta_ptr, n_tokens * hidden) })
 }

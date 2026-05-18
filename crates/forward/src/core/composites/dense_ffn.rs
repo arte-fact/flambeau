@@ -12,50 +12,85 @@ pub fn dense_ffn_local<H: TopologyHooks>(
     hooks: &mut H,
     input: &Tensor<F16>,
     weights: &FfnWeights,
+    n_tokens: usize,
 ) -> Result<Tensor<F16>> {
     let hidden = state.hidden();
     let m = state.pool.config.intermediate;
     let ops = state.ops();
+    let n = n_tokens;
 
-    let mut norm_q8_1 = unsafe { Tensor::<Q8_1>::from_raw(state.pool.norm_q8_1, hidden) };
-    flambeau_model_ops::rmsnorm_quant_q8_1(
-        input,
-        &weights.ffn_norm,
-        &mut norm_q8_1,
-        1,
-        hidden,
-        weights.rms_eps,
-        &ops,
-    )?;
+    let mut norm_q8_1 = unsafe { Tensor::<Q8_1>::from_raw(state.pool.norm_q8_1, n * hidden) };
     let act_mmq_null = unsafe { Tensor::<Q8_1>::from_raw(DevicePtr::NULL, 0) };
+    let norm_mmq_t;
+    let act_norm_mmq: &Tensor<Q8_1> = if n > 1 {
+        // Unfused at N>1 so we can also produce the MMQ-layout activation.
+        let mut norm_f16 =
+            unsafe { Tensor::<F16>::from_raw(state.pool.norm, n * hidden) };
+        flambeau_model_ops::rmsnorm_f16(
+            input,
+            &weights.ffn_norm,
+            &mut norm_f16,
+            n,
+            hidden,
+            weights.rms_eps,
+            &ops,
+        )?;
+        flambeau_model_ops::quantize_f16_to_q8_1(&norm_f16, &mut norm_q8_1, n * hidden, &ops)?;
+        let mut norm_mmq =
+            unsafe { Tensor::<Q8_1>::from_raw(state.pool.norm_q8_1_mmq, n * hidden) };
+        flambeau_model_ops::quantize_f16_to_q8_1_mmq(&norm_f16, &mut norm_mmq, hidden, n, &ops)?;
+        norm_mmq_t = norm_mmq;
+        &norm_mmq_t
+    } else {
+        flambeau_model_ops::rmsnorm_quant_q8_1(
+            input,
+            &weights.ffn_norm,
+            &mut norm_q8_1,
+            n,
+            hidden,
+            weights.rms_eps,
+            &ops,
+        )?;
+        &act_mmq_null
+    };
 
-    let mut gate_f32 = unsafe { Tensor::<F32>::from_raw(state.pool.gate_f32, m) };
+    let mut gate_f32 = unsafe { Tensor::<F32>::from_raw(state.pool.gate_f32, n * m) };
     weights
         .ffn_gate
-        .qmatmul(&norm_q8_1, &act_mmq_null, &mut gate_f32, 1, hidden, m, &ops)?;
-    let mut up_f32 = unsafe { Tensor::<F32>::from_raw(state.pool.up_f32, m) };
+        .qmatmul(&norm_q8_1, act_norm_mmq, &mut gate_f32, n, hidden, m, &ops)?;
+    let mut up_f32 = unsafe { Tensor::<F32>::from_raw(state.pool.up_f32, n * m) };
     weights
         .ffn_up
-        .qmatmul(&norm_q8_1, &act_mmq_null, &mut up_f32, 1, hidden, m, &ops)?;
+        .qmatmul(&norm_q8_1, act_norm_mmq, &mut up_f32, n, hidden, m, &ops)?;
 
-    let mut gated_f16 = unsafe { Tensor::<F16>::from_raw(state.pool.gated_f16, m) };
+    let mut gated_f16 = unsafe { Tensor::<F16>::from_raw(state.pool.gated_f16, n * m) };
     match weights.activation {
         Activation::SwiGLU => {
-            flambeau_model_ops::swiglu_f32_to_f16(&gate_f32, &up_f32, &mut gated_f16, m, &ops)?;
+            flambeau_model_ops::swiglu_f32_to_f16(&gate_f32, &up_f32, &mut gated_f16, n * m, &ops)?;
         }
         Activation::GeluTanh => {
-            flambeau_model_ops::gelu_mul_f32_to_f16(&gate_f32, &up_f32, &mut gated_f16, m, &ops)?;
+            flambeau_model_ops::gelu_mul_f32_to_f16(&gate_f32, &up_f32, &mut gated_f16, n * m, &ops)?;
         }
     }
 
-    let mut gated_q8_1 = unsafe { Tensor::<Q8_1>::from_raw(state.pool.gated_q8_1, m) };
-    flambeau_model_ops::quantize_f16_to_q8_1(&gated_f16, &mut gated_q8_1, m, &ops)?;
-    let mut down_f32 = unsafe { Tensor::<F32>::from_raw(state.pool.down_f32, hidden) };
+    let mut gated_q8_1 = unsafe { Tensor::<Q8_1>::from_raw(state.pool.gated_q8_1, n * m) };
+    flambeau_model_ops::quantize_f16_to_q8_1(&gated_f16, &mut gated_q8_1, n * m, &ops)?;
+    let gated_mmq_t;
+    let act_gated_mmq: &Tensor<Q8_1> = if n > 1 {
+        let mut gated_mmq =
+            unsafe { Tensor::<Q8_1>::from_raw(state.pool.gated_q8_1_mmq, n * m) };
+        flambeau_model_ops::quantize_f16_to_q8_1_mmq(&gated_f16, &mut gated_mmq, m, n, &ops)?;
+        gated_mmq_t = gated_mmq;
+        &gated_mmq_t
+    } else {
+        &act_mmq_null
+    };
+    let mut down_f32 = unsafe { Tensor::<F32>::from_raw(state.pool.down_f32, n * hidden) };
     weights
         .ffn_down
-        .qmatmul(&gated_q8_1, &act_mmq_null, &mut down_f32, 1, m, hidden, &ops)?;
-    hooks.ar_sum_f32(down_f32.ptr, hidden, state.device, state.stream)?;
-    let mut delta = unsafe { Tensor::<F16>::from_raw(state.pool.delta, hidden) };
-    flambeau_model_ops::cast_f32_to_f16(&down_f32, &mut delta, hidden, &ops)?;
+        .qmatmul(&gated_q8_1, act_gated_mmq, &mut down_f32, n, m, hidden, &ops)?;
+    hooks.ar_sum_f32(down_f32.ptr, n * hidden, state.device, state.stream)?;
+    let mut delta = unsafe { Tensor::<F16>::from_raw(state.pool.delta, n * hidden) };
+    flambeau_model_ops::cast_f32_to_f16(&down_f32, &mut delta, n * hidden, &ops)?;
     Ok(delta)
 }

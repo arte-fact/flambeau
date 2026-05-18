@@ -397,11 +397,15 @@ impl<'a> ForwardEngine<'a, HybridHooks, HybStage> {
 }
 
 impl<H: TopologyHooks, S: StageHooks> ForwardCtx for ForwardEngine<'_, H, S> {
-    fn embed(&mut self, weights: &EmbeddingWeights, token_id: u32) -> Result<Tensor<F16>> {
+    fn embed(
+        &mut self,
+        weights: &EmbeddingWeights,
+        tokens: &[u32],
+    ) -> Result<Tensor<F16>> {
         if self.stage.is_first() {
-            composites::embed_local(&mut self.core, &mut self.hooks, weights, token_id)
+            composites::embed_local(&mut self.core, &mut self.hooks, weights, tokens)
         } else {
-            self.stage.peer_recv(&mut self.core, 1)
+            self.stage.peer_recv(&mut self.core, tokens.len())
         }
     }
 
@@ -410,12 +414,18 @@ impl<H: TopologyHooks, S: StageHooks> ForwardCtx for ForwardEngine<'_, H, S> {
         input: &Tensor<F16>,
         weight: &Tensor<F16>,
         eps: f32,
+        n_tokens: usize,
     ) -> Result<Tensor<F16>> {
-        composites::rmsnorm_local(&mut self.core, &mut self.hooks, input, weight, eps)
+        composites::rmsnorm_local(&mut self.core, &mut self.hooks, input, weight, eps, n_tokens)
     }
 
-    fn residual_add(&mut self, a: Tensor<F16>, b: Tensor<F16>) -> Result<Tensor<F16>> {
-        composites::residual_add_local(&mut self.core, &mut self.hooks, a, b)
+    fn residual_add(
+        &mut self,
+        a: Tensor<F16>,
+        b: Tensor<F16>,
+        n_tokens: usize,
+    ) -> Result<Tensor<F16>> {
+        composites::residual_add_local(&mut self.core, &mut self.hooks, a, b, n_tokens)
     }
 
     fn standard_attn(
@@ -423,7 +433,8 @@ impl<H: TopologyHooks, S: StageHooks> ForwardCtx for ForwardEngine<'_, H, S> {
         input: &Tensor<F16>,
         weights: &AttnWeights,
         layer_idx: usize,
-        position: usize,
+        start_position: usize,
+        n_tokens: usize,
     ) -> Result<Tensor<F16>> {
         composites::standard_attn_local(
             &mut self.core,
@@ -431,7 +442,8 @@ impl<H: TopologyHooks, S: StageHooks> ForwardCtx for ForwardEngine<'_, H, S> {
             input,
             weights,
             layer_idx,
-            position,
+            start_position,
+            n_tokens,
         )
     }
 
@@ -440,23 +452,52 @@ impl<H: TopologyHooks, S: StageHooks> ForwardCtx for ForwardEngine<'_, H, S> {
         input: &Tensor<F16>,
         weights: &crate::ctx::GdnWeights,
         layer_idx: usize,
+        n_tokens: usize,
     ) -> Result<Tensor<F16>> {
-        composites::gdn_layer_local(&mut self.core, &mut self.hooks, input, weights, layer_idx)
+        composites::gdn_layer_local(
+            &mut self.core,
+            &mut self.hooks,
+            input,
+            weights,
+            layer_idx,
+            n_tokens,
+        )
     }
 
-    fn dense_ffn(&mut self, input: &Tensor<F16>, weights: &FfnWeights) -> Result<Tensor<F16>> {
-        composites::dense_ffn_local(&mut self.core, &mut self.hooks, input, weights)
+    fn dense_ffn(
+        &mut self,
+        input: &Tensor<F16>,
+        weights: &FfnWeights,
+        n_tokens: usize,
+    ) -> Result<Tensor<F16>> {
+        composites::dense_ffn_local(&mut self.core, &mut self.hooks, input, weights, n_tokens)
     }
 
-    fn moe_ffn(&mut self, input: &Tensor<F16>, weights: &MoeWeights) -> Result<Tensor<F16>> {
-        composites::moe_ffn_local(&mut self.core, &mut self.hooks, input, weights)
+    fn moe_ffn(
+        &mut self,
+        input: &Tensor<F16>,
+        weights: &MoeWeights,
+        n_tokens: usize,
+    ) -> Result<Tensor<F16>> {
+        composites::moe_ffn_local(&mut self.core, &mut self.hooks, input, weights, n_tokens)
     }
 
-    fn output_head(&mut self, input: &Tensor<F16>, lm_head: &LmHeadWeights) -> Result<()> {
+    fn output_head(
+        &mut self,
+        input: &Tensor<F16>,
+        lm_head: &LmHeadWeights,
+        n_tokens: usize,
+    ) -> Result<()> {
         if self.stage.is_last() {
-            composites::output_head_local(&mut self.core, &mut self.hooks, input, lm_head)
+            composites::output_head_local(
+                &mut self.core,
+                &mut self.hooks,
+                input,
+                lm_head,
+                n_tokens,
+            )
         } else {
-            self.stage.peer_send(&mut self.core, input, 1)
+            self.stage.peer_send(&mut self.core, input, n_tokens)
         }
     }
 

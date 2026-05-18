@@ -7,13 +7,14 @@ use flambeau_forward::ctx::ForwardCtx;
 
 use crate::loader::Gemma4V2Model;
 
-pub fn forward_one_token<C: ForwardCtx>(
+pub fn forward<C: ForwardCtx>(
     model: &Gemma4V2Model,
     ctx: &mut C,
-    token_id: u32,
-    position: usize,
+    tokens: &[u32],
+    start_position: usize,
 ) -> Result<()> {
-    let mut resid = ctx.embed(&model.embedding, token_id)?;
+    let n = tokens.len();
+    let mut resid = ctx.embed(&model.embedding, tokens)?;
     let layers: Vec<usize> = ctx.layer_range(&model.layout).collect();
     for li in layers {
         let attn_w = model.attn[li]
@@ -23,12 +24,12 @@ pub fn forward_one_token<C: ForwardCtx>(
             .as_ref()
             .expect("ffn weights missing for owned layer (PP slice mismatch)");
 
-        let delta = ctx.standard_attn(&resid, attn_w, li, position)?;
-        resid = ctx.residual_add(resid, delta)?;
+        let delta = ctx.standard_attn(&resid, attn_w, li, start_position, n)?;
+        resid = ctx.residual_add(resid, delta, n)?;
 
-        let delta = ctx.dense_ffn(&resid, ffn_w)?;
-        resid = ctx.residual_add(resid, delta)?;
+        let delta = ctx.dense_ffn(&resid, ffn_w, n)?;
+        resid = ctx.residual_add(resid, delta, n)?;
     }
-    ctx.output_head(&resid, &model.lm_head)?;
+    ctx.output_head(&resid, &model.lm_head, n)?;
     Ok(())
 }

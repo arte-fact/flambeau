@@ -12,7 +12,7 @@ use flambeau_forward::runtime::Arch;
 use flambeau_forward::ScratchConfig;
 use flambeau_quant::GgufFile;
 
-use crate::{forward_one_token, load_from_gguf, Qwen35MoeV2Model};
+use crate::{forward, load_from_gguf, Qwen35MoeV2Model};
 
 pub struct Qwen35MoeV2;
 
@@ -57,13 +57,17 @@ impl Arch for Qwen35MoeV2 {
     fn forward<C: ForwardCtx>(
         model: &Self::Model,
         ctx: &mut C,
-        token: u32,
-        position: usize,
+        tokens: &[u32],
+        start_position: usize,
     ) -> Result<()> {
-        forward_one_token(model, ctx, token, position)
+        forward(model, ctx, tokens, start_position)
     }
 
-    fn scratch_config(model: &Self::Model, shard: ShardMode) -> ScratchConfig {
+    fn scratch_config(
+        model: &Self::Model,
+        shard: ShardMode,
+        prefill_ubatch: usize,
+    ) -> ScratchConfig {
         let cfg = &model.config;
         let n_ranks = shard.n_ranks();
         let max_seq_len = cfg.context_length;
@@ -85,6 +89,7 @@ impl Arch for Qwen35MoeV2 {
             per_layer_kv_widths: None,
             attn_q_gated: true,
             shared_intermediate: cfg.shared_expert_intermediate,
+            max_prefill_tokens: prefill_ubatch,
         }
     }
 
