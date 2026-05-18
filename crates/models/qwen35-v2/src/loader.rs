@@ -1,6 +1,6 @@
 //! qwen35 GGUF → device. Per-layer dispatch on `is_recurrent` picks
-//! either dense-attn or GDN; FFN is dense everywhere. TP-sharded path
-//! errors on GDN layers (TP-aware GDN is a separate phase).
+//! either dense-attn or GDN; FFN is dense everywhere. TP uses
+//! `GdnTpMode::KReplicated` for GDN layers (qwen35 "rep_outer").
 
 use anyhow::{bail, Context, Result};
 use flambeau_backend_hip::HipDevice;
@@ -11,10 +11,12 @@ use flambeau_forward::ctx::{
 };
 use flambeau_forward::loader::{
     load_dense_attn_layer, load_dense_ffn_layer, load_embedding, load_gdn_layer, load_lm_head,
-    DenseAttnLayerSpec, DenseFfnLayerSpec, EmbeddingSpec, GdnLayerSpec, LmHeadSpec, ShardMode,
+    DenseAttnLayerSpec, DenseFfnLayerSpec, EmbeddingSpec, GdnLayerSpec, GdnTpMode, LmHeadSpec,
+    ShardMode,
 };
 use flambeau_quant::GgufFile;
 
+use crate::arch::per_rank_gdn_dims;
 use crate::config::Qwen35V2Config;
 
 pub struct Qwen35V2Model {
@@ -56,7 +58,15 @@ fn load_with_shard(
 ) -> Result<Qwen35V2Model> {
     let config = Qwen35V2Config::from_gguf(file).context("parse qwen35 config")?;
     let mut allocs: Vec<(DevicePtr, usize)> = Vec::new();
-    let g = config.gdn;
+    let n_ranks = shard.n_ranks();
+    // GDN dims handed to the loader are per-rank under TP. Norm
+    // weights are replicated; the loader's KReplicated path knows
+    // to keep the K/Q slabs full while sharding only V.
+    let g = if n_ranks > 1 {
+        per_rank_gdn_dims(config.gdn, n_ranks)
+    } else {
+        config.gdn
+    };
 
     let embedding = load_embedding(
         file,
@@ -109,6 +119,7 @@ fn load_with_shard(
                     dims: g,
                     rms_eps: config.rms_eps,
                     rep_inner_layout: false,
+                    tp_mode: GdnTpMode::KReplicated,
                 },
                 shard,
                 &mut allocs,
@@ -220,4 +231,13 @@ fn load_with_shard(
 
 pub fn load_from_gguf(file: &GgufFile, device: &HipDevice) -> Result<Qwen35V2Model> {
     load_with_shard(file, device, ShardMode::Replicated)
+}
+
+pub fn load_tp_shard_from_gguf(
+    file: &GgufFile,
+    device: &HipDevice,
+    rank: usize,
+    n_ranks: usize,
+) -> Result<Qwen35V2Model> {
+    load_with_shard(file, device, ShardMode::Tp { rank, n_ranks })
 }
