@@ -751,6 +751,32 @@ impl DeltaNetLayer {
         n_tokens: usize,
         state_event: Option<&HipEvent>,
     ) -> Result<()> {
+        self.forward_prefill_with_ar_hook(
+            ops, device, stream, x_in, delta_out, state, conv_history,
+            scratch, n_tokens, state_event, None,
+        )
+    }
+
+    /// Like `forward_prefill` but with an AR hook on the `ssm_out_f32`
+    /// partial buffer between the row-parallel ssm_out qmatmul and the
+    /// F32→F16 cast. Mirrors [`Self::forward_decode_with_ar_hook`].
+    #[allow(clippy::too_many_arguments)]
+    pub fn forward_prefill_with_ar_hook<O: Ops>(
+        &self,
+        ops: &O,
+        device: &HipDevice,
+        stream: &HipStream,
+        x_in: DevicePtr,
+        delta_out: DevicePtr,
+        state: DevicePtr,
+        conv_history: DevicePtr,
+        scratch: DeltaNetLayerPrefillScratch,
+        n_tokens: usize,
+        state_event: Option<&HipEvent>,
+        ar_partial_callback: Option<
+            &mut dyn FnMut(DevicePtr, usize, &HipDevice, &HipStream) -> Result<()>,
+        >,
+    ) -> Result<()> {
         if n_tokens == 0 {
             bail!("DeltaNetLayer::forward_prefill called with n_tokens = 0");
         }
@@ -1013,6 +1039,13 @@ impl DeltaNetLayer {
             self.ssm_out.dtype,
         )
         .context("gdn prefill ssm_out qmatmul")?;
+
+        // ssm_out output is rank-local partial under TP. AR-sum it
+        // before casting to F16. Caller passes `None` on SD/PP.
+        if let Some(cb) = ar_partial_callback {
+            cb(scratch.ssm_out_f32, n_tokens * hidden, device, stream)
+                .context("gdn prefill ar_partial_callback (ssm_out F32)")?;
+        }
 
         // 16. Cast back to F16 for the outer residual path.
         ops.cast_f32_to_f16(

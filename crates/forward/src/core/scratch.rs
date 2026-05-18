@@ -168,6 +168,11 @@ pub struct ScratchPool {
     /// Shared GDN per-decode scratch wrapping blocks's owned scratch.
     /// `None` when `config.gdn` is None.
     pub gdn_decode_scratch: Option<flambeau_blocks::OwnedDeltaNetLayerDecodeScratch>,
+    /// Shared GDN prefill scratch sized for `max_prefill_tokens`. Used
+    /// by the composite when the call is single-slot, contiguous, and
+    /// `n_tokens > 1` (the prefill-shape path). `None` when GDN is off
+    /// or `max_prefill_tokens <= 1`.
+    pub gdn_prefill_scratch: Option<flambeau_blocks::OwnedDeltaNetLayerPrefillScratch>,
 
     pub current_residual_is_a: bool,
 
@@ -348,7 +353,7 @@ impl ScratchPool {
             });
         }
 
-        let (gdn_state, gdn_decode_scratch) = if let Some(g) = config.gdn {
+        let (gdn_state, gdn_decode_scratch, gdn_prefill_scratch) = if let Some(g) = config.gdn {
             let mut state_vec = Vec::with_capacity(config.num_layers);
             let state_bytes = n_slots * g.num_v_heads * g.head_k_dim * g.head_v_dim * f32;
             let hist_bytes = n_slots * (g.conv_kernel - 1) * g.conv_channels * f32;
@@ -403,11 +408,23 @@ impl ScratchPool {
                 &mut tracker,
                 dims,
             )?;
-            // `mem::take` so `RawAllocTracker::Drop` doesn't double-dispose.
             allocs.extend(std::mem::take(&mut tracker.allocs));
-            (state_vec, Some(owned))
+            let prefill_owned = if config.max_prefill_tokens > 1 {
+                let mut p_tracker = flambeau_blocks::RawAllocTracker::new();
+                let p = flambeau_blocks::DeltaNetLayer::alloc_prefill_scratch(
+                    device,
+                    &mut p_tracker,
+                    dims,
+                    config.max_prefill_tokens,
+                )?;
+                allocs.extend(std::mem::take(&mut p_tracker.allocs));
+                Some(p)
+            } else {
+                None
+            };
+            (state_vec, Some(owned), prefill_owned)
         } else {
-            (Vec::new(), None)
+            (Vec::new(), None, None)
         };
 
         Ok(Self {
@@ -453,6 +470,7 @@ impl ScratchPool {
             kv_caches,
             gdn_state,
             gdn_decode_scratch,
+            gdn_prefill_scratch,
             current_residual_is_a: true,
             allocs,
         })
