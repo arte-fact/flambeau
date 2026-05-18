@@ -76,6 +76,7 @@ fn synth_dense_one_token_forward() {
             head_dim: HEAD_DIM,
             rotated_dims: HEAD_DIM,
             rope_theta: 10000.0,
+            rope_variant: flambeau_forward::ctx::RopeVariant::NeoxSplit,
             window_size: 0,
             rms_eps: RMS_EPS,
             softmax_scale: None,

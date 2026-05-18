@@ -14,6 +14,7 @@ pub mod graph_capture;
 pub mod impls;
 pub mod kv_cache_slot;
 pub mod module;
+pub mod probe;
 pub mod profile;
 pub mod sys;
 

@@ -15,6 +15,12 @@ rccl = []
 # Enables debug FLAMBEAU_* env-var reads (FLAMBEAU_LOB_*, etc.) in release
 # builds. Off by default; production binaries elide them.
 dev_trace = []
+# Enables `probe::f16` / `probe::f32` — env-gated DtoH dumps of named
+# device buffers, used for forward-path bisection. Off by default (probe
+# fns are inlined no-ops). Test crates opt in to capture intermediate state
+# without touching production code; activate per-call site via
+# `FLAMBEAU_PROBE_<NAME_UPPER>=<idx>` at runtime.
+parity-probe = []
 
 [dependencies]
 flambeau-core = { path = "../core" }

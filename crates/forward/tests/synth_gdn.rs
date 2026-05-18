@@ -94,7 +94,7 @@ fn synth_gdn_one_token_forward() {
             ssm_dt_bias: allocs.upload_f32(&det_signal(NUM_V_HEADS, seed + 6)),
             ssm_a: allocs.upload_f32(&det_signal(NUM_V_HEADS, seed + 7)),
             ssm_conv1d: allocs.upload_f32(&det_signal(CONV_KERNEL * conv_channels, seed + 8)),
-            ssm_norm_w: allocs.upload_f16(&vec![1.0_f32; HEAD_V_DIM]),
+            ssm_norm_w: allocs.upload_f32(&vec![1.0_f32; HEAD_V_DIM]),
             dims,
             rms_eps: RMS_EPS,
             rep_inner_layout: false,
