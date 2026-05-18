@@ -316,4 +316,48 @@ impl ScratchPool {
             self.resid_b
         }
     }
+
+    /// Zero per-layer GDN recurrent state + conv-history slabs so the
+    /// next request starts fresh. No-op when the arch is non-GDN.
+    /// KV-cache positions are caller-supplied (no counter on the
+    /// pool), so this is the only stateful slot that needs reset.
+    pub fn reset_gdn_state(&self, device: &HipDevice) -> Result<()> {
+        let Some(g) = self.config.gdn else {
+            return Ok(());
+        };
+        if self.gdn_state.is_empty() {
+            return Ok(());
+        }
+        let f32 = 4;
+        let state_bytes = g.num_v_heads * g.head_k_dim * g.head_v_dim * f32;
+        let hist_bytes = (g.conv_kernel - 1) * g.conv_channels * f32;
+        let zero_buf = vec![0u8; state_bytes.max(hist_bytes)];
+        let stream = device.default_stream();
+        for ls in &self.gdn_state {
+            // SAFETY: `ls.state` / `ls.conv_history` were allocated for
+            // state_bytes / hist_bytes in `new`; zero_buf >= both.
+            unsafe {
+                device
+                    .memcpy_async(
+                        stream,
+                        CopyDirection::HostToDevice,
+                        ls.state,
+                        DevicePtr(zero_buf.as_ptr() as usize),
+                        state_bytes,
+                    )
+                    .context("reset gdn state")?;
+                device
+                    .memcpy_async(
+                        stream,
+                        CopyDirection::HostToDevice,
+                        ls.conv_history,
+                        DevicePtr(zero_buf.as_ptr() as usize),
+                        hist_bytes,
+                    )
+                    .context("reset gdn conv_history")?;
+            }
+        }
+        flambeau_core::Stream::synchronize(stream).context("sync gdn reset")?;
+        Ok(())
+    }
 }

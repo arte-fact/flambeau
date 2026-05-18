@@ -23,5 +23,8 @@ half.workspace = true
 bytemuck.workspace = true
 tracing.workspace = true
 
+[dev-dependencies]
+serde_json.workspace = true
+
 [lints]
 workspace = true

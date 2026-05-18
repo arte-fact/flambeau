@@ -30,9 +30,13 @@ pub mod model_handle;
 #[cfg(feature = "hip")]
 pub mod gemma4_handle;
 #[cfg(feature = "hip")]
+pub mod v2_handle;
+#[cfg(feature = "hip")]
 pub mod routes;
 #[cfg(feature = "hip")]
 pub mod serve;
+#[cfg(feature = "hip")]
+pub mod serve_common;
 
 pub use api::{
     ChatChoice, ChatCompletionRequest, ChatCompletionResponse, ChatMessage, CompletionChoice,

@@ -13,6 +13,10 @@ flambeau-server-core = { path = "../server-core" }
 flambeau-quant = { path = "../quant" }
 flambeau-qwen3-moe = { path = "../models/qwen3-moe" }
 flambeau-gemma4 = { path = "../models/gemma4", optional = true }
+flambeau-forward = { path = "../forward", optional = true }
+flambeau-qwen35-v2 = { path = "../models/qwen35-v2", optional = true }
+flambeau-qwen35moe-v2 = { path = "../models/qwen35moe-v2", optional = true }
+flambeau-gemma4-v2 = { path = "../models/gemma4-v2", optional = true }
 flambeau-blocks = { path = "../blocks", optional = true }
 flambeau-ops = { path = "../ops" }
 anyhow.workspace = true
@@ -36,11 +40,19 @@ hip = [
     "dep:flambeau-backend-hip",
     "dep:flambeau-blocks",
     "dep:flambeau-gemma4",
+    "dep:flambeau-forward",
+    "dep:flambeau-qwen35-v2",
+    "dep:flambeau-qwen35moe-v2",
+    "dep:flambeau-gemma4-v2",
     "flambeau-blocks/hip",
     "flambeau-ops/hip",
     "flambeau-qwen3-moe/hip",
     "flambeau-gemma4/hip",
     "flambeau-server-core/hip",
+    "flambeau-forward/hip",
+    "flambeau-qwen35-v2/hip",
+    "flambeau-qwen35moe-v2/hip",
+    "flambeau-gemma4-v2/hip",
 ]
 # Enables debug FLAMBEAU_* env-var reads (TRACE_BATCH, DUMP_PROMPT,
 # DUMP_RAW_REQ, DEBUG_TOOL_RAW, PROFILE_DECODE, HOST_PROFILE) in release

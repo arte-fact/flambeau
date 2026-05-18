@@ -1,6 +1,6 @@
 //! qwen35 GGUF → device. Per-layer dispatch on `is_recurrent` picks
-//! either dense-attn or GDN; FFN is dense everywhere. TP uses
-//! `GdnTpMode::KReplicated` for GDN layers (qwen35 "rep_outer").
+//! either dense-attn or GDN; FFN is dense everywhere. GDN TP mode is
+//! auto-picked by `arch::gdn_tp_mode_for` from per-rank geometry.
 
 use anyhow::{bail, Context, Result};
 use flambeau_backend_hip::HipDevice;
@@ -11,12 +11,11 @@ use flambeau_forward::ctx::{
 };
 use flambeau_forward::loader::{
     load_dense_attn_layer, load_dense_ffn_layer, load_embedding, load_gdn_layer, load_lm_head,
-    DenseAttnLayerSpec, DenseFfnLayerSpec, EmbeddingSpec, GdnLayerSpec, GdnTpMode, LmHeadSpec,
-    ShardMode,
+    DenseAttnLayerSpec, DenseFfnLayerSpec, EmbeddingSpec, GdnLayerSpec, LmHeadSpec, ShardMode,
 };
 use flambeau_quant::GgufFile;
 
-use crate::arch::per_rank_gdn_dims;
+use crate::arch::{gdn_tp_mode_for, per_rank_gdn_dims};
 use crate::config::Qwen35V2Config;
 
 pub struct Qwen35V2Model {
@@ -59,8 +58,8 @@ fn load_with_shard(
     let config = Qwen35V2Config::from_gguf(file).context("parse qwen35 config")?;
     let mut allocs: Vec<(DevicePtr, usize)> = Vec::new();
     let n_ranks = shard.n_ranks();
-    // Per-rank GdnDims under TP (KReplicated: V-heads shard, K-heads
-    // stay global). At n_ranks == 1 this is the identity.
+    let tp_mode = gdn_tp_mode_for(config.gdn, n_ranks);
+    // Per-rank GdnDims under TP. At n_ranks == 1 this is the identity.
     let g = if n_ranks > 1 {
         per_rank_gdn_dims(config.gdn, n_ranks)
     } else {
@@ -118,7 +117,7 @@ fn load_with_shard(
                     dims: g,
                     rms_eps: config.rms_eps,
                     rep_inner_layout: false,
-                    tp_mode: GdnTpMode::KReplicated,
+                    tp_mode,
                 },
                 shard,
                 &mut allocs,

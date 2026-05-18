@@ -21,6 +21,7 @@ flambeau-core = { path = "../core" }
 flambeau-quant = { path = "../quant" }
 flambeau-model-ops = { path = "../model-ops" }
 flambeau-ops = { path = "../ops" }
+flambeau-runtime = { path = "../runtime" }
 flambeau-backend-hip = { path = "../backend-hip", optional = true }
 # blocks::DeltaNetLayer is reused as the GDN math primitive (~500 LOC
 # of orchestration we don't want to duplicate). v2 owns the composite

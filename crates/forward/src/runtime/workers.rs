@@ -97,6 +97,9 @@ enum Command {
         position: usize,
         reply: SyncSender<Result<Vec<f32>>>,
     },
+    ResetKv {
+        reply: SyncSender<Result<()>>,
+    },
     Shutdown,
 }
 
@@ -145,6 +148,10 @@ impl<A: Arch> WorkerHandle<A> {
                         let res = run_forward_once::<A>(&mut state, &role, token, position);
                         let _ = reply.send(res);
                     }
+                    Command::ResetKv { reply } => {
+                        let res = state.pool.reset_gdn_state(&state.device);
+                        let _ = reply.send(res);
+                    }
                     Command::Shutdown => break,
                 }
             }
@@ -184,6 +191,16 @@ impl<A: Arch> WorkerHandle<A> {
                 position,
                 reply: reply_tx,
             })
+            .map_err(|e| anyhow::anyhow!("worker channel closed: {e}"))?;
+        Ok(reply_rx)
+    }
+
+    /// Queue a ResetKv command. Each worker zeroes its rank's GDN
+    /// state slabs; reply fires once that rank's stream is drained.
+    pub fn send_reset_kv(&self) -> Result<Receiver<Result<()>>> {
+        let (reply_tx, reply_rx) = mpsc::sync_channel::<Result<()>>(1);
+        self.cmd_tx
+            .send(Command::ResetKv { reply: reply_tx })
             .map_err(|e| anyhow::anyhow!("worker channel closed: {e}"))?;
         Ok(reply_rx)
     }

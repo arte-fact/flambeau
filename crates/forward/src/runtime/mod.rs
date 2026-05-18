@@ -3,10 +3,11 @@
 //! peer-copy, stage handoff) behind a uniform forward-one-token API.
 
 pub mod ar;
+pub mod driver;
 pub mod orchestrate;
 pub mod workers;
 
-use anyhow::Result;
+use anyhow::{anyhow, Result};
 use flambeau_backend_hip::HipDevice;
 use flambeau_quant::GgufFile;
 
@@ -127,17 +128,92 @@ impl<A: Arch> Session<A> {
         Ok(())
     }
 
+    /// Decode wrapper that returns last-token logits via `out` (caller-
+    /// owned). Matches the `ModelDriver::forward_one_token_logits`
+    /// shape so server adapters call one method per request step.
+    pub fn forward_one_token_logits(
+        &mut self,
+        token: u32,
+        position: usize,
+        out: &mut Vec<f32>,
+    ) -> Result<()> {
+        self.forward_one_token(token, position)?;
+        out.clear();
+        out.extend_from_slice(&self.last_logits);
+        Ok(())
+    }
+
+    /// Multi-token prefill returning the LAST token's logits via `out`.
+    /// v1 implementation loops `forward_one_token` for each prompt
+    /// token; tracked as [P9-OUT real batched-prefill kernel] —
+    /// switching to a single prefill pass per layer is the lever.
+    pub fn forward_prefill_logits(
+        &mut self,
+        tokens: &[u32],
+        start_position: usize,
+        out: &mut Vec<f32>,
+    ) -> Result<()> {
+        if tokens.is_empty() {
+            anyhow::bail!("Session::forward_prefill_logits: empty tokens");
+        }
+        for (i, &t) in tokens.iter().enumerate() {
+            self.forward_one_token(t, start_position + i)?;
+        }
+        out.clear();
+        out.extend_from_slice(&self.last_logits);
+        Ok(())
+    }
+
+    /// Zero per-rank GDN state + conv history. KV-cache positions are
+    /// caller-supplied; this is the only stateful slot that survives a
+    /// request boundary, so it's the entire reset surface.
+    pub fn reset_kv(&mut self) -> Result<()> {
+        let rxs: Vec<_> = self
+            .handles
+            .iter()
+            .map(|h| h.send_reset_kv())
+            .collect::<Result<_>>()?;
+        for rx in rxs {
+            rx.recv()
+                .map_err(|e| anyhow!("reset_kv reply channel closed: {e}"))??;
+        }
+        Ok(())
+    }
+
     /// The logits emitted by the most recent `forward_one_token`.
     pub fn logits(&self) -> &[f32] {
         &self.last_logits
     }
 
+    /// Vocab size — `self.last_logits.len()` after the first forward,
+    /// `0` before. Callers needing a pre-forward value must look at the
+    /// model handle directly (`A::Model` exposes it).
+    pub fn vocab_size(&self) -> usize {
+        self.last_logits.len()
+    }
+
     /// Shut workers down + free device memory.
     pub fn dispose(mut self) -> Result<()> {
-        for h in self.handles.drain(..) {
-            h.shutdown()?;
-        }
+        Self::dispose_in_place(&mut self)?;
         Ok(())
+    }
+
+    /// `&mut`-only dispose so callers behind a trait method (e.g.
+    /// `ModelDriver::dispose`, which cannot consume `self`) can release
+    /// the workers without owning the `Session`. Drops in `Drop` as a
+    /// safety net catch what this misses.
+    pub fn dispose_in_place(&mut self) -> Result<()> {
+        let mut first_err: Option<anyhow::Error> = None;
+        for h in self.handles.drain(..) {
+            if let Err(e) = h.shutdown() {
+                first_err.get_or_insert(e);
+            }
+        }
+        if let Some(e) = first_err {
+            Err(e)
+        } else {
+            Ok(())
+        }
     }
 }
 
