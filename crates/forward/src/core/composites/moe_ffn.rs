@@ -574,10 +574,16 @@ fn gemma4_moe_cascade_local<H: TopologyHooks>(
     if n_tokens == 0 {
         bail!("gemma4_moe_cascade: empty n_tokens");
     }
-    for t in 0..n_tokens {
-        let in_ptr = input.ptr.offset_bytes(t * hidden * 2);
-        let out_ptr = state.pool.delta.offset_bytes(t * hidden * 2);
-        gemma4_moe_cascade_one_token(state, hooks, in_ptr, weights, out_ptr)?;
+    if n_tokens == 1 {
+        gemma4_moe_cascade_one_token(
+            state,
+            hooks,
+            input.ptr,
+            weights,
+            state.pool.delta,
+        )?;
+    } else {
+        gemma4_moe_cascade_batched(state, hooks, input, weights, n_tokens)?;
     }
     Ok(Some(unsafe {
         Tensor::<F16>::from_raw(state.pool.delta, n_tokens * hidden)
@@ -612,6 +618,357 @@ fn gemma4_moe_cascade_local<H: TopologyHooks>(
 /// delta_f16     = cast_f32_to_f16(tmp_f32)
 /// ```
 ///
+/// Batched gemma4 MoE cascade for `n_tokens > 1`. Same math as the
+/// single-token path but every op runs at the batched shape. The
+/// routed-MoE branch uses
+/// `MoeExperts::forward_prefill_tp_f32` against
+/// `pool.moe_prefill_scratch`; the per-token expert-down-scale fold
+/// is a small N-launch loop (each launch top_k threads). Pool buffer
+/// reuse:
+///
+/// * router_input_f16      → `pool.q_f16` (N × q_width F16, fits N × hidden)
+/// * partial_shared_mlp    → `pool.down_f32`        (N × hidden F32)
+/// * moe_input_f16         → `pool.norm`            (N × hidden F16,
+///                                                   free after the
+///                                                   shared-MLP norm)
+/// * partial_moe / cur_moe → `pool.attn_proj_f32`   (N × max ≥ hidden F32)
+/// * cur_combined / tmp    → `pool.shared_x_norm_f32` (N × hidden F32,
+///                                                    allocated when
+///                                                    shared MLP set)
+fn gemma4_moe_cascade_batched<H: TopologyHooks>(
+    state: &mut CoreState<'_>,
+    hooks: &mut H,
+    input: &Tensor<F16>,
+    weights: &MoeWeights,
+    n_tokens: usize,
+) -> Result<()> {
+    let hidden = state.hidden();
+    let n_experts = weights.n_experts;
+    let k_top = weights.experts_per_tok;
+    if n_tokens > state.pool.config.max_prefill_tokens {
+        bail!(
+            "gemma4_moe_cascade_batched: n_tokens {n_tokens} > pool.max_prefill_tokens {}",
+            state.pool.config.max_prefill_tokens
+        );
+    }
+    if weights.shared.is_none() {
+        bail!("gemma4_moe_cascade_batched: shared MLP is required");
+    }
+    let pre_router_w = weights.pre_router_weight_f16.as_ref().ok_or_else(|| {
+        anyhow::anyhow!("gemma4_moe_cascade_batched: pre_router_weight_f16 missing")
+    })?;
+    let pre_ffw_norm_2 = weights.pre_ffw_norm_2_f16.as_ref().ok_or_else(|| {
+        anyhow::anyhow!("gemma4_moe_cascade_batched: pre_ffw_norm_2_f16 missing")
+    })?;
+    let post_ffw_norm_1 = weights.post_ffw_norm_1_f32.as_ref().ok_or_else(|| {
+        anyhow::anyhow!("gemma4_moe_cascade_batched: post_ffw_norm_1_f32 missing")
+    })?;
+    let post_ffw_norm_2 = weights.post_ffw_norm_2_f32.as_ref().ok_or_else(|| {
+        anyhow::anyhow!("gemma4_moe_cascade_batched: post_ffw_norm_2_f32 missing")
+    })?;
+    let post_norm_f32 = weights.post_ffn_norm_f32.as_ref().ok_or_else(|| {
+        anyhow::anyhow!("gemma4_moe_cascade_batched: post_ffn_norm_f32 missing")
+    })?;
+    let expert_scale = weights.expert_down_scale_f32.as_ref().ok_or_else(|| {
+        anyhow::anyhow!("gemma4_moe_cascade_batched: expert_down_scale_f32 missing")
+    })?;
+    let prefill_scratch = state
+        .pool
+        .moe_prefill_scratch
+        .as_ref()
+        .ok_or_else(|| {
+            anyhow::anyhow!(
+                "gemma4_moe_cascade_batched: pool.moe_prefill_scratch missing — \
+                 ScratchConfig.max_prefill_tokens > 1 required"
+            )
+        })?
+        .view();
+    let m_shared = state.pool.config.shared_intermediate;
+    let m_routed = state.pool.config.intermediate;
+    if state.pool.shared_x_norm_f32.as_usize() == 0 {
+        bail!("gemma4_moe_cascade_batched: pool.shared_x_norm_f32 unallocated");
+    }
+
+    let ops = state.ops();
+    let act_mmq_null = unsafe { Tensor::<Q8_1>::from_raw(DevicePtr::NULL, 0) };
+
+    let router_input_ptr = state.pool.q_f16;
+    let partial_shared_mlp_ptr = state.pool.down_f32;
+    let moe_input_ptr = state.pool.norm;
+    let partial_moe_ptr = state.pool.attn_proj_f32;
+    let cur_combined_ptr = state.pool.shared_x_norm_f32;
+
+    let input_view =
+        unsafe { Tensor::<F16>::from_raw(input.ptr, n_tokens * hidden) };
+
+    // 1. router_input = rmsnorm_f16(input, pre_router_weight) — N rows.
+    let mut router_input = unsafe {
+        Tensor::<F16>::from_raw(router_input_ptr, n_tokens * hidden)
+    };
+    flambeau_model_ops::rmsnorm_f16(
+        &input_view,
+        pre_router_w,
+        &mut router_input,
+        n_tokens,
+        hidden,
+        weights.rms_eps,
+        &ops,
+    )?;
+
+    // 2. Router topk on N rows. Routes via prefill_scratch buffers
+    //    (sized [N, n_experts] and [N, top_k]).
+    let mut router_q8_1 = unsafe {
+        Tensor::<Q8_1>::from_raw(prefill_scratch.x_q8_1, n_tokens * hidden)
+    };
+    flambeau_model_ops::quantize_f16_to_q8_1(
+        &router_input,
+        &mut router_q8_1,
+        n_tokens * hidden,
+        &ops,
+    )?;
+    let mut router_logits = unsafe {
+        Tensor::<F32>::from_raw(prefill_scratch.router_logits, n_tokens * n_experts)
+    };
+    weights.router.qmatmul(
+        &router_q8_1,
+        &act_mmq_null,
+        &mut router_logits,
+        n_tokens,
+        hidden,
+        n_experts,
+        &ops,
+    )?;
+    let mut expert_ids = unsafe {
+        Tensor::<I32>::from_raw(prefill_scratch.expert_ids, n_tokens * k_top)
+    };
+    let mut expert_weights = unsafe {
+        Tensor::<F32>::from_raw(prefill_scratch.expert_weights, n_tokens * k_top)
+    };
+    flambeau_model_ops::moe_router_topk_f32(
+        &router_logits,
+        &mut expert_ids,
+        &mut expert_weights,
+        n_tokens,
+        n_experts,
+        k_top,
+        &ops,
+    )?;
+    // Per-token expert-down-scale fold. The kernel is single-token
+    // (1 block × top_k threads), so loop N times with offsets.
+    use flambeau_ops::Ops;
+    for t in 0..n_tokens {
+        let w_ptr = prefill_scratch
+            .expert_weights
+            .offset_bytes(t * k_top * 4);
+        let i_ptr = prefill_scratch
+            .expert_ids
+            .offset_bytes(t * k_top * 4);
+        ops.apply_per_expert_scale_f32(w_ptr, i_ptr, expert_scale.ptr, k_top)?;
+    }
+
+    // 3. Shared MLP — all ops batched at N tokens.
+    let sh = weights.shared.as_ref().unwrap();
+    ops.rmsnorm_quant_q8_1(
+        input.ptr,
+        weights.ffn_norm.ptr,
+        prefill_scratch.x_q8_1,
+        n_tokens,
+        hidden,
+        weights.rms_eps,
+    )?;
+    let mut shared_x_q8_1 = unsafe {
+        Tensor::<Q8_1>::from_raw(prefill_scratch.x_q8_1, n_tokens * hidden)
+    };
+    let mut shared_gate_f32 = unsafe {
+        Tensor::<F32>::from_raw(state.pool.gate_f32, n_tokens * m_shared)
+    };
+    // shared_x_q8_1 also needs an MMQ-shape copy for n_tokens >= 8;
+    // pool.attn_out_q8_1_mmq might not fit batched. Use the unbatched
+    // mmvq path via null MMQ ptr — qmatmul auto-dispatches MMQ
+    // tile-8 only when act_q8_1_mmq is non-NULL, and the unbatched
+    // MMVQ at n_tokens > 1 falls back to per-row launches inside
+    // qmatmul. Acceptable: shared MLP is small relative to routed.
+    sh.gate.qmatmul(
+        &shared_x_q8_1,
+        &act_mmq_null,
+        &mut shared_gate_f32,
+        n_tokens,
+        hidden,
+        m_shared,
+        &ops,
+    )?;
+    let mut shared_up_f32 = unsafe {
+        Tensor::<F32>::from_raw(state.pool.up_f32, n_tokens * m_shared)
+    };
+    sh.up.qmatmul(
+        &shared_x_q8_1,
+        &act_mmq_null,
+        &mut shared_up_f32,
+        n_tokens,
+        hidden,
+        m_shared,
+        &ops,
+    )?;
+    ops.gelu_f32_to_f16(
+        state.pool.gate_f32,
+        state.pool.up_f32,
+        state.pool.gated_f16,
+        n_tokens * m_shared,
+    )?;
+    ops.quantize_f16_q8_1(
+        state.pool.gated_f16,
+        state.pool.gated_q8_1,
+        n_tokens * m_shared,
+    )?;
+    let shared_act_q8_1 = unsafe {
+        Tensor::<Q8_1>::from_raw(state.pool.gated_q8_1, n_tokens * m_shared)
+    };
+    let mut partial_shared_mlp = unsafe {
+        Tensor::<F32>::from_raw(partial_shared_mlp_ptr, n_tokens * hidden)
+    };
+    sh.down.qmatmul(
+        &shared_act_q8_1,
+        &act_mmq_null,
+        &mut partial_shared_mlp,
+        n_tokens,
+        m_shared,
+        hidden,
+        &ops,
+    )?;
+    hooks.ar_sum_f32(
+        partial_shared_mlp_ptr,
+        n_tokens * hidden,
+        state.device,
+        state.stream,
+    )?;
+    // cur_mlp = rmsnorm_f32 in-place over partial_shared_mlp.
+    let post_ffw_norm_1_view =
+        unsafe { Tensor::<F32>::from_raw(post_ffw_norm_1.ptr, hidden) };
+    let mut cur_mlp = unsafe {
+        Tensor::<F32>::from_raw(partial_shared_mlp_ptr, n_tokens * hidden)
+    };
+    flambeau_model_ops::rmsnorm_f32(
+        &unsafe { Tensor::<F32>::from_raw(partial_shared_mlp_ptr, n_tokens * hidden) },
+        &post_ffw_norm_1_view,
+        &mut cur_mlp,
+        n_tokens,
+        hidden,
+        weights.rms_eps,
+        &ops,
+    )?;
+
+    // 4. Routed MoE — N rows.
+    let mut moe_input_f16 = unsafe {
+        Tensor::<F16>::from_raw(moe_input_ptr, n_tokens * hidden)
+    };
+    flambeau_model_ops::rmsnorm_f16(
+        &input_view,
+        pre_ffw_norm_2,
+        &mut moe_input_f16,
+        n_tokens,
+        hidden,
+        weights.rms_eps,
+        &ops,
+    )?;
+    let gate_dt = weights.experts_gate[0].dtype;
+    let up_dt = weights.experts_up[0].dtype;
+    let down_dt = weights.experts_down[0].dtype;
+    let router_dt = weights.router.dtype;
+    let block = MoeExperts::new(
+        WeightHandle { ptr: weights.router.ptr, dtype: router_dt, dims: [n_experts, hidden] },
+        WeightHandle {
+            ptr: weights.experts_gate[0].ptr,
+            dtype: gate_dt,
+            dims: [n_experts * m_routed, hidden],
+        },
+        WeightHandle {
+            ptr: weights.experts_up[0].ptr,
+            dtype: up_dt,
+            dims: [n_experts * m_routed, hidden],
+        },
+        WeightHandle {
+            ptr: weights.experts_down[0].ptr,
+            dtype: down_dt,
+            dims: [n_experts * hidden, m_routed],
+        },
+        hidden,
+        m_routed,
+        n_experts,
+        k_top,
+    )?
+    .with_router_policy(RouterPolicy::default())
+    .with_activation(match weights.activation {
+        Activation::SwiGLU => BlockActivation::SwiGLU,
+        Activation::GeluTanh => BlockActivation::Gelu,
+    });
+    block.forward_prefill_tp_f32(
+        &ops,
+        moe_input_ptr,
+        partial_moe_ptr,
+        n_tokens,
+        prefill_scratch,
+    )?;
+    hooks.ar_sum_f32(
+        partial_moe_ptr,
+        n_tokens * hidden,
+        state.device,
+        state.stream,
+    )?;
+    // cur_moe = rmsnorm_f32 in-place over partial_moe.
+    let post_ffw_norm_2_view =
+        unsafe { Tensor::<F32>::from_raw(post_ffw_norm_2.ptr, hidden) };
+    let mut cur_moe = unsafe {
+        Tensor::<F32>::from_raw(partial_moe_ptr, n_tokens * hidden)
+    };
+    flambeau_model_ops::rmsnorm_f32(
+        &unsafe { Tensor::<F32>::from_raw(partial_moe_ptr, n_tokens * hidden) },
+        &post_ffw_norm_2_view,
+        &mut cur_moe,
+        n_tokens,
+        hidden,
+        weights.rms_eps,
+        &ops,
+    )?;
+
+    // 5. cur_combined = cur_mlp + cur_moe (N × hidden F32)
+    let cur_mlp_view = unsafe {
+        Tensor::<F32>::from_raw(partial_shared_mlp_ptr, n_tokens * hidden)
+    };
+    let cur_moe_view = unsafe {
+        Tensor::<F32>::from_raw(partial_moe_ptr, n_tokens * hidden)
+    };
+    let mut cur_combined = unsafe {
+        Tensor::<F32>::from_raw(cur_combined_ptr, n_tokens * hidden)
+    };
+    flambeau_model_ops::add_f32(
+        &cur_mlp_view,
+        &cur_moe_view,
+        &mut cur_combined,
+        n_tokens * hidden,
+        &ops,
+    )?;
+
+    // 6. tmp = rmsnorm_f32(cur_combined, post_ffn_norm_f32) in-place,
+    //    then cast F32→F16 into pool.delta (N × hidden F16).
+    let mut tmp_inout = cur_combined;
+    flambeau_model_ops::rmsnorm_f32(
+        &unsafe { Tensor::<F32>::from_raw(cur_combined_ptr, n_tokens * hidden) },
+        post_norm_f32,
+        &mut tmp_inout,
+        n_tokens,
+        hidden,
+        weights.rms_eps,
+        &ops,
+    )?;
+    let mut delta_all = unsafe {
+        Tensor::<F16>::from_raw(state.pool.delta, n_tokens * hidden)
+    };
+    flambeau_model_ops::cast_f32_to_f16(&tmp_inout, &mut delta_all, n_tokens * hidden, &ops)?;
+
+    let _ = (act_mmq_null, gate_dt, up_dt, down_dt, router_dt);
+    Ok(())
+}
+
 fn gemma4_moe_cascade_one_token<H: TopologyHooks>(
     state: &mut CoreState<'_>,
     hooks: &mut H,

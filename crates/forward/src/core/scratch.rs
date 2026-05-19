@@ -280,12 +280,19 @@ impl ScratchPool {
             (DevicePtr::NULL, DevicePtr::NULL, DevicePtr::NULL)
         };
 
-        let gate_f32 = alloc_bytes(n * m * f32)?;
-        let up_f32 = alloc_bytes(n * m * f32)?;
-        let gated_f16 = alloc_bytes(n * m * f16)?;
-        let gated_q8_1 = alloc_bytes(q8_1(n * m))?;
+        // FFN gate/up/activated buffers are shared between the dense
+        // FFN path (intermediate=ffn_inter), the qwen-shared-expert
+        // path (intermediate=shared_expert_inter, usually =
+        // expert_inter), and the gemma4 MoE shared MLP path
+        // (shared_intermediate > routed expert_intermediate). Size for
+        // the max so all callers fit.
+        let m_buf = m.max(config.shared_intermediate);
+        let gate_f32 = alloc_bytes(n * m_buf * f32)?;
+        let up_f32 = alloc_bytes(n * m_buf * f32)?;
+        let gated_f16 = alloc_bytes(n * m_buf * f16)?;
+        let gated_q8_1 = alloc_bytes(q8_1(n * m_buf))?;
         let gated_q8_1_mmq = if n > 1 {
-            alloc_bytes(q8_1_mmq(m, n))?
+            alloc_bytes(q8_1_mmq(m_buf, n))?
         } else {
             DevicePtr::NULL
         };
