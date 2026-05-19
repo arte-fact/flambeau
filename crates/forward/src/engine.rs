@@ -18,6 +18,7 @@ use crate::ctx::{
     AttnWeights, EmbeddingWeights, FfnWeights, ForwardCtx, LmHeadWeights, ModelLayout,
     MoeWeights,
 };
+use crate::runtime::ar::{bar_ar_residual_f16, BarArCoordinator};
 
 pub type ArCallback = Box<
     dyn FnMut(
@@ -35,6 +36,7 @@ pub struct TpHooks {
     pub rank: usize,
     pub n_ranks: usize,
     pub ar_callback: ArCallback,
+    pub bar: Option<Arc<BarArCoordinator>>,
 }
 
 impl TopologyHooks for TpHooks {
@@ -50,12 +52,40 @@ impl TopologyHooks for TpHooks {
         }
         (self.ar_callback)(self.rank, self.n_ranks, buf, n_elems, device, stream)
     }
+
+    fn supports_ar_residual_f16(&self) -> bool {
+        self.n_ranks == 2 && self.bar.is_some()
+    }
+
+    fn ar_residual_f16(
+        &mut self,
+        residual_inout: DevicePtr,
+        partial_f16: DevicePtr,
+        n_elems: usize,
+        device: &HipDevice,
+        stream: &HipStream,
+    ) -> Result<()> {
+        let bar = self
+            .bar
+            .as_ref()
+            .ok_or_else(|| anyhow!("TpHooks::ar_residual_f16: bar coordinator not configured"))?;
+        bar_ar_residual_f16(
+            bar,
+            self.rank,
+            residual_inout,
+            partial_f16,
+            n_elems,
+            device,
+            stream,
+        )
+    }
 }
 
 pub struct HybridHooks {
     pub rank_in_stage: usize,
     pub tp_size: usize,
     pub ar_callback: ArCallback,
+    pub bar: Option<Arc<BarArCoordinator>>,
 }
 
 impl TopologyHooks for HybridHooks {
@@ -70,6 +100,33 @@ impl TopologyHooks for HybridHooks {
             return Ok(());
         }
         (self.ar_callback)(self.rank_in_stage, self.tp_size, buf, n_elems, device, stream)
+    }
+
+    fn supports_ar_residual_f16(&self) -> bool {
+        self.tp_size == 2 && self.bar.is_some()
+    }
+
+    fn ar_residual_f16(
+        &mut self,
+        residual_inout: DevicePtr,
+        partial_f16: DevicePtr,
+        n_elems: usize,
+        device: &HipDevice,
+        stream: &HipStream,
+    ) -> Result<()> {
+        let bar = self
+            .bar
+            .as_ref()
+            .ok_or_else(|| anyhow!("HybridHooks::ar_residual_f16: bar coordinator not configured"))?;
+        bar_ar_residual_f16(
+            bar,
+            self.rank_in_stage,
+            residual_inout,
+            partial_f16,
+            n_elems,
+            device,
+            stream,
+        )
     }
 }
 
@@ -375,6 +432,7 @@ impl<'a> ForwardEngine<'a, HybridHooks, HybStage> {
         layer_start: usize,
         layer_end: usize,
         ar_callback: ArCallback,
+        bar: Option<Arc<BarArCoordinator>>,
         peer_buffer: Arc<Mutex<Vec<f16>>>,
         handoff_barrier: Arc<Barrier>,
     ) -> Self {
@@ -382,6 +440,7 @@ impl<'a> ForwardEngine<'a, HybridHooks, HybStage> {
             rank_in_stage,
             tp_size,
             ar_callback,
+            bar,
         };
         let stage = HybStage {
             stage_idx,
@@ -450,7 +509,7 @@ impl<H: TopologyHooks, S: StageHooks> ForwardCtx for ForwardEngine<'_, H, S> {
         layer_idx: usize,
         positions: &[usize],
         slot_ids: &[usize],
-    ) -> Result<Tensor<F16>> {
+    ) -> Result<Option<Tensor<F16>>> {
         composites::standard_attn_local(
             &mut self.core,
             &mut self.hooks,
@@ -468,7 +527,7 @@ impl<H: TopologyHooks, S: StageHooks> ForwardCtx for ForwardEngine<'_, H, S> {
         weights: &crate::ctx::GdnWeights,
         layer_idx: usize,
         slot_ids: &[usize],
-    ) -> Result<Tensor<F16>> {
+    ) -> Result<Option<Tensor<F16>>> {
         composites::gdn_layer_local(
             &mut self.core,
             &mut self.hooks,
@@ -484,7 +543,7 @@ impl<H: TopologyHooks, S: StageHooks> ForwardCtx for ForwardEngine<'_, H, S> {
         input: &Tensor<F16>,
         weights: &FfnWeights,
         n_tokens: usize,
-    ) -> Result<Tensor<F16>> {
+    ) -> Result<Option<Tensor<F16>>> {
         composites::dense_ffn_local(&mut self.core, &mut self.hooks, input, weights, n_tokens)
     }
 
@@ -493,7 +552,7 @@ impl<H: TopologyHooks, S: StageHooks> ForwardCtx for ForwardEngine<'_, H, S> {
         input: &Tensor<F16>,
         weights: &MoeWeights,
         n_tokens: usize,
-    ) -> Result<Tensor<F16>> {
+    ) -> Result<Option<Tensor<F16>>> {
         composites::moe_ffn_local(&mut self.core, &mut self.hooks, input, weights, n_tokens)
     }
 

@@ -24,10 +24,14 @@ pub fn forward<C: ForwardCtx>(
             .expect("ffn weights missing for owned layer (PP slice mismatch)");
 
         let delta = ctx.standard_attn(&resid, attn_w, li, positions, slot_ids)?;
-        resid = ctx.residual_add(resid, delta, n)?;
+        if let Some(d) = delta {
+            resid = ctx.residual_add(resid, d, n)?;
+        }
 
         let delta = ctx.dense_ffn(&resid, ffn_w, n)?;
-        resid = ctx.residual_add(resid, delta, n)?;
+        if let Some(d) = delta {
+            resid = ctx.residual_add(resid, d, n)?;
+        }
 
         if let Some(scale) = model.layer_output_scale[li] {
             resid = ctx.scale_inplace_f16(resid, scale, n)?;

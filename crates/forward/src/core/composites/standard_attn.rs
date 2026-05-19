@@ -17,7 +17,7 @@ pub fn standard_attn_local<H: TopologyHooks>(
     layer_idx: usize,
     positions: &[usize],
     slot_ids: &[usize],
-) -> Result<Tensor<F16>> {
+) -> Result<Option<Tensor<F16>>> {
     let hidden = state.hidden();
     if positions.len() != slot_ids.len() {
         bail!(
@@ -565,6 +565,24 @@ pub fn standard_attn_local<H: TopologyHooks>(
         hidden,
         &ops,
     )?;
+    // Fast path: BAR1 TP=2 with no post-attn-norm folds the
+    // F32→F16 cast + AR + residual-add into 2 launches (cast +
+    // residual_tp2) instead of 4 (ar_sum_f32 + cast + add +
+    // model.rs's residual_add). Saves 2 launches per AR site per
+    // token. Returns None to signal the model to skip residual_add.
+    if hooks.supports_ar_residual_f16() && weights.post_attn_norm.is_none() {
+        let mut partial_f16 =
+            unsafe { Tensor::<F16>::from_raw(state.pool.delta, n * hidden) };
+        flambeau_model_ops::cast_f32_to_f16(&proj_f32, &mut partial_f16, n * hidden, &ops)?;
+        hooks.ar_residual_f16(
+            input.ptr,
+            partial_f16.ptr,
+            n * hidden,
+            state.device,
+            state.stream,
+        )?;
+        return Ok(None);
+    }
     hooks.ar_sum_f32(proj_f32.ptr, n * hidden, state.device, state.stream)?;
     let mut delta = unsafe { Tensor::<F16>::from_raw(state.pool.delta, n * hidden) };
     flambeau_model_ops::cast_f32_to_f16(&proj_f32, &mut delta, n * hidden, &ops)?;
@@ -581,5 +599,5 @@ pub fn standard_attn_local<H: TopologyHooks>(
             &ops,
         )?;
     }
-    Ok(delta)
+    Ok(Some(delta))
 }

@@ -33,10 +33,14 @@ pub fn forward<C: ForwardCtx>(
                 ctx.gdn_layer(&resid, w, li, slot_ids)?
             }
         };
-        resid = ctx.residual_add(resid, delta, n)?;
+        if let Some(d) = delta {
+            resid = ctx.residual_add(resid, d, n)?;
+        }
 
         let delta = ctx.moe_ffn(&resid, ffn_w, n)?;
-        resid = ctx.residual_add(resid, delta, n)?;
+        if let Some(d) = delta {
+            resid = ctx.residual_add(resid, d, n)?;
+        }
     }
     ctx.output_head(&resid, &model.lm_head, slot_ids)?;
     Ok(())

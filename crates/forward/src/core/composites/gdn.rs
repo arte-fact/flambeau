@@ -35,7 +35,7 @@ pub fn gdn_layer_local<H: TopologyHooks>(
     weights: &GdnWeights,
     layer_idx: usize,
     slot_ids: &[usize],
-) -> Result<Tensor<F16>> {
+) -> Result<Option<Tensor<F16>>> {
     let hidden = state.hidden();
     let n_tokens = slot_ids.len();
     if n_tokens == 0 {
@@ -157,5 +157,5 @@ pub fn gdn_layer_local<H: TopologyHooks>(
             )?;
         }
     }
-    Ok(unsafe { Tensor::<F16>::from_raw(delta_ptr, n_tokens * hidden) })
+    Ok(Some(unsafe { Tensor::<F16>::from_raw(delta_ptr, n_tokens * hidden) }))
 }

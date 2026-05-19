@@ -324,6 +324,7 @@ fn run_forward_once<A: Arch>(
                 rank: *rank,
                 n_ranks: *n_ranks,
                 ar_callback,
+                bar: bar.as_ref().map(Arc::clone),
             };
             let mut ctx = TpForwardCtx::new(
                 &state.device,
@@ -388,6 +389,7 @@ fn run_forward_once<A: Arch>(
                 *layer_start,
                 *layer_end,
                 ar_callback,
+                bar.as_ref().map(Arc::clone),
                 Arc::clone(peer_buffer),
                 Arc::clone(handoff),
             );

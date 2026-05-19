@@ -48,6 +48,13 @@ pub trait ForwardCtx {
     /// Single decode: positions=[pos], slot_ids=[0]. Prefill chunk:
     /// positions=[start..start+n], slot_ids=[slot;n]. Batched decode:
     /// positions=[pos_0..pos_{N-1}], slot_ids=[0..N-1].
+    /// `Result<Option<Tensor>>`: `Some(delta)` means the caller must
+    /// follow with `residual_add(input, delta)`. `None` means the
+    /// composite has already folded AR + residual-add into `input`
+    /// in-place via the BAR1 fused kernel (no separate `residual_add`
+    /// needed and harmful to attempt). Fusion only kicks in when
+    /// (a) TP+BAR1 is engaged and (b) no per-arch op (e.g., gemma4
+    /// `post_attn_norm`) sits between AR and residual-add.
     fn standard_attn(
         &mut self,
         input: &Tensor<F16>,
@@ -55,31 +62,36 @@ pub trait ForwardCtx {
         layer_idx: usize,
         positions: &[usize],
         slot_ids: &[usize],
-    ) -> Result<Tensor<F16>>;
+    ) -> Result<Option<Tensor<F16>>>;
 
     /// Gated-Delta-Net recurrent layer. `slot_ids[i]` selects the
-    /// per-slot recurrent state slab updated by token `i`.
+    /// per-slot recurrent state slab updated by token `i`. Returns
+    /// `None` when AR+residual-add was folded into `input` in-place.
     fn gdn_layer(
         &mut self,
         input: &Tensor<F16>,
         weights: &GdnWeights,
         layer_idx: usize,
         slot_ids: &[usize],
-    ) -> Result<Tensor<F16>>;
+    ) -> Result<Option<Tensor<F16>>>;
 
+    /// Returns `None` when AR+residual-add was folded into `input`
+    /// in-place.
     fn dense_ffn(
         &mut self,
         input: &Tensor<F16>,
         weights: &FfnWeights,
         n_tokens: usize,
-    ) -> Result<Tensor<F16>>;
+    ) -> Result<Option<Tensor<F16>>>;
 
+    /// Returns `None` when AR+residual-add was folded into `input`
+    /// in-place.
     fn moe_ffn(
         &mut self,
         input: &Tensor<F16>,
         weights: &MoeWeights,
         n_tokens: usize,
-    ) -> Result<Tensor<F16>>;
+    ) -> Result<Option<Tensor<F16>>>;
 
     /// When `slot_ids` are all equal (prefill / single decode), only
     /// the LAST token's logits land in `ctx.logits()` (vocab elems).

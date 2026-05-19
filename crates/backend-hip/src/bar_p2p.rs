@@ -693,6 +693,42 @@ impl BarP2pAllReduce {
         }
     }
 
+    /// Rank-local fused AR + residual-add for TP=2 (F16). Caller
+    /// exchanges peer partial pointer out-of-band; both ranks pass
+    /// partial in canonical order (rank0's then rank1's) so the
+    /// F32 reduce order matches across ranks.
+    /// # Safety
+    /// Same per-pointer + ordering contract as
+    /// [`Self::sum_tp2_f32_rank`]. `hidden` and `partial`s are F16.
+    pub unsafe fn residual_tp2_rank(
+        &self,
+        rank: usize,
+        hidden: DevicePtr,
+        partial_canonical_rank0: DevicePtr,
+        partial_canonical_rank1: DevicePtr,
+        elem_count: u32,
+        stream: &HipStream,
+    ) -> DeviceResult<()> {
+        self.expect_ranks(2)?;
+        let cfg = launch_cfg(elem_count);
+        let _ = rank;
+        // SAFETY: forwarded from public-method contract.
+        unsafe {
+            self.launch_one(
+                ArKind::ResidualTp2,
+                rank,
+                cfg,
+                stream,
+                ArArgs::Residual {
+                    hidden,
+                    partial_local: partial_canonical_rank0,
+                    peers: [partial_canonical_rank1, DevicePtr(0), DevicePtr(0)],
+                },
+                elem_count,
+            )
+        }
+    }
+
     /// Rank-local F32 AllReduce-sum for TP=4. Caller exchanges all
     /// three peer pointers out-of-band.
     /// # Safety

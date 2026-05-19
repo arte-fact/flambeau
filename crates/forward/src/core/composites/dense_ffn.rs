@@ -13,7 +13,7 @@ pub fn dense_ffn_local<H: TopologyHooks>(
     input: &Tensor<F16>,
     weights: &FfnWeights,
     n_tokens: usize,
-) -> Result<Tensor<F16>> {
+) -> Result<Option<Tensor<F16>>> {
     let hidden = state.hidden();
     let m = state.pool.config.intermediate;
     let ops = state.ops();
@@ -89,6 +89,20 @@ pub fn dense_ffn_local<H: TopologyHooks>(
     weights
         .ffn_down
         .qmatmul(&gated_q8_1, act_gated_mmq, &mut down_f32, n, m, hidden, &ops)?;
+    // Fused AR + residual fast path when post_ffn_norm is None.
+    if hooks.supports_ar_residual_f16() && weights.post_ffn_norm.is_none() {
+        let mut partial_f16 =
+            unsafe { Tensor::<F16>::from_raw(state.pool.delta, n * hidden) };
+        flambeau_model_ops::cast_f32_to_f16(&down_f32, &mut partial_f16, n * hidden, &ops)?;
+        hooks.ar_residual_f16(
+            input.ptr,
+            partial_f16.ptr,
+            n * hidden,
+            state.device,
+            state.stream,
+        )?;
+        return Ok(None);
+    }
     hooks.ar_sum_f32(down_f32.ptr, n * hidden, state.device, state.stream)?;
     let mut delta = unsafe { Tensor::<F16>::from_raw(state.pool.delta, n * hidden) };
     flambeau_model_ops::cast_f32_to_f16(&down_f32, &mut delta, n * hidden, &ops)?;
@@ -105,5 +119,5 @@ pub fn dense_ffn_local<H: TopologyHooks>(
             &ops,
         )?;
     }
-    Ok(delta)
+    Ok(Some(delta))
 }

@@ -26,7 +26,7 @@ pub fn moe_ffn_local<H: TopologyHooks>(
     input: &Tensor<F16>,
     weights: &MoeWeights,
     n_tokens: usize,
-) -> Result<Tensor<F16>> {
+) -> Result<Option<Tensor<F16>>> {
     let hidden = state.hidden();
     if n_tokens > 1 {
         return moe_ffn_loop(state, hooks, input, weights, n_tokens);
@@ -154,6 +154,48 @@ pub fn moe_ffn_local<H: TopologyHooks>(
     // F32 partial → AR (no-op on SD/PP) → cast F32→F16 → delta.
     // `pool.down_f32` is sized hidden×F32; perfect for partial output.
     block.forward_decode_tp_f32(&ops, x_norm_f16_ptr, state.pool.down_f32, scratch_view)?;
+
+    // Fast path: BAR1 TP=2 — fuse AR + residual-add for the routed
+    // MoE partial AND (if present) the shared-expert partial.
+    // Returns None so the model skips its `residual_add`.
+    if hooks.supports_ar_residual_f16() {
+        let down_f32_t = unsafe { Tensor::<F32>::from_raw(state.pool.down_f32, hidden) };
+        let mut moe_partial_f16 =
+            unsafe { Tensor::<F16>::from_raw(state.pool.delta, hidden) };
+        flambeau_model_ops::cast_f32_to_f16(&down_f32_t, &mut moe_partial_f16, hidden, &ops)?;
+        hooks.ar_residual_f16(
+            input.ptr,
+            moe_partial_f16.ptr,
+            hidden,
+            state.device,
+            state.stream,
+        )?;
+        if let Some(sh) = weights.shared.as_ref() {
+            if state.pool.shared_x_norm_f32.as_usize() == 0 && sh.gate_inp.is_some() {
+                bail!(
+                    "moe_ffn: shared expert with per-token gate present but \
+                     pool.shared_x_norm_f32 unallocated — set \
+                     ScratchConfig.shared_intermediate"
+                );
+            }
+            let shared_block = build_shared_expert_block(sh, hidden)?;
+            let scratch_view = flambeau_blocks::SharedExpertDecodeScratch {
+                x_q8_1: state.pool.norm_q8_1,
+                gate_f32: state.pool.gate_f32,
+                up_f32: state.pool.up_f32,
+                activated_f16: state.pool.gated_f16,
+                activated_q8_1: state.pool.gated_q8_1,
+                down_f32: state.pool.down_f32,
+                x_norm_f32: state.pool.shared_x_norm_f32,
+            };
+            let shared_out = state.pool.q_f16;
+            shared_block.forward_decode(&ops, x_norm_f16_ptr, shared_out, scratch_view)?;
+            hooks.ar_residual_f16(input.ptr, shared_out, hidden, state.device, state.stream)?;
+        }
+        let _ = (act_mmq_null, gate_dt, up_dt, down_dt, router_dt);
+        return Ok(None);
+    }
+
     hooks.ar_sum_f32(state.pool.down_f32, hidden, state.device, state.stream)?;
     let down_f32_t = unsafe { Tensor::<F32>::from_raw(state.pool.down_f32, hidden) };
     let mut delta_f16 = unsafe { Tensor::<F16>::from_raw(state.pool.delta, hidden) };
@@ -184,9 +226,7 @@ pub fn moe_ffn_local<H: TopologyHooks>(
         shared_block.forward_decode(&ops, x_norm_f16_ptr, shared_out, scratch_view)?;
         // Under TP, down_shexp is row-parallel and shared_out is a
         // rank-local partial. Cast → F32 → ar_sum_f32 → F16 to fold
-        // the cross-rank sum (no-op on SD/PP). pool.moe_accum_f16 is
-        // unused by the indexed-MoE decode path so we borrow it as
-        // the F16 staging slot; pool.attn_proj_f32 is the F32 staging.
+        // the cross-rank sum (no-op on SD/PP).
         let shared = unsafe { Tensor::<F16>::from_raw(shared_out, hidden) };
         let mut shared_f32 =
             unsafe { Tensor::<F32>::from_raw(state.pool.attn_proj_f32, hidden) };
@@ -201,7 +241,7 @@ pub fn moe_ffn_local<H: TopologyHooks>(
     }
 
     let _ = (act_mmq_null, gate_dt, up_dt, down_dt, router_dt);
-    Ok(unsafe { Tensor::<F16>::from_raw(state.pool.delta, hidden) })
+    Ok(Some(unsafe { Tensor::<F16>::from_raw(state.pool.delta, hidden) }))
 }
 
 /// Batched prefill MoE path. Used whenever `n_tokens > 1`. Mirrors the
@@ -222,7 +262,7 @@ fn moe_ffn_loop<H: TopologyHooks>(
     input: &Tensor<F16>,
     weights: &MoeWeights,
     n_tokens: usize,
-) -> Result<Tensor<F16>> {
+) -> Result<Option<Tensor<F16>>> {
     let hidden = state.hidden();
     let m = state.pool.config.intermediate;
     let n_experts = weights.n_experts;
@@ -416,7 +456,7 @@ fn moe_ffn_loop<H: TopologyHooks>(
     }
 
     let _ = (act_mmq_null, gate_dt, up_dt, down_dt, router_dt);
-    Ok(unsafe { Tensor::<F16>::from_raw(state.pool.delta, n_tokens * hidden) })
+    Ok(Some(unsafe { Tensor::<F16>::from_raw(state.pool.delta, n_tokens * hidden) }))
 }
 
 fn build_shared_expert_block(
