@@ -14,8 +14,8 @@ use flambeau_forward::loader::{
     load_dense_attn_layer, load_embedding, load_gdn_layer, load_lm_head, upload_col_sharded_quant,
     upload_dequant_to_f16, upload_f32_tensor, upload_moe_experts_stacked,
     upload_moe_experts_stacked_col_sharded, upload_moe_experts_stacked_row_sharded,
-    upload_quant_weight, upload_row_sharded_quant, DenseAttnLayerSpec, EmbeddingSpec,
-    GdnLayerSpec, GdnTpMode, LmHeadSpec, ShardMode,
+    upload_quant_weight, upload_router_f16, upload_row_sharded_quant, DenseAttnLayerSpec,
+    EmbeddingSpec, GdnLayerSpec, GdnTpMode, LmHeadSpec, ShardMode,
 };
 use flambeau_quant::GgufFile;
 
@@ -211,7 +211,7 @@ fn load_with_shard(
             config.hidden,
             &mut allocs,
         )?;
-        let router = upload_quant_weight(
+        let router = upload_router_f16(
             file,
             device,
             &router_name,

@@ -26,7 +26,7 @@ fn qwen35_9b_forward_one_token_produces_finite_non_constant_logits() {
     let device = HipDevice::new(0).expect("HIP device 0");
     device.bind().expect("bind");
 
-    let mut model = load_from_gguf(&file, &device, None).expect("load_from_gguf");
+    let mut model = load_from_gguf(&file, &device, None, None).expect("load_from_gguf");
     let cfg = &model.config;
     let n_gdn = (0..cfg.num_layers).filter(|&li| cfg.is_recurrent(li)).count();
     eprintln!(

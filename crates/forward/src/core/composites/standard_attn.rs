@@ -563,21 +563,31 @@ pub fn standard_attn_local<H: TopologyHooks>(
         &act_mmq_null
     };
 
+    // Decode F16-direct fast path: at n=1 with AR-fold semantics
+    // (post_attn_norm=None + caller wants F16 partial), the projection
+    // can write straight to `pool.delta` via mmvq's saturating F16-cast
+    // — skips one `cast_f32_to_f16` launch per layer per token.
+    let f16_fast = n == 1
+        && weights.post_attn_norm.is_none()
+        && weights.attn_output.supports_decode_to_f16()
+        && (hooks.supports_ar_residual_rmsnorm_f16()
+            || hooks.supports_ar_residual_f16());
     let mut proj_f32 = unsafe { Tensor::<F32>::from_raw(state.pool.attn_proj_f32, n * hidden) };
-    weights.attn_output.qmatmul(
-        &attn_out_q8_1,
-        act_attn_out_mmq,
-        &mut proj_f32,
-        n,
-        q_width,
-        hidden,
-        &ops,
-    )?;
+    if !f16_fast {
+        weights.attn_output.qmatmul(
+            &attn_out_q8_1,
+            act_attn_out_mmq,
+            &mut proj_f32,
+            n,
+            q_width,
+            hidden,
+            &ops,
+        )?;
+    }
     // Fast path: BAR1 TP=2 with no post-attn-norm folds the
-    // F32→F16 cast + AR + residual-add into 2 launches (cast +
-    // residual_tp2) instead of 4 (ar_sum_f32 + cast + add +
-    // model.rs's residual_add). Saves 2 launches per AR site per
-    // token. Returns None to signal the model to skip residual_add.
+    // F32→F16 cast + AR + residual-add into 1 launch (residual_tp2)
+    // instead of 4 (qmatmul + cast + ar_sum + add). Returns None so the
+    // model skips its own residual_add.
     if n == 1
         && weights.post_attn_norm.is_none()
         && next_norm.is_some()
@@ -586,7 +596,17 @@ pub fn standard_attn_local<H: TopologyHooks>(
         let next_w = next_norm.unwrap();
         let mut partial_f16 =
             unsafe { Tensor::<F16>::from_raw(state.pool.delta, n * hidden) };
-        flambeau_model_ops::cast_f32_to_f16(&proj_f32, &mut partial_f16, n * hidden, &ops)?;
+        if f16_fast {
+            weights.attn_output.qmatmul_decode_to_f16(
+                &attn_out_q8_1,
+                &mut partial_f16,
+                q_width,
+                hidden,
+                &ops,
+            )?;
+        } else {
+            flambeau_model_ops::cast_f32_to_f16(&proj_f32, &mut partial_f16, n * hidden, &ops)?;
+        }
         hooks.ar_residual_rmsnorm_f16(
             input.ptr,
             partial_f16.ptr,
@@ -603,7 +623,17 @@ pub fn standard_attn_local<H: TopologyHooks>(
     if hooks.supports_ar_residual_f16() && weights.post_attn_norm.is_none() {
         let mut partial_f16 =
             unsafe { Tensor::<F16>::from_raw(state.pool.delta, n * hidden) };
-        flambeau_model_ops::cast_f32_to_f16(&proj_f32, &mut partial_f16, n * hidden, &ops)?;
+        if f16_fast {
+            weights.attn_output.qmatmul_decode_to_f16(
+                &attn_out_q8_1,
+                &mut partial_f16,
+                q_width,
+                hidden,
+                &ops,
+            )?;
+        } else {
+            flambeau_model_ops::cast_f32_to_f16(&proj_f32, &mut partial_f16, n * hidden, &ops)?;
+        }
         hooks.ar_residual_f16(
             input.ptr,
             partial_f16.ptr,

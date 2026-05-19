@@ -38,7 +38,7 @@ fn try_build_bar_ar(devices: &[i32]) -> Option<Arc<BarArCoordinator>> {
         return None;
     }
     let bar = Arc::new(BarP2pAllReduce::new(Arc::clone(&cluster)).ok()?);
-    Some(Arc::new(BarArCoordinator::new(bar)))
+    Some(Arc::new(BarArCoordinator::new(bar).ok()?))
 }
 
 pub fn launch<A: Arch>(

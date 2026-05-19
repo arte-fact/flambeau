@@ -508,7 +508,7 @@ impl DeltaNetLayer {
             )
             .context("attn_qkv + attn_gate fused mmvq_q8_0")?;
         } else if fuse_q4_0 {
-            ops.mmvq_q4_0_gate_up(
+            ops.mmvq_q4_0_gate_up_t128(
                 self.attn_qkv.ptr,
                 self.attn_gate.ptr,
                 scratch.x_q8_1,
@@ -518,7 +518,7 @@ impl DeltaNetLayer {
                 d_inner,
                 hidden,
             )
-            .context("attn_qkv + attn_gate fused mmvq_q4_0")?;
+            .context("attn_qkv + attn_gate fused mmvq_q4_0_t128")?;
         } else {
             ops.mmvq(
                 self.attn_qkv.ptr,

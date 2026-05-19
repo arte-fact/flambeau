@@ -24,6 +24,9 @@ fn session_qwen36_a3b_q3_k_s_sd_finite_logits() {
     let mut session = match Session::<Qwen35MoeV2>::new(
         file,
         Topology::SingleDevice { device: 0 },
+        None,
+        16,
+        1,
     ) {
         Ok(s) => s,
         Err(e) => {

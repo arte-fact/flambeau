@@ -3,13 +3,15 @@
 
 use anyhow::{bail, Context, Result};
 use flambeau_backend_hip::HipDevice;
+use flambeau_core::op::QDtype;
 use flambeau_core::DevicePtr;
 use flambeau_quant::{GgmlDType, GgufFile};
 
 use crate::ctx::QuantWeight;
 
 use super::primitives::{
-    dtype_qmatmul_native, f32_to_q8_0_bytes, upload_bytes, upload_raw, wrap_quant,
+    dtype_qmatmul_native, f32_to_q8_0_bytes, upload_bytes, upload_dequant_to_f16, upload_raw,
+    wrap_quant,
 };
 use super::ShardMode;
 
@@ -43,6 +45,26 @@ pub fn upload_quant_weight(
     let q8_0_bytes = f32_to_q8_0_bytes(name, &f32_vec)?;
     let ptr = upload_bytes(device, &q8_0_bytes, allocs)?;
     wrap_quant(ptr, n_elems, GgmlDType::Q8_0)
+}
+
+/// Upload a host-dequantised tensor as an F16 `QuantWeight`. The
+/// returned weight dispatches through `ops.dense_gemv_f16_f16` (no
+/// per-call activation re-quantise to Q8_1). Use for small dense
+/// weights where the F16 path is faster than mmvq + quantise — e.g.
+/// MoE router (`ffn_gate_inp`).
+pub fn upload_router_f16(
+    file: &GgufFile,
+    device: &HipDevice,
+    name: &str,
+    n_elems: usize,
+    allocs: &mut Vec<(DevicePtr, usize)>,
+) -> Result<QuantWeight> {
+    let tensor = upload_dequant_to_f16(file, device, name, n_elems, allocs)?;
+    Ok(QuantWeight {
+        ptr: tensor.ptr,
+        dtype: QDtype::F16,
+        n_elems,
+    })
 }
 
 /// Col-shard along GGUF dim-0 (output rows). Native dtypes ride a

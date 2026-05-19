@@ -209,6 +209,13 @@ impl BarP2pAllReduce {
         self.cluster.ranks()
     }
 
+    /// HIP device id for `rank`. Used by callers that need to allocate
+    /// per-rank ordering primitives (e.g. `HipEvent`) bound to the
+    /// rank's device without re-acquiring the cluster handle.
+    pub fn device_id(&self, rank: usize) -> i32 {
+        self.cluster.device(rank).id()
+    }
+
     /// TP=4 residual: on every rank simultaneously,
     /// `hidden[r] += partial[r] + Σ_{k≠r} partial[k]`.
     /// `hidden[r]` and `partial[r]` are device pointers on rank `r`'s

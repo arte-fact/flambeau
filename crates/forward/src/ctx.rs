@@ -160,6 +160,66 @@ impl QuantWeight {
             self.dtype,
         )
     }
+
+    /// True iff `dtype` has an F16-direct MMVQ kernel registered in
+    /// `ops.mmvq_f16_direct`. Callers gate the fused-cast fast path on
+    /// this; unsupported dtypes (F16, BF16) keep the F32+cast pair.
+    pub fn supports_decode_to_f16(&self) -> bool {
+        use flambeau_core::op::QDtype;
+        matches!(
+            self.dtype,
+            QDtype::Q4_0
+                | QDtype::Q4_1
+                | QDtype::Q5_0
+                | QDtype::Q5_1
+                | QDtype::Q8_0
+                | QDtype::Q2_K
+                | QDtype::Q3_K
+                | QDtype::Q4_K
+                | QDtype::Q5_K
+                | QDtype::Q6_K
+                | QDtype::Q8_K
+                | QDtype::IQ1_S
+                | QDtype::IQ1_M
+                | QDtype::IQ2_XXS
+                | QDtype::IQ2_XS
+                | QDtype::IQ2_S
+                | QDtype::IQ3_XXS
+                | QDtype::IQ3_S
+                | QDtype::IQ4_NL
+                | QDtype::IQ4_XS
+        )
+    }
+
+    /// Decode-only (`m=1`) MMVQ writing directly into an F16
+    /// destination. Saturating cast happens inside the kernel — saves
+    /// one `cast_f32_to_f16` launch per call. Caller must check
+    /// [`Self::supports_decode_to_f16`] first; F16/BF16 weights bail.
+    pub fn qmatmul_decode_to_f16(
+        &self,
+        act_q8_1: &Tensor<flambeau_model_ops::Q8_1>,
+        output: &mut Tensor<flambeau_model_ops::F16>,
+        k: usize,
+        n: usize,
+        ops: &flambeau_ops::HipOps<'_>,
+    ) -> Result<()> {
+        if output.n_elems < n {
+            anyhow::bail!(
+                "qmatmul_decode_to_f16 ({:?}): output has {} F16 elems, need >= {n}",
+                self.dtype,
+                output.n_elems,
+            );
+        }
+        <flambeau_ops::HipOps<'_> as flambeau_ops::Ops>::mmvq_f16_direct(
+            ops,
+            self.ptr,
+            act_q8_1.ptr,
+            output.ptr,
+            n,
+            k,
+            self.dtype,
+        )
+    }
 }
 
 pub struct EmbeddingWeights {

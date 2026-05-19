@@ -9,9 +9,26 @@
 //!   are no DtoH/HtoD bytes — just BAR1 reads inside the kernel.
 
 use anyhow::Result;
-use flambeau_backend_hip::{BarP2pAllReduce, HipDevice, HipStream};
+use flambeau_backend_hip::{BarP2pAllReduce, HipDevice, HipEvent, HipStream};
 use flambeau_core::{CopyDirection, Device, DevicePtr};
 use std::sync::{Arc, Barrier, Mutex};
+
+/// Above this `n_elems`, the AR call rides the host-sync producer
+/// ordering path (`Stream::synchronize`) instead of the event-based
+/// stream_wait path. Picked to separate decode (`n_tokens=1`,
+/// `n_elems = hidden ≤ ~8192`) from prefill (`n_tokens >> 1`,
+/// `n_elems = n_tokens * hidden ≫ 32k`).
+///
+/// Why the gate exists: event-based ordering decouples host from GPU,
+/// which is a win when per-call kernel work is tiny (decode) — the
+/// host queues many ARs ahead. But at prefill, each AR kernel is
+/// large (~3-15 MB) and the host can queue dozens of layers ahead of
+/// the GPU; HIP appears to serialize at high queue depth on gfx906,
+/// which manifests as a 45% prefill regression on 27B-Q4_0 TP2.
+/// Pre-lever's `Stream::synchronize` naturally throttled queue depth.
+/// See cert `decode_gap_levers_design_2026_05_19.md` and the bench
+/// in `flambeau_v2_vs_legacy_tp2.py` for the bisect.
+const EVENT_PATH_MAX_ELEMS: usize = 65_536;
 
 /// One coordinator per stage / per TP cluster. Workers in the same
 /// stage share an `Arc<ArCoordinator>` and call `ar_sum` through the
@@ -116,17 +133,30 @@ pub fn make_ar_callback(
 pub struct BarArCoordinator {
     pub bar: Arc<BarP2pAllReduce>,
     partials: Mutex<Vec<Option<DevicePtr>>>,
+    /// Per-rank producer-done events, one per rank, each created on
+    /// the rank's device. Used by the small-`n` event-based ordering
+    /// path so callers can avoid host `Stream::synchronize`; legacy's
+    /// `cross_rank_event_barrier` pattern. Large-`n` AR calls keep
+    /// host-sync — see `EVENT_PATH_MAX_ELEMS`.
+    events: Vec<HipEvent>,
     barrier: Barrier,
 }
 
 impl BarArCoordinator {
-    pub fn new(bar: Arc<BarP2pAllReduce>) -> Self {
+    pub fn new(bar: Arc<BarP2pAllReduce>) -> Result<Self> {
         let n = bar.ranks();
-        Self {
+        let mut events = Vec::with_capacity(n);
+        for r in 0..n {
+            let dev = bar.device_id(r);
+            flambeau_backend_hip::bind(dev)?;
+            events.push(HipEvent::new(dev)?);
+        }
+        Ok(Self {
             bar,
             partials: Mutex::new(vec![None; n]),
+            events,
             barrier: Barrier::new(n),
-        }
+        })
     }
 
     pub fn ranks(&self) -> usize {
@@ -134,9 +164,80 @@ impl BarArCoordinator {
     }
 }
 
-/// BAR1 P2P AR-sum. Steps: producer-stream sync → publish own buf →
-/// barrier → snap peer pointer(s) → launch this rank's kernel →
-/// barrier → reset slab (rank 0).
+/// Producer ordering for the event-based fast path: record this
+/// rank's event on its own stream, publish the partial pointer, sync
+/// host threads at a barrier, then queue a `stream_wait` against every
+/// peer event so the upcoming BAR1 launch sees committed peer writes.
+/// No host `Stream::synchronize` — CPU stays decoupled from GPU.
+fn ar_publish_with_events(
+    coord: &BarArCoordinator,
+    rank: usize,
+    partial: DevicePtr,
+    stream: &HipStream,
+) -> Result<Vec<DevicePtr>> {
+    coord.events[rank].record(stream)?;
+    {
+        let mut p = coord.partials.lock().unwrap();
+        p[rank] = Some(partial);
+    }
+    coord.barrier.wait();
+    let snap: Vec<DevicePtr> = {
+        let p = coord.partials.lock().unwrap();
+        (0..coord.ranks())
+            .map(|r| p[r].expect("BarArCoordinator: peer pointer unpublished"))
+            .collect()
+    };
+    for r in 0..coord.ranks() {
+        if r != rank {
+            coord.events[r].stream_wait(stream)?;
+        }
+    }
+    Ok(snap)
+}
+
+/// Producer ordering for the host-sync path: drain own producer
+/// stream so the partial is committed in HBM before any peer reads
+/// it via BAR1, then publish + host barrier + snap peers. Matches
+/// pre-Lever-3 semantics; used at prefill-scale `n_elems` to avoid
+/// the high-queue-depth path that hurts gfx906.
+fn ar_publish_with_host_sync(
+    coord: &BarArCoordinator,
+    rank: usize,
+    partial: DevicePtr,
+    stream: &HipStream,
+) -> Result<Vec<DevicePtr>> {
+    flambeau_core::Stream::synchronize(stream)?;
+    {
+        let mut p = coord.partials.lock().unwrap();
+        p[rank] = Some(partial);
+    }
+    coord.barrier.wait();
+    let snap: Vec<DevicePtr> = {
+        let p = coord.partials.lock().unwrap();
+        (0..coord.ranks())
+            .map(|r| p[r].expect("BarArCoordinator: peer pointer unpublished"))
+            .collect()
+    };
+    Ok(snap)
+}
+
+/// Slab-reset epilogue shared by both publish paths: barrier, rank 0
+/// clears the partials slab, barrier again so the next AR call sees
+/// `None` slots.
+fn ar_epilogue(coord: &BarArCoordinator, rank: usize) {
+    coord.barrier.wait();
+    if rank == 0 {
+        let mut p = coord.partials.lock().unwrap();
+        for r in 0..coord.ranks() {
+            p[r] = None;
+        }
+    }
+    coord.barrier.wait();
+}
+
+/// BAR1 P2P AR-sum. Picks event-based ordering for decode-shape
+/// (small `n_elems`) and host-sync for prefill-shape (large
+/// `n_elems`) — see `EVENT_PATH_MAX_ELEMS`.
 pub fn bar_ar_sum_f32(
     coord: &BarArCoordinator,
     rank: usize,
@@ -149,53 +250,34 @@ pub fn bar_ar_sum_f32(
     if n_ranks == 1 {
         return Ok(());
     }
-    // Drain own producer-stream work so the partial is committed
-    // before any peer reads it via BAR1.
-    flambeau_core::Stream::synchronize(stream)?;
-
-    {
-        let mut p = coord.partials.lock().unwrap();
-        p[rank] = Some(buf);
-    }
-    coord.barrier.wait();
-
-    let peers_snapshot: Vec<DevicePtr> = {
-        let p = coord.partials.lock().unwrap();
-        (0..n_ranks)
-            .map(|r| p[r].expect("BarArCoordinator: peer pointer unpublished"))
-            .collect()
+    let peers = if n_elems <= EVENT_PATH_MAX_ELEMS {
+        ar_publish_with_events(coord, rank, buf, stream)?
+    } else {
+        ar_publish_with_host_sync(coord, rank, buf, stream)?
     };
-
     // SAFETY: partials are pool-owned DevicePtrs alive for the request;
-    // producer ordering held by step-1 sync; each rank launches on its
-    // own stream; BarP2pAllReduce validates per-rank cluster device.
+    // producer ordering held by the publish helper; each rank launches
+    // on its own stream; BarP2pAllReduce validates per-rank cluster
+    // device.
     unsafe {
         match n_ranks {
             2 => coord
                 .bar
-                .sum_tp2_f32_rank(rank, peers_snapshot[rank], peers_snapshot[1 - rank], n_elems as u32, stream)?,
+                .sum_tp2_f32_rank(rank, peers[rank], peers[1 - rank], n_elems as u32, stream)?,
             4 => {
-                let peers = [
-                    peers_snapshot[(rank + 1) % 4],
-                    peers_snapshot[(rank + 2) % 4],
-                    peers_snapshot[(rank + 3) % 4],
+                let peer3 = [
+                    peers[(rank + 1) % 4],
+                    peers[(rank + 2) % 4],
+                    peers[(rank + 3) % 4],
                 ];
                 coord
                     .bar
-                    .sum_tp4_f32_rank(rank, peers_snapshot[rank], peers, n_elems as u32, stream)?
+                    .sum_tp4_f32_rank(rank, peers[rank], peer3, n_elems as u32, stream)?
             }
             other => anyhow::bail!("BarArCoordinator: unsupported n_ranks={other}"),
         }
     }
-
-    coord.barrier.wait();
-    if rank == 0 {
-        let mut p = coord.partials.lock().unwrap();
-        for r in 0..n_ranks {
-            p[r] = None;
-        }
-    }
-    coord.barrier.wait();
+    ar_epilogue(coord, rank);
     Ok(())
 }
 
@@ -221,38 +303,24 @@ pub fn bar_ar_residual_f16(
     if n_ranks != 2 {
         anyhow::bail!("bar_ar_residual_f16: only TP=2 supported (got {n_ranks})");
     }
-    flambeau_core::Stream::synchronize(stream)?;
-    {
-        let mut p = coord.partials.lock().unwrap();
-        p[rank] = Some(partial_f16);
-    }
-    coord.barrier.wait();
-    let peers_snapshot: Vec<DevicePtr> = {
-        let p = coord.partials.lock().unwrap();
-        (0..n_ranks)
-            .map(|r| p[r].expect("BarArCoordinator: peer pointer unpublished"))
-            .collect()
+    let peers = if n_elems <= EVENT_PATH_MAX_ELEMS {
+        ar_publish_with_events(coord, rank, partial_f16, stream)?
+    } else {
+        ar_publish_with_host_sync(coord, rank, partial_f16, stream)?
     };
     // SAFETY: partials are pool-owned F16 alive for the request;
-    // producer-stream sync drained own writes before publish.
+    // producer ordering held by the publish helper.
     unsafe {
         coord.bar.residual_tp2_rank(
             rank,
             residual_inout_f16,
-            peers_snapshot[0],
-            peers_snapshot[1],
+            peers[0],
+            peers[1],
             n_elems as u32,
             stream,
         )?;
     }
-    coord.barrier.wait();
-    if rank == 0 {
-        let mut p = coord.partials.lock().unwrap();
-        for r in 0..n_ranks {
-            p[r] = None;
-        }
-    }
-    coord.barrier.wait();
+    ar_epilogue(coord, rank);
     Ok(())
 }
 
@@ -277,26 +345,19 @@ pub fn bar_ar_residual_rmsnorm_f16(
     if n_ranks != 2 {
         anyhow::bail!("bar_ar_residual_rmsnorm_f16: only TP=2 supported (got {n_ranks})");
     }
-    flambeau_core::Stream::synchronize(stream)?;
-    {
-        let mut p = coord.partials.lock().unwrap();
-        p[rank] = Some(partial_f16);
-    }
-    coord.barrier.wait();
-    let peers_snapshot: Vec<DevicePtr> = {
-        let p = coord.partials.lock().unwrap();
-        (0..n_ranks)
-            .map(|r| p[r].expect("BarArCoordinator: peer pointer unpublished"))
-            .collect()
+    let peers = if n_elems <= EVENT_PATH_MAX_ELEMS {
+        ar_publish_with_events(coord, rank, partial_f16, stream)?
+    } else {
+        ar_publish_with_host_sync(coord, rank, partial_f16, stream)?
     };
     // SAFETY: partials are pool-owned F16 alive for the request;
-    // producer-stream sync drained own writes before publish.
+    // producer ordering held by the publish helper.
     unsafe {
         coord.bar.residual_rmsnorm_tp2_rank(
             rank,
             residual_inout_f16,
-            peers_snapshot[0],
-            peers_snapshot[1],
+            peers[0],
+            peers[1],
             rms_weight,
             out_norm,
             n_elems as u32,
@@ -304,14 +365,7 @@ pub fn bar_ar_residual_rmsnorm_f16(
             stream,
         )?;
     }
-    coord.barrier.wait();
-    if rank == 0 {
-        let mut p = coord.partials.lock().unwrap();
-        for r in 0..n_ranks {
-            p[r] = None;
-        }
-    }
-    coord.barrier.wait();
+    ar_epilogue(coord, rank);
     Ok(())
 }
 

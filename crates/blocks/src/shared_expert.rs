@@ -239,10 +239,14 @@ impl SharedExpert {
         ops.quantize_f16_q8_1(x_norm, scratch.x_q8_1, hidden)
             .context("shexp x_norm → Q8_1")?;
 
-        // 2+3. gate + up. Fuse when both Q8_0.
-        let fuse_gate_up = self.ffn_gate_shexp.dtype == QDtype::Q8_0
+        // 2+3. gate + up. Fuse when both Q8_0 (mmvq_q8_0_gate_up) or
+        // both Q4_0 (mmvq_q4_0_gate_up_t128, t128 schedule matches
+        // legacy's fast path); else two plain mmvq launches.
+        let fuse_q8_0 = self.ffn_gate_shexp.dtype == QDtype::Q8_0
             && self.ffn_up_shexp.dtype == QDtype::Q8_0;
-        if fuse_gate_up {
+        let fuse_q4_0 = self.ffn_gate_shexp.dtype == QDtype::Q4_0
+            && self.ffn_up_shexp.dtype == QDtype::Q4_0;
+        if fuse_q8_0 {
             ops.mmvq_q8_0_gate_up(
                 self.ffn_gate_shexp.ptr,
                 self.ffn_up_shexp.ptr,
@@ -254,6 +258,18 @@ impl SharedExpert {
                 hidden,
             )
             .context("shexp gate+up fused mmvq_q8_0")?;
+        } else if fuse_q4_0 {
+            ops.mmvq_q4_0_gate_up_t128(
+                self.ffn_gate_shexp.ptr,
+                self.ffn_up_shexp.ptr,
+                scratch.x_q8_1,
+                scratch.gate_f32,
+                scratch.up_f32,
+                inter,
+                inter,
+                hidden,
+            )
+            .context("shexp gate+up fused mmvq_q4_0_t128")?;
         } else {
             ops.mmvq(
                 self.ffn_gate_shexp.ptr,

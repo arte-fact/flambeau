@@ -92,10 +92,20 @@ pub fn dense_ffn_local<H: TopologyHooks>(
     } else {
         &act_mmq_null
     };
+    // Decode F16-direct fast path: at n=1 under AR-fold the down
+    // projection writes straight to `pool.delta` via mmvq's saturating
+    // F16-cast — skips one `cast_f32_to_f16` launch per layer per token.
+    let f16_fast = n == 1
+        && weights.post_ffn_norm.is_none()
+        && weights.ffn_down.supports_decode_to_f16()
+        && (hooks.supports_ar_residual_rmsnorm_f16()
+            || hooks.supports_ar_residual_f16());
     let mut down_f32 = unsafe { Tensor::<F32>::from_raw(state.pool.down_f32, n * hidden) };
-    weights
-        .ffn_down
-        .qmatmul(&gated_q8_1, act_gated_mmq, &mut down_f32, n, m, hidden, &ops)?;
+    if !f16_fast {
+        weights
+            .ffn_down
+            .qmatmul(&gated_q8_1, act_gated_mmq, &mut down_f32, n, m, hidden, &ops)?;
+    }
     // Fused AR + residual fast path when post_ffn_norm is None.
     if n == 1
         && weights.post_ffn_norm.is_none()
@@ -105,7 +115,17 @@ pub fn dense_ffn_local<H: TopologyHooks>(
         let next_w = next_norm.unwrap();
         let mut partial_f16 =
             unsafe { Tensor::<F16>::from_raw(state.pool.delta, n * hidden) };
-        flambeau_model_ops::cast_f32_to_f16(&down_f32, &mut partial_f16, n * hidden, &ops)?;
+        if f16_fast {
+            weights.ffn_down.qmatmul_decode_to_f16(
+                &gated_q8_1,
+                &mut partial_f16,
+                m,
+                hidden,
+                &ops,
+            )?;
+        } else {
+            flambeau_model_ops::cast_f32_to_f16(&down_f32, &mut partial_f16, n * hidden, &ops)?;
+        }
         hooks.ar_residual_rmsnorm_f16(
             input.ptr,
             partial_f16.ptr,
@@ -122,7 +142,17 @@ pub fn dense_ffn_local<H: TopologyHooks>(
     if hooks.supports_ar_residual_f16() && weights.post_ffn_norm.is_none() {
         let mut partial_f16 =
             unsafe { Tensor::<F16>::from_raw(state.pool.delta, n * hidden) };
-        flambeau_model_ops::cast_f32_to_f16(&down_f32, &mut partial_f16, n * hidden, &ops)?;
+        if f16_fast {
+            weights.ffn_down.qmatmul_decode_to_f16(
+                &gated_q8_1,
+                &mut partial_f16,
+                m,
+                hidden,
+                &ops,
+            )?;
+        } else {
+            flambeau_model_ops::cast_f32_to_f16(&down_f32, &mut partial_f16, n * hidden, &ops)?;
+        }
         hooks.ar_residual_f16(
             input.ptr,
             partial_f16.ptr,
