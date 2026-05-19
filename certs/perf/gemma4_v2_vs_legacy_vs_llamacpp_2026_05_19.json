@@ -1,6 +1,6 @@
 {
-  "timestamp": "2026-05-19T19:43:29Z",
-  "tg": 64,
+  "timestamp": "2026-05-19T20:52:28Z",
+  "tg": 128,
   "results": [
     {
       "case": "gemma4-26B-A4B-Q8_0",
@@ -8,11 +8,11 @@
       "label": "flambeau-v2__gemma4-26B-A4B-Q8_0",
       "err": null,
       "prompt_tokens": 725,
-      "completion_tokens": 64,
-      "ttft_ms": 1313.5817050933838,
-      "decode_ms": 1455.744775675111,
-      "decode_tps": 43.27681682442126,
-      "prefill_tps": 551.9260790469513,
+      "completion_tokens": 128,
+      "ttft_ms": 1433.2191944122314,
+      "decode_ms": 2831.616163253784,
+      "decode_tps": 44.850711635317644,
+      "prefill_tps": 505.8542355744302,
       "text_head": "\n### Technical Memorandum: High-Performance Integer Arithmetic via `V_DOT4_I32_I"
     },
     {
@@ -34,11 +34,11 @@
       "label": "llama.cpp__gemma4-26B-A4B-Q8_0",
       "err": null,
       "prompt_tokens": 702,
-      "completion_tokens": 61,
-      "ttft_ms": 1432.3298931121826,
-      "decode_ms": 910.8424186706543,
-      "decode_tps": 65.87308492677373,
-      "prefill_tps": 490.1105557984875,
+      "completion_tokens": 125,
+      "ttft_ms": 1427.2863864898682,
+      "decode_ms": 1877.3565292358398,
+      "decode_tps": 66.0503202609432,
+      "prefill_tps": 491.8424267511104,
       "text_head": "Senior Compiler Engineer at a large GPU vendor.\nExhaustive technical explanation"
     }
   ]

@@ -144,7 +144,34 @@ reaches parity; (1) + (2) + (3) puts flambeau ahead.
 ## Files
 
 - Raw kernel summaries: `flambeau_v2_kernels.txt`,
-  `llamacpp_kernels.txt`
+  `llamacpp_kernels.txt`, `flambeau_v2_post_lever_b_kernels.txt`
 - rocprofv3 SQLite DBs (not committed):
   `/tmp/rocprof_v2/flambeau_v2_results.db`,
   `/tmp/rocprof_llamacpp/llamacpp_results.db`
+
+## Lever B shipped (Q8_0 indexed-MoE gate+up fusion)
+
+Ported `indexed_moe_mmvq_q4_0_gate_up_dp4a` to Q8_0:
+`flambeau_indexed_moe_mmvq_q8_0_gate_up_dp4a_q8_1`. Same per-block
+shape (256 threads, VDR=2 DP4A), reads the Q8_1 activation int32
+words once and accumulates `gate` and `up` partial sums in parallel.
+Halves the MoE MMVQ launch count for the gate+up branch (`down`
+remains a separate launch — needs a 3-way fused kernel for full
+llama.cpp parity).
+
+Measured on the same 128-token Q8_0 decode workload:
+
+| metric                              | before        | after (lever B) | delta    |
+|-------------------------------------|--------------:|----------------:|---------:|
+| `indexed_moe_mmvq_q8_0_*` launches  | 12 060        | 4 020 + 4 020   | -33 %    |
+| MoE MMVQ GPU time                   | 586 ms        | 574 ms          | -2 %     |
+| Total kernel GPU time               | 3754 ms       | 3499 ms         | -6.8 %   |
+| Decode t/s (bench)                  | 43.21         | **44.85**       | +3.8 %   |
+| v2 / llama.cpp decode ratio         | 0.65×         | **0.68×**       | +3 pp    |
+
+The launch-count cut and the HBM saving on activation re-reads both
+contribute. Remaining gap is dominated by lever A (attention decode
+2× slower) and lever C (rmsnorm 2× per-call).
+
+Next: A. attention_decode_f16 tile-size audit / port to
+`flash_attn_tile<d=256>` shape.
