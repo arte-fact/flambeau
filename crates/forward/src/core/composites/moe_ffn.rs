@@ -221,10 +221,22 @@ pub fn moe_ffn_local<H: TopologyHooks>(
         // is ≥ hidden on every supported MoE arch.
         let shared_out = state.pool.q_f16;
         shared_block.forward_decode(&ops, x_norm_f16_ptr, shared_out, scratch_view)?;
+        // Under TP, down_shexp is row-parallel and shared_out is a
+        // rank-local partial. Cast → F32 → ar_sum_f32 → F16 to fold
+        // the cross-rank sum (no-op on SD/PP). pool.moe_accum_f16 is
+        // unused by the indexed-MoE decode path so we borrow it as
+        // the F16 staging slot; pool.attn_proj_f32 is the F32 staging.
         let shared = unsafe { Tensor::<F16>::from_raw(shared_out, hidden) };
+        let mut shared_f32 =
+            unsafe { Tensor::<F32>::from_raw(state.pool.attn_proj_f32, hidden) };
+        flambeau_model_ops::cast_f16_to_f32(&shared, &mut shared_f32, hidden, &ops)?;
+        hooks.ar_sum_f32(shared_f32.ptr, hidden, state.device, state.stream)?;
+        let mut shared_synced = unsafe { Tensor::<F16>::from_raw(shared_out, hidden) };
+        flambeau_model_ops::cast_f32_to_f16(&shared_f32, &mut shared_synced, hidden, &ops)?;
+        let shared_view = unsafe { Tensor::<F16>::from_raw(shared_out, hidden) };
         let delta = unsafe { Tensor::<F16>::from_raw(state.pool.delta, hidden) };
         let mut delta_out = unsafe { Tensor::<F16>::from_raw(state.pool.delta, hidden) };
-        flambeau_model_ops::add_f16(&delta, &shared, &mut delta_out, hidden, &ops)?;
+        flambeau_model_ops::add_f16(&delta, &shared_view, &mut delta_out, hidden, &ops)?;
     }
 
     let _ = (act_mmq_null, gate_dt, up_dt, down_dt, router_dt);
@@ -466,11 +478,26 @@ fn moe_ffn_loop<H: TopologyHooks>(
             };
             let shared_out = state.pool.q_f16;
             shared_block.forward_decode(&ops, x_row, shared_out, shared_view)?;
+            // TP: cast shared_out F16→F32, ar_sum_f32, cast back. No-op
+            // on SD/PP. Same pattern as decode path above.
             let shared_t = unsafe { Tensor::<F16>::from_raw(shared_out, hidden) };
+            let mut shared_f32 =
+                unsafe { Tensor::<F32>::from_raw(state.pool.attn_proj_f32, hidden) };
+            flambeau_model_ops::cast_f16_to_f32(&shared_t, &mut shared_f32, hidden, &ops)?;
+            hooks.ar_sum_f32(shared_f32.ptr, hidden, state.device, state.stream)?;
+            let mut shared_synced = unsafe { Tensor::<F16>::from_raw(shared_out, hidden) };
+            flambeau_model_ops::cast_f32_to_f16(&shared_f32, &mut shared_synced, hidden, &ops)?;
+            let shared_t_synced = unsafe { Tensor::<F16>::from_raw(shared_out, hidden) };
             let delta_row = state.pool.delta.offset_bytes(t * row_bytes);
             let delta_t_in = unsafe { Tensor::<F16>::from_raw(delta_row, hidden) };
             let mut delta_t_out = unsafe { Tensor::<F16>::from_raw(delta_row, hidden) };
-            flambeau_model_ops::add_f16(&delta_t_in, &shared_t, &mut delta_t_out, hidden, &ops)?;
+            flambeau_model_ops::add_f16(
+                &delta_t_in,
+                &shared_t_synced,
+                &mut delta_t_out,
+                hidden,
+                &ops,
+            )?;
         }
     }
 

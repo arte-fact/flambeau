@@ -28,7 +28,10 @@ pub use gdn_shard::{
     upload_f32_array_sharded, upload_gdn_fused_qkv_f32, upload_gdn_fused_qkv_quant,
 };
 pub use globals::{load_embedding, load_lm_head, EmbeddingSpec, LmHeadSpec};
-pub use moe::upload_moe_experts_stacked;
+pub use moe::{
+    upload_moe_experts_stacked, upload_moe_experts_stacked_col_sharded,
+    upload_moe_experts_stacked_row_sharded,
+};
 pub use primitives::{
     dtype_qmatmul_native, ggml_to_qdtype, upload_bytes, upload_dequant_to_f16, upload_f16_from_f32,
     upload_f16_ones, upload_f32_tensor, upload_raw, wrap_quant,

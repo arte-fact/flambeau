@@ -48,9 +48,9 @@ impl Arch for Qwen35MoeV2 {
     ) -> Result<Self::Model> {
         match shard {
             ShardMode::Replicated => load_from_gguf(file, device, layer_range, ctx_cap),
-            ShardMode::Tp { .. } => Err(anyhow!(
-                "qwen35moe-v2: TP loader not implemented yet (MoE expert sharding prerequisite)"
-            )),
+            ShardMode::Tp { rank, n_ranks } => crate::loader::load_tp_shard_from_gguf(
+                file, device, rank, n_ranks, layer_range, ctx_cap,
+            ),
         }
     }
 

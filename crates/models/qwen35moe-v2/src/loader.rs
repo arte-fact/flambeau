@@ -11,9 +11,11 @@ use flambeau_forward::ctx::{
     MoeWeights, SharedExpertWeights,
 };
 use flambeau_forward::loader::{
-    load_dense_attn_layer, load_embedding, load_gdn_layer, load_lm_head, upload_dequant_to_f16,
-    upload_f32_tensor, upload_moe_experts_stacked, upload_quant_weight, DenseAttnLayerSpec,
-    EmbeddingSpec, GdnLayerSpec, GdnTpMode, LmHeadSpec, ShardMode,
+    load_dense_attn_layer, load_embedding, load_gdn_layer, load_lm_head, upload_col_sharded_quant,
+    upload_dequant_to_f16, upload_f32_tensor, upload_moe_experts_stacked,
+    upload_moe_experts_stacked_col_sharded, upload_moe_experts_stacked_row_sharded,
+    upload_quant_weight, upload_row_sharded_quant, DenseAttnLayerSpec, EmbeddingSpec,
+    GdnLayerSpec, GdnTpMode, LmHeadSpec, ShardMode,
 };
 use flambeau_quant::GgufFile;
 
@@ -65,7 +67,15 @@ fn load_with_shard(
         }
     }
     let mut allocs: Vec<(DevicePtr, usize)> = Vec::new();
-    let g = config.gdn;
+    let n_ranks = shard.n_ranks();
+    // Per-rank GdnDims under TP (KReplicated mode keeps num_k_heads at
+    // its global value; only num_v_heads divides). At n_ranks == 1
+    // this is the identity.
+    let g = if n_ranks > 1 {
+        crate::arch::per_rank_gdn_dims(config.gdn, n_ranks)
+    } else {
+        config.gdn
+    };
     let owns_embed = layer_range.map_or(true, |(s, _)| s == 0);
     let owns_lm_head = layer_range.map_or(true, |(_, e)| e == config.num_layers);
     let in_range = |li: usize| -> bool {
@@ -208,31 +218,41 @@ fn load_with_shard(
             config.num_experts * config.hidden,
             &mut allocs,
         )?;
-        let experts_gate = upload_moe_experts_stacked(
+        // gate/up: `[n_experts, intermediate, hidden]` — col-shard the
+        // `intermediate` dim (= outer dim of each expert's slab) so each
+        // rank computes a partial gate/up over [local_intermediate, hidden].
+        let experts_gate = upload_moe_experts_stacked_col_sharded(
             file,
             device,
             &gate_exps_name,
             config.num_experts,
             config.expert_intermediate,
             config.hidden,
+            shard,
             &mut allocs,
         )?;
-        let experts_up = upload_moe_experts_stacked(
+        let experts_up = upload_moe_experts_stacked_col_sharded(
             file,
             device,
             &up_exps_name,
             config.num_experts,
             config.expert_intermediate,
             config.hidden,
+            shard,
             &mut allocs,
         )?;
-        let experts_down = upload_moe_experts_stacked(
+        // down: `[n_experts, hidden, intermediate]` — row-shard the
+        // `intermediate` (= inner row dim). The local matmul yields a
+        // [hidden] partial; the v2 moe_ffn composite's ar_sum_f32 folds
+        // the cross-rank sum.
+        let experts_down = upload_moe_experts_stacked_row_sharded(
             file,
             device,
             &down_exps_name,
             config.num_experts,
             config.hidden,
             config.expert_intermediate,
+            shard,
             &mut allocs,
         )?;
         let shared = if config.shared_expert_intermediate > 0 {
@@ -241,27 +261,21 @@ fn load_with_shard(
             let down_shexp_name = format!("{p}.ffn_down_shexp.weight");
             let gate_inp_shexp_name = format!("{p}.ffn_gate_inp_shexp.weight");
             let inter = config.shared_expert_intermediate;
-            let gate = upload_quant_weight(
-                file,
-                device,
-                &gate_shexp_name,
-                inter * config.hidden,
-                &mut allocs,
-            )?;
-            let up = upload_quant_weight(
-                file,
-                device,
-                &up_shexp_name,
-                inter * config.hidden,
-                &mut allocs,
-            )?;
-            let down = upload_quant_weight(
-                file,
-                device,
-                &down_shexp_name,
-                config.hidden * inter,
-                &mut allocs,
-            )?;
+            // Shared-expert TP: gate/up col-shard along `intermediate`
+            // (= outer rows of `[intermediate, hidden]`); down row-shard
+            // along `intermediate` (= inner cols of `[hidden, intermediate]`).
+            let (gate, up, down) = match shard {
+                ShardMode::Replicated => (
+                    upload_quant_weight(file, device, &gate_shexp_name, inter * config.hidden, &mut allocs)?,
+                    upload_quant_weight(file, device, &up_shexp_name, inter * config.hidden, &mut allocs)?,
+                    upload_quant_weight(file, device, &down_shexp_name, config.hidden * inter, &mut allocs)?,
+                ),
+                ShardMode::Tp { rank, n_ranks } => (
+                    upload_col_sharded_quant(file, device, &gate_shexp_name, inter, config.hidden, rank, n_ranks, &mut allocs)?,
+                    upload_col_sharded_quant(file, device, &up_shexp_name, inter, config.hidden, rank, n_ranks, &mut allocs)?,
+                    upload_row_sharded_quant(file, device, &down_shexp_name, config.hidden, inter, rank, n_ranks, &mut allocs)?,
+                ),
+            };
             let gate_inp = file
                 .info(&gate_inp_shexp_name)
                 .ok()
@@ -280,7 +294,7 @@ fn load_with_shard(
                 up,
                 down,
                 gate_inp,
-                intermediate: inter,
+                intermediate: inter / shard.n_ranks(),
             })
         } else {
             None
