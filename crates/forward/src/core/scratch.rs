@@ -87,6 +87,11 @@ impl Default for ScratchConfig {
     }
 }
 
+/// Maximum split-K chunk count. Sized so that `n_chunks` per
+/// `splitk_chunk_size` stays ≤ 32 for any `n_tokens_kv` ≤ 16 384;
+/// callers must keep ctx within that bound.
+pub const MAX_SPLITK_CHUNKS: usize = 32;
+
 #[derive(Clone, Copy)]
 pub struct KvCache {
     pub k: DevicePtr,
@@ -118,6 +123,17 @@ pub struct ScratchPool {
     pub attn_out_q8_1: DevicePtr,
     pub attn_out_q8_1_mmq: DevicePtr,
     pub attn_proj_f32: DevicePtr,
+
+    /// `[n_heads_q * MAX_SPLITK_CHUNKS]` F32 — split-K online-softmax
+    /// per-chunk running max. NULL until `q_width > 0`.
+    pub splitk_partials_m: DevicePtr,
+    /// `[n_heads_q * MAX_SPLITK_CHUNKS]` F32 — split-K per-chunk
+    /// running denom.
+    pub splitk_partials_s: DevicePtr,
+    /// `[n_heads_q * MAX_SPLITK_CHUNKS * head_dim]` F32 — split-K
+    /// per-chunk numerator outputs. Sized as `q_width * MAX_SPLITK_CHUNKS`
+    /// (= n_heads_q * head_dim * MAX_SPLITK_CHUNKS).
+    pub splitk_partials_o: DevicePtr,
 
     pub gate_f32: DevicePtr,
     pub up_f32: DevicePtr,
@@ -242,6 +258,19 @@ impl ScratchPool {
         };
         let q_or_fused = if config.attn_q_gated { 2 * qw } else { qw };
         let attn_proj_f32 = alloc_bytes(n * q_or_fused.max(kvw).max(h) * f32)?;
+
+        // Split-K decode-attn partials. Over-allocate `partials_m/s`
+        // at q_width elems (= n_heads_q * head_dim) rather than the
+        // exact n_heads_q — saves storing head_dim in ScratchConfig
+        // and the waste is sub-MB.
+        let (splitk_partials_m, splitk_partials_s, splitk_partials_o) = if qw > 0 {
+            let m = alloc_bytes(qw * MAX_SPLITK_CHUNKS * f32)?;
+            let s = alloc_bytes(qw * MAX_SPLITK_CHUNKS * f32)?;
+            let o = alloc_bytes(qw * MAX_SPLITK_CHUNKS * f32)?;
+            (m, s, o)
+        } else {
+            (DevicePtr::NULL, DevicePtr::NULL, DevicePtr::NULL)
+        };
 
         let gate_f32 = alloc_bytes(n * m * f32)?;
         let up_f32 = alloc_bytes(n * m * f32)?;
@@ -472,6 +501,9 @@ impl ScratchPool {
             attn_out_q8_1,
             attn_out_q8_1_mmq,
             attn_proj_f32,
+            splitk_partials_m,
+            splitk_partials_s,
+            splitk_partials_o,
             gate_f32,
             up_f32,
             gated_f16,
