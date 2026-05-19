@@ -26,10 +26,13 @@ pub fn moe_ffn_local<H: TopologyHooks>(
     input: &Tensor<F16>,
     weights: &MoeWeights,
     n_tokens: usize,
+    next_norm: Option<&Tensor<F16>>,
 ) -> Result<Option<Tensor<F16>>> {
+    let input_pre_normed = state.pool.input_pre_normed;
+    state.pool.input_pre_normed = false;
     let hidden = state.hidden();
     if n_tokens > 1 {
-        return moe_ffn_loop(state, hooks, input, weights, n_tokens);
+        return moe_ffn_loop(state, hooks, input, weights, n_tokens, next_norm);
     }
     let m = state.pool.config.intermediate;
     let n_experts = weights.n_experts;
@@ -71,16 +74,19 @@ pub fn moe_ffn_local<H: TopologyHooks>(
     //    the same buffer) — one extra ~4µs launch per layer; acceptable.
     let mut norm_q8_1 = unsafe { Tensor::<Q8_1>::from_raw(state.pool.norm_q8_1, hidden) };
     let x_norm_f16_ptr = state.pool.norm;
-    let mut x_norm_f16 = unsafe { Tensor::<F16>::from_raw(x_norm_f16_ptr, hidden) };
-    flambeau_model_ops::rmsnorm_f16(
-        input,
-        &weights.ffn_norm,
-        &mut x_norm_f16,
-        1,
-        hidden,
-        weights.rms_eps,
-        &ops,
-    )?;
+    if !input_pre_normed {
+        let mut x_norm_f16 = unsafe { Tensor::<F16>::from_raw(x_norm_f16_ptr, hidden) };
+        flambeau_model_ops::rmsnorm_f16(
+            input,
+            &weights.ffn_norm,
+            &mut x_norm_f16,
+            1,
+            hidden,
+            weights.rms_eps,
+            &ops,
+        )?;
+    }
+    let x_norm_f16 = unsafe { Tensor::<F16>::from_raw(x_norm_f16_ptr, hidden) };
     flambeau_model_ops::quantize_f16_to_q8_1(&x_norm_f16, &mut norm_q8_1, hidden, &ops)?;
 
     // 2. Router via v2 qmatmul (works for both F16/F32 and quantised
@@ -163,13 +169,31 @@ pub fn moe_ffn_local<H: TopologyHooks>(
         let mut moe_partial_f16 =
             unsafe { Tensor::<F16>::from_raw(state.pool.delta, hidden) };
         flambeau_model_ops::cast_f32_to_f16(&down_f32_t, &mut moe_partial_f16, hidden, &ops)?;
-        hooks.ar_residual_f16(
-            input.ptr,
-            moe_partial_f16.ptr,
-            hidden,
-            state.device,
-            state.stream,
-        )?;
+        let has_shared = weights.shared.is_some();
+        let fuse_moe_into_norm =
+            !has_shared && next_norm.is_some() && hooks.supports_ar_residual_rmsnorm_f16();
+        if fuse_moe_into_norm {
+            let next_w = next_norm.unwrap();
+            hooks.ar_residual_rmsnorm_f16(
+                input.ptr,
+                moe_partial_f16.ptr,
+                next_w.ptr,
+                state.pool.norm,
+                hidden,
+                weights.rms_eps,
+                state.device,
+                state.stream,
+            )?;
+            state.pool.input_pre_normed = true;
+        } else {
+            hooks.ar_residual_f16(
+                input.ptr,
+                moe_partial_f16.ptr,
+                hidden,
+                state.device,
+                state.stream,
+            )?;
+        }
         if let Some(sh) = weights.shared.as_ref() {
             if state.pool.shared_x_norm_f32.as_usize() == 0 && sh.gate_inp.is_some() {
                 bail!(
@@ -190,7 +214,24 @@ pub fn moe_ffn_local<H: TopologyHooks>(
             };
             let shared_out = state.pool.q_f16;
             shared_block.forward_decode(&ops, x_norm_f16_ptr, shared_out, scratch_view)?;
-            hooks.ar_residual_f16(input.ptr, shared_out, hidden, state.device, state.stream)?;
+            let fuse_shared_into_norm =
+                next_norm.is_some() && hooks.supports_ar_residual_rmsnorm_f16();
+            if fuse_shared_into_norm {
+                let next_w = next_norm.unwrap();
+                hooks.ar_residual_rmsnorm_f16(
+                    input.ptr,
+                    shared_out,
+                    next_w.ptr,
+                    state.pool.norm,
+                    hidden,
+                    weights.rms_eps,
+                    state.device,
+                    state.stream,
+                )?;
+                state.pool.input_pre_normed = true;
+            } else {
+                hooks.ar_residual_f16(input.ptr, shared_out, hidden, state.device, state.stream)?;
+            }
         }
         let _ = (act_mmq_null, gate_dt, up_dt, down_dt, router_dt);
         return Ok(None);
@@ -262,6 +303,7 @@ fn moe_ffn_loop<H: TopologyHooks>(
     input: &Tensor<F16>,
     weights: &MoeWeights,
     n_tokens: usize,
+    _next_norm: Option<&Tensor<F16>>,
 ) -> Result<Option<Tensor<F16>>> {
     let hidden = state.hidden();
     let m = state.pool.config.intermediate;

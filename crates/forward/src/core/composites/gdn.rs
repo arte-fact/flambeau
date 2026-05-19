@@ -36,6 +36,7 @@ pub fn gdn_layer_local<H: TopologyHooks>(
     layer_idx: usize,
     slot_ids: &[usize],
 ) -> Result<Option<Tensor<F16>>> {
+    state.pool.input_pre_normed = false;
     let hidden = state.hidden();
     let n_tokens = slot_ids.len();
     if n_tokens == 0 {

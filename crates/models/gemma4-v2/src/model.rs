@@ -23,12 +23,12 @@ pub fn forward<C: ForwardCtx>(
             .as_ref()
             .expect("ffn weights missing for owned layer (PP slice mismatch)");
 
-        let delta = ctx.standard_attn(&resid, attn_w, li, positions, slot_ids)?;
+        let delta = ctx.standard_attn(&resid, attn_w, li, positions, slot_ids, None)?;
         if let Some(d) = delta {
             resid = ctx.residual_add(resid, d, n)?;
         }
 
-        let delta = ctx.dense_ffn(&resid, ffn_w, n)?;
+        let delta = ctx.dense_ffn(&resid, ffn_w, n, None)?;
         if let Some(d) = delta {
             resid = ctx.residual_add(resid, d, n)?;
         }

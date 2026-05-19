@@ -729,6 +729,52 @@ impl BarP2pAllReduce {
         }
     }
 
+    /// Rank-local fused AR + residual-add + RMSNorm for TP=2 (F16).
+    /// `out_norm` receives `rmsnorm(hidden + Σ partials, rms_weight)`;
+    /// `hidden` is also updated in-place. Same canonical-order /
+    /// producer-sync contract as [`Self::residual_tp2_rank`].
+    #[allow(clippy::too_many_arguments)]
+    pub unsafe fn residual_rmsnorm_tp2_rank(
+        &self,
+        rank: usize,
+        hidden: DevicePtr,
+        partial_canonical_rank0: DevicePtr,
+        partial_canonical_rank1: DevicePtr,
+        rms_weight: DevicePtr,
+        out_norm: DevicePtr,
+        n: u32,
+        eps: f32,
+        stream: &HipStream,
+    ) -> DeviceResult<()> {
+        self.expect_ranks(2)?;
+        if n % BLOCK_THREADS != 0 {
+            return Err(DeviceError::Backend {
+                backend: "hip",
+                code: -1,
+                message: format!(
+                    "residual_rmsnorm_tp2_rank: n={n} not divisible by BLOCK_THREADS={BLOCK_THREADS}"
+                ),
+            });
+        }
+        let cfg = LaunchCfg::one_d(1, BLOCK_THREADS);
+        // SAFETY: forwarded from public-method contract.
+        unsafe {
+            self.launch_fused_rmsnorm(
+                ArKind::ResidualRmsNormTp2,
+                rank,
+                cfg,
+                stream,
+                hidden,
+                partial_canonical_rank0,
+                [partial_canonical_rank1, DevicePtr(0), DevicePtr(0)],
+                rms_weight,
+                out_norm,
+                n,
+                eps,
+            )
+        }
+    }
+
     /// Rank-local F32 AllReduce-sum for TP=4. Caller exchanges all
     /// three peer pointers out-of-band.
     /// # Safety

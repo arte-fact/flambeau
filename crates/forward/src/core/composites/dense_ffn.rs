@@ -13,7 +13,10 @@ pub fn dense_ffn_local<H: TopologyHooks>(
     input: &Tensor<F16>,
     weights: &FfnWeights,
     n_tokens: usize,
+    next_norm: Option<&Tensor<F16>>,
 ) -> Result<Option<Tensor<F16>>> {
+    let input_pre_normed = state.pool.input_pre_normed;
+    state.pool.input_pre_normed = false;
     let hidden = state.hidden();
     let m = state.pool.config.intermediate;
     let ops = state.ops();
@@ -22,7 +25,11 @@ pub fn dense_ffn_local<H: TopologyHooks>(
     let mut norm_q8_1 = unsafe { Tensor::<Q8_1>::from_raw(state.pool.norm_q8_1, n * hidden) };
     let act_mmq_null = unsafe { Tensor::<Q8_1>::from_raw(DevicePtr::NULL, 0) };
     let norm_mmq_t;
-    let act_norm_mmq: &Tensor<Q8_1> = if n > 1 {
+    let act_norm_mmq: &Tensor<Q8_1> = if input_pre_normed && n == 1 {
+        let norm_view = unsafe { Tensor::<F16>::from_raw(state.pool.norm, n * hidden) };
+        flambeau_model_ops::quantize_f16_to_q8_1(&norm_view, &mut norm_q8_1, n * hidden, &ops)?;
+        &act_mmq_null
+    } else if n > 1 {
         // Unfused at N>1 so we can also produce the MMQ-layout activation.
         let mut norm_f16 =
             unsafe { Tensor::<F16>::from_raw(state.pool.norm, n * hidden) };
@@ -90,6 +97,28 @@ pub fn dense_ffn_local<H: TopologyHooks>(
         .ffn_down
         .qmatmul(&gated_q8_1, act_gated_mmq, &mut down_f32, n, m, hidden, &ops)?;
     // Fused AR + residual fast path when post_ffn_norm is None.
+    if n == 1
+        && weights.post_ffn_norm.is_none()
+        && next_norm.is_some()
+        && hooks.supports_ar_residual_rmsnorm_f16()
+    {
+        let next_w = next_norm.unwrap();
+        let mut partial_f16 =
+            unsafe { Tensor::<F16>::from_raw(state.pool.delta, n * hidden) };
+        flambeau_model_ops::cast_f32_to_f16(&down_f32, &mut partial_f16, n * hidden, &ops)?;
+        hooks.ar_residual_rmsnorm_f16(
+            input.ptr,
+            partial_f16.ptr,
+            next_w.ptr,
+            state.pool.norm,
+            n * hidden,
+            weights.rms_eps,
+            state.device,
+            state.stream,
+        )?;
+        state.pool.input_pre_normed = true;
+        return Ok(None);
+    }
     if hooks.supports_ar_residual_f16() && weights.post_ffn_norm.is_none() {
         let mut partial_f16 =
             unsafe { Tensor::<F16>::from_raw(state.pool.delta, n * hidden) };

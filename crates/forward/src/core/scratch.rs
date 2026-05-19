@@ -197,6 +197,14 @@ pub struct ScratchPool {
 
     pub current_residual_is_a: bool,
 
+    /// When true, `pool.norm` holds an already-rmsnormed F16 buffer
+    /// written by the previous composite's BAR1 fused
+    /// `residual_rmsnorm_tp2` call. The next composite must consume it
+    /// (skip its initial rmsnorm) and clear the flag, OR clear the
+    /// flag and ignore the stale value if its rmsnorm uses a different
+    /// weight than the one folded in upstream.
+    pub input_pre_normed: bool,
+
     allocs: Vec<(DevicePtr, usize)>,
 }
 
@@ -533,6 +541,7 @@ impl ScratchPool {
             gdn_decode_scratch,
             gdn_prefill_scratch,
             current_residual_is_a: true,
+            input_pre_normed: false,
             allocs,
         })
     }

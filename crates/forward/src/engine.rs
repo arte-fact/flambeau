@@ -18,7 +18,7 @@ use crate::ctx::{
     AttnWeights, EmbeddingWeights, FfnWeights, ForwardCtx, LmHeadWeights, ModelLayout,
     MoeWeights,
 };
-use crate::runtime::ar::{bar_ar_residual_f16, BarArCoordinator};
+use crate::runtime::ar::{bar_ar_residual_f16, bar_ar_residual_rmsnorm_f16, BarArCoordinator};
 
 pub type ArCallback = Box<
     dyn FnMut(
@@ -79,6 +79,39 @@ impl TopologyHooks for TpHooks {
             stream,
         )
     }
+
+    fn supports_ar_residual_rmsnorm_f16(&self) -> bool {
+        self.n_ranks == 2 && self.bar.is_some()
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn ar_residual_rmsnorm_f16(
+        &mut self,
+        residual_inout: DevicePtr,
+        partial_f16: DevicePtr,
+        rms_weight: DevicePtr,
+        out_norm: DevicePtr,
+        n_elems: usize,
+        eps: f32,
+        device: &HipDevice,
+        stream: &HipStream,
+    ) -> Result<()> {
+        let bar = self.bar.as_ref().ok_or_else(|| {
+            anyhow!("TpHooks::ar_residual_rmsnorm_f16: bar coordinator not configured")
+        })?;
+        bar_ar_residual_rmsnorm_f16(
+            bar,
+            self.rank,
+            residual_inout,
+            partial_f16,
+            rms_weight,
+            out_norm,
+            n_elems,
+            eps,
+            device,
+            stream,
+        )
+    }
 }
 
 pub struct HybridHooks {
@@ -124,6 +157,39 @@ impl TopologyHooks for HybridHooks {
             residual_inout,
             partial_f16,
             n_elems,
+            device,
+            stream,
+        )
+    }
+
+    fn supports_ar_residual_rmsnorm_f16(&self) -> bool {
+        self.tp_size == 2 && self.bar.is_some()
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn ar_residual_rmsnorm_f16(
+        &mut self,
+        residual_inout: DevicePtr,
+        partial_f16: DevicePtr,
+        rms_weight: DevicePtr,
+        out_norm: DevicePtr,
+        n_elems: usize,
+        eps: f32,
+        device: &HipDevice,
+        stream: &HipStream,
+    ) -> Result<()> {
+        let bar = self.bar.as_ref().ok_or_else(|| {
+            anyhow!("HybridHooks::ar_residual_rmsnorm_f16: bar coordinator not configured")
+        })?;
+        bar_ar_residual_rmsnorm_f16(
+            bar,
+            self.rank_in_stage,
+            residual_inout,
+            partial_f16,
+            rms_weight,
+            out_norm,
+            n_elems,
+            eps,
             device,
             stream,
         )
@@ -509,6 +575,7 @@ impl<H: TopologyHooks, S: StageHooks> ForwardCtx for ForwardEngine<'_, H, S> {
         layer_idx: usize,
         positions: &[usize],
         slot_ids: &[usize],
+        next_norm: Option<&Tensor<F16>>,
     ) -> Result<Option<Tensor<F16>>> {
         composites::standard_attn_local(
             &mut self.core,
@@ -518,6 +585,7 @@ impl<H: TopologyHooks, S: StageHooks> ForwardCtx for ForwardEngine<'_, H, S> {
             layer_idx,
             positions,
             slot_ids,
+            next_norm,
         )
     }
 
@@ -527,6 +595,7 @@ impl<H: TopologyHooks, S: StageHooks> ForwardCtx for ForwardEngine<'_, H, S> {
         weights: &crate::ctx::GdnWeights,
         layer_idx: usize,
         slot_ids: &[usize],
+        _next_norm: Option<&Tensor<F16>>,
     ) -> Result<Option<Tensor<F16>>> {
         composites::gdn_layer_local(
             &mut self.core,
@@ -543,8 +612,16 @@ impl<H: TopologyHooks, S: StageHooks> ForwardCtx for ForwardEngine<'_, H, S> {
         input: &Tensor<F16>,
         weights: &FfnWeights,
         n_tokens: usize,
+        next_norm: Option<&Tensor<F16>>,
     ) -> Result<Option<Tensor<F16>>> {
-        composites::dense_ffn_local(&mut self.core, &mut self.hooks, input, weights, n_tokens)
+        composites::dense_ffn_local(
+            &mut self.core,
+            &mut self.hooks,
+            input,
+            weights,
+            n_tokens,
+            next_norm,
+        )
     }
 
     fn moe_ffn(
@@ -552,8 +629,16 @@ impl<H: TopologyHooks, S: StageHooks> ForwardCtx for ForwardEngine<'_, H, S> {
         input: &Tensor<F16>,
         weights: &MoeWeights,
         n_tokens: usize,
+        next_norm: Option<&Tensor<F16>>,
     ) -> Result<Option<Tensor<F16>>> {
-        composites::moe_ffn_local(&mut self.core, &mut self.hooks, input, weights, n_tokens)
+        composites::moe_ffn_local(
+            &mut self.core,
+            &mut self.hooks,
+            input,
+            weights,
+            n_tokens,
+            next_norm,
+        )
     }
 
     fn output_head(

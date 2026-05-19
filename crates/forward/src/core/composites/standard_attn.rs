@@ -9,6 +9,7 @@ use flambeau_model_ops::{Tensor, F16, F32, I32, Q8_1};
 use crate::core::{CoreState, TopologyHooks};
 use crate::ctx::AttnWeights;
 
+#[allow(clippy::too_many_arguments)]
 pub fn standard_attn_local<H: TopologyHooks>(
     state: &mut CoreState<'_>,
     hooks: &mut H,
@@ -17,7 +18,10 @@ pub fn standard_attn_local<H: TopologyHooks>(
     layer_idx: usize,
     positions: &[usize],
     slot_ids: &[usize],
+    next_norm: Option<&Tensor<F16>>,
 ) -> Result<Option<Tensor<F16>>> {
+    let input_pre_normed = state.pool.input_pre_normed;
+    state.pool.input_pre_normed = false;
     let hidden = state.hidden();
     if positions.len() != slot_ids.len() {
         bail!(
@@ -97,7 +101,11 @@ pub fn standard_attn_local<H: TopologyHooks>(
     let mut norm_q8_1 = unsafe { Tensor::<Q8_1>::from_raw(state.pool.norm_q8_1, n * hidden) };
     let act_mmq_null = unsafe { Tensor::<Q8_1>::from_raw(DevicePtr::NULL, 0) };
     let norm_mmq_t;
-    let act_norm_mmq: &Tensor<Q8_1> = if n > 1 {
+    let act_norm_mmq: &Tensor<Q8_1> = if input_pre_normed && n == 1 {
+        let norm_view = unsafe { Tensor::<F16>::from_raw(state.pool.norm, n * hidden) };
+        flambeau_model_ops::quantize_f16_to_q8_1(&norm_view, &mut norm_q8_1, n * hidden, &ops)?;
+        &act_mmq_null
+    } else if n > 1 {
         let mut norm_f16 =
             unsafe { Tensor::<F16>::from_raw(state.pool.norm, n * hidden) };
         flambeau_model_ops::rmsnorm_f16(
@@ -570,6 +578,28 @@ pub fn standard_attn_local<H: TopologyHooks>(
     // residual_tp2) instead of 4 (ar_sum_f32 + cast + add +
     // model.rs's residual_add). Saves 2 launches per AR site per
     // token. Returns None to signal the model to skip residual_add.
+    if n == 1
+        && weights.post_attn_norm.is_none()
+        && next_norm.is_some()
+        && hooks.supports_ar_residual_rmsnorm_f16()
+    {
+        let next_w = next_norm.unwrap();
+        let mut partial_f16 =
+            unsafe { Tensor::<F16>::from_raw(state.pool.delta, n * hidden) };
+        flambeau_model_ops::cast_f32_to_f16(&proj_f32, &mut partial_f16, n * hidden, &ops)?;
+        hooks.ar_residual_rmsnorm_f16(
+            input.ptr,
+            partial_f16.ptr,
+            next_w.ptr,
+            state.pool.norm,
+            n * hidden,
+            weights.rms_eps,
+            state.device,
+            state.stream,
+        )?;
+        state.pool.input_pre_normed = true;
+        return Ok(None);
+    }
     if hooks.supports_ar_residual_f16() && weights.post_attn_norm.is_none() {
         let mut partial_f16 =
             unsafe { Tensor::<F16>::from_raw(state.pool.delta, n * hidden) };

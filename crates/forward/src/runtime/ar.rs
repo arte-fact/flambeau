@@ -256,6 +256,65 @@ pub fn bar_ar_residual_f16(
     Ok(())
 }
 
+/// BAR1 P2P fused AR + residual-add + RMSNorm. `partial_f16` is the
+/// rank-local F16 partial; `residual_inout_f16` is the per-rank
+/// residual (updated in-place to `residual + Σ peers`); `out_norm`
+/// receives the rmsnormed result. TP=2 only.
+#[allow(clippy::too_many_arguments)]
+pub fn bar_ar_residual_rmsnorm_f16(
+    coord: &BarArCoordinator,
+    rank: usize,
+    residual_inout_f16: DevicePtr,
+    partial_f16: DevicePtr,
+    rms_weight: DevicePtr,
+    out_norm: DevicePtr,
+    n_elems: usize,
+    eps: f32,
+    _device: &HipDevice,
+    stream: &HipStream,
+) -> Result<()> {
+    let n_ranks = coord.ranks();
+    if n_ranks != 2 {
+        anyhow::bail!("bar_ar_residual_rmsnorm_f16: only TP=2 supported (got {n_ranks})");
+    }
+    flambeau_core::Stream::synchronize(stream)?;
+    {
+        let mut p = coord.partials.lock().unwrap();
+        p[rank] = Some(partial_f16);
+    }
+    coord.barrier.wait();
+    let peers_snapshot: Vec<DevicePtr> = {
+        let p = coord.partials.lock().unwrap();
+        (0..n_ranks)
+            .map(|r| p[r].expect("BarArCoordinator: peer pointer unpublished"))
+            .collect()
+    };
+    // SAFETY: partials are pool-owned F16 alive for the request;
+    // producer-stream sync drained own writes before publish.
+    unsafe {
+        coord.bar.residual_rmsnorm_tp2_rank(
+            rank,
+            residual_inout_f16,
+            peers_snapshot[0],
+            peers_snapshot[1],
+            rms_weight,
+            out_norm,
+            n_elems as u32,
+            eps,
+            stream,
+        )?;
+    }
+    coord.barrier.wait();
+    if rank == 0 {
+        let mut p = coord.partials.lock().unwrap();
+        for r in 0..n_ranks {
+            p[r] = None;
+        }
+    }
+    coord.barrier.wait();
+    Ok(())
+}
+
 /// Build the boxed callback that TpHooks / HybridHooks expect, with
 /// the BAR1 P2P backend.
 pub fn make_bar_ar_callback(

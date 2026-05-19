@@ -55,6 +55,12 @@ pub trait ForwardCtx {
     /// needed and harmful to attempt). Fusion only kicks in when
     /// (a) TP+BAR1 is engaged and (b) no per-arch op (e.g., gemma4
     /// `post_attn_norm`) sits between AR and residual-add.
+    /// `next_norm` is the FOLLOWING composite's input rmsnorm weight
+    /// (e.g., `&ffn[li].ffn_norm` after attn). When the composite
+    /// fuses AR + residual + rmsnorm-of-next, it writes the rmsnormed
+    /// buffer to `pool.norm` and sets `pool.input_pre_normed = true`;
+    /// the next composite skips its own rmsnorm. `None` skips the
+    /// fold even on TP.
     fn standard_attn(
         &mut self,
         input: &Tensor<F16>,
@@ -62,35 +68,32 @@ pub trait ForwardCtx {
         layer_idx: usize,
         positions: &[usize],
         slot_ids: &[usize],
+        next_norm: Option<&Tensor<F16>>,
     ) -> Result<Option<Tensor<F16>>>;
 
-    /// Gated-Delta-Net recurrent layer. `slot_ids[i]` selects the
-    /// per-slot recurrent state slab updated by token `i`. Returns
-    /// `None` when AR+residual-add was folded into `input` in-place.
     fn gdn_layer(
         &mut self,
         input: &Tensor<F16>,
         weights: &GdnWeights,
         layer_idx: usize,
         slot_ids: &[usize],
+        next_norm: Option<&Tensor<F16>>,
     ) -> Result<Option<Tensor<F16>>>;
 
-    /// Returns `None` when AR+residual-add was folded into `input`
-    /// in-place.
     fn dense_ffn(
         &mut self,
         input: &Tensor<F16>,
         weights: &FfnWeights,
         n_tokens: usize,
+        next_norm: Option<&Tensor<F16>>,
     ) -> Result<Option<Tensor<F16>>>;
 
-    /// Returns `None` when AR+residual-add was folded into `input`
-    /// in-place.
     fn moe_ffn(
         &mut self,
         input: &Tensor<F16>,
         weights: &MoeWeights,
         n_tokens: usize,
+        next_norm: Option<&Tensor<F16>>,
     ) -> Result<Option<Tensor<F16>>>;
 
     /// When `slot_ids` are all equal (prefill / single decode), only

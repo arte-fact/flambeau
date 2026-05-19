@@ -15,29 +15,40 @@ pub fn forward<C: ForwardCtx>(
     let n = tokens.len();
     let mut resid = ctx.embed(&model.embedding, tokens)?;
     let layers: Vec<usize> = ctx.layer_range(&model.layout).collect();
-    for li in layers {
+    let last_layer_idx = layers.last().copied();
+    for li in layers.iter().copied() {
         let ffn_w = model.ffn[li]
             .as_ref()
             .expect("ffn weights missing for owned layer (PP slice mismatch)");
+        let next_norm_after_attn: Option<&_> = Some(&ffn_w.ffn_norm);
         let delta = match model.layer_kinds[li] {
             LayerKind::FullAttn => {
                 let w = model.full_attn[li]
                     .as_ref()
                     .expect("layer_kinds says FullAttn but full_attn[li] is None");
-                ctx.standard_attn(&resid, w, li, positions, slot_ids)?
+                ctx.standard_attn(&resid, w, li, positions, slot_ids, next_norm_after_attn)?
             }
             LayerKind::Gdn => {
                 let w = model.gdn[li]
                     .as_ref()
                     .expect("layer_kinds says Gdn but gdn[li] is None");
-                ctx.gdn_layer(&resid, w, li, slot_ids)?
+                ctx.gdn_layer(&resid, w, li, slot_ids, next_norm_after_attn)?
             }
         };
         if let Some(d) = delta {
             resid = ctx.residual_add(resid, d, n)?;
         }
 
-        let delta = ctx.moe_ffn(&resid, ffn_w, n)?;
+        let next_norm_after_ffn: Option<&_> = if Some(li) == last_layer_idx {
+            None
+        } else {
+            let nli = li + 1;
+            match model.layer_kinds[nli] {
+                LayerKind::FullAttn => model.full_attn[nli].as_ref().map(|w| &w.attn_norm),
+                LayerKind::Gdn => model.gdn[nli].as_ref().map(|w| &w.attn_norm),
+            }
+        };
+        let delta = ctx.moe_ffn(&resid, ffn_w, n, next_norm_after_ffn)?;
         if let Some(d) = delta {
             resid = ctx.residual_add(resid, d, n)?;
         }

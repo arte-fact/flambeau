@@ -51,6 +51,38 @@ pub trait TopologyHooks {
              check supports_ar_residual_f16() before calling"
         )
     }
+
+    fn supports_ar_residual_rmsnorm_f16(&self) -> bool {
+        false
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn ar_residual_rmsnorm_f16(
+        &mut self,
+        residual_inout: DevicePtr,
+        partial_f16: DevicePtr,
+        rms_weight: DevicePtr,
+        out_norm: DevicePtr,
+        n_elems: usize,
+        eps: f32,
+        device: &HipDevice,
+        stream: &HipStream,
+    ) -> Result<()> {
+        let _ = (
+            residual_inout,
+            partial_f16,
+            rms_weight,
+            out_norm,
+            n_elems,
+            eps,
+            device,
+            stream,
+        );
+        anyhow::bail!(
+            "TopologyHooks::ar_residual_rmsnorm_f16: unsupported — gate with \
+             supports_ar_residual_rmsnorm_f16() first"
+        )
+    }
 }
 
 pub struct NoopHooks;
