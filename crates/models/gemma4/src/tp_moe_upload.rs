@@ -692,6 +692,7 @@ pub fn forward_ffn_moe_tp_per_rank<O: Ops>(
         scratch.moe_scratch.expert_weights,
         scratch.moe_scratch.expert_ids,
         tp_moe.ffn_down_exps_scale_f32,
+        1,
         tp_moe.moe.top_k,
     )
     .context("MoE TP apply ffn_down_exps.scale to expert_weights")?;

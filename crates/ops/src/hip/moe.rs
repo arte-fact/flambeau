@@ -109,9 +109,11 @@ pub fn apply_per_expert_scale_f32(
     expert_weights: DevicePtr,
     expert_ids: DevicePtr,
     expert_scales: DevicePtr,
+    n_tokens: usize,
     top_k: usize,
 ) -> Result<()> {
     assert!(top_k > 0 && top_k <= 64, "apply_per_expert_scale_f32: top_k {top_k} not in 1..=64");
+    assert!(n_tokens > 0, "apply_per_expert_scale_f32: n_tokens must be > 0");
     let module = reg.expect_module("apply_per_expert_scale_f32")?;
     let kernel = module.kernel("flambeau_apply_per_expert_scale_f32")?;
     let w_ptr: u64 = expert_weights.as_usize() as u64;
@@ -123,9 +125,9 @@ pub fn apply_per_expert_scale_f32(
     args.push(&i_ptr);
     args.push(&s_ptr);
     args.push(&k_i);
-    // 1 block × 64 threads (the kernel guards `k < top_k` so unused
-    // threads idle). top_k=8 on gemma4 26B-A4B.
-    let cfg = LaunchCfg::one_d(1, 64);
+    // gridDim.x = n_tokens, blockDim.x = max(64, top_k) (kernel guards
+    // `k < top_k` so unused threads idle). top_k=8 on gemma4 26B-A4B.
+    let cfg = LaunchCfg::one_d(n_tokens as u32, 64);
     unsafe { kernel.launch(stream, cfg, args)? };
     Ok(())
 }

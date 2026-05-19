@@ -1,25 +1,25 @@
 {
-  "timestamp": "2026-05-19T14:28:55Z",
-  "tg": 128,
+  "timestamp": "2026-05-19T19:43:29Z",
+  "tg": 64,
   "results": [
     {
-      "case": "gemma4-31B-Q8_0-pp4",
+      "case": "gemma4-26B-A4B-Q8_0",
       "stack": "flambeau-v2",
-      "label": "flambeau-v2__gemma4-31B-Q8_0-pp4",
-      "err": "process exited",
-      "prompt_tokens": 0,
-      "completion_tokens": 0,
-      "ttft_ms": 0.0,
-      "decode_ms": 0.0,
-      "decode_tps": 0.0,
-      "prefill_tps": 0.0,
-      "text_head": ""
+      "label": "flambeau-v2__gemma4-26B-A4B-Q8_0",
+      "err": null,
+      "prompt_tokens": 725,
+      "completion_tokens": 64,
+      "ttft_ms": 1313.5817050933838,
+      "decode_ms": 1455.744775675111,
+      "decode_tps": 43.27681682442126,
+      "prefill_tps": 551.9260790469513,
+      "text_head": "\n### Technical Memorandum: High-Performance Integer Arithmetic via `V_DOT4_I32_I"
     },
     {
-      "case": "gemma4-31B-Q8_0-pp4",
+      "case": "gemma4-26B-A4B-Q8_0",
       "stack": "flambeau-legacy",
-      "label": "flambeau-legacy__gemma4-31B-Q8_0-pp4",
-      "err": "process exited",
+      "label": "flambeau-legacy__gemma4-26B-A4B-Q8_0",
+      "err": "no tokens",
       "prompt_tokens": 0,
       "completion_tokens": 0,
       "ttft_ms": 0.0,
@@ -29,17 +29,17 @@
       "text_head": ""
     },
     {
-      "case": "gemma4-31B-Q8_0-pp4",
+      "case": "gemma4-26B-A4B-Q8_0",
       "stack": "llama.cpp",
-      "label": "llama.cpp__gemma4-31B-Q8_0-pp4",
+      "label": "llama.cpp__gemma4-26B-A4B-Q8_0",
       "err": null,
       "prompt_tokens": 702,
-      "completion_tokens": 125,
-      "ttft_ms": 7167.783975601196,
-      "decode_ms": 7879.66775894165,
-      "decode_tps": 15.7367041090391,
-      "prefill_tps": 97.9382194538194,
-      "text_head": "Senior Compiler Engineer at a GPU vendor.\nModern AMD GPUs (CDNA-1 / gfx906).\n`V_"
+      "completion_tokens": 61,
+      "ttft_ms": 1432.3298931121826,
+      "decode_ms": 910.8424186706543,
+      "decode_tps": 65.87308492677373,
+      "prefill_tps": 490.1105557984875,
+      "text_head": "Senior Compiler Engineer at a large GPU vendor.\nExhaustive technical explanation"
     }
   ]
 }

@@ -910,6 +910,7 @@ impl<'a> Ops for HipOps<'a> {
         expert_weights: DevicePtr,
         expert_ids: DevicePtr,
         expert_scales: DevicePtr,
+        n_tokens: usize,
         top_k: usize,
     ) -> Result<()> {
         super::moe::apply_per_expert_scale_f32(
@@ -918,6 +919,7 @@ impl<'a> Ops for HipOps<'a> {
             expert_weights,
             expert_ids,
             expert_scales,
+            n_tokens,
             top_k,
         )
     }

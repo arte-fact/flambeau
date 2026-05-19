@@ -740,6 +740,7 @@ pub trait Ops {
         expert_weights: DevicePtr,
         expert_ids: DevicePtr,
         expert_scales: DevicePtr,
+        n_tokens: usize,
         top_k: usize,
     ) -> Result<()>;
 

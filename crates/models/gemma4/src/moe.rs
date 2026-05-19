@@ -208,6 +208,7 @@ pub fn forward_ffn_moe<O: Ops>(
         moe_scratch.moe_scratch.expert_weights,
         moe_scratch.moe_scratch.expert_ids,
         moe.ffn_down_exps_scale_f32,
+        1,
         moe.moe.top_k,
     )
     .context("MoE apply ffn_down_exps.scale")?;

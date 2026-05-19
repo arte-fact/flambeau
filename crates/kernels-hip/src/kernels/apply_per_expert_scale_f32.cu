@@ -10,11 +10,14 @@
 // This kernel does the fold so the existing `moe_combine_*` kernels
 // pick up the scale for free.
 //
-// Layout (single-token decode):
-//   weights      F32 [top_k]  (modified in place)
-//   expert_ids   i32 [top_k]
+// Layout:
+//   weights      F32 [n_tokens, top_k]  (modified in place)
+//   expert_ids   i32 [n_tokens, top_k]
 //   scale        F32 [n_experts]
-// Launch: 1 block × max(64, top_k) threads (top_k ≤ 16 per TOPK_MAX_K).
+// Launch: gridDim.x = n_tokens, blockDim.x = top_k threads.
+// `n_tokens = 1` recovers the single-token decode case; the prefill
+// path passes `n_tokens > 1` so the per-token scale fold is one
+// launch instead of N.
 
 #include <hip/hip_runtime.h>
 
@@ -24,8 +27,10 @@ extern "C" __global__ void flambeau_apply_per_expert_scale_f32(
     const float* __restrict__ expert_scales,
     const int top_k
 ) {
+    const int t = blockIdx.x;
     const int k = threadIdx.x;
     if (k >= top_k) return;
-    const int eid = expert_ids[k];
-    expert_weights[k] = expert_weights[k] * expert_scales[eid];
+    const int row = t * top_k + k;
+    const int eid = expert_ids[row];
+    expert_weights[row] = expert_weights[row] * expert_scales[eid];
 }

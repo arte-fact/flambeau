@@ -710,18 +710,14 @@ fn gemma4_moe_cascade_batched<H: TopologyHooks>(
         Activation::GeluTanh => BlockActivation::Gelu,
     });
     block.route_prefill(&ops, router_input_ptr, n_tokens, prefill_scratch)?;
-    // apply_per_expert_scale_f32 is single-token (1 block × top_k
-    // threads); loop N times with per-token offsets.
     use flambeau_ops::Ops;
-    for t in 0..n_tokens {
-        let w_ptr = prefill_scratch
-            .expert_weights
-            .offset_bytes(t * k_top * 4);
-        let i_ptr = prefill_scratch
-            .expert_ids
-            .offset_bytes(t * k_top * 4);
-        ops.apply_per_expert_scale_f32(w_ptr, i_ptr, expert_scale.ptr, k_top)?;
-    }
+    ops.apply_per_expert_scale_f32(
+        prefill_scratch.expert_weights,
+        prefill_scratch.expert_ids,
+        expert_scale.ptr,
+        n_tokens,
+        k_top,
+    )?;
 
     let sh_block = build_shared_expert_block(
         weights.shared.as_ref().unwrap(),
@@ -995,6 +991,7 @@ fn gemma4_moe_cascade_one_token<H: TopologyHooks>(
         state.pool.moe_expert_weights,
         state.pool.moe_expert_ids,
         expert_scale.ptr,
+        1,
         k_top,
     )?;
 
