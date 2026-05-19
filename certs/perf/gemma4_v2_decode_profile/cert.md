@@ -215,3 +215,34 @@ than our tile-2 splitk. The remaining gap likely lives in K/V cache
 coalescing or in GQA-aware q_head batching (n_heads_q=16 sharing
 n_heads_kv=8 means 2 q_heads per kv_head — each kv_head row is
 currently read twice).
+
+## Lever C shipped (rmsnorm_f32 float4 vectorisation)
+
+`flambeau_rmsnorm_f32` at decode launches a single block per token-layer
+(n_rows = 1, hidden = 2816 F32 elements). Per-call cost was 30 µs vs
+llama.cpp's templated `rms_norm_f32<1024>` at ~6 µs/call — 5× per-call
+gap.
+
+Rewrote both phases (sum-of-squares + scale) to use `float4` (16-byte)
+loads/stores when the row pointers are 16-byte aligned and k is a
+multiple of 4. gemma4 hidden=2816, qwen hidden=2304/3072/5120 all
+satisfy the alignment. Same launch shape, same correctness contract.
+
+Measured:
+
+| metric                              | post-A (tile-2)| post-C (float4) | delta    |
+|-------------------------------------|---------------:|----------------:|---------:|
+| rmsnorm_f32 time                    | 366 ms         | **69 ms**       | **-81 %**|
+| rmsnorm_f32 per-call cost           | 30 µs          | **5.6 µs**      | **-81 %**|
+| Decode t/s (bench)                  | 49.53          | 49.90           | +0.7 %   |
+
+The kernel is 5.4× faster but the bench-level delta is noise-bound
+(0.7 % ≈ run-to-run variance). The 297 ms saved at GPU is real but
+only ~1 ms/decode-token, masked by other variance.
+
+A parallel `rmsnorm_f16` vectorisation (uint4 packing 8 F16 elems)
+was attempted and reverted — it caused a 22 % prefill regression at
+n_rows = 725 (probably VGPR-budget driven occupancy drop on the
+prefill grid). The F16 kernel is left as-is; tackling it cleanly
+needs the kind of `<BLOCK_SIZE, K>` template-specialisation pattern
+llama.cpp uses, which is a separate session.

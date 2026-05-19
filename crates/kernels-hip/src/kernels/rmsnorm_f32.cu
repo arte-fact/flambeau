@@ -32,11 +32,28 @@ extern "C" __global__ void flambeau_rmsnorm_f32(
     const float* x_row = x + (size_t) row * k;
     float*       y_row = y + (size_t) row * k;
 
+    // Vectorised path when k is a multiple of 4: each thread issues
+    // float4 (16-byte) loads to cut HBM transactions and saturate the
+    // 1024-bit-per-CU LDS path. k=2816 (gemma4 hidden) / k=2304 / k=5120
+    // all satisfy the alignment.
+    const bool vec4 = (k % 4) == 0
+        && ((reinterpret_cast<uintptr_t>(x_row) & 0xF) == 0)
+        && ((reinterpret_cast<uintptr_t>(y_row) & 0xF) == 0)
+        && ((reinterpret_cast<uintptr_t>(weight) & 0xF) == 0);
+
     float sum_sq = 0.0f;
-    #pragma unroll 4
-    for (int i = tid; i < k; i += RMSNORM_F32_THREADS) {
-        const float v = x_row[i];
-        sum_sq += v * v;
+    if (vec4) {
+        const int k4 = k >> 2;
+        const float4* x4 = reinterpret_cast<const float4*>(x_row);
+        for (int i = tid; i < k4; i += RMSNORM_F32_THREADS) {
+            const float4 v = x4[i];
+            sum_sq += v.x * v.x + v.y * v.y + v.z * v.z + v.w * v.w;
+        }
+    } else {
+        for (int i = tid; i < k; i += RMSNORM_F32_THREADS) {
+            const float v = x_row[i];
+            sum_sq += v * v;
+        }
     }
 
     #pragma unroll
@@ -67,8 +84,24 @@ extern "C" __global__ void flambeau_rmsnorm_f32(
     const float mean_sq = total_sq / (float) k;
     const float rsqrt = 1.0f / sqrtf(mean_sq + eps);
 
-    #pragma unroll 4
-    for (int i = tid; i < k; i += RMSNORM_F32_THREADS) {
-        y_row[i] = x_row[i] * weight[i] * rsqrt;
+    if (vec4) {
+        const int k4 = k >> 2;
+        const float4* x4 = reinterpret_cast<const float4*>(x_row);
+        const float4* w4 = reinterpret_cast<const float4*>(weight);
+        float4*       y4 = reinterpret_cast<float4*>(y_row);
+        for (int i = tid; i < k4; i += RMSNORM_F32_THREADS) {
+            const float4 v = x4[i];
+            const float4 w = w4[i];
+            float4 r;
+            r.x = v.x * w.x * rsqrt;
+            r.y = v.y * w.y * rsqrt;
+            r.z = v.z * w.z * rsqrt;
+            r.w = v.w * w.w * rsqrt;
+            y4[i] = r;
+        }
+    } else {
+        for (int i = tid; i < k; i += RMSNORM_F32_THREADS) {
+            y_row[i] = x_row[i] * weight[i] * rsqrt;
+        }
     }
 }
