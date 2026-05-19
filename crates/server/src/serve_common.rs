@@ -268,7 +268,18 @@ pub async fn run_axum(
         .await
         .context("bind listener")?;
     axum::serve(listener, app)
+        .with_graceful_shutdown(shutdown_signal())
         .await
         .context("axum::serve failed")?;
     Ok(())
+}
+
+async fn shutdown_signal() {
+    use tokio::signal::unix::{signal, SignalKind};
+    let mut sigint = signal(SignalKind::interrupt()).expect("install SIGINT handler");
+    let mut sigterm = signal(SignalKind::terminate()).expect("install SIGTERM handler");
+    tokio::select! {
+        _ = sigint.recv() => tracing::info!("SIGINT received — shutting down"),
+        _ = sigterm.recv() => tracing::info!("SIGTERM received — shutting down"),
+    }
 }
