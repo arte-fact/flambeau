@@ -14,7 +14,7 @@ use flambeau_blocks::{
 };
 use flambeau_core::op::QDtype;
 use flambeau_core::{CopyDirection, Device, DevicePtr};
-use flambeau_model_ops::{Tensor, F16, F32, Q8_1};
+use flambeau_model_ops::{Tensor, F16, F32, I32, Q8_1};
 
 use crate::core::{CoreState, TopologyHooks};
 use crate::ctx::{Activation, MoeWeights};
@@ -97,61 +97,22 @@ pub fn moe_ffn_local<H: TopologyHooks>(
         &ops,
     )?;
 
-    // 3. DtoH router logits + host top-k + softmax-over-k.
-    let mut logits_host = vec![0.0_f32; n_experts];
-    let logits_bytes = n_experts * 4;
-    unsafe {
-        state
-            .device
-            .memcpy_async(
-                state.stream,
-                CopyDirection::DeviceToHost,
-                DevicePtr(logits_host.as_mut_ptr() as usize),
-                router_logits.ptr,
-                logits_bytes,
-            )
-            .context("moe_ffn: router logits DtoH")?;
-    }
-    flambeau_core::Stream::synchronize(state.stream)?;
-
-    let mut topk: Vec<(usize, f32)> = logits_host.iter().copied().enumerate().collect();
-    topk.select_nth_unstable_by(k_top - 1, |a, b| {
-        b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal)
-    });
-    topk.truncate(k_top);
-    topk.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
-    let max_logit = topk[0].1;
-    let mut exps: Vec<f32> = topk.iter().map(|(_, v)| (v - max_logit).exp()).collect();
-    let sum: f32 = exps.iter().sum();
-    for e in &mut exps {
-        *e /= sum;
-    }
-    let host_ids: Vec<i32> = topk.iter().map(|(e, _)| *e as i32).collect();
-
-    // 4. Upload expert_ids + expert_weights to device scratch.
-    unsafe {
-        state
-            .device
-            .memcpy_async(
-                state.stream,
-                CopyDirection::HostToDevice,
-                state.pool.moe_expert_ids,
-                DevicePtr(host_ids.as_ptr() as usize),
-                k_top * 4,
-            )
-            .context("moe_ffn: expert_ids HtoD")?;
-        state
-            .device
-            .memcpy_async(
-                state.stream,
-                CopyDirection::HostToDevice,
-                state.pool.moe_expert_weights,
-                DevicePtr(exps.as_ptr() as usize),
-                k_top * 4,
-            )
-            .context("moe_ffn: expert_weights HtoD")?;
-    }
-    flambeau_core::Stream::synchronize(state.stream)?;
+    // 3. GPU-side top-k + softmax-over-k (algebraically equivalent
+    //    to softmax-over-V → top-k → renormalise; see topk_f32.cu's
+    //    proof comment). Replaces DtoH + CPU topk + HtoD with a
+    //    single in-block kernel.
+    let mut expert_ids = unsafe { Tensor::<I32>::from_raw(state.pool.moe_expert_ids, k_top) };
+    let mut expert_weights =
+        unsafe { Tensor::<F32>::from_raw(state.pool.moe_expert_weights, k_top) };
+    flambeau_model_ops::moe_router_topk_f32(
+        &router_logits,
+        &mut expert_ids,
+        &mut expert_weights,
+        1,
+        n_experts,
+        k_top,
+        &ops,
+    )?;
 
     // 5. Indexed-MoE expert dispatch via flambeau_blocks::MoeExperts.
     //    `experts_gate[0].ptr` is the base of the stacked packed-expert
@@ -335,71 +296,23 @@ fn moe_ffn_loop<H: TopologyHooks>(
         &ops,
     )?;
 
-    // 3. DtoH all N×n_experts logits in one transfer; host topk per row.
-    let mut logits_host = vec![0.0_f32; n_tokens * n_experts];
-    let logits_bytes = n_tokens * n_experts * 4;
-    unsafe {
-        state
-            .device
-            .memcpy_async(
-                state.stream,
-                CopyDirection::DeviceToHost,
-                DevicePtr(logits_host.as_mut_ptr() as usize),
-                router_logits.ptr,
-                logits_bytes,
-            )
-            .context("moe_ffn prefill: router logits DtoH")?;
-    }
-    flambeau_core::Stream::synchronize(state.stream)?;
-    let mut host_ids: Vec<i32> = Vec::with_capacity(n_tokens * k_top);
-    let mut host_weights: Vec<f32> = Vec::with_capacity(n_tokens * k_top);
-    for t in 0..n_tokens {
-        let row = &logits_host[t * n_experts..(t + 1) * n_experts];
-        let mut topk: Vec<(usize, f32)> =
-            row.iter().copied().enumerate().collect();
-        topk.select_nth_unstable_by(k_top - 1, |a, b| {
-            b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal)
-        });
-        topk.truncate(k_top);
-        topk.sort_by(|a, b| {
-            b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal)
-        });
-        let max_logit = topk[0].1;
-        let mut exps: Vec<f32> = topk.iter().map(|(_, v)| (v - max_logit).exp()).collect();
-        let sum: f32 = exps.iter().sum();
-        for e in &mut exps {
-            *e /= sum;
-        }
-        for (slot, &(e, _)) in topk.iter().enumerate() {
-            host_ids.push(e as i32);
-            host_weights.push(exps[slot]);
-        }
-    }
-
-    // 4. HtoD upload [N, top_k] ids + weights into the prefill scratch.
-    unsafe {
-        state
-            .device
-            .memcpy_async(
-                state.stream,
-                CopyDirection::HostToDevice,
-                prefill_scratch.expert_ids,
-                DevicePtr(host_ids.as_ptr() as usize),
-                n_tokens * k_top * 4,
-            )
-            .context("moe_ffn prefill: expert_ids HtoD")?;
-        state
-            .device
-            .memcpy_async(
-                state.stream,
-                CopyDirection::HostToDevice,
-                prefill_scratch.expert_weights,
-                DevicePtr(host_weights.as_ptr() as usize),
-                n_tokens * k_top * 4,
-            )
-            .context("moe_ffn prefill: expert_weights HtoD")?;
-    }
-    flambeau_core::Stream::synchronize(state.stream)?;
+    // 3. GPU-side per-token top-k + softmax-over-k (replaces DtoH
+    //    + per-row CPU topk + HtoD).
+    let mut expert_ids = unsafe {
+        Tensor::<I32>::from_raw(prefill_scratch.expert_ids, n_tokens * k_top)
+    };
+    let mut expert_weights = unsafe {
+        Tensor::<F32>::from_raw(prefill_scratch.expert_weights, n_tokens * k_top)
+    };
+    flambeau_model_ops::moe_router_topk_f32(
+        &router_logits,
+        &mut expert_ids,
+        &mut expert_weights,
+        n_tokens,
+        n_experts,
+        k_top,
+        &ops,
+    )?;
 
     // 5. Batched indexed-MoE forward + F32 partial AR.
     let gate_dt = weights.experts_gate[0].dtype;
