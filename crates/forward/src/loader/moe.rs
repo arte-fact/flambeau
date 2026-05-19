@@ -144,6 +144,79 @@ pub fn upload_moe_experts_stacked_col_sharded(
     Ok(experts)
 }
 
+/// Upload a fused gate+up MoE expert tensor `[n_experts, 2*inter, hidden]`
+/// (gemma4 MoE layout) as two SEPARATE stacked buffers — one for gate
+/// and one for up — each `[n_experts, inter, hidden]`. The indexed
+/// MoE kernels expect each expert's rows to be contiguous within its
+/// own stacked tensor, so we cannot keep the fused on-disk layout and
+/// just offset; we must compact at load time.
+///
+/// Native-quant only. F16/BF16/F32 fused gate+up isn't a real-world
+/// shape so we bail rather than add a dequant fallback.
+pub fn upload_moe_experts_fused_gate_up_stacked(
+    file: &GgufFile,
+    device: &HipDevice,
+    name: &str,
+    n_experts: usize,
+    inter: usize,
+    hidden: usize,
+    allocs: &mut Vec<(DevicePtr, usize)>,
+) -> Result<(Vec<QuantWeight>, Vec<QuantWeight>)> {
+    let info = file.info(name).with_context(|| format!("info {name}"))?;
+    if !dtype_qmatmul_native(info.dtype) {
+        bail!(
+            "{name}: dtype {:?} not native — fused gate+up dequant fallback not implemented",
+            info.dtype
+        );
+    }
+    let block_size = info.dtype.block_size();
+    let type_size = info.dtype.type_size();
+    if hidden % block_size != 0 {
+        bail!(
+            "{name}: hidden {hidden} not divisible by block_size {block_size}"
+        );
+    }
+    let row_bytes = (hidden / block_size) * type_size;
+    let half_per_expert = inter * row_bytes;
+    let full_per_expert = 2 * half_per_expert;
+    let raw = file
+        .tensor_raw(name)
+        .with_context(|| format!("tensor_raw {name}"))?;
+    let expected = n_experts * full_per_expert;
+    if raw.len() < expected {
+        bail!(
+            "{name}: raw bytes {} < expected {expected} ({n_experts} × 2 × {inter} × {row_bytes})",
+            raw.len()
+        );
+    }
+    let mut gate_buf: Vec<u8> = Vec::with_capacity(n_experts * half_per_expert);
+    let mut up_buf: Vec<u8> = Vec::with_capacity(n_experts * half_per_expert);
+    for e in 0..n_experts {
+        let base = e * full_per_expert;
+        gate_buf.extend_from_slice(&raw[base..base + half_per_expert]);
+        up_buf.extend_from_slice(&raw[base + half_per_expert..base + full_per_expert]);
+    }
+    let gate_ptr = upload_bytes(device, &gate_buf, allocs)?;
+    let up_ptr = upload_bytes(device, &up_buf, allocs)?;
+    let qd = ggml_to_qdtype(info.dtype)?;
+    let elems_per_expert = inter * hidden;
+    let gate: Vec<QuantWeight> = (0..n_experts)
+        .map(|e| QuantWeight {
+            ptr: gate_ptr.offset_bytes(e * half_per_expert),
+            dtype: qd,
+            n_elems: elems_per_expert,
+        })
+        .collect();
+    let up: Vec<QuantWeight> = (0..n_experts)
+        .map(|e| QuantWeight {
+            ptr: up_ptr.offset_bytes(e * half_per_expert),
+            dtype: qd,
+            n_elems: elems_per_expert,
+        })
+        .collect();
+    Ok((gate, up))
+}
+
 /// Row-shard variant of [`upload_moe_experts_stacked`]. Splits the
 /// stacked tensor along the INNER dimension `dim_b` (e.g.
 /// `intermediate` for ffn_down where layout is `[hidden,

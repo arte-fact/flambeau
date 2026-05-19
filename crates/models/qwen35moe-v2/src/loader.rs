@@ -301,6 +301,7 @@ fn load_with_shard(
         };
         ffn.push(Some(MoeWeights {
             ffn_norm,
+            post_ffn_norm: None,
             router,
             experts_gate,
             experts_up,

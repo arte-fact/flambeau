@@ -1,16 +1,23 @@
-//! Gemma-4 dense GGUF → device. Per-layer SWA alternation; every layer
-//! is FullAttn (no GDN/MoE in this first cut). Single entry parametrised
-//! by `ShardMode`.
+//! Gemma-4 GGUF → device. Per-layer SWA alternation; every layer is
+//! FullAttn. Dense variant (31B) populates `ffn`; MoE variant
+//! (26B-A4B) populates `moe` with the routed experts + shared MLP
+//! sibling (gemma4 MoE layer = routed MoE + dense MLP in parallel,
+//! one pre-norm, one post-norm). Single entry parametrised by
+//! `ShardMode`.
 
 use anyhow::{bail, Context, Result};
 use flambeau_backend_hip::HipDevice;
 use flambeau_core::{Device, DevicePtr};
 use flambeau_forward::ctx::{
     Activation, AttnWeights, EmbeddingWeights, FfnWeights, LmHeadWeights, ModelLayout,
+    MoeWeights, SharedExpertWeights,
 };
 use flambeau_forward::loader::{
     load_dense_attn_layer, load_dense_ffn_layer, load_embedding, load_lm_head,
-    DenseAttnLayerSpec, DenseFfnLayerSpec, EmbeddingSpec, LmHeadSpec, ShardMode,
+    upload_col_sharded_quant, upload_dequant_to_f16, upload_moe_experts_fused_gate_up_stacked,
+    upload_moe_experts_stacked_row_sharded, upload_quant_weight, upload_row_sharded_quant,
+    upload_router_f16, DenseAttnLayerSpec, DenseFfnLayerSpec, EmbeddingSpec, LmHeadSpec,
+    ShardMode,
 };
 use flambeau_quant::GgufFile;
 
@@ -21,7 +28,12 @@ pub struct Gemma4V2Model {
     pub layout: ModelLayout,
     pub embedding: EmbeddingWeights,
     pub attn: Vec<Option<AttnWeights>>,
+    /// Dense FFN per layer for the 31B / 9B variants. Empty Vec when
+    /// the model is MoE (use `moe` instead).
     pub ffn: Vec<Option<FfnWeights>>,
+    /// Routed MoE + shared MLP per layer for the 26B-A4B variant.
+    /// Empty Vec for dense variants.
+    pub moe: Vec<Option<MoeWeights>>,
     pub lm_head: LmHeadWeights,
     /// Per-layer `blk.N.layer_output_scale.weight` F32 scalar applied
     /// to the residual after both attn + FFN residuals. `None` when
@@ -90,13 +102,21 @@ fn load_with_shard(
         placeholder
     };
 
+    let is_moe = config.moe.is_some();
     let mut attn = Vec::with_capacity(config.num_layers);
-    let mut ffn = Vec::with_capacity(config.num_layers);
+    let mut ffn: Vec<Option<FfnWeights>> =
+        if is_moe { Vec::new() } else { Vec::with_capacity(config.num_layers) };
+    let mut moe_layers: Vec<Option<MoeWeights>> =
+        if is_moe { Vec::with_capacity(config.num_layers) } else { Vec::new() };
     let mut layer_output_scale: Vec<Option<f32>> = Vec::with_capacity(config.num_layers);
     for li in 0..config.num_layers {
         if !in_range(li) {
             attn.push(None);
-            ffn.push(None);
+            if is_moe {
+                moe_layers.push(None);
+            } else {
+                ffn.push(None);
+            }
             layer_output_scale.push(None);
             continue;
         }
@@ -149,30 +169,119 @@ fn load_with_shard(
             &mut allocs,
         )?));
 
-        let (ffn_norm, post_ffn_norm, ffn_gate, ffn_up, ffn_down) = (
+        let (ffn_norm_name, post_ffn_norm_name, ffn_gate, ffn_up, ffn_down) = (
             format!("{p}.ffn_norm.weight"),
             format!("{p}.post_ffw_norm.weight"),
             format!("{p}.ffn_gate.weight"),
             format!("{p}.ffn_up.weight"),
             format!("{p}.ffn_down.weight"),
         );
-        ffn.push(Some(load_dense_ffn_layer(
-            file,
-            device,
-            &DenseFfnLayerSpec {
-                ffn_norm_name: &ffn_norm,
-                post_ffn_norm_name: Some(&post_ffn_norm),
-                ffn_gate_name: &ffn_gate,
-                ffn_up_name: &ffn_up,
-                ffn_down_name: &ffn_down,
-                hidden: config.hidden,
-                intermediate: config.intermediate,
+        if let Some(mdims) = config.moe {
+            // Gemma4 MoE: routed experts + shared dense MLP per layer.
+            // `ffn_norm` is shared by both paths; `post_ffw_norm` is
+            // applied to the summed delta before the residual_add.
+            let router_name = format!("{p}.ffn_gate_inp.weight");
+            let gate_up_exps = format!("{p}.ffn_gate_up_exps.weight");
+            let down_exps = format!("{p}.ffn_down_exps.weight");
+            let ffn_norm_t = upload_dequant_to_f16(
+                file,
+                device,
+                &ffn_norm_name,
+                config.hidden,
+                &mut allocs,
+            )?;
+            let post_ffn_norm_t = upload_dequant_to_f16(
+                file,
+                device,
+                &post_ffn_norm_name,
+                config.hidden,
+                &mut allocs,
+            )?;
+            let router = upload_router_f16(
+                file,
+                device,
+                &router_name,
+                mdims.num_experts * config.hidden,
+                &mut allocs,
+            )?;
+            // gate_up_exps: `[n_experts, 2*moe_inter, hidden]` fused on
+            // disk → split into two stacked tensors.
+            let (experts_gate, experts_up) = upload_moe_experts_fused_gate_up_stacked(
+                file,
+                device,
+                &gate_up_exps,
+                mdims.num_experts,
+                mdims.moe_intermediate,
+                config.hidden,
+                &mut allocs,
+            )?;
+            // down_exps: `[n_experts, hidden, moe_inter]` — row-shard
+            // the inner moe_inter dim for TP.
+            let experts_down = upload_moe_experts_stacked_row_sharded(
+                file,
+                device,
+                &down_exps,
+                mdims.num_experts,
+                config.hidden,
+                mdims.moe_intermediate,
+                shard,
+                &mut allocs,
+            )?;
+            // Shared MLP: dense FFN at `config.intermediate`, summed
+            // into the routed MoE delta. Same TP shard plan as the
+            // qwen35moe shared expert.
+            let inter = config.intermediate;
+            let (gate_sh, up_sh, down_sh) = match shard {
+                ShardMode::Replicated => (
+                    upload_quant_weight(file, device, &ffn_gate, inter * config.hidden, &mut allocs)?,
+                    upload_quant_weight(file, device, &ffn_up, inter * config.hidden, &mut allocs)?,
+                    upload_quant_weight(file, device, &ffn_down, config.hidden * inter, &mut allocs)?,
+                ),
+                ShardMode::Tp { rank, n_ranks } => (
+                    upload_col_sharded_quant(file, device, &ffn_gate, inter, config.hidden, rank, n_ranks, &mut allocs)?,
+                    upload_col_sharded_quant(file, device, &ffn_up, inter, config.hidden, rank, n_ranks, &mut allocs)?,
+                    upload_row_sharded_quant(file, device, &ffn_down, config.hidden, inter, rank, n_ranks, &mut allocs)?,
+                ),
+            };
+            let shared = Some(SharedExpertWeights {
+                gate: gate_sh,
+                up: up_sh,
+                down: down_sh,
+                gate_inp: None,
+                intermediate: inter / shard.n_ranks(),
+            });
+            moe_layers.push(Some(MoeWeights {
+                ffn_norm: ffn_norm_t,
+                post_ffn_norm: Some(post_ffn_norm_t),
+                router,
+                experts_gate,
+                experts_up,
+                experts_down,
+                n_experts: mdims.num_experts,
+                experts_per_tok: mdims.experts_per_tok,
                 activation: Activation::GeluTanh,
                 rms_eps: config.rms_eps,
-            },
-            shard,
-            &mut allocs,
-        )?));
+                shared,
+            }));
+        } else {
+            ffn.push(Some(load_dense_ffn_layer(
+                file,
+                device,
+                &DenseFfnLayerSpec {
+                    ffn_norm_name: &ffn_norm_name,
+                    post_ffn_norm_name: Some(&post_ffn_norm_name),
+                    ffn_gate_name: &ffn_gate,
+                    ffn_up_name: &ffn_up,
+                    ffn_down_name: &ffn_down,
+                    hidden: config.hidden,
+                    intermediate: config.intermediate,
+                    activation: Activation::GeluTanh,
+                    rms_eps: config.rms_eps,
+                },
+                shard,
+                &mut allocs,
+            )?));
+        }
 
         // Per-layer F32 scalar applied after both residuals (gemma4
         // trained behavior). Tensor is `[1]` F32 on disk; read raw +
@@ -233,6 +342,7 @@ fn load_with_shard(
         embedding,
         attn,
         ffn,
+        moe: moe_layers,
         lm_head,
         layer_output_scale,
         allocs,

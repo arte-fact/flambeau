@@ -9,10 +9,18 @@ pub enum Gemma4V2ConfigError {
     WrongArchitecture { got: Option<String> },
     #[error("token_embd.weight tensor missing — cannot infer vocab size")]
     MissingTokenEmbd,
-    #[error("gemma4-v2 first cut targets dense variants only; expert_count present in GGUF")]
-    MoeUnsupported,
-    #[error("gemma4-v2 first cut targets variants without per-layer embd; embedding_length_per_layer_input > 0")]
+    #[error("gemma4-v2 does not yet support variants with per-layer embd (gemma 4n / E2B / E4B): embedding_length_per_layer_input > 0")]
     PerLayerEmbdUnsupported,
+}
+
+/// Routed-expert dims for the MoE variant (26B-A4B). Each MoE layer
+/// has a shared MLP at [`Gemma4V2Config::intermediate`] running in
+/// parallel with the routed experts at `moe_intermediate`.
+#[derive(Debug, Clone, Copy)]
+pub struct MoeDims {
+    pub num_experts: usize,
+    pub experts_per_tok: usize,
+    pub moe_intermediate: usize,
 }
 
 /// Per-layer attention dims. SWA layers and full-attn layers can differ
@@ -41,6 +49,11 @@ pub struct Gemma4V2Config {
     pub vocab_size: usize,
     pub final_logit_softcap: f32,
     pub tied_lm_head: bool,
+    /// Present iff `gemma4.expert_count > 0` (26B-A4B). When set, every
+    /// layer's FFN is the routed MoE + the shared dense MLP running in
+    /// parallel; the shared MLP uses `intermediate`, the routed
+    /// experts use `moe.moe_intermediate`.
+    pub moe: Option<MoeDims>,
 }
 
 impl Gemma4V2Config {
@@ -60,12 +73,17 @@ impl Gemma4V2Config {
         let opt_u32 = |s: &str| file.metadata_u32(&key(s)).map(|v| v as usize);
         let opt_f32 = |s: &str| file.metadata_f32(&key(s));
 
-        if opt_u32("expert_count").unwrap_or(0) > 0 {
-            return Err(Gemma4V2ConfigError::MoeUnsupported);
-        }
         if opt_u32("embedding_length_per_layer_input").unwrap_or(0) > 0 {
             return Err(Gemma4V2ConfigError::PerLayerEmbdUnsupported);
         }
+        let moe = match opt_u32("expert_count") {
+            Some(n) if n > 0 => Some(MoeDims {
+                num_experts: n,
+                experts_per_tok: req_u32("expert_used_count")?,
+                moe_intermediate: req_u32("expert_feed_forward_length")?,
+            }),
+            _ => None,
+        };
 
         let hidden = req_u32("embedding_length")?;
         let num_heads = req_u32("attention.head_count")?;
@@ -135,6 +153,7 @@ impl Gemma4V2Config {
             vocab_size,
             final_logit_softcap,
             tied_lm_head,
+            moe,
         })
     }
 }

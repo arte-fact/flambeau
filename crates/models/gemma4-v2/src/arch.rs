@@ -72,20 +72,43 @@ impl Arch for Gemma4V2 {
             .max()
             .unwrap_or(0);
         let kv_width = per_layer_kv.iter().copied().max().unwrap_or(0);
+        // MoE variants size the pool's expert / shared scratch from
+        // the GGUF; dense variants leave them at zero.
+        let (max_experts, max_experts_per_tok, moe_intermediate) = match cfg.moe {
+            Some(m) => (m.num_experts, m.experts_per_tok, m.moe_intermediate / n_ranks),
+            None => (0, 0, 0),
+        };
+        // Shared-MLP scratch uses the dense intermediate width per
+        // rank — same shape as a row-parallel SharedExpert. Dense
+        // variants leave this at zero.
+        let shared_intermediate = if cfg.moe.is_some() {
+            cfg.intermediate / n_ranks
+        } else {
+            0
+        };
+        // The MoE moe_intermediate replaces the dense per-rank
+        // intermediate for routed-expert scratch sizing. The shared
+        // MLP path still uses the dense intermediate via
+        // `shared_intermediate`.
+        let intermediate = if cfg.moe.is_some() {
+            moe_intermediate
+        } else {
+            cfg.intermediate / n_ranks
+        };
         ScratchConfig {
             hidden: cfg.hidden,
-            intermediate: cfg.intermediate / n_ranks,
+            intermediate,
             q_width,
             kv_width,
             vocab: cfg.vocab_size,
             max_seq_len,
             num_layers: cfg.num_layers,
-            max_experts: 0,
-            max_experts_per_tok: 0,
+            max_experts,
+            max_experts_per_tok,
             gdn: None,
             per_layer_kv_widths: Some(per_layer_kv),
             attn_q_gated: false,
-            shared_intermediate: 0,
+            shared_intermediate,
             max_prefill_tokens: prefill_ubatch,
             max_slots,
         }

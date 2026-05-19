@@ -20,6 +20,7 @@ use flambeau_core::op::QDtype;
 use flambeau_ops::Ops;
 
 use crate::driver_utils::RawAllocTracker;
+use crate::moe_experts::Activation;
 use crate::WeightHandle;
 
 #[derive(Copy, Clone)]
@@ -116,6 +117,9 @@ pub struct SharedExpert {
     pub ffn_down_shexp: WeightHandle,  // [hidden, intermediate]
     pub hidden: usize,
     pub intermediate: usize,
+    /// Activation between gate/up and down. Default `SwiGLU` (qwen3.x
+    /// shared expert); gemma4 MoE shared MLP uses `Gelu`.
+    pub activation: Activation,
 }
 
 impl SharedExpert {
@@ -158,7 +162,14 @@ impl SharedExpert {
             ffn_down_shexp,
             hidden,
             intermediate,
+            activation: Activation::SwiGLU,
         })
+    }
+
+    /// Override the activation. Default is `SwiGLU`; gemma4 sets `Gelu`.
+    pub fn with_activation(mut self, activation: Activation) -> Self {
+        self.activation = activation;
+        self
     }
 
     pub fn scratch_dims(&self) -> SharedExpertScratchDims {
@@ -291,26 +302,41 @@ impl SharedExpert {
             .context("shexp up mmvq")?;
         }
 
-        // 4+5. Fused swiglu→Q8_1 when intermediate aligns with QK8_1=32;
-        // unfused fallback for off-multiples.
-        if inter % 32 == 0 {
-            ops.swiglu_f32_to_q8_1(
-                scratch.gate_f32,
-                scratch.up_f32,
-                scratch.activated_q8_1,
-                inter,
-            )
-            .context("shexp swiglu_f32_to_q8_1")?;
-        } else {
-            ops.swiglu_f32_to_f16(
-                scratch.gate_f32,
-                scratch.up_f32,
-                scratch.activated_f16,
-                inter,
-            )
-            .context("shexp swiglu_f32_to_f16")?;
-            ops.quantize_f16_q8_1(scratch.activated_f16, scratch.activated_q8_1, inter)
-                .context("shexp quantise activated → Q8_1")?;
+        // 4+5. activation(gate, up) → F16, then quantise to Q8_1.
+        // SwiGLU has a fused `swiglu_f32_to_q8_1` when intermediate is
+        // a multiple of QK8_1 (32); Gelu has no fused variant.
+        match self.activation {
+            Activation::SwiGLU if inter % 32 == 0 => {
+                ops.swiglu_f32_to_q8_1(
+                    scratch.gate_f32,
+                    scratch.up_f32,
+                    scratch.activated_q8_1,
+                    inter,
+                )
+                .context("shexp swiglu_f32_to_q8_1")?;
+            }
+            Activation::SwiGLU => {
+                ops.swiglu_f32_to_f16(
+                    scratch.gate_f32,
+                    scratch.up_f32,
+                    scratch.activated_f16,
+                    inter,
+                )
+                .context("shexp swiglu_f32_to_f16")?;
+                ops.quantize_f16_q8_1(scratch.activated_f16, scratch.activated_q8_1, inter)
+                    .context("shexp quantise activated → Q8_1")?;
+            }
+            Activation::Gelu => {
+                ops.gelu_f32_to_f16(
+                    scratch.gate_f32,
+                    scratch.up_f32,
+                    scratch.activated_f16,
+                    inter,
+                )
+                .context("shexp gelu_f32_to_f16")?;
+                ops.quantize_f16_q8_1(scratch.activated_f16, scratch.activated_q8_1, inter)
+                    .context("shexp quantise activated → Q8_1")?;
+            }
         }
 
         // 6. down matmul → F32.
@@ -400,15 +426,16 @@ impl SharedExpert {
         )
         .context("shexp prefill up qmatmul")?;
 
-        // 4-5. swiglu → F16, then quantise to Q8_1.
+        // 4-5. activation → F16, then quantise to Q8_1.
         let n_total = n_tokens * inter;
-        ops.swiglu_f32_to_f16(
-            scratch.gate_f32,
-            scratch.up_f32,
-            scratch.activated_f16,
-            n_total,
-        )
-        .context("shexp prefill swiglu_f32_to_f16")?;
+        match self.activation {
+            Activation::SwiGLU => ops
+                .swiglu_f32_to_f16(scratch.gate_f32, scratch.up_f32, scratch.activated_f16, n_total)
+                .context("shexp prefill swiglu_f32_to_f16")?,
+            Activation::Gelu => ops
+                .gelu_f32_to_f16(scratch.gate_f32, scratch.up_f32, scratch.activated_f16, n_total)
+                .context("shexp prefill gelu_f32_to_f16")?,
+        }
         ops.quantize_f16_q8_1(scratch.activated_f16, scratch.activated_q8_1, n_total)
             .context("shexp prefill activated → Q8_1")?;
 

@@ -164,7 +164,10 @@ pub fn moe_ffn_local<H: TopologyHooks>(
     // Fast path: BAR1 TP=2 — fuse AR + residual-add for the routed
     // MoE partial AND (if present) the shared-expert partial.
     // Returns None so the model skips its `residual_add`.
-    if hooks.supports_ar_residual_f16() {
+    // Disabled when post_ffn_norm is set (gemma4 MoE): the post-norm
+    // must be applied to the delta before residual_add, which the
+    // AR-fold fast path doesn't expose. Slow path below handles it.
+    if hooks.supports_ar_residual_f16() && weights.post_ffn_norm.is_none() {
         let down_f32_t = unsafe { Tensor::<F32>::from_raw(state.pool.down_f32, hidden) };
         let mut moe_partial_f16 =
             unsafe { Tensor::<F16>::from_raw(state.pool.delta, hidden) };
@@ -178,7 +181,7 @@ pub fn moe_ffn_local<H: TopologyHooks>(
                      ScratchConfig.shared_intermediate"
                 );
             }
-            let shared_block = build_shared_expert_block(sh, hidden)?;
+            let shared_block = build_shared_expert_block(sh, hidden, weights.activation)?;
             let scratch_view = flambeau_blocks::SharedExpertDecodeScratch {
                 x_q8_1: state.pool.norm_q8_1,
                 gate_f32: state.pool.gate_f32,
@@ -238,7 +241,7 @@ pub fn moe_ffn_local<H: TopologyHooks>(
                  ScratchConfig.shared_intermediate"
             );
         }
-        let shared_block = build_shared_expert_block(sh, hidden)?;
+        let shared_block = build_shared_expert_block(sh, hidden, weights.activation)?;
         let scratch_view = flambeau_blocks::SharedExpertDecodeScratch {
             x_q8_1: state.pool.norm_q8_1,
             gate_f32: state.pool.gate_f32,
@@ -268,6 +271,20 @@ pub fn moe_ffn_local<H: TopologyHooks>(
         flambeau_model_ops::add_f16(&delta, &shared_view, &mut delta_out, hidden, &ops)?;
     }
 
+    // Optional post-ffn rmsnorm on the F16 delta (gemma4 MoE pattern).
+    if let Some(post_norm) = weights.post_ffn_norm.as_ref() {
+        let delta_in = unsafe { Tensor::<F16>::from_raw(state.pool.delta, hidden) };
+        let mut delta_out = unsafe { Tensor::<F16>::from_raw(state.pool.delta, hidden) };
+        flambeau_model_ops::rmsnorm_f16(
+            &delta_in,
+            post_norm,
+            &mut delta_out,
+            1,
+            hidden,
+            weights.rms_eps,
+            &ops,
+        )?;
+    }
     let _ = (act_mmq_null, gate_dt, up_dt, down_dt, router_dt);
     Ok(Some(unsafe { Tensor::<F16>::from_raw(state.pool.delta, hidden) }))
 }
@@ -445,7 +462,7 @@ fn moe_ffn_loop<H: TopologyHooks>(
                  pool.shared_x_norm_f32 unallocated — set ScratchConfig.shared_intermediate"
             );
         }
-        let shared_block = build_shared_expert_block(sh, hidden)?;
+        let shared_block = build_shared_expert_block(sh, hidden, weights.activation)?;
         let shared_out = state.pool.q_f16;
         let shared_view = flambeau_blocks::SharedExpertPrefillScratch {
             max_tokens: state.pool.config.max_prefill_tokens,
@@ -484,6 +501,22 @@ fn moe_ffn_loop<H: TopologyHooks>(
         )?;
     }
 
+    // Optional post-ffn rmsnorm on the batched F16 delta (gemma4 MoE).
+    if let Some(post_norm) = weights.post_ffn_norm.as_ref() {
+        let delta_in =
+            unsafe { Tensor::<F16>::from_raw(state.pool.delta, n_tokens * hidden) };
+        let mut delta_out =
+            unsafe { Tensor::<F16>::from_raw(state.pool.delta, n_tokens * hidden) };
+        flambeau_model_ops::rmsnorm_f16(
+            &delta_in,
+            post_norm,
+            &mut delta_out,
+            n_tokens,
+            hidden,
+            weights.rms_eps,
+            &ops,
+        )?;
+    }
     let _ = (act_mmq_null, gate_dt, up_dt, down_dt, router_dt);
     Ok(Some(unsafe { Tensor::<F16>::from_raw(state.pool.delta, n_tokens * hidden) }))
 }
@@ -491,8 +524,9 @@ fn moe_ffn_loop<H: TopologyHooks>(
 fn build_shared_expert_block(
     sh: &crate::ctx::SharedExpertWeights,
     hidden: usize,
+    activation: Activation,
 ) -> Result<flambeau_blocks::SharedExpert> {
-    flambeau_blocks::SharedExpert::new(
+    let block = flambeau_blocks::SharedExpert::new(
         sh.gate_inp.as_ref().map(|t| t.ptr),
         flambeau_blocks::WeightHandle {
             ptr: sh.gate.ptr,
@@ -511,5 +545,9 @@ fn build_shared_expert_block(
         },
         hidden,
         sh.intermediate,
-    )
+    )?;
+    Ok(block.with_activation(match activation {
+        Activation::SwiGLU => BlockActivation::SwiGLU,
+        Activation::GeluTanh => BlockActivation::Gelu,
+    }))
 }

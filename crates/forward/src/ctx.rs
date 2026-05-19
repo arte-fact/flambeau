@@ -321,6 +321,10 @@ pub enum Activation {
 /// (algebraically equivalent to `softmax(all) → topk → renorm`).
 pub struct MoeWeights {
     pub ffn_norm: Tensor<F16>,
+    /// Optional norm applied to the F16 MoE delta BEFORE the outer
+    /// residual_add. Gemma4 sets this to `post_ffw_norm.weight`; qwen3-moe
+    /// leaves it `None`. Mirrors `FfnWeights::post_ffn_norm`.
+    pub post_ffn_norm: Option<Tensor<F16>>,
     pub router: QuantWeight,
     pub experts_gate: Vec<QuantWeight>,
     pub experts_up: Vec<QuantWeight>,
@@ -329,9 +333,11 @@ pub struct MoeWeights {
     pub experts_per_tok: usize,
     pub activation: Activation,
     pub rms_eps: f32,
-    /// Always-on shared expert (qwen3-moe family). When `Some`, its
-    /// per-token-sigmoid-gated dense FFN output is added to the routed
-    /// experts' accumulator before the residual.
+    /// Always-on shared expert / shared MLP run in parallel with the
+    /// routed experts. qwen3-moe family attaches it with a per-token
+    /// sigmoid gate (`SharedExpertWeights::gate_inp = Some(...)`);
+    /// gemma4 MoE attaches it as a plain dense FFN
+    /// (`gate_inp = None`).
     pub shared: Option<SharedExpertWeights>,
 }
 
