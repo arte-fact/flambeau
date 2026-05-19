@@ -244,6 +244,63 @@ impl SharedExpert {
         scratch: SharedExpertDecodeScratch,
     ) -> Result<()> {
         let hidden = self.hidden;
+        self.decode_compute_partial_f32(ops, x_norm, scratch.down_f32, scratch)?;
+        // 7. Optional per-token sigmoid gate scaling on `down_f32`
+        // (qwen3next pattern). qwen35moe leaves this off — the down
+        // output passes straight to the F16 cast.
+        if let Some(gate_w) = self.ffn_gate_inp_shexp {
+            ops.cast_f16_to_f32(x_norm, scratch.x_norm_f32, hidden)
+                .context("shexp cast x_norm → f32")?;
+            ops.shared_expert_scale_f32(
+                scratch.down_f32,
+                scratch.x_norm_f32,
+                gate_w,
+                1,
+                hidden,
+            )
+            .context("shexp shared_expert_scale_f32")?;
+        }
+        // 8. Cast (scaled) output back to F16.
+        ops.cast_f32_to_f16(scratch.down_f32, shared_out, hidden)
+            .context("shexp cast → f16")
+    }
+
+    /// Decode variant that writes the F32 down partial directly to
+    /// `partial_out_f32` (`[hidden]` F32) and skips the optional
+    /// sigmoid-gate scaling + the final F16 cast. Used by archs whose
+    /// MoE branch keeps F32 partials through a downstream cascade
+    /// (gemma4 26B-A4B). The sigmoid-gate scaling path is incompatible
+    /// with this variant — bails if `ffn_gate_inp_shexp` is set.
+    pub fn forward_decode_f32_partial<O: Ops>(
+        &self,
+        ops: &O,
+        x_norm: DevicePtr,
+        partial_out_f32: DevicePtr,
+        scratch: SharedExpertDecodeScratch,
+    ) -> Result<()> {
+        if self.ffn_gate_inp_shexp.is_some() {
+            bail!(
+                "SharedExpert::forward_decode_f32_partial: sigmoid-gate \
+                 (`ffn_gate_inp_shexp` set) requires the F16-cast path; \
+                 use `forward_decode` for those archs"
+            );
+        }
+        self.decode_compute_partial_f32(ops, x_norm, partial_out_f32, scratch)
+    }
+
+    /// Steps 1-6 of the decode pipeline: quantise x_norm → gate+up
+    /// (with optional fused mmvq) → activation → quantise → down. The
+    /// final `mmvq(down)` writes to `down_out_f32`. Used by both the
+    /// public F16-cast path (`forward_decode`) and the F32-partial
+    /// variant.
+    fn decode_compute_partial_f32<O: Ops>(
+        &self,
+        ops: &O,
+        x_norm: DevicePtr,
+        down_out_f32: DevicePtr,
+        scratch: SharedExpertDecodeScratch,
+    ) -> Result<()> {
+        let hidden = self.hidden;
         let inter = self.intermediate;
 
         // 1. Quantise x_norm → Q8_1.
@@ -339,36 +396,17 @@ impl SharedExpert {
             }
         }
 
-        // 6. down matmul → F32.
+        // 6. down matmul → F32 (caller's `down_out_f32` ptr).
         ops.mmvq(
             self.ffn_down_shexp.ptr,
             scratch.activated_q8_1,
-            scratch.down_f32,
+            down_out_f32,
             hidden,
             inter,
             self.ffn_down_shexp.dtype,
         )
         .context("shexp down mmvq")?;
-
-        // 7. Optional per-token sigmoid gate scaling on `down_f32`
-        // (qwen3next pattern). qwen35moe leaves this off — the down
-        // output passes straight to the F16 cast.
-        if let Some(gate_w) = self.ffn_gate_inp_shexp {
-            ops.cast_f16_to_f32(x_norm, scratch.x_norm_f32, hidden)
-                .context("shexp cast x_norm → f32")?;
-            ops.shared_expert_scale_f32(
-                scratch.down_f32,
-                scratch.x_norm_f32,
-                gate_w,
-                1,
-                hidden,
-            )
-            .context("shexp shared_expert_scale_f32")?;
-        }
-
-        // 8. Cast (scaled) output back to F16.
-        ops.cast_f32_to_f16(scratch.down_f32, shared_out, hidden)
-            .context("shexp cast → f16")
+        Ok(())
     }
 
     /// Multi-token prefill (also serves the per-rank TP shared-expert
@@ -386,12 +424,67 @@ impl SharedExpert {
         n_tokens: usize,
         scratch: SharedExpertPrefillScratch,
     ) -> Result<()> {
+        let hidden = self.hidden;
+        self.prefill_compute_partial_f32(ops, x_norm, scratch.down_f32, n_tokens, scratch)?;
+        // 7. Optional per-token sigmoid gate scaling on the F32 down
+        // output. Skipped for qwen35moe; applied for qwen3next.
+        if let Some(gate_w) = self.ffn_gate_inp_shexp {
+            ops.cast_f16_to_f32(x_norm, scratch.x_norm_f32, n_tokens * hidden)
+                .context("shexp prefill cast x_norm → f32 (gate)")?;
+            ops.shared_expert_scale_f32(
+                scratch.down_f32,
+                scratch.x_norm_f32,
+                gate_w,
+                n_tokens,
+                hidden,
+            )
+            .context("shexp prefill shared_expert_scale_f32")?;
+        }
+        // 8. Cast scaled output back to F16.
+        ops.cast_f32_to_f16(scratch.down_f32, shared_out, n_tokens * hidden)
+            .context("shexp prefill cast → f16")
+    }
+
+    /// Prefill variant that writes the F32 down partial directly to
+    /// `partial_out_f32` (`[n_tokens, hidden]` F32) and skips the
+    /// optional sigmoid-gate scaling + the final F16 cast. See
+    /// [`Self::forward_decode_f32_partial`] for the decode sibling.
+    pub fn forward_prefill_f32_partial<O: Ops>(
+        &self,
+        ops: &O,
+        x_norm: DevicePtr,
+        partial_out_f32: DevicePtr,
+        n_tokens: usize,
+        scratch: SharedExpertPrefillScratch,
+    ) -> Result<()> {
+        if self.ffn_gate_inp_shexp.is_some() {
+            bail!(
+                "SharedExpert::forward_prefill_f32_partial: sigmoid-gate \
+                 (`ffn_gate_inp_shexp` set) requires the F16-cast path; \
+                 use `forward_prefill` for those archs"
+            );
+        }
+        self.prefill_compute_partial_f32(ops, x_norm, partial_out_f32, n_tokens, scratch)
+    }
+
+    /// Steps 1-6 of the prefill pipeline. Writes the F32 down output
+    /// to `down_out_f32` (`[n_tokens, hidden]` F32). Shared between
+    /// `forward_prefill` (F16-cast tail) and
+    /// `forward_prefill_f32_partial` (no tail).
+    fn prefill_compute_partial_f32<O: Ops>(
+        &self,
+        ops: &O,
+        x_norm: DevicePtr,
+        down_out_f32: DevicePtr,
+        n_tokens: usize,
+        scratch: SharedExpertPrefillScratch,
+    ) -> Result<()> {
         if n_tokens == 0 {
-            bail!("SharedExpert::forward_prefill called with n_tokens = 0");
+            bail!("SharedExpert::prefill_compute_partial_f32 called with n_tokens = 0");
         }
         if n_tokens > scratch.max_tokens {
             bail!(
-                "SharedExpert::forward_prefill: n_tokens={n_tokens} > scratch.max_tokens={}",
+                "SharedExpert::prefill_compute_partial_f32: n_tokens={n_tokens} > scratch.max_tokens={}",
                 scratch.max_tokens
             );
         }
@@ -439,36 +532,18 @@ impl SharedExpert {
         ops.quantize_f16_q8_1(scratch.activated_f16, scratch.activated_q8_1, n_total)
             .context("shexp prefill activated → Q8_1")?;
 
-        // 6. down qmatmul.
+        // 6. down qmatmul → F32 (caller's `down_out_f32` ptr).
         ops.qmatmul(
             self.ffn_down_shexp.ptr,
             scratch.activated_q8_1,
             DevicePtr(0),
-            scratch.down_f32,
+            down_out_f32,
             n_tokens,
             inter,
             hidden,
             self.ffn_down_shexp.dtype,
         )
         .context("shexp prefill down qmatmul")?;
-
-        // 7. Optional per-token sigmoid gate scaling on the F32 down
-        // output. Skipped for qwen35moe; applied for qwen3next.
-        if let Some(gate_w) = self.ffn_gate_inp_shexp {
-            ops.cast_f16_to_f32(x_norm, scratch.x_norm_f32, n_tokens * hidden)
-                .context("shexp prefill cast x_norm → f32 (gate)")?;
-            ops.shared_expert_scale_f32(
-                scratch.down_f32,
-                scratch.x_norm_f32,
-                gate_w,
-                n_tokens,
-                hidden,
-            )
-            .context("shexp prefill shared_expert_scale_f32")?;
-        }
-
-        // 8. Cast scaled output back to F16.
-        ops.cast_f32_to_f16(scratch.down_f32, shared_out, n_tokens * hidden)
-            .context("shexp prefill cast → f16")
+        Ok(())
     }
 }
