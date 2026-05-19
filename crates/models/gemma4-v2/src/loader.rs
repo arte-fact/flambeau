@@ -14,7 +14,8 @@ use flambeau_forward::ctx::{
 };
 use flambeau_forward::loader::{
     load_dense_attn_layer, load_dense_ffn_layer, load_embedding, load_lm_head,
-    upload_col_sharded_quant, upload_dequant_to_f16, upload_moe_experts_fused_gate_up_stacked,
+    upload_col_sharded_quant, upload_dequant_to_f16, upload_f32_tensor,
+    upload_gemma4_pre_router_weight_f16, upload_moe_experts_fused_gate_up_stacked,
     upload_moe_experts_stacked_row_sharded, upload_quant_weight, upload_row_sharded_quant,
     upload_router_f16, DenseAttnLayerSpec, DenseFfnLayerSpec, EmbeddingSpec, LmHeadSpec,
     ShardMode,
@@ -190,11 +191,68 @@ fn load_with_shard(
                 config.hidden,
                 &mut allocs,
             )?;
+            // Final F16 post-norm (legacy keeps both F16 and F32 copies;
+            // v2 cascade uses the F32 variant, but we keep the F16
+            // tensor too for the qwen-path fallback / future use).
             let post_ffn_norm_t = upload_dequant_to_f16(
                 file,
                 device,
                 &post_ffn_norm_name,
                 config.hidden,
+                &mut allocs,
+            )?;
+            // F32 cascade norms (kept as F32 on device for the
+            // F32-precision rmsnorm steps in the gemma4 MoE path).
+            let post_ffn_norm_f32_name = post_ffn_norm_name.clone();
+            let post_ffn_norm_f32_t = upload_f32_tensor(
+                file,
+                device,
+                &post_ffn_norm_f32_name,
+                config.hidden,
+                &mut allocs,
+            )?;
+            let pre_ffw_norm_2_name = format!("{p}.pre_ffw_norm_2.weight");
+            let pre_ffw_norm_2_f16 = upload_dequant_to_f16(
+                file,
+                device,
+                &pre_ffw_norm_2_name,
+                config.hidden,
+                &mut allocs,
+            )?;
+            let post_ffw_norm_1_name = format!("{p}.post_ffw_norm_1.weight");
+            let post_ffw_norm_1_f32 = upload_f32_tensor(
+                file,
+                device,
+                &post_ffw_norm_1_name,
+                config.hidden,
+                &mut allocs,
+            )?;
+            let post_ffw_norm_2_name = format!("{p}.post_ffw_norm_2.weight");
+            let post_ffw_norm_2_f32 = upload_f32_tensor(
+                file,
+                device,
+                &post_ffw_norm_2_name,
+                config.hidden,
+                &mut allocs,
+            )?;
+            // pre_router_weight is derived from `ffn_gate_inp.scale`
+            // (F32 [hidden]) × 1/sqrt(hidden) → F16 [hidden].
+            let ffn_gate_inp_scale_name = format!("{p}.ffn_gate_inp.scale");
+            let pre_router_weight_f16 = upload_gemma4_pre_router_weight_f16(
+                file,
+                device,
+                &ffn_gate_inp_scale_name,
+                config.hidden,
+                &mut allocs,
+            )?;
+            // Per-expert F32 scale array [n_experts] folded into the
+            // router top-k weights.
+            let expert_down_scale_name = format!("{p}.ffn_down_exps.scale");
+            let expert_down_scale_f32 = upload_f32_tensor(
+                file,
+                device,
+                &expert_down_scale_name,
+                mdims.num_experts,
                 &mut allocs,
             )?;
             let router = upload_router_f16(
@@ -262,6 +320,12 @@ fn load_with_shard(
                 activation: Activation::GeluTanh,
                 rms_eps: config.rms_eps,
                 shared,
+                pre_router_weight_f16: Some(pre_router_weight_f16),
+                pre_ffw_norm_2_f16: Some(pre_ffw_norm_2_f16),
+                post_ffw_norm_1_f32: Some(post_ffw_norm_1_f32),
+                post_ffw_norm_2_f32: Some(post_ffw_norm_2_f32),
+                post_ffn_norm_f32: Some(post_ffn_norm_f32_t),
+                expert_down_scale_f32: Some(expert_down_scale_f32),
             }));
         } else {
             ffn.push(Some(load_dense_ffn_layer(

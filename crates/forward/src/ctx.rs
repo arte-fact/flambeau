@@ -319,11 +319,21 @@ pub enum Activation {
 
 /// MoE routing: top-k by raw logit, then softmax over k
 /// (algebraically equivalent to `softmax(all) → topk → renorm`).
+///
+/// Two shapes share this struct:
+///
+/// * qwen3-moe (default): single pre-norm (`ffn_norm`), optional shared
+///   expert with per-token sigmoid gate, optional F16 `post_ffn_norm`.
+///   The cascade fields below stay `None`.
+/// * gemma4 MoE (26B-A4B): a 5-norm F32 cascade. All cascade fields are
+///   populated; the composite detects this by
+///   `pre_router_weight_f16.is_some()` and runs the F32 partial path
+///   (`flambeau-model-ops::moe_cascade_*`).
 pub struct MoeWeights {
     pub ffn_norm: Tensor<F16>,
     /// Optional norm applied to the F16 MoE delta BEFORE the outer
-    /// residual_add. Gemma4 sets this to `post_ffw_norm.weight`; qwen3-moe
-    /// leaves it `None`. Mirrors `FfnWeights::post_ffn_norm`.
+    /// residual_add. qwen3-moe leaves it `None`; gemma4 MoE uses the
+    /// F32 cascade fields below instead.
     pub post_ffn_norm: Option<Tensor<F16>>,
     pub router: QuantWeight,
     pub experts_gate: Vec<QuantWeight>,
@@ -339,6 +349,30 @@ pub struct MoeWeights {
     /// gemma4 MoE attaches it as a plain dense FFN
     /// (`gate_inp = None`).
     pub shared: Option<SharedExpertWeights>,
+
+    // ---- gemma4 cascade fields (all Some together, all None for qwen) ----
+    /// F16 `[hidden]` rmsnorm weight applied to the attn-residual
+    /// BEFORE the router. Gemma4-only — derived at load from
+    /// `ffn_gate_inp.scale` (F32 [hidden]) × 1/sqrt(hidden), then cast
+    /// to F16.
+    pub pre_router_weight_f16: Option<Tensor<F16>>,
+    /// F16 `[hidden]` rmsnorm weight applied to the attn-residual
+    /// BEFORE the routed-MoE branch (separate from `ffn_norm` which is
+    /// the shared-MLP pre-norm).
+    pub pre_ffw_norm_2_f16: Option<Tensor<F16>>,
+    /// F32 `[hidden]` rmsnorm weight applied to the shared-MLP F32
+    /// partial (before combine).
+    pub post_ffw_norm_1_f32: Option<Tensor<F32>>,
+    /// F32 `[hidden]` rmsnorm weight applied to the routed-MoE F32
+    /// partial (before combine).
+    pub post_ffw_norm_2_f32: Option<Tensor<F32>>,
+    /// F32 `[hidden]` rmsnorm weight applied to the combined F32
+    /// partial after `cur_mlp + cur_moe`. The result is cast F32→F16
+    /// and added to the residual.
+    pub post_ffn_norm_f32: Option<Tensor<F32>>,
+    /// F32 `[n_experts]` per-expert weight scale folded into the
+    /// router top-k weights before the indexed-MoE forward.
+    pub expert_down_scale_f32: Option<Tensor<F32>>,
 }
 
 pub struct SharedExpertWeights {

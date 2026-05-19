@@ -164,6 +164,61 @@ pub fn upload_dequant_to_f16(
     upload_f16_from_f32(device, &f32_vec, allocs)
 }
 
+/// Derive gemma4's pre-router rmsnorm weight from the on-disk
+/// `ffn_gate_inp.scale` F32 array: `weight = scale * 1 / sqrt(hidden)`,
+/// cast F16, then HtoD. Mirrors legacy
+/// `crates/models/gemma4/src/weights_hip.rs` upload path.
+pub fn upload_gemma4_pre_router_weight_f16(
+    file: &GgufFile,
+    device: &HipDevice,
+    name: &str,
+    hidden: usize,
+    allocs: &mut Vec<(DevicePtr, usize)>,
+) -> Result<Tensor<F16>> {
+    let scale_info = file
+        .info(name)
+        .with_context(|| format!("info {name}"))?;
+    if scale_info.dtype != flambeau_quant::GgmlDType::F32 {
+        bail!(
+            "{name}: expected F32, got {:?}",
+            scale_info.dtype
+        );
+    }
+    let raw = file
+        .tensor_raw(name)
+        .with_context(|| format!("tensor_raw {name}"))?;
+    if raw.len() < hidden * 4 {
+        bail!(
+            "{name}: raw bytes {} < expected {} (hidden={hidden})",
+            raw.len(),
+            hidden * 4
+        );
+    }
+    let scale_f32: &[f32] = bytemuck::cast_slice(&raw[..hidden * 4]);
+    let inv_sqrt = 1.0f32 / (hidden as f32).sqrt();
+    let host: Vec<f16> = scale_f32
+        .iter()
+        .map(|&v| f16::from_f32(v * inv_sqrt))
+        .collect();
+    let bytes = hidden * 2;
+    let ptr = device.alloc(bytes).context("alloc pre_router_weight")?;
+    let stream = device.default_stream();
+    // SAFETY: ptr owns `bytes`; host has the matching byte count.
+    unsafe {
+        device.memcpy_async(
+            stream,
+            CopyDirection::HostToDevice,
+            ptr,
+            DevicePtr(host.as_ptr() as usize),
+            bytes,
+        )?;
+    }
+    flambeau_core::Stream::synchronize(stream)
+        .context("sync after pre_router_weight upload")?;
+    allocs.push((ptr, bytes));
+    Ok(unsafe { Tensor::<F16>::from_raw(ptr, hidden) })
+}
+
 /// HtoD a host-dequantised tensor as `Tensor<F32>` (no quantise
 /// step). Used for F32 scalars some arches store on disk (GDN's
 /// `ssm_dt_bias`, `ssm_a`, `ssm_conv1d`).

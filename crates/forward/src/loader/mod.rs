@@ -34,7 +34,8 @@ pub use moe::{
 };
 pub use primitives::{
     dtype_qmatmul_native, ggml_to_qdtype, upload_bytes, upload_dequant_to_f16, upload_f16_from_f32,
-    upload_f16_ones, upload_f32_tensor, upload_raw, wrap_quant,
+    upload_f16_ones, upload_f32_tensor, upload_gemma4_pre_router_weight_f16, upload_raw,
+    wrap_quant,
 };
 pub use shard::{
     upload_col_sharded_quant, upload_quant_weight, upload_router_f16, upload_row_sharded_quant,

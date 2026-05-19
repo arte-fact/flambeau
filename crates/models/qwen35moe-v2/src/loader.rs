@@ -311,6 +311,12 @@ fn load_with_shard(
             activation: Activation::SwiGLU,
             rms_eps: config.rms_eps,
             shared,
+            pre_router_weight_f16: None,
+            pre_ffw_norm_2_f16: None,
+            post_ffw_norm_1_f32: None,
+            post_ffw_norm_2_f32: None,
+            post_ffn_norm_f32: None,
+            expert_down_scale_f32: None,
         }));
     }
 
