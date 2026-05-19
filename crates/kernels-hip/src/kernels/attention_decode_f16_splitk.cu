@@ -78,16 +78,66 @@ extern "C" __global__ void flambeau_attention_decode_f16_splitk_chunk(
     float running_sum = 0.0f;
     __shared__ float out_shared[ATTN_SK_MAX_HEAD_DIM];
     if (tid < head_dim) out_shared[tid] = 0.0f;
-    __shared__ float score_parts[ATTN_SK_MAX_WARPS];
+    // 2 score slots per warp so the tile-2 inner loop reduces both K[t]
+    // and K[t+1] dot-products through one __syncthreads instead of two.
+    __shared__ float score_parts[ATTN_SK_MAX_WARPS * 2];
     __syncthreads();
 
-    // If the chunk is empty (n_tokens < t_start, possible when
-    // n_chunks > ceil(n_tokens/chunk_size) — not by our launch, but guard
-    // anyway), still write partials_m = -INF, s = 0, o = 0 so combine sees
-    // a neutral contribution.
-    for (int t = t_start; t < t_end; ++t) {
-        const size_t kv_row = ((size_t) t * n_heads_kv + kv_head) * head_dim;
+    // Tile-2 inner loop: each iter processes two consecutive K/V tokens
+    // sharing one cross-warp LDS roundtrip. The odd tail (t_end - t_start
+    // is odd) is handled by the single-token loop after.
+    int t = t_start;
+    for (; t + 1 < t_end; t += 2) {
+        const size_t kv_row_a = ((size_t) t * n_heads_kv + kv_head) * head_dim;
+        const size_t kv_row_b = kv_row_a + (size_t) n_heads_kv * head_dim;
 
+        float partial_a = 0.0f;
+        float partial_b = 0.0f;
+        if (tid < head_dim) {
+            const float qv = q_shared[tid];
+            partial_a = qv * (float) k_cache[kv_row_a + tid];
+            partial_b = qv * (float) k_cache[kv_row_b + tid];
+        }
+        #pragma unroll
+        for (int off = 32; off > 0; off >>= 1) {
+            partial_a += __shfl_xor(partial_a, off, 64);
+            partial_b += __shfl_xor(partial_b, off, 64);
+        }
+        if (lane == 0) {
+            score_parts[warp * 2 + 0] = partial_a;
+            score_parts[warp * 2 + 1] = partial_b;
+        }
+        __syncthreads();
+        float score_a = 0.0f;
+        float score_b = 0.0f;
+        #pragma unroll
+        for (int w = 0; w < ATTN_SK_MAX_WARPS; ++w) {
+            if (w < nwarps) {
+                score_a += score_parts[w * 2 + 0];
+                score_b += score_parts[w * 2 + 1];
+            }
+        }
+        score_a *= scale;
+        score_b *= scale;
+
+        float new_max  = fmaxf(running_max, fmaxf(score_a, score_b));
+        float scale_old = __expf(running_max - new_max);
+        float coeff_a   = __expf(score_a - new_max);
+        float coeff_b   = __expf(score_b - new_max);
+
+        if (tid < head_dim) {
+            const float v_a = (float) v_cache[kv_row_a + tid];
+            const float v_b = (float) v_cache[kv_row_b + tid];
+            out_shared[tid] = out_shared[tid] * scale_old + coeff_a * v_a + coeff_b * v_b;
+        }
+        running_sum = running_sum * scale_old + coeff_a + coeff_b;
+        running_max = new_max;
+
+        __syncthreads();
+    }
+    // Tail (at most one token): single-token update path.
+    for (; t < t_end; ++t) {
+        const size_t kv_row = ((size_t) t * n_heads_kv + kv_head) * head_dim;
         float my_partial = 0.0f;
         if (tid < head_dim) {
             my_partial = q_shared[tid] * (float) k_cache[kv_row + tid];
@@ -96,12 +146,12 @@ extern "C" __global__ void flambeau_attention_decode_f16_splitk_chunk(
         for (int off = 32; off > 0; off >>= 1) {
             my_partial += __shfl_xor(my_partial, off, 64);
         }
-        if (lane == 0) score_parts[warp] = my_partial;
+        if (lane == 0) score_parts[warp * 2] = my_partial;
         __syncthreads();
         float score_t = 0.0f;
         #pragma unroll
         for (int w = 0; w < ATTN_SK_MAX_WARPS; ++w) {
-            if (w < nwarps) score_t += score_parts[w];
+            if (w < nwarps) score_t += score_parts[w * 2];
         }
         score_t *= scale;
 

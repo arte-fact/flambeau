@@ -175,3 +175,43 @@ contribute. Remaining gap is dominated by lever A (attention decode
 
 Next: A. attention_decode_f16 tile-size audit / port to
 `flash_attn_tile<d=256>` shape.
+
+## Lever A shipped (splitk_chunk tile-2 inner loop)
+
+The 184 µs/call cost in `attention_decode_f16_splitk_chunk` is dominated
+by the per-token sync overhead: each context-token iter does one
+`__syncthreads()` for cross-warp reduce + one `__syncthreads()` between
+iters. At chunk_size=128 that's 256 syncs per block.
+
+Rewrote the inner loop to process two K/V tokens per iter:
+
+- Both Q · K[t] and Q · K[t+1] dot products done in parallel
+- Warp-reduce both via paired `__shfl_xor`
+- Cross-warp reduce uses `score_parts[ATTN_SK_MAX_WARPS * 2]` — write
+  both partials before a single `__syncthreads`
+- Online-softmax update with both scores: `new_max = max(running, a, b)`,
+  `out_shared[tid] = out_shared * scale_old + coeff_a*V[t] + coeff_b*V[t+1]`,
+  `running_sum = running_sum * scale_old + coeff_a + coeff_b`
+- Odd tail handled by a single-token loop after
+
+Bench numbers (gemma-4-26B-A4B PP2, 725-tok prompt, 128-tok decode):
+
+| metric                              | post-B (single)| post-A (tile-2) | delta    |
+|-------------------------------------|---------------:|----------------:|---------:|
+| splitk_chunk time                   | 739.4 ms       | **435.3 ms**    | **-41 %**|
+| splitk_chunk per-call cost          | 184 µs         | **108 µs**      | **-41 %**|
+| Total kernel GPU time               | 4117 ms        | 3713 ms         | -10 %    |
+| Decode t/s (bench)                  | 44.85          | **49.53**       | +10.4 %  |
+| v2 / llama.cpp decode ratio         | 0.68×          | **0.82×**       | +14 pp   |
+
+Same chat output (coherence preserved). The single-pass kernel
+(`attention_decode_f16`) was not modified — only the splitk_chunk path
+which the long-prompt bench hits. The single-pass kernel only runs for
+n_tokens_kv ≤ 256; if that path also needs the tile-2 pattern (short-
+context bench shapes), it's a follow-up port.
+
+llama.cpp's `flash_attn_tile<256,256>` is still ~1.5× faster per call
+than our tile-2 splitk. The remaining gap likely lives in K/V cache
+coalescing or in GQA-aware q_head batching (n_heads_q=16 sharing
+n_heads_kv=8 means 2 q_heads per kv_head — each kv_head row is
+currently read twice).
