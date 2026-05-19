@@ -117,6 +117,7 @@ impl Arch for Qwen35V2 {
             shared_intermediate: 0,
             max_prefill_tokens: prefill_ubatch,
             max_slots,
+            per_layer_embd: 0,
         }
     }
 

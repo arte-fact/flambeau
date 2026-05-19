@@ -7,6 +7,7 @@
 
 use anyhow::{bail, Context, Result};
 use flambeau_backend_hip::HipDevice;
+use flambeau_blocks::per_layer_embd::PerLayerEmbedLayerWeights;
 use flambeau_core::{Device, DevicePtr};
 use flambeau_forward::ctx::{
     Activation, AttnWeights, EmbeddingWeights, FfnWeights, LmHeadWeights, ModelLayout,
@@ -20,9 +21,27 @@ use flambeau_forward::loader::{
     upload_router_f16, DenseAttnLayerSpec, DenseFfnLayerSpec, EmbeddingSpec, LmHeadSpec,
     ShardMode,
 };
-use flambeau_quant::GgufFile;
+use flambeau_quant::{GgmlDType, GgufFile};
 
 use crate::config::Gemma4V2Config;
+
+/// Owned copy of the gemma 4n / E2B / E4B per-layer-embd globals.
+/// These three tensors feed
+/// [`flambeau_blocks::per_layer_embd::build_inp_per_layer_table`] once
+/// per token; we keep the raw bytes alive (mmap-derived `tensor_raw`
+/// can't outlive the loader's `&GgufFile`, so the load helper copies).
+pub struct PerLayerEmbdGlobals {
+    pub tok_embd_raw: Vec<u8>,
+    pub tok_embd_dtype: GgmlDType,
+    pub tok_embd_row_bytes: usize,
+    pub model_proj_raw: Vec<u8>,
+    pub model_proj_dtype: GgmlDType,
+    pub proj_norm_raw: Vec<u8>,
+    /// Device buffer the host build helper uploads into, sized
+    /// `pe * n_layer * sizeof(f32)`.
+    pub table_dev: DevicePtr,
+    pub pe: usize,
+}
 
 pub struct Gemma4V2Model {
     pub config: Gemma4V2Config,
@@ -41,6 +60,12 @@ pub struct Gemma4V2Model {
     /// the tensor is absent on disk for that layer (older gemma4
     /// variants might skip it; main-line gemma4 ships one per layer).
     pub layer_output_scale: Vec<Option<f32>>,
+    /// Per-layer side-channel embedding weights (E2B / E4B only).
+    /// Empty Vec when `config.per_layer_embd.is_none()`.
+    pub per_layer_embd: Vec<Option<PerLayerEmbedLayerWeights>>,
+    /// Globals + device buffer for the per-token table build. `None`
+    /// when `config.per_layer_embd.is_none()`.
+    pub per_layer_embd_globals: Option<PerLayerEmbdGlobals>,
 
     pub(crate) allocs: Vec<(DevicePtr, usize)>,
     pub(crate) device_id: i32,
@@ -104,12 +129,19 @@ fn load_with_shard(
     };
 
     let is_moe = config.moe.is_some();
+    let has_per_layer_embd = config.per_layer_embd.is_some();
     let mut attn = Vec::with_capacity(config.num_layers);
     let mut ffn: Vec<Option<FfnWeights>> =
         if is_moe { Vec::new() } else { Vec::with_capacity(config.num_layers) };
     let mut moe_layers: Vec<Option<MoeWeights>> =
         if is_moe { Vec::with_capacity(config.num_layers) } else { Vec::new() };
     let mut layer_output_scale: Vec<Option<f32>> = Vec::with_capacity(config.num_layers);
+    let mut per_layer_embd_w: Vec<Option<PerLayerEmbedLayerWeights>> =
+        if has_per_layer_embd {
+            Vec::with_capacity(config.num_layers)
+        } else {
+            Vec::new()
+        };
     for li in 0..config.num_layers {
         if !in_range(li) {
             attn.push(None);
@@ -119,6 +151,9 @@ fn load_with_shard(
                 ffn.push(None);
             }
             layer_output_scale.push(None);
+            if has_per_layer_embd {
+                per_layer_embd_w.push(None);
+            }
             continue;
         }
         let p = format!("blk.{li}");
@@ -364,6 +399,41 @@ fn load_with_shard(
             None
         };
         layer_output_scale.push(scale);
+
+        // gemma 4n (E2B / E4B) per-layer side-channel weights: F32
+        // inp_gate / proj on device, post_norm cast to F16.
+        if let Some(ple) = config.per_layer_embd {
+            let pe = ple.pe;
+            let inp_gate_name = format!("{p}.inp_gate.weight");
+            let proj_name = format!("{p}.proj.weight");
+            let post_norm_name = format!("{p}.post_norm.weight");
+            let inp_gate_t = upload_f32_tensor(
+                file,
+                device,
+                &inp_gate_name,
+                pe * config.hidden,
+                &mut allocs,
+            )?;
+            let proj_t = upload_f32_tensor(
+                file,
+                device,
+                &proj_name,
+                config.hidden * pe,
+                &mut allocs,
+            )?;
+            let post_norm_t = upload_dequant_to_f16(
+                file,
+                device,
+                &post_norm_name,
+                config.hidden,
+                &mut allocs,
+            )?;
+            per_layer_embd_w.push(Some(PerLayerEmbedLayerWeights {
+                inp_gate: inp_gate_t.ptr,
+                proj: proj_t.ptr,
+                post_norm_f16: post_norm_t.ptr,
+            }));
+        }
     }
 
     let lm_head = if owns_lm_head {
@@ -394,6 +464,59 @@ fn load_with_shard(
         LmHeadWeights::placeholder(config.vocab_size, config.hidden, config.rms_eps)
     };
 
+    let per_layer_embd_globals = if let Some(ple) = config.per_layer_embd {
+        let pe = ple.pe;
+        let total = pe * config.num_layers;
+        let table_bytes = total * 4;
+        let table_dev = device.alloc(table_bytes).context("alloc per_layer table")?;
+        allocs.push((table_dev, table_bytes));
+
+        let tok_embd_info = file
+            .info("per_layer_token_embd.weight")
+            .context("per_layer_token_embd.weight info")?;
+        let model_proj_info = file
+            .info("per_layer_model_proj.weight")
+            .context("per_layer_model_proj.weight info")?;
+
+        let tok_embd_row_bytes = {
+            let bs = tok_embd_info.dtype.block_size() as usize;
+            let ts = tok_embd_info.dtype.type_size() as usize;
+            let row_elems = tok_embd_info.dims.get(1).copied().unwrap_or(0) as usize;
+            if row_elems == 0 || row_elems % bs != 0 {
+                bail!(
+                    "per_layer_token_embd row width {row_elems} % block_size {bs} != 0 for {:?}",
+                    tok_embd_info.dtype
+                );
+            }
+            (row_elems / bs) * ts
+        };
+
+        let tok_embd_raw = file
+            .tensor_raw("per_layer_token_embd.weight")
+            .context("read per_layer_token_embd.weight bytes")?
+            .to_vec();
+        let model_proj_raw = file
+            .tensor_raw("per_layer_model_proj.weight")
+            .context("read per_layer_model_proj.weight bytes")?
+            .to_vec();
+        let proj_norm_raw = file
+            .tensor_raw("per_layer_proj_norm.weight")
+            .context("read per_layer_proj_norm.weight bytes")?
+            .to_vec();
+
+        Some(PerLayerEmbdGlobals {
+            tok_embd_raw,
+            tok_embd_dtype: tok_embd_info.dtype,
+            tok_embd_row_bytes,
+            model_proj_raw,
+            model_proj_dtype: model_proj_info.dtype,
+            proj_norm_raw,
+            table_dev,
+            pe,
+        })
+    } else {
+        None
+    };
     let layout = ModelLayout {
         num_layers: config.num_layers,
         hidden: config.hidden,
@@ -409,10 +532,14 @@ fn load_with_shard(
         moe: moe_layers,
         lm_head,
         layer_output_scale,
+        per_layer_embd: per_layer_embd_w,
+        per_layer_embd_globals,
         allocs,
         device_id,
     })
 }
+
+
 
 pub fn load_from_gguf(
     file: &GgufFile,

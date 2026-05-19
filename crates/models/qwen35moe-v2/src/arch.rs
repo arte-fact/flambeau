@@ -94,6 +94,7 @@ impl Arch for Qwen35MoeV2 {
             shared_intermediate: cfg.shared_expert_intermediate,
             max_prefill_tokens: prefill_ubatch,
             max_slots,
+            per_layer_embd: 0,
         }
     }
 

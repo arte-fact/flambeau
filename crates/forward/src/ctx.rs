@@ -4,6 +4,7 @@
 //! handoff). See `core/` for the shared composite engine.
 
 use anyhow::Result;
+use flambeau_core::DevicePtr;
 use flambeau_model_ops::{Tensor, F16, F32};
 
 /// One impl per topology; the model is `<C: ForwardCtx>` generic.
@@ -95,6 +96,56 @@ pub trait ForwardCtx {
         n_tokens: usize,
         next_norm: Option<&Tensor<F16>>,
     ) -> Result<Option<Tensor<F16>>>;
+
+    /// Per-layer side-channel embedding apply (gemma 4n / E2B / E4B).
+    /// Reads `resid` (F16, length hidden), reads the slice
+    /// `table_dev[layer_idx * pe .. (layer_idx + 1) * pe]` (F32),
+    /// rewrites `resid` in place with the side-channel residual.
+    /// `pe` is the per-layer side-channel width (256 on E4B).
+    /// Default impl panics — only impls that own a Pool can run the
+    /// apply (engine, testing). RecordingCtx records the call.
+    fn per_layer_embd_apply(
+        &mut self,
+        resid: &mut Tensor<F16>,
+        weights: &flambeau_blocks::per_layer_embd::PerLayerEmbedLayerWeights,
+        table_dev: DevicePtr,
+        layer_idx: usize,
+        pe: usize,
+        rms_eps: f32,
+    ) -> Result<()> {
+        let _ = (resid, weights, table_dev, layer_idx, pe, rms_eps);
+        anyhow::bail!("per_layer_embd_apply not implemented for this ctx")
+    }
+
+    /// Per-token build + upload of the side-channel embedding table.
+    /// Reads `main_embd` (F16 [hidden] for the current token) via DtoH,
+    /// runs
+    /// [`flambeau_blocks::per_layer_embd::build_inp_per_layer_table`]
+    /// host-side, and uploads the resulting `[n_layer * pe]` F32 table
+    /// to `table_dev`. Caller passes the GGUF raw byte slices for the
+    /// three per-layer-embd globals plus the row-sliced token embedding
+    /// bytes for the current token.
+    #[allow(clippy::too_many_arguments)]
+    fn per_layer_embd_build_table(
+        &mut self,
+        main_embd: &Tensor<F16>,
+        tok_embd_row_raw: &[u8],
+        tok_embd_dtype: flambeau_quant::GgmlDType,
+        model_proj_raw: &[u8],
+        model_proj_dtype: flambeau_quant::GgmlDType,
+        proj_norm_raw: &[u8],
+        table_dev: DevicePtr,
+        pe: usize,
+        n_layer: usize,
+        hidden: usize,
+        rms_eps: f32,
+    ) -> Result<()> {
+        let _ = (
+            main_embd, tok_embd_row_raw, tok_embd_dtype, model_proj_raw, model_proj_dtype,
+            proj_norm_raw, table_dev, pe, n_layer, hidden, rms_eps,
+        );
+        anyhow::bail!("per_layer_embd_build_table not implemented for this ctx")
+    }
 
     /// When `slot_ids` are all equal (prefill / single decode), only
     /// the LAST token's logits land in `ctx.logits()` (vocab elems).

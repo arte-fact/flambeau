@@ -6,7 +6,7 @@
 use std::ops::Range;
 use std::sync::{Arc, Barrier, Mutex};
 
-use anyhow::{anyhow, bail, Result};
+use anyhow::{anyhow, bail, Context, Result};
 use flambeau_backend_hip::{HipDevice, HipStream};
 use flambeau_core::{CopyDirection, Device, DevicePtr};
 use flambeau_model_ops::{Tensor, F16};
@@ -640,6 +640,96 @@ impl<H: TopologyHooks, S: StageHooks> ForwardCtx for ForwardEngine<'_, H, S> {
             n_tokens,
             next_norm,
         )
+    }
+
+    fn per_layer_embd_apply(
+        &mut self,
+        resid: &mut Tensor<F16>,
+        weights: &flambeau_blocks::per_layer_embd::PerLayerEmbedLayerWeights,
+        table_dev: flambeau_core::DevicePtr,
+        layer_idx: usize,
+        pe: usize,
+        rms_eps: f32,
+    ) -> Result<()> {
+        let hidden = self.core.hidden();
+        let pool = &self.core.pool;
+        let scratch = flambeau_blocks::per_layer_embd::PerLayerEmbedDecodeScratch {
+            gate_out_f32: pool.ple_gate_out_f32,
+            activated_f32: pool.ple_activated_f32,
+            activated_f16: pool.ple_activated_f16,
+            proj_out_f32: pool.ple_proj_out_f32,
+            proj_out_f16: pool.ple_proj_out_f16,
+            normed_f16: pool.ple_normed_f16,
+        };
+        let table_slice =
+            flambeau_blocks::per_layer_embd::table_slice_ptr(table_dev, layer_idx, pe);
+        let block =
+            flambeau_blocks::per_layer_embd::PerLayerEmbedBlock::new(*weights, pe, hidden, rms_eps);
+        let ops = self.core.ops();
+        block.forward_decode(&ops, resid.ptr, table_slice, scratch, resid.ptr)
+    }
+
+    fn per_layer_embd_build_table(
+        &mut self,
+        main_embd: &Tensor<F16>,
+        tok_embd_row_raw: &[u8],
+        tok_embd_dtype: flambeau_quant::GgmlDType,
+        model_proj_raw: &[u8],
+        model_proj_dtype: flambeau_quant::GgmlDType,
+        proj_norm_raw: &[u8],
+        table_dev: flambeau_core::DevicePtr,
+        pe: usize,
+        n_layer: usize,
+        hidden: usize,
+        rms_eps: f32,
+    ) -> Result<()> {
+        use flambeau_core::{CopyDirection, DevicePtr, Stream};
+        use half::f16;
+        if main_embd.n_elems < hidden {
+            anyhow::bail!(
+                "per_layer_embd_build_table: main_embd has {} elems, hidden = {hidden}",
+                main_embd.n_elems
+            );
+        }
+        let device = self.core.device;
+        let stream = self.core.stream;
+        let mut inp_batch_f16 = vec![f16::ZERO; hidden];
+        unsafe {
+            device.memcpy_async(
+                stream,
+                CopyDirection::DeviceToHost,
+                DevicePtr(inp_batch_f16.as_mut_ptr() as usize),
+                main_embd.ptr,
+                hidden * 2,
+            )?;
+        }
+        Stream::synchronize(stream).context("sync after DtoH for per_layer_embd build")?;
+
+        let table = flambeau_blocks::per_layer_embd::build_inp_per_layer_table(
+            tok_embd_row_raw,
+            tok_embd_dtype,
+            model_proj_raw,
+            model_proj_dtype,
+            proj_norm_raw,
+            &inp_batch_f16,
+            pe,
+            n_layer,
+            hidden,
+            rms_eps,
+        )?;
+
+        let bytes = std::mem::size_of_val(table.as_slice());
+        unsafe {
+            device.memcpy_async(
+                stream,
+                CopyDirection::HostToDevice,
+                table_dev,
+                DevicePtr(table.as_ptr() as usize),
+                bytes,
+            )?;
+        }
+        Stream::synchronize(stream).context("sync after HtoD for per_layer_embd table")?;
+        Ok(())
     }
 
     fn output_head(

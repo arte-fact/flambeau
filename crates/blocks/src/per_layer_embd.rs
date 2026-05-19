@@ -13,13 +13,18 @@
 //! x_out         = pe_in + normed_f16               (add_f16)
 //! ```
 //!
-//! Only the per-layer apply lives here. The (host-side) build of
-//! `inp_per_layer_table[]` is GGUF-coupled and stays in the gemma4
-//! crate alongside the model-specific tensor names.
+//! The per-token build of `inp_per_layer_table[]` (Q5_K dequant +
+//! BF16 matmul + rmsnorm + add) is the host-side function
+//! [`build_inp_per_layer_table`] below — model crates pass the GGUF
+//! mmap slices for `per_layer_token_embd`, `per_layer_model_proj`,
+//! `per_layer_proj_norm` plus the current token's F16 main embedding
+//! and get back a `[n_layer * pe]` F32 table to upload once per token.
 
-use anyhow::{Context, Result};
+use anyhow::{anyhow, bail, Context, Result};
 use flambeau_core::DevicePtr;
 use flambeau_ops::Ops;
+use flambeau_quant::GgmlDType;
+use half::f16;
 
 /// Per-layer weights for the side-channel apply. All F32 on disk;
 /// `post_norm_f16` gets cast to F16 at upload time to match
@@ -126,4 +131,136 @@ impl PerLayerEmbedBlock {
 /// callers that compute per-layer slices outside the forward call.
 pub fn table_slice_ptr(table_base: DevicePtr, il: usize, pe: usize) -> DevicePtr {
     table_base.offset_bytes(il * pe * 4)
+}
+
+/// Host-side build of `inp_per_layer_table` for the current token.
+///
+/// Mirrors llama.cpp's `project_per_layer_inputs` for n_tokens = 1:
+///
+/// ```text
+/// table = dequant(per_layer_token_embd[token]) * sqrt(pe)
+/// proj  = per_layer_model_proj @ inp_batch_f16 * (1 / sqrt(hidden))
+/// proj  = rmsnorm(proj_view[layer, pe], per_layer_proj_norm)   per layer
+/// out   = (table + proj) * (1 / sqrt(2))
+/// ```
+///
+/// `tok_embd_row_raw` is the slice for a single token row of
+/// `per_layer_token_embd` (`pe * n_layer` elements after dequant).
+/// `model_proj_raw` covers the full `[pe * n_layer, hidden]` matrix
+/// (BF16 or F32 on disk). `proj_norm_raw` is the `[pe]` F32 norm
+/// weight. Output layout: layer-major, `out[il * pe + i]`.
+#[allow(clippy::too_many_arguments)]
+pub fn build_inp_per_layer_table(
+    tok_embd_row_raw: &[u8],
+    tok_embd_dtype: GgmlDType,
+    model_proj_raw: &[u8],
+    model_proj_dtype: GgmlDType,
+    proj_norm_raw: &[u8],
+    inp_batch_f16: &[f16],
+    pe: usize,
+    n_layer: usize,
+    hidden: usize,
+    rms_norm_eps: f32,
+) -> Result<Vec<f32>> {
+    if inp_batch_f16.len() != hidden {
+        bail!(
+            "build_inp_per_layer_table: inp_batch len {} != hidden {hidden}",
+            inp_batch_f16.len()
+        );
+    }
+    let total = pe * n_layer;
+
+    let table = if tok_embd_dtype == GgmlDType::F32 {
+        let bytes_needed = total * 4;
+        if tok_embd_row_raw.len() < bytes_needed {
+            bail!(
+                "tok_embd row {} < expected {}",
+                tok_embd_row_raw.len(),
+                bytes_needed
+            );
+        }
+        bytemuck::cast_slice::<u8, f32>(&tok_embd_row_raw[..bytes_needed]).to_vec()
+    } else {
+        flambeau_quant::dequantize_to_vec(tok_embd_dtype, tok_embd_row_raw, total)
+            .map_err(|e| anyhow!("dequant per_layer_token_embd row: {e}"))?
+    };
+    let pe_sqrt = (pe as f32).sqrt();
+    let mut table: Vec<f32> = table.iter().map(|v| *v * pe_sqrt).collect();
+
+    let mut proj = vec![0.0f32; total];
+    match model_proj_dtype {
+        GgmlDType::F32 => {
+            let need = total * hidden * 4;
+            if model_proj_raw.len() < need {
+                bail!(
+                    "per_layer_model_proj {} < expected {}",
+                    model_proj_raw.len(),
+                    need
+                );
+            }
+            let w: &[f32] = bytemuck::cast_slice(&model_proj_raw[..need]);
+            for row in 0..total {
+                let mut acc = 0.0f64;
+                for col in 0..hidden {
+                    acc += (w[row * hidden + col] * inp_batch_f16[col].to_f32()) as f64;
+                }
+                proj[row] = acc as f32;
+            }
+        }
+        GgmlDType::BF16 => {
+            let need = total * hidden * 2;
+            if model_proj_raw.len() < need {
+                bail!(
+                    "per_layer_model_proj {} < expected {}",
+                    model_proj_raw.len(),
+                    need
+                );
+            }
+            let w: &[u16] = bytemuck::cast_slice(&model_proj_raw[..need]);
+            for row in 0..total {
+                let mut acc = 0.0f64;
+                for col in 0..hidden {
+                    let bf = w[row * hidden + col];
+                    let bits = (bf as u32) << 16;
+                    let wv = f32::from_bits(bits);
+                    acc += (wv * inp_batch_f16[col].to_f32()) as f64;
+                }
+                proj[row] = acc as f32;
+            }
+        }
+        other => bail!(
+            "per_layer_model_proj dtype {other:?} not supported (expected F32 or BF16)"
+        ),
+    }
+
+    let inv_sqrt_n = 1.0 / (hidden as f32).sqrt();
+    for v in proj.iter_mut() {
+        *v *= inv_sqrt_n;
+    }
+
+    if proj_norm_raw.len() < pe * 4 {
+        bail!(
+            "per_layer_proj_norm {} < pe*4={}",
+            proj_norm_raw.len(),
+            pe * 4
+        );
+    }
+    let proj_norm: &[f32] = bytemuck::cast_slice(&proj_norm_raw[..pe * 4]);
+    for il in 0..n_layer {
+        let row = &mut proj[il * pe..(il + 1) * pe];
+        let mut ss = 0.0f64;
+        for &v in row.iter() {
+            ss += (v as f64) * (v as f64);
+        }
+        let inv_rms = 1.0 / ((ss / pe as f64).sqrt() + rms_norm_eps as f64);
+        for (i, v) in row.iter_mut().enumerate() {
+            *v = ((*v as f64) * inv_rms * proj_norm[i] as f64) as f32;
+        }
+    }
+
+    let inv_sqrt_2 = 1.0 / 2.0f32.sqrt();
+    for (t, p) in table.iter_mut().zip(proj.iter()) {
+        *t = (*t + *p) * inv_sqrt_2;
+    }
+    Ok(table)
 }

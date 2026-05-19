@@ -9,8 +9,18 @@ pub enum Gemma4V2ConfigError {
     WrongArchitecture { got: Option<String> },
     #[error("token_embd.weight tensor missing — cannot infer vocab size")]
     MissingTokenEmbd,
-    #[error("gemma4-v2 does not yet support variants with per-layer embd (gemma 4n / E2B / E4B): embedding_length_per_layer_input > 0")]
-    PerLayerEmbdUnsupported,
+}
+
+/// Per-layer side-channel embedding dims (gemma 4n / E2B / E4B). When
+/// present, each layer mixes a `[pe]`-wide F32 vector into the
+/// residual stream after the FFN residual add. The vector is
+/// precomputed once per token from `per_layer_token_embd` +
+/// `per_layer_model_proj` (see
+/// `flambeau_blocks::per_layer_embd::build_inp_per_layer_table`).
+#[derive(Debug, Clone, Copy)]
+pub struct PerLayerEmbdDims {
+    /// Per-layer side-channel width (256 on E4B).
+    pub pe: usize,
 }
 
 /// Routed-expert dims for the MoE variant (26B-A4B). Each MoE layer
@@ -54,6 +64,10 @@ pub struct Gemma4V2Config {
     /// parallel; the shared MLP uses `intermediate`, the routed
     /// experts use `moe.moe_intermediate`.
     pub moe: Option<MoeDims>,
+    /// Present iff `gemma4.embedding_length_per_layer_input > 0` (E2B,
+    /// E4B). When set, every layer applies a per-layer side-channel
+    /// embedding block after the FFN residual add.
+    pub per_layer_embd: Option<PerLayerEmbdDims>,
 }
 
 impl Gemma4V2Config {
@@ -73,9 +87,10 @@ impl Gemma4V2Config {
         let opt_u32 = |s: &str| file.metadata_u32(&key(s)).map(|v| v as usize);
         let opt_f32 = |s: &str| file.metadata_f32(&key(s));
 
-        if opt_u32("embedding_length_per_layer_input").unwrap_or(0) > 0 {
-            return Err(Gemma4V2ConfigError::PerLayerEmbdUnsupported);
-        }
+        let per_layer_embd = match opt_u32("embedding_length_per_layer_input") {
+            Some(n) if n > 0 => Some(PerLayerEmbdDims { pe: n }),
+            _ => None,
+        };
         let moe = match opt_u32("expert_count") {
             Some(n) if n > 0 => Some(MoeDims {
                 num_experts: n,
@@ -154,6 +169,7 @@ impl Gemma4V2Config {
             final_logit_softcap,
             tied_lm_head,
             moe,
+            per_layer_embd,
         })
     }
 }

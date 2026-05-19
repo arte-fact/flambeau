@@ -63,6 +63,10 @@ pub struct ScratchConfig {
     /// `kv_caches[li].k/v` is sized `[max_slots, max_seq_len, kv_width]`;
     /// GDN per-layer state + conv_history multiply by `max_slots`.
     pub max_slots: usize,
+    /// Per-layer side-channel embedding width (gemma 4n / E2B / E4B,
+    /// 256 on E4B). `0` when the arch has no per-layer side-channel;
+    /// drives the 6 small F32 / F16 scratch slots for the apply block.
+    pub per_layer_embd: usize,
 }
 
 impl Default for ScratchConfig {
@@ -83,6 +87,7 @@ impl Default for ScratchConfig {
             shared_intermediate: 0,
             max_prefill_tokens: 1,
             max_slots: 1,
+            per_layer_embd: 0,
         }
     }
 }
@@ -180,6 +185,15 @@ pub struct ScratchPool {
     /// `[max_experts_per_tok * hidden]` F32 — indexed down output before combine.
     pub moe_down_f32: DevicePtr,
     pub moe_down_f16: DevicePtr,
+
+    /// Per-layer side-channel embedding scratch (E2B / E4B).
+    /// NULL when `config.per_layer_embd == 0`.
+    pub ple_gate_out_f32: DevicePtr,
+    pub ple_activated_f32: DevicePtr,
+    pub ple_activated_f16: DevicePtr,
+    pub ple_proj_out_f32: DevicePtr,
+    pub ple_proj_out_f16: DevicePtr,
+    pub ple_normed_f16: DevicePtr,
 
     pub kv_caches: Vec<KvCache>,
 
@@ -312,6 +326,37 @@ impl ScratchPool {
             alloc_bytes(n * h * f32)?
         } else {
             DevicePtr::NULL
+        };
+
+        // Per-layer side-channel embedding scratch (gemma 4n / E2B / E4B).
+        // Six small per-token buffers; pe is typically 256 so total is
+        // ~10 KB. Skip alloc when the arch has no per-layer side channel.
+        let pe = config.per_layer_embd;
+        let (
+            ple_gate_out_f32,
+            ple_activated_f32,
+            ple_activated_f16,
+            ple_proj_out_f32,
+            ple_proj_out_f16,
+            ple_normed_f16,
+        ) = if pe > 0 {
+            (
+                alloc_bytes(n * pe * f32)?,
+                alloc_bytes(n * pe * f32)?,
+                alloc_bytes(n * pe * f16)?,
+                alloc_bytes(n * h * f32)?,
+                alloc_bytes(n * h * f16)?,
+                alloc_bytes(n * h * f16)?,
+            )
+        } else {
+            (
+                DevicePtr::NULL,
+                DevicePtr::NULL,
+                DevicePtr::NULL,
+                DevicePtr::NULL,
+                DevicePtr::NULL,
+                DevicePtr::NULL,
+            )
         };
 
         // Batched-decode attention scratch. Per-slot pointer/scalar
@@ -543,6 +588,12 @@ impl ScratchPool {
             moe_activated_q8_1,
             moe_down_f32,
             moe_down_f16,
+            ple_gate_out_f32,
+            ple_activated_f32,
+            ple_activated_f16,
+            ple_proj_out_f32,
+            ple_proj_out_f16,
+            ple_normed_f16,
             kv_caches,
             gdn_state,
             gdn_decode_scratch,

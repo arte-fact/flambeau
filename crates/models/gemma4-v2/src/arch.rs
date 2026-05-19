@@ -95,6 +95,7 @@ impl Arch for Gemma4V2 {
         } else {
             cfg.intermediate / n_ranks
         };
+        let per_layer_embd = cfg.per_layer_embd.map_or(0, |p| p.pe);
         ScratchConfig {
             hidden: cfg.hidden,
             intermediate,
@@ -111,6 +112,7 @@ impl Arch for Gemma4V2 {
             shared_intermediate,
             max_prefill_tokens: prefill_ubatch,
             max_slots,
+            per_layer_embd,
         }
     }
 
