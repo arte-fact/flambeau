@@ -174,6 +174,7 @@ fn load_with_shard(
                     attn_output_name: &output,
                     attn_q_norm_name: Some(&q_norm),
                     attn_k_norm_name: Some(&k_norm),
+                    attn_v_unit_norm: false,
                     n_heads: config.n_heads,
                     n_kv_heads: config.n_kv_heads,
                     head_dim: config.head_dim,

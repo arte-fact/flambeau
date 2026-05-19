@@ -34,6 +34,32 @@ pub fn upload_bytes(
     Ok(ptr)
 }
 
+/// Allocate + upload a `[n]` F16 buffer filled with `1.0`. Used for
+/// gemma4's `v_ones` per-head V-norm weight. Caller adds the
+/// allocation to `allocs` for lifetime tracking via this function.
+pub fn upload_f16_ones(
+    device: &HipDevice,
+    n: usize,
+    allocs: &mut Vec<(DevicePtr, usize)>,
+) -> Result<Tensor<F16>> {
+    let host = vec![f16::ONE; n];
+    let bytes = n * 2;
+    let ptr = device.alloc(bytes).context("alloc F16 ones")?;
+    let stream = device.default_stream();
+    unsafe {
+        device.memcpy_async(
+            stream,
+            CopyDirection::HostToDevice,
+            ptr,
+            DevicePtr(host.as_ptr() as usize),
+            bytes,
+        )?;
+    }
+    flambeau_core::Stream::synchronize(stream).context("sync after f16 ones upload")?;
+    allocs.push((ptr, bytes));
+    Ok(unsafe { Tensor::<F16>::from_raw(ptr, n) })
+}
+
 pub fn upload_f16_from_f32(
     device: &HipDevice,
     f32_vec: &[f32],

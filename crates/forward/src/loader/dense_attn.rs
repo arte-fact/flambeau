@@ -11,7 +11,7 @@ use flambeau_quant::GgufFile;
 
 use crate::ctx::AttnWeights;
 
-use super::primitives::upload_dequant_to_f16;
+use super::primitives::{upload_dequant_to_f16, upload_f16_ones};
 use super::shard::{upload_col, upload_row};
 use super::ShardMode;
 
@@ -28,6 +28,9 @@ pub struct DenseAttnLayerSpec<'a> {
     pub attn_output_name: &'a str,
     pub attn_q_norm_name: Option<&'a str>,
     pub attn_k_norm_name: Option<&'a str>,
+    /// `true` to allocate + upload a `[head_dim]` F16 tensor of ones
+    /// used as the V-norm weight (gemma4 trained behavior).
+    pub attn_v_unit_norm: bool,
     pub n_heads: usize,
     pub n_kv_heads: usize,
     pub head_dim: usize,
@@ -108,6 +111,11 @@ pub fn load_dense_attn_layer(
         .transpose()
         .ok()
         .flatten();
+    let attn_v_unit_norm_w = if spec.attn_v_unit_norm {
+        Some(upload_f16_ones(device, spec.head_dim, allocs)?)
+    } else {
+        None
+    };
 
     Ok(AttnWeights {
         attn_norm,
@@ -118,6 +126,7 @@ pub fn load_dense_attn_layer(
         attn_output,
         attn_q_norm,
         attn_k_norm,
+        attn_v_unit_norm_w,
         n_heads: n_heads_local,
         n_kv_heads: n_kv_heads_local,
         head_dim: spec.head_dim,

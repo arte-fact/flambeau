@@ -23,6 +23,11 @@ pub struct Gemma4V2Model {
     pub attn: Vec<Option<AttnWeights>>,
     pub ffn: Vec<Option<FfnWeights>>,
     pub lm_head: LmHeadWeights,
+    /// Per-layer `blk.N.layer_output_scale.weight` F32 scalar applied
+    /// to the residual after both attn + FFN residuals. `None` when
+    /// the tensor is absent on disk for that layer (older gemma4
+    /// variants might skip it; main-line gemma4 ships one per layer).
+    pub layer_output_scale: Vec<Option<f32>>,
 
     pub(crate) allocs: Vec<(DevicePtr, usize)>,
     pub(crate) device_id: i32,
@@ -87,10 +92,12 @@ fn load_with_shard(
 
     let mut attn = Vec::with_capacity(config.num_layers);
     let mut ffn = Vec::with_capacity(config.num_layers);
+    let mut layer_output_scale: Vec<Option<f32>> = Vec::with_capacity(config.num_layers);
     for li in 0..config.num_layers {
         if !in_range(li) {
             attn.push(None);
             ffn.push(None);
+            layer_output_scale.push(None);
             continue;
         }
         let p = format!("blk.{li}");
@@ -124,6 +131,7 @@ fn load_with_shard(
                 attn_output_name: &output,
                 attn_q_norm_name: Some(&q_norm),
                 attn_k_norm_name: Some(&k_norm),
+                attn_v_unit_norm: true,
                 n_heads: config.num_heads,
                 n_kv_heads,
                 head_dim: dims.head_dim,
@@ -165,6 +173,24 @@ fn load_with_shard(
             shard,
             &mut allocs,
         )?));
+
+        // Per-layer F32 scalar applied after both residuals (gemma4
+        // trained behavior). Tensor is `[1]` F32 on disk; read raw +
+        // reinterpret. Absence = leave as None (legacy treats absent
+        // as scale=1).
+        let scale_name = format!("{p}.layer_output_scale.weight");
+        let scale = if file.info(&scale_name).is_ok() {
+            let raw = file
+                .tensor_raw(&scale_name)
+                .with_context(|| format!("read {scale_name}"))?;
+            if raw.len() < 4 {
+                bail!("{scale_name}: raw len {} < 4", raw.len());
+            }
+            Some(f32::from_le_bytes([raw[0], raw[1], raw[2], raw[3]]))
+        } else {
+            None
+        };
+        layer_output_scale.push(scale);
     }
 
     let lm_head = if owns_lm_head {
@@ -208,6 +234,7 @@ fn load_with_shard(
         attn,
         ffn,
         lm_head,
+        layer_output_scale,
         allocs,
         device_id,
     })

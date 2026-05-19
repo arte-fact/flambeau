@@ -28,6 +28,10 @@ pub fn forward<C: ForwardCtx>(
 
         let delta = ctx.dense_ffn(&resid, ffn_w, n)?;
         resid = ctx.residual_add(resid, delta, n)?;
+
+        if let Some(scale) = model.layer_output_scale[li] {
+            resid = ctx.scale_inplace_f16(resid, scale, n)?;
+        }
     }
     ctx.output_head(&resid, &model.lm_head, slot_ids)?;
     Ok(())

@@ -33,6 +33,16 @@ pub trait ForwardCtx {
         n_tokens: usize,
     ) -> Result<Tensor<F16>>;
 
+    /// Multiply a `[n_tokens, hidden]` F16 buffer by `scale` in place.
+    /// Used for gemma4's per-layer `layer_output_scale` applied to the
+    /// residual after both attention + FFN residuals.
+    fn scale_inplace_f16(
+        &mut self,
+        buf: Tensor<F16>,
+        scale: f32,
+        n_tokens: usize,
+    ) -> Result<Tensor<F16>>;
+
     /// `positions[i]` is the KV write row for `tokens[i]`; `slot_ids[i]`
     /// is the inflight-slot index whose KV slab receives that write.
     /// Single decode: positions=[pos], slot_ids=[0]. Prefill chunk:
@@ -191,6 +201,11 @@ pub struct AttnWeights {
     pub attn_output: QuantWeight,
     pub attn_q_norm: Option<Tensor<F16>>,
     pub attn_k_norm: Option<Tensor<F16>>,
+    /// Optional unit-weights F16 tensor sized `[head_dim]`. When
+    /// `Some`, the V tensor receives per-head `rmsnorm_f16(V, ones)`
+    /// before the attention compute. Gemma4 trained this in; legacy
+    /// allocates an equivalent `v_ones_f16` scratch.
+    pub attn_v_unit_norm_w: Option<Tensor<F16>>,
     pub n_heads: usize,
     pub n_kv_heads: usize,
     pub head_dim: usize,

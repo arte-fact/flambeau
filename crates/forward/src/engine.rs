@@ -428,6 +428,21 @@ impl<H: TopologyHooks, S: StageHooks> ForwardCtx for ForwardEngine<'_, H, S> {
         composites::residual_add_local(&mut self.core, &mut self.hooks, a, b, n_tokens)
     }
 
+    fn scale_inplace_f16(
+        &mut self,
+        buf: Tensor<F16>,
+        scale: f32,
+        n_tokens: usize,
+    ) -> Result<Tensor<F16>> {
+        let hidden = self.core.hidden();
+        let ops = self.core.ops();
+        let n_elems = n_tokens * hidden;
+        let buf_in = unsafe { Tensor::<F16>::from_raw(buf.ptr, n_elems) };
+        let mut buf_out = unsafe { Tensor::<F16>::from_raw(buf.ptr, n_elems) };
+        flambeau_model_ops::scale_f16(&buf_in, &mut buf_out, n_elems, scale, &ops)?;
+        Ok(buf)
+    }
+
     fn standard_attn(
         &mut self,
         input: &Tensor<F16>,

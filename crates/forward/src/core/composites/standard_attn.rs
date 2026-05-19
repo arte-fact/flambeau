@@ -195,6 +195,37 @@ pub fn standard_attn_local<H: TopologyHooks>(
     }
     let _ = q_f32_buf;
 
+    // Per-head V unit-weights rmsnorm (gemma4 trained behavior). The
+    // legacy stack does this via a scratch.v_ones_f16 vector; v2 reuses
+    // attn_out_f16 as the tmp and writes back to v_f16. Applied AFTER
+    // V is materialised (both V-from-K and explicit V-proj paths).
+    if let Some(v_unit_w) = weights.attn_v_unit_norm_w.as_ref() {
+        let v_in = unsafe { Tensor::<F16>::from_raw(state.pool.v_f16, n * kv_width) };
+        let mut v_tmp = unsafe { Tensor::<F16>::from_raw(state.pool.attn_out_f16, n * kv_width) };
+        flambeau_model_ops::rmsnorm_f16(
+            &v_in,
+            v_unit_w,
+            &mut v_tmp,
+            n * weights.n_kv_heads,
+            weights.head_dim,
+            weights.rms_eps,
+            &ops,
+        )?;
+        let bytes = n * kv_width * 2;
+        unsafe {
+            state
+                .device
+                .memcpy_async(
+                    state.stream,
+                    CopyDirection::DeviceToDevice,
+                    state.pool.v_f16,
+                    v_tmp.ptr,
+                    bytes,
+                )
+                .context("standard_attn: v_unit_norm DtoD copy back")?;
+        }
+    }
+
     // Per-head Q/K norm over (n_tokens * n_heads) rows of head_dim.
     if let Some(q_norm_w) = weights.attn_q_norm.as_ref() {
         let q_normed = unsafe { Tensor::<F16>::from_raw(state.pool.q_f16, n * q_width) };
