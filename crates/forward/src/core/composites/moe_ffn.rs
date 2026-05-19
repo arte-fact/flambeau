@@ -377,41 +377,42 @@ fn moe_ffn_loop<H: TopologyHooks>(
             );
         }
         let shared_block = build_shared_expert_block(sh, hidden)?;
-        let row_bytes = hidden * 2;
-        for t in 0..n_tokens {
-            let x_row = x_norm_f16_ptr.offset_bytes(t * row_bytes);
-            let shared_view = flambeau_blocks::SharedExpertDecodeScratch {
-                x_q8_1: state.pool.norm_q8_1,
-                gate_f32: state.pool.gate_f32,
-                up_f32: state.pool.up_f32,
-                activated_f16: state.pool.gated_f16,
-                activated_q8_1: state.pool.gated_q8_1,
-                down_f32: state.pool.down_f32,
-                x_norm_f32: state.pool.shared_x_norm_f32,
-            };
-            let shared_out = state.pool.q_f16;
-            shared_block.forward_decode(&ops, x_row, shared_out, shared_view)?;
-            // TP: cast shared_out F16→F32, ar_sum_f32, cast back. No-op
-            // on SD/PP. Same pattern as decode path above.
-            let shared_t = unsafe { Tensor::<F16>::from_raw(shared_out, hidden) };
-            let mut shared_f32 =
-                unsafe { Tensor::<F32>::from_raw(state.pool.attn_proj_f32, hidden) };
-            flambeau_model_ops::cast_f16_to_f32(&shared_t, &mut shared_f32, hidden, &ops)?;
-            hooks.ar_sum_f32(shared_f32.ptr, hidden, state.device, state.stream)?;
-            let mut shared_synced = unsafe { Tensor::<F16>::from_raw(shared_out, hidden) };
-            flambeau_model_ops::cast_f32_to_f16(&shared_f32, &mut shared_synced, hidden, &ops)?;
-            let shared_t_synced = unsafe { Tensor::<F16>::from_raw(shared_out, hidden) };
-            let delta_row = state.pool.delta.offset_bytes(t * row_bytes);
-            let delta_t_in = unsafe { Tensor::<F16>::from_raw(delta_row, hidden) };
-            let mut delta_t_out = unsafe { Tensor::<F16>::from_raw(delta_row, hidden) };
-            flambeau_model_ops::add_f16(
-                &delta_t_in,
-                &shared_t_synced,
-                &mut delta_t_out,
-                hidden,
-                &ops,
-            )?;
-        }
+        let shared_out = state.pool.q_f16;
+        let shared_view = flambeau_blocks::SharedExpertPrefillScratch {
+            max_tokens: state.pool.config.max_prefill_tokens,
+            x_q8_1: state.pool.norm_q8_1,
+            gate_f32: state.pool.gate_f32,
+            up_f32: state.pool.up_f32,
+            activated_f16: state.pool.gated_f16,
+            activated_q8_1: state.pool.gated_q8_1,
+            down_f32: state.pool.down_f32,
+            x_norm_f32: state.pool.shared_x_norm_f32,
+        };
+        shared_block.forward_prefill(&ops, x_norm_f16_ptr, shared_out, n_tokens, shared_view)?;
+        // Single batched AR over the whole [n_tokens, hidden] partial,
+        // not n_tokens scalar ARs. Same cast-up / AR / cast-back
+        // pattern as the per-token decode path.
+        let shared_all = unsafe { Tensor::<F16>::from_raw(shared_out, n_tokens * hidden) };
+        let mut shared_f32 = unsafe {
+            Tensor::<F32>::from_raw(state.pool.attn_proj_f32, n_tokens * hidden)
+        };
+        flambeau_model_ops::cast_f16_to_f32(&shared_all, &mut shared_f32, n_tokens * hidden, &ops)?;
+        hooks.ar_sum_f32(shared_f32.ptr, n_tokens * hidden, state.device, state.stream)?;
+        let mut shared_synced =
+            unsafe { Tensor::<F16>::from_raw(shared_out, n_tokens * hidden) };
+        flambeau_model_ops::cast_f32_to_f16(&shared_f32, &mut shared_synced, n_tokens * hidden, &ops)?;
+        let shared_view_f16 =
+            unsafe { Tensor::<F16>::from_raw(shared_out, n_tokens * hidden) };
+        let delta_in = unsafe { Tensor::<F16>::from_raw(state.pool.delta, n_tokens * hidden) };
+        let mut delta_out =
+            unsafe { Tensor::<F16>::from_raw(state.pool.delta, n_tokens * hidden) };
+        flambeau_model_ops::add_f16(
+            &delta_in,
+            &shared_view_f16,
+            &mut delta_out,
+            n_tokens * hidden,
+            &ops,
+        )?;
     }
 
     let _ = (act_mmq_null, gate_dt, up_dt, down_dt, router_dt);
