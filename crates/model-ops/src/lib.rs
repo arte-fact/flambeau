@@ -29,7 +29,7 @@ pub use ops::kv_append::kv_append_f16;
 pub use ops::moe_router::topk_f32 as moe_router_topk_f32;
 pub use ops::qmatmul::{qmatmul_q4_0, qmatmul_q4_1, qmatmul_q5_0, qmatmul_q5_1, qmatmul_q8_0};
 pub use ops::quantize::{quantize_f16_to_q8_1, quantize_f16_to_q8_1_mmq, quantize_f32_to_q8_1};
-pub use ops::rmsnorm::{rmsnorm_f16, rmsnorm_f32, rmsnorm_quant_q8_1};
+pub use ops::rmsnorm::{rmsnorm_f16, rmsnorm_f32, rmsnorm_f32_to_f16, rmsnorm_quant_q8_1};
 pub use ops::rope::{rope_f16, rope_neox_partial_f16};
 pub use ops::scale::scale_f16;
 pub use ops::softcap::apply_softcap_f32;

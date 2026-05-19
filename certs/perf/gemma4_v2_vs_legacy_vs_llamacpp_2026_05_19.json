@@ -1,0 +1,45 @@
+{
+  "timestamp": "2026-05-19T14:28:55Z",
+  "tg": 128,
+  "results": [
+    {
+      "case": "gemma4-31B-Q8_0-pp4",
+      "stack": "flambeau-v2",
+      "label": "flambeau-v2__gemma4-31B-Q8_0-pp4",
+      "err": "process exited",
+      "prompt_tokens": 0,
+      "completion_tokens": 0,
+      "ttft_ms": 0.0,
+      "decode_ms": 0.0,
+      "decode_tps": 0.0,
+      "prefill_tps": 0.0,
+      "text_head": ""
+    },
+    {
+      "case": "gemma4-31B-Q8_0-pp4",
+      "stack": "flambeau-legacy",
+      "label": "flambeau-legacy__gemma4-31B-Q8_0-pp4",
+      "err": "process exited",
+      "prompt_tokens": 0,
+      "completion_tokens": 0,
+      "ttft_ms": 0.0,
+      "decode_ms": 0.0,
+      "decode_tps": 0.0,
+      "prefill_tps": 0.0,
+      "text_head": ""
+    },
+    {
+      "case": "gemma4-31B-Q8_0-pp4",
+      "stack": "llama.cpp",
+      "label": "llama.cpp__gemma4-31B-Q8_0-pp4",
+      "err": null,
+      "prompt_tokens": 702,
+      "completion_tokens": 125,
+      "ttft_ms": 7167.783975601196,
+      "decode_ms": 7879.66775894165,
+      "decode_tps": 15.7367041090391,
+      "prefill_tps": 97.9382194538194,
+      "text_head": "Senior Compiler Engineer at a GPU vendor.\nModern AMD GPUs (CDNA-1 / gfx906).\n`V_"
+    }
+  ]
+}

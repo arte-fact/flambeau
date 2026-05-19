@@ -163,6 +163,14 @@ pub fn standard_attn_local<H: TopologyHooks>(
             weights.head_dim,
             &ops,
         )?;
+    } else if n == 1 && weights.attn_q.supports_decode_to_f16() {
+        // Decode F16-direct: skip the qmatmul→F32→cast pair, write Q
+        // straight to the F16 KV-cache-shape buffer via mmvq's
+        // saturating F16 cast. No AR on attn_q (TP col-shards heads).
+        let mut q_f16 = unsafe { Tensor::<F16>::from_raw(state.pool.q_f16, n * q_width) };
+        weights
+            .attn_q
+            .qmatmul_decode_to_f16(&norm_q8_1, &mut q_f16, hidden, q_width, &ops)?;
     } else {
         let mut q_f32 = unsafe { Tensor::<F32>::from_raw(q_f32_buf, n * q_width) };
         weights
@@ -172,18 +180,30 @@ pub fn standard_attn_local<H: TopologyHooks>(
         flambeau_model_ops::cast_f32_to_f16(&q_f32, &mut q_f16, n * q_width, &ops)?;
     }
 
-    let mut k_f32 = unsafe { Tensor::<F32>::from_raw(q_f32_buf, n * kv_width) };
-    weights
-        .attn_k
-        .qmatmul(&norm_q8_1, act_norm_mmq, &mut k_f32, n, hidden, kv_width, &ops)?;
-    let mut k_f16 = unsafe { Tensor::<F16>::from_raw(state.pool.k_f16, n * kv_width) };
-    flambeau_model_ops::cast_f32_to_f16(&k_f32, &mut k_f16, n * kv_width, &ops)?;
+    if n == 1 && weights.attn_k.supports_decode_to_f16() {
+        let mut k_f16 = unsafe { Tensor::<F16>::from_raw(state.pool.k_f16, n * kv_width) };
+        weights
+            .attn_k
+            .qmatmul_decode_to_f16(&norm_q8_1, &mut k_f16, hidden, kv_width, &ops)?;
+    } else {
+        let mut k_f32 = unsafe { Tensor::<F32>::from_raw(q_f32_buf, n * kv_width) };
+        weights
+            .attn_k
+            .qmatmul(&norm_q8_1, act_norm_mmq, &mut k_f32, n, hidden, kv_width, &ops)?;
+        let mut k_f16 = unsafe { Tensor::<F16>::from_raw(state.pool.k_f16, n * kv_width) };
+        flambeau_model_ops::cast_f32_to_f16(&k_f32, &mut k_f16, n * kv_width, &ops)?;
+    }
 
     if let Some(v_w) = weights.attn_v.as_ref() {
-        let mut v_f32 = unsafe { Tensor::<F32>::from_raw(q_f32_buf, n * kv_width) };
-        v_w.qmatmul(&norm_q8_1, act_norm_mmq, &mut v_f32, n, hidden, kv_width, &ops)?;
-        let mut v_f16 = unsafe { Tensor::<F16>::from_raw(state.pool.v_f16, n * kv_width) };
-        flambeau_model_ops::cast_f32_to_f16(&v_f32, &mut v_f16, n * kv_width, &ops)?;
+        if n == 1 && v_w.supports_decode_to_f16() {
+            let mut v_f16 = unsafe { Tensor::<F16>::from_raw(state.pool.v_f16, n * kv_width) };
+            v_w.qmatmul_decode_to_f16(&norm_q8_1, &mut v_f16, hidden, kv_width, &ops)?;
+        } else {
+            let mut v_f32 = unsafe { Tensor::<F32>::from_raw(q_f32_buf, n * kv_width) };
+            v_w.qmatmul(&norm_q8_1, act_norm_mmq, &mut v_f32, n, hidden, kv_width, &ops)?;
+            let mut v_f16 = unsafe { Tensor::<F16>::from_raw(state.pool.v_f16, n * kv_width) };
+            flambeau_model_ops::cast_f32_to_f16(&v_f32, &mut v_f16, n * kv_width, &ops)?;
+        }
     } else {
         // Gemma4 V-from-K: V = K (no separate projection).
         let bytes = n * kv_width * 2;
@@ -644,13 +664,13 @@ pub fn standard_attn_local<H: TopologyHooks>(
         return Ok(None);
     }
     hooks.ar_sum_f32(proj_f32.ptr, n * hidden, state.device, state.stream)?;
-    let mut delta = unsafe { Tensor::<F16>::from_raw(state.pool.delta, n * hidden) };
-    flambeau_model_ops::cast_f32_to_f16(&proj_f32, &mut delta, n * hidden, &ops)?;
+    let delta = unsafe { Tensor::<F16>::from_raw(state.pool.delta, n * hidden) };
     if let Some(post_norm) = weights.post_attn_norm.as_ref() {
-        let delta_in = unsafe { Tensor::<F16>::from_raw(state.pool.delta, n * hidden) };
+        // Fused F32→F16 + rmsnorm: skip the cast_f32_to_f16 launch and
+        // do the post-norm in one pass over the row.
         let mut delta_out = unsafe { Tensor::<F16>::from_raw(state.pool.delta, n * hidden) };
-        flambeau_model_ops::rmsnorm_f16(
-            &delta_in,
+        flambeau_model_ops::rmsnorm_f32_to_f16(
+            &proj_f32,
             post_norm,
             &mut delta_out,
             n,
@@ -658,6 +678,9 @@ pub fn standard_attn_local<H: TopologyHooks>(
             weights.rms_eps,
             &ops,
         )?;
+    } else {
+        let mut delta_mut = unsafe { Tensor::<F16>::from_raw(state.pool.delta, n * hidden) };
+        flambeau_model_ops::cast_f32_to_f16(&proj_f32, &mut delta_mut, n * hidden, &ops)?;
     }
     Ok(Some(delta))
 }

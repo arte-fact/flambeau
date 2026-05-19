@@ -163,13 +163,12 @@ pub fn dense_ffn_local<H: TopologyHooks>(
         return Ok(None);
     }
     hooks.ar_sum_f32(down_f32.ptr, n * hidden, state.device, state.stream)?;
-    let mut delta = unsafe { Tensor::<F16>::from_raw(state.pool.delta, n * hidden) };
-    flambeau_model_ops::cast_f32_to_f16(&down_f32, &mut delta, n * hidden, &ops)?;
+    let delta = unsafe { Tensor::<F16>::from_raw(state.pool.delta, n * hidden) };
     if let Some(post_norm) = weights.post_ffn_norm.as_ref() {
-        let delta_in = unsafe { Tensor::<F16>::from_raw(state.pool.delta, n * hidden) };
+        // Fused F32→F16 + rmsnorm: skip the cast_f32_to_f16 launch.
         let mut delta_out = unsafe { Tensor::<F16>::from_raw(state.pool.delta, n * hidden) };
-        flambeau_model_ops::rmsnorm_f16(
-            &delta_in,
+        flambeau_model_ops::rmsnorm_f32_to_f16(
+            &down_f32,
             post_norm,
             &mut delta_out,
             n,
@@ -177,6 +176,9 @@ pub fn dense_ffn_local<H: TopologyHooks>(
             weights.rms_eps,
             &ops,
         )?;
+    } else {
+        let mut delta_mut = unsafe { Tensor::<F16>::from_raw(state.pool.delta, n * hidden) };
+        flambeau_model_ops::cast_f32_to_f16(&down_f32, &mut delta_mut, n * hidden, &ops)?;
     }
     Ok(Some(delta))
 }

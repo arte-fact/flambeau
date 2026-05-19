@@ -377,6 +377,18 @@ pub trait Ops {
         eps: f32,
     ) -> Result<()>;
 
+    /// F32-in / F16-out fused RMSNorm. Replaces `cast_f32_to_f16 →
+    /// rmsnorm_f16` for the gemma4 post-attn / post-ffn norm site.
+    fn rmsnorm_f32_to_f16(
+        &self,
+        x_f32: DevicePtr,
+        weight_f16: DevicePtr,
+        y_f16: DevicePtr,
+        m: usize,
+        k: usize,
+        eps: f32,
+    ) -> Result<()>;
+
     fn l2_norm_f32(
         &self,
         x: DevicePtr,

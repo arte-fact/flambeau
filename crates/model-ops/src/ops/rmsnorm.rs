@@ -41,6 +41,42 @@ pub fn rmsnorm_f16(
     ops.rmsnorm_f16(input.ptr, weight.ptr, output.ptr, n_rows, hidden, eps)
 }
 
+/// Fused F32-in / F16-out RMSNorm. Saves one launch + one HBM pass at
+/// gemma4's post-attn / post-ffn norm site where the AR sum produces
+/// F32 and the residual is F16. Weight is F16.
+pub fn rmsnorm_f32_to_f16(
+    input: &Tensor<F32>,
+    weight: &Tensor<F16>,
+    output: &mut Tensor<F16>,
+    n_rows: usize,
+    hidden: usize,
+    eps: f32,
+    ops: &HipOps<'_>,
+) -> Result<()> {
+    let need = n_rows * hidden;
+    if input.n_elems < need {
+        bail!(
+            "rmsnorm_f32_to_f16: input has {} F32 elems, need >= {} ({n_rows}*{hidden})",
+            input.n_elems,
+            need
+        );
+    }
+    if weight.n_elems < hidden {
+        bail!(
+            "rmsnorm_f32_to_f16: weight has {} F16 elems, need >= {hidden}",
+            weight.n_elems
+        );
+    }
+    if output.n_elems < need {
+        bail!(
+            "rmsnorm_f32_to_f16: output has {} F16 elems, need >= {}",
+            output.n_elems,
+            need
+        );
+    }
+    ops.rmsnorm_f32_to_f16(input.ptr, weight.ptr, output.ptr, n_rows, hidden, eps)
+}
+
 /// F32 variant — for the MoE F32 cascade and gemma4's F32-output
 /// attention path (F16 overflows the row-parallel hidden sum at
 /// head_dim ≥ 256).

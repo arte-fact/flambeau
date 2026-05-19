@@ -156,6 +156,39 @@ pub fn rmsnorm_f32(
     Ok(())
 }
 
+/// F32-in / F16-out fused RMSNorm. Replaces the `cast_f32_to_f16 +
+/// rmsnorm_f16` two-launch pair at gemma4's post-attn / post-ffn norm
+/// site (caller still owns AR + residual_add). Reads F32 input, F16
+/// weight, writes F16 output in one pass.
+pub fn rmsnorm_f32_to_f16(
+    reg: &OpsRegistry,
+    stream: &HipStream,
+    x: DevicePtr,
+    weight: DevicePtr,
+    y: DevicePtr,
+    m: usize,
+    k: usize,
+    eps: f32,
+) -> Result<()> {
+    let module = reg.expect_module("rmsnorm_f32_to_f16")?;
+    let kernel = module.kernel("flambeau_rmsnorm_f32_to_f16")?;
+    let m_i = m as i32;
+    let k_i = k as i32;
+    let x_ptr: u64 = x.as_usize() as u64;
+    let w_ptr: u64 = weight.as_usize() as u64;
+    let y_ptr: u64 = y.as_usize() as u64;
+    let mut args = KernelArgs::new();
+    args.push(&x_ptr);
+    args.push(&w_ptr);
+    args.push(&y_ptr);
+    args.push(&m_i);
+    args.push(&k_i);
+    args.push(&eps);
+    let cfg = LaunchCfg::one_d(m as u32, 256);
+    unsafe { kernel.launch(stream, cfg, args)? };
+    Ok(())
+}
+
 /// L2 normalization along the last dimension. `y[i] = x[i] / sqrt(sum(x^2) + eps)`.
 /// F32 in/out. Used by GDN on Q and K before the recurrent state update.
 /// Launch: one block/row, 256 threads.
