@@ -18,11 +18,28 @@
 use std::sync::{Arc, Barrier};
 
 use anyhow::{anyhow, Context, Result};
+use flambeau_backend_hip::{BarP2pAllReduce, HipCluster};
 use flambeau_quant::GgufFile;
 
-use super::ar::{new_peer_buffer, ArCoordinator};
+use super::ar::{new_peer_buffer, ArCoordinator, BarArCoordinator};
 use super::workers::{WorkerHandle, WorkerRole};
 use super::{Arch, Topology};
+
+/// Build a BAR1 P2P AR coordinator for a TP cluster, if peer-access
+/// permits. Returns `None` on partial peer-access matrices, missing
+/// hsaco, or BAR1-incompatible topologies — callers fall back to the
+/// host-bounce coordinator.
+fn try_build_bar_ar(devices: &[i32]) -> Option<Arc<BarArCoordinator>> {
+    if devices.len() < 2 {
+        return None;
+    }
+    let cluster = Arc::new(HipCluster::new(devices).ok()?);
+    if !cluster.peer_access_full() {
+        return None;
+    }
+    let bar = Arc::new(BarP2pAllReduce::new(Arc::clone(&cluster)).ok()?);
+    Some(Arc::new(BarArCoordinator::new(bar)))
+}
 
 pub fn launch<A: Arch>(
     file: GgufFile,
@@ -81,12 +98,14 @@ fn launch_tp<A: Arch>(
 ) -> Result<Vec<WorkerHandle<A>>> {
     let n = devices.len();
     let ar = Arc::new(ArCoordinator::new(n));
+    let bar = try_build_bar_ar(devices);
     let mut handles = Vec::with_capacity(n);
     for (rank, &dev) in devices.iter().enumerate() {
         let role = WorkerRole::Tp {
             rank,
             n_ranks: n,
             ar: Arc::clone(&ar),
+            bar: bar.as_ref().map(Arc::clone),
         };
         handles.push(
             WorkerHandle::<A>::spawn(dev, role, Arc::clone(&file), ctx_cap, prefill_ubatch, max_slots)
@@ -180,6 +199,7 @@ fn launch_hybrid<A: Arch>(
     for (stage_idx, ranks) in stages.iter().enumerate() {
         let tp_size = ranks.len();
         let ar = Arc::new(ArCoordinator::new(tp_size));
+        let bar = try_build_bar_ar(ranks);
         let (layer_start, layer_end) = if !split.is_empty() {
             let s = layer_cursor;
             let count = split[stage_idx];
@@ -197,6 +217,7 @@ fn launch_hybrid<A: Arch>(
                 layer_start,
                 layer_end,
                 ar: Arc::clone(&ar),
+                bar: bar.as_ref().map(Arc::clone),
                 peer_buffer: Arc::clone(&peer),
                 handoff: Arc::clone(&handoff),
             };

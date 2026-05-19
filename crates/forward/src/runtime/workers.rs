@@ -20,7 +20,9 @@ use crate::engine::{HybridForwardCtx, PpForwardCtx, SingleDeviceForwardCtx, TpFo
 use crate::loader::ShardMode;
 use crate::ForwardCtx;
 
-use super::ar::{make_ar_callback, ArCoordinator, PeerBuffer};
+use super::ar::{
+    make_ar_callback, make_bar_ar_callback, ArCoordinator, BarArCoordinator, PeerBuffer,
+};
 use super::Arch;
 
 /// Per-rank role + the inter-thread state needed to construct the
@@ -31,6 +33,7 @@ pub enum WorkerRole {
         rank: usize,
         n_ranks: usize,
         ar: Arc<ArCoordinator>,
+        bar: Option<Arc<BarArCoordinator>>,
     },
     Pp {
         rank: usize,
@@ -47,6 +50,7 @@ pub enum WorkerRole {
         layer_start: usize,
         layer_end: usize,
         ar: Arc<ArCoordinator>,
+        bar: Option<Arc<BarArCoordinator>>,
         peer_buffer: PeerBuffer,
         handoff: Arc<Barrier>,
     },
@@ -310,11 +314,16 @@ fn run_forward_once<A: Arch>(
             A::forward(&state.model, &mut ctx, tokens, positions, slot_ids)?;
             Ok(ctx.logits().to_vec())
         }
-        WorkerRole::Tp { rank, n_ranks, ar } => {
+        WorkerRole::Tp { rank, n_ranks, ar, bar } => {
+            let ar_callback = if let Some(bc) = bar {
+                make_bar_ar_callback(Arc::clone(bc), *rank)
+            } else {
+                make_ar_callback(Arc::clone(ar), *rank)
+            };
             let hooks = TpHooks {
                 rank: *rank,
                 n_ranks: *n_ranks,
-                ar_callback: make_ar_callback(Arc::clone(ar), *rank),
+                ar_callback,
             };
             let mut ctx = TpForwardCtx::new(
                 &state.device,
@@ -358,9 +367,15 @@ fn run_forward_once<A: Arch>(
             layer_start,
             layer_end,
             ar,
+            bar,
             peer_buffer,
             handoff,
         } => {
+            let ar_callback = if let Some(bc) = bar {
+                make_bar_ar_callback(Arc::clone(bc), *rank_in_stage)
+            } else {
+                make_ar_callback(Arc::clone(ar), *rank_in_stage)
+            };
             let mut ctx = HybridForwardCtx::new(
                 &state.device,
                 stream,
@@ -372,7 +387,7 @@ fn run_forward_once<A: Arch>(
                 *tp_size,
                 *layer_start,
                 *layer_end,
-                make_ar_callback(Arc::clone(ar), *rank_in_stage),
+                ar_callback,
                 Arc::clone(peer_buffer),
                 Arc::clone(handoff),
             );

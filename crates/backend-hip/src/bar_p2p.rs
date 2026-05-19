@@ -655,6 +655,74 @@ impl BarP2pAllReduce {
         Ok(())
     }
 
+    /// Rank-local F32 AllReduce-sum for TP=2. Each rank's worker
+    /// calls this for its own rank; caller exchanges peer pointers via
+    /// an out-of-band barrier and sync-drains the producer stream
+    /// before invocation (see `feedback_bar_p2p_sum_write_target`).
+    /// # Safety
+    /// - `partial_local` is on `rank`'s device and valid for
+    ///   `elem_count` F32 elements.
+    /// - `peer` is on the other rank's device, mapped via BAR1, and
+    ///   valid for `elem_count` F32 elements.
+    /// - Producer writes to BOTH partials have been ordered against
+    ///   `stream` (typically `Stream::synchronize` on every rank
+    ///   before all-ranks-publish-then-launch).
+    pub unsafe fn sum_tp2_f32_rank(
+        &self,
+        rank: usize,
+        partial_local: DevicePtr,
+        peer: DevicePtr,
+        elem_count: u32,
+        stream: &HipStream,
+    ) -> DeviceResult<()> {
+        self.expect_ranks(2)?;
+        let cfg = launch_cfg_for(ArKind::SumTp2F32, elem_count);
+        // SAFETY: forwarded from public-method contract.
+        unsafe {
+            self.launch_one(
+                ArKind::SumTp2F32,
+                rank,
+                cfg,
+                stream,
+                ArArgs::Sum {
+                    partial_local,
+                    peers: [peer, DevicePtr(0), DevicePtr(0)],
+                },
+                elem_count,
+            )
+        }
+    }
+
+    /// Rank-local F32 AllReduce-sum for TP=4. Caller exchanges all
+    /// three peer pointers out-of-band.
+    /// # Safety
+    /// Same per-pointer + ordering contract as [`Self::sum_tp2_f32_rank`].
+    pub unsafe fn sum_tp4_f32_rank(
+        &self,
+        rank: usize,
+        partial_local: DevicePtr,
+        peers: [DevicePtr; 3],
+        elem_count: u32,
+        stream: &HipStream,
+    ) -> DeviceResult<()> {
+        self.expect_ranks(4)?;
+        let cfg = launch_cfg_for(ArKind::SumTp4F32, elem_count);
+        // SAFETY: forwarded from public-method contract.
+        unsafe {
+            self.launch_one(
+                ArKind::SumTp4F32,
+                rank,
+                cfg,
+                stream,
+                ArArgs::Sum {
+                    partial_local,
+                    peers,
+                },
+                elem_count,
+            )
+        }
+    }
+
     fn expect_ranks(&self, expected: usize) -> DeviceResult<()> {
         if self.cluster.ranks() == expected {
             Ok(())
