@@ -1,5 +1,5 @@
 {
-  "timestamp": "2026-05-19T21:57:12Z",
+  "timestamp": "2026-05-19T22:31:10Z",
   "tg": 128,
   "results": [
     {
@@ -9,10 +9,10 @@
       "err": null,
       "prompt_tokens": 725,
       "completion_tokens": 128,
-      "ttft_ms": 1310.5885982513428,
-      "decode_ms": 2545.075614277909,
-      "decode_tps": 49.9002855897594,
-      "prefill_tps": 553.1865613414718,
+      "ttft_ms": 1440.232515335083,
+      "decode_ms": 2504.619703060243,
+      "decode_tps": 50.70630077884734,
+      "prefill_tps": 503.3909401992096,
       "text_head": "\n### Technical Memorandum: High-Performance Integer Arithmetic via `V_DOT4_I32_I"
     },
     {
@@ -35,10 +35,10 @@
       "err": null,
       "prompt_tokens": 702,
       "completion_tokens": 125,
-      "ttft_ms": 1724.736213684082,
-      "decode_ms": 2238.3384704589844,
-      "decode_tps": 55.39823473371884,
-      "prefill_tps": 407.01876288693995,
+      "ttft_ms": 1458.336353302002,
+      "decode_ms": 1909.2764854431152,
+      "decode_tps": 64.94606776200955,
+      "prefill_tps": 481.3704317323736,
       "text_head": "Senior Compiler Engineer at a large GPU vendor.\nExhaustive technical explanation"
     }
   ]
