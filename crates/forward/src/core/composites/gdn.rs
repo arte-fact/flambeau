@@ -35,6 +35,7 @@ pub fn gdn_layer_local<H: TopologyHooks>(
     weights: &GdnWeights,
     layer_idx: usize,
     slot_ids: &[usize],
+    next_norm: Option<&Tensor<F16>>,
 ) -> Result<Option<Tensor<F16>>> {
     state.pool.input_pre_normed = false;
     let hidden = state.hidden();
@@ -135,6 +136,48 @@ pub fn gdn_layer_local<H: TopologyHooks>(
             .as_ref()
             .ok_or_else(|| anyhow::anyhow!("gdn_layer: pool not configured with GDN dims"))?
             .view();
+        let fused_path = n_tokens == 1 && hooks.supports_ar_residual_f16();
+        if fused_path {
+            let slot = slot_ids[0];
+            let state_i = layer_state.state.offset_bytes(slot * state_bytes_per_slot);
+            let hist_i = layer_state.conv_history.offset_bytes(slot * hist_bytes_per_slot);
+            block.forward_decode_with_ar_hook(
+                &ops,
+                state.device,
+                state.stream,
+                input.ptr,
+                delta_ptr,
+                state_i,
+                hist_i,
+                scratch,
+                None,
+            )?;
+            let fuse_norm =
+                next_norm.is_some() && hooks.supports_ar_residual_rmsnorm_f16();
+            if fuse_norm {
+                let next_w = next_norm.unwrap();
+                hooks.ar_residual_rmsnorm_f16(
+                    input.ptr,
+                    delta_ptr,
+                    next_w.ptr,
+                    state.pool.norm,
+                    hidden,
+                    weights.rms_eps,
+                    state.device,
+                    state.stream,
+                )?;
+                state.pool.input_pre_normed = true;
+            } else {
+                hooks.ar_residual_f16(
+                    input.ptr,
+                    delta_ptr,
+                    hidden,
+                    state.device,
+                    state.stream,
+                )?;
+            }
+            return Ok(None);
+        }
         let mut ar_cb =
             |buf: DevicePtr, n_elems: usize, dev: &HipDevice, stm: &HipStream| -> Result<()> {
                 hooks.ar_sum_f32(buf, n_elems, dev, stm)

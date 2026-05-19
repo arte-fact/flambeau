@@ -595,7 +595,7 @@ impl<H: TopologyHooks, S: StageHooks> ForwardCtx for ForwardEngine<'_, H, S> {
         weights: &crate::ctx::GdnWeights,
         layer_idx: usize,
         slot_ids: &[usize],
-        _next_norm: Option<&Tensor<F16>>,
+        next_norm: Option<&Tensor<F16>>,
     ) -> Result<Option<Tensor<F16>>> {
         composites::gdn_layer_local(
             &mut self.core,
@@ -604,6 +604,7 @@ impl<H: TopologyHooks, S: StageHooks> ForwardCtx for ForwardEngine<'_, H, S> {
             weights,
             layer_idx,
             slot_ids,
+            next_norm,
         )
     }
 
