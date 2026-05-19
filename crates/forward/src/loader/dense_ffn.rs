@@ -15,6 +15,10 @@ use super::ShardMode;
 
 pub struct DenseFfnLayerSpec<'a> {
     pub ffn_norm_name: &'a str,
+    /// Optional name of the F16 norm tensor applied to the FFN delta
+    /// BEFORE the outer residual add. Gemma4 sets this to
+    /// `post_ffw_norm.weight`; other arches pass `None`.
+    pub post_ffn_norm_name: Option<&'a str>,
     pub ffn_gate_name: &'a str,
     pub ffn_up_name: &'a str,
     pub ffn_down_name: &'a str,
@@ -39,6 +43,10 @@ pub fn load_dense_ffn_layer(
         );
     }
     let ffn_norm = upload_dequant_to_f16(file, device, spec.ffn_norm_name, spec.hidden, allocs)?;
+    let post_ffn_norm = spec
+        .post_ffn_norm_name
+        .map(|n| upload_dequant_to_f16(file, device, n, spec.hidden, allocs))
+        .transpose()?;
     let ffn_gate = upload_col(
         file,
         device,
@@ -68,6 +76,7 @@ pub fn load_dense_ffn_layer(
     )?;
     Ok(FfnWeights {
         ffn_norm,
+        post_ffn_norm,
         ffn_gate,
         ffn_up,
         ffn_down,

@@ -174,6 +174,10 @@ pub enum RopeVariant {
 
 pub struct AttnWeights {
     pub attn_norm: Tensor<F16>,
+    /// Optional norm applied to the F16 attention delta BEFORE the
+    /// outer residual_add. Gemma4 sets this to `post_attention_norm.weight`;
+    /// every other arch leaves it `None`.
+    pub post_attn_norm: Option<Tensor<F16>>,
     /// When `attn_q_gated`, the underlying tensor has
     /// `[2 * n_heads * head_dim, hidden]` rows in head-interleaved
     /// `[head_i_Q | head_i_gate]` layout; the composite splits the
@@ -206,6 +210,10 @@ pub struct AttnWeights {
 
 pub struct FfnWeights {
     pub ffn_norm: Tensor<F16>,
+    /// Optional norm applied to the F16 FFN delta BEFORE the outer
+    /// residual_add. Gemma4 sets this to `post_ffw_norm.weight`;
+    /// every other arch leaves it `None`.
+    pub post_ffn_norm: Option<Tensor<F16>>,
     pub ffn_gate: QuantWeight,
     pub ffn_up: QuantWeight,
     pub ffn_down: QuantWeight,

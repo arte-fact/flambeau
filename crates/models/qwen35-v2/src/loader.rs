@@ -167,6 +167,7 @@ fn load_with_shard(
                 device,
                 &DenseAttnLayerSpec {
                     attn_norm_name: &attn_norm_name,
+                    post_attn_norm_name: None,
                     attn_q_name: &q,
                     attn_k_name: &k,
                     attn_v_name: Some(&v),
@@ -205,6 +206,7 @@ fn load_with_shard(
             device,
             &DenseFfnLayerSpec {
                 ffn_norm_name: &ffn_norm,
+                post_ffn_norm_name: None,
                 ffn_gate_name: &ffn_gate,
                 ffn_up_name: &ffn_up,
                 ffn_down_name: &ffn_down,

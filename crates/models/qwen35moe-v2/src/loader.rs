@@ -160,6 +160,7 @@ fn load_with_shard(
                 device,
                 &DenseAttnLayerSpec {
                     attn_norm_name: &attn_norm_name,
+                    post_attn_norm_name: None,
                     attn_q_name: &q,
                     attn_k_name: &k,
                     attn_v_name: Some(&v),

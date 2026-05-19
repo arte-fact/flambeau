@@ -500,5 +500,18 @@ pub fn standard_attn_local<H: TopologyHooks>(
     hooks.ar_sum_f32(proj_f32.ptr, n * hidden, state.device, state.stream)?;
     let mut delta = unsafe { Tensor::<F16>::from_raw(state.pool.delta, n * hidden) };
     flambeau_model_ops::cast_f32_to_f16(&proj_f32, &mut delta, n * hidden, &ops)?;
+    if let Some(post_norm) = weights.post_attn_norm.as_ref() {
+        let delta_in = unsafe { Tensor::<F16>::from_raw(state.pool.delta, n * hidden) };
+        let mut delta_out = unsafe { Tensor::<F16>::from_raw(state.pool.delta, n * hidden) };
+        flambeau_model_ops::rmsnorm_f16(
+            &delta_in,
+            post_norm,
+            &mut delta_out,
+            n,
+            hidden,
+            weights.rms_eps,
+            &ops,
+        )?;
+    }
     Ok(delta)
 }

@@ -17,6 +17,10 @@ use super::ShardMode;
 
 pub struct DenseAttnLayerSpec<'a> {
     pub attn_norm_name: &'a str,
+    /// Optional name of the F16 norm tensor applied to the attention
+    /// delta BEFORE the outer residual add. Gemma4 sets this to
+    /// `post_attention_norm.weight`; other arches pass `None`.
+    pub post_attn_norm_name: Option<&'a str>,
     pub attn_q_name: &'a str,
     pub attn_k_name: &'a str,
     /// `None` for gemma4-style "V from K" layers (no attn_v on disk).
@@ -69,6 +73,10 @@ pub fn load_dense_attn_layer(
     let n_kv_heads_local = spec.n_kv_heads / n_ranks;
 
     let attn_norm = upload_dequant_to_f16(file, device, spec.attn_norm_name, spec.hidden, allocs)?;
+    let post_attn_norm = spec
+        .post_attn_norm_name
+        .map(|n| upload_dequant_to_f16(file, device, n, spec.hidden, allocs))
+        .transpose()?;
     // Gated `attn_q`: head-interleaved layout, so col-shard with
     // doubled n_rows cleanly partitions heads + their gates.
     let attn_q_rows = if spec.attn_q_gated { 2 * q_width } else { q_width };
@@ -103,6 +111,7 @@ pub fn load_dense_attn_layer(
 
     Ok(AttnWeights {
         attn_norm,
+        post_attn_norm,
         attn_q,
         attn_k,
         attn_v,

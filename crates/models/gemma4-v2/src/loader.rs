@@ -97,23 +97,30 @@ fn load_with_shard(
         let dims = config.attn[li];
         let n_kv_heads = config.num_kv_heads[li];
 
-        let (norm, q, k, output, q_norm, k_norm) = (
+        let (norm, post_attn_norm, q, k, v, output, q_norm, k_norm) = (
             format!("{p}.attn_norm.weight"),
+            format!("{p}.post_attention_norm.weight"),
             format!("{p}.attn_q.weight"),
             format!("{p}.attn_k.weight"),
+            format!("{p}.attn_v.weight"),
             format!("{p}.attn_output.weight"),
             format!("{p}.attn_q_norm.weight"),
             format!("{p}.attn_k_norm.weight"),
         );
+        // Gemma4's `shared_kv_layers` (E2B/E4B variants) makes the
+        // tail-N layers reuse a shared V. Probe tensor existence to
+        // decide per-layer; 31B / 26B-A4B / 9B have shared_kv_layers=0
+        // so every layer has its own attn_v.weight.
+        let has_attn_v = file.info(&v).is_ok();
         attn.push(Some(load_dense_attn_layer(
             file,
             device,
             &DenseAttnLayerSpec {
                 attn_norm_name: &norm,
+                post_attn_norm_name: Some(&post_attn_norm),
                 attn_q_name: &q,
                 attn_k_name: &k,
-                // V from K via DtoD memcpy (no attn_v on disk).
-                attn_v_name: None,
+                attn_v_name: if has_attn_v { Some(&v) } else { None },
                 attn_output_name: &output,
                 attn_q_norm_name: Some(&q_norm),
                 attn_k_norm_name: Some(&k_norm),
@@ -134,8 +141,9 @@ fn load_with_shard(
             &mut allocs,
         )?));
 
-        let (ffn_norm, ffn_gate, ffn_up, ffn_down) = (
-            format!("{p}.post_attention_norm.weight"),
+        let (ffn_norm, post_ffn_norm, ffn_gate, ffn_up, ffn_down) = (
+            format!("{p}.ffn_norm.weight"),
+            format!("{p}.post_ffw_norm.weight"),
             format!("{p}.ffn_gate.weight"),
             format!("{p}.ffn_up.weight"),
             format!("{p}.ffn_down.weight"),
@@ -145,6 +153,7 @@ fn load_with_shard(
             device,
             &DenseFfnLayerSpec {
                 ffn_norm_name: &ffn_norm,
+                post_ffn_norm_name: Some(&post_ffn_norm),
                 ffn_gate_name: &ffn_gate,
                 ffn_up_name: &ffn_up,
                 ffn_down_name: &ffn_down,
