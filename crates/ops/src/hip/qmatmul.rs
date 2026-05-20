@@ -1050,7 +1050,7 @@ pub fn mmvq_f16_direct(
 /// Grid = `ceil(n_rows / rows_per_block)`. `units_per_row` is the
 /// caller-defined inner-loop count (n_blocks for 32-element-block
 /// dtypes, n_superblocks for K-quants). #120 / #120-followup.
-fn mmvq_simple_launch(
+pub fn mmvq_simple_launch(
     reg: &OpsRegistry,
     stream: &HipStream,
     module_stem: &'static str,
