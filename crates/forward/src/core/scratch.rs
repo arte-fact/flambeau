@@ -219,6 +219,15 @@ pub struct ScratchPool {
     /// weight than the one folded in upstream.
     pub input_pre_normed: bool,
 
+    /// When true, the previous composite fused its post-norm+residual
+    /// add into the next residual slot directly (gemma4 paths with
+    /// post_attn_norm / post_ffn_norm). The matching `residual_add`
+    /// must skip its own advance + add and return the incoming `b`
+    /// (which IS the new residual) as-is. Set by `standard_attn_local`
+    /// / `dense_ffn_local` when they take the fused path; cleared by
+    /// `residual_add_local`.
+    pub fused_residual_already_done: bool,
+
     allocs: Vec<(DevicePtr, usize)>,
 }
 
@@ -600,6 +609,7 @@ impl ScratchPool {
             gdn_prefill_scratch,
             current_residual_is_a: true,
             input_pre_normed: false,
+            fused_residual_already_done: false,
             allocs,
         })
     }

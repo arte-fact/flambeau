@@ -504,6 +504,21 @@ impl<'a> Ops for HipOps<'a> {
         super::norm::rmsnorm_f32_to_f16(self.reg, self.stream, x_f32, weight_f16, y_f16, m, k, eps)
     }
 
+    fn rmsnorm_f32_to_f16_add_residual(
+        &self,
+        x_f32: DevicePtr,
+        weight_f16: DevicePtr,
+        resid_in_f16: DevicePtr,
+        resid_out_f16: DevicePtr,
+        m: usize,
+        k: usize,
+        eps: f32,
+    ) -> Result<()> {
+        super::norm::rmsnorm_f32_to_f16_add_residual(
+            self.reg, self.stream, x_f32, weight_f16, resid_in_f16, resid_out_f16, m, k, eps,
+        )
+    }
+
     fn l2_norm_f32(
         &self,
         x: DevicePtr,

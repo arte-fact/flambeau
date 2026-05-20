@@ -163,22 +163,28 @@ pub fn dense_ffn_local<H: TopologyHooks>(
         return Ok(None);
     }
     hooks.ar_sum_f32(down_f32.ptr, n * hidden, state.device, state.stream)?;
-    let delta = unsafe { Tensor::<F16>::from_raw(state.pool.delta, n * hidden) };
     if let Some(post_norm) = weights.post_ffn_norm.as_ref() {
-        // Fused F32→F16 + rmsnorm: skip the cast_f32_to_f16 launch.
-        let mut delta_out = unsafe { Tensor::<F16>::from_raw(state.pool.delta, n * hidden) };
-        flambeau_model_ops::rmsnorm_f32_to_f16(
-            &down_f32,
-            post_norm,
-            &mut delta_out,
+        // Fused F32→F16 rmsnorm + residual add. See standard_attn's
+        // matching block for the slot-advance + flag pattern.
+        let resid_in_ptr = input.ptr;
+        let new_resid_ptr = state.pool.next_residual_slot();
+        use flambeau_ops::Ops;
+        ops.rmsnorm_f32_to_f16_add_residual(
+            down_f32.ptr,
+            post_norm.ptr,
+            resid_in_ptr,
+            new_resid_ptr,
             n,
             hidden,
             weights.rms_eps,
-            &ops,
         )?;
+        state.pool.fused_residual_already_done = true;
+        let new_resid = unsafe { Tensor::<F16>::from_raw(new_resid_ptr, n * hidden) };
+        Ok(Some(new_resid))
     } else {
         let mut delta_mut = unsafe { Tensor::<F16>::from_raw(state.pool.delta, n * hidden) };
         flambeau_model_ops::cast_f32_to_f16(&down_f32, &mut delta_mut, n * hidden, &ops)?;
+        let delta = unsafe { Tensor::<F16>::from_raw(state.pool.delta, n * hidden) };
+        Ok(Some(delta))
     }
-    Ok(Some(delta))
 }

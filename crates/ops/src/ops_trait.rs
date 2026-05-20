@@ -405,6 +405,22 @@ pub trait Ops {
         eps: f32,
     ) -> Result<()>;
 
+    /// Fused rmsnorm_f32_to_f16 + residual add. Writes
+    /// `resid_out = resid_in + rmsnorm(x * weight)`. `resid_out` may
+    /// alias `resid_in` for in-place. Same launch shape as
+    /// `rmsnorm_f32_to_f16`.
+    #[allow(clippy::too_many_arguments)]
+    fn rmsnorm_f32_to_f16_add_residual(
+        &self,
+        x_f32: DevicePtr,
+        weight_f16: DevicePtr,
+        resid_in_f16: DevicePtr,
+        resid_out_f16: DevicePtr,
+        m: usize,
+        k: usize,
+        eps: f32,
+    ) -> Result<()>;
+
     fn l2_norm_f32(
         &self,
         x: DevicePtr,
