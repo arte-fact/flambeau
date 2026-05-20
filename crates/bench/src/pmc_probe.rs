@@ -24,6 +24,7 @@ use half::f16;
 pub fn run_one(kernel_stem: &str, m: usize, k: usize, n: usize) -> Result<String> {
     let (entry, threads) = match kernel_stem {
         "mmvq_q8_0" => ("flambeau_mmvq_q8_0_q8_1", 256u32),
+        "mmvq_q4_0" => ("flambeau_mmvq_q4_0_q8_1", 256),
         "mmvq_q4_k" => ("flambeau_mmvq_q4_k_q8_1", 64),
         "mmvq_q5_k" => ("flambeau_mmvq_q5_k_q8_1", 64),
         "mmvq_q6_k" => ("flambeau_mmvq_q6_k_q8_1", 64),
@@ -404,6 +405,7 @@ fn run_mmvq(
 fn block_size_of(kernel_stem: &str) -> Result<usize> {
     Ok(match kernel_stem {
         "mmvq_q8_0" => std::mem::size_of::<BlockQ8_0>(),
+        "mmvq_q4_0" => std::mem::size_of::<flambeau_quant::BlockQ4_0>(),
         "mmvq_q4_k" | "mmvq_q4_k_r2" => std::mem::size_of::<flambeau_quant::BlockQ4K>(),
         "mmvq_q5_k" | "mmvq_q5_k_r2" => std::mem::size_of::<flambeau_quant::BlockQ5K>(),
         "mmvq_q6_k" | "mmvq_q6_k_r4" => std::mem::size_of::<flambeau_quant::BlockQ6K>(),

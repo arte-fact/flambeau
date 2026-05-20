@@ -144,19 +144,21 @@ impl PerLayerEmbedBlock {
             )
             .context("per_layer_embd proj batched")?;
         }
-        ops.cast_f32_to_f16(proj_out_f32, proj_out_f16, n_tokens * self.hidden)
-            .context("per_layer_embd cast proj → f16")?;
-        ops.rmsnorm_f16(
-            proj_out_f16,
+        // Fused F32→F16 rmsnorm + add residual: replaces
+        // (cast_f32_to_f16 → rmsnorm_f16 → add_f16). One kernel
+        // launch instead of three per layer per token.
+        let _ = proj_out_f16;
+        let _ = normed_f16;
+        ops.rmsnorm_f32_to_f16_add_residual(
+            proj_out_f32,
             self.weights.post_norm_f16,
-            normed_f16,
+            pe_in,
+            x_out,
             n_tokens,
             self.hidden,
             self.rms_norm_eps,
         )
-        .context("per_layer_embd post_norm")?;
-        ops.add_f16(pe_in, normed_f16, x_out, n_tokens * self.hidden)
-            .context("per_layer_embd residual add")?;
+        .context("per_layer_embd fused post_norm + residual")?;
         Ok(())
     }
 }
