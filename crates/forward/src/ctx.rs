@@ -98,12 +98,17 @@ pub trait ForwardCtx {
     ) -> Result<Option<Tensor<F16>>>;
 
     /// Per-layer side-channel embedding apply (gemma 4n / E2B / E4B).
-    /// Reads `resid` (F16, length hidden), reads the slice
-    /// `table_dev[layer_idx * pe .. (layer_idx + 1) * pe]` (F32),
-    /// rewrites `resid` in place with the side-channel residual.
-    /// `pe` is the per-layer side-channel width (256 on E4B).
+    /// Reads `resid` (F16, length `n_tokens * hidden`), reads
+    /// `table_dev[layer_idx * n_tokens * pe ..]` (F32 `[n_tokens, pe]`
+    /// contiguous in the layer-major layer-major table), rewrites
+    /// `resid` in place with the side-channel residual added per
+    /// token. `pe` is the per-layer side-channel width (256 on E4B).
+    /// `n_tokens_total` is the table's stride per layer — needed to
+    /// locate this layer's slice in the prebuilt
+    /// `[n_layer, n_tokens_total, pe]` table.
     /// Default impl panics — only impls that own a Pool can run the
-    /// apply (engine, testing). RecordingCtx records the call.
+    /// apply (engine, testing).
+    #[allow(clippy::too_many_arguments)]
     fn per_layer_embd_apply(
         &mut self,
         resid: &mut Tensor<F16>,
@@ -111,28 +116,31 @@ pub trait ForwardCtx {
         table_dev: DevicePtr,
         layer_idx: usize,
         pe: usize,
+        n_tokens: usize,
+        n_tokens_total: usize,
         rms_eps: f32,
     ) -> Result<()> {
-        let _ = (resid, weights, table_dev, layer_idx, pe, rms_eps);
+        let _ = (resid, weights, table_dev, layer_idx, pe, n_tokens, n_tokens_total, rms_eps);
         anyhow::bail!("per_layer_embd_apply not implemented for this ctx")
     }
 
     /// Per-token build + upload of the side-channel embedding table.
-    /// Runs the BF16/F16 model-proj matmul on device
-    /// (`dense_gemv_f16_f16` against `model_proj_f16_dev`, writing
-    /// `[pe * n_layer]` F32 into `proj_matmul_f32_dev`), DtoH-copies
-    /// that output, finishes the build host-side via
+    /// Generalised to n_tokens > 1 (prefill). `main_embd` is F16
+    /// `[n_tokens, hidden]`; `tok_embd_rows_raw` is `n_tokens *
+    /// row_bytes` consecutive token-embedding rows (caller assembles
+    /// the per-prompt-token slice in order). The matmul runs on device
+    /// as `dense_gemv_f16_f16_batched`; the resulting `[n_tokens,
+    /// pe * n_layer]` F32 is DtoH-copied and finished host-side via
     /// [`flambeau_blocks::per_layer_embd::build_inp_per_layer_table_with_proj`]
-    /// (Q5_K dequant + rmsnorm + add + scale), and HtoD-uploads the
-    /// resulting `[n_layer * pe]` F32 table to `table_dev`. Caller
-    /// supplies the row-sliced token embedding bytes for the current
-    /// token and the F32 raw norm-weight bytes.
+    /// (Q5_K dequant + rmsnorm + add + scale), producing a layer-major
+    /// `[n_layer, n_tokens, pe]` table HtoD-uploaded to `table_dev`.
     #[allow(clippy::too_many_arguments)]
     fn per_layer_embd_build_table(
         &mut self,
         main_embd: &Tensor<F16>,
-        tok_embd_row_raw: &[u8],
+        tok_embd_rows_raw: &[u8],
         tok_embd_dtype: flambeau_quant::GgmlDType,
+        tok_embd_row_bytes: usize,
         model_proj_f16_dev: DevicePtr,
         proj_matmul_f32_dev: DevicePtr,
         proj_norm_raw: &[u8],
@@ -143,8 +151,9 @@ pub trait ForwardCtx {
         rms_eps: f32,
     ) -> Result<()> {
         let _ = (
-            main_embd, tok_embd_row_raw, tok_embd_dtype, model_proj_f16_dev,
-            proj_matmul_f32_dev, proj_norm_raw, table_dev, pe, n_layer, hidden, rms_eps,
+            main_embd, tok_embd_rows_raw, tok_embd_dtype, tok_embd_row_bytes,
+            model_proj_f16_dev, proj_matmul_f32_dev, proj_norm_raw, table_dev, pe, n_layer,
+            hidden, rms_eps,
         );
         anyhow::bail!("per_layer_embd_build_table not implemented for this ctx")
     }

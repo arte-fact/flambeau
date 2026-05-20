@@ -241,8 +241,16 @@ mod tests {
 
     #[test]
     fn attn_prefill_f16_with_swa() {
-        // n_q_tokens < 4 → oracle kernel (flash_tile SWA has a
-        // NaN-init bug when `block_swa_min % BC != 0`).
         run_case(3, 4, 2, 64, 16, 13, 5);
+    }
+
+    #[test]
+    fn attn_prefill_f16_flash_tile_swa_unaligned_window() {
+        // flash_tile path (n_q_tokens >= 4) with window_size that
+        // makes block_swa_min unaligned to BC. Regression test for the
+        // NaN bug where the first chunk's first row is masked and the
+        // online softmax initializer (m_i = s_j = -INFINITY) produced
+        // NaN through alpha = exp(-inf - -inf).
+        run_case(8, 4, 2, 64, 600, 520, 512);
     }
 }

@@ -474,7 +474,12 @@ fn load_with_shard(
     let per_layer_embd_globals = if let Some(ple) = config.per_layer_embd {
         let pe = ple.pe;
         let total = pe * config.num_layers;
-        let table_bytes = total * 4;
+        // Size for the worst case the server will pass in: prefill
+        // chunks are 512 by default, decode is 1. 1024 leaves headroom
+        // for FLAMBEAU_PREFILL_UBATCH overrides. Layer-major
+        // [n_layer, max_n_tokens, pe] F32.
+        const PLE_MAX_TOKENS: usize = 1024;
+        let table_bytes = total * PLE_MAX_TOKENS * 4;
         let table_dev = device.alloc(table_bytes).context("alloc per_layer table")?;
         allocs.push((table_dev, table_bytes));
 
@@ -567,7 +572,10 @@ fn load_with_shard(
         flambeau_core::Stream::synchronize(device.default_stream())
             .context("sync after model_proj f16 upload")?;
 
-        let proj_matmul_bytes = total * 4;
+        // Sized for max prefill chunk so dense_gemv_f16_f16_batched
+        // can write `[max_n_tokens, pe * n_layer]` F32 without
+        // reallocation per forward.
+        let proj_matmul_bytes = total * PLE_MAX_TOKENS * 4;
         let proj_matmul_f32_dev = device
             .alloc(proj_matmul_bytes)
             .context("alloc per_layer proj matmul scratch")?;

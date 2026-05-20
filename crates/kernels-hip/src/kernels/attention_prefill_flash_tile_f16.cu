@@ -177,23 +177,25 @@ static __device__ __forceinline__ void flash_attn_prefill_v2_impl(
                 float s_j = gfx906_warp_reduce_sum(partial) * scale;
 
                 // Mask K rows beyond the causal cutoff or below the
-                // SWA lower bound.
-                if (row >= limit || row < swa_min) {
-                    s_j = -INFINITY;
-                }
+                // SWA lower bound. Skip the online softmax update for
+                // masked rows: the contribution is mathematically 0
+                // (p = exp(-inf - m_new) = 0), and skipping avoids the
+                // m_i = s_j = -INFINITY case where (-inf) - (-inf) = NaN
+                // poisons alpha + p before the first valid row arrives.
+                const bool masked = (row >= limit) || (row < swa_min);
+                if (!masked) {
+                    const float m_new = fmaxf(m_i, s_j);
+                    const float alpha = gfx906_fast_exp(m_i - m_new);
+                    const float p     = gfx906_fast_exp(s_j - m_new);
 
-                // Online softmax rescale (Dao et al. flash-attention v1).
-                const float m_new = fmaxf(m_i, s_j);
-                const float alpha = gfx906_fast_exp(m_i - m_new);
-                const float p     = gfx906_fast_exp(s_j - m_new);
-
-                #pragma unroll
-                for (int i = 0; i < D_PER_LANE; ++i) {
-                    o_reg[i] = alpha * o_reg[i]
-                             + p * v_lds[j * D + lane + i * WARP_SIZE];
+                    #pragma unroll
+                    for (int i = 0; i < D_PER_LANE; ++i) {
+                        o_reg[i] = alpha * o_reg[i]
+                                 + p * v_lds[j * D + lane + i * WARP_SIZE];
+                    }
+                    l_i = alpha * l_i + p;
+                    m_i = m_new;
                 }
-                l_i = alpha * l_i + p;
-                m_i = m_new;
             }
         }
         __syncthreads();

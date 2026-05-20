@@ -93,6 +93,23 @@ impl PerLayerEmbedBlock {
         scratch: PerLayerEmbedDecodeScratch,
         x_out: DevicePtr,
     ) -> Result<()> {
+        self.forward_n_tokens(ops, pe_in, table_slice, scratch, x_out, 1)
+    }
+
+    /// Generalised forward: each token in `pe_in` (F16
+    /// `[n_tokens, hidden]`) gets the side-channel residual applied
+    /// against `table_slice` (F32 `[n_tokens, pe]`, this layer's
+    /// contiguous slice of the prebuilt layer-major
+    /// `[n_layer, n_tokens, pe]` table). `pe_in` and `x_out` may alias.
+    pub fn forward_n_tokens<O: Ops>(
+        &self,
+        ops: &O,
+        pe_in: DevicePtr,
+        table_slice: DevicePtr,
+        scratch: PerLayerEmbedDecodeScratch,
+        x_out: DevicePtr,
+        n_tokens: usize,
+    ) -> Result<()> {
         let PerLayerEmbedDecodeScratch {
             gate_out_f32,
             activated_f32,
@@ -101,26 +118,44 @@ impl PerLayerEmbedBlock {
             proj_out_f16,
             normed_f16,
         } = scratch;
-        ops.dense_gemv_f32_f16(self.weights.inp_gate, pe_in, gate_out_f32, self.pe, self.hidden)
+        if n_tokens == 1 {
+            ops.dense_gemv_f32_f16(
+                self.weights.inp_gate, pe_in, gate_out_f32, self.pe, self.hidden,
+            )
             .context("per_layer_embd inp_gate")?;
-        ops.gelu_mul_f32(gate_out_f32, table_slice, activated_f32, self.pe)
+        } else {
+            ops.dense_gemv_f32_f16_batched(
+                self.weights.inp_gate, pe_in, gate_out_f32, self.pe, self.hidden, n_tokens,
+            )
+            .context("per_layer_embd inp_gate batched")?;
+        }
+        ops.gelu_mul_f32(gate_out_f32, table_slice, activated_f32, n_tokens * self.pe)
             .context("per_layer_embd gelu_mul")?;
-        ops.cast_f32_to_f16(activated_f32, activated_f16, self.pe)
+        ops.cast_f32_to_f16(activated_f32, activated_f16, n_tokens * self.pe)
             .context("per_layer_embd cast activated → f16")?;
-        ops.dense_gemv_f32_f16(self.weights.proj, activated_f16, proj_out_f32, self.hidden, self.pe)
+        if n_tokens == 1 {
+            ops.dense_gemv_f32_f16(
+                self.weights.proj, activated_f16, proj_out_f32, self.hidden, self.pe,
+            )
             .context("per_layer_embd proj")?;
-        ops.cast_f32_to_f16(proj_out_f32, proj_out_f16, self.hidden)
+        } else {
+            ops.dense_gemv_f32_f16_batched(
+                self.weights.proj, activated_f16, proj_out_f32, self.hidden, self.pe, n_tokens,
+            )
+            .context("per_layer_embd proj batched")?;
+        }
+        ops.cast_f32_to_f16(proj_out_f32, proj_out_f16, n_tokens * self.hidden)
             .context("per_layer_embd cast proj → f16")?;
         ops.rmsnorm_f16(
             proj_out_f16,
             self.weights.post_norm_f16,
             normed_f16,
-            1,
+            n_tokens,
             self.hidden,
             self.rms_norm_eps,
         )
         .context("per_layer_embd post_norm")?;
-        ops.add_f16(pe_in, normed_f16, x_out, self.hidden)
+        ops.add_f16(pe_in, normed_f16, x_out, n_tokens * self.hidden)
             .context("per_layer_embd residual add")?;
         Ok(())
     }
@@ -134,55 +169,51 @@ pub fn table_slice_ptr(table_base: DevicePtr, il: usize, pe: usize) -> DevicePtr
 }
 
 /// Host-side build with the `per_layer_model_proj @ inp_batch` matmul
-/// PRECOMPUTED. The caller supplies `proj_matmul_f32` of length
-/// `pe * n_layer` containing `per_layer_model_proj @ inp_batch` (no
-/// scaling applied yet). This skips the BF16 matmul that dominates
-/// the CPU build at ~5.5 ms / token on E4B.
+/// PRECOMPUTED, generalised to `n_tokens >= 1`. The caller supplies
+/// `proj_matmul_f32` of length `n_tokens * pe * n_layer` in TOKEN-MAJOR
+/// layout `[n_tokens, n_layer * pe]` (the natural output of
+/// `dense_gemv_f16_f16_batched`).
 ///
-/// Apply order matches [`build_inp_per_layer_table`]:
-/// 1. table = dequant(per_layer_token_embd[token]) * sqrt(pe)
-/// 2. proj  = proj_matmul_f32 * (1 / sqrt(hidden))
-/// 3. proj  = rmsnorm(proj_view[layer, pe], per_layer_proj_norm) per layer
-/// 4. out   = (table + proj) * (1 / sqrt(2))
+/// `tok_embd_rows_raw` is `n_tokens` consecutive `per_layer_token_embd`
+/// rows (`row_bytes` each). The output is laid out LAYER-MAJOR
+/// `[n_layer, n_tokens, pe]` so the per-layer apply can slice
+/// `&table[il * n_tokens * pe..]` as a contiguous `[n_tokens, pe]`
+/// block for `dense_gemv_*_batched` + `gelu_mul_f32` consumers.
+///
+/// Math per (token, layer) matches the single-token build:
+/// 1. table = dequant(per_layer_token_embd[token, layer, :]) * sqrt(pe)
+/// 2. proj  = proj_matmul_f32[token, layer, :] * (1 / sqrt(hidden))
+/// 3. proj  = rmsnorm(proj, per_layer_proj_norm)
+/// 4. out[layer, token, :] = (table + proj) * (1 / sqrt(2))
 #[allow(clippy::too_many_arguments)]
 pub fn build_inp_per_layer_table_with_proj(
-    tok_embd_row_raw: &[u8],
+    tok_embd_rows_raw: &[u8],
     tok_embd_dtype: GgmlDType,
+    tok_embd_row_bytes: usize,
     proj_matmul_f32: &[f32],
     proj_norm_raw: &[u8],
     pe: usize,
     n_layer: usize,
+    n_tokens: usize,
     hidden: usize,
     rms_norm_eps: f32,
 ) -> Result<Vec<f32>> {
-    let total = pe * n_layer;
+    let per_token = pe * n_layer;
+    let total = n_tokens * per_token;
     if proj_matmul_f32.len() != total {
         bail!(
-            "build_inp_per_layer_table_with_proj: proj len {} != pe*n_layer {}",
+            "build_inp_per_layer_table_with_proj: proj len {} != n_tokens*pe*n_layer {}",
             proj_matmul_f32.len(),
             total
         );
     }
-    let table = if tok_embd_dtype == GgmlDType::F32 {
-        let bytes_needed = total * 4;
-        if tok_embd_row_raw.len() < bytes_needed {
-            bail!(
-                "tok_embd row {} < expected {}",
-                tok_embd_row_raw.len(),
-                bytes_needed
-            );
-        }
-        bytemuck::cast_slice::<u8, f32>(&tok_embd_row_raw[..bytes_needed]).to_vec()
-    } else {
-        flambeau_quant::dequantize_to_vec(tok_embd_dtype, tok_embd_row_raw, total)
-            .map_err(|e| anyhow!("dequant per_layer_token_embd row: {e}"))?
-    };
-    let pe_sqrt = (pe as f32).sqrt();
-    let mut table: Vec<f32> = table.iter().map(|v| *v * pe_sqrt).collect();
-
-    let inv_sqrt_n = 1.0 / (hidden as f32).sqrt();
-    let mut proj: Vec<f32> = proj_matmul_f32.iter().map(|v| *v * inv_sqrt_n).collect();
-
+    if tok_embd_rows_raw.len() < n_tokens * tok_embd_row_bytes {
+        bail!(
+            "tok_embd rows len {} < expected {} (n_tokens={n_tokens} * row_bytes={tok_embd_row_bytes})",
+            tok_embd_rows_raw.len(),
+            n_tokens * tok_embd_row_bytes
+        );
+    }
     if proj_norm_raw.len() < pe * 4 {
         bail!(
             "per_layer_proj_norm {} < pe*4={}",
@@ -191,23 +222,44 @@ pub fn build_inp_per_layer_table_with_proj(
         );
     }
     let proj_norm: &[f32] = bytemuck::cast_slice(&proj_norm_raw[..pe * 4]);
-    for il in 0..n_layer {
-        let row = &mut proj[il * pe..(il + 1) * pe];
-        let mut ss = 0.0f64;
-        for &v in row.iter() {
-            ss += (v as f64) * (v as f64);
-        }
-        let inv_rms = 1.0 / ((ss / pe as f64).sqrt() + rms_norm_eps as f64);
-        for (i, v) in row.iter_mut().enumerate() {
-            *v = ((*v as f64) * inv_rms * proj_norm[i] as f64) as f32;
-        }
-    }
-
+    let pe_sqrt = (pe as f32).sqrt();
+    let inv_sqrt_hidden = 1.0 / (hidden as f32).sqrt();
     let inv_sqrt_2 = 1.0 / 2.0f32.sqrt();
-    for (t, p) in table.iter_mut().zip(proj.iter()) {
-        *t = (*t + *p) * inv_sqrt_2;
+
+    let mut out = vec![0.0f32; total];
+    for t in 0..n_tokens {
+        let row_off = t * tok_embd_row_bytes;
+        let row_raw = &tok_embd_rows_raw[row_off..row_off + tok_embd_row_bytes];
+        let row_table = if tok_embd_dtype == GgmlDType::F32 {
+            bytemuck::cast_slice::<u8, f32>(&row_raw[..per_token * 4]).to_vec()
+        } else {
+            flambeau_quant::dequantize_to_vec(tok_embd_dtype, row_raw, per_token)
+                .map_err(|e| anyhow!("dequant per_layer_token_embd row {t}: {e}"))?
+        };
+        let proj_token = &proj_matmul_f32[t * per_token..(t + 1) * per_token];
+        for il in 0..n_layer {
+            let mut proj_row = [0.0f32; 256];
+            let proj_slice = &proj_token[il * pe..(il + 1) * pe];
+            if pe > proj_row.len() {
+                bail!("build_inp_per_layer_table_with_proj: pe {pe} > scratch {}", proj_row.len());
+            }
+            for i in 0..pe {
+                proj_row[i] = proj_slice[i] * inv_sqrt_hidden;
+            }
+            let mut ss = 0.0f64;
+            for v in &proj_row[..pe] {
+                ss += (*v as f64) * (*v as f64);
+            }
+            let inv_rms = 1.0 / ((ss / pe as f64).sqrt() + rms_norm_eps as f64);
+            let dst_base = il * n_tokens * pe + t * pe;
+            for i in 0..pe {
+                let table_v = row_table[il * pe + i] * pe_sqrt;
+                let proj_v = (proj_row[i] as f64 * inv_rms * proj_norm[i] as f64) as f32;
+                out[dst_base + i] = (table_v + proj_v) * inv_sqrt_2;
+            }
+        }
     }
-    Ok(table)
+    Ok(out)
 }
 
 /// Host-side build of `inp_per_layer_table` for the current token.

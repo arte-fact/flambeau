@@ -649,6 +649,8 @@ impl<H: TopologyHooks, S: StageHooks> ForwardCtx for ForwardEngine<'_, H, S> {
         table_dev: flambeau_core::DevicePtr,
         layer_idx: usize,
         pe: usize,
+        n_tokens: usize,
+        n_tokens_total: usize,
         rms_eps: f32,
     ) -> Result<()> {
         let hidden = self.core.hidden();
@@ -661,19 +663,20 @@ impl<H: TopologyHooks, S: StageHooks> ForwardCtx for ForwardEngine<'_, H, S> {
             proj_out_f16: pool.ple_proj_out_f16,
             normed_f16: pool.ple_normed_f16,
         };
-        let table_slice =
-            flambeau_blocks::per_layer_embd::table_slice_ptr(table_dev, layer_idx, pe);
+        // Layer-major table layout: [n_layer, n_tokens_total, pe] F32.
+        let table_slice = table_dev.offset_bytes(layer_idx * n_tokens_total * pe * 4);
         let block =
             flambeau_blocks::per_layer_embd::PerLayerEmbedBlock::new(*weights, pe, hidden, rms_eps);
         let ops = self.core.ops();
-        block.forward_decode(&ops, resid.ptr, table_slice, scratch, resid.ptr)
+        block.forward_n_tokens(&ops, resid.ptr, table_slice, scratch, resid.ptr, n_tokens)
     }
 
     fn per_layer_embd_build_table(
         &mut self,
         main_embd: &Tensor<F16>,
-        tok_embd_row_raw: &[u8],
+        tok_embd_rows_raw: &[u8],
         tok_embd_dtype: flambeau_quant::GgmlDType,
+        tok_embd_row_bytes: usize,
         model_proj_f16_dev: flambeau_core::DevicePtr,
         proj_matmul_f32_dev: flambeau_core::DevicePtr,
         proj_norm_raw: &[u8],
@@ -690,21 +693,44 @@ impl<H: TopologyHooks, S: StageHooks> ForwardCtx for ForwardEngine<'_, H, S> {
                 main_embd.n_elems
             );
         }
+        let n_tokens = main_embd.n_elems / hidden;
+        if n_tokens * hidden != main_embd.n_elems {
+            anyhow::bail!(
+                "per_layer_embd_build_table: main_embd elems {} not a multiple of hidden {hidden}",
+                main_embd.n_elems
+            );
+        }
         let device = self.core.device;
         let stream = self.core.stream;
 
-        // GPU-side per_layer_model_proj @ main_embd → F32 [pe * n_layer].
-        let total = pe * n_layer;
-        flambeau_ops::hip::router::dense_gemv_f16_f16(
-            self.core.reg,
-            stream,
-            model_proj_f16_dev,
-            main_embd.ptr,
-            proj_matmul_f32_dev,
-            total,
-            hidden,
-        )
-        .context("per_layer_embd build: dense_gemv_f16_f16")?;
+        // GPU-side per_layer_model_proj @ main_embd[n_tokens, hidden]
+        // → F32 [n_tokens, pe * n_layer].
+        let per_token = pe * n_layer;
+        let total = n_tokens * per_token;
+        if n_tokens == 1 {
+            flambeau_ops::hip::router::dense_gemv_f16_f16(
+                self.core.reg,
+                stream,
+                model_proj_f16_dev,
+                main_embd.ptr,
+                proj_matmul_f32_dev,
+                per_token,
+                hidden,
+            )
+            .context("per_layer_embd build: dense_gemv_f16_f16")?;
+        } else {
+            flambeau_ops::hip::router::dense_gemv_f16_f16_batched(
+                self.core.reg,
+                stream,
+                model_proj_f16_dev,
+                main_embd.ptr,
+                proj_matmul_f32_dev,
+                per_token,
+                hidden,
+                n_tokens,
+            )
+            .context("per_layer_embd build: dense_gemv_f16_f16_batched")?;
+        }
 
         let mut proj_matmul_host = vec![0.0f32; total];
         unsafe {
@@ -720,12 +746,14 @@ impl<H: TopologyHooks, S: StageHooks> ForwardCtx for ForwardEngine<'_, H, S> {
             .context("sync after DtoH proj_matmul for per_layer_embd build")?;
 
         let table = flambeau_blocks::per_layer_embd::build_inp_per_layer_table_with_proj(
-            tok_embd_row_raw,
+            tok_embd_rows_raw,
             tok_embd_dtype,
+            tok_embd_row_bytes,
             &proj_matmul_host,
             proj_norm_raw,
             pe,
             n_layer,
+            n_tokens,
             hidden,
             rms_eps,
         )?;

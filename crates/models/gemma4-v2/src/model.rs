@@ -6,8 +6,10 @@
 //!
 //! E2B / E4B (`config.per_layer_embd.is_some()`): a per-layer
 //! side-channel embedding is mixed into the residual after the FFN
-//! residual add. The side-channel table is rebuilt host-side once per
-//! token, then sliced per layer.
+//! residual add. The side-channel table is built once per forward call
+//! over all n_tokens (prefill or decode) and laid out
+//! `[n_layer, n_tokens, pe]` so each layer's apply reads a contiguous
+//! `[n_tokens, pe]` slice.
 
 use anyhow::{bail, Result};
 use flambeau_forward::ctx::ForwardCtx;
@@ -23,38 +25,32 @@ pub fn forward<C: ForwardCtx>(
 ) -> Result<()> {
     let n = tokens.len();
     let is_moe = model.config.moe.is_some();
-    let has_per_layer_embd = model.config.per_layer_embd.is_some();
-    // First-ship E2B / E4B prefill: loop the whole forward token-by-
-    // token. The per-token table build + per-layer apply require n=1;
-    // batching `n > 1` is a follow-up (n-token table build + an apply
-    // generalised to read `inp_per_layer[token, layer, :]` per row).
-    if has_per_layer_embd && n > 1 {
-        for i in 0..n {
-            forward(model, ctx, &tokens[i..i + 1], &positions[i..i + 1], &slot_ids[i..i + 1])?;
-        }
-        return Ok(());
-    }
     let mut resid = ctx.embed(&model.embedding, tokens)?;
 
-    // gemma 4n / E2B / E4B: rebuild the per-token side-channel table.
-    // `model.embedding` for n=1 has been written into `resid` with the
-    // sqrt(n_embd) scale already applied — that's the same `inp_batch`
-    // llama.cpp's `project_per_layer_inputs` consumes.
+    // Build the side-channel table once for all n_tokens. The rows are
+    // assembled per-token in the order of `tokens`; the GPU matmul +
+    // host finishing produces a layer-major
+    // `[n_layer, n_tokens, pe]` table at `globals.table_dev`.
+    let mut tok_rows_buf: Vec<u8> = Vec::new();
     if let Some(globals) = model.per_layer_embd_globals.as_ref() {
-        let token = tokens[0] as usize;
-        let row_off = token * globals.tok_embd_row_bytes;
-        let row_end = row_off + globals.tok_embd_row_bytes;
-        if row_end > globals.tok_embd_raw.len() {
-            bail!(
-                "per_layer_token_embd row OOB at token {token}: {row_end} > {}",
-                globals.tok_embd_raw.len()
-            );
+        tok_rows_buf.reserve_exact(n * globals.tok_embd_row_bytes);
+        for &t in tokens {
+            let token = t as usize;
+            let row_off = token * globals.tok_embd_row_bytes;
+            let row_end = row_off + globals.tok_embd_row_bytes;
+            if row_end > globals.tok_embd_raw.len() {
+                bail!(
+                    "per_layer_token_embd row OOB at token {token}: {row_end} > {}",
+                    globals.tok_embd_raw.len()
+                );
+            }
+            tok_rows_buf.extend_from_slice(&globals.tok_embd_raw[row_off..row_end]);
         }
-        let row = &globals.tok_embd_raw[row_off..row_end];
         ctx.per_layer_embd_build_table(
             &resid,
-            row,
+            &tok_rows_buf,
             globals.tok_embd_dtype,
+            globals.tok_embd_row_bytes,
             globals.model_proj_f16_dev,
             globals.proj_matmul_f32_dev,
             &globals.proj_norm_raw,
@@ -104,6 +100,8 @@ pub fn forward<C: ForwardCtx>(
                 globals.table_dev,
                 li,
                 globals.pe,
+                n,
+                n,
                 model.config.rms_eps,
             )?;
         }
