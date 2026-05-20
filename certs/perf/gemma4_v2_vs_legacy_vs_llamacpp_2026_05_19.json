@@ -1,25 +1,25 @@
 {
-  "timestamp": "2026-05-19T22:31:10Z",
-  "tg": 128,
+  "timestamp": "2026-05-20T07:46:45Z",
+  "tg": 64,
   "results": [
     {
-      "case": "gemma4-26B-A4B-Q8_0",
+      "case": "gemma4-E4B-Q4_0",
       "stack": "flambeau-v2",
-      "label": "flambeau-v2__gemma4-26B-A4B-Q8_0",
+      "label": "flambeau-v2__gemma4-E4B-Q4_0",
       "err": null,
-      "prompt_tokens": 725,
-      "completion_tokens": 128,
-      "ttft_ms": 1440.232515335083,
-      "decode_ms": 2504.619703060243,
-      "decode_tps": 50.70630077884734,
-      "prefill_tps": 503.3909401992096,
-      "text_head": "\n### Technical Memorandum: High-Performance Integer Arithmetic via `V_DOT4_I32_I"
+      "prompt_tokens": 716,
+      "completion_tokens": 64,
+      "ttft_ms": 74674.73578453064,
+      "decode_ms": 6617.227792739868,
+      "decode_tps": 9.520603185086182,
+      "prefill_tps": 9.58824952613122,
+      "text_head": "This request demands an extremely detailed, multi-faceted technical exposition c"
     },
     {
-      "case": "gemma4-26B-A4B-Q8_0",
+      "case": "gemma4-E4B-Q4_0",
       "stack": "flambeau-legacy",
-      "label": "flambeau-legacy__gemma4-26B-A4B-Q8_0",
-      "err": "no tokens",
+      "label": "flambeau-legacy__gemma4-E4B-Q4_0",
+      "err": "process exited",
       "prompt_tokens": 0,
       "completion_tokens": 0,
       "ttft_ms": 0.0,
@@ -29,17 +29,17 @@
       "text_head": ""
     },
     {
-      "case": "gemma4-26B-A4B-Q8_0",
+      "case": "gemma4-E4B-Q4_0",
       "stack": "llama.cpp",
-      "label": "llama.cpp__gemma4-26B-A4B-Q8_0",
+      "label": "llama.cpp__gemma4-E4B-Q4_0",
       "err": null,
       "prompt_tokens": 702,
-      "completion_tokens": 125,
-      "ttft_ms": 1458.336353302002,
-      "decode_ms": 1909.2764854431152,
-      "decode_tps": 64.94606776200955,
-      "prefill_tps": 481.3704317323736,
-      "text_head": "Senior Compiler Engineer at a large GPU vendor.\nExhaustive technical explanation"
+      "completion_tokens": 61,
+      "ttft_ms": 668.7524318695068,
+      "decode_ms": 844.0454006195068,
+      "decode_tps": 71.08622350878471,
+      "prefill_tps": 1049.715808939265,
+      "text_head": "Here's a plan to structure the response:\n1.  **Analyze the Request:** The reques"
     }
   ]
 }

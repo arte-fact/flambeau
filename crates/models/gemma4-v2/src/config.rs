@@ -54,6 +54,13 @@ pub struct Gemma4V2Config {
     pub num_kv_heads: Vec<usize>,
     /// Per-layer attention shape. `attn[li].window_size > 0` for SWA layers.
     pub attn: Vec<LayerAttnDims>,
+    /// Per-layer KV-share source — `Some(src)` means this layer
+    /// reuses layer `src`'s KV cache slot (gemma 4n's
+    /// `shared_kv_layers`). `None` for own-KV layers. Resolver
+    /// matches the most recent has_kv layer of the same attention
+    /// type (SWA vs full), mirroring llama.cpp's
+    /// `build_attn_inp_kv_iswa` slot match.
+    pub kv_share_src: Vec<Option<usize>>,
     pub rms_eps: f32,
     pub context_length: usize,
     pub vocab_size: usize,
@@ -146,6 +153,34 @@ impl Gemma4V2Config {
             })
             .collect();
 
+        // gemma 4n shared-KV: the trailing `shared_kv_layers` layers
+        // reuse an earlier layer's K/V cache slot. Resolver matches
+        // each shared layer to the most recent has_kv layer of the
+        // same attention type (SWA vs full), mirroring llama.cpp's
+        // `build_attn_inp_kv_iswa`. Default 0 ⇒ every layer owns KV.
+        let shared_kv_layers =
+            opt_u32("attention.shared_kv_layers").unwrap_or(0);
+        let n_kv_from_start = num_layers.saturating_sub(shared_kv_layers);
+        let mut kv_share_src: Vec<Option<usize>> = vec![None; num_layers];
+        let mut last_swa_with_kv: Option<usize> = None;
+        let mut last_full_with_kv: Option<usize> = None;
+        for li in 0..num_layers {
+            let is_swa = attn[li].window_size > 0;
+            if li < n_kv_from_start {
+                if is_swa {
+                    last_swa_with_kv = Some(li);
+                } else {
+                    last_full_with_kv = Some(li);
+                }
+            } else {
+                kv_share_src[li] = if is_swa {
+                    last_swa_with_kv
+                } else {
+                    last_full_with_kv
+                };
+            }
+        }
+
         let final_logit_softcap = opt_f32("final_logit_softcapping").unwrap_or(0.0);
 
         let vocab_size = file
@@ -163,6 +198,7 @@ impl Gemma4V2Config {
             num_heads,
             num_kv_heads,
             attn,
+            kv_share_src,
             rms_eps,
             context_length,
             vocab_size,

@@ -82,6 +82,7 @@ fn synth_moe_one_token_forward() {
             rms_eps: RMS_EPS,
             softmax_scale: None,
             attn_q_gated: false,
+            kv_share_src: None,
         });
 
         let mut experts_gate = Vec::with_capacity(N_EXPERTS);
@@ -131,6 +132,7 @@ fn synth_moe_one_token_forward() {
         gdn: None,
         per_layer_kv_widths: None,
         attn_q_gated: false,
+        kv_share_src: None,
             shared_intermediate: 0,
     };
     let mut pool = ScratchPool::new(&device, cfg).expect("ScratchPool::new");

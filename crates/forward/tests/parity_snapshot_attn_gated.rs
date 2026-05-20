@@ -88,6 +88,7 @@ fn parity_snapshot_attn_gated_single_token() {
         rms_eps: RMS_EPS,
         softmax_scale: None,
         attn_q_gated: true,
+        kv_share_src: None,
     };
 
     let cfg = ScratchConfig {
@@ -102,6 +103,7 @@ fn parity_snapshot_attn_gated_single_token() {
         gdn: None,
         per_layer_kv_widths: None,
         attn_q_gated: true,
+        kv_share_src: None,
             shared_intermediate: 0,
     };
     let mut pool = ScratchPool::new(&device, cfg).expect("ScratchPool::new");

@@ -139,6 +139,7 @@ fn run_gdn_forward() -> Vec<f32> {
         gdn: Some(dims),
         per_layer_kv_widths: None,
         attn_q_gated: false,
+        kv_share_src: None,
             shared_intermediate: 0,
     };
     let mut pool = ScratchPool::new(&device, cfg).expect("ScratchPool::new");
@@ -264,6 +265,7 @@ fn multi_session_leak_dense_then_gdn() {
                 rms_eps: D_RMS_EPS,
                 softmax_scale: None,
                 attn_q_gated: false,
+                kv_share_src: None,
             });
             ffn_weights.push(FfnWeights {
                 ffn_norm: allocs.upload_f16(&vec![1.0_f32; D_HIDDEN]),
@@ -299,6 +301,7 @@ fn multi_session_leak_dense_then_gdn() {
             gdn: None,
             per_layer_kv_widths: None,
             attn_q_gated: false,
+            kv_share_src: None,
             shared_intermediate: 0,
         };
         let mut pool = ScratchPool::new(&device, cfg).expect("ScratchPool::new");

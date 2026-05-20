@@ -47,6 +47,27 @@ pub fn standard_attn_local<H: TopologyHooks>(
             state.pool.kv_caches.len()
         );
     }
+    // gemma 4n shared-KV: read/write through the share-source's slot
+    // and skip the K/V cache append. Source layer's own KV write
+    // populated the cache on its earlier pass; this layer only reuses
+    // it. `attn_q` is still this layer's, so Q projection runs.
+    let kv_local_idx = match weights.kv_share_src {
+        Some(src) => src.checked_sub(state.layer_idx_offset).ok_or_else(|| {
+            anyhow::anyhow!(
+                "standard_attn: kv_share_src {src} < layer_idx_offset {}",
+                state.layer_idx_offset
+            )
+        })?,
+        None => local_idx,
+    };
+    if kv_local_idx >= state.pool.kv_caches.len() {
+        bail!(
+            "standard_attn: kv_local_idx {kv_local_idx} (src {:?}) >= owned_layers {}",
+            weights.kv_share_src,
+            state.pool.kv_caches.len()
+        );
+    }
+    let is_kv_shared = weights.kv_share_src.is_some();
     let max_seq_len = state.pool.config.max_seq_len;
     let max_slots = state.pool.config.max_slots.max(1);
     for (i, (&pos, &slot)) in positions.iter().zip(slot_ids.iter()).enumerate() {
@@ -88,10 +109,10 @@ pub fn standard_attn_local<H: TopologyHooks>(
             state.pool.config.kv_width
         );
     }
-    let slot_kv_width = state.pool.kv_caches[local_idx].kv_width;
+    let slot_kv_width = state.pool.kv_caches[kv_local_idx].kv_width;
     if slot_kv_width != kv_width {
         bail!(
-            "standard_attn: kv_caches[{local_idx}].kv_width {slot_kv_width} != \
+            "standard_attn: kv_caches[{kv_local_idx}].kv_width {slot_kv_width} != \
              weights kv_width {kv_width} (per-layer KV cache sizing mismatch)"
         );
     }
@@ -352,7 +373,7 @@ pub fn standard_attn_local<H: TopologyHooks>(
     )?;
     let _ = weights.rope_variant;
 
-    let kv = state.pool.kv_caches[local_idx];
+    let kv = state.pool.kv_caches[kv_local_idx];
     let slot_stride_elems = max_seq_len * kv_width;
     let slot_stride_bytes = slot_stride_elems * 2;
     let scale = weights
@@ -369,18 +390,20 @@ pub fn standard_attn_local<H: TopologyHooks>(
         let mut v_cache =
             unsafe { Tensor::<F16>::from_raw(v_slot_ptr, slot_stride_elems) };
         let v_f16_view = unsafe { Tensor::<F16>::from_raw(state.pool.v_f16, n * kv_width) };
-        flambeau_model_ops::kv_append_f16(
-            &k_f16_rope,
-            &v_f16_view,
-            &mut k_cache,
-            &mut v_cache,
-            n,
-            kv_width,
-            start_position,
-            max_seq_len,
-            state.device,
-            state.stream,
-        )?;
+        if !is_kv_shared {
+            flambeau_model_ops::kv_append_f16(
+                &k_f16_rope,
+                &v_f16_view,
+                &mut k_cache,
+                &mut v_cache,
+                n,
+                kv_width,
+                start_position,
+                max_seq_len,
+                state.device,
+                state.stream,
+            )?;
+        }
         let mut attn_out =
             unsafe { Tensor::<F16>::from_raw(state.pool.attn_out_f16, n * q_width) };
         if n == 1 {
@@ -522,16 +545,23 @@ pub fn standard_attn_local<H: TopologyHooks>(
         flambeau_core::Stream::synchronize(state.stream)?;
         let k_src_full = unsafe { Tensor::<F16>::from_raw(state.pool.k_f16, n * kv_width) };
         let v_src_full = unsafe { Tensor::<F16>::from_raw(state.pool.v_f16, n * kv_width) };
-        flambeau_model_ops::kv_append_f16_batched_slots(
-            &k_src_full,
-            &v_src_full,
-            state.pool.attn_slot_k_dst_ptrs,
-            state.pool.attn_slot_v_dst_ptrs,
-            state.pool.attn_slot_write_pos,
-            n,
-            kv_width,
-            &ops,
-        )?;
+        if !is_kv_shared {
+            flambeau_model_ops::kv_append_f16_batched_slots(
+                &k_src_full,
+                &v_src_full,
+                state.pool.attn_slot_k_dst_ptrs,
+                state.pool.attn_slot_v_dst_ptrs,
+                state.pool.attn_slot_write_pos,
+                n,
+                kv_width,
+                &ops,
+            )?;
+        }
+        // The two `_src_full` slot pointer arrays must point at the
+        // share-source's KV cache slabs when reading shared KV. The
+        // host-side arrays above were filled from `kv` which already
+        // routed via `kv_local_idx`, so this is correct.
+        let _ = (&k_src_full, &v_src_full);
         let q_batched =
             unsafe { Tensor::<F16>::from_raw(state.pool.q_f16, n * q_width) };
         let mut attn_out_batched =

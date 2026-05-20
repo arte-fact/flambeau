@@ -47,6 +47,12 @@ pub struct DenseAttnLayerSpec<'a> {
     /// Q-projection output per head and applies a sigmoid gate after
     /// attention. `false` for plain-Q arches (gemma4 dense).
     pub attn_q_gated: bool,
+    /// When `Some(src)`, this layer reuses layer `src`'s KV cache
+    /// slot (gemma 4n `shared_kv_layers`). Passed through to
+    /// `AttnWeights::kv_share_src`; the loader still uploads attn_k /
+    /// attn_v if their tensors exist on disk (the projection bytes
+    /// are computed and discarded in the composite).
+    pub kv_share_src: Option<usize>,
 }
 
 pub fn load_dense_attn_layer(
@@ -137,5 +143,6 @@ pub fn load_dense_attn_layer(
         rms_eps: spec.rms_eps,
         softmax_scale: spec.softmax_scale,
         attn_q_gated: spec.attn_q_gated,
+        kv_share_src: spec.kv_share_src,
     })
 }

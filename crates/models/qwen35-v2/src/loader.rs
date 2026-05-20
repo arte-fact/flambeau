@@ -186,6 +186,7 @@ fn load_with_shard(
                     rms_eps: config.rms_eps,
                     softmax_scale: None,
                     attn_q_gated: true,
+                    kv_share_src: None,
                 },
                 shard,
                 &mut allocs,

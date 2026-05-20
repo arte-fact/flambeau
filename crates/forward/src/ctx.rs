@@ -347,6 +347,14 @@ pub struct AttnWeights {
     /// `true` for qwen3.5 / qwen3.6 / qwen3-Next full-attention
     /// layers (fused Q+gate in `attn_q`). `false` for plain Q.
     pub attn_q_gated: bool,
+    /// Per-layer KV-cache share source (gemma 4n / E2B / E4B's
+    /// `shared_kv_layers`). When `Some(src_layer)`, this layer's
+    /// attention reads K/V from layer `src_layer`'s KV cache slot
+    /// instead of its own, and skips the `kv_append` write. The Q
+    /// projection still uses this layer's `attn_q`. The K/V
+    /// projection bytes are computed but discarded (cheaper than
+    /// branching the composite). `None` ⇒ normal own-KV path.
+    pub kv_share_src: Option<usize>,
 }
 
 pub struct FfnWeights {
