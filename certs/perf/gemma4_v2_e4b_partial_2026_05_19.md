@@ -1,12 +1,15 @@
 # gemma4-v2 E4B / E2B (per-layer-embd) — partial implementation status
 
-Date: 2026-05-19
-Status: **scaffolding lands, output not coherent yet**
+Date: 2026-05-20
+Status: **scaffolding lands; coherence-blocker localised to shared-KV
+routing — distinct from the per-layer-embd path**
 
 E4B now boots through the full forward path including the per-layer
 side-channel build + apply, but generates incoherent tokens on real
-prompts. The infrastructure is in place; the math doesn't pass
-coherence and needs a side-by-side diff against llama.cpp to localise.
+prompts. The infrastructure is in place. The output-coherence bug has
+been localised (see "Root cause" below); it is a *different* missing
+feature from the per-layer-embd, so the next session is two separate
+pieces of work, not a debug diff.
 
 ## What landed
 
@@ -45,37 +48,80 @@ coherence and needs a side-by-side diff against llama.cpp to localise.
 ## Current behaviour
 
 Boot succeeds. A short chat call (`"The capital of France is"`,
-24-token decode) returns 24 random unicode-soup tokens. Disabling the
-apply block (test env `FLAMBEAU_E4B_NO_PLE=1` during the debug, now
-removed) also produces garbage — different garbage. That means the
-output isn't right *with or without* the per-layer side-channel:
+24-token decode) returns 24 random unicode-soup tokens. A diagnostic
+flag (`FLAMBEAU_E4B_NO_PLE=1` — bypassed the apply block during
+debug, then removed) showed the same garbage shape *without* the
+per-layer side-channel apply running. So the bug is upstream of the
+per-layer-embd path.
 
-- The base gemma4 forward path on E4B itself isn't producing
-  coherent state. Suspects to chase next session:
-  - **GGUF reports `gemma4.attention.shared_kv_layers = 18` but every
-    blk.N has its own `attn_v.weight`** — investigate whether this is
-    metadata-only or whether some layers must read KV from a peer.
-    Legacy gemma4 has `kv_share_src` resolver logic; v2 does not.
-  - **Per-layer attention head_dim alternates** (256 for SWA, 512 for
-    full-attn) — verify the config-driven dispatch path lines up.
-  - **Q/K-norm per-head dim** (256 vs 512 per layer) — verify the
-    norm weights are loaded with matching dims.
-- The per-layer side-channel math itself may also be off; not yet
-  validated independently of the rest.
+## Root cause — KV sharing for the tail 18 layers
 
-## What to validate next session
+`gemma4.attention.shared_kv_layers = 18` on the E4B GGUF means the
+tail 18 layers (indices 24..41) **do not own their KV — they reuse
+K/V written by earlier layers' caches**.
 
-1. Boot E4B with `FLAMBEAU_E4B_NO_PLE=1` (re-add the diagnostic flag
-   in model.rs at the per_layer_embd_apply call site). If output is
-   *still* garbage, the per-layer-embd path is downstream of the bug.
-2. Run llama.cpp on the same prompt with `--log-disable` off and
-   verbose mode. Capture per-layer intermediate tensors (probably via
-   GGML_LOG=) and compare against flambeau's same-shape state. The
-   first divergent layer points at the bug.
-3. Confirm the head_dim per-layer path: at layer 17 (first full-attn
-   layer, head_dim=512), the SWA-layer head_dim_swa=256 attn_q_norm
-   shape changes to 512. Make sure the loader picks the right size
-   per layer.
+llama.cpp's `src/llama-hparams.cpp:231` computes
+`n_layer_kv_from_start = n_layer - n_kv_shared_layers = 42 - 18 = 24`.
+Then `src/models/gemma4-iswa.cpp:79`:
+
+```cpp
+if (hparams.has_kv(il)) {                // il < 24
+    // compute K, V; KV-write; attention read
+} else {                                 // il in [24, 42)
+    // compute Q only; read K/V from a previous layer's cache
+    cur = build_attn(inp_attn, wo, ..., Qcur, nullptr, nullptr, ...);
+}
+```
+
+v2's `flambeau_blocks::StandardAttention` has no KV-share routing.
+It runs the full Q + K + V projection + KV-write + attention read
+for every layer. For layers 24..41 this:
+
+1. Wastes the K, V projection work
+2. Writes K, V to a slot that is never read
+3. Reads zeros (or stale state) from the layer's own — never written —
+   KV cache for the actual attention computation
+4. Produces a near-zero or garbage attention delta
+5. Pollutes the residual stream with bad attention output
+
+That alone is enough to make output incoherent. The per-layer-embd
+math added on top is correct in shape but reading from a residual
+that's already corrupt.
+
+The GGUF still lists `blk.N.attn_v.weight` for `il >= 24` (legacy
+loader artifact from the original Google export) but llama.cpp
+silently ignores those tensors when `has_kv(il) == false`.
+
+## What to do next session (split into two parts)
+
+**Part A — KV-share routing (unblocks coherent E4B output)**:
+
+1. Add per-layer `has_kv: bool` to gemma4-v2's config / layout.
+   Set `has_kv = il < n_layer - shared_kv_layers`. (And, separately:
+   load `gemma4.attention.shared_kv_layers` as an optional u32 in
+   `Gemma4V2Config::from_gguf`.)
+2. In gemma4-v2's loader: when `has_kv == false`, skip loading
+   `attn_k`, `attn_v`, `attn_k_norm`, `attn_v_unit_norm_w` for that
+   layer.
+3. In `flambeau_blocks::StandardAttention` (or a small `StandardAttention
+   ::with_shared_kv` builder) plus `standard_attn_local`: when the
+   layer has `has_kv == false`, skip the K/V projection + KV write +
+   the `kv_append` kernel; the attention-read should use the
+   share-src layer's KV cache slot.
+4. Loader needs a `kv_share_src` resolver (legacy gemma4's
+   `ModelLayout::resolve_kv_sharing` is the existing reference).
+   The simplest mapping for E4B: `kv_share_src[il] = il_of_last_full_layer_le(il)`
+   where the "last full layer" tracks the most recent has_kv layer in
+   the SWA/full alternation.
+
+**Part B — validate the per-layer-embd math once attention is right**:
+
+1. Re-add a `FLAMBEAU_E4B_NO_PLE` diagnostic gate in the model.rs
+   per_layer_embd_apply call site.
+2. Boot E4B with KV-share landed. With `FLAMBEAU_E4B_NO_PLE=1` the
+   model should be runnable (probably degraded coherence — the
+   per-layer side-channel is load-bearing — but not garbage soup).
+3. Drop the env flag and confirm coherence vs llama.cpp.
 
 ## Files changed (commit boundary)
 
