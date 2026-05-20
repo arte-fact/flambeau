@@ -672,6 +672,24 @@ impl<'a> Ops for HipOps<'a> {
         )
     }
 
+    fn rmsnorm_rope_neox_partial_f16(
+        &self,
+        x: DevicePtr,
+        norm_w: DevicePtr,
+        positions: DevicePtr,
+        theta_base: f32,
+        eps: f32,
+        n_tokens: usize,
+        n_heads: usize,
+        head_dim: usize,
+        rotated_dims: usize,
+    ) -> Result<()> {
+        super::pe::rmsnorm_rope_neox_partial_f16(
+            self.reg, self.stream, x, norm_w, positions, theta_base, eps, n_tokens, n_heads,
+            head_dim, rotated_dims,
+        )
+    }
+
     // -- cast --
 
     fn cast_f32_to_f16(&self, x_f32: DevicePtr, y_f16: DevicePtr, n: usize) -> Result<()> {

@@ -555,6 +555,22 @@ pub trait Ops {
         rotated_dims: usize,
     ) -> Result<()>;
 
+    /// Fused per-head rmsnorm + partial NeoX RoPE, F16 in-place. See
+    /// `hip::pe::rmsnorm_rope_neox_partial_f16` for the math.
+    #[allow(clippy::too_many_arguments)]
+    fn rmsnorm_rope_neox_partial_f16(
+        &self,
+        x: DevicePtr,
+        norm_w: DevicePtr,
+        positions: DevicePtr,
+        theta_base: f32,
+        eps: f32,
+        n_tokens: usize,
+        n_heads: usize,
+        head_dim: usize,
+        rotated_dims: usize,
+    ) -> Result<()>;
+
     // -- cast (dtype conversion) --
 
     fn cast_f32_to_f16(&self, x_f32: DevicePtr, y_f16: DevicePtr, n: usize) -> Result<()>;

@@ -275,64 +275,8 @@ pub fn standard_attn_local<H: TopologyHooks>(
         }
     }
 
-    // Per-head Q/K norm over (n_tokens * n_heads) rows of head_dim.
-    if let Some(q_norm_w) = weights.attn_q_norm.as_ref() {
-        let q_normed = unsafe { Tensor::<F16>::from_raw(state.pool.q_f16, n * q_width) };
-        let mut tmp =
-            unsafe { Tensor::<F16>::from_raw(state.pool.attn_out_f16, n * q_width) };
-        flambeau_model_ops::rmsnorm_f16(
-            &q_normed,
-            q_norm_w,
-            &mut tmp,
-            n * weights.n_heads,
-            weights.head_dim,
-            weights.rms_eps,
-            &ops,
-        )?;
-        let bytes = n * q_width * 2;
-        unsafe {
-            state
-                .device
-                .memcpy_async(
-                    state.stream,
-                    CopyDirection::DeviceToDevice,
-                    state.pool.q_f16,
-                    tmp.ptr,
-                    bytes,
-                )
-                .context("standard_attn: q_norm DtoD copy back")?;
-        }
-        let _ = q_normed;
-    }
-    if let Some(k_norm_w) = weights.attn_k_norm.as_ref() {
-        let k_normed = unsafe { Tensor::<F16>::from_raw(state.pool.k_f16, n * kv_width) };
-        let mut tmp =
-            unsafe { Tensor::<F16>::from_raw(state.pool.attn_out_f16, n * kv_width) };
-        flambeau_model_ops::rmsnorm_f16(
-            &k_normed,
-            k_norm_w,
-            &mut tmp,
-            n * weights.n_kv_heads,
-            weights.head_dim,
-            weights.rms_eps,
-            &ops,
-        )?;
-        let bytes = n * kv_width * 2;
-        unsafe {
-            state
-                .device
-                .memcpy_async(
-                    state.stream,
-                    CopyDirection::DeviceToDevice,
-                    state.pool.k_f16,
-                    tmp.ptr,
-                    bytes,
-                )
-                .context("standard_attn: k_norm DtoD copy back")?;
-        }
-        let _ = k_normed;
-    }
-
+    // Positions HtoD hoisted ahead of the Q/K norm step so the fused
+    // rmsnorm+RoPE kernel can read positions when q_norm / k_norm are set.
     let positions_i32: Vec<i32> = positions.iter().map(|&p| p as i32).collect();
     let pos_bytes = n * 4;
     // SAFETY: position_i32 sized max_prefill_tokens * i32.
@@ -351,26 +295,60 @@ pub fn standard_attn_local<H: TopologyHooks>(
     let pos_tensor = unsafe { Tensor::<I32>::from_raw(state.pool.position_i32, n) };
     let mut q_f16_rope = unsafe { Tensor::<F16>::from_raw(state.pool.q_f16, n * q_width) };
     let mut k_f16_rope = unsafe { Tensor::<F16>::from_raw(state.pool.k_f16, n * kv_width) };
-    flambeau_model_ops::rope_neox_partial_f16(
-        &mut q_f16_rope,
-        &pos_tensor,
-        weights.rope_theta,
-        n,
-        weights.n_heads,
-        weights.head_dim,
-        weights.rotated_dims,
-        &ops,
-    )?;
-    flambeau_model_ops::rope_neox_partial_f16(
-        &mut k_f16_rope,
-        &pos_tensor,
-        weights.rope_theta,
-        n,
-        weights.n_kv_heads,
-        weights.head_dim,
-        weights.rotated_dims,
-        &ops,
-    )?;
+
+    // gemma4 Q/K-norm + RoPE: fuse into one in-place launch each. Replaces
+    // (rmsnorm_f16 → DtoD memcpy back → rope_neox_partial_f16) for archs
+    // that set attn_q_norm / attn_k_norm. Saves 2 launches + 1 DtoD per
+    // path per layer per token (Q and K independently).
+    use flambeau_ops::Ops;
+    if let Some(q_norm_w) = weights.attn_q_norm.as_ref() {
+        ops.rmsnorm_rope_neox_partial_f16(
+            state.pool.q_f16,
+            q_norm_w.ptr,
+            state.pool.position_i32,
+            weights.rope_theta,
+            weights.rms_eps,
+            n,
+            weights.n_heads,
+            weights.head_dim,
+            weights.rotated_dims,
+        )?;
+    } else {
+        flambeau_model_ops::rope_neox_partial_f16(
+            &mut q_f16_rope,
+            &pos_tensor,
+            weights.rope_theta,
+            n,
+            weights.n_heads,
+            weights.head_dim,
+            weights.rotated_dims,
+            &ops,
+        )?;
+    }
+    if let Some(k_norm_w) = weights.attn_k_norm.as_ref() {
+        ops.rmsnorm_rope_neox_partial_f16(
+            state.pool.k_f16,
+            k_norm_w.ptr,
+            state.pool.position_i32,
+            weights.rope_theta,
+            weights.rms_eps,
+            n,
+            weights.n_kv_heads,
+            weights.head_dim,
+            weights.rotated_dims,
+        )?;
+    } else {
+        flambeau_model_ops::rope_neox_partial_f16(
+            &mut k_f16_rope,
+            &pos_tensor,
+            weights.rope_theta,
+            n,
+            weights.n_kv_heads,
+            weights.head_dim,
+            weights.rotated_dims,
+            &ops,
+        )?;
+    }
     let _ = weights.rope_variant;
 
     let kv = state.pool.kv_caches[kv_local_idx];
