@@ -279,6 +279,24 @@ impl<'a> Ops for HipOps<'a> {
         )
     }
 
+    fn kv_append_v_unit_norm_f16(
+        &self,
+        k_src: DevicePtr,
+        v_src: DevicePtr,
+        k_cache: DevicePtr,
+        v_cache: DevicePtr,
+        n_tokens: usize,
+        n_kv_heads: usize,
+        head_dim: usize,
+        write_pos: usize,
+        eps: f32,
+    ) -> Result<()> {
+        super::attention::kv_append_v_unit_norm_f16(
+            self.reg, self.stream, k_src, v_src, k_cache, v_cache,
+            n_tokens, n_kv_heads, head_dim, write_pos, eps,
+        )
+    }
+
     fn attention_decode_f16_splitk(
         &self,
         q: DevicePtr,

@@ -824,3 +824,62 @@ fn push_scalar_maybe_slot<'a, T: 'a>(
         None => args.push(v),
     }
 }
+
+/// Fused KV-cache append with V unit-RMSNorm. For gemma4 archs that
+/// apply RMSNorm V (unit weights) before the cache write. Saves
+/// (rmsnorm_f16 + DtoD memcpy back + 2× DtoD memcpy kv_append) → 1
+/// kernel launch per layer per token.
+///
+/// `k_src` / `v_src`: F16 [n_tokens, n_kv_heads, head_dim] in scratch.
+/// `k_cache` / `v_cache`: F16 [max_seq, n_kv_heads, head_dim] slot.
+/// `write_pos`: starting row offset within the slot.
+/// `head_dim` ∈ {64, 128, 256, 512}.
+#[allow(clippy::too_many_arguments)]
+pub fn kv_append_v_unit_norm_f16(
+    reg: &OpsRegistry,
+    stream: &HipStream,
+    k_src: DevicePtr,
+    v_src: DevicePtr,
+    k_cache: DevicePtr,
+    v_cache: DevicePtr,
+    n_tokens: usize,
+    n_kv_heads: usize,
+    head_dim: usize,
+    write_pos: usize,
+    eps: f32,
+) -> Result<()> {
+    let entry = match head_dim {
+        64  => "flambeau_kv_append_v_unit_norm_f16_d64",
+        128 => "flambeau_kv_append_v_unit_norm_f16_d128",
+        256 => "flambeau_kv_append_v_unit_norm_f16_d256",
+        512 => "flambeau_kv_append_v_unit_norm_f16_d512",
+        other => anyhow::bail!(
+            "kv_append_v_unit_norm_f16: head_dim {other} not in {{64, 128, 256, 512}}"
+        ),
+    };
+    let module = reg.expect_module("kv_append_v_unit_norm_f16")?;
+    let kernel = module.kernel(entry)?;
+
+    let n_kv_heads_i = n_kv_heads as i32;
+    let write_pos_i = write_pos as i32;
+    let eps_f = eps;
+    let k_src_p: u64 = k_src.as_usize() as u64;
+    let v_src_p: u64 = v_src.as_usize() as u64;
+    let k_dst_p: u64 = k_cache.as_usize() as u64;
+    let v_dst_p: u64 = v_cache.as_usize() as u64;
+    let mut args = flambeau_backend_hip::KernelArgs::new();
+    args.push(&k_src_p);
+    args.push(&v_src_p);
+    args.push(&k_dst_p);
+    args.push(&v_dst_p);
+    args.push(&n_kv_heads_i);
+    args.push(&write_pos_i);
+    args.push(&eps_f);
+    let cfg = flambeau_backend_hip::LaunchCfg {
+        grid: (n_tokens as u32, n_kv_heads as u32, 1),
+        block: (head_dim as u32, 1, 1),
+        shared_bytes: 0,
+    };
+    unsafe { kernel.launch(stream, cfg, args)? };
+    Ok(())
+}

@@ -220,6 +220,22 @@ pub trait Ops {
         kv_width: usize,
     ) -> Result<()>;
 
+    /// Fused V unit-RMSNorm + KV-cache append (K direct copy, V normed).
+    /// See `hip::attention::kv_append_v_unit_norm_f16`.
+    #[allow(clippy::too_many_arguments)]
+    fn kv_append_v_unit_norm_f16(
+        &self,
+        k_src: DevicePtr,
+        v_src: DevicePtr,
+        k_cache: DevicePtr,
+        v_cache: DevicePtr,
+        n_tokens: usize,
+        n_kv_heads: usize,
+        head_dim: usize,
+        write_pos: usize,
+        eps: f32,
+    ) -> Result<()>;
+
     #[allow(clippy::too_many_arguments)]
     fn attention_decode_f16_splitk(
         &self,

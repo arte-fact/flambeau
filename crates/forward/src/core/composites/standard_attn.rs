@@ -244,36 +244,12 @@ pub fn standard_attn_local<H: TopologyHooks>(
     }
     let _ = q_f32_buf;
 
-    // Per-head V unit-weights rmsnorm (gemma4 trained behavior). The
-    // legacy stack does this via a scratch.v_ones_f16 vector; v2 reuses
-    // attn_out_f16 as the tmp and writes back to v_f16. Applied AFTER
-    // V is materialised (both V-from-K and explicit V-proj paths).
-    if let Some(v_unit_w) = weights.attn_v_unit_norm_w.as_ref() {
-        let v_in = unsafe { Tensor::<F16>::from_raw(state.pool.v_f16, n * kv_width) };
-        let mut v_tmp = unsafe { Tensor::<F16>::from_raw(state.pool.attn_out_f16, n * kv_width) };
-        flambeau_model_ops::rmsnorm_f16(
-            &v_in,
-            v_unit_w,
-            &mut v_tmp,
-            n * weights.n_kv_heads,
-            weights.head_dim,
-            weights.rms_eps,
-            &ops,
-        )?;
-        let bytes = n * kv_width * 2;
-        unsafe {
-            state
-                .device
-                .memcpy_async(
-                    state.stream,
-                    CopyDirection::DeviceToDevice,
-                    state.pool.v_f16,
-                    v_tmp.ptr,
-                    bytes,
-                )
-                .context("standard_attn: v_unit_norm DtoD copy back")?;
-        }
-    }
+    // V unit-RMSNorm (gemma4 trained behavior) is fused into the
+    // KV-cache append below for the single-slot path when
+    // `attn_v_unit_norm_w` is set. The fused kernel writes the normed
+    // V directly to the cache slot — eliminates this standalone
+    // rmsnorm + DtoD memcpy pair from the per-layer per-token cost.
+    let _ = weights.attn_v_unit_norm_w; // consumed in the prefill_shape branch below.
 
     // Positions HtoD hoisted ahead of the Q/K norm step so the fused
     // rmsnorm+RoPE kernel can read positions when q_norm / k_norm are set.
@@ -369,18 +345,35 @@ pub fn standard_attn_local<H: TopologyHooks>(
             unsafe { Tensor::<F16>::from_raw(v_slot_ptr, slot_stride_elems) };
         let v_f16_view = unsafe { Tensor::<F16>::from_raw(state.pool.v_f16, n * kv_width) };
         if !is_kv_shared {
-            flambeau_model_ops::kv_append_f16(
-                &k_f16_rope,
-                &v_f16_view,
-                &mut k_cache,
-                &mut v_cache,
-                n,
-                kv_width,
-                start_position,
-                max_seq_len,
-                state.device,
-                state.stream,
-            )?;
+            if weights.attn_v_unit_norm_w.is_some() {
+                // gemma4 path: fuse V unit-RMSNorm into the cache write.
+                // K copy + V normalize-then-copy in one launch.
+                use flambeau_ops::Ops;
+                ops.kv_append_v_unit_norm_f16(
+                    state.pool.k_f16,
+                    state.pool.v_f16,
+                    k_cache.ptr,
+                    v_cache.ptr,
+                    n,
+                    weights.n_kv_heads,
+                    weights.head_dim,
+                    start_position,
+                    weights.rms_eps,
+                )?;
+            } else {
+                flambeau_model_ops::kv_append_f16(
+                    &k_f16_rope,
+                    &v_f16_view,
+                    &mut k_cache,
+                    &mut v_cache,
+                    n,
+                    kv_width,
+                    start_position,
+                    max_seq_len,
+                    state.device,
+                    state.stream,
+                )?;
+            }
         }
         let mut attn_out =
             unsafe { Tensor::<F16>::from_raw(state.pool.attn_out_f16, n * q_width) };

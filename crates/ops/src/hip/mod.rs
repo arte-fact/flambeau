@@ -235,6 +235,7 @@ pub const KERNEL_STEMS: &[&str] = &[
     "rope_f16",
     "rope_neox_partial_f16",
     "rmsnorm_rope_neox_partial_f16",
+    "kv_append_v_unit_norm_f16",
     "softmax_masked_f16",
     // Attention.
     "attention_decode_f16",
