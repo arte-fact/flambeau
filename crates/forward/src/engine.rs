@@ -674,8 +674,8 @@ impl<H: TopologyHooks, S: StageHooks> ForwardCtx for ForwardEngine<'_, H, S> {
         main_embd: &Tensor<F16>,
         tok_embd_row_raw: &[u8],
         tok_embd_dtype: flambeau_quant::GgmlDType,
-        model_proj_raw: &[u8],
-        model_proj_dtype: flambeau_quant::GgmlDType,
+        model_proj_f16_dev: flambeau_core::DevicePtr,
+        proj_matmul_f32_dev: flambeau_core::DevicePtr,
         proj_norm_raw: &[u8],
         table_dev: flambeau_core::DevicePtr,
         pe: usize,
@@ -684,7 +684,6 @@ impl<H: TopologyHooks, S: StageHooks> ForwardCtx for ForwardEngine<'_, H, S> {
         rms_eps: f32,
     ) -> Result<()> {
         use flambeau_core::{CopyDirection, DevicePtr, Stream};
-        use half::f16;
         if main_embd.n_elems < hidden {
             anyhow::bail!(
                 "per_layer_embd_build_table: main_embd has {} elems, hidden = {hidden}",
@@ -693,25 +692,38 @@ impl<H: TopologyHooks, S: StageHooks> ForwardCtx for ForwardEngine<'_, H, S> {
         }
         let device = self.core.device;
         let stream = self.core.stream;
-        let mut inp_batch_f16 = vec![f16::ZERO; hidden];
+
+        // GPU-side per_layer_model_proj @ main_embd → F32 [pe * n_layer].
+        let total = pe * n_layer;
+        flambeau_ops::hip::router::dense_gemv_f16_f16(
+            self.core.reg,
+            stream,
+            model_proj_f16_dev,
+            main_embd.ptr,
+            proj_matmul_f32_dev,
+            total,
+            hidden,
+        )
+        .context("per_layer_embd build: dense_gemv_f16_f16")?;
+
+        let mut proj_matmul_host = vec![0.0f32; total];
         unsafe {
             device.memcpy_async(
                 stream,
                 CopyDirection::DeviceToHost,
-                DevicePtr(inp_batch_f16.as_mut_ptr() as usize),
-                main_embd.ptr,
-                hidden * 2,
+                DevicePtr(proj_matmul_host.as_mut_ptr() as usize),
+                proj_matmul_f32_dev,
+                total * 4,
             )?;
         }
-        Stream::synchronize(stream).context("sync after DtoH for per_layer_embd build")?;
+        Stream::synchronize(stream)
+            .context("sync after DtoH proj_matmul for per_layer_embd build")?;
 
-        let table = flambeau_blocks::per_layer_embd::build_inp_per_layer_table(
+        let table = flambeau_blocks::per_layer_embd::build_inp_per_layer_table_with_proj(
             tok_embd_row_raw,
             tok_embd_dtype,
-            model_proj_raw,
-            model_proj_dtype,
+            &proj_matmul_host,
             proj_norm_raw,
-            &inp_batch_f16,
             pe,
             n_layer,
             hidden,

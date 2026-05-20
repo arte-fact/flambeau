@@ -133,6 +133,83 @@ pub fn table_slice_ptr(table_base: DevicePtr, il: usize, pe: usize) -> DevicePtr
     table_base.offset_bytes(il * pe * 4)
 }
 
+/// Host-side build with the `per_layer_model_proj @ inp_batch` matmul
+/// PRECOMPUTED. The caller supplies `proj_matmul_f32` of length
+/// `pe * n_layer` containing `per_layer_model_proj @ inp_batch` (no
+/// scaling applied yet). This skips the BF16 matmul that dominates
+/// the CPU build at ~5.5 ms / token on E4B.
+///
+/// Apply order matches [`build_inp_per_layer_table`]:
+/// 1. table = dequant(per_layer_token_embd[token]) * sqrt(pe)
+/// 2. proj  = proj_matmul_f32 * (1 / sqrt(hidden))
+/// 3. proj  = rmsnorm(proj_view[layer, pe], per_layer_proj_norm) per layer
+/// 4. out   = (table + proj) * (1 / sqrt(2))
+#[allow(clippy::too_many_arguments)]
+pub fn build_inp_per_layer_table_with_proj(
+    tok_embd_row_raw: &[u8],
+    tok_embd_dtype: GgmlDType,
+    proj_matmul_f32: &[f32],
+    proj_norm_raw: &[u8],
+    pe: usize,
+    n_layer: usize,
+    hidden: usize,
+    rms_norm_eps: f32,
+) -> Result<Vec<f32>> {
+    let total = pe * n_layer;
+    if proj_matmul_f32.len() != total {
+        bail!(
+            "build_inp_per_layer_table_with_proj: proj len {} != pe*n_layer {}",
+            proj_matmul_f32.len(),
+            total
+        );
+    }
+    let table = if tok_embd_dtype == GgmlDType::F32 {
+        let bytes_needed = total * 4;
+        if tok_embd_row_raw.len() < bytes_needed {
+            bail!(
+                "tok_embd row {} < expected {}",
+                tok_embd_row_raw.len(),
+                bytes_needed
+            );
+        }
+        bytemuck::cast_slice::<u8, f32>(&tok_embd_row_raw[..bytes_needed]).to_vec()
+    } else {
+        flambeau_quant::dequantize_to_vec(tok_embd_dtype, tok_embd_row_raw, total)
+            .map_err(|e| anyhow!("dequant per_layer_token_embd row: {e}"))?
+    };
+    let pe_sqrt = (pe as f32).sqrt();
+    let mut table: Vec<f32> = table.iter().map(|v| *v * pe_sqrt).collect();
+
+    let inv_sqrt_n = 1.0 / (hidden as f32).sqrt();
+    let mut proj: Vec<f32> = proj_matmul_f32.iter().map(|v| *v * inv_sqrt_n).collect();
+
+    if proj_norm_raw.len() < pe * 4 {
+        bail!(
+            "per_layer_proj_norm {} < pe*4={}",
+            proj_norm_raw.len(),
+            pe * 4
+        );
+    }
+    let proj_norm: &[f32] = bytemuck::cast_slice(&proj_norm_raw[..pe * 4]);
+    for il in 0..n_layer {
+        let row = &mut proj[il * pe..(il + 1) * pe];
+        let mut ss = 0.0f64;
+        for &v in row.iter() {
+            ss += (v as f64) * (v as f64);
+        }
+        let inv_rms = 1.0 / ((ss / pe as f64).sqrt() + rms_norm_eps as f64);
+        for (i, v) in row.iter_mut().enumerate() {
+            *v = ((*v as f64) * inv_rms * proj_norm[i] as f64) as f32;
+        }
+    }
+
+    let inv_sqrt_2 = 1.0 / 2.0f32.sqrt();
+    for (t, p) in table.iter_mut().zip(proj.iter()) {
+        *t = (*t + *p) * inv_sqrt_2;
+    }
+    Ok(table)
+}
+
 /// Host-side build of `inp_per_layer_table` for the current token.
 ///
 /// Mirrors llama.cpp's `project_per_layer_inputs` for n_tokens = 1:

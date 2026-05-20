@@ -8,7 +8,7 @@
 use anyhow::{bail, Context, Result};
 use flambeau_backend_hip::HipDevice;
 use flambeau_blocks::per_layer_embd::PerLayerEmbedLayerWeights;
-use flambeau_core::{Device, DevicePtr};
+use flambeau_core::{CopyDirection, Device, DevicePtr, Stream};
 use flambeau_forward::ctx::{
     Activation, AttnWeights, EmbeddingWeights, FfnWeights, LmHeadWeights, ModelLayout,
     MoeWeights, SharedExpertWeights,
@@ -34,12 +34,18 @@ pub struct PerLayerEmbdGlobals {
     pub tok_embd_raw: Vec<u8>,
     pub tok_embd_dtype: GgmlDType,
     pub tok_embd_row_bytes: usize,
-    pub model_proj_raw: Vec<u8>,
-    pub model_proj_dtype: GgmlDType,
     pub proj_norm_raw: Vec<u8>,
     /// Device buffer the host build helper uploads into, sized
     /// `pe * n_layer * sizeof(f32)`.
     pub table_dev: DevicePtr,
+    /// `per_layer_model_proj` cast to F16 on device — F16 `[pe *
+    /// n_layer, hidden]` row-major. Moves the BF16 × F16 matmul
+    /// (~5.5 ms / token on CPU) onto the GPU as
+    /// `dense_gemv_f16_f16`.
+    pub model_proj_f16_dev: DevicePtr,
+    /// Device scratch for the F16-matmul output, sized `pe * n_layer
+    /// * sizeof(f32)`.
+    pub proj_matmul_f32_dev: DevicePtr,
     pub pe: usize,
 }
 
@@ -505,14 +511,77 @@ fn load_with_shard(
             .context("read per_layer_proj_norm.weight bytes")?
             .to_vec();
 
+        // Cast `per_layer_model_proj` BF16/F32 to F16 on device so the
+        // per-token build matmul runs as `dense_gemv_f16_f16` (~10 us)
+        // instead of a CPU BF16 dot product (~5.5 ms / token).
+        let proj_elems = total * config.hidden;
+        let mut proj_f16_host: Vec<half::f16> = Vec::with_capacity(proj_elems);
+        match model_proj_info.dtype {
+            GgmlDType::BF16 => {
+                let need = proj_elems * 2;
+                if model_proj_raw.len() < need {
+                    bail!(
+                        "per_layer_model_proj raw {} < expected {}",
+                        model_proj_raw.len(),
+                        need
+                    );
+                }
+                let w: &[u16] = bytemuck::cast_slice(&model_proj_raw[..need]);
+                for &bf in w.iter() {
+                    let bits = (bf as u32) << 16;
+                    proj_f16_host.push(half::f16::from_f32(f32::from_bits(bits)));
+                }
+            }
+            GgmlDType::F32 => {
+                let need = proj_elems * 4;
+                if model_proj_raw.len() < need {
+                    bail!(
+                        "per_layer_model_proj raw {} < expected {}",
+                        model_proj_raw.len(),
+                        need
+                    );
+                }
+                let w: &[f32] = bytemuck::cast_slice(&model_proj_raw[..need]);
+                for &v in w.iter() {
+                    proj_f16_host.push(half::f16::from_f32(v));
+                }
+            }
+            other => bail!(
+                "per_layer_model_proj dtype {other:?} not supported (expected F32 or BF16)"
+            ),
+        }
+        let proj_bytes = proj_elems * 2;
+        let model_proj_f16_dev = device
+            .alloc(proj_bytes)
+            .context("alloc per_layer_model_proj f16 dev")?;
+        allocs.push((model_proj_f16_dev, proj_bytes));
+        unsafe {
+            device.memcpy_async(
+                device.default_stream(),
+                flambeau_core::CopyDirection::HostToDevice,
+                model_proj_f16_dev,
+                DevicePtr(proj_f16_host.as_ptr() as usize),
+                proj_bytes,
+            )?;
+        }
+        flambeau_core::Stream::synchronize(device.default_stream())
+            .context("sync after model_proj f16 upload")?;
+
+        let proj_matmul_bytes = total * 4;
+        let proj_matmul_f32_dev = device
+            .alloc(proj_matmul_bytes)
+            .context("alloc per_layer proj matmul scratch")?;
+        allocs.push((proj_matmul_f32_dev, proj_matmul_bytes));
+
+        drop(model_proj_raw);
         Some(PerLayerEmbdGlobals {
             tok_embd_raw,
             tok_embd_dtype: tok_embd_info.dtype,
             tok_embd_row_bytes,
-            model_proj_raw,
-            model_proj_dtype: model_proj_info.dtype,
             proj_norm_raw,
             table_dev,
+            model_proj_f16_dev,
+            proj_matmul_f32_dev,
             pe,
         })
     } else {

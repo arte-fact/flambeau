@@ -118,21 +118,23 @@ pub trait ForwardCtx {
     }
 
     /// Per-token build + upload of the side-channel embedding table.
-    /// Reads `main_embd` (F16 [hidden] for the current token) via DtoH,
-    /// runs
-    /// [`flambeau_blocks::per_layer_embd::build_inp_per_layer_table`]
-    /// host-side, and uploads the resulting `[n_layer * pe]` F32 table
-    /// to `table_dev`. Caller passes the GGUF raw byte slices for the
-    /// three per-layer-embd globals plus the row-sliced token embedding
-    /// bytes for the current token.
+    /// Runs the BF16/F16 model-proj matmul on device
+    /// (`dense_gemv_f16_f16` against `model_proj_f16_dev`, writing
+    /// `[pe * n_layer]` F32 into `proj_matmul_f32_dev`), DtoH-copies
+    /// that output, finishes the build host-side via
+    /// [`flambeau_blocks::per_layer_embd::build_inp_per_layer_table_with_proj`]
+    /// (Q5_K dequant + rmsnorm + add + scale), and HtoD-uploads the
+    /// resulting `[n_layer * pe]` F32 table to `table_dev`. Caller
+    /// supplies the row-sliced token embedding bytes for the current
+    /// token and the F32 raw norm-weight bytes.
     #[allow(clippy::too_many_arguments)]
     fn per_layer_embd_build_table(
         &mut self,
         main_embd: &Tensor<F16>,
         tok_embd_row_raw: &[u8],
         tok_embd_dtype: flambeau_quant::GgmlDType,
-        model_proj_raw: &[u8],
-        model_proj_dtype: flambeau_quant::GgmlDType,
+        model_proj_f16_dev: DevicePtr,
+        proj_matmul_f32_dev: DevicePtr,
         proj_norm_raw: &[u8],
         table_dev: DevicePtr,
         pe: usize,
@@ -141,8 +143,8 @@ pub trait ForwardCtx {
         rms_eps: f32,
     ) -> Result<()> {
         let _ = (
-            main_embd, tok_embd_row_raw, tok_embd_dtype, model_proj_raw, model_proj_dtype,
-            proj_norm_raw, table_dev, pe, n_layer, hidden, rms_eps,
+            main_embd, tok_embd_row_raw, tok_embd_dtype, model_proj_f16_dev,
+            proj_matmul_f32_dev, proj_norm_raw, table_dev, pe, n_layer, hidden, rms_eps,
         );
         anyhow::bail!("per_layer_embd_build_table not implemented for this ctx")
     }
