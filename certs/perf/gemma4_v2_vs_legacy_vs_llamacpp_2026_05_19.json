@@ -1,5 +1,5 @@
 {
-  "timestamp": "2026-05-20T07:56:12Z",
+  "timestamp": "2026-05-20T08:22:15Z",
   "tg": 64,
   "results": [
     {
@@ -9,10 +9,10 @@
       "err": null,
       "prompt_tokens": 716,
       "completion_tokens": 64,
-      "ttft_ms": 17417.778730392456,
-      "decode_ms": 1522.3839282989502,
-      "decode_tps": 41.382465243438055,
-      "prefill_tps": 41.10742311536226,
+      "ttft_ms": 17456.608295440674,
+      "decode_ms": 1521.8069553375244,
+      "decode_tps": 41.39815485731376,
+      "prefill_tps": 41.01598591674909,
       "text_head": "This request is highly complex and demands an exhaustive, multi-faceted technica"
     },
     {
@@ -35,10 +35,10 @@
       "err": null,
       "prompt_tokens": 702,
       "completion_tokens": 61,
-      "ttft_ms": 670.3929901123047,
-      "decode_ms": 851.2997627258301,
-      "decode_tps": 70.48046132173494,
-      "prefill_tps": 1047.1469874444847,
+      "ttft_ms": 668.1473255157471,
+      "decode_ms": 846.773624420166,
+      "decode_tps": 70.85719048120495,
+      "prefill_tps": 1050.66648206385,
       "text_head": "Here's a plan to structure the response:\n1.  **Analyze the Request:** The reques"
     }
   ]
