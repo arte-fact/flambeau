@@ -7,8 +7,7 @@
 
 use anyhow::{bail, Context, Result};
 use flambeau_backend_hip::HipDevice;
-use flambeau_blocks::per_layer_embd::PerLayerEmbedLayerWeights;
-use flambeau_core::{CopyDirection, Device, DevicePtr, Stream};
+use flambeau_core::{Device, DevicePtr};
 use flambeau_forward::ctx::{
     Activation, AttnWeights, EmbeddingWeights, FfnWeights, LmHeadWeights, ModelLayout, MoeWeights,
     SharedExpertWeights,
@@ -21,13 +20,14 @@ use flambeau_forward::loader::{
     upload_row_sharded_quant, DenseAttnLayerSpec, DenseFfnLayerSpec, EmbeddingSpec, LmHeadSpec,
     ShardMode,
 };
+use flambeau_forward::per_layer_embd::PerLayerEmbedLayerWeights;
 use flambeau_quant::{GgmlDType, GgufFile};
 
 use crate::config::Gemma4V2Config;
 
 /// Owned copy of the gemma 4n / E2B / E4B per-layer-embd globals.
 /// These three tensors feed
-/// [`flambeau_blocks::per_layer_embd::build_inp_per_layer_table`] once
+/// [`flambeau_forward::per_layer_embd::build_inp_per_layer_table`] once
 /// per token; we keep the raw bytes alive (mmap-derived `tensor_raw`
 /// can't outlive the loader's `&GgufFile`, so the load helper copies).
 pub struct PerLayerEmbdGlobals {

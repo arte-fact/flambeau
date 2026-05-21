@@ -218,8 +218,7 @@ mod tests {
             }
         }
 
-        let (weight_t, weight_ptr) =
-            upload::<Q8_0, u8>(&device, &weight_q8_0_bytes, N * K);
+        let (weight_t, weight_ptr) = upload::<Q8_0, u8>(&device, &weight_q8_0_bytes, N * K);
         let (act_f32_t, act_f32_ptr) = upload::<F32, f32>(&device, &act_f32, act_f32.len());
         let (mut act_q8_1_t, act_q8_1_ptr) = alloc::<Q8_1>(&device, M * K);
 

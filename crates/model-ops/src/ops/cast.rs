@@ -71,7 +71,10 @@ mod tests {
         let ops = HipOps::new(&reg, stream);
 
         let input_host: Vec<f32> = (0..N).map(|i| (i as f32) * 0.05 - 6.4).collect();
-        let expected: Vec<f32> = input_host.iter().map(|x| f16::from_f32(*x).to_f32()).collect();
+        let expected: Vec<f32> = input_host
+            .iter()
+            .map(|x| f16::from_f32(*x).to_f32())
+            .collect();
 
         let (input_t, input_ptr) = upload::<F32, f32>(&device, &input_host, input_host.len());
         let (mut out_t, out_ptr) = alloc::<F16>(&device, N);

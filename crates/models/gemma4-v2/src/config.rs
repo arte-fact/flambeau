@@ -16,7 +16,7 @@ pub enum Gemma4V2ConfigError {
 /// residual stream after the FFN residual add. The vector is
 /// precomputed once per token from `per_layer_token_embd` +
 /// `per_layer_model_proj` (see
-/// `flambeau_blocks::per_layer_embd::build_inp_per_layer_table`).
+/// `flambeau_forward::per_layer_embd::build_inp_per_layer_table`).
 #[derive(Debug, Clone, Copy)]
 pub struct PerLayerEmbdDims {
     /// Per-layer side-channel width (256 on E4B).

@@ -13,8 +13,9 @@
 
 use anyhow::{bail, Result};
 use flambeau_backend_hip::{HipDevice, HipStream};
-use flambeau_blocks::{DeltaNetLayer, WeightHandle};
 use flambeau_core::DevicePtr;
+use flambeau_model_ops::delta_net::DeltaNetLayer;
+use flambeau_model_ops::WeightHandle;
 use flambeau_model_ops::{Tensor, F16};
 
 use crate::core::{CoreState, TopologyHooks};

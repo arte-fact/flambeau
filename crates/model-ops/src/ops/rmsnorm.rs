@@ -160,10 +160,13 @@ fn cpu_rmsnorm_f16(
     let mut out = vec![0.0f32; n_rows * hidden];
     for r in 0..n_rows {
         let row = &input[r * hidden..(r + 1) * hidden];
-        let sum_sq: f32 = row.iter().map(|x| {
-            let v = x.to_f32();
-            v * v
-        }).sum();
+        let sum_sq: f32 = row
+            .iter()
+            .map(|x| {
+                let v = x.to_f32();
+                v * v
+            })
+            .sum();
         let rms = (sum_sq / hidden as f32 + eps).sqrt();
         for c in 0..hidden {
             out[r * hidden + c] = row[c].to_f32() / rms * weight[c].to_f32();
@@ -196,8 +199,8 @@ fn cpu_rmsnorm_f32(
 mod tests {
     use super::*;
     use crate::testing::{
-        alloc, assert_close_f16, assert_close_f32, download, free, test_device,
-        test_ops_registry, upload,
+        alloc, assert_close_f16, assert_close_f32, download, free, test_device, test_ops_registry,
+        upload,
     };
     use flambeau_backend_hip::HipStream;
     use flambeau_core::Device;
@@ -287,10 +290,8 @@ mod tests {
             .collect();
         let expected_f32 = cpu_rmsnorm_f16(&input_host, &weight_host, N_ROWS, HIDDEN, EPS);
 
-        let (input_t, input_ptr) =
-            upload::<F16, f16>(&device, &input_host, input_host.len());
-        let (weight_t, weight_ptr) =
-            upload::<F16, f16>(&device, &weight_host, weight_host.len());
+        let (input_t, input_ptr) = upload::<F16, f16>(&device, &input_host, input_host.len());
+        let (weight_t, weight_ptr) = upload::<F16, f16>(&device, &weight_host, weight_host.len());
         let (mut output_t, output_ptr) = alloc::<Q8_1>(&device, N_ROWS * HIDDEN);
 
         rmsnorm_quant_q8_1(

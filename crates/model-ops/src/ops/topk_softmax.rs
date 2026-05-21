@@ -60,7 +60,10 @@ fn cpu_topk_softmax(logits: &[f32], k: usize, inv_temp: f32) -> (Vec<i32>, Vec<f
     indexed.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
     let top: Vec<(usize, f32)> = indexed.into_iter().take(k).collect();
     let ids: Vec<i32> = top.iter().map(|(i, _)| *i as i32).collect();
-    let probs: Vec<f32> = top.iter().map(|(_, v)| (v - max_full).exp() / sum_full).collect();
+    let probs: Vec<f32> = top
+        .iter()
+        .map(|(_, v)| (v - max_full).exp() / sum_full)
+        .collect();
     (ids, probs)
 }
 
@@ -92,8 +95,7 @@ mod tests {
             .collect();
         let (expected_ids, expected_probs) = cpu_topk_softmax(&logits_host, K, INV_TEMP);
 
-        let (logits_t, logits_ptr) =
-            upload::<F32, f32>(&device, &logits_host, logits_host.len());
+        let (logits_t, logits_ptr) = upload::<F32, f32>(&device, &logits_host, logits_host.len());
         let (mut ids_t, ids_ptr) = alloc::<I32>(&device, K);
         let (mut probs_t, probs_ptr) = alloc::<F32>(&device, K);
 

@@ -78,7 +78,9 @@ mod tests {
         let ops = HipOps::new(&reg, stream);
 
         let a_host: Vec<f16> = (0..N).map(|i| f16::from_f32((i as f32) * 0.1)).collect();
-        let b_host: Vec<f16> = (0..N).map(|i| f16::from_f32((i as f32) * -0.05 + 1.0)).collect();
+        let b_host: Vec<f16> = (0..N)
+            .map(|i| f16::from_f32((i as f32) * -0.05 + 1.0))
+            .collect();
         let expected = cpu_add_f16(&a_host, &b_host);
 
         let (a_t, a_ptr) = upload::<F16, f16>(&device, &a_host, a_host.len());

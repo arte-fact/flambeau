@@ -47,7 +47,7 @@ use flambeau_core::{CopyDirection, Device, DevicePtr};
 use flambeau_ops::Ops;
 
 use crate::driver_utils::RawAllocTracker;
-use crate::WeightHandle;
+use crate::weight_handle::WeightHandle;
 
 /// Borrowed-by-value view over a caller-owned GDN decode scratch.
 #[derive(Copy, Clone)]

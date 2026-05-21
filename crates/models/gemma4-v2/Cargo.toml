@@ -8,14 +8,18 @@ description = "Gemma-4 dense (31B) on the v2 stack. GELU-tanh FFN, final-logit s
 
 [features]
 default = []
-hip = ["dep:flambeau-backend-hip", "flambeau-forward/hip", "flambeau-model-ops/hip", "flambeau-ops/hip", "flambeau-blocks/hip"]
+hip = [
+  "dep:flambeau-backend-hip",
+  "flambeau-forward/hip",
+  "flambeau-model-ops/hip",
+  "flambeau-ops/hip",
+]
 
 [dependencies]
 flambeau-core = { path = "../../core" }
 flambeau-quant = { path = "../../quant" }
 flambeau-model-ops = { path = "../../model-ops" }
 flambeau-ops = { path = "../../ops" }
-flambeau-blocks = { path = "../../blocks" }
 flambeau-forward = { path = "../../forward" }
 flambeau-backend-hip = { path = "../../backend-hip", optional = true }
 anyhow.workspace = true

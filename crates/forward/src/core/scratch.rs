@@ -168,10 +168,10 @@ pub struct ScratchPool {
     /// `[max_slots]` I32 — per-slot KV length (= positions[i] + 1).
     pub attn_slot_n_kv: DevicePtr,
 
-    /// Shared MoE prefill scratch (`flambeau_blocks` owned, sized
+    /// Shared MoE prefill scratch (`flambeau_model_ops` owned, sized
     /// `max_prefill_tokens × top_k × intermediate`). `None` when no MoE
     /// or `max_prefill_tokens <= 1`.
-    pub moe_prefill_scratch: Option<flambeau_blocks::OwnedMoeExpertsPrefillScratch>,
+    pub moe_prefill_scratch: Option<flambeau_model_ops::OwnedMoeExpertsPrefillScratch>,
 
     /// `[max_experts_per_tok]` I32 — top-k expert indices. NULL when no MoE.
     pub moe_expert_ids: DevicePtr,
@@ -202,12 +202,12 @@ pub struct ScratchPool {
     pub gdn_state: Vec<GdnLayerState>,
     /// Shared GDN per-decode scratch wrapping blocks's owned scratch.
     /// `None` when `config.gdn` is None.
-    pub gdn_decode_scratch: Option<flambeau_blocks::OwnedDeltaNetLayerDecodeScratch>,
+    pub gdn_decode_scratch: Option<flambeau_model_ops::OwnedDeltaNetLayerDecodeScratch>,
     /// Shared GDN prefill scratch sized for `max_prefill_tokens`. Used
     /// by the composite when the call is single-slot, contiguous, and
     /// `n_tokens > 1` (the prefill-shape path). `None` when GDN is off
     /// or `max_prefill_tokens <= 1`.
-    pub gdn_prefill_scratch: Option<flambeau_blocks::OwnedDeltaNetLayerPrefillScratch>,
+    pub gdn_prefill_scratch: Option<flambeau_model_ops::OwnedDeltaNetLayerPrefillScratch>,
 
     pub current_residual_is_a: bool,
 
@@ -499,8 +499,8 @@ impl ScratchPool {
             flambeau_core::Stream::synchronize(stream).context("sync gdn zero")?;
             // Drain the blocks-owned RawAllocTracker into our list
             // so a single dispose walks every alloc.
-            let mut tracker = flambeau_blocks::RawAllocTracker::new();
-            let dims = flambeau_blocks::DeltaNetScratchDims {
+            let mut tracker = flambeau_model_ops::RawAllocTracker::new();
+            let dims = flambeau_model_ops::DeltaNetScratchDims {
                 hidden: h,
                 d_inner: g.d_inner,
                 num_v_heads: g.num_v_heads,
@@ -510,12 +510,15 @@ impl ScratchPool {
                 conv_channels: g.conv_channels,
                 conv_kernel: g.conv_kernel,
             };
-            let owned =
-                flambeau_blocks::DeltaNetLayer::alloc_decode_scratch(device, &mut tracker, dims)?;
+            let owned = flambeau_model_ops::DeltaNetLayer::alloc_decode_scratch(
+                device,
+                &mut tracker,
+                dims,
+            )?;
             allocs.extend(std::mem::take(&mut tracker.allocs));
             let prefill_owned = if config.max_prefill_tokens > 1 {
-                let mut p_tracker = flambeau_blocks::RawAllocTracker::new();
-                let p = flambeau_blocks::DeltaNetLayer::alloc_prefill_scratch(
+                let mut p_tracker = flambeau_model_ops::RawAllocTracker::new();
+                let p = flambeau_model_ops::DeltaNetLayer::alloc_prefill_scratch(
                     device,
                     &mut p_tracker,
                     dims,
@@ -537,14 +540,14 @@ impl ScratchPool {
         // dropped from the borrow checker's perspective).
         let moe_prefill_scratch =
             if topk > 0 && config.max_experts > 0 && config.max_prefill_tokens > 1 {
-                let mut p_tracker = flambeau_blocks::RawAllocTracker::new();
-                let dims = flambeau_blocks::MoeExpertsScratchDims {
+                let mut p_tracker = flambeau_model_ops::RawAllocTracker::new();
+                let dims = flambeau_model_ops::MoeExpertsScratchDims {
                     hidden: h,
                     intermediate: m,
                     n_experts: config.max_experts,
                     top_k: topk,
                 };
-                let owned = flambeau_blocks::MoeExperts::alloc_prefill_scratch(
+                let owned = flambeau_model_ops::MoeExperts::alloc_prefill_scratch(
                     device,
                     &mut p_tracker,
                     dims,

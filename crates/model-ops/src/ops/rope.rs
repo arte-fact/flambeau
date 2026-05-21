@@ -36,7 +36,14 @@ pub fn rope_f16(
             positions.n_elems
         );
     }
-    ops.rope_f16(x.ptr, positions.ptr, theta_base, n_tokens, n_heads, head_dim)
+    ops.rope_f16(
+        x.ptr,
+        positions.ptr,
+        theta_base,
+        n_tokens,
+        n_heads,
+        head_dim,
+    )
 }
 
 /// Dims `rotated_dims..head_dim` pass through. `rotated_dims` must
@@ -56,9 +63,7 @@ pub fn rope_neox_partial_f16(
         bail!("rope_neox_partial_f16: rotated_dims ({rotated_dims}) must be even");
     }
     if rotated_dims > head_dim {
-        bail!(
-            "rope_neox_partial_f16: rotated_dims ({rotated_dims}) > head_dim ({head_dim})"
-        );
+        bail!("rope_neox_partial_f16: rotated_dims ({rotated_dims}) > head_dim ({head_dim})");
     }
     let need = n_tokens * n_heads * head_dim;
     if x.n_elems < need {
@@ -172,8 +177,7 @@ mod tests {
         let positions: Vec<i32> = (0..N_TOKENS as i32).collect();
 
         let mut expected_f32 = x_host_f32.clone();
-        let expected_inputs: Vec<f32> =
-            x_host_f16.iter().map(|v| v.to_f32()).collect();
+        let expected_inputs: Vec<f32> = x_host_f16.iter().map(|v| v.to_f32()).collect();
         expected_f32.copy_from_slice(&expected_inputs);
         cpu_rope_interleaved(
             &mut expected_f32,
@@ -187,16 +191,7 @@ mod tests {
         let (mut x_t, x_ptr) = upload::<F16, f16>(&device, &x_host_f16, total);
         let (pos_t, pos_ptr) = upload::<I32, i32>(&device, &positions, N_TOKENS);
 
-        rope_f16(
-            &mut x_t,
-            &pos_t,
-            THETA,
-            N_TOKENS,
-            N_HEADS,
-            HEAD_DIM,
-            &ops,
-        )
-        .expect("rope_f16");
+        rope_f16(&mut x_t, &pos_t, THETA, N_TOKENS, N_HEADS, HEAD_DIM, &ops).expect("rope_f16");
 
         let got: Vec<f16> = download::<F16, f16>(&device, &x_t);
         assert_close_f16(&got, &expected_f32, 3e-3, 3e-3);

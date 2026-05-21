@@ -1,5 +1,5 @@
 //! rmsnorm → quantise → router qmatmul → host top-k + softmax-over-k →
-//! `flambeau_blocks::MoeExperts::forward_decode_tp_f32` (indexed
+//! `flambeau_model_ops::MoeExperts::forward_decode_tp_f32` (indexed
 //! batched-expert gate+up / activate / down / weighted-sum) → AR →
 //! cast → optional shared expert → delta.
 //!
@@ -8,15 +8,15 @@
 //! `indexed_moe_mmvq_*` launches, closing the legacy/v2 perf gap
 //! documented in `certs/perf/d4_batched_decode/v2_vs_legacy_profile.md`.
 
-use anyhow::{bail, Context, Result};
-use flambeau_blocks::{MoeExperts, MoeExpertsDecodeScratch, RouterPolicy, WeightHandle};
-use flambeau_core::op::QDtype;
-use flambeau_core::{CopyDirection, Device, DevicePtr};
+use anyhow::{bail, Result};
+use flambeau_core::DevicePtr;
+use flambeau_model_ops::moe_experts::{MoeExperts, MoeExpertsDecodeScratch, RouterPolicy};
+use flambeau_model_ops::WeightHandle;
 use flambeau_model_ops::{Tensor, F16, F32, I32, Q8_1};
 
 use crate::core::{CoreState, TopologyHooks};
 use crate::ctx::{Activation, MoeWeights};
-use flambeau_blocks::Activation as BlockActivation;
+use flambeau_model_ops::moe_experts::Activation as BlockActivation;
 
 pub fn moe_ffn_local<H: TopologyHooks>(
     state: &mut CoreState<'_>,
@@ -124,7 +124,7 @@ pub fn moe_ffn_local<H: TopologyHooks>(
         &ops,
     )?;
 
-    // 5. Indexed-MoE expert dispatch via flambeau_blocks::MoeExperts.
+    // 5. Indexed-MoE expert dispatch via flambeau_model_ops::MoeExperts.
     //    `experts_gate[0].ptr` is the base of the stacked packed-expert
     //    tensor (loader::upload_moe_experts_stacked guarantees this);
     //    block treats it as a 2D `[n_experts * inter, hidden]` view.
@@ -201,7 +201,7 @@ pub fn moe_ffn_local<H: TopologyHooks>(
                 );
             }
             let shared_block = build_shared_expert_block(sh, hidden, weights.activation)?;
-            let scratch_view = flambeau_blocks::SharedExpertDecodeScratch {
+            let scratch_view = flambeau_model_ops::SharedExpertDecodeScratch {
                 x_q8_1: state.pool.norm_q8_1,
                 gate_f32: state.pool.gate_f32,
                 up_f32: state.pool.up_f32,
@@ -260,7 +260,7 @@ pub fn moe_ffn_local<H: TopologyHooks>(
             );
         }
         let shared_block = build_shared_expert_block(sh, hidden, weights.activation)?;
-        let scratch_view = flambeau_blocks::SharedExpertDecodeScratch {
+        let scratch_view = flambeau_model_ops::SharedExpertDecodeScratch {
             x_q8_1: state.pool.norm_q8_1,
             gate_f32: state.pool.gate_f32,
             up_f32: state.pool.up_f32,
@@ -475,7 +475,7 @@ fn moe_ffn_loop<H: TopologyHooks>(
         }
         let shared_block = build_shared_expert_block(sh, hidden, weights.activation)?;
         let shared_out = state.pool.q_f16;
-        let shared_view = flambeau_blocks::SharedExpertPrefillScratch {
+        let shared_view = flambeau_model_ops::SharedExpertPrefillScratch {
             max_tokens: state.pool.config.max_prefill_tokens,
             x_q8_1: state.pool.norm_q8_1,
             gate_f32: state.pool.gate_f32,
@@ -542,20 +542,20 @@ fn build_shared_expert_block(
     sh: &crate::ctx::SharedExpertWeights,
     hidden: usize,
     activation: Activation,
-) -> Result<flambeau_blocks::SharedExpert> {
-    let block = flambeau_blocks::SharedExpert::new(
+) -> Result<flambeau_model_ops::SharedExpert> {
+    let block = flambeau_model_ops::SharedExpert::new(
         sh.gate_inp.as_ref().map(|t| t.ptr),
-        flambeau_blocks::WeightHandle {
+        flambeau_model_ops::WeightHandle {
             ptr: sh.gate.ptr,
             dtype: sh.gate.dtype,
             dims: [sh.intermediate, hidden],
         },
-        flambeau_blocks::WeightHandle {
+        flambeau_model_ops::WeightHandle {
             ptr: sh.up.ptr,
             dtype: sh.up.dtype,
             dims: [sh.intermediate, hidden],
         },
-        flambeau_blocks::WeightHandle {
+        flambeau_model_ops::WeightHandle {
             ptr: sh.down.ptr,
             dtype: sh.down.dtype,
             dims: [hidden, sh.intermediate],
@@ -655,7 +655,7 @@ fn gemma4_moe_cascade_batched<H: TopologyHooks>(
             )
         })?
         .view();
-    let m_shared = state.pool.config.shared_intermediate;
+    let _m_shared = state.pool.config.shared_intermediate;
     let m_routed = state.pool.config.intermediate;
     if state.pool.shared_x_norm_f32.as_usize() == 0 {
         bail!("gemma4_moe_cascade_batched: pool.shared_x_norm_f32 unallocated");
@@ -739,7 +739,7 @@ fn gemma4_moe_cascade_batched<H: TopologyHooks>(
         weights.rms_eps,
         &ops,
     )?;
-    let shared_scratch = flambeau_blocks::SharedExpertPrefillScratch {
+    let shared_scratch = flambeau_model_ops::SharedExpertPrefillScratch {
         max_tokens: state.pool.config.max_prefill_tokens,
         x_q8_1: state.pool.norm_q8_1,
         gate_f32: state.pool.gate_f32,
@@ -996,7 +996,7 @@ fn gemma4_moe_cascade_one_token<H: TopologyHooks>(
         weights.rms_eps,
         &ops,
     )?;
-    let shared_scratch = flambeau_blocks::SharedExpertDecodeScratch {
+    let shared_scratch = flambeau_model_ops::SharedExpertDecodeScratch {
         x_q8_1: state.pool.norm_q8_1,
         gate_f32: state.pool.gate_f32,
         up_f32: state.pool.up_f32,

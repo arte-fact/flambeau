@@ -136,7 +136,7 @@ unchanged; the only difference is which ctx is constructed.
   depend on it; we do NOT bypass it to call kernels directly.
 - **flambeau-ops** — kernel-launch wrappers. model-ops calls into
   this; flambeau-forward never depends on it directly.
-- **flambeau-blocks** — the OLD topology orchestration layer. Lives in
+- **flambeau-model-ops** — the OLD topology orchestration layer. Lives in
   parallel; deleted when models-v2 cuts over.
 - **crates/models/*-v2** — model crates that use this. Each ~300–500
   LOC. Generic over `<C: ForwardCtx>`.

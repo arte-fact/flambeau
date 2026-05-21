@@ -628,7 +628,7 @@ impl<H: TopologyHooks, S: StageHooks> ForwardCtx for ForwardEngine<'_, H, S> {
     fn per_layer_embd_apply(
         &mut self,
         resid: &mut Tensor<F16>,
-        weights: &flambeau_blocks::per_layer_embd::PerLayerEmbedLayerWeights,
+        weights: &crate::per_layer_embd::PerLayerEmbedLayerWeights,
         table_dev: flambeau_core::DevicePtr,
         layer_idx: usize,
         pe: usize,
@@ -638,7 +638,7 @@ impl<H: TopologyHooks, S: StageHooks> ForwardCtx for ForwardEngine<'_, H, S> {
     ) -> Result<()> {
         let hidden = self.core.hidden();
         let pool = &self.core.pool;
-        let scratch = flambeau_blocks::per_layer_embd::PerLayerEmbedDecodeScratch {
+        let scratch = crate::per_layer_embd::PerLayerEmbedDecodeScratch {
             gate_out_f32: pool.ple_gate_out_f32,
             activated_f32: pool.ple_activated_f32,
             activated_f16: pool.ple_activated_f16,
@@ -648,8 +648,7 @@ impl<H: TopologyHooks, S: StageHooks> ForwardCtx for ForwardEngine<'_, H, S> {
         };
         // Layer-major table layout: [n_layer, n_tokens_total, pe] F32.
         let table_slice = table_dev.offset_bytes(layer_idx * n_tokens_total * pe * 4);
-        let block =
-            flambeau_blocks::per_layer_embd::PerLayerEmbedBlock::new(*weights, pe, hidden, rms_eps);
+        let block = crate::per_layer_embd::PerLayerEmbedBlock::new(*weights, pe, hidden, rms_eps);
         let ops = self.core.ops();
         block.forward_n_tokens(&ops, resid.ptr, table_slice, scratch, resid.ptr, n_tokens)
     }
@@ -669,7 +668,7 @@ impl<H: TopologyHooks, S: StageHooks> ForwardCtx for ForwardEngine<'_, H, S> {
         hidden: usize,
         rms_eps: f32,
     ) -> Result<()> {
-        use flambeau_core::{CopyDirection, DevicePtr, Stream};
+        use flambeau_core::Stream;
         if main_embd.n_elems < hidden {
             anyhow::bail!(
                 "per_layer_embd_build_table: main_embd has {} elems, hidden = {hidden}",
@@ -728,7 +727,7 @@ impl<H: TopologyHooks, S: StageHooks> ForwardCtx for ForwardEngine<'_, H, S> {
         Stream::synchronize(stream)
             .context("sync after DtoH proj_matmul for per_layer_embd build")?;
 
-        let table = flambeau_blocks::per_layer_embd::build_inp_per_layer_table_with_proj(
+        let table = crate::per_layer_embd::build_inp_per_layer_table_with_proj(
             tok_embd_rows_raw,
             tok_embd_dtype,
             tok_embd_row_bytes,

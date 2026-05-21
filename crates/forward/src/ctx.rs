@@ -108,7 +108,7 @@ pub trait ForwardCtx {
     fn per_layer_embd_apply(
         &mut self,
         resid: &mut Tensor<F16>,
-        weights: &flambeau_blocks::per_layer_embd::PerLayerEmbedLayerWeights,
+        weights: &crate::per_layer_embd::PerLayerEmbedLayerWeights,
         table_dev: DevicePtr,
         layer_idx: usize,
         pe: usize,
@@ -136,7 +136,7 @@ pub trait ForwardCtx {
     /// the per-prompt-token slice in order). The matmul runs on device
     /// as `dense_gemv_f16_f16_batched`; the resulting `[n_tokens,
     /// pe * n_layer]` F32 is DtoH-copied and finished host-side via
-    /// [`flambeau_blocks::per_layer_embd::build_inp_per_layer_table_with_proj`]
+    /// [`crate::per_layer_embd::build_inp_per_layer_table_with_proj`]
     /// (Q5_K dequant + rmsnorm + add + scale), producing a layer-major
     /// `[n_layer, n_tokens, pe]` table HtoD-uploaded to `table_dev`.
     #[allow(clippy::too_many_arguments)]

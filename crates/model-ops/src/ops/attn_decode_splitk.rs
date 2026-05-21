@@ -52,7 +52,10 @@ pub fn attn_decode_f16_splitk(
     let ms_need = n_heads_q * n_chunks;
     let o_need = n_heads_q * n_chunks * head_dim;
     if q.n_elems < q_need {
-        bail!("attn_decode_f16_splitk: q has {} F16 elems, need >= {q_need}", q.n_elems);
+        bail!(
+            "attn_decode_f16_splitk: q has {} F16 elems, need >= {q_need}",
+            q.n_elems
+        );
     }
     if k_cache.n_elems < cache_need {
         bail!(
@@ -67,7 +70,10 @@ pub fn attn_decode_f16_splitk(
         );
     }
     if out.n_elems < q_need {
-        bail!("attn_decode_f16_splitk: out has {} F16 elems, need >= {q_need}", out.n_elems);
+        bail!(
+            "attn_decode_f16_splitk: out has {} F16 elems, need >= {q_need}",
+            out.n_elems
+        );
     }
     if partials_m.n_elems < ms_need {
         bail!(

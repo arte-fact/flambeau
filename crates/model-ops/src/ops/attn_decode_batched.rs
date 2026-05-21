@@ -81,9 +81,7 @@ pub fn attn_decode_f16_batched(
         bail!("attn_decode_f16_batched: n_slots {n_slots} out of range [1, 32]");
     }
     if n_heads_q == 0 || n_heads_kv == 0 || n_heads_q % n_heads_kv != 0 {
-        bail!(
-            "attn_decode_f16_batched: head counts invalid (q={n_heads_q}, kv={n_heads_kv})"
-        );
+        bail!("attn_decode_f16_batched: head counts invalid (q={n_heads_q}, kv={n_heads_kv})");
     }
     let need = n_slots * n_heads_q * head_dim;
     if q_batched.n_elems < need || out_batched.n_elems < need {

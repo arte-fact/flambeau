@@ -39,7 +39,10 @@ pub fn attn_decode_f16(
     let q_need = n_heads_q * head_dim;
     let cache_need = n_tokens_kv * n_heads_kv * head_dim;
     if q.n_elems < q_need {
-        bail!("attn_decode_f16: q has {} F16 elems, need >= {q_need}", q.n_elems);
+        bail!(
+            "attn_decode_f16: q has {} F16 elems, need >= {q_need}",
+            q.n_elems
+        );
     }
     if k_cache.n_elems < cache_need {
         bail!(
@@ -54,7 +57,10 @@ pub fn attn_decode_f16(
         );
     }
     if out.n_elems < q_need {
-        bail!("attn_decode_f16: out has {} F16 elems, need >= {q_need}", out.n_elems);
+        bail!(
+            "attn_decode_f16: out has {} F16 elems, need >= {q_need}",
+            out.n_elems
+        );
     }
     ops.attention_decode_f16(
         q.ptr,
@@ -73,9 +79,9 @@ pub fn attn_decode_f16(
 #[cfg(test)]
 #[allow(clippy::too_many_arguments)]
 fn cpu_attn_decode(
-    q: &[f32],          // [n_heads_q, head_dim]
-    k_cache: &[f32],    // [n_tokens, n_heads_kv, head_dim]
-    v_cache: &[f32],    // [n_tokens, n_heads_kv, head_dim]
+    q: &[f32],       // [n_heads_q, head_dim]
+    k_cache: &[f32], // [n_tokens, n_heads_kv, head_dim]
+    v_cache: &[f32], // [n_tokens, n_heads_kv, head_dim]
     n_heads_q: usize,
     n_heads_kv: usize,
     head_dim: usize,

@@ -21,7 +21,7 @@ use flambeau_ops::Ops;
 
 use crate::driver_utils::RawAllocTracker;
 use crate::moe_experts::Activation;
-use crate::WeightHandle;
+use crate::weight_handle::WeightHandle;
 
 #[derive(Copy, Clone)]
 pub struct SharedExpertDecodeScratch {

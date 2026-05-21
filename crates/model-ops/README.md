@@ -140,7 +140,7 @@ as the other HIP crates (`bench`, `kernels-hip`).
 |---|---|---|
 | `flambeau-kernels-hip` | HSACO kernel sources + module loader | reused |
 | `flambeau-ops` | per-kernel launch wrappers (`HipOps::rmsnorm_f16`, etc.) | reused as the kernel-call layer |
-| `flambeau-blocks` | composite blocks + topology orchestrators (the bloated layer this work replaces) | NOT a dependency of model-ops; will be retired once v2 models migrate |
+| `flambeau-model-ops` | composite blocks + topology orchestrators (the bloated layer this work replaces) | NOT a dependency of model-ops; will be retired once v2 models migrate |
 | `crates/models/qwen3-moe`, `crates/models/gemma4` | current per-arch impls | untouched; correctness oracle; deleted when v2 lands |
 | `crates/model-ops` (this crate) | leaf op vocabulary | new |
 | `crates/models/*-v2` (future) | thin model crates composing these ops | new |

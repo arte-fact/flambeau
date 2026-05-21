@@ -4,7 +4,7 @@
 //! are currently replicated on every rank (loader is SD-only;
 //! TP expert sharding is a follow-up).
 
-use anyhow::{anyhow, Result};
+use anyhow::Result;
 use flambeau_backend_hip::HipDevice;
 use flambeau_forward::ctx::{ForwardCtx, GdnDims};
 use flambeau_forward::loader::ShardMode;

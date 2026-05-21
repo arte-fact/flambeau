@@ -1,0 +1,76 @@
+{
+  "files": {
+    "src/core/composites/gdn.rs": {
+      "modifiedRanges": [
+        {
+          "start": 16,
+          "end": 17
+        }
+      ],
+      "importsChanged": false,
+      "lastEdit": "2026-05-21T13:11:31.107Z"
+    },
+    "Cargo.toml": {
+      "modifiedRanges": [
+        {
+          "start": 1,
+          "end": 30
+        }
+      ],
+      "importsChanged": false,
+      "lastEdit": "2026-05-21T13:17:40.855Z"
+    },
+    "src/lib.rs": {
+      "modifiedRanges": [
+        {
+          "start": 1,
+          "end": 26
+        }
+      ],
+      "importsChanged": false,
+      "lastEdit": "2026-05-21T13:29:47.694Z"
+    },
+    "src/core/composites/moe_ffn.rs": {
+      "modifiedRanges": [
+        {
+          "start": 11,
+          "end": 13
+        },
+        {
+          "start": 658,
+          "end": 658
+        }
+      ],
+      "importsChanged": false,
+      "lastEdit": "2026-05-21T13:44:15.869Z"
+    },
+    "src/core/composites/standard_attn.rs": {
+      "modifiedRanges": [
+        {
+          "start": 370,
+          "end": 370
+        },
+        {
+          "start": 705,
+          "end": 705
+        }
+      ],
+      "importsChanged": false,
+      "lastEdit": "2026-05-21T13:46:01.198Z"
+    },
+    "src/engine.rs": {
+      "modifiedRanges": [
+        {
+          "start": 671,
+          "end": 671
+        }
+      ],
+      "importsChanged": false,
+      "lastEdit": "2026-05-21T13:47:04.019Z"
+    }
+  },
+  "turnCycles": 0,
+  "maxCycles": 3,
+  "lastUpdated": "2026-05-21T13:47:04.019Z",
+  "sessionId": "lens-mpfg0ijk-f7507db8"
+}

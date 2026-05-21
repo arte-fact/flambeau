@@ -31,7 +31,7 @@ use flambeau_core::op::QDtype;
 use flambeau_ops::Ops;
 
 use crate::driver_utils::RawAllocTracker;
-use crate::WeightHandle;
+use crate::weight_handle::WeightHandle;
 
 /// Borrowed-by-value view of a caller-owned MoE decode scratch.
 #[derive(Copy, Clone)]

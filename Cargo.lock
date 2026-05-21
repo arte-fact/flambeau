@@ -476,21 +476,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "flambeau-blocks"
-version = "0.1.0-dev"
-dependencies = [
- "anyhow",
- "bytemuck",
- "flambeau-backend-hip",
- "flambeau-core",
- "flambeau-ops",
- "flambeau-quant",
- "flambeau-runtime",
- "half",
- "tracing",
-]
-
-[[package]]
 name = "flambeau-cli"
 version = "0.1.0-dev"
 dependencies = [
@@ -524,7 +509,6 @@ dependencies = [
  "anyhow",
  "bytemuck",
  "flambeau-backend-hip",
- "flambeau-blocks",
  "flambeau-core",
  "flambeau-model-ops",
  "flambeau-ops",
@@ -541,7 +525,6 @@ dependencies = [
  "anyhow",
  "bytemuck",
  "flambeau-backend-hip",
- "flambeau-blocks",
  "flambeau-core",
  "flambeau-forward",
  "flambeau-model-ops",
@@ -670,7 +653,6 @@ dependencies = [
  "anyhow",
  "axum",
  "flambeau-backend-hip",
- "flambeau-blocks",
  "flambeau-core",
  "flambeau-forward",
  "flambeau-gemma4-v2",
@@ -696,7 +678,7 @@ version = "0.1.0-dev"
 dependencies = [
  "anyhow",
  "flambeau-backend-hip",
- "flambeau-blocks",
+ "flambeau-model-ops",
  "flambeau-runtime",
 ]
 

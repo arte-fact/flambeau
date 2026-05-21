@@ -367,7 +367,6 @@ pub fn standard_attn_local<H: TopologyHooks>(
             if weights.attn_v_unit_norm_w.is_some() {
                 // gemma4 path: fuse V unit-RMSNorm into the cache write.
                 // K copy + V normalize-then-copy in one launch.
-                use flambeau_ops::Ops;
                 ops.kv_append_v_unit_norm_f16(
                     state.pool.k_f16,
                     state.pool.v_f16,
@@ -702,7 +701,6 @@ pub fn standard_attn_local<H: TopologyHooks>(
         // fused_residual_already_done flag and skips re-doing the add.
         let resid_in_ptr = input.ptr;
         let new_resid_ptr = state.pool.next_residual_slot();
-        use flambeau_ops::Ops;
         ops.rmsnorm_f32_to_f16_add_residual(
             proj_f32.ptr,
             post_norm.ptr,

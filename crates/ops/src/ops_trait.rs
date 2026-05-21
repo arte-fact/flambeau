@@ -9,7 +9,7 @@
 //! `flambeau-backend-hip`. The whole trait is gated under
 //! `feature = "hip"` at the crate root, so HIP-specific types in
 //! method signatures are consistent — when CUDA arrives, the slot
-//! types either go behind a `Slot` trait at flambeau-blocks or split
+//! types either go behind a `Slot` trait at flambeau-model-ops or split
 //! into per-backend trait extensions.
 
 use crate::MoeShape;

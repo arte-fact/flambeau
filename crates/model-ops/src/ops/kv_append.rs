@@ -65,8 +65,20 @@ pub fn kv_append_f16(
     // SAFETY: bounds checks above guarantee `bytes` of valid storage at
     // both src and dst on the same device; stream is live.
     unsafe {
-        device.memcpy_async(stream, CopyDirection::DeviceToDevice, k_dst, k_src.ptr, bytes)?;
-        device.memcpy_async(stream, CopyDirection::DeviceToDevice, v_dst, v_src.ptr, bytes)?;
+        device.memcpy_async(
+            stream,
+            CopyDirection::DeviceToDevice,
+            k_dst,
+            k_src.ptr,
+            bytes,
+        )?;
+        device.memcpy_async(
+            stream,
+            CopyDirection::DeviceToDevice,
+            v_dst,
+            v_src.ptr,
+            bytes,
+        )?;
     }
     Ok(())
 }
@@ -74,9 +86,7 @@ pub fn kv_append_f16(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::testing::{
-        alloc, download, free, test_device, upload,
-    };
+    use crate::testing::{alloc, download, free, test_device, upload};
     use flambeau_core::Stream;
     use half::f16;
 

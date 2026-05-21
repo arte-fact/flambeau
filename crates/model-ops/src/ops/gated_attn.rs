@@ -167,8 +167,7 @@ mod tests {
         let fused_host: Vec<f16> = (0..fused_n)
             .map(|i| f16::from_f32((i as f32) * 0.01 - 1.0))
             .collect();
-        let (exp_q, exp_gate) =
-            cpu_split_q_gate_f16(&fused_host, N_TOKENS, N_HEADS, HEAD_DIM);
+        let (exp_q, exp_gate) = cpu_split_q_gate_f16(&fused_host, N_TOKENS, N_HEADS, HEAD_DIM);
 
         let (fused_t, fused_ptr) = upload::<F16, f16>(&device, &fused_host, fused_n);
         let split_n = N_TOKENS * N_HEADS * HEAD_DIM;
@@ -176,7 +175,13 @@ mod tests {
         let (mut gate_t, gate_ptr) = alloc::<F16>(&device, split_n);
 
         split_q_gate_f16(
-            &fused_t, &mut q_t, &mut gate_t, N_TOKENS, N_HEADS, HEAD_DIM, &ops,
+            &fused_t,
+            &mut q_t,
+            &mut gate_t,
+            N_TOKENS,
+            N_HEADS,
+            HEAD_DIM,
+            &ops,
         )
         .expect("split_q_gate_f16");
 

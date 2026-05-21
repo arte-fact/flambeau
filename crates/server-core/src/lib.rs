@@ -13,7 +13,11 @@
 #![forbid(unsafe_op_in_unsafe_fn)]
 
 #[cfg(feature = "hip")]
+mod logits_sink;
+#[cfg(feature = "hip")]
 mod traits;
 
 #[cfg(feature = "hip")]
-pub use traits::{BatchSlot, LogitsSink, Model, Session, SessionContext};
+pub use logits_sink::LogitsSink;
+#[cfg(feature = "hip")]
+pub use traits::{BatchSlot, Model, Session, SessionContext};

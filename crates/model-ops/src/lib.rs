@@ -13,9 +13,31 @@ pub(crate) mod testing;
 
 pub mod ops;
 
+pub mod delta_net;
+pub mod driver_utils;
+pub mod moe_experts;
+pub mod shared_expert;
+pub mod weight_handle;
+
 pub use dtype::{ElemType, F16, F32, I32, Q4_0, Q4_1, Q5_0, Q5_1, Q8_0, Q8_1};
 pub use error::{Error, Result};
 pub use tensor::Tensor;
+
+pub use delta_net::{
+    DeltaNetLayer, DeltaNetLayerDecodeScratch, DeltaNetLayerPrefillScratch, DeltaNetScratchDims,
+    OwnedDeltaNetLayerDecodeScratch, OwnedDeltaNetLayerPrefillScratch,
+};
+pub use driver_utils::RawAllocTracker;
+pub use moe_experts::{
+    Activation as MoeActivation, MoeExperts, MoeExpertsDecodeScratch, MoeExpertsPrefillScratch,
+    MoeExpertsScratchDims, OwnedMoeExpertsDecodeScratch, OwnedMoeExpertsPrefillScratch,
+    RouterInput, RouterNormalize, RouterPolicy,
+};
+pub use shared_expert::{
+    OwnedSharedExpertDecodeScratch, OwnedSharedExpertPrefillScratch, SharedExpert,
+    SharedExpertDecodeScratch, SharedExpertPrefillScratch, SharedExpertScratchDims,
+};
+pub use weight_handle::WeightHandle;
 
 pub use ops::activation::{gelu_mul_f32_to_f16, swiglu_f16, swiglu_f32_to_f16};
 pub use ops::add::{add_f16, add_f32};

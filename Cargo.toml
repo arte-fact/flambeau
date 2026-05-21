@@ -1,23 +1,22 @@
 [workspace]
 resolver = "2"
 members = [
-    "crates/core",
-    "crates/quant",
-    "crates/kernels-shared",
-    "crates/kernels-hip",
-    "crates/backend-hip",
-    "crates/ops",
-    "crates/model-ops",
-    "crates/forward",
-    "crates/blocks",
-    "crates/models/qwen35-v2",
-    "crates/models/qwen35moe-v2",
-    "crates/models/gemma4-v2",
-    "crates/runtime",
-    "crates/bench",
-    "crates/server-core",
-    "crates/server",
-    "crates/cli",
+  "crates/core",
+  "crates/quant",
+  "crates/kernels-shared",
+  "crates/kernels-hip",
+  "crates/backend-hip",
+  "crates/ops",
+  "crates/model-ops",
+  "crates/forward",
+  "crates/models/qwen35-v2",
+  "crates/models/qwen35moe-v2",
+  "crates/models/gemma4-v2",
+  "crates/runtime",
+  "crates/bench",
+  "crates/server-core",
+  "crates/server",
+  "crates/cli",
 ]
 
 [workspace.package]
@@ -63,7 +62,7 @@ clap = { version = "4", features = ["derive", "env"] }
 opt-level = 3
 lto = "thin"
 codegen-units = 1
-debug = 1          # keep line info for rocprofv3 / perf attribution
+debug = 1         # keep line info for rocprofv3 / perf attribution
 # C9: server posture — any panic is fatal-and-restart. A/B tested
 # 2026-04-23 on Qwen3.6-27B-Q8_0 Mesh<4>: no measurable perf delta on
 # pp=512 or tg=64 (5 reps each). Kept for code-size / unwind-table trim.
@@ -71,7 +70,7 @@ debug = 1          # keep line info for rocprofv3 / perf attribution
 panic = "abort"
 
 [profile.dev]
-opt-level = 1      # compiled kernels are slow without this; pure-Rust is fine at 1
+opt-level = 1 # compiled kernels are slow without this; pure-Rust is fine at 1
 
 # Pure-Rust glue crate: opt-level=1 buys nothing at runtime here but costs
 # codegen time on the 4 big modules (impls.rs 1512 LOC, device.rs 1204,
@@ -87,17 +86,17 @@ codegen-units = 16
 # Workspace-wide lint configuration — per M-STATIC-VERIFICATION.
 # Member crates opt in with `[lints] workspace = true`.
 [workspace.lints.rust]
-ambiguous_negative_literals      = "warn"
+ambiguous_negative_literals = "warn"
 # Internal types (HIP handles, atomic bounce buffers, etc.) don't all carry
 # Debug — adding it mechanically produces output that's less useful than
 # manual impls on the types where it matters.  Flip back to "warn" if any
 # crate becomes externally consumed.
-missing_debug_implementations    = "allow"
-redundant_imports                = "warn"
-redundant_lifetimes              = "warn"
+missing_debug_implementations = "allow"
+redundant_imports = "warn"
+redundant_lifetimes = "warn"
 # c_int == i32 on all tier-1 targets; explicit `as c_int` casts document the
 # C-ABI expectation at the call site. Removing them hurts readability more
 # than it helps.
-trivial_numeric_casts            = "allow"
-unsafe_op_in_unsafe_fn           = "warn"
-unused_lifetimes                 = "warn"
+trivial_numeric_casts = "allow"
+unsafe_op_in_unsafe_fn = "warn"
+unused_lifetimes = "warn"

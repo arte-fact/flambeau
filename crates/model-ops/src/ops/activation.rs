@@ -46,7 +46,10 @@ pub fn swiglu_f32_to_f16(
         );
     }
     if up.n_elems < n {
-        bail!("swiglu_f32_to_f16: up has {} elems, need >= {n}", up.n_elems);
+        bail!(
+            "swiglu_f32_to_f16: up has {} elems, need >= {n}",
+            up.n_elems
+        );
     }
     if output.n_elems < n {
         bail!(
