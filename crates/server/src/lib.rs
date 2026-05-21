@@ -18,17 +18,11 @@ pub mod tool_call_parser;
 #[cfg(feature = "hip")]
 pub mod gpu_sampler;
 #[cfg(feature = "hip")]
-pub mod qwen3moe_handle;
-#[cfg(feature = "hip")]
 pub mod model_cfg;
-#[cfg(feature = "hip")]
-pub mod model_extensions;
 #[cfg(feature = "hip")]
 pub mod embedding;
 #[cfg(feature = "hip")]
 pub mod model_handle;
-#[cfg(feature = "hip")]
-pub mod gemma4_handle;
 #[cfg(feature = "hip")]
 pub mod v2_handle;
 #[cfg(feature = "hip")]
@@ -47,10 +41,6 @@ pub use api::{
 pub use state::{ModelDefaults, SamplingParams};
 
 #[cfg(feature = "hip")]
-pub use qwen3moe_handle::{prefill_logits, Inflight, LoadedModel};
-#[cfg(feature = "hip")]
-pub use model_extensions::KvSnapshot;
-#[cfg(feature = "hip")]
-pub use model_handle::{create_qwen3moe_session, Model, Session, Qwen3MoeOwnedSession};
+pub use model_handle::{Model, Session};
 #[cfg(feature = "hip")]
 pub use serve::{serve, MeshMode, ServeConfig};

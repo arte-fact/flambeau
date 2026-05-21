@@ -255,6 +255,24 @@ pub trait Ops {
         window_size: i32,
     ) -> Result<()>;
 
+    fn attention_decode_f16_splitk_h2(
+        &self,
+        q: DevicePtr,
+        k_cache: DevicePtr,
+        v_cache: DevicePtr,
+        out: DevicePtr,
+        partials_m: DevicePtr,
+        partials_s: DevicePtr,
+        partials_o: DevicePtr,
+        n_heads_q: usize,
+        n_heads_kv: usize,
+        head_dim: usize,
+        n_tokens_kv: usize,
+        chunk_size: usize,
+        scale: f32,
+        window_size: i32,
+    ) -> Result<()>;
+
     fn attention_decode_q8_kv(
         &self,
         q: DevicePtr,

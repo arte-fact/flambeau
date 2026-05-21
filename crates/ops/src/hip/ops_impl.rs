@@ -320,6 +320,29 @@ impl<'a> Ops for HipOps<'a> {
         )
     }
 
+    fn attention_decode_f16_splitk_h2(
+        &self,
+        q: DevicePtr,
+        k_cache: DevicePtr,
+        v_cache: DevicePtr,
+        out: DevicePtr,
+        partials_m: DevicePtr,
+        partials_s: DevicePtr,
+        partials_o: DevicePtr,
+        n_heads_q: usize,
+        n_heads_kv: usize,
+        head_dim: usize,
+        n_tokens_kv: usize,
+        chunk_size: usize,
+        scale: f32,
+        window_size: i32,
+    ) -> Result<()> {
+        super::attention::attention_decode_f16_splitk_h2(
+            self.reg, self.stream, q, k_cache, v_cache, out, partials_m, partials_s, partials_o,
+            n_heads_q, n_heads_kv, head_dim, n_tokens_kv, chunk_size, scale, window_size,
+        )
+    }
+
     fn attention_decode_q8_kv(
         &self,
         q: DevicePtr,

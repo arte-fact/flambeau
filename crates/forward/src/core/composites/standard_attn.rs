@@ -397,23 +397,43 @@ pub fn standard_attn_local<H: TopologyHooks>(
                 let mut partials_o = unsafe {
                     Tensor::<F32>::from_raw(state.pool.splitk_partials_o, partials_o_n)
                 };
-                flambeau_model_ops::attn_decode_f16_splitk(
-                    &q_f16_rope,
-                    &k_cache,
-                    &v_cache,
-                    &mut attn_out,
-                    &mut partials_m,
-                    &mut partials_s,
-                    &mut partials_o,
-                    weights.n_heads,
-                    weights.n_kv_heads,
-                    weights.head_dim,
-                    n_tokens_kv,
-                    chunk_size,
-                    scale,
-                    weights.window_size,
-                    &ops,
-                )?;
+                if matches!(weights.head_dim, 128 | 256 | 512) {
+                    flambeau_model_ops::attn_decode_f16_splitk_h2(
+                        &q_f16_rope,
+                        &k_cache,
+                        &v_cache,
+                        &mut attn_out,
+                        &mut partials_m,
+                        &mut partials_s,
+                        &mut partials_o,
+                        weights.n_heads,
+                        weights.n_kv_heads,
+                        weights.head_dim,
+                        n_tokens_kv,
+                        chunk_size,
+                        scale,
+                        weights.window_size,
+                        &ops,
+                    )?;
+                } else {
+                    flambeau_model_ops::attn_decode_f16_splitk(
+                        &q_f16_rope,
+                        &k_cache,
+                        &v_cache,
+                        &mut attn_out,
+                        &mut partials_m,
+                        &mut partials_s,
+                        &mut partials_o,
+                        weights.n_heads,
+                        weights.n_kv_heads,
+                        weights.head_dim,
+                        n_tokens_kv,
+                        chunk_size,
+                        scale,
+                        weights.window_size,
+                        &ops,
+                    )?;
+                }
             } else {
                 flambeau_model_ops::attn_decode_f16(
                     &q_f16_rope,

@@ -25,7 +25,7 @@ use tracing::info;
 use crate::prefix_cache::{PrefixCache, TopologyTag};
 use crate::routes::{
     agent_stats, chat_completions, completions, detokenize, embeddings, health, infill,
-    messages_anthropic, models, tokenize, Qwen3MoeServerExtras, ServerState, SharedState,
+    messages_anthropic, models, tokenize, ServerState, SharedState,
 };
 use crate::serve::{MeshMode, ServeConfig};
 
@@ -156,7 +156,7 @@ pub fn build_prefix_cache(cfg: &ServeConfig, mesh_kind: &'static str) -> Arc<Pre
     prefix_cache
 }
 
-type EmbeddingHandle = (
+pub type EmbeddingHandle = (
     Arc<tokio::sync::Mutex<Box<dyn crate::embedding::EmbeddingHandle>>>,
     Arc<flambeau_quant::GgufTokenizer>,
 );
@@ -167,10 +167,9 @@ type EmbeddingHandle = (
 pub struct ServerStateInputs {
     pub model_id: String,
     pub model_cfg: crate::model_cfg::ServerModelCfg,
-    pub model: crate::qwen3moe_handle::LoadedModel,
+    pub model: crate::model_handle::LoadedModel,
     pub cluster: Arc<HipCluster>,
     pub inflight_pool: Vec<Mutex<Box<dyn crate::Session>>>,
-    pub qwen3_moe: Option<Qwen3MoeServerExtras>,
     pub embedding: Option<EmbeddingHandle>,
     pub embedding_rank: Option<usize>,
     pub gpu_sampler: bool,
@@ -190,7 +189,6 @@ pub fn build_server_state(inputs: ServerStateInputs) -> SharedState {
         model,
         cluster,
         inflight_pool,
-        qwen3_moe,
         embedding,
         embedding_rank,
         gpu_sampler,
@@ -220,7 +218,6 @@ pub fn build_server_state(inputs: ServerStateInputs) -> SharedState {
         slot_in_use,
         batched_pending: std::sync::Mutex::new(Vec::new()),
         batched_dispatcher: std::sync::Mutex::new(()),
-        qwen3_moe,
         prefix_cache,
         prefix_cache_chunk_tokens: prefill_ubatch,
         topology_tag,

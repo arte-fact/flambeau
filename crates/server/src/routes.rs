@@ -8,11 +8,8 @@ use crate::model_cfg::ServerModelCfg;
 use flambeau_quant::{ChatTemplate, GgufTokenizer};
 use tokio::sync::Mutex;
 
-use crate::qwen3moe_handle::{
-    capture_kv_from_inflight, restore_kv_into_inflight, snapshot_bytes, LoadedModel,
-    Qwen3MoeModelExt, Qwen3MoeSessionExt,
-};
-use crate::prefix_cache::{PrefixCache, PrefixKeys, TopologyTag};
+use crate::model_handle::LoadedModel;
+use crate::prefix_cache::{PrefixCache, TopologyTag};
 
 #[cfg(feature = "dev_trace")]
 fn dev_flag(name: &str) -> bool {
@@ -52,7 +49,6 @@ pub enum PrefixCacheRestore {
     PrefixHit { n_matched: usize },
 }
 
-pub use crate::qwen3moe_handle::Qwen3MoeServerExtras;
 
 /// Server-wide shared state — built once at startup.
 pub struct ServerState {
@@ -109,12 +105,6 @@ pub struct ServerState {
     /// ⇒ blocking_lock the relevant slots ⇒ batched forward ⇒
     /// distribute responses ⇒ unlock).
     pub batched_dispatcher: std::sync::Mutex<()>,
-    /// Qwen3-moe-specific shared workspaces. `Some` on the qwen3-moe
-    /// boot path; `None` otherwise. Reached via
-    /// `state.qwen3_moe.as_ref().expect(...)` from dispatch branches
-    /// that are already arch-gated upstream (`model.as_pp/_tp/_hybrid`
-    /// returning `Some`, or the scheduler path).
-    pub qwen3_moe: Option<Qwen3MoeServerExtras>,
     /// **#229 P2.10c** — process-local prompt prefix cache. Always
     /// constructed; methods short-circuit when `state.prefix_cache.enabled()`
     /// is false (default OFF; flip via `FLAMBEAU_PREFIX_CACHE=1`).
@@ -281,56 +271,11 @@ impl crate::model_handle::SessionContext for ServerState {
         self.inflight_pool.len()
     }
     fn extras(&self) -> Option<&dyn std::any::Any> {
-        self.qwen3_moe.as_ref().map(|e| e as &dyn std::any::Any)
+        None
     }
 }
 
 impl ServerState {
-    /// **#324** — lock the shared TP prefill scratch, lazy-initialising
-    /// on first call. Caller MUST already hold `prefill_serialiser` to
-    /// avoid concurrent init races and concurrent kernel writes (the
-    /// scratch buffers are not safe for parallel use).
-    /// Sized for `FLAMBEAU_PREFILL_UBATCH` (default 512). Returns the
-    /// locked option as a guard so the caller can borrow `&mut` for
-    /// the duration of `prefill_logits`. PP-only models don't call
-    /// this; Hybrid currently doesn't use it either (V2 follow-up).
-    pub fn lock_tp_prefill_scratch(
-        &self,
-    ) -> anyhow::Result<
-        std::sync::MutexGuard<
-            '_,
-            Option<flambeau_qwen3_moe::forward::ShardedForwardPrefillScratchTp>,
-        >,
-    > {
-        let qwen3_moe = self
-            .qwen3_moe
-            .as_ref()
-            .context("lock_tp_prefill_scratch on non-qwen3-moe boot")?;
-        let mut guard = qwen3_moe.tp_prefill_scratch.lock().unwrap();
-        if guard.is_none() {
-            let prefill_ubatch = self.prefill_ubatch;
-            let cfg = &self
-                .model
-                .as_tp()
-                .context("lock_tp_prefill_scratch on non-TP model")?
-                .model
-                .config;
-            let scratch = flambeau_qwen3_moe::forward::ShardedForwardPrefillScratchTp::new(
-                cfg,
-                &self.cluster,
-                prefill_ubatch,
-            )
-            .context("lazy-init shared TP prefill scratch")?;
-            tracing::info!(
-                target: "server.prefill",
-                prefill_ubatch,
-                "lazy-init shared TP prefill scratch (#324)"
-            );
-            *guard = Some(scratch);
-        }
-        Ok(guard)
-    }
-
     /// **#229 P2.10c** — look up the prefix cache for the given
     /// prompt. On a hit, restore the cached KV+GDN state into
     /// `inflight` and report whether it covers the FULL prompt (with
@@ -345,101 +290,13 @@ impl ServerState {
     /// - Restore fails (logged + downgraded to miss).
     pub fn prefix_cache_try_restore(
         &self,
-        inflight: &mut dyn crate::Session,
-        prompt_ids: &[u32],
+        _inflight: &mut dyn crate::Session,
+        _prompt_ids: &[u32],
     ) -> anyhow::Result<PrefixCacheRestore> {
-        tracing::debug!(
-            target: "server.prefix_cache",
-            prompt_tokens = prompt_ids.len(),
-            enabled = self.prefix_cache.enabled(),
-            hybrid = self.model.as_hybrid().is_some(),
-            "prefix_cache_try_restore called"
-        );
-        if !self.prefix_cache.enabled() {
-            return Ok(PrefixCacheRestore::Miss);
-        }
-        // Phase 12.7 — prefix cache stays qwen3-moe-typed in V1.
-        // Sessions from other archs (gemma4) silently skip without the
-        // capture/restore warn-log churn.
-        if inflight.as_pp().is_none()
-            && inflight.as_tp().is_none()
-            && inflight.as_hybrid().is_none()
-        {
-            return Ok(PrefixCacheRestore::Miss);
-        }
-        let chunk_tokens = self.prefix_cache_chunk_tokens;
-        if prompt_ids.len() < chunk_tokens {
-            return Ok(PrefixCacheRestore::Miss);
-        }
-        let keys = PrefixKeys::from_prompt(prompt_ids, chunk_tokens);
-        if keys.n_chunks() == 0 {
-            return Ok(PrefixCacheRestore::Miss);
-        }
-        let topology = self.topology_tag;
-        let info = self
-            .prefix_cache
-            .longest_match(&keys, topology, |_terminal| {});
-        let info = match info {
-            Some(m) => m,
-            None => return Ok(PrefixCacheRestore::Miss),
-        };
-        let snapshot = match self.prefix_cache.snapshot_for(info.terminal) {
-            Some(arc) => arc,
-            None => return Ok(PrefixCacheRestore::Miss),
-        };
-        let is_full = info.n_tokens == prompt_ids.len();
-        // For full-prompt match we need cached logits to skip prefill.
-        // If the entry was inserted at a chunk boundary (intermediate)
-        // there are no logits — degrade to partial-prefill at that
-        // boundary (still saves work).
-        let logits = if is_full {
-            self.prefix_cache.logits_for(info.terminal)
-        } else {
-            None
-        };
-        let restore_start = std::time::Instant::now();
-        if let Err(e) = restore_kv_into_inflight(
-            inflight,
-            &self.cluster,
-            snapshot.as_ref(),
-            &self.model,
-        ) {
-            tracing::warn!(
-                target: "server.prefix_cache",
-                error = %e,
-                "restore failed — falling through to fresh prefill"
-            );
-            return Ok(PrefixCacheRestore::Miss);
-        }
-        let restore_ms = restore_start.elapsed().as_secs_f64() * 1000.0;
-        match logits {
-            Some(arc) => {
-                tracing::info!(
-                    target: "server.prefix_cache",
-                    event = "full_hit",
-                    n_matched_tokens = info.n_tokens,
-                    n_matched_chunks = info.n_chunks,
-                    prompt_tokens = prompt_ids.len(),
-                    restore_ms,
-                    "prefix-cache full hit — KV restored, prefill skipped"
-                );
-                Ok(PrefixCacheRestore::FullHit { logits: arc })
-            }
-            None => {
-                tracing::info!(
-                    target: "server.prefix_cache",
-                    event = "prefix_hit",
-                    n_matched_tokens = info.n_tokens,
-                    n_matched_chunks = info.n_chunks,
-                    prompt_tokens = prompt_ids.len(),
-                    restore_ms,
-                    "prefix-cache prefix hit — KV restored, partial prefill of tail"
-                );
-                Ok(PrefixCacheRestore::PrefixHit {
-                    n_matched: info.n_tokens,
-                })
-            }
-        }
+        // Pending #219: v2 prefix-cache snapshot/restore. After #221
+        // deleted the legacy qwen3-moe snapshot/restore path, prefix
+        // cache is a no-op regardless of `FLAMBEAU_PREFIX_CACHE`.
+        Ok(PrefixCacheRestore::Miss)
     }
 
     /// **#229 insert an intermediate (chunk-boundary) cache
@@ -449,47 +306,11 @@ impl ServerState {
     /// proceed with a partial-tail prefill via `prefill_logits`.
     pub fn prefix_cache_insert_intermediate(
         &self,
-        prompt_ids: &[u32],
-        n_tokens_completed: usize,
-        snap: Vec<crate::prefix_cache::RankSnapshot>,
+        _prompt_ids: &[u32],
+        _n_tokens_completed: usize,
+        _snap: Vec<crate::prefix_cache::RankSnapshot>,
     ) {
-        if !self.prefix_cache.enabled() {
-            return;
-        }
-        let chunk_tokens = self.prefix_cache_chunk_tokens;
-        if n_tokens_completed == 0 || n_tokens_completed % chunk_tokens != 0 {
-            return;
-        }
-        let n_full_chunks = n_tokens_completed / chunk_tokens;
-        if n_full_chunks == 0 {
-            return;
-        }
-        let keys = PrefixKeys::from_prompt(prompt_ids, chunk_tokens);
-        if n_full_chunks > keys.chunk_keys.len() {
-            return;
-        }
-        let chain = keys.chunk_keys[..n_full_chunks].to_vec();
-        let bytes = snapshot_bytes(&snap);
-        let snap_arc = std::sync::Arc::new(snap);
-        self.prefix_cache.insert_with_kv(
-            chain,
-            self.topology_tag,
-            chunk_tokens,
-            n_tokens_completed,
-            snap_arc,
-            None,
-            bytes,
-        );
-        tracing::info!(
-            target: "server.prefix_cache",
-            event = "insert_intermediate",
-            n_chunks = n_full_chunks,
-            n_tokens = n_tokens_completed,
-            kv_bytes = bytes,
-            used_bytes = self.prefix_cache.used_bytes(),
-            entries = self.prefix_cache.len(),
-            "prefix-cache write — intermediate boundary entry"
-        );
+        // Pending #219: v2 prefix-cache snapshot path.
     }
 
     /// **#229 P2.10c** — best-effort capture of the post-prefill KV
@@ -519,85 +340,11 @@ impl ServerState {
     /// - Prompt ≥ 50 tokens AND at least one full chunk in the chain.
     pub fn prefix_cache_try_capture_full(
         &self,
-        inflight: &dyn crate::Session,
-        prompt_ids: &[u32],
-        last_logits: &[f32],
+        _inflight: &dyn crate::Session,
+        _prompt_ids: &[u32],
+        _last_logits: &[f32],
     ) {
-        tracing::debug!(
-            target: "server.prefix_cache",
-            prompt_tokens = prompt_ids.len(),
-            logits_len = last_logits.len(),
-            enabled = self.prefix_cache.enabled(),
-            hybrid = self.model.as_hybrid().is_some(),
-            "prefix_cache_try_capture_full called"
-        );
-        if !self.prefix_cache.enabled() {
-            return;
-        }
-        // Phase 12.7 — see `prefix_cache_try_restore` early-out doc.
-        if inflight.as_pp().is_none()
-            && inflight.as_tp().is_none()
-            && inflight.as_hybrid().is_none()
-        {
-            return;
-        }
-        const MIN_PROMPT_TOKENS: usize = 50;
-        if prompt_ids.len() < MIN_PROMPT_TOKENS {
-            tracing::debug!(target: "server.prefix_cache", "skip: prompt < MIN_PROMPT_TOKENS");
-            return;
-        }
-        let chunk_tokens = self.prefix_cache_chunk_tokens;
-        if prompt_ids.len() < chunk_tokens {
-            tracing::debug!(target: "server.prefix_cache", "skip: prompt < chunk_tokens");
-            return;
-        }
-        let keys = PrefixKeys::from_prompt(prompt_ids, chunk_tokens);
-        if keys.n_chunks() == 0 || last_logits.is_empty() {
-            tracing::debug!(target: "server.prefix_cache", "skip: 0 chunks or empty logits");
-            return;
-        }
-        let snap = match capture_kv_from_inflight(inflight, &self.cluster, &self.model) {
-            Ok(s) => s,
-            Err(e) => {
-                tracing::warn!(
-                    target: "server.prefix_cache",
-                    error = %e,
-                    "capture failed — entry not inserted"
-                );
-                return;
-            }
-        };
-        // **#229 V1** — capture the FULL post-prefill state (no
-        // truncation). Pair it with the last-position logits so the
-        // hit path skips prefill entirely. GDN is captured as the
-        // post-prompt-end state; future identical-prompt hit gets
-        // bit-equivalent state restored.
-        let kv_bytes = snapshot_bytes(&snap);
-        let logits_bytes = last_logits.len() * std::mem::size_of::<f32>();
-        let total_bytes = kv_bytes + logits_bytes;
-        let snap_arc = std::sync::Arc::new(snap);
-        let logits_arc = std::sync::Arc::new(last_logits.to_vec());
-        self.prefix_cache.insert_with_kv(
-            keys.chunk_keys.clone(),
-            self.topology_tag,
-            chunk_tokens,
-            prompt_ids.len(),
-            snap_arc,
-            Some(logits_arc),
-            total_bytes,
-        );
-        tracing::info!(
-            target: "server.prefix_cache",
-            event = "insert",
-            n_chunks = keys.n_chunks(),
-            n_tokens = prompt_ids.len(),
-            kv_bytes,
-            logits_bytes,
-            used_bytes = self.prefix_cache.used_bytes(),
-            budget_bytes = self.prefix_cache.vram_budget_bytes,
-            entries = self.prefix_cache.len(),
-            "prefix-cache write — full-prompt entry inserted"
-        );
+        // Pending #219: v2 prefix-cache snapshot path.
     }
 
     /// **#232 P2.12** — try to admit a new request. Bumps `in_flight`
@@ -756,10 +503,6 @@ impl ServerState {
             // when n_others_active==0. The lock lives in `qwen3_moe`
             // extras (qwen3-moe TP/Hybrid need it); gemma4 boots
             // without those extras, so we just skip the lock there.
-            let _prefill_lock = self
-                .qwen3_moe
-                .as_ref()
-                .map(|x| x.prefill_serialiser.lock().unwrap());
             tr!("FAST_PATH lock_inflight start");
             let mut guard = self.inflight_pool[slot_idx].blocking_lock();
             tr!("FAST_PATH lock_inflight done; decode start");

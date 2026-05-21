@@ -18,9 +18,8 @@ use tokio_stream::wrappers::ReceiverStream;
 
 use crate::api::*;
 use crate::gpu_sampler::{self, GpuSamplerScratch};
-use crate::qwen3moe_handle::prefill_logits;
 use crate::routes::{
-    dev_flag, dev_usize, now_unix, request_id, PrefixCacheRestore, ServerState, SharedState,
+    dev_flag, dev_usize, now_unix, request_id, ServerState, SharedState,
 };
 use crate::state::SamplingParams;
 
@@ -378,90 +377,18 @@ fn run_completion_scheduler_pp_blocking(
                 .reset_for_next_request()
                 .context("reset inflight for new request")?;
             let mut logits_buf: Vec<f32> = Vec::with_capacity(vocab);
-            // **#321** — TP/Hybrid prefill alloc serialiser. See field
-            // doc on ServerState::prefill_serialiser.
-            let _prefill_lock = if model.requires_prefill_serialiser() {
-                Some(state.qwen3_moe.as_ref().expect("TP/Hybrid serialiser requires qwen3-moe boot").prefill_serialiser.lock().unwrap())
-            } else {
-                None
-            };
-            // **#324** — for TP, hand the shared pre-allocated scratch
-            // through so prefill_logits skips the per-call alloc.
-            let mut tp_scratch_g = if model.requires_tp_prefill_scratch() {
-                Some(state.lock_tp_prefill_scratch()?)
-            } else {
-                None
-            };
-            let tp_pool: Option<
-                &mut flambeau_qwen3_moe::forward::ShardedForwardPrefillScratchTp,
-            > = tp_scratch_g.as_mut().and_then(|g| g.as_mut());
-            // **#229 prefix-cache lookup. Three outcomes:
-            // FullHit: KV+GDN restored, logits cached → skip prefill.
-            // PrefixHit: KV+GDN restored at chunk boundary → partial
-            // prefill of the tail starting at n_matched.
-            // Miss: full fresh prefill, capture both intermediate
-            // (chunk-boundary) and final (full prompt) entries.
-            let restore =
-                state.prefix_cache_try_restore(&mut **guard, &prompt_ids)?;
-            match restore {
-                PrefixCacheRestore::FullHit { logits } => {
-                    logits_buf.clear();
-                    logits_buf.extend_from_slice(logits.as_ref());
-                }
-                PrefixCacheRestore::PrefixHit { n_matched } => {
-                    crate::qwen3moe_handle::prefill_logits(
-                        model,
-                        cluster,
-                        &mut **guard,
-                        &prompt_ids[n_matched..],
-                        n_matched,
-                        &mut logits_buf,
-                        tp_pool,
-                        None,
-                        state.prefill_ubatch,
-                    )
-                    .context("scheduler-path tail prefill (after prefix-hit)")?;
-                    // After tail prefill we have full state — capture
-                    // the FULL entry (with logits) for future requests.
-                    state.prefix_cache_try_capture_full(
-                        &**guard,
-                        &prompt_ids,
-                        &logits_buf,
-                    );
-                }
-                PrefixCacheRestore::Miss => {
-                    let mut boundary_cb = |snap, n_tok| {
-                        state.prefix_cache_insert_intermediate(
-                            &prompt_ids,
-                            n_tok,
-                            snap,
-                        );
-                        Ok(())
-                    };
-                    let cb_opt: Option<crate::qwen3moe_handle::BoundaryCallback<'_>> =
-                        if state.prefix_cache.enabled() {
-                            Some(&mut boundary_cb)
-                        } else {
-                            None
-                        };
-                    crate::qwen3moe_handle::prefill_logits(
-                        model,
-                        cluster,
-                        &mut **guard,
-                        &prompt_ids,
-                        0,
-                        &mut logits_buf,
-                        tp_pool,
-                        cb_opt,
-                        state.prefill_ubatch,
-                    )
+            // Prefix cache is disabled until #219 reimplements it on v2.
+            // All requests go through a fresh full prefill via the v2
+            // Session<A> path exposed on the inflight as a ModelDriver.
+            let _ = cluster;
+            let _ = model;
+            {
+                let driver = guard
+                    .as_model_driver_mut()
+                    .context("scheduler-path prefill: session is not a v2 ModelDriver")?;
+                driver
+                    .forward_prefill_logits(&prompt_ids, 0, &mut logits_buf)
                     .context("scheduler-path prefill")?;
-                    state.prefix_cache_try_capture_full(
-                        &**guard,
-                        &prompt_ids,
-                        &logits_buf,
-                    );
-                }
             }
             // First-token stop mask: NEG_INFINITY all stop ids so the
             // model is forced to emit a content token first.
@@ -669,81 +596,18 @@ fn run_completion_blocking_ids(
     // the first response token on multi-turn prompts, producing an empty
     // reply. Suppress it until at least one content token is emitted.
     let prefill_start = Instant::now();
-    // **#321** — TP/Hybrid prefill alloc serialiser. See field
-    // doc on ServerState::prefill_serialiser.
-    let _prefill_lock = if model.requires_prefill_serialiser() {
-        Some(state.qwen3_moe.as_ref().expect("TP/Hybrid serialiser requires qwen3-moe boot").prefill_serialiser.lock().unwrap())
-    } else {
-        None
-    };
-    // **#324** — for TP, hand the shared pre-allocated scratch through.
-    let mut tp_scratch_g = if model.requires_tp_prefill_scratch() {
-        Some(state.lock_tp_prefill_scratch()?)
-    } else {
-        None
-    };
-    let tp_pool: Option<
-        &mut flambeau_qwen3_moe::forward::ShardedForwardPrefillScratchTp,
-    > = tp_scratch_g.as_mut().and_then(|g| g.as_mut());
-    // **#229 prefix-cache restore (legacy path). Three
-    // outcomes per `prefix_cache_try_restore`. Bypass when logprobs
-    // active.
-    let cache_eligible = params.collect_logprobs.is_none();
-    let restore = if cache_eligible {
-        state.prefix_cache_try_restore(&mut *inflight, &prompt_ids)?
-    } else {
-        PrefixCacheRestore::Miss
-    };
-    match restore {
-        PrefixCacheRestore::FullHit { logits } => {
-            logits_buf.clear();
-            logits_buf.extend_from_slice(logits.as_ref());
-        }
-        PrefixCacheRestore::PrefixHit { n_matched } => {
-            prefill_logits(
-                model,
-                cluster,
-                &mut *inflight,
-                &prompt_ids[n_matched..],
-                n_matched,
-                &mut logits_buf,
-                tp_pool,
-                None,
-                state.prefill_ubatch,
-            )
-            .context("legacy-path tail prefill (after prefix-hit)")?;
-            state.prefix_cache_try_capture_full(&*inflight, &prompt_ids, &logits_buf);
-        }
-        PrefixCacheRestore::Miss => {
-            let mut boundary_cb = |snap, n_tok| {
-                state.prefix_cache_insert_intermediate(&prompt_ids, n_tok, snap);
-                Ok(())
-            };
-            let cb_opt: Option<crate::qwen3moe_handle::BoundaryCallback<'_>> =
-                if cache_eligible && state.prefix_cache.enabled() {
-                    Some(&mut boundary_cb)
-                } else {
-                    None
-                };
-            prefill_logits(
-                model,
-                cluster,
-                &mut *inflight,
-                &prompt_ids,
-                0,
-                &mut logits_buf,
-                tp_pool,
-                cb_opt,
-                state.prefill_ubatch,
-            )
+    // Prefix cache disabled pending #219. Always do a full fresh prefill
+    // through the v2 Session<A> ModelDriver path.
+    let _ = cluster;
+    let _ = model;
+    {
+        let driver = inflight
+            .as_model_driver_mut()
+            .context("legacy-path prefill: session is not a v2 ModelDriver")?;
+        driver
+            .forward_prefill_logits(&prompt_ids, 0, &mut logits_buf)
             .context("prefill logits")?;
-            if cache_eligible {
-                state.prefix_cache_try_capture_full(&*inflight, &prompt_ids, &logits_buf);
-            }
-        }
     }
-    drop(tp_scratch_g);
-    drop(_prefill_lock);
     for &sid in stop_ids {
         if (sid as usize) < logits_buf.len() {
             logits_buf[sid as usize] = f32::NEG_INFINITY;
@@ -1126,73 +990,17 @@ pub(crate) fn run_completion_blocking_streaming(
     // non-streaming path for the rationale (multi-turn Qwen3.6 argmaxes
     // `<|im_end|>` immediately otherwise).
     let prefill_start = Instant::now();
-    // **#321** — TP/Hybrid prefill alloc serialiser. See field
-    // doc on ServerState::prefill_serialiser.
-    let _prefill_lock = if model.requires_prefill_serialiser() {
-        Some(state.qwen3_moe.as_ref().expect("TP/Hybrid serialiser requires qwen3-moe boot").prefill_serialiser.lock().unwrap())
-    } else {
-        None
-    };
-    // **#324** — for TP, hand the shared pre-allocated scratch through.
-    let mut tp_scratch_g = if model.requires_tp_prefill_scratch() {
-        Some(state.lock_tp_prefill_scratch()?)
-    } else {
-        None
-    };
-    let tp_pool: Option<
-        &mut flambeau_qwen3_moe::forward::ShardedForwardPrefillScratchTp,
-    > = tp_scratch_g.as_mut().and_then(|g| g.as_mut());
-    // **#229 prefix-cache restore (streaming path).
-    let restore_stream =
-        state.prefix_cache_try_restore(&mut *inflight, &prompt_ids)?;
-    match restore_stream {
-        PrefixCacheRestore::FullHit { logits } => {
-            logits_buf.clear();
-            logits_buf.extend_from_slice(logits.as_ref());
-        }
-        PrefixCacheRestore::PrefixHit { n_matched } => {
-            prefill_logits(
-                model,
-                cluster,
-                &mut *inflight,
-                &prompt_ids[n_matched..],
-                n_matched,
-                &mut logits_buf,
-                tp_pool,
-                None,
-                state.prefill_ubatch,
-            )
-            .context("streaming-path tail prefill (after prefix-hit)")?;
-            state.prefix_cache_try_capture_full(&*inflight, &prompt_ids, &logits_buf);
-        }
-        PrefixCacheRestore::Miss => {
-            let mut boundary_cb = |snap, n_tok| {
-                state.prefix_cache_insert_intermediate(&prompt_ids, n_tok, snap);
-                Ok(())
-            };
-            let cb_opt: Option<crate::qwen3moe_handle::BoundaryCallback<'_>> =
-                if state.prefix_cache.enabled() {
-                    Some(&mut boundary_cb)
-                } else {
-                    None
-                };
-            prefill_logits(
-                model,
-                cluster,
-                &mut *inflight,
-                &prompt_ids,
-                0,
-                &mut logits_buf,
-                tp_pool,
-                cb_opt,
-                state.prefill_ubatch,
-            )
+    // Prefix cache disabled pending #219. Always do a full fresh prefill
+    // through the v2 Session<A> ModelDriver path.
+    let _ = cluster;
+    {
+        let driver = inflight
+            .as_model_driver_mut()
+            .context("streaming-path prefill: session is not a v2 ModelDriver")?;
+        driver
+            .forward_prefill_logits(&prompt_ids, 0, &mut logits_buf)
             .context("prefill logits")?;
-            state.prefix_cache_try_capture_full(&*inflight, &prompt_ids, &logits_buf);
-        }
     }
-    drop(tp_scratch_g);
-    drop(_prefill_lock);
     for &sid in stop_ids {
         if (sid as usize) < logits_buf.len() {
             logits_buf[sid as usize] = f32::NEG_INFINITY;

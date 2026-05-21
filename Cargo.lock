@@ -458,12 +458,9 @@ version = "0.1.0-dev"
 dependencies = [
  "anyhow",
  "clap",
- "flambeau-backend-hip",
  "flambeau-bench",
  "flambeau-core",
- "flambeau-gemma4",
  "flambeau-quant",
- "flambeau-qwen3-moe",
  "flambeau-runtime",
  "flambeau-server",
  "mimalloc",
@@ -496,23 +493,6 @@ dependencies = [
  "flambeau-quant",
  "flambeau-runtime",
  "half",
- "tracing",
-]
-
-[[package]]
-name = "flambeau-gemma4"
-version = "0.1.0-dev"
-dependencies = [
- "anyhow",
- "bytemuck",
- "flambeau-backend-hip",
- "flambeau-blocks",
- "flambeau-core",
- "flambeau-ops",
- "flambeau-quant",
- "flambeau-runtime",
- "half",
- "thiserror 2.0.18",
  "tracing",
 ]
 
@@ -593,25 +573,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "flambeau-qwen3-moe"
-version = "0.1.0-dev"
-dependencies = [
- "anyhow",
- "bytemuck",
- "flambeau-backend-hip",
- "flambeau-blocks",
- "flambeau-core",
- "flambeau-ops",
- "flambeau-quant",
- "flambeau-runtime",
- "half",
- "serde",
- "serde_json",
- "thiserror 2.0.18",
- "tracing",
-]
-
-[[package]]
 name = "flambeau-qwen35-v2"
 version = "0.1.0-dev"
 dependencies = [
@@ -672,11 +633,9 @@ dependencies = [
  "flambeau-blocks",
  "flambeau-core",
  "flambeau-forward",
- "flambeau-gemma4",
  "flambeau-gemma4-v2",
  "flambeau-ops",
  "flambeau-quant",
- "flambeau-qwen3-moe",
  "flambeau-qwen35-v2",
  "flambeau-qwen35moe-v2",
  "flambeau-runtime",

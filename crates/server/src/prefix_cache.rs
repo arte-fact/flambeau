@@ -146,8 +146,13 @@ pub struct TopologyTag {
 /// the snapshot type is feature-gated since it carries
 /// `LayerCacheSnapshot` from the qwen3-moe crate which itself is
 /// `#[cfg(feature = "hip")]`.
+/// Opaque per-rank snapshot bytes. Layout is arch-specific; the prefix
+/// cache treats it as bytes for size accounting + storage. After the
+/// legacy qwen3-moe stack was removed (#221) the snapshot/restore path
+/// is on hold pending #219 (v2 prefix-cache reimplementation); the type
+/// stays in the public surface as a `Vec<u8>` placeholder.
 #[cfg(feature = "hip")]
-pub type RankSnapshot = Vec<flambeau_qwen3_moe::session::LayerCacheSnapshot>;
+pub type RankSnapshot = Vec<u8>;
 
 /// Full multi-rank KV snapshot — one [`RankSnapshot`] per rank in the
 /// captured topology.
@@ -455,16 +460,7 @@ impl PrefixCache {
 /// view (avoids importing the model crate's helper into this module).
 #[cfg(feature = "hip")]
 fn snapshot_bytes_arc(snap: &KvSnapshot) -> usize {
-    use flambeau_qwen3_moe::session::LayerCacheSnapshot;
-    snap.iter()
-        .flat_map(|rank| rank.iter())
-        .map(|s| match s {
-            LayerCacheSnapshot::FullAttn { k, v, .. } => k.len() + v.len(),
-            LayerCacheSnapshot::Gdn { state, conv_history } => {
-                state.len() + conv_history.len()
-            }
-        })
-        .sum()
+    snap.iter().map(|rank| rank.len()).sum()
 }
 
 /// Standalone helpers don't need to live in `impl PrefixCache` — keeping

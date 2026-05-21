@@ -342,6 +342,104 @@ pub fn attention_decode_f16_splitk(
     Ok(())
 }
 
+/// Half2-packed split-K decode attention, F16 KV. Identical math + partials
+/// layout to `attention_decode_f16_splitk`; inner KQ dot and VKQ accumulate
+/// use `__hmul2` so gfx906 issues `v_pk_mul_f16` (2 F16 mul/cycle vs the
+/// scalar F32 FMA equivalent). Block size halved to `head_dim / 2` —
+/// each thread handles a dim pair — which also boosts MI50 occupancy
+/// from 1 → 2 blocks/CU at head_dim=256.
+///
+/// Same partials sizing as `attention_decode_f16_splitk`. Phase 2
+/// (`flambeau_attention_decode_f16_splitk_combine`) is shared and
+/// unmodified.
+#[allow(clippy::too_many_arguments)]
+pub fn attention_decode_f16_splitk_h2(
+    reg: &OpsRegistry,
+    stream: &HipStream,
+    q: DevicePtr,
+    k_cache: DevicePtr,
+    v_cache: DevicePtr,
+    out: DevicePtr,
+    partials_m: DevicePtr,
+    partials_s: DevicePtr,
+    partials_o: DevicePtr,
+    n_heads_q: usize,
+    n_heads_kv: usize,
+    head_dim: usize,
+    n_tokens_kv: usize,
+    chunk_size: usize,
+    scale: f32,
+    window_size: i32,
+) -> Result<()> {
+    assert!(
+        head_dim == 128 || head_dim == 256 || head_dim == 512,
+        "attention_decode_f16_splitk_h2: head_dim {head_dim} not in {{128, 256, 512}}"
+    );
+    assert!(chunk_size > 0);
+    assert!(head_dim % 2 == 0);
+
+    let module = reg.expect_module("attention_decode_f16_splitk_h2")?;
+    let k_chunk = module.kernel("flambeau_attention_decode_f16_splitk_h2_chunk")?;
+    let combine_module = reg.expect_module("attention_decode_f16_splitk")?;
+    let k_combine = combine_module.kernel("flambeau_attention_decode_f16_splitk_combine")?;
+
+    let n_chunks = n_tokens_kv.div_ceil(chunk_size);
+    let n_heads_q_i = n_heads_q as i32;
+    let n_heads_kv_i = n_heads_kv as i32;
+    let head_dim_i = head_dim as i32;
+    let n_tokens_i = n_tokens_kv as i32;
+    let n_chunks_i = n_chunks as i32;
+    let chunk_size_i = chunk_size as i32;
+    let q_ptr: u64 = q.as_usize() as u64;
+    let k_ptr: u64 = k_cache.as_usize() as u64;
+    let v_ptr: u64 = v_cache.as_usize() as u64;
+    let o_ptr: u64 = out.as_usize() as u64;
+    let m_ptr: u64 = partials_m.as_usize() as u64;
+    let s_ptr: u64 = partials_s.as_usize() as u64;
+    let po_ptr: u64 = partials_o.as_usize() as u64;
+    let scale_f = scale;
+    let window_i = window_size;
+
+    let mut a1 = KernelArgs::new();
+    a1.push(&q_ptr);
+    a1.push(&k_ptr);
+    a1.push(&v_ptr);
+    a1.push(&m_ptr);
+    a1.push(&s_ptr);
+    a1.push(&po_ptr);
+    a1.push(&n_heads_q_i);
+    a1.push(&n_heads_kv_i);
+    a1.push(&head_dim_i);
+    a1.push(&n_tokens_i);
+    a1.push(&n_chunks_i);
+    a1.push(&chunk_size_i);
+    a1.push(&scale_f);
+    a1.push(&window_i);
+    let cfg1 = LaunchCfg {
+        grid: (n_heads_q as u32, n_chunks as u32, 1),
+        block: ((head_dim / 2) as u32, 1, 1),
+        shared_bytes: 0,
+    };
+    unsafe { k_chunk.launch(stream, cfg1, a1)? };
+
+    let mut a2 = KernelArgs::new();
+    a2.push(&m_ptr);
+    a2.push(&s_ptr);
+    a2.push(&po_ptr);
+    a2.push(&o_ptr);
+    a2.push(&n_heads_q_i);
+    a2.push(&n_chunks_i);
+    a2.push(&head_dim_i);
+    let cfg2 = LaunchCfg {
+        grid: (n_heads_q as u32, 1, 1),
+        block: (head_dim as u32, 1, 1),
+        shared_bytes: 0,
+    };
+    unsafe { k_combine.launch(stream, cfg2, a2)? };
+
+    Ok(())
+}
+
 /// Pick a reasonable split-K chunk size given `n_tokens`. Target n_chunks in
 /// [4, 16] so we land 16 heads × n_chunks = 64–256 blocks on 60 CUs
 /// (1–4× saturation, more than enough to hide the per-block serial loop).
