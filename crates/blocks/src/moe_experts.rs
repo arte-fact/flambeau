@@ -37,15 +37,15 @@ use crate::WeightHandle;
 #[derive(Copy, Clone)]
 pub struct MoeExpertsDecodeScratch {
     pub x_q8_1: DevicePtr,
-    pub router_logits: DevicePtr,   // F32 [n_experts]
-    pub expert_ids: DevicePtr,      // i32 [top_k]
-    pub expert_weights: DevicePtr,  // F32 [top_k]
-    pub gate_out_f32: DevicePtr,    // F32 [top_k, intermediate]
-    pub up_out_f32: DevicePtr,      // F32 [top_k, intermediate]
-    pub activated_f16: DevicePtr,   // F16 [top_k, intermediate]
-    pub activated_q8_1: DevicePtr,  // Q8_1 [top_k, intermediate / 32]
-    pub down_f32: DevicePtr,        // F32 [top_k, hidden]
-    pub down_f16: DevicePtr,        // F16 [top_k, hidden]
+    pub router_logits: DevicePtr,  // F32 [n_experts]
+    pub expert_ids: DevicePtr,     // i32 [top_k]
+    pub expert_weights: DevicePtr, // F32 [top_k]
+    pub gate_out_f32: DevicePtr,   // F32 [top_k, intermediate]
+    pub up_out_f32: DevicePtr,     // F32 [top_k, intermediate]
+    pub activated_f16: DevicePtr,  // F16 [top_k, intermediate]
+    pub activated_q8_1: DevicePtr, // Q8_1 [top_k, intermediate / 32]
+    pub down_f32: DevicePtr,       // F32 [top_k, hidden]
+    pub down_f16: DevicePtr,       // F16 [top_k, hidden]
 }
 
 /// Borrowed-by-value view of a caller-owned MoE prefill scratch.
@@ -53,22 +53,22 @@ pub struct MoeExpertsDecodeScratch {
 #[derive(Copy, Clone)]
 pub struct MoeExpertsPrefillScratch {
     pub max_tokens: usize,
-    pub x_q8_1: DevicePtr,                       // Q8_1 [L, hidden / 32]
-    pub router_logits: DevicePtr,                // F32 [L, n_experts]
-    pub expert_ids: DevicePtr,                   // i32 [L, top_k]
-    pub expert_weights: DevicePtr,               // F32 [L, top_k]
-    pub gate_out_f32: DevicePtr,                 // F32 [L, top_k, intermediate]
-    pub up_out_f32: DevicePtr,                   // F32 [L, top_k, intermediate]
-    pub activated_f16: DevicePtr,                // F16 [L, top_k, intermediate]
-    pub activated_q8_1: DevicePtr,               // Q8_1 [L, top_k, intermediate / 32]
-    pub down_f32: DevicePtr,                     // F32 [L, top_k, hidden]
-    pub down_f16: DevicePtr,                     // F16 [L, top_k, hidden]
-    pub sort_counts: DevicePtr,                  // i32 [n_experts]
-    pub sort_offsets: DevicePtr,                 // i32 [n_experts + 1]
-    pub sort_cursors: DevicePtr,                 // i32 [n_experts]
-    pub sort_sorted_pair_idx: DevicePtr,         // i32 [L * top_k]
-    pub sort_padded_offsets: DevicePtr,          // i32 [n_experts + 1]
-    pub sort_sorted_pair_idx_padded: DevicePtr,  // i32 [L * top_k + n_experts * 8]
+    pub x_q8_1: DevicePtr,                      // Q8_1 [L, hidden / 32]
+    pub router_logits: DevicePtr,               // F32 [L, n_experts]
+    pub expert_ids: DevicePtr,                  // i32 [L, top_k]
+    pub expert_weights: DevicePtr,              // F32 [L, top_k]
+    pub gate_out_f32: DevicePtr,                // F32 [L, top_k, intermediate]
+    pub up_out_f32: DevicePtr,                  // F32 [L, top_k, intermediate]
+    pub activated_f16: DevicePtr,               // F16 [L, top_k, intermediate]
+    pub activated_q8_1: DevicePtr,              // Q8_1 [L, top_k, intermediate / 32]
+    pub down_f32: DevicePtr,                    // F32 [L, top_k, hidden]
+    pub down_f16: DevicePtr,                    // F16 [L, top_k, hidden]
+    pub sort_counts: DevicePtr,                 // i32 [n_experts]
+    pub sort_offsets: DevicePtr,                // i32 [n_experts + 1]
+    pub sort_cursors: DevicePtr,                // i32 [n_experts]
+    pub sort_sorted_pair_idx: DevicePtr,        // i32 [L * top_k]
+    pub sort_padded_offsets: DevicePtr,         // i32 [n_experts + 1]
+    pub sort_sorted_pair_idx_padded: DevicePtr, // i32 [L * top_k + n_experts * 8]
 }
 
 const QK_K: usize = 256;
@@ -239,10 +239,10 @@ impl Default for RouterPolicy {
 /// indexed weights, and the shape scalars. The block does NOT own the
 /// shared-expert path; that stays in the model crate.
 pub struct MoeExperts {
-    pub ffn_gate_inp: WeightHandle,    // [n_experts, hidden]
-    pub ffn_gate_exps: WeightHandle,   // [n_experts, intermediate, hidden]
-    pub ffn_up_exps: WeightHandle,     // dito
-    pub ffn_down_exps: WeightHandle,   // [n_experts, hidden, intermediate]
+    pub ffn_gate_inp: WeightHandle,  // [n_experts, hidden]
+    pub ffn_gate_exps: WeightHandle, // [n_experts, intermediate, hidden]
+    pub ffn_up_exps: WeightHandle,   // dito
+    pub ffn_down_exps: WeightHandle, // [n_experts, hidden, intermediate]
     pub hidden: usize,
     pub intermediate: usize,
     pub n_experts: usize,
@@ -343,7 +343,12 @@ impl MoeExperts {
         if max_tokens == 0 {
             bail!("alloc_prefill_scratch: max_tokens must be >= 1");
         }
-        let MoeExpertsScratchDims { hidden, intermediate, n_experts, top_k } = dims;
+        let MoeExpertsScratchDims {
+            hidden,
+            intermediate,
+            n_experts,
+            top_k,
+        } = dims;
         let (x_q8_1, _) = tracker.alloc_q8_1(device, max_tokens * hidden)?;
         let (router_logits, _) = tracker.alloc_f32(device, max_tokens * n_experts)?;
         let (expert_ids, _) = tracker.alloc_i32(device, max_tokens * top_k)?;
@@ -351,8 +356,7 @@ impl MoeExperts {
         let (gate_out_f32, _) = tracker.alloc_f32(device, max_tokens * top_k * intermediate)?;
         let (up_out_f32, _) = tracker.alloc_f32(device, max_tokens * top_k * intermediate)?;
         let (activated_f16, _) = tracker.alloc_f16(device, max_tokens * top_k * intermediate)?;
-        let (activated_q8_1, _) =
-            tracker.alloc_q8_1(device, max_tokens * top_k * intermediate)?;
+        let (activated_q8_1, _) = tracker.alloc_q8_1(device, max_tokens * top_k * intermediate)?;
         let (down_f32, _) = tracker.alloc_f32(device, max_tokens * top_k * hidden)?;
         let (down_f16, _) = tracker.alloc_f16(device, max_tokens * top_k * hidden)?;
         let (sort_counts, _) = tracker.alloc_i32(device, n_experts)?;
@@ -392,7 +396,12 @@ impl MoeExperts {
         tracker: &mut RawAllocTracker,
         dims: MoeExpertsScratchDims,
     ) -> Result<OwnedMoeExpertsDecodeScratch> {
-        let MoeExpertsScratchDims { hidden, intermediate, n_experts, top_k } = dims;
+        let MoeExpertsScratchDims {
+            hidden,
+            intermediate,
+            n_experts,
+            top_k,
+        } = dims;
         let (x_q8_1, _) = tracker.alloc_q8_1(device, hidden)?;
         let (router_logits, _) = tracker.alloc_f32(device, n_experts)?;
         let (expert_ids, _) = tracker.alloc_i32(device, top_k)?;
@@ -465,11 +474,7 @@ impl MoeExperts {
         Ok(())
     }
 
-    fn gate_up<O: Ops>(
-        &self,
-        ops: &O,
-        scratch: MoeExpertsDecodeScratch,
-    ) -> Result<()> {
+    fn gate_up<O: Ops>(&self, ops: &O, scratch: MoeExpertsDecodeScratch) -> Result<()> {
         let inter = self.intermediate;
         let n_tokens = 1usize;
         let top_k = self.top_k;
@@ -524,17 +529,13 @@ impl MoeExperts {
                 )
                 .context("indexed_moe gate+up q4_0 fused")
             }
-            other => bail!(
-                "MoeExperts gate dtype {other:?} not supported (expected Q4_K / Q8_0 / Q4_0)"
-            ),
+            other => {
+                bail!("MoeExperts gate dtype {other:?} not supported (expected Q4_K / Q8_0 / Q4_0)")
+            }
         }
     }
 
-    fn down<O: Ops>(
-        &self,
-        ops: &O,
-        scratch: MoeExpertsDecodeScratch,
-    ) -> Result<()> {
+    fn down<O: Ops>(&self, ops: &O, scratch: MoeExpertsDecodeScratch) -> Result<()> {
         let inter = self.intermediate;
         let hidden = self.hidden;
         let n_tokens_eff = self.top_k;
@@ -660,8 +661,7 @@ impl MoeExperts {
         // `swiglu_f32_to_q8_1` fast path (saves the F16 cast +
         // quantise pair). GELU has no fused-q8_1 sibling kernel.
         let n_total = top_k * inter;
-        let fuse_swiglu_quant =
-            matches!(self.activation, Activation::SwiGLU) && n_total % 32 == 0;
+        let fuse_swiglu_quant = matches!(self.activation, Activation::SwiGLU) && n_total % 32 == 0;
         if fuse_swiglu_quant {
             ops.swiglu_f32_to_q8_1(
                 scratch.gate_out_f32,
@@ -760,8 +760,7 @@ impl MoeExperts {
         // 3+4. Fused activation → Q8_1 (SwiGLU @ multiples of QK8_1=32)
         // or unfused (GELU / off-multiples).
         let n_total = top_k * inter;
-        let fuse_swiglu_quant =
-            matches!(self.activation, Activation::SwiGLU) && n_total % 32 == 0;
+        let fuse_swiglu_quant = matches!(self.activation, Activation::SwiGLU) && n_total % 32 == 0;
         if fuse_swiglu_quant {
             ops.swiglu_f32_to_q8_1(
                 scratch.gate_out_f32,
@@ -835,8 +834,7 @@ impl MoeExperts {
             .context("moe (TP-F32) x_norm → Q8_1")?;
         self.gate_up(ops, scratch)?;
         let n_total = top_k * inter;
-        let fuse_swiglu_quant =
-            matches!(self.activation, Activation::SwiGLU) && n_total % 32 == 0;
+        let fuse_swiglu_quant = matches!(self.activation, Activation::SwiGLU) && n_total % 32 == 0;
         if fuse_swiglu_quant {
             ops.swiglu_f32_to_q8_1(
                 scratch.gate_out_f32,
@@ -1060,8 +1058,7 @@ impl MoeExperts {
         // 2. Q4_0 / Q8_0 short-prompt fast path. Uses plain indexed
         // MoE MMVQ (no sort/pad). Allowed combos: Q4_0 gate+up with
         // Q4_0 / Q8_0 / Q4_1 down; Q8_0 gate+up with Q8_0 down.
-        let allow_tile8_decode =
-            std::env::var("FLAMBEAU_MOE_TILE8_DECODE").as_deref() != Ok("0");
+        let allow_tile8_decode = std::env::var("FLAMBEAU_MOE_TILE8_DECODE").as_deref() != Ok("0");
         let tile8_tokens_ok = self
             .tile8_min_tokens
             .map(|m| prompt_len >= m)
@@ -1372,8 +1369,12 @@ impl MoeExperts {
             n_pairs * inter,
         )
         .context("prefill moe swiglu_f32_to_f16")?;
-        ops.quantize_f16_q8_1(scratch.activated_f16, scratch.activated_q8_1, n_pairs * inter)
-            .context("prefill quantise activated → Q8_1")?;
+        ops.quantize_f16_q8_1(
+            scratch.activated_f16,
+            scratch.activated_q8_1,
+            n_pairs * inter,
+        )
+        .context("prefill quantise activated → Q8_1")?;
 
         // 5. Down dispatch — per-dtype tile8 / MMVQ choice.
         let down_shape_tile8_kk = flambeau_ops::MoeShape {
@@ -1558,9 +1559,7 @@ impl MoeExperts {
                     down_shape_tile8_kk,
                 )
                 .context("prefill indexed_moe down iq1_m tile8")?,
-            other => bail!(
-                "MoeExperts prefill: down_dt {other:?} not on the tile8 surface"
-            ),
+            other => bail!("MoeExperts prefill: down_dt {other:?} not on the tile8 surface"),
         }
 
         // 6. Cast expert outputs to F16.
@@ -1637,9 +1636,7 @@ impl MoeExperts {
                 )
                 .context("prefill indexed_moe gate+up q4_0 mmvq")
             }
-            other => bail!(
-                "MoeExperts prefill MMVQ short path: gate_dt {other:?} not supported"
-            ),
+            other => bail!("MoeExperts prefill MMVQ short path: gate_dt {other:?} not supported"),
         }
     }
 
@@ -1738,9 +1735,7 @@ impl MoeExperts {
                 )
                 .context("prefill indexed_moe down q4_1 mmvq")
             }
-            other => bail!(
-                "MoeExperts prefill MMVQ short path: down_dt {other:?} not supported"
-            ),
+            other => bail!("MoeExperts prefill MMVQ short path: down_dt {other:?} not supported"),
         }
     }
 

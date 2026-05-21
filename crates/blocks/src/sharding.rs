@@ -61,7 +61,9 @@ pub fn upload_sharded_tensor(
     let slice = slice_for_tp(file, &info.name, layout, rank)
         .with_context(|| format!("slice_for_tp `{}`", info.name))?;
     let bytes = slice.len();
-    htod_alloc_copy(&info.name, &slice, info.dtype, device, stream, tracker, bytes)
+    htod_alloc_copy(
+        &info.name, &slice, info.dtype, device, stream, tracker, bytes,
+    )
 }
 
 /// Upload `info` fully replicated (no slicing). Dtype preserved.
@@ -108,11 +110,7 @@ pub fn upload_replicated_norm_f32_to_f16(
     tracker: &mut RawAllocTracker,
 ) -> Result<UploadedTensor> {
     if info.dtype != GgmlDType::F32 {
-        bail!(
-            "norm `{}` expected F32, got {:?}",
-            info.name,
-            info.dtype
-        );
+        bail!("norm `{}` expected F32, got {:?}", info.name, info.dtype);
     }
     let elems: usize = info.dims.iter().product::<u64>() as usize;
     if elems != expected_len {

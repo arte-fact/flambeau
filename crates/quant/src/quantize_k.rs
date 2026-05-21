@@ -63,15 +63,23 @@ fn make_qkx2_quants(
     let mut sum_w = weights[0];
     let mut sum_x = sum_w * x[0];
     for i in 1..n {
-        if x[i] < min { min = x[i]; }
-        if x[i] > max { max = x[i]; }
+        if x[i] < min {
+            min = x[i];
+        }
+        if x[i] > max {
+            max = x[i];
+        }
         let w = weights[i];
         sum_w += w;
         sum_x += w * x[i];
     }
-    if min > 0.0 { min = 0.0; }
+    if min > 0.0 {
+        min = 0.0;
+    }
     if max == min {
-        for i in 0..n { out_l[i] = 0; }
+        for i in 0..n {
+            out_l[i] = 0;
+        }
         *the_min = -min;
         return 0.0;
     }
@@ -136,21 +144,20 @@ fn make_qkx2_quants(
 /// `make_q3_quants` — pure-scale signed quantiser with RMSE fixpoint.
 /// Returns the best scale; writes per-element codes into `out_l` as
 /// `l + nmax` (so the caller sees an unsigned 0..2*nmax index).
-fn make_q3_quants(
-    n: usize,
-    nmax: i32,
-    x: &[f32],
-    out_l: &mut [i8],
-    do_rmse: bool,
-) -> f32 {
+fn make_q3_quants(n: usize, nmax: i32, x: &[f32], out_l: &mut [i8], do_rmse: bool) -> f32 {
     let mut max = 0.0f32;
     let mut amax = 0.0f32;
     for &v in &x[..n] {
         let ax = v.abs();
-        if ax > amax { amax = ax; max = v; }
+        if ax > amax {
+            amax = ax;
+            max = v;
+        }
     }
     if amax < GROUP_MAX_EPS {
-        for i in 0..n { out_l[i] = 0; }
+        for i in 0..n {
+            out_l[i] = 0;
+        }
         return 0.0;
     }
     let iscale = -(nmax as f32) / max;
@@ -172,7 +179,8 @@ fn make_q3_quants(
                 if slx_base > 0.0 {
                     let sl2_base = suml2 - w * (out_l[i] as f32) * (out_l[i] as f32);
                     let new_l = nearest_int(x[i] * sl2_base / slx_base)
-                        .max(-nmax).min(nmax - 1);
+                        .max(-nmax)
+                        .min(nmax - 1);
                     if new_l != out_l[i] as i32 {
                         let slx = slx_base + w * x[i] * (new_l as f32);
                         let sl2 = sl2_base + w * (new_l as f32) * (new_l as f32);
@@ -185,7 +193,9 @@ fn make_q3_quants(
                     }
                 }
             }
-            if n_changed == 0 { break; }
+            if n_changed == 0 {
+                break;
+            }
         }
         for i in 0..n {
             out_l[i] = (out_l[i] as i32 + nmax) as i8;
@@ -227,42 +237,63 @@ fn pack_block_q4_k(xi: &[f32], out: &mut [u8]) {
     for j in 0..QK_K / 32 {
         let xj = &xi[32 * j..32 * (j + 1)];
         let mut sum_x2 = 0.0f32;
-        for &v in xj { sum_x2 += v * v; }
+        for &v in xj {
+            sum_x2 += v * v;
+        }
         let av_x = (sum_x2 / 32.0).sqrt();
-        for l in 0..32 { weights[l] = av_x + xj[l].abs(); }
+        for l in 0..32 {
+            weights[l] = av_x + xj[l].abs();
+        }
         let mut the_min = 0.0f32;
         scales[j] = make_qkx2_quants(
-            32, 15, xj, &weights,
+            32,
+            15,
+            xj,
+            &weights,
             &mut local_l[32 * j..32 * (j + 1)],
             &mut the_min,
-            &mut aux_l, -1.0, 0.1, 20, false,
+            &mut aux_l,
+            -1.0,
+            0.1,
+            20,
+            false,
         );
         mins[j] = the_min;
-        if scales[j] > max_scale { max_scale = scales[j]; }
-        if mins[j]  > max_min   { max_min   = mins[j]; }
+        if scales[j] > max_scale {
+            max_scale = scales[j];
+        }
+        if mins[j] > max_min {
+            max_min = mins[j];
+        }
     }
 
-    let inv_scale = if max_scale > 0.0 { 63.0 / max_scale } else { 0.0 };
-    let inv_min   = if max_min   > 0.0 { 63.0 / max_min   } else { 0.0 };
+    let inv_scale = if max_scale > 0.0 {
+        63.0 / max_scale
+    } else {
+        0.0
+    };
+    let inv_min = if max_min > 0.0 { 63.0 / max_min } else { 0.0 };
     for j in 0..QK_K / 32 {
         let ls = (nearest_int(inv_scale * scales[j]) as u8).min(63);
-        let lm = (nearest_int(inv_min   * mins[j])   as u8).min(63);
+        let lm = (nearest_int(inv_min * mins[j]) as u8).min(63);
         if j < 4 {
-            block_scales[j]     = ls;
+            block_scales[j] = ls;
             block_scales[j + 4] = lm;
         } else {
             block_scales[j + 4] = (ls & 0xF) | ((lm & 0xF) << 4);
             block_scales[j - 4] |= (ls >> 4) << 6;
-            block_scales[j]     |= (lm >> 4) << 6;
+            block_scales[j] |= (lm >> 4) << 6;
         }
     }
-    let d_f16    = f16::from_f32(max_scale / 63.0);
-    let dmin_f16 = f16::from_f32(max_min   / 63.0);
+    let d_f16 = f16::from_f32(max_scale / 63.0);
+    let dmin_f16 = f16::from_f32(max_min / 63.0);
 
     for j in 0..QK_K / 32 {
         let (sc, m) = get_scale_min_k4(j, &block_scales);
         let d = d_f16.to_f32() * sc as f32;
-        if d == 0.0 { continue; }
+        if d == 0.0 {
+            continue;
+        }
         let dm = dmin_f16.to_f32() * m as f32;
         for ii in 0..32 {
             let l = nearest_int((xi[32 * j + ii] + dm) / d).max(0).min(15);
@@ -311,10 +342,18 @@ fn pack_block_q3_k(xi: &[f32], out: &mut [u8]) {
     let mut max_scale = 0.0f32;
     let mut amax = 0.0f32;
     for j in 0..QK_K / 16 {
-        scales[j] = make_q3_quants(16, 4, &xi[16 * j..16 * (j + 1)],
-            &mut local_l[16 * j..16 * (j + 1)], true);
+        scales[j] = make_q3_quants(
+            16,
+            4,
+            &xi[16 * j..16 * (j + 1)],
+            &mut local_l[16 * j..16 * (j + 1)],
+            true,
+        );
         let sa = scales[j].abs();
-        if sa > amax { amax = sa; max_scale = scales[j]; }
+        if sa > amax {
+            amax = sa;
+            max_scale = scales[j];
+        }
     }
 
     let d_f16 = if max_scale != 0.0 {
@@ -336,11 +375,17 @@ fn pack_block_q3_k(xi: &[f32], out: &mut [u8]) {
     };
 
     for j in 0..QK_K / 16 {
-        let sc_low = if j < 8 { block_scales[j] & 0xF } else { block_scales[j - 8] >> 4 };
+        let sc_low = if j < 8 {
+            block_scales[j] & 0xF
+        } else {
+            block_scales[j - 8] >> 4
+        };
         let sc = sc_low | ((block_scales[8 + j % 4] >> (2 * (j / 4))) & 3) << 4;
         let sc = (sc as i32) - 32;
         let d = d_f16.to_f32() * sc as f32;
-        if d == 0.0 { continue; }
+        if d == 0.0 {
+            continue;
+        }
         for ii in 0..16 {
             let l = nearest_int(xi[16 * j + ii] / d).max(-4).min(3);
             local_l[16 * j + ii] = (l + 4) as i8;
@@ -405,17 +450,30 @@ fn pack_block_q2_k(xi: &[f32], out: &mut [u8]) {
     let mut max_min = 0.0f32;
     for j in 0..QK_K / 16 {
         let xj = &xi[16 * j..16 * (j + 1)];
-        for l in 0..16 { weights[l] = xj[l].abs(); }
+        for l in 0..16 {
+            weights[l] = xj[l].abs();
+        }
         let mut the_min = 0.0f32;
         scales[j] = make_qkx2_quants(
-            16, 3, xj, &weights,
+            16,
+            3,
+            xj,
+            &weights,
             &mut local_l[16 * j..16 * (j + 1)],
             &mut the_min,
-            &mut aux_l, -0.5, 0.1, 15, true,
+            &mut aux_l,
+            -0.5,
+            0.1,
+            15,
+            true,
         );
         mins[j] = the_min;
-        if scales[j] > max_scale { max_scale = scales[j]; }
-        if mins[j]  > max_min   { max_min   = mins[j]; }
+        if scales[j] > max_scale {
+            max_scale = scales[j];
+        }
+        if mins[j] > max_min {
+            max_min = mins[j];
+        }
     }
 
     let d_f16 = if max_scale > 0.0 {
@@ -440,7 +498,9 @@ fn pack_block_q2_k(xi: &[f32], out: &mut [u8]) {
 
     for j in 0..QK_K / 16 {
         let d = d_f16.to_f32() * (block_scales[j] & 0xF) as f32;
-        if d == 0.0 { continue; }
+        if d == 0.0 {
+            continue;
+        }
         let dm = dmin_f16.to_f32() * (block_scales[j] >> 4) as f32;
         for ii in 0..16 {
             let l = nearest_int((xi[16 * j + ii] + dm) / d).max(0).min(3);
@@ -517,7 +577,11 @@ mod tests {
         // full quant range and the zero-d shortcut.
         for i in 0..n {
             let phase = (i as f32) * 0.017;
-            let amp = if i % 73 == 0 { 0.0 } else { 1.5 + 0.5 * (i as f32 / 1024.0).sin() };
+            let amp = if i % 73 == 0 {
+                0.0
+            } else {
+                1.5 + 0.5 * (i as f32 / 1024.0).sin()
+            };
             v.push(amp * phase.sin() - 0.3 * phase.cos());
         }
         v
@@ -529,12 +593,18 @@ mod tests {
         let mut b = Vec::new();
         f(&x, &mut a);
         f(&x, &mut b);
-        assert_eq!(a, b, "rayon-parallel quantize should be deterministic across runs");
+        assert_eq!(
+            a, b,
+            "rayon-parallel quantize should be deterministic across runs"
+        );
         // Output prefix-appends: a second call appends to the same Vec.
         let mut c = b.clone();
         f(&x, &mut c);
-        assert_eq!(&c[a.len()..], &a[..],
-            "second call must produce identical bytes to the first call");
+        assert_eq!(
+            &c[a.len()..],
+            &a[..],
+            "second call must produce identical bytes to the first call"
+        );
     }
 
     #[test]

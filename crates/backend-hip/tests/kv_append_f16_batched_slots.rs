@@ -3,8 +3,14 @@
 //! cache contents — the kernel just executes the same copies in one
 //! launch.
 
-#![expect(clippy::undocumented_unsafe_blocks, reason = "test fixture; same shape rationale as siblings")]
-#![expect(clippy::cast_possible_wrap, reason = "kernel-shape math bounded by GGUF dims")]
+#![expect(
+    clippy::undocumented_unsafe_blocks,
+    reason = "test fixture; same shape rationale as siblings"
+)]
+#![expect(
+    clippy::cast_possible_wrap,
+    reason = "kernel-shape math bounded by GGUF dims"
+)]
 
 use flambeau_backend_hip::{device_count, HipDevice, HipKernel, HipModule, KernelArgs, LaunchCfg};
 use flambeau_core::{CopyDirection, Device, DevicePtr, Stream};
@@ -19,7 +25,9 @@ fn seeded_f16(seed: u64, n: usize) -> Vec<f16> {
     let mut state = seed.wrapping_mul(6364136223846793005).wrapping_add(1);
     (0..n)
         .map(|_| {
-            state = state.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+            state = state
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
             let u = (state >> 32) as u32;
             f16::from_f32((u as f32 / u32::MAX as f32) * 2.0 - 1.0)
         })
@@ -59,12 +67,20 @@ fn copy_back_f16(dev: &HipDevice, src: DevicePtr, n: usize) -> Vec<f16> {
     out
 }
 
-fn run_case(n_slots: usize, kv_width: usize, max_seq_len: usize, seed: u64) -> (Vec<Vec<f16>>, Vec<Vec<f16>>, Vec<Vec<f16>>, Vec<Vec<f16>>) {
+fn run_case(
+    n_slots: usize,
+    kv_width: usize,
+    max_seq_len: usize,
+    seed: u64,
+) -> (Vec<Vec<f16>>, Vec<Vec<f16>>, Vec<Vec<f16>>, Vec<Vec<f16>>) {
     let dev = HipDevice::new(0).unwrap();
     dev.bind().unwrap();
 
-    let kv_append_module = HipModule::load(0, kernels::hsaco("kv_append_f16_batched_slots").unwrap()).unwrap();
-    let k_kernel: HipKernel<'_> = kv_append_module.kernel("flambeau_kv_append_f16_batched_slots").unwrap();
+    let kv_append_module =
+        HipModule::load(0, kernels::hsaco("kv_append_f16_batched_slots").unwrap()).unwrap();
+    let k_kernel: HipKernel<'_> = kv_append_module
+        .kernel("flambeau_kv_append_f16_batched_slots")
+        .unwrap();
 
     // K/V src: [N, kv_width]
     let k_src = seeded_f16(seed, n_slots * kv_width);
@@ -74,24 +90,48 @@ fn run_case(n_slots: usize, kv_width: usize, max_seq_len: usize, seed: u64) -> (
     // deterministic garbage so we can verify only the target row got
     // overwritten.
     let cache_init: Vec<Vec<f16>> = (0..n_slots)
-        .map(|i| seeded_f16(seed.wrapping_add(101).wrapping_add(i as u64), max_seq_len * kv_width))
+        .map(|i| {
+            seeded_f16(
+                seed.wrapping_add(101).wrapping_add(i as u64),
+                max_seq_len * kv_width,
+            )
+        })
         .collect();
     let cache_init_v: Vec<Vec<f16>> = (0..n_slots)
-        .map(|i| seeded_f16(seed.wrapping_add(211).wrapping_add(i as u64), max_seq_len * kv_width))
+        .map(|i| {
+            seeded_f16(
+                seed.wrapping_add(211).wrapping_add(i as u64),
+                max_seq_len * kv_width,
+            )
+        })
         .collect();
 
     // REF caches.
-    let ref_k_caches: Vec<DevicePtr> = cache_init.iter().map(|c| alloc_and_upload(&dev, c)).collect();
-    let ref_v_caches: Vec<DevicePtr> = cache_init_v.iter().map(|c| alloc_and_upload(&dev, c)).collect();
+    let ref_k_caches: Vec<DevicePtr> = cache_init
+        .iter()
+        .map(|c| alloc_and_upload(&dev, c))
+        .collect();
+    let ref_v_caches: Vec<DevicePtr> = cache_init_v
+        .iter()
+        .map(|c| alloc_and_upload(&dev, c))
+        .collect();
     // KER (kernel) caches with same init.
-    let ker_k_caches: Vec<DevicePtr> = cache_init.iter().map(|c| alloc_and_upload(&dev, c)).collect();
-    let ker_v_caches: Vec<DevicePtr> = cache_init_v.iter().map(|c| alloc_and_upload(&dev, c)).collect();
+    let ker_k_caches: Vec<DevicePtr> = cache_init
+        .iter()
+        .map(|c| alloc_and_upload(&dev, c))
+        .collect();
+    let ker_v_caches: Vec<DevicePtr> = cache_init_v
+        .iter()
+        .map(|c| alloc_and_upload(&dev, c))
+        .collect();
 
     let d_k_src = alloc_and_upload(&dev, &k_src);
     let d_v_src = alloc_and_upload(&dev, &v_src);
 
     // Write positions: spread across the cache.
-    let write_pos: Vec<usize> = (0..n_slots).map(|i| (i * (max_seq_len - 1) / n_slots.max(1)).min(max_seq_len - 1)).collect();
+    let write_pos: Vec<usize> = (0..n_slots)
+        .map(|i| (i * (max_seq_len - 1) / n_slots.max(1)).min(max_seq_len - 1))
+        .collect();
 
     // REF: per-slot DtoD memcpys (mirrors the legacy step-8 loop).
     {
@@ -103,8 +143,22 @@ fn run_case(n_slots: usize, kv_width: usize, max_seq_len: usize, seed: u64) -> (
             let k_src_off = DevicePtr(d_k_src.as_usize() + s * row_bytes);
             let v_src_off = DevicePtr(d_v_src.as_usize() + s * row_bytes);
             unsafe {
-                dev.memcpy_async(stream, CopyDirection::DeviceToDevice, k_dst, k_src_off, row_bytes).unwrap();
-                dev.memcpy_async(stream, CopyDirection::DeviceToDevice, v_dst, v_src_off, row_bytes).unwrap();
+                dev.memcpy_async(
+                    stream,
+                    CopyDirection::DeviceToDevice,
+                    k_dst,
+                    k_src_off,
+                    row_bytes,
+                )
+                .unwrap();
+                dev.memcpy_async(
+                    stream,
+                    CopyDirection::DeviceToDevice,
+                    v_dst,
+                    v_src_off,
+                    row_bytes,
+                )
+                .unwrap();
             }
         }
         stream.synchronize().unwrap();
@@ -144,16 +198,36 @@ fn run_case(n_slots: usize, kv_width: usize, max_seq_len: usize, seed: u64) -> (
         stream.synchronize().unwrap();
     }
 
-    let ref_k_out: Vec<Vec<f16>> = ref_k_caches.iter().map(|p| copy_back_f16(&dev, *p, max_seq_len * kv_width)).collect();
-    let ref_v_out: Vec<Vec<f16>> = ref_v_caches.iter().map(|p| copy_back_f16(&dev, *p, max_seq_len * kv_width)).collect();
-    let ker_k_out: Vec<Vec<f16>> = ker_k_caches.iter().map(|p| copy_back_f16(&dev, *p, max_seq_len * kv_width)).collect();
-    let ker_v_out: Vec<Vec<f16>> = ker_v_caches.iter().map(|p| copy_back_f16(&dev, *p, max_seq_len * kv_width)).collect();
+    let ref_k_out: Vec<Vec<f16>> = ref_k_caches
+        .iter()
+        .map(|p| copy_back_f16(&dev, *p, max_seq_len * kv_width))
+        .collect();
+    let ref_v_out: Vec<Vec<f16>> = ref_v_caches
+        .iter()
+        .map(|p| copy_back_f16(&dev, *p, max_seq_len * kv_width))
+        .collect();
+    let ker_k_out: Vec<Vec<f16>> = ker_k_caches
+        .iter()
+        .map(|p| copy_back_f16(&dev, *p, max_seq_len * kv_width))
+        .collect();
+    let ker_v_out: Vec<Vec<f16>> = ker_v_caches
+        .iter()
+        .map(|p| copy_back_f16(&dev, *p, max_seq_len * kv_width))
+        .collect();
 
     unsafe {
-        for p in &ref_k_caches { dev.dealloc(*p, cache_init[0].len() * 2).unwrap(); }
-        for p in &ref_v_caches { dev.dealloc(*p, cache_init_v[0].len() * 2).unwrap(); }
-        for p in &ker_k_caches { dev.dealloc(*p, cache_init[0].len() * 2).unwrap(); }
-        for p in &ker_v_caches { dev.dealloc(*p, cache_init_v[0].len() * 2).unwrap(); }
+        for p in &ref_k_caches {
+            dev.dealloc(*p, cache_init[0].len() * 2).unwrap();
+        }
+        for p in &ref_v_caches {
+            dev.dealloc(*p, cache_init_v[0].len() * 2).unwrap();
+        }
+        for p in &ker_k_caches {
+            dev.dealloc(*p, cache_init[0].len() * 2).unwrap();
+        }
+        for p in &ker_v_caches {
+            dev.dealloc(*p, cache_init_v[0].len() * 2).unwrap();
+        }
         dev.dealloc(d_k_src, k_src.len() * 2).unwrap();
         dev.dealloc(d_v_src, v_src.len() * 2).unwrap();
         dev.dealloc(d_k_ptrs, ker_k_ptrs_host.len() * 8).unwrap();
@@ -167,7 +241,13 @@ fn run_case(n_slots: usize, kv_width: usize, max_seq_len: usize, seed: u64) -> (
 fn assert_bit_equal(label: &str, a: &[f16], b: &[f16]) {
     assert_eq!(a.len(), b.len(), "{label}: length mismatch");
     for (i, (x, y)) in a.iter().zip(b).enumerate() {
-        assert_eq!(x.to_bits(), y.to_bits(), "{label}: idx={i} ref={} ker={}", x.to_f32(), y.to_f32());
+        assert_eq!(
+            x.to_bits(),
+            y.to_bits(),
+            "{label}: idx={i} ref={} ker={}",
+            x.to_f32(),
+            y.to_f32()
+        );
     }
 }
 

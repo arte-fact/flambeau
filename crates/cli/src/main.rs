@@ -23,7 +23,11 @@ fn parse_bool_loose(s: &str) -> Result<bool, String> {
 }
 
 #[derive(Parser)]
-#[command(name = "flambeau", version, about = "Max-perf inference server for modern LLMs on HIP + CUDA.")]
+#[command(
+    name = "flambeau",
+    version,
+    about = "Max-perf inference server for modern LLMs on HIP + CUDA."
+)]
 struct Cli {
     #[command(subcommand)]
     cmd: Cmd,
@@ -32,9 +36,7 @@ struct Cli {
 #[derive(Subcommand)]
 enum Cmd {
     /// Dump GGUF tensor list, dtype audit, metadata ().
-    InspectGguf {
-        path: String,
-    },
+    InspectGguf { path: String },
     /// Dump the GGUF-embedded Jinja chat template to a `.jinja` file.
     /// Used by `certs/chat_template/qwen35moe_tools/regenerate.sh` and as
     /// a general utility for anyone wanting to feed the model's actual
@@ -50,9 +52,7 @@ enum Cmd {
         out: Option<String>,
     },
     /// Dump HIP `.hsaco` kernel symbols + VGPR budgets (+).
-    InspectHsaco {
-        path: String,
-    },
+    InspectHsaco { path: String },
     /// Single-prompt inference; prints completion to stdout ().
     Infer {
         #[arg(long)]
@@ -115,19 +115,35 @@ enum Cmd {
         #[arg(long = "embedding-device")]
         embedding_device: Option<i32>,
         /// Number of concurrent inflight decode slots (1-32).
-        #[arg(long = "inflight-slots", env = "FLAMBEAU_INFLIGHT_SLOTS", default_value_t = 4)]
+        #[arg(
+            long = "inflight-slots",
+            env = "FLAMBEAU_INFLIGHT_SLOTS",
+            default_value_t = 4
+        )]
         inflight_slots: usize,
         /// Prefill chunk size (tokens per forward step).
-        #[arg(long = "prefill-ubatch", env = "FLAMBEAU_PREFILL_UBATCH", default_value_t = 512)]
+        #[arg(
+            long = "prefill-ubatch",
+            env = "FLAMBEAU_PREFILL_UBATCH",
+            default_value_t = 512
+        )]
         prefill_ubatch: usize,
         /// Admission-control queue depth beyond `inflight_slots` before
         /// returning 503 + Retry-After. 0 disables (legacy).
-        #[arg(long = "max-queue-depth", env = "FLAMBEAU_MAX_QUEUE_DEPTH", default_value_t = 16)]
+        #[arg(
+            long = "max-queue-depth",
+            env = "FLAMBEAU_MAX_QUEUE_DEPTH",
+            default_value_t = 16
+        )]
         max_queue_depth: usize,
         /// Decode-batching coalescence window (microseconds). The
         /// leader sleeps this long before draining the pending-decode
         /// queue so concurrent requests join the same batched forward.
-        #[arg(long = "decode-batch-window-us", env = "FLAMBEAU_DECODE_BATCH_WINDOW_US", default_value_t = 1500)]
+        #[arg(
+            long = "decode-batch-window-us",
+            env = "FLAMBEAU_DECODE_BATCH_WINDOW_US",
+            default_value_t = 1500
+        )]
         decode_batch_window_us: u64,
         /// Clamp the model's `context_length` to this many tokens.
         /// Useful for preventing per-slot KV-cache OOM on consumer VRAM.
@@ -165,7 +181,11 @@ enum Cmd {
         )]
         prefix_cache: bool,
         /// Prefix-cache LRU size in GB. Only used when --prefix-cache is set.
-        #[arg(long = "prefix-cache-max-gb", env = "FLAMBEAU_PREFIX_CACHE_MAX_GB", default_value_t = 2.0)]
+        #[arg(
+            long = "prefix-cache-max-gb",
+            env = "FLAMBEAU_PREFIX_CACHE_MAX_GB",
+            default_value_t = 2.0
+        )]
         prefix_cache_max_gb: f64,
         /// KV cache layout. `f16` (default, canonical) or `q8` (~2× HBM
         /// saving on decode; quality cert required per model).
@@ -176,7 +196,11 @@ enum Cmd {
         #[arg(long = "default-system", env = "FLAMBEAU_DEFAULT_SYSTEM")]
         default_system: Option<String>,
         /// /v1/embeddings endpoint per-prompt token cap.
-        #[arg(long = "embedding-max-tokens", env = "FLAMBEAU_EMBEDDING_MAX_TOKENS", default_value_t = 8192)]
+        #[arg(
+            long = "embedding-max-tokens",
+            env = "FLAMBEAU_EMBEDDING_MAX_TOKENS",
+            default_value_t = 8192
+        )]
         embedding_max_tokens: usize,
     },
     /// Correctness-sweep harness; emits certs (+).
@@ -398,7 +422,9 @@ fn serve_cmd(args: ServeArgs) -> Result<()> {
                     device_ids.len()
                 );
             }
-            flambeau_server::MeshMode::Tp { world: tp_size_resolved }
+            flambeau_server::MeshMode::Tp {
+                world: tp_size_resolved,
+            }
         }
         "pp+tp" | "hybrid" => {
             // both axes are explicit — operator-driven, no
@@ -420,9 +446,7 @@ fn serve_cmd(args: ServeArgs) -> Result<()> {
             }
             flambeau_server::MeshMode::Hybrid { pp_size, tp_size }
         }
-        other => anyhow::bail!(
-            "--mesh-mode must be `pp`, `tp`, or `pp+tp` (got `{other}`)"
-        ),
+        other => anyhow::bail!("--mesh-mode must be `pp`, `tp`, or `pp+tp` (got `{other}`)"),
     };
 
     let bind_addr: SocketAddr = format!("0.0.0.0:{port}").parse()?;
@@ -532,7 +556,11 @@ fn inspect_gguf(path: &str) -> Result<()> {
     println!("tensors ({}):", file.tensors.len());
     for name in &file.tensor_order {
         let info = &file.tensors[name];
-        let dims: Vec<String> = info.dims.iter().map(std::string::ToString::to_string).collect();
+        let dims: Vec<String> = info
+            .dims
+            .iter()
+            .map(std::string::ToString::to_string)
+            .collect();
         println!(
             "  {name:<56} {:<5} [{}] off={} size={}",
             info.dtype.name(),
@@ -583,86 +611,271 @@ fn repo_root() -> std::path::PathBuf {
 /// / `rmsnorm` which stay hand-rolled). Adding a new single-shape sweep is
 /// one row here; typos become compile errors.
 #[cfg(feature = "hip_sweep")]
-type SweepFn =
-    fn(&std::path::Path) -> anyhow::Result<flambeau_bench::cert::Cert>;
+type SweepFn = fn(&std::path::Path) -> anyhow::Result<flambeau_bench::cert::Cert>;
 
 #[cfg(feature = "hip_sweep")]
 const SIMPLE_SWEEPS: &[(&str, SweepFn)] = &[
-    ("rmsnorm_q8_1", flambeau_bench::sweep_rmsnorm_q8_1::run_sweep),
+    (
+        "rmsnorm_q8_1",
+        flambeau_bench::sweep_rmsnorm_q8_1::run_sweep,
+    ),
     ("swiglu", flambeau_bench::sweep_swiglu::run_sweep),
-    ("quantize_q8_1_mmq", flambeau_bench::sweep_quantize_q8_1_mmq::run_sweep),
-    ("attention_prefill_flash_tile", flambeau_bench::sweep_attention_prefill::run_sweep_flash_tile),
+    (
+        "quantize_q8_1_mmq",
+        flambeau_bench::sweep_quantize_q8_1_mmq::run_sweep,
+    ),
+    (
+        "attention_prefill_flash_tile",
+        flambeau_bench::sweep_attention_prefill::run_sweep_flash_tile,
+    ),
     ("rope", flambeau_bench::sweep_rope::run_sweep),
-    ("rope_neox_partial", flambeau_bench::sweep_rope_neox::run_sweep),
+    (
+        "rope_neox_partial",
+        flambeau_bench::sweep_rope_neox::run_sweep,
+    ),
     ("l2_norm", flambeau_bench::sweep_l2_norm::run_sweep),
-    ("causal_conv1d", flambeau_bench::sweep_causal_conv1d::run_sweep),
+    (
+        "causal_conv1d",
+        flambeau_bench::sweep_causal_conv1d::run_sweep,
+    ),
     ("gdn_state_step", flambeau_bench::sweep_gdn_step::run_sweep),
-    ("gdn_state_step_alphabeta", flambeau_bench::sweep_gdn_step_alphabeta::run_sweep),
+    (
+        "gdn_state_step_alphabeta",
+        flambeau_bench::sweep_gdn_step_alphabeta::run_sweep,
+    ),
     ("cast_f32_f16", flambeau_bench::sweep_cast::run_sweep),
-    ("cast_f16_f32", flambeau_bench::sweep_f32_pointwise::run_cast_f16_f32_sweep),
-    ("silu_f32", flambeau_bench::sweep_f32_pointwise::run_silu_sweep),
-    ("swiglu_f32", flambeau_bench::sweep_f32_pointwise::run_swiglu_sweep),
-    ("scale_f32", flambeau_bench::sweep_f32_pointwise::run_scale_sweep),
-    ("rmsnorm_f32", flambeau_bench::sweep_f32_pointwise::run_rmsnorm_f32_sweep),
-    ("gdn_alpha_beta", flambeau_bench::sweep_f32_pointwise::run_gdn_alpha_beta_sweep),
-    ("quantize_f16_q8_1", flambeau_bench::sweep_f32_pointwise::run_quantize_f16_q8_1_sweep),
-    ("dense_gemv_f32_f16", flambeau_bench::sweep_f32_pointwise::run_dense_gemv_sweep),
-    ("add_f16", flambeau_bench::sweep_f32_pointwise::run_add_f16_sweep),
-    ("peer_copy_via_host", flambeau_bench::sweep_peer_copy::run_sweep),
-    ("shared_expert_scale", flambeau_bench::sweep_shared_expert::run_sweep),
-    ("split_q_gate", flambeau_bench::sweep_split_q_gate::run_sweep),
+    (
+        "cast_f16_f32",
+        flambeau_bench::sweep_f32_pointwise::run_cast_f16_f32_sweep,
+    ),
+    (
+        "silu_f32",
+        flambeau_bench::sweep_f32_pointwise::run_silu_sweep,
+    ),
+    (
+        "swiglu_f32",
+        flambeau_bench::sweep_f32_pointwise::run_swiglu_sweep,
+    ),
+    (
+        "scale_f32",
+        flambeau_bench::sweep_f32_pointwise::run_scale_sweep,
+    ),
+    (
+        "rmsnorm_f32",
+        flambeau_bench::sweep_f32_pointwise::run_rmsnorm_f32_sweep,
+    ),
+    (
+        "gdn_alpha_beta",
+        flambeau_bench::sweep_f32_pointwise::run_gdn_alpha_beta_sweep,
+    ),
+    (
+        "quantize_f16_q8_1",
+        flambeau_bench::sweep_f32_pointwise::run_quantize_f16_q8_1_sweep,
+    ),
+    (
+        "dense_gemv_f32_f16",
+        flambeau_bench::sweep_f32_pointwise::run_dense_gemv_sweep,
+    ),
+    (
+        "add_f16",
+        flambeau_bench::sweep_f32_pointwise::run_add_f16_sweep,
+    ),
+    (
+        "peer_copy_via_host",
+        flambeau_bench::sweep_peer_copy::run_sweep,
+    ),
+    (
+        "shared_expert_scale",
+        flambeau_bench::sweep_shared_expert::run_sweep,
+    ),
+    (
+        "split_q_gate",
+        flambeau_bench::sweep_split_q_gate::run_sweep,
+    ),
     ("softmax", flambeau_bench::sweep_softmax::run_sweep),
-    ("attention_decode", flambeau_bench::sweep_attention::run_sweep),
-    ("attention_prefill", flambeau_bench::sweep_attention_prefill::run_sweep),
-    ("attention_decode_q8_kv", flambeau_bench::sweep_attention_q8_kv::run_sweep),
-    ("attention_decode_splitk", flambeau_bench::sweep_attention_splitk::run_sweep),
+    (
+        "attention_decode",
+        flambeau_bench::sweep_attention::run_sweep,
+    ),
+    (
+        "attention_prefill",
+        flambeau_bench::sweep_attention_prefill::run_sweep,
+    ),
+    (
+        "attention_decode_q8_kv",
+        flambeau_bench::sweep_attention_q8_kv::run_sweep,
+    ),
+    (
+        "attention_decode_splitk",
+        flambeau_bench::sweep_attention_splitk::run_sweep,
+    ),
     ("mmvq_f16", flambeau_bench::sweep_mmvq_f16::run_sweep),
     ("mmq_f16", flambeau_bench::sweep_mmvq_f16::run_mmq_sweep),
-    ("mmq_f16_tile", flambeau_bench::sweep_mmvq_f16::run_mmq_tile_sweep),
-    ("mmvq_q4_0", flambeau_bench::sweep_q4_0_q5_0::run_mmvq_q4_0_sweep),
-    ("mmvq_q4_0_warpcoop64", flambeau_bench::sweep_q4_0_q5_0::run_mmvq_q4_0_warpcoop64_sweep),
-    ("mmvq_q5_0", flambeau_bench::sweep_q4_0_q5_0::run_mmvq_q5_0_sweep),
-    ("mmvq_q5_1", flambeau_bench::sweep_q4_0_q5_0::run_mmvq_q5_1_sweep),
-    ("indexed_moe_mmvq_q4_0", flambeau_bench::sweep_q4_0_q5_0::run_indexed_moe_mmvq_q4_0_sweep),
-    ("indexed_moe_mmvq_q4_1", flambeau_bench::sweep_q4_0_q5_0::run_indexed_moe_mmvq_q4_1_sweep),
-    ("indexed_moe_mmvq_q5_0", flambeau_bench::sweep_q4_0_q5_0::run_indexed_moe_mmvq_q5_0_sweep),
-    ("indexed_moe_mmvq_q5_1", flambeau_bench::sweep_q4_0_q5_0::run_indexed_moe_mmvq_q5_1_sweep),
+    (
+        "mmq_f16_tile",
+        flambeau_bench::sweep_mmvq_f16::run_mmq_tile_sweep,
+    ),
+    (
+        "mmvq_q4_0",
+        flambeau_bench::sweep_q4_0_q5_0::run_mmvq_q4_0_sweep,
+    ),
+    (
+        "mmvq_q4_0_warpcoop64",
+        flambeau_bench::sweep_q4_0_q5_0::run_mmvq_q4_0_warpcoop64_sweep,
+    ),
+    (
+        "mmvq_q5_0",
+        flambeau_bench::sweep_q4_0_q5_0::run_mmvq_q5_0_sweep,
+    ),
+    (
+        "mmvq_q5_1",
+        flambeau_bench::sweep_q4_0_q5_0::run_mmvq_q5_1_sweep,
+    ),
+    (
+        "indexed_moe_mmvq_q4_0",
+        flambeau_bench::sweep_q4_0_q5_0::run_indexed_moe_mmvq_q4_0_sweep,
+    ),
+    (
+        "indexed_moe_mmvq_q4_1",
+        flambeau_bench::sweep_q4_0_q5_0::run_indexed_moe_mmvq_q4_1_sweep,
+    ),
+    (
+        "indexed_moe_mmvq_q5_0",
+        flambeau_bench::sweep_q4_0_q5_0::run_indexed_moe_mmvq_q5_0_sweep,
+    ),
+    (
+        "indexed_moe_mmvq_q5_1",
+        flambeau_bench::sweep_q4_0_q5_0::run_indexed_moe_mmvq_q5_1_sweep,
+    ),
     ("topk", flambeau_bench::sweep_moe::run_topk_sweep),
-    ("indexed_moe_mmvq", flambeau_bench::sweep_moe::run_indexed_moe_mmvq_sweep),
-    ("moe_combine", flambeau_bench::sweep_moe::run_moe_combine_sweep),
-    ("indexed_moe_mmvq_gate_up", flambeau_bench::sweep_moe::run_gate_up_sweep),
-    ("indexed_moe_mmvq_r2", flambeau_bench::sweep_moe::run_indexed_moe_mmvq_r2_sweep),
-    ("indexed_moe_mmvq_q2_k", flambeau_bench::sweep_moe::run_indexed_moe_mmvq_q2_k_sweep),
-    ("indexed_moe_mmvq_q3_k", flambeau_bench::sweep_moe::run_indexed_moe_mmvq_q3_k_sweep),
-    ("indexed_moe_mmvq_q5_k", flambeau_bench::sweep_moe::run_indexed_moe_mmvq_q5_k_sweep),
-    ("indexed_moe_mmvq_q6_k", flambeau_bench::sweep_moe::run_indexed_moe_mmvq_q6_k_sweep),
-    ("indexed_moe_mmvq_q8_0", flambeau_bench::sweep_moe::run_indexed_moe_mmvq_q8_0_sweep),
-    ("indexed_moe_mmq", flambeau_bench::sweep_moe::run_indexed_moe_mmq_sweep),
-    ("indexed_moe_mmq_q8_0_gate_up_tile8", flambeau_bench::sweep_moe::run_indexed_moe_mmq_q8_0_gate_up_tile8_sweep),
-    ("indexed_moe_mmq_q8_0_down_tile8", flambeau_bench::sweep_moe::run_indexed_moe_mmq_q8_0_down_tile8_sweep),
-    ("indexed_moe_mmq_q4_0_gate_up_tile8", flambeau_bench::sweep_moe::run_indexed_moe_mmq_q4_0_gate_up_tile8_sweep),
-    ("indexed_moe_mmq_q4_0_down_tile8", flambeau_bench::sweep_moe::run_indexed_moe_mmq_q4_0_down_tile8_sweep),
-    ("indexed_moe_mmq_q4_1_gate_up_tile8", flambeau_bench::sweep_moe::run_indexed_moe_mmq_q4_1_gate_up_tile8_sweep),
-    ("indexed_moe_mmq_q4_1_down_tile8", flambeau_bench::sweep_moe::run_indexed_moe_mmq_q4_1_down_tile8_sweep),
-    ("indexed_moe_mmq_q5_0_gate_up_tile8", flambeau_bench::sweep_moe::run_indexed_moe_mmq_q5_0_gate_up_tile8_sweep),
-    ("indexed_moe_mmq_q5_0_down_tile8", flambeau_bench::sweep_moe::run_indexed_moe_mmq_q5_0_down_tile8_sweep),
-    ("indexed_moe_mmq_q5_1_gate_up_tile8", flambeau_bench::sweep_moe::run_indexed_moe_mmq_q5_1_gate_up_tile8_sweep),
-    ("indexed_moe_mmq_q5_1_down_tile8", flambeau_bench::sweep_moe::run_indexed_moe_mmq_q5_1_down_tile8_sweep),
-    ("indexed_moe_mmq_q4_k_gate_up_tile8", flambeau_bench::sweep_moe::run_indexed_moe_mmq_q4_k_gate_up_tile8_sweep),
-    ("indexed_moe_mmq_q4_k_down_tile8", flambeau_bench::sweep_moe::run_indexed_moe_mmq_q4_k_down_tile8_sweep),
-    ("indexed_moe_mmq_q5_k_gate_up_tile8", flambeau_bench::sweep_moe::run_indexed_moe_mmq_q5_k_gate_up_tile8_sweep),
-    ("indexed_moe_mmq_q5_k_down_tile8", flambeau_bench::sweep_moe::run_indexed_moe_mmq_q5_k_down_tile8_sweep),
-    ("indexed_moe_mmq_q6_k_gate_up_tile8", flambeau_bench::sweep_moe::run_indexed_moe_mmq_q6_k_gate_up_tile8_sweep),
-    ("indexed_moe_mmq_q6_k_down_tile8", flambeau_bench::sweep_moe::run_indexed_moe_mmq_q6_k_down_tile8_sweep),
-    ("indexed_moe_mmq_q2_k_gate_up_tile8", flambeau_bench::sweep_moe::run_indexed_moe_mmq_q2_k_gate_up_tile8_sweep),
-    ("indexed_moe_mmq_q2_k_down_tile8", flambeau_bench::sweep_moe::run_indexed_moe_mmq_q2_k_down_tile8_sweep),
-    ("indexed_moe_mmq_q3_k_gate_up_tile8", flambeau_bench::sweep_moe::run_indexed_moe_mmq_q3_k_gate_up_tile8_sweep),
-    ("indexed_moe_mmq_q3_k_down_tile8", flambeau_bench::sweep_moe::run_indexed_moe_mmq_q3_k_down_tile8_sweep),
+    (
+        "indexed_moe_mmvq",
+        flambeau_bench::sweep_moe::run_indexed_moe_mmvq_sweep,
+    ),
+    (
+        "moe_combine",
+        flambeau_bench::sweep_moe::run_moe_combine_sweep,
+    ),
+    (
+        "indexed_moe_mmvq_gate_up",
+        flambeau_bench::sweep_moe::run_gate_up_sweep,
+    ),
+    (
+        "indexed_moe_mmvq_r2",
+        flambeau_bench::sweep_moe::run_indexed_moe_mmvq_r2_sweep,
+    ),
+    (
+        "indexed_moe_mmvq_q2_k",
+        flambeau_bench::sweep_moe::run_indexed_moe_mmvq_q2_k_sweep,
+    ),
+    (
+        "indexed_moe_mmvq_q3_k",
+        flambeau_bench::sweep_moe::run_indexed_moe_mmvq_q3_k_sweep,
+    ),
+    (
+        "indexed_moe_mmvq_q5_k",
+        flambeau_bench::sweep_moe::run_indexed_moe_mmvq_q5_k_sweep,
+    ),
+    (
+        "indexed_moe_mmvq_q6_k",
+        flambeau_bench::sweep_moe::run_indexed_moe_mmvq_q6_k_sweep,
+    ),
+    (
+        "indexed_moe_mmvq_q8_0",
+        flambeau_bench::sweep_moe::run_indexed_moe_mmvq_q8_0_sweep,
+    ),
+    (
+        "indexed_moe_mmq",
+        flambeau_bench::sweep_moe::run_indexed_moe_mmq_sweep,
+    ),
+    (
+        "indexed_moe_mmq_q8_0_gate_up_tile8",
+        flambeau_bench::sweep_moe::run_indexed_moe_mmq_q8_0_gate_up_tile8_sweep,
+    ),
+    (
+        "indexed_moe_mmq_q8_0_down_tile8",
+        flambeau_bench::sweep_moe::run_indexed_moe_mmq_q8_0_down_tile8_sweep,
+    ),
+    (
+        "indexed_moe_mmq_q4_0_gate_up_tile8",
+        flambeau_bench::sweep_moe::run_indexed_moe_mmq_q4_0_gate_up_tile8_sweep,
+    ),
+    (
+        "indexed_moe_mmq_q4_0_down_tile8",
+        flambeau_bench::sweep_moe::run_indexed_moe_mmq_q4_0_down_tile8_sweep,
+    ),
+    (
+        "indexed_moe_mmq_q4_1_gate_up_tile8",
+        flambeau_bench::sweep_moe::run_indexed_moe_mmq_q4_1_gate_up_tile8_sweep,
+    ),
+    (
+        "indexed_moe_mmq_q4_1_down_tile8",
+        flambeau_bench::sweep_moe::run_indexed_moe_mmq_q4_1_down_tile8_sweep,
+    ),
+    (
+        "indexed_moe_mmq_q5_0_gate_up_tile8",
+        flambeau_bench::sweep_moe::run_indexed_moe_mmq_q5_0_gate_up_tile8_sweep,
+    ),
+    (
+        "indexed_moe_mmq_q5_0_down_tile8",
+        flambeau_bench::sweep_moe::run_indexed_moe_mmq_q5_0_down_tile8_sweep,
+    ),
+    (
+        "indexed_moe_mmq_q5_1_gate_up_tile8",
+        flambeau_bench::sweep_moe::run_indexed_moe_mmq_q5_1_gate_up_tile8_sweep,
+    ),
+    (
+        "indexed_moe_mmq_q5_1_down_tile8",
+        flambeau_bench::sweep_moe::run_indexed_moe_mmq_q5_1_down_tile8_sweep,
+    ),
+    (
+        "indexed_moe_mmq_q4_k_gate_up_tile8",
+        flambeau_bench::sweep_moe::run_indexed_moe_mmq_q4_k_gate_up_tile8_sweep,
+    ),
+    (
+        "indexed_moe_mmq_q4_k_down_tile8",
+        flambeau_bench::sweep_moe::run_indexed_moe_mmq_q4_k_down_tile8_sweep,
+    ),
+    (
+        "indexed_moe_mmq_q5_k_gate_up_tile8",
+        flambeau_bench::sweep_moe::run_indexed_moe_mmq_q5_k_gate_up_tile8_sweep,
+    ),
+    (
+        "indexed_moe_mmq_q5_k_down_tile8",
+        flambeau_bench::sweep_moe::run_indexed_moe_mmq_q5_k_down_tile8_sweep,
+    ),
+    (
+        "indexed_moe_mmq_q6_k_gate_up_tile8",
+        flambeau_bench::sweep_moe::run_indexed_moe_mmq_q6_k_gate_up_tile8_sweep,
+    ),
+    (
+        "indexed_moe_mmq_q6_k_down_tile8",
+        flambeau_bench::sweep_moe::run_indexed_moe_mmq_q6_k_down_tile8_sweep,
+    ),
+    (
+        "indexed_moe_mmq_q2_k_gate_up_tile8",
+        flambeau_bench::sweep_moe::run_indexed_moe_mmq_q2_k_gate_up_tile8_sweep,
+    ),
+    (
+        "indexed_moe_mmq_q2_k_down_tile8",
+        flambeau_bench::sweep_moe::run_indexed_moe_mmq_q2_k_down_tile8_sweep,
+    ),
+    (
+        "indexed_moe_mmq_q3_k_gate_up_tile8",
+        flambeau_bench::sweep_moe::run_indexed_moe_mmq_q3_k_gate_up_tile8_sweep,
+    ),
+    (
+        "indexed_moe_mmq_q3_k_down_tile8",
+        flambeau_bench::sweep_moe::run_indexed_moe_mmq_q3_k_down_tile8_sweep,
+    ),
 ];
 
 #[cfg(feature = "hip_sweep")]
 fn find_simple_sweep(op: &str) -> Option<SweepFn> {
-    SIMPLE_SWEEPS.iter().find(|(k, _)| *k == op).map(|(_, f)| *f)
+    SIMPLE_SWEEPS
+        .iter()
+        .find(|(k, _)| *k == op)
+        .map(|(_, f)| *f)
 }
 
 fn sweep(arch: &str, op: Option<&str>, dtype: &str) -> Result<()> {
@@ -677,13 +890,27 @@ fn sweep(arch: &str, op: Option<&str>, dtype: &str) -> Result<()> {
             "qmatmul" => {
                 use flambeau_bench::sweep_mmvq::{run_sweep, Dtype, SweepSpec};
                 let dtypes: Vec<Dtype> = match dtype {
-                    "all" => vec![Dtype::Q8_0, Dtype::Q2K, Dtype::Q3K, Dtype::Q4K, Dtype::Q5K, Dtype::Q6K, Dtype::Q8K],
+                    "all" => vec![
+                        Dtype::Q8_0,
+                        Dtype::Q2K,
+                        Dtype::Q3K,
+                        Dtype::Q4K,
+                        Dtype::Q5K,
+                        Dtype::Q6K,
+                        Dtype::Q8K,
+                    ],
                     "Q2_K" => vec![Dtype::Q2K],
                     "Q2_K_r2" => vec![Dtype::Q2KR2],
                     "Q3_K" => vec![Dtype::Q3K],
                     "Q3_K_r2" => vec![Dtype::Q3KR2],
                     "Q8_K" => vec![Dtype::Q8K],
-                    "all-multirow" => vec![Dtype::Q2KR2, Dtype::Q3KR2, Dtype::Q4KR2, Dtype::Q5KR2, Dtype::Q6KR4],
+                    "all-multirow" => vec![
+                        Dtype::Q2KR2,
+                        Dtype::Q3KR2,
+                        Dtype::Q4KR2,
+                        Dtype::Q5KR2,
+                        Dtype::Q6KR4,
+                    ],
                     "Q8_0" => vec![Dtype::Q8_0],
                     "Q4_K" => vec![Dtype::Q4K],
                     "Q5_K" => vec![Dtype::Q5K],
@@ -692,7 +919,12 @@ fn sweep(arch: &str, op: Option<&str>, dtype: &str) -> Result<()> {
                     "Q5_K_r2" => vec![Dtype::Q5KR2],
                     "Q6_K_r4" => vec![Dtype::Q6KR4],
                     "Q6_K_dp4a" => vec![Dtype::Q6KDP4A],
-                    "Q4_1" => vec![Dtype::Q4_1, Dtype::Q4_1R2, Dtype::Q4_1R2DP4A, Dtype::Q4_1T128],
+                    "Q4_1" => vec![
+                        Dtype::Q4_1,
+                        Dtype::Q4_1R2,
+                        Dtype::Q4_1R2DP4A,
+                        Dtype::Q4_1T128,
+                    ],
                     "Q4_1_r2" => vec![Dtype::Q4_1R2],
                     "Q4_1_r2_dp4a" => vec![Dtype::Q4_1R2DP4A],
                     "Q4_1_t128" => vec![Dtype::Q4_1T128],
@@ -735,7 +967,8 @@ fn sweep(arch: &str, op: Option<&str>, dtype: &str) -> Result<()> {
             }
             "qmatmul_mmq" => {
                 use flambeau_bench::sweep_mmq::{run_sweep, Dtype as MmqDtype, SweepSpec};
-                let (dtypes, spec_builder): (Vec<MmqDtype>, fn(MmqDtype) -> SweepSpec) = match dtype {
+                let (dtypes, spec_builder): (Vec<MmqDtype>, fn(MmqDtype) -> SweepSpec) = match dtype
+                {
                     "Q8_0" | "Q8_0_oracle" => (vec![MmqDtype::Q8_0Oracle], SweepSpec::v1_4_oracle),
                     "Q8_0_4warp" => (vec![MmqDtype::Q8_04Warp], SweepSpec::v1_4_prefill),
                     "Q8_0_wave64" => (vec![MmqDtype::Q8_0Wave64], SweepSpec::v1_4_prefill),
@@ -757,15 +990,33 @@ fn sweep(arch: &str, op: Option<&str>, dtype: &str) -> Result<()> {
                     "Q8_K" | "Q8_K_wave64" => (vec![MmqDtype::Q8KWave64], SweepSpec::v1_4_prefill),
                     "Q2_K" | "Q2_K_wave64" => (vec![MmqDtype::Q2KWave64], SweepSpec::v1_4_prefill),
                     "Q3_K" | "Q3_K_wave64" => (vec![MmqDtype::Q3KWave64], SweepSpec::v1_4_prefill),
-                    "IQ4_XS" | "IQ4_XS_wave64" => (vec![MmqDtype::Iq4XsWave64], SweepSpec::v1_4_prefill),
-                    "IQ3_S" | "IQ3_S_wave64" => (vec![MmqDtype::Iq3SWave64], SweepSpec::v1_4_prefill),
-                    "IQ4_NL" | "IQ4_NL_wave64" => (vec![MmqDtype::Iq4NlWave64], SweepSpec::v1_4_prefill),
-                    "IQ3_XXS" | "IQ3_XXS_wave64" => (vec![MmqDtype::Iq3XxsWave64], SweepSpec::v1_4_prefill),
-                    "IQ2_XXS" | "IQ2_XXS_wave64" => (vec![MmqDtype::Iq2XxsWave64], SweepSpec::v1_4_prefill),
-                    "IQ2_XS" | "IQ2_XS_wave64" => (vec![MmqDtype::Iq2XsWave64], SweepSpec::v1_4_prefill),
-                    "IQ2_S" | "IQ2_S_wave64" => (vec![MmqDtype::Iq2SWave64], SweepSpec::v1_4_prefill),
-                    "IQ1_S" | "IQ1_S_wave64" => (vec![MmqDtype::Iq1SWave64], SweepSpec::v1_4_prefill),
-                    "IQ1_M" | "IQ1_M_wave64" => (vec![MmqDtype::Iq1MWave64], SweepSpec::v1_4_prefill),
+                    "IQ4_XS" | "IQ4_XS_wave64" => {
+                        (vec![MmqDtype::Iq4XsWave64], SweepSpec::v1_4_prefill)
+                    }
+                    "IQ3_S" | "IQ3_S_wave64" => {
+                        (vec![MmqDtype::Iq3SWave64], SweepSpec::v1_4_prefill)
+                    }
+                    "IQ4_NL" | "IQ4_NL_wave64" => {
+                        (vec![MmqDtype::Iq4NlWave64], SweepSpec::v1_4_prefill)
+                    }
+                    "IQ3_XXS" | "IQ3_XXS_wave64" => {
+                        (vec![MmqDtype::Iq3XxsWave64], SweepSpec::v1_4_prefill)
+                    }
+                    "IQ2_XXS" | "IQ2_XXS_wave64" => {
+                        (vec![MmqDtype::Iq2XxsWave64], SweepSpec::v1_4_prefill)
+                    }
+                    "IQ2_XS" | "IQ2_XS_wave64" => {
+                        (vec![MmqDtype::Iq2XsWave64], SweepSpec::v1_4_prefill)
+                    }
+                    "IQ2_S" | "IQ2_S_wave64" => {
+                        (vec![MmqDtype::Iq2SWave64], SweepSpec::v1_4_prefill)
+                    }
+                    "IQ1_S" | "IQ1_S_wave64" => {
+                        (vec![MmqDtype::Iq1SWave64], SweepSpec::v1_4_prefill)
+                    }
+                    "IQ1_M" | "IQ1_M_wave64" => {
+                        (vec![MmqDtype::Iq1MWave64], SweepSpec::v1_4_prefill)
+                    }
                     "all" => (
                         vec![
                             MmqDtype::Q8_0Oracle,
@@ -844,7 +1095,9 @@ fn sweep(arch: &str, op: Option<&str>, dtype: &str) -> Result<()> {
                 let cert = run_sweep(&spec, &repo_root())?;
                 println!(
                     "sweep rmsnorm: pass={} shapes={} rig={}",
-                    cert.pass, cert.results.len(), cert.rig
+                    cert.pass,
+                    cert.results.len(),
+                    cert.rig
                 );
                 Ok(())
             }
@@ -854,7 +1107,9 @@ fn sweep(arch: &str, op: Option<&str>, dtype: &str) -> Result<()> {
                     let cert = run(&repo_root())?;
                     println!(
                         "sweep {other}: pass={} shapes={} rig={}",
-                        cert.pass, cert.results.len(), cert.rig
+                        cert.pass,
+                        cert.results.len(),
+                        cert.rig
                     );
                     Ok(())
                 } else {
@@ -914,20 +1169,104 @@ fn pmc_refresh(arch: &str) -> Result<()> {
         // Keep shapes small — rocprofv3 is slow (seconds per dispatch group).
         let targets: &[(&str, &str, usize, usize, usize)] = &[
             // (impl_id, kernel_stem, m, k, n)
-            ("qmatmul_q8_0_mmvq_single_row_gfx906", "mmvq_q8_0", 1, 2048, 64),
-            ("qmatmul_q4_K_mmvq_single_row_gfx906", "mmvq_q4_k", 1, 2048, 64),
-            ("qmatmul_q5_K_mmvq_single_row_gfx906", "mmvq_q5_k", 1, 2048, 64),
-            ("qmatmul_q6_K_mmvq_single_row_gfx906", "mmvq_q6_k", 1, 2048, 64),
-            ("qmatmul_q4_K_mmvq_nw1_r2_gfx906", "mmvq_q4_k_r2", 1, 2048, 64),
-            ("qmatmul_q5_K_mmvq_nw1_r2_gfx906", "mmvq_q5_k_r2", 1, 2048, 64),
-            ("qmatmul_q6_K_mmvq_nw1_r4_gfx906", "mmvq_q6_k_r4", 1, 2048, 64),
-            ("qmatmul_q8_0_mmq_oracle_gfx906", "mmq_q8_0_oracle", 8, 2048, 64),
-            ("qmatmul_q8_0_mmq_4warp_lds_gfx906", "mmq_q8_0_4warp", 128, 2048, 64),
-            ("qmatmul_q8_0_mmq_wave64_gfx906", "mmq_q8_0_wave64", 128, 2048, 4096),
-            ("qmatmul_q4_1_mmq_4warp_lds_gfx906", "mmq_q4_1_4warp_lds", 128, 2048, 4096),
-            ("qmatmul_q4_K_mmq_wave64_gfx906", "mmq_q4_K_wave64", 128, 2048, 4096),
-            ("qmatmul_q5_K_mmq_wave64_gfx906", "mmq_q5_K_wave64", 128, 2048, 4096),
-            ("qmatmul_q6_K_mmq_wave64_gfx906", "mmq_q6_K_wave64", 128, 2048, 4096),
+            (
+                "qmatmul_q8_0_mmvq_single_row_gfx906",
+                "mmvq_q8_0",
+                1,
+                2048,
+                64,
+            ),
+            (
+                "qmatmul_q4_K_mmvq_single_row_gfx906",
+                "mmvq_q4_k",
+                1,
+                2048,
+                64,
+            ),
+            (
+                "qmatmul_q5_K_mmvq_single_row_gfx906",
+                "mmvq_q5_k",
+                1,
+                2048,
+                64,
+            ),
+            (
+                "qmatmul_q6_K_mmvq_single_row_gfx906",
+                "mmvq_q6_k",
+                1,
+                2048,
+                64,
+            ),
+            (
+                "qmatmul_q4_K_mmvq_nw1_r2_gfx906",
+                "mmvq_q4_k_r2",
+                1,
+                2048,
+                64,
+            ),
+            (
+                "qmatmul_q5_K_mmvq_nw1_r2_gfx906",
+                "mmvq_q5_k_r2",
+                1,
+                2048,
+                64,
+            ),
+            (
+                "qmatmul_q6_K_mmvq_nw1_r4_gfx906",
+                "mmvq_q6_k_r4",
+                1,
+                2048,
+                64,
+            ),
+            (
+                "qmatmul_q8_0_mmq_oracle_gfx906",
+                "mmq_q8_0_oracle",
+                8,
+                2048,
+                64,
+            ),
+            (
+                "qmatmul_q8_0_mmq_4warp_lds_gfx906",
+                "mmq_q8_0_4warp",
+                128,
+                2048,
+                64,
+            ),
+            (
+                "qmatmul_q8_0_mmq_wave64_gfx906",
+                "mmq_q8_0_wave64",
+                128,
+                2048,
+                4096,
+            ),
+            (
+                "qmatmul_q4_1_mmq_4warp_lds_gfx906",
+                "mmq_q4_1_4warp_lds",
+                128,
+                2048,
+                4096,
+            ),
+            (
+                "qmatmul_q4_K_mmq_wave64_gfx906",
+                "mmq_q4_K_wave64",
+                128,
+                2048,
+                4096,
+            ),
+            (
+                "qmatmul_q5_K_mmq_wave64_gfx906",
+                "mmq_q5_K_wave64",
+                128,
+                2048,
+                4096,
+            ),
+            (
+                "qmatmul_q6_K_mmq_wave64_gfx906",
+                "mmq_q6_K_wave64",
+                128,
+                2048,
+                4096,
+            ),
         ];
 
         for &(impl_id, stem, m, k, n) in targets {
@@ -1017,7 +1356,10 @@ fn cert_check(backend: &str, arch: &str) -> Result<()> {
         println!("  FAIL {impl_id}: {err}");
     }
     if !report.ok() {
-        anyhow::bail!("cert-check failed — {} row(s) missing or stale", report.failures.len());
+        anyhow::bail!(
+            "cert-check failed — {} row(s) missing or stale",
+            report.failures.len()
+        );
     }
     Ok(())
 }

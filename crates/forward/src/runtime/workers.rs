@@ -16,7 +16,9 @@ use flambeau_ops::OpsRegistry;
 use flambeau_quant::GgufFile;
 
 use crate::core::ScratchPool;
-use crate::engine::{HybridForwardCtx, PpForwardCtx, SingleDeviceForwardCtx, TpForwardCtx, TpHooks};
+use crate::engine::{
+    HybridForwardCtx, PpForwardCtx, SingleDeviceForwardCtx, TpForwardCtx, TpHooks,
+};
 use crate::loader::ShardMode;
 use crate::ForwardCtx;
 
@@ -133,9 +135,9 @@ impl<A: Arch> WorkerHandle<A> {
         let thread = std::thread::spawn(move || {
             let (mut state, init_err) =
                 match init_rank::<A>(device_id, &role, &file, ctx_cap, prefill_ubatch, max_slots) {
-                Ok(s) => (Some(s), None),
-                Err(e) => (None, Some(e)),
-            };
+                    Ok(s) => (Some(s), None),
+                    Err(e) => (None, Some(e)),
+                };
             let send_result = match &init_err {
                 None => ready_tx.send(Ok(())),
                 Some(e) => ready_tx.send(Err(anyhow::anyhow!("{e:#}"))),
@@ -155,11 +157,7 @@ impl<A: Arch> WorkerHandle<A> {
                         reply,
                     } => {
                         let res = run_forward_once::<A>(
-                            &mut state,
-                            &role,
-                            &tokens,
-                            &positions,
-                            &slot_ids,
+                            &mut state, &role, &tokens, &positions, &slot_ids,
                         );
                         let _ = reply.send(res);
                     }
@@ -271,8 +269,7 @@ fn init_rank<A: Arch>(
     let device = HipDevice::new(device_id).context("HipDevice::new")?;
     device.bind().context("device.bind")?;
     let shard = role.shard();
-    let model = A::load(file, &device, shard, role.layer_slice(), ctx_cap)
-        .context("Arch::load")?;
+    let model = A::load(file, &device, shard, role.layer_slice(), ctx_cap).context("Arch::load")?;
     let mut cfg = A::scratch_config(&model, shard, prefill_ubatch, max_slots);
     if let Some((ls, le)) = role.layer_slice() {
         cfg.num_layers = le - ls;
@@ -314,7 +311,12 @@ fn run_forward_once<A: Arch>(
             A::forward(&state.model, &mut ctx, tokens, positions, slot_ids)?;
             Ok(ctx.logits().to_vec())
         }
-        WorkerRole::Tp { rank, n_ranks, ar, bar } => {
+        WorkerRole::Tp {
+            rank,
+            n_ranks,
+            ar,
+            bar,
+        } => {
             let ar_callback = if let Some(bc) = bar {
                 make_bar_ar_callback(Arc::clone(bc), *rank)
             } else {
@@ -326,13 +328,8 @@ fn run_forward_once<A: Arch>(
                 ar_callback,
                 bar: bar.as_ref().map(Arc::clone),
             };
-            let mut ctx = TpForwardCtx::new(
-                &state.device,
-                stream,
-                &state.reg,
-                &mut state.pool,
-                hooks,
-            );
+            let mut ctx =
+                TpForwardCtx::new(&state.device, stream, &state.reg, &mut state.pool, hooks);
             A::forward(&state.model, &mut ctx, tokens, positions, slot_ids)?;
             Ok(ctx.logits().to_vec())
         }

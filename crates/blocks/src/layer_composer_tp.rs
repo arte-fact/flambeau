@@ -90,7 +90,9 @@ pub fn forward_decode_layer_tp<L: LayerComposerTp>(
     // streams + cluster outlive this scope; `tp_allreduce_sum_synced`
     // orders BAR1 reads behind every peer's Phase-1 producer-done
     // event.
-    unsafe { ar_sum_partial(layer, partial_attn_ptr_fn)?; }
+    unsafe {
+        ar_sum_partial(layer, partial_attn_ptr_fn)?;
+    }
 
     // Phase 3.
     for r in 0..n {
@@ -104,7 +106,9 @@ pub fn forward_decode_layer_tp<L: LayerComposerTp>(
 
     // Phase 5: barrier-fused AR-sum on partial_ffn.
     // SAFETY: same as Phase 2.
-    unsafe { ar_sum_partial(layer, partial_ffn_ptr_fn)?; }
+    unsafe {
+        ar_sum_partial(layer, partial_ffn_ptr_fn)?;
+    }
 
     // Phase 6.
     for r in 0..n {

@@ -17,8 +17,8 @@
 use std::collections::HashMap;
 
 use anyhow::{anyhow, Result};
-pub use flambeau_backend_hip::{HipDevice, HipStream};
 use flambeau_backend_hip::HipModule;
+pub use flambeau_backend_hip::{HipDevice, HipStream};
 use flambeau_core::Device;
 
 pub mod attention;
@@ -320,14 +320,17 @@ impl OpsRegistry {
         })?;
         let mut modules = HashMap::with_capacity(KERNEL_STEMS.len());
         for &stem in KERNEL_STEMS {
-            let bytes = flambeau_kernels_hip::hsaco(stem)
-                .ok_or(OpsRegistryError::Missing(stem))?;
-            let module = HipModule::load(dev.id(), bytes).map_err(|e| {
-                OpsRegistryError::Load { stem, source: anyhow!("{e:?}") }
+            let bytes = flambeau_kernels_hip::hsaco(stem).ok_or(OpsRegistryError::Missing(stem))?;
+            let module = HipModule::load(dev.id(), bytes).map_err(|e| OpsRegistryError::Load {
+                stem,
+                source: anyhow!("{e:?}"),
             })?;
             modules.insert(stem, module);
         }
-        Ok(Self { device_id: dev.id(), modules })
+        Ok(Self {
+            device_id: dev.id(),
+            modules,
+        })
     }
 
     /// Look up a previously-loaded module by kernel stem. Returns `None` if

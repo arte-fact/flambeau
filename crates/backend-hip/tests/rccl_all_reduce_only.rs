@@ -45,7 +45,10 @@ fn rccl_all_reduce_sum_f32_mesh_4_standalone() {
             let out: &[f32] = bytemuck::cast_slice(&buf);
             let expected: f32 = (1..=n).map(|i| i as f32).sum();
             for v in out {
-                assert!((*v - expected).abs() < 1e-4, "rank {r}: got {v} want {expected}");
+                assert!(
+                    (*v - expected).abs() < 1e-4,
+                    "rank {r}: got {v} want {expected}"
+                );
             }
         }));
     }

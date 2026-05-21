@@ -7,7 +7,6 @@
 //! mmvq_q8_0_gate_up_parity -- --nocapture`.
 
 #![cfg(feature = "hip")]
-
 #![expect(
     clippy::undocumented_unsafe_blocks,
     reason = "bench A/B test — every unsafe block is a kernel.launch or memcpy_async \
@@ -24,7 +23,9 @@ fn seeded_f32(seed: u64, n: usize) -> Vec<f32> {
     let mut s = seed.wrapping_mul(6364136223846793005).wrapping_add(1);
     (0..n)
         .map(|_| {
-            s = s.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+            s = s
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
             let u = (s >> 32) as u32;
             (u as f32 / u32::MAX as f32) - 0.5
         })
@@ -45,7 +46,10 @@ fn quantize_row_q8_0(xs: &[f32]) -> Vec<BlockQ8_0> {
             let q = (v * id).round().clamp(-127.0, 127.0) as i8;
             qs[j] = q;
         }
-        out.push(BlockQ8_0 { d: f16::from_f32(d), qs });
+        out.push(BlockQ8_0 {
+            d: f16::from_f32(d),
+            qs,
+        });
     }
     out
 }
@@ -67,7 +71,11 @@ fn quantize_row_q8_1(xs: &[f32]) -> Vec<BlockQ8_1> {
             sum_i += q as i32;
         }
         let s = d * sum_i as f32;
-        out.push(BlockQ8_1 { d: f16::from_f32(d), s: f16::from_f32(s), qs });
+        out.push(BlockQ8_1 {
+            d: f16::from_f32(d),
+            s: f16::from_f32(s),
+            qs,
+        });
     }
     out
 }
@@ -117,16 +125,24 @@ fn ab_parity_fused_vs_unfused_dense_ffn() {
     // 27B-Q8_0 dense FFN + 35B-A3B full-attn K+V (historical cert-by-use).
     let shapes: &[(usize, usize, &str)] = &[
         (5120, 17408, "27B dense FFN (hidden=5120, inter=17408)"),
-        (2048, 1024, "35B-A3B full-attn K+V (hidden=2048, kv_rows=1024)"),
+        (
+            2048,
+            1024,
+            "35B-A3B full-attn K+V (hidden=2048, kv_rows=1024)",
+        ),
     ];
 
     let kb_single = kernels::hsaco("mmvq_q8_0_dp4a_vdr2").unwrap();
     let mod_single = HipModule::load(dev.id(), kb_single).unwrap();
-    let k_single = mod_single.kernel("flambeau_mmvq_q8_0_dp4a_vdr2_q8_1").unwrap();
+    let k_single = mod_single
+        .kernel("flambeau_mmvq_q8_0_dp4a_vdr2_q8_1")
+        .unwrap();
 
     let kb_fused = kernels::hsaco("mmvq_q8_0_gate_up_dp4a").unwrap();
     let mod_fused = HipModule::load(dev.id(), kb_fused).unwrap();
-    let k_fused = mod_fused.kernel("flambeau_mmvq_q8_0_gate_up_dp4a_q8_1").unwrap();
+    let k_fused = mod_fused
+        .kernel("flambeau_mmvq_q8_0_gate_up_dp4a_q8_1")
+        .unwrap();
 
     for &(hidden, inter, label) in shapes {
         let gate_f32 = seeded_f32(0x9419, inter * hidden);
@@ -154,8 +170,11 @@ fn ab_parity_fused_vs_unfused_dense_ffn() {
             let y: u64 = d_x.as_usize() as u64;
             let out: u64 = d_gate_out_single.as_usize() as u64;
             let mut args = KernelArgs::new();
-            args.push(&gw); args.push(&y); args.push(&out);
-            args.push(&n_rows); args.push(&n_blocks);
+            args.push(&gw);
+            args.push(&y);
+            args.push(&out);
+            args.push(&n_rows);
+            args.push(&n_blocks);
             let cfg = LaunchCfg::one_d(inter as u32, 256);
             unsafe { k_single.launch(stream, cfg, args).unwrap() };
         }
@@ -164,8 +183,11 @@ fn ab_parity_fused_vs_unfused_dense_ffn() {
             let y: u64 = d_x.as_usize() as u64;
             let out: u64 = d_up_out_single.as_usize() as u64;
             let mut args = KernelArgs::new();
-            args.push(&uw); args.push(&y); args.push(&out);
-            args.push(&n_rows); args.push(&n_blocks);
+            args.push(&uw);
+            args.push(&y);
+            args.push(&out);
+            args.push(&n_rows);
+            args.push(&n_blocks);
             let cfg = LaunchCfg::one_d(inter as u32, 256);
             unsafe { k_single.launch(stream, cfg, args).unwrap() };
         }
@@ -178,9 +200,14 @@ fn ab_parity_fused_vs_unfused_dense_ffn() {
             let g_out: u64 = d_gate_out_fused.as_usize() as u64;
             let u_out: u64 = d_up_out_fused.as_usize() as u64;
             let mut args = KernelArgs::new();
-            args.push(&gw); args.push(&uw); args.push(&y);
-            args.push(&g_out); args.push(&u_out);
-            args.push(&n_rows); args.push(&n_rows); args.push(&n_blocks);
+            args.push(&gw);
+            args.push(&uw);
+            args.push(&y);
+            args.push(&g_out);
+            args.push(&u_out);
+            args.push(&n_rows);
+            args.push(&n_rows);
+            args.push(&n_blocks);
             let cfg = LaunchCfg::one_d(inter as u32, 256);
             unsafe { k_fused.launch(stream, cfg, args).unwrap() };
         }
@@ -198,8 +225,12 @@ fn ab_parity_fused_vs_unfused_dense_ffn() {
             for (x, y) in a.iter().zip(b) {
                 let abs = (x - y).abs();
                 let rel = abs / x.abs().max(floor);
-                if rel > mrel { mrel = rel; }
-                if abs > mabs { mabs = abs; }
+                if rel > mrel {
+                    mrel = rel;
+                }
+                if abs > mabs {
+                    mabs = abs;
+                }
             }
             (mrel, mabs)
         };
@@ -219,9 +250,12 @@ fn ab_parity_fused_vs_unfused_dense_ffn() {
         );
 
         unsafe {
-            dev.dealloc(d_gate, gate_q.len() * std::mem::size_of::<BlockQ8_0>()).unwrap();
-            dev.dealloc(d_up, up_q.len() * std::mem::size_of::<BlockQ8_0>()).unwrap();
-            dev.dealloc(d_x, x_q.len() * std::mem::size_of::<BlockQ8_1>()).unwrap();
+            dev.dealloc(d_gate, gate_q.len() * std::mem::size_of::<BlockQ8_0>())
+                .unwrap();
+            dev.dealloc(d_up, up_q.len() * std::mem::size_of::<BlockQ8_0>())
+                .unwrap();
+            dev.dealloc(d_x, x_q.len() * std::mem::size_of::<BlockQ8_1>())
+                .unwrap();
             dev.dealloc(d_gate_out_single, inter * 4).unwrap();
             dev.dealloc(d_up_out_single, inter * 4).unwrap();
             dev.dealloc(d_gate_out_fused, inter * 4).unwrap();

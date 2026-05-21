@@ -5,7 +5,6 @@
 //! divergence point.
 
 #![cfg(feature = "hip")]
-
 #![expect(clippy::undocumented_unsafe_blocks, reason = "test fixture")]
 
 use anyhow::Result;
@@ -43,7 +42,7 @@ fn upload<T: Copy>(dev: &HipDevice, data: &[T]) -> DevicePtr {
 #[repr(C)]
 #[derive(Copy, Clone)]
 struct BlockQ8_0 {
-    d: u16,            // f16 bits
+    d: u16, // f16 bits
     qs: [i8; 32],
 }
 
@@ -51,8 +50,8 @@ struct BlockQ8_0 {
 #[repr(C)]
 #[derive(Copy, Clone)]
 struct BlockQ8_1 {
-    d: u16,            // f16 bits
-    s: u16,            // f16 bits (sum * d)
+    d: u16, // f16 bits
+    s: u16, // f16 bits (sum * d)
     qs: [i8; 32],
 }
 
@@ -68,9 +67,13 @@ fn mmvq_q8_0_r4_matches_vdr2() -> Result<()> {
     // k=5120 = 160 blocks. Start there — bug may only appear at
     // production-sized shapes.
     let n_rows: usize = std::env::var("TEST_N_ROWS")
-        .ok().and_then(|s| s.parse().ok()).unwrap_or(12288);
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(12288);
     let n_blocks: usize = std::env::var("TEST_N_BLOCKS")
-        .ok().and_then(|s| s.parse().ok()).unwrap_or(160);
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(160);
     eprintln!("test config: n_rows={n_rows} n_blocks={n_blocks}");
 
     // Deterministic weights: block[r, b].qs[i] = (r * 32 + b * 8 + i) % 37 - 18
@@ -177,15 +180,23 @@ fn mmvq_q8_0_r4_matches_vdr2() -> Result<()> {
     eprintln!("row : vdr2 (ref)    r4 (got)       diff");
     for &r in &div_rows {
         let diff = out_r4[r] - out_vdr2[r];
-        eprintln!("  {r}: {:>14.6}  {:>14.6}  {:>+10.6}", out_vdr2[r], out_r4[r], diff);
+        eprintln!(
+            "  {r}: {:>14.6}  {:>14.6}  {:>+10.6}",
+            out_vdr2[r], out_r4[r], diff
+        );
     }
     if div_rows.is_empty() {
         for r in 0..(n_rows.min(8)) {
             let diff = out_r4[r] - out_vdr2[r];
-            eprintln!("  {r}: {:>14.6}  {:>14.6}  {:>+10.6}", out_vdr2[r], out_r4[r], diff);
+            eprintln!(
+                "  {r}: {:>14.6}  {:>14.6}  {:>+10.6}",
+                out_vdr2[r], out_r4[r], diff
+            );
         }
     }
-    let n_div = (0..n_rows).filter(|&r| (out_r4[r] - out_vdr2[r]).abs() > 1e-3).count();
+    let n_div = (0..n_rows)
+        .filter(|&r| (out_r4[r] - out_vdr2[r]).abs() > 1e-3)
+        .count();
     eprintln!("divergent rows: {n_div} / {n_rows}");
 
     let mut max_diff = 0f32;

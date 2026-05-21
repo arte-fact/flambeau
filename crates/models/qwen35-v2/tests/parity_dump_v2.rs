@@ -1,7 +1,7 @@
 #![cfg(feature = "hip")]
 
-use std::path::PathBuf;
 use std::io::Write;
+use std::path::PathBuf;
 
 use flambeau_forward::{Session, Topology};
 use flambeau_quant::GgufFile;
@@ -19,12 +19,12 @@ fn parity_dump_v2() {
         eprintln!("SKIP: {MODEL_PATH} not present");
         return;
     }
-    let out_path = std::env::var("FLAMBEAU_PARITY_OUT")
-        .expect("set FLAMBEAU_PARITY_OUT to the dump path");
+    let out_path =
+        std::env::var("FLAMBEAU_PARITY_OUT").expect("set FLAMBEAU_PARITY_OUT to the dump path");
 
     let file = GgufFile::open(&path).expect("open gguf");
-    let mut session = Session::<Qwen35V2>::new(file, Topology::SingleDevice { device: 0 })
-        .expect("Session SD");
+    let mut session =
+        Session::<Qwen35V2>::new(file, Topology::SingleDevice { device: 0 }).expect("Session SD");
 
     let mut f = std::fs::File::create(&out_path).expect("create dump");
     for (i, &t) in PROMPT.iter().enumerate() {

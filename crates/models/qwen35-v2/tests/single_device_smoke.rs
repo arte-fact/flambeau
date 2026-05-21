@@ -10,8 +10,8 @@ use flambeau_core::{CopyDirection, Device, DevicePtr};
 use flambeau_forward::single_device::{ScratchConfig, ScratchPool, SingleDeviceForwardCtx};
 use flambeau_forward::ForwardCtx;
 use flambeau_ops::OpsRegistry;
-use flambeau_qwen35_v2::{forward_one_token, load_from_gguf};
 use flambeau_quant::GgufFile;
+use flambeau_qwen35_v2::{forward_one_token, load_from_gguf};
 
 const MODEL_PATH: &str = "/artefact/models/Qwen3.5-9B-Q4_1.gguf";
 
@@ -28,7 +28,9 @@ fn qwen35_9b_forward_one_token_produces_finite_non_constant_logits() {
 
     let mut model = load_from_gguf(&file, &device, None, None).expect("load_from_gguf");
     let cfg = &model.config;
-    let n_gdn = (0..cfg.num_layers).filter(|&li| cfg.is_recurrent(li)).count();
+    let n_gdn = (0..cfg.num_layers)
+        .filter(|&li| cfg.is_recurrent(li))
+        .count();
     eprintln!(
         "qwen35-v2 loaded: hidden={} layers={} (full-attn {}, gdn {}) heads={}/{} head_dim={} rope_theta={} vocab={} full_attn_interval={}",
         cfg.hidden,
@@ -56,7 +58,7 @@ fn qwen35_9b_forward_one_token_produces_finite_non_constant_logits() {
         max_seq_len,
         num_layers: cfg.num_layers,
         max_experts: 0,
-            max_experts_per_tok: 0,
+        max_experts_per_tok: 0,
         gdn: Some(cfg.gdn),
         per_layer_kv_widths: None,
         attn_q_gated: true,
@@ -112,9 +114,7 @@ fn qwen35_9b_forward_one_token_produces_finite_non_constant_logits() {
                 min = l;
             }
         }
-        eprintln!(
-            "qwen35-v2 token=1 pos=0 logits: min={min:.4} max={max:.4} argmax={argmax}"
-        );
+        eprintln!("qwen35-v2 token=1 pos=0 logits: min={min:.4} max={max:.4} argmax={argmax}");
         assert!(max - min > 1e-2, "logits collapsed (min={min}, max={max})");
     }
 

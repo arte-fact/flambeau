@@ -71,11 +71,7 @@ fn synth_gdn_one_token_forward() {
                 conv_channels,
                 HIDDEN,
             ),
-            attn_gate: allocs.upload_q8_0(
-                &det_signal(d_inner * HIDDEN, seed + 2),
-                d_inner,
-                HIDDEN,
-            ),
+            attn_gate: allocs.upload_q8_0(&det_signal(d_inner * HIDDEN, seed + 2), d_inner, HIDDEN),
             ssm_alpha: allocs.upload_q8_0(
                 &det_signal(NUM_V_HEADS * HIDDEN, seed + 3),
                 NUM_V_HEADS,
@@ -86,11 +82,7 @@ fn synth_gdn_one_token_forward() {
                 NUM_V_HEADS,
                 HIDDEN,
             ),
-            ssm_out: allocs.upload_q8_0(
-                &det_signal(HIDDEN * d_inner, seed + 5),
-                HIDDEN,
-                d_inner,
-            ),
+            ssm_out: allocs.upload_q8_0(&det_signal(HIDDEN * d_inner, seed + 5), HIDDEN, d_inner),
             ssm_dt_bias: allocs.upload_f32(&det_signal(NUM_V_HEADS, seed + 6)),
             ssm_a: allocs.upload_f32(&det_signal(NUM_V_HEADS, seed + 7)),
             ssm_conv1d: allocs.upload_f32(&det_signal(CONV_KERNEL * conv_channels, seed + 8)),
@@ -113,7 +105,7 @@ fn synth_gdn_one_token_forward() {
         gdn: Some(dims),
         per_layer_kv_widths: None,
         attn_q_gated: false,
-            shared_intermediate: 0,
+        shared_intermediate: 0,
     };
     let mut pool = ScratchPool::new(&device, cfg).expect("ScratchPool::new");
 

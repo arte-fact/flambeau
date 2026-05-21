@@ -72,7 +72,11 @@ pub fn rope_neox_partial_f16(
     head_dim: usize,
     rotated_dims: usize,
 ) -> Result<()> {
-    assert_eq!(rotated_dims % 2, 0, "rope_neox_partial_f16 expects rotated_dims % 2 == 0");
+    assert_eq!(
+        rotated_dims % 2,
+        0,
+        "rope_neox_partial_f16 expects rotated_dims % 2 == 0"
+    );
     assert!(
         rotated_dims <= head_dim,
         "rotated_dims ({rotated_dims}) must fit in head_dim ({head_dim})"
@@ -102,7 +106,6 @@ pub fn rope_neox_partial_f16(
     Ok(())
 }
 
-
 /// Fused per-head rmsnorm + partial NeoX RoPE, F16 in-place. Replaces
 /// (`rmsnorm_f16` → DtoD memcpy back → `rope_neox_partial_f16`) for
 /// gemma4 Q-norm and K-norm paths. Saves 2 launches + 1 DtoD memcpy
@@ -122,13 +125,17 @@ pub fn rmsnorm_rope_neox_partial_f16(
     head_dim: usize,
     rotated_dims: usize,
 ) -> Result<()> {
-    assert_eq!(rotated_dims % 2, 0, "rmsnorm_rope_neox_partial_f16 expects rotated_dims % 2 == 0");
+    assert_eq!(
+        rotated_dims % 2,
+        0,
+        "rmsnorm_rope_neox_partial_f16 expects rotated_dims % 2 == 0"
+    );
     assert!(
         rotated_dims <= head_dim,
         "rotated_dims ({rotated_dims}) must fit in head_dim ({head_dim})"
     );
     let entry = match head_dim {
-        64  => "flambeau_rmsnorm_rope_neox_partial_f16_d64",
+        64 => "flambeau_rmsnorm_rope_neox_partial_f16_d64",
         128 => "flambeau_rmsnorm_rope_neox_partial_f16_d128",
         256 => "flambeau_rmsnorm_rope_neox_partial_f16_d256",
         512 => "flambeau_rmsnorm_rope_neox_partial_f16_d512",

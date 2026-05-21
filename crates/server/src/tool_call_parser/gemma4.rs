@@ -323,10 +323,9 @@ impl Gemma4ToolCallParser {
             // Drain through the close brace.
             self.buf.drain(..close_pos + 1);
             // Parse args_body → JSON object, emit deltas, advance.
-            let parsed = parse_args_body(&self.args_body)
-                .unwrap_or_else(|_| Value::Object(Map::new()));
-            let json = serde_json::to_string(&parsed)
-                .unwrap_or_else(|_| "{}".to_owned());
+            let parsed =
+                parse_args_body(&self.args_body).unwrap_or_else(|_| Value::Object(Map::new()));
+            let json = serde_json::to_string(&parsed).unwrap_or_else(|_| "{}".to_owned());
             out.push(ParserEvent::ToolCallArgumentsDelta {
                 index: self.next_index,
                 arguments: json,
@@ -440,7 +439,10 @@ impl<'a> Parser<'a> {
             }
             let key = self.s[key_start..self.pos].trim().to_owned();
             if self.peek() != Some(b':') {
-                return Err(format!("expected `:` after key `{key}` at byte {}", self.pos));
+                return Err(format!(
+                    "expected `:` after key `{key}` at byte {}",
+                    self.pos
+                ));
             }
             self.pos += 1; // consume ':'
             self.skip_ws();
@@ -466,9 +468,9 @@ impl<'a> Parser<'a> {
         if self.starts_with(STRING_QUOTE) {
             self.pos += STRING_QUOTE.len();
             let start = self.pos;
-            let close_rel = self.s[self.pos..].find(STRING_QUOTE).ok_or_else(|| {
-                format!("unterminated string at byte {}", start)
-            })?;
+            let close_rel = self.s[self.pos..]
+                .find(STRING_QUOTE)
+                .ok_or_else(|| format!("unterminated string at byte {}", start))?;
             let s = self.s[start..start + close_rel].to_owned();
             self.pos = start + close_rel + STRING_QUOTE.len();
             return Ok(Value::String(s));
@@ -554,7 +556,11 @@ fn align_down_char_boundary(s: &str, n: usize) -> usize {
 }
 
 fn ambiguous_tail_start(s: &str, tags: &[&str]) -> usize {
-    let max_tail = tags.iter().map(|t| t.len().saturating_sub(1)).max().unwrap_or(0);
+    let max_tail = tags
+        .iter()
+        .map(|t| t.len().saturating_sub(1))
+        .max()
+        .unwrap_or(0);
     if max_tail == 0 {
         return s.len();
     }
@@ -637,13 +643,16 @@ mod tests {
 
     #[test]
     fn happy_path_one_string_arg() {
-        let events = collect(
-            "Hello! <|tool_call>call:get_weather{location:<|\"|>Paris<|\"|>}<tool_call|>",
-        );
+        let events =
+            collect("Hello! <|tool_call>call:get_weather{location:<|\"|>Paris<|\"|>}<tool_call|>");
         assert_eq!(events.len(), 4, "events: {events:#?}");
         assert!(matches!(&events[0], ParserEvent::TextDelta(s) if s == "Hello! "));
-        assert!(matches!(&events[1], ParserEvent::ToolCallOpen { index: 0, name } if name == "get_weather"));
-        assert!(matches!(&events[2], ParserEvent::ToolCallArgumentsDelta { index: 0, arguments } if arguments == r#"{"location":"Paris"}"#));
+        assert!(
+            matches!(&events[1], ParserEvent::ToolCallOpen { index: 0, name } if name == "get_weather")
+        );
+        assert!(
+            matches!(&events[2], ParserEvent::ToolCallArgumentsDelta { index: 0, arguments } if arguments == r#"{"location":"Paris"}"#)
+        );
         assert!(matches!(events[3], ParserEvent::ToolCallClose { index: 0 }));
     }
 
@@ -776,7 +785,9 @@ mod tests {
     fn free_text_with_no_tool_call() {
         let events = collect("just some text, nothing special");
         assert_eq!(events.len(), 1);
-        assert!(matches!(&events[0], ParserEvent::TextDelta(s) if s == "just some text, nothing special"));
+        assert!(
+            matches!(&events[0], ParserEvent::TextDelta(s) if s == "just some text, nothing special")
+        );
     }
 
     #[test]

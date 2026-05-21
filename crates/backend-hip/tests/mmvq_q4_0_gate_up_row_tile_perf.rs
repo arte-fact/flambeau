@@ -2,10 +2,18 @@
 //! HIP-event timed, 200 warmup + 1000 measured launches per kernel per shape.
 //! Reported as wall-time per launch (µs) and the ratio K5/row-tile (>1 = win).
 
-#![expect(clippy::undocumented_unsafe_blocks, reason = "test fixture; same shape rationale as siblings")]
-#![expect(clippy::cast_possible_wrap, reason = "kernel-shape math bounded by GGUF dims")]
+#![expect(
+    clippy::undocumented_unsafe_blocks,
+    reason = "test fixture; same shape rationale as siblings"
+)]
+#![expect(
+    clippy::cast_possible_wrap,
+    reason = "kernel-shape math bounded by GGUF dims"
+)]
 
-use flambeau_backend_hip::{device_count, HipDevice, HipEvent, HipKernel, HipModule, KernelArgs, LaunchCfg};
+use flambeau_backend_hip::{
+    device_count, HipDevice, HipEvent, HipKernel, HipModule, KernelArgs, LaunchCfg,
+};
 use flambeau_core::{CopyDirection, Device, DevicePtr, Stream};
 use flambeau_kernels_hip as kernels;
 use flambeau_quant::{BlockQ4_0, BlockQ8_1, QK8_0};
@@ -24,7 +32,9 @@ fn seeded_bytes(seed: u64, n: usize) -> Vec<u8> {
     let mut state = seed.wrapping_mul(6364136223846793005).wrapping_add(1);
     (0..n)
         .map(|_| {
-            state = state.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+            state = state
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
             (state >> 24) as u8
         })
         .collect()
@@ -34,7 +44,9 @@ fn seeded_f32(seed: u64, n: usize) -> Vec<f32> {
     let mut state = seed.wrapping_mul(6364136223846793005).wrapping_add(1);
     (0..n)
         .map(|_| {
-            state = state.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+            state = state
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
             let u = (state >> 32) as u32;
             (u as f32 / u32::MAX as f32) * 2.0 - 1.0
         })
@@ -42,7 +54,10 @@ fn seeded_f32(seed: u64, n: usize) -> Vec<f32> {
 }
 
 fn random_q4_0_block(seed: u64, idx: usize) -> BlockQ4_0 {
-    let bytes = seeded_bytes(seed ^ ((idx as u64).wrapping_mul(0x9E3779B97F4A7C15)), QK4 / 2 + 4);
+    let bytes = seeded_bytes(
+        seed ^ ((idx as u64).wrapping_mul(0x9E3779B97F4A7C15)),
+        QK4 / 2 + 4,
+    );
     let d_scalar = (bytes[0] as f32 / 255.0) * 0.1 + 0.01;
     let d = f16::from_f32(d_scalar);
     let mut qs = [0u8; QK4 / 2];
@@ -81,9 +96,13 @@ fn bench_one(dev: &HipDevice, n_rows: usize, k: usize, n_slots: usize) -> ShapeR
     let n_blocks_per_row = k / QK4;
 
     let q_module = HipModule::load(0, kernels::hsaco("quantize_q8_1").unwrap()).unwrap();
-    let k5_module = HipModule::load(0, kernels::hsaco("mmvq_q4_0_gate_up_batched").unwrap()).unwrap();
-    let rt_module =
-        HipModule::load(0, kernels::hsaco("mmvq_q4_0_gate_up_row_tile_batched").unwrap()).unwrap();
+    let k5_module =
+        HipModule::load(0, kernels::hsaco("mmvq_q4_0_gate_up_batched").unwrap()).unwrap();
+    let rt_module = HipModule::load(
+        0,
+        kernels::hsaco("mmvq_q4_0_gate_up_row_tile_batched").unwrap(),
+    )
+    .unwrap();
     let k_quantize: HipKernel<'_> = q_module.kernel("flambeau_quantize_row_q8_1").unwrap();
     let k5_entry = match n_slots {
         2 => "flambeau_mmvq_q4_0_gate_up_dp4a_q8_1_batched_n2",
@@ -120,8 +139,9 @@ fn bench_one(dev: &HipDevice, n_rows: usize, k: usize, n_slots: usize) -> ShapeR
         for c in 0..n_slots {
             let n_elems = k as i32;
             let d_y_f32_c: u64 = (d_y_f32.as_usize() + c * k * 4) as u64;
-            let d_y_q8_1_c: u64 =
-                (d_y_q8_1.as_usize() + c * y_blocks_per_slot * std::mem::size_of::<BlockQ8_1>()) as u64;
+            let d_y_q8_1_c: u64 = (d_y_q8_1.as_usize()
+                + c * y_blocks_per_slot * std::mem::size_of::<BlockQ8_1>())
+                as u64;
             let mut args = KernelArgs::new();
             args.push(&d_y_f32_c);
             args.push(&d_y_q8_1_c);
@@ -183,14 +203,25 @@ fn bench_one(dev: &HipDevice, n_rows: usize, k: usize, n_slots: usize) -> ShapeR
     let rt_us = bench(&k_rt, (n_rows as u32).div_ceil(4), 256);
 
     unsafe {
-        dev.dealloc(d_w, blocks.len() * std::mem::size_of::<BlockQ4_0>()).unwrap();
+        dev.dealloc(d_w, blocks.len() * std::mem::size_of::<BlockQ4_0>())
+            .unwrap();
         dev.dealloc(d_y_f32, y_f32.len() * 4).unwrap();
-        dev.dealloc(d_y_q8_1, n_slots * y_blocks_per_slot * std::mem::size_of::<BlockQ8_1>()).unwrap();
+        dev.dealloc(
+            d_y_q8_1,
+            n_slots * y_blocks_per_slot * std::mem::size_of::<BlockQ8_1>(),
+        )
+        .unwrap();
         dev.dealloc(d_g_out, n_slots * n_rows * 4).unwrap();
         dev.dealloc(d_u_out, n_slots * n_rows * 4).unwrap();
     }
 
-    ShapeResult { n_rows, k, n: n_slots, k5_us, rt_us }
+    ShapeResult {
+        n_rows,
+        k,
+        n: n_slots,
+        k5_us,
+        rt_us,
+    }
 }
 
 #[test]
@@ -219,7 +250,10 @@ fn perf_row_tile_vs_k5() {
         (128, 2304, 4),
     ];
 
-    eprintln!("\n{:>10} | {:>6} | {:>4} | {:>9} | {:>9} | {:>6}", "n_rows", "k", "N", "K5(µs)", "RT(µs)", "K5/RT");
+    eprintln!(
+        "\n{:>10} | {:>6} | {:>4} | {:>9} | {:>9} | {:>6}",
+        "n_rows", "k", "N", "K5(µs)", "RT(µs)", "K5/RT"
+    );
     eprintln!("{}", "-".repeat(60));
     for (n_rows, k, n) in shapes {
         let r = bench_one(&dev, n_rows, k, n);

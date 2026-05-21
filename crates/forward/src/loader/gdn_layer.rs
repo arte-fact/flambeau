@@ -104,8 +104,7 @@ pub fn load_gdn_layer(
         }
     };
 
-    let attn_norm =
-        upload_dequant_to_f16(file, device, spec.attn_norm_name, spec.hidden, allocs)?;
+    let attn_norm = upload_dequant_to_f16(file, device, spec.attn_norm_name, spec.hidden, allocs)?;
     // ssm_norm is consumed by `rmsnorm_f32` inside the GDN block,
     // so the weight must be uploaded as F32. (Earlier dequant-to-F16
     // landed in this slot was the v2 chained-prefill bug — the

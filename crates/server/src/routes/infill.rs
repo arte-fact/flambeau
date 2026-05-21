@@ -11,9 +11,7 @@ use axum::extract::State;
 use axum::Json;
 
 use crate::api::{CompletionChoice, CompletionResponse, InfillExtra, InfillRequest, Usage};
-use crate::routes::{
-    now_unix, request_id, run_completion_ids, ApiError, SharedState,
-};
+use crate::routes::{now_unix, request_id, run_completion_ids, ApiError, SharedState};
 use crate::state::{parse_stop, SamplingParams};
 
 pub async fn infill(

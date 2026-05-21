@@ -36,8 +36,8 @@ impl TpCluster {
     }
 
     pub fn from_arc(cluster: Arc<HipCluster>) -> Result<Self> {
-        let ar = BarP2pAllReduce::new(cluster.clone())
-            .map_err(|e| anyhow!("BarP2pAllReduce: {e}"))?;
+        let ar =
+            BarP2pAllReduce::new(cluster.clone()).map_err(|e| anyhow!("BarP2pAllReduce: {e}"))?;
         Ok(Self { cluster, ar })
     }
 

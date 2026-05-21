@@ -133,7 +133,8 @@ fn tool_call_tags_roundtrip_through_tokenizer() {
         let ids = tok.encode(f).expect("encode");
         let back = tok.decode(&ids).expect("decode");
         assert_eq!(
-            back, f,
+            back,
+            f,
             "tool-call tag round-trip failed: original={f:?}, decoded={back:?}, n_ids={}",
             ids.len()
         );

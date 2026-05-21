@@ -79,14 +79,8 @@ impl ParserEvent {
         let mut out: Vec<ParserEvent> = Vec::with_capacity(events.len());
         for e in events {
             match (out.last_mut(), &e) {
-                (
-                    Some(ParserEvent::TextDelta(acc)),
-                    ParserEvent::TextDelta(s),
-                ) => acc.push_str(s),
-                (
-                    Some(ParserEvent::ThinkDelta(acc)),
-                    ParserEvent::ThinkDelta(s),
-                ) => acc.push_str(s),
+                (Some(ParserEvent::TextDelta(acc)), ParserEvent::TextDelta(s)) => acc.push_str(s),
+                (Some(ParserEvent::ThinkDelta(acc)), ParserEvent::ThinkDelta(s)) => acc.push_str(s),
                 (
                     Some(ParserEvent::ToolCallArgumentsDelta {
                         index: a_idx,
@@ -114,9 +108,7 @@ impl ParserEvent {
 /// - Close events whose matching Open never fired still produce a
 /// `ToolCall` with an empty name — imperfect, but preserves parser
 /// events rather than dropping them.
-pub fn split_events(
-    events: Vec<ParserEvent>,
-) -> (String, Vec<crate::api::ToolCall>) {
+pub fn split_events(events: Vec<ParserEvent>) -> (String, Vec<crate::api::ToolCall>) {
     use crate::api::{FunctionCall, ToolCall};
     let mut content = String::new();
     let mut tool_calls: Vec<ToolCall> = Vec::new();
@@ -349,10 +341,7 @@ mod tests {
             </function>
             </tool_call> ...
         "#;
-        assert_eq!(
-            detect_format_from_template(tpl),
-            ToolCallFormat::QwenCoder
-        );
+        assert_eq!(detect_format_from_template(tpl), ToolCallFormat::QwenCoder);
     }
 
     #[test]
@@ -390,7 +379,10 @@ mod tests {
     fn split_events_single_tool_call() {
         let evts = vec![
             ParserEvent::TextDelta("calling: ".into()),
-            ParserEvent::ToolCallOpen { index: 0, name: "f".into() },
+            ParserEvent::ToolCallOpen {
+                index: 0,
+                name: "f".into(),
+            },
             ParserEvent::ToolCallArgumentsDelta {
                 index: 0,
                 arguments: r#"{"x":1}"#.into(),
@@ -409,13 +401,19 @@ mod tests {
     #[test]
     fn split_events_parallel_calls_preserve_order_and_indices() {
         let evts = vec![
-            ParserEvent::ToolCallOpen { index: 0, name: "a".into() },
+            ParserEvent::ToolCallOpen {
+                index: 0,
+                name: "a".into(),
+            },
             ParserEvent::ToolCallArgumentsDelta {
                 index: 0,
                 arguments: r#"{"p":1}"#.into(),
             },
             ParserEvent::ToolCallClose { index: 0 },
-            ParserEvent::ToolCallOpen { index: 1, name: "b".into() },
+            ParserEvent::ToolCallOpen {
+                index: 1,
+                name: "b".into(),
+            },
             ParserEvent::ToolCallArgumentsDelta {
                 index: 1,
                 arguments: r#"{"q":2}"#.into(),
@@ -433,7 +431,10 @@ mod tests {
     #[test]
     fn split_events_arguments_accumulate_across_deltas() {
         let evts = vec![
-            ParserEvent::ToolCallOpen { index: 0, name: "f".into() },
+            ParserEvent::ToolCallOpen {
+                index: 0,
+                name: "f".into(),
+            },
             ParserEvent::ToolCallArgumentsDelta {
                 index: 0,
                 arguments: r#"{"x":"#.into(),

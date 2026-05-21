@@ -8,10 +8,10 @@ use std::time::Instant;
 
 use anyhow::{anyhow, Context, Result};
 use axum::extract::State;
-use flambeau_core::Device;
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use axum::Json;
+use flambeau_core::Device;
 use serde_json::json;
 
 use crate::api::{
@@ -70,10 +70,7 @@ pub async fn embeddings(
     }
 
     let req_start = Instant::now();
-    let model_id = req
-        .model
-        .clone()
-        .unwrap_or_else(|| state.model_id.clone());
+    let model_id = req.model.clone().unwrap_or_else(|| state.model_id.clone());
 
     let tokenizer = state
         .embedding_tokenizer

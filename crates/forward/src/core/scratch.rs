@@ -381,7 +381,12 @@ impl ScratchPool {
                 let nk = alloc_bytes(n_slots * i32_b)?;
                 (kd, vd, wp, nk)
             } else {
-                (DevicePtr::NULL, DevicePtr::NULL, DevicePtr::NULL, DevicePtr::NULL)
+                (
+                    DevicePtr::NULL,
+                    DevicePtr::NULL,
+                    DevicePtr::NULL,
+                    DevicePtr::NULL,
+                )
             };
 
         let topk = config.max_experts_per_tok;
@@ -486,7 +491,10 @@ impl ScratchPool {
                         )
                         .context("zero gdn conv_history")?;
                 }
-                state_vec.push(GdnLayerState { state, conv_history });
+                state_vec.push(GdnLayerState {
+                    state,
+                    conv_history,
+                });
             }
             flambeau_core::Stream::synchronize(stream).context("sync gdn zero")?;
             // Drain the blocks-owned RawAllocTracker into our list
@@ -502,11 +510,8 @@ impl ScratchPool {
                 conv_channels: g.conv_channels,
                 conv_kernel: g.conv_kernel,
             };
-            let owned = flambeau_blocks::DeltaNetLayer::alloc_decode_scratch(
-                device,
-                &mut tracker,
-                dims,
-            )?;
+            let owned =
+                flambeau_blocks::DeltaNetLayer::alloc_decode_scratch(device, &mut tracker, dims)?;
             allocs.extend(std::mem::take(&mut tracker.allocs));
             let prefill_owned = if config.max_prefill_tokens > 1 {
                 let mut p_tracker = flambeau_blocks::RawAllocTracker::new();
@@ -530,28 +535,26 @@ impl ScratchPool {
         // closure's last use (allocs is captured-mutably; extending it
         // here is the only safe spot once the closure has been
         // dropped from the borrow checker's perspective).
-        let moe_prefill_scratch = if topk > 0
-            && config.max_experts > 0
-            && config.max_prefill_tokens > 1
-        {
-            let mut p_tracker = flambeau_blocks::RawAllocTracker::new();
-            let dims = flambeau_blocks::MoeExpertsScratchDims {
-                hidden: h,
-                intermediate: m,
-                n_experts: config.max_experts,
-                top_k: topk,
+        let moe_prefill_scratch =
+            if topk > 0 && config.max_experts > 0 && config.max_prefill_tokens > 1 {
+                let mut p_tracker = flambeau_blocks::RawAllocTracker::new();
+                let dims = flambeau_blocks::MoeExpertsScratchDims {
+                    hidden: h,
+                    intermediate: m,
+                    n_experts: config.max_experts,
+                    top_k: topk,
+                };
+                let owned = flambeau_blocks::MoeExperts::alloc_prefill_scratch(
+                    device,
+                    &mut p_tracker,
+                    dims,
+                    config.max_prefill_tokens,
+                )?;
+                allocs.extend(std::mem::take(&mut p_tracker.allocs));
+                Some(owned)
+            } else {
+                None
             };
-            let owned = flambeau_blocks::MoeExperts::alloc_prefill_scratch(
-                device,
-                &mut p_tracker,
-                dims,
-                config.max_prefill_tokens,
-            )?;
-            allocs.extend(std::mem::take(&mut p_tracker.allocs));
-            Some(owned)
-        } else {
-            None
-        };
 
         Ok(Self {
             config,
@@ -691,9 +694,7 @@ impl ScratchPool {
         }
         let n_slots = self.config.max_slots.max(1);
         if slot_id >= n_slots {
-            anyhow::bail!(
-                "reset_gdn_state_slot: slot_id {slot_id} >= max_slots {n_slots}"
-            );
+            anyhow::bail!("reset_gdn_state_slot: slot_id {slot_id} >= max_slots {n_slots}");
         }
         let f32 = 4;
         let state_bytes_per_slot = g.num_v_heads * g.head_k_dim * g.head_v_dim * f32;

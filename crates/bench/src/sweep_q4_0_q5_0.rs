@@ -3,7 +3,6 @@
 //! Q8_1-roundtripped activations (same envelope as other MMVQ certs).
 
 #![cfg(feature = "hip")]
-
 #![expect(
     clippy::undocumented_unsafe_blocks,
     reason = "sweep harness — every unsafe block is a kernel launch or a memcpy_async \
@@ -112,7 +111,16 @@ fn run_dense_sweep_with_block(
     let mut results = Vec::new();
     for (n_rows, k) in shapes {
         let seed = 0x4E0Cu64 ^ (n_rows as u64 * 7919) ^ (k as u64 * 101);
-        let max_rel = run_dense_shape(&dev, &kernel, &q_kernel, n_rows, k, seed, encode, block_threads)?;
+        let max_rel = run_dense_shape(
+            &dev,
+            &kernel,
+            &q_kernel,
+            n_rows,
+            k,
+            seed,
+            encode,
+            block_threads,
+        )?;
         let tol = 3e-2;
         results.push(ShapeResult {
             m: 1,
@@ -226,9 +234,9 @@ fn run_dense_shape(
     let mut w_dequant = vec![0.0f32; n_rows * k];
     let block_bytes = w_bytes.len() / n_blocks_per_row / n_rows;
     let dtype = match block_bytes {
-        18 => flambeau_quant::GgmlDType::Q4_0,   // 2 d + 16 nibbles
-        22 => flambeau_quant::GgmlDType::Q5_0,   // 2 d + 4 qh + 16 nibbles
-        24 => flambeau_quant::GgmlDType::Q5_1,   // 2 d + 2 m + 4 qh + 16 nibbles
+        18 => flambeau_quant::GgmlDType::Q4_0, // 2 d + 16 nibbles
+        22 => flambeau_quant::GgmlDType::Q5_0, // 2 d + 4 qh + 16 nibbles
+        24 => flambeau_quant::GgmlDType::Q5_1, // 2 d + 2 m + 4 qh + 16 nibbles
         other => panic!("unexpected block size {other}"),
     };
     flambeau_quant::dequantize_into(dtype, &w_bytes, &mut w_dequant)?;
@@ -241,7 +249,11 @@ fn run_dense_shape(
         }
         reference[row] = acc as f32;
     }
-    Ok(max_rel_err_with_floor(&got, &reference, (k as f32).sqrt() * 0.01))
+    Ok(max_rel_err_with_floor(
+        &got,
+        &reference,
+        (k as f32).sqrt() * 0.01,
+    ))
 }
 
 pub fn run_indexed_moe_mmvq_q4_0_sweep(repo_root: &Path) -> Result<Cert> {
@@ -252,22 +264,17 @@ pub fn run_indexed_moe_mmvq_q4_0_sweep(repo_root: &Path) -> Result<Cert> {
     dev.bind()?;
     let kb = kernels::hsaco("indexed_moe_mmvq_q4_0").unwrap();
     let module = HipModule::load(dev.id(), kb)?;
-    let kernel: HipKernel<'_> =
-        module.kernel("flambeau_indexed_moe_mmvq_q4_0_q8_1")?;
+    let kernel: HipKernel<'_> = module.kernel("flambeau_indexed_moe_mmvq_q4_0_q8_1")?;
     let attrs: FuncAttributes = kernel.attributes()?;
     let q_kb = kernels::hsaco("quantize_q8_1").unwrap();
     let q_module = HipModule::load(dev.id(), q_kb)?;
     let q_kernel: HipKernel<'_> = q_module.kernel("flambeau_quantize_row_q8_1")?;
 
     let n_experts = 16usize;
-    let cases = [
-        (1usize, 4usize, 256usize, 2048usize),
-        (4, 4, 256, 2048),
-    ];
+    let cases = [(1usize, 4usize, 256usize, 2048usize), (4, 4, 256, 2048)];
     let mut results = Vec::new();
     for (n_tokens, top_k, n_rows, k_dim) in cases {
-        let seed = 0x4EC0u64
-            ^ (n_tokens as u64 * 53 + top_k as u64 * 17 + n_rows as u64 * 7);
+        let seed = 0x4EC0u64 ^ (n_tokens as u64 * 53 + top_k as u64 * 17 + n_rows as u64 * 7);
         let max_rel = run_q4_0_moe_shape(
             &dev, &kernel, &q_kernel, n_experts, n_rows, k_dim, top_k, n_tokens, seed,
         )?;
@@ -316,22 +323,17 @@ pub fn run_indexed_moe_mmvq_q5_0_sweep(repo_root: &Path) -> Result<Cert> {
     dev.bind()?;
     let kb = kernels::hsaco("indexed_moe_mmvq_q5_0").unwrap();
     let module = HipModule::load(dev.id(), kb)?;
-    let kernel: HipKernel<'_> =
-        module.kernel("flambeau_indexed_moe_mmvq_q5_0_q8_1")?;
+    let kernel: HipKernel<'_> = module.kernel("flambeau_indexed_moe_mmvq_q5_0_q8_1")?;
     let attrs: FuncAttributes = kernel.attributes()?;
     let q_kb = kernels::hsaco("quantize_q8_1").unwrap();
     let q_module = HipModule::load(dev.id(), q_kb)?;
     let q_kernel: HipKernel<'_> = q_module.kernel("flambeau_quantize_row_q8_1")?;
 
     let n_experts = 16usize;
-    let cases = [
-        (1usize, 4usize, 256usize, 2048usize),
-        (4, 4, 256, 2048),
-    ];
+    let cases = [(1usize, 4usize, 256usize, 2048usize), (4, 4, 256, 2048)];
     let mut results = Vec::new();
     for (n_tokens, top_k, n_rows, k_dim) in cases {
-        let seed = 0x5EC0u64
-            ^ (n_tokens as u64 * 53 + top_k as u64 * 17 + n_rows as u64 * 7);
+        let seed = 0x5EC0u64 ^ (n_tokens as u64 * 53 + top_k as u64 * 17 + n_rows as u64 * 7);
         let max_rel = run_q5_0_moe_shape(
             &dev, &kernel, &q_kernel, n_experts, n_rows, k_dim, top_k, n_tokens, seed,
         )?;
@@ -380,22 +382,17 @@ pub fn run_indexed_moe_mmvq_q5_1_sweep(repo_root: &Path) -> Result<Cert> {
     dev.bind()?;
     let kb = kernels::hsaco("indexed_moe_mmvq_q5_1").unwrap();
     let module = HipModule::load(dev.id(), kb)?;
-    let kernel: HipKernel<'_> =
-        module.kernel("flambeau_indexed_moe_mmvq_q5_1_q8_1")?;
+    let kernel: HipKernel<'_> = module.kernel("flambeau_indexed_moe_mmvq_q5_1_q8_1")?;
     let attrs: FuncAttributes = kernel.attributes()?;
     let q_kb = kernels::hsaco("quantize_q8_1").unwrap();
     let q_module = HipModule::load(dev.id(), q_kb)?;
     let q_kernel: HipKernel<'_> = q_module.kernel("flambeau_quantize_row_q8_1")?;
 
     let n_experts = 16usize;
-    let cases = [
-        (1usize, 4usize, 256usize, 2048usize),
-        (4, 4, 256, 2048),
-    ];
+    let cases = [(1usize, 4usize, 256usize, 2048usize), (4, 4, 256, 2048)];
     let mut results = Vec::new();
     for (n_tokens, top_k, n_rows, k_dim) in cases {
-        let seed = 0x5EC1u64
-            ^ (n_tokens as u64 * 53 + top_k as u64 * 17 + n_rows as u64 * 7);
+        let seed = 0x5EC1u64 ^ (n_tokens as u64 * 53 + top_k as u64 * 17 + n_rows as u64 * 7);
         let max_rel = run_q5_1_moe_shape(
             &dev, &kernel, &q_kernel, n_experts, n_rows, k_dim, top_k, n_tokens, seed,
         )?;
@@ -448,8 +445,7 @@ pub fn run_indexed_moe_mmvq_q4_1_sweep(repo_root: &Path) -> Result<Cert> {
     dev.bind()?;
     let kb = kernels::hsaco("indexed_moe_mmvq_q4_1").unwrap();
     let module = HipModule::load(dev.id(), kb)?;
-    let kernel: HipKernel<'_> =
-        module.kernel("flambeau_indexed_moe_mmvq_q4_1_q8_1")?;
+    let kernel: HipKernel<'_> = module.kernel("flambeau_indexed_moe_mmvq_q4_1_q8_1")?;
     let attrs: FuncAttributes = kernel.attributes()?;
     let q_kb = kernels::hsaco("quantize_q8_1").unwrap();
     let q_module = HipModule::load(dev.id(), q_kb)?;
@@ -465,8 +461,7 @@ pub fn run_indexed_moe_mmvq_q4_1_sweep(repo_root: &Path) -> Result<Cert> {
     ];
     let mut results = Vec::new();
     for (n_tokens, top_k, n_rows, k_dim) in cases {
-        let seed = 0x4EC1u64
-            ^ (n_tokens as u64 * 53 + top_k as u64 * 17 + n_rows as u64 * 7);
+        let seed = 0x4EC1u64 ^ (n_tokens as u64 * 53 + top_k as u64 * 17 + n_rows as u64 * 7);
         let max_rel = run_q4_1_moe_shape(
             &dev, &kernel, &q_kernel, n_experts, n_rows, k_dim, top_k, n_tokens, seed,
         )?;
@@ -619,7 +614,11 @@ fn run_q4_1_moe_shape(
             }
         }
     }
-    Ok(max_rel_err_with_floor(&got, &reference, (k_dim as f32).sqrt() * 0.01))
+    Ok(max_rel_err_with_floor(
+        &got,
+        &reference,
+        (k_dim as f32).sqrt() * 0.01,
+    ))
 }
 
 fn run_q4_0_moe_shape(
@@ -736,7 +735,11 @@ fn run_q4_0_moe_shape(
             }
         }
     }
-    Ok(max_rel_err_with_floor(&got, &reference, (k_dim as f32).sqrt() * 0.01))
+    Ok(max_rel_err_with_floor(
+        &got,
+        &reference,
+        (k_dim as f32).sqrt() * 0.01,
+    ))
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -852,7 +855,11 @@ fn run_q5_0_moe_shape(
             }
         }
     }
-    Ok(max_rel_err_with_floor(&got, &reference, (k_dim as f32).sqrt() * 0.01))
+    Ok(max_rel_err_with_floor(
+        &got,
+        &reference,
+        (k_dim as f32).sqrt() * 0.01,
+    ))
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -968,7 +975,11 @@ fn run_q5_1_moe_shape(
             }
         }
     }
-    Ok(max_rel_err_with_floor(&got, &reference, (k_dim as f32).sqrt() * 0.01))
+    Ok(max_rel_err_with_floor(
+        &got,
+        &reference,
+        (k_dim as f32).sqrt() * 0.01,
+    ))
 }
 
 // ---------- encoders + helpers ----------
@@ -1015,8 +1026,12 @@ fn encode_q4_1(xs: &[f32]) -> Vec<u8> {
         let mut mn = f32::INFINITY;
         let mut mx = f32::NEG_INFINITY;
         for &v in block {
-            if v < mn { mn = v; }
-            if v > mx { mx = v; }
+            if v < mn {
+                mn = v;
+            }
+            if v > mx {
+                mx = v;
+            }
         }
         let d = (mx - mn) / 15.0;
         let id = if d != 0.0 { 1.0 / d } else { 0.0 };
@@ -1048,8 +1063,12 @@ fn encode_q5_1(xs: &[f32]) -> Vec<u8> {
         let mut mn = f32::INFINITY;
         let mut mx = f32::NEG_INFINITY;
         for &v in block {
-            if v < mn { mn = v; }
-            if v > mx { mx = v; }
+            if v < mn {
+                mn = v;
+            }
+            if v > mx {
+                mx = v;
+            }
         }
         let d = (mx - mn) / 31.0;
         let id = if d != 0.0 { 1.0 / d } else { 0.0 };
@@ -1141,4 +1160,3 @@ fn q8_1_roundtrip(xs: &[f32]) -> Vec<f32> {
     }
     out
 }
-

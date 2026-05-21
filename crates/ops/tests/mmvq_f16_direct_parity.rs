@@ -447,15 +447,15 @@ fn build_q8_k(n_rows: usize, n_super: usize) -> Vec<BlockQ8K> {
 /// Per-block byte size for IQ dtypes — see `block_quant.cuh` static_asserts.
 fn iq_block_bytes(dtype: QDtype) -> usize {
     match dtype {
-        QDtype::IQ1_S => 2 + QK_K / 8 + 2 * QK_K / 32,       // 50
-        QDtype::IQ1_M => QK_K / 8 + QK_K / 16 + QK_K / 32,    // 56
-        QDtype::IQ2_XXS => 2 + 2 * QK_K / 8,                  // 66
-        QDtype::IQ2_XS => 2 + 2 * QK_K / 8 + QK_K / 32,       // 74
+        QDtype::IQ1_S => 2 + QK_K / 8 + 2 * QK_K / 32, // 50
+        QDtype::IQ1_M => QK_K / 8 + QK_K / 16 + QK_K / 32, // 56
+        QDtype::IQ2_XXS => 2 + 2 * QK_K / 8,           // 66
+        QDtype::IQ2_XS => 2 + 2 * QK_K / 8 + QK_K / 32, // 74
         QDtype::IQ2_S => 2 + QK_K / 4 + QK_K / 32 + QK_K / 32, // 82
-        QDtype::IQ3_XXS => 2 + QK_K / 4 + QK_K / 8,           // 98
+        QDtype::IQ3_XXS => 2 + QK_K / 4 + QK_K / 8,    // 98
         QDtype::IQ3_S => 2 + QK_K / 4 + QK_K / 32 + QK_K / 8 + QK_K / 64, // 110
-        QDtype::IQ4_NL => 2 + 32 / 2,                          // 18 (32-elem block)
-        QDtype::IQ4_XS => 2 + 2 + QK_K / 64 + QK_K / 2,        // 136
+        QDtype::IQ4_NL => 2 + 32 / 2,                  // 18 (32-elem block)
+        QDtype::IQ4_XS => 2 + 2 + QK_K / 64 + QK_K / 2, // 136
         _ => unreachable!(),
     }
 }
@@ -602,7 +602,11 @@ fn run_parity(dev: &HipDevice, dtype: QDtype, n_rows: usize, k: usize) -> Result
         | QDtype::IQ4_NL
         | QDtype::IQ4_XS => {
             let block_bytes = iq_block_bytes(dtype);
-            let units = if dtype == QDtype::IQ4_NL { n_blocks } else { n_super };
+            let units = if dtype == QDtype::IQ4_NL {
+                n_blocks
+            } else {
+                n_super
+            };
             build_iq_bytes(n_rows, units, block_bytes)
         }
         _ => unreachable!(),
@@ -622,7 +626,16 @@ fn run_parity(dev: &HipDevice, dtype: QDtype, n_rows: usize, k: usize) -> Result
 
     mmvq(&reg, stream, w_dev, act_dev, dst_f32, n_rows, k, dtype)?;
     cast_f32_to_f16(&reg, stream, dst_f32, dst_f16_via_cast, n_rows)?;
-    mmvq_f16_direct(&reg, stream, w_dev, act_dev, dst_f16_direct, n_rows, k, dtype)?;
+    mmvq_f16_direct(
+        &reg,
+        stream,
+        w_dev,
+        act_dev,
+        dst_f16_direct,
+        n_rows,
+        k,
+        dtype,
+    )?;
     stream.synchronize()?;
 
     let via_cast: Vec<u16> = download(dev, dst_f16_via_cast, n_rows);
@@ -688,9 +701,7 @@ fn run_parity(dev: &HipDevice, dtype: QDtype, n_rows: usize, k: usize) -> Result
     );
     if !bug_rows.is_empty() {
         for (idx, a, b, f) in bug_rows.iter().take(4) {
-            eprintln!(
-                "  bug row={idx}: via_cast={a} direct={b} f32_ref={f}"
-            );
+            eprintln!("  bug row={idx}: via_cast={a} direct={b} f32_ref={f}");
         }
         panic!(
             "{dtype:?}: F16-direct diverges from F32+cast in normal regime (or fails to saturate \

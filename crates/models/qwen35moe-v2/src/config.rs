@@ -62,14 +62,14 @@ impl Qwen35MoeV2Config {
         let context_length = req_u32("context_length")?;
         let rope_theta = opt_f32("rope.freq_base").unwrap_or(10_000.0);
         let rotated_dims = opt_u32("rope.dimension_count").unwrap_or(head_dim);
-        let full_attention_interval =
-            opt_u32("full_attention_interval").filter(|&v| v > 0).unwrap_or(1);
+        let full_attention_interval = opt_u32("full_attention_interval")
+            .filter(|&v| v > 0)
+            .unwrap_or(1);
 
         let num_experts = req_u32("expert_count")?;
         let experts_per_tok = req_u32("expert_used_count")?;
         let expert_intermediate = req_u32("expert_feed_forward_length")?;
-        let shared_expert_intermediate =
-            opt_u32("expert_shared_feed_forward_length").unwrap_or(0);
+        let shared_expert_intermediate = opt_u32("expert_shared_feed_forward_length").unwrap_or(0);
 
         let d_inner = req_u32("ssm.inner_size")?;
         let num_v_heads = req_u32("ssm.time_step_rank")?;

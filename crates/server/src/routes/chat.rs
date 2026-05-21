@@ -18,8 +18,8 @@ use crate::api::{
     ResponseFormat, Usage,
 };
 use crate::routes::{
-    dev_flag, now_unix, queue_full_response, request_id, run_completion,
-    strip_trailing_assistant_terminator, stream_completion_sse, ApiError, SharedState,
+    dev_flag, now_unix, queue_full_response, request_id, run_completion, stream_completion_sse,
+    strip_trailing_assistant_terminator, ApiError, SharedState,
 };
 use crate::state::{parse_stop, SamplingParams};
 
@@ -124,12 +124,12 @@ pub async fn chat_completions(
         Some(ResponseFormat::JsonObject) | Some(ResponseFormat::JsonSchema { .. }),
     );
     let stop_strings = parse_stop(req.stop.as_ref());
-    let collect_logprobs: Option<u32> = if req.logprobs.unwrap_or(false) || req.top_logprobs.is_some()
-    {
-        Some(req.top_logprobs.unwrap_or(0))
-    } else {
-        None
-    };
+    let collect_logprobs: Option<u32> =
+        if req.logprobs.unwrap_or(false) || req.top_logprobs.is_some() {
+            Some(req.top_logprobs.unwrap_or(0))
+        } else {
+            None
+        };
     let assistant_prefill: Option<String> = if json_mode {
         req.messages
             .last()

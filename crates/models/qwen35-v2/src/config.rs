@@ -61,8 +61,9 @@ impl Qwen35V2Config {
         let context_length = req_u32("context_length")?;
         let rope_theta = opt_f32("rope.freq_base").unwrap_or(10_000.0);
         let rotated_dims = opt_u32("rope.dimension_count").unwrap_or(head_dim);
-        let full_attention_interval =
-            opt_u32("full_attention_interval").filter(|&v| v > 0).unwrap_or(1);
+        let full_attention_interval = opt_u32("full_attention_interval")
+            .filter(|&v| v > 0)
+            .unwrap_or(1);
 
         let d_inner = req_u32("ssm.inner_size")?;
         let num_v_heads = req_u32("ssm.time_step_rank")?;

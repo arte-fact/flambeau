@@ -15,22 +15,12 @@ use half::f16;
 
 use crate::core::{composites, CoreState, NoopHooks, ScratchPool, TopologyHooks};
 use crate::ctx::{
-    AttnWeights, EmbeddingWeights, FfnWeights, ForwardCtx, LmHeadWeights, ModelLayout,
-    MoeWeights,
+    AttnWeights, EmbeddingWeights, FfnWeights, ForwardCtx, LmHeadWeights, ModelLayout, MoeWeights,
 };
 use crate::runtime::ar::{bar_ar_residual_f16, bar_ar_residual_rmsnorm_f16, BarArCoordinator};
 
-pub type ArCallback = Box<
-    dyn FnMut(
-            usize,
-            usize,
-            DevicePtr,
-            usize,
-            &HipDevice,
-            &HipStream,
-        ) -> Result<()>
-        + Send,
->;
+pub type ArCallback =
+    Box<dyn FnMut(usize, usize, DevicePtr, usize, &HipDevice, &HipStream) -> Result<()> + Send>;
 
 pub struct TpHooks {
     pub rank: usize,
@@ -132,7 +122,14 @@ impl TopologyHooks for HybridHooks {
         if self.tp_size <= 1 {
             return Ok(());
         }
-        (self.ar_callback)(self.rank_in_stage, self.tp_size, buf, n_elems, device, stream)
+        (self.ar_callback)(
+            self.rank_in_stage,
+            self.tp_size,
+            buf,
+            n_elems,
+            device,
+            stream,
+        )
     }
 
     fn supports_ar_residual_f16(&self) -> bool {
@@ -147,10 +144,9 @@ impl TopologyHooks for HybridHooks {
         device: &HipDevice,
         stream: &HipStream,
     ) -> Result<()> {
-        let bar = self
-            .bar
-            .as_ref()
-            .ok_or_else(|| anyhow!("HybridHooks::ar_residual_f16: bar coordinator not configured"))?;
+        let bar = self.bar.as_ref().ok_or_else(|| {
+            anyhow!("HybridHooks::ar_residual_f16: bar coordinator not configured")
+        })?;
         bar_ar_residual_f16(
             bar,
             self.rank_in_stage,
@@ -200,11 +196,7 @@ pub trait StageHooks {
     fn is_first(&self) -> bool;
     fn is_last(&self) -> bool;
     fn layer_range(&self, layout: &ModelLayout) -> Range<usize>;
-    fn peer_recv(
-        &mut self,
-        core: &mut CoreState<'_>,
-        n_tokens: usize,
-    ) -> Result<Tensor<F16>>;
+    fn peer_recv(&mut self, core: &mut CoreState<'_>, n_tokens: usize) -> Result<Tensor<F16>>;
     fn peer_send(
         &mut self,
         core: &mut CoreState<'_>,
@@ -225,11 +217,7 @@ impl StageHooks for SoloStage {
     fn layer_range(&self, layout: &ModelLayout) -> Range<usize> {
         0..layout.num_layers
     }
-    fn peer_recv(
-        &mut self,
-        _core: &mut CoreState<'_>,
-        _n_tokens: usize,
-    ) -> Result<Tensor<F16>> {
+    fn peer_recv(&mut self, _core: &mut CoreState<'_>, _n_tokens: usize) -> Result<Tensor<F16>> {
         bail!("SoloStage::peer_recv unreachable — is_first() is true")
     }
     fn peer_send(
@@ -260,11 +248,7 @@ impl<'a> StageHooks for PpStage<'a> {
     fn layer_range(&self, _layout: &ModelLayout) -> Range<usize> {
         self.layer_start..self.layer_end
     }
-    fn peer_recv(
-        &mut self,
-        core: &mut CoreState<'_>,
-        n_tokens: usize,
-    ) -> Result<Tensor<F16>> {
+    fn peer_recv(&mut self, core: &mut CoreState<'_>, n_tokens: usize) -> Result<Tensor<F16>> {
         let hidden = core.hidden();
         let need = n_tokens * hidden;
         if self.peer_buffer.len() < need {
@@ -344,11 +328,7 @@ impl StageHooks for HybStage {
     fn layer_range(&self, _layout: &ModelLayout) -> Range<usize> {
         self.layer_start..self.layer_end
     }
-    fn peer_recv(
-        &mut self,
-        core: &mut CoreState<'_>,
-        n_tokens: usize,
-    ) -> Result<Tensor<F16>> {
+    fn peer_recv(&mut self, core: &mut CoreState<'_>, n_tokens: usize) -> Result<Tensor<F16>> {
         self.handoff_barrier.wait();
         let hidden = core.hidden();
         let need = n_tokens * hidden;
@@ -522,11 +502,7 @@ impl<'a> ForwardEngine<'a, HybridHooks, HybStage> {
 }
 
 impl<H: TopologyHooks, S: StageHooks> ForwardCtx for ForwardEngine<'_, H, S> {
-    fn embed(
-        &mut self,
-        weights: &EmbeddingWeights,
-        tokens: &[u32],
-    ) -> Result<Tensor<F16>> {
+    fn embed(&mut self, weights: &EmbeddingWeights, tokens: &[u32]) -> Result<Tensor<F16>> {
         if self.stage.is_first() {
             composites::embed_local(&mut self.core, &mut self.hooks, weights, tokens)
         } else {
@@ -541,7 +517,14 @@ impl<H: TopologyHooks, S: StageHooks> ForwardCtx for ForwardEngine<'_, H, S> {
         eps: f32,
         n_tokens: usize,
     ) -> Result<Tensor<F16>> {
-        composites::rmsnorm_local(&mut self.core, &mut self.hooks, input, weight, eps, n_tokens)
+        composites::rmsnorm_local(
+            &mut self.core,
+            &mut self.hooks,
+            input,
+            weight,
+            eps,
+            n_tokens,
+        )
     }
 
     fn residual_add(
@@ -779,13 +762,7 @@ impl<H: TopologyHooks, S: StageHooks> ForwardCtx for ForwardEngine<'_, H, S> {
         slot_ids: &[usize],
     ) -> Result<()> {
         if self.stage.is_last() {
-            composites::output_head_local(
-                &mut self.core,
-                &mut self.hooks,
-                input,
-                lm_head,
-                slot_ids,
-            )
+            composites::output_head_local(&mut self.core, &mut self.hooks, input, lm_head, slot_ids)
         } else {
             self.stage.peer_send(&mut self.core, input, slot_ids.len())
         }

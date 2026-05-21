@@ -51,9 +51,7 @@ fn session_qwen35_27b_q4_0_tp_size_2_runs() {
         .max_by(|(_, a), (_, b)| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal))
         .map(|(i, _)| i)
         .unwrap();
-    eprintln!(
-        "Qwen3.5-27B-Q4_0 TP=2: min={min:.4} max={max:.4} argmax={argmax} finite={finite}"
-    );
+    eprintln!("Qwen3.5-27B-Q4_0 TP=2: min={min:.4} max={max:.4} argmax={argmax} finite={finite}");
     assert!(finite, "27B TP=2 logits contain NaN/Inf");
     assert!(min < max, "logits constant");
 }

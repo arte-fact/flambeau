@@ -282,7 +282,10 @@ mod tests {
         let l = WeightLayout::col_parallel(4, 0);
         assert_eq!(
             l.shard_size(13),
-            Err(LayoutError::Indivisible { total: 13, world: 4 })
+            Err(LayoutError::Indivisible {
+                total: 13,
+                world: 4
+            })
         );
     }
 
@@ -296,9 +299,18 @@ mod tests {
         let l = WeightLayout::col_parallel(4, 0);
         let row_stride = 5120 * 2;
         assert_eq!(l.shard_byte_offset(0, 8192, row_stride).unwrap(), 0);
-        assert_eq!(l.shard_byte_offset(1, 8192, row_stride).unwrap(), 2048 * row_stride);
-        assert_eq!(l.shard_byte_offset(2, 8192, row_stride).unwrap(), 4096 * row_stride);
-        assert_eq!(l.shard_byte_offset(3, 8192, row_stride).unwrap(), 6144 * row_stride);
+        assert_eq!(
+            l.shard_byte_offset(1, 8192, row_stride).unwrap(),
+            2048 * row_stride
+        );
+        assert_eq!(
+            l.shard_byte_offset(2, 8192, row_stride).unwrap(),
+            4096 * row_stride
+        );
+        assert_eq!(
+            l.shard_byte_offset(3, 8192, row_stride).unwrap(),
+            6144 * row_stride
+        );
     }
 
     #[test]

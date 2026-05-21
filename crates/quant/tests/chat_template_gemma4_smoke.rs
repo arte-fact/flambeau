@@ -57,17 +57,17 @@ fn render_with_tools_emits_tool_block() {
         .render_with_tools::<ChatMessage, _>(&messages, Some(&tools), true, Some(false))
         .expect("render with tools");
 
-    eprintln!("=== rendered ({} bytes) ===\n{rendered}\n=========================", rendered.len());
+    eprintln!(
+        "=== rendered ({} bytes) ===\n{rendered}\n=========================",
+        rendered.len()
+    );
     assert!(rendered.contains("<|tool>"), "missing tool open marker");
     assert!(rendered.contains("<tool|>"), "missing tool close marker");
     assert!(
         rendered.contains("declaration:get_weather"),
         "missing tool declaration"
     );
-    assert!(
-        rendered.contains("location"),
-        "missing parameter name"
-    );
+    assert!(rendered.contains("location"), "missing parameter name");
 }
 
 #[test]
@@ -110,7 +110,10 @@ fn render_assistant_tool_call_then_tool_response() {
         )
         .expect("render mixed history");
 
-    eprintln!("=== rendered ({} bytes) ===\n{rendered}\n=========================", rendered.len());
+    eprintln!(
+        "=== rendered ({} bytes) ===\n{rendered}\n=========================",
+        rendered.len()
+    );
     assert!(
         rendered.contains("<|tool_call>call:get_weather"),
         "missing tool_call marker for emitted call"
@@ -140,7 +143,10 @@ fn render_system_user_assistant_turn() {
         .render(&messages, /*add_generation_prompt=*/ true)
         .expect("render");
 
-    eprintln!("=== rendered ({} bytes) ===\n{rendered}\n=========================", rendered.len());
+    eprintln!(
+        "=== rendered ({} bytes) ===\n{rendered}\n=========================",
+        rendered.len()
+    );
     assert!(!rendered.is_empty(), "empty render");
     assert!(
         rendered.contains("<|turn>system"),
@@ -150,14 +156,8 @@ fn render_system_user_assistant_turn() {
         rendered.contains("You are a helpful assistant."),
         "system content dropped"
     );
-    assert!(
-        rendered.contains("<|turn>user"),
-        "missing user turn header"
-    );
-    assert!(
-        rendered.contains("Hello"),
-        "user content dropped"
-    );
+    assert!(rendered.contains("<|turn>user"), "missing user turn header");
+    assert!(rendered.contains("Hello"), "user content dropped");
     assert!(
         rendered.trim_end().ends_with("<|turn>model"),
         "expected open assistant turn at end, got: {rendered:?}"

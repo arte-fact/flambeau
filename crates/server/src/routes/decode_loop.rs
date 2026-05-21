@@ -18,9 +18,7 @@ use tokio_stream::wrappers::ReceiverStream;
 
 use crate::api::*;
 use crate::gpu_sampler::{self, GpuSamplerScratch};
-use crate::routes::{
-    dev_flag, dev_usize, now_unix, request_id, ServerState, SharedState,
-};
+use crate::routes::{dev_flag, dev_usize, now_unix, request_id, ServerState, SharedState};
 use crate::state::SamplingParams;
 
 use super::finalise::{build_logprob_entry, finalise, preview_text, CompletionOutput};
@@ -72,10 +70,8 @@ pub(crate) fn stream_completion_sse(
             Err(e) => {
                 // Bad tool_call_format — surface as a streamed error.
                 let err = json!({ "error": { "message": e.to_string() } });
-                let _ = tx_clone
-                    .blocking_send(Ok(Event::default().data(err.to_string())));
-                let _ = tx_clone
-                    .blocking_send(Ok(Event::default().data("[DONE]")));
+                let _ = tx_clone.blocking_send(Ok(Event::default().data(err.to_string())));
+                let _ = tx_clone.blocking_send(Ok(Event::default().data("[DONE]")));
                 return;
             }
         };
@@ -278,10 +274,7 @@ pub(crate) async fn run_completion(
 ) -> Result<CompletionOutput> {
     let prompt = prompt.to_owned();
     tokio::task::spawn_blocking(move || {
-        let ids = state
-            .tokenizer
-            .encode(&prompt)
-            .context("tokenize prompt")?;
+        let ids = state.tokenizer.encode(&prompt).context("tokenize prompt")?;
         run_completion_blocking_ids(state, ids, params, relax_stop_mask)
     })
     .await
@@ -720,7 +713,15 @@ fn run_completion_blocking_ids(
     // changes.
     if is_stop(first_next) {
         // Slot stays pooled; mutex releases on function return.
-        return finalise(&state, prompt_tokens, generated, "stop", &params.stop_strings, logprobs_acc, params.enable_thinking);
+        return finalise(
+            &state,
+            prompt_tokens,
+            generated,
+            "stop",
+            &params.stop_strings,
+            logprobs_acc,
+            params.enable_thinking,
+        );
     }
 
     let mut finish_reason = "length";
@@ -859,9 +860,7 @@ fn run_completion_blocking_ids(
             .max()
             .unwrap_or(0);
         let need_user_check = !params.stop_strings.is_empty();
-        if (need_user_check || !relax_stop_mask)
-            && (step % 4 == 0 || step >= MIN_RESPONSE_TOKENS)
-        {
+        if (need_user_check || !relax_stop_mask) && (step % 4 == 0 || step >= MIN_RESPONSE_TOKENS) {
             let n = generated.len();
             // 16 tokens covers ≥48 chars typical; widen if a user
             // stop string is longer than ~32 chars.
@@ -1034,46 +1033,48 @@ pub(crate) fn run_completion_blocking_streaming(
     let mut decode_cursor: usize = 0;
     let mut pending_emitted_in_segment: usize = 0;
 
-    let mut push_and_emit = |tok: u32,
-                             generated: &mut Vec<u32>,
-                             emitted_text: &mut String|
-     -> Result<bool> {
-        generated.push(tok);
-        let stop_hit = is_stop(tok);
-        // Decode only the still-open segment, not the full sequence.
-        // `end` excludes the trailing stop token so its raw text never leaks.
-        let end = if stop_hit { generated.len() - 1 } else { generated.len() };
-        if end <= decode_cursor {
-            return Ok(!stop_hit);
-        }
-        let raw = state
-            .tokenizer
-            .decode(&generated[decode_cursor..end])
-            .context("decode")?;
-        // Trim trailing U+FFFD: the HF BPE+ByteLevel decoder substitutes
-        // it when the byte tail is an incomplete UTF-8 codepoint
-        // (multi-byte glyph straddling two BPE tokens). The trimmed
-        // bytes will resolve once the next token's bytes arrive.
-        let safe = raw.trim_end_matches('\u{FFFD}');
-
-        // Emit anything new within the current open segment.
-        if safe.len() > pending_emitted_in_segment {
-            let delta = &safe[pending_emitted_in_segment..];
-            if !emit(delta) {
-                return Ok(false);
+    let mut push_and_emit =
+        |tok: u32, generated: &mut Vec<u32>, emitted_text: &mut String| -> Result<bool> {
+            generated.push(tok);
+            let stop_hit = is_stop(tok);
+            // Decode only the still-open segment, not the full sequence.
+            // `end` excludes the trailing stop token so its raw text never leaks.
+            let end = if stop_hit {
+                generated.len() - 1
+            } else {
+                generated.len()
+            };
+            if end <= decode_cursor {
+                return Ok(!stop_hit);
             }
-            emitted_text.push_str(delta);
-            pending_emitted_in_segment = safe.len();
-        }
+            let raw = state
+                .tokenizer
+                .decode(&generated[decode_cursor..end])
+                .context("decode")?;
+            // Trim trailing U+FFFD: the HF BPE+ByteLevel decoder substitutes
+            // it when the byte tail is an incomplete UTF-8 codepoint
+            // (multi-byte glyph straddling two BPE tokens). The trimmed
+            // bytes will resolve once the next token's bytes arrive.
+            let safe = raw.trim_end_matches('\u{FFFD}');
 
-        // If nothing was trimmed, the segment closed cleanly: advance
-        // the cursor and reset segment-local emit accounting.
-        if safe.len() == raw.len() {
-            decode_cursor = end;
-            pending_emitted_in_segment = 0;
-        }
-        Ok(!stop_hit)
-    };
+            // Emit anything new within the current open segment.
+            if safe.len() > pending_emitted_in_segment {
+                let delta = &safe[pending_emitted_in_segment..];
+                if !emit(delta) {
+                    return Ok(false);
+                }
+                emitted_text.push_str(delta);
+                pending_emitted_in_segment = safe.len();
+            }
+
+            // If nothing was trimmed, the segment closed cleanly: advance
+            // the cursor and reset segment-local emit accounting.
+            if safe.len() == raw.len() {
+                decode_cursor = end;
+                pending_emitted_in_segment = 0;
+            }
+            Ok(!stop_hit)
+        };
 
     let alive = push_and_emit(first_next, &mut generated, &mut emitted_text)?;
     if !alive {
@@ -1167,7 +1168,11 @@ pub(crate) fn run_completion_blocking_streaming(
         }
         // T4.1: same relax-stop-mask behaviour as the non-streaming path.
         let force_mask = step < MIN_RESPONSE_TOKENS && !relax_stop_mask;
-        let hp_step_t0 = if host_profile_on { Some(Instant::now()) } else { None };
+        let hp_step_t0 = if host_profile_on {
+            Some(Instant::now())
+        } else {
+            None
+        };
         state
             .dispatch_decode_one(
                 &mut *inflight,
@@ -1176,7 +1181,11 @@ pub(crate) fn run_completion_blocking_streaming(
                 &mut logits_buf,
             )
             .context("decode step logits")?;
-        let hp_after_decode = if host_profile_on { Some(Instant::now()) } else { None };
+        let hp_after_decode = if host_profile_on {
+            Some(Instant::now())
+        } else {
+            None
+        };
         if !relax_stop_mask {
             for &sid in stop_ids {
                 if (sid as usize) < logits_buf.len() {
@@ -1194,11 +1203,23 @@ pub(crate) fn run_completion_blocking_streaming(
                 }
             }
         }
-        let hp_after_mask = if host_profile_on { Some(Instant::now()) } else { None };
+        let hp_after_mask = if host_profile_on {
+            Some(Instant::now())
+        } else {
+            None
+        };
         let next = sampler.sample(&logits_buf, sampling, &generated);
-        let hp_after_sample = if host_profile_on { Some(Instant::now()) } else { None };
+        let hp_after_sample = if host_profile_on {
+            Some(Instant::now())
+        } else {
+            None
+        };
         let alive = push_and_emit(next, &mut generated, &mut emitted_text)?;
-        let hp_after_emit = if host_profile_on { Some(Instant::now()) } else { None };
+        let hp_after_emit = if host_profile_on {
+            Some(Instant::now())
+        } else {
+            None
+        };
         last_token = next;
         if !alive {
             finish_reason = "stop";
@@ -1256,9 +1277,13 @@ pub(crate) fn run_completion_blocking_streaming(
         // Skip first 8 steps (cold cache / allocator warmup).
         if host_profile_on && step > profile_skip {
             let t_step_end = Instant::now();
-            if let (Some(t0), Some(td), Some(tm), Some(ts), Some(te)) =
-                (hp_step_t0, hp_after_decode, hp_after_mask, hp_after_sample, hp_after_emit)
-            {
+            if let (Some(t0), Some(td), Some(tm), Some(ts), Some(te)) = (
+                hp_step_t0,
+                hp_after_decode,
+                hp_after_mask,
+                hp_after_sample,
+                hp_after_emit,
+            ) {
                 hp_n += 1;
                 hp_decode_us += (td - t0).as_micros();
                 hp_mask_us += (tm - td).as_micros();
@@ -1304,5 +1329,9 @@ pub(crate) fn run_completion_blocking_streaming(
         "streaming chat_completions response"
     );
 
-    Ok((finish_reason.to_owned(), prompt_tokens, generated.len() as u32))
+    Ok((
+        finish_reason.to_owned(),
+        prompt_tokens,
+        generated.len() as u32,
+    ))
 }

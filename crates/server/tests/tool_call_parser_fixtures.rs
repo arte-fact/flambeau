@@ -59,19 +59,12 @@ fn fixtures_match_committed_expectations() {
         .filter(|p| p.extension().and_then(|s| s.to_str()) == Some("txt"))
         .collect();
     fixtures.sort();
-    assert!(
-        !fixtures.is_empty(),
-        "no .txt fixtures found under {dir:?}"
-    );
+    assert!(!fixtures.is_empty(), "no .txt fixtures found under {dir:?}");
 
     let mut failed: Vec<String> = Vec::new();
     for fixture in &fixtures {
-        let name = fixture
-            .file_stem()
-            .and_then(|s| s.to_str())
-            .unwrap_or("?");
-        let input = fs::read_to_string(fixture)
-            .unwrap_or_else(|e| panic!("read {fixture:?}: {e}"));
+        let name = fixture.file_stem().and_then(|s| s.to_str()).unwrap_or("?");
+        let input = fs::read_to_string(fixture).unwrap_or_else(|e| panic!("read {fixture:?}: {e}"));
         let expected_path = fixture.with_extension("expected.jsonl");
         if !expected_path.exists() {
             failed.push(format!(

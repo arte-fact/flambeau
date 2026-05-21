@@ -186,11 +186,9 @@ pub(crate) async fn serve_inner_v2(
         inflight_slots,
     )
     .with_context(|| format!("v2 shared session ({gguf_arch})"))?;
-    let shared: crate::v2_handle::SharedV2Session =
-        Arc::new(Mutex::new(shared_session));
+    let shared: crate::v2_handle::SharedV2Session = Arc::new(Mutex::new(shared_session));
 
-    let mut inflight_pool: Vec<Mutex<Box<dyn crate::Session>>> =
-        Vec::with_capacity(inflight_slots);
+    let mut inflight_pool: Vec<Mutex<Box<dyn crate::Session>>> = Vec::with_capacity(inflight_slots);
     for slot_idx in 0..inflight_slots {
         let conv: Box<dyn crate::Session> = Box::new(crate::v2_handle::V2Conv {
             shared: Arc::clone(&shared),
@@ -205,8 +203,7 @@ pub(crate) async fn serve_inner_v2(
         Arc::new(HipCluster::new(&cfg.device_ids).context("v2: HipCluster::new (state side)")?);
     let topology_tag =
         crate::serve_common::topology_tag_from_mesh(cfg.mesh_mode, cfg.device_ids.len());
-    let prefix_cache =
-        crate::serve_common::build_prefix_cache(&cfg, topology_tag.mesh_kind);
+    let prefix_cache = crate::serve_common::build_prefix_cache(&cfg, topology_tag.mesh_kind);
 
     // Embedding endpoint disabled — legacy qwen3-moe `EmbeddingModel`
     // was removed in #221; v2 reimplementation is a follow-up.
@@ -221,25 +218,23 @@ pub(crate) async fn serve_inner_v2(
         vocab: model_cfg.vocab_size,
     }) as crate::model_handle::LoadedModel;
 
-    let state = crate::serve_common::build_server_state(
-        crate::serve_common::ServerStateInputs {
-            model_id: cfg.model_id.clone(),
-            model_cfg,
-            model,
-            cluster,
-            inflight_pool,
-            embedding,
-            embedding_rank,
-            gpu_sampler: false,
-            batched_decode: true,
-            max_queue_depth,
-            prefill_ubatch,
-            topology_tag,
-            prefix_cache,
-            boot,
-            decode_batch_window_us: cfg.decode_batch_window_us,
-        },
-    );
+    let state = crate::serve_common::build_server_state(crate::serve_common::ServerStateInputs {
+        model_id: cfg.model_id.clone(),
+        model_cfg,
+        model,
+        cluster,
+        inflight_pool,
+        embedding,
+        embedding_rank,
+        gpu_sampler: false,
+        batched_decode: true,
+        max_queue_depth,
+        prefill_ubatch,
+        topology_tag,
+        prefix_cache,
+        boot,
+        decode_batch_window_us: cfg.decode_batch_window_us,
+    });
 
     crate::serve_common::run_axum(state, cfg.bind_addr, "v2").await
 }
@@ -257,9 +252,7 @@ fn topology_from_mesh(
     let even_split = |n_groups: usize| -> Vec<usize> {
         let base = num_layers / n_groups;
         let rem = num_layers % n_groups;
-        (0..n_groups)
-            .map(|i| base + usize::from(i < rem))
-            .collect()
+        (0..n_groups).map(|i| base + usize::from(i < rem)).collect()
     };
     match mesh {
         MeshMode::Pp if device_ids.len() == 1 => Ok(Topology::SingleDevice {

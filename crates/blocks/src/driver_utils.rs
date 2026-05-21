@@ -23,7 +23,9 @@ use half::f16;
 /// per-stage scratch-builder for buffers that must start at zero
 /// (residual streams, partial accumulators).
 pub fn alloc_zeroed(device: &HipDevice, bytes: usize) -> Result<DevicePtr> {
-    let p = device.alloc(bytes).map_err(|e| anyhow!("alloc {bytes}: {e}"))?;
+    let p = device
+        .alloc(bytes)
+        .map_err(|e| anyhow!("alloc {bytes}: {e}"))?;
     let zero = vec![0u8; bytes];
     // SAFETY: dst has `bytes` allocation; src is a host vec of the
     // same length; we sync the stream before returning so the host
@@ -49,7 +51,9 @@ pub fn alloc_zeroed(device: &HipDevice, bytes: usize) -> Result<DevicePtr> {
 pub fn upload_f16_ones(device: &HipDevice, n: usize) -> Result<DevicePtr> {
     let ones: Vec<f16> = vec![f16::from_f32(1.0); n];
     let bytes = ones.len() * 2;
-    let p = device.alloc(bytes).map_err(|e| anyhow!("alloc {bytes}: {e}"))?;
+    let p = device
+        .alloc(bytes)
+        .map_err(|e| anyhow!("alloc {bytes}: {e}"))?;
     // SAFETY: dst has `bytes` allocation; ones outlives the bounded sync.
     unsafe {
         device.memcpy_async(
@@ -113,18 +117,14 @@ pub fn quant_f32_to_q8_0(raw: &[u8], src_dtype: GgmlDType) -> Result<(Vec<u8>, G
         return Ok((raw.to_vec(), GgmlDType::Q8_0));
     }
     if src_dtype != GgmlDType::F32 {
-        bail!(
-            "quant_f32_to_q8_0: unsupported source dtype {src_dtype:?} (expected F32 or Q8_0)"
-        );
+        bail!("quant_f32_to_q8_0: unsupported source dtype {src_dtype:?} (expected F32 or Q8_0)");
     }
     // SAFETY-cast: raw is the F32 mmap view; alignment is 4 bytes
     // (mmap is page-aligned, exceeds f32 alignment).
     let src: &[f32] = bytemuck::cast_slice(raw);
     let elems = src.len();
     if elems == 0 || elems % QK8_0 != 0 {
-        bail!(
-            "quant_f32_to_q8_0: elem count {elems} not a positive multiple of QK8_0={QK8_0}"
-        );
+        bail!("quant_f32_to_q8_0: elem count {elems} not a positive multiple of QK8_0={QK8_0}");
     }
     let n_blocks = elems / QK8_0;
     let block_size = 34usize; // 2 (d) + 32 (qs)
@@ -255,11 +255,7 @@ impl RawAllocTracker {
 
     /// Allocate `bytes` on `device`, zero-fill, and record the
     /// `(ptr, bytes)` pair for later dispose. Returns the new ptr.
-    pub fn alloc_zeroed_tracked(
-        &mut self,
-        device: &HipDevice,
-        bytes: usize,
-    ) -> Result<DevicePtr> {
+    pub fn alloc_zeroed_tracked(&mut self, device: &HipDevice, bytes: usize) -> Result<DevicePtr> {
         let p = alloc_zeroed(device, bytes)?;
         self.allocs.push((p, bytes));
         Ok(p)
@@ -322,11 +318,7 @@ impl RawAllocTracker {
     /// Allocate + track a Q8_1_MMQ buffer of `n` elements. The 4-warp
     /// LDS-tiled MMQ kernels read Q8_1 in 128-elem super-blocks
     /// (`BlockQ8_1Mmq`, 144 B). Asserts `n % 128 == 0`.
-    pub fn alloc_q8_1_mmq(
-        &mut self,
-        device: &HipDevice,
-        n: usize,
-    ) -> Result<(DevicePtr, usize)> {
+    pub fn alloc_q8_1_mmq(&mut self, device: &HipDevice, n: usize) -> Result<(DevicePtr, usize)> {
         if n % 128 != 0 {
             bail!("alloc_q8_1_mmq: n={n} not a multiple of 128");
         }

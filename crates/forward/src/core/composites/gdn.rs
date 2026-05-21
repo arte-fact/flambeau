@@ -43,12 +43,14 @@ pub fn gdn_layer_local<H: TopologyHooks>(
     if n_tokens == 0 {
         bail!("gdn_layer: empty slot_ids");
     }
-    let local_idx = layer_idx.checked_sub(state.layer_idx_offset).ok_or_else(|| {
-        anyhow::anyhow!(
-            "gdn_layer: layer_idx {layer_idx} < layer_idx_offset {}",
-            state.layer_idx_offset
-        )
-    })?;
+    let local_idx = layer_idx
+        .checked_sub(state.layer_idx_offset)
+        .ok_or_else(|| {
+            anyhow::anyhow!(
+                "gdn_layer: layer_idx {layer_idx} < layer_idx_offset {}",
+                state.layer_idx_offset
+            )
+        })?;
     if local_idx >= state.pool.gdn_state.len() {
         bail!(
             "gdn_layer: local_idx {local_idx} >= gdn_state.len {}",
@@ -63,8 +65,7 @@ pub fn gdn_layer_local<H: TopologyHooks>(
     }
     let dims = weights.dims;
     let layer_state = state.pool.gdn_state[local_idx];
-    let state_bytes_per_slot =
-        dims.num_v_heads * dims.head_k_dim * dims.head_v_dim * 4;
+    let state_bytes_per_slot = dims.num_v_heads * dims.head_k_dim * dims.head_v_dim * 4;
     let hist_bytes_per_slot = (dims.conv_kernel - 1) * dims.conv_channels * 4;
 
     let block = DeltaNetLayer::new(
@@ -111,7 +112,9 @@ pub fn gdn_layer_local<H: TopologyHooks>(
             .view();
         let slot = slot_ids[0];
         let state_ptr = layer_state.state.offset_bytes(slot * state_bytes_per_slot);
-        let hist_ptr = layer_state.conv_history.offset_bytes(slot * hist_bytes_per_slot);
+        let hist_ptr = layer_state
+            .conv_history
+            .offset_bytes(slot * hist_bytes_per_slot);
         let mut ar_cb =
             |buf: DevicePtr, n_elems: usize, dev: &HipDevice, stm: &HipStream| -> Result<()> {
                 hooks.ar_sum_f32(buf, n_elems, dev, stm)
@@ -140,7 +143,9 @@ pub fn gdn_layer_local<H: TopologyHooks>(
         if fused_path {
             let slot = slot_ids[0];
             let state_i = layer_state.state.offset_bytes(slot * state_bytes_per_slot);
-            let hist_i = layer_state.conv_history.offset_bytes(slot * hist_bytes_per_slot);
+            let hist_i = layer_state
+                .conv_history
+                .offset_bytes(slot * hist_bytes_per_slot);
             block.forward_decode_with_ar_hook(
                 &ops,
                 state.device,
@@ -152,8 +157,7 @@ pub fn gdn_layer_local<H: TopologyHooks>(
                 scratch,
                 None,
             )?;
-            let fuse_norm =
-                next_norm.is_some() && hooks.supports_ar_residual_rmsnorm_f16();
+            let fuse_norm = next_norm.is_some() && hooks.supports_ar_residual_rmsnorm_f16();
             if fuse_norm {
                 let next_w = next_norm.unwrap();
                 hooks.ar_residual_rmsnorm_f16(
@@ -168,13 +172,7 @@ pub fn gdn_layer_local<H: TopologyHooks>(
                 )?;
                 state.pool.input_pre_normed = true;
             } else {
-                hooks.ar_residual_f16(
-                    input.ptr,
-                    delta_ptr,
-                    hidden,
-                    state.device,
-                    state.stream,
-                )?;
+                hooks.ar_residual_f16(input.ptr, delta_ptr, hidden, state.device, state.stream)?;
             }
             return Ok(None);
         }
@@ -187,7 +185,9 @@ pub fn gdn_layer_local<H: TopologyHooks>(
             let in_i = input.ptr.offset_bytes(i * row_bytes);
             let out_i = delta_ptr.offset_bytes(i * row_bytes);
             let state_i = layer_state.state.offset_bytes(slot * state_bytes_per_slot);
-            let hist_i = layer_state.conv_history.offset_bytes(slot * hist_bytes_per_slot);
+            let hist_i = layer_state
+                .conv_history
+                .offset_bytes(slot * hist_bytes_per_slot);
             block.forward_decode_with_ar_hook(
                 &ops,
                 state.device,
@@ -201,5 +201,7 @@ pub fn gdn_layer_local<H: TopologyHooks>(
             )?;
         }
     }
-    Ok(Some(unsafe { Tensor::<F16>::from_raw(delta_ptr, n_tokens * hidden) }))
+    Ok(Some(unsafe {
+        Tensor::<F16>::from_raw(delta_ptr, n_tokens * hidden)
+    }))
 }

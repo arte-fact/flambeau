@@ -1,7 +1,6 @@
 //! masked softmax correctness sweep.
 
 #![cfg(feature = "hip")]
-
 #![expect(
     clippy::undocumented_unsafe_blocks,
     reason = "sweep harness — every unsafe block is a kernel launch or a memcpy_async \
@@ -39,11 +38,11 @@ pub fn run_sweep(repo_root: &Path) -> Result<Cert> {
     // Decode: n_q = 1, so n_rows = 32.
     // Prefill: n_q = 512, so n_rows = 32*512 = 16k rows, k up to seq_len.
     let shapes = [
-        (32usize, 128usize),    // decode, short context
-        (32, 1024),             // decode, medium context
-        (32, 4096),             // decode, long context
-        (32 * 128, 128),        // 128-token prefill, short context
-        (32 * 128, 4096),       // 128-token prefill, long-ish context
+        (32usize, 128usize), // decode, short context
+        (32, 1024),          // decode, medium context
+        (32, 4096),          // decode, long context
+        (32 * 128, 128),     // 128-token prefill, short context
+        (32 * 128, 4096),    // 128-token prefill, long-ish context
     ];
     let scale = 1.0 / (128.0f32).sqrt(); // head_dim=128 attention scale
     let seed = 0xDECADEu64;
@@ -217,4 +216,3 @@ fn run_shape(
     }
     Ok((got, reference))
 }
-

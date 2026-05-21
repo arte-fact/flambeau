@@ -231,8 +231,13 @@ fn kernel_param_update_scale_f32() {
         std::ptr::from_ref(&n_i) as *mut c_void,
         std::ptr::from_ref(&new_scale) as *mut c_void,
     ];
-    let current = exec.get_kernel_node_params(0).expect("get_kernel_node_params");
-    assert!(!current.func.is_null(), "captured node func must be non-null");
+    let current = exec
+        .get_kernel_node_params(0)
+        .expect("get_kernel_node_params");
+    assert!(
+        !current.func.is_null(),
+        "captured node func must be non-null"
+    );
     assert_eq!(current.grid_dim.x, (n as u32).div_ceil(256));
     assert_eq!(current.block_dim.x, 256);
 
@@ -303,8 +308,7 @@ fn slot_map_two_launches_round_trip() {
         return;
     }
     let dev = HipDevice::new(0).expect("HipDevice::new(0)");
-    let hsaco =
-        flambeau_kernels_hip::hsaco("scale_f32").expect("scale_f32.hsaco present");
+    let hsaco = flambeau_kernels_hip::hsaco("scale_f32").expect("scale_f32.hsaco present");
     let module = HipModule::load(0, hsaco).unwrap();
     let kernel = module.kernel("flambeau_scale_f32").unwrap();
 
@@ -517,10 +521,7 @@ fn memcpy_slot_update_round_trip() {
     .expect("capture tagged memcpy");
 
     // Slot must be bound to a memcpy node.
-    let binding = exec
-        .slot_map()
-        .get_memcpy(slot)
-        .expect("memcpy slot bound");
+    let binding = exec.slot_map().get_memcpy(slot).expect("memcpy slot bound");
     assert_eq!(binding.memcpy_node_idx, 0);
     assert_eq!(binding.count, bytes);
     assert_eq!(binding.dst, dst_a_dev.as_usize());
@@ -552,7 +553,10 @@ fn memcpy_slot_update_round_trip() {
     }
     stream.synchronize().unwrap();
     assert_eq!(a_back, src_host, "pre-update: dst_a mismatch");
-    assert!(b_back.iter().all(|v| *v == 0.0), "pre-update: dst_b should still be zero");
+    assert!(
+        b_back.iter().all(|v| *v == 0.0),
+        "pre-update: dst_b should still be zero"
+    );
 
     // Retarget dst → dst_b_dev via set_memcpy_slot.
     // SAFETY: dst_b_dev is live for `bytes` device writes.

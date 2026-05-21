@@ -2,8 +2,14 @@
 //! Both kernels consume identical Q5_K + Q8_1 inputs and must produce
 //! identical outputs (mod F32 reduction-order noise).
 
-#![expect(clippy::undocumented_unsafe_blocks, reason = "test fixture; same shape rationale as siblings")]
-#![expect(clippy::cast_possible_wrap, reason = "kernel-shape math bounded by GGUF dims")]
+#![expect(
+    clippy::undocumented_unsafe_blocks,
+    reason = "test fixture; same shape rationale as siblings"
+)]
+#![expect(
+    clippy::cast_possible_wrap,
+    reason = "kernel-shape math bounded by GGUF dims"
+)]
 
 use flambeau_backend_hip::{device_count, HipDevice, HipKernel, HipModule, KernelArgs, LaunchCfg};
 use flambeau_core::{CopyDirection, Device, DevicePtr, Stream};
@@ -21,7 +27,9 @@ fn seeded_bytes(seed: u64, n: usize) -> Vec<u8> {
     let mut state = seed.wrapping_mul(6364136223846793005).wrapping_add(1);
     (0..n)
         .map(|_| {
-            state = state.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+            state = state
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
             (state >> 24) as u8
         })
         .collect()
@@ -31,7 +39,9 @@ fn seeded_f32(seed: u64, n: usize) -> Vec<f32> {
     let mut state = seed.wrapping_mul(6364136223846793005).wrapping_add(1);
     (0..n)
         .map(|_| {
-            state = state.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+            state = state
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
             let u = (state >> 32) as u32;
             (u as f32 / u32::MAX as f32) * 2.0 - 1.0
         })
@@ -50,7 +60,13 @@ fn random_q5k_block(seed: u64, idx: usize) -> BlockQ5K {
     qh.copy_from_slice(&bytes[16..16 + QK_K / 8]);
     let mut qs = [0u8; QK_K / 2];
     qs.copy_from_slice(&bytes[48..48 + QK_K / 2]);
-    BlockQ5K { d, dmin, scales, qh, qs }
+    BlockQ5K {
+        d,
+        dmin,
+        scales,
+        qh,
+        qs,
+    }
 }
 
 fn alloc_and_upload<T: Copy>(dev: &HipDevice, data: &[T]) -> DevicePtr {
@@ -101,7 +117,8 @@ fn run_both(n_rows: usize, k: usize, n_slots: usize, seed: u64) -> Outs {
 
     let q_module = HipModule::load(0, kernels::hsaco("quantize_q8_1").unwrap()).unwrap();
     let k3_module = HipModule::load(0, kernels::hsaco("mmvq_q5_k_r2_batched").unwrap()).unwrap();
-    let rt_module = HipModule::load(0, kernels::hsaco("mmvq_q5_k_row_tile_batched").unwrap()).unwrap();
+    let rt_module =
+        HipModule::load(0, kernels::hsaco("mmvq_q5_k_row_tile_batched").unwrap()).unwrap();
     let k_quantize: HipKernel<'_> = q_module.kernel("flambeau_quantize_row_q8_1").unwrap();
     let k3_entry = match n_slots {
         2 => "flambeau_mmvq_q5_k_r2_q8_1_batched_n2",
@@ -138,8 +155,9 @@ fn run_both(n_rows: usize, k: usize, n_slots: usize, seed: u64) -> Outs {
         for c in 0..n_slots {
             let n_elems = k as i32;
             let d_y_f32_c: u64 = (d_y_f32.as_usize() + c * k * 4) as u64;
-            let d_y_q8_1_c: u64 =
-                (d_y_q8_1.as_usize() + c * y_blocks_per_slot * std::mem::size_of::<BlockQ8_1>()) as u64;
+            let d_y_q8_1_c: u64 = (d_y_q8_1.as_usize()
+                + c * y_blocks_per_slot * std::mem::size_of::<BlockQ8_1>())
+                as u64;
             let mut args = KernelArgs::new();
             args.push(&d_y_f32_c);
             args.push(&d_y_q8_1_c);
@@ -189,9 +207,14 @@ fn run_both(n_rows: usize, k: usize, n_slots: usize, seed: u64) -> Outs {
     let rt = copy_back(&dev, d_rt, n_slots * n_rows);
 
     unsafe {
-        dev.dealloc(d_x, x_blocks.len() * std::mem::size_of::<BlockQ5K>()).unwrap();
+        dev.dealloc(d_x, x_blocks.len() * std::mem::size_of::<BlockQ5K>())
+            .unwrap();
         dev.dealloc(d_y_f32, y_f32.len() * 4).unwrap();
-        dev.dealloc(d_y_q8_1, n_slots * y_blocks_per_slot * std::mem::size_of::<BlockQ8_1>()).unwrap();
+        dev.dealloc(
+            d_y_q8_1,
+            n_slots * y_blocks_per_slot * std::mem::size_of::<BlockQ8_1>(),
+        )
+        .unwrap();
         dev.dealloc(d_k3, n_slots * n_rows * 4).unwrap();
         dev.dealloc(d_rt, n_slots * n_rows * 4).unwrap();
     }

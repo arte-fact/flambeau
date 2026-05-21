@@ -16,7 +16,6 @@
 //! direct dispatch.
 
 #![cfg(feature = "hip")]
-
 #![expect(
     clippy::undocumented_unsafe_blocks,
     reason = "test fixture — every unsafe block is a kernel launch or memcpy_async \
@@ -121,9 +120,19 @@ fn attention_prefill_slot_update_parity() -> Result<()> {
 
     // === 1. Reference: uncaptured attn at (N_K_FINAL, Q_OFF_FINAL). ===
     attention_prefill_f16(
-        &reg, &stream, q_dev, k_dev, v_dev, out_ref_dev,
-        N_Q, N_HEADS_Q, N_HEADS_KV, HEAD_DIM,
-        N_K_FINAL, Q_OFF_FINAL, scale,
+        &reg,
+        &stream,
+        q_dev,
+        k_dev,
+        v_dev,
+        out_ref_dev,
+        N_Q,
+        N_HEADS_Q,
+        N_HEADS_KV,
+        HEAD_DIM,
+        N_K_FINAL,
+        Q_OFF_FINAL,
+        scale,
     )?;
     stream.synchronize().unwrap();
     let y_ref = readback_f16(&dev, &stream, out_ref_dev, N_Q * N_HEADS_Q * HEAD_DIM);
@@ -134,10 +143,21 @@ fn attention_prefill_slot_update_parity() -> Result<()> {
     let cap_stream = HipStream::new_non_blocking(0).unwrap();
     let exec = HipGraphExec::capture(&cap_stream, |s| {
         attention_prefill_f16_slots(
-            &reg, s, q_dev, k_dev, v_dev, out_capt_dev,
-            N_Q, N_HEADS_Q, N_HEADS_KV, HEAD_DIM,
-            N_K_INIT, Q_OFF_INIT, scale,
-            Some(slot_n_k), Some(slot_q_off),
+            &reg,
+            s,
+            q_dev,
+            k_dev,
+            v_dev,
+            out_capt_dev,
+            N_Q,
+            N_HEADS_Q,
+            N_HEADS_KV,
+            HEAD_DIM,
+            N_K_INIT,
+            Q_OFF_INIT,
+            scale,
+            Some(slot_n_k),
+            Some(slot_q_off),
         )
         .map_err(|e| flambeau_core::DeviceError::Backend {
             backend: "hip",
@@ -175,23 +195,36 @@ fn attention_prefill_slot_update_parity() -> Result<()> {
 
     let out_init_ref_dev = dev.alloc(out_bytes).unwrap();
     attention_prefill_f16(
-        &reg, &stream, q_dev, k_dev, v_dev, out_init_ref_dev,
-        N_Q, N_HEADS_Q, N_HEADS_KV, HEAD_DIM,
-        N_K_INIT, Q_OFF_INIT, scale,
+        &reg,
+        &stream,
+        q_dev,
+        k_dev,
+        v_dev,
+        out_init_ref_dev,
+        N_Q,
+        N_HEADS_Q,
+        N_HEADS_KV,
+        HEAD_DIM,
+        N_K_INIT,
+        Q_OFF_INIT,
+        scale,
     )?;
     stream.synchronize().unwrap();
     let y_init_ref = readback_f16(&dev, &stream, out_init_ref_dev, N_Q * N_HEADS_Q * HEAD_DIM);
-    let init_match = y_capt_init.iter().zip(y_init_ref.iter())
+    let init_match = y_capt_init
+        .iter()
+        .zip(y_init_ref.iter())
         .all(|(a, b)| a.to_bits() == b.to_bits());
     eprintln!("pre-update capture vs uncaptured @ init params: match = {init_match}");
-    unsafe { dev.dealloc(out_init_ref_dev, out_bytes).unwrap(); }
+    unsafe {
+        dev.dealloc(out_init_ref_dev, out_bytes).unwrap();
+    }
 
     // === 3. Update both slots to (N_K_FINAL, Q_OFF_FINAL). ===
     let n_k_final_i: i32 = N_K_FINAL as i32;
     let q_off_final_i: i32 = Q_OFF_FINAL as i32;
     unsafe {
-        exec.set_slot(slot_n_k, &n_k_final_i)
-            .expect("set_slot n_k");
+        exec.set_slot(slot_n_k, &n_k_final_i).expect("set_slot n_k");
         exec.set_slot(slot_q_off, &q_off_final_i)
             .expect("set_slot q_off");
     }

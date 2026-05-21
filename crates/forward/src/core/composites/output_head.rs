@@ -43,11 +43,9 @@ pub fn output_head_local<H: TopologyHooks>(
     } else {
         input.ptr.offset_bytes((n_tokens - 1) * hidden * 2)
     };
-    let input_slice =
-        unsafe { Tensor::<F16>::from_raw(input_slice_ptr, n_emit * hidden) };
+    let input_slice = unsafe { Tensor::<F16>::from_raw(input_slice_ptr, n_emit * hidden) };
 
-    let mut norm_q8_1 =
-        unsafe { Tensor::<Q8_1>::from_raw(state.pool.norm_q8_1, n_emit * hidden) };
+    let mut norm_q8_1 = unsafe { Tensor::<Q8_1>::from_raw(state.pool.norm_q8_1, n_emit * hidden) };
     flambeau_model_ops::rmsnorm_quant_q8_1(
         &input_slice,
         &lm_head.output_norm,
@@ -99,9 +97,8 @@ pub fn output_head_local<H: TopologyHooks>(
     }
 
     if let Some(cap) = lm_head.final_logit_softcap {
-        let mut logits_inplace = unsafe {
-            Tensor::<F32>::from_raw(state.pool.logits_f32_dev, n_emit * vocab)
-        };
+        let mut logits_inplace =
+            unsafe { Tensor::<F32>::from_raw(state.pool.logits_f32_dev, n_emit * vocab) };
         flambeau_model_ops::apply_softcap_f32(
             &logits_f32,
             &mut logits_inplace,

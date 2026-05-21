@@ -208,11 +208,13 @@ impl HipCluster {
     /// serialisation via shared host buffer).
     pub fn reserve_lane_bounces(&self, n_lanes: usize, bytes_per_rank: usize) -> DeviceResult<()> {
         for rank in 0..self.devices.len() {
-            let mut slot = self.lane_bounces[rank].lock().map_err(|_| DeviceError::Backend {
-                backend: "hip",
-                code: -1,
-                message: "lane_bounces mutex poisoned".into(),
-            })?;
+            let mut slot = self.lane_bounces[rank]
+                .lock()
+                .map_err(|_| DeviceError::Backend {
+                    backend: "hip",
+                    code: -1,
+                    message: "lane_bounces mutex poisoned".into(),
+                })?;
             while slot.len() < n_lanes {
                 slot.push(RankBounce::empty());
             }
@@ -236,11 +238,13 @@ impl HipCluster {
         for rank in 0..self.devices.len() {
             let device = &self.devices[rank];
             device.bind()?;
-            let mut slot = self.aux_streams[rank].lock().map_err(|_| DeviceError::Backend {
-                backend: "hip",
-                code: -1,
-                message: "aux_streams mutex poisoned".into(),
-            })?;
+            let mut slot = self.aux_streams[rank]
+                .lock()
+                .map_err(|_| DeviceError::Backend {
+                    backend: "hip",
+                    code: -1,
+                    message: "aux_streams mutex poisoned".into(),
+                })?;
             while slot.len() < n_lanes {
                 // 5.g — non-blocking so lanes truly overlap on the same
                 // device (blocking streams serialise via the null stream).
@@ -265,14 +269,19 @@ impl HipCluster {
             return Err(DeviceError::Backend {
                 backend: "hip",
                 code: -1,
-                message: format!("aux_stream: rank {rank} out of range (N={})", self.devices.len()),
+                message: format!(
+                    "aux_stream: rank {rank} out of range (N={})",
+                    self.devices.len()
+                ),
             });
         }
-        let guard = self.aux_streams[rank].lock().map_err(|_| DeviceError::Backend {
-            backend: "hip",
-            code: -1,
-            message: "aux_streams mutex poisoned".into(),
-        })?;
+        let guard = self.aux_streams[rank]
+            .lock()
+            .map_err(|_| DeviceError::Backend {
+                backend: "hip",
+                code: -1,
+                message: "aux_streams mutex poisoned".into(),
+            })?;
         if lane >= guard.len() {
             return Err(DeviceError::Backend {
                 backend: "hip",
@@ -296,11 +305,13 @@ impl HipCluster {
                 message: format!("aux_stream_count: rank {rank} out of range"),
             });
         }
-        let guard = self.aux_streams[rank].lock().map_err(|_| DeviceError::Backend {
-            backend: "hip",
-            code: -1,
-            message: "aux_streams mutex poisoned".into(),
-        })?;
+        let guard = self.aux_streams[rank]
+            .lock()
+            .map_err(|_| DeviceError::Backend {
+                backend: "hip",
+                code: -1,
+                message: "aux_streams mutex poisoned".into(),
+            })?;
         Ok(guard.len())
     }
 
@@ -403,11 +414,14 @@ impl HipCluster {
         }
 
         // Cold path: serialise growers.
-        let _guard = slot.grow_lock.lock().map_err(|_poisoned| DeviceError::Backend {
-            backend: "hip",
-            code: -1,
-            message: "HipCluster grow_lock poisoned".into(),
-        })?;
+        let _guard = slot
+            .grow_lock
+            .lock()
+            .map_err(|_poisoned| DeviceError::Backend {
+                backend: "hip",
+                code: -1,
+                message: "HipCluster grow_lock poisoned".into(),
+            })?;
         // Double-check — another writer may have grown the buffer while we
         // were waiting for the lock.
         if slot.bytes.load(Ordering::Acquire) >= need {
@@ -523,13 +537,14 @@ impl HipCluster {
         // racing here would clobber each other's pinned buffer.
         // Held across DtoH+sync+HtoD+sync; total ~100 µs per stage
         // transition. See `peer_copy_lock` field doc.
-        let _bounce_guard = self.peer_copy_lock[src_rank].lock().map_err(|_| {
-            DeviceError::Backend {
-                backend: "hip",
-                code: -1,
-                message: format!("peer_copy_lock[{src_rank}] poisoned"),
-            }
-        })?;
+        let _bounce_guard =
+            self.peer_copy_lock[src_rank]
+                .lock()
+                .map_err(|_| DeviceError::Backend {
+                    backend: "hip",
+                    code: -1,
+                    message: format!("peer_copy_lock[{src_rank}] poisoned"),
+                })?;
 
         let buf = self.ensure_bounce(src_rank, bytes)?;
 
@@ -642,13 +657,14 @@ impl HipCluster {
             return Ok(());
         }
 
-        let _bounce_guard = self.peer_copy_lock[src_rank].lock().map_err(|_| {
-            DeviceError::Backend {
-                backend: "hip",
-                code: -1,
-                message: format!("peer_copy_lock[{src_rank}] poisoned"),
-            }
-        })?;
+        let _bounce_guard =
+            self.peer_copy_lock[src_rank]
+                .lock()
+                .map_err(|_| DeviceError::Backend {
+                    backend: "hip",
+                    code: -1,
+                    message: format!("peer_copy_lock[{src_rank}] poisoned"),
+                })?;
 
         let buf = self.ensure_bounce(src_rank, bytes)?;
 
@@ -656,13 +672,14 @@ impl HipCluster {
         src_dev.bind()?;
         let src_stream = src_dev.default_stream();
 
-        let prev_htod = self.peer_copy_htod_event[src_rank].lock().map_err(|_| {
-            DeviceError::Backend {
+        let prev_htod = self.peer_copy_htod_event[src_rank]
+            .lock()
+            .map_err(|_| DeviceError::Backend {
                 backend: "hip",
                 code: -1,
                 message: format!("peer_copy_htod_event[{src_rank}] poisoned"),
-            }
-        })?.take();
+            })?
+            .take();
         if let Some(ref ev) = prev_htod {
             ev.stream_wait(src_stream)?;
         }
@@ -705,13 +722,13 @@ impl HipCluster {
         if let Some(consumer) = consumer_stream {
             htod_done.stream_wait(consumer)?;
         }
-        *self.peer_copy_htod_event[src_rank].lock().map_err(|_| {
-            DeviceError::Backend {
+        *self.peer_copy_htod_event[src_rank]
+            .lock()
+            .map_err(|_| DeviceError::Backend {
                 backend: "hip",
                 code: -1,
                 message: format!("peer_copy_htod_event[{src_rank}] poisoned"),
-            }
-        })? = Some(htod_done);
+            })? = Some(htod_done);
 
         Ok(())
     }
@@ -756,8 +773,16 @@ impl HipCluster {
         // across lanes should use `peer_copy_via_host_async_laned`.
         unsafe {
             self.peer_copy_via_host_async_laned(
-                dst_ptr, dst_rank, src_ptr, src_rank, bytes,
-                src_stream, dst_stream, bridge_event, done_event, None,
+                dst_ptr,
+                dst_rank,
+                src_ptr,
+                src_rank,
+                bytes,
+                src_stream,
+                dst_stream,
+                bridge_event,
+                done_event,
+                None,
             )
         }
     }
@@ -824,13 +849,14 @@ impl HipCluster {
 
         let buf = match lane {
             Some(l) => {
-                let guard = self.lane_bounces[src_rank].lock().map_err(|_| {
-                    DeviceError::Backend {
-                        backend: "hip",
-                        code: -1,
-                        message: "lane_bounces mutex poisoned".into(),
-                    }
-                })?;
+                let guard =
+                    self.lane_bounces[src_rank]
+                        .lock()
+                        .map_err(|_| DeviceError::Backend {
+                            backend: "hip",
+                            code: -1,
+                            message: "lane_bounces mutex poisoned".into(),
+                        })?;
                 if l >= guard.len() {
                     return Err(DeviceError::Backend {
                         backend: "hip",

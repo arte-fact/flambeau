@@ -78,9 +78,7 @@ fn load_with_shard(
     };
     let owns_embed = layer_range.map_or(true, |(s, _)| s == 0);
     let owns_lm_head = layer_range.map_or(true, |(_, e)| e == config.num_layers);
-    let in_range = |li: usize| -> bool {
-        layer_range.map_or(true, |(s, e)| li >= s && li < e)
-    };
+    let in_range = |li: usize| -> bool { layer_range.map_or(true, |(s, e)| li >= s && li < e) };
 
     let embedding = if owns_embed {
         load_embedding(
@@ -205,13 +203,8 @@ fn load_with_shard(
         let up_exps_name = format!("{p}.ffn_up_exps.weight");
         let down_exps_name = format!("{p}.ffn_down_exps.weight");
 
-        let ffn_norm = upload_dequant_to_f16(
-            file,
-            device,
-            &ffn_norm_name,
-            config.hidden,
-            &mut allocs,
-        )?;
+        let ffn_norm =
+            upload_dequant_to_f16(file, device, &ffn_norm_name, config.hidden, &mut allocs)?;
         let router = upload_router_f16(
             file,
             device,
@@ -267,14 +260,59 @@ fn load_with_shard(
             // along `intermediate` (= inner cols of `[hidden, intermediate]`).
             let (gate, up, down) = match shard {
                 ShardMode::Replicated => (
-                    upload_quant_weight(file, device, &gate_shexp_name, inter * config.hidden, &mut allocs)?,
-                    upload_quant_weight(file, device, &up_shexp_name, inter * config.hidden, &mut allocs)?,
-                    upload_quant_weight(file, device, &down_shexp_name, config.hidden * inter, &mut allocs)?,
+                    upload_quant_weight(
+                        file,
+                        device,
+                        &gate_shexp_name,
+                        inter * config.hidden,
+                        &mut allocs,
+                    )?,
+                    upload_quant_weight(
+                        file,
+                        device,
+                        &up_shexp_name,
+                        inter * config.hidden,
+                        &mut allocs,
+                    )?,
+                    upload_quant_weight(
+                        file,
+                        device,
+                        &down_shexp_name,
+                        config.hidden * inter,
+                        &mut allocs,
+                    )?,
                 ),
                 ShardMode::Tp { rank, n_ranks } => (
-                    upload_col_sharded_quant(file, device, &gate_shexp_name, inter, config.hidden, rank, n_ranks, &mut allocs)?,
-                    upload_col_sharded_quant(file, device, &up_shexp_name, inter, config.hidden, rank, n_ranks, &mut allocs)?,
-                    upload_row_sharded_quant(file, device, &down_shexp_name, config.hidden, inter, rank, n_ranks, &mut allocs)?,
+                    upload_col_sharded_quant(
+                        file,
+                        device,
+                        &gate_shexp_name,
+                        inter,
+                        config.hidden,
+                        rank,
+                        n_ranks,
+                        &mut allocs,
+                    )?,
+                    upload_col_sharded_quant(
+                        file,
+                        device,
+                        &up_shexp_name,
+                        inter,
+                        config.hidden,
+                        rank,
+                        n_ranks,
+                        &mut allocs,
+                    )?,
+                    upload_row_sharded_quant(
+                        file,
+                        device,
+                        &down_shexp_name,
+                        config.hidden,
+                        inter,
+                        rank,
+                        n_ranks,
+                        &mut allocs,
+                    )?,
                 ),
             };
             let gate_inp = file

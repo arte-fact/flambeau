@@ -96,8 +96,7 @@ impl HipModule {
         // `image.as_ptr()` for its full length (driver-internal copy) and
         // writes a module handle through the out-pointer. `image` is a live
         // slice for the duration of this call; `&mut m` is valid for writes.
-        let code =
-            unsafe { hipModuleLoadData(&raw mut m, image.as_ptr().cast()) };
+        let code = unsafe { hipModuleLoadData(&raw mut m, image.as_ptr().cast()) };
         check(code, "hipModuleLoadData")?;
         Ok(Self {
             raw: m,
@@ -348,7 +347,11 @@ impl HipKernel<'_> {
     /// Query the kernel's static attributes — VGPR count, shared-mem
     /// footprint, etc. Cheap in-process call; no kernel launch.
     pub fn attributes(&self) -> DeviceResult<FuncAttributes> {
-        fn q(raw: hipFunction_t, attr: std::os::raw::c_int, ctx: &'static str) -> DeviceResult<i32> {
+        fn q(
+            raw: hipFunction_t,
+            attr: std::os::raw::c_int,
+            ctx: &'static str,
+        ) -> DeviceResult<i32> {
             let mut v: std::os::raw::c_int = 0;
             // SAFETY: `raw` is a live function handle (invariant of the enclosing
             // `HipKernel`, which borrows from its `HipModule`). `&mut v` is valid
@@ -357,12 +360,24 @@ impl HipKernel<'_> {
             check(code, ctx)?;
             Ok(v)
         }
-        let num_regs = q(self.raw, HIP_FUNC_ATTRIBUTE_NUM_REGS, "hipFuncGetAttribute NUM_REGS")?
-            .max(0) as u32;
-        let shared = q(self.raw, HIP_FUNC_ATTRIBUTE_SHARED_SIZE_BYTES, "hipFuncGetAttribute SHARED")?
-            .max(0) as u32;
-        let local = q(self.raw, HIP_FUNC_ATTRIBUTE_LOCAL_SIZE_BYTES, "hipFuncGetAttribute LOCAL")?
-            .max(0) as u32;
+        let num_regs = q(
+            self.raw,
+            HIP_FUNC_ATTRIBUTE_NUM_REGS,
+            "hipFuncGetAttribute NUM_REGS",
+        )?
+        .max(0) as u32;
+        let shared = q(
+            self.raw,
+            HIP_FUNC_ATTRIBUTE_SHARED_SIZE_BYTES,
+            "hipFuncGetAttribute SHARED",
+        )?
+        .max(0) as u32;
+        let local = q(
+            self.raw,
+            HIP_FUNC_ATTRIBUTE_LOCAL_SIZE_BYTES,
+            "hipFuncGetAttribute LOCAL",
+        )?
+        .max(0) as u32;
         let max_tpb = q(
             self.raw,
             HIP_FUNC_ATTRIBUTE_MAX_THREADS_PER_BLOCK,

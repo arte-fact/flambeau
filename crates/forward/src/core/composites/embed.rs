@@ -15,7 +15,10 @@ pub fn embed_local<H: TopologyHooks>(
 ) -> Result<Tensor<F16>> {
     let hidden = state.hidden();
     if hidden != weights.hidden {
-        bail!("embed: ctx hidden {hidden} != weights.hidden {}", weights.hidden);
+        bail!(
+            "embed: ctx hidden {hidden} != weights.hidden {}",
+            weights.hidden
+        );
     }
     if tokens.is_empty() {
         bail!("embed: tokens empty");
@@ -47,7 +50,13 @@ pub fn embed_local<H: TopologyHooks>(
         unsafe {
             state
                 .device
-                .memcpy_async(state.stream, CopyDirection::DeviceToDevice, row_dst, src, row_bytes)
+                .memcpy_async(
+                    state.stream,
+                    CopyDirection::DeviceToDevice,
+                    row_dst,
+                    src,
+                    row_bytes,
+                )
                 .context("embed: DtoD row memcpy")?;
         }
     }

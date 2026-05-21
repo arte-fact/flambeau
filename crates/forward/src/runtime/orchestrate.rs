@@ -108,8 +108,15 @@ fn launch_tp<A: Arch>(
             bar: bar.as_ref().map(Arc::clone),
         };
         handles.push(
-            WorkerHandle::<A>::spawn(dev, role, Arc::clone(&file), ctx_cap, prefill_ubatch, max_slots)
-                .with_context(|| format!("TP rank {rank} on hip:{dev}"))?,
+            WorkerHandle::<A>::spawn(
+                dev,
+                role,
+                Arc::clone(&file),
+                ctx_cap,
+                prefill_ubatch,
+                max_slots,
+            )
+            .with_context(|| format!("TP rank {rank} on hip:{dev}"))?,
         );
     }
     Ok(handles)
@@ -162,8 +169,15 @@ fn launch_pp<A: Arch>(
             peer_buffer: Arc::clone(&peer),
         };
         handles.push(
-            WorkerHandle::<A>::spawn(dev, role, Arc::clone(&file), ctx_cap, prefill_ubatch, max_slots)
-                .with_context(|| format!("PP rank {rank} on hip:{dev}"))?,
+            WorkerHandle::<A>::spawn(
+                dev,
+                role,
+                Arc::clone(&file),
+                ctx_cap,
+                prefill_ubatch,
+                max_slots,
+            )
+            .with_context(|| format!("PP rank {rank} on hip:{dev}"))?,
         );
     }
     Ok(handles)
@@ -255,8 +269,7 @@ pub fn run_forward<A: Arch>(
         Topology::Pp { .. } => {
             let mut last_logits = Vec::new();
             for h in handles.iter_mut() {
-                let rx =
-                    h.send_forward(tokens.clone(), positions.clone(), slot_ids.clone())?;
+                let rx = h.send_forward(tokens.clone(), positions.clone(), slot_ids.clone())?;
                 last_logits = rx
                     .recv()
                     .map_err(|e| anyhow!("PP reply channel closed: {e}"))??;
@@ -266,11 +279,7 @@ pub fn run_forward<A: Arch>(
         Topology::Tp { .. } | Topology::Hybrid { .. } => {
             let mut rxs = Vec::with_capacity(handles.len());
             for h in handles.iter_mut() {
-                rxs.push(h.send_forward(
-                    tokens.clone(),
-                    positions.clone(),
-                    slot_ids.clone(),
-                )?);
+                rxs.push(h.send_forward(tokens.clone(), positions.clone(), slot_ids.clone())?);
             }
             let mut last_nonempty: Option<Vec<f32>> = None;
             for rx in rxs {

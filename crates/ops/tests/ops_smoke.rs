@@ -8,7 +8,6 @@
 //! round-trip through the real driver.
 
 #![cfg(feature = "hip")]
-
 #![expect(
     clippy::undocumented_unsafe_blocks,
     reason = "test fixture — every unsafe block is a kernel launch or `memcpy_async` \
@@ -70,7 +69,9 @@ fn swiglu_pointwise_roundtrips() -> Result<()> {
     let reg = OpsRegistry::new(&dev)?;
     let n = 1024usize;
     let gate_f16: Vec<f16> = (0..n).map(|i| f16::from_f32(0.01 * i as f32)).collect();
-    let up_f16: Vec<f16> = (0..n).map(|i| f16::from_f32(0.02 * (i as f32).sin())).collect();
+    let up_f16: Vec<f16> = (0..n)
+        .map(|i| f16::from_f32(0.02 * (i as f32).sin()))
+        .collect();
     let d_g = upload(&dev, &gate_f16);
     let d_u = upload(&dev, &up_f16);
     let d_y = dev.alloc(n * 2)?;
@@ -108,8 +109,9 @@ fn rmsnorm_f16_runs() -> Result<()> {
     };
     let reg = OpsRegistry::new(&dev)?;
     let (m, k) = (4usize, 256usize);
-    let x: Vec<f16> =
-        (0..m * k).map(|i| f16::from_f32(0.1 * ((i % 16) as f32 - 8.0))).collect();
+    let x: Vec<f16> = (0..m * k)
+        .map(|i| f16::from_f32(0.1 * ((i % 16) as f32 - 8.0)))
+        .collect();
     let w: Vec<f16> = vec![f16::from_f32(1.0); k];
     let d_x = upload(&dev, &x);
     let d_w = upload(&dev, &w);
@@ -180,22 +182,14 @@ fn softmax_masked_runs_with_zero_mask() -> Result<()> {
     // Real attention always has k ≥ the head_dim / n_kv_heads product this
     // size, so the kernel's guarantee holds.
     let (m, k) = (4usize, 256usize);
-    let scores: Vec<f16> =
-        (0..m * k).map(|i| f16::from_f32(0.01 * (i as f32).cos())).collect();
+    let scores: Vec<f16> = (0..m * k)
+        .map(|i| f16::from_f32(0.01 * (i as f32).cos()))
+        .collect();
     let mask: Vec<f16> = vec![f16::from_f32(0.0); m * k];
     let d_s = upload(&dev, &scores);
     let d_m = upload(&dev, &mask);
     let d_o = dev.alloc(m * k * 2)?;
-    softmax::softmax_masked_f16(
-        &reg,
-        dev.default_stream(),
-        d_s,
-        d_m,
-        d_o,
-        m,
-        k,
-        1.0,
-    )?;
+    softmax::softmax_masked_f16(&reg, dev.default_stream(), d_s, d_m, d_o, m, k, 1.0)?;
     dev.default_stream().synchronize()?;
     let mut out = vec![f16::from_f32(0.0); m * k];
     unsafe {
@@ -215,10 +209,7 @@ fn softmax_masked_runs_with_zero_mask() -> Result<()> {
     }
     // Each row sums to ~1.
     for row in 0..m {
-        let sum: f32 = out[row * k..(row + 1) * k]
-            .iter()
-            .map(|v| v.to_f32())
-            .sum();
+        let sum: f32 = out[row * k..(row + 1) * k].iter().map(|v| v.to_f32()).sum();
         assert!((sum - 1.0).abs() < 5e-3, "row {row} softmax sum = {sum}");
     }
     Ok(())

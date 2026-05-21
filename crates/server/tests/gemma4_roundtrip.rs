@@ -12,7 +12,9 @@
 //! Skipped when no gemma4 GGUF is present in `/artefact/models`.
 
 use flambeau_quant::{ChatTemplate, GgufFile};
-use flambeau_server::tool_call_parser::{gemma4::Gemma4ToolCallParser, ParserEvent, ToolCallParser};
+use flambeau_server::tool_call_parser::{
+    gemma4::Gemma4ToolCallParser, ParserEvent, ToolCallParser,
+};
 
 const MODELS: &[&str] = &[
     "/artefact/models/gemma-4-E4B-it-Q4_0.gguf",
@@ -68,11 +70,17 @@ fn render_then_parse_recovers_tool_call() {
     // model's *output* during decode — i.e. the same byte sequence the
     // template emitted for the prior assistant turn.
     let assistant_open = "<|turn>model\n";
-    let pos = rendered.find(assistant_open).expect("missing model turn header");
+    let pos = rendered
+        .find(assistant_open)
+        .expect("missing model turn header");
     let after_header = &rendered[pos + assistant_open.len()..];
     let close_pos = after_header.find("<turn|>").expect("missing turn close");
     let assistant_body = &after_header[..close_pos];
-    eprintln!("=== assistant body ({} bytes) ===\n{}\n================", assistant_body.len(), assistant_body);
+    eprintln!(
+        "=== assistant body ({} bytes) ===\n{}\n================",
+        assistant_body.len(),
+        assistant_body
+    );
 
     // Feed through the parser.
     let mut parser = Gemma4ToolCallParser::new();

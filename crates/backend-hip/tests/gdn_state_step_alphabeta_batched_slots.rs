@@ -8,8 +8,14 @@
 //! by stride. Outputs must be **bit-equal** since the FP32
 //! accumulation order is identical.
 
-#![expect(clippy::undocumented_unsafe_blocks, reason = "test fixture; same shape rationale as siblings")]
-#![expect(clippy::cast_possible_wrap, reason = "kernel-shape math bounded by GGUF dims")]
+#![expect(
+    clippy::undocumented_unsafe_blocks,
+    reason = "test fixture; same shape rationale as siblings"
+)]
+#![expect(
+    clippy::cast_possible_wrap,
+    reason = "kernel-shape math bounded by GGUF dims"
+)]
 
 use flambeau_backend_hip::{device_count, HipDevice, HipKernel, HipModule, KernelArgs, LaunchCfg};
 use flambeau_core::{CopyDirection, Device, DevicePtr, Stream};
@@ -27,7 +33,9 @@ fn seeded_f32(seed: u64, n: usize) -> Vec<f32> {
     let mut state = seed.wrapping_mul(6364136223846793005).wrapping_add(1);
     (0..n)
         .map(|_| {
-            state = state.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+            state = state
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
             let u = (state >> 32) as u32;
             (u as f32 / u32::MAX as f32) * 2.0 - 1.0
         })
@@ -75,15 +83,32 @@ struct Outs {
 }
 
 #[allow(clippy::too_many_arguments)]
-fn run_both(b: usize, h_v: usize, h_kv: usize, l: usize, n_rep: usize, rep_inner: bool, seed: u64) -> Outs {
+fn run_both(
+    b: usize,
+    h_v: usize,
+    h_kv: usize,
+    l: usize,
+    n_rep: usize,
+    rep_inner: bool,
+    seed: u64,
+) -> Outs {
     assert_eq!(h_v, h_kv * n_rep);
     let dev = HipDevice::new(0).unwrap();
     dev.bind().unwrap();
 
-    let ref_module = HipModule::load(0, kernels::hsaco("gdn_state_step_alphabeta_f32").unwrap()).unwrap();
-    let bs_module = HipModule::load(0, kernels::hsaco("gdn_state_step_alphabeta_f32_batched_slots").unwrap()).unwrap();
-    let k_ref: HipKernel<'_> = ref_module.kernel("flambeau_gdn_state_step_alphabeta_f32_s128").unwrap();
-    let k_bs: HipKernel<'_> = bs_module.kernel("flambeau_gdn_state_step_alphabeta_f32_s128_batched_slots").unwrap();
+    let ref_module =
+        HipModule::load(0, kernels::hsaco("gdn_state_step_alphabeta_f32").unwrap()).unwrap();
+    let bs_module = HipModule::load(
+        0,
+        kernels::hsaco("gdn_state_step_alphabeta_f32_batched_slots").unwrap(),
+    )
+    .unwrap();
+    let k_ref: HipKernel<'_> = ref_module
+        .kernel("flambeau_gdn_state_step_alphabeta_f32_s128")
+        .unwrap();
+    let k_bs: HipKernel<'_> = bs_module
+        .kernel("flambeau_gdn_state_step_alphabeta_f32_s128_batched_slots")
+        .unwrap();
 
     // Activations slot-major [B, L, H, S_v] / [B, L, H_kv, S_v].
     let q_len = b * l * h_kv * S_V;
@@ -94,12 +119,23 @@ fn run_both(b: usize, h_v: usize, h_kv: usize, l: usize, n_rep: usize, rep_inner
     let v_f32 = seeded_f32(seed.wrapping_add(23), v_len);
     let alpha_f32 = seeded_f32(seed.wrapping_add(37), alpha_len);
     let beta_f32 = seeded_f32(seed.wrapping_add(53), alpha_len);
-    let dt_bias_f32 = seeded_f32(seed.wrapping_add(71), h_v).iter().map(|x| x * 0.1).collect::<Vec<_>>();
-    let ssm_a_f32 = seeded_f32(seed.wrapping_add(83), h_v).iter().map(|x| -0.5 - 0.5 * x.abs()).collect::<Vec<_>>();
+    let dt_bias_f32 = seeded_f32(seed.wrapping_add(71), h_v)
+        .iter()
+        .map(|x| x * 0.1)
+        .collect::<Vec<_>>();
+    let ssm_a_f32 = seeded_f32(seed.wrapping_add(83), h_v)
+        .iter()
+        .map(|x| -0.5 - 0.5 * x.abs())
+        .collect::<Vec<_>>();
 
     let state_len_per_slot = h_v * S_V * S_V;
     let state_init: Vec<Vec<f32>> = (0..b)
-        .map(|i| seeded_f32(seed.wrapping_add(101).wrapping_add(i as u64), state_len_per_slot))
+        .map(|i| {
+            seeded_f32(
+                seed.wrapping_add(101).wrapping_add(i as u64),
+                state_len_per_slot,
+            )
+        })
         .collect();
 
     let d_q = alloc_and_upload(&dev, &q_f32);
@@ -115,11 +151,17 @@ fn run_both(b: usize, h_v: usize, h_kv: usize, l: usize, n_rep: usize, rep_inner
     let d_bs_attn = dev.alloc(attn_len * 4).unwrap();
 
     // Per-slot state buffers (independent allocations) for REF run.
-    let d_ref_state: Vec<DevicePtr> = state_init.iter().map(|s| alloc_and_upload(&dev, s)).collect();
+    let d_ref_state: Vec<DevicePtr> = state_init
+        .iter()
+        .map(|s| alloc_and_upload(&dev, s))
+        .collect();
     // Per-slot state buffers (independent allocations) for BS run — fresh
     // copies of the same init data so both kernels start from the same
     // state.
-    let d_bs_state: Vec<DevicePtr> = state_init.iter().map(|s| alloc_and_upload(&dev, s)).collect();
+    let d_bs_state: Vec<DevicePtr> = state_init
+        .iter()
+        .map(|s| alloc_and_upload(&dev, s))
+        .collect();
 
     // Slot-pointer array for BS run (in-place: same array for in and out).
     let bs_ptr_u64: Vec<u64> = d_bs_state.iter().map(|p| p.as_usize() as u64).collect();
@@ -210,14 +252,24 @@ fn run_both(b: usize, h_v: usize, h_kv: usize, l: usize, n_rep: usize, rep_inner
         stream.synchronize().unwrap();
     }
 
-    let ref_state: Vec<Vec<f32>> = d_ref_state.iter().map(|p| copy_back_f32(&dev, *p, state_len_per_slot)).collect();
+    let ref_state: Vec<Vec<f32>> = d_ref_state
+        .iter()
+        .map(|p| copy_back_f32(&dev, *p, state_len_per_slot))
+        .collect();
     let ref_attn = copy_back_f32(&dev, d_ref_attn, attn_len);
-    let bs_state: Vec<Vec<f32>> = d_bs_state.iter().map(|p| copy_back_f32(&dev, *p, state_len_per_slot)).collect();
+    let bs_state: Vec<Vec<f32>> = d_bs_state
+        .iter()
+        .map(|p| copy_back_f32(&dev, *p, state_len_per_slot))
+        .collect();
     let bs_attn = copy_back_f32(&dev, d_bs_attn, attn_len);
 
     unsafe {
-        for p in &d_ref_state { dev.dealloc(*p, state_len_per_slot * 4).unwrap(); }
-        for p in &d_bs_state { dev.dealloc(*p, state_len_per_slot * 4).unwrap(); }
+        for p in &d_ref_state {
+            dev.dealloc(*p, state_len_per_slot * 4).unwrap();
+        }
+        for p in &d_bs_state {
+            dev.dealloc(*p, state_len_per_slot * 4).unwrap();
+        }
         dev.dealloc(d_bs_ptrs, bs_ptr_u64.len() * 8).unwrap();
         dev.dealloc(d_q, q_f32.len() * 4).unwrap();
         dev.dealloc(d_k, k_f32.len() * 4).unwrap();
@@ -230,7 +282,12 @@ fn run_both(b: usize, h_v: usize, h_kv: usize, l: usize, n_rep: usize, rep_inner
         dev.dealloc(d_bs_attn, attn_len * 4).unwrap();
     }
 
-    Outs { ref_state, ref_attn, bs_state, bs_attn }
+    Outs {
+        ref_state,
+        ref_attn,
+        bs_state,
+        bs_attn,
+    }
 }
 
 fn assert_bit_equal_vec(label: &str, a: &[f32], b: &[f32]) {
@@ -256,7 +313,10 @@ fn assert_bit_equal_vec(label: &str, a: &[f32], b: &[f32]) {
             worst.1
         );
     }
-    assert_eq!(diffs, 0, "{label}: outputs not bit-equal ({diffs} mismatches)");
+    assert_eq!(
+        diffs, 0,
+        "{label}: outputs not bit-equal ({diffs} mismatches)"
+    );
 }
 
 #[test]
@@ -268,7 +328,11 @@ fn parity_b2_l1_h32_rep1() {
     // L=1 is the decode case. H=32, n_rep=1 → H_kv=32.
     let outs = run_both(2, 32, 32, 1, 1, false, 0xC0FFEE);
     for s in 0..2 {
-        assert_bit_equal_vec(&format!("state slot {s}"), &outs.ref_state[s], &outs.bs_state[s]);
+        assert_bit_equal_vec(
+            &format!("state slot {s}"),
+            &outs.ref_state[s],
+            &outs.bs_state[s],
+        );
     }
     assert_bit_equal_vec("attn", &outs.ref_attn, &outs.bs_attn);
 }
@@ -281,7 +345,11 @@ fn parity_b4_l1_h32_rep4_outer() {
     // n_rep=4 / rep_outer (qwen35moe). H=32, H_kv=8.
     let outs = run_both(4, 32, 8, 1, 4, false, 0xFEED_FACE);
     for s in 0..4 {
-        assert_bit_equal_vec(&format!("state slot {s}"), &outs.ref_state[s], &outs.bs_state[s]);
+        assert_bit_equal_vec(
+            &format!("state slot {s}"),
+            &outs.ref_state[s],
+            &outs.bs_state[s],
+        );
     }
     assert_bit_equal_vec("attn", &outs.ref_attn, &outs.bs_attn);
 }
@@ -294,7 +362,11 @@ fn parity_b4_l1_h32_rep4_inner() {
     // n_rep=4 / rep_inner (qwen3next).
     let outs = run_both(4, 32, 8, 1, 4, true, 0x1234_5678);
     for s in 0..4 {
-        assert_bit_equal_vec(&format!("state slot {s}"), &outs.ref_state[s], &outs.bs_state[s]);
+        assert_bit_equal_vec(
+            &format!("state slot {s}"),
+            &outs.ref_state[s],
+            &outs.bs_state[s],
+        );
     }
     assert_bit_equal_vec("attn", &outs.ref_attn, &outs.bs_attn);
 }
@@ -307,7 +379,11 @@ fn parity_b3_l1_h16_rep1() {
     // Odd B count.
     let outs = run_both(3, 16, 16, 1, 1, false, 0xABCDEF01);
     for s in 0..3 {
-        assert_bit_equal_vec(&format!("state slot {s}"), &outs.ref_state[s], &outs.bs_state[s]);
+        assert_bit_equal_vec(
+            &format!("state slot {s}"),
+            &outs.ref_state[s],
+            &outs.bs_state[s],
+        );
     }
     assert_bit_equal_vec("attn", &outs.ref_attn, &outs.bs_attn);
 }

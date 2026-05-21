@@ -173,7 +173,9 @@ fn max_abs_diff(a: &[f32], b: &[f32]) -> f32 {
 
 #[test]
 fn swa_decode_window_4_of_8() {
-    let Some(dev) = dev_or_skip() else { return; };
+    let Some(dev) = dev_or_skip() else {
+        return;
+    };
     let reg = OpsRegistry::new(&dev).unwrap();
 
     let head_dim = 64usize;
@@ -198,8 +200,18 @@ fn swa_decode_window_4_of_8() {
 
     let scale = 1.0 / (head_dim as f32).sqrt();
     attention_decode_f16(
-        &reg, dev.default_stream(), d_q, d_k, d_v, d_out,
-        n_heads_q, n_heads_kv, head_dim, n_tokens, scale, window,
+        &reg,
+        dev.default_stream(),
+        d_q,
+        d_k,
+        d_v,
+        d_out,
+        n_heads_q,
+        n_heads_kv,
+        head_dim,
+        n_tokens,
+        scale,
+        window,
     )
     .unwrap();
     dev.default_stream().synchronize().unwrap();
@@ -229,7 +241,9 @@ fn swa_decode_window_4_of_8() {
 #[test]
 fn swa_decode_window_geq_ntokens_matches_unbounded() {
     // window_size >= n_tokens should produce output identical to window_size=0.
-    let Some(dev) = dev_or_skip() else { return; };
+    let Some(dev) = dev_or_skip() else {
+        return;
+    };
     let reg = OpsRegistry::new(&dev).unwrap();
 
     let head_dim = 64usize;
@@ -253,20 +267,44 @@ fn swa_decode_window_geq_ntokens_matches_unbounded() {
 
     let scale = 1.0 / (head_dim as f32).sqrt();
     attention_decode_f16(
-        &reg, dev.default_stream(), d_q, d_k, d_v, d_out_off,
-        n_heads_q, n_heads_kv, head_dim, n_tokens, scale, 0,
+        &reg,
+        dev.default_stream(),
+        d_q,
+        d_k,
+        d_v,
+        d_out_off,
+        n_heads_q,
+        n_heads_kv,
+        head_dim,
+        n_tokens,
+        scale,
+        0,
     )
     .unwrap();
     attention_decode_f16(
-        &reg, dev.default_stream(), d_q, d_k, d_v, d_out_big,
-        n_heads_q, n_heads_kv, head_dim, n_tokens, scale, 16,
+        &reg,
+        dev.default_stream(),
+        d_q,
+        d_k,
+        d_v,
+        d_out_big,
+        n_heads_q,
+        n_heads_kv,
+        head_dim,
+        n_tokens,
+        scale,
+        16,
     )
     .unwrap();
     dev.default_stream().synchronize().unwrap();
     let off = download_f16(&dev, d_out_off, out_n);
     let big = download_f16(&dev, d_out_big, out_n);
     for (a, b) in off.iter().zip(big.iter()) {
-        assert_eq!(a.to_bits(), b.to_bits(), "window>=n_tokens must match window=0 bit-exactly");
+        assert_eq!(
+            a.to_bits(),
+            b.to_bits(),
+            "window>=n_tokens must match window=0 bit-exactly"
+        );
     }
     unsafe {
         dev.dealloc(d_q, q_f16.len() * 2).unwrap();
@@ -282,7 +320,9 @@ fn swa_decode_window_geq_ntokens_matches_unbounded() {
 /// Phase 13: ATTN_SK_MAX_HEAD_DIM bumped 256→512.
 #[test]
 fn splitk_matches_single_pass_gemma4_hd512() {
-    let Some(dev) = dev_or_skip() else { return; };
+    let Some(dev) = dev_or_skip() else {
+        return;
+    };
     let reg = OpsRegistry::new(&dev).unwrap();
 
     let head_dim = 512usize;
@@ -313,14 +353,37 @@ fn splitk_matches_single_pass_gemma4_hd512() {
 
     let scale = 1.0 / (head_dim as f32).sqrt();
     attention_decode_f16(
-        &reg, dev.default_stream(), d_q, d_k, d_v, d_out_single,
-        n_heads_q, n_heads_kv, head_dim, n_tokens, scale, window,
+        &reg,
+        dev.default_stream(),
+        d_q,
+        d_k,
+        d_v,
+        d_out_single,
+        n_heads_q,
+        n_heads_kv,
+        head_dim,
+        n_tokens,
+        scale,
+        window,
     )
     .unwrap();
     attention_decode_f16_splitk(
-        &reg, dev.default_stream(), d_q, d_k, d_v, d_out_split,
-        d_part_m, d_part_s, d_part_o,
-        n_heads_q, n_heads_kv, head_dim, n_tokens, chunk_size, scale, window,
+        &reg,
+        dev.default_stream(),
+        d_q,
+        d_k,
+        d_v,
+        d_out_split,
+        d_part_m,
+        d_part_s,
+        d_part_o,
+        n_heads_q,
+        n_heads_kv,
+        head_dim,
+        n_tokens,
+        chunk_size,
+        scale,
+        window,
     )
     .unwrap();
     dev.default_stream().synchronize().unwrap();
@@ -329,9 +392,14 @@ fn splitk_matches_single_pass_gemma4_hd512() {
     let mut max_abs = 0.0f32;
     for (a, b) in single.iter().zip(split.iter()) {
         let d = (a.to_f32() - b.to_f32()).abs();
-        if d > max_abs { max_abs = d; }
+        if d > max_abs {
+            max_abs = d;
+        }
     }
-    assert!(max_abs < 5e-3, "splitk hd=512 vs single-pass max-abs-diff {max_abs} too high");
+    assert!(
+        max_abs < 5e-3,
+        "splitk hd=512 vs single-pass max-abs-diff {max_abs} too high"
+    );
 
     unsafe {
         dev.dealloc(d_q, q_f16.len() * 2).unwrap();
@@ -341,7 +409,8 @@ fn splitk_matches_single_pass_gemma4_hd512() {
         dev.dealloc(d_out_split, out_n * 2).unwrap();
         dev.dealloc(d_part_m, n_heads_q * n_chunks * 4).unwrap();
         dev.dealloc(d_part_s, n_heads_q * n_chunks * 4).unwrap();
-        dev.dealloc(d_part_o, n_heads_q * n_chunks * head_dim * 4).unwrap();
+        dev.dealloc(d_part_o, n_heads_q * n_chunks * head_dim * 4)
+            .unwrap();
     }
 }
 
@@ -349,7 +418,9 @@ fn splitk_matches_single_pass_gemma4_hd512() {
 fn swa_decode_splitk_matches_window_4() {
     // splitk + SWA should produce the same output as single-pass + SWA.
     // Force splitk by using n_tokens > 256.
-    let Some(dev) = dev_or_skip() else { return; };
+    let Some(dev) = dev_or_skip() else {
+        return;
+    };
     let reg = OpsRegistry::new(&dev).unwrap();
 
     let head_dim = 128usize;
@@ -380,14 +451,37 @@ fn swa_decode_splitk_matches_window_4() {
 
     let scale = 1.0 / (head_dim as f32).sqrt();
     attention_decode_f16(
-        &reg, dev.default_stream(), d_q, d_k, d_v, d_out_single,
-        n_heads_q, n_heads_kv, head_dim, n_tokens, scale, window,
+        &reg,
+        dev.default_stream(),
+        d_q,
+        d_k,
+        d_v,
+        d_out_single,
+        n_heads_q,
+        n_heads_kv,
+        head_dim,
+        n_tokens,
+        scale,
+        window,
     )
     .unwrap();
     attention_decode_f16_splitk(
-        &reg, dev.default_stream(), d_q, d_k, d_v, d_out_split,
-        d_part_m, d_part_s, d_part_o,
-        n_heads_q, n_heads_kv, head_dim, n_tokens, chunk_size, scale, window,
+        &reg,
+        dev.default_stream(),
+        d_q,
+        d_k,
+        d_v,
+        d_out_split,
+        d_part_m,
+        d_part_s,
+        d_part_o,
+        n_heads_q,
+        n_heads_kv,
+        head_dim,
+        n_tokens,
+        chunk_size,
+        scale,
+        window,
     )
     .unwrap();
     dev.default_stream().synchronize().unwrap();
@@ -396,9 +490,14 @@ fn swa_decode_splitk_matches_window_4() {
     let mut max_abs = 0.0f32;
     for (a, b) in single.iter().zip(split.iter()) {
         let d = (a.to_f32() - b.to_f32()).abs();
-        if d > max_abs { max_abs = d; }
+        if d > max_abs {
+            max_abs = d;
+        }
     }
-    assert!(max_abs < 5e-3, "splitk SWA vs single-pass SWA max-abs-diff {max_abs} too high");
+    assert!(
+        max_abs < 5e-3,
+        "splitk SWA vs single-pass SWA max-abs-diff {max_abs} too high"
+    );
 
     unsafe {
         dev.dealloc(d_q, q_f16.len() * 2).unwrap();
@@ -408,23 +507,26 @@ fn swa_decode_splitk_matches_window_4() {
         dev.dealloc(d_out_split, out_n * 2).unwrap();
         dev.dealloc(d_part_m, n_heads_q * n_chunks * 4).unwrap();
         dev.dealloc(d_part_s, n_heads_q * n_chunks * 4).unwrap();
-        dev.dealloc(d_part_o, n_heads_q * n_chunks * head_dim * 4).unwrap();
+        dev.dealloc(d_part_o, n_heads_q * n_chunks * head_dim * 4)
+            .unwrap();
     }
 }
 
 #[test]
 fn swa_prefill_window_3_of_8() {
     // Per-query SWA: each q at position p attends only to [max(0, p-w+1), p].
-    let Some(dev) = dev_or_skip() else { return; };
+    let Some(dev) = dev_or_skip() else {
+        return;
+    };
     let reg = OpsRegistry::new(&dev).unwrap();
 
     let head_dim = 64usize;
     let n_heads_q = 2usize;
     let n_heads_kv = 1usize;
-    let n_q = 3usize;        // < 4 so we definitely hit the oracle prefill path
+    let n_q = 3usize; // < 4 so we definitely hit the oracle prefill path
     let n_k = 8usize;
-    let q_offset = 5usize;   // q's at global positions 5, 6, 7
-    let window = 3i32;       // each q attends to last 3 keys ≤ its position
+    let q_offset = 5usize; // q's at global positions 5, 6, 7
+    let window = 3i32; // each q attends to last 3 keys ≤ its position
 
     let q_f32 = seeded_f32(0xDEAD0, n_q * n_heads_q * head_dim, 0.5);
     let k_f32 = seeded_f32(0xDEAD1, n_k * n_heads_kv * head_dim, 0.5);
@@ -441,8 +543,20 @@ fn swa_prefill_window_3_of_8() {
 
     let scale = 1.0 / (head_dim as f32).sqrt();
     attention_prefill_f16(
-        &reg, dev.default_stream(), d_q, d_k, d_v, d_out,
-        n_q, n_heads_q, n_heads_kv, head_dim, n_k, q_offset, scale, window,
+        &reg,
+        dev.default_stream(),
+        d_q,
+        d_k,
+        d_v,
+        d_out,
+        n_q,
+        n_heads_q,
+        n_heads_kv,
+        head_dim,
+        n_k,
+        q_offset,
+        scale,
+        window,
     )
     .unwrap();
     dev.default_stream().synchronize().unwrap();
@@ -460,8 +574,7 @@ fn swa_prefill_window_3_of_8() {
         let t_end = (qpos + 1).min(n_k);
         let q_slice = &q_ref[q_idx * n_heads_q * head_dim..(q_idx + 1) * n_heads_q * head_dim];
         let per_q = cpu_decode_attn_ref(
-            q_slice, &k_ref, &v_ref, n_heads_q, n_heads_kv, head_dim,
-            t_start, t_end, scale,
+            q_slice, &k_ref, &v_ref, n_heads_q, n_heads_kv, head_dim, t_start, t_end, scale,
         );
         reference[q_idx * n_heads_q * head_dim..(q_idx + 1) * n_heads_q * head_dim]
             .copy_from_slice(&per_q);
@@ -479,7 +592,9 @@ fn swa_prefill_window_3_of_8() {
 
 #[test]
 fn softcap_f32_parity() {
-    let Some(dev) = dev_or_skip() else { return; };
+    let Some(dev) = dev_or_skip() else {
+        return;
+    };
     let reg = OpsRegistry::new(&dev).unwrap();
 
     let cap = 30.0f32; // Gemma4 default
@@ -513,7 +628,9 @@ fn cpu_gelu(x: f32) -> f32 {
 
 #[test]
 fn gelu_f32_to_f16_parity() {
-    let Some(dev) = dev_or_skip() else { return; };
+    let Some(dev) = dev_or_skip() else {
+        return;
+    };
     let reg = OpsRegistry::new(&dev).unwrap();
 
     let n = 1024usize;
@@ -544,7 +661,9 @@ fn gelu_f32_to_f16_parity() {
 
 #[test]
 fn gelu_mul_f32_parity() {
-    let Some(dev) = dev_or_skip() else { return; };
+    let Some(dev) = dev_or_skip() else {
+        return;
+    };
     let reg = OpsRegistry::new(&dev).unwrap();
 
     let n = 1024usize;
@@ -557,7 +676,11 @@ fn gelu_mul_f32_parity() {
     gelu_mul_f32(&reg, dev.default_stream(), d_a, d_b, d_y, n).unwrap();
     dev.default_stream().synchronize().unwrap();
     let got = download_f32(&dev, d_y, n);
-    let expected: Vec<f32> = a.iter().zip(b.iter()).map(|(&x, &y)| cpu_gelu(x) * y).collect();
+    let expected: Vec<f32> = a
+        .iter()
+        .zip(b.iter())
+        .map(|(&x, &y)| cpu_gelu(x) * y)
+        .collect();
     let err = max_abs_diff(&got, &expected);
     assert!(err < 1e-5, "gelu_mul_f32 max-abs-diff {err} too high");
 
@@ -572,15 +695,17 @@ fn gelu_mul_f32_parity() {
 /// (previously routed to oracle when window > 0).
 #[test]
 fn swa_prefill_flash_tile_window_4() {
-    let Some(dev) = dev_or_skip() else { return; };
+    let Some(dev) = dev_or_skip() else {
+        return;
+    };
     let reg = OpsRegistry::new(&dev).unwrap();
 
     let head_dim = 64usize;
     let n_heads_q = 2usize;
     let n_heads_kv = 1usize;
-    let n_q = 8usize;          // ≥ 4 → flash_tile path
+    let n_q = 8usize; // ≥ 4 → flash_tile path
     let n_k = 16usize;
-    let q_offset = 4usize;     // q's at global positions 4..11
+    let q_offset = 4usize; // q's at global positions 4..11
     let window = 4i32;
 
     let q_f32 = seeded_f32(0xF11A, n_q * n_heads_q * head_dim, 0.5);
@@ -598,8 +723,20 @@ fn swa_prefill_flash_tile_window_4() {
 
     let scale = 1.0 / (head_dim as f32).sqrt();
     attention_prefill_f16(
-        &reg, dev.default_stream(), d_q, d_k, d_v, d_out,
-        n_q, n_heads_q, n_heads_kv, head_dim, n_k, q_offset, scale, window,
+        &reg,
+        dev.default_stream(),
+        d_q,
+        d_k,
+        d_v,
+        d_out,
+        n_q,
+        n_heads_q,
+        n_heads_kv,
+        head_dim,
+        n_k,
+        q_offset,
+        scale,
+        window,
     )
     .unwrap();
     dev.default_stream().synchronize().unwrap();
@@ -616,14 +753,16 @@ fn swa_prefill_flash_tile_window_4() {
         let t_end = (qpos + 1).min(n_k);
         let q_slice = &q_ref[q_idx * n_heads_q * head_dim..(q_idx + 1) * n_heads_q * head_dim];
         let per_q = cpu_decode_attn_ref(
-            q_slice, &k_ref, &v_ref, n_heads_q, n_heads_kv, head_dim,
-            t_start, t_end, scale,
+            q_slice, &k_ref, &v_ref, n_heads_q, n_heads_kv, head_dim, t_start, t_end, scale,
         );
         reference[q_idx * n_heads_q * head_dim..(q_idx + 1) * n_heads_q * head_dim]
             .copy_from_slice(&per_q);
     }
     let err = max_abs_diff(&got, &reference);
-    assert!(err < 5e-3, "flash_tile SWA n_q=8 window=4 max-abs-diff {err}");
+    assert!(
+        err < 5e-3,
+        "flash_tile SWA n_q=8 window=4 max-abs-diff {err}"
+    );
 
     unsafe {
         dev.dealloc(d_q, q_f16.len() * 2).unwrap();
@@ -637,14 +776,16 @@ fn swa_prefill_flash_tile_window_4() {
 /// to the pre-#15 baseline (regression guard for the kernel change).
 #[test]
 fn flash_tile_window_zero_matches_oracle() {
-    let Some(dev) = dev_or_skip() else { return; };
+    let Some(dev) = dev_or_skip() else {
+        return;
+    };
     let reg = OpsRegistry::new(&dev).unwrap();
 
     let head_dim = 64usize;
     let n_heads_q = 2usize;
     let n_heads_kv = 1usize;
-    let n_q_short = 3usize;    // oracle path
-    let n_q_long = 8usize;     // flash_tile path
+    let n_q_short = 3usize; // oracle path
+    let n_q_long = 8usize; // flash_tile path
     let n_k_long = 16usize;
     let q_offset = 0usize;
 
@@ -664,8 +805,20 @@ fn flash_tile_window_zero_matches_oracle() {
     let out_long = n_q_long * n_heads_q * head_dim;
     let d_out_long = dev.alloc(out_long * 2).unwrap();
     attention_prefill_f16(
-        &reg, dev.default_stream(), d_q_long, d_k, d_v, d_out_long,
-        n_q_long, n_heads_q, n_heads_kv, head_dim, n_k_long, q_offset, scale, 0,
+        &reg,
+        dev.default_stream(),
+        d_q_long,
+        d_k,
+        d_v,
+        d_out_long,
+        n_q_long,
+        n_heads_q,
+        n_heads_kv,
+        head_dim,
+        n_k_long,
+        q_offset,
+        scale,
+        0,
     )
     .unwrap();
 
@@ -683,8 +836,20 @@ fn flash_tile_window_zero_matches_oracle() {
         let chunk_out = chunk * n_heads_q * head_dim;
         let d_out_chunk = dev.alloc(chunk_out * 2).unwrap();
         attention_prefill_f16(
-            &reg, dev.default_stream(), d_q_chunk, d_k, d_v, d_out_chunk,
-            chunk, n_heads_q, n_heads_kv, head_dim, n_k_long, q_off_cur, scale, 0,
+            &reg,
+            dev.default_stream(),
+            d_q_chunk,
+            d_k,
+            d_v,
+            d_out_chunk,
+            chunk,
+            n_heads_q,
+            n_heads_kv,
+            head_dim,
+            n_k_long,
+            q_off_cur,
+            scale,
+            0,
         )
         .unwrap();
         dev.default_stream().synchronize().unwrap();
@@ -705,7 +870,10 @@ fn flash_tile_window_zero_matches_oracle() {
     let got_o: Vec<f32> = out_oracle.iter().map(|v| v.to_f32()).collect();
     let err = max_abs_diff(&got_f, &got_o);
     // F16 accumulation order differs between oracle and flash_tile; allow tolerance.
-    assert!(err < 5e-3, "flash_tile window=0 vs oracle max-abs-diff {err}");
+    assert!(
+        err < 5e-3,
+        "flash_tile window=0 vs oracle max-abs-diff {err}"
+    );
 
     unsafe {
         dev.dealloc(d_q_long, q_long.len() * 2).unwrap();
@@ -717,7 +885,9 @@ fn flash_tile_window_zero_matches_oracle() {
 
 #[test]
 fn softcap_f32_inplace() {
-    let Some(dev) = dev_or_skip() else { return; };
+    let Some(dev) = dev_or_skip() else {
+        return;
+    };
     let reg = OpsRegistry::new(&dev).unwrap();
 
     let cap = 30.0f32;

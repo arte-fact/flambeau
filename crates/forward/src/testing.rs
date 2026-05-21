@@ -10,8 +10,7 @@ use flambeau_core::DevicePtr;
 use flambeau_model_ops::{Tensor, F16};
 
 use crate::ctx::{
-    AttnWeights, EmbeddingWeights, FfnWeights, ForwardCtx, LmHeadWeights, ModelLayout,
-    MoeWeights,
+    AttnWeights, EmbeddingWeights, FfnWeights, ForwardCtx, LmHeadWeights, ModelLayout, MoeWeights,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -86,8 +85,10 @@ impl ForwardCtx for RecordingCtx {
         layer_idx: usize,
         position: usize,
     ) -> Result<Tensor<F16>> {
-        self.ops_called
-            .push(OpCall::StandardAttn { layer_idx, position });
+        self.ops_called.push(OpCall::StandardAttn {
+            layer_idx,
+            position,
+        });
         Ok(Self::dummy_tensor())
     }
 
@@ -111,11 +112,7 @@ impl ForwardCtx for RecordingCtx {
         Ok(Self::dummy_tensor())
     }
 
-    fn output_head(
-        &mut self,
-        _input: &Tensor<F16>,
-        _lm_head: &LmHeadWeights,
-    ) -> Result<()> {
+    fn output_head(&mut self, _input: &Tensor<F16>, _lm_head: &LmHeadWeights) -> Result<()> {
         self.ops_called.push(OpCall::OutputHead);
         Ok(())
     }

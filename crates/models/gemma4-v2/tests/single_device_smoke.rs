@@ -57,7 +57,12 @@ fn gemma4_31b_forward_one_token_produces_finite_non_constant_logits() {
     let max_seq_len = 64.min(cfg.context_length);
 
     // Pool widths: take the max across layers so the scratch fits any.
-    let q_width = cfg.attn.iter().map(|a| cfg.num_heads * a.head_dim).max().unwrap();
+    let q_width = cfg
+        .attn
+        .iter()
+        .map(|a| cfg.num_heads * a.head_dim)
+        .max()
+        .unwrap();
     let kv_width = cfg
         .attn
         .iter()
@@ -75,7 +80,7 @@ fn gemma4_31b_forward_one_token_produces_finite_non_constant_logits() {
         max_seq_len,
         num_layers: cfg.num_layers,
         max_experts: 0,
-            max_experts_per_tok: 0,
+        max_experts_per_tok: 0,
         gdn: None,
         per_layer_kv_widths: None,
         attn_q_gated: false,
@@ -101,9 +106,7 @@ fn gemma4_31b_forward_one_token_produces_finite_non_constant_logits() {
                 min = l;
             }
         }
-        eprintln!(
-            "gemma4-v2 token=1 pos=0 logits: min={min:.4} max={max:.4} argmax={argmax}"
-        );
+        eprintln!("gemma4-v2 token=1 pos=0 logits: min={min:.4} max={max:.4} argmax={argmax}");
         assert!(max - min > 1e-2, "logits collapsed");
         if cfg.final_logit_softcap > 0.0 {
             let cap = cfg.final_logit_softcap;
@@ -148,8 +151,7 @@ fn gemma4_31b_config_parses_with_swa_alternation_and_softcap() {
     let swa_dims = cfg.attn.iter().find(|a| a.window_size > 0).unwrap();
     let global_dims = cfg.attn.iter().find(|a| a.window_size == 0).unwrap();
     assert!(
-        swa_dims.head_dim != global_dims.head_dim
-            || swa_dims.rope_theta != global_dims.rope_theta,
+        swa_dims.head_dim != global_dims.head_dim || swa_dims.rope_theta != global_dims.rope_theta,
         "SWA / global layers should differ in head_dim or rope_theta"
     );
 }

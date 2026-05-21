@@ -6,7 +6,6 @@
 //! (4096 — the usual decode sweet spot).
 
 #![cfg(feature = "hip")]
-
 #![expect(
     clippy::undocumented_unsafe_blocks,
     reason = "sweep harness — every unsafe block is a kernel launch or a memcpy_async \
@@ -30,8 +29,8 @@ use crate::harness::{alloc_and_upload, max_rel_err_with_floor, rig, seeded_f32_r
 /// (head_dim, n_heads_q, n_heads_kv) — V1 target families + tests.
 const SHAPES: &[(usize, usize, usize)] = &[
     (64, 4, 1),    // synthetic smoke-test shape (head_dim=64, 1 warp path)
-    (128, 32, 4), // Qwen3.5 / GQA-8
-    (256, 16, 2), // Qwen3.6 / GQA-8
+    (128, 32, 4),  // Qwen3.5 / GQA-8
+    (256, 16, 2),  // Qwen3.6 / GQA-8
     (512, 32, 16), // gemma4-31B full-attn (n_heads=32, n_heads_kv=16)
 ];
 
@@ -52,11 +51,10 @@ pub fn run_sweep(repo_root: &Path) -> Result<Cert> {
     let mut results = Vec::new();
     for &(head_dim, n_heads_q, n_heads_kv) in SHAPES {
         for n_tokens in contexts {
-            let seed = 0xDECADE
-                ^ (head_dim as u64 * 7919)
-                ^ (n_tokens as u64 * 101);
-            let (got, reference) =
-                run_shape(&dev, &kernel, head_dim, n_heads_q, n_heads_kv, n_tokens, seed)?;
+            let seed = 0xDECADE ^ (head_dim as u64 * 7919) ^ (n_tokens as u64 * 101);
+            let (got, reference) = run_shape(
+                &dev, &kernel, head_dim, n_heads_q, n_heads_kv, n_tokens, seed,
+            )?;
             let max_rel = max_rel_err_with_floor(&got, &reference, (head_dim as f32).sqrt() * 0.01);
             // Online softmax + F16 output round-trip + F32 reference comparison.
             // 2e-2 at n_tokens=4096 is on the order of F16's 2^-10 precision
@@ -217,10 +215,8 @@ fn run_shape(
                 let vv = v_inputs[(t * n_heads_kv + kvh) * head_dim + d];
                 acc += (scores[t] * vv) as f64;
             }
-            reference[qh * head_dim + d] =
-                f16::from_f32(acc as f32).to_f32();
+            reference[qh * head_dim + d] = f16::from_f32(acc as f32).to_f32();
         }
     }
     Ok((got, reference))
 }
-

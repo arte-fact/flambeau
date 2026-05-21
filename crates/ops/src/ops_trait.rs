@@ -448,12 +448,7 @@ pub trait Ops {
         eps: f32,
     ) -> Result<()>;
 
-    fn quantize_q8_1(
-        &self,
-        x_f32: DevicePtr,
-        y_q8_1: DevicePtr,
-        n_elems: usize,
-    ) -> Result<()>;
+    fn quantize_q8_1(&self, x_f32: DevicePtr, y_q8_1: DevicePtr, n_elems: usize) -> Result<()>;
 
     fn quantize_q8_1_mmq(
         &self,
@@ -471,39 +466,17 @@ pub trait Ops {
         total_b: usize,
     ) -> Result<()>;
 
-    fn quantize_f16_q8_1(
-        &self,
-        x_f16: DevicePtr,
-        y_q8_1: DevicePtr,
-        n_elems: usize,
-    ) -> Result<()>;
+    fn quantize_f16_q8_1(&self, x_f16: DevicePtr, y_q8_1: DevicePtr, n_elems: usize) -> Result<()>;
 
-    fn quantize_f16_q8_0(
-        &self,
-        x_f16: DevicePtr,
-        y_q8_0: DevicePtr,
-        n_elems: usize,
-    ) -> Result<()>;
+    fn quantize_f16_q8_0(&self, x_f16: DevicePtr, y_q8_0: DevicePtr, n_elems: usize) -> Result<()>;
 
     // -- mlp (pointwise + gated activations) --
 
     fn silu_f32(&self, x: DevicePtr, y: DevicePtr, n: usize) -> Result<()>;
 
-    fn swiglu_f32(
-        &self,
-        a: DevicePtr,
-        b: DevicePtr,
-        y: DevicePtr,
-        n: usize,
-    ) -> Result<()>;
+    fn swiglu_f32(&self, a: DevicePtr, b: DevicePtr, y: DevicePtr, n: usize) -> Result<()>;
 
-    fn swiglu_f32_to_f16(
-        &self,
-        a: DevicePtr,
-        b: DevicePtr,
-        y: DevicePtr,
-        n: usize,
-    ) -> Result<()>;
+    fn swiglu_f32_to_f16(&self, a: DevicePtr, b: DevicePtr, y: DevicePtr, n: usize) -> Result<()>;
 
     fn swiglu_f32_to_q8_1(
         &self,
@@ -515,72 +488,24 @@ pub trait Ops {
 
     /// Fused `y_f16[i] = (fp16)(gelu(a[i]) * b[i])` — Gemma 4 dense
     /// FFN. GELU = ggml tanh-approximation form.
-    fn gelu_f32_to_f16(
-        &self,
-        a: DevicePtr,
-        b: DevicePtr,
-        y: DevicePtr,
-        n: usize,
-    ) -> Result<()>;
+    fn gelu_f32_to_f16(&self, a: DevicePtr, b: DevicePtr, y: DevicePtr, n: usize) -> Result<()>;
 
     /// Fused `y_f32[i] = gelu(a[i]) * b[i]` — Gemma 4 per-layer
     /// side-channel embedding gate.
-    fn gelu_mul_f32(
-        &self,
-        a: DevicePtr,
-        b: DevicePtr,
-        y: DevicePtr,
-        n: usize,
-    ) -> Result<()>;
+    fn gelu_mul_f32(&self, a: DevicePtr, b: DevicePtr, y: DevicePtr, n: usize) -> Result<()>;
 
-    fn scale_f32(
-        &self,
-        x: DevicePtr,
-        y: DevicePtr,
-        n: usize,
-        scale: f32,
-    ) -> Result<()>;
+    fn scale_f32(&self, x: DevicePtr, y: DevicePtr, n: usize, scale: f32) -> Result<()>;
 
     /// F16 variant of [`Ops::scale_f32`].
-    fn scale_f16(
-        &self,
-        x: DevicePtr,
-        y: DevicePtr,
-        n: usize,
-        scale: f32,
-    ) -> Result<()>;
+    fn scale_f16(&self, x: DevicePtr, y: DevicePtr, n: usize, scale: f32) -> Result<()>;
 
-    fn add_f16(
-        &self,
-        a: DevicePtr,
-        b: DevicePtr,
-        y: DevicePtr,
-        n: usize,
-    ) -> Result<()>;
+    fn add_f16(&self, a: DevicePtr, b: DevicePtr, y: DevicePtr, n: usize) -> Result<()>;
 
-    fn add_f32(
-        &self,
-        a: DevicePtr,
-        b: DevicePtr,
-        y: DevicePtr,
-        n: usize,
-    ) -> Result<()>;
+    fn add_f32(&self, a: DevicePtr, b: DevicePtr, y: DevicePtr, n: usize) -> Result<()>;
 
-    fn swiglu_f16(
-        &self,
-        gate: DevicePtr,
-        up: DevicePtr,
-        y: DevicePtr,
-        n: usize,
-    ) -> Result<()>;
+    fn swiglu_f16(&self, gate: DevicePtr, up: DevicePtr, y: DevicePtr, n: usize) -> Result<()>;
 
-    fn sigmoid_mul_f16(
-        &self,
-        gate: DevicePtr,
-        x: DevicePtr,
-        y: DevicePtr,
-        n: usize,
-    ) -> Result<()>;
+    fn sigmoid_mul_f16(&self, gate: DevicePtr, x: DevicePtr, y: DevicePtr, n: usize) -> Result<()>;
 
     // -- pe (rope) --
 
@@ -1401,11 +1326,5 @@ pub trait Ops {
 
     /// Final-logit softcap: `y[i] = tanh(x[i] / cap) * cap`. In-place
     /// safe (`x` may equal `y`). Used by Gemma4 on the LM-head logits.
-    fn apply_softcap_f32(
-        &self,
-        x: DevicePtr,
-        y: DevicePtr,
-        n: usize,
-        cap: f32,
-    ) -> Result<()>;
+    fn apply_softcap_f32(&self, x: DevicePtr, y: DevicePtr, n: usize, cap: f32) -> Result<()>;
 }

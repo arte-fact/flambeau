@@ -97,11 +97,7 @@ fn run_gdn_forward() -> Vec<f32> {
                 conv_channels,
                 HIDDEN,
             ),
-            attn_gate: allocs.upload_q8_0(
-                &det_signal(d_inner * HIDDEN, seed + 2),
-                d_inner,
-                HIDDEN,
-            ),
+            attn_gate: allocs.upload_q8_0(&det_signal(d_inner * HIDDEN, seed + 2), d_inner, HIDDEN),
             ssm_alpha: allocs.upload_q8_0(
                 &det_signal(NUM_V_HEADS * HIDDEN, seed + 3),
                 NUM_V_HEADS,
@@ -112,11 +108,7 @@ fn run_gdn_forward() -> Vec<f32> {
                 NUM_V_HEADS,
                 HIDDEN,
             ),
-            ssm_out: allocs.upload_q8_0(
-                &det_signal(HIDDEN * d_inner, seed + 5),
-                HIDDEN,
-                d_inner,
-            ),
+            ssm_out: allocs.upload_q8_0(&det_signal(HIDDEN * d_inner, seed + 5), HIDDEN, d_inner),
             ssm_dt_bias: allocs.upload_f32(&det_signal(NUM_V_HEADS, seed + 6)),
             ssm_a: allocs.upload_f32(&det_signal(NUM_V_HEADS, seed + 7)),
             ssm_conv1d: allocs.upload_f32(&det_signal(CONV_KERNEL * conv_channels, seed + 8)),
@@ -140,7 +132,7 @@ fn run_gdn_forward() -> Vec<f32> {
         per_layer_kv_widths: None,
         attn_q_gated: false,
         kv_share_src: None,
-            shared_intermediate: 0,
+        shared_intermediate: 0,
     };
     let mut pool = ScratchPool::new(&device, cfg).expect("ScratchPool::new");
     let layout = ModelLayout {
@@ -180,7 +172,10 @@ fn multi_session_leak_double_gdn() {
         .map(|(x, y)| (x - y).abs())
         .fold(0.0_f32, f32::max);
     eprintln!("double-GDN max_abs_diff = {max_diff}");
-    assert!(a[0].is_finite() && b[0].is_finite(), "either call produced NaN");
+    assert!(
+        a[0].is_finite() && b[0].is_finite(),
+        "either call produced NaN"
+    );
     assert_eq!(max_diff, 0.0, "two GDN sessions should be bit-equal");
 }
 
@@ -260,7 +255,7 @@ fn multi_session_leak_dense_then_gdn() {
                 head_dim: D_HEAD_DIM,
                 rotated_dims: D_HEAD_DIM,
                 rope_theta: 10000.0,
-            rope_variant: flambeau_forward::ctx::RopeVariant::NeoxSplit,
+                rope_variant: flambeau_forward::ctx::RopeVariant::NeoxSplit,
                 window_size: 0,
                 rms_eps: D_RMS_EPS,
                 softmax_scale: None,
@@ -328,7 +323,8 @@ fn multi_session_leak_dense_then_gdn() {
             let delta = ctx.dense_ffn(&normed, &ffn_weights[li]).expect("dense_ffn");
             resid = ctx.residual_add(resid, delta).expect("ffn residual_add");
         }
-        ctx.output_head(&resid, &lm_head_weights).expect("output_head");
+        ctx.output_head(&resid, &lm_head_weights)
+            .expect("output_head");
         drop(ctx);
         pool.dispose(&device).expect("pool dispose");
         eprintln!("[dense warm-up] done");

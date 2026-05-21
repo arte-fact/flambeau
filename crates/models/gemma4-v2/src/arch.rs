@@ -75,7 +75,11 @@ impl Arch for Gemma4V2 {
         // MoE variants size the pool's expert / shared scratch from
         // the GGUF; dense variants leave them at zero.
         let (max_experts, max_experts_per_tok, moe_intermediate) = match cfg.moe {
-            Some(m) => (m.num_experts, m.experts_per_tok, m.moe_intermediate / n_ranks),
+            Some(m) => (
+                m.num_experts,
+                m.experts_per_tok,
+                m.moe_intermediate / n_ranks,
+            ),
             None => (0, 0, 0),
         };
         // Shared-MLP scratch uses the dense intermediate width per

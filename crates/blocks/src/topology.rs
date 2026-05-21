@@ -285,9 +285,7 @@ pub fn forward_prefill_pp_chunk<D: PpPrefillDriver>(
     }
     let max_tokens = driver.max_tokens();
     if l > max_tokens {
-        bail!(
-            "forward_prefill_pp_chunk: tokens.len()={l} > driver.max_tokens()={max_tokens}"
-        );
+        bail!("forward_prefill_pp_chunk: tokens.len()={l} > driver.max_tokens()={max_tokens}");
     }
     let row_bytes = driver.hidden_row_bytes();
     let chunk_bytes = l * row_bytes;
@@ -316,14 +314,7 @@ pub fn forward_prefill_pp_chunk<D: PpPrefillDriver>(
         let n_layers = driver.layers_per_rank(rank_idx);
         let (mut x_in, mut x_out) = (driver.hidden_a(rank_idx), driver.hidden_b(rank_idx));
         for local_idx in 0..n_layers {
-            driver.forward_layer_prefill(
-                rank_idx,
-                local_idx,
-                x_in,
-                x_out,
-                l,
-                start_position,
-            )?;
+            driver.forward_layer_prefill(rank_idx, local_idx, x_in, x_out, l, start_position)?;
             std::mem::swap(&mut x_in, &mut x_out);
         }
 
@@ -415,9 +406,7 @@ pub fn forward_one_token_tp<D: TpDecodeDriver>(
 
     let head = driver.head_rank();
     if head >= n_ranks {
-        bail!(
-            "forward_one_token_tp: head_rank={head} out of range (n_ranks={n_ranks})"
-        );
+        bail!("forward_one_token_tp: head_rank={head} out of range (n_ranks={n_ranks})");
     }
     driver.cluster().device(head).bind()?;
     driver.output_head()
@@ -446,11 +435,7 @@ pub trait TpPrefillDriver {
 
     /// Run the entire layer chain for the prompt at L tokens. Driver
     /// handles per-rank weight slicing + intra-layer AllReduces.
-    fn forward_layers_prefill(
-        &mut self,
-        prompt_len: usize,
-        start_position: usize,
-    ) -> Result<()>;
+    fn forward_layers_prefill(&mut self, prompt_len: usize, start_position: usize) -> Result<()>;
 
     /// Run final norm + LM head on `head_rank`'s last-token row,
     /// leaving F32 logits in the driver-owned head scratch.
@@ -488,9 +473,7 @@ pub fn forward_prefill_tp<D: TpPrefillDriver>(
 
     let head = driver.head_rank();
     if head >= n_ranks {
-        bail!(
-            "forward_prefill_tp: head_rank={head} out of range (n_ranks={n_ranks})"
-        );
+        bail!("forward_prefill_tp: head_rank={head} out of range (n_ranks={n_ranks})");
     }
     driver.cluster().device(head).bind()?;
     driver.output_head_last_token(prompt_ids.len())
@@ -607,12 +590,7 @@ pub trait HybridPrefillDriver {
     /// Embed the whole prompt on `(stage, rank)` — token_embd is
     /// replicated within a stage; each rank writes `[L, hidden]` F16
     /// rows into its hidden buffer.
-    fn embed_prompt_on_rank(
-        &mut self,
-        stage: usize,
-        rank: usize,
-        tokens: &[u32],
-    ) -> Result<()>;
+    fn embed_prompt_on_rank(&mut self, stage: usize, rank: usize, tokens: &[u32]) -> Result<()>;
 
     /// Run `stage`'s entire layer slice at `prompt_len` tokens with
     /// `start_position` as the position the first prompt token lands

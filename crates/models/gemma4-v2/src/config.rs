@@ -122,16 +122,10 @@ impl Gemma4V2Config {
         let rotated_swa = opt_u32("rope.dimension_count_swa").unwrap_or(head_dim_swa);
         let sliding_window = req_u32("attention.sliding_window")? as i32;
 
-        let swa_layers = read_bool_array_or_scalar(
-            file,
-            &key("attention.sliding_window_pattern"),
-            num_layers,
-        )?;
-        let num_kv_heads = read_usize_array_or_scalar(
-            file,
-            &key("attention.head_count_kv"),
-            num_layers,
-        )?;
+        let swa_layers =
+            read_bool_array_or_scalar(file, &key("attention.sliding_window_pattern"), num_layers)?;
+        let num_kv_heads =
+            read_usize_array_or_scalar(file, &key("attention.head_count_kv"), num_layers)?;
 
         let attn: Vec<LayerAttnDims> = (0..num_layers)
             .map(|li| {
@@ -158,8 +152,7 @@ impl Gemma4V2Config {
         // each shared layer to the most recent has_kv layer of the
         // same attention type (SWA vs full), mirroring llama.cpp's
         // `build_attn_inp_kv_iswa`. Default 0 ⇒ every layer owns KV.
-        let shared_kv_layers =
-            opt_u32("attention.shared_kv_layers").unwrap_or(0);
+        let shared_kv_layers = opt_u32("attention.shared_kv_layers").unwrap_or(0);
         let n_kv_from_start = num_layers.saturating_sub(shared_kv_layers);
         let mut kv_share_src: Vec<Option<usize>> = vec![None; num_layers];
         let mut last_swa_with_kv: Option<usize> = None;
@@ -229,13 +222,17 @@ fn read_bool_array_or_scalar(
         arr.iter()
             .map(|e| match e {
                 Value::Bool(b) => Ok(*b),
-                _ => Err(Gemma4V2ConfigError::MissingKey(format!("{key} (bad element type)"))),
+                _ => Err(Gemma4V2ConfigError::MissingKey(format!(
+                    "{key} (bad element type)"
+                ))),
             })
             .collect()
     } else if let Value::Bool(b) = v {
         Ok(vec![*b; n])
     } else {
-        Err(Gemma4V2ConfigError::MissingKey(format!("{key} (not bool/array)")))
+        Err(Gemma4V2ConfigError::MissingKey(format!(
+            "{key} (not bool/array)"
+        )))
     }
 }
 

@@ -19,7 +19,9 @@ fn open_e4b() -> Option<GgufFile> {
 
 #[test]
 fn gemma4_tokenizer_loads_and_advertises_overrides() {
-    let Some(file) = open_e4b() else { return; };
+    let Some(file) = open_e4b() else {
+        return;
+    };
     let tok = load_from_gguf(&file).expect("load_from_gguf gemma4");
     assert_eq!(tok.bos_id, Some(2));
     assert_eq!(tok.eos_id, Some(106));
@@ -34,18 +36,16 @@ fn gemma4_tokenizer_loads_and_advertises_overrides() {
     // also-stop token (PR #21492 strips `</s>` from EOG, but gemma4
     // doesn't have `</s>` in its vocab — it has `<eos>`/`<end_of_turn>`).
     assert!(tok.stop_ids.contains(&106));
-    let eos_extra = tok
-        .inner
-        .get_vocab(false)
-        .get("<eos>")
-        .copied();
+    let eos_extra = tok.inner.get_vocab(false).get("<eos>").copied();
     if let Some(eos1) = eos_extra {
         assert!(tok.stop_ids.contains(&eos1));
     }
 }
 
 fn roundtrip(text: &str) {
-    let Some(file) = open_e4b() else { return; };
+    let Some(file) = open_e4b() else {
+        return;
+    };
     let tok = load_from_gguf(&file).expect("load");
     let ids = tok.encode(text).expect("encode");
     let back = tok.decode(&ids).expect("decode");

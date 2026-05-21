@@ -77,13 +77,13 @@ pub struct WeightHandle {
 /// fresh view per forward call via `view_mut()`. All `DevicePtr`
 /// fields are `Copy`; only `positions_host` actually borrows mutably.
 pub struct StandardAttentionDecodeScratch<'a> {
-    pub x_q8_1: DevicePtr,         // Q8_1 blocks [hidden / 32]
-    pub mmvq_f32: DevicePtr,       // F32 [max(2*H*D, H_kv*D, hidden)]
-    pub q_fused_f16: DevicePtr,    // F16 [2 * n_heads * head_dim]
-    pub q_f16: DevicePtr,          // F16 [n_heads * head_dim]
-    pub gate_f16: DevicePtr,       // F16 [n_heads * head_dim]
-    pub k_f16: DevicePtr,          // F16 [n_kv_heads * head_dim]
-    pub v_f16: DevicePtr,          // F16 [n_kv_heads * head_dim]
+    pub x_q8_1: DevicePtr,      // Q8_1 blocks [hidden / 32]
+    pub mmvq_f32: DevicePtr,    // F32 [max(2*H*D, H_kv*D, hidden)]
+    pub q_fused_f16: DevicePtr, // F16 [2 * n_heads * head_dim]
+    pub q_f16: DevicePtr,       // F16 [n_heads * head_dim]
+    pub gate_f16: DevicePtr,    // F16 [n_heads * head_dim]
+    pub k_f16: DevicePtr,       // F16 [n_kv_heads * head_dim]
+    pub v_f16: DevicePtr,       // F16 [n_kv_heads * head_dim]
     /// Q8_0 staging for `KvCache<Q8Contig>`. Sized for
     /// `n_kv_heads * head_dim / 32` Q8_0 blocks (18 B each). Unused on
     /// the F16-KV path.
@@ -91,7 +91,7 @@ pub struct StandardAttentionDecodeScratch<'a> {
     pub v_q8_0: DevicePtr,
     pub attn_out_f16: DevicePtr,
     pub gated_out_f16: DevicePtr,
-    pub positions: DevicePtr,      // i32 [1]
+    pub positions: DevicePtr, // i32 [1]
     /// Persistent host-side 1-slot position backing — keeps the HtoD
     /// memcpy source stable so the call can drop its sync.
     pub positions_host: &'a mut [i32],
@@ -351,16 +351,16 @@ impl OwnedStandardAttentionBatchedDecodeScratch {
 /// `ops: &O: &impl Ops` at call time.
 pub struct StandardAttention {
     pub attn_q: WeightHandle,
-    pub attn_k: WeightHandle,            // [n_kv_heads*head_dim, hidden]
+    pub attn_k: WeightHandle, // [n_kv_heads*head_dim, hidden]
     /// V projection weight. `None` triggers the gemma4
     /// "alt-attention" path where V is the pre-norm K row (a single
     /// DtoD memcpy replaces the V matmul). Standard models (qwen3.x,
     /// llama, etc.) always set this.
-    pub attn_v: Option<WeightHandle>,    // [n_kv_heads*head_dim, hidden]
-    pub attn_output: WeightHandle,       // [hidden, n_heads*head_dim]
-    pub attn_norm_w: DevicePtr,          // F16 [hidden]
-    pub attn_q_norm_w: DevicePtr,        // F16 [head_dim]
-    pub attn_k_norm_w: DevicePtr,        // F16 [head_dim]
+    pub attn_v: Option<WeightHandle>, // [n_kv_heads*head_dim, hidden]
+    pub attn_output: WeightHandle, // [hidden, n_heads*head_dim]
+    pub attn_norm_w: DevicePtr, // F16 [hidden]
+    pub attn_q_norm_w: DevicePtr, // F16 [head_dim]
+    pub attn_k_norm_w: DevicePtr, // F16 [head_dim]
     /// V-norm weight, F16 `[head_dim]`. When `Some`, an extra
     /// per-head RMSNorm is applied to V. Gemma4 uses this with a
     /// caller-owned unit-weight buffer for the "unlearned" V norm
@@ -581,7 +581,12 @@ impl StandardAttention {
         tracker: &mut RawAllocTracker,
         dims: AttentionScratchDims,
     ) -> Result<OwnedStandardAttentionDecodeScratch> {
-        let AttentionScratchDims { hidden, n_heads, n_kv_heads, head_dim } = dims;
+        let AttentionScratchDims {
+            hidden,
+            n_heads,
+            n_kv_heads,
+            head_dim,
+        } = dims;
         let q_width = n_heads * head_dim;
         let kv_width = n_kv_heads * head_dim;
         let q_fused_width = 2 * q_width;
@@ -601,10 +606,8 @@ impl StandardAttention {
         let (attn_out_f16, _) = tracker.alloc_f16(device, q_width)?;
         let (gated_out_f16, _) = tracker.alloc_f16(device, q_width)?;
         let (positions, _) = tracker.alloc_i32(device, 1)?;
-        let (splitk_partials_m, _) =
-            tracker.alloc_f32(device, n_heads * MAX_SPLITK_CHUNKS)?;
-        let (splitk_partials_s, _) =
-            tracker.alloc_f32(device, n_heads * MAX_SPLITK_CHUNKS)?;
+        let (splitk_partials_m, _) = tracker.alloc_f32(device, n_heads * MAX_SPLITK_CHUNKS)?;
+        let (splitk_partials_s, _) = tracker.alloc_f32(device, n_heads * MAX_SPLITK_CHUNKS)?;
         let (splitk_partials_o, _) =
             tracker.alloc_f32(device, n_heads * MAX_SPLITK_CHUNKS * head_dim)?;
 
@@ -639,7 +642,12 @@ impl StandardAttention {
         if max_tokens == 0 {
             bail!("alloc_prefill_scratch: max_tokens must be >= 1");
         }
-        let AttentionScratchDims { hidden, n_heads, n_kv_heads, head_dim } = dims;
+        let AttentionScratchDims {
+            hidden,
+            n_heads,
+            n_kv_heads,
+            head_dim,
+        } = dims;
         let q_width = n_heads * head_dim;
         let kv_width = n_kv_heads * head_dim;
         let q_fused_width = 2 * q_width;
@@ -1154,9 +1162,13 @@ impl StandardAttention {
             let mut max_abs = 0f32;
             for &b in &host {
                 let v = half::f16::from_bits(b).to_f32();
-                if v.is_nan() { nan += 1; }
-                else if v.is_infinite() { inf += 1; }
-                else if v.abs() > max_abs { max_abs = v.abs(); }
+                if v.is_nan() {
+                    nan += 1;
+                } else if v.is_infinite() {
+                    inf += 1;
+                } else if v.abs() > max_abs {
+                    max_abs = v.abs();
+                }
             }
             eprintln!(
                 "  [ATTN_PROBE] attn_out_f16 n_heads={n_heads} head_dim={head_dim} | nan={nan} inf={inf} max_abs={max_abs:.4}"
@@ -1418,12 +1430,8 @@ impl StandardAttention {
             )
             .context("prefill split_q_gate")?;
         } else {
-            ops.cast_f32_to_f16(
-                scratch.mmvq_f32,
-                scratch.q_f16,
-                n_tokens * q_proj_rows,
-            )
-            .context("prefill cast attn_q → f16")?;
+            ops.cast_f32_to_f16(scratch.mmvq_f32, scratch.q_f16, n_tokens * q_proj_rows)
+                .context("prefill cast attn_q → f16")?;
         }
 
         // 4. K projection.
@@ -1665,13 +1673,8 @@ impl StandardAttention {
         // 11. Quantise the post-attn F16 to BOTH Q8_1 layouts.
         ops.quantize_f16_q8_1(post_attn_f16, scratch.gated_q8_1, n_tokens * q_width)
             .context("prefill quantise post-attn → Q8_1 (std)")?;
-        ops.quantize_f16_q8_1_mmq(
-            post_attn_f16,
-            scratch.gated_q8_1_mmq,
-            q_width,
-            n_tokens,
-        )
-        .context("prefill quantise post-attn → Q8_1 (MMQ DS4)")?;
+        ops.quantize_f16_q8_1_mmq(post_attn_f16, scratch.gated_q8_1_mmq, q_width, n_tokens)
+            .context("prefill quantise post-attn → Q8_1 (MMQ DS4)")?;
 
         // 12. Output projection.
         ops.qmatmul(
@@ -1726,9 +1729,11 @@ impl StandardAttention {
                  (qwen3.x batched-decode); plain-Q + alt-V batched path not implemented"
             );
         }
-        let attn_v = self.attn_v.as_ref().ok_or_else(|| anyhow::anyhow!(
+        let attn_v = self.attn_v.as_ref().ok_or_else(|| {
+            anyhow::anyhow!(
             "forward_decode_batched_tp: attn_v is None (alt-attention batched path not implemented)"
-        ))?;
+        )
+        })?;
         let n_tokens = slot_positions.len();
         if n_tokens == 0 {
             bail!("forward_decode_batched_tp called with 0 slots");
@@ -1766,13 +1771,8 @@ impl StandardAttention {
         .context("batched-decode attn_norm")?;
         ops.quantize_f16_q8_1(scratch.x_norm_f16, scratch.x_q8_1, n_tokens * hidden)
             .context("batched-decode x_norm → Q8_1 std")?;
-        ops.quantize_f16_q8_1_mmq(
-            scratch.x_norm_f16,
-            scratch.x_q8_1_mmq,
-            hidden,
-            n_tokens,
-        )
-        .context("batched-decode x_norm → Q8_1 MMQ")?;
+        ops.quantize_f16_q8_1_mmq(scratch.x_norm_f16, scratch.x_q8_1_mmq, hidden, n_tokens)
+            .context("batched-decode x_norm → Q8_1 MMQ")?;
 
         // 2. Q|gate fused projection.
         ops.qmatmul(

@@ -49,7 +49,12 @@ impl Arch for Qwen35MoeV2 {
         match shard {
             ShardMode::Replicated => load_from_gguf(file, device, layer_range, ctx_cap),
             ShardMode::Tp { rank, n_ranks } => crate::loader::load_tp_shard_from_gguf(
-                file, device, rank, n_ranks, layer_range, ctx_cap,
+                file,
+                device,
+                rank,
+                n_ranks,
+                layer_range,
+                ctx_cap,
             ),
         }
     }

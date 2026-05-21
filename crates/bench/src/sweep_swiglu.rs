@@ -1,7 +1,6 @@
 //! SwiGLU correctness sweep — pure pointwise silu(gate) * up.
 
 #![cfg(feature = "hip")]
-
 #![expect(
     clippy::undocumented_unsafe_blocks,
     reason = "sweep harness — every unsafe block is a kernel launch or a memcpy_async \
@@ -30,8 +29,8 @@ pub fn run_sweep(repo_root: &Path) -> Result<Cert> {
     let dev = HipDevice::new(0)?;
     dev.bind()?;
 
-    let kernel_bytes = kernels::hsaco("swiglu_f16")
-        .ok_or_else(|| anyhow::anyhow!("swiglu_f16 not compiled"))?;
+    let kernel_bytes =
+        kernels::hsaco("swiglu_f16").ok_or_else(|| anyhow::anyhow!("swiglu_f16 not compiled"))?;
     let module = HipModule::load(dev.id(), kernel_bytes)?;
     let kernel: HipKernel<'_> = module.kernel("flambeau_swiglu_f16")?;
     let attrs: FuncAttributes = kernel.attributes()?;
@@ -40,18 +39,12 @@ pub fn run_sweep(repo_root: &Path) -> Result<Cert> {
     // intermediate size for FFN expert is 15360; a batch of 128 tokens hits
     // n ≈ 2M. We cover a decode-shaped small case and a prefill-shaped
     // large case.
-    let shapes = [
-        (1usize, 2048usize),
-        (1, 15360),
-        (8, 15360),
-        (128, 15360),
-    ];
+    let shapes = [(1usize, 2048usize), (1, 15360), (8, 15360), (128, 15360)];
 
     let mut results = Vec::new();
     for (m, hidden) in shapes {
         let n_elems = m * hidden;
-        let seed = 0xC0FFEE
-            ^ (n_elems as u64).wrapping_mul(0x9E3779B97F4A7C15);
+        let seed = 0xC0FFEE ^ (n_elems as u64).wrapping_mul(0x9E3779B97F4A7C15);
         let (got, reference) = run_shape(&dev, &kernel, n_elems, seed)?;
         let max_rel = max_rel_err_with_floor(&got, &reference, 1e-2);
         let tol = 5e-3;
@@ -158,4 +151,3 @@ fn run_shape(
         .collect();
     Ok((got, reference))
 }
-

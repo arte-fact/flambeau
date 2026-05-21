@@ -146,12 +146,7 @@ impl Rng {
 
 /// One-shot sample: allocates per call. Prefer [`Sampler::sample`] on
 /// the decode hot path where the scratch buffers can be reused.
-pub fn sample(
-    logits: &[f32],
-    mode: &Sampling,
-    history: &[u32],
-    rng: &mut Rng,
-) -> u32 {
+pub fn sample(logits: &[f32], mode: &Sampling, history: &[u32], rng: &mut Rng) -> u32 {
     // Clone logits into scratch so penalties can mutate without
     // touching the caller's buffer.
     let mut scratch: Vec<f32> = logits.to_vec();
@@ -291,12 +286,7 @@ impl Sampler {
     /// request disables penalties). Penalties and filters are applied
     /// to a clone of `logits` only when needed; otherwise the caller's
     /// buffer is read directly.
-    pub fn sample(
-        &mut self,
-        logits: &[f32],
-        mode: &Sampling,
-        history: &[u32],
-    ) -> u32 {
+    pub fn sample(&mut self, logits: &[f32], mode: &Sampling, history: &[u32]) -> u32 {
         // **Sampler-E (#207)** — when no penalty is active we don't
         // need a writeable copy of `logits`, so skip the 600 KB
         // `extend_from_slice` and read the caller's buffer directly.
@@ -320,12 +310,7 @@ impl Sampler {
         if mode.is_greedy() {
             return argmax(logits_view);
         }
-        sample_stochastic(
-            logits_view,
-            mode,
-            &mut self.rng,
-            &mut self.pair_scratch,
-        )
+        sample_stochastic(logits_view, mode, &mut self.rng, &mut self.pair_scratch)
     }
 }
 
@@ -653,9 +638,7 @@ fn sample_stochastic(
                 pair_scratch.truncate(k);
             }
         }
-        pair_scratch.sort_unstable_by(|a, b| {
-            b.1.partial_cmp(&a.1).unwrap_or(Ordering::Equal)
-        });
+        pair_scratch.sort_unstable_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(Ordering::Equal));
         // Apply top-k: truncate to first `k` entries.
         let mut end = pair_scratch.len();
         if let Some(k) = mode.top_k {

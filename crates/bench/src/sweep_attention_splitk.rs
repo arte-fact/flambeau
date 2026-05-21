@@ -3,7 +3,6 @@
 //! split-K kernel pair and checks against the same F32 reference.
 
 #![cfg(feature = "hip")]
-
 #![expect(
     clippy::undocumented_unsafe_blocks,
     reason = "sweep harness — every unsafe block is a kernel launch or a memcpy_async \
@@ -26,16 +25,21 @@ use crate::harness::{alloc_and_upload, max_rel_err_with_floor, rig, seeded_f32_r
 
 /// Same shape family as the non-split-K cert.
 const SHAPES: &[(usize, usize, usize)] = &[
-    (64, 4, 1),    // synthetic smoke
+    (64, 4, 1),   // synthetic smoke
     (128, 32, 4), // Qwen3.5 / GQA-8
     (256, 16, 2), // Qwen3.6 / GQA-8
 ];
 
 fn pick_chunk(n_tokens: usize) -> usize {
-    if n_tokens <= 128 { 128 }
-    else if n_tokens <= 1024 { 128 }
-    else if n_tokens <= 2048 { 256 }
-    else { 512 }
+    if n_tokens <= 128 {
+        128
+    } else if n_tokens <= 1024 {
+        128
+    } else if n_tokens <= 2048 {
+        256
+    } else {
+        512
+    }
 }
 
 pub fn run_sweep(repo_root: &Path) -> Result<Cert> {
@@ -47,10 +51,8 @@ pub fn run_sweep(repo_root: &Path) -> Result<Cert> {
     dev.bind()?;
     let kb = kernels::hsaco("attention_decode_f16_splitk").unwrap();
     let module = HipModule::load(dev.id(), kb)?;
-    let k_chunk: HipKernel<'_> =
-        module.kernel("flambeau_attention_decode_f16_splitk_chunk")?;
-    let k_combine: HipKernel<'_> =
-        module.kernel("flambeau_attention_decode_f16_splitk_combine")?;
+    let k_chunk: HipKernel<'_> = module.kernel("flambeau_attention_decode_f16_splitk_chunk")?;
+    let k_combine: HipKernel<'_> = module.kernel("flambeau_attention_decode_f16_splitk_combine")?;
     let attrs_chunk: FuncAttributes = k_chunk.attributes()?;
 
     // Split-K targets the long-context decode sweet spot. 16 is there to
@@ -59,12 +61,9 @@ pub fn run_sweep(repo_root: &Path) -> Result<Cert> {
     let mut results = Vec::new();
     for &(head_dim, n_heads_q, n_heads_kv) in SHAPES {
         for n_tokens in contexts {
-            let seed = 0xDECADE
-                ^ (head_dim as u64 * 7919)
-                ^ (n_tokens as u64 * 101);
+            let seed = 0xDECADE ^ (head_dim as u64 * 7919) ^ (n_tokens as u64 * 101);
             let (got, reference) = run_shape(
-                &dev, &k_chunk, &k_combine,
-                head_dim, n_heads_q, n_heads_kv, n_tokens, seed,
+                &dev, &k_chunk, &k_combine, head_dim, n_heads_q, n_heads_kv, n_tokens, seed,
             )?;
             let max_rel = max_rel_err_with_floor(&got, &reference, (head_dim as f32).sqrt() * 0.01);
             // Same tolerance as the single-pass cert: 2e-2 covers F16 round-trip
@@ -267,4 +266,3 @@ fn run_shape(
     }
     Ok((got, reference))
 }
-

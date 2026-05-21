@@ -209,7 +209,9 @@ pub trait WeightRole: Sized {
     /// Build the role's logical name for a specific layer. Globals
     /// override this to ignore `layer`.
     fn tensor_name(layer: usize) -> String {
-        Self::SPEC.name_template.replace("{layer}", &layer.to_string())
+        Self::SPEC
+            .name_template
+            .replace("{layer}", &layer.to_string())
     }
 }
 
@@ -249,16 +251,14 @@ impl<'a> WeightUploader<'a> {
             // The role declares the post-transform dtype via
             // `pre_upload`'s return value.
             if R::SPEC.dtype == DtypeFilter::F32ToF16Norm {
-                bail!(
-                    "role `{name}`: pre_upload + F32ToF16Norm are mutually exclusive"
-                );
+                bail!("role `{name}`: pre_upload + F32ToF16Norm are mutually exclusive");
             }
             let raw = self
                 .file
                 .tensor_raw(&info.name)
                 .with_context(|| format!("tensor_raw `{}`", info.name))?;
-            let (transformed, new_dtype) = (pre_upload)(&raw, info.dtype)
-                .with_context(|| format!("pre_upload `{name}`"))?;
+            let (transformed, new_dtype) =
+                (pre_upload)(&raw, info.dtype).with_context(|| format!("pre_upload `{name}`"))?;
             let bytes = transformed.len();
             let ptr = self
                 .device

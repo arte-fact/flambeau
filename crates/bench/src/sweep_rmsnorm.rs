@@ -7,7 +7,6 @@
 //! with a floor tracking `sqrt(K)` noise (same formula as the MMVQ sweep).
 
 #![cfg(feature = "hip")]
-
 #![expect(
     clippy::undocumented_unsafe_blocks,
     reason = "sweep harness — every unsafe block is a kernel launch or a memcpy_async \
@@ -77,10 +76,10 @@ impl SweepSpec {
     /// k*m*2 bytes of traffic, so we include a prefill-shape datapoint.
     pub fn v1_6_rmsnorm() -> Self {
         let shapes = vec![
-            Shape { m: 1,   k: 2048 },
-            Shape { m: 1,   k: 5120 },
-            Shape { m: 1,   k: 15360 },
-            Shape { m: 8,   k: 5120 },
+            Shape { m: 1, k: 2048 },
+            Shape { m: 1, k: 5120 },
+            Shape { m: 1, k: 15360 },
+            Shape { m: 8, k: 5120 },
             Shape { m: 128, k: 5120 },
             Shape { m: 512, k: 5120 },
         ];
@@ -265,4 +264,3 @@ fn cert_tol() -> f32 {
     // for reasonable inputs. Widened to 1e-2 to absorb the f16 output cast.
     1e-2
 }
-

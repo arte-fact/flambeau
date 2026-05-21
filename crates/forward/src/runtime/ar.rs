@@ -116,12 +116,8 @@ pub fn ar_sum_f32(
 pub fn make_ar_callback(
     coord: Arc<ArCoordinator>,
     rank: usize,
-) -> Box<
-    dyn FnMut(usize, usize, DevicePtr, usize, &HipDevice, &HipStream) -> Result<()> + Send,
-> {
-    Box::new(move |_r, _nr, buf, n_elems, dev, st| {
-        ar_sum_f32(&coord, rank, buf, n_elems, dev, st)
-    })
+) -> Box<dyn FnMut(usize, usize, DevicePtr, usize, &HipDevice, &HipStream) -> Result<()> + Send> {
+    Box::new(move |_r, _nr, buf, n_elems, dev, st| ar_sum_f32(&coord, rank, buf, n_elems, dev, st))
 }
 
 /// BAR1 P2P AllReduce coordinator. Each rank's worker thread calls
@@ -261,9 +257,13 @@ pub fn bar_ar_sum_f32(
     // device.
     unsafe {
         match n_ranks {
-            2 => coord
-                .bar
-                .sum_tp2_f32_rank(rank, peers[rank], peers[1 - rank], n_elems as u32, stream)?,
+            2 => coord.bar.sum_tp2_f32_rank(
+                rank,
+                peers[rank],
+                peers[1 - rank],
+                n_elems as u32,
+                stream,
+            )?,
             4 => {
                 let peer3 = [
                     peers[(rank + 1) % 4],
@@ -374,9 +374,7 @@ pub fn bar_ar_residual_rmsnorm_f16(
 pub fn make_bar_ar_callback(
     coord: Arc<BarArCoordinator>,
     rank: usize,
-) -> Box<
-    dyn FnMut(usize, usize, DevicePtr, usize, &HipDevice, &HipStream) -> Result<()> + Send,
-> {
+) -> Box<dyn FnMut(usize, usize, DevicePtr, usize, &HipDevice, &HipStream) -> Result<()> + Send> {
     Box::new(move |_r, _nr, buf, n_elems, dev, st| {
         bar_ar_sum_f32(&coord, rank, buf, n_elems, dev, st)
     })

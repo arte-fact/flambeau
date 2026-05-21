@@ -3,7 +3,6 @@
 //! Not a parity test (separate file); just prints wall numbers.
 
 #![cfg(feature = "hip")]
-
 #![expect(
     clippy::undocumented_unsafe_blocks,
     reason = "test fixture — every unsafe block is a memcpy or kernel launch."
@@ -63,7 +62,9 @@ fn alloc_zeroed(dev: &HipDevice, bytes: usize) -> DevicePtr {
 
 #[test]
 fn perf_v151424_k256() -> Result<()> {
-    let Some(dev) = dev_or_skip() else { return Ok(()); };
+    let Some(dev) = dev_or_skip() else {
+        return Ok(());
+    };
     let reg = OpsRegistry::new(&dev).expect("registry");
 
     let vocab = 151424usize;
@@ -74,7 +75,9 @@ fn perf_v151424_k256() -> Result<()> {
     let mut state = 0x12345678u64;
     let mut logits = vec![0.0f32; vocab];
     for slot in &mut logits {
-        state = state.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+        state = state
+            .wrapping_mul(6364136223846793005)
+            .wrapping_add(1442695040888963407);
         let raw = (state as i64 >> 32) as f32;
         *slot = raw * (5.0 / (1u32 << 31) as f32);
     }
@@ -84,7 +87,16 @@ fn perf_v151424_k256() -> Result<()> {
 
     // Warmup
     for _ in 0..5 {
-        topk_softmax_f32(&reg, dev.default_stream(), d_logits, d_ids, d_probs, vocab, k, inv_temp)?;
+        topk_softmax_f32(
+            &reg,
+            dev.default_stream(),
+            d_logits,
+            d_ids,
+            d_probs,
+            vocab,
+            k,
+            inv_temp,
+        )?;
     }
     dev.default_stream().synchronize()?;
 
@@ -93,7 +105,16 @@ fn perf_v151424_k256() -> Result<()> {
     let mut samples: Vec<f64> = Vec::with_capacity(n);
     for _ in 0..n {
         let t0 = Instant::now();
-        topk_softmax_f32(&reg, dev.default_stream(), d_logits, d_ids, d_probs, vocab, k, inv_temp)?;
+        topk_softmax_f32(
+            &reg,
+            dev.default_stream(),
+            d_logits,
+            d_ids,
+            d_probs,
+            vocab,
+            k,
+            inv_temp,
+        )?;
         dev.default_stream().synchronize()?;
         samples.push(t0.elapsed().as_secs_f64() * 1000.0);
     }
@@ -123,9 +144,7 @@ fn perf_v151424_k256() -> Result<()> {
         for (_, p) in pairs.iter_mut() {
             *p /= sum;
         }
-        pairs.sort_unstable_by(|a, b| {
-            b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal)
-        });
+        pairs.sort_unstable_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
         pairs.truncate(k);
         let _kept = &pairs[..];
         cpu_samples.push(t0.elapsed().as_secs_f64() * 1000.0);

@@ -48,9 +48,7 @@ fn session_qwen35_9b_pp_size_2_argmax_matches_sd() {
         .max_by(|(_, a), (_, b)| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal))
         .map(|(i, _)| i)
         .unwrap();
-    eprintln!(
-        "Session<Qwen35V2> PP=2: argmax={argmax} finite={finite}"
-    );
+    eprintln!("Session<Qwen35V2> PP=2: argmax={argmax} finite={finite}");
     assert!(finite, "qwen35-v2 PP=2 logits contain NaN/Inf");
     assert_eq!(
         argmax, EXPECTED_ARGMAX,

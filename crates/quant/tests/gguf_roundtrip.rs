@@ -28,7 +28,10 @@ struct Gguf {
     tensors: Vec<TensorSpec>,
 }
 
-#[expect(dead_code, reason = "U64 is constructed via writer branches kept for GGUF-spec completeness; roundtrip test exercises only U32/String in practice")]
+#[expect(
+    dead_code,
+    reason = "U64 is constructed via writer branches kept for GGUF-spec completeness; roundtrip test exercises only U32/String in practice"
+)]
 enum MetaValue {
     U32(u32),
     U64(u64),
@@ -64,8 +67,10 @@ impl Gguf {
         let mut hdr: Vec<u8> = Vec::new();
         hdr.write_u32::<LittleEndian>(0x46554747).unwrap(); // "GGUF"
         hdr.write_u32::<LittleEndian>(3).unwrap(); // version
-        hdr.write_u64::<LittleEndian>(self.tensors.len() as u64).unwrap();
-        hdr.write_u64::<LittleEndian>(self.metadata.len() as u64).unwrap();
+        hdr.write_u64::<LittleEndian>(self.tensors.len() as u64)
+            .unwrap();
+        hdr.write_u64::<LittleEndian>(self.metadata.len() as u64)
+            .unwrap();
 
         for (k, v) in &self.metadata {
             write_str(&mut hdr, k);
@@ -109,7 +114,8 @@ impl Gguf {
         }
         for (t, off) in self.tensors.iter().zip(&tensor_offsets) {
             write_str(&mut hdr, &t.name);
-            hdr.write_u32::<LittleEndian>(t.dims_wire.len() as u32).unwrap();
+            hdr.write_u32::<LittleEndian>(t.dims_wire.len() as u32)
+                .unwrap();
             for d in &t.dims_wire {
                 hdr.write_u64::<LittleEndian>(*d).unwrap();
             }
@@ -154,11 +160,7 @@ fn tempdir() -> PathBuf {
     use std::sync::atomic::{AtomicU64, Ordering};
     static COUNTER: AtomicU64 = AtomicU64::new(0);
     let n = COUNTER.fetch_add(1, Ordering::SeqCst);
-    let dir = std::env::temp_dir().join(format!(
-        "flambeau-gguf-test-{}-{}",
-        std::process::id(),
-        n
-    ));
+    let dir = std::env::temp_dir().join(format!("flambeau-gguf-test-{}-{}", std::process::id(), n));
     std::fs::create_dir_all(&dir).unwrap();
     dir
 }
@@ -205,7 +207,9 @@ fn header_and_tensor_index_round_trip() {
 fn two_tensors_offsets_stay_disjoint() {
     // Two F32 tensors of 4 elements each, back-to-back.
     let a: Vec<u8> = (0..4).flat_map(|i| (i as f32).to_le_bytes()).collect();
-    let b: Vec<u8> = (0..4).flat_map(|i| ((i + 100) as f32).to_le_bytes()).collect();
+    let b: Vec<u8> = (0..4)
+        .flat_map(|i| ((i + 100) as f32).to_le_bytes())
+        .collect();
     let bytes = Gguf::default()
         .meta("general.architecture", MetaValue::String("test".into()))
         .tensor("a.weight", GgmlDType::F32, &[4], a)

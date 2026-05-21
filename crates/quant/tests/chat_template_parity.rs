@@ -104,9 +104,8 @@ fn chat_template_byte_parity_vs_llamacpp() {
             .and_then(|s| s.to_str())
             .unwrap_or("?");
         let body = fs::read_to_string(fixture_path).expect("read fixture");
-        let fixture: Fixture = serde_json::from_str(&body).unwrap_or_else(|e| {
-            panic!("parse {name}: {e}")
-        });
+        let fixture: Fixture =
+            serde_json::from_str(&body).unwrap_or_else(|e| panic!("parse {name}: {e}"));
 
         // Reference render via llama.cpp.
         let ref_out = tmpdir.join(format!("{name}.expected.txt"));
@@ -171,10 +170,7 @@ fn diff_report(name: &str, expected: &str, got: &str) -> String {
     let lo = first_diff.saturating_sub(ctx);
     let hi_e = (first_diff + ctx).min(expected.len());
     let hi_g = (first_diff + ctx).min(got.len());
-    out.push_str(&format!(
-        "  expected: …{:?}…\n",
-        &expected[lo..hi_e]
-    ));
+    out.push_str(&format!("  expected: …{:?}…\n", &expected[lo..hi_e]));
     out.push_str(&format!("  got:      …{:?}…\n", &got[lo..hi_g]));
     out
 }

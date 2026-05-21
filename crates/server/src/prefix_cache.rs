@@ -351,11 +351,7 @@ impl PrefixCache {
             last_logits: None,
         };
         let mut inner = self.inner.write().unwrap();
-        inner
-            .by_terminal
-            .entry(terminal)
-            .or_default()
-            .push(entry);
+        inner.by_terminal.entry(terminal).or_default().push(entry);
     }
 
     /// **#228** — clone out the `Arc<KvSnapshot>` for a hit terminal so
@@ -440,14 +436,13 @@ impl PrefixCache {
             if let Some(victim_entries) = inner.by_terminal.remove(&victim) {
                 for e in victim_entries {
                     if let Some(arc) = e.kv {
-                        inner.used_bytes = inner
-                            .used_bytes
-                            .saturating_sub(snapshot_bytes_arc(&arc));
+                        inner.used_bytes =
+                            inner.used_bytes.saturating_sub(snapshot_bytes_arc(&arc));
                     }
                     if let Some(lp) = e.last_logits {
-                        inner.used_bytes = inner.used_bytes.saturating_sub(
-                            lp.len() * std::mem::size_of::<f32>(),
-                        );
+                        inner.used_bytes = inner
+                            .used_bytes
+                            .saturating_sub(lp.len() * std::mem::size_of::<f32>());
                     }
                 }
             }
@@ -467,7 +462,6 @@ fn snapshot_bytes_arc(snap: &KvSnapshot) -> usize {
 /// them here avoids forcing callers to construct an instance just to
 /// hash a prompt.
 impl PrefixCache {
-
     /// Number of stored entries (sum across all terminal keys).
     pub fn len(&self) -> usize {
         self.inner

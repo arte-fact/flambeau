@@ -172,9 +172,7 @@ pub fn upload_moe_experts_fused_gate_up_stacked(
     let block_size = info.dtype.block_size();
     let type_size = info.dtype.type_size();
     if hidden % block_size != 0 {
-        bail!(
-            "{name}: hidden {hidden} not divisible by block_size {block_size}"
-        );
+        bail!("{name}: hidden {hidden} not divisible by block_size {block_size}");
     }
     let row_bytes = (hidden / block_size) * type_size;
     let half_per_expert = inter * row_bytes;

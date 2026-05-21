@@ -8,7 +8,6 @@
 //! * synthetic narrow shape for block-count coverage.
 
 #![cfg(feature = "hip")]
-
 #![expect(
     clippy::undocumented_unsafe_blocks,
     reason = "sweep harness — every unsafe block is a kernel launch or a memcpy_async \
@@ -31,10 +30,10 @@ use crate::cert::{now_utc_iso8601, Cert, PmcSnapshot, ShapeResult, SCHEMA_VERSIO
 use crate::harness::{alloc_and_upload, max_rel_err_with_floor, rig, seeded_f32_range};
 
 const SHAPES: &[(usize, usize)] = &[
-    (256, 256),         // smoke
-    (6144, 5120),       // Qwen3.6-27B-UD-Q8_K_XL attn_gate
-    (5120, 6144),       // Qwen3.6-27B-UD-Q8_K_XL ssm_out
-    (248320, 5120),     // Qwen3.6-27B LM head / embeddings (F16 in UD)
+    (256, 256),     // smoke
+    (6144, 5120),   // Qwen3.6-27B-UD-Q8_K_XL attn_gate
+    (5120, 6144),   // Qwen3.6-27B-UD-Q8_K_XL ssm_out
+    (248320, 5120), // Qwen3.6-27B LM head / embeddings (F16 in UD)
 ];
 
 /// 9.a — tile-M variant sweep: exercises `flambeau_mmq_f16_tile_q8_1`
@@ -54,10 +53,10 @@ pub fn run_mmq_tile_sweep(repo_root: &Path) -> Result<Cert> {
     // (n_rows, k, n_tokens) — include an under-fill (n_tokens=5) case to
     // exercise the slot-token -1 early-exit path.
     let cases = [
-        (256usize, 256usize, 8usize),     // smoke + MMQ_X fit
-        (256, 256, 5),                     // under-fill TILE_N=8
-        (6144, 5120, 16),                  // 27B-UD-Q8_K_XL attn_gate
-        (5120, 6144, 8),                   // 27B-UD-Q8_K_XL ssm_out
+        (256usize, 256usize, 8usize), // smoke + MMQ_X fit
+        (256, 256, 5),                // under-fill TILE_N=8
+        (6144, 5120, 16),             // 27B-UD-Q8_K_XL attn_gate
+        (5120, 6144, 8),              // 27B-UD-Q8_K_XL ssm_out
     ];
     let mut results = Vec::new();
     for (n, k, n_tokens) in cases {
@@ -167,7 +166,8 @@ fn run_mmq_tile_shape(
     let w_back: Vec<f32> = w_f16.iter().map(|v| v.to_f32()).collect();
     for tok in 0..n_tokens {
         let blocks = &x_q[tok * (k / QK8_1)..(tok + 1) * (k / QK8_1)];
-        let x_dequant: Vec<f32> = blocks.iter()
+        let x_dequant: Vec<f32> = blocks
+            .iter()
             .flat_map(|b| {
                 let d = b.d.to_f32();
                 (0..QK8_1).map(move |i| d * b.qs[i] as f32)
@@ -199,10 +199,10 @@ pub fn run_mmq_sweep(repo_root: &Path) -> Result<Cert> {
 
     // (n_rows, k, n_tokens)
     let cases = [
-        (256usize, 256usize, 1usize),   // collapse to mmvq case
-        (256, 256, 8),                   // small smoke
-        (6144, 5120, 16),                // 27B-UD-Q8_K_XL attn_gate, prefill-like
-        (5120, 6144, 8),                 // 27B-UD-Q8_K_XL ssm_out
+        (256usize, 256usize, 1usize), // collapse to mmvq case
+        (256, 256, 8),                // small smoke
+        (6144, 5120, 16),             // 27B-UD-Q8_K_XL attn_gate, prefill-like
+        (5120, 6144, 8),              // 27B-UD-Q8_K_XL ssm_out
     ];
     let mut results = Vec::new();
     for (n, k, n_tokens) in cases {
@@ -264,8 +264,8 @@ fn run_mmq_shape(
         x_q.extend(quantize_row_q8_1(&x_f32[row * k..(row + 1) * k]));
     }
 
-    let d_w = alloc_and_upload(dev,&w_f16);
-    let d_x = alloc_and_upload(dev,&x_q);
+    let d_w = alloc_and_upload(dev, &w_f16);
+    let d_x = alloc_and_upload(dev, &x_q);
     let d_out = dev.alloc(n_tokens * n * 4)?;
 
     {
@@ -432,8 +432,8 @@ fn run_shape(
     let w_f16: Vec<f16> = w_f32.iter().map(|&v| f16::from_f32(v)).collect();
     let x_q = quantize_row_q8_1(&x_f32);
 
-    let d_w = alloc_and_upload(dev,&w_f16);
-    let d_x = alloc_and_upload(dev,&x_q);
+    let d_w = alloc_and_upload(dev, &w_f16);
+    let d_x = alloc_and_upload(dev, &x_q);
     let d_out = dev.alloc(n * 4)?;
 
     {
@@ -474,7 +474,8 @@ fn run_shape(
     // Reference: F16 weight × Q8_1-dequant activation in F32.
     let mut reference = vec![0.0f32; n];
     let w_back: Vec<f32> = w_f16.iter().map(|v| v.to_f32()).collect();
-    let x_dequant: Vec<f32> = x_q.iter()
+    let x_dequant: Vec<f32> = x_q
+        .iter()
         .flat_map(|b| {
             let d = b.d.to_f32();
             (0..QK8_1).map(move |i| d * b.qs[i] as f32)
@@ -489,4 +490,3 @@ fn run_shape(
     }
     Ok((got, reference))
 }
-

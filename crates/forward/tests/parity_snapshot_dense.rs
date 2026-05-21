@@ -11,8 +11,8 @@ use flambeau_backend_hip::HipDevice;
 use flambeau_core::Device;
 use flambeau_forward::core::ScratchConfig;
 use flambeau_forward::ctx::{
-    Activation, AttnWeights, EmbeddingWeights, FfnWeights, ForwardCtx, LmHeadWeights,
-    ModelLayout, RopeVariant,
+    Activation, AttnWeights, EmbeddingWeights, FfnWeights, ForwardCtx, LmHeadWeights, ModelLayout,
+    RopeVariant,
 };
 use flambeau_forward::{ScratchPool, SingleDeviceForwardCtx};
 use flambeau_ops::OpsRegistry;
@@ -27,10 +27,22 @@ const MAX_SEQ_LEN: usize = 4;
 const RMS_EPS: f32 = 1e-5;
 
 const REFERENCE_LOGITS_HEAD16: [f32; 16] = [
-    -0.27348816, -0.6983838, -0.4945717, -0.20793961,
-    -0.41295117, 0.44879973, -0.12378508, 0.9048374,
-    0.12987937, 0.9078851, 0.19723168, 0.42451006,
-    0.074222, -0.29097384, -0.09338939, -0.86321926,
+    -0.27348816,
+    -0.6983838,
+    -0.4945717,
+    -0.20793961,
+    -0.41295117,
+    0.44879973,
+    -0.12378508,
+    0.9048374,
+    0.12987937,
+    0.9078851,
+    0.19723168,
+    0.42451006,
+    0.074222,
+    -0.29097384,
+    -0.09338939,
+    -0.86321926,
 ];
 const REFERENCE_ARGMAX: usize = 56;
 const TOL: f32 = 5e-3;
@@ -64,16 +76,8 @@ fn parity_snapshot_dense_single_token() {
         attn_norm: allocs.upload_f16(&vec![1.0_f32; HIDDEN]),
         attn_q: allocs.upload_q8_0(&det_signal(q_width * HIDDEN, 101), q_width, HIDDEN),
         attn_k: allocs.upload_q8_0(&det_signal(kv_width * HIDDEN, 102), kv_width, HIDDEN),
-        attn_v: Some(allocs.upload_q8_0(
-            &det_signal(kv_width * HIDDEN, 103),
-            kv_width,
-            HIDDEN,
-        )),
-        attn_output: allocs.upload_q8_0(
-            &det_signal(HIDDEN * q_width, 104),
-            HIDDEN,
-            q_width,
-        ),
+        attn_v: Some(allocs.upload_q8_0(&det_signal(kv_width * HIDDEN, 103), kv_width, HIDDEN)),
+        attn_output: allocs.upload_q8_0(&det_signal(HIDDEN * q_width, 104), HIDDEN, q_width),
         attn_q_norm: None,
         attn_k_norm: None,
         n_heads: N_HEADS,
@@ -122,7 +126,7 @@ fn parity_snapshot_dense_single_token() {
         per_layer_kv_widths: None,
         attn_q_gated: false,
         kv_share_src: None,
-            shared_intermediate: 0,
+        shared_intermediate: 0,
     };
     let mut pool = ScratchPool::new(&device, cfg).expect("ScratchPool::new");
     let layout = ModelLayout {
@@ -135,10 +139,16 @@ fn parity_snapshot_dense_single_token() {
     {
         let mut ctx = SingleDeviceForwardCtx::new(&device, stream, &reg, &mut pool);
         let resid_in = ctx.embed(&embd, 7).expect("embed");
-        let attn_delta = ctx.standard_attn(&resid_in, &attn, 0, 0).expect("standard_attn");
-        let resid_mid = ctx.residual_add(resid_in, attn_delta).expect("attn residual");
+        let attn_delta = ctx
+            .standard_attn(&resid_in, &attn, 0, 0)
+            .expect("standard_attn");
+        let resid_mid = ctx
+            .residual_add(resid_in, attn_delta)
+            .expect("attn residual");
         let ffn_delta = ctx.dense_ffn(&resid_mid, &ffn).expect("dense_ffn");
-        let resid_out = ctx.residual_add(resid_mid, ffn_delta).expect("ffn residual");
+        let resid_out = ctx
+            .residual_add(resid_mid, ffn_delta)
+            .expect("ffn residual");
         ctx.output_head(&resid_out, &lm_head).expect("output_head");
         logits = ctx.logits().to_vec();
     }

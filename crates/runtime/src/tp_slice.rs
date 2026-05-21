@@ -47,14 +47,18 @@ pub enum SliceError {
          (only ColParallel{{dim=0}} and RowParallel{{dim=1}} are wired)"
     )]
     UnsupportedAxis { layout: String, dim: usize },
-    #[error(
-        "tensor `{name}` outer dim {outer} is not divisible by world {world}"
-    )]
-    OuterIndivisible { name: String, outer: usize, world: u32 },
-    #[error(
-        "tensor `{name}` inner dim {inner} is not divisible by world {world}"
-    )]
-    InnerIndivisible { name: String, inner: usize, world: u32 },
+    #[error("tensor `{name}` outer dim {outer} is not divisible by world {world}")]
+    OuterIndivisible {
+        name: String,
+        outer: usize,
+        world: u32,
+    },
+    #[error("tensor `{name}` inner dim {inner} is not divisible by world {world}")]
+    InnerIndivisible {
+        name: String,
+        inner: usize,
+        world: u32,
+    },
     #[error(
         "tensor `{name}` per-rank inner length {per_rank_inner} is not a \
          multiple of dtype block_size {block_size}"
@@ -124,20 +128,16 @@ pub fn slice_for_tp<'a>(
             head_k_dim,
             kq_replicated,
         ),
-        WeightLayout::ColParallel { dim, .. } => {
-            Err(SliceError::UnsupportedAxis {
-                layout: "ColParallel".into(),
-                dim,
-            }
-            .into())
+        WeightLayout::ColParallel { dim, .. } => Err(SliceError::UnsupportedAxis {
+            layout: "ColParallel".into(),
+            dim,
         }
-        WeightLayout::RowParallel { dim, .. } => {
-            Err(SliceError::UnsupportedAxis {
-                layout: "RowParallel".into(),
-                dim,
-            }
-            .into())
+        .into()),
+        WeightLayout::RowParallel { dim, .. } => Err(SliceError::UnsupportedAxis {
+            layout: "RowParallel".into(),
+            dim,
         }
+        .into()),
     }
 }
 
@@ -145,9 +145,7 @@ pub fn slice_for_tp<'a>(
 /// allocation sizing and for the cert artefact without materialising
 /// the slice.
 pub fn slice_bytes_for_tp(file: &GgufFile, name: &str, layout: WeightLayout) -> Result<usize> {
-    let info = file
-        .info(name)
-        .with_context(|| format!("info `{name}`"))?;
+    let info = file.info(name).with_context(|| format!("info `{name}`"))?;
     let total = info.size_in_bytes() as usize;
     match layout {
         WeightLayout::Replicated => Ok(total),
@@ -209,9 +207,7 @@ fn slice_col_parallel_dim0<'a>(
     if rank >= world {
         return Err(SliceError::RankOutOfRange { rank, world }.into());
     }
-    let info = file
-        .info(name)
-        .with_context(|| format!("info `{name}`"))?;
+    let info = file.info(name).with_context(|| format!("info `{name}`"))?;
     if info.dims.is_empty() || info.dims.len() > 2 {
         return Err(SliceError::NotTwoDimensional {
             name: name.into(),
@@ -273,9 +269,7 @@ fn slice_col_parallel_dim1_3d<'a>(
     if rank >= world {
         return Err(SliceError::RankOutOfRange { rank, world }.into());
     }
-    let info = file
-        .info(name)
-        .with_context(|| format!("info `{name}`"))?;
+    let info = file.info(name).with_context(|| format!("info `{name}`"))?;
     if info.dims.len() != 3 {
         return Err(SliceError::NotTwoDimensional {
             name: name.into(),
@@ -348,9 +342,7 @@ fn slice_row_parallel_dim2_3d<'a>(
     if rank >= world {
         return Err(SliceError::RankOutOfRange { rank, world }.into());
     }
-    let info = file
-        .info(name)
-        .with_context(|| format!("info `{name}`"))?;
+    let info = file.info(name).with_context(|| format!("info `{name}`"))?;
     if info.dims.len() != 3 {
         return Err(SliceError::NotTwoDimensional {
             name: name.into(),
@@ -442,9 +434,7 @@ fn slice_fused_qkv_parallel<'a>(
             "FusedQkvParallel: num_k_heads {num_k_heads} not divisible by world {world}"
         ));
     }
-    let info = file
-        .info(name)
-        .with_context(|| format!("info `{name}`"))?;
+    let info = file.info(name).with_context(|| format!("info `{name}`"))?;
     if info.dims.len() != 2 {
         return Err(SliceError::NotTwoDimensional {
             name: name.into(),
@@ -527,10 +517,8 @@ fn slice_fused_qkv_parallel<'a>(
     // Pack per-rank slab in `[Q_local | K_local | V_local]` order — the
     // order the GDN forward kernel expects (gdn_tp.rs:289-293).
     let mut packed = Vec::with_capacity(total_local_bytes);
-    packed
-        .extend_from_slice(&raw[q_offset_rows * row_bytes..(q_offset_rows + q_rows) * row_bytes]);
-    packed
-        .extend_from_slice(&raw[k_offset_rows * row_bytes..(k_offset_rows + k_rows) * row_bytes]);
+    packed.extend_from_slice(&raw[q_offset_rows * row_bytes..(q_offset_rows + q_rows) * row_bytes]);
+    packed.extend_from_slice(&raw[k_offset_rows * row_bytes..(k_offset_rows + k_rows) * row_bytes]);
     packed.extend_from_slice(
         &raw[v_offset_rows * row_bytes..(v_offset_rows + v_local_rows) * row_bytes],
     );
@@ -547,9 +535,7 @@ fn slice_row_parallel_dim1<'a>(
     if rank >= world {
         return Err(SliceError::RankOutOfRange { rank, world }.into());
     }
-    let info = file
-        .info(name)
-        .with_context(|| format!("info `{name}`"))?;
+    let info = file.info(name).with_context(|| format!("info `{name}`"))?;
     if info.dims.len() != 2 {
         return Err(SliceError::NotTwoDimensional {
             name: name.into(),

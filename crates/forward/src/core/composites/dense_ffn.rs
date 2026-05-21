@@ -31,8 +31,7 @@ pub fn dense_ffn_local<H: TopologyHooks>(
         &act_mmq_null
     } else if n > 1 {
         // Unfused at N>1 so we can also produce the MMQ-layout activation.
-        let mut norm_f16 =
-            unsafe { Tensor::<F16>::from_raw(state.pool.norm, n * hidden) };
+        let mut norm_f16 = unsafe { Tensor::<F16>::from_raw(state.pool.norm, n * hidden) };
         flambeau_model_ops::rmsnorm_f16(
             input,
             &weights.ffn_norm,
@@ -76,7 +75,13 @@ pub fn dense_ffn_local<H: TopologyHooks>(
             flambeau_model_ops::swiglu_f32_to_f16(&gate_f32, &up_f32, &mut gated_f16, n * m, &ops)?;
         }
         Activation::GeluTanh => {
-            flambeau_model_ops::gelu_mul_f32_to_f16(&gate_f32, &up_f32, &mut gated_f16, n * m, &ops)?;
+            flambeau_model_ops::gelu_mul_f32_to_f16(
+                &gate_f32,
+                &up_f32,
+                &mut gated_f16,
+                n * m,
+                &ops,
+            )?;
         }
     }
 
@@ -84,8 +89,7 @@ pub fn dense_ffn_local<H: TopologyHooks>(
     flambeau_model_ops::quantize_f16_to_q8_1(&gated_f16, &mut gated_q8_1, n * m, &ops)?;
     let gated_mmq_t;
     let act_gated_mmq: &Tensor<Q8_1> = if n > 1 {
-        let mut gated_mmq =
-            unsafe { Tensor::<Q8_1>::from_raw(state.pool.gated_q8_1_mmq, n * m) };
+        let mut gated_mmq = unsafe { Tensor::<Q8_1>::from_raw(state.pool.gated_q8_1_mmq, n * m) };
         flambeau_model_ops::quantize_f16_to_q8_1_mmq(&gated_f16, &mut gated_mmq, m, n, &ops)?;
         gated_mmq_t = gated_mmq;
         &gated_mmq_t
@@ -98,13 +102,18 @@ pub fn dense_ffn_local<H: TopologyHooks>(
     let f16_fast = n == 1
         && weights.post_ffn_norm.is_none()
         && weights.ffn_down.supports_decode_to_f16()
-        && (hooks.supports_ar_residual_rmsnorm_f16()
-            || hooks.supports_ar_residual_f16());
+        && (hooks.supports_ar_residual_rmsnorm_f16() || hooks.supports_ar_residual_f16());
     let mut down_f32 = unsafe { Tensor::<F32>::from_raw(state.pool.down_f32, n * hidden) };
     if !f16_fast {
-        weights
-            .ffn_down
-            .qmatmul(&gated_q8_1, act_gated_mmq, &mut down_f32, n, m, hidden, &ops)?;
+        weights.ffn_down.qmatmul(
+            &gated_q8_1,
+            act_gated_mmq,
+            &mut down_f32,
+            n,
+            m,
+            hidden,
+            &ops,
+        )?;
     }
     // Fused AR + residual fast path when post_ffn_norm is None.
     if n == 1
@@ -113,8 +122,7 @@ pub fn dense_ffn_local<H: TopologyHooks>(
         && hooks.supports_ar_residual_rmsnorm_f16()
     {
         let next_w = next_norm.unwrap();
-        let mut partial_f16 =
-            unsafe { Tensor::<F16>::from_raw(state.pool.delta, n * hidden) };
+        let mut partial_f16 = unsafe { Tensor::<F16>::from_raw(state.pool.delta, n * hidden) };
         if f16_fast {
             weights.ffn_down.qmatmul_decode_to_f16(
                 &gated_q8_1,
@@ -140,8 +148,7 @@ pub fn dense_ffn_local<H: TopologyHooks>(
         return Ok(None);
     }
     if hooks.supports_ar_residual_f16() && weights.post_ffn_norm.is_none() {
-        let mut partial_f16 =
-            unsafe { Tensor::<F16>::from_raw(state.pool.delta, n * hidden) };
+        let mut partial_f16 = unsafe { Tensor::<F16>::from_raw(state.pool.delta, n * hidden) };
         if f16_fast {
             weights.ffn_down.qmatmul_decode_to_f16(
                 &gated_q8_1,

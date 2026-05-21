@@ -43,7 +43,9 @@ const REL_TOL: f32 = 1e-3;
 fn lcg(seed: u64) -> impl FnMut() -> f32 {
     let mut state = seed.wrapping_mul(6364136223846793005).wrapping_add(1);
     move || {
-        state = state.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+        state = state
+            .wrapping_mul(6364136223846793005)
+            .wrapping_add(1442695040888963407);
         let u = (state >> 32) as u32;
         (u as f32 / u32::MAX as f32) * 2.0 - 1.0
     }
@@ -132,10 +134,12 @@ fn tp4_residual_correctness_sweep_and_latency() {
         // Per-rank inputs: rank r gets seed (1234 + r). Different deterministic
         // streams so the residual buffer (= rank's hidden input) and four
         // partial buffers all carry distinct values.
-        let host_partials: Vec<Vec<f16>> =
-            (0..4).map(|r| deterministic_f16(1234 + r as u64, n)).collect();
-        let host_hiddens: Vec<Vec<f16>> =
-            (0..4).map(|r| deterministic_f16(9999 + r as u64, n)).collect();
+        let host_partials: Vec<Vec<f16>> = (0..4)
+            .map(|r| deterministic_f16(1234 + r as u64, n))
+            .collect();
+        let host_hiddens: Vec<Vec<f16>> = (0..4)
+            .map(|r| deterministic_f16(9999 + r as u64, n))
+            .collect();
 
         // Reference: each rank's post-AR hidden is hidden[r] + Σ_k partial[k].
         // The Σ_k term is identical across ranks; only the hidden differs.
@@ -189,13 +193,16 @@ fn tp4_residual_correctness_sweep_and_latency() {
         for r in 0..4 {
             cluster.device(r).bind().unwrap();
             unsafe {
-                cluster.device(r).memcpy_async(
-                    cluster.device(r).default_stream(),
-                    CopyDirection::HostToDevice,
-                    d_hiddens[r],
-                    DevicePtr(host_hiddens[r].as_ptr() as usize),
-                    n * 2,
-                ).unwrap();
+                cluster
+                    .device(r)
+                    .memcpy_async(
+                        cluster.device(r).default_stream(),
+                        CopyDirection::HostToDevice,
+                        d_hiddens[r],
+                        DevicePtr(host_hiddens[r].as_ptr() as usize),
+                        n * 2,
+                    )
+                    .unwrap();
             }
             cluster.device(r).default_stream().synchronize().unwrap();
         }

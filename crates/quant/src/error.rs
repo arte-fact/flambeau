@@ -30,9 +30,7 @@ pub enum QuantError {
     #[error("tensor {name:?} declared in two different split files")]
     DuplicateTensor { name: String },
 
-    #[error(
-        "byte range [{start}..+{len}) on tensor {name:?} exceeds its {total} bytes"
-    )]
+    #[error("byte range [{start}..+{len}) on tensor {name:?} exceeds its {total} bytes")]
     RangeOutOfBounds {
         name: String,
         start: u64,

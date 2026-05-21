@@ -42,8 +42,19 @@ pub fn attention_decode_f16(
     window_size: i32,
 ) -> Result<()> {
     attention_decode_f16_slots(
-        reg, stream, q, k_cache, v_cache, out, n_heads_q, n_heads_kv, head_dim,
-        n_tokens_kv, scale, window_size, None,
+        reg,
+        stream,
+        q,
+        k_cache,
+        v_cache,
+        out,
+        n_heads_q,
+        n_heads_kv,
+        head_dim,
+        n_tokens_kv,
+        scale,
+        window_size,
+        None,
     )
 }
 
@@ -754,7 +765,6 @@ pub fn split_q_gate_f16(
     Ok(())
 }
 
-
 /// Prefill attention, F16 KV. Computes `n_q_tokens` Q rows against
 /// `n_k_tokens` KV rows with causal masking (`q_token_i` attends to
 /// `k_token_0..k_token_{q_offset + i}`).
@@ -784,8 +794,22 @@ pub fn attention_prefill_f16(
     window_size: i32,
 ) -> Result<()> {
     attention_prefill_f16_slots(
-        reg, stream, q, k_cache, v_cache, out, n_q_tokens, n_heads_q, n_heads_kv,
-        head_dim, n_k_tokens, q_offset, scale, window_size, None, None,
+        reg,
+        stream,
+        q,
+        k_cache,
+        v_cache,
+        out,
+        n_q_tokens,
+        n_heads_q,
+        n_heads_kv,
+        head_dim,
+        n_k_tokens,
+        q_offset,
+        scale,
+        window_size,
+        None,
+        None,
     )
 }
 
@@ -947,7 +971,7 @@ pub fn kv_append_v_unit_norm_f16(
     eps: f32,
 ) -> Result<()> {
     let entry = match head_dim {
-        64  => "flambeau_kv_append_v_unit_norm_f16_d64",
+        64 => "flambeau_kv_append_v_unit_norm_f16_d64",
         128 => "flambeau_kv_append_v_unit_norm_f16_d128",
         256 => "flambeau_kv_append_v_unit_norm_f16_d256",
         512 => "flambeau_kv_append_v_unit_norm_f16_d512",

@@ -16,21 +16,21 @@ pub mod state;
 pub mod tool_call_parser;
 
 #[cfg(feature = "hip")]
+pub mod embedding;
+#[cfg(feature = "hip")]
 pub mod gpu_sampler;
 #[cfg(feature = "hip")]
 pub mod model_cfg;
 #[cfg(feature = "hip")]
-pub mod embedding;
-#[cfg(feature = "hip")]
 pub mod model_handle;
-#[cfg(feature = "hip")]
-pub mod v2_handle;
 #[cfg(feature = "hip")]
 pub mod routes;
 #[cfg(feature = "hip")]
 pub mod serve;
 #[cfg(feature = "hip")]
 pub mod serve_common;
+#[cfg(feature = "hip")]
+pub mod v2_handle;
 
 pub use api::{
     ChatChoice, ChatCompletionRequest, ChatCompletionResponse, ChatMessage, CompletionChoice,

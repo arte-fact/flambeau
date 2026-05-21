@@ -7,7 +7,6 @@
 //! zero drift.
 
 #![cfg(feature = "hip")]
-
 #![expect(
     clippy::undocumented_unsafe_blocks,
     reason = "test fixture — every unsafe block is a memcpy or kernel launch \
@@ -151,7 +150,10 @@ fn swiglu_f32_to_q8_1_matches_unfused_chain() -> Result<()> {
             eprintln!("  ref   block {block_idx}: d={rd:?} s={rs:?} q={rq:?}");
             eprintln!("  fused block {block_idx}: d={fd:?} s={fs:?} q={fq:?}");
         }
-        assert_eq!(mismatches, 0, "n={n}: fused output disagrees with unfused chain");
+        assert_eq!(
+            mismatches, 0,
+            "n={n}: fused output disagrees with unfused chain"
+        );
 
         unsafe {
             dev.dealloc(d_a, n * 4)?;

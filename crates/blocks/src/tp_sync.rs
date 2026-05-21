@@ -33,10 +33,7 @@ use crate::tp_rank_core::TpRankCore;
 ///
 /// Replaces the inline pattern at gemma4 `tp.rs` Phases 2/5 and
 /// qwen3-moe `forward/tp.rs::ar_residual`.
-pub fn cross_rank_event_barrier(
-    cluster: &HipCluster,
-    cores: &[&TpRankCore],
-) -> DeviceResult<()> {
+pub fn cross_rank_event_barrier(cluster: &HipCluster, cores: &[&TpRankCore]) -> DeviceResult<()> {
     let n = cluster.ranks();
     assert_eq!(
         cores.len(),

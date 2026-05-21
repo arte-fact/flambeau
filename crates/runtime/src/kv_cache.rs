@@ -19,7 +19,7 @@
 
 use std::marker::PhantomData;
 
-use flambeau_core::{CopyDirection, Device, DevicePtr, DeviceError};
+use flambeau_core::{CopyDirection, Device, DeviceError, DevicePtr};
 
 /// Marker trait for a KV cache layout. The actual element type + memory
 /// order are encoded by the concrete marker struct; this trait just

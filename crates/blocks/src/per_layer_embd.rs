@@ -120,12 +120,21 @@ impl PerLayerEmbedBlock {
         } = scratch;
         if n_tokens == 1 {
             ops.dense_gemv_f32_f16(
-                self.weights.inp_gate, pe_in, gate_out_f32, self.pe, self.hidden,
+                self.weights.inp_gate,
+                pe_in,
+                gate_out_f32,
+                self.pe,
+                self.hidden,
             )
             .context("per_layer_embd inp_gate")?;
         } else {
             ops.dense_gemv_f32_f16_batched(
-                self.weights.inp_gate, pe_in, gate_out_f32, self.pe, self.hidden, n_tokens,
+                self.weights.inp_gate,
+                pe_in,
+                gate_out_f32,
+                self.pe,
+                self.hidden,
+                n_tokens,
             )
             .context("per_layer_embd inp_gate batched")?;
         }
@@ -135,12 +144,21 @@ impl PerLayerEmbedBlock {
             .context("per_layer_embd cast activated → f16")?;
         if n_tokens == 1 {
             ops.dense_gemv_f32_f16(
-                self.weights.proj, activated_f16, proj_out_f32, self.hidden, self.pe,
+                self.weights.proj,
+                activated_f16,
+                proj_out_f32,
+                self.hidden,
+                self.pe,
             )
             .context("per_layer_embd proj")?;
         } else {
             ops.dense_gemv_f32_f16_batched(
-                self.weights.proj, activated_f16, proj_out_f32, self.hidden, self.pe, n_tokens,
+                self.weights.proj,
+                activated_f16,
+                proj_out_f32,
+                self.hidden,
+                self.pe,
+                n_tokens,
             )
             .context("per_layer_embd proj batched")?;
         }
@@ -243,7 +261,10 @@ pub fn build_inp_per_layer_table_with_proj(
             let mut proj_row = [0.0f32; 256];
             let proj_slice = &proj_token[il * pe..(il + 1) * pe];
             if pe > proj_row.len() {
-                bail!("build_inp_per_layer_table_with_proj: pe {pe} > scratch {}", proj_row.len());
+                bail!(
+                    "build_inp_per_layer_table_with_proj: pe {pe} > scratch {}",
+                    proj_row.len()
+                );
             }
             for i in 0..pe {
                 proj_row[i] = proj_slice[i] * inv_sqrt_hidden;
@@ -359,9 +380,7 @@ pub fn build_inp_per_layer_table(
                 proj[row] = acc as f32;
             }
         }
-        other => bail!(
-            "per_layer_model_proj dtype {other:?} not supported (expected F32 or BF16)"
-        ),
+        other => bail!("per_layer_model_proj dtype {other:?} not supported (expected F32 or BF16)"),
     }
 
     let inv_sqrt_n = 1.0 / (hidden as f32).sqrt();

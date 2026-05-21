@@ -3,7 +3,6 @@
 //! and probs that match the CPU reference within F32 epsilon.
 
 #![cfg(feature = "hip")]
-
 #![expect(
     clippy::undocumented_unsafe_blocks,
     reason = "test fixture — every unsafe block is a memcpy or kernel launch \
@@ -125,7 +124,9 @@ fn cpu_topk_softmax(logits: &[f32], k: usize, inv_temp: f32) -> Vec<(u32, f32)> 
 }
 
 fn run_one(vocab: usize, k: usize, inv_temp: f32, seed: u64) -> Result<()> {
-    let Some(dev) = dev_or_skip() else { return Ok(()); };
+    let Some(dev) = dev_or_skip() else {
+        return Ok(());
+    };
     let reg = OpsRegistry::new(&dev).expect("registry");
 
     // Simple LCG to fill logits deterministically.

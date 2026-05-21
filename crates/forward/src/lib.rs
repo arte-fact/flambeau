@@ -15,8 +15,8 @@ pub mod testing;
 pub use core::{NoopHooks, ScratchConfig, ScratchPool, TopologyHooks};
 pub use ctx::ForwardCtx;
 pub use engine::{
-    ForwardEngine, HybStage, HybridEngine, HybridForwardCtx, HybridHooks, PpEngine, PpStage,
-    PpForwardCtx, SingleDeviceEngine, SingleDeviceForwardCtx, SoloStage, StageHooks, TpEngine,
+    ForwardEngine, HybStage, HybridEngine, HybridForwardCtx, HybridHooks, PpEngine, PpForwardCtx,
+    PpStage, SingleDeviceEngine, SingleDeviceForwardCtx, SoloStage, StageHooks, TpEngine,
     TpForwardCtx, TpHooks,
 };
 pub use runtime::{Arch, Session, Topology};

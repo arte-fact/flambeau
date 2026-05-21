@@ -175,14 +175,9 @@ pub fn upload_gemma4_pre_router_weight_f16(
     hidden: usize,
     allocs: &mut Vec<(DevicePtr, usize)>,
 ) -> Result<Tensor<F16>> {
-    let scale_info = file
-        .info(name)
-        .with_context(|| format!("info {name}"))?;
+    let scale_info = file.info(name).with_context(|| format!("info {name}"))?;
     if scale_info.dtype != flambeau_quant::GgmlDType::F32 {
-        bail!(
-            "{name}: expected F32, got {:?}",
-            scale_info.dtype
-        );
+        bail!("{name}: expected F32, got {:?}", scale_info.dtype);
     }
     let raw = file
         .tensor_raw(name)
@@ -213,8 +208,7 @@ pub fn upload_gemma4_pre_router_weight_f16(
             bytes,
         )?;
     }
-    flambeau_core::Stream::synchronize(stream)
-        .context("sync after pre_router_weight upload")?;
+    flambeau_core::Stream::synchronize(stream).context("sync after pre_router_weight upload")?;
     allocs.push((ptr, bytes));
     Ok(unsafe { Tensor::<F16>::from_raw(ptr, hidden) })
 }
@@ -268,10 +262,7 @@ pub(crate) fn f32_to_q8_0_bytes(name: &str, f32_buf: &[f32]) -> Result<Vec<u8>> 
     let mut bytes: Vec<u8> = Vec::with_capacity(f32_buf.len() / 32 * 34);
     let mut cursor = 0usize;
     while cursor < f32_buf.len() {
-        flambeau_quant::quantize_k::quantize_row_q8_0(
-            &f32_buf[cursor..cursor + 32],
-            &mut bytes,
-        );
+        flambeau_quant::quantize_k::quantize_row_q8_0(&f32_buf[cursor..cursor + 32], &mut bytes);
         cursor += 32;
     }
     Ok(bytes)

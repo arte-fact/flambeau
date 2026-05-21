@@ -336,8 +336,8 @@ mod tests {
         raw[2] = 0x43;
         let mut out = [0.0f32; 32];
         crate::dequantize_into(GgmlDType::Mxfp4, &raw, &mut out).unwrap();
-        assert!((out[0]  - 1.0).abs() < 1e-6, "out[0]={}", out[0]);
-        assert!((out[1]  - 3.0).abs() < 1e-6, "out[1]={}", out[1]);
+        assert!((out[0] - 1.0).abs() < 1e-6, "out[0]={}", out[0]);
+        assert!((out[1] - 3.0).abs() < 1e-6, "out[1]={}", out[1]);
         assert!((out[16] - 2.0).abs() < 1e-6, "out[16]={}", out[16]);
         assert!((out[17] - 4.0).abs() < 1e-6, "out[17]={}", out[17]);
         // Other positions should be zero.
@@ -362,7 +362,10 @@ mod tests {
             GgmlDType::Q5K.type_size(),
             2 + 2 + K_SCALE_SIZE + QK_K / 8 + QK_K / 2
         );
-        assert_eq!(GgmlDType::Q6K.type_size(), QK_K / 2 + QK_K / 4 + QK_K / 16 + 2);
+        assert_eq!(
+            GgmlDType::Q6K.type_size(),
+            QK_K / 2 + QK_K / 4 + QK_K / 16 + 2
+        );
         assert_eq!(GgmlDType::Q8K.type_size(), 4 + QK_K + QK_K / 16 * 2);
     }
 }

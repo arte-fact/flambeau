@@ -108,7 +108,11 @@ fn synth_moe_one_token_forward() {
         }
         moe_weights.push(MoeWeights {
             ffn_norm: allocs.upload_f16(&vec![1.0_f32; HIDDEN]),
-            router: allocs.upload_q8_0(&det_signal(N_EXPERTS * HIDDEN, seed + 50), N_EXPERTS, HIDDEN),
+            router: allocs.upload_q8_0(
+                &det_signal(N_EXPERTS * HIDDEN, seed + 50),
+                N_EXPERTS,
+                HIDDEN,
+            ),
             experts_gate,
             experts_up,
             experts_down,
@@ -133,7 +137,7 @@ fn synth_moe_one_token_forward() {
         per_layer_kv_widths: None,
         attn_q_gated: false,
         kv_share_src: None,
-            shared_intermediate: 0,
+        shared_intermediate: 0,
     };
     let mut pool = ScratchPool::new(&device, cfg).expect("ScratchPool::new");
     let layout = ModelLayout {
@@ -164,7 +168,8 @@ fn synth_moe_one_token_forward() {
             let delta = ctx.moe_ffn(&normed, &moe_weights[li]).expect("moe_ffn");
             resid = ctx.residual_add(resid, delta).expect("moe residual_add");
         }
-        ctx.output_head(&resid, &lm_head_weights).expect("output_head");
+        ctx.output_head(&resid, &lm_head_weights)
+            .expect("output_head");
         let logits = ctx.logits();
         assert_eq!(logits.len(), VOCAB);
         for (i, &l) in logits.iter().enumerate() {

@@ -73,10 +73,7 @@ pub fn apply_json_mask_to_logits(
             logits[id as usize] = f32::NEG_INFINITY;
             continue;
         }
-        if !already_started
-            && probe.has_started()
-            && bytes.as_bytes().iter().all(|&b| b != b'{')
-        {
+        if !already_started && probe.has_started() && bytes.as_bytes().iter().all(|&b| b != b'{') {
             logits[id as usize] = f32::NEG_INFINITY;
         }
     }

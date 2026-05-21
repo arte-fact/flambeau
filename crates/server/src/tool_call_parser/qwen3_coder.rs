@@ -287,10 +287,9 @@ impl QwenCoderXmlParser {
             // No speculative `\n` drain — step_awaiting_close's leading-
             // whitespace drain handles it.
             // Emit arguments-as-JSON-string (guards #20198).
-            let args_json = serde_json::to_string(&Value::Object(std::mem::take(
-                &mut self.current_params,
-            )))
-            .unwrap_or_else(|_| "{}".to_owned());
+            let args_json =
+                serde_json::to_string(&Value::Object(std::mem::take(&mut self.current_params)))
+                    .unwrap_or_else(|_| "{}".to_owned());
             out.push(ParserEvent::ToolCallArgumentsDelta {
                 index: self.next_index,
                 arguments: args_json,
@@ -373,7 +372,7 @@ impl QwenCoderXmlParser {
                 });
                 self.next_index += 1;
                 self.state = State::Text;
-               true
+                true
             }
             "func" => {
                 // **Forgiveness**: model forgot `</tool_call>` and went
@@ -444,7 +443,11 @@ fn align_down_char_boundary(s: &str, n: usize) -> usize {
 /// Only the last `max(tag.len()) - 1` bytes are candidates — no need to
 /// scan the whole string.
 fn ambiguous_tail_start(s: &str, tags: &[&str]) -> usize {
-    let max_tail = tags.iter().map(|t| t.len().saturating_sub(1)).max().unwrap_or(0);
+    let max_tail = tags
+        .iter()
+        .map(|t| t.len().saturating_sub(1))
+        .max()
+        .unwrap_or(0);
     if max_tail == 0 || s.len() <= max_tail {
         // Consider every suffix; we'll still return s.len() if none match.
     }
@@ -526,9 +529,7 @@ mod tests {
     fn collect_opens(evts: &[ParserEvent]) -> Vec<(u32, String)> {
         evts.iter()
             .filter_map(|e| match e {
-                ParserEvent::ToolCallOpen { index, name } => {
-                    Some((*index, name.clone()))
-                }
+                ParserEvent::ToolCallOpen { index, name } => Some((*index, name.clone())),
                 _ => None,
             })
             .collect()
@@ -563,8 +564,7 @@ mod tests {
         assert_eq!(args.len(), 1);
         assert_eq!(args[0].0, 0);
         // JSON string body, with preserve_order from serde_json.
-        let parsed: serde_json::Value =
-            serde_json::from_str(&args[0].1).expect("valid json");
+        let parsed: serde_json::Value = serde_json::from_str(&args[0].1).expect("valid json");
         assert_eq!(parsed["city"], "San Francisco");
     }
 
@@ -595,10 +595,7 @@ mod tests {
             "<tool_call>\n<function=b>\n<parameter=y>\n2\n</parameter>\n</function>\n</tool_call>"
         );
         let evts = parse_all(input);
-        assert_eq!(
-            collect_opens(&evts),
-            vec![(0, "a".into()), (1, "b".into())]
-        );
+        assert_eq!(collect_opens(&evts), vec![(0, "a".into()), (1, "b".into())]);
         assert_eq!(collect_closes(&evts), vec![0, 1]);
         let args = collect_args_strings(&evts);
         assert_eq!(args[0], (0, r#"{"x":"1"}"#.into()));
@@ -816,7 +813,9 @@ mod tests {
         // Should have emitted the `first batch of reasoning ` as
         // ThinkDelta, holding only any tag-prefix tail.
         assert!(
-            evts1.iter().any(|e| matches!(e, ParserEvent::ThinkDelta(_))),
+            evts1
+                .iter()
+                .any(|e| matches!(e, ParserEvent::ThinkDelta(_))),
             "expected incremental ThinkDelta, got {evts1:?}"
         );
         let evts2 = p.push("more text</think>final");
@@ -858,7 +857,11 @@ mod tests {
         );
         let evts = parse_all(input);
         let opens = collect_opens(&evts);
-        assert_eq!(opens.len(), 3, "expected 3 calls (Paris/Tokyo/London), got opens={opens:?}");
+        assert_eq!(
+            opens.len(),
+            3,
+            "expected 3 calls (Paris/Tokyo/London), got opens={opens:?}"
+        );
         for (i, (_, name)) in opens.iter().enumerate() {
             assert_eq!(name, "get_weather", "open #{i} name should be get_weather");
         }

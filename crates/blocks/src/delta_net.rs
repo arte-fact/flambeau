@@ -42,8 +42,8 @@
 
 use anyhow::{bail, Context, Result};
 use flambeau_backend_hip::{HipDevice, HipEvent, HipStream};
-use flambeau_core::{CopyDirection, Device, DevicePtr};
 use flambeau_core::op::QDtype;
+use flambeau_core::{CopyDirection, Device, DevicePtr};
 use flambeau_ops::Ops;
 
 use crate::driver_utils::RawAllocTracker;
@@ -53,20 +53,20 @@ use crate::WeightHandle;
 #[derive(Copy, Clone)]
 pub struct DeltaNetLayerDecodeScratch {
     pub x_q8_1: DevicePtr,
-    pub qkv_mixed_f32: DevicePtr,   // [conv_channels]
-    pub z_f32: DevicePtr,           // [d_inner]
-    pub alpha_f32: DevicePtr,       // [num_v_heads]
-    pub beta_f32: DevicePtr,        // [num_v_heads]
-    pub conv_input: DevicePtr,      // [conv_kernel, conv_channels]
-    pub conv_out: DevicePtr,        // [conv_channels]
-    pub silu_out: DevicePtr,        // [conv_channels]
-    pub q_norm_f32: DevicePtr,      // [num_k_heads, head_k_dim]
-    pub k_norm_f32: DevicePtr,      // [num_k_heads, head_k_dim]
-    pub state_out: DevicePtr,       // [num_v_heads, head_v_dim]
-    pub out_normed: DevicePtr,      // [num_v_heads, head_v_dim]
-    pub gated_f32: DevicePtr,       // [d_inner]
-    pub gated_q8_1: DevicePtr,      // Q8_1 [d_inner / 32]
-    pub ssm_out_f32: DevicePtr,     // [hidden]
+    pub qkv_mixed_f32: DevicePtr, // [conv_channels]
+    pub z_f32: DevicePtr,         // [d_inner]
+    pub alpha_f32: DevicePtr,     // [num_v_heads]
+    pub beta_f32: DevicePtr,      // [num_v_heads]
+    pub conv_input: DevicePtr,    // [conv_kernel, conv_channels]
+    pub conv_out: DevicePtr,      // [conv_channels]
+    pub silu_out: DevicePtr,      // [conv_channels]
+    pub q_norm_f32: DevicePtr,    // [num_k_heads, head_k_dim]
+    pub k_norm_f32: DevicePtr,    // [num_k_heads, head_k_dim]
+    pub state_out: DevicePtr,     // [num_v_heads, head_v_dim]
+    pub out_normed: DevicePtr,    // [num_v_heads, head_v_dim]
+    pub gated_f32: DevicePtr,     // [d_inner]
+    pub gated_q8_1: DevicePtr,    // Q8_1 [d_inner / 32]
+    pub ssm_out_f32: DevicePtr,   // [hidden]
 }
 
 /// Shape inputs needed to size a `DeltaNetLayer` decode scratch.
@@ -179,39 +179,39 @@ impl OwnedDeltaNetLayerPrefillScratch {
 #[derive(Copy, Clone)]
 pub struct DeltaNetLayerPrefillScratch {
     pub max_tokens: usize,
-    pub x_norm_f16: DevicePtr,       // F16 [L, hidden]
+    pub x_norm_f16: DevicePtr, // F16 [L, hidden]
     pub x_q8_1: DevicePtr,
-    pub x_q8_1_mmq: DevicePtr,       // DS4 layout sibling for MMQ at L≥128
-    pub qkv_mixed_f32: DevicePtr,    // [L, conv_channels]
-    pub z_f32: DevicePtr,            // [L, d_inner]
-    pub alpha_f32: DevicePtr,        // [L, num_v_heads]
-    pub beta_f32: DevicePtr,         // [L, num_v_heads]
-    pub conv_input: DevicePtr,       // [(K-1) + L, conv_channels]
-    pub conv_out: DevicePtr,         // [L, conv_channels]
-    pub silu_out: DevicePtr,         // [L, conv_channels]
-    pub q_norm_f32: DevicePtr,       // [L, num_k_heads, head_k_dim]
-    pub k_norm_f32: DevicePtr,       // [L, num_k_heads, head_k_dim]
-    pub v_f32: DevicePtr,            // [L, num_v_heads, head_v_dim]
-    pub state_out: DevicePtr,        // [L, num_v_heads, head_v_dim]
+    pub x_q8_1_mmq: DevicePtr,    // DS4 layout sibling for MMQ at L≥128
+    pub qkv_mixed_f32: DevicePtr, // [L, conv_channels]
+    pub z_f32: DevicePtr,         // [L, d_inner]
+    pub alpha_f32: DevicePtr,     // [L, num_v_heads]
+    pub beta_f32: DevicePtr,      // [L, num_v_heads]
+    pub conv_input: DevicePtr,    // [(K-1) + L, conv_channels]
+    pub conv_out: DevicePtr,      // [L, conv_channels]
+    pub silu_out: DevicePtr,      // [L, conv_channels]
+    pub q_norm_f32: DevicePtr,    // [L, num_k_heads, head_k_dim]
+    pub k_norm_f32: DevicePtr,    // [L, num_k_heads, head_k_dim]
+    pub v_f32: DevicePtr,         // [L, num_v_heads, head_v_dim]
+    pub state_out: DevicePtr,     // [L, num_v_heads, head_v_dim]
     pub out_normed: DevicePtr,
     pub gated_f32: DevicePtr,
     pub gated_q8_1: DevicePtr,
     pub gated_q8_1_mmq: DevicePtr,
-    pub ssm_out_f32: DevicePtr,      // [L, hidden]
+    pub ssm_out_f32: DevicePtr, // [L, hidden]
 }
 
 /// Qwen3.5-Next / Qwen3.6 GDN (gated delta-net) block.
 pub struct DeltaNetLayer {
-    pub attn_qkv: WeightHandle,    // [conv_channels, hidden]
-    pub attn_gate: WeightHandle,   // [d_inner, hidden]
-    pub ssm_alpha: WeightHandle,   // [num_v_heads, hidden]
-    pub ssm_beta: WeightHandle,    // [num_v_heads, hidden]
-    pub ssm_out: WeightHandle,     // [hidden, d_inner]
-    pub ssm_dt_bias: DevicePtr,    // 1-D [num_v_heads] F32
-    pub ssm_a: DevicePtr,          // 1-D [num_v_heads] F32
-    pub ssm_conv1d: DevicePtr,     // [conv_kernel, conv_channels] F32
-    pub ssm_norm_w: DevicePtr,     // 1-D [head_v_dim] F16
-    pub attn_norm_w: DevicePtr,    // 1-D [hidden] F16
+    pub attn_qkv: WeightHandle,  // [conv_channels, hidden]
+    pub attn_gate: WeightHandle, // [d_inner, hidden]
+    pub ssm_alpha: WeightHandle, // [num_v_heads, hidden]
+    pub ssm_beta: WeightHandle,  // [num_v_heads, hidden]
+    pub ssm_out: WeightHandle,   // [hidden, d_inner]
+    pub ssm_dt_bias: DevicePtr,  // 1-D [num_v_heads] F32
+    pub ssm_a: DevicePtr,        // 1-D [num_v_heads] F32
+    pub ssm_conv1d: DevicePtr,   // [conv_kernel, conv_channels] F32
+    pub ssm_norm_w: DevicePtr,   // 1-D [head_v_dim] F16
+    pub attn_norm_w: DevicePtr,  // 1-D [hidden] F16
     pub hidden: usize,
     pub d_inner: usize,
     pub num_v_heads: usize,
@@ -466,7 +466,9 @@ impl DeltaNetLayer {
         state: DevicePtr,
         conv_history: DevicePtr,
         scratch: DeltaNetLayerDecodeScratch,
-        ar_partial_callback: Option<&mut dyn FnMut(DevicePtr, usize, &HipDevice, &HipStream) -> Result<()>>,
+        ar_partial_callback: Option<
+            &mut dyn FnMut(DevicePtr, usize, &HipDevice, &HipStream) -> Result<()>,
+        >,
     ) -> Result<()> {
         let hidden = self.hidden;
         let d_inner = self.d_inner;
@@ -642,13 +644,8 @@ impl DeltaNetLayer {
 
         // 10. Scale Q by 1 / sqrt(head_k_dim) (in-place).
         let q_scale = 1.0f32 / (head_k_dim as f32).sqrt();
-        ops.scale_f32(
-            scratch.q_norm_f32,
-            scratch.q_norm_f32,
-            qk_size,
-            q_scale,
-        )
-        .context("scale_f32 Q")?;
+        ops.scale_f32(scratch.q_norm_f32, scratch.q_norm_f32, qk_size, q_scale)
+            .context("scale_f32 Q")?;
 
         // 11. Fused state-step (absorbs α/β/gate compute).
         let n_rep = num_v_heads / num_k_heads;
@@ -752,8 +749,17 @@ impl DeltaNetLayer {
         state_event: Option<&HipEvent>,
     ) -> Result<()> {
         self.forward_prefill_with_ar_hook(
-            ops, device, stream, x_in, delta_out, state, conv_history,
-            scratch, n_tokens, state_event, None,
+            ops,
+            device,
+            stream,
+            x_in,
+            delta_out,
+            state,
+            conv_history,
+            scratch,
+            n_tokens,
+            state_event,
+            None,
         )
     }
 
@@ -811,13 +817,8 @@ impl DeltaNetLayer {
         .context("gdn prefill attn_norm")?;
         ops.quantize_f16_q8_1(scratch.x_norm_f16, scratch.x_q8_1, n_tokens * hidden)
             .context("gdn prefill x_norm → Q8_1 (std)")?;
-        ops.quantize_f16_q8_1_mmq(
-            scratch.x_norm_f16,
-            scratch.x_q8_1_mmq,
-            hidden,
-            n_tokens,
-        )
-        .context("gdn prefill x_norm → Q8_1 (MMQ DS4)")?;
+        ops.quantize_f16_q8_1_mmq(scratch.x_norm_f16, scratch.x_q8_1_mmq, hidden, n_tokens)
+            .context("gdn prefill x_norm → Q8_1 (MMQ DS4)")?;
 
         // 2..5. Hidden-input projections at M = L. qmatmul auto-
         // dispatches MMVQ vs MMQ based on M and weight dtype.
@@ -910,12 +911,8 @@ impl DeltaNetLayer {
         }
 
         // 7. silu(conv_out).
-        ops.silu_f32(
-            scratch.conv_out,
-            scratch.silu_out,
-            n_tokens * conv_channels,
-        )
-        .context("gdn prefill silu_f32(conv_out)")?;
+        ops.silu_f32(scratch.conv_out, scratch.silu_out, n_tokens * conv_channels)
+            .context("gdn prefill silu_f32(conv_out)")?;
 
         // 8. Split silu_out into Q | K | V contiguous buffers via the
         // fused kernel (memcpy slice loop is ~1500 driver calls/layer
@@ -1013,19 +1010,10 @@ impl DeltaNetLayer {
             n_tokens * d_inner,
         )
         .context("gdn prefill swiglu_f32(z, out_normed)")?;
-        ops.quantize_q8_1(
-            scratch.gated_f32,
-            scratch.gated_q8_1,
-            n_tokens * d_inner,
-        )
-        .context("gdn prefill quantise gated → Q8_1 (std)")?;
-        ops.quantize_q8_1_mmq(
-            scratch.gated_f32,
-            scratch.gated_q8_1_mmq,
-            d_inner,
-            n_tokens,
-        )
-        .context("gdn prefill quantise gated → Q8_1 (MMQ DS4)")?;
+        ops.quantize_q8_1(scratch.gated_f32, scratch.gated_q8_1, n_tokens * d_inner)
+            .context("gdn prefill quantise gated → Q8_1 (std)")?;
+        ops.quantize_q8_1_mmq(scratch.gated_f32, scratch.gated_q8_1_mmq, d_inner, n_tokens)
+            .context("gdn prefill quantise gated → Q8_1 (MMQ DS4)")?;
 
         // 15. ssm_out projection at M = L.
         ops.qmatmul(
@@ -1048,12 +1036,8 @@ impl DeltaNetLayer {
         }
 
         // 16. Cast back to F16 for the outer residual path.
-        ops.cast_f32_to_f16(
-            scratch.ssm_out_f32,
-            delta_out,
-            n_tokens * hidden,
-        )
-        .context("gdn prefill cast ssm_out → f16")?;
+        ops.cast_f32_to_f16(scratch.ssm_out_f32, delta_out, n_tokens * hidden)
+            .context("gdn prefill cast ssm_out → f16")?;
 
         Ok(())
     }

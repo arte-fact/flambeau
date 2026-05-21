@@ -118,7 +118,7 @@ fn synth_dense_one_token_forward() {
         per_layer_kv_widths: None,
         attn_q_gated: false,
         kv_share_src: None,
-            shared_intermediate: 0,
+        shared_intermediate: 0,
     };
     let mut pool = ScratchPool::new(&device, cfg).expect("ScratchPool::new");
     let layout = ModelLayout {
@@ -152,7 +152,8 @@ fn synth_dense_one_token_forward() {
             resid = ctx.residual_add(resid, delta).expect("ffn residual_add");
         }
 
-        ctx.output_head(&resid, &lm_head_weights).expect("output_head");
+        ctx.output_head(&resid, &lm_head_weights)
+            .expect("output_head");
         let logits = ctx.logits();
         assert_eq!(logits.len(), VOCAB);
         for (i, &l) in logits.iter().enumerate() {

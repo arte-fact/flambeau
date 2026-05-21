@@ -61,14 +61,10 @@ pub async fn completions(
         )
         .map_err(ApiError::internal)?;
         let prompt_tokens = prompt_ids.len() as u32;
-        let (text, _, completion_tokens, finish, _, _) = run_completion_ids(
-            state.clone(),
-            prompt_ids,
-            params,
-            true,
-        )
-        .await
-        .map_err(ApiError::internal)?;
+        let (text, _, completion_tokens, finish, _, _) =
+            run_completion_ids(state.clone(), prompt_ids, params, true)
+                .await
+                .map_err(ApiError::internal)?;
         (text, prompt_tokens, completion_tokens, finish)
     } else {
         if suffix_fim.is_some() {
@@ -77,10 +73,9 @@ pub async fn completions(
                 "`suffix` provided but model carries no FIM tokens — falling back to non-FIM completion"
             );
         }
-        let (t, p, c, f, _, _) =
-            run_completion(state.clone(), &req.prompt, params, false)
-                .await
-                .map_err(ApiError::internal)?;
+        let (t, p, c, f, _, _) = run_completion(state.clone(), &req.prompt, params, false)
+            .await
+            .map_err(ApiError::internal)?;
         (t, p, c, f)
     };
 

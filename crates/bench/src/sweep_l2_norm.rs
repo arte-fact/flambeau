@@ -4,7 +4,6 @@
 //! for Qwen3.6).
 
 #![cfg(feature = "hip")]
-
 #![expect(
     clippy::undocumented_unsafe_blocks,
     reason = "sweep harness — every unsafe block is a kernel launch or a memcpy_async \
@@ -32,8 +31,8 @@ pub fn run_sweep(repo_root: &Path) -> Result<Cert> {
     let dev = HipDevice::new(0)?;
     dev.bind()?;
 
-    let kb = kernels::hsaco("l2_norm_f32")
-        .ok_or_else(|| anyhow::anyhow!("l2_norm_f32 not compiled"))?;
+    let kb =
+        kernels::hsaco("l2_norm_f32").ok_or_else(|| anyhow::anyhow!("l2_norm_f32 not compiled"))?;
     let module = HipModule::load(dev.id(), kb)?;
     let kernel: HipKernel<'_> = module.kernel("flambeau_l2_norm_f32")?;
     let attrs: FuncAttributes = kernel.attributes()?;
@@ -41,12 +40,7 @@ pub fn run_sweep(repo_root: &Path) -> Result<Cert> {
     // (n_rows, k). Qwen3.6 GDN: rows = n_tokens × num_k_heads (= 16), k = head_k_dim (= 128).
     // Decode: n_tokens=1 → 16 rows. Prefill 128 tokens → 2048 rows.
     // Also include a larger k to exercise the strided loop.
-    let shapes = [
-        (16usize, 128usize),
-        (2048, 128),
-        (16, 256),
-        (1, 512),
-    ];
+    let shapes = [(16usize, 128usize), (2048, 128), (16, 256), (1, 512)];
     let eps = 1e-6f32;
 
     let mut results = Vec::new();

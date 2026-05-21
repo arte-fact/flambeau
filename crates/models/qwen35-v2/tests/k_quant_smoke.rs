@@ -49,9 +49,10 @@ fn session_qwen35_9b_q3_k_s_sd_finite_logits() {
         .max_by(|(_, a), (_, b)| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal))
         .map(|(i, _)| i)
         .unwrap();
-    eprintln!(
-        "qwen35-9B-Q3_K_S SD: min={min:.4} max={max:.4} argmax={argmax} finite={finite}"
-    );
+    eprintln!("qwen35-9B-Q3_K_S SD: min={min:.4} max={max:.4} argmax={argmax} finite={finite}");
     assert!(finite, "Q3_K_S logits contain NaN/Inf");
-    assert!(min < max, "logits are constant — model not actually computing");
+    assert!(
+        min < max,
+        "logits are constant — model not actually computing"
+    );
 }

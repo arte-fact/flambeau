@@ -58,9 +58,10 @@ pub async fn messages_anthropic(
         })
         .collect();
 
-    let messages = if !messages.iter().any(|m| {
-        m.role == "system" && !m.content_str().trim().is_empty()
-    }) {
+    let messages = if !messages
+        .iter()
+        .any(|m| m.role == "system" && !m.content_str().trim().is_empty())
+    {
         if let Some(sys) = state.default_system.as_deref() {
             let mut prepended = Vec::with_capacity(messages.len() + 1);
             prepended.push(ChatMessage {
@@ -111,12 +112,7 @@ pub async fn messages_anthropic(
 
     let prompt = state
         .chat_template
-        .render_with_tools(
-            &messages,
-            merged_tools.as_deref(),
-            true,
-            Some(false),
-        )
+        .render_with_tools(&messages, merged_tools.as_deref(), true, Some(false))
         .map_err(ApiError::internal)?;
     let has_tools = merged_tools.is_some();
     let relax_stop_mask = has_tools;
@@ -162,10 +158,8 @@ pub async fn messages_anthropic(
         content.push(AnthropicResponseBlock::Text { text: text_out });
     }
     for tc in &tool_calls {
-        let input: serde_json::Value =
-            serde_json::from_str(&tc.function.arguments).unwrap_or_else(|_| {
-                serde_json::json!({ "_raw": tc.function.arguments })
-            });
+        let input: serde_json::Value = serde_json::from_str(&tc.function.arguments)
+            .unwrap_or_else(|_| serde_json::json!({ "_raw": tc.function.arguments }));
         content.push(AnthropicResponseBlock::ToolUse {
             id: tc.id.clone(),
             name: tc.function.name.clone(),
@@ -173,7 +167,9 @@ pub async fn messages_anthropic(
         });
     }
     if content.is_empty() {
-        content.push(AnthropicResponseBlock::Text { text: String::new() });
+        content.push(AnthropicResponseBlock::Text {
+            text: String::new(),
+        });
     }
 
     Ok(Json(AnthropicMessagesResponse {
@@ -367,29 +363,27 @@ fn stream_messages_anthropic_sse(
         };
 
         let mut text_open = false;
-        let mut tool_open: std::collections::HashMap<u32, u32> =
-            std::collections::HashMap::new();
+        let mut tool_open: std::collections::HashMap<u32, u32> = std::collections::HashMap::new();
         let mut next_block_index: u32 = 1;
         let mut emitted_any = false;
         let mut has_tool_calls = false;
 
-        let emit_block_start_text = |tx: &mpsc::Sender<Result<Event, Infallible>>,
-                                     text_open: &mut bool|
-         -> bool {
-            if *text_open {
-                return true;
-            }
-            *text_open = true;
-            let frame = json!({
-                "type": "content_block_start",
-                "index": 0,
-                "content_block": {"type": "text", "text": ""},
-            });
-            tx.blocking_send(Ok(Event::default()
-                .event("content_block_start")
-                .data(frame.to_string())))
-                .is_ok()
-        };
+        let emit_block_start_text =
+            |tx: &mpsc::Sender<Result<Event, Infallible>>, text_open: &mut bool| -> bool {
+                if *text_open {
+                    return true;
+                }
+                *text_open = true;
+                let frame = json!({
+                    "type": "content_block_start",
+                    "index": 0,
+                    "content_block": {"type": "text", "text": ""},
+                });
+                tx.blocking_send(Ok(Event::default()
+                    .event("content_block_start")
+                    .data(frame.to_string())))
+                    .is_ok()
+            };
 
         let drain_events = |events: Vec<ParserEvent>,
                             text_open: &mut bool,
@@ -519,10 +513,9 @@ fn stream_messages_anthropic_sse(
 
         for (_idx, block_idx) in tool_open.drain() {
             let frame = json!({"type": "content_block_stop", "index": block_idx});
-            let _ = tx_clone
-                .blocking_send(Ok(Event::default()
-                    .event("content_block_stop")
-                    .data(frame.to_string())));
+            let _ = tx_clone.blocking_send(Ok(Event::default()
+                .event("content_block_stop")
+                .data(frame.to_string())));
         }
         if !text_open && !emitted_any {
             let cbs = json!({
@@ -537,10 +530,9 @@ fn stream_messages_anthropic_sse(
         }
         if text_open {
             let frame = json!({"type": "content_block_stop", "index": 0});
-            let _ = tx_clone
-                .blocking_send(Ok(Event::default()
-                    .event("content_block_stop")
-                    .data(frame.to_string())));
+            let _ = tx_clone.blocking_send(Ok(Event::default()
+                .event("content_block_stop")
+                .data(frame.to_string())));
         }
 
         let (finish, _, output_tokens) = match &res {
@@ -568,20 +560,22 @@ fn stream_messages_anthropic_sse(
             "delta": {"stop_reason": stop_reason, "stop_sequence": serde_json::Value::Null},
             "usage": {"output_tokens": output_tokens},
         });
-        let _ = tx_clone
-            .blocking_send(Ok(Event::default().event("message_delta").data(mdelta.to_string())));
+        let _ = tx_clone.blocking_send(Ok(Event::default()
+            .event("message_delta")
+            .data(mdelta.to_string())));
 
         let mstop = json!({"type": "message_stop"});
-        let _ = tx_clone
-            .blocking_send(Ok(Event::default().event("message_stop").data(mstop.to_string())));
+        let _ = tx_clone.blocking_send(Ok(Event::default()
+            .event("message_stop")
+            .data(mstop.to_string())));
 
         if let Err(e) = res {
             let err = json!({
                 "type": "error",
                 "error": {"type": "internal_error", "message": e.to_string()},
             });
-            let _ = tx_clone
-                .blocking_send(Ok(Event::default().event("error").data(err.to_string())));
+            let _ =
+                tx_clone.blocking_send(Ok(Event::default().event("error").data(err.to_string())));
         }
         let _ = id_clone;
     });

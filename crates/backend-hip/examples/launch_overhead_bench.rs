@@ -26,7 +26,10 @@
 use std::time::Instant;
 
 use flambeau_backend_hip::{device_count, HipDevice, HipModule, KernelArgs, LaunchCfg};
-#[expect(unused_imports, reason = "traits imported for type inference on `HipDevice` methods; not named directly")]
+#[expect(
+    unused_imports,
+    reason = "traits imported for type inference on `HipDevice` methods; not named directly"
+)]
 use flambeau_core::{Device, DevicePtr, Stream};
 use flambeau_kernels_hip as kernels;
 
@@ -60,10 +63,10 @@ fn main() -> anyhow::Result<()> {
     // Warm-up: 1k launches so first-launch JIT/cache effects don't skew.
     for _ in 0..1000 {
         let mut args = KernelArgs::new();
-        args.push(&dst_u64);      // x
-        args.push(&dst_u64);      // y (same buffer, 1.0 scale = no-op)
-        args.push(&n_elems);      // n
-        args.push(&scale);        // scale
+        args.push(&dst_u64); // x
+        args.push(&dst_u64); // y (same buffer, 1.0 scale = no-op)
+        args.push(&n_elems); // n
+        args.push(&scale); // scale
         let cfg = LaunchCfg::one_d(1, 32);
         unsafe { kernel.launch(stream, cfg, args)? };
     }
@@ -75,10 +78,10 @@ fn main() -> anyhow::Result<()> {
     let t0 = Instant::now();
     for i in 0..n_iters {
         let mut args = KernelArgs::new();
-        args.push(&dst_u64);      // x
-        args.push(&dst_u64);      // y
-        args.push(&n_elems);      // n
-        args.push(&scale);        // scale
+        args.push(&dst_u64); // x
+        args.push(&dst_u64); // y
+        args.push(&n_elems); // n
+        args.push(&scale); // scale
         unsafe { kernel.launch(stream, cfg, args)? };
         if sync_every > 0 && (i + 1) % sync_every == 0 {
             stream.synchronize()?;
@@ -111,9 +114,7 @@ fn main() -> anyhow::Result<()> {
 
     let ns_per_call_a = dt_a.as_nanos() as f64 / n_iters as f64;
     let ns_per_call_b = dt_b.as_nanos() as f64 / n_iters as f64;
-    eprintln!(
-        "[lob] {n_iters} iters, sync_every={sync_every}"
-    );
+    eprintln!("[lob] {n_iters} iters, sync_every={sync_every}");
     eprintln!(
         "[lob]  A (fresh KernelArgs):  {:>7.3} ms total → {:>6.3} µs/launch",
         dt_a.as_secs_f64() * 1000.0,
@@ -125,9 +126,7 @@ fn main() -> anyhow::Result<()> {
         ns_per_call_b / 1000.0,
         (ns_per_call_a - ns_per_call_b) / 1000.0
     );
-    eprintln!(
-        "[lob]  gfx906 rocprof hipModuleLaunchKernel avg (same binary earlier): ~2.25 µs"
-    );
+    eprintln!("[lob]  gfx906 rocprof hipModuleLaunchKernel avg (same binary earlier): ~2.25 µs");
 
     unsafe { dev.dealloc(d_ptr, 4)? };
     Ok(())

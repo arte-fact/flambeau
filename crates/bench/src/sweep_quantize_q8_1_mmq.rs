@@ -8,7 +8,6 @@
 //! the sub-block sum path that the Q4_1 vec_dot consumes.
 
 #![cfg(feature = "hip")]
-
 #![expect(
     clippy::undocumented_unsafe_blocks,
     reason = "sweep harness — every unsafe block is a kernel launch or a memcpy_async \
@@ -19,9 +18,7 @@
 use std::path::Path;
 
 use anyhow::{bail, Context, Result};
-use flambeau_backend_hip::{
-    device_count, HipDevice, HipKernel, HipModule, KernelArgs, LaunchCfg,
-};
+use flambeau_backend_hip::{device_count, HipDevice, HipKernel, HipModule, KernelArgs, LaunchCfg};
 use flambeau_core::{CopyDirection, Device, DevicePtr, Stream};
 use flambeau_kernels_hip as kernels;
 use flambeau_quant::BlockQ8_1Mmq;
@@ -40,8 +37,7 @@ pub fn run_sweep(repo_root: &Path) -> Result<Cert> {
     let bytes = kernels::hsaco("quantize_q8_1_mmq")
         .ok_or_else(|| anyhow::anyhow!("quantize_q8_1_mmq not compiled"))?;
     let module = HipModule::load(dev.id(), bytes)?;
-    let kernel: HipKernel<'_> =
-        module.kernel("flambeau_quantize_q8_1_mmq")?;
+    let kernel: HipKernel<'_> = module.kernel("flambeau_quantize_q8_1_mmq")?;
 
     // (total_b = batch rows, ncols = K). ncols must be a multiple of 128.
     let shapes = [
@@ -234,4 +230,3 @@ fn run_shape(
 
     Ok((max_rel_err.max(ssum_max_err), !any_nan))
 }
-

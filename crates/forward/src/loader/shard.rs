@@ -151,9 +151,7 @@ pub fn upload_row_sharded_quant(
         let block_size = info.dtype.block_size();
         let type_size = info.dtype.type_size();
         if cols_per_rank % block_size != 0 {
-            bail!(
-                "{name}: cols_per_rank {cols_per_rank} not divisible by block_size {block_size}"
-            );
+            bail!("{name}: cols_per_rank {cols_per_rank} not divisible by block_size {block_size}");
         }
         let row_bytes = n_cols / block_size * type_size;
         let half_row_bytes = cols_per_rank / block_size * type_size;
@@ -207,9 +205,9 @@ pub(super) fn upload_col(
 ) -> Result<QuantWeight> {
     match shard {
         ShardMode::Replicated => upload_quant_weight(file, device, name, n_rows * n_cols, allocs),
-        ShardMode::Tp { rank, n_ranks } => upload_col_sharded_quant(
-            file, device, name, n_rows, n_cols, rank, n_ranks, allocs,
-        ),
+        ShardMode::Tp { rank, n_ranks } => {
+            upload_col_sharded_quant(file, device, name, n_rows, n_cols, rank, n_ranks, allocs)
+        }
     }
 }
 
@@ -225,8 +223,8 @@ pub(super) fn upload_row(
 ) -> Result<QuantWeight> {
     match shard {
         ShardMode::Replicated => upload_quant_weight(file, device, name, n_rows * n_cols, allocs),
-        ShardMode::Tp { rank, n_ranks } => upload_row_sharded_quant(
-            file, device, name, n_rows, n_cols, rank, n_ranks, allocs,
-        ),
+        ShardMode::Tp { rank, n_ranks } => {
+            upload_row_sharded_quant(file, device, name, n_rows, n_cols, rank, n_ranks, allocs)
+        }
     }
 }

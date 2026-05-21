@@ -720,10 +720,9 @@ mod tests {
         let mode: ToolChoice = serde_json::from_str(r#""auto""#).unwrap();
         assert!(matches!(mode, ToolChoice::Mode(ref s) if s == "auto"));
 
-        let named: ToolChoice = serde_json::from_str(
-            r#"{"type":"function","function":{"name":"get_weather"}}"#,
-        )
-        .unwrap();
+        let named: ToolChoice =
+            serde_json::from_str(r#"{"type":"function","function":{"name":"get_weather"}}"#)
+                .unwrap();
         match named {
             ToolChoice::Named(n) => {
                 assert_eq!(n.kind, "function");
@@ -872,7 +871,10 @@ mod tests {
             model: "flambeau".into(),
             stop_reason: "end_turn".into(),
             stop_sequence: None,
-            usage: AnthropicUsage { input_tokens: 5, output_tokens: 1 },
+            usage: AnthropicUsage {
+                input_tokens: 5,
+                output_tokens: 1,
+            },
         };
         let s = serde_json::to_string(&r).unwrap();
         assert!(s.contains("\"type\":\"message\""));
@@ -904,14 +906,11 @@ mod tests {
 
     #[test]
     fn anthropic_tool_choice_variants() {
-        let auto: AnthropicToolChoice =
-            serde_json::from_str(r#"{"type":"auto"}"#).unwrap();
+        let auto: AnthropicToolChoice = serde_json::from_str(r#"{"type":"auto"}"#).unwrap();
         assert!(matches!(auto, AnthropicToolChoice::Auto));
-        let any: AnthropicToolChoice =
-            serde_json::from_str(r#"{"type":"any"}"#).unwrap();
+        let any: AnthropicToolChoice = serde_json::from_str(r#"{"type":"any"}"#).unwrap();
         assert!(matches!(any, AnthropicToolChoice::Any));
-        let none: AnthropicToolChoice =
-            serde_json::from_str(r#"{"type":"none"}"#).unwrap();
+        let none: AnthropicToolChoice = serde_json::from_str(r#"{"type":"none"}"#).unwrap();
         assert!(matches!(none, AnthropicToolChoice::None));
         let named: AnthropicToolChoice =
             serde_json::from_str(r#"{"type":"tool","name":"weather"}"#).unwrap();
@@ -928,7 +927,9 @@ mod tests {
             kind: "message",
             role: "assistant",
             content: vec![
-                AnthropicResponseBlock::Text { text: "Calling tool".into() },
+                AnthropicResponseBlock::Text {
+                    text: "Calling tool".into(),
+                },
                 AnthropicResponseBlock::ToolUse {
                     id: "toolu_abc".into(),
                     name: "get_weather".into(),
@@ -938,7 +939,10 @@ mod tests {
             model: "flambeau".into(),
             stop_reason: "tool_use".into(),
             stop_sequence: None,
-            usage: AnthropicUsage { input_tokens: 5, output_tokens: 12 },
+            usage: AnthropicUsage {
+                input_tokens: 5,
+                output_tokens: 12,
+            },
         };
         let s = serde_json::to_string(&r).unwrap();
         assert!(s.contains("\"type\":\"tool_use\""));

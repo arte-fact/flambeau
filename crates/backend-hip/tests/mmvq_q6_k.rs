@@ -43,12 +43,15 @@ fn run(n_rows: usize, k: usize, seed: u64) -> (Vec<f32>, Vec<f32>) {
     let m_module = HipModule::load(0, m_bytes).unwrap();
     let k_mmvq: HipKernel<'_> = m_module.kernel("flambeau_mmvq_q6_k_q8_1").unwrap();
 
-    let x_blocks: Vec<BlockQ6K> = (0..n_rows * sb).map(|i| random_q6k_block(seed, i)).collect();
+    let x_blocks: Vec<BlockQ6K> = (0..n_rows * sb)
+        .map(|i| random_q6k_block(seed, i))
+        .collect();
     let total_elems = n_rows * k;
     let mut x_dequant = vec![0.0f32; total_elems];
     {
         let raw: &[u8] = bytemuck::cast_slice(&x_blocks);
-        flambeau_quant::dequantize_into(flambeau_quant::GgmlDType::Q6K, raw, &mut x_dequant).unwrap();
+        flambeau_quant::dequantize_into(flambeau_quant::GgmlDType::Q6K, raw, &mut x_dequant)
+            .unwrap();
     }
 
     let y_f32 = seeded_f32(seed.wrapping_add(41), k);
@@ -79,7 +82,8 @@ fn run(n_rows: usize, k: usize, seed: u64) -> (Vec<f32>, Vec<f32>) {
     let dst = download_f32(&dev, d_dst, n_rows);
 
     unsafe {
-        dev.dealloc(d_x, x_blocks.len() * std::mem::size_of::<BlockQ6K>()).unwrap();
+        dev.dealloc(d_x, x_blocks.len() * std::mem::size_of::<BlockQ6K>())
+            .unwrap();
         dev.dealloc(d_y_f32, y_f32.len() * 4).unwrap();
         dev.dealloc(d_y_q8_1, y_q8_1_bytes).unwrap();
         dev.dealloc(d_dst, n_rows * 4).unwrap();
@@ -92,7 +96,9 @@ fn run(n_rows: usize, k: usize, seed: u64) -> (Vec<f32>, Vec<f32>) {
 
 #[test]
 fn mmvq_q6_k_small() {
-    if !maybe_skip() { return }
+    if !maybe_skip() {
+        return;
+    }
     let (got, reference) = run(4, QK_K, 0xC0FFEE);
     let err = max_rel_err(&got, &reference);
     let tol = cert_tol(QK_K);
@@ -102,7 +108,9 @@ fn mmvq_q6_k_small() {
 
 #[test]
 fn mmvq_q6_k_qwen_2048() {
-    if !maybe_skip() { return }
+    if !maybe_skip() {
+        return;
+    }
     let k = 2048;
     let (got, reference) = run(8, k, 0xFEEDFACE);
     let err = max_rel_err(&got, &reference);
@@ -113,7 +121,9 @@ fn mmvq_q6_k_qwen_2048() {
 
 #[test]
 fn mmvq_q6_k_5120() {
-    if !maybe_skip() { return }
+    if !maybe_skip() {
+        return;
+    }
     let k = 5120;
     let (got, reference) = run(16, k, 0x12345678);
     let err = max_rel_err(&got, &reference);
@@ -124,7 +134,9 @@ fn mmvq_q6_k_5120() {
 
 #[test]
 fn mmvq_q6_k_15360() {
-    if !maybe_skip() { return }
+    if !maybe_skip() {
+        return;
+    }
     let k = 15360;
     let (got, reference) = run(4, k, 0xABCDEF01);
     let err = max_rel_err(&got, &reference);

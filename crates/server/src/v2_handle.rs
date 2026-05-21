@@ -42,10 +42,7 @@ pub trait V2BatchableSession: Send {
     /// Drive N concurrent decodes through one Session forward. After
     /// return, logits rows are reachable via [`Self::logits_row`] with
     /// the model's vocab. Slot ids must be distinct.
-    fn forward_decode_batched(
-        &mut self,
-        slots: &[(u32, usize, usize)],
-    ) -> Result<()>;
+    fn forward_decode_batched(&mut self, slots: &[(u32, usize, usize)]) -> Result<()>;
 
     fn logits_row(&self, i: usize, vocab: usize) -> &[f32];
 
@@ -75,10 +72,7 @@ impl<A: Arch> V2BatchableSession for Session<A> {
         Session::forward_prefill_logits_slot(self, tokens, start_position, slot_id, out)
     }
 
-    fn forward_decode_batched(
-        &mut self,
-        slots: &[(u32, usize, usize)],
-    ) -> Result<()> {
+    fn forward_decode_batched(&mut self, slots: &[(u32, usize, usize)]) -> Result<()> {
         Session::forward_decode_batched(self, slots)
     }
 

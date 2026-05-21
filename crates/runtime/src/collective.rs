@@ -17,9 +17,7 @@ pub enum CollectiveError {
     #[error("rank {rank} out of range for mesh of size {size}")]
     RankOutOfRange { rank: u32, size: u32 },
 
-    #[error(
-        "buffer length mismatch: expected {expected_elems} {dtype:?}, got {got} bytes"
-    )]
+    #[error("buffer length mismatch: expected {expected_elems} {dtype:?}, got {got} bytes")]
     BufferLen {
         expected_elems: usize,
         dtype: CollectiveDType,
@@ -95,7 +93,12 @@ impl RefMesh {
     /// Hand a `RefRankHandle` to rank `r`. Each handle clones the `Arc` so
     /// dropping the mesh after handles have been distributed is fine.
     pub fn rank_handle(self: &Arc<Self>, r: RankId) -> RefRankHandle {
-        assert!(r.0 < self.size, "rank id {} exceeds mesh size {}", r.0, self.size);
+        assert!(
+            r.0 < self.size,
+            "rank id {} exceeds mesh size {}",
+            r.0,
+            self.size
+        );
         RefRankHandle {
             rank: r,
             size: self.size,
@@ -149,33 +152,20 @@ pub trait AllReduce {
 /// Concatenate each rank's buffer into a (rank_count × elem_count) output.
 /// Input `send` is this rank's shard; `recv` is the full gathered buffer.
 pub trait AllGather {
-    fn all_gather(
-        &self,
-        send: &[u8],
-        recv: &mut [u8],
-        cfg: &CollectiveCfg,
-    ) -> CollectiveResult<()>;
+    fn all_gather(&self, send: &[u8], recv: &mut [u8], cfg: &CollectiveCfg)
+        -> CollectiveResult<()>;
 }
 
 /// Element at rank `r` is received from rank `r`'s `send[r * shard..]`. The
 /// per-shard size is `elem_count` (same across all ranks).
 pub trait AllToAll {
-    fn all_to_all(
-        &self,
-        send: &[u8],
-        recv: &mut [u8],
-        cfg: &CollectiveCfg,
-    ) -> CollectiveResult<()>;
+    fn all_to_all(&self, send: &[u8], recv: &mut [u8], cfg: &CollectiveCfg)
+        -> CollectiveResult<()>;
 }
 
 /// Fan rank `root`'s buffer out to every rank.
 pub trait Broadcast {
-    fn broadcast(
-        &self,
-        buf: &mut [u8],
-        root: RankId,
-        cfg: &CollectiveCfg,
-    ) -> CollectiveResult<()>;
+    fn broadcast(&self, buf: &mut [u8], root: RankId, cfg: &CollectiveCfg) -> CollectiveResult<()>;
 }
 
 // Generic element-wise reduction over a dtype, in place on rank 0 then
@@ -243,9 +233,15 @@ trait ReduceField: Copy {
 }
 
 impl ReduceField for f32 {
-    fn add(self, o: Self) -> Self { self + o }
-    fn max_(self, o: Self) -> Self { self.max(o) }
-    fn min_(self, o: Self) -> Self { self.min(o) }
+    fn add(self, o: Self) -> Self {
+        self + o
+    }
+    fn max_(self, o: Self) -> Self {
+        self.max(o)
+    }
+    fn min_(self, o: Self) -> Self {
+        self.min(o)
+    }
 }
 
 impl AllReduce for RefRankHandle {
@@ -333,12 +329,7 @@ impl AllToAll for RefRankHandle {
 }
 
 impl Broadcast for RefRankHandle {
-    fn broadcast(
-        &self,
-        buf: &mut [u8],
-        root: RankId,
-        cfg: &CollectiveCfg,
-    ) -> CollectiveResult<()> {
+    fn broadcast(&self, buf: &mut [u8], root: RankId, cfg: &CollectiveCfg) -> CollectiveResult<()> {
         if root.0 >= self.size {
             return Err(CollectiveError::RankOutOfRange {
                 rank: root.0,

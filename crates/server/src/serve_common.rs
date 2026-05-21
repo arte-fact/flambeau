@@ -55,8 +55,9 @@ impl BootMetadata {
         );
         let supports_thinking = tpl_src.contains("enable_thinking");
 
-        let quantization: Option<String> =
-            gguf.metadata_u32("general.file_type").map(quantization_label);
+        let quantization: Option<String> = gguf
+            .metadata_u32("general.file_type")
+            .map(quantization_label);
 
         let model_defaults = crate::state::ModelDefaults::from_gguf(gguf);
         info!(

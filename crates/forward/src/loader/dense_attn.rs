@@ -88,11 +88,39 @@ pub fn load_dense_attn_layer(
         .transpose()?;
     // Gated `attn_q`: head-interleaved layout, so col-shard with
     // doubled n_rows cleanly partitions heads + their gates.
-    let attn_q_rows = if spec.attn_q_gated { 2 * q_width } else { q_width };
-    let attn_q = upload_col(file, device, spec.attn_q_name, attn_q_rows, spec.hidden, shard, allocs)?;
-    let attn_k = upload_col(file, device, spec.attn_k_name, kv_width, spec.hidden, shard, allocs)?;
+    let attn_q_rows = if spec.attn_q_gated {
+        2 * q_width
+    } else {
+        q_width
+    };
+    let attn_q = upload_col(
+        file,
+        device,
+        spec.attn_q_name,
+        attn_q_rows,
+        spec.hidden,
+        shard,
+        allocs,
+    )?;
+    let attn_k = upload_col(
+        file,
+        device,
+        spec.attn_k_name,
+        kv_width,
+        spec.hidden,
+        shard,
+        allocs,
+    )?;
     let attn_v = if let Some(name) = spec.attn_v_name {
-        Some(upload_col(file, device, name, kv_width, spec.hidden, shard, allocs)?)
+        Some(upload_col(
+            file,
+            device,
+            name,
+            kv_width,
+            spec.hidden,
+            shard,
+            allocs,
+        )?)
     } else {
         None
     };

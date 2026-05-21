@@ -5,7 +5,6 @@
 //! the sweep degenerates to a same-rank dtod sanity check.
 
 #![cfg(feature = "hip")]
-
 #![expect(
     clippy::undocumented_unsafe_blocks,
     reason = "sweep harness — every unsafe block is a kernel launch or a memcpy_async \
@@ -102,7 +101,9 @@ fn run_shape(cluster: &HipCluster, bytes: usize) -> Result<(f32, f32)> {
 
     // Host-side seeded pattern — every byte determined by offset so a
     // bit-wise round-trip check catches any byte-swapping bug.
-    let pattern: Vec<u8> = (0..bytes).map(|i| (i.wrapping_mul(0x9E) as u8) ^ 0xA5).collect();
+    let pattern: Vec<u8> = (0..bytes)
+        .map(|i| (i.wrapping_mul(0x9E) as u8) ^ 0xA5)
+        .collect();
 
     // Per-rank allocations: `src_buf[r]` holds the outbound payload on
     // rank r; `dst_buf[r]` catches inbound data on rank r. We seed only
@@ -158,13 +159,7 @@ fn run_shape(cluster: &HipCluster, bytes: usize) -> Result<(f32, f32)> {
         if src_rank != 0 {
             // SAFETY: both buffers are `bytes` long on their respective devices.
             unsafe {
-                cluster.peer_copy_via_host(
-                    src_bufs[src_rank],
-                    src_rank,
-                    src_bufs[0],
-                    0,
-                    bytes,
-                )?;
+                cluster.peer_copy_via_host(src_bufs[src_rank], src_rank, src_bufs[0], 0, bytes)?;
             }
         }
 
@@ -239,4 +234,3 @@ fn run_shape(cluster: &HipCluster, bytes: usize) -> Result<(f32, f32)> {
 
     Ok((max_err, best_gbps))
 }
-

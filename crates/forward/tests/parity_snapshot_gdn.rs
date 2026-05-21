@@ -30,10 +30,8 @@ const RMS_EPS: f32 = 1e-5;
 /// Tolerance covers F16/F32 rounding across the recurrent step and
 /// the LM-head matmul.
 const REFERENCE_LOGITS_HEAD16: [f32; 16] = [
-    6.895144, -7.6692233, -20.527489, -24.147297,
-    -15.382086, 2.195806, 19.785957, 28.057117,
-    22.347519, 5.3705873, -14.10443, -26.103209,
-    -24.811516, -11.56735, 6.1491146, 19.138206,
+    6.895144, -7.6692233, -20.527489, -24.147297, -15.382086, 2.195806, 19.785957, 28.057117,
+    22.347519, 5.3705873, -14.10443, -26.103209, -24.811516, -11.56735, 6.1491146, 19.138206,
 ];
 const REFERENCE_ARGMAX: usize = 7;
 const TOL: f32 = 5e-3;
@@ -80,16 +78,8 @@ fn parity_snapshot_gdn_single_token() {
             HIDDEN,
         ),
         attn_gate: allocs.upload_q8_0(&det_signal(d_inner * HIDDEN, 202), d_inner, HIDDEN),
-        ssm_alpha: allocs.upload_q8_0(
-            &det_signal(NUM_V_HEADS * HIDDEN, 203),
-            NUM_V_HEADS,
-            HIDDEN,
-        ),
-        ssm_beta: allocs.upload_q8_0(
-            &det_signal(NUM_V_HEADS * HIDDEN, 204),
-            NUM_V_HEADS,
-            HIDDEN,
-        ),
+        ssm_alpha: allocs.upload_q8_0(&det_signal(NUM_V_HEADS * HIDDEN, 203), NUM_V_HEADS, HIDDEN),
+        ssm_beta: allocs.upload_q8_0(&det_signal(NUM_V_HEADS * HIDDEN, 204), NUM_V_HEADS, HIDDEN),
         ssm_out: allocs.upload_q8_0(&det_signal(HIDDEN * d_inner, 205), HIDDEN, d_inner),
         ssm_dt_bias: allocs.upload_f32(&det_signal(NUM_V_HEADS, 206)),
         ssm_a: allocs.upload_f32(&det_signal(NUM_V_HEADS, 207)),
@@ -112,7 +102,7 @@ fn parity_snapshot_gdn_single_token() {
         gdn: Some(dims),
         per_layer_kv_widths: None,
         attn_q_gated: false,
-            shared_intermediate: 0,
+        shared_intermediate: 0,
     };
     let mut pool = ScratchPool::new(&device, cfg).expect("ScratchPool::new");
     let layout = ModelLayout {

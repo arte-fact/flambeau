@@ -10,7 +10,6 @@
 //! derivation.
 
 #![cfg(feature = "hip")]
-
 #![expect(
     clippy::undocumented_unsafe_blocks,
     reason = "sweep harness — every unsafe block is a kernel launch or a memcpy_async \
@@ -29,8 +28,7 @@ use flambeau_kernels_hip as kernels;
 use flambeau_quant::{
     dequantize_into, BlockIq1M, BlockIq1S, BlockIq2S, BlockIq2Xs, BlockIq2Xxs, BlockIq3S,
     BlockIq3Xxs, BlockIq4Nl, BlockIq4Xs, BlockQ2K, BlockQ3K, BlockQ4K, BlockQ4_1, BlockQ5K,
-    BlockQ6K, BlockQ8K, BlockQ8_0,
-    BlockQ8_1, GgmlDType, QK8_0, QK_K,
+    BlockQ6K, BlockQ8K, BlockQ8_0, BlockQ8_1, GgmlDType, QK8_0, QK_K,
 };
 use half::f16;
 
@@ -293,7 +291,9 @@ impl Dtype {
             Dtype::Q5K | Dtype::Q5KR2 => std::mem::size_of::<BlockQ5K>(),
             Dtype::Q6K | Dtype::Q6KR4 | Dtype::Q6KDP4A => std::mem::size_of::<BlockQ6K>(),
             Dtype::Q8K => std::mem::size_of::<BlockQ8K>(),
-            Dtype::Q4_1 | Dtype::Q4_1R2 | Dtype::Q4_1R2DP4A | Dtype::Q4_1T128 => std::mem::size_of::<BlockQ4_1>(),
+            Dtype::Q4_1 | Dtype::Q4_1R2 | Dtype::Q4_1R2DP4A | Dtype::Q4_1T128 => {
+                std::mem::size_of::<BlockQ4_1>()
+            }
             Dtype::Iq4Nl | Dtype::Iq4NlR2 => std::mem::size_of::<BlockIq4Nl>(),
             Dtype::Iq4Xs | Dtype::Iq4XsR2 => std::mem::size_of::<BlockIq4Xs>(),
             Dtype::Iq3Xxs | Dtype::Iq3XxsR2 => std::mem::size_of::<BlockIq3Xxs>(),
@@ -323,9 +323,21 @@ impl Dtype {
     fn rows_per_block(self) -> u32 {
         match self {
             Dtype::Q6KR4 => 4,
-            Dtype::Q2KR2 | Dtype::Q3KR2 | Dtype::Q4KR2 | Dtype::Q5KR2 | Dtype::Q4_1R2
-            | Dtype::Q4_1R2DP4A | Dtype::Iq4NlR2 | Dtype::Iq4XsR2 | Dtype::Iq3XxsR2 | Dtype::Iq3SR2
-            | Dtype::Iq2XxsR2 | Dtype::Iq2XsR2 | Dtype::Iq2SR2 | Dtype::Iq1SR2 | Dtype::Iq1MR2 => 2,
+            Dtype::Q2KR2
+            | Dtype::Q3KR2
+            | Dtype::Q4KR2
+            | Dtype::Q5KR2
+            | Dtype::Q4_1R2
+            | Dtype::Q4_1R2DP4A
+            | Dtype::Iq4NlR2
+            | Dtype::Iq4XsR2
+            | Dtype::Iq3XxsR2
+            | Dtype::Iq3SR2
+            | Dtype::Iq2XxsR2
+            | Dtype::Iq2XsR2
+            | Dtype::Iq2SR2
+            | Dtype::Iq1SR2
+            | Dtype::Iq1MR2 => 2,
             // Q6KDP4A is a single-row kernel (inner cooperative across 2 super-blocks).
             _ => 1,
         }
@@ -354,8 +366,7 @@ impl SweepSpec {
 }
 
 pub fn run_sweep(spec: &SweepSpec, repo_root: &Path) -> Result<Cert> {
-    let n = device_count()
-        .context("hipGetDeviceCount")?;
+    let n = device_count().context("hipGetDeviceCount")?;
     if n < 1 {
         bail!("no HIP devices on this host — sweep needs gfx906");
     }
@@ -439,12 +450,12 @@ fn capture_static_pmc(dev: &HipDevice, dtype: Dtype) -> Result<PmcSnapshot> {
 
     let pmc = PmcSnapshot {
         vgpr_count: Some(attrs.num_regs),
-        sgpr_count: None, // hipFuncGetAttribute doesn't expose SGPR; 
-                          // captures it from the .hsaco ELF via inspect-hsaco
-                          // once that CLI lands.
+        sgpr_count: None, // hipFuncGetAttribute doesn't expose SGPR;
+        // captures it from the .hsaco ELF via inspect-hsaco
+        // once that CLI lands.
         waves_per_simd: Some(attrs.gfx906_waves_per_simd()),
-        mem_busy_pct: None,   // Phase B (rocprof wrapper).
-        valu_busy_pct: None,  // Phase B.
+        mem_busy_pct: None,  // Phase B (rocprof wrapper).
+        valu_busy_pct: None, // Phase B.
     };
 
     tracing::info!(
@@ -574,7 +585,9 @@ fn seeded_bytes(seed: u64, n: usize) -> Vec<u8> {
     let mut s = seed.wrapping_mul(6364136223846793005).wrapping_add(1);
     (0..n)
         .map(|_| {
-            s = s.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+            s = s
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
             (s >> 24) as u8
         })
         .collect()
@@ -705,7 +718,7 @@ fn tame_scales(dtype: Dtype, raw: Vec<u8>) -> Vec<u8> {
                 //          | ((sc[2]>>4)&0xF00) | (sc[3] & 0xF000)
                 // Target d_bits = 0x0850. Distribute nibbles 0x0, 0x5, 0x8, 0x0.
                 let pin_nib = [0x0u16, 0x5, 0x8, 0x0];
-                let sc_off = QK_K / 8 + QK_K / 16;   // scales array offset in BlockIq1M (no d)
+                let sc_off = QK_K / 8 + QK_K / 16; // scales array offset in BlockIq1M (no d)
                 for i in 0..4 {
                     let off = sc_off + 2 * i;
                     let lo = u16::from_le_bytes([block[off], block[off + 1]]);
@@ -754,4 +767,3 @@ fn cert_tol(_k: usize) -> f32 {
     // Tighter bounds follow once MMVQ moves to the dp4a / multi-row DPP path.
     3e-2
 }
-

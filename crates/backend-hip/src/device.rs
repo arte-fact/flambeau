@@ -17,8 +17,7 @@ use flambeau_core::{CopyDirection, Device, DeviceError, DevicePtr, DeviceResult,
 use crate::sys::{
     self, error_string, hipFree, hipGetDevice, hipGetDeviceCount, hipMalloc, hipMemcpyAsync,
     hipMemcpyKind, hipSetDevice, hipStreamCreate, hipStreamCreateWithFlags, hipStreamDestroy,
-    hipStreamSynchronize,
-    hipStream_t, HIP_SUCCESS,
+    hipStreamSynchronize, hipStream_t, HIP_SUCCESS,
 };
 
 const BACKEND: &str = "hip";
@@ -107,10 +106,7 @@ impl HipStream {
         // SAFETY: `hipStreamCreate` writes a stream handle through the
         // out-pointer. `&mut s` is valid for writes of a `hipStream_t`.
         check(unsafe { hipStreamCreate(&raw mut s) }, "hipStreamCreate")?;
-        Ok(Self {
-            ptr: s,
-            device_id,
-        })
+        Ok(Self { ptr: s, device_id })
     }
 
     /// 5.g — create a non-blocking stream (`hipStreamNonBlocking` = 1).
@@ -199,10 +195,7 @@ impl HipEvent {
         // the out-pointer. `&mut e` is valid for a `hipEvent_t`.
         check(
             unsafe {
-                crate::sys::hipEventCreateWithFlags(
-                    &raw mut e,
-                    crate::sys::hipEventDisableTiming,
-                )
+                crate::sys::hipEventCreateWithFlags(&raw mut e, crate::sys::hipEventDisableTiming)
             },
             "hipEventCreateWithFlags",
         )?;
@@ -494,9 +487,7 @@ impl HipGraphExec {
             // SAFETY: node is live (from hipGraphGetNodes on the still-
             // alive source graph); params is local stack storage.
             check(
-                unsafe {
-                    crate::sys::hipGraphKernelNodeGetParams(node, &raw mut params)
-                },
+                unsafe { crate::sys::hipGraphKernelNodeGetParams(node, &raw mut params) },
                 "hipGraphKernelNodeGetParams (shadow init)",
             )?;
             // Determine arity. Without a dedicated query, pull it from
@@ -511,9 +502,8 @@ impl HipGraphExec {
             let ptrs = if arity > 0 && !params.kernel_params.is_null() {
                 // SAFETY: params.kernel_params points to a driver-owned
                 // array of `arity` void* entries.
-                let slice: &[*mut std::os::raw::c_void] = unsafe {
-                    std::slice::from_raw_parts(params.kernel_params, arity)
-                };
+                let slice: &[*mut std::os::raw::c_void] =
+                    unsafe { std::slice::from_raw_parts(params.kernel_params, arity) };
                 slice.to_vec()
             } else {
                 Vec::new()
@@ -565,10 +555,7 @@ impl HipGraphExec {
     /// Limitation: returns a HipGraphExec with EMPTY slot map.
     /// `set_slot` / `set_memcpy_slot` will error. K/V append
     /// destinations + `n_tokens_kv` are frozen at capture time.
-    pub fn capture_into_shared_graph<F>(
-        streams: &[&HipStream],
-        f: F,
-    ) -> DeviceResult<Self>
+    pub fn capture_into_shared_graph<F>(streams: &[&HipStream], f: F) -> DeviceResult<Self>
     where
         F: FnOnce() -> DeviceResult<()>,
     {
@@ -629,8 +616,10 @@ impl HipGraphExec {
         // 3. Run the closure — issues kernels + cross-stream events.
         let closure_result = f();
         if trace {
-            eprintln!("[capture_into_shared_graph] closure returned: {}",
-                if closure_result.is_ok() { "ok" } else { "err" });
+            eprintln!(
+                "[capture_into_shared_graph] closure returned: {}",
+                if closure_result.is_ok() { "ok" } else { "err" }
+            );
         }
 
         // 4. End capture on every stream so they leave capture mode and
@@ -668,12 +657,12 @@ impl HipGraphExec {
                 eprintln!("[capture_into_shared_graph] end capture stream {i}");
             }
             let mut out_graph: crate::sys::hipGraph_t = ptr::null_mut();
-            let code = unsafe {
-                crate::sys::hipStreamEndCapture(stream.raw(), &raw mut out_graph)
-            };
+            let code = unsafe { crate::sys::hipStreamEndCapture(stream.raw(), &raw mut out_graph) };
             if trace {
-                eprintln!("[capture_into_shared_graph] end stream {i} -> code {code} out_graph 0x{:x}",
-                    out_graph as usize);
+                eprintln!(
+                    "[capture_into_shared_graph] end stream {i} -> code {code} out_graph 0x{:x}",
+                    out_graph as usize
+                );
             }
             // Drop any returned graph immediately — none of them are
             // usable on ROCm 7.1.1 multi-stream + cross-stream events.
@@ -725,23 +714,24 @@ impl HipGraphExec {
         slot: crate::graph_capture::MemcpySlot,
         new_dst: flambeau_core::DevicePtr,
     ) -> DeviceResult<()> {
-        let binding = self
-            .slot_map
-            .get_memcpy(slot)
-            .copied()
-            .ok_or_else(|| DeviceError::Backend {
-                backend: BACKEND,
-                code: -1,
-                message: format!(
-                    "HipGraphExec::set_memcpy_slot: slot id={} not bound",
-                    slot.id()
-                ),
-            })?;
+        let binding =
+            self.slot_map
+                .get_memcpy(slot)
+                .copied()
+                .ok_or_else(|| DeviceError::Backend {
+                    backend: BACKEND,
+                    code: -1,
+                    message: format!(
+                        "HipGraphExec::set_memcpy_slot: slot id={} not bound",
+                        slot.id()
+                    ),
+                })?;
         let mut shadows = self.memcpy_shadows.borrow_mut();
         let shadow = &mut shadows[binding.memcpy_node_idx];
         shadow.dst = new_dst.0;
 
-        let node = self.kernel_or_memcpy_node_handle(binding.memcpy_node_idx, NodeBucket::Memcpy)?;
+        let node =
+            self.kernel_or_memcpy_node_handle(binding.memcpy_node_idx, NodeBucket::Memcpy)?;
         // SAFETY: exec + node are live. dst is a caller-provided live
         // device pointer per the outer unsafe contract. src / count /
         // kind come from the shadow (capture-time values, valid to
@@ -973,9 +963,7 @@ unsafe fn collect_nodes_by_type(
     let mut out_count = count;
     // SAFETY: nodes buffer has `count` slots; out_count starts at count.
     check(
-        unsafe {
-            crate::sys::hipGraphGetNodes(graph, nodes.as_mut_ptr(), &raw mut out_count)
-        },
+        unsafe { crate::sys::hipGraphGetNodes(graph, nodes.as_mut_ptr(), &raw mut out_count) },
         "hipGraphGetNodes",
     )?;
     nodes.truncate(out_count);

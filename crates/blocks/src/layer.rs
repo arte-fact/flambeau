@@ -46,7 +46,10 @@ pub enum AttnState<'a> {
     KvQ8(&'a mut KvCache<Q8Contig, HipDevice>),
     /// Recurrent state (delta-net) — `state` and `conv_history` are
     /// mutated in-place by the kernel sequence.
-    Recurrent { state: DevicePtr, conv_history: DevicePtr },
+    Recurrent {
+        state: DevicePtr,
+        conv_history: DevicePtr,
+    },
 }
 
 /// Per-call workspace view sized for one decode step.
@@ -93,15 +96,24 @@ impl AttnBlock {
         slots: Option<AttnDecodeSlots>,
     ) -> Result<()> {
         match (self, state, scratch) {
-            (AttnBlock::Standard(blk), AttnState::KvF16(kv), AttnDecodeScratch::Standard(mut s)) => {
-                blk.forward_decode(ops, device, stream, x_in, delta_out, kv, &mut s, position, slots)
-            }
+            (
+                AttnBlock::Standard(blk),
+                AttnState::KvF16(kv),
+                AttnDecodeScratch::Standard(mut s),
+            ) => blk.forward_decode(
+                ops, device, stream, x_in, delta_out, kv, &mut s, position, slots,
+            ),
             (AttnBlock::Standard(blk), AttnState::KvQ8(kv), AttnDecodeScratch::Standard(mut s)) => {
-                blk.forward_decode(ops, device, stream, x_in, delta_out, kv, &mut s, position, slots)
+                blk.forward_decode(
+                    ops, device, stream, x_in, delta_out, kv, &mut s, position, slots,
+                )
             }
             (
                 AttnBlock::DeltaNet(blk),
-                AttnState::Recurrent { state, conv_history },
+                AttnState::Recurrent {
+                    state,
+                    conv_history,
+                },
                 AttnDecodeScratch::DeltaNet(s),
             ) => {
                 if slots.is_some() {
@@ -109,18 +121,11 @@ impl AttnBlock {
                         "AttnBlock::DeltaNet::forward_decode: graph-capture slots are not supported on the recurrent path"
                     );
                 }
-                blk.forward_decode(
-                    ops,
-                    device,
-                    stream,
-                    x_in,
-                    delta_out,
-                    state,
-                    conv_history,
-                    s,
-                )
+                blk.forward_decode(ops, device, stream, x_in, delta_out, state, conv_history, s)
             }
-            _ => bail!("AttnBlock::forward_decode: variant mismatch between block, state, and scratch"),
+            _ => bail!(
+                "AttnBlock::forward_decode: variant mismatch between block, state, and scratch"
+            ),
         }
     }
 
@@ -242,7 +247,10 @@ impl<'a> AttnState<'a> {
     }
 
     pub fn recurrent(state: DevicePtr, conv_history: DevicePtr) -> Self {
-        Self::Recurrent { state, conv_history }
+        Self::Recurrent {
+            state,
+            conv_history,
+        }
     }
 }
 
@@ -393,9 +401,13 @@ pub unsafe fn tp_allreduce_sum_synced<const DIM: usize>(
     ar: &BarP2pAllReduce,
     cluster: &flambeau_backend_hip::HipCluster,
     cores: &[&crate::tp_rank_core::TpRankCore],
-    partials: &[crate::tensor_view::Buffer<crate::tensor_view::F16, crate::tensor_view::RowParallel<DIM>>],
+    partials: &[crate::tensor_view::Buffer<
+        crate::tensor_view::F16,
+        crate::tensor_view::RowParallel<DIM>,
+    >],
     streams: &[&HipStream],
-) -> Result<Vec<crate::tensor_view::Buffer<crate::tensor_view::F16, crate::tensor_view::Replicated>>> {
+) -> Result<Vec<crate::tensor_view::Buffer<crate::tensor_view::F16, crate::tensor_view::Replicated>>>
+{
     crate::tp_sync::cross_rank_event_barrier(cluster, cores)?;
     // SAFETY: caller upholds the BAR1 + streams + ordering contract.
     // The barrier above adds the cross-rank ordering edge.
@@ -415,9 +427,13 @@ pub unsafe fn tp_allreduce_sum_synced<const DIM: usize>(
 /// does not relax the BAR1 / streams / ordering invariants.
 pub unsafe fn tp_allreduce_sum<const DIM: usize>(
     ar: &BarP2pAllReduce,
-    partials: &[crate::tensor_view::Buffer<crate::tensor_view::F16, crate::tensor_view::RowParallel<DIM>>],
+    partials: &[crate::tensor_view::Buffer<
+        crate::tensor_view::F16,
+        crate::tensor_view::RowParallel<DIM>,
+    >],
     streams: &[&HipStream],
-) -> Result<Vec<crate::tensor_view::Buffer<crate::tensor_view::F16, crate::tensor_view::Replicated>>> {
+) -> Result<Vec<crate::tensor_view::Buffer<crate::tensor_view::F16, crate::tensor_view::Replicated>>>
+{
     if partials.is_empty() {
         return Ok(Vec::new());
     }
@@ -498,8 +514,14 @@ pub unsafe fn tp_allreduce_residual_into(
 /// but does not relax the BAR1 / streams / ordering invariants.
 pub unsafe fn tp_allreduce_residual<const DIM: usize>(
     ar: &BarP2pAllReduce,
-    hidden: &[crate::tensor_view::Buffer<crate::tensor_view::F16, crate::tensor_view::Replicated>],
-    partials: &[crate::tensor_view::Buffer<crate::tensor_view::F16, crate::tensor_view::RowParallel<DIM>>],
+    hidden: &[crate::tensor_view::Buffer<
+        crate::tensor_view::F16,
+        crate::tensor_view::Replicated,
+    >],
+    partials: &[crate::tensor_view::Buffer<
+        crate::tensor_view::F16,
+        crate::tensor_view::RowParallel<DIM>,
+    >],
     streams: &[&HipStream],
 ) -> Result<()> {
     if hidden.is_empty() {
@@ -597,10 +619,22 @@ pub unsafe fn tp_allreduce_residual_rmsnorm_into(
 #[allow(clippy::too_many_arguments)]
 pub unsafe fn tp_allreduce_residual_rmsnorm<const DIM: usize>(
     ar: &BarP2pAllReduce,
-    hidden: &[crate::tensor_view::Buffer<crate::tensor_view::F16, crate::tensor_view::Replicated>],
-    partials: &[crate::tensor_view::Buffer<crate::tensor_view::F16, crate::tensor_view::RowParallel<DIM>>],
-    rms_weight: &[crate::tensor_view::Buffer<crate::tensor_view::F16, crate::tensor_view::Replicated>],
-    out_norm: &[crate::tensor_view::Buffer<crate::tensor_view::F16, crate::tensor_view::Replicated>],
+    hidden: &[crate::tensor_view::Buffer<
+        crate::tensor_view::F16,
+        crate::tensor_view::Replicated,
+    >],
+    partials: &[crate::tensor_view::Buffer<
+        crate::tensor_view::F16,
+        crate::tensor_view::RowParallel<DIM>,
+    >],
+    rms_weight: &[crate::tensor_view::Buffer<
+        crate::tensor_view::F16,
+        crate::tensor_view::Replicated,
+    >],
+    out_norm: &[crate::tensor_view::Buffer<
+        crate::tensor_view::F16,
+        crate::tensor_view::Replicated,
+    >],
     eps: f32,
     streams: &[&HipStream],
 ) -> Result<()> {
@@ -619,4 +653,3 @@ pub unsafe fn tp_allreduce_residual_rmsnorm<const DIM: usize>(
         )
     }
 }
-

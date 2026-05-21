@@ -39,7 +39,9 @@ fn seeded_bytes(seed: u64, n: usize) -> Vec<u8> {
     let mut state = seed.wrapping_mul(6364136223846793005).wrapping_add(1);
     (0..n)
         .map(|_| {
-            state = state.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+            state = state
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
             (state >> 24) as u8
         })
         .collect()
@@ -49,7 +51,9 @@ fn seeded_f32(seed: u64, n: usize) -> Vec<f32> {
     let mut state = seed.wrapping_mul(6364136223846793005).wrapping_add(1);
     (0..n)
         .map(|_| {
-            state = state.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+            state = state
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
             let u = (state >> 32) as u32;
             (u as f32 / u32::MAX as f32) * 2.0 - 1.0
         })
@@ -73,7 +77,12 @@ fn random_q4k_block(seed: u64, idx: usize) -> BlockQ4K {
     scales.copy_from_slice(&bytes[4..16]);
     let mut qs = [0u8; QK_K / 2];
     qs.copy_from_slice(&bytes[16..16 + QK_K / 2]);
-    BlockQ4K { d, dmin, scales, qs }
+    BlockQ4K {
+        d,
+        dmin,
+        scales,
+        qs,
+    }
 }
 
 fn quantize_q8_1_roundtrip(xs: &[f32]) -> Vec<f32> {
@@ -146,12 +155,8 @@ fn run_mmvq_q4_k(n_rows: usize, k: usize, seed: u64) -> (Vec<f32>, Vec<f32>) {
     let mut x_dequant = vec![0.0f32; total_elems];
     {
         let raw: &[u8] = bytemuck::cast_slice(&x_blocks);
-        flambeau_quant::dequantize_into(
-            flambeau_quant::GgmlDType::Q4K,
-            raw,
-            &mut x_dequant,
-        )
-        .unwrap();
+        flambeau_quant::dequantize_into(flambeau_quant::GgmlDType::Q4K, raw, &mut x_dequant)
+            .unwrap();
     }
 
     let y_f32 = seeded_f32(seed.wrapping_add(31), k);
@@ -160,7 +165,9 @@ fn run_mmvq_q4_k(n_rows: usize, k: usize, seed: u64) -> (Vec<f32>, Vec<f32>) {
     let d_x = alloc_and_upload(&dev, &x_blocks);
     let d_y_f32 = alloc_and_upload(&dev, &y_f32);
     let y_blocks = k / QK8;
-    let d_y_q8_1 = dev.alloc(y_blocks * std::mem::size_of::<BlockQ8_1>()).unwrap();
+    let d_y_q8_1 = dev
+        .alloc(y_blocks * std::mem::size_of::<BlockQ8_1>())
+        .unwrap();
     let d_dst = dev.alloc(n_rows * 4).unwrap();
 
     // Quantise activation on device.
@@ -211,9 +218,11 @@ fn run_mmvq_q4_k(n_rows: usize, k: usize, seed: u64) -> (Vec<f32>, Vec<f32>) {
     dev.default_stream().synchronize().unwrap();
 
     unsafe {
-        dev.dealloc(d_x, x_blocks.len() * std::mem::size_of::<BlockQ4K>()).unwrap();
+        dev.dealloc(d_x, x_blocks.len() * std::mem::size_of::<BlockQ4K>())
+            .unwrap();
         dev.dealloc(d_y_f32, y_f32.len() * 4).unwrap();
-        dev.dealloc(d_y_q8_1, y_blocks * std::mem::size_of::<BlockQ8_1>()).unwrap();
+        dev.dealloc(d_y_q8_1, y_blocks * std::mem::size_of::<BlockQ8_1>())
+            .unwrap();
         dev.dealloc(d_dst, n_rows * 4).unwrap();
     }
 
@@ -229,7 +238,10 @@ fn max_rel_err(got: &[f32], reference: &[f32]) -> f32 {
         .fold(0.0f32, f32::max)
 }
 
-#[allow(dead_code, reason = "printf-style cert debug helper; called ad-hoc when investigating correctness regressions. `#[allow]` because the whole fn body is `#[cfg(feature = \"hip\")]` gated")]
+#[allow(
+    dead_code,
+    reason = "printf-style cert debug helper; called ad-hoc when investigating correctness regressions. `#[allow]` because the whole fn body is `#[cfg(feature = \"hip\")]` gated"
+)]
 fn debug_worst(got: &[f32], reference: &[f32]) {
     let mut worst = (0usize, 0.0f32);
     for (i, (g, r)) in got.iter().zip(reference).enumerate() {

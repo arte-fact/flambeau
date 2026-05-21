@@ -45,10 +45,7 @@ pub(super) fn build_logprob_entry(
     if dist.is_empty() {
         return None;
     }
-    let chosen_prob = dist
-        .iter()
-        .find(|(id, _)| *id == chosen)
-        .map(|(_, p)| *p)?;
+    let chosen_prob = dist.iter().find(|(id, _)| *id == chosen).map(|(_, p)| *p)?;
     let chosen_logprob = log_clamped(chosen_prob);
 
     let mut alts: Vec<(u32, f32)> = dist
@@ -62,9 +59,7 @@ pub(super) fn build_logprob_entry(
         });
         alts.truncate(top_n);
     }
-    alts.sort_unstable_by(|a, b| {
-        b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal)
-    });
+    alts.sort_unstable_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
 
     let chosen_text = tokenizer.decode(&[chosen]).unwrap_or_default();
     let chosen_bytes = chosen_text.as_bytes().to_vec();

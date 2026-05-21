@@ -44,7 +44,13 @@ mod enabled {
     fn env_target(name: &str) -> Option<usize> {
         let key = name
             .chars()
-            .map(|c| if c == '.' { '_' } else { c.to_ascii_uppercase() })
+            .map(|c| {
+                if c == '.' {
+                    '_'
+                } else {
+                    c.to_ascii_uppercase()
+                }
+            })
             .collect::<String>();
         std::env::var(format!("FLAMBEAU_PROBE_{key}"))
             .ok()

@@ -112,8 +112,14 @@ pub fn apply_per_expert_scale_f32(
     n_tokens: usize,
     top_k: usize,
 ) -> Result<()> {
-    assert!(top_k > 0 && top_k <= 64, "apply_per_expert_scale_f32: top_k {top_k} not in 1..=64");
-    assert!(n_tokens > 0, "apply_per_expert_scale_f32: n_tokens must be > 0");
+    assert!(
+        top_k > 0 && top_k <= 64,
+        "apply_per_expert_scale_f32: top_k {top_k} not in 1..=64"
+    );
+    assert!(
+        n_tokens > 0,
+        "apply_per_expert_scale_f32: n_tokens must be > 0"
+    );
     let module = reg.expect_module("apply_per_expert_scale_f32")?;
     let kernel = module.kernel("flambeau_apply_per_expert_scale_f32")?;
     let w_ptr: u64 = expert_weights.as_usize() as u64;
@@ -157,9 +163,17 @@ pub fn indexed_moe_mmvq_q4_k_r2(
     // -2 % decode vs r2; the split captures both.
     const R4_TOKEN_THRESHOLD: usize = 32;
     let (stem, entry, rows_per_block) = if n_tokens >= R4_TOKEN_THRESHOLD {
-        ("indexed_moe_mmvq_q4_k_r4_dp4a", "flambeau_indexed_moe_mmvq_q4_k_r4_dp4a_q8_1", 4u32)
+        (
+            "indexed_moe_mmvq_q4_k_r4_dp4a",
+            "flambeau_indexed_moe_mmvq_q4_k_r4_dp4a_q8_1",
+            4u32,
+        )
     } else {
-        ("indexed_moe_mmvq_q4_k_r2_dp4a", "flambeau_indexed_moe_mmvq_q4_k_r2_dp4a_q8_1", 2u32)
+        (
+            "indexed_moe_mmvq_q4_k_r2_dp4a",
+            "flambeau_indexed_moe_mmvq_q4_k_r2_dp4a_q8_1",
+            2u32,
+        )
     };
     let module = reg.expect_module(stem)?;
     let kernel = module.kernel(entry)?;
@@ -652,7 +666,6 @@ pub fn indexed_moe_mmvq_iq1_m(
     unsafe { kernel.launch(stream, cfg, args)? };
     Ok(())
 }
-
 
 /// Q6_K sibling of `indexed_moe_mmvq_q4_k_r2`. Same indexing contract —
 /// `[n_tokens, top_k]` expert ids, `[n_tokens, top_k, n_rows]` F32 output,
@@ -2725,13 +2738,13 @@ pub fn indexed_moe_mmq_q4_k_gate_up_turbo(
     stream: &HipStream,
     gate_w: DevicePtr,
     up_w: DevicePtr,
-    y_mmq: DevicePtr,           // DS4 Q8_1 activation — per-TOKEN layout (not per-pair)
+    y_mmq: DevicePtr, // DS4 Q8_1 activation — per-TOKEN layout (not per-pair)
     expert_ids: DevicePtr,
     sorted_pair_idx_padded: DevicePtr,
     padded_offsets: DevicePtr,
     gate_out: DevicePtr,
     up_out: DevicePtr,
-    shape: MoeShape,            // n_rows=inter, n_sb_per_row=hidden/QK_K
+    shape: MoeShape, // n_rows=inter, n_sb_per_row=hidden/QK_K
 ) -> Result<()> {
     let module = reg.expect_module("indexed_moe_mmq_q4_k_gate_up_turbo")?;
     let kernel = module.kernel("flambeau_indexed_moe_mmq_q4_k_gate_up_turbo_q8_1")?;
@@ -2793,13 +2806,13 @@ pub fn indexed_moe_mmq_q4_k_down_turbo(
     sorted_pair_idx_padded: DevicePtr,
     padded_offsets: DevicePtr,
     dst: DevicePtr,
-    shape: MoeShape,            // n_tokens holds n_pairs; top_k unused (kernel signature lacks it)
+    shape: MoeShape, // n_tokens holds n_pairs; top_k unused (kernel signature lacks it)
 ) -> Result<()> {
     let module = reg.expect_module("indexed_moe_mmq_q4_k_down_turbo")?;
     let kernel = module.kernel("flambeau_indexed_moe_mmq_q4_k_down_turbo_q8_1")?;
 
     let n_rows_i = shape.n_rows as i32;
-    let n_pairs_i = shape.n_tokens as i32;    // down's Y axis is per-pair
+    let n_pairs_i = shape.n_tokens as i32; // down's Y axis is per-pair
     let nb_i = shape.n_sb_per_row as i32;
     let n_experts_i = shape.n_experts as i32;
     let w_ptr: u64 = down_w.as_usize() as u64;
@@ -3202,8 +3215,7 @@ pub fn indexed_moe_mmq_q4_k(
     args.push(&n_rows_i);
     args.push(&nb_i);
     args.push(&top_k_i);
-    let grid_x =
-        (n_rows as u32).div_ceil(INDEXED_MOE_MMQ_Y as u32);
+    let grid_x = (n_rows as u32).div_ceil(INDEXED_MOE_MMQ_Y as u32);
     let cfg = LaunchCfg {
         grid: (grid_x, n_buckets as u32, 1),
         block: (128, 1, 1),
@@ -3222,9 +3234,9 @@ pub fn indexed_moe_mmq_q4_k(
 pub fn shared_expert_scale_f32(
     reg: &OpsRegistry,
     stream: &HipStream,
-    shared_out: DevicePtr,  // in-place [n_tokens, hidden]
-    x: DevicePtr,           // [n_tokens, hidden] (layer input)
-    gate_w: DevicePtr,      // [hidden]
+    shared_out: DevicePtr, // in-place [n_tokens, hidden]
+    x: DevicePtr,          // [n_tokens, hidden] (layer input)
+    gate_w: DevicePtr,     // [hidden]
     n_tokens: usize,
     hidden: usize,
 ) -> Result<()> {
@@ -3642,7 +3654,11 @@ pub fn moe_sort_by_expert_padded_16(
         args.push(&c_ptr);
         args.push(&po_ptr);
         args.push(&n_experts_i);
-        let cfg = LaunchCfg { grid: (1, 1, 1), block: (512, 1, 1), shared_bytes: 0 };
+        let cfg = LaunchCfg {
+            grid: (1, 1, 1),
+            block: (512, 1, 1),
+            shared_bytes: 0,
+        };
         unsafe { k_scan_padded.launch(stream, cfg, args)? };
     }
     {
@@ -3669,13 +3685,13 @@ pub fn moe_sort_by_expert_padded_16(
 pub fn moe_sort_by_expert_padded(
     reg: &OpsRegistry,
     stream: &HipStream,
-    expert_ids: DevicePtr,                 // [total] i32
-    counts: DevicePtr,                     // [n_experts] i32, overwritten
-    offsets: DevicePtr,                    // [n_experts + 1] i32 (written)
-    cursors: DevicePtr,                    // [n_experts] i32 scratch
-    sorted_pair_idx: DevicePtr,            // [total] i32 (written, unpadded)
-    padded_offsets: DevicePtr,             // [n_experts + 1] i32 (written)
-    sorted_pair_idx_padded: DevicePtr,     // [total_padded_cap] i32 (written)
+    expert_ids: DevicePtr,             // [total] i32
+    counts: DevicePtr,                 // [n_experts] i32, overwritten
+    offsets: DevicePtr,                // [n_experts + 1] i32 (written)
+    cursors: DevicePtr,                // [n_experts] i32 scratch
+    sorted_pair_idx: DevicePtr,        // [total] i32 (written, unpadded)
+    padded_offsets: DevicePtr,         // [n_experts + 1] i32 (written)
+    sorted_pair_idx_padded: DevicePtr, // [total_padded_cap] i32 (written)
     total: usize,
     n_experts: usize,
     max_tokens: usize,

@@ -13,11 +13,7 @@ use flambeau_model_ops::{Tensor, F16, F32};
 /// kernels at N=1 and N>1; the leaf-kernel branch (e.g. attn_decode vs
 /// attn_prefill) lives inside the composite, not in this trait.
 pub trait ForwardCtx {
-    fn embed(
-        &mut self,
-        token_embd: &EmbeddingWeights,
-        tokens: &[u32],
-    ) -> Result<Tensor<F16>>;
+    fn embed(&mut self, token_embd: &EmbeddingWeights, tokens: &[u32]) -> Result<Tensor<F16>>;
 
     fn rmsnorm(
         &mut self,
@@ -120,7 +116,16 @@ pub trait ForwardCtx {
         n_tokens_total: usize,
         rms_eps: f32,
     ) -> Result<()> {
-        let _ = (resid, weights, table_dev, layer_idx, pe, n_tokens, n_tokens_total, rms_eps);
+        let _ = (
+            resid,
+            weights,
+            table_dev,
+            layer_idx,
+            pe,
+            n_tokens,
+            n_tokens_total,
+            rms_eps,
+        );
         anyhow::bail!("per_layer_embd_apply not implemented for this ctx")
     }
 
@@ -151,9 +156,18 @@ pub trait ForwardCtx {
         rms_eps: f32,
     ) -> Result<()> {
         let _ = (
-            main_embd, tok_embd_rows_raw, tok_embd_dtype, tok_embd_row_bytes,
-            model_proj_f16_dev, proj_matmul_f32_dev, proj_norm_raw, table_dev, pe, n_layer,
-            hidden, rms_eps,
+            main_embd,
+            tok_embd_rows_raw,
+            tok_embd_dtype,
+            tok_embd_row_bytes,
+            model_proj_f16_dev,
+            proj_matmul_f32_dev,
+            proj_norm_raw,
+            table_dev,
+            pe,
+            n_layer,
+            hidden,
+            rms_eps,
         );
         anyhow::bail!("per_layer_embd_build_table not implemented for this ctx")
     }
@@ -475,9 +489,7 @@ impl LmHeadWeights {
         use flambeau_core::op::QDtype;
         Self {
             // SAFETY: NULL ptr + 0 elems is opaque; never read.
-            output_norm: unsafe {
-                Tensor::<F16>::from_raw(flambeau_core::DevicePtr::NULL, 0)
-            },
+            output_norm: unsafe { Tensor::<F16>::from_raw(flambeau_core::DevicePtr::NULL, 0) },
             lm_head: QuantWeight {
                 ptr: flambeau_core::DevicePtr::NULL,
                 dtype: QDtype::F16,

@@ -330,7 +330,11 @@ pub fn quantize_f16_q8_1_mmq(
     ncols: usize,
     total_b: usize,
 ) -> Result<()> {
-    assert_eq!(ncols % 128, 0, "quantize_f16_q8_1_mmq expects ncols % 128 == 0");
+    assert_eq!(
+        ncols % 128,
+        0,
+        "quantize_f16_q8_1_mmq expects ncols % 128 == 0"
+    );
     let module = reg.expect_module("quantize_f16_q8_1_mmq")?;
     let kernel = module.kernel("flambeau_quantize_f16_q8_1_mmq")?;
     let ncols_i = ncols as i32;
@@ -361,7 +365,11 @@ pub fn quantize_f16_q8_1(
     y_q8_1: DevicePtr,
     n_elems: usize,
 ) -> Result<()> {
-    assert_eq!(n_elems % 32, 0, "quantize_f16_q8_1 expects n_elems % 32 == 0");
+    assert_eq!(
+        n_elems % 32,
+        0,
+        "quantize_f16_q8_1 expects n_elems % 32 == 0"
+    );
     let module = reg.expect_module("quantize_f16_q8_1")?;
     let kernel = module.kernel("flambeau_quantize_row_f16_q8_1")?;
     let n_i = n_elems as i32;
@@ -388,7 +396,11 @@ pub fn quantize_f16_q8_0(
     y_q8_0: DevicePtr,
     n_elems: usize,
 ) -> Result<()> {
-    assert_eq!(n_elems % 32, 0, "quantize_f16_q8_0 expects n_elems % 32 == 0");
+    assert_eq!(
+        n_elems % 32,
+        0,
+        "quantize_f16_q8_0 expects n_elems % 32 == 0"
+    );
     let module = reg.expect_module("quantize_f16_q8_0")?;
     let kernel = module.kernel("flambeau_quantize_row_f16_q8_0")?;
     let n_i = n_elems as i32;

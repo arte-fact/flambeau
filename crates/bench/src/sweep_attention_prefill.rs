@@ -7,7 +7,6 @@
 //! limit.
 
 #![cfg(feature = "hip")]
-
 #![expect(
     clippy::undocumented_unsafe_blocks,
     reason = "sweep harness — every unsafe block is a kernel launch or a memcpy_async \
@@ -51,10 +50,10 @@ pub fn run_sweep(repo_root: &Path) -> Result<Cert> {
     // - first prefill batch (q_offset=0, n_k=n_q).
     // - follow-on prefill batch into an existing cache (q_offset>0).
     let cases = [
-        (8usize, 8usize, 0usize),   // short first batch
-        (128, 128, 0),              // canonical 128-token prefill
-        (128, 640, 512),            // 2nd 128-batch into 512-cache
-        (512, 512, 0),              // larger prefill
+        (8usize, 8usize, 0usize), // short first batch
+        (128, 128, 0),            // canonical 128-token prefill
+        (128, 640, 512),          // 2nd 128-batch into 512-cache
+        (512, 512, 0),            // larger prefill
     ];
     let mut results = Vec::new();
     for &(head_dim, n_heads_q, n_heads_kv) in SHAPES {
@@ -272,10 +271,10 @@ pub fn run_sweep_flash_tile(repo_root: &Path) -> Result<Cert> {
 
     // Extra shapes: d=64, d=128, d=256, d=512 coverage.
     const FT_SHAPES: &[(usize, usize, usize)] = &[
-        (64, 32, 8),    // synthetic d=64 coverage
-        (128, 32, 4),   // Qwen3.5
-        (256, 16, 2),   // Qwen3.6
-        (512, 32, 16),  // gemma4 full-attn
+        (64, 32, 8),   // synthetic d=64 coverage
+        (128, 32, 4),  // Qwen3.5
+        (256, 16, 2),  // Qwen3.6
+        (512, 32, 16), // gemma4 full-attn
     ];
     let cases = [
         (8usize, 8usize, 0usize),
@@ -440,7 +439,9 @@ fn run_shape_flash_tile(
     let v_in: Vec<f32> = v_f16.iter().map(|v| v.to_f32()).collect();
     for qt in 0..n_q_tokens {
         let limit = usize::min(q_offset + qt + 1, n_k_tokens);
-        if limit == 0 { continue; }
+        if limit == 0 {
+            continue;
+        }
         for qh in 0..n_heads_q {
             let kvh = qh / group;
             let mut scores = vec![0.0f32; limit];
@@ -460,7 +461,9 @@ fn run_shape_flash_tile(
                 sum += *s as f64;
             }
             let inv = 1.0f32 / sum as f32;
-            for s in scores.iter_mut() { *s *= inv; }
+            for s in scores.iter_mut() {
+                *s *= inv;
+            }
             for d in 0..head_dim {
                 let mut acc = 0.0f64;
                 for t in 0..limit {
@@ -474,4 +477,3 @@ fn run_shape_flash_tile(
     }
     Ok((got, reference))
 }
-

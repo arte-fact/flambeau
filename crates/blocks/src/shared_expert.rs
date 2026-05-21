@@ -25,13 +25,13 @@ use crate::WeightHandle;
 
 #[derive(Copy, Clone)]
 pub struct SharedExpertDecodeScratch {
-    pub x_q8_1: DevicePtr,        // Q8_1 [hidden / 32]
-    pub gate_f32: DevicePtr,      // F32 [intermediate]
-    pub up_f32: DevicePtr,        // F32 [intermediate]
-    pub activated_f16: DevicePtr, // F16 [intermediate] (only used when fused-swiglu path is off)
+    pub x_q8_1: DevicePtr,         // Q8_1 [hidden / 32]
+    pub gate_f32: DevicePtr,       // F32 [intermediate]
+    pub up_f32: DevicePtr,         // F32 [intermediate]
+    pub activated_f16: DevicePtr,  // F16 [intermediate] (only used when fused-swiglu path is off)
     pub activated_q8_1: DevicePtr, // Q8_1 [intermediate / 32]
-    pub down_f32: DevicePtr,      // F32 [hidden] — scaled in place
-    pub x_norm_f32: DevicePtr,    // F32 [hidden] — gate-scale uses this
+    pub down_f32: DevicePtr,       // F32 [hidden] — scaled in place
+    pub x_norm_f32: DevicePtr,     // F32 [hidden] — gate-scale uses this
 }
 
 #[derive(Copy, Clone)]
@@ -112,9 +112,9 @@ pub struct SharedExpert {
     /// the pipeline (`shared_expert_scale_f32`) is skipped and the
     /// `x_norm_f32` scratch field is unused.
     pub ffn_gate_inp_shexp: Option<DevicePtr>,
-    pub ffn_gate_shexp: WeightHandle,  // [intermediate, hidden]
-    pub ffn_up_shexp: WeightHandle,    // [intermediate, hidden]
-    pub ffn_down_shexp: WeightHandle,  // [hidden, intermediate]
+    pub ffn_gate_shexp: WeightHandle, // [intermediate, hidden]
+    pub ffn_up_shexp: WeightHandle,   // [intermediate, hidden]
+    pub ffn_down_shexp: WeightHandle, // [hidden, intermediate]
     pub hidden: usize,
     pub intermediate: usize,
     /// Activation between gate/up and down. Default `SwiGLU` (qwen3.x
@@ -173,7 +173,10 @@ impl SharedExpert {
     }
 
     pub fn scratch_dims(&self) -> SharedExpertScratchDims {
-        SharedExpertScratchDims { hidden: self.hidden, intermediate: self.intermediate }
+        SharedExpertScratchDims {
+            hidden: self.hidden,
+            intermediate: self.intermediate,
+        }
     }
 
     /// Allocate an [`OwnedSharedExpertDecodeScratch`] sized for `dims`.
@@ -182,7 +185,10 @@ impl SharedExpert {
         tracker: &mut RawAllocTracker,
         dims: SharedExpertScratchDims,
     ) -> Result<OwnedSharedExpertDecodeScratch> {
-        let SharedExpertScratchDims { hidden, intermediate } = dims;
+        let SharedExpertScratchDims {
+            hidden,
+            intermediate,
+        } = dims;
         let (x_q8_1, _) = tracker.alloc_q8_1(device, hidden)?;
         let (gate_f32, _) = tracker.alloc_f32(device, intermediate)?;
         let (up_f32, _) = tracker.alloc_f32(device, intermediate)?;
@@ -212,7 +218,10 @@ impl SharedExpert {
         if max_tokens == 0 {
             bail!("alloc_prefill_scratch: max_tokens must be >= 1");
         }
-        let SharedExpertScratchDims { hidden, intermediate } = dims;
+        let SharedExpertScratchDims {
+            hidden,
+            intermediate,
+        } = dims;
         let (x_q8_1, _) = tracker.alloc_q8_1(device, max_tokens * hidden)?;
         let (gate_f32, _) = tracker.alloc_f32(device, max_tokens * intermediate)?;
         let (up_f32, _) = tracker.alloc_f32(device, max_tokens * intermediate)?;
@@ -251,14 +260,8 @@ impl SharedExpert {
         if let Some(gate_w) = self.ffn_gate_inp_shexp {
             ops.cast_f16_to_f32(x_norm, scratch.x_norm_f32, hidden)
                 .context("shexp cast x_norm → f32")?;
-            ops.shared_expert_scale_f32(
-                scratch.down_f32,
-                scratch.x_norm_f32,
-                gate_w,
-                1,
-                hidden,
-            )
-            .context("shexp shared_expert_scale_f32")?;
+            ops.shared_expert_scale_f32(scratch.down_f32, scratch.x_norm_f32, gate_w, 1, hidden)
+                .context("shexp shared_expert_scale_f32")?;
         }
         // 8. Cast (scaled) output back to F16.
         ops.cast_f32_to_f16(scratch.down_f32, shared_out, hidden)
@@ -310,10 +313,10 @@ impl SharedExpert {
         // 2+3. gate + up. Fuse when both Q8_0 (mmvq_q8_0_gate_up) or
         // both Q4_0 (mmvq_q4_0_gate_up_t128, t128 schedule matches
         // legacy's fast path); else two plain mmvq launches.
-        let fuse_q8_0 = self.ffn_gate_shexp.dtype == QDtype::Q8_0
-            && self.ffn_up_shexp.dtype == QDtype::Q8_0;
-        let fuse_q4_0 = self.ffn_gate_shexp.dtype == QDtype::Q4_0
-            && self.ffn_up_shexp.dtype == QDtype::Q4_0;
+        let fuse_q8_0 =
+            self.ffn_gate_shexp.dtype == QDtype::Q8_0 && self.ffn_up_shexp.dtype == QDtype::Q8_0;
+        let fuse_q4_0 =
+            self.ffn_gate_shexp.dtype == QDtype::Q4_0 && self.ffn_up_shexp.dtype == QDtype::Q4_0;
         if fuse_q8_0 {
             ops.mmvq_q8_0_gate_up(
                 self.ffn_gate_shexp.ptr,
@@ -523,10 +526,20 @@ impl SharedExpert {
         let n_total = n_tokens * inter;
         match self.activation {
             Activation::SwiGLU => ops
-                .swiglu_f32_to_f16(scratch.gate_f32, scratch.up_f32, scratch.activated_f16, n_total)
+                .swiglu_f32_to_f16(
+                    scratch.gate_f32,
+                    scratch.up_f32,
+                    scratch.activated_f16,
+                    n_total,
+                )
                 .context("shexp prefill swiglu_f32_to_f16")?,
             Activation::Gelu => ops
-                .gelu_f32_to_f16(scratch.gate_f32, scratch.up_f32, scratch.activated_f16, n_total)
+                .gelu_f32_to_f16(
+                    scratch.gate_f32,
+                    scratch.up_f32,
+                    scratch.activated_f16,
+                    n_total,
+                )
                 .context("shexp prefill gelu_f32_to_f16")?,
         }
         ops.quantize_f16_q8_1(scratch.activated_f16, scratch.activated_q8_1, n_total)

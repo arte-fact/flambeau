@@ -75,9 +75,7 @@ fn load_with_shard(
 
     let owns_embed = layer_range.map_or(true, |(s, _)| s == 0);
     let owns_lm_head = layer_range.map_or(true, |(_, e)| e == config.num_layers);
-    let in_range = |li: usize| -> bool {
-        layer_range.map_or(true, |(s, e)| li >= s && li < e)
-    };
+    let in_range = |li: usize| -> bool { layer_range.map_or(true, |(s, e)| li >= s && li < e) };
 
     let embedding = if owns_embed {
         load_embedding(

@@ -6,7 +6,6 @@
 //! any larger error is a real bug.
 
 #![cfg(feature = "hip")]
-
 #![expect(
     clippy::undocumented_unsafe_blocks,
     reason = "sweep harness — every unsafe block is a kernel launch or a memcpy_async \
@@ -44,8 +43,7 @@ fn open_kernel(stem: &str, entry: &str) -> Result<(HipDevice, HipModule, String)
     }
     let dev = HipDevice::new(0)?;
     dev.bind()?;
-    let kb = kernels::hsaco(stem)
-        .ok_or_else(|| anyhow::anyhow!("{stem} not compiled"))?;
+    let kb = kernels::hsaco(stem).ok_or_else(|| anyhow::anyhow!("{stem} not compiled"))?;
     let module = HipModule::load(dev.id(), kb)?;
     let _ = module.kernel_dynamic(entry)?; // validate upfront
     Ok((dev, module, entry.to_string()))
@@ -514,10 +512,7 @@ pub fn run_gdn_alpha_beta_sweep(repo_root: &Path) -> Result<Cert> {
 // --- quantize_f16_q8_1 ----------------------------------------------------
 
 pub fn run_quantize_f16_q8_1_sweep(repo_root: &Path) -> Result<Cert> {
-    let (dev, module, entry) = open_kernel(
-        "quantize_f16_q8_1",
-        "flambeau_quantize_row_f16_q8_1",
-    )?;
+    let (dev, module, entry) = open_kernel("quantize_f16_q8_1", "flambeau_quantize_row_f16_q8_1")?;
     let kernel = module.kernel_dynamic(&entry)?;
     // Must be multiples of 32. Cover shapes the full-attn forward hits
     // (n_heads * head_dim = 4096 for Qwen3.6) + small sanity.
@@ -608,10 +603,8 @@ pub fn run_quantize_f16_q8_1_sweep(repo_root: &Path) -> Result<Cert> {
             let got_s = f16::from_bits(u16::from_le_bytes([got_block[2], got_block[3]]));
             let ref_d = f16::from_bits(u16::from_le_bytes([ref_block[0], ref_block[1]]));
             let ref_s = f16::from_bits(u16::from_le_bytes([ref_block[2], ref_block[3]]));
-            if (got_d.to_f32() - ref_d.to_f32()).abs()
-                > ref_d.to_f32().abs().max(1.0) * 2e-3
-                || (got_s.to_f32() - ref_s.to_f32()).abs()
-                    > ref_s.to_f32().abs().max(1.0) * 2e-3
+            if (got_d.to_f32() - ref_d.to_f32()).abs() > ref_d.to_f32().abs().max(1.0) * 2e-3
+                || (got_s.to_f32() - ref_s.to_f32()).abs() > ref_s.to_f32().abs().max(1.0) * 2e-3
             {
                 mismatches += 1;
             }
@@ -747,12 +740,7 @@ pub fn run_dense_gemv_sweep(repo_root: &Path) -> Result<Cert> {
     let kernel = module.kernel_dynamic(&entry)?;
     // MoE router shapes: n_rows = n_experts (4, 128, 256), k = hidden (2048).
     // Small n_experts + small k for sanity.
-    let shapes = [
-        (4usize, 256usize),
-        (16, 1024),
-        (128, 2048),
-        (256, 2048),
-    ];
+    let shapes = [(4usize, 256usize), (16, 1024), (128, 2048), (256, 2048)];
     let mut results = Vec::new();
     for (n_rows, k) in shapes {
         let seed = 0xC0FFEE ^ ((n_rows as u64) * 71 + (k as u64) * 13);
@@ -829,7 +817,8 @@ pub fn run_dense_gemv_sweep(repo_root: &Path) -> Result<Cert> {
         op: "dense_gemv_f32_f16".to_string(),
         dtype_weight: "F32".to_string(),
         dtype_activation: "F16".to_string(),
-        tolerance_formula: "|err| <= 1e-3 * max(|ref|, 1) vs F64 reference with F16-quantised input".to_string(),
+        tolerance_formula:
+            "|err| <= 1e-3 * max(|ref|, 1) vs F64 reference with F16-quantised input".to_string(),
         results,
         pass,
         emitted_at: now_utc_iso8601(),

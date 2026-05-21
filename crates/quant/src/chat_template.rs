@@ -69,8 +69,7 @@ fn tojson_python_style(
     args.assert_all_used()?;
     let mut out = Vec::<u8>::new();
     let render_err = |err: serde_json::Error| {
-        Error::new(ErrorKind::InvalidOperation, "cannot serialize to JSON")
-            .with_source(err)
+        Error::new(ErrorKind::InvalidOperation, "cannot serialize to JSON").with_source(err)
     };
     if let Some(indent) = indent {
         // Pretty-print path — matches minijinja's stock behaviour when an
@@ -79,9 +78,8 @@ fn tojson_python_style(
         let indent_n: usize = match bool::try_from(indent.clone()).ok() {
             Some(true) => 2,
             Some(false) => 0,
-            None => usize::try_from(indent).map_err(|_| {
-                Error::new(ErrorKind::InvalidOperation, "invalid indent")
-            })?,
+            None => usize::try_from(indent)
+                .map_err(|_| Error::new(ErrorKind::InvalidOperation, "invalid indent"))?,
         };
         let spaces = " ".repeat(indent_n);
         let formatter = serde_json::ser::PrettyFormatter::with_indent(spaces.as_bytes());
@@ -259,24 +257,19 @@ impl ChatTemplate {
 /// The conversion is serialise-roundtrip (message → JSON value → mutate
 /// → MjValue) rather than in-place; this is the cheap, obvious
 /// implementation and runs once per request, not per token.
-fn normalise_messages_for_template<M: serde::Serialize>(
-    messages: &[M],
-) -> Result<MjValue> {
+fn normalise_messages_for_template<M: serde::Serialize>(messages: &[M]) -> Result<MjValue> {
     // Serialise to a mutable JSON array so we can patch the
     // `arguments` field. `serde_json::Value` preserves field order with
     // the workspace's `preserve_order` feature, so we don't reshuffle
     // anything the template sees.
-    let mut j: serde_json::Value =
-        serde_json::to_value(messages).context("serialise messages")?;
+    let mut j: serde_json::Value = serde_json::to_value(messages).context("serialise messages")?;
     if let Some(arr) = j.as_array_mut() {
         for msg in arr.iter_mut() {
-            let Some(tool_calls) = msg.get_mut("tool_calls").and_then(|v| v.as_array_mut())
-            else {
+            let Some(tool_calls) = msg.get_mut("tool_calls").and_then(|v| v.as_array_mut()) else {
                 continue;
             };
             for tc in tool_calls.iter_mut() {
-                let Some(func) = tc.get_mut("function").and_then(|v| v.as_object_mut())
-                else {
+                let Some(func) = tc.get_mut("function").and_then(|v| v.as_object_mut()) else {
                     continue;
                 };
                 if let Some(args) = func.get_mut("arguments") {

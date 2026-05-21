@@ -2,9 +2,9 @@
 
 use std::sync::Arc;
 
+use crate::model_cfg::ServerModelCfg;
 use anyhow::{anyhow, bail, Context};
 use flambeau_backend_hip::HipCluster;
-use crate::model_cfg::ServerModelCfg;
 use flambeau_quant::{ChatTemplate, GgufTokenizer};
 use tokio::sync::Mutex;
 
@@ -48,7 +48,6 @@ pub enum PrefixCacheRestore {
     /// with `start_position = n_matched` to advance to prompt end.
     PrefixHit { n_matched: usize },
 }
-
 
 /// Server-wide shared state — built once at startup.
 pub struct ServerState {
@@ -354,9 +353,7 @@ impl ServerState {
     pub fn try_admit(self: &Arc<Self>) -> Option<AdmissionGuard> {
         if self.max_queue_depth == 0 {
             // Disabled — pass through without counting.
-            return Some(AdmissionGuard {
-                state: None,
-            });
+            return Some(AdmissionGuard { state: None });
         }
         let cap = self.inflight_pool.len() + self.max_queue_depth;
         let prev = self
@@ -478,8 +475,7 @@ impl ServerState {
             .iter()
             .enumerate()
             .filter(|(idx, taken)| {
-                *idx != slot_idx
-                    && taken.load(std::sync::atomic::Ordering::Relaxed)
+                *idx != slot_idx && taken.load(std::sync::atomic::Ordering::Relaxed)
             })
             .count();
         let trace = dev_flag("FLAMBEAU_TRACE_BATCH");
@@ -530,8 +526,7 @@ impl ServerState {
         // Try to become the dispatch leader for this round. Stored in an
         // Option so we can deterministically drop it *while holding*
         // `batched_pending` to close the post-dispatch race (see #276 fix).
-        let mut dispatch_lock_opt: Option<_> =
-            self.batched_dispatcher.try_lock().ok();
+        let mut dispatch_lock_opt: Option<_> = self.batched_dispatcher.try_lock().ok();
         tr!("LEADER try_lock={}", dispatch_lock_opt.is_some());
         if dispatch_lock_opt.is_some() {
             // **Cycle 1 optimisation (single-user fast path)** — only
@@ -542,8 +537,7 @@ impl ServerState {
                 .iter()
                 .enumerate()
                 .filter(|(idx, taken)| {
-                    *idx != slot_idx
-                        && taken.load(std::sync::atomic::Ordering::Relaxed)
+                    *idx != slot_idx && taken.load(std::sync::atomic::Ordering::Relaxed)
                 })
                 .count();
             if n_others_active > 0 {
@@ -597,9 +591,9 @@ impl ServerState {
                 tr!("DISPATCH start slots={:?}", ids);
                 if let Err(e) = self.dispatch_batched_pending(&pending) {
                     for p in &pending {
-                        let _ = p.response.send(Err(anyhow!(
-                            "batched dispatch failed: {e}"
-                        )));
+                        let _ = p
+                            .response
+                            .send(Err(anyhow!("batched dispatch failed: {e}")));
                     }
                 }
                 tr!("DISPATCH done slots={:?}", ids);
@@ -624,10 +618,7 @@ impl ServerState {
     /// the response senders.
     /// Returns Err on dispatch failure; caller fans the error to all
     /// pending senders.
-    fn dispatch_batched_pending(
-        &self,
-        pending: &[PendingDecode],
-    ) -> anyhow::Result<()> {
+    fn dispatch_batched_pending(&self, pending: &[PendingDecode]) -> anyhow::Result<()> {
         use crate::model_handle::BatchSlot;
         let trace = dev_flag("FLAMBEAU_TRACE_BATCH");
         macro_rules! tr_d {
@@ -665,9 +656,7 @@ impl ServerState {
             .collect();
 
         let vocab = self.cfg.vocab_size;
-        let mut logits_owned: Vec<Vec<f32>> = (0..n)
-            .map(|_| Vec::with_capacity(vocab))
-            .collect();
+        let mut logits_owned: Vec<Vec<f32>> = (0..n).map(|_| Vec::with_capacity(vocab)).collect();
 
         // Deref each MutexGuard<Box<dyn Session>> to a
         // `&mut dyn Session` and hand the distinct-by-index slice to
@@ -679,8 +668,7 @@ impl ServerState {
                 let inflight: &mut dyn crate::Session = &mut ***g;
                 inflights.push(inflight);
             }
-            let mut logits_refs: Vec<&mut Vec<f32>> =
-                logits_owned.iter_mut().collect();
+            let mut logits_refs: Vec<&mut Vec<f32>> = logits_owned.iter_mut().collect();
             self.forward_decode_batched_with_inflights(
                 inflights.as_mut_slice(),
                 &slots,
@@ -690,7 +678,11 @@ impl ServerState {
 
         for (s, p) in pending.iter().enumerate() {
             let logits = std::mem::take(&mut logits_owned[s]);
-            tr_d!("send response slot={} logits_len={}", p.slot_idx, logits.len());
+            tr_d!(
+                "send response slot={} logits_len={}",
+                p.slot_idx,
+                logits.len()
+            );
             let _ = p.response.send(Ok(logits));
         }
         tr_d!("dispatch_done dropping guards");
@@ -743,11 +735,7 @@ impl ServerState {
         logits_out.clear();
         let mut inflights_arr: [&mut dyn crate::Session; 1] = [inflight];
         let mut logits_refs: [&mut Vec<f32>; 1] = [logits_out];
-        self.forward_decode_batched_with_inflights(
-            &mut inflights_arr,
-            &slots,
-            &mut logits_refs,
-        )
+        self.forward_decode_batched_with_inflights(&mut inflights_arr, &slots, &mut logits_refs)
     }
 }
 
@@ -763,12 +751,10 @@ pub use embeddings::embeddings;
 pub mod chat;
 pub use chat::chat_completions;
 
-
 pub mod completions;
 pub use completions::completions;
 
 pub mod finalise;
-
 
 pub mod infill;
 pub use infill::infill;
@@ -783,5 +769,3 @@ pub(crate) use decode_loop::{
 
 pub mod errors;
 pub use errors::{now_unix, queue_full_response, request_id, ApiError};
-
-

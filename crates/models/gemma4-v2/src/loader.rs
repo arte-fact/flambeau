@@ -10,15 +10,15 @@ use flambeau_backend_hip::HipDevice;
 use flambeau_blocks::per_layer_embd::PerLayerEmbedLayerWeights;
 use flambeau_core::{CopyDirection, Device, DevicePtr, Stream};
 use flambeau_forward::ctx::{
-    Activation, AttnWeights, EmbeddingWeights, FfnWeights, LmHeadWeights, ModelLayout,
-    MoeWeights, SharedExpertWeights,
+    Activation, AttnWeights, EmbeddingWeights, FfnWeights, LmHeadWeights, ModelLayout, MoeWeights,
+    SharedExpertWeights,
 };
 use flambeau_forward::loader::{
     load_dense_attn_layer, load_dense_ffn_layer, load_embedding, load_lm_head,
     upload_col_sharded_quant, upload_dequant_to_f16, upload_f32_tensor,
     upload_gemma4_pre_router_weight_f16, upload_moe_experts_fused_gate_up_stacked,
-    upload_moe_experts_stacked_row_sharded, upload_quant_weight, upload_row_sharded_quant,
-    upload_router_f16, DenseAttnLayerSpec, DenseFfnLayerSpec, EmbeddingSpec, LmHeadSpec,
+    upload_moe_experts_stacked_row_sharded, upload_quant_weight, upload_router_f16,
+    upload_row_sharded_quant, DenseAttnLayerSpec, DenseFfnLayerSpec, EmbeddingSpec, LmHeadSpec,
     ShardMode,
 };
 use flambeau_quant::{GgmlDType, GgufFile};
@@ -111,9 +111,7 @@ fn load_with_shard(
     let mut allocs: Vec<(DevicePtr, usize)> = Vec::new();
     let owns_embed = layer_range.map_or(true, |(s, _)| s == 0);
     let owns_lm_head = layer_range.map_or(true, |(_, e)| e == config.num_layers);
-    let in_range = |li: usize| -> bool {
-        layer_range.map_or(true, |(s, e)| li >= s && li < e)
-    };
+    let in_range = |li: usize| -> bool { layer_range.map_or(true, |(s, e)| li >= s && li < e) };
 
     // Gemma4: inpL *= sqrt(n_embd) post-embed.
     let embedding = if owns_embed {
@@ -137,17 +135,22 @@ fn load_with_shard(
     let is_moe = config.moe.is_some();
     let has_per_layer_embd = config.per_layer_embd.is_some();
     let mut attn = Vec::with_capacity(config.num_layers);
-    let mut ffn: Vec<Option<FfnWeights>> =
-        if is_moe { Vec::new() } else { Vec::with_capacity(config.num_layers) };
-    let mut moe_layers: Vec<Option<MoeWeights>> =
-        if is_moe { Vec::with_capacity(config.num_layers) } else { Vec::new() };
+    let mut ffn: Vec<Option<FfnWeights>> = if is_moe {
+        Vec::new()
+    } else {
+        Vec::with_capacity(config.num_layers)
+    };
+    let mut moe_layers: Vec<Option<MoeWeights>> = if is_moe {
+        Vec::with_capacity(config.num_layers)
+    } else {
+        Vec::new()
+    };
     let mut layer_output_scale: Vec<Option<f32>> = Vec::with_capacity(config.num_layers);
-    let mut per_layer_embd_w: Vec<Option<PerLayerEmbedLayerWeights>> =
-        if has_per_layer_embd {
-            Vec::with_capacity(config.num_layers)
-        } else {
-            Vec::new()
-        };
+    let mut per_layer_embd_w: Vec<Option<PerLayerEmbedLayerWeights>> = if has_per_layer_embd {
+        Vec::with_capacity(config.num_layers)
+    } else {
+        Vec::new()
+    };
     for li in 0..config.num_layers {
         if !in_range(li) {
             attn.push(None);
@@ -226,13 +229,8 @@ fn load_with_shard(
             let router_name = format!("{p}.ffn_gate_inp.weight");
             let gate_up_exps = format!("{p}.ffn_gate_up_exps.weight");
             let down_exps = format!("{p}.ffn_down_exps.weight");
-            let ffn_norm_t = upload_dequant_to_f16(
-                file,
-                device,
-                &ffn_norm_name,
-                config.hidden,
-                &mut allocs,
-            )?;
+            let ffn_norm_t =
+                upload_dequant_to_f16(file, device, &ffn_norm_name, config.hidden, &mut allocs)?;
             // Final F16 post-norm (legacy keeps both F16 and F32 copies;
             // v2 cascade uses the F32 variant, but we keep the F16
             // tensor too for the qwen-path fallback / future use).
@@ -333,14 +331,53 @@ fn load_with_shard(
             let inter = config.intermediate;
             let (gate_sh, up_sh, down_sh) = match shard {
                 ShardMode::Replicated => (
-                    upload_quant_weight(file, device, &ffn_gate, inter * config.hidden, &mut allocs)?,
+                    upload_quant_weight(
+                        file,
+                        device,
+                        &ffn_gate,
+                        inter * config.hidden,
+                        &mut allocs,
+                    )?,
                     upload_quant_weight(file, device, &ffn_up, inter * config.hidden, &mut allocs)?,
-                    upload_quant_weight(file, device, &ffn_down, config.hidden * inter, &mut allocs)?,
+                    upload_quant_weight(
+                        file,
+                        device,
+                        &ffn_down,
+                        config.hidden * inter,
+                        &mut allocs,
+                    )?,
                 ),
                 ShardMode::Tp { rank, n_ranks } => (
-                    upload_col_sharded_quant(file, device, &ffn_gate, inter, config.hidden, rank, n_ranks, &mut allocs)?,
-                    upload_col_sharded_quant(file, device, &ffn_up, inter, config.hidden, rank, n_ranks, &mut allocs)?,
-                    upload_row_sharded_quant(file, device, &ffn_down, config.hidden, inter, rank, n_ranks, &mut allocs)?,
+                    upload_col_sharded_quant(
+                        file,
+                        device,
+                        &ffn_gate,
+                        inter,
+                        config.hidden,
+                        rank,
+                        n_ranks,
+                        &mut allocs,
+                    )?,
+                    upload_col_sharded_quant(
+                        file,
+                        device,
+                        &ffn_up,
+                        inter,
+                        config.hidden,
+                        rank,
+                        n_ranks,
+                        &mut allocs,
+                    )?,
+                    upload_row_sharded_quant(
+                        file,
+                        device,
+                        &ffn_down,
+                        config.hidden,
+                        inter,
+                        rank,
+                        n_ranks,
+                        &mut allocs,
+                    )?,
                 ),
             };
             let shared = Some(SharedExpertWeights {
@@ -421,20 +458,10 @@ fn load_with_shard(
                 pe * config.hidden,
                 &mut allocs,
             )?;
-            let proj_t = upload_f32_tensor(
-                file,
-                device,
-                &proj_name,
-                config.hidden * pe,
-                &mut allocs,
-            )?;
-            let post_norm_t = upload_dequant_to_f16(
-                file,
-                device,
-                &post_norm_name,
-                config.hidden,
-                &mut allocs,
-            )?;
+            let proj_t =
+                upload_f32_tensor(file, device, &proj_name, config.hidden * pe, &mut allocs)?;
+            let post_norm_t =
+                upload_dequant_to_f16(file, device, &post_norm_name, config.hidden, &mut allocs)?;
             per_layer_embd_w.push(Some(PerLayerEmbedLayerWeights {
                 inp_gate: inp_gate_t.ptr,
                 proj: proj_t.ptr,
@@ -551,9 +578,9 @@ fn load_with_shard(
                     proj_f16_host.push(half::f16::from_f32(v));
                 }
             }
-            other => bail!(
-                "per_layer_model_proj dtype {other:?} not supported (expected F32 or BF16)"
-            ),
+            other => {
+                bail!("per_layer_model_proj dtype {other:?} not supported (expected F32 or BF16)")
+            }
         }
         let proj_bytes = proj_elems * 2;
         let model_proj_f16_dev = device
@@ -616,8 +643,6 @@ fn load_with_shard(
         device_id,
     })
 }
-
-
 
 pub fn load_from_gguf(
     file: &GgufFile,

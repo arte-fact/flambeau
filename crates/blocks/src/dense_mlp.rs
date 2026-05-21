@@ -29,13 +29,13 @@ use crate::WeightHandle;
 /// the underlying allocations.
 #[derive(Copy, Clone)]
 pub struct DenseMlpDecodeScratch {
-    pub x_q8_1: DevicePtr,        // Q8_1 [hidden / 32]
-    pub gate_f32: DevicePtr,      // F32 [intermediate]
-    pub up_f32: DevicePtr,        // F32 [intermediate]
-    pub activated_f16: DevicePtr, // F16 [intermediate]
-    pub activated_q8_1: DevicePtr,// Q8_1 [intermediate / 32]
-    pub down_f32: DevicePtr,      // F32 [hidden]
-    pub down_f16: DevicePtr,      // F16 [hidden]
+    pub x_q8_1: DevicePtr,         // Q8_1 [hidden / 32]
+    pub gate_f32: DevicePtr,       // F32 [intermediate]
+    pub up_f32: DevicePtr,         // F32 [intermediate]
+    pub activated_f16: DevicePtr,  // F16 [intermediate]
+    pub activated_q8_1: DevicePtr, // Q8_1 [intermediate / 32]
+    pub down_f32: DevicePtr,       // F32 [hidden]
+    pub down_f16: DevicePtr,       // F16 [hidden]
 }
 
 /// Borrowed-by-value view of a caller-owned dense FFN prefill scratch.
@@ -123,9 +123,9 @@ impl OwnedDenseMlpPrefillScratch {
 /// the caller (since the block also serves as the per-expert path
 /// inside `MoeExperts`, where the input norm is upstream).
 pub struct DenseMlp {
-    pub ffn_gate: WeightHandle,  // [intermediate, hidden]
-    pub ffn_up: WeightHandle,    // [intermediate, hidden]
-    pub ffn_down: WeightHandle,  // [hidden, intermediate]
+    pub ffn_gate: WeightHandle, // [intermediate, hidden]
+    pub ffn_up: WeightHandle,   // [intermediate, hidden]
+    pub ffn_down: WeightHandle, // [hidden, intermediate]
     pub hidden: usize,
     pub intermediate: usize,
 }
@@ -162,11 +162,20 @@ impl DenseMlp {
                 intermediate,
             );
         }
-        Ok(Self { ffn_gate, ffn_up, ffn_down, hidden, intermediate })
+        Ok(Self {
+            ffn_gate,
+            ffn_up,
+            ffn_down,
+            hidden,
+            intermediate,
+        })
     }
 
     pub fn scratch_dims(&self) -> DenseMlpScratchDims {
-        DenseMlpScratchDims { hidden: self.hidden, intermediate: self.intermediate }
+        DenseMlpScratchDims {
+            hidden: self.hidden,
+            intermediate: self.intermediate,
+        }
     }
 
     /// Allocate an [`OwnedDenseMlpDecodeScratch`] sized for `dims`. All
@@ -177,7 +186,10 @@ impl DenseMlp {
         tracker: &mut RawAllocTracker,
         dims: DenseMlpScratchDims,
     ) -> Result<OwnedDenseMlpDecodeScratch> {
-        let DenseMlpScratchDims { hidden, intermediate } = dims;
+        let DenseMlpScratchDims {
+            hidden,
+            intermediate,
+        } = dims;
         let (x_q8_1, _) = tracker.alloc_q8_1(device, hidden)?;
         let (gate_f32, _) = tracker.alloc_f32(device, intermediate)?;
         let (up_f32, _) = tracker.alloc_f32(device, intermediate)?;
@@ -207,7 +219,10 @@ impl DenseMlp {
         if max_tokens == 0 {
             bail!("alloc_prefill_scratch: max_tokens must be >= 1");
         }
-        let DenseMlpScratchDims { hidden, intermediate } = dims;
+        let DenseMlpScratchDims {
+            hidden,
+            intermediate,
+        } = dims;
         let (x_q8_1, _) = tracker.alloc_q8_1(device, max_tokens * hidden)?;
         let (x_q8_1_mmq, _) = tracker.alloc_q8_1_mmq(device, max_tokens * hidden)?;
         let (gate_f32, _) = tracker.alloc_f32(device, max_tokens * intermediate)?;
@@ -290,8 +305,13 @@ impl DenseMlp {
         }
 
         // 4+5. Fused SwiGLU → F16 + Q8_1 quantise.
-        ops.swiglu_f32_to_f16(scratch.gate_f32, scratch.up_f32, scratch.activated_f16, inter)
-            .context("dense ffn swiglu_f32_to_f16")?;
+        ops.swiglu_f32_to_f16(
+            scratch.gate_f32,
+            scratch.up_f32,
+            scratch.activated_f16,
+            inter,
+        )
+        .context("dense ffn swiglu_f32_to_f16")?;
         ops.quantize_f16_q8_1(scratch.activated_f16, scratch.activated_q8_1, inter)
             .context("dense ffn quantise activated → Q8_1")?;
 
@@ -454,19 +474,25 @@ impl DenseMlpTp {
         if ffn_gate.dims != [intermediate_local, hidden] {
             bail!(
                 "DenseMlpTp: ffn_gate dims {:?} != [{}, {}]",
-                ffn_gate.dims, intermediate_local, hidden
+                ffn_gate.dims,
+                intermediate_local,
+                hidden
             );
         }
         if ffn_up.dims != [intermediate_local, hidden] {
             bail!(
                 "DenseMlpTp: ffn_up dims {:?} != [{}, {}]",
-                ffn_up.dims, intermediate_local, hidden
+                ffn_up.dims,
+                intermediate_local,
+                hidden
             );
         }
         if ffn_down.dims != [hidden, intermediate_local] {
             bail!(
                 "DenseMlpTp: ffn_down dims {:?} != [{}, {}]",
-                ffn_down.dims, hidden, intermediate_local
+                ffn_down.dims,
+                hidden,
+                intermediate_local
             );
         }
         Ok(Self {
@@ -505,12 +531,12 @@ impl DenseMlpTp {
         // 2+3. gate + up — fused on Q8_0 / Q4_0 / Q4_1, unfused otherwise.
         let gate_dt = self.ffn_gate.dtype;
         let up_dt = self.ffn_up.dtype;
-        let fuse_q8 = gate_dt == flambeau_core::op::QDtype::Q8_0
-            && up_dt == flambeau_core::op::QDtype::Q8_0;
-        let fuse_q4_0 = gate_dt == flambeau_core::op::QDtype::Q4_0
-            && up_dt == flambeau_core::op::QDtype::Q4_0;
-        let fuse_q4_1 = gate_dt == flambeau_core::op::QDtype::Q4_1
-            && up_dt == flambeau_core::op::QDtype::Q4_1;
+        let fuse_q8 =
+            gate_dt == flambeau_core::op::QDtype::Q8_0 && up_dt == flambeau_core::op::QDtype::Q8_0;
+        let fuse_q4_0 =
+            gate_dt == flambeau_core::op::QDtype::Q4_0 && up_dt == flambeau_core::op::QDtype::Q4_0;
+        let fuse_q4_1 =
+            gate_dt == flambeau_core::op::QDtype::Q4_1 && up_dt == flambeau_core::op::QDtype::Q4_1;
         if fuse_q8 {
             ops.mmvq_q8_0_gate_up(
                 self.ffn_gate.ptr,
@@ -640,43 +666,88 @@ impl DenseMlpTp {
         }
         let gate_dt = self.ffn_gate.dtype;
         let up_dt = self.ffn_up.dtype;
-        let fuse_q8 = gate_dt == flambeau_core::op::QDtype::Q8_0
-            && up_dt == flambeau_core::op::QDtype::Q8_0;
-        let fuse_q4_0 = gate_dt == flambeau_core::op::QDtype::Q4_0
-            && up_dt == flambeau_core::op::QDtype::Q4_0;
-        let fuse_q4_1 = gate_dt == flambeau_core::op::QDtype::Q4_1
-            && up_dt == flambeau_core::op::QDtype::Q4_1;
+        let fuse_q8 =
+            gate_dt == flambeau_core::op::QDtype::Q8_0 && up_dt == flambeau_core::op::QDtype::Q8_0;
+        let fuse_q4_0 =
+            gate_dt == flambeau_core::op::QDtype::Q4_0 && up_dt == flambeau_core::op::QDtype::Q4_0;
+        let fuse_q4_1 =
+            gate_dt == flambeau_core::op::QDtype::Q4_1 && up_dt == flambeau_core::op::QDtype::Q4_1;
         if fuse_q8 {
             ops.mmvq_q8_0_gate_up(
-                self.ffn_gate.ptr, self.ffn_up.ptr, scratch.x_q8_1,
-                scratch.gate_f32, scratch.up_f32, inter, inter, hidden,
-            ).context("DenseMlpTp (F32) gate+up fused mmvq_q8_0")?;
+                self.ffn_gate.ptr,
+                self.ffn_up.ptr,
+                scratch.x_q8_1,
+                scratch.gate_f32,
+                scratch.up_f32,
+                inter,
+                inter,
+                hidden,
+            )
+            .context("DenseMlpTp (F32) gate+up fused mmvq_q8_0")?;
         } else if fuse_q4_0 {
             ops.mmvq_q4_0_gate_up_t128(
-                self.ffn_gate.ptr, self.ffn_up.ptr, scratch.x_q8_1,
-                scratch.gate_f32, scratch.up_f32, inter, inter, hidden,
-            ).context("DenseMlpTp (F32) gate+up fused mmvq_q4_0_t128")?;
+                self.ffn_gate.ptr,
+                self.ffn_up.ptr,
+                scratch.x_q8_1,
+                scratch.gate_f32,
+                scratch.up_f32,
+                inter,
+                inter,
+                hidden,
+            )
+            .context("DenseMlpTp (F32) gate+up fused mmvq_q4_0_t128")?;
         } else if fuse_q4_1 {
             ops.mmvq_q4_1_gate_up(
-                self.ffn_gate.ptr, self.ffn_up.ptr, scratch.x_q8_1,
-                scratch.gate_f32, scratch.up_f32, inter, inter, hidden,
-            ).context("DenseMlpTp (F32) gate+up fused mmvq_q4_1")?;
+                self.ffn_gate.ptr,
+                self.ffn_up.ptr,
+                scratch.x_q8_1,
+                scratch.gate_f32,
+                scratch.up_f32,
+                inter,
+                inter,
+                hidden,
+            )
+            .context("DenseMlpTp (F32) gate+up fused mmvq_q4_1")?;
         } else {
             ops.qmatmul(
-                self.ffn_gate.ptr, scratch.x_q8_1, DevicePtr(0),
-                scratch.gate_f32, 1, hidden, inter, gate_dt,
-            ).context("DenseMlpTp (F32) gate qmatmul")?;
+                self.ffn_gate.ptr,
+                scratch.x_q8_1,
+                DevicePtr(0),
+                scratch.gate_f32,
+                1,
+                hidden,
+                inter,
+                gate_dt,
+            )
+            .context("DenseMlpTp (F32) gate qmatmul")?;
             ops.qmatmul(
-                self.ffn_up.ptr, scratch.x_q8_1, DevicePtr(0),
-                scratch.up_f32, 1, hidden, inter, up_dt,
-            ).context("DenseMlpTp (F32) up qmatmul")?;
+                self.ffn_up.ptr,
+                scratch.x_q8_1,
+                DevicePtr(0),
+                scratch.up_f32,
+                1,
+                hidden,
+                inter,
+                up_dt,
+            )
+            .context("DenseMlpTp (F32) up qmatmul")?;
         }
         match self.activation {
             Activation::SwiGLU => ops
-                .swiglu_f32_to_f16(scratch.gate_f32, scratch.up_f32, scratch.activated_f16, inter)
+                .swiglu_f32_to_f16(
+                    scratch.gate_f32,
+                    scratch.up_f32,
+                    scratch.activated_f16,
+                    inter,
+                )
                 .context("DenseMlpTp (F32) swiglu_f32_to_f16")?,
             Activation::Gelu => ops
-                .gelu_f32_to_f16(scratch.gate_f32, scratch.up_f32, scratch.activated_f16, inter)
+                .gelu_f32_to_f16(
+                    scratch.gate_f32,
+                    scratch.up_f32,
+                    scratch.activated_f16,
+                    inter,
+                )
                 .context("DenseMlpTp (F32) gelu_f32_to_f16")?,
         }
         ops.quantize_f16_q8_1(scratch.activated_f16, scratch.activated_q8_1, inter)
@@ -688,7 +759,9 @@ impl DenseMlpTp {
             scratch.activated_q8_1,
             DevicePtr(0),
             partial_ffn_out_f32,
-            1, inter, hidden,
+            1,
+            inter,
+            hidden,
             self.ffn_down.dtype,
         )
         .context("DenseMlpTp (F32) down qmatmul → partial_ffn_out_f32")?;
@@ -771,8 +844,13 @@ impl DenseMlpTp {
         // 5. Quantise activated → BOTH Q8_1 layouts.
         ops.quantize_f16_q8_1(scratch.activated_f16, scratch.activated_q8_1, act_elems)
             .context("DenseMlpTp prefill activated → Q8_1 (std)")?;
-        ops.quantize_f16_q8_1_mmq(scratch.activated_f16, scratch.activated_q8_1_mmq, inter, n_tokens)
-            .context("DenseMlpTp prefill activated → Q8_1 (MMQ DS4)")?;
+        ops.quantize_f16_q8_1_mmq(
+            scratch.activated_f16,
+            scratch.activated_q8_1_mmq,
+            inter,
+            n_tokens,
+        )
+        .context("DenseMlpTp prefill activated → Q8_1 (MMQ DS4)")?;
 
         // 6. Row-parallel down matmul.
         ops.qmatmul(

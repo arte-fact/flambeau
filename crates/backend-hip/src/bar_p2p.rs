@@ -164,7 +164,8 @@ impl BarP2pAllReduce {
                 backend: "hip",
                 code: -1,
                 message: "BarP2pAllReduce requires a fully-connected peer-access matrix; \
-                          fall back to host-bounce AllReduce on this cluster".into(),
+                          fall back to host-bounce AllReduce on this cluster"
+                    .into(),
             });
         }
         let hsaco = kernels::hsaco(HSACO_NAME).ok_or(DeviceError::Backend {
@@ -844,7 +845,11 @@ impl BarP2pAllReduce {
         let n = elem_count;
         // Pack pointer args as u64 (matches `void*` ABI on 64-bit).
         match args {
-            ArArgs::Residual { hidden, partial_local, peers } => {
+            ArArgs::Residual {
+                hidden,
+                partial_local,
+                peers,
+            } => {
                 let h = hidden.as_usize() as u64;
                 let pl = partial_local.as_usize() as u64;
                 let p0 = peers[0].as_usize() as u64;
@@ -865,7 +870,10 @@ impl BarP2pAllReduce {
                 // return of `hipModuleLaunchKernel`).
                 unsafe { kern.launch(stream, cfg, k_args)? };
             }
-            ArArgs::Sum { partial_local, peers } => {
+            ArArgs::Sum {
+                partial_local,
+                peers,
+            } => {
                 let pl = partial_local.as_usize() as u64;
                 let p0 = peers[0].as_usize() as u64;
                 let p1 = peers[1].as_usize() as u64;
@@ -944,10 +952,7 @@ impl BarP2pAllReduce {
     /// # Safety
     /// Forwarded from `residual_rmsnorm_q8_1_tp{2,4}` public-method
     /// contracts.
-    #[expect(
-        clippy::too_many_arguments,
-        reason = "matches the kernel's flat ABI"
-    )]
+    #[expect(clippy::too_many_arguments, reason = "matches the kernel's flat ABI")]
     unsafe fn launch_fused_rmsnorm_q8_1(
         &self,
         kind: ArKind,
@@ -1023,8 +1028,14 @@ mod tests {
         // String-level guard — if the kernel file gets renamed, the cert
         // harness in `tests/p2p_allreduce_smoke.rs` will catch it at
         // runtime, but we want a compile-locality check too.
-        assert_eq!(ArKind::ResidualTp4.fn_name(), "flambeau_p2p_allreduce_residual_tp4");
-        assert_eq!(ArKind::ResidualTp2.fn_name(), "flambeau_p2p_allreduce_residual_tp2");
+        assert_eq!(
+            ArKind::ResidualTp4.fn_name(),
+            "flambeau_p2p_allreduce_residual_tp4"
+        );
+        assert_eq!(
+            ArKind::ResidualTp2.fn_name(),
+            "flambeau_p2p_allreduce_residual_tp2"
+        );
         assert_eq!(ArKind::SumTp4.fn_name(), "flambeau_p2p_allreduce_sum_tp4");
         assert_eq!(ArKind::SumTp2.fn_name(), "flambeau_p2p_allreduce_sum_tp2");
         assert_eq!(

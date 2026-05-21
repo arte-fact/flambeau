@@ -29,7 +29,9 @@ pub enum Topology {
     },
     /// Tensor-parallel across `devices`. Every rank holds a shard of
     /// every layer; AR collapses partials after each row-parallel matmul.
-    Tp { devices: Vec<i32> },
+    Tp {
+        devices: Vec<i32>,
+    },
     /// PP-of-TP. `stages` is `[stage_idx][rank_in_stage]` — each stage
     /// is a TP cluster, stages chain via host peer_buffer. `layer_split`
     /// gives the per-stage layer count (length = `stages.len()`); when
@@ -327,10 +329,7 @@ impl<A: Arch> Session<A> {
     /// Batched-decode entry: forwards N pairs of (token, position) each
     /// targeting its slot's KV history; emits N logits rows in
     /// `self.last_logits` row-major `[N, vocab]`.
-    pub fn forward_decode_batched(
-        &mut self,
-        slots: &[(u32, usize, usize)],
-    ) -> Result<()> {
+    pub fn forward_decode_batched(&mut self, slots: &[(u32, usize, usize)]) -> Result<()> {
         if slots.is_empty() {
             anyhow::bail!("Session::forward_decode_batched: empty slots");
         }

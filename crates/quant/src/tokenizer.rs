@@ -198,17 +198,15 @@ pub fn load_from_gguf(file: &GgufFile) -> Result<GgufTokenizer> {
         // #21488 byte-token handling).
         let bf = decoders::byte_fallback::ByteFallback::new();
         let ms = Metaspace::new('▁', PrependScheme::Never, true);
-        let seq =
-            decoders::sequence::Sequence::new(vec![
-                DecoderWrapper::ByteFallback(bf),
-                DecoderWrapper::Metaspace(ms),
-            ]);
+        let seq = decoders::sequence::Sequence::new(vec![
+            DecoderWrapper::ByteFallback(bf),
+            DecoderWrapper::Metaspace(ms),
+        ]);
         tok.with_decoder(Some(DecoderWrapper::Sequence(seq)));
     } else {
         tok.with_decoder(Some(DecoderWrapper::ByteLevel(
             decoders::byte_level::ByteLevel::new(
-                /*add_prefix_space=*/ false,
-                /*trim_offsets=*/ true,
+                /*add_prefix_space=*/ false, /*trim_offsets=*/ true,
                 /*use_regex=*/ true,
             ),
         )));
@@ -241,10 +239,13 @@ pub fn load_from_gguf(file: &GgufFile) -> Result<GgufTokenizer> {
     // Sweep vocab for `<|...|>` bracket-style control tokens.
     for (id, v) in tokens_arr.iter().enumerate() {
         if let Some(s) = v.as_str() {
-            if s.starts_with("<|") && s.ends_with("|>") && s.len() <= 32
-                && added_ids.insert(id as u32) {
-                    added.push(AddedToken::from(s.to_owned(), /*special=*/ true));
-                }
+            if s.starts_with("<|")
+                && s.ends_with("|>")
+                && s.len() <= 32
+                && added_ids.insert(id as u32)
+            {
+                added.push(AddedToken::from(s.to_owned(), /*special=*/ true));
+            }
         }
     }
     if !added.is_empty() {
@@ -298,9 +299,7 @@ pub fn load_from_gguf(file: &GgufFile) -> Result<GgufTokenizer> {
             // `<think>` / `</think>` (and their open variants) bypass
             // the server's MIN_RESPONSE_TOKENS early-window mask. See
             // `always_stop_ids` doc on `GgufTokenizer`.
-            if (needle == "<think>" || needle == "</think>")
-                && !always_stop_ids.contains(&id)
-            {
+            if (needle == "<think>" || needle == "</think>") && !always_stop_ids.contains(&id) {
                 always_stop_ids.push(id);
             }
         }
@@ -310,12 +309,7 @@ pub fn load_from_gguf(file: &GgufFile) -> Result<GgufTokenizer> {
     // llama.cpp `llama-vocab.cpp:2569` plus the tokenizer-pre group's
     // closing tokens.
     if is_gemma4 {
-        for needle in [
-            "<end_of_turn>",
-            "<eos>",
-            "<turn|>",
-            "<|tool_response>",
-        ] {
+        for needle in ["<end_of_turn>", "<eos>", "<turn|>", "<|tool_response>"] {
             if let Some(id) = find_vocab_id(tokens_arr, needle) {
                 if !stop_ids.contains(&id) {
                     stop_ids.push(id);
@@ -423,9 +417,10 @@ fn detect_fim_tokens(tokens_arr: &[crate::gguf::Value]) -> Option<FimTokens> {
 }
 
 fn find_vocab_id(tokens_arr: &[crate::gguf::Value], needle: &str) -> Option<u32> {
-    tokens_arr.iter().position(|v| {
-        v.as_str().is_some_and(|s| s == needle)
-    }).map(|i| i as u32)
+    tokens_arr
+        .iter()
+        .position(|v| v.as_str().is_some_and(|s| s == needle))
+        .map(|i| i as u32)
 }
 
 #[cfg(test)]
@@ -434,14 +429,23 @@ mod fim_tests {
     use crate::gguf::Value;
 
     fn vocab(words: &[&str]) -> Vec<Value> {
-        words.iter().map(|w| Value::String((*w).to_string())).collect()
+        words
+            .iter()
+            .map(|w| Value::String((*w).to_string()))
+            .collect()
     }
 
     #[test]
     fn detects_qwen_coder_set() {
         let v = vocab(&[
-            "a", "<|fim_prefix|>", "b", "<|fim_suffix|>", "<|fim_middle|>",
-            "<|fim_pad|>", "<|repo_name|>", "<|file_sep|>",
+            "a",
+            "<|fim_prefix|>",
+            "b",
+            "<|fim_suffix|>",
+            "<|fim_middle|>",
+            "<|fim_pad|>",
+            "<|repo_name|>",
+            "<|file_sep|>",
         ]);
         let fim = detect_fim_tokens(&v).expect("fim present");
         assert_eq!(fim.prefix, 1);
@@ -512,8 +516,7 @@ fn pre_for(pre: &str) -> Result<PreTokenizerWrapper> {
     match pre {
         "default" | "gpt-2" | "llama-bpe" | "llama3" => {
             Ok(PreTokenizerWrapper::ByteLevel(ByteLevel::new(
-                /*add_prefix_space=*/ false,
-                /*trim_offsets=*/ true,
+                /*add_prefix_space=*/ false, /*trim_offsets=*/ true,
                 /*use_regex=*/ true,
             )))
         }
@@ -532,8 +535,7 @@ fn pre_for(pre: &str) -> Result<PreTokenizerWrapper> {
             )
             .map_err(|e| anyhow!("qwen split pretokenizer: {e}"))?;
             let byte_level = ByteLevel::new(
-                /*add_prefix_space=*/ false,
-                /*trim_offsets=*/ true,
+                /*add_prefix_space=*/ false, /*trim_offsets=*/ true,
                 /*use_regex=*/ false,
             );
             Ok(PreTokenizerWrapper::Sequence(PreTokSequence::new(vec![

@@ -18,9 +18,7 @@ use flambeau_quant::{GgmlDType, GgufFile};
 
 use crate::ctx::QuantWeight;
 
-use super::primitives::{
-    dtype_qmatmul_native, f32_to_q8_0_bytes, upload_bytes, wrap_quant,
-};
+use super::primitives::{dtype_qmatmul_native, f32_to_q8_0_bytes, upload_bytes, wrap_quant};
 
 /// Pack the per-rank [Q | K | V] byte slab. `row_bytes` is the
 /// on-disk row stride (inner dim × bytes-per-element, accounting
@@ -59,7 +57,12 @@ pub(super) fn pack_gdn_qkv_slab(
         (k_part_full, k_part_full, 0, k_part_full)
     } else {
         let k_local = k_part_full / n_ranks;
-        (k_local, k_local, rank * k_local, k_part_full + rank * k_local)
+        (
+            k_local,
+            k_local,
+            rank * k_local,
+            k_part_full + rank * k_local,
+        )
     };
     let v_off = 2 * k_part_full + rank * v_local;
     let per_rank_rows = q_rows + k_rows + v_local;
@@ -138,7 +141,12 @@ pub fn upload_gdn_fused_qkv_quant(
             (k_part_full, k_part_full, 0, k_part_full)
         } else {
             let k_local = k_part_full / n_ranks;
-            (k_local, k_local, rank * k_local, k_part_full + rank * k_local)
+            (
+                k_local,
+                k_local,
+                rank * k_local,
+                k_part_full + rank * k_local,
+            )
         };
         let v_off = 2 * k_part_full + rank * v_local;
         let per_rank_rows = q_rows + k_rows + v_local;

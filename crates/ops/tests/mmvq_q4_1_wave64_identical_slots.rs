@@ -111,8 +111,12 @@ fn quantize_row_q4_1(row: &[f32]) -> Vec<BlockQ4_1> {
         let mut min = chunk[0];
         let mut max = chunk[0];
         for &v in &chunk[1..] {
-            if v < min { min = v; }
-            if v > max { max = v; }
+            if v < min {
+                min = v;
+            }
+            if v > max {
+                max = v;
+            }
         }
         let d = (max - min) / 15.0;
         let id = if d != 0.0 { 1.0 / d } else { 0.0 };
@@ -122,14 +126,20 @@ fn quantize_row_q4_1(row: &[f32]) -> Vec<BlockQ4_1> {
             let hi = ((chunk[i + 16] - min) * id).round().clamp(0.0, 15.0) as u8;
             qs[i] = (hi << 4) | (lo & 0x0F);
         }
-        blocks.push(BlockQ4_1 { d: f16::from_f32(d), m: f16::from_f32(min), qs });
+        blocks.push(BlockQ4_1 {
+            d: f16::from_f32(d),
+            m: f16::from_f32(min),
+            qs,
+        });
     }
     blocks
 }
 
 #[test]
 fn mmvq_q4_1_wave64_identical_slots() -> Result<()> {
-    let Some(dev) = dev_or_skip() else { return Ok(()); };
+    let Some(dev) = dev_or_skip() else {
+        return Ok(());
+    };
     let reg = OpsRegistry::new(&dev).expect("registry");
     let stream = dev.default_stream();
 
@@ -161,12 +171,27 @@ fn mmvq_q4_1_wave64_identical_slots() -> Result<()> {
 
     // 3. Run wave64 path.
     // SAFETY: env mutation/restore is single-threaded inside the test.
-    unsafe { std::env::set_var("FLAMBEAU_BATCHED_MMVQ", "wave64"); }
+    unsafe {
+        std::env::set_var("FLAMBEAU_BATCHED_MMVQ", "wave64");
+    }
     let dst_bytes = n_slots * n_rows * 4;
     let d_dst = alloc_zeroed(&dev, dst_bytes);
-    qmatmul(&reg, stream, d_w, d_act_q8_1, DevicePtr(0), d_dst, n_slots, k, n_rows, QDtype::Q4_1)?;
+    qmatmul(
+        &reg,
+        stream,
+        d_w,
+        d_act_q8_1,
+        DevicePtr(0),
+        d_dst,
+        n_slots,
+        k,
+        n_rows,
+        QDtype::Q4_1,
+    )?;
     stream.synchronize()?;
-    unsafe { std::env::remove_var("FLAMBEAU_BATCHED_MMVQ"); }
+    unsafe {
+        std::env::remove_var("FLAMBEAU_BATCHED_MMVQ");
+    }
 
     let h_dst = download_f32(&dev, d_dst, n_slots * n_rows);
 
@@ -181,8 +206,12 @@ fn mmvq_q4_1_wave64_identical_slots() -> Result<()> {
         if a.to_bits() != b.to_bits() {
             n_diff += 1;
             let d = (a - b).abs();
-            if d > max_abs { max_abs = d; }
-            if first_diff.is_none() { first_diff = Some((i, a, b)); }
+            if d > max_abs {
+                max_abs = d;
+            }
+            if first_diff.is_none() {
+                first_diff = Some((i, a, b));
+            }
         }
     }
     eprintln!(
