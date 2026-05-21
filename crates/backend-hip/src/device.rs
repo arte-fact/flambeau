@@ -683,9 +683,7 @@ impl HipGraphExec {
         let _ = _capture_scope.end();
         let _ = unsafe { crate::sys::hipGraphDestroy(shared_graph) };
 
-        if let Err(e) = closure_result {
-            return Err(e);
-        }
+        closure_result?;
         Err(DeviceError::Backend {
             backend: BACKEND,
             code: last_end_code,

@@ -3610,7 +3610,6 @@ pub fn moe_sort_by_expert(
 /// future tile16-class attempt with different kernel internals wants the
 /// pad-to-16 invariant; the scan_padded_offsets_16 kernel is already
 /// compiled into `moe_sort_by_expert`.
-#[allow(dead_code)]
 pub fn moe_sort_by_expert_padded_16(
     reg: &OpsRegistry,
     stream: &HipStream,

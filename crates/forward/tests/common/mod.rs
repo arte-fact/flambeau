@@ -1,7 +1,6 @@
 //! Shared helpers for the synth_*.rs integration tests.
 
 #![cfg(feature = "hip")]
-#![allow(dead_code)] // each binary only uses a subset
 
 use bytemuck::Pod;
 use flambeau_backend_hip::HipDevice;

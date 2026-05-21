@@ -73,6 +73,17 @@ panic = "abort"
 [profile.dev]
 opt-level = 1      # compiled kernels are slow without this; pure-Rust is fine at 1
 
+# Pure-Rust glue crate: opt-level=1 buys nothing at runtime here but costs
+# codegen time on the 4 big modules (impls.rs 1512 LOC, device.rs 1204,
+# bar_p2p.rs 1058, cluster.rs 1027). Override to 0 for faster dev rebuilds.
+[profile.dev.package.flambeau-backend-hip]
+opt-level = 0
+
+[profile.release-dev]
+inherits = "release"
+lto = "off"
+codegen-units = 16
+
 # Workspace-wide lint configuration — per M-STATIC-VERIFICATION.
 # Member crates opt in with `[lints] workspace = true`.
 [workspace.lints.rust]
@@ -90,73 +101,3 @@ redundant_lifetimes              = "warn"
 trivial_numeric_casts            = "allow"
 unsafe_op_in_unsafe_fn           = "warn"
 unused_lifetimes                 = "warn"
-
-[workspace.lints.clippy]
-# Major groups — priority = -1 so individual overrides below win.
-cargo        = { level = "warn", priority = -1 }
-complexity   = { level = "warn", priority = -1 }
-correctness  = { level = "warn", priority = -1 }
-pedantic     = { level = "warn", priority = -1 }
-perf         = { level = "warn", priority = -1 }
-style        = { level = "warn", priority = -1 }
-suspicious   = { level = "warn", priority = -1 }
-
-# Selected `restriction`-group lints that drive quality/consistency.
-allow_attributes_without_reason  = "warn"
-assertions_on_result_states      = "warn"
-# Downgraded: `arc.clone()` reads more naturally than `Arc::clone(&arc)` when
-# the arc is already named explicitly. Clippy's preference inverts on clarity
-# for our read-mostly shared-pointer pattern.
-clone_on_ref_ptr                 = "allow"
-map_err_ignore                   = "warn"
-undocumented_unsafe_blocks       = "warn"
-unnecessary_safety_comment       = "warn"
-unused_result_ok                 = "warn"
-
-# Clashes with message-template-style structured logging.
-literal_string_with_formatting_args = "allow"
-
-# Not published to crates.io — we don't maintain per-crate description/readme/
-# keywords/categories. Re-enable if/when any crate becomes externally consumed.
-cargo_common_metadata   = "allow"
-multiple_crate_versions = "allow"
-
-# Flambeau-specific opt-outs — kernel-shape math routinely int↔f32-casts,
-# and several `pedantic` lints are high-noise for the workload. Each gets
-# a rationale here in the spirit of M-LINT-OVERRIDE-EXPECT.
-cast_precision_loss      = "allow"   # int → f32 is routine in kernel-shape math
-cast_possible_truncation = "allow"   # same
-cast_sign_loss           = "allow"   # same (signed offsets into device buffers)
-cast_lossless            = "allow"   # same
-module_name_repetitions  = "allow"   # `hip::hip_device` et al. are idiomatic here
-missing_errors_doc       = "allow"   # flambeau is not published to crates.io; internal error-doc policy is "error context travels via `anyhow::Context` chains, not rustdoc `# Errors` sections". Revisit if any crate becomes externally consumed.
-missing_panics_doc       = "allow"   # same rationale — panics are debug-build guards + `expect()` on single-threaded sweep-harness code; `anyhow` contexts carry the story.
-must_use_candidate       = "allow"   # high-noise pedantic, low signal here
-missing_const_for_fn     = "allow"   # same
-return_self_not_must_use = "allow"   # builder-style APIs are already obvious
-similar_names            = "allow"   # kernel variants genuinely share prefixes (q4_k, q5_k, …)
-too_many_lines           = "allow"   # forward.rs splits tracked in P3.2, not by line cap
-doc_markdown             = "allow"   # bare identifiers in docs (Q4_K, gfx906) aren't code spans
-cast_possible_wrap       = "allow"   # kernel-shape math: usize indices → c_int for HIP launch args. GGUF dim bounds make wrap impossible at any shape we run.
-unreadable_literal       = "allow"   # splitmix64 RNG + bit-mask hex constants read more naturally without underscore separators
-if_not_else              = "allow"   # `if !cond { … } else { … }` is fine when the negated branch is the common path
-map_unwrap_or            = "allow"   # `.map(f).unwrap_or(d)` is clearer than `.map_or(d, f)` when `f` has a body
-redundant_closure_for_method_calls = "allow"   # `|x| x.to_string()` is clearer than `std::string::ToString::to_string` in chained iterators
-needless_pass_by_value   = "allow"   # test/bench fixtures routinely pass Vec<T> by value to helpers; callers have no follow-on use, so the borrow-vs-move tradeoff doesn't matter
-uninlined_format_args    = "allow"   # inlined `{var}` is fine; positional `{}` with explicit args reads better when the arg is a method call or an expression
-many_single_char_names   = "allow"   # kernel / math code uses standard single-letter names (d, k, v, n, m, b, h, i, j) by convention; renaming loses the math-text correspondence
-items_after_statements   = "allow"   # locally-scoped `use`s immediately before the only site that needs them are intentionally kept close to the use for readability
-match_same_arms          = "allow"   # match arms that look identical today often exist to stay independently mutable — e.g. per-dtype strides that are equal at one dtype set and diverge at the next
-redundant_else           = "allow"   # keeping the `else` after an early return/bail is sometimes clearer than flattening when the two branches have symmetric intent
-if_same_then_else        = "allow"   # guard-shape `if X {...} else if Y {...} else {...}` chains legitimately reuse branch bodies at predicate-table boundaries
-single_match_else        = "allow"   # `match` is clearer than `if let Some(x) = ... else { ... }` when the pattern is non-trivial
-cloned_instead_of_copied = "allow"   # `.cloned()` is fine on small owned iterators where adding a `Copy` bound propagates
-stable_sort_primitive    = "allow"   # `.sort()` is fine on short vecs; `sort_unstable` reorders ties and makes test assertions fragile
-needless_range_loop      = "allow"   # `for i in 0..n { buf[i] = ... }` is often clearer than `.iter_mut().enumerate()` especially when the loop body indexes multiple parallel arrays
-wildcard_imports         = "allow"   # `use common::*;` in test files pulls in a fixed set of helpers; expanding is just noise
-unnested_or_patterns     = "allow"   # flat `A | B | C` on one level is fine; nesting rules are taste
-unnecessary_wraps        = "allow"   # kernel-launch helpers that currently return `Result<()>` because later calls will error; keeping the Result shape avoids signature churn
-borrow_as_ptr            = "allow"   # FFI call sites use `&raw mut` / `as *mut` patterns that clippy flags as avoidable but are the idiomatic pointer-provenance-preserving form
-missing_fields_in_debug  = "allow"   # manual Debug impls intentionally omit poison-lock / atomic fields that would need custom formatting
-explicit_iter_loop       = "allow"   # `for x in xs.iter()` and `for x in &xs` are equivalent; the explicit form reads more naturally in numeric loops where the container variable name (`gate`, `beta`) is the subject
-ref_as_ptr               = "allow"   # `&foo as *const _` is the conventional FFI conversion; `std::ptr::from_ref(&foo)` is equally safe but more verbose and not widely used

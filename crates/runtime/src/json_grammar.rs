@@ -499,21 +499,19 @@ impl JsonState {
                 expecting_value,
                 expecting_comma_or_close,
                 ..
-            }) => {
-                if *expecting_value {
+            })
+                if *expecting_value => {
                     *expecting_value = false;
                     *expecting_comma_or_close = true;
                 }
-            }
             Some(Frame::Array {
                 expecting_value,
                 expecting_comma_or_close,
-            }) => {
-                if *expecting_value {
+            })
+                if *expecting_value => {
                     *expecting_value = false;
                     *expecting_comma_or_close = true;
                 }
-            }
             None => {
                 self.finished = true;
             }

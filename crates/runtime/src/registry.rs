@@ -38,7 +38,7 @@ impl Registry {
         self.models
             .iter()
             .rev()
-            .find(|m| m.supported_archs().iter().any(|&a| a == arch))
+            .find(|m| m.supported_archs().contains(&arch))
     }
 
     /// `find` but errors with the registered arch list so an unknown

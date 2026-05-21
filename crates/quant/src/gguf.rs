@@ -191,7 +191,6 @@ impl TensorInfo {
 struct SplitMmap {
     /// Path the mmap came from. Unused on the hot path; kept for `{:?}`
     /// debug output and future per-split error context.
-    #[allow(dead_code)]
     path: PathBuf,
     mmap: Arc<Mmap>,
     /// Byte offset within this split file at which its tensor data section

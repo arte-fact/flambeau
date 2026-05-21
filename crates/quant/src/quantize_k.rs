@@ -359,7 +359,7 @@ fn pack_block_q3_k(xi: &[f32], out: &mut [u8]) {
     let d_f16 = if max_scale != 0.0 {
         let iscale = -32.0 / max_scale;
         for j in 0..QK_K / 16 {
-            let l = nearest_int(iscale * scales[j]).max(-32).min(31) as i32 + 32;
+            let l = nearest_int(iscale * scales[j]).max(-32).min(31) + 32;
             let l = l as u8;
             if j < 8 {
                 block_scales[j] = l & 0xF;
