@@ -6,7 +6,7 @@ pub mod add;
 pub mod attn_decode;
 pub mod attn_decode_batched;
 pub mod attn_decode_splitk;
-pub mod attn_decode_splitk_h2;
+// pub mod attn_decode_splitk_h2;
 pub mod attn_prefill;
 pub mod cast;
 pub mod gated_attn;

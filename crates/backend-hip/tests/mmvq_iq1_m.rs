@@ -10,7 +10,6 @@ use flambeau_backend_hip::{device_count, HipDevice, HipKernel, HipModule, Kernel
 use flambeau_core::{CopyDirection, Device, DevicePtr, Stream};
 use flambeau_kernels_hip as kernels;
 use flambeau_quant::{BlockIq1M, BlockQ8_1, QK8_0, QK_K};
-use half::f16;
 
 const QK8: usize = QK8_0;
 const BLOCK_BYTES: usize = 56;

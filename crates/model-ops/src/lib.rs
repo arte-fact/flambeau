@@ -22,7 +22,7 @@ pub use ops::add::{add_f16, add_f32};
 pub use ops::attn_decode::attn_decode_f16;
 pub use ops::attn_decode_batched::{attn_decode_f16_batched, kv_append_f16_batched_slots};
 pub use ops::attn_decode_splitk::{attn_decode_f16_splitk, splitk_chunk_size};
-pub use ops::attn_decode_splitk_h2::attn_decode_f16_splitk_h2;
+// pub use ops::attn_decode_splitk_h2::attn_decode_f16_splitk_h2;
 pub use ops::attn_prefill::attn_prefill_f16;
 pub use ops::cast::{cast_f16_to_f32, cast_f32_to_f16};
 pub use ops::gated_attn::{sigmoid_mul_f16, split_q_gate_f16};

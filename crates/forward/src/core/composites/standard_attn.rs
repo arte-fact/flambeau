@@ -413,7 +413,7 @@ pub fn standard_attn_local<H: TopologyHooks>(
                 let mut partials_o =
                     unsafe { Tensor::<F32>::from_raw(state.pool.splitk_partials_o, partials_o_n) };
                 if matches!(weights.head_dim, 128 | 256 | 512) {
-                    flambeau_model_ops::attn_decode_f16_splitk_h2(
+                    flambeau_model_ops::attn_decode_f16_splitk(
                         &q_f16_rope,
                         &k_cache,
                         &v_cache,
