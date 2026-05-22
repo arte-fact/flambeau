@@ -99,10 +99,14 @@ fn parity_snapshot_gdn_single_token() {
         max_seq_len: 1,
         num_layers: 1,
         max_experts: 0,
+        max_experts_per_tok: 0,
         gdn: Some(dims),
         per_layer_kv_widths: None,
         attn_q_gated: false,
         shared_intermediate: 0,
+        max_prefill_tokens: 1,
+        max_slots: 1,
+        per_layer_embd: 0,
     };
     let mut pool = ScratchPool::new(&device, cfg).expect("ScratchPool::new");
     let layout = ModelLayout {
@@ -114,10 +118,14 @@ fn parity_snapshot_gdn_single_token() {
     let logits: Vec<f32>;
     {
         let mut ctx = SingleDeviceForwardCtx::new(&device, stream, &reg, &mut pool);
-        let resid_in = ctx.embed(&embd, 7).expect("embed");
-        let delta = ctx.gdn_layer(&resid_in, &gdn, 0).expect("gdn_layer");
-        let resid_out = ctx.residual_add(resid_in, delta).expect("residual_add");
-        ctx.output_head(&resid_out, &lm_head).expect("output_head");
+        let resid_in = ctx.embed(&embd, &[7u32]).expect("embed");
+        let delta = ctx
+            .gdn_layer(&resid_in, &gdn, 0, &[0], None)
+            .expect("gdn_layer")
+            .expect("gdn_layer delta");
+        let resid_out = ctx.residual_add(resid_in, delta, 1).expect("residual_add");
+        ctx.output_head(&resid_out, &lm_head, &[0])
+            .expect("output_head");
         logits = ctx.logits().to_vec();
     }
     pool.dispose(&device).expect("pool dispose");

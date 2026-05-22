@@ -102,10 +102,14 @@ fn synth_gdn_one_token_forward() {
         max_seq_len: 1,
         num_layers: NUM_LAYERS,
         max_experts: 0,
+        max_experts_per_tok: 0,
         gdn: Some(dims),
         per_layer_kv_widths: None,
         attn_q_gated: false,
         shared_intermediate: 0,
+        max_prefill_tokens: 1,
+        max_slots: 1,
+        per_layer_embd: 0,
     };
     let mut pool = ScratchPool::new(&device, cfg).expect("ScratchPool::new");
 
@@ -148,18 +152,20 @@ fn synth_gdn_one_token_forward() {
 
     {
         let mut ctx = SingleDeviceForwardCtx::new(&device, stream, &reg, &mut pool);
-        let mut resid = ctx.embed(&embd, 7).expect("embed");
+        let mut resid = ctx.embed(&embd, &[7u32]).expect("embed");
         let layers: Vec<usize> = ctx.layer_range(&layout).collect();
         for li in layers {
             let normed = ctx
-                .rmsnorm(&resid, &gdn_weights[li].attn_norm, RMS_EPS)
+                .rmsnorm(&resid, &gdn_weights[li].attn_norm, RMS_EPS, 1)
                 .expect("attn_norm");
             let delta = ctx
-                .gdn_layer(&normed, &gdn_weights[li], li)
-                .expect("gdn_layer");
-            resid = ctx.residual_add(resid, delta).expect("residual_add");
+                .gdn_layer(&normed, &gdn_weights[li], li, &[0], None)
+                .expect("gdn_layer")
+                .expect("delta");
+            resid = ctx.residual_add(resid, delta, 1).expect("residual_add");
         }
-        ctx.output_head(&resid, &lm_head).expect("output_head");
+        ctx.output_head(&resid, &lm_head, &[0])
+            .expect("output_head");
         let logits = ctx.logits();
         assert_eq!(logits.len(), VOCAB);
         for (i, &l) in logits.iter().enumerate() {

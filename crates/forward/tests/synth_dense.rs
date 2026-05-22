@@ -64,6 +64,7 @@ fn synth_dense_one_token_forward() {
                 kv_width,
                 HIDDEN,
             )),
+            attn_v_unit_norm_w: None,
             attn_output: allocs.upload_q8_0(
                 &det_signal(HIDDEN * q_width, seed + 4),
                 HIDDEN,
@@ -82,6 +83,7 @@ fn synth_dense_one_token_forward() {
             softmax_scale: None,
             attn_q_gated: false,
             kv_share_src: None,
+            post_attn_norm: None,
         });
         ffn_weights.push(FfnWeights {
             ffn_norm: allocs.upload_f16(&vec![1.0_f32; HIDDEN]),
@@ -102,6 +104,7 @@ fn synth_dense_one_token_forward() {
             ),
             activation: Activation::SwiGLU,
             rms_eps: RMS_EPS,
+            post_ffn_norm: None,
         });
     }
 
@@ -114,11 +117,14 @@ fn synth_dense_one_token_forward() {
         max_seq_len: MAX_SEQ_LEN,
         num_layers: NUM_LAYERS,
         max_experts: 0,
+        max_experts_per_tok: 0,
         gdn: None,
         per_layer_kv_widths: None,
         attn_q_gated: false,
-        kv_share_src: None,
         shared_intermediate: 0,
+        max_prefill_tokens: 1,
+        max_slots: 1,
+        per_layer_embd: 0,
     };
     let mut pool = ScratchPool::new(&device, cfg).expect("ScratchPool::new");
     let layout = ModelLayout {
@@ -132,27 +138,35 @@ fn synth_dense_one_token_forward() {
         let token_id: u32 = 7;
         let position: usize = 0;
 
-        let mut resid = ctx.embed(&embd, token_id).expect("embed");
+        let mut resid = ctx.embed(&embd, &[token_id]).expect("embed");
         let layers: Vec<usize> = ctx.layer_range(&layout).collect();
         assert_eq!(layers, vec![0, 1]);
 
         for li in layers {
             let normed = ctx
-                .rmsnorm(&resid, &attn_weights[li].attn_norm, RMS_EPS)
+                .rmsnorm(&resid, &attn_weights[li].attn_norm, RMS_EPS, 1)
                 .expect("attn rmsnorm");
             let delta = ctx
-                .standard_attn(&normed, &attn_weights[li], li, position)
-                .expect("standard_attn");
-            resid = ctx.residual_add(resid, delta).expect("attn residual_add");
+                .standard_attn(&normed, &attn_weights[li], li, &[position], &[0], None)
+                .expect("standard_attn")
+                .expect("delta");
+            resid = ctx
+                .residual_add(resid, delta, 1)
+                .expect("attn residual_add");
 
             let normed = ctx
-                .rmsnorm(&resid, &ffn_weights[li].ffn_norm, RMS_EPS)
+                .rmsnorm(&resid, &ffn_weights[li].ffn_norm, RMS_EPS, 1)
                 .expect("ffn rmsnorm");
-            let delta = ctx.dense_ffn(&normed, &ffn_weights[li]).expect("dense_ffn");
-            resid = ctx.residual_add(resid, delta).expect("ffn residual_add");
+            let delta = ctx
+                .dense_ffn(&normed, &ffn_weights[li], 1, None)
+                .expect("dense_ffn")
+                .expect("delta");
+            resid = ctx
+                .residual_add(resid, delta, 1)
+                .expect("ffn residual_add");
         }
 
-        ctx.output_head(&resid, &lm_head_weights)
+        ctx.output_head(&resid, &lm_head_weights, &[0])
             .expect("output_head");
         let logits = ctx.logits();
         assert_eq!(logits.len(), VOCAB);

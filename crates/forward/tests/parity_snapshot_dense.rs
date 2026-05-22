@@ -77,6 +77,7 @@ fn parity_snapshot_dense_single_token() {
         attn_q: allocs.upload_q8_0(&det_signal(q_width * HIDDEN, 101), q_width, HIDDEN),
         attn_k: allocs.upload_q8_0(&det_signal(kv_width * HIDDEN, 102), kv_width, HIDDEN),
         attn_v: Some(allocs.upload_q8_0(&det_signal(kv_width * HIDDEN, 103), kv_width, HIDDEN)),
+        attn_v_unit_norm_w: None,
         attn_output: allocs.upload_q8_0(&det_signal(HIDDEN * q_width, 104), HIDDEN, q_width),
         attn_q_norm: None,
         attn_k_norm: None,
@@ -91,6 +92,7 @@ fn parity_snapshot_dense_single_token() {
         softmax_scale: None,
         attn_q_gated: false,
         kv_share_src: None,
+        post_attn_norm: None,
     };
     let ffn = FfnWeights {
         ffn_norm: allocs.upload_f16(&vec![1.0_f32; HIDDEN]),
@@ -111,6 +113,7 @@ fn parity_snapshot_dense_single_token() {
         ),
         activation: Activation::SwiGLU,
         rms_eps: RMS_EPS,
+        post_ffn_norm: None,
     };
 
     let cfg = ScratchConfig {
@@ -122,11 +125,14 @@ fn parity_snapshot_dense_single_token() {
         max_seq_len: MAX_SEQ_LEN,
         num_layers: 1,
         max_experts: 0,
+        max_experts_per_tok: 0,
         gdn: None,
         per_layer_kv_widths: None,
         attn_q_gated: false,
-        kv_share_src: None,
         shared_intermediate: 0,
+        max_prefill_tokens: 1,
+        max_slots: 1,
+        per_layer_embd: 0,
     };
     let mut pool = ScratchPool::new(&device, cfg).expect("ScratchPool::new");
     let layout = ModelLayout {
@@ -138,18 +144,23 @@ fn parity_snapshot_dense_single_token() {
     let logits: Vec<f32>;
     {
         let mut ctx = SingleDeviceForwardCtx::new(&device, stream, &reg, &mut pool);
-        let resid_in = ctx.embed(&embd, 7).expect("embed");
+        let resid_in = ctx.embed(&embd, &[7u32]).expect("embed");
         let attn_delta = ctx
-            .standard_attn(&resid_in, &attn, 0, 0)
-            .expect("standard_attn");
+            .standard_attn(&resid_in, &attn, 0, &[0], &[0], None)
+            .expect("standard_attn")
+            .expect("attn delta");
         let resid_mid = ctx
-            .residual_add(resid_in, attn_delta)
+            .residual_add(resid_in, attn_delta, 1)
             .expect("attn residual");
-        let ffn_delta = ctx.dense_ffn(&resid_mid, &ffn).expect("dense_ffn");
+        let ffn_delta = ctx
+            .dense_ffn(&resid_mid, &ffn, 1, None)
+            .expect("dense_ffn")
+            .expect("ffn delta");
         let resid_out = ctx
-            .residual_add(resid_mid, ffn_delta)
+            .residual_add(resid_mid, ffn_delta, 1)
             .expect("ffn residual");
-        ctx.output_head(&resid_out, &lm_head).expect("output_head");
+        ctx.output_head(&resid_out, &lm_head, &[0])
+            .expect("output_head");
         logits = ctx.logits().to_vec();
     }
     pool.dispose(&device).expect("pool dispose");

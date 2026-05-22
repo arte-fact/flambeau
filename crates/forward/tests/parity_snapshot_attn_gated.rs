@@ -79,6 +79,7 @@ fn parity_snapshot_attn_gated_single_token() {
         attn_q: allocs.upload_q8_0(&det_signal(2 * q_width * HIDDEN, 301), 2 * q_width, HIDDEN),
         attn_k: allocs.upload_q8_0(&det_signal(kv_width * HIDDEN, 302), kv_width, HIDDEN),
         attn_v: Some(allocs.upload_q8_0(&det_signal(kv_width * HIDDEN, 303), kv_width, HIDDEN)),
+        attn_v_unit_norm_w: None,
         attn_output: allocs.upload_q8_0(&det_signal(HIDDEN * q_width, 304), HIDDEN, q_width),
         attn_q_norm: Some(allocs.upload_f16(&det_signal(HEAD_DIM, 305))),
         attn_k_norm: Some(allocs.upload_f16(&det_signal(HEAD_DIM, 306))),
@@ -93,6 +94,7 @@ fn parity_snapshot_attn_gated_single_token() {
         softmax_scale: None,
         attn_q_gated: true,
         kv_share_src: None,
+        post_attn_norm: None,
     };
 
     let cfg = ScratchConfig {
@@ -104,11 +106,14 @@ fn parity_snapshot_attn_gated_single_token() {
         max_seq_len: MAX_SEQ_LEN,
         num_layers: 1,
         max_experts: 0,
+        max_experts_per_tok: 0,
         gdn: None,
         per_layer_kv_widths: None,
         attn_q_gated: true,
-        kv_share_src: None,
         shared_intermediate: 0,
+        max_prefill_tokens: 1,
+        max_slots: 1,
+        per_layer_embd: 0,
     };
     let mut pool = ScratchPool::new(&device, cfg).expect("ScratchPool::new");
     let layout = ModelLayout {
@@ -120,12 +125,14 @@ fn parity_snapshot_attn_gated_single_token() {
     let logits: Vec<f32>;
     {
         let mut ctx = SingleDeviceForwardCtx::new(&device, stream, &reg, &mut pool);
-        let resid_in = ctx.embed(&embd, 7).expect("embed");
+        let resid_in = ctx.embed(&embd, &[7u32]).expect("embed");
         let delta = ctx
-            .standard_attn(&resid_in, &attn, 0, 0)
-            .expect("standard_attn");
-        let resid_out = ctx.residual_add(resid_in, delta).expect("residual");
-        ctx.output_head(&resid_out, &lm_head).expect("output_head");
+            .standard_attn(&resid_in, &attn, 0, &[0], &[0], None)
+            .expect("standard_attn")
+            .expect("delta");
+        let resid_out = ctx.residual_add(resid_in, delta, 1).expect("residual");
+        ctx.output_head(&resid_out, &lm_head, &[0])
+            .expect("output_head");
         logits = ctx.logits().to_vec();
     }
     pool.dispose(&device).expect("pool dispose");

@@ -65,6 +65,7 @@ fn synth_moe_one_token_forward() {
                 kv_width,
                 HIDDEN,
             )),
+            attn_v_unit_norm_w: None,
             attn_output: allocs.upload_q8_0(
                 &det_signal(HIDDEN * q_width, seed + 4),
                 HIDDEN,
@@ -83,6 +84,7 @@ fn synth_moe_one_token_forward() {
             softmax_scale: None,
             attn_q_gated: false,
             kv_share_src: None,
+            post_attn_norm: None,
         });
 
         let mut experts_gate = Vec::with_capacity(N_EXPERTS);
@@ -121,6 +123,13 @@ fn synth_moe_one_token_forward() {
             activation: Activation::SwiGLU,
             rms_eps: RMS_EPS,
             shared: None,
+            post_ffn_norm: None,
+            pre_router_weight_f16: None,
+            pre_ffw_norm_2_f16: None,
+            post_ffw_norm_1_f32: None,
+            post_ffw_norm_2_f32: None,
+            post_ffn_norm_f32: None,
+            expert_down_scale_f32: None,
         });
     }
 
@@ -133,11 +142,14 @@ fn synth_moe_one_token_forward() {
         max_seq_len: MAX_SEQ_LEN,
         num_layers: NUM_LAYERS,
         max_experts: N_EXPERTS,
+        max_experts_per_tok: EXPERTS_PER_TOK,
         gdn: None,
         per_layer_kv_widths: None,
         attn_q_gated: false,
-        kv_share_src: None,
         shared_intermediate: 0,
+        max_prefill_tokens: 1,
+        max_slots: 1,
+        per_layer_embd: 0,
     };
     let mut pool = ScratchPool::new(&device, cfg).expect("ScratchPool::new");
     let layout = ModelLayout {
@@ -151,24 +163,32 @@ fn synth_moe_one_token_forward() {
         let token_id: u32 = 7;
         let position: usize = 0;
 
-        let mut resid = ctx.embed(&embd, token_id).expect("embed");
+        let mut resid = ctx.embed(&embd, &[token_id]).expect("embed");
         let layers: Vec<usize> = ctx.layer_range(&layout).collect();
         for li in layers {
             let normed = ctx
-                .rmsnorm(&resid, &attn_weights[li].attn_norm, RMS_EPS)
+                .rmsnorm(&resid, &attn_weights[li].attn_norm, RMS_EPS, 1)
                 .expect("attn rmsnorm");
             let delta = ctx
-                .standard_attn(&normed, &attn_weights[li], li, position)
-                .expect("standard_attn");
-            resid = ctx.residual_add(resid, delta).expect("attn residual_add");
+                .standard_attn(&normed, &attn_weights[li], li, &[position], &[0], None)
+                .expect("standard_attn")
+                .expect("delta");
+            resid = ctx
+                .residual_add(resid, delta, 1)
+                .expect("attn residual_add");
 
             let normed = ctx
-                .rmsnorm(&resid, &moe_weights[li].ffn_norm, RMS_EPS)
+                .rmsnorm(&resid, &moe_weights[li].ffn_norm, RMS_EPS, 1)
                 .expect("moe rmsnorm");
-            let delta = ctx.moe_ffn(&normed, &moe_weights[li]).expect("moe_ffn");
-            resid = ctx.residual_add(resid, delta).expect("moe residual_add");
+            let delta = ctx
+                .moe_ffn(&normed, &moe_weights[li], 1, None)
+                .expect("moe_ffn")
+                .expect("delta");
+            resid = ctx
+                .residual_add(resid, delta, 1)
+                .expect("moe residual_add");
         }
-        ctx.output_head(&resid, &lm_head_weights)
+        ctx.output_head(&resid, &lm_head_weights, &[0])
             .expect("output_head");
         let logits = ctx.logits();
         assert_eq!(logits.len(), VOCAB);

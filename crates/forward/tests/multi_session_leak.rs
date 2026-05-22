@@ -128,11 +128,14 @@ fn run_gdn_forward() -> Vec<f32> {
         max_seq_len: 1,
         num_layers: NUM_LAYERS,
         max_experts: 0,
+        max_experts_per_tok: 0,
         gdn: Some(dims),
         per_layer_kv_widths: None,
         attn_q_gated: false,
-        kv_share_src: None,
         shared_intermediate: 0,
+        max_prefill_tokens: 1,
+        max_slots: 1,
+        per_layer_embd: 0,
     };
     let mut pool = ScratchPool::new(&device, cfg).expect("ScratchPool::new");
     let layout = ModelLayout {
@@ -144,18 +147,20 @@ fn run_gdn_forward() -> Vec<f32> {
     let logits_vec: Vec<f32>;
     {
         let mut ctx = SingleDeviceForwardCtx::new(&device, stream, &reg, &mut pool);
-        let mut resid = ctx.embed(&embd, 7).expect("embed");
+        let mut resid = ctx.embed(&embd, &[7u32]).expect("embed");
         let layers: Vec<usize> = ctx.layer_range(&layout).collect();
         for li in layers {
             let normed = ctx
-                .rmsnorm(&resid, &gdn_weights[li].attn_norm, RMS_EPS)
+                .rmsnorm(&resid, &gdn_weights[li].attn_norm, RMS_EPS, 1)
                 .expect("attn_norm");
             let delta = ctx
-                .gdn_layer(&normed, &gdn_weights[li], li)
-                .expect("gdn_layer");
-            resid = ctx.residual_add(resid, delta).expect("residual_add");
+                .gdn_layer(&normed, &gdn_weights[li], li, &[0], None)
+                .expect("gdn_layer")
+                .expect("delta");
+            resid = ctx.residual_add(resid, delta, 1).expect("residual_add");
         }
-        ctx.output_head(&resid, &lm_head).expect("output_head");
+        ctx.output_head(&resid, &lm_head, &[0])
+            .expect("output_head");
         logits_vec = ctx.logits().to_vec();
     }
     pool.dispose(&device).expect("pool dispose");
@@ -243,6 +248,7 @@ fn multi_session_leak_dense_then_gdn() {
                     kv_width,
                     D_HIDDEN,
                 )),
+                attn_v_unit_norm_w: None,
                 attn_output: allocs.upload_q8_0(
                     &det_signal(D_HIDDEN * q_width, seed + 4),
                     D_HIDDEN,
@@ -261,6 +267,7 @@ fn multi_session_leak_dense_then_gdn() {
                 softmax_scale: None,
                 attn_q_gated: false,
                 kv_share_src: None,
+                post_attn_norm: None,
             });
             ffn_weights.push(FfnWeights {
                 ffn_norm: allocs.upload_f16(&vec![1.0_f32; D_HIDDEN]),
@@ -281,6 +288,7 @@ fn multi_session_leak_dense_then_gdn() {
                 ),
                 activation: Activation::SwiGLU,
                 rms_eps: D_RMS_EPS,
+                post_ffn_norm: None,
             });
         }
 
@@ -293,11 +301,14 @@ fn multi_session_leak_dense_then_gdn() {
             max_seq_len: D_MAX_SEQ,
             num_layers: D_LAYERS,
             max_experts: 0,
+            max_experts_per_tok: 0,
             gdn: None,
             per_layer_kv_widths: None,
             attn_q_gated: false,
-            kv_share_src: None,
             shared_intermediate: 0,
+            max_prefill_tokens: 1,
+            max_slots: 1,
+            per_layer_embd: 0,
         };
         let mut pool = ScratchPool::new(&device, cfg).expect("ScratchPool::new");
         let layout = ModelLayout {
@@ -307,23 +318,31 @@ fn multi_session_leak_dense_then_gdn() {
         };
 
         let mut ctx = SingleDeviceForwardCtx::new(&device, stream, &reg, &mut pool);
-        let mut resid = ctx.embed(&embd, 7).expect("embed");
+        let mut resid = ctx.embed(&embd, &[7u32]).expect("embed");
         let layers: Vec<usize> = ctx.layer_range(&layout).collect();
         for li in layers {
             let normed = ctx
-                .rmsnorm(&resid, &attn_weights[li].attn_norm, D_RMS_EPS)
+                .rmsnorm(&resid, &attn_weights[li].attn_norm, D_RMS_EPS, 1)
                 .expect("attn rmsnorm");
             let delta = ctx
-                .standard_attn(&normed, &attn_weights[li], li, 0)
-                .expect("standard_attn");
-            resid = ctx.residual_add(resid, delta).expect("attn residual_add");
+                .standard_attn(&normed, &attn_weights[li], li, &[0], &[0], None)
+                .expect("standard_attn")
+                .expect("delta");
+            resid = ctx
+                .residual_add(resid, delta, 1)
+                .expect("attn residual_add");
             let normed = ctx
-                .rmsnorm(&resid, &ffn_weights[li].ffn_norm, D_RMS_EPS)
+                .rmsnorm(&resid, &ffn_weights[li].ffn_norm, D_RMS_EPS, 1)
                 .expect("ffn rmsnorm");
-            let delta = ctx.dense_ffn(&normed, &ffn_weights[li]).expect("dense_ffn");
-            resid = ctx.residual_add(resid, delta).expect("ffn residual_add");
+            let delta = ctx
+                .dense_ffn(&normed, &ffn_weights[li], 1, None)
+                .expect("dense_ffn")
+                .expect("delta");
+            resid = ctx
+                .residual_add(resid, delta, 1)
+                .expect("ffn residual_add");
         }
-        ctx.output_head(&resid, &lm_head_weights)
+        ctx.output_head(&resid, &lm_head_weights, &[0])
             .expect("output_head");
         drop(ctx);
         pool.dispose(&device).expect("pool dispose");
