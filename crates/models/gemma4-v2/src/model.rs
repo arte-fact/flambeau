@@ -62,6 +62,13 @@ pub fn forward<C: ForwardCtx>(
         )?;
     }
 
+    // Diagnostic: bail after layer N (env FLAMBEAU_GEMMA4_BAIL_AFTER_LAYER=N).
+    // Used to localize which layer first produces degenerate output during
+    // the 31B regression hunt. Tail-call output_head on the partial resid.
+    let bail_after: Option<usize> = std::env::var("FLAMBEAU_GEMMA4_BAIL_AFTER_LAYER")
+        .ok()
+        .and_then(|s| s.parse().ok());
+
     let layers: Vec<usize> = ctx.layer_range(&model.layout).collect();
     for li in layers {
         let attn_w = model.attn[li]
@@ -108,6 +115,11 @@ pub fn forward<C: ForwardCtx>(
 
         if let Some(scale) = model.layer_output_scale[li] {
             resid = ctx.scale_inplace_f16(resid, scale, n)?;
+        }
+
+        if Some(li) == bail_after {
+            ctx.output_head(&resid, &model.lm_head, slot_ids)?;
+            return Ok(());
         }
     }
     ctx.output_head(&resid, &model.lm_head, slot_ids)?;
