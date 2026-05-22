@@ -23,7 +23,9 @@ mod shard;
 
 pub use dense_attn::{load_dense_attn_layer, DenseAttnLayerSpec};
 pub use dense_ffn::{load_dense_ffn_layer, DenseFfnLayerSpec};
-pub use gdn_layer::{load_gdn_layer, GdnLayerSpec, GdnTpMode};
+pub use gdn_layer::{
+    gdn_tp_mode_for, load_gdn_layer, per_rank_gdn_dims, GdnLayerSpec, GdnTpMode,
+};
 pub use gdn_shard::{
     upload_f32_array_sharded, upload_gdn_fused_qkv_f32, upload_gdn_fused_qkv_quant,
 };

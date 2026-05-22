@@ -11,11 +11,11 @@ use flambeau_forward::ctx::{
     MoeWeights, SharedExpertWeights,
 };
 use flambeau_forward::loader::{
-    load_dense_attn_layer, load_embedding, load_gdn_layer, load_lm_head, upload_col_sharded_quant,
-    upload_dequant_to_f16, upload_f32_tensor, upload_moe_experts_stacked_col_sharded,
-    upload_moe_experts_stacked_row_sharded, upload_quant_weight, upload_router_f16,
-    upload_row_sharded_quant, DenseAttnLayerSpec, EmbeddingSpec, GdnLayerSpec, GdnTpMode,
-    LmHeadSpec, ShardMode,
+    gdn_tp_mode_for, load_dense_attn_layer, load_embedding, load_gdn_layer, load_lm_head,
+    per_rank_gdn_dims, upload_col_sharded_quant, upload_dequant_to_f16, upload_f32_tensor,
+    upload_moe_experts_stacked_col_sharded, upload_moe_experts_stacked_row_sharded,
+    upload_quant_weight, upload_router_f16, upload_row_sharded_quant, DenseAttnLayerSpec,
+    EmbeddingSpec, GdnLayerSpec, LmHeadSpec, ShardMode,
 };
 use flambeau_quant::GgufFile;
 
@@ -68,14 +68,8 @@ fn load_with_shard(
     }
     let mut allocs: Vec<(DevicePtr, usize)> = Vec::new();
     let n_ranks = shard.n_ranks();
-    // Per-rank GdnDims under TP (KReplicated mode keeps num_k_heads at
-    // its global value; only num_v_heads divides). At n_ranks == 1
-    // this is the identity.
-    let g = if n_ranks > 1 {
-        crate::arch::per_rank_gdn_dims(config.gdn, n_ranks)
-    } else {
-        config.gdn
-    };
+    let g = per_rank_gdn_dims(config.gdn, n_ranks);
+    let tp_mode = gdn_tp_mode_for(config.gdn, n_ranks);
     let owns_embed = layer_range.map_or(true, |(s, _)| s == 0);
     let owns_lm_head = layer_range.map_or(true, |(_, e)| e == config.num_layers);
     let in_range = |li: usize| -> bool { layer_range.map_or(true, |(s, e)| li >= s && li < e) };
@@ -146,7 +140,7 @@ fn load_with_shard(
                     dims: g,
                     rms_eps: config.rms_eps,
                     rep_inner_layout: false,
-                    tp_mode: GdnTpMode::KReplicated,
+                    tp_mode,
                 },
                 shard,
                 &mut allocs,

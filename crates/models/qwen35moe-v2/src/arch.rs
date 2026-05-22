@@ -1,13 +1,14 @@
 //! `Arch` impl for `flambeau_forward::Session<Qwen35MoeV2>`.
 //! Hybrid (GDN + full-attn-gated alternation) + routed MoE FFN.
-//! TP uses `GdnTpMode::KReplicated` ("rep_outer"). MoE experts
-//! are currently replicated on every rank (loader is SD-only;
-//! TP expert sharding is a follow-up).
+//! GDN TP mode is auto-picked by `flambeau_forward::loader::gdn_tp_mode_for`
+//! from the per-rank geometry (KReplicated for clean-integer n_rep,
+//! FullShard otherwise). MoE experts are currently replicated on every
+//! rank (loader is SD-only; TP expert sharding is a follow-up).
 
 use anyhow::Result;
 use flambeau_backend_hip::HipDevice;
 use flambeau_forward::ctx::{ForwardCtx, GdnDims};
-use flambeau_forward::loader::ShardMode;
+use flambeau_forward::loader::{per_rank_gdn_dims, ShardMode};
 use flambeau_forward::runtime::Arch;
 use flambeau_forward::{scratch_config_for, MoeShape, ScratchConfig, ScratchShape};
 use flambeau_quant::GgufFile;
@@ -16,22 +17,6 @@ use crate::config::Qwen35MoeV2Config;
 use crate::{forward, load_from_gguf, Qwen35MoeV2Model};
 
 pub struct Qwen35MoeV2;
-
-pub(crate) fn per_rank_gdn_dims(g: GdnDims, n_ranks: usize) -> GdnDims {
-    let num_v_heads_local = g.num_v_heads / n_ranks;
-    let num_k_heads_local = g.num_k_heads;
-    let d_inner_local = num_v_heads_local * g.head_v_dim;
-    let conv_channels_local = 2 * num_k_heads_local * g.head_k_dim + d_inner_local;
-    GdnDims {
-        d_inner: d_inner_local,
-        num_v_heads: num_v_heads_local,
-        num_k_heads: num_k_heads_local,
-        head_k_dim: g.head_k_dim,
-        head_v_dim: g.head_v_dim,
-        conv_channels: conv_channels_local,
-        conv_kernel: g.conv_kernel,
-    }
-}
 
 impl Arch for Qwen35MoeV2 {
     type Model = Qwen35MoeV2Model;
@@ -108,11 +93,7 @@ impl ScratchShape for Qwen35MoeV2Config {
         })
     }
     fn gdn_per_rank(&self, n_ranks: usize) -> Option<GdnDims> {
-        Some(if n_ranks > 1 {
-            per_rank_gdn_dims(self.gdn, n_ranks)
-        } else {
-            self.gdn
-        })
+        Some(per_rank_gdn_dims(self.gdn, n_ranks))
     }
     fn attn_q_gated(&self) -> bool {
         true

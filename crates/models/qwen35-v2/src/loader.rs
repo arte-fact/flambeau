@@ -10,12 +10,12 @@ use flambeau_forward::ctx::{
     ModelLayout,
 };
 use flambeau_forward::loader::{
-    load_dense_attn_layer, load_dense_ffn_layer, load_embedding, load_gdn_layer, load_lm_head,
-    DenseAttnLayerSpec, DenseFfnLayerSpec, EmbeddingSpec, GdnLayerSpec, LmHeadSpec, ShardMode,
+    gdn_tp_mode_for, load_dense_attn_layer, load_dense_ffn_layer, load_embedding, load_gdn_layer,
+    load_lm_head, per_rank_gdn_dims, DenseAttnLayerSpec, DenseFfnLayerSpec, EmbeddingSpec,
+    GdnLayerSpec, LmHeadSpec, ShardMode,
 };
 use flambeau_quant::GgufFile;
 
-use crate::arch::{gdn_tp_mode_for, per_rank_gdn_dims};
 use crate::config::Qwen35V2Config;
 
 pub struct Qwen35V2Model {
@@ -66,12 +66,7 @@ fn load_with_shard(
     let mut allocs: Vec<(DevicePtr, usize)> = Vec::new();
     let n_ranks = shard.n_ranks();
     let tp_mode = gdn_tp_mode_for(config.gdn, n_ranks);
-    // Per-rank GdnDims under TP. At n_ranks == 1 this is the identity.
-    let g = if n_ranks > 1 {
-        per_rank_gdn_dims(config.gdn, n_ranks)
-    } else {
-        config.gdn
-    };
+    let g = per_rank_gdn_dims(config.gdn, n_ranks);
 
     let owns_embed = layer_range.map_or(true, |(s, _)| s == 0);
     let owns_lm_head = layer_range.map_or(true, |(_, e)| e == config.num_layers);

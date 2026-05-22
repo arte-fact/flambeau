@@ -35,6 +35,54 @@ pub enum GdnTpMode {
     KReplicated,
 }
 
+/// Pick `GdnTpMode` from the per-rank geometry: prefer `KReplicated`
+/// when `(num_v_heads / n_ranks) % num_k_heads == 0` (the kernel's
+/// `n_rep` lands on a clean integer); fall back to `FullShard`
+/// otherwise. `n_ranks <= 1` always returns `KReplicated` (SD has no
+/// sharding to do; the rep-vs-shard distinction collapses).
+///
+/// Real-model dispatch:
+/// - Qwen3.5/3.6-9B, Qwen3.6-35B-A3B (n_v / n_k = integer) → `KReplicated`
+/// - Qwen3.5/3.6-27B (24 v / 16 k = 1.5)                   → `FullShard`
+pub fn gdn_tp_mode_for(g: GdnDims, n_ranks: usize) -> GdnTpMode {
+    if n_ranks <= 1 {
+        return GdnTpMode::KReplicated;
+    }
+    let local_v = g.num_v_heads / n_ranks;
+    if local_v % g.num_k_heads == 0 {
+        GdnTpMode::KReplicated
+    } else {
+        GdnTpMode::FullShard
+    }
+}
+
+/// Per-rank `GdnDims` under TP. Math differs by mode:
+/// `KReplicated` keeps K-heads global (only V shards);
+/// `FullShard` divides both K and V heads by `n_ranks`.
+/// `n_ranks <= 1` short-circuits to the input `g` (no sharding).
+pub fn per_rank_gdn_dims(g: GdnDims, n_ranks: usize) -> GdnDims {
+    if n_ranks <= 1 {
+        return g;
+    }
+    let mode = gdn_tp_mode_for(g, n_ranks);
+    let num_v_heads_local = g.num_v_heads / n_ranks;
+    let num_k_heads_local = match mode {
+        GdnTpMode::KReplicated => g.num_k_heads,
+        GdnTpMode::FullShard => g.num_k_heads / n_ranks,
+    };
+    let d_inner_local = num_v_heads_local * g.head_v_dim;
+    let conv_channels_local = 2 * num_k_heads_local * g.head_k_dim + d_inner_local;
+    GdnDims {
+        d_inner: d_inner_local,
+        num_v_heads: num_v_heads_local,
+        num_k_heads: num_k_heads_local,
+        head_k_dim: g.head_k_dim,
+        head_v_dim: g.head_v_dim,
+        conv_channels: conv_channels_local,
+        conv_kernel: g.conv_kernel,
+    }
+}
+
 pub struct GdnLayerSpec<'a> {
     pub attn_norm_name: &'a str,
     pub attn_qkv_name: &'a str,
