@@ -9,7 +9,7 @@ use flambeau_backend_hip::{device_count, HipCluster};
 use flambeau_quant::GgufFile;
 use flambeau_runtime::Registry;
 use tokio::sync::Mutex;
-use tracing::info;
+use tracing::{info, warn};
 
 /// mesh topology selector. PP-V1 default; TP engages the
 /// Qwen3MoETpModel loader + the BarP2pAllReduce-based forward path.
@@ -106,6 +106,16 @@ impl Default for MeshMode {
 pub async fn serve(cfg: ServeConfig, registry: Registry) -> Result<()> {
     info!(forward_stack = "v2", "flambeau serve: loading model");
     info!(?cfg, "flambeau serve config");
+
+    if cfg.kv != "f16" {
+        warn!(
+            requested = %cfg.kv,
+            effective = "f16",
+            "--kv {} is accepted but not yet wired through the v2 forward stack; \
+             KV cache is allocated as F16 regardless. Use --ctx-cap to reduce KV memory.",
+            cfg.kv,
+        );
+    }
 
     let gguf = GgufFile::open(&cfg.gguf_path)
         .with_context(|| format!("open GGUF at {}", cfg.gguf_path.display()))?;
