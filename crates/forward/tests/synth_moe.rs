@@ -87,27 +87,28 @@ fn synth_moe_one_token_forward() {
             post_attn_norm: None,
         });
 
-        let mut experts_gate = Vec::with_capacity(N_EXPERTS);
-        let mut experts_up = Vec::with_capacity(N_EXPERTS);
-        let mut experts_down = Vec::with_capacity(N_EXPERTS);
+        // The v2 moe_ffn composite treats experts_gate[0].ptr as the
+        // base of a STACKED [n_experts * inter, hidden] tensor and
+        // reads experts 1..N from offsets in the same allocation. So
+        // upload each expert family as a single stacked alloc, then
+        // populate experts_gate/up/down with N QuantWeight handles
+        // that all share the same ptr (their dtype + dims describe the
+        // per-expert slice; the kernel uses the base + per-row stride).
+        let mut gate_stacked: Vec<f32> = Vec::with_capacity(N_EXPERTS * INTERMEDIATE * HIDDEN);
+        let mut up_stacked: Vec<f32> = Vec::with_capacity(N_EXPERTS * INTERMEDIATE * HIDDEN);
+        let mut down_stacked: Vec<f32> = Vec::with_capacity(N_EXPERTS * HIDDEN * INTERMEDIATE);
         for e in 0..N_EXPERTS as u32 {
             let s = seed + 100 + e * 7;
-            experts_gate.push(allocs.upload_q8_0(
-                &det_signal(INTERMEDIATE * HIDDEN, s + 1),
-                INTERMEDIATE,
-                HIDDEN,
-            ));
-            experts_up.push(allocs.upload_q8_0(
-                &det_signal(INTERMEDIATE * HIDDEN, s + 2),
-                INTERMEDIATE,
-                HIDDEN,
-            ));
-            experts_down.push(allocs.upload_q8_0(
-                &det_signal(HIDDEN * INTERMEDIATE, s + 3),
-                HIDDEN,
-                INTERMEDIATE,
-            ));
+            gate_stacked.extend_from_slice(&det_signal(INTERMEDIATE * HIDDEN, s + 1));
+            up_stacked.extend_from_slice(&det_signal(INTERMEDIATE * HIDDEN, s + 2));
+            down_stacked.extend_from_slice(&det_signal(HIDDEN * INTERMEDIATE, s + 3));
         }
+        let gate_base = allocs.upload_q8_0(&gate_stacked, N_EXPERTS * INTERMEDIATE, HIDDEN);
+        let up_base = allocs.upload_q8_0(&up_stacked, N_EXPERTS * INTERMEDIATE, HIDDEN);
+        let down_base = allocs.upload_q8_0(&down_stacked, N_EXPERTS * HIDDEN, INTERMEDIATE);
+        let experts_gate: Vec<_> = (0..N_EXPERTS).map(|_| gate_base).collect();
+        let experts_up: Vec<_> = (0..N_EXPERTS).map(|_| up_base).collect();
+        let experts_down: Vec<_> = (0..N_EXPERTS).map(|_| down_base).collect();
         moe_weights.push(MoeWeights {
             ffn_norm: allocs.upload_f16(&vec![1.0_f32; HIDDEN]),
             router: allocs.upload_q8_0(
