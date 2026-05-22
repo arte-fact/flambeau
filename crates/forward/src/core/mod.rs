@@ -8,5 +8,8 @@ pub mod scratch;
 pub mod state;
 
 pub use hooks::{NoopHooks, TopologyHooks};
-pub use scratch::{per_layer_kv_widths, KvLayerShape, ScratchConfig, ScratchPool};
+pub use scratch::{
+    per_layer_kv_widths, scratch_config_for, KvLayerShape, MoeShape, ScratchConfig, ScratchPool,
+    ScratchShape,
+};
 pub use state::CoreState;

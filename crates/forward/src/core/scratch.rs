@@ -5,6 +5,7 @@ use flambeau_backend_hip::HipDevice;
 use flambeau_core::{CopyDirection, Device, DevicePtr};
 
 use crate::ctx::GdnDims;
+use crate::loader::ShardMode;
 
 /// `q_width` / `kv_width` are PER-RANK under TP (caller divides by
 /// tp_size) AND act as upper bounds across layers — they size the
@@ -121,6 +122,78 @@ pub fn per_layer_kv_widths<S: KvLayerShape + ?Sized>(shape: &S, n_ranks: usize) 
     (0..shape.num_layers())
         .map(|li| shape.kv_width_at(li, n_ranks))
         .collect()
+}
+
+/// MoE-specific scratch dims, factored out so dense arches return
+/// `None` and MoE arches return one value. `shared_intermediate_per_rank`
+/// is the row-parallel shared-MLP intermediate (Qwen3.6-35B-A3B = 512,
+/// gemma4-26B-A4B = dense `intermediate / n_ranks`); 0 when the MoE
+/// arch has no shared expert.
+#[derive(Debug, Clone, Copy)]
+pub struct MoeShape {
+    pub num_experts: usize,
+    pub experts_per_tok: usize,
+    pub shared_intermediate_per_rank: usize,
+}
+
+/// Full scratch-pool geometry. Arches implement this on their `Config`
+/// and the runtime builds `ScratchConfig` via `scratch_config_for`.
+///
+/// Width/intermediate accessors take `n_ranks` so each arch's MoE-vs-
+/// dense / per-layer-max-vs-uniform choice stays encapsulated rather
+/// than leaking into the `Arch::scratch_config` impl. `q_width_per_rank`
+/// should return the per-rank max across layers when the arch has
+/// per-layer attention shape (gemma4 SWA-vs-global); uniform arches
+/// return the single value.
+pub trait ScratchShape: KvLayerShape {
+    fn hidden(&self) -> usize;
+    fn vocab(&self) -> usize;
+    fn max_seq_len(&self) -> usize;
+    fn intermediate_per_rank(&self, n_ranks: usize) -> usize;
+    fn q_width_per_rank(&self, n_ranks: usize) -> usize;
+    fn moe_per_rank(&self, n_ranks: usize) -> Option<MoeShape>;
+    fn gdn_per_rank(&self, n_ranks: usize) -> Option<GdnDims>;
+    fn attn_q_gated(&self) -> bool;
+    fn per_layer_embd(&self) -> usize {
+        0
+    }
+}
+
+/// Build a `ScratchConfig` from a shape spec. Each arch's
+/// `Arch::scratch_config` collapses to one call into this helper. The
+/// builder derives `kv_width` as `max(per_layer_kv_widths)` so the
+/// arch never has to (it's a 0-uniform-or-per-layer-max math identical
+/// across qwen and gemma4). `per_layer_kv_widths` is always `Some`;
+/// the runtime alloc loop interprets width=0 as "no KV slab for this
+/// layer" (GDN / recurrent / shared-KV).
+pub fn scratch_config_for<S: ScratchShape + ?Sized>(
+    shape: &S,
+    shard: ShardMode,
+    prefill_ubatch: usize,
+    max_slots: usize,
+) -> ScratchConfig {
+    let n_ranks = shard.n_ranks();
+    let per_layer_kv = per_layer_kv_widths(shape, n_ranks);
+    let kv_width = per_layer_kv.iter().copied().max().unwrap_or(0);
+    let moe = shape.moe_per_rank(n_ranks);
+    ScratchConfig {
+        hidden: shape.hidden(),
+        intermediate: shape.intermediate_per_rank(n_ranks),
+        q_width: shape.q_width_per_rank(n_ranks),
+        kv_width,
+        vocab: shape.vocab(),
+        max_seq_len: shape.max_seq_len(),
+        num_layers: shape.num_layers(),
+        max_experts: moe.map_or(0, |m| m.num_experts),
+        max_experts_per_tok: moe.map_or(0, |m| m.experts_per_tok),
+        gdn: shape.gdn_per_rank(n_ranks),
+        per_layer_kv_widths: Some(per_layer_kv),
+        attn_q_gated: shape.attn_q_gated(),
+        shared_intermediate: moe.map_or(0, |m| m.shared_intermediate_per_rank),
+        max_prefill_tokens: prefill_ubatch,
+        max_slots,
+        per_layer_embd: shape.per_layer_embd(),
+    }
 }
 
 #[derive(Clone, Copy)]

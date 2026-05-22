@@ -13,9 +13,10 @@ use flambeau_backend_hip::HipDevice;
 use flambeau_forward::ctx::{ForwardCtx, GdnDims};
 use flambeau_forward::loader::{GdnTpMode, ShardMode};
 use flambeau_forward::runtime::Arch;
-use flambeau_forward::{per_layer_kv_widths, ScratchConfig};
+use flambeau_forward::{scratch_config_for, MoeShape, ScratchConfig, ScratchShape};
 use flambeau_quant::GgufFile;
 
+use crate::config::Qwen35V2Config;
 use crate::{forward, load_from_gguf, load_tp_shard_from_gguf, Qwen35V2Model};
 
 pub struct Qwen35V2;
@@ -93,35 +94,41 @@ impl Arch for Qwen35V2 {
         prefill_ubatch: usize,
         max_slots: usize,
     ) -> ScratchConfig {
-        let cfg = &model.config;
-        let n_ranks = shard.n_ranks();
-        let max_seq_len = cfg.context_length;
-        let local_gdn = if n_ranks > 1 {
-            per_rank_gdn_dims(cfg.gdn, n_ranks)
-        } else {
-            cfg.gdn
-        };
-        ScratchConfig {
-            hidden: cfg.hidden,
-            intermediate: cfg.intermediate / n_ranks,
-            q_width: (cfg.n_heads / n_ranks) * cfg.head_dim,
-            kv_width: (cfg.n_kv_heads / n_ranks) * cfg.head_dim,
-            vocab: cfg.vocab_size,
-            max_seq_len,
-            num_layers: cfg.num_layers,
-            max_experts: 0,
-            max_experts_per_tok: 0,
-            gdn: Some(local_gdn),
-            per_layer_kv_widths: Some(per_layer_kv_widths(cfg, n_ranks)),
-            attn_q_gated: true,
-            shared_intermediate: 0,
-            max_prefill_tokens: prefill_ubatch,
-            max_slots,
-            per_layer_embd: 0,
-        }
+        scratch_config_for(&model.config, shard, prefill_ubatch, max_slots)
     }
 
     fn dispose(model: &mut Self::Model, device: &HipDevice) -> Result<()> {
         model.dispose(device)
+    }
+}
+
+impl ScratchShape for Qwen35V2Config {
+    fn hidden(&self) -> usize {
+        self.hidden
+    }
+    fn vocab(&self) -> usize {
+        self.vocab_size
+    }
+    fn max_seq_len(&self) -> usize {
+        self.context_length
+    }
+    fn intermediate_per_rank(&self, n_ranks: usize) -> usize {
+        self.intermediate / n_ranks
+    }
+    fn q_width_per_rank(&self, n_ranks: usize) -> usize {
+        (self.n_heads / n_ranks) * self.head_dim
+    }
+    fn moe_per_rank(&self, _n_ranks: usize) -> Option<MoeShape> {
+        None
+    }
+    fn gdn_per_rank(&self, n_ranks: usize) -> Option<GdnDims> {
+        Some(if n_ranks > 1 {
+            per_rank_gdn_dims(self.gdn, n_ranks)
+        } else {
+            self.gdn
+        })
+    }
+    fn attn_q_gated(&self) -> bool {
+        true
     }
 }

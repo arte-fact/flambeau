@@ -5,12 +5,13 @@
 
 use anyhow::Result;
 use flambeau_backend_hip::HipDevice;
-use flambeau_forward::ctx::ForwardCtx;
+use flambeau_forward::ctx::{ForwardCtx, GdnDims};
 use flambeau_forward::loader::ShardMode;
 use flambeau_forward::runtime::Arch;
-use flambeau_forward::{per_layer_kv_widths, ScratchConfig};
+use flambeau_forward::{scratch_config_for, MoeShape, ScratchConfig, ScratchShape};
 use flambeau_quant::GgufFile;
 
+use crate::config::Gemma4V2Config;
 use crate::{forward, load_from_gguf, load_tp_shard_from_gguf, Gemma4V2Model};
 
 pub struct Gemma4V2;
@@ -53,69 +54,57 @@ impl Arch for Gemma4V2 {
         prefill_ubatch: usize,
         max_slots: usize,
     ) -> ScratchConfig {
-        let cfg = &model.config;
-        let n_ranks = match shard {
-            ShardMode::Replicated => 1,
-            ShardMode::Tp { n_ranks, .. } => n_ranks,
-        };
-        let max_seq_len = cfg.context_length;
-        let per_layer_kv = per_layer_kv_widths(cfg, n_ranks);
-        let q_width = cfg
-            .attn
-            .iter()
-            .map(|a| (cfg.num_heads / n_ranks) * a.head_dim)
-            .max()
-            .unwrap_or(0);
-        let kv_width = per_layer_kv.iter().copied().max().unwrap_or(0);
-        // MoE variants size the pool's expert / shared scratch from
-        // the GGUF; dense variants leave them at zero.
-        let (max_experts, max_experts_per_tok, moe_intermediate) = match cfg.moe {
-            Some(m) => (
-                m.num_experts,
-                m.experts_per_tok,
-                m.moe_intermediate / n_ranks,
-            ),
-            None => (0, 0, 0),
-        };
-        // Shared-MLP scratch uses the dense intermediate width per
-        // rank — same shape as a row-parallel SharedExpert. Dense
-        // variants leave this at zero.
-        let shared_intermediate = if cfg.moe.is_some() {
-            cfg.intermediate / n_ranks
-        } else {
-            0
-        };
-        // The MoE moe_intermediate replaces the dense per-rank
-        // intermediate for routed-expert scratch sizing. The shared
-        // MLP path still uses the dense intermediate via
-        // `shared_intermediate`.
-        let intermediate = if cfg.moe.is_some() {
-            moe_intermediate
-        } else {
-            cfg.intermediate / n_ranks
-        };
-        let per_layer_embd = cfg.per_layer_embd.map_or(0, |p| p.pe);
-        ScratchConfig {
-            hidden: cfg.hidden,
-            intermediate,
-            q_width,
-            kv_width,
-            vocab: cfg.vocab_size,
-            max_seq_len,
-            num_layers: cfg.num_layers,
-            max_experts,
-            max_experts_per_tok,
-            gdn: None,
-            per_layer_kv_widths: Some(per_layer_kv),
-            attn_q_gated: false,
-            shared_intermediate,
-            max_prefill_tokens: prefill_ubatch,
-            max_slots,
-            per_layer_embd,
-        }
+        scratch_config_for(&model.config, shard, prefill_ubatch, max_slots)
     }
 
     fn dispose(model: &mut Self::Model, device: &HipDevice) -> Result<()> {
         model.dispose(device)
+    }
+}
+
+impl ScratchShape for Gemma4V2Config {
+    fn hidden(&self) -> usize {
+        self.hidden
+    }
+    fn vocab(&self) -> usize {
+        self.vocab_size
+    }
+    fn max_seq_len(&self) -> usize {
+        self.context_length
+    }
+    // MoE variants route per-token compute through the experts with
+    // `moe_intermediate`; the shared dense MLP uses the dense
+    // `intermediate`. Builder picks the routed width here and the
+    // shared width via `moe().shared_intermediate_per_rank`.
+    fn intermediate_per_rank(&self, n_ranks: usize) -> usize {
+        match self.moe {
+            Some(m) => m.moe_intermediate / n_ranks,
+            None => self.intermediate / n_ranks,
+        }
+    }
+    fn q_width_per_rank(&self, n_ranks: usize) -> usize {
+        self.attn
+            .iter()
+            .map(|a| (self.num_heads / n_ranks) * a.head_dim)
+            .max()
+            .unwrap_or(0)
+    }
+    fn moe_per_rank(&self, n_ranks: usize) -> Option<MoeShape> {
+        self.moe.map(|m| MoeShape {
+            num_experts: m.num_experts,
+            experts_per_tok: m.experts_per_tok,
+            // gemma4's shared MLP runs in parallel with the routed
+            // experts and uses the dense `intermediate` width per rank.
+            shared_intermediate_per_rank: self.intermediate / n_ranks,
+        })
+    }
+    fn gdn_per_rank(&self, _n_ranks: usize) -> Option<GdnDims> {
+        None
+    }
+    fn attn_q_gated(&self) -> bool {
+        false
+    }
+    fn per_layer_embd(&self) -> usize {
+        self.per_layer_embd.map_or(0, |p| p.pe)
     }
 }
