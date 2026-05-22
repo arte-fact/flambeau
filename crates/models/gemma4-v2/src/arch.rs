@@ -8,7 +8,7 @@ use flambeau_backend_hip::HipDevice;
 use flambeau_forward::ctx::ForwardCtx;
 use flambeau_forward::loader::ShardMode;
 use flambeau_forward::runtime::Arch;
-use flambeau_forward::ScratchConfig;
+use flambeau_forward::{per_layer_kv_widths, ScratchConfig};
 use flambeau_quant::GgufFile;
 
 use crate::{forward, load_from_gguf, load_tp_shard_from_gguf, Gemma4V2Model};
@@ -59,12 +59,7 @@ impl Arch for Gemma4V2 {
             ShardMode::Tp { n_ranks, .. } => n_ranks,
         };
         let max_seq_len = cfg.context_length;
-        let per_layer_kv: Vec<usize> = cfg
-            .attn
-            .iter()
-            .zip(cfg.num_kv_heads.iter())
-            .map(|(a, &nkv)| (nkv / n_ranks) * a.head_dim)
-            .collect();
+        let per_layer_kv = per_layer_kv_widths(cfg, n_ranks);
         let q_width = cfg
             .attn
             .iter()

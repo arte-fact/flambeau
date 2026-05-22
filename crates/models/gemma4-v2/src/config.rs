@@ -1,3 +1,4 @@
+use flambeau_forward::KvLayerShape;
 use flambeau_quant::{GgufFile, Value};
 use thiserror::Error;
 
@@ -200,6 +201,15 @@ impl Gemma4V2Config {
             moe,
             per_layer_embd,
         })
+    }
+}
+
+impl KvLayerShape for Gemma4V2Config {
+    fn num_layers(&self) -> usize {
+        self.num_layers
+    }
+    fn kv_width_at(&self, li: usize, n_ranks: usize) -> usize {
+        (self.num_kv_heads[li] / n_ranks) * self.attn[li].head_dim
     }
 }
 

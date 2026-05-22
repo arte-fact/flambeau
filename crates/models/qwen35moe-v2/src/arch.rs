@@ -9,7 +9,7 @@ use flambeau_backend_hip::HipDevice;
 use flambeau_forward::ctx::{ForwardCtx, GdnDims};
 use flambeau_forward::loader::ShardMode;
 use flambeau_forward::runtime::Arch;
-use flambeau_forward::ScratchConfig;
+use flambeau_forward::{per_layer_kv_widths, ScratchConfig};
 use flambeau_quant::GgufFile;
 
 use crate::{forward, load_from_gguf, Qwen35MoeV2Model};
@@ -83,22 +83,18 @@ impl Arch for Qwen35MoeV2 {
         } else {
             cfg.gdn
         };
-        let full_kv_width = (cfg.n_kv_heads / n_ranks) * cfg.head_dim;
-        let per_layer_kv_widths: Vec<usize> = (0..cfg.num_layers)
-            .map(|li| if cfg.is_recurrent(li) { 0 } else { full_kv_width })
-            .collect();
         ScratchConfig {
             hidden: cfg.hidden,
             intermediate: cfg.expert_intermediate / n_ranks,
             q_width: (cfg.n_heads / n_ranks) * cfg.head_dim,
-            kv_width: full_kv_width,
+            kv_width: (cfg.n_kv_heads / n_ranks) * cfg.head_dim,
             vocab: cfg.vocab_size,
             max_seq_len,
             num_layers: cfg.num_layers,
             max_experts: cfg.num_experts,
             max_experts_per_tok: cfg.experts_per_tok,
             gdn: Some(local_gdn),
-            per_layer_kv_widths: Some(per_layer_kv_widths),
+            per_layer_kv_widths: Some(per_layer_kv_widths(cfg, n_ranks)),
             attn_q_gated: true,
             shared_intermediate: cfg.shared_expert_intermediate,
             max_prefill_tokens: prefill_ubatch,

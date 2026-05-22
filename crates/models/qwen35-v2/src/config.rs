@@ -1,4 +1,5 @@
 use flambeau_forward::ctx::GdnDims;
+use flambeau_forward::KvLayerShape;
 use flambeau_quant::GgufFile;
 use thiserror::Error;
 
@@ -110,5 +111,18 @@ impl Qwen35V2Config {
     /// `(il + 1) % full_attention_interval != 0` ⇒ GDN, else full-attn.
     pub fn is_recurrent(&self, il: usize) -> bool {
         (il + 1) % self.full_attention_interval != 0
+    }
+}
+
+impl KvLayerShape for Qwen35V2Config {
+    fn num_layers(&self) -> usize {
+        self.num_layers
+    }
+    fn kv_width_at(&self, li: usize, n_ranks: usize) -> usize {
+        if self.is_recurrent(li) {
+            0
+        } else {
+            (self.n_kv_heads / n_ranks) * self.head_dim
+        }
     }
 }

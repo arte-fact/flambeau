@@ -97,6 +97,32 @@ impl Default for ScratchConfig {
 /// callers must keep ctx within that bound.
 pub const MAX_SPLITK_CHUNKS: usize = 32;
 
+/// Per-layer KV-cache geometry. Arches implement this on their
+/// `Config` so `per_layer_kv_widths` can size the ScratchPool's
+/// per-layer K/V slabs uniformly. Layers with no KV cache
+/// (SSM / GDN / recurrent) MUST return 0 — the alloc loop in
+/// `ScratchPool::new` skips zero-width allocations.
+///
+/// Indexing is GLOBAL: `kv_width_at(li, _)` is called for every
+/// `li` in `0..num_layers()`, then the runtime slices the result
+/// to the PP layer range in `runtime::workers::build_pool`.
+///
+/// `n_ranks` is the per-stage TP world size (1 for SD / PP-only).
+pub trait KvLayerShape {
+    fn num_layers(&self) -> usize;
+    fn kv_width_at(&self, li: usize, n_ranks: usize) -> usize;
+}
+
+/// Build the per-layer KV width vector for `ScratchConfig`. Length
+/// equals `shape.num_layers()`. Pass the result directly into
+/// `ScratchConfig::per_layer_kv_widths`. The runtime slices it to the
+/// owned PP range; arches should NOT slice themselves.
+pub fn per_layer_kv_widths<S: KvLayerShape + ?Sized>(shape: &S, n_ranks: usize) -> Vec<usize> {
+    (0..shape.num_layers())
+        .map(|li| shape.kv_width_at(li, n_ranks))
+        .collect()
+}
+
 #[derive(Clone, Copy)]
 pub struct KvCache {
     pub k: DevicePtr,
@@ -732,3 +758,4 @@ impl ScratchPool {
         Ok(())
     }
 }
+

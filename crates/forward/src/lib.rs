@@ -13,7 +13,9 @@ pub mod runtime;
 #[cfg(test)]
 pub mod testing;
 
-pub use core::{NoopHooks, ScratchConfig, ScratchPool, TopologyHooks};
+pub use core::{
+    per_layer_kv_widths, KvLayerShape, NoopHooks, ScratchConfig, ScratchPool, TopologyHooks,
+};
 pub use ctx::ForwardCtx;
 pub use engine::{
     ForwardEngine, HybStage, HybridEngine, HybridForwardCtx, HybridHooks, PpEngine, PpForwardCtx,
