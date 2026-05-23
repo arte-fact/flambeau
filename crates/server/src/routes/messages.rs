@@ -314,7 +314,7 @@ fn stream_messages_anthropic_sse(
     let id = request_id("msg");
     let model = state.model_id.clone();
 
-    let prompt_ids = match state.tokenizer.encode(&prompt) {
+    let prompt_ids = match state.tokenizer.encode_for_inference(&prompt) {
         Ok(ids) if !ids.is_empty() => ids,
         Ok(_) | Err(_) => {
             let err = json!({"type":"error","error":{"type":"invalid_request_error","message":"prompt tokenized to 0 tokens"}});

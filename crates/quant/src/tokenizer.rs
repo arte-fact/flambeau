@@ -97,6 +97,25 @@ impl GgufTokenizer {
         Ok(enc.get_ids().to_vec())
     }
 
+    /// Encode a raw prompt for the inference path, prepending BOS when the
+    /// tokenizer's `force_add_bos` flag is set and the result doesn't
+    /// already start with BOS. Gemma-4 requires this; without BOS the
+    /// model decodes from a degenerate state and produces incoherent
+    /// output (loops on " la la la", "thought\nthought\n").
+    /// # Errors
+    /// Same conditions as [`Self::encode`].
+    pub fn encode_for_inference(&self, text: &str) -> Result<Vec<u32>> {
+        let mut ids = self.encode(text)?;
+        if self.force_add_bos {
+            if let Some(bos) = self.bos_id {
+                if ids.first().copied() != Some(bos) {
+                    ids.insert(0, bos);
+                }
+            }
+        }
+        Ok(ids)
+    }
+
     /// Decode `ids` → UTF-8 string. Skips added-special-tokens.
     /// # Errors
     /// Returns an `anyhow` error wrapping whatever `tokenizers::Tokenizer::decode`

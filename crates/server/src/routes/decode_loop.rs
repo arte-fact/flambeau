@@ -274,7 +274,10 @@ pub(crate) async fn run_completion(
 ) -> Result<CompletionOutput> {
     let prompt = prompt.to_owned();
     tokio::task::spawn_blocking(move || {
-        let ids = state.tokenizer.encode(&prompt).context("tokenize prompt")?;
+        let ids = state
+            .tokenizer
+            .encode_for_inference(&prompt)
+            .context("tokenize prompt")?;
         run_completion_blocking_ids(state, ids, params, relax_stop_mask)
     })
     .await
@@ -952,7 +955,10 @@ pub(crate) fn run_completion_blocking_streaming(
     // Same lifecycle as run_completion_blocking_ids.
     let (slot_idx, mut inflight_guard) = state.acquire_inflight_blocking();
 
-    let prompt_ids = state.tokenizer.encode(&prompt).context("tokenize prompt")?;
+    let prompt_ids = state
+        .tokenizer
+        .encode_for_inference(&prompt)
+        .context("tokenize prompt")?;
     if prompt_ids.is_empty() {
         bail!("prompt tokenized to 0 tokens");
     }
