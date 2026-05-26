@@ -771,6 +771,18 @@ pub trait Ops {
         n_sb_per_row: usize,
     ) -> Result<()>;
 
+    fn indexed_moe_mmvq_q3_k(
+        &self,
+        w: DevicePtr,
+        y: DevicePtr,
+        expert_ids: DevicePtr,
+        dst: DevicePtr,
+        n_rows: usize,
+        n_tokens: usize,
+        top_k: usize,
+        n_sb_per_row: usize,
+    ) -> Result<()>;
+
     fn indexed_moe_mmvq_q4_0(
         &self,
         w: DevicePtr,
@@ -862,6 +874,30 @@ pub trait Ops {
     ) -> Result<()>;
 
     fn indexed_moe_mmq_q4_k_down_tile8(
+        &self,
+        w: DevicePtr,
+        y: DevicePtr,
+        expert_ids: DevicePtr,
+        sorted_pair_idx_padded: DevicePtr,
+        padded_offsets: DevicePtr,
+        dst: DevicePtr,
+        shape: MoeShape,
+    ) -> Result<()>;
+
+    fn indexed_moe_mmq_q3_k_gate_up_tile8(
+        &self,
+        w_gate: DevicePtr,
+        w_up: DevicePtr,
+        y: DevicePtr,
+        expert_ids: DevicePtr,
+        sorted_pair_idx_padded: DevicePtr,
+        padded_offsets: DevicePtr,
+        gate_out: DevicePtr,
+        up_out: DevicePtr,
+        shape: MoeShape,
+    ) -> Result<()>;
+
+    fn indexed_moe_mmq_q3_k_down_tile8(
         &self,
         w: DevicePtr,
         y: DevicePtr,

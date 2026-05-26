@@ -1347,6 +1347,31 @@ impl<'a> Ops for HipOps<'a> {
         )
     }
 
+    fn indexed_moe_mmvq_q3_k(
+        &self,
+        w: DevicePtr,
+        y: DevicePtr,
+        expert_ids: DevicePtr,
+        dst: DevicePtr,
+        n_rows: usize,
+        n_tokens: usize,
+        top_k: usize,
+        n_sb_per_row: usize,
+    ) -> Result<()> {
+        super::moe::indexed_moe_mmvq_q3_k(
+            self.reg,
+            self.stream,
+            w,
+            y,
+            expert_ids,
+            dst,
+            n_rows,
+            n_tokens,
+            top_k,
+            n_sb_per_row,
+        )
+    }
+
     fn indexed_moe_mmvq_q4_0(
         &self,
         w: DevicePtr,
@@ -1545,6 +1570,56 @@ impl<'a> Ops for HipOps<'a> {
         shape: MoeShape,
     ) -> Result<()> {
         super::moe::indexed_moe_mmq_q4_k_down_tile8(
+            self.reg,
+            self.stream,
+            w,
+            y,
+            expert_ids,
+            sorted_pair_idx_padded,
+            padded_offsets,
+            dst,
+            shape,
+        )
+    }
+
+    fn indexed_moe_mmq_q3_k_gate_up_tile8(
+        &self,
+        w_gate: DevicePtr,
+        w_up: DevicePtr,
+        y: DevicePtr,
+        expert_ids: DevicePtr,
+        sorted_pair_idx_padded: DevicePtr,
+        padded_offsets: DevicePtr,
+        gate_out: DevicePtr,
+        up_out: DevicePtr,
+        shape: MoeShape,
+    ) -> Result<()> {
+        super::moe::indexed_moe_mmq_q3_k_gate_up_tile8(
+            self.reg,
+            self.stream,
+            w_gate,
+            w_up,
+            y,
+            expert_ids,
+            sorted_pair_idx_padded,
+            padded_offsets,
+            gate_out,
+            up_out,
+            shape,
+        )
+    }
+
+    fn indexed_moe_mmq_q3_k_down_tile8(
+        &self,
+        w: DevicePtr,
+        y: DevicePtr,
+        expert_ids: DevicePtr,
+        sorted_pair_idx_padded: DevicePtr,
+        padded_offsets: DevicePtr,
+        dst: DevicePtr,
+        shape: MoeShape,
+    ) -> Result<()> {
+        super::moe::indexed_moe_mmq_q3_k_down_tile8(
             self.reg,
             self.stream,
             w,

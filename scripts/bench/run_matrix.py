@@ -168,11 +168,9 @@ MODELS = [
     ModelSpec("qwen36_27B_q4_0", "/artefact/models/Qwen3.6-27B-Q4_0.gguf",      4096, 512),
     ModelSpec("qwen36_27B_q4_1", "/artefact/models/Qwen3.6-27B-Q4_1.gguf",      4096, 512),
     ModelSpec("qwen36_35B_a3b_q4_0", "/artefact/models/Qwen_Qwen3.6-35B-A3B-Q4_0.gguf", 16384, 512),
-    # Qwen3.6-35B-A3B MoE re-quantised from Q4_0 → Q3_K_S to exercise the
-    # Q3_K MoE indexed-MMVQ + tile8 kernels added in tier-1. main rejects
-    # Q3_K weights at qmatmul-dispatch time so this is a branch-only path.
-    ModelSpec("qwen36_35B_a3b_q3_k_s", "/artefact/models/Qwen3.6-35B-A3B-Q3_K_S.gguf", 16384, 512,
-              branch_only=True),
+    # Qwen3.6-35B-A3B MoE re-quantised from Q4_0 → Q3_K_S. The Q3_K MoE
+    # indexed-MMVQ + tile8 dispatch was wired 2026-05-26 (task #34).
+    ModelSpec("qwen36_35B_a3b_q3_k_s", "/artefact/models/Qwen3.6-35B-A3B-Q3_K_S.gguf", 16384, 512),
     ModelSpec("qwen36_35B_a3b_ud_q4_k_s", "/artefact/models/Qwen3.6-35B-A3B-UD-Q4_K_S.gguf", 4096, 512),
     # gemma4 dense — added 2026-05-23 after the BOS-prepend fix landed.
     # E4B fits on one GPU; 31B needs PP across all 4 (per-layer KV at
