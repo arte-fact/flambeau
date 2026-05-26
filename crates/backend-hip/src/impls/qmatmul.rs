@@ -163,14 +163,31 @@ pub const QMATMUL_GFX906: &[KernelDescriptor] = &[
     },
     KernelDescriptor {
         op_name: "QMatMul",
+        impl_id: "qmatmul_q5_K_mmvq_dp4a_gfx906",
+        backend: "hip",
+        arch: "gfx906",
+        dtype_weight: QDtype::Q5_K,
+        dtype_activation: QDtype::Q8_1,
+        // DP4A port (90aa05c). End-to-end measured +14.6% wall t/s on
+        // Qwen3.6-27B-Q4_0 PP4 single-stream decode (17.29 → 19.82
+        // t/s, 200-token greedy), microbench shows 2.48× per-call vs
+        // the prior nw1_r2 at the production shape. m>=128 hits the
+        // wave64 MMQ kernel below.
+        m_range: (1, 127),
+        cert_rel_path: "certs/hip/gfx906/qmatmul_q5_K_mmvq_dp4a_gfx906.json",
+    },
+    // Dormant nw1_r2 baseline — preserved for A/B regression checks.
+    // m_range=(MAX,MAX) keeps shape-dispatch from picking it; the cert
+    // at certs/hip/gfx906/qmatmul_q5_K_mmvq_nw1_r2_gfx906.json stays
+    // green for cross-validation runs.
+    KernelDescriptor {
+        op_name: "QMatMul",
         impl_id: "qmatmul_q5_K_mmvq_nw1_r2_gfx906",
         backend: "hip",
         arch: "gfx906",
         dtype_weight: QDtype::Q5_K,
         dtype_activation: QDtype::Q8_1,
-        // narrowed from (1, 512) to (1, 127) so prefill paths
-        // route to the wave64 MMQ kernel below instead of looping MMVQ per row.
-        m_range: (1, 127),
+        m_range: (usize::MAX, usize::MAX),
         cert_rel_path: "certs/hip/gfx906/qmatmul_q5_K_mmvq_nw1_r2_gfx906.json",
     },
     KernelDescriptor {
