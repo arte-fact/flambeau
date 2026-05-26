@@ -61,13 +61,41 @@ pub fn dense_ffn_local<H: TopologyHooks>(
     };
 
     let mut gate_f32 = unsafe { Tensor::<F32>::from_raw(state.pool.gate_f32, n * m) };
-    weights
-        .ffn_gate
-        .qmatmul(&norm_q8_1, act_norm_mmq, &mut gate_f32, n, hidden, m, &ops)?;
     let mut up_f32 = unsafe { Tensor::<F32>::from_raw(state.pool.up_f32, n * m) };
-    weights
-        .ffn_up
-        .qmatmul(&norm_q8_1, act_norm_mmq, &mut up_f32, n, hidden, m, &ops)?;
+    let fuse_q4_0_decode = n == 1
+        && weights.ffn_gate.dtype == flambeau_core::op::QDtype::Q4_0
+        && weights.ffn_up.dtype == flambeau_core::op::QDtype::Q4_0;
+    if fuse_q4_0_decode {
+        let gate_w = unsafe {
+            Tensor::<flambeau_model_ops::Q4_0>::from_raw(
+                weights.ffn_gate.ptr,
+                weights.ffn_gate.n_elems,
+            )
+        };
+        let up_w = unsafe {
+            Tensor::<flambeau_model_ops::Q4_0>::from_raw(
+                weights.ffn_up.ptr,
+                weights.ffn_up.n_elems,
+            )
+        };
+        flambeau_model_ops::mmvq_q4_0_gate_up_t128_decode(
+            &gate_w,
+            &up_w,
+            &norm_q8_1,
+            &mut gate_f32,
+            &mut up_f32,
+            hidden,
+            m,
+            &ops,
+        )?;
+    } else {
+        weights
+            .ffn_gate
+            .qmatmul(&norm_q8_1, act_norm_mmq, &mut gate_f32, n, hidden, m, &ops)?;
+        weights
+            .ffn_up
+            .qmatmul(&norm_q8_1, act_norm_mmq, &mut up_f32, n, hidden, m, &ops)?;
+    }
 
     let mut gated_f16 = unsafe { Tensor::<F16>::from_raw(state.pool.gated_f16, n * m) };
     match weights.activation {

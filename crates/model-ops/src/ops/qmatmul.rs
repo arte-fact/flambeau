@@ -134,6 +134,39 @@ pub fn qmatmul_q5_1(
     )
 }
 
+/// Fused gate+up decode for Q4_0 dense FFN — one launch produces both
+/// projections, sharing the Q8_1 activation HBM read. Caller guarantees
+/// `n_rows_gate == n_rows_up == n` and `m == 1`.
+#[allow(clippy::too_many_arguments)]
+pub fn mmvq_q4_0_gate_up_t128_decode(
+    gate_w: &Tensor<Q4_0>,
+    up_w: &Tensor<Q4_0>,
+    act_q8_1: &Tensor<Q8_1>,
+    gate_out: &mut Tensor<F32>,
+    up_out: &mut Tensor<F32>,
+    k: usize,
+    n: usize,
+    ops: &HipOps<'_>,
+) -> Result<()> {
+    if gate_out.n_elems < n || up_out.n_elems < n {
+        bail!(
+            "mmvq_q4_0_gate_up_t128_decode: outputs too small (gate={}, up={}, need {n})",
+            gate_out.n_elems,
+            up_out.n_elems
+        );
+    }
+    ops.mmvq_q4_0_gate_up_t128(
+        gate_w.ptr,
+        up_w.ptr,
+        act_q8_1.ptr,
+        gate_out.ptr,
+        up_out.ptr,
+        n,
+        n,
+        k,
+    )
+}
+
 #[allow(clippy::too_many_arguments)]
 fn qmatmul_dispatch(
     weight_ptr: flambeau_core::DevicePtr,
