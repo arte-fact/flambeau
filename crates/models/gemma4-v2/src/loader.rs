@@ -311,6 +311,7 @@ fn load_with_shard(
                 mdims.num_experts,
                 mdims.moe_intermediate,
                 config.hidden,
+                shard,
                 &mut allocs,
             )?;
             // down_exps: `[n_experts, hidden, moe_inter]` — row-shard

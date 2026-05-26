@@ -160,8 +160,17 @@ pub fn upload_moe_experts_fused_gate_up_stacked(
     n_experts: usize,
     inter: usize,
     hidden: usize,
+    shard: ShardMode,
     allocs: &mut Vec<(DevicePtr, usize)>,
 ) -> Result<(Vec<QuantWeight>, Vec<QuantWeight>)> {
+    let (rank, n_ranks) = match shard {
+        ShardMode::Replicated => (0_usize, 1_usize),
+        ShardMode::Tp { rank, n_ranks } => (rank, n_ranks),
+    };
+    if inter % n_ranks != 0 {
+        bail!("{name}: inter {inter} not divisible by n_ranks {n_ranks}");
+    }
+    let local_inter = inter / n_ranks;
     let info = file.info(name).with_context(|| format!("info {name}"))?;
     if !dtype_qmatmul_native(info.dtype) {
         bail!(
@@ -175,8 +184,9 @@ pub fn upload_moe_experts_fused_gate_up_stacked(
         bail!("{name}: hidden {hidden} not divisible by block_size {block_size}");
     }
     let row_bytes = (hidden / block_size) * type_size;
-    let half_per_expert = inter * row_bytes;
-    let full_per_expert = 2 * half_per_expert;
+    let full_half_per_expert = inter * row_bytes;
+    let full_per_expert = 2 * full_half_per_expert;
+    let local_half_per_expert = local_inter * row_bytes;
     let raw = file
         .tensor_raw(name)
         .with_context(|| format!("tensor_raw {name}"))?;
@@ -187,27 +197,30 @@ pub fn upload_moe_experts_fused_gate_up_stacked(
             raw.len()
         );
     }
-    let mut gate_buf: Vec<u8> = Vec::with_capacity(n_experts * half_per_expert);
-    let mut up_buf: Vec<u8> = Vec::with_capacity(n_experts * half_per_expert);
+    let mut gate_buf: Vec<u8> = Vec::with_capacity(n_experts * local_half_per_expert);
+    let mut up_buf: Vec<u8> = Vec::with_capacity(n_experts * local_half_per_expert);
+    let rank_row_offset = rank * local_inter * row_bytes;
     for e in 0..n_experts {
         let base = e * full_per_expert;
-        gate_buf.extend_from_slice(&raw[base..base + half_per_expert]);
-        up_buf.extend_from_slice(&raw[base + half_per_expert..base + full_per_expert]);
+        let gate_lo = base + rank_row_offset;
+        gate_buf.extend_from_slice(&raw[gate_lo..gate_lo + local_half_per_expert]);
+        let up_lo = base + full_half_per_expert + rank_row_offset;
+        up_buf.extend_from_slice(&raw[up_lo..up_lo + local_half_per_expert]);
     }
     let gate_ptr = upload_bytes(device, &gate_buf, allocs)?;
     let up_ptr = upload_bytes(device, &up_buf, allocs)?;
     let qd = ggml_to_qdtype(info.dtype)?;
-    let elems_per_expert = inter * hidden;
+    let elems_per_expert = local_inter * hidden;
     let gate: Vec<QuantWeight> = (0..n_experts)
         .map(|e| QuantWeight {
-            ptr: gate_ptr.offset_bytes(e * half_per_expert),
+            ptr: gate_ptr.offset_bytes(e * local_half_per_expert),
             dtype: qd,
             n_elems: elems_per_expert,
         })
         .collect();
     let up: Vec<QuantWeight> = (0..n_experts)
         .map(|e| QuantWeight {
-            ptr: up_ptr.offset_bytes(e * half_per_expert),
+            ptr: up_ptr.offset_bytes(e * local_half_per_expert),
             dtype: qd,
             n_elems: elems_per_expert,
         })
