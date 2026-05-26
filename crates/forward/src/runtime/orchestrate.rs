@@ -21,7 +21,7 @@ use anyhow::{anyhow, Context, Result};
 use flambeau_backend_hip::{BarP2pAllReduce, HipCluster};
 use flambeau_quant::GgufFile;
 
-use super::ar::{new_peer_buffer, ArCoordinator, BarArCoordinator};
+use super::ar::{new_peer_buffer, new_peer_edge, ArCoordinator, BarArCoordinator};
 use super::workers::{WorkerHandle, WorkerRole};
 use super::{Arch, Topology};
 
@@ -143,10 +143,19 @@ fn launch_pp<A: Arch>(
         }
         None => Vec::new(),
     };
-    // peer_buffer hidden size is filled in lazily by the workers on
-    // first DtoH deposit; we pre-allocate an empty Vec<f16> and let
-    // the producer resize it.
-    let peer = new_peer_buffer(0);
+    // One PeerEdge per PP boundary (n-1 total). Each carries a device
+    // buffer pre-bound to the consumer's device (allocated lazily on
+    // first peer_send) + an event for cross-stream ordering. Replaces
+    // the single shared host-bounce vec that used to serialise all
+    // PP hand-offs through one mutex.
+    let mut edges: Vec<super::ar::PeerBuffer> = Vec::with_capacity(n.saturating_sub(1));
+    for edge_idx in 0..n.saturating_sub(1) {
+        let consumer_dev = devices[edge_idx + 1];
+        edges.push(
+            new_peer_edge(consumer_dev)
+                .with_context(|| format!("PP edge {edge_idx}→{} (consumer hip:{consumer_dev})", edge_idx + 1))?,
+        );
+    }
     let mut handles = Vec::with_capacity(n);
     let mut layer_cursor = 0usize;
     for (rank, &dev) in devices.iter().enumerate() {
@@ -161,12 +170,23 @@ fn launch_pp<A: Arch>(
             // the model's Arch::forward must derive its own slice.
             (0, 0)
         };
+        let send_edge = if rank + 1 < n {
+            Some(Arc::clone(&edges[rank]))
+        } else {
+            None
+        };
+        let recv_edge = if rank > 0 {
+            Some(Arc::clone(&edges[rank - 1]))
+        } else {
+            None
+        };
         let role = WorkerRole::Pp {
             rank,
             n_ranks: n,
             layer_start,
             layer_end,
-            peer_buffer: Arc::clone(&peer),
+            send_edge,
+            recv_edge,
         };
         handles.push(
             WorkerHandle::<A>::spawn(

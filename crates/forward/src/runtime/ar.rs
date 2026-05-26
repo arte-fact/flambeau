@@ -380,11 +380,79 @@ pub fn make_bar_ar_callback(
     })
 }
 
-/// Shared host F16 staging slot between consecutive PP / hybrid stages.
-/// Length `hidden`. Built once, threaded into both the sender and
-/// receiver rank's contexts.
-pub type PeerBuffer = Arc<Mutex<Vec<half::f16>>>;
+/// Per-edge handoff slot between two consecutive PP stages
+/// (producer rank → consumer rank). Holds a destination buffer
+/// allocated on the **consumer's** device + an event handshake.
+///
+/// Producer's `peer_send`:
+///   * grows `dst` on demand to cover `n_tokens * hidden * 2` bytes,
+///   * enqueues `hipMemcpyPeerAsync(dst, dst_device, src, src_device,
+///     bytes, producer_stream)` — direct device-to-device, no host
+///     bounce. This is the same pattern llama.cpp uses in
+///     `ggml_backend_cuda_cpy_tensor_async`.
+///   * records `send_done` on the producer stream after the copy.
+///
+/// Consumer's `peer_recv`:
+///   * stream-waits on `send_done` (driver-side),
+///   * returns a `Tensor` view of `dst.ptr` — no second copy needed,
+///     because `dst` already lives on the consumer's device.
+///
+/// `buf` (the host bounce vec) is retained as a fallback used by the
+/// `HybStage` path which hasn't been migrated to the device path yet
+/// — see TODO in `engine.rs`.
+pub struct PeerSlot {
+    pub buf: Mutex<Vec<half::f16>>,
+    pub send_done: Mutex<Option<HipEvent>>,
+    /// Pre-allocated device buffer on the CONSUMER's device. Lazy:
+    /// `None` until first `peer_send` allocates with the actual
+    /// hidden×n_tokens size.
+    pub dst: Mutex<Option<PeerDeviceBuffer>>,
+    /// Consumer device ID — used by the producer to call
+    /// `hipMemcpyPeerAsync`. `None` for the hybrid path (still on
+    /// host bounce).
+    pub consumer_device_id: Option<i32>,
+    /// Consumer's HipDevice handle, kept alive so allocations made
+    /// on it remain valid for the slot's lifetime. Producer doesn't
+    /// touch this — it only uses `consumer_device_id` for the peer
+    /// copy call. The Arc keeps `dst` valid.
+    pub consumer_device: Option<Arc<HipDevice>>,
+}
 
+pub struct PeerDeviceBuffer {
+    pub ptr: DevicePtr,
+    pub bytes: usize,
+}
+
+pub type PeerBuffer = Arc<PeerSlot>;
+
+/// Build a peer slot for the **legacy / hybrid** path — host-bounce
+/// only, no device buffer. Used by [`launch_hybrid`] and any caller
+/// that hasn't migrated to the per-edge BAR1 P2P handoff.
 pub fn new_peer_buffer(hidden: usize) -> PeerBuffer {
-    Arc::new(Mutex::new(vec![half::f16::ZERO; hidden]))
+    Arc::new(PeerSlot {
+        buf: Mutex::new(vec![half::f16::ZERO; hidden]),
+        send_done: Mutex::new(None),
+        dst: Mutex::new(None),
+        consumer_device_id: None,
+        consumer_device: None,
+    })
+}
+
+/// Build a per-edge PP slot wired for direct cross-device peer copy.
+/// `consumer_device_id` is the device the buffer will be allocated on.
+/// The actual allocation is deferred to the first `peer_send`, when
+/// the byte size becomes known.
+///
+/// # Errors
+/// Returns a [`HipDevice::new`] failure if `consumer_device_id` is
+/// invalid (out of range, or the underlying HIP context init fails).
+pub fn new_peer_edge(consumer_device_id: i32) -> anyhow::Result<PeerBuffer> {
+    let dev = HipDevice::new(consumer_device_id)?;
+    Ok(Arc::new(PeerSlot {
+        buf: Mutex::new(Vec::new()),
+        send_done: Mutex::new(None),
+        dst: Mutex::new(None),
+        consumer_device_id: Some(consumer_device_id),
+        consumer_device: Some(Arc::new(dev)),
+    }))
 }

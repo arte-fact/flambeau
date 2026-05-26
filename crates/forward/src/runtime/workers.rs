@@ -42,7 +42,12 @@ pub enum WorkerRole {
         n_ranks: usize,
         layer_start: usize,
         layer_end: usize,
-        peer_buffer: PeerBuffer,
+        /// Edge this rank produces TO (rank → rank+1). `None` on the
+        /// final rank.
+        send_edge: Option<PeerBuffer>,
+        /// Edge this rank consumes FROM (rank-1 → rank). `None` on
+        /// rank 0.
+        recv_edge: Option<PeerBuffer>,
     },
     Hybrid {
         stage_idx: usize,
@@ -338,11 +343,9 @@ fn run_forward_once<A: Arch>(
             n_ranks,
             layer_start,
             layer_end,
-            peer_buffer,
+            send_edge,
+            recv_edge,
         } => {
-            let mut buf = peer_buffer
-                .lock()
-                .map_err(|e| anyhow::anyhow!("peer_buffer poisoned: {e}"))?;
             let mut ctx = PpForwardCtx::new(
                 &state.device,
                 stream,
@@ -352,7 +355,8 @@ fn run_forward_once<A: Arch>(
                 *n_ranks,
                 *layer_start,
                 *layer_end,
-                &mut *buf,
+                send_edge.as_ref().map(|a| a.as_ref()),
+                recv_edge.as_ref().map(|a| a.as_ref()),
             );
             A::forward(&state.model, &mut ctx, tokens, positions, slot_ids)?;
             Ok(ctx.logits().to_vec())

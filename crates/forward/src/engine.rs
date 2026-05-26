@@ -7,7 +7,7 @@ use std::ops::Range;
 use std::sync::{Arc, Barrier, Mutex};
 
 use anyhow::{anyhow, bail, Context, Result};
-use flambeau_backend_hip::{HipDevice, HipStream};
+use flambeau_backend_hip::{HipDevice, HipEvent, HipStream};
 use flambeau_core::{CopyDirection, Device, DevicePtr};
 use flambeau_model_ops::{Tensor, F16};
 use flambeau_ops::OpsRegistry;
@@ -235,7 +235,12 @@ pub struct PpStage<'a> {
     pub n_ranks: usize,
     pub layer_start: usize,
     pub layer_end: usize,
-    pub peer_buffer: &'a mut Vec<f16>,
+    /// Edge that this rank produces TO (rank → rank+1). `None` on the
+    /// final rank, which has no downstream consumer.
+    pub send_edge: Option<&'a crate::runtime::ar::PeerSlot>,
+    /// Edge that this rank consumes FROM (rank-1 → rank). `None` on
+    /// rank 0, which feeds itself from the embedding.
+    pub recv_edge: Option<&'a crate::runtime::ar::PeerSlot>,
 }
 
 impl<'a> StageHooks for PpStage<'a> {
@@ -249,30 +254,40 @@ impl<'a> StageHooks for PpStage<'a> {
         self.layer_start..self.layer_end
     }
     fn peer_recv(&mut self, core: &mut CoreState<'_>, n_tokens: usize) -> Result<Tensor<F16>> {
+        let edge = self
+            .recv_edge
+            .ok_or_else(|| anyhow!("PpStage::peer_recv: rank 0 has no recv_edge"))?;
         let hidden = core.hidden();
         let need = n_tokens * hidden;
-        if self.peer_buffer.len() < need {
+        // Driver-side wait on producer's done event before reading dst.
+        let send_done = edge
+            .send_done
+            .lock()
+            .map_err(|e| anyhow!("PpStage peer_recv: send_done poisoned: {e}"))?
+            .take();
+        if let Some(ev) = send_done {
+            ev.stream_wait(core.stream)
+                .map_err(|e| anyhow!("PpStage peer_recv stream_wait: {e}"))?;
+        }
+        let dst = edge
+            .dst
+            .lock()
+            .map_err(|e| anyhow!("PpStage peer_recv: dst poisoned: {e}"))?;
+        let dst_buf = dst.as_ref().ok_or_else(|| {
+            anyhow!("PpStage::peer_recv: producer hasn't allocated dst yet")
+        })?;
+        let needed_bytes = need * 2;
+        if dst_buf.bytes < needed_bytes {
             bail!(
-                "PpStage::peer_recv: peer_buffer len {} < n_tokens*hidden {need}",
-                self.peer_buffer.len()
+                "PpStage::peer_recv: dst buffer {} bytes < needed {needed_bytes}",
+                dst_buf.bytes
             );
         }
-        let dst = core.pool.next_residual_slot();
-        let bytes = need * 2;
-        // SAFETY: `dst` is the residual slot (sized `hidden` F16);
-        // `peer_buffer` holds `need` host F16 (checked above).
-        unsafe {
-            core.device
-                .memcpy_async(
-                    core.stream,
-                    CopyDirection::HostToDevice,
-                    dst,
-                    DevicePtr(self.peer_buffer.as_ptr() as usize),
-                    bytes,
-                )
-                .map_err(|e| anyhow!("PpStage peer_recv HtoD: {e}"))?;
-        }
-        Ok(unsafe { Tensor::<F16>::from_raw(dst, need) })
+        // The buffer lives on this consumer's device (allocated by the
+        // edge at first peer_send). Return a Tensor view directly — no
+        // second copy. Downstream ops will execute on `core.stream`
+        // which is gated on the event above.
+        Ok(unsafe { Tensor::<F16>::from_raw(dst_buf.ptr, need) })
     }
     fn peer_send(
         &mut self,
@@ -280,41 +295,119 @@ impl<'a> StageHooks for PpStage<'a> {
         input: &Tensor<F16>,
         n_tokens: usize,
     ) -> Result<()> {
+        let edge = self
+            .send_edge
+            .ok_or_else(|| anyhow!("PpStage::peer_send: last rank has no send_edge"))?;
+        let consumer_device_id = edge.consumer_device_id.ok_or_else(|| {
+            anyhow!("PpStage::peer_send: edge has no consumer_device_id (legacy host-bounce slot?)")
+        })?;
+        let consumer_device = edge.consumer_device.as_ref().ok_or_else(|| {
+            anyhow!("PpStage::peer_send: edge has no consumer_device handle")
+        })?;
         let hidden = core.hidden();
         let need = n_tokens * hidden;
-        if self.peer_buffer.len() < need {
-            *self.peer_buffer = vec![f16::ZERO; need];
+        let needed_bytes = need * 2;
+
+        // Lazily allocate dst on consumer's device on first call, or
+        // grow if a larger n_tokens shows up. Stream is producer-side
+        // so we don't enqueue any work on the consumer here.
+        {
+            let mut dst_guard = edge
+                .dst
+                .lock()
+                .map_err(|e| anyhow!("PpStage peer_send: dst poisoned: {e}"))?;
+            let needs_alloc = match dst_guard.as_ref() {
+                None => true,
+                Some(b) => b.bytes < needed_bytes,
+            };
+            if needs_alloc {
+                if let Some(old) = dst_guard.take() {
+                    // SAFETY: returned by an earlier alloc on the same
+                    // consumer device; no in-flight op may reference it
+                    // because the caller's outer step boundary
+                    // synchronises before we get here. (Slot grow only
+                    // happens when n_tokens exceeds anything seen so far.)
+                    unsafe {
+                        flambeau_core::Device::dealloc(
+                            consumer_device.as_ref(),
+                            old.ptr,
+                            old.bytes,
+                        )
+                        .map_err(|e| anyhow!("PpStage peer_send dealloc old: {e}"))?;
+                    }
+                }
+                consumer_device
+                    .bind()
+                    .map_err(|e| anyhow!("PpStage peer_send bind consumer: {e}"))?;
+                let ptr = flambeau_core::Device::alloc(consumer_device.as_ref(), needed_bytes)
+                    .map_err(|e| {
+                        anyhow!("PpStage peer_send alloc consumer ({needed_bytes}B): {e}")
+                    })?;
+                *dst_guard = Some(crate::runtime::ar::PeerDeviceBuffer {
+                    ptr,
+                    bytes: needed_bytes,
+                });
+            }
         }
-        let bytes = need * 2;
-        // SAFETY: `input.ptr` carries `need` F16 (caller invariant);
-        // `peer_buffer` was just sized to `need`.
+
+        // Re-bind to producer device — the consumer alloc above may
+        // have left the thread's HIP context on the consumer device.
+        core.device
+            .bind()
+            .map_err(|e| anyhow!("PpStage peer_send bind producer: {e}"))?;
+
+        // Direct device-to-device copy enqueued on producer's stream,
+        // same pattern as llama.cpp's `ggml_backend_cuda_cpy_tensor_async`.
+        let dst_ptr = edge
+            .dst
+            .lock()
+            .map_err(|e| anyhow!("PpStage peer_send: dst poisoned: {e}"))?
+            .as_ref()
+            .expect("dst just allocated above")
+            .ptr;
+        // SAFETY: `input.ptr` is `need` F16 = `needed_bytes` on producer
+        // device; `dst_ptr` is `needed_bytes` on consumer device; peer
+        // access was authorised at cluster bring-up; stream belongs to
+        // the producer device.
         unsafe {
             core.device
-                .memcpy_async(
+                .memcpy_peer_async(
                     core.stream,
-                    CopyDirection::DeviceToHost,
-                    DevicePtr(self.peer_buffer.as_mut_ptr() as usize),
+                    DevicePtr(dst_ptr.0),
+                    consumer_device_id,
                     input.ptr,
-                    bytes,
+                    needed_bytes,
                 )
-                .map_err(|e| anyhow!("PpStage peer_send DtoH: {e}"))?;
+                .map_err(|e| anyhow!("PpStage peer_send memcpy_peer_async: {e}"))?;
         }
-        // Consumer rank runs on a different worker thread; sync the
-        // stream so the host buffer is observable when it reads.
-        flambeau_core::Stream::synchronize(core.stream)?;
+
+        // Record producer-side done event; consumer's peer_recv will
+        // stream_wait on it.
+        let event = HipEvent::new(flambeau_core::Device::id(core.device))
+            .map_err(|e| anyhow!("PpStage peer_send HipEvent::new: {e}"))?;
+        event
+            .record(core.stream)
+            .map_err(|e| anyhow!("PpStage peer_send event.record: {e}"))?;
+        *edge
+            .send_done
+            .lock()
+            .map_err(|e| anyhow!("PpStage peer_send: send_done poisoned: {e}"))? = Some(event);
         Ok(())
     }
 }
 
 /// Hybrid runs all ranks in parallel — peer_buffer access is guarded
 /// by `handoff_barrier`. Only rank 0 of each stage writes/reads.
+/// TODO: port the event-based handoff used in [`PpStage`] here so the
+/// `Stream::synchronize` in peer_send/peer_recv can be replaced by
+/// driver-side waits. Today this still bounces synchronously.
 pub struct HybStage {
     pub stage_idx: usize,
     pub n_stages: usize,
     pub rank_in_stage: usize,
     pub layer_start: usize,
     pub layer_end: usize,
-    pub peer_buffer: Arc<Mutex<Vec<f16>>>,
+    pub peer_slot: Arc<crate::runtime::ar::PeerSlot>,
     pub handoff_barrier: Arc<Barrier>,
 }
 
@@ -335,7 +428,8 @@ impl StageHooks for HybStage {
         let dst = core.pool.next_residual_slot();
         let bytes = need * 2;
         let buf = self
-            .peer_buffer
+            .peer_slot
+            .buf
             .lock()
             .map_err(|e| anyhow!("HybStage peer_buffer poisoned: {e}"))?;
         if buf.len() < need {
@@ -369,7 +463,8 @@ impl StageHooks for HybStage {
             let hidden = core.hidden();
             let need = n_tokens * hidden;
             let mut buf = self
-                .peer_buffer
+                .peer_slot
+                .buf
                 .lock()
                 .map_err(|e| anyhow!("HybStage peer_buffer poisoned: {e}"))?;
             if buf.len() < need {
@@ -451,14 +546,16 @@ impl<'a> ForwardEngine<'a, NoopHooks, PpStage<'a>> {
         n_ranks: usize,
         layer_start: usize,
         layer_end: usize,
-        peer_buffer: &'a mut Vec<f16>,
+        send_edge: Option<&'a crate::runtime::ar::PeerSlot>,
+        recv_edge: Option<&'a crate::runtime::ar::PeerSlot>,
     ) -> Self {
         let stage = PpStage {
             rank,
             n_ranks,
             layer_start,
             layer_end,
-            peer_buffer,
+            send_edge,
+            recv_edge,
         };
         Self::build(device, stream, reg, pool, NoopHooks, stage, layer_start)
     }
@@ -479,7 +576,7 @@ impl<'a> ForwardEngine<'a, HybridHooks, HybStage> {
         layer_end: usize,
         ar_callback: ArCallback,
         bar: Option<Arc<BarArCoordinator>>,
-        peer_buffer: Arc<Mutex<Vec<f16>>>,
+        peer_slot: Arc<crate::runtime::ar::PeerSlot>,
         handoff_barrier: Arc<Barrier>,
     ) -> Self {
         let hooks = HybridHooks {
@@ -494,7 +591,7 @@ impl<'a> ForwardEngine<'a, HybridHooks, HybStage> {
             rank_in_stage,
             layer_start,
             layer_end,
-            peer_buffer,
+            peer_slot,
             handoff_barrier,
         };
         Self::build(device, stream, reg, pool, hooks, stage, layer_start)

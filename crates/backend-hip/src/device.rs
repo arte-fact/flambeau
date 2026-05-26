@@ -1189,6 +1189,53 @@ impl Device for HipDevice {
     }
 }
 
+impl HipDevice {
+    /// Cross-device peer copy, enqueued on `stream` (which must belong
+    /// to the source device). Peer access between `self.id()` (source)
+    /// and `dst_device_id` must already be enabled by the cluster
+    /// bring-up (`probe_and_enable_peer_access`); otherwise this fails
+    /// with `hipErrorInvalidValue` on first invocation.
+    ///
+    /// Modeled after llama.cpp's `ggml_backend_cuda_cpy_tensor_async`
+    /// — the producer enqueues the cross-device copy on its own
+    /// stream, records an event, and the consumer's stream waits on
+    /// that event before reading `dst`. Eliminates the host-RAM
+    /// bounce that the legacy `peer_copy_via_host` path uses.
+    ///
+    /// # Safety
+    /// `dst` must be a live device allocation on `dst_device_id`,
+    /// valid for `bytes` writes; `src` must be a live allocation on
+    /// `self.id()`, valid for `bytes` reads. No other in-flight op on
+    /// `stream` may alias either pointer.
+    pub unsafe fn memcpy_peer_async(
+        &self,
+        stream: &HipStream,
+        dst: DevicePtr,
+        dst_device_id: i32,
+        src: DevicePtr,
+        bytes: usize,
+    ) -> DeviceResult<()> {
+        if bytes == 0 {
+            return Ok(());
+        }
+        self.bind()?;
+        // SAFETY: caller's contract above; `stream.raw()` is owned by
+        // the source-device HipStream so its driver context matches
+        // the just-bound source device.
+        let code = unsafe {
+            sys::hipMemcpyPeerAsync(
+                dst.0 as *mut _,
+                dst_device_id,
+                src.0 as *const _,
+                self.id,
+                bytes,
+                stream.raw(),
+            )
+        };
+        check(code, "hipMemcpyPeerAsync")
+    }
+}
+
 impl Drop for HipDevice {
     fn drop(&mut self) {
         // The thread's currently-bound HIP device might be a different

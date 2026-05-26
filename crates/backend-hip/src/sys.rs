@@ -60,6 +60,26 @@ extern "C" {
         stream: hipStream_t,
     ) -> c_int;
 
+    /// Cross-device peer copy. `dst_device_id` / `src_device_id` are the
+    /// HIP device IDs holding the respective allocations; peer access
+    /// must be enabled between them (`hipDeviceEnablePeerAccess`). On
+    /// gfx906 + ROCm with BAR1 mapping (Above-4G + Resizable-BAR in
+    /// BIOS) this routes via PCIe BAR1 with no host bounce — the
+    /// pattern llama.cpp uses for its `-sm layer` PP handoff. Earlier
+    /// concerns about `hipMemcpyPeerAsync` leaving the source stream
+    /// in an unsync'able state (cluster.rs docstring) didn't reproduce
+    /// in 2026-05-24 testing against llama.cpp; the call works
+    /// reliably when enqueued on the producer stream + ordered with
+    /// `hipEventRecord` + `hipStreamWaitEvent` on the consumer side.
+    pub fn hipMemcpyPeerAsync(
+        dst: *mut c_void,
+        dst_device_id: c_int,
+        src: *const c_void,
+        src_device_id: c_int,
+        size_bytes: usize,
+        stream: hipStream_t,
+    ) -> c_int;
+
     pub fn hipStreamCreate(stream: *mut hipStream_t) -> c_int;
     pub fn hipStreamCreateWithFlags(stream: *mut hipStream_t, flags: c_uint) -> c_int;
     pub fn hipStreamDestroy(stream: hipStream_t) -> c_int;
