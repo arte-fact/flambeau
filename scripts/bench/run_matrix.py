@@ -166,6 +166,11 @@ MODELS = [
     # Q3_K weights at qmatmul-dispatch time so this is a branch-only path.
     ModelSpec("qwen36_35B_a3b_q3_k_s", "/artefact/models/Qwen3.6-35B-A3B-Q3_K_S.gguf", 16384, 512),
     ModelSpec("qwen36_35B_a3b_ud_q4_k_s", "/artefact/models/Qwen3.6-35B-A3B-UD-Q4_K_S.gguf", 4096, 512),
+    # gemma4 dense — added 2026-05-23 after the BOS-prepend fix landed.
+    # E4B fits on one GPU; 31B needs PP across all 4 (per-layer KV at
+    # ctx=4096 already pushes ~12 GB on the heaviest rank).
+    ModelSpec("gemma4_E4B_q4_0", "/artefact/models/gemma-4-E4B-it-Q4_0.gguf",   4096, 512),
+    ModelSpec("gemma4_31B_q4_0", "/artefact/models/gemma-4-31B-it-Q4_0.gguf",   4096, 512),
 ]
 
 @dataclasses.dataclass(frozen=True)
@@ -201,11 +206,22 @@ def is_feasible(model: ModelSpec, topo: TopoSpec) -> bool:
     # 2-GPU TP for 35B (~10 GB / GPU + KV) marginal but tries.
     if topo.id == "single":
         if model.id in ("qwen36_27B_q4_0", "qwen36_27B_q4_1",
-                        "qwen36_35B_a3b_q4_0", "qwen36_35B_a3b_ud_q4_k_s"):
+                        "qwen36_35B_a3b_q4_0", "qwen36_35B_a3b_ud_q4_k_s",
+                        "gemma4_31B_q4_0"):
             return False
     if topo.id == "tp2":
-        if model.id in ("qwen36_35B_a3b_q4_0", "qwen36_35B_a3b_ud_q4_k_s"):
-            # 35B / 2 = 10 GB weights + KV at ctx risks OOM; skip
+        if model.id in ("qwen36_35B_a3b_q4_0", "qwen36_35B_a3b_ud_q4_k_s",
+                        "gemma4_31B_q4_0"):
+            # 35B / 2 ≈ 10 GB; gemma4-31B Q4_0 ≈ 17 GB so /2 ≈ 8.5 GB
+            # weights but per-layer KV across 64 layers at ctx=4096 with
+            # head_dim 256/512 mix pushes ~16+ GB / GPU. Skip.
+            return False
+    if topo.id in ("pp2", "pp4", "pp2tp2") and model.id == "gemma4_31B_q4_0":
+        # PP2 (2 GPUs) for 31B Q4_0 — 17 GB / 2 ≈ 8.5 GB weights but
+        # heavy per-layer KV (gemma4 SWA+global at head_dim 256/512)
+        # OOMs on PP2. Confirmed via prior session OOM at default ctx;
+        # ctx=4096 still tight. Keep PP4 and skip PP2.
+        if topo.id == "pp2":
             return False
     return True
 
