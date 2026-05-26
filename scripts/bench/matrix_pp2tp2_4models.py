@@ -257,7 +257,15 @@ def run_one(model_id: str, model_path: str, ctx_cap: int, prefill_ubatch: int,
         if not wait_ready(port, log_path):
             return {"id": model_id, "err": "boot failed", "log": str(log_path)}
         load_s = time.perf_counter() - t_boot
-        print(f"[{model_id}] ready in {load_s:.1f}s; firing request", flush=True)
+        print(f"[{model_id}] ready in {load_s:.1f}s; warming up", flush=True)
+        # First-decode-after-load hits cold caches / first-touch paths and
+        # under-reports steady-state throughput by ~40% on this rig. Always
+        # warm up before the timed measurement (see task #36 papercut #3).
+        try:
+            _ = stream_one(port, 32)
+        except Exception as e:
+            print(f"[{model_id}] warmup failed: {e}", flush=True)
+        print(f"[{model_id}] firing request", flush=True)
         sampler = SmiSampler([0, 1, 2, 3], interval_s=0.5)
         sampler.start()
         try:
