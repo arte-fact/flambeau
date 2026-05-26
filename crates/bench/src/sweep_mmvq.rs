@@ -57,6 +57,12 @@ pub enum Dtype {
     Q4KR2,
     /// r2 multi-row variant of Q5_K.
     Q5KR2,
+    /// DP4A 256-thread Q5_K MMVQ (port of llama.cpp's
+    /// `vec_dot_q5_K_q8_1_impl_vmmq`). Replaces per-element FP32
+    /// multiplies with `__builtin_amdgcn_sdot4` SIMD int8 dot products
+    /// — measured ~3× faster than `mmvq_q5_k_r2` on Qwen3.6-27B
+    /// `ssm_out` shape (n=5120, k=6144, m=1).
+    Q5KDp4a,
     /// r4 multi-row variant of Q6_K (4 output rows per wave64).
     Q6KR4,
     /// DP4A single-row Q6_K variant. Cooperative 64 lanes across
@@ -118,7 +124,7 @@ impl Dtype {
             Dtype::Q2K | Dtype::Q2KR2 => "Q2_K",
             Dtype::Q3K | Dtype::Q3KR2 => "Q3_K",
             Dtype::Q4K | Dtype::Q4KR2 => "Q4_K",
-            Dtype::Q5K | Dtype::Q5KR2 => "Q5_K",
+            Dtype::Q5K | Dtype::Q5KR2 | Dtype::Q5KDp4a => "Q5_K",
             Dtype::Q6K | Dtype::Q6KR4 | Dtype::Q6KDP4A => "Q6_K",
             Dtype::Q8K => "Q8_K",
             Dtype::Q4_1 | Dtype::Q4_1R2 | Dtype::Q4_1R2DP4A | Dtype::Q4_1T128 => "Q4_1",
@@ -140,7 +146,7 @@ impl Dtype {
             Dtype::Q2K | Dtype::Q2KR2 => GgmlDType::Q2K,
             Dtype::Q3K | Dtype::Q3KR2 => GgmlDType::Q3K,
             Dtype::Q4K | Dtype::Q4KR2 => GgmlDType::Q4K,
-            Dtype::Q5K | Dtype::Q5KR2 => GgmlDType::Q5K,
+            Dtype::Q5K | Dtype::Q5KR2 | Dtype::Q5KDp4a => GgmlDType::Q5K,
             Dtype::Q6K | Dtype::Q6KR4 | Dtype::Q6KDP4A => GgmlDType::Q6K,
             Dtype::Q8K => GgmlDType::Q8K,
             Dtype::Q4_1 | Dtype::Q4_1R2 | Dtype::Q4_1R2DP4A | Dtype::Q4_1T128 => GgmlDType::Q4_1,
@@ -169,6 +175,7 @@ impl Dtype {
             Dtype::Q8K => "qmatmul_q8_K_mmvq_single_row_gfx906",
             Dtype::Q4KR2 => "qmatmul_q4_K_mmvq_nw1_r2_gfx906",
             Dtype::Q5KR2 => "qmatmul_q5_K_mmvq_nw1_r2_gfx906",
+            Dtype::Q5KDp4a => "qmatmul_q5_K_mmvq_dp4a_gfx906",
             Dtype::Q6KR4 => "qmatmul_q6_K_mmvq_nw1_r4_gfx906",
             Dtype::Q6KDP4A => "qmatmul_q6_K_mmvq_dp4a_gfx906",
             Dtype::Q4_1 => "qmatmul_q4_1_mmvq_dp4a_gfx906",
@@ -213,6 +220,7 @@ impl Dtype {
             Dtype::Q8K => "mmvq_q8_k",
             Dtype::Q4KR2 => "mmvq_q4_k_r2",
             Dtype::Q5KR2 => "mmvq_q5_k_r2",
+            Dtype::Q5KDp4a => "mmvq_q5_k_dp4a",
             Dtype::Q6KR4 => "mmvq_q6_k_r4",
             Dtype::Q6KDP4A => "mmvq_q6_k_dp4a",
             Dtype::Q4_1 => "mmvq_q4_1",
@@ -253,6 +261,7 @@ impl Dtype {
             Dtype::Q6K => "flambeau_mmvq_q6_k_q8_1",
             Dtype::Q4KR2 => "flambeau_mmvq_q4_k_r2_q8_1",
             Dtype::Q5KR2 => "flambeau_mmvq_q5_k_r2_q8_1",
+            Dtype::Q5KDp4a => "flambeau_mmvq_q5_k_dp4a_q8_1",
             Dtype::Q6KR4 => "flambeau_mmvq_q6_k_r4_q8_1",
             Dtype::Q6KDP4A => "flambeau_mmvq_q6_k_dp4a_q8_1",
             Dtype::Q4_1 => "flambeau_mmvq_q4_1_q8_1",
@@ -288,7 +297,7 @@ impl Dtype {
             Dtype::Q2K | Dtype::Q2KR2 => std::mem::size_of::<BlockQ2K>(),
             Dtype::Q3K | Dtype::Q3KR2 => std::mem::size_of::<BlockQ3K>(),
             Dtype::Q4K | Dtype::Q4KR2 => std::mem::size_of::<BlockQ4K>(),
-            Dtype::Q5K | Dtype::Q5KR2 => std::mem::size_of::<BlockQ5K>(),
+            Dtype::Q5K | Dtype::Q5KR2 | Dtype::Q5KDp4a => std::mem::size_of::<BlockQ5K>(),
             Dtype::Q6K | Dtype::Q6KR4 | Dtype::Q6KDP4A => std::mem::size_of::<BlockQ6K>(),
             Dtype::Q8K => std::mem::size_of::<BlockQ8K>(),
             Dtype::Q4_1 | Dtype::Q4_1R2 | Dtype::Q4_1R2DP4A | Dtype::Q4_1T128 => {
@@ -312,7 +321,7 @@ impl Dtype {
 
     fn launch_threads(self) -> u32 {
         match self {
-            Dtype::Q8_0 | Dtype::Q4_1 | Dtype::Q4_1R2DP4A | Dtype::Q8K => 256,
+            Dtype::Q8_0 | Dtype::Q4_1 | Dtype::Q4_1R2DP4A | Dtype::Q8K | Dtype::Q5KDp4a => 256,
             Dtype::Q4_1T128 | Dtype::Q8_0T128 | Dtype::Q8_0T128VDR2 => 128,
             _ => 64,
         }
@@ -625,7 +634,7 @@ fn tame_scales(dtype: Dtype, raw: Vec<u8>) -> Vec<u8> {
                 let d = f16::from_f32((block[d_off] as f32 / 255.0) * 0.05 + 0.005);
                 block[d_off..d_off + 2].copy_from_slice(&d.to_bits().to_le_bytes());
             }
-            Dtype::Q4K | Dtype::Q5K | Dtype::Q4KR2 | Dtype::Q5KR2 => {
+            Dtype::Q4K | Dtype::Q5K | Dtype::Q4KR2 | Dtype::Q5KR2 | Dtype::Q5KDp4a => {
                 // d (0..2), dmin (2..4). Same treatment as Q4_K test.
                 let d = f16::from_f32((block[0] as f32 / 255.0) * 0.1 + 0.01);
                 let dmin = f16::from_f32((block[1] as f32 / 255.0) * 0.05);

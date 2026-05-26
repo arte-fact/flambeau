@@ -29,6 +29,7 @@ pub fn run_one(kernel_stem: &str, m: usize, k: usize, n: usize) -> Result<String
         "mmvq_q6_k" => ("flambeau_mmvq_q6_k_q8_1", 64),
         "mmvq_q4_k_r2" => ("flambeau_mmvq_q4_k_r2_q8_1", 64),
         "mmvq_q5_k_r2" => ("flambeau_mmvq_q5_k_r2_q8_1", 64),
+        "mmvq_q5_k_dp4a" => ("flambeau_mmvq_q5_k_dp4a_q8_1", 256),
         "mmvq_q6_k_r4" => ("flambeau_mmvq_q6_k_r4_q8_1", 64),
         "mmq_q8_0_oracle" => ("flambeau_mmq_q8_0_oracle_q8_1", 256),
         "mmq_q8_0_4warp" => ("flambeau_mmq_q8_0_4warp_q8_1", 256),
@@ -409,7 +410,9 @@ fn block_size_of(kernel_stem: &str) -> Result<usize> {
         "mmvq_q8_0" => std::mem::size_of::<BlockQ8_0>(),
         "mmvq_q4_0" => std::mem::size_of::<flambeau_quant::BlockQ4_0>(),
         "mmvq_q4_k" | "mmvq_q4_k_r2" => std::mem::size_of::<flambeau_quant::BlockQ4K>(),
-        "mmvq_q5_k" | "mmvq_q5_k_r2" => std::mem::size_of::<flambeau_quant::BlockQ5K>(),
+        "mmvq_q5_k" | "mmvq_q5_k_r2" | "mmvq_q5_k_dp4a" => {
+            std::mem::size_of::<flambeau_quant::BlockQ5K>()
+        }
         "mmvq_q6_k" | "mmvq_q6_k_r4" => std::mem::size_of::<flambeau_quant::BlockQ6K>(),
         other => bail!("block size unknown for {other}"),
     })

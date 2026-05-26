@@ -1,0 +1,157 @@
+{
+  "schema_version": 1,
+  "impl_id": "qmatmul_q5_K_mmvq_dp4a_gfx906",
+  "backend": "hip",
+  "arch": "gfx906",
+  "op": "qmatmul_mmvq",
+  "dtype_weight": "Q5_K",
+  "dtype_activation": "Q8_1",
+  "tolerance_formula": "|err| <= 3e-2 * max(|ref|, sqrt(k))",
+  "results": [
+    {
+      "m": 1,
+      "k": 2048,
+      "n": 2048,
+      "seed": 13532696731359440213,
+      "max_rel_err": 0.00010439255,
+      "tolerance": 0.03,
+      "pass": true
+    },
+    {
+      "m": 1,
+      "k": 5120,
+      "n": 5120,
+      "seed": 6161625717786667349,
+      "max_rel_err": 0.000030124826,
+      "tolerance": 0.03,
+      "pass": true
+    },
+    {
+      "m": 1,
+      "k": 15360,
+      "n": 15360,
+      "seed": 38133079586976085,
+      "max_rel_err": 0.000012960146,
+      "tolerance": 0.03,
+      "pass": true
+    },
+    {
+      "m": 8,
+      "k": 2048,
+      "n": 2048,
+      "seed": 13532696731493061414,
+      "max_rel_err": 0.0005590121,
+      "tolerance": 0.03,
+      "pass": true
+    },
+    {
+      "m": 8,
+      "k": 5120,
+      "n": 5120,
+      "seed": 6161625717920288550,
+      "max_rel_err": 0.0020808564,
+      "tolerance": 0.03,
+      "pass": true
+    },
+    {
+      "m": 8,
+      "k": 15360,
+      "n": 15360,
+      "seed": 38133079720597286,
+      "max_rel_err": 0.00049182377,
+      "tolerance": 0.03,
+      "pass": true
+    },
+    {
+      "m": 16,
+      "k": 2048,
+      "n": 2048,
+      "seed": 13532696731645771358,
+      "max_rel_err": 0.0010075205,
+      "tolerance": 0.03,
+      "pass": true
+    },
+    {
+      "m": 16,
+      "k": 5120,
+      "n": 5120,
+      "seed": 6161625718072998494,
+      "max_rel_err": 0.0036038973,
+      "tolerance": 0.03,
+      "pass": true
+    },
+    {
+      "m": 16,
+      "k": 15360,
+      "n": 15360,
+      "seed": 38133079873307230,
+      "max_rel_err": 0.0020531814,
+      "tolerance": 0.03,
+      "pass": true
+    },
+    {
+      "m": 128,
+      "k": 2048,
+      "n": 2048,
+      "seed": 13532696733783710574,
+      "max_rel_err": 0.0046609356,
+      "tolerance": 0.03,
+      "pass": true
+    },
+    {
+      "m": 128,
+      "k": 5120,
+      "n": 5120,
+      "seed": 6161625720210937710,
+      "max_rel_err": 0.0031745413,
+      "tolerance": 0.03,
+      "pass": true
+    },
+    {
+      "m": 128,
+      "k": 15360,
+      "n": 15360,
+      "seed": 38133082011246446,
+      "max_rel_err": 0.009750025,
+      "tolerance": 0.03,
+      "pass": true
+    },
+    {
+      "m": 512,
+      "k": 2048,
+      "n": 2048,
+      "seed": 13532696741113787886,
+      "max_rel_err": 0.005608903,
+      "tolerance": 0.03,
+      "pass": true
+    },
+    {
+      "m": 512,
+      "k": 5120,
+      "n": 5120,
+      "seed": 6161625727541015022,
+      "max_rel_err": 0.007368162,
+      "tolerance": 0.03,
+      "pass": true
+    },
+    {
+      "m": 512,
+      "k": 15360,
+      "n": 15360,
+      "seed": 38133089341323758,
+      "max_rel_err": 0.006421324,
+      "tolerance": 0.03,
+      "pass": true
+    }
+  ],
+  "pass": true,
+  "emitted_at": "2026-05-26T09:53:37Z",
+  "rig": "threadreaper-gfx906",
+  "pmc": {
+    "vgpr_count": 24,
+    "sgpr_count": null,
+    "waves_per_simd": 10,
+    "mem_busy_pct": null,
+    "valu_busy_pct": null
+  }
+}
