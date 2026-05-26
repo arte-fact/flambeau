@@ -93,6 +93,18 @@ pub struct ServeConfig {
     pub default_system: Option<String>,
     /// /v1/embeddings per-prompt token cap.
     pub embedding_max_tokens: usize,
+    /// Override the per-rank layer split. `None` falls back to the
+    /// default uniform `num_layers / n_groups` split. When `Some`, the
+    /// vector length must equal the PP rank count (== `device_ids.len()`
+    /// for `Pp`, == `pp_size` for `Hybrid`), and the sum must equal the
+    /// model's `num_layers`.
+    ///
+    /// Useful for hybrid arches like Qwen3.6 where the recurrent (GDN)
+    /// layers are much lighter than the full-attn layers. With a
+    /// uniform split, early ranks (holding heavier layers) become the
+    /// pipeline bottleneck; rocprofv3 trace on PP4 Qwen3.6-27B showed
+    /// rank 0 doing 1.8× the kernel work of rank 3.
+    pub layer_split: Option<Vec<usize>>,
 }
 
 impl Default for MeshMode {
@@ -157,7 +169,12 @@ pub(crate) async fn serve_inner_v2(
     }
 
     let model_cfg = parse_v2_server_model_cfg(gguf_arch, &cfg.gguf_path)?;
-    let topology = topology_from_mesh(cfg.mesh_mode, &cfg.device_ids, model_cfg.num_layers)?;
+    let topology = topology_from_mesh(
+        cfg.mesh_mode,
+        &cfg.device_ids,
+        model_cfg.num_layers,
+        cfg.layer_split.as_deref(),
+    )?;
     let topology_label: &'static str = match cfg.mesh_mode {
         MeshMode::Pp => "pp",
         MeshMode::Tp { .. } => "tp",
@@ -253,16 +270,33 @@ fn topology_from_mesh(
     mesh: MeshMode,
     device_ids: &[i32],
     num_layers: usize,
+    override_split: Option<&[usize]>,
 ) -> Result<flambeau_forward::Topology> {
     use flambeau_forward::Topology;
     // `flambeau_forward`'s orchestrator falls back to (start=0, end=0)
     // empty per-rank layer ranges when `layer_split: None`; an
     // explicit even split is required for PP / Hybrid to actually
     // execute layers. SingleDevice avoids the issue entirely at N=1.
-    let even_split = |n_groups: usize| -> Vec<usize> {
-        let base = num_layers / n_groups;
-        let rem = num_layers % n_groups;
-        (0..n_groups).map(|i| base + usize::from(i < rem)).collect()
+    let resolve_split = |n_groups: usize| -> Result<Vec<usize>> {
+        if let Some(s) = override_split {
+            if s.len() != n_groups {
+                bail!(
+                    "--layer-split has {} entries but topology has {n_groups} PP ranks",
+                    s.len()
+                );
+            }
+            let sum: usize = s.iter().sum();
+            if sum != num_layers {
+                bail!(
+                    "--layer-split sums to {sum} but model has {num_layers} layers"
+                );
+            }
+            Ok(s.to_vec())
+        } else {
+            let base = num_layers / n_groups;
+            let rem = num_layers % n_groups;
+            Ok((0..n_groups).map(|i| base + usize::from(i < rem)).collect())
+        }
     };
     match mesh {
         MeshMode::Pp if device_ids.len() == 1 => Ok(Topology::SingleDevice {
@@ -270,7 +304,7 @@ fn topology_from_mesh(
         }),
         MeshMode::Pp => Ok(Topology::Pp {
             devices: device_ids.to_vec(),
-            layer_split: Some(even_split(device_ids.len())),
+            layer_split: Some(resolve_split(device_ids.len())?),
         }),
         MeshMode::Tp { world } => {
             if device_ids.len() as u32 != world {
@@ -297,7 +331,7 @@ fn topology_from_mesh(
                 .collect();
             Ok(Topology::Hybrid {
                 stages,
-                layer_split: Some(even_split(pp)),
+                layer_split: Some(resolve_split(pp)?),
             })
         }
     }

@@ -101,6 +101,13 @@ enum Cmd {
         /// `pp_size * tp_size == --devices count`. Ignored for `pp`/`tp`.
         #[arg(long = "pp-size", default_value_t = 0)]
         pp_size: u32,
+        /// Override the per-rank layer split. Comma-separated integers,
+        /// one per PP rank. Sum must equal the model's num_layers.
+        /// Example: `--layer-split 12,16,16,20` for PP4 to put more
+        /// layers on the last (lighter) rank in a hybrid GDN+attn
+        /// arch like Qwen3.6. Default: uniform split.
+        #[arg(long = "layer-split")]
+        layer_split: Option<String>,
         /// **#230 P2.11a** — optional path to a `qwen3` arch embedding
         /// GGUF (e.g. `Qwen3-Embedding-0.6B-Q8_0.gguf`). Loaded
         /// alongside the chat model on a single device; powers the
@@ -280,6 +287,7 @@ fn main() -> Result<()> {
             mesh_mode,
             tp_size,
             pp_size,
+            layer_split,
             embedding_model,
             embedding_device,
             inflight_slots,
@@ -301,6 +309,7 @@ fn main() -> Result<()> {
             mesh_mode,
             tp_size,
             pp_size,
+            layer_split,
             embedding_model,
             embedding_device,
             inflight_slots,
@@ -332,6 +341,7 @@ struct ServeArgs {
     mesh_mode: String,
     tp_size: u32,
     pp_size: u32,
+    layer_split: Option<String>,
     embedding_model: Option<String>,
     embedding_device: Option<i32>,
     inflight_slots: usize,
@@ -380,6 +390,7 @@ fn serve_cmd(args: ServeArgs) -> Result<()> {
         mesh_mode,
         tp_size,
         pp_size,
+        layer_split,
         embedding_model,
         embedding_device,
         inflight_slots,
@@ -475,6 +486,16 @@ fn serve_cmd(args: ServeArgs) -> Result<()> {
             .map(|s| s.to_string_lossy().to_string())
             .unwrap_or_else(|| "flambeau".to_string()),
         mesh_mode: mesh_mode_parsed,
+        layer_split: match layer_split.as_deref() {
+            None => None,
+            Some(s) => Some(
+                s.split(',')
+                    .filter(|p| !p.is_empty())
+                    .map(|p| p.trim().parse::<usize>())
+                    .collect::<std::result::Result<Vec<_>, _>>()
+                    .map_err(|e| anyhow::anyhow!("--layer-split parse error: {e}"))?,
+            ),
+        },
         embedding_gguf_path: embedding_model.map(PathBuf::from),
         embedding_device_id: resolved_embedding_device,
         inflight_slots,
