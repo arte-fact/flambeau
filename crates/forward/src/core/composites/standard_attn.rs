@@ -208,7 +208,37 @@ pub fn standard_attn_local<H: TopologyHooks>(
         flambeau_model_ops::cast_f32_to_f16(&q_f32, &mut q_f16, n * q_width, &ops)?;
     }
 
-    if n == 1 && weights.attn_k.supports_decode_to_f16() {
+    let fuse_kv_q4_0 = n == 1
+        && weights.attn_k.dtype == flambeau_core::op::QDtype::Q4_0
+        && weights
+            .attn_v
+            .as_ref()
+            .map(|v| v.dtype == flambeau_core::op::QDtype::Q4_0)
+            .unwrap_or(false);
+    if fuse_kv_q4_0 {
+        let k_w = unsafe {
+            Tensor::<flambeau_model_ops::Q4_0>::from_raw(
+                weights.attn_k.ptr,
+                weights.attn_k.n_elems,
+            )
+        };
+        let v_qw = weights.attn_v.as_ref().unwrap();
+        let v_w = unsafe {
+            Tensor::<flambeau_model_ops::Q4_0>::from_raw(v_qw.ptr, v_qw.n_elems)
+        };
+        let mut k_f16 = unsafe { Tensor::<F16>::from_raw(state.pool.k_f16, n * kv_width) };
+        let mut v_f16 = unsafe { Tensor::<F16>::from_raw(state.pool.v_f16, n * kv_width) };
+        flambeau_model_ops::mmvq_q4_0_kv_decode_f16(
+            &k_w,
+            &v_w,
+            &norm_q8_1,
+            &mut k_f16,
+            &mut v_f16,
+            hidden,
+            kv_width,
+            &ops,
+        )?;
+    } else if n == 1 && weights.attn_k.supports_decode_to_f16() {
         let mut k_f16 = unsafe { Tensor::<F16>::from_raw(state.pool.k_f16, n * kv_width) };
         weights
             .attn_k
@@ -228,7 +258,9 @@ pub fn standard_attn_local<H: TopologyHooks>(
         flambeau_model_ops::cast_f32_to_f16(&k_f32, &mut k_f16, n * kv_width, &ops)?;
     }
 
-    if let Some(v_w) = weights.attn_v.as_ref() {
+    if fuse_kv_q4_0 {
+        // V was produced by the fused K+V kernel above.
+    } else if let Some(v_w) = weights.attn_v.as_ref() {
         if n == 1 && v_w.supports_decode_to_f16() {
             let mut v_f16 = unsafe { Tensor::<F16>::from_raw(state.pool.v_f16, n * kv_width) };
             v_w.qmatmul_decode_to_f16(&norm_q8_1, &mut v_f16, hidden, kv_width, &ops)?;

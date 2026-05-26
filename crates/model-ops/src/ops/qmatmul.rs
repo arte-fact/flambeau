@@ -10,7 +10,7 @@ use anyhow::bail;
 use flambeau_core::op::QDtype;
 use flambeau_ops::{HipOps, Ops};
 
-use crate::dtype::{F32, Q4_0, Q4_1, Q5_0, Q5_1, Q8_0, Q8_1};
+use crate::dtype::{F16, F32, Q4_0, Q4_1, Q5_0, Q5_1, Q8_0, Q8_1};
 use crate::error::Result;
 use crate::tensor::Tensor;
 
@@ -165,6 +165,30 @@ pub fn mmvq_q4_0_gate_up_t128_decode(
         n,
         k,
     )
+}
+
+/// Fused K+V decode for Q4_0 attention — one launch produces both
+/// projections in F16 directly, sharing the Q8_1 activation HBM read.
+/// K and V must share shape `[n, k]`; caller guarantees `m == 1`.
+#[allow(clippy::too_many_arguments)]
+pub fn mmvq_q4_0_kv_decode_f16(
+    k_w: &Tensor<Q4_0>,
+    v_w: &Tensor<Q4_0>,
+    act_q8_1: &Tensor<Q8_1>,
+    k_out: &mut Tensor<F16>,
+    v_out: &mut Tensor<F16>,
+    k: usize,
+    n: usize,
+    ops: &HipOps<'_>,
+) -> Result<()> {
+    if k_out.n_elems < n || v_out.n_elems < n {
+        bail!(
+            "mmvq_q4_0_kv_decode_f16: outputs too small (k_out={}, v_out={}, need {n})",
+            k_out.n_elems,
+            v_out.n_elems
+        );
+    }
+    ops.mmvq_q4_0_kv_f16dst(k_w.ptr, v_w.ptr, act_q8_1.ptr, k_out.ptr, v_out.ptr, n, k)
 }
 
 #[allow(clippy::too_many_arguments)]
