@@ -204,6 +204,19 @@ impl Gemma4V2Config {
     }
 }
 
+impl Gemma4V2Config {
+    /// Minimum absolute layer index referenced by any `kv_share_src`
+    /// entry, or `None` when no layer shares KV. The server uses this
+    /// as the PP-split boundary: the last PP rank must own
+    /// `[boundary..num_layers]` so every shared layer and its source
+    /// live on the same rank (cross-rank KV sharing is not wired —
+    /// `standard_attn` would `bail!` on a source not in its local
+    /// pool).
+    pub fn pp_kv_share_boundary(&self) -> Option<usize> {
+        self.kv_share_src.iter().filter_map(|o| *o).min()
+    }
+}
+
 impl KvLayerShape for Gemma4V2Config {
     fn num_layers(&self) -> usize {
         self.num_layers

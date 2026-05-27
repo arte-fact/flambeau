@@ -174,6 +174,7 @@ pub(crate) async fn serve_inner_v2(
         &cfg.device_ids,
         model_cfg.num_layers,
         cfg.layer_split.as_deref(),
+        model_cfg.kv_share_pp_boundary,
     )?;
     let topology_label: &'static str = match cfg.mesh_mode {
         MeshMode::Pp => "pp",
@@ -271,6 +272,7 @@ fn topology_from_mesh(
     device_ids: &[i32],
     num_layers: usize,
     override_split: Option<&[usize]>,
+    kv_share_boundary: Option<usize>,
 ) -> Result<flambeau_forward::Topology> {
     use flambeau_forward::Topology;
     // `flambeau_forward`'s orchestrator falls back to (start=0, end=0)
@@ -291,12 +293,40 @@ fn topology_from_mesh(
                     "--layer-split sums to {sum} but model has {num_layers} layers"
                 );
             }
-            Ok(s.to_vec())
-        } else {
-            let base = num_layers / n_groups;
-            let rem = num_layers % n_groups;
-            Ok((0..n_groups).map(|i| base + usize::from(i < rem)).collect())
+            return Ok(s.to_vec());
         }
+        if let Some(b) = kv_share_boundary {
+            if n_groups == 1 {
+                return Ok(vec![num_layers]);
+            }
+            if b == 0 || b >= num_layers {
+                bail!(
+                    "kv_share_pp_boundary={b} cannot be honored \
+                     (num_layers={num_layers}, n_groups={n_groups})"
+                );
+            }
+            // Last rank owns [b..num_layers]; remaining ranks split
+            // [0..b) evenly. Bail if the prefix can't be split (would
+            // leave an empty intermediate rank).
+            let prefix = b;
+            let prefix_groups = n_groups - 1;
+            if prefix < prefix_groups {
+                bail!(
+                    "kv_share boundary {b} too small to split across \
+                     {prefix_groups} non-tail ranks (need >= {prefix_groups})"
+                );
+            }
+            let base = prefix / prefix_groups;
+            let rem = prefix % prefix_groups;
+            let mut split: Vec<usize> = (0..prefix_groups)
+                .map(|i| base + usize::from(i < rem))
+                .collect();
+            split.push(num_layers - prefix);
+            return Ok(split);
+        }
+        let base = num_layers / n_groups;
+        let rem = num_layers % n_groups;
+        Ok((0..n_groups).map(|i| base + usize::from(i < rem)).collect())
     };
     match mesh {
         MeshMode::Pp if device_ids.len() == 1 => Ok(Topology::SingleDevice {
@@ -417,10 +447,20 @@ fn parse_v2_server_model_cfg(
         .and_then(|ti| ti.dims.first().copied())
         .map(|v| v as usize)
         .ok_or_else(|| anyhow::anyhow!("v2 cfg: token_embd.weight missing"))?;
+    let kv_share_pp_boundary = match gguf_arch {
+        #[cfg(feature = "hip")]
+        "gemma4" => {
+            let cfg = flambeau_gemma4_v2::Gemma4V2Config::from_gguf(&f)
+                .context("v2 cfg: gemma4 config parse for kv_share boundary")?;
+            cfg.pp_kv_share_boundary()
+        }
+        _ => None,
+    };
     Ok(crate::model_cfg::ServerModelCfg {
         arch: gguf_arch.to_string(),
         vocab_size,
         context_length,
         num_layers,
+        kv_share_pp_boundary,
     })
 }
