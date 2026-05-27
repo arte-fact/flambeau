@@ -752,7 +752,8 @@ impl<H: TopologyHooks, S: StageHooks> ForwardCtx for ForwardEngine<'_, H, S> {
 
     fn per_layer_embd_build_table(
         &mut self,
-        main_embd: &Tensor<F16>,
+        main_embd_host_f16: &[half::f16],
+        main_embd_scratch_dev: flambeau_core::DevicePtr,
         tok_embd_rows_raw: &[u8],
         tok_embd_dtype: flambeau_quant::GgmlDType,
         tok_embd_row_bytes: usize,
@@ -766,21 +767,31 @@ impl<H: TopologyHooks, S: StageHooks> ForwardCtx for ForwardEngine<'_, H, S> {
         rms_eps: f32,
     ) -> Result<()> {
         use flambeau_core::Stream;
-        if main_embd.n_elems < hidden {
+        if main_embd_host_f16.len() < hidden {
             anyhow::bail!(
-                "per_layer_embd_build_table: main_embd has {} elems, hidden = {hidden}",
-                main_embd.n_elems
+                "per_layer_embd_build_table: main_embd_host has {} elems, hidden = {hidden}",
+                main_embd_host_f16.len()
             );
         }
-        let n_tokens = main_embd.n_elems / hidden;
-        if n_tokens * hidden != main_embd.n_elems {
+        let n_tokens = main_embd_host_f16.len() / hidden;
+        if n_tokens * hidden != main_embd_host_f16.len() {
             anyhow::bail!(
-                "per_layer_embd_build_table: main_embd elems {} not a multiple of hidden {hidden}",
-                main_embd.n_elems
+                "per_layer_embd_build_table: main_embd_host elems {} not a multiple of hidden {hidden}",
+                main_embd_host_f16.len()
             );
         }
         let device = self.core.device;
         let stream = self.core.stream;
+
+        unsafe {
+            device.memcpy_async(
+                stream,
+                CopyDirection::HostToDevice,
+                main_embd_scratch_dev,
+                flambeau_core::DevicePtr(main_embd_host_f16.as_ptr() as usize),
+                n_tokens * hidden * 2,
+            )?;
+        }
 
         // GPU-side per_layer_model_proj @ main_embd[n_tokens, hidden]
         // → F32 [n_tokens, pe * n_layer].
@@ -791,7 +802,7 @@ impl<H: TopologyHooks, S: StageHooks> ForwardCtx for ForwardEngine<'_, H, S> {
                 self.core.reg,
                 stream,
                 model_proj_f16_dev,
-                main_embd.ptr,
+                main_embd_scratch_dev,
                 proj_matmul_f32_dev,
                 per_token,
                 hidden,
@@ -802,7 +813,7 @@ impl<H: TopologyHooks, S: StageHooks> ForwardCtx for ForwardEngine<'_, H, S> {
                 self.core.reg,
                 stream,
                 model_proj_f16_dev,
-                main_embd.ptr,
+                main_embd_scratch_dev,
                 proj_matmul_f32_dev,
                 per_token,
                 hidden,

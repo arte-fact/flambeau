@@ -11,10 +11,12 @@
 //! `[n_layer, n_tokens, pe]` so each layer's apply reads a contiguous
 //! `[n_tokens, pe]` slice.
 
-use anyhow::{bail, Result};
+use anyhow::{anyhow, bail, Context, Result};
 use flambeau_forward::ctx::ForwardCtx;
+use flambeau_quant::GgmlDType;
+use half::f16;
 
-use crate::loader::Gemma4V2Model;
+use crate::loader::{Gemma4V2Model, PerLayerEmbdGlobals};
 
 pub fn forward<C: ForwardCtx>(
     model: &Gemma4V2Model,
@@ -31,6 +33,12 @@ pub fn forward<C: ForwardCtx>(
     // assembled per-token in the order of `tokens`; the GPU matmul +
     // host finishing produces a layer-major
     // `[n_layer, n_tokens, pe]` table at `globals.table_dev`.
+    //
+    // Every PP rank does its own build: PP rank > 0's `resid` (from
+    // `ctx.embed` → `peer_recv`) is the post-prior-layers hidden, not
+    // the post-embed hidden the side-channel matmul needs. Building
+    // host-side from `globals.main_embd_token_embd_raw` keeps every
+    // rank's per_layer table coherent.
     let mut tok_rows_buf: Vec<u8> = Vec::new();
     if let Some(globals) = model.per_layer_embd_globals.as_ref() {
         tok_rows_buf.reserve_exact(n * globals.tok_embd_row_bytes);
@@ -46,8 +54,10 @@ pub fn forward<C: ForwardCtx>(
             }
             tok_rows_buf.extend_from_slice(&globals.tok_embd_raw[row_off..row_end]);
         }
+        let main_embd_host = build_main_embd_host_f16(globals, tokens)?;
         ctx.per_layer_embd_build_table(
-            &resid,
+            &main_embd_host,
+            globals.main_embd_scratch_dev,
             &tok_rows_buf,
             globals.tok_embd_dtype,
             globals.tok_embd_row_bytes,
@@ -124,4 +134,53 @@ pub fn forward<C: ForwardCtx>(
     }
     ctx.output_head(&resid, &model.lm_head, slot_ids)?;
     Ok(())
+}
+
+fn build_main_embd_host_f16(
+    globals: &PerLayerEmbdGlobals,
+    tokens: &[u32],
+) -> Result<Vec<f16>> {
+    let hidden = globals.main_embd_hidden;
+    let dtype = globals.main_embd_token_embd_dtype;
+    let raw = &globals.main_embd_token_embd_raw;
+    let bs = dtype.block_size() as usize;
+    let ts = dtype.type_size() as usize;
+    if hidden % bs != 0 {
+        bail!("token_embd hidden {hidden} % block_size {bs} != 0 for {dtype:?}");
+    }
+    let row_bytes = (hidden / bs) * ts;
+    let scale = globals.main_embd_post_scale.unwrap_or(1.0);
+    let n = tokens.len();
+    let mut out: Vec<f16> = Vec::with_capacity(n * hidden);
+    let mut row_f32 = vec![0.0f32; hidden];
+    for &t in tokens {
+        let token = t as usize;
+        let row_off = token * row_bytes;
+        let row_end = row_off + row_bytes;
+        if row_end > raw.len() {
+            bail!(
+                "token_embd row OOB at token {token}: {row_end} > {}",
+                raw.len()
+            );
+        }
+        if dtype == GgmlDType::F32 {
+            let src: &[f32] = bytemuck::cast_slice(&raw[row_off..row_end]);
+            for (i, &v) in src.iter().enumerate() {
+                row_f32[i] = v;
+            }
+        } else if dtype == GgmlDType::F16 {
+            let src: &[f16] = bytemuck::cast_slice(&raw[row_off..row_end]);
+            for (i, &v) in src.iter().enumerate() {
+                row_f32[i] = v.to_f32();
+            }
+        } else {
+            flambeau_quant::dequantize_into(dtype, &raw[row_off..row_end], &mut row_f32)
+                .map_err(|e| anyhow!("dequant token_embd row {token}: {e}"))
+                .context("token_embd host dequant")?;
+        }
+        for &v in &row_f32 {
+            out.push(f16::from_f32(v * scale));
+        }
+    }
+    Ok(out)
 }

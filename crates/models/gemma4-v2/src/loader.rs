@@ -35,6 +35,26 @@ pub struct PerLayerEmbdGlobals {
     pub tok_embd_dtype: GgmlDType,
     pub tok_embd_row_bytes: usize,
     pub proj_norm_raw: Vec<u8>,
+    /// Raw `token_embd.weight` bytes (full vocab) kept on every PP rank
+    /// so the per-token side-channel build can construct the main
+    /// embedding on host independently of rank 0. PP rank > 0 receives
+    /// the post-prior-layers hidden state via peer-copy from `embed`;
+    /// that value is NOT the post-embed hidden the side-channel matmul
+    /// needs, so every rank dequants the current tokens from this raw
+    /// blob, applies `main_embd_post_scale`, and HtoDs to
+    /// `main_embd_scratch_dev` before the
+    /// `per_layer_model_proj @ main_embd` matmul.
+    pub main_embd_token_embd_raw: Vec<u8>,
+    pub main_embd_token_embd_dtype: GgmlDType,
+    /// `hidden`, kept here for the host-side row-dequant helper.
+    pub main_embd_hidden: usize,
+    /// `Some(sqrt(hidden))` for gemma4; applied per element after
+    /// dequant.
+    pub main_embd_post_scale: Option<f32>,
+    /// Per-rank device scratch sized `PLE_MAX_TOKENS * hidden * 2`
+    /// bytes, holds the host-built F16 `[n_tokens, hidden]` main embd
+    /// that feeds the side-channel matmul.
+    pub main_embd_scratch_dev: DevicePtr,
     /// Device buffer the host build helper uploads into, sized
     /// `pe * n_layer * sizeof(f32)`.
     pub table_dev: DevicePtr,
@@ -544,6 +564,21 @@ fn load_with_shard(
             .context("read per_layer_proj_norm.weight bytes")?
             .to_vec();
 
+        let main_token_embd_info = file
+            .info("token_embd.weight")
+            .context("token_embd.weight info")?;
+        let main_embd_token_embd_raw = file
+            .tensor_raw("token_embd.weight")
+            .context("read token_embd.weight bytes")?
+            .to_vec();
+        let main_embd_token_embd_dtype = main_token_embd_info.dtype;
+
+        let main_embd_scratch_bytes = PLE_MAX_TOKENS * config.hidden * 2;
+        let main_embd_scratch_dev = device
+            .alloc(main_embd_scratch_bytes)
+            .context("alloc per_layer main_embd scratch")?;
+        allocs.push((main_embd_scratch_dev, main_embd_scratch_bytes));
+
         // Cast `per_layer_model_proj` BF16/F32 to F16 on device so the
         // per-token build matmul runs as `dense_gemv_f16_f16` (~10 us)
         // instead of a CPU BF16 dot product (~5.5 ms / token).
@@ -615,6 +650,11 @@ fn load_with_shard(
             tok_embd_dtype: tok_embd_info.dtype,
             tok_embd_row_bytes,
             proj_norm_raw,
+            main_embd_token_embd_raw,
+            main_embd_token_embd_dtype,
+            main_embd_hidden: config.hidden,
+            main_embd_post_scale: Some((config.hidden as f32).sqrt()),
+            main_embd_scratch_dev,
             table_dev,
             model_proj_f16_dev,
             proj_matmul_f32_dev,

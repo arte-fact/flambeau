@@ -130,19 +130,26 @@ pub trait ForwardCtx {
     }
 
     /// Per-token build + upload of the side-channel embedding table.
-    /// Generalised to n_tokens > 1 (prefill). `main_embd` is F16
-    /// `[n_tokens, hidden]`; `tok_embd_rows_raw` is `n_tokens *
-    /// row_bytes` consecutive token-embedding rows (caller assembles
-    /// the per-prompt-token slice in order). The matmul runs on device
-    /// as `dense_gemv_f16_f16_batched`; the resulting `[n_tokens,
-    /// pe * n_layer]` F32 is DtoH-copied and finished host-side via
+    /// Generalised to n_tokens > 1 (prefill). `main_embd_host_f16` is
+    /// the F16 row slice `[n_tokens, hidden]` (caller dequants the
+    /// current tokens from `token_embd.weight` raw bytes and applies
+    /// the post-embed scale; PP rank > 0 cannot use the device-side
+    /// embedding because it never holds the true post-embed hidden
+    /// state, so the caller builds host-side and the engine HtoDs to
+    /// `main_embd_scratch_dev` before running the matmul).
+    /// `tok_embd_rows_raw` is `n_tokens * row_bytes` consecutive
+    /// `per_layer_token_embd` rows. The matmul runs on device as
+    /// `dense_gemv_f16_f16_batched`; the resulting
+    /// `[n_tokens, pe * n_layer]` F32 is DtoH-copied and finished
+    /// host-side via
     /// [`crate::per_layer_embd::build_inp_per_layer_table_with_proj`]
     /// (Q5_K dequant + rmsnorm + add + scale), producing a layer-major
     /// `[n_layer, n_tokens, pe]` table HtoD-uploaded to `table_dev`.
     #[allow(clippy::too_many_arguments)]
     fn per_layer_embd_build_table(
         &mut self,
-        main_embd: &Tensor<F16>,
+        main_embd_host_f16: &[half::f16],
+        main_embd_scratch_dev: DevicePtr,
         tok_embd_rows_raw: &[u8],
         tok_embd_dtype: flambeau_quant::GgmlDType,
         tok_embd_row_bytes: usize,
@@ -156,7 +163,8 @@ pub trait ForwardCtx {
         rms_eps: f32,
     ) -> Result<()> {
         let _ = (
-            main_embd,
+            main_embd_host_f16,
+            main_embd_scratch_dev,
             tok_embd_rows_raw,
             tok_embd_dtype,
             tok_embd_row_bytes,
