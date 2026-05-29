@@ -48,6 +48,8 @@ pub trait V2BatchableSession: Send {
 
     fn reset_kv_slot(&mut self, slot_id: usize) -> Result<()>;
 
+    fn release_paged_slot(&mut self, slot_id: usize) -> Result<()>;
+
     fn dispose_in_place(&mut self) -> Result<()>;
 }
 
@@ -82,6 +84,10 @@ impl<A: Arch> V2BatchableSession for Session<A> {
 
     fn reset_kv_slot(&mut self, slot_id: usize) -> Result<()> {
         Session::reset_kv_slot(self, slot_id)
+    }
+
+    fn release_paged_slot(&mut self, slot_id: usize) -> Result<()> {
+        Session::release_paged_slot(self, slot_id)
     }
 
     fn dispose_in_place(&mut self) -> Result<()> {
@@ -185,6 +191,12 @@ impl Model for V2Model {
     }
     fn chat_stop_markers(&self) -> &'static [&'static str] {
         self.chat_stops
+    }
+    fn release_paged_slot(&self, slot: usize) {
+        let mut shared = self.shared.blocking_lock();
+        if let Err(e) = shared.release_paged_slot(slot) {
+            tracing::warn!("V2Model::release_paged_slot(slot={slot}) failed: {e:#}");
+        }
     }
 }
 

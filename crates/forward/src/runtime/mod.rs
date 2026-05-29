@@ -263,6 +263,22 @@ impl<A: Arch> Session<A> {
         Ok(())
     }
 
+    /// Recycle every page held by `slot_id` across every layer's
+    /// `PagePool` back into the free list. No-op on non-paged ranks.
+    /// Called by the server when a slot is released.
+    pub fn release_paged_slot(&mut self, slot_id: usize) -> Result<()> {
+        let rxs: Vec<_> = self
+            .handles
+            .iter()
+            .map(|h| h.send_release_paged_slot(slot_id))
+            .collect::<Result<_>>()?;
+        for rx in rxs {
+            rx.recv()
+                .map_err(|e| anyhow!("release_paged_slot reply channel closed: {e}"))??;
+        }
+        Ok(())
+    }
+
     /// Single-token decode into a specific KV/GDN slot. Mirrors
     /// `forward_one_token_logits` but routes the write to `slot_id`.
     pub fn forward_one_token_logits_slot(

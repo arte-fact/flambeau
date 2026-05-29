@@ -423,6 +423,7 @@ impl ServerState {
     /// **P2.9b-i2-B** — release a request-lifetime slot claim. Pair
     /// with [`claim_slot_blocking`].
     pub fn release_slot(&self, idx: usize) {
+        self.model.release_paged_slot(idx);
         self.slot_in_use[idx].store(false, std::sync::atomic::Ordering::Release);
     }
 

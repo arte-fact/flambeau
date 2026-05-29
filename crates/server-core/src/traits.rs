@@ -71,6 +71,16 @@ pub trait Model: Send + Sync + 'static {
         &[]
     }
 
+    /// Release every page held by `slot` back to each layer's
+    /// per-layer page pool. Called by the server when a slot is
+    /// released (request finished, error, or shutdown) so the pool
+    /// recycles pages for the next request.
+    ///
+    /// Default no-op — only models running on the PagedAttention
+    /// path (PagedKvCache configured in their ScratchPool) need to
+    /// override.
+    fn release_paged_slot(&self, _slot: usize) {}
+
     /// Batched-decode entry point. Default handles N=1 only by
     /// delegating to [`Session::decode_one_logits`] — multi-slot archs
     /// (qwen3-moe PP/TP/Hybrid) override this method.

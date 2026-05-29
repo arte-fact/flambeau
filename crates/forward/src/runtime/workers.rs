@@ -113,6 +113,10 @@ enum Command {
         slot_id: usize,
         reply: SyncSender<Result<()>>,
     },
+    ReleasePagedSlot {
+        slot_id: usize,
+        reply: SyncSender<Result<()>>,
+    },
     Shutdown,
 }
 
@@ -173,6 +177,12 @@ impl<A: Arch> WorkerHandle<A> {
                     Command::ResetKvSlot { slot_id, reply } => {
                         let res = state.pool.reset_gdn_state_slot(slot_id, &state.device);
                         let _ = reply.send(res);
+                    }
+                    Command::ReleasePagedSlot { slot_id, reply } => {
+                        for pool in state.pool.page_pools.iter_mut() {
+                            pool.release_slot(slot_id);
+                        }
+                        let _ = reply.send(Ok(()));
                     }
                     Command::Shutdown => break,
                 }
@@ -235,6 +245,21 @@ impl<A: Arch> WorkerHandle<A> {
         let (reply_tx, reply_rx) = mpsc::sync_channel::<Result<()>>(1);
         self.cmd_tx
             .send(Command::ResetKvSlot {
+                slot_id,
+                reply: reply_tx,
+            })
+            .map_err(|e| anyhow::anyhow!("worker channel closed: {e}"))?;
+        Ok(reply_rx)
+    }
+
+    /// Queue a ReleasePagedSlot command. Each worker calls
+    /// `release_slot(slot_id)` on every layer's `PagePool`, recycling
+    /// the slot's held pages back into the free list. No-op on ranks
+    /// whose `page_pools` is empty (non-paged path).
+    pub fn send_release_paged_slot(&self, slot_id: usize) -> Result<Receiver<Result<()>>> {
+        let (reply_tx, reply_rx) = mpsc::sync_channel::<Result<()>>(1);
+        self.cmd_tx
+            .send(Command::ReleasePagedSlot {
                 slot_id,
                 reply: reply_tx,
             })
