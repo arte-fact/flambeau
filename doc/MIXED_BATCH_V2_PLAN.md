@@ -104,19 +104,29 @@ prefill for one slot, rows `[K..K+N)` are decode for N distinct slots.
   method exists on only one topology). Pp is simplest, Tp adds AR
   placement, Hybrid adds stage handoff.
 
-**Slice K1a** — add a new ctx method
-`standard_attn_mixed(input, weights, layer_idx, positions, slot_ids,
-prefill_rows: usize, next_norm)` to the trait. Default impl bails.
-Implement on Pp first against a synthetic test. Use Qwen3.5-9B (dense,
-no GDN) so K2's GDN split doesn't block. ~500-700 LOC across
-`forward/src/core/composites/`.
+**Slice K1a status (2026-05-29): SHIPPED — including K1b+K1c.**
+`crates/forward/src/core/composites/standard_attn_mixed.rs`
+(`standard_attn_mixed_local`) + ctx trait method + `ForwardEngine`
+impl. Because the engine impl is generic over
+`<H: TopologyHooks, S: StageHooks>`, the same composite serves
+Pp/Tp/Hybrid in one shot — the AR hook calls
+(`hooks.ar_residual_f16` / `hooks.ar_sum_f32`) are unchanged from
+`standard_attn`, and topology choice is at the type-parameter
+level. K1b and K1c were redundant slice splits on the v1 architecture.
 
-**Slice K1b** — Tp impl. Adds the cross-rank AR after output proj
-(unchanged from standard_attn).
+K1a bails (future slices):
+- Paged KV (Phase K-paged)
+- Shared-KV layers (gemma 4n)
+- V unit-norm fusion (gemma4)
+- `attn_q_gated` (gemma4)
+- `post_attn_norm` (gemma4)
+- Sliding-window attention
+- V-from-K (gemma4 fused)
 
-**Slice K1c** — Hybrid impl. Adds the stage-handoff path. Most
-involved because the mixed batch can span PP boundaries; the stage
-handoff sync needs to carry K+N rows.
+Parity test: `crates/forward/tests/synth_dense_mixed.rs`. K=4/N=3
+on a synthetic dense config. Compares mixed (one call) vs reference
+(two `standard_attn` calls — prefill_shape + batched-decode).
+Hybrid abs+rel tolerance (abs_tol=0.5, rel_tol=1e-2). **PASS.**
 
 ### Phase K2 — `gdn_layer_mixed` on Pp/Tp/Hybrid (multi-session)
 
