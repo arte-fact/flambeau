@@ -47,6 +47,7 @@ pub fn launch<A: Arch>(
     ctx_cap: Option<usize>,
     prefill_ubatch: usize,
     max_slots: usize,
+    paged_kv_pages: Option<usize>,
 ) -> Result<Vec<WorkerHandle<A>>> {
     let file = Arc::new(file);
     match topology {
@@ -58,11 +59,12 @@ pub fn launch<A: Arch>(
                 ctx_cap,
                 prefill_ubatch,
                 max_slots,
+                paged_kv_pages,
             )?;
             Ok(vec![h])
         }
         Topology::Tp { devices } => {
-            launch_tp::<A>(devices, file, ctx_cap, prefill_ubatch, max_slots)
+            launch_tp::<A>(devices, file, ctx_cap, prefill_ubatch, max_slots, paged_kv_pages)
         }
         Topology::Pp {
             devices,
@@ -74,6 +76,7 @@ pub fn launch<A: Arch>(
             ctx_cap,
             prefill_ubatch,
             max_slots,
+            paged_kv_pages,
         ),
         Topology::Hybrid {
             stages,
@@ -85,6 +88,7 @@ pub fn launch<A: Arch>(
             ctx_cap,
             prefill_ubatch,
             max_slots,
+            paged_kv_pages,
         ),
     }
 }
@@ -95,6 +99,7 @@ fn launch_tp<A: Arch>(
     ctx_cap: Option<usize>,
     prefill_ubatch: usize,
     max_slots: usize,
+    paged_kv_pages: Option<usize>,
 ) -> Result<Vec<WorkerHandle<A>>> {
     let n = devices.len();
     let ar = Arc::new(ArCoordinator::new(n));
@@ -115,6 +120,7 @@ fn launch_tp<A: Arch>(
                 ctx_cap,
                 prefill_ubatch,
                 max_slots,
+                paged_kv_pages,
             )
             .with_context(|| format!("TP rank {rank} on hip:{dev}"))?,
         );
@@ -129,6 +135,7 @@ fn launch_pp<A: Arch>(
     ctx_cap: Option<usize>,
     prefill_ubatch: usize,
     max_slots: usize,
+    paged_kv_pages: Option<usize>,
 ) -> Result<Vec<WorkerHandle<A>>> {
     let n = devices.len();
     let split = match layer_split {
@@ -196,6 +203,7 @@ fn launch_pp<A: Arch>(
                 ctx_cap,
                 prefill_ubatch,
                 max_slots,
+                paged_kv_pages,
             )
             .with_context(|| format!("PP rank {rank} on hip:{dev}"))?,
         );
@@ -210,6 +218,7 @@ fn launch_hybrid<A: Arch>(
     ctx_cap: Option<usize>,
     prefill_ubatch: usize,
     max_slots: usize,
+    paged_kv_pages: Option<usize>,
 ) -> Result<Vec<WorkerHandle<A>>> {
     let n_stages = stages.len();
     let total_ranks: usize = stages.iter().map(|s| s.len()).sum();
@@ -263,6 +272,7 @@ fn launch_hybrid<A: Arch>(
                     ctx_cap,
                     prefill_ubatch,
                     max_slots,
+                    paged_kv_pages,
                 )
                 .with_context(|| {
                     format!("Hybrid stage {stage_idx} rank {rank_in_stage} on hip:{dev}")

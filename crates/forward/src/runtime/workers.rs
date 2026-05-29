@@ -137,13 +137,14 @@ impl<A: Arch> WorkerHandle<A> {
         ctx_cap: Option<usize>,
         prefill_ubatch: usize,
         max_slots: usize,
+        paged_kv_pages: Option<usize>,
     ) -> Result<Self> {
         let (cmd_tx, cmd_rx) = mpsc::channel::<Command>();
         let (ready_tx, ready_rx) = mpsc::sync_channel::<Result<()>>(1);
 
         let thread = std::thread::spawn(move || {
             let (mut state, init_err) =
-                match init_rank::<A>(device_id, &role, &file, ctx_cap, prefill_ubatch, max_slots) {
+                match init_rank::<A>(device_id, &role, &file, ctx_cap, prefill_ubatch, max_slots, paged_kv_pages) {
                     Ok(s) => (Some(s), None),
                     Err(e) => (None, Some(e)),
                 };
@@ -295,12 +296,13 @@ fn init_rank<A: Arch>(
     ctx_cap: Option<usize>,
     prefill_ubatch: usize,
     max_slots: usize,
+    paged_kv_pages: Option<usize>,
 ) -> Result<RankState<A>> {
     let device = HipDevice::new(device_id).context("HipDevice::new")?;
     device.bind().context("device.bind")?;
     let shard = role.shard();
     let model = A::load(file, &device, shard, role.layer_slice(), ctx_cap).context("Arch::load")?;
-    let mut cfg = A::scratch_config(&model, shard, prefill_ubatch, max_slots);
+    let mut cfg = A::scratch_config(&model, shard, prefill_ubatch, max_slots, paged_kv_pages);
     if let Some((ls, le)) = role.layer_slice() {
         cfg.num_layers = le - ls;
         // KV cache slots are per-owned-layer; slice the per-layer

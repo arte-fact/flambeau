@@ -60,8 +60,9 @@ impl Arch for Qwen35MoeV2 {
         shard: ShardMode,
         prefill_ubatch: usize,
         max_slots: usize,
+        paged_kv_pages: Option<usize>,
     ) -> ScratchConfig {
-        scratch_config_for(&model.config, shard, prefill_ubatch, max_slots)
+        scratch_config_for(&model.config, shard, prefill_ubatch, max_slots, paged_kv_pages)
     }
 
     fn dispose(model: &mut Self::Model, device: &HipDevice) -> Result<()> {

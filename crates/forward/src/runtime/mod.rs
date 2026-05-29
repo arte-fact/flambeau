@@ -103,6 +103,7 @@ pub trait Arch: Send + Sync + 'static {
         shard: ShardMode,
         prefill_ubatch: usize,
         max_slots: usize,
+        paged_kv_pages: Option<usize>,
     ) -> ScratchConfig;
 
     /// Per-layer attention kind (FullAttn / Gdn) if the arch is
@@ -133,6 +134,7 @@ impl<A: Arch> Session<A> {
         ctx_cap: Option<usize>,
         prefill_ubatch: usize,
         max_slots: usize,
+        paged_kv_pages: Option<usize>,
     ) -> Result<Self> {
         if prefill_ubatch == 0 {
             anyhow::bail!("Session::new: prefill_ubatch must be > 0");
@@ -141,7 +143,7 @@ impl<A: Arch> Session<A> {
             anyhow::bail!("Session::new: max_slots must be > 0");
         }
         let handles =
-            orchestrate::launch::<A>(file, &topology, ctx_cap, prefill_ubatch, max_slots)?;
+            orchestrate::launch::<A>(file, &topology, ctx_cap, prefill_ubatch, max_slots, paged_kv_pages)?;
         Ok(Self {
             topology,
             handles,

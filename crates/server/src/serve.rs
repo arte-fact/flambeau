@@ -62,6 +62,14 @@ pub struct ServeConfig {
     /// Prefill chunk size in tokens. Default 512 is the production sweet
     /// spot across pp/tp/hybrid topologies; tune for short-prompt TTFT.
     pub prefill_ubatch: usize,
+    /// PagedAttention activation. `None` (default) uses the legacy
+    /// contiguous per-slot KV slab. `Some(N)` for `N > 1` builds the
+    /// page pool with `N` pages per layer — pair with a high
+    /// `inflight_slots` to pack concurrent requests into the same
+    /// VRAM. `Some(1)` clamps to `max_slots * max_pages_per_slot`
+    /// (correctness only, no VRAM win). Activation also unlocks the
+    /// paged decode + prefill attention kernels in `standard_attn`.
+    pub paged_kv_pages: Option<usize>,
     /// #232 admission-control queue depth beyond the inflight pool. 0
     /// disables (legacy unbounded queue). Default 16.
     pub max_queue_depth: usize,
@@ -212,6 +220,7 @@ pub(crate) async fn serve_inner_v2(
         cfg.ctx_cap,
         prefill_ubatch,
         inflight_slots,
+        cfg.paged_kv_pages,
     )
     .with_context(|| format!("v2 shared session ({gguf_arch})"))?;
     let shared: crate::v2_handle::SharedV2Session = Arc::new(Mutex::new(shared_session));
@@ -374,6 +383,7 @@ fn create_v2_shared_session(
     ctx_cap: Option<usize>,
     prefill_ubatch: usize,
     max_slots: usize,
+    paged_kv_pages: Option<usize>,
 ) -> Result<Box<dyn crate::v2_handle::V2BatchableSession>> {
     use flambeau_forward::Session;
     match gguf_arch {
@@ -384,6 +394,7 @@ fn create_v2_shared_session(
                 ctx_cap,
                 prefill_ubatch,
                 max_slots,
+                paged_kv_pages,
             )?;
             Ok(Box::new(s))
         }
@@ -394,6 +405,7 @@ fn create_v2_shared_session(
                 ctx_cap,
                 prefill_ubatch,
                 max_slots,
+                paged_kv_pages,
             )?;
             Ok(Box::new(s))
         }
@@ -404,6 +416,7 @@ fn create_v2_shared_session(
                 ctx_cap,
                 prefill_ubatch,
                 max_slots,
+                paged_kv_pages,
             )?;
             Ok(Box::new(s))
         }

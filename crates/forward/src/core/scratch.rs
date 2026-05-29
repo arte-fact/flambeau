@@ -179,27 +179,24 @@ pub fn scratch_config_for<S: ScratchShape + ?Sized>(
     shard: ShardMode,
     prefill_ubatch: usize,
     max_slots: usize,
+    paged_kv_pages: Option<usize>,
 ) -> ScratchConfig {
     let n_ranks = shard.n_ranks();
     let per_layer_kv = per_layer_kv_widths(shape, n_ranks);
     let kv_width = per_layer_kv.iter().copied().max().unwrap_or(0);
     let moe = shape.moe_per_rank(n_ranks);
-    // Env-gated PagedAttention activation. `FLAMBEAU_PAGED_KV=1`
-    // turns on the paged path with `n_pages` clamped to the
-    // `max_slots * max_pages_per_slot` floor (correctness-only,
-    // no VRAM win). `FLAMBEAU_PAGED_KV=<N>` (N > 1) sizes
-    // `n_pages = N` directly — this is the lever for the
-    // structural PagedAttention win: a workload whose average
-    // per-slot page usage is well below `max_pages_per_slot`
-    // can pack many more `max_slots` into the same VRAM as the
-    // contiguous slab. Caller sets `--inflight-slots` high
-    // (the "more concurrent requests" dimension) and
-    // `FLAMBEAU_PAGED_KV=<n_pages>` low (the per-layer page
-    // budget). PagePool::acquire_for returns `None` once the
-    // budget is exhausted, at which point the scheduler must
-    // evict (or reject).
-    let paged_kv = std::env::var("FLAMBEAU_PAGED_KV").ok().and_then(|s| {
-        let parsed = s.parse::<usize>().ok()?;
+    // PagedAttention activation. `paged_kv_pages = Some(1)` clamps
+    // `n_pages` to the `max_slots * max_pages_per_slot` floor
+    // (correctness-only, no VRAM win). `paged_kv_pages = Some(N)`
+    // for `N > 1` sizes `n_pages = N` directly — the structural
+    // lever: a workload whose average per-slot page usage is well
+    // below `max_pages_per_slot` packs many more `max_slots` into
+    // the same VRAM as the contiguous slab. Caller sets
+    // `--inflight-slots` high (concurrent-requests dimension) and
+    // `--paged-kv <n_pages>` to bound the per-layer page budget.
+    // `PagePool::acquire_for` returns `None` once the budget is
+    // exhausted, at which point the scheduler must evict or reject.
+    let paged_kv = paged_kv_pages.and_then(|parsed| {
         if parsed == 0 {
             return None;
         }

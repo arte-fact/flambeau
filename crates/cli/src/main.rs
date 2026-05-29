@@ -135,6 +135,15 @@ enum Cmd {
             default_value_t = 512
         )]
         prefill_ubatch: usize,
+        /// Activate PagedAttention with `N` pages per layer (page size
+        /// fixed at 16 tokens). Default off (contiguous per-slot KV
+        /// slab). Set `N` to the per-layer page budget; pair with a
+        /// high `--inflight-slots` to pack more concurrent requests
+        /// into the same VRAM. `N=1` clamps to the
+        /// `max_slots * max_pages_per_slot` floor (correctness only,
+        /// no VRAM win).
+        #[arg(long = "paged-kv")]
+        paged_kv: Option<usize>,
         /// Admission-control queue depth beyond `inflight_slots` before
         /// returning 503 + Retry-After. 0 disables (legacy).
         #[arg(
@@ -292,6 +301,7 @@ fn main() -> Result<()> {
             embedding_device,
             inflight_slots,
             prefill_ubatch,
+            paged_kv,
             max_queue_depth,
             decode_batch_window_us,
             ctx_cap,
@@ -314,6 +324,7 @@ fn main() -> Result<()> {
             embedding_device,
             inflight_slots,
             prefill_ubatch,
+            paged_kv,
             max_queue_depth,
             decode_batch_window_us,
             ctx_cap,
@@ -346,6 +357,7 @@ struct ServeArgs {
     embedding_device: Option<i32>,
     inflight_slots: usize,
     prefill_ubatch: usize,
+    paged_kv: Option<usize>,
     max_queue_depth: usize,
     decode_batch_window_us: u64,
     ctx_cap: Option<usize>,
@@ -395,6 +407,7 @@ fn serve_cmd(args: ServeArgs) -> Result<()> {
         embedding_device,
         inflight_slots,
         prefill_ubatch,
+        paged_kv,
         max_queue_depth,
         decode_batch_window_us,
         ctx_cap,
@@ -500,6 +513,7 @@ fn serve_cmd(args: ServeArgs) -> Result<()> {
         embedding_device_id: resolved_embedding_device,
         inflight_slots,
         prefill_ubatch,
+        paged_kv_pages: paged_kv,
         max_queue_depth,
         decode_batch_window_us,
         ctx_cap,
