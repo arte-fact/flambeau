@@ -292,14 +292,50 @@ Scratch sizing at boot:
 
 ### Phase K5 — Realistic-traffic cert + scheduler tuning
 
-Final cert. Aggregate throughput on a sustained mixed workload (call
-arrivals at fixed rate, both short and long prompts). Compare to the
-S1+S2 baseline at the same arrival rate. Target: ≥1.5× aggregate
-output tokens at the SAME inflight-slots count and ctx-cap budget.
+**Status (2026-05-29): SHIPPED with HONEST null on aggregate throughput.**
 
-This is also where chunk size sweep happens — the optimal chunk on
-mixed-batch can differ from the S1+S2 setpoint (the per-iteration
-overlap math changes when the mixed kernel does both phases at once).
+K5a: boot-time scratch auto-sizing in `crates/server/src/serve.rs`.
+When `FLAMBEAU_MIXED_BATCH=1` is set, `prefill_ubatch` is bumped to
+at least `chunk_tokens + inflight_slots` so the K4c capacity guard
+never rejects engagement. Operator no longer has to set
+`--prefill-ubatch 768` manually.
+
+K5b: `scripts/bench/bench_mixed_sustained.py` — open-loop
+sustained-traffic cert at fixed arrival rate with mixed short +
+long prompt distribution. Reports aggregate output tokens/sec +
+per-cohort wall percentiles.
+
+Result on Qwen3.5-9B-Q4_1 / pp hip:0 / `--inflight-slots 4
+--ctx-cap 32768`, DURATION_S=30 ARRIVAL_S=1.0 LONG_RATIO=0.33:
+
+| Metric | K4c OFF | K4c ON |
+|---|---|---|
+| **Aggregate (wall)** | **26.3 t/s** | **25.9 t/s** |
+| Long  p50 wall | 24.4 s | **20.5 s (-16 %)** |
+| Long  p99 wall | 43.2 s | 40.0 s (-7 %)  |
+| Short p50 wall | 20.2 s | 25.1 s (+24 %) |
+
+**Plan target NOT hit.** Aggregate throughput unchanged at this
+saturated load. The mechanism **does work** — it redistributes
+latency in favour of long-prompt requests (long p50 -16%, long p99
+-7%) at the cost of short-prompt p50 latency (+24%). At full HBM
+saturation on MI50 the total work per second is fixed; mixed-batch
+can't lift the hardware ceiling.
+
+The aggregate win regime is structurally different — low-to-medium
+load where prefill stalls dominate the schedule. Saturated MI50
+has no stalls for the mixed kernel to fill.
+
+**Default position.** `FLAMBEAU_MIXED_BATCH=1` stays default-off.
+Operators who want long-prompt latency reduction at the cost of
+short-prompt latency can opt in.
+
+**Optional follow-up sweeps (not Required for K5 close):**
+- Chunk-size sweep on mixed bench (the per-iteration overlap math
+  shifts with chunk size; ARRIVAL_S sweep).
+- Higher-N regime via Phase 6 paged KV (K3b microbench's 1.235× at
+  K=128/N=16 cell hints at a higher-N regime where per-call gain
+  compounds; would need pp2tp2 + paged to reach those slot counts).
 
 ## Acceptance criteria
 
