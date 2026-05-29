@@ -351,12 +351,24 @@ Bench (max_tokens=128 nostream, Qwen3.6-27B-Q4_0 pp2tp2, median of
   mutex re-acquire per 512-token prompt).
 
 What's left (deferred — touches request lifecycle):
-- **Slice S3** — TTFT-measuring mixed bench that engages the
-  scheduler path. Streaming (`bench_mixed_chat.py` with `stream:True`)
-  measures TTFT but bypasses the scheduler via
-  `decode_loop.rs:781 dispatch_decode_one`. Either route streaming
-  through the scheduler, OR add a `/v1/chat/completions?stream=false`
-  variant that emits inter-token timestamps in the response body.
+- **Slice S3 status (2026-05-29): SHIPPED via measurement.**
+  `scripts/bench/bench_mixed_chat_streaming.py` captures TTFT from
+  the first SSE content delta + inter-token p50/p99. After S2 the
+  streaming handler also chunks, so streaming TTFT *is* what we
+  want to measure (no need to re-route through scheduler). On
+  Qwen3.6-27B-Q4_0 pp2tp2 hip:0,2,1,3, 2 long + 2 short streaming
+  completions, 500 ms cohort stagger, max_tokens=64:
+
+  | Server `FLAMBEAU_PREFILL_CHUNK_TOKENS` | Long TTFT (p50) | Short TTFT (p50) |
+  |---|---|---|
+  | 512 (S2 ON) | 8306 ms | **5766 ms** |
+  | 999999 (single-shot) | 6032 ms | 8271 ms |
+
+  Short TTFT drops ~2500 ms at ~1500-2500 ms cost to long TTFT.
+  Total wall: 15.04 vs 15.19 s — unchanged. The Sarathi trade
+  redistributes prefill latency in favour of the interactive
+  request without changing aggregate compute.
+
 - **Kernel half** (`forward_decode_mixed_hybrid` from
   `project_lever1_mixed_batch_v1`) is on an unmerged track in this
   branch — for the Sarathi paper's 2.6× wins on Mistral-class
