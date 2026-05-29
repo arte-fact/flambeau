@@ -241,6 +241,29 @@ pub trait Ops {
         kv_width: usize,
     ) -> Result<()>;
 
+    /// PagedAttention prefill attention. Same flash-attn-v2 body as
+    /// `attention_prefill_f16`; per-`t` K/V row resolved via
+    /// `block_table[t / page_size] * page_size + (t & (page_size - 1))`.
+    /// `page_size` must be a power of two.
+    #[allow(clippy::too_many_arguments)]
+    fn attention_prefill_f16_paged(
+        &self,
+        q: DevicePtr,
+        k_pool: DevicePtr,
+        v_pool: DevicePtr,
+        block_table: DevicePtr,
+        out: DevicePtr,
+        n_q_tokens: usize,
+        n_heads_q: usize,
+        n_heads_kv: usize,
+        head_dim: usize,
+        n_k_tokens: usize,
+        q_offset: usize,
+        page_size: usize,
+        scale: f32,
+        window_size: i32,
+    ) -> Result<()>;
+
     /// PagedAttention prefill K + V append. Writes L K + V rows for
     /// a single slot's prefill into the slot's paged KV cache, walking
     /// the slot's row of the block table per token. The host must

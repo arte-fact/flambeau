@@ -372,6 +372,87 @@ pub fn kv_append_f16_paged_slots(
     Ok(())
 }
 
+/// PagedAttention prefill attention sibling of
+/// `attention_prefill_f16`. Same flash-attn-v2 online-softmax body;
+/// per-`t` K/V row resolved via
+/// `block_table[t / page_size] * page_size + (t & (page_size - 1))`.
+/// `page_size` MUST be a power of two so the divide and modulo
+/// compile to shifts and AND masks.
+///
+/// Identity-mapped `block_table` (`block_table[p] = p`) with
+/// `n_pages * page_size >= n_k_tokens` makes the output bit-identical
+/// to `attention_prefill_f16` running on the same K/V data — the
+/// regression guard the paired parity test relies on.
+///
+/// # Safety
+/// Mirrors `attention_decode_f16_paged`'s safety contract for K/V
+/// pool sizes and block-table extent.
+#[allow(clippy::too_many_arguments)]
+pub fn attention_prefill_f16_paged(
+    reg: &OpsRegistry,
+    stream: &HipStream,
+    q: DevicePtr,
+    k_pool: DevicePtr,
+    v_pool: DevicePtr,
+    block_table: DevicePtr,
+    out: DevicePtr,
+    n_q_tokens: usize,
+    n_heads_q: usize,
+    n_heads_kv: usize,
+    head_dim: usize,
+    n_k_tokens: usize,
+    q_offset: usize,
+    page_size: usize,
+    scale: f32,
+    window_size: i32,
+) -> Result<()> {
+    assert!(
+        head_dim == 64 || head_dim == 128 || head_dim == 256 || head_dim == 512,
+        "attention_prefill_f16_paged: head_dim {head_dim} not supported (expected 64, 128, 256, or 512)"
+    );
+    assert!(
+        page_size > 0 && page_size.is_power_of_two(),
+        "attention_prefill_f16_paged: page_size {page_size} must be a positive power of two"
+    );
+    let module = reg.expect_module("attention_prefill_f16_paged")?;
+    let kernel = module.kernel("flambeau_attention_prefill_f16_paged")?;
+
+    let n_q_i = n_q_tokens as i32;
+    let n_heads_q_i = n_heads_q as i32;
+    let n_heads_kv_i = n_heads_kv as i32;
+    let head_dim_i = head_dim as i32;
+    let n_k_i = n_k_tokens as i32;
+    let q_off_i = q_offset as i32;
+    let page_size_i = page_size as i32;
+    let q_ptr: u64 = q.as_usize() as u64;
+    let k_ptr: u64 = k_pool.as_usize() as u64;
+    let v_ptr: u64 = v_pool.as_usize() as u64;
+    let bt_ptr: u64 = block_table.as_usize() as u64;
+    let o_ptr: u64 = out.as_usize() as u64;
+    let mut args = KernelArgs::new();
+    args.push(&q_ptr);
+    args.push(&k_ptr);
+    args.push(&v_ptr);
+    args.push(&bt_ptr);
+    args.push(&o_ptr);
+    args.push(&n_q_i);
+    args.push(&n_heads_q_i);
+    args.push(&n_heads_kv_i);
+    args.push(&head_dim_i);
+    args.push(&n_k_i);
+    args.push(&q_off_i);
+    args.push(&page_size_i);
+    args.push(&scale);
+    args.push(&window_size);
+    let cfg = LaunchCfg {
+        grid: (n_q_tokens as u32, n_heads_q as u32, 1),
+        block: (head_dim as u32, 1, 1),
+        shared_bytes: 0,
+    };
+    unsafe { kernel.launch(stream, cfg, args)? };
+    Ok(())
+}
+
 /// PagedAttention sibling of `kv_append_f16` for prefill. Writes L
 /// K + V rows for a single slot's prefill into the slot's paged KV
 /// cache, walking the slot's row of the block table per token.

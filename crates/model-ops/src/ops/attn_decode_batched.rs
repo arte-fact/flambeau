@@ -106,6 +106,64 @@ pub fn attn_decode_f16_batched(
     )
 }
 
+/// PagedAttention prefill attention. Same flash-attn-v2 body as
+/// `attn_prefill_f16`; per-`t` K/V row resolved via
+/// `block_table[t / page_size] * page_size + (t & (page_size - 1))`.
+/// `page_size` must be a power of two.
+#[allow(clippy::too_many_arguments)]
+pub fn attn_prefill_f16_paged(
+    q: &Tensor<F16>,
+    k_pool: flambeau_core::DevicePtr,
+    v_pool: flambeau_core::DevicePtr,
+    block_table: flambeau_core::DevicePtr,
+    out: &mut Tensor<F16>,
+    n_q_tokens: usize,
+    n_heads_q: usize,
+    n_heads_kv: usize,
+    head_dim: usize,
+    n_k_tokens: usize,
+    q_offset: usize,
+    page_size: usize,
+    scale: f32,
+    window_size: i32,
+    ops: &HipOps<'_>,
+) -> Result<()> {
+    if !matches!(head_dim, 64 | 128 | 256 | 512) {
+        bail!("attn_prefill_f16_paged: head_dim {head_dim} not in {{64, 128, 256, 512}}");
+    }
+    if !page_size.is_power_of_two() {
+        bail!("attn_prefill_f16_paged: page_size {page_size} must be a power of two");
+    }
+    if n_heads_q == 0 || n_heads_kv == 0 || n_heads_q % n_heads_kv != 0 {
+        bail!("attn_prefill_f16_paged: head counts invalid (q={n_heads_q}, kv={n_heads_kv})");
+    }
+    let need = n_q_tokens * n_heads_q * head_dim;
+    if q.n_elems < need || out.n_elems < need {
+        bail!(
+            "attn_prefill_f16_paged: q/out must have >= {need} F16 elems \
+             (got q={}, out={})",
+            q.n_elems,
+            out.n_elems,
+        );
+    }
+    ops.attention_prefill_f16_paged(
+        q.ptr,
+        k_pool,
+        v_pool,
+        block_table,
+        out.ptr,
+        n_q_tokens,
+        n_heads_q,
+        n_heads_kv,
+        head_dim,
+        n_k_tokens,
+        q_offset,
+        page_size,
+        scale,
+        window_size,
+    )
+}
+
 /// PagedAttention prefill K + V append. Writes L K + V rows for a
 /// single slot's prefill into the slot's paged KV cache, walking the
 /// slot's row of the block table per token.

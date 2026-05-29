@@ -464,54 +464,42 @@ pub fn standard_attn_local<H: TopologyHooks>(
             )?;
         }
 
-        // Per-token paged attention. Reuses `attn_slot_n_kv` device
-        // scratch (`[max_slots] i32`) for the single-slot length each
-        // iteration. `attention_decode_f16_paged` accepts n_slots ∈
-        // [1, 32] so an N=1 dispatch is well-defined.
-        if state.pool.attn_slot_n_kv.as_usize() == 0 {
-            bail!(
-                "standard_attn paged prefill: requires max_slots > 1 in ScratchConfig \
-                 (need attn_slot_n_kv scratch for the per-token n_kv array; got max_slots={})",
-                state.pool.config.max_slots
-            );
-        }
-        let head_dim_bytes = weights.head_dim * 2;
-        let row_bytes = weights.n_heads * head_dim_bytes;
-        for t in 0..n {
-            let n_kv_value: [i32; 1] = [(start_position + t + 1) as i32];
-            // SAFETY: attn_slot_n_kv owns ≥ 4 bytes (max_slots > 1).
-            unsafe {
-                state.device.memcpy_async(
-                    state.stream,
-                    CopyDirection::HostToDevice,
-                    state.pool.attn_slot_n_kv,
-                    DevicePtr(n_kv_value.as_ptr() as usize),
-                    std::mem::size_of::<i32>(),
-                )?;
-            }
-            let q_t = state.pool.q_f16.offset_bytes(t * row_bytes);
-            let out_t = state.pool.attn_out_f16.offset_bytes(t * row_bytes);
-            let q_view =
-                unsafe { Tensor::<F16>::from_raw(q_t, weights.n_heads * weights.head_dim) };
-            let mut out_view =
-                unsafe { Tensor::<F16>::from_raw(out_t, weights.n_heads * weights.head_dim) };
-            flambeau_model_ops::attn_decode_f16_paged(
-                &q_view,
-                paged_cache.k_pool,
-                paged_cache.v_pool,
-                slot_block_table_ptr,
-                &mut out_view,
-                state.pool.attn_slot_n_kv,
-                weights.n_heads,
-                weights.n_kv_heads,
-                weights.head_dim,
-                1,
-                page_size,
-                mpps,
-                scale,
-                &ops,
-            )?;
-        }
+        // Single-launch paged prefill attention. Same flash-attn-v2
+        // body as the contiguous `attn_prefill_f16`; per-`t` K/V row
+        // is resolved through the slot's row of the block table. The
+        // earlier per-token `attn_decode_f16_paged` loop was the E3d
+        // stub; this slice replaces it with the real multi-row paged
+        // kernel — one launch instead of L.
+        let q_view = unsafe {
+            Tensor::<F16>::from_raw(state.pool.q_f16, n * weights.n_heads * weights.head_dim)
+        };
+        let mut out_view = unsafe {
+            Tensor::<F16>::from_raw(
+                state.pool.attn_out_f16,
+                n * weights.n_heads * weights.head_dim,
+            )
+        };
+        flambeau_model_ops::attn_prefill_f16_paged(
+            &q_view,
+            paged_cache.k_pool,
+            paged_cache.v_pool,
+            slot_block_table_ptr,
+            &mut out_view,
+            n,
+            weights.n_heads,
+            weights.n_kv_heads,
+            weights.head_dim,
+            start_position + n,
+            start_position,
+            page_size,
+            scale,
+            // window_size guard above already bailed on SWA when paged on.
+            0,
+            &ops,
+        )?;
+        // Suppress unused-mpps lint when the paged-prefill kernel
+        // signature doesn't need max_pages_per_slot.
+        let _ = mpps;
     } else if prefill_shape {
         // Single-slot, contiguous positions → batched kv_append + attn_prefill.
         let slot_offset = primary_slot * slot_stride_bytes;

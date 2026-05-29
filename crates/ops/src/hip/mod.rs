@@ -250,6 +250,7 @@ pub const KERNEL_STEMS: &[&str] = &[
     "attention_decode_q8_kv",
     "attention_decode_q8_kv_splitk",
     "attention_prefill_f16",
+    "attention_prefill_f16_paged",
     "attention_prefill_flash_tile_f16",
     "attention_prefill_q8_kv",
     "attention_prefill_flash_tile_q8_kv",

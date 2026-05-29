@@ -408,6 +408,43 @@ impl<'a> Ops for HipOps<'a> {
         )
     }
 
+    fn attention_prefill_f16_paged(
+        &self,
+        q: DevicePtr,
+        k_pool: DevicePtr,
+        v_pool: DevicePtr,
+        block_table: DevicePtr,
+        out: DevicePtr,
+        n_q_tokens: usize,
+        n_heads_q: usize,
+        n_heads_kv: usize,
+        head_dim: usize,
+        n_k_tokens: usize,
+        q_offset: usize,
+        page_size: usize,
+        scale: f32,
+        window_size: i32,
+    ) -> Result<()> {
+        super::attention::attention_prefill_f16_paged(
+            self.reg,
+            self.stream,
+            q,
+            k_pool,
+            v_pool,
+            block_table,
+            out,
+            n_q_tokens,
+            n_heads_q,
+            n_heads_kv,
+            head_dim,
+            n_k_tokens,
+            q_offset,
+            page_size,
+            scale,
+            window_size,
+        )
+    }
+
     fn kv_append_f16_paged_prefill(
         &self,
         k_src: DevicePtr,

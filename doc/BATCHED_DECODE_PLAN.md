@@ -584,11 +584,32 @@ Remaining slices for production rollout:
   `Model::release_paged_slot(slot)` trait method, default no-op,
   V2Model downcasts inflights to V2Conv and reaches into the
   shared Session's ScratchPool's `page_pools`.
-- **Real paged-prefill attention kernel** — replaces the per-
-  token loop. Multi-row flash-attention with shared-LDS reuse,
-  block-table indirection folded into the inner K/V address.
-  Substantial — ports the existing `attn_prefill_f16` body
-  with the indirection.
+- **Real paged-prefill attention kernel SHIPPED (2026-05-29).**
+  `attention_prefill_f16_paged.cu` ports the existing
+  `attention_prefill_f16` body verbatim with the
+  `block_table[t / page_size] * page_size + (t & (page_size -
+  1))` indirection on the inner K/V row address. 3/3 parity
+  tests pass bit-equal vs the contiguous baseline under an
+  identity-mapped block table (Q=4 nk=32 / Q=16 nk=128 / Q=8 nk=64
+  hd=256). `standard_attn` paged prefill arm replaces the per-
+  token `attn_decode_f16_paged` loop with a single
+  `attn_prefill_f16_paged` launch — one kernel instead of L.
+
+  Throughput post-rebuild (Qwen3.5-9B-Q4_1 / pp / hip:0 /
+  ctx-cap 32768, max_tokens=128 nostream, median of 2 runs):
+
+  | Config | N_bench=4 | N_bench=8 | N_bench=16 |
+  |---|---|---|---|
+  | Contiguous inflight=8 | 49.3 t/s | 54.7 t/s | queued (~38 t/s) |
+  | Paged inflight=16 (real prefill) | 48.2 t/s | 56.3 t/s | **47.0 t/s** |
+  | Δ vs contiguous | -2.2 % | +2.9 % | **+24 % aggregate** |
+
+  At memory-bandwidth saturation the per-step decode is parity
+  (paged is +2.9 % at N=8 — within noise). The headline number is
+  the **+24 % aggregate at N=16**: contiguous can only run 8
+  inflight, so the bench's 16 streams queue 8 deep; paged runs all
+  16 concurrently. That is the actual concurrent-throughput win
+  paged was meant to deliver.
 - **Paged splitk decode** for long-context single-slot decode
   (n_tokens_kv > 256). Currently paged decode skips splitk.
 - **Per-arch paged dispatch** — gemma4 V-norm fusion,
