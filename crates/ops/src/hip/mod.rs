@@ -62,6 +62,7 @@ pub const KERNEL_STEMS: &[&str] = &[
     "mmvq_q4_0_batched",
     "mmvq_q4_0_row_tile_batched",
     "mmvq_q8_0_batched",
+    "mmvq_q8_0_row_tile_batched",
     "mmvq_q4_k_batched",
     "mmvq_q6_k_batched",
     "mmvq_q4_0_gate_up_batched",

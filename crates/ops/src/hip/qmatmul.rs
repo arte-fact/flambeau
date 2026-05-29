@@ -69,7 +69,7 @@ pub fn qmatmul(
         return Ok(());
     }
     if dtype_weight == QDtype::Q8_0 && (2..=4).contains(&m) {
-        mmvq_q8_0_batched(reg, stream, weights, act_q8_1, dst, n, k, m)?;
+        mmvq_q8_0_row_tile_batched(reg, stream, weights, act_q8_1, dst, n, k, m)?;
         let _ = act_q8_1_mmq;
         return Ok(());
     }
@@ -854,6 +854,49 @@ pub fn mmvq_q4_0_row_tile_batched(
         _ => bail!("mmvq_q4_0_row_tile_batched: n_slots={n_slots} outside [2, 4]"),
     };
     let module = reg.expect_module("mmvq_q4_0_row_tile_batched")?;
+    let kernel = module.kernel(entry)?;
+    let n_rows_i = n_rows as i32;
+    let n_blocks_i = (k / 32) as i32;
+    let w_ptr: u64 = weights.as_usize() as u64;
+    let y_ptr: u64 = y_q8_1.as_usize() as u64;
+    let d_ptr: u64 = dst.as_usize() as u64;
+    let mut args = KernelArgs::new();
+    args.push(&w_ptr);
+    args.push(&y_ptr);
+    args.push(&d_ptr);
+    args.push(&n_rows_i);
+    args.push(&n_blocks_i);
+    let grid = (n_rows as u32).div_ceil(4);
+    let cfg = LaunchCfg::one_d(grid, 256);
+    unsafe { kernel.launch(stream, cfg, args)? };
+    Ok(())
+}
+
+/// Row-tiled sibling of `mmvq_q8_0_batched`. R=4 output rows per block
+/// share one LDS-resident Q8_1 activation strip across the N decode
+/// slots; cuts activation HBM traffic ~4× vs the per-row Q8_0 batched
+/// kernel at the same output count. Used for non-fused Q8_0
+/// projections (GDN α/β on Qwen3.6 hybrids, etc.).
+///
+/// `n_slots` ∈ [2, 4]. Output ABI identical to `mmvq_q8_0_batched`
+/// (`dst[N, n_rows]`, slot-major F32).
+pub fn mmvq_q8_0_row_tile_batched(
+    reg: &OpsRegistry,
+    stream: &HipStream,
+    weights: DevicePtr,
+    y_q8_1: DevicePtr,
+    dst: DevicePtr,
+    n_rows: usize,
+    k: usize,
+    n_slots: usize,
+) -> Result<()> {
+    let entry = match n_slots {
+        2 => "flambeau_mmvq_q8_0_row_tile_dp4a_q8_1_batched_n2",
+        3 => "flambeau_mmvq_q8_0_row_tile_dp4a_q8_1_batched_n3",
+        4 => "flambeau_mmvq_q8_0_row_tile_dp4a_q8_1_batched_n4",
+        _ => bail!("mmvq_q8_0_row_tile_batched: n_slots={n_slots} outside [2, 4]"),
+    };
+    let module = reg.expect_module("mmvq_q8_0_row_tile_batched")?;
     let kernel = module.kernel(entry)?;
     let n_rows_i = n_rows as i32;
     let n_blocks_i = (k / 32) as i32;
