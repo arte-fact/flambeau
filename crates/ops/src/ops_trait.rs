@@ -81,6 +81,21 @@ pub trait Ops {
         n_slots: usize,
     ) -> Result<()>;
 
+    /// Row-tiled Q4_0 MMVQ for non-fused projections (single weight
+    /// matrix). Each block owns 4 output rows and shares one LDS-
+    /// resident Q8_1 activation strip across the N decode slots.
+    /// Activations slot-major `[N, k]` Q8_1; outputs slot-major
+    /// `[N, n_rows]` F32.
+    fn mmvq_q4_0_row_tile_batched(
+        &self,
+        weights: DevicePtr,
+        y_q8_1: DevicePtr,
+        dst: DevicePtr,
+        n_rows: usize,
+        k: usize,
+        n_slots: usize,
+    ) -> Result<()>;
+
     fn mmvq_q4_0_warpcoop64(
         &self,
         weights: DevicePtr,
