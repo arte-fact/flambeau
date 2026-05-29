@@ -24,7 +24,8 @@ pub use error::{Error, Result};
 pub use tensor::Tensor;
 
 pub use delta_net::{
-    DeltaNetLayer, DeltaNetLayerDecodeScratch, DeltaNetLayerPrefillScratch, DeltaNetScratchDims,
+    DeltaNetLayer, DeltaNetLayerDecodeBatchedScratch, DeltaNetLayerDecodeScratch,
+    DeltaNetLayerPrefillScratch, DeltaNetScratchDims, OwnedDeltaNetLayerDecodeBatchedScratch,
     OwnedDeltaNetLayerDecodeScratch, OwnedDeltaNetLayerPrefillScratch,
 };
 pub use driver_utils::RawAllocTracker;

@@ -60,6 +60,27 @@ pub trait Ops {
         k: usize,
     ) -> Result<()>;
 
+    /// Q4_0 gate+up row-tile batched MMVQ for n_slots ∈ [2, 4]. Each
+    /// block handles R=4 consecutive output rows and shares one LDS-
+    /// resident Q8_1 activation strip across the N decode slots. The
+    /// per-call work is `(n_rows_gate + n_rows_up) × n_slots` outputs
+    /// vs. `N × per-slot mmvq_q4_0_gate_up_t128` launches in the
+    /// per-slot fallback. Activations slot-major `[N, k]` Q8_1;
+    /// outputs slot-major `[N, n_rows_*]` F32.
+    #[allow(clippy::too_many_arguments)]
+    fn mmvq_q4_0_gate_up_row_tile_batched(
+        &self,
+        gate_w: DevicePtr,
+        up_w: DevicePtr,
+        y_q8_1: DevicePtr,
+        gate_out: DevicePtr,
+        up_out: DevicePtr,
+        n_rows_gate: usize,
+        n_rows_up: usize,
+        k: usize,
+        n_slots: usize,
+    ) -> Result<()>;
+
     fn mmvq_q4_0_warpcoop64(
         &self,
         weights: DevicePtr,
@@ -629,6 +650,47 @@ pub trait Ops {
         history: DevicePtr,
         current: DevicePtr,
         conv_input: DevicePtr,
+        conv_channels: usize,
+        conv_kernel: usize,
+    ) -> Result<()>;
+
+    /// Batched-slots single-token GDN recurrent step. Each slot owns
+    /// an independent state buffer; `state_in_ptrs` / `state_out_ptrs`
+    /// are `[B] u64` device arrays of those base pointers. Activations
+    /// (q/k/v/alpha/beta/attn_out) are slot-major `[B, L, H, S_v]`.
+    /// Same compute as `gdn_state_step_alphabeta_f32_s128`.
+    #[allow(clippy::too_many_arguments)]
+    fn gdn_state_step_alphabeta_f32_s128_batched_slots(
+        &self,
+        q: DevicePtr,
+        k: DevicePtr,
+        v: DevicePtr,
+        alpha_in: DevicePtr,
+        beta_in: DevicePtr,
+        ssm_dt_bias: DevicePtr,
+        ssm_a: DevicePtr,
+        state_in_ptrs: DevicePtr,
+        state_out_ptrs: DevicePtr,
+        attn_out: DevicePtr,
+        b: usize,
+        h_v: usize,
+        l: usize,
+        n_rep: usize,
+        rep_inner_layout: bool,
+    ) -> Result<()>;
+
+    /// Batched-slots single-token conv trio (assemble + causal_conv1d
+    /// + history shift) collapsed into one launch across N slots, each
+    /// with its own conv-history buffer. `slot_history_ptrs` is
+    /// `[N] u64`; `qkv_mixed` and `conv_out` are slot-major
+    /// `[N, conv_channels]`.
+    fn gdn_conv_trio_decode_f32_batched_slots(
+        &self,
+        slot_history_ptrs: DevicePtr,
+        qkv_mixed: DevicePtr,
+        weight: DevicePtr,
+        conv_out: DevicePtr,
+        n_slots: usize,
         conv_channels: usize,
         conv_kernel: usize,
     ) -> Result<()>;

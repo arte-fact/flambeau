@@ -101,6 +101,71 @@ pub struct OwnedDeltaNetLayerDecodeScratch {
     pub ssm_out_f32: DevicePtr,
 }
 
+/// Borrowed view over a caller-owned GDN batched-slots decode scratch.
+/// All buffers sized `max_slots ×` the per-slot decode shape; slot-major
+/// `[N, ...]` layout. The conv trio + state-step batched-slots kernels
+/// consume q/k/v/alpha/beta/qkv_mixed/conv_out/state_out in this layout.
+#[derive(Copy, Clone)]
+pub struct DeltaNetLayerDecodeBatchedScratch {
+    pub max_slots: usize,
+    pub x_q8_1: DevicePtr,        // [N, hidden] Q8_1
+    pub qkv_mixed_f32: DevicePtr, // [N, conv_channels]
+    pub z_f32: DevicePtr,         // [N, d_inner]
+    pub alpha_f32: DevicePtr,     // [N, num_v_heads]
+    pub beta_f32: DevicePtr,      // [N, num_v_heads]
+    pub conv_out: DevicePtr,      // [N, conv_channels]
+    pub silu_out: DevicePtr,      // [N, conv_channels]
+    pub q_norm_f32: DevicePtr,    // [N, num_k_heads, head_k_dim]
+    pub k_norm_f32: DevicePtr,    // [N, num_k_heads, head_k_dim]
+    pub state_out: DevicePtr,     // [N, num_v_heads, head_v_dim]
+    pub out_normed: DevicePtr,    // [N, num_v_heads, head_v_dim]
+    pub gated_f32: DevicePtr,     // [N, d_inner]
+    pub gated_q8_1: DevicePtr,    // [N] Q8_1 d_inner
+    pub ssm_out_f32: DevicePtr,   // [N, hidden]
+}
+
+/// Owned GDN batched-slots decode scratch. Allocated once per session
+/// at `max_slots` capacity; the call passes `n_slots ≤ max_slots`.
+pub struct OwnedDeltaNetLayerDecodeBatchedScratch {
+    pub max_slots: usize,
+    pub x_q8_1: DevicePtr,
+    pub qkv_mixed_f32: DevicePtr,
+    pub z_f32: DevicePtr,
+    pub alpha_f32: DevicePtr,
+    pub beta_f32: DevicePtr,
+    pub conv_out: DevicePtr,
+    pub silu_out: DevicePtr,
+    pub q_norm_f32: DevicePtr,
+    pub k_norm_f32: DevicePtr,
+    pub state_out: DevicePtr,
+    pub out_normed: DevicePtr,
+    pub gated_f32: DevicePtr,
+    pub gated_q8_1: DevicePtr,
+    pub ssm_out_f32: DevicePtr,
+}
+
+impl OwnedDeltaNetLayerDecodeBatchedScratch {
+    pub fn view(&self) -> DeltaNetLayerDecodeBatchedScratch {
+        DeltaNetLayerDecodeBatchedScratch {
+            max_slots: self.max_slots,
+            x_q8_1: self.x_q8_1,
+            qkv_mixed_f32: self.qkv_mixed_f32,
+            z_f32: self.z_f32,
+            alpha_f32: self.alpha_f32,
+            beta_f32: self.beta_f32,
+            conv_out: self.conv_out,
+            silu_out: self.silu_out,
+            q_norm_f32: self.q_norm_f32,
+            k_norm_f32: self.k_norm_f32,
+            state_out: self.state_out,
+            out_normed: self.out_normed,
+            gated_f32: self.gated_f32,
+            gated_q8_1: self.gated_q8_1,
+            ssm_out_f32: self.ssm_out_f32,
+        }
+    }
+}
+
 impl OwnedDeltaNetLayerDecodeScratch {
     pub fn view(&self) -> DeltaNetLayerDecodeScratch {
         DeltaNetLayerDecodeScratch {
@@ -341,6 +406,65 @@ impl DeltaNetLayer {
             alpha_f32,
             beta_f32,
             conv_input,
+            conv_out,
+            silu_out,
+            q_norm_f32,
+            k_norm_f32,
+            state_out,
+            out_normed,
+            gated_f32,
+            gated_q8_1,
+            ssm_out_f32,
+        })
+    }
+
+    /// Allocate an [`OwnedDeltaNetLayerDecodeBatchedScratch`] sized
+    /// for `dims` × `max_slots`. The slot-pointer arrays themselves
+    /// (per-slot state and conv-history base ptrs) live separately —
+    /// owned by the caller's pool because they index per-layer state.
+    pub fn alloc_decode_batched_scratch(
+        device: &HipDevice,
+        tracker: &mut RawAllocTracker,
+        dims: DeltaNetScratchDims,
+        max_slots: usize,
+    ) -> Result<OwnedDeltaNetLayerDecodeBatchedScratch> {
+        if max_slots == 0 {
+            bail!("alloc_decode_batched_scratch: max_slots must be >= 1");
+        }
+        let DeltaNetScratchDims {
+            hidden,
+            d_inner,
+            num_v_heads,
+            num_k_heads,
+            head_k_dim,
+            head_v_dim,
+            conv_channels,
+            ..
+        } = dims;
+        let qk_size = num_k_heads * head_k_dim;
+        let v_size = num_v_heads * head_v_dim;
+        let n = max_slots;
+        let (x_q8_1, _) = tracker.alloc_q8_1(device, n * hidden)?;
+        let (qkv_mixed_f32, _) = tracker.alloc_f32(device, n * conv_channels)?;
+        let (z_f32, _) = tracker.alloc_f32(device, n * d_inner)?;
+        let (alpha_f32, _) = tracker.alloc_f32(device, n * num_v_heads)?;
+        let (beta_f32, _) = tracker.alloc_f32(device, n * num_v_heads)?;
+        let (conv_out, _) = tracker.alloc_f32(device, n * conv_channels)?;
+        let (silu_out, _) = tracker.alloc_f32(device, n * conv_channels)?;
+        let (q_norm_f32, _) = tracker.alloc_f32(device, n * qk_size)?;
+        let (k_norm_f32, _) = tracker.alloc_f32(device, n * qk_size)?;
+        let (state_out, _) = tracker.alloc_f32(device, n * v_size)?;
+        let (out_normed, _) = tracker.alloc_f32(device, n * v_size)?;
+        let (gated_f32, _) = tracker.alloc_f32(device, n * d_inner)?;
+        let (gated_q8_1, _) = tracker.alloc_q8_1(device, n * d_inner)?;
+        let (ssm_out_f32, _) = tracker.alloc_f32(device, n * hidden)?;
+        Ok(OwnedDeltaNetLayerDecodeBatchedScratch {
+            max_slots,
+            x_q8_1,
+            qkv_mixed_f32,
+            z_f32,
+            alpha_f32,
+            beta_f32,
             conv_out,
             silu_out,
             q_norm_f32,
@@ -725,6 +849,385 @@ impl DeltaNetLayer {
         // 16. Cast F32 → F16.
         ops.cast_f32_to_f16(scratch.ssm_out_f32, delta_out, hidden)
             .context("cast ssm_out → f16")?;
+
+        Ok(())
+    }
+
+    /// Batched-slots single-token decode through the GDN block. Same
+    /// per-token compute as `forward_decode_with_ar_hook` but issues
+    /// one launch of the state-step + conv-trio kernels across all
+    /// `n_slots` instead of `N` per-slot launches. Projections + per-
+    /// head norms + swiglu + ssm_out are still per-slot looped (Phase
+    /// 2 introduces batched MMVQ).
+    ///
+    /// `state_in_ptrs_dev` / `state_out_ptrs_dev` / `conv_history_ptrs_dev`
+    /// are `[n_slots] u64` device arrays of per-slot base pointers.
+    /// In-place use sets `state_out_ptrs_dev == state_in_ptrs_dev`.
+    /// Activation inputs/outputs `x_in_base` and `delta_out_base` are
+    /// slot-major `[n_slots, hidden]` F16. The AR callback fires once
+    /// per slot on its `ssm_out_f32[slot]` partial.
+    #[allow(clippy::too_many_arguments)]
+    pub fn forward_decode_with_ar_hook_batched_slots<O: Ops>(
+        &self,
+        ops: &O,
+        device: &HipDevice,
+        stream: &HipStream,
+        x_in_base: DevicePtr,
+        delta_out_base: DevicePtr,
+        state_in_ptrs_dev: DevicePtr,
+        state_out_ptrs_dev: DevicePtr,
+        conv_history_ptrs_dev: DevicePtr,
+        scratch: DeltaNetLayerDecodeBatchedScratch,
+        n_slots: usize,
+        ar_partial_callback: Option<
+            &mut dyn FnMut(DevicePtr, usize, &HipDevice, &HipStream) -> Result<()>,
+        >,
+    ) -> Result<()> {
+        if n_slots == 0 {
+            bail!("DeltaNetLayer::forward_decode_with_ar_hook_batched_slots: n_slots = 0");
+        }
+        if n_slots > scratch.max_slots {
+            bail!(
+                "DeltaNetLayer::forward_decode_with_ar_hook_batched_slots: \
+                 n_slots={n_slots} > scratch.max_slots={}; caller must chunk",
+                scratch.max_slots
+            );
+        }
+
+        let hidden = self.hidden;
+        let d_inner = self.d_inner;
+        let num_v_heads = self.num_v_heads;
+        let num_k_heads = self.num_k_heads;
+        let head_k_dim = self.head_k_dim;
+        let head_v_dim = self.head_v_dim;
+        let conv_channels = self.conv_channels;
+        let conv_kernel = self.conv_kernel;
+        let qk_size = num_k_heads * head_k_dim;
+        let v_size = num_v_heads * head_v_dim;
+
+        if v_size != d_inner {
+            bail!("GDN layout: num_v_heads * head_v_dim ({v_size}) != d_inner ({d_inner})");
+        }
+
+        let x_row_f16_bytes = hidden * 2;
+        let x_q8_1_row_bytes = (hidden / 32) * 36;
+        let qkv_mixed_row_bytes = conv_channels * 4;
+        let z_row_bytes = d_inner * 4;
+        let alphabeta_row_bytes = num_v_heads * 4;
+        let qk_row_bytes = qk_size * 4;
+        let v_row_bytes = v_size * 4;
+        let gated_q8_1_row_bytes = (d_inner / 32) * 36;
+        let gated_f32_row_bytes = d_inner * 4;
+        let conv_out_row_bytes = conv_channels * 4;
+        let silu_out_row_bytes = conv_channels * 4;
+        let ssm_out_row_bytes = hidden * 4;
+
+        let qkv_dt = self.attn_qkv.dtype;
+        let gate_dt = self.attn_gate.dtype;
+        let fuse_q8_0 = qkv_dt == QDtype::Q8_0 && gate_dt == QDtype::Q8_0;
+        let fuse_q4_0 = qkv_dt == QDtype::Q4_0 && gate_dt == QDtype::Q4_0;
+        let alpha_dt = self.ssm_alpha.dtype;
+        let beta_dt = self.ssm_beta.dtype;
+        let fuse_alpha_beta = alpha_dt == QDtype::Q8_0 && beta_dt == QDtype::Q8_0;
+        let fuse_tail = d_inner % 32 == 0;
+        // Phase 2 Slice A: Q4_0 gate+up row-tile batched MMVQ shares one
+        // LDS-resident activation strip across N decode slots, replacing
+        // N per-slot `mmvq_q4_0_gate_up_t128` launches with one batched
+        // launch. Only firing for n_slots ∈ [2, 4] — the kernel only
+        // specialises N up to 4.
+        let use_q4_0_gate_up_row_tile =
+            fuse_q4_0 && matches!(n_slots, 2 | 3 | 4);
+
+        // 1. per-slot rmsnorm+quant. Writes slot-major into scratch.x_q8_1.
+        for i in 0..n_slots {
+            let x_in_i = x_in_base.offset_bytes(i * x_row_f16_bytes);
+            let x_q8_1_i = scratch.x_q8_1.offset_bytes(i * x_q8_1_row_bytes);
+            ops.rmsnorm_quant_q8_1(
+                x_in_i,
+                self.attn_norm_w,
+                x_q8_1_i,
+                1,
+                hidden,
+                self.rms_norm_eps,
+            )
+            .context("gdn batched: attn_norm + quant")?;
+        }
+
+        // 2+3. attn_qkv + attn_gate. Row-tile batched (Q4_0 N∈[2,4]) is
+        // one launch for all N slots; otherwise per-slot loop.
+        if use_q4_0_gate_up_row_tile {
+            ops.mmvq_q4_0_gate_up_row_tile_batched(
+                self.attn_qkv.ptr,
+                self.attn_gate.ptr,
+                scratch.x_q8_1,
+                scratch.qkv_mixed_f32,
+                scratch.z_f32,
+                conv_channels,
+                d_inner,
+                hidden,
+                n_slots,
+            )
+            .context("gdn batched: attn_qkv+attn_gate row-tile batched Q4_0")?;
+        } else {
+            for i in 0..n_slots {
+                let x_q8_1_i = scratch.x_q8_1.offset_bytes(i * x_q8_1_row_bytes);
+                let qkv_mixed_i = scratch.qkv_mixed_f32.offset_bytes(i * qkv_mixed_row_bytes);
+                let z_i = scratch.z_f32.offset_bytes(i * z_row_bytes);
+                if fuse_q8_0 {
+                    ops.mmvq_q8_0_gate_up(
+                        self.attn_qkv.ptr,
+                        self.attn_gate.ptr,
+                        x_q8_1_i,
+                        qkv_mixed_i,
+                        z_i,
+                        conv_channels,
+                        d_inner,
+                        hidden,
+                    )
+                    .context("gdn batched: attn_qkv + attn_gate fused mmvq_q8_0")?;
+                } else if fuse_q4_0 {
+                    ops.mmvq_q4_0_gate_up_t128(
+                        self.attn_qkv.ptr,
+                        self.attn_gate.ptr,
+                        x_q8_1_i,
+                        qkv_mixed_i,
+                        z_i,
+                        conv_channels,
+                        d_inner,
+                        hidden,
+                    )
+                    .context("gdn batched: attn_qkv + attn_gate fused mmvq_q4_0_t128")?;
+                } else {
+                    ops.mmvq(self.attn_qkv.ptr, x_q8_1_i, qkv_mixed_i, conv_channels, hidden, qkv_dt)
+                        .context("gdn batched: attn_qkv mmvq")?;
+                    ops.mmvq(self.attn_gate.ptr, x_q8_1_i, z_i, d_inner, hidden, gate_dt)
+                        .context("gdn batched: attn_gate mmvq")?;
+                }
+            }
+        }
+
+        // 4+5. ssm_alpha + ssm_beta. Phase 2 Slice B: for n_slots ∈
+        // [2, 4], drop the Q8_0 gate+up fusion and split into two
+        // batched qmatmul calls — `qmatmul` auto-dispatches Q8_0
+        // m∈{2,3,4} to `mmvq_q8_0_batched` (one launch per matrix,
+        // weight read once across all N slots vs. N per-slot reads
+        // in the fused path). Fused path retained for n_slots == 1
+        // and for dtypes the slot-batched dispatch doesn't cover.
+        let use_alphabeta_batched = matches!(n_slots, 2 | 3 | 4);
+        if use_alphabeta_batched {
+            ops.qmatmul(
+                self.ssm_alpha.ptr,
+                scratch.x_q8_1,
+                scratch.x_q8_1,
+                scratch.alpha_f32,
+                n_slots,
+                hidden,
+                num_v_heads,
+                alpha_dt,
+            )
+            .context("gdn batched: ssm_alpha qmatmul (m=N batched)")?;
+            ops.qmatmul(
+                self.ssm_beta.ptr,
+                scratch.x_q8_1,
+                scratch.x_q8_1,
+                scratch.beta_f32,
+                n_slots,
+                hidden,
+                num_v_heads,
+                beta_dt,
+            )
+            .context("gdn batched: ssm_beta qmatmul (m=N batched)")?;
+        } else {
+            for i in 0..n_slots {
+                let x_q8_1_i = scratch.x_q8_1.offset_bytes(i * x_q8_1_row_bytes);
+                let alpha_i = scratch.alpha_f32.offset_bytes(i * alphabeta_row_bytes);
+                let beta_i = scratch.beta_f32.offset_bytes(i * alphabeta_row_bytes);
+                if fuse_alpha_beta {
+                    ops.mmvq_q8_0_gate_up(
+                        self.ssm_alpha.ptr,
+                        self.ssm_beta.ptr,
+                        x_q8_1_i,
+                        alpha_i,
+                        beta_i,
+                        num_v_heads,
+                        num_v_heads,
+                        hidden,
+                    )
+                    .context("gdn batched: ssm alpha+beta fused mmvq_q8_0")?;
+                } else {
+                    ops.mmvq(self.ssm_alpha.ptr, x_q8_1_i, alpha_i, num_v_heads, hidden, alpha_dt)
+                        .context("gdn batched: ssm_alpha mmvq")?;
+                    ops.mmvq(self.ssm_beta.ptr, x_q8_1_i, beta_i, num_v_heads, hidden, beta_dt)
+                        .context("gdn batched: ssm_beta mmvq")?;
+                }
+            }
+        }
+
+        // 6. Fused conv trio across N slots in one launch.
+        ops.gdn_conv_trio_decode_f32_batched_slots(
+            conv_history_ptrs_dev,
+            scratch.qkv_mixed_f32,
+            self.ssm_conv1d,
+            scratch.conv_out,
+            n_slots,
+            conv_channels,
+            conv_kernel,
+        )
+        .context("gdn batched: conv_trio_decode")?;
+
+        // 7-10: per-slot silu, slice, L2 norm Q+K, scale Q.
+        let q_scale = 1.0f32 / (head_k_dim as f32).sqrt();
+        for i in 0..n_slots {
+            let conv_out_i = scratch.conv_out.offset_bytes(i * conv_out_row_bytes);
+            let silu_out_i = scratch.silu_out.offset_bytes(i * silu_out_row_bytes);
+            ops.silu_f32(conv_out_i, silu_out_i, conv_channels)
+                .context("gdn batched: silu_f32(conv_out)")?;
+
+            let q_src = silu_out_i;
+            let k_src = silu_out_i.offset_bytes(qk_size * 4);
+            // v_src = silu_out_i + 2*qk_size*4, but the state-step reads
+            // V from a slot-major contiguous buffer; we need v in the
+            // batched-slots [N, num_v_heads, head_v_dim] layout. Pack
+            // v_src directly out of silu_out by a memcpy_async into the
+            // appropriate state_out region? No — state_out is the
+            // recurrent state output. Use a dedicated v-pack: stride is
+            // already correct because silu_out_i + 2*qk_size*4 holds the
+            // V slice for slot i, but the state-step kernel expects all
+            // V slots adjacent in `[N, L=1, H, S_v]` slot-major layout.
+            // Solution: write the per-slot V slice into `state_out`
+            // staging? No — state_out is the output. The cleanest fix is
+            // a per-slot DtoD copy of the V slice into a dedicated
+            // contiguous buffer; we reuse `out_normed` as that buffer
+            // (it's sized [N, num_v_heads, head_v_dim] and is consumed
+            // only AFTER the state-step).
+            let v_src = silu_out_i.offset_bytes(2 * qk_size * 4);
+            let v_dst_i = scratch.out_normed.offset_bytes(i * v_row_bytes);
+            // SAFETY: silu_out has v_size*4 valid bytes past the QK
+            // slice; out_normed has v_row_bytes per slot.
+            unsafe {
+                device.memcpy_async(
+                    stream,
+                    CopyDirection::DeviceToDevice,
+                    v_dst_i,
+                    v_src,
+                    v_row_bytes,
+                )?;
+            }
+
+            let q_norm_i = scratch.q_norm_f32.offset_bytes(i * qk_row_bytes);
+            let k_norm_i = scratch.k_norm_f32.offset_bytes(i * qk_row_bytes);
+            ops.l2_norm_f32(q_src, q_norm_i, num_k_heads, head_k_dim, self.rms_norm_eps)
+                .context("gdn batched: l2_norm Q")?;
+            ops.l2_norm_f32(k_src, k_norm_i, num_k_heads, head_k_dim, self.rms_norm_eps)
+                .context("gdn batched: l2_norm K")?;
+            ops.scale_f32(q_norm_i, q_norm_i, qk_size, q_scale)
+                .context("gdn batched: scale_f32 Q")?;
+        }
+
+        // 11. Fused state-step across N slots. V lives in `out_normed`
+        // (slot-major contiguous); state-step writes attn output into
+        // `state_out`. After this call we discard the V staging in
+        // `out_normed` and re-use it for ssm_norm output.
+        let n_rep = num_v_heads / num_k_heads;
+        ops.gdn_state_step_alphabeta_f32_s128_batched_slots(
+            scratch.q_norm_f32,
+            scratch.k_norm_f32,
+            scratch.out_normed, // V staging (re-used as ssm_norm output below)
+            scratch.alpha_f32,
+            scratch.beta_f32,
+            self.ssm_dt_bias,
+            self.ssm_a,
+            state_in_ptrs_dev,
+            state_out_ptrs_dev,
+            scratch.state_out,
+            n_slots,
+            num_v_heads,
+            1,
+            n_rep,
+            self.rep_inner_layout,
+        )
+        .context("gdn batched: gdn_state_step_alphabeta_f32_s128_batched_slots")?;
+
+        // 12+13+14: per-slot ssm_norm + swiglu (produces slot-major
+        // gated_q8_1 ready for the batched ssm_out matmul below).
+        for i in 0..n_slots {
+            let state_out_i = scratch.state_out.offset_bytes(i * v_row_bytes);
+            let out_normed_i = scratch.out_normed.offset_bytes(i * v_row_bytes);
+            let z_i = scratch.z_f32.offset_bytes(i * z_row_bytes);
+            let gated_q8_1_i = scratch.gated_q8_1.offset_bytes(i * gated_q8_1_row_bytes);
+            let gated_f32_i = scratch.gated_f32.offset_bytes(i * gated_f32_row_bytes);
+
+            ops.rmsnorm_f32(
+                state_out_i,
+                self.ssm_norm_w,
+                out_normed_i,
+                num_v_heads,
+                head_v_dim,
+                self.rms_norm_eps,
+            )
+            .context("gdn batched: ssm_norm (rmsnorm_f32)")?;
+
+            if fuse_tail {
+                ops.swiglu_f32_to_q8_1(z_i, out_normed_i, gated_q8_1_i, d_inner)
+                    .context("gdn batched: swiglu_f32_to_q8_1(z, out_normed)")?;
+            } else {
+                ops.swiglu_f32(z_i, out_normed_i, gated_f32_i, d_inner)
+                    .context("gdn batched: swiglu_f32(z, out_normed)")?;
+                ops.quantize_q8_1(gated_f32_i, gated_q8_1_i, d_inner)
+                    .context("gdn batched: quantize gated → Q8_1")?;
+            }
+        }
+
+        // 15. ssm_out projection. Phase 2 Slice C: for n_slots ∈
+        // [2, 4], one batched qmatmul replaces N per-slot mmvq launches.
+        // The dispatch at `qmatmul.rs:71-105` routes Q4_0/Q8_0/Q4_1/Q4_K
+        // /Q6_K m∈{2,3,4} to the corresponding slot-batched MMVQ variant
+        // (1 weight read per N slots vs N reads in the per-slot fallback).
+        // ssm_out is the largest weight in the GDN block — biggest absolute
+        // weight-HBM saving in Phase 2 outside the gate+up row-tile.
+        let use_ssm_out_batched = matches!(n_slots, 2 | 3 | 4);
+        if use_ssm_out_batched {
+            ops.qmatmul(
+                self.ssm_out.ptr,
+                scratch.gated_q8_1,
+                scratch.gated_q8_1,
+                scratch.ssm_out_f32,
+                n_slots,
+                d_inner,
+                hidden,
+                self.ssm_out.dtype,
+            )
+            .context("gdn batched: ssm_out qmatmul (m=N batched)")?;
+        } else {
+            for i in 0..n_slots {
+                let gated_q8_1_i = scratch.gated_q8_1.offset_bytes(i * gated_q8_1_row_bytes);
+                let ssm_out_i = scratch.ssm_out_f32.offset_bytes(i * ssm_out_row_bytes);
+                ops.mmvq(
+                    self.ssm_out.ptr,
+                    gated_q8_1_i,
+                    ssm_out_i,
+                    hidden,
+                    d_inner,
+                    self.ssm_out.dtype,
+                )
+                .context("gdn batched: ssm_out mmvq (per-slot fallback)")?;
+            }
+        }
+
+        if let Some(cb) = ar_partial_callback {
+            for i in 0..n_slots {
+                let ssm_out_i = scratch.ssm_out_f32.offset_bytes(i * ssm_out_row_bytes);
+                cb(ssm_out_i, hidden, device, stream)
+                    .context("gdn batched: ar_partial_callback (ssm_out F32 per slot)")?;
+            }
+        }
+
+        for i in 0..n_slots {
+            let ssm_out_i = scratch.ssm_out_f32.offset_bytes(i * ssm_out_row_bytes);
+            let delta_out_i = delta_out_base.offset_bytes(i * x_row_f16_bytes);
+            ops.cast_f32_to_f16(ssm_out_i, delta_out_i, hidden)
+                .context("gdn batched: cast ssm_out → f16")?;
+        }
 
         Ok(())
     }

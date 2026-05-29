@@ -121,7 +121,7 @@ impl Model for V2Model {
     fn forward_decode_batched(
         &self,
         _ctx: &dyn crate::model_handle::SessionContext,
-        _inflights: &mut [&mut dyn ServerSession],
+        inflights: &mut [&mut dyn ServerSession],
         slots: &[crate::model_handle::BatchSlot],
         logits_refs: &mut [&mut Vec<f32>],
     ) -> Result<()> {
@@ -132,13 +132,36 @@ impl Model for V2Model {
                 logits_refs.len(),
             );
         }
+        if inflights.len() != slots.len() {
+            anyhow::bail!(
+                "V2Model::forward_decode_batched: inflights={} slots={}",
+                inflights.len(),
+                slots.len(),
+            );
+        }
         if slots.is_empty() {
             return Ok(());
         }
         let n = slots.len();
+        // `BatchSlot.idx` is the parallel-array position (= `i` in this
+        // loop) — used only for routing logits_refs[i] back to the
+        // right pending sender. The actual KV/GDN slot for the forward
+        // is the per-V2Conv `slot_id` set at inflight construction;
+        // read it from `inflights[i]`. Using `s.idx` directly was a
+        // long-standing bug: under N>1 concurrency the pending queue
+        // can arrive in any order, so `s.idx` (queue position) and the
+        // per-conv slot_id diverge, routing decode reads/writes to the
+        // wrong slot's KV slab and producing inter-stream topic mixing.
         let tuples: Vec<(u32, usize, usize)> = slots
             .iter()
-            .map(|s| (s.token_id, s.position, s.idx))
+            .zip(inflights.iter())
+            .map(|(s, inflight)| {
+                let conv = inflight
+                    .as_any()
+                    .downcast_ref::<V2Conv>()
+                    .expect("V2Model::forward_decode_batched expects V2Conv inflight");
+                (s.token_id, s.position, conv.slot_id)
+            })
             .collect();
         let single_slot = n == 1;
         let vocab = self.vocab;

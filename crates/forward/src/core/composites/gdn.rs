@@ -13,7 +13,7 @@
 
 use anyhow::{bail, Result};
 use flambeau_backend_hip::{HipDevice, HipStream};
-use flambeau_core::DevicePtr;
+use flambeau_core::{Device, DevicePtr};
 use flambeau_model_ops::delta_net::DeltaNetLayer;
 use flambeau_model_ops::WeightHandle;
 use flambeau_model_ops::{Tensor, F16};
@@ -181,25 +181,84 @@ pub fn gdn_layer_local<H: TopologyHooks>(
             |buf: DevicePtr, n_elems: usize, dev: &HipDevice, stm: &HipStream| -> Result<()> {
                 hooks.ar_sum_f32(buf, n_elems, dev, stm)
             };
-        for i in 0..n_tokens {
-            let slot = slot_ids[i];
-            let in_i = input.ptr.offset_bytes(i * row_bytes);
-            let out_i = delta_ptr.offset_bytes(i * row_bytes);
-            let state_i = layer_state.state.offset_bytes(slot * state_bytes_per_slot);
-            let hist_i = layer_state
-                .conv_history
-                .offset_bytes(slot * hist_bytes_per_slot);
-            block.forward_decode_with_ar_hook(
+        let batched_opt = if std::env::var("FLAMBEAU_GDN_BATCHED_SLOTS").as_deref() == Ok("0") {
+            None
+        } else {
+            state.pool.gdn_decode_batched_scratch.as_ref()
+        };
+        if let Some(batched_scratch) = batched_opt {
+            let batched_view = batched_scratch.view();
+            if n_tokens > batched_view.max_slots {
+                bail!(
+                    "gdn_layer batched: n_tokens={n_tokens} > max_slots={}",
+                    batched_view.max_slots
+                );
+            }
+            let slot_state_ptrs = state.pool.gdn_slot_state_ptrs;
+            let slot_hist_ptrs = state.pool.gdn_slot_history_ptrs;
+            let mut host_state_ptrs: Vec<u64> = Vec::with_capacity(n_tokens);
+            let mut host_hist_ptrs: Vec<u64> = Vec::with_capacity(n_tokens);
+            for &slot in slot_ids.iter() {
+                let s = layer_state.state.offset_bytes(slot * state_bytes_per_slot);
+                let h = layer_state
+                    .conv_history
+                    .offset_bytes(slot * hist_bytes_per_slot);
+                host_state_ptrs.push(s.as_usize() as u64);
+                host_hist_ptrs.push(h.as_usize() as u64);
+            }
+            // SAFETY: pool reserves n_tokens*8 bytes per array when
+            // max_slots > 1; n_tokens ≤ max_slots checked above.
+            unsafe {
+                state.device.memcpy_async(
+                    state.stream,
+                    flambeau_core::CopyDirection::HostToDevice,
+                    slot_state_ptrs,
+                    DevicePtr(host_state_ptrs.as_ptr() as usize),
+                    n_tokens * 8,
+                )?;
+                state.device.memcpy_async(
+                    state.stream,
+                    flambeau_core::CopyDirection::HostToDevice,
+                    slot_hist_ptrs,
+                    DevicePtr(host_hist_ptrs.as_ptr() as usize),
+                    n_tokens * 8,
+                )?;
+            }
+            flambeau_core::Stream::synchronize(state.stream)?;
+            block.forward_decode_with_ar_hook_batched_slots(
                 &ops,
                 state.device,
                 state.stream,
-                in_i,
-                out_i,
-                state_i,
-                hist_i,
-                scratch,
+                input.ptr,
+                delta_ptr,
+                slot_state_ptrs,
+                slot_state_ptrs,
+                slot_hist_ptrs,
+                batched_view,
+                n_tokens,
                 Some(&mut ar_cb),
             )?;
+        } else {
+            for i in 0..n_tokens {
+                let slot = slot_ids[i];
+                let in_i = input.ptr.offset_bytes(i * row_bytes);
+                let out_i = delta_ptr.offset_bytes(i * row_bytes);
+                let state_i = layer_state.state.offset_bytes(slot * state_bytes_per_slot);
+                let hist_i = layer_state
+                    .conv_history
+                    .offset_bytes(slot * hist_bytes_per_slot);
+                block.forward_decode_with_ar_hook(
+                    &ops,
+                    state.device,
+                    state.stream,
+                    in_i,
+                    out_i,
+                    state_i,
+                    hist_i,
+                    scratch,
+                    Some(&mut ar_cb),
+                )?;
+            }
         }
     }
     Ok(Some(unsafe {

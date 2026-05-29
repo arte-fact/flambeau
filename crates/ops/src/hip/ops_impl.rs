@@ -93,6 +93,33 @@ impl<'a> Ops for HipOps<'a> {
         )
     }
 
+    fn mmvq_q4_0_gate_up_row_tile_batched(
+        &self,
+        gate_w: DevicePtr,
+        up_w: DevicePtr,
+        y_q8_1: DevicePtr,
+        gate_out: DevicePtr,
+        up_out: DevicePtr,
+        n_rows_gate: usize,
+        n_rows_up: usize,
+        k: usize,
+        n_slots: usize,
+    ) -> Result<()> {
+        super::qmatmul::mmvq_q4_0_gate_up_row_tile_batched(
+            self.reg,
+            self.stream,
+            gate_w,
+            up_w,
+            y_q8_1,
+            gate_out,
+            up_out,
+            n_rows_gate,
+            n_rows_up,
+            k,
+            n_slots,
+        )
+    }
+
     fn mmvq_q4_0_warpcoop64(
         &self,
         weights: DevicePtr,
@@ -1099,6 +1126,68 @@ impl<'a> Ops for HipOps<'a> {
             history,
             current,
             conv_input,
+            conv_channels,
+            conv_kernel,
+        )
+    }
+
+    fn gdn_state_step_alphabeta_f32_s128_batched_slots(
+        &self,
+        q: DevicePtr,
+        k: DevicePtr,
+        v: DevicePtr,
+        alpha_in: DevicePtr,
+        beta_in: DevicePtr,
+        ssm_dt_bias: DevicePtr,
+        ssm_a: DevicePtr,
+        state_in_ptrs: DevicePtr,
+        state_out_ptrs: DevicePtr,
+        attn_out: DevicePtr,
+        b: usize,
+        h_v: usize,
+        l: usize,
+        n_rep: usize,
+        rep_inner_layout: bool,
+    ) -> Result<()> {
+        super::recurrent::gdn_state_step_alphabeta_f32_s128_batched_slots(
+            self.reg,
+            self.stream,
+            q,
+            k,
+            v,
+            alpha_in,
+            beta_in,
+            ssm_dt_bias,
+            ssm_a,
+            state_in_ptrs,
+            state_out_ptrs,
+            attn_out,
+            b,
+            h_v,
+            l,
+            n_rep,
+            rep_inner_layout,
+        )
+    }
+
+    fn gdn_conv_trio_decode_f32_batched_slots(
+        &self,
+        slot_history_ptrs: DevicePtr,
+        qkv_mixed: DevicePtr,
+        weight: DevicePtr,
+        conv_out: DevicePtr,
+        n_slots: usize,
+        conv_channels: usize,
+        conv_kernel: usize,
+    ) -> Result<()> {
+        super::recurrent::gdn_conv_trio_decode_f32_batched_slots(
+            self.reg,
+            self.stream,
+            slot_history_ptrs,
+            qkv_mixed,
+            weight,
+            conv_out,
+            n_slots,
             conv_channels,
             conv_kernel,
         )

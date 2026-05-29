@@ -302,6 +302,17 @@ pub struct ScratchPool {
     /// Shared GDN per-decode scratch wrapping blocks's owned scratch.
     /// `None` when `config.gdn` is None.
     pub gdn_decode_scratch: Option<flambeau_model_ops::OwnedDeltaNetLayerDecodeScratch>,
+    /// Shared GDN batched-decode scratch sized for `max_slots`. `None`
+    /// when GDN is off or `max_slots <= 1`. Used by the GDN composite
+    /// when `slot_ids.len() > 1` (multi-slot decode path).
+    pub gdn_decode_batched_scratch: Option<flambeau_model_ops::OwnedDeltaNetLayerDecodeBatchedScratch>,
+    /// `[max_slots] u64` device arrays of per-slot GDN state and conv
+    /// history base pointers. Filled host-side per forward call and
+    /// consumed by `gdn_state_step_alphabeta_f32_s128_batched_slots`
+    /// and `gdn_conv_trio_decode_f32_batched_slots`. NULL when GDN is
+    /// off or `max_slots <= 1`.
+    pub gdn_slot_state_ptrs: DevicePtr,
+    pub gdn_slot_history_ptrs: DevicePtr,
     /// Shared GDN prefill scratch sized for `max_prefill_tokens`. Used
     /// by the composite when the call is single-slot, contiguous, and
     /// `n_tokens > 1` (the prefill-shape path). `None` when GDN is off
@@ -488,6 +499,20 @@ impl ScratchPool {
                 )
             };
 
+        // Per-slot pointer arrays for GDN batched-slot kernels. Allocated
+        // only when GDN is enabled AND multi-slot. Filled host-side per
+        // forward call by `gdn_layer_local`; consumed by
+        // `gdn_state_step_alphabeta_f32_s128_batched_slots` and
+        // `gdn_conv_trio_decode_f32_batched_slots`.
+        let (gdn_slot_state_ptrs, gdn_slot_history_ptrs) =
+            if config.gdn.is_some() && n_slots > 1 {
+                let s = alloc_bytes(n_slots * 8)?;
+                let h = alloc_bytes(n_slots * 8)?;
+                (s, h)
+            } else {
+                (DevicePtr::NULL, DevicePtr::NULL)
+            };
+
         let topk = config.max_experts_per_tok;
         let (
             moe_expert_ids,
@@ -556,7 +581,7 @@ impl ScratchPool {
             });
         }
 
-        let (gdn_state, gdn_decode_scratch, gdn_prefill_scratch) = if let Some(g) = config.gdn {
+        let (gdn_state, gdn_decode_scratch, gdn_decode_batched_scratch, gdn_prefill_scratch) = if let Some(g) = config.gdn {
             let mut state_vec = Vec::with_capacity(config.num_layers);
             let state_bytes = n_slots * g.num_v_heads * g.head_k_dim * g.head_v_dim * f32;
             let hist_bytes = n_slots * (g.conv_kernel - 1) * g.conv_channels * f32;
@@ -615,6 +640,19 @@ impl ScratchPool {
                 dims,
             )?;
             allocs.extend(std::mem::take(&mut tracker.allocs));
+            let batched_owned = if n_slots > 1 {
+                let mut b_tracker = flambeau_model_ops::RawAllocTracker::new();
+                let b = flambeau_model_ops::DeltaNetLayer::alloc_decode_batched_scratch(
+                    device,
+                    &mut b_tracker,
+                    dims,
+                    n_slots,
+                )?;
+                allocs.extend(std::mem::take(&mut b_tracker.allocs));
+                Some(b)
+            } else {
+                None
+            };
             let prefill_owned = if config.max_prefill_tokens > 1 {
                 let mut p_tracker = flambeau_model_ops::RawAllocTracker::new();
                 let p = flambeau_model_ops::DeltaNetLayer::alloc_prefill_scratch(
@@ -628,9 +666,9 @@ impl ScratchPool {
             } else {
                 None
             };
-            (state_vec, Some(owned), prefill_owned)
+            (state_vec, Some(owned), batched_owned, prefill_owned)
         } else {
-            (Vec::new(), None, None)
+            (Vec::new(), None, None, None)
         };
 
         // MoE prefill scratch — must happen AFTER the `alloc_bytes`
@@ -711,6 +749,9 @@ impl ScratchPool {
             kv_caches,
             gdn_state,
             gdn_decode_scratch,
+            gdn_decode_batched_scratch,
+            gdn_slot_state_ptrs,
+            gdn_slot_history_ptrs,
             gdn_prefill_scratch,
             current_residual_is_a: true,
             input_pre_normed: false,
