@@ -159,6 +159,14 @@ aggregate at N=4 on Qwen3.6-27B-Q4_0 pp2tp2** — +21 % over the
 33.77 t/s Slice A+B+C result, +30 % over the 31.35 t/s per-slot
 fallback. All 4/4 streams complete topic-coherent.
 
+**Q8_0 row-tile status (2026-05-29): SHIPPED, perf-NULL on this
+model.** Q8_0 sibling kernel + dispatch landed (5/5 parity bit-
+equal). 27B-Q4_0 N=4: 40.19 t/s vs 40.84 = -1.6 % (noise). The
+model's only Q8_0 weights are GDN α/β with `n_rows ≈ n_heads ≈ 32`
+— below the row-tile's `n_rows >> N×R` working regime. Kernel is
+the right dispatch shape for any future wide-Q8_0 model but
+doesn't move 27B-Q4_0's needle.
+
 Slice A wired
 `mmvq_q4_0_gate_up_row_tile_batched` (Q4_0 gate+up row-tile, already
 in tree) into the GDN batched composite. Slice B replaced the
