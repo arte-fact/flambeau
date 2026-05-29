@@ -105,3 +105,119 @@ pub fn attn_decode_f16_batched(
         scale,
     )
 }
+
+/// PagedAttention sibling of [`kv_append_f16_batched_slots`]. Writes
+/// the per-slot K + V row into the page that the slot's block table
+/// currently maps to.
+///
+/// `block_tables` is a `[n_slots, max_pages_per_slot]` `u32` device
+/// region. The host populates
+/// `block_tables[slot_ids[i] * max_pages_per_slot + write_pos[i] /
+/// page_size]` with a valid page index BEFORE calling — the kernel
+/// never allocates pages. `page_size` MUST be a power of two.
+#[allow(clippy::too_many_arguments)]
+pub fn kv_append_f16_paged_slots(
+    k_src: &Tensor<F16>,
+    v_src: &Tensor<F16>,
+    k_pool: flambeau_core::DevicePtr,
+    v_pool: flambeau_core::DevicePtr,
+    block_tables: flambeau_core::DevicePtr,
+    slot_write_pos: flambeau_core::DevicePtr,
+    n_slots: usize,
+    kv_width: usize,
+    page_size: usize,
+    max_pages_per_slot: usize,
+    ops: &HipOps<'_>,
+) -> Result<()> {
+    if n_slots == 0 {
+        bail!("kv_append_f16_paged_slots: n_slots must be > 0");
+    }
+    if !page_size.is_power_of_two() {
+        bail!("kv_append_f16_paged_slots: page_size {page_size} must be a power of two");
+    }
+    if max_pages_per_slot == 0 {
+        bail!("kv_append_f16_paged_slots: max_pages_per_slot must be > 0");
+    }
+    let need = n_slots * kv_width;
+    if k_src.n_elems < need || v_src.n_elems < need {
+        bail!(
+            "kv_append_f16_paged_slots: k_src/v_src must have >= {need} F16 elems \
+             (got k={}, v={})",
+            k_src.n_elems,
+            v_src.n_elems,
+        );
+    }
+    ops.kv_append_f16_paged_slots(
+        k_src.ptr,
+        v_src.ptr,
+        k_pool,
+        v_pool,
+        block_tables,
+        slot_write_pos,
+        n_slots,
+        kv_width,
+        page_size,
+        max_pages_per_slot,
+    )
+}
+
+/// PagedAttention sibling of [`attn_decode_f16_batched`]. Reads K/V
+/// per-token rows through the slot's block-table indirection.
+/// `page_size` MUST be a power of two.
+#[allow(clippy::too_many_arguments)]
+pub fn attn_decode_f16_paged(
+    q_batched: &Tensor<F16>,
+    k_pool: flambeau_core::DevicePtr,
+    v_pool: flambeau_core::DevicePtr,
+    block_tables: flambeau_core::DevicePtr,
+    out_batched: &mut Tensor<F16>,
+    n_tokens_kv: flambeau_core::DevicePtr,
+    n_heads_q: usize,
+    n_heads_kv: usize,
+    head_dim: usize,
+    n_slots: usize,
+    page_size: usize,
+    max_pages_per_slot: usize,
+    scale: f32,
+    ops: &HipOps<'_>,
+) -> Result<()> {
+    if !matches!(head_dim, 64 | 128 | 256 | 512) {
+        bail!("attn_decode_f16_paged: head_dim {head_dim} not in {{64, 128, 256, 512}}");
+    }
+    if n_slots == 0 || n_slots > 32 {
+        bail!("attn_decode_f16_paged: n_slots {n_slots} out of range [1, 32]");
+    }
+    if n_heads_q == 0 || n_heads_kv == 0 || n_heads_q % n_heads_kv != 0 {
+        bail!("attn_decode_f16_paged: head counts invalid (q={n_heads_q}, kv={n_heads_kv})");
+    }
+    if !page_size.is_power_of_two() {
+        bail!("attn_decode_f16_paged: page_size {page_size} must be a power of two");
+    }
+    if max_pages_per_slot == 0 {
+        bail!("attn_decode_f16_paged: max_pages_per_slot must be > 0");
+    }
+    let need = n_slots * n_heads_q * head_dim;
+    if q_batched.n_elems < need || out_batched.n_elems < need {
+        bail!(
+            "attn_decode_f16_paged: q/out must have >= {need} F16 elems \
+             (got q={}, out={})",
+            q_batched.n_elems,
+            out_batched.n_elems,
+        );
+    }
+    ops.attention_decode_f16_paged(
+        q_batched.ptr,
+        k_pool,
+        v_pool,
+        block_tables,
+        out_batched.ptr,
+        n_tokens_kv,
+        n_heads_q,
+        n_heads_kv,
+        head_dim,
+        n_slots,
+        page_size,
+        max_pages_per_slot,
+        scale,
+    )
+}

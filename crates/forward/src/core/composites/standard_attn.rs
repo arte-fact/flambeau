@@ -513,6 +513,129 @@ pub fn standard_attn_local<H: TopologyHooks>(
                 &ops,
             )?;
         }
+    } else if let Some(paged_caches) = state.pool.paged_kv_caches.as_ref() {
+        // Paged path: K/V live in a shared page pool; per-slot KV is
+        // looked up via a `[max_slots, max_pages_per_slot]` u32 block
+        // table. The host acquires a new page from this layer's
+        // PagePool on every `position % page_size == 0` boundary,
+        // writes the page index into the per-slot row of the block
+        // table, then uploads the patched row (or whole table) before
+        // the kv_append + attention kernels fire.
+        let paged_cache = paged_caches[kv_local_idx];
+        let page_size = paged_cache.page_size;
+        let mpps = paged_cache.max_pages_per_slot;
+        let mut host_write_pos: Vec<i32> = Vec::with_capacity(n);
+        let mut host_n_kv: Vec<i32> = Vec::with_capacity(n);
+        // Patch the block table for any slot crossing a page boundary
+        // this step. We acquire pages from this layer's PagePool and
+        // memcpy the updated u32 to the device-side block_tables.
+        for i in 0..n {
+            let slot = slot_ids[i];
+            let pos = positions[i];
+            host_write_pos.push(pos as i32);
+            host_n_kv.push((pos + 1) as i32);
+            if pos >= page_size * mpps {
+                bail!(
+                    "standard_attn paged: slot {slot} position {pos} exceeds \
+                     page_size*max_pages_per_slot ({page_size}*{mpps})"
+                );
+            }
+            let page_idx_in_slot = pos / page_size;
+            if pos % page_size == 0 {
+                let page = state.pool.page_pools[kv_local_idx]
+                    .acquire_for(slot)
+                    .ok_or_else(|| {
+                        anyhow::anyhow!(
+                            "standard_attn paged: PagePool for layer {layer_idx} exhausted at \
+                             slot {slot} pos {pos} (n_pages={}, free={})",
+                            paged_cache.n_pages,
+                            state.pool.page_pools[kv_local_idx].n_free()
+                        )
+                    })?;
+                let host_page = [page];
+                let table_entry_offset_bytes =
+                    (slot * mpps + page_idx_in_slot) * std::mem::size_of::<u32>();
+                let dst = paged_cache
+                    .block_tables
+                    .offset_bytes(table_entry_offset_bytes);
+                // SAFETY: block_tables owns max_slots * mpps * 4 bytes;
+                // table_entry_offset_bytes < max_slots * mpps * 4.
+                unsafe {
+                    state.device.memcpy_async(
+                        state.stream,
+                        CopyDirection::HostToDevice,
+                        dst,
+                        DevicePtr(host_page.as_ptr() as usize),
+                        std::mem::size_of::<u32>(),
+                    )?;
+                }
+            }
+        }
+        // Reuse attn_slot_write_pos / attn_slot_n_kv scratch for the
+        // per-slot scalar arrays (sized for max_slots * i32 already).
+        if state.pool.attn_slot_write_pos.as_usize() == 0 {
+            bail!(
+                "standard_attn paged: non-prefill shape requires max_slots > 1 in ScratchConfig \
+                 (got max_slots={})",
+                state.pool.config.max_slots
+            );
+        }
+        // SAFETY: attn_slot_write_pos / attn_slot_n_kv both own >= n * 4
+        // bytes when max_slots > 1 (allocated in scratch.rs:483).
+        unsafe {
+            state.device.memcpy_async(
+                state.stream,
+                CopyDirection::HostToDevice,
+                state.pool.attn_slot_write_pos,
+                DevicePtr(host_write_pos.as_ptr() as usize),
+                n * 4,
+            )?;
+            state.device.memcpy_async(
+                state.stream,
+                CopyDirection::HostToDevice,
+                state.pool.attn_slot_n_kv,
+                DevicePtr(host_n_kv.as_ptr() as usize),
+                n * 4,
+            )?;
+        }
+        flambeau_core::Stream::synchronize(state.stream)?;
+        let k_src_full = unsafe { Tensor::<F16>::from_raw(state.pool.k_f16, n * kv_width) };
+        let v_src_full = unsafe { Tensor::<F16>::from_raw(state.pool.v_f16, n * kv_width) };
+        if !is_kv_shared {
+            flambeau_model_ops::kv_append_f16_paged_slots(
+                &k_src_full,
+                &v_src_full,
+                paged_cache.k_pool,
+                paged_cache.v_pool,
+                paged_cache.block_tables,
+                state.pool.attn_slot_write_pos,
+                n,
+                kv_width,
+                page_size,
+                mpps,
+                &ops,
+            )?;
+        }
+        let _ = (&k_src_full, &v_src_full);
+        let q_batched = unsafe { Tensor::<F16>::from_raw(state.pool.q_f16, n * q_width) };
+        let mut attn_out_batched =
+            unsafe { Tensor::<F16>::from_raw(state.pool.attn_out_f16, n * q_width) };
+        flambeau_model_ops::attn_decode_f16_paged(
+            &q_batched,
+            paged_cache.k_pool,
+            paged_cache.v_pool,
+            paged_cache.block_tables,
+            &mut attn_out_batched,
+            state.pool.attn_slot_n_kv,
+            weights.n_heads,
+            weights.n_kv_heads,
+            weights.head_dim,
+            n,
+            page_size,
+            mpps,
+            scale,
+            &ops,
+        )?;
     } else {
         // Multi-slot or non-contiguous positions → one-shot batched
         // KV-append + batched-decode attention. Caller's pool sized

@@ -454,17 +454,41 @@ Remaining slices:
   via `kv_caches`. With `paged_kv: None` everywhere today, the new
   fields stay empty / `None`, zero runtime cost.
 
-- **Slice E3c** (next session) — `standard_attn` dispatch on
-  `state.pool.paged_kv_caches.is_some()` to route the per-step
-  KV append + attention through the paged kernels. Server-side
-  `claim_slot_blocking` reserves a slot pre-allocated to zero
-  pages; the scheduler dispatches a single
-  `kv_append_f16_paged_slots` per step that, in addition to writing
-  the new KV row, calls `page_pools[li].acquire_for(slot)` when
-  crossing a page boundary (`position % page_size == 0`). Once
-  E3c lands, the parallel contiguous `kv_caches` allocation can
-  be skipped when paged is on (saving the VRAM that motivated
-  Phase 6 in the first place).
+- **Slice E3c status (2026-05-29): SHIPPED — plumbing only,
+  unreachable in the current runtime.**
+  - Model-ops wrappers at
+    `crates/model-ops/src/ops/attn_decode_batched.rs`:
+    `kv_append_f16_paged_slots` + `attn_decode_f16_paged`. Re-
+    exported from `crates/model-ops/src/lib.rs`.
+  - `crates/forward/src/core/composites/standard_attn.rs` multi-
+    slot batched decode path: new `else if let Some(paged_caches)
+    = state.pool.paged_kv_caches.as_ref()` arm before the
+    existing contiguous batched path. The paged arm:
+    1. Iterates `slot_ids` building host `write_pos` / `n_kv` and
+       acquiring a fresh page from `state.pool.page_pools[kv_local_idx]`
+       on every `position % page_size == 0` boundary; the
+       acquired page index is memcpy'd to the device-side
+       block-table entry `[slot * mpps + position / page_size]`
+       inline.
+    2. Memcpys `write_pos` and `n_kv` to the existing
+       `attn_slot_write_pos` / `attn_slot_n_kv` scratch (reused;
+       sized for `max_slots > 1`).
+    3. Calls `kv_append_f16_paged_slots` then
+       `attn_decode_f16_paged` against the paged cache + block
+       tables. K/V src reused from `state.pool.k_f16` /
+       `state.pool.v_f16` slot-major.
+  - **The arm is unreachable today** because `paged_kv` stays
+    `None` in every arch's `scratch_config_for` and
+    `paged_kv_caches` is always `None`. Activation needs E3d to
+    land first (see below) so prefill writes K/V into pages too —
+    otherwise prefill writes to the contiguous slab while decode
+    reads pages, breaking the end-to-end path.
+  - Server-side `page_pools[li].release_slot(slot)` hook in
+    `release_slot` (`crates/server/src/routes.rs`) deferred to
+    the same session that lands E3d — the per-layer release loop
+    only makes sense once paged decode is reachable, and the
+    cross-crate ownership shape (Server → Model → ScratchPool)
+    isn't worth resolving twice.
 - **Slice E3d** (next session) — paged prefill kernel
   (`kv_append_f16_paged_prefill` for L tokens per slot). Without
   it, paged decode can't be tested end-to-end because prefill
