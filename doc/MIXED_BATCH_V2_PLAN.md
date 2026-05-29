@@ -159,28 +159,36 @@ decode `gdn_layer` calls) within abs+rel tolerance. **PASS.**
 
 ### Phase K3 — Driver + parity + microbench
 
-**Driver.** A free function (or `Arch::forward_mixed`) that builds the
-mixed `(tokens, positions, slot_ids)` arrays and calls the v2 forward
-with the new `mixed_split` parameter routed through. Output-head row
-selection emits logits only for `(K-1)`-th row (last prefill chunk
-token) + N decode rows.
+**Slice K3a status (2026-05-29): SHIPPED.**
+`flambeau_qwen35_v2::forward_mixed` and
+`flambeau_qwen35moe_v2::forward_mixed`. Parallel entry to `forward`
+that takes `prefill_rows: usize` and routes attention/GDN through
+the `_mixed` ctx methods. Embed / FFN / residual_add unchanged at
+`n = K + N`. Output head emits `N + 1` rows: (K-1)-th prefill row
+(slot_p's next-token logit) + N decode rows.
 
-Add an arch-trait method or pass through `ScratchPool` config
-(`prefill_chunk_budget` field) so scratches size to T = chunk + N at
-boot time.
+Re-exported from each crate's `lib.rs`. Covers Qwen3.5-9B,
+Qwen3.6-27B hybrid, Qwen3.6-35B-A3B MoE.
 
-**Borrow disjointness check.** Driver bails if the prefill slot_id
-overlaps with any decode slot_id.
+Composite-level parity (K1a `synth_dense_mixed` + K2 `synth_gdn_mixed`)
+already proves the math. Model-level parity test deferred to K3b
+because `Qwen35V2Model` has crate-private fields (`allocs`,
+`device_id`) — a synth-data integration test would need a test-only
+constructor or going through the GGUF loader. K3b loads a real GGUF
+anyway and is the right level to validate end-to-end.
 
-**Parity test.** `crates/forward/tests/mixed_batch_parity.rs`. Mirror
-the v1 test shape:
-- K=32 / N=1: bit-exact vs separate-session reference.
-- K=32 / N=2: bit-exact.
-- K=128 / N=4: hybrid abs+rel tolerance (abs_tol=0.5, rel_tol=1e-2).
+**Slice K3b deferred (next session): real-GGUF microbench.**
+Sweep {K=128/N=16, K=256/N=8, K=512/N=4} on Qwen3.5-9B-Q4_1 /
+pp2tp2. Target: match v1's 1.06-1.17× per-call. Requires either an
+`Arch::forward_mixed` trait method (and corresponding `Session::forward_mixed`)
+or a microbench harness that bypasses `Session` to call
+`forward_mixed` via a manually-built `ForwardEngine`. The
+`max_prefill_tokens >= K + N` and `max_slots >= N + 1` scratch sizing
+must be baked into the test setup.
 
-**Microbench.** `crates/forward/tests/mixed_batch_microbench.rs`. Sweep
-{K=128/N=16, K=256/N=8, K=512/N=4} on Qwen3.5-9B-Q4_1 / pp2tp2. Target:
-match v1's 1.06-1.17× per-call.
+**Borrow disjointness check.** Already implemented at the composite
+layer in both `standard_attn_mixed` and `gdn_layer_mixed`: each bails
+if the prefill slot_id appears in the decode slot_ids.
 
 ### Phase K4 — Scheduler integration (`build_mixed_iteration`)
 
