@@ -241,6 +241,25 @@ pub trait Ops {
         kv_width: usize,
     ) -> Result<()>;
 
+    /// PagedAttention prefill K + V append. Writes L K + V rows for
+    /// a single slot's prefill into the slot's paged KV cache, walking
+    /// the slot's row of the block table per token. The host must
+    /// pre-populate `block_table` for `[start_pos, start_pos +
+    /// n_tokens)`. `page_size` must be a power of two.
+    #[allow(clippy::too_many_arguments)]
+    fn kv_append_f16_paged_prefill(
+        &self,
+        k_src: DevicePtr,
+        v_src: DevicePtr,
+        k_pool: DevicePtr,
+        v_pool: DevicePtr,
+        block_table: DevicePtr,
+        n_tokens: usize,
+        kv_width: usize,
+        start_pos: usize,
+        page_size: usize,
+    ) -> Result<()>;
+
     /// PagedAttention sibling of `kv_append_f16_batched_slots`. Writes
     /// the per-slot K+V row into the page that the slot's block table
     /// currently maps to. `block_tables` is `[n_slots,

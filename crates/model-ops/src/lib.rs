@@ -45,7 +45,7 @@ pub use ops::add::{add_f16, add_f32};
 pub use ops::attn_decode::attn_decode_f16;
 pub use ops::attn_decode_batched::{
     attn_decode_f16_batched, attn_decode_f16_paged, kv_append_f16_batched_slots,
-    kv_append_f16_paged_slots,
+    kv_append_f16_paged_prefill, kv_append_f16_paged_slots,
 };
 pub use ops::attn_decode_splitk::{attn_decode_f16_splitk, splitk_chunk_size};
 // pub use ops::attn_decode_splitk_h2::attn_decode_f16_splitk_h2;

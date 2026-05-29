@@ -244,6 +244,7 @@ pub const KERNEL_STEMS: &[&str] = &[
     "attention_decode_f16_paged",
     "kv_append_f16_batched_slots",
     "kv_append_f16_paged_slots",
+    "kv_append_f16_paged_prefill",
     "attention_decode_f16_splitk",
     // "attention_decode_f16_splitk_h2",
     "attention_decode_q8_kv",

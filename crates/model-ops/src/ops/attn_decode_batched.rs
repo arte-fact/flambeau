@@ -106,6 +106,58 @@ pub fn attn_decode_f16_batched(
     )
 }
 
+/// PagedAttention prefill K + V append. Writes L K + V rows for a
+/// single slot's prefill into the slot's paged KV cache, walking the
+/// slot's row of the block table per token.
+///
+/// `block_table` is a pointer at the slot's row of the global
+/// `[max_slots, max_pages_per_slot]` block table. The host must
+/// pre-populate it for the position range `[start_pos, start_pos +
+/// n_tokens)` before this call — typically by calling
+/// `PagePool::acquire_for` for each new page boundary and memcpying
+/// the acquired page indices to the device-side block-table region.
+/// `page_size` MUST be a power of two.
+#[allow(clippy::too_many_arguments)]
+pub fn kv_append_f16_paged_prefill(
+    k_src: &Tensor<F16>,
+    v_src: &Tensor<F16>,
+    k_pool: flambeau_core::DevicePtr,
+    v_pool: flambeau_core::DevicePtr,
+    block_table: flambeau_core::DevicePtr,
+    n_tokens: usize,
+    kv_width: usize,
+    start_pos: usize,
+    page_size: usize,
+    ops: &HipOps<'_>,
+) -> Result<()> {
+    if n_tokens == 0 {
+        return Ok(());
+    }
+    if !page_size.is_power_of_two() {
+        bail!("kv_append_f16_paged_prefill: page_size {page_size} must be a power of two");
+    }
+    let need = n_tokens * kv_width;
+    if k_src.n_elems < need || v_src.n_elems < need {
+        bail!(
+            "kv_append_f16_paged_prefill: k_src/v_src must have >= {need} F16 elems \
+             (got k={}, v={})",
+            k_src.n_elems,
+            v_src.n_elems,
+        );
+    }
+    ops.kv_append_f16_paged_prefill(
+        k_src.ptr,
+        v_src.ptr,
+        k_pool,
+        v_pool,
+        block_table,
+        n_tokens,
+        kv_width,
+        start_pos,
+        page_size,
+    )
+}
+
 /// PagedAttention sibling of [`kv_append_f16_batched_slots`]. Writes
 /// the per-slot K + V row into the page that the slot's block table
 /// currently maps to.

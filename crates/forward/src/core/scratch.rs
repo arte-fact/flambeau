@@ -184,6 +184,26 @@ pub fn scratch_config_for<S: ScratchShape + ?Sized>(
     let per_layer_kv = per_layer_kv_widths(shape, n_ranks);
     let kv_width = per_layer_kv.iter().copied().max().unwrap_or(0);
     let moe = shape.moe_per_rank(n_ranks);
+    // Env-gated PagedAttention activation. `FLAMBEAU_PAGED_KV=1`
+    // turns on the paged path; n_pages is clamped to `max_slots *
+    // max_pages_per_slot` (the contiguous-equivalent floor) so the
+    // paged path activates with no VRAM win — sized for correctness
+    // validation, not the structural PagedAttention saving. A
+    // future flag (or per-arch budget) can size n_pages larger.
+    let paged_kv = if std::env::var("FLAMBEAU_PAGED_KV").as_deref() == Ok("1") {
+        let page_size = 16;
+        let max_seq_len = shape.max_seq_len();
+        let mpps = max_seq_len.div_ceil(page_size);
+        Some(PagedKvCacheConfig::from_vram_budget(
+            0,
+            page_size,
+            kv_width,
+            max_slots,
+            mpps,
+        ))
+    } else {
+        None
+    };
     ScratchConfig {
         hidden: shape.hidden(),
         intermediate: shape.intermediate_per_rank(n_ranks),
@@ -201,7 +221,7 @@ pub fn scratch_config_for<S: ScratchShape + ?Sized>(
         max_prefill_tokens: prefill_ubatch,
         max_slots,
         per_layer_embd: shape.per_layer_embd(),
-        paged_kv: None,
+        paged_kv,
     }
 }
 
@@ -471,6 +491,45 @@ impl PagePool {
             self.free.push_back(page);
         }
     }
+
+    /// Ensure the slot owns at least `target_page_count` pages —
+    /// acquiring fresh ones from the free list until it does. Returns
+    /// the indices of any newly-acquired pages in slot-internal page-
+    /// index order (i.e. `[old_count, target_page_count)`). Used by
+    /// prefill paths that span multiple page boundaries in a single
+    /// kernel call and need to pre-populate the slot's block-table
+    /// row before launching.
+    ///
+    /// Returns `Err` (with the count of pages successfully acquired
+    /// before exhaustion) when the free list runs dry OR when the
+    /// slot would exceed `max_pages_per_slot`. The pages it managed
+    /// to acquire are RETAINED — caller can release the slot to
+    /// recycle them.
+    pub fn ensure_pages_up_to(
+        &mut self,
+        slot: usize,
+        target_page_count: usize,
+    ) -> std::result::Result<Vec<(usize, u32)>, usize> {
+        assert!(slot < self.per_slot_held.len(), "PagePool::ensure_pages_up_to: slot {slot} out of bounds");
+        if target_page_count > self.max_pages_per_slot {
+            return Err(self.per_slot_held[slot].len());
+        }
+        let already = self.per_slot_held[slot].len();
+        if already >= target_page_count {
+            return Ok(Vec::new());
+        }
+        let mut new_pages: Vec<(usize, u32)> = Vec::with_capacity(target_page_count - already);
+        for page_idx_in_slot in already..target_page_count {
+            match self.free.pop_front() {
+                Some(p) => {
+                    self.per_slot_held[slot].push(p);
+                    new_pages.push((page_idx_in_slot, p));
+                }
+                None => return Err(self.per_slot_held[slot].len()),
+            }
+        }
+        Ok(new_pages)
+    }
 }
 
 #[cfg(test)]
@@ -531,6 +590,43 @@ mod page_pool_tests {
         // Released pages are reusable in any order.
         let p2 = pool.acquire_for(1).unwrap();
         assert!(p2 == p0 || p2 == p1 || p2 == 2 || p2 == 3);
+    }
+
+    #[test]
+    fn ensure_pages_up_to_acquires_missing() {
+        let mut pool = PagePool::new(8, 2, 4);
+        // Slot starts with 0 pages. Request 3 → acquires 3.
+        let new = pool.ensure_pages_up_to(0, 3).unwrap();
+        assert_eq!(new.len(), 3);
+        assert_eq!(new[0].0, 0);
+        assert_eq!(new[1].0, 1);
+        assert_eq!(new[2].0, 2);
+        assert_eq!(pool.pages_held_by(0).len(), 3);
+        // Request 3 again → no-op.
+        let new = pool.ensure_pages_up_to(0, 3).unwrap();
+        assert!(new.is_empty());
+        // Request 4 → acquires 1 more (page_idx 3).
+        let new = pool.ensure_pages_up_to(0, 4).unwrap();
+        assert_eq!(new, vec![(3, new[0].1)]);
+    }
+
+    #[test]
+    fn ensure_pages_up_to_returns_err_when_exhausted() {
+        let mut pool = PagePool::new(2, 2, 4);
+        // Slot 0 takes all 2 pages.
+        assert!(pool.ensure_pages_up_to(0, 2).is_ok());
+        // Slot 1 wants 1 page but pool is empty.
+        let err = pool.ensure_pages_up_to(1, 1).unwrap_err();
+        assert_eq!(err, 0); // acquired 0 before exhaustion
+    }
+
+    #[test]
+    fn ensure_pages_up_to_returns_err_when_over_cap() {
+        let mut pool = PagePool::new(8, 1, 2);
+        // Cap is 2. Asking for 3 → Err with already-acquired count.
+        let err = pool.ensure_pages_up_to(0, 3).unwrap_err();
+        assert_eq!(err, 0);
+        assert!(pool.pages_held_by(0).is_empty());
     }
 
     #[test]

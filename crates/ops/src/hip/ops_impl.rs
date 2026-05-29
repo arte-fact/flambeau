@@ -408,6 +408,33 @@ impl<'a> Ops for HipOps<'a> {
         )
     }
 
+    fn kv_append_f16_paged_prefill(
+        &self,
+        k_src: DevicePtr,
+        v_src: DevicePtr,
+        k_pool: DevicePtr,
+        v_pool: DevicePtr,
+        block_table: DevicePtr,
+        n_tokens: usize,
+        kv_width: usize,
+        start_pos: usize,
+        page_size: usize,
+    ) -> Result<()> {
+        super::attention::kv_append_f16_paged_prefill(
+            self.reg,
+            self.stream,
+            k_src,
+            v_src,
+            k_pool,
+            v_pool,
+            block_table,
+            n_tokens,
+            kv_width,
+            start_pos,
+            page_size,
+        )
+    }
+
     fn kv_append_f16_paged_slots(
         &self,
         k_src: DevicePtr,

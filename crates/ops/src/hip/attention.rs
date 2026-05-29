@@ -372,6 +372,76 @@ pub fn kv_append_f16_paged_slots(
     Ok(())
 }
 
+/// PagedAttention sibling of `kv_append_f16` for prefill. Writes L
+/// K + V rows for a single slot's prefill into the slot's paged KV
+/// cache, walking the slot's row of the block table per token.
+///
+/// `block_table` is a pointer at the slot's row of the global
+/// `[max_slots, max_pages_per_slot]` block table — i.e. element 0
+/// of `block_tables_global + slot * max_pages_per_slot * 4 bytes`.
+/// The host must pre-populate it for the position range
+/// `[start_pos, start_pos + n_tokens)` BEFORE this kernel fires
+/// (typically by calling `PagePool::acquire_for` for each new
+/// `position % page_size == 0` boundary).
+///
+/// `page_size` MUST be a power of two.
+///
+/// # Safety
+/// Mirrors [`kv_append_f16_paged_slots`]. `k_pool` / `v_pool` must
+/// own `≥ n_pages * page_size * kv_width` F16 elements. `block_table`
+/// must point at ≥ `(start_pos + n_tokens) / page_size + 1` u32
+/// elements. `k_src` / `v_src` must each point at ≥ `n_tokens *
+/// kv_width` F16 elements.
+#[allow(clippy::too_many_arguments)]
+pub fn kv_append_f16_paged_prefill(
+    reg: &OpsRegistry,
+    stream: &HipStream,
+    k_src: DevicePtr,
+    v_src: DevicePtr,
+    k_pool: DevicePtr,
+    v_pool: DevicePtr,
+    block_table: DevicePtr,
+    n_tokens: usize,
+    kv_width: usize,
+    start_pos: usize,
+    page_size: usize,
+) -> Result<()> {
+    assert!(
+        page_size > 0 && page_size.is_power_of_two(),
+        "kv_append_f16_paged_prefill: page_size {page_size} must be a positive power of two"
+    );
+    let module = reg.expect_module("kv_append_f16_paged_prefill")?;
+    let kernel = module.kernel("flambeau_kv_append_f16_paged_prefill")?;
+
+    let n_tokens_i = n_tokens as i32;
+    let kv_width_i = kv_width as i32;
+    let start_pos_i = start_pos as i32;
+    let page_size_i = page_size as i32;
+    let k_src_ptr: u64 = k_src.as_usize() as u64;
+    let v_src_ptr: u64 = v_src.as_usize() as u64;
+    let k_pool_ptr: u64 = k_pool.as_usize() as u64;
+    let v_pool_ptr: u64 = v_pool.as_usize() as u64;
+    let bt_ptr: u64 = block_table.as_usize() as u64;
+    let mut args = KernelArgs::new();
+    args.push(&k_src_ptr);
+    args.push(&v_src_ptr);
+    args.push(&k_pool_ptr);
+    args.push(&v_pool_ptr);
+    args.push(&bt_ptr);
+    args.push(&n_tokens_i);
+    args.push(&kv_width_i);
+    args.push(&start_pos_i);
+    args.push(&page_size_i);
+    let block_threads: u32 = kv_width.min(128) as u32;
+    let cfg = LaunchCfg {
+        grid: (n_tokens as u32, 1, 1),
+        block: (block_threads.max(1), 1, 1),
+        shared_bytes: 0,
+    };
+    unsafe { kernel.launch(stream, cfg, args)? };
+    Ok(())
+}
+
 /// Batched K+V append across N decode slots, each writing one new
 /// token row into its own KV cache. Companion to
 /// [`attention_decode_f16_batched`] — replaces the N×2

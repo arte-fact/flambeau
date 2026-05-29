@@ -489,14 +489,75 @@ Remaining slices:
     only makes sense once paged decode is reachable, and the
     cross-crate ownership shape (Server → Model → ScratchPool)
     isn't worth resolving twice.
-- **Slice E3d** (next session) — paged prefill kernel
-  (`kv_append_f16_paged_prefill` for L tokens per slot). Without
-  it, paged decode can't be tested end-to-end because prefill
-  writes K/V to contiguous and decode reads from pages — they're
-  separate memory regions. Either share the address space (write
-  prefill output directly to pages, requires per-token page
-  acquire inside the prefill kernel) or copy contiguous prefill
-  output to pages after the prefill finishes.
+- **Slice E3d status (2026-05-29): SHIPPED — Phase 6 functionally
+  activates end-to-end.** Greedy-decode output bit-equal between
+  paged (`FLAMBEAU_PAGED_KV=1`) and contiguous baseline on
+  Qwen3.5-9B-Q4_1 / pp / hip:0 / ctx-cap 4096 (`"The capital of
+  France is **Paris**. Paris is the most populous city in France
+  and serves as the country's political"` — identical 24-token
+  completion on both paths).
+  - **Kernel:** `flambeau_kv_append_f16_paged_prefill` at
+    `crates/kernels-hip/src/kernels/`. Grid `(L,)`, block 128
+    threads strided across kv_width. Each block handles one
+    prefill token, walking the slot's row of the block table
+    inline. 3/3 parity tests pass bit-equal vs the contiguous
+    DtoD baseline (L=4 / L=31 spanning two pages / L=64 spanning
+    three pages).
+  - **Rust wrapper + Ops trait + HipOps impl + model-ops
+    wrapper** mirror the existing batched/paged kernels'
+    structure.
+  - **`PagePool::ensure_pages_up_to(slot, target_page_count)`**
+    helper for batch acquisition (prefill needs
+    `ceil(L / page_size)` pages at once). Returns the newly-
+    acquired `(slot_internal_page_idx, page_index)` pairs the
+    caller memcpys to the device-side block-table region. 3 new
+    unit tests cover the helper.
+  - **`standard_attn` prefill paged arm** at
+    `crates/forward/src/core/composites/standard_attn.rs`. When
+    `prefill_shape && state.pool.paged_kv_caches.is_some()`:
+    pre-acquires pages via `ensure_pages_up_to`, memcpys new
+    block-table entries inline, calls `kv_append_f16_paged_prefill`,
+    then runs attention as a per-token loop over
+    `attn_decode_f16_paged` (slow but correct E3d stub —
+    replaceable by a real paged-prefill attention kernel in a
+    later slice). Bails with helpful error when V unit-norm
+    fusion (gemma4) or sliding-window attention is configured —
+    both need their own paged-aware kernels.
+  - **Env-gated activation** in `scratch_config_for`:
+    `FLAMBEAU_PAGED_KV=1` → `Some(PagedKvCacheConfig::from_vram_budget(0,
+    16, kv_width, max_slots, max_seq_len.div_ceil(16)))`. The
+    `0` budget clamps `n_pages` to `max_slots * max_pages_per_slot`
+    — exactly the contiguous-equivalent floor. **No VRAM win
+    yet** because of the clamp; activating with a larger
+    per-layer budget is one constant change away once the
+    contiguous-slab allocation in `ScratchPool::new` is gated
+    on `paged_kv.is_none()`.
+
+Remaining slices for production rollout:
+- **Skip contiguous KV allocation when paged is on** — today
+  `ScratchPool::new` allocates BOTH contiguous and paged when
+  `paged_kv: Some`. That's the missing VRAM win. One-line guard
+  on the contiguous-slab `alloc_bytes` loop. Trivial once the
+  rest of the path stops referencing `kv_caches` via the paged
+  arms.
+- **Server-side `page_pools[li].release_slot(slot)` hook** —
+  without it, pages leak across requests. Today's single-
+  request smoke works because pages are reused (slot's
+  `pages_held_by` row covers any new request that's shorter or
+  equal-length); multi-request workloads will exhaust the
+  pool. Cross-crate (Server → Model → ScratchPool): add a
+  `Model::release_paged_slot(slot)` trait method, default no-op,
+  V2Model downcasts inflights to V2Conv and reaches into the
+  shared Session's ScratchPool's `page_pools`.
+- **Real paged-prefill attention kernel** — replaces the per-
+  token loop. Multi-row flash-attention with shared-LDS reuse,
+  block-table indirection folded into the inner K/V address.
+  Substantial — ports the existing `attn_prefill_f16` body
+  with the indirection.
+- **Paged splitk decode** for long-context single-slot decode
+  (n_tokens_kv > 256). Currently paged decode skips splitk.
+- **Per-arch paged dispatch** — gemma4 V-norm fusion,
+  sliding-window attention. Both need their own paged kernels.
 - **Slice E4** (stretch) — prefix-cache hash table keyed by page
   content. Reuses pages across requests with identical leading
   tokens. Closes #219.
