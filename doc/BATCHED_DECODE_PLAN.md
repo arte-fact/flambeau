@@ -365,6 +365,73 @@ Acceptance for Phase 5:
 
 ### Phase 6 — PagedAttention (multi-session, structural)
 
+**Slice E1 status (2026-05-29): SHIPPED — types only.**
+`crates/forward/src/core/scratch.rs` now defines two new pub types
+sitting alongside the existing `KvCache`:
+
+- `PagedKvCacheConfig { page_size, n_pages, max_pages_per_slot }`
+  — page geometry. `page_size = 16` is the recommended default
+  (matches vLLM). `n_pages` is sized from VRAM budget at
+  construction, NOT `max_slots × max_seq_len`.
+- `PagedKvCache { k_pool, v_pool, block_tables, block_table_lens,
+  kv_width, page_size, n_pages, max_slots, max_pages_per_slot }`
+  — runtime handle. `k_pool` / `v_pool` are
+  `[n_pages, page_size, kv_width]` F16 shared pools.
+  `block_tables` is `[max_slots, max_pages_per_slot]` u32 device
+  memory; row `s` lists the page indices currently held by slot `s`.
+  `block_table_lens` is the per-slot active page count.
+
+Plus `PagedKvCache::alloc(device, cfg, kv_width, max_slots,
+&mut allocs)` constructor that allocates K/V pools + block tables
+on device, zero-inits the tables (unbacked entries decode as
+page-0 tombstone), and tracks the allocations in `allocs` for
+later disposal. `pool_bytes()` + `per_layer_bytes()` helpers for
+VRAM budget sizing.
+
+E1 is plumbing only — no kernels, no scheduler integration. The
+runtime still allocates contiguous `KvCache` via `ScratchPool::new`.
+Zero behavioural change in the existing path.
+
+Remaining slices:
+- **Slice E2** — paged-aware kernel siblings:
+  `kv_append_f16_paged_slots(k_pool, v_pool, block_tables,
+  block_table_lens, k_src, v_src, slot_write_positions, ...)` and
+  `attention_decode_f16_paged(q, k_pool, v_pool, block_tables,
+  block_table_lens, slot_n_kv, ...)`. The attention kernel does one
+  block-table read per `t / page_size` boundary (table fits in L2,
+  read amortises over `page_size = 16` token loads). Expected
+  per-step kernel-level cost: ≤ 5 % vs the contiguous baseline —
+  small enough that the higher-N gain dominates.
+- **Slice E3** — host-side `PagePool { free_list: VecDeque<u32>,
+  per_slot_held: Vec<Vec<u32>>, ... }` allocator + a `ScratchPool`
+  field `paged_kv_caches: Vec<PagedKvCache>` alongside the existing
+  `kv_caches`. Server-side `claim_slot_blocking` reserves a slot
+  pre-allocated to zero pages; the scheduler dispatches a single
+  `kv_append_f16_paged_slots` per step that, in addition to writing
+  the new KV row, fetches a fresh page from the pool when crossing
+  a page boundary (`position % page_size == 0`).
+- **Slice E4** (stretch) — prefix-cache hash table keyed by page
+  content. Reuses pages across requests with identical leading
+  tokens. Closes #219.
+
+Entry point for E2 (next session): the existing
+`flambeau_ops::attention_decode_f16_batched` at
+`crates/ops/src/hip/attention.rs` accepts `slot_k_dst_ptrs` /
+`slot_v_dst_ptrs` arrays of per-slot K/V base pointers. For paged,
+replace those args with `(block_tables, block_table_lens,
+k_pool, v_pool, page_size)` and add the `t / page_size`
+indirection inside the per-token attention loop. The block-table
+read pattern (one u32 per `page_size = 16` tokens) is cheap and
+sequential within a warp.
+
+Entry point for E3 (next session): `ScratchPool::new` at
+`crates/forward/src/core/scratch.rs:550` currently allocates
+`kv_caches[li] = KvCache { k, v, kv_width }` sized for worst-case
+`max_slots × max_seq_len`. Add a parallel branch that allocates
+`paged_kv_caches[li] = PagedKvCache::alloc(...)` from a VRAM
+budget input on `ScratchConfig`. Wire `standard_attn` to dispatch
+on a new `state.pool.paged_kv_caches` Option.
+
 After Phases 1-4 we're at the kernel-batching ceiling: each batched
 launch is efficient, but `max_slots` is structurally capped by VRAM
 because every slot pre-allocates `[max_seq_len, kv_width]` F16. On

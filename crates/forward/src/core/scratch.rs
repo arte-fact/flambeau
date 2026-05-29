@@ -203,6 +203,150 @@ pub struct KvCache {
     pub kv_width: usize,
 }
 
+/// Geometry for a paged KV cache.
+///
+/// Today's `KvCache` allocates `[max_slots, max_seq_len, kv_width]`
+/// F16 contiguously — every slot reserves worst-case context, so VRAM
+/// caps `max_slots` at ~4 on MI50 for Qwen3.6-27B-Q4_0 at ctx 32k.
+/// `PagedKvCache` replaces the per-slot slab with a shared
+/// `[n_pages, page_size, kv_width]` pool plus a per-slot block table
+/// of page indices. A slot only consumes pages for its actually-
+/// written tokens, so a sparse N can share the same VRAM as a dense 4.
+///
+/// `page_size = 16` matches vLLM's default — small enough to keep
+/// per-token waste bounded at the tail, large enough that the block-
+/// table-indirected attention kernel hits L2 for the table read.
+/// 16 token pages on Qwen3.6 head_dim=128 GQA-4 = 2 KiB / page,
+/// fitting comfortably in a single block's L1 tile.
+#[derive(Clone, Copy, Debug)]
+pub struct PagedKvCacheConfig {
+    /// Tokens per page. Recommended 16; powers of two for cheap
+    /// `t / page_size = t >> log2(page_size)` in the kernel.
+    pub page_size: usize,
+    /// Total number of pages in the per-layer pool. Sized from
+    /// VRAM budget at construction, NOT from `max_slots × max_seq_len`.
+    pub n_pages: usize,
+    /// Maximum pages a single slot can hold. Bounded by `ceil(max_seq_len / page_size)`.
+    pub max_pages_per_slot: usize,
+}
+
+/// Paged KV cache layout. Sibling of the contiguous [`KvCache`].
+///
+/// `k_pool` and `v_pool` are the shared `[n_pages, page_size, kv_width]`
+/// F16 page pools. `block_tables` is `[max_slots, max_pages_per_slot]`
+/// `u32` device memory: row `s` of length `<= max_pages_per_slot` lists
+/// the page indices currently held by slot `s`. `block_table_lens`
+/// holds the active page count per slot (current `ceil((position + 1)
+/// / page_size)`).
+///
+/// Append: write the slot's next token to
+/// `block_tables[s][position / page_size] * page_size + position % page_size`,
+/// allocating a new page when crossing a page boundary.
+///
+/// Read (attention): for each token `t` in `[0, n_kv)`, the kernel
+/// fetches `page_idx = block_tables[s][t / page_size]` then loads
+/// from `k_pool + (page_idx * page_size + t % page_size) * kv_width`.
+#[derive(Clone, Copy)]
+pub struct PagedKvCache {
+    pub k_pool: DevicePtr,
+    pub v_pool: DevicePtr,
+    pub block_tables: DevicePtr,
+    pub block_table_lens: DevicePtr,
+    pub kv_width: usize,
+    pub page_size: usize,
+    pub n_pages: usize,
+    pub max_slots: usize,
+    pub max_pages_per_slot: usize,
+}
+
+impl PagedKvCache {
+    /// Byte size of the per-layer page pool for K (= for V, doubled
+    /// for the per-layer pair). Excludes the block-table allocation
+    /// (which is per-pool and small: `max_slots * max_pages_per_slot
+    /// * 4` bytes).
+    pub fn pool_bytes(&self) -> usize {
+        self.n_pages * self.page_size * self.kv_width * std::mem::size_of::<u16>()
+    }
+
+    /// Total per-layer allocation including K + V pools + block table
+    /// + block-table-lens. Used to size the page pool from a VRAM budget.
+    pub fn per_layer_bytes(&self) -> usize {
+        2 * self.pool_bytes()
+            + self.max_slots * self.max_pages_per_slot * std::mem::size_of::<u32>()
+            + self.max_slots * std::mem::size_of::<u32>()
+    }
+
+    /// Allocate K + V page pools + block table + block-table-lens for a
+    /// single layer on `device`. The block table is zero-initialised on
+    /// the host buffer so unbacked entries decode as page 0 (a tombstone);
+    /// `block_table_lens` is zero-initialised to mean "no pages yet
+    /// assigned". Caller is responsible for tracking the returned
+    /// allocations and freeing them on dispose.
+    pub fn alloc(
+        device: &HipDevice,
+        cfg: PagedKvCacheConfig,
+        kv_width: usize,
+        max_slots: usize,
+        allocs: &mut Vec<(DevicePtr, usize)>,
+    ) -> Result<Self> {
+        let f16_bytes = std::mem::size_of::<u16>();
+        let pool_bytes = cfg.n_pages * cfg.page_size * kv_width * f16_bytes;
+        let table_bytes = max_slots * cfg.max_pages_per_slot * std::mem::size_of::<u32>();
+        let lens_bytes = max_slots * std::mem::size_of::<u32>();
+        let k_pool = device.alloc(pool_bytes).context("PagedKvCache::alloc k_pool")?;
+        allocs.push((k_pool, pool_bytes));
+        let v_pool = device.alloc(pool_bytes).context("PagedKvCache::alloc v_pool")?;
+        allocs.push((v_pool, pool_bytes));
+        let block_tables = device
+            .alloc(table_bytes)
+            .context("PagedKvCache::alloc block_tables")?;
+        allocs.push((block_tables, table_bytes));
+        let block_table_lens = device
+            .alloc(lens_bytes)
+            .context("PagedKvCache::alloc block_table_lens")?;
+        allocs.push((block_table_lens, lens_bytes));
+        // Zero the block table + lens. Pool stays uninit — the append
+        // kernel writes every element of each newly-acquired page
+        // before the attention kernel reads it.
+        let zero = vec![0u8; table_bytes.max(lens_bytes)];
+        let stream = device.default_stream();
+        // SAFETY: block_tables owns table_bytes; block_table_lens owns
+        // lens_bytes; zero has at least max(table_bytes, lens_bytes).
+        unsafe {
+            device
+                .memcpy_async(
+                    stream,
+                    CopyDirection::HostToDevice,
+                    block_tables,
+                    DevicePtr(zero.as_ptr() as usize),
+                    table_bytes,
+                )
+                .context("PagedKvCache::alloc zero block_tables")?;
+            device
+                .memcpy_async(
+                    stream,
+                    CopyDirection::HostToDevice,
+                    block_table_lens,
+                    DevicePtr(zero.as_ptr() as usize),
+                    lens_bytes,
+                )
+                .context("PagedKvCache::alloc zero block_table_lens")?;
+        }
+        flambeau_core::Stream::synchronize(stream).context("PagedKvCache::alloc sync zero")?;
+        Ok(Self {
+            k_pool,
+            v_pool,
+            block_tables,
+            block_table_lens,
+            kv_width,
+            page_size: cfg.page_size,
+            n_pages: cfg.n_pages,
+            max_slots,
+            max_pages_per_slot: cfg.max_pages_per_slot,
+        })
+    }
+}
+
 /// Caller must invoke `dispose(device)` before drop to release HBM.
 pub struct ScratchPool {
     pub config: ScratchConfig,
