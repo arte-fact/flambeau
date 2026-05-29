@@ -669,6 +669,29 @@ impl<H: TopologyHooks, S: StageHooks> ForwardCtx for ForwardEngine<'_, H, S> {
         )
     }
 
+    fn standard_attn_mixed(
+        &mut self,
+        input: &Tensor<F16>,
+        weights: &AttnWeights,
+        layer_idx: usize,
+        positions: &[usize],
+        slot_ids: &[usize],
+        prefill_rows: usize,
+        next_norm: Option<&Tensor<F16>>,
+    ) -> Result<Option<Tensor<F16>>> {
+        composites::standard_attn_mixed_local(
+            &mut self.core,
+            &mut self.hooks,
+            input,
+            weights,
+            layer_idx,
+            positions,
+            slot_ids,
+            prefill_rows,
+            next_norm,
+        )
+    }
+
     fn gdn_layer(
         &mut self,
         input: &Tensor<F16>,

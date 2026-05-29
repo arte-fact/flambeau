@@ -68,6 +68,35 @@ pub trait ForwardCtx {
         next_norm: Option<&Tensor<F16>>,
     ) -> Result<Option<Tensor<F16>>>;
 
+    /// Sarathi-Serve mixed batch: rows `[0..prefill_rows)` are a prefill
+    /// chunk for one slot (single slot_id, contiguous positions); rows
+    /// `[prefill_rows..n)` are batched decodes (distinct slot_ids,
+    /// arbitrary positions). One QKV/RoPE/output-proj/AR pass amortises
+    /// the weight reads across all `n = K + N` rows; the attention call
+    /// itself splits into existing `attn_prefill_f16` for K rows +
+    /// `attn_decode_f16_batched` for N rows.
+    ///
+    /// `prefill_rows` is `K`. Must satisfy `0 < K < n`. Slot disjointness
+    /// is the caller's contract (driver bails otherwise) — the prefill
+    /// slot_id MUST NOT appear in the decode slot_ids[K..].
+    ///
+    /// Default impl bails — only the engine ctx implements this today.
+    /// See `doc/MIXED_BATCH_V2_PLAN.md` Phase K1.
+    #[allow(clippy::too_many_arguments)]
+    fn standard_attn_mixed(
+        &mut self,
+        input: &Tensor<F16>,
+        weights: &AttnWeights,
+        layer_idx: usize,
+        positions: &[usize],
+        slot_ids: &[usize],
+        prefill_rows: usize,
+        next_norm: Option<&Tensor<F16>>,
+    ) -> Result<Option<Tensor<F16>>> {
+        let _ = (input, weights, layer_idx, positions, slot_ids, prefill_rows, next_norm);
+        anyhow::bail!("standard_attn_mixed: not implemented on this ctx")
+    }
+
     fn gdn_layer(
         &mut self,
         input: &Tensor<F16>,

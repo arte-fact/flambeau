@@ -10,6 +10,7 @@ pub mod output_head;
 pub mod residual_add;
 pub mod rmsnorm;
 pub mod standard_attn;
+pub mod standard_attn_mixed;
 
 pub use dense_ffn::dense_ffn_local;
 pub use embed::embed_local;
@@ -19,6 +20,7 @@ pub use output_head::output_head_local;
 pub use residual_add::residual_add_local;
 pub use rmsnorm::rmsnorm_local;
 pub use standard_attn::standard_attn_local;
+pub use standard_attn_mixed::standard_attn_mixed_local;
 
 use flambeau_core::DevicePtr;
 use flambeau_model_ops::{Tensor, F16};
