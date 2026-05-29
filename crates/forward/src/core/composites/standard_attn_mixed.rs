@@ -88,9 +88,6 @@ pub fn standard_attn_mixed_local<H: TopologyHooks>(
     if weights.attn_v_unit_norm_w.is_some() {
         bail!("standard_attn_mixed: V unit-norm fusion (gemma4) not yet supported");
     }
-    if weights.attn_q_gated {
-        bail!("standard_attn_mixed: gated Q (gemma4 attn_q_gated) not yet supported");
-    }
     if weights.post_attn_norm.is_some() {
         bail!("standard_attn_mixed: post_attn_norm (gemma4) not yet supported");
     }
@@ -188,9 +185,38 @@ pub fn standard_attn_mixed_local<H: TopologyHooks>(
     let norm_mmq_t = norm_mmq;
     let act_norm_mmq: &Tensor<Q8_1> = &norm_mmq_t;
 
-    // ---- Q projection (n = K + N rows) ----
+    // ---- Q projection (n = K + N rows). Gated path produces a fused
+    // [n, 2*q_width] F32, casts to F16, then splits Q and the per-head
+    // gate (consumed post-attention). Non-gated path emits Q only.
     let q_f32_buf = state.pool.attn_proj_f32;
-    {
+    if weights.attn_q_gated {
+        let fused_n = 2 * q_width;
+        let mut q_fused_f32 = unsafe { Tensor::<F32>::from_raw(q_f32_buf, n * fused_n) };
+        weights.attn_q.qmatmul(
+            &norm_q8_1,
+            act_norm_mmq,
+            &mut q_fused_f32,
+            n,
+            hidden,
+            fused_n,
+            &ops,
+        )?;
+        let q_fused = unsafe { Tensor::<F16>::from_raw(state.pool.q_fused_f16, n * fused_n) };
+        let mut q_fused_mut =
+            unsafe { Tensor::<F16>::from_raw(state.pool.q_fused_f16, n * fused_n) };
+        flambeau_model_ops::cast_f32_to_f16(&q_fused_f32, &mut q_fused_mut, n * fused_n, &ops)?;
+        let mut q_f16 = unsafe { Tensor::<F16>::from_raw(state.pool.q_f16, n * q_width) };
+        let mut gate_f16 = unsafe { Tensor::<F16>::from_raw(state.pool.gate_f16, n * q_width) };
+        flambeau_model_ops::split_q_gate_f16(
+            &q_fused,
+            &mut q_f16,
+            &mut gate_f16,
+            n,
+            weights.n_heads,
+            weights.head_dim,
+            &ops,
+        )?;
+    } else {
         let mut q_f32 = unsafe { Tensor::<F32>::from_raw(q_f32_buf, n * q_width) };
         weights.attn_q.qmatmul(
             &norm_q8_1,
@@ -257,7 +283,23 @@ pub fn standard_attn_mixed_local<H: TopologyHooks>(
             .context("standard_attn_mixed: positions HtoD")?;
     }
     let pos_tensor = unsafe { Tensor::<I32>::from_raw(state.pool.position_i32, n) };
-    {
+    // Q-norm + RoPE: when `attn_q_norm` is set (Qwen3.5/3.6, gemma4),
+    // fuse rmsnorm + rope into one in-place launch. Saves 2 launches
+    // + 1 DtoD per layer per row.
+    use flambeau_ops::Ops;
+    if let Some(q_norm_w) = weights.attn_q_norm.as_ref() {
+        ops.rmsnorm_rope_neox_partial_f16(
+            state.pool.q_f16,
+            q_norm_w.ptr,
+            state.pool.position_i32,
+            weights.rope_theta,
+            weights.rms_eps,
+            n,
+            weights.n_heads,
+            weights.head_dim,
+            weights.rotated_dims,
+        )?;
+    } else {
         let mut q_f16_rope = unsafe { Tensor::<F16>::from_raw(state.pool.q_f16, n * q_width) };
         flambeau_model_ops::rope_neox_partial_f16(
             &mut q_f16_rope,
@@ -270,7 +312,19 @@ pub fn standard_attn_mixed_local<H: TopologyHooks>(
             &ops,
         )?;
     }
-    {
+    if let Some(k_norm_w) = weights.attn_k_norm.as_ref() {
+        ops.rmsnorm_rope_neox_partial_f16(
+            state.pool.k_f16,
+            k_norm_w.ptr,
+            state.pool.position_i32,
+            weights.rope_theta,
+            weights.rms_eps,
+            n,
+            weights.n_kv_heads,
+            weights.head_dim,
+            weights.rotated_dims,
+        )?;
+    } else {
         let mut k_f16_rope = unsafe { Tensor::<F16>::from_raw(state.pool.k_f16, n * kv_width) };
         flambeau_model_ops::rope_neox_partial_f16(
             &mut k_f16_rope,
@@ -284,8 +338,6 @@ pub fn standard_attn_mixed_local<H: TopologyHooks>(
         )?;
     }
     let _ = weights.rope_variant;
-    let _ = weights.attn_q_norm;
-    let _ = weights.attn_k_norm;
 
     let kv = state.pool.kv_caches[kv_local_idx];
     let slot_stride_elems = max_seq_len * kv_width;
@@ -439,8 +491,18 @@ pub fn standard_attn_mixed_local<H: TopologyHooks>(
         )?;
     }
 
-    // ---- Output proj on all K+N rows ----
-    let post_attn = unsafe { Tensor::<F16>::from_raw(state.pool.attn_out_f16, n * q_width) };
+    // ---- Apply Q-gate sigmoid·mul if gated, then output proj on K+N rows ----
+    let post_attn_ptr = if weights.attn_q_gated {
+        let gate = unsafe { Tensor::<F16>::from_raw(state.pool.gate_f16, n * q_width) };
+        let attn_in = unsafe { Tensor::<F16>::from_raw(state.pool.attn_out_f16, n * q_width) };
+        let mut gated_out =
+            unsafe { Tensor::<F16>::from_raw(state.pool.q_fused_f16, n * q_width) };
+        flambeau_model_ops::sigmoid_mul_f16(&gate, &attn_in, &mut gated_out, n * q_width, &ops)?;
+        state.pool.q_fused_f16
+    } else {
+        state.pool.attn_out_f16
+    };
+    let post_attn = unsafe { Tensor::<F16>::from_raw(post_attn_ptr, n * q_width) };
     let mut attn_out_q8_1 =
         unsafe { Tensor::<Q8_1>::from_raw(state.pool.attn_out_q8_1, n * q_width) };
     flambeau_model_ops::quantize_f16_to_q8_1(&post_attn, &mut attn_out_q8_1, n * q_width, &ops)?;
