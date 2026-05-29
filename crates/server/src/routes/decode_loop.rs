@@ -329,6 +329,61 @@ fn scheduler_can_engage(state: &ServerState, params: &SamplingParams) -> bool {
 /// Does NOT (yet) support: spec-decode (MTP), JSON-grammar masking,
 /// logprobs, GPU sampler. Those still go through the legacy
 /// `run_completion_blocking_ids`.
+/// Sarathi-Serve style chunked prefill (Phase 5 S1+S2). Splits the prompt
+/// into fixed-size chunks and releases `inflight_pool[slot_idx]`'s mutex
+/// between chunks so concurrent slots' decode steps can interleave, bounding
+/// the per-step stall a long prompt inflicts on peers. Chunk size from
+/// `FLAMBEAU_PREFILL_CHUNK_TOKENS` env (default 512 — Sarathi paper's
+/// recommendation).
+///
+/// On entry the slot is claimed but unlocked. The first chunk's guard
+/// scope runs `reset_for_next_request`. After return the slot remains
+/// claimed; caller must explicitly relock for decode if it needs to.
+///
+/// `logits_out` is populated with the LAST chunk's final-row logits
+/// — the prefill-side input for first-token sampling.
+fn chunked_prefill_pp(
+    state: &ServerState,
+    slot_idx: usize,
+    prompt_ids: &[u32],
+    logits_out: &mut Vec<f32>,
+) -> Result<()> {
+    const PREFILL_CHUNK_TOKENS: usize = 512;
+    let prefill_chunk = std::env::var("FLAMBEAU_PREFILL_CHUNK_TOKENS")
+        .ok()
+        .and_then(|s| s.parse::<usize>().ok())
+        .filter(|&n| n >= 1)
+        .unwrap_or(PREFILL_CHUNK_TOKENS);
+    let mut prefill_start = 0usize;
+    let mut reset_done = false;
+    while prefill_start < prompt_ids.len() {
+        let end = (prefill_start + prefill_chunk).min(prompt_ids.len());
+        let chunk = &prompt_ids[prefill_start..end];
+        let mut guard = state.inflight_pool[slot_idx].blocking_lock();
+        if !reset_done {
+            guard
+                .reset_for_next_request()
+                .context("reset inflight for new request")?;
+            reset_done = true;
+        }
+        let driver = guard
+            .as_model_driver_mut()
+            .context("chunked_prefill: session is not a v2 ModelDriver")?;
+        driver
+            .forward_prefill_logits(chunk, prefill_start, logits_out)
+            .with_context(|| {
+                format!(
+                    "chunked_prefill chunk [{}..{}] of {}",
+                    prefill_start,
+                    end,
+                    prompt_ids.len()
+                )
+            })?;
+        prefill_start = end;
+    }
+    Ok(())
+}
+
 fn run_completion_scheduler_pp_blocking(
     state: SharedState,
     prompt_ids: Vec<u32>,
@@ -366,54 +421,10 @@ fn run_completion_scheduler_pp_blocking(
         let mut sampler = Sampler::from_seed(params.seed);
         sampler.reserve(vocab);
 
-        // Sarathi-Serve style chunked prefill. Splitting the prompt into
-        // fixed-size chunks and releasing the inflight mutex between
-        // chunks lets other slots' decode steps interleave with this
-        // request's prefill — bounding the per-step stall a long prompt
-        // inflicts on concurrent decode. The kernel cost per chunk is
-        // amortised by the per-chunk MMQ tile8 path (n_pairs scales with
-        // chunk_len * top_k); too-small chunks lose tile8 efficiency,
-        // too-large chunks reintroduce the prefill-stall pathology.
-        // 512 tokens is the Sarathi paper's recommended chunk on
-        // similar-class shapes; we keep it configurable for tuning.
-        const PREFILL_CHUNK_TOKENS: usize = 512;
-        let prefill_chunk = std::env::var("FLAMBEAU_PREFILL_CHUNK_TOKENS")
-            .ok()
-            .and_then(|s| s.parse::<usize>().ok())
-            .filter(|&n| n >= 1)
-            .unwrap_or(PREFILL_CHUNK_TOKENS);
         let mut logits_buf: Vec<f32> = Vec::with_capacity(vocab);
         let _ = cluster;
         let _ = model;
-        let mut prefill_start = 0usize;
-        let mut reset_done = false;
-        while prefill_start < prompt_ids.len() {
-            let end = (prefill_start + prefill_chunk).min(prompt_ids.len());
-            let chunk = &prompt_ids[prefill_start..end];
-            let mut guard = state.inflight_pool[slot_idx].blocking_lock();
-            if !reset_done {
-                guard
-                    .reset_for_next_request()
-                    .context("reset inflight for new request")?;
-                reset_done = true;
-            }
-            let driver = guard
-                .as_model_driver_mut()
-                .context("scheduler-path prefill: session is not a v2 ModelDriver")?;
-            driver
-                .forward_prefill_logits(chunk, prefill_start, &mut logits_buf)
-                .with_context(|| {
-                    format!(
-                        "scheduler-path prefill chunk [{}..{}] of {}",
-                        prefill_start,
-                        end,
-                        prompt_ids.len()
-                    )
-                })?;
-            prefill_start = end;
-            // Guard drops here, releasing the inflight mutex so other
-            // slots' decode steps can fire before the next chunk.
-        }
+        chunked_prefill_pp(&state, slot_idx, &prompt_ids, &mut logits_buf)?;
         if !relax_stop_mask {
             for &sid in stop_ids {
                 if (sid as usize) < logits_buf.len() {
@@ -556,16 +567,12 @@ fn run_completion_blocking_ids(
 
     let request_start = Instant::now();
 
-    // **P2.9b-i1 (multi-slot pool)** — acquire an idle inflight slot.
-    // With N=1 (default) this is identical to P2.9a; with N>1 distinct
-    // requests can hold separate slots and run their forwards through
-    // the same GPU stream concurrently (kernel-serialised; true batched
-    // throughput is P2.9b-i2).
-    let (slot_idx, mut inflight_guard) = state.acquire_inflight_blocking();
-
     if prompt_ids.is_empty() {
         bail!("prompt tokenized to 0 tokens");
     }
+
+    let slot_idx = state.claim_slot_blocking();
+    let result = (|| -> Result<CompletionOutput> {
     let prompt_tokens = prompt_ids.len() as u32;
 
     tracing::info!(
@@ -578,16 +585,6 @@ fn run_completion_blocking_ids(
 
     let cluster: &HipCluster = &state.cluster;
     let model = &state.model;
-
-    // Reset KV state on the pooled inflight before this request's
-    // prefill — clears full-attn `current_tokens` and zeros GDN
-    // recurrent state without freeing scratch buffers.
-    inflight_guard
-        .reset_for_next_request()
-        .context("reset inflight for new request")?;
-    // Shadow with a reborrow so existing `&mut inflight` / `&inflight`
-    // call-site syntax works unchanged.
-    let inflight: &mut dyn crate::Session = &mut **inflight_guard;
 
     // Sampler holds vocab-sized scratch reused across all decode steps
     // (C2 in RUST-PERF-CORRECTIONS.md). Reserve upfront to avoid the
@@ -617,18 +614,16 @@ fn run_completion_blocking_ids(
     // the first response token on multi-turn prompts, producing an empty
     // reply. Suppress it until at least one content token is emitted.
     let prefill_start = Instant::now();
-    // Prefix cache disabled pending #219. Always do a full fresh prefill
-    // through the v2 Session<A> ModelDriver path.
     let _ = cluster;
     let _ = model;
-    {
-        let driver = inflight
-            .as_model_driver_mut()
-            .context("legacy-path prefill: session is not a v2 ModelDriver")?;
-        driver
-            .forward_prefill_logits(&prompt_ids, 0, &mut logits_buf)
-            .context("prefill logits")?;
-    }
+    // **Phase 5 S2** — chunked prefill releases `inflight_pool[slot_idx]`'s
+    // mutex between chunks so concurrent slots' decode steps interleave
+    // (bounds the per-step stall a long prompt inflicts on peers).
+    // Reset for new request happens inside `chunked_prefill_pp` on the
+    // first chunk's lock scope. Decode reacquires the guard below.
+    chunked_prefill_pp(&state, slot_idx, &prompt_ids, &mut logits_buf)?;
+    let mut inflight_guard = state.inflight_pool[slot_idx].blocking_lock();
+    let inflight: &mut dyn crate::Session = &mut **inflight_guard;
     for &sid in stop_ids {
         if (sid as usize) < logits_buf.len() {
             logits_buf[sid as usize] = f32::NEG_INFINITY;
@@ -961,6 +956,9 @@ fn run_completion_blocking_ids(
         "chat_completions response"
     );
     Ok(result)
+    })();
+    state.release_slot(slot_idx);
+    result
 }
 
 /// Streaming variant of the decode loop. Pushes text deltas through
@@ -976,10 +974,6 @@ pub(crate) fn run_completion_blocking_streaming(
 ) -> Result<(String, u32, u32)> {
     let request_start = Instant::now();
 
-    // **P2.9b-i1 (multi-slot pool)** — acquire an idle inflight slot.
-    // Same lifecycle as run_completion_blocking_ids.
-    let (slot_idx, mut inflight_guard) = state.acquire_inflight_blocking();
-
     let prompt_ids = state
         .tokenizer
         .encode_for_inference(&prompt)
@@ -987,6 +981,9 @@ pub(crate) fn run_completion_blocking_streaming(
     if prompt_ids.is_empty() {
         bail!("prompt tokenized to 0 tokens");
     }
+
+    let slot_idx = state.claim_slot_blocking();
+    let result = (|| -> Result<(String, u32, u32)> {
     let prompt_tokens = prompt_ids.len() as u32;
 
     tracing::info!(
@@ -1004,11 +1001,6 @@ pub(crate) fn run_completion_blocking_streaming(
     let always_stop_ids = &state.tokenizer.always_stop_ids;
     let is_stop = |t: u32| stop_ids.contains(&t);
 
-    inflight_guard
-        .reset_for_next_request()
-        .context("reset inflight for new streaming request")?;
-    let inflight: &mut dyn crate::Session = &mut **inflight_guard;
-
     let mut sampler = Sampler::from_seed(params.seed);
     sampler.reserve(state.cfg.vocab_size);
     let sampling = &params.sampling;
@@ -1020,17 +1012,13 @@ pub(crate) fn run_completion_blocking_streaming(
     // non-streaming path for the rationale (multi-turn Qwen3.6 argmaxes
     // `<|im_end|>` immediately otherwise).
     let prefill_start = Instant::now();
-    // Prefix cache disabled pending #219. Always do a full fresh prefill
-    // through the v2 Session<A> ModelDriver path.
     let _ = cluster;
-    {
-        let driver = inflight
-            .as_model_driver_mut()
-            .context("streaming-path prefill: session is not a v2 ModelDriver")?;
-        driver
-            .forward_prefill_logits(&prompt_ids, 0, &mut logits_buf)
-            .context("prefill logits")?;
-    }
+    // **Phase 5 S2** — chunked prefill on the streaming path. Same
+    // mutex-release-between-chunks shape as the legacy path; decode
+    // reacquires once below for the SSE-emit loop.
+    chunked_prefill_pp(&state, slot_idx, &prompt_ids, &mut logits_buf)?;
+    let mut inflight_guard = state.inflight_pool[slot_idx].blocking_lock();
+    let inflight: &mut dyn crate::Session = &mut **inflight_guard;
     for &sid in stop_ids {
         if (sid as usize) < logits_buf.len() {
             logits_buf[sid as usize] = f32::NEG_INFINITY;
@@ -1365,4 +1353,7 @@ pub(crate) fn run_completion_blocking_streaming(
         prompt_tokens,
         generated.len() as u32,
     ))
+    })();
+    state.release_slot(slot_idx);
+    result
 }
