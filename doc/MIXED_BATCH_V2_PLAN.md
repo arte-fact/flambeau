@@ -177,14 +177,33 @@ because `Qwen35V2Model` has crate-private fields (`allocs`,
 constructor or going through the GGUF loader. K3b loads a real GGUF
 anyway and is the right level to validate end-to-end.
 
-**Slice K3b deferred (next session): real-GGUF microbench.**
-Sweep {K=128/N=16, K=256/N=8, K=512/N=4} on Qwen3.5-9B-Q4_1 /
-pp2tp2. Target: match v1's 1.06-1.17× per-call. Requires either an
-`Arch::forward_mixed` trait method (and corresponding `Session::forward_mixed`)
-or a microbench harness that bypasses `Session` to call
-`forward_mixed` via a manually-built `ForwardEngine`. The
-`max_prefill_tokens >= K + N` and `max_slots >= N + 1` scratch sizing
-must be baked into the test setup.
+**Slice K3b status (2026-05-29): SHIPPED.**
+`crates/models/qwen35-v2/tests/mixed_batch_microbench.rs` — env-gated
+by `FLAMBEAU_MIXED_MICROBENCH_GGUF`. Builds a `SingleDeviceForwardCtx`
+manually (bypasses `Session`), sizes the pool to
+`max_prefill_tokens = K + N` and `max_slots = N + 1`, times
+`forward_mixed` vs `forward(K) + forward(N)` with stream sync between
+calls. Single-device hip:0, not pp2tp2 (pp2tp2 would need
+`Arch::forward_mixed` + `Session::forward_mixed` plumbing — deferred).
+
+K3b also required lifting two K1a bailouts that turn out to apply
+to Qwen3.5/3.6 (not just gemma4): `attn_q_gated` (fused Q + per-head
+gate; QKV emits `2*q_width`, `split_q_gate_f16` + post-attn
+`sigmoid_mul_f16`) and `attn_q_norm`/`attn_k_norm` (fused rmsnorm +
+RoPE single-launch path). K1a `synth_dense_mixed` parity still passes
+(synth has both off).
+
+Result on Qwen3.5-9B-Q4_1 / hip:0, ctx_cap=4096, 1 warmup + 5 timed:
+
+| K   | N   | seq (ms) | mix (ms) | speedup |
+|-----|-----|---------:|---------:|--------:|
+| 128 | 16  | 435.28   | 352.40   | **1.235×** |
+| 256 | 8   | 491.73   | 464.19   | 1.059×  |
+| 512 | 4   | 801.95   | 800.10   | 1.002×  |
+
+Range 1.002×–1.235× vs v1 reference 1.063×–1.174×. K=128/N=16 beats
+v1; K=512/N=4 flat (prefill dominates, no decode headroom). Per-call
+ceiling validated on the actual model — Phase K3 done.
 
 **Borrow disjointness check.** Already implemented at the composite
 layer in both `standard_attn_mixed` and `gdn_layer_mixed`: each bails
