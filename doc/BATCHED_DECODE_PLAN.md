@@ -370,12 +370,12 @@ What's left (deferred — touches request lifecycle):
   request without changing aggregate compute.
 
 - **Kernel half** (`forward_decode_mixed_hybrid` from
-  `project_lever1_mixed_batch_v1`) is on an unmerged track in this
-  branch — for the Sarathi paper's 2.6× wins on Mistral-class
-  shapes, the scheduler chunking has to land alongside the
-  co-batched (prefill_chunk, decode_slots) forward kernel. S1
-  alone delivers bounded prefill-stall behaviour but not the
-  paper's compute+bandwidth-overlap gain.
+  `project_lever1_mixed_batch_v1`) — the v1 driver was deleted with
+  the qwen3-moe v1 crate during the v2 migration. Multi-session
+  v2 port plan: see [`doc/MIXED_BATCH_V2_PLAN.md`](MIXED_BATCH_V2_PLAN.md).
+  Per-call ceiling is bounded (v1 hit 1.06-1.17× on Qwen3.5-9B-Q4_1);
+  the aggregate-throughput win needs the scheduler integration
+  (Phase K4 in the mixed-batch plan), not just the driver.
 
 Why this slots between Phases 2-4 and Phase 6 (PagedAttention):
 - Phase 5 unlocks throughput at *mixed* workloads (prefill +
