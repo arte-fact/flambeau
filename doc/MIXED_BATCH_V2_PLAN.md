@@ -211,6 +211,34 @@ if the prefill slot_id appears in the decode slot_ids.
 
 ### Phase K4 — Scheduler integration (`build_mixed_iteration`)
 
+**Slice K4a+K4b status (2026-05-29): SHIPPED.** Runtime plumbing
+threads `forward_mixed` from `Arch` trait → workers → Session in
+the same shape as `forward`:
+
+- `Arch::forward_mixed(model, ctx, tokens, positions, slot_ids,
+  prefill_rows)` trait method with default-bail. Overridden in
+  qwen35-v2 and qwen35moe-v2 to delegate to each crate's
+  `forward_mixed` (K3a). gemma4-v2 inherits the bail.
+- `Command::ForwardMixed` worker variant + `run_forward_mixed_once`
+  per-WorkerRole dispatcher (Sd/Tp/Pp/Hybrid). Same ctx
+  construction as `run_forward_once`.
+- `WorkerHandle::send_forward_mixed` + `orchestrate::run_forward_mixed`
+  topology-aware fanout.
+- `Session::forward_mixed(tokens, positions, slot_ids, prefill_rows)`
+  with bounds checks; results readable via `Session::mixed_logits_row(i, vocab)`.
+  Layout: `[(N + 1), vocab]` row-major — row 0 = prefill slot's
+  next-token, rows 1..=N = decode slots.
+
+K4b smoke: `crates/models/qwen35-v2/tests/forward_mixed_session_smoke.rs`
+loads Qwen3.5-9B-Q4_1 via the production
+`Session<Qwen35V2>::new(SingleDevice)` path, fires
+`Session::forward_mixed` once with K=8/N=3, asserts the 4 rows
+(vocab=248320 wide each) come back finite + non-constant. **PASS.**
+
+Validates the entire plumbing chain on the real worker
+infrastructure — no bypass.
+
+**Remaining slice K4c (next session): server-side scheduler tick.**
 The throughput lever. The mixed driver delivers a fixed per-call
 speedup; the scheduler is what makes EVERY decode iteration use the
 mixed shape instead of going through separate prefill+decode paths.
