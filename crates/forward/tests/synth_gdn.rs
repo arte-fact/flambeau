@@ -110,6 +110,7 @@ fn synth_gdn_one_token_forward() {
         max_prefill_tokens: 1,
         max_slots: 1,
         per_layer_embd: 0,
+            paged_kv: None,
     };
     let mut pool = ScratchPool::new(&device, cfg).expect("ScratchPool::new");
 

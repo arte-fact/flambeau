@@ -59,7 +59,7 @@ fn per_layer_kv_widths_uniform_n_ranks_1() {
 
 // ---- ScratchShape golden-diff tests ---------------------------------
 //
-// These assert that `scratch_config_for(...)` returns byte-identical
+// These assert that `scratch_config_for(..., None)` returns byte-identical
 // values to the pre-Phase-2 hand-written `Arch::scratch_config` bodies.
 // If the trait shape ever changes a derivation, these tests catch it
 // before any arch crate sees the regression.
@@ -149,6 +149,7 @@ fn scratch_config_for_qwen_dense_matches_handwritten() {
         },
         512,
         1,
+        None,
     );
     assert_eq!(cfg.hidden, 5120);
     assert_eq!(cfg.intermediate, 17408 / 2);
@@ -268,6 +269,7 @@ fn scratch_config_for_qwen_moe_matches_handwritten() {
         },
         512,
         1,
+        None,
     );
     assert_eq!(cfg.intermediate, 1536 / 2);
     assert_eq!(cfg.max_experts, 128);
@@ -370,6 +372,7 @@ fn scratch_config_for_gemma4_per_layer_max_widths() {
         },
         512,
         1,
+        None,
     );
     assert_eq!(cfg.q_width, (8 / 2) * 256);
     assert_eq!(cfg.kv_width, (4 / 2) * 256);
@@ -398,7 +401,7 @@ fn scratch_config_for_gemma4_per_layer_head_dim_alternation() {
         moe: None,
         per_layer_embd: 0,
     };
-    let cfg = scratch_config_for(&shape, ShardMode::Replicated, 512, 1);
+    let cfg = scratch_config_for(&shape, ShardMode::Replicated, 512, 1, None);
     // q_width = max over layers = num_heads * max(head_dim) = 8 * 256
     assert_eq!(cfg.q_width, 8 * 256);
     // kv_width = max over per_layer_kv = max(num_kv_heads[li] * head_dim[li])
