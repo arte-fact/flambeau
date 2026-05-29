@@ -106,6 +106,29 @@ pub trait ForwardCtx {
         next_norm: Option<&Tensor<F16>>,
     ) -> Result<Option<Tensor<F16>>>;
 
+    /// Sarathi-Serve mixed-batch GDN. Rows `[0..prefill_rows)` are a
+    /// prefill chunk for `slot_ids[0]` (single slot, K contiguous
+    /// timesteps); rows `[prefill_rows..n)` are batched decodes across
+    /// N distinct slots. The prefill kernel updates `slot_p`'s state +
+    /// conv history in-place; the batched decode kernel updates each
+    /// of the N decode slots' state + conv history in-place. AR fires
+    /// once per phase (twice per layer) — matches the v1 driver shape
+    /// (see `project_lever1_mixed_batch_v1`).
+    ///
+    /// Default impl bails. See `doc/MIXED_BATCH_V2_PLAN.md` Phase K2.
+    fn gdn_layer_mixed(
+        &mut self,
+        input: &Tensor<F16>,
+        weights: &GdnWeights,
+        layer_idx: usize,
+        slot_ids: &[usize],
+        prefill_rows: usize,
+        next_norm: Option<&Tensor<F16>>,
+    ) -> Result<Option<Tensor<F16>>> {
+        let _ = (input, weights, layer_idx, slot_ids, prefill_rows, next_norm);
+        anyhow::bail!("gdn_layer_mixed: not implemented on this ctx")
+    }
+
     fn dense_ffn(
         &mut self,
         input: &Tensor<F16>,
