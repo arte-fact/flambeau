@@ -330,6 +330,25 @@ has no stalls for the mixed kernel to fill.
 Operators who want long-prompt latency reduction at the cost of
 short-prompt latency can opt in.
 
+**PP4 addendum.** Same bench shape on
+`--mesh-mode pp --devices hip:0,1,2,3`:
+
+| Metric | OFF | ON | Δ |
+|---|---|---|---|
+| Aggregate (wall) | 26.4 t/s | 26.4 t/s | ~0 % |
+| Aggregate (inject) | 60.0 t/s | 61.3 t/s | +2.2 % |
+| Long p50 wall | 19.2 s | **17.4 s (-9.4 %)** | |
+| Short p50 wall | 31.5 s | **30.0 s (-4.8 %)** | |
+| Errors (503) | 2 | 1 | -1 |
+
+PP4 inverts the single-device latency-redistribution trade — both
+cohorts get slightly faster. Per-rank compute is 1/4 of the layers
+so each rank has more idle time per iteration; the mixed kernel
+fills that idle without stealing bandwidth from concurrent shorts.
+Aggregate still unchanged at saturated load (HBM-bound), but the
+PP4 wall behaviour is materially better for both cohorts. This is
+the production-relevant configuration for the rig.
+
 **Optional follow-up sweeps (not Required for K5 close):**
 - Chunk-size sweep on mixed bench (the per-iteration overlap math
   shifts with chunk size; ARRIVAL_S sweep).
