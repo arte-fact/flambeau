@@ -68,6 +68,13 @@ pub struct ScratchConfig {
     /// 256 on E4B). `0` when the arch has no per-layer side-channel;
     /// drives the 6 small F32 / F16 scratch slots for the apply block.
     pub per_layer_embd: usize,
+    /// PagedAttention geometry, when configured. `Some(cfg)` allocates a
+    /// parallel paged KV cache alongside the existing contiguous
+    /// `kv_caches`. The two coexist until E3c rewires `standard_attn` to
+    /// dispatch on the paged path — at that point the contiguous slabs
+    /// can be skipped when paged is on. Derive via
+    /// [`PagedKvCacheConfig::from_vram_budget`].
+    pub paged_kv: Option<PagedKvCacheConfig>,
 }
 
 impl Default for ScratchConfig {
@@ -89,6 +96,7 @@ impl Default for ScratchConfig {
             max_prefill_tokens: 1,
             max_slots: 1,
             per_layer_embd: 0,
+            paged_kv: None,
         }
     }
 }
@@ -193,6 +201,7 @@ pub fn scratch_config_for<S: ScratchShape + ?Sized>(
         max_prefill_tokens: prefill_ubatch,
         max_slots,
         per_layer_embd: shape.per_layer_embd(),
+        paged_kv: None,
     }
 }
 
@@ -257,6 +266,45 @@ pub struct PagedKvCache {
     pub n_pages: usize,
     pub max_slots: usize,
     pub max_pages_per_slot: usize,
+}
+
+impl PagedKvCacheConfig {
+    /// Pick `n_pages` from a per-layer VRAM budget. Reserves bytes for
+    /// `max_slots` block-table rows plus the block-table-length array,
+    /// then divides the remaining budget by `2 * page_size * kv_width
+    /// * 2` (K and V pools, F16). The result is clamped to at least
+    /// `max_slots * max_pages_per_slot` so every slot can fill its
+    /// table even when the budget is just enough; a larger budget
+    /// leaves spare pages for cross-slot sharing (E4 prefix cache).
+    pub fn from_vram_budget(
+        per_layer_budget_bytes: usize,
+        page_size: usize,
+        kv_width: usize,
+        max_slots: usize,
+        max_pages_per_slot: usize,
+    ) -> Self {
+        assert!(
+            page_size > 0 && page_size.is_power_of_two(),
+            "PagedKvCacheConfig::from_vram_budget: page_size {page_size} must be a positive power of two"
+        );
+        let table_bytes = max_slots * max_pages_per_slot * std::mem::size_of::<u32>();
+        let lens_bytes = max_slots * std::mem::size_of::<u32>();
+        let overhead = table_bytes + lens_bytes;
+        let usable = per_layer_budget_bytes.saturating_sub(overhead);
+        let bytes_per_page_pair = 2 * page_size * kv_width * std::mem::size_of::<u16>();
+        let from_budget = if bytes_per_page_pair == 0 {
+            0
+        } else {
+            usable / bytes_per_page_pair
+        };
+        let min_pages = max_slots * max_pages_per_slot;
+        let n_pages = from_budget.max(min_pages);
+        Self {
+            page_size,
+            n_pages,
+            max_pages_per_slot,
+        }
+    }
 }
 
 impl PagedKvCache {
@@ -344,6 +392,160 @@ impl PagedKvCache {
             max_slots,
             max_pages_per_slot: cfg.max_pages_per_slot,
         })
+    }
+}
+
+/// Host-side free-list allocator over the `n_pages` pages of a single
+/// layer's [`PagedKvCache`]. Each [`PagePool`] owns its layer's free
+/// list and tracks which pages each slot currently holds so a slot
+/// release (request finish) returns all its pages atomically.
+///
+/// Per-step acquisition fires when a slot crosses a page boundary
+/// (the host computes `position % page_size == 0`). The acquired page
+/// index is then written into the slot's block-table row before the
+/// next `kv_append_f16_paged_slots` launch reads it.
+///
+/// The pool is intentionally generic over the layer's `PagedKvCache`
+/// geometry — `acquire_for` returns `None` once the free list runs
+/// dry. Callers (E3c scheduler hook) handle eviction.
+#[derive(Debug)]
+pub struct PagePool {
+    /// Total pages in this layer's pool. Matches the linked
+    /// `PagedKvCache.n_pages`. Stored for assertion sanity-checks.
+    pub n_pages: usize,
+    /// Maximum pages a single slot can ever hold. Matches
+    /// `max_pages_per_slot` on the linked `PagedKvCache`.
+    pub max_pages_per_slot: usize,
+    free: std::collections::VecDeque<u32>,
+    per_slot_held: Vec<Vec<u32>>,
+}
+
+impl PagePool {
+    /// Build a pool with all `n_pages` pages free. `per_slot_held` is
+    /// pre-sized to `max_slots` empty vectors so `acquire_for(slot)`
+    /// never reallocates the outer vec.
+    pub fn new(n_pages: usize, max_slots: usize, max_pages_per_slot: usize) -> Self {
+        let free: std::collections::VecDeque<u32> = (0..n_pages as u32).collect();
+        let per_slot_held = (0..max_slots).map(|_| Vec::new()).collect();
+        Self {
+            n_pages,
+            max_pages_per_slot,
+            free,
+            per_slot_held,
+        }
+    }
+
+    /// Number of pages currently free. Used by E3c to decide whether
+    /// to evict before serving the next prefill or to admit a new
+    /// request.
+    pub fn n_free(&self) -> usize {
+        self.free.len()
+    }
+
+    /// Page indices currently held by `slot`. Caller must guard
+    /// `slot < per_slot_held.len()`.
+    pub fn pages_held_by(&self, slot: usize) -> &[u32] {
+        &self.per_slot_held[slot]
+    }
+
+    /// Acquire one free page for `slot`. Returns `None` when the free
+    /// list is empty — caller (E3c scheduler) decides between
+    /// blocking, evicting, or rejecting the request.
+    pub fn acquire_for(&mut self, slot: usize) -> Option<u32> {
+        assert!(slot < self.per_slot_held.len(), "PagePool::acquire_for: slot {slot} out of bounds");
+        if self.per_slot_held[slot].len() >= self.max_pages_per_slot {
+            return None;
+        }
+        let page = self.free.pop_front()?;
+        self.per_slot_held[slot].push(page);
+        Some(page)
+    }
+
+    /// Release every page held by `slot` back to the free list.
+    /// Called at request finish (slot lifecycle in
+    /// [`crate::routes::ServerState::release_slot`] sibling).
+    pub fn release_slot(&mut self, slot: usize) {
+        assert!(slot < self.per_slot_held.len(), "PagePool::release_slot: slot {slot} out of bounds");
+        let held = std::mem::take(&mut self.per_slot_held[slot]);
+        for page in held {
+            self.free.push_back(page);
+        }
+    }
+}
+
+#[cfg(test)]
+mod page_pool_tests {
+    use super::*;
+
+    #[test]
+    fn new_pool_has_all_pages_free() {
+        let pool = PagePool::new(8, 4, 4);
+        assert_eq!(pool.n_free(), 8);
+        for slot in 0..4 {
+            assert!(pool.pages_held_by(slot).is_empty());
+        }
+    }
+
+    #[test]
+    fn acquire_returns_distinct_pages() {
+        let mut pool = PagePool::new(4, 2, 4);
+        let p0 = pool.acquire_for(0).unwrap();
+        let p1 = pool.acquire_for(0).unwrap();
+        let p2 = pool.acquire_for(1).unwrap();
+        assert_ne!(p0, p1);
+        assert_ne!(p0, p2);
+        assert_ne!(p1, p2);
+        assert_eq!(pool.n_free(), 1);
+        assert_eq!(pool.pages_held_by(0).len(), 2);
+        assert_eq!(pool.pages_held_by(1).len(), 1);
+    }
+
+    #[test]
+    fn acquire_returns_none_when_pool_empty() {
+        let mut pool = PagePool::new(2, 2, 4);
+        assert!(pool.acquire_for(0).is_some());
+        assert!(pool.acquire_for(0).is_some());
+        assert!(pool.acquire_for(1).is_none());
+    }
+
+    #[test]
+    fn acquire_returns_none_when_slot_full() {
+        let mut pool = PagePool::new(8, 2, 2);
+        assert!(pool.acquire_for(0).is_some());
+        assert!(pool.acquire_for(0).is_some());
+        // Slot 0 has hit its per-slot cap even though 6 pages are
+        // still free — caller must release-slot or reject.
+        assert!(pool.acquire_for(0).is_none());
+        assert_eq!(pool.n_free(), 6);
+    }
+
+    #[test]
+    fn release_slot_returns_pages_to_free_list() {
+        let mut pool = PagePool::new(4, 2, 4);
+        let p0 = pool.acquire_for(0).unwrap();
+        let p1 = pool.acquire_for(0).unwrap();
+        assert_eq!(pool.n_free(), 2);
+        pool.release_slot(0);
+        assert_eq!(pool.n_free(), 4);
+        assert!(pool.pages_held_by(0).is_empty());
+        // Released pages are reusable in any order.
+        let p2 = pool.acquire_for(1).unwrap();
+        assert!(p2 == p0 || p2 == p1 || p2 == 2 || p2 == 3);
+    }
+
+    #[test]
+    fn from_vram_budget_picks_max_of_budget_and_min() {
+        // Tight budget: only enough for the min_pages = max_slots *
+        // max_pages_per_slot. Allocator must still return at least
+        // that minimum.
+        let cfg = PagedKvCacheConfig::from_vram_budget(0, 16, 64, 4, 8);
+        assert_eq!(cfg.n_pages, 4 * 8); // min_pages floor
+        // Generous budget: 1 MiB per layer should comfortably exceed
+        // the floor.
+        let cfg = PagedKvCacheConfig::from_vram_budget(1 << 20, 16, 64, 4, 8);
+        assert!(cfg.n_pages > 4 * 8);
+        assert_eq!(cfg.page_size, 16);
+        assert_eq!(cfg.max_pages_per_slot, 8);
     }
 }
 
@@ -439,6 +641,17 @@ pub struct ScratchPool {
     pub ple_normed_f16: DevicePtr,
 
     pub kv_caches: Vec<KvCache>,
+
+    /// Per-layer paged KV cache, when `config.paged_kv` is `Some`.
+    /// Coexists with `kv_caches` until E3c rewires `standard_attn`
+    /// to dispatch on the paged path; today's runtime still reads
+    /// and writes via `kv_caches` regardless of this Option.
+    pub paged_kv_caches: Option<Vec<PagedKvCache>>,
+    /// Per-layer host-side free-list allocator. Empty when
+    /// `config.paged_kv` is `None`. Each `PagePool` owns the
+    /// corresponding `paged_kv_caches[li].n_pages` pages and tracks
+    /// per-slot ownership for the page-acquire / release lifecycle.
+    pub page_pools: Vec<PagePool>,
 
     /// Per-owned-layer recurrent state + conv history. Empty when
     /// `config.gdn` is None.
@@ -725,6 +938,41 @@ impl ScratchPool {
             });
         }
 
+        // Paged-KV allocation runs alongside the contiguous cache when
+        // `config.paged_kv` is `Some`. Today's `standard_attn` still
+        // reads + writes via `kv_caches`; the paged structures sit
+        // ready for E3c's dispatch rewire. Uses a local alloc list
+        // (drained into `allocs` after the `alloc_bytes` closure
+        // releases its mutable borrow) — same pattern as the GDN +
+        // MoE prefill scratch paths below.
+        let mut paged_local_allocs: Vec<(DevicePtr, usize)> = Vec::new();
+        let (paged_kv_caches, page_pools) = if let Some(paged_cfg) = config.paged_kv.as_ref() {
+            let mut caches = Vec::with_capacity(config.num_layers);
+            let mut pools: Vec<PagePool> = Vec::with_capacity(config.num_layers);
+            for li in 0..config.num_layers {
+                let slot_kvw = config
+                    .per_layer_kv_widths
+                    .as_ref()
+                    .map(|p| p[li])
+                    .unwrap_or(kvw);
+                let cache = PagedKvCache::alloc(
+                    device,
+                    *paged_cfg,
+                    slot_kvw,
+                    n_slots,
+                    &mut paged_local_allocs,
+                )
+                .context("PagedKvCache::alloc")?;
+                let pool =
+                    PagePool::new(cache.n_pages, cache.max_slots, cache.max_pages_per_slot);
+                caches.push(cache);
+                pools.push(pool);
+            }
+            (Some(caches), pools)
+        } else {
+            (None, Vec::new())
+        };
+
         let (gdn_state, gdn_decode_scratch, gdn_decode_batched_scratch, gdn_prefill_scratch) = if let Some(g) = config.gdn {
             let mut state_vec = Vec::with_capacity(config.num_layers);
             let state_bytes = n_slots * g.num_v_heads * g.head_k_dim * g.head_v_dim * f32;
@@ -840,6 +1088,10 @@ impl ScratchPool {
                 None
             };
 
+        // Drain the paged-KV local allocations into the unified
+        // `allocs` list so `dispose` walks every allocation in one pass.
+        allocs.append(&mut paged_local_allocs);
+
         Ok(Self {
             config,
             resid_a,
@@ -891,6 +1143,8 @@ impl ScratchPool {
             ple_proj_out_f16,
             ple_normed_f16,
             kv_caches,
+            paged_kv_caches,
+            page_pools,
             gdn_state,
             gdn_decode_scratch,
             gdn_decode_batched_scratch,

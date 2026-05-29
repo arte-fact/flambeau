@@ -422,14 +422,57 @@ Remaining slices:
     head_dim 64/128/256 + page_size 16/32, GQA 4/4 + 4/8). All 6
     pass with **bit-equal** output to the contiguous batched
     baseline under identity-mapped block tables.
-- **Slice E3** — host-side `PagePool { free_list: VecDeque<u32>,
-  per_slot_held: Vec<Vec<u32>>, ... }` allocator + a `ScratchPool`
-  field `paged_kv_caches: Vec<PagedKvCache>` alongside the existing
-  `kv_caches`. Server-side `claim_slot_blocking` reserves a slot
-  pre-allocated to zero pages; the scheduler dispatches a single
+- **Slice E3a + E3b status (2026-05-29): SHIPPED.**
+  Host-side `PagePool` allocator + `ScratchConfig.paged_kv:
+  Option<PagedKvCacheConfig>` + parallel `ScratchPool` allocation
+  branch.
+  - `PagePool { n_pages, max_pages_per_slot, free: VecDeque<u32>,
+    per_slot_held: Vec<Vec<u32>> }` at
+    `crates/forward/src/core/scratch.rs`. Methods: `new`, `n_free`,
+    `pages_held_by`, `acquire_for(slot) -> Option<u32>`,
+    `release_slot(slot)`. Returns `None` when free list runs dry OR
+    when the slot has hit its `max_pages_per_slot` cap — caller
+    (E3c scheduler hook) decides between blocking, evicting, or
+    rejecting.
+  - `PagedKvCacheConfig::from_vram_budget(per_layer_budget_bytes,
+    page_size, kv_width, max_slots, max_pages_per_slot)` sizes
+    `n_pages` from a VRAM budget; clamps to `max_slots *
+    max_pages_per_slot` floor.
+  - `ScratchConfig` gained `paged_kv: Option<PagedKvCacheConfig>`
+    (defaults to `None` — every arch's `scratch_config_for`
+    initialises to `None` so no behavioural delta).
+  - `ScratchPool` gained `paged_kv_caches: Option<Vec<PagedKvCache>>`
+    + `page_pools: Vec<PagePool>`. When `config.paged_kv.is_some()`,
+    `ScratchPool::new` allocates a `PagedKvCache` + matching
+    `PagePool` per layer alongside the existing contiguous
+    `kv_caches`; otherwise both fields are empty / `None`.
+  - 6 host-only unit tests for `PagePool` + `from_vram_budget`
+    pass: `cargo test -p flambeau-forward --lib --features hip
+    page_pool_tests`.
+  
+  E3b is **plumbing only** — `standard_attn` still reads + writes
+  via `kv_caches`. With `paged_kv: None` everywhere today, the new
+  fields stay empty / `None`, zero runtime cost.
+
+- **Slice E3c** (next session) — `standard_attn` dispatch on
+  `state.pool.paged_kv_caches.is_some()` to route the per-step
+  KV append + attention through the paged kernels. Server-side
+  `claim_slot_blocking` reserves a slot pre-allocated to zero
+  pages; the scheduler dispatches a single
   `kv_append_f16_paged_slots` per step that, in addition to writing
-  the new KV row, fetches a fresh page from the pool when crossing
-  a page boundary (`position % page_size == 0`).
+  the new KV row, calls `page_pools[li].acquire_for(slot)` when
+  crossing a page boundary (`position % page_size == 0`). Once
+  E3c lands, the parallel contiguous `kv_caches` allocation can
+  be skipped when paged is on (saving the VRAM that motivated
+  Phase 6 in the first place).
+- **Slice E3d** (next session) — paged prefill kernel
+  (`kv_append_f16_paged_prefill` for L tokens per slot). Without
+  it, paged decode can't be tested end-to-end because prefill
+  writes K/V to contiguous and decode reads from pages — they're
+  separate memory regions. Either share the address space (write
+  prefill output directly to pages, requires per-token page
+  acquire inside the prefill kernel) or copy contiguous prefill
+  output to pages after the prefill finishes.
 - **Slice E4** (stretch) — prefix-cache hash table keyed by page
   content. Reuses pages across requests with identical leading
   tokens. Closes #219.
