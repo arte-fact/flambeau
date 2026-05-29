@@ -374,7 +374,7 @@ shorter. Short p50 rises 60 % — the trade is sharp.
 - Short-only typing-feel chat: keep default OFF.
 - Mixed traffic: depends on ratio.
 
-**Cross-config:**
+**Cross-config (Qwen3.5-9B):**
 
 | Topology | Aggregate OFF→ON | Long p50 OFF→ON | Short p50 OFF→ON |
 |---|---|---|---|
@@ -385,6 +385,25 @@ shorter. Short p50 rises 60 % — the trade is sharp.
 pp2tp2 is the production-relevant topology — highest baseline
 throughput, the only one where the K5 aggregate target trends in
 the right direction.
+
+**Larger-model pp2tp2 cert** (same bench shape, hip:0,2,1,3):
+
+| Model | Aggregate OFF→ON | Long p50 OFF→ON | Short p50 OFF→ON |
+|---|---|---|---|
+| Qwen3.5-9B-Q4_1 | +5.6 % | -42 % | +60 % |
+| Qwen3.6-27B-Q4_0 | +3.7 % | -44 % | +43 % |
+| **Qwen3.6-35B-A3B-Q4_0 (MoE)** | **+14.4 %** | **-52 %** | **-42 %** |
+
+**Qwen3.6-35B-A3B is the strongest result of the K1-K5 arc.** Both
+cohorts faster, aggregate +14.4 %, total wall -19 %. MoE expert-sort
+amortises across mixed prefill chunk + decode rows. Dense 9B/27B
+follow the latency-redistribution pattern (long faster, short
+slower). On the production MoE the trade inverts: both win.
+
+**Production recommendation updated.**
+- 35B-A3B / qwen3.6-MoE: ON unconditionally on pp2tp2.
+- 27B dense / 9B: ON for long-completion-bound workloads
+  (RAG / summarisation); OFF for short-only typing-feel chat.
 
 **Optional follow-up sweeps (not Required for K5 close):**
 - Chunk-size sweep on mixed bench (the per-iteration overlap math
