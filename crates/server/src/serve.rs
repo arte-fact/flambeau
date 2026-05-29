@@ -191,7 +191,37 @@ pub(crate) async fn serve_inner_v2(
     };
 
     let inflight_slots = cfg.inflight_slots.clamp(1, 32);
-    let prefill_ubatch = cfg.prefill_ubatch.max(128);
+    let prefill_ubatch_raw = cfg.prefill_ubatch.max(128);
+    // **Phase K5a** — when `FLAMBEAU_MIXED_BATCH=1` is set, the
+    // scheduler may fire a single forward covering K prefill tokens +
+    // N decode slots. The ScratchPool's `max_prefill_tokens` must
+    // accommodate K + N or the residual / QKV / output buffers
+    // overrun. Bump `prefill_ubatch` to at least
+    // `chunk + inflight_slots` so the K4c capacity guard never
+    // rejects engagement.
+    let chunk_tokens = std::env::var("FLAMBEAU_PREFILL_CHUNK_TOKENS")
+        .ok()
+        .and_then(|s| s.parse::<usize>().ok())
+        .filter(|&n| n >= 1)
+        .unwrap_or(512);
+    let mixed_on = std::env::var("FLAMBEAU_MIXED_BATCH").as_deref() == Ok("1");
+    let prefill_ubatch = if mixed_on {
+        let needed = chunk_tokens + inflight_slots;
+        if prefill_ubatch_raw < needed {
+            info!(
+                from = prefill_ubatch_raw,
+                to = needed,
+                chunk_tokens,
+                inflight_slots,
+                "K5a: bumping prefill_ubatch for FLAMBEAU_MIXED_BATCH=1"
+            );
+            needed
+        } else {
+            prefill_ubatch_raw
+        }
+    } else {
+        prefill_ubatch_raw
+    };
     let max_queue_depth = cfg.max_queue_depth;
     info!(
         arch = gguf_arch,
@@ -199,6 +229,7 @@ pub(crate) async fn serve_inner_v2(
         inflight_slots,
         prefill_ubatch,
         max_queue_depth,
+        mixed_batch = mixed_on,
         "v2: building shared Session with max_slots=N"
     );
 
