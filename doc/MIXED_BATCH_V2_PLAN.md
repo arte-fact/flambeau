@@ -128,22 +128,34 @@ on a synthetic dense config. Compares mixed (one call) vs reference
 (two `standard_attn` calls — prefill_shape + batched-decode).
 Hybrid abs+rel tolerance (abs_tol=0.5, rel_tol=1e-2). **PASS.**
 
-### Phase K2 — `gdn_layer_mixed` on Pp/Tp/Hybrid (multi-session)
+### Phase K2 — `gdn_layer_mixed` on Pp/Tp/Hybrid
 
-Qwen3.6-27B is hybrid (GDN + full-attn layers). The Phase 5 acceptance
-target is 27B, which means K2 is required to ship a 27B mixed-batch
-driver.
+**Status (2026-05-29): SHIPPED.**
+`crates/forward/src/core/composites/gdn_mixed.rs`
+(`gdn_layer_mixed_local`) + ctx trait method + `ForwardEngine` impl.
+Same generic-engine collapse as K1a — one slice covers Pp/Tp/Hybrid.
 
-GDN is harder than full-attn because of the recurrent state. The
-state-step for slot_p (the prefill slot) runs over K timesteps; for
-the N decode slots it runs over 1 timestep each. The `forward_gdn_prefill_*`
-kernel handles K timesteps for a single slot; `forward_gdn_decode_batched_*`
-handles 1 timestep across N slots. Same split-call-sites strategy as
-K1: no new kernels, just dispatch both back-to-back with disjoint
-slot_id arrays.
+Composite calls the two existing `DeltaNetLayer` entry points
+back-to-back on sliced input/delta views:
+- K rows → `forward_prefill_with_ar_hook` on slot_p.
+- N rows → `forward_decode_with_ar_hook_batched_slots` on N slots'
+  per-slot state + history pointer arrays.
 
-**Slice K2a** — Pp impl + parity test.
-**Slice K2b** — Tp + Hybrid impls.
+No new device kernels. AR fires twice per layer (one per phase) —
+matches the v1 driver shape.
+
+Pool requirements: both `gdn_prefill_scratch` AND
+`gdn_decode_batched_scratch` configured.
+`max_prefill_tokens >= K + N`, `max_slots >= N + 1`.
+
+Parity test: `crates/forward/tests/synth_gdn_mixed.rs`. K=4/N=3 on
+synth GDN config (HIDDEN=256, NUM_V_HEADS=NUM_K_HEADS=2,
+HEAD_K/V_DIM=128, CONV_KERNEL=4). State + conv history zero-init.
+Mixed (one call) matches reference (separate prefill + batched-
+decode `gdn_layer` calls) within abs+rel tolerance. **PASS.**
+
+**K1 + K2 together unblock the driver layer for both layer kinds**
+— dense (Qwen3.5-9B/27B + Qwen3.5moe) and hybrid (Qwen3.6-27B).
 
 ### Phase K3 — Driver + parity + microbench
 
