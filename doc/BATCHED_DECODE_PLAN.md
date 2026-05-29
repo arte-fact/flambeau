@@ -393,15 +393,35 @@ runtime still allocates contiguous `KvCache` via `ScratchPool::new`.
 Zero behavioural change in the existing path.
 
 Remaining slices:
-- **Slice E2** — paged-aware kernel siblings:
-  `kv_append_f16_paged_slots(k_pool, v_pool, block_tables,
-  block_table_lens, k_src, v_src, slot_write_positions, ...)` and
-  `attention_decode_f16_paged(q, k_pool, v_pool, block_tables,
-  block_table_lens, slot_n_kv, ...)`. The attention kernel does one
-  block-table read per `t / page_size` boundary (table fits in L2,
-  read amortises over `page_size = 16` token loads). Expected
-  per-step kernel-level cost: ≤ 5 % vs the contiguous baseline —
-  small enough that the higher-N gain dominates.
+- **Slice E2 status (2026-05-29): SHIPPED.** Both kernels and
+  Rust wrappers + Ops trait methods + HipOps impls landed:
+  - `flambeau_kv_append_f16_paged_slots` —
+    `crates/kernels-hip/src/kernels/kv_append_f16_paged_slots.cu`.
+    Grid `(n_slots,)`, block 128 threads strided across `kv_width`.
+    Resolves slot's destination via
+    `block_tables[s * mpps + write_pos / page_size]` then writes
+    one K + V F16 row per slot. Identical occupancy / VGPR profile
+    to the contiguous sibling.
+  - `flambeau_attention_decode_f16_paged` —
+    `crates/kernels-hip/src/kernels/attention_decode_f16_paged.cu`.
+    Same flash-attn-v2 online-softmax body as
+    `attention_decode_f16_batched`; per-token K/V row resolved via
+    `slot_table[t / page_size] * page_size + (t & (page_size - 1))`.
+    `page_size` is a power of two so the divide / modulo compile
+    to shifts and AND masks. VGPR delta vs the contiguous kernel:
+    ~+3 (page_idx, page_offset, page).
+  - Rust wrappers + asserts at `crates/ops/src/hip/attention.rs`
+    (`page_size.is_power_of_two()` guard, head_dim ∈ {64, 128,
+    256, 512}, n_slots ∈ [1, 32]).
+  - Trait + impl: `Ops::kv_append_f16_paged_slots` +
+    `Ops::attention_decode_f16_paged` in `ops_trait.rs` and
+    `hip/ops_impl.rs`.
+  - Parity tests at `crates/backend-hip/tests/`:
+    `kv_append_f16_paged_slots.rs` (3 tests, head_dim 64/128/256 +
+    page_size 16/32) and `attention_decode_f16_paged.rs` (3 tests,
+    head_dim 64/128/256 + page_size 16/32, GQA 4/4 + 4/8). All 6
+    pass with **bit-equal** output to the contiguous batched
+    baseline under identity-mapped block tables.
 - **Slice E3** — host-side `PagePool { free_list: VecDeque<u32>,
   per_slot_held: Vec<Vec<u32>>, ... }` allocator + a `ScratchPool`
   field `paged_kv_caches: Vec<PagedKvCache>` alongside the existing

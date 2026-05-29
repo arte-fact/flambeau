@@ -241,7 +241,9 @@ pub const KERNEL_STEMS: &[&str] = &[
     // Attention.
     "attention_decode_f16",
     "attention_decode_f16_batched",
+    "attention_decode_f16_paged",
     "kv_append_f16_batched_slots",
+    "kv_append_f16_paged_slots",
     "attention_decode_f16_splitk",
     // "attention_decode_f16_splitk_h2",
     "attention_decode_q8_kv",

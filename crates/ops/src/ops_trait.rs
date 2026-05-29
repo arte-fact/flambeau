@@ -241,6 +241,47 @@ pub trait Ops {
         kv_width: usize,
     ) -> Result<()>;
 
+    /// PagedAttention sibling of `kv_append_f16_batched_slots`. Writes
+    /// the per-slot K+V row into the page that the slot's block table
+    /// currently maps to. `block_tables` is `[n_slots,
+    /// max_pages_per_slot]` u32 row-major. `page_size` must be a power
+    /// of two.
+    #[allow(clippy::too_many_arguments)]
+    fn kv_append_f16_paged_slots(
+        &self,
+        k_src: DevicePtr,
+        v_src: DevicePtr,
+        k_pool: DevicePtr,
+        v_pool: DevicePtr,
+        block_tables: DevicePtr,
+        slot_write_pos: DevicePtr,
+        n_slots: usize,
+        kv_width: usize,
+        page_size: usize,
+        max_pages_per_slot: usize,
+    ) -> Result<()>;
+
+    /// PagedAttention sibling of `attention_decode_f16_batched`. Reads
+    /// K/V per-token rows through the slot's block-table indirection.
+    /// `page_size` must be a power of two.
+    #[allow(clippy::too_many_arguments)]
+    fn attention_decode_f16_paged(
+        &self,
+        q_batched: DevicePtr,
+        k_pool: DevicePtr,
+        v_pool: DevicePtr,
+        block_tables: DevicePtr,
+        out_batched: DevicePtr,
+        n_tokens_kv: DevicePtr,
+        n_heads_q: usize,
+        n_heads_kv: usize,
+        head_dim: usize,
+        n_slots: usize,
+        page_size: usize,
+        max_pages_per_slot: usize,
+        scale: f32,
+    ) -> Result<()>;
+
     /// Fused V unit-RMSNorm + KV-cache append (K direct copy, V normed).
     /// See `hip::attention::kv_append_v_unit_norm_f16`.
     #[allow(clippy::too_many_arguments)]

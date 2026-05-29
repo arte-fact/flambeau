@@ -199,6 +199,179 @@ pub fn attention_decode_f16_batched(
     Ok(())
 }
 
+/// PagedAttention sibling of [`attention_decode_f16_batched`]. Same
+/// flash-attn-v2 online-softmax body; K/V per-token rows are fetched
+/// from a shared `[n_pages, page_size, kv_width]` F16 page pool via
+/// a per-slot block table indirection.
+///
+/// `block_tables` is `[n_slots, max_pages_per_slot]` `u32` device
+/// memory, row-major. For token `t` of slot `s`, the page that holds
+/// it is `block_tables[s * max_pages_per_slot + t / page_size]` and
+/// the in-page row is `t % page_size`. `page_size` MUST be a power
+/// of two so the kernel can replace the divide / modulo with shifts
+/// and AND masks.
+///
+/// Identity-mapped block table (`block_tables[s][p] = s * max_pages
+/// _per_slot + p`) with `n_pages = n_slots * max_pages_per_slot`
+/// makes the output bit-identical to
+/// [`attention_decode_f16_batched`] running on the same K/V data —
+/// that's the regression guard the paired test relies on.
+///
+/// # Safety
+/// All device pointers must outlive the kernel launch and remain
+/// valid on the stream's device. `k_pool` / `v_pool` must point at
+/// ≥ `n_pages * page_size * (n_heads_kv * head_dim)` F16 elements.
+/// `block_tables` must point at ≥ `n_slots * max_pages_per_slot`
+/// u32 elements. `n_tokens_kv` must point at ≥ `n_slots` i32
+/// elements; each entry must satisfy
+/// `(n_tokens_kv[s] - 1) / page_size < max_pages_per_slot`. `q_batched`
+/// and `out_batched` must each point at ≥ `n_slots * n_heads_q *
+/// head_dim` F16 elements.
+#[allow(clippy::too_many_arguments)]
+pub fn attention_decode_f16_paged(
+    reg: &OpsRegistry,
+    stream: &HipStream,
+    q_batched: DevicePtr,
+    k_pool: DevicePtr,
+    v_pool: DevicePtr,
+    block_tables: DevicePtr,
+    out_batched: DevicePtr,
+    n_tokens_kv: DevicePtr,
+    n_heads_q: usize,
+    n_heads_kv: usize,
+    head_dim: usize,
+    n_slots: usize,
+    page_size: usize,
+    max_pages_per_slot: usize,
+    scale: f32,
+) -> Result<()> {
+    assert!(
+        head_dim == 64 || head_dim == 128 || head_dim == 256 || head_dim == 512,
+        "attention_decode_f16_paged: head_dim {head_dim} not supported (expected 64, 128, 256, or 512)"
+    );
+    assert!(
+        n_slots >= 1 && n_slots <= 32,
+        "attention_decode_f16_paged: n_slots {n_slots} out of supported range [1, 32]"
+    );
+    assert!(
+        page_size > 0 && page_size.is_power_of_two(),
+        "attention_decode_f16_paged: page_size {page_size} must be a positive power of two"
+    );
+    assert!(
+        max_pages_per_slot >= 1,
+        "attention_decode_f16_paged: max_pages_per_slot must be >= 1"
+    );
+    let module = reg.expect_module("attention_decode_f16_paged")?;
+    let kernel = module.kernel("flambeau_attention_decode_f16_paged")?;
+
+    let n_heads_q_i = n_heads_q as i32;
+    let n_heads_kv_i = n_heads_kv as i32;
+    let head_dim_i = head_dim as i32;
+    let n_slots_i = n_slots as i32;
+    let page_size_i = page_size as i32;
+    let max_pps_i = max_pages_per_slot as i32;
+    let scale_f = scale;
+    let q_ptr: u64 = q_batched.as_usize() as u64;
+    let k_pool_ptr: u64 = k_pool.as_usize() as u64;
+    let v_pool_ptr: u64 = v_pool.as_usize() as u64;
+    let bt_ptr: u64 = block_tables.as_usize() as u64;
+    let o_ptr: u64 = out_batched.as_usize() as u64;
+    let n_kv_ptr: u64 = n_tokens_kv.as_usize() as u64;
+    let mut args = KernelArgs::new();
+    args.push(&q_ptr);
+    args.push(&k_pool_ptr);
+    args.push(&v_pool_ptr);
+    args.push(&bt_ptr);
+    args.push(&o_ptr);
+    args.push(&n_kv_ptr);
+    args.push(&n_heads_q_i);
+    args.push(&n_heads_kv_i);
+    args.push(&head_dim_i);
+    args.push(&n_slots_i);
+    args.push(&page_size_i);
+    args.push(&max_pps_i);
+    args.push(&scale_f);
+    let cfg = LaunchCfg {
+        grid: (n_heads_q as u32, n_slots as u32, 1),
+        block: (head_dim as u32, 1, 1),
+        shared_bytes: 0,
+    };
+    unsafe { kernel.launch(stream, cfg, args)? };
+    Ok(())
+}
+
+/// PagedAttention sibling of [`kv_append_f16_batched_slots`]. Writes
+/// one new K+V row per slot into a shared `[n_pages, page_size,
+/// kv_width]` F16 page pool, with the per-slot destination resolved
+/// through a `[n_slots, max_pages_per_slot]` u32 block table.
+///
+/// The host allocator must populate
+/// `block_tables[s * max_pages_per_slot + slot_write_pos[s] / page_size]`
+/// with a valid page index before this kernel fires; the kernel
+/// never allocates pages.
+///
+/// # Safety
+/// Mirrors [`attention_decode_f16_paged`]'s requirements. `k_src` /
+/// `v_src` must point at ≥ `n_slots * kv_width` F16 elements.
+/// `slot_write_pos` must point at ≥ `n_slots` i32 elements with each
+/// `(slot_write_pos[s] / page_size) < max_pages_per_slot`.
+#[allow(clippy::too_many_arguments)]
+pub fn kv_append_f16_paged_slots(
+    reg: &OpsRegistry,
+    stream: &HipStream,
+    k_src: DevicePtr,
+    v_src: DevicePtr,
+    k_pool: DevicePtr,
+    v_pool: DevicePtr,
+    block_tables: DevicePtr,
+    slot_write_pos: DevicePtr,
+    n_slots: usize,
+    kv_width: usize,
+    page_size: usize,
+    max_pages_per_slot: usize,
+) -> Result<()> {
+    assert!(
+        page_size > 0 && page_size.is_power_of_two(),
+        "kv_append_f16_paged_slots: page_size {page_size} must be a positive power of two"
+    );
+    assert!(
+        max_pages_per_slot >= 1,
+        "kv_append_f16_paged_slots: max_pages_per_slot must be >= 1"
+    );
+    let module = reg.expect_module("kv_append_f16_paged_slots")?;
+    let kernel = module.kernel("flambeau_kv_append_f16_paged_slots")?;
+
+    let n_slots_i = n_slots as i32;
+    let kv_width_i = kv_width as i32;
+    let page_size_i = page_size as i32;
+    let max_pps_i = max_pages_per_slot as i32;
+    let k_src_ptr: u64 = k_src.as_usize() as u64;
+    let v_src_ptr: u64 = v_src.as_usize() as u64;
+    let k_pool_ptr: u64 = k_pool.as_usize() as u64;
+    let v_pool_ptr: u64 = v_pool.as_usize() as u64;
+    let bt_ptr: u64 = block_tables.as_usize() as u64;
+    let wpos_ptr: u64 = slot_write_pos.as_usize() as u64;
+    let mut args = KernelArgs::new();
+    args.push(&k_src_ptr);
+    args.push(&v_src_ptr);
+    args.push(&k_pool_ptr);
+    args.push(&v_pool_ptr);
+    args.push(&bt_ptr);
+    args.push(&wpos_ptr);
+    args.push(&n_slots_i);
+    args.push(&kv_width_i);
+    args.push(&page_size_i);
+    args.push(&max_pps_i);
+    let block_threads: u32 = kv_width.min(128) as u32;
+    let cfg = LaunchCfg {
+        grid: (n_slots as u32, 1, 1),
+        block: (block_threads.max(1), 1, 1),
+        shared_bytes: 0,
+    };
+    unsafe { kernel.launch(stream, cfg, args)? };
+    Ok(())
+}
+
 /// Batched K+V append across N decode slots, each writing one new
 /// token row into its own KV cache. Companion to
 /// [`attention_decode_f16_batched`] — replaces the N×2
