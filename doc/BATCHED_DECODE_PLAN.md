@@ -321,7 +321,20 @@ Deferred (not gating Phase 5/6):
 
 ### Phase 5 — Finish Sarathi-Serve scheduler (multi-session, structural)
 
-**Slice S1 status (2026-05-29): SHIPPED at scheduler-path.**
+**Slice S1+S2 status (2026-05-29): SHIPPED across all three handler
+paths.** S2 extracts `chunked_prefill_pp` from the scheduler path
+and adopts it in `run_completion_blocking_ids` (legacy:
+json_mode / logprobs / non-batched-arch requests) and
+`run_completion_blocking_streaming` (SSE). Both switch from
+`acquire_inflight_blocking()` (guard across full fn) to
+`claim_slot_blocking()` + body-closure + `release_slot` in the tail.
+Verified on Qwen3.6-27B-Q4_0 pp2tp2 via
+`scripts/bench/bench_s2_interleave.py`: short request finishes
+**1318 ms BEFORE** the concurrent long one (long elapsed 10.38 s,
+short 8.81 s with 250 ms stagger; both on the legacy path via
+`logprobs=true`).
+
+**Slice S1 details (2026-05-29):**
 `decode_loop.rs run_completion_scheduler_pp_blocking` Stage 1
 now loops over prompt chunks of `PREFILL_CHUNK_TOKENS=512`
 (env-tunable via `FLAMBEAU_PREFILL_CHUNK_TOKENS`), reacquiring
@@ -338,14 +351,6 @@ Bench (max_tokens=128 nostream, Qwen3.6-27B-Q4_0 pp2tp2, median of
   mutex re-acquire per 512-token prompt).
 
 What's left (deferred — touches request lifecycle):
-- **Slice S2** — apply chunked prefill to the **legacy** path
-  (`run_completion_blocking_ids` at `decode_loop.rs:564`) and
-  **streaming** path (`stream_completion_sse` at `decode_loop.rs:981`).
-  Both currently hold the inflight `MutexGuard` across the whole
-  function via `acquire_inflight_blocking()`, so chunking requires
-  the guard to be droppable mid-function. Refactor: split the
-  function into prefill-phase and decode-phase functions that each
-  take and release the guard; thread the slot_idx through.
 - **Slice S3** — TTFT-measuring mixed bench that engages the
   scheduler path. Streaming (`bench_mixed_chat.py` with `stream:True`)
   measures TTFT but bypasses the scheduler via
