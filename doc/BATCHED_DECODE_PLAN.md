@@ -484,14 +484,15 @@ Remaining slices:
     otherwise prefill writes to the contiguous slab while decode
     reads pages, breaking the end-to-end path.
   - Server-side `page_pools[li].release_slot(slot)` hook in
-    `release_slot` (`crates/server/src/routes.rs`) deferred to
-    the same session that lands E3d — the per-layer release loop
-    only makes sense once paged decode is reachable, and the
-    cross-crate ownership shape (Server → Model → ScratchPool)
-    isn't worth resolving twice.
+    `release_slot` (`crates/server/src/routes.rs`) SHIPPED
+    2026-05-29 via `Model::release_paged_slot` (default-no-op trait
+    method) -> `V2Model` override -> `Session::release_paged_slot`
+    -> `ReleasePagedSlot` worker command -> per-layer
+    `PagePool::release_slot`. See the "Remaining slices" entry
+    below for the full handoff shape.
 - **Slice E3d status (2026-05-29): SHIPPED — Phase 6 functionally
   activates end-to-end.** Greedy-decode output bit-equal between
-  paged (`FLAMBEAU_PAGED_KV=1`) and contiguous baseline on
+  paged (`--paged-kv 1`) and contiguous baseline on
   Qwen3.5-9B-Q4_1 / pp / hip:0 / ctx-cap 4096 (`"The capital of
   France is **Paris**. Paris is the most populous city in France
   and serves as the country's political"` — identical 24-token
@@ -524,7 +525,7 @@ Remaining slices:
     fusion (gemma4) or sliding-window attention is configured —
     both need their own paged-aware kernels.
   - **Env-gated activation** in `scratch_config_for`:
-    `FLAMBEAU_PAGED_KV=1` → `Some(PagedKvCacheConfig::from_vram_budget(0,
+    `--paged-kv 1` → `Some(PagedKvCacheConfig::from_vram_budget(0,
     16, kv_width, max_slots, max_seq_len.div_ceil(16)))`. The
     `0` budget clamps `n_pages` to `max_slots * max_pages_per_slot`
     — exactly the contiguous-equivalent floor. **No VRAM win
@@ -542,7 +543,7 @@ Remaining slices:
     by `kv_local_idx` don't shift; `standard_attn` only
     dereferences `kv.k` / `kv.v` on contiguous arms which are
     unreachable when paged is on.
-  - `FLAMBEAU_PAGED_KV=<N>` (N > 1) sizes `n_pages = N` directly
+  - `--paged-kv <N>` (N > 1) sizes `n_pages = N` directly
     — the structural lever. `=1` keeps the floor for correctness
     only.
 
@@ -553,7 +554,7 @@ Remaining slices:
   | Contiguous `--inflight-slots 8` ctx 32k | fits |
   | **Contiguous `--inflight-slots 16` ctx 32k** | **OOMs (1 GB alloc failure per layer)** |
   | **Paged `--inflight-slots 16 FLAMBEAU_PAGED_KV=512`** | **fits comfortably** |
-  | Paged `--inflight-slots 32 FLAMBEAU_PAGED_KV=1024` | fits |
+  | Paged `--inflight-slots 32 --paged-kv 1024` | fits |
 
   Throughput (max_tokens=128 nostream, median of 2 runs):
 
@@ -575,15 +576,28 @@ Remaining slices:
   paged-prefill-attention kernel (see "Remaining slices" below).
 
 Remaining slices for production rollout:
-- **Server-side `page_pools[li].release_slot(slot)` hook** —
-  without it, pages leak across requests. Today's single-
-  request smoke works because pages are reused (slot's
-  `pages_held_by` row covers any new request that's shorter or
-  equal-length); multi-request workloads will exhaust the
-  pool. Cross-crate (Server → Model → ScratchPool): add a
-  `Model::release_paged_slot(slot)` trait method, default no-op,
-  V2Model downcasts inflights to V2Conv and reaches into the
-  shared Session's ScratchPool's `page_pools`.
+- **Server-side `release_slot` hook SHIPPED (2026-05-29).**
+  `Model::release_paged_slot(&self, slot)` default-no-op on the
+  trait; `V2Model` overrides with `shared.blocking_lock() ->
+  release_paged_slot`; arch-erased through `V2BatchableSession`;
+  `Session::release_paged_slot` fans a `ReleasePagedSlot` worker
+  command to every rank; each worker calls `PagePool::release_slot`
+  on every layer (no-op when `page_pools` is empty). Wired into
+  `ServerState::release_slot` before the `slot_in_use` store.
+  Multi-request paged workloads now recycle pages instead of
+  leaking. Validated with four back-to-back N=16 batches on
+  Qwen3.5-9B-Q4_1 / pp / hip:0 / `--inflight-slots 16
+  --paged-kv 512`: 64/64 requests succeed, 0 failures, aggregate
+  decode 51-56 t/s across batches.
+- **CLI activation SHIPPED (2026-05-29).** `--paged-kv <N>` on
+  `flambeau serve` replaces the `FLAMBEAU_PAGED_KV` env var
+  (deleted — rule 1: variant selection lives in the CLI / dispatch
+  table, not env). Threads `paged_kv_pages: Option<usize>` from
+  `ServeArgs` -> `ServerConfig` -> `Session::new` ->
+  `orchestrate::launch*` -> `WorkerHandle::spawn` -> `init_rank` ->
+  `Arch::scratch_config` -> `scratch_config_for`. `None` (default)
+  preserves the contiguous-slab path; `Some(N>1)` sizes the per-
+  layer page budget directly.
 - **Real paged-prefill attention kernel SHIPPED (2026-05-29).**
   `attention_prefill_f16_paged.cu` ports the existing
   `attention_prefill_f16` body verbatim with the
