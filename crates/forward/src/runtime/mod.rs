@@ -93,6 +93,23 @@ pub trait Arch: Send + Sync + 'static {
         slot_ids: &[usize],
     ) -> Result<()>;
 
+    /// Sarathi-Serve mixed-batch forward (Phase K4). Rows
+    /// `[0..prefill_rows)` are a prefill chunk for `slot_ids[0]`;
+    /// rows `[prefill_rows..n)` are batched decodes across N distinct
+    /// slots. One forward call covering both phases; logit emission
+    /// is `(N + 1)`-wide. Default impl bails — only archs that override
+    /// (qwen35-v2, qwen35moe-v2) support mixed-batch today.
+    fn forward_mixed<C: ForwardCtx>(
+        _model: &Self::Model,
+        _ctx: &mut C,
+        _tokens: &[u32],
+        _positions: &[usize],
+        _slot_ids: &[usize],
+        _prefill_rows: usize,
+    ) -> Result<()> {
+        anyhow::bail!("Arch::forward_mixed: not implemented for this arch")
+    }
+
     /// Build the ScratchPool config for this rank given the
     /// effective `ShardMode` (TP divides per-rank widths), the
     /// operator's prefill chunk size (sizes the per-token scratch
@@ -193,6 +210,53 @@ impl<A: Arch> Session<A> {
 
     pub fn forward_one_token(&mut self, token: u32, position: usize) -> Result<()> {
         self.forward(&[token], &[position], &[0])
+    }
+
+    /// Sarathi-Serve mixed-batch dispatch (Phase K4). Rows
+    /// `[0..prefill_rows)` are a prefill chunk for `slot_ids[0]`;
+    /// rows `[prefill_rows..n)` are batched decodes across N distinct
+    /// slots. Logits emitted are `(N + 1)` rows: the last prefill
+    /// chunk token + N decode rows, in that order. Arch must override
+    /// `Arch::forward_mixed`; default impl bails.
+    pub fn forward_mixed(
+        &mut self,
+        tokens: &[u32],
+        positions: &[usize],
+        slot_ids: &[usize],
+        prefill_rows: usize,
+    ) -> Result<()> {
+        if tokens.is_empty() {
+            anyhow::bail!("Session::forward_mixed: empty tokens");
+        }
+        if positions.len() != tokens.len() || slot_ids.len() != tokens.len() {
+            anyhow::bail!(
+                "Session::forward_mixed: positions.len {} / slot_ids.len {} != tokens.len {}",
+                positions.len(),
+                slot_ids.len(),
+                tokens.len()
+            );
+        }
+        if prefill_rows == 0 || prefill_rows >= tokens.len() {
+            anyhow::bail!(
+                "Session::forward_mixed: prefill_rows must satisfy 0 < K < n (got K={prefill_rows}, n={})",
+                tokens.len()
+            );
+        }
+        self.last_logits = orchestrate::run_forward_mixed(
+            &self.topology,
+            &mut self.handles,
+            tokens.to_vec(),
+            positions.to_vec(),
+            slot_ids.to_vec(),
+            prefill_rows,
+        )?;
+        Ok(())
+    }
+
+    /// Read the i-th mixed-output row from the last `forward_mixed` call.
+    /// Row 0 = prefill slot's next-token logit; rows 1..=N = decode slots.
+    pub fn mixed_logits_row(&self, i: usize, vocab: usize) -> &[f32] {
+        &self.last_logits[i * vocab..(i + 1) * vocab]
     }
 
     pub fn forward_one_token_logits(

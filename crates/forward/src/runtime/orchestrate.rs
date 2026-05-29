@@ -283,6 +283,59 @@ fn launch_hybrid<A: Arch>(
     Ok(handles)
 }
 
+pub fn run_forward_mixed<A: Arch>(
+    topology: &Topology,
+    handles: &mut [WorkerHandle<A>],
+    tokens: Vec<u32>,
+    positions: Vec<usize>,
+    slot_ids: Vec<usize>,
+    prefill_rows: usize,
+) -> Result<Vec<f32>> {
+    match topology {
+        Topology::SingleDevice { .. } => {
+            let rx = handles[0].send_forward_mixed(tokens, positions, slot_ids, prefill_rows)?;
+            rx.recv()
+                .map_err(|e| anyhow!("SD mixed reply channel closed: {e}"))?
+        }
+        Topology::Pp { .. } => {
+            let mut last_logits = Vec::new();
+            for h in handles.iter_mut() {
+                let rx = h.send_forward_mixed(
+                    tokens.clone(),
+                    positions.clone(),
+                    slot_ids.clone(),
+                    prefill_rows,
+                )?;
+                last_logits = rx
+                    .recv()
+                    .map_err(|e| anyhow!("PP mixed reply channel closed: {e}"))??;
+            }
+            Ok(last_logits)
+        }
+        Topology::Tp { .. } | Topology::Hybrid { .. } => {
+            let mut rxs = Vec::with_capacity(handles.len());
+            for h in handles.iter_mut() {
+                rxs.push(h.send_forward_mixed(
+                    tokens.clone(),
+                    positions.clone(),
+                    slot_ids.clone(),
+                    prefill_rows,
+                )?);
+            }
+            let mut last_nonempty: Option<Vec<f32>> = None;
+            for rx in rxs {
+                let logits = rx
+                    .recv()
+                    .map_err(|e| anyhow!("mixed worker reply channel closed: {e}"))??;
+                if !logits.is_empty() {
+                    last_nonempty = Some(logits);
+                }
+            }
+            last_nonempty.ok_or_else(|| anyhow!("no rank produced mixed logits"))
+        }
+    }
+}
+
 pub fn run_forward<A: Arch>(
     topology: &Topology,
     handles: &mut [WorkerHandle<A>],

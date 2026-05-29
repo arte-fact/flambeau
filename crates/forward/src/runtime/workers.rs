@@ -113,6 +113,13 @@ enum Command {
         slot_id: usize,
         reply: SyncSender<Result<()>>,
     },
+    ForwardMixed {
+        tokens: Vec<u32>,
+        positions: Vec<usize>,
+        slot_ids: Vec<usize>,
+        prefill_rows: usize,
+        reply: SyncSender<Result<Vec<f32>>>,
+    },
     ReleasePagedSlot {
         slot_id: usize,
         reply: SyncSender<Result<()>>,
@@ -185,6 +192,23 @@ impl<A: Arch> WorkerHandle<A> {
                         }
                         let _ = reply.send(Ok(()));
                     }
+                    Command::ForwardMixed {
+                        tokens,
+                        positions,
+                        slot_ids,
+                        prefill_rows,
+                        reply,
+                    } => {
+                        let res = run_forward_mixed_once::<A>(
+                            &mut state,
+                            &role,
+                            &tokens,
+                            &positions,
+                            &slot_ids,
+                            prefill_rows,
+                        );
+                        let _ = reply.send(res);
+                    }
                     Command::Shutdown => break,
                 }
             }
@@ -224,6 +248,29 @@ impl<A: Arch> WorkerHandle<A> {
                 tokens,
                 positions,
                 slot_ids,
+                reply: reply_tx,
+            })
+            .map_err(|e| anyhow::anyhow!("worker channel closed: {e}"))?;
+        Ok(reply_rx)
+    }
+
+    /// Sarathi-Serve mixed-batch forward dispatch (Phase K4). Routes
+    /// to `Arch::forward_mixed` which is wired only for archs that
+    /// support it (qwen35-v2, qwen35moe-v2 today).
+    pub fn send_forward_mixed(
+        &self,
+        tokens: Vec<u32>,
+        positions: Vec<usize>,
+        slot_ids: Vec<usize>,
+        prefill_rows: usize,
+    ) -> Result<Receiver<Result<Vec<f32>>>> {
+        let (reply_tx, reply_rx) = mpsc::sync_channel::<Result<Vec<f32>>>(1);
+        self.cmd_tx
+            .send(Command::ForwardMixed {
+                tokens,
+                positions,
+                slot_ids,
+                prefill_rows,
                 reply: reply_tx,
             })
             .map_err(|e| anyhow::anyhow!("worker channel closed: {e}"))?;
@@ -326,6 +373,134 @@ fn init_rank<A: Arch>(
         reg,
         model,
     })
+}
+
+fn run_forward_mixed_once<A: Arch>(
+    state: &mut RankState<A>,
+    role: &WorkerRole,
+    tokens: &[u32],
+    positions: &[usize],
+    slot_ids: &[usize],
+    prefill_rows: usize,
+) -> Result<Vec<f32>> {
+    let stream = state.device.default_stream();
+    match role {
+        WorkerRole::Sd => {
+            let mut ctx =
+                SingleDeviceForwardCtx::new(&state.device, stream, &state.reg, &mut state.pool);
+            A::forward_mixed(
+                &state.model,
+                &mut ctx,
+                tokens,
+                positions,
+                slot_ids,
+                prefill_rows,
+            )?;
+            Ok(ctx.logits().to_vec())
+        }
+        WorkerRole::Tp {
+            rank,
+            n_ranks,
+            ar,
+            bar,
+        } => {
+            let ar_callback = if let Some(bc) = bar {
+                make_bar_ar_callback(Arc::clone(bc), *rank)
+            } else {
+                make_ar_callback(Arc::clone(ar), *rank)
+            };
+            let hooks = TpHooks {
+                rank: *rank,
+                n_ranks: *n_ranks,
+                ar_callback,
+                bar: bar.as_ref().map(Arc::clone),
+            };
+            let mut ctx =
+                TpForwardCtx::new(&state.device, stream, &state.reg, &mut state.pool, hooks);
+            A::forward_mixed(
+                &state.model,
+                &mut ctx,
+                tokens,
+                positions,
+                slot_ids,
+                prefill_rows,
+            )?;
+            Ok(ctx.logits().to_vec())
+        }
+        WorkerRole::Pp {
+            rank,
+            n_ranks,
+            layer_start,
+            layer_end,
+            send_edge,
+            recv_edge,
+        } => {
+            let mut ctx = PpForwardCtx::new(
+                &state.device,
+                stream,
+                &state.reg,
+                &mut state.pool,
+                *rank,
+                *n_ranks,
+                *layer_start,
+                *layer_end,
+                send_edge.as_ref().map(|a| a.as_ref()),
+                recv_edge.as_ref().map(|a| a.as_ref()),
+            );
+            A::forward_mixed(
+                &state.model,
+                &mut ctx,
+                tokens,
+                positions,
+                slot_ids,
+                prefill_rows,
+            )?;
+            Ok(ctx.logits().to_vec())
+        }
+        WorkerRole::Hybrid {
+            stage_idx,
+            n_stages,
+            rank_in_stage,
+            tp_size,
+            layer_start,
+            layer_end,
+            ar,
+            bar,
+            peer_buffer,
+            handoff,
+        } => {
+            let ar_callback = if let Some(bc) = bar {
+                make_bar_ar_callback(Arc::clone(bc), *rank_in_stage)
+            } else {
+                make_ar_callback(Arc::clone(ar), *rank_in_stage)
+            };
+            let mut ctx = HybridForwardCtx::new(
+                &state.device,
+                stream,
+                &state.reg,
+                &mut state.pool,
+                *stage_idx,
+                *n_stages,
+                *rank_in_stage,
+                *tp_size,
+                *layer_start,
+                *layer_end,
+                ar_callback,
+                bar.as_ref().map(Arc::clone),
+                Arc::clone(peer_buffer),
+                Arc::clone(handoff),
+            );
+            A::forward_mixed(
+                &state.model,
+                &mut ctx,
+                tokens,
+                positions,
+                slot_ids,
+                prefill_rows,
+            )?;
+            Ok(ctx.logits().to_vec())
+        }
+    }
 }
 
 fn run_forward_once<A: Arch>(

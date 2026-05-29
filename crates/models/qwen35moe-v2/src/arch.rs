@@ -55,6 +55,17 @@ impl Arch for Qwen35MoeV2 {
         forward(model, ctx, tokens, positions, slot_ids)
     }
 
+    fn forward_mixed<C: ForwardCtx>(
+        model: &Self::Model,
+        ctx: &mut C,
+        tokens: &[u32],
+        positions: &[usize],
+        slot_ids: &[usize],
+        prefill_rows: usize,
+    ) -> Result<()> {
+        crate::model::forward_mixed(model, ctx, tokens, positions, slot_ids, prefill_rows)
+    }
+
     fn scratch_config(
         model: &Self::Model,
         shard: ShardMode,
