@@ -349,6 +349,43 @@ Aggregate still unchanged at saturated load (HBM-bound), but the
 PP4 wall behaviour is materially better for both cohorts. This is
 the production-relevant configuration for the rig.
 
+**pp2tp2 addendum (`--mesh-mode pp+tp --pp-size 2 --tp-size 2
+--devices hip:0,2,1,3`):**
+
+| Metric | OFF | ON | Δ |
+|---|---|---|---|
+| **Aggregate (wall)** | 33.7 t/s | **35.6 t/s** | **+5.6 %** |
+| Total wall | 57.05 s | 53.91 s | -5.5 % |
+| **Long p50 wall** | 18.7 s | **10.8 s** | **-42 %** |
+| Long p99 wall | 34.9 s | 23.1 s | -34 % |
+| Short p50 wall | 12.8 s | 20.6 s | +60 % |
+| Errors (503) | 0 | 0 | 0 |
+
+**This is the strongest mixed-batch result measured.** pp2tp2's
+per-rank envelope is small enough that prefill benefits
+dramatically from co-batching with concurrent decodes, while AR
+cost across the TP=2 pair is hidden by the same overlap. Long p50
+drops 42 %, p99 drops 34 %, aggregate +5.6 %, total wall 3 s
+shorter. Short p50 rises 60 % — the trade is sharp.
+
+**Production recommendation.**
+- RAG / summarisation / long-context chat: turn it ON. Long-
+  completion is what users wait on.
+- Short-only typing-feel chat: keep default OFF.
+- Mixed traffic: depends on ratio.
+
+**Cross-config:**
+
+| Topology | Aggregate OFF→ON | Long p50 OFF→ON | Short p50 OFF→ON |
+|---|---|---|---|
+| Single-device | -1.5 % | -16 % | +24 % |
+| PP4 | 0 % | -9.4 % | -4.8 % |
+| **pp2tp2** | **+5.6 %** | **-42 %** | +60 % |
+
+pp2tp2 is the production-relevant topology — highest baseline
+throughput, the only one where the K5 aggregate target trends in
+the right direction.
+
 **Optional follow-up sweeps (not Required for K5 close):**
 - Chunk-size sweep on mixed bench (the per-iteration overlap math
   shifts with chunk size; ARRIVAL_S sweep).
