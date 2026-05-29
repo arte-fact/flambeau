@@ -149,7 +149,17 @@ Phase 1 follow-ups (deferrable):
 
 ### Phase 2 — GDN row-tiled batched MMVQ (multi-session, B/C/D)
 
-**Slices A+B+C status (2026-05-29): SHIPPED.** Slice A wired
+**Slices A+B+C+D status (2026-05-29): SHIPPED.** Slice D added the
+single-weight Q4_0 row-tile (`mmvq_q4_0_row_tile_batched`), wired
+into qmatmul auto-dispatch at Q4_0 m∈{2,3,4} so every non-gate+up
+Q4_0 projection (GDN ssm_out, attention output_proj, …) gets
+R=4×N LDS-resident activation reuse. 5/5 parity tests bit-equal
+vs `mmvq_q4_0_batched`. **Bench (3-run median): 40.84 t/s
+aggregate at N=4 on Qwen3.6-27B-Q4_0 pp2tp2** — +21 % over the
+33.77 t/s Slice A+B+C result, +30 % over the 31.35 t/s per-slot
+fallback. All 4/4 streams complete topic-coherent.
+
+Slice A wired
 `mmvq_q4_0_gate_up_row_tile_batched` (Q4_0 gate+up row-tile, already
 in tree) into the GDN batched composite. Slice B replaced the
 per-slot fused Q8_0 α+β with two `qmatmul` calls that auto-dispatch
