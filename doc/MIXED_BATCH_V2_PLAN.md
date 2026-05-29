@@ -238,7 +238,30 @@ loads Qwen3.5-9B-Q4_1 via the production
 Validates the entire plumbing chain on the real worker
 infrastructure — no bypass.
 
-**Remaining slice K4c (next session): server-side scheduler tick.**
+**Slice K4c status (2026-05-29): SHIPPED.**
+Server-side mixed engagement in `chunked_prefill_pp`. When
+`FLAMBEAU_MIXED_BATCH=1` + the arch supports it
+(`Model::supports_mixed_batch`) + capacity allows (K + N ≤
+`--prefill-ubatch`), the chunked-prefill leader blocking-locks
+`batched_dispatcher`, drains `batched_pending`, and fires
+`Model::forward_mixed_decode` (V2Model override on qwen35 /
+qwen35moe). Decode pendings receive their per-slot logits via the
+already-held response channels; the prefill's logits land in
+`logits_out`. Otherwise falls through to the existing pure-prefill
+path.
+
+No cycle: decode loops in `decode_via_scheduler_into` PUSH then
+RELEASE their inflight slot mutex before `rx.recv()`, so
+`dispatch_mixed_with_pending` can acquire the decode slots' mutexes.
+
+End-to-end smoke `scripts/bench/bench_mixed_engage_nostream.py`
+on Qwen3.5-9B-Q4_1 / hip:0 / `--inflight-slots 4 --prefill-ubatch
+768 --ctx-cap 32768` — engagement fires (`slot_p=3, k=436, n_dec=3`)
+during the long's second chunk while shorts are decoding. All 4
+streams coherent; wall 12.43 s ON vs 12.61 s OFF (modest at this
+shape — only 1-2 engagement opportunities per long request; the
+sustained-traffic case is K5).
+
 The throughput lever. The mixed driver delivers a fixed per-call
 speedup; the scheduler is what makes EVERY decode iteration use the
 mixed shape instead of going through separate prefill+decode paths.
