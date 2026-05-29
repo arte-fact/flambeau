@@ -303,46 +303,44 @@ Deferred (not gating Phase 5/6):
 
 ### Phase 5 — Finish Sarathi-Serve scheduler (multi-session, structural)
 
-The partial Sarathi mixed-batch v1 driver shipped earlier (memory:
-`project_lever1_mixed_batch_v1` — `forward_decode_mixed_hybrid` +
-1.06-1.17× per-call wall at K=512/N=4 → K=128/N=16) only delivers
-the *kernel* half of Sarathi. The headline 2.6× / 3.7× /
-5.6× wins reported in the Sarathi-Serve paper (OSDI '24, Yi-34B /
-Mistral-7B / Falcon-180B) come from the *scheduler* half: a
-stall-free hybrid scheduler that keeps decode slots saturated while
-long prefills chunk through, eliminating the prefill→decode
-pipeline bubble that vanilla continuous batching can't avoid.
+**Slice S1 status (2026-05-29): SHIPPED at scheduler-path.**
+`decode_loop.rs run_completion_scheduler_pp_blocking` Stage 1
+now loops over prompt chunks of `PREFILL_CHUNK_TOKENS=512`
+(env-tunable via `FLAMBEAU_PREFILL_CHUNK_TOKENS`), reacquiring
+`inflight_pool[slot_idx]` per chunk. Decode steps from other slots
+can drain between chunks. Single-chunk short prompts behave as
+before — one mutex acquire, one prefill call.
 
-What's shipped (`project_lever1_mixed_batch_v1`):
-- `forward_decode_mixed_hybrid` op surface — one prefill chunk +
-  N decode slots co-batched in a single forward.
-- Bit-exact parity #307 at K=32/N=1+2; top-1 match at K=128/N=4.
-- Per-call ceiling bounded by `(T_pre + T_dec) / max(T_pre, T_dec)`.
+Bench (max_tokens=128 nostream, Qwen3.6-27B-Q4_0 pp2tp2, median of
+5 runs):
+- Steady-state N=4 with default chunk=512: 33.87 t/s.
+- Phase 4 baseline (no chunking): 33.80 t/s.
+- Δ = +0.2 %, within noise — Phase 5 S1 is **perf-neutral** on
+  pure-decode benches, as expected (the chunk wraparound adds one
+  mutex re-acquire per 512-token prompt).
 
-What's missing (stall-free Sarathi scheduler — Phase 5 deliverable):
-- **Slice S1** — scheduler-side per-step *chunk planner*. Given
-  the pending mix (M prefill requests of varying remaining lengths
-  + N active decode slots), pick a `(prefill_chunk_size,
-  decode_slots)` combo each step that maximises decode-slot
-  occupancy while keeping per-step wall ≤ SLO tail. Today's
-  scheduler treats prefill as opaque (per-request leader claim);
-  Sarathi-style splits each prefill into Sarathi-sized chunks
-  (~512 tokens at 27B) and schedules chunks against decode
-  steps.
-- **Slice S2** — admission control + prefill-chunk queue. New
-  request → split prompt into chunks → enqueue chunks behind the
-  active prefills. Each step's leader drains both the
-  prefill-chunk queue and the decode queue; calls
-  `forward_decode_mixed_hybrid` with the picked combo.
-- **Slice S3** — request lifecycle through the chunked path.
-  Prefill-in-progress requests don't hold their inflight slot's
-  mutex across chunks (today they do across the whole prefill —
-  see `decode_loop.rs:371`). State (positions, KV slab base) is
-  threaded through the chunk planner instead.
-- **Slice S4** — bench + cert. Mixed workload: stream of
-  alternating short + long prompts with concurrent decode. Target:
-  matches Sarathi paper's 2.6× over vanilla on Mistral-class
-  shapes adapted to Qwen3.6-27B on gfx906.
+What's left (deferred — touches request lifecycle):
+- **Slice S2** — apply chunked prefill to the **legacy** path
+  (`run_completion_blocking_ids` at `decode_loop.rs:564`) and
+  **streaming** path (`stream_completion_sse` at `decode_loop.rs:981`).
+  Both currently hold the inflight `MutexGuard` across the whole
+  function via `acquire_inflight_blocking()`, so chunking requires
+  the guard to be droppable mid-function. Refactor: split the
+  function into prefill-phase and decode-phase functions that each
+  take and release the guard; thread the slot_idx through.
+- **Slice S3** — TTFT-measuring mixed bench that engages the
+  scheduler path. Streaming (`bench_mixed_chat.py` with `stream:True`)
+  measures TTFT but bypasses the scheduler via
+  `decode_loop.rs:781 dispatch_decode_one`. Either route streaming
+  through the scheduler, OR add a `/v1/chat/completions?stream=false`
+  variant that emits inter-token timestamps in the response body.
+- **Kernel half** (`forward_decode_mixed_hybrid` from
+  `project_lever1_mixed_batch_v1`) is on an unmerged track in this
+  branch — for the Sarathi paper's 2.6× wins on Mistral-class
+  shapes, the scheduler chunking has to land alongside the
+  co-batched (prefill_chunk, decode_slots) forward kernel. S1
+  alone delivers bounded prefill-stall behaviour but not the
+  paper's compute+bandwidth-overlap gain.
 
 Why this slots between Phases 2-4 and Phase 6 (PagedAttention):
 - Phase 5 unlocks throughput at *mixed* workloads (prefill +

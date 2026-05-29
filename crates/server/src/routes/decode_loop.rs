@@ -366,37 +366,62 @@ fn run_completion_scheduler_pp_blocking(
         let mut sampler = Sampler::from_seed(params.seed);
         sampler.reserve(vocab);
 
-        // ---------- Stage 1: brief mutex hold for prefill + first-token sample.
-        let first_next = {
+        // Sarathi-Serve style chunked prefill. Splitting the prompt into
+        // fixed-size chunks and releasing the inflight mutex between
+        // chunks lets other slots' decode steps interleave with this
+        // request's prefill — bounding the per-step stall a long prompt
+        // inflicts on concurrent decode. The kernel cost per chunk is
+        // amortised by the per-chunk MMQ tile8 path (n_pairs scales with
+        // chunk_len * top_k); too-small chunks lose tile8 efficiency,
+        // too-large chunks reintroduce the prefill-stall pathology.
+        // 512 tokens is the Sarathi paper's recommended chunk on
+        // similar-class shapes; we keep it configurable for tuning.
+        const PREFILL_CHUNK_TOKENS: usize = 512;
+        let prefill_chunk = std::env::var("FLAMBEAU_PREFILL_CHUNK_TOKENS")
+            .ok()
+            .and_then(|s| s.parse::<usize>().ok())
+            .filter(|&n| n >= 1)
+            .unwrap_or(PREFILL_CHUNK_TOKENS);
+        let mut logits_buf: Vec<f32> = Vec::with_capacity(vocab);
+        let _ = cluster;
+        let _ = model;
+        let mut prefill_start = 0usize;
+        let mut reset_done = false;
+        while prefill_start < prompt_ids.len() {
+            let end = (prefill_start + prefill_chunk).min(prompt_ids.len());
+            let chunk = &prompt_ids[prefill_start..end];
             let mut guard = state.inflight_pool[slot_idx].blocking_lock();
-            guard
-                .reset_for_next_request()
-                .context("reset inflight for new request")?;
-            let mut logits_buf: Vec<f32> = Vec::with_capacity(vocab);
-            // Prefix cache is disabled until #219 reimplements it on v2.
-            // All requests go through a fresh full prefill via the v2
-            // Session<A> path exposed on the inflight as a ModelDriver.
-            let _ = cluster;
-            let _ = model;
-            {
-                let driver = guard
-                    .as_model_driver_mut()
-                    .context("scheduler-path prefill: session is not a v2 ModelDriver")?;
-                driver
-                    .forward_prefill_logits(&prompt_ids, 0, &mut logits_buf)
-                    .context("scheduler-path prefill")?;
+            if !reset_done {
+                guard
+                    .reset_for_next_request()
+                    .context("reset inflight for new request")?;
+                reset_done = true;
             }
-            // First-token stop mask: NEG_INFINITY all stop ids so the
-            // model is forced to emit a content token first.
-            if !relax_stop_mask {
-                for &sid in stop_ids {
-                    if (sid as usize) < logits_buf.len() {
-                        logits_buf[sid as usize] = f32::NEG_INFINITY;
-                    }
+            let driver = guard
+                .as_model_driver_mut()
+                .context("scheduler-path prefill: session is not a v2 ModelDriver")?;
+            driver
+                .forward_prefill_logits(chunk, prefill_start, &mut logits_buf)
+                .with_context(|| {
+                    format!(
+                        "scheduler-path prefill chunk [{}..{}] of {}",
+                        prefill_start,
+                        end,
+                        prompt_ids.len()
+                    )
+                })?;
+            prefill_start = end;
+            // Guard drops here, releasing the inflight mutex so other
+            // slots' decode steps can fire before the next chunk.
+        }
+        if !relax_stop_mask {
+            for &sid in stop_ids {
+                if (sid as usize) < logits_buf.len() {
+                    logits_buf[sid as usize] = f32::NEG_INFINITY;
                 }
             }
-            sampler.sample(&logits_buf, sampling, &[])
-        };
+        }
+        let first_next = sampler.sample(&logits_buf, sampling, &[]);
 
         let mut generated: Vec<u32> = Vec::with_capacity(params.max_tokens as usize);
         generated.push(first_next);
