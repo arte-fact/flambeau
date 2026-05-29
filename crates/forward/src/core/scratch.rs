@@ -185,25 +185,43 @@ pub fn scratch_config_for<S: ScratchShape + ?Sized>(
     let kv_width = per_layer_kv.iter().copied().max().unwrap_or(0);
     let moe = shape.moe_per_rank(n_ranks);
     // Env-gated PagedAttention activation. `FLAMBEAU_PAGED_KV=1`
-    // turns on the paged path; n_pages is clamped to `max_slots *
-    // max_pages_per_slot` (the contiguous-equivalent floor) so the
-    // paged path activates with no VRAM win — sized for correctness
-    // validation, not the structural PagedAttention saving. A
-    // future flag (or per-arch budget) can size n_pages larger.
-    let paged_kv = if std::env::var("FLAMBEAU_PAGED_KV").as_deref() == Ok("1") {
+    // turns on the paged path with `n_pages` clamped to the
+    // `max_slots * max_pages_per_slot` floor (correctness-only,
+    // no VRAM win). `FLAMBEAU_PAGED_KV=<N>` (N > 1) sizes
+    // `n_pages = N` directly — this is the lever for the
+    // structural PagedAttention win: a workload whose average
+    // per-slot page usage is well below `max_pages_per_slot`
+    // can pack many more `max_slots` into the same VRAM as the
+    // contiguous slab. Caller sets `--inflight-slots` high
+    // (the "more concurrent requests" dimension) and
+    // `FLAMBEAU_PAGED_KV=<n_pages>` low (the per-layer page
+    // budget). PagePool::acquire_for returns `None` once the
+    // budget is exhausted, at which point the scheduler must
+    // evict (or reject).
+    let paged_kv = std::env::var("FLAMBEAU_PAGED_KV").ok().and_then(|s| {
+        let parsed = s.parse::<usize>().ok()?;
+        if parsed == 0 {
+            return None;
+        }
         let page_size = 16;
         let max_seq_len = shape.max_seq_len();
         let mpps = max_seq_len.div_ceil(page_size);
-        Some(PagedKvCacheConfig::from_vram_budget(
-            0,
-            page_size,
-            kv_width,
-            max_slots,
-            mpps,
-        ))
-    } else {
-        None
-    };
+        if parsed == 1 {
+            Some(PagedKvCacheConfig::from_vram_budget(
+                0,
+                page_size,
+                kv_width,
+                max_slots,
+                mpps,
+            ))
+        } else {
+            Some(PagedKvCacheConfig {
+                page_size,
+                n_pages: parsed,
+                max_pages_per_slot: mpps,
+            })
+        }
+    });
     ScratchConfig {
         hidden: shape.hidden(),
         intermediate: shape.intermediate_per_rank(n_ranks),
@@ -1018,6 +1036,15 @@ impl ScratchPool {
             }
         }
         let n_slots = config.max_slots.max(1);
+        // Skip the contiguous KV slab allocation when paged is
+        // configured — the paged path covers prefill + decode and the
+        // contiguous slab would just consume VRAM that paged could
+        // give to more concurrent slots. With paged on we still push
+        // KvCache entries with NULL pointers so other allocations
+        // referenced by index (kv_local_idx into kv_caches) don't
+        // shift; standard_attn only dereferences kv.k / kv.v on the
+        // contiguous arms which are unreachable when paged is on.
+        let paged_on = config.paged_kv.is_some();
         let mut kv_caches = Vec::with_capacity(config.num_layers);
         for li in 0..config.num_layers {
             let slot_kvw = config
@@ -1025,6 +1052,14 @@ impl ScratchPool {
                 .as_ref()
                 .map(|p| p[li])
                 .unwrap_or(kvw);
+            if paged_on {
+                kv_caches.push(KvCache {
+                    k: DevicePtr::NULL,
+                    v: DevicePtr::NULL,
+                    kv_width: slot_kvw,
+                });
+                continue;
+            }
             let k = alloc_bytes(n_slots * config.max_seq_len * slot_kvw * f16)?;
             let v = alloc_bytes(n_slots * config.max_seq_len * slot_kvw * f16)?;
             kv_caches.push(KvCache {

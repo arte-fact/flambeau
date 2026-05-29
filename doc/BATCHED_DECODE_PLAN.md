@@ -533,13 +533,48 @@ Remaining slices:
     contiguous-slab allocation in `ScratchPool::new` is gated
     on `paged_kv.is_none()`.
 
+- **Slice E3e status (2026-05-29): SHIPPED — capacity win
+  demonstrated, throughput parity within ~10 % at saturated
+  bandwidth.**
+  - `ScratchPool::new` now skips the contiguous K/V slab
+    allocation when `paged_kv: Some`. `KvCache` entries still get
+    pushed with `DevicePtr::NULL` k/v so other allocations keyed
+    by `kv_local_idx` don't shift; `standard_attn` only
+    dereferences `kv.k` / `kv.v` on contiguous arms which are
+    unreachable when paged is on.
+  - `FLAMBEAU_PAGED_KV=<N>` (N > 1) sizes `n_pages = N` directly
+    — the structural lever. `=1` keeps the floor for correctness
+    only.
+
+  Capacity win bench (Qwen3.5-9B-Q4_1 / pp / hip:0 / ctx-cap 32768):
+
+  | Config | Status |
+  |---|---|
+  | Contiguous `--inflight-slots 8` ctx 32k | fits |
+  | **Contiguous `--inflight-slots 16` ctx 32k** | **OOMs (1 GB alloc failure per layer)** |
+  | **Paged `--inflight-slots 16 FLAMBEAU_PAGED_KV=512`** | **fits comfortably** |
+  | Paged `--inflight-slots 32 FLAMBEAU_PAGED_KV=1024` | fits |
+
+  Throughput (max_tokens=128 nostream, median of 2 runs):
+
+  | Config | N_bench=4 | N_bench=8 | N_bench=16 |
+  |---|---|---|---|
+  | Contiguous inflight=8 | 47.3 t/s | 48.9 t/s | 38.8 t/s (queues) |
+  | Paged inflight=16 | 44.7 t/s | 44.8 t/s | 37.5 t/s |
+
+  Paged is ~5 % slower at light load and matches contiguous when
+  the contiguous server starts queuing. **The Phase 6 win on
+  this rig is capacity, not steady-state throughput** — at
+  memory-bandwidth-saturated decode, aggregate t/s is bounded
+  by HBM bandwidth regardless of slot count, so more slots means
+  lower per-stream rate at constant aggregate. What paged
+  unlocks is *serving more concurrent users in the same VRAM
+  envelope* — exactly vLLM's headline number, on the model
+  storage side of the trade. The ~5 % decode gap closes once
+  the per-token prefill-attention stub is replaced by a real
+  paged-prefill-attention kernel (see "Remaining slices" below).
+
 Remaining slices for production rollout:
-- **Skip contiguous KV allocation when paged is on** — today
-  `ScratchPool::new` allocates BOTH contiguous and paged when
-  `paged_kv: Some`. That's the missing VRAM win. One-line guard
-  on the contiguous-slab `alloc_bytes` loop. Trivial once the
-  rest of the path stops referencing `kv_caches` via the paged
-  arms.
 - **Server-side `page_pools[li].release_slot(slot)` hook** —
   without it, pages leak across requests. Today's single-
   request smoke works because pages are reused (slot's
