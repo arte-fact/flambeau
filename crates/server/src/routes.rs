@@ -619,6 +619,84 @@ impl ServerState {
     /// the response senders.
     /// Returns Err on dispatch failure; caller fans the error to all
     /// pending senders.
+    /// Sarathi-Serve mixed-batch dispatch (Phase K4c). Combines one
+    /// prefill chunk for `prefill_slot_idx` (tokens at contiguous
+    /// positions starting at `prefill_start_position`) with the
+    /// drained `pending` decode entries into a single
+    /// `Model::forward_mixed_decode` call. The caller must already
+    /// hold `inflight_pool[prefill_slot_idx]`'s `MutexGuard` (passed
+    /// by mutable reference). Acquires the decode pendings' inflight
+    /// guards internally; releases them on return.
+    ///
+    /// Returns the logits for the prefill chunk's last token (row 0
+    /// of the mixed output) on success. Decode pendings receive their
+    /// per-slot logits via their `response` channels.
+    pub fn dispatch_mixed_with_pending(
+        &self,
+        prefill_inflight_guard: &mut tokio::sync::MutexGuard<'_, Box<dyn crate::Session>>,
+        prefill_tokens: &[u32],
+        prefill_start_position: usize,
+        pending: &[PendingDecode],
+    ) -> anyhow::Result<Vec<f32>> {
+        use crate::model_handle::BatchSlot;
+        if prefill_tokens.is_empty() {
+            anyhow::bail!("dispatch_mixed_with_pending: empty prefill_tokens");
+        }
+        if pending.is_empty() {
+            anyhow::bail!("dispatch_mixed_with_pending: empty pending decodes");
+        }
+
+        let mut decode_guards: Vec<tokio::sync::MutexGuard<'_, Box<dyn crate::Session>>> =
+            Vec::with_capacity(pending.len());
+        for p in pending {
+            decode_guards.push(self.inflight_pool[p.slot_idx].blocking_lock());
+        }
+
+        let n = pending.len();
+        let decode_slots: Vec<BatchSlot> = pending
+            .iter()
+            .enumerate()
+            .map(|(s, p)| BatchSlot {
+                idx: s,
+                token_id: p.token_id,
+                position: p.position,
+            })
+            .collect();
+
+        let vocab = self.cfg.vocab_size;
+        let mut prefill_logits: Vec<f32> = Vec::with_capacity(vocab);
+        let mut decode_logits_owned: Vec<Vec<f32>> =
+            (0..n).map(|_| Vec::with_capacity(vocab)).collect();
+
+        {
+            let prefill_inflight: &mut dyn crate::Session = &mut ***prefill_inflight_guard;
+            let mut decode_inflights: Vec<&mut dyn crate::Session> = Vec::with_capacity(n);
+            for g in decode_guards.iter_mut() {
+                let inflight: &mut dyn crate::Session = &mut ***g;
+                decode_inflights.push(inflight);
+            }
+            let mut decode_logits_refs: Vec<&mut Vec<f32>> =
+                decode_logits_owned.iter_mut().collect();
+            self.model.forward_mixed_decode(
+                self,
+                prefill_inflight,
+                prefill_tokens,
+                prefill_start_position,
+                &mut prefill_logits,
+                decode_inflights.as_mut_slice(),
+                &decode_slots,
+                decode_logits_refs.as_mut_slice(),
+            )?;
+        }
+
+        for (s, p) in pending.iter().enumerate() {
+            let logits = std::mem::take(&mut decode_logits_owned[s]);
+            let _ = p.response.send(Ok(logits));
+        }
+        drop(decode_guards);
+        Ok(prefill_logits)
+    }
+
     fn dispatch_batched_pending(&self, pending: &[PendingDecode]) -> anyhow::Result<()> {
         use crate::model_handle::BatchSlot;
         let trace = dev_flag("FLAMBEAU_TRACE_BATCH");

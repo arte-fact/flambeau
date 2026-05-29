@@ -104,6 +104,40 @@ pub trait Model: Send + Sync + 'static {
         out.clear();
         inflights[0].decode_one_logits(slot.token_id, slot.position, out)
     }
+
+    /// True if this arch supports the Sarathi-Serve mixed-batch
+    /// scheduler path. Default false — only archs that override
+    /// `forward_mixed_decode` set this to true. Server checks this
+    /// before attempting to engage `FLAMBEAU_MIXED_BATCH=1`.
+    fn supports_mixed_batch(&self) -> bool {
+        false
+    }
+
+    /// Sarathi-Serve mixed-batch entry point (Phase K4c). Combines one
+    /// prefill chunk (`prefill_tokens` for `prefill_inflight` at
+    /// contiguous positions starting at `prefill_start_position`) with
+    /// N batched decodes (`decode_inflights`/`decode_slots`). Logits
+    /// are written into `prefill_logits_out` (row 0, prefill slot's
+    /// next-token logit) and `decode_logits_refs` (rows 1..=N).
+    /// Default bails — only archs that opt into the mixed-batch path
+    /// (qwen35-v2, qwen35moe-v2 today) override this.
+    #[allow(clippy::too_many_arguments)]
+    fn forward_mixed_decode(
+        &self,
+        _ctx: &dyn SessionContext,
+        _prefill_inflight: &mut dyn Session,
+        _prefill_tokens: &[u32],
+        _prefill_start_position: usize,
+        _prefill_logits_out: &mut Vec<f32>,
+        _decode_inflights: &mut [&mut dyn Session],
+        _decode_slots: &[BatchSlot],
+        _decode_logits_refs: &mut [&mut Vec<f32>],
+    ) -> Result<()> {
+        anyhow::bail!(
+            "Model::forward_mixed_decode: not implemented for this arch \
+             (supports_mixed_batch() returns false)"
+        )
+    }
 }
 
 pub trait Session: Send + 'static {

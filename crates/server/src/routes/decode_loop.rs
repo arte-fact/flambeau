@@ -354,6 +354,16 @@ fn chunked_prefill_pp(
         .and_then(|s| s.parse::<usize>().ok())
         .filter(|&n| n >= 1)
         .unwrap_or(PREFILL_CHUNK_TOKENS);
+    // Phase K4c — mixed-batch engagement: when the env gate is on AND
+    // the arch supports it, each per-chunk lock acquisition tries to
+    // also become the batched-decode leader. If we get the lock AND
+    // `batched_pending` is non-empty, we drain it, build a mixed
+    // forward (K prefill rows + N decode rows), demux logits, and
+    // send decode logits back to the pending response senders. The
+    // prefill side's logits land in `logits_out` exactly like the
+    // pure path. Default off — opt in with `FLAMBEAU_MIXED_BATCH=1`.
+    let mixed_on = std::env::var("FLAMBEAU_MIXED_BATCH").as_deref() == Ok("1")
+        && state.model.supports_mixed_batch();
     let mut prefill_start = 0usize;
     let mut reset_done = false;
     while prefill_start < prompt_ids.len() {
@@ -365,6 +375,81 @@ fn chunked_prefill_pp(
                 .reset_for_next_request()
                 .context("reset inflight for new request")?;
             reset_done = true;
+        }
+        if mixed_on {
+            // Become the dispatch leader for this chunk. `lock()`
+            // (blocking) — we wait for the current decode tick to
+            // finish its dispatch. The decode loops PUSH then RELEASE
+            // their slot mutex before rx.recv(), so there is no
+            // dependency cycle. Once we have the lock we sleep one
+            // batch window for late arrivals, drain, and fire mixed
+            // if pendings exist; otherwise fall through to pure
+            // prefill while still holding the lock.
+            let _dispatch_lock = state.batched_dispatcher.lock().expect("dispatcher poisoned");
+            {
+                // Brief window for active decode loops to push their next
+                // token into `batched_pending` before we drain. Mirrors
+                // the decode-batch coalescence sleep in
+                // `decode_via_scheduler_into`. Without this the leader/
+                // follower race usually drains an empty queue.
+                std::thread::sleep(std::time::Duration::from_micros(
+                    state.decode_batch_window_us,
+                ));
+                let drained: Vec<crate::routes::PendingDecode> = {
+                    let mut q = state
+                        .batched_pending
+                        .lock()
+                        .expect("batched_pending mutex poisoned");
+                    std::mem::take(&mut *q)
+                };
+                if !drained.is_empty() {
+                    // Capacity guard. The ScratchPool was sized for
+                    // `max_prefill_tokens = --prefill-ubatch` at boot; a
+                    // K + N row mixed forward overruns that buffer when
+                    // K + N > prefill_ubatch. Until the boot-time scratch
+                    // sizing reserves `chunk_budget + max_slots`, fall
+                    // through to pure prefill instead of crashing. The
+                    // pendings get re-pushed via their already-held
+                    // response channels — but they're already drained
+                    // here, so re-push.
+                    let total = chunk.len() + drained.len();
+                    if total > prefill_chunk {
+                        let mut q = state
+                            .batched_pending
+                            .lock()
+                            .expect("batched_pending mutex poisoned");
+                        for p in drained {
+                            q.push(p);
+                        }
+                        drop(q);
+                    } else {
+                    tracing::info!(
+                        target: "server.scheduler.mixed",
+                        slot_p = slot_idx,
+                        k = chunk.len(),
+                        n_dec = drained.len(),
+                        prefill_start,
+                        "mixed-batch engaged"
+                    );
+                    let prefill_logits = state
+                        .dispatch_mixed_with_pending(&mut guard, chunk, prefill_start, &drained)
+                        .with_context(|| {
+                            format!(
+                                "chunked_prefill mixed chunk [{}..{}] of {} (N_decode={})",
+                                prefill_start,
+                                end,
+                                prompt_ids.len(),
+                                drained.len(),
+                            )
+                        })?;
+                    logits_out.clear();
+                    logits_out.extend_from_slice(&prefill_logits);
+                    prefill_start = end;
+                    continue;
+                    }
+                }
+            }
+            drop(_dispatch_lock);
         }
         let driver = guard
             .as_model_driver_mut()

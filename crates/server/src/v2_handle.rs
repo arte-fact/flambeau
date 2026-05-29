@@ -44,6 +44,23 @@ pub trait V2BatchableSession: Send {
     /// the model's vocab. Slot ids must be distinct.
     fn forward_decode_batched(&mut self, slots: &[(u32, usize, usize)]) -> Result<()>;
 
+    /// Sarathi-Serve mixed-batch forward (Phase K4c). Combines one
+    /// prefill chunk (`K` tokens starting at `prefill_start_position`
+    /// on `prefill_slot_id`) with N decode tokens (`decodes`) into a
+    /// single Session::forward_mixed call. Returns Ok(()) iff the arch
+    /// supports mixed (qwen35-v2 / qwen35moe-v2 today); other archs
+    /// bail. After return, the (N + 1) logit rows are reachable via
+    /// [`Self::logits_row`] in row-major `[(N + 1), vocab]` order —
+    /// row 0 = prefill slot's next-token logit; rows 1..=N = decode
+    /// slot logits.
+    fn forward_mixed(
+        &mut self,
+        prefill_tokens: &[u32],
+        prefill_start_position: usize,
+        prefill_slot_id: usize,
+        decodes: &[(u32, usize, usize)],
+    ) -> Result<()>;
+
     fn logits_row(&self, i: usize, vocab: usize) -> &[f32];
 
     fn reset_kv_slot(&mut self, slot_id: usize) -> Result<()>;
@@ -76,6 +93,37 @@ impl<A: Arch> V2BatchableSession for Session<A> {
 
     fn forward_decode_batched(&mut self, slots: &[(u32, usize, usize)]) -> Result<()> {
         Session::forward_decode_batched(self, slots)
+    }
+
+    fn forward_mixed(
+        &mut self,
+        prefill_tokens: &[u32],
+        prefill_start_position: usize,
+        prefill_slot_id: usize,
+        decodes: &[(u32, usize, usize)],
+    ) -> Result<()> {
+        let k = prefill_tokens.len();
+        if k == 0 {
+            anyhow::bail!("V2BatchableSession::forward_mixed: empty prefill_tokens");
+        }
+        if decodes.is_empty() {
+            anyhow::bail!("V2BatchableSession::forward_mixed: empty decodes");
+        }
+        let n = k + decodes.len();
+        let mut tokens: Vec<u32> = Vec::with_capacity(n);
+        let mut positions: Vec<usize> = Vec::with_capacity(n);
+        let mut slot_ids: Vec<usize> = Vec::with_capacity(n);
+        tokens.extend_from_slice(prefill_tokens);
+        for i in 0..k {
+            positions.push(prefill_start_position + i);
+            slot_ids.push(prefill_slot_id);
+        }
+        for &(tok, pos, slot) in decodes {
+            tokens.push(tok);
+            positions.push(pos);
+            slot_ids.push(slot);
+        }
+        Session::forward_mixed(self, &tokens, &positions, &slot_ids, k)
     }
 
     fn logits_row(&self, i: usize, vocab: usize) -> &[f32] {
@@ -184,6 +232,74 @@ impl Model for V2Model {
         for i in 0..n {
             let row = shared.logits_row(i, vocab);
             let out: &mut Vec<f32> = logits_refs[i];
+            out.clear();
+            out.extend_from_slice(row);
+        }
+        Ok(())
+    }
+    fn supports_mixed_batch(&self) -> bool {
+        matches!(self.gguf_arch, "qwen35" | "qwen35moe")
+    }
+    fn forward_mixed_decode(
+        &self,
+        _ctx: &dyn crate::model_handle::SessionContext,
+        prefill_inflight: &mut dyn ServerSession,
+        prefill_tokens: &[u32],
+        prefill_start_position: usize,
+        prefill_logits_out: &mut Vec<f32>,
+        decode_inflights: &mut [&mut dyn ServerSession],
+        decode_slots: &[crate::model_handle::BatchSlot],
+        decode_logits_refs: &mut [&mut Vec<f32>],
+    ) -> Result<()> {
+        if decode_slots.len() != decode_logits_refs.len()
+            || decode_slots.len() != decode_inflights.len()
+        {
+            anyhow::bail!(
+                "V2Model::forward_mixed_decode: decode_slots={} decode_inflights={} \
+                 decode_logits_refs={}",
+                decode_slots.len(),
+                decode_inflights.len(),
+                decode_logits_refs.len(),
+            );
+        }
+        if prefill_tokens.is_empty() {
+            anyhow::bail!("V2Model::forward_mixed_decode: empty prefill_tokens");
+        }
+        if decode_slots.is_empty() {
+            anyhow::bail!("V2Model::forward_mixed_decode: empty decode_slots");
+        }
+        let prefill_slot_id = prefill_inflight
+            .as_any()
+            .downcast_ref::<V2Conv>()
+            .expect("V2Model::forward_mixed_decode expects V2Conv prefill inflight")
+            .slot_id;
+        let decode_tuples: Vec<(u32, usize, usize)> = decode_slots
+            .iter()
+            .zip(decode_inflights.iter())
+            .map(|(s, inflight)| {
+                let conv = inflight
+                    .as_any()
+                    .downcast_ref::<V2Conv>()
+                    .expect("V2Model::forward_mixed_decode expects V2Conv decode inflight");
+                (s.token_id, s.position, conv.slot_id)
+            })
+            .collect();
+        let vocab = self.vocab;
+        let mut shared = self.shared.blocking_lock();
+        shared.forward_mixed(
+            prefill_tokens,
+            prefill_start_position,
+            prefill_slot_id,
+            &decode_tuples,
+        )?;
+        // Row 0 = prefill slot's next-token logit (the (K-1)-th token).
+        let row = shared.logits_row(0, vocab);
+        prefill_logits_out.clear();
+        prefill_logits_out.extend_from_slice(row);
+        // Rows 1..=N = decode logits, one per decode slot in caller's order.
+        for i in 0..decode_slots.len() {
+            let row = shared.logits_row(i + 1, vocab);
+            let out: &mut Vec<f32> = decode_logits_refs[i];
             out.clear();
             out.extend_from_slice(row);
         }
