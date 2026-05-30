@@ -400,8 +400,22 @@ amortises across mixed prefill chunk + decode rows. Dense 9B/27B
 follow the latency-redistribution pattern (long faster, short
 slower). On the production MoE the trade inverts: both win.
 
+**MoE arrival-rate sweep (35B-A3B Q4_0, same shape):**
+
+| Arrival | Aggregate Δ | Long p50 Δ | Short p50 Δ | 503 OFF→ON |
+|---|---|---|---|---|
+| 1.0s   | **+14.4 %** | **-52 %** | **-42 %** | 0 → 0 |
+| 0.75s  | **+10.8 %** | -31 % | -36 % | 9 → 7 |
+| 0.5s   | -0.7 % | -21 % | +33 % | 28 → 28 |
+
+The "both cohorts faster" regime holds at 0.75s and 1.0s. Above
+the saturation cliff (somewhere between 0.5s and 0.75s), the GPU
+is fully busy and admission control rejects ~half of arrivals
+equally OFF/ON; the trade reappears.
+
 **Production recommendation updated.**
-- 35B-A3B / qwen3.6-MoE: ON unconditionally on pp2tp2.
+- 35B-A3B / qwen3.6-MoE: ON unconditionally on pp2tp2 if below
+  saturation cliff; profile actual traffic to confirm.
 - 27B dense / 9B: ON for long-completion-bound workloads
   (RAG / summarisation); OFF for short-only typing-feel chat.
 
