@@ -53,6 +53,10 @@ const FN_RESIDUAL_RMSNORM_TP4: &str = "flambeau_p2p_allreduce_residual_rmsnorm_t
 const FN_RESIDUAL_RMSNORM_TP2: &str = "flambeau_p2p_allreduce_residual_rmsnorm_tp2";
 const FN_RESIDUAL_RMSNORM_Q8_1_TP4: &str = "flambeau_p2p_allreduce_residual_rmsnorm_q8_1_tp4";
 const FN_RESIDUAL_RMSNORM_Q8_1_TP2: &str = "flambeau_p2p_allreduce_residual_rmsnorm_q8_1_tp2";
+const FN_POSTATTN_RESIDUAL_RMSNORM_F32_TO_F16_TP2: &str =
+    "flambeau_p2p_allreduce_postattn_residual_rmsnorm_f32_to_f16_tp2";
+const FN_POSTATTN_RESIDUAL_RMSNORM_F32_TO_F16_TP4: &str =
+    "flambeau_p2p_allreduce_postattn_residual_rmsnorm_f32_to_f16_tp4";
 /// 256 threads/block × 2 fp16 elements/thread. Pointwise kernel, low
 /// VGPR pressure — gfx906 occupancy is bounded by the launch grid size,
 /// not by per-thread resource use.
@@ -77,6 +81,8 @@ enum ArKind {
     ResidualRmsNormTp2,
     ResidualRmsNormQ8_1Tp4,
     ResidualRmsNormQ8_1Tp2,
+    PostAttnResidualRmsNormF32ToF16Tp2,
+    PostAttnResidualRmsNormF32ToF16Tp4,
 }
 
 impl ArKind {
@@ -92,14 +98,25 @@ impl ArKind {
             ArKind::ResidualRmsNormTp2 => FN_RESIDUAL_RMSNORM_TP2,
             ArKind::ResidualRmsNormQ8_1Tp4 => FN_RESIDUAL_RMSNORM_Q8_1_TP4,
             ArKind::ResidualRmsNormQ8_1Tp2 => FN_RESIDUAL_RMSNORM_Q8_1_TP2,
+            ArKind::PostAttnResidualRmsNormF32ToF16Tp2 => {
+                FN_POSTATTN_RESIDUAL_RMSNORM_F32_TO_F16_TP2
+            }
+            ArKind::PostAttnResidualRmsNormF32ToF16Tp4 => {
+                FN_POSTATTN_RESIDUAL_RMSNORM_F32_TO_F16_TP4
+            }
         }
     }
 
     /// Elements processed per thread. F16 kernels pack via `half2`
     /// (2 elements / thread); F32 kernels run scalar (1 elem / thread).
+    /// The fused post-attn norm kernels launch one block per row and
+    /// don't use this for grid sizing — the value here is irrelevant
+    /// for those variants.
     fn elems_per_thread(self) -> u32 {
         match self {
             ArKind::SumTp4F32 | ArKind::SumTp2F32 => 1,
+            ArKind::PostAttnResidualRmsNormF32ToF16Tp2
+            | ArKind::PostAttnResidualRmsNormF32ToF16Tp4 => 1,
             _ => 2,
         }
     }
@@ -701,6 +718,39 @@ impl BarP2pAllReduce {
         }
     }
 
+    /// Rank-local F16 AllReduce-sum for TP=2. F16 sibling of
+    /// [`Self::sum_tp2_f32_rank`]. Halves the BAR1 payload at the
+    /// price of F16 saturation on overflowing partials — gated by
+    /// caller (e.g. `output_proj_safe_for_f16_ar` on gemma4).
+    /// # Safety
+    /// Same per-pointer + ordering contract as
+    /// [`Self::sum_tp2_f32_rank`], but partials are F16.
+    pub unsafe fn sum_tp2_rank(
+        &self,
+        rank: usize,
+        partial_local: DevicePtr,
+        peer: DevicePtr,
+        elem_count: u32,
+        stream: &HipStream,
+    ) -> DeviceResult<()> {
+        self.expect_ranks(2)?;
+        let cfg = launch_cfg_for(ArKind::SumTp2, elem_count);
+        // SAFETY: forwarded from public-method contract.
+        unsafe {
+            self.launch_one(
+                ArKind::SumTp2,
+                rank,
+                cfg,
+                stream,
+                ArArgs::Sum {
+                    partial_local,
+                    peers: [peer, DevicePtr(0), DevicePtr(0)],
+                },
+                elem_count,
+            )
+        }
+    }
+
     /// Rank-local fused AR + residual-add for TP=2 (F16). Caller
     /// exchanges peer partial pointer out-of-band; both ranks pass
     /// partial in canonical order (rank0's then rank1's) so the
@@ -809,6 +859,145 @@ impl BarP2pAllReduce {
                     peers,
                 },
                 elem_count,
+            )
+        }
+    }
+
+    /// Rank-local F16 AllReduce-sum for TP=4. F16 sibling of
+    /// [`Self::sum_tp4_f32_rank`].
+    /// # Safety
+    /// Same per-pointer + ordering contract as
+    /// [`Self::sum_tp2_f32_rank`], but partials are F16.
+    pub unsafe fn sum_tp4_rank(
+        &self,
+        rank: usize,
+        partial_local: DevicePtr,
+        peers: [DevicePtr; 3],
+        elem_count: u32,
+        stream: &HipStream,
+    ) -> DeviceResult<()> {
+        self.expect_ranks(4)?;
+        let cfg = launch_cfg_for(ArKind::SumTp4, elem_count);
+        // SAFETY: forwarded from public-method contract.
+        unsafe {
+            self.launch_one(
+                ArKind::SumTp4,
+                rank,
+                cfg,
+                stream,
+                ArArgs::Sum {
+                    partial_local,
+                    peers,
+                },
+                elem_count,
+            )
+        }
+    }
+
+    /// Rank-local fused AR + post-attn-norm + residual-add for TP=2,
+    /// F32-input projection → F16 output residual. Replaces a 2-launch
+    /// `ar_sum_f32 + rmsnorm_f32_to_f16_add_residual` sequence on the
+    /// gemma4 post-attn / post-ffn paths. `n_rows` blocks of
+    /// [`BLOCK_THREADS`] threads; per-row hidden `n` must satisfy
+    /// `n <= 32 * BLOCK_THREADS = 8192` (per-thread AR-sum register
+    /// cache).
+    /// # Safety
+    /// - `proj_local`, `peer` are F32 on respective devices, each
+    ///   valid for `n_rows * n` elements.
+    /// - `post_norm_w` is F16 on rank's device, valid for `n` elems.
+    /// - `resid_in`, `resid_out` are F16 on rank's device, each valid
+    ///   for `n_rows * n` elements. `resid_out` may NOT alias
+    ///   `resid_in` (kernel reads resid_in and writes resid_out in the
+    ///   same pass; aliasing would race).
+    /// - Producer-stream ordering as in [`Self::sum_tp2_f32_rank`].
+    #[allow(clippy::too_many_arguments)]
+    pub unsafe fn postattn_residual_rmsnorm_f32_to_f16_tp2_rank(
+        &self,
+        rank: usize,
+        proj_local: DevicePtr,
+        peer: DevicePtr,
+        post_norm_w: DevicePtr,
+        resid_in: DevicePtr,
+        resid_out: DevicePtr,
+        n_rows: u32,
+        n: u32,
+        eps: f32,
+        stream: &HipStream,
+    ) -> DeviceResult<()> {
+        self.expect_ranks(2)?;
+        if n > 8192 {
+            return Err(DeviceError::Backend {
+                backend: "hip",
+                code: -1,
+                message: format!(
+                    "postattn_residual_rmsnorm_f32_to_f16_tp2_rank: n={n} > 8192 \
+                     (per-thread register-cache cap)"
+                ),
+            });
+        }
+        let cfg = LaunchCfg::one_d(n_rows, BLOCK_THREADS);
+        // SAFETY: forwarded from public-method contract.
+        unsafe {
+            self.launch_postattn_norm_f32_to_f16(
+                ArKind::PostAttnResidualRmsNormF32ToF16Tp2,
+                rank,
+                cfg,
+                stream,
+                proj_local,
+                peer,
+                [DevicePtr(0), DevicePtr(0)],
+                post_norm_w,
+                resid_in,
+                resid_out,
+                n,
+                eps,
+            )
+        }
+    }
+
+    /// TP=4 sibling of [`Self::postattn_residual_rmsnorm_f32_to_f16_tp2_rank`].
+    /// # Safety
+    /// Same contract; 3 peer F32 partials instead of 1.
+    #[allow(clippy::too_many_arguments)]
+    pub unsafe fn postattn_residual_rmsnorm_f32_to_f16_tp4_rank(
+        &self,
+        rank: usize,
+        proj_local: DevicePtr,
+        peers: [DevicePtr; 3],
+        post_norm_w: DevicePtr,
+        resid_in: DevicePtr,
+        resid_out: DevicePtr,
+        n_rows: u32,
+        n: u32,
+        eps: f32,
+        stream: &HipStream,
+    ) -> DeviceResult<()> {
+        self.expect_ranks(4)?;
+        if n > 8192 {
+            return Err(DeviceError::Backend {
+                backend: "hip",
+                code: -1,
+                message: format!(
+                    "postattn_residual_rmsnorm_f32_to_f16_tp4_rank: n={n} > 8192"
+                ),
+            });
+        }
+        let cfg = LaunchCfg::one_d(n_rows, BLOCK_THREADS);
+        // SAFETY: forwarded from public-method contract.
+        unsafe {
+            self.launch_postattn_norm_f32_to_f16(
+                ArKind::PostAttnResidualRmsNormF32ToF16Tp4,
+                rank,
+                cfg,
+                stream,
+                proj_local,
+                peers[0],
+                [peers[1], peers[2]],
+                post_norm_w,
+                resid_in,
+                resid_out,
+                n,
+                eps,
             )
         }
     }
@@ -941,6 +1130,54 @@ impl BarP2pAllReduce {
         // pointer is a live device alloc on `rank`'s device with the
         // documented sizing; producer streams synced against `stream`
         // via the caller-side ordering contract.
+        unsafe { kern.launch(stream, cfg, k_args)? };
+        Ok(())
+    }
+
+    /// launch the gemma4 post-attn / post-ffn fused kernel.
+    /// Kernel ABI (TP=2):
+    ///   (proj_local, peer0, post_norm_w, resid_in, resid_out, n, eps)
+    /// TP=4 inserts `peer1, peer2` after `peer0`.
+    /// # Safety
+    /// Forwarded from `postattn_residual_rmsnorm_f32_to_f16_tp{2,4}_rank`.
+    #[expect(clippy::too_many_arguments, reason = "matches the kernel's flat ABI")]
+    unsafe fn launch_postattn_norm_f32_to_f16(
+        &self,
+        kind: ArKind,
+        rank: usize,
+        cfg: LaunchCfg,
+        stream: &HipStream,
+        proj_local: DevicePtr,
+        peer0: DevicePtr,
+        peers_extra: [DevicePtr; 2],
+        post_norm_w: DevicePtr,
+        resid_in: DevicePtr,
+        resid_out: DevicePtr,
+        n: u32,
+        eps: f32,
+    ) -> DeviceResult<()> {
+        self.cluster.device(rank).bind()?;
+        let kern: HipKernel<'_> = self.modules_fused_norm[rank].kernel(kind.fn_name())?;
+        let pl = proj_local.as_usize() as u64;
+        let p0 = peer0.as_usize() as u64;
+        let p1 = peers_extra[0].as_usize() as u64;
+        let p2 = peers_extra[1].as_usize() as u64;
+        let w = post_norm_w.as_usize() as u64;
+        let ri = resid_in.as_usize() as u64;
+        let ro = resid_out.as_usize() as u64;
+        let mut k_args = KernelArgs::new();
+        k_args.push(&pl);
+        k_args.push(&p0);
+        if matches!(kind, ArKind::PostAttnResidualRmsNormF32ToF16Tp4) {
+            k_args.push(&p1);
+            k_args.push(&p2);
+        }
+        k_args.push(&w);
+        k_args.push(&ri);
+        k_args.push(&ro);
+        k_args.push(&n);
+        k_args.push(&eps);
+        // SAFETY: forwarded from the public-method contract.
         unsafe { kern.launch(stream, cfg, k_args)? };
         Ok(())
     }

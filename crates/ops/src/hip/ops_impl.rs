@@ -692,6 +692,7 @@ impl<'a> Ops for HipOps<'a> {
         head_dim: usize,
         n_tokens_kv: usize,
         scale: f32,
+        window_size: i32,
     ) -> Result<()> {
         super::attention::attention_decode_q8_kv(
             self.reg,
@@ -705,6 +706,7 @@ impl<'a> Ops for HipOps<'a> {
             head_dim,
             n_tokens_kv,
             scale,
+            window_size,
         )
     }
 
@@ -723,6 +725,7 @@ impl<'a> Ops for HipOps<'a> {
         n_tokens_kv: usize,
         chunk_size: usize,
         scale: f32,
+        window_size: i32,
     ) -> Result<()> {
         super::attention::attention_decode_q8_kv_splitk(
             self.reg,
@@ -740,6 +743,7 @@ impl<'a> Ops for HipOps<'a> {
             n_tokens_kv,
             chunk_size,
             scale,
+            window_size,
         )
     }
 
@@ -756,6 +760,7 @@ impl<'a> Ops for HipOps<'a> {
         n_k_tokens: usize,
         q_offset: usize,
         scale: f32,
+        window_size: i32,
     ) -> Result<()> {
         super::attention::attention_prefill_q8_kv(
             self.reg,
@@ -771,6 +776,7 @@ impl<'a> Ops for HipOps<'a> {
             n_k_tokens,
             q_offset,
             scale,
+            window_size,
         )
     }
 
@@ -973,6 +979,29 @@ impl<'a> Ops for HipOps<'a> {
             self.reg,
             self.stream,
             x_f32,
+            weight_f16,
+            resid_in_f16,
+            resid_out_f16,
+            m,
+            k,
+            eps,
+        )
+    }
+
+    fn rmsnorm_f16_to_f16_add_residual(
+        &self,
+        x_f16: DevicePtr,
+        weight_f16: DevicePtr,
+        resid_in_f16: DevicePtr,
+        resid_out_f16: DevicePtr,
+        m: usize,
+        k: usize,
+        eps: f32,
+    ) -> Result<()> {
+        super::norm::rmsnorm_f16_to_f16_add_residual(
+            self.reg,
+            self.stream,
+            x_f16,
             weight_f16,
             resid_in_f16,
             resid_out_f16,

@@ -406,6 +406,7 @@ pub trait Ops {
         window_size: i32,
     ) -> Result<()>;
 
+    #[allow(clippy::too_many_arguments)]
     fn attention_decode_q8_kv(
         &self,
         q: DevicePtr,
@@ -417,8 +418,10 @@ pub trait Ops {
         head_dim: usize,
         n_tokens_kv: usize,
         scale: f32,
+        window_size: i32,
     ) -> Result<()>;
 
+    #[allow(clippy::too_many_arguments)]
     fn attention_decode_q8_kv_splitk(
         &self,
         q: DevicePtr,
@@ -434,8 +437,10 @@ pub trait Ops {
         n_tokens_kv: usize,
         chunk_size: usize,
         scale: f32,
+        window_size: i32,
     ) -> Result<()>;
 
+    #[allow(clippy::too_many_arguments)]
     fn attention_prefill_q8_kv(
         &self,
         q: DevicePtr,
@@ -449,6 +454,7 @@ pub trait Ops {
         n_k_tokens: usize,
         q_offset: usize,
         scale: f32,
+        window_size: i32,
     ) -> Result<()>;
 
     #[allow(clippy::too_many_arguments)]
@@ -578,6 +584,21 @@ pub trait Ops {
     fn rmsnorm_f32_to_f16_add_residual(
         &self,
         x_f32: DevicePtr,
+        weight_f16: DevicePtr,
+        resid_in_f16: DevicePtr,
+        resid_out_f16: DevicePtr,
+        m: usize,
+        k: usize,
+        eps: f32,
+    ) -> Result<()>;
+
+    /// F16-input sibling of `rmsnorm_f32_to_f16_add_residual`. Used
+    /// after an F16 AR sum (gemma4 post-attn / post-ffn path when the
+    /// safety predicate allows skipping the F32 AR widening).
+    #[allow(clippy::too_many_arguments)]
+    fn rmsnorm_f16_to_f16_add_residual(
+        &self,
+        x_f16: DevicePtr,
         weight_f16: DevicePtr,
         resid_in_f16: DevicePtr,
         resid_out_f16: DevicePtr,

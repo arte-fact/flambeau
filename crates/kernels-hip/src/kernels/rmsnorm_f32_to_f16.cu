@@ -154,3 +154,75 @@ extern "C" __global__ void flambeau_rmsnorm_f32_to_f16_add_residual(
         out_row[i] = __float2half(sum);
     }
 }
+
+// F16-input sibling of `rmsnorm_f32_to_f16_add_residual`. Reads the
+// pre-summed F16 attention output (already AR-reduced over TP peers),
+// rmsnorms with `weight`, adds to `resid_in`, writes `resid_out`.
+// One pass per row, in-place safe (`resid_out` may alias `resid_in`).
+// Launch identical to `rmsnorm_f32_to_f16`.
+extern "C" __global__ void flambeau_rmsnorm_f16_to_f16_add_residual(
+    const __half* __restrict__ x,         // F16 [n_rows, k] — delta to norm
+    const __half* __restrict__ weight,    // F16 [k]
+    const __half* __restrict__ resid_in,  // F16 [n_rows, k]
+    __half*       __restrict__ resid_out, // F16 [n_rows, k] — may alias resid_in
+    const int n_rows,
+    const int k,
+    const float eps
+) {
+    const int row = blockIdx.x;
+    if (row >= n_rows) return;
+
+    const int tid  = threadIdx.x;
+    const int warp = tid >> 6;
+    const int lane = tid & 63;
+
+    const __half* x_row     = x         + (size_t) row * k;
+    const __half* resid_row = resid_in  + (size_t) row * k;
+    __half*       out_row   = resid_out + (size_t) row * k;
+
+    float sum_sq = 0.0f;
+    #pragma unroll 4
+    for (int i = tid; i < k; i += RMSNORM_F32_TO_F16_THREADS) {
+        const float v = __half2float(x_row[i]);
+        sum_sq += v * v;
+    }
+
+    #pragma unroll
+    for (int off = 32; off > 0; off >>= 1) {
+        sum_sq += __shfl_xor(sum_sq, off, 64);
+    }
+
+    __shared__ float warp_sums[RMSNORM_F32_TO_F16_WARPS];
+    if (lane == 0) {
+        warp_sums[warp] = sum_sq;
+    }
+    __syncthreads();
+
+    float total_sq;
+    if (warp == 0) {
+        float s = (lane < RMSNORM_F32_TO_F16_WARPS) ? warp_sums[lane] : 0.0f;
+        #pragma unroll
+        for (int off = RMSNORM_F32_TO_F16_WARPS / 2; off > 0; off >>= 1) {
+            s += __shfl_xor(s, off, 64);
+        }
+        if (lane == 0) {
+            warp_sums[0] = s;
+        }
+    }
+    __syncthreads();
+    total_sq = warp_sums[0];
+
+    const float mean_sq = total_sq / (float) k;
+    const float rsqrt = 1.0f / sqrtf(mean_sq + eps);
+
+    #pragma unroll 4
+    for (int i = tid; i < k; i += RMSNORM_F32_TO_F16_THREADS) {
+        const float w = __half2float(weight[i]);
+        const float v = __half2float(x_row[i]) * w * rsqrt;
+        const float r = __half2float(resid_row[i]);
+        float sum = r + v;
+        if (sum > 65504.0f) sum = 65504.0f;
+        else if (sum < -65504.0f) sum = -65504.0f;
+        out_row[i] = __float2half(sum);
+    }
+}

@@ -56,6 +56,31 @@ pub trait TopologyHooks {
         false
     }
 
+    /// Whether [`Self::ar_sum_f16`] is available. SD/PP return false;
+    /// BAR1 TP=2 / TP=4 return true. Gemma4's attn/FFN post-norm
+    /// paths use this when the safety predicate allows the F16
+    /// payload (caller checks `output_proj_safe_for_f16_ar`).
+    fn supports_ar_sum_f16(&self) -> bool {
+        false
+    }
+
+    /// F16-payload AR-sum: `buf = Σ peer buf[rank]` in F16. Halves
+    /// BAR1 traffic vs [`Self::ar_sum_f32`]. Default impl bails;
+    /// callers MUST gate with [`Self::supports_ar_sum_f16`].
+    fn ar_sum_f16(
+        &mut self,
+        buf: DevicePtr,
+        n_elems: usize,
+        device: &HipDevice,
+        stream: &HipStream,
+    ) -> Result<()> {
+        let _ = (buf, n_elems, device, stream);
+        anyhow::bail!(
+            "TopologyHooks::ar_sum_f16: unsupported on this topology — \
+             check supports_ar_sum_f16() before calling"
+        )
+    }
+
     #[allow(clippy::too_many_arguments)]
     fn ar_residual_rmsnorm_f16(
         &mut self,
@@ -81,6 +106,48 @@ pub trait TopologyHooks {
         anyhow::bail!(
             "TopologyHooks::ar_residual_rmsnorm_f16: unsupported — gate with \
              supports_ar_residual_rmsnorm_f16() first"
+        )
+    }
+
+    /// Whether [`Self::ar_postattn_residual_rmsnorm_f32_to_f16`] is
+    /// available. SD/PP return false; BAR1 TP=2 / TP=4 return true
+    /// when per-row hidden ≤ 8192 (kernel's per-thread register cap).
+    fn supports_ar_postattn_residual_rmsnorm_f32_to_f16(&self) -> bool {
+        false
+    }
+
+    /// Fused gemma4 post-attn / post-ffn path:
+    /// `resid_out = resid_in + rmsnorm(Σ proj_partial_f32, post_norm_w, eps)`.
+    /// Collapses the `ar_sum_f32` + `rmsnorm_f32_to_f16_add_residual`
+    /// 2-launch sequence into one. `resid_out` must NOT alias
+    /// `resid_in`. Default bails; gate with the `supports_…` flag.
+    #[allow(clippy::too_many_arguments)]
+    fn ar_postattn_residual_rmsnorm_f32_to_f16(
+        &mut self,
+        proj_local_f32: DevicePtr,
+        post_norm_w_f16: DevicePtr,
+        resid_in_f16: DevicePtr,
+        resid_out_f16: DevicePtr,
+        n_rows: usize,
+        n: usize,
+        eps: f32,
+        device: &HipDevice,
+        stream: &HipStream,
+    ) -> Result<()> {
+        let _ = (
+            proj_local_f32,
+            post_norm_w_f16,
+            resid_in_f16,
+            resid_out_f16,
+            n_rows,
+            n,
+            eps,
+            device,
+            stream,
+        );
+        anyhow::bail!(
+            "TopologyHooks::ar_postattn_residual_rmsnorm_f32_to_f16: unsupported — gate \
+             with supports_ar_postattn_residual_rmsnorm_f32_to_f16() first"
         )
     }
 }

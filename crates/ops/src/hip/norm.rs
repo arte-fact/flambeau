@@ -265,6 +265,43 @@ pub fn rmsnorm_f32_to_f16_add_residual(
     Ok(())
 }
 
+/// F16-input sibling of [`rmsnorm_f32_to_f16_add_residual`]. Reads an
+/// F16 delta (caller has cast / AR-summed already), rmsnorms with an
+/// F16 weight, adds to `resid_in`, writes `resid_out`. `resid_out`
+/// may alias `resid_in` for in-place. Same launch shape.
+#[allow(clippy::too_many_arguments)]
+pub fn rmsnorm_f16_to_f16_add_residual(
+    reg: &OpsRegistry,
+    stream: &HipStream,
+    x: DevicePtr,
+    weight: DevicePtr,
+    resid_in: DevicePtr,
+    resid_out: DevicePtr,
+    m: usize,
+    k: usize,
+    eps: f32,
+) -> Result<()> {
+    let module = reg.expect_module("rmsnorm_f32_to_f16")?;
+    let kernel = module.kernel("flambeau_rmsnorm_f16_to_f16_add_residual")?;
+    let m_i = m as i32;
+    let k_i = k as i32;
+    let x_ptr: u64 = x.as_usize() as u64;
+    let w_ptr: u64 = weight.as_usize() as u64;
+    let r_in_ptr: u64 = resid_in.as_usize() as u64;
+    let r_out_ptr: u64 = resid_out.as_usize() as u64;
+    let mut args = KernelArgs::new();
+    args.push(&x_ptr);
+    args.push(&w_ptr);
+    args.push(&r_in_ptr);
+    args.push(&r_out_ptr);
+    args.push(&m_i);
+    args.push(&k_i);
+    args.push(&eps);
+    let cfg = LaunchCfg::one_d(m as u32, 256);
+    unsafe { kernel.launch(stream, cfg, args)? };
+    Ok(())
+}
+
 /// L2 normalization along the last dimension. `y[i] = x[i] / sqrt(sum(x^2) + eps)`.
 /// F32 in/out. Used by GDN on Q and K before the recurrent state update.
 /// Launch: one block/row, 256 threads.

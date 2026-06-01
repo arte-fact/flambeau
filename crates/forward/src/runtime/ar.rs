@@ -281,6 +281,133 @@ pub fn bar_ar_sum_f32(
     Ok(())
 }
 
+/// Fused BAR1 AR + post-attn / post-ffn rmsnorm + residual-add.
+/// Collapses the gemma4 2-launch sequence (`ar_sum_f32` +
+/// `rmsnorm_f32_to_f16_add_residual`) into one launch. F32 over
+/// BAR1 (same payload as `bar_ar_sum_f32` — measured null for F16
+/// payload halving in S1; the launch-count win is what matters).
+/// `n_rows` blocks of 256 threads; per-row hidden `n` must satisfy
+/// `n <= 8192`. `resid_out` must NOT alias `resid_in`.
+#[allow(clippy::too_many_arguments)]
+pub fn bar_ar_postattn_residual_rmsnorm_f32_to_f16(
+    coord: &BarArCoordinator,
+    rank: usize,
+    proj_local_f32: DevicePtr,
+    post_norm_w_f16: DevicePtr,
+    resid_in_f16: DevicePtr,
+    resid_out_f16: DevicePtr,
+    n_rows: usize,
+    n: usize,
+    eps: f32,
+    _device: &HipDevice,
+    stream: &HipStream,
+) -> Result<()> {
+    let n_ranks = coord.ranks();
+    if n_ranks == 1 {
+        anyhow::bail!(
+            "bar_ar_postattn_residual_rmsnorm_f32_to_f16: TP=1 caller — fall back \
+             to the split-path manually"
+        );
+    }
+    let total_elems = n_rows * n;
+    let peers = if total_elems <= EVENT_PATH_MAX_ELEMS {
+        ar_publish_with_events(coord, rank, proj_local_f32, stream)?
+    } else {
+        ar_publish_with_host_sync(coord, rank, proj_local_f32, stream)?
+    };
+    // SAFETY: partials are pool-owned F32 DevicePtrs alive for the
+    // request; producer ordering held by the publish helper; the
+    // kernel reads `resid_in` and writes `resid_out` (caller's
+    // contract: not aliased).
+    unsafe {
+        match n_ranks {
+            2 => coord.bar.postattn_residual_rmsnorm_f32_to_f16_tp2_rank(
+                rank,
+                peers[rank],
+                peers[1 - rank],
+                post_norm_w_f16,
+                resid_in_f16,
+                resid_out_f16,
+                n_rows as u32,
+                n as u32,
+                eps,
+                stream,
+            )?,
+            4 => {
+                let peer3 = [
+                    peers[(rank + 1) % 4],
+                    peers[(rank + 2) % 4],
+                    peers[(rank + 3) % 4],
+                ];
+                coord.bar.postattn_residual_rmsnorm_f32_to_f16_tp4_rank(
+                    rank,
+                    peers[rank],
+                    peer3,
+                    post_norm_w_f16,
+                    resid_in_f16,
+                    resid_out_f16,
+                    n_rows as u32,
+                    n as u32,
+                    eps,
+                    stream,
+                )?
+            }
+            other => anyhow::bail!("BarArCoordinator: unsupported n_ranks={other}"),
+        }
+    }
+    ar_epilogue(coord, rank);
+    Ok(())
+}
+
+/// BAR1 P2P AR-sum (F16 payload). Halves the cross-rank traffic vs
+/// [`bar_ar_sum_f32`] at the price of F16-saturating any
+/// partial-sum element above ±65504. Caller is responsible for the
+/// safety predicate (e.g. `output_proj_safe_for_f16_ar` on gemma4).
+pub fn bar_ar_sum_f16(
+    coord: &BarArCoordinator,
+    rank: usize,
+    buf: DevicePtr,
+    n_elems: usize,
+    _device: &HipDevice,
+    stream: &HipStream,
+) -> Result<()> {
+    let n_ranks = coord.ranks();
+    if n_ranks == 1 {
+        return Ok(());
+    }
+    let peers = if n_elems <= EVENT_PATH_MAX_ELEMS {
+        ar_publish_with_events(coord, rank, buf, stream)?
+    } else {
+        ar_publish_with_host_sync(coord, rank, buf, stream)?
+    };
+    // SAFETY: as in `bar_ar_sum_f32`, but the kernel reads/writes F16
+    // partials.
+    unsafe {
+        match n_ranks {
+            2 => coord.bar.sum_tp2_rank(
+                rank,
+                peers[rank],
+                peers[1 - rank],
+                n_elems as u32,
+                stream,
+            )?,
+            4 => {
+                let peer3 = [
+                    peers[(rank + 1) % 4],
+                    peers[(rank + 2) % 4],
+                    peers[(rank + 3) % 4],
+                ];
+                coord
+                    .bar
+                    .sum_tp4_rank(rank, peers[rank], peer3, n_elems as u32, stream)?
+            }
+            other => anyhow::bail!("BarArCoordinator: unsupported n_ranks={other}"),
+        }
+    }
+    ar_epilogue(coord, rank);
+    Ok(())
+}
+
 /// BAR1 P2P fused AR + residual-add. `partial_f16` is the
 /// rank-local F16 partial (caller has cast from F32 if needed).
 /// `residual_inout_f16` is the rank-local residual; updated in place
@@ -452,6 +579,33 @@ pub fn new_peer_edge(consumer_device_id: i32) -> anyhow::Result<PeerBuffer> {
         buf: Mutex::new(Vec::new()),
         send_done: Mutex::new(None),
         dst: Mutex::new(None),
+        consumer_device_id: Some(consumer_device_id),
+        consumer_device: Some(Arc::new(dev)),
+    }))
+}
+
+/// Build a per-edge slot with `dst` pre-allocated to `max_bytes` on
+/// the consumer's device. Eliminates the alloc-on-first-send race
+/// when both ranks of a stage start in parallel and the receiver
+/// reaches `peer_recv` before the producer's lazy `peer_send` alloc.
+/// Used by `launch_hybrid` since stage workers wake up concurrently.
+///
+/// # Errors
+/// Returns errors from [`HipDevice::new`] or [`Device::alloc`].
+pub fn new_peer_edge_prealloc(
+    consumer_device_id: i32,
+    max_bytes: usize,
+) -> anyhow::Result<PeerBuffer> {
+    let dev = HipDevice::new(consumer_device_id)?;
+    dev.bind()?;
+    let ptr = flambeau_core::Device::alloc(&dev, max_bytes)?;
+    Ok(Arc::new(PeerSlot {
+        buf: Mutex::new(Vec::new()),
+        send_done: Mutex::new(None),
+        dst: Mutex::new(Some(PeerDeviceBuffer {
+            ptr,
+            bytes: max_bytes,
+        })),
         consumer_device_id: Some(consumer_device_id),
         consumer_device: Some(Arc::new(dev)),
     }))
