@@ -250,6 +250,7 @@ pub trait Ops {
         head_dim: usize,
         n_slots: usize,
         scale: f32,
+        window_size: i32,
     ) -> Result<()>;
 
     /// Single-launch per-slot K/V append for the batched-decode path.

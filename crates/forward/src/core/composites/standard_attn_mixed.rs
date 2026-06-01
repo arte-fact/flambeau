@@ -87,17 +87,6 @@ pub fn standard_attn_mixed_local<H: TopologyHooks>(
     if weights.kv_share_src.is_some() {
         bail!("standard_attn_mixed: shared-KV layers (gemma 4n) not yet supported");
     }
-    // SWA on the batched-decode path needs a window-aware
-    // `attn_decode_f16_batched` kernel that doesn't exist yet — bail
-    // until that lands. V-unit-norm / V-from-K / post_attn_norm
-    // ARE supported below for full-attn gemma4 layers.
-    if weights.window_size > 0 {
-        bail!(
-            "standard_attn_mixed: sliding-window attention not yet supported \
-             (window_size={}, attn_decode_f16_batched_swa kernel needed)",
-            weights.window_size
-        );
-    }
 
     let local_idx = layer_idx
         .checked_sub(state.layer_idx_offset)
@@ -520,6 +509,7 @@ pub fn standard_attn_mixed_local<H: TopologyHooks>(
             weights.head_dim,
             n_dec,
             scale,
+            weights.window_size,
             &ops,
         )?;
     }

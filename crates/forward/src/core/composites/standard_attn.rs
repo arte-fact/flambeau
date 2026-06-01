@@ -849,6 +849,7 @@ pub fn standard_attn_local<H: TopologyHooks>(
             weights.head_dim,
             n,
             scale,
+            weights.window_size,
             &ops,
         )?;
     }

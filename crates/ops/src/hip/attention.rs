@@ -144,6 +144,7 @@ pub fn attention_decode_f16_slots(
 /// n_heads_kv * head_dim` F16 elements. `q` / `out` must each point at
 /// ≥ `n_slots * n_heads_q * head_dim` F16 elements.
 #[allow(clippy::too_many_arguments)]
+#[allow(clippy::too_many_arguments)]
 pub fn attention_decode_f16_batched(
     reg: &OpsRegistry,
     stream: &HipStream,
@@ -157,6 +158,7 @@ pub fn attention_decode_f16_batched(
     head_dim: usize,
     n_slots: usize,
     scale: f32,
+    window_size: i32,
 ) -> Result<()> {
     assert!(
         head_dim == 64 || head_dim == 128 || head_dim == 256 || head_dim == 512,
@@ -190,6 +192,7 @@ pub fn attention_decode_f16_batched(
     args.push(&head_dim_i);
     args.push(&n_slots_i);
     args.push(&scale_f);
+    args.push(&window_size);
     let cfg = LaunchCfg {
         grid: (n_heads_q as u32, n_slots as u32, 1),
         block: (head_dim as u32, 1, 1),

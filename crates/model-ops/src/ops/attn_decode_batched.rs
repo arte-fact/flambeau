@@ -72,6 +72,7 @@ pub fn attn_decode_f16_batched(
     head_dim: usize,
     n_slots: usize,
     scale: f32,
+    window_size: i32,
     ops: &HipOps<'_>,
 ) -> Result<()> {
     if !matches!(head_dim, 64 | 128 | 256 | 512) {
@@ -103,6 +104,7 @@ pub fn attn_decode_f16_batched(
         head_dim,
         n_slots,
         scale,
+        window_size,
     )
 }
 

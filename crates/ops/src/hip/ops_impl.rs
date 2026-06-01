@@ -410,6 +410,7 @@ impl<'a> Ops for HipOps<'a> {
         head_dim: usize,
         n_slots: usize,
         scale: f32,
+        window_size: i32,
     ) -> Result<()> {
         super::attention::attention_decode_f16_batched(
             self.reg,
@@ -424,6 +425,7 @@ impl<'a> Ops for HipOps<'a> {
             head_dim,
             n_slots,
             scale,
+            window_size,
         )
     }
 
