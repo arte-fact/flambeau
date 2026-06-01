@@ -238,14 +238,17 @@ impl Model for V2Model {
         Ok(())
     }
     fn supports_mixed_batch(&self) -> bool {
-        // Gemma4's `forward_mixed` driver isn't wired yet — the
-        // standard_attn_mixed composite (with SWA + V-unit-norm +
-        // post_attn_norm + V-from-K) is ready, but `Arch::forward_mixed`
-        // on gemma4-v2 still defaults to bail (gemma4's forward has
-        // side-channel embeddings + dense/MoE branching that need
-        // their own port). Until that driver ships, keeping gemma4
-        // out of this matches keeps engagement attempts from erroring.
-        matches!(self.gguf_arch, "qwen35" | "qwen35moe")
+        matches!(
+            self.gguf_arch,
+            "qwen35"
+                | "qwen35moe"
+                | "gemma3"
+                | "gemma4"
+                | "gemma4-26b-a4b"
+                | "gemma4-31b"
+                | "gemma4-9b"
+                | "gemma4-2b"
+        )
     }
     fn forward_mixed_decode(
         &self,

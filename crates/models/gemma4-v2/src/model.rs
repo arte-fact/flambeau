@@ -136,6 +136,128 @@ pub fn forward<C: ForwardCtx>(
     Ok(())
 }
 
+/// Sarathi-Serve mixed-batch forward. Rows `[0..prefill_rows)` are
+/// a prefill chunk for `slot_ids[0]` at contiguous positions; rows
+/// `[prefill_rows..n)` are batched decodes across N distinct slots.
+/// Routes attention through `standard_attn_mixed`; embed / FFN /
+/// residual_add / per_layer_embd_apply / scale_inplace all run at
+/// `n = K + N` (none of them depend on row identity beyond what's
+/// already in `tokens`/`positions`). Output head emits `N + 1` rows:
+/// the (K-1)-th prefill row + the N decode rows.
+pub fn forward_mixed<C: ForwardCtx>(
+    model: &Gemma4V2Model,
+    ctx: &mut C,
+    tokens: &[u32],
+    positions: &[usize],
+    slot_ids: &[usize],
+    prefill_rows: usize,
+) -> Result<()> {
+    let n = tokens.len();
+    if prefill_rows == 0 || prefill_rows >= n {
+        bail!(
+            "forward_mixed: prefill_rows must satisfy 0 < K < n (got K={prefill_rows}, n={n})"
+        );
+    }
+    let is_moe = model.config.moe.is_some();
+    let mut resid = ctx.embed(&model.embedding, tokens)?;
+
+    let mut tok_rows_buf: Vec<u8> = Vec::new();
+    if let Some(globals) = model.per_layer_embd_globals.as_ref() {
+        tok_rows_buf.reserve_exact(n * globals.tok_embd_row_bytes);
+        for &t in tokens {
+            let token = t as usize;
+            let row_off = token * globals.tok_embd_row_bytes;
+            let row_end = row_off + globals.tok_embd_row_bytes;
+            if row_end > globals.tok_embd_raw.len() {
+                bail!(
+                    "per_layer_token_embd row OOB at token {token}: {row_end} > {}",
+                    globals.tok_embd_raw.len()
+                );
+            }
+            tok_rows_buf.extend_from_slice(&globals.tok_embd_raw[row_off..row_end]);
+        }
+        let main_embd_host = build_main_embd_host_f16(globals, tokens)?;
+        ctx.per_layer_embd_build_table(
+            &main_embd_host,
+            globals.main_embd_scratch_dev,
+            &tok_rows_buf,
+            globals.tok_embd_dtype,
+            globals.tok_embd_row_bytes,
+            globals.model_proj_f16_dev,
+            globals.proj_matmul_f32_dev,
+            &globals.proj_norm_raw,
+            globals.table_dev,
+            globals.pe,
+            model.config.num_layers,
+            model.config.hidden,
+            model.config.rms_eps,
+        )?;
+    }
+
+    let layers: Vec<usize> = ctx.layer_range(&model.layout).collect();
+    for li in layers {
+        let attn_w = model.attn[li]
+            .as_ref()
+            .expect("attn weights missing for owned layer (PP slice mismatch)");
+
+        let delta =
+            ctx.standard_attn_mixed(&resid, attn_w, li, positions, slot_ids, prefill_rows, None)?;
+        if let Some(d) = delta {
+            resid = ctx.residual_add(resid, d, n)?;
+        }
+
+        let delta = if is_moe {
+            let moe_w = model.moe[li]
+                .as_ref()
+                .expect("moe weights missing for owned MoE layer (PP slice mismatch)");
+            ctx.moe_ffn(&resid, moe_w, n, None)?
+        } else {
+            let ffn_w = model.ffn[li]
+                .as_ref()
+                .expect("ffn weights missing for owned dense layer (PP slice mismatch)");
+            ctx.dense_ffn(&resid, ffn_w, n, None)?
+        };
+        if let Some(d) = delta {
+            resid = ctx.residual_add(resid, d, n)?;
+        }
+
+        if let (Some(globals), Some(pe_w)) = (
+            model.per_layer_embd_globals.as_ref(),
+            model.per_layer_embd.get(li).and_then(|o| o.as_ref()),
+        ) {
+            ctx.per_layer_embd_apply(
+                &mut resid,
+                pe_w,
+                globals.table_dev,
+                li,
+                globals.pe,
+                n,
+                n,
+                model.config.rms_eps,
+            )?;
+        }
+
+        if let Some(scale) = model.layer_output_scale[li] {
+            resid = ctx.scale_inplace_f16(resid, scale, n)?;
+        }
+    }
+
+    // Output head emits the (K-1)-th prefill row + N decode rows
+    // via a sliced residual view + sliced slot_ids. Mirrors
+    // `qwen35-v2::forward_mixed`.
+    let hidden = model.layout.hidden;
+    let n_emit = n - prefill_rows + 1;
+    let emit_ptr = resid.ptr.offset_bytes((prefill_rows - 1) * hidden * 2);
+    let emit_input = unsafe {
+        flambeau_model_ops::Tensor::<flambeau_model_ops::F16>::from_raw(emit_ptr, n_emit * hidden)
+    };
+    let mut emit_slots: Vec<usize> = Vec::with_capacity(n_emit);
+    emit_slots.push(slot_ids[0]);
+    emit_slots.extend_from_slice(&slot_ids[prefill_rows..]);
+    ctx.output_head(&emit_input, &model.lm_head, &emit_slots)?;
+    Ok(())
+}
+
 fn build_main_embd_host_f16(
     globals: &PerLayerEmbdGlobals,
     tokens: &[u32],
