@@ -22,7 +22,13 @@ pub const HIP_SUCCESS: c_int = 0;
 /// Returned by `hipDeviceEnablePeerAccess` when the (current device, peer)
 /// edge is already authorised — benign on cluster re-bind paths and
 /// treated as success by `HipCluster::new`.
-pub const HIP_ERROR_PEER_ACCESS_ALREADY_ENABLED: c_int = 705;
+///
+/// Code 705 is `hipErrorPeerAccessNotEnabled` (the opposite); using 705
+/// here silently disabled BAR1 P2P on any second `HipCluster::new` over
+/// the same devices — the AR fell back to host-bounce for any topology
+/// where serve.rs's state-side cluster construction preceded
+/// `try_build_bar_ar`'s.
+pub const HIP_ERROR_PEER_ACCESS_ALREADY_ENABLED: c_int = 704;
 
 // Opaque stream handle. HIP defines `typedef struct ihipStream_t* hipStream_t`;
 // from Rust we only ever pass it opaquely, so a void* newtype is enough.
@@ -60,6 +66,26 @@ extern "C" {
         stream: hipStream_t,
     ) -> c_int;
 
+    /// Cross-device peer copy. `dst_device_id` / `src_device_id` are the
+    /// HIP device IDs holding the respective allocations; peer access
+    /// must be enabled between them (`hipDeviceEnablePeerAccess`). On
+    /// gfx906 + ROCm with BAR1 mapping (Above-4G + Resizable-BAR in
+    /// BIOS) this routes via PCIe BAR1 with no host bounce — the
+    /// pattern llama.cpp uses for its `-sm layer` PP handoff. Earlier
+    /// concerns about `hipMemcpyPeerAsync` leaving the source stream
+    /// in an unsync'able state (cluster.rs docstring) didn't reproduce
+    /// in 2026-05-24 testing against llama.cpp; the call works
+    /// reliably when enqueued on the producer stream + ordered with
+    /// `hipEventRecord` + `hipStreamWaitEvent` on the consumer side.
+    pub fn hipMemcpyPeerAsync(
+        dst: *mut c_void,
+        dst_device_id: c_int,
+        src: *const c_void,
+        src_device_id: c_int,
+        size_bytes: usize,
+        stream: hipStream_t,
+    ) -> c_int;
+
     pub fn hipStreamCreate(stream: *mut hipStream_t) -> c_int;
     pub fn hipStreamCreateWithFlags(stream: *mut hipStream_t, flags: c_uint) -> c_int;
     pub fn hipStreamDestroy(stream: hipStream_t) -> c_int;
@@ -88,11 +114,7 @@ extern "C" {
         extra: *mut *mut c_void,
     ) -> c_int;
 
-    pub fn hipFuncGetAttribute(
-        value: *mut c_int,
-        attrib: c_int,
-        hfunc: hipFunction_t,
-    ) -> c_int;
+    pub fn hipFuncGetAttribute(value: *mut c_int, attrib: c_int, hfunc: hipFunction_t) -> c_int;
 
     // Pinned (page-locked) host memory — required by PP peer
     // copy host-bounce to keep DtoH + HtoD at full PCIe bandwidth.
@@ -254,7 +276,10 @@ pub type hipEvent_t = *mut c_void;
 
 // Flag passed to hipEventCreateWithFlags for a latency-optimised event
 // (no timing — we only use events for dependency tracking, not profiling).
-#[allow(non_upper_case_globals, reason = "verbatim FFI binding name from HIP runtime headers")]
+#[allow(
+    non_upper_case_globals,
+    reason = "verbatim FFI binding name from HIP runtime headers"
+)]
 pub const hipEventDisableTiming: c_uint = 0x2;
 
 /// `hipHostMalloc` flag bits from `hip_runtime_api.h`. Use `Portable` to

@@ -41,7 +41,10 @@ fn f16_contig_new_append_readback() {
     assert_eq!(cache.current_tokens(), 0);
     assert_eq!(cache.max_tokens(), max_tokens);
     assert_eq!(cache.layout_name(), "f16_contig");
-    assert_eq!(cache.bytes_per_tensor(), max_tokens * n_heads * head_dim * 2);
+    assert_eq!(
+        cache.bytes_per_tensor(),
+        max_tokens * n_heads * head_dim * 2
+    );
 
     // Construct 8 tokens of K and V on host: values carry the token index
     // so readback verifies positional ordering after append.
@@ -183,10 +186,7 @@ fn capacity_exceeded_is_reported() {
     let mut cache: KvCache<F16Contig, HipDevice> = KvCache::new(&dev, 1, 4, 4).unwrap();
     let dummy = dev.alloc(32).unwrap();
     // 8 tokens into a 4-token cap.
-    let err = unsafe {
-        cache.append(&dev, dev.default_stream(), dummy, dummy, 8)
-    }
-    .unwrap_err();
+    let err = unsafe { cache.append(&dev, dev.default_stream(), dummy, dummy, 8) }.unwrap_err();
     assert!(format!("{err}").contains("capacity"));
     unsafe { dev.dealloc(dummy, 32).unwrap() };
     cache.dispose(&dev).unwrap();

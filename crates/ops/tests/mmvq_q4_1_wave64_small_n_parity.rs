@@ -128,7 +128,9 @@ fn quantize_row_q4_1(row: &[f32]) -> Vec<BlockQ4_1> {
 }
 
 fn run_parity(label: &str, n_rows: usize, k: usize, n_slots: usize, seed: u64) -> Result<bool> {
-    let Some(dev) = dev_or_skip() else { return Ok(true); };
+    let Some(dev) = dev_or_skip() else {
+        return Ok(true);
+    };
     let reg = OpsRegistry::new(&dev).expect("registry");
     let stream = dev.default_stream();
 
@@ -154,27 +156,49 @@ fn run_parity(label: &str, n_rows: usize, k: usize, n_slots: usize, seed: u64) -
 
     // 1. Baseline: per-row qmatmul(m=1) loop with FLAMBEAU_BATCHED_MMVQ unset.
     // SAFETY: env mutation/restore is single-threaded inside this test.
-    unsafe { std::env::remove_var("FLAMBEAU_BATCHED_MMVQ"); }
+    unsafe {
+        std::env::remove_var("FLAMBEAU_BATCHED_MMVQ");
+    }
     let act_row_bytes = n_blocks_per_row * std::mem::size_of::<BlockQ8_1>();
     let dst_row_bytes = n_rows * 4;
     for s in 0..n_slots {
         let act_row = DevicePtr(d_act_q8_1.as_usize() + s * act_row_bytes);
         let dst_row = DevicePtr(d_out_baseline.as_usize() + s * dst_row_bytes);
         qmatmul(
-            &reg, stream, d_w, act_row, DevicePtr(0), dst_row,
-            1, k, n_rows, QDtype::Q4_1,
+            &reg,
+            stream,
+            d_w,
+            act_row,
+            DevicePtr(0),
+            dst_row,
+            1,
+            k,
+            n_rows,
+            QDtype::Q4_1,
         )?;
     }
     stream.synchronize()?;
 
     // 2. Wave64 path via the qmatmul opt-in.
-    unsafe { std::env::set_var("FLAMBEAU_BATCHED_MMVQ", "1"); }
+    unsafe {
+        std::env::set_var("FLAMBEAU_BATCHED_MMVQ", "1");
+    }
     qmatmul(
-        &reg, stream, d_w, d_act_q8_1, DevicePtr(0), d_out_wave64,
-        n_slots, k, n_rows, QDtype::Q4_1,
+        &reg,
+        stream,
+        d_w,
+        d_act_q8_1,
+        DevicePtr(0),
+        d_out_wave64,
+        n_slots,
+        k,
+        n_rows,
+        QDtype::Q4_1,
     )?;
     stream.synchronize()?;
-    unsafe { std::env::remove_var("FLAMBEAU_BATCHED_MMVQ"); }
+    unsafe {
+        std::env::remove_var("FLAMBEAU_BATCHED_MMVQ");
+    }
 
     let h_baseline = download_f32(&dev, d_out_baseline, n_slots * n_rows);
     let h_wave64 = download_f32(&dev, d_out_wave64, n_slots * n_rows);
@@ -212,8 +236,8 @@ fn run_parity(label: &str, n_rows: usize, k: usize, n_slots: usize, seed: u64) -
 fn mmvq_q4_1_wave64_small_n_parity_sweep() -> Result<()> {
     let cases: &[(&str, usize, usize, &[usize])] = &[
         // (label, n_rows, k, slot_counts)
-        ("qkv-3584",   3584,  4096, &[2, 4, 8]),
-        ("ssm-14336",  14336, 4096, &[2, 4, 8]),
+        ("qkv-3584", 3584, 4096, &[2, 4, 8]),
+        ("ssm-14336", 14336, 4096, &[2, 4, 8]),
     ];
     let mut all_pass = true;
     for (label, n_rows, k, slots) in cases {
@@ -224,6 +248,9 @@ fn mmvq_q4_1_wave64_small_n_parity_sweep() -> Result<()> {
             }
         }
     }
-    assert!(all_pass, "wave64 small-N parity exceeded 1e-5 abs-err tolerance");
+    assert!(
+        all_pass,
+        "wave64 small-N parity exceeded 1e-5 abs-err tolerance"
+    );
     Ok(())
 }

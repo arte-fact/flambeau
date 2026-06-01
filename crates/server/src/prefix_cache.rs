@@ -146,8 +146,13 @@ pub struct TopologyTag {
 /// the snapshot type is feature-gated since it carries
 /// `LayerCacheSnapshot` from the qwen3-moe crate which itself is
 /// `#[cfg(feature = "hip")]`.
+/// Opaque per-rank snapshot bytes. Layout is arch-specific; the prefix
+/// cache treats it as bytes for size accounting + storage. After the
+/// legacy qwen3-moe stack was removed (#221) the snapshot/restore path
+/// is on hold pending #219 (v2 prefix-cache reimplementation); the type
+/// stays in the public surface as a `Vec<u8>` placeholder.
 #[cfg(feature = "hip")]
-pub type RankSnapshot = Vec<flambeau_qwen3_moe::session::LayerCacheSnapshot>;
+pub type RankSnapshot = Vec<u8>;
 
 /// Full multi-rank KV snapshot — one [`RankSnapshot`] per rank in the
 /// captured topology.
@@ -346,11 +351,7 @@ impl PrefixCache {
             last_logits: None,
         };
         let mut inner = self.inner.write().unwrap();
-        inner
-            .by_terminal
-            .entry(terminal)
-            .or_default()
-            .push(entry);
+        inner.by_terminal.entry(terminal).or_default().push(entry);
     }
 
     /// **#228** — clone out the `Arc<KvSnapshot>` for a hit terminal so
@@ -435,14 +436,13 @@ impl PrefixCache {
             if let Some(victim_entries) = inner.by_terminal.remove(&victim) {
                 for e in victim_entries {
                     if let Some(arc) = e.kv {
-                        inner.used_bytes = inner
-                            .used_bytes
-                            .saturating_sub(snapshot_bytes_arc(&arc));
+                        inner.used_bytes =
+                            inner.used_bytes.saturating_sub(snapshot_bytes_arc(&arc));
                     }
                     if let Some(lp) = e.last_logits {
-                        inner.used_bytes = inner.used_bytes.saturating_sub(
-                            lp.len() * std::mem::size_of::<f32>(),
-                        );
+                        inner.used_bytes = inner
+                            .used_bytes
+                            .saturating_sub(lp.len() * std::mem::size_of::<f32>());
                     }
                 }
             }
@@ -455,23 +455,13 @@ impl PrefixCache {
 /// view (avoids importing the model crate's helper into this module).
 #[cfg(feature = "hip")]
 fn snapshot_bytes_arc(snap: &KvSnapshot) -> usize {
-    use flambeau_qwen3_moe::session::LayerCacheSnapshot;
-    snap.iter()
-        .flat_map(|rank| rank.iter())
-        .map(|s| match s {
-            LayerCacheSnapshot::FullAttn { k, v, .. } => k.len() + v.len(),
-            LayerCacheSnapshot::Gdn { state, conv_history } => {
-                state.len() + conv_history.len()
-            }
-        })
-        .sum()
+    snap.iter().map(|rank| rank.len()).sum()
 }
 
 /// Standalone helpers don't need to live in `impl PrefixCache` — keeping
 /// them here avoids forcing callers to construct an instance just to
 /// hash a prompt.
 impl PrefixCache {
-
     /// Number of stored entries (sum across all terminal keys).
     pub fn len(&self) -> usize {
         self.inner

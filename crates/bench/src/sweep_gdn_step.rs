@@ -13,7 +13,6 @@
 //! path.
 
 #![cfg(feature = "hip")]
-
 #![expect(
     clippy::undocumented_unsafe_blocks,
     reason = "sweep harness — every unsafe block is a kernel launch or a memcpy_async \
@@ -267,4 +266,3 @@ fn run_shape(
     let attn_err = max_rel_err_with_floor(&got_attn, &attn_ref, 1.0);
     Ok(state_err.max(attn_err))
 }
-

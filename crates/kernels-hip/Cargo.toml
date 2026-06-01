@@ -10,6 +10,8 @@ description = "HIP `.cu` kernel sources compiled to `.hsaco` via hipcc in build.
 
 [build-dependencies]
 anyhow.workspace = true
+rayon = "1"
+sha2 = "0.10"
 
 [lints]
 workspace = true

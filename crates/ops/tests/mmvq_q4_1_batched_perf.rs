@@ -116,7 +116,11 @@ fn quantize_row_q4_1(row: &[f32]) -> Vec<BlockQ4_1> {
     blocks
 }
 
-fn time_us<F: FnMut() -> Result<()>>(stream: &flambeau_backend_hip::HipStream, iters: usize, mut f: F) -> Result<f64> {
+fn time_us<F: FnMut() -> Result<()>>(
+    stream: &flambeau_backend_hip::HipStream,
+    iters: usize,
+    mut f: F,
+) -> Result<f64> {
     // Warm-up.
     for _ in 0..3 {
         f()?;
@@ -134,7 +138,9 @@ fn time_us<F: FnMut() -> Result<()>>(stream: &flambeau_backend_hip::HipStream, i
 #[test]
 #[ignore = "perf bench (run with --ignored)"]
 fn mmvq_q4_1_batched_perf_sweep() -> Result<()> {
-    let Some(dev) = dev_or_skip() else { return Ok(()); };
+    let Some(dev) = dev_or_skip() else {
+        return Ok(());
+    };
     let reg = OpsRegistry::new(&dev).expect("registry");
     let stream = dev.default_stream();
 
@@ -178,8 +184,16 @@ fn mmvq_q4_1_batched_perf_sweep() -> Result<()> {
         // N=1 single-row baseline (m=1 falls through to per-row MMVQ).
         let single_us = time_us(stream, iters, || {
             qmatmul(
-                &reg, stream, d_w, d_act_q8_1, DevicePtr(0), d_dst,
-                1, k, n_rows, QDtype::Q4_1,
+                &reg,
+                stream,
+                d_w,
+                d_act_q8_1,
+                DevicePtr(0),
+                d_dst,
+                1,
+                k,
+                n_rows,
+                QDtype::Q4_1,
             )
         })?;
 
@@ -199,13 +213,25 @@ fn mmvq_q4_1_batched_perf_sweep() -> Result<()> {
                     let act_row = DevicePtr(d_act_q8_1.as_usize() + s * act_row_bytes);
                     let dst_row = DevicePtr(d_dst.as_usize() + s * dst_row_bytes);
                     qmatmul(
-                        &reg, stream, d_w, act_row, DevicePtr(0), dst_row,
-                        1, k, n_rows, QDtype::Q4_1,
+                        &reg,
+                        stream,
+                        d_w,
+                        act_row,
+                        DevicePtr(0),
+                        dst_row,
+                        1,
+                        k,
+                        n_rows,
+                        QDtype::Q4_1,
                     )?;
                 }
                 Ok(())
             })?;
-            baseline_bits.push(format!("N={n}: {:>7.1}µs ({:.2}×)", us, single_us * n as f64 / us));
+            baseline_bits.push(format!(
+                "N={n}: {:>7.1}µs ({:.2}×)",
+                us,
+                single_us * n as f64 / us
+            ));
         }
         eprintln!("    {}", baseline_bits.join("  "));
 
@@ -214,11 +240,23 @@ fn mmvq_q4_1_batched_perf_sweep() -> Result<()> {
         for &n in slot_counts {
             let us = time_us(stream, iters, || {
                 qmatmul(
-                    &reg, stream, d_w, d_act_q8_1, DevicePtr(0), d_dst,
-                    n, k, n_rows, QDtype::Q4_1,
+                    &reg,
+                    stream,
+                    d_w,
+                    d_act_q8_1,
+                    DevicePtr(0),
+                    d_dst,
+                    n,
+                    k,
+                    n_rows,
+                    QDtype::Q4_1,
                 )
             })?;
-            batched_bits.push(format!("N={n}: {:>7.1}µs ({:.2}×)", us, single_us * n as f64 / us));
+            batched_bits.push(format!(
+                "N={n}: {:>7.1}µs ({:.2}×)",
+                us,
+                single_us * n as f64 / us
+            ));
         }
         eprintln!("    {}", batched_bits.join("  "));
 

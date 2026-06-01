@@ -1,12 +1,11 @@
 //! attention decode with Q8_0 KV cache — correctness cert.
-//! The quality cert (delta-ppl ≤ 0.5% on wikitext-2) lands with the 
+//! The quality cert (delta-ppl ≤ 0.5% on wikitext-2) lands with the
 //! model loader; this sweep gates on the kernel's *arithmetic* matching
 //! the F32 reference that uses Q8-round-tripped K/V — i.e. the kernel
 //! must compute exactly what you'd get if you dequantised K/V to F32 and
 //! ran the F16-KV attention.
 
 #![cfg(feature = "hip")]
-
 #![expect(
     clippy::undocumented_unsafe_blocks,
     reason = "sweep harness — every unsafe block is a kernel launch or a memcpy_async \
@@ -51,11 +50,10 @@ pub fn run_sweep(repo_root: &Path) -> Result<Cert> {
     let mut results = Vec::new();
     for &(head_dim, n_heads_q, n_heads_kv) in SHAPES {
         for n_tokens in contexts {
-            let seed = 0xDECADE
-                ^ (head_dim as u64 * 7919)
-                ^ (n_tokens as u64 * 101);
-            let (got, reference) =
-                run_shape(&dev, &kernel, head_dim, n_heads_q, n_heads_kv, n_tokens, seed)?;
+            let seed = 0xDECADE ^ (head_dim as u64 * 7919) ^ (n_tokens as u64 * 101);
+            let (got, reference) = run_shape(
+                &dev, &kernel, head_dim, n_heads_q, n_heads_kv, n_tokens, seed,
+            )?;
             let max_rel = max_rel_err_with_floor(&got, &reference, (head_dim as f32).sqrt() * 0.01);
             // Q8 quant noise on both K and V → looser bar than F16 KV's 2e-2.
             let tol = 5e-2;
@@ -86,8 +84,10 @@ pub fn run_sweep(repo_root: &Path) -> Result<Cert> {
         arch: "gfx906".to_string(),
         op: "attention_decode_q8_kv".to_string(),
         dtype_weight: "Q8_0".to_string(),    // KV dtype
-        dtype_activation: "F16".to_string(),  // Q/out dtype
-        tolerance_formula: "|err| <= 5e-2 * max(|ref|, sqrt(head_dim))  (correctness; delta-ppl quality cert)".to_string(),
+        dtype_activation: "F16".to_string(), // Q/out dtype
+        tolerance_formula:
+            "|err| <= 5e-2 * max(|ref|, sqrt(head_dim))  (correctness; delta-ppl quality cert)"
+                .to_string(),
         results,
         pass,
         emitted_at: now_utc_iso8601(),
@@ -119,7 +119,10 @@ fn quantize_row_q8_0(xs: &[f32]) -> Vec<BlockQ8_0> {
             let q = (v * id).round().clamp(-127.0, 127.0) as i8;
             qs[j] = q;
         }
-        out.push(BlockQ8_0 { d: f16::from_f32(d), qs });
+        out.push(BlockQ8_0 {
+            d: f16::from_f32(d),
+            qs,
+        });
     }
     out
 }
@@ -228,10 +231,8 @@ fn run_shape(
     for row in 0..n_rows {
         let blocks_k = &k_blocks[row * nb_per_row..(row + 1) * nb_per_row];
         let blocks_v = &v_blocks[row * nb_per_row..(row + 1) * nb_per_row];
-        k_rt[row * head_dim..(row + 1) * head_dim]
-            .copy_from_slice(&dequantize_row_q8_0(blocks_k));
-        v_rt[row * head_dim..(row + 1) * head_dim]
-            .copy_from_slice(&dequantize_row_q8_0(blocks_v));
+        k_rt[row * head_dim..(row + 1) * head_dim].copy_from_slice(&dequantize_row_q8_0(blocks_k));
+        v_rt[row * head_dim..(row + 1) * head_dim].copy_from_slice(&dequantize_row_q8_0(blocks_v));
     }
     let q_in: Vec<f32> = q_f16.iter().map(|v| v.to_f32()).collect();
     let group = n_heads_q / n_heads_kv;
@@ -269,4 +270,3 @@ fn run_shape(
     }
     Ok((got, reference))
 }
-

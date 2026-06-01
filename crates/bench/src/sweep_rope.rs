@@ -9,7 +9,6 @@
 //! Sequence lengths from decode (1) through short prefill (128).
 
 #![cfg(feature = "hip")]
-
 #![expect(
     clippy::undocumented_unsafe_blocks,
     reason = "sweep harness — every unsafe block is a kernel launch or a memcpy_async \
@@ -130,8 +129,7 @@ fn run_shape_cert(
                 let base = (t * n_heads + h) * head_dim + 2 * pair;
                 let x0 = x0_f16[base].to_f32();
                 let x1 = x0_f16[base + 1].to_f32();
-                let inv_freq =
-                    1.0f32 / theta_base.powf(2.0 * (pair as f32) / (head_dim as f32));
+                let inv_freq = 1.0f32 / theta_base.powf(2.0 * (pair as f32) / (head_dim as f32));
                 let angle = (pos as f32) * inv_freq;
                 let c = angle.cos();
                 let s = angle.sin();
@@ -145,7 +143,9 @@ fn run_shape_cert(
     let d_x = alloc_and_upload(dev, &x0_f16);
     let d_pos = alloc_and_upload(dev, &positions);
 
-    launch_rope(dev, kernel, d_x, d_pos, theta_base, n_tokens, n_heads, head_dim)?;
+    launch_rope(
+        dev, kernel, d_x, d_pos, theta_base, n_tokens, n_heads, head_dim,
+    )?;
 
     // Copy out the rotated tensor for the oracle check.
     let mut got1 = vec![f16::from_f32(0.0); total];
@@ -166,7 +166,9 @@ fn run_shape_cert(
     // return to x0 modulo F16 noise).
     let neg_positions: Vec<i32> = positions.iter().map(|p| -p).collect();
     let d_neg_pos = alloc_and_upload(dev, &neg_positions);
-    launch_rope(dev, kernel, d_x, d_neg_pos, theta_base, n_tokens, n_heads, head_dim)?;
+    launch_rope(
+        dev, kernel, d_x, d_neg_pos, theta_base, n_tokens, n_heads, head_dim,
+    )?;
 
     let mut got2 = vec![f16::from_f32(0.0); total];
     unsafe {
@@ -223,4 +225,3 @@ fn launch_rope(
     stream.synchronize()?;
     Ok(())
 }
-

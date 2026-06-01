@@ -9,7 +9,6 @@
               covers symbols held for future collectives that are declared but not yet \
               wired."
 )]
-
 #![expect(
     clippy::undocumented_unsafe_blocks,
     reason = "RCCL FFI — every unsafe block wraps an ncclGroup* / ncclAllReduce* / \
@@ -69,11 +68,7 @@ extern "C" {
     pub fn ncclGetErrorString(result: c_int) -> *const c_char;
 
     pub fn ncclGetUniqueId(unique_id: *mut ncclUniqueId) -> c_int;
-    pub fn ncclCommInitAll(
-        comms: *mut ncclComm_t,
-        ndev: c_int,
-        devlist: *const c_int,
-    ) -> c_int;
+    pub fn ncclCommInitAll(comms: *mut ncclComm_t, ndev: c_int, devlist: *const c_int) -> c_int;
     pub fn ncclCommInitRank(
         newcomm: *mut ncclComm_t,
         nranks: c_int,

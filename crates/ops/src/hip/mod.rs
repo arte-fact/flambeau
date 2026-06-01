@@ -17,8 +17,8 @@
 use std::collections::HashMap;
 
 use anyhow::{anyhow, Result};
-pub use flambeau_backend_hip::{HipDevice, HipStream};
 use flambeau_backend_hip::HipModule;
+pub use flambeau_backend_hip::{HipDevice, HipStream};
 use flambeau_core::Device;
 
 pub mod attention;
@@ -33,6 +33,7 @@ pub mod qmatmul;
 pub mod recurrent;
 pub mod router;
 pub mod sampling;
+pub mod softcap;
 pub mod softmax;
 
 pub use ops_impl::HipOps;
@@ -59,7 +60,9 @@ pub const KERNEL_STEMS: &[&str] = &[
     "mmvq_q4_0_gate_up_t128_dp4a",
     "mmvq_q4_0_warpcoop64",
     "mmvq_q4_0_batched",
+    "mmvq_q4_0_row_tile_batched",
     "mmvq_q8_0_batched",
+    "mmvq_q8_0_row_tile_batched",
     "mmvq_q4_k_batched",
     "mmvq_q6_k_batched",
     "mmvq_q4_0_gate_up_batched",
@@ -108,6 +111,7 @@ pub const KERNEL_STEMS: &[&str] = &[
     "mmvq_q4_k_r4",
     "mmvq_q5_k",
     "mmvq_q5_k_r2",
+    "mmvq_q5_k_dp4a",
     "mmvq_iq4_nl",
     "mmvq_iq4_nl_r2",
     "mmvq_iq4_xs",
@@ -210,7 +214,9 @@ pub const KERNEL_STEMS: &[&str] = &[
     // Norm / pointwise.
     "rmsnorm_f16",
     "rmsnorm_f16_add_residual",
+    "v_unit_norm_per_head_f16",
     "rmsnorm_f32",
+    "rmsnorm_f32_to_f16",
     "rmsnorm_q8_1_fused",
     "l2_norm_f32",
     "causal_conv1d_f32",
@@ -227,24 +233,33 @@ pub const KERNEL_STEMS: &[&str] = &[
     "silu_f32",
     "sigmoid_mul_f16",
     "scale_f32",
+    "scale_f16",
     "add_f16",
     "add_f32",
     "rope_f16",
     "rope_neox_partial_f16",
+    "rmsnorm_rope_neox_partial_f16",
+    "kv_append_v_unit_norm_f16",
     "softmax_masked_f16",
     // Attention.
     "attention_decode_f16",
     "attention_decode_f16_batched",
+    "attention_decode_f16_paged",
     "kv_append_f16_batched_slots",
+    "kv_append_f16_paged_slots",
+    "kv_append_f16_paged_prefill",
     "attention_decode_f16_splitk",
+    // "attention_decode_f16_splitk_h2",
     "attention_decode_q8_kv",
     "attention_decode_q8_kv_splitk",
     "attention_prefill_f16",
+    "attention_prefill_f16_paged",
     "attention_prefill_flash_tile_f16",
     "attention_prefill_q8_kv",
     "attention_prefill_flash_tile_q8_kv",
     // MoE.
     "topk_f32",
+    "apply_per_expert_scale_f32",
     "indexed_moe_mmvq_q4_k",
     "indexed_moe_mmvq_q4_k_r2",
     "indexed_moe_mmvq_q4_k_gate_up",
@@ -257,10 +272,12 @@ pub const KERNEL_STEMS: &[&str] = &[
     "indexed_moe_mmq_q3_k_gate_up_tile8_dp4a",
     "indexed_moe_mmvq_q6_k",
     "indexed_moe_mmvq_q8_0",
+    "indexed_moe_mmvq_q8_0_gate_up_dp4a",
     "indexed_moe_mmq_q4_k",
     "moe_combine_f16",
     "moe_combine_two_residuals_f16",
     "moe_combine_no_residual_f16",
+    "moe_combine_no_residual_f32",
     "dense_gemv_f32_f16",
     "dense_gemv_f32_f16_batched",
     "dense_gemv_f16_f16",
@@ -268,6 +285,11 @@ pub const KERNEL_STEMS: &[&str] = &[
     // Sampler-D (#211, #212) — GPU-side sampler kernels for the chat hot path.
     "sampler_topk_softmax_f32",
     "sampler_apply_penalties_f32",
+    // Gemma4 — final logit softcap.
+    "apply_softcap_f32",
+    // Gemma4 — GELU-based FFN + per-layer side-channel.
+    "gelu_f32_to_f16",
+    "gelu_mul_f32",
 ];
 
 /// Single-session registry of loaded HIP kernel modules. Built once at model
@@ -306,14 +328,17 @@ impl OpsRegistry {
         })?;
         let mut modules = HashMap::with_capacity(KERNEL_STEMS.len());
         for &stem in KERNEL_STEMS {
-            let bytes = flambeau_kernels_hip::hsaco(stem)
-                .ok_or(OpsRegistryError::Missing(stem))?;
-            let module = HipModule::load(dev.id(), bytes).map_err(|e| {
-                OpsRegistryError::Load { stem, source: anyhow!("{e:?}") }
+            let bytes = flambeau_kernels_hip::hsaco(stem).ok_or(OpsRegistryError::Missing(stem))?;
+            let module = HipModule::load(dev.id(), bytes).map_err(|e| OpsRegistryError::Load {
+                stem,
+                source: anyhow!("{e:?}"),
             })?;
             modules.insert(stem, module);
         }
-        Ok(Self { device_id: dev.id(), modules })
+        Ok(Self {
+            device_id: dev.id(),
+            modules,
+        })
     }
 
     /// Look up a previously-loaded module by kernel stem. Returns `None` if

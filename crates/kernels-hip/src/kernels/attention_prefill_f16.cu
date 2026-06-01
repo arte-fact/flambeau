@@ -7,7 +7,7 @@
 // Q: [n_q_tokens, n_heads_q, head_dim]
 // K/V: [n_k_tokens, n_heads_kv, head_dim] (same layout KvCache<F16Contig> uses)
 // Out: [n_q_tokens, n_heads_q, head_dim]
-// Supported head_dim: {64, 128, 256} (matching attention_decode_f16).
+// Supported head_dim: {64, 128, 256, 512} (matching attention_decode_f16).
 // Caller launches with `block = head_dim` threads; kernel computes
 // `n_warps = blockDim.x / 64` at runtime and sums `score_parts[0..n_warps]`.
 // Launch shape:
@@ -26,7 +26,7 @@
 
 typedef _Float16 fb_fp16_t;
 
-#define PREFILL_MAX_HEAD_DIM 256
+#define PREFILL_MAX_HEAD_DIM 512
 #define PREFILL_MAX_WARPS (PREFILL_MAX_HEAD_DIM / 64)
 
 extern "C" __global__ void flambeau_attention_prefill_f16(
@@ -37,10 +37,11 @@ extern "C" __global__ void flambeau_attention_prefill_f16(
     const int n_q_tokens,
     const int n_heads_q,
     const int n_heads_kv,
-    const int head_dim,                        // must be 64, 128 or 256
+    const int head_dim,                        // must be 64, 128, 256, or 512
     const int n_k_tokens,
     const int q_offset,                        // global position of Q[0]
-    const float scale
+    const float scale,
+    const int window_size                      // SWA radius, 0 = unbounded causal
 ) {
     const int q_token = blockIdx.x;
     const int q_head  = blockIdx.y;
@@ -55,9 +56,17 @@ extern "C" __global__ void flambeau_attention_prefill_f16(
 
     // Causal mask: Q token at global position (q_offset + q_token) can
     // attend to K tokens 0..=(q_offset + q_token). Clamp to the cache.
-    int limit = q_offset + q_token + 1;
+    const int qpos_global = q_offset + q_token;
+    int limit = qpos_global + 1;
     if (limit > n_k_tokens) {
         limit = n_k_tokens;
+    }
+    // SWA: lower-bound the per-query causal range to the last
+    // `window_size` keys. window_size=0 disables the window.
+    int t_start = 0;
+    if (window_size > 0) {
+        t_start = qpos_global - window_size + 1;
+        if (t_start < 0) t_start = 0;
     }
 
     // --- Load Q for this (q_token, q_head) into LDS ---
@@ -76,7 +85,7 @@ extern "C" __global__ void flambeau_attention_prefill_f16(
     __shared__ float score_parts[PREFILL_MAX_WARPS];
     __syncthreads();
 
-    for (int t = 0; t < limit; ++t) {
+    for (int t = t_start; t < limit; ++t) {
         const size_t kv_row = ((size_t) t * n_heads_kv + kv_head) * head_dim;
 
         // 1. Q · K[t, kv_head]

@@ -5,9 +5,7 @@
     reason = "test fixture — every `unsafe {}` below is a kernel launch or `memcpy_async`               whose invariant is uniform: host/device buffers live for the bounded               `synchronize()` that follows, pointers are freshly allocated above, kernel               ABIs match kernels-hip. Per-site SAFETY comments would just repeat this."
 )]
 
-use flambeau_backend_hip::{
-    device_count, HipDevice, HipKernel, HipModule, KernelArgs, LaunchCfg,
-};
+use flambeau_backend_hip::{device_count, HipDevice, HipKernel, HipModule, KernelArgs, LaunchCfg};
 use flambeau_core::{CopyDirection, Device, DevicePtr, Stream};
 use flambeau_kernels_hip as kernels;
 
@@ -32,8 +30,11 @@ fn cpu_topk_softmax(
     for t in 0..n_tokens {
         let row = &logits[t * n_experts..(t + 1) * n_experts];
         // Sort (value, index) by value desc with lower-index-wins tiebreak.
-        let mut pairs: Vec<(f32, i32)> =
-            row.iter().enumerate().map(|(i, &v)| (v, i as i32)).collect();
+        let mut pairs: Vec<(f32, i32)> = row
+            .iter()
+            .enumerate()
+            .map(|(i, &v)| (v, i as i32))
+            .collect();
         pairs.sort_by(|a, b| {
             b.0.partial_cmp(&a.0)
                 .unwrap_or(std::cmp::Ordering::Equal)
@@ -146,10 +147,7 @@ fn topk_matches_cpu_reference() {
         for i in 0..k {
             let g = got_idx[t * k + i];
             let r = ref_idx[t * k + i];
-            assert_eq!(
-                g, r,
-                "token {t} pos {i}: got idx {g}, want {r}"
-            );
+            assert_eq!(g, r, "token {t} pos {i}: got idx {g}, want {r}");
             let gw = got_wts[t * k + i];
             let rw = ref_wts[t * k + i];
             assert!(

@@ -22,7 +22,8 @@
 #define INFINITY __builtin_huge_valf()
 #endif
 
-#define ATTN_Q8SK_MAX_HEAD_DIM 256
+#define ATTN_Q8SK_MAX_HEAD_DIM 512
+#define ATTN_Q8SK_MAX_WAVES (ATTN_Q8SK_MAX_HEAD_DIM / 256)
 
 extern "C" __global__ void flambeau_attention_decode_q8_kv_splitk_chunk(
     const fb_fp16_t* __restrict__ q,                    // [n_heads_q, head_dim]
@@ -33,11 +34,12 @@ extern "C" __global__ void flambeau_attention_decode_q8_kv_splitk_chunk(
     float* __restrict__ partials_o,                     // [n_heads_q, n_chunks, head_dim]
     const int n_heads_q,
     const int n_heads_kv,
-    const int head_dim,                                 // 64, 128 or 256
+    const int head_dim,                                 // 64, 128, 256 or 512
     const int n_tokens,
     const int n_chunks,
     const int chunk_size,
-    const float scale
+    const float scale,
+    const int window_size                               // 0 = unbounded causal; >0 = SWA
 ) {
     const int q_head = blockIdx.x;
     const int chunk  = blockIdx.y;
@@ -55,9 +57,35 @@ extern "C" __global__ void flambeau_attention_decode_q8_kv_splitk_chunk(
     const int n_quads_per_block = 8;
     const int quad_in_block     = (elem_base % 32) / 4;
 
-    const int t_start = chunk * chunk_size;
-    int t_end         = t_start + chunk_size;
+    int t_start = chunk * chunk_size;
+    int t_end   = t_start + chunk_size;
     if (t_end > n_tokens) t_end = n_tokens;
+    // SWA mask: keys older than (qpos - window_size + 1) are
+    // excluded. Apply per chunk by raising t_start when the window
+    // begins inside this chunk. Chunks entirely before the window
+    // collapse to empty (t_start >= t_end). For those we write the
+    // neutral-element partials and return early, skipping the
+    // Q→Q8 LDS quantize phase (the dominant per-block cost beyond
+    // the inner score loop).
+    if (window_size > 0) {
+        const int qpos = n_tokens - 1;
+        int window_start = qpos - window_size + 1;
+        if (window_start < 0) window_start = 0;
+        if (t_start < window_start) t_start = window_start;
+        if (t_start > t_end) t_start = t_end;
+    }
+    if (t_start >= t_end) {
+        const int part_idx = q_head * n_chunks + chunk;
+        if (tid == 0) {
+            partials_m[part_idx] = -INFINITY;
+            partials_s[part_idx] = 0.0f;
+        }
+        partials_o[(size_t) part_idx * head_dim + elem_base + 0] = 0.0f;
+        partials_o[(size_t) part_idx * head_dim + elem_base + 1] = 0.0f;
+        partials_o[(size_t) part_idx * head_dim + elem_base + 2] = 0.0f;
+        partials_o[(size_t) part_idx * head_dim + elem_base + 3] = 0.0f;
+        return;
+    }
 
     // 1. Q → Q8_0 in LDS, once per (q_head, chunk) block. Same trick as
     // single-pass: amax over each 32-elem group, roundf(v/d).
@@ -115,13 +143,25 @@ extern "C" __global__ void flambeau_attention_decode_q8_kv_splitk_chunk(
         float score_t = k_d * qd_block * (float) sumi_block;
 
         if (n_blocks_per_row >= 2) {
-            score_t += __shfl_xor(score_t, 8,  n_blocks_per_row * n_quads_per_block);
+            score_t += __shfl_xor(score_t, 8,  min(n_blocks_per_row * n_quads_per_block, 64));
         }
         if (n_blocks_per_row >= 4) {
-            score_t += __shfl_xor(score_t, 16, n_blocks_per_row * n_quads_per_block);
+            score_t += __shfl_xor(score_t, 16, min(n_blocks_per_row * n_quads_per_block, 64));
         }
         if (n_blocks_per_row >= 8) {
-            score_t += __shfl_xor(score_t, 32, n_blocks_per_row * n_quads_per_block);
+            score_t += __shfl_xor(score_t, 32, min(n_blocks_per_row * n_quads_per_block, 64));
+        }
+        // d=512: 2 waves per block; xor chain above ends at stride 32
+        // (wave-internal). Cross-wave LDS reduce so every lane sees the
+        // full sum across both waves.
+        if (head_dim > 256) {
+            __shared__ float score_parts[ATTN_Q8SK_MAX_WAVES];
+            const int warp = tid >> 6;
+            const int lane = tid & 63;
+            if (lane == 0) score_parts[warp] = score_t;
+            __syncthreads();
+            score_t = score_parts[0] + score_parts[1];
+            __syncthreads();
         }
         score_t *= scale;
 

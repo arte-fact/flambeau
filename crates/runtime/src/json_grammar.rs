@@ -64,9 +64,7 @@ enum Frame {
     },
     /// Inside a `true`, `false`, or `null` literal — `expected` is the
     /// remaining suffix to consume.
-    Literal {
-        expected: &'static [u8],
-    },
+    Literal { expected: &'static [u8] },
 }
 
 /// Streaming JSON validator. Feed it bytes via [`Self::feed`]; ask
@@ -141,9 +139,11 @@ impl JsonState {
         // Read just enough state to dispatch — releasing the borrow
         // before we call the per-state handler (which re-borrows).
         let dispatch = match self.stack.back() {
-            Some(Frame::String { escape, unicode_remaining, .. }) => {
-                Dispatch::String(*escape, *unicode_remaining)
-            }
+            Some(Frame::String {
+                escape,
+                unicode_remaining,
+                ..
+            }) => Dispatch::String(*escape, *unicode_remaining),
             Some(Frame::Number { .. }) => Dispatch::Number,
             Some(Frame::Literal { .. }) => Dispatch::Literal,
             Some(Frame::Object { .. }) => Dispatch::Object,
@@ -235,21 +235,15 @@ impl JsonState {
                 true
             }
             b't' => {
-                self.stack.push_back(Frame::Literal {
-                    expected: b"rue",
-                });
+                self.stack.push_back(Frame::Literal { expected: b"rue" });
                 true
             }
             b'f' => {
-                self.stack.push_back(Frame::Literal {
-                    expected: b"alse",
-                });
+                self.stack.push_back(Frame::Literal { expected: b"alse" });
                 true
             }
             b'n' => {
-                self.stack.push_back(Frame::Literal {
-                    expected: b"ull",
-                });
+                self.stack.push_back(Frame::Literal { expected: b"ull" });
                 true
             }
             b'-' | b'0'..=b'9' => {
@@ -271,8 +265,11 @@ impl JsonState {
     }
 
     fn feed_string_byte(&mut self, b: u8, escape: bool, unicode_remaining: u8) -> bool {
-        if let Some(Frame::String { escape: e, unicode_remaining: u, is_key }) =
-            self.stack.back_mut()
+        if let Some(Frame::String {
+            escape: e,
+            unicode_remaining: u,
+            is_key,
+        }) = self.stack.back_mut()
         {
             if unicode_remaining > 0 {
                 if b.is_ascii_hexdigit() {
@@ -502,21 +499,19 @@ impl JsonState {
                 expecting_value,
                 expecting_comma_or_close,
                 ..
-            }) => {
-                if *expecting_value {
+            })
+                if *expecting_value => {
                     *expecting_value = false;
                     *expecting_comma_or_close = true;
                 }
-            }
             Some(Frame::Array {
                 expecting_value,
                 expecting_comma_or_close,
-            }) => {
-                if *expecting_value {
+            })
+                if *expecting_value => {
                     *expecting_value = false;
                     *expecting_comma_or_close = true;
                 }
-            }
             None => {
                 self.finished = true;
             }
@@ -555,8 +550,7 @@ mod tests {
 
     #[test]
     fn nested() {
-        let (ok, done) =
-            validate(r#"{"queries":["a","b"],"meta":{"n":2,"ok":true,"x":null}}"#);
+        let (ok, done) = validate(r#"{"queries":["a","b"],"meta":{"n":2,"ok":true,"x":null}}"#);
         assert!(ok && done);
     }
 

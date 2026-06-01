@@ -1,7 +1,6 @@
 //! shared-expert gate-scale correctness sweep.
 
 #![cfg(feature = "hip")]
-
 #![expect(
     clippy::undocumented_unsafe_blocks,
     reason = "sweep harness — every unsafe block is a kernel launch or a memcpy_async \
@@ -143,4 +142,3 @@ fn run_shape(
     }
     Ok(max_rel_err_with_floor(&got, &reference, 1.0))
 }
-

@@ -49,6 +49,44 @@ pub fn rmsnorm_f16(
     Ok(())
 }
 
+/// Per-head V unit RMSNorm in place. `v` is F16
+/// `[n_tokens, n_kv_heads, head_dim]`, normalised per (token, head)
+/// group of `head_dim` elements with unit weights (no learnable
+/// gamma). `head_dim` must be ≤ 512 and divisible by 64.
+pub fn v_unit_norm_per_head_f16(
+    reg: &OpsRegistry,
+    stream: &HipStream,
+    v: DevicePtr,
+    n_tokens: usize,
+    n_kv_heads: usize,
+    head_dim: usize,
+    eps: f32,
+) -> Result<()> {
+    if head_dim == 0 || head_dim > 512 || (head_dim % 64) != 0 {
+        anyhow::bail!(
+            "v_unit_norm_per_head_f16: head_dim={head_dim} unsupported (need 64..=512, multiple of 64)"
+        );
+    }
+    let module = reg.expect_module("v_unit_norm_per_head_f16")?;
+    let kernel = module.kernel("flambeau_v_unit_norm_per_head_f16")?;
+
+    let n_kv_heads_i = n_kv_heads as i32;
+    let head_dim_i = head_dim as i32;
+    let v_ptr: u64 = v.as_usize() as u64;
+    let mut args = KernelArgs::new();
+    args.push(&v_ptr);
+    args.push(&n_kv_heads_i);
+    args.push(&head_dim_i);
+    args.push(&eps);
+    let cfg = LaunchCfg {
+        grid: (n_kv_heads as u32, n_tokens as u32, 1),
+        block: (head_dim as u32, 1, 1),
+        shared_bytes: 0,
+    };
+    unsafe { kernel.launch(stream, cfg, args)? };
+    Ok(())
+}
+
 /// 3.a.1 — fused `mid = x_in + delta; mid_norm = rmsnorm(mid) * weight`.
 /// Replaces `add_f16` + `rmsnorm_f16` pair at the attention-residual epilogue.
 /// Both `mid` and `mid_norm` are needed downstream.
@@ -148,6 +186,114 @@ pub fn rmsnorm_f32(
     args.push(&x_ptr);
     args.push(&w_ptr);
     args.push(&y_ptr);
+    args.push(&m_i);
+    args.push(&k_i);
+    args.push(&eps);
+    let cfg = LaunchCfg::one_d(m as u32, 256);
+    unsafe { kernel.launch(stream, cfg, args)? };
+    Ok(())
+}
+
+/// F32-in / F16-out fused RMSNorm. Replaces the `cast_f32_to_f16 +
+/// rmsnorm_f16` two-launch pair at gemma4's post-attn / post-ffn norm
+/// site (caller still owns AR + residual_add). Reads F32 input, F16
+/// weight, writes F16 output in one pass.
+pub fn rmsnorm_f32_to_f16(
+    reg: &OpsRegistry,
+    stream: &HipStream,
+    x: DevicePtr,
+    weight: DevicePtr,
+    y: DevicePtr,
+    m: usize,
+    k: usize,
+    eps: f32,
+) -> Result<()> {
+    let module = reg.expect_module("rmsnorm_f32_to_f16")?;
+    let kernel = module.kernel("flambeau_rmsnorm_f32_to_f16")?;
+    let m_i = m as i32;
+    let k_i = k as i32;
+    let x_ptr: u64 = x.as_usize() as u64;
+    let w_ptr: u64 = weight.as_usize() as u64;
+    let y_ptr: u64 = y.as_usize() as u64;
+    let mut args = KernelArgs::new();
+    args.push(&x_ptr);
+    args.push(&w_ptr);
+    args.push(&y_ptr);
+    args.push(&m_i);
+    args.push(&k_i);
+    args.push(&eps);
+    let cfg = LaunchCfg::one_d(m as u32, 256);
+    unsafe { kernel.launch(stream, cfg, args)? };
+    Ok(())
+}
+
+/// Fused: `resid_out = resid_in + rmsnorm_f32_to_f16(x, weight, eps)`.
+/// Replaces the (`rmsnorm_f32_to_f16` → `add_f16`) pair on the gemma4
+/// post-attn / post-ffn paths. One pass over each row; `resid_out`
+/// may alias `resid_in` for in-place. Same launch shape as
+/// `rmsnorm_f32_to_f16`.
+#[allow(clippy::too_many_arguments)]
+pub fn rmsnorm_f32_to_f16_add_residual(
+    reg: &OpsRegistry,
+    stream: &HipStream,
+    x: DevicePtr,
+    weight: DevicePtr,
+    resid_in: DevicePtr,
+    resid_out: DevicePtr,
+    m: usize,
+    k: usize,
+    eps: f32,
+) -> Result<()> {
+    let module = reg.expect_module("rmsnorm_f32_to_f16")?;
+    let kernel = module.kernel("flambeau_rmsnorm_f32_to_f16_add_residual")?;
+    let m_i = m as i32;
+    let k_i = k as i32;
+    let x_ptr: u64 = x.as_usize() as u64;
+    let w_ptr: u64 = weight.as_usize() as u64;
+    let r_in_ptr: u64 = resid_in.as_usize() as u64;
+    let r_out_ptr: u64 = resid_out.as_usize() as u64;
+    let mut args = KernelArgs::new();
+    args.push(&x_ptr);
+    args.push(&w_ptr);
+    args.push(&r_in_ptr);
+    args.push(&r_out_ptr);
+    args.push(&m_i);
+    args.push(&k_i);
+    args.push(&eps);
+    let cfg = LaunchCfg::one_d(m as u32, 256);
+    unsafe { kernel.launch(stream, cfg, args)? };
+    Ok(())
+}
+
+/// F16-input sibling of [`rmsnorm_f32_to_f16_add_residual`]. Reads an
+/// F16 delta (caller has cast / AR-summed already), rmsnorms with an
+/// F16 weight, adds to `resid_in`, writes `resid_out`. `resid_out`
+/// may alias `resid_in` for in-place. Same launch shape.
+#[allow(clippy::too_many_arguments)]
+pub fn rmsnorm_f16_to_f16_add_residual(
+    reg: &OpsRegistry,
+    stream: &HipStream,
+    x: DevicePtr,
+    weight: DevicePtr,
+    resid_in: DevicePtr,
+    resid_out: DevicePtr,
+    m: usize,
+    k: usize,
+    eps: f32,
+) -> Result<()> {
+    let module = reg.expect_module("rmsnorm_f32_to_f16")?;
+    let kernel = module.kernel("flambeau_rmsnorm_f16_to_f16_add_residual")?;
+    let m_i = m as i32;
+    let k_i = k as i32;
+    let x_ptr: u64 = x.as_usize() as u64;
+    let w_ptr: u64 = weight.as_usize() as u64;
+    let r_in_ptr: u64 = resid_in.as_usize() as u64;
+    let r_out_ptr: u64 = resid_out.as_usize() as u64;
+    let mut args = KernelArgs::new();
+    args.push(&x_ptr);
+    args.push(&w_ptr);
+    args.push(&r_in_ptr);
+    args.push(&r_out_ptr);
     args.push(&m_i);
     args.push(&k_i);
     args.push(&eps);
@@ -259,7 +405,11 @@ pub fn quantize_f16_q8_1_mmq(
     ncols: usize,
     total_b: usize,
 ) -> Result<()> {
-    assert_eq!(ncols % 128, 0, "quantize_f16_q8_1_mmq expects ncols % 128 == 0");
+    assert_eq!(
+        ncols % 128,
+        0,
+        "quantize_f16_q8_1_mmq expects ncols % 128 == 0"
+    );
     let module = reg.expect_module("quantize_f16_q8_1_mmq")?;
     let kernel = module.kernel("flambeau_quantize_f16_q8_1_mmq")?;
     let ncols_i = ncols as i32;
@@ -290,7 +440,11 @@ pub fn quantize_f16_q8_1(
     y_q8_1: DevicePtr,
     n_elems: usize,
 ) -> Result<()> {
-    assert_eq!(n_elems % 32, 0, "quantize_f16_q8_1 expects n_elems % 32 == 0");
+    assert_eq!(
+        n_elems % 32,
+        0,
+        "quantize_f16_q8_1 expects n_elems % 32 == 0"
+    );
     let module = reg.expect_module("quantize_f16_q8_1")?;
     let kernel = module.kernel("flambeau_quantize_row_f16_q8_1")?;
     let n_i = n_elems as i32;
@@ -317,7 +471,11 @@ pub fn quantize_f16_q8_0(
     y_q8_0: DevicePtr,
     n_elems: usize,
 ) -> Result<()> {
-    assert_eq!(n_elems % 32, 0, "quantize_f16_q8_0 expects n_elems % 32 == 0");
+    assert_eq!(
+        n_elems % 32,
+        0,
+        "quantize_f16_q8_0 expects n_elems % 32 == 0"
+    );
     let module = reg.expect_module("quantize_f16_q8_0")?;
     let kernel = module.kernel("flambeau_quantize_row_f16_q8_0")?;
     let n_i = n_elems as i32;

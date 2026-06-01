@@ -14,14 +14,15 @@ pub mod graph_capture;
 pub mod impls;
 pub mod kv_cache_slot;
 pub mod module;
+pub mod probe;
 pub mod profile;
 pub mod sys;
 
 pub use bar_p2p::BarP2pAllReduce;
 pub use cluster::HipCluster;
 pub use graph_capture::{MemcpyBinding, MemcpySlot, ScalarSlot, SlotBinding, SlotMap};
-pub use kv_cache_slot::kv_cache_append_hip_slot;
 pub use impls::{dispatch_qmatmul, QMATMUL_GFX906};
+pub use kv_cache_slot::kv_cache_append_hip_slot;
 pub use module::{FuncAttributes, HipKernel, HipModule, KernelArgs, LaunchCfg};
 
 #[cfg(feature = "rccl")]
@@ -30,7 +31,9 @@ pub mod rccl;
 #[cfg(feature = "rccl")]
 pub mod rccl_sys;
 
-pub use device::{bind, current_device, device_count, HipDevice, HipEvent, HipGraphExec, HipStream};
+pub use device::{
+    bind, current_device, device_count, HipDevice, HipEvent, HipGraphExec, HipStream,
+};
 
 #[cfg(feature = "rccl")]
 pub use rccl::{HipMesh, HipRankHandle};

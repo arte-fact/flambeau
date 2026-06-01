@@ -61,4 +61,3 @@ pub fn cast_f16_to_f32(
     unsafe { kernel.launch(stream, cfg, args)? };
     Ok(())
 }
-

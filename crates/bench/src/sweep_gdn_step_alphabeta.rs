@@ -8,7 +8,6 @@
 //! `state_out` and `attn_out` element-wise.
 
 #![cfg(feature = "hip")]
-
 #![expect(
     clippy::undocumented_unsafe_blocks,
     reason = "sweep harness — kernel launches + memcpy_async over local \

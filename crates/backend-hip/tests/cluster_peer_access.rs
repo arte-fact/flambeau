@@ -32,7 +32,10 @@ fn single_rank_matrix_is_diagonal_true() {
     assert_eq!(m[0].len(), 1);
     assert!(m[0][0], "diagonal entry must be true");
     assert!(cluster.can_peer_access(0, 0));
-    assert!(cluster.peer_access_full(), "single-rank cluster is trivially fully connected");
+    assert!(
+        cluster.peer_access_full(),
+        "single-rank cluster is trivially fully connected"
+    );
 }
 
 #[test]

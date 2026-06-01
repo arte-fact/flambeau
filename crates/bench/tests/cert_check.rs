@@ -10,10 +10,7 @@ static COUNTER: AtomicU64 = AtomicU64::new(0);
 
 fn tempdir() -> PathBuf {
     let n = COUNTER.fetch_add(1, Ordering::SeqCst);
-    let p = std::env::temp_dir().join(format!(
-        "flambeau-cert-check-{}-{n}",
-        std::process::id()
-    ));
+    let p = std::env::temp_dir().join(format!("flambeau-cert-check-{}-{n}", std::process::id()));
     std::fs::create_dir_all(&p).unwrap();
     p
 }
@@ -119,11 +116,7 @@ fn cert_check_impl_id_mismatch_fails() {
 #[test]
 fn cert_check_pass_false_fails() {
     let root = tempdir();
-    let dispatch = write_dispatch(
-        &root,
-        "q",
-        "certs/hip/gfx906/q.json",
-    );
+    let dispatch = write_dispatch(&root, "q", "certs/hip/gfx906/q.json");
     // Write a cert with pass=false.
     let mut cert = Cert {
         schema_version: SCHEMA_VERSION,

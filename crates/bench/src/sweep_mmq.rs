@@ -10,7 +10,6 @@
 //! kernel (one output element per single-wave block). Slow but correct.
 
 #![cfg(feature = "hip")]
-
 #![expect(
     clippy::undocumented_unsafe_blocks,
     reason = "sweep harness — every unsafe block is a kernel launch or a memcpy_async \
@@ -27,8 +26,10 @@ use flambeau_backend_hip::{
 use flambeau_core::{CopyDirection, Device, DevicePtr, Stream};
 use flambeau_kernels_hip as kernels;
 use flambeau_quant::{
-    dequantize_into, BlockIq1M, BlockIq1S, BlockIq2S, BlockIq2Xs, BlockIq2Xxs, BlockIq3S, BlockIq3Xxs, BlockIq4Nl, BlockIq4Xs, BlockQ2K, BlockQ3K, BlockQ4_0, BlockQ4_1, BlockQ4K, BlockQ5_0, BlockQ5_1, BlockQ5K,
-    BlockQ6K, BlockQ8K, BlockQ8_0, BlockQ8_1, GgmlDType, QK4_1, QK5_1, QK8_0, QK_K,
+    dequantize_into, BlockIq1M, BlockIq1S, BlockIq2S, BlockIq2Xs, BlockIq2Xxs, BlockIq3S,
+    BlockIq3Xxs, BlockIq4Nl, BlockIq4Xs, BlockQ2K, BlockQ3K, BlockQ4K, BlockQ4_0, BlockQ4_1,
+    BlockQ5K, BlockQ5_0, BlockQ5_1, BlockQ6K, BlockQ8K, BlockQ8_0, BlockQ8_1, GgmlDType, QK4_1,
+    QK5_1, QK8_0, QK_K,
 };
 use half::f16;
 
@@ -116,22 +117,22 @@ pub enum Dtype {
 /// `(ceil(n / rows_per_block), ceil(m / batches_per_block))`.
 fn tile_shape(dtype: Dtype) -> (u32, u32) {
     match dtype {
-        Dtype::Q8_0Oracle => (1, 1),   // one output element per block
-        Dtype::Q8_04Warp => (32, 8),   // MMQ_Y × MMQ_X
-        Dtype::Q8_0Wave64 => (64, 8),  // MMQ_Y × TILE_N — wave64 ()
+        Dtype::Q8_0Oracle => (1, 1),         // one output element per block
+        Dtype::Q8_04Warp => (32, 8),         // MMQ_Y × MMQ_X
+        Dtype::Q8_0Wave64 => (64, 8),        // MMQ_Y × TILE_N — wave64 ()
         Dtype::Q8_0Wave64Tile16 => (64, 16), // MMQ_Y × TILE_N — wave64 ()
-        Dtype::Q4_14Warp => (128, 64), // 5 — candle turbo tile shape
-        Dtype::Q4_1Wave64 => (64, 8),  // 3.a wave64 MMQ for Q4_1
-        Dtype::Q4_0Wave64 => (64, 8),  // 8.a wave64 MMQ for Q4_0
-        Dtype::Q4_04Warp => (128, 64), // C1 — 4warp_lds tile, MMQ_Y=128, MMQ_X=64
-        Dtype::Q5_0Wave64 => (64, 8),  // 0.a wave64 MMQ for Q5_0
+        Dtype::Q4_14Warp => (128, 64),       // 5 — candle turbo tile shape
+        Dtype::Q4_1Wave64 => (64, 8),        // 3.a wave64 MMQ for Q4_1
+        Dtype::Q4_0Wave64 => (64, 8),        // 8.a wave64 MMQ for Q4_0
+        Dtype::Q4_04Warp => (128, 64),       // C1 — 4warp_lds tile, MMQ_Y=128, MMQ_X=64
+        Dtype::Q5_0Wave64 => (64, 8),        // 0.a wave64 MMQ for Q5_0
         Dtype::Q5_1Wave64 => (64, 8),
-        Dtype::Q4K4Warp => (16, 8),    // MMQ_Y × MMQ_X (Q4_K uses 16 rows to fit LDS)
-        Dtype::Q4KTurbo => (128, 16),  // 4.b turbo-ported Q4_K (MMQ_Y=128, MMQ_X=16)
-        Dtype::Q4KWave64 => (64, 8),   // MMQ_Y × TILE_N — wave64 MMQ for Q4_K (candle port)
-        Dtype::Q5KWave64 => (64, 8),   // MMQ_Y × TILE_N — wave64 MMQ for Q5_K (candle port)
-        Dtype::Q6K4Warp => (16, 8),    // MMQ_Y × MMQ_X (Q6_K same tile as Q4_K)
-        Dtype::Q6KWave64 => (64, 8),   // MMQ_Y × TILE_N — wave64 MMQ for Q6_K ()
+        Dtype::Q4K4Warp => (16, 8), // MMQ_Y × MMQ_X (Q4_K uses 16 rows to fit LDS)
+        Dtype::Q4KTurbo => (128, 16), // 4.b turbo-ported Q4_K (MMQ_Y=128, MMQ_X=16)
+        Dtype::Q4KWave64 => (64, 8), // MMQ_Y × TILE_N — wave64 MMQ for Q4_K (candle port)
+        Dtype::Q5KWave64 => (64, 8), // MMQ_Y × TILE_N — wave64 MMQ for Q5_K (candle port)
+        Dtype::Q6K4Warp => (16, 8), // MMQ_Y × MMQ_X (Q6_K same tile as Q4_K)
+        Dtype::Q6KWave64 => (64, 8), // MMQ_Y × TILE_N — wave64 MMQ for Q6_K ()
         Dtype::Q8KWave64 => (64, 8),
         Dtype::Q2KWave64 => (64, 8),
         Dtype::Q3KWave64 => (64, 8),
@@ -150,10 +151,9 @@ fn tile_shape(dtype: Dtype) -> (u32, u32) {
 impl Dtype {
     pub fn name(self) -> &'static str {
         match self {
-            Dtype::Q8_0Oracle
-            | Dtype::Q8_04Warp
-            | Dtype::Q8_0Wave64
-            | Dtype::Q8_0Wave64Tile16 => "Q8_0",
+            Dtype::Q8_0Oracle | Dtype::Q8_04Warp | Dtype::Q8_0Wave64 | Dtype::Q8_0Wave64Tile16 => {
+                "Q8_0"
+            }
             Dtype::Q4_14Warp | Dtype::Q4_1Wave64 => "Q4_1",
             Dtype::Q4_0Wave64 | Dtype::Q4_04Warp => "Q4_0",
             Dtype::Q5_0Wave64 => "Q5_0",
@@ -178,10 +178,9 @@ impl Dtype {
 
     pub fn ggml(self) -> GgmlDType {
         match self {
-            Dtype::Q8_0Oracle
-            | Dtype::Q8_04Warp
-            | Dtype::Q8_0Wave64
-            | Dtype::Q8_0Wave64Tile16 => GgmlDType::Q8_0,
+            Dtype::Q8_0Oracle | Dtype::Q8_04Warp | Dtype::Q8_0Wave64 | Dtype::Q8_0Wave64Tile16 => {
+                GgmlDType::Q8_0
+            }
             Dtype::Q4_14Warp | Dtype::Q4_1Wave64 => GgmlDType::Q4_1,
             Dtype::Q4_0Wave64 | Dtype::Q4_04Warp => GgmlDType::Q4_0,
             Dtype::Q5_0Wave64 => GgmlDType::Q5_0,
@@ -306,10 +305,29 @@ impl Dtype {
     fn launch_threads(self) -> u32 {
         match self {
             Dtype::Q8_0Oracle | Dtype::Q8_04Warp | Dtype::Q4_14Warp | Dtype::Q4_04Warp => 256,
-            Dtype::Q8_0Wave64 | Dtype::Q8_0Wave64Tile16 | Dtype::Q4_1Wave64 | Dtype::Q4_0Wave64 | Dtype::Q5_0Wave64 | Dtype::Q5_1Wave64 => 64,
+            Dtype::Q8_0Wave64
+            | Dtype::Q8_0Wave64Tile16
+            | Dtype::Q4_1Wave64
+            | Dtype::Q4_0Wave64
+            | Dtype::Q5_0Wave64
+            | Dtype::Q5_1Wave64 => 64,
             Dtype::Q4K4Warp | Dtype::Q6K4Warp => 128,
-            Dtype::Q4KTurbo => 256,  // 4 warps × 64
-            Dtype::Q4KWave64 | Dtype::Q5KWave64 | Dtype::Q6KWave64 | Dtype::Q8KWave64 | Dtype::Q2KWave64 | Dtype::Q3KWave64 | Dtype::Iq4XsWave64 | Dtype::Iq3SWave64 | Dtype::Iq4NlWave64 | Dtype::Iq3XxsWave64 | Dtype::Iq2XxsWave64 | Dtype::Iq2XsWave64 | Dtype::Iq2SWave64 | Dtype::Iq1SWave64 | Dtype::Iq1MWave64 => 64,
+            Dtype::Q4KTurbo => 256, // 4 warps × 64
+            Dtype::Q4KWave64
+            | Dtype::Q5KWave64
+            | Dtype::Q6KWave64
+            | Dtype::Q8KWave64
+            | Dtype::Q2KWave64
+            | Dtype::Q3KWave64
+            | Dtype::Iq4XsWave64
+            | Dtype::Iq3SWave64
+            | Dtype::Iq4NlWave64
+            | Dtype::Iq3XxsWave64
+            | Dtype::Iq2XxsWave64
+            | Dtype::Iq2XsWave64
+            | Dtype::Iq2SWave64
+            | Dtype::Iq1SWave64
+            | Dtype::Iq1MWave64 => 64,
         }
     }
 
@@ -319,10 +337,9 @@ impl Dtype {
 
     fn weight_block_bytes(self) -> usize {
         match self {
-            Dtype::Q8_0Oracle
-            | Dtype::Q8_04Warp
-            | Dtype::Q8_0Wave64
-            | Dtype::Q8_0Wave64Tile16 => std::mem::size_of::<BlockQ8_0>(),
+            Dtype::Q8_0Oracle | Dtype::Q8_04Warp | Dtype::Q8_0Wave64 | Dtype::Q8_0Wave64Tile16 => {
+                std::mem::size_of::<BlockQ8_0>()
+            }
             Dtype::Q4_14Warp | Dtype::Q4_1Wave64 => std::mem::size_of::<BlockQ4_1>(),
             Dtype::Q4_0Wave64 | Dtype::Q4_04Warp => std::mem::size_of::<BlockQ4_0>(),
             Dtype::Q5_0Wave64 => std::mem::size_of::<BlockQ5_0>(),
@@ -358,7 +375,22 @@ impl Dtype {
             Dtype::Q5_1Wave64 => "wave64",
             Dtype::Q4K4Warp => "4warp_lds",
             Dtype::Q4KTurbo => "turbo",
-            Dtype::Q4KWave64 | Dtype::Q5KWave64 | Dtype::Q6KWave64 | Dtype::Q8KWave64 | Dtype::Q2KWave64 | Dtype::Q3KWave64 | Dtype::Q8_0Wave64 | Dtype::Iq4XsWave64 | Dtype::Iq3SWave64 | Dtype::Iq4NlWave64 | Dtype::Iq3XxsWave64 | Dtype::Iq2XxsWave64 | Dtype::Iq2XsWave64 | Dtype::Iq2SWave64 | Dtype::Iq1SWave64 | Dtype::Iq1MWave64 => "wave64",
+            Dtype::Q4KWave64
+            | Dtype::Q5KWave64
+            | Dtype::Q6KWave64
+            | Dtype::Q8KWave64
+            | Dtype::Q2KWave64
+            | Dtype::Q3KWave64
+            | Dtype::Q8_0Wave64
+            | Dtype::Iq4XsWave64
+            | Dtype::Iq3SWave64
+            | Dtype::Iq4NlWave64
+            | Dtype::Iq3XxsWave64
+            | Dtype::Iq2XxsWave64
+            | Dtype::Iq2XsWave64
+            | Dtype::Iq2SWave64
+            | Dtype::Iq1SWave64
+            | Dtype::Iq1MWave64 => "wave64",
             Dtype::Q8_0Wave64Tile16 => "wave64_tile16",
             Dtype::Q6K4Warp => "4warp_lds",
         }
@@ -388,15 +420,47 @@ impl SweepSpec {
         // K, N chosen from Qwen3.6 attention + FFN widths; M small so the
         // oracle's M×N single-wave launches stay under a few seconds total.
         let shapes = vec![
-            Shape { m: 4,  k: 2048, n: 2048 },
-            Shape { m: 8,  k: 2048, n: 2048 },
-            Shape { m: 16, k: 2048, n: 2048 },
-            Shape { m: 4,  k: 5120, n: 5120 },
-            Shape { m: 8,  k: 5120, n: 5120 },
-            Shape { m: 4,  k: 5120, n: 15360 }, // FFN up
-            Shape { m: 4,  k: 15360, n: 5120 }, // FFN down
+            Shape {
+                m: 4,
+                k: 2048,
+                n: 2048,
+            },
+            Shape {
+                m: 8,
+                k: 2048,
+                n: 2048,
+            },
+            Shape {
+                m: 16,
+                k: 2048,
+                n: 2048,
+            },
+            Shape {
+                m: 4,
+                k: 5120,
+                n: 5120,
+            },
+            Shape {
+                m: 8,
+                k: 5120,
+                n: 5120,
+            },
+            Shape {
+                m: 4,
+                k: 5120,
+                n: 15360,
+            }, // FFN up
+            Shape {
+                m: 4,
+                k: 15360,
+                n: 5120,
+            }, // FFN down
         ];
-        Self { dtype, shapes, seed: 0xC0FFEE }
+        Self {
+            dtype,
+            shapes,
+            seed: 0xC0FFEE,
+        }
     }
 
     /// Prefill-scale grid for the first-class 4-warp LDS-tiled kernel.
@@ -404,15 +468,47 @@ impl SweepSpec {
     /// MoE widths.
     pub fn v1_4_prefill(dtype: Dtype) -> Self {
         let shapes = vec![
-            Shape { m: 128,  k: 2048, n: 2048 },
-            Shape { m: 128,  k: 5120, n: 5120 },
-            Shape { m: 128,  k: 5120, n: 15360 },
-            Shape { m: 128,  k: 15360, n: 5120 },
-            Shape { m: 512,  k: 2048, n: 2048 },
-            Shape { m: 512,  k: 5120, n: 5120 },
-            Shape { m: 2048, k: 2048, n: 2048 },
+            Shape {
+                m: 128,
+                k: 2048,
+                n: 2048,
+            },
+            Shape {
+                m: 128,
+                k: 5120,
+                n: 5120,
+            },
+            Shape {
+                m: 128,
+                k: 5120,
+                n: 15360,
+            },
+            Shape {
+                m: 128,
+                k: 15360,
+                n: 5120,
+            },
+            Shape {
+                m: 512,
+                k: 2048,
+                n: 2048,
+            },
+            Shape {
+                m: 512,
+                k: 5120,
+                n: 5120,
+            },
+            Shape {
+                m: 2048,
+                k: 2048,
+                n: 2048,
+            },
         ];
-        Self { dtype, shapes, seed: 0xC0FFEE }
+        Self {
+            dtype,
+            shapes,
+            seed: 0xC0FFEE,
+        }
     }
 }
 
@@ -467,7 +563,21 @@ pub fn run_sweep(spec: &SweepSpec, repo_root: &Path) -> Result<Cert> {
         dtype_weight: spec.dtype.name().to_string(),
         dtype_activation: "Q8_1".to_string(),
         tolerance_formula: match spec.dtype {
-            Dtype::Q4KWave64 | Dtype::Q5KWave64 | Dtype::Q6KWave64 | Dtype::Q8KWave64 | Dtype::Q2KWave64 | Dtype::Q3KWave64 | Dtype::Iq4XsWave64 | Dtype::Iq3SWave64 | Dtype::Iq4NlWave64 | Dtype::Iq3XxsWave64 | Dtype::Iq2XxsWave64 | Dtype::Iq2XsWave64 | Dtype::Iq2SWave64 | Dtype::Iq1SWave64 | Dtype::Iq1MWave64 => "|err| <= 5e-2 * max(|ref|, sqrt(k))".to_string(),
+            Dtype::Q4KWave64
+            | Dtype::Q5KWave64
+            | Dtype::Q6KWave64
+            | Dtype::Q8KWave64
+            | Dtype::Q2KWave64
+            | Dtype::Q3KWave64
+            | Dtype::Iq4XsWave64
+            | Dtype::Iq3SWave64
+            | Dtype::Iq4NlWave64
+            | Dtype::Iq3XxsWave64
+            | Dtype::Iq2XxsWave64
+            | Dtype::Iq2XsWave64
+            | Dtype::Iq2SWave64
+            | Dtype::Iq1SWave64
+            | Dtype::Iq1MWave64 => "|err| <= 5e-2 * max(|ref|, sqrt(k))".to_string(),
             _ => "|err| <= 3e-2 * max(|ref|, sqrt(k))".to_string(),
         },
         results,
@@ -516,13 +626,20 @@ fn run_shape(
     // Q4_1 MMQ uses the DS4 / BlockQ8_1Mmq activation layout (series
     // port of candle). Every other MMQ variant still uses the per-row
     // BlockQ8_1 layout. The fork happens here.
-    let uses_mmq_layout = dtype == Dtype::Q4_14Warp
-        || dtype == Dtype::Q4_04Warp
-        || dtype == Dtype::Q4KTurbo;
+    let uses_mmq_layout =
+        dtype == Dtype::Q4_14Warp || dtype == Dtype::Q4_04Warp || dtype == Dtype::Q4KTurbo;
 
     // Kernels.
-    let q_stem = if uses_mmq_layout { "quantize_q8_1_mmq" } else { "quantize_q8_1" };
-    let q_entry = if uses_mmq_layout { "flambeau_quantize_q8_1_mmq" } else { "flambeau_quantize_row_q8_1" };
+    let q_stem = if uses_mmq_layout {
+        "quantize_q8_1_mmq"
+    } else {
+        "quantize_q8_1"
+    };
+    let q_entry = if uses_mmq_layout {
+        "flambeau_quantize_q8_1_mmq"
+    } else {
+        "flambeau_quantize_row_q8_1"
+    };
     let q_bytes = kernels::hsaco(q_stem).unwrap();
     let m_bytes = kernels::hsaco(dtype.kernel_stem()).unwrap();
     let q_module = HipModule::load(dev.id(), q_bytes)?;
@@ -634,9 +751,9 @@ fn run_shape(
             // + tile_x_dm (MMQ_Y half2) + tile_x_sc (MMQ_Y×4 + MMQ_Y/8) ints
             // = 576 + 4224 + 128 + 528 = 5456 ints = 21824 B (mmq_y=128)
             let shared_bytes: u32 = match dtype {
-                Dtype::Q4_14Warp | Dtype::Q4_04Warp => 7584 * 4,  // same MMQ_Y/MMQ_X tile
-                Dtype::Q4KTurbo  => 22528,  // 22 KiB, rounded up
-                _ => 0,  // unreachable (uses_mmq_layout gate above)
+                Dtype::Q4_14Warp | Dtype::Q4_04Warp => 7584 * 4, // same MMQ_Y/MMQ_X tile
+                Dtype::Q4KTurbo => 22528,                        // 22 KiB, rounded up
+                _ => 0, // unreachable (uses_mmq_layout gate above)
             };
             let cfg = LaunchCfg {
                 grid: (grid_x, grid_y, 1),
@@ -644,7 +761,28 @@ fn run_shape(
                 shared_bytes,
             };
             unsafe { k_mmq.launch(stream, cfg, args)? };
-        } else if dtype == Dtype::Q4KWave64 || dtype == Dtype::Q5KWave64 || dtype == Dtype::Q6KWave64 || dtype == Dtype::Q8KWave64 || dtype == Dtype::Q2KWave64 || dtype == Dtype::Q3KWave64 || dtype == Dtype::Q8_0Wave64 || dtype == Dtype::Q8_0Wave64Tile16 || dtype == Dtype::Q4_1Wave64 || dtype == Dtype::Q4_0Wave64 || dtype == Dtype::Q5_0Wave64 || dtype == Dtype::Q5_1Wave64 || dtype == Dtype::Iq4XsWave64 || dtype == Dtype::Iq3SWave64 || dtype == Dtype::Iq4NlWave64 || dtype == Dtype::Iq3XxsWave64 || dtype == Dtype::Iq2XxsWave64 || dtype == Dtype::Iq2XsWave64 || dtype == Dtype::Iq2SWave64 || dtype == Dtype::Iq1SWave64 || dtype == Dtype::Iq1MWave64 {
+        } else if dtype == Dtype::Q4KWave64
+            || dtype == Dtype::Q5KWave64
+            || dtype == Dtype::Q6KWave64
+            || dtype == Dtype::Q8KWave64
+            || dtype == Dtype::Q2KWave64
+            || dtype == Dtype::Q3KWave64
+            || dtype == Dtype::Q8_0Wave64
+            || dtype == Dtype::Q8_0Wave64Tile16
+            || dtype == Dtype::Q4_1Wave64
+            || dtype == Dtype::Q4_0Wave64
+            || dtype == Dtype::Q5_0Wave64
+            || dtype == Dtype::Q5_1Wave64
+            || dtype == Dtype::Iq4XsWave64
+            || dtype == Dtype::Iq3SWave64
+            || dtype == Dtype::Iq4NlWave64
+            || dtype == Dtype::Iq3XxsWave64
+            || dtype == Dtype::Iq2XxsWave64
+            || dtype == Dtype::Iq2XsWave64
+            || dtype == Dtype::Iq2SWave64
+            || dtype == Dtype::Iq1SWave64
+            || dtype == Dtype::Iq1MWave64
+        {
             // flambeau_mmq_{q4_K,q5_K,q6_K,q8_0}_wave64_q8_1: 8 scalar args + 3 ptrs, wave64
             // block. Args: vx, vy, dst, ncols_x=K, nrows_x=N, ncols_y=M,
             // nrows_y=K, nrows_dst=N.
@@ -730,7 +868,9 @@ fn seeded_bytes(seed: u64, n: usize) -> Vec<u8> {
     let mut s = seed.wrapping_mul(6364136223846793005).wrapping_add(1);
     (0..n)
         .map(|_| {
-            s = s.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+            s = s
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
             (s >> 24) as u8
         })
         .collect()
@@ -742,10 +882,7 @@ fn tame_weight_scales(dtype: Dtype, mut raw: Vec<u8>) -> Vec<u8> {
     for i in 0..nblocks {
         let block = &mut raw[i * bs..(i + 1) * bs];
         match dtype {
-            Dtype::Q8_0Oracle
-            | Dtype::Q8_04Warp
-            | Dtype::Q8_0Wave64
-            | Dtype::Q8_0Wave64Tile16 => {
+            Dtype::Q8_0Oracle | Dtype::Q8_04Warp | Dtype::Q8_0Wave64 | Dtype::Q8_0Wave64Tile16 => {
                 let d = f16::from_f32((block[0] as f32 / 255.0) * 0.1 + 0.01);
                 block[0..2].copy_from_slice(&d.to_bits().to_le_bytes());
             }
@@ -921,8 +1058,15 @@ fn cert_tol(dtype: Dtype, _k: usize) -> f32 {
         // even for a correct kernel. Candle's Q5_K MMQ accepts ~5e-2 at m=2048.
         // Q4_K wave64 shares the same super/sub-block decomposition as Q5_K.
         Dtype::Q4KWave64 | Dtype::Q5KWave64 | Dtype::Q6KWave64 | Dtype::Q4KTurbo => 5e-2,
-        Dtype::Iq4XsWave64 | Dtype::Iq3SWave64 | Dtype::Iq4NlWave64 | Dtype::Iq3XxsWave64 | Dtype::Iq2XxsWave64 | Dtype::Iq2XsWave64 | Dtype::Iq2SWave64 | Dtype::Iq1SWave64 | Dtype::Iq1MWave64 => 5e-2,
+        Dtype::Iq4XsWave64
+        | Dtype::Iq3SWave64
+        | Dtype::Iq4NlWave64
+        | Dtype::Iq3XxsWave64
+        | Dtype::Iq2XxsWave64
+        | Dtype::Iq2XsWave64
+        | Dtype::Iq2SWave64
+        | Dtype::Iq1SWave64
+        | Dtype::Iq1MWave64 => 5e-2,
         _ => 3e-2,
     }
 }
-

@@ -27,7 +27,9 @@ const REL_TOL: f32 = 1e-3;
 fn lcg(seed: u64) -> impl FnMut() -> f32 {
     let mut state = seed.wrapping_mul(6364136223846793005).wrapping_add(1);
     move || {
-        state = state.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+        state = state
+            .wrapping_mul(6364136223846793005)
+            .wrapping_add(1442695040888963407);
         let u = (state >> 32) as u32;
         (u as f32 / u32::MAX as f32) * 2.0 - 1.0
     }
@@ -94,10 +96,12 @@ fn bar_p2p_residual_tp4_round_trip() {
     assert_eq!(ar.ranks(), 4);
 
     // Per-rank inputs (different deterministic streams per rank).
-    let host_partials: Vec<Vec<f16>> =
-        (0..4).map(|r| deterministic_f16(1234 + r as u64, N)).collect();
-    let host_hiddens: Vec<Vec<f16>> =
-        (0..4).map(|r| deterministic_f16(9999 + r as u64, N)).collect();
+    let host_partials: Vec<Vec<f16>> = (0..4)
+        .map(|r| deterministic_f16(1234 + r as u64, N))
+        .collect();
+    let host_hiddens: Vec<Vec<f16>> = (0..4)
+        .map(|r| deterministic_f16(9999 + r as u64, N))
+        .collect();
 
     // Reference: hidden[r] += Σ partial[k].
     let partial_sum_f32: Vec<f32> = (0..N)

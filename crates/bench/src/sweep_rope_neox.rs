@@ -6,7 +6,6 @@
 //! head_dim=256, rotated_dims=64, theta_base=1e7, n_heads_q=16, n_heads_kv=2.
 
 #![cfg(feature = "hip")]
-
 #![expect(
     clippy::undocumented_unsafe_blocks,
     reason = "sweep harness — every unsafe block is a kernel launch or a memcpy_async \
@@ -246,4 +245,3 @@ fn launch(
     stream.synchronize()?;
     Ok(())
 }
-

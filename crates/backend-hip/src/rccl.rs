@@ -33,9 +33,9 @@ use flambeau_runtime::{
 
 use crate::device::HipDevice;
 use crate::rccl_sys::{
-    nccl_error_string, ncclAllGather, ncclAllReduce, ncclBroadcast, ncclCommDestroy,
-    ncclCommInitRank, ncclComm_t, ncclDataType_t, ncclGetUniqueId, ncclGroupEnd, ncclGroupStart,
-    ncclRecv, ncclRedOp_t, ncclSend, ncclUniqueId, NCCL_SUCCESS,
+    ncclAllGather, ncclAllReduce, ncclBroadcast, ncclCommDestroy, ncclCommInitRank, ncclComm_t,
+    ncclDataType_t, ncclGetUniqueId, ncclGroupEnd, ncclGroupStart, ncclRecv, ncclRedOp_t, ncclSend,
+    ncclUniqueId, nccl_error_string, NCCL_SUCCESS,
 };
 
 fn rccl_check(code: c_int, ctx: &'static str) -> CollectiveResult<()> {
@@ -94,7 +94,9 @@ impl HipMesh {
         let code = unsafe { ncclGetUniqueId(&mut unique_id as *mut _) };
         rccl_check(code, "ncclGetUniqueId")?;
         Ok(Arc::new(Self {
-            comms: (0..devices.len()).map(|_| std::sync::OnceLock::new()).collect(),
+            comms: (0..devices.len())
+                .map(|_| std::sync::OnceLock::new())
+                .collect(),
             devices: devices.to_vec(),
             unique_id,
         }))
@@ -194,9 +196,7 @@ impl HipRankHandle {
     }
 
     fn comm(&self) -> ncclComm_t {
-        *self
-            .mesh
-            .comms[self.rank.0 as usize]
+        *self.mesh.comms[self.rank.0 as usize]
             .get()
             .expect("comm not initialised — HipMesh::new should have connected all ranks")
     }

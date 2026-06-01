@@ -2,7 +2,6 @@
 //! sort groups (token, slot) pair indices by expert_id correctly.
 
 #![cfg(feature = "hip")]
-
 #![expect(
     clippy::undocumented_unsafe_blocks,
     reason = "test fixture — every unsafe block is a kernel launch or memcpy_async \
@@ -16,7 +15,9 @@ use flambeau_core::{CopyDirection, Device, DevicePtr, Stream};
 use flambeau_ops::{moe, OpsRegistry};
 
 fn dev_or_skip() -> Option<HipDevice> {
-    if device_count().ok()? < 1 { return None; }
+    if device_count().ok()? < 1 {
+        return None;
+    }
     let d = HipDevice::new(0).ok()?;
     d.bind().ok()?;
     Some(d)
@@ -32,7 +33,8 @@ fn upload_i32(dev: &HipDevice, data: &[i32]) -> DevicePtr {
             d,
             DevicePtr(data.as_ptr() as usize),
             bytes,
-        ).unwrap();
+        )
+        .unwrap();
     }
     dev.default_stream().synchronize().unwrap();
     d
@@ -47,7 +49,8 @@ fn download_i32(dev: &HipDevice, p: DevicePtr, n: usize) -> Vec<i32> {
             DevicePtr(host.as_mut_ptr() as usize),
             p,
             n * 4,
-        ).unwrap();
+        )
+        .unwrap();
     }
     dev.default_stream().synchronize().unwrap();
     host
@@ -55,43 +58,61 @@ fn download_i32(dev: &HipDevice, p: DevicePtr, n: usize) -> Vec<i32> {
 
 #[test]
 fn moe_sort_by_expert_groups_pairs() -> Result<()> {
-    let Some(dev) = dev_or_skip() else { eprintln!("skip — no HIP"); return Ok(()) };
+    let Some(dev) = dev_or_skip() else {
+        eprintln!("skip — no HIP");
+        return Ok(());
+    };
     let reg = OpsRegistry::new(&dev)?;
 
     // 8 tokens × top_k=4 = 32 pairs, 6 experts, deterministic mix.
     let n_experts = 6;
     let total = 32;
-    let expert_ids: Vec<i32> = (0..total).map(|i| ((i * 7 + 3) % n_experts) as i32).collect();
+    let expert_ids: Vec<i32> = (0..total)
+        .map(|i| ((i * 7 + 3) % n_experts) as i32)
+        .collect();
 
     // Device allocations.
-    let d_ids      = upload_i32(&dev, &expert_ids);
-    let d_counts   = dev.alloc(n_experts * 4)?;
-    let d_offsets  = dev.alloc((n_experts + 1) * 4)?;
-    let d_cursors  = dev.alloc(n_experts * 4)?;
-    let d_sorted   = dev.alloc(total * 4)?;
+    let d_ids = upload_i32(&dev, &expert_ids);
+    let d_counts = dev.alloc(n_experts * 4)?;
+    let d_offsets = dev.alloc((n_experts + 1) * 4)?;
+    let d_cursors = dev.alloc(n_experts * 4)?;
+    let d_sorted = dev.alloc(total * 4)?;
 
     // Zero counts + cursors.
     let zeros = vec![0i32; n_experts];
     unsafe {
-        dev.memcpy_async(dev.default_stream(), CopyDirection::HostToDevice,
-            d_counts, DevicePtr(zeros.as_ptr() as usize), n_experts * 4)?;
+        dev.memcpy_async(
+            dev.default_stream(),
+            CopyDirection::HostToDevice,
+            d_counts,
+            DevicePtr(zeros.as_ptr() as usize),
+            n_experts * 4,
+        )?;
     }
     dev.default_stream().synchronize()?;
 
     moe::moe_sort_by_expert(
-        &reg, dev.default_stream(),
-        d_ids, d_counts, d_offsets, d_cursors, d_sorted,
-        total, n_experts,
+        &reg,
+        dev.default_stream(),
+        d_ids,
+        d_counts,
+        d_offsets,
+        d_cursors,
+        d_sorted,
+        total,
+        n_experts,
     )?;
 
     // Download results.
-    let counts  = download_i32(&dev, d_counts,  n_experts);
+    let counts = download_i32(&dev, d_counts, n_experts);
     let offsets = download_i32(&dev, d_offsets, n_experts + 1);
-    let sorted  = download_i32(&dev, d_sorted,  total);
+    let sorted = download_i32(&dev, d_sorted, total);
 
     // CPU reference.
     let mut cpu_counts = vec![0i32; n_experts];
-    for &e in &expert_ids { cpu_counts[e as usize] += 1; }
+    for &e in &expert_ids {
+        cpu_counts[e as usize] += 1;
+    }
     assert_eq!(counts, cpu_counts, "histogram mismatch");
 
     let mut cpu_offsets = vec![0i32; n_experts + 1];
@@ -107,9 +128,11 @@ fn moe_sort_by_expert_groups_pairs() -> Result<()> {
         let hi = offsets[e + 1] as usize;
         for (k, &pair_idx) in sorted[lo..hi].iter().enumerate() {
             let k_abs = lo + k;
-            assert_eq!(expert_ids[pair_idx as usize], e as i32,
+            assert_eq!(
+                expert_ids[pair_idx as usize], e as i32,
                 "expert {e}: sorted[{k_abs}]={pair_idx} has expert_id {}",
-                expert_ids[pair_idx as usize]);
+                expert_ids[pair_idx as usize]
+            );
         }
     }
 
@@ -134,7 +157,9 @@ fn moe_sort_by_expert_groups_pairs() -> Result<()> {
 
 #[test]
 fn moe_sort_by_expert_qwen3_6_scale() -> Result<()> {
-    let Some(dev) = dev_or_skip() else { return Ok(()) };
+    let Some(dev) = dev_or_skip() else {
+        return Ok(());
+    };
     let reg = OpsRegistry::new(&dev)?;
 
     // Qwen3.6-35B pp=512 scale: n_tokens=512, top_k=8, n_experts=256.
@@ -144,33 +169,48 @@ fn moe_sort_by_expert_qwen3_6_scale() -> Result<()> {
     let total = n_tokens * top_k;
 
     // Deterministic-but-distributed assignments.
-    let expert_ids: Vec<i32> = (0..total).map(|i| ((i * 997 + 41) % n_experts) as i32).collect();
+    let expert_ids: Vec<i32> = (0..total)
+        .map(|i| ((i * 997 + 41) % n_experts) as i32)
+        .collect();
 
-    let d_ids     = upload_i32(&dev, &expert_ids);
-    let d_counts  = dev.alloc(n_experts * 4)?;
+    let d_ids = upload_i32(&dev, &expert_ids);
+    let d_counts = dev.alloc(n_experts * 4)?;
     let d_offsets = dev.alloc((n_experts + 1) * 4)?;
     let d_cursors = dev.alloc(n_experts * 4)?;
-    let d_sorted  = dev.alloc(total * 4)?;
+    let d_sorted = dev.alloc(total * 4)?;
 
     let zeros = vec![0i32; n_experts];
     unsafe {
-        dev.memcpy_async(dev.default_stream(), CopyDirection::HostToDevice,
-            d_counts, DevicePtr(zeros.as_ptr() as usize), n_experts * 4)?;
+        dev.memcpy_async(
+            dev.default_stream(),
+            CopyDirection::HostToDevice,
+            d_counts,
+            DevicePtr(zeros.as_ptr() as usize),
+            n_experts * 4,
+        )?;
     }
     dev.default_stream().synchronize()?;
 
     moe::moe_sort_by_expert(
-        &reg, dev.default_stream(),
-        d_ids, d_counts, d_offsets, d_cursors, d_sorted,
-        total, n_experts,
+        &reg,
+        dev.default_stream(),
+        d_ids,
+        d_counts,
+        d_offsets,
+        d_cursors,
+        d_sorted,
+        total,
+        n_experts,
     )?;
 
-    let counts  = download_i32(&dev, d_counts,  n_experts);
+    let counts = download_i32(&dev, d_counts, n_experts);
     let offsets = download_i32(&dev, d_offsets, n_experts + 1);
-    let sorted  = download_i32(&dev, d_sorted,  total);
+    let sorted = download_i32(&dev, d_sorted, total);
 
     let mut cpu_counts = vec![0i32; n_experts];
-    for &e in &expert_ids { cpu_counts[e as usize] += 1; }
+    for &e in &expert_ids {
+        cpu_counts[e as usize] += 1;
+    }
     assert_eq!(counts, cpu_counts);
     assert_eq!(offsets[n_experts], total as i32);
 
@@ -195,7 +235,10 @@ fn moe_sort_by_expert_qwen3_6_scale() -> Result<()> {
 
 #[test]
 fn moe_sort_by_expert_padded_groups_in_multiples_of_8() -> Result<()> {
-    let Some(dev) = dev_or_skip() else { eprintln!("skip — no HIP"); return Ok(()) };
+    let Some(dev) = dev_or_skip() else {
+        eprintln!("skip — no HIP");
+        return Ok(());
+    };
     let reg = OpsRegistry::new(&dev)?;
 
     let n_experts = 6;
@@ -205,27 +248,37 @@ fn moe_sort_by_expert_padded_groups_in_multiples_of_8() -> Result<()> {
 
     // Pattern that gives uneven counts per expert:
     // expert_ids[i] = (i * 7 + 3) mod 6
-    let expert_ids: Vec<i32> =
-        (0..total).map(|i| ((i * 7 + 3) % n_experts) as i32).collect();
+    let expert_ids: Vec<i32> = (0..total)
+        .map(|i| ((i * 7 + 3) % n_experts) as i32)
+        .collect();
 
-    let d_ids      = upload_i32(&dev, &expert_ids);
-    let d_counts   = dev.alloc(n_experts * 4)?;
-    let d_offsets  = dev.alloc((n_experts + 1) * 4)?;
-    let d_cursors  = dev.alloc(n_experts * 4)?;
-    let d_sorted   = dev.alloc(total * 4)?;
+    let d_ids = upload_i32(&dev, &expert_ids);
+    let d_counts = dev.alloc(n_experts * 4)?;
+    let d_offsets = dev.alloc((n_experts + 1) * 4)?;
+    let d_cursors = dev.alloc(n_experts * 4)?;
+    let d_sorted = dev.alloc(total * 4)?;
     let d_padded_off = dev.alloc((n_experts + 1) * 4)?;
     // Upper bound: total + n_experts * 7 (worst-case padding), rounded up.
     let padded_cap = total + n_experts * 8;
     let d_sorted_padded = dev.alloc(padded_cap * 4)?;
 
     moe::moe_sort_by_expert_padded(
-        &reg, dev.default_stream(),
-        d_ids, d_counts, d_offsets, d_cursors, d_sorted,
-        d_padded_off, d_sorted_padded,
-        total, n_experts, max_tokens, top_k,
+        &reg,
+        dev.default_stream(),
+        d_ids,
+        d_counts,
+        d_offsets,
+        d_cursors,
+        d_sorted,
+        d_padded_off,
+        d_sorted_padded,
+        total,
+        n_experts,
+        max_tokens,
+        top_k,
     )?;
 
-    let counts  = download_i32(&dev, d_counts, n_experts);
+    let counts = download_i32(&dev, d_counts, n_experts);
     let offsets = download_i32(&dev, d_offsets, n_experts + 1);
     let padded_off = download_i32(&dev, d_padded_off, n_experts + 1);
     let sorted = download_i32(&dev, d_sorted, total);
@@ -246,18 +299,28 @@ fn moe_sort_by_expert_padded_groups_in_multiples_of_8() -> Result<()> {
     for e in 0..n_experts {
         let real = counts[e] as usize;
         let padded = (padded_off[e + 1] - padded_off[e]) as usize;
-        assert_eq!(padded % 8, 0, "expert {e} padded count {padded} not multiple of 8");
+        assert_eq!(
+            padded % 8,
+            0,
+            "expert {e} padded count {padded} not multiple of 8"
+        );
         let lo_u = offsets[e] as usize;
         let lo_p = padded_off[e] as usize;
         for i in 0..real {
-            assert_eq!(sorted_padded[lo_p + i], sorted[lo_u + i],
-                "expert {e} real slot {i}");
+            assert_eq!(
+                sorted_padded[lo_p + i],
+                sorted[lo_u + i],
+                "expert {e} real slot {i}"
+            );
         }
         if real > 0 {
             let last = sorted[lo_u + real - 1];
             for i in real..padded {
-                assert_eq!(sorted_padded[lo_p + i], last,
-                    "expert {e} padding slot {i} should repeat last real entry");
+                assert_eq!(
+                    sorted_padded[lo_p + i],
+                    last,
+                    "expert {e} padding slot {i} should repeat last real entry"
+                );
             }
         }
     }

@@ -27,11 +27,11 @@ use crate::blocks::{
     BlockQ8K, BlockQ8_0, BlockQ8_1,
 };
 use crate::dtype::{GgmlDType, QK4_0, QK4_1, QK5_0, QK5_1, QK8_0, QK_K};
-use crate::iq_tables::{
-    IQ1S_GRID, IQ1_DELTA, IQ2S_GRID, IQ2XS_GRID, IQ2XXS_GRID, IQ3S_GRID, IQ3XXS_GRID,
-    KMASK_IQ2XS, KSIGNS_IQ2XS, KVALUES_IQ4NL,
-};
 use crate::error::QuantError;
+use crate::iq_tables::{
+    IQ1S_GRID, IQ1_DELTA, IQ2S_GRID, IQ2XS_GRID, IQ2XXS_GRID, IQ3S_GRID, IQ3XXS_GRID, KMASK_IQ2XS,
+    KSIGNS_IQ2XS, KVALUES_IQ4NL,
+};
 
 /// Dispatch on `dtype` and dequantize `raw` (one tensor's packed bytes) into a
 /// freshly-allocated `Vec<f32>` of length `elem_count`.
@@ -53,11 +53,7 @@ pub fn dequantize_to_vec(
 /// # Errors
 /// Returns an error if `raw` is the wrong byte length for `out.len()` of
 /// `dtype`, or if `out.len()` is not a multiple of the dtype's block size.
-pub fn dequantize_into(
-    dtype: GgmlDType,
-    raw: &[u8],
-    out: &mut [f32],
-) -> Result<(), QuantError> {
+pub fn dequantize_into(dtype: GgmlDType, raw: &[u8], out: &mut [f32]) -> Result<(), QuantError> {
     let elem_count = out.len();
     let block_size = dtype.block_size();
     let type_size = dtype.type_size();
@@ -135,8 +131,8 @@ fn dequant_iq4_nl(raw: &[u8], out: &mut [f32]) {
         let qs = &raw[off + 2..off + BLOCK];
         let dst = &mut out[b * QK..(b + 1) * QK];
         for j in 0..QK / 2 {
-            dst[j]          = d * KVALUES_IQ4NL[(qs[j] & 0x0F) as usize] as f32;
-            dst[j + QK / 2] = d * KVALUES_IQ4NL[(qs[j] >> 4) as usize]   as f32;
+            dst[j] = d * KVALUES_IQ4NL[(qs[j] & 0x0F) as usize] as f32;
+            dst[j + QK / 2] = d * KVALUES_IQ4NL[(qs[j] >> 4) as usize] as f32;
         }
     }
 }
@@ -145,10 +141,10 @@ fn dequant_iq4_xs(raw: &[u8], out: &mut [f32]) {
     // Block layout (136 B): f16 d (2) + u16 scales_h (2) + u8 scales_l[4] (4)
     // + u8 qs[128]. 8 sub-blocks of 32 elements; each sub-block has a signed
     // 6-bit scale split low/high across scales_l / scales_h, biased by -32.
-    const QK: usize = QK_K;             // 256
+    const QK: usize = QK_K; // 256
     const SUB: usize = 32;
-    const N_SUBS: usize = QK / SUB;     // 8
-    const BLOCK: usize = 2 + 2 + (QK / 64) + (QK / 2);  // 136
+    const N_SUBS: usize = QK / SUB; // 8
+    const BLOCK: usize = 2 + 2 + (QK / 64) + (QK / 2); // 136
     let n_blocks = out.len() / QK;
     for b in 0..n_blocks {
         let off = b * BLOCK;
@@ -164,8 +160,8 @@ fn dequant_iq4_xs(raw: &[u8], out: &mut [f32]) {
             let qs_sub = &qs[ib * 16..(ib + 1) * 16];
             let dst = &mut out[b * QK + ib * SUB..b * QK + (ib + 1) * SUB];
             for j in 0..16 {
-                dst[j]      = dl * KVALUES_IQ4NL[(qs_sub[j] & 0x0F) as usize] as f32;
-                dst[j + 16] = dl * KVALUES_IQ4NL[(qs_sub[j] >> 4) as usize]   as f32;
+                dst[j] = dl * KVALUES_IQ4NL[(qs_sub[j] & 0x0F) as usize] as f32;
+                dst[j + 16] = dl * KVALUES_IQ4NL[(qs_sub[j] >> 4) as usize] as f32;
             }
         }
     }
@@ -176,21 +172,23 @@ fn dequant_iq3_xxs(raw: &[u8], out: &mut [f32]) {
     // QK_K/4 = 64 bytes index the codebook (2 indices per ib32 chunk),
     // and the last 32 bytes hold per-ib32 (scale, sign-bits) as packed
     // uint32_t (4 bits scale + 7 bits sign × 4 = 28 bits).
-    const QK: usize = QK_K;            // 256
-    const N_IB32: usize = QK / 32;     // 8 chunks of 32 elements
-    const BLOCK: usize = 2 + 3 * QK / 8;  // 2 + 96 = 98
+    const QK: usize = QK_K; // 256
+    const N_IB32: usize = QK / 32; // 8 chunks of 32 elements
+    const BLOCK: usize = 2 + 3 * QK / 8; // 2 + 96 = 98
     let n_blocks = out.len() / QK;
     for b in 0..n_blocks {
         let off = b * BLOCK;
         let d = half::f16::from_le_bytes([raw[off], raw[off + 1]]).to_f32();
-        let qs = &raw[off + 2..off + 2 + QK / 4];                // 64 bytes
-        let scs = &raw[off + 2 + QK / 4..off + BLOCK];           // 32 bytes
+        let qs = &raw[off + 2..off + 2 + QK / 4]; // 64 bytes
+        let scs = &raw[off + 2 + QK / 4..off + BLOCK]; // 32 bytes
         let mut q_off = 0usize;
         let mut y_off = b * QK;
         for ib32 in 0..N_IB32 {
             let aux32 = u32::from_le_bytes([
-                scs[4 * ib32], scs[4 * ib32 + 1],
-                scs[4 * ib32 + 2], scs[4 * ib32 + 3],
+                scs[4 * ib32],
+                scs[4 * ib32 + 1],
+                scs[4 * ib32 + 2],
+                scs[4 * ib32 + 3],
             ]);
             let db = d * (0.5f32 + ((aux32 >> 28) as f32)) * 0.5f32;
             for l in 0..4 {
@@ -198,9 +196,17 @@ fn dequant_iq3_xxs(raw: &[u8], out: &mut [f32]) {
                 let g1 = IQ3XXS_GRID[qs[q_off + 2 * l] as usize].to_le_bytes();
                 let g2 = IQ3XXS_GRID[qs[q_off + 2 * l + 1] as usize].to_le_bytes();
                 for j in 0..4 {
-                    let s1 = if signs & (1 << j) != 0 { -1.0f32 } else { 1.0f32 };
-                    let s2 = if signs & (1 << (j + 4)) != 0 { -1.0f32 } else { 1.0f32 };
-                    out[y_off + j]     = db * g1[j] as f32 * s1;
+                    let s1 = if signs & (1 << j) != 0 {
+                        -1.0f32
+                    } else {
+                        1.0f32
+                    };
+                    let s2 = if signs & (1 << (j + 4)) != 0 {
+                        -1.0f32
+                    } else {
+                        1.0f32
+                    };
+                    out[y_off + j] = db * g1[j] as f32 * s1;
                     out[y_off + j + 4] = db * g2[j] as f32 * s2;
                 }
                 y_off += 8;
@@ -216,7 +222,7 @@ fn dequant_iq3_s(raw: &[u8], out: &mut [f32]) {
     // qs[byte] | ((qh_bit) << 8); per-sub-block scale = 1 + 2 * 4bit-nibble
     // from scales[ib32/2]; per-byte sign in signs[l].
     const QK: usize = QK_K;
-    const BLOCK: usize = 2 + QK / 4 + QK / 32 + QK / 8 + QK / 64;  // 110
+    const BLOCK: usize = 2 + QK / 4 + QK / 32 + QK / 8 + QK / 64; // 110
     let n_blocks = out.len() / QK;
     for b in 0..n_blocks {
         let off = b * BLOCK;
@@ -226,8 +232,8 @@ fn dequant_iq3_s(raw: &[u8], out: &mut [f32]) {
         let sgn_base = qh_base + QK / 32;
         let sc_base = sgn_base + QK / 8;
         let mut y_off = b * QK;
-        let mut qs_p = 0usize;     // offset into qs[]
-        let mut signs_p = 0usize;  // offset into signs[]
+        let mut qs_p = 0usize; // offset into qs[]
+        let mut signs_p = 0usize; // offset into signs[]
         let mut ib32 = 0usize;
         while ib32 < QK / 32 {
             let sc_byte = raw[sc_base + ib32 / 2];
@@ -236,17 +242,25 @@ fn dequant_iq3_s(raw: &[u8], out: &mut [f32]) {
             let qh1 = raw[qh_base + ib32];
             let qh2 = raw[qh_base + ib32 + 1];
             for l in 0..4 {
-                let g1_idx = (raw[qs_base + qs_p + 2 * l] as u32)
-                    | (((qh1 as u32) << (8 - 2 * l)) & 256);
+                let g1_idx =
+                    (raw[qs_base + qs_p + 2 * l] as u32) | (((qh1 as u32) << (8 - 2 * l)) & 256);
                 let g2_idx = (raw[qs_base + qs_p + 2 * l + 1] as u32)
                     | (((qh1 as u32) << (7 - 2 * l)) & 256);
                 let g1 = IQ3S_GRID[g1_idx as usize].to_le_bytes();
                 let g2 = IQ3S_GRID[g2_idx as usize].to_le_bytes();
                 let signs = raw[sgn_base + signs_p + l];
                 for j in 0..4 {
-                    let s1 = if signs & KMASK_IQ2XS[j] != 0 { -1.0f32 } else { 1.0f32 };
-                    let s2 = if signs & KMASK_IQ2XS[j + 4] != 0 { -1.0f32 } else { 1.0f32 };
-                    out[y_off + j]     = db1 * g1[j] as f32 * s1;
+                    let s1 = if signs & KMASK_IQ2XS[j] != 0 {
+                        -1.0f32
+                    } else {
+                        1.0f32
+                    };
+                    let s2 = if signs & KMASK_IQ2XS[j + 4] != 0 {
+                        -1.0f32
+                    } else {
+                        1.0f32
+                    };
+                    out[y_off + j] = db1 * g1[j] as f32 * s1;
                     out[y_off + j + 4] = db1 * g2[j] as f32 * s2;
                 }
                 y_off += 8;
@@ -254,17 +268,25 @@ fn dequant_iq3_s(raw: &[u8], out: &mut [f32]) {
             qs_p += 8;
             signs_p += 4;
             for l in 0..4 {
-                let g1_idx = (raw[qs_base + qs_p + 2 * l] as u32)
-                    | (((qh2 as u32) << (8 - 2 * l)) & 256);
+                let g1_idx =
+                    (raw[qs_base + qs_p + 2 * l] as u32) | (((qh2 as u32) << (8 - 2 * l)) & 256);
                 let g2_idx = (raw[qs_base + qs_p + 2 * l + 1] as u32)
                     | (((qh2 as u32) << (7 - 2 * l)) & 256);
                 let g1 = IQ3S_GRID[g1_idx as usize].to_le_bytes();
                 let g2 = IQ3S_GRID[g2_idx as usize].to_le_bytes();
                 let signs = raw[sgn_base + signs_p + l];
                 for j in 0..4 {
-                    let s1 = if signs & KMASK_IQ2XS[j] != 0 { -1.0f32 } else { 1.0f32 };
-                    let s2 = if signs & KMASK_IQ2XS[j + 4] != 0 { -1.0f32 } else { 1.0f32 };
-                    out[y_off + j]     = db2 * g1[j] as f32 * s1;
+                    let s1 = if signs & KMASK_IQ2XS[j] != 0 {
+                        -1.0f32
+                    } else {
+                        1.0f32
+                    };
+                    let s2 = if signs & KMASK_IQ2XS[j + 4] != 0 {
+                        -1.0f32
+                    } else {
+                        1.0f32
+                    };
+                    out[y_off + j] = db2 * g1[j] as f32 * s1;
                     out[y_off + j + 4] = db2 * g2[j] as f32 * s2;
                 }
                 y_off += 8;
@@ -285,8 +307,8 @@ fn dequant_iq2_xxs(raw: &[u8], out: &mut [f32]) {
     // shared with IQ3_XXS) inflates a 7-bit index to an 8-bit per-byte sign
     // mask.
     const QK: usize = QK_K;
-    const N_IB32: usize = QK / 32;  // 8
-    const BLOCK: usize = 2 + 2 * (QK / 8);  // 66
+    const N_IB32: usize = QK / 32; // 8
+    const BLOCK: usize = 2 + 2 * (QK / 8); // 66
     let n_blocks = out.len() / QK;
     for b in 0..n_blocks {
         let off = b * BLOCK;
@@ -303,7 +325,11 @@ fn dequant_iq2_xxs(raw: &[u8], out: &mut [f32]) {
                 let grid = IQ2XXS_GRID[aux8[l] as usize].to_le_bytes();
                 let signs = KSIGNS_IQ2XS[((aux1 >> (7 * l)) & 127) as usize];
                 for j in 0..8 {
-                    let s = if signs & (1 << j) != 0 { -1.0f32 } else { 1.0f32 };
+                    let s = if signs & (1 << j) != 0 {
+                        -1.0f32
+                    } else {
+                        1.0f32
+                    };
                     out[y_off + j] = db * grid[j] as f32 * s;
                 }
                 y_off += 8;
@@ -318,8 +344,8 @@ fn dequant_iq2_xs(raw: &[u8], out: &mut [f32]) {
     // index (high 7). Scales array holds 8 × 4-bit-pair sub-block scales,
     // each contributing db = d * (0.5 + nib) * 0.25.
     const QK: usize = QK_K;
-    const N_IB32: usize = QK / 32;  // 8
-    const BLOCK: usize = 2 + 2 * (QK / 8) + QK / 32;  // 74
+    const N_IB32: usize = QK / 32; // 8
+    const BLOCK: usize = 2 + 2 * (QK / 8) + QK / 32; // 74
     let n_blocks = out.len() / QK;
     for b in 0..n_blocks {
         let off = b * BLOCK;
@@ -338,10 +364,14 @@ fn dequant_iq2_xs(raw: &[u8], out: &mut [f32]) {
                 let q = u16::from_le_bytes([raw[qbase + 2 * l], raw[qbase + 2 * l + 1]]);
                 let grid = IQ2XS_GRID[(q & 511) as usize].to_le_bytes();
                 let signs = KSIGNS_IQ2XS[((q >> 9) & 127) as usize];
-                let dl = if l < 2 { db_lo } else { db_lo };  // both halves of first sub-block use db_lo
+                let dl = if l < 2 { db_lo } else { db_lo }; // both halves of first sub-block use db_lo
                 let _ = dl;
                 for j in 0..8 {
-                    let s = if signs & (1 << j) != 0 { -1.0f32 } else { 1.0f32 };
+                    let s = if signs & (1 << j) != 0 {
+                        -1.0f32
+                    } else {
+                        1.0f32
+                    };
                     out[y_off + j] = db_lo * grid[j] as f32 * s;
                 }
                 y_off += 8;
@@ -353,7 +383,11 @@ fn dequant_iq2_xs(raw: &[u8], out: &mut [f32]) {
                 let grid = IQ2XS_GRID[(q & 511) as usize].to_le_bytes();
                 let signs = KSIGNS_IQ2XS[((q >> 9) & 127) as usize];
                 for j in 0..8 {
-                    let s = if signs & (1 << j) != 0 { -1.0f32 } else { 1.0f32 };
+                    let s = if signs & (1 << j) != 0 {
+                        -1.0f32
+                    } else {
+                        1.0f32
+                    };
                     out[y_off + j] = db_hi * grid[j] as f32 * s;
                 }
                 y_off += 8;
@@ -371,17 +405,17 @@ fn dequant_iq2_s(raw: &[u8], out: &mut [f32]) {
     // 10-bit index). scales[ib32/2] = two 4-bit sub-block scales (lo/hi nib).
     const QK: usize = QK_K;
     const N_IB32: usize = QK / 32;
-    const BLOCK: usize = 2 + QK / 4 + QK / 32 + QK / 32;  // 82
+    const BLOCK: usize = 2 + QK / 4 + QK / 32 + QK / 32; // 82
     let n_blocks = out.len() / QK;
     for b in 0..n_blocks {
         let off = b * BLOCK;
         let d = half::f16::from_le_bytes([raw[off], raw[off + 1]]).to_f32();
-        let qs_base = off + 2;            // [..32] idx low, [32..64] signs
+        let qs_base = off + 2; // [..32] idx low, [32..64] signs
         let qh_base = qs_base + QK / 4;
         let sc_base = qh_base + QK / 32;
         let mut y_off = b * QK;
-        let mut qs_p = 0usize;            // walks qs[0..32]
-        let mut sgn_p = QK / 8;           // walks qs[32..64] (initial offset 32)
+        let mut qs_p = 0usize; // walks qs[0..32]
+        let mut sgn_p = QK / 8; // walks qs[32..64] (initial offset 32)
         let mut ib32 = 0usize;
         while ib32 < N_IB32 {
             let sc_byte = raw[sc_base + ib32 / 2];
@@ -390,12 +424,16 @@ fn dequant_iq2_s(raw: &[u8], out: &mut [f32]) {
             // First half (sub-block ib32, 32 elems): qh[ib32] supplies high bits.
             let qh1 = raw[qh_base + ib32];
             for l in 0..4 {
-                let idx = (raw[qs_base + qs_p + l] as usize)
-                    | (((qh1 as usize) << (8 - 2 * l)) & 0x300);
+                let idx =
+                    (raw[qs_base + qs_p + l] as usize) | (((qh1 as usize) << (8 - 2 * l)) & 0x300);
                 let grid = IQ2S_GRID[idx].to_le_bytes();
                 let signs = raw[qs_base + sgn_p + l];
                 for j in 0..8 {
-                    let s = if signs & KMASK_IQ2XS[j] != 0 { -1.0f32 } else { 1.0f32 };
+                    let s = if signs & KMASK_IQ2XS[j] != 0 {
+                        -1.0f32
+                    } else {
+                        1.0f32
+                    };
                     out[y_off + j] = db_lo * grid[j] as f32 * s;
                 }
                 y_off += 8;
@@ -405,12 +443,16 @@ fn dequant_iq2_s(raw: &[u8], out: &mut [f32]) {
             // Second half (sub-block ib32+1): qh[ib32+1].
             let qh2 = raw[qh_base + ib32 + 1];
             for l in 0..4 {
-                let idx = (raw[qs_base + qs_p + l] as usize)
-                    | (((qh2 as usize) << (8 - 2 * l)) & 0x300);
+                let idx =
+                    (raw[qs_base + qs_p + l] as usize) | (((qh2 as usize) << (8 - 2 * l)) & 0x300);
                 let grid = IQ2S_GRID[idx].to_le_bytes();
                 let signs = raw[qs_base + sgn_p + l];
                 for j in 0..8 {
-                    let s = if signs & KMASK_IQ2XS[j] != 0 { -1.0f32 } else { 1.0f32 };
+                    let s = if signs & KMASK_IQ2XS[j] != 0 {
+                        -1.0f32
+                    } else {
+                        1.0f32
+                    };
                     out[y_off + j] = db_hi * grid[j] as f32 * s;
                 }
                 y_off += 8;
@@ -429,7 +471,7 @@ fn dequant_iq1_s(raw: &[u8], out: &mut [f32]) {
     // index = qs[4*ib+l] | (((qh[ib] >> (3*l)) & 7) << 8).
     const QK: usize = QK_K;
     const N_IB: usize = QK / 32;
-    const BLOCK: usize = 2 + QK / 8 + 2 * (QK / 32);  // 50
+    const BLOCK: usize = 2 + QK / 8 + 2 * (QK / 32); // 50
     let n_blocks = out.len() / QK;
     for b in 0..n_blocks {
         let off = b * BLOCK;
@@ -438,12 +480,13 @@ fn dequant_iq1_s(raw: &[u8], out: &mut [f32]) {
         let qh_base = qs_base + QK / 8;
         let mut y_off = b * QK;
         for ib in 0..N_IB {
-            let qh = u16::from_le_bytes([
-                raw[qh_base + 2 * ib],
-                raw[qh_base + 2 * ib + 1],
-            ]);
+            let qh = u16::from_le_bytes([raw[qh_base + 2 * ib], raw[qh_base + 2 * ib + 1]]);
             let dl = d * (2.0f32 * (((qh >> 12) & 7) as f32) + 1.0f32);
-            let delta = if qh & 0x8000 != 0 { -IQ1_DELTA } else { IQ1_DELTA };
+            let delta = if qh & 0x8000 != 0 {
+                -IQ1_DELTA
+            } else {
+                IQ1_DELTA
+            };
             for l in 0..4 {
                 let lo = raw[qs_base + 4 * ib + l] as usize;
                 let hi = ((qh as usize) >> (3 * l)) & 7;
@@ -465,7 +508,7 @@ fn dequant_iq1_m(raw: &[u8], out: &mut [f32]) {
     // spread across the 4 u16 scale-words, then interpreted as fp16.
     const QK: usize = QK_K;
     const N_IB: usize = QK / 32;
-    const BLOCK: usize = QK / 8 + QK / 16 + QK / 32;  // 56
+    const BLOCK: usize = QK / 8 + QK / 16 + QK / 32; // 56
     let n_blocks = out.len() / QK;
     for b in 0..n_blocks {
         let off = b * BLOCK;
@@ -479,10 +522,8 @@ fn dequant_iq1_m(raw: &[u8], out: &mut [f32]) {
             u16::from_le_bytes([raw[sc_base + 4], raw[sc_base + 5]]),
             u16::from_le_bytes([raw[sc_base + 6], raw[sc_base + 7]]),
         ];
-        let d_bits = (sc[0] >> 12)
-            | ((sc[1] >> 8) & 0x00f0)
-            | ((sc[2] >> 4) & 0x0f00)
-            | (sc[3] & 0xf000);
+        let d_bits =
+            (sc[0] >> 12) | ((sc[1] >> 8) & 0x00f0) | ((sc[2] >> 4) & 0x0f00) | (sc[3] & 0xf000);
         let d = half::f16::from_bits(d_bits).to_f32();
         let mut y_off = b * QK;
         for ib in 0..N_IB {
@@ -501,10 +542,26 @@ fn dequant_iq1_m(raw: &[u8], out: &mut [f32]) {
             let idx1 = qs1 as usize | (((qh0 as usize) << 4) & 0x700);
             let idx2 = qs2 as usize | (((qh1 as usize) << 8) & 0x700);
             let idx3 = qs3 as usize | (((qh1 as usize) << 4) & 0x700);
-            let delta0 = if qh0 & 0x08 != 0 { -IQ1_DELTA } else { IQ1_DELTA };
-            let delta1 = if qh0 & 0x80 != 0 { -IQ1_DELTA } else { IQ1_DELTA };
-            let delta2 = if qh1 & 0x08 != 0 { -IQ1_DELTA } else { IQ1_DELTA };
-            let delta3 = if qh1 & 0x80 != 0 { -IQ1_DELTA } else { IQ1_DELTA };
+            let delta0 = if qh0 & 0x08 != 0 {
+                -IQ1_DELTA
+            } else {
+                IQ1_DELTA
+            };
+            let delta1 = if qh0 & 0x80 != 0 {
+                -IQ1_DELTA
+            } else {
+                IQ1_DELTA
+            };
+            let delta2 = if qh1 & 0x08 != 0 {
+                -IQ1_DELTA
+            } else {
+                IQ1_DELTA
+            };
+            let delta3 = if qh1 & 0x80 != 0 {
+                -IQ1_DELTA
+            } else {
+                IQ1_DELTA
+            };
             // First half uses dl1
             for &(idx, delta) in &[(idx0, delta0), (idx1, delta1)] {
                 let g = IQ1S_GRID[idx].to_le_bytes();
@@ -527,8 +584,7 @@ fn dequant_iq1_m(raw: &[u8], out: &mut [f32]) {
 
 // MXFP4 lookup (sign << 3 | exp << 1 | mantissa).
 static MXFP4_LUT: [f32; 16] = [
-     0.0,  0.5,  1.0,  1.5,  2.0,  3.0,  4.0,  6.0,
-    -0.0, -0.5, -1.0, -1.5, -2.0, -3.0, -4.0, -6.0,
+    0.0, 0.5, 1.0, 1.5, 2.0, 3.0, 4.0, 6.0, -0.0, -0.5, -1.0, -1.5, -2.0, -3.0, -4.0, -6.0,
 ];
 
 fn dequant_mxfp4(raw: &[u8], out: &mut [f32]) {
@@ -541,7 +597,11 @@ fn dequant_mxfp4(raw: &[u8], out: &mut [f32]) {
         // E8M0 → FP32: scale = 2^(e - 127). Pairs with our half-magnitude
         // `MXFP4_LUT` (true E2M1 values: 0/0.5/1/.../6); llama.cpp uses
         // a doubled LUT × half-scale, but the product is identical.
-        let scale = if e == 0 { 0.0f32 } else { f32::from_bits((e as u32) << 23) };
+        let scale = if e == 0 {
+            0.0f32
+        } else {
+            f32::from_bits((e as u32) << 23)
+        };
         let nibbles = &raw[off + 1..off + 1 + QK / 2];
         let dst = &mut out[b * QK..(b + 1) * QK];
         // ggml Q4_0-family layout: lo nibble at byte j → elem j,
@@ -549,7 +609,7 @@ fn dequant_mxfp4(raw: &[u8], out: &mut [f32]) {
         // adjacent (elem 2j / 2j+1) which is the post-shuffle layout and
         // does not match what GGUFs store.
         for (j, &byte) in nibbles.iter().enumerate() {
-            dst[j]          = MXFP4_LUT[(byte & 0x0F) as usize] * scale;
+            dst[j] = MXFP4_LUT[(byte & 0x0F) as usize] * scale;
             dst[j + QK / 2] = MXFP4_LUT[((byte >> 4) & 0x0F) as usize] * scale;
         }
     }
@@ -727,8 +787,7 @@ fn dequant_q3_k(xs: &[BlockQ3K], ys: &mut [f32]) {
                         let q = qs_chunk[qi];
                         let sub: i8 = if (x.hmask[qi] & m) == 0 { 4 } else { 0 };
                         let q_val = ((q >> shift) & 3) as i8 - sub;
-                        let y_idx =
-                            blk128 * 128 + shift_iter * 32 + scale_idx * 16 + l;
+                        let y_idx = blk128 * 128 + shift_iter * 32 + scale_idx * 16 + l;
                         y[y_idx] = dl * q_val as f32;
                     }
                     is += 1;
@@ -908,7 +967,7 @@ mod tests {
         dequant_q5_0(&[block], &mut out);
         assert_eq!(out[0], 0.0); // (0|16)-16
         assert_eq!(out[QK5_0 / 2], -16.0); // (0|0)-16
-        // Lane 1 low-half is unaffected.
+                                           // Lane 1 low-half is unaffected.
         assert_eq!(out[1], -16.0);
     }
 

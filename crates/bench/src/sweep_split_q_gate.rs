@@ -1,7 +1,6 @@
 //! split-q-gate correctness sweep.
 
 #![cfg(feature = "hip")]
-
 #![expect(
     clippy::undocumented_unsafe_blocks,
     reason = "sweep harness — every unsafe block is a kernel launch or a memcpy_async \
@@ -40,8 +39,8 @@ pub fn run_sweep(repo_root: &Path) -> Result<Cert> {
     let shapes = [(1usize, 16usize, 256usize), (128, 16, 256), (1, 2, 256)];
     let mut results = Vec::new();
     for (n_tokens, n_head, head_dim) in shapes {
-        let seed = 0xC0FFEE
-            ^ ((n_tokens as u64) * 1049 + (n_head as u64) * 53 + (head_dim as u64) * 11);
+        let seed =
+            0xC0FFEE ^ ((n_tokens as u64) * 1049 + (n_head as u64) * 53 + (head_dim as u64) * 11);
         let max_rel_err = run_shape(&dev, &kernel, n_tokens, n_head, head_dim, seed)?;
         let tol = 0.0;
         results.push(ShapeResult {
@@ -164,11 +163,14 @@ fn run_shape(
     // Exact match expected — pure strided copy.
     let mut err = 0.0f32;
     for (a, b) in got_q.iter().zip(&ref_q) {
-        if a.to_bits() != b.to_bits() { err = err.max(1.0); }
+        if a.to_bits() != b.to_bits() {
+            err = err.max(1.0);
+        }
     }
     for (a, b) in got_g.iter().zip(&ref_g) {
-        if a.to_bits() != b.to_bits() { err = err.max(1.0); }
+        if a.to_bits() != b.to_bits() {
+            err = err.max(1.0);
+        }
     }
     Ok(err)
 }
-

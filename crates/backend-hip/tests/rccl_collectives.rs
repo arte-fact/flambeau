@@ -9,7 +9,6 @@
 //! known-working RCCL build.
 
 #![cfg(feature = "rccl")]
-
 #![expect(
     clippy::undocumented_unsafe_blocks,
     reason = "test fixture — every unsafe block is a kernel launch or `memcpy_async` \
@@ -100,7 +99,9 @@ struct RefCtx {
 
 #[test]
 fn all_reduce_sum_f32_mesh_vs_ref() {
-    let Some(n) = mesh_size_or_skip(2) else { return };
+    let Some(n) = mesh_size_or_skip(2) else {
+        return;
+    };
     let n = n as u32;
     let elem_count = 1024usize;
     run_both_meshes(
@@ -116,7 +117,9 @@ fn all_reduce_sum_f32_mesh_vs_ref() {
 
             // RCCL via host-bounce
             let mut rcc_buf = input.clone();
-            rcc.rank.all_reduce_host(&rcc.dev, &mut rcc_buf, &cfg).unwrap();
+            rcc.rank
+                .all_reduce_host(&rcc.dev, &mut rcc_buf, &cfg)
+                .unwrap();
             let rcc_out = as_f32(&rcc_buf);
 
             assert_eq!(ref_out.len(), rcc_out.len());
@@ -131,12 +134,20 @@ fn all_reduce_sum_f32_mesh_vs_ref() {
 
 #[test]
 fn all_gather_f32_mesh_vs_ref() {
-    let Some(n) = mesh_size_or_skip(2) else { return };
+    let Some(n) = mesh_size_or_skip(2) else {
+        return;
+    };
     let n = n as u32;
     let elem_count = 8usize;
     run_both_meshes(
         n,
-        move |r| f32_bytes(&(0..elem_count).map(|i| (r * 100 + i as u32) as f32).collect::<Vec<_>>()),
+        move |r| {
+            f32_bytes(
+                &(0..elem_count)
+                    .map(|i| (r * 100 + i as u32) as f32)
+                    .collect::<Vec<_>>(),
+            )
+        },
         move |rcc, refc, input| {
             let cfg = CollectiveCfg::new(elem_count, CollectiveDType::F32, ReduceOp::Sum);
             let recv_len = cfg.buffer_bytes() * rcc.rank.rank_count() as usize;
@@ -190,7 +201,9 @@ fn all_gather_f32_mesh_vs_ref() {
 
 #[test]
 fn broadcast_f32_mesh_vs_ref() {
-    let Some(n) = mesh_size_or_skip(2) else { return };
+    let Some(n) = mesh_size_or_skip(2) else {
+        return;
+    };
     let n = n as u32;
     let root = RankId(n - 1);
     let elem_count = 16usize;
@@ -250,7 +263,9 @@ fn broadcast_f32_mesh_vs_ref() {
 
 #[test]
 fn all_to_all_f32_mesh_vs_ref() {
-    let Some(n) = mesh_size_or_skip(2) else { return };
+    let Some(n) = mesh_size_or_skip(2) else {
+        return;
+    };
     let n = n as u32;
     let shard_elems = 4usize;
     run_both_meshes(

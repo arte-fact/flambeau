@@ -9,7 +9,7 @@
 //! `flambeau-backend-hip`. The whole trait is gated under
 //! `feature = "hip"` at the crate root, so HIP-specific types in
 //! method signatures are consistent — when CUDA arrives, the slot
-//! types either go behind a `Slot` trait at flambeau-blocks or split
+//! types either go behind a `Slot` trait at flambeau-model-ops or split
 //! into per-backend trait extensions.
 
 use crate::MoeShape;
@@ -58,6 +58,55 @@ pub trait Ops {
         n_rows_gate: usize,
         n_rows_up: usize,
         k: usize,
+    ) -> Result<()>;
+
+    /// Q4_0 gate+up row-tile batched MMVQ for n_slots ∈ [2, 4]. Each
+    /// block handles R=4 consecutive output rows and shares one LDS-
+    /// resident Q8_1 activation strip across the N decode slots. The
+    /// per-call work is `(n_rows_gate + n_rows_up) × n_slots` outputs
+    /// vs. `N × per-slot mmvq_q4_0_gate_up_t128` launches in the
+    /// per-slot fallback. Activations slot-major `[N, k]` Q8_1;
+    /// outputs slot-major `[N, n_rows_*]` F32.
+    #[allow(clippy::too_many_arguments)]
+    fn mmvq_q4_0_gate_up_row_tile_batched(
+        &self,
+        gate_w: DevicePtr,
+        up_w: DevicePtr,
+        y_q8_1: DevicePtr,
+        gate_out: DevicePtr,
+        up_out: DevicePtr,
+        n_rows_gate: usize,
+        n_rows_up: usize,
+        k: usize,
+        n_slots: usize,
+    ) -> Result<()>;
+
+    /// Row-tiled Q4_0 MMVQ for non-fused projections (single weight
+    /// matrix). Each block owns 4 output rows and shares one LDS-
+    /// resident Q8_1 activation strip across the N decode slots.
+    /// Activations slot-major `[N, k]` Q8_1; outputs slot-major
+    /// `[N, n_rows]` F32.
+    fn mmvq_q4_0_row_tile_batched(
+        &self,
+        weights: DevicePtr,
+        y_q8_1: DevicePtr,
+        dst: DevicePtr,
+        n_rows: usize,
+        k: usize,
+        n_slots: usize,
+    ) -> Result<()>;
+
+    /// Row-tiled Q8_0 sibling of [`Ops::mmvq_q4_0_row_tile_batched`].
+    /// Same ABI; for GDN α/β (Q8_0 on Qwen3.6 hybrids) and any other
+    /// non-gate+up Q8_0 projection at decode N∈{2,3,4}.
+    fn mmvq_q8_0_row_tile_batched(
+        &self,
+        weights: DevicePtr,
+        y_q8_1: DevicePtr,
+        dst: DevicePtr,
+        n_rows: usize,
+        k: usize,
+        n_slots: usize,
     ) -> Result<()>;
 
     fn mmvq_q4_0_warpcoop64(
@@ -126,6 +175,21 @@ pub trait Ops {
         dtype_weight: QDtype,
     ) -> Result<()>;
 
+    /// Weight × Q8_1 MMVQ writing directly into an F16 destination
+    /// (saturating at ±65504). Skips the F32 scratch + `cast_f32_to_f16`
+    /// two-step path for consumers whose downstream kernel expects F16
+    /// (e.g. K projection feeding `rmsnorm_f16`). Supports Q4_0 / Q4_1
+    /// / Q8_0 today; other dtypes bail. #120.
+    fn mmvq_f16_direct(
+        &self,
+        weights: DevicePtr,
+        act_q8_1: DevicePtr,
+        dst_f16: DevicePtr,
+        n_rows: usize,
+        k: usize,
+        dtype_weight: QDtype,
+    ) -> Result<()>;
+
     fn mmq(
         &self,
         weights: DevicePtr,
@@ -139,6 +203,7 @@ pub trait Ops {
 
     // -- attention (decode + prefill) --
 
+    #[allow(clippy::too_many_arguments)]
     fn attention_decode_f16(
         &self,
         q: DevicePtr,
@@ -150,12 +215,14 @@ pub trait Ops {
         head_dim: usize,
         n_tokens_kv: usize,
         scale: f32,
+        window_size: i32,
     ) -> Result<()>;
 
     /// Graph-capture variant of `attention_decode_f16`. When
     /// `n_tokens_kv_slot` is `Some`, the recorder tags the
     /// `n_tokens_kv` kernel arg so the caller can update it per
     /// replay via `HipGraphExec::set_slot`.
+    #[allow(clippy::too_many_arguments)]
     fn attention_decode_f16_slots(
         &self,
         q: DevicePtr,
@@ -167,6 +234,7 @@ pub trait Ops {
         head_dim: usize,
         n_tokens_kv: usize,
         scale: f32,
+        window_size: i32,
         n_tokens_kv_slot: Option<ScalarSlot>,
     ) -> Result<()>;
 
@@ -182,8 +250,126 @@ pub trait Ops {
         head_dim: usize,
         n_slots: usize,
         scale: f32,
+        window_size: i32,
     ) -> Result<()>;
 
+    /// Single-launch per-slot K/V append for the batched-decode path.
+    /// `slot_{k,v}_dst_ptrs` are `[n_slots] u64` device arrays of
+    /// per-slot KV-cache base pointers; `slot_write_pos` is `[n_slots]
+    /// i32` with each slot's pre-bump tail index. Writes one row of
+    /// `kv_width` F16 from `k_src` / `v_src` (slot-major) at
+    /// `dst + write_pos * kv_width` per slot.
+    fn kv_append_f16_batched_slots(
+        &self,
+        k_src: DevicePtr,
+        v_src: DevicePtr,
+        slot_k_dst_ptrs: DevicePtr,
+        slot_v_dst_ptrs: DevicePtr,
+        slot_write_pos: DevicePtr,
+        n_slots: usize,
+        kv_width: usize,
+    ) -> Result<()>;
+
+    /// PagedAttention prefill attention. Same flash-attn-v2 body as
+    /// `attention_prefill_f16`; per-`t` K/V row resolved via
+    /// `block_table[t / page_size] * page_size + (t & (page_size - 1))`.
+    /// `page_size` must be a power of two.
+    #[allow(clippy::too_many_arguments)]
+    fn attention_prefill_f16_paged(
+        &self,
+        q: DevicePtr,
+        k_pool: DevicePtr,
+        v_pool: DevicePtr,
+        block_table: DevicePtr,
+        out: DevicePtr,
+        n_q_tokens: usize,
+        n_heads_q: usize,
+        n_heads_kv: usize,
+        head_dim: usize,
+        n_k_tokens: usize,
+        q_offset: usize,
+        page_size: usize,
+        scale: f32,
+        window_size: i32,
+    ) -> Result<()>;
+
+    /// PagedAttention prefill K + V append. Writes L K + V rows for
+    /// a single slot's prefill into the slot's paged KV cache, walking
+    /// the slot's row of the block table per token. The host must
+    /// pre-populate `block_table` for `[start_pos, start_pos +
+    /// n_tokens)`. `page_size` must be a power of two.
+    #[allow(clippy::too_many_arguments)]
+    fn kv_append_f16_paged_prefill(
+        &self,
+        k_src: DevicePtr,
+        v_src: DevicePtr,
+        k_pool: DevicePtr,
+        v_pool: DevicePtr,
+        block_table: DevicePtr,
+        n_tokens: usize,
+        kv_width: usize,
+        start_pos: usize,
+        page_size: usize,
+    ) -> Result<()>;
+
+    /// PagedAttention sibling of `kv_append_f16_batched_slots`. Writes
+    /// the per-slot K+V row into the page that the slot's block table
+    /// currently maps to. `block_tables` is `[n_slots,
+    /// max_pages_per_slot]` u32 row-major. `page_size` must be a power
+    /// of two.
+    #[allow(clippy::too_many_arguments)]
+    fn kv_append_f16_paged_slots(
+        &self,
+        k_src: DevicePtr,
+        v_src: DevicePtr,
+        k_pool: DevicePtr,
+        v_pool: DevicePtr,
+        block_tables: DevicePtr,
+        slot_write_pos: DevicePtr,
+        n_slots: usize,
+        kv_width: usize,
+        page_size: usize,
+        max_pages_per_slot: usize,
+    ) -> Result<()>;
+
+    /// PagedAttention sibling of `attention_decode_f16_batched`. Reads
+    /// K/V per-token rows through the slot's block-table indirection.
+    /// `page_size` must be a power of two.
+    #[allow(clippy::too_many_arguments)]
+    fn attention_decode_f16_paged(
+        &self,
+        q_batched: DevicePtr,
+        k_pool: DevicePtr,
+        v_pool: DevicePtr,
+        block_tables: DevicePtr,
+        out_batched: DevicePtr,
+        n_tokens_kv: DevicePtr,
+        n_heads_q: usize,
+        n_heads_kv: usize,
+        head_dim: usize,
+        n_slots: usize,
+        page_size: usize,
+        max_pages_per_slot: usize,
+        scale: f32,
+    ) -> Result<()>;
+
+    /// Fused V unit-RMSNorm + KV-cache append (K direct copy, V normed).
+    /// See `hip::attention::kv_append_v_unit_norm_f16`.
+    #[allow(clippy::too_many_arguments)]
+    fn kv_append_v_unit_norm_f16(
+        &self,
+        k_src: DevicePtr,
+        v_src: DevicePtr,
+        k_cache: DevicePtr,
+        v_cache: DevicePtr,
+        n_tokens: usize,
+        n_kv_heads: usize,
+        head_dim: usize,
+        write_pos: usize,
+        eps: f32,
+    ) -> Result<()>;
+
+    #[allow(clippy::too_many_arguments)]
     fn attention_decode_f16_splitk(
         &self,
         q: DevicePtr,
@@ -199,8 +385,28 @@ pub trait Ops {
         n_tokens_kv: usize,
         chunk_size: usize,
         scale: f32,
+        window_size: i32,
     ) -> Result<()>;
 
+    fn attention_decode_f16_splitk_h2(
+        &self,
+        q: DevicePtr,
+        k_cache: DevicePtr,
+        v_cache: DevicePtr,
+        out: DevicePtr,
+        partials_m: DevicePtr,
+        partials_s: DevicePtr,
+        partials_o: DevicePtr,
+        n_heads_q: usize,
+        n_heads_kv: usize,
+        head_dim: usize,
+        n_tokens_kv: usize,
+        chunk_size: usize,
+        scale: f32,
+        window_size: i32,
+    ) -> Result<()>;
+
+    #[allow(clippy::too_many_arguments)]
     fn attention_decode_q8_kv(
         &self,
         q: DevicePtr,
@@ -212,8 +418,10 @@ pub trait Ops {
         head_dim: usize,
         n_tokens_kv: usize,
         scale: f32,
+        window_size: i32,
     ) -> Result<()>;
 
+    #[allow(clippy::too_many_arguments)]
     fn attention_decode_q8_kv_splitk(
         &self,
         q: DevicePtr,
@@ -229,8 +437,10 @@ pub trait Ops {
         n_tokens_kv: usize,
         chunk_size: usize,
         scale: f32,
+        window_size: i32,
     ) -> Result<()>;
 
+    #[allow(clippy::too_many_arguments)]
     fn attention_prefill_q8_kv(
         &self,
         q: DevicePtr,
@@ -244,8 +454,10 @@ pub trait Ops {
         n_k_tokens: usize,
         q_offset: usize,
         scale: f32,
+        window_size: i32,
     ) -> Result<()>;
 
+    #[allow(clippy::too_many_arguments)]
     fn attention_prefill_f16(
         &self,
         q: DevicePtr,
@@ -259,11 +471,13 @@ pub trait Ops {
         n_k_tokens: usize,
         q_offset: usize,
         scale: f32,
+        window_size: i32,
     ) -> Result<()>;
 
     /// Graph-capture variant of `attention_prefill_f16`. When
     /// `n_k_slot` / `q_off_slot` are `Some`, the recorder tags those
     /// kernel args for per-replay updates.
+    #[allow(clippy::too_many_arguments)]
     fn attention_prefill_f16_slots(
         &self,
         q: DevicePtr,
@@ -277,6 +491,7 @@ pub trait Ops {
         n_k_tokens: usize,
         q_offset: usize,
         scale: f32,
+        window_size: i32,
         n_k_slot: Option<ScalarSlot>,
         q_off_slot: Option<ScalarSlot>,
     ) -> Result<()>;
@@ -315,6 +530,20 @@ pub trait Ops {
         eps: f32,
     ) -> Result<()>;
 
+    /// Per-head V unit RMSNorm in place on
+    /// `[n_tokens, n_kv_heads, head_dim]` F16. Unit weights (no
+    /// learnable gamma). Composes with `kv_append_f16` and
+    /// `kv_append_f16_batched_slots` for the mixed-batch path on
+    /// gemma4-style archs whose `attn_v_unit_norm` flag is set.
+    fn v_unit_norm_per_head_f16(
+        &self,
+        v: DevicePtr,
+        n_tokens: usize,
+        n_kv_heads: usize,
+        head_dim: usize,
+        eps: f32,
+    ) -> Result<()>;
+
     fn rmsnorm_quant_q8_1(
         &self,
         x: DevicePtr,
@@ -335,6 +564,49 @@ pub trait Ops {
         eps: f32,
     ) -> Result<()>;
 
+    /// F32-in / F16-out fused RMSNorm. Replaces `cast_f32_to_f16 →
+    /// rmsnorm_f16` for the gemma4 post-attn / post-ffn norm site.
+    fn rmsnorm_f32_to_f16(
+        &self,
+        x_f32: DevicePtr,
+        weight_f16: DevicePtr,
+        y_f16: DevicePtr,
+        m: usize,
+        k: usize,
+        eps: f32,
+    ) -> Result<()>;
+
+    /// Fused rmsnorm_f32_to_f16 + residual add. Writes
+    /// `resid_out = resid_in + rmsnorm(x * weight)`. `resid_out` may
+    /// alias `resid_in` for in-place. Same launch shape as
+    /// `rmsnorm_f32_to_f16`.
+    #[allow(clippy::too_many_arguments)]
+    fn rmsnorm_f32_to_f16_add_residual(
+        &self,
+        x_f32: DevicePtr,
+        weight_f16: DevicePtr,
+        resid_in_f16: DevicePtr,
+        resid_out_f16: DevicePtr,
+        m: usize,
+        k: usize,
+        eps: f32,
+    ) -> Result<()>;
+
+    /// F16-input sibling of `rmsnorm_f32_to_f16_add_residual`. Used
+    /// after an F16 AR sum (gemma4 post-attn / post-ffn path when the
+    /// safety predicate allows skipping the F32 AR widening).
+    #[allow(clippy::too_many_arguments)]
+    fn rmsnorm_f16_to_f16_add_residual(
+        &self,
+        x_f16: DevicePtr,
+        weight_f16: DevicePtr,
+        resid_in_f16: DevicePtr,
+        resid_out_f16: DevicePtr,
+        m: usize,
+        k: usize,
+        eps: f32,
+    ) -> Result<()>;
+
     fn l2_norm_f32(
         &self,
         x: DevicePtr,
@@ -344,12 +616,7 @@ pub trait Ops {
         eps: f32,
     ) -> Result<()>;
 
-    fn quantize_q8_1(
-        &self,
-        x_f32: DevicePtr,
-        y_q8_1: DevicePtr,
-        n_elems: usize,
-    ) -> Result<()>;
+    fn quantize_q8_1(&self, x_f32: DevicePtr, y_q8_1: DevicePtr, n_elems: usize) -> Result<()>;
 
     fn quantize_q8_1_mmq(
         &self,
@@ -367,39 +634,17 @@ pub trait Ops {
         total_b: usize,
     ) -> Result<()>;
 
-    fn quantize_f16_q8_1(
-        &self,
-        x_f16: DevicePtr,
-        y_q8_1: DevicePtr,
-        n_elems: usize,
-    ) -> Result<()>;
+    fn quantize_f16_q8_1(&self, x_f16: DevicePtr, y_q8_1: DevicePtr, n_elems: usize) -> Result<()>;
 
-    fn quantize_f16_q8_0(
-        &self,
-        x_f16: DevicePtr,
-        y_q8_0: DevicePtr,
-        n_elems: usize,
-    ) -> Result<()>;
+    fn quantize_f16_q8_0(&self, x_f16: DevicePtr, y_q8_0: DevicePtr, n_elems: usize) -> Result<()>;
 
     // -- mlp (pointwise + gated activations) --
 
     fn silu_f32(&self, x: DevicePtr, y: DevicePtr, n: usize) -> Result<()>;
 
-    fn swiglu_f32(
-        &self,
-        a: DevicePtr,
-        b: DevicePtr,
-        y: DevicePtr,
-        n: usize,
-    ) -> Result<()>;
+    fn swiglu_f32(&self, a: DevicePtr, b: DevicePtr, y: DevicePtr, n: usize) -> Result<()>;
 
-    fn swiglu_f32_to_f16(
-        &self,
-        a: DevicePtr,
-        b: DevicePtr,
-        y: DevicePtr,
-        n: usize,
-    ) -> Result<()>;
+    fn swiglu_f32_to_f16(&self, a: DevicePtr, b: DevicePtr, y: DevicePtr, n: usize) -> Result<()>;
 
     fn swiglu_f32_to_q8_1(
         &self,
@@ -409,45 +654,26 @@ pub trait Ops {
         n: usize,
     ) -> Result<()>;
 
-    fn scale_f32(
-        &self,
-        x: DevicePtr,
-        y: DevicePtr,
-        n: usize,
-        scale: f32,
-    ) -> Result<()>;
+    /// Fused `y_f16[i] = (fp16)(gelu(a[i]) * b[i])` — Gemma 4 dense
+    /// FFN. GELU = ggml tanh-approximation form.
+    fn gelu_f32_to_f16(&self, a: DevicePtr, b: DevicePtr, y: DevicePtr, n: usize) -> Result<()>;
 
-    fn add_f16(
-        &self,
-        a: DevicePtr,
-        b: DevicePtr,
-        y: DevicePtr,
-        n: usize,
-    ) -> Result<()>;
+    /// Fused `y_f32[i] = gelu(a[i]) * b[i]` — Gemma 4 per-layer
+    /// side-channel embedding gate.
+    fn gelu_mul_f32(&self, a: DevicePtr, b: DevicePtr, y: DevicePtr, n: usize) -> Result<()>;
 
-    fn add_f32(
-        &self,
-        a: DevicePtr,
-        b: DevicePtr,
-        y: DevicePtr,
-        n: usize,
-    ) -> Result<()>;
+    fn scale_f32(&self, x: DevicePtr, y: DevicePtr, n: usize, scale: f32) -> Result<()>;
 
-    fn swiglu_f16(
-        &self,
-        gate: DevicePtr,
-        up: DevicePtr,
-        y: DevicePtr,
-        n: usize,
-    ) -> Result<()>;
+    /// F16 variant of [`Ops::scale_f32`].
+    fn scale_f16(&self, x: DevicePtr, y: DevicePtr, n: usize, scale: f32) -> Result<()>;
 
-    fn sigmoid_mul_f16(
-        &self,
-        gate: DevicePtr,
-        x: DevicePtr,
-        y: DevicePtr,
-        n: usize,
-    ) -> Result<()>;
+    fn add_f16(&self, a: DevicePtr, b: DevicePtr, y: DevicePtr, n: usize) -> Result<()>;
+
+    fn add_f32(&self, a: DevicePtr, b: DevicePtr, y: DevicePtr, n: usize) -> Result<()>;
+
+    fn swiglu_f16(&self, gate: DevicePtr, up: DevicePtr, y: DevicePtr, n: usize) -> Result<()>;
+
+    fn sigmoid_mul_f16(&self, gate: DevicePtr, x: DevicePtr, y: DevicePtr, n: usize) -> Result<()>;
 
     // -- pe (rope) --
 
@@ -466,6 +692,22 @@ pub trait Ops {
         x: DevicePtr,
         positions: DevicePtr,
         theta_base: f32,
+        n_tokens: usize,
+        n_heads: usize,
+        head_dim: usize,
+        rotated_dims: usize,
+    ) -> Result<()>;
+
+    /// Fused per-head rmsnorm + partial NeoX RoPE, F16 in-place. See
+    /// `hip::pe::rmsnorm_rope_neox_partial_f16` for the math.
+    #[allow(clippy::too_many_arguments)]
+    fn rmsnorm_rope_neox_partial_f16(
+        &self,
+        x: DevicePtr,
+        norm_w: DevicePtr,
+        positions: DevicePtr,
+        theta_base: f32,
+        eps: f32,
         n_tokens: usize,
         n_heads: usize,
         head_dim: usize,
@@ -559,6 +801,47 @@ pub trait Ops {
         conv_kernel: usize,
     ) -> Result<()>;
 
+    /// Batched-slots single-token GDN recurrent step. Each slot owns
+    /// an independent state buffer; `state_in_ptrs` / `state_out_ptrs`
+    /// are `[B] u64` device arrays of those base pointers. Activations
+    /// (q/k/v/alpha/beta/attn_out) are slot-major `[B, L, H, S_v]`.
+    /// Same compute as `gdn_state_step_alphabeta_f32_s128`.
+    #[allow(clippy::too_many_arguments)]
+    fn gdn_state_step_alphabeta_f32_s128_batched_slots(
+        &self,
+        q: DevicePtr,
+        k: DevicePtr,
+        v: DevicePtr,
+        alpha_in: DevicePtr,
+        beta_in: DevicePtr,
+        ssm_dt_bias: DevicePtr,
+        ssm_a: DevicePtr,
+        state_in_ptrs: DevicePtr,
+        state_out_ptrs: DevicePtr,
+        attn_out: DevicePtr,
+        b: usize,
+        h_v: usize,
+        l: usize,
+        n_rep: usize,
+        rep_inner_layout: bool,
+    ) -> Result<()>;
+
+    /// Batched-slots single-token conv trio (assemble + causal_conv1d
+    /// + history shift) collapsed into one launch across N slots, each
+    /// with its own conv-history buffer. `slot_history_ptrs` is
+    /// `[N] u64`; `qkv_mixed` and `conv_out` are slot-major
+    /// `[N, conv_channels]`.
+    fn gdn_conv_trio_decode_f32_batched_slots(
+        &self,
+        slot_history_ptrs: DevicePtr,
+        qkv_mixed: DevicePtr,
+        weight: DevicePtr,
+        conv_out: DevicePtr,
+        n_slots: usize,
+        conv_channels: usize,
+        conv_kernel: usize,
+    ) -> Result<()>;
+
     fn gdn_split_qkv_f32(
         &self,
         silu_out: DevicePtr,
@@ -646,6 +929,21 @@ pub trait Ops {
         k: usize,
     ) -> Result<()>;
 
+    /// `expert_weights[k] *= expert_scales[expert_ids[k]]` for k in 0..top_k.
+    /// Folds gemma4's per-expert `ffn_down_exps.scale` into the routing
+    /// weights so `moe_combine_*` picks up the post-down scaling for free
+    /// (equivalent to multiplying each expert's down output by the
+    /// scalar before the weighted sum — see candle's `quantized_gemma4`
+    /// reference at line 2521 of `quantized_gemma4.rs`).
+    fn apply_per_expert_scale_f32(
+        &self,
+        expert_weights: DevicePtr,
+        expert_ids: DevicePtr,
+        expert_scales: DevicePtr,
+        n_tokens: usize,
+        top_k: usize,
+    ) -> Result<()>;
+
     fn indexed_moe_mmvq_q4_k_r2(
         &self,
         w: DevicePtr,
@@ -671,6 +969,18 @@ pub trait Ops {
     ) -> Result<()>;
 
     fn indexed_moe_mmvq_q5_k(
+        &self,
+        w: DevicePtr,
+        y: DevicePtr,
+        expert_ids: DevicePtr,
+        dst: DevicePtr,
+        n_rows: usize,
+        n_tokens: usize,
+        top_k: usize,
+        n_sb_per_row: usize,
+    ) -> Result<()>;
+
+    fn indexed_moe_mmvq_q3_k(
         &self,
         w: DevicePtr,
         y: DevicePtr,
@@ -732,6 +1042,20 @@ pub trait Ops {
         n_blocks_per_row: usize,
     ) -> Result<()>;
 
+    fn indexed_moe_mmvq_q8_0_gate_up(
+        &self,
+        w_gate: DevicePtr,
+        w_up: DevicePtr,
+        y: DevicePtr,
+        expert_ids: DevicePtr,
+        gate_out: DevicePtr,
+        up_out: DevicePtr,
+        n_rows: usize,
+        n_tokens: usize,
+        top_k: usize,
+        n_blocks_per_row: usize,
+    ) -> Result<()>;
+
     fn indexed_moe_mmvq_q4_k_r2_sorted(
         &self,
         w: DevicePtr,
@@ -759,6 +1083,30 @@ pub trait Ops {
     ) -> Result<()>;
 
     fn indexed_moe_mmq_q4_k_down_tile8(
+        &self,
+        w: DevicePtr,
+        y: DevicePtr,
+        expert_ids: DevicePtr,
+        sorted_pair_idx_padded: DevicePtr,
+        padded_offsets: DevicePtr,
+        dst: DevicePtr,
+        shape: MoeShape,
+    ) -> Result<()>;
+
+    fn indexed_moe_mmq_q3_k_gate_up_tile8(
+        &self,
+        w_gate: DevicePtr,
+        w_up: DevicePtr,
+        y: DevicePtr,
+        expert_ids: DevicePtr,
+        sorted_pair_idx_padded: DevicePtr,
+        padded_offsets: DevicePtr,
+        gate_out: DevicePtr,
+        up_out: DevicePtr,
+        shape: MoeShape,
+    ) -> Result<()>;
+
+    fn indexed_moe_mmq_q3_k_down_tile8(
         &self,
         w: DevicePtr,
         y: DevicePtr,
@@ -818,6 +1166,218 @@ pub trait Ops {
     ) -> Result<()>;
 
     fn indexed_moe_mmq_q8_0_down_tile8(
+        &self,
+        w: DevicePtr,
+        y: DevicePtr,
+        expert_ids: DevicePtr,
+        sorted_pair_idx_padded: DevicePtr,
+        padded_offsets: DevicePtr,
+        dst: DevicePtr,
+        shape: MoeShape,
+    ) -> Result<()>;
+
+    // ---- IQ tile8: gate_up + down for the 9 IQ families ----
+    // Same signature pattern as the q4_0/q8_0/q4_k tile8 trait methods
+    // above. Phase-4 free functions live at
+    // `crates/ops/src/hip/moe.rs::indexed_moe_mmq_iq*_{gate_up,down}_tile8`.
+
+    fn indexed_moe_mmq_iq4_xs_gate_up_tile8(
+        &self,
+        w_gate: DevicePtr,
+        w_up: DevicePtr,
+        y: DevicePtr,
+        expert_ids: DevicePtr,
+        sorted_pair_idx_padded: DevicePtr,
+        padded_offsets: DevicePtr,
+        gate_out: DevicePtr,
+        up_out: DevicePtr,
+        shape: MoeShape,
+    ) -> Result<()>;
+    fn indexed_moe_mmq_iq4_xs_down_tile8(
+        &self,
+        w: DevicePtr,
+        y: DevicePtr,
+        expert_ids: DevicePtr,
+        sorted_pair_idx_padded: DevicePtr,
+        padded_offsets: DevicePtr,
+        dst: DevicePtr,
+        shape: MoeShape,
+    ) -> Result<()>;
+
+    fn indexed_moe_mmq_iq4_nl_gate_up_tile8(
+        &self,
+        w_gate: DevicePtr,
+        w_up: DevicePtr,
+        y: DevicePtr,
+        expert_ids: DevicePtr,
+        sorted_pair_idx_padded: DevicePtr,
+        padded_offsets: DevicePtr,
+        gate_out: DevicePtr,
+        up_out: DevicePtr,
+        shape: MoeShape,
+    ) -> Result<()>;
+    fn indexed_moe_mmq_iq4_nl_down_tile8(
+        &self,
+        w: DevicePtr,
+        y: DevicePtr,
+        expert_ids: DevicePtr,
+        sorted_pair_idx_padded: DevicePtr,
+        padded_offsets: DevicePtr,
+        dst: DevicePtr,
+        shape: MoeShape,
+    ) -> Result<()>;
+
+    fn indexed_moe_mmq_iq3_xxs_gate_up_tile8(
+        &self,
+        w_gate: DevicePtr,
+        w_up: DevicePtr,
+        y: DevicePtr,
+        expert_ids: DevicePtr,
+        sorted_pair_idx_padded: DevicePtr,
+        padded_offsets: DevicePtr,
+        gate_out: DevicePtr,
+        up_out: DevicePtr,
+        shape: MoeShape,
+    ) -> Result<()>;
+    fn indexed_moe_mmq_iq3_xxs_down_tile8(
+        &self,
+        w: DevicePtr,
+        y: DevicePtr,
+        expert_ids: DevicePtr,
+        sorted_pair_idx_padded: DevicePtr,
+        padded_offsets: DevicePtr,
+        dst: DevicePtr,
+        shape: MoeShape,
+    ) -> Result<()>;
+
+    fn indexed_moe_mmq_iq3_s_gate_up_tile8(
+        &self,
+        w_gate: DevicePtr,
+        w_up: DevicePtr,
+        y: DevicePtr,
+        expert_ids: DevicePtr,
+        sorted_pair_idx_padded: DevicePtr,
+        padded_offsets: DevicePtr,
+        gate_out: DevicePtr,
+        up_out: DevicePtr,
+        shape: MoeShape,
+    ) -> Result<()>;
+    fn indexed_moe_mmq_iq3_s_down_tile8(
+        &self,
+        w: DevicePtr,
+        y: DevicePtr,
+        expert_ids: DevicePtr,
+        sorted_pair_idx_padded: DevicePtr,
+        padded_offsets: DevicePtr,
+        dst: DevicePtr,
+        shape: MoeShape,
+    ) -> Result<()>;
+
+    fn indexed_moe_mmq_iq2_xxs_gate_up_tile8(
+        &self,
+        w_gate: DevicePtr,
+        w_up: DevicePtr,
+        y: DevicePtr,
+        expert_ids: DevicePtr,
+        sorted_pair_idx_padded: DevicePtr,
+        padded_offsets: DevicePtr,
+        gate_out: DevicePtr,
+        up_out: DevicePtr,
+        shape: MoeShape,
+    ) -> Result<()>;
+    fn indexed_moe_mmq_iq2_xxs_down_tile8(
+        &self,
+        w: DevicePtr,
+        y: DevicePtr,
+        expert_ids: DevicePtr,
+        sorted_pair_idx_padded: DevicePtr,
+        padded_offsets: DevicePtr,
+        dst: DevicePtr,
+        shape: MoeShape,
+    ) -> Result<()>;
+
+    fn indexed_moe_mmq_iq2_xs_gate_up_tile8(
+        &self,
+        w_gate: DevicePtr,
+        w_up: DevicePtr,
+        y: DevicePtr,
+        expert_ids: DevicePtr,
+        sorted_pair_idx_padded: DevicePtr,
+        padded_offsets: DevicePtr,
+        gate_out: DevicePtr,
+        up_out: DevicePtr,
+        shape: MoeShape,
+    ) -> Result<()>;
+    fn indexed_moe_mmq_iq2_xs_down_tile8(
+        &self,
+        w: DevicePtr,
+        y: DevicePtr,
+        expert_ids: DevicePtr,
+        sorted_pair_idx_padded: DevicePtr,
+        padded_offsets: DevicePtr,
+        dst: DevicePtr,
+        shape: MoeShape,
+    ) -> Result<()>;
+
+    fn indexed_moe_mmq_iq2_s_gate_up_tile8(
+        &self,
+        w_gate: DevicePtr,
+        w_up: DevicePtr,
+        y: DevicePtr,
+        expert_ids: DevicePtr,
+        sorted_pair_idx_padded: DevicePtr,
+        padded_offsets: DevicePtr,
+        gate_out: DevicePtr,
+        up_out: DevicePtr,
+        shape: MoeShape,
+    ) -> Result<()>;
+    fn indexed_moe_mmq_iq2_s_down_tile8(
+        &self,
+        w: DevicePtr,
+        y: DevicePtr,
+        expert_ids: DevicePtr,
+        sorted_pair_idx_padded: DevicePtr,
+        padded_offsets: DevicePtr,
+        dst: DevicePtr,
+        shape: MoeShape,
+    ) -> Result<()>;
+
+    fn indexed_moe_mmq_iq1_s_gate_up_tile8(
+        &self,
+        w_gate: DevicePtr,
+        w_up: DevicePtr,
+        y: DevicePtr,
+        expert_ids: DevicePtr,
+        sorted_pair_idx_padded: DevicePtr,
+        padded_offsets: DevicePtr,
+        gate_out: DevicePtr,
+        up_out: DevicePtr,
+        shape: MoeShape,
+    ) -> Result<()>;
+    fn indexed_moe_mmq_iq1_s_down_tile8(
+        &self,
+        w: DevicePtr,
+        y: DevicePtr,
+        expert_ids: DevicePtr,
+        sorted_pair_idx_padded: DevicePtr,
+        padded_offsets: DevicePtr,
+        dst: DevicePtr,
+        shape: MoeShape,
+    ) -> Result<()>;
+
+    fn indexed_moe_mmq_iq1_m_gate_up_tile8(
+        &self,
+        w_gate: DevicePtr,
+        w_up: DevicePtr,
+        y: DevicePtr,
+        expert_ids: DevicePtr,
+        sorted_pair_idx_padded: DevicePtr,
+        padded_offsets: DevicePtr,
+        gate_out: DevicePtr,
+        up_out: DevicePtr,
+        shape: MoeShape,
+    ) -> Result<()>;
+    fn indexed_moe_mmq_iq1_m_down_tile8(
         &self,
         w: DevicePtr,
         y: DevicePtr,
@@ -946,6 +1506,16 @@ pub trait Ops {
         hidden: usize,
     ) -> Result<()>;
 
+    fn moe_combine_no_residual_f32(
+        &self,
+        expert_outs: DevicePtr,
+        weights: DevicePtr,
+        out: DevicePtr,
+        n_tokens: usize,
+        top_k: usize,
+        hidden: usize,
+    ) -> Result<()>;
+
     fn moe_combine_two_residuals_f16(
         &self,
         expert_outs: DevicePtr,
@@ -998,4 +1568,8 @@ pub trait Ops {
         max_tokens: usize,
         top_k: usize,
     ) -> Result<()>;
+
+    /// Final-logit softcap: `y[i] = tanh(x[i] / cap) * cap`. In-place
+    /// safe (`x` may equal `y`). Used by Gemma4 on the LM-head logits.
+    fn apply_softcap_f32(&self, x: DevicePtr, y: DevicePtr, n: usize, cap: f32) -> Result<()>;
 }

@@ -23,7 +23,9 @@ pub fn seeded_bytes(seed: u64, n: usize) -> Vec<u8> {
     let mut state = seed.wrapping_mul(6364136223846793005).wrapping_add(1);
     (0..n)
         .map(|_| {
-            state = state.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+            state = state
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
             (state >> 24) as u8
         })
         .collect()
@@ -33,7 +35,9 @@ pub fn seeded_f32(seed: u64, n: usize) -> Vec<f32> {
     let mut state = seed.wrapping_mul(6364136223846793005).wrapping_add(1);
     (0..n)
         .map(|_| {
-            state = state.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+            state = state
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
             let u = (state >> 32) as u32;
             (u as f32 / u32::MAX as f32) * 2.0 - 1.0
         })

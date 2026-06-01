@@ -3,8 +3,14 @@
 //! memcpy, run B times against B independent history buffers). Bit-equal
 //! at FP32 — same op order, just one launch instead of 3N.
 
-#![expect(clippy::undocumented_unsafe_blocks, reason = "test fixture; same shape rationale as siblings")]
-#![expect(clippy::cast_possible_wrap, reason = "kernel-shape math bounded by GGUF dims")]
+#![expect(
+    clippy::undocumented_unsafe_blocks,
+    reason = "test fixture; same shape rationale as siblings"
+)]
+#![expect(
+    clippy::cast_possible_wrap,
+    reason = "kernel-shape math bounded by GGUF dims"
+)]
 
 use flambeau_backend_hip::{device_count, HipDevice, HipKernel, HipModule, KernelArgs, LaunchCfg};
 use flambeau_core::{CopyDirection, Device, DevicePtr, Stream};
@@ -18,7 +24,9 @@ fn seeded_f32(seed: u64, n: usize) -> Vec<f32> {
     let mut state = seed.wrapping_mul(6364136223846793005).wrapping_add(1);
     (0..n)
         .map(|_| {
-            state = state.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+            state = state
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
             let u = (state >> 32) as u32;
             (u as f32 / u32::MAX as f32) * 2.0 - 1.0
         })
@@ -70,9 +78,15 @@ fn run_both(n_slots: usize, conv_channels: usize, conv_kernel: usize, seed: u64)
     dev.bind().unwrap();
 
     let conv1d_module = HipModule::load(0, kernels::hsaco("causal_conv1d_f32").unwrap()).unwrap();
-    let trio_module = HipModule::load(0, kernels::hsaco("gdn_conv_trio_decode_f32_batched_slots").unwrap()).unwrap();
+    let trio_module = HipModule::load(
+        0,
+        kernels::hsaco("gdn_conv_trio_decode_f32_batched_slots").unwrap(),
+    )
+    .unwrap();
     let k_conv1d: HipKernel<'_> = conv1d_module.kernel("flambeau_causal_conv1d_f32").unwrap();
-    let k_trio: HipKernel<'_> = trio_module.kernel("flambeau_gdn_conv_trio_decode_f32_batched_slots").unwrap();
+    let k_trio: HipKernel<'_> = trio_module
+        .kernel("flambeau_gdn_conv_trio_decode_f32_batched_slots")
+        .unwrap();
 
     let qkv = seeded_f32(seed, n_slots * conv_channels);
     let weight = seeded_f32(seed.wrapping_add(7), conv_channels * conv_kernel);
@@ -89,8 +103,10 @@ fn run_both(n_slots: usize, conv_channels: usize, conv_kernel: usize, seed: u64)
     let d_weight = alloc_and_upload(&dev, &weight);
 
     // REF buffers
-    let d_ref_history: Vec<DevicePtr> =
-        hist_init.iter().map(|h| alloc_and_upload(&dev, h)).collect();
+    let d_ref_history: Vec<DevicePtr> = hist_init
+        .iter()
+        .map(|h| alloc_and_upload(&dev, h))
+        .collect();
     let d_ref_conv_out = dev.alloc(n_slots * conv_channels * 4).unwrap();
     let d_ref_conv_input = dev.alloc(conv_kernel * conv_channels * 4).unwrap();
 
@@ -155,8 +171,10 @@ fn run_both(n_slots: usize, conv_channels: usize, conv_kernel: usize, seed: u64)
     }
 
     // BS buffers (fresh history copies)
-    let d_bs_history: Vec<DevicePtr> =
-        hist_init.iter().map(|h| alloc_and_upload(&dev, h)).collect();
+    let d_bs_history: Vec<DevicePtr> = hist_init
+        .iter()
+        .map(|h| alloc_and_upload(&dev, h))
+        .collect();
     let d_bs_conv_out = dev.alloc(n_slots * conv_channels * 4).unwrap();
     let bs_ptr_u64: Vec<u64> = d_bs_history.iter().map(|p| p.as_usize() as u64).collect();
     let d_bs_ptrs = alloc_and_upload(&dev, &bs_ptr_u64);
@@ -179,11 +197,7 @@ fn run_both(n_slots: usize, conv_channels: usize, conv_kernel: usize, seed: u64)
         args.push(&ck_i);
         let threads: u32 = 256;
         let cfg = LaunchCfg {
-            grid: (
-                (conv_channels as u32).div_ceil(threads),
-                n_slots as u32,
-                1,
-            ),
+            grid: ((conv_channels as u32).div_ceil(threads), n_slots as u32, 1),
             block: (threads, 1, 1),
             shared_bytes: 0,
         };
@@ -203,17 +217,29 @@ fn run_both(n_slots: usize, conv_channels: usize, conv_kernel: usize, seed: u64)
         .collect();
 
     unsafe {
-        for p in &d_ref_history { dev.dealloc(*p, hist_init[0].len() * 4).unwrap(); }
-        for p in &d_bs_history { dev.dealloc(*p, hist_init[0].len() * 4).unwrap(); }
+        for p in &d_ref_history {
+            dev.dealloc(*p, hist_init[0].len() * 4).unwrap();
+        }
+        for p in &d_bs_history {
+            dev.dealloc(*p, hist_init[0].len() * 4).unwrap();
+        }
         dev.dealloc(d_qkv, qkv.len() * 4).unwrap();
         dev.dealloc(d_weight, weight.len() * 4).unwrap();
-        dev.dealloc(d_ref_conv_out, n_slots * conv_channels * 4).unwrap();
-        dev.dealloc(d_ref_conv_input, conv_kernel * conv_channels * 4).unwrap();
-        dev.dealloc(d_bs_conv_out, n_slots * conv_channels * 4).unwrap();
+        dev.dealloc(d_ref_conv_out, n_slots * conv_channels * 4)
+            .unwrap();
+        dev.dealloc(d_ref_conv_input, conv_kernel * conv_channels * 4)
+            .unwrap();
+        dev.dealloc(d_bs_conv_out, n_slots * conv_channels * 4)
+            .unwrap();
         dev.dealloc(d_bs_ptrs, bs_ptr_u64.len() * 8).unwrap();
     }
 
-    Outs { ref_conv_out, ref_history, bs_conv_out, bs_history }
+    Outs {
+        ref_conv_out,
+        ref_history,
+        bs_conv_out,
+        bs_history,
+    }
 }
 
 fn assert_bit_equal(label: &str, a: &[f32], b: &[f32]) {

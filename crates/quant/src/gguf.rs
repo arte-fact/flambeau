@@ -191,7 +191,6 @@ impl TensorInfo {
 struct SplitMmap {
     /// Path the mmap came from. Unused on the hot path; kept for `{:?}`
     /// debug output and future per-split error context.
-    #[allow(dead_code)]
     path: PathBuf,
     mmap: Arc<Mmap>,
     /// Byte offset within this split file at which its tensor data section
@@ -347,8 +346,7 @@ impl GgufFile {
         // A concurrent writer modifying the file would make reads unsafe, but
         // model weights are a cold artefact — callers must not mutate them.
         let mmap = unsafe { Mmap::map(&file)? };
-        let (parsed, md, mut tensors, order, offset) =
-            parse_gguf_header(path, Arc::new(mmap))?;
+        let (parsed, md, mut tensors, order, offset) = parse_gguf_header(path, Arc::new(mmap))?;
         for info in tensors.values_mut() {
             info.split_idx = split_idx;
         }
@@ -428,8 +426,11 @@ impl GgufFile {
             libc::munmap(addr, len)
         };
         if rc != 0 && dev_flag("FLAMBEAU_LOAD_TRACE") {
-            eprintln!("  [munmap] {} failed: {}", name,
-                std::io::Error::last_os_error());
+            eprintln!(
+                "  [munmap] {} failed: {}",
+                name,
+                std::io::Error::last_os_error()
+            );
         }
     }
 
@@ -464,9 +465,8 @@ impl GgufFile {
                 name: info.name.clone(),
                 start: byte_start,
                 len: byte_len,
-                total: (split.mmap.len() as u64).saturating_sub(
-                    split.tensor_data_offset + info.rel_offset,
-                ),
+                total: (split.mmap.len() as u64)
+                    .saturating_sub(split.tensor_data_offset + info.rel_offset),
             });
         }
         Ok(&split.mmap[abs_start as usize..abs_end as usize])
@@ -549,12 +549,7 @@ impl GgufFile {
     /// # Errors
     /// Same error space as [`tensor_row_range_raw`] — `UnknownTensor`,
     /// `RangeOutOfBounds`, or `TruncatedTensor`.
-    pub fn tensor_expert_range_raw(
-        &self,
-        name: &str,
-        e_start: u64,
-        e_count: u64,
-    ) -> Result<&[u8]> {
+    pub fn tensor_expert_range_raw(&self, name: &str, e_start: u64, e_count: u64) -> Result<&[u8]> {
         let info = self.info(name)?;
         if info.dims.len() != 3 {
             return Err(QuantError::RangeOutOfBounds {
@@ -713,7 +708,11 @@ fn parse_gguf_header(
         .unwrap_or(DEFAULT_ALIGNMENT);
     let tensor_data_offset = header_end.div_ceil(alignment) * alignment;
 
-    let parsed = ParsedSplit { path, version, mmap };
+    let parsed = ParsedSplit {
+        path,
+        version,
+        mmap,
+    };
     Ok((parsed, metadata, tensors, tensor_order, tensor_data_offset))
 }
 

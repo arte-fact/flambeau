@@ -48,10 +48,7 @@ pub fn capture_runtime_pmc(
     // rocprofv3 expects the `pmc:` syntax in the input file (one `pmc:` line
     // per counter group, counters separated by spaces on the same line).
     let pmc_file = workdir.join("pmc.txt");
-    std::fs::write(
-        &pmc_file,
-        format!("pmc: {}\n", counters.join(" ")),
-    )?;
+    std::fs::write(&pmc_file, format!("pmc: {}\n", counters.join(" ")))?;
 
     let mut c = Command::new(rocprofv3_bin);
     c.args(["-i", pmc_file.to_str().unwrap()])
@@ -176,7 +173,10 @@ fn aggregate_pmc(rows: &[CounterRow], kernel_name: &str) -> Result<PmcSnapshot> 
     // Filter rows belonging to this kernel. rocprofv3 may log multiple
     // dispatches if the kernel is called repeatedly (e.g. an A/B harness);
     // we average counter values across dispatches.
-    let filtered: Vec<&CounterRow> = rows.iter().filter(|r| r.kernel_name == kernel_name).collect();
+    let filtered: Vec<&CounterRow> = rows
+        .iter()
+        .filter(|r| r.kernel_name == kernel_name)
+        .collect();
     if filtered.is_empty() {
         let seen: Vec<&str> = rows
             .iter()
@@ -184,9 +184,7 @@ fn aggregate_pmc(rows: &[CounterRow], kernel_name: &str) -> Result<PmcSnapshot> 
             .collect::<std::collections::BTreeSet<_>>()
             .into_iter()
             .collect();
-        bail!(
-            "kernel {kernel_name:?} never dispatched under rocprofv3 (saw: {seen:?})"
-        );
+        bail!("kernel {kernel_name:?} never dispatched under rocprofv3 (saw: {seen:?})");
     }
 
     let vgpr = filtered[0].vgpr_count;

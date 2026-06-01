@@ -12,9 +12,13 @@
 // k_cache / v_cache: [n_tokens, n_heads_kv, head_dim/32] block_q8_0
 // q: [n_heads_q, head_dim] FP16
 // out: [n_heads_q, head_dim] FP16
-// Supported head_dim: {64, 128, 256}. block.x = head_dim / 4 threads
-// (= 16, 32, 64 — one wavefront for head_dim=256). Each thread owns
-// 4 int8 K-bytes + 4 fp32 V-accumulators + 4 int8 Q-bytes from LDS.
+// Supported head_dim: {64, 128, 256, 512}. block.x = head_dim / 4
+// threads (= 16, 32, 64, 128). At d≤256 the block is one wave64 and
+// all reductions use free `__shfl_xor`. At d=512 the block is 2 waves;
+// the in-wave shfl_xor sum-of-blocks reduction is followed by a tiny
+// cross-wave LDS rendezvous (`score_parts[2]` + 2 `__syncthreads`).
+// Each thread owns 4 int8 K-bytes + 4 fp32 V-accumulators + 4 int8
+// Q-bytes from LDS, regardless of head_dim.
 
 #include "block_quant.cuh"
 #include "../arch_primitives/gfx906.cuh"
@@ -24,7 +28,8 @@
 #define INFINITY __builtin_huge_valf()
 #endif
 
-#define ATTN_Q8DP_MAX_HEAD_DIM 256
+#define ATTN_Q8DP_MAX_HEAD_DIM 512
+#define ATTN_Q8DP_MAX_WAVES (ATTN_Q8DP_MAX_HEAD_DIM / 256)
 
 extern "C" __global__ void flambeau_attention_decode_q8_kv(
     const fb_fp16_t* __restrict__ q,                    // [n_heads_q, head_dim]
@@ -33,9 +38,10 @@ extern "C" __global__ void flambeau_attention_decode_q8_kv(
     fb_fp16_t* __restrict__ out,                        // [n_heads_q, head_dim]
     const int n_heads_q,
     const int n_heads_kv,
-    const int head_dim,                                 // 64, 128 or 256
+    const int head_dim,                                 // 64, 128, 256 or 512
     const int n_tokens,
-    const float scale
+    const float scale,
+    const int window_size                               // 0 = unbounded causal; >0 = SWA
 ) {
     const int q_head  = blockIdx.x;
     if (q_head >= n_heads_q) return;
@@ -94,7 +100,17 @@ extern "C" __global__ void flambeau_attention_decode_q8_kv(
     const int* q_qs_int = (const int*) q_qs;
     const int q_packed  = q_qs_int[dim_quad];
 
-    for (int t = 0; t < n_tokens; ++t) {
+    // SWA: query position is the last token in the cache (n_tokens-1).
+    // Keys older than (qpos - window_size + 1) are masked. window_size=0
+    // disables the window — full causal range. Matches the F16 kernel's
+    // SWA semantics.
+    int t_start = 0;
+    if (window_size > 0) {
+        const int qpos = n_tokens - 1;
+        t_start = qpos - window_size + 1;
+        if (t_start < 0) t_start = 0;
+    }
+    for (int t = t_start; t < n_tokens; ++t) {
         const size_t kv_row_blocks =
             ((size_t) t * n_heads_kv + kv_head) * n_blocks_per_row;
 
@@ -133,13 +149,25 @@ extern "C" __global__ void flambeau_attention_decode_q8_kv(
         if (n_blocks_per_row >= 2) {
             // After this xor=8, lanes (0..7) and lanes (8..15) all see
             // sum of blocks 0+1.
-            score_t += __shfl_xor(score_t, 8, n_blocks_per_row * n_quads_per_block);
+            score_t += __shfl_xor(score_t, 8, min(n_blocks_per_row * n_quads_per_block, 64));
         }
         if (n_blocks_per_row >= 4) {
-            score_t += __shfl_xor(score_t, 16, n_blocks_per_row * n_quads_per_block);
+            score_t += __shfl_xor(score_t, 16, min(n_blocks_per_row * n_quads_per_block, 64));
         }
         if (n_blocks_per_row >= 8) {
-            score_t += __shfl_xor(score_t, 32, n_blocks_per_row * n_quads_per_block);
+            score_t += __shfl_xor(score_t, 32, min(n_blocks_per_row * n_quads_per_block, 64));
+        }
+        // d=512: 2 waves per block; the in-wave xor chain above ends at
+        // stride 32 (wave-internal). Add a cross-wave LDS reduce so all
+        // lanes see the full sum across both waves.
+        if (head_dim > 256) {
+            __shared__ float score_parts[ATTN_Q8DP_MAX_WAVES];
+            const int warp = tid >> 6;
+            const int lane = tid & 63;
+            if (lane == 0) score_parts[warp] = score_t;
+            __syncthreads();
+            score_t = score_parts[0] + score_parts[1];
+            __syncthreads();
         }
         score_t *= scale;
 

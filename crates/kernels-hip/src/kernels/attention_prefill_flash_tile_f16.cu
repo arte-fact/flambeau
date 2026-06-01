@@ -28,6 +28,7 @@
 // D=64, BC=64 → 32 KiB
 // D=128, BC=32 → 32 KiB
 // D=256, BC=16 → 32 KiB
+// D=512, BC=8 → 32 KiB (gemma4 full-attn layers)
 
 #include <hip/hip_runtime.h>
 #include <hip/hip_fp16.h>
@@ -50,9 +51,10 @@ static __device__ __forceinline__ void flash_attn_prefill_v2_impl(
     const int n_heads_kv,
     const int n_k_tokens,
     const int q_offset,
-    const float scale
+    const float scale,
+    const int window_size                   // SWA radius, 0 = unbounded causal
 ) {
-    static_assert(D == 64 || D == 128 || D == 256, "D must be 64, 128, or 256");
+    static_assert(D == 64 || D == 128 || D == 256 || D == 512, "D must be 64, 128, 256, or 512");
     static_assert(D % WARP_SIZE == 0, "D must be a multiple of WARP_SIZE");
 
     constexpr int D_PER_LANE = D / WARP_SIZE;
@@ -71,8 +73,17 @@ static __device__ __forceinline__ void flash_attn_prefill_v2_impl(
     const int h_kv  = (n_rep > 1) ? (h_q / n_rep) : h_q;
 
     // Per-warp causal cutoff: Q[q_idx] attends to K[0..limit).
-    int limit = q_offset + q_idx + 1;
+    const int qpos_global = q_offset + q_idx;
+    int limit = qpos_global + 1;
     if (limit > n_k_tokens) limit = n_k_tokens;
+    // Per-warp SWA lower bound: K[row] is masked when row < swa_min.
+    // window_size = 0 disables the window (swa_min = 0 → unbounded
+    // causal). Otherwise swa_min = max(0, qpos - window + 1).
+    int swa_min = 0;
+    if (window_size > 0) {
+        swa_min = qpos_global - window_size + 1;
+        if (swa_min < 0) swa_min = 0;
+    }
 
     // Block-wide cutoff for the cooperative LDS tile load — all 4 warps
     // share one tile, so we must load enough rows for the LATEST q_idx
@@ -82,6 +93,15 @@ static __device__ __forceinline__ void flash_attn_prefill_v2_impl(
     const int last_q_idx = min(q_tile * BR + BR - 1, n_q_tokens - 1);
     int block_limit = q_offset + last_q_idx + 1;
     if (block_limit > n_k_tokens) block_limit = n_k_tokens;
+    // Block-wide SWA lower bound for chunk loop: smallest swa_min
+    // across this block's q rows. The earliest q in the tile is
+    // q_tile * BR (warp 0); its swa_min is the block minimum.
+    int block_swa_min = 0;
+    if (window_size > 0) {
+        const int first_q_idx = q_tile * BR;
+        block_swa_min = (q_offset + first_q_idx) - window_size + 1;
+        if (block_swa_min < 0) block_swa_min = 0;
+    }
 
     // ---- Per-lane register state ----
     float q_reg[D_PER_LANE];
@@ -105,13 +125,16 @@ static __device__ __forceinline__ void flash_attn_prefill_v2_impl(
     __shared__ float v_lds[BC * D];
 
     // Number of K chunks sized by block_limit (the cooperative-load's
-    // upper bound), not the per-warp limit. Inner loop applies the
-    // per-warp causal mask via `row >= limit`.
-    const int n_chunks = (block_limit + BC - 1) / BC;
+    // upper bound), not the per-warp limit. With SWA, skip leading
+    // chunks entirely below `block_swa_min` — no q in the block uses
+    // them. Per-warp masks (`row >= limit` and `row < swa_min`)
+    // handle the boundary rows.
+    const int n_chunks_end = (block_limit + BC - 1) / BC;
+    const int n_chunks_start = block_swa_min / BC;
     const int tile_elems = BC * D;
     const int loads_per_thread = (tile_elems + THREADS_PER_BLOCK - 1) / THREADS_PER_BLOCK;
 
-    for (int chunk = 0; chunk < n_chunks; ++chunk) {
+    for (int chunk = n_chunks_start; chunk < n_chunks_end; ++chunk) {
         const int k_start = chunk * BC;
 
         // Cooperative load of BC × D K/V entries into LDS. Upcast F16 → F32
@@ -153,23 +176,26 @@ static __device__ __forceinline__ void flash_attn_prefill_v2_impl(
                 }
                 float s_j = gfx906_warp_reduce_sum(partial) * scale;
 
-                // Mask K rows beyond the causal cutoff.
-                if (row >= limit) {
-                    s_j = -INFINITY;
-                }
+                // Mask K rows beyond the causal cutoff or below the
+                // SWA lower bound. Skip the online softmax update for
+                // masked rows: the contribution is mathematically 0
+                // (p = exp(-inf - m_new) = 0), and skipping avoids the
+                // m_i = s_j = -INFINITY case where (-inf) - (-inf) = NaN
+                // poisons alpha + p before the first valid row arrives.
+                const bool masked = (row >= limit) || (row < swa_min);
+                if (!masked) {
+                    const float m_new = fmaxf(m_i, s_j);
+                    const float alpha = gfx906_fast_exp(m_i - m_new);
+                    const float p     = gfx906_fast_exp(s_j - m_new);
 
-                // Online softmax rescale (Dao et al. flash-attention v1).
-                const float m_new = fmaxf(m_i, s_j);
-                const float alpha = gfx906_fast_exp(m_i - m_new);
-                const float p     = gfx906_fast_exp(s_j - m_new);
-
-                #pragma unroll
-                for (int i = 0; i < D_PER_LANE; ++i) {
-                    o_reg[i] = alpha * o_reg[i]
-                             + p * v_lds[j * D + lane + i * WARP_SIZE];
+                    #pragma unroll
+                    for (int i = 0; i < D_PER_LANE; ++i) {
+                        o_reg[i] = alpha * o_reg[i]
+                                 + p * v_lds[j * D + lane + i * WARP_SIZE];
+                    }
+                    l_i = alpha * l_i + p;
+                    m_i = m_new;
                 }
-                l_i = alpha * l_i + p;
-                m_i = m_new;
             }
         }
         __syncthreads();
@@ -199,12 +225,13 @@ void flambeau_attention_prefill_flash_tile_d64_f16(
     const int n_heads_kv,
     const int n_k_tokens,
     const int q_offset,
-    const float scale
+    const float scale,
+    const int window_size
 ) {
     flash_attn_prefill_v2_impl</*D=*/64, /*BR=*/4, /*BC=*/64>(
         q, k_cache, v_cache, out,
         n_q_tokens, n_heads_q, n_heads_kv,
-        n_k_tokens, q_offset, scale);
+        n_k_tokens, q_offset, scale, window_size);
 }
 
 extern "C" __global__ __launch_bounds__(256, 2)
@@ -218,12 +245,13 @@ void flambeau_attention_prefill_flash_tile_d128_f16(
     const int n_heads_kv,
     const int n_k_tokens,
     const int q_offset,
-    const float scale
+    const float scale,
+    const int window_size
 ) {
     flash_attn_prefill_v2_impl</*D=*/128, /*BR=*/4, /*BC=*/32>(
         q, k_cache, v_cache, out,
         n_q_tokens, n_heads_q, n_heads_kv,
-        n_k_tokens, q_offset, scale);
+        n_k_tokens, q_offset, scale, window_size);
 }
 
 extern "C" __global__ __launch_bounds__(256, 2)
@@ -237,12 +265,13 @@ void flambeau_attention_prefill_flash_tile_d256_f16(
     const int n_heads_kv,
     const int n_k_tokens,
     const int q_offset,
-    const float scale
+    const float scale,
+    const int window_size
 ) {
     flash_attn_prefill_v2_impl</*D=*/256, /*BR=*/4, /*BC=*/16>(
         q, k_cache, v_cache, out,
         n_q_tokens, n_heads_q, n_heads_kv,
-        n_k_tokens, q_offset, scale);
+        n_k_tokens, q_offset, scale, window_size);
 }
 
 // BR=8 variant at D=256. Doubles Q rows per block → halves
@@ -261,10 +290,34 @@ void flambeau_attention_prefill_flash_tile_d256_br8_f16(
     const int n_heads_kv,
     const int n_k_tokens,
     const int q_offset,
-    const float scale
+    const float scale,
+    const int window_size
 ) {
     flash_attn_prefill_v2_impl</*D=*/256, /*BR=*/8, /*BC=*/16>(
         q, k_cache, v_cache, out,
         n_q_tokens, n_heads_q, n_heads_kv,
-        n_k_tokens, q_offset, scale);
+        n_k_tokens, q_offset, scale, window_size);
+}
+
+// D=512 BR=4 BC=8. Each lane holds 8 floats for q_reg and o_reg (D/WARP_SIZE).
+// LDS: 2 × 8 × 512 × 4 = 32 KiB. Block = 4 × 64 = 256 threads → launch_bounds(256, 2).
+// Used by gemma4 full-attn layers (key_length=512).
+extern "C" __global__ __launch_bounds__(256, 2)
+void flambeau_attention_prefill_flash_tile_d512_f16(
+    const fb_fp16_t* __restrict__ q,
+    const fb_fp16_t* __restrict__ k_cache,
+    const fb_fp16_t* __restrict__ v_cache,
+    fb_fp16_t*       __restrict__ out,
+    const int n_q_tokens,
+    const int n_heads_q,
+    const int n_heads_kv,
+    const int n_k_tokens,
+    const int q_offset,
+    const float scale,
+    const int window_size
+) {
+    flash_attn_prefill_v2_impl</*D=*/512, /*BR=*/4, /*BC=*/8>(
+        q, k_cache, v_cache, out,
+        n_q_tokens, n_heads_q, n_heads_kv,
+        n_k_tokens, q_offset, scale, window_size);
 }

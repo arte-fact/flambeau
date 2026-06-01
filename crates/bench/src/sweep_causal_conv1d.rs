@@ -4,7 +4,6 @@
 //! exercises a small width for edge-case coverage.
 
 #![cfg(feature = "hip")]
-
 #![expect(
     clippy::undocumented_unsafe_blocks,
     reason = "sweep harness — every unsafe block is a kernel launch or a memcpy_async \
@@ -52,8 +51,7 @@ pub fn run_sweep(repo_root: &Path) -> Result<Cert> {
     for (n_new, conv_channels, conv_kernel) in shapes {
         let seed = 0xC0FFEE
             ^ ((n_new as u64) * 1033 + (conv_channels as u64) * 43 + (conv_kernel as u64) * 7);
-        let max_rel_err =
-            run_shape(&dev, &kernel, n_new, conv_channels, conv_kernel, seed)?;
+        let max_rel_err = run_shape(&dev, &kernel, n_new, conv_channels, conv_kernel, seed)?;
         let tol = 5e-5;
         results.push(ShapeResult {
             m: n_new,
@@ -103,7 +101,12 @@ fn run_shape(
 ) -> Result<f32> {
     let n_total = n_new + conv_kernel - 1;
     let x = seeded_f32_range(seed, n_total * conv_channels, -0.5, 0.5);
-    let w = seeded_f32_range(seed.wrapping_add(0xA1), conv_kernel * conv_channels, -0.5, 0.5);
+    let w = seeded_f32_range(
+        seed.wrapping_add(0xA1),
+        conv_kernel * conv_channels,
+        -0.5,
+        0.5,
+    );
 
     // CPU reference. Weight layout matches GGUF on-disk order for
     // `ssm_conv1d.weight`: `[conv_channels, conv_kernel]` with the
@@ -169,4 +172,3 @@ fn run_shape(
 
     Ok(max_rel_err_with_floor(&got, &reference, 1.0))
 }
-

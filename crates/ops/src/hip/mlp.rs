@@ -152,6 +152,32 @@ pub fn scale_f32(
     Ok(())
 }
 
+/// Pointwise `y[i] = (fp16)((float)x[i] * scale)`. F16 in/out. Used
+/// by Gemma 4 to apply `layer_output_scale` at the end of a layer.
+pub fn scale_f16(
+    reg: &OpsRegistry,
+    stream: &HipStream,
+    x: DevicePtr,
+    y: DevicePtr,
+    n: usize,
+    scale: f32,
+) -> Result<()> {
+    let module = reg.expect_module("scale_f16")?;
+    let kernel = module.kernel("flambeau_scale_f16")?;
+    let n_i = n as i32;
+    let x_ptr: u64 = x.as_usize() as u64;
+    let y_ptr: u64 = y.as_usize() as u64;
+    let scale_f = scale;
+    let mut args = KernelArgs::new();
+    args.push(&x_ptr);
+    args.push(&y_ptr);
+    args.push(&n_i);
+    args.push(&scale_f);
+    let cfg = LaunchCfg::one_d((n as u32).div_ceil(256), 256);
+    unsafe { kernel.launch(stream, cfg, args)? };
+    Ok(())
+}
+
 /// Pointwise `y = a + b` in F16. Residual fan-in primitive — used between
 /// layers in `forward_one_token` to sum the pre-layer residual with each
 /// per-layer delta, and to merge the shared-expert contribution into the
@@ -269,3 +295,55 @@ pub fn sigmoid_mul_f16(
     Ok(())
 }
 
+/// Fused `y_f16[i] = (fp16)(gelu(a[i]) * b[i])` — Gemma 4 dense FFN's
+/// `down(GELU(gate) * up)`. GELU is the ggml tanh-approximation form
+/// (parity with llama.cpp's `LLM_FFN_GELU`).
+pub fn gelu_f32_to_f16(
+    reg: &OpsRegistry,
+    stream: &HipStream,
+    a: DevicePtr,
+    b: DevicePtr,
+    y: DevicePtr,
+    n: usize,
+) -> Result<()> {
+    let module = reg.expect_module("gelu_f32_to_f16")?;
+    let kernel = module.kernel("flambeau_gelu_f32_to_f16")?;
+    let n_i = n as i32;
+    let a_ptr: u64 = a.as_usize() as u64;
+    let b_ptr: u64 = b.as_usize() as u64;
+    let y_ptr: u64 = y.as_usize() as u64;
+    let mut args = KernelArgs::new();
+    args.push(&a_ptr);
+    args.push(&b_ptr);
+    args.push(&y_ptr);
+    args.push(&n_i);
+    let cfg = LaunchCfg::one_d((n as u32).div_ceil(256), 256);
+    unsafe { kernel.launch(stream, cfg, args)? };
+    Ok(())
+}
+
+/// Fused `y_f32[i] = gelu(a[i]) * b[i]` — Gemma 4 per-layer
+/// side-channel embedding (E2B / E4B).
+pub fn gelu_mul_f32(
+    reg: &OpsRegistry,
+    stream: &HipStream,
+    a: DevicePtr,
+    b: DevicePtr,
+    y: DevicePtr,
+    n: usize,
+) -> Result<()> {
+    let module = reg.expect_module("gelu_mul_f32")?;
+    let kernel = module.kernel("flambeau_gelu_mul_f32")?;
+    let n_i = n as i32;
+    let a_ptr: u64 = a.as_usize() as u64;
+    let b_ptr: u64 = b.as_usize() as u64;
+    let y_ptr: u64 = y.as_usize() as u64;
+    let mut args = KernelArgs::new();
+    args.push(&a_ptr);
+    args.push(&b_ptr);
+    args.push(&y_ptr);
+    args.push(&n_i);
+    let cfg = LaunchCfg::one_d((n as u32).div_ceil(256), 256);
+    unsafe { kernel.launch(stream, cfg, args)? };
+    Ok(())
+}

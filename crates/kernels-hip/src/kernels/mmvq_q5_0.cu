@@ -1,4 +1,4 @@
-// mmvq_q5_0 — Q5_0 weight × Q8_1 activation → F32 dst.
+// mmvq_q5_0 — Q5_0 weight × Q8_1 activation → {F32, F16} dst.
 // Q5_0 layout: 2-byte F16 scale + 4-byte qh (32 "5th bits") + 16 bytes
 // nibble-packed unsigned low-4-bits. Reconstruction per element i:
 // q5_i = ((qh >> i) & 1) << 4 | nibble_i;
@@ -17,9 +17,14 @@
 // Bit expansion: given `b = 4 bits packed into bits [0..4) of a byte`, produce
 // `b0 | (b1 << 8) | (b2 << 16) | (b3 << 24)` — each byte is 0 or 1.
 // Block/grid: blockDim=256, gridDim=n_rows.
+//
+// Two output dtypes via templated __device__ body (#120):
+//   flambeau_mmvq_q5_0_q8_1      → F32 dst (legacy scratch-then-cast)
+//   flambeau_mmvq_q5_0_q8_1_f16  → F16 dst (saturating; direct store)
 
 #include "block_quant.cuh"
 #include "gfx906.cuh"
+#include "mmvq_store.cuh"
 
 #define MMVQ_Q5_0_THREADS 256
 #define MMVQ_Q5_0_WARPS (MMVQ_Q5_0_THREADS / WARP_SIZE)
@@ -44,10 +49,11 @@ static __device__ __forceinline__ int expand_bits4(unsigned int qh, int start) {
     return out;
 }
 
-extern "C" __global__ void flambeau_mmvq_q5_0_q8_1(
+template<typename OutT>
+__device__ void mmvq_q5_0_q8_1_body(
     const flambeau_block_q5_0* __restrict__ x,
     const flambeau_block_q8_1* __restrict__ y,
-    float* __restrict__ dst,
+    OutT* __restrict__ dst,
     const int n_rows,
     const int n_blocks_per_row
 ) {
@@ -117,7 +123,27 @@ extern "C" __global__ void flambeau_mmvq_q5_0_q8_1(
             v += __shfl_xor(v, off, WARP_SIZE);
         }
         if (lane == 0) {
-            dst[row] = v;
+            mmvq_store<OutT>(dst, row, v);
         }
     }
+}
+
+extern "C" __global__ void flambeau_mmvq_q5_0_q8_1(
+    const flambeau_block_q5_0* __restrict__ x,
+    const flambeau_block_q8_1* __restrict__ y,
+    float* __restrict__ dst,
+    const int n_rows,
+    const int n_blocks_per_row
+) {
+    mmvq_q5_0_q8_1_body<float>(x, y, dst, n_rows, n_blocks_per_row);
+}
+
+extern "C" __global__ void flambeau_mmvq_q5_0_q8_1_f16(
+    const flambeau_block_q5_0* __restrict__ x,
+    const flambeau_block_q8_1* __restrict__ y,
+    fb_fp16_t* __restrict__ dst,
+    const int n_rows,
+    const int n_blocks_per_row
+) {
+    mmvq_q5_0_q8_1_body<fb_fp16_t>(x, y, dst, n_rows, n_blocks_per_row);
 }

@@ -12,9 +12,14 @@
 // lane_in_grp = tid & 3 — 0..3: which int32-pair within a block
 // block_idx = tid >> 2 — 0..31: 32 blocks/iter (vs 64 in 256t vdr2)
 // Outer stride = 32 blocks/iter.
+//
+// Two output dtypes via templated __device__ body (#120):
+//   flambeau_mmvq_q8_0_t128_vdr2_q8_1      → F32 dst (legacy)
+//   flambeau_mmvq_q8_0_t128_vdr2_q8_1_f16  → F16 dst (saturating)
 
 #include "block_quant.cuh"
 #include "gfx906.cuh"
+#include "mmvq_store.cuh"
 
 #define MMVQ_T128_VDR2_BLOCK_THREADS 128
 #define MMVQ_T128_VDR2_WARPS_PER_BLOCK (MMVQ_T128_VDR2_BLOCK_THREADS / WARP_SIZE)
@@ -25,11 +30,11 @@ static __device__ __forceinline__ int flambeau_dp4a_t128_vdr2(int a, int b, int 
     return __builtin_amdgcn_sdot4(a, b, c, false);
 }
 
-extern "C" __global__ __launch_bounds__(MMVQ_T128_VDR2_BLOCK_THREADS)
-void flambeau_mmvq_q8_0_t128_vdr2_q8_1(
+template<typename OutT>
+__device__ void mmvq_q8_0_t128_vdr2_q8_1_body(
     const flambeau_block_q8_0* __restrict__ x,
     const flambeau_block_q8_1* __restrict__ y,
-    float* __restrict__ dst,
+    OutT* __restrict__ dst,
     const int n_rows,
     const int n_blocks_per_row
 ) {
@@ -77,7 +82,29 @@ void flambeau_mmvq_q8_0_t128_vdr2_q8_1(
             v += __shfl_xor(v, off, WARP_SIZE);
         }
         if (lane == 0) {
-            dst[row] = v;
+            mmvq_store<OutT>(dst, row, v);
         }
     }
+}
+
+extern "C" __global__ __launch_bounds__(MMVQ_T128_VDR2_BLOCK_THREADS)
+void flambeau_mmvq_q8_0_t128_vdr2_q8_1(
+    const flambeau_block_q8_0* __restrict__ x,
+    const flambeau_block_q8_1* __restrict__ y,
+    float* __restrict__ dst,
+    const int n_rows,
+    const int n_blocks_per_row
+) {
+    mmvq_q8_0_t128_vdr2_q8_1_body<float>(x, y, dst, n_rows, n_blocks_per_row);
+}
+
+extern "C" __global__ __launch_bounds__(MMVQ_T128_VDR2_BLOCK_THREADS)
+void flambeau_mmvq_q8_0_t128_vdr2_q8_1_f16(
+    const flambeau_block_q8_0* __restrict__ x,
+    const flambeau_block_q8_1* __restrict__ y,
+    fb_fp16_t* __restrict__ dst,
+    const int n_rows,
+    const int n_blocks_per_row
+) {
+    mmvq_q8_0_t128_vdr2_q8_1_body<fb_fp16_t>(x, y, dst, n_rows, n_blocks_per_row);
 }

@@ -4,8 +4,14 @@
 //! reduction-order noise) for all (n_rows_gate, n_rows_up, k, N) shapes
 //! we ever launch.
 
-#![expect(clippy::undocumented_unsafe_blocks, reason = "test fixture; same shape rationale as siblings")]
-#![expect(clippy::cast_possible_wrap, reason = "kernel-shape math bounded by GGUF dims")]
+#![expect(
+    clippy::undocumented_unsafe_blocks,
+    reason = "test fixture; same shape rationale as siblings"
+)]
+#![expect(
+    clippy::cast_possible_wrap,
+    reason = "kernel-shape math bounded by GGUF dims"
+)]
 
 use flambeau_backend_hip::{device_count, HipDevice, HipKernel, HipModule, KernelArgs, LaunchCfg};
 use flambeau_core::{CopyDirection, Device, DevicePtr, Stream};
@@ -30,7 +36,9 @@ fn seeded_bytes(seed: u64, n: usize) -> Vec<u8> {
     let mut state = seed.wrapping_mul(6364136223846793005).wrapping_add(1);
     (0..n)
         .map(|_| {
-            state = state.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+            state = state
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
             (state >> 24) as u8
         })
         .collect()
@@ -40,7 +48,9 @@ fn seeded_f32(seed: u64, n: usize) -> Vec<f32> {
     let mut state = seed.wrapping_mul(6364136223846793005).wrapping_add(1);
     (0..n)
         .map(|_| {
-            state = state.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+            state = state
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
             let u = (state >> 32) as u32;
             (u as f32 / u32::MAX as f32) * 2.0 - 1.0
         })
@@ -48,7 +58,10 @@ fn seeded_f32(seed: u64, n: usize) -> Vec<f32> {
 }
 
 fn random_q4_0_block(seed: u64, idx: usize) -> BlockQ4_0 {
-    let bytes = seeded_bytes(seed ^ ((idx as u64).wrapping_mul(0x9E3779B97F4A7C15)), QK4 / 2 + 4);
+    let bytes = seeded_bytes(
+        seed ^ ((idx as u64).wrapping_mul(0x9E3779B97F4A7C15)),
+        QK4 / 2 + 4,
+    );
     let d_scalar = (bytes[0] as f32 / 255.0) * 0.1 + 0.01;
     let d = f16::from_f32(d_scalar);
     let mut qs = [0u8; QK4 / 2];
@@ -156,8 +169,9 @@ fn run_both(n_rows_gate: usize, n_rows_up: usize, k: usize, n_slots: usize, seed
         for c in 0..n_slots {
             let n_elems = k as i32;
             let d_y_f32_c: u64 = (d_y_f32.as_usize() + c * k * 4) as u64;
-            let d_y_q8_1_c: u64 =
-                (d_y_q8_1.as_usize() + c * y_blocks_per_slot * std::mem::size_of::<BlockQ8_1>()) as u64;
+            let d_y_q8_1_c: u64 = (d_y_q8_1.as_usize()
+                + c * y_blocks_per_slot * std::mem::size_of::<BlockQ8_1>())
+                as u64;
             let mut args = KernelArgs::new();
             args.push(&d_y_f32_c);
             args.push(&d_y_q8_1_c);
@@ -221,17 +235,28 @@ fn run_both(n_rows_gate: usize, n_rows_up: usize, k: usize, n_slots: usize, seed
     let rt_up = copy_back(&dev, d_rt_u, n_slots * n_rows_up);
 
     unsafe {
-        dev.dealloc(d_g, g_blocks.len() * std::mem::size_of::<BlockQ4_0>()).unwrap();
-        dev.dealloc(d_u, u_blocks.len() * std::mem::size_of::<BlockQ4_0>()).unwrap();
+        dev.dealloc(d_g, g_blocks.len() * std::mem::size_of::<BlockQ4_0>())
+            .unwrap();
+        dev.dealloc(d_u, u_blocks.len() * std::mem::size_of::<BlockQ4_0>())
+            .unwrap();
         dev.dealloc(d_y_f32, y_f32.len() * 4).unwrap();
-        dev.dealloc(d_y_q8_1, n_slots * y_blocks_per_slot * std::mem::size_of::<BlockQ8_1>()).unwrap();
+        dev.dealloc(
+            d_y_q8_1,
+            n_slots * y_blocks_per_slot * std::mem::size_of::<BlockQ8_1>(),
+        )
+        .unwrap();
         dev.dealloc(d_k5_g, n_slots * n_rows_gate * 4).unwrap();
         dev.dealloc(d_k5_u, n_slots * n_rows_up * 4).unwrap();
         dev.dealloc(d_rt_g, n_slots * n_rows_gate * 4).unwrap();
         dev.dealloc(d_rt_u, n_slots * n_rows_up * 4).unwrap();
     }
 
-    Outs { k5_gate, k5_up, rt_gate, rt_up }
+    Outs {
+        k5_gate,
+        k5_up,
+        rt_gate,
+        rt_up,
+    }
 }
 
 fn assert_bit_equal_or_close(label: &str, k5: &[f32], rt: &[f32], k: usize) {
@@ -311,7 +336,12 @@ fn parity_n4_asym_gdn_shape() {
     // and must not dereference up_w pointers (which only have 2048
     // valid rows).
     let outs = run_both(4096, 2048, 2048, 4, 0x35B_A3B_F1);
-    assert_bit_equal_or_close("n4 gdn-asym g4096 u2048 gate", &outs.k5_gate, &outs.rt_gate, 2048);
+    assert_bit_equal_or_close(
+        "n4 gdn-asym g4096 u2048 gate",
+        &outs.k5_gate,
+        &outs.rt_gate,
+        2048,
+    );
     assert_bit_equal_or_close("n4 gdn-asym g4096 u2048 up", &outs.k5_up, &outs.rt_up, 2048);
 }
 

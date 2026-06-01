@@ -8,7 +8,6 @@
 //! F32 projection of each Q8_1 block against the "true" F32 reference.
 
 #![cfg(feature = "hip")]
-
 #![expect(
     clippy::undocumented_unsafe_blocks,
     reason = "sweep harness — every unsafe block is a kernel launch or a memcpy_async \
@@ -219,4 +218,3 @@ fn run_shape(
 
     Ok((got, reference))
 }
-

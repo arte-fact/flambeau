@@ -1,7 +1,8 @@
-// cast_f32_f16 — pointwise F32 → F16.
-// Decode-path bridge: MMVQ writes its accumulator in F32 (per-block scale
-// chain needs full precision); attention / rmsnorm / swiglu all operate
-// on F16. Saves adding an F16 accumulator variant of every MMVQ kernel.
+// cast_f32_f16 — pointwise F32 → F16, saturating at ±F16_MAX.
+// Decode-path bridge: MMVQ accumulates in F32; attention / rmsnorm /
+// swiglu consume F16. Saturating clamp prevents ±inf from poisoning
+// downstream F16 buffers (NaN through rmsnorm variance). NaN inputs
+// pass through (clamp comparisons against NaN are false).
 // Launch: 1D, ceil(n/256) blocks × 256 threads. One element per thread.
 
 #include <hip/hip_runtime.h>
@@ -18,5 +19,8 @@ extern "C" __global__ void flambeau_cast_f32_f16(
 ) {
     const int i = blockIdx.x * blockDim.x + threadIdx.x;
     if (i >= n) return;
-    y[i] = (fb_fp16_t) x[i];
+    float v = x[i];
+    if (v > 65504.0f) v = 65504.0f;
+    else if (v < -65504.0f) v = -65504.0f;
+    y[i] = (fb_fp16_t) v;
 }

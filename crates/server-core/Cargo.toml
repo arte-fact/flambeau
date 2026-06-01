@@ -1,0 +1,23 @@
+[package]
+name = "flambeau-server-core"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "Backend-neutral Session/Model/SessionContext traits + BatchSlot type. Arch crates implement these without depending on flambeau-server or flambeau-qwen3-moe."
+
+[dependencies]
+anyhow.workspace = true
+flambeau-runtime = { path = "../runtime" }
+flambeau-model-ops = { path = "../model-ops" }
+
+[dependencies.flambeau-backend-hip]
+path = "../backend-hip"
+optional = true
+
+[features]
+default = []
+hip = ["dep:flambeau-backend-hip", "flambeau-model-ops/hip"]
+
+[lints]
+workspace = true

@@ -354,11 +354,7 @@ pub fn gdn_conv_trio_decode_f32_batched_slots(
     args.push(&conv_channels_i);
     args.push(&conv_kernel_i);
     let cfg = LaunchCfg {
-        grid: (
-            (conv_channels as u32).div_ceil(THREADS),
-            n_slots as u32,
-            1,
-        ),
+        grid: ((conv_channels as u32).div_ceil(THREADS), n_slots as u32, 1),
         block: (THREADS, 1, 1),
         shared_bytes: 0,
     };

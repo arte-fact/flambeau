@@ -7,7 +7,6 @@
 //! same bit-exact-vs-host pattern.
 
 #![cfg(feature = "hip")]
-
 #![expect(
     clippy::undocumented_unsafe_blocks,
     reason = "sweep harness — every unsafe block is a kernel launch or a memcpy_async \
@@ -170,8 +169,7 @@ where
     let dev = HipDevice::new(0)?;
     dev.bind()?;
 
-    let kb = kernels::hsaco(stem)
-        .ok_or_else(|| anyhow::anyhow!("{stem} not compiled"))?;
+    let kb = kernels::hsaco(stem).ok_or_else(|| anyhow::anyhow!("{stem} not compiled"))?;
     let module = HipModule::load(dev.id(), kb)?;
     let kernel: HipKernel<'_> = module.kernel(entry)?;
     let attrs: FuncAttributes = kernel.attributes()?;
@@ -269,4 +267,3 @@ where
     cert.write_to_disk(repo_root)?;
     Ok(cert)
 }
-

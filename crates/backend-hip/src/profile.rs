@@ -125,6 +125,10 @@ pub fn flush() -> anyhow::Result<Vec<SectionStat>> {
         })
         .collect();
     // Sort by total_ms descending so callers see the hot-spot first.
-    stats.sort_unstable_by(|a, b| b.total_ms.partial_cmp(&a.total_ms).unwrap_or(std::cmp::Ordering::Equal));
+    stats.sort_unstable_by(|a, b| {
+        b.total_ms
+            .partial_cmp(&a.total_ms)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
     Ok(stats)
 }

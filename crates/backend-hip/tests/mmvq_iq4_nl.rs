@@ -40,7 +40,9 @@ fn seeded_bytes(seed: u64, n: usize) -> Vec<u8> {
     let mut state = seed.wrapping_mul(6364136223846793005).wrapping_add(1);
     (0..n)
         .map(|_| {
-            state = state.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+            state = state
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
             (state >> 24) as u8
         })
         .collect()
@@ -50,7 +52,9 @@ fn seeded_f32(seed: u64, n: usize) -> Vec<f32> {
     let mut state = seed.wrapping_mul(6364136223846793005).wrapping_add(1);
     (0..n)
         .map(|_| {
-            state = state.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+            state = state
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
             let u = (state >> 32) as u32;
             (u as f32 / u32::MAX as f32) * 2.0 - 1.0
         })
@@ -115,7 +119,14 @@ fn alloc_and_upload<T: Copy>(dev: &HipDevice, data: &[T]) -> DevicePtr {
     d
 }
 
-fn run_mmvq_iq4_nl(n_rows: usize, k: usize, seed: u64, kernel_stem: &'static str, entry: &'static str, rows_per_block: usize) -> (Vec<f32>, Vec<f32>) {
+fn run_mmvq_iq4_nl(
+    n_rows: usize,
+    k: usize,
+    seed: u64,
+    kernel_stem: &'static str,
+    entry: &'static str,
+    rows_per_block: usize,
+) -> (Vec<f32>, Vec<f32>) {
     assert_eq!(k % QK_NL, 0, "k must be a multiple of QK4_0 (32)");
     let blocks_per_row = k / QK_NL;
 
@@ -137,12 +148,8 @@ fn run_mmvq_iq4_nl(n_rows: usize, k: usize, seed: u64, kernel_stem: &'static str
     let mut x_dequant = vec![0.0f32; total_elems];
     {
         let raw: &[u8] = bytemuck::cast_slice(&x_blocks);
-        flambeau_quant::dequantize_into(
-            flambeau_quant::GgmlDType::Iq4Nl,
-            raw,
-            &mut x_dequant,
-        )
-        .unwrap();
+        flambeau_quant::dequantize_into(flambeau_quant::GgmlDType::Iq4Nl, raw, &mut x_dequant)
+            .unwrap();
     }
 
     let y_f32 = seeded_f32(seed.wrapping_add(31), k);
@@ -150,7 +157,9 @@ fn run_mmvq_iq4_nl(n_rows: usize, k: usize, seed: u64, kernel_stem: &'static str
     let d_x = alloc_and_upload(&dev, &x_blocks);
     let d_y_f32 = alloc_and_upload(&dev, &y_f32);
     let y_blocks = k / QK8;
-    let d_y_q8_1 = dev.alloc(y_blocks * std::mem::size_of::<BlockQ8_1>()).unwrap();
+    let d_y_q8_1 = dev
+        .alloc(y_blocks * std::mem::size_of::<BlockQ8_1>())
+        .unwrap();
     let d_dst = dev.alloc(n_rows * 4).unwrap();
 
     {
@@ -200,9 +209,11 @@ fn run_mmvq_iq4_nl(n_rows: usize, k: usize, seed: u64, kernel_stem: &'static str
     dev.default_stream().synchronize().unwrap();
 
     unsafe {
-        dev.dealloc(d_x, x_blocks.len() * std::mem::size_of::<BlockIq4Nl>()).unwrap();
+        dev.dealloc(d_x, x_blocks.len() * std::mem::size_of::<BlockIq4Nl>())
+            .unwrap();
         dev.dealloc(d_y_f32, y_f32.len() * 4).unwrap();
-        dev.dealloc(d_y_q8_1, y_blocks * std::mem::size_of::<BlockQ8_1>()).unwrap();
+        dev.dealloc(d_y_q8_1, y_blocks * std::mem::size_of::<BlockQ8_1>())
+            .unwrap();
         dev.dealloc(d_dst, n_rows * 4).unwrap();
     }
 
@@ -224,18 +235,39 @@ fn tol_for(k: usize) -> f32 {
 
 #[test]
 fn mmvq_iq4_nl_small() {
-    if !maybe_skip() { return; }
-    let (got, reference) = run_mmvq_iq4_nl(4, 256, 0xC0FFEE, "mmvq_iq4_nl", "flambeau_mmvq_iq4_nl_q8_1", 1);
+    if !maybe_skip() {
+        return;
+    }
+    let (got, reference) = run_mmvq_iq4_nl(
+        4,
+        256,
+        0xC0FFEE,
+        "mmvq_iq4_nl",
+        "flambeau_mmvq_iq4_nl_q8_1",
+        1,
+    );
     let err = max_rel_err(&got, &reference);
-    eprintln!("[mmvq_iq4_nl 4×256] err={err:.3e}, tol={:.3e}", tol_for(256));
+    eprintln!(
+        "[mmvq_iq4_nl 4×256] err={err:.3e}, tol={:.3e}",
+        tol_for(256)
+    );
     assert!(err <= tol_for(256), "err {err:.3e}");
 }
 
 #[test]
 fn mmvq_iq4_nl_2048() {
-    if !maybe_skip() { return; }
+    if !maybe_skip() {
+        return;
+    }
     let k = 2048;
-    let (got, reference) = run_mmvq_iq4_nl(8, k, 0xFEEDFACE, "mmvq_iq4_nl", "flambeau_mmvq_iq4_nl_q8_1", 1);
+    let (got, reference) = run_mmvq_iq4_nl(
+        8,
+        k,
+        0xFEEDFACE,
+        "mmvq_iq4_nl",
+        "flambeau_mmvq_iq4_nl_q8_1",
+        1,
+    );
     let err = max_rel_err(&got, &reference);
     eprintln!("[mmvq_iq4_nl 8×{k}] err={err:.3e}, tol={:.3e}", tol_for(k));
     assert!(err <= tol_for(k), "err {err:.3e}");
@@ -243,9 +275,18 @@ fn mmvq_iq4_nl_2048() {
 
 #[test]
 fn mmvq_iq4_nl_5120() {
-    if !maybe_skip() { return; }
+    if !maybe_skip() {
+        return;
+    }
     let k = 5120;
-    let (got, reference) = run_mmvq_iq4_nl(16, k, 0x12345678, "mmvq_iq4_nl", "flambeau_mmvq_iq4_nl_q8_1", 1);
+    let (got, reference) = run_mmvq_iq4_nl(
+        16,
+        k,
+        0x12345678,
+        "mmvq_iq4_nl",
+        "flambeau_mmvq_iq4_nl_q8_1",
+        1,
+    );
     let err = max_rel_err(&got, &reference);
     eprintln!("[mmvq_iq4_nl 16×{k}] err={err:.3e}, tol={:.3e}", tol_for(k));
     assert!(err <= tol_for(k), "err {err:.3e}");
@@ -253,30 +294,66 @@ fn mmvq_iq4_nl_5120() {
 
 #[test]
 fn mmvq_iq4_nl_r2_small() {
-    if !maybe_skip() { return; }
-    let (got, reference) = run_mmvq_iq4_nl(4, 256, 0xC0FFEE, "mmvq_iq4_nl_r2", "flambeau_mmvq_iq4_nl_r2_q8_1", 2);
+    if !maybe_skip() {
+        return;
+    }
+    let (got, reference) = run_mmvq_iq4_nl(
+        4,
+        256,
+        0xC0FFEE,
+        "mmvq_iq4_nl_r2",
+        "flambeau_mmvq_iq4_nl_r2_q8_1",
+        2,
+    );
     let err = max_rel_err(&got, &reference);
-    eprintln!("[mmvq_iq4_nl_r2 4×256] err={err:.3e}, tol={:.3e}", tol_for(256));
+    eprintln!(
+        "[mmvq_iq4_nl_r2 4×256] err={err:.3e}, tol={:.3e}",
+        tol_for(256)
+    );
     assert!(err <= tol_for(256), "err {err:.3e}");
 }
 
 #[test]
 fn mmvq_iq4_nl_r2_2048() {
-    if !maybe_skip() { return; }
+    if !maybe_skip() {
+        return;
+    }
     let k = 2048;
-    let (got, reference) = run_mmvq_iq4_nl(8, k, 0xFEEDFACE, "mmvq_iq4_nl_r2", "flambeau_mmvq_iq4_nl_r2_q8_1", 2);
+    let (got, reference) = run_mmvq_iq4_nl(
+        8,
+        k,
+        0xFEEDFACE,
+        "mmvq_iq4_nl_r2",
+        "flambeau_mmvq_iq4_nl_r2_q8_1",
+        2,
+    );
     let err = max_rel_err(&got, &reference);
-    eprintln!("[mmvq_iq4_nl_r2 8×{k}] err={err:.3e}, tol={:.3e}", tol_for(k));
+    eprintln!(
+        "[mmvq_iq4_nl_r2 8×{k}] err={err:.3e}, tol={:.3e}",
+        tol_for(k)
+    );
     assert!(err <= tol_for(k), "err {err:.3e}");
 }
 
 #[test]
 fn mmvq_iq4_nl_r2_odd_rows() {
     // Boundary: odd row count exercises the in-kernel `row >= n_rows` guard.
-    if !maybe_skip() { return; }
+    if !maybe_skip() {
+        return;
+    }
     let k = 1024;
-    let (got, reference) = run_mmvq_iq4_nl(7, k, 0xDEADBEEF, "mmvq_iq4_nl_r2", "flambeau_mmvq_iq4_nl_r2_q8_1", 2);
+    let (got, reference) = run_mmvq_iq4_nl(
+        7,
+        k,
+        0xDEADBEEF,
+        "mmvq_iq4_nl_r2",
+        "flambeau_mmvq_iq4_nl_r2_q8_1",
+        2,
+    );
     let err = max_rel_err(&got, &reference);
-    eprintln!("[mmvq_iq4_nl_r2 7×{k}] err={err:.3e}, tol={:.3e}", tol_for(k));
+    eprintln!(
+        "[mmvq_iq4_nl_r2 7×{k}] err={err:.3e}, tol={:.3e}",
+        tol_for(k)
+    );
     assert!(err <= tol_for(k), "err {err:.3e}");
 }

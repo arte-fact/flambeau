@@ -5,23 +5,11 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use anyhow::{bail, Context, Result};
-use axum::routing::{get, post};
-use axum::Router;
-use flambeau_backend_hip::{device_count, BarP2pAllReduce, HipCluster};
-use flambeau_quant::{ChatTemplate, GgufFile};
-use flambeau_qwen3_moe::{
-    HybridMeshSpec, Qwen35DenseTpLayout, Qwen3MoEConfig, Qwen3MoEHybridModel,
-    Qwen3MoEShardedModel, Qwen3MoETpModel,
-};
-use flambeau_runtime::{LayerAssignment, Registry};
+use flambeau_backend_hip::{device_count, HipCluster};
+use flambeau_quant::GgufFile;
+use flambeau_runtime::Registry;
 use tokio::sync::Mutex;
-use tracing::info;
-
-use crate::model::LoadedModel;
-use crate::routes::{
-    agent_stats, chat_completions, completions, detokenize, embeddings, health, infill,
-    messages_anthropic, models, tokenize, ServerState, SharedState,
-};
+use tracing::{info, warn};
 
 /// mesh topology selector. PP-V1 default; TP engages the
 /// Qwen3MoETpModel loader + the BarP2pAllReduce-based forward path.
@@ -74,9 +62,28 @@ pub struct ServeConfig {
     /// Prefill chunk size in tokens. Default 512 is the production sweet
     /// spot across pp/tp/hybrid topologies; tune for short-prompt TTFT.
     pub prefill_ubatch: usize,
+    /// Per-chunk prefill budget used by the K4c mixed-batch scheduler.
+    /// Smaller chunks improve short-request TTFT under load
+    /// (Sarathi-Serve trade) at the cost of slightly higher long-request
+    /// prefill latency. Default 512.
+    pub prefill_chunk_tokens: usize,
+    /// PagedAttention activation. `None` (default) uses the legacy
+    /// contiguous per-slot KV slab. `Some(N)` for `N > 1` builds the
+    /// page pool with `N` pages per layer — pair with a high
+    /// `inflight_slots` to pack concurrent requests into the same
+    /// VRAM. `Some(1)` clamps to `max_slots * max_pages_per_slot`
+    /// (correctness only, no VRAM win). Activation also unlocks the
+    /// paged decode + prefill attention kernels in `standard_attn`.
+    pub paged_kv_pages: Option<usize>,
     /// #232 admission-control queue depth beyond the inflight pool. 0
     /// disables (legacy unbounded queue). Default 16.
     pub max_queue_depth: usize,
+    /// Decode-batching coalescence window (microseconds). The leader
+    /// thread sleeps this long before draining `batched_pending` so
+    /// concurrent decode requests join the same batched forward.
+    /// Default 1500 µs; raise for higher concurrency at the cost of
+    /// per-step latency.
+    pub decode_batch_window_us: u64,
     /// Clamp the model's `context_length`. `None` keeps the GGUF's
     /// architectural max; many GGUFs ship 262 144 which OOMs the per-rank
     /// KV cache on 16 GB MI50. Only shrinks.
@@ -99,6 +106,18 @@ pub struct ServeConfig {
     pub default_system: Option<String>,
     /// /v1/embeddings per-prompt token cap.
     pub embedding_max_tokens: usize,
+    /// Override the per-rank layer split. `None` falls back to the
+    /// default uniform `num_layers / n_groups` split. When `Some`, the
+    /// vector length must equal the PP rank count (== `device_ids.len()`
+    /// for `Pp`, == `pp_size` for `Hybrid`), and the sum must equal the
+    /// model's `num_layers`.
+    ///
+    /// Useful for hybrid arches like Qwen3.6 where the recurrent (GDN)
+    /// layers are much lighter than the full-attn layers. With a
+    /// uniform split, early ranks (holding heavier layers) become the
+    /// pipeline bottleneck; rocprofv3 trace on PP4 Qwen3.6-27B showed
+    /// rank 0 doing 1.8× the kernel work of rank 3.
+    pub layer_split: Option<Vec<usize>>,
 }
 
 impl Default for MeshMode {
@@ -110,14 +129,12 @@ impl Default for MeshMode {
 /// Blocking serve loop — loads the model, starts the HTTP server, runs
 /// until terminated. Caller owns the tokio runtime.
 pub async fn serve(cfg: ServeConfig, registry: Registry) -> Result<()> {
-    info!(?cfg, "flambeau serve: loading model");
+    info!(forward_stack = "v2", "flambeau serve: loading model");
+    info!(?cfg, "flambeau serve config");
 
     let gguf = GgufFile::open(&cfg.gguf_path)
         .with_context(|| format!("open GGUF at {}", cfg.gguf_path.display()))?;
 
-    // Reject unsupported GGUF arches before walking tokenizer / chat
-    // template / model paths so the operator gets a clean diagnostic
-    // instead of a downstream invariant error.
     let gguf_arch = gguf.metadata_str("general.architecture").unwrap_or("");
     let model_arch = registry
         .validate(gguf_arch)
@@ -128,470 +145,368 @@ pub async fn serve(cfg: ServeConfig, registry: Registry) -> Result<()> {
         "GGUF arch validated against registry"
     );
 
-    // Load tokenizer + chat template first (cheap, catch config errors early).
-    let tokenizer = flambeau_quant::load_from_gguf(&gguf).context("load tokenizer")?;
-    let chat_template =
-        ChatTemplate::load_from_gguf(&gguf).context("load chat template")?;
+    let boot = crate::serve_common::BootMetadata::from_gguf(&gguf, &cfg)?;
+    serve_inner_v2(cfg, gguf, boot).await
+}
 
-    // L3 — detect tool-call format from the chat-template source. The
-    // Unsloth UD Qwen3.6 GGUFs ship a Coder-XML template under the
-    // qwen35moe arch tag; we can't decide from arch alone.
-    let tpl_src = gguf
-        .metadata_str("tokenizer.chat_template")
-        .unwrap_or("");
-    let tool_call_format_default =
-        crate::tool_call_parser::detect_format_from_template(tpl_src);
-    info!(
-        format = ?tool_call_format_default,
-        "tool-call format detected from chat template"
-    );
+/// Arch dispatch is intentionally a `match` on the arch string in
+/// `create_v2_driver`: one branch per supported arch crate. Adding a
+/// new v2 arch = one new branch + a `flambeau-<arch>-v2` workspace
+/// dep, with no churn at the routes/sampler/parser layer.
+pub(crate) async fn serve_inner_v2(
+    cfg: ServeConfig,
+    gguf: GgufFile,
+    boot: crate::serve_common::BootMetadata,
+) -> Result<()> {
+    let gguf_arch_owned = gguf
+        .metadata_str("general.architecture")
+        .unwrap_or("")
+        .to_string();
+    let gguf_arch: &str = &gguf_arch_owned;
 
-    // **#235 P3.15** — `enable_thinking` Jinja variable detection.
-    // Qwen3.6 templates render `<think>` blocks when this is true; the
-    // bool feeds the `/v1/models` `"thinking"` capability so clients
-    // can choose whether to expose the request flag (#233).
-    let supports_thinking = tpl_src.contains("enable_thinking");
+    let kv_layout = match cfg.kv.as_str() {
+        "f16" => flambeau_forward::KvLayout::F16Contig,
+        "q8" => flambeau_forward::KvLayout::Q8Contig,
+        other => anyhow::bail!(
+            "--kv {other}: unknown KV cache layout (supported: f16, q8)"
+        ),
+    };
 
-    // **#235 P3.15** — quantization label from GGUF `general.file_type`.
-    // The integer enum mirrors llama.cpp's LLAMA_FTYPE; we only label
-    // the families we actually load. Unknown values surface as
-    // `"type=N"` rather than `None` so a new quant doesn't go silent.
-    let quantization: Option<String> = gguf
-        .metadata_u32("general.file_type")
-        .map(|ft| match ft {
-            0 => "F32".to_string(),
-            1 => "F16".to_string(),
-            2 => "Q4_0".to_string(),
-            3 => "Q4_1".to_string(),
-            6 => "Q5_0".to_string(),
-            7 => "Q5_1".to_string(),
-            8 => "Q8_0".to_string(),
-            9 => "Q8_1".to_string(),
-            10 => "Q2_K".to_string(),
-            11 => "Q3_K_S".to_string(),
-            12 => "Q3_K_M".to_string(),
-            13 => "Q3_K_L".to_string(),
-            14 => "Q4_K_S".to_string(),
-            15 => "Q4_K_M".to_string(),
-            16 => "Q5_K_S".to_string(),
-            17 => "Q5_K_M".to_string(),
-            18 => "Q6_K".to_string(),
-            32 => "BF16".to_string(),
-            other => format!("type={other}"),
-        });
-
-    // Sanity: device_ids must be valid.
     let n_available = device_count().unwrap_or(0);
     for d in &cfg.device_ids {
         if *d < 0 || *d >= n_available {
-            bail!(
-                "device {d} not available (have {n_available} HIP devices)"
-            );
+            bail!("device {d} not available (have {n_available} HIP devices)");
         }
     }
 
-    let mut model_cfg = Qwen3MoEConfig::from_gguf(&gguf).context("model config from GGUF")?;
-    // Allow operators to clamp the model's KV-cache provisioning ceiling
-    // (mirrors the test-side FLAMBEAU_CTX_CAP). The on-disk
-    // `context_length` is often the architectural max (262144 for
-    // Qwen3.5/3.6) which would OOM the per-rank KV cache on consumer
-    // VRAM. The clamp only shrinks; explicit increases are ignored.
-    if let Some(cap) = cfg.ctx_cap {
-        if cap > 0 && cap < model_cfg.context_length {
-            info!(
-                from = model_cfg.context_length,
-                to = cap,
-                "ctx-cap shrinking model.context_length"
-            );
-            model_cfg.context_length = cap;
-        }
-    }
-    // construction order matters on this rig. For pure
-    // PP/TP, the single global cluster is built first; for hybrid, the
-    // per-stage sub-clusters are built first (inside
-    // `Qwen3MoEHybridModel::load`) and the global cluster is built
-    // *afterwards*. Reverse order leaves per-stage `peer_access_full`
-    // reporting zero on the off-diagonal (`project_hybrid_cluster_order`).
-    let (cluster, model): (Arc<HipCluster>, LoadedModel) = match cfg.mesh_mode {
-        MeshMode::Pp => {
-            let cluster: Arc<HipCluster> =
-                Arc::new(HipCluster::new(&cfg.device_ids).context("HipCluster::new")?);
-            let assignment =
-                LayerAssignment::contiguous(model_cfg.num_layers, cluster.ranks() as u32);
-            info!(
-                num_layers = model_cfg.num_layers,
-                ranks = cluster.ranks(),
-                topology = "pp",
-                "loading model weights"
-            );
-            let mut m = Qwen3MoEShardedModel::load(&gguf, &cluster, &assignment)
-                .context("Qwen3MoEShardedModel::load")?;
-            // Re-apply the FLAMBEAU_CTX_CAP clamp on the model-owned
-            // cfg (mirrors the TP / Hybrid arms below). Without this,
-            // the PP loader keeps the GGUF-embedded context_length
-            // (often 128k+ on Qwen3.x), which OOMs SLOTS≥2 on
-            // consumer-VRAM rigs at TP=1 (~512 MB/layer/slot KV at the
-            // GGUF-default ctx).
-            if m.config.context_length > model_cfg.context_length {
-                m.config.context_length = model_cfg.context_length;
-            }
-
-            (
-                cluster,
-                std::sync::Arc::new(crate::model::PpHipModel { model: m }) as LoadedModel,
-            )
-        }
-        MeshMode::Tp { world } => {
-            let cluster: Arc<HipCluster> =
-                Arc::new(HipCluster::new(&cfg.device_ids).context("HipCluster::new")?);
-            if cluster.ranks() as u32 != world {
-                bail!(
-                    "--mesh-mode tp: --tp-size {world} but cluster has {} ranks",
-                    cluster.ranks()
-                );
-            }
-            let layout = Qwen35DenseTpLayout::new(&model_cfg, world)
-                .context("--mesh-mode tp: layout validation")?;
-            info!(
-                num_layers = model_cfg.num_layers,
-                ranks = cluster.ranks(),
-                world,
-                kv_replicated = layout.kv_replicated(),
-                topology = "tp",
-                "loading model weights"
-            );
-            let mut m = Qwen3MoETpModel::load(&gguf, &cluster, layout)
-                .context("Qwen3MoETpModel::load")?;
-            // Re-apply the FLAMBEAU_CTX_CAP clamp on the model-owned cfg.
-            // `Qwen3MoETpModel::load` re-reads the GGUF for its embedded
-            // config, so the clamp on `model_cfg` above doesn't propagate
-            // here without an explicit second clamp.
-            if m.config.context_length > model_cfg.context_length {
-                m.config.context_length = model_cfg.context_length;
-            }
-            let ar = BarP2pAllReduce::new(Arc::clone(&cluster))
-                .context("BarP2pAllReduce::new (requires fully-connected peer-access matrix)")?;
-            (
-                cluster,
-                std::sync::Arc::new(crate::model::TpHipModel { model: m, ar }) as LoadedModel,
-            )
-        }
-        MeshMode::Hybrid { pp_size, tp_size } => {
-            let spec = HybridMeshSpec { pp_size, tp_size };
-            spec.validate(model_cfg.num_layers, cfg.device_ids.len())
-                .context("--mesh-mode pp+tp: HybridMeshSpec::validate")?;
-            info!(
-                num_layers = model_cfg.num_layers,
-                pp_size,
-                tp_size,
-                ranks = cfg.device_ids.len(),
-                topology = "pp+tp",
-                "loading model weights (hybrid)"
-            );
-            // 1. Per-stage sub-clusters (built inside `load`) + weights.
-            let mut hybrid = Qwen3MoEHybridModel::load(&gguf, &cfg.device_ids, spec)
-                .context("Qwen3MoEHybridModel::load")?;
-            for stage in &hybrid.stages {
-                info!(
-                    stage = stage.stage_idx,
-                    layer_range = ?stage.layer_range,
-                    bytes = stage.tp_model.total_bytes(),
-                    has_token_embd = stage.tp_model.has_token_embd,
-                    has_output_head = stage.tp_model.has_output_head,
-                    "hybrid stage loaded"
-                );
-            }
-            // Re-apply the FLAMBEAU_CTX_CAP clamp on each stage's
-            // model-owned cfg (same reason as the TP arm).
-            for stage in hybrid.stages.iter_mut() {
-                if stage.tp_model.config.context_length > model_cfg.context_length {
-                    stage.tp_model.config.context_length = model_cfg.context_length;
-                }
-            }
-            if hybrid.config.context_length > model_cfg.context_length {
-                hybrid.config.context_length = model_cfg.context_length;
-            }
-            // 2. Per-stage AllReduce, each on its own sub-cluster.
-            let mut stage_ars: Vec<BarP2pAllReduce> = Vec::with_capacity(hybrid.stages.len());
-            for stage in &hybrid.stages {
-                let ar = BarP2pAllReduce::new(Arc::clone(&stage.sub_cluster))
-                    .with_context(|| {
-                        format!(
-                            "BarP2pAllReduce::new for stage {} (devices need fully-\
-                             connected BAR1 peer access)",
-                            stage.stage_idx
-                        )
-                    })?;
-                stage_ars.push(ar);
-            }
-            // 3. Global cluster LAST — used only for inter-stage
-            // `peer_copy_via_host` hand-off. Constructing it before
-            // the per-stage sub-clusters/ARs disables BAR1 on the
-            // sub-cluster off-diagonal (project_hybrid_cluster_order).
-            let cluster: Arc<HipCluster> = Arc::new(
-                HipCluster::new(&cfg.device_ids)
-                    .context("HipCluster::new (global, for inter-stage hand-off)")?,
-            );
-            (
-                cluster,
-                std::sync::Arc::new(crate::model::HybridHipModel {
-                    model: hybrid,
-                    stage_ars,
-                }) as LoadedModel,
-            )
-        }
+    let model_cfg = parse_v2_server_model_cfg(gguf_arch, &cfg.gguf_path)?;
+    let topology = topology_from_mesh(
+        cfg.mesh_mode,
+        &cfg.device_ids,
+        model_cfg.num_layers,
+        cfg.layer_split.as_deref(),
+        model_cfg.kv_share_pp_boundary,
+    )?;
+    let topology_label: &'static str = match cfg.mesh_mode {
+        MeshMode::Pp => "pp",
+        MeshMode::Tp { .. } => "tp",
+        MeshMode::Hybrid { .. } => "pp+tp",
     };
 
-    let model_defaults = crate::state::ModelDefaults::from_gguf(&gguf);
-    info!(
-        temperature = ?model_defaults.temperature,
-        top_p = ?model_defaults.top_p,
-        top_k = ?model_defaults.top_k,
-        min_p = ?model_defaults.min_p,
-        "model sampling defaults from GGUF"
-    );
-
-    // P0.5 — boot-time default system prompt. Empty string treated as
-    // unset so an operator can clear a system-level config by passing
-    // `--default-system ""`.
-    let default_system = cfg
-        .default_system
-        .as_ref()
-        .filter(|s| !s.is_empty())
-        .cloned();
-    if let Some(s) = default_system.as_deref() {
-        info!(len = s.len(), "default system prompt loaded");
-    }
-
-    // **P2.9b-i1 (multi-slot pool)** — pre-allocate N inflight slots
-    // sized to FLAMBEAU_PREFILL_UBATCH (default 512). Each slot owns
-    // its own session (KV cache, GDN state) and scratch buffers; a
-    // request acquires any free slot via try-lock round-robin and
-    // returns it to the pool on response. N defaults to 1 (P2.9a
-    // behaviour); N>1 enables request-level concurrency. Decode
-    // kernels still serialise on the GPU stream — true batched
-    // throughput lands in P2.9b-i2.
-    let prefill_ubatch = cfg.prefill_ubatch.max(128);
     let inflight_slots = cfg.inflight_slots.clamp(1, 32);
-    // **#232 P2.12** — admission control. Cap at `inflight_slots +
-    // max_queue_depth`; new requests beyond that get 503 +
-    // Retry-After: 2. `0` disables (legacy behaviour). Default 16.
+    let prefill_ubatch_raw = cfg.prefill_ubatch.max(128);
+    // Mixed-batch engagement (K prefill rows + N decode rows in one
+    // forward) is on by default for every arch whose Model::
+    // supports_mixed_batch returns true. The ScratchPool's
+    // `max_prefill_tokens` must accommodate K + N or the residual /
+    // QKV / output buffers overrun, so bump `prefill_ubatch` to
+    // `chunk + inflight_slots` whenever the raw value is below that.
+    // Cost on archs that never engage is trivial (a few extra rows
+    // of scratch capacity).
+    let chunk_tokens = cfg.prefill_chunk_tokens.max(1);
+    let prefill_ubatch = {
+        let needed = chunk_tokens + inflight_slots;
+        if prefill_ubatch_raw < needed {
+            info!(
+                from = prefill_ubatch_raw,
+                to = needed,
+                chunk_tokens,
+                inflight_slots,
+                "bumping prefill_ubatch to accommodate mixed-batch K+N forward"
+            );
+            needed
+        } else {
+            prefill_ubatch_raw
+        }
+    };
     let max_queue_depth = cfg.max_queue_depth;
     info!(
+        arch = gguf_arch,
+        topology = topology_label,
+        inflight_slots,
+        prefill_ubatch,
+        max_queue_depth,
+        "v2: building shared Session with max_slots=N"
+    );
+
+    drop(gguf);
+    let gguf_path = cfg.gguf_path.clone();
+    let chat_stops = crate::v2_handle::chat_stops_for(gguf_arch);
+    let bos_id = if crate::v2_handle::wants_bos_prepend(gguf_arch) {
+        boot.tokenizer.bos_id
+    } else {
+        None
+    };
+
+    let shared_gguf = GgufFile::open(&gguf_path)
+        .with_context(|| "v2: re-open GGUF for shared Session".to_string())?;
+    let shared_session: Box<dyn crate::v2_handle::V2BatchableSession> = create_v2_shared_session(
+        gguf_arch,
+        shared_gguf,
+        topology.clone(),
+        cfg.ctx_cap,
         prefill_ubatch,
         inflight_slots,
-        max_queue_depth,
-        "pre-allocating inflight slot pool"
-    );
-    let mut inflight_pool: Vec<Mutex<crate::model::Inflight>> =
-        Vec::with_capacity(inflight_slots);
+        cfg.paged_kv_pages,
+        kv_layout,
+    )
+    .with_context(|| format!("v2 shared session ({gguf_arch})"))?;
+    let shared: crate::v2_handle::SharedV2Session = Arc::new(Mutex::new(shared_session));
+
+    let mut inflight_pool: Vec<Mutex<Box<dyn crate::Session>>> = Vec::with_capacity(inflight_slots);
     for slot_idx in 0..inflight_slots {
-        let slot = crate::model::Inflight::new(
-            &model,
-            &cluster,
-            prefill_ubatch,
-            flambeau_qwen3_moe::session::KvLayout::from_str(&cfg.kv),
-        )
-            .with_context(|| format!("pre-alloc Inflight slot {slot_idx} at boot"))?;
-        inflight_pool.push(Mutex::new(slot));
+        let conv: Box<dyn crate::Session> = Box::new(crate::v2_handle::V2Conv {
+            shared: Arc::clone(&shared),
+            slot_id: slot_idx,
+            bos_id,
+            chat_stops,
+        });
+        inflight_pool.push(Mutex::new(conv));
     }
 
-    // **P2.9b-i2-B (scheduler)** — request-lifetime claim flags +
-    // empty pending queue + leader gate. These are used by the
-    // scheduler-aware decode path (`FLAMBEAU_BATCHED_DECODE=1`)
-    // to aggregate concurrent decode requests into batched dispatches.
-    let slot_in_use: Vec<std::sync::atomic::AtomicBool> = (0..inflight_slots)
-        .map(|_| std::sync::atomic::AtomicBool::new(false))
-        .collect();
+    let cluster: Arc<HipCluster> =
+        Arc::new(HipCluster::new(&cfg.device_ids).context("v2: HipCluster::new (state side)")?);
+    let topology_tag =
+        crate::serve_common::topology_tag_from_mesh(cfg.mesh_mode, cfg.device_ids.len());
+    let prefix_cache = crate::serve_common::build_prefix_cache(&cfg, topology_tag.mesh_kind);
 
-    // **#229 P2.10c** — process-local prefix cache. Always constructed;
-    // `prefix_cache.enabled()` (set from `cfg.prefix_cache`) controls
-    // whether request handlers actually consult it. Empty index +
-    // zero-byte LRU at boot.
-    let prefix_cache = Arc::new(crate::prefix_cache::PrefixCache::new(
-        crate::prefix_cache::PrefixCache::gb_to_bytes(cfg.prefix_cache_max_gb),
-        cfg.prefix_cache,
-    ));
-    let topology_tag = match cfg.mesh_mode {
-        MeshMode::Pp => crate::prefix_cache::TopologyTag {
-            mesh_kind: "pp",
-            ranks: cfg.device_ids.len() as u32,
-            pp_size: cfg.device_ids.len() as u32,
-            tp_size: 1,
-        },
-        MeshMode::Tp { world } => crate::prefix_cache::TopologyTag {
-            mesh_kind: "tp",
-            ranks: world,
-            pp_size: 1,
-            tp_size: world,
-        },
-        MeshMode::Hybrid { pp_size, tp_size } => crate::prefix_cache::TopologyTag {
-            mesh_kind: "pp+tp",
-            ranks: pp_size * tp_size,
-            pp_size,
-            tp_size,
-        },
-    };
-    if prefix_cache.enabled() {
-        info!(
-            chunk_tokens = prefill_ubatch,
-            budget_bytes = prefix_cache.vram_budget_bytes,
-            mesh = topology_tag.mesh_kind,
-            "prefix cache ENABLED (FLAMBEAU_PREFIX_CACHE=1)"
-        );
-    } else {
-        info!("prefix cache disabled (set FLAMBEAU_PREFIX_CACHE=1 to enable)");
-    }
+    // Embedding endpoint disabled — legacy qwen3-moe `EmbeddingModel`
+    // was removed in #221; v2 reimplementation is a follow-up.
+    let embedding_rank: Option<usize> = None;
+    let embedding: Option<crate::serve_common::EmbeddingHandle> = None;
 
-    // **#230 P2.11a** — optional embedding model. Loaded after the
-    // chat model + inflight pool so any boot-time OOM lands here
-    // (where it's clearly an embedding-specific failure) rather than
-    // mid-request. Reuses the chat cluster's per-device handle: we
-    // resolve the requested embedding device id back to its rank in
-    // the cluster, then pass the matching `&HipDevice`. Errors abort
-    // the server boot — operator can omit `--embedding-model` to
-    // disable.
-    let mut embedding_rank: Option<usize> = None;
-    let embedding_model: Option<(
-        Arc<tokio::sync::Mutex<flambeau_qwen3_moe::EmbeddingModel>>,
-        Arc<flambeau_quant::GgufTokenizer>,
-    )> =
-        if let Some(path) = cfg.embedding_gguf_path.as_ref() {
-            let device_id = cfg.embedding_device_id.unwrap_or(cfg.device_ids[0]);
-            let rank = cfg
-                .device_ids
-                .iter()
-                .position(|d| *d == device_id)
-                .ok_or_else(|| anyhow::anyhow!(
-                    "embedding device {device_id} not in --devices {:?}",
-                    cfg.device_ids
-                ))?;
-            embedding_rank = Some(rank);
-            let device = cluster.device(rank);
-            info!(
-                path = %path.display(),
-                device_id,
-                rank,
-                "loading embedding model"
-            );
-            let efile = GgufFile::open(path)
-                .with_context(|| format!("open embedding GGUF at {}", path.display()))?;
-            // **#231 quality fix** — load the embedding model's own
-            // tokenizer (vocab_size differs from chat tokenizer:
-            // Qwen3-Embedding ships 151669, Qwen3.5-9B ships 151424).
-            // Token ids from the chat tokenizer dereference into the
-            // wrong rows of the embedding model's `token_embd`,
-            // producing non-discriminating output vectors.
-            let embedding_tokenizer =
-                flambeau_quant::load_from_gguf(&efile)
-                    .context("load embedding tokenizer from GGUF")?;
-            // **#231** — `max_tokens` caps the longest input the
-            // `/v1/embeddings` endpoint will accept. Default 8192;
-            // override with --embedding-max-tokens. Realistic RAG /
-            // memory chunking patterns sit at 512–2048 tokens.
-            let max_emb_tokens = cfg.embedding_max_tokens.clamp(16, 32768);
-            let em = flambeau_qwen3_moe::EmbeddingModel::load(
-                &efile,
-                device,
-                device_id,
-                max_emb_tokens,
-            )
-            .context("EmbeddingModel::load")?;
-            info!(
-                arch = em.arch(),
-                hidden_size = em.hidden_size(),
-                vocab_size = em.vocab_size(),
-                pooling_type = em.pooling_type(),
-                max_tokens = em.max_tokens,
-                bytes = em.total_bytes(),
-                device_id,
-                "embedding model loaded"
-            );
-            Some((
-                Arc::new(tokio::sync::Mutex::new(em)),
-                Arc::new(embedding_tokenizer),
-            ))
-        } else {
-            info!("embedding model not configured (--embedding-model unset)");
-            None
-        };
-    let (embedding_model, embedding_tokenizer): (
-        Option<Arc<tokio::sync::Mutex<flambeau_qwen3_moe::EmbeddingModel>>>,
-        Option<Arc<flambeau_quant::GgufTokenizer>>,
-    ) = match embedding_model {
-        Some((m, t)) => (Some(m), Some(t)),
-        None => (None, None),
-    };
+    let model = std::sync::Arc::new(crate::v2_handle::V2Model {
+        gguf_arch: gguf_arch_to_static(gguf_arch),
+        topology: topology_label,
+        chat_stops,
+        shared: Arc::clone(&shared),
+        vocab: model_cfg.vocab_size,
+    }) as crate::model_handle::LoadedModel;
 
-    let state: SharedState = Arc::new(ServerState {
+    let state = crate::serve_common::build_server_state(crate::serve_common::ServerStateInputs {
         model_id: cfg.model_id.clone(),
-        cfg: model_cfg,
+        model_cfg,
         model,
         cluster,
-        tokenizer,
-        chat_template,
         inflight_pool,
-        slot_in_use,
-        batched_pending: std::sync::Mutex::new(Vec::new()),
-        batched_dispatcher: std::sync::Mutex::new(()),
-        tp_batched_scratch: std::sync::Mutex::new(None),
-        hybrid_batched_scratch: std::sync::Mutex::new(None),
-        prefill_serialiser: std::sync::Mutex::new(()),
-        tp_prefill_scratch: std::sync::Mutex::new(None),
-        prefix_cache,
-        prefix_cache_chunk_tokens: prefill_ubatch,
-        topology_tag,
-        embedding_model,
-        embedding_tokenizer,
+        embedding,
         embedding_rank,
-        in_flight: std::sync::atomic::AtomicUsize::new(0),
+        gpu_sampler: false,
+        batched_decode: true,
         max_queue_depth,
         prefill_ubatch,
-        gpu_sampler: cfg.gpu_sampler,
-        batched_decode: cfg.batched_decode,
-        agent_stats: crate::agent_stats::AgentStatsRing::default(),
-        tool_call_format_default,
-        supports_thinking,
-        quantization,
-        model_defaults,
-        default_system,
+        prefill_chunk_tokens: chunk_tokens,
+        topology_tag,
+        prefix_cache,
+        boot,
+        decode_batch_window_us: cfg.decode_batch_window_us,
     });
 
-    let app = Router::new()
-        .route("/health", get(health))
-        .route("/v1/models", get(models))
-        .route("/v1/chat/completions", post(chat_completions))
-        .route("/v1/completions", post(completions))
-        // **#231 P2.11b** — OpenAI-compat embeddings endpoint. 503
-        // when the server was started without `--embedding-model`.
-        .route("/v1/embeddings", post(embeddings))
-        // P1.6b — llama.cpp-compatible Fill-in-the-Middle. Both
-        // top-level (`/infill`, llama.cpp + Continue) and
-        // namespaced (`/v1/infill`) for clients that expect API-
-        // versioned routes.
-        .route("/infill", post(infill))
-        .route("/v1/infill", post(infill))
-        // **#234 P3.14** — llama.cpp-compatible tokenize / detokenize.
-        // Both top-level and `/v1/` namespaced; same handler. No GPU
-        // work — pure tokenizer round-trips for clients that need to
-        // count tokens or render token boundaries.
-        .route("/tokenize", post(tokenize))
-        .route("/v1/tokenize", post(tokenize))
-        .route("/detokenize", post(detokenize))
-        .route("/v1/detokenize", post(detokenize))
-        // P1.8a — Anthropic Messages API (text-only, non-streaming for
-        // now). Tools (P1.8c) and SSE (P1.8b) layer in afterwards.
-        .route("/v1/messages", post(messages_anthropic))
-        // Read-only agent-loop telemetry snapshot.
-        .route("/v1/agent/stats", get(agent_stats))
-        .with_state(state);
+    crate::serve_common::run_axum(state, cfg.bind_addr, "v2").await
+}
 
-    info!(bind = %cfg.bind_addr, "serving");
-    let listener = tokio::net::TcpListener::bind(cfg.bind_addr)
-        .await
-        .context("bind listener")?;
-    axum::serve(listener, app)
-        .await
-        .context("axum::serve failed")?;
-    Ok(())
+fn topology_from_mesh(
+    mesh: MeshMode,
+    device_ids: &[i32],
+    num_layers: usize,
+    override_split: Option<&[usize]>,
+    kv_share_boundary: Option<usize>,
+) -> Result<flambeau_forward::Topology> {
+    use flambeau_forward::Topology;
+    // `flambeau_forward`'s orchestrator falls back to (start=0, end=0)
+    // empty per-rank layer ranges when `layer_split: None`; an
+    // explicit even split is required for PP / Hybrid to actually
+    // execute layers. SingleDevice avoids the issue entirely at N=1.
+    let resolve_split = |n_groups: usize| -> Result<Vec<usize>> {
+        if let Some(s) = override_split {
+            if s.len() != n_groups {
+                bail!(
+                    "--layer-split has {} entries but topology has {n_groups} PP ranks",
+                    s.len()
+                );
+            }
+            let sum: usize = s.iter().sum();
+            if sum != num_layers {
+                bail!(
+                    "--layer-split sums to {sum} but model has {num_layers} layers"
+                );
+            }
+            return Ok(s.to_vec());
+        }
+        if let Some(b) = kv_share_boundary {
+            if n_groups == 1 {
+                return Ok(vec![num_layers]);
+            }
+            if b == 0 || b >= num_layers {
+                bail!(
+                    "kv_share_pp_boundary={b} cannot be honored \
+                     (num_layers={num_layers}, n_groups={n_groups})"
+                );
+            }
+            // Last rank owns [b..num_layers]; remaining ranks split
+            // [0..b) evenly. Bail if the prefix can't be split (would
+            // leave an empty intermediate rank).
+            let prefix = b;
+            let prefix_groups = n_groups - 1;
+            if prefix < prefix_groups {
+                bail!(
+                    "kv_share boundary {b} too small to split across \
+                     {prefix_groups} non-tail ranks (need >= {prefix_groups})"
+                );
+            }
+            let base = prefix / prefix_groups;
+            let rem = prefix % prefix_groups;
+            let mut split: Vec<usize> = (0..prefix_groups)
+                .map(|i| base + usize::from(i < rem))
+                .collect();
+            split.push(num_layers - prefix);
+            return Ok(split);
+        }
+        let base = num_layers / n_groups;
+        let rem = num_layers % n_groups;
+        Ok((0..n_groups).map(|i| base + usize::from(i < rem)).collect())
+    };
+    match mesh {
+        MeshMode::Pp if device_ids.len() == 1 => Ok(Topology::SingleDevice {
+            device: device_ids[0],
+        }),
+        MeshMode::Pp => Ok(Topology::Pp {
+            devices: device_ids.to_vec(),
+            layer_split: Some(resolve_split(device_ids.len())?),
+        }),
+        MeshMode::Tp { world } => {
+            if device_ids.len() as u32 != world {
+                bail!(
+                    "--mesh-mode tp: --tp-size {world} but {} devices supplied",
+                    device_ids.len()
+                );
+            }
+            Ok(Topology::Tp {
+                devices: device_ids.to_vec(),
+            })
+        }
+        MeshMode::Hybrid { pp_size, tp_size } => {
+            let pp = pp_size as usize;
+            let tp = tp_size as usize;
+            if pp * tp != device_ids.len() {
+                bail!(
+                    "--mesh-mode pp+tp: {pp}*{tp} != {} devices",
+                    device_ids.len()
+                );
+            }
+            let stages: Vec<Vec<i32>> = (0..pp)
+                .map(|s| device_ids[s * tp..(s + 1) * tp].to_vec())
+                .collect();
+            Ok(Topology::Hybrid {
+                stages,
+                layer_split: Some(resolve_split(pp)?),
+            })
+        }
+    }
+}
+
+fn create_v2_shared_session(
+    gguf_arch: &str,
+    file: GgufFile,
+    topology: flambeau_forward::Topology,
+    ctx_cap: Option<usize>,
+    prefill_ubatch: usize,
+    max_slots: usize,
+    paged_kv_pages: Option<usize>,
+    kv_layout: flambeau_forward::KvLayout,
+) -> Result<Box<dyn crate::v2_handle::V2BatchableSession>> {
+    use flambeau_forward::Session;
+    match gguf_arch {
+        "qwen35" => {
+            let s = Session::<flambeau_qwen35_v2::Qwen35V2>::new(
+                file,
+                topology,
+                ctx_cap,
+                prefill_ubatch,
+                max_slots,
+                paged_kv_pages,
+                kv_layout,
+            )?;
+            Ok(Box::new(s))
+        }
+        "qwen35moe" => {
+            let s = Session::<flambeau_qwen35moe_v2::Qwen35MoeV2>::new(
+                file,
+                topology,
+                ctx_cap,
+                prefill_ubatch,
+                max_slots,
+                paged_kv_pages,
+                kv_layout,
+            )?;
+            Ok(Box::new(s))
+        }
+        "gemma3" | "gemma4" | "gemma4-26b-a4b" | "gemma4-31b" | "gemma4-9b" | "gemma4-2b" => {
+            let s = Session::<flambeau_gemma4_v2::Gemma4V2>::new(
+                file,
+                topology,
+                ctx_cap,
+                prefill_ubatch,
+                max_slots,
+                paged_kv_pages,
+                kv_layout,
+            )?;
+            Ok(Box::new(s))
+        }
+        other => bail!("v2 serve: unsupported GGUF arch `{other}`"),
+    }
+}
+
+fn gguf_arch_to_static(arch: &str) -> &'static str {
+    match arch {
+        "qwen35" => "qwen35",
+        "qwen35moe" => "qwen35moe",
+        "gemma3" => "gemma3",
+        "gemma4" => "gemma4",
+        "gemma4-26b-a4b" => "gemma4-26b-a4b",
+        "gemma4-31b" => "gemma4-31b",
+        "gemma4-9b" => "gemma4-9b",
+        "gemma4-2b" => "gemma4-2b",
+        _ => "v2",
+    }
+}
+
+fn parse_v2_server_model_cfg(
+    gguf_arch: &str,
+    gguf_path: &std::path::Path,
+) -> Result<crate::model_cfg::ServerModelCfg> {
+    let f = GgufFile::open(gguf_path).context("v2 cfg: re-open GGUF for metadata")?;
+    // GGUF metadata keys are namespaced by `general.architecture`.
+    let prefix = gguf_arch;
+    let key = |suffix: &str| format!("{prefix}.{suffix}");
+    let num_layers = f
+        .metadata_u32(&key("block_count"))
+        .ok_or_else(|| anyhow::anyhow!("v2 cfg: missing `{}.block_count`", prefix))?
+        as usize;
+    let context_length = f
+        .metadata_u32(&key("context_length"))
+        .ok_or_else(|| anyhow::anyhow!("v2 cfg: missing `{}.context_length`", prefix))?
+        as usize;
+    let vocab_size = f
+        .info("token_embd.weight")
+        .ok()
+        .and_then(|ti| ti.dims.first().copied())
+        .map(|v| v as usize)
+        .ok_or_else(|| anyhow::anyhow!("v2 cfg: token_embd.weight missing"))?;
+    let kv_share_pp_boundary = match gguf_arch {
+        #[cfg(feature = "hip")]
+        "gemma4" => {
+            let cfg = flambeau_gemma4_v2::Gemma4V2Config::from_gguf(&f)
+                .context("v2 cfg: gemma4 config parse for kv_share boundary")?;
+            cfg.pp_kv_share_boundary()
+        }
+        _ => None,
+    };
+    Ok(crate::model_cfg::ServerModelCfg {
+        arch: gguf_arch.to_string(),
+        vocab_size,
+        context_length,
+        num_layers,
+        kv_share_pp_boundary,
+    })
 }

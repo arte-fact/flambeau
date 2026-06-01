@@ -3,7 +3,6 @@
 //! profiler sees a clean single-dispatch trace.
 
 #![cfg(feature = "hip")]
-
 #![expect(
     clippy::undocumented_unsafe_blocks,
     reason = "sweep harness — every unsafe block is a kernel launch or a memcpy_async \
@@ -24,11 +23,13 @@ use half::f16;
 pub fn run_one(kernel_stem: &str, m: usize, k: usize, n: usize) -> Result<String> {
     let (entry, threads) = match kernel_stem {
         "mmvq_q8_0" => ("flambeau_mmvq_q8_0_q8_1", 256u32),
+        "mmvq_q4_0" => ("flambeau_mmvq_q4_0_q8_1", 256),
         "mmvq_q4_k" => ("flambeau_mmvq_q4_k_q8_1", 64),
         "mmvq_q5_k" => ("flambeau_mmvq_q5_k_q8_1", 64),
         "mmvq_q6_k" => ("flambeau_mmvq_q6_k_q8_1", 64),
         "mmvq_q4_k_r2" => ("flambeau_mmvq_q4_k_r2_q8_1", 64),
         "mmvq_q5_k_r2" => ("flambeau_mmvq_q5_k_r2_q8_1", 64),
+        "mmvq_q5_k_dp4a" => ("flambeau_mmvq_q5_k_dp4a_q8_1", 256),
         "mmvq_q6_k_r4" => ("flambeau_mmvq_q6_k_r4_q8_1", 64),
         "mmq_q8_0_oracle" => ("flambeau_mmq_q8_0_oracle_q8_1", 256),
         "mmq_q8_0_4warp" => ("flambeau_mmq_q8_0_4warp_q8_1", 256),
@@ -56,11 +57,14 @@ pub fn run_one(kernel_stem: &str, m: usize, k: usize, n: usize) -> Result<String
     // launch geometry; one `if is_mmq` enum isn't enough anymore.
     match kernel_stem {
         "mmq_q4_1_4warp_lds" => run_mmq_q4_1_4warp_lds(&dev, &kernel, m, k, n)?,
-        "mmq_q4_K_wave64" | "mmq_q5_K_wave64" | "mmq_q6_K_wave64" =>
-            run_mmq_k_wave64(&dev, &kernel, kernel_stem, m, k, n)?,
+        "mmq_q4_K_wave64" | "mmq_q5_K_wave64" | "mmq_q6_K_wave64" => {
+            run_mmq_k_wave64(&dev, &kernel, kernel_stem, m, k, n)?
+        }
         "mmq_q8_0_wave64" => run_mmq_q8_0_wave64(&dev, &kernel, m, k, n, 8)?,
         "mmq_q8_0_wave64_tile16" => run_mmq_q8_0_wave64(&dev, &kernel, m, k, n, 16)?,
-        "mmq_q8_0_oracle" | "mmq_q8_0_4warp" => run_mmq_q8_0(&dev, &kernel, kernel_stem, threads, m, k, n)?,
+        "mmq_q8_0_oracle" | "mmq_q8_0_4warp" => {
+            run_mmq_q8_0(&dev, &kernel, kernel_stem, threads, m, k, n)?
+        }
         _ => run_mmvq(&dev, &kernel, kernel_stem, threads, m, k, n)?,
     }
 
@@ -160,8 +164,8 @@ fn run_mmq_q4_1_4warp_lds(
 ) -> Result<()> {
     const QK4_1: usize = 32;
     assert!(k % QK8_1_MMQ == 0, "k={k} must be multiple of {QK8_1_MMQ}");
-    let n_blocks_per_row = k / QK4_1;       // weight row stride in Q4_1 blocks
-    let n_big_blocks_k = k / QK8_1_MMQ;     // Y row count in big blocks
+    let n_blocks_per_row = k / QK4_1; // weight row stride in Q4_1 blocks
+    let n_big_blocks_k = k / QK8_1_MMQ; // Y row count in big blocks
 
     // Weights: Q4_1 * [n_rows=N, cols=n_blocks_per_row] row-major.
     let w_blocks = n * n_blocks_per_row;
@@ -200,7 +204,7 @@ fn run_mmq_q4_1_4warp_lds(
     let ncols_x = k as i32;
     let nrows_x = n as i32;
     let ncols_y = m as i32;
-    let stride_col_y = m as i32;                  // ncols_y
+    let stride_col_y = m as i32; // ncols_y
     let stride_row_x = n_blocks_per_row as i32;
     let nrows_dst = n as i32;
 
@@ -220,7 +224,7 @@ fn run_mmq_q4_1_4warp_lds(
 
     const MMQ_Y: u32 = 128;
     const MMQ_X: u32 = 64;
-    const SHARED_BYTES: u32 = 7584 * 4;  // matches ops/src/hip/qmatmul.rs
+    const SHARED_BYTES: u32 = 7584 * 4; // matches ops/src/hip/qmatmul.rs
     let grid_x = (n as u32).div_ceil(MMQ_Y);
     let grid_y = (m as u32).div_ceil(MMQ_X);
     let cfg = LaunchCfg {
@@ -404,8 +408,11 @@ fn run_mmvq(
 fn block_size_of(kernel_stem: &str) -> Result<usize> {
     Ok(match kernel_stem {
         "mmvq_q8_0" => std::mem::size_of::<BlockQ8_0>(),
+        "mmvq_q4_0" => std::mem::size_of::<flambeau_quant::BlockQ4_0>(),
         "mmvq_q4_k" | "mmvq_q4_k_r2" => std::mem::size_of::<flambeau_quant::BlockQ4K>(),
-        "mmvq_q5_k" | "mmvq_q5_k_r2" => std::mem::size_of::<flambeau_quant::BlockQ5K>(),
+        "mmvq_q5_k" | "mmvq_q5_k_r2" | "mmvq_q5_k_dp4a" => {
+            std::mem::size_of::<flambeau_quant::BlockQ5K>()
+        }
         "mmvq_q6_k" | "mmvq_q6_k_r4" => std::mem::size_of::<flambeau_quant::BlockQ6K>(),
         other => bail!("block size unknown for {other}"),
     })
@@ -485,7 +492,6 @@ fn run_mmq_q8_0_wave64(
     args.push(&ncols_y);
     args.push(&nrows_y);
     args.push(&nrows_dst);
-
 
     let grid_x = (n as u32).div_ceil(64);
     let grid_y = (m as u32).div_ceil(tile_n);

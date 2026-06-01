@@ -39,7 +39,7 @@ typedef _Float16 fb_fp16_t;
 
 // Max head_dim the kernel tolerates. Must match the dispatcher / ops-layer
 // guard. Bump alongside both, never silently.
-#define ATTN_MAX_HEAD_DIM 256
+#define ATTN_MAX_HEAD_DIM 512
 // Max warps per block = ATTN_MAX_HEAD_DIM / wave64.
 #define ATTN_MAX_WARPS (ATTN_MAX_HEAD_DIM / 64)
 
@@ -53,7 +53,8 @@ extern "C" __global__ void flambeau_attention_decode_f16_batched(
     const int n_heads_kv,
     const int head_dim,                              // 64, 128, or 256
     const int n_slots,
-    const float scale                                // 1 / sqrt(head_dim)
+    const float scale,                               // 1 / sqrt(head_dim)
+    const int window_size                            // SWA radius, 0 = unbounded causal
 ) {
     const int q_head = blockIdx.x;
     const int slot   = blockIdx.y;
@@ -95,8 +96,18 @@ extern "C" __global__ void flambeau_attention_decode_f16_batched(
     __shared__ float score_parts[ATTN_MAX_WARPS];
     __syncthreads();
 
+    // SWA: per-slot query position is the last token in the cache
+    // (n_tokens - 1). Keys older than (qpos - window_size + 1) are
+    // masked. window_size=0 disables the window — full causal range.
+    int t_start = 0;
+    if (window_size > 0) {
+        const int qpos = n_tokens - 1;
+        t_start = qpos - window_size + 1;
+        if (t_start < 0) t_start = 0;
+    }
+
     // --- Inner loop over context positions ---
-    for (int t = 0; t < n_tokens; ++t) {
+    for (int t = t_start; t < n_tokens; ++t) {
         const size_t kv_row = ((size_t) t * n_heads_kv + kv_head) * head_dim;
 
         // 1. Compute Q · K[t, kv_head] cooperatively — each thread owns one lane.

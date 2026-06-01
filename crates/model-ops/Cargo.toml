@@ -1,0 +1,27 @@
+[package]
+name = "flambeau-model-ops"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "Typed, individually-testable model ops. Each op is a free function over typed tensors with a co-located mock-data parity test. Replacement for the per-arch/per-topology forward-path duplication in crates/models/*."
+
+[features]
+default = []
+hip = ["dep:flambeau-backend-hip", "flambeau-ops/hip"]
+
+[dependencies]
+flambeau-core = { path = "../core" }
+flambeau-ops = { path = "../ops" }
+flambeau-quant = { path = "../quant" }
+flambeau-backend-hip = { path = "../backend-hip", optional = true }
+anyhow.workspace = true
+half.workspace = true
+bytemuck.workspace = true
+tracing.workspace = true
+
+[dev-dependencies]
+half.workspace = true
+
+[lints]
+workspace = true

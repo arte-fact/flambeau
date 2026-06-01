@@ -121,7 +121,10 @@ fn graph_replay_vs_direct_dispatch_perf() {
     );
     let speedup = dm as f64 / gm as f64;
     let saved_us = (dm as i128) - (gm as i128);
-    eprintln!("speedup: {:.2}x  (saved {} us per replay)", speedup, saved_us);
+    eprintln!(
+        "speedup: {:.2}x  (saved {} us per replay)",
+        speedup, saved_us
+    );
 
     // SAFETY: no outstanding work on the streams.
     unsafe {

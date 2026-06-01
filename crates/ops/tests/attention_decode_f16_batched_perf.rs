@@ -17,9 +17,7 @@ use std::time::Instant;
 use anyhow::Result;
 use flambeau_backend_hip::{device_count, HipDevice};
 use flambeau_core::{CopyDirection, Device, DevicePtr, Stream};
-use flambeau_ops::hip::attention::{
-    attention_decode_f16_batched, attention_decode_f16_slots,
-};
+use flambeau_ops::hip::attention::{attention_decode_f16_batched, attention_decode_f16_slots};
 use flambeau_ops::OpsRegistry;
 use half::f16;
 
@@ -97,7 +95,9 @@ fn time_us(dev: &HipDevice, iters: usize, mut launch: impl FnMut()) -> f64 {
 #[test]
 #[ignore]
 fn ab_perf_qwen36_27b_tp2_local() -> Result<()> {
-    let Some(dev) = dev_or_skip() else { return Ok(()); };
+    let Some(dev) = dev_or_skip() else {
+        return Ok(());
+    };
     let reg = OpsRegistry::new(&dev).expect("registry");
     let stream = dev.default_stream();
 
@@ -162,18 +162,8 @@ fn ab_perf_qwen36_27b_tp2_local() -> Result<()> {
         // Batched: single launch per "iteration".
         let batched_us = time_us(&dev, iters, || {
             attention_decode_f16_batched(
-                &reg,
-                stream,
-                d_q,
-                d_k_ptrs,
-                d_v_ptrs,
-                d_out,
-                d_n_kv,
-                n_heads_q,
-                n_heads_kv,
-                head_dim,
-                n_slots,
-                scale,
+                &reg, stream, d_q, d_k_ptrs, d_v_ptrs, d_out, d_n_kv, n_heads_q, n_heads_kv,
+                head_dim, n_slots, scale,
             )
             .unwrap();
         });

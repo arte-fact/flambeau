@@ -241,10 +241,7 @@ impl SlotMap {
 
     /// Iterate bindings that target `kernel_node_idx`. Used by
     /// `HipGraphExec::capture` to size each node's shadow.
-    pub fn bindings_for_node(
-        &self,
-        kernel_node_idx: usize,
-    ) -> impl Iterator<Item = &SlotBinding> {
+    pub fn bindings_for_node(&self, kernel_node_idx: usize) -> impl Iterator<Item = &SlotBinding> {
         self.entries
             .values()
             .filter(move |b| b.kernel_node_idx == kernel_node_idx)
@@ -313,7 +310,10 @@ impl SlotMap {
                 }
             }
         }
-        Ok(Self { entries, memcpy_entries })
+        Ok(Self {
+            entries,
+            memcpy_entries,
+        })
     }
 
     pub fn get_memcpy(&self, slot: MemcpySlot) -> Option<&MemcpyBinding> {
@@ -434,10 +434,22 @@ mod tests {
     #[test]
     fn record_memcpy_appends_only_during_capture() {
         // Outside capture: no-op.
-        record_memcpy(None, 0x1000, 0x2000, 64, crate::sys::hipMemcpyKind::DeviceToDevice);
+        record_memcpy(
+            None,
+            0x1000,
+            0x2000,
+            64,
+            crate::sys::hipMemcpyKind::DeviceToDevice,
+        );
 
         let scope = CaptureScope::begin();
-        record_memcpy(None, 0x1000, 0x2000, 64, crate::sys::hipMemcpyKind::DeviceToDevice);
+        record_memcpy(
+            None,
+            0x1000,
+            0x2000,
+            64,
+            crate::sys::hipMemcpyKind::DeviceToDevice,
+        );
         record_memcpy(
             Some(MemcpySlot::new()),
             0x3000,

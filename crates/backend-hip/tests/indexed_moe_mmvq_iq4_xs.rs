@@ -33,7 +33,9 @@ fn seeded_bytes(seed: u64, n: usize) -> Vec<u8> {
     let mut s = seed.wrapping_mul(6364136223846793005).wrapping_add(1);
     (0..n)
         .map(|_| {
-            s = s.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+            s = s
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
             (s >> 24) as u8
         })
         .collect()
@@ -42,7 +44,9 @@ fn seeded_f32(seed: u64, n: usize) -> Vec<f32> {
     let mut s = seed.wrapping_mul(6364136223846793005).wrapping_add(1);
     (0..n)
         .map(|_| {
-            s = s.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+            s = s
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
             let u = (s >> 32) as u32;
             (u as f32 / u32::MAX as f32) * 2.0 - 1.0
         })
@@ -57,7 +61,12 @@ fn random_iq4_xs_block(seed: u64, idx: usize) -> BlockIq4Xs {
     scales_l.copy_from_slice(&bytes[4..4 + QK_K / 64]);
     let mut qs = [0u8; QK_K / 2];
     qs.copy_from_slice(&bytes[8..8 + QK_K / 2]);
-    BlockIq4Xs { d, scales_h, scales_l, qs }
+    BlockIq4Xs {
+        d,
+        scales_h,
+        scales_l,
+        qs,
+    }
 }
 
 fn quantize_q8_1_roundtrip(xs: &[f32]) -> Vec<f32> {
@@ -111,8 +120,7 @@ fn indexed_moe_mmvq_iq4_xs_parity() {
     dev.bind().unwrap();
 
     let q_module = HipModule::load(0, kernels::hsaco("quantize_q8_1").unwrap()).unwrap();
-    let m_module =
-        HipModule::load(0, kernels::hsaco("indexed_moe_mmvq_iq4_xs").unwrap()).unwrap();
+    let m_module = HipModule::load(0, kernels::hsaco("indexed_moe_mmvq_iq4_xs").unwrap()).unwrap();
     let k_quantize: HipKernel<'_> = q_module.kernel("flambeau_quantize_row_q8_1").unwrap();
     let k_mmvq: HipKernel<'_> = m_module
         .kernel("flambeau_indexed_moe_mmvq_iq4_xs_q8_1")
@@ -159,7 +167,9 @@ fn indexed_moe_mmvq_iq4_xs_parity() {
     let d_y_f32 = alloc_and_upload(&dev, &act_f32);
     let d_eids = alloc_and_upload(&dev, &expert_ids);
     let y_blocks = n_tokens * (k / QK8);
-    let d_y_q8_1 = dev.alloc(y_blocks * std::mem::size_of::<BlockQ8_1>()).unwrap();
+    let d_y_q8_1 = dev
+        .alloc(y_blocks * std::mem::size_of::<BlockQ8_1>())
+        .unwrap();
     let d_dst = dev.alloc(n_tokens * top_k * n_rows * 4).unwrap();
 
     {
@@ -225,8 +235,8 @@ fn indexed_moe_mmvq_iq4_xs_parity() {
         for s in 0..top_k {
             let expert = expert_ids[t * top_k + s] as usize;
             for row in 0..n_rows {
-                let w_row =
-                    &expert_f32[expert * elems_per_expert + row * k..expert * elems_per_expert + (row + 1) * k];
+                let w_row = &expert_f32[expert * elems_per_expert + row * k
+                    ..expert * elems_per_expert + (row + 1) * k];
                 let mut acc = 0.0f64;
                 for j in 0..k {
                     acc += (w_row[j] * act_rt[j]) as f64;
@@ -252,10 +262,12 @@ fn indexed_moe_mmvq_iq4_xs_parity() {
     );
 
     unsafe {
-        dev.dealloc(d_x, all_weights.len() * std::mem::size_of::<BlockIq4Xs>()).unwrap();
+        dev.dealloc(d_x, all_weights.len() * std::mem::size_of::<BlockIq4Xs>())
+            .unwrap();
         dev.dealloc(d_y_f32, act_f32.len() * 4).unwrap();
         dev.dealloc(d_eids, expert_ids.len() * 4).unwrap();
-        dev.dealloc(d_y_q8_1, y_blocks * std::mem::size_of::<BlockQ8_1>()).unwrap();
+        dev.dealloc(d_y_q8_1, y_blocks * std::mem::size_of::<BlockQ8_1>())
+            .unwrap();
         dev.dealloc(d_dst, n_tokens * top_k * n_rows * 4).unwrap();
     }
 

@@ -92,6 +92,58 @@ implementing.
     decode → emit `tool_calls` → return. Multi-turn execution and MCP
     are the *client's* job (Claude Desktop, IDE extensions, the user's
     app), exactly like vLLM / SGLang / OpenAI / Anthropic.
+12. **Cross-arch abstractions stay backend-neutral.** Traits and types
+    that span model architectures or HIP/CUDA backends carry generic
+    names: `Session`, `Model`, `ClusterHandle` — never `HipSession`,
+    `Gemma4Model`, `CudaCluster` on a shared trait. No `is_<arch>()`
+    predicates or `as_<arch>_*()` downcast accessors on a generic
+    trait — that's a closed enum disguised as a trait, and tomorrow's
+    arch is a fresh round of trait-surface churn. If a method only
+    makes sense for one arch, push it onto the arch-specific impl
+    type and have the caller use the concrete type, not the trait.
+    Rule 6's "type, not a flag" spirit applied to traits.
+13. **Arch-specific glue lives in the model-glue crate.** Shared
+    handler files (`crates/server/routes.rs`, `crates/server/model.rs`,
+    `crates/server/model_cfg.rs`, the generic dispatch helpers) branch
+    on trait methods — never on `gguf.architecture()` strings or
+    `if let Some(_) = inflight.as_<arch>_mut()`. Adding "just one
+    gemma4 branch" to a shared handler is how 4000-LOC arch-leaky
+    files happen. Per-arch behavior (BOS prepend, EOS marker set,
+    chat-template fragment leak filtering, weight upload signature
+    quirks) goes into the model crate's glue module
+    (`crates/server/<arch>_handle.rs`), exposed via a generic trait
+    method with a sane default — the shared file calls it
+    polymorphically. If you need a new arch-specific hook on the
+    shared trait, expect to refactor existing arch impls so the
+    abstraction holds for ≥ 2 archs before landing.
+14. **Rule of three triggers a refactor — not "three similar lines
+    is fine".** The "three similar lines is better than premature
+    abstraction" maxim applies to *small* repetitions (three string
+    formats, three trivial enum match arms). It does **NOT** justify
+    duplicating 100-LOC blocks across 6 sites. The classic rule of
+    three is: *two is acceptable, three is the refactor signal*.
+    Flambeau's arch × topology product (qwen × {pp,tp,hyb} + gemma4
+    × {pp,tp,hyb} + tomorrow's mistral/qwen3-coder-next) means any
+    "I'll just copy-paste this driver pattern" reflex compounds to
+    6× or 9× duplication. **Don't cite "three similar lines" as a
+    reason to copy-paste a 200-LOC Stage struct across topologies
+    when 6 of them already exist.** When you spot a candidate site:
+    - Count existing duplicate sites. ≥3 = refactor; 2 = acceptable.
+    - Look for the actual shared shape first (a side-by-side
+      inventory of every field / method usually surfaces the
+      ~80/20 split between common skeleton and arch-specific
+      extension).
+    - Extract into `flambeau-blocks` via composition (each topology
+      *contains* the shared piece, not *is* — keeps topology-specific
+      knobs concrete).
+    - Validate the abstraction on the MOST-tested existing site
+      (qwen3-moe today) before adopting it for new code (gemma4
+      pending splits, future arches).
+    The premature-abstraction risk is real but small here: blocks /
+    runtime / backend-hip already define generic types
+    (`KvCache<L>`, `Buffer<T, D>`, `HipCluster`) that span every
+    arch — extending those with a `StageCommon<W, K>` shape is
+    consistent with existing architecture, not novel coupling.
 
 ## Measurement rules
 
@@ -190,6 +242,21 @@ implementing.
 - **Correctness-sweep harness FIRST.** Without per-variant correctness
   the kernel work keeps destabilizing. The `sweep` CLI is a
   foundational deliverable.
+- **Glue does not work around upstream API mismatches.** When two
+  sibling APIs disagree on shape (e.g. `Gemma4PpDriver::upload`
+  consumes `HipCluster` by value while `Gemma4TpDriver::upload` takes
+  `Arc<HipCluster>`), fix the upstream signatures — don't absorb the
+  inconsistency in the calling crate (dual-cluster construction,
+  by-value clones, "state-side handle that's unused"). The
+  disagreement is a bug in the upstream layer; glue workarounds make
+  it harder to fix later and entrench the inconsistency.
+- **Don't add a `Box<dyn Trait>` accessor with a default that returns
+  `None` / `&[]` for every arch except one.** That's the same parallel-
+  op-trait shape rule 3 bans, just wearing a "polymorphism" hat. If
+  the method is genuinely per-arch, it belongs on the concrete impl
+  with the caller downcasting; if it's a shared concern with arch-
+  specific defaults, the trait grows the method but every existing
+  arch impl provides a real value, not the default.
 
 ## Collaboration norms
 
@@ -211,14 +278,42 @@ implementing.
   and a lower bound. If we hit the silicon ceiling and llama.cpp is
   faster, they have room; we file the diagnosis, we do not ship a
   regression to "catch up".
-- **No narrative comments.** Code comments describe what the code does
-  or why a non-obvious choice was made — they do not narrate the
-  refactor that produced them. No `// L1` / `// **#229**` / "Mirrors
-  llama.cpp X" / "saves 200 µs" / "memory note says…" / phase-number
-  markers. Session prose, ROI claims, and roadmap references belong in
-  the commit message, not the source file. Strip them before commit.
-  Bare technical minimum: invariants, safety, hidden constraints —
-  nothing else.
+- **No narrative comments. Strictly necessary commenting only.** Code
+  comments describe what the code does or why a non-obvious choice was
+  made — they do not narrate the refactor that produced them. No
+  `// L1` / `// **#229**` / `// #116 step 2 —` / "Mirrors llama.cpp X"
+  / "saves 200 µs" / "memory note says…" / phase-number markers / task
+  numbers / commit-shas. Session prose, ROI claims, roadmap
+  references, and task-list cross-refs belong in the commit message,
+  not the source file.
+  - **If you see a narrative comment, refactor it.** Don't preserve
+    the rot just because it was there. Strip / rewrite as you pass
+    by. Treat it the same as commented-out code.
+  - **If you are about to write a narrative comment, don't.** Ask
+    "does removing this comment confuse a future reader who can see
+    only the code?" — if no, drop it. The bar is: invariants, safety
+    notes, hidden constraints, non-obvious choices. Nothing else.
+  - Whitespace + naming carries most of what bad comments try to
+    explain. Rename the variable, split the function, lift the
+    constant.
+- **Architectural-rule audit before each substantive commit.** "Make
+  the test pass" is not the only constraint — the rules above ARE the
+  durable direction. Before landing non-trivial code, run a single
+  pass against the architectural rules and the architectural lessons.
+  If any rule conflicts with the change, surface the conflict
+  explicitly and recommend the prerequisite refactor — do not layer a
+  workaround and ship. The most common failure mode is "I'll just add
+  one branch / one trait method / one arch flag and clean up later":
+  the cleanup never comes, and the next session inherits 4000-LOC
+  arch-leaky files. Quote the rule number in the recommendation so
+  the user can audit the call.
+- **`Hip*` / `Cuda*` / `<Arch>*` prefix on a new server-side type is
+  an immediate refactor flag.** If the type is genuinely backend- or
+  arch-specific, it belongs in the backend / model crate, not the
+  shared server surface. If it's cross-cutting, drop the prefix.
+  Don't ship `HipSession`/`HipModel`-style names "for now" — the
+  rename later is more disruptive than naming it right the first
+  time.
 
 ## Build / run conventions
 
@@ -260,6 +355,27 @@ Before any "this is faster" / "this is correct" claim:
       target model per backend.
 - [ ] Diff vs previous cert snapshot documented in the PR body.
 - [ ] Null results filed honestly (no "slight regression" rewording).
+
+## Quick-reference: pre-commit architectural audit
+
+Before any substantive commit (anything beyond a one-line fix):
+
+- [ ] No new `Hip*` / `Cuda*` / `<Arch>*`-prefixed types in shared
+      server surface (rule 12).
+- [ ] No new `if state.cfg.arch == "<arch>"` / `gguf.architecture()`
+      string match in shared files; new arch-specific behavior is a
+      trait method called polymorphically (rule 13).
+- [ ] No new `is_<arch>()` predicate or `as_<arch>_*()` accessor on a
+      generic trait (rules 12 + parallel-op-trait variant of rule 3).
+- [ ] New trait method with a `None` / `&[]` default for every arch
+      except one → reject; either it goes on the concrete impl or
+      every arch provides a real value (parallel-op variant of rule 3).
+- [ ] Glue-side workaround for an upstream API mismatch → reject; fix
+      the upstream signature instead (see arch-lessons section).
+- [ ] No env flag added for variant selection — dispatch table or
+      type-state, not `CANDLE_*` redux (rule 1).
+- [ ] Any rule conflict surfaced to the user with a recommendation
+      for the prerequisite refactor, not "land + clean up later".
 
 ## Pointers
 

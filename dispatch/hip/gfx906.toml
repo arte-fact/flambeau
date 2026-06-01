@@ -225,9 +225,9 @@ notes   = "V2.24.a.3 — 128-thread single-row Q4_1 DP4A MMVQ. Halves threads/bl
 dtype   = "Q5_K"
 dtype_q = "Q8_1"
 shape   = { m = "1..127", k = "any", n = "any" }
-impl    = "qmatmul_q5_K_mmvq_nw1_r2_gfx906"
-cert    = "certs/hip/gfx906/qmatmul_q5_K_mmvq_nw1_r2_gfx906.json"
-notes   = "P29 r2 variant of Q4_K r2; adds 5th bit from qh[]. VGPR 25, waves/SIMD 10. Narrowed to m<=127 in V2.2.d fix 1 — Q5_K MMQ wave64 handles m>=128 (candle port, closes 1-sec prefill gap from per-row MMVQ loops)."
+impl    = "qmatmul_q5_K_mmvq_dp4a_gfx906"
+cert    = "certs/hip/gfx906/qmatmul_q5_K_mmvq_dp4a_gfx906.json"
+notes   = "DP4A 256-thread Q5_K MMVQ port of llama.cpp's vec_dot_q5_K_q8_1_impl_vmmq (sumi via v_dot4_i32_i8). Replaces the prior nw1_r2 kernel which did per-element FP32 multiplies — rocprofv3 head-to-head on Qwen3.6-27B-Q4_0 PP4 showed mmvq_q5_k_r2 at 268us/call vs llama.cpp's mul_mat_vec_q at ~91us/call. Sweep cert green across the 15-shape grid (max rel_err 1e-2). Prior r2 cert kept at certs/hip/gfx906/qmatmul_q5_K_mmvq_nw1_r2_gfx906.json for regression cross-check."
 
 [[qmatmul_mmq]]
 dtype   = "Q5_K"

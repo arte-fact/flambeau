@@ -148,24 +148,35 @@ class ModelSpec:
     path: str
     ctx_cap: int
     prefill_ubatch: int
+    # branch_only=True means the model runs only on a feature branch with
+    # the kernel work that supports its dtype. Default-skipped by the
+    # matrix; opt-in via `FLAMBEAU_BENCH_BRANCH_ONLY=1` env (or override
+    # by passing the id explicitly via `--models`). See task #36 papercut
+    # #2: enabling Q3_K models on main wasted hours on per-cell timeouts.
+    branch_only: bool = False
 
 MODELS = [
     ModelSpec("qwen35_9B_q4_1",  "/artefact/models/Qwen3.5-9B-Q4_1.gguf",       16384, 512),
     # Qwen3.5-9B re-quantised from Q4_1 → Q3_K_S via llama-quantize
     # (`--allow-requantize` Q3_K_S). Exists to exercise the Q3_K dispatch
     # rows on a model that fits a single GPU; main rejects this dtype.
-    ModelSpec("qwen35_9B_q3_k_s", "/artefact/models/Qwen3.5-9B-Q3_K_S.gguf",    16384, 512),
+    ModelSpec("qwen35_9B_q3_k_s", "/artefact/models/Qwen3.5-9B-Q3_K_S.gguf",    16384, 512,
+              branch_only=True),
     # 27B context dropped from 16384 to 4096 so PP2 (2 GPUs × 32 layers
     # per rank × 8 inflight slots) fits in VRAM. Long-prompt
     # characterisation is still meaningful at ctx=4096.
     ModelSpec("qwen36_27B_q4_0", "/artefact/models/Qwen3.6-27B-Q4_0.gguf",      4096, 512),
     ModelSpec("qwen36_27B_q4_1", "/artefact/models/Qwen3.6-27B-Q4_1.gguf",      4096, 512),
     ModelSpec("qwen36_35B_a3b_q4_0", "/artefact/models/Qwen_Qwen3.6-35B-A3B-Q4_0.gguf", 16384, 512),
-    # Qwen3.6-35B-A3B MoE re-quantised from Q4_0 → Q3_K_S to exercise the
-    # Q3_K MoE indexed-MMVQ + tile8 kernels added in tier-1. main rejects
-    # Q3_K weights at qmatmul-dispatch time so this is a branch-only path.
+    # Qwen3.6-35B-A3B MoE re-quantised from Q4_0 → Q3_K_S. The Q3_K MoE
+    # indexed-MMVQ + tile8 dispatch was wired 2026-05-26 (task #34).
     ModelSpec("qwen36_35B_a3b_q3_k_s", "/artefact/models/Qwen3.6-35B-A3B-Q3_K_S.gguf", 16384, 512),
     ModelSpec("qwen36_35B_a3b_ud_q4_k_s", "/artefact/models/Qwen3.6-35B-A3B-UD-Q4_K_S.gguf", 4096, 512),
+    # gemma4 dense — added 2026-05-23 after the BOS-prepend fix landed.
+    # E4B fits on one GPU; 31B needs PP across all 4 (per-layer KV at
+    # ctx=4096 already pushes ~12 GB on the heaviest rank).
+    ModelSpec("gemma4_E4B_q4_0", "/artefact/models/gemma-4-E4B-it-Q4_0.gguf",   4096, 512),
+    ModelSpec("gemma4_31B_q4_0", "/artefact/models/gemma-4-31B-it-Q4_0.gguf",   4096, 512),
 ]
 
 @dataclasses.dataclass(frozen=True)
@@ -201,11 +212,22 @@ def is_feasible(model: ModelSpec, topo: TopoSpec) -> bool:
     # 2-GPU TP for 35B (~10 GB / GPU + KV) marginal but tries.
     if topo.id == "single":
         if model.id in ("qwen36_27B_q4_0", "qwen36_27B_q4_1",
-                        "qwen36_35B_a3b_q4_0", "qwen36_35B_a3b_ud_q4_k_s"):
+                        "qwen36_35B_a3b_q4_0", "qwen36_35B_a3b_ud_q4_k_s",
+                        "gemma4_31B_q4_0"):
             return False
     if topo.id == "tp2":
-        if model.id in ("qwen36_35B_a3b_q4_0", "qwen36_35B_a3b_ud_q4_k_s"):
-            # 35B / 2 = 10 GB weights + KV at ctx risks OOM; skip
+        if model.id in ("qwen36_35B_a3b_q4_0", "qwen36_35B_a3b_ud_q4_k_s",
+                        "gemma4_31B_q4_0"):
+            # 35B / 2 ≈ 10 GB; gemma4-31B Q4_0 ≈ 17 GB so /2 ≈ 8.5 GB
+            # weights but per-layer KV across 64 layers at ctx=4096 with
+            # head_dim 256/512 mix pushes ~16+ GB / GPU. Skip.
+            return False
+    if topo.id in ("pp2", "pp4", "pp2tp2") and model.id == "gemma4_31B_q4_0":
+        # PP2 (2 GPUs) for 31B Q4_0 — 17 GB / 2 ≈ 8.5 GB weights but
+        # heavy per-layer KV (gemma4 SWA+global at head_dim 256/512)
+        # OOMs on PP2. Confirmed via prior session OOM at default ctx;
+        # ctx=4096 still tight. Keep PP4 and skip PP2.
+        if topo.id == "pp2":
             return False
     return True
 
@@ -426,9 +448,15 @@ def run_matrix(out_path: Path, max_tokens: int, only_models=None,
     log_dir = ROOT / "scripts" / "bench" / "logs"
     log_dir.mkdir(parents=True, exist_ok=True)
 
+    allow_branch_only = os.environ.get("FLAMBEAU_BENCH_BRANCH_ONLY") == "1"
     cells = []
     for model in MODELS:
         if only_models and model.id not in only_models:
+            continue
+        # Branch-only models are skipped unless explicitly requested via
+        # --models or the FLAMBEAU_BENCH_BRANCH_ONLY=1 env opt-in.
+        if model.branch_only and not only_models and not allow_branch_only:
+            cells.append({"model": model.id, "topo": "(all)", "skipped": "branch_only"})
             continue
         for topo in TOPOLOGIES:
             if only_topos and topo.id not in only_topos:
@@ -574,7 +602,38 @@ def run_matrix(out_path: Path, max_tokens: int, only_models=None,
     print(f"\nWrote {out_path}", flush=True)
 
 
+def _run_matrix_with_cleanup(*args, **kwargs):
+    """Wrap run_matrix so SIGINT/SIGTERM tear down any in-flight server
+    process group before exiting. The cell-level try/finally already
+    calls kill_server, but a KeyboardInterrupt raised between cells
+    (or during boot_server before the try block) would otherwise leak
+    the server. Belt-and-suspenders kill of any flambeau child by
+    process-group on exit."""
+    try:
+        run_matrix(*args, **kwargs)
+    except KeyboardInterrupt:
+        print("\n!! interrupted — killing any leaked flambeau server children", flush=True)
+        try:
+            # Kill anything in our process group that still has the BIN
+            # name. setsid above made boot_server's children their own
+            # groups; this catches stragglers that escaped kill_server.
+            subprocess.run(["pkill", "-TERM", "-f", str(BIN.name)],
+                           timeout=5, check=False)
+        except Exception:
+            pass
+        raise SystemExit(130)
+
+
 def main():
+    # Convert SIGTERM into KeyboardInterrupt so it propagates through
+    # the cell `try/finally` and the server child gets killed cleanly.
+    # Without this, `kill -TERM <python-pid>` exits python without
+    # running finally clauses, leaving the spawned flambeau server
+    # reparented to init (task #36 papercut #1).
+    def _term_handler(signum, frame):
+        raise KeyboardInterrupt(f"received signal {signum}")
+    signal.signal(signal.SIGTERM, _term_handler)
+
     ap = argparse.ArgumentParser()
     ap.add_argument("--out", required=True)
     ap.add_argument("--max-tokens", type=int, default=256)
@@ -600,11 +659,11 @@ def main():
               file=sys.stderr)
         sys.exit(2)
 
-    run_matrix(Path(args.out), args.max_tokens, only_models, only_topos,
-               only_paths, only_concs,
-               cooldown_threshold_c=args.cooldown_threshold_c,
-               cooldown_max_wait_s=args.cooldown_max_wait_s,
-               resume=args.resume)
+    _run_matrix_with_cleanup(Path(args.out), args.max_tokens, only_models, only_topos,
+                             only_paths, only_concs,
+                             cooldown_threshold_c=args.cooldown_threshold_c,
+                             cooldown_max_wait_s=args.cooldown_max_wait_s,
+                             resume=args.resume)
 
 
 if __name__ == "__main__":

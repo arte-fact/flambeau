@@ -1,0 +1,18 @@
+{
+  "files": {
+    "src/loader.rs": {
+      "modifiedRanges": [
+        {
+          "start": 1,
+          "end": 430
+        }
+      ],
+      "importsChanged": false,
+      "lastEdit": "2026-05-21T13:51:10.662Z"
+    }
+  },
+  "turnCycles": 0,
+  "maxCycles": 3,
+  "lastUpdated": "2026-05-21T13:51:10.662Z",
+  "sessionId": "lens-mpfg0ijk-f7507db8"
+}

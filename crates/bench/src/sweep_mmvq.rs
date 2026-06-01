@@ -10,7 +10,6 @@
 //! derivation.
 
 #![cfg(feature = "hip")]
-
 #![expect(
     clippy::undocumented_unsafe_blocks,
     reason = "sweep harness — every unsafe block is a kernel launch or a memcpy_async \
@@ -29,8 +28,7 @@ use flambeau_kernels_hip as kernels;
 use flambeau_quant::{
     dequantize_into, BlockIq1M, BlockIq1S, BlockIq2S, BlockIq2Xs, BlockIq2Xxs, BlockIq3S,
     BlockIq3Xxs, BlockIq4Nl, BlockIq4Xs, BlockQ2K, BlockQ3K, BlockQ4K, BlockQ4_1, BlockQ5K,
-    BlockQ6K, BlockQ8K, BlockQ8_0,
-    BlockQ8_1, GgmlDType, QK8_0, QK_K,
+    BlockQ6K, BlockQ8K, BlockQ8_0, BlockQ8_1, GgmlDType, QK8_0, QK_K,
 };
 use half::f16;
 
@@ -59,6 +57,12 @@ pub enum Dtype {
     Q4KR2,
     /// r2 multi-row variant of Q5_K.
     Q5KR2,
+    /// DP4A 256-thread Q5_K MMVQ (port of llama.cpp's
+    /// `vec_dot_q5_K_q8_1_impl_vmmq`). Replaces per-element FP32
+    /// multiplies with `__builtin_amdgcn_sdot4` SIMD int8 dot products
+    /// — measured ~3× faster than `mmvq_q5_k_r2` on Qwen3.6-27B
+    /// `ssm_out` shape (n=5120, k=6144, m=1).
+    Q5KDp4a,
     /// r4 multi-row variant of Q6_K (4 output rows per wave64).
     Q6KR4,
     /// DP4A single-row Q6_K variant. Cooperative 64 lanes across
@@ -120,7 +124,7 @@ impl Dtype {
             Dtype::Q2K | Dtype::Q2KR2 => "Q2_K",
             Dtype::Q3K | Dtype::Q3KR2 => "Q3_K",
             Dtype::Q4K | Dtype::Q4KR2 => "Q4_K",
-            Dtype::Q5K | Dtype::Q5KR2 => "Q5_K",
+            Dtype::Q5K | Dtype::Q5KR2 | Dtype::Q5KDp4a => "Q5_K",
             Dtype::Q6K | Dtype::Q6KR4 | Dtype::Q6KDP4A => "Q6_K",
             Dtype::Q8K => "Q8_K",
             Dtype::Q4_1 | Dtype::Q4_1R2 | Dtype::Q4_1R2DP4A | Dtype::Q4_1T128 => "Q4_1",
@@ -142,7 +146,7 @@ impl Dtype {
             Dtype::Q2K | Dtype::Q2KR2 => GgmlDType::Q2K,
             Dtype::Q3K | Dtype::Q3KR2 => GgmlDType::Q3K,
             Dtype::Q4K | Dtype::Q4KR2 => GgmlDType::Q4K,
-            Dtype::Q5K | Dtype::Q5KR2 => GgmlDType::Q5K,
+            Dtype::Q5K | Dtype::Q5KR2 | Dtype::Q5KDp4a => GgmlDType::Q5K,
             Dtype::Q6K | Dtype::Q6KR4 | Dtype::Q6KDP4A => GgmlDType::Q6K,
             Dtype::Q8K => GgmlDType::Q8K,
             Dtype::Q4_1 | Dtype::Q4_1R2 | Dtype::Q4_1R2DP4A | Dtype::Q4_1T128 => GgmlDType::Q4_1,
@@ -171,6 +175,7 @@ impl Dtype {
             Dtype::Q8K => "qmatmul_q8_K_mmvq_single_row_gfx906",
             Dtype::Q4KR2 => "qmatmul_q4_K_mmvq_nw1_r2_gfx906",
             Dtype::Q5KR2 => "qmatmul_q5_K_mmvq_nw1_r2_gfx906",
+            Dtype::Q5KDp4a => "qmatmul_q5_K_mmvq_dp4a_gfx906",
             Dtype::Q6KR4 => "qmatmul_q6_K_mmvq_nw1_r4_gfx906",
             Dtype::Q6KDP4A => "qmatmul_q6_K_mmvq_dp4a_gfx906",
             Dtype::Q4_1 => "qmatmul_q4_1_mmvq_dp4a_gfx906",
@@ -215,6 +220,7 @@ impl Dtype {
             Dtype::Q8K => "mmvq_q8_k",
             Dtype::Q4KR2 => "mmvq_q4_k_r2",
             Dtype::Q5KR2 => "mmvq_q5_k_r2",
+            Dtype::Q5KDp4a => "mmvq_q5_k_dp4a",
             Dtype::Q6KR4 => "mmvq_q6_k_r4",
             Dtype::Q6KDP4A => "mmvq_q6_k_dp4a",
             Dtype::Q4_1 => "mmvq_q4_1",
@@ -255,6 +261,7 @@ impl Dtype {
             Dtype::Q6K => "flambeau_mmvq_q6_k_q8_1",
             Dtype::Q4KR2 => "flambeau_mmvq_q4_k_r2_q8_1",
             Dtype::Q5KR2 => "flambeau_mmvq_q5_k_r2_q8_1",
+            Dtype::Q5KDp4a => "flambeau_mmvq_q5_k_dp4a_q8_1",
             Dtype::Q6KR4 => "flambeau_mmvq_q6_k_r4_q8_1",
             Dtype::Q6KDP4A => "flambeau_mmvq_q6_k_dp4a_q8_1",
             Dtype::Q4_1 => "flambeau_mmvq_q4_1_q8_1",
@@ -290,10 +297,12 @@ impl Dtype {
             Dtype::Q2K | Dtype::Q2KR2 => std::mem::size_of::<BlockQ2K>(),
             Dtype::Q3K | Dtype::Q3KR2 => std::mem::size_of::<BlockQ3K>(),
             Dtype::Q4K | Dtype::Q4KR2 => std::mem::size_of::<BlockQ4K>(),
-            Dtype::Q5K | Dtype::Q5KR2 => std::mem::size_of::<BlockQ5K>(),
+            Dtype::Q5K | Dtype::Q5KR2 | Dtype::Q5KDp4a => std::mem::size_of::<BlockQ5K>(),
             Dtype::Q6K | Dtype::Q6KR4 | Dtype::Q6KDP4A => std::mem::size_of::<BlockQ6K>(),
             Dtype::Q8K => std::mem::size_of::<BlockQ8K>(),
-            Dtype::Q4_1 | Dtype::Q4_1R2 | Dtype::Q4_1R2DP4A | Dtype::Q4_1T128 => std::mem::size_of::<BlockQ4_1>(),
+            Dtype::Q4_1 | Dtype::Q4_1R2 | Dtype::Q4_1R2DP4A | Dtype::Q4_1T128 => {
+                std::mem::size_of::<BlockQ4_1>()
+            }
             Dtype::Iq4Nl | Dtype::Iq4NlR2 => std::mem::size_of::<BlockIq4Nl>(),
             Dtype::Iq4Xs | Dtype::Iq4XsR2 => std::mem::size_of::<BlockIq4Xs>(),
             Dtype::Iq3Xxs | Dtype::Iq3XxsR2 => std::mem::size_of::<BlockIq3Xxs>(),
@@ -312,7 +321,7 @@ impl Dtype {
 
     fn launch_threads(self) -> u32 {
         match self {
-            Dtype::Q8_0 | Dtype::Q4_1 | Dtype::Q4_1R2DP4A | Dtype::Q8K => 256,
+            Dtype::Q8_0 | Dtype::Q4_1 | Dtype::Q4_1R2DP4A | Dtype::Q8K | Dtype::Q5KDp4a => 256,
             Dtype::Q4_1T128 | Dtype::Q8_0T128 | Dtype::Q8_0T128VDR2 => 128,
             _ => 64,
         }
@@ -323,9 +332,21 @@ impl Dtype {
     fn rows_per_block(self) -> u32 {
         match self {
             Dtype::Q6KR4 => 4,
-            Dtype::Q2KR2 | Dtype::Q3KR2 | Dtype::Q4KR2 | Dtype::Q5KR2 | Dtype::Q4_1R2
-            | Dtype::Q4_1R2DP4A | Dtype::Iq4NlR2 | Dtype::Iq4XsR2 | Dtype::Iq3XxsR2 | Dtype::Iq3SR2
-            | Dtype::Iq2XxsR2 | Dtype::Iq2XsR2 | Dtype::Iq2SR2 | Dtype::Iq1SR2 | Dtype::Iq1MR2 => 2,
+            Dtype::Q2KR2
+            | Dtype::Q3KR2
+            | Dtype::Q4KR2
+            | Dtype::Q5KR2
+            | Dtype::Q4_1R2
+            | Dtype::Q4_1R2DP4A
+            | Dtype::Iq4NlR2
+            | Dtype::Iq4XsR2
+            | Dtype::Iq3XxsR2
+            | Dtype::Iq3SR2
+            | Dtype::Iq2XxsR2
+            | Dtype::Iq2XsR2
+            | Dtype::Iq2SR2
+            | Dtype::Iq1SR2
+            | Dtype::Iq1MR2 => 2,
             // Q6KDP4A is a single-row kernel (inner cooperative across 2 super-blocks).
             _ => 1,
         }
@@ -354,8 +375,7 @@ impl SweepSpec {
 }
 
 pub fn run_sweep(spec: &SweepSpec, repo_root: &Path) -> Result<Cert> {
-    let n = device_count()
-        .context("hipGetDeviceCount")?;
+    let n = device_count().context("hipGetDeviceCount")?;
     if n < 1 {
         bail!("no HIP devices on this host — sweep needs gfx906");
     }
@@ -439,12 +459,12 @@ fn capture_static_pmc(dev: &HipDevice, dtype: Dtype) -> Result<PmcSnapshot> {
 
     let pmc = PmcSnapshot {
         vgpr_count: Some(attrs.num_regs),
-        sgpr_count: None, // hipFuncGetAttribute doesn't expose SGPR; 
-                          // captures it from the .hsaco ELF via inspect-hsaco
-                          // once that CLI lands.
+        sgpr_count: None, // hipFuncGetAttribute doesn't expose SGPR;
+        // captures it from the .hsaco ELF via inspect-hsaco
+        // once that CLI lands.
         waves_per_simd: Some(attrs.gfx906_waves_per_simd()),
-        mem_busy_pct: None,   // Phase B (rocprof wrapper).
-        valu_busy_pct: None,  // Phase B.
+        mem_busy_pct: None,  // Phase B (rocprof wrapper).
+        valu_busy_pct: None, // Phase B.
     };
 
     tracing::info!(
@@ -574,7 +594,9 @@ fn seeded_bytes(seed: u64, n: usize) -> Vec<u8> {
     let mut s = seed.wrapping_mul(6364136223846793005).wrapping_add(1);
     (0..n)
         .map(|_| {
-            s = s.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+            s = s
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
             (s >> 24) as u8
         })
         .collect()
@@ -612,7 +634,7 @@ fn tame_scales(dtype: Dtype, raw: Vec<u8>) -> Vec<u8> {
                 let d = f16::from_f32((block[d_off] as f32 / 255.0) * 0.05 + 0.005);
                 block[d_off..d_off + 2].copy_from_slice(&d.to_bits().to_le_bytes());
             }
-            Dtype::Q4K | Dtype::Q5K | Dtype::Q4KR2 | Dtype::Q5KR2 => {
+            Dtype::Q4K | Dtype::Q5K | Dtype::Q4KR2 | Dtype::Q5KR2 | Dtype::Q5KDp4a => {
                 // d (0..2), dmin (2..4). Same treatment as Q4_K test.
                 let d = f16::from_f32((block[0] as f32 / 255.0) * 0.1 + 0.01);
                 let dmin = f16::from_f32((block[1] as f32 / 255.0) * 0.05);
@@ -705,7 +727,7 @@ fn tame_scales(dtype: Dtype, raw: Vec<u8>) -> Vec<u8> {
                 //          | ((sc[2]>>4)&0xF00) | (sc[3] & 0xF000)
                 // Target d_bits = 0x0850. Distribute nibbles 0x0, 0x5, 0x8, 0x0.
                 let pin_nib = [0x0u16, 0x5, 0x8, 0x0];
-                let sc_off = QK_K / 8 + QK_K / 16;   // scales array offset in BlockIq1M (no d)
+                let sc_off = QK_K / 8 + QK_K / 16; // scales array offset in BlockIq1M (no d)
                 for i in 0..4 {
                     let off = sc_off + 2 * i;
                     let lo = u16::from_le_bytes([block[off], block[off + 1]]);
@@ -754,4 +776,3 @@ fn cert_tol(_k: usize) -> f32 {
     // Tighter bounds follow once MMVQ moves to the dp4a / multi-row DPP path.
     3e-2
 }
-

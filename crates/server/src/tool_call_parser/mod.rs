@@ -32,6 +32,7 @@
 
 use anyhow::{anyhow, Result};
 
+pub mod gemma4;
 pub mod hermes;
 pub mod qwen3_coder;
 
@@ -78,14 +79,8 @@ impl ParserEvent {
         let mut out: Vec<ParserEvent> = Vec::with_capacity(events.len());
         for e in events {
             match (out.last_mut(), &e) {
-                (
-                    Some(ParserEvent::TextDelta(acc)),
-                    ParserEvent::TextDelta(s),
-                ) => acc.push_str(s),
-                (
-                    Some(ParserEvent::ThinkDelta(acc)),
-                    ParserEvent::ThinkDelta(s),
-                ) => acc.push_str(s),
+                (Some(ParserEvent::TextDelta(acc)), ParserEvent::TextDelta(s)) => acc.push_str(s),
+                (Some(ParserEvent::ThinkDelta(acc)), ParserEvent::ThinkDelta(s)) => acc.push_str(s),
                 (
                     Some(ParserEvent::ToolCallArgumentsDelta {
                         index: a_idx,
@@ -113,9 +108,7 @@ impl ParserEvent {
 /// - Close events whose matching Open never fired still produce a
 /// `ToolCall` with an empty name — imperfect, but preserves parser
 /// events rather than dropping them.
-pub fn split_events(
-    events: Vec<ParserEvent>,
-) -> (String, Vec<crate::api::ToolCall>) {
+pub fn split_events(events: Vec<ParserEvent>) -> (String, Vec<crate::api::ToolCall>) {
     use crate::api::{FunctionCall, ToolCall};
     let mut content = String::new();
     let mut tool_calls: Vec<ToolCall> = Vec::new();
@@ -186,18 +179,21 @@ pub enum ToolCallFormat {
     Hermes,
     /// Qwen3-Coder XML: `<tool_call><function=name><parameter=k>v</parameter>…</function></tool_call>`.
     QwenCoder,
+    /// Gemma 4 custom: `<|tool_call>call:NAME{k:<|"|>v<|"|>,...}<tool_call|>`.
+    Gemma4,
 }
 
 impl ToolCallFormat {
-    /// Parse `"hermes" | "qwen3_coder"`. Other strings — including
-    /// `"auto"` — are not accepted here; use [`dispatcher`] to resolve
-    /// `"auto"` against a model architecture.
+    /// Parse `"hermes" | "qwen3_coder" | "gemma4"`. Other strings —
+    /// including `"auto"` — are not accepted here; use [`dispatcher`]
+    /// to resolve `"auto"` against a model architecture.
     pub fn from_explicit(s: &str) -> Result<Self> {
         match s {
             "hermes" => Ok(Self::Hermes),
             "qwen3_coder" | "qwen3-coder" | "qwen_coder" => Ok(Self::QwenCoder),
+            "gemma4" | "gemma-4" => Ok(Self::Gemma4),
             other => Err(anyhow!(
-                "unknown tool_call_format: {other:?} (expected \"hermes\" or \"qwen3_coder\")"
+                "unknown tool_call_format: {other:?} (expected \"hermes\", \"qwen3_coder\", or \"gemma4\")"
             )),
         }
     }
@@ -236,6 +232,12 @@ pub fn choose_format(
 /// `ServerState.tool_call_format_default` once per process. Per-
 /// request `tool_call_format` overrides are honoured first.
 pub fn detect_format_from_template(template_src: &str) -> ToolCallFormat {
+    // Gemma 4 signature: the custom `<|tool_call>call:` open + the
+    // `<|"|>` string-quote special-token sequence. Both are unique to
+    // gemma4 and absent from Hermes / Coder templates.
+    if template_src.contains("<|tool_call>") && template_src.contains("<|\"|>") {
+        return ToolCallFormat::Gemma4;
+    }
     // Coder-XML signature: literal tag instructions in the system
     // prompt branch. Hermes templates emit JSON-shaped guidance.
     if template_src.contains("<function=") || template_src.contains("<parameter=") {
@@ -255,6 +257,7 @@ pub fn dispatcher(
     match choose_format(request_override, server_default)? {
         ToolCallFormat::Hermes => Ok(Box::new(hermes::HermesJsonParser::new())),
         ToolCallFormat::QwenCoder => Ok(Box::new(qwen3_coder::QwenCoderXmlParser::new())),
+        ToolCallFormat::Gemma4 => Ok(Box::new(gemma4::Gemma4ToolCallParser::new())),
     }
 }
 
@@ -305,6 +308,28 @@ mod tests {
     }
 
     #[test]
+    fn detect_format_gemma4_template() {
+        let tpl = r#"
+            {{ bos_token }}
+            <|turn>system
+            <|tool_call>call:NAME{k:<|"|>v<|"|>}<tool_call|>
+        "#;
+        assert_eq!(detect_format_from_template(tpl), ToolCallFormat::Gemma4);
+    }
+
+    #[test]
+    fn explicit_gemma4() {
+        assert_eq!(
+            choose_format(Some("gemma4"), ToolCallFormat::Hermes).unwrap(),
+            ToolCallFormat::Gemma4
+        );
+        assert_eq!(
+            choose_format(Some("gemma-4"), ToolCallFormat::Hermes).unwrap(),
+            ToolCallFormat::Gemma4
+        );
+    }
+
+    #[test]
     fn detect_format_qwen_coder_template() {
         // Unsloth UD Qwen3.6 chat template signature.
         let tpl = r#"
@@ -316,10 +341,7 @@ mod tests {
             </function>
             </tool_call> ...
         "#;
-        assert_eq!(
-            detect_format_from_template(tpl),
-            ToolCallFormat::QwenCoder
-        );
+        assert_eq!(detect_format_from_template(tpl), ToolCallFormat::QwenCoder);
     }
 
     #[test]
@@ -357,7 +379,10 @@ mod tests {
     fn split_events_single_tool_call() {
         let evts = vec![
             ParserEvent::TextDelta("calling: ".into()),
-            ParserEvent::ToolCallOpen { index: 0, name: "f".into() },
+            ParserEvent::ToolCallOpen {
+                index: 0,
+                name: "f".into(),
+            },
             ParserEvent::ToolCallArgumentsDelta {
                 index: 0,
                 arguments: r#"{"x":1}"#.into(),
@@ -376,13 +401,19 @@ mod tests {
     #[test]
     fn split_events_parallel_calls_preserve_order_and_indices() {
         let evts = vec![
-            ParserEvent::ToolCallOpen { index: 0, name: "a".into() },
+            ParserEvent::ToolCallOpen {
+                index: 0,
+                name: "a".into(),
+            },
             ParserEvent::ToolCallArgumentsDelta {
                 index: 0,
                 arguments: r#"{"p":1}"#.into(),
             },
             ParserEvent::ToolCallClose { index: 0 },
-            ParserEvent::ToolCallOpen { index: 1, name: "b".into() },
+            ParserEvent::ToolCallOpen {
+                index: 1,
+                name: "b".into(),
+            },
             ParserEvent::ToolCallArgumentsDelta {
                 index: 1,
                 arguments: r#"{"q":2}"#.into(),
@@ -400,7 +431,10 @@ mod tests {
     #[test]
     fn split_events_arguments_accumulate_across_deltas() {
         let evts = vec![
-            ParserEvent::ToolCallOpen { index: 0, name: "f".into() },
+            ParserEvent::ToolCallOpen {
+                index: 0,
+                name: "f".into(),
+            },
             ParserEvent::ToolCallArgumentsDelta {
                 index: 0,
                 arguments: r#"{"x":"#.into(),

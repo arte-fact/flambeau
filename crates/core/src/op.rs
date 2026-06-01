@@ -271,14 +271,12 @@ pub struct KernelDescriptor {
 }
 
 impl KernelDescriptor {
-    pub const fn matches(
-        &self,
-        dtype_w: QDtype,
-        dtype_a: QDtype,
-        m: usize,
-    ) -> bool {
+    pub const fn matches(&self, dtype_w: QDtype, dtype_a: QDtype, m: usize) -> bool {
         let (lo, hi) = self.m_range;
-        m >= lo && m <= hi && eq_qdtype(self.dtype_weight, dtype_w) && eq_qdtype(self.dtype_activation, dtype_a)
+        m >= lo
+            && m <= hi
+            && eq_qdtype(self.dtype_weight, dtype_w)
+            && eq_qdtype(self.dtype_activation, dtype_a)
     }
 }
 
@@ -325,7 +323,7 @@ mod tests {
         assert!(DESC.matches(QDtype::Q4_K, QDtype::Q8_1, 256));
         assert!(DESC.matches(QDtype::Q4_K, QDtype::Q8_1, 512));
         assert!(!DESC.matches(QDtype::Q4_K, QDtype::Q8_1, 1024)); // m > 512
-        assert!(!DESC.matches(QDtype::Q6_K, QDtype::Q8_1, 1));    // dtype_w mismatch
-        assert!(!DESC.matches(QDtype::Q4_K, QDtype::F16, 1));     // dtype_a mismatch
+        assert!(!DESC.matches(QDtype::Q6_K, QDtype::Q8_1, 1)); // dtype_w mismatch
+        assert!(!DESC.matches(QDtype::Q4_K, QDtype::F16, 1)); // dtype_a mismatch
     }
 }

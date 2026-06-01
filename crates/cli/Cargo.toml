@@ -18,9 +18,6 @@ hip_sweep = ["flambeau-bench/hip"]
 hip_serve = ["flambeau-server/hip"]
 # Enables debug FLAMBEAU_* env-var reads (probes, dumps, traces).
 # Off by default; production binaries elide all gated reads.
-# (flambeau-server propagates the flag to flambeau-qwen3-moe and
-# flambeau-quant transitively; this CLI only depends on those crates
-# directly which are already covered.)
 dev_trace = [
     "flambeau-quant/dev_trace",
     "flambeau-server/dev_trace",
@@ -32,10 +29,6 @@ flambeau-quant = { path = "../quant" }
 flambeau-runtime = { path = "../runtime" }
 flambeau-bench = { path = "../bench" }
 flambeau-server = { path = "../server" }
-# Direct dep so the CLI can register `Qwen3MoEModelArch` with the
-# runtime registry. Compiles arch-only (no `hip` feature) — the
-# struct + trait impl don't need device code.
-flambeau-qwen3-moe = { path = "../models/qwen3-moe" }
 anyhow.workspace = true
 clap.workspace = true
 tokio.workspace = true

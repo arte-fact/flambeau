@@ -69,7 +69,7 @@ pub fn qmatmul(
         return Ok(());
     }
     if dtype_weight == QDtype::Q8_0 && (2..=4).contains(&m) {
-        mmvq_q8_0_batched(reg, stream, weights, act_q8_1, dst, n, k, m)?;
+        mmvq_q8_0_row_tile_batched(reg, stream, weights, act_q8_1, dst, n, k, m)?;
         let _ = act_q8_1_mmq;
         return Ok(());
     }
@@ -99,19 +99,21 @@ pub fn qmatmul(
         // major convention since the batched kernel writes
         // `dst[s * n_rows + row]` for the same s = row-batch index.
         if dtype_weight == QDtype::Q4_0 && (2..=4).contains(&m) {
-            mmvq_q4_0_batched(reg, stream, weights, act_q8_1, dst, n, k, m)?;
+            mmvq_q4_0_row_tile_batched(reg, stream, weights, act_q8_1, dst, n, k, m)?;
             let _ = act_q8_1_mmq;
             return Ok(());
         }
 
-        let (stem, entry) = match dtype_weight {
-            QDtype::Q4_0 => ("mmvq_q4_0", "flambeau_mmvq_q4_0_q8_1"),
-            QDtype::Q5_0 => ("mmvq_q5_0", "flambeau_mmvq_q5_0_q8_1"),
-            QDtype::Q5_1 => ("mmvq_q5_1", "flambeau_mmvq_q5_1_q8_1"),
+        let (stem, entry, threads) = match dtype_weight {
+            QDtype::Q4_0 => ("mmvq_q4_0", "flambeau_mmvq_q4_0_q8_1", 256u32),
+            QDtype::Q5_0 => ("mmvq_q5_0", "flambeau_mmvq_q5_0_q8_1", 256),
+            QDtype::Q5_1 => ("mmvq_q5_1", "flambeau_mmvq_q5_1_q8_1", 256),
             _ => unreachable!(),
         };
         let act_row_bytes = (k / 32) * std::mem::size_of::<flambeau_quant::BlockQ8_1>();
         let dst_row_bytes = n * 4;
+        assert_eq!(k % 32, 0, "{stem} requires k % 32 == 0");
+        let n_blocks = k / 32;
         for i in 0..m {
             mmvq_simple_launch(
                 reg,
@@ -122,7 +124,9 @@ pub fn qmatmul(
                 act_q8_1.offset_bytes(i * act_row_bytes),
                 dst.offset_bytes(i * dst_row_bytes),
                 n,
-                k,
+                n_blocks,
+                threads,
+                1,
             )?;
         }
         let _ = act_q8_1_mmq;
@@ -188,7 +192,9 @@ pub fn qmatmul(
         }
         RecipeKind::MmqOracle | RecipeKind::Mmq4Warp => {
             let nb_per_row = k / block_elems(dtype_weight);
-            mmq_launch(reg, stream, recipe, weights, act_q8_1, dst, n, m, nb_per_row)
+            mmq_launch(
+                reg, stream, recipe, weights, act_q8_1, dst, n, m, nb_per_row,
+            )
         }
         RecipeKind::MmqLdsX64 => {
             if act_q8_1_mmq.as_usize() == 0 {
@@ -202,17 +208,22 @@ pub fn qmatmul(
             }
             let nb_per_row = k / block_elems(dtype_weight);
             mmq_lds_x64_launch(
-                reg, stream, recipe, weights, act_q8_1_mmq, dst, n, m, nb_per_row,
+                reg,
+                stream,
+                recipe,
+                weights,
+                act_q8_1_mmq,
+                dst,
+                n,
+                m,
+                nb_per_row,
             )
         }
         RecipeKind::MmqWave64 => {
-            mmq_wave64_launch(
-                reg, stream, recipe, weights, act_q8_1, dst, n, m, k,
-            )
+            mmq_wave64_launch(reg, stream, recipe, weights, act_q8_1, dst, n, m, k)
         }
     }
 }
-
 
 /// Decode-path MMVQ for a single activation row. Caller is responsible for
 /// ensuring `m == 1` in the dispatch sense (one Q8_1-quantised vector of K
@@ -328,9 +339,7 @@ pub fn mmvq_q4_k_batched(
         2 => "flambeau_mmvq_q4_k_q8_1_batched_n2",
         3 => "flambeau_mmvq_q4_k_q8_1_batched_n3",
         4 => "flambeau_mmvq_q4_k_q8_1_batched_n4",
-        _ => bail!(
-            "mmvq_q4_k_batched: n_slots={n_slots} outside [2, 4]"
-        ),
+        _ => bail!("mmvq_q4_k_batched: n_slots={n_slots} outside [2, 4]"),
     };
     let module = reg.expect_module("mmvq_q4_k_batched")?;
     let kernel = module.kernel(entry)?;
@@ -368,9 +377,7 @@ pub fn mmvq_q6_k_batched(
         2 => "flambeau_mmvq_q6_k_q8_1_batched_n2",
         3 => "flambeau_mmvq_q6_k_q8_1_batched_n3",
         4 => "flambeau_mmvq_q6_k_q8_1_batched_n4",
-        _ => bail!(
-            "mmvq_q6_k_batched: n_slots={n_slots} outside [2, 4]"
-        ),
+        _ => bail!("mmvq_q6_k_batched: n_slots={n_slots} outside [2, 4]"),
     };
     let module = reg.expect_module("mmvq_q6_k_batched")?;
     let kernel = module.kernel(entry)?;
@@ -496,9 +503,7 @@ pub fn mmvq_q5_k_r2_batched(
         2 => "flambeau_mmvq_q5_k_r2_q8_1_batched_n2",
         3 => "flambeau_mmvq_q5_k_r2_q8_1_batched_n3",
         4 => "flambeau_mmvq_q5_k_r2_q8_1_batched_n4",
-        _ => bail!(
-            "mmvq_q5_k_r2_batched: n_slots={n_slots} outside [2, 4]"
-        ),
+        _ => bail!("mmvq_q5_k_r2_batched: n_slots={n_slots} outside [2, 4]"),
     };
     let module = reg.expect_module("mmvq_q5_k_r2_batched")?;
     let kernel = module.kernel(entry)?;
@@ -744,9 +749,7 @@ pub fn mmvq_q4_0_gate_up_batched(
         2 => "flambeau_mmvq_q4_0_gate_up_dp4a_q8_1_batched_n2",
         3 => "flambeau_mmvq_q4_0_gate_up_dp4a_q8_1_batched_n3",
         4 => "flambeau_mmvq_q4_0_gate_up_dp4a_q8_1_batched_n4",
-        _ => bail!(
-            "mmvq_q4_0_gate_up_batched: n_slots={n_slots} outside [2, 4]"
-        ),
+        _ => bail!("mmvq_q4_0_gate_up_batched: n_slots={n_slots} outside [2, 4]"),
     };
     let module = reg.expect_module("mmvq_q4_0_gate_up_batched")?;
     let kernel = module.kernel(entry)?;
@@ -798,9 +801,7 @@ pub fn mmvq_q4_0_gate_up_row_tile_batched(
         2 => "flambeau_mmvq_q4_0_gate_up_row_tile_dp4a_q8_1_batched_n2",
         3 => "flambeau_mmvq_q4_0_gate_up_row_tile_dp4a_q8_1_batched_n3",
         4 => "flambeau_mmvq_q4_0_gate_up_row_tile_dp4a_q8_1_batched_n4",
-        _ => bail!(
-            "mmvq_q4_0_gate_up_row_tile_batched: n_slots={n_slots} outside [2, 4]"
-        ),
+        _ => bail!("mmvq_q4_0_gate_up_row_tile_batched: n_slots={n_slots} outside [2, 4]"),
     };
     let module = reg.expect_module("mmvq_q4_0_gate_up_row_tile_batched")?;
     let kernel = module.kernel(entry)?;
@@ -823,6 +824,92 @@ pub fn mmvq_q4_0_gate_up_row_tile_batched(
     args.push(&n_blocks_i);
     let max_rows = n_rows_gate.max(n_rows_up);
     let grid = (max_rows as u32).div_ceil(4);
+    let cfg = LaunchCfg::one_d(grid, 256);
+    unsafe { kernel.launch(stream, cfg, args)? };
+    Ok(())
+}
+
+/// Row-tiled sibling of [`mmvq_q4_0_batched`]. Each block owns `R = 4`
+/// consecutive output rows and shares one LDS-resident Q8_1 activation
+/// strip across the N decode slots. Single-weight-matrix variant of
+/// [`mmvq_q4_0_gate_up_row_tile_batched`] for projections that aren't
+/// gate+up fused (`ssm_out`, attention output_proj, etc.).
+///
+/// `n_slots` ∈ [2, 4]. Output ABI identical to `mmvq_q4_0_batched`
+/// (`dst[N, n_rows]`, slot-major F32).
+pub fn mmvq_q4_0_row_tile_batched(
+    reg: &OpsRegistry,
+    stream: &HipStream,
+    weights: DevicePtr,
+    y_q8_1: DevicePtr,
+    dst: DevicePtr,
+    n_rows: usize,
+    k: usize,
+    n_slots: usize,
+) -> Result<()> {
+    let entry = match n_slots {
+        2 => "flambeau_mmvq_q4_0_row_tile_dp4a_q8_1_batched_n2",
+        3 => "flambeau_mmvq_q4_0_row_tile_dp4a_q8_1_batched_n3",
+        4 => "flambeau_mmvq_q4_0_row_tile_dp4a_q8_1_batched_n4",
+        _ => bail!("mmvq_q4_0_row_tile_batched: n_slots={n_slots} outside [2, 4]"),
+    };
+    let module = reg.expect_module("mmvq_q4_0_row_tile_batched")?;
+    let kernel = module.kernel(entry)?;
+    let n_rows_i = n_rows as i32;
+    let n_blocks_i = (k / 32) as i32;
+    let w_ptr: u64 = weights.as_usize() as u64;
+    let y_ptr: u64 = y_q8_1.as_usize() as u64;
+    let d_ptr: u64 = dst.as_usize() as u64;
+    let mut args = KernelArgs::new();
+    args.push(&w_ptr);
+    args.push(&y_ptr);
+    args.push(&d_ptr);
+    args.push(&n_rows_i);
+    args.push(&n_blocks_i);
+    let grid = (n_rows as u32).div_ceil(4);
+    let cfg = LaunchCfg::one_d(grid, 256);
+    unsafe { kernel.launch(stream, cfg, args)? };
+    Ok(())
+}
+
+/// Row-tiled sibling of `mmvq_q8_0_batched`. R=4 output rows per block
+/// share one LDS-resident Q8_1 activation strip across the N decode
+/// slots; cuts activation HBM traffic ~4× vs the per-row Q8_0 batched
+/// kernel at the same output count. Used for non-fused Q8_0
+/// projections (GDN α/β on Qwen3.6 hybrids, etc.).
+///
+/// `n_slots` ∈ [2, 4]. Output ABI identical to `mmvq_q8_0_batched`
+/// (`dst[N, n_rows]`, slot-major F32).
+pub fn mmvq_q8_0_row_tile_batched(
+    reg: &OpsRegistry,
+    stream: &HipStream,
+    weights: DevicePtr,
+    y_q8_1: DevicePtr,
+    dst: DevicePtr,
+    n_rows: usize,
+    k: usize,
+    n_slots: usize,
+) -> Result<()> {
+    let entry = match n_slots {
+        2 => "flambeau_mmvq_q8_0_row_tile_dp4a_q8_1_batched_n2",
+        3 => "flambeau_mmvq_q8_0_row_tile_dp4a_q8_1_batched_n3",
+        4 => "flambeau_mmvq_q8_0_row_tile_dp4a_q8_1_batched_n4",
+        _ => bail!("mmvq_q8_0_row_tile_batched: n_slots={n_slots} outside [2, 4]"),
+    };
+    let module = reg.expect_module("mmvq_q8_0_row_tile_batched")?;
+    let kernel = module.kernel(entry)?;
+    let n_rows_i = n_rows as i32;
+    let n_blocks_i = (k / 32) as i32;
+    let w_ptr: u64 = weights.as_usize() as u64;
+    let y_ptr: u64 = y_q8_1.as_usize() as u64;
+    let d_ptr: u64 = dst.as_usize() as u64;
+    let mut args = KernelArgs::new();
+    args.push(&w_ptr);
+    args.push(&y_ptr);
+    args.push(&d_ptr);
+    args.push(&n_rows_i);
+    args.push(&n_blocks_i);
+    let grid = (n_rows as u32).div_ceil(4);
     let cfg = LaunchCfg::one_d(grid, 256);
     unsafe { kernel.launch(stream, cfg, args)? };
     Ok(())
@@ -932,22 +1019,51 @@ pub fn mmvq(
     // decode regression AND a logit re-accumulation-order argmax shift on
     // seed 9419. The candle P29 r2 pattern wins on K-quants (sub-block
     // scales block DP4A) but strictly loses on Q4_0's flat-block DP4A path.
+    assert_eq!(k % 32, 0, "MMVQ requires k % 32 == 0");
+    let n_blocks_q32 = k / 32;
     if dtype_weight == QDtype::Q4_0 {
         return mmvq_simple_launch(
-            reg, stream, "mmvq_q4_0", "flambeau_mmvq_q4_0_q8_1",
-            weights, act_q8_1, dst, n_rows, k,
+            reg,
+            stream,
+            "mmvq_q4_0",
+            "flambeau_mmvq_q4_0_q8_1",
+            weights,
+            act_q8_1,
+            dst,
+            n_rows,
+            n_blocks_q32,
+            256,
+            1,
         );
     }
     if dtype_weight == QDtype::Q5_0 {
         return mmvq_simple_launch(
-            reg, stream, "mmvq_q5_0", "flambeau_mmvq_q5_0_q8_1",
-            weights, act_q8_1, dst, n_rows, k,
+            reg,
+            stream,
+            "mmvq_q5_0",
+            "flambeau_mmvq_q5_0_q8_1",
+            weights,
+            act_q8_1,
+            dst,
+            n_rows,
+            n_blocks_q32,
+            256,
+            1,
         );
     }
     if dtype_weight == QDtype::Q5_1 {
         return mmvq_simple_launch(
-            reg, stream, "mmvq_q5_1", "flambeau_mmvq_q5_1_q8_1",
-            weights, act_q8_1, dst, n_rows, k,
+            reg,
+            stream,
+            "mmvq_q5_1",
+            "flambeau_mmvq_q5_1_q8_1",
+            weights,
+            act_q8_1,
+            dst,
+            n_rows,
+            n_blocks_q32,
+            256,
+            1,
         );
     }
     let cfg = QMatMulCfg {
@@ -957,22 +1073,216 @@ pub fn mmvq(
         k,
         n: n_rows,
     };
-    let desc = dispatch_qmatmul(&cfg).ok_or_else(|| {
-        anyhow!("no MMVQ impl for dtype={} k={k}", dtype_weight.name())
-    })?;
+    let desc = dispatch_qmatmul(&cfg)
+        .ok_or_else(|| anyhow!("no MMVQ impl for dtype={} k={k}", dtype_weight.name()))?;
     let recipe = Recipe::from_impl_id(desc.impl_id)?;
     if recipe.kind != RecipeKind::Mmvq {
         bail!("dispatch for m=1 returned non-MMVQ impl {}", desc.impl_id);
     }
     let nb_per_row = k / block_elems(dtype_weight);
-    mmvq_launch(reg, stream, recipe, weights, act_q8_1, dst, n_rows, nb_per_row)
+    mmvq_launch(
+        reg, stream, recipe, weights, act_q8_1, dst, n_rows, nb_per_row,
+    )
 }
 
-/// 3.a — common launch path for single-block-per-row Q-weight MMVQ
-/// kernels that take (w, y_q8_1, dst, n_rows, n_blocks_per_row) and expect
-/// 256 threads. Used for Q4_0, Q5_0 and (via `mmvq()` short-circuit) any
-/// future single-kernel MMVQ variants.
-fn mmvq_simple_launch(
+/// Weight × Q8_1 MMVQ writing directly into an F16 destination, saturating
+/// at ±F16_MAX. Equivalent shape to [`mmvq`] but skips the `mmvq_f32`
+/// scratch + the separate `cast_f32_to_f16` launch. Kernel bodies are
+/// shared with the F32 variants via templated `__device__` thunks in
+/// `mmvq_q{4_0, 4_1, 8_0}*.cu`; this entry point is opt-in per consumer
+/// (#120). Caller must ensure `dst_f16` is sized `n_rows × sizeof(fp16)`.
+///
+/// Supported dtypes: `Q4_0`, `Q4_1`, `Q8_0`. Other dtypes bail —
+/// extending the set is mechanical (add the templated thunk in the
+/// kernel + a `match` arm here).
+pub fn mmvq_f16_direct(
+    reg: &OpsRegistry,
+    stream: &HipStream,
+    weights: DevicePtr,
+    act_q8_1: DevicePtr,
+    dst_f16: DevicePtr,
+    n_rows: usize,
+    k: usize,
+    dtype_weight: QDtype,
+) -> Result<()> {
+    // Per-dtype (stem, entry, threads, rows_per_block, units_per_row).
+    // units_per_row matches the kernel's second-to-last int param:
+    //   - Q4_0..Q8_0  → n_blocks_per_row     = k / 32
+    //   - Q2_K..Q8_K  → n_superblocks_per_row = k / QK_K (256)
+    assert_eq!(k % 32, 0, "mmvq_f16_direct requires k % 32 == 0");
+    let n_blocks_q32 = k / 32;
+    let n_superblocks = k / 256;
+    let (stem, entry, threads, rows_per_block, units) = match dtype_weight {
+        QDtype::Q4_0 => (
+            "mmvq_q4_0",
+            "flambeau_mmvq_q4_0_q8_1_f16",
+            256u32,
+            1u32,
+            n_blocks_q32,
+        ),
+        QDtype::Q4_1 => (
+            "mmvq_q4_1_t128",
+            "flambeau_mmvq_q4_1_t128_q8_1_f16",
+            128,
+            1,
+            n_blocks_q32,
+        ),
+        QDtype::Q5_0 => (
+            "mmvq_q5_0",
+            "flambeau_mmvq_q5_0_q8_1_f16",
+            256,
+            1,
+            n_blocks_q32,
+        ),
+        QDtype::Q5_1 => (
+            "mmvq_q5_1",
+            "flambeau_mmvq_q5_1_q8_1_f16",
+            256,
+            1,
+            n_blocks_q32,
+        ),
+        QDtype::Q8_0 => (
+            "mmvq_q8_0_t128_vdr2",
+            "flambeau_mmvq_q8_0_t128_vdr2_q8_1_f16",
+            128,
+            1,
+            n_blocks_q32,
+        ),
+        QDtype::Q2_K => (
+            "mmvq_q2_k_r2",
+            "flambeau_mmvq_q2_K_r2_q8_1_f16",
+            64,
+            2,
+            n_superblocks,
+        ),
+        QDtype::Q3_K => (
+            "mmvq_q3_k_r2",
+            "flambeau_mmvq_q3_k_r2_q8_1_f16",
+            64,
+            2,
+            n_superblocks,
+        ),
+        QDtype::Q4_K => (
+            "mmvq_q4_k_r2",
+            "flambeau_mmvq_q4_k_r2_q8_1_f16",
+            64,
+            2,
+            n_superblocks,
+        ),
+        QDtype::Q5_K => (
+            "mmvq_q5_k_r2",
+            "flambeau_mmvq_q5_k_r2_q8_1_f16",
+            64,
+            2,
+            n_superblocks,
+        ),
+        QDtype::Q6_K => (
+            "mmvq_q6_k_dp4a",
+            "flambeau_mmvq_q6_k_dp4a_q8_1_f16",
+            64,
+            1,
+            n_superblocks,
+        ),
+        QDtype::Q8_K => (
+            "mmvq_q8_k",
+            "flambeau_mmvq_q8_K_q8_1_f16",
+            256,
+            1,
+            n_superblocks,
+        ),
+        QDtype::IQ1_S => (
+            "mmvq_iq1_s_r2",
+            "flambeau_mmvq_iq1_s_r2_q8_1_f16",
+            64,
+            2,
+            n_superblocks,
+        ),
+        QDtype::IQ1_M => (
+            "mmvq_iq1_m_r2",
+            "flambeau_mmvq_iq1_m_r2_q8_1_f16",
+            64,
+            2,
+            n_superblocks,
+        ),
+        QDtype::IQ2_XXS => (
+            "mmvq_iq2_xxs_r2",
+            "flambeau_mmvq_iq2_xxs_r2_q8_1_f16",
+            64,
+            2,
+            n_superblocks,
+        ),
+        QDtype::IQ2_XS => (
+            "mmvq_iq2_xs_r2",
+            "flambeau_mmvq_iq2_xs_r2_q8_1_f16",
+            64,
+            2,
+            n_superblocks,
+        ),
+        QDtype::IQ2_S => (
+            "mmvq_iq2_s_r2",
+            "flambeau_mmvq_iq2_s_r2_q8_1_f16",
+            64,
+            2,
+            n_superblocks,
+        ),
+        QDtype::IQ3_XXS => (
+            "mmvq_iq3_xxs_r2",
+            "flambeau_mmvq_iq3_xxs_r2_q8_1_f16",
+            64,
+            2,
+            n_superblocks,
+        ),
+        QDtype::IQ3_S => (
+            "mmvq_iq3_s_r2",
+            "flambeau_mmvq_iq3_s_r2_q8_1_f16",
+            64,
+            2,
+            n_superblocks,
+        ),
+        QDtype::IQ4_NL => (
+            "mmvq_iq4_nl_r2",
+            "flambeau_mmvq_iq4_nl_r2_q8_1_f16",
+            64,
+            2,
+            n_blocks_q32,
+        ),
+        QDtype::IQ4_XS => (
+            "mmvq_iq4_xs_r2",
+            "flambeau_mmvq_iq4_xs_r2_q8_1_f16",
+            64,
+            2,
+            n_superblocks,
+        ),
+        other => bail!("mmvq_f16_direct: no F16-direct kernel for {}", other.name()),
+    };
+    mmvq_simple_launch(
+        reg,
+        stream,
+        stem,
+        entry,
+        weights,
+        act_q8_1,
+        dst_f16,
+        n_rows,
+        units,
+        threads,
+        rows_per_block,
+    )
+}
+
+/// Common launch path for Q-weight MMVQ kernels taking
+/// (w, y_q8_1, dst, n_rows, n_units_per_row).
+///
+/// Caller must pass `(threads, rows_per_block)` explicitly. `threads`
+/// is the kernel's `blockDim.x`; over-launching against a kernel with
+/// `__launch_bounds__` triggers a HIP launch failure, under-launching
+/// silently produces wrong results (warp-count math reads stale lanes).
+/// `rows_per_block` is how many output rows a single block writes —
+/// 1 for traditional single-row kernels, 2 for r2 K-quant multi-row.
+/// Grid = `ceil(n_rows / rows_per_block)`. `units_per_row` is the
+/// caller-defined inner-loop count (n_blocks for 32-element-block
+/// dtypes, n_superblocks for K-quants). #120 / #120-followup.
+pub fn mmvq_simple_launch(
     reg: &OpsRegistry,
     stream: &HipStream,
     module_stem: &'static str,
@@ -981,13 +1291,14 @@ fn mmvq_simple_launch(
     act_q8_1: DevicePtr,
     dst: DevicePtr,
     n_rows: usize,
-    k: usize,
+    units_per_row: usize,
+    threads: u32,
+    rows_per_block: u32,
 ) -> Result<()> {
-    assert_eq!(k % 32, 0, "{module_stem} requires k % 32 == 0");
     let module = reg.expect_module(module_stem)?;
     let kernel = module.kernel(kernel_entry)?;
     let n_rows_i = n_rows as i32;
-    let n_blocks_i = (k / 32) as i32;
+    let n_units_i = units_per_row as i32;
     let w_ptr: u64 = weights.as_usize() as u64;
     let y_ptr: u64 = act_q8_1.as_usize() as u64;
     let d_ptr: u64 = dst.as_usize() as u64;
@@ -996,8 +1307,9 @@ fn mmvq_simple_launch(
     args.push(&y_ptr);
     args.push(&d_ptr);
     args.push(&n_rows_i);
-    args.push(&n_blocks_i);
-    let cfg = LaunchCfg::one_d(n_rows as u32, 256);
+    args.push(&n_units_i);
+    let grid = (n_rows as u32).div_ceil(rows_per_block);
+    let cfg = LaunchCfg::one_d(grid, threads);
     unsafe { kernel.launch(stream, cfg, args)? };
     Ok(())
 }
@@ -1039,7 +1351,11 @@ fn mmq_f16_tile_launch(
     args.push(&n_blocks_i);
     // Block = 64 threads (wave64), grid = (⌈n_rows / 64⌉, ⌈n_tokens / 8⌉).
     let cfg = LaunchCfg {
-        grid: ((n_rows as u32).div_ceil(64), (n_tokens as u32).div_ceil(8), 1),
+        grid: (
+            (n_rows as u32).div_ceil(64),
+            (n_tokens as u32).div_ceil(8),
+            1,
+        ),
         block: (64, 1, 1),
         shared_bytes: 0,
     };
@@ -1146,7 +1462,9 @@ pub fn mmq(
     })?;
     let recipe = Recipe::from_impl_id(desc.impl_id)?;
     let nb_per_row = k / block_elems(dtype_weight);
-    mmq_launch(reg, stream, recipe, weights, act_q8_1, dst, n, m, nb_per_row)
+    mmq_launch(
+        reg, stream, recipe, weights, act_q8_1, dst, n, m, nb_per_row,
+    )
 }
 
 // ---------------------------------------------------------------------------
@@ -1207,12 +1525,8 @@ impl Recipe {
         // Single-row Q8_0 dispatch rows are aliased to the t128_vdr2 kernel
         // (≥+3 % on Qwen3.6-27B-Q8_0 and Qwen3.5-27B-Q8_0).
         let impl_id = match impl_id {
-            "qmatmul_q8_0_mmvq_single_row_gfx906" => {
-                "qmatmul_q8_0_mmvq_t128_vdr2_gfx906"
-            }
-            "qmatmul_q8_0_mmvq_dp4a_vdr2_gfx906" => {
-                "qmatmul_q8_0_mmvq_t128_vdr2_gfx906"
-            }
+            "qmatmul_q8_0_mmvq_single_row_gfx906" => "qmatmul_q8_0_mmvq_t128_vdr2_gfx906",
+            "qmatmul_q8_0_mmvq_dp4a_vdr2_gfx906" => "qmatmul_q8_0_mmvq_t128_vdr2_gfx906",
             other => other,
         };
         Ok(match impl_id {
@@ -1393,54 +1707,84 @@ impl Recipe {
                 mmq_tile: (0, 0),
             },
             "qmatmul_iq2_xxs_mmvq_single_row_gfx906" => Self {
-                kind: RecipeKind::Mmvq, stem: "mmvq_iq2_xxs",
+                kind: RecipeKind::Mmvq,
+                stem: "mmvq_iq2_xxs",
                 entry: "flambeau_mmvq_iq2_xxs_q8_1",
-                threads: 64, rows_per_block: 1, mmq_tile: (0, 0),
+                threads: 64,
+                rows_per_block: 1,
+                mmq_tile: (0, 0),
             },
             "qmatmul_iq2_xxs_mmvq_nw1_r2_gfx906" => Self {
-                kind: RecipeKind::Mmvq, stem: "mmvq_iq2_xxs_r2",
+                kind: RecipeKind::Mmvq,
+                stem: "mmvq_iq2_xxs_r2",
                 entry: "flambeau_mmvq_iq2_xxs_r2_q8_1",
-                threads: 64, rows_per_block: 2, mmq_tile: (0, 0),
+                threads: 64,
+                rows_per_block: 2,
+                mmq_tile: (0, 0),
             },
             "qmatmul_iq2_xs_mmvq_single_row_gfx906" => Self {
-                kind: RecipeKind::Mmvq, stem: "mmvq_iq2_xs",
+                kind: RecipeKind::Mmvq,
+                stem: "mmvq_iq2_xs",
                 entry: "flambeau_mmvq_iq2_xs_q8_1",
-                threads: 64, rows_per_block: 1, mmq_tile: (0, 0),
+                threads: 64,
+                rows_per_block: 1,
+                mmq_tile: (0, 0),
             },
             "qmatmul_iq2_xs_mmvq_nw1_r2_gfx906" => Self {
-                kind: RecipeKind::Mmvq, stem: "mmvq_iq2_xs_r2",
+                kind: RecipeKind::Mmvq,
+                stem: "mmvq_iq2_xs_r2",
                 entry: "flambeau_mmvq_iq2_xs_r2_q8_1",
-                threads: 64, rows_per_block: 2, mmq_tile: (0, 0),
+                threads: 64,
+                rows_per_block: 2,
+                mmq_tile: (0, 0),
             },
             "qmatmul_iq2_s_mmvq_single_row_gfx906" => Self {
-                kind: RecipeKind::Mmvq, stem: "mmvq_iq2_s",
+                kind: RecipeKind::Mmvq,
+                stem: "mmvq_iq2_s",
                 entry: "flambeau_mmvq_iq2_s_q8_1",
-                threads: 64, rows_per_block: 1, mmq_tile: (0, 0),
+                threads: 64,
+                rows_per_block: 1,
+                mmq_tile: (0, 0),
             },
             "qmatmul_iq2_s_mmvq_nw1_r2_gfx906" => Self {
-                kind: RecipeKind::Mmvq, stem: "mmvq_iq2_s_r2",
+                kind: RecipeKind::Mmvq,
+                stem: "mmvq_iq2_s_r2",
                 entry: "flambeau_mmvq_iq2_s_r2_q8_1",
-                threads: 64, rows_per_block: 2, mmq_tile: (0, 0),
+                threads: 64,
+                rows_per_block: 2,
+                mmq_tile: (0, 0),
             },
             "qmatmul_iq1_s_mmvq_single_row_gfx906" => Self {
-                kind: RecipeKind::Mmvq, stem: "mmvq_iq1_s",
+                kind: RecipeKind::Mmvq,
+                stem: "mmvq_iq1_s",
                 entry: "flambeau_mmvq_iq1_s_q8_1",
-                threads: 64, rows_per_block: 1, mmq_tile: (0, 0),
+                threads: 64,
+                rows_per_block: 1,
+                mmq_tile: (0, 0),
             },
             "qmatmul_iq1_s_mmvq_nw1_r2_gfx906" => Self {
-                kind: RecipeKind::Mmvq, stem: "mmvq_iq1_s_r2",
+                kind: RecipeKind::Mmvq,
+                stem: "mmvq_iq1_s_r2",
                 entry: "flambeau_mmvq_iq1_s_r2_q8_1",
-                threads: 64, rows_per_block: 2, mmq_tile: (0, 0),
+                threads: 64,
+                rows_per_block: 2,
+                mmq_tile: (0, 0),
             },
             "qmatmul_iq1_m_mmvq_single_row_gfx906" => Self {
-                kind: RecipeKind::Mmvq, stem: "mmvq_iq1_m",
+                kind: RecipeKind::Mmvq,
+                stem: "mmvq_iq1_m",
                 entry: "flambeau_mmvq_iq1_m_q8_1",
-                threads: 64, rows_per_block: 1, mmq_tile: (0, 0),
+                threads: 64,
+                rows_per_block: 1,
+                mmq_tile: (0, 0),
             },
             "qmatmul_iq1_m_mmvq_nw1_r2_gfx906" => Self {
-                kind: RecipeKind::Mmvq, stem: "mmvq_iq1_m_r2",
+                kind: RecipeKind::Mmvq,
+                stem: "mmvq_iq1_m_r2",
                 entry: "flambeau_mmvq_iq1_m_r2_q8_1",
-                threads: 64, rows_per_block: 2, mmq_tile: (0, 0),
+                threads: 64,
+                rows_per_block: 2,
+                mmq_tile: (0, 0),
             },
             //— dense MMQ wave64 for IQ family.
             // MMQ_Y=64, TILE_N=8 (same tile shape as the K-quant wave64 MMQ).
@@ -1448,48 +1792,73 @@ impl Recipe {
                 kind: RecipeKind::MmqWave64,
                 stem: "mmq_iq4_xs_wave64",
                 entry: "flambeau_mmq_iq4_xs_wave64_q8_1",
-                threads: 64, rows_per_block: 0, mmq_tile: (64, 8),
+                threads: 64,
+                rows_per_block: 0,
+                mmq_tile: (64, 8),
             },
             "qmatmul_iq3_s_mmq_wave64_gfx906" => Self {
                 kind: RecipeKind::MmqWave64,
                 stem: "mmq_iq3_s_wave64",
                 entry: "flambeau_mmq_iq3_s_wave64_q8_1",
-                threads: 64, rows_per_block: 0, mmq_tile: (64, 8),
+                threads: 64,
+                rows_per_block: 0,
+                mmq_tile: (64, 8),
             },
             "qmatmul_iq4_nl_mmq_wave64_gfx906" => Self {
-                kind: RecipeKind::MmqWave64, stem: "mmq_iq4_nl_wave64",
+                kind: RecipeKind::MmqWave64,
+                stem: "mmq_iq4_nl_wave64",
                 entry: "flambeau_mmq_iq4_nl_wave64_q8_1",
-                threads: 64, rows_per_block: 0, mmq_tile: (64, 8),
+                threads: 64,
+                rows_per_block: 0,
+                mmq_tile: (64, 8),
             },
             "qmatmul_iq3_xxs_mmq_wave64_gfx906" => Self {
-                kind: RecipeKind::MmqWave64, stem: "mmq_iq3_xxs_wave64",
+                kind: RecipeKind::MmqWave64,
+                stem: "mmq_iq3_xxs_wave64",
                 entry: "flambeau_mmq_iq3_xxs_wave64_q8_1",
-                threads: 64, rows_per_block: 0, mmq_tile: (64, 8),
+                threads: 64,
+                rows_per_block: 0,
+                mmq_tile: (64, 8),
             },
             "qmatmul_iq2_xxs_mmq_wave64_gfx906" => Self {
-                kind: RecipeKind::MmqWave64, stem: "mmq_iq2_xxs_wave64",
+                kind: RecipeKind::MmqWave64,
+                stem: "mmq_iq2_xxs_wave64",
                 entry: "flambeau_mmq_iq2_xxs_wave64_q8_1",
-                threads: 64, rows_per_block: 0, mmq_tile: (64, 8),
+                threads: 64,
+                rows_per_block: 0,
+                mmq_tile: (64, 8),
             },
             "qmatmul_iq2_xs_mmq_wave64_gfx906" => Self {
-                kind: RecipeKind::MmqWave64, stem: "mmq_iq2_xs_wave64",
+                kind: RecipeKind::MmqWave64,
+                stem: "mmq_iq2_xs_wave64",
                 entry: "flambeau_mmq_iq2_xs_wave64_q8_1",
-                threads: 64, rows_per_block: 0, mmq_tile: (64, 8),
+                threads: 64,
+                rows_per_block: 0,
+                mmq_tile: (64, 8),
             },
             "qmatmul_iq2_s_mmq_wave64_gfx906" => Self {
-                kind: RecipeKind::MmqWave64, stem: "mmq_iq2_s_wave64",
+                kind: RecipeKind::MmqWave64,
+                stem: "mmq_iq2_s_wave64",
                 entry: "flambeau_mmq_iq2_s_wave64_q8_1",
-                threads: 64, rows_per_block: 0, mmq_tile: (64, 8),
+                threads: 64,
+                rows_per_block: 0,
+                mmq_tile: (64, 8),
             },
             "qmatmul_iq1_s_mmq_wave64_gfx906" => Self {
-                kind: RecipeKind::MmqWave64, stem: "mmq_iq1_s_wave64",
+                kind: RecipeKind::MmqWave64,
+                stem: "mmq_iq1_s_wave64",
                 entry: "flambeau_mmq_iq1_s_wave64_q8_1",
-                threads: 64, rows_per_block: 0, mmq_tile: (64, 8),
+                threads: 64,
+                rows_per_block: 0,
+                mmq_tile: (64, 8),
             },
             "qmatmul_iq1_m_mmq_wave64_gfx906" => Self {
-                kind: RecipeKind::MmqWave64, stem: "mmq_iq1_m_wave64",
+                kind: RecipeKind::MmqWave64,
+                stem: "mmq_iq1_m_wave64",
                 entry: "flambeau_mmq_iq1_m_wave64_q8_1",
-                threads: 64, rows_per_block: 0, mmq_tile: (64, 8),
+                threads: 64,
+                rows_per_block: 0,
+                mmq_tile: (64, 8),
             },
             "qmatmul_q4_1_mmvq_dp4a_gfx906" => Self {
                 kind: RecipeKind::Mmvq,
@@ -1529,6 +1898,14 @@ impl Recipe {
                 entry: "flambeau_mmvq_q5_k_r2_q8_1",
                 threads: 64,
                 rows_per_block: 2,
+                mmq_tile: (0, 0),
+            },
+            "qmatmul_q5_K_mmvq_dp4a_gfx906" => Self {
+                kind: RecipeKind::Mmvq,
+                stem: "mmvq_q5_k_dp4a",
+                entry: "flambeau_mmvq_q5_k_dp4a_q8_1",
+                threads: 256,
+                rows_per_block: 1,
                 mmq_tile: (0, 0),
             },
             "qmatmul_q6_K_mmvq_nw1_r4_gfx906" => Self {
@@ -1611,7 +1988,7 @@ impl Recipe {
                 kind: RecipeKind::MmqLdsX64,
                 stem: "mmq_q4_1_4warp_lds",
                 entry: "flambeau_mmq_q4_1_4warp_lds_q8_1",
-                threads: 0,      // unused for MmqLdsX64 (2D block dims hard-coded in launcher)
+                threads: 0, // unused for MmqLdsX64 (2D block dims hard-coded in launcher)
                 rows_per_block: 0,
                 // MMQ_Y=128, MMQ_X=64 — used by the launcher to compute the grid
                 // and dynamic LDS bytes. These MUST match mmq_q4_1_4warp_lds.cu.
@@ -1698,7 +2075,7 @@ impl Recipe {
                 kind: RecipeKind::MmqLdsX64,
                 stem: "mmq_q4_K_turbo",
                 entry: "flambeau_mmq_q4_K_turbo_q8_1",
-                threads: 0,  // unused for MmqLdsX64
+                threads: 0, // unused for MmqLdsX64
                 rows_per_block: 0,
                 // MMQ_Y=128, MMQ_X=16 (must match mmq_q4_K_turbo.cu).
                 mmq_tile: (128, 16),
@@ -1919,7 +2296,7 @@ fn mmq_wave64_launch(
     let ncols_x = k as i32;
     let nrows_x = n_rows as i32;
     let ncols_y = n_batches as i32;
-    let nrows_y = k as i32;  // Y's K dim in elements (blocks = K / QK8_1)
+    let nrows_y = k as i32; // Y's K dim in elements (blocks = K / QK8_1)
     let nrows_dst = n_rows as i32;
     let w_ptr: u64 = weights.as_usize() as u64;
     let a_ptr: u64 = act_q8_1.as_usize() as u64;
@@ -1948,8 +2325,12 @@ fn mmq_wave64_launch(
 fn block_elems(dtype: QDtype) -> usize {
     use flambeau_quant::{QK8_0, QK_K};
     match dtype {
-        QDtype::Q8_0 | QDtype::Q8_1 | QDtype::Q4_0 | QDtype::Q4_1 | QDtype::Q5_0 | QDtype::Q5_1 => QK8_0,
-        QDtype::Q2_K | QDtype::Q3_K | QDtype::Q4_K | QDtype::Q5_K | QDtype::Q6_K | QDtype::Q8_K => QK_K,
+        QDtype::Q8_0 | QDtype::Q8_1 | QDtype::Q4_0 | QDtype::Q4_1 | QDtype::Q5_0 | QDtype::Q5_1 => {
+            QK8_0
+        }
+        QDtype::Q2_K | QDtype::Q3_K | QDtype::Q4_K | QDtype::Q5_K | QDtype::Q6_K | QDtype::Q8_K => {
+            QK_K
+        }
         // IQ4_NL is a 32-elem block (like Q4_0); IQ4_XS is a 256-elem
         // super-block (like Q4_K).
         QDtype::IQ4_NL => QK8_0,
@@ -1958,8 +2339,7 @@ fn block_elems(dtype: QDtype) -> usize {
         // shape as Q3_K / Q4_K).
         QDtype::IQ3_XXS | QDtype::IQ3_S => QK_K,
         // IQ2 + IQ1 family all share the 256-elem super-block shape.
-        QDtype::IQ2_XXS | QDtype::IQ2_XS | QDtype::IQ2_S
-        | QDtype::IQ1_S | QDtype::IQ1_M => QK_K,
+        QDtype::IQ2_XXS | QDtype::IQ2_XS | QDtype::IQ2_S | QDtype::IQ1_S | QDtype::IQ1_M => QK_K,
         // F16 has no native block; return the Q8_1 stride (QK8_1) so the
         // caller's `n_blocks_per_row = k / block_elems` matches the
         // activation side, which is what the F16 MMVQ kernel iterates over.

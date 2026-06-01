@@ -238,8 +238,21 @@ mod tests {
     #[test]
     fn p04_json_mode_no_explicit_temp_clamps_to_low() {
         let p = SamplingParams::from_parts(
-            None, None, None, None, None, None, None, None, None,
-            /*json_mode=*/ true, vec![], None, false, vec![], &defaults_none(),
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            /*json_mode=*/ true,
+            vec![],
+            None,
+            false,
+            vec![],
+            &defaults_none(),
         );
         assert!((p.sampling.temperature - 0.2).abs() < 1e-6);
     }
@@ -247,8 +260,21 @@ mod tests {
     #[test]
     fn p04_json_mode_explicit_temp_wins() {
         let p = SamplingParams::from_parts(
-            Some(0.9), None, None, None, None, None, None, None, None,
-            /*json_mode=*/ true, vec![], None, false, vec![], &defaults_none(),
+            Some(0.9),
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            /*json_mode=*/ true,
+            vec![],
+            None,
+            false,
+            vec![],
+            &defaults_none(),
         );
         assert!((p.sampling.temperature - 0.9).abs() < 1e-6);
     }
@@ -256,8 +282,21 @@ mod tests {
     #[test]
     fn p04_non_json_mode_keeps_default() {
         let p = SamplingParams::from_parts(
-            None, None, None, None, None, None, None, None, None,
-            /*json_mode=*/ false, vec![], None, false, vec![], &defaults_none(),
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            /*json_mode=*/ false,
+            vec![],
+            None,
+            false,
+            vec![],
+            &defaults_none(),
         );
         assert!((p.sampling.temperature - 1.0).abs() < 1e-6);
     }
@@ -265,8 +304,21 @@ mod tests {
     #[test]
     fn p04_json_mode_explicit_zero_temp_stays_greedy() {
         let p = SamplingParams::from_parts(
-            Some(0.0), None, None, None, None, None, None, None, None,
-            /*json_mode=*/ true, vec![], None, false, vec![], &defaults_none(),
+            Some(0.0),
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            /*json_mode=*/ true,
+            vec![],
+            None,
+            false,
+            vec![],
+            &defaults_none(),
         );
         assert!(p.sampling.temperature.abs() < 1e-6);
     }

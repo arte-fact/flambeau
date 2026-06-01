@@ -65,7 +65,11 @@ pub struct CollectiveCfg {
 
 impl CollectiveCfg {
     pub fn new(elem_count: usize, dtype: CollectiveDType, op: ReduceOp) -> Self {
-        Self { elem_count, dtype, op }
+        Self {
+            elem_count,
+            dtype,
+            op,
+        }
     }
 
     pub fn buffer_bytes(&self) -> usize {
@@ -92,7 +96,10 @@ impl LayerAssignment {
     /// ranks) the split is exactly 10/10/10/10.
     pub fn contiguous(num_layers: usize, num_ranks: u32) -> Self {
         assert!(num_ranks >= 1, "num_ranks must be >= 1");
-        assert!(num_layers >= num_ranks as usize, "num_layers must be >= num_ranks");
+        assert!(
+            num_layers >= num_ranks as usize,
+            "num_layers must be >= num_ranks"
+        );
         let r = num_ranks as usize;
         let per = num_layers.div_ceil(r);
         let layer_to_rank = (0..num_layers)
@@ -120,7 +127,10 @@ impl LayerAssignment {
                 layer_to_rank.push(RankId(rank as u32));
             }
         }
-        Self { layer_to_rank, num_ranks }
+        Self {
+            layer_to_rank,
+            num_ranks,
+        }
     }
 
     pub fn num_layers(&self) -> usize {

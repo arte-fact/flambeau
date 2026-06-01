@@ -12,7 +12,7 @@
 //! per-slot loop bound in the kernel)
 //! - (n_heads_q, n_heads_kv): (32, 4) for Qwen3.5 GQA-32/4 and
 //! (16, 2) for Qwen3.6 GQA-16/2
-//! - head_dim ∈ {128, 256}
+//! - head_dim ∈ {128, 256, 512} — 512 covers gemma4 full-attn layers
 
 #![cfg(feature = "hip")]
 #![expect(
@@ -24,9 +24,7 @@
 use anyhow::Result;
 use flambeau_backend_hip::{device_count, HipDevice};
 use flambeau_core::{CopyDirection, Device, DevicePtr, Stream};
-use flambeau_ops::hip::attention::{
-    attention_decode_f16_batched, attention_decode_f16_slots,
-};
+use flambeau_ops::hip::attention::{attention_decode_f16_batched, attention_decode_f16_slots};
 use flambeau_ops::OpsRegistry;
 use half::f16;
 
@@ -121,11 +119,17 @@ fn run_parity(
     seed: u64,
 ) -> Result<()> {
     assert_eq!(slot_kv_lens.len(), n_slots);
-    let Some(dev) = dev_or_skip() else { return Ok(()); };
+    let Some(dev) = dev_or_skip() else {
+        return Ok(());
+    };
     let reg = OpsRegistry::new(&dev).expect("registry");
     let stream = dev.default_stream();
 
-    let Shape { n_heads_q, n_heads_kv, head_dim } = shape;
+    let Shape {
+        n_heads_q,
+        n_heads_kv,
+        head_dim,
+    } = shape;
     let q_per_slot = n_heads_q * head_dim;
     let kv_stride_per_token = n_heads_kv * head_dim; // F16 elements
     let scale = (head_dim as f32).sqrt().recip();
@@ -138,8 +142,14 @@ fn run_parity(
     for s in 0..n_slots {
         all_q.extend(seeded_f16(seed.wrapping_add(s as u64 * 7 + 1), q_per_slot));
         let kv_n = slot_kv_lens[s];
-        per_slot_k.push(seeded_f16(seed.wrapping_add(s as u64 * 7 + 2), kv_n * kv_stride_per_token));
-        per_slot_v.push(seeded_f16(seed.wrapping_add(s as u64 * 7 + 3), kv_n * kv_stride_per_token));
+        per_slot_k.push(seeded_f16(
+            seed.wrapping_add(s as u64 * 7 + 2),
+            kv_n * kv_stride_per_token,
+        ));
+        per_slot_v.push(seeded_f16(
+            seed.wrapping_add(s as u64 * 7 + 3),
+            kv_n * kv_stride_per_token,
+        ));
     }
 
     // 2. Upload everything to the device.
@@ -177,6 +187,7 @@ fn run_parity(
             head_dim,
             slot_kv_lens[s],
             scale,
+            /* window_size = */ 0,
             None,
         )?;
     }
@@ -253,7 +264,11 @@ fn run_parity(
 
 #[test]
 fn parity_qwen35_gqa32_4_hd128() -> Result<()> {
-    let shape = Shape { n_heads_q: 32, n_heads_kv: 4, head_dim: 128 };
+    let shape = Shape {
+        n_heads_q: 32,
+        n_heads_kv: 4,
+        head_dim: 128,
+    };
     // N=1 — regression guard for the wiring task (#266c).
     run_parity("Qwen3.5/N=1/kv=128", shape, 1, &[128], 0xA5)?;
     // N=2 / homogeneous KV-len.
@@ -274,14 +289,24 @@ fn parity_qwen35_gqa32_4_hd128() -> Result<()> {
 
 #[test]
 fn parity_qwen36_gqa16_2_hd256() -> Result<()> {
-    let shape = Shape { n_heads_q: 16, n_heads_kv: 2, head_dim: 256 };
+    let shape = Shape {
+        n_heads_q: 16,
+        n_heads_kv: 2,
+        head_dim: 256,
+    };
     // N=1 — regression guard.
     run_parity("Qwen3.6/N=1/kv=128", shape, 1, &[128], 0xB5)?;
     // N=2 / TP=2 local: local_n_heads=8, but the test uses full
     // n_heads_q=16 to also exercise the n_heads_q>n_heads_kv group.
     run_parity("Qwen3.6/N=2/kv=mix", shape, 2, &[256, 1024], 0xB6)?;
     // N=4 / Qwen3.6 prod shape — head_dim=256 stresses LDS budget.
-    run_parity("Qwen3.6/N=4/kv=mix", shape, 4, &[128, 512, 1024, 2048], 0xB7)?;
+    run_parity(
+        "Qwen3.6/N=4/kv=mix",
+        shape,
+        4,
+        &[128, 512, 1024, 2048],
+        0xB7,
+    )?;
     // N=8 / longer.
     run_parity(
         "Qwen3.6/N=8/kv=long",
@@ -289,6 +314,29 @@ fn parity_qwen36_gqa16_2_hd256() -> Result<()> {
         8,
         &[256, 512, 1024, 2048, 1024, 512, 256, 4096],
         0xB8,
+    )?;
+    Ok(())
+}
+
+/// Gemma4 26B-A4B full-attention layer shape: head_dim=512, GQA-16/2.
+/// The cap was 256 until Phase 13 extended splitk/batched/q8_kv to 512;
+/// this case keeps that extension green and proves the batched path
+/// works at the new max head_dim alongside the smaller models.
+#[test]
+fn parity_gemma4_full_attn_gqa16_2_hd512() -> Result<()> {
+    let shape = Shape {
+        n_heads_q: 16,
+        n_heads_kv: 2,
+        head_dim: 512,
+    };
+    run_parity("Gemma4-26B-A4B/N=1/kv=128", shape, 1, &[128], 0xD5)?;
+    run_parity("Gemma4-26B-A4B/N=2/kv=mix", shape, 2, &[256, 1024], 0xD6)?;
+    run_parity(
+        "Gemma4-26B-A4B/N=4/kv=mix",
+        shape,
+        4,
+        &[128, 512, 1024, 2048],
+        0xD7,
     )?;
     Ok(())
 }
@@ -301,9 +349,19 @@ fn parity_qwen36_gqa16_2_hd256() -> Result<()> {
 fn parity_qwen36_tp2_local() -> Result<()> {
     // Qwen3.6 27B: num_heads=32, num_kv_heads=4 globally.
     // TP=2 sliced: local_n_heads=16, local_n_kv_heads=2.
-    let shape = Shape { n_heads_q: 16, n_heads_kv: 2, head_dim: 128 };
+    let shape = Shape {
+        n_heads_q: 16,
+        n_heads_kv: 2,
+        head_dim: 128,
+    };
     run_parity("Qwen3.6-27B/TP=2/N=1", shape, 1, &[256], 0xC5)?;
     run_parity("Qwen3.6-27B/TP=2/N=2", shape, 2, &[256, 512], 0xC6)?;
-    run_parity("Qwen3.6-27B/TP=2/N=4", shape, 4, &[128, 256, 512, 1024], 0xC7)?;
+    run_parity(
+        "Qwen3.6-27B/TP=2/N=4",
+        shape,
+        4,
+        &[128, 256, 512, 1024],
+        0xC7,
+    )?;
     Ok(())
 }

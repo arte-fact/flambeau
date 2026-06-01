@@ -1,4 +1,4 @@
-// mmvq_q4_0 — Q4_0 weight × Q8_1 activation → F32 dst, DP4A inner loop.
+// mmvq_q4_0 — Q4_0 weight × Q8_1 activation → {F32, F16} dst, DP4A inner loop.
 // Q4_0 is the legacy 4-bit quant without a min: 18 bytes/block = 2-byte F16
 // scale d + 16 bytes nibble-packed unsigned quants. Reconstruction is
 // `y = d * (q - 8)` where `q ∈ [0, 15]`.
@@ -16,9 +16,15 @@
 // vi_lo = (v >> 0) & 0x0F0F0F0F — 4 low nibbles
 // vi_hi = (v >> 4) & 0x0F0F0F0F — 4 high nibbles
 // Block/grid: blockDim=256, gridDim=n_rows (one block per output row).
+//
+// Two output dtypes via templated __device__ body (#120):
+//   flambeau_mmvq_q4_0_q8_1      → F32 dst (legacy scratch-then-cast path)
+//   flambeau_mmvq_q4_0_q8_1_f16  → F16 dst (saturating; consumer-direct, no
+//                                  scratch + no cast launch)
 
 #include "block_quant.cuh"
 #include "gfx906.cuh"
+#include "mmvq_store.cuh"
 
 #define MMVQ_Q4_0_THREADS 256
 #define MMVQ_Q4_0_WARPS (MMVQ_Q4_0_THREADS / WARP_SIZE)
@@ -29,10 +35,11 @@ static __device__ __forceinline__ int flambeau_q4_0_dp4a(int a, int b, int c) {
     return __builtin_amdgcn_sdot4(a, b, c, false);
 }
 
-extern "C" __global__ void flambeau_mmvq_q4_0_q8_1(
+template<typename OutT>
+__device__ void mmvq_q4_0_q8_1_body(
     const flambeau_block_q4_0* __restrict__ x,
     const flambeau_block_q8_1* __restrict__ y,
-    float* __restrict__ dst,
+    OutT* __restrict__ dst,
     const int n_rows,
     const int n_blocks_per_row
 ) {
@@ -89,7 +96,27 @@ extern "C" __global__ void flambeau_mmvq_q4_0_q8_1(
             v += __shfl_xor(v, off, WARP_SIZE);
         }
         if (lane == 0) {
-            dst[row] = v;
+            mmvq_store<OutT>(dst, row, v);
         }
     }
+}
+
+extern "C" __global__ void flambeau_mmvq_q4_0_q8_1(
+    const flambeau_block_q4_0* __restrict__ x,
+    const flambeau_block_q8_1* __restrict__ y,
+    float* __restrict__ dst,
+    const int n_rows,
+    const int n_blocks_per_row
+) {
+    mmvq_q4_0_q8_1_body<float>(x, y, dst, n_rows, n_blocks_per_row);
+}
+
+extern "C" __global__ void flambeau_mmvq_q4_0_q8_1_f16(
+    const flambeau_block_q4_0* __restrict__ x,
+    const flambeau_block_q8_1* __restrict__ y,
+    fb_fp16_t* __restrict__ dst,
+    const int n_rows,
+    const int n_blocks_per_row
+) {
+    mmvq_q4_0_q8_1_body<fb_fp16_t>(x, y, dst, n_rows, n_blocks_per_row);
 }

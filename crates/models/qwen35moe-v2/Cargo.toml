@@ -1,0 +1,27 @@
+[package]
+name = "flambeau-qwen35moe-v2"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "qwen35moe MoE hybrid (GDN + full-attn-gated + routed-MoE FFN + shared expert) model crate on the v2 stack. Covers Qwen3.5-MoE and Qwen3.6-35B-A3B."
+
+[features]
+default = []
+hip = ["dep:flambeau-backend-hip", "flambeau-forward/hip", "flambeau-model-ops/hip", "flambeau-ops/hip"]
+
+[dependencies]
+flambeau-core = { path = "../../core" }
+flambeau-quant = { path = "../../quant" }
+flambeau-model-ops = { path = "../../model-ops" }
+flambeau-ops = { path = "../../ops" }
+flambeau-forward = { path = "../../forward" }
+flambeau-backend-hip = { path = "../../backend-hip", optional = true }
+anyhow.workspace = true
+thiserror.workspace = true
+half.workspace = true
+bytemuck.workspace = true
+tracing.workspace = true
+
+[lints]
+workspace = true

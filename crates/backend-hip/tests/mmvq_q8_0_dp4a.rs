@@ -46,7 +46,10 @@ fn quantize_q8_0(xs: &[f32]) -> Vec<BlockQ8_0> {
             }
             arr
         };
-        out.push(BlockQ8_0 { d: f16::from_f32(d), qs });
+        out.push(BlockQ8_0 {
+            d: f16::from_f32(d),
+            qs,
+        });
     }
     out
 }
@@ -87,7 +90,9 @@ fn run_kernel(stem: &str, entry: &'static str, n_rows: usize, k: usize, seed: u6
     let d_x = upload(&dev, &x_blocks);
     let d_y_f32 = upload(&dev, &y_f32);
     let y_blocks = k / QK;
-    let d_y_q8_1 = dev.alloc(y_blocks * std::mem::size_of::<BlockQ8_1>()).unwrap();
+    let d_y_q8_1 = dev
+        .alloc(y_blocks * std::mem::size_of::<BlockQ8_1>())
+        .unwrap();
     let d_dst = dev.alloc(n_rows * 4).unwrap();
 
     {
@@ -135,9 +140,11 @@ fn run_kernel(stem: &str, entry: &'static str, n_rows: usize, k: usize, seed: u6
     dev.default_stream().synchronize().unwrap();
 
     unsafe {
-        dev.dealloc(d_x, x_blocks.len() * std::mem::size_of::<BlockQ8_0>()).unwrap();
+        dev.dealloc(d_x, x_blocks.len() * std::mem::size_of::<BlockQ8_0>())
+            .unwrap();
         dev.dealloc(d_y_f32, y_f32.len() * 4).unwrap();
-        dev.dealloc(d_y_q8_1, y_blocks * std::mem::size_of::<BlockQ8_1>()).unwrap();
+        dev.dealloc(d_y_q8_1, y_blocks * std::mem::size_of::<BlockQ8_1>())
+            .unwrap();
         dev.dealloc(d_dst, n_rows * 4).unwrap();
     }
 
@@ -155,15 +162,25 @@ fn mmvq_q8_0_dp4a_matches_scalar_small() {
         (8, 2048, 0x222),
         (16, 4096, 0x333),
         // Shapes used by Qwen3.6-35B-A3B Q8_0 decode dispatch.
-        (8192, 2048, 0xA11),   // attn_qkv
-        (4096, 2048, 0xB22),   // attn_gate
-        (2048, 4096, 0xC33),   // ssm_out
-        (512, 2048, 0xD44),    // attn_k / ffn_shexp
+        (8192, 2048, 0xA11), // attn_qkv
+        (4096, 2048, 0xB22), // attn_gate
+        (2048, 4096, 0xC33), // ssm_out
+        (512, 2048, 0xD44),  // attn_k / ffn_shexp
     ] {
         let scalar = run_kernel("mmvq_q8_0", "flambeau_mmvq_q8_0_q8_1", n_rows, k, seed);
-        let dp4a   = run_kernel("mmvq_q8_0_dp4a", "flambeau_mmvq_q8_0_dp4a_q8_1", n_rows, k, seed);
+        let dp4a = run_kernel(
+            "mmvq_q8_0_dp4a",
+            "flambeau_mmvq_q8_0_dp4a_q8_1",
+            n_rows,
+            k,
+            seed,
+        );
         eprintln!("[n_rows={n_rows} k={k}] scalar={scalar:?} dp4a={dp4a:?}");
-        let max_abs = scalar.iter().zip(&dp4a).map(|(a, b)| (a - b).abs()).fold(0.0f32, f32::max);
+        let max_abs = scalar
+            .iter()
+            .zip(&dp4a)
+            .map(|(a, b)| (a - b).abs())
+            .fold(0.0f32, f32::max);
         let max_ref = scalar.iter().fold(0.0f32, |a, &b| a.max(b.abs())).max(1.0);
         let rel = max_abs / max_ref;
         eprintln!("  max_abs_diff={max_abs:.4e}  rel={rel:.4e}");

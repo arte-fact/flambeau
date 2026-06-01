@@ -136,7 +136,9 @@ struct Shape {
 }
 
 fn run_parity(label: &str, shape: Shape, n_slots: usize, seed: u64) -> Result<bool> {
-    let Some(dev) = dev_or_skip() else { return Ok(true); };
+    let Some(dev) = dev_or_skip() else {
+        return Ok(true);
+    };
     let reg = OpsRegistry::new(&dev).expect("registry");
     let stream = dev.default_stream();
 
@@ -144,13 +146,15 @@ fn run_parity(label: &str, shape: Shape, n_slots: usize, seed: u64) -> Result<bo
     assert_eq!(k % QK_K, 0);
 
     let n_superblocks = n_rows * k / QK_K;
-    let mut w_q4_k_bytes = seeded_u8(seed.wrapping_add(1), n_superblocks * std::mem::size_of::<BlockQ4K>());
+    let mut w_q4_k_bytes = seeded_u8(
+        seed.wrapping_add(1),
+        n_superblocks * std::mem::size_of::<BlockQ4K>(),
+    );
     tame_q4_k_scales(&mut w_q4_k_bytes);
 
     let act_f32 = seeded_f32(seed.wrapping_add(2), n_slots * k, 1.0);
     let d_act_f32 = upload(&dev, &act_f32);
-    let act_q8_1_bytes =
-        n_slots * (k / 32) * std::mem::size_of::<BlockQ8_1>();
+    let act_q8_1_bytes = n_slots * (k / 32) * std::mem::size_of::<BlockQ8_1>();
     let d_act_q8_1 = alloc_zeroed(&dev, act_q8_1_bytes);
     quantize_q8_1(&reg, stream, d_act_f32, d_act_q8_1, n_slots * k)?;
     stream.synchronize()?;
@@ -167,15 +171,31 @@ fn run_parity(label: &str, shape: Shape, n_slots: usize, seed: u64) -> Result<bo
         let act_row = DevicePtr(d_act_q8_1.as_usize() + s * act_row_bytes);
         let dst_row = DevicePtr(d_out_baseline.as_usize() + s * dst_row_bytes);
         qmatmul(
-            &reg, stream, d_w, act_row, DevicePtr(0), dst_row,
-            /* m = */ 1, k, n_rows, QDtype::Q4_K,
+            &reg,
+            stream,
+            d_w,
+            act_row,
+            DevicePtr(0),
+            dst_row,
+            /* m = */ 1,
+            k,
+            n_rows,
+            QDtype::Q4_K,
         )?;
     }
     stream.synchronize()?;
 
     qmatmul(
-        &reg, stream, d_w, d_act_q8_1, DevicePtr(0), d_out_batched,
-        n_slots, k, n_rows, QDtype::Q4_K,
+        &reg,
+        stream,
+        d_w,
+        d_act_q8_1,
+        DevicePtr(0),
+        d_out_batched,
+        n_slots,
+        k,
+        n_rows,
+        QDtype::Q4_K,
     )?;
     stream.synchronize()?;
 
@@ -214,8 +234,22 @@ fn run_parity(label: &str, shape: Shape, n_slots: usize, seed: u64) -> Result<bo
 #[test]
 fn mmvq_q4_k_batched_parity_sweep() -> Result<()> {
     let cases: &[(&str, Shape, &[usize])] = &[
-        ("small", Shape { n_rows: 64,   k: 1024 }, &[2, 3, 4]),
-        ("prod",  Shape { n_rows: 4096, k: 4096 }, &[2, 3, 4]),
+        (
+            "small",
+            Shape {
+                n_rows: 64,
+                k: 1024,
+            },
+            &[2, 3, 4],
+        ),
+        (
+            "prod",
+            Shape {
+                n_rows: 4096,
+                k: 4096,
+            },
+            &[2, 3, 4],
+        ),
     ];
     let mut all_pass = true;
     for (label, shape, slots) in cases {
@@ -226,6 +260,9 @@ fn mmvq_q4_k_batched_parity_sweep() -> Result<()> {
             }
         }
     }
-    assert!(all_pass, "one or more parity cases exceeded the 5e-4 abs-err tolerance");
+    assert!(
+        all_pass,
+        "one or more parity cases exceeded the 5e-4 abs-err tolerance"
+    );
     Ok(())
 }

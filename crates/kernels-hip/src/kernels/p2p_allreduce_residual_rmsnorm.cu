@@ -155,3 +155,176 @@ void flambeau_p2p_allreduce_residual_rmsnorm_tp2(
         out_norm[i] = (fb_fp16_t) (h_v * w_v * rsqrt);
     }
 }
+
+// ------------------------------------------------------------------------
+// Gemma4 post-attn / post-ffn fused path. Different shape from the
+// `_residual_rmsnorm_tp*` kernels above (which fold the AR'd partial
+// INTO `hidden` and then norm `hidden`):
+//
+//   resid_out = resid_in + rmsnorm(Σ proj_partial, post_norm_w, eps)
+//
+// Inputs are F32 projection outputs (saves the upstream
+// `cast_f32_to_f16` launch that S1's split-launch path needed). The
+// AR-summed partial is rmsnormed and added to a SEPARATE input
+// residual; the new residual is written to a fresh output buffer
+// (gemma4's pool advances residual slots per layer).
+//
+// Replaces a 2-launch sequence
+//   `ar_sum_f32(proj_local)` + `rmsnorm_f32_to_f16_add_residual(...)`
+// with one launch.
+//
+// Layout: gridDim={n_rows}, blockDim={256}. Each block handles one
+// row of `n` elements. AR sums held in per-thread registers (max
+// 32 elems/thread × 256 threads = hidden ≤ 8192 supported). Peer
+// BAR1 read happens once per element.
+// ------------------------------------------------------------------------
+
+#define P2P_POSTNORM_MAX_ELEMS_PER_THREAD 32
+
+extern "C" __global__ __launch_bounds__(P2P_AR_NORM_THREADS)
+void flambeau_p2p_allreduce_postattn_residual_rmsnorm_f32_to_f16_tp2(
+    const float*     __restrict__ proj_local,
+    const float*     __restrict__ proj_peer0,
+    const fb_fp16_t* __restrict__ post_norm_w,
+    const fb_fp16_t* __restrict__ resid_in,
+    fb_fp16_t*       __restrict__ resid_out,
+    const unsigned int n,
+    const float eps
+) {
+    const int row  = blockIdx.x;
+    const int tid  = threadIdx.x;
+    const int warp = tid >> 6;
+    const int lane = tid & 63;
+
+    const float*     local_row     = proj_local  + (size_t) row * n;
+    const float*     peer_row      = proj_peer0  + (size_t) row * n;
+    const fb_fp16_t* resid_in_row  = resid_in    + (size_t) row * n;
+    fb_fp16_t*       resid_out_row = resid_out   + (size_t) row * n;
+
+    float ar_sums[P2P_POSTNORM_MAX_ELEMS_PER_THREAD];
+    float sum_sq = 0.0f;
+
+    #pragma unroll
+    for (int k = 0; k < P2P_POSTNORM_MAX_ELEMS_PER_THREAD; ++k) {
+        const int i = tid + k * P2P_AR_NORM_THREADS;
+        if (i < (int) n) {
+            const float s = local_row[i] + peer_row[i];
+            ar_sums[k] = s;
+            sum_sq += s * s;
+        } else {
+            ar_sums[k] = 0.0f;
+        }
+    }
+
+    #pragma unroll
+    for (int off = 32; off > 0; off >>= 1) {
+        sum_sq += __shfl_xor(sum_sq, off, 64);
+    }
+    __shared__ float s_warp[P2P_AR_NORM_WARPS];
+    if (lane == 0) {
+        s_warp[warp] = sum_sq;
+    }
+    __syncthreads();
+    if (warp == 0) {
+        float v = (lane < P2P_AR_NORM_WARPS) ? s_warp[lane] : 0.0f;
+        #pragma unroll
+        for (int off = P2P_AR_NORM_WARPS / 2; off > 0; off >>= 1) {
+            v += __shfl_xor(v, off, 64);
+        }
+        if (lane == 0) {
+            s_warp[0] = v;
+        }
+    }
+    __syncthreads();
+    const float mean_sq = s_warp[0] / (float) n;
+    const float rsqrt   = 1.0f / sqrtf(mean_sq + eps);
+
+    #pragma unroll
+    for (int k = 0; k < P2P_POSTNORM_MAX_ELEMS_PER_THREAD; ++k) {
+        const int i = tid + k * P2P_AR_NORM_THREADS;
+        if (i < (int) n) {
+            const float w = (float) post_norm_w[i];
+            const float r = (float) resid_in_row[i];
+            float out = r + ar_sums[k] * w * rsqrt;
+            if (out > 65504.0f) out = 65504.0f;
+            else if (out < -65504.0f) out = -65504.0f;
+            resid_out_row[i] = (fb_fp16_t) out;
+        }
+    }
+}
+
+extern "C" __global__ __launch_bounds__(P2P_AR_NORM_THREADS)
+void flambeau_p2p_allreduce_postattn_residual_rmsnorm_f32_to_f16_tp4(
+    const float*     __restrict__ proj_local,
+    const float*     __restrict__ proj_peer0,
+    const float*     __restrict__ proj_peer1,
+    const float*     __restrict__ proj_peer2,
+    const fb_fp16_t* __restrict__ post_norm_w,
+    const fb_fp16_t* __restrict__ resid_in,
+    fb_fp16_t*       __restrict__ resid_out,
+    const unsigned int n,
+    const float eps
+) {
+    const int row  = blockIdx.x;
+    const int tid  = threadIdx.x;
+    const int warp = tid >> 6;
+    const int lane = tid & 63;
+
+    const float*     local_row     = proj_local  + (size_t) row * n;
+    const float*     peer0_row     = proj_peer0  + (size_t) row * n;
+    const float*     peer1_row     = proj_peer1  + (size_t) row * n;
+    const float*     peer2_row     = proj_peer2  + (size_t) row * n;
+    const fb_fp16_t* resid_in_row  = resid_in    + (size_t) row * n;
+    fb_fp16_t*       resid_out_row = resid_out   + (size_t) row * n;
+
+    float ar_sums[P2P_POSTNORM_MAX_ELEMS_PER_THREAD];
+    float sum_sq = 0.0f;
+
+    #pragma unroll
+    for (int k = 0; k < P2P_POSTNORM_MAX_ELEMS_PER_THREAD; ++k) {
+        const int i = tid + k * P2P_AR_NORM_THREADS;
+        if (i < (int) n) {
+            const float s = local_row[i] + peer0_row[i] + peer1_row[i] + peer2_row[i];
+            ar_sums[k] = s;
+            sum_sq += s * s;
+        } else {
+            ar_sums[k] = 0.0f;
+        }
+    }
+
+    #pragma unroll
+    for (int off = 32; off > 0; off >>= 1) {
+        sum_sq += __shfl_xor(sum_sq, off, 64);
+    }
+    __shared__ float s_warp[P2P_AR_NORM_WARPS];
+    if (lane == 0) {
+        s_warp[warp] = sum_sq;
+    }
+    __syncthreads();
+    if (warp == 0) {
+        float v = (lane < P2P_AR_NORM_WARPS) ? s_warp[lane] : 0.0f;
+        #pragma unroll
+        for (int off = P2P_AR_NORM_WARPS / 2; off > 0; off >>= 1) {
+            v += __shfl_xor(v, off, 64);
+        }
+        if (lane == 0) {
+            s_warp[0] = v;
+        }
+    }
+    __syncthreads();
+    const float mean_sq = s_warp[0] / (float) n;
+    const float rsqrt   = 1.0f / sqrtf(mean_sq + eps);
+
+    #pragma unroll
+    for (int k = 0; k < P2P_POSTNORM_MAX_ELEMS_PER_THREAD; ++k) {
+        const int i = tid + k * P2P_AR_NORM_THREADS;
+        if (i < (int) n) {
+            const float w = (float) post_norm_w[i];
+            const float r = (float) resid_in_row[i];
+            float out = r + ar_sums[k] * w * rsqrt;
+            if (out > 65504.0f) out = 65504.0f;
+            else if (out < -65504.0f) out = -65504.0f;
+            resid_out_row[i] = (fb_fp16_t) out;
+        }
+    }
+}

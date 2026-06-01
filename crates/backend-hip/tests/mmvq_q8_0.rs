@@ -96,7 +96,9 @@ fn deterministic_rand_f32(seed: u64, n: usize) -> Vec<f32> {
     let mut state = seed.wrapping_mul(6364136223846793005).wrapping_add(1);
     (0..n)
         .map(|_| {
-            state = state.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+            state = state
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
             // Map 64-bit state to roughly [-1, 1].
             let u = (state >> 32) as u32;
             (u as f32 / u32::MAX as f32) * 2.0 - 1.0
@@ -164,7 +166,9 @@ fn run_mmvq_q8_0(n_rows: usize, k: usize, seed: u64) -> (Vec<f32>, Vec<f32>) {
 
     // Allocate y_q8_1 (one block per 32 activation elems).
     let y_blocks = k / QK;
-    let d_y_q8_1 = dev.alloc(y_blocks * std::mem::size_of::<BlockQ8_1>()).unwrap();
+    let d_y_q8_1 = dev
+        .alloc(y_blocks * std::mem::size_of::<BlockQ8_1>())
+        .unwrap();
 
     // Allocate dst.
     let d_dst = dev.alloc(n_rows * 4).unwrap();
@@ -219,9 +223,11 @@ fn run_mmvq_q8_0(n_rows: usize, k: usize, seed: u64) -> (Vec<f32>, Vec<f32>) {
 
     // Cleanup.
     unsafe {
-        dev.dealloc(d_x, x_blocks.len() * std::mem::size_of::<BlockQ8_0>()).unwrap();
+        dev.dealloc(d_x, x_blocks.len() * std::mem::size_of::<BlockQ8_0>())
+            .unwrap();
         dev.dealloc(d_y_f32, y_f32.len() * 4).unwrap();
-        dev.dealloc(d_y_q8_1, y_blocks * std::mem::size_of::<BlockQ8_1>()).unwrap();
+        dev.dealloc(d_y_q8_1, y_blocks * std::mem::size_of::<BlockQ8_1>())
+            .unwrap();
         dev.dealloc(d_dst, n_rows * 4).unwrap();
     }
 
@@ -249,8 +255,14 @@ fn mmvq_q8_0_small_k() {
     }
     let (got, reference) = run_mmvq_q8_0(4, 128, 0xC0FFEE);
     let err = max_rel_err(&got, &reference);
-    eprintln!("[mmvq_q8_0 4×128] got[0..4] = {:?}", &got[..4.min(got.len())]);
-    eprintln!("[mmvq_q8_0 4×128] ref[0..4] = {:?}", &reference[..4.min(reference.len())]);
+    eprintln!(
+        "[mmvq_q8_0 4×128] got[0..4] = {:?}",
+        &got[..4.min(got.len())]
+    );
+    eprintln!(
+        "[mmvq_q8_0 4×128] ref[0..4] = {:?}",
+        &reference[..4.min(reference.len())]
+    );
     eprintln!("[mmvq_q8_0 4×128] max_rel_err = {err:.3e}");
     assert!(err <= 5e-3, "max_rel_err {err:.3e} > 5e-3");
 }
