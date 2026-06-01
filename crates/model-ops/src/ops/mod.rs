@@ -19,3 +19,4 @@ pub mod rope;
 pub mod scale;
 pub mod softcap;
 pub mod topk_softmax;
+pub mod v_unit_norm;

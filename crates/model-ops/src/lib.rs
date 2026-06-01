@@ -64,3 +64,4 @@ pub use ops::rope::{rope_f16, rope_neox_partial_f16};
 pub use ops::scale::scale_f16;
 pub use ops::softcap::apply_softcap_f32;
 pub use ops::topk_softmax::{topk_softmax_f32, SAMPLER_K_OUT_MAX};
+pub use ops::v_unit_norm::v_unit_norm_per_head_f16;

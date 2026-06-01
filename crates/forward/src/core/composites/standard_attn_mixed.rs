@@ -78,22 +78,23 @@ pub fn standard_attn_mixed_local<H: TopologyHooks>(
         }
     }
 
-    // K1a bails: structural shapes not yet supported in the mixed path.
+    // Remaining bails: paged KV (Phase K-paged) and gemma 4n's
+    // shared-KV layers. SWA / V-unit-norm / post_attn_norm / V-from-K
+    // ship in this slice for gemma4 dense and 26B-A4B MoE.
     if state.pool.paged_kv_caches.is_some() {
         bail!("standard_attn_mixed: paged KV not yet supported (Phase K-paged)");
     }
     if weights.kv_share_src.is_some() {
-        bail!("standard_attn_mixed: shared-KV layers not yet supported");
+        bail!("standard_attn_mixed: shared-KV layers (gemma 4n) not yet supported");
     }
-    if weights.attn_v_unit_norm_w.is_some() {
-        bail!("standard_attn_mixed: V unit-norm fusion (gemma4) not yet supported");
-    }
-    if weights.post_attn_norm.is_some() {
-        bail!("standard_attn_mixed: post_attn_norm (gemma4) not yet supported");
-    }
+    // SWA on the batched-decode path needs a window-aware
+    // `attn_decode_f16_batched` kernel that doesn't exist yet — bail
+    // until that lands. V-unit-norm / V-from-K / post_attn_norm
+    // ARE supported below for full-attn gemma4 layers.
     if weights.window_size > 0 {
         bail!(
-            "standard_attn_mixed: sliding-window attention not yet supported (window_size={})",
+            "standard_attn_mixed: sliding-window attention not yet supported \
+             (window_size={}, attn_decode_f16_batched_swa kernel needed)",
             weights.window_size
         );
     }
@@ -247,11 +248,9 @@ pub fn standard_attn_mixed_local<H: TopologyHooks>(
         flambeau_model_ops::cast_f32_to_f16(&k_f32, &mut k_f16, n * kv_width, &ops)?;
     }
 
-    // ---- V projection (require separate attn_v — K1a bails on V-from-K) ----
-    let Some(v_w) = weights.attn_v.as_ref() else {
-        bail!("standard_attn_mixed: V-from-K (gemma4 fused) not yet supported");
-    };
-    {
+    // ---- V projection. When `attn_v` is None (gemma4 V-from-K),
+    //      V = K so we DtoD the K buffer into v_f16 at n=K+N. ----
+    if let Some(v_w) = weights.attn_v.as_ref() {
         let mut v_f32 = unsafe { Tensor::<F32>::from_raw(q_f32_buf, n * kv_width) };
         v_w.qmatmul(
             &norm_q8_1,
@@ -264,6 +263,22 @@ pub fn standard_attn_mixed_local<H: TopologyHooks>(
         )?;
         let mut v_f16 = unsafe { Tensor::<F16>::from_raw(state.pool.v_f16, n * kv_width) };
         flambeau_model_ops::cast_f32_to_f16(&v_f32, &mut v_f16, n * kv_width, &ops)?;
+    } else {
+        let bytes = n * kv_width * 2;
+        // SAFETY: k_f16 and v_f16 pool slots are both sized for
+        // max_prefill_tokens * kv_width F16 (validated at pool boot).
+        unsafe {
+            state
+                .device
+                .memcpy_async(
+                    state.stream,
+                    CopyDirection::DeviceToDevice,
+                    state.pool.v_f16,
+                    state.pool.k_f16,
+                    bytes,
+                )
+                .context("standard_attn_mixed: V-from-K DtoD memcpy")?;
+        }
     }
     let _ = q_f32_buf;
 
@@ -338,6 +353,24 @@ pub fn standard_attn_mixed_local<H: TopologyHooks>(
         )?;
     }
     let _ = weights.rope_variant;
+
+    // ---- gemma4 V unit-norm: per-head RMSNorm on V at n = K + N
+    //      before kv_append. Unit weights (no learnable gamma) —
+    //      the kernel matches the rmsnorm inside the legacy fused
+    //      `kv_append_v_unit_norm_f16`. After this, both kv_append
+    //      paths (range-write for K, batched-slots for N) write the
+    //      normed V into their respective cache slots.
+    if weights.attn_v_unit_norm_w.is_some() {
+        let mut v_f16 = unsafe { Tensor::<F16>::from_raw(state.pool.v_f16, n * kv_width) };
+        flambeau_model_ops::v_unit_norm_per_head_f16(
+            &mut v_f16,
+            n,
+            weights.n_kv_heads,
+            weights.head_dim,
+            weights.rms_eps,
+            &ops,
+        )?;
+    }
 
     let kv = state.pool.kv_caches[kv_local_idx];
     let slot_stride_elems = max_seq_len * kv_width;
@@ -528,8 +561,15 @@ pub fn standard_attn_mixed_local<H: TopologyHooks>(
         &ops,
     )?;
 
-    // ---- AR + residual + (optional) next-norm fold ----
-    if hooks.supports_ar_residual_f16() && next_norm.is_none() {
+    // ---- AR + residual + (optional) post_attn_norm fold ----
+    // BAR1 ar_residual_f16 fast path is only safe when there's no
+    // post_attn_norm AND no next-norm fold — gemma4 needs the fused
+    // rmsnorm_f32_to_f16_add_residual after AR, which the fast path
+    // would skip.
+    if hooks.supports_ar_residual_f16()
+        && next_norm.is_none()
+        && weights.post_attn_norm.is_none()
+    {
         let mut partial_f16 = unsafe { Tensor::<F16>::from_raw(state.pool.delta, n * hidden) };
         flambeau_model_ops::cast_f32_to_f16(&proj_f32, &mut partial_f16, n * hidden, &ops)?;
         hooks.ar_residual_f16(
@@ -542,6 +582,29 @@ pub fn standard_attn_mixed_local<H: TopologyHooks>(
         return Ok(None);
     }
     hooks.ar_sum_f32(proj_f32.ptr, n * hidden, state.device, state.stream)?;
+    if let Some(post_norm) = weights.post_attn_norm.as_ref() {
+        // Fused F32→F16 rmsnorm + add to residual. Advances the
+        // pool's residual slot directly and sets
+        // `fused_residual_already_done` so the model's `residual_add`
+        // skips re-doing the add. Mirrors `standard_attn`'s post-AR
+        // gemma4 path at n = K + N.
+        use flambeau_ops::Ops;
+        let resid_in_ptr = input.ptr;
+        let new_resid_ptr = state.pool.next_residual_slot();
+        ops.rmsnorm_f32_to_f16_add_residual(
+            proj_f32.ptr,
+            post_norm.ptr,
+            resid_in_ptr,
+            new_resid_ptr,
+            n,
+            hidden,
+            weights.rms_eps,
+        )?;
+        state.pool.fused_residual_already_done = true;
+        let new_resid = unsafe { Tensor::<F16>::from_raw(new_resid_ptr, n * hidden) };
+        let _ = next_norm;
+        return Ok(Some(new_resid));
+    }
     let mut delta_mut = unsafe { Tensor::<F16>::from_raw(state.pool.delta, n * hidden) };
     flambeau_model_ops::cast_f32_to_f16(&proj_f32, &mut delta_mut, n * hidden, &ops)?;
     let delta = unsafe { Tensor::<F16>::from_raw(state.pool.delta, n * hidden) };

@@ -902,6 +902,25 @@ impl<'a> Ops for HipOps<'a> {
         )
     }
 
+    fn v_unit_norm_per_head_f16(
+        &self,
+        v: DevicePtr,
+        n_tokens: usize,
+        n_kv_heads: usize,
+        head_dim: usize,
+        eps: f32,
+    ) -> Result<()> {
+        super::norm::v_unit_norm_per_head_f16(
+            self.reg,
+            self.stream,
+            v,
+            n_tokens,
+            n_kv_heads,
+            head_dim,
+            eps,
+        )
+    }
+
     fn rmsnorm_quant_q8_1(
         &self,
         x: DevicePtr,

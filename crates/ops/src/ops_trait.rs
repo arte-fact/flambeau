@@ -523,6 +523,20 @@ pub trait Ops {
         eps: f32,
     ) -> Result<()>;
 
+    /// Per-head V unit RMSNorm in place on
+    /// `[n_tokens, n_kv_heads, head_dim]` F16. Unit weights (no
+    /// learnable gamma). Composes with `kv_append_f16` and
+    /// `kv_append_f16_batched_slots` for the mixed-batch path on
+    /// gemma4-style archs whose `attn_v_unit_norm` flag is set.
+    fn v_unit_norm_per_head_f16(
+        &self,
+        v: DevicePtr,
+        n_tokens: usize,
+        n_kv_heads: usize,
+        head_dim: usize,
+        eps: f32,
+    ) -> Result<()>;
+
     fn rmsnorm_quant_q8_1(
         &self,
         x: DevicePtr,

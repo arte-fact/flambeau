@@ -214,6 +214,7 @@ pub const KERNEL_STEMS: &[&str] = &[
     // Norm / pointwise.
     "rmsnorm_f16",
     "rmsnorm_f16_add_residual",
+    "v_unit_norm_per_head_f16",
     "rmsnorm_f32",
     "rmsnorm_f32_to_f16",
     "rmsnorm_q8_1_fused",

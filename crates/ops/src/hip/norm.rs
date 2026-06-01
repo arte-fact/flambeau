@@ -49,6 +49,44 @@ pub fn rmsnorm_f16(
     Ok(())
 }
 
+/// Per-head V unit RMSNorm in place. `v` is F16
+/// `[n_tokens, n_kv_heads, head_dim]`, normalised per (token, head)
+/// group of `head_dim` elements with unit weights (no learnable
+/// gamma). `head_dim` must be ≤ 512 and divisible by 64.
+pub fn v_unit_norm_per_head_f16(
+    reg: &OpsRegistry,
+    stream: &HipStream,
+    v: DevicePtr,
+    n_tokens: usize,
+    n_kv_heads: usize,
+    head_dim: usize,
+    eps: f32,
+) -> Result<()> {
+    if head_dim == 0 || head_dim > 512 || (head_dim % 64) != 0 {
+        anyhow::bail!(
+            "v_unit_norm_per_head_f16: head_dim={head_dim} unsupported (need 64..=512, multiple of 64)"
+        );
+    }
+    let module = reg.expect_module("v_unit_norm_per_head_f16")?;
+    let kernel = module.kernel("flambeau_v_unit_norm_per_head_f16")?;
+
+    let n_kv_heads_i = n_kv_heads as i32;
+    let head_dim_i = head_dim as i32;
+    let v_ptr: u64 = v.as_usize() as u64;
+    let mut args = KernelArgs::new();
+    args.push(&v_ptr);
+    args.push(&n_kv_heads_i);
+    args.push(&head_dim_i);
+    args.push(&eps);
+    let cfg = LaunchCfg {
+        grid: (n_kv_heads as u32, n_tokens as u32, 1),
+        block: (head_dim as u32, 1, 1),
+        shared_bytes: 0,
+    };
+    unsafe { kernel.launch(stream, cfg, args)? };
+    Ok(())
+}
+
 /// 3.a.1 — fused `mid = x_in + delta; mid_norm = rmsnorm(mid) * weight`.
 /// Replaces `add_f16` + `rmsnorm_f16` pair at the attention-residual epilogue.
 /// Both `mid` and `mid_norm` are needed downstream.
