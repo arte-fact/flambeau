@@ -22,7 +22,13 @@ pub const HIP_SUCCESS: c_int = 0;
 /// Returned by `hipDeviceEnablePeerAccess` when the (current device, peer)
 /// edge is already authorised — benign on cluster re-bind paths and
 /// treated as success by `HipCluster::new`.
-pub const HIP_ERROR_PEER_ACCESS_ALREADY_ENABLED: c_int = 705;
+///
+/// Code 705 is `hipErrorPeerAccessNotEnabled` (the opposite); using 705
+/// here silently disabled BAR1 P2P on any second `HipCluster::new` over
+/// the same devices — the AR fell back to host-bounce for any topology
+/// where serve.rs's state-side cluster construction preceded
+/// `try_build_bar_ar`'s.
+pub const HIP_ERROR_PEER_ACCESS_ALREADY_ENABLED: c_int = 704;
 
 // Opaque stream handle. HIP defines `typedef struct ihipStream_t* hipStream_t`;
 // from Rust we only ever pass it opaquely, so a void* newtype is enough.
