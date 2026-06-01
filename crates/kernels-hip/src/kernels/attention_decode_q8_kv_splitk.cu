@@ -62,14 +62,28 @@ extern "C" __global__ void flambeau_attention_decode_q8_kv_splitk_chunk(
     // SWA mask: keys older than (qpos - window_size + 1) are
     // excluded. Apply per chunk by raising t_start when the window
     // begins inside this chunk. Chunks entirely before the window
-    // collapse to empty (t_start >= t_end → loop skipped → caller's
-    // combine stage treats empty chunks as no-op).
+    // collapse to empty (t_start >= t_end). For those we write the
+    // neutral-element partials and return early, skipping the
+    // Q→Q8 LDS quantize phase (the dominant per-block cost beyond
+    // the inner score loop).
     if (window_size > 0) {
         const int qpos = n_tokens - 1;
         int window_start = qpos - window_size + 1;
         if (window_start < 0) window_start = 0;
         if (t_start < window_start) t_start = window_start;
         if (t_start > t_end) t_start = t_end;
+    }
+    if (t_start >= t_end) {
+        const int part_idx = q_head * n_chunks + chunk;
+        if (tid == 0) {
+            partials_m[part_idx] = -INFINITY;
+            partials_s[part_idx] = 0.0f;
+        }
+        partials_o[(size_t) part_idx * head_dim + elem_base + 0] = 0.0f;
+        partials_o[(size_t) part_idx * head_dim + elem_base + 1] = 0.0f;
+        partials_o[(size_t) part_idx * head_dim + elem_base + 2] = 0.0f;
+        partials_o[(size_t) part_idx * head_dim + elem_base + 3] = 0.0f;
+        return;
     }
 
     // 1. Q → Q8_0 in LDS, once per (q_head, chunk) block. Same trick as

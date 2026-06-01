@@ -112,7 +112,20 @@ static __device__ __forceinline__ void flash_attn_prefill_v2_q8_impl(
     const int tile_elems = BC * D;
     const int loads_per_thread = (tile_elems + THREADS_PER_BLOCK - 1) / THREADS_PER_BLOCK;
 
-    for (int chunk = 0; chunk < n_chunks; ++chunk) {
+    // SWA chunk skip: the SMALLEST t_start across the BR Q rows in this
+    // tile bounds which chunks can contribute. Chunks entirely before
+    // that point are skipped — saves the cooperative K/V dequant load
+    // AND the inner score loop. Per-row `t_start` mask in the score
+    // loop still handles the boundary chunk's tail correctly.
+    int min_t_start = 0;
+    if (window_size > 0) {
+        const int q_tile_base = q_tile * BR;
+        min_t_start = q_tile_base + q_offset - window_size + 1;
+        if (min_t_start < 0) min_t_start = 0;
+    }
+    const int first_active_chunk = min_t_start / BC;
+
+    for (int chunk = first_active_chunk; chunk < n_chunks; ++chunk) {
         const int k_start = chunk * BC;
 
         // Cooperative Q8 → F32 dequant load. Each thread handles

@@ -615,21 +615,41 @@ pub fn standard_attn_local<H: TopologyHooks>(
         if n == 1 {
             let n_tokens_kv = start_position + 1;
             if is_q8 {
+                // SWA at decode: when window < n_tokens_kv, slide the
+                // cache pointer to the window's start and pass the
+                // window length as n_tokens_kv. The kernel's `qpos =
+                // n_tokens_kv - 1` then makes t_start = 0 (no SWA
+                // masking inside the kernel) and there's no waste over
+                // out-of-window chunks. window_size = 0 keeps the full
+                // causal range.
+                let (eff_n_tokens_kv, k_ptr_eff, v_ptr_eff) = if weights.window_size > 0
+                    && (weights.window_size as usize) < n_tokens_kv
+                {
+                    let w = weights.window_size as usize;
+                    let offset_tokens = n_tokens_kv - w;
+                    let offset_bytes = offset_tokens * kv.bytes_per_row;
+                    (w, k_slot_ptr.offset_bytes(offset_bytes), v_slot_ptr.offset_bytes(offset_bytes))
+                } else {
+                    (n_tokens_kv, k_slot_ptr, v_slot_ptr)
+                };
                 let k_cache_q8 = unsafe {
                     Tensor::<flambeau_model_ops::Q8_0>::from_raw(
-                        k_slot_ptr,
+                        k_ptr_eff,
                         max_seq_len * kv_width,
                     )
                 };
                 let v_cache_q8 = unsafe {
                     Tensor::<flambeau_model_ops::Q8_0>::from_raw(
-                        v_slot_ptr,
+                        v_ptr_eff,
                         max_seq_len * kv_width,
                     )
                 };
-                let chunk_size = flambeau_model_ops::splitk_chunk_size(n_tokens_kv);
-                let n_chunks = n_tokens_kv.div_ceil(chunk_size);
-                let use_splitk = n_tokens_kv > 256
+                // Effective window length is the kernel's view of the
+                // cache; the SWA mask becomes a no-op inside the kernel.
+                let kernel_window = 0i32;
+                let chunk_size = flambeau_model_ops::splitk_chunk_size(eff_n_tokens_kv);
+                let n_chunks = eff_n_tokens_kv.div_ceil(chunk_size);
+                let use_splitk = eff_n_tokens_kv > 256
                     && n_chunks > 1
                     && n_chunks <= crate::core::scratch::MAX_SPLITK_CHUNKS
                     && state.pool.splitk_partials_m.as_usize() != 0;
@@ -656,10 +676,10 @@ pub fn standard_attn_local<H: TopologyHooks>(
                         weights.n_heads,
                         weights.n_kv_heads,
                         weights.head_dim,
-                        n_tokens_kv,
+                        eff_n_tokens_kv,
                         chunk_size,
                         scale,
-                        weights.window_size,
+                        kernel_window,
                         &ops,
                     )?;
                 } else {
@@ -671,17 +691,44 @@ pub fn standard_attn_local<H: TopologyHooks>(
                         weights.n_heads,
                         weights.n_kv_heads,
                         weights.head_dim,
-                        n_tokens_kv,
+                        eff_n_tokens_kv,
                         scale,
-                        weights.window_size,
+                        kernel_window,
                         &ops,
                     )?;
                 }
                 let _ = (k_cache, v_cache);
             } else {
-            let chunk_size = flambeau_model_ops::splitk_chunk_size(n_tokens_kv);
-            let n_chunks = n_tokens_kv.div_ceil(chunk_size);
-            let use_splitk = n_tokens_kv > 256
+            // SWA at decode (mirror of the Q8 lever above): when
+            // window_size < n_tokens_kv, slide the F16 cache pointer
+            // to the window start and pass n_tokens_kv = window. The
+            // kernel's internal SWA mask becomes a no-op. Eliminates
+            // splitk launches for out-of-window chunks and lets the
+            // chunk_size heuristic pick a tighter chunking for the
+            // active window.
+            let (eff_n_tokens_kv, k_cache_eff_t, v_cache_eff_t) =
+                if weights.window_size > 0 && (weights.window_size as usize) < n_tokens_kv {
+                    let w = weights.window_size as usize;
+                    let offset_tokens = n_tokens_kv - w;
+                    let offset_bytes = offset_tokens * kv.bytes_per_row;
+                    let k_ptr = k_slot_ptr.offset_bytes(offset_bytes);
+                    let v_ptr = v_slot_ptr.offset_bytes(offset_bytes);
+                    (
+                        w,
+                        unsafe { Tensor::<F16>::from_raw(k_ptr, slot_stride_elems) },
+                        unsafe { Tensor::<F16>::from_raw(v_ptr, slot_stride_elems) },
+                    )
+                } else {
+                    (
+                        n_tokens_kv,
+                        unsafe { Tensor::<F16>::from_raw(k_slot_ptr, slot_stride_elems) },
+                        unsafe { Tensor::<F16>::from_raw(v_slot_ptr, slot_stride_elems) },
+                    )
+                };
+            let kernel_window = 0i32;
+            let chunk_size = flambeau_model_ops::splitk_chunk_size(eff_n_tokens_kv);
+            let n_chunks = eff_n_tokens_kv.div_ceil(chunk_size);
+            let use_splitk = eff_n_tokens_kv > 256
                 && n_chunks > 1
                 && n_chunks <= crate::core::scratch::MAX_SPLITK_CHUNKS
                 && state.pool.splitk_partials_m.as_usize() != 0;
@@ -694,58 +741,39 @@ pub fn standard_attn_local<H: TopologyHooks>(
                     unsafe { Tensor::<F32>::from_raw(state.pool.splitk_partials_s, partials_m_n) };
                 let mut partials_o =
                     unsafe { Tensor::<F32>::from_raw(state.pool.splitk_partials_o, partials_o_n) };
-                if matches!(weights.head_dim, 128 | 256 | 512) {
-                    flambeau_model_ops::attn_decode_f16_splitk(
-                        &q_f16_rope,
-                        &k_cache,
-                        &v_cache,
-                        &mut attn_out,
-                        &mut partials_m,
-                        &mut partials_s,
-                        &mut partials_o,
-                        weights.n_heads,
-                        weights.n_kv_heads,
-                        weights.head_dim,
-                        n_tokens_kv,
-                        chunk_size,
-                        scale,
-                        weights.window_size,
-                        &ops,
-                    )?;
-                } else {
-                    flambeau_model_ops::attn_decode_f16_splitk(
-                        &q_f16_rope,
-                        &k_cache,
-                        &v_cache,
-                        &mut attn_out,
-                        &mut partials_m,
-                        &mut partials_s,
-                        &mut partials_o,
-                        weights.n_heads,
-                        weights.n_kv_heads,
-                        weights.head_dim,
-                        n_tokens_kv,
-                        chunk_size,
-                        scale,
-                        weights.window_size,
-                        &ops,
-                    )?;
-                }
+                flambeau_model_ops::attn_decode_f16_splitk(
+                    &q_f16_rope,
+                    &k_cache_eff_t,
+                    &v_cache_eff_t,
+                    &mut attn_out,
+                    &mut partials_m,
+                    &mut partials_s,
+                    &mut partials_o,
+                    weights.n_heads,
+                    weights.n_kv_heads,
+                    weights.head_dim,
+                    eff_n_tokens_kv,
+                    chunk_size,
+                    scale,
+                    kernel_window,
+                    &ops,
+                )?;
             } else {
                 flambeau_model_ops::attn_decode_f16(
                     &q_f16_rope,
-                    &k_cache,
-                    &v_cache,
+                    &k_cache_eff_t,
+                    &v_cache_eff_t,
                     &mut attn_out,
                     weights.n_heads,
                     weights.n_kv_heads,
                     weights.head_dim,
-                    n_tokens_kv,
+                    eff_n_tokens_kv,
                     scale,
-                    weights.window_size,
+                    kernel_window,
                     &ops,
                 )?;
             }
+            let _ = (k_cache, v_cache);
             } // end of else (non-Q8) decode branch
         } else if is_q8 {
             let k_cache_q8 = unsafe {
