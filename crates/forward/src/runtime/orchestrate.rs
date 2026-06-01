@@ -15,13 +15,13 @@
 //!   coordinates through `ArCoordinator`, stages chain through the
 //!   shared `peer_buffer` + handoff barrier.
 
-use std::sync::{Arc, Barrier};
+use std::sync::Arc;
 
 use anyhow::{anyhow, Context, Result};
 use flambeau_backend_hip::{BarP2pAllReduce, HipCluster};
 use flambeau_quant::GgufFile;
 
-use super::ar::{new_peer_buffer, new_peer_edge, ArCoordinator, BarArCoordinator};
+use super::ar::{new_peer_edge, new_peer_edge_prealloc, ArCoordinator, BarArCoordinator};
 use super::workers::{WorkerHandle, WorkerRole};
 use super::{Arch, Topology};
 
@@ -48,6 +48,7 @@ pub fn launch<A: Arch>(
     prefill_ubatch: usize,
     max_slots: usize,
     paged_kv_pages: Option<usize>,
+    kv_layout: crate::core::KvLayout,
 ) -> Result<Vec<WorkerHandle<A>>> {
     let file = Arc::new(file);
     match topology {
@@ -60,11 +61,20 @@ pub fn launch<A: Arch>(
                 prefill_ubatch,
                 max_slots,
                 paged_kv_pages,
+                kv_layout,
             )?;
             Ok(vec![h])
         }
         Topology::Tp { devices } => {
-            launch_tp::<A>(devices, file, ctx_cap, prefill_ubatch, max_slots, paged_kv_pages)
+            launch_tp::<A>(
+                devices,
+                file,
+                ctx_cap,
+                prefill_ubatch,
+                max_slots,
+                paged_kv_pages,
+                kv_layout,
+            )
         }
         Topology::Pp {
             devices,
@@ -77,6 +87,7 @@ pub fn launch<A: Arch>(
             prefill_ubatch,
             max_slots,
             paged_kv_pages,
+            kv_layout,
         ),
         Topology::Hybrid {
             stages,
@@ -89,6 +100,7 @@ pub fn launch<A: Arch>(
             prefill_ubatch,
             max_slots,
             paged_kv_pages,
+            kv_layout,
         ),
     }
 }
@@ -100,6 +112,7 @@ fn launch_tp<A: Arch>(
     prefill_ubatch: usize,
     max_slots: usize,
     paged_kv_pages: Option<usize>,
+    kv_layout: crate::core::KvLayout,
 ) -> Result<Vec<WorkerHandle<A>>> {
     let n = devices.len();
     let ar = Arc::new(ArCoordinator::new(n));
@@ -121,6 +134,7 @@ fn launch_tp<A: Arch>(
                 prefill_ubatch,
                 max_slots,
                 paged_kv_pages,
+                kv_layout,
             )
             .with_context(|| format!("TP rank {rank} on hip:{dev}"))?,
         );
@@ -136,6 +150,7 @@ fn launch_pp<A: Arch>(
     prefill_ubatch: usize,
     max_slots: usize,
     paged_kv_pages: Option<usize>,
+    kv_layout: crate::core::KvLayout,
 ) -> Result<Vec<WorkerHandle<A>>> {
     let n = devices.len();
     let split = match layer_split {
@@ -204,6 +219,7 @@ fn launch_pp<A: Arch>(
                 prefill_ubatch,
                 max_slots,
                 paged_kv_pages,
+                kv_layout,
             )
             .with_context(|| format!("PP rank {rank} on hip:{dev}"))?,
         );
@@ -219,6 +235,7 @@ fn launch_hybrid<A: Arch>(
     prefill_ubatch: usize,
     max_slots: usize,
     paged_kv_pages: Option<usize>,
+    kv_layout: crate::core::KvLayout,
 ) -> Result<Vec<WorkerHandle<A>>> {
     let n_stages = stages.len();
     let total_ranks: usize = stages.iter().map(|s| s.len()).sum();
@@ -234,8 +251,48 @@ fn launch_hybrid<A: Arch>(
         }
         None => Vec::new(),
     };
-    let handoff = Arc::new(Barrier::new(total_ranks));
-    let peer = new_peer_buffer(0);
+    // S8b: per-transition per-rank edges, one DtoD peer slot per
+    // producer-consumer pair (rank_in_stage k of stage i → rank k of
+    // stage i+1). Replaces the single shared host-bounce slot +
+    // handoff barrier with PpStage's event-based async DtoD pattern.
+    // Requires equal `tp_size` across adjacent stages; pp2tp2's
+    // canonical config satisfies this.
+    let mut transition_edges: Vec<Vec<super::ar::PeerBuffer>> =
+        Vec::with_capacity(n_stages.saturating_sub(1));
+    for ti in 0..n_stages.saturating_sub(1) {
+        let src_ranks = &stages[ti];
+        let dst_ranks = &stages[ti + 1];
+        if src_ranks.len() != dst_ranks.len() {
+            return Err(anyhow!(
+                "Hybrid transition {ti}→{}: src tp_size {} != dst tp_size {} \
+                 (S8b async DtoD path assumes equal TP across stages)",
+                ti + 1,
+                src_ranks.len(),
+                dst_ranks.len()
+            ));
+        }
+        let mut edges_at_transition = Vec::with_capacity(src_ranks.len());
+        // Pre-allocate dst to a safe upper bound on prefill_ubatch *
+        // hidden * 2 bytes (F16). 8192 is the largest hidden across
+        // v2-supported archs (gemma4-31B = 5376, qwen3.6-27B = 5120,
+        // qwen3.5-9B = 4096). Eliminates the race where the
+        // concurrently-started receiver hits peer_recv before the
+        // producer's lazy peer_send alloc runs.
+        const MAX_HIDDEN: usize = 8192;
+        let max_bytes = prefill_ubatch * MAX_HIDDEN * 2;
+        for k in 0..src_ranks.len() {
+            let consumer_dev = dst_ranks[k];
+            edges_at_transition.push(
+                new_peer_edge_prealloc(consumer_dev, max_bytes).with_context(|| {
+                    format!(
+                        "Hybrid edge stage {ti}→{} rank_in_stage {k} (consumer hip:{consumer_dev}, prealloc {max_bytes} B)",
+                        ti + 1
+                    )
+                })?,
+            );
+        }
+        transition_edges.push(edges_at_transition);
+    }
 
     let mut handles = Vec::with_capacity(total_ranks);
     let mut layer_cursor = 0usize;
@@ -252,6 +309,16 @@ fn launch_hybrid<A: Arch>(
             (0, 0)
         };
         for (rank_in_stage, &dev) in ranks.iter().enumerate() {
+            let send_edge = if stage_idx + 1 < n_stages {
+                Some(Arc::clone(&transition_edges[stage_idx][rank_in_stage]))
+            } else {
+                None
+            };
+            let recv_edge = if stage_idx > 0 {
+                Some(Arc::clone(&transition_edges[stage_idx - 1][rank_in_stage]))
+            } else {
+                None
+            };
             let role = WorkerRole::Hybrid {
                 stage_idx,
                 n_stages,
@@ -261,8 +328,8 @@ fn launch_hybrid<A: Arch>(
                 layer_end,
                 ar: Arc::clone(&ar),
                 bar: bar.as_ref().map(Arc::clone),
-                peer_buffer: Arc::clone(&peer),
-                handoff: Arc::clone(&handoff),
+                send_edge,
+                recv_edge,
             };
             handles.push(
                 WorkerHandle::<A>::spawn(
@@ -273,6 +340,7 @@ fn launch_hybrid<A: Arch>(
                     prefill_ubatch,
                     max_slots,
                     paged_kv_pages,
+                    kv_layout,
                 )
                 .with_context(|| {
                     format!("Hybrid stage {stage_idx} rank {rank_in_stage} on hip:{dev}")

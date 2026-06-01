@@ -17,7 +17,10 @@ use crate::core::{composites, CoreState, NoopHooks, ScratchPool, TopologyHooks};
 use crate::ctx::{
     AttnWeights, EmbeddingWeights, FfnWeights, ForwardCtx, LmHeadWeights, ModelLayout, MoeWeights,
 };
-use crate::runtime::ar::{bar_ar_residual_f16, bar_ar_residual_rmsnorm_f16, BarArCoordinator};
+use crate::runtime::ar::{
+    bar_ar_postattn_residual_rmsnorm_f32_to_f16, bar_ar_residual_f16, bar_ar_residual_rmsnorm_f16,
+    bar_ar_sum_f16, BarArCoordinator,
+};
 
 pub type ArCallback =
     Box<dyn FnMut(usize, usize, DevicePtr, usize, &HipDevice, &HipStream) -> Result<()> + Send>;
@@ -97,6 +100,59 @@ impl TopologyHooks for TpHooks {
             rms_weight,
             out_norm,
             n_elems,
+            eps,
+            device,
+            stream,
+        )
+    }
+
+    fn supports_ar_sum_f16(&self) -> bool {
+        matches!(self.n_ranks, 2 | 4) && self.bar.is_some()
+    }
+
+    fn ar_sum_f16(
+        &mut self,
+        buf: DevicePtr,
+        n_elems: usize,
+        device: &HipDevice,
+        stream: &HipStream,
+    ) -> Result<()> {
+        let bar = self
+            .bar
+            .as_ref()
+            .ok_or_else(|| anyhow!("TpHooks::ar_sum_f16: bar coordinator not configured"))?;
+        bar_ar_sum_f16(bar, self.rank, buf, n_elems, device, stream)
+    }
+
+    fn supports_ar_postattn_residual_rmsnorm_f32_to_f16(&self) -> bool {
+        matches!(self.n_ranks, 2 | 4) && self.bar.is_some()
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn ar_postattn_residual_rmsnorm_f32_to_f16(
+        &mut self,
+        proj_local_f32: DevicePtr,
+        post_norm_w_f16: DevicePtr,
+        resid_in_f16: DevicePtr,
+        resid_out_f16: DevicePtr,
+        n_rows: usize,
+        n: usize,
+        eps: f32,
+        device: &HipDevice,
+        stream: &HipStream,
+    ) -> Result<()> {
+        let bar = self.bar.as_ref().ok_or_else(|| {
+            anyhow!("TpHooks::ar_postattn_residual_rmsnorm_f32_to_f16: bar coordinator not configured")
+        })?;
+        bar_ar_postattn_residual_rmsnorm_f32_to_f16(
+            bar,
+            self.rank,
+            proj_local_f32,
+            post_norm_w_f16,
+            resid_in_f16,
+            resid_out_f16,
+            n_rows,
+            n,
             eps,
             device,
             stream,
@@ -185,6 +241,59 @@ impl TopologyHooks for HybridHooks {
             rms_weight,
             out_norm,
             n_elems,
+            eps,
+            device,
+            stream,
+        )
+    }
+
+    fn supports_ar_sum_f16(&self) -> bool {
+        matches!(self.tp_size, 2 | 4) && self.bar.is_some()
+    }
+
+    fn ar_sum_f16(
+        &mut self,
+        buf: DevicePtr,
+        n_elems: usize,
+        device: &HipDevice,
+        stream: &HipStream,
+    ) -> Result<()> {
+        let bar = self
+            .bar
+            .as_ref()
+            .ok_or_else(|| anyhow!("HybridHooks::ar_sum_f16: bar coordinator not configured"))?;
+        bar_ar_sum_f16(bar, self.rank_in_stage, buf, n_elems, device, stream)
+    }
+
+    fn supports_ar_postattn_residual_rmsnorm_f32_to_f16(&self) -> bool {
+        matches!(self.tp_size, 2 | 4) && self.bar.is_some()
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn ar_postattn_residual_rmsnorm_f32_to_f16(
+        &mut self,
+        proj_local_f32: DevicePtr,
+        post_norm_w_f16: DevicePtr,
+        resid_in_f16: DevicePtr,
+        resid_out_f16: DevicePtr,
+        n_rows: usize,
+        n: usize,
+        eps: f32,
+        device: &HipDevice,
+        stream: &HipStream,
+    ) -> Result<()> {
+        let bar = self.bar.as_ref().ok_or_else(|| {
+            anyhow!("HybridHooks::ar_postattn_residual_rmsnorm_f32_to_f16: bar coordinator not configured")
+        })?;
+        bar_ar_postattn_residual_rmsnorm_f32_to_f16(
+            bar,
+            self.rank_in_stage,
+            proj_local_f32,
+            post_norm_w_f16,
+            resid_in_f16,
+            resid_out_f16,
+            n_rows,
+            n,
             eps,
             device,
             stream,
@@ -396,22 +505,25 @@ impl<'a> StageHooks for PpStage<'a> {
     }
 }
 
-/// Hybrid runs all ranks in parallel — peer_buffer access is guarded
-/// by `handoff_barrier`. Only rank 0 of each stage writes/reads.
-/// TODO: port the event-based handoff used in [`PpStage`] here so the
-/// `Stream::synchronize` in peer_send/peer_recv can be replaced by
-/// driver-side waits. Today this still bounces synchronously.
-pub struct HybStage {
+/// Hybrid runs all ranks in parallel. Cross-stage handoff is
+/// event-based DtoD peer copy on a per-rank edge (rank_in_stage k of
+/// stage i ↔ rank k of stage i+1) — same shape as [`PpStage`]. No
+/// CPU barrier, no host bounce.
+pub struct HybStage<'a> {
     pub stage_idx: usize,
     pub n_stages: usize,
     pub rank_in_stage: usize,
     pub layer_start: usize,
     pub layer_end: usize,
-    pub peer_slot: Arc<crate::runtime::ar::PeerSlot>,
-    pub handoff_barrier: Arc<Barrier>,
+    /// Edge this rank produces TO (stage i / rank k → stage i+1 / rank k).
+    /// `None` on the final stage.
+    pub send_edge: Option<&'a crate::runtime::ar::PeerSlot>,
+    /// Edge this rank consumes FROM (stage i-1 / rank k → stage i / rank k).
+    /// `None` on the first stage.
+    pub recv_edge: Option<&'a crate::runtime::ar::PeerSlot>,
 }
 
-impl StageHooks for HybStage {
+impl<'a> StageHooks for HybStage<'a> {
     fn is_first(&self) -> bool {
         self.stage_idx == 0
     }
@@ -422,36 +534,59 @@ impl StageHooks for HybStage {
         self.layer_start..self.layer_end
     }
     fn peer_recv(&mut self, core: &mut CoreState<'_>, n_tokens: usize) -> Result<Tensor<F16>> {
-        self.handoff_barrier.wait();
+        let edge = self
+            .recv_edge
+            .ok_or_else(|| anyhow!("HybStage::peer_recv: first stage has no recv_edge"))?;
         let hidden = core.hidden();
         let need = n_tokens * hidden;
-        let dst = core.pool.next_residual_slot();
-        let bytes = need * 2;
-        let buf = self
-            .peer_slot
-            .buf
+        // Receiver and producer threads start concurrently per
+        // forward. Spin-wait for the producer's CPU-side
+        // peer_send to finish (signalled by `send_done` becoming
+        // Some). Without this, take() returns None, stream_wait is
+        // skipped, and we read pre-allocated dst before
+        // memcpy_peer_async lands → garbage. The producer's CPU
+        // path is fast (kernel enqueues only, no Stream::synchronize),
+        // so this spins for at most ~µs per forward at decode and
+        // tens of µs at prefill.
+        let ev = {
+            let start = std::time::Instant::now();
+            const SPIN_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+            loop {
+                let mut guard = edge
+                    .send_done
+                    .lock()
+                    .map_err(|e| anyhow!("HybStage peer_recv: send_done poisoned: {e}"))?;
+                if let Some(ev) = guard.take() {
+                    break ev;
+                }
+                drop(guard);
+                if start.elapsed() > SPIN_TIMEOUT {
+                    bail!(
+                        "HybStage::peer_recv: timed out waiting for producer event ({:?})",
+                        SPIN_TIMEOUT
+                    );
+                }
+                std::thread::yield_now();
+            }
+        };
+        ev.stream_wait(core.stream)
+            .map_err(|e| anyhow!("HybStage peer_recv stream_wait: {e}"))?;
+        let dst = edge
+            .dst
             .lock()
-            .map_err(|e| anyhow!("HybStage peer_buffer poisoned: {e}"))?;
-        if buf.len() < need {
+            .map_err(|e| anyhow!("HybStage peer_recv: dst poisoned: {e}"))?;
+        let dst_buf = dst.as_ref().ok_or_else(|| {
+            anyhow!("HybStage::peer_recv: dst not pre-allocated (orchestrate bug)")
+        })?;
+        let needed_bytes = need * 2;
+        if dst_buf.bytes < needed_bytes {
             bail!(
-                "HybStage::peer_recv: peer_buffer len {} < n_tokens*hidden {need}",
-                buf.len()
+                "HybStage::peer_recv: dst buffer {} bytes < needed {needed_bytes} \
+                 (raise prefill_ubatch or MAX_HIDDEN in launch_hybrid)",
+                dst_buf.bytes
             );
         }
-        // SAFETY: `dst` is the residual slot; `buf` holds `need` host F16.
-        unsafe {
-            core.device
-                .memcpy_async(
-                    core.stream,
-                    CopyDirection::HostToDevice,
-                    dst,
-                    DevicePtr(buf.as_ptr() as usize),
-                    bytes,
-                )
-                .map_err(|e| anyhow!("HybStage peer_recv HtoD: {e}"))?;
-        }
-        flambeau_core::Stream::synchronize(core.stream)?;
-        Ok(unsafe { Tensor::<F16>::from_raw(dst, need) })
+        Ok(unsafe { Tensor::<F16>::from_raw(dst_buf.ptr, need) })
     }
     fn peer_send(
         &mut self,
@@ -459,33 +594,99 @@ impl StageHooks for HybStage {
         input: &Tensor<F16>,
         n_tokens: usize,
     ) -> Result<()> {
-        if self.rank_in_stage == 0 {
-            let hidden = core.hidden();
-            let need = n_tokens * hidden;
-            let mut buf = self
-                .peer_slot
-                .buf
+        let edge = self
+            .send_edge
+            .ok_or_else(|| anyhow!("HybStage::peer_send: last stage has no send_edge"))?;
+        let consumer_device_id = edge.consumer_device_id.ok_or_else(|| {
+            anyhow!("HybStage::peer_send: edge has no consumer_device_id")
+        })?;
+        let consumer_device = edge.consumer_device.as_ref().ok_or_else(|| {
+            anyhow!("HybStage::peer_send: edge has no consumer_device handle")
+        })?;
+        let hidden = core.hidden();
+        let need = n_tokens * hidden;
+        let needed_bytes = need * 2;
+
+        // Lazy alloc-or-grow dst on the consumer's device.
+        {
+            let mut dst_guard = edge
+                .dst
                 .lock()
-                .map_err(|e| anyhow!("HybStage peer_buffer poisoned: {e}"))?;
-            if buf.len() < need {
-                *buf = vec![f16::ZERO; need];
+                .map_err(|e| anyhow!("HybStage peer_send: dst poisoned: {e}"))?;
+            let needs_alloc = match dst_guard.as_ref() {
+                None => true,
+                Some(b) => b.bytes < needed_bytes,
+            };
+            if needs_alloc {
+                if let Some(old) = dst_guard.take() {
+                    // SAFETY: returned by an earlier alloc on the same
+                    // consumer device; the only callers reach this point
+                    // synchronously between forwards, so no in-flight
+                    // op references it.
+                    unsafe {
+                        flambeau_core::Device::dealloc(
+                            consumer_device.as_ref(),
+                            old.ptr,
+                            old.bytes,
+                        )
+                        .map_err(|e| anyhow!("HybStage peer_send dealloc old: {e}"))?;
+                    }
+                }
+                consumer_device
+                    .bind()
+                    .map_err(|e| anyhow!("HybStage peer_send bind consumer: {e}"))?;
+                let ptr = flambeau_core::Device::alloc(
+                    consumer_device.as_ref(),
+                    needed_bytes,
+                )
+                .map_err(|e| {
+                    anyhow!("HybStage peer_send alloc consumer ({needed_bytes}B): {e}")
+                })?;
+                *dst_guard = Some(crate::runtime::ar::PeerDeviceBuffer {
+                    ptr,
+                    bytes: needed_bytes,
+                });
             }
-            let bytes = need * 2;
-            // SAFETY: `input.ptr` carries `need` F16; `buf` is `need` host F16.
-            unsafe {
-                core.device
-                    .memcpy_async(
-                        core.stream,
-                        CopyDirection::DeviceToHost,
-                        DevicePtr(buf.as_mut_ptr() as usize),
-                        input.ptr,
-                        bytes,
-                    )
-                    .map_err(|e| anyhow!("HybStage peer_send DtoH: {e}"))?;
-            }
-            flambeau_core::Stream::synchronize(core.stream)?;
         }
-        self.handoff_barrier.wait();
+
+        // Re-bind to producer device — the consumer alloc above may
+        // have left the thread's HIP context on the consumer device.
+        core.device
+            .bind()
+            .map_err(|e| anyhow!("HybStage peer_send bind producer: {e}"))?;
+
+        let dst_ptr = edge
+            .dst
+            .lock()
+            .map_err(|e| anyhow!("HybStage peer_send: dst poisoned: {e}"))?
+            .as_ref()
+            .expect("dst just allocated above")
+            .ptr;
+        // SAFETY: `input.ptr` is `need` F16 = `needed_bytes` on producer
+        // device; `dst_ptr` is `needed_bytes` on consumer device; peer
+        // access was authorised at cluster bring-up; stream belongs to
+        // the producer device.
+        unsafe {
+            core.device
+                .memcpy_peer_async(
+                    core.stream,
+                    DevicePtr(dst_ptr.0),
+                    consumer_device_id,
+                    input.ptr,
+                    needed_bytes,
+                )
+                .map_err(|e| anyhow!("HybStage peer_send memcpy_peer_async: {e}"))?;
+        }
+
+        let event = HipEvent::new(flambeau_core::Device::id(core.device))
+            .map_err(|e| anyhow!("HybStage peer_send HipEvent::new: {e}"))?;
+        event
+            .record(core.stream)
+            .map_err(|e| anyhow!("HybStage peer_send event.record: {e}"))?;
+        *edge
+            .send_done
+            .lock()
+            .map_err(|e| anyhow!("HybStage peer_send: send_done poisoned: {e}"))? = Some(event);
         Ok(())
     }
 }
@@ -561,7 +762,7 @@ impl<'a> ForwardEngine<'a, NoopHooks, PpStage<'a>> {
     }
 }
 
-impl<'a> ForwardEngine<'a, HybridHooks, HybStage> {
+impl<'a> ForwardEngine<'a, HybridHooks, HybStage<'a>> {
     #[allow(clippy::too_many_arguments)]
     pub fn new(
         device: &'a HipDevice,
@@ -576,8 +777,8 @@ impl<'a> ForwardEngine<'a, HybridHooks, HybStage> {
         layer_end: usize,
         ar_callback: ArCallback,
         bar: Option<Arc<BarArCoordinator>>,
-        peer_slot: Arc<crate::runtime::ar::PeerSlot>,
-        handoff_barrier: Arc<Barrier>,
+        send_edge: Option<&'a crate::runtime::ar::PeerSlot>,
+        recv_edge: Option<&'a crate::runtime::ar::PeerSlot>,
     ) -> Self {
         let hooks = HybridHooks {
             rank_in_stage,
@@ -591,8 +792,8 @@ impl<'a> ForwardEngine<'a, HybridHooks, HybStage> {
             rank_in_stage,
             layer_start,
             layer_end,
-            peer_slot,
-            handoff_barrier,
+            send_edge,
+            recv_edge,
         };
         Self::build(device, stream, reg, pool, hooks, stage, layer_start)
     }
@@ -934,7 +1135,7 @@ impl<H: TopologyHooks, S: StageHooks> ForwardCtx for ForwardEngine<'_, H, S> {
 pub type SingleDeviceEngine<'a> = ForwardEngine<'a, NoopHooks, SoloStage>;
 pub type TpEngine<'a> = ForwardEngine<'a, TpHooks, SoloStage>;
 pub type PpEngine<'a> = ForwardEngine<'a, NoopHooks, PpStage<'a>>;
-pub type HybridEngine<'a> = ForwardEngine<'a, HybridHooks, HybStage>;
+pub type HybridEngine<'a> = ForwardEngine<'a, HybridHooks, HybStage<'a>>;
 
 pub type SingleDeviceForwardCtx<'a> = SingleDeviceEngine<'a>;
 pub type TpForwardCtx<'a> = TpEngine<'a>;

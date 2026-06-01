@@ -15,7 +15,7 @@ use flambeau_core::Device;
 use flambeau_ops::OpsRegistry;
 use flambeau_quant::GgufFile;
 
-use crate::core::ScratchPool;
+use crate::core::{KvLayout, ScratchPool};
 use crate::engine::{
     HybridForwardCtx, PpForwardCtx, SingleDeviceForwardCtx, TpForwardCtx, TpHooks,
 };
@@ -58,8 +58,12 @@ pub enum WorkerRole {
         layer_end: usize,
         ar: Arc<ArCoordinator>,
         bar: Option<Arc<BarArCoordinator>>,
-        peer_buffer: PeerBuffer,
-        handoff: Arc<Barrier>,
+        /// Edge to the same-rank consumer in the next stage. `None` on
+        /// the last stage.
+        send_edge: Option<PeerBuffer>,
+        /// Edge from the same-rank producer in the previous stage.
+        /// `None` on the first stage.
+        recv_edge: Option<PeerBuffer>,
     },
 }
 
@@ -145,13 +149,14 @@ impl<A: Arch> WorkerHandle<A> {
         prefill_ubatch: usize,
         max_slots: usize,
         paged_kv_pages: Option<usize>,
+        kv_layout: crate::core::KvLayout,
     ) -> Result<Self> {
         let (cmd_tx, cmd_rx) = mpsc::channel::<Command>();
         let (ready_tx, ready_rx) = mpsc::sync_channel::<Result<()>>(1);
 
         let thread = std::thread::spawn(move || {
             let (mut state, init_err) =
-                match init_rank::<A>(device_id, &role, &file, ctx_cap, prefill_ubatch, max_slots, paged_kv_pages) {
+                match init_rank::<A>(device_id, &role, &file, ctx_cap, prefill_ubatch, max_slots, paged_kv_pages, kv_layout) {
                     Ok(s) => (Some(s), None),
                     Err(e) => (None, Some(e)),
                 };
@@ -344,12 +349,20 @@ fn init_rank<A: Arch>(
     prefill_ubatch: usize,
     max_slots: usize,
     paged_kv_pages: Option<usize>,
+    kv_layout: KvLayout,
 ) -> Result<RankState<A>> {
     let device = HipDevice::new(device_id).context("HipDevice::new")?;
     device.bind().context("device.bind")?;
     let shard = role.shard();
     let model = A::load(file, &device, shard, role.layer_slice(), ctx_cap).context("Arch::load")?;
-    let mut cfg = A::scratch_config(&model, shard, prefill_ubatch, max_slots, paged_kv_pages);
+    let mut cfg = A::scratch_config(
+        &model,
+        shard,
+        prefill_ubatch,
+        max_slots,
+        paged_kv_pages,
+        kv_layout,
+    );
     if let Some((ls, le)) = role.layer_slice() {
         cfg.num_layers = le - ls;
         // KV cache slots are per-owned-layer; slice the per-layer
@@ -466,8 +479,8 @@ fn run_forward_mixed_once<A: Arch>(
             layer_end,
             ar,
             bar,
-            peer_buffer,
-            handoff,
+            send_edge,
+            recv_edge,
         } => {
             let ar_callback = if let Some(bc) = bar {
                 make_bar_ar_callback(Arc::clone(bc), *rank_in_stage)
@@ -487,8 +500,8 @@ fn run_forward_mixed_once<A: Arch>(
                 *layer_end,
                 ar_callback,
                 bar.as_ref().map(Arc::clone),
-                Arc::clone(peer_buffer),
-                Arc::clone(handoff),
+                send_edge.as_deref(),
+                recv_edge.as_deref(),
             );
             A::forward_mixed(
                 &state.model,
@@ -572,8 +585,8 @@ fn run_forward_once<A: Arch>(
             layer_end,
             ar,
             bar,
-            peer_buffer,
-            handoff,
+            send_edge,
+            recv_edge,
         } => {
             let ar_callback = if let Some(bc) = bar {
                 make_bar_ar_callback(Arc::clone(bc), *rank_in_stage)
@@ -593,8 +606,8 @@ fn run_forward_once<A: Arch>(
                 *layer_end,
                 ar_callback,
                 bar.as_ref().map(Arc::clone),
-                Arc::clone(peer_buffer),
-                Arc::clone(handoff),
+                send_edge.as_deref(),
+                recv_edge.as_deref(),
             );
             A::forward(&state.model, &mut ctx, tokens, positions, slot_ids)?;
             Ok(ctx.logits().to_vec())
