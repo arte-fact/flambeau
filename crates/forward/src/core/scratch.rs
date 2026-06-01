@@ -131,10 +131,9 @@ pub trait KvLayerShape {
     fn num_layers(&self) -> usize;
     fn kv_width_at(&self, li: usize, n_ranks: usize) -> usize;
     /// Per-layer head_dim. Used to gate the Q8 KV layout (Q8 attention
-    /// kernel supports `head_dim ∈ {64, 128, 256}` today; gemma4's
-    /// head_dim=512 global layers exclude themselves). Default 0 means
-    /// "unknown" — `scratch_config_for` rejects Q8 unless every layer
-    /// with `kv_width > 0` returns a real value.
+    /// kernel supports `head_dim ∈ {64, 128, 256, 512}`). Default 0
+    /// means "unknown" — `scratch_config_for` rejects Q8 unless every
+    /// layer with `kv_width > 0` returns a real value.
     fn head_dim_at(&self, _li: usize) -> usize {
         0
     }
@@ -209,14 +208,10 @@ pub fn scratch_config_for<S: ScratchShape + ?Sized>(
     let n_ranks = shard.n_ranks();
     let per_layer_kv = per_layer_kv_widths(shape, n_ranks);
     let kv_width = per_layer_kv.iter().copied().max().unwrap_or(0);
-    // S7 + gemma4 extension: per-layer KV layout. `kv_layout` is the
-    // uniform request from --kv. For each layer with a KV cache:
-    //   head_dim ≤ 256 → Q8 (works with window_size via the SWA mask
-    //                         added to attention_decode_q8_kv)
-    //   head_dim = 512 → F16 (Q8 kernel can't be retuned to wave64
-    //                         single-wave at d=512 in this slice;
-    //                         gemma4 globals stay on F16)
-    // GDN / recurrent / kv-share layers (width == 0) keep the requested
+    // Per-layer KV layout. `kv_layout` is the uniform request from --kv.
+    // Q8 attention now covers head_dim ∈ {64, 128, 256, 512}; the d=512
+    // path uses a 2-wave block with cross-wave LDS reduction. Layers
+    // with width == 0 (GDN / recurrent / kv-share) keep the requested
     // layout but allocate nothing.
     let per_layer_kv_layouts: Option<Vec<KvLayout>> =
         if kv_layout == KvLayout::Q8Contig {
@@ -233,7 +228,7 @@ pub fn scratch_config_for<S: ScratchShape + ?Sized>(
                          to be implemented (layer {li} returned 0 — arch must override)"
                     );
                 }
-                let layout = if matches!(head_dim, 64 | 128 | 256) {
+                let layout = if matches!(head_dim, 64 | 128 | 256 | 512) {
                     KvLayout::Q8Contig
                 } else {
                     KvLayout::F16Contig

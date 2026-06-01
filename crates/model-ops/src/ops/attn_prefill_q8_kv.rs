@@ -1,6 +1,6 @@
 //! GQA prefill attention reading a Q8_0 KV cache. F16 Q, F16 out.
 //! Same shape contract as `attn_prefill_f16`, swapping the K/V cache
-//! dtype. Supports `head_dim ∈ {64, 128, 256}`.
+//! dtype. Supports `head_dim ∈ {64, 128, 256, 512}`.
 
 use anyhow::bail;
 use flambeau_ops::{HipOps, Ops};
@@ -25,9 +25,9 @@ pub fn attn_prefill_q8_kv(
     window_size: i32,
     ops: &HipOps<'_>,
 ) -> Result<()> {
-    if !matches!(head_dim, 64 | 128 | 256) {
+    if !matches!(head_dim, 64 | 128 | 256 | 512) {
         bail!(
-            "attn_prefill_q8_kv: head_dim {head_dim} not in {{64, 128, 256}}"
+            "attn_prefill_q8_kv: head_dim {head_dim} not in {{64, 128, 256, 512}}"
         );
     }
     if n_heads_q == 0 || n_heads_kv == 0 {

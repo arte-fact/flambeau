@@ -817,16 +817,14 @@ pub fn attention_decode_q8_kv(
     scale: f32,
     window_size: i32,
 ) -> Result<()> {
-    // Kernel supports head_dim ∈ {64, 128, 256}; block = head_dim/4
-    // threads (= 16/32/64 — one wavefront at d=256). The inter-block-
-    // of-Q8_0 reduction is wave-bounded `__shfl_xor` with stride up to
-    // 32; head_dim=512 needs 128 threads (2 waves) and cross-wave LDS
-    // reduction — gemma4 global layers stay on F16 KV via per-layer
-    // KvLayout. SWA layers (window_size > 0) are now supported via
-    // the t_start clamp in the kernel inner loop.
+    // Kernel supports head_dim ∈ {64, 128, 256, 512}. block = head_dim/4
+    // threads (16/32/64/128). At d=512 the block is 2 waves and the
+    // sum-of-blocks reduction adds a tiny cross-wave LDS rendezvous
+    // (`score_parts[2]` + 2 __syncthreads). SWA layers (window_size > 0)
+    // are supported via the t_start clamp in the kernel inner loop.
     assert!(
-        head_dim == 64 || head_dim == 128 || head_dim == 256,
-        "attention_decode_q8_kv: head_dim {head_dim} not supported (expected 64, 128, or 256)"
+        matches!(head_dim, 64 | 128 | 256 | 512),
+        "attention_decode_q8_kv: head_dim {head_dim} not supported (expected 64, 128, 256, or 512)"
     );
     let module = reg.expect_module("attention_decode_q8_kv")?;
     let kernel = module.kernel("flambeau_attention_decode_q8_kv")?;
@@ -884,10 +882,11 @@ pub fn attention_decode_q8_kv_splitk(
     scale: f32,
     window_size: i32,
 ) -> Result<()> {
-    // Same wave64-bounded reduction shape as `attention_decode_q8_kv`
-    // — head_dim=512 deferred until a Q8-KV d=512 consumer arrives.
+    // head_dim ∈ {64, 128, 256, 512}. d=512 enables Q8 on gemma4
+    // global layers; the kernel adds a cross-wave LDS reduce for that
+    // case (see attention_decode_q8_kv comments).
     assert!(
-        head_dim == 64 || head_dim == 128 || head_dim == 256,
+        matches!(head_dim, 64 | 128 | 256 | 512),
         "attention_decode_q8_kv_splitk: head_dim {head_dim} not supported"
     );
     assert!(chunk_size > 0);
@@ -983,10 +982,11 @@ pub fn attention_prefill_q8_kv(
     scale: f32,
     window_size: i32,
 ) -> Result<()> {
-    // Same wave64-bounded reduction shape as `attention_decode_q8_kv`
-    // — head_dim=512 deferred until a Q8-KV d=512 consumer arrives.
+    // head_dim ∈ {64, 128, 256, 512}. d=512 routes through the oracle
+    // single-pass kernel (no flash_tile template at d=512); d≤256 goes
+    // flash_tile when n_q_tokens ≥ 4.
     assert!(
-        head_dim == 64 || head_dim == 128 || head_dim == 256,
+        matches!(head_dim, 64 | 128 | 256 | 512),
         "attention_prefill_q8_kv: head_dim {head_dim} not supported"
     );
 
@@ -1002,9 +1002,13 @@ pub fn attention_prefill_q8_kv(
     let v_ptr: u64 = v_cache.as_usize() as u64;
     let o_ptr: u64 = out.as_usize() as u64;
 
-    if n_q_tokens >= 4 {
+    if n_q_tokens >= 4 && head_dim != 512 {
         // Flash-tile fast path: BR=4 (head_dim ∈ {64,128}) or BR=8
         // (head_dim=256, more Q rows / fewer blocks at high n_q).
+        // d=512 has no flash_tile template (template instantiation
+        // would push LDS tile size to 32 KB at BC=16); falls back to
+        // the oracle single-pass kernel below, which now handles
+        // d=512 via cross-wave LDS reduction.
         let module = reg.expect_module("attention_prefill_flash_tile_q8_kv")?;
         let entry = match head_dim {
             64 => "flambeau_attention_prefill_flash_tile_d64_q8_kv",

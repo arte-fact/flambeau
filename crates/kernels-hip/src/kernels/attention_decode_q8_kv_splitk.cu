@@ -22,7 +22,8 @@
 #define INFINITY __builtin_huge_valf()
 #endif
 
-#define ATTN_Q8SK_MAX_HEAD_DIM 256
+#define ATTN_Q8SK_MAX_HEAD_DIM 512
+#define ATTN_Q8SK_MAX_WAVES (ATTN_Q8SK_MAX_HEAD_DIM / 256)
 
 extern "C" __global__ void flambeau_attention_decode_q8_kv_splitk_chunk(
     const fb_fp16_t* __restrict__ q,                    // [n_heads_q, head_dim]
@@ -33,7 +34,7 @@ extern "C" __global__ void flambeau_attention_decode_q8_kv_splitk_chunk(
     float* __restrict__ partials_o,                     // [n_heads_q, n_chunks, head_dim]
     const int n_heads_q,
     const int n_heads_kv,
-    const int head_dim,                                 // 64, 128 or 256
+    const int head_dim,                                 // 64, 128, 256 or 512
     const int n_tokens,
     const int n_chunks,
     const int chunk_size,
@@ -142,13 +143,25 @@ extern "C" __global__ void flambeau_attention_decode_q8_kv_splitk_chunk(
         float score_t = k_d * qd_block * (float) sumi_block;
 
         if (n_blocks_per_row >= 2) {
-            score_t += __shfl_xor(score_t, 8,  n_blocks_per_row * n_quads_per_block);
+            score_t += __shfl_xor(score_t, 8,  min(n_blocks_per_row * n_quads_per_block, 64));
         }
         if (n_blocks_per_row >= 4) {
-            score_t += __shfl_xor(score_t, 16, n_blocks_per_row * n_quads_per_block);
+            score_t += __shfl_xor(score_t, 16, min(n_blocks_per_row * n_quads_per_block, 64));
         }
         if (n_blocks_per_row >= 8) {
-            score_t += __shfl_xor(score_t, 32, n_blocks_per_row * n_quads_per_block);
+            score_t += __shfl_xor(score_t, 32, min(n_blocks_per_row * n_quads_per_block, 64));
+        }
+        // d=512: 2 waves per block; xor chain above ends at stride 32
+        // (wave-internal). Cross-wave LDS reduce so every lane sees the
+        // full sum across both waves.
+        if (head_dim > 256) {
+            __shared__ float score_parts[ATTN_Q8SK_MAX_WAVES];
+            const int warp = tid >> 6;
+            const int lane = tid & 63;
+            if (lane == 0) score_parts[warp] = score_t;
+            __syncthreads();
+            score_t = score_parts[0] + score_parts[1];
+            __syncthreads();
         }
         score_t *= scale;
 

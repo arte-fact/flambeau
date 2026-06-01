@@ -29,8 +29,8 @@ pub fn attn_decode_q8_kv_splitk(
     window_size: i32,
     ops: &HipOps<'_>,
 ) -> Result<()> {
-    if !matches!(head_dim, 64 | 128 | 256) {
-        bail!("attn_decode_q8_kv_splitk: head_dim {head_dim} not in {{64, 128, 256}}");
+    if !matches!(head_dim, 64 | 128 | 256 | 512) {
+        bail!("attn_decode_q8_kv_splitk: head_dim {head_dim} not in {{64, 128, 256, 512}}");
     }
     if n_heads_q == 0 || n_heads_kv == 0 || chunk_size == 0 {
         bail!(

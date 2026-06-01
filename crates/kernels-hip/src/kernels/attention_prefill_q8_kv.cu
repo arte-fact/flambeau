@@ -11,7 +11,7 @@
 // Q: [n_q_tokens, n_heads_q, head_dim] FP16
 // K/V: [n_k_tokens, n_heads_kv, head_dim/32] block_q8_0
 // Out: [n_q_tokens, n_heads_q, head_dim] FP16
-// Supported head_dim: {64, 128, 256}.
+// Supported head_dim: {64, 128, 256, 512}.
 // Launch: blockDim = { head_dim/4 }, gridDim = { n_q_tokens, n_heads_q, 1 }.
 
 #include "block_quant.cuh"
@@ -22,7 +22,8 @@
 #define INFINITY __builtin_huge_valf()
 #endif
 
-#define ATTN_Q8DPP_MAX_HEAD_DIM 256
+#define ATTN_Q8DPP_MAX_HEAD_DIM 512
+#define ATTN_Q8DPP_MAX_WAVES (ATTN_Q8DPP_MAX_HEAD_DIM / 256)
 
 extern "C" __global__ void flambeau_attention_prefill_q8_kv(
     const fb_fp16_t* __restrict__ q,                    // [n_q_tokens, n_heads_q, head_dim]
@@ -32,7 +33,7 @@ extern "C" __global__ void flambeau_attention_prefill_q8_kv(
     const int n_q_tokens,
     const int n_heads_q,
     const int n_heads_kv,
-    const int head_dim,                                 // 64, 128 or 256
+    const int head_dim,                                 // 64, 128, 256 or 512
     const int n_k_tokens,
     const int q_offset,                                 // global position of Q[0]
     const float scale,
@@ -119,13 +120,23 @@ extern "C" __global__ void flambeau_attention_prefill_q8_kv(
         float score_t = k_d * qd_block * (float) sumi_block;
 
         if (n_blocks_per_row >= 2) {
-            score_t += __shfl_xor(score_t, 8,  n_blocks_per_row * n_quads_per_block);
+            score_t += __shfl_xor(score_t, 8,  min(n_blocks_per_row * n_quads_per_block, 64));
         }
         if (n_blocks_per_row >= 4) {
-            score_t += __shfl_xor(score_t, 16, n_blocks_per_row * n_quads_per_block);
+            score_t += __shfl_xor(score_t, 16, min(n_blocks_per_row * n_quads_per_block, 64));
         }
         if (n_blocks_per_row >= 8) {
-            score_t += __shfl_xor(score_t, 32, n_blocks_per_row * n_quads_per_block);
+            score_t += __shfl_xor(score_t, 32, min(n_blocks_per_row * n_quads_per_block, 64));
+        }
+        // d=512: 2-wave block; cross-wave LDS rendezvous.
+        if (head_dim > 256) {
+            __shared__ float score_parts[ATTN_Q8DPP_MAX_WAVES];
+            const int warp = tid >> 6;
+            const int lane = tid & 63;
+            if (lane == 0) score_parts[warp] = score_t;
+            __syncthreads();
+            score_t = score_parts[0] + score_parts[1];
+            __syncthreads();
         }
         score_t *= scale;
 

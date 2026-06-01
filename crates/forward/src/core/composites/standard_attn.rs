@@ -504,8 +504,8 @@ pub fn standard_attn_local<H: TopologyHooks>(
         // Single-slot, contiguous positions → batched kv_append + attn_prefill.
         // Q8Contig path (S7c) replaces F16 kv_append + attn_decode/prefill with
         // the Q8 model-ops siblings. The Q8 dispatch is gated upstream by
-        // `scratch_config_for`'s Q8 viability check (head_dim ∈ {64,128,256},
-        // window_size == 0) — at runtime we just trust the cache layout.
+        // `scratch_config_for`'s Q8 viability check (head_dim ∈ {64,128,256,512})
+        // — at runtime we just trust the cache layout.
         let is_q8 = kv.layout == crate::core::KvLayout::Q8Contig;
         let q8_slot_stride_bytes = max_seq_len * kv.bytes_per_row;
         let slot_offset = if is_q8 {
