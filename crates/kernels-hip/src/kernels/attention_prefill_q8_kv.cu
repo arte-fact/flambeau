@@ -35,7 +35,8 @@ extern "C" __global__ void flambeau_attention_prefill_q8_kv(
     const int head_dim,                                 // 64, 128 or 256
     const int n_k_tokens,
     const int q_offset,                                 // global position of Q[0]
-    const float scale
+    const float scale,
+    const int window_size                               // 0 = unbounded causal; >0 = SWA
 ) {
     const int q_token = blockIdx.x;
     const int q_head  = blockIdx.y;
@@ -51,9 +52,17 @@ extern "C" __global__ void flambeau_attention_prefill_q8_kv(
     const int n_quads_per_block = 8;
     const int quad_in_block     = (elem_base % 32) / 4;
 
-    // Causal mask: same as F16 oracle.
-    int limit = q_offset + q_token + 1;
+    // Causal mask: keys with t < qpos+1 are visible.
+    // SWA mask (window_size > 0): keys with t < qpos - window_size + 1
+    // are excluded as well. Per-query both ends move with `q_token`.
+    const int qpos = q_offset + q_token;
+    int limit = qpos + 1;
     if (limit > n_k_tokens) limit = n_k_tokens;
+    int t_start = 0;
+    if (window_size > 0) {
+        t_start = qpos - window_size + 1;
+        if (t_start < 0) t_start = 0;
+    }
 
     // 1. Q → Q8_0 in LDS, once per (q_token, q_head) block.
     __shared__ int8_t q_qs[ATTN_Q8DPP_MAX_HEAD_DIM];
@@ -90,7 +99,7 @@ extern "C" __global__ void flambeau_attention_prefill_q8_kv(
     const int* q_qs_int = (const int*) q_qs;
     const int q_packed  = q_qs_int[dim_quad];
 
-    for (int t = 0; t < limit; ++t) {
+    for (int t = t_start; t < limit; ++t) {
         const size_t kv_row_blocks =
             ((size_t) t * n_heads_kv + kv_head) * n_blocks_per_row;
 

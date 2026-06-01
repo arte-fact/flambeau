@@ -37,7 +37,8 @@ extern "C" __global__ void flambeau_attention_decode_q8_kv_splitk_chunk(
     const int n_tokens,
     const int n_chunks,
     const int chunk_size,
-    const float scale
+    const float scale,
+    const int window_size                               // 0 = unbounded causal; >0 = SWA
 ) {
     const int q_head = blockIdx.x;
     const int chunk  = blockIdx.y;
@@ -55,9 +56,21 @@ extern "C" __global__ void flambeau_attention_decode_q8_kv_splitk_chunk(
     const int n_quads_per_block = 8;
     const int quad_in_block     = (elem_base % 32) / 4;
 
-    const int t_start = chunk * chunk_size;
-    int t_end         = t_start + chunk_size;
+    int t_start = chunk * chunk_size;
+    int t_end   = t_start + chunk_size;
     if (t_end > n_tokens) t_end = n_tokens;
+    // SWA mask: keys older than (qpos - window_size + 1) are
+    // excluded. Apply per chunk by raising t_start when the window
+    // begins inside this chunk. Chunks entirely before the window
+    // collapse to empty (t_start >= t_end → loop skipped → caller's
+    // combine stage treats empty chunks as no-op).
+    if (window_size > 0) {
+        const int qpos = n_tokens - 1;
+        int window_start = qpos - window_size + 1;
+        if (window_start < 0) window_start = 0;
+        if (t_start < window_start) t_start = window_start;
+        if (t_start > t_end) t_start = t_end;
+    }
 
     // 1. Q → Q8_0 in LDS, once per (q_head, chunk) block. Same trick as
     // single-pass: amax over each 32-elem group, roundf(v/d).

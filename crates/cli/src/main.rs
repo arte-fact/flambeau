@@ -135,6 +135,15 @@ enum Cmd {
             default_value_t = 512
         )]
         prefill_ubatch: usize,
+        /// Per-chunk prefill budget used by the K4c mixed-batch
+        /// scheduler. Smaller chunks improve short-request TTFT
+        /// under load (Sarathi-Serve trade) at the cost of slightly
+        /// higher long-request prefill latency.
+        #[arg(
+            long = "prefill-chunk-tokens",
+            default_value_t = 512
+        )]
+        prefill_chunk_tokens: usize,
         /// Activate PagedAttention with `N` pages per layer (page size
         /// fixed at 16 tokens). Default off (contiguous per-slot KV
         /// slab). Set `N` to the per-layer page budget; pair with a
@@ -301,6 +310,7 @@ fn main() -> Result<()> {
             embedding_device,
             inflight_slots,
             prefill_ubatch,
+            prefill_chunk_tokens,
             paged_kv,
             max_queue_depth,
             decode_batch_window_us,
@@ -324,6 +334,7 @@ fn main() -> Result<()> {
             embedding_device,
             inflight_slots,
             prefill_ubatch,
+            prefill_chunk_tokens,
             paged_kv,
             max_queue_depth,
             decode_batch_window_us,
@@ -357,6 +368,7 @@ struct ServeArgs {
     embedding_device: Option<i32>,
     inflight_slots: usize,
     prefill_ubatch: usize,
+    prefill_chunk_tokens: usize,
     paged_kv: Option<usize>,
     max_queue_depth: usize,
     decode_batch_window_us: u64,
@@ -407,6 +419,7 @@ fn serve_cmd(args: ServeArgs) -> Result<()> {
         embedding_device,
         inflight_slots,
         prefill_ubatch,
+        prefill_chunk_tokens,
         paged_kv,
         max_queue_depth,
         decode_batch_window_us,
@@ -513,6 +526,7 @@ fn serve_cmd(args: ServeArgs) -> Result<()> {
         embedding_device_id: resolved_embedding_device,
         inflight_slots,
         prefill_ubatch,
+        prefill_chunk_tokens,
         paged_kv_pages: paged_kv,
         max_queue_depth,
         decode_batch_window_us,

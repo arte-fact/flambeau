@@ -52,7 +52,11 @@ pub use ops::attn_decode_splitk::{attn_decode_f16_splitk, splitk_chunk_size};
 pub use ops::attn_prefill::attn_prefill_f16;
 pub use ops::cast::{cast_f16_to_f32, cast_f32_to_f16};
 pub use ops::gated_attn::{sigmoid_mul_f16, split_q_gate_f16};
+pub use ops::attn_decode_q8_kv::attn_decode_q8_kv;
+pub use ops::attn_decode_q8_kv_splitk::attn_decode_q8_kv_splitk;
+pub use ops::attn_prefill_q8_kv::attn_prefill_q8_kv;
 pub use ops::kv_append::kv_append_f16;
+pub use ops::kv_append_f16_to_q8::kv_append_f16_to_q8;
 pub use ops::moe_router::topk_f32 as moe_router_topk_f32;
 pub use ops::qmatmul::{
     mmvq_q4_0_gate_up_t128_decode, mmvq_q4_0_kv_decode_f16, qmatmul_q4_0, qmatmul_q4_1,

@@ -125,4 +125,7 @@ impl KvLayerShape for Qwen35V2Config {
             (self.n_kv_heads / n_ranks) * self.head_dim
         }
     }
+    fn head_dim_at(&self, _li: usize) -> usize {
+        self.head_dim
+    }
 }

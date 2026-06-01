@@ -14,8 +14,8 @@ pub mod runtime;
 pub mod testing;
 
 pub use core::{
-    per_layer_kv_widths, scratch_config_for, KvLayerShape, MoeShape, NoopHooks, ScratchConfig,
-    ScratchPool, ScratchShape, TopologyHooks,
+    per_layer_kv_widths, scratch_config_for, KvLayerShape, KvLayout, MoeShape, NoopHooks,
+    ScratchConfig, ScratchPool, ScratchShape, TopologyHooks, Q8_0_BLOCK_BYTES,
 };
 pub use ctx::ForwardCtx;
 pub use engine::{

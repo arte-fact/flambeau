@@ -8,7 +8,7 @@ use flambeau_backend_hip::HipDevice;
 use flambeau_forward::ctx::{ForwardCtx, GdnDims};
 use flambeau_forward::loader::ShardMode;
 use flambeau_forward::runtime::Arch;
-use flambeau_forward::{scratch_config_for, MoeShape, ScratchConfig, ScratchShape};
+use flambeau_forward::{scratch_config_for, KvLayout, MoeShape, ScratchConfig, ScratchShape};
 use flambeau_quant::GgufFile;
 
 use crate::config::Gemma4V2Config;
@@ -65,8 +65,16 @@ impl Arch for Gemma4V2 {
         prefill_ubatch: usize,
         max_slots: usize,
         paged_kv_pages: Option<usize>,
+        kv_layout: KvLayout,
     ) -> ScratchConfig {
-        scratch_config_for(&model.config, shard, prefill_ubatch, max_slots, paged_kv_pages)
+        scratch_config_for(
+            &model.config,
+            shard,
+            prefill_ubatch,
+            max_slots,
+            paged_kv_pages,
+            kv_layout,
+        )
     }
 
     fn dispose(model: &mut Self::Model, device: &HipDevice) -> Result<()> {

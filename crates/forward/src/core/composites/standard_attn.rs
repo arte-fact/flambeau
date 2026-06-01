@@ -502,16 +502,26 @@ pub fn standard_attn_local<H: TopologyHooks>(
         let _ = mpps;
     } else if prefill_shape {
         // Single-slot, contiguous positions → batched kv_append + attn_prefill.
-        let slot_offset = primary_slot * slot_stride_bytes;
+        // Q8Contig path (S7c) replaces F16 kv_append + attn_decode/prefill with
+        // the Q8 model-ops siblings. The Q8 dispatch is gated upstream by
+        // `scratch_config_for`'s Q8 viability check (head_dim ∈ {64,128,256},
+        // window_size == 0) — at runtime we just trust the cache layout.
+        let is_q8 = kv.layout == crate::core::KvLayout::Q8Contig;
+        let q8_slot_stride_bytes = max_seq_len * kv.bytes_per_row;
+        let slot_offset = if is_q8 {
+            primary_slot * q8_slot_stride_bytes
+        } else {
+            primary_slot * slot_stride_bytes
+        };
         let k_slot_ptr = kv.k.offset_bytes(slot_offset);
         let v_slot_ptr = kv.v.offset_bytes(slot_offset);
         let mut k_cache = unsafe { Tensor::<F16>::from_raw(k_slot_ptr, slot_stride_elems) };
         let mut v_cache = unsafe { Tensor::<F16>::from_raw(v_slot_ptr, slot_stride_elems) };
         let v_f16_view = unsafe { Tensor::<F16>::from_raw(state.pool.v_f16, n * kv_width) };
         if !is_kv_shared {
-            if weights.attn_v_unit_norm_w.is_some() {
-                // gemma4 path: fuse V unit-RMSNorm into the cache write.
-                // K copy + V normalize-then-copy in one launch.
+            if weights.attn_v_unit_norm_w.is_some() && !is_q8 {
+                // gemma4 F16 path: fuse V unit-RMSNorm into the cache
+                // write. K copy + V normalize-then-copy in one launch.
                 ops.kv_append_v_unit_norm_f16(
                     state.pool.k_f16,
                     state.pool.v_f16,
@@ -522,6 +532,69 @@ pub fn standard_attn_local<H: TopologyHooks>(
                     weights.head_dim,
                     start_position,
                     weights.rms_eps,
+                )?;
+            } else if weights.attn_v_unit_norm_w.is_some() && is_q8 {
+                // gemma4 Q8 path: V-unit-norm in place on the F16 scratch,
+                // then F16→Q8 quantize-and-write. The fused F16 kernel
+                // can't target a Q8 slab (different byte stride per row),
+                // so this slice splits the two ops.
+                let mut v_for_norm = unsafe {
+                    Tensor::<F16>::from_raw(state.pool.v_f16, n * kv_width)
+                };
+                flambeau_model_ops::v_unit_norm_per_head_f16(
+                    &mut v_for_norm,
+                    n,
+                    weights.n_kv_heads,
+                    weights.head_dim,
+                    weights.rms_eps,
+                    &ops,
+                )?;
+                let mut k_cache_q8 = unsafe {
+                    Tensor::<flambeau_model_ops::Q8_0>::from_raw(
+                        k_slot_ptr,
+                        max_seq_len * kv_width,
+                    )
+                };
+                let mut v_cache_q8 = unsafe {
+                    Tensor::<flambeau_model_ops::Q8_0>::from_raw(
+                        v_slot_ptr,
+                        max_seq_len * kv_width,
+                    )
+                };
+                flambeau_model_ops::kv_append_f16_to_q8(
+                    &k_f16_rope,
+                    &v_f16_view,
+                    &mut k_cache_q8,
+                    &mut v_cache_q8,
+                    n,
+                    kv_width,
+                    start_position,
+                    max_seq_len,
+                    &ops,
+                )?;
+            } else if is_q8 {
+                let mut k_cache_q8 = unsafe {
+                    Tensor::<flambeau_model_ops::Q8_0>::from_raw(
+                        k_slot_ptr,
+                        max_seq_len * kv_width,
+                    )
+                };
+                let mut v_cache_q8 = unsafe {
+                    Tensor::<flambeau_model_ops::Q8_0>::from_raw(
+                        v_slot_ptr,
+                        max_seq_len * kv_width,
+                    )
+                };
+                flambeau_model_ops::kv_append_f16_to_q8(
+                    &k_f16_rope,
+                    &v_f16_view,
+                    &mut k_cache_q8,
+                    &mut v_cache_q8,
+                    n,
+                    kv_width,
+                    start_position,
+                    max_seq_len,
+                    &ops,
                 )?;
             } else {
                 flambeau_model_ops::kv_append_f16(
@@ -541,6 +614,71 @@ pub fn standard_attn_local<H: TopologyHooks>(
         let mut attn_out = unsafe { Tensor::<F16>::from_raw(state.pool.attn_out_f16, n * q_width) };
         if n == 1 {
             let n_tokens_kv = start_position + 1;
+            if is_q8 {
+                let k_cache_q8 = unsafe {
+                    Tensor::<flambeau_model_ops::Q8_0>::from_raw(
+                        k_slot_ptr,
+                        max_seq_len * kv_width,
+                    )
+                };
+                let v_cache_q8 = unsafe {
+                    Tensor::<flambeau_model_ops::Q8_0>::from_raw(
+                        v_slot_ptr,
+                        max_seq_len * kv_width,
+                    )
+                };
+                let chunk_size = flambeau_model_ops::splitk_chunk_size(n_tokens_kv);
+                let n_chunks = n_tokens_kv.div_ceil(chunk_size);
+                let use_splitk = n_tokens_kv > 256
+                    && n_chunks > 1
+                    && n_chunks <= crate::core::scratch::MAX_SPLITK_CHUNKS
+                    && state.pool.splitk_partials_m.as_usize() != 0;
+                if use_splitk {
+                    let partials_m_n = weights.n_heads * n_chunks;
+                    let partials_o_n = partials_m_n * weights.head_dim;
+                    let mut partials_m = unsafe {
+                        Tensor::<F32>::from_raw(state.pool.splitk_partials_m, partials_m_n)
+                    };
+                    let mut partials_s = unsafe {
+                        Tensor::<F32>::from_raw(state.pool.splitk_partials_s, partials_m_n)
+                    };
+                    let mut partials_o = unsafe {
+                        Tensor::<F32>::from_raw(state.pool.splitk_partials_o, partials_o_n)
+                    };
+                    flambeau_model_ops::attn_decode_q8_kv_splitk(
+                        &q_f16_rope,
+                        &k_cache_q8,
+                        &v_cache_q8,
+                        &mut attn_out,
+                        &mut partials_m,
+                        &mut partials_s,
+                        &mut partials_o,
+                        weights.n_heads,
+                        weights.n_kv_heads,
+                        weights.head_dim,
+                        n_tokens_kv,
+                        chunk_size,
+                        scale,
+                        weights.window_size,
+                        &ops,
+                    )?;
+                } else {
+                    flambeau_model_ops::attn_decode_q8_kv(
+                        &q_f16_rope,
+                        &k_cache_q8,
+                        &v_cache_q8,
+                        &mut attn_out,
+                        weights.n_heads,
+                        weights.n_kv_heads,
+                        weights.head_dim,
+                        n_tokens_kv,
+                        scale,
+                        weights.window_size,
+                        &ops,
+                    )?;
+                }
+                let _ = (k_cache, v_cache);
+            } else {
             let chunk_size = flambeau_model_ops::splitk_chunk_size(n_tokens_kv);
             let n_chunks = n_tokens_kv.div_ceil(chunk_size);
             let use_splitk = n_tokens_kv > 256
@@ -608,6 +746,37 @@ pub fn standard_attn_local<H: TopologyHooks>(
                     &ops,
                 )?;
             }
+            } // end of else (non-Q8) decode branch
+        } else if is_q8 {
+            let k_cache_q8 = unsafe {
+                Tensor::<flambeau_model_ops::Q8_0>::from_raw(
+                    k_slot_ptr,
+                    max_seq_len * kv_width,
+                )
+            };
+            let v_cache_q8 = unsafe {
+                Tensor::<flambeau_model_ops::Q8_0>::from_raw(
+                    v_slot_ptr,
+                    max_seq_len * kv_width,
+                )
+            };
+            let n_k_tokens = start_position + n;
+            flambeau_model_ops::attn_prefill_q8_kv(
+                &q_f16_rope,
+                &k_cache_q8,
+                &v_cache_q8,
+                &mut attn_out,
+                n,
+                weights.n_heads,
+                weights.n_kv_heads,
+                weights.head_dim,
+                n_k_tokens,
+                start_position,
+                scale,
+                weights.window_size,
+                &ops,
+            )?;
+            let _ = (k_cache, v_cache);
         } else {
             let n_k_tokens = start_position + n;
             flambeau_model_ops::attn_prefill_f16(

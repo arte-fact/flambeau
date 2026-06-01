@@ -10,7 +10,7 @@ use flambeau_backend_hip::HipDevice;
 use flambeau_forward::ctx::{ForwardCtx, GdnDims};
 use flambeau_forward::loader::{per_rank_gdn_dims, ShardMode};
 use flambeau_forward::runtime::Arch;
-use flambeau_forward::{scratch_config_for, MoeShape, ScratchConfig, ScratchShape};
+use flambeau_forward::{scratch_config_for, KvLayout, MoeShape, ScratchConfig, ScratchShape};
 use flambeau_quant::GgufFile;
 
 use crate::config::Qwen35MoeV2Config;
@@ -72,8 +72,16 @@ impl Arch for Qwen35MoeV2 {
         prefill_ubatch: usize,
         max_slots: usize,
         paged_kv_pages: Option<usize>,
+        kv_layout: KvLayout,
     ) -> ScratchConfig {
-        scratch_config_for(&model.config, shard, prefill_ubatch, max_slots, paged_kv_pages)
+        scratch_config_for(
+            &model.config,
+            shard,
+            prefill_ubatch,
+            max_slots,
+            paged_kv_pages,
+            kv_layout,
+        )
     }
 
     fn dispose(model: &mut Self::Model, device: &HipDevice) -> Result<()> {

@@ -47,7 +47,8 @@ static __device__ __forceinline__ void flash_attn_prefill_v2_q8_impl(
     const int n_heads_kv,
     const int n_k_tokens,
     const int q_offset,
-    const float scale
+    const float scale,
+    const int window_size                              // 0 = unbounded causal; >0 = SWA
 ) {
     static_assert(D == 64 || D == 128 || D == 256, "D must be 64, 128, or 256");
     static_assert(D % WARP_SIZE == 0, "D must be a multiple of WARP_SIZE");
@@ -71,6 +72,16 @@ static __device__ __forceinline__ void flash_attn_prefill_v2_q8_impl(
 
     int limit = q_offset + q_idx + 1;
     if (limit > n_k_tokens) limit = n_k_tokens;
+
+    // SWA: per-row lower bound. Rows older than (qpos - window_size + 1)
+    // are masked. window_size == 0 keeps the full causal range
+    // (t_start = 0).
+    int t_start = 0;
+    if (window_size > 0) {
+        const int qpos = q_offset + q_idx;
+        t_start = qpos - window_size + 1;
+        if (t_start < 0) t_start = 0;
+    }
 
     const int last_q_idx = min(q_tile * BR + BR - 1, n_q_tokens - 1);
     int block_limit = q_offset + last_q_idx + 1;
@@ -151,7 +162,7 @@ static __device__ __forceinline__ void flash_attn_prefill_v2_q8_impl(
                 }
                 float s_j = gfx906_warp_reduce_sum(partial) * scale;
 
-                if (row >= limit) {
+                if (row >= limit || row < t_start) {
                     s_j = -INFINITY;
                 }
 
@@ -195,12 +206,13 @@ void flambeau_attention_prefill_flash_tile_d64_q8_kv(
     const int n_heads_kv,
     const int n_k_tokens,
     const int q_offset,
-    const float scale
+    const float scale,
+    const int window_size
 ) {
     flash_attn_prefill_v2_q8_impl</*D=*/64, /*BR=*/4, /*BC=*/64>(
         q, k_cache, v_cache, out,
         n_q_tokens, n_heads_q, n_heads_kv,
-        n_k_tokens, q_offset, scale);
+        n_k_tokens, q_offset, scale, window_size);
 }
 
 extern "C" __global__ __launch_bounds__(256, 2)
@@ -214,12 +226,13 @@ void flambeau_attention_prefill_flash_tile_d128_q8_kv(
     const int n_heads_kv,
     const int n_k_tokens,
     const int q_offset,
-    const float scale
+    const float scale,
+    const int window_size
 ) {
     flash_attn_prefill_v2_q8_impl</*D=*/128, /*BR=*/4, /*BC=*/32>(
         q, k_cache, v_cache, out,
         n_q_tokens, n_heads_q, n_heads_kv,
-        n_k_tokens, q_offset, scale);
+        n_k_tokens, q_offset, scale, window_size);
 }
 
 extern "C" __global__ __launch_bounds__(256, 2)
@@ -233,12 +246,13 @@ void flambeau_attention_prefill_flash_tile_d256_q8_kv(
     const int n_heads_kv,
     const int n_k_tokens,
     const int q_offset,
-    const float scale
+    const float scale,
+    const int window_size
 ) {
     flash_attn_prefill_v2_q8_impl</*D=*/256, /*BR=*/4, /*BC=*/16>(
         q, k_cache, v_cache, out,
         n_q_tokens, n_heads_q, n_heads_kv,
-        n_k_tokens, q_offset, scale);
+        n_k_tokens, q_offset, scale, window_size);
 }
 
 extern "C" __global__ __launch_bounds__(512, 1)
@@ -252,10 +266,11 @@ void flambeau_attention_prefill_flash_tile_d256_br8_q8_kv(
     const int n_heads_kv,
     const int n_k_tokens,
     const int q_offset,
-    const float scale
+    const float scale,
+    const int window_size
 ) {
     flash_attn_prefill_v2_q8_impl</*D=*/256, /*BR=*/8, /*BC=*/16>(
         q, k_cache, v_cache, out,
         n_q_tokens, n_heads_q, n_heads_kv,
-        n_k_tokens, q_offset, scale);
+        n_k_tokens, q_offset, scale, window_size);
 }

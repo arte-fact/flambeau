@@ -181,12 +181,7 @@ pub fn gdn_layer_local<H: TopologyHooks>(
             |buf: DevicePtr, n_elems: usize, dev: &HipDevice, stm: &HipStream| -> Result<()> {
                 hooks.ar_sum_f32(buf, n_elems, dev, stm)
             };
-        let batched_opt = if std::env::var("FLAMBEAU_GDN_BATCHED_SLOTS").as_deref() == Ok("0") {
-            None
-        } else {
-            state.pool.gdn_decode_batched_scratch.as_ref()
-        };
-        if let Some(batched_scratch) = batched_opt {
+        if let Some(batched_scratch) = state.pool.gdn_decode_batched_scratch.as_ref() {
             let batched_view = batched_scratch.view();
             if n_tokens > batched_view.max_slots {
                 bail!(

@@ -62,6 +62,11 @@ pub struct ServeConfig {
     /// Prefill chunk size in tokens. Default 512 is the production sweet
     /// spot across pp/tp/hybrid topologies; tune for short-prompt TTFT.
     pub prefill_ubatch: usize,
+    /// Per-chunk prefill budget used by the K4c mixed-batch scheduler.
+    /// Smaller chunks improve short-request TTFT under load
+    /// (Sarathi-Serve trade) at the cost of slightly higher long-request
+    /// prefill latency. Default 512.
+    pub prefill_chunk_tokens: usize,
     /// PagedAttention activation. `None` (default) uses the legacy
     /// contiguous per-slot KV slab. `Some(N)` for `N > 1` builds the
     /// page pool with `N` pages per layer — pair with a high
@@ -127,16 +132,6 @@ pub async fn serve(cfg: ServeConfig, registry: Registry) -> Result<()> {
     info!(forward_stack = "v2", "flambeau serve: loading model");
     info!(?cfg, "flambeau serve config");
 
-    if cfg.kv != "f16" {
-        warn!(
-            requested = %cfg.kv,
-            effective = "f16",
-            "--kv {} is accepted but not yet wired through the v2 forward stack; \
-             KV cache is allocated as F16 regardless. Use --ctx-cap to reduce KV memory.",
-            cfg.kv,
-        );
-    }
-
     let gguf = GgufFile::open(&cfg.gguf_path)
         .with_context(|| format!("open GGUF at {}", cfg.gguf_path.display()))?;
 
@@ -169,6 +164,14 @@ pub(crate) async fn serve_inner_v2(
         .to_string();
     let gguf_arch: &str = &gguf_arch_owned;
 
+    let kv_layout = match cfg.kv.as_str() {
+        "f16" => flambeau_forward::KvLayout::F16Contig,
+        "q8" => flambeau_forward::KvLayout::Q8Contig,
+        other => anyhow::bail!(
+            "--kv {other}: unknown KV cache layout (supported: f16, q8)"
+        ),
+    };
+
     let n_available = device_count().unwrap_or(0);
     for d in &cfg.device_ids {
         if *d < 0 || *d >= n_available {
@@ -192,20 +195,16 @@ pub(crate) async fn serve_inner_v2(
 
     let inflight_slots = cfg.inflight_slots.clamp(1, 32);
     let prefill_ubatch_raw = cfg.prefill_ubatch.max(128);
-    // **Phase K5a** — when `FLAMBEAU_MIXED_BATCH=1` is set, the
-    // scheduler may fire a single forward covering K prefill tokens +
-    // N decode slots. The ScratchPool's `max_prefill_tokens` must
-    // accommodate K + N or the residual / QKV / output buffers
-    // overrun. Bump `prefill_ubatch` to at least
-    // `chunk + inflight_slots` so the K4c capacity guard never
-    // rejects engagement.
-    let chunk_tokens = std::env::var("FLAMBEAU_PREFILL_CHUNK_TOKENS")
-        .ok()
-        .and_then(|s| s.parse::<usize>().ok())
-        .filter(|&n| n >= 1)
-        .unwrap_or(512);
-    let mixed_on = std::env::var("FLAMBEAU_MIXED_BATCH").as_deref() == Ok("1");
-    let prefill_ubatch = if mixed_on {
+    // Mixed-batch engagement (K prefill rows + N decode rows in one
+    // forward) is on by default for every arch whose Model::
+    // supports_mixed_batch returns true. The ScratchPool's
+    // `max_prefill_tokens` must accommodate K + N or the residual /
+    // QKV / output buffers overrun, so bump `prefill_ubatch` to
+    // `chunk + inflight_slots` whenever the raw value is below that.
+    // Cost on archs that never engage is trivial (a few extra rows
+    // of scratch capacity).
+    let chunk_tokens = cfg.prefill_chunk_tokens.max(1);
+    let prefill_ubatch = {
         let needed = chunk_tokens + inflight_slots;
         if prefill_ubatch_raw < needed {
             info!(
@@ -213,14 +212,12 @@ pub(crate) async fn serve_inner_v2(
                 to = needed,
                 chunk_tokens,
                 inflight_slots,
-                "K5a: bumping prefill_ubatch for FLAMBEAU_MIXED_BATCH=1"
+                "bumping prefill_ubatch to accommodate mixed-batch K+N forward"
             );
             needed
         } else {
             prefill_ubatch_raw
         }
-    } else {
-        prefill_ubatch_raw
     };
     let max_queue_depth = cfg.max_queue_depth;
     info!(
@@ -229,7 +226,6 @@ pub(crate) async fn serve_inner_v2(
         inflight_slots,
         prefill_ubatch,
         max_queue_depth,
-        mixed_batch = mixed_on,
         "v2: building shared Session with max_slots=N"
     );
 
@@ -252,6 +248,7 @@ pub(crate) async fn serve_inner_v2(
         prefill_ubatch,
         inflight_slots,
         cfg.paged_kv_pages,
+        kv_layout,
     )
     .with_context(|| format!("v2 shared session ({gguf_arch})"))?;
     let shared: crate::v2_handle::SharedV2Session = Arc::new(Mutex::new(shared_session));
@@ -298,6 +295,7 @@ pub(crate) async fn serve_inner_v2(
         batched_decode: true,
         max_queue_depth,
         prefill_ubatch,
+        prefill_chunk_tokens: chunk_tokens,
         topology_tag,
         prefix_cache,
         boot,
@@ -415,6 +413,7 @@ fn create_v2_shared_session(
     prefill_ubatch: usize,
     max_slots: usize,
     paged_kv_pages: Option<usize>,
+    kv_layout: flambeau_forward::KvLayout,
 ) -> Result<Box<dyn crate::v2_handle::V2BatchableSession>> {
     use flambeau_forward::Session;
     match gguf_arch {
@@ -426,6 +425,7 @@ fn create_v2_shared_session(
                 prefill_ubatch,
                 max_slots,
                 paged_kv_pages,
+                kv_layout,
             )?;
             Ok(Box::new(s))
         }
@@ -437,6 +437,7 @@ fn create_v2_shared_session(
                 prefill_ubatch,
                 max_slots,
                 paged_kv_pages,
+                kv_layout,
             )?;
             Ok(Box::new(s))
         }
@@ -448,6 +449,7 @@ fn create_v2_shared_session(
                 prefill_ubatch,
                 max_slots,
                 paged_kv_pages,
+                kv_layout,
             )?;
             Ok(Box::new(s))
         }

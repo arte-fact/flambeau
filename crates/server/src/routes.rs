@@ -159,6 +159,9 @@ pub struct ServerState {
     /// Prefill chunk size (`--prefill-ubatch`). Read by the chunked
     /// prefill driver and the lazy TP-prefill scratch allocator.
     pub prefill_ubatch: usize,
+    /// `--prefill-chunk-tokens` (default 512). Per-chunk prefill budget
+    /// for the K4c mixed-batch scheduler.
+    pub prefill_chunk_tokens: usize,
     /// `--gpu-sampler` (default true). When true the head rank's
     /// top-K + softmax (+ penalties) run on device.
     pub gpu_sampler: bool,

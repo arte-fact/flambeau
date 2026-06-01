@@ -75,6 +75,14 @@ pub struct ScratchConfig {
     /// can be skipped when paged is on. Derive via
     /// [`PagedKvCacheConfig::from_vram_budget`].
     pub paged_kv: Option<PagedKvCacheConfig>,
+    /// KV cache element layout. Defaults to [`KvLayout::F16Contig`];
+    /// `--kv q8` selects [`KvLayout::Q8Contig`] (requires S7b/S7c).
+    pub kv_layout: KvLayout,
+    /// Per-layer override of [`Self::kv_layout`]. `None` ⇒ every layer
+    /// uses `kv_layout`. `Some(v)` (length == num_layers) ⇒ layer `li`
+    /// uses `v[li]`. Used by gemma4 under `--kv q8` to keep
+    /// head_dim=512 global layers on F16 while SWA layers go Q8.
+    pub per_layer_kv_layouts: Option<Vec<KvLayout>>,
 }
 
 impl Default for ScratchConfig {
@@ -97,6 +105,8 @@ impl Default for ScratchConfig {
             max_slots: 1,
             per_layer_embd: 0,
             paged_kv: None,
+            kv_layout: KvLayout::F16Contig,
+            per_layer_kv_layouts: None,
         }
     }
 }
@@ -120,6 +130,20 @@ pub const MAX_SPLITK_CHUNKS: usize = 32;
 pub trait KvLayerShape {
     fn num_layers(&self) -> usize;
     fn kv_width_at(&self, li: usize, n_ranks: usize) -> usize;
+    /// Per-layer head_dim. Used to gate the Q8 KV layout (Q8 attention
+    /// kernel supports `head_dim ∈ {64, 128, 256}` today; gemma4's
+    /// head_dim=512 global layers exclude themselves). Default 0 means
+    /// "unknown" — `scratch_config_for` rejects Q8 unless every layer
+    /// with `kv_width > 0` returns a real value.
+    fn head_dim_at(&self, _li: usize) -> usize {
+        0
+    }
+    /// Per-layer attention window radius. 0 = unbounded causal. Used
+    /// to gate Q8 (the Q8 attention kernel has no SWA mask path);
+    /// gemma4's window=1024 SWA layers exclude themselves.
+    fn window_size_at(&self, _li: usize) -> i32 {
+        0
+    }
 }
 
 /// Build the per-layer KV width vector for `ScratchConfig`. Length
@@ -180,10 +204,46 @@ pub fn scratch_config_for<S: ScratchShape + ?Sized>(
     prefill_ubatch: usize,
     max_slots: usize,
     paged_kv_pages: Option<usize>,
+    kv_layout: KvLayout,
 ) -> ScratchConfig {
     let n_ranks = shard.n_ranks();
     let per_layer_kv = per_layer_kv_widths(shape, n_ranks);
     let kv_width = per_layer_kv.iter().copied().max().unwrap_or(0);
+    // S7 + gemma4 extension: per-layer KV layout. `kv_layout` is the
+    // uniform request from --kv. For each layer with a KV cache:
+    //   head_dim ≤ 256 → Q8 (works with window_size via the SWA mask
+    //                         added to attention_decode_q8_kv)
+    //   head_dim = 512 → F16 (Q8 kernel can't be retuned to wave64
+    //                         single-wave at d=512 in this slice;
+    //                         gemma4 globals stay on F16)
+    // GDN / recurrent / kv-share layers (width == 0) keep the requested
+    // layout but allocate nothing.
+    let per_layer_kv_layouts: Option<Vec<KvLayout>> =
+        if kv_layout == KvLayout::Q8Contig {
+            let mut out = Vec::with_capacity(per_layer_kv.len());
+            for (li, &width) in per_layer_kv.iter().enumerate() {
+                if width == 0 {
+                    out.push(KvLayout::Q8Contig);
+                    continue;
+                }
+                let head_dim = shape.head_dim_at(li);
+                if head_dim == 0 {
+                    panic!(
+                        "scratch_config_for: --kv q8 requires KvLayerShape::head_dim_at \
+                         to be implemented (layer {li} returned 0 — arch must override)"
+                    );
+                }
+                let layout = if matches!(head_dim, 64 | 128 | 256) {
+                    KvLayout::Q8Contig
+                } else {
+                    KvLayout::F16Contig
+                };
+                out.push(layout);
+            }
+            Some(out)
+        } else {
+            None
+        };
     let moe = shape.moe_per_rank(n_ranks);
     // PagedAttention activation. `paged_kv_pages = Some(1)` clamps
     // `n_pages` to the `max_slots * max_pages_per_slot` floor
@@ -237,6 +297,57 @@ pub fn scratch_config_for<S: ScratchShape + ?Sized>(
         max_slots,
         per_layer_embd: shape.per_layer_embd(),
         paged_kv,
+        kv_layout,
+        per_layer_kv_layouts,
+    }
+}
+
+/// KV cache element layout. Selected at [`ScratchConfig`] construction;
+/// the composite branches on `state.pool.kv_layout` for kv_append /
+/// attention_decode dispatch.
+///
+/// Rule 6 (project CLAUDE.md): canonical shape is a per-layout typestate
+/// (`KvCache<F16Contig>` vs `KvCache<Q8Contig>`). The v2 stack uses an
+/// enum because turning `KvCache` generic would ripple a type parameter
+/// through `ScratchPool`, `CoreState`, `ForwardCtx`, every composite, and
+/// every model crate — multi-session refactor. The enum encodes the same
+/// decision at runtime; misdispatches surface as panics at composite
+/// dispatch rather than compile errors. Tracked in
+/// `doc/GEMMA4_PERF_PLAN.md` as the typestate-ification follow-up.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum KvLayout {
+    /// F16 contiguous slabs (today's default). `bytes_per_row =
+    /// 2 * kv_width`. Compatible with the existing kv_append_f16 +
+    /// attention_decode_f16 family of kernels.
+    #[default]
+    F16Contig,
+    /// Q8_0 contiguous slabs. `bytes_per_row = (kv_width / 32) *
+    /// Q8_0_BLOCK_BYTES`. ~47 % HBM saving on KV reads at decode
+    /// for GQA-heavy archs (gemma4 32/16, mistral 32/8, …). Requires
+    /// the Q8 kv_append + attention kernels (S7b).
+    Q8Contig,
+}
+
+/// `sizeof(BlockQ8_0)` — 2-byte F16 scale + 32 int8 quants. Mirrors
+/// `Q8_0_BLOCK_BYTES` in `crates/runtime/src/kv_cache.rs` and the C
+/// `flambeau_block_q8_0` static_assert in `kernels-shared/.../block_quant.cuh`.
+pub const Q8_0_BLOCK_BYTES: usize = 34;
+
+impl KvLayout {
+    /// Slab byte stride for one (token × n_kv_heads × head_dim) row.
+    /// `kv_width = n_kv_heads * head_dim` (elements, per rank).
+    pub fn bytes_per_row(self, kv_width: usize) -> usize {
+        match self {
+            KvLayout::F16Contig => 2 * kv_width,
+            KvLayout::Q8Contig => {
+                debug_assert_eq!(
+                    kv_width % 32,
+                    0,
+                    "Q8Contig needs kv_width % 32 == 0; got {kv_width}"
+                );
+                (kv_width / 32) * Q8_0_BLOCK_BYTES
+            }
+        }
     }
 }
 
@@ -244,7 +355,19 @@ pub fn scratch_config_for<S: ScratchShape + ?Sized>(
 pub struct KvCache {
     pub k: DevicePtr,
     pub v: DevicePtr,
+    /// Element count per (token × all-kv-heads) row. Independent of the
+    /// per-element byte width — divide by `head_dim` for `n_kv_heads`.
     pub kv_width: usize,
+    /// Slab byte stride per row. `KvLayout::F16Contig` ⇒ `2 *
+    /// kv_width`; `Q8Contig` ⇒ `(kv_width / 32) * Q8_0_BLOCK_BYTES`.
+    /// Pre-computed at alloc time so kv-append / decode-attention
+    /// offset math doesn't have to redo the layout switch per launch.
+    pub bytes_per_row: usize,
+    /// Identifies which family of kernels the composite must dispatch
+    /// to. F16Contig ⇒ the existing kv_append_f16 / attention_decode_f16
+    /// family. Q8Contig ⇒ the Q8 family (kernels ported in S7b; dispatch
+    /// wired in S7c).
+    pub layout: KvLayout,
 }
 
 /// Geometry for a paged KV cache.
@@ -1049,20 +1172,31 @@ impl ScratchPool {
                 .as_ref()
                 .map(|p| p[li])
                 .unwrap_or(kvw);
+            let layer_layout = config
+                .per_layer_kv_layouts
+                .as_ref()
+                .map(|v| v[li])
+                .unwrap_or(config.kv_layout);
+            let bytes_per_row = layer_layout.bytes_per_row(slot_kvw);
             if paged_on {
                 kv_caches.push(KvCache {
                     k: DevicePtr::NULL,
                     v: DevicePtr::NULL,
                     kv_width: slot_kvw,
+                    bytes_per_row,
+                    layout: layer_layout,
                 });
                 continue;
             }
-            let k = alloc_bytes(n_slots * config.max_seq_len * slot_kvw * f16)?;
-            let v = alloc_bytes(n_slots * config.max_seq_len * slot_kvw * f16)?;
+            let slab_bytes = n_slots * config.max_seq_len * bytes_per_row;
+            let k = alloc_bytes(slab_bytes)?;
+            let v = alloc_bytes(slab_bytes)?;
             kv_caches.push(KvCache {
                 k,
                 v,
                 kv_width: slot_kvw,
+                bytes_per_row,
+                layout: layer_layout,
             });
         }
 
@@ -1399,3 +1533,44 @@ impl ScratchPool {
     }
 }
 
+#[cfg(test)]
+mod kv_layout_tests {
+    use super::*;
+
+    #[test]
+    fn f16_contig_row_bytes_match_two_times_kv_width() {
+        // 16 KV heads × 256 head_dim = 4096 elements / row.
+        // F16 = 2 bytes / element.
+        assert_eq!(KvLayout::F16Contig.bytes_per_row(4096), 8192);
+        assert_eq!(KvLayout::F16Contig.bytes_per_row(1024), 2048);
+        assert_eq!(KvLayout::F16Contig.bytes_per_row(32), 64);
+    }
+
+    #[test]
+    fn q8_contig_row_bytes_match_block_count_times_block_bytes() {
+        // 4096 elems = 128 Q8_0 blocks of 32 elems × 34 bytes/block = 4352 B.
+        assert_eq!(KvLayout::Q8Contig.bytes_per_row(4096), 128 * Q8_0_BLOCK_BYTES);
+        assert_eq!(KvLayout::Q8Contig.bytes_per_row(1024), 32 * Q8_0_BLOCK_BYTES);
+        // Smallest legal: 32 elems = 1 block.
+        assert_eq!(KvLayout::Q8Contig.bytes_per_row(32), Q8_0_BLOCK_BYTES);
+    }
+
+    #[test]
+    fn q8_contig_saves_about_47_percent_vs_f16() {
+        // Decode-relevant ratio: kv_width = 4096 (gemma4-31B SWA / global).
+        let f16 = KvLayout::F16Contig.bytes_per_row(4096);
+        let q8 = KvLayout::Q8Contig.bytes_per_row(4096);
+        // Q8 = 4352, F16 = 8192. Saving = 1 - 4352/8192 = 46.875 %.
+        let saving_bp = ((f16 - q8) * 10_000) / f16;
+        assert!(
+            (4500..=4800).contains(&saving_bp),
+            "expected ~47 % saving in basis points, got {saving_bp}"
+        );
+    }
+
+    #[test]
+    fn default_kv_layout_is_f16_contig() {
+        let cfg = ScratchConfig::default();
+        assert_eq!(cfg.kv_layout, KvLayout::F16Contig);
+    }
+}

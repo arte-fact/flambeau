@@ -11,7 +11,7 @@ use anyhow::{anyhow, Result};
 use flambeau_backend_hip::HipDevice;
 use flambeau_quant::GgufFile;
 
-use crate::core::ScratchConfig;
+use crate::core::{KvLayout, ScratchConfig};
 use crate::ctx::{ForwardCtx, LayerKind};
 use crate::loader::ShardMode;
 
@@ -121,6 +121,7 @@ pub trait Arch: Send + Sync + 'static {
         prefill_ubatch: usize,
         max_slots: usize,
         paged_kv_pages: Option<usize>,
+        kv_layout: KvLayout,
     ) -> ScratchConfig;
 
     /// Per-layer attention kind (FullAttn / Gdn) if the arch is
@@ -152,6 +153,7 @@ impl<A: Arch> Session<A> {
         prefill_ubatch: usize,
         max_slots: usize,
         paged_kv_pages: Option<usize>,
+        kv_layout: KvLayout,
     ) -> Result<Self> {
         if prefill_ubatch == 0 {
             anyhow::bail!("Session::new: prefill_ubatch must be > 0");
@@ -159,8 +161,15 @@ impl<A: Arch> Session<A> {
         if max_slots == 0 {
             anyhow::bail!("Session::new: max_slots must be > 0");
         }
-        let handles =
-            orchestrate::launch::<A>(file, &topology, ctx_cap, prefill_ubatch, max_slots, paged_kv_pages)?;
+        let handles = orchestrate::launch::<A>(
+            file,
+            &topology,
+            ctx_cap,
+            prefill_ubatch,
+            max_slots,
+            paged_kv_pages,
+            kv_layout,
+        )?;
         Ok(Self {
             topology,
             handles,

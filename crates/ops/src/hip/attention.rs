@@ -802,6 +802,7 @@ pub fn splitk_chunk_size(n_tokens_kv: usize) -> usize {
 /// Decode attention with Q8_0-quantised KV. Same args as the F16 variant;
 /// `k_cache` / `v_cache` hold `flambeau_block_q8_0` blocks laid out as
 /// `[n_tokens_kv, n_heads_kv, head_dim/32]` row-major.
+#[allow(clippy::too_many_arguments)]
 pub fn attention_decode_q8_kv(
     reg: &OpsRegistry,
     stream: &HipStream,
@@ -814,13 +815,15 @@ pub fn attention_decode_q8_kv(
     head_dim: usize,
     n_tokens_kv: usize,
     scale: f32,
+    window_size: i32,
 ) -> Result<()> {
     // Kernel supports head_dim ∈ {64, 128, 256}; block = head_dim/4
     // threads (= 16/32/64 — one wavefront at d=256). The inter-block-
     // of-Q8_0 reduction is wave-bounded `__shfl_xor` with stride up to
     // 32; head_dim=512 needs 128 threads (2 waves) and cross-wave LDS
-    // reduction. Defer: gemma4 (the only d=512 target) uses F16 KV;
-    // restructure when a d=512 Q8-KV consumer arrives.
+    // reduction — gemma4 global layers stay on F16 KV via per-layer
+    // KvLayout. SWA layers (window_size > 0) are now supported via
+    // the t_start clamp in the kernel inner loop.
     assert!(
         head_dim == 64 || head_dim == 128 || head_dim == 256,
         "attention_decode_q8_kv: head_dim {head_dim} not supported (expected 64, 128, or 256)"
@@ -833,6 +836,7 @@ pub fn attention_decode_q8_kv(
     let head_dim_i = head_dim as i32;
     let n_tokens_i = n_tokens_kv as i32;
     let scale_f = scale;
+    let window_i = window_size;
     let q_ptr: u64 = q.as_usize() as u64;
     let k_ptr: u64 = k_cache.as_usize() as u64;
     let v_ptr: u64 = v_cache.as_usize() as u64;
@@ -847,6 +851,7 @@ pub fn attention_decode_q8_kv(
     args.push(&head_dim_i);
     args.push(&n_tokens_i);
     args.push(&scale_f);
+    args.push(&window_i);
     // block.x = head_dim/4 (one thread per int32-
     // packed quad). For head_dim=256 that's 64 threads = 1 wavefront.
     let cfg = LaunchCfg::one_d(n_heads_q as u32, (head_dim / 4) as u32);
@@ -860,6 +865,7 @@ pub fn attention_decode_q8_kv(
 /// Closes the long-context Q8↔F16 gap (single-pass `attention_decode_q8_kv`
 /// is the same shape as the single-pass F16 kernel and pays the same 7.78×
 /// occupancy penalty past 256 KV tokens).
+#[allow(clippy::too_many_arguments)]
 pub fn attention_decode_q8_kv_splitk(
     reg: &OpsRegistry,
     stream: &HipStream,
@@ -876,6 +882,7 @@ pub fn attention_decode_q8_kv_splitk(
     n_tokens_kv: usize,
     chunk_size: usize,
     scale: f32,
+    window_size: i32,
 ) -> Result<()> {
     // Same wave64-bounded reduction shape as `attention_decode_q8_kv`
     // — head_dim=512 deferred until a Q8-KV d=512 consumer arrives.
@@ -904,6 +911,7 @@ pub fn attention_decode_q8_kv_splitk(
     let s_ptr: u64 = partials_s.as_usize() as u64;
     let po_ptr: u64 = partials_o.as_usize() as u64;
     let scale_f = scale;
+    let window_i = window_size;
 
     let mut a1 = KernelArgs::new();
     a1.push(&q_ptr);
@@ -919,6 +927,7 @@ pub fn attention_decode_q8_kv_splitk(
     a1.push(&n_chunks_i);
     a1.push(&chunk_size_i);
     a1.push(&scale_f);
+    a1.push(&window_i);
     // chunk pass uses block = head_dim/4 (one
     // thread per int32-packed quad). Combine pass still needs
     // head_dim threads (one per output element).
@@ -972,6 +981,7 @@ pub fn attention_prefill_q8_kv(
     n_k_tokens: usize,
     q_offset: usize,
     scale: f32,
+    window_size: i32,
 ) -> Result<()> {
     // Same wave64-bounded reduction shape as `attention_decode_q8_kv`
     // — head_dim=512 deferred until a Q8-KV d=512 consumer arrives.
@@ -986,6 +996,7 @@ pub fn attention_prefill_q8_kv(
     let n_k_i = n_k_tokens as i32;
     let q_off_i = q_offset as i32;
     let scale_f = scale;
+    let window_i = window_size;
     let q_ptr: u64 = q.as_usize() as u64;
     let k_ptr: u64 = k_cache.as_usize() as u64;
     let v_ptr: u64 = v_cache.as_usize() as u64;
@@ -1013,6 +1024,7 @@ pub fn attention_prefill_q8_kv(
         args.push(&n_k_i);
         args.push(&q_off_i);
         args.push(&scale_f);
+        args.push(&window_i);
         let br: u32 = if head_dim == 256 { 8 } else { 4 };
         const WARP: u32 = 64;
         let cfg = LaunchCfg {
@@ -1040,6 +1052,7 @@ pub fn attention_prefill_q8_kv(
     args.push(&n_k_i);
     args.push(&q_off_i);
     args.push(&scale_f);
+    args.push(&window_i);
     let cfg = LaunchCfg {
         grid: (n_q_tokens as u32, n_heads_q as u32, 1),
         block: ((head_dim / 4) as u32, 1, 1),

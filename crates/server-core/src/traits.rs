@@ -108,7 +108,7 @@ pub trait Model: Send + Sync + 'static {
     /// True if this arch supports the Sarathi-Serve mixed-batch
     /// scheduler path. Default false — only archs that override
     /// `forward_mixed_decode` set this to true. Server checks this
-    /// before attempting to engage `FLAMBEAU_MIXED_BATCH=1`.
+    /// before attempting to engage co-batched prefill + decode.
     fn supports_mixed_batch(&self) -> bool {
         false
     }

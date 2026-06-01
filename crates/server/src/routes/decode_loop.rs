@@ -329,11 +329,11 @@ fn scheduler_can_engage(state: &ServerState, params: &SamplingParams) -> bool {
 /// Does NOT (yet) support: spec-decode (MTP), JSON-grammar masking,
 /// logprobs, GPU sampler. Those still go through the legacy
 /// `run_completion_blocking_ids`.
-/// Sarathi-Serve style chunked prefill (Phase 5 S1+S2). Splits the prompt
-/// into fixed-size chunks and releases `inflight_pool[slot_idx]`'s mutex
-/// between chunks so concurrent slots' decode steps can interleave, bounding
-/// the per-step stall a long prompt inflicts on peers. Chunk size from
-/// `FLAMBEAU_PREFILL_CHUNK_TOKENS` env (default 512 — Sarathi paper's
+/// Sarathi-Serve style chunked prefill. Splits the prompt into
+/// fixed-size chunks and releases `inflight_pool[slot_idx]`'s mutex
+/// between chunks so concurrent slots' decode steps can interleave,
+/// bounding the per-step stall a long prompt inflicts on peers. Chunk
+/// size from `--prefill-chunk-tokens` (default 512 — Sarathi paper's
 /// recommendation).
 ///
 /// On entry the slot is claimed but unlocked. The first chunk's guard
@@ -348,22 +348,18 @@ fn chunked_prefill_pp(
     prompt_ids: &[u32],
     logits_out: &mut Vec<f32>,
 ) -> Result<()> {
-    const PREFILL_CHUNK_TOKENS: usize = 512;
-    let prefill_chunk = std::env::var("FLAMBEAU_PREFILL_CHUNK_TOKENS")
-        .ok()
-        .and_then(|s| s.parse::<usize>().ok())
-        .filter(|&n| n >= 1)
-        .unwrap_or(PREFILL_CHUNK_TOKENS);
-    // Phase K4c — mixed-batch engagement: when the env gate is on AND
-    // the arch supports it, each per-chunk lock acquisition tries to
-    // also become the batched-decode leader. If we get the lock AND
-    // `batched_pending` is non-empty, we drain it, build a mixed
+    let prefill_chunk = state.prefill_chunk_tokens.max(1);
+    // Phase K4c — mixed-batch engagement on every arch that
+    // implements `Model::supports_mixed_batch` (qwen35 / qwen35moe /
+    // gemma3 / gemma4 today). Each per-chunk lock acquisition tries
+    // to also become the batched-decode leader. If we get the lock
+    // AND `batched_pending` is non-empty, we drain it, build a mixed
     // forward (K prefill rows + N decode rows), demux logits, and
     // send decode logits back to the pending response senders. The
     // prefill side's logits land in `logits_out` exactly like the
-    // pure path. Default off — opt in with `FLAMBEAU_MIXED_BATCH=1`.
-    let mixed_on = std::env::var("FLAMBEAU_MIXED_BATCH").as_deref() == Ok("1")
-        && state.model.supports_mixed_batch();
+    // pure path. Single-request workloads see ~0 % overhead (the
+    // empty drain costs one batch-window sleep per chunk, ~1.5 ms).
+    let mixed_on = state.model.supports_mixed_batch();
     let mut prefill_start = 0usize;
     let mut reset_done = false;
     while prefill_start < prompt_ids.len() {

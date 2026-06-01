@@ -35,7 +35,8 @@ extern "C" __global__ void flambeau_attention_decode_q8_kv(
     const int n_heads_kv,
     const int head_dim,                                 // 64, 128 or 256
     const int n_tokens,
-    const float scale
+    const float scale,
+    const int window_size                               // 0 = unbounded causal; >0 = SWA
 ) {
     const int q_head  = blockIdx.x;
     if (q_head >= n_heads_q) return;
@@ -94,7 +95,17 @@ extern "C" __global__ void flambeau_attention_decode_q8_kv(
     const int* q_qs_int = (const int*) q_qs;
     const int q_packed  = q_qs_int[dim_quad];
 
-    for (int t = 0; t < n_tokens; ++t) {
+    // SWA: query position is the last token in the cache (n_tokens-1).
+    // Keys older than (qpos - window_size + 1) are masked. window_size=0
+    // disables the window — full causal range. Matches the F16 kernel's
+    // SWA semantics.
+    int t_start = 0;
+    if (window_size > 0) {
+        const int qpos = n_tokens - 1;
+        t_start = qpos - window_size + 1;
+        if (t_start < 0) t_start = 0;
+    }
+    for (int t = t_start; t < n_tokens; ++t) {
         const size_t kv_row_blocks =
             ((size_t) t * n_heads_kv + kv_head) * n_blocks_per_row;
 

@@ -224,6 +224,12 @@ impl KvLayerShape for Gemma4V2Config {
     fn kv_width_at(&self, li: usize, n_ranks: usize) -> usize {
         (self.num_kv_heads[li] / n_ranks) * self.attn[li].head_dim
     }
+    fn head_dim_at(&self, li: usize) -> usize {
+        self.attn[li].head_dim
+    }
+    fn window_size_at(&self, li: usize) -> i32 {
+        self.attn[li].window_size
+    }
 }
 
 fn read_bool_array_or_scalar(
