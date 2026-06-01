@@ -957,19 +957,64 @@ pub fn standard_attn_local<H: TopologyHooks>(
                 state.pool.config.max_slots
             );
         }
-        let mut host_k_ptrs: Vec<u64> = Vec::with_capacity(n);
-        let mut host_v_ptrs: Vec<u64> = Vec::with_capacity(n);
+        // SWA window-offset: each slot independently slides its K/V
+        // read pointer to its window start. The batched attention
+        // kernel then sees a per-slot `n_kv = window` cache starting
+        // at relative position 0; passing `kernel_window = 0` makes
+        // the kernel's internal SWA mask a no-op. kv_append still
+        // writes to the absolute slot position, so we use a separate
+        // per-slot pointer set for the append step (slot bases,
+        // unmodified) and upload the offset pointers later before
+        // the attention launch.
+        let window_size = weights.window_size;
+        let window = window_size as usize;
+        let bytes_per_row = kv.bytes_per_row;
+        let mut host_k_base_ptrs: Vec<u64> = Vec::with_capacity(n);
+        let mut host_v_base_ptrs: Vec<u64> = Vec::with_capacity(n);
+        let mut host_k_read_ptrs: Vec<u64> = Vec::with_capacity(n);
+        let mut host_v_read_ptrs: Vec<u64> = Vec::with_capacity(n);
         let mut host_write_pos: Vec<i32> = Vec::with_capacity(n);
         let mut host_n_kv: Vec<i32> = Vec::with_capacity(n);
+        let mut any_offset = false;
         for i in 0..n {
             let slot = slot_ids[i];
             let pos = positions[i];
             let slot_offset = slot * slot_stride_bytes;
-            host_k_ptrs.push(kv.k.offset_bytes(slot_offset).as_usize() as u64);
-            host_v_ptrs.push(kv.v.offset_bytes(slot_offset).as_usize() as u64);
+            let slot_k_base = kv.k.offset_bytes(slot_offset);
+            let slot_v_base = kv.v.offset_bytes(slot_offset);
+            host_k_base_ptrs.push(slot_k_base.as_usize() as u64);
+            host_v_base_ptrs.push(slot_v_base.as_usize() as u64);
+            let n_kv_full = pos + 1;
+            let (k_read_ptr, v_read_ptr, n_kv_eff) =
+                if window_size > 0 && window < n_kv_full {
+                    any_offset = true;
+                    let off_tokens = n_kv_full - window;
+                    let off_bytes = off_tokens * bytes_per_row;
+                    (
+                        slot_k_base.offset_bytes(off_bytes),
+                        slot_v_base.offset_bytes(off_bytes),
+                        window,
+                    )
+                } else {
+                    (slot_k_base, slot_v_base, n_kv_full)
+                };
+            host_k_read_ptrs.push(k_read_ptr.as_usize() as u64);
+            host_v_read_ptrs.push(v_read_ptr.as_usize() as u64);
             host_write_pos.push(pos as i32);
-            host_n_kv.push((pos + 1) as i32);
+            host_n_kv.push(n_kv_eff as i32);
         }
+        // When we offset at least one slot the per-slot windowing
+        // bounds reads to `[0..n_kv[i])` and the kernel's internal
+        // SWA mask is not needed. When no slot was offset the
+        // original window param still works (it's either 0 or
+        // covers all slot positions).
+        let kernel_window: i32 = if any_offset { 0 } else { window_size };
+        // Suppress unused warning when SWA offset doesn't apply.
+        let _ = &host_k_read_ptrs;
+        let _ = &host_v_read_ptrs;
+        let swa_offset_active = any_offset;
+        // Step 1: upload slot-base pointers (used for kv_append) and
+        // write_pos + n_kv. Run kv_append.
         unsafe {
             state
                 .device
@@ -977,7 +1022,7 @@ pub fn standard_attn_local<H: TopologyHooks>(
                     state.stream,
                     CopyDirection::HostToDevice,
                     state.pool.attn_slot_k_dst_ptrs,
-                    DevicePtr(host_k_ptrs.as_ptr() as usize),
+                    DevicePtr(host_k_base_ptrs.as_ptr() as usize),
                     n * 8,
                 )
                 .context("standard_attn: attn_slot_k_dst_ptrs HtoD")?;
@@ -987,7 +1032,7 @@ pub fn standard_attn_local<H: TopologyHooks>(
                     state.stream,
                     CopyDirection::HostToDevice,
                     state.pool.attn_slot_v_dst_ptrs,
-                    DevicePtr(host_v_ptrs.as_ptr() as usize),
+                    DevicePtr(host_v_base_ptrs.as_ptr() as usize),
                     n * 8,
                 )
                 .context("standard_attn: attn_slot_v_dst_ptrs HtoD")?;
@@ -1027,10 +1072,37 @@ pub fn standard_attn_local<H: TopologyHooks>(
                 &ops,
             )?;
         }
-        // The two `_src_full` slot pointer arrays must point at the
-        // share-source's KV cache slabs when reading shared KV. The
-        // host-side arrays above were filled from `kv` which already
-        // routed via `kv_local_idx`, so this is correct.
+        // Step 2: when SWA windowing applies, replace the slot ptr
+        // arrays with the offset (window-start) ptrs before
+        // attention. The kv_append above already landed against the
+        // absolute slot bases; attention reads only the window from
+        // the offset position. `kernel_window = 0` makes the kernel's
+        // SWA mask a no-op.
+        if swa_offset_active {
+            unsafe {
+                state
+                    .device
+                    .memcpy_async(
+                        state.stream,
+                        CopyDirection::HostToDevice,
+                        state.pool.attn_slot_k_dst_ptrs,
+                        DevicePtr(host_k_read_ptrs.as_ptr() as usize),
+                        n * 8,
+                    )
+                    .context("standard_attn: attn_slot_k_dst_ptrs HtoD (SWA offset)")?;
+                state
+                    .device
+                    .memcpy_async(
+                        state.stream,
+                        CopyDirection::HostToDevice,
+                        state.pool.attn_slot_v_dst_ptrs,
+                        DevicePtr(host_v_read_ptrs.as_ptr() as usize),
+                        n * 8,
+                    )
+                    .context("standard_attn: attn_slot_v_dst_ptrs HtoD (SWA offset)")?;
+            }
+            flambeau_core::Stream::synchronize(state.stream)?;
+        }
         let _ = (&k_src_full, &v_src_full);
         let q_batched = unsafe { Tensor::<F16>::from_raw(state.pool.q_f16, n * q_width) };
         let mut attn_out_batched =
@@ -1046,7 +1118,7 @@ pub fn standard_attn_local<H: TopologyHooks>(
             weights.head_dim,
             n,
             scale,
-            weights.window_size,
+            kernel_window,
             &ops,
         )?;
     }

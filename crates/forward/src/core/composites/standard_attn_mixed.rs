@@ -428,19 +428,48 @@ pub fn standard_attn_mixed_local<H: TopologyHooks>(
     let v_dec_ptr = v_pref_ptr.offset_bytes(k * kv_width * 2);
     let out_dec_ptr = out_pref_ptr.offset_bytes(k * q_width * 2);
     {
-        let mut host_k_ptrs: Vec<u64> = Vec::with_capacity(n_dec);
-        let mut host_v_ptrs: Vec<u64> = Vec::with_capacity(n_dec);
+        // Per-slot SWA window-offset mirror of standard_attn.rs.
+        // kv_append writes at absolute slot positions; attention
+        // reads from each slot's window start. When any slot has
+        // pos+1 > window we re-upload offset ptrs before attention.
+        let window_size = weights.window_size;
+        let window = window_size as usize;
+        let bytes_per_row = kv.bytes_per_row;
+        let mut host_k_base_ptrs: Vec<u64> = Vec::with_capacity(n_dec);
+        let mut host_v_base_ptrs: Vec<u64> = Vec::with_capacity(n_dec);
+        let mut host_k_read_ptrs: Vec<u64> = Vec::with_capacity(n_dec);
+        let mut host_v_read_ptrs: Vec<u64> = Vec::with_capacity(n_dec);
         let mut host_write_pos: Vec<i32> = Vec::with_capacity(n_dec);
         let mut host_n_kv: Vec<i32> = Vec::with_capacity(n_dec);
+        let mut any_offset = false;
         for i in 0..n_dec {
             let slot = slot_ids[k + i];
             let pos = positions[k + i];
             let slot_offset = slot * slot_stride_bytes;
-            host_k_ptrs.push(kv.k.offset_bytes(slot_offset).as_usize() as u64);
-            host_v_ptrs.push(kv.v.offset_bytes(slot_offset).as_usize() as u64);
+            let slot_k_base = kv.k.offset_bytes(slot_offset);
+            let slot_v_base = kv.v.offset_bytes(slot_offset);
+            host_k_base_ptrs.push(slot_k_base.as_usize() as u64);
+            host_v_base_ptrs.push(slot_v_base.as_usize() as u64);
+            let n_kv_full = pos + 1;
+            let (k_read_ptr, v_read_ptr, n_kv_eff) =
+                if window_size > 0 && window < n_kv_full {
+                    any_offset = true;
+                    let off_tokens = n_kv_full - window;
+                    let off_bytes = off_tokens * bytes_per_row;
+                    (
+                        slot_k_base.offset_bytes(off_bytes),
+                        slot_v_base.offset_bytes(off_bytes),
+                        window,
+                    )
+                } else {
+                    (slot_k_base, slot_v_base, n_kv_full)
+                };
+            host_k_read_ptrs.push(k_read_ptr.as_usize() as u64);
+            host_v_read_ptrs.push(v_read_ptr.as_usize() as u64);
             host_write_pos.push(pos as i32);
-            host_n_kv.push((pos + 1) as i32);
+            host_n_kv.push(n_kv_eff as i32);
         }
+        let kernel_window: i32 = if any_offset { 0 } else { window_size };
         unsafe {
             state
                 .device
@@ -448,7 +477,7 @@ pub fn standard_attn_mixed_local<H: TopologyHooks>(
                     state.stream,
                     CopyDirection::HostToDevice,
                     state.pool.attn_slot_k_dst_ptrs,
-                    DevicePtr(host_k_ptrs.as_ptr() as usize),
+                    DevicePtr(host_k_base_ptrs.as_ptr() as usize),
                     n_dec * 8,
                 )
                 .context("standard_attn_mixed: attn_slot_k_dst_ptrs HtoD")?;
@@ -458,7 +487,7 @@ pub fn standard_attn_mixed_local<H: TopologyHooks>(
                     state.stream,
                     CopyDirection::HostToDevice,
                     state.pool.attn_slot_v_dst_ptrs,
-                    DevicePtr(host_v_ptrs.as_ptr() as usize),
+                    DevicePtr(host_v_base_ptrs.as_ptr() as usize),
                     n_dec * 8,
                 )
                 .context("standard_attn_mixed: attn_slot_v_dst_ptrs HtoD")?;
@@ -496,6 +525,31 @@ pub fn standard_attn_mixed_local<H: TopologyHooks>(
             kv_width,
             &ops,
         )?;
+        if any_offset {
+            unsafe {
+                state
+                    .device
+                    .memcpy_async(
+                        state.stream,
+                        CopyDirection::HostToDevice,
+                        state.pool.attn_slot_k_dst_ptrs,
+                        DevicePtr(host_k_read_ptrs.as_ptr() as usize),
+                        n_dec * 8,
+                    )
+                    .context("standard_attn_mixed: attn_slot_k_dst_ptrs HtoD (SWA)")?;
+                state
+                    .device
+                    .memcpy_async(
+                        state.stream,
+                        CopyDirection::HostToDevice,
+                        state.pool.attn_slot_v_dst_ptrs,
+                        DevicePtr(host_v_read_ptrs.as_ptr() as usize),
+                        n_dec * 8,
+                    )
+                    .context("standard_attn_mixed: attn_slot_v_dst_ptrs HtoD (SWA)")?;
+            }
+            flambeau_core::Stream::synchronize(state.stream)?;
+        }
         let q_dec = unsafe { Tensor::<F16>::from_raw(q_dec_ptr, n_dec * q_width) };
         let mut out_dec = unsafe { Tensor::<F16>::from_raw(out_dec_ptr, n_dec * q_width) };
         flambeau_model_ops::attn_decode_f16_batched(
@@ -509,7 +563,7 @@ pub fn standard_attn_mixed_local<H: TopologyHooks>(
             weights.head_dim,
             n_dec,
             scale,
-            weights.window_size,
+            kernel_window,
             &ops,
         )?;
     }
