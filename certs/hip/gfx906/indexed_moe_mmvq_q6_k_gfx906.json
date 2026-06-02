@@ -13,7 +13,7 @@
       "k": 512,
       "n": 256,
       "seed": 14576490,
-      "max_rel_err": 0.0025927057,
+      "max_rel_err": 0.0025923685,
       "tolerance": 0.05,
       "pass": true
     },
@@ -28,12 +28,12 @@
     }
   ],
   "pass": true,
-  "emitted_at": "2026-04-21T10:17:15Z",
+  "emitted_at": "2026-06-02T19:00:06Z",
   "rig": "threadreaper-gfx906",
   "pmc": {
-    "vgpr_count": 22,
+    "vgpr_count": 27,
     "sgpr_count": null,
-    "waves_per_simd": 10,
+    "waves_per_simd": 9,
     "mem_busy_pct": null,
     "valu_busy_pct": null
   }

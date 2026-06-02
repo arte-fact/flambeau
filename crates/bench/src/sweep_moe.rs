@@ -780,9 +780,9 @@ fn tame_q5k_scales(mut raw: Vec<u8>) -> Vec<u8> {
 
 pub fn run_indexed_moe_mmvq_q6_k_sweep(repo_root: &Path) -> Result<Cert> {
     let dev = ensure_dev()?;
-    let kb = kernels::hsaco("indexed_moe_mmvq_q6_k").unwrap();
+    let kb = kernels::hsaco("indexed_moe_mmvq_q6_k_r2_dp4a").unwrap();
     let module = HipModule::load(dev.id(), kb)?;
-    let kernel: HipKernel<'_> = module.kernel("flambeau_indexed_moe_mmvq_q6_k_q8_1")?;
+    let kernel: HipKernel<'_> = module.kernel("flambeau_indexed_moe_mmvq_q6_k_r2_dp4a_q8_1")?;
     let attrs: FuncAttributes = kernel.attributes()?;
     let q_kb = kernels::hsaco("quantize_q8_1").unwrap();
     let q_module = HipModule::load(dev.id(), q_kb)?;
@@ -1075,7 +1075,7 @@ fn run_q6k_shape(
         stream.synchronize()?;
     }
 
-    // Launch Q6_K MoE MMVQ — single-row grid: {n_rows, n_tokens*top_k, 1}.
+    // Launch Q6_K MoE MMVQ (r2 dp4a: 2 rows / block, half-warp DPP reduce).
     {
         let stream = dev.default_stream();
         let n_rows_i = n_rows as i32;
@@ -1095,8 +1095,9 @@ fn run_q6k_shape(
         args.push(&n_tokens_i);
         args.push(&top_k_i);
         args.push(&nb_i);
+        let grid_x = (n_rows as u32).div_ceil(2);
         let cfg = LaunchCfg {
-            grid: (n_rows as u32, (n_tokens * top_k) as u32, 1),
+            grid: (grid_x, (n_tokens * top_k) as u32, 1),
             block: (64, 1, 1),
             shared_bytes: 0,
         };
@@ -2312,9 +2313,9 @@ pub fn run_indexed_moe_mmvq_q3_k_sweep(repo_root: &Path) -> Result<Cert> {
 
 pub fn run_indexed_moe_mmvq_q2_k_sweep(repo_root: &Path) -> Result<Cert> {
     let dev = ensure_dev()?;
-    let kb = kernels::hsaco("indexed_moe_mmvq_q2_k").unwrap();
+    let kb = kernels::hsaco("indexed_moe_mmvq_q2_k_r2_dp4a").unwrap();
     let module = HipModule::load(dev.id(), kb)?;
-    let kernel: HipKernel<'_> = module.kernel("flambeau_indexed_moe_mmvq_q2_K_q8_1")?;
+    let kernel: HipKernel<'_> = module.kernel("flambeau_indexed_moe_mmvq_q2_k_r2_dp4a_q8_1")?;
     let attrs: FuncAttributes = kernel.attributes()?;
     let q_kb = kernels::hsaco("quantize_q8_1").unwrap();
     let q_module = HipModule::load(dev.id(), q_kb)?;
@@ -2547,8 +2548,9 @@ fn run_q2k_shape(
         args.push(&n_tokens_i);
         args.push(&top_k_i);
         args.push(&nb_i);
+        let grid_x = (n_rows as u32).div_ceil(2);
         let cfg = LaunchCfg {
-            grid: (n_rows as u32, (n_tokens * top_k) as u32, 1),
+            grid: (grid_x, (n_tokens * top_k) as u32, 1),
             block: (64, 1, 1),
             shared_bytes: 0,
         };
