@@ -175,21 +175,26 @@ static __device__ __forceinline__ void flash_attn_prefill_v2_q8_impl(
                 }
                 float s_j = gfx906_warp_reduce_sum(partial) * scale;
 
-                if (row >= limit || row < t_start) {
-                    s_j = -INFINITY;
-                }
+                // Skip the online softmax update for masked rows: the
+                // contribution is mathematically 0 (p = exp(-inf - m_new)
+                // = 0), and skipping avoids the m_i = s_j = -INFINITY
+                // case where (-inf) - (-inf) = NaN poisons alpha + p
+                // before the first valid row arrives. Mirrors the
+                // attention_prefill_flash_tile_f16 fix.
+                const bool masked = (row >= limit) || (row < t_start);
+                if (!masked) {
+                    const float m_new = fmaxf(m_i, s_j);
+                    const float alpha = gfx906_fast_exp(m_i - m_new);
+                    const float p     = gfx906_fast_exp(s_j - m_new);
 
-                const float m_new = fmaxf(m_i, s_j);
-                const float alpha = gfx906_fast_exp(m_i - m_new);
-                const float p     = gfx906_fast_exp(s_j - m_new);
-
-                #pragma unroll
-                for (int i = 0; i < D_PER_LANE; ++i) {
-                    o_reg[i] = alpha * o_reg[i]
-                             + p * v_lds[j * D + lane + i * WARP_SIZE];
+                    #pragma unroll
+                    for (int i = 0; i < D_PER_LANE; ++i) {
+                        o_reg[i] = alpha * o_reg[i]
+                                 + p * v_lds[j * D + lane + i * WARP_SIZE];
+                    }
+                    l_i = alpha * l_i + p;
+                    m_i = m_new;
                 }
-                l_i = alpha * l_i + p;
-                m_i = m_new;
             }
         }
         __syncthreads();

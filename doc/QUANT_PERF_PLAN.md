@@ -387,21 +387,51 @@ F16 prefill at the same SWA boundary works (Q8 in isolation, not the
 mask math). Three earlier hypotheses now all ruled out empirically:
 chunked-prefill, Q8 splitk decode, SWA cache-pointer-offset lever.
 
-**Action items (Slice 3c, real kernel fix)**:
-1. Add a parity unit test for `attn_prefill_q8_kv` at n_q_tokens
-   crossing the SWA boundary (1023, 1024, 1025) vs F16 reference;
-   expect the failure to reproduce in isolation.
-2. Inspect `attention_prefill_q8_kv.cu` inner loop for divergence
-   when t_start > 0: per-block `__shfl_xor` reductions assume all
-   lanes participate; cross-wave LDS rendezvous at head_dim=512
-   syncs across 2 waves on `score_parts[2]` and must include the
-   SWA-masked iterations or skip them uniformly across both waves.
-3. Compare against `attention_decode_q8_kv.cu` (which DOES work for
-   prompts within the cache window) to spot the divergence.
+### Phase 4 Slice 3c — Fixed (NaN-init in flash_tile_q8_kv)
 
-**Recommendation**: F16 KV is the safe default on gemma at prompt > 1024
-until the kernel fix lands. Q8 KV remains correct for prompts within
-the SWA window.
+Root cause: missing NaN-init guard in
+`attention_prefill_flash_tile_q8_kv.cu`. The F16 sibling fixed this
+2026-05-20 (`feedback_flash_tile_swa_nan_init`); the Q8 sibling was
+never patched. When SWA mask activates the first row of the first
+active chunk, `s_j = -INF` and `m_i = -INF` (initial state), so
+`alpha = exp(-INF - (-INF)) = exp(NaN) = NaN` poisons `o_reg`/`l_i`.
+
+Fix: wrap the online softmax update in `if (!masked) { ... }`,
+mirroring the F16 sibling exactly:
+
+```cpp
+const bool masked = (row >= limit) || (row < t_start);
+if (!masked) {
+    const float m_new = fmaxf(m_i, s_j);
+    const float alpha = gfx906_fast_exp(m_i - m_new);
+    const float p     = gfx906_fast_exp(s_j - m_new);
+    // existing online softmax update
+}
+```
+
+Verified on gemma-4-26B-A4B-it-Q8_0 / pp2tp2 / temperature 0:
+
+  prompt 1300: coherent, decode_tps 40.08 median (3 reps)
+  prompt 3000: coherent, decode_tps 42.22 median (3 reps)
+  Qwen3.6-27B-Q4_0 regression check: 32.66 tps (was 32.60 pre-fix,
+                                     within noise), coherent 3/3
+
+The gemma certified +57 % Q8 decode lift in
+`feedback_q8_kv_head_dim_512_two_wave` would now be measurable for
+the first time on real long-prompt traffic. F16 stays the default on
+gemma at prompt > 1024 pending a delta-perplexity sweep (Slice 3d),
+but Q8 is no longer correctness-broken.
+
+### Phase 4 follow-ups (Slice 3d, Slice 4)
+
+- **Slice 3d**: cert-harness gap. The bench/cert harness has zero
+  SWA-window tests for Q8 prefill kernels (verified by grep); a
+  single parity test at n_q_tokens crossing window_size would have
+  caught this. Add one for flash_tile_d64/128/256 + oracle d=512.
+- **Slice 4**: delta-perplexity sweep across Phase 1 models at F16
+  vs Q8 KV now that correctness is restored on gemma.
+- **Slice 5**: decision-table cell per (model, ctx) for VRAM-fit
+  (feeds Phase 5).
 
 ### Phase 4 takeaway
 
