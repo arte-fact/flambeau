@@ -67,6 +67,7 @@ pub struct ModelDefaults {
     pub top_p: Option<f32>,
     pub top_k: Option<u32>,
     pub min_p: Option<f32>,
+    pub repetition_penalty: Option<f32>,
 }
 
 impl ModelDefaults {
@@ -78,6 +79,8 @@ impl ModelDefaults {
             top_p: gguf.metadata_f32("general.sampling.top_p"),
             top_k: gguf.metadata_u32("general.sampling.top_k"),
             min_p: gguf.metadata_f32("general.sampling.min_p"),
+            repetition_penalty: gguf
+                .metadata_f32("general.sampling.repetition_penalty"),
         }
     }
 }
@@ -145,12 +148,30 @@ impl SamplingParams {
         let top_p = top_p.or(defaults.top_p).filter(|p| *p < 1.0 && *p > 0.0);
         let top_k = top_k.or(defaults.top_k).filter(|k| *k > 0);
         let min_p = min_p.or(defaults.min_p).filter(|m| *m > 0.0);
+        // Rep-penalty resolution: request → GGUF default → 1.0 (off).
+        // Low-temp override: at effectively-greedy temperatures with no
+        // caller-supplied penalty and no GGUF default, bump to 1.05 so
+        // the model can emit EOS instead of locking on its own argmax.
+        // Verified live on Qwen3.6-27B UD-Q3_K_XL where temp=0 looped
+        // "Paris.\n\nParis.\n\nParis…" indefinitely until rep_penalty
+        // unblocked EOS. Explicit caller value (including 1.0) always
+        // wins so a power user can opt out per-call.
+        let request_set_rep = repetition_penalty.is_some();
+        let resolved_rep = repetition_penalty
+            .or(defaults.repetition_penalty)
+            .unwrap_or(1.0);
+        let repetition_penalty =
+            if temperature < 0.1 && !request_set_rep && resolved_rep == 1.0 {
+                1.05
+            } else {
+                resolved_rep
+            };
         let sampling = Sampling {
             temperature,
             top_p,
             top_k,
             min_p,
-            repetition_penalty: repetition_penalty.unwrap_or(1.0),
+            repetition_penalty,
             presence_penalty: presence_penalty.unwrap_or(0.0),
             frequency_penalty: frequency_penalty.unwrap_or(0.0),
         };
