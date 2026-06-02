@@ -1,7 +1,4 @@
 // indexed_moe_mmvq_iq3_s_r2_dp4a — IQ3_S MoE MMVQ with DP4A inner loop.
-// Drop-in replacement for `indexed_moe_mmvq_iq3_s.cu` (scalar FP32).
-// Same per-element math as dense `mmvq_iq3_s_dp4a.cu` plus the standard
-// MoE wiring.
 //
 // Launch: blockDim = { 64 } (wave64), gridDim = { n_row_pairs,
 // n_tokens * top_k, 1 }. 2 rows per block; 32 lanes per row covering

@@ -205,10 +205,8 @@ pub fn indexed_moe_mmvq_q4_k_r2(
     Ok(())
 }
 
-/// Q3_K MoE MMVQ. Phase 3.5 M-a routes through the r2 dp4a kernel
-/// (`indexed_moe_mmvq_q3_k_r2_dp4a`): wave64, 2 rows per block,
-/// half-warp DPP reduce. Replaces the scalar single-row path
-/// (`indexed_moe_mmvq_q3_k`) which did per-element FP32 multiplies.
+/// Q3_K MoE MMVQ. Routes through `indexed_moe_mmvq_q3_k_r2_dp4a`:
+/// wave64, 2 rows per block, half-warp DPP reduce.
 pub fn indexed_moe_mmvq_q3_k(
     reg: &OpsRegistry,
     stream: &HipStream,
@@ -250,12 +248,10 @@ pub fn indexed_moe_mmvq_q3_k(
     Ok(())
 }
 
-/// Q2_K MoE MMVQ. Phase 3.5 M-e routes through the r2 dp4a kernel
-/// (`indexed_moe_mmvq_q2_k_r2_dp4a`): wave64, 2 rows per block,
-/// half-warp DPP reduce. Replaces the scalar single-row path
-/// (`indexed_moe_mmvq_q2_k`) which did per-element FP32 multiplies.
-/// Same indexing contract as `indexed_moe_mmvq_q4_k`; weights are
-/// Q2_K super-blocks (affine, packed 4-bit (scale, min)).
+/// Q2_K MoE MMVQ. Routes through `indexed_moe_mmvq_q2_k_r2_dp4a`:
+/// wave64, 2 rows per block, half-warp DPP reduce. Same indexing
+/// contract as `indexed_moe_mmvq_q4_k`; weights are Q2_K super-blocks
+/// (affine, packed 4-bit (scale, min)).
 pub fn indexed_moe_mmvq_q2_k(
     reg: &OpsRegistry,
     stream: &HipStream,
@@ -684,14 +680,12 @@ pub fn indexed_moe_mmvq_iq1_m(
     Ok(())
 }
 
-/// Q6_K MoE MMVQ. Phase 3.5 M-d routes through the r2 dp4a kernel
-/// (`indexed_moe_mmvq_q6_k_r2_dp4a`): wave64, 2 rows per block,
-/// half-warp DPP reduce. Replaces the scalar single-row path
-/// (`indexed_moe_mmvq_q6_k`) which did per-element FP32 multiplies.
-/// Same indexing contract as the Q4_K sibling: `[n_tokens, top_k]`
-/// expert ids, `[n_tokens, top_k, n_rows]` F32 output, `[n_tokens,
-/// n_sb_per_row * 8]` Q8_1 activations; weights are Q6_K super-blocks.
-/// Needed for UD-Q4_K_S-style mixed-quant GGUFs where some
+/// Q6_K MoE MMVQ. Routes through `indexed_moe_mmvq_q6_k_r2_dp4a`:
+/// wave64, 2 rows per block, half-warp DPP reduce. Same indexing
+/// contract as the Q4_K sibling: `[n_tokens, top_k]` expert ids,
+/// `[n_tokens, top_k, n_rows]` F32 output, `[n_tokens, n_sb_per_row
+/// * 8]` Q8_1 activations; weights are Q6_K super-blocks. Needed
+/// for UD-Q4_K_S-style mixed-quant GGUFs where some
 /// `ffn_down_exps` are promoted from Q4_K to Q6_K.
 pub fn indexed_moe_mmvq_q6_k(
     reg: &OpsRegistry,
@@ -735,10 +729,8 @@ pub fn indexed_moe_mmvq_q6_k(
     Ok(())
 }
 
-/// Q5_K MoE MMVQ. Phase 3.5 M-c routes through the r2 dp4a kernel
-/// (`indexed_moe_mmvq_q5_k_r2_dp4a`): wave64, 2 rows per block,
-/// half-warp DPP reduce. Replaces the scalar single-row path
-/// (`indexed_moe_mmvq_q5_k`) which did per-element FP32 multiplies.
+/// Q5_K MoE MMVQ. Routes through `indexed_moe_mmvq_q5_k_r2_dp4a`:
+/// wave64, 2 rows per block, half-warp DPP reduce.
 pub fn indexed_moe_mmvq_q5_k(
     reg: &OpsRegistry,
     stream: &HipStream,

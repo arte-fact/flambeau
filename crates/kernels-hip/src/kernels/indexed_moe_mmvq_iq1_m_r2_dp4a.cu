@@ -1,8 +1,7 @@
 // indexed_moe_mmvq_iq1_m_r2_dp4a — IQ1_M MoE MMVQ with DP4A inner loop.
-// Drop-in replacement for `indexed_moe_mmvq_iq1_m.cu` (scalar FP32).
-// Same per-element math as dense `mmvq_iq1_m_dp4a.cu` plus the standard
-// MoE wiring. IQ1_M extends IQ1_S with d reassembled from 4 u16 scale
-// words, two 3-bit scales per sub-block, per-l_grp delta sign.
+//
+// IQ1_M extends IQ1_S: d reassembled from 4 u16 scale words, two 3-bit
+// scales per sub-block, per-l_grp delta sign.
 
 #include "block_quant.cuh"
 #include "../arch_primitives/gfx906.cuh"

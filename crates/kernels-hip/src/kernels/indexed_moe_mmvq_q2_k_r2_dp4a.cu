@@ -1,8 +1,4 @@
 // indexed_moe_mmvq_q2_k_r2_dp4a — Q2_K MoE MMVQ with DP4A inner loop.
-// Drop-in replacement for `indexed_moe_mmvq_q2_k.cu` (scalar FP32). Same
-// per-element math as dense Lever 1 Q2_K (`mmvq_q2_k_r2_dp4a.cu`) plus
-// the standard MoE wiring: expert_ids indirection on the weight pointer,
-// per-token activation slab, per-(token, slot, row) dst.
 //
 // Launch: blockDim = { 64 } (wave64), gridDim = { n_row_pairs,
 // n_tokens * top_k, 1 }. 2 output rows per block, 32 lanes per row;

@@ -1,9 +1,8 @@
 // indexed_moe_mmvq_iq1_s_r2_dp4a — IQ1_S MoE MMVQ with DP4A inner loop.
-// Drop-in replacement for `indexed_moe_mmvq_iq1_s.cu` (scalar FP32).
-// Same per-element math as dense `mmvq_iq1_s_dp4a.cu` plus the standard
-// MoE wiring. IQ1_S has no sign mask (codebook entries are signed i8);
-// the delta offset (±IQ1_DELTA per sub-block, picked by qh bit 15)
-// contributes via a separate dp4a vs broadcast 0x01010101.
+//
+// IQ1_S has no sign mask (codebook entries are signed i8); the delta
+// offset (±IQ1_DELTA per sub-block, picked by qh bit 15) contributes
+// via a separate dp4a vs broadcast 0x01010101.
 
 #include "block_quant.cuh"
 #include "../arch_primitives/gfx906.cuh"

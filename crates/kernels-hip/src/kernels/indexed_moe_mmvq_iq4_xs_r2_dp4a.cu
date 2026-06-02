@@ -1,9 +1,8 @@
 // indexed_moe_mmvq_iq4_xs_r2_dp4a — IQ4_XS MoE MMVQ with DP4A inner loop.
-// Drop-in replacement for `indexed_moe_mmvq_iq4_xs.cu` (scalar FP32). Same
-// per-element math as dense `mmvq_iq4_xs_dp4a.cu` (256-element super-block,
-// 16-entry kvalues_iq4nl codebook via gfx906 __builtin_amdgcn_perm,
-// 6-bit per-sub-block scale from `scales_h` + `scales_l`) plus the
-// standard MoE wiring.
+//
+// 256-element super-block, 16-entry kvalues_iq4nl codebook resolved via
+// gfx906 __builtin_amdgcn_perm, 6-bit per-sub-block scale from
+// `scales_h` + `scales_l`.
 //
 // Launch: blockDim = { 64 } (wave64), gridDim = { n_row_pairs,
 // n_tokens * top_k, 1 }. 2 rows per block; 32 lanes per row, 4 lanes

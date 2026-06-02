@@ -1,15 +1,12 @@
 // indexed_moe_mmvq_q6_k_r2_dp4a — Q6_K MoE MMVQ with DP4A inner loop.
-// Drop-in replacement for `indexed_moe_mmvq_q6_k.cu` (scalar FP32). Same
-// per-element math as dense `mmvq_q6_k_dp4a` plus the Q5_K MoE r2 wiring
-// (expert_ids indirection, 2 output rows per block, half-warp DPP reduce).
 //
 // Launch: blockDim = { 64 } (wave64), gridDim = { n_row_pairs,
 // n_tokens * top_k, 1 }. 2 output rows per block (lanes 0..31 own row R,
 // lanes 32..63 own row R+1). 32 iqs positions per super-block per row.
 //
 // Q6_K bias correction: raw_q is stored as unsigned [0, 63]; the −32 bias
-// is folded out via the dp4a identity (raw − 32) * y = raw * y − 32 * Σ y,
-// matching the dense kernel comment (mmvq_q6_k_dp4a.cu:86-99).
+// is folded out via the dp4a identity (raw − 32) * y = raw * y − 32 * Σ y
+// (gfx906 has no per-byte saturating int8 subtract).
 
 #include "block_quant.cuh"
 #include "../arch_primitives/gfx906.cuh"

@@ -1,31 +1,16 @@
 // attention_prefill_flash_tile_q8_kv — BR=4/8 LDS-tiled flash-attention
-// v2 prefill kernel with Q8_0 KV cache. Mirror of `attention_prefill_flash_tile_f16`
-// with the cooperative K/V load path changed to dequantize Q8_0 blocks
-// on the way into the F32 LDS tile.
-// Closes the prefill regression where the
-// F16 path used BR=8 LDS-tiled prefill while Q8 was stuck on the oracle
-// (one block per (q_token, q_head)). Both kernels now share structure;
-// only the load path differs (Q8 → F32 dequant vs F16 → F32 cast).
-// Score loop and online-softmax rescale are identical.
-// Why the LDS tile stays F32 (not int8): the original f16 flash-tile
-// upcasts to F32 on load, which is necessary for the online-softmax
-// math anyway. Keeping LDS as F32 lets the inner Q·K dot stay
-// register-fp32 (1 mul + 1 add per element, warp-reduced) — same as
-// the F16 variant. dp4a in the score-path here is harder than in
-// decode because each warp handles ONE Q row × BC=16 K rows; the
-// per-K-row reduction across 64 lanes already uses warp reductions
-// efficiently. The win vs the oracle path is from LDS reuse (each K
-// element is loaded once per chunk and reused by BR=4-8 Q rows in the
-// tile), not from dp4a.
-// Shape (matches the F16 variant exactly):
-// Q: [n_q_tokens, n_heads_q, head_dim] F16
-// K/V: [n_k_tokens, n_heads_kv, head_dim/32] block_q8_0
-// Out: [n_q_tokens, n_heads_q, head_dim] F16
-// Causal: Q at global pos (q_offset + q_idx) attends to K[0..q_offset+q_idx].
-// Launch (per template instantiation):
-// grid = (ceil(n_q_tokens / BR), n_heads_q, 1)
-// block = (WARP_SIZE=64, BR, 1) — 256 or 512 threads, 2D block
-// LDS: 2 × BC × D floats. Same per-D budget as F16 variant.
+// prefill with Q8_0 K/V cache. Sibling of attention_prefill_flash_tile_f16;
+// only the cooperative K/V load path differs (Q8_0 → F32 dequant on the
+// way into the F32 LDS tile).
+//
+// Shape:
+//   Q:   [n_q_tokens, n_heads_q,  D] F16
+//   K/V: [n_k_tokens, n_heads_kv, D/32] block_q8_0
+//   Out: [n_q_tokens, n_heads_q,  D] F16
+// Launch:
+//   grid  = (ceil(n_q_tokens / BR), n_heads_q, 1)
+//   block = (WARP_SIZE=64, BR, 1)
+//   LDS   = 2 × BC × D floats
 
 #include <hip/hip_runtime.h>
 #include <hip/hip_fp16.h>

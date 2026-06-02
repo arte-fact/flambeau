@@ -1,9 +1,9 @@
 // indexed_moe_mmvq_iq2_s_r2_dp4a — IQ2_S MoE MMVQ with DP4A inner loop.
-// Drop-in replacement for `indexed_moe_mmvq_iq2_s.cu` (scalar FP32).
-// Same per-element math as dense `mmvq_iq2_s_dp4a.cu` plus the standard
-// MoE wiring. Note flambeau scale convention: `scales[ib32 >> 1]`
-// (4 bytes) per super-block, NOT llama.cpp's `scales[iqs/2]` (8 bytes)
-// — see feedback_iq2_s_scale_convention.
+//
+// Flambeau scale convention: `scales[ib32 >> 1]` (4 bytes) per super-
+// block, NOT llama.cpp's `scales[iqs/2]` (8 bytes). The 10-bit codebook
+// index is qs byte + qh 2-bit extension into IQ2S_GRID; separate signs
+// byte expands via per-byte mask.
 
 #include "block_quant.cuh"
 #include "../arch_primitives/gfx906.cuh"
