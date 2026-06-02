@@ -311,8 +311,8 @@ pub fn indexed_moe_mmvq_iq4_xs(
     top_k: usize,
     n_sb_per_row: usize,
 ) -> Result<()> {
-    let module = reg.expect_module("indexed_moe_mmvq_iq4_xs")?;
-    let kernel = module.kernel("flambeau_indexed_moe_mmvq_iq4_xs_q8_1")?;
+    let module = reg.expect_module("indexed_moe_mmvq_iq4_xs_r2_dp4a")?;
+    let kernel = module.kernel("flambeau_indexed_moe_mmvq_iq4_xs_r2_dp4a_q8_1")?;
     let n_rows_i = n_rows as i32;
     let n_tokens_i = n_tokens as i32;
     let top_k_i = top_k as i32;
@@ -330,8 +330,9 @@ pub fn indexed_moe_mmvq_iq4_xs(
     args.push(&n_tokens_i);
     args.push(&top_k_i);
     args.push(&nb_i);
+    let grid_x = (n_rows as u32).div_ceil(2);
     let cfg = LaunchCfg {
-        grid: (n_rows as u32, (n_tokens * top_k) as u32, 1),
+        grid: (grid_x, (n_tokens * top_k) as u32, 1),
         block: (64, 1, 1),
         shared_bytes: 0,
     };
@@ -353,8 +354,8 @@ pub fn indexed_moe_mmvq_iq4_nl(
     top_k: usize,
     n_blocks_per_row: usize,
 ) -> Result<()> {
-    let module = reg.expect_module("indexed_moe_mmvq_iq4_nl")?;
-    let kernel = module.kernel("flambeau_indexed_moe_mmvq_iq4_nl_q8_1")?;
+    let module = reg.expect_module("indexed_moe_mmvq_iq4_nl_r2_dp4a")?;
+    let kernel = module.kernel("flambeau_indexed_moe_mmvq_iq4_nl_r2_dp4a_q8_1")?;
     let n_rows_i = n_rows as i32;
     let n_tokens_i = n_tokens as i32;
     let top_k_i = top_k as i32;
@@ -372,8 +373,9 @@ pub fn indexed_moe_mmvq_iq4_nl(
     args.push(&n_tokens_i);
     args.push(&top_k_i);
     args.push(&nb_i);
+    let grid_x = (n_rows as u32).div_ceil(2);
     let cfg = LaunchCfg {
-        grid: (n_rows as u32, (n_tokens * top_k) as u32, 1),
+        grid: (grid_x, (n_tokens * top_k) as u32, 1),
         block: (64, 1, 1),
         shared_bytes: 0,
     };
@@ -438,8 +440,8 @@ pub fn indexed_moe_mmvq_iq3_s(
     top_k: usize,
     n_sb_per_row: usize,
 ) -> Result<()> {
-    let module = reg.expect_module("indexed_moe_mmvq_iq3_s")?;
-    let kernel = module.kernel("flambeau_indexed_moe_mmvq_iq3_s_q8_1")?;
+    let module = reg.expect_module("indexed_moe_mmvq_iq3_s_r2_dp4a")?;
+    let kernel = module.kernel("flambeau_indexed_moe_mmvq_iq3_s_r2_dp4a_q8_1")?;
     let n_rows_i = n_rows as i32;
     let n_tokens_i = n_tokens as i32;
     let top_k_i = top_k as i32;
@@ -457,8 +459,9 @@ pub fn indexed_moe_mmvq_iq3_s(
     args.push(&n_tokens_i);
     args.push(&top_k_i);
     args.push(&nb_i);
+    let grid_x = (n_rows as u32).div_ceil(2);
     let cfg = LaunchCfg {
-        grid: (n_rows as u32, (n_tokens * top_k) as u32, 1),
+        grid: (grid_x, (n_tokens * top_k) as u32, 1),
         block: (64, 1, 1),
         shared_bytes: 0,
     };
@@ -480,8 +483,8 @@ pub fn indexed_moe_mmvq_iq2_xxs(
     top_k: usize,
     n_sb_per_row: usize,
 ) -> Result<()> {
-    let module = reg.expect_module("indexed_moe_mmvq_iq2_xxs")?;
-    let kernel = module.kernel("flambeau_indexed_moe_mmvq_iq2_xxs_q8_1")?;
+    let module = reg.expect_module("indexed_moe_mmvq_iq2_xxs_r2_dp4a")?;
+    let kernel = module.kernel("flambeau_indexed_moe_mmvq_iq2_xxs_r2_dp4a_q8_1")?;
     let n_rows_i = n_rows as i32;
     let n_tokens_i = n_tokens as i32;
     let top_k_i = top_k as i32;
@@ -499,8 +502,9 @@ pub fn indexed_moe_mmvq_iq2_xxs(
     args.push(&n_tokens_i);
     args.push(&top_k_i);
     args.push(&nb_i);
+    let grid_x = (n_rows as u32).div_ceil(2);
     let cfg = LaunchCfg {
-        grid: (n_rows as u32, (n_tokens * top_k) as u32, 1),
+        grid: (grid_x, (n_tokens * top_k) as u32, 1),
         block: (64, 1, 1),
         shared_bytes: 0,
     };
@@ -565,8 +569,8 @@ pub fn indexed_moe_mmvq_iq2_s(
     top_k: usize,
     n_sb_per_row: usize,
 ) -> Result<()> {
-    let module = reg.expect_module("indexed_moe_mmvq_iq2_s")?;
-    let kernel = module.kernel("flambeau_indexed_moe_mmvq_iq2_s_q8_1")?;
+    let module = reg.expect_module("indexed_moe_mmvq_iq2_s_r2_dp4a")?;
+    let kernel = module.kernel("flambeau_indexed_moe_mmvq_iq2_s_r2_dp4a_q8_1")?;
     let n_rows_i = n_rows as i32;
     let n_tokens_i = n_tokens as i32;
     let top_k_i = top_k as i32;
@@ -584,8 +588,9 @@ pub fn indexed_moe_mmvq_iq2_s(
     args.push(&n_tokens_i);
     args.push(&top_k_i);
     args.push(&nb_i);
+    let grid_x = (n_rows as u32).div_ceil(2);
     let cfg = LaunchCfg {
-        grid: (n_rows as u32, (n_tokens * top_k) as u32, 1),
+        grid: (grid_x, (n_tokens * top_k) as u32, 1),
         block: (64, 1, 1),
         shared_bytes: 0,
     };
@@ -607,8 +612,8 @@ pub fn indexed_moe_mmvq_iq1_s(
     top_k: usize,
     n_sb_per_row: usize,
 ) -> Result<()> {
-    let module = reg.expect_module("indexed_moe_mmvq_iq1_s")?;
-    let kernel = module.kernel("flambeau_indexed_moe_mmvq_iq1_s_q8_1")?;
+    let module = reg.expect_module("indexed_moe_mmvq_iq1_s_r2_dp4a")?;
+    let kernel = module.kernel("flambeau_indexed_moe_mmvq_iq1_s_r2_dp4a_q8_1")?;
     let n_rows_i = n_rows as i32;
     let n_tokens_i = n_tokens as i32;
     let top_k_i = top_k as i32;
@@ -626,8 +631,9 @@ pub fn indexed_moe_mmvq_iq1_s(
     args.push(&n_tokens_i);
     args.push(&top_k_i);
     args.push(&nb_i);
+    let grid_x = (n_rows as u32).div_ceil(2);
     let cfg = LaunchCfg {
-        grid: (n_rows as u32, (n_tokens * top_k) as u32, 1),
+        grid: (grid_x, (n_tokens * top_k) as u32, 1),
         block: (64, 1, 1),
         shared_bytes: 0,
     };
@@ -649,8 +655,8 @@ pub fn indexed_moe_mmvq_iq1_m(
     top_k: usize,
     n_sb_per_row: usize,
 ) -> Result<()> {
-    let module = reg.expect_module("indexed_moe_mmvq_iq1_m")?;
-    let kernel = module.kernel("flambeau_indexed_moe_mmvq_iq1_m_q8_1")?;
+    let module = reg.expect_module("indexed_moe_mmvq_iq1_m_r2_dp4a")?;
+    let kernel = module.kernel("flambeau_indexed_moe_mmvq_iq1_m_r2_dp4a_q8_1")?;
     let n_rows_i = n_rows as i32;
     let n_tokens_i = n_tokens as i32;
     let top_k_i = top_k as i32;
@@ -668,8 +674,9 @@ pub fn indexed_moe_mmvq_iq1_m(
     args.push(&n_tokens_i);
     args.push(&top_k_i);
     args.push(&nb_i);
+    let grid_x = (n_rows as u32).div_ceil(2);
     let cfg = LaunchCfg {
-        grid: (n_rows as u32, (n_tokens * top_k) as u32, 1),
+        grid: (grid_x, (n_tokens * top_k) as u32, 1),
         block: (64, 1, 1),
         shared_bytes: 0,
     };
