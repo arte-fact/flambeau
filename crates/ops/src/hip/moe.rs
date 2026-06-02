@@ -205,8 +205,10 @@ pub fn indexed_moe_mmvq_q4_k_r2(
     Ok(())
 }
 
-/// Q3_K MoE MMVQ. Same indexing contract as `indexed_moe_mmvq_q4_k`;
-/// weights are Q3_K super-blocks (110 B; byte-wise scales unpack).
+/// Q3_K MoE MMVQ. Phase 3.5 M-a routes through the r2 dp4a kernel
+/// (`indexed_moe_mmvq_q3_k_r2_dp4a`): wave64, 2 rows per block,
+/// half-warp DPP reduce. Replaces the scalar single-row path
+/// (`indexed_moe_mmvq_q3_k`) which did per-element FP32 multiplies.
 pub fn indexed_moe_mmvq_q3_k(
     reg: &OpsRegistry,
     stream: &HipStream,
@@ -219,8 +221,8 @@ pub fn indexed_moe_mmvq_q3_k(
     top_k: usize,
     n_sb_per_row: usize,
 ) -> Result<()> {
-    let module = reg.expect_module("indexed_moe_mmvq_q3_k")?;
-    let kernel = module.kernel("flambeau_indexed_moe_mmvq_q3_k_q8_1")?;
+    let module = reg.expect_module("indexed_moe_mmvq_q3_k_r2_dp4a")?;
+    let kernel = module.kernel("flambeau_indexed_moe_mmvq_q3_k_r2_dp4a_q8_1")?;
     let n_rows_i = n_rows as i32;
     let n_tokens_i = n_tokens as i32;
     let top_k_i = top_k as i32;
@@ -238,8 +240,9 @@ pub fn indexed_moe_mmvq_q3_k(
     args.push(&n_tokens_i);
     args.push(&top_k_i);
     args.push(&nb_i);
+    let grid_x = (n_rows as u32).div_ceil(2);
     let cfg = LaunchCfg {
-        grid: (n_rows as u32, (n_tokens * top_k) as u32, 1),
+        grid: (grid_x, (n_tokens * top_k) as u32, 1),
         block: (64, 1, 1),
         shared_bytes: 0,
     };
