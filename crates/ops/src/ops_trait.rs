@@ -992,6 +992,114 @@ pub trait Ops {
         n_sb_per_row: usize,
     ) -> Result<()>;
 
+    fn indexed_moe_mmvq_iq4_xs(
+        &self,
+        w: DevicePtr,
+        y: DevicePtr,
+        expert_ids: DevicePtr,
+        dst: DevicePtr,
+        n_rows: usize,
+        n_tokens: usize,
+        top_k: usize,
+        n_sb_per_row: usize,
+    ) -> Result<()>;
+
+    fn indexed_moe_mmvq_iq4_nl(
+        &self,
+        w: DevicePtr,
+        y: DevicePtr,
+        expert_ids: DevicePtr,
+        dst: DevicePtr,
+        n_rows: usize,
+        n_tokens: usize,
+        top_k: usize,
+        n_sb_per_row: usize,
+    ) -> Result<()>;
+
+    fn indexed_moe_mmvq_iq3_xxs(
+        &self,
+        w: DevicePtr,
+        y: DevicePtr,
+        expert_ids: DevicePtr,
+        dst: DevicePtr,
+        n_rows: usize,
+        n_tokens: usize,
+        top_k: usize,
+        n_sb_per_row: usize,
+    ) -> Result<()>;
+
+    fn indexed_moe_mmvq_iq3_s(
+        &self,
+        w: DevicePtr,
+        y: DevicePtr,
+        expert_ids: DevicePtr,
+        dst: DevicePtr,
+        n_rows: usize,
+        n_tokens: usize,
+        top_k: usize,
+        n_sb_per_row: usize,
+    ) -> Result<()>;
+
+    fn indexed_moe_mmvq_iq2_xxs(
+        &self,
+        w: DevicePtr,
+        y: DevicePtr,
+        expert_ids: DevicePtr,
+        dst: DevicePtr,
+        n_rows: usize,
+        n_tokens: usize,
+        top_k: usize,
+        n_sb_per_row: usize,
+    ) -> Result<()>;
+
+    fn indexed_moe_mmvq_iq2_xs(
+        &self,
+        w: DevicePtr,
+        y: DevicePtr,
+        expert_ids: DevicePtr,
+        dst: DevicePtr,
+        n_rows: usize,
+        n_tokens: usize,
+        top_k: usize,
+        n_sb_per_row: usize,
+    ) -> Result<()>;
+
+    fn indexed_moe_mmvq_iq2_s(
+        &self,
+        w: DevicePtr,
+        y: DevicePtr,
+        expert_ids: DevicePtr,
+        dst: DevicePtr,
+        n_rows: usize,
+        n_tokens: usize,
+        top_k: usize,
+        n_sb_per_row: usize,
+    ) -> Result<()>;
+
+    fn indexed_moe_mmvq_iq1_s(
+        &self,
+        w: DevicePtr,
+        y: DevicePtr,
+        expert_ids: DevicePtr,
+        dst: DevicePtr,
+        n_rows: usize,
+        n_tokens: usize,
+        top_k: usize,
+        n_sb_per_row: usize,
+    ) -> Result<()>;
+
+    fn indexed_moe_mmvq_iq1_m(
+        &self,
+        w: DevicePtr,
+        y: DevicePtr,
+        expert_ids: DevicePtr,
+        dst: DevicePtr,
+        n_rows: usize,
+        n_tokens: usize,
+        top_k: usize,
+        n_sb_per_row: usize,
+    ) -> Result<()>;
+
     fn indexed_moe_mmvq_q4_0(
         &self,
         w: DevicePtr,

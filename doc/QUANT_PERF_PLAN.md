@@ -268,11 +268,22 @@ Missing (port targets):
 | M-c | Q5_K MoE | Qwen3.6-35B-A3B-UD-Q5_K_S | ✅ shipped — A/B: SCALAR 47.77 → DP4A 51.47 tps (+7.7 %) pp2tp2 ctx 4096 f16 KV. Also wired prefill tile8 (`indexed_moe_mmq_q5_k_gate_up_tile8_dp4a` was on-disk but un-dispatched) + decode-gate split path (no fused gate+up MMVQ for Q5_K). |
 | M-d | Q6_K MoE | Qwen3.6-35B-A3B-UD-Q6_K_XL | ✅ shipped — A/B: SCALAR 1913.32 → DP4A 1635.13 ms median total_ms (−14.5 % wall / +22 % decode), pp2tp2 ctx 4096 f16 KV. Also wired Q6_K gate+up tile8 prefill (`indexed_moe_mmq_q6_k_gate_up_tile8_dp4a` was on-disk but un-dispatched) + decode-gate split path (no fused gate+up MMVQ for Q6_K, same shape as M-c Q5_K). Module `indexed_moe_mmvq_q6_k_r2_dp4a` registered in the kernel module list. |
 | M-e | Q2_K MoE | UD-Q2_K_S MoE variants | ✅ kernel-only — `indexed_moe_mmvq_q2_k_r2_dp4a`, sweep PASS (max_rel 1.3e-4). No on-disk consumer: `Qwen3.5-122B-A10B-UD-Q2_K_XL.gguf` uses IQ2_XS + IQ3_XXS for MoE experts (Unsloth mixed dynamic-quant), not Q2_K. Same Lever-1 r2 dp4a template as dense; ships for future pure-Q2_K MoE downloads. |
-| M-f | IQ4_XS MoE | Unsloth IQ4_XS MoE |  |
-| M-g | IQ4_NL MoE | Unsloth IQ4_NL MoE |  |
-| M-h | IQ3_S / IQ3_XXS MoE | low-bit IQ3 MoE |  |
-| M-i | IQ2_S/XS/XXS MoE | extreme-low-bit MoE |  |
-| M-j | IQ1_S/M MoE | extreme-low-bit MoE |  |
+| M-f | IQ4_XS MoE | Unsloth IQ4_XS MoE | ✅ wiring shipped (scalar) |
+| M-g | IQ4_NL MoE | Unsloth IQ4_NL MoE | ✅ wiring shipped (scalar) |
+| M-h | IQ3_S / IQ3_XXS MoE | low-bit IQ3 MoE | ✅ wiring shipped (scalar) — unlocks UD-Q2_K_XL down_exps (IQ3_XXS) |
+| M-i | IQ2_S/XS/XXS MoE | extreme-low-bit MoE | ✅ wiring shipped (scalar) — unlocks UD-Q2_K_XL gate/up (IQ2_XS) |
+| M-j | IQ1_S/M MoE | extreme-low-bit MoE | ✅ wiring shipped (scalar) |
+
+**M-f–M-j wiring slice** (decode + prefill MMVQ + Ops trait + HipOps impls):
+Pre-slice, every IQ-MoE gate/down combo bailed in `moe_experts.rs` decode
+match arms (the prefill tile8 dispatch + dense IQ MMVQ + scalar IQ
+indexed-MoE MMVQ kernels were already shipped; only the decode-gate and
+decode-down dispatch arms were missing). End-to-end on
+Qwen3.5-122B-A10B-UD-Q2_K_XL / pp2tp2 / ctx 4096 / f16 KV: median
+total_ms = 4459.23 ms (64 ct, 259 pt). The MoE expert kernels themselves
+are still scalar FP32 — porting dp4a siblings is a separate slice
+(M-f–M-j dp4a port), expected ~2× lift mirroring M-a (+17.7 %) and
+Phase 3 dense gains.
 
 Per slice the port mirrors the dense Phase 3 work: copy the dense
 kernel body, add an `expert_ids` indirection on the weight pointer
@@ -353,9 +364,14 @@ Output: a markdown table users can read in 10 seconds:
    Q6_K tile8 prefill + Q6_K decode-gate split + module registry entry.
 9. ~~Phase 3.5 M-e: Q2_K MoE r2 dp4a port~~ ✅ kernel-only — sweep PASS,
    no on-disk consumer (UD-Q2_K_XL uses IQ2_XS not Q2_K).
-10. Phase 3.5 M-f–M-j (IQ-quant MoE) — *next end-to-end win*. UD-Q2_K_XL
-    on disk needs IQ2_XS + IQ3_XXS MoE dispatch support (kernels already
-    shipped on dense side via Phase 3f-3l; MoE wiring is the gap).
+10. ~~Phase 3.5 M-f–M-j wiring~~ ✅ — IQ-MoE decode/prefill dispatch arms
+    for all 9 IQ dtypes (IQ4_XS/NL, IQ3_XXS/S, IQ2_XXS/XS/S, IQ1_S/M).
+    Unblocks UD-Q2_K_XL on Qwen3.5-122B-A10B-UD-Q2_K_XL (4459 ms median
+    for 64 ct / 259 pt pp2tp2 ctx 4096 f16 KV). Kernels still scalar.
+11. Phase 3.5 M-f–M-j dp4a port — port `indexed_moe_mmvq_iq{*}_dp4a`
+    kernels mirroring M-a / M-c K-quant slices. Same dense IQ dp4a
+    templates from Phase 3f-3l apply. Expected ~2× decode lift on
+    UD-Q2_K_XL and any IQ-MoE consumer.
 8. Phase 2: download missing K-quant variants once MoE slices land
    — they inherit the kernels and don't need a separate diagnosis pass.
 9. Phase 4: KV-quant pairings re-validated after Phase 3
