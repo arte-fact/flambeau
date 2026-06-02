@@ -88,8 +88,8 @@ notes   = "T-IQ.16 Phase 4 Slice A — wave64 MMQ for IQ4_XS. Pre-applies the IQ
 dtype   = "IQ4_NL"
 dtype_q = "Q8_1"
 shape   = { m = "1..127", k = "any", n = "any" }
-impl    = "qmatmul_iq4_nl_mmvq_nw1_r2_gfx906"
-cert    = "certs/hip/gfx906/qmatmul_iq4_nl_mmvq_nw1_r2_gfx906.json"
+impl    = "qmatmul_iq4_nl_mmvq_dp4a_gfx906"
+cert    = "certs/hip/gfx906/qmatmul_iq4_nl_mmvq_dp4a_gfx906.json"
 notes   = "T-IQ.13 — native IQ4_NL MMVQ. 32-elem block, no sub-block scale. r2 multi-row pattern."
 
 [[qmatmul]]
