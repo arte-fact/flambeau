@@ -261,18 +261,18 @@ Already shipped (pre-existing):
 
 Missing (port targets):
 
-| Slice | Quant | Affected on-disk model |
-|-------|-------|------------------------|
-| **M-a** | **Q3_K MoE** | Qwen3.6-35B-A3B-Q3_K_S (on disk) |
-| M-b | Q8_K MoE | Qwen3.6-35B-A3B-UD-Q8_K_XL (on disk) |
-| M-c | Q5_K MoE | any UD-Q5_K_S MoE |
-| M-d | Q6_K MoE | any UD-Q6_K MoE |
-| M-e | Q2_K MoE | UD-Q2_K_S MoE variants |
-| M-f | IQ4_XS MoE | Unsloth IQ4_XS MoE |
-| M-g | IQ4_NL MoE | Unsloth IQ4_NL MoE |
-| M-h | IQ3_S / IQ3_XXS MoE | low-bit IQ3 MoE |
-| M-i | IQ2_S/XS/XXS MoE | extreme-low-bit MoE |
-| M-j | IQ1_S/M MoE | extreme-low-bit MoE |
+| Slice | Quant | Affected on-disk model | Status |
+|-------|-------|------------------------|--------|
+| M-a | Q3_K MoE | Qwen3.6-35B-A3B-Q3_K_S | ✅ shipped — A/B: SCALAR 39.89 → DP4A 46.94 tps (+17.7 %) pp2tp2 ctx 4096 f16 KV |
+| ~~M-b~~ | ~~Q8_K MoE~~ | ~~UD-Q8_K_XL~~ | N/A — UD-Q8_K_XL MoE experts are Q8_0 (already dp4a-covered); model itself currently blocked by missing BF16 MoE sharded-stacked dequant on blk.1 |
+| **M-c** | **Q5_K MoE** | any UD-Q5_K_S MoE |  |
+| M-d | Q6_K MoE | any UD-Q6_K MoE |  |
+| M-e | Q2_K MoE | UD-Q2_K_S MoE variants |  |
+| M-f | IQ4_XS MoE | Unsloth IQ4_XS MoE |  |
+| M-g | IQ4_NL MoE | Unsloth IQ4_NL MoE |  |
+| M-h | IQ3_S / IQ3_XXS MoE | low-bit IQ3 MoE |  |
+| M-i | IQ2_S/XS/XXS MoE | extreme-low-bit MoE |  |
+| M-j | IQ1_S/M MoE | extreme-low-bit MoE |  |
 
 Per slice the port mirrors the dense Phase 3 work: copy the dense
 kernel body, add an `expert_ids` indirection on the weight pointer
@@ -283,8 +283,8 @@ per slice for IQ-family once the helpers from dense Phase 3f-3l are
 in place.
 
 **Order of priority by on-disk consumer:**
-1. **M-a Q3_K MoE** — Qwen3.6-35B-A3B-Q3_K_S already downloaded.
-2. M-b Q8_K MoE — UD-Q8_K_XL on disk.
+1. ✅ M-a Q3_K MoE — Qwen3.6-35B-A3B-Q3_K_S: +17.7 % end-to-end (39.89 → 46.94 tps).
+2. ~~M-b~~ N/A — UD-Q8_K_XL MoE is Q8_0 (covered); model blocked by BF16 MoE dequant.
 3. M-c → M-j — on demand as MoE consumers surface.
 
 gemma4-26B-A4B's MoE layers use Q4_K which is already covered.
@@ -339,9 +339,11 @@ Output: a markdown table users can read in 10 seconds:
    bench but ship correctness-OK.
 4. ~~Lever 1 r2 multi-row on Q4_K, Q3_K, Q2_K~~ ✅ — Q3_K +6.6 %,
    Q2_K +2.3 % on top of the single-row dp4a stack.
-5. **Phase 3.5 M-a: Q3_K MoE dp4a port** — next slice. Qwen3.6-35B-A3B
-   -Q3_K_S is the on-disk consumer; biggest immediate impact for MoE.
-6. Phase 3.5 M-b: Q8_K MoE dp4a port — UD-Q8_K_XL on disk.
+5. ~~Phase 3.5 M-a: Q3_K MoE dp4a port~~ ✅ — Qwen3.6-35B-A3B-Q3_K_S
+   pp2tp2: SCALAR 39.89 → DP4A 46.94 tps (+17.7 % end-to-end).
+6. ~~Phase 3.5 M-b: Q8_K MoE dp4a port~~ N/A — UD-Q8_K_XL MoE experts
+   are Q8_0 (already covered); the model itself is currently blocked by
+   missing BF16 MoE sharded-stacked dequant on blk.1 (separate slice).
 7. Phase 3.5 M-c–M-j — additional MoE dp4a slices on demand.
 8. Phase 2: download missing K-quant variants once MoE slices land
    — they inherit the kernels and don't need a separate diagnosis pass.
@@ -349,10 +351,9 @@ Output: a markdown table users can read in 10 seconds:
    (decode wall composition changed; the floor analysis matters now).
 10. Phase 5: decision table — final cert, plan close.
 
-Total remaining surface: 2–4 sessions for M-a + M-b (the on-disk-
-consumer slices); M-c–M-j land as MoE consumers surface. Lever 2/3
-on dense codebook kernels are open at any time. Phase 4 and 5 are
-1 session each.
+Total remaining surface: M-c–M-j land as MoE consumers surface.
+Lever 2/3 on dense codebook kernels are open at any time. Phase 4
+and 5 are 1 session each.
 
 ## Acceptance criteria
 
