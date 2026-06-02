@@ -51,6 +51,12 @@ pub enum Dtype {
     Q8K,
     /// r2 multi-row variant of Q2_K.
     Q2KR2,
+    /// DP4A 256-thread Q2_K MMVQ (Phase 3e — port of llama.cpp's
+    /// `vec_dot_q2_K_q8_1_impl_mmvq`). Two DP4A calls per (iqs, i):
+    /// one for the 2-bit packed values, one for the broadcast-min
+    /// term (m × Σu via dp4a(m_packed, u, 0)). Same 64-threads-per-
+    /// super-block / BLOCKS_PER_ITER=4 layout as Q3KDp4a.
+    Q2KDp4a,
     /// r2 multi-row variant of Q3_K.
     Q3KR2,
     /// DP4A 256-thread Q3_K MMVQ (Phase 3b — port of llama.cpp's
@@ -145,7 +151,7 @@ impl Dtype {
     pub fn name(self) -> &'static str {
         match self {
             Dtype::Q8_0 | Dtype::Q8_0T128 | Dtype::Q8_0T128VDR2 => "Q8_0",
-            Dtype::Q2K | Dtype::Q2KR2 => "Q2_K",
+            Dtype::Q2K | Dtype::Q2KR2 | Dtype::Q2KDp4a => "Q2_K",
             Dtype::Q3K | Dtype::Q3KR2 | Dtype::Q3KDp4a => "Q3_K",
             Dtype::Q4K | Dtype::Q4KR2 | Dtype::Q4KR2Dp4a => "Q4_K",
             Dtype::Q5K | Dtype::Q5KR2 | Dtype::Q5KDp4a => "Q5_K",
@@ -167,7 +173,7 @@ impl Dtype {
     pub fn ggml(self) -> GgmlDType {
         match self {
             Dtype::Q8_0 | Dtype::Q8_0T128 | Dtype::Q8_0T128VDR2 => GgmlDType::Q8_0,
-            Dtype::Q2K | Dtype::Q2KR2 => GgmlDType::Q2K,
+            Dtype::Q2K | Dtype::Q2KR2 | Dtype::Q2KDp4a => GgmlDType::Q2K,
             Dtype::Q3K | Dtype::Q3KR2 | Dtype::Q3KDp4a => GgmlDType::Q3K,
             Dtype::Q4K | Dtype::Q4KR2 | Dtype::Q4KR2Dp4a => GgmlDType::Q4K,
             Dtype::Q5K | Dtype::Q5KR2 | Dtype::Q5KDp4a => GgmlDType::Q5K,
@@ -191,6 +197,7 @@ impl Dtype {
             Dtype::Q8_0 => "qmatmul_q8_0_mmvq_single_row_gfx906",
             Dtype::Q2K => "qmatmul_q2_K_mmvq_single_row_gfx906",
             Dtype::Q2KR2 => "qmatmul_q2_K_mmvq_nw1_r2_gfx906",
+            Dtype::Q2KDp4a => "qmatmul_q2_K_mmvq_dp4a_gfx906",
             Dtype::Q3K => "qmatmul_q3_K_mmvq_single_row_gfx906",
             Dtype::Q3KR2 => "qmatmul_q3_K_mmvq_nw1_r2_gfx906",
             Dtype::Q3KDp4a => "qmatmul_q3_K_mmvq_dp4a_gfx906",
@@ -240,6 +247,7 @@ impl Dtype {
             Dtype::Q8_0T128VDR2 => "mmvq_q8_0_t128_vdr2",
             Dtype::Q2K => "mmvq_q2_k",
             Dtype::Q2KR2 => "mmvq_q2_k_r2",
+            Dtype::Q2KDp4a => "mmvq_q2_k_dp4a",
             Dtype::Q3K => "mmvq_q3_k",
             Dtype::Q3KR2 => "mmvq_q3_k_r2",
             Dtype::Q3KDp4a => "mmvq_q3_k_dp4a",
@@ -285,6 +293,7 @@ impl Dtype {
             Dtype::Q8_0 => "flambeau_mmvq_q8_0_q8_1",
             Dtype::Q2K => "flambeau_mmvq_q2_K_q8_1",
             Dtype::Q2KR2 => "flambeau_mmvq_q2_K_r2_q8_1",
+            Dtype::Q2KDp4a => "flambeau_mmvq_q2_k_dp4a_q8_1",
             Dtype::Q3K => "flambeau_mmvq_q3_k_q8_1",
             Dtype::Q3KR2 => "flambeau_mmvq_q3_k_r2_q8_1",
             Dtype::Q3KDp4a => "flambeau_mmvq_q3_k_dp4a_q8_1",
@@ -330,7 +339,7 @@ impl Dtype {
     fn block_size_bytes(self) -> usize {
         match self {
             Dtype::Q8_0 | Dtype::Q8_0T128 | Dtype::Q8_0T128VDR2 => std::mem::size_of::<BlockQ8_0>(),
-            Dtype::Q2K | Dtype::Q2KR2 => std::mem::size_of::<BlockQ2K>(),
+            Dtype::Q2K | Dtype::Q2KR2 | Dtype::Q2KDp4a => std::mem::size_of::<BlockQ2K>(),
             Dtype::Q3K | Dtype::Q3KR2 | Dtype::Q3KDp4a => std::mem::size_of::<BlockQ3K>(),
             Dtype::Q4K | Dtype::Q4KR2 | Dtype::Q4KR2Dp4a => std::mem::size_of::<BlockQ4K>(),
             Dtype::Q5K | Dtype::Q5KR2 | Dtype::Q5KDp4a => std::mem::size_of::<BlockQ5K>(),
@@ -357,7 +366,7 @@ impl Dtype {
 
     fn launch_threads(self) -> u32 {
         match self {
-            Dtype::Q8_0 | Dtype::Q4_1 | Dtype::Q4_1R2DP4A | Dtype::Q8K | Dtype::Q5KDp4a | Dtype::Q3KDp4a | Dtype::Iq4XsDp4a | Dtype::Iq4NlDp4a => 256,
+            Dtype::Q8_0 | Dtype::Q4_1 | Dtype::Q4_1R2DP4A | Dtype::Q8K | Dtype::Q5KDp4a | Dtype::Q3KDp4a | Dtype::Q2KDp4a | Dtype::Iq4XsDp4a | Dtype::Iq4NlDp4a => 256,
             Dtype::Q4_1T128 | Dtype::Q8_0T128 | Dtype::Q8_0T128VDR2 => 128,
             _ => 64,
         }
@@ -654,7 +663,7 @@ fn tame_scales(dtype: Dtype, raw: Vec<u8>) -> Vec<u8> {
                 let d = f16::from_f32((block[0] as f32 / 255.0) * 0.1 + 0.01);
                 block[0..2].copy_from_slice(&d.to_bits().to_le_bytes());
             }
-            Dtype::Q2K | Dtype::Q2KR2 => {
+            Dtype::Q2K | Dtype::Q2KR2 | Dtype::Q2KDp4a => {
                 // BlockQ2K: scales[16] + qs[64] + d (f16 @ 80) + dmin (f16 @ 82).
                 // Keep scale-low-nibble in 0..15 (random already); cap d & dmin small.
                 let d = f16::from_f32((block[80] as f32 / 255.0) * 0.05 + 0.005);

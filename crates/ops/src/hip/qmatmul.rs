@@ -1149,10 +1149,10 @@ pub fn mmvq_f16_direct(
             n_blocks_q32,
         ),
         QDtype::Q2_K => (
-            "mmvq_q2_k_r2",
-            "flambeau_mmvq_q2_K_r2_q8_1_f16",
-            64,
-            2,
+            "mmvq_q2_k_dp4a",
+            "flambeau_mmvq_q2_k_dp4a_q8_1_f16",
+            256,
+            1,
             n_superblocks,
         ),
         QDtype::Q3_K => (
@@ -1600,6 +1600,14 @@ impl Recipe {
                 entry: "flambeau_mmvq_q2_K_r2_q8_1",
                 threads: 64,
                 rows_per_block: 2,
+                mmq_tile: (0, 0),
+            },
+            "qmatmul_q2_K_mmvq_dp4a_gfx906" => Self {
+                kind: RecipeKind::Mmvq,
+                stem: "mmvq_q2_k_dp4a",
+                entry: "flambeau_mmvq_q2_k_dp4a_q8_1",
+                threads: 256,
+                rows_per_block: 1,
                 mmq_tile: (0, 0),
             },
             "qmatmul_q3_K_mmvq_single_row_gfx906" => Self {
