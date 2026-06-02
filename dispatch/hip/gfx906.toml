@@ -120,8 +120,8 @@ notes   = "T-IQ.16 Phase 4 Slice A — wave64 MMQ for IQ3_S. Per-element 9-bit c
 dtype   = "IQ2_XXS"
 dtype_q = "Q8_1"
 shape   = { m = "1..127", k = "any", n = "any" }
-impl    = "qmatmul_iq2_xxs_mmvq_nw1_r2_gfx906"
-cert    = "certs/hip/gfx906/qmatmul_iq2_xxs_mmvq_nw1_r2_gfx906.json"
+impl    = "qmatmul_iq2_xxs_mmvq_dp4a_gfx906"
+cert    = "certs/hip/gfx906/qmatmul_iq2_xxs_mmvq_dp4a_gfx906.json"
 notes   = "T-IQ.15 — native IQ2_XXS MMVQ. 256-entry u64 codebook + 7-bit sign LUT (shared with IQ3_XXS). ~2.06 bpw."
 
 [[qmatmul]]
