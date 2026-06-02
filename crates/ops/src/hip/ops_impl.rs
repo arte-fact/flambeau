@@ -1968,6 +1968,33 @@ impl<'a> Ops for HipOps<'a> {
         )
     }
 
+    fn indexed_moe_mmq_q6_k_gate_up_tile8(
+        &self,
+        w_gate: DevicePtr,
+        w_up: DevicePtr,
+        y: DevicePtr,
+        expert_ids: DevicePtr,
+        sorted_pair_idx_padded: DevicePtr,
+        padded_offsets: DevicePtr,
+        gate_out: DevicePtr,
+        up_out: DevicePtr,
+        shape: MoeShape,
+    ) -> Result<()> {
+        super::moe::indexed_moe_mmq_q6_k_gate_up_tile8(
+            self.reg,
+            self.stream,
+            w_gate,
+            w_up,
+            y,
+            expert_ids,
+            sorted_pair_idx_padded,
+            padded_offsets,
+            gate_out,
+            up_out,
+            shape,
+        )
+    }
+
     fn indexed_moe_mmq_q4_0_gate_up_tile8(
         &self,
         w_gate: DevicePtr,

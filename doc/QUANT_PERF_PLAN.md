@@ -266,7 +266,7 @@ Missing (port targets):
 | M-a | Q3_K MoE | Qwen3.6-35B-A3B-Q3_K_S | ✅ shipped — A/B: SCALAR 39.89 → DP4A 46.94 tps (+17.7 %) pp2tp2 ctx 4096 f16 KV |
 | ~~M-b~~ | ~~Q8_K MoE~~ | ~~UD-Q8_K_XL~~ | N/A — UD-Q8_K_XL MoE experts are Q8_0 (already dp4a-covered); model itself currently blocked by missing BF16 MoE sharded-stacked dequant on blk.1 |
 | M-c | Q5_K MoE | Qwen3.6-35B-A3B-UD-Q5_K_S | ✅ shipped — A/B: SCALAR 47.77 → DP4A 51.47 tps (+7.7 %) pp2tp2 ctx 4096 f16 KV. Also wired prefill tile8 (`indexed_moe_mmq_q5_k_gate_up_tile8_dp4a` was on-disk but un-dispatched) + decode-gate split path (no fused gate+up MMVQ for Q5_K). |
-| M-d | Q6_K MoE | any UD-Q6_K MoE | ✅ kernel-only — `indexed_moe_mmvq_q6_k_r2_dp4a`, sweep PASS (max_rel 2.6e-3). No on-disk consumer: only `Qwen3.6-27B-UD-Q6_K_XL.gguf` ships UD-Q6_K and it's dense (already covered by `mmvq_q6_k_dp4a`). |
+| M-d | Q6_K MoE | Qwen3.6-35B-A3B-UD-Q6_K_XL | ✅ shipped — A/B: SCALAR 1913.32 → DP4A 1635.13 ms median total_ms (−14.5 % wall / +22 % decode), pp2tp2 ctx 4096 f16 KV. Also wired Q6_K gate+up tile8 prefill (`indexed_moe_mmq_q6_k_gate_up_tile8_dp4a` was on-disk but un-dispatched) + decode-gate split path (no fused gate+up MMVQ for Q6_K, same shape as M-c Q5_K). Module `indexed_moe_mmvq_q6_k_r2_dp4a` registered in the kernel module list. |
 | M-e | Q2_K MoE | UD-Q2_K_S MoE variants | ✅ kernel-only — `indexed_moe_mmvq_q2_k_r2_dp4a`, sweep PASS (max_rel 1.3e-4). No on-disk consumer: `Qwen3.5-122B-A10B-UD-Q2_K_XL.gguf` uses IQ2_XS + IQ3_XXS for MoE experts (Unsloth mixed dynamic-quant), not Q2_K. Same Lever-1 r2 dp4a template as dense; ships for future pure-Q2_K MoE downloads. |
 | M-f | IQ4_XS MoE | Unsloth IQ4_XS MoE |  |
 | M-g | IQ4_NL MoE | Unsloth IQ4_NL MoE |  |
@@ -347,8 +347,10 @@ Output: a markdown table users can read in 10 seconds:
    missing BF16 MoE sharded-stacked dequant on blk.1 (separate slice).
 7. ~~Phase 3.5 M-c: Q5_K MoE dp4a port~~ ✅ — Qwen3.6-35B-A3B-UD-Q5_K_S
    pp2tp2: SCALAR 47.77 → DP4A 51.47 tps (+7.7 % end-to-end).
-8. ~~Phase 3.5 M-d: Q6_K MoE r2 dp4a port~~ ✅ kernel-only — sweep PASS,
-   no on-disk consumer. Kernel ships for future UD-Q6_K MoE downloads.
+8. ~~Phase 3.5 M-d: Q6_K MoE r2 dp4a port~~ ✅ — Qwen3.6-35B-A3B-UD-Q6_K_XL
+   pp2tp2: SCALAR 1913.32 → DP4A 1635.13 ms median total_ms
+   (−14.5 % wall / +22 % decode). Also wired pre-existing-but-un-dispatched
+   Q6_K tile8 prefill + Q6_K decode-gate split + module registry entry.
 9. ~~Phase 3.5 M-e: Q2_K MoE r2 dp4a port~~ ✅ kernel-only — sweep PASS,
    no on-disk consumer (UD-Q2_K_XL uses IQ2_XS not Q2_K).
 10. Phase 3.5 M-f–M-j (IQ-quant MoE) — *next end-to-end win*. UD-Q2_K_XL
