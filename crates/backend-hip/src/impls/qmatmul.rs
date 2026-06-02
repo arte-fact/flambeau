@@ -139,13 +139,13 @@ pub const QMATMUL_GFX906: &[KernelDescriptor] = &[
     },
     KernelDescriptor {
         op_name: "QMatMul",
-        impl_id: "qmatmul_iq1_m_mmvq_nw1_r2_gfx906",
+        impl_id: "qmatmul_iq1_m_mmvq_dp4a_gfx906",
         backend: "hip",
         arch: "gfx906",
         dtype_weight: QDtype::IQ1_M,
         dtype_activation: QDtype::Q8_1,
         m_range: (1, 127),
-        cert_rel_path: "certs/hip/gfx906/qmatmul_iq1_m_mmvq_nw1_r2_gfx906.json",
+        cert_rel_path: "certs/hip/gfx906/qmatmul_iq1_m_mmvq_dp4a_gfx906.json",
     },
     KernelDescriptor {
         // 4.a.3 — 128-thread single-row DP4A Q4_1 MMVQ. Same DP4A

@@ -178,6 +178,13 @@ pub enum Dtype {
     Iq1SDp4a,
     Iq1M,
     Iq1MR2,
+    /// DP4A IQ1_M MMVQ (Phase 3l — port of llama.cpp's
+    /// `vec_dot_iq1_m_q8_1`). Closes the IQ family. Same IQ1S_GRID +
+    /// delta pattern as IQ1_S but with per-half-sub-block scales
+    /// (sc0/sc1) and per-l_grp delta sign from qh nibbles. d itself
+    /// is reassembled from 4 nibbles spread across the 4 u16 scales
+    /// words via iq1m_reassemble_d.
+    Iq1MDp4a,
 }
 
 impl Dtype {
@@ -199,7 +206,7 @@ impl Dtype {
             Dtype::Iq2Xs | Dtype::Iq2XsR2 | Dtype::Iq2XsDp4a => "IQ2_XS",
             Dtype::Iq2S | Dtype::Iq2SR2 | Dtype::Iq2SDp4a => "IQ2_S",
             Dtype::Iq1S | Dtype::Iq1SR2 | Dtype::Iq1SDp4a => "IQ1_S",
-            Dtype::Iq1M | Dtype::Iq1MR2 => "IQ1_M",
+            Dtype::Iq1M | Dtype::Iq1MR2 | Dtype::Iq1MDp4a => "IQ1_M",
         }
     }
 
@@ -221,7 +228,7 @@ impl Dtype {
             Dtype::Iq2Xs | Dtype::Iq2XsR2 | Dtype::Iq2XsDp4a => GgmlDType::Iq2Xs,
             Dtype::Iq2S | Dtype::Iq2SR2 | Dtype::Iq2SDp4a => GgmlDType::Iq2S,
             Dtype::Iq1S | Dtype::Iq1SR2 | Dtype::Iq1SDp4a => GgmlDType::Iq1S,
-            Dtype::Iq1M | Dtype::Iq1MR2 => GgmlDType::Iq1M,
+            Dtype::Iq1M | Dtype::Iq1MR2 | Dtype::Iq1MDp4a => GgmlDType::Iq1M,
         }
     }
 
@@ -276,6 +283,7 @@ impl Dtype {
             Dtype::Iq1SDp4a => "qmatmul_iq1_s_mmvq_dp4a_gfx906",
             Dtype::Iq1M => "qmatmul_iq1_m_mmvq_single_row_gfx906",
             Dtype::Iq1MR2 => "qmatmul_iq1_m_mmvq_nw1_r2_gfx906",
+            Dtype::Iq1MDp4a => "qmatmul_iq1_m_mmvq_dp4a_gfx906",
         }
     }
 
@@ -330,6 +338,7 @@ impl Dtype {
             Dtype::Iq1SDp4a => "mmvq_iq1_s_dp4a",
             Dtype::Iq1M => "mmvq_iq1_m",
             Dtype::Iq1MR2 => "mmvq_iq1_m_r2",
+            Dtype::Iq1MDp4a => "mmvq_iq1_m_dp4a",
         }
     }
 
@@ -384,6 +393,7 @@ impl Dtype {
             Dtype::Iq1SDp4a => "flambeau_mmvq_iq1_s_dp4a_q8_1",
             Dtype::Iq1M => "flambeau_mmvq_iq1_m_q8_1",
             Dtype::Iq1MR2 => "flambeau_mmvq_iq1_m_r2_q8_1",
+            Dtype::Iq1MDp4a => "flambeau_mmvq_iq1_m_dp4a_q8_1",
         }
     }
 
@@ -407,7 +417,7 @@ impl Dtype {
             Dtype::Iq2Xs | Dtype::Iq2XsR2 | Dtype::Iq2XsDp4a => std::mem::size_of::<BlockIq2Xs>(),
             Dtype::Iq2S | Dtype::Iq2SR2 | Dtype::Iq2SDp4a => std::mem::size_of::<BlockIq2S>(),
             Dtype::Iq1S | Dtype::Iq1SR2 | Dtype::Iq1SDp4a => std::mem::size_of::<BlockIq1S>(),
-            Dtype::Iq1M | Dtype::Iq1MR2 => std::mem::size_of::<BlockIq1M>(),
+            Dtype::Iq1M | Dtype::Iq1MR2 | Dtype::Iq1MDp4a => std::mem::size_of::<BlockIq1M>(),
         }
     }
 
@@ -417,7 +427,7 @@ impl Dtype {
 
     fn launch_threads(self) -> u32 {
         match self {
-            Dtype::Q8_0 | Dtype::Q4_1 | Dtype::Q4_1R2DP4A | Dtype::Q8K | Dtype::Q5KDp4a | Dtype::Q3KDp4a | Dtype::Q2KDp4a | Dtype::Iq4XsDp4a | Dtype::Iq4NlDp4a | Dtype::Iq3SDp4a | Dtype::Iq3XxsDp4a | Dtype::Iq2SDp4a | Dtype::Iq2XsDp4a | Dtype::Iq2XxsDp4a | Dtype::Iq1SDp4a => 256,
+            Dtype::Q8_0 | Dtype::Q4_1 | Dtype::Q4_1R2DP4A | Dtype::Q8K | Dtype::Q5KDp4a | Dtype::Q3KDp4a | Dtype::Q2KDp4a | Dtype::Iq4XsDp4a | Dtype::Iq4NlDp4a | Dtype::Iq3SDp4a | Dtype::Iq3XxsDp4a | Dtype::Iq2SDp4a | Dtype::Iq2XsDp4a | Dtype::Iq2XxsDp4a | Dtype::Iq1SDp4a | Dtype::Iq1MDp4a => 256,
             Dtype::Q4_1T128 | Dtype::Q8_0T128 | Dtype::Q8_0T128VDR2 => 128,
             _ => 64,
         }
@@ -814,7 +824,7 @@ fn tame_scales(dtype: Dtype, raw: Vec<u8>) -> Vec<u8> {
                 let d = f16::from_f32((block[0] as f32 / 255.0) * 0.001 + 0.0001);
                 block[0..2].copy_from_slice(&d.to_bits().to_le_bytes());
             }
-            Dtype::Iq1M | Dtype::Iq1MR2 => {
+            Dtype::Iq1M | Dtype::Iq1MR2 | Dtype::Iq1MDp4a => {
                 // IQ1_M has no per-block d — it's reassembled from the top
                 // nibble of each of 4 u16 scale-words at scales[0..8].
                 // Pin those nibbles so the reassembled d_bits resolves to
