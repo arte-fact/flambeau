@@ -265,7 +265,7 @@ Missing (port targets):
 |-------|-------|------------------------|--------|
 | M-a | Q3_K MoE | Qwen3.6-35B-A3B-Q3_K_S | ✅ shipped — A/B: SCALAR 39.89 → DP4A 46.94 tps (+17.7 %) pp2tp2 ctx 4096 f16 KV |
 | ~~M-b~~ | ~~Q8_K MoE~~ | ~~UD-Q8_K_XL~~ | N/A — UD-Q8_K_XL MoE experts are Q8_0 (already dp4a-covered); model itself currently blocked by missing BF16 MoE sharded-stacked dequant on blk.1 |
-| **M-c** | **Q5_K MoE** | any UD-Q5_K_S MoE |  |
+| M-c | Q5_K MoE | Qwen3.6-35B-A3B-UD-Q5_K_S | ✅ shipped — A/B: SCALAR 47.77 → DP4A 51.47 tps (+7.7 %) pp2tp2 ctx 4096 f16 KV. Also wired prefill tile8 (`indexed_moe_mmq_q5_k_gate_up_tile8_dp4a` was on-disk but un-dispatched) + decode-gate split path (no fused gate+up MMVQ for Q5_K). |
 | M-d | Q6_K MoE | any UD-Q6_K MoE |  |
 | M-e | Q2_K MoE | UD-Q2_K_S MoE variants |  |
 | M-f | IQ4_XS MoE | Unsloth IQ4_XS MoE |  |
@@ -285,7 +285,8 @@ in place.
 **Order of priority by on-disk consumer:**
 1. ✅ M-a Q3_K MoE — Qwen3.6-35B-A3B-Q3_K_S: +17.7 % end-to-end (39.89 → 46.94 tps).
 2. ~~M-b~~ N/A — UD-Q8_K_XL MoE is Q8_0 (covered); model blocked by BF16 MoE dequant.
-3. M-c → M-j — on demand as MoE consumers surface.
+3. ✅ M-c Q5_K MoE — Qwen3.6-35B-A3B-UD-Q5_K_S: +7.7 % end-to-end (47.77 → 51.47 tps). Also wired pre-existing-but-un-dispatched Q5_K tile8 prefill + Q5_K decode-gate split.
+4. M-d → M-j — on demand as MoE consumers surface.
 
 gemma4-26B-A4B's MoE layers use Q4_K which is already covered.
 
@@ -344,7 +345,9 @@ Output: a markdown table users can read in 10 seconds:
 6. ~~Phase 3.5 M-b: Q8_K MoE dp4a port~~ N/A — UD-Q8_K_XL MoE experts
    are Q8_0 (already covered); the model itself is currently blocked by
    missing BF16 MoE sharded-stacked dequant on blk.1 (separate slice).
-7. Phase 3.5 M-c–M-j — additional MoE dp4a slices on demand.
+7. ~~Phase 3.5 M-c: Q5_K MoE dp4a port~~ ✅ — Qwen3.6-35B-A3B-UD-Q5_K_S
+   pp2tp2: SCALAR 47.77 → DP4A 51.47 tps (+7.7 % end-to-end).
+8. Phase 3.5 M-d–M-j — additional MoE dp4a slices on demand.
 8. Phase 2: download missing K-quant variants once MoE slices land
    — they inherit the kernels and don't need a separate diagnosis pass.
 9. Phase 4: KV-quant pairings re-validated after Phase 3

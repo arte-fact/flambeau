@@ -530,8 +530,6 @@ impl MoeExperts {
                 .context("indexed_moe gate+up q4_0 fused")
             }
             QDtype::Q3_K => {
-                // No fused Q3_K gate+up MMVQ kernel; fire two single-output
-                // launches via the down-style indexed_moe_mmvq_q3_k.
                 let nb = hidden / QK_K;
                 ops.indexed_moe_mmvq_q3_k(
                     self.ffn_gate_exps.ptr,
@@ -556,8 +554,33 @@ impl MoeExperts {
                 )
                 .context("indexed_moe up q3_k split")
             }
+            QDtype::Q5_K => {
+                let nb = hidden / QK_K;
+                ops.indexed_moe_mmvq_q5_k(
+                    self.ffn_gate_exps.ptr,
+                    scratch.x_q8_1,
+                    scratch.expert_ids,
+                    scratch.gate_out_f32,
+                    inter,
+                    n_tokens,
+                    top_k,
+                    nb,
+                )
+                .context("indexed_moe gate q5_k split")?;
+                ops.indexed_moe_mmvq_q5_k(
+                    self.ffn_up_exps.ptr,
+                    scratch.x_q8_1,
+                    scratch.expert_ids,
+                    scratch.up_out_f32,
+                    inter,
+                    n_tokens,
+                    top_k,
+                    nb,
+                )
+                .context("indexed_moe up q5_k split")
+            }
             other => {
-                bail!("MoeExperts gate dtype {other:?} not supported (expected Q4_K / Q3_K / Q8_0 / Q4_0)")
+                bail!("MoeExperts gate dtype {other:?} not supported (expected Q4_K / Q3_K / Q5_K / Q8_0 / Q4_0)")
             }
         }
     }
@@ -1416,8 +1439,28 @@ impl MoeExperts {
                     },
                 )
                 .context("prefill indexed_moe gate+up q3_k tile8")?,
+            QDtype::Q5_K => ops
+                .indexed_moe_mmq_q5_k_gate_up_tile8(
+                    self.ffn_gate_exps.ptr,
+                    self.ffn_up_exps.ptr,
+                    scratch.x_q8_1,
+                    scratch.expert_ids,
+                    scratch.sort_sorted_pair_idx_padded,
+                    scratch.sort_padded_offsets,
+                    scratch.gate_out_f32,
+                    scratch.up_out_f32,
+                    flambeau_ops::MoeShape {
+                        n_rows: inter,
+                        n_tokens: prompt_len,
+                        top_k,
+                        n_sb_per_row: n_sb_per_row_hidden_kk,
+                        n_experts,
+                        padded_total_upper_bound: padded_total_ub,
+                    },
+                )
+                .context("prefill indexed_moe gate+up q5_k tile8")?,
             other => bail!(
-                "MoeExperts prefill: gate_dt {other:?} not on the tile8 surface (Q4_K / Q3_K / Q4_0 / Q8_0 / IQ family)"
+                "MoeExperts prefill: gate_dt {other:?} not on the tile8 surface (Q4_K / Q3_K / Q5_K / Q4_0 / Q8_0 / IQ family)"
             ),
         }
         let _ = up_dt;
