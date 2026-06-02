@@ -90,7 +90,7 @@ def boot():
     env["FLAMBEAU_CTX_CAP"] = str(CTX)
     env["FLAMBEAU_GPU_SAMPLER"] = "1"
     env["FLAMBEAU_BATCHED_DECODE"] = "1"
-    env["FLAMBEAU_PREFILL_UBATCH"] = "512"
+    env["FLAMBEAU_PREFILL_UBATCH"] = os.environ.get("BENCH_PREFILL_UBATCH", "512")
     env["RUST_LOG"] = "info"
     args = [str(BIN), "serve",
             "--model", MODEL,
@@ -100,6 +100,8 @@ def boot():
             "--port", str(port)]
     if MESH != "pp":
         args.extend(["--pp-size", str(PP), "--tp-size", str(TP)])
+    if "BENCH_CHUNK_TOKENS" in os.environ:
+        args.extend(["--prefill-chunk-tokens", os.environ["BENCH_CHUNK_TOKENS"]])
     log = open(LOG, "w")
     proc = subprocess.Popen(args, env=env, stdout=log, stderr=subprocess.STDOUT,
                             preexec_fn=os.setsid)
