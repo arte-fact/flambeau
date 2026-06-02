@@ -265,9 +265,9 @@ notes   = "Q2_K MMVQ r2 multi-row (64 threads wave64, 2 rows/block). Half-warp D
 dtype   = "Q3_K"
 dtype_q = "Q8_1"
 shape   = { m = "1..127", k = "any", n = "any" }
-impl    = "qmatmul_q3_K_mmvq_nw1_r2_gfx906"
-cert    = "certs/hip/gfx906/qmatmul_q3_K_mmvq_nw1_r2_gfx906.json"
-notes   = "Q3_K MMVQ r2 multi-row (64 threads wave64, 2 rows/block). Half-warp DPP reduce. Reuses the byte-wise scales unpack (Q3_K is 110 B, scales[] misaligned for every other super-block)."
+impl    = "qmatmul_q3_K_mmvq_dp4a_gfx906"
+cert    = "certs/hip/gfx906/qmatmul_q3_K_mmvq_dp4a_gfx906.json"
+notes   = "Phase 3b — DP4A 256-thread Q3_K MMVQ port of llama.cpp vec_dot_q3_K_q8_1_impl_mmvq. 64 threads per super-block, BLOCKS_PER_ITER=4. Two DP4A calls per element-group (one for low 2 bits, one for hmask high bit) — sidesteps the int32 borrow that would corrupt a direct __vsubss4 on gfx906. Replaces nw1_r2 which did per-element scalar FP32 multiplies (51.7 % of UD-Q3_K_XL wall at 670 us/call)."
 
 # ----- QMatMul MMQ (prefill / large-M path) ---------------------------------
 #
