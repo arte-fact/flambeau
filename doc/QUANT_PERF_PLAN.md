@@ -371,18 +371,37 @@ covers single-chunk correctness only; the head_dim=512 two-wave
 kernels are correct in isolation. The chunked-prefill cross-chunk
 behavior was never separately certified.
 
-**Action items (Phase 4 Slice 3, deferred to its own slice)**:
-1. Try `FLAMBEAU_PREFILL_UBATCH=2048` to fit prompt 1500 in one chunk;
-   if coherent, confirms the chunked-prefill cross-chunk hypothesis.
-2. Repro on Qwen3.6-style gemma quant (no V-unit-norm) to isolate the
-   V-unit-norm-into-Q8 split path.
-3. Add a Q8 KV snapshot tool that dequantizes the cache at chunk
-   boundaries (write_pos = 511, 1023, 1535) and spot-checks for
-   plausibility.
+**Tighter bisect (Slice 3b)** localised the cliff precisely:
 
-**Recommendation**: F16 KV is the safe default on gemma at prompt > ~1000
-until the cross-chunk Q8 regression is fixed. Q8 KV remains correct for
-short-prompt single-chunk decode on gemma.
+  actual pt 1008 (target 1100): coherent
+  actual pt 1062 (target 1150): broken  ← cliff
+  actual pt 1116 (target 1200): broken
+
+The boundary is prompt_tokens crossing **1024**, which is exactly
+`gemma4.attention.sliding_window` from the GGUF metadata for
+gemma-4-26B-A4B. (Earlier memory recorded window=512 by analogy with
+gemma4-E4B; 26B-A4B actually ships window=1024.) Bug therefore lives
+in `attn_prefill_q8_kv`'s SWA-mask branch (`t_start > 0`), which is
+activated for the first time once any q_token has `qpos >= 1024`.
+F16 prefill at the same SWA boundary works (Q8 in isolation, not the
+mask math). Three earlier hypotheses now all ruled out empirically:
+chunked-prefill, Q8 splitk decode, SWA cache-pointer-offset lever.
+
+**Action items (Slice 3c, real kernel fix)**:
+1. Add a parity unit test for `attn_prefill_q8_kv` at n_q_tokens
+   crossing the SWA boundary (1023, 1024, 1025) vs F16 reference;
+   expect the failure to reproduce in isolation.
+2. Inspect `attention_prefill_q8_kv.cu` inner loop for divergence
+   when t_start > 0: per-block `__shfl_xor` reductions assume all
+   lanes participate; cross-wave LDS rendezvous at head_dim=512
+   syncs across 2 waves on `score_parts[2]` and must include the
+   SWA-masked iterations or skip them uniformly across both waves.
+3. Compare against `attention_decode_q8_kv.cu` (which DOES work for
+   prompts within the cache window) to spot the divergence.
+
+**Recommendation**: F16 KV is the safe default on gemma at prompt > 1024
+until the kernel fix lands. Q8 KV remains correct for prompts within
+the SWA window.
 
 ### Phase 4 takeaway
 
