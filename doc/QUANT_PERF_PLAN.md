@@ -156,27 +156,63 @@ and Q6_K does per-element scalar FP32 multiplies. MoE has dp4a
 variants for all of them (`indexed_moe_mmvq_<quant>_r2_dp4a`) —
 copy-paste-edit templates.
 
-### Kernel port plan
+### Full dp4a coverage inventory
 
-| Slice | Quant        | Wall share (UD-Q3_K_XL) | Expected end-to-end lift |
-|-------|--------------|------------------------:|-------------------------:|
-| 3a    | Q4_K dp4a    | 26.6 %                  | 2.2× on UD-Q4_K_XL, 1.4× on UD-Q3_K_XL |
-| 3b    | Q3_K dp4a    | 51.7 %                  | 2.5× on UD-Q3_K_XL (composed with 3a) |
-| 3c    | IQ4_XS dp4a  | 13.9 %                  | 1.2× on UD-Q3_K_XL, lifts pure IQ4_XS |
-| 3d    | IQ4_NL dp4a  | (no UD share — pure-IQ4) | 1.5× on IQ4_NL models |
-| 3e    | IQ3_S / IQ3_XXS dp4a | 3.0 %           | unlocks IQ3 quants for ≤ 14 GB VRAM users |
-| 3f    | IQ2_S/XS/XXS dp4a    | n/a            | unlocks IQ2 quants for ≤ 10 GB VRAM users |
-| 3g    | IQ1_S/M dp4a         | n/a            | low priority (extreme-low-bit niche) |
+**Already shipped:**
 
-Per slice:
-1. Mirror MoE `indexed_moe_mmvq_<quant>_r2_dp4a.cu` → dense
-   `mmvq_<quant>_r2_dp4a.cu`. Strip expert-index arg, identical
-   inner-product body.
+| Quant   | Status                                                          |
+|---------|-----------------------------------------------------------------|
+| Q4_0    | runtime intercept (`mmvq_q4_0_dp4a` via Recipe::from_impl_id)   |
+| Q4_1    | runtime intercept                                               |
+| Q5_K    | dense `mmvq_q5_k_dp4a.cu` (V1.6)                                |
+| Q6_K    | dense `mmvq_q6_k_dp4a.cu` (V2.3.d.1)                            |
+| Q8_0    | runtime intercept (`mmvq_q8_0_dp4a_vdr2`)                       |
+
+**Missing (port targets, 11 dense kernels):**
+
+| Slice | Quant    | Template source                                       | UD wall share              | Difficulty | Affected models                       |
+|-------|----------|-------------------------------------------------------|----------------------------|------------|---------------------------------------|
+| 3a    | **Q4_K** | MoE `indexed_moe_mmvq_q4_k_r2_dp4a.cu` ✓              | 72.6 % (Q4_XL), 26.6 % (Q3_XL) | easy (copy MoE) | **most-used quant**: Q4_K_M/S, UD-Q4_K_XL, every Q4_K base in qwen/llama/mistral |
+| 3b    | **Q3_K** | from scratch — no MoE template                        | 51.7 % (Q3_XL)             | medium (3-bit + 6 subscales) | Q3_K_M/S, UD-Q3_K_XL, UD-Q2_K_XL (Q2 contains Q3 sub-blocks) |
+| 3c    | IQ4_XS   | from scratch — port llama.cpp `vec_dot_iq4_xs_q8_1`   | 13.9 % (Q3_XL)             | medium (LUT pre-apply) | Unsloth IQ4_XS (every model), some UD-Q4_K_XL share |
+| 3d    | IQ4_NL   | from scratch — same shape as IQ4_XS minus sub-block scale | n/a in Phase 1         | medium      | Unsloth IQ4_NL (every model)          |
+| 3e    | Q2_K     | from scratch — 2-bit blocks + 4-bit min scales        | n/a in Phase 1             | medium      | UD-Q2_K_XL, Q2_K (very-low-VRAM)      |
+| 3f    | IQ3_S    | from scratch — 8-elem signed codebook lookup          | 3.0 % (Q3_XL)              | hard (codebook in constant mem) | Unsloth IQ3_S                         |
+| 3g    | IQ3_XXS  | from scratch — 8-elem unsigned codebook + sign bits   | n/a in Phase 1             | hard        | UD-IQ3_XXS, Unsloth IQ3_XXS           |
+| 3h    | IQ2_S    | from scratch — 8-elem 2-bit codebook                  | n/a in Phase 1             | hard        | Unsloth IQ2_S                         |
+| 3i    | IQ2_XS   | from scratch — 8-elem 2-bit codebook                  | n/a in Phase 1             | hard        | Unsloth IQ2_XS                        |
+| 3j    | IQ2_XXS  | from scratch — 8-elem 2-bit codebook + signs          | n/a in Phase 1             | hard        | UD-IQ2_XXS, UD-IQ2_M                  |
+| 3k    | IQ1_S    | from scratch — 1-bit + 3-bit scale                    | n/a in Phase 1             | hard        | Unsloth IQ1_S (extreme low-VRAM)      |
+| 3l    | IQ1_M    | from scratch — IQ1_S variant                          | n/a in Phase 1             | hard        | Unsloth IQ1_M                         |
+
+**Out of scope:** Q5_0, Q5_1 — legacy format, almost no model in the
+wild ships these as the headline quant. Leave on scalar until a
+real consumer surfaces.
+
+### Difficulty rubric
+
+- **easy** (copy MoE template): 1-2 hours per slice. Strip expert
+  index, identical dp4a + 1-FMA-per-superblock body. Only Q4_K.
+- **medium** (port llama.cpp `vec_dot_<quant>_q8_1_impl`): 3-5 hours
+  per slice. Read llama.cpp reference (`ggml-cuda/vecdotq.cuh`),
+  match the per-block dequant pattern, adapt to flambeau's 256-thread
+  / wave64 launch shape, sweep cert. Q3_K, IQ4_*, Q2_K.
+- **hard** (codebook + signs in constant memory): full session per
+  slice. IQ-quants 2/3/1 use 8-element signed codebooks loaded into
+  constant memory at module init, plus per-block sign bits packed
+  with the quant. The dp4a path requires codebook-aware Q→int8
+  pre-expansion in LDS, then standard dp4a. Pattern shared across
+  IQ3_S, IQ3_XXS, IQ2_*, IQ1_* — pay the cost once on IQ3_S, then
+  the rest inherit the helper.
+
+### Per-slice steps
+
+1. Mirror or write `crates/kernels-hip/src/kernels/mmvq_<quant>_r2_dp4a.cu`.
 2. Register the impl_id in `crates/backend-hip/src/impls.rs`.
 3. Swap the gfx906.toml dispatch row for the new impl.
 4. Run `flambeau sweep --arch gfx906 --impl <new>` against the
    existing 15-shape grid.
-5. Re-bench the affected UD quant on Qwen3.6-27B pp2tp2 to
+5. Re-bench the affected quant on Qwen3.6-27B pp2tp2 to
    measure end-to-end lift.
 6. Commit + cert in one go (rule: "commit when code actually ships").
 
@@ -239,20 +275,25 @@ Output: a markdown table users can read in 10 seconds:
 2. ~~Phase 3 diagnosis~~ ✅ DONE — rocprofv3 traces identify a
    family-wide dp4a gap across every K-quant + IQ-quant except
    Q5_K, Q6_K, Q8_0.
-3. **Phase 3a: Q4_K dp4a port** — next slice. Single kernel; lifts
-   both UD-Q4_K_XL (2.2×) and UD-Q3_K_XL (1.4× partial).
-4. Phase 3b: Q3_K dp4a port — composed with 3a, lifts UD-Q3_K_XL ~3×.
-5. Phase 3c-3g: IQ4_XS, IQ4_NL, IQ3_*, IQ2_*, IQ1_* — same template,
-   one per session. Priority by how many real models use the quant.
-6. Phase 2: download missing K-quant variants once Phase 3 lands —
+3. **Phase 3a: Q4_K dp4a port** — easy (MoE template). Lifts
+   UD-Q4_K_XL 2.2× + UD-Q3_K_XL 1.4× + every Q4_K_M base model.
+4. **Phase 3b: Q3_K dp4a port** — medium (no template, port from
+   llama.cpp). Composed with 3a, lifts UD-Q3_K_XL ~3×, UD-Q2_K_XL.
+5. **Phase 3c-e (medium): IQ4_XS, IQ4_NL, Q2_K.** Each 1 session.
+6. **Phase 3f-l (hard): IQ3_S, IQ3_XXS, IQ2_S/XS/XXS, IQ1_S/M.** Pay
+   the codebook-in-constant-memory cost once on IQ3_S; the rest are
+   ~half a session each inheriting the helper.
+7. Phase 2: download missing K-quant variants once 3a-3b land —
    they'll inherit the dp4a kernels and won't need a separate
    diagnosis pass.
-7. Phase 4: KV-quant pairings re-validated after Phase 3a-3b (decode
+8. Phase 4: KV-quant pairings re-validated after Phase 3a-3b (decode
    wall composition changes once K-quant kernels stop dominating).
-8. Phase 5: decision table — final cert, plan close.
+9. Phase 5: decision table — final cert, plan close.
 
-Total remaining surface: 5-8 sessions, dominated by Phase 3a-3g
-kernel ports (each ~1 session). Phase 4 and 5 are 1 session each.
+Total remaining surface: ~12-15 sessions if all 11 quant ports land
+(realistic: 3a-3e are the productive core, 3f-l are the IQ tail
+landed only as user demand surfaces). Phase 4 and 5 are 1 session
+each.
 
 ## Acceptance criteria
 
