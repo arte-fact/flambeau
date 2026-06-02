@@ -130,6 +130,11 @@ pub enum Dtype {
     Iq3Xxs,
     /// native IQ3_XXS r2 multi-row MMVQ.
     Iq3XxsR2,
+    /// DP4A IQ3_XXS MMVQ (Phase 3g — port of llama.cpp's
+    /// `vec_dot_iq3_xxs_q8_1`). Uses IQ3XXS_GRID + unpack_ksigns
+    /// (popcount-parity 8th-bit extension) + the apply_signs helper
+    /// from IQ3_S.
+    Iq3XxsDp4a,
     /// native IQ3_S single-row MMVQ.
     Iq3S,
     /// native IQ3_S r2 multi-row MMVQ.
@@ -167,7 +172,7 @@ impl Dtype {
             Dtype::Q4_1 | Dtype::Q4_1R2 | Dtype::Q4_1R2DP4A | Dtype::Q4_1T128 => "Q4_1",
             Dtype::Iq4Nl | Dtype::Iq4NlR2 | Dtype::Iq4NlDp4a => "IQ4_NL",
             Dtype::Iq4Xs | Dtype::Iq4XsR2 | Dtype::Iq4XsDp4a => "IQ4_XS",
-            Dtype::Iq3Xxs | Dtype::Iq3XxsR2 => "IQ3_XXS",
+            Dtype::Iq3Xxs | Dtype::Iq3XxsR2 | Dtype::Iq3XxsDp4a => "IQ3_XXS",
             Dtype::Iq3S | Dtype::Iq3SR2 | Dtype::Iq3SDp4a => "IQ3_S",
             Dtype::Iq2Xxs | Dtype::Iq2XxsR2 => "IQ2_XXS",
             Dtype::Iq2Xs | Dtype::Iq2XsR2 => "IQ2_XS",
@@ -189,7 +194,7 @@ impl Dtype {
             Dtype::Q4_1 | Dtype::Q4_1R2 | Dtype::Q4_1R2DP4A | Dtype::Q4_1T128 => GgmlDType::Q4_1,
             Dtype::Iq4Nl | Dtype::Iq4NlR2 | Dtype::Iq4NlDp4a => GgmlDType::Iq4Nl,
             Dtype::Iq4Xs | Dtype::Iq4XsR2 | Dtype::Iq4XsDp4a => GgmlDType::Iq4Xs,
-            Dtype::Iq3Xxs | Dtype::Iq3XxsR2 => GgmlDType::Iq3Xxs,
+            Dtype::Iq3Xxs | Dtype::Iq3XxsR2 | Dtype::Iq3XxsDp4a => GgmlDType::Iq3Xxs,
             Dtype::Iq3S | Dtype::Iq3SR2 | Dtype::Iq3SDp4a => GgmlDType::Iq3S,
             Dtype::Iq2Xxs | Dtype::Iq2XxsR2 => GgmlDType::Iq2Xxs,
             Dtype::Iq2Xs | Dtype::Iq2XsR2 => GgmlDType::Iq2Xs,
@@ -232,6 +237,7 @@ impl Dtype {
             Dtype::Iq4XsDp4a => "qmatmul_iq4_xs_mmvq_dp4a_gfx906",
             Dtype::Iq3Xxs => "qmatmul_iq3_xxs_mmvq_single_row_gfx906",
             Dtype::Iq3XxsR2 => "qmatmul_iq3_xxs_mmvq_nw1_r2_gfx906",
+            Dtype::Iq3XxsDp4a => "qmatmul_iq3_xxs_mmvq_dp4a_gfx906",
             Dtype::Iq3S => "qmatmul_iq3_s_mmvq_single_row_gfx906",
             Dtype::Iq3SR2 => "qmatmul_iq3_s_mmvq_nw1_r2_gfx906",
             Dtype::Iq3SDp4a => "qmatmul_iq3_s_mmvq_dp4a_gfx906",
@@ -281,6 +287,7 @@ impl Dtype {
             Dtype::Iq4XsDp4a => "mmvq_iq4_xs_dp4a",
             Dtype::Iq3Xxs => "mmvq_iq3_xxs",
             Dtype::Iq3XxsR2 => "mmvq_iq3_xxs_r2",
+            Dtype::Iq3XxsDp4a => "mmvq_iq3_xxs_dp4a",
             Dtype::Iq3S => "mmvq_iq3_s",
             Dtype::Iq3SR2 => "mmvq_iq3_s_r2",
             Dtype::Iq3SDp4a => "mmvq_iq3_s_dp4a",
@@ -330,6 +337,7 @@ impl Dtype {
             Dtype::Iq4XsDp4a => "flambeau_mmvq_iq4_xs_dp4a_q8_1",
             Dtype::Iq3Xxs => "flambeau_mmvq_iq3_xxs_q8_1",
             Dtype::Iq3XxsR2 => "flambeau_mmvq_iq3_xxs_r2_q8_1",
+            Dtype::Iq3XxsDp4a => "flambeau_mmvq_iq3_xxs_dp4a_q8_1",
             Dtype::Iq3S => "flambeau_mmvq_iq3_s_q8_1",
             Dtype::Iq3SR2 => "flambeau_mmvq_iq3_s_r2_q8_1",
             Dtype::Iq3SDp4a => "flambeau_mmvq_iq3_s_dp4a_q8_1",
@@ -360,7 +368,7 @@ impl Dtype {
             }
             Dtype::Iq4Nl | Dtype::Iq4NlR2 | Dtype::Iq4NlDp4a => std::mem::size_of::<BlockIq4Nl>(),
             Dtype::Iq4Xs | Dtype::Iq4XsR2 | Dtype::Iq4XsDp4a => std::mem::size_of::<BlockIq4Xs>(),
-            Dtype::Iq3Xxs | Dtype::Iq3XxsR2 => std::mem::size_of::<BlockIq3Xxs>(),
+            Dtype::Iq3Xxs | Dtype::Iq3XxsR2 | Dtype::Iq3XxsDp4a => std::mem::size_of::<BlockIq3Xxs>(),
             Dtype::Iq3S | Dtype::Iq3SR2 | Dtype::Iq3SDp4a => std::mem::size_of::<BlockIq3S>(),
             Dtype::Iq2Xxs | Dtype::Iq2XxsR2 => std::mem::size_of::<BlockIq2Xxs>(),
             Dtype::Iq2Xs | Dtype::Iq2XsR2 => std::mem::size_of::<BlockIq2Xs>(),
@@ -376,7 +384,7 @@ impl Dtype {
 
     fn launch_threads(self) -> u32 {
         match self {
-            Dtype::Q8_0 | Dtype::Q4_1 | Dtype::Q4_1R2DP4A | Dtype::Q8K | Dtype::Q5KDp4a | Dtype::Q3KDp4a | Dtype::Q2KDp4a | Dtype::Iq4XsDp4a | Dtype::Iq4NlDp4a | Dtype::Iq3SDp4a => 256,
+            Dtype::Q8_0 | Dtype::Q4_1 | Dtype::Q4_1R2DP4A | Dtype::Q8K | Dtype::Q5KDp4a | Dtype::Q3KDp4a | Dtype::Q2KDp4a | Dtype::Iq4XsDp4a | Dtype::Iq4NlDp4a | Dtype::Iq3SDp4a | Dtype::Iq3XxsDp4a => 256,
             Dtype::Q4_1T128 | Dtype::Q8_0T128 | Dtype::Q8_0T128VDR2 => 128,
             _ => 64,
         }
@@ -738,7 +746,7 @@ fn tame_scales(dtype: Dtype, raw: Vec<u8>) -> Vec<u8> {
                 let d = f16::from_f32((block[0] as f32 / 255.0) * 0.02 + 0.002);
                 block[0..2].copy_from_slice(&d.to_bits().to_le_bytes());
             }
-            Dtype::Iq3Xxs | Dtype::Iq3XxsR2 => {
+            Dtype::Iq3Xxs | Dtype::Iq3XxsR2 | Dtype::Iq3XxsDp4a => {
                 // BlockIq3Xxs: d (f16, 0..2) + qs[96]. Grid magnitudes
                 // ≤ 0x3e (62); scale factor `(0.5 + (aux32>>28))*0.5` ≤ 7.75.
                 // Cap d very tight to bound F32 accumulation at k=15360.
