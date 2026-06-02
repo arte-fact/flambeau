@@ -84,6 +84,9 @@ pub mod sweep_attention;
 pub mod sweep_attention_prefill;
 
 #[cfg(feature = "hip")]
+pub mod sweep_attention_prefill_q8_kv;
+
+#[cfg(feature = "hip")]
 pub mod sweep_attention_q8_kv;
 
 #[cfg(feature = "hip")]
