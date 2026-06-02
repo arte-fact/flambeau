@@ -242,6 +242,53 @@ prefill m ≥ 128 the turbo kernel beats dp4a. UD-Q6_K_XL prefill TTFT
 is ~13 s at ctx 4 k — turbo port plausibly halves that. Defer until
 3a-3c land and prefill becomes a measurable share of the wall.
 
+## Phase 3.5 — MoE-side dp4a parity
+
+Phase 3 fixed only the **dense** dispatch path. MoE expert matmuls
+go through a separate `[[indexed_moe_mmvq]]` dispatch row family;
+the Phase 3a kernel (`indexed_moe_mmvq_q4_k_r2_dp4a`) actually
+predates this plan and was the *template* the dense Phase 3a was
+copied from. But every K-quant / IQ-quant beyond Q4_K is still on
+scalar FP32 multiplies in the MoE path — the same gap the dense
+sweep closed.
+
+### MoE dp4a coverage today (pre-Phase-3.5)
+
+Already shipped (pre-existing):
+- Q4_K: `indexed_moe_mmvq_q4_k_r2_dp4a`, `_r4_dp4a`, `_gate_up_r{2,4,8}_dp4a`
+- Q4_0: `indexed_moe_mmvq_q4_0_gate_up_dp4a`
+- Q8_0: `indexed_moe_mmvq_q8_0_gate_up_dp4a`
+
+Missing (port targets):
+
+| Slice | Quant | Affected on-disk model |
+|-------|-------|------------------------|
+| **M-a** | **Q3_K MoE** | Qwen3.6-35B-A3B-Q3_K_S (on disk) |
+| M-b | Q8_K MoE | Qwen3.6-35B-A3B-UD-Q8_K_XL (on disk) |
+| M-c | Q5_K MoE | any UD-Q5_K_S MoE |
+| M-d | Q6_K MoE | any UD-Q6_K MoE |
+| M-e | Q2_K MoE | UD-Q2_K_S MoE variants |
+| M-f | IQ4_XS MoE | Unsloth IQ4_XS MoE |
+| M-g | IQ4_NL MoE | Unsloth IQ4_NL MoE |
+| M-h | IQ3_S / IQ3_XXS MoE | low-bit IQ3 MoE |
+| M-i | IQ2_S/XS/XXS MoE | extreme-low-bit MoE |
+| M-j | IQ1_S/M MoE | extreme-low-bit MoE |
+
+Per slice the port mirrors the dense Phase 3 work: copy the dense
+kernel body, add an `expert_ids` indirection on the weight pointer
+(see `indexed_moe_mmvq_q4_k_r2_dp4a.cu` for the template), register
+impl_id, swap the `[[indexed_moe_mmvq]]` dispatch row, sweep cert,
+re-bench. Roughly 1 session per slice for Q-family, half a session
+per slice for IQ-family once the helpers from dense Phase 3f-3l are
+in place.
+
+**Order of priority by on-disk consumer:**
+1. **M-a Q3_K MoE** — Qwen3.6-35B-A3B-Q3_K_S already downloaded.
+2. M-b Q8_K MoE — UD-Q8_K_XL on disk.
+3. M-c → M-j — on demand as MoE consumers surface.
+
+gemma4-26B-A4B's MoE layers use Q4_K which is already covered.
+
 ## Phase 4 — KV-quant pairings
 
 Today `--kv q8` is wired but only validated end-to-end on a few
@@ -286,23 +333,26 @@ Output: a markdown table users can read in 10 seconds:
 2. ~~Phase 3 diagnosis~~ ✅ DONE — rocprofv3 traces identify a
    family-wide dp4a gap across every K-quant + IQ-quant except
    Q5_K, Q6_K, Q8_0.
-3. ~~Phase 3a: Q4_K dp4a~~ ✅ — 1.42× UD-Q4_K_XL, Q5_K parity per row.
-4. ~~Phase 3b: Q3_K dp4a~~ ✅ — 1.58× UD-Q3_K_XL (cum).
-5. ~~Phase 3c: IQ4_XS dp4a~~ ✅ — 1.87× UD-Q3_K_XL (cum), 92 % wall covered.
-6. ~~Phase 3d: IQ4_NL dp4a~~ ✅ — sweep-only, no on-disk consumer.
-7. **Phase 3e: Q2_K dp4a port** — next slice. Medium difficulty,
-   no template. Lifts UD-Q2_K_XL whenever it's pulled in.
-8. Phase 3f–l (hard): IQ3_S codebook helper → IQ3_XXS / IQ2_* / IQ1_*
-   share the helper. One full session for 3f; ~half each for the rest.
-9. Phase 2: download missing K-quant variants once 3e lands — they
-   inherit the kernels and don't need a separate diagnosis pass.
-10. Phase 4: KV-quant pairings re-validated after Phase 3
-    (decode wall composition changed; the floor analysis matters now).
-11. Phase 5: decision table — final cert, plan close.
+3. ~~Phase 3a–3l: dense dp4a ports for all 12 missing quants~~ ✅
+   shipped. Cumulative UD-Q3_K_XL 9.54 → 17.80 tps (1.87×, 92 %
+   wall covered). All sweep-green; smaller-share kernels carry no
+   bench but ship correctness-OK.
+4. ~~Lever 1 r2 multi-row on Q4_K, Q3_K, Q2_K~~ ✅ — Q3_K +6.6 %,
+   Q2_K +2.3 % on top of the single-row dp4a stack.
+5. **Phase 3.5 M-a: Q3_K MoE dp4a port** — next slice. Qwen3.6-35B-A3B
+   -Q3_K_S is the on-disk consumer; biggest immediate impact for MoE.
+6. Phase 3.5 M-b: Q8_K MoE dp4a port — UD-Q8_K_XL on disk.
+7. Phase 3.5 M-c–M-j — additional MoE dp4a slices on demand.
+8. Phase 2: download missing K-quant variants once MoE slices land
+   — they inherit the kernels and don't need a separate diagnosis pass.
+9. Phase 4: KV-quant pairings re-validated after Phase 3
+   (decode wall composition changed; the floor analysis matters now).
+10. Phase 5: decision table — final cert, plan close.
 
-Total remaining surface: ~8-10 sessions if all IQ-tail ports land
-(realistic: 3e is the productive close of the medium tier, 3f–l only
-land as user demand surfaces). Phase 4 and 5 are 1 session each.
+Total remaining surface: 2–4 sessions for M-a + M-b (the on-disk-
+consumer slices); M-c–M-j land as MoE consumers surface. Lever 2/3
+on dense codebook kernels are open at any time. Phase 4 and 5 are
+1 session each.
 
 ## Acceptance criteria
 
