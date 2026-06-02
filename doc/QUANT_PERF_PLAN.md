@@ -94,47 +94,106 @@ same fraction of its bandwidth ceiling, modulo the dequant-path cost.
 
 ---
 
-## Phase 1 — Bench matrix (sweep, no kernel work)
+## Phase 1 — Bench matrix (sweep, no kernel work) — ✅ DONE 2026-06-01
 
-End-to-end decode tps for the full quant × KV × topo product:
+Disk-resident quants only (Q4_K_M-mtp excluded — MTP head not loaded
+by qwen35 arch; replace with non-MTP Q4_K_M in Phase 2).
 
 ```
-quants:  Q4_0, Q4_K_M, Q5_K_M, Q6_K, Q8_0
+quants:  Q4_0, Q4_1, Q8_0
          + UD-Q3_K_XL, UD-Q4_K_XL, UD-Q6_K_XL, UD-Q8_K_XL
 kv:      f16, q8
 ctx:     512, 4k
-topo:    pp2tp2 + 1×MI50 (where it fits)
+topo:    pp2tp2
 ```
 
-That's 9 quants × 2 KV × 2 ctx × 2 topo = 72 cells. Single-stream
-greedy decode, 64 tg, 3-rep median. Bench script:
-`scripts/bench/quant_perf_matrix.py`. Cert at
-`certs/perf/quant_matrix_qwen36_27b_2026_06_XX.md`.
+28 cells, all green. Cert at
+`certs/perf/quant_matrix_qwen36_27b_2026_06_01.{json,md}`. Bench
+script: `scripts/bench/quant_perf_matrix.py`. 1×MI50 deferred (these
+are 16 GB cards, not 32 GB — most quants don't fit single-GPU at
+ctx_cap ≥ 4 k).
 
-**Output.** Two tables:
-1. tps per (quant, KV, ctx, topo) — raw measurement
-2. % of per-quant bandwidth ceiling — normalised; flags outliers
+**Outliers (< 0.7× Q4_0 fraction):**
 
-Outliers are quants achieving < 0.7× the Q4_0 ceiling fraction.
+| Quant       | ctx 4k F16 tps | vs Q4_0 | % HBM ceiling |
+|-------------|---------------:|--------:|--------------:|
+| UD-Q3_K_XL  |           9.54 |   0.29× |          4 %  |
+| UD-Q4_K_XL  |          13.72 |   0.42× |          8 %  |
 
-## Phase 2 — Fetch missing quants
+Q8 KV pattern (uniform 0.80-0.93× of F16 across all quants at ctx
+4 k) is consistent with the gemma4-31B-Q4_0 finding — Q8 KV's
+per-call floor dominates below ctx ≈ 14 k. Use F16 KV for this
+ctx range; Q8 KV pays off above.
 
-Q3_K_S/M, Q4_K_S, Q5_K_S, Q6_K (non-UD), IQ4_NL, IQ4_XS, UD-Q2_K_XL,
-UD-Q5_K_XL, UD-IQ2_M, UD-IQ3_XXS. Extend Phase 1 matrix.
+## Phase 2 — Fetch missing quants (deferred)
 
-## Phase 3 — Per-outlier kernel work
+Q3_K_S/M, Q4_K_S (no MTP), Q5_K_S/M, Q6_K (non-UD), IQ4_NL, IQ4_XS,
+UD-Q2_K_XL, UD-Q5_K_XL, UD-IQ2_M, UD-IQ3_XXS. ~120 GB download.
+**Deferred** — Phase 3 already has clear direction from rocprofv3
+traces; the missing quants would all hit the same dp4a gap that
+Phase 3 closes. Re-run the matrix after Phase 3 lands.
 
-For each quant flagged in Phase 1:
-- Profile decode kernel with rocprofv3.
-- Compare PMC against Q4_K (the best-tuned K-quant) — VGPR, waves/EU,
-  MemBusy/Stall, VALUBusy.
-- If the gap is the dequant arithmetic (LUT lookups for IQ-quants,
-  Q5_K six-bit sub-block decode), port the multi-row DPP pattern
-  that Q4_K uses (`mmvq_q*_K_nw1_r{2,4}` shape).
-- If the gap is bandwidth-bound (Q6_K, Q8_0), look at MMQ-turbo /
-  4-warp LDS-tiled at the m-shape that decode hits.
-- Q5_K and Q6_K have only 2 dispatch rows each on gfx906 today —
-  prime candidates for the multi-row treatment Q4_K got in V1.3.
+## Phase 3 — Dense K-quant + IQ-quant dp4a port — IN PROGRESS
+
+### Diagnosis (✅ DONE 2026-06-02)
+
+rocprofv3 kernel-trace harness:
+`scripts/profile/trace_ud_q{3,4}_k_xl.sh`. Single-rank pp2 trace
+under `--kernel-trace`, 1 prefill + 3 decode warm steps, dump CSV.
+Findings filed at `[[dense-q4-k-r2-scalar-fp32]]`:
+
+| Trace            | Top kernel(s) (% wall)                              |
+|------------------|-----------------------------------------------------|
+| UD-Q4_K_XL pp2   | mmvq_q4_k_r2 72.6 % @ 384 us/call                   |
+| UD-Q3_K_XL pp2   | mmvq_q3_k_r2 51.7 % + mmvq_q4_k_r2 26.6 % + mmvq_iq4_xs_r2 13.9 % = **95.2 %** scalar-FP32 r2 |
+
+Reference: `mmvq_q5_k_dp4a` 100 us/call, `mmvq_q6_k_dp4a` 60 us/call
+on the same model on the same GPU. Q5_K and Q6_K got the dp4a
+treatment in V1.6 / V2.3.d.1; the rest of the family didn't.
+
+**Family-wide gap.** Every dense `mmvq_<quant>_r2_q8_1` except Q5_K
+and Q6_K does per-element scalar FP32 multiplies. MoE has dp4a
+variants for all of them (`indexed_moe_mmvq_<quant>_r2_dp4a`) —
+copy-paste-edit templates.
+
+### Kernel port plan
+
+| Slice | Quant        | Wall share (UD-Q3_K_XL) | Expected end-to-end lift |
+|-------|--------------|------------------------:|-------------------------:|
+| 3a    | Q4_K dp4a    | 26.6 %                  | 2.2× on UD-Q4_K_XL, 1.4× on UD-Q3_K_XL |
+| 3b    | Q3_K dp4a    | 51.7 %                  | 2.5× on UD-Q3_K_XL (composed with 3a) |
+| 3c    | IQ4_XS dp4a  | 13.9 %                  | 1.2× on UD-Q3_K_XL, lifts pure IQ4_XS |
+| 3d    | IQ4_NL dp4a  | (no UD share — pure-IQ4) | 1.5× on IQ4_NL models |
+| 3e    | IQ3_S / IQ3_XXS dp4a | 3.0 %           | unlocks IQ3 quants for ≤ 14 GB VRAM users |
+| 3f    | IQ2_S/XS/XXS dp4a    | n/a            | unlocks IQ2 quants for ≤ 10 GB VRAM users |
+| 3g    | IQ1_S/M dp4a         | n/a            | low priority (extreme-low-bit niche) |
+
+Per slice:
+1. Mirror MoE `indexed_moe_mmvq_<quant>_r2_dp4a.cu` → dense
+   `mmvq_<quant>_r2_dp4a.cu`. Strip expert-index arg, identical
+   inner-product body.
+2. Register the impl_id in `crates/backend-hip/src/impls.rs`.
+3. Swap the gfx906.toml dispatch row for the new impl.
+4. Run `flambeau sweep --arch gfx906 --impl <new>` against the
+   existing 15-shape grid.
+5. Re-bench the affected UD quant on Qwen3.6-27B pp2tp2 to
+   measure end-to-end lift.
+6. Commit + cert in one go (rule: "commit when code actually ships").
+
+### Acceptance per slice
+
+- Sweep green (matches the kernel's existing cert dtype).
+- End-to-end re-bench on Qwen3.6-27B pp2tp2 hits **≥ 1.5×** the
+  pre-port number. Below that, leave the kernel behind
+  `cfg(unverified)` with a one-line diagnosis.
+- No regression on any *other* quant in the Phase 1 matrix.
+
+### Q5_K / Q6_K MMQ-turbo upgrade (optional 3h)
+
+Q5_K and Q6_K dp4a are already shipped but MMQ-turbo is not. At
+prefill m ≥ 128 the turbo kernel beats dp4a. UD-Q6_K_XL prefill TTFT
+is ~13 s at ctx 4 k — turbo port plausibly halves that. Defer until
+3a-3c land and prefill becomes a measurable share of the wall.
 
 ## Phase 4 — KV-quant pairings
 
@@ -176,19 +235,24 @@ Output: a markdown table users can read in 10 seconds:
 
 ## Order of operations
 
-1. Phase 1 with quants already on disk (Q4_0, Q4_K_M, Q8_0,
-   UD-{Q3,Q4,Q6,Q8}_K_XL) — covers the 5 most-used cells with zero
-   download bandwidth. **First slice.**
-2. Phase 2 download of the missing 10 — single rsync from HF, then
-   extend the matrix.
-3. Phase 3 picks the worst outlier and does kernel work. One quant
-   per session.
-4. Phase 4 KV-quant pairings layered on top.
-5. Phase 5 decision table closes the plan.
+1. ~~Phase 1~~ ✅ DONE — 28-cell pp2tp2 matrix shipped 2026-06-01.
+2. ~~Phase 3 diagnosis~~ ✅ DONE — rocprofv3 traces identify a
+   family-wide dp4a gap across every K-quant + IQ-quant except
+   Q5_K, Q6_K, Q8_0.
+3. **Phase 3a: Q4_K dp4a port** — next slice. Single kernel; lifts
+   both UD-Q4_K_XL (2.2×) and UD-Q3_K_XL (1.4× partial).
+4. Phase 3b: Q3_K dp4a port — composed with 3a, lifts UD-Q3_K_XL ~3×.
+5. Phase 3c-3g: IQ4_XS, IQ4_NL, IQ3_*, IQ2_*, IQ1_* — same template,
+   one per session. Priority by how many real models use the quant.
+6. Phase 2: download missing K-quant variants once Phase 3 lands —
+   they'll inherit the dp4a kernels and won't need a separate
+   diagnosis pass.
+7. Phase 4: KV-quant pairings re-validated after Phase 3a-3b (decode
+   wall composition changes once K-quant kernels stop dominating).
+8. Phase 5: decision table — final cert, plan close.
 
-Total surface: estimated 5–8 sessions depending on how many quants
-need kernel work in Phase 3. Phase 1 alone is one session (~2 hours
-of bench wall + summary).
+Total remaining surface: 5-8 sessions, dominated by Phase 3a-3g
+kernel ports (each ~1 session). Phase 4 and 5 are 1 session each.
 
 ## Acceptance criteria
 
