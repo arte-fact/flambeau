@@ -971,11 +971,12 @@ fn sweep(arch: &str, op: Option<&str>, dtype: &str) -> Result<()> {
                     "Q8_0" => vec![Dtype::Q8_0],
                     "Q4_K" => vec![Dtype::Q4K, Dtype::Q4KR2, Dtype::Q4KR2Dp4a],
                     "Q4_K_r2_dp4a" => vec![Dtype::Q4KR2Dp4a],
-                    "Q5_K" => vec![Dtype::Q5K],
+                    "Q5_K" => vec![Dtype::Q5K, Dtype::Q5KR2, Dtype::Q5KDp4a, Dtype::Q5KR2Dp4a],
                     "Q6_K" => vec![Dtype::Q6K],
                     "Q4_K_r2" => vec![Dtype::Q4KR2],
                     "Q5_K_r2" => vec![Dtype::Q5KR2],
                     "Q5_K_dp4a" => vec![Dtype::Q5KDp4a],
+                    "Q5_K_r2_dp4a" => vec![Dtype::Q5KR2Dp4a],
                     "Q6_K_r4" => vec![Dtype::Q6KR4],
                     "Q6_K_dp4a" => vec![Dtype::Q6KDP4A],
                     "Q4_1" => vec![

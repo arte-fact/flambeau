@@ -227,7 +227,7 @@ dtype_q = "Q8_1"
 shape   = { m = "1..127", k = "any", n = "any" }
 impl    = "qmatmul_q5_K_mmvq_dp4a_gfx906"
 cert    = "certs/hip/gfx906/qmatmul_q5_K_mmvq_dp4a_gfx906.json"
-notes   = "DP4A 256-thread Q5_K MMVQ port of llama.cpp's vec_dot_q5_K_q8_1_impl_vmmq (sumi via v_dot4_i32_i8). Replaces the prior nw1_r2 kernel which did per-element FP32 multiplies — rocprofv3 head-to-head on Qwen3.6-27B-Q4_0 PP4 showed mmvq_q5_k_r2 at 268us/call vs llama.cpp's mul_mat_vec_q at ~91us/call. Sweep cert green across the 15-shape grid (max rel_err 1e-2). Prior r2 cert kept at certs/hip/gfx906/qmatmul_q5_K_mmvq_nw1_r2_gfx906.json for regression cross-check."
+notes   = "DP4A 256-thread Q5_K MMVQ port of llama.cpp's vec_dot_q5_K_q8_1_impl_vmmq (sumi via v_dot4_i32_i8). Sibling qmatmul_q5_K_mmvq_r2_dp4a_gfx906 (wave64 r2 dp4a, dense analog of M-c) was empirically null on UD-Q2_K_XL (decode_tps 31.03 vs 31.12 single-row, within noise — m=1 is HBM-bound on attn_qkv/attn_gate, not launch-overhead bound); sweep cert is kept available for re-evaluation on smaller-projection shapes."
 
 [[qmatmul_mmq]]
 dtype   = "Q5_K"
