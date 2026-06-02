@@ -104,8 +104,8 @@ notes   = "T-IQ.14 — native IQ3_XXS MMVQ. 256-entry u32 codebook + 7-bit sign 
 dtype   = "IQ3_S"
 dtype_q = "Q8_1"
 shape   = { m = "1..127", k = "any", n = "any" }
-impl    = "qmatmul_iq3_s_mmvq_nw1_r2_gfx906"
-cert    = "certs/hip/gfx906/qmatmul_iq3_s_mmvq_nw1_r2_gfx906.json"
+impl    = "qmatmul_iq3_s_mmvq_dp4a_gfx906"
+cert    = "certs/hip/gfx906/qmatmul_iq3_s_mmvq_dp4a_gfx906.json"
 notes   = "T-IQ.14 — native IQ3_S MMVQ. 512-entry 9-bit codebook + explicit per-byte sign array (~3.44 bpw). MMQ at m>=128."
 
 [[qmatmul]]
