@@ -307,15 +307,59 @@ gemma4-26B-A4B's MoE layers use Q4_K which is already covered.
 
 ## Phase 4 — KV-quant pairings
 
-Today `--kv q8` is wired but only validated end-to-end on a few
-models. For each quant in Phase 1, verify:
-- correctness (Paris-smoke + delta-perplexity vs F16 KV)
-- perf delta (long-ctx win when global layer scan dominates)
+`--kv q8` is fully wired in v2 (CLI flag → `ServerConfig.kv` →
+`KvLayout::Q8Contig` → `scratch_config_for(... kv_layout)` →
+per-layer Q8Contig for head_dim ∈ {64, 128, 256, 512}, F16Contig
+elsewhere). Earlier feedback memory `feedback_kv_q8_not_honored`
+(2026-05-22) is superseded by the v2 wiring shipped before
+`feedback_q8_kv_head_dim_512_two_wave` (2026-06-01).
 
-The gemma4 work landed a KV-quant tradeoff for head_dim=512 globals
-(`feedback_q8_kv_head_dim_512_two_wave`) — Qwen3.6-27B head_dim=128
-doesn't have the same shape, but the crossover-ctx analysis pattern
-transfers.
+### Phase 4 Slice 1 — Qwen3.6-27B-Q4_0 (head_dim=128 dense) pp2tp2
+
+| ctx | prompt | F16 KV total_s 3-rep | Q8 KV total_s 3-rep | Notes |
+|-----|--------|---------------------|---------------------|-------|
+| 16k | 4565   | 15.61 (ct=64)       | 15.95 (ct=61)       | Q8 ≈ noise (+2.8 %) |
+| 16k | 11453  | 42.95 (ct=76)       | 44.99 (ct=76)       | Q8 +4.8 % wall at matched ct |
+| 32k | 22933  | 146.6 avg ct=62.3   | 154.7 avg ct=74.3   | Q8 per-token rate +13 %, total wall +5.5 % |
+
+Paris smoke (`The capital of France is`) returns identical text on F16
+and Q8 KV across all configs — Q8 KV is **correctness-OK on Qwen3.6-27B
+head_dim=128**.
+
+Performance: roughly neutral. No structural Q8 win at head_dim=128
+without an SWA cache-pointer-offset lever (the gemma4-only optimization
+in `feedback_swa_cache_pointer_offset_lever`). Qwen3.6-27B has no
+sliding-window layers; the per-token KV scan is full-context f16-read
+vs full-context q8-read+dequant, and at 1 TB/s HBM the difference is
+inside measurement noise once ct variance from temperature is in play.
+
+Recommendation: F16 KV remains the default on Qwen3.6 dense / MoE
+head_dim=128. Q8 KV is functional as a VRAM-saving knob (~2× cache
+fit) when the user prefers concurrency or longer ctx over absolute
+single-stream perf.
+
+### Phase 4 Slice 2 — gemma4 head_dim=512 (cert)
+
+Already certified in `feedback_q8_kv_head_dim_512_two_wave` (2026-06-01):
+all 60 gemma4-31B / 26B-A4B layers covered; Q8 KV at ctx 3000 with the
+SWA cache-pointer-offset lever yields F16 +20 % / Q8 +57 % decode tps.
+No re-bench in this slice.
+
+### Phase 4 takeaway
+
+Q8 KV is structurally a *gemma4* win, not a generic win. The lever
+chains: head_dim=512 globals + SWA window collapse → per-token KV scan
+becomes the wall → Q8 halves it. Qwen3.6's head_dim=128 full-attention
+already fits in HBM budget at ctx ≤ 32k; Q8 quantize/dequantize
+overhead cancels the HBM win.
+
+### Phase 4 follow-ups (not in this slice)
+
+- Delta-perplexity sweep across Phase 1 models at F16 vs Q8 KV
+  (correctness cert beyond Paris-smoke).
+- Decision-table cell per (model, ctx) for VRAM-fit (feeds Phase 5).
+- Deterministic-decode bench rig (temperature=0 + no early stop) so
+  A/B numbers are not muddled by ct-variance.
 
 ## Phase 5 — VRAM fit decision table
 
