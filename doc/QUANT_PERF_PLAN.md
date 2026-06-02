@@ -343,38 +343,46 @@ single-stream perf.
 Re-benched with the deterministic rig on gemma-4-26B-A4B-it-Q8_0 /
 pp2tp2 / temperature 0:
 
-  ctx 2048, prompt ≈ 128 (within SWA window=512):
-    F16  ≈ baseline coherent
-    Q8   decode_tps 46.66  ttft 204.6 ms — coherent ("thought\nThe Linux
-         kernel has transitioned from the O(1) scheduler to the Complet…")
+Bisect via the deterministic rig:
 
-  ctx 4096, prompt ≈ 3000 (past SWA window=512):
-    F16  decode_tps 53.27  ttft 3467 ms — coherent ("thought\nThe Linux
-         scheduler has transitioned from the O(1) design to the Complet…")
-    Q8   decode_tps 42.41  ttft 3122 ms — **broken** (`<pad><pad><pad>…`)
+  prompt 128  (1 prefill chunk):  Q8 coherent — decode_tps 46.66 ttft 205 ms
+  prompt 600  (2 prefill chunks): Q8 coherent — decode_tps 46.90 ttft 869 ms
+  prompt 1500 (3 prefill chunks): Q8 **broken** — `<pad>` flood
+  prompt 3000 (6 prefill chunks): Q8 **broken** — `<pad>` flood
 
-The crossover is the SWA window. `feedback_swa_cache_pointer_offset_lever`
-shifts the K/V pointer for SWA decode by `(n_tokens − window) * bytes_per_row`;
-that pointer arithmetic was certified for F16 KV (2-byte rows) and almost
-certainly miscomputes the byte-offset for Q8Contig (Q8_0 stores 32-element
-blocks of 34 bytes — not constant `bytes_per_row`).
+The crossover is the prefill-chunk count, NOT the SWA window. First
+hypothesis (SWA cache-pointer-offset lever byte-arithmetic) was tested:
+the gating change leaves the regression in place, and `kv.bytes_per_row`
+is layout-aware via `KvLayout::bytes_per_row` — the Q8Contig stride
+`(kv_width/32) * 34` was always correct. Hypothesis ruled out.
 
-Earlier memory `feedback_q8_kv_head_dim_512_two_wave` (2026-06-01) reported
-Q8 KV correct across all 60 gemma4 layers. The deterministic rig contradicts
-that cert. Either:
-  - the certified shape (head_dim=512 two-wave) was tested *without* the
-    SWA cache-pointer lever active, and the regression was always latent
-    at prompt > window;
-  - or a later change to the cache-pointer lever or Q8 layout regressed
-    the gemma path.
+Current best hypothesis: the Q8 chunked-prefill cross-chunk K/V state
+is broken. Suspects:
+  - `kv_append_f16_to_q8` at high `write_pos` (≥ 1024) — block stride
+    interaction with `quantize_f16_q8_0` internal layout
+  - `attn_prefill_q8_kv` reading prior-chunk K/V written by an earlier
+    kv_append call
+  - The gemma V-unit-norm-into-Q8 split path
+    (`v_unit_norm_per_head_f16` then `kv_append_f16_to_q8`) losing
+    precision past chunk 2
 
-The deterministic rig surfaced this in 2 short-runs. Without it, the
-non-deterministic bench at temp=0.5 / max=64 in Slice 1 hid the regression
-(ct varied + finish_reason="stop" masked the all-`<pad>` output).
+Earlier memory `feedback_q8_kv_head_dim_512_two_wave` (2026-06-01)
+covers single-chunk correctness only; the head_dim=512 two-wave
+kernels are correct in isolation. The chunked-prefill cross-chunk
+behavior was never separately certified.
 
-**Action item (Phase 4 Slice 3)**: localise the bug — either fix the
-cache-pointer offset arithmetic for Q8 (multiply by Q8 row stride, not
-F16) or gate the SWA lever to F16 only.
+**Action items (Phase 4 Slice 3, deferred to its own slice)**:
+1. Try `FLAMBEAU_PREFILL_UBATCH=2048` to fit prompt 1500 in one chunk;
+   if coherent, confirms the chunked-prefill cross-chunk hypothesis.
+2. Repro on Qwen3.6-style gemma quant (no V-unit-norm) to isolate the
+   V-unit-norm-into-Q8 split path.
+3. Add a Q8 KV snapshot tool that dequantizes the cache at chunk
+   boundaries (write_pos = 511, 1023, 1535) and spot-checks for
+   plausibility.
+
+**Recommendation**: F16 KV is the safe default on gemma at prompt > ~1000
+until the cross-chunk Q8 regression is fixed. Q8 KV remains correct for
+short-prompt single-chunk decode on gemma.
 
 ### Phase 4 takeaway
 
