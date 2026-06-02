@@ -35,9 +35,11 @@ MODEL_ID_FOR_API = "qwen3.6-27b"
 
 QUANTS = [
     # (name, gguf_path_under_/artefact/models, weight_GB)
+    # Q4_K_M-mtp.gguf is excluded: it's the multi-token-prediction
+    # variant with an extra blk.64.ssm_norm head tensor that
+    # flambeau qwen35 doesn't consume. Need a non-MTP Q4_K_M GGUF.
     ("Q4_0",       "Qwen3.6-27B-Q4_0.gguf",       15.0),
     ("Q4_1",       "Qwen3.6-27B-Q4_1.gguf",       17.0),
-    ("Q4_K_M",     "Qwen3.6-27B-Q4_K_M-mtp.gguf", 16.0),
     ("Q8_0",       "Qwen3.6-27B-Q8_0.gguf",       27.0),
     ("UD-Q3_K_XL", "Qwen3.6-27B-UD-Q3_K_XL.gguf", 14.0),
     ("UD-Q4_K_XL", "Qwen3.6-27B-UD-Q4_K_XL.gguf", 17.0),
@@ -53,8 +55,6 @@ REPS = 3
 TOPOS = {
     "pp2tp2": {"devices": "0,2,1,3", "mesh_mode": "pp+tp",
                "pp_size": 2, "tp_size": 2, "weight_div": 4},
-    "1xmi50": {"devices": "0", "mesh_mode": "pp",
-               "pp_size": 1, "weight_div": 1},
 }
 
 MI50_VRAM_GB = 32.0

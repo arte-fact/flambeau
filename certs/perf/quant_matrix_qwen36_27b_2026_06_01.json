@@ -1,0 +1,333 @@
+{
+  "quants": [
+    "Q4_0",
+    "Q4_1",
+    "Q8_0",
+    "UD-Q3_K_XL",
+    "UD-Q4_K_XL",
+    "UD-Q6_K_XL",
+    "UD-Q8_K_XL"
+  ],
+  "kv": [
+    "f16",
+    "q8"
+  ],
+  "ctx": [
+    512,
+    4096
+  ],
+  "topo": [
+    "pp2tp2"
+  ],
+  "rows": [
+    {
+      "quant": "Q4_0",
+      "kv": "f16",
+      "topo": "pp2tp2",
+      "ctx_target": 512,
+      "wall_ms": 2241.044282913208,
+      "ttft_ms": 829.9126625061035,
+      "decode_ms_per_tok": 27.669247458962833,
+      "decode_tps": 36.141207001857666,
+      "n_reps": 3
+    },
+    {
+      "quant": "Q4_0",
+      "kv": "f16",
+      "topo": "pp2tp2",
+      "ctx_target": 4096,
+      "wall_ms": 10533.795595169067,
+      "ttft_ms": 8622.509241104126,
+      "decode_ms_per_tok": 30.567646026611328,
+      "decode_tps": 32.71432805553389,
+      "n_reps": 3
+    },
+    {
+      "quant": "Q4_0",
+      "kv": "q8",
+      "topo": "pp2tp2",
+      "ctx_target": 512,
+      "wall_ms": 2325.0648975372314,
+      "ttft_ms": 833.35280418396,
+      "decode_ms_per_tok": 29.515865114000107,
+      "decode_tps": 33.88008435929852,
+      "n_reps": 3
+    },
+    {
+      "quant": "Q4_0",
+      "kv": "q8",
+      "topo": "pp2tp2",
+      "ctx_target": 4096,
+      "wall_ms": 11067.951917648315,
+      "ttft_ms": 8663.476467132568,
+      "decode_ms_per_tok": 37.85472446017795,
+      "decode_tps": 26.41678190134419,
+      "n_reps": 3
+    },
+    {
+      "quant": "Q4_1",
+      "kv": "f16",
+      "topo": "pp2tp2",
+      "ctx_target": 512,
+      "wall_ms": 2154.002904891968,
+      "ttft_ms": 861.7062568664551,
+      "decode_ms_per_tok": 26.92284683386485,
+      "decode_tps": 37.143174574768665,
+      "n_reps": 3
+    },
+    {
+      "quant": "Q4_1",
+      "kv": "f16",
+      "topo": "pp2tp2",
+      "ctx_target": 4096,
+      "wall_ms": 10754.733800888062,
+      "ttft_ms": 8884.829759597778,
+      "decode_ms_per_tok": 29.664709454491025,
+      "decode_tps": 33.71008913922152,
+      "n_reps": 3
+    },
+    {
+      "quant": "Q4_1",
+      "kv": "q8",
+      "topo": "pp2tp2",
+      "ctx_target": 512,
+      "wall_ms": 2130.2707195281982,
+      "ttft_ms": 859.3270778656006,
+      "decode_ms_per_tok": 28.910815715789795,
+      "decode_tps": 34.589131272897454,
+      "n_reps": 3
+    },
+    {
+      "quant": "Q4_1",
+      "kv": "q8",
+      "topo": "pp2tp2",
+      "ctx_target": 4096,
+      "wall_ms": 11199.00918006897,
+      "ttft_ms": 8867.728233337402,
+      "decode_ms_per_tok": 37.03342922150143,
+      "decode_tps": 27.0026303537509,
+      "n_reps": 3
+    },
+    {
+      "quant": "Q8_0",
+      "kv": "f16",
+      "topo": "pp2tp2",
+      "ctx_target": 512,
+      "wall_ms": 3025.235176086426,
+      "ttft_ms": 1243.4611320495605,
+      "decode_ms_per_tok": 32.28347518227317,
+      "decode_tps": 30.975599570801446,
+      "n_reps": 3
+    },
+    {
+      "quant": "Q8_0",
+      "kv": "f16",
+      "topo": "pp2tp2",
+      "ctx_target": 4096,
+      "wall_ms": 15875.96344947815,
+      "ttft_ms": 13673.170328140259,
+      "decode_ms_per_tok": 34.96497017996652,
+      "decode_tps": 28.60005299169277,
+      "n_reps": 3
+    },
+    {
+      "quant": "Q8_0",
+      "kv": "q8",
+      "topo": "pp2tp2",
+      "ctx_target": 512,
+      "wall_ms": 3086.876630783081,
+      "ttft_ms": 1240.847110748291,
+      "decode_ms_per_tok": 33.51295644586737,
+      "decode_tps": 29.839205670060018,
+      "n_reps": 3
+    },
+    {
+      "quant": "Q8_0",
+      "kv": "q8",
+      "topo": "pp2tp2",
+      "ctx_target": 4096,
+      "wall_ms": 16262.746095657349,
+      "ttft_ms": 13634.650468826294,
+      "decode_ms_per_tok": 42.413138328714574,
+      "decode_tps": 23.577599758115028,
+      "n_reps": 3
+    },
+    {
+      "quant": "UD-Q3_K_XL",
+      "kv": "f16",
+      "topo": "pp2tp2",
+      "ctx_target": 512,
+      "wall_ms": 7234.153032302856,
+      "ttft_ms": 2162.252426147461,
+      "decode_ms_per_tok": 101.61390900611877,
+      "decode_tps": 9.841172431815256,
+      "n_reps": 3
+    },
+    {
+      "quant": "UD-Q3_K_XL",
+      "kv": "f16",
+      "topo": "pp2tp2",
+      "ctx_target": 4096,
+      "wall_ms": 30439.515590667725,
+      "ttft_ms": 24672.861576080322,
+      "decode_ms_per_tok": 104.84825481068005,
+      "decode_tps": 9.537593179835532,
+      "n_reps": 3
+    },
+    {
+      "quant": "UD-Q3_K_XL",
+      "kv": "q8",
+      "topo": "pp2tp2",
+      "ctx_target": 512,
+      "wall_ms": 7325.317859649658,
+      "ttft_ms": 2164.3521785736084,
+      "decode_ms_per_tok": 103.34797859191895,
+      "decode_tps": 9.67604798492104,
+      "n_reps": 3
+    },
+    {
+      "quant": "UD-Q3_K_XL",
+      "kv": "q8",
+      "topo": "pp2tp2",
+      "ctx_target": 4096,
+      "wall_ms": 32630.258560180664,
+      "ttft_ms": 25550.307989120483,
+      "decode_ms_per_tok": 112.38016779460604,
+      "decode_tps": 8.898367208595657,
+      "n_reps": 3
+    },
+    {
+      "quant": "UD-Q4_K_XL",
+      "kv": "f16",
+      "topo": "pp2tp2",
+      "ctx_target": 512,
+      "wall_ms": 5660.475969314575,
+      "ttft_ms": 1818.3844089508057,
+      "decode_ms_per_tok": 69.85621018843217,
+      "decode_tps": 14.315119547747736,
+      "n_reps": 3
+    },
+    {
+      "quant": "UD-Q4_K_XL",
+      "kv": "f16",
+      "topo": "pp2tp2",
+      "ctx_target": 4096,
+      "wall_ms": 24952.32629776001,
+      "ttft_ms": 20337.372064590454,
+      "decode_ms_per_tok": 72.8812747531467,
+      "decode_tps": 13.720945515663121,
+      "n_reps": 3
+    },
+    {
+      "quant": "UD-Q4_K_XL",
+      "kv": "q8",
+      "topo": "pp2tp2",
+      "ctx_target": 512,
+      "wall_ms": 5756.595849990845,
+      "ttft_ms": 1817.9283142089844,
+      "decode_ms_per_tok": 71.61213701421565,
+      "decode_tps": 13.96411337091492,
+      "n_reps": 3
+    },
+    {
+      "quant": "UD-Q4_K_XL",
+      "kv": "q8",
+      "topo": "pp2tp2",
+      "ctx_target": 4096,
+      "wall_ms": 24399.611949920654,
+      "ttft_ms": 20317.378520965576,
+      "decode_ms_per_tok": 80.04379272460938,
+      "decode_tps": 12.493161130438926,
+      "n_reps": 3
+    },
+    {
+      "quant": "UD-Q6_K_XL",
+      "kv": "f16",
+      "topo": "pp2tp2",
+      "ctx_target": 512,
+      "wall_ms": 4368.22247505188,
+      "ttft_ms": 2725.7115840911865,
+      "decode_ms_per_tok": 35.03622478908963,
+      "decode_tps": 28.541887889456703,
+      "n_reps": 3
+    },
+    {
+      "quant": "UD-Q6_K_XL",
+      "kv": "f16",
+      "topo": "pp2tp2",
+      "ctx_target": 4096,
+      "wall_ms": 34360.48173904419,
+      "ttft_ms": 31947.58367538452,
+      "decode_ms_per_tok": 38.29996926443918,
+      "decode_tps": 26.109681527302993,
+      "n_reps": 3
+    },
+    {
+      "quant": "UD-Q6_K_XL",
+      "kv": "q8",
+      "topo": "pp2tp2",
+      "ctx_target": 512,
+      "wall_ms": 4533.206939697266,
+      "ttft_ms": 2726.482629776001,
+      "decode_ms_per_tok": 37.078401777479385,
+      "decode_tps": 26.9698787450806,
+      "n_reps": 3
+    },
+    {
+      "quant": "UD-Q6_K_XL",
+      "kv": "q8",
+      "topo": "pp2tp2",
+      "ctx_target": 4096,
+      "wall_ms": 34869.7772026062,
+      "ttft_ms": 31990.01121520996,
+      "decode_ms_per_tok": 45.710571228511746,
+      "decode_tps": 21.876777583918155,
+      "n_reps": 3
+    },
+    {
+      "quant": "UD-Q8_K_XL",
+      "kv": "f16",
+      "topo": "pp2tp2",
+      "ctx_target": 512,
+      "wall_ms": 2852.741241455078,
+      "ttft_ms": 1239.7544384002686,
+      "decode_ms_per_tok": 32.28015088020487,
+      "decode_tps": 30.97878952645259,
+      "n_reps": 3
+    },
+    {
+      "quant": "UD-Q8_K_XL",
+      "kv": "f16",
+      "topo": "pp2tp2",
+      "ctx_target": 4096,
+      "wall_ms": 15807.778596878052,
+      "ttft_ms": 13596.338987350464,
+      "decode_ms_per_tok": 35.102216024247426,
+      "decode_tps": 28.488229897201755,
+      "n_reps": 3
+    },
+    {
+      "quant": "UD-Q8_K_XL",
+      "kv": "q8",
+      "topo": "pp2tp2",
+      "ctx_target": 512,
+      "wall_ms": 3015.4714584350586,
+      "ttft_ms": 1240.710973739624,
+      "decode_ms_per_tok": 33.98348634893244,
+      "decode_tps": 29.426056812779425,
+      "n_reps": 3
+    },
+    {
+      "quant": "UD-Q8_K_XL",
+      "kv": "q8",
+      "topo": "pp2tp2",
+      "ctx_target": 4096,
+      "wall_ms": 16263.310432434082,
+      "ttft_ms": 13560.378074645996,
+      "decode_ms_per_tok": 42.55367839147174,
+      "decode_tps": 23.499731111386406,
+      "n_reps": 3
+    }
+  ],
+  "skipped": []
+}
