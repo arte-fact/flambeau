@@ -961,7 +961,8 @@ fn sweep(arch: &str, op: Option<&str>, dtype: &str) -> Result<()> {
                         Dtype::Q6KR4,
                     ],
                     "Q8_0" => vec![Dtype::Q8_0],
-                    "Q4_K" => vec![Dtype::Q4K],
+                    "Q4_K" => vec![Dtype::Q4K, Dtype::Q4KR2, Dtype::Q4KR2Dp4a],
+                    "Q4_K_r2_dp4a" => vec![Dtype::Q4KR2Dp4a],
                     "Q5_K" => vec![Dtype::Q5K],
                     "Q6_K" => vec![Dtype::Q6K],
                     "Q4_K_r2" => vec![Dtype::Q4KR2],
@@ -1250,6 +1251,13 @@ fn pmc_refresh(arch: &str) -> Result<()> {
             (
                 "qmatmul_q4_K_mmvq_nw1_r2_gfx906",
                 "mmvq_q4_k_r2",
+                1,
+                2048,
+                64,
+            ),
+            (
+                "qmatmul_q4_K_mmvq_dp4a_gfx906",
+                "mmvq_q4_k_r2_dp4a",
                 1,
                 2048,
                 64,

@@ -481,9 +481,9 @@ mod tests {
     }
 
     #[test]
-    fn mmvq_decode_selects_r2_for_q4_k() {
+    fn mmvq_decode_selects_dp4a_for_q4_k() {
         let d = dispatch_qmatmul(&cfg(QDtype::Q4_K, QDtype::Q8_1, 1)).unwrap();
-        assert_eq!(d.impl_id, "qmatmul_q4_K_mmvq_nw1_r2_gfx906");
+        assert_eq!(d.impl_id, "qmatmul_q4_K_mmvq_dp4a_gfx906");
     }
 
     #[test]
