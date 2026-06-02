@@ -144,8 +144,8 @@ notes   = "T-IQ.15 — native IQ2_S MMVQ. 1024-entry u64 codebook (10-bit idx) +
 dtype   = "IQ1_S"
 dtype_q = "Q8_1"
 shape   = { m = "1..127", k = "any", n = "any" }
-impl    = "qmatmul_iq1_s_mmvq_nw1_r2_gfx906"
-cert    = "certs/hip/gfx906/qmatmul_iq1_s_mmvq_nw1_r2_gfx906.json"
+impl    = "qmatmul_iq1_s_mmvq_dp4a_gfx906"
+cert    = "certs/hip/gfx906/qmatmul_iq1_s_mmvq_dp4a_gfx906.json"
 notes   = "T-IQ.15 — native IQ1_S MMVQ. 2048-entry u64 codebook (11-bit idx) with signed-i8 grid entries + per-sub-block ±IQ1_DELTA offset. ~1.56 bpw."
 
 [[qmatmul]]

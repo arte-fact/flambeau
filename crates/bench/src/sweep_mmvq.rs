@@ -170,6 +170,12 @@ pub enum Dtype {
     Iq2SDp4a,
     Iq1S,
     Iq1SR2,
+    /// DP4A IQ1_S MMVQ (Phase 3k — port of llama.cpp's
+    /// `vec_dot_iq1_s_q8_1`). No sign mask; codebook stores signed i8
+    /// magnitudes directly in IQ1S_GRID (uint64 of 8 packed i8).
+    /// Per-sub-block delta offset (±IQ1_DELTA) introduces a bias term
+    /// computed via dp4a(0x01010101, u, 0). VDR=1 (no x2 step on iqs).
+    Iq1SDp4a,
     Iq1M,
     Iq1MR2,
 }
@@ -192,7 +198,7 @@ impl Dtype {
             Dtype::Iq2Xxs | Dtype::Iq2XxsR2 | Dtype::Iq2XxsDp4a => "IQ2_XXS",
             Dtype::Iq2Xs | Dtype::Iq2XsR2 | Dtype::Iq2XsDp4a => "IQ2_XS",
             Dtype::Iq2S | Dtype::Iq2SR2 | Dtype::Iq2SDp4a => "IQ2_S",
-            Dtype::Iq1S | Dtype::Iq1SR2 => "IQ1_S",
+            Dtype::Iq1S | Dtype::Iq1SR2 | Dtype::Iq1SDp4a => "IQ1_S",
             Dtype::Iq1M | Dtype::Iq1MR2 => "IQ1_M",
         }
     }
@@ -214,7 +220,7 @@ impl Dtype {
             Dtype::Iq2Xxs | Dtype::Iq2XxsR2 | Dtype::Iq2XxsDp4a => GgmlDType::Iq2Xxs,
             Dtype::Iq2Xs | Dtype::Iq2XsR2 | Dtype::Iq2XsDp4a => GgmlDType::Iq2Xs,
             Dtype::Iq2S | Dtype::Iq2SR2 | Dtype::Iq2SDp4a => GgmlDType::Iq2S,
-            Dtype::Iq1S | Dtype::Iq1SR2 => GgmlDType::Iq1S,
+            Dtype::Iq1S | Dtype::Iq1SR2 | Dtype::Iq1SDp4a => GgmlDType::Iq1S,
             Dtype::Iq1M | Dtype::Iq1MR2 => GgmlDType::Iq1M,
         }
     }
@@ -267,6 +273,7 @@ impl Dtype {
             Dtype::Iq2SDp4a => "qmatmul_iq2_s_mmvq_dp4a_gfx906",
             Dtype::Iq1S => "qmatmul_iq1_s_mmvq_single_row_gfx906",
             Dtype::Iq1SR2 => "qmatmul_iq1_s_mmvq_nw1_r2_gfx906",
+            Dtype::Iq1SDp4a => "qmatmul_iq1_s_mmvq_dp4a_gfx906",
             Dtype::Iq1M => "qmatmul_iq1_m_mmvq_single_row_gfx906",
             Dtype::Iq1MR2 => "qmatmul_iq1_m_mmvq_nw1_r2_gfx906",
         }
@@ -320,6 +327,7 @@ impl Dtype {
             Dtype::Iq2SDp4a => "mmvq_iq2_s_dp4a",
             Dtype::Iq1S => "mmvq_iq1_s",
             Dtype::Iq1SR2 => "mmvq_iq1_s_r2",
+            Dtype::Iq1SDp4a => "mmvq_iq1_s_dp4a",
             Dtype::Iq1M => "mmvq_iq1_m",
             Dtype::Iq1MR2 => "mmvq_iq1_m_r2",
         }
@@ -373,6 +381,7 @@ impl Dtype {
             Dtype::Iq2SDp4a => "flambeau_mmvq_iq2_s_dp4a_q8_1",
             Dtype::Iq1S => "flambeau_mmvq_iq1_s_q8_1",
             Dtype::Iq1SR2 => "flambeau_mmvq_iq1_s_r2_q8_1",
+            Dtype::Iq1SDp4a => "flambeau_mmvq_iq1_s_dp4a_q8_1",
             Dtype::Iq1M => "flambeau_mmvq_iq1_m_q8_1",
             Dtype::Iq1MR2 => "flambeau_mmvq_iq1_m_r2_q8_1",
         }
@@ -397,7 +406,7 @@ impl Dtype {
             Dtype::Iq2Xxs | Dtype::Iq2XxsR2 | Dtype::Iq2XxsDp4a => std::mem::size_of::<BlockIq2Xxs>(),
             Dtype::Iq2Xs | Dtype::Iq2XsR2 | Dtype::Iq2XsDp4a => std::mem::size_of::<BlockIq2Xs>(),
             Dtype::Iq2S | Dtype::Iq2SR2 | Dtype::Iq2SDp4a => std::mem::size_of::<BlockIq2S>(),
-            Dtype::Iq1S | Dtype::Iq1SR2 => std::mem::size_of::<BlockIq1S>(),
+            Dtype::Iq1S | Dtype::Iq1SR2 | Dtype::Iq1SDp4a => std::mem::size_of::<BlockIq1S>(),
             Dtype::Iq1M | Dtype::Iq1MR2 => std::mem::size_of::<BlockIq1M>(),
         }
     }
@@ -408,7 +417,7 @@ impl Dtype {
 
     fn launch_threads(self) -> u32 {
         match self {
-            Dtype::Q8_0 | Dtype::Q4_1 | Dtype::Q4_1R2DP4A | Dtype::Q8K | Dtype::Q5KDp4a | Dtype::Q3KDp4a | Dtype::Q2KDp4a | Dtype::Iq4XsDp4a | Dtype::Iq4NlDp4a | Dtype::Iq3SDp4a | Dtype::Iq3XxsDp4a | Dtype::Iq2SDp4a | Dtype::Iq2XsDp4a | Dtype::Iq2XxsDp4a => 256,
+            Dtype::Q8_0 | Dtype::Q4_1 | Dtype::Q4_1R2DP4A | Dtype::Q8K | Dtype::Q5KDp4a | Dtype::Q3KDp4a | Dtype::Q2KDp4a | Dtype::Iq4XsDp4a | Dtype::Iq4NlDp4a | Dtype::Iq3SDp4a | Dtype::Iq3XxsDp4a | Dtype::Iq2SDp4a | Dtype::Iq2XsDp4a | Dtype::Iq2XxsDp4a | Dtype::Iq1SDp4a => 256,
             Dtype::Q4_1T128 | Dtype::Q8_0T128 | Dtype::Q8_0T128VDR2 => 128,
             _ => 64,
         }
@@ -800,7 +809,7 @@ fn tame_scales(dtype: Dtype, raw: Vec<u8>) -> Vec<u8> {
                 let d = f16::from_f32((block[0] as f32 / 255.0) * 0.005 + 0.0005);
                 block[0..2].copy_from_slice(&d.to_bits().to_le_bytes());
             }
-            Dtype::Iq1S | Dtype::Iq1SR2 => {
+            Dtype::Iq1S | Dtype::Iq1SR2 | Dtype::Iq1SDp4a => {
                 // IQ1_S scale = (2 * (qh>>12)&7 + 1), max 15. Cap d tighter.
                 let d = f16::from_f32((block[0] as f32 / 255.0) * 0.001 + 0.0001);
                 block[0..2].copy_from_slice(&d.to_bits().to_le_bytes());
