@@ -128,8 +128,8 @@ notes   = "T-IQ.15 — native IQ2_XXS MMVQ. 256-entry u64 codebook + 7-bit sign 
 dtype   = "IQ2_XS"
 dtype_q = "Q8_1"
 shape   = { m = "1..127", k = "any", n = "any" }
-impl    = "qmatmul_iq2_xs_mmvq_nw1_r2_gfx906"
-cert    = "certs/hip/gfx906/qmatmul_iq2_xs_mmvq_nw1_r2_gfx906.json"
+impl    = "qmatmul_iq2_xs_mmvq_dp4a_gfx906"
+cert    = "certs/hip/gfx906/qmatmul_iq2_xs_mmvq_dp4a_gfx906.json"
 notes   = "T-IQ.15 — native IQ2_XS MMVQ. 512-entry u64 codebook (9-bit idx packed in u16 with 7-bit sign idx) + nibble-pair scales. ~2.31 bpw."
 
 [[qmatmul]]
