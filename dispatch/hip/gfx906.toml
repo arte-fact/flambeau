@@ -257,8 +257,8 @@ notes   = "Q8_K MMVQ single-row (256 threads, 1 row/block). Q8_K is the simplest
 dtype   = "Q2_K"
 dtype_q = "Q8_1"
 shape   = { m = "1..127", k = "any", n = "any" }
-impl    = "qmatmul_q2_K_mmvq_dp4a_gfx906"
-cert    = "certs/hip/gfx906/qmatmul_q2_K_mmvq_dp4a_gfx906.json"
+impl    = "qmatmul_q2_K_mmvq_r2_dp4a_gfx906"
+cert    = "certs/hip/gfx906/qmatmul_q2_K_mmvq_r2_dp4a_gfx906.json"
 notes   = "Q2_K MMVQ r2 multi-row (64 threads wave64, 2 rows/block). Half-warp DPP reduce (xor-1..16). Activation shared across the row pair. Single-row kept as cross-check oracle."
 
 [[qmatmul]]
