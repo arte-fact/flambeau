@@ -997,6 +997,53 @@ pub fn mmvq_q8_0_gate_up(
     Ok(())
 }
 
+/// Fused gate+up Q5_K dense MMVQ. Mirror of [`mmvq_q8_0_gate_up`]: reads
+/// the Q8_1 activation once per inner-loop block and computes both dot
+/// products. Used by the qwen3.5/3.6 shared-expert FFN path when
+/// `ffn_gate_shexp` and `ffn_up_shexp` are both Q5_K.
+pub fn mmvq_q5_k_gate_up(
+    reg: &OpsRegistry,
+    stream: &HipStream,
+    gate_w: DevicePtr,
+    up_w: DevicePtr,
+    y_q8_1: DevicePtr,
+    gate_out: DevicePtr,
+    up_out: DevicePtr,
+    n_rows_gate: usize,
+    n_rows_up: usize,
+    k: usize,
+) -> Result<()> {
+    if k % flambeau_quant::QK_K != 0 {
+        bail!(
+            "mmvq_q5_k_gate_up: k={k} must be a multiple of QK_K={}",
+            flambeau_quant::QK_K
+        );
+    }
+    let module = reg.expect_module("mmvq_q5_k_gate_up_dp4a")?;
+    let kernel = module.kernel("flambeau_mmvq_q5_k_gate_up_dp4a_q8_1")?;
+    let n_rows_g = n_rows_gate as i32;
+    let n_rows_u = n_rows_up as i32;
+    let n_sb_per_row = (k / flambeau_quant::QK_K) as i32;
+    let gw_ptr: u64 = gate_w.as_usize() as u64;
+    let uw_ptr: u64 = up_w.as_usize() as u64;
+    let y_ptr: u64 = y_q8_1.as_usize() as u64;
+    let g_ptr: u64 = gate_out.as_usize() as u64;
+    let u_ptr: u64 = up_out.as_usize() as u64;
+    let mut args = KernelArgs::new();
+    args.push(&gw_ptr);
+    args.push(&uw_ptr);
+    args.push(&y_ptr);
+    args.push(&g_ptr);
+    args.push(&u_ptr);
+    args.push(&n_rows_g);
+    args.push(&n_rows_u);
+    args.push(&n_sb_per_row);
+    let grid = n_rows_gate.max(n_rows_up) as u32;
+    let cfg = LaunchCfg::one_d(grid, 256);
+    unsafe { kernel.launch(stream, cfg, args)? };
+    Ok(())
+}
+
 pub fn mmvq(
     reg: &OpsRegistry,
     stream: &HipStream,

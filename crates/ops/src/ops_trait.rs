@@ -165,6 +165,18 @@ pub trait Ops {
         k: usize,
     ) -> Result<()>;
 
+    fn mmvq_q5_k_gate_up(
+        &self,
+        gate_w: DevicePtr,
+        up_w: DevicePtr,
+        y_q8_1: DevicePtr,
+        gate_out: DevicePtr,
+        up_out: DevicePtr,
+        n_rows_gate: usize,
+        n_rows_up: usize,
+        k: usize,
+    ) -> Result<()>;
+
     fn mmvq(
         &self,
         weights: DevicePtr,

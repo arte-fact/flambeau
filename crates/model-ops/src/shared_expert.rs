@@ -317,6 +317,8 @@ impl SharedExpert {
             self.ffn_gate_shexp.dtype == QDtype::Q8_0 && self.ffn_up_shexp.dtype == QDtype::Q8_0;
         let fuse_q4_0 =
             self.ffn_gate_shexp.dtype == QDtype::Q4_0 && self.ffn_up_shexp.dtype == QDtype::Q4_0;
+        let fuse_q5_k =
+            self.ffn_gate_shexp.dtype == QDtype::Q5_K && self.ffn_up_shexp.dtype == QDtype::Q5_K;
         if fuse_q8_0 {
             ops.mmvq_q8_0_gate_up(
                 self.ffn_gate_shexp.ptr,
@@ -341,6 +343,18 @@ impl SharedExpert {
                 hidden,
             )
             .context("shexp gate+up fused mmvq_q4_0_t128")?;
+        } else if fuse_q5_k {
+            ops.mmvq_q5_k_gate_up(
+                self.ffn_gate_shexp.ptr,
+                self.ffn_up_shexp.ptr,
+                scratch.x_q8_1,
+                scratch.gate_f32,
+                scratch.up_f32,
+                inter,
+                inter,
+                hidden,
+            )
+            .context("shexp gate+up fused mmvq_q5_k")?;
         } else {
             ops.mmvq(
                 self.ffn_gate_shexp.ptr,
