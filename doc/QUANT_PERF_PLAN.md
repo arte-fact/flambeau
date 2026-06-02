@@ -338,12 +338,43 @@ head_dim=128. Q8 KV is functional as a VRAM-saving knob (~2× cache
 fit) when the user prefers concurrency or longer ctx over absolute
 single-stream perf.
 
-### Phase 4 Slice 2 — gemma4 head_dim=512 (cert)
+### Phase 4 Slice 2 — gemma4 head_dim=512 (regression flagged)
 
-Already certified in `feedback_q8_kv_head_dim_512_two_wave` (2026-06-01):
-all 60 gemma4-31B / 26B-A4B layers covered; Q8 KV at ctx 3000 with the
-SWA cache-pointer-offset lever yields F16 +20 % / Q8 +57 % decode tps.
-No re-bench in this slice.
+Re-benched with the deterministic rig on gemma-4-26B-A4B-it-Q8_0 /
+pp2tp2 / temperature 0:
+
+  ctx 2048, prompt ≈ 128 (within SWA window=512):
+    F16  ≈ baseline coherent
+    Q8   decode_tps 46.66  ttft 204.6 ms — coherent ("thought\nThe Linux
+         kernel has transitioned from the O(1) scheduler to the Complet…")
+
+  ctx 4096, prompt ≈ 3000 (past SWA window=512):
+    F16  decode_tps 53.27  ttft 3467 ms — coherent ("thought\nThe Linux
+         scheduler has transitioned from the O(1) design to the Complet…")
+    Q8   decode_tps 42.41  ttft 3122 ms — **broken** (`<pad><pad><pad>…`)
+
+The crossover is the SWA window. `feedback_swa_cache_pointer_offset_lever`
+shifts the K/V pointer for SWA decode by `(n_tokens − window) * bytes_per_row`;
+that pointer arithmetic was certified for F16 KV (2-byte rows) and almost
+certainly miscomputes the byte-offset for Q8Contig (Q8_0 stores 32-element
+blocks of 34 bytes — not constant `bytes_per_row`).
+
+Earlier memory `feedback_q8_kv_head_dim_512_two_wave` (2026-06-01) reported
+Q8 KV correct across all 60 gemma4 layers. The deterministic rig contradicts
+that cert. Either:
+  - the certified shape (head_dim=512 two-wave) was tested *without* the
+    SWA cache-pointer lever active, and the regression was always latent
+    at prompt > window;
+  - or a later change to the cache-pointer lever or Q8 layout regressed
+    the gemma path.
+
+The deterministic rig surfaced this in 2 short-runs. Without it, the
+non-deterministic bench at temp=0.5 / max=64 in Slice 1 hid the regression
+(ct varied + finish_reason="stop" masked the all-`<pad>` output).
+
+**Action item (Phase 4 Slice 3)**: localise the bug — either fix the
+cache-pointer offset arithmetic for Q8 (multiply by Q8 row stride, not
+F16) or gate the SWA lever to F16 only.
 
 ### Phase 4 takeaway
 
