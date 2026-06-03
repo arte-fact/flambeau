@@ -87,12 +87,8 @@ pub trait Ops {
     /// `[N, n_rows]` F32.
     fn mmvq_q4_0_row_tile_batched(
         &self,
-        weights: DevicePtr,
-        y_q8_1: DevicePtr,
-        dst: DevicePtr,
-        n_rows: usize,
-        k: usize,
-        n_slots: usize,
+        buffers: crate::MmvqBuffers,
+        shape: crate::MmvqBatchShape,
     ) -> Result<()>;
 
     /// Row-tiled Q8_0 sibling of [`Ops::mmvq_q4_0_row_tile_batched`].
@@ -100,12 +96,8 @@ pub trait Ops {
     /// non-gate+up Q8_0 projection at decode N∈{2,3,4}.
     fn mmvq_q8_0_row_tile_batched(
         &self,
-        weights: DevicePtr,
-        y_q8_1: DevicePtr,
-        dst: DevicePtr,
-        n_rows: usize,
-        k: usize,
-        n_slots: usize,
+        buffers: crate::MmvqBuffers,
+        shape: crate::MmvqBatchShape,
     ) -> Result<()>;
 
     fn mmvq_q4_0_warpcoop64(

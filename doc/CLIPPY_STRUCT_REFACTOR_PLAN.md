@@ -57,12 +57,12 @@ below is the corrected one.
 | P1e | `attention_prefill_f16` + `_slots` | ☑ done | 4 | trait, impl, wrapper, prefill callers (model-ops + 2 tests) |
 | P1f | `attention_prefill_q8_kv` + `_f16_paged` | ☑ done | 4 | trait, impl, wrapper, remaining prefill callers (2 model-ops files) |
 | **P2 — Matmul family (~100 sites, sub-phased by sibling group)** | | | | |
-| P2a | mmvq single-weight (Q4_0/Q5_K/Q8_0 t128 + warpcoop64) | ☐ pending | ~15 | trait, impl, wrapper, qmatmul callers |
-| P2b | mmvq gate-up fused (Q4_0/Q4_1/Q5_K/Q8_0/Q4_0_t128) | ☐ pending | ~15 | same |
-| P2c | mmvq row-tile batched (Q4_0/Q5_K/Q8_0 row_tile_batched + gate_up variants) | ☐ pending | ~20 | same |
-| P2d | mmvq KV-out (`mmvq_q4_0_kv_f16dst`) + `mmvq` generic + `mmvq_f16_direct` | ☐ pending | ~10 | same |
-| P2e | `qmatmul` composite + `mmq` per-dtype | ☐ pending | ~10 | same |
-| P2f | indexed_moe_mmvq + indexed_moe_mmq (MoE family — touches hip/moe.rs) | ☐ pending | ~30 | trait, impl, hip/moe.rs, moe_experts.rs |
+| P2a | All 9 batched single-weight fns (`mmvq_q4_0_batched`, `q4_k_batched`, `q6_k_batched`, `q8_0_batched`, `q4_1_batched`, `q5_k_r2_batched`, `q5_k_row_tile_batched`, `q4_0_row_tile_batched`, `q8_0_row_tile_batched`) | ☑ done | 9 | trait (2 of 9), impl (2 of 9), hip/qmatmul.rs (9 free fns + 6 in-file dispatcher calls). Zero external callers found. |
+| P2b | mmvq gate-up fused (Q4_0/Q4_1/Q5_K/Q8_0/Q4_0_t128) | ☐ pending | ~15 | trait, impl, hip/qmatmul.rs, model-ops callers |
+| P2c | mmvq gate-up fused (Q4_0/Q4_1/Q5_K/Q8_0/Q4_0_t128/Q5_K) | ☐ pending | ~15 | trait, impl, hip/qmatmul.rs, model-ops callers |
+| P2d | mmvq row-tile + gate-up batched variants | ☐ pending | ~10 | same |
+| P2e | mmvq KV-out + `mmvq` generic + `mmvq_f16_direct` + `qmatmul` + `mmq` | ☐ pending | ~10 | same |
+| P2f | indexed_moe_mmvq + indexed_moe_mmq (MoE family) | ☐ pending | ~30 | trait, impl, hip/moe.rs, moe_experts.rs |
 | **P3 — Norm fused** | | | | |
 | P3a | `rmsnorm_*_add_residual` family (3-4 fns) | ☐ pending | ~5 | `ops_trait.rs`, `hip/norm.rs` + callers |
 | P3b | `rmsnorm_rope_neox_partial_f16` + `rope_neox_partial_f16` | ☐ pending | ~5 | `ops_trait.rs`, `hip/norm.rs`, `hip/pe.rs` + callers |
@@ -94,12 +94,12 @@ below is the corrected one.
 
 ## Live state
 
-| Metric | At start | After P0 | After P1a | After P1b | After P1c | After P1d | After P1e | After P1f | After P2 | After … |
+| Metric | At start | After P0 | After P1f | After P2a | After P2b | After P2c | After P2d | After P2e | After P2f | After … |
 |---|---|---|---|---|---|---|---|---|---|---|
-| total warnings | 478 | 478 | 475 | 471 | 467 | 463 | 460 | 456 | — | — |
-| `too_many_arguments` | 315 | 315 | 311 | 307 | 303 | 299 | 295 | 291 | — | — |
-| errors | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 0 | — | — |
-| cumulative LOC delta | 0 | +232 | +276 | +313 | +242 | +203 | +56 | tbd | — | — |
+| total warnings | 478 | 478 | 456 | 447 | — | — | — | — | — | — |
+| `too_many_arguments` | 315 | 315 | 291 | 282 | — | — | — | — | — | — |
+| errors | 0 | 0 | 0 | 0 | — | — | — | — | — | — |
+| cumulative LOC delta | 0 | +232 | +10 | tbd | — | — | — | — | — | — |
 
 LOC deltas per commit (insertions − deletions, from `git show --stat`):
 
@@ -111,7 +111,8 @@ LOC deltas per commit (insertions − deletions, from `git show --stat`):
 | P1c | `60e2a81` | 121 | 192 | −71 | 4 |
 | P1d | `1cc57f8` | 112 | 151 | −39 | 4 |
 | P1e | `56af554` | 116 | 263 | −147 | 4 |
-| P1f | (pending) | tbd | tbd | tbd | 4 |
+| P1f | `f7b1229` | 114 | 160 | −46 | 4 |
+| P2a | (pending) | tbd | tbd | tbd | 9 |
 
 ## Non-goals
 

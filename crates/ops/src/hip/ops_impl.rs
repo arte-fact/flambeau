@@ -122,43 +122,31 @@ impl<'a> Ops for HipOps<'a> {
 
     fn mmvq_q4_0_row_tile_batched(
         &self,
-        weights: DevicePtr,
-        y_q8_1: DevicePtr,
-        dst: DevicePtr,
-        n_rows: usize,
-        k: usize,
-        n_slots: usize,
+        buffers: crate::MmvqBuffers,
+        shape: crate::MmvqBatchShape,
     ) -> Result<()> {
         super::qmatmul::mmvq_q4_0_row_tile_batched(
-            self.reg,
-            self.stream,
-            weights,
-            y_q8_1,
-            dst,
-            n_rows,
-            k,
-            n_slots,
+            crate::OpCtx {
+                reg: self.reg,
+                stream: self.stream,
+            },
+            buffers,
+            shape,
         )
     }
 
     fn mmvq_q8_0_row_tile_batched(
         &self,
-        weights: DevicePtr,
-        y_q8_1: DevicePtr,
-        dst: DevicePtr,
-        n_rows: usize,
-        k: usize,
-        n_slots: usize,
+        buffers: crate::MmvqBuffers,
+        shape: crate::MmvqBatchShape,
     ) -> Result<()> {
         super::qmatmul::mmvq_q8_0_row_tile_batched(
-            self.reg,
-            self.stream,
-            weights,
-            y_q8_1,
-            dst,
-            n_rows,
-            k,
-            n_slots,
+            crate::OpCtx {
+                reg: self.reg,
+                stream: self.stream,
+            },
+            buffers,
+            shape,
         )
     }
 
