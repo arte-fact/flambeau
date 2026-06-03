@@ -857,8 +857,7 @@ impl<H: TopologyHooks, S: StageHooks> ForwardCtx for ForwardEngine<'_, H, S> {
             input,
             weights,
             layer_idx,
-            positions,
-            slot_ids,
+            crate::core::TokenBatch { positions, slot_ids },
             next_norm,
         )
     }
@@ -879,9 +878,7 @@ impl<H: TopologyHooks, S: StageHooks> ForwardCtx for ForwardEngine<'_, H, S> {
             input,
             weights,
             layer_idx,
-            positions,
-            slot_ids,
-            prefill_rows,
+            crate::core::MixedBatch { positions, slot_ids, prefill_rows },
             next_norm,
         )
     }
@@ -901,8 +898,7 @@ impl<H: TopologyHooks, S: StageHooks> ForwardCtx for ForwardEngine<'_, H, S> {
             input,
             weights,
             layer_idx,
-            slot_ids,
-            prefill_rows,
+            crate::core::GdnMixedBatch { slot_ids, prefill_rows },
             next_norm,
         )
     }

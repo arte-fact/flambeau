@@ -45,10 +45,10 @@ pub fn gdn_layer_mixed_local<H: TopologyHooks>(
     input: &Tensor<F16>,
     weights: &GdnWeights,
     layer_idx: usize,
-    slot_ids: &[usize],
-    prefill_rows: usize,
+    batch: crate::core::GdnMixedBatch<'_>,
     next_norm: Option<&Tensor<F16>>,
 ) -> Result<Option<Tensor<F16>>> {
+    let crate::core::GdnMixedBatch { slot_ids, prefill_rows } = batch;
     state.pool.input_pre_normed = false;
     let hidden = state.hidden();
     let n_tokens = slot_ids.len();

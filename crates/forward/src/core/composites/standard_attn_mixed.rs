@@ -18,7 +18,7 @@ use anyhow::{bail, Context, Result};
 use flambeau_core::{CopyDirection, Device, DevicePtr};
 use flambeau_model_ops::{Tensor, F16, F32, I32, Q8_1};
 
-use crate::core::{CoreState, TopologyHooks};
+use crate::core::{CoreState, MixedBatch, TopologyHooks};
 use crate::ctx::AttnWeights;
 
 pub fn standard_attn_mixed_local<H: TopologyHooks>(
@@ -27,11 +27,10 @@ pub fn standard_attn_mixed_local<H: TopologyHooks>(
     input: &Tensor<F16>,
     weights: &AttnWeights,
     layer_idx: usize,
-    positions: &[usize],
-    slot_ids: &[usize],
-    prefill_rows: usize,
+    batch: MixedBatch<'_>,
     next_norm: Option<&Tensor<F16>>,
 ) -> Result<Option<Tensor<F16>>> {
+    let MixedBatch { positions, slot_ids, prefill_rows } = batch;
     let input_pre_normed = state.pool.input_pre_normed;
     state.pool.input_pre_normed = false;
     let hidden = state.hidden();
