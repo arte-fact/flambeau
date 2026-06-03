@@ -62,7 +62,11 @@ below is the corrected one.
 | P2c | `mmvq_q4_0_gate_up_{batched,row_tile_batched}` (siblings, share GateUpBatchShape) | ☑ done | 3 | trait (1), impl (1), hip/qmatmul.rs (2 free fns), 1 model-ops caller (delta_net) |
 | P2d | remaining single-weight non-batched (`mmvq_q4_0_t128`, `_warpcoop64`, `_kv_f16dst`) | ☐ pending | ~5 | same |
 | P2e | mmvq KV-out + `mmvq` generic + `mmvq_f16_direct` + `qmatmul` + `mmq` | ☐ pending | ~10 | same |
-| P2f | indexed_moe_mmvq + indexed_moe_mmq (MoE family) | ☐ pending (1st attempt reverted) | ~50 across 4 sub-slices | trait (~30 methods), impl (~30), hip/moe.rs (63 free fns), model-ops moe_experts.rs (~30 caller sites) |
+| P2f1 | Single-weight `indexed_moe_mmvq_*` (19 free fns + 16 trait + 16 impl + 21 callers) | ☑ done | ~35 | hip/moe.rs, ops_trait.rs, ops_impl.rs, model-ops/moe_experts.rs (incl. 2 macros) — driven by 3 awk scripts under scripts/migrate_moe_*.awk |
+| P2f2 | indexed_moe_mmvq gate-up (2 fns: `q4_0_gate_up`, `q8_0_gate_up`) | ☐ pending | ~6 | trait, impl, hip/moe.rs, model-ops/moe_experts.rs |
+| P2f3 | `indexed_moe_mmvq_q4_k_r2_sorted` + remaining single-weight (q5_k_gate_up etc) | ☐ pending | ~3 | same |
+| P2f4 | MMQ tile8 gate-up (11 fns — already uses `MoeShape`, needs buffer aggregate) | ☐ pending | ~25 | same |
+| P2f5 | MMQ tile8 down (11 fns — same as P2f4) | ☐ pending | ~25 | same |
 
 ### P2f attempt-and-revert notes (for next session)
 
@@ -125,10 +129,10 @@ Next-session restart plan:
 
 | Metric | At start | After P0 | After P1f | After P2a | After P2b | After P2c | After P2d | After P2e | After P2f | After … |
 |---|---|---|---|---|---|---|---|---|---|---|
-| total warnings | 478 | 478 | 456 | 447 | 437 | 434 | — | — | — | — |
-| `too_many_arguments` | 315 | 315 | 291 | 282 | 272 | 269 | — | — | — | — |
-| errors | 0 | 0 | 0 | 0 | 0 | 0 | — | — | — | — |
-| cumulative LOC delta | 0 | +232 | +10 | +12 | −136 | −162 | — | — | — | — |
+| total warnings | 478 | 478 | 456 | 447 | 437 | 434 | 413 | — | — | — |
+| `too_many_arguments` | 315 | 315 | 291 | 282 | 272 | 269 | 234 | — | — | — |
+| errors | 0 | 0 | 0 | 0 | 0 | 0 | 0 | — | — | — |
+| cumulative LOC delta | 0 | +232 | +10 | +12 | −136 | −162 | tbd | — | — | — |
 
 LOC deltas per commit (insertions − deletions, from `git show --stat`):
 
@@ -144,6 +148,7 @@ LOC deltas per commit (insertions − deletions, from `git show --stat`):
 | P2a | `760d53e` | 150 | 148 | +2 | 9 |
 | P2b | `46cd52e` | 128 | 276 | −148 | 10 |
 | P2c | `8c09856` | 45 | 71 | −26 | 3 |
+| P2f1 | (pending) | tbd | tbd | tbd | 35 |
 
 ## Non-goals
 

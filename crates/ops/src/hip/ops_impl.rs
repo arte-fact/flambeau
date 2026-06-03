@@ -1342,376 +1342,226 @@ impl<'a> Ops for HipOps<'a> {
 
     fn indexed_moe_mmvq_q4_k_r2(
         &self,
-        w: DevicePtr,
-        y: DevicePtr,
-        expert_ids: DevicePtr,
-        dst: DevicePtr,
-        n_rows: usize,
-        n_tokens: usize,
-        top_k: usize,
-        n_sb_per_row: usize,
+        buffers: crate::MoeMmvqBuffers,
+        shape: crate::MoeMmvqShape,
     ) -> Result<()> {
         super::moe::indexed_moe_mmvq_q4_k_r2(
-            self.reg,
-            self.stream,
-            w,
-            y,
-            expert_ids,
-            dst,
-            n_rows,
-            n_tokens,
-            top_k,
-            n_sb_per_row,
+            crate::OpCtx {
+                reg: self.reg,
+                stream: self.stream,
+            },
+            buffers,
+            shape,
         )
     }
 
     fn indexed_moe_mmvq_q6_k(
         &self,
-        w: DevicePtr,
-        y: DevicePtr,
-        expert_ids: DevicePtr,
-        dst: DevicePtr,
-        n_rows: usize,
-        n_tokens: usize,
-        top_k: usize,
-        n_sb_per_row: usize,
+        buffers: crate::MoeMmvqBuffers,
+        shape: crate::MoeMmvqShape,
     ) -> Result<()> {
         super::moe::indexed_moe_mmvq_q6_k(
-            self.reg,
-            self.stream,
-            w,
-            y,
-            expert_ids,
-            dst,
-            n_rows,
-            n_tokens,
-            top_k,
-            n_sb_per_row,
+            crate::OpCtx {
+                reg: self.reg,
+                stream: self.stream,
+            },
+            buffers,
+            shape,
         )
     }
 
     fn indexed_moe_mmvq_q5_k(
         &self,
-        w: DevicePtr,
-        y: DevicePtr,
-        expert_ids: DevicePtr,
-        dst: DevicePtr,
-        n_rows: usize,
-        n_tokens: usize,
-        top_k: usize,
-        n_sb_per_row: usize,
+        buffers: crate::MoeMmvqBuffers,
+        shape: crate::MoeMmvqShape,
     ) -> Result<()> {
         super::moe::indexed_moe_mmvq_q5_k(
-            self.reg,
-            self.stream,
-            w,
-            y,
-            expert_ids,
-            dst,
-            n_rows,
-            n_tokens,
-            top_k,
-            n_sb_per_row,
+            crate::OpCtx {
+                reg: self.reg,
+                stream: self.stream,
+            },
+            buffers,
+            shape,
         )
     }
 
     fn indexed_moe_mmvq_q3_k(
         &self,
-        w: DevicePtr,
-        y: DevicePtr,
-        expert_ids: DevicePtr,
-        dst: DevicePtr,
-        n_rows: usize,
-        n_tokens: usize,
-        top_k: usize,
-        n_sb_per_row: usize,
+        buffers: crate::MoeMmvqBuffers,
+        shape: crate::MoeMmvqShape,
     ) -> Result<()> {
         super::moe::indexed_moe_mmvq_q3_k(
-            self.reg,
-            self.stream,
-            w,
-            y,
-            expert_ids,
-            dst,
-            n_rows,
-            n_tokens,
-            top_k,
-            n_sb_per_row,
+            crate::OpCtx {
+                reg: self.reg,
+                stream: self.stream,
+            },
+            buffers,
+            shape,
         )
     }
 
     fn indexed_moe_mmvq_iq4_xs(
         &self,
-        w: DevicePtr,
-        y: DevicePtr,
-        expert_ids: DevicePtr,
-        dst: DevicePtr,
-        n_rows: usize,
-        n_tokens: usize,
-        top_k: usize,
-        n_sb_per_row: usize,
+        buffers: crate::MoeMmvqBuffers,
+        shape: crate::MoeMmvqShape,
     ) -> Result<()> {
         super::moe::indexed_moe_mmvq_iq4_xs(
-            self.reg,
-            self.stream,
-            w,
-            y,
-            expert_ids,
-            dst,
-            n_rows,
-            n_tokens,
-            top_k,
-            n_sb_per_row,
+            crate::OpCtx {
+                reg: self.reg,
+                stream: self.stream,
+            },
+            buffers,
+            shape,
         )
     }
 
     fn indexed_moe_mmvq_iq4_nl(
         &self,
-        w: DevicePtr,
-        y: DevicePtr,
-        expert_ids: DevicePtr,
-        dst: DevicePtr,
-        n_rows: usize,
-        n_tokens: usize,
-        top_k: usize,
-        n_sb_per_row: usize,
+        buffers: crate::MoeMmvqBuffers,
+        shape: crate::MoeMmvqShape,
     ) -> Result<()> {
         super::moe::indexed_moe_mmvq_iq4_nl(
-            self.reg,
-            self.stream,
-            w,
-            y,
-            expert_ids,
-            dst,
-            n_rows,
-            n_tokens,
-            top_k,
-            n_sb_per_row,
+            crate::OpCtx {
+                reg: self.reg,
+                stream: self.stream,
+            },
+            buffers,
+            shape,
         )
     }
 
     fn indexed_moe_mmvq_iq3_xxs(
         &self,
-        w: DevicePtr,
-        y: DevicePtr,
-        expert_ids: DevicePtr,
-        dst: DevicePtr,
-        n_rows: usize,
-        n_tokens: usize,
-        top_k: usize,
-        n_sb_per_row: usize,
+        buffers: crate::MoeMmvqBuffers,
+        shape: crate::MoeMmvqShape,
     ) -> Result<()> {
         super::moe::indexed_moe_mmvq_iq3_xxs(
-            self.reg,
-            self.stream,
-            w,
-            y,
-            expert_ids,
-            dst,
-            n_rows,
-            n_tokens,
-            top_k,
-            n_sb_per_row,
+            crate::OpCtx {
+                reg: self.reg,
+                stream: self.stream,
+            },
+            buffers,
+            shape,
         )
     }
 
     fn indexed_moe_mmvq_iq3_s(
         &self,
-        w: DevicePtr,
-        y: DevicePtr,
-        expert_ids: DevicePtr,
-        dst: DevicePtr,
-        n_rows: usize,
-        n_tokens: usize,
-        top_k: usize,
-        n_sb_per_row: usize,
+        buffers: crate::MoeMmvqBuffers,
+        shape: crate::MoeMmvqShape,
     ) -> Result<()> {
         super::moe::indexed_moe_mmvq_iq3_s(
-            self.reg,
-            self.stream,
-            w,
-            y,
-            expert_ids,
-            dst,
-            n_rows,
-            n_tokens,
-            top_k,
-            n_sb_per_row,
+            crate::OpCtx {
+                reg: self.reg,
+                stream: self.stream,
+            },
+            buffers,
+            shape,
         )
     }
 
     fn indexed_moe_mmvq_iq2_xxs(
         &self,
-        w: DevicePtr,
-        y: DevicePtr,
-        expert_ids: DevicePtr,
-        dst: DevicePtr,
-        n_rows: usize,
-        n_tokens: usize,
-        top_k: usize,
-        n_sb_per_row: usize,
+        buffers: crate::MoeMmvqBuffers,
+        shape: crate::MoeMmvqShape,
     ) -> Result<()> {
         super::moe::indexed_moe_mmvq_iq2_xxs(
-            self.reg,
-            self.stream,
-            w,
-            y,
-            expert_ids,
-            dst,
-            n_rows,
-            n_tokens,
-            top_k,
-            n_sb_per_row,
+            crate::OpCtx {
+                reg: self.reg,
+                stream: self.stream,
+            },
+            buffers,
+            shape,
         )
     }
 
     fn indexed_moe_mmvq_iq2_xs(
         &self,
-        w: DevicePtr,
-        y: DevicePtr,
-        expert_ids: DevicePtr,
-        dst: DevicePtr,
-        n_rows: usize,
-        n_tokens: usize,
-        top_k: usize,
-        n_sb_per_row: usize,
+        buffers: crate::MoeMmvqBuffers,
+        shape: crate::MoeMmvqShape,
     ) -> Result<()> {
         super::moe::indexed_moe_mmvq_iq2_xs(
-            self.reg,
-            self.stream,
-            w,
-            y,
-            expert_ids,
-            dst,
-            n_rows,
-            n_tokens,
-            top_k,
-            n_sb_per_row,
+            crate::OpCtx {
+                reg: self.reg,
+                stream: self.stream,
+            },
+            buffers,
+            shape,
         )
     }
 
     fn indexed_moe_mmvq_iq2_s(
         &self,
-        w: DevicePtr,
-        y: DevicePtr,
-        expert_ids: DevicePtr,
-        dst: DevicePtr,
-        n_rows: usize,
-        n_tokens: usize,
-        top_k: usize,
-        n_sb_per_row: usize,
+        buffers: crate::MoeMmvqBuffers,
+        shape: crate::MoeMmvqShape,
     ) -> Result<()> {
         super::moe::indexed_moe_mmvq_iq2_s(
-            self.reg,
-            self.stream,
-            w,
-            y,
-            expert_ids,
-            dst,
-            n_rows,
-            n_tokens,
-            top_k,
-            n_sb_per_row,
+            crate::OpCtx {
+                reg: self.reg,
+                stream: self.stream,
+            },
+            buffers,
+            shape,
         )
     }
 
     fn indexed_moe_mmvq_iq1_s(
         &self,
-        w: DevicePtr,
-        y: DevicePtr,
-        expert_ids: DevicePtr,
-        dst: DevicePtr,
-        n_rows: usize,
-        n_tokens: usize,
-        top_k: usize,
-        n_sb_per_row: usize,
+        buffers: crate::MoeMmvqBuffers,
+        shape: crate::MoeMmvqShape,
     ) -> Result<()> {
         super::moe::indexed_moe_mmvq_iq1_s(
-            self.reg,
-            self.stream,
-            w,
-            y,
-            expert_ids,
-            dst,
-            n_rows,
-            n_tokens,
-            top_k,
-            n_sb_per_row,
+            crate::OpCtx {
+                reg: self.reg,
+                stream: self.stream,
+            },
+            buffers,
+            shape,
         )
     }
 
     fn indexed_moe_mmvq_iq1_m(
         &self,
-        w: DevicePtr,
-        y: DevicePtr,
-        expert_ids: DevicePtr,
-        dst: DevicePtr,
-        n_rows: usize,
-        n_tokens: usize,
-        top_k: usize,
-        n_sb_per_row: usize,
+        buffers: crate::MoeMmvqBuffers,
+        shape: crate::MoeMmvqShape,
     ) -> Result<()> {
         super::moe::indexed_moe_mmvq_iq1_m(
-            self.reg,
-            self.stream,
-            w,
-            y,
-            expert_ids,
-            dst,
-            n_rows,
-            n_tokens,
-            top_k,
-            n_sb_per_row,
+            crate::OpCtx {
+                reg: self.reg,
+                stream: self.stream,
+            },
+            buffers,
+            shape,
         )
     }
 
     fn indexed_moe_mmvq_q4_0(
         &self,
-        w: DevicePtr,
-        y: DevicePtr,
-        expert_ids: DevicePtr,
-        dst: DevicePtr,
-        n_rows: usize,
-        n_tokens: usize,
-        top_k: usize,
-        n_blocks_per_row: usize,
+        buffers: crate::MoeMmvqBuffers,
+        shape: crate::MoeMmvqShape,
     ) -> Result<()> {
         super::moe::indexed_moe_mmvq_q4_0(
-            self.reg,
-            self.stream,
-            w,
-            y,
-            expert_ids,
-            dst,
-            n_rows,
-            n_tokens,
-            top_k,
-            n_blocks_per_row,
+            crate::OpCtx {
+                reg: self.reg,
+                stream: self.stream,
+            },
+            buffers,
+            shape,
         )
     }
 
     fn indexed_moe_mmvq_q4_1(
         &self,
-        w: DevicePtr,
-        y: DevicePtr,
-        expert_ids: DevicePtr,
-        dst: DevicePtr,
-        n_rows: usize,
-        n_tokens: usize,
-        top_k: usize,
-        n_blocks_per_row: usize,
+        buffers: crate::MoeMmvqBuffers,
+        shape: crate::MoeMmvqShape,
     ) -> Result<()> {
         super::moe::indexed_moe_mmvq_q4_1(
-            self.reg,
-            self.stream,
-            w,
-            y,
-            expert_ids,
-            dst,
-            n_rows,
-            n_tokens,
-            top_k,
-            n_blocks_per_row,
+            crate::OpCtx {
+                reg: self.reg,
+                stream: self.stream,
+            },
+            buffers,
+            shape,
         )
     }
 
@@ -1746,26 +1596,16 @@ impl<'a> Ops for HipOps<'a> {
 
     fn indexed_moe_mmvq_q8_0(
         &self,
-        w: DevicePtr,
-        y: DevicePtr,
-        expert_ids: DevicePtr,
-        dst: DevicePtr,
-        n_rows: usize,
-        n_tokens: usize,
-        top_k: usize,
-        n_blocks_per_row: usize,
+        buffers: crate::MoeMmvqBuffers,
+        shape: crate::MoeMmvqShape,
     ) -> Result<()> {
         super::moe::indexed_moe_mmvq_q8_0(
-            self.reg,
-            self.stream,
-            w,
-            y,
-            expert_ids,
-            dst,
-            n_rows,
-            n_tokens,
-            top_k,
-            n_blocks_per_row,
+            crate::OpCtx {
+                reg: self.reg,
+                stream: self.stream,
+            },
+            buffers,
+            shape,
         )
     }
 

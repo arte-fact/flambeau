@@ -482,12 +482,26 @@ impl MoeExperts {
              $nb:expr, $inter:ident, $n_tokens:ident, $top_k:ident) => {{
                 let nb = $nb;
                 $ops.$op(
-                    $self.ffn_gate_exps.ptr, $scratch.x_q8_1, $scratch.expert_ids,
-                    $scratch.gate_out_f32, $inter, $n_tokens, $top_k, nb,
+                    flambeau_ops::MoeMmvqBuffers {
+                        weights: $self.ffn_gate_exps.ptr,
+                        act: $scratch.x_q8_1,
+                        expert_ids: $scratch.expert_ids,
+                        dst: $scratch.gate_out_f32,
+                    },
+                    flambeau_ops::MoeMmvqShape {
+                        n_rows: $inter, n_tokens: $n_tokens, top_k: $top_k, n_sb_per_row: nb,
+                    },
                 ).context(concat!("indexed_moe gate ", $tag, " split"))?;
                 $ops.$op(
-                    $self.ffn_up_exps.ptr, $scratch.x_q8_1, $scratch.expert_ids,
-                    $scratch.up_out_f32, $inter, $n_tokens, $top_k, nb,
+                    flambeau_ops::MoeMmvqBuffers {
+                        weights: $self.ffn_up_exps.ptr,
+                        act: $scratch.x_q8_1,
+                        expert_ids: $scratch.expert_ids,
+                        dst: $scratch.up_out_f32,
+                    },
+                    flambeau_ops::MoeMmvqShape {
+                        n_rows: $inter, n_tokens: $n_tokens, top_k: $top_k, n_sb_per_row: nb,
+                    },
                 ).context(concat!("indexed_moe up ", $tag, " split"))
             }};
         }
@@ -543,75 +557,99 @@ impl MoeExperts {
             QDtype::Q3_K => {
                 let nb = hidden / QK_K;
                 ops.indexed_moe_mmvq_q3_k(
-                    self.ffn_gate_exps.ptr,
-                    scratch.x_q8_1,
-                    scratch.expert_ids,
-                    scratch.gate_out_f32,
-                    inter,
-                    n_tokens,
-                    top_k,
-                    nb,
+                    flambeau_ops::MoeMmvqBuffers {
+                        weights: self.ffn_gate_exps.ptr,
+                        act: scratch.x_q8_1,
+                        expert_ids: scratch.expert_ids,
+                        dst: scratch.gate_out_f32,
+                    },
+                    flambeau_ops::MoeMmvqShape {
+                        n_rows: inter,
+                        n_tokens: n_tokens,
+                        top_k: top_k,
+                        n_sb_per_row: nb,
+                    },
                 )
                 .context("indexed_moe gate q3_k split")?;
                 ops.indexed_moe_mmvq_q3_k(
-                    self.ffn_up_exps.ptr,
-                    scratch.x_q8_1,
-                    scratch.expert_ids,
-                    scratch.up_out_f32,
-                    inter,
-                    n_tokens,
-                    top_k,
-                    nb,
+                    flambeau_ops::MoeMmvqBuffers {
+                        weights: self.ffn_up_exps.ptr,
+                        act: scratch.x_q8_1,
+                        expert_ids: scratch.expert_ids,
+                        dst: scratch.up_out_f32,
+                    },
+                    flambeau_ops::MoeMmvqShape {
+                        n_rows: inter,
+                        n_tokens: n_tokens,
+                        top_k: top_k,
+                        n_sb_per_row: nb,
+                    },
                 )
                 .context("indexed_moe up q3_k split")
             }
             QDtype::Q5_K => {
                 let nb = hidden / QK_K;
                 ops.indexed_moe_mmvq_q5_k(
-                    self.ffn_gate_exps.ptr,
-                    scratch.x_q8_1,
-                    scratch.expert_ids,
-                    scratch.gate_out_f32,
-                    inter,
-                    n_tokens,
-                    top_k,
-                    nb,
+                    flambeau_ops::MoeMmvqBuffers {
+                        weights: self.ffn_gate_exps.ptr,
+                        act: scratch.x_q8_1,
+                        expert_ids: scratch.expert_ids,
+                        dst: scratch.gate_out_f32,
+                    },
+                    flambeau_ops::MoeMmvqShape {
+                        n_rows: inter,
+                        n_tokens: n_tokens,
+                        top_k: top_k,
+                        n_sb_per_row: nb,
+                    },
                 )
                 .context("indexed_moe gate q5_k split")?;
                 ops.indexed_moe_mmvq_q5_k(
-                    self.ffn_up_exps.ptr,
-                    scratch.x_q8_1,
-                    scratch.expert_ids,
-                    scratch.up_out_f32,
-                    inter,
-                    n_tokens,
-                    top_k,
-                    nb,
+                    flambeau_ops::MoeMmvqBuffers {
+                        weights: self.ffn_up_exps.ptr,
+                        act: scratch.x_q8_1,
+                        expert_ids: scratch.expert_ids,
+                        dst: scratch.up_out_f32,
+                    },
+                    flambeau_ops::MoeMmvqShape {
+                        n_rows: inter,
+                        n_tokens: n_tokens,
+                        top_k: top_k,
+                        n_sb_per_row: nb,
+                    },
                 )
                 .context("indexed_moe up q5_k split")
             }
             QDtype::Q6_K => {
                 let nb = hidden / QK_K;
                 ops.indexed_moe_mmvq_q6_k(
-                    self.ffn_gate_exps.ptr,
-                    scratch.x_q8_1,
-                    scratch.expert_ids,
-                    scratch.gate_out_f32,
-                    inter,
-                    n_tokens,
-                    top_k,
-                    nb,
+                    flambeau_ops::MoeMmvqBuffers {
+                        weights: self.ffn_gate_exps.ptr,
+                        act: scratch.x_q8_1,
+                        expert_ids: scratch.expert_ids,
+                        dst: scratch.gate_out_f32,
+                    },
+                    flambeau_ops::MoeMmvqShape {
+                        n_rows: inter,
+                        n_tokens: n_tokens,
+                        top_k: top_k,
+                        n_sb_per_row: nb,
+                    },
                 )
                 .context("indexed_moe gate q6_k split")?;
                 ops.indexed_moe_mmvq_q6_k(
-                    self.ffn_up_exps.ptr,
-                    scratch.x_q8_1,
-                    scratch.expert_ids,
-                    scratch.up_out_f32,
-                    inter,
-                    n_tokens,
-                    top_k,
-                    nb,
+                    flambeau_ops::MoeMmvqBuffers {
+                        weights: self.ffn_up_exps.ptr,
+                        act: scratch.x_q8_1,
+                        expert_ids: scratch.expert_ids,
+                        dst: scratch.up_out_f32,
+                    },
+                    flambeau_ops::MoeMmvqShape {
+                        n_rows: inter,
+                        n_tokens: n_tokens,
+                        top_k: top_k,
+                        n_sb_per_row: nb,
+                    },
                 )
                 .context("indexed_moe up q6_k split")
             }
@@ -641,9 +679,15 @@ impl MoeExperts {
              $nb:expr, $hidden:ident, $n_tokens_eff:ident, $top_k_inner:ident) => {{
                 let nb = $nb;
                 $ops.$op(
-                    $self.ffn_down_exps.ptr, $scratch.activated_q8_1,
-                    $scratch.expert_ids, $scratch.down_f32,
-                    $hidden, $n_tokens_eff, $top_k_inner, nb,
+                    flambeau_ops::MoeMmvqBuffers {
+                        weights: $self.ffn_down_exps.ptr,
+                        act: $scratch.activated_q8_1,
+                        expert_ids: $scratch.expert_ids,
+                        dst: $scratch.down_f32,
+                    },
+                    flambeau_ops::MoeMmvqShape {
+                        n_rows: $hidden, n_tokens: $n_tokens_eff, top_k: $top_k_inner, n_sb_per_row: nb,
+                    },
                 ).context(concat!("indexed_moe down ", $tag))
             }};
         }
@@ -651,98 +695,126 @@ impl MoeExperts {
             QDtype::Q4_K => {
                 let nb = inter / QK_K;
                 ops.indexed_moe_mmvq_q4_k_r2(
-                    self.ffn_down_exps.ptr,
-                    scratch.activated_q8_1,
-                    scratch.expert_ids,
-                    scratch.down_f32,
-                    hidden,
-                    n_tokens_eff,
-                    top_k_inner,
-                    nb,
+                    flambeau_ops::MoeMmvqBuffers {
+                        weights: self.ffn_down_exps.ptr,
+                        act: scratch.activated_q8_1,
+                        expert_ids: scratch.expert_ids,
+                        dst: scratch.down_f32,
+                    },
+                    flambeau_ops::MoeMmvqShape {
+                        n_rows: hidden,
+                        n_tokens: n_tokens_eff,
+                        top_k: top_k_inner,
+                        n_sb_per_row: nb,
+                    },
                 )
                 .context("indexed_moe down q4_k r2")
             }
             QDtype::Q5_K => {
                 let nb = inter / QK_K;
                 ops.indexed_moe_mmvq_q5_k(
-                    self.ffn_down_exps.ptr,
-                    scratch.activated_q8_1,
-                    scratch.expert_ids,
-                    scratch.down_f32,
-                    hidden,
-                    n_tokens_eff,
-                    top_k_inner,
-                    nb,
+                    flambeau_ops::MoeMmvqBuffers {
+                        weights: self.ffn_down_exps.ptr,
+                        act: scratch.activated_q8_1,
+                        expert_ids: scratch.expert_ids,
+                        dst: scratch.down_f32,
+                    },
+                    flambeau_ops::MoeMmvqShape {
+                        n_rows: hidden,
+                        n_tokens: n_tokens_eff,
+                        top_k: top_k_inner,
+                        n_sb_per_row: nb,
+                    },
                 )
                 .context("indexed_moe down q5_k")
             }
             QDtype::Q6_K => {
                 let nb = inter / QK_K;
                 ops.indexed_moe_mmvq_q6_k(
-                    self.ffn_down_exps.ptr,
-                    scratch.activated_q8_1,
-                    scratch.expert_ids,
-                    scratch.down_f32,
-                    hidden,
-                    n_tokens_eff,
-                    top_k_inner,
-                    nb,
+                    flambeau_ops::MoeMmvqBuffers {
+                        weights: self.ffn_down_exps.ptr,
+                        act: scratch.activated_q8_1,
+                        expert_ids: scratch.expert_ids,
+                        dst: scratch.down_f32,
+                    },
+                    flambeau_ops::MoeMmvqShape {
+                        n_rows: hidden,
+                        n_tokens: n_tokens_eff,
+                        top_k: top_k_inner,
+                        n_sb_per_row: nb,
+                    },
                 )
                 .context("indexed_moe down q6_k")
             }
             QDtype::Q3_K => {
                 let nb = inter / QK_K;
                 ops.indexed_moe_mmvq_q3_k(
-                    self.ffn_down_exps.ptr,
-                    scratch.activated_q8_1,
-                    scratch.expert_ids,
-                    scratch.down_f32,
-                    hidden,
-                    n_tokens_eff,
-                    top_k_inner,
-                    nb,
+                    flambeau_ops::MoeMmvqBuffers {
+                        weights: self.ffn_down_exps.ptr,
+                        act: scratch.activated_q8_1,
+                        expert_ids: scratch.expert_ids,
+                        dst: scratch.down_f32,
+                    },
+                    flambeau_ops::MoeMmvqShape {
+                        n_rows: hidden,
+                        n_tokens: n_tokens_eff,
+                        top_k: top_k_inner,
+                        n_sb_per_row: nb,
+                    },
                 )
                 .context("indexed_moe down q3_k")
             }
             QDtype::Q8_0 => {
                 let nb = inter / 32;
                 ops.indexed_moe_mmvq_q8_0(
-                    self.ffn_down_exps.ptr,
-                    scratch.activated_q8_1,
-                    scratch.expert_ids,
-                    scratch.down_f32,
-                    hidden,
-                    n_tokens_eff,
-                    top_k_inner,
-                    nb,
+                    flambeau_ops::MoeMmvqBuffers {
+                        weights: self.ffn_down_exps.ptr,
+                        act: scratch.activated_q8_1,
+                        expert_ids: scratch.expert_ids,
+                        dst: scratch.down_f32,
+                    },
+                    flambeau_ops::MoeMmvqShape {
+                        n_rows: hidden,
+                        n_tokens: n_tokens_eff,
+                        top_k: top_k_inner,
+                        n_sb_per_row: nb,
+                    },
                 )
                 .context("indexed_moe down q8_0")
             }
             QDtype::Q4_0 => {
                 let nb = inter / 32;
                 ops.indexed_moe_mmvq_q4_0(
-                    self.ffn_down_exps.ptr,
-                    scratch.activated_q8_1,
-                    scratch.expert_ids,
-                    scratch.down_f32,
-                    hidden,
-                    n_tokens_eff,
-                    top_k_inner,
-                    nb,
+                    flambeau_ops::MoeMmvqBuffers {
+                        weights: self.ffn_down_exps.ptr,
+                        act: scratch.activated_q8_1,
+                        expert_ids: scratch.expert_ids,
+                        dst: scratch.down_f32,
+                    },
+                    flambeau_ops::MoeMmvqShape {
+                        n_rows: hidden,
+                        n_tokens: n_tokens_eff,
+                        top_k: top_k_inner,
+                        n_sb_per_row: nb,
+                    },
                 )
                 .context("indexed_moe down q4_0")
             }
             QDtype::Q4_1 => {
                 let nb = inter / 32;
                 ops.indexed_moe_mmvq_q4_1(
-                    self.ffn_down_exps.ptr,
-                    scratch.activated_q8_1,
-                    scratch.expert_ids,
-                    scratch.down_f32,
-                    hidden,
-                    n_tokens_eff,
-                    top_k_inner,
-                    nb,
+                    flambeau_ops::MoeMmvqBuffers {
+                        weights: self.ffn_down_exps.ptr,
+                        act: scratch.activated_q8_1,
+                        expert_ids: scratch.expert_ids,
+                        dst: scratch.down_f32,
+                    },
+                    flambeau_ops::MoeMmvqShape {
+                        n_rows: hidden,
+                        n_tokens: n_tokens_eff,
+                        top_k: top_k_inner,
+                        n_sb_per_row: nb,
+                    },
                 )
                 .context("indexed_moe down q4_1")
             }
@@ -1798,25 +1870,33 @@ impl MoeExperts {
             QDtype::Q8_0 => {
                 let nb = hidden / 32;
                 ops.indexed_moe_mmvq_q8_0(
-                    self.ffn_gate_exps.ptr,
-                    scratch.x_q8_1,
-                    scratch.expert_ids,
-                    scratch.gate_out_f32,
-                    inter,
-                    prompt_len,
-                    top_k,
-                    nb,
+                    flambeau_ops::MoeMmvqBuffers {
+                        weights: self.ffn_gate_exps.ptr,
+                        act: scratch.x_q8_1,
+                        expert_ids: scratch.expert_ids,
+                        dst: scratch.gate_out_f32,
+                    },
+                    flambeau_ops::MoeMmvqShape {
+                        n_rows: inter,
+                        n_tokens: prompt_len,
+                        top_k: top_k,
+                        n_sb_per_row: nb,
+                    },
                 )
                 .context("prefill indexed_moe gate q8_0 mmvq")?;
                 ops.indexed_moe_mmvq_q8_0(
-                    self.ffn_up_exps.ptr,
-                    scratch.x_q8_1,
-                    scratch.expert_ids,
-                    scratch.up_out_f32,
-                    inter,
-                    prompt_len,
-                    top_k,
-                    nb,
+                    flambeau_ops::MoeMmvqBuffers {
+                        weights: self.ffn_up_exps.ptr,
+                        act: scratch.x_q8_1,
+                        expert_ids: scratch.expert_ids,
+                        dst: scratch.up_out_f32,
+                    },
+                    flambeau_ops::MoeMmvqShape {
+                        n_rows: inter,
+                        n_tokens: prompt_len,
+                        top_k: top_k,
+                        n_sb_per_row: nb,
+                    },
                 )
                 .context("prefill indexed_moe up q8_0 mmvq")
             }
@@ -1854,84 +1934,108 @@ impl MoeExperts {
             QDtype::Q4_K => {
                 let nb = inter / QK_K;
                 ops.indexed_moe_mmvq_q4_k_r2(
-                    self.ffn_down_exps.ptr,
-                    scratch.activated_q8_1,
-                    scratch.expert_ids,
-                    scratch.down_f32,
-                    hidden,
-                    n_pairs,
-                    1,
-                    nb,
+                    flambeau_ops::MoeMmvqBuffers {
+                        weights: self.ffn_down_exps.ptr,
+                        act: scratch.activated_q8_1,
+                        expert_ids: scratch.expert_ids,
+                        dst: scratch.down_f32,
+                    },
+                    flambeau_ops::MoeMmvqShape {
+                        n_rows: hidden,
+                        n_tokens: n_pairs,
+                        top_k: 1,
+                        n_sb_per_row: nb,
+                    },
                 )
                 .context("prefill indexed_moe down q4_k r2")
             }
             QDtype::Q5_K => {
                 let nb = inter / QK_K;
                 ops.indexed_moe_mmvq_q5_k(
-                    self.ffn_down_exps.ptr,
-                    scratch.activated_q8_1,
-                    scratch.expert_ids,
-                    scratch.down_f32,
-                    hidden,
-                    n_pairs,
-                    1,
-                    nb,
+                    flambeau_ops::MoeMmvqBuffers {
+                        weights: self.ffn_down_exps.ptr,
+                        act: scratch.activated_q8_1,
+                        expert_ids: scratch.expert_ids,
+                        dst: scratch.down_f32,
+                    },
+                    flambeau_ops::MoeMmvqShape {
+                        n_rows: hidden,
+                        n_tokens: n_pairs,
+                        top_k: 1,
+                        n_sb_per_row: nb,
+                    },
                 )
                 .context("prefill indexed_moe down q5_k mmvq")
             }
             QDtype::Q6_K => {
                 let nb = inter / QK_K;
                 ops.indexed_moe_mmvq_q6_k(
-                    self.ffn_down_exps.ptr,
-                    scratch.activated_q8_1,
-                    scratch.expert_ids,
-                    scratch.down_f32,
-                    hidden,
-                    n_pairs,
-                    1,
-                    nb,
+                    flambeau_ops::MoeMmvqBuffers {
+                        weights: self.ffn_down_exps.ptr,
+                        act: scratch.activated_q8_1,
+                        expert_ids: scratch.expert_ids,
+                        dst: scratch.down_f32,
+                    },
+                    flambeau_ops::MoeMmvqShape {
+                        n_rows: hidden,
+                        n_tokens: n_pairs,
+                        top_k: 1,
+                        n_sb_per_row: nb,
+                    },
                 )
                 .context("prefill indexed_moe down q6_k mmvq")
             }
             QDtype::Q8_0 => {
                 let nb = inter / 32;
                 ops.indexed_moe_mmvq_q8_0(
-                    self.ffn_down_exps.ptr,
-                    scratch.activated_q8_1,
-                    scratch.expert_ids,
-                    scratch.down_f32,
-                    hidden,
-                    n_pairs,
-                    1,
-                    nb,
+                    flambeau_ops::MoeMmvqBuffers {
+                        weights: self.ffn_down_exps.ptr,
+                        act: scratch.activated_q8_1,
+                        expert_ids: scratch.expert_ids,
+                        dst: scratch.down_f32,
+                    },
+                    flambeau_ops::MoeMmvqShape {
+                        n_rows: hidden,
+                        n_tokens: n_pairs,
+                        top_k: 1,
+                        n_sb_per_row: nb,
+                    },
                 )
                 .context("prefill indexed_moe down q8_0 mmvq")
             }
             QDtype::Q4_0 => {
                 let nb = inter / 32;
                 ops.indexed_moe_mmvq_q4_0(
-                    self.ffn_down_exps.ptr,
-                    scratch.activated_q8_1,
-                    scratch.expert_ids,
-                    scratch.down_f32,
-                    hidden,
-                    n_pairs,
-                    1,
-                    nb,
+                    flambeau_ops::MoeMmvqBuffers {
+                        weights: self.ffn_down_exps.ptr,
+                        act: scratch.activated_q8_1,
+                        expert_ids: scratch.expert_ids,
+                        dst: scratch.down_f32,
+                    },
+                    flambeau_ops::MoeMmvqShape {
+                        n_rows: hidden,
+                        n_tokens: n_pairs,
+                        top_k: 1,
+                        n_sb_per_row: nb,
+                    },
                 )
                 .context("prefill indexed_moe down q4_0 mmvq")
             }
             QDtype::Q4_1 => {
                 let nb = inter / 32;
                 ops.indexed_moe_mmvq_q4_1(
-                    self.ffn_down_exps.ptr,
-                    scratch.activated_q8_1,
-                    scratch.expert_ids,
-                    scratch.down_f32,
-                    hidden,
-                    n_pairs,
-                    1,
-                    nb,
+                    flambeau_ops::MoeMmvqBuffers {
+                        weights: self.ffn_down_exps.ptr,
+                        act: scratch.activated_q8_1,
+                        expert_ids: scratch.expert_ids,
+                        dst: scratch.down_f32,
+                    },
+                    flambeau_ops::MoeMmvqShape {
+                        n_rows: hidden,
+                        n_tokens: n_pairs,
+                        top_k: 1,
+                        n_sb_per_row: nb,
+                    },
                 )
                 .context("prefill indexed_moe down q4_1 mmvq")
             }

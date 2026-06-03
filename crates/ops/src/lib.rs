@@ -37,7 +37,8 @@ pub use sig::{
     AttnDecodeShape, AttnDecodeSlots, AttnKnobs, AttnPagedDecodeBuffers, AttnPagedPrefillBuffers,
     AttnPrefillPagedShape, AttnPrefillShape, AttnPrefillSlots, AttnSplitkPartials,
     AttnSplitkShape, MatmulShape, MmvqBatchShape, MmvqBuffers, MmvqGateUpBatchShape,
-    MmvqGateUpBuffers, MmvqGateUpShape, MmvqShape, NormBuffers, NormResidual, OpCtx,
+    MmvqGateUpBuffers, MmvqGateUpShape, MmvqShape, MoeMmvqBuffers, MoeMmvqGateUpBuffers,
+    MoeMmvqShape, MoeMmvqSortedBuffers, NormBuffers, NormResidual, OpCtx,
 };
 
 #[cfg(feature = "hip")]

@@ -146,17 +146,12 @@ pub fn apply_per_expert_scale_f32(
 /// - `expert_ids[n_tokens, top_k]` i32
 /// - `dst[n_tokens, top_k, n_rows]` F32
 pub fn indexed_moe_mmvq_q4_k_r2(
-    reg: &OpsRegistry,
-    stream: &HipStream,
-    w: DevicePtr,
-    y: DevicePtr,
-    expert_ids: DevicePtr,
-    dst: DevicePtr,
-    n_rows: usize,
-    n_tokens: usize,
-    top_k: usize,
-    n_sb_per_row: usize,
+    ctx: crate::OpCtx<'_>,
+    buffers: crate::MoeMmvqBuffers,
+    shape: crate::MoeMmvqShape,
 ) -> Result<()> {
+    let crate::MoeMmvqBuffers { weights: w, act: y, expert_ids, dst } = buffers;
+    let crate::MoeMmvqShape { n_rows, n_tokens, top_k, n_sb_per_row } = shape;
     // productisation: shape-aware — r4 (quarter-wave) at prefill
     // (n_tokens ≥ 32, launch-overhead-bound), r2 (half-wave) at decode
     // (n_tokens < 32, per-thread-work-bound). Measured r4 +8 % prefill but
@@ -175,7 +170,7 @@ pub fn indexed_moe_mmvq_q4_k_r2(
             2u32,
         )
     };
-    let module = reg.expect_module(stem)?;
+    let module = ctx.reg.expect_module(stem)?;
     let kernel = module.kernel(entry)?;
 
     let n_rows_i = n_rows as i32;
@@ -201,25 +196,20 @@ pub fn indexed_moe_mmvq_q4_k_r2(
         block: (64, 1, 1),
         shared_bytes: 0,
     };
-    unsafe { kernel.launch(stream, cfg, args)? };
+    unsafe { kernel.launch(ctx.stream, cfg, args)? };
     Ok(())
 }
 
 /// Q3_K MoE MMVQ. Routes through `indexed_moe_mmvq_q3_k_r2_dp4a`:
 /// wave64, 2 rows per block, half-warp DPP reduce.
 pub fn indexed_moe_mmvq_q3_k(
-    reg: &OpsRegistry,
-    stream: &HipStream,
-    w: DevicePtr,
-    y: DevicePtr,
-    expert_ids: DevicePtr,
-    dst: DevicePtr,
-    n_rows: usize,
-    n_tokens: usize,
-    top_k: usize,
-    n_sb_per_row: usize,
+    ctx: crate::OpCtx<'_>,
+    buffers: crate::MoeMmvqBuffers,
+    shape: crate::MoeMmvqShape,
 ) -> Result<()> {
-    let module = reg.expect_module("indexed_moe_mmvq_q3_k_r2_dp4a")?;
+    let crate::MoeMmvqBuffers { weights: w, act: y, expert_ids, dst } = buffers;
+    let crate::MoeMmvqShape { n_rows, n_tokens, top_k, n_sb_per_row } = shape;
+    let module = ctx.reg.expect_module("indexed_moe_mmvq_q3_k_r2_dp4a")?;
     let kernel = module.kernel("flambeau_indexed_moe_mmvq_q3_k_r2_dp4a_q8_1")?;
     let n_rows_i = n_rows as i32;
     let n_tokens_i = n_tokens as i32;
@@ -244,7 +234,7 @@ pub fn indexed_moe_mmvq_q3_k(
         block: (64, 1, 1),
         shared_bytes: 0,
     };
-    unsafe { kernel.launch(stream, cfg, args)? };
+    unsafe { kernel.launch(ctx.stream, cfg, args)? };
     Ok(())
 }
 
@@ -253,18 +243,13 @@ pub fn indexed_moe_mmvq_q3_k(
 /// contract as `indexed_moe_mmvq_q4_k`; weights are Q2_K super-blocks
 /// (affine, packed 4-bit (scale, min)).
 pub fn indexed_moe_mmvq_q2_k(
-    reg: &OpsRegistry,
-    stream: &HipStream,
-    w: DevicePtr,
-    y: DevicePtr,
-    expert_ids: DevicePtr,
-    dst: DevicePtr,
-    n_rows: usize,
-    n_tokens: usize,
-    top_k: usize,
-    n_sb_per_row: usize,
+    ctx: crate::OpCtx<'_>,
+    buffers: crate::MoeMmvqBuffers,
+    shape: crate::MoeMmvqShape,
 ) -> Result<()> {
-    let module = reg.expect_module("indexed_moe_mmvq_q2_k_r2_dp4a")?;
+    let crate::MoeMmvqBuffers { weights: w, act: y, expert_ids, dst } = buffers;
+    let crate::MoeMmvqShape { n_rows, n_tokens, top_k, n_sb_per_row } = shape;
+    let module = ctx.reg.expect_module("indexed_moe_mmvq_q2_k_r2_dp4a")?;
     let kernel = module.kernel("flambeau_indexed_moe_mmvq_q2_k_r2_dp4a_q8_1")?;
     let n_rows_i = n_rows as i32;
     let n_tokens_i = n_tokens as i32;
@@ -289,25 +274,20 @@ pub fn indexed_moe_mmvq_q2_k(
         block: (64, 1, 1),
         shared_bytes: 0,
     };
-    unsafe { kernel.launch(stream, cfg, args)? };
+    unsafe { kernel.launch(ctx.stream, cfg, args)? };
     Ok(())
 }
 
 /// IQ4_XS MoE MMVQ. Same indexing contract as `indexed_moe_mmvq_q4_k`;
 /// weights are IQ4_XS blocks.
 pub fn indexed_moe_mmvq_iq4_xs(
-    reg: &OpsRegistry,
-    stream: &HipStream,
-    w: DevicePtr,
-    y: DevicePtr,
-    expert_ids: DevicePtr,
-    dst: DevicePtr,
-    n_rows: usize,
-    n_tokens: usize,
-    top_k: usize,
-    n_sb_per_row: usize,
+    ctx: crate::OpCtx<'_>,
+    buffers: crate::MoeMmvqBuffers,
+    shape: crate::MoeMmvqShape,
 ) -> Result<()> {
-    let module = reg.expect_module("indexed_moe_mmvq_iq4_xs_r2_dp4a")?;
+    let crate::MoeMmvqBuffers { weights: w, act: y, expert_ids, dst } = buffers;
+    let crate::MoeMmvqShape { n_rows, n_tokens, top_k, n_sb_per_row } = shape;
+    let module = ctx.reg.expect_module("indexed_moe_mmvq_iq4_xs_r2_dp4a")?;
     let kernel = module.kernel("flambeau_indexed_moe_mmvq_iq4_xs_r2_dp4a_q8_1")?;
     let n_rows_i = n_rows as i32;
     let n_tokens_i = n_tokens as i32;
@@ -332,25 +312,20 @@ pub fn indexed_moe_mmvq_iq4_xs(
         block: (64, 1, 1),
         shared_bytes: 0,
     };
-    unsafe { kernel.launch(stream, cfg, args)? };
+    unsafe { kernel.launch(ctx.stream, cfg, args)? };
     Ok(())
 }
 
 /// IQ4_NL MoE MMVQ. Same indexing contract as `indexed_moe_mmvq_q4_k`;
 /// weights are IQ4_NL blocks.
 pub fn indexed_moe_mmvq_iq4_nl(
-    reg: &OpsRegistry,
-    stream: &HipStream,
-    w: DevicePtr,
-    y: DevicePtr,
-    expert_ids: DevicePtr,
-    dst: DevicePtr,
-    n_rows: usize,
-    n_tokens: usize,
-    top_k: usize,
-    n_blocks_per_row: usize,
+    ctx: crate::OpCtx<'_>,
+    buffers: crate::MoeMmvqBuffers,
+    shape: crate::MoeMmvqShape,
 ) -> Result<()> {
-    let module = reg.expect_module("indexed_moe_mmvq_iq4_nl_r2_dp4a")?;
+    let crate::MoeMmvqBuffers { weights: w, act: y, expert_ids, dst } = buffers;
+    let crate::MoeMmvqShape { n_rows, n_tokens, top_k, n_sb_per_row: n_blocks_per_row } = shape;
+    let module = ctx.reg.expect_module("indexed_moe_mmvq_iq4_nl_r2_dp4a")?;
     let kernel = module.kernel("flambeau_indexed_moe_mmvq_iq4_nl_r2_dp4a_q8_1")?;
     let n_rows_i = n_rows as i32;
     let n_tokens_i = n_tokens as i32;
@@ -375,25 +350,20 @@ pub fn indexed_moe_mmvq_iq4_nl(
         block: (64, 1, 1),
         shared_bytes: 0,
     };
-    unsafe { kernel.launch(stream, cfg, args)? };
+    unsafe { kernel.launch(ctx.stream, cfg, args)? };
     Ok(())
 }
 
 /// IQ3_XXS MoE MMVQ. Same indexing contract as `indexed_moe_mmvq_q4_k`;
 /// weights are IQ3_XXS blocks.
 pub fn indexed_moe_mmvq_iq3_xxs(
-    reg: &OpsRegistry,
-    stream: &HipStream,
-    w: DevicePtr,
-    y: DevicePtr,
-    expert_ids: DevicePtr,
-    dst: DevicePtr,
-    n_rows: usize,
-    n_tokens: usize,
-    top_k: usize,
-    n_sb_per_row: usize,
+    ctx: crate::OpCtx<'_>,
+    buffers: crate::MoeMmvqBuffers,
+    shape: crate::MoeMmvqShape,
 ) -> Result<()> {
-    let module = reg.expect_module("indexed_moe_mmvq_iq3_xxs_r2_dp4a")?;
+    let crate::MoeMmvqBuffers { weights: w, act: y, expert_ids, dst } = buffers;
+    let crate::MoeMmvqShape { n_rows, n_tokens, top_k, n_sb_per_row } = shape;
+    let module = ctx.reg.expect_module("indexed_moe_mmvq_iq3_xxs_r2_dp4a")?;
     let kernel = module.kernel("flambeau_indexed_moe_mmvq_iq3_xxs_r2_dp4a_q8_1")?;
     let n_rows_i = n_rows as i32;
     let n_tokens_i = n_tokens as i32;
@@ -418,25 +388,20 @@ pub fn indexed_moe_mmvq_iq3_xxs(
         block: (64, 1, 1),
         shared_bytes: 0,
     };
-    unsafe { kernel.launch(stream, cfg, args)? };
+    unsafe { kernel.launch(ctx.stream, cfg, args)? };
     Ok(())
 }
 
 /// IQ3_S MoE MMVQ. Same indexing contract as `indexed_moe_mmvq_q4_k`;
 /// weights are IQ3_S blocks.
 pub fn indexed_moe_mmvq_iq3_s(
-    reg: &OpsRegistry,
-    stream: &HipStream,
-    w: DevicePtr,
-    y: DevicePtr,
-    expert_ids: DevicePtr,
-    dst: DevicePtr,
-    n_rows: usize,
-    n_tokens: usize,
-    top_k: usize,
-    n_sb_per_row: usize,
+    ctx: crate::OpCtx<'_>,
+    buffers: crate::MoeMmvqBuffers,
+    shape: crate::MoeMmvqShape,
 ) -> Result<()> {
-    let module = reg.expect_module("indexed_moe_mmvq_iq3_s_r2_dp4a")?;
+    let crate::MoeMmvqBuffers { weights: w, act: y, expert_ids, dst } = buffers;
+    let crate::MoeMmvqShape { n_rows, n_tokens, top_k, n_sb_per_row } = shape;
+    let module = ctx.reg.expect_module("indexed_moe_mmvq_iq3_s_r2_dp4a")?;
     let kernel = module.kernel("flambeau_indexed_moe_mmvq_iq3_s_r2_dp4a_q8_1")?;
     let n_rows_i = n_rows as i32;
     let n_tokens_i = n_tokens as i32;
@@ -461,25 +426,20 @@ pub fn indexed_moe_mmvq_iq3_s(
         block: (64, 1, 1),
         shared_bytes: 0,
     };
-    unsafe { kernel.launch(stream, cfg, args)? };
+    unsafe { kernel.launch(ctx.stream, cfg, args)? };
     Ok(())
 }
 
 /// IQ2_XXS MoE MMVQ. Same indexing contract as `indexed_moe_mmvq_q4_k`;
 /// weights are IQ2_XXS blocks.
 pub fn indexed_moe_mmvq_iq2_xxs(
-    reg: &OpsRegistry,
-    stream: &HipStream,
-    w: DevicePtr,
-    y: DevicePtr,
-    expert_ids: DevicePtr,
-    dst: DevicePtr,
-    n_rows: usize,
-    n_tokens: usize,
-    top_k: usize,
-    n_sb_per_row: usize,
+    ctx: crate::OpCtx<'_>,
+    buffers: crate::MoeMmvqBuffers,
+    shape: crate::MoeMmvqShape,
 ) -> Result<()> {
-    let module = reg.expect_module("indexed_moe_mmvq_iq2_xxs_r2_dp4a")?;
+    let crate::MoeMmvqBuffers { weights: w, act: y, expert_ids, dst } = buffers;
+    let crate::MoeMmvqShape { n_rows, n_tokens, top_k, n_sb_per_row } = shape;
+    let module = ctx.reg.expect_module("indexed_moe_mmvq_iq2_xxs_r2_dp4a")?;
     let kernel = module.kernel("flambeau_indexed_moe_mmvq_iq2_xxs_r2_dp4a_q8_1")?;
     let n_rows_i = n_rows as i32;
     let n_tokens_i = n_tokens as i32;
@@ -504,25 +464,20 @@ pub fn indexed_moe_mmvq_iq2_xxs(
         block: (64, 1, 1),
         shared_bytes: 0,
     };
-    unsafe { kernel.launch(stream, cfg, args)? };
+    unsafe { kernel.launch(ctx.stream, cfg, args)? };
     Ok(())
 }
 
 /// IQ2_XS MoE MMVQ. Same indexing contract as `indexed_moe_mmvq_q4_k`;
 /// weights are IQ2_XS blocks.
 pub fn indexed_moe_mmvq_iq2_xs(
-    reg: &OpsRegistry,
-    stream: &HipStream,
-    w: DevicePtr,
-    y: DevicePtr,
-    expert_ids: DevicePtr,
-    dst: DevicePtr,
-    n_rows: usize,
-    n_tokens: usize,
-    top_k: usize,
-    n_sb_per_row: usize,
+    ctx: crate::OpCtx<'_>,
+    buffers: crate::MoeMmvqBuffers,
+    shape: crate::MoeMmvqShape,
 ) -> Result<()> {
-    let module = reg.expect_module("indexed_moe_mmvq_iq2_xs_r2_dp4a")?;
+    let crate::MoeMmvqBuffers { weights: w, act: y, expert_ids, dst } = buffers;
+    let crate::MoeMmvqShape { n_rows, n_tokens, top_k, n_sb_per_row } = shape;
+    let module = ctx.reg.expect_module("indexed_moe_mmvq_iq2_xs_r2_dp4a")?;
     let kernel = module.kernel("flambeau_indexed_moe_mmvq_iq2_xs_r2_dp4a_q8_1")?;
     let n_rows_i = n_rows as i32;
     let n_tokens_i = n_tokens as i32;
@@ -547,25 +502,20 @@ pub fn indexed_moe_mmvq_iq2_xs(
         block: (64, 1, 1),
         shared_bytes: 0,
     };
-    unsafe { kernel.launch(stream, cfg, args)? };
+    unsafe { kernel.launch(ctx.stream, cfg, args)? };
     Ok(())
 }
 
 /// IQ2_S MoE MMVQ. Same indexing contract as `indexed_moe_mmvq_q4_k`;
 /// weights are IQ2_S blocks.
 pub fn indexed_moe_mmvq_iq2_s(
-    reg: &OpsRegistry,
-    stream: &HipStream,
-    w: DevicePtr,
-    y: DevicePtr,
-    expert_ids: DevicePtr,
-    dst: DevicePtr,
-    n_rows: usize,
-    n_tokens: usize,
-    top_k: usize,
-    n_sb_per_row: usize,
+    ctx: crate::OpCtx<'_>,
+    buffers: crate::MoeMmvqBuffers,
+    shape: crate::MoeMmvqShape,
 ) -> Result<()> {
-    let module = reg.expect_module("indexed_moe_mmvq_iq2_s_r2_dp4a")?;
+    let crate::MoeMmvqBuffers { weights: w, act: y, expert_ids, dst } = buffers;
+    let crate::MoeMmvqShape { n_rows, n_tokens, top_k, n_sb_per_row } = shape;
+    let module = ctx.reg.expect_module("indexed_moe_mmvq_iq2_s_r2_dp4a")?;
     let kernel = module.kernel("flambeau_indexed_moe_mmvq_iq2_s_r2_dp4a_q8_1")?;
     let n_rows_i = n_rows as i32;
     let n_tokens_i = n_tokens as i32;
@@ -590,25 +540,20 @@ pub fn indexed_moe_mmvq_iq2_s(
         block: (64, 1, 1),
         shared_bytes: 0,
     };
-    unsafe { kernel.launch(stream, cfg, args)? };
+    unsafe { kernel.launch(ctx.stream, cfg, args)? };
     Ok(())
 }
 
 /// IQ1_S MoE MMVQ. Same indexing contract as `indexed_moe_mmvq_q4_k`;
 /// weights are IQ1_S blocks.
 pub fn indexed_moe_mmvq_iq1_s(
-    reg: &OpsRegistry,
-    stream: &HipStream,
-    w: DevicePtr,
-    y: DevicePtr,
-    expert_ids: DevicePtr,
-    dst: DevicePtr,
-    n_rows: usize,
-    n_tokens: usize,
-    top_k: usize,
-    n_sb_per_row: usize,
+    ctx: crate::OpCtx<'_>,
+    buffers: crate::MoeMmvqBuffers,
+    shape: crate::MoeMmvqShape,
 ) -> Result<()> {
-    let module = reg.expect_module("indexed_moe_mmvq_iq1_s_r2_dp4a")?;
+    let crate::MoeMmvqBuffers { weights: w, act: y, expert_ids, dst } = buffers;
+    let crate::MoeMmvqShape { n_rows, n_tokens, top_k, n_sb_per_row } = shape;
+    let module = ctx.reg.expect_module("indexed_moe_mmvq_iq1_s_r2_dp4a")?;
     let kernel = module.kernel("flambeau_indexed_moe_mmvq_iq1_s_r2_dp4a_q8_1")?;
     let n_rows_i = n_rows as i32;
     let n_tokens_i = n_tokens as i32;
@@ -633,25 +578,20 @@ pub fn indexed_moe_mmvq_iq1_s(
         block: (64, 1, 1),
         shared_bytes: 0,
     };
-    unsafe { kernel.launch(stream, cfg, args)? };
+    unsafe { kernel.launch(ctx.stream, cfg, args)? };
     Ok(())
 }
 
 /// IQ1_M MoE MMVQ. Same indexing contract as `indexed_moe_mmvq_q4_k`;
 /// weights are IQ1_M blocks.
 pub fn indexed_moe_mmvq_iq1_m(
-    reg: &OpsRegistry,
-    stream: &HipStream,
-    w: DevicePtr,
-    y: DevicePtr,
-    expert_ids: DevicePtr,
-    dst: DevicePtr,
-    n_rows: usize,
-    n_tokens: usize,
-    top_k: usize,
-    n_sb_per_row: usize,
+    ctx: crate::OpCtx<'_>,
+    buffers: crate::MoeMmvqBuffers,
+    shape: crate::MoeMmvqShape,
 ) -> Result<()> {
-    let module = reg.expect_module("indexed_moe_mmvq_iq1_m_r2_dp4a")?;
+    let crate::MoeMmvqBuffers { weights: w, act: y, expert_ids, dst } = buffers;
+    let crate::MoeMmvqShape { n_rows, n_tokens, top_k, n_sb_per_row } = shape;
+    let module = ctx.reg.expect_module("indexed_moe_mmvq_iq1_m_r2_dp4a")?;
     let kernel = module.kernel("flambeau_indexed_moe_mmvq_iq1_m_r2_dp4a_q8_1")?;
     let n_rows_i = n_rows as i32;
     let n_tokens_i = n_tokens as i32;
@@ -676,7 +616,7 @@ pub fn indexed_moe_mmvq_iq1_m(
         block: (64, 1, 1),
         shared_bytes: 0,
     };
-    unsafe { kernel.launch(stream, cfg, args)? };
+    unsafe { kernel.launch(ctx.stream, cfg, args)? };
     Ok(())
 }
 
@@ -688,18 +628,13 @@ pub fn indexed_moe_mmvq_iq1_m(
 /// for UD-Q4_K_S-style mixed-quant GGUFs where some
 /// `ffn_down_exps` are promoted from Q4_K to Q6_K.
 pub fn indexed_moe_mmvq_q6_k(
-    reg: &OpsRegistry,
-    stream: &HipStream,
-    w: DevicePtr,
-    y: DevicePtr,
-    expert_ids: DevicePtr,
-    dst: DevicePtr,
-    n_rows: usize,
-    n_tokens: usize,
-    top_k: usize,
-    n_sb_per_row: usize,
+    ctx: crate::OpCtx<'_>,
+    buffers: crate::MoeMmvqBuffers,
+    shape: crate::MoeMmvqShape,
 ) -> Result<()> {
-    let module = reg.expect_module("indexed_moe_mmvq_q6_k_r2_dp4a")?;
+    let crate::MoeMmvqBuffers { weights: w, act: y, expert_ids, dst } = buffers;
+    let crate::MoeMmvqShape { n_rows, n_tokens, top_k, n_sb_per_row } = shape;
+    let module = ctx.reg.expect_module("indexed_moe_mmvq_q6_k_r2_dp4a")?;
     let kernel = module.kernel("flambeau_indexed_moe_mmvq_q6_k_r2_dp4a_q8_1")?;
 
     let n_rows_i = n_rows as i32;
@@ -725,25 +660,20 @@ pub fn indexed_moe_mmvq_q6_k(
         block: (64, 1, 1),
         shared_bytes: 0,
     };
-    unsafe { kernel.launch(stream, cfg, args)? };
+    unsafe { kernel.launch(ctx.stream, cfg, args)? };
     Ok(())
 }
 
 /// Q5_K MoE MMVQ. Routes through `indexed_moe_mmvq_q5_k_r2_dp4a`:
 /// wave64, 2 rows per block, half-warp DPP reduce.
 pub fn indexed_moe_mmvq_q5_k(
-    reg: &OpsRegistry,
-    stream: &HipStream,
-    w: DevicePtr,
-    y: DevicePtr,
-    expert_ids: DevicePtr,
-    dst: DevicePtr,
-    n_rows: usize,
-    n_tokens: usize,
-    top_k: usize,
-    n_sb_per_row: usize,
+    ctx: crate::OpCtx<'_>,
+    buffers: crate::MoeMmvqBuffers,
+    shape: crate::MoeMmvqShape,
 ) -> Result<()> {
-    let module = reg.expect_module("indexed_moe_mmvq_q5_k_r2_dp4a")?;
+    let crate::MoeMmvqBuffers { weights: w, act: y, expert_ids, dst } = buffers;
+    let crate::MoeMmvqShape { n_rows, n_tokens, top_k, n_sb_per_row } = shape;
+    let module = ctx.reg.expect_module("indexed_moe_mmvq_q5_k_r2_dp4a")?;
     let kernel = module.kernel("flambeau_indexed_moe_mmvq_q5_k_r2_dp4a_q8_1")?;
 
     let n_rows_i = n_rows as i32;
@@ -769,7 +699,7 @@ pub fn indexed_moe_mmvq_q5_k(
         block: (64, 1, 1),
         shared_bytes: 0,
     };
-    unsafe { kernel.launch(stream, cfg, args)? };
+    unsafe { kernel.launch(ctx.stream, cfg, args)? };
     Ok(())
 }
 
@@ -777,18 +707,13 @@ pub fn indexed_moe_mmvq_q5_k(
 /// MoE expert weights are Q4_0 (gate+up+down in most layers). Same
 /// contract as `indexed_moe_mmvq_q8_0`, 256 threads/block with VDR=2 DP4A.
 pub fn indexed_moe_mmvq_q4_0(
-    reg: &OpsRegistry,
-    stream: &HipStream,
-    w: DevicePtr,
-    y: DevicePtr,
-    expert_ids: DevicePtr,
-    dst: DevicePtr,
-    n_rows: usize,
-    n_tokens: usize,
-    top_k: usize,
-    n_blocks_per_row: usize,
+    ctx: crate::OpCtx<'_>,
+    buffers: crate::MoeMmvqBuffers,
+    shape: crate::MoeMmvqShape,
 ) -> Result<()> {
-    let module = reg.expect_module("indexed_moe_mmvq_q4_0")?;
+    let crate::MoeMmvqBuffers { weights: w, act: y, expert_ids, dst } = buffers;
+    let crate::MoeMmvqShape { n_rows, n_tokens, top_k, n_sb_per_row: n_blocks_per_row } = shape;
+    let module = ctx.reg.expect_module("indexed_moe_mmvq_q4_0")?;
     let kernel = module.kernel("flambeau_indexed_moe_mmvq_q4_0_q8_1")?;
     let n_rows_i = n_rows as i32;
     let n_tokens_i = n_tokens as i32;
@@ -812,7 +737,7 @@ pub fn indexed_moe_mmvq_q4_0(
         block: (256, 1, 1),
         shared_bytes: 0,
     };
-    unsafe { kernel.launch(stream, cfg, args)? };
+    unsafe { kernel.launch(ctx.stream, cfg, args)? };
     Ok(())
 }
 
@@ -821,18 +746,13 @@ pub fn indexed_moe_mmvq_q4_0(
 /// `16 · sumi_bit · d_x · d_y` and subtracts `16 · d_x · s_y` for the
 /// (q5 − 16) offset.
 pub fn indexed_moe_mmvq_q5_0(
-    reg: &OpsRegistry,
-    stream: &HipStream,
-    w: DevicePtr,
-    y: DevicePtr,
-    expert_ids: DevicePtr,
-    dst: DevicePtr,
-    n_rows: usize,
-    n_tokens: usize,
-    top_k: usize,
-    n_blocks_per_row: usize,
+    ctx: crate::OpCtx<'_>,
+    buffers: crate::MoeMmvqBuffers,
+    shape: crate::MoeMmvqShape,
 ) -> Result<()> {
-    let module = reg.expect_module("indexed_moe_mmvq_q5_0")?;
+    let crate::MoeMmvqBuffers { weights: w, act: y, expert_ids, dst } = buffers;
+    let crate::MoeMmvqShape { n_rows, n_tokens, top_k, n_sb_per_row: n_blocks_per_row } = shape;
+    let module = ctx.reg.expect_module("indexed_moe_mmvq_q5_0")?;
     let kernel = module.kernel("flambeau_indexed_moe_mmvq_q5_0_q8_1")?;
     let n_rows_i = n_rows as i32;
     let n_tokens_i = n_tokens as i32;
@@ -856,25 +776,20 @@ pub fn indexed_moe_mmvq_q5_0(
         block: (256, 1, 1),
         shared_bytes: 0,
     };
-    unsafe { kernel.launch(stream, cfg, args)? };
+    unsafe { kernel.launch(ctx.stream, cfg, args)? };
     Ok(())
 }
 
 /// Q5_1 indexed-MoE MMVQ. Q5_0 indexed structure with the Q4_1-style
 /// `m·s_y` correction (Q5_1 is affine: y = d·q5 + m).
 pub fn indexed_moe_mmvq_q5_1(
-    reg: &OpsRegistry,
-    stream: &HipStream,
-    w: DevicePtr,
-    y: DevicePtr,
-    expert_ids: DevicePtr,
-    dst: DevicePtr,
-    n_rows: usize,
-    n_tokens: usize,
-    top_k: usize,
-    n_blocks_per_row: usize,
+    ctx: crate::OpCtx<'_>,
+    buffers: crate::MoeMmvqBuffers,
+    shape: crate::MoeMmvqShape,
 ) -> Result<()> {
-    let module = reg.expect_module("indexed_moe_mmvq_q5_1")?;
+    let crate::MoeMmvqBuffers { weights: w, act: y, expert_ids, dst } = buffers;
+    let crate::MoeMmvqShape { n_rows, n_tokens, top_k, n_sb_per_row: n_blocks_per_row } = shape;
+    let module = ctx.reg.expect_module("indexed_moe_mmvq_q5_1")?;
     let kernel = module.kernel("flambeau_indexed_moe_mmvq_q5_1_q8_1")?;
     let n_rows_i = n_rows as i32;
     let n_tokens_i = n_tokens as i32;
@@ -898,7 +813,7 @@ pub fn indexed_moe_mmvq_q5_1(
         block: (256, 1, 1),
         shared_bytes: 0,
     };
-    unsafe { kernel.launch(stream, cfg, args)? };
+    unsafe { kernel.launch(ctx.stream, cfg, args)? };
     Ok(())
 }
 
@@ -907,18 +822,13 @@ pub fn indexed_moe_mmvq_q5_1(
 /// down is Q4_1). Same contract as `indexed_moe_mmvq_q4_0`; per-block
 /// reconstruction differs (`m_x · s_y` instead of `-8 · d_x · s_y`).
 pub fn indexed_moe_mmvq_q4_1(
-    reg: &OpsRegistry,
-    stream: &HipStream,
-    w: DevicePtr,
-    y: DevicePtr,
-    expert_ids: DevicePtr,
-    dst: DevicePtr,
-    n_rows: usize,
-    n_tokens: usize,
-    top_k: usize,
-    n_blocks_per_row: usize,
+    ctx: crate::OpCtx<'_>,
+    buffers: crate::MoeMmvqBuffers,
+    shape: crate::MoeMmvqShape,
 ) -> Result<()> {
-    let module = reg.expect_module("indexed_moe_mmvq_q4_1")?;
+    let crate::MoeMmvqBuffers { weights: w, act: y, expert_ids, dst } = buffers;
+    let crate::MoeMmvqShape { n_rows, n_tokens, top_k, n_sb_per_row: n_blocks_per_row } = shape;
+    let module = ctx.reg.expect_module("indexed_moe_mmvq_q4_1")?;
     let kernel = module.kernel("flambeau_indexed_moe_mmvq_q4_1_q8_1")?;
     let n_rows_i = n_rows as i32;
     let n_tokens_i = n_tokens as i32;
@@ -942,7 +852,7 @@ pub fn indexed_moe_mmvq_q4_1(
         block: (256, 1, 1),
         shared_bytes: 0,
     };
-    unsafe { kernel.launch(stream, cfg, args)? };
+    unsafe { kernel.launch(ctx.stream, cfg, args)? };
     Ok(())
 }
 
@@ -1007,18 +917,13 @@ pub fn indexed_moe_mmvq_q4_0_gate_up(
 /// * expert_ids [n_tokens, top_k] i32
 /// * dst [n_tokens, top_k, n_rows] F32
 pub fn indexed_moe_mmvq_q8_0(
-    reg: &OpsRegistry,
-    stream: &HipStream,
-    w: DevicePtr,
-    y: DevicePtr,
-    expert_ids: DevicePtr,
-    dst: DevicePtr,
-    n_rows: usize,
-    n_tokens: usize,
-    top_k: usize,
-    n_blocks_per_row: usize,
+    ctx: crate::OpCtx<'_>,
+    buffers: crate::MoeMmvqBuffers,
+    shape: crate::MoeMmvqShape,
 ) -> Result<()> {
-    let module = reg.expect_module("indexed_moe_mmvq_q8_0")?;
+    let crate::MoeMmvqBuffers { weights: w, act: y, expert_ids, dst } = buffers;
+    let crate::MoeMmvqShape { n_rows, n_tokens, top_k, n_sb_per_row: n_blocks_per_row } = shape;
+    let module = ctx.reg.expect_module("indexed_moe_mmvq_q8_0")?;
     let kernel = module.kernel("flambeau_indexed_moe_mmvq_q8_0_dp4a_q8_1")?;
 
     let n_rows_i = n_rows as i32;
@@ -1043,7 +948,7 @@ pub fn indexed_moe_mmvq_q8_0(
         block: (256, 1, 1),
         shared_bytes: 0,
     };
-    unsafe { kernel.launch(stream, cfg, args)? };
+    unsafe { kernel.launch(ctx.stream, cfg, args)? };
     Ok(())
 }
 

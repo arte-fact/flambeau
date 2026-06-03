@@ -208,6 +208,55 @@ pub struct AttnPrefillSlots {
     pub q_off: ScalarSlot,
 }
 
+// --- MoE family ------------------------------------------------------------
+
+/// Single-weight MoE MMVQ buffers — `weights` is the contiguous
+/// expert-block weights array; `expert_ids` is `[n_tokens, top_k] i32`
+/// of expert indices; `act` is `[n_tokens] Q8_1`; `dst` is `[n_tokens,
+/// top_k, n_rows] F32`.
+#[derive(Copy, Clone, Debug)]
+pub struct MoeMmvqBuffers {
+    pub weights: DevicePtr,
+    pub act: DevicePtr,
+    pub expert_ids: DevicePtr,
+    pub dst: DevicePtr,
+}
+
+/// Fused gate + up MoE MMVQ — two weight matrices, two output buffers,
+/// shared expert_ids + activation.
+#[derive(Copy, Clone, Debug)]
+pub struct MoeMmvqGateUpBuffers {
+    pub gate_w: DevicePtr,
+    pub up_w: DevicePtr,
+    pub act: DevicePtr,
+    pub expert_ids: DevicePtr,
+    pub gate_out: DevicePtr,
+    pub up_out: DevicePtr,
+}
+
+/// Single-weight MoE MMVQ with a sorted-pair token-index reorder for
+/// expert-major launch ordering — same buffer set as
+/// [`MoeMmvqBuffers`] plus the sorted pair index array.
+#[derive(Copy, Clone, Debug)]
+pub struct MoeMmvqSortedBuffers {
+    pub weights: DevicePtr,
+    pub act: DevicePtr,
+    pub expert_ids: DevicePtr,
+    pub sorted_pair_idx: DevicePtr,
+    pub dst: DevicePtr,
+}
+
+/// Shape parameters shared across every MoE MMVQ variant.
+/// `n_sb_per_row` is super-blocks for K-quants / Q-blocks (k / 32)
+/// for `_0` quants — the kernel ABI takes the raw count.
+#[derive(Copy, Clone, Debug)]
+pub struct MoeMmvqShape {
+    pub n_rows: usize,
+    pub n_tokens: usize,
+    pub top_k: usize,
+    pub n_sb_per_row: usize,
+}
+
 // --- norm / fused-norm family ----------------------------------------------
 
 #[derive(Copy, Clone, Debug)]
