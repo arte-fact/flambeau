@@ -121,20 +121,10 @@ fn attention_prefill_slot_update_parity() -> Result<()> {
 
     // === 1. Reference: uncaptured attn at (N_K_FINAL, Q_OFF_FINAL). ===
     attention_prefill_f16(
-        &reg,
-        &stream,
-        q_dev,
-        k_dev,
-        v_dev,
-        out_ref_dev,
-        N_Q,
-        N_HEADS_Q,
-        N_HEADS_KV,
-        HEAD_DIM,
-        N_K_FINAL,
-        Q_OFF_FINAL,
-        scale,
-        0,
+        flambeau_ops::OpCtx { reg: &reg, stream: &stream },
+        flambeau_ops::AttnBuffers { q: q_dev, k: k_dev, v: v_dev, out: out_ref_dev },
+        flambeau_ops::AttnPrefillShape { n_q_tokens: N_Q, n_heads_q: N_HEADS_Q, n_heads_kv: N_HEADS_KV, head_dim: HEAD_DIM, n_k_tokens: N_K_FINAL, q_offset: Q_OFF_FINAL },
+        flambeau_ops::AttnKnobs { scale, window_size: 0 },
     )?;
     stream.synchronize().unwrap();
     let y_ref = readback_f16(&dev, &stream, out_ref_dev, N_Q * N_HEADS_Q * HEAD_DIM);
@@ -145,22 +135,11 @@ fn attention_prefill_slot_update_parity() -> Result<()> {
     let cap_stream = HipStream::new_non_blocking(0).unwrap();
     let exec = HipGraphExec::capture(&cap_stream, |s| {
         attention_prefill_f16_slots(
-            &reg,
-            s,
-            q_dev,
-            k_dev,
-            v_dev,
-            out_capt_dev,
-            N_Q,
-            N_HEADS_Q,
-            N_HEADS_KV,
-            HEAD_DIM,
-            N_K_INIT,
-            Q_OFF_INIT,
-            scale,
-            0,
-            Some(slot_n_k),
-            Some(slot_q_off),
+            flambeau_ops::OpCtx { reg: &reg, stream: s },
+            flambeau_ops::AttnBuffers { q: q_dev, k: k_dev, v: v_dev, out: out_capt_dev },
+            flambeau_ops::AttnPrefillShape { n_q_tokens: N_Q, n_heads_q: N_HEADS_Q, n_heads_kv: N_HEADS_KV, head_dim: HEAD_DIM, n_k_tokens: N_K_INIT, q_offset: Q_OFF_INIT },
+            flambeau_ops::AttnKnobs { scale, window_size: 0 },
+            Some(flambeau_ops::AttnPrefillSlots { n_k: slot_n_k, q_off: slot_q_off }),
         )
         .map_err(|e| flambeau_core::DeviceError::Backend {
             backend: "hip",
@@ -198,20 +177,10 @@ fn attention_prefill_slot_update_parity() -> Result<()> {
 
     let out_init_ref_dev = dev.alloc(out_bytes).unwrap();
     attention_prefill_f16(
-        &reg,
-        &stream,
-        q_dev,
-        k_dev,
-        v_dev,
-        out_init_ref_dev,
-        N_Q,
-        N_HEADS_Q,
-        N_HEADS_KV,
-        HEAD_DIM,
-        N_K_INIT,
-        Q_OFF_INIT,
-        scale,
-        0,
+        flambeau_ops::OpCtx { reg: &reg, stream: &stream },
+        flambeau_ops::AttnBuffers { q: q_dev, k: k_dev, v: v_dev, out: out_init_ref_dev },
+        flambeau_ops::AttnPrefillShape { n_q_tokens: N_Q, n_heads_q: N_HEADS_Q, n_heads_kv: N_HEADS_KV, head_dim: HEAD_DIM, n_k_tokens: N_K_INIT, q_offset: Q_OFF_INIT },
+        flambeau_ops::AttnKnobs { scale, window_size: 0 },
     )?;
     stream.synchronize().unwrap();
     let y_init_ref = readback_f16(&dev, &stream, out_init_ref_dev, N_Q * N_HEADS_Q * HEAD_DIM);

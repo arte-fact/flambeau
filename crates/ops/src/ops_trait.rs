@@ -389,39 +389,20 @@ pub trait Ops {
 
     fn attention_prefill_f16(
         &self,
-        q: DevicePtr,
-        k_cache: DevicePtr,
-        v_cache: DevicePtr,
-        out: DevicePtr,
-        n_q_tokens: usize,
-        n_heads_q: usize,
-        n_heads_kv: usize,
-        head_dim: usize,
-        n_k_tokens: usize,
-        q_offset: usize,
-        scale: f32,
-        window_size: i32,
+        buffers: crate::AttnBuffers,
+        shape: crate::AttnPrefillShape,
+        knobs: crate::AttnKnobs,
     ) -> Result<()>;
 
-    /// Graph-capture variant of `attention_prefill_f16`. When
-    /// `n_k_slot` / `q_off_slot` are `Some`, the recorder tags those
+    /// Graph-capture variant of `attention_prefill_f16`. When `slots`
+    /// is `Some`, the recorder tags both `n_k_tokens` and `q_offset`
     /// kernel args for per-replay updates.
     fn attention_prefill_f16_slots(
         &self,
-        q: DevicePtr,
-        k_cache: DevicePtr,
-        v_cache: DevicePtr,
-        out: DevicePtr,
-        n_q_tokens: usize,
-        n_heads_q: usize,
-        n_heads_kv: usize,
-        head_dim: usize,
-        n_k_tokens: usize,
-        q_offset: usize,
-        scale: f32,
-        window_size: i32,
-        n_k_slot: Option<ScalarSlot>,
-        q_off_slot: Option<ScalarSlot>,
+        buffers: crate::AttnBuffers,
+        shape: crate::AttnPrefillShape,
+        knobs: crate::AttnKnobs,
+        slots: Option<crate::AttnPrefillSlots>,
     ) -> Result<()>;
 
     fn split_q_gate_f16(

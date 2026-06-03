@@ -481,20 +481,10 @@ fn swa_prefill_window_3_of_8() {
 
     let scale = 1.0 / (head_dim as f32).sqrt();
     attention_prefill_f16(
-        &reg,
-        dev.default_stream(),
-        d_q,
-        d_k,
-        d_v,
-        d_out,
-        n_q,
-        n_heads_q,
-        n_heads_kv,
-        head_dim,
-        n_k,
-        q_offset,
-        scale,
-        window,
+        flambeau_ops::OpCtx { reg: &reg, stream: dev.default_stream() },
+        flambeau_ops::AttnBuffers { q: d_q, k: d_k, v: d_v, out: d_out },
+        flambeau_ops::AttnPrefillShape { n_q_tokens: n_q, n_heads_q, n_heads_kv, head_dim, n_k_tokens: n_k, q_offset },
+        flambeau_ops::AttnKnobs { scale, window_size: window },
     )
     .unwrap();
     dev.default_stream().synchronize().unwrap();
@@ -661,20 +651,10 @@ fn swa_prefill_flash_tile_window_4() {
 
     let scale = 1.0 / (head_dim as f32).sqrt();
     attention_prefill_f16(
-        &reg,
-        dev.default_stream(),
-        d_q,
-        d_k,
-        d_v,
-        d_out,
-        n_q,
-        n_heads_q,
-        n_heads_kv,
-        head_dim,
-        n_k,
-        q_offset,
-        scale,
-        window,
+        flambeau_ops::OpCtx { reg: &reg, stream: dev.default_stream() },
+        flambeau_ops::AttnBuffers { q: d_q, k: d_k, v: d_v, out: d_out },
+        flambeau_ops::AttnPrefillShape { n_q_tokens: n_q, n_heads_q, n_heads_kv, head_dim, n_k_tokens: n_k, q_offset },
+        flambeau_ops::AttnKnobs { scale, window_size: window },
     )
     .unwrap();
     dev.default_stream().synchronize().unwrap();
@@ -743,20 +723,10 @@ fn flash_tile_window_zero_matches_oracle() {
     let out_long = n_q_long * n_heads_q * head_dim;
     let d_out_long = dev.alloc(out_long * 2).unwrap();
     attention_prefill_f16(
-        &reg,
-        dev.default_stream(),
-        d_q_long,
-        d_k,
-        d_v,
-        d_out_long,
-        n_q_long,
-        n_heads_q,
-        n_heads_kv,
-        head_dim,
-        n_k_long,
-        q_offset,
-        scale,
-        0,
+        flambeau_ops::OpCtx { reg: &reg, stream: dev.default_stream() },
+        flambeau_ops::AttnBuffers { q: d_q_long, k: d_k, v: d_v, out: d_out_long },
+        flambeau_ops::AttnPrefillShape { n_q_tokens: n_q_long, n_heads_q, n_heads_kv, head_dim, n_k_tokens: n_k_long, q_offset },
+        flambeau_ops::AttnKnobs { scale, window_size: 0 },
     )
     .unwrap();
 
@@ -774,20 +744,10 @@ fn flash_tile_window_zero_matches_oracle() {
         let chunk_out = chunk * n_heads_q * head_dim;
         let d_out_chunk = dev.alloc(chunk_out * 2).unwrap();
         attention_prefill_f16(
-            &reg,
-            dev.default_stream(),
-            d_q_chunk,
-            d_k,
-            d_v,
-            d_out_chunk,
-            chunk,
-            n_heads_q,
-            n_heads_kv,
-            head_dim,
-            n_k_long,
-            q_off_cur,
-            scale,
-            0,
+            flambeau_ops::OpCtx { reg: &reg, stream: dev.default_stream() },
+            flambeau_ops::AttnBuffers { q: d_q_chunk, k: d_k, v: d_v, out: d_out_chunk },
+            flambeau_ops::AttnPrefillShape { n_q_tokens: chunk, n_heads_q, n_heads_kv, head_dim, n_k_tokens: n_k_long, q_offset: q_off_cur },
+            flambeau_ops::AttnKnobs { scale, window_size: 0 },
         )
         .unwrap();
         dev.default_stream().synchronize().unwrap();

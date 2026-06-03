@@ -74,18 +74,21 @@ pub fn attn_prefill_f16(
         );
     }
     ops.attention_prefill_f16(
-        q.ptr,
-        k_cache.ptr,
-        v_cache.ptr,
-        out.ptr,
-        n_q_tokens,
-        n_heads_q,
-        n_heads_kv,
-        head_dim,
-        n_k_tokens,
-        q_offset,
-        scale,
-        window_size,
+        flambeau_ops::AttnBuffers {
+            q: q.ptr,
+            k: k_cache.ptr,
+            v: v_cache.ptr,
+            out: out.ptr,
+        },
+        flambeau_ops::AttnPrefillShape {
+            n_q_tokens,
+            n_heads_q,
+            n_heads_kv,
+            head_dim,
+            n_k_tokens,
+            q_offset,
+        },
+        flambeau_ops::AttnKnobs { scale, window_size },
     )
 }
 
