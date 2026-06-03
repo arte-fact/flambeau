@@ -737,21 +737,9 @@ impl<'a> ForwardEngine<'a, NoopHooks, PpStage<'a>> {
         stream: &'a HipStream,
         reg: &'a OpsRegistry,
         pool: &'a mut ScratchPool,
-        rank: usize,
-        n_ranks: usize,
-        layer_start: usize,
-        layer_end: usize,
-        send_edge: Option<&'a crate::runtime::ar::PeerSlot>,
-        recv_edge: Option<&'a crate::runtime::ar::PeerSlot>,
+        stage: PpStage<'a>,
     ) -> Self {
-        let stage = PpStage {
-            rank,
-            n_ranks,
-            layer_start,
-            layer_end,
-            send_edge,
-            recv_edge,
-        };
+        let layer_start = stage.layer_start;
         Self::build(device, stream, reg, pool, NoopHooks, stage, layer_start)
     }
 }
@@ -762,32 +750,10 @@ impl<'a> ForwardEngine<'a, HybridHooks, HybStage<'a>> {
         stream: &'a HipStream,
         reg: &'a OpsRegistry,
         pool: &'a mut ScratchPool,
-        stage_idx: usize,
-        n_stages: usize,
-        rank_in_stage: usize,
-        tp_size: usize,
-        layer_start: usize,
-        layer_end: usize,
-        ar_callback: ArCallback,
-        bar: Option<Arc<BarArCoordinator>>,
-        send_edge: Option<&'a crate::runtime::ar::PeerSlot>,
-        recv_edge: Option<&'a crate::runtime::ar::PeerSlot>,
+        hooks: HybridHooks,
+        stage: HybStage<'a>,
     ) -> Self {
-        let hooks = HybridHooks {
-            rank_in_stage,
-            tp_size,
-            ar_callback,
-            bar,
-        };
-        let stage = HybStage {
-            stage_idx,
-            n_stages,
-            rank_in_stage,
-            layer_start,
-            layer_end,
-            send_edge,
-            recv_edge,
-        };
+        let layer_start = stage.layer_start;
         Self::build(device, stream, reg, pool, hooks, stage, layer_start)
     }
 }
