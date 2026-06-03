@@ -93,20 +93,25 @@ pub fn attn_decode_f16_splitk(
         );
     }
     ops.attention_decode_f16_splitk(
-        q.ptr,
-        k_cache.ptr,
-        v_cache.ptr,
-        out.ptr,
-        partials_m.ptr,
-        partials_s.ptr,
-        partials_o.ptr,
-        n_heads_q,
-        n_heads_kv,
-        head_dim,
-        n_tokens_kv,
-        chunk_size,
-        scale,
-        window_size,
+        flambeau_ops::AttnBuffers {
+            q: q.ptr,
+            k: k_cache.ptr,
+            v: v_cache.ptr,
+            out: out.ptr,
+        },
+        flambeau_ops::AttnSplitkPartials {
+            partials_m: partials_m.ptr,
+            partials_s: partials_s.ptr,
+            partials_o: partials_o.ptr,
+        },
+        flambeau_ops::AttnSplitkShape {
+            n_heads_q,
+            n_heads_kv,
+            head_dim,
+            n_tokens_kv,
+            chunk_size,
+        },
+        flambeau_ops::AttnKnobs { scale, window_size },
     )
 }
 

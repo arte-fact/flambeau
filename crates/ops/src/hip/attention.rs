@@ -574,30 +574,33 @@ pub fn kv_append_f16_batched_slots(
 /// * n_tokens=2048: single-pass 2647 µs → split-K 340 µs = **7.78×**
 /// * n_tokens=4096: single-pass 5210 µs → split-K 662 µs = **7.87×**
 pub fn attention_decode_f16_splitk(
-    reg: &OpsRegistry,
-    stream: &HipStream,
-    q: DevicePtr,
-    k_cache: DevicePtr,
-    v_cache: DevicePtr,
-    out: DevicePtr,
-    partials_m: DevicePtr,
-    partials_s: DevicePtr,
-    partials_o: DevicePtr,
-    n_heads_q: usize,
-    n_heads_kv: usize,
-    head_dim: usize,
-    n_tokens_kv: usize,
-    chunk_size: usize,
-    scale: f32,
-    window_size: i32,
+    ctx: crate::OpCtx<'_>,
+    buffers: crate::AttnBuffers,
+    partials: crate::AttnSplitkPartials,
+    shape: crate::AttnSplitkShape,
+    knobs: crate::AttnKnobs,
 ) -> Result<()> {
+    let crate::AttnBuffers { q, k, v, out } = buffers;
+    let crate::AttnSplitkPartials {
+        partials_m,
+        partials_s,
+        partials_o,
+    } = partials;
+    let crate::AttnSplitkShape {
+        n_heads_q,
+        n_heads_kv,
+        head_dim,
+        n_tokens_kv,
+        chunk_size,
+    } = shape;
+    let crate::AttnKnobs { scale, window_size } = knobs;
     assert!(
         head_dim == 64 || head_dim == 128 || head_dim == 256 || head_dim == 512,
         "attention_decode_f16_splitk: head_dim {head_dim} not supported"
     );
     assert!(chunk_size > 0);
 
-    let module = reg.expect_module("attention_decode_f16_splitk")?;
+    let module = ctx.reg.expect_module("attention_decode_f16_splitk")?;
     let k_chunk = module.kernel("flambeau_attention_decode_f16_splitk_chunk")?;
     let k_combine = module.kernel("flambeau_attention_decode_f16_splitk_combine")?;
 
@@ -609,15 +612,12 @@ pub fn attention_decode_f16_splitk(
     let n_chunks_i = n_chunks as i32;
     let chunk_size_i = chunk_size as i32;
     let q_ptr: u64 = q.as_usize() as u64;
-    let k_ptr: u64 = k_cache.as_usize() as u64;
-    let v_ptr: u64 = v_cache.as_usize() as u64;
+    let k_ptr: u64 = k.as_usize() as u64;
+    let v_ptr: u64 = v.as_usize() as u64;
     let o_ptr: u64 = out.as_usize() as u64;
     let m_ptr: u64 = partials_m.as_usize() as u64;
     let s_ptr: u64 = partials_s.as_usize() as u64;
     let po_ptr: u64 = partials_o.as_usize() as u64;
-    let scale_f = scale;
-
-    let window_i = window_size;
     let mut a1 = KernelArgs::new();
     a1.push(&q_ptr);
     a1.push(&k_ptr);
@@ -631,14 +631,14 @@ pub fn attention_decode_f16_splitk(
     a1.push(&n_tokens_i);
     a1.push(&n_chunks_i);
     a1.push(&chunk_size_i);
-    a1.push(&scale_f);
-    a1.push(&window_i);
+    a1.push(&scale);
+    a1.push(&window_size);
     let cfg1 = LaunchCfg {
         grid: (n_heads_q as u32, n_chunks as u32, 1),
         block: (head_dim as u32, 1, 1),
         shared_bytes: 0,
     };
-    unsafe { k_chunk.launch(stream, cfg1, a1)? };
+    unsafe { k_chunk.launch(ctx.stream, cfg1, a1)? };
 
     let mut a2 = KernelArgs::new();
     a2.push(&m_ptr);
@@ -653,7 +653,7 @@ pub fn attention_decode_f16_splitk(
         block: (head_dim as u32, 1, 1),
         shared_bytes: 0,
     };
-    unsafe { k_combine.launch(stream, cfg2, a2)? };
+    unsafe { k_combine.launch(ctx.stream, cfg2, a2)? };
 
     Ok(())
 }
@@ -669,23 +669,26 @@ pub fn attention_decode_f16_splitk(
 /// (`flambeau_attention_decode_f16_splitk_combine`) is shared and
 /// unmodified.
 pub fn attention_decode_f16_splitk_h2(
-    reg: &OpsRegistry,
-    stream: &HipStream,
-    q: DevicePtr,
-    k_cache: DevicePtr,
-    v_cache: DevicePtr,
-    out: DevicePtr,
-    partials_m: DevicePtr,
-    partials_s: DevicePtr,
-    partials_o: DevicePtr,
-    n_heads_q: usize,
-    n_heads_kv: usize,
-    head_dim: usize,
-    n_tokens_kv: usize,
-    chunk_size: usize,
-    scale: f32,
-    window_size: i32,
+    ctx: crate::OpCtx<'_>,
+    buffers: crate::AttnBuffers,
+    partials: crate::AttnSplitkPartials,
+    shape: crate::AttnSplitkShape,
+    knobs: crate::AttnKnobs,
 ) -> Result<()> {
+    let crate::AttnBuffers { q, k, v, out } = buffers;
+    let crate::AttnSplitkPartials {
+        partials_m,
+        partials_s,
+        partials_o,
+    } = partials;
+    let crate::AttnSplitkShape {
+        n_heads_q,
+        n_heads_kv,
+        head_dim,
+        n_tokens_kv,
+        chunk_size,
+    } = shape;
+    let crate::AttnKnobs { scale, window_size } = knobs;
     assert!(
         head_dim == 128 || head_dim == 256 || head_dim == 512,
         "attention_decode_f16_splitk_h2: head_dim {head_dim} not in {{128, 256, 512}}"
@@ -693,9 +696,9 @@ pub fn attention_decode_f16_splitk_h2(
     assert!(chunk_size > 0);
     assert!(head_dim % 2 == 0);
 
-    let module = reg.expect_module("attention_decode_f16_splitk_h2")?;
+    let module = ctx.reg.expect_module("attention_decode_f16_splitk_h2")?;
     let k_chunk = module.kernel("flambeau_attention_decode_f16_splitk_h2_chunk")?;
-    let combine_module = reg.expect_module("attention_decode_f16_splitk")?;
+    let combine_module = ctx.reg.expect_module("attention_decode_f16_splitk")?;
     let k_combine = combine_module.kernel("flambeau_attention_decode_f16_splitk_combine")?;
 
     let n_chunks = n_tokens_kv.div_ceil(chunk_size);
@@ -706,14 +709,12 @@ pub fn attention_decode_f16_splitk_h2(
     let n_chunks_i = n_chunks as i32;
     let chunk_size_i = chunk_size as i32;
     let q_ptr: u64 = q.as_usize() as u64;
-    let k_ptr: u64 = k_cache.as_usize() as u64;
-    let v_ptr: u64 = v_cache.as_usize() as u64;
+    let k_ptr: u64 = k.as_usize() as u64;
+    let v_ptr: u64 = v.as_usize() as u64;
     let o_ptr: u64 = out.as_usize() as u64;
     let m_ptr: u64 = partials_m.as_usize() as u64;
     let s_ptr: u64 = partials_s.as_usize() as u64;
     let po_ptr: u64 = partials_o.as_usize() as u64;
-    let scale_f = scale;
-    let window_i = window_size;
 
     let mut a1 = KernelArgs::new();
     a1.push(&q_ptr);
@@ -728,14 +729,14 @@ pub fn attention_decode_f16_splitk_h2(
     a1.push(&n_tokens_i);
     a1.push(&n_chunks_i);
     a1.push(&chunk_size_i);
-    a1.push(&scale_f);
-    a1.push(&window_i);
+    a1.push(&scale);
+    a1.push(&window_size);
     let cfg1 = LaunchCfg {
         grid: (n_heads_q as u32, n_chunks as u32, 1),
         block: ((head_dim / 2) as u32, 1, 1),
         shared_bytes: 0,
     };
-    unsafe { k_chunk.launch(stream, cfg1, a1)? };
+    unsafe { k_chunk.launch(ctx.stream, cfg1, a1)? };
 
     let mut a2 = KernelArgs::new();
     a2.push(&m_ptr);
@@ -750,7 +751,7 @@ pub fn attention_decode_f16_splitk_h2(
         block: (head_dim as u32, 1, 1),
         shared_bytes: 0,
     };
-    unsafe { k_combine.launch(stream, cfg2, a2)? };
+    unsafe { k_combine.launch(ctx.stream, cfg2, a2)? };
 
     Ok(())
 }

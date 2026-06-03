@@ -336,22 +336,11 @@ fn splitk_matches_single_pass_gemma4_hd512() {
     )
     .unwrap();
     attention_decode_f16_splitk(
-        &reg,
-        dev.default_stream(),
-        d_q,
-        d_k,
-        d_v,
-        d_out_split,
-        d_part_m,
-        d_part_s,
-        d_part_o,
-        n_heads_q,
-        n_heads_kv,
-        head_dim,
-        n_tokens,
-        chunk_size,
-        scale,
-        window,
+        flambeau_ops::OpCtx { reg: &reg, stream: dev.default_stream() },
+        flambeau_ops::AttnBuffers { q: d_q, k: d_k, v: d_v, out: d_out_split },
+        flambeau_ops::AttnSplitkPartials { partials_m: d_part_m, partials_s: d_part_s, partials_o: d_part_o },
+        flambeau_ops::AttnSplitkShape { n_heads_q, n_heads_kv, head_dim, n_tokens_kv: n_tokens, chunk_size },
+        flambeau_ops::AttnKnobs { scale, window_size: window },
     )
     .unwrap();
     dev.default_stream().synchronize().unwrap();
@@ -426,22 +415,11 @@ fn swa_decode_splitk_matches_window_4() {
     )
     .unwrap();
     attention_decode_f16_splitk(
-        &reg,
-        dev.default_stream(),
-        d_q,
-        d_k,
-        d_v,
-        d_out_split,
-        d_part_m,
-        d_part_s,
-        d_part_o,
-        n_heads_q,
-        n_heads_kv,
-        head_dim,
-        n_tokens,
-        chunk_size,
-        scale,
-        window,
+        flambeau_ops::OpCtx { reg: &reg, stream: dev.default_stream() },
+        flambeau_ops::AttnBuffers { q: d_q, k: d_k, v: d_v, out: d_out_split },
+        flambeau_ops::AttnSplitkPartials { partials_m: d_part_m, partials_s: d_part_s, partials_o: d_part_o },
+        flambeau_ops::AttnSplitkShape { n_heads_q, n_heads_kv, head_dim, n_tokens_kv: n_tokens, chunk_size },
+        flambeau_ops::AttnKnobs { scale, window_size: window },
     )
     .unwrap();
     dev.default_stream().synchronize().unwrap();
