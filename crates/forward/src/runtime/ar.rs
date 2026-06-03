@@ -319,16 +319,21 @@ pub fn bar_ar_postattn_residual_rmsnorm_f32_to_f16(
     // kernel reads `resid_in` and writes `resid_out` (caller's
     // contract: not aliased).
     unsafe {
+        let shape = flambeau_backend_hip::ArPostAttnNormShape {
+            n_rows: n_rows as u32,
+            n: n as u32,
+        };
         match n_ranks {
             2 => coord.bar.postattn_residual_rmsnorm_f32_to_f16_tp2_rank(
                 rank,
-                peers[rank],
-                peers[1 - rank],
-                post_norm_w_f16,
-                resid_in_f16,
-                resid_out_f16,
-                n_rows as u32,
-                n as u32,
+                flambeau_backend_hip::ArPostAttnNormRankBuffersTp2 {
+                    proj_local: peers[rank],
+                    peer: peers[1 - rank],
+                    post_norm_w: post_norm_w_f16,
+                    resid_in: resid_in_f16,
+                    resid_out: resid_out_f16,
+                },
+                shape,
                 eps,
                 stream,
             )?,
@@ -340,13 +345,14 @@ pub fn bar_ar_postattn_residual_rmsnorm_f32_to_f16(
                 ];
                 coord.bar.postattn_residual_rmsnorm_f32_to_f16_tp4_rank(
                     rank,
-                    peers[rank],
-                    peer3,
-                    post_norm_w_f16,
-                    resid_in_f16,
-                    resid_out_f16,
-                    n_rows as u32,
-                    n as u32,
+                    flambeau_backend_hip::ArPostAttnNormRankBuffersTp4 {
+                        proj_local: peers[rank],
+                        peers: peer3,
+                        post_norm_w: post_norm_w_f16,
+                        resid_in: resid_in_f16,
+                        resid_out: resid_out_f16,
+                    },
+                    shape,
                     eps,
                     stream,
                 )?
@@ -480,11 +486,13 @@ pub fn bar_ar_residual_rmsnorm_f16(
     unsafe {
         coord.bar.residual_rmsnorm_tp2_rank(
             rank,
-            residual_inout_f16,
-            peers[0],
-            peers[1],
-            rms_weight,
-            out_norm,
+            flambeau_backend_hip::ArResidualRmsNormRankBuffers {
+                hidden: residual_inout_f16,
+                partial_canonical_rank0: peers[0],
+                partial_canonical_rank1: peers[1],
+                rms_weight,
+                out_norm,
+            },
             n_elems as u32,
             eps,
             stream,

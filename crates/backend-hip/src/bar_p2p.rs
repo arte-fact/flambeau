@@ -137,6 +137,56 @@ fn launch_cfg_for(kind: ArKind, elem_count: u32) -> LaunchCfg {
 /// ([`HipCluster::peer_access_full`]); a partial matrix means at least
 /// one rank can't read at least one peer through BAR1, and the caller
 /// should fall back to host-bounce AllReduce instead.
+/// Cross-rank buffer set for the array-style `residual_rmsnorm_tp{N}` and
+/// `_q8_1_tp{N}` AR primitives. One slot per rank.
+#[derive(Copy, Clone, Debug)]
+pub struct ArResidualRmsNormArrayBuffers<const N: usize> {
+    pub hidden: [DevicePtr; N],
+    pub partial: [DevicePtr; N],
+    pub rms_weight: [DevicePtr; N],
+    pub out_dst: [DevicePtr; N],
+}
+
+/// Rank-local buffer set for `residual_rmsnorm_tp2_rank`. Caller holds the
+/// two canonical-order partial pointers (rank 0 then rank 1) explicitly.
+#[derive(Copy, Clone, Debug)]
+pub struct ArResidualRmsNormRankBuffers {
+    pub hidden: DevicePtr,
+    pub partial_canonical_rank0: DevicePtr,
+    pub partial_canonical_rank1: DevicePtr,
+    pub rms_weight: DevicePtr,
+    pub out_norm: DevicePtr,
+}
+
+/// Rank-local buffer set for the TP=2 fused post-attention AR + rmsnorm +
+/// residual-add. One peer F32 partial.
+#[derive(Copy, Clone, Debug)]
+pub struct ArPostAttnNormRankBuffersTp2 {
+    pub proj_local: DevicePtr,
+    pub peer: DevicePtr,
+    pub post_norm_w: DevicePtr,
+    pub resid_in: DevicePtr,
+    pub resid_out: DevicePtr,
+}
+
+/// Rank-local buffer set for the TP=4 fused post-attention path. Three
+/// peer F32 partials instead of one.
+#[derive(Copy, Clone, Debug)]
+pub struct ArPostAttnNormRankBuffersTp4 {
+    pub proj_local: DevicePtr,
+    pub peers: [DevicePtr; 3],
+    pub post_norm_w: DevicePtr,
+    pub resid_in: DevicePtr,
+    pub resid_out: DevicePtr,
+}
+
+/// Shape pair shared by both `postattn_residual_rmsnorm_f32_to_f16_tp{2,4}_rank`.
+#[derive(Copy, Clone, Debug)]
+pub struct ArPostAttnNormShape {
+    pub n_rows: u32,
+    pub n: u32,
+}
+
 pub struct BarP2pAllReduce {
     // **drop-order**: Rust drops fields in declaration order, so
     // anything that holds a per-device resource MUST be declared
@@ -381,10 +431,7 @@ impl BarP2pAllReduce {
     /// - Producer-stream ordering as in `residual_tp4`.
     pub unsafe fn residual_rmsnorm_tp4(
         &self,
-        hidden: &[DevicePtr; 4],
-        partial: &[DevicePtr; 4],
-        rms_weight: &[DevicePtr; 4],
-        out_norm: &[DevicePtr; 4],
+        buf: ArResidualRmsNormArrayBuffers<4>,
         n: u32,
         eps: f32,
         streams: &[&HipStream; 4],
@@ -410,11 +457,11 @@ impl BarP2pAllReduce {
                     r,
                     cfg,
                     streams[r],
-                    hidden[r],
-                    partial[0],
-                    [partial[1], partial[2], partial[3]],
-                    rms_weight[r],
-                    out_norm[r],
+                    buf.hidden[r],
+                    buf.partial[0],
+                    [buf.partial[1], buf.partial[2], buf.partial[3]],
+                    buf.rms_weight[r],
+                    buf.out_dst[r],
                     n,
                     eps,
                 )?;
@@ -435,10 +482,7 @@ impl BarP2pAllReduce {
     /// with `out_q8_1` replacing `out_norm`.
     pub unsafe fn residual_rmsnorm_q8_1_tp4(
         &self,
-        hidden: &[DevicePtr; 4],
-        partial: &[DevicePtr; 4],
-        rms_weight: &[DevicePtr; 4],
-        out_q8_1: &[DevicePtr; 4],
+        buf: ArResidualRmsNormArrayBuffers<4>,
         n: u32,
         eps: f32,
         streams: &[&HipStream; 4],
@@ -463,11 +507,11 @@ impl BarP2pAllReduce {
                     r,
                     cfg,
                     streams[r],
-                    hidden[r],
-                    partial[0],
-                    [partial[1], partial[2], partial[3]],
-                    rms_weight[r],
-                    out_q8_1[r],
+                    buf.hidden[r],
+                    buf.partial[0],
+                    [buf.partial[1], buf.partial[2], buf.partial[3]],
+                    buf.rms_weight[r],
+                    buf.out_dst[r],
                     n,
                     eps,
                 )?;
@@ -481,10 +525,7 @@ impl BarP2pAllReduce {
     /// Same per-pointer + ordering contract as `residual_rmsnorm_q8_1_tp4`.
     pub unsafe fn residual_rmsnorm_q8_1_tp2(
         &self,
-        hidden: &[DevicePtr; 2],
-        partial: &[DevicePtr; 2],
-        rms_weight: &[DevicePtr; 2],
-        out_q8_1: &[DevicePtr; 2],
+        buf: ArResidualRmsNormArrayBuffers<2>,
         n: u32,
         eps: f32,
         streams: &[&HipStream; 2],
@@ -509,11 +550,11 @@ impl BarP2pAllReduce {
                     r,
                     cfg,
                     streams[r],
-                    hidden[r],
-                    partial[0],
-                    [partial[1], DevicePtr(0), DevicePtr(0)],
-                    rms_weight[r],
-                    out_q8_1[r],
+                    buf.hidden[r],
+                    buf.partial[0],
+                    [buf.partial[1], DevicePtr(0), DevicePtr(0)],
+                    buf.rms_weight[r],
+                    buf.out_dst[r],
                     n,
                     eps,
                 )?;
@@ -527,10 +568,7 @@ impl BarP2pAllReduce {
     /// Same per-pointer + ordering contract as `residual_rmsnorm_tp4`.
     pub unsafe fn residual_rmsnorm_tp2(
         &self,
-        hidden: &[DevicePtr; 2],
-        partial: &[DevicePtr; 2],
-        rms_weight: &[DevicePtr; 2],
-        out_norm: &[DevicePtr; 2],
+        buf: ArResidualRmsNormArrayBuffers<2>,
         n: u32,
         eps: f32,
         streams: &[&HipStream; 2],
@@ -556,11 +594,11 @@ impl BarP2pAllReduce {
                     r,
                     cfg,
                     streams[r],
-                    hidden[r],
-                    partial[0],
-                    [partial[1], DevicePtr(0), DevicePtr(0)],
-                    rms_weight[r],
-                    out_norm[r],
+                    buf.hidden[r],
+                    buf.partial[0],
+                    [buf.partial[1], DevicePtr(0), DevicePtr(0)],
+                    buf.rms_weight[r],
+                    buf.out_dst[r],
                     n,
                     eps,
                 )?;
@@ -794,11 +832,7 @@ impl BarP2pAllReduce {
     pub unsafe fn residual_rmsnorm_tp2_rank(
         &self,
         rank: usize,
-        hidden: DevicePtr,
-        partial_canonical_rank0: DevicePtr,
-        partial_canonical_rank1: DevicePtr,
-        rms_weight: DevicePtr,
-        out_norm: DevicePtr,
+        buf: ArResidualRmsNormRankBuffers,
         n: u32,
         eps: f32,
         stream: &HipStream,
@@ -821,11 +855,11 @@ impl BarP2pAllReduce {
                 rank,
                 cfg,
                 stream,
-                hidden,
-                partial_canonical_rank0,
-                [partial_canonical_rank1, DevicePtr(0), DevicePtr(0)],
-                rms_weight,
-                out_norm,
+                buf.hidden,
+                buf.partial_canonical_rank0,
+                [buf.partial_canonical_rank1, DevicePtr(0), DevicePtr(0)],
+                buf.rms_weight,
+                buf.out_norm,
                 n,
                 eps,
             )
@@ -912,28 +946,24 @@ impl BarP2pAllReduce {
     pub unsafe fn postattn_residual_rmsnorm_f32_to_f16_tp2_rank(
         &self,
         rank: usize,
-        proj_local: DevicePtr,
-        peer: DevicePtr,
-        post_norm_w: DevicePtr,
-        resid_in: DevicePtr,
-        resid_out: DevicePtr,
-        n_rows: u32,
-        n: u32,
+        buf: ArPostAttnNormRankBuffersTp2,
+        shape: ArPostAttnNormShape,
         eps: f32,
         stream: &HipStream,
     ) -> DeviceResult<()> {
         self.expect_ranks(2)?;
-        if n > 8192 {
+        if shape.n > 8192 {
             return Err(DeviceError::Backend {
                 backend: "hip",
                 code: -1,
                 message: format!(
-                    "postattn_residual_rmsnorm_f32_to_f16_tp2_rank: n={n} > 8192 \
-                     (per-thread register-cache cap)"
+                    "postattn_residual_rmsnorm_f32_to_f16_tp2_rank: n={} > 8192 \
+                     (per-thread register-cache cap)",
+                    shape.n
                 ),
             });
         }
-        let cfg = LaunchCfg::one_d(n_rows, BLOCK_THREADS);
+        let cfg = LaunchCfg::one_d(shape.n_rows, BLOCK_THREADS);
         // SAFETY: forwarded from public-method contract.
         unsafe {
             self.launch_postattn_norm_f32_to_f16(
@@ -941,13 +971,13 @@ impl BarP2pAllReduce {
                 rank,
                 cfg,
                 stream,
-                proj_local,
-                peer,
+                buf.proj_local,
+                buf.peer,
                 [DevicePtr(0), DevicePtr(0)],
-                post_norm_w,
-                resid_in,
-                resid_out,
-                n,
+                buf.post_norm_w,
+                buf.resid_in,
+                buf.resid_out,
+                shape.n,
                 eps,
             )
         }
@@ -959,27 +989,23 @@ impl BarP2pAllReduce {
     pub unsafe fn postattn_residual_rmsnorm_f32_to_f16_tp4_rank(
         &self,
         rank: usize,
-        proj_local: DevicePtr,
-        peers: [DevicePtr; 3],
-        post_norm_w: DevicePtr,
-        resid_in: DevicePtr,
-        resid_out: DevicePtr,
-        n_rows: u32,
-        n: u32,
+        buf: ArPostAttnNormRankBuffersTp4,
+        shape: ArPostAttnNormShape,
         eps: f32,
         stream: &HipStream,
     ) -> DeviceResult<()> {
         self.expect_ranks(4)?;
-        if n > 8192 {
+        if shape.n > 8192 {
             return Err(DeviceError::Backend {
                 backend: "hip",
                 code: -1,
                 message: format!(
-                    "postattn_residual_rmsnorm_f32_to_f16_tp4_rank: n={n} > 8192"
+                    "postattn_residual_rmsnorm_f32_to_f16_tp4_rank: n={} > 8192",
+                    shape.n
                 ),
             });
         }
-        let cfg = LaunchCfg::one_d(n_rows, BLOCK_THREADS);
+        let cfg = LaunchCfg::one_d(shape.n_rows, BLOCK_THREADS);
         // SAFETY: forwarded from public-method contract.
         unsafe {
             self.launch_postattn_norm_f32_to_f16(
@@ -987,13 +1013,13 @@ impl BarP2pAllReduce {
                 rank,
                 cfg,
                 stream,
-                proj_local,
-                peers[0],
-                [peers[1], peers[2]],
-                post_norm_w,
-                resid_in,
-                resid_out,
-                n,
+                buf.proj_local,
+                buf.peers[0],
+                [buf.peers[1], buf.peers[2]],
+                buf.post_norm_w,
+                buf.resid_in,
+                buf.resid_out,
+                shape.n,
                 eps,
             )
         }

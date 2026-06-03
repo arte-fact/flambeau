@@ -18,7 +18,10 @@ pub mod probe;
 pub mod profile;
 pub mod sys;
 
-pub use bar_p2p::BarP2pAllReduce;
+pub use bar_p2p::{
+    ArPostAttnNormRankBuffersTp2, ArPostAttnNormRankBuffersTp4, ArPostAttnNormShape,
+    ArResidualRmsNormArrayBuffers, ArResidualRmsNormRankBuffers, BarP2pAllReduce,
+};
 pub use cluster::HipCluster;
 pub use graph_capture::{MemcpyBinding, MemcpySlot, ScalarSlot, SlotBinding, SlotMap};
 pub use impls::{dispatch_qmatmul, QMATMUL_GFX906};
