@@ -20,6 +20,23 @@ use crate::ctx::QuantWeight;
 
 use super::primitives::{dtype_qmatmul_native, f32_to_q8_0_bytes, upload_bytes, wrap_quant};
 
+/// Per-head dims for the fused GDN QKV slab.
+#[derive(Copy, Clone, Debug)]
+pub struct GdnHeadDims {
+    pub num_v_heads: usize,
+    pub num_k_heads: usize,
+    pub head_v_dim: usize,
+    pub head_k_dim: usize,
+}
+
+/// Sharding decision for the fused GDN QKV / conv1d slab.
+#[derive(Copy, Clone, Debug)]
+pub struct GdnShardCtx {
+    pub kq_replicated: bool,
+    pub rank: usize,
+    pub n_ranks: usize,
+}
+
 /// Pack the per-rank [Q | K | V] byte slab. `row_bytes` is the
 /// on-disk row stride (inner dim × bytes-per-element, accounting
 /// for quant block packing). Returns `(packed_bytes, per_rank_rows)`.
@@ -27,14 +44,20 @@ pub(super) fn pack_gdn_qkv_slab(
     name: &str,
     raw: &[u8],
     row_bytes: usize,
-    num_v_heads: usize,
-    num_k_heads: usize,
-    head_v_dim: usize,
-    head_k_dim: usize,
-    kq_replicated: bool,
-    rank: usize,
-    n_ranks: usize,
+    heads: GdnHeadDims,
+    shard: GdnShardCtx,
 ) -> Result<(Vec<u8>, usize)> {
+    let GdnHeadDims {
+        num_v_heads,
+        num_k_heads,
+        head_v_dim,
+        head_k_dim,
+    } = heads;
+    let GdnShardCtx {
+        kq_replicated,
+        rank,
+        n_ranks,
+    } = shard;
     let v_part_full = num_v_heads * head_v_dim;
     let k_part_full = num_k_heads * head_k_dim;
     let outer_full = v_part_full + 2 * k_part_full;
@@ -79,16 +102,22 @@ pub fn upload_gdn_fused_qkv_quant(
     file: &GgufFile,
     device: &HipDevice,
     name: &str,
-    num_v_heads: usize,
-    num_k_heads: usize,
-    head_v_dim: usize,
-    head_k_dim: usize,
+    heads: GdnHeadDims,
     hidden: usize,
-    kq_replicated: bool,
-    rank: usize,
-    n_ranks: usize,
+    shard: GdnShardCtx,
     allocs: &mut Vec<(DevicePtr, usize)>,
 ) -> Result<QuantWeight> {
+    let GdnHeadDims {
+        num_v_heads,
+        num_k_heads,
+        head_v_dim,
+        head_k_dim,
+    } = heads;
+    let GdnShardCtx {
+        kq_replicated,
+        rank,
+        n_ranks,
+    } = shard;
     let info = file.info(name).with_context(|| format!("info {name}"))?;
     if dtype_qmatmul_native(info.dtype) {
         let block_size = info.dtype.block_size();
@@ -100,18 +129,7 @@ pub fn upload_gdn_fused_qkv_quant(
         let raw = file
             .tensor_raw(name)
             .with_context(|| format!("tensor_raw {name}"))?;
-        let (packed, per_rank_rows) = pack_gdn_qkv_slab(
-            name,
-            raw,
-            row_bytes,
-            num_v_heads,
-            num_k_heads,
-            head_v_dim,
-            head_k_dim,
-            kq_replicated,
-            rank,
-            n_ranks,
-        )?;
+        let (packed, per_rank_rows) = pack_gdn_qkv_slab(name, raw, row_bytes, heads, shard)?;
         let ptr = upload_bytes(device, &packed, allocs)?;
         wrap_quant(ptr, per_rank_rows * hidden, info.dtype)
     } else {
@@ -164,32 +182,16 @@ pub fn upload_gdn_fused_qkv_f32(
     file: &GgufFile,
     device: &HipDevice,
     name: &str,
-    num_v_heads: usize,
-    num_k_heads: usize,
-    head_v_dim: usize,
-    head_k_dim: usize,
+    heads: GdnHeadDims,
     conv_kernel: usize,
-    kq_replicated: bool,
-    rank: usize,
-    n_ranks: usize,
+    shard: GdnShardCtx,
     allocs: &mut Vec<(DevicePtr, usize)>,
 ) -> Result<Tensor<F32>> {
     let row_bytes = conv_kernel * 4;
     let raw = file
         .tensor_raw(name)
         .with_context(|| format!("tensor_raw {name}"))?;
-    let (packed, per_rank_rows) = pack_gdn_qkv_slab(
-        name,
-        raw,
-        row_bytes,
-        num_v_heads,
-        num_k_heads,
-        head_v_dim,
-        head_k_dim,
-        kq_replicated,
-        rank,
-        n_ranks,
-    )?;
+    let (packed, per_rank_rows) = pack_gdn_qkv_slab(name, raw, row_bytes, heads, shard)?;
     let bytes = packed.len();
     let ptr = device.alloc(bytes).context("alloc gdn conv1d shard")?;
     let stream = device.default_stream();

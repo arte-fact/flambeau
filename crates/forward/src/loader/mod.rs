@@ -41,6 +41,7 @@ pub use primitives::{
 };
 pub use shard::{
     upload_col_sharded_quant, upload_quant_weight, upload_router_f16, upload_row_sharded_quant,
+    ShardSpec,
 };
 
 /// How a matmul weight gets uploaded.

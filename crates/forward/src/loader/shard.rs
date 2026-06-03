@@ -15,6 +15,17 @@ use super::primitives::{
 };
 use super::ShardMode;
 
+/// Sharded-upload parameters. Used by `upload_col_sharded_quant` and
+/// `upload_row_sharded_quant`. `n_rows` / `n_cols` describe the full
+/// GGUF tensor; this rank gets the slice along whichever dim matches.
+#[derive(Copy, Clone, Debug)]
+pub struct ShardSpec {
+    pub n_rows: usize,
+    pub n_cols: usize,
+    pub rank: usize,
+    pub n_ranks: usize,
+}
+
 /// Upload a GGUF tensor as a `QuantWeight`. Bytes-as-is when
 /// `dtype_qmatmul_native`; otherwise host dequant → re-quantise to
 /// Q8_0 (the F16 / BF16 / F32 path).
@@ -74,12 +85,15 @@ pub fn upload_col_sharded_quant(
     file: &GgufFile,
     device: &HipDevice,
     name: &str,
-    n_rows: usize,
-    n_cols: usize,
-    rank: usize,
-    n_ranks: usize,
+    spec: ShardSpec,
     allocs: &mut Vec<(DevicePtr, usize)>,
 ) -> Result<QuantWeight> {
+    let ShardSpec {
+        n_rows,
+        n_cols,
+        rank,
+        n_ranks,
+    } = spec;
     if n_rows % n_ranks != 0 {
         bail!("{name}: n_rows {n_rows} not divisible by n_ranks {n_ranks}");
     }
@@ -134,12 +148,15 @@ pub fn upload_row_sharded_quant(
     file: &GgufFile,
     device: &HipDevice,
     name: &str,
-    n_rows: usize,
-    n_cols: usize,
-    rank: usize,
-    n_ranks: usize,
+    spec: ShardSpec,
     allocs: &mut Vec<(DevicePtr, usize)>,
 ) -> Result<QuantWeight> {
+    let ShardSpec {
+        n_rows,
+        n_cols,
+        rank,
+        n_ranks,
+    } = spec;
     if n_cols % n_ranks != 0 {
         bail!("{name}: n_cols {n_cols} not divisible by n_ranks {n_ranks}");
     }
@@ -203,9 +220,18 @@ pub(super) fn upload_col(
 ) -> Result<QuantWeight> {
     match shard {
         ShardMode::Replicated => upload_quant_weight(file, device, name, n_rows * n_cols, allocs),
-        ShardMode::Tp { rank, n_ranks } => {
-            upload_col_sharded_quant(file, device, name, n_rows, n_cols, rank, n_ranks, allocs)
-        }
+        ShardMode::Tp { rank, n_ranks } => upload_col_sharded_quant(
+            file,
+            device,
+            name,
+            ShardSpec {
+                n_rows,
+                n_cols,
+                rank,
+                n_ranks,
+            },
+            allocs,
+        ),
     }
 }
 
@@ -221,8 +247,17 @@ pub(super) fn upload_row(
 ) -> Result<QuantWeight> {
     match shard {
         ShardMode::Replicated => upload_quant_weight(file, device, name, n_rows * n_cols, allocs),
-        ShardMode::Tp { rank, n_ranks } => {
-            upload_row_sharded_quant(file, device, name, n_rows, n_cols, rank, n_ranks, allocs)
-        }
+        ShardMode::Tp { rank, n_ranks } => upload_row_sharded_quant(
+            file,
+            device,
+            name,
+            ShardSpec {
+                n_rows,
+                n_cols,
+                rank,
+                n_ranks,
+            },
+            allocs,
+        ),
     }
 }
