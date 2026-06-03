@@ -1246,10 +1246,12 @@ pub fn standard_attn_local<H: TopologyHooks>(
             flambeau_model_ops::cast_f32_to_f16(&proj_f32, &mut partial_f16, n * hidden, &ops)?;
         }
         hooks.ar_residual_rmsnorm_f16(
-            input.ptr,
-            partial_f16.ptr,
-            next_w.ptr,
-            state.pool.norm,
+            crate::core::ArResidualRmsNormHookBuffers {
+                residual_inout: input.ptr,
+                partial_f16: partial_f16.ptr,
+                rms_weight: next_w.ptr,
+                out_norm: state.pool.norm,
+            },
             n * hidden,
             weights.rms_eps,
             state.device,

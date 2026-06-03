@@ -228,10 +228,12 @@ pub fn moe_ffn_local<H: TopologyHooks>(
         if fuse_into_norm {
             let next_w = next_norm.unwrap();
             hooks.ar_residual_rmsnorm_f16(
-                input.ptr,
-                state.pool.delta,
-                next_w.ptr,
-                state.pool.norm,
+                crate::core::ArResidualRmsNormHookBuffers {
+                    residual_inout: input.ptr,
+                    partial_f16: state.pool.delta,
+                    rms_weight: next_w.ptr,
+                    out_norm: state.pool.norm,
+                },
                 hidden,
                 weights.rms_eps,
                 state.device,

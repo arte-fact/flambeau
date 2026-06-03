@@ -78,10 +78,7 @@ impl TopologyHooks for TpHooks {
 
     fn ar_residual_rmsnorm_f16(
         &mut self,
-        residual_inout: DevicePtr,
-        partial_f16: DevicePtr,
-        rms_weight: DevicePtr,
-        out_norm: DevicePtr,
+        bufs: crate::core::ArResidualRmsNormHookBuffers,
         n_elems: usize,
         eps: f32,
         device: &HipDevice,
@@ -90,18 +87,7 @@ impl TopologyHooks for TpHooks {
         let bar = self.bar.as_ref().ok_or_else(|| {
             anyhow!("TpHooks::ar_residual_rmsnorm_f16: bar coordinator not configured")
         })?;
-        bar_ar_residual_rmsnorm_f16(
-            bar,
-            self.rank,
-            residual_inout,
-            partial_f16,
-            rms_weight,
-            out_norm,
-            n_elems,
-            eps,
-            device,
-            stream,
-        )
+        bar_ar_residual_rmsnorm_f16(bar, self.rank, bufs, n_elems, eps, device, stream)
     }
 
     fn supports_ar_sum_f16(&self) -> bool {
@@ -128,10 +114,7 @@ impl TopologyHooks for TpHooks {
 
     fn ar_postattn_residual_rmsnorm_f32_to_f16(
         &mut self,
-        proj_local_f32: DevicePtr,
-        post_norm_w_f16: DevicePtr,
-        resid_in_f16: DevicePtr,
-        resid_out_f16: DevicePtr,
+        bufs: crate::core::ArPostAttnRmsNormHookBuffers,
         n_rows: usize,
         n: usize,
         eps: f32,
@@ -142,17 +125,7 @@ impl TopologyHooks for TpHooks {
             anyhow!("TpHooks::ar_postattn_residual_rmsnorm_f32_to_f16: bar coordinator not configured")
         })?;
         bar_ar_postattn_residual_rmsnorm_f32_to_f16(
-            bar,
-            self.rank,
-            proj_local_f32,
-            post_norm_w_f16,
-            resid_in_f16,
-            resid_out_f16,
-            n_rows,
-            n,
-            eps,
-            device,
-            stream,
+            bar, self.rank, bufs, n_rows, n, eps, device, stream,
         )
     }
 }
@@ -217,10 +190,7 @@ impl TopologyHooks for HybridHooks {
 
     fn ar_residual_rmsnorm_f16(
         &mut self,
-        residual_inout: DevicePtr,
-        partial_f16: DevicePtr,
-        rms_weight: DevicePtr,
-        out_norm: DevicePtr,
+        bufs: crate::core::ArResidualRmsNormHookBuffers,
         n_elems: usize,
         eps: f32,
         device: &HipDevice,
@@ -229,18 +199,7 @@ impl TopologyHooks for HybridHooks {
         let bar = self.bar.as_ref().ok_or_else(|| {
             anyhow!("HybridHooks::ar_residual_rmsnorm_f16: bar coordinator not configured")
         })?;
-        bar_ar_residual_rmsnorm_f16(
-            bar,
-            self.rank_in_stage,
-            residual_inout,
-            partial_f16,
-            rms_weight,
-            out_norm,
-            n_elems,
-            eps,
-            device,
-            stream,
-        )
+        bar_ar_residual_rmsnorm_f16(bar, self.rank_in_stage, bufs, n_elems, eps, device, stream)
     }
 
     fn supports_ar_sum_f16(&self) -> bool {
@@ -267,10 +226,7 @@ impl TopologyHooks for HybridHooks {
 
     fn ar_postattn_residual_rmsnorm_f32_to_f16(
         &mut self,
-        proj_local_f32: DevicePtr,
-        post_norm_w_f16: DevicePtr,
-        resid_in_f16: DevicePtr,
-        resid_out_f16: DevicePtr,
+        bufs: crate::core::ArPostAttnRmsNormHookBuffers,
         n_rows: usize,
         n: usize,
         eps: f32,
@@ -281,17 +237,7 @@ impl TopologyHooks for HybridHooks {
             anyhow!("HybridHooks::ar_postattn_residual_rmsnorm_f32_to_f16: bar coordinator not configured")
         })?;
         bar_ar_postattn_residual_rmsnorm_f32_to_f16(
-            bar,
-            self.rank_in_stage,
-            proj_local_f32,
-            post_norm_w_f16,
-            resid_in_f16,
-            resid_out_f16,
-            n_rows,
-            n,
-            eps,
-            device,
-            stream,
+            bar, self.rank_in_stage, bufs, n_rows, n, eps, device, stream,
         )
     }
 }
@@ -1047,11 +993,13 @@ impl<H: TopologyHooks, S: StageHooks> ForwardCtx for ForwardEngine<'_, H, S> {
             tok_embd_row_bytes,
             &proj_matmul_host,
             proj_norm_raw,
-            pe,
-            n_layer,
             n_tokens,
-            hidden,
-            rms_eps,
+            crate::per_layer_embd::PerLayerProjShape {
+                pe,
+                n_layer,
+                hidden,
+                rms_norm_eps: rms_eps,
+            },
         )?;
 
         let bytes = std::mem::size_of_val(table.as_slice());

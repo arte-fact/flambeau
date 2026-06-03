@@ -37,6 +37,16 @@ pub struct PerLayerApplySpec {
     pub rms_eps: f32,
 }
 
+/// Shared shape for [`build_inp_per_layer_table`] and
+/// [`build_inp_per_layer_table_with_proj`].
+#[derive(Copy, Clone, Debug)]
+pub struct PerLayerProjShape {
+    pub pe: usize,
+    pub n_layer: usize,
+    pub hidden: usize,
+    pub rms_norm_eps: f32,
+}
+
 /// Inputs for [`crate::ctx::ForwardCtx::per_layer_embd_build_table`].
 pub struct PerLayerBuildTableSpec<'a> {
     pub main_embd_host_f16: &'a [f16],
@@ -243,12 +253,10 @@ pub fn build_inp_per_layer_table_with_proj(
     tok_embd_row_bytes: usize,
     proj_matmul_f32: &[f32],
     proj_norm_raw: &[u8],
-    pe: usize,
-    n_layer: usize,
     n_tokens: usize,
-    hidden: usize,
-    rms_norm_eps: f32,
+    shape: PerLayerProjShape,
 ) -> Result<Vec<f32>> {
+    let PerLayerProjShape { pe, n_layer, hidden, rms_norm_eps } = shape;
     let per_token = pe * n_layer;
     let total = n_tokens * per_token;
     if proj_matmul_f32.len() != total {
@@ -339,11 +347,9 @@ pub fn build_inp_per_layer_table(
     model_proj_dtype: GgmlDType,
     proj_norm_raw: &[u8],
     inp_batch_f16: &[f16],
-    pe: usize,
-    n_layer: usize,
-    hidden: usize,
-    rms_norm_eps: f32,
+    shape: PerLayerProjShape,
 ) -> Result<Vec<f32>> {
+    let PerLayerProjShape { pe, n_layer, hidden, rms_norm_eps } = shape;
     if inp_batch_f16.len() != hidden {
         bail!(
             "build_inp_per_layer_table: inp_batch len {} != hidden {hidden}",

@@ -145,18 +145,14 @@ impl<A: Arch> WorkerHandle<A> {
         device_id: i32,
         role: WorkerRole,
         file: Arc<GgufFile>,
-        ctx_cap: Option<usize>,
-        prefill_ubatch: usize,
-        max_slots: usize,
-        paged_kv_pages: Option<usize>,
-        kv_layout: crate::core::KvLayout,
+        params: crate::runtime::orchestrate::LaunchParams,
     ) -> Result<Self> {
         let (cmd_tx, cmd_rx) = mpsc::channel::<Command>();
         let (ready_tx, ready_rx) = mpsc::sync_channel::<Result<()>>(1);
 
         let thread = std::thread::spawn(move || {
             let (mut state, init_err) =
-                match init_rank::<A>(device_id, &role, &file, ctx_cap, prefill_ubatch, max_slots, paged_kv_pages, kv_layout) {
+                match init_rank::<A>(device_id, &role, &file, params) {
                     Ok(s) => (Some(s), None),
                     Err(e) => (None, Some(e)),
                 };
@@ -345,12 +341,15 @@ fn init_rank<A: Arch>(
     device_id: i32,
     role: &WorkerRole,
     file: &GgufFile,
-    ctx_cap: Option<usize>,
-    prefill_ubatch: usize,
-    max_slots: usize,
-    paged_kv_pages: Option<usize>,
-    kv_layout: KvLayout,
+    params: crate::runtime::orchestrate::LaunchParams,
 ) -> Result<RankState<A>> {
+    let crate::runtime::orchestrate::LaunchParams {
+        ctx_cap,
+        prefill_ubatch,
+        max_slots,
+        paged_kv_pages,
+        kv_layout,
+    } = params;
     let device = HipDevice::new(device_id).context("HipDevice::new")?;
     device.bind().context("device.bind")?;
     let shard = role.shard();

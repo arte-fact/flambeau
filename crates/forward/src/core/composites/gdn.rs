@@ -176,10 +176,12 @@ pub fn gdn_layer_local<H: TopologyHooks>(
             if fuse_norm {
                 let next_w = next_norm.unwrap();
                 hooks.ar_residual_rmsnorm_f16(
-                    input.ptr,
-                    delta_ptr,
-                    next_w.ptr,
-                    state.pool.norm,
+                    crate::core::ArResidualRmsNormHookBuffers {
+                        residual_inout: input.ptr,
+                        partial_f16: delta_ptr,
+                        rms_weight: next_w.ptr,
+                        out_norm: state.pool.norm,
+                    },
                     hidden,
                     weights.rms_eps,
                     state.device,

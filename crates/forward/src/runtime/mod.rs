@@ -164,11 +164,13 @@ impl<A: Arch> Session<A> {
         let handles = orchestrate::launch::<A>(
             file,
             &topology,
-            ctx_cap,
-            prefill_ubatch,
-            max_slots,
-            paged_kv_pages,
-            kv_layout,
+            orchestrate::LaunchParams {
+                ctx_cap,
+                prefill_ubatch,
+                max_slots,
+                paged_kv_pages,
+                kv_layout,
+            },
         )?;
         Ok(Self {
             topology,

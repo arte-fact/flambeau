@@ -291,16 +291,19 @@ pub fn bar_ar_sum_f32(
 pub fn bar_ar_postattn_residual_rmsnorm_f32_to_f16(
     coord: &BarArCoordinator,
     rank: usize,
-    proj_local_f32: DevicePtr,
-    post_norm_w_f16: DevicePtr,
-    resid_in_f16: DevicePtr,
-    resid_out_f16: DevicePtr,
+    bufs: crate::core::ArPostAttnRmsNormHookBuffers,
     n_rows: usize,
     n: usize,
     eps: f32,
     _device: &HipDevice,
     stream: &HipStream,
 ) -> Result<()> {
+    let crate::core::ArPostAttnRmsNormHookBuffers {
+        proj_local_f32,
+        post_norm_w_f16,
+        resid_in_f16,
+        resid_out_f16,
+    } = bufs;
     let n_ranks = coord.ranks();
     if n_ranks == 1 {
         anyhow::bail!(
@@ -463,15 +466,18 @@ pub fn bar_ar_residual_f16(
 pub fn bar_ar_residual_rmsnorm_f16(
     coord: &BarArCoordinator,
     rank: usize,
-    residual_inout_f16: DevicePtr,
-    partial_f16: DevicePtr,
-    rms_weight: DevicePtr,
-    out_norm: DevicePtr,
+    bufs: crate::core::ArResidualRmsNormHookBuffers,
     n_elems: usize,
     eps: f32,
     _device: &HipDevice,
     stream: &HipStream,
 ) -> Result<()> {
+    let crate::core::ArResidualRmsNormHookBuffers {
+        residual_inout: residual_inout_f16,
+        partial_f16,
+        rms_weight,
+        out_norm,
+    } = bufs;
     let n_ranks = coord.ranks();
     if n_ranks != 2 {
         anyhow::bail!("bar_ar_residual_rmsnorm_f16: only TP=2 supported (got {n_ranks})");

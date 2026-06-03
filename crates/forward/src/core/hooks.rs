@@ -7,6 +7,24 @@ use anyhow::Result;
 use flambeau_backend_hip::{HipDevice, HipStream};
 use flambeau_core::DevicePtr;
 
+/// Buffer set for [`TopologyHooks::ar_residual_rmsnorm_f16`].
+#[derive(Copy, Clone, Debug)]
+pub struct ArResidualRmsNormHookBuffers {
+    pub residual_inout: DevicePtr,
+    pub partial_f16: DevicePtr,
+    pub rms_weight: DevicePtr,
+    pub out_norm: DevicePtr,
+}
+
+/// Buffer set for [`TopologyHooks::ar_postattn_residual_rmsnorm_f32_to_f16`].
+#[derive(Copy, Clone, Debug)]
+pub struct ArPostAttnRmsNormHookBuffers {
+    pub proj_local_f32: DevicePtr,
+    pub post_norm_w_f16: DevicePtr,
+    pub resid_in_f16: DevicePtr,
+    pub resid_out_f16: DevicePtr,
+}
+
 pub trait TopologyHooks {
     /// In-place reduce-sum across ranks. Called after row-parallel
     /// matmuls (attn output_proj, ffn down).
@@ -83,25 +101,13 @@ pub trait TopologyHooks {
 
     fn ar_residual_rmsnorm_f16(
         &mut self,
-        residual_inout: DevicePtr,
-        partial_f16: DevicePtr,
-        rms_weight: DevicePtr,
-        out_norm: DevicePtr,
+        bufs: ArResidualRmsNormHookBuffers,
         n_elems: usize,
         eps: f32,
         device: &HipDevice,
         stream: &HipStream,
     ) -> Result<()> {
-        let _ = (
-            residual_inout,
-            partial_f16,
-            rms_weight,
-            out_norm,
-            n_elems,
-            eps,
-            device,
-            stream,
-        );
+        let _ = (bufs, n_elems, eps, device, stream);
         anyhow::bail!(
             "TopologyHooks::ar_residual_rmsnorm_f16: unsupported — gate with \
              supports_ar_residual_rmsnorm_f16() first"
@@ -122,27 +128,14 @@ pub trait TopologyHooks {
     /// `resid_in`. Default bails; gate with the `supports_…` flag.
     fn ar_postattn_residual_rmsnorm_f32_to_f16(
         &mut self,
-        proj_local_f32: DevicePtr,
-        post_norm_w_f16: DevicePtr,
-        resid_in_f16: DevicePtr,
-        resid_out_f16: DevicePtr,
+        bufs: ArPostAttnRmsNormHookBuffers,
         n_rows: usize,
         n: usize,
         eps: f32,
         device: &HipDevice,
         stream: &HipStream,
     ) -> Result<()> {
-        let _ = (
-            proj_local_f32,
-            post_norm_w_f16,
-            resid_in_f16,
-            resid_out_f16,
-            n_rows,
-            n,
-            eps,
-            device,
-            stream,
-        );
+        let _ = (bufs, n_rows, n, eps, device, stream);
         anyhow::bail!(
             "TopologyHooks::ar_postattn_residual_rmsnorm_f32_to_f16: unsupported — gate \
              with supports_ar_postattn_residual_rmsnorm_f32_to_f16() first"

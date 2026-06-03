@@ -44,50 +44,22 @@ fn try_build_bar_ar(devices: &[i32]) -> Option<Arc<BarArCoordinator>> {
 pub fn launch<A: Arch>(
     file: GgufFile,
     topology: &Topology,
-    ctx_cap: Option<usize>,
-    prefill_ubatch: usize,
-    max_slots: usize,
-    paged_kv_pages: Option<usize>,
-    kv_layout: crate::core::KvLayout,
+    params: LaunchParams,
 ) -> Result<Vec<WorkerHandle<A>>> {
     let file = Arc::new(file);
     match topology {
         Topology::SingleDevice { device } => {
-            let h = WorkerHandle::<A>::spawn(
-                *device,
-                WorkerRole::Sd,
-                Arc::clone(&file),
-                ctx_cap,
-                prefill_ubatch,
-                max_slots,
-                paged_kv_pages,
-                kv_layout,
-            )?;
+            let h = WorkerHandle::<A>::spawn(*device, WorkerRole::Sd, Arc::clone(&file), params)?;
             Ok(vec![h])
         }
-        Topology::Tp { devices } => {
-            launch_tp::<A>(
-                devices,
-                file,
-                ctx_cap,
-                prefill_ubatch,
-                max_slots,
-                paged_kv_pages,
-                kv_layout,
-            )
-        }
+        Topology::Tp { devices } => launch_tp::<A>(devices, file, params),
         Topology::Pp {
             devices,
             layer_split,
         } => launch_pp::<A>(
             devices,
             layer_split.as_deref(),
-            file,
-            ctx_cap,
-            prefill_ubatch,
-            max_slots,
-            paged_kv_pages,
-            kv_layout,
+            LaunchConfig { file, params },
         ),
         Topology::Hybrid {
             stages,
@@ -95,12 +67,7 @@ pub fn launch<A: Arch>(
         } => launch_hybrid::<A>(
             stages,
             layer_split.as_deref(),
-            file,
-            ctx_cap,
-            prefill_ubatch,
-            max_slots,
-            paged_kv_pages,
-            kv_layout,
+            LaunchConfig { file, params },
         ),
     }
 }
@@ -108,11 +75,7 @@ pub fn launch<A: Arch>(
 fn launch_tp<A: Arch>(
     devices: &[i32],
     file: Arc<GgufFile>,
-    ctx_cap: Option<usize>,
-    prefill_ubatch: usize,
-    max_slots: usize,
-    paged_kv_pages: Option<usize>,
-    kv_layout: crate::core::KvLayout,
+    params: LaunchParams,
 ) -> Result<Vec<WorkerHandle<A>>> {
     let n = devices.len();
     let ar = Arc::new(ArCoordinator::new(n));
@@ -126,32 +89,38 @@ fn launch_tp<A: Arch>(
             bar: bar.as_ref().map(Arc::clone),
         };
         handles.push(
-            WorkerHandle::<A>::spawn(
-                dev,
-                role,
-                Arc::clone(&file),
-                ctx_cap,
-                prefill_ubatch,
-                max_slots,
-                paged_kv_pages,
-                kv_layout,
-            )
-            .with_context(|| format!("TP rank {rank} on hip:{dev}"))?,
+            WorkerHandle::<A>::spawn(dev, role, Arc::clone(&file), params)
+                .with_context(|| format!("TP rank {rank} on hip:{dev}"))?,
         );
     }
     Ok(handles)
 }
 
+/// Runtime knobs shared by every worker (orchestrate-level launchers
+/// + `WorkerHandle::spawn` + `init_rank`). Separate from the GGUF
+/// `Arc` because the worker variants take it by ref or by clone
+/// independently.
+#[derive(Copy, Clone, Debug)]
+pub struct LaunchParams {
+    pub ctx_cap: Option<usize>,
+    pub prefill_ubatch: usize,
+    pub max_slots: usize,
+    pub paged_kv_pages: Option<usize>,
+    pub kv_layout: crate::core::KvLayout,
+}
+
+/// Shared runtime configuration for the topology launchers.
+pub struct LaunchConfig {
+    pub file: Arc<GgufFile>,
+    pub params: LaunchParams,
+}
+
 fn launch_pp<A: Arch>(
     devices: &[i32],
     layer_split: Option<&[usize]>,
-    file: Arc<GgufFile>,
-    ctx_cap: Option<usize>,
-    prefill_ubatch: usize,
-    max_slots: usize,
-    paged_kv_pages: Option<usize>,
-    kv_layout: crate::core::KvLayout,
+    cfg: LaunchConfig,
 ) -> Result<Vec<WorkerHandle<A>>> {
+    let LaunchConfig { file, params } = cfg;
     let n = devices.len();
     let split = match layer_split {
         Some(s) => {
@@ -215,11 +184,7 @@ fn launch_pp<A: Arch>(
                 dev,
                 role,
                 Arc::clone(&file),
-                ctx_cap,
-                prefill_ubatch,
-                max_slots,
-                paged_kv_pages,
-                kv_layout,
+                params,
             )
             .with_context(|| format!("PP rank {rank} on hip:{dev}"))?,
         );
@@ -230,13 +195,9 @@ fn launch_pp<A: Arch>(
 fn launch_hybrid<A: Arch>(
     stages: &[Vec<i32>],
     layer_split: Option<&[usize]>,
-    file: Arc<GgufFile>,
-    ctx_cap: Option<usize>,
-    prefill_ubatch: usize,
-    max_slots: usize,
-    paged_kv_pages: Option<usize>,
-    kv_layout: crate::core::KvLayout,
+    cfg: LaunchConfig,
 ) -> Result<Vec<WorkerHandle<A>>> {
+    let LaunchConfig { file, params } = cfg;
     let n_stages = stages.len();
     let total_ranks: usize = stages.iter().map(|s| s.len()).sum();
     let split: Vec<usize> = match layer_split {
@@ -279,7 +240,7 @@ fn launch_hybrid<A: Arch>(
         // concurrently-started receiver hits peer_recv before the
         // producer's lazy peer_send alloc runs.
         const MAX_HIDDEN: usize = 8192;
-        let max_bytes = prefill_ubatch * MAX_HIDDEN * 2;
+        let max_bytes = params.prefill_ubatch * MAX_HIDDEN * 2;
         for k in 0..src_ranks.len() {
             let consumer_dev = dst_ranks[k];
             edges_at_transition.push(
@@ -332,19 +293,10 @@ fn launch_hybrid<A: Arch>(
                 recv_edge,
             };
             handles.push(
-                WorkerHandle::<A>::spawn(
-                    dev,
-                    role,
-                    Arc::clone(&file),
-                    ctx_cap,
-                    prefill_ubatch,
-                    max_slots,
-                    paged_kv_pages,
-                    kv_layout,
-                )
-                .with_context(|| {
-                    format!("Hybrid stage {stage_idx} rank {rank_in_stage} on hip:{dev}")
-                })?,
+                WorkerHandle::<A>::spawn(dev, role, Arc::clone(&file), params)
+                    .with_context(|| {
+                        format!("Hybrid stage {stage_idx} rank {rank_in_stage} on hip:{dev}")
+                    })?,
             );
         }
     }
