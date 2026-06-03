@@ -62,7 +62,36 @@ below is the corrected one.
 | P2c | `mmvq_q4_0_gate_up_{batched,row_tile_batched}` (siblings, share GateUpBatchShape) | ☑ done | 3 | trait (1), impl (1), hip/qmatmul.rs (2 free fns), 1 model-ops caller (delta_net) |
 | P2d | remaining single-weight non-batched (`mmvq_q4_0_t128`, `_warpcoop64`, `_kv_f16dst`) | ☐ pending | ~5 | same |
 | P2e | mmvq KV-out + `mmvq` generic + `mmvq_f16_direct` + `qmatmul` + `mmq` | ☐ pending | ~10 | same |
-| P2f | indexed_moe_mmvq + indexed_moe_mmq (MoE family) | ☐ pending | ~30 | trait, impl, hip/moe.rs, moe_experts.rs |
+| P2f | indexed_moe_mmvq + indexed_moe_mmq (MoE family) | ☐ pending (1st attempt reverted) | ~50 across 4 sub-slices | trait (~30 methods), impl (~30), hip/moe.rs (63 free fns), model-ops moe_experts.rs (~30 caller sites) |
+
+### P2f attempt-and-revert notes (for next session)
+
+1st attempt at P2f1 (19 single-weight MMVQ free fns + 16 trait + 16 impls)
+landed cleanly in `hip/moe.rs` / `ops_trait.rs` / `ops_impl.rs` via a
+Python bulk-script (4-arg buffers + 4-arg shape via `MoeMmvqBuffers` +
+`MoeMmvqShape` aggregates added to `sig.rs`). Caller migration in
+`model-ops/src/moe_experts.rs` (~30 sites) couldn't complete because
+the bash tool started backgrounding Python invocations and the
+substitutions never landed — build was broken, reverted to P2c state.
+
+Next-session restart plan:
+- Re-extend `sig.rs` with `MoeMmvqBuffers { weights, act, expert_ids,
+  dst }` + `MoeMmvqShape { n_rows, n_tokens, top_k, n_sb_per_row }`
+  + `MoeMmvqGateUpBuffers { gate_w, up_w, act, expert_ids, gate_out,
+  up_out }` + `MoeMmvqSortedBuffers` (for `_q4_k_r2_sorted`).
+- Decompose P2f into sub-slices:
+  - P2f1 (single-weight MMVQ, 19 fns) — bulk via awk or `Edit replace_all`
+    where possible
+  - P2f2 (gate-up MMVQ, 2 fns: `q4_0_gate_up`, `q8_0_gate_up`)
+  - P2f3 (sorted MMVQ, 1 fn: `q4_k_r2_sorted`)
+  - P2f4 (MMQ tile8 gate-up, 11 fns) — already uses `MoeShape` aggregate
+  - P2f5 (MMQ tile8 down, 11 fns) — same
+- Each sub-slice = 1 commit; verify build+clippy green per commit.
+- Beware double-application of `reg -> ctx.reg` substitutions when
+  bulk-scripting bodies — the body-fix step must idempotently check
+  for existing `ctx.` prefix before substituting (the 1st attempt
+  produced `ctx.ctx.reg` on the 6 `_0`-quant variants because the
+  second Python pass re-ran on already-migrated bodies).
 | **P3 — Norm fused** | | | | |
 | P3a | `rmsnorm_*_add_residual` family (3-4 fns) | ☐ pending | ~5 | `ops_trait.rs`, `hip/norm.rs` + callers |
 | P3b | `rmsnorm_rope_neox_partial_f16` + `rope_neox_partial_f16` | ☐ pending | ~5 | `ops_trait.rs`, `hip/norm.rs`, `hip/pe.rs` + callers |
@@ -99,7 +128,7 @@ below is the corrected one.
 | total warnings | 478 | 478 | 456 | 447 | 437 | 434 | — | — | — | — |
 | `too_many_arguments` | 315 | 315 | 291 | 282 | 272 | 269 | — | — | — | — |
 | errors | 0 | 0 | 0 | 0 | 0 | 0 | — | — | — | — |
-| cumulative LOC delta | 0 | +232 | +10 | +12 | −136 | tbd | — | — | — | — |
+| cumulative LOC delta | 0 | +232 | +10 | +12 | −136 | −162 | — | — | — | — |
 
 LOC deltas per commit (insertions − deletions, from `git show --stat`):
 
@@ -114,7 +143,7 @@ LOC deltas per commit (insertions − deletions, from `git show --stat`):
 | P1f | `f7b1229` | 114 | 160 | −46 | 4 |
 | P2a | `760d53e` | 150 | 148 | +2 | 9 |
 | P2b | `46cd52e` | 128 | 276 | −148 | 10 |
-| P2c | (pending) | tbd | tbd | tbd | 3 |
+| P2c | `8c09856` | 45 | 71 | −26 | 3 |
 
 ## Non-goals
 
