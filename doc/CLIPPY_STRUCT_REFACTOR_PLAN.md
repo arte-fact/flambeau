@@ -105,7 +105,7 @@ Next-session restart plan:
 | P5a | 3 moe_sort_by_expert variants + 1 caller (moe_experts) + 3 test calls (moe_sort_smoke) | ☑ done | 6 | sig.rs (+`MoeSortBuffers`/`MoeSortPaddedBuffers`/`MoeSortShape`/`MoeSortPaddedShape`), trait, impl, hip/moe.rs |
 | P5b | 4 moe_combine variants (f16, no_residual_f16/f32, two_residuals_f16) + 8 caller sites in moe_experts | ☑ done | 6 | sig.rs (+`MoeCombineBuffers`/`MoeCombineNoResidualBuffers`/`MoeCombineTwoResidualsBuffers`/`MoeCombineShape`), trait, impl, hip/moe.rs |
 | **P6 — Collective** | | | | |
-| P6 | `bar_ar_*` (4 sibling fns share an 11-arg shape) + `flambeau_p2p_allreduce_sum_tp*` | ☐ pending | ~7 | `backend-hip/src/bar_p2p.rs`, `forward/src/runtime/ar.rs` |
+| P6 | 7 BarP2pAllReduce methods (residual_rmsnorm_tp{2,4}, _q8_1_tp{2,4}, _tp2_rank, postattn_residual_rmsnorm_f32_to_f16_tp{2,4}_rank) + 3 caller sites in forward/runtime/ar.rs | ☑ done | 7 | bar_p2p.rs (+5 aggregates: const-generic `ArResidualRmsNormArrayBuffers<N>`, `ArResidualRmsNormRankBuffers`, `ArPostAttnNormRankBuffersTp{2,4}`, `ArPostAttnNormShape`), re-exported from backend-hip/src/lib.rs |
 | **P7 — Mid-layer drivers** | | | | |
 | P7a | `delta_net.rs` (6 sites) | ☐ pending | ~6 | model-ops/src/delta_net.rs |
 | P7b | `moe_experts.rs` (2 sites) + `forward/src/loader/shard.rs::upload_*_sharded_quant` (2 sites) | ☐ pending | ~4 | model-ops + forward/loader |
@@ -126,12 +126,12 @@ Next-session restart plan:
 
 ## Live state
 
-| Metric | At start | After P0 | After P1f | After P2a | After P2b | After P2c | After P2f1 | After P2f2 | After P2f3 | After P2f4 | After P2f5 | After P3a | After P3b | After P4 | After P5a | After P5b |
-|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
-| total warnings | 478 | 478 | 456 | 447 | 437 | 434 | 413 | 414 | 411 | 378 | 344 | 329 | 324 | 315 | 309 | 303 |
-| `too_many_arguments` | 315 | 315 | 291 | 282 | 272 | 269 | 234 | 230 | 224 | 191 | 157 | 147 | 142 | 134 | 128 | 122 |
-| errors | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 0 |
-| cumulative LOC delta | 0 | +232 | +10 | +12 | −136 | −162 | −46 | −93 | −157 | −509 | −774 | −815 | −825 | −868 | −918 | −952 |
+| Metric | At start | After P0 | After P1f | After P2a | After P2b | After P2c | After P2f1 | After P2f2 | After P2f3 | After P2f4 | After P2f5 | After P3a | After P3b | After P4 | After P5a | After P5b | After P6 |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| total warnings | 478 | 478 | 456 | 447 | 437 | 434 | 413 | 414 | 411 | 378 | 344 | 329 | 324 | 315 | 309 | 303 | 300 |
+| `too_many_arguments` | 315 | 315 | 291 | 282 | 272 | 269 | 234 | 230 | 224 | 191 | 157 | 147 | 142 | 134 | 128 | 122 | 115 |
+| errors | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 0 |
+| cumulative LOC delta | 0 | +232 | +10 | +12 | −136 | −162 | −46 | −93 | −157 | −509 | −774 | −815 | −825 | −868 | −918 | −952 | −915 |
 
 LOC deltas per commit (insertions − deletions, from `git show --stat`):
 
@@ -157,6 +157,7 @@ LOC deltas per commit (insertions − deletions, from `git show --stat`):
 | P4 | `b93807e` | 206 | 249 | −43 | 8 |
 | P5a | `39de884` | 184 | 234 | −50 | 6 |
 | P5b | `04e4b1d` | 195 | 229 | −34 | 6 |
+| P6 | `fef8ba3` | 137 | 100 | +37 | 7 |
 
 ## Non-goals
 
