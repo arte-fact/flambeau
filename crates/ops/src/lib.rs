@@ -26,7 +26,17 @@
 pub mod hip;
 
 #[cfg(feature = "hip")]
+pub mod sig;
+
+#[cfg(feature = "hip")]
 pub use hip::{OpsRegistry, OpsRegistryError};
+
+#[cfg(feature = "hip")]
+pub use sig::{
+    AttnBuffers, AttnDecodeShape, AttnKnobs, AttnPrefillShape, MatmulShape, MmvqBatchShape,
+    MmvqBuffers, MmvqGateUpBatchShape, MmvqGateUpBuffers, MmvqGateUpShape, MmvqShape, NormBuffers,
+    NormResidual, OpCtx,
+};
 
 #[cfg(feature = "hip")]
 pub use hip::{attention, conv, mlp, moe, norm, pe, qmatmul, softmax};
