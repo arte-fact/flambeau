@@ -426,3 +426,39 @@ pub struct KvAppendBatchedSlotsShape {
     pub n_slots: usize,
     pub kv_width: usize,
 }
+
+// --- MoE sort-by-expert family ---------------------------------------------
+
+#[derive(Copy, Clone, Debug)]
+pub struct MoeSortBuffers {
+    pub expert_ids: DevicePtr,
+    pub counts: DevicePtr,
+    pub offsets: DevicePtr,
+    pub cursors: DevicePtr,
+    pub sorted_pair_idx: DevicePtr,
+}
+
+#[derive(Copy, Clone, Debug)]
+pub struct MoeSortPaddedBuffers {
+    pub expert_ids: DevicePtr,
+    pub counts: DevicePtr,
+    pub offsets: DevicePtr,
+    pub cursors: DevicePtr,
+    pub sorted_pair_idx: DevicePtr,
+    pub padded_offsets: DevicePtr,
+    pub sorted_pair_idx_padded: DevicePtr,
+}
+
+#[derive(Copy, Clone, Debug)]
+pub struct MoeSortShape {
+    pub total: usize,
+    pub n_experts: usize,
+}
+
+#[derive(Copy, Clone, Debug)]
+pub struct MoeSortPaddedShape {
+    pub total: usize,
+    pub n_experts: usize,
+    pub max_tokens: usize,
+    pub top_k: usize,
+}

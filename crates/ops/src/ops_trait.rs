@@ -1100,43 +1100,20 @@ pub trait Ops {
 
     fn moe_sort_by_expert(
         &self,
-        expert_ids: DevicePtr,
-        counts: DevicePtr,
-        offsets: DevicePtr,
-        cursors: DevicePtr,
-        sorted_pair_idx: DevicePtr,
-        total: usize,
-        n_experts: usize,
+        buf: crate::MoeSortBuffers,
+        shape: crate::MoeSortShape,
     ) -> Result<()>;
 
     fn moe_sort_by_expert_padded_16(
         &self,
-        expert_ids: DevicePtr,
-        counts: DevicePtr,
-        offsets: DevicePtr,
-        cursors: DevicePtr,
-        sorted_pair_idx: DevicePtr,
-        padded_offsets: DevicePtr,
-        sorted_pair_idx_padded: DevicePtr,
-        total: usize,
-        n_experts: usize,
-        max_tokens: usize,
-        top_k: usize,
+        buf: crate::MoeSortPaddedBuffers,
+        shape: crate::MoeSortPaddedShape,
     ) -> Result<()>;
 
     fn moe_sort_by_expert_padded(
         &self,
-        expert_ids: DevicePtr,
-        counts: DevicePtr,
-        offsets: DevicePtr,
-        cursors: DevicePtr,
-        sorted_pair_idx: DevicePtr,
-        padded_offsets: DevicePtr,
-        sorted_pair_idx_padded: DevicePtr,
-        total: usize,
-        n_experts: usize,
-        max_tokens: usize,
-        top_k: usize,
+        buf: crate::MoeSortPaddedBuffers,
+        shape: crate::MoeSortPaddedShape,
     ) -> Result<()>;
 
     /// Final-logit softcap: `y[i] = tanh(x[i] / cap) * cap`. In-place

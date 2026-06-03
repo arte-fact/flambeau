@@ -3271,21 +3271,16 @@ pub fn build_expert_buckets(
 // Three sequential kernel launches; no host round-trip.
 // ---------------------------------------------------------------------------
 pub fn moe_sort_by_expert(
-    reg: &OpsRegistry,
-    stream: &HipStream,
-    expert_ids: DevicePtr,      // [total] i32
-    counts: DevicePtr,          // [n_experts] i32, pre-zeroed
-    offsets: DevicePtr,         // [n_experts + 1] i32 (written)
-    cursors: DevicePtr,         // [n_experts] i32 scratch (written)
-    sorted_pair_idx: DevicePtr, // [total] i32 (written)
-    total: usize,
-    n_experts: usize,
+    ctx: crate::OpCtx<'_>,
+    buf: crate::MoeSortBuffers,
+    shape: crate::MoeSortShape,
 ) -> Result<()> {
     assert!(
-        n_experts <= MOE_SORT_MAX_EXPERTS,
-        "moe_sort_by_expert: n_experts {n_experts} > {MOE_SORT_MAX_EXPERTS} (bump MOE_SORT_MAX_EXPERTS in core::kernel_limits + matching `#define` in kernels-hip/src/kernels/moe_sort.cu)"
+        shape.n_experts <= MOE_SORT_MAX_EXPERTS,
+        "moe_sort_by_expert: n_experts {} > {MOE_SORT_MAX_EXPERTS} (bump MOE_SORT_MAX_EXPERTS in core::kernel_limits + matching `#define` in kernels-hip/src/kernels/moe_sort.cu)",
+        shape.n_experts
     );
-    let module = reg.expect_module("moe_sort_by_expert")?;
+    let module = ctx.reg.expect_module("moe_sort_by_expert")?;
     let k_zero = module.kernel("flambeau_moe_sort_zero_counts")?;
     let k_count = module.kernel("flambeau_moe_sort_count")?;
     let k_scan = module.kernel("flambeau_moe_sort_scan_offsets")?;
@@ -3295,13 +3290,13 @@ pub fn moe_sort_by_expert(
     // it corrupted TP determinism and the perf gain was marginal).
     let k_scatter = module.kernel("flambeau_moe_sort_scatter_det")?;
 
-    let total_i = total as i32;
-    let n_experts_i = n_experts as i32;
-    let e_ptr: u64 = expert_ids.as_usize() as u64;
-    let c_ptr: u64 = counts.as_usize() as u64;
-    let o_ptr: u64 = offsets.as_usize() as u64;
-    let k_ptr: u64 = cursors.as_usize() as u64;
-    let s_ptr: u64 = sorted_pair_idx.as_usize() as u64;
+    let total_i = shape.total as i32;
+    let n_experts_i = shape.n_experts as i32;
+    let e_ptr: u64 = buf.expert_ids.as_usize() as u64;
+    let c_ptr: u64 = buf.counts.as_usize() as u64;
+    let o_ptr: u64 = buf.offsets.as_usize() as u64;
+    let k_ptr: u64 = buf.cursors.as_usize() as u64;
+    let s_ptr: u64 = buf.sorted_pair_idx.as_usize() as u64;
 
     // Kernel 0: zero counts
     {
@@ -3313,7 +3308,7 @@ pub fn moe_sort_by_expert(
             block: (512, 1, 1),
             shared_bytes: 0,
         };
-        unsafe { k_zero.launch(stream, cfg, args)? };
+        unsafe { k_zero.launch(ctx.stream, cfg, args)? };
     }
     // Kernel 1: histogram
     {
@@ -3322,9 +3317,9 @@ pub fn moe_sort_by_expert(
         args.push(&c_ptr);
         args.push(&total_i);
         const BLOCK: u32 = 256;
-        let grid = (total as u32).div_ceil(BLOCK);
+        let grid = (shape.total as u32).div_ceil(BLOCK);
         let cfg = LaunchCfg::one_d(grid, BLOCK);
-        unsafe { k_count.launch(stream, cfg, args)? };
+        unsafe { k_count.launch(ctx.stream, cfg, args)? };
     }
     // Kernel 2: scan to offsets + init cursors (single block, 512 threads)
     {
@@ -3338,7 +3333,7 @@ pub fn moe_sort_by_expert(
             block: (512, 1, 1),
             shared_bytes: 0,
         };
-        unsafe { k_scan.launch(stream, cfg, args)? };
+        unsafe { k_scan.launch(ctx.stream, cfg, args)? };
     }
     // Kernel 3: scatter (deterministic by default, racing on opt-in)
     {
@@ -3353,7 +3348,7 @@ pub fn moe_sort_by_expert(
             block: (1, 1, 1),
             shared_bytes: 0,
         };
-        unsafe { k_scatter.launch(stream, cfg, args)? };
+        unsafe { k_scatter.launch(ctx.stream, cfg, args)? };
     }
     Ok(())
 }
@@ -3372,42 +3367,35 @@ pub fn moe_sort_by_expert(
 /// pad-to-16 invariant; the scan_padded_offsets_16 kernel is already
 /// compiled into `moe_sort_by_expert`.
 pub fn moe_sort_by_expert_padded_16(
-    reg: &OpsRegistry,
-    stream: &HipStream,
-    expert_ids: DevicePtr,
-    counts: DevicePtr,
-    offsets: DevicePtr,
-    cursors: DevicePtr,
-    sorted_pair_idx: DevicePtr,
-    padded_offsets: DevicePtr,
-    sorted_pair_idx_padded: DevicePtr,
-    total: usize,
-    n_experts: usize,
-    max_tokens: usize,
-    top_k: usize,
+    ctx: crate::OpCtx<'_>,
+    buf: crate::MoeSortPaddedBuffers,
+    shape: crate::MoeSortPaddedShape,
 ) -> Result<()> {
     moe_sort_by_expert(
-        reg,
-        stream,
-        expert_ids,
-        counts,
-        offsets,
-        cursors,
-        sorted_pair_idx,
-        total,
-        n_experts,
+        ctx,
+        crate::MoeSortBuffers {
+            expert_ids: buf.expert_ids,
+            counts: buf.counts,
+            offsets: buf.offsets,
+            cursors: buf.cursors,
+            sorted_pair_idx: buf.sorted_pair_idx,
+        },
+        crate::MoeSortShape {
+            total: shape.total,
+            n_experts: shape.n_experts,
+        },
     )?;
 
-    let module = reg.expect_module("moe_sort_by_expert")?;
+    let module = ctx.reg.expect_module("moe_sort_by_expert")?;
     let k_scan_padded = module.kernel("flambeau_moe_sort_scan_padded_offsets_16")?;
     let k_pad_copy = module.kernel("flambeau_moe_sort_pad_copy")?;
 
-    let n_experts_i = n_experts as i32;
-    let c_ptr: u64 = counts.as_usize() as u64;
-    let o_ptr: u64 = offsets.as_usize() as u64;
-    let po_ptr: u64 = padded_offsets.as_usize() as u64;
-    let spi_ptr: u64 = sorted_pair_idx.as_usize() as u64;
-    let spip_ptr: u64 = sorted_pair_idx_padded.as_usize() as u64;
+    let n_experts_i = shape.n_experts as i32;
+    let c_ptr: u64 = buf.counts.as_usize() as u64;
+    let o_ptr: u64 = buf.offsets.as_usize() as u64;
+    let po_ptr: u64 = buf.padded_offsets.as_usize() as u64;
+    let spi_ptr: u64 = buf.sorted_pair_idx.as_usize() as u64;
+    let spip_ptr: u64 = buf.sorted_pair_idx_padded.as_usize() as u64;
 
     {
         let mut args = KernelArgs::new();
@@ -3419,7 +3407,7 @@ pub fn moe_sort_by_expert_padded_16(
             block: (512, 1, 1),
             shared_bytes: 0,
         };
-        unsafe { k_scan_padded.launch(stream, cfg, args)? };
+        unsafe { k_scan_padded.launch(ctx.stream, cfg, args)? };
     }
     {
         let mut args = KernelArgs::new();
@@ -3430,57 +3418,50 @@ pub fn moe_sort_by_expert_padded_16(
         args.push(&spip_ptr);
         args.push(&n_experts_i);
         // pad-to-16 worst case: each of `total` pairs + up to 15 padding slots per expert.
-        let max_per_expert = (max_tokens * top_k + 15) & !15;
+        let max_per_expert = (shape.max_tokens * shape.top_k + 15) & !15;
         let grid_x = (max_per_expert as u32).div_ceil(256);
         let cfg = LaunchCfg {
-            grid: (grid_x.max(1), n_experts as u32, 1),
+            grid: (grid_x.max(1), shape.n_experts as u32, 1),
             block: (256, 1, 1),
             shared_bytes: 0,
         };
-        unsafe { k_pad_copy.launch(stream, cfg, args)? };
+        unsafe { k_pad_copy.launch(ctx.stream, cfg, args)? };
     }
     Ok(())
 }
 
 pub fn moe_sort_by_expert_padded(
-    reg: &OpsRegistry,
-    stream: &HipStream,
-    expert_ids: DevicePtr,             // [total] i32
-    counts: DevicePtr,                 // [n_experts] i32, overwritten
-    offsets: DevicePtr,                // [n_experts + 1] i32 (written)
-    cursors: DevicePtr,                // [n_experts] i32 scratch
-    sorted_pair_idx: DevicePtr,        // [total] i32 (written, unpadded)
-    padded_offsets: DevicePtr,         // [n_experts + 1] i32 (written)
-    sorted_pair_idx_padded: DevicePtr, // [total_padded_cap] i32 (written)
-    total: usize,
-    n_experts: usize,
-    max_tokens: usize,
-    top_k: usize,
+    ctx: crate::OpCtx<'_>,
+    buf: crate::MoeSortPaddedBuffers,
+    shape: crate::MoeSortPaddedShape,
 ) -> Result<()> {
     // 1. Run the standard (unpadded) sort — fills counts, offsets, cursors,
     // sorted_pair_idx.
     moe_sort_by_expert(
-        reg,
-        stream,
-        expert_ids,
-        counts,
-        offsets,
-        cursors,
-        sorted_pair_idx,
-        total,
-        n_experts,
+        ctx,
+        crate::MoeSortBuffers {
+            expert_ids: buf.expert_ids,
+            counts: buf.counts,
+            offsets: buf.offsets,
+            cursors: buf.cursors,
+            sorted_pair_idx: buf.sorted_pair_idx,
+        },
+        crate::MoeSortShape {
+            total: shape.total,
+            n_experts: shape.n_experts,
+        },
     )?;
 
-    let module = reg.expect_module("moe_sort_by_expert")?;
+    let module = ctx.reg.expect_module("moe_sort_by_expert")?;
     let k_scan_padded = module.kernel("flambeau_moe_sort_scan_padded_offsets")?;
     let k_pad_copy = module.kernel("flambeau_moe_sort_pad_copy")?;
 
-    let n_experts_i = n_experts as i32;
-    let c_ptr: u64 = counts.as_usize() as u64;
-    let o_ptr: u64 = offsets.as_usize() as u64;
-    let po_ptr: u64 = padded_offsets.as_usize() as u64;
-    let spi_ptr: u64 = sorted_pair_idx.as_usize() as u64;
-    let spip_ptr: u64 = sorted_pair_idx_padded.as_usize() as u64;
+    let n_experts_i = shape.n_experts as i32;
+    let c_ptr: u64 = buf.counts.as_usize() as u64;
+    let o_ptr: u64 = buf.offsets.as_usize() as u64;
+    let po_ptr: u64 = buf.padded_offsets.as_usize() as u64;
+    let spi_ptr: u64 = buf.sorted_pair_idx.as_usize() as u64;
+    let spip_ptr: u64 = buf.sorted_pair_idx_padded.as_usize() as u64;
 
     // 2. Scan counts → padded_offsets (single-block Blelloch).
     {
@@ -3493,7 +3474,7 @@ pub fn moe_sort_by_expert_padded(
             block: (512, 1, 1),
             shared_bytes: 0,
         };
-        unsafe { k_scan_padded.launch(stream, cfg, args)? };
+        unsafe { k_scan_padded.launch(ctx.stream, cfg, args)? };
     }
     // 3. Copy + pad-fill. grid.x covers the worst case (all pairs to one
     // expert, rounded up to mult of 8); blocks that fall outside an
@@ -3506,14 +3487,14 @@ pub fn moe_sort_by_expert_padded(
         args.push(&po_ptr);
         args.push(&spip_ptr);
         args.push(&n_experts_i);
-        let max_per_expert = (max_tokens * top_k + 7) & !7;
+        let max_per_expert = (shape.max_tokens * shape.top_k + 7) & !7;
         let grid_x = (max_per_expert as u32).div_ceil(256);
         let cfg = LaunchCfg {
-            grid: (grid_x.max(1), n_experts as u32, 1),
+            grid: (grid_x.max(1), shape.n_experts as u32, 1),
             block: (256, 1, 1),
             shared_bytes: 0,
         };
-        unsafe { k_pad_copy.launch(stream, cfg, args)? };
+        unsafe { k_pad_copy.launch(ctx.stream, cfg, args)? };
     }
     Ok(())
 }

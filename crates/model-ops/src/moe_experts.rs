@@ -1313,17 +1313,21 @@ impl MoeExperts {
         // MMQ for gate+up.
         let padded_total_ub = n_pairs + n_experts * 8;
         ops.moe_sort_by_expert_padded(
-            scratch.expert_ids,
-            scratch.sort_counts,
-            scratch.sort_offsets,
-            scratch.sort_cursors,
-            scratch.sort_sorted_pair_idx,
-            scratch.sort_padded_offsets,
-            scratch.sort_sorted_pair_idx_padded,
-            n_pairs,
-            n_experts,
-            scratch.max_tokens,
-            top_k,
+            flambeau_ops::MoeSortPaddedBuffers {
+                expert_ids: scratch.expert_ids,
+                counts: scratch.sort_counts,
+                offsets: scratch.sort_offsets,
+                cursors: scratch.sort_cursors,
+                sorted_pair_idx: scratch.sort_sorted_pair_idx,
+                padded_offsets: scratch.sort_padded_offsets,
+                sorted_pair_idx_padded: scratch.sort_sorted_pair_idx_padded,
+            },
+            flambeau_ops::MoeSortPaddedShape {
+                total: n_pairs,
+                n_experts,
+                max_tokens: scratch.max_tokens,
+                top_k,
+            },
         )
         .context("prefill moe_sort_by_expert_padded")?;
 

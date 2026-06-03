@@ -2137,87 +2137,26 @@ impl<'a> Ops for HipOps<'a> {
 
     fn moe_sort_by_expert(
         &self,
-        expert_ids: DevicePtr,
-        counts: DevicePtr,
-        offsets: DevicePtr,
-        cursors: DevicePtr,
-        sorted_pair_idx: DevicePtr,
-        total: usize,
-        n_experts: usize,
+        buf: crate::MoeSortBuffers,
+        shape: crate::MoeSortShape,
     ) -> Result<()> {
-        super::moe::moe_sort_by_expert(
-            self.reg,
-            self.stream,
-            expert_ids,
-            counts,
-            offsets,
-            cursors,
-            sorted_pair_idx,
-            total,
-            n_experts,
-        )
+        super::moe::moe_sort_by_expert(self.ctx(), buf, shape)
     }
 
     fn moe_sort_by_expert_padded_16(
         &self,
-        expert_ids: DevicePtr,
-        counts: DevicePtr,
-        offsets: DevicePtr,
-        cursors: DevicePtr,
-        sorted_pair_idx: DevicePtr,
-        padded_offsets: DevicePtr,
-        sorted_pair_idx_padded: DevicePtr,
-        total: usize,
-        n_experts: usize,
-        max_tokens: usize,
-        top_k: usize,
+        buf: crate::MoeSortPaddedBuffers,
+        shape: crate::MoeSortPaddedShape,
     ) -> Result<()> {
-        super::moe::moe_sort_by_expert_padded_16(
-            self.reg,
-            self.stream,
-            expert_ids,
-            counts,
-            offsets,
-            cursors,
-            sorted_pair_idx,
-            padded_offsets,
-            sorted_pair_idx_padded,
-            total,
-            n_experts,
-            max_tokens,
-            top_k,
-        )
+        super::moe::moe_sort_by_expert_padded_16(self.ctx(), buf, shape)
     }
 
     fn moe_sort_by_expert_padded(
         &self,
-        expert_ids: DevicePtr,
-        counts: DevicePtr,
-        offsets: DevicePtr,
-        cursors: DevicePtr,
-        sorted_pair_idx: DevicePtr,
-        padded_offsets: DevicePtr,
-        sorted_pair_idx_padded: DevicePtr,
-        total: usize,
-        n_experts: usize,
-        max_tokens: usize,
-        top_k: usize,
+        buf: crate::MoeSortPaddedBuffers,
+        shape: crate::MoeSortPaddedShape,
     ) -> Result<()> {
-        super::moe::moe_sort_by_expert_padded(
-            self.reg,
-            self.stream,
-            expert_ids,
-            counts,
-            offsets,
-            cursors,
-            sorted_pair_idx,
-            padded_offsets,
-            sorted_pair_idx_padded,
-            total,
-            n_experts,
-            max_tokens,
-            top_k,
-        )
+        super::moe::moe_sort_by_expert_padded(self.ctx(), buf, shape)
     }
 
     fn apply_softcap_f32(&self, x: DevicePtr, y: DevicePtr, n: usize, cap: f32) -> Result<()> {

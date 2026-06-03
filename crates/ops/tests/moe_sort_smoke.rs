@@ -92,15 +92,18 @@ fn moe_sort_by_expert_groups_pairs() -> Result<()> {
     dev.default_stream().synchronize()?;
 
     moe::moe_sort_by_expert(
-        &reg,
-        dev.default_stream(),
-        d_ids,
-        d_counts,
-        d_offsets,
-        d_cursors,
-        d_sorted,
-        total,
-        n_experts,
+        flambeau_ops::OpCtx {
+            reg: &reg,
+            stream: dev.default_stream(),
+        },
+        flambeau_ops::MoeSortBuffers {
+            expert_ids: d_ids,
+            counts: d_counts,
+            offsets: d_offsets,
+            cursors: d_cursors,
+            sorted_pair_idx: d_sorted,
+        },
+        flambeau_ops::MoeSortShape { total, n_experts },
     )?;
 
     // Download results.
@@ -192,15 +195,18 @@ fn moe_sort_by_expert_qwen3_6_scale() -> Result<()> {
     dev.default_stream().synchronize()?;
 
     moe::moe_sort_by_expert(
-        &reg,
-        dev.default_stream(),
-        d_ids,
-        d_counts,
-        d_offsets,
-        d_cursors,
-        d_sorted,
-        total,
-        n_experts,
+        flambeau_ops::OpCtx {
+            reg: &reg,
+            stream: dev.default_stream(),
+        },
+        flambeau_ops::MoeSortBuffers {
+            expert_ids: d_ids,
+            counts: d_counts,
+            offsets: d_offsets,
+            cursors: d_cursors,
+            sorted_pair_idx: d_sorted,
+        },
+        flambeau_ops::MoeSortShape { total, n_experts },
     )?;
 
     let counts = download_i32(&dev, d_counts, n_experts);
@@ -263,19 +269,25 @@ fn moe_sort_by_expert_padded_groups_in_multiples_of_8() -> Result<()> {
     let d_sorted_padded = dev.alloc(padded_cap * 4)?;
 
     moe::moe_sort_by_expert_padded(
-        &reg,
-        dev.default_stream(),
-        d_ids,
-        d_counts,
-        d_offsets,
-        d_cursors,
-        d_sorted,
-        d_padded_off,
-        d_sorted_padded,
-        total,
-        n_experts,
-        max_tokens,
-        top_k,
+        flambeau_ops::OpCtx {
+            reg: &reg,
+            stream: dev.default_stream(),
+        },
+        flambeau_ops::MoeSortPaddedBuffers {
+            expert_ids: d_ids,
+            counts: d_counts,
+            offsets: d_offsets,
+            cursors: d_cursors,
+            sorted_pair_idx: d_sorted,
+            padded_offsets: d_padded_off,
+            sorted_pair_idx_padded: d_sorted_padded,
+        },
+        flambeau_ops::MoeSortPaddedShape {
+            total,
+            n_experts,
+            max_tokens,
+            top_k,
+        },
     )?;
 
     let counts = download_i32(&dev, d_counts, n_experts);
