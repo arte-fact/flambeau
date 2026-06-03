@@ -1,0 +1,7 @@
+{
+  "model": "gemma4-31b-q4_0",
+  "scenario": "S3",
+  "skipped": true,
+  "reason": "S1 precondition produced no tool_calls",
+  "verdict": "skip"
+}

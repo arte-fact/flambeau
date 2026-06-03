@@ -116,28 +116,85 @@ Five slices. Each ends with a green parity test against a captured
 real-model fixture and a live `/v1/chat/completions` round-trip on
 pp2tp2 / hip:0,2,1,3 / `--ctx-cap 4096`.
 
-### T1 — Capture real fixtures (no code change)
+### T1 — Capture real fixtures (no code change) — COMPLETE
 
-Goal: pin down what each model actually emits today, before
-hypothesising fixes.
+Harness at `scripts/tool_test/{run.py, scenarios.py, assertions.py}`;
+24 fixtures (4 models × S1–S6) under `scripts/tool_test/fixtures/`.
 
-For each of the four models (qwen3.6-27B, qwen3.6-35B-A3B, gemma4-31B,
-gemma4-26B-A4B), fire a `/v1/chat/completions` request with a single
-realistic tool definition (`get_weather(location: str)`) and a prompt
-that should trigger it ("What's the weather in Paris?"). Capture:
-- raw `content` (including any leaked tokens),
-- the value of `tool_calls` (likely null or empty),
-- the GGUF-embedded chat template source for each arch,
-- the `tool_call_format` that `detect_format_from_template` chose.
+**Per-model results, S1–S6:**
 
-Land the fixtures under
-`certs/chat_template/{gemma4,qwen35moe,qwen35moe_coder}_tools/fixtures/`
-as `live_capture.json`. These are the regression oracles for the rest
-of the plan — they document the broken state and become the bit-equal
-green target after each fix.
+| Model                         | S1   | S2   | S3   | S4   | S5   | S6   |
+|-------------------------------|------|------|------|------|------|------|
+| qwen3.6-27b-q4_0              | pass | pass | pass | pass | FAIL | pass |
+| qwen3.6-35b-a3b-q4_0          | pass | pass | pass | pass | FAIL | pass |
+| gemma4-26b-a4b-q8_0 (MoE)     | pass | pass | FAIL | pass | FAIL | pass |
+| gemma4-31b-q4_0 (dense)       | FAIL | FAIL | skip | FAIL | FAIL | pass |
 
-**Deliverable**: 4 fixture files + a one-page diagnosis section in this
-plan listing, per model, which upstream issue maps best.
+**Diagnoses (sorted by impact):**
+
+1. **gemma4-31B dense — wrong tool-call format**. The model emits
+   `<|call:NAME{location: 'Paris, France'}>` instead of the documented
+   `<|tool_call>call:NAME{location:<|"|>Paris<|"|>}<tool_call|>` —
+   missing the `<|tool_call>` open token, missing the `<|"|>` string
+   quote wrapper, using Python-style single quotes. S1 fixture shows
+   the model also auto-hallucinates the tool *response* and the final
+   answer in one go ("…<|response:...> The current weather in Paris is
+   15°C and cloudy."), so the model never stops on `<tool_call|>` to
+   let the server call the tool. The existing `Gemma4ToolCallParser`
+   correctly does not lift this — it doesn't match the spec it was
+   built for. Either the model is undertrained on tool calling, or our
+   chat template is rendering the tools section in a way the model
+   doesn't recognize. Likely both — T2 addresses the template,
+   T3 must extend the parser to recognize the `<|call:NAME{...}>`
+   shape if the template fix doesn't make 31B switch to the documented
+   format. Compare T3 work against gemma4-26B-A4B fixture (which DOES
+   produce native format — parser path is OK there).
+
+2. **gemma4-26B-A4B MoE — channel-leak in non-tool-call turns**.
+   S3 fails on a finish-reason=length cut-off (max_tokens=128) AFTER
+   the model burns ~50 tokens narrating `thought\nThe user wants to
+   know...\nI have called get_current_weather...\nNow I should
+   formulate a response...\nResponse: "The cur` — the reasoning
+   channel is leaking into visible content as plain text. Bumping
+   max_tokens would mask this; T2 (template strip) is the right fix.
+   S5 also shows the same `thought\n` prefix on a plain reply.
+
+3. **All 4 models — `tool_choice="none"` is ignored**. Server still
+   passes tools to the model and lifts a `tool_calls[0]` payload
+   when the request explicitly forbids it. This is a server-side
+   gating bug, separate from the parser/template axis. Not in
+   T2/T3/T4 scope as originally written — adding a new slice:
+   - **T2.5 — server-side `tool_choice="none"` enforcement**. When
+     `tool_choice=="none"`, suppress the tools section in the rendered
+     chat template AND blank `tool_calls[]` post-decode if anything
+     leaks through. Trivial in `crates/server/src/routes/chat.rs`;
+     gates on S5 turning green for all 4 models.
+
+4. **qwen3.6 family is fine on the V1 rig**. Both 27B dense and 35B
+   MoE pass S1, S2, S3 (round-trip), S4 (parallel — actually emits
+   both calls), and S6. The upstream HF/vLLM regression chatter
+   doesn't reproduce here — likely because we're on V1 of the
+   official Qwen3.6 GGUFs and the model+template combination
+   happens to work through our Hermes parser path. T4 is downgraded
+   to "verify the Unsloth UD-Q*_K_XL GGUF builds also pass on the
+   same harness" — if they do, T4 is no-op; if not, ship the
+   `qwen3.5-enhanced.jinja` template variant per the NVIDIA forum.
+
+**Net effect on slice ordering:**
+
+- T2 (gemma4 template strip) and T3 (gemma4 parser extension for
+  the `<|call:NAME{...}>` shape) become co-dependent: ship T2 first,
+  re-capture gemma4-31B fixtures, then scope T3 against whatever
+  format the 31B model emits POST-template-fix.
+- T2.5 added for `tool_choice="none"` enforcement.
+- T4 demoted from "implement qwen3_xml parser" to "verify Unsloth
+  build passes the same harness" — the qwen3.6 base GGUFs already
+  work.
+- T5 unchanged: full 4-model × 6-scenario green gate before merge.
+
+**Re-baseline cadence**: after each fix slice lands, re-run
+`scripts/tool_test/run.py --all --capture` to overwrite fixtures.
+The diff between captures is the gate evidence.
 
 ### T2 — Gemma4 channel-leak template fix
 

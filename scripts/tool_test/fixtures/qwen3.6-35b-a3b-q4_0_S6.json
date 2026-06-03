@@ -1,0 +1,66 @@
+{
+  "model": "qwen3.6-35b-a3b-q4_0",
+  "scenario": "S6",
+  "request": {
+    "model": "qwen3.6-35b-a3b-q4_0",
+    "messages": [
+      {
+        "role": "user",
+        "content": "What's the capital of France?"
+      }
+    ],
+    "temperature": 0.0,
+    "top_p": 1.0,
+    "seed": 12345,
+    "max_tokens": 64
+  },
+  "response": {
+    "id": "chatcmpl-1780530267",
+    "choices": [
+      {
+        "finish_reason": "stop",
+        "index": 0,
+        "logprobs": null,
+        "message": {
+          "content": "The capital of France is **Paris**. It is the country's largest city and serves as its political, economic, and cultural center.",
+          "refusal": null,
+          "role": "assistant",
+          "annotations": null,
+          "audio": null,
+          "function_call": null,
+          "tool_calls": null
+        }
+      }
+    ],
+    "created": 1780530267,
+    "model": "Qwen_Qwen3.6-35B-A3B-Q4_0",
+    "object": "chat.completion",
+    "service_tier": null,
+    "system_fingerprint": null,
+    "usage": {
+      "completion_tokens": 27,
+      "prompt_tokens": 23,
+      "total_tokens": 50,
+      "completion_tokens_details": null,
+      "prompt_tokens_details": null
+    }
+  },
+  "checks": [
+    {
+      "name": "finish_reason=stop",
+      "pass": true,
+      "detail": "got 'stop'"
+    },
+    {
+      "name": "content mentions Paris",
+      "pass": true,
+      "detail": "content[:80]=\"The capital of France is **Paris**. It is the country's largest city and serves \""
+    },
+    {
+      "name": "no tool/channel markers leak",
+      "pass": true,
+      "detail": "leaked: None"
+    }
+  ],
+  "verdict": "pass"
+}
