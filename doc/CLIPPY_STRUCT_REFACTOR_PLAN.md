@@ -99,12 +99,11 @@ Next-session restart plan:
 | **P3 — Norm fused** | | | | |
 | P3a | 7 rmsnorm wrappers + 4 caller sites (rmsnorm.rs leaf + delta_net + 3 forward composites) | ☑ done | 10 | `ops_trait.rs`, `hip/norm.rs`, `hip/ops_impl.rs`, sig.rs (+`NormResidualBuffers`/`NormFusedAddBuffers`/`NormShape`), 5 callers. Also added `HipOps::ctx()` helper. |
 | P3b | 3 rope wrappers (`rope_f16`, `rope_neox_partial_f16`, `rmsnorm_rope_neox_partial_f16`) + 6 caller sites | ☑ done | 5 | sig.rs (+`RopeBuffers`/`RopeFusedBuffers`/`RopeShape`/`RopePartialShape`), trait, impl, hip/pe.rs, 6 callers. |
-| **P4 — KV-append (5 fns)** | | | | |
-| P4a | `kv_append_f16_paged_*` (prefill + slots) | ☐ pending | 2 | `ops_trait.rs`, `hip/attention.rs` (where these live) + callers |
-| P4b | `kv_append_f16_batched_slots` + `kv_append_v_unit_norm_f16` | ☐ pending | 2 | same |
+| **P4 — KV-append (4 fns)** | | | | |
+| P4 | 4 kv_append wrappers (paged_slots, paged_prefill, batched_slots, v_unit_norm_f16) + 4 caller sites (model-ops/attn_decode_batched 3, forward/standard_attn 1) | ☑ done | 8 | sig.rs (+4 buf aggregates: `Kv{,PagedSlots,PagedPrefill,BatchedSlots}Buffers` + 4 shape aggregates), trait, impl, hip/attention.rs, 4 callers |
 | **P5 — MoE compose** | | | | |
-| P5a | `moe_sort_by_expert_*` (3 variants) | ☐ pending | 3 | `ops_trait.rs`, `hip/moe.rs`, `hip/router.rs` |
-| P5b | `moe_combine_*` + `moe_router_*` | ☐ pending | 3 | same |
+| P5a | 3 moe_sort_by_expert variants + 1 caller (moe_experts) + 3 test calls (moe_sort_smoke) | ☑ done | 6 | sig.rs (+`MoeSortBuffers`/`MoeSortPaddedBuffers`/`MoeSortShape`/`MoeSortPaddedShape`), trait, impl, hip/moe.rs |
+| P5b | 4 moe_combine variants (f16, no_residual_f16/f32, two_residuals_f16) + 8 caller sites in moe_experts | ☑ done | 6 | sig.rs (+`MoeCombineBuffers`/`MoeCombineNoResidualBuffers`/`MoeCombineTwoResidualsBuffers`/`MoeCombineShape`), trait, impl, hip/moe.rs |
 | **P6 — Collective** | | | | |
 | P6 | `bar_ar_*` (4 sibling fns share an 11-arg shape) + `flambeau_p2p_allreduce_sum_tp*` | ☐ pending | ~7 | `backend-hip/src/bar_p2p.rs`, `forward/src/runtime/ar.rs` |
 | **P7 — Mid-layer drivers** | | | | |
@@ -127,12 +126,12 @@ Next-session restart plan:
 
 ## Live state
 
-| Metric | At start | After P0 | After P1f | After P2a | After P2b | After P2c | After P2f1 | After P2f2 | After P2f3 | After P2f4 | After P2f5 | After P3a | After P3b |
-|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
-| total warnings | 478 | 478 | 456 | 447 | 437 | 434 | 413 | 414 | 411 | 378 | 344 | 329 | 324 |
-| `too_many_arguments` | 315 | 315 | 291 | 282 | 272 | 269 | 234 | 230 | 224 | 191 | 157 | 147 | 142 |
-| errors | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 0 |
-| cumulative LOC delta | 0 | +232 | +10 | +12 | −136 | −162 | −46 | −93 | −157 | −509 | −774 | −815 | −825 |
+| Metric | At start | After P0 | After P1f | After P2a | After P2b | After P2c | After P2f1 | After P2f2 | After P2f3 | After P2f4 | After P2f5 | After P3a | After P3b | After P4 | After P5a | After P5b |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| total warnings | 478 | 478 | 456 | 447 | 437 | 434 | 413 | 414 | 411 | 378 | 344 | 329 | 324 | 315 | 309 | 303 |
+| `too_many_arguments` | 315 | 315 | 291 | 282 | 272 | 269 | 234 | 230 | 224 | 191 | 157 | 147 | 142 | 134 | 128 | 122 |
+| errors | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 0 |
+| cumulative LOC delta | 0 | +232 | +10 | +12 | −136 | −162 | −46 | −93 | −157 | −509 | −774 | −815 | −825 | −868 | −918 | −952 |
 
 LOC deltas per commit (insertions − deletions, from `git show --stat`):
 
@@ -155,6 +154,9 @@ LOC deltas per commit (insertions − deletions, from `git show --stat`):
 | P2f5 | `5e99a56` | 339 | 604 | −265 | 34 |
 | P3a | `f4eca1b` | 285 | 326 | −41 | 10 |
 | P3b | `8681de0` | 183 | 193 | −10 | 5 |
+| P4 | `b93807e` | 206 | 249 | −43 | 8 |
+| P5a | `39de884` | 184 | 234 | −50 | 6 |
+| P5b | `04e4b1d` | 195 | 229 | −34 | 6 |
 
 ## Non-goals
 
