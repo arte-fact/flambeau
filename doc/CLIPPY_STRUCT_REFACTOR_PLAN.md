@@ -51,7 +51,7 @@ below is the corrected one.
 | P0 | Foundation — `sig.rs` + re-exports | ☑ done (`8a0aXXX`) | 0 | `crates/ops/src/sig.rs` (new), `crates/ops/src/lib.rs` |
 | **P1 — Attention family (12 fns, 6 sub-phases)** | | | | |
 | P1a | `attention_decode_f16` + `_slots` (graph-capture sibling) | ☑ done | 4 | trait, impl, wrapper, decode callers (model-ops + tests) |
-| P1b | `attention_decode_f16_batched` + `_paged` | ☐ pending | 2 | trait, impl, wrapper, batched callers |
+| P1b | `attention_decode_f16_batched` + `_paged` | ☑ done | 4 | trait, impl, wrapper, batched callers (model-ops + 2 tests) |
 | P1c | `attention_decode_f16_splitk` + `_splitk_h2` | ☐ pending | 2 | trait, impl, wrapper, splitk callers |
 | P1d | `attention_decode_q8_kv` + `_splitk` (Q8 decode pair) | ☐ pending | 2 | trait, impl, wrapper, q8 decode callers |
 | P1e | `attention_prefill_f16` + `_slots` | ☐ pending | 2 | trait, impl, wrapper, prefill callers, tests |
@@ -96,9 +96,18 @@ below is the corrected one.
 
 | Metric | At start | After P0 | After P1a | After P1f | After P2f | After P3 | After P4 | After P5 | After P6 | After P7 | After P8 |
 |---|---|---|---|---|---|---|---|---|---|---|---|
-| total warnings | 478 | 478 | 475 | — | — | — | — | — | — | — | — |
-| `too_many_arguments` | 315 | 315 | 311 | — | — | — | — | — | — | — | — |
-| errors | 0 | 0 | 0 | — | — | — | — | — | — | — | — |
+| total warnings | 478 | 478 | 475 | 471 | — | — | — | — | — | — | — |
+| `too_many_arguments` | 315 | 315 | 311 | 307 | — | — | — | — | — | — | — |
+| errors | 0 | 0 | 0 | 0 | — | — | — | — | — | — | — |
+| cumulative LOC delta | 0 | +232 | +276 | +313 | — | — | — | — | — | — | — |
+
+LOC deltas per commit (insertions − deletions, from `git show --stat`):
+
+| Phase | Commit | + | − | net | warnings cleared |
+|---|---|---|---|---|---|
+| P0 | `8a0aXXX` | 232 | 0 | +232 | 0 (setup) |
+| P1a | `62f177e` | 284 | 240 | +44 | 4 |
+| P1b | (pending) | tbd | tbd | tbd | 4 |
 
 ## Non-goals
 

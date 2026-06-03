@@ -401,32 +401,18 @@ impl<'a> Ops for HipOps<'a> {
 
     fn attention_decode_f16_batched(
         &self,
-        q_batched: DevicePtr,
-        k_cache_ptrs: DevicePtr,
-        v_cache_ptrs: DevicePtr,
-        out_batched: DevicePtr,
-        n_tokens_kv: DevicePtr,
-        n_heads_q: usize,
-        n_heads_kv: usize,
-        head_dim: usize,
-        n_slots: usize,
-        scale: f32,
-        window_size: i32,
+        buffers: crate::AttnBatchedBuffers,
+        shape: crate::AttnDecodeBatchedShape,
+        knobs: crate::AttnKnobs,
     ) -> Result<()> {
         super::attention::attention_decode_f16_batched(
-            self.reg,
-            self.stream,
-            q_batched,
-            k_cache_ptrs,
-            v_cache_ptrs,
-            out_batched,
-            n_tokens_kv,
-            n_heads_q,
-            n_heads_kv,
-            head_dim,
-            n_slots,
-            scale,
-            window_size,
+            crate::OpCtx {
+                reg: self.reg,
+                stream: self.stream,
+            },
+            buffers,
+            shape,
+            knobs,
         )
     }
 
@@ -548,35 +534,17 @@ impl<'a> Ops for HipOps<'a> {
 
     fn attention_decode_f16_paged(
         &self,
-        q_batched: DevicePtr,
-        k_pool: DevicePtr,
-        v_pool: DevicePtr,
-        block_tables: DevicePtr,
-        out_batched: DevicePtr,
-        n_tokens_kv: DevicePtr,
-        n_heads_q: usize,
-        n_heads_kv: usize,
-        head_dim: usize,
-        n_slots: usize,
-        page_size: usize,
-        max_pages_per_slot: usize,
+        buffers: crate::AttnPagedDecodeBuffers,
+        shape: crate::AttnDecodePagedShape,
         scale: f32,
     ) -> Result<()> {
         super::attention::attention_decode_f16_paged(
-            self.reg,
-            self.stream,
-            q_batched,
-            k_pool,
-            v_pool,
-            block_tables,
-            out_batched,
-            n_tokens_kv,
-            n_heads_q,
-            n_heads_kv,
-            head_dim,
-            n_slots,
-            page_size,
-            max_pages_per_slot,
+            crate::OpCtx {
+                reg: self.reg,
+                stream: self.stream,
+            },
+            buffers,
+            shape,
             scale,
         )
     }

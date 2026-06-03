@@ -92,17 +92,20 @@ pub fn attn_decode_f16_batched(
         );
     }
     ops.attention_decode_f16_batched(
-        q_batched.ptr,
-        k_cache_ptrs,
-        v_cache_ptrs,
-        out_batched.ptr,
-        n_tokens_kv,
-        n_heads_q,
-        n_heads_kv,
-        head_dim,
-        n_slots,
-        scale,
-        window_size,
+        flambeau_ops::AttnBatchedBuffers {
+            q_batched: q_batched.ptr,
+            k_cache_ptrs,
+            v_cache_ptrs,
+            out_batched: out_batched.ptr,
+            n_tokens_kv_ptrs: n_tokens_kv,
+        },
+        flambeau_ops::AttnDecodeBatchedShape {
+            n_heads_q,
+            n_heads_kv,
+            head_dim,
+            n_slots,
+        },
+        flambeau_ops::AttnKnobs { scale, window_size },
     )
 }
 
@@ -312,18 +315,22 @@ pub fn attn_decode_f16_paged(
         );
     }
     ops.attention_decode_f16_paged(
-        q_batched.ptr,
-        k_pool,
-        v_pool,
-        block_tables,
-        out_batched.ptr,
-        n_tokens_kv,
-        n_heads_q,
-        n_heads_kv,
-        head_dim,
-        n_slots,
-        page_size,
-        max_pages_per_slot,
+        flambeau_ops::AttnPagedDecodeBuffers {
+            q_batched: q_batched.ptr,
+            k_pool,
+            v_pool,
+            block_tables,
+            out_batched: out_batched.ptr,
+            n_tokens_kv_ptrs: n_tokens_kv,
+        },
+        flambeau_ops::AttnDecodePagedShape {
+            n_heads_q,
+            n_heads_kv,
+            head_dim,
+            n_slots,
+            page_size,
+            max_pages_per_slot,
+        },
         scale,
     )
 }

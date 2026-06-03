@@ -119,20 +119,25 @@ pub fn attention_decode_f16_slots(
 /// n_heads_kv * head_dim` F16 elements. `q` / `out` must each point at
 /// ≥ `n_slots * n_heads_q * head_dim` F16 elements.
 pub fn attention_decode_f16_batched(
-    reg: &OpsRegistry,
-    stream: &HipStream,
-    q_batched: DevicePtr,
-    k_cache_ptrs: DevicePtr,
-    v_cache_ptrs: DevicePtr,
-    out_batched: DevicePtr,
-    n_tokens_kv: DevicePtr,
-    n_heads_q: usize,
-    n_heads_kv: usize,
-    head_dim: usize,
-    n_slots: usize,
-    scale: f32,
-    window_size: i32,
+    ctx: crate::OpCtx<'_>,
+    buffers: crate::AttnBatchedBuffers,
+    shape: crate::AttnDecodeBatchedShape,
+    knobs: crate::AttnKnobs,
 ) -> Result<()> {
+    let crate::AttnBatchedBuffers {
+        q_batched,
+        k_cache_ptrs,
+        v_cache_ptrs,
+        out_batched,
+        n_tokens_kv_ptrs: n_tokens_kv,
+    } = buffers;
+    let crate::AttnDecodeBatchedShape {
+        n_heads_q,
+        n_heads_kv,
+        head_dim,
+        n_slots,
+    } = shape;
+    let crate::AttnKnobs { scale, window_size } = knobs;
     assert!(
         head_dim == 64 || head_dim == 128 || head_dim == 256 || head_dim == 512,
         "attention_decode_f16_batched: head_dim {head_dim} not supported (expected 64, 128, 256, or 512)"
@@ -141,14 +146,13 @@ pub fn attention_decode_f16_batched(
         (1..=32).contains(&n_slots),
         "attention_decode_f16_batched: n_slots {n_slots} out of supported range [1, 32]"
     );
-    let module = reg.expect_module("attention_decode_f16_batched")?;
+    let module = ctx.reg.expect_module("attention_decode_f16_batched")?;
     let kernel = module.kernel("flambeau_attention_decode_f16_batched")?;
 
     let n_heads_q_i = n_heads_q as i32;
     let n_heads_kv_i = n_heads_kv as i32;
     let head_dim_i = head_dim as i32;
     let n_slots_i = n_slots as i32;
-    let scale_f = scale;
     let q_ptr: u64 = q_batched.as_usize() as u64;
     let k_ptrs_ptr: u64 = k_cache_ptrs.as_usize() as u64;
     let v_ptrs_ptr: u64 = v_cache_ptrs.as_usize() as u64;
@@ -164,14 +168,14 @@ pub fn attention_decode_f16_batched(
     args.push(&n_heads_kv_i);
     args.push(&head_dim_i);
     args.push(&n_slots_i);
-    args.push(&scale_f);
+    args.push(&scale);
     args.push(&window_size);
     let cfg = LaunchCfg {
         grid: (n_heads_q as u32, n_slots as u32, 1),
         block: (head_dim as u32, 1, 1),
         shared_bytes: 0,
     };
-    unsafe { kernel.launch(stream, cfg, args)? };
+    unsafe { kernel.launch(ctx.stream, cfg, args)? };
     Ok(())
 }
 
@@ -204,22 +208,27 @@ pub fn attention_decode_f16_batched(
 /// and `out_batched` must each point at ≥ `n_slots * n_heads_q *
 /// head_dim` F16 elements.
 pub fn attention_decode_f16_paged(
-    reg: &OpsRegistry,
-    stream: &HipStream,
-    q_batched: DevicePtr,
-    k_pool: DevicePtr,
-    v_pool: DevicePtr,
-    block_tables: DevicePtr,
-    out_batched: DevicePtr,
-    n_tokens_kv: DevicePtr,
-    n_heads_q: usize,
-    n_heads_kv: usize,
-    head_dim: usize,
-    n_slots: usize,
-    page_size: usize,
-    max_pages_per_slot: usize,
+    ctx: crate::OpCtx<'_>,
+    buffers: crate::AttnPagedDecodeBuffers,
+    shape: crate::AttnDecodePagedShape,
     scale: f32,
 ) -> Result<()> {
+    let crate::AttnPagedDecodeBuffers {
+        q_batched,
+        k_pool,
+        v_pool,
+        block_tables,
+        out_batched,
+        n_tokens_kv_ptrs: n_tokens_kv,
+    } = buffers;
+    let crate::AttnDecodePagedShape {
+        n_heads_q,
+        n_heads_kv,
+        head_dim,
+        n_slots,
+        page_size,
+        max_pages_per_slot,
+    } = shape;
     assert!(
         head_dim == 64 || head_dim == 128 || head_dim == 256 || head_dim == 512,
         "attention_decode_f16_paged: head_dim {head_dim} not supported (expected 64, 128, 256, or 512)"
@@ -236,7 +245,7 @@ pub fn attention_decode_f16_paged(
         max_pages_per_slot >= 1,
         "attention_decode_f16_paged: max_pages_per_slot must be >= 1"
     );
-    let module = reg.expect_module("attention_decode_f16_paged")?;
+    let module = ctx.reg.expect_module("attention_decode_f16_paged")?;
     let kernel = module.kernel("flambeau_attention_decode_f16_paged")?;
 
     let n_heads_q_i = n_heads_q as i32;
@@ -245,7 +254,6 @@ pub fn attention_decode_f16_paged(
     let n_slots_i = n_slots as i32;
     let page_size_i = page_size as i32;
     let max_pps_i = max_pages_per_slot as i32;
-    let scale_f = scale;
     let q_ptr: u64 = q_batched.as_usize() as u64;
     let k_pool_ptr: u64 = k_pool.as_usize() as u64;
     let v_pool_ptr: u64 = v_pool.as_usize() as u64;
@@ -265,13 +273,13 @@ pub fn attention_decode_f16_paged(
     args.push(&n_slots_i);
     args.push(&page_size_i);
     args.push(&max_pps_i);
-    args.push(&scale_f);
+    args.push(&scale);
     let cfg = LaunchCfg {
         grid: (n_heads_q as u32, n_slots as u32, 1),
         block: (head_dim as u32, 1, 1),
         shared_bytes: 0,
     };
-    unsafe { kernel.launch(stream, cfg, args)? };
+    unsafe { kernel.launch(ctx.stream, cfg, args)? };
     Ok(())
 }
 

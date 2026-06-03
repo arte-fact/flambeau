@@ -234,17 +234,9 @@ pub trait Ops {
 
     fn attention_decode_f16_batched(
         &self,
-        q_batched: DevicePtr,
-        k_cache_ptrs: DevicePtr,
-        v_cache_ptrs: DevicePtr,
-        out_batched: DevicePtr,
-        n_tokens_kv: DevicePtr,
-        n_heads_q: usize,
-        n_heads_kv: usize,
-        head_dim: usize,
-        n_slots: usize,
-        scale: f32,
-        window_size: i32,
+        buffers: crate::AttnBatchedBuffers,
+        shape: crate::AttnDecodeBatchedShape,
+        knobs: crate::AttnKnobs,
     ) -> Result<()>;
 
     /// Single-launch per-slot K/V append for the batched-decode path.
@@ -328,18 +320,8 @@ pub trait Ops {
     /// `page_size` must be a power of two.
     fn attention_decode_f16_paged(
         &self,
-        q_batched: DevicePtr,
-        k_pool: DevicePtr,
-        v_pool: DevicePtr,
-        block_tables: DevicePtr,
-        out_batched: DevicePtr,
-        n_tokens_kv: DevicePtr,
-        n_heads_q: usize,
-        n_heads_kv: usize,
-        head_dim: usize,
-        n_slots: usize,
-        page_size: usize,
-        max_pages_per_slot: usize,
+        buffers: crate::AttnPagedDecodeBuffers,
+        shape: crate::AttnDecodePagedShape,
         scale: f32,
     ) -> Result<()>;
 

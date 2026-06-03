@@ -203,19 +203,27 @@ fn run_parity(
 
     // 6. Batched: single launch.
     attention_decode_f16_batched(
-        &reg,
-        stream,
-        d_q_batched,
-        d_k_ptrs,
-        d_v_ptrs,
-        d_out_batched,
-        d_n_kv,
-        n_heads_q,
-        n_heads_kv,
-        head_dim,
-        n_slots,
-        scale,
-        /* window_size = */ 0,
+        flambeau_ops::OpCtx {
+            reg: &reg,
+            stream,
+        },
+        flambeau_ops::AttnBatchedBuffers {
+            q_batched: d_q_batched,
+            k_cache_ptrs: d_k_ptrs,
+            v_cache_ptrs: d_v_ptrs,
+            out_batched: d_out_batched,
+            n_tokens_kv_ptrs: d_n_kv,
+        },
+        flambeau_ops::AttnDecodeBatchedShape {
+            n_heads_q,
+            n_heads_kv,
+            head_dim,
+            n_slots,
+        },
+        flambeau_ops::AttnKnobs {
+            scale,
+            window_size: 0,
+        },
     )?;
     stream.synchronize()?;
 
