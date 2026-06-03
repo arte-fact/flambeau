@@ -71,7 +71,7 @@ fn copy_back_f16(dev: &HipDevice, src: DevicePtr, n: usize) -> Vec<f16> {
     out
 }
 
-fn run_case(
+struct Case {
     n_q_tokens: usize,
     n_heads_q: usize,
     n_heads_kv: usize,
@@ -80,7 +80,19 @@ fn run_case(
     q_offset: usize,
     page_size: usize,
     seed: u64,
-) -> (Vec<f16>, Vec<f16>) {
+}
+
+fn run_case(case: Case) -> (Vec<f16>, Vec<f16>) {
+    let Case {
+        n_q_tokens,
+        n_heads_q,
+        n_heads_kv,
+        head_dim,
+        n_k_tokens,
+        q_offset,
+        page_size,
+        seed,
+    } = case;
     let dev = HipDevice::new(0).unwrap();
     dev.bind().unwrap();
 
@@ -204,7 +216,16 @@ fn paged_prefill_attn_matches_contiguous_q4_qh8_kvh2_hd64_page16_nk32() {
         return;
     }
     // n_q = 4, n_k = 32 spanning 2 pages at page_size 16.
-    let (b, p) = run_case(4, 8, 2, 64, 32, 0, 16, 0xCAFEBABE);
+    let (b, p) = run_case(Case {
+        n_q_tokens: 4,
+        n_heads_q: 8,
+        n_heads_kv: 2,
+        head_dim: 64,
+        n_k_tokens: 32,
+        q_offset: 0,
+        page_size: 16,
+        seed: 0xCAFEBABE,
+    });
     assert_eq!(b, p, "prefill attn mismatch (Q=4, n_k=32, page=16)");
 }
 
@@ -214,7 +235,16 @@ fn paged_prefill_attn_matches_contiguous_q16_qh16_kvh4_hd128_page16_nk128() {
         return;
     }
     // n_q = 16 (full causal prefill), n_k = 128 spanning 8 pages.
-    let (b, p) = run_case(16, 16, 4, 128, 128, 0, 16, 0x1234567890ABCDEF);
+    let (b, p) = run_case(Case {
+        n_q_tokens: 16,
+        n_heads_q: 16,
+        n_heads_kv: 4,
+        head_dim: 128,
+        n_k_tokens: 128,
+        q_offset: 0,
+        page_size: 16,
+        seed: 0x1234567890ABCDEF,
+    });
     assert_eq!(b, p, "prefill attn mismatch (Q=16, n_k=128, page=16)");
 }
 
@@ -224,6 +254,15 @@ fn paged_prefill_attn_matches_contiguous_q8_qh16_kvh2_hd256_page32_nk64() {
         return;
     }
     // head_dim=256 with page_size=32.
-    let (b, p) = run_case(8, 16, 2, 256, 64, 0, 32, 0xABCDEF01);
+    let (b, p) = run_case(Case {
+        n_q_tokens: 8,
+        n_heads_q: 16,
+        n_heads_kv: 2,
+        head_dim: 256,
+        n_k_tokens: 64,
+        q_offset: 0,
+        page_size: 32,
+        seed: 0xABCDEF01,
+    });
     assert_eq!(b, p, "prefill attn mismatch (Q=8, n_k=64, page=32, hd=256)");
 }

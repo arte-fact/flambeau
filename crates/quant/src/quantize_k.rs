@@ -38,6 +38,23 @@ fn nearest_int(x: f32) -> i32 {
 
 const GROUP_MAX_EPS: f32 = 1e-15;
 
+/// Borrowed slice quartet driving [`make_qkx2_quants`].
+struct QkxBuffers<'a> {
+    x: &'a [f32],
+    weights: &'a [f32],
+    out_l: &'a mut [u8],
+    aux_l: &'a mut [u8],
+}
+
+/// Iterative-refinement knobs for [`make_qkx2_quants`].
+#[derive(Copy, Clone, Debug)]
+struct QkxKnobs {
+    rmin: f32,
+    rdelta: f32,
+    nstep: i32,
+    use_mad: bool,
+}
+
 /// `make_qkx2_quants` — joint scale + min fit for an affine quant
 /// (`y = scale*l + min` with `l ∈ [0, nmax]`). Initial guess from
 /// max/min, then `nstep` refinements that solve the weighted least-
@@ -47,16 +64,12 @@ const GROUP_MAX_EPS: f32 = 1e-15;
 fn make_qkx2_quants(
     n: usize,
     nmax: i32,
-    x: &[f32],
-    weights: &[f32],
-    out_l: &mut [u8],
+    bufs: QkxBuffers<'_>,
     the_min: &mut f32,
-    aux_l: &mut [u8],
-    rmin: f32,
-    rdelta: f32,
-    nstep: i32,
-    use_mad: bool,
+    knobs: QkxKnobs,
 ) -> f32 {
+    let QkxBuffers { x, weights, out_l, aux_l } = bufs;
+    let QkxKnobs { rmin, rdelta, nstep, use_mad } = knobs;
     let mut min = x[0];
     let mut max = x[0];
     let mut sum_w = weights[0];
@@ -247,15 +260,14 @@ fn pack_block_q4_k(xi: &[f32], out: &mut [u8]) {
         scales[j] = make_qkx2_quants(
             32,
             15,
-            xj,
-            &weights,
-            &mut local_l[32 * j..32 * (j + 1)],
+            QkxBuffers {
+                x: xj,
+                weights: &weights,
+                out_l: &mut local_l[32 * j..32 * (j + 1)],
+                aux_l: &mut aux_l,
+            },
             &mut the_min,
-            &mut aux_l,
-            -1.0,
-            0.1,
-            20,
-            false,
+            QkxKnobs { rmin: -1.0, rdelta: 0.1, nstep: 20, use_mad: false },
         );
         mins[j] = the_min;
         if scales[j] > max_scale {
@@ -456,15 +468,14 @@ fn pack_block_q2_k(xi: &[f32], out: &mut [u8]) {
         scales[j] = make_qkx2_quants(
             16,
             3,
-            xj,
-            &weights,
-            &mut local_l[16 * j..16 * (j + 1)],
+            QkxBuffers {
+                x: xj,
+                weights: &weights,
+                out_l: &mut local_l[16 * j..16 * (j + 1)],
+                aux_l: &mut aux_l,
+            },
             &mut the_min,
-            &mut aux_l,
-            -0.5,
-            0.1,
-            15,
-            true,
+            QkxKnobs { rmin: -0.5, rdelta: 0.1, nstep: 15, use_mad: true },
         );
         mins[j] = the_min;
         if scales[j] > max_scale {

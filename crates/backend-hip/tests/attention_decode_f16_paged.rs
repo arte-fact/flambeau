@@ -71,16 +71,28 @@ fn copy_back_f16(dev: &HipDevice, src: DevicePtr, n: usize) -> Vec<f16> {
     out
 }
 
-fn run_case(
+struct Case<'a> {
     n_slots: usize,
     n_heads_q: usize,
     n_heads_kv: usize,
     head_dim: usize,
     page_size: usize,
     max_pages_per_slot: usize,
-    n_tokens_kv: &[usize],
+    n_tokens_kv: &'a [usize],
     seed: u64,
-) -> (Vec<f16>, Vec<f16>) {
+}
+
+fn run_case(case: Case<'_>) -> (Vec<f16>, Vec<f16>) {
+    let Case {
+        n_slots,
+        n_heads_q,
+        n_heads_kv,
+        head_dim,
+        page_size,
+        max_pages_per_slot,
+        n_tokens_kv,
+        seed,
+    } = case;
     assert_eq!(n_tokens_kv.len(), n_slots);
     let dev = HipDevice::new(0).unwrap();
     dev.bind().unwrap();
@@ -227,7 +239,16 @@ fn attention_paged_matches_batched_n2_qh8_kvh2_hd64_page16() {
     if !maybe_skip() {
         return;
     }
-    let (b, p) = run_case(2, 8, 2, 64, 16, 4, &[40, 60], 0xCAFEBABE);
+    let (b, p) = run_case(Case {
+        n_slots: 2,
+        n_heads_q: 8,
+        n_heads_kv: 2,
+        head_dim: 64,
+        page_size: 16,
+        max_pages_per_slot: 4,
+        n_tokens_kv: &[40, 60],
+        seed: 0xCAFEBABE,
+    });
     assert_eq!(b, p, "attention output mismatch (N=2, head_dim=64, page=16)");
 }
 
@@ -236,7 +257,16 @@ fn attention_paged_matches_batched_n4_qh16_kvh4_hd128_page16() {
     if !maybe_skip() {
         return;
     }
-    let (b, p) = run_case(4, 16, 4, 128, 16, 8, &[20, 80, 100, 127], 0x1234567890ABCDEF);
+    let (b, p) = run_case(Case {
+        n_slots: 4,
+        n_heads_q: 16,
+        n_heads_kv: 4,
+        head_dim: 128,
+        page_size: 16,
+        max_pages_per_slot: 8,
+        n_tokens_kv: &[20, 80, 100, 127],
+        seed: 0x1234567890ABCDEF,
+    });
     assert_eq!(b, p, "attention output mismatch (N=4, head_dim=128, page=16)");
 }
 
@@ -245,6 +275,15 @@ fn attention_paged_matches_batched_n2_qh16_kvh2_hd256_page32() {
     if !maybe_skip() {
         return;
     }
-    let (b, p) = run_case(2, 16, 2, 256, 32, 4, &[31, 127], 0xABCDEF01);
+    let (b, p) = run_case(Case {
+        n_slots: 2,
+        n_heads_q: 16,
+        n_heads_kv: 2,
+        head_dim: 256,
+        page_size: 32,
+        max_pages_per_slot: 4,
+        n_tokens_kv: &[31, 127],
+        seed: 0xABCDEF01,
+    });
     assert_eq!(b, p, "attention output mismatch (N=2, head_dim=256, page=32)");
 }

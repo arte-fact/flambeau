@@ -122,11 +122,13 @@ pub fn slice_for_tp<'a>(
             name,
             world,
             rank,
-            num_v_heads,
-            num_k_heads,
-            head_v_dim,
-            head_k_dim,
-            kq_replicated,
+            FusedQkvSpec {
+                num_v_heads,
+                num_k_heads,
+                head_v_dim,
+                head_k_dim,
+                kq_replicated,
+            },
         ),
         WeightLayout::ColParallel { dim, .. } => Err(SliceError::UnsupportedAxis {
             layout: "ColParallel".into(),
@@ -410,17 +412,30 @@ fn slice_row_parallel_dim2_3d<'a>(
 ///   quantised dtypes the rows must already be block-aligned (any
 ///   2-D ggml tensor is); the per-sub-slab row counts must each
 ///   individually divide cleanly by `world`.
+/// Per-tensor head geometry for [`WeightLayout::FusedQkvParallel`].
+#[derive(Copy, Clone, Debug)]
+pub struct FusedQkvSpec {
+    pub num_v_heads: u32,
+    pub num_k_heads: u32,
+    pub head_v_dim: u32,
+    pub head_k_dim: u32,
+    pub kq_replicated: bool,
+}
+
 fn slice_fused_qkv_parallel<'a>(
     file: &'a GgufFile,
     name: &str,
     world: u32,
     rank: u32,
-    num_v_heads: u32,
-    num_k_heads: u32,
-    head_v_dim: u32,
-    head_k_dim: u32,
-    kq_replicated: bool,
+    spec: FusedQkvSpec,
 ) -> Result<Cow<'a, [u8]>> {
+    let FusedQkvSpec {
+        num_v_heads,
+        num_k_heads,
+        head_v_dim,
+        head_k_dim,
+        kq_replicated,
+    } = spec;
     if rank >= world {
         return Err(SliceError::RankOutOfRange { rank, world }.into());
     }

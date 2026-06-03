@@ -31,16 +31,30 @@ use crate::{HipDevice, HipStream};
 /// Same contract as `KvCache::append`: `k_new` and `v_new` must point
 /// to at least `n_new * n_heads * head_dim * 2` valid device bytes on
 /// the same device as the cache.
+/// Source pointers + token count for a captureable KV append.
+#[derive(Copy, Clone, Debug)]
+pub struct KvAppendSrc {
+    pub k_new: DevicePtr,
+    pub v_new: DevicePtr,
+    pub n_new: usize,
+}
+
+/// Captured-memcpy slot pair, one per K/V leg.
+#[derive(Copy, Clone, Debug)]
+pub struct KvAppendSlots {
+    pub k: MemcpySlot,
+    pub v: MemcpySlot,
+}
+
 pub unsafe fn kv_cache_append_hip_slot<L: CacheLayout>(
     cache: &mut KvCache<L, HipDevice>,
     device: &HipDevice,
     stream: &HipStream,
-    k_new: DevicePtr,
-    v_new: DevicePtr,
-    n_new: usize,
-    k_slot: MemcpySlot,
-    v_slot: MemcpySlot,
+    src: KvAppendSrc,
+    slots: KvAppendSlots,
 ) -> anyhow::Result<()> {
+    let KvAppendSrc { k_new, v_new, n_new } = src;
+    let KvAppendSlots { k: k_slot, v: v_slot } = slots;
     let (k_dst, v_dst, total_bytes) = cache
         .compute_append_dsts(n_new)
         .map_err(|e| anyhow::anyhow!("kv_cache_append_hip_slot: {e}"))?;

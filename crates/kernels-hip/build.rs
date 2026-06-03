@@ -52,7 +52,11 @@ fn main() {
 
                 if needs_rebuild {
                     compile_cu(
-                        &hipcc, cu, &hsaco, &arch, arch_inc, shared_inc, src_dir,
+                        &hipcc,
+                        cu,
+                        &hsaco,
+                        &arch,
+                        IncludeRoots { arch: arch_inc, shared: shared_inc, kernel: src_dir },
                         &device_lib,
                     );
                     let hash = hash_cu_source(cu, &arch);
@@ -158,16 +162,22 @@ fn needs_rebuild(cu: &Path, hsaco: &Path, cache_hash: &Path, arch: &str) -> bool
     current_hash != cached_hash
 }
 
+/// Include-path roots passed to `hipcc -I`.
+struct IncludeRoots<'a> {
+    arch: &'a Path,
+    shared: &'a Path,
+    kernel: &'a Path,
+}
+
 fn compile_cu(
     hipcc: &Path,
     cu: &Path,
     hsaco: &Path,
     arch: &str,
-    arch_inc: &Path,
-    shared_inc: &Path,
-    kernel_inc: &Path,
+    includes: IncludeRoots<'_>,
     device_lib: &str,
 ) {
+    let IncludeRoots { arch: arch_inc, shared: shared_inc, kernel: kernel_inc } = includes;
     let rocm_path = env::var("ROCM_PATH").unwrap_or_else(|_| "/opt/rocm".into());
     let output = Command::new(hipcc)
         .args([

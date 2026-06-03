@@ -22,10 +22,10 @@ pub use bar_p2p::{
     ArPostAttnNormRankBuffersTp2, ArPostAttnNormRankBuffersTp4, ArPostAttnNormShape,
     ArResidualRmsNormArrayBuffers, ArResidualRmsNormRankBuffers, BarP2pAllReduce,
 };
-pub use cluster::HipCluster;
+pub use cluster::{HipCluster, PeerCopyEvents, PeerCopySpec, PeerCopyStreams};
 pub use graph_capture::{MemcpyBinding, MemcpySlot, ScalarSlot, SlotBinding, SlotMap};
 pub use impls::{dispatch_qmatmul, QMATMUL_GFX906};
-pub use kv_cache_slot::kv_cache_append_hip_slot;
+pub use kv_cache_slot::{kv_cache_append_hip_slot, KvAppendSlots, KvAppendSrc};
 pub use module::{FuncAttributes, HipKernel, HipModule, KernelArgs, LaunchCfg};
 
 #[cfg(feature = "rccl")]

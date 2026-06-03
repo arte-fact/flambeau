@@ -72,6 +72,31 @@ impl RankBounce {
     }
 }
 
+/// Endpoints + payload size for a peer-to-peer copy.
+#[derive(Copy, Clone, Debug)]
+pub struct PeerCopySpec {
+    pub dst_ptr: DevicePtr,
+    pub dst_rank: usize,
+    pub src_ptr: DevicePtr,
+    pub src_rank: usize,
+    pub bytes: usize,
+}
+
+/// Streams driving each end of an async peer copy.
+#[derive(Copy, Clone, Debug)]
+pub struct PeerCopyStreams<'a> {
+    pub src: &'a HipStream,
+    pub dst: &'a HipStream,
+}
+
+/// Bridge event between DtoH/HtoD plus an optional completion event for
+/// downstream waiters.
+#[derive(Copy, Clone, Debug)]
+pub struct PeerCopyEvents<'a> {
+    pub bridge: &'a crate::HipEvent,
+    pub done: Option<&'a crate::HipEvent>,
+}
+
 /// Multi-device cluster holding one `HipDevice` + one pinned bounce slab
 /// per rank. Only the peer-copy primitive is wired today; C+ add
 /// pipeline-level orchestration on top.
@@ -758,33 +783,14 @@ impl HipCluster {
     ///   its DtoH before the next stage starts its DtoH on the same rank.
     pub unsafe fn peer_copy_via_host_async(
         &self,
-        dst_ptr: DevicePtr,
-        dst_rank: usize,
-        src_ptr: DevicePtr,
-        src_rank: usize,
-        bytes: usize,
-        src_stream: &HipStream,
-        dst_stream: &HipStream,
-        bridge_event: &crate::HipEvent,
-        done_event: Option<&crate::HipEvent>,
+        spec: PeerCopySpec,
+        streams: PeerCopyStreams<'_>,
+        events: PeerCopyEvents<'_>,
     ) -> DeviceResult<()> {
-        // SAFETY: forwards to the laned variant with lane=0 (legacy
+        // SAFETY: forwards to the laned variant with lane=None (shared
         // per-rank bounce). Callers that need concurrent async peer-copies
         // across lanes should use `peer_copy_via_host_async_laned`.
-        unsafe {
-            self.peer_copy_via_host_async_laned(
-                dst_ptr,
-                dst_rank,
-                src_ptr,
-                src_rank,
-                bytes,
-                src_stream,
-                dst_stream,
-                bridge_event,
-                done_event,
-                None,
-            )
-        }
+        unsafe { self.peer_copy_via_host_async_laned(spec, streams, events, None) }
     }
 
     /// 5.g — async peer copy with an optional `lane` for per-lane
@@ -800,20 +806,16 @@ impl HipCluster {
     /// Same as the unlaned variant. Additionally: when `lane = Some(L)`,
     /// no other in-flight async copy may alias lane L's bounce on this
     /// source rank.
-    #[expect(clippy::too_many_arguments, reason = "full peer-copy contract")]
     pub unsafe fn peer_copy_via_host_async_laned(
         &self,
-        dst_ptr: DevicePtr,
-        dst_rank: usize,
-        src_ptr: DevicePtr,
-        src_rank: usize,
-        bytes: usize,
-        src_stream: &HipStream,
-        dst_stream: &HipStream,
-        bridge_event: &crate::HipEvent,
-        done_event: Option<&crate::HipEvent>,
+        spec: PeerCopySpec,
+        streams: PeerCopyStreams<'_>,
+        events: PeerCopyEvents<'_>,
         lane: Option<usize>,
     ) -> DeviceResult<()> {
+        let PeerCopySpec { dst_ptr, dst_rank, src_ptr, src_rank, bytes } = spec;
+        let PeerCopyStreams { src: src_stream, dst: dst_stream } = streams;
+        let PeerCopyEvents { bridge: bridge_event, done: done_event } = events;
         if bytes == 0 {
             return Ok(());
         }
