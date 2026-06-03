@@ -1037,19 +1037,12 @@ pub fn indexed_moe_mmvq_q4_k_r2_sorted(
 /// dispatch (`moe_tp.rs::tile8_dt_ok` does not include IQ4_XS).
 ///
 pub fn indexed_moe_mmq_iq4_xs_gate_up_tile8(
-    reg: &OpsRegistry,
-    stream: &HipStream,
-    w_gate: DevicePtr,
-    w_up: DevicePtr,
-    y: DevicePtr,
-    expert_ids: DevicePtr,
-    sorted_pair_idx_padded: DevicePtr,
-    padded_offsets: DevicePtr,
-    gate_out: DevicePtr,
-    up_out: DevicePtr,
+    ctx: crate::OpCtx<'_>,
+    buffers: crate::MoeMmqTile8GateUpBuffers,
     shape: MoeShape,
 ) -> Result<()> {
-    let module = reg.expect_module("indexed_moe_mmq_iq4_xs_gate_up_tile8_dp4a")?;
+    let crate::MoeMmqTile8GateUpBuffers { gate_w: w_gate, up_w: w_up, act: y, expert_ids, sorted_pair_idx_padded, padded_offsets, gate_out, up_out } = buffers;
+    let module = ctx.reg.expect_module("indexed_moe_mmq_iq4_xs_gate_up_tile8_dp4a")?;
     let kernel = module.kernel("flambeau_indexed_moe_mmq_iq4_xs_gate_up_tile8_dp4a_q8_1")?;
     let n_rows_i = shape.n_rows as i32;
     let n_tokens_i = shape.n_tokens as i32;
@@ -1084,7 +1077,7 @@ pub fn indexed_moe_mmq_iq4_xs_gate_up_tile8(
         block: (64, 1, 1),
         shared_bytes: 0,
     };
-    unsafe { kernel.launch(stream, cfg, args)? };
+    unsafe { kernel.launch(ctx.stream, cfg, args)? };
     Ok(())
 }
 
@@ -1094,19 +1087,12 @@ pub fn indexed_moe_mmq_iq4_xs_gate_up_tile8(
 /// dispatch (`moe_tp.rs::tile8_dt_ok` does not include IQ4_NL).
 ///
 pub fn indexed_moe_mmq_iq4_nl_gate_up_tile8(
-    reg: &OpsRegistry,
-    stream: &HipStream,
-    w_gate: DevicePtr,
-    w_up: DevicePtr,
-    y: DevicePtr,
-    expert_ids: DevicePtr,
-    sorted_pair_idx_padded: DevicePtr,
-    padded_offsets: DevicePtr,
-    gate_out: DevicePtr,
-    up_out: DevicePtr,
+    ctx: crate::OpCtx<'_>,
+    buffers: crate::MoeMmqTile8GateUpBuffers,
     shape: MoeShape,
 ) -> Result<()> {
-    let module = reg.expect_module("indexed_moe_mmq_iq4_nl_gate_up_tile8_dp4a")?;
+    let crate::MoeMmqTile8GateUpBuffers { gate_w: w_gate, up_w: w_up, act: y, expert_ids, sorted_pair_idx_padded, padded_offsets, gate_out, up_out } = buffers;
+    let module = ctx.reg.expect_module("indexed_moe_mmq_iq4_nl_gate_up_tile8_dp4a")?;
     let kernel = module.kernel("flambeau_indexed_moe_mmq_iq4_nl_gate_up_tile8_dp4a_q8_1")?;
     let n_rows_i = shape.n_rows as i32;
     let n_tokens_i = shape.n_tokens as i32;
@@ -1141,7 +1127,7 @@ pub fn indexed_moe_mmq_iq4_nl_gate_up_tile8(
         block: (64, 1, 1),
         shared_bytes: 0,
     };
-    unsafe { kernel.launch(stream, cfg, args)? };
+    unsafe { kernel.launch(ctx.stream, cfg, args)? };
     Ok(())
 }
 
@@ -1151,19 +1137,12 @@ pub fn indexed_moe_mmq_iq4_nl_gate_up_tile8(
 /// dispatch (`moe_tp.rs::tile8_dt_ok` does not include IQ3_XXS).
 ///
 pub fn indexed_moe_mmq_iq3_xxs_gate_up_tile8(
-    reg: &OpsRegistry,
-    stream: &HipStream,
-    w_gate: DevicePtr,
-    w_up: DevicePtr,
-    y: DevicePtr,
-    expert_ids: DevicePtr,
-    sorted_pair_idx_padded: DevicePtr,
-    padded_offsets: DevicePtr,
-    gate_out: DevicePtr,
-    up_out: DevicePtr,
+    ctx: crate::OpCtx<'_>,
+    buffers: crate::MoeMmqTile8GateUpBuffers,
     shape: MoeShape,
 ) -> Result<()> {
-    let module = reg.expect_module("indexed_moe_mmq_iq3_xxs_gate_up_tile8_dp4a")?;
+    let crate::MoeMmqTile8GateUpBuffers { gate_w: w_gate, up_w: w_up, act: y, expert_ids, sorted_pair_idx_padded, padded_offsets, gate_out, up_out } = buffers;
+    let module = ctx.reg.expect_module("indexed_moe_mmq_iq3_xxs_gate_up_tile8_dp4a")?;
     let kernel = module.kernel("flambeau_indexed_moe_mmq_iq3_xxs_gate_up_tile8_dp4a_q8_1")?;
     let n_rows_i = shape.n_rows as i32;
     let n_tokens_i = shape.n_tokens as i32;
@@ -1198,7 +1177,7 @@ pub fn indexed_moe_mmq_iq3_xxs_gate_up_tile8(
         block: (64, 1, 1),
         shared_bytes: 0,
     };
-    unsafe { kernel.launch(stream, cfg, args)? };
+    unsafe { kernel.launch(ctx.stream, cfg, args)? };
     Ok(())
 }
 
@@ -1208,19 +1187,12 @@ pub fn indexed_moe_mmq_iq3_xxs_gate_up_tile8(
 /// dispatch (`moe_tp.rs::tile8_dt_ok` does not include IQ3_S).
 ///
 pub fn indexed_moe_mmq_iq3_s_gate_up_tile8(
-    reg: &OpsRegistry,
-    stream: &HipStream,
-    w_gate: DevicePtr,
-    w_up: DevicePtr,
-    y: DevicePtr,
-    expert_ids: DevicePtr,
-    sorted_pair_idx_padded: DevicePtr,
-    padded_offsets: DevicePtr,
-    gate_out: DevicePtr,
-    up_out: DevicePtr,
+    ctx: crate::OpCtx<'_>,
+    buffers: crate::MoeMmqTile8GateUpBuffers,
     shape: MoeShape,
 ) -> Result<()> {
-    let module = reg.expect_module("indexed_moe_mmq_iq3_s_gate_up_tile8_dp4a")?;
+    let crate::MoeMmqTile8GateUpBuffers { gate_w: w_gate, up_w: w_up, act: y, expert_ids, sorted_pair_idx_padded, padded_offsets, gate_out, up_out } = buffers;
+    let module = ctx.reg.expect_module("indexed_moe_mmq_iq3_s_gate_up_tile8_dp4a")?;
     let kernel = module.kernel("flambeau_indexed_moe_mmq_iq3_s_gate_up_tile8_dp4a_q8_1")?;
     let n_rows_i = shape.n_rows as i32;
     let n_tokens_i = shape.n_tokens as i32;
@@ -1255,7 +1227,7 @@ pub fn indexed_moe_mmq_iq3_s_gate_up_tile8(
         block: (64, 1, 1),
         shared_bytes: 0,
     };
-    unsafe { kernel.launch(stream, cfg, args)? };
+    unsafe { kernel.launch(ctx.stream, cfg, args)? };
     Ok(())
 }
 
@@ -1265,19 +1237,12 @@ pub fn indexed_moe_mmq_iq3_s_gate_up_tile8(
 /// dispatch (`moe_tp.rs::tile8_dt_ok` does not include IQ2_XXS).
 ///
 pub fn indexed_moe_mmq_iq2_xxs_gate_up_tile8(
-    reg: &OpsRegistry,
-    stream: &HipStream,
-    w_gate: DevicePtr,
-    w_up: DevicePtr,
-    y: DevicePtr,
-    expert_ids: DevicePtr,
-    sorted_pair_idx_padded: DevicePtr,
-    padded_offsets: DevicePtr,
-    gate_out: DevicePtr,
-    up_out: DevicePtr,
+    ctx: crate::OpCtx<'_>,
+    buffers: crate::MoeMmqTile8GateUpBuffers,
     shape: MoeShape,
 ) -> Result<()> {
-    let module = reg.expect_module("indexed_moe_mmq_iq2_xxs_gate_up_tile8_dp4a")?;
+    let crate::MoeMmqTile8GateUpBuffers { gate_w: w_gate, up_w: w_up, act: y, expert_ids, sorted_pair_idx_padded, padded_offsets, gate_out, up_out } = buffers;
+    let module = ctx.reg.expect_module("indexed_moe_mmq_iq2_xxs_gate_up_tile8_dp4a")?;
     let kernel = module.kernel("flambeau_indexed_moe_mmq_iq2_xxs_gate_up_tile8_dp4a_q8_1")?;
     let n_rows_i = shape.n_rows as i32;
     let n_tokens_i = shape.n_tokens as i32;
@@ -1312,7 +1277,7 @@ pub fn indexed_moe_mmq_iq2_xxs_gate_up_tile8(
         block: (64, 1, 1),
         shared_bytes: 0,
     };
-    unsafe { kernel.launch(stream, cfg, args)? };
+    unsafe { kernel.launch(ctx.stream, cfg, args)? };
     Ok(())
 }
 
@@ -1322,19 +1287,12 @@ pub fn indexed_moe_mmq_iq2_xxs_gate_up_tile8(
 /// dispatch (`moe_tp.rs::tile8_dt_ok` does not include IQ2_XS).
 ///
 pub fn indexed_moe_mmq_iq2_xs_gate_up_tile8(
-    reg: &OpsRegistry,
-    stream: &HipStream,
-    w_gate: DevicePtr,
-    w_up: DevicePtr,
-    y: DevicePtr,
-    expert_ids: DevicePtr,
-    sorted_pair_idx_padded: DevicePtr,
-    padded_offsets: DevicePtr,
-    gate_out: DevicePtr,
-    up_out: DevicePtr,
+    ctx: crate::OpCtx<'_>,
+    buffers: crate::MoeMmqTile8GateUpBuffers,
     shape: MoeShape,
 ) -> Result<()> {
-    let module = reg.expect_module("indexed_moe_mmq_iq2_xs_gate_up_tile8_dp4a")?;
+    let crate::MoeMmqTile8GateUpBuffers { gate_w: w_gate, up_w: w_up, act: y, expert_ids, sorted_pair_idx_padded, padded_offsets, gate_out, up_out } = buffers;
+    let module = ctx.reg.expect_module("indexed_moe_mmq_iq2_xs_gate_up_tile8_dp4a")?;
     let kernel = module.kernel("flambeau_indexed_moe_mmq_iq2_xs_gate_up_tile8_dp4a_q8_1")?;
     let n_rows_i = shape.n_rows as i32;
     let n_tokens_i = shape.n_tokens as i32;
@@ -1369,7 +1327,7 @@ pub fn indexed_moe_mmq_iq2_xs_gate_up_tile8(
         block: (64, 1, 1),
         shared_bytes: 0,
     };
-    unsafe { kernel.launch(stream, cfg, args)? };
+    unsafe { kernel.launch(ctx.stream, cfg, args)? };
     Ok(())
 }
 
@@ -1379,19 +1337,12 @@ pub fn indexed_moe_mmq_iq2_xs_gate_up_tile8(
 /// dispatch (`moe_tp.rs::tile8_dt_ok` does not include IQ2_S).
 ///
 pub fn indexed_moe_mmq_iq2_s_gate_up_tile8(
-    reg: &OpsRegistry,
-    stream: &HipStream,
-    w_gate: DevicePtr,
-    w_up: DevicePtr,
-    y: DevicePtr,
-    expert_ids: DevicePtr,
-    sorted_pair_idx_padded: DevicePtr,
-    padded_offsets: DevicePtr,
-    gate_out: DevicePtr,
-    up_out: DevicePtr,
+    ctx: crate::OpCtx<'_>,
+    buffers: crate::MoeMmqTile8GateUpBuffers,
     shape: MoeShape,
 ) -> Result<()> {
-    let module = reg.expect_module("indexed_moe_mmq_iq2_s_gate_up_tile8_dp4a")?;
+    let crate::MoeMmqTile8GateUpBuffers { gate_w: w_gate, up_w: w_up, act: y, expert_ids, sorted_pair_idx_padded, padded_offsets, gate_out, up_out } = buffers;
+    let module = ctx.reg.expect_module("indexed_moe_mmq_iq2_s_gate_up_tile8_dp4a")?;
     let kernel = module.kernel("flambeau_indexed_moe_mmq_iq2_s_gate_up_tile8_dp4a_q8_1")?;
     let n_rows_i = shape.n_rows as i32;
     let n_tokens_i = shape.n_tokens as i32;
@@ -1426,7 +1377,7 @@ pub fn indexed_moe_mmq_iq2_s_gate_up_tile8(
         block: (64, 1, 1),
         shared_bytes: 0,
     };
-    unsafe { kernel.launch(stream, cfg, args)? };
+    unsafe { kernel.launch(ctx.stream, cfg, args)? };
     Ok(())
 }
 
@@ -1436,19 +1387,12 @@ pub fn indexed_moe_mmq_iq2_s_gate_up_tile8(
 /// dispatch (`moe_tp.rs::tile8_dt_ok` does not include IQ1_S).
 ///
 pub fn indexed_moe_mmq_iq1_s_gate_up_tile8(
-    reg: &OpsRegistry,
-    stream: &HipStream,
-    w_gate: DevicePtr,
-    w_up: DevicePtr,
-    y: DevicePtr,
-    expert_ids: DevicePtr,
-    sorted_pair_idx_padded: DevicePtr,
-    padded_offsets: DevicePtr,
-    gate_out: DevicePtr,
-    up_out: DevicePtr,
+    ctx: crate::OpCtx<'_>,
+    buffers: crate::MoeMmqTile8GateUpBuffers,
     shape: MoeShape,
 ) -> Result<()> {
-    let module = reg.expect_module("indexed_moe_mmq_iq1_s_gate_up_tile8_dp4a")?;
+    let crate::MoeMmqTile8GateUpBuffers { gate_w: w_gate, up_w: w_up, act: y, expert_ids, sorted_pair_idx_padded, padded_offsets, gate_out, up_out } = buffers;
+    let module = ctx.reg.expect_module("indexed_moe_mmq_iq1_s_gate_up_tile8_dp4a")?;
     let kernel = module.kernel("flambeau_indexed_moe_mmq_iq1_s_gate_up_tile8_dp4a_q8_1")?;
     let n_rows_i = shape.n_rows as i32;
     let n_tokens_i = shape.n_tokens as i32;
@@ -1483,7 +1427,7 @@ pub fn indexed_moe_mmq_iq1_s_gate_up_tile8(
         block: (64, 1, 1),
         shared_bytes: 0,
     };
-    unsafe { kernel.launch(stream, cfg, args)? };
+    unsafe { kernel.launch(ctx.stream, cfg, args)? };
     Ok(())
 }
 
@@ -1493,19 +1437,12 @@ pub fn indexed_moe_mmq_iq1_s_gate_up_tile8(
 /// dispatch (`moe_tp.rs::tile8_dt_ok` does not include IQ1_M).
 ///
 pub fn indexed_moe_mmq_iq1_m_gate_up_tile8(
-    reg: &OpsRegistry,
-    stream: &HipStream,
-    w_gate: DevicePtr,
-    w_up: DevicePtr,
-    y: DevicePtr,
-    expert_ids: DevicePtr,
-    sorted_pair_idx_padded: DevicePtr,
-    padded_offsets: DevicePtr,
-    gate_out: DevicePtr,
-    up_out: DevicePtr,
+    ctx: crate::OpCtx<'_>,
+    buffers: crate::MoeMmqTile8GateUpBuffers,
     shape: MoeShape,
 ) -> Result<()> {
-    let module = reg.expect_module("indexed_moe_mmq_iq1_m_gate_up_tile8_dp4a")?;
+    let crate::MoeMmqTile8GateUpBuffers { gate_w: w_gate, up_w: w_up, act: y, expert_ids, sorted_pair_idx_padded, padded_offsets, gate_out, up_out } = buffers;
+    let module = ctx.reg.expect_module("indexed_moe_mmq_iq1_m_gate_up_tile8_dp4a")?;
     let kernel = module.kernel("flambeau_indexed_moe_mmq_iq1_m_gate_up_tile8_dp4a_q8_1")?;
     let n_rows_i = shape.n_rows as i32;
     let n_tokens_i = shape.n_tokens as i32;
@@ -1540,7 +1477,7 @@ pub fn indexed_moe_mmq_iq1_m_gate_up_tile8(
         block: (64, 1, 1),
         shared_bytes: 0,
     };
-    unsafe { kernel.launch(stream, cfg, args)? };
+    unsafe { kernel.launch(ctx.stream, cfg, args)? };
     Ok(())
 }
 
@@ -1551,19 +1488,12 @@ pub fn indexed_moe_mmq_iq1_m_gate_up_tile8(
 /// blocks past the actual (on-device) padded_offsets[n_experts] → avoids
 /// DtoH sync.
 pub fn indexed_moe_mmq_q4_k_gate_up_tile8(
-    reg: &OpsRegistry,
-    stream: &HipStream,
-    w_gate: DevicePtr,
-    w_up: DevicePtr,
-    y: DevicePtr,
-    expert_ids: DevicePtr,
-    sorted_pair_idx_padded: DevicePtr,
-    padded_offsets: DevicePtr,
-    gate_out: DevicePtr,
-    up_out: DevicePtr,
+    ctx: crate::OpCtx<'_>,
+    buffers: crate::MoeMmqTile8GateUpBuffers,
     shape: MoeShape,
 ) -> Result<()> {
-    let module = reg.expect_module("indexed_moe_mmq_q4_k_gate_up_tile8_dp4a")?;
+    let crate::MoeMmqTile8GateUpBuffers { gate_w: w_gate, up_w: w_up, act: y, expert_ids, sorted_pair_idx_padded, padded_offsets, gate_out, up_out } = buffers;
+    let module = ctx.reg.expect_module("indexed_moe_mmq_q4_k_gate_up_tile8_dp4a")?;
     let kernel = module.kernel("flambeau_indexed_moe_mmq_q4_k_gate_up_tile8_dp4a_q8_1")?;
 
     let n_rows_i = shape.n_rows as i32;
@@ -1600,26 +1530,19 @@ pub fn indexed_moe_mmq_q4_k_gate_up_tile8(
         block: (64, 1, 1),
         shared_bytes: 0,
     };
-    unsafe { kernel.launch(stream, cfg, args)? };
+    unsafe { kernel.launch(ctx.stream, cfg, args)? };
     Ok(())
 }
 
 /// Q3_K MoE MMQ tile8 gate+up. Same contract + launch shape as the
 /// Q4_K sibling; caller sets `n_sb_per_row = hidden / QK_K`.
 pub fn indexed_moe_mmq_q3_k_gate_up_tile8(
-    reg: &OpsRegistry,
-    stream: &HipStream,
-    w_gate: DevicePtr,
-    w_up: DevicePtr,
-    y: DevicePtr,
-    expert_ids: DevicePtr,
-    sorted_pair_idx_padded: DevicePtr,
-    padded_offsets: DevicePtr,
-    gate_out: DevicePtr,
-    up_out: DevicePtr,
+    ctx: crate::OpCtx<'_>,
+    buffers: crate::MoeMmqTile8GateUpBuffers,
     shape: MoeShape,
 ) -> Result<()> {
-    let module = reg.expect_module("indexed_moe_mmq_q3_k_gate_up_tile8_dp4a")?;
+    let crate::MoeMmqTile8GateUpBuffers { gate_w: w_gate, up_w: w_up, act: y, expert_ids, sorted_pair_idx_padded, padded_offsets, gate_out, up_out } = buffers;
+    let module = ctx.reg.expect_module("indexed_moe_mmq_q3_k_gate_up_tile8_dp4a")?;
     let kernel = module.kernel("flambeau_indexed_moe_mmq_q3_k_gate_up_tile8_dp4a_q8_1")?;
     let n_rows_i = shape.n_rows as i32;
     let n_tokens_i = shape.n_tokens as i32;
@@ -1654,7 +1577,7 @@ pub fn indexed_moe_mmq_q3_k_gate_up_tile8(
         block: (64, 1, 1),
         shared_bytes: 0,
     };
-    unsafe { kernel.launch(stream, cfg, args)? };
+    unsafe { kernel.launch(ctx.stream, cfg, args)? };
     Ok(())
 }
 
@@ -2210,19 +2133,12 @@ pub fn indexed_moe_mmq_q3_k_down_tile8(
 /// `n_sb_per_row` in the `MoeShape` should be set to `hidden / 32` (Q4_0
 /// block size) by the caller, not `hidden / QK_K` as for Q4_K.
 pub fn indexed_moe_mmq_q4_0_gate_up_tile8(
-    reg: &OpsRegistry,
-    stream: &HipStream,
-    w_gate: DevicePtr,
-    w_up: DevicePtr,
-    y: DevicePtr,
-    expert_ids: DevicePtr,
-    sorted_pair_idx_padded: DevicePtr,
-    padded_offsets: DevicePtr,
-    gate_out: DevicePtr,
-    up_out: DevicePtr,
+    ctx: crate::OpCtx<'_>,
+    buffers: crate::MoeMmqTile8GateUpBuffers,
     shape: MoeShape,
 ) -> Result<()> {
-    let module = reg.expect_module("indexed_moe_mmq_q4_0_gate_up_tile8_dp4a")?;
+    let crate::MoeMmqTile8GateUpBuffers { gate_w: w_gate, up_w: w_up, act: y, expert_ids, sorted_pair_idx_padded, padded_offsets, gate_out, up_out } = buffers;
+    let module = ctx.reg.expect_module("indexed_moe_mmq_q4_0_gate_up_tile8_dp4a")?;
     let kernel = module.kernel("flambeau_indexed_moe_mmq_q4_0_gate_up_tile8_dp4a_q8_1")?;
     let n_rows_i = shape.n_rows as i32;
     let n_tokens_i = shape.n_tokens as i32;
@@ -2257,7 +2173,7 @@ pub fn indexed_moe_mmq_q4_0_gate_up_tile8(
         block: (64, 1, 1),
         shared_bytes: 0,
     };
-    unsafe { kernel.launch(stream, cfg, args)? };
+    unsafe { kernel.launch(ctx.stream, cfg, args)? };
     Ok(())
 }
 
@@ -2311,19 +2227,12 @@ pub fn indexed_moe_mmq_q4_0_down_tile8(
 /// Q5_0 gate+up tile8 MoE MMQ. Q4_0 tile8 structure + the 5th-bit
 /// ladder: per-block dot is `d_x·(d_y·(sumi_nib + 16·sumi_bit) - 16·s_y)`.
 pub fn indexed_moe_mmq_q5_0_gate_up_tile8(
-    reg: &OpsRegistry,
-    stream: &HipStream,
-    w_gate: DevicePtr,
-    w_up: DevicePtr,
-    y: DevicePtr,
-    expert_ids: DevicePtr,
-    sorted_pair_idx_padded: DevicePtr,
-    padded_offsets: DevicePtr,
-    gate_out: DevicePtr,
-    up_out: DevicePtr,
+    ctx: crate::OpCtx<'_>,
+    buffers: crate::MoeMmqTile8GateUpBuffers,
     shape: MoeShape,
 ) -> Result<()> {
-    let module = reg.expect_module("indexed_moe_mmq_q5_0_gate_up_tile8_dp4a")?;
+    let crate::MoeMmqTile8GateUpBuffers { gate_w: w_gate, up_w: w_up, act: y, expert_ids, sorted_pair_idx_padded, padded_offsets, gate_out, up_out } = buffers;
+    let module = ctx.reg.expect_module("indexed_moe_mmq_q5_0_gate_up_tile8_dp4a")?;
     let kernel = module.kernel("flambeau_indexed_moe_mmq_q5_0_gate_up_tile8_dp4a_q8_1")?;
     let n_rows_i = shape.n_rows as i32;
     let n_tokens_i = shape.n_tokens as i32;
@@ -2358,7 +2267,7 @@ pub fn indexed_moe_mmq_q5_0_gate_up_tile8(
         block: (64, 1, 1),
         shared_bytes: 0,
     };
-    unsafe { kernel.launch(stream, cfg, args)? };
+    unsafe { kernel.launch(ctx.stream, cfg, args)? };
     Ok(())
 }
 
@@ -2412,19 +2321,12 @@ pub fn indexed_moe_mmq_q5_0_down_tile8(
 /// Q5_1 gate+up tile8 MoE MMQ. Q5_0 tile8 structure with Q4_1-style
 /// per-block reduction `d_x·d_y·(sumi_nib + 16·sumi_bit) + m_x·s_y`.
 pub fn indexed_moe_mmq_q5_1_gate_up_tile8(
-    reg: &OpsRegistry,
-    stream: &HipStream,
-    w_gate: DevicePtr,
-    w_up: DevicePtr,
-    y: DevicePtr,
-    expert_ids: DevicePtr,
-    sorted_pair_idx_padded: DevicePtr,
-    padded_offsets: DevicePtr,
-    gate_out: DevicePtr,
-    up_out: DevicePtr,
+    ctx: crate::OpCtx<'_>,
+    buffers: crate::MoeMmqTile8GateUpBuffers,
     shape: MoeShape,
 ) -> Result<()> {
-    let module = reg.expect_module("indexed_moe_mmq_q5_1_gate_up_tile8_dp4a")?;
+    let crate::MoeMmqTile8GateUpBuffers { gate_w: w_gate, up_w: w_up, act: y, expert_ids, sorted_pair_idx_padded, padded_offsets, gate_out, up_out } = buffers;
+    let module = ctx.reg.expect_module("indexed_moe_mmq_q5_1_gate_up_tile8_dp4a")?;
     let kernel = module.kernel("flambeau_indexed_moe_mmq_q5_1_gate_up_tile8_dp4a_q8_1")?;
     let n_rows_i = shape.n_rows as i32;
     let n_tokens_i = shape.n_tokens as i32;
@@ -2459,7 +2361,7 @@ pub fn indexed_moe_mmq_q5_1_gate_up_tile8(
         block: (64, 1, 1),
         shared_bytes: 0,
     };
-    unsafe { kernel.launch(stream, cfg, args)? };
+    unsafe { kernel.launch(ctx.stream, cfg, args)? };
     Ok(())
 }
 
@@ -2564,19 +2466,12 @@ pub fn indexed_moe_mmq_q4_1_down_tile8(
 /// reduction `d_x · d_y · sumi + m_x · s_y` per block, mirror of the
 /// `indexed_moe_mmq_q4_1_down_tile8` sibling.
 pub fn indexed_moe_mmq_q4_1_gate_up_tile8(
-    reg: &OpsRegistry,
-    stream: &HipStream,
-    w_gate: DevicePtr,
-    w_up: DevicePtr,
-    y: DevicePtr,
-    expert_ids: DevicePtr,
-    sorted_pair_idx_padded: DevicePtr,
-    padded_offsets: DevicePtr,
-    gate_out: DevicePtr,
-    up_out: DevicePtr,
+    ctx: crate::OpCtx<'_>,
+    buffers: crate::MoeMmqTile8GateUpBuffers,
     shape: MoeShape,
 ) -> Result<()> {
-    let module = reg.expect_module("indexed_moe_mmq_q4_1_gate_up_tile8_dp4a")?;
+    let crate::MoeMmqTile8GateUpBuffers { gate_w: w_gate, up_w: w_up, act: y, expert_ids, sorted_pair_idx_padded, padded_offsets, gate_out, up_out } = buffers;
+    let module = ctx.reg.expect_module("indexed_moe_mmq_q4_1_gate_up_tile8_dp4a")?;
     let kernel = module.kernel("flambeau_indexed_moe_mmq_q4_1_gate_up_tile8_dp4a_q8_1")?;
     let n_rows_i = shape.n_rows as i32;
     let n_tokens_i = shape.n_tokens as i32;
@@ -2611,7 +2506,7 @@ pub fn indexed_moe_mmq_q4_1_gate_up_tile8(
         block: (64, 1, 1),
         shared_bytes: 0,
     };
-    unsafe { kernel.launch(stream, cfg, args)? };
+    unsafe { kernel.launch(ctx.stream, cfg, args)? };
     Ok(())
 }
 
@@ -2620,19 +2515,12 @@ pub fn indexed_moe_mmq_q4_1_gate_up_tile8(
 /// `hidden / 32` (Q8_0 block size), matching the Q4_0 convention. Same
 /// grid/block shape as Q4_0 tile8 — one wave64 per 64×8 output tile.
 pub fn indexed_moe_mmq_q8_0_gate_up_tile8(
-    reg: &OpsRegistry,
-    stream: &HipStream,
-    w_gate: DevicePtr,
-    w_up: DevicePtr,
-    y: DevicePtr,
-    expert_ids: DevicePtr,
-    sorted_pair_idx_padded: DevicePtr,
-    padded_offsets: DevicePtr,
-    gate_out: DevicePtr,
-    up_out: DevicePtr,
+    ctx: crate::OpCtx<'_>,
+    buffers: crate::MoeMmqTile8GateUpBuffers,
     shape: MoeShape,
 ) -> Result<()> {
-    let module = reg.expect_module("indexed_moe_mmq_q8_0_gate_up_tile8_dp4a")?;
+    let crate::MoeMmqTile8GateUpBuffers { gate_w: w_gate, up_w: w_up, act: y, expert_ids, sorted_pair_idx_padded, padded_offsets, gate_out, up_out } = buffers;
+    let module = ctx.reg.expect_module("indexed_moe_mmq_q8_0_gate_up_tile8_dp4a")?;
     let kernel = module.kernel("flambeau_indexed_moe_mmq_q8_0_gate_up_tile8_dp4a_q8_1")?;
     let n_rows_i = shape.n_rows as i32;
     let n_tokens_i = shape.n_tokens as i32;
@@ -2667,7 +2555,7 @@ pub fn indexed_moe_mmq_q8_0_gate_up_tile8(
         block: (64, 1, 1),
         shared_bytes: 0,
     };
-    unsafe { kernel.launch(stream, cfg, args)? };
+    unsafe { kernel.launch(ctx.stream, cfg, args)? };
     Ok(())
 }
 
@@ -2902,19 +2790,12 @@ pub fn indexed_moe_mmq_q5_k_down_tile8(
 /// 5-bit, per-sub-block (sc, m) → d·sumi_d·sc − dmin·sumi_y·m) fused for
 /// two output projections.
 pub fn indexed_moe_mmq_q5_k_gate_up_tile8(
-    reg: &OpsRegistry,
-    stream: &HipStream,
-    w_gate: DevicePtr,
-    w_up: DevicePtr,
-    y: DevicePtr,
-    expert_ids: DevicePtr,
-    sorted_pair_idx_padded: DevicePtr,
-    padded_offsets: DevicePtr,
-    gate_out: DevicePtr,
-    up_out: DevicePtr,
+    ctx: crate::OpCtx<'_>,
+    buffers: crate::MoeMmqTile8GateUpBuffers,
     shape: MoeShape,
 ) -> Result<()> {
-    let module = reg.expect_module("indexed_moe_mmq_q5_k_gate_up_tile8_dp4a")?;
+    let crate::MoeMmqTile8GateUpBuffers { gate_w: w_gate, up_w: w_up, act: y, expert_ids, sorted_pair_idx_padded, padded_offsets, gate_out, up_out } = buffers;
+    let module = ctx.reg.expect_module("indexed_moe_mmq_q5_k_gate_up_tile8_dp4a")?;
     let kernel = module.kernel("flambeau_indexed_moe_mmq_q5_k_gate_up_tile8_dp4a_q8_1")?;
     let n_rows_i = shape.n_rows as i32;
     let n_tokens_i = shape.n_tokens as i32;
@@ -2949,7 +2830,7 @@ pub fn indexed_moe_mmq_q5_k_gate_up_tile8(
         block: (64, 1, 1),
         shared_bytes: 0,
     };
-    unsafe { kernel.launch(stream, cfg, args)? };
+    unsafe { kernel.launch(ctx.stream, cfg, args)? };
     Ok(())
 }
 
@@ -2957,19 +2838,12 @@ pub fn indexed_moe_mmq_q5_k_gate_up_tile8(
 /// per-16-element scale, `(raw − 32)·y = raw·y − 32·Σy` bias-correction)
 /// fused for two output projections.
 pub fn indexed_moe_mmq_q6_k_gate_up_tile8(
-    reg: &OpsRegistry,
-    stream: &HipStream,
-    w_gate: DevicePtr,
-    w_up: DevicePtr,
-    y: DevicePtr,
-    expert_ids: DevicePtr,
-    sorted_pair_idx_padded: DevicePtr,
-    padded_offsets: DevicePtr,
-    gate_out: DevicePtr,
-    up_out: DevicePtr,
+    ctx: crate::OpCtx<'_>,
+    buffers: crate::MoeMmqTile8GateUpBuffers,
     shape: MoeShape,
 ) -> Result<()> {
-    let module = reg.expect_module("indexed_moe_mmq_q6_k_gate_up_tile8_dp4a")?;
+    let crate::MoeMmqTile8GateUpBuffers { gate_w: w_gate, up_w: w_up, act: y, expert_ids, sorted_pair_idx_padded, padded_offsets, gate_out, up_out } = buffers;
+    let module = ctx.reg.expect_module("indexed_moe_mmq_q6_k_gate_up_tile8_dp4a")?;
     let kernel = module.kernel("flambeau_indexed_moe_mmq_q6_k_gate_up_tile8_dp4a_q8_1")?;
     let n_rows_i = shape.n_rows as i32;
     let n_tokens_i = shape.n_tokens as i32;
@@ -3004,7 +2878,7 @@ pub fn indexed_moe_mmq_q6_k_gate_up_tile8(
         block: (64, 1, 1),
         shared_bytes: 0,
     };
-    unsafe { kernel.launch(stream, cfg, args)? };
+    unsafe { kernel.launch(ctx.stream, cfg, args)? };
     Ok(())
 }
 

@@ -900,14 +900,7 @@ pub trait Ops {
 
     fn indexed_moe_mmq_q4_k_gate_up_tile8(
         &self,
-        w_gate: DevicePtr,
-        w_up: DevicePtr,
-        y: DevicePtr,
-        expert_ids: DevicePtr,
-        sorted_pair_idx_padded: DevicePtr,
-        padded_offsets: DevicePtr,
-        gate_out: DevicePtr,
-        up_out: DevicePtr,
+        buffers: crate::MoeMmqTile8GateUpBuffers,
         shape: MoeShape,
     ) -> Result<()>;
 
@@ -924,14 +917,7 @@ pub trait Ops {
 
     fn indexed_moe_mmq_q3_k_gate_up_tile8(
         &self,
-        w_gate: DevicePtr,
-        w_up: DevicePtr,
-        y: DevicePtr,
-        expert_ids: DevicePtr,
-        sorted_pair_idx_padded: DevicePtr,
-        padded_offsets: DevicePtr,
-        gate_out: DevicePtr,
-        up_out: DevicePtr,
+        buffers: crate::MoeMmqTile8GateUpBuffers,
         shape: MoeShape,
     ) -> Result<()>;
 
@@ -948,40 +934,19 @@ pub trait Ops {
 
     fn indexed_moe_mmq_q5_k_gate_up_tile8(
         &self,
-        w_gate: DevicePtr,
-        w_up: DevicePtr,
-        y: DevicePtr,
-        expert_ids: DevicePtr,
-        sorted_pair_idx_padded: DevicePtr,
-        padded_offsets: DevicePtr,
-        gate_out: DevicePtr,
-        up_out: DevicePtr,
+        buffers: crate::MoeMmqTile8GateUpBuffers,
         shape: MoeShape,
     ) -> Result<()>;
 
     fn indexed_moe_mmq_q6_k_gate_up_tile8(
         &self,
-        w_gate: DevicePtr,
-        w_up: DevicePtr,
-        y: DevicePtr,
-        expert_ids: DevicePtr,
-        sorted_pair_idx_padded: DevicePtr,
-        padded_offsets: DevicePtr,
-        gate_out: DevicePtr,
-        up_out: DevicePtr,
+        buffers: crate::MoeMmqTile8GateUpBuffers,
         shape: MoeShape,
     ) -> Result<()>;
 
     fn indexed_moe_mmq_q4_0_gate_up_tile8(
         &self,
-        w_gate: DevicePtr,
-        w_up: DevicePtr,
-        y: DevicePtr,
-        expert_ids: DevicePtr,
-        sorted_pair_idx_padded: DevicePtr,
-        padded_offsets: DevicePtr,
-        gate_out: DevicePtr,
-        up_out: DevicePtr,
+        buffers: crate::MoeMmqTile8GateUpBuffers,
         shape: MoeShape,
     ) -> Result<()>;
 
@@ -1009,14 +974,7 @@ pub trait Ops {
 
     fn indexed_moe_mmq_q8_0_gate_up_tile8(
         &self,
-        w_gate: DevicePtr,
-        w_up: DevicePtr,
-        y: DevicePtr,
-        expert_ids: DevicePtr,
-        sorted_pair_idx_padded: DevicePtr,
-        padded_offsets: DevicePtr,
-        gate_out: DevicePtr,
-        up_out: DevicePtr,
+        buffers: crate::MoeMmqTile8GateUpBuffers,
         shape: MoeShape,
     ) -> Result<()>;
 
@@ -1038,14 +996,7 @@ pub trait Ops {
 
     fn indexed_moe_mmq_iq4_xs_gate_up_tile8(
         &self,
-        w_gate: DevicePtr,
-        w_up: DevicePtr,
-        y: DevicePtr,
-        expert_ids: DevicePtr,
-        sorted_pair_idx_padded: DevicePtr,
-        padded_offsets: DevicePtr,
-        gate_out: DevicePtr,
-        up_out: DevicePtr,
+        buffers: crate::MoeMmqTile8GateUpBuffers,
         shape: MoeShape,
     ) -> Result<()>;
     fn indexed_moe_mmq_iq4_xs_down_tile8(
@@ -1061,14 +1012,7 @@ pub trait Ops {
 
     fn indexed_moe_mmq_iq4_nl_gate_up_tile8(
         &self,
-        w_gate: DevicePtr,
-        w_up: DevicePtr,
-        y: DevicePtr,
-        expert_ids: DevicePtr,
-        sorted_pair_idx_padded: DevicePtr,
-        padded_offsets: DevicePtr,
-        gate_out: DevicePtr,
-        up_out: DevicePtr,
+        buffers: crate::MoeMmqTile8GateUpBuffers,
         shape: MoeShape,
     ) -> Result<()>;
     fn indexed_moe_mmq_iq4_nl_down_tile8(
@@ -1084,14 +1028,7 @@ pub trait Ops {
 
     fn indexed_moe_mmq_iq3_xxs_gate_up_tile8(
         &self,
-        w_gate: DevicePtr,
-        w_up: DevicePtr,
-        y: DevicePtr,
-        expert_ids: DevicePtr,
-        sorted_pair_idx_padded: DevicePtr,
-        padded_offsets: DevicePtr,
-        gate_out: DevicePtr,
-        up_out: DevicePtr,
+        buffers: crate::MoeMmqTile8GateUpBuffers,
         shape: MoeShape,
     ) -> Result<()>;
     fn indexed_moe_mmq_iq3_xxs_down_tile8(
@@ -1107,14 +1044,7 @@ pub trait Ops {
 
     fn indexed_moe_mmq_iq3_s_gate_up_tile8(
         &self,
-        w_gate: DevicePtr,
-        w_up: DevicePtr,
-        y: DevicePtr,
-        expert_ids: DevicePtr,
-        sorted_pair_idx_padded: DevicePtr,
-        padded_offsets: DevicePtr,
-        gate_out: DevicePtr,
-        up_out: DevicePtr,
+        buffers: crate::MoeMmqTile8GateUpBuffers,
         shape: MoeShape,
     ) -> Result<()>;
     fn indexed_moe_mmq_iq3_s_down_tile8(
@@ -1130,14 +1060,7 @@ pub trait Ops {
 
     fn indexed_moe_mmq_iq2_xxs_gate_up_tile8(
         &self,
-        w_gate: DevicePtr,
-        w_up: DevicePtr,
-        y: DevicePtr,
-        expert_ids: DevicePtr,
-        sorted_pair_idx_padded: DevicePtr,
-        padded_offsets: DevicePtr,
-        gate_out: DevicePtr,
-        up_out: DevicePtr,
+        buffers: crate::MoeMmqTile8GateUpBuffers,
         shape: MoeShape,
     ) -> Result<()>;
     fn indexed_moe_mmq_iq2_xxs_down_tile8(
@@ -1153,14 +1076,7 @@ pub trait Ops {
 
     fn indexed_moe_mmq_iq2_xs_gate_up_tile8(
         &self,
-        w_gate: DevicePtr,
-        w_up: DevicePtr,
-        y: DevicePtr,
-        expert_ids: DevicePtr,
-        sorted_pair_idx_padded: DevicePtr,
-        padded_offsets: DevicePtr,
-        gate_out: DevicePtr,
-        up_out: DevicePtr,
+        buffers: crate::MoeMmqTile8GateUpBuffers,
         shape: MoeShape,
     ) -> Result<()>;
     fn indexed_moe_mmq_iq2_xs_down_tile8(
@@ -1176,14 +1092,7 @@ pub trait Ops {
 
     fn indexed_moe_mmq_iq2_s_gate_up_tile8(
         &self,
-        w_gate: DevicePtr,
-        w_up: DevicePtr,
-        y: DevicePtr,
-        expert_ids: DevicePtr,
-        sorted_pair_idx_padded: DevicePtr,
-        padded_offsets: DevicePtr,
-        gate_out: DevicePtr,
-        up_out: DevicePtr,
+        buffers: crate::MoeMmqTile8GateUpBuffers,
         shape: MoeShape,
     ) -> Result<()>;
     fn indexed_moe_mmq_iq2_s_down_tile8(
@@ -1199,14 +1108,7 @@ pub trait Ops {
 
     fn indexed_moe_mmq_iq1_s_gate_up_tile8(
         &self,
-        w_gate: DevicePtr,
-        w_up: DevicePtr,
-        y: DevicePtr,
-        expert_ids: DevicePtr,
-        sorted_pair_idx_padded: DevicePtr,
-        padded_offsets: DevicePtr,
-        gate_out: DevicePtr,
-        up_out: DevicePtr,
+        buffers: crate::MoeMmqTile8GateUpBuffers,
         shape: MoeShape,
     ) -> Result<()>;
     fn indexed_moe_mmq_iq1_s_down_tile8(
@@ -1222,14 +1124,7 @@ pub trait Ops {
 
     fn indexed_moe_mmq_iq1_m_gate_up_tile8(
         &self,
-        w_gate: DevicePtr,
-        w_up: DevicePtr,
-        y: DevicePtr,
-        expert_ids: DevicePtr,
-        sorted_pair_idx_padded: DevicePtr,
-        padded_offsets: DevicePtr,
-        gate_out: DevicePtr,
-        up_out: DevicePtr,
+        buffers: crate::MoeMmqTile8GateUpBuffers,
         shape: MoeShape,
     ) -> Result<()>;
     fn indexed_moe_mmq_iq1_m_down_tile8(

@@ -1330,14 +1330,16 @@ impl MoeExperts {
         match gate_dt {
             QDtype::Q4_0 => ops
                 .indexed_moe_mmq_q4_0_gate_up_tile8(
-                    self.ffn_gate_exps.ptr,
-                    self.ffn_up_exps.ptr,
-                    scratch.x_q8_1,
-                    scratch.expert_ids,
-                    scratch.sort_sorted_pair_idx_padded,
-                    scratch.sort_padded_offsets,
-                    scratch.gate_out_f32,
-                    scratch.up_out_f32,
+                    flambeau_ops::MoeMmqTile8GateUpBuffers {
+                        gate_w: self.ffn_gate_exps.ptr,
+                        up_w: self.ffn_up_exps.ptr,
+                        act: scratch.x_q8_1,
+                        expert_ids: scratch.expert_ids,
+                        sorted_pair_idx_padded: scratch.sort_sorted_pair_idx_padded,
+                        padded_offsets: scratch.sort_padded_offsets,
+                        gate_out: scratch.gate_out_f32,
+                        up_out: scratch.up_out_f32,
+                    },
                     flambeau_ops::MoeShape {
                         n_rows: inter,
                         n_tokens: prompt_len,
@@ -1350,14 +1352,16 @@ impl MoeExperts {
                 .context("prefill indexed_moe gate+up q4_0 tile8")?,
             QDtype::Q8_0 => ops
                 .indexed_moe_mmq_q8_0_gate_up_tile8(
-                    self.ffn_gate_exps.ptr,
-                    self.ffn_up_exps.ptr,
-                    scratch.x_q8_1,
-                    scratch.expert_ids,
-                    scratch.sort_sorted_pair_idx_padded,
-                    scratch.sort_padded_offsets,
-                    scratch.gate_out_f32,
-                    scratch.up_out_f32,
+                    flambeau_ops::MoeMmqTile8GateUpBuffers {
+                        gate_w: self.ffn_gate_exps.ptr,
+                        up_w: self.ffn_up_exps.ptr,
+                        act: scratch.x_q8_1,
+                        expert_ids: scratch.expert_ids,
+                        sorted_pair_idx_padded: scratch.sort_sorted_pair_idx_padded,
+                        padded_offsets: scratch.sort_padded_offsets,
+                        gate_out: scratch.gate_out_f32,
+                        up_out: scratch.up_out_f32,
+                    },
                     flambeau_ops::MoeShape {
                         n_rows: inter,
                         n_tokens: prompt_len,
@@ -1370,14 +1374,16 @@ impl MoeExperts {
                 .context("prefill indexed_moe gate+up q8_0 tile8")?,
             QDtype::IQ4_NL => ops
                 .indexed_moe_mmq_iq4_nl_gate_up_tile8(
-                    self.ffn_gate_exps.ptr,
-                    self.ffn_up_exps.ptr,
-                    scratch.x_q8_1,
-                    scratch.expert_ids,
-                    scratch.sort_sorted_pair_idx_padded,
-                    scratch.sort_padded_offsets,
-                    scratch.gate_out_f32,
-                    scratch.up_out_f32,
+                    flambeau_ops::MoeMmqTile8GateUpBuffers {
+                        gate_w: self.ffn_gate_exps.ptr,
+                        up_w: self.ffn_up_exps.ptr,
+                        act: scratch.x_q8_1,
+                        expert_ids: scratch.expert_ids,
+                        sorted_pair_idx_padded: scratch.sort_sorted_pair_idx_padded,
+                        padded_offsets: scratch.sort_padded_offsets,
+                        gate_out: scratch.gate_out_f32,
+                        up_out: scratch.up_out_f32,
+                    },
                     flambeau_ops::MoeShape {
                         n_rows: inter,
                         n_tokens: prompt_len,
@@ -1390,14 +1396,16 @@ impl MoeExperts {
                 .context("prefill indexed_moe gate+up iq4_nl tile8")?,
             QDtype::IQ4_XS => ops
                 .indexed_moe_mmq_iq4_xs_gate_up_tile8(
-                    self.ffn_gate_exps.ptr,
-                    self.ffn_up_exps.ptr,
-                    scratch.x_q8_1,
-                    scratch.expert_ids,
-                    scratch.sort_sorted_pair_idx_padded,
-                    scratch.sort_padded_offsets,
-                    scratch.gate_out_f32,
-                    scratch.up_out_f32,
+                    flambeau_ops::MoeMmqTile8GateUpBuffers {
+                        gate_w: self.ffn_gate_exps.ptr,
+                        up_w: self.ffn_up_exps.ptr,
+                        act: scratch.x_q8_1,
+                        expert_ids: scratch.expert_ids,
+                        sorted_pair_idx_padded: scratch.sort_sorted_pair_idx_padded,
+                        padded_offsets: scratch.sort_padded_offsets,
+                        gate_out: scratch.gate_out_f32,
+                        up_out: scratch.up_out_f32,
+                    },
                     flambeau_ops::MoeShape {
                         n_rows: inter,
                         n_tokens: prompt_len,
@@ -1410,14 +1418,16 @@ impl MoeExperts {
                 .context("prefill indexed_moe gate+up iq4_xs tile8")?,
             QDtype::IQ3_XXS => ops
                 .indexed_moe_mmq_iq3_xxs_gate_up_tile8(
-                    self.ffn_gate_exps.ptr,
-                    self.ffn_up_exps.ptr,
-                    scratch.x_q8_1,
-                    scratch.expert_ids,
-                    scratch.sort_sorted_pair_idx_padded,
-                    scratch.sort_padded_offsets,
-                    scratch.gate_out_f32,
-                    scratch.up_out_f32,
+                    flambeau_ops::MoeMmqTile8GateUpBuffers {
+                        gate_w: self.ffn_gate_exps.ptr,
+                        up_w: self.ffn_up_exps.ptr,
+                        act: scratch.x_q8_1,
+                        expert_ids: scratch.expert_ids,
+                        sorted_pair_idx_padded: scratch.sort_sorted_pair_idx_padded,
+                        padded_offsets: scratch.sort_padded_offsets,
+                        gate_out: scratch.gate_out_f32,
+                        up_out: scratch.up_out_f32,
+                    },
                     flambeau_ops::MoeShape {
                         n_rows: inter,
                         n_tokens: prompt_len,
@@ -1430,14 +1440,16 @@ impl MoeExperts {
                 .context("prefill indexed_moe gate+up iq3_xxs tile8")?,
             QDtype::IQ3_S => ops
                 .indexed_moe_mmq_iq3_s_gate_up_tile8(
-                    self.ffn_gate_exps.ptr,
-                    self.ffn_up_exps.ptr,
-                    scratch.x_q8_1,
-                    scratch.expert_ids,
-                    scratch.sort_sorted_pair_idx_padded,
-                    scratch.sort_padded_offsets,
-                    scratch.gate_out_f32,
-                    scratch.up_out_f32,
+                    flambeau_ops::MoeMmqTile8GateUpBuffers {
+                        gate_w: self.ffn_gate_exps.ptr,
+                        up_w: self.ffn_up_exps.ptr,
+                        act: scratch.x_q8_1,
+                        expert_ids: scratch.expert_ids,
+                        sorted_pair_idx_padded: scratch.sort_sorted_pair_idx_padded,
+                        padded_offsets: scratch.sort_padded_offsets,
+                        gate_out: scratch.gate_out_f32,
+                        up_out: scratch.up_out_f32,
+                    },
                     flambeau_ops::MoeShape {
                         n_rows: inter,
                         n_tokens: prompt_len,
@@ -1450,14 +1462,16 @@ impl MoeExperts {
                 .context("prefill indexed_moe gate+up iq3_s tile8")?,
             QDtype::IQ2_XXS => ops
                 .indexed_moe_mmq_iq2_xxs_gate_up_tile8(
-                    self.ffn_gate_exps.ptr,
-                    self.ffn_up_exps.ptr,
-                    scratch.x_q8_1,
-                    scratch.expert_ids,
-                    scratch.sort_sorted_pair_idx_padded,
-                    scratch.sort_padded_offsets,
-                    scratch.gate_out_f32,
-                    scratch.up_out_f32,
+                    flambeau_ops::MoeMmqTile8GateUpBuffers {
+                        gate_w: self.ffn_gate_exps.ptr,
+                        up_w: self.ffn_up_exps.ptr,
+                        act: scratch.x_q8_1,
+                        expert_ids: scratch.expert_ids,
+                        sorted_pair_idx_padded: scratch.sort_sorted_pair_idx_padded,
+                        padded_offsets: scratch.sort_padded_offsets,
+                        gate_out: scratch.gate_out_f32,
+                        up_out: scratch.up_out_f32,
+                    },
                     flambeau_ops::MoeShape {
                         n_rows: inter,
                         n_tokens: prompt_len,
@@ -1470,14 +1484,16 @@ impl MoeExperts {
                 .context("prefill indexed_moe gate+up iq2_xxs tile8")?,
             QDtype::IQ2_XS => ops
                 .indexed_moe_mmq_iq2_xs_gate_up_tile8(
-                    self.ffn_gate_exps.ptr,
-                    self.ffn_up_exps.ptr,
-                    scratch.x_q8_1,
-                    scratch.expert_ids,
-                    scratch.sort_sorted_pair_idx_padded,
-                    scratch.sort_padded_offsets,
-                    scratch.gate_out_f32,
-                    scratch.up_out_f32,
+                    flambeau_ops::MoeMmqTile8GateUpBuffers {
+                        gate_w: self.ffn_gate_exps.ptr,
+                        up_w: self.ffn_up_exps.ptr,
+                        act: scratch.x_q8_1,
+                        expert_ids: scratch.expert_ids,
+                        sorted_pair_idx_padded: scratch.sort_sorted_pair_idx_padded,
+                        padded_offsets: scratch.sort_padded_offsets,
+                        gate_out: scratch.gate_out_f32,
+                        up_out: scratch.up_out_f32,
+                    },
                     flambeau_ops::MoeShape {
                         n_rows: inter,
                         n_tokens: prompt_len,
@@ -1490,14 +1506,16 @@ impl MoeExperts {
                 .context("prefill indexed_moe gate+up iq2_xs tile8")?,
             QDtype::IQ2_S => ops
                 .indexed_moe_mmq_iq2_s_gate_up_tile8(
-                    self.ffn_gate_exps.ptr,
-                    self.ffn_up_exps.ptr,
-                    scratch.x_q8_1,
-                    scratch.expert_ids,
-                    scratch.sort_sorted_pair_idx_padded,
-                    scratch.sort_padded_offsets,
-                    scratch.gate_out_f32,
-                    scratch.up_out_f32,
+                    flambeau_ops::MoeMmqTile8GateUpBuffers {
+                        gate_w: self.ffn_gate_exps.ptr,
+                        up_w: self.ffn_up_exps.ptr,
+                        act: scratch.x_q8_1,
+                        expert_ids: scratch.expert_ids,
+                        sorted_pair_idx_padded: scratch.sort_sorted_pair_idx_padded,
+                        padded_offsets: scratch.sort_padded_offsets,
+                        gate_out: scratch.gate_out_f32,
+                        up_out: scratch.up_out_f32,
+                    },
                     flambeau_ops::MoeShape {
                         n_rows: inter,
                         n_tokens: prompt_len,
@@ -1510,14 +1528,16 @@ impl MoeExperts {
                 .context("prefill indexed_moe gate+up iq2_s tile8")?,
             QDtype::IQ1_S => ops
                 .indexed_moe_mmq_iq1_s_gate_up_tile8(
-                    self.ffn_gate_exps.ptr,
-                    self.ffn_up_exps.ptr,
-                    scratch.x_q8_1,
-                    scratch.expert_ids,
-                    scratch.sort_sorted_pair_idx_padded,
-                    scratch.sort_padded_offsets,
-                    scratch.gate_out_f32,
-                    scratch.up_out_f32,
+                    flambeau_ops::MoeMmqTile8GateUpBuffers {
+                        gate_w: self.ffn_gate_exps.ptr,
+                        up_w: self.ffn_up_exps.ptr,
+                        act: scratch.x_q8_1,
+                        expert_ids: scratch.expert_ids,
+                        sorted_pair_idx_padded: scratch.sort_sorted_pair_idx_padded,
+                        padded_offsets: scratch.sort_padded_offsets,
+                        gate_out: scratch.gate_out_f32,
+                        up_out: scratch.up_out_f32,
+                    },
                     flambeau_ops::MoeShape {
                         n_rows: inter,
                         n_tokens: prompt_len,
@@ -1530,14 +1550,16 @@ impl MoeExperts {
                 .context("prefill indexed_moe gate+up iq1_s tile8")?,
             QDtype::IQ1_M => ops
                 .indexed_moe_mmq_iq1_m_gate_up_tile8(
-                    self.ffn_gate_exps.ptr,
-                    self.ffn_up_exps.ptr,
-                    scratch.x_q8_1,
-                    scratch.expert_ids,
-                    scratch.sort_sorted_pair_idx_padded,
-                    scratch.sort_padded_offsets,
-                    scratch.gate_out_f32,
-                    scratch.up_out_f32,
+                    flambeau_ops::MoeMmqTile8GateUpBuffers {
+                        gate_w: self.ffn_gate_exps.ptr,
+                        up_w: self.ffn_up_exps.ptr,
+                        act: scratch.x_q8_1,
+                        expert_ids: scratch.expert_ids,
+                        sorted_pair_idx_padded: scratch.sort_sorted_pair_idx_padded,
+                        padded_offsets: scratch.sort_padded_offsets,
+                        gate_out: scratch.gate_out_f32,
+                        up_out: scratch.up_out_f32,
+                    },
                     flambeau_ops::MoeShape {
                         n_rows: inter,
                         n_tokens: prompt_len,
@@ -1550,14 +1572,16 @@ impl MoeExperts {
                 .context("prefill indexed_moe gate+up iq1_m tile8")?,
             QDtype::Q4_K => ops
                 .indexed_moe_mmq_q4_k_gate_up_tile8(
-                    self.ffn_gate_exps.ptr,
-                    self.ffn_up_exps.ptr,
-                    scratch.x_q8_1,
-                    scratch.expert_ids,
-                    scratch.sort_sorted_pair_idx_padded,
-                    scratch.sort_padded_offsets,
-                    scratch.gate_out_f32,
-                    scratch.up_out_f32,
+                    flambeau_ops::MoeMmqTile8GateUpBuffers {
+                        gate_w: self.ffn_gate_exps.ptr,
+                        up_w: self.ffn_up_exps.ptr,
+                        act: scratch.x_q8_1,
+                        expert_ids: scratch.expert_ids,
+                        sorted_pair_idx_padded: scratch.sort_sorted_pair_idx_padded,
+                        padded_offsets: scratch.sort_padded_offsets,
+                        gate_out: scratch.gate_out_f32,
+                        up_out: scratch.up_out_f32,
+                    },
                     flambeau_ops::MoeShape {
                         n_rows: inter,
                         n_tokens: prompt_len,
@@ -1570,14 +1594,16 @@ impl MoeExperts {
                 .context("prefill indexed_moe gate+up q4_k tile8")?,
             QDtype::Q3_K => ops
                 .indexed_moe_mmq_q3_k_gate_up_tile8(
-                    self.ffn_gate_exps.ptr,
-                    self.ffn_up_exps.ptr,
-                    scratch.x_q8_1,
-                    scratch.expert_ids,
-                    scratch.sort_sorted_pair_idx_padded,
-                    scratch.sort_padded_offsets,
-                    scratch.gate_out_f32,
-                    scratch.up_out_f32,
+                    flambeau_ops::MoeMmqTile8GateUpBuffers {
+                        gate_w: self.ffn_gate_exps.ptr,
+                        up_w: self.ffn_up_exps.ptr,
+                        act: scratch.x_q8_1,
+                        expert_ids: scratch.expert_ids,
+                        sorted_pair_idx_padded: scratch.sort_sorted_pair_idx_padded,
+                        padded_offsets: scratch.sort_padded_offsets,
+                        gate_out: scratch.gate_out_f32,
+                        up_out: scratch.up_out_f32,
+                    },
                     flambeau_ops::MoeShape {
                         n_rows: inter,
                         n_tokens: prompt_len,
@@ -1590,14 +1616,16 @@ impl MoeExperts {
                 .context("prefill indexed_moe gate+up q3_k tile8")?,
             QDtype::Q5_K => ops
                 .indexed_moe_mmq_q5_k_gate_up_tile8(
-                    self.ffn_gate_exps.ptr,
-                    self.ffn_up_exps.ptr,
-                    scratch.x_q8_1,
-                    scratch.expert_ids,
-                    scratch.sort_sorted_pair_idx_padded,
-                    scratch.sort_padded_offsets,
-                    scratch.gate_out_f32,
-                    scratch.up_out_f32,
+                    flambeau_ops::MoeMmqTile8GateUpBuffers {
+                        gate_w: self.ffn_gate_exps.ptr,
+                        up_w: self.ffn_up_exps.ptr,
+                        act: scratch.x_q8_1,
+                        expert_ids: scratch.expert_ids,
+                        sorted_pair_idx_padded: scratch.sort_sorted_pair_idx_padded,
+                        padded_offsets: scratch.sort_padded_offsets,
+                        gate_out: scratch.gate_out_f32,
+                        up_out: scratch.up_out_f32,
+                    },
                     flambeau_ops::MoeShape {
                         n_rows: inter,
                         n_tokens: prompt_len,
@@ -1610,14 +1638,16 @@ impl MoeExperts {
                 .context("prefill indexed_moe gate+up q5_k tile8")?,
             QDtype::Q6_K => ops
                 .indexed_moe_mmq_q6_k_gate_up_tile8(
-                    self.ffn_gate_exps.ptr,
-                    self.ffn_up_exps.ptr,
-                    scratch.x_q8_1,
-                    scratch.expert_ids,
-                    scratch.sort_sorted_pair_idx_padded,
-                    scratch.sort_padded_offsets,
-                    scratch.gate_out_f32,
-                    scratch.up_out_f32,
+                    flambeau_ops::MoeMmqTile8GateUpBuffers {
+                        gate_w: self.ffn_gate_exps.ptr,
+                        up_w: self.ffn_up_exps.ptr,
+                        act: scratch.x_q8_1,
+                        expert_ids: scratch.expert_ids,
+                        sorted_pair_idx_padded: scratch.sort_sorted_pair_idx_padded,
+                        padded_offsets: scratch.sort_padded_offsets,
+                        gate_out: scratch.gate_out_f32,
+                        up_out: scratch.up_out_f32,
+                    },
                     flambeau_ops::MoeShape {
                         n_rows: inter,
                         n_tokens: prompt_len,

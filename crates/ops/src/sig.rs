@@ -259,6 +259,34 @@ pub struct MoeMmvqGateUpSortedBuffers {
     pub up_out: DevicePtr,
 }
 
+/// Fused gate + up MoE MMQ tile8 buffers — same shape as
+/// [`MoeMmvqGateUpSortedBuffers`] plus a `padded_offsets` ptr that
+/// encodes per-block starting position within the padded sorted
+/// expert-major batch.
+#[derive(Copy, Clone, Debug)]
+pub struct MoeMmqTile8GateUpBuffers {
+    pub gate_w: DevicePtr,
+    pub up_w: DevicePtr,
+    pub act: DevicePtr,
+    pub expert_ids: DevicePtr,
+    pub sorted_pair_idx_padded: DevicePtr,
+    pub padded_offsets: DevicePtr,
+    pub gate_out: DevicePtr,
+    pub up_out: DevicePtr,
+}
+
+/// Single-weight MoE MMQ tile8 buffers — used by the `*_down_tile8`
+/// down-projection family.
+#[derive(Copy, Clone, Debug)]
+pub struct MoeMmqTile8DownBuffers {
+    pub weights: DevicePtr,
+    pub act: DevicePtr,
+    pub expert_ids: DevicePtr,
+    pub sorted_pair_idx_padded: DevicePtr,
+    pub padded_offsets: DevicePtr,
+    pub dst: DevicePtr,
+}
+
 /// Shape parameters shared across every MoE MMVQ variant.
 /// `n_sb_per_row` is super-blocks for K-quants / Q-blocks (k / 32)
 /// for `_0` quants — the kernel ABI takes the raw count.
