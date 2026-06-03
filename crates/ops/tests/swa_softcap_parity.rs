@@ -548,7 +548,7 @@ fn softcap_f32_parity() {
 
 /// ggml tanh-GELU (`ggml-cpu/vec.h:986`).
 fn cpu_gelu(x: f32) -> f32 {
-    const SQRT_2_OVER_PI: f32 = 0.797_884_56;
+    const SQRT_2_OVER_PI: f32 = 0.797_884_6;
     const COEF_A: f32 = 0.044_715;
     let t = SQRT_2_OVER_PI * x * (1.0 + COEF_A * x * x);
     0.5 * x * (1.0 + t.tanh())

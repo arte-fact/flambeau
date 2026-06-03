@@ -191,7 +191,7 @@ fn mmvq_q4_1_batched_perf_sweep() -> Result<()> {
                     act_q8_1_mmq: DevicePtr(0),
                     dst: d_dst,
                 },
-                flambeau_ops::MatmulShape { m: 1, k: k, n: n_rows },
+                flambeau_ops::MatmulShape { m: 1, k, n: n_rows },
                 QDtype::Q4_1,
             )
         })?;
@@ -219,7 +219,7 @@ fn mmvq_q4_1_batched_perf_sweep() -> Result<()> {
                             act_q8_1_mmq: DevicePtr(0),
                             dst: dst_row,
                         },
-                        flambeau_ops::MatmulShape { m: 1, k: k, n: n_rows },
+                        flambeau_ops::MatmulShape { m: 1, k, n: n_rows },
                         QDtype::Q4_1,
                     )?;
                 }
@@ -245,7 +245,7 @@ fn mmvq_q4_1_batched_perf_sweep() -> Result<()> {
                         act_q8_1_mmq: DevicePtr(0),
                         dst: d_dst,
                     },
-                    flambeau_ops::MatmulShape { m: n, k: k, n: n_rows },
+                    flambeau_ops::MatmulShape { m: n, k, n: n_rows },
                     QDtype::Q4_1,
                 )
             })?;

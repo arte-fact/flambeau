@@ -299,7 +299,7 @@ fn moe_sort_by_expert_padded_groups_in_multiples_of_8() -> Result<()> {
     // Verify padded_offsets prefix-sum = sum of ceil(counts[e]/8)*8.
     let mut cpu_padded = vec![0i32; n_experts + 1];
     for e in 0..n_experts {
-        let padded_c = ((counts[e] + 7) & !7) as i32;
+        let padded_c = ((counts[e] + 7) & !7);
         cpu_padded[e + 1] = cpu_padded[e] + padded_c;
     }
     assert_eq!(padded_off, cpu_padded, "padded_offsets mismatch");

@@ -57,7 +57,7 @@ fn session_forward_mixed_smoke() {
     let n_total = K_PREFILL + N_DECODE;
     let tokens: Vec<u32> = (0..n_total as u32).map(|i| (i + 1) % 50).collect();
     let mut positions: Vec<usize> = (0..K_PREFILL).collect();
-    positions.extend((K_PREFILL..K_PREFILL + N_DECODE).map(|i| i));
+    positions.extend((K_PREFILL..K_PREFILL + N_DECODE));
     let mut slot_ids = vec![0usize; K_PREFILL];
     slot_ids.extend(1..=N_DECODE);
 

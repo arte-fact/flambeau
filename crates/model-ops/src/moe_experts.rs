@@ -537,8 +537,8 @@ impl MoeExperts {
                     },
                     flambeau_ops::MoeMmvqShape {
                         n_rows: inter,
-                        n_tokens: n_tokens,
-                        top_k: top_k,
+                        n_tokens,
+                        top_k,
                         n_sb_per_row: nb,
                     },
                 )
@@ -557,8 +557,8 @@ impl MoeExperts {
                     },
                     flambeau_ops::MoeMmvqShape {
                         n_rows: inter,
-                        n_tokens: n_tokens,
-                        top_k: top_k,
+                        n_tokens,
+                        top_k,
                         n_sb_per_row: nb,
                     },
                 )
@@ -577,8 +577,8 @@ impl MoeExperts {
                     },
                     flambeau_ops::MoeMmvqShape {
                         n_rows: inter,
-                        n_tokens: n_tokens,
-                        top_k: top_k,
+                        n_tokens,
+                        top_k,
                         n_sb_per_row: nb,
                     },
                 )
@@ -595,8 +595,8 @@ impl MoeExperts {
                     },
                     flambeau_ops::MoeMmvqShape {
                         n_rows: inter,
-                        n_tokens: n_tokens,
-                        top_k: top_k,
+                        n_tokens,
+                        top_k,
                         n_sb_per_row: nb,
                     },
                 )
@@ -610,8 +610,8 @@ impl MoeExperts {
                     },
                     flambeau_ops::MoeMmvqShape {
                         n_rows: inter,
-                        n_tokens: n_tokens,
-                        top_k: top_k,
+                        n_tokens,
+                        top_k,
                         n_sb_per_row: nb,
                     },
                 )
@@ -628,8 +628,8 @@ impl MoeExperts {
                     },
                     flambeau_ops::MoeMmvqShape {
                         n_rows: inter,
-                        n_tokens: n_tokens,
-                        top_k: top_k,
+                        n_tokens,
+                        top_k,
                         n_sb_per_row: nb,
                     },
                 )
@@ -643,8 +643,8 @@ impl MoeExperts {
                     },
                     flambeau_ops::MoeMmvqShape {
                         n_rows: inter,
-                        n_tokens: n_tokens,
-                        top_k: top_k,
+                        n_tokens,
+                        top_k,
                         n_sb_per_row: nb,
                     },
                 )
@@ -661,8 +661,8 @@ impl MoeExperts {
                     },
                     flambeau_ops::MoeMmvqShape {
                         n_rows: inter,
-                        n_tokens: n_tokens,
-                        top_k: top_k,
+                        n_tokens,
+                        top_k,
                         n_sb_per_row: nb,
                     },
                 )
@@ -676,8 +676,8 @@ impl MoeExperts {
                     },
                     flambeau_ops::MoeMmvqShape {
                         n_rows: inter,
-                        n_tokens: n_tokens,
-                        top_k: top_k,
+                        n_tokens,
+                        top_k,
                         n_sb_per_row: nb,
                     },
                 )
@@ -1989,7 +1989,7 @@ impl MoeExperts {
                     flambeau_ops::MoeMmvqShape {
                         n_rows: inter,
                         n_tokens: prompt_len,
-                        top_k: top_k,
+                        top_k,
                         n_sb_per_row: nb,
                     },
                 )
@@ -2007,7 +2007,7 @@ impl MoeExperts {
                     flambeau_ops::MoeMmvqShape {
                         n_rows: inter,
                         n_tokens: prompt_len,
-                        top_k: top_k,
+                        top_k,
                         n_sb_per_row: nb,
                     },
                 )
@@ -2022,7 +2022,7 @@ impl MoeExperts {
                     flambeau_ops::MoeMmvqShape {
                         n_rows: inter,
                         n_tokens: prompt_len,
-                        top_k: top_k,
+                        top_k,
                         n_sb_per_row: nb,
                     },
                 )
@@ -2042,7 +2042,7 @@ impl MoeExperts {
                     flambeau_ops::MoeMmvqShape {
                         n_rows: inter,
                         n_tokens: prompt_len,
-                        top_k: top_k,
+                        top_k,
                         n_sb_per_row: nb,
                     },
                 )

@@ -162,7 +162,7 @@ fn run_parity(label: &str, shape: Shape, n_slots: usize, seed: u64) -> Result<bo
                 act_q8_1_mmq: DevicePtr(0),
                 dst: dst_row,
             },
-            flambeau_ops::MatmulShape { m: 1, k: k, n: n_rows },
+            flambeau_ops::MatmulShape { m: 1, k, n: n_rows },
             QDtype::Q8_0,
         )?;
     }
@@ -176,7 +176,7 @@ fn run_parity(label: &str, shape: Shape, n_slots: usize, seed: u64) -> Result<bo
             act_q8_1_mmq: DevicePtr(0),
             dst: d_out_batched,
         },
-        flambeau_ops::MatmulShape { m: n_slots, k: k, n: n_rows },
+        flambeau_ops::MatmulShape { m: n_slots, k, n: n_rows },
         QDtype::Q8_0,
     )?;
     stream.synchronize()?;
