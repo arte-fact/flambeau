@@ -506,24 +506,32 @@ impl SharedExpert {
 
         // 2-3. gate + up qmatmul (auto MMVQ / MMQ dispatch by m=n_tokens).
         ops.qmatmul(
-            self.ffn_gate_shexp.ptr,
-            scratch.x_q8_1,
-            DevicePtr(0),
-            scratch.gate_f32,
-            n_tokens,
-            hidden,
-            inter,
+            flambeau_ops::QmatmulBuffers {
+                weights: self.ffn_gate_shexp.ptr,
+                act_q8_1: scratch.x_q8_1,
+                act_q8_1_mmq: DevicePtr(0),
+                dst: scratch.gate_f32,
+            },
+            flambeau_ops::MatmulShape {
+                m: n_tokens,
+                k: hidden,
+                n: inter,
+            },
             self.ffn_gate_shexp.dtype,
         )
         .context("shexp prefill gate qmatmul")?;
         ops.qmatmul(
-            self.ffn_up_shexp.ptr,
-            scratch.x_q8_1,
-            DevicePtr(0),
-            scratch.up_f32,
-            n_tokens,
-            hidden,
-            inter,
+            flambeau_ops::QmatmulBuffers {
+                weights: self.ffn_up_shexp.ptr,
+                act_q8_1: scratch.x_q8_1,
+                act_q8_1_mmq: DevicePtr(0),
+                dst: scratch.up_f32,
+            },
+            flambeau_ops::MatmulShape {
+                m: n_tokens,
+                k: hidden,
+                n: inter,
+            },
             self.ffn_up_shexp.dtype,
         )
         .context("shexp prefill up qmatmul")?;
@@ -553,13 +561,17 @@ impl SharedExpert {
 
         // 6. down qmatmul → F32 (caller's `down_out_f32` ptr).
         ops.qmatmul(
-            self.ffn_down_shexp.ptr,
-            scratch.activated_q8_1,
-            DevicePtr(0),
-            down_out_f32,
-            n_tokens,
-            inter,
-            hidden,
+            flambeau_ops::QmatmulBuffers {
+                weights: self.ffn_down_shexp.ptr,
+                act_q8_1: scratch.activated_q8_1,
+                act_q8_1_mmq: DevicePtr(0),
+                dst: down_out_f32,
+            },
+            flambeau_ops::MatmulShape {
+                m: n_tokens,
+                k: inter,
+                n: hidden,
+            },
             self.ffn_down_shexp.dtype,
         )
         .context("shexp prefill down qmatmul")?;

@@ -28,13 +28,8 @@ pub trait Ops {
 
     fn qmatmul(
         &self,
-        weights: DevicePtr,
-        act_q8_1: DevicePtr,
-        act_q8_1_mmq: DevicePtr,
-        dst: DevicePtr,
-        m: usize,
-        k: usize,
-        n: usize,
+        buf: crate::QmatmulBuffers,
+        shape: crate::MatmulShape,
         dtype_weight: QDtype,
     ) -> Result<()>;
 

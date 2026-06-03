@@ -31,6 +31,18 @@ pub struct MmvqBuffers {
     pub dst: DevicePtr,
 }
 
+/// Umbrella `qmatmul` dispatcher buffers. Adds `act_q8_1_mmq` (DS4
+/// 144 B layout) for the MmqLdsX64 prefill recipe; decode-path callers
+/// can pass `DevicePtr(0)` for it (the dispatcher's F16 / MMVQ short-
+/// circuits never read it).
+#[derive(Copy, Clone, Debug)]
+pub struct QmatmulBuffers {
+    pub weights: DevicePtr,
+    pub act_q8_1: DevicePtr,
+    pub act_q8_1_mmq: DevicePtr,
+    pub dst: DevicePtr,
+}
+
 #[derive(Copy, Clone, Debug)]
 pub struct MmvqGateUpBuffers {
     pub gate_w: DevicePtr,

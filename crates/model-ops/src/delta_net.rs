@@ -1037,24 +1037,32 @@ impl DeltaNetLayer {
         let use_alphabeta_batched = matches!(n_slots, 2..=4);
         if use_alphabeta_batched {
             ops.qmatmul(
-                self.ssm_alpha.ptr,
-                scratch.x_q8_1,
-                scratch.x_q8_1,
-                scratch.alpha_f32,
-                n_slots,
-                hidden,
-                num_v_heads,
+                flambeau_ops::QmatmulBuffers {
+                    weights: self.ssm_alpha.ptr,
+                    act_q8_1: scratch.x_q8_1,
+                    act_q8_1_mmq: scratch.x_q8_1,
+                    dst: scratch.alpha_f32,
+                },
+                flambeau_ops::MatmulShape {
+                    m: n_slots,
+                    k: hidden,
+                    n: num_v_heads,
+                },
                 alpha_dt,
             )
             .context("gdn batched: ssm_alpha qmatmul (m=N batched)")?;
             ops.qmatmul(
-                self.ssm_beta.ptr,
-                scratch.x_q8_1,
-                scratch.x_q8_1,
-                scratch.beta_f32,
-                n_slots,
-                hidden,
-                num_v_heads,
+                flambeau_ops::QmatmulBuffers {
+                    weights: self.ssm_beta.ptr,
+                    act_q8_1: scratch.x_q8_1,
+                    act_q8_1_mmq: scratch.x_q8_1,
+                    dst: scratch.beta_f32,
+                },
+                flambeau_ops::MatmulShape {
+                    m: n_slots,
+                    k: hidden,
+                    n: num_v_heads,
+                },
                 beta_dt,
             )
             .context("gdn batched: ssm_beta qmatmul (m=N batched)")?;
@@ -1207,13 +1215,17 @@ impl DeltaNetLayer {
         let use_ssm_out_batched = matches!(n_slots, 2..=4);
         if use_ssm_out_batched {
             ops.qmatmul(
-                self.ssm_out.ptr,
-                scratch.gated_q8_1,
-                scratch.gated_q8_1,
-                scratch.ssm_out_f32,
-                n_slots,
-                d_inner,
-                hidden,
+                flambeau_ops::QmatmulBuffers {
+                    weights: self.ssm_out.ptr,
+                    act_q8_1: scratch.gated_q8_1,
+                    act_q8_1_mmq: scratch.gated_q8_1,
+                    dst: scratch.ssm_out_f32,
+                },
+                flambeau_ops::MatmulShape {
+                    m: n_slots,
+                    k: d_inner,
+                    n: hidden,
+                },
                 self.ssm_out.dtype,
             )
             .context("gdn batched: ssm_out qmatmul (m=N batched)")?;
@@ -1336,46 +1348,62 @@ impl DeltaNetLayer {
         // 2..5. Hidden-input projections at M = L. qmatmul auto-
         // dispatches MMVQ vs MMQ based on M and weight dtype.
         ops.qmatmul(
-            self.attn_qkv.ptr,
-            scratch.x_q8_1,
-            scratch.x_q8_1_mmq,
-            scratch.qkv_mixed_f32,
-            n_tokens,
-            hidden,
-            conv_channels,
+            flambeau_ops::QmatmulBuffers {
+                weights: self.attn_qkv.ptr,
+                act_q8_1: scratch.x_q8_1,
+                act_q8_1_mmq: scratch.x_q8_1_mmq,
+                dst: scratch.qkv_mixed_f32,
+            },
+            flambeau_ops::MatmulShape {
+                m: n_tokens,
+                k: hidden,
+                n: conv_channels,
+            },
             self.attn_qkv.dtype,
         )
         .context("gdn prefill attn_qkv qmatmul")?;
         ops.qmatmul(
-            self.attn_gate.ptr,
-            scratch.x_q8_1,
-            scratch.x_q8_1_mmq,
-            scratch.z_f32,
-            n_tokens,
-            hidden,
-            d_inner,
+            flambeau_ops::QmatmulBuffers {
+                weights: self.attn_gate.ptr,
+                act_q8_1: scratch.x_q8_1,
+                act_q8_1_mmq: scratch.x_q8_1_mmq,
+                dst: scratch.z_f32,
+            },
+            flambeau_ops::MatmulShape {
+                m: n_tokens,
+                k: hidden,
+                n: d_inner,
+            },
             self.attn_gate.dtype,
         )
         .context("gdn prefill attn_gate qmatmul")?;
         ops.qmatmul(
-            self.ssm_alpha.ptr,
-            scratch.x_q8_1,
-            scratch.x_q8_1_mmq,
-            scratch.alpha_f32,
-            n_tokens,
-            hidden,
-            num_v_heads,
+            flambeau_ops::QmatmulBuffers {
+                weights: self.ssm_alpha.ptr,
+                act_q8_1: scratch.x_q8_1,
+                act_q8_1_mmq: scratch.x_q8_1_mmq,
+                dst: scratch.alpha_f32,
+            },
+            flambeau_ops::MatmulShape {
+                m: n_tokens,
+                k: hidden,
+                n: num_v_heads,
+            },
             self.ssm_alpha.dtype,
         )
         .context("gdn prefill ssm_alpha qmatmul")?;
         ops.qmatmul(
-            self.ssm_beta.ptr,
-            scratch.x_q8_1,
-            scratch.x_q8_1_mmq,
-            scratch.beta_f32,
-            n_tokens,
-            hidden,
-            num_v_heads,
+            flambeau_ops::QmatmulBuffers {
+                weights: self.ssm_beta.ptr,
+                act_q8_1: scratch.x_q8_1,
+                act_q8_1_mmq: scratch.x_q8_1_mmq,
+                dst: scratch.beta_f32,
+            },
+            flambeau_ops::MatmulShape {
+                m: n_tokens,
+                k: hidden,
+                n: num_v_heads,
+            },
             self.ssm_beta.dtype,
         )
         .context("gdn prefill ssm_beta qmatmul")?;
@@ -1534,13 +1562,17 @@ impl DeltaNetLayer {
 
         // 15. ssm_out projection at M = L.
         ops.qmatmul(
-            self.ssm_out.ptr,
-            scratch.gated_q8_1,
-            scratch.gated_q8_1_mmq,
-            scratch.ssm_out_f32,
-            n_tokens,
-            d_inner,
-            hidden,
+            flambeau_ops::QmatmulBuffers {
+                weights: self.ssm_out.ptr,
+                act_q8_1: scratch.gated_q8_1,
+                act_q8_1_mmq: scratch.gated_q8_1_mmq,
+                dst: scratch.ssm_out_f32,
+            },
+            flambeau_ops::MatmulShape {
+                m: n_tokens,
+                k: d_inner,
+                n: hidden,
+            },
             self.ssm_out.dtype,
         )
         .context("gdn prefill ssm_out qmatmul")?;

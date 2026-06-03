@@ -89,12 +89,28 @@ pub fn dense_ffn_local<H: TopologyHooks>(
             &ops,
         )?;
     } else {
-        weights
-            .ffn_gate
-            .qmatmul(&norm_q8_1, act_norm_mmq, &mut gate_f32, n, hidden, m, &ops)?;
-        weights
-            .ffn_up
-            .qmatmul(&norm_q8_1, act_norm_mmq, &mut up_f32, n, hidden, m, &ops)?;
+        weights.ffn_gate.qmatmul(
+            &norm_q8_1,
+            act_norm_mmq,
+            &mut gate_f32,
+            flambeau_ops::MatmulShape {
+                m: n,
+                k: hidden,
+                n: m,
+            },
+            &ops,
+        )?;
+        weights.ffn_up.qmatmul(
+            &norm_q8_1,
+            act_norm_mmq,
+            &mut up_f32,
+            flambeau_ops::MatmulShape {
+                m: n,
+                k: hidden,
+                n: m,
+            },
+            &ops,
+        )?;
     }
 
     let mut gated_f16 = unsafe { Tensor::<F16>::from_raw(state.pool.gated_f16, n * m) };
@@ -137,9 +153,11 @@ pub fn dense_ffn_local<H: TopologyHooks>(
             &gated_q8_1,
             act_gated_mmq,
             &mut down_f32,
-            n,
-            m,
-            hidden,
+            flambeau_ops::MatmulShape {
+                m: n,
+                k: m,
+                n: hidden,
+            },
             &ops,
         )?;
     }

@@ -101,9 +101,11 @@ pub fn moe_ffn_local<H: TopologyHooks>(
         &norm_q8_1,
         &act_mmq_null,
         &mut router_logits,
-        1,
-        hidden,
-        n_experts,
+        flambeau_ops::MatmulShape {
+            m: 1,
+            k: hidden,
+            n: n_experts,
+        },
         &ops,
     )?;
 
@@ -390,9 +392,11 @@ fn moe_ffn_loop<H: TopologyHooks>(
         &x_q8_1_n,
         &act_mmq_null,
         &mut router_logits,
-        n_tokens,
-        hidden,
-        n_experts,
+        flambeau_ops::MatmulShape {
+            m: n_tokens,
+            k: hidden,
+            n: n_experts,
+        },
         &ops,
     )?;
 

@@ -155,30 +155,28 @@ fn run_parity(label: &str, shape: Shape, n_slots: usize, seed: u64) -> Result<bo
         let act_row = DevicePtr(d_act_q8_1.as_usize() + s * act_row_bytes);
         let dst_row = DevicePtr(d_out_baseline.as_usize() + s * dst_row_bytes);
         qmatmul(
-            &reg,
-            stream,
-            d_w,
-            act_row,
-            DevicePtr(0),
-            dst_row,
-            /* m = */ 1,
-            k,
-            n_rows,
+            flambeau_ops::OpCtx { reg: &reg, stream },
+            flambeau_ops::QmatmulBuffers {
+                weights: d_w,
+                act_q8_1: act_row,
+                act_q8_1_mmq: DevicePtr(0),
+                dst: dst_row,
+            },
+            flambeau_ops::MatmulShape { m: 1, k: k, n: n_rows },
             QDtype::Q8_0,
         )?;
     }
     stream.synchronize()?;
 
     qmatmul(
-        &reg,
-        stream,
-        d_w,
-        d_act_q8_1,
-        DevicePtr(0),
-        d_out_batched,
-        n_slots,
-        k,
-        n_rows,
+        flambeau_ops::OpCtx { reg: &reg, stream },
+        flambeau_ops::QmatmulBuffers {
+            weights: d_w,
+            act_q8_1: d_act_q8_1,
+            act_q8_1_mmq: DevicePtr(0),
+            dst: d_out_batched,
+        },
+        flambeau_ops::MatmulShape { m: n_slots, k: k, n: n_rows },
         QDtype::Q8_0,
     )?;
     stream.synchronize()?;

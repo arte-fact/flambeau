@@ -184,15 +184,14 @@ fn mmvq_q4_1_batched_perf_sweep() -> Result<()> {
         // N=1 single-row baseline (m=1 falls through to per-row MMVQ).
         let single_us = time_us(stream, iters, || {
             qmatmul(
-                &reg,
-                stream,
-                d_w,
-                d_act_q8_1,
-                DevicePtr(0),
-                d_dst,
-                1,
-                k,
-                n_rows,
+                flambeau_ops::OpCtx { reg: &reg, stream },
+                flambeau_ops::QmatmulBuffers {
+                    weights: d_w,
+                    act_q8_1: d_act_q8_1,
+                    act_q8_1_mmq: DevicePtr(0),
+                    dst: d_dst,
+                },
+                flambeau_ops::MatmulShape { m: 1, k: k, n: n_rows },
                 QDtype::Q4_1,
             )
         })?;
@@ -213,15 +212,14 @@ fn mmvq_q4_1_batched_perf_sweep() -> Result<()> {
                     let act_row = DevicePtr(d_act_q8_1.as_usize() + s * act_row_bytes);
                     let dst_row = DevicePtr(d_dst.as_usize() + s * dst_row_bytes);
                     qmatmul(
-                        &reg,
-                        stream,
-                        d_w,
-                        act_row,
-                        DevicePtr(0),
-                        dst_row,
-                        1,
-                        k,
-                        n_rows,
+                        flambeau_ops::OpCtx { reg: &reg, stream },
+                        flambeau_ops::QmatmulBuffers {
+                            weights: d_w,
+                            act_q8_1: act_row,
+                            act_q8_1_mmq: DevicePtr(0),
+                            dst: dst_row,
+                        },
+                        flambeau_ops::MatmulShape { m: 1, k: k, n: n_rows },
                         QDtype::Q4_1,
                     )?;
                 }
@@ -240,15 +238,14 @@ fn mmvq_q4_1_batched_perf_sweep() -> Result<()> {
         for &n in slot_counts {
             let us = time_us(stream, iters, || {
                 qmatmul(
-                    &reg,
-                    stream,
-                    d_w,
-                    d_act_q8_1,
-                    DevicePtr(0),
-                    d_dst,
-                    n,
-                    k,
-                    n_rows,
+                    flambeau_ops::OpCtx { reg: &reg, stream },
+                    flambeau_ops::QmatmulBuffers {
+                        weights: d_w,
+                        act_q8_1: d_act_q8_1,
+                        act_q8_1_mmq: DevicePtr(0),
+                        dst: d_dst,
+                    },
+                    flambeau_ops::MatmulShape { m: n, k: k, n: n_rows },
                     QDtype::Q4_1,
                 )
             })?;

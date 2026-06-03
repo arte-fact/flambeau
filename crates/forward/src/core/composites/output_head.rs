@@ -89,9 +89,11 @@ pub fn output_head_local<H: TopologyHooks>(
             &norm_q8_1,
             &act_mmq_null,
             &mut logits_f32,
-            n_emit,
-            hidden,
-            vocab,
+            flambeau_ops::MatmulShape {
+                m: n_emit,
+                k: hidden,
+                n: vocab,
+            },
             &ops,
         )?;
     }

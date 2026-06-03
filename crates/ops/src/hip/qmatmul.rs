@@ -32,17 +32,19 @@ use super::OpsRegistry;
 ///   Decode-path callers that never hit the MmqLdsX64 recipe can pass a null
 ///   [`DevicePtr`] for `act_q8_1_mmq`; use [`qmatmul_decode`] for ergonomics.
 pub fn qmatmul(
-    reg: &OpsRegistry,
-    stream: &HipStream,
-    weights: DevicePtr,
-    act_q8_1: DevicePtr,
-    act_q8_1_mmq: DevicePtr,
-    dst: DevicePtr,
-    m: usize,
-    k: usize,
-    n: usize,
+    ctx: crate::OpCtx<'_>,
+    buf: crate::QmatmulBuffers,
+    shape: crate::MatmulShape,
     dtype_weight: QDtype,
 ) -> Result<()> {
+    let crate::OpCtx { reg, stream } = ctx;
+    let crate::QmatmulBuffers {
+        weights,
+        act_q8_1,
+        act_q8_1_mmq,
+        dst,
+    } = buf;
+    let crate::MatmulShape { m, k, n } = shape;
     // F16 short-circuits the dispatch table: there is no F16 MMQ, so all
     // M (including L>1 prefill) routes through per-row MMVQ.
     if dtype_weight == QDtype::F16 {

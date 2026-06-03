@@ -164,9 +164,11 @@ pub fn standard_attn_local<H: TopologyHooks>(
             &norm_q8_1,
             act_norm_mmq,
             &mut q_fused_f32,
-            n,
-            hidden,
-            fused_n,
+            flambeau_ops::MatmulShape {
+                m: n,
+                k: hidden,
+                n: fused_n,
+            },
             &ops,
         )?;
         let q_fused = unsafe { Tensor::<F16>::from_raw(state.pool.q_fused_f16, n * fused_n) };
@@ -198,9 +200,11 @@ pub fn standard_attn_local<H: TopologyHooks>(
             &norm_q8_1,
             act_norm_mmq,
             &mut q_f32,
-            n,
-            hidden,
-            q_width,
+            flambeau_ops::MatmulShape {
+                m: n,
+                k: hidden,
+                n: q_width,
+            },
             &ops,
         )?;
         let mut q_f16 = unsafe { Tensor::<F16>::from_raw(state.pool.q_f16, n * q_width) };
@@ -248,9 +252,11 @@ pub fn standard_attn_local<H: TopologyHooks>(
             &norm_q8_1,
             act_norm_mmq,
             &mut k_f32,
-            n,
-            hidden,
-            kv_width,
+            flambeau_ops::MatmulShape {
+                m: n,
+                k: hidden,
+                n: kv_width,
+            },
             &ops,
         )?;
         let mut k_f16 = unsafe { Tensor::<F16>::from_raw(state.pool.k_f16, n * kv_width) };
@@ -269,9 +275,11 @@ pub fn standard_attn_local<H: TopologyHooks>(
                 &norm_q8_1,
                 act_norm_mmq,
                 &mut v_f32,
-                n,
-                hidden,
-                kv_width,
+                flambeau_ops::MatmulShape {
+                    m: n,
+                    k: hidden,
+                    n: kv_width,
+                },
                 &ops,
             )?;
             let mut v_f16 = unsafe { Tensor::<F16>::from_raw(state.pool.v_f16, n * kv_width) };
@@ -1189,9 +1197,11 @@ pub fn standard_attn_local<H: TopologyHooks>(
             &attn_out_q8_1,
             act_attn_out_mmq,
             &mut proj_f32,
-            n,
-            q_width,
-            hidden,
+            flambeau_ops::MatmulShape {
+                m: n,
+                k: q_width,
+                n: hidden,
+            },
             &ops,
         )?;
     }

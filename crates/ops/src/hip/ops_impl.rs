@@ -42,27 +42,11 @@ impl<'a> Ops for HipOps<'a> {
 
     fn qmatmul(
         &self,
-        weights: DevicePtr,
-        act_q8_1: DevicePtr,
-        act_q8_1_mmq: DevicePtr,
-        dst: DevicePtr,
-        m: usize,
-        k: usize,
-        n: usize,
+        buf: crate::QmatmulBuffers,
+        shape: crate::MatmulShape,
         dtype_weight: QDtype,
     ) -> Result<()> {
-        super::qmatmul::qmatmul(
-            self.reg,
-            self.stream,
-            weights,
-            act_q8_1,
-            act_q8_1_mmq,
-            dst,
-            m,
-            k,
-            n,
-            dtype_weight,
-        )
+        super::qmatmul::qmatmul(self.ctx(), buf, shape, dtype_weight)
     }
 
     fn mmvq_q4_0_t128(

@@ -177,15 +177,14 @@ fn mmvq_q4_1_wave64_identical_slots() -> Result<()> {
     let dst_bytes = n_slots * n_rows * 4;
     let d_dst = alloc_zeroed(&dev, dst_bytes);
     qmatmul(
-        &reg,
-        stream,
-        d_w,
-        d_act_q8_1,
-        DevicePtr(0),
-        d_dst,
-        n_slots,
-        k,
-        n_rows,
+        flambeau_ops::OpCtx { reg: &reg, stream },
+        flambeau_ops::QmatmulBuffers {
+            weights: d_w,
+            act_q8_1: d_act_q8_1,
+            act_q8_1_mmq: DevicePtr(0),
+            dst: d_dst,
+        },
+        flambeau_ops::MatmulShape { m: n_slots, k: k, n: n_rows },
         QDtype::Q4_1,
     )?;
     stream.synchronize()?;
