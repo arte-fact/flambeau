@@ -34,6 +34,11 @@ fn session_qwen36_a3b_q3_k_s_pp_size_2_runs() {
             devices: vec![0, 1],
             layer_split: Some(vec![half, rest]),
         },
+        None,
+        1,
+        1,
+        None,
+        flambeau_forward::KvLayout::F16Contig,
     ) {
         Ok(s) => s,
         Err(e) => {

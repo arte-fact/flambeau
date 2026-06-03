@@ -24,7 +24,7 @@ fn session_qwen35_9b_q3_k_s_sd_finite_logits() {
     }
 
     let file = GgufFile::open(&path).expect("open gguf");
-    let mut session = Session::<Qwen35V2>::new(file, Topology::SingleDevice { device: 0 })
+    let mut session = Session::<Qwen35V2>::new(file, Topology::SingleDevice { device: 0 }, None, 1, 1, None, flambeau_forward::KvLayout::F16Contig)
         .expect("Session<Qwen35V2> SD");
     session.forward_one_token(1, 0).expect("SD forward");
     let logits = session.logits().to_vec();

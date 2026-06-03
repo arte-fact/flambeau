@@ -54,7 +54,14 @@ fn bench_one(
     let n_dec = cell.n_dec;
     let n_total = k + n_dec;
     let max_slots = n_dec + 1;
-    let cfg = Qwen35V2::scratch_config(model, ShardMode::Replicated, n_total, max_slots, None);
+    let cfg = Qwen35V2::scratch_config(
+        model,
+        ShardMode::Replicated,
+        n_total,
+        max_slots,
+        None,
+        flambeau_forward::KvLayout::F16Contig,
+    );
     let max_seq_len = cfg.max_seq_len;
     let mut pool = ScratchPool::new(device, cfg).expect("ScratchPool::new");
     let stream = device.default_stream();

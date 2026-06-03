@@ -31,6 +31,11 @@ fn session_gemma4_31b_tp_size_2_runs() {
         Topology::Tp {
             devices: vec![0, 1],
         },
+        None,
+        1,
+        1,
+        None,
+        flambeau_forward::KvLayout::F16Contig,
     )
     .expect("Session<Gemma4V2> TP=2");
 

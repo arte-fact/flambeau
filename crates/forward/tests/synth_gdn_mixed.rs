@@ -83,6 +83,8 @@ fn build_scratch_cfg(dims: GdnDims) -> ScratchConfig {
         max_slots: N_DECODE + 1,
         per_layer_embd: 0,
         paged_kv: None,
+        kv_layout: flambeau_forward::core::KvLayout::F16Contig,
+        per_layer_kv_layouts: None,
     }
 }
 

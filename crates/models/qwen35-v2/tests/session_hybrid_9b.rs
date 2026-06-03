@@ -32,6 +32,11 @@ fn session_qwen35_9b_pp2tp2_argmax_matches_sd() {
             stages: vec![vec![0, 2], vec![1, 3]],
             layer_split: Some(vec![16, 16]),
         },
+        None,
+        1,
+        1,
+        None,
+        flambeau_forward::KvLayout::F16Contig,
     )
     .expect("Session<Qwen35V2> pp2tp2");
 

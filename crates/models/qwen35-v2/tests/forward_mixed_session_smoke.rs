@@ -50,6 +50,7 @@ fn session_forward_mixed_smoke() {
         PREFILL_UBATCH.max(K_PREFILL + N_DECODE),
         max_slots,
         None,
+        flambeau_forward::KvLayout::F16Contig,
     )
     .expect("Session<Qwen35V2>::new");
 

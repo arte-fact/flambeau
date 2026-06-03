@@ -3,7 +3,7 @@
 use flambeau_forward::ctx::GdnDims;
 use flambeau_forward::loader::ShardMode;
 use flambeau_forward::{
-    per_layer_kv_widths, scratch_config_for, KvLayerShape, MoeShape, ScratchShape,
+    per_layer_kv_widths, scratch_config_for, KvLayerShape, KvLayout, MoeShape, ScratchShape,
 };
 
 struct HybridShape {
@@ -150,6 +150,7 @@ fn scratch_config_for_qwen_dense_matches_handwritten() {
         512,
         1,
         None,
+    KvLayout::F16Contig,
     );
     assert_eq!(cfg.hidden, 5120);
     assert_eq!(cfg.intermediate, 17408 / 2);
@@ -270,6 +271,7 @@ fn scratch_config_for_qwen_moe_matches_handwritten() {
         512,
         1,
         None,
+    KvLayout::F16Contig,
     );
     assert_eq!(cfg.intermediate, 1536 / 2);
     assert_eq!(cfg.max_experts, 128);
@@ -373,6 +375,7 @@ fn scratch_config_for_gemma4_per_layer_max_widths() {
         512,
         1,
         None,
+    KvLayout::F16Contig,
     );
     assert_eq!(cfg.q_width, (8 / 2) * 256);
     assert_eq!(cfg.kv_width, (4 / 2) * 256);
@@ -401,7 +404,7 @@ fn scratch_config_for_gemma4_per_layer_head_dim_alternation() {
         moe: None,
         per_layer_embd: 0,
     };
-    let cfg = scratch_config_for(&shape, ShardMode::Replicated, 512, 1, None);
+    let cfg = scratch_config_for(&shape, ShardMode::Replicated, 512, 1, None, KvLayout::F16Contig);
     // q_width = max over layers = num_heads * max(head_dim) = 8 * 256
     assert_eq!(cfg.q_width, 8 * 256);
     // kv_width = max over per_layer_kv = max(num_kv_heads[li] * head_dim[li])
