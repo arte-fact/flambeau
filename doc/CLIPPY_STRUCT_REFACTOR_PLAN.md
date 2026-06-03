@@ -113,8 +113,11 @@ Next-session restart plan:
 | P7d | MoeExperts::new (20-arg constructor) + forward_prefill (8 args) + 4 callers in moe_ffn.rs | ☑ done | 2 | `MoeExpertsWeights` / `MoeExpertsDims` / `MoeExpertsPrefillBuffers` (model-ops aggregates) |
 | P7e | 5 forward/loader sharded-upload fns (col/row + 3 GDN fused) + 12 callers across forward + 2 model loader crates | ☑ done | 5 | `ShardSpec` + `GdnHeadDims` + `GdnShardCtx` aggregates in forward/loader |
 | P7f | qmatmul umbrella dispatcher: trait + impl + free fn + QuantWeight::qmatmul + ~30 call sites across 11 files (model-ops drivers, forward composites, ops parity tests) | ☑ done | 3 | `QmatmulBuffers` (4-ptr aggregate with `act_q8_1_mmq` slot for MMQ-DS4 layout) in sig.rs |
+| P7g | 4 hip/qmatmul.rs mid-tier dispatchers (`mmvq`, `mmvq_f16_direct`, `mmq`, `mmvq_q4_0_kv_f16dst`) + ~12 callers across model-ops/forward/tests | ☑ done | 6 | `MmvqKvF16Buffers` in sig.rs; reuses existing `MmvqBuffers`/`MmvqShape`/`MatmulShape` |
+| P7h | 5 model-ops qmatmul leaf wrappers (`qmatmul_q{8_0,4_0,4_1,5_0,5_1}`) + `qmatmul_dispatch` helper | ☑ done | 6 | reuses existing `MatmulShape` |
+| P7i | `SamplingParams::from_parts` (15-arg constructor) + 4 route callers (chat/completions/messages/infill) + 4 internal tests | ☑ done | 1 | `SamplingKnobs` / `GenerationLimits` / `ResponseMode` in server state.rs |
 | **P8 — Tail** | | | | |
-| P8 | `build.rs`, `tp_slice.rs`, `quantize_k.rs`, `ctx.rs`, `workers.rs::init_rank` | ☐ pending | ~12 | misc |
+| P8 | `runtime/tp_slice.rs::slice_fused_qkv_parallel`, `backend-hip/cluster.rs::peer_copy_via_host_async{,_laned}` (incl. removing the lone `#[expect(too_many_arguments)]`), `backend-hip/kv_cache_slot.rs::kv_cache_append_hip_slot`, `quant/quantize_k.rs::make_qkx2_quants`, `kernels-hip/build.rs::compile_cu`, 2 paged-attn test helpers | ☑ done | 8 | `FusedQkvSpec`, `PeerCopy{Spec,Streams,Events}`, `KvAppend{Src,Slots}`, `QkxBuffers`/`QkxKnobs`, `IncludeRoots`, per-file `Case` aggregates |
 
 ## Per-phase commit policy
 
@@ -129,12 +132,20 @@ Next-session restart plan:
 
 ## Live state
 
-| Metric | At start | After P2f5 | After P3a | After P3b | After P4 | After P5a | After P5b | After P6 | After P7a | After P7b | After P7c | After P7d | After P7e | After P7f |
-|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
-| total warnings | 478 | 344 | 329 | 324 | 315 | 309 | 303 | 300 | 299 | 294 | 288 | 286 | 281 | 266 |
-| `too_many_arguments` | 315 | 157 | 147 | 142 | 134 | 128 | 122 | 115 | 114 | 109 | 103 | 101 | 96 | 93 |
-| errors | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 0 |
-| cumulative LOC delta | 0 | −774 | −815 | −825 | −868 | −918 | −952 | −915 | −891 | −842 | −981 | −942 | −876 | −809 |
+| Metric | At start | After P2f5 | After P6 | After P7f | After P7g | After P7h | After P7i | After P8 |
+|---|---|---|---|---|---|---|---|---|
+| total warnings | 478 | 344 | 300 | 266 | 260 | 89 | 88 | **80** |
+| `too_many_arguments` | 315 | 157 | 115 | 93 | 87 | 8 | 7 | **0** |
+| errors | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 0 |
+| cumulative LOC delta | 0 | −774 | −915 | −809 | −779 | −801 | −802 | −672 |
+
+**Note on the P7g→P7h jump (260 → 89).** Earlier counts of `too_many_arguments` and
+`total warnings` were inflated by `grep "too_many_arguments" | wc -l` matching the
+`= help:` + `= note:` trailing lines clippy emits per warning (≈2× over-count).
+The real values reconciled at P7h once we filtered on
+`grep "this function has too many arguments"`. Likewise the lint-noise count
+mostly tracks unchanged surface lints (non-camel-case HIP sys typedefs, dead
+fields, type-complexity tuples) — none related to TMA.
 
 LOC deltas per commit (insertions − deletions, from `git show --stat`):
 
@@ -167,6 +178,10 @@ LOC deltas per commit (insertions − deletions, from `git show --stat`):
 | P7d | `a479a06` | 158 | 119 | +39 | 2 |
 | P7e | `35c4432` | 179 | 113 | +66 | 5 |
 | P7f | `27be185` | 375 | 308 | +67 | 3 |
+| P7g | `4ad6717` | 210 | 180 | +30 | 6 |
+| P7h | `6a6dede` | 18 | 40 | −22 | 6 |
+| P7i | `a9a032e` | 125 | 126 | −1 | 1 |
+| P8 | `b69b60e` | 220 | 90 | +130 | 8 |
 
 ## Non-goals
 
