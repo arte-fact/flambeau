@@ -163,10 +163,10 @@ fn attention_prefill_slot_update_parity() -> Result<()> {
     assert_eq!(b_n_k.kernel_node_idx, 0);
     assert_eq!(b_q_off.kernel_node_idx, 0);
     // Flash-tile path: args are [q, k, v, out, n_q, n_heads_q, n_heads_kv,
-    // n_k, q_off, scale] → n_k at idx 7, q_off at idx 8.
+    // n_k, q_off, scale, window_size] → n_k at idx 7, q_off at idx 8.
     assert_eq!(b_n_k.arg_index, 7, "n_k expected at arg idx 7");
     assert_eq!(b_q_off.arg_index, 8, "q_off expected at arg idx 8");
-    assert_eq!(b_n_k.arity, 10);
+    assert_eq!(b_n_k.arity, 11);
 
     // Sanity check: pre-update replay should match uncaptured at
     // (N_K_INIT, Q_OFF_INIT). If this fails, the capture itself is
