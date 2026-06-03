@@ -85,28 +85,16 @@ impl<'a> Ops for HipOps<'a> {
 
     fn mmvq_q4_0_gate_up_row_tile_batched(
         &self,
-        gate_w: DevicePtr,
-        up_w: DevicePtr,
-        y_q8_1: DevicePtr,
-        gate_out: DevicePtr,
-        up_out: DevicePtr,
-        n_rows_gate: usize,
-        n_rows_up: usize,
-        k: usize,
-        n_slots: usize,
+        buffers: crate::MmvqGateUpBuffers,
+        shape: crate::MmvqGateUpBatchShape,
     ) -> Result<()> {
         super::qmatmul::mmvq_q4_0_gate_up_row_tile_batched(
-            self.reg,
-            self.stream,
-            gate_w,
-            up_w,
-            y_q8_1,
-            gate_out,
-            up_out,
-            n_rows_gate,
-            n_rows_up,
-            k,
-            n_slots,
+            crate::OpCtx {
+                reg: self.reg,
+                stream: self.stream,
+            },
+            buffers,
+            shape,
         )
     }
 

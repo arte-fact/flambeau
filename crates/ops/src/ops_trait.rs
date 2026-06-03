@@ -63,15 +63,8 @@ pub trait Ops {
     /// outputs slot-major `[N, n_rows_*]` F32.
     fn mmvq_q4_0_gate_up_row_tile_batched(
         &self,
-        gate_w: DevicePtr,
-        up_w: DevicePtr,
-        y_q8_1: DevicePtr,
-        gate_out: DevicePtr,
-        up_out: DevicePtr,
-        n_rows_gate: usize,
-        n_rows_up: usize,
-        k: usize,
-        n_slots: usize,
+        buffers: crate::MmvqGateUpBuffers,
+        shape: crate::MmvqGateUpBatchShape,
     ) -> Result<()>;
 
     /// Row-tiled Q4_0 MMVQ for non-fused projections (single weight

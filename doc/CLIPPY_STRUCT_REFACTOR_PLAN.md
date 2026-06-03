@@ -59,8 +59,8 @@ below is the corrected one.
 | **P2 — Matmul family (~100 sites, sub-phased by sibling group)** | | | | |
 | P2a | All 9 batched single-weight fns (`mmvq_q4_0_batched`, `q4_k_batched`, `q6_k_batched`, `q8_0_batched`, `q4_1_batched`, `q5_k_r2_batched`, `q5_k_row_tile_batched`, `q4_0_row_tile_batched`, `q8_0_row_tile_batched`) | ☑ done | 9 | trait (2 of 9), impl (2 of 9), hip/qmatmul.rs (9 free fns + 6 in-file dispatcher calls). Zero external callers found. |
 | P2b | mmvq gate-up fused (Q4_0/Q4_1/Q5_K/Q8_0/Q4_0_t128) | ☑ done | 10 | trait (5 methods), impl (5 methods), hip/qmatmul.rs (5 free fns), 4 model-ops callers |
-| P2c | mmvq gate-up fused (Q4_0/Q4_1/Q5_K/Q8_0/Q4_0_t128/Q5_K) | ☐ pending | ~15 | trait, impl, hip/qmatmul.rs, model-ops callers |
-| P2d | mmvq row-tile + gate-up batched variants | ☐ pending | ~10 | same |
+| P2c | `mmvq_q4_0_gate_up_{batched,row_tile_batched}` (siblings, share GateUpBatchShape) | ☑ done | 3 | trait (1), impl (1), hip/qmatmul.rs (2 free fns), 1 model-ops caller (delta_net) |
+| P2d | remaining single-weight non-batched (`mmvq_q4_0_t128`, `_warpcoop64`, `_kv_f16dst`) | ☐ pending | ~5 | same |
 | P2e | mmvq KV-out + `mmvq` generic + `mmvq_f16_direct` + `qmatmul` + `mmq` | ☐ pending | ~10 | same |
 | P2f | indexed_moe_mmvq + indexed_moe_mmq (MoE family) | ☐ pending | ~30 | trait, impl, hip/moe.rs, moe_experts.rs |
 | **P3 — Norm fused** | | | | |
@@ -96,10 +96,10 @@ below is the corrected one.
 
 | Metric | At start | After P0 | After P1f | After P2a | After P2b | After P2c | After P2d | After P2e | After P2f | After … |
 |---|---|---|---|---|---|---|---|---|---|---|
-| total warnings | 478 | 478 | 456 | 447 | 437 | — | — | — | — | — |
-| `too_many_arguments` | 315 | 315 | 291 | 282 | 272 | — | — | — | — | — |
-| errors | 0 | 0 | 0 | 0 | 0 | — | — | — | — | — |
-| cumulative LOC delta | 0 | +232 | +10 | +12 | tbd | — | — | — | — | — |
+| total warnings | 478 | 478 | 456 | 447 | 437 | 434 | — | — | — | — |
+| `too_many_arguments` | 315 | 315 | 291 | 282 | 272 | 269 | — | — | — | — |
+| errors | 0 | 0 | 0 | 0 | 0 | 0 | — | — | — | — |
+| cumulative LOC delta | 0 | +232 | +10 | +12 | −136 | tbd | — | — | — | — |
 
 LOC deltas per commit (insertions − deletions, from `git show --stat`):
 
@@ -113,7 +113,8 @@ LOC deltas per commit (insertions − deletions, from `git show --stat`):
 | P1e | `56af554` | 116 | 263 | −147 | 4 |
 | P1f | `f7b1229` | 114 | 160 | −46 | 4 |
 | P2a | `760d53e` | 150 | 148 | +2 | 9 |
-| P2b | (pending) | tbd | tbd | tbd | 10 |
+| P2b | `46cd52e` | 128 | 276 | −148 | 10 |
+| P2c | (pending) | tbd | tbd | tbd | 3 |
 
 ## Non-goals
 

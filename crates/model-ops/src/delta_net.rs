@@ -934,15 +934,19 @@ impl DeltaNetLayer {
         // one launch for all N slots; otherwise per-slot loop.
         if use_q4_0_gate_up_row_tile {
             ops.mmvq_q4_0_gate_up_row_tile_batched(
-                self.attn_qkv.ptr,
-                self.attn_gate.ptr,
-                scratch.x_q8_1,
-                scratch.qkv_mixed_f32,
-                scratch.z_f32,
-                conv_channels,
-                d_inner,
-                hidden,
-                n_slots,
+                flambeau_ops::MmvqGateUpBuffers {
+                    gate_w: self.attn_qkv.ptr,
+                    up_w: self.attn_gate.ptr,
+                    act_q8_1: scratch.x_q8_1,
+                    gate_out: scratch.qkv_mixed_f32,
+                    up_out: scratch.z_f32,
+                },
+                flambeau_ops::MmvqGateUpBatchShape {
+                    n_rows_gate: conv_channels,
+                    n_rows_up: d_inner,
+                    k: hidden,
+                    n_slots,
+                },
             )
             .context("gdn batched: attn_qkv+attn_gate row-tile batched Q4_0")?;
         } else {

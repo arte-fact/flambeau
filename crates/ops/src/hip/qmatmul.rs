@@ -750,25 +750,19 @@ pub fn mmvq_q4_0_gate_up(
 ///
 /// `n_slots` ∈ [2, 4]. Used by the K6 batched-GDN paired-L=2 forward.
 pub fn mmvq_q4_0_gate_up_batched(
-    reg: &OpsRegistry,
-    stream: &HipStream,
-    gate_w: DevicePtr,
-    up_w: DevicePtr,
-    y_q8_1: DevicePtr,
-    gate_out: DevicePtr,
-    up_out: DevicePtr,
-    n_rows_gate: usize,
-    n_rows_up: usize,
-    k: usize,
-    n_slots: usize,
+    ctx: crate::OpCtx<'_>,
+    buffers: crate::MmvqGateUpBuffers,
+    shape: crate::MmvqGateUpBatchShape,
 ) -> Result<()> {
+    let crate::MmvqGateUpBuffers { gate_w, up_w, act_q8_1: y_q8_1, gate_out, up_out } = buffers;
+    let crate::MmvqGateUpBatchShape { n_rows_gate, n_rows_up, k, n_slots } = shape;
     let entry = match n_slots {
         2 => "flambeau_mmvq_q4_0_gate_up_dp4a_q8_1_batched_n2",
         3 => "flambeau_mmvq_q4_0_gate_up_dp4a_q8_1_batched_n3",
         4 => "flambeau_mmvq_q4_0_gate_up_dp4a_q8_1_batched_n4",
         _ => bail!("mmvq_q4_0_gate_up_batched: n_slots={n_slots} outside [2, 4]"),
     };
-    let module = reg.expect_module("mmvq_q4_0_gate_up_batched")?;
+    let module = ctx.reg.expect_module("mmvq_q4_0_gate_up_batched")?;
     let kernel = module.kernel(entry)?;
     let n_rows_g = n_rows_gate as i32;
     let n_rows_u = n_rows_up as i32;
@@ -789,7 +783,7 @@ pub fn mmvq_q4_0_gate_up_batched(
     args.push(&n_blocks_i);
     let grid = n_rows_gate.max(n_rows_up) as u32;
     let cfg = LaunchCfg::one_d(grid, 256);
-    unsafe { kernel.launch(stream, cfg, args)? };
+    unsafe { kernel.launch(ctx.stream, cfg, args)? };
     Ok(())
 }
 
@@ -802,25 +796,19 @@ pub fn mmvq_q4_0_gate_up_batched(
 /// `n_slots` ∈ [2, 4]. Output ABI identical to `mmvq_q4_0_gate_up_batched`
 /// (`gate_out[N, n_rows_gate]`, `up_out[N, n_rows_up]`, slot-major F32).
 pub fn mmvq_q4_0_gate_up_row_tile_batched(
-    reg: &OpsRegistry,
-    stream: &HipStream,
-    gate_w: DevicePtr,
-    up_w: DevicePtr,
-    y_q8_1: DevicePtr,
-    gate_out: DevicePtr,
-    up_out: DevicePtr,
-    n_rows_gate: usize,
-    n_rows_up: usize,
-    k: usize,
-    n_slots: usize,
+    ctx: crate::OpCtx<'_>,
+    buffers: crate::MmvqGateUpBuffers,
+    shape: crate::MmvqGateUpBatchShape,
 ) -> Result<()> {
+    let crate::MmvqGateUpBuffers { gate_w, up_w, act_q8_1: y_q8_1, gate_out, up_out } = buffers;
+    let crate::MmvqGateUpBatchShape { n_rows_gate, n_rows_up, k, n_slots } = shape;
     let entry = match n_slots {
         2 => "flambeau_mmvq_q4_0_gate_up_row_tile_dp4a_q8_1_batched_n2",
         3 => "flambeau_mmvq_q4_0_gate_up_row_tile_dp4a_q8_1_batched_n3",
         4 => "flambeau_mmvq_q4_0_gate_up_row_tile_dp4a_q8_1_batched_n4",
         _ => bail!("mmvq_q4_0_gate_up_row_tile_batched: n_slots={n_slots} outside [2, 4]"),
     };
-    let module = reg.expect_module("mmvq_q4_0_gate_up_row_tile_batched")?;
+    let module = ctx.reg.expect_module("mmvq_q4_0_gate_up_row_tile_batched")?;
     let kernel = module.kernel(entry)?;
     let n_rows_g = n_rows_gate as i32;
     let n_rows_u = n_rows_up as i32;
@@ -842,7 +830,7 @@ pub fn mmvq_q4_0_gate_up_row_tile_batched(
     let max_rows = n_rows_gate.max(n_rows_up);
     let grid = (max_rows as u32).div_ceil(4);
     let cfg = LaunchCfg::one_d(grid, 256);
-    unsafe { kernel.launch(stream, cfg, args)? };
+    unsafe { kernel.launch(ctx.stream, cfg, args)? };
     Ok(())
 }
 
