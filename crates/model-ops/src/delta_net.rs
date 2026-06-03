@@ -800,21 +800,25 @@ impl DeltaNetLayer {
         // 11. Fused state-step (absorbs α/β/gate compute).
         let n_rep = num_v_heads / num_k_heads;
         ops.gdn_state_step_alphabeta_f32_s128(
-            scratch.q_norm_f32,
-            scratch.k_norm_f32,
-            v_src,
-            scratch.alpha_f32,
-            scratch.beta_f32,
-            self.ssm_dt_bias,
-            self.ssm_a,
-            state,
-            state,
-            scratch.state_out,
-            1,
-            num_v_heads,
-            1,
-            n_rep,
-            self.rep_inner_layout,
+            flambeau_ops::GdnStepAlphaBetaBuffers {
+                q: scratch.q_norm_f32,
+                k: scratch.k_norm_f32,
+                v: v_src,
+                alpha_in: scratch.alpha_f32,
+                beta_in: scratch.beta_f32,
+                ssm_dt_bias: self.ssm_dt_bias,
+                ssm_a: self.ssm_a,
+                state_in: state,
+                state_out: state,
+                attn_out: scratch.state_out,
+            },
+            flambeau_ops::GdnStepShape {
+                b: 1,
+                h_v: num_v_heads,
+                l: 1,
+                n_rep,
+                rep_inner_layout: self.rep_inner_layout,
+            },
         )
         .context("gdn_state_step_alphabeta_f32_s128")?;
 
@@ -1137,13 +1141,17 @@ impl DeltaNetLayer {
 
         // 6. Fused conv trio across N slots in one launch.
         ops.gdn_conv_trio_decode_f32_batched_slots(
-            conv_history_ptrs_dev,
-            scratch.qkv_mixed_f32,
-            self.ssm_conv1d,
-            scratch.conv_out,
-            n_slots,
-            conv_channels,
-            conv_kernel,
+            flambeau_ops::GdnConvTrioBatchedSlotsBuffers {
+                slot_history_ptrs: conv_history_ptrs_dev,
+                qkv_mixed: scratch.qkv_mixed_f32,
+                weight: self.ssm_conv1d,
+                conv_out: scratch.conv_out,
+            },
+            flambeau_ops::GdnConvTrioShape {
+                n_slots,
+                conv_channels,
+                conv_kernel,
+            },
         )
         .context("gdn batched: conv_trio_decode")?;
 
@@ -1202,21 +1210,25 @@ impl DeltaNetLayer {
         // `out_normed` and re-use it for ssm_norm output.
         let n_rep = num_v_heads / num_k_heads;
         ops.gdn_state_step_alphabeta_f32_s128_batched_slots(
-            scratch.q_norm_f32,
-            scratch.k_norm_f32,
-            scratch.out_normed, // V staging (re-used as ssm_norm output below)
-            scratch.alpha_f32,
-            scratch.beta_f32,
-            self.ssm_dt_bias,
-            self.ssm_a,
-            state_in_ptrs_dev,
-            state_out_ptrs_dev,
-            scratch.state_out,
-            n_slots,
-            num_v_heads,
-            1,
-            n_rep,
-            self.rep_inner_layout,
+            flambeau_ops::GdnStepAlphaBetaBatchedSlotsBuffers {
+                q: scratch.q_norm_f32,
+                k: scratch.k_norm_f32,
+                v: scratch.out_normed, // V staging (re-used as ssm_norm output below)
+                alpha_in: scratch.alpha_f32,
+                beta_in: scratch.beta_f32,
+                ssm_dt_bias: self.ssm_dt_bias,
+                ssm_a: self.ssm_a,
+                state_in_ptrs: state_in_ptrs_dev,
+                state_out_ptrs: state_out_ptrs_dev,
+                attn_out: scratch.state_out,
+            },
+            flambeau_ops::GdnStepShape {
+                b: n_slots,
+                h_v: num_v_heads,
+                l: 1,
+                n_rep,
+                rep_inner_layout: self.rep_inner_layout,
+            },
         )
         .context("gdn batched: gdn_state_step_alphabeta_f32_s128_batched_slots")?;
 
@@ -1509,13 +1521,13 @@ impl DeltaNetLayer {
         // fused kernel (memcpy slice loop is ~1500 driver calls/layer
         // at L=512).
         ops.gdn_split_qkv_f32(
-            scratch.silu_out,
-            scratch.q_norm_f32,
-            scratch.k_norm_f32,
-            scratch.v_f32,
-            n_tokens,
-            qk_size,
-            v_size,
+            flambeau_ops::GdnSplitQkvBuffers {
+                silu_out: scratch.silu_out,
+                q_out: scratch.q_norm_f32,
+                k_out: scratch.k_norm_f32,
+                v_out: scratch.v_f32,
+            },
+            flambeau_ops::GdnSplitQkvShape { n_tokens, qk_size, v_size },
         )
         .context("gdn prefill gdn_split_qkv_f32")?;
 
@@ -1557,21 +1569,25 @@ impl DeltaNetLayer {
                 .context("gdn prefill state_step stream_wait")?;
         }
         ops.gdn_state_step_alphabeta_f32_s128(
-            scratch.q_norm_f32,
-            scratch.k_norm_f32,
-            scratch.v_f32,
-            scratch.alpha_f32,
-            scratch.beta_f32,
-            self.ssm_dt_bias,
-            self.ssm_a,
-            state,
-            state,
-            scratch.state_out,
-            1,
-            num_v_heads,
-            n_tokens,
-            n_rep,
-            self.rep_inner_layout,
+            flambeau_ops::GdnStepAlphaBetaBuffers {
+                q: scratch.q_norm_f32,
+                k: scratch.k_norm_f32,
+                v: scratch.v_f32,
+                alpha_in: scratch.alpha_f32,
+                beta_in: scratch.beta_f32,
+                ssm_dt_bias: self.ssm_dt_bias,
+                ssm_a: self.ssm_a,
+                state_in: state,
+                state_out: state,
+                attn_out: scratch.state_out,
+            },
+            flambeau_ops::GdnStepShape {
+                b: 1,
+                h_v: num_v_heads,
+                l: n_tokens,
+                n_rep,
+                rep_inner_layout: self.rep_inner_layout,
+            },
         )
         .context("gdn prefill gdn_state_step_alphabeta_f32_s128")?;
         if let Some(ev) = state_event {

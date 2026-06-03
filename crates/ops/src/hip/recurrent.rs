@@ -32,22 +32,13 @@ use super::OpsRegistry;
 ///   `(WARP_SIZE=64, 4, 1)` — 4 warps per block, each warp owns one output
 ///   column. `warps_per_block = 4` ⇒ grid_z = `S_v / 4 = 32` at S_v=128.
 pub fn gdn_state_step_f32_s128(
-    reg: &OpsRegistry,
-    stream: &HipStream,
-    q: DevicePtr,
-    k: DevicePtr,
-    v: DevicePtr,
-    gate: DevicePtr,
-    beta: DevicePtr,
-    state_in: DevicePtr,
-    state_out: DevicePtr,
-    attn_out: DevicePtr,
-    b: usize,
-    h_v: usize,
-    l: usize,
-    n_rep: usize,
-    rep_inner_layout: bool,
+    ctx: crate::OpCtx<'_>,
+    bufs: crate::GdnStepBuffers,
+    shape: crate::GdnStepShape,
 ) -> Result<()> {
+    let crate::OpCtx { reg, stream } = ctx;
+    let crate::GdnStepBuffers { q, k, v, gate, beta, state_in, state_out, attn_out } = bufs;
+    let crate::GdnStepShape { b, h_v, l, n_rep, rep_inner_layout } = shape;
     const S_V: u32 = 128;
     const WARP_SIZE: u32 = 64;
     const WARPS_PER_BLOCK: u32 = 4;
@@ -105,17 +96,20 @@ pub fn gdn_state_step_f32_s128(
 /// marshalling (profile 2026-04-22: ~50 ms in the kernel + ~150 ms
 /// rocclr_copyBuffer overhead).
 pub fn gdn_alpha_beta_f32(
-    reg: &OpsRegistry,
-    stream: &HipStream,
-    alpha_in: DevicePtr,
-    beta_in: DevicePtr,
-    ssm_dt_bias: DevicePtr,
-    ssm_a: DevicePtr,
-    gate_out: DevicePtr,
-    beta_out: DevicePtr,
-    num_v_heads: usize,
-    n_tokens: usize,
+    ctx: crate::OpCtx<'_>,
+    bufs: crate::GdnAlphaBetaBuffers,
+    shape: crate::GdnAlphaBetaShape,
 ) -> Result<()> {
+    let crate::OpCtx { reg, stream } = ctx;
+    let crate::GdnAlphaBetaBuffers {
+        alpha_in,
+        beta_in,
+        ssm_dt_bias,
+        ssm_a,
+        gate_out,
+        beta_out,
+    } = bufs;
+    let crate::GdnAlphaBetaShape { num_v_heads, n_tokens } = shape;
     assert!(n_tokens >= 1, "gdn_alpha_beta_f32 needs n_tokens >= 1");
     assert!(
         num_v_heads <= 1024,
@@ -160,24 +154,24 @@ pub fn gdn_alpha_beta_f32(
 /// against `gdn_state_step_f32_s128 ∘ gdn_alpha_beta_f32` on Qwen3.6
 /// shapes.
 pub fn gdn_state_step_alphabeta_f32_s128(
-    reg: &OpsRegistry,
-    stream: &HipStream,
-    q: DevicePtr,
-    k: DevicePtr,
-    v: DevicePtr,
-    alpha_in: DevicePtr,
-    beta_in: DevicePtr,
-    ssm_dt_bias: DevicePtr,
-    ssm_a: DevicePtr,
-    state_in: DevicePtr,
-    state_out: DevicePtr,
-    attn_out: DevicePtr,
-    b: usize,
-    h_v: usize,
-    l: usize,
-    n_rep: usize,
-    rep_inner_layout: bool,
+    ctx: crate::OpCtx<'_>,
+    bufs: crate::GdnStepAlphaBetaBuffers,
+    shape: crate::GdnStepShape,
 ) -> Result<()> {
+    let crate::OpCtx { reg, stream } = ctx;
+    let crate::GdnStepAlphaBetaBuffers {
+        q,
+        k,
+        v,
+        alpha_in,
+        beta_in,
+        ssm_dt_bias,
+        ssm_a,
+        state_in,
+        state_out,
+        attn_out,
+    } = bufs;
+    let crate::GdnStepShape { b, h_v, l, n_rep, rep_inner_layout } = shape;
     const S_V: u32 = 128;
     const WARP_SIZE: u32 = 64;
     const WARPS_PER_BLOCK: u32 = 4;
@@ -240,24 +234,24 @@ pub fn gdn_state_step_alphabeta_f32_s128(
 /// `GdnLayerState::state` base pointers. Same buffer for both is fine
 /// when in-place (the existing kernel's pattern).
 pub fn gdn_state_step_alphabeta_f32_s128_batched_slots(
-    reg: &OpsRegistry,
-    stream: &HipStream,
-    q: DevicePtr,
-    k: DevicePtr,
-    v: DevicePtr,
-    alpha_in: DevicePtr,
-    beta_in: DevicePtr,
-    ssm_dt_bias: DevicePtr,
-    ssm_a: DevicePtr,
-    state_in_ptrs: DevicePtr,
-    state_out_ptrs: DevicePtr,
-    attn_out: DevicePtr,
-    b: usize,
-    h_v: usize,
-    l: usize,
-    n_rep: usize,
-    rep_inner_layout: bool,
+    ctx: crate::OpCtx<'_>,
+    bufs: crate::GdnStepAlphaBetaBatchedSlotsBuffers,
+    shape: crate::GdnStepShape,
 ) -> Result<()> {
+    let crate::OpCtx { reg, stream } = ctx;
+    let crate::GdnStepAlphaBetaBatchedSlotsBuffers {
+        q,
+        k,
+        v,
+        alpha_in,
+        beta_in,
+        ssm_dt_bias,
+        ssm_a,
+        state_in_ptrs,
+        state_out_ptrs,
+        attn_out,
+    } = bufs;
+    let crate::GdnStepShape { b, h_v, l, n_rep, rep_inner_layout } = shape;
     const S_V: u32 = 128;
     const WARP_SIZE: u32 = 64;
     const WARPS_PER_BLOCK: u32 = 4;
@@ -316,16 +310,18 @@ pub fn gdn_state_step_alphabeta_f32_s128_batched_slots(
 /// into a device array sized `[N] u64` and passes its base via
 /// `slot_history_ptrs`.
 pub fn gdn_conv_trio_decode_f32_batched_slots(
-    reg: &OpsRegistry,
-    stream: &HipStream,
-    slot_history_ptrs: DevicePtr,
-    qkv_mixed: DevicePtr,
-    weight: DevicePtr,
-    conv_out: DevicePtr,
-    n_slots: usize,
-    conv_channels: usize,
-    conv_kernel: usize,
+    ctx: crate::OpCtx<'_>,
+    bufs: crate::GdnConvTrioBatchedSlotsBuffers,
+    shape: crate::GdnConvTrioShape,
 ) -> Result<()> {
+    let crate::OpCtx { reg, stream } = ctx;
+    let crate::GdnConvTrioBatchedSlotsBuffers {
+        slot_history_ptrs,
+        qkv_mixed,
+        weight,
+        conv_out,
+    } = bufs;
+    let crate::GdnConvTrioShape { n_slots, conv_channels, conv_kernel } = shape;
     const THREADS: u32 = 256;
     const KERNEL_MAX: usize = 8;
     assert!(
@@ -397,16 +393,13 @@ pub fn gdn_assemble_conv_input_f32(
 /// `forward.rs::gather_qkv_strided`. Reads one row of silu_out per token
 /// and strided-writes into q_out / k_out / v_out.
 pub fn gdn_split_qkv_f32(
-    reg: &OpsRegistry,
-    stream: &HipStream,
-    silu_out: DevicePtr,
-    q_out: DevicePtr,
-    k_out: DevicePtr,
-    v_out: DevicePtr,
-    n_tokens: usize,
-    qk_size: usize,
-    v_size: usize,
+    ctx: crate::OpCtx<'_>,
+    bufs: crate::GdnSplitQkvBuffers,
+    shape: crate::GdnSplitQkvShape,
 ) -> Result<()> {
+    let crate::OpCtx { reg, stream } = ctx;
+    let crate::GdnSplitQkvBuffers { silu_out, q_out, k_out, v_out } = bufs;
+    let crate::GdnSplitQkvShape { n_tokens, qk_size, v_size } = shape;
     let module = reg.expect_module("gdn_split_qkv_f32")?;
     let kernel = module.kernel("flambeau_gdn_split_qkv_f32")?;
     let conv_channels = 2 * qk_size + v_size;

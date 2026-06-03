@@ -763,101 +763,26 @@ impl<'a> Ops for HipOps<'a> {
 
     fn gdn_state_step_f32_s128(
         &self,
-        q: DevicePtr,
-        k: DevicePtr,
-        v: DevicePtr,
-        gate: DevicePtr,
-        beta: DevicePtr,
-        state_in: DevicePtr,
-        state_out: DevicePtr,
-        attn_out: DevicePtr,
-        b: usize,
-        h_v: usize,
-        l: usize,
-        n_rep: usize,
-        rep_inner_layout: bool,
+        bufs: crate::GdnStepBuffers,
+        shape: crate::GdnStepShape,
     ) -> Result<()> {
-        super::recurrent::gdn_state_step_f32_s128(
-            self.reg,
-            self.stream,
-            q,
-            k,
-            v,
-            gate,
-            beta,
-            state_in,
-            state_out,
-            attn_out,
-            b,
-            h_v,
-            l,
-            n_rep,
-            rep_inner_layout,
-        )
+        super::recurrent::gdn_state_step_f32_s128(self.ctx(), bufs, shape)
     }
 
     fn gdn_alpha_beta_f32(
         &self,
-        alpha_in: DevicePtr,
-        beta_in: DevicePtr,
-        ssm_dt_bias: DevicePtr,
-        ssm_a: DevicePtr,
-        gate_out: DevicePtr,
-        beta_out: DevicePtr,
-        num_v_heads: usize,
-        n_tokens: usize,
+        bufs: crate::GdnAlphaBetaBuffers,
+        shape: crate::GdnAlphaBetaShape,
     ) -> Result<()> {
-        super::recurrent::gdn_alpha_beta_f32(
-            self.reg,
-            self.stream,
-            alpha_in,
-            beta_in,
-            ssm_dt_bias,
-            ssm_a,
-            gate_out,
-            beta_out,
-            num_v_heads,
-            n_tokens,
-        )
+        super::recurrent::gdn_alpha_beta_f32(self.ctx(), bufs, shape)
     }
 
     fn gdn_state_step_alphabeta_f32_s128(
         &self,
-        q: DevicePtr,
-        k: DevicePtr,
-        v: DevicePtr,
-        alpha_in: DevicePtr,
-        beta_in: DevicePtr,
-        ssm_dt_bias: DevicePtr,
-        ssm_a: DevicePtr,
-        state_in: DevicePtr,
-        state_out: DevicePtr,
-        attn_out: DevicePtr,
-        b: usize,
-        h_v: usize,
-        l: usize,
-        n_rep: usize,
-        rep_inner_layout: bool,
+        bufs: crate::GdnStepAlphaBetaBuffers,
+        shape: crate::GdnStepShape,
     ) -> Result<()> {
-        super::recurrent::gdn_state_step_alphabeta_f32_s128(
-            self.reg,
-            self.stream,
-            q,
-            k,
-            v,
-            alpha_in,
-            beta_in,
-            ssm_dt_bias,
-            ssm_a,
-            state_in,
-            state_out,
-            attn_out,
-            b,
-            h_v,
-            l,
-            n_rep,
-            rep_inner_layout,
-        )
+        super::recurrent::gdn_state_step_alphabeta_f32_s128(self.ctx(), bufs, shape)
     }
 
     fn gdn_assemble_conv_input_f32(
@@ -881,87 +806,30 @@ impl<'a> Ops for HipOps<'a> {
 
     fn gdn_state_step_alphabeta_f32_s128_batched_slots(
         &self,
-        q: DevicePtr,
-        k: DevicePtr,
-        v: DevicePtr,
-        alpha_in: DevicePtr,
-        beta_in: DevicePtr,
-        ssm_dt_bias: DevicePtr,
-        ssm_a: DevicePtr,
-        state_in_ptrs: DevicePtr,
-        state_out_ptrs: DevicePtr,
-        attn_out: DevicePtr,
-        b: usize,
-        h_v: usize,
-        l: usize,
-        n_rep: usize,
-        rep_inner_layout: bool,
+        bufs: crate::GdnStepAlphaBetaBatchedSlotsBuffers,
+        shape: crate::GdnStepShape,
     ) -> Result<()> {
         super::recurrent::gdn_state_step_alphabeta_f32_s128_batched_slots(
-            self.reg,
-            self.stream,
-            q,
-            k,
-            v,
-            alpha_in,
-            beta_in,
-            ssm_dt_bias,
-            ssm_a,
-            state_in_ptrs,
-            state_out_ptrs,
-            attn_out,
-            b,
-            h_v,
-            l,
-            n_rep,
-            rep_inner_layout,
+            self.ctx(),
+            bufs,
+            shape,
         )
     }
 
     fn gdn_conv_trio_decode_f32_batched_slots(
         &self,
-        slot_history_ptrs: DevicePtr,
-        qkv_mixed: DevicePtr,
-        weight: DevicePtr,
-        conv_out: DevicePtr,
-        n_slots: usize,
-        conv_channels: usize,
-        conv_kernel: usize,
+        bufs: crate::GdnConvTrioBatchedSlotsBuffers,
+        shape: crate::GdnConvTrioShape,
     ) -> Result<()> {
-        super::recurrent::gdn_conv_trio_decode_f32_batched_slots(
-            self.reg,
-            self.stream,
-            slot_history_ptrs,
-            qkv_mixed,
-            weight,
-            conv_out,
-            n_slots,
-            conv_channels,
-            conv_kernel,
-        )
+        super::recurrent::gdn_conv_trio_decode_f32_batched_slots(self.ctx(), bufs, shape)
     }
 
     fn gdn_split_qkv_f32(
         &self,
-        silu_out: DevicePtr,
-        q_out: DevicePtr,
-        k_out: DevicePtr,
-        v_out: DevicePtr,
-        n_tokens: usize,
-        qk_size: usize,
-        v_size: usize,
+        bufs: crate::GdnSplitQkvBuffers,
+        shape: crate::GdnSplitQkvShape,
     ) -> Result<()> {
-        super::recurrent::gdn_split_qkv_f32(
-            self.reg,
-            self.stream,
-            silu_out,
-            q_out,
-            k_out,
-            v_out,
-            n_tokens,
-            qk_size,
-            v_size,
-        )
+        super::recurrent::gdn_split_qkv_f32(self.ctx(), bufs, shape)
     }
 
     // -- router --

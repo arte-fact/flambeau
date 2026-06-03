@@ -519,3 +519,117 @@ pub struct MoeCombineShape {
     pub top_k: usize,
     pub hidden: usize,
 }
+
+// ---------------------------------------------------------------------------
+// GDN (gated delta-net) recurrent-state aggregates.
+// ---------------------------------------------------------------------------
+
+/// Buffers for [`Ops::gdn_state_step_f32_s128`] — the gate/beta variant
+/// of the GDN per-token recurrent step.
+#[derive(Copy, Clone, Debug)]
+pub struct GdnStepBuffers {
+    pub q: DevicePtr,
+    pub k: DevicePtr,
+    pub v: DevicePtr,
+    pub gate: DevicePtr,
+    pub beta: DevicePtr,
+    pub state_in: DevicePtr,
+    pub state_out: DevicePtr,
+    pub attn_out: DevicePtr,
+}
+
+/// Buffers for [`Ops::gdn_state_step_alphabeta_f32_s128`] — α/β variant
+/// that fuses the gate+beta prep inline.
+#[derive(Copy, Clone, Debug)]
+pub struct GdnStepAlphaBetaBuffers {
+    pub q: DevicePtr,
+    pub k: DevicePtr,
+    pub v: DevicePtr,
+    pub alpha_in: DevicePtr,
+    pub beta_in: DevicePtr,
+    pub ssm_dt_bias: DevicePtr,
+    pub ssm_a: DevicePtr,
+    pub state_in: DevicePtr,
+    pub state_out: DevicePtr,
+    pub attn_out: DevicePtr,
+}
+
+/// Buffers for the batched-slots α/β GDN step. Same shape as
+/// [`GdnStepAlphaBetaBuffers`] but `state_in_ptrs` / `state_out_ptrs`
+/// are `[B] u64` device arrays of per-slot state base pointers.
+#[derive(Copy, Clone, Debug)]
+pub struct GdnStepAlphaBetaBatchedSlotsBuffers {
+    pub q: DevicePtr,
+    pub k: DevicePtr,
+    pub v: DevicePtr,
+    pub alpha_in: DevicePtr,
+    pub beta_in: DevicePtr,
+    pub ssm_dt_bias: DevicePtr,
+    pub ssm_a: DevicePtr,
+    pub state_in_ptrs: DevicePtr,
+    pub state_out_ptrs: DevicePtr,
+    pub attn_out: DevicePtr,
+}
+
+/// Shared shape carrier for the three GDN state-step variants.
+#[derive(Copy, Clone, Debug)]
+pub struct GdnStepShape {
+    pub b: usize,
+    pub h_v: usize,
+    pub l: usize,
+    pub n_rep: usize,
+    pub rep_inner_layout: bool,
+}
+
+/// Buffers for [`Ops::gdn_alpha_beta_f32`] — the α/β preparation kernel
+/// invoked before [`GdnStepAlphaBetaBuffers`]-shaped state steps.
+#[derive(Copy, Clone, Debug)]
+pub struct GdnAlphaBetaBuffers {
+    pub alpha_in: DevicePtr,
+    pub beta_in: DevicePtr,
+    pub ssm_dt_bias: DevicePtr,
+    pub ssm_a: DevicePtr,
+    pub gate_out: DevicePtr,
+    pub beta_out: DevicePtr,
+}
+
+/// Shape for [`Ops::gdn_alpha_beta_f32`].
+#[derive(Copy, Clone, Debug)]
+pub struct GdnAlphaBetaShape {
+    pub num_v_heads: usize,
+    pub n_tokens: usize,
+}
+
+/// Buffers for [`Ops::gdn_conv_trio_decode_f32_batched_slots`].
+#[derive(Copy, Clone, Debug)]
+pub struct GdnConvTrioBatchedSlotsBuffers {
+    pub slot_history_ptrs: DevicePtr,
+    pub qkv_mixed: DevicePtr,
+    pub weight: DevicePtr,
+    pub conv_out: DevicePtr,
+}
+
+/// Shape for [`Ops::gdn_conv_trio_decode_f32_batched_slots`].
+#[derive(Copy, Clone, Debug)]
+pub struct GdnConvTrioShape {
+    pub n_slots: usize,
+    pub conv_channels: usize,
+    pub conv_kernel: usize,
+}
+
+/// Buffers for [`Ops::gdn_split_qkv_f32`].
+#[derive(Copy, Clone, Debug)]
+pub struct GdnSplitQkvBuffers {
+    pub silu_out: DevicePtr,
+    pub q_out: DevicePtr,
+    pub k_out: DevicePtr,
+    pub v_out: DevicePtr,
+}
+
+/// Shape for [`Ops::gdn_split_qkv_f32`].
+#[derive(Copy, Clone, Debug)]
+pub struct GdnSplitQkvShape {
+    pub n_tokens: usize,
+    pub qk_size: usize,
+    pub v_size: usize,
+}

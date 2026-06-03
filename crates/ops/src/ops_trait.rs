@@ -485,50 +485,20 @@ pub trait Ops {
 
     fn gdn_state_step_f32_s128(
         &self,
-        q: DevicePtr,
-        k: DevicePtr,
-        v: DevicePtr,
-        gate: DevicePtr,
-        beta: DevicePtr,
-        state_in: DevicePtr,
-        state_out: DevicePtr,
-        attn_out: DevicePtr,
-        b: usize,
-        h_v: usize,
-        l: usize,
-        n_rep: usize,
-        rep_inner_layout: bool,
+        bufs: crate::GdnStepBuffers,
+        shape: crate::GdnStepShape,
     ) -> Result<()>;
 
     fn gdn_alpha_beta_f32(
         &self,
-        alpha_in: DevicePtr,
-        beta_in: DevicePtr,
-        ssm_dt_bias: DevicePtr,
-        ssm_a: DevicePtr,
-        gate_out: DevicePtr,
-        beta_out: DevicePtr,
-        num_v_heads: usize,
-        n_tokens: usize,
+        bufs: crate::GdnAlphaBetaBuffers,
+        shape: crate::GdnAlphaBetaShape,
     ) -> Result<()>;
 
     fn gdn_state_step_alphabeta_f32_s128(
         &self,
-        q: DevicePtr,
-        k: DevicePtr,
-        v: DevicePtr,
-        alpha_in: DevicePtr,
-        beta_in: DevicePtr,
-        ssm_dt_bias: DevicePtr,
-        ssm_a: DevicePtr,
-        state_in: DevicePtr,
-        state_out: DevicePtr,
-        attn_out: DevicePtr,
-        b: usize,
-        h_v: usize,
-        l: usize,
-        n_rep: usize,
-        rep_inner_layout: bool,
+        bufs: crate::GdnStepAlphaBetaBuffers,
+        shape: crate::GdnStepShape,
     ) -> Result<()>;
 
     fn gdn_assemble_conv_input_f32(
@@ -547,21 +517,8 @@ pub trait Ops {
     /// Same compute as `gdn_state_step_alphabeta_f32_s128`.
     fn gdn_state_step_alphabeta_f32_s128_batched_slots(
         &self,
-        q: DevicePtr,
-        k: DevicePtr,
-        v: DevicePtr,
-        alpha_in: DevicePtr,
-        beta_in: DevicePtr,
-        ssm_dt_bias: DevicePtr,
-        ssm_a: DevicePtr,
-        state_in_ptrs: DevicePtr,
-        state_out_ptrs: DevicePtr,
-        attn_out: DevicePtr,
-        b: usize,
-        h_v: usize,
-        l: usize,
-        n_rep: usize,
-        rep_inner_layout: bool,
+        bufs: crate::GdnStepAlphaBetaBatchedSlotsBuffers,
+        shape: crate::GdnStepShape,
     ) -> Result<()>;
 
     /// Batched-slots single-token conv trio (assemble + causal_conv1d
@@ -571,24 +528,14 @@ pub trait Ops {
     ///   `[N, conv_channels]`.
     fn gdn_conv_trio_decode_f32_batched_slots(
         &self,
-        slot_history_ptrs: DevicePtr,
-        qkv_mixed: DevicePtr,
-        weight: DevicePtr,
-        conv_out: DevicePtr,
-        n_slots: usize,
-        conv_channels: usize,
-        conv_kernel: usize,
+        bufs: crate::GdnConvTrioBatchedSlotsBuffers,
+        shape: crate::GdnConvTrioShape,
     ) -> Result<()>;
 
     fn gdn_split_qkv_f32(
         &self,
-        silu_out: DevicePtr,
-        q_out: DevicePtr,
-        k_out: DevicePtr,
-        v_out: DevicePtr,
-        n_tokens: usize,
-        qk_size: usize,
-        v_size: usize,
+        bufs: crate::GdnSplitQkvBuffers,
+        shape: crate::GdnSplitQkvShape,
     ) -> Result<()>;
 
     // -- router (dense F16/F32 GEMV for routers + LM head fragments) --
