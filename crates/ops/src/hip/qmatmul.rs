@@ -54,10 +54,12 @@ pub fn qmatmul(
         // read once per K-sub-block per thread instead of per activation
         // row. 5 multi-row kept for m < 8 where tile partial-fill
         // hurts grid occupancy.
+        let ctx = crate::OpCtx { reg, stream };
+        let bufs = crate::MmvqBuffers { weights, act_q8_1, dst };
         if m >= 8 {
-            return mmq_f16_tile_launch(reg, stream, weights, act_q8_1, dst, n, m, k);
+            return mmq_f16_tile_launch(ctx, bufs, n, m, k);
         }
-        return mmq_f16_launch(reg, stream, weights, act_q8_1, dst, n, m, k);
+        return mmq_f16_launch(ctx, bufs, n, m, k);
     }
     // Q4_1 at m ∈ {2, 3, 4}: per-N compile-time batched MMVQ.
     // Sibling of K1's Q4_0 batched path. The first cut of Q4_1 batched
@@ -157,17 +159,16 @@ pub fn qmatmul(
         let n_blocks = k / 32;
         for i in 0..m {
             mmvq_simple_launch(
-                reg,
-                stream,
-                stem,
-                entry,
-                weights,
-                act_q8_1.offset_bytes(i * act_row_bytes),
-                dst.offset_bytes(i * dst_row_bytes),
+                crate::OpCtx { reg, stream },
+                KernelEntry { stem, entry },
+                crate::MmvqBuffers {
+                    weights,
+                    act_q8_1: act_q8_1.offset_bytes(i * act_row_bytes),
+                    dst: dst.offset_bytes(i * dst_row_bytes),
+                },
                 n,
                 n_blocks,
-                threads,
-                1,
+                MmvqLaunchTune { threads, rows_per_block: 1 },
             )?;
         }
         let _ = act_q8_1_mmq;
@@ -225,14 +226,16 @@ pub fn qmatmul(
             let act_row_bytes =
                 act_blocks_per_row * std::mem::size_of::<flambeau_quant::BlockQ8_1>();
             let dst_row_bytes = n * 4;
+            let ctx = crate::OpCtx { reg, stream };
             for i in 0..m {
                 mmvq_launch(
-                    reg,
-                    stream,
+                    ctx,
                     recipe,
-                    weights.offset_bytes(i * w_row_bytes),
-                    act_q8_1.offset_bytes(i * act_row_bytes),
-                    dst.offset_bytes(i * dst_row_bytes),
+                    crate::MmvqBuffers {
+                        weights: weights.offset_bytes(i * w_row_bytes),
+                        act_q8_1: act_q8_1.offset_bytes(i * act_row_bytes),
+                        dst: dst.offset_bytes(i * dst_row_bytes),
+                    },
                     n,
                     nb_per_row,
                 )?;
@@ -242,7 +245,12 @@ pub fn qmatmul(
         RecipeKind::MmqOracle | RecipeKind::Mmq4Warp => {
             let nb_per_row = k / block_elems(dtype_weight);
             mmq_launch(
-                reg, stream, recipe, weights, act_q8_1, dst, n, m, nb_per_row,
+                crate::OpCtx { reg, stream },
+                recipe,
+                crate::MmvqBuffers { weights, act_q8_1, dst },
+                n,
+                m,
+                nb_per_row,
             )
         }
         RecipeKind::MmqLdsX64 => {
@@ -257,19 +265,23 @@ pub fn qmatmul(
             }
             let nb_per_row = k / block_elems(dtype_weight);
             mmq_lds_x64_launch(
-                reg,
-                stream,
+                crate::OpCtx { reg, stream },
                 recipe,
-                weights,
-                act_q8_1_mmq,
-                dst,
+                crate::MmvqBuffers { weights, act_q8_1: act_q8_1_mmq, dst },
                 n,
                 m,
                 nb_per_row,
             )
         }
         RecipeKind::MmqWave64 => {
-            mmq_wave64_launch(reg, stream, recipe, weights, act_q8_1, dst, n, m, k)
+            mmq_wave64_launch(
+                crate::OpCtx { reg, stream },
+                recipe,
+                crate::MmvqBuffers { weights, act_q8_1, dst },
+                n,
+                m,
+                k,
+            )
         }
     }
 }
@@ -1046,7 +1058,12 @@ pub fn mmvq(
     } = buf;
     let crate::MmvqShape { n_rows, k } = shape;
     if dtype_weight == QDtype::F16 {
-        return mmvq_f16_launch(reg, stream, weights, act_q8_1, dst, n_rows, k);
+        return mmvq_f16_launch(
+            crate::OpCtx { reg, stream },
+            crate::MmvqBuffers { weights, act_q8_1, dst },
+            n_rows,
+            k,
+        );
     }
     // 3.a — Q4_0 / Q5_0 bypass the dispatch table. Unblock Qwen3.6-35B
     // -A3B-Q4_0 which uses Q4_0 for attn/FFN and Q5_0 for shared-expert FFN.
@@ -1059,49 +1076,37 @@ pub fn mmvq(
     // scales block DP4A) but strictly loses on Q4_0's flat-block DP4A path.
     assert_eq!(k % 32, 0, "MMVQ requires k % 32 == 0");
     let n_blocks_q32 = k / 32;
+    let ctx = crate::OpCtx { reg, stream };
+    let bufs = crate::MmvqBuffers { weights, act_q8_1, dst };
+    let tune = MmvqLaunchTune { threads: 256, rows_per_block: 1 };
     if dtype_weight == QDtype::Q4_0 {
         return mmvq_simple_launch(
-            reg,
-            stream,
-            "mmvq_q4_0",
-            "flambeau_mmvq_q4_0_q8_1",
-            weights,
-            act_q8_1,
-            dst,
+            ctx,
+            KernelEntry { stem: "mmvq_q4_0", entry: "flambeau_mmvq_q4_0_q8_1" },
+            bufs,
             n_rows,
             n_blocks_q32,
-            256,
-            1,
+            tune,
         );
     }
     if dtype_weight == QDtype::Q5_0 {
         return mmvq_simple_launch(
-            reg,
-            stream,
-            "mmvq_q5_0",
-            "flambeau_mmvq_q5_0_q8_1",
-            weights,
-            act_q8_1,
-            dst,
+            ctx,
+            KernelEntry { stem: "mmvq_q5_0", entry: "flambeau_mmvq_q5_0_q8_1" },
+            bufs,
             n_rows,
             n_blocks_q32,
-            256,
-            1,
+            tune,
         );
     }
     if dtype_weight == QDtype::Q5_1 {
         return mmvq_simple_launch(
-            reg,
-            stream,
-            "mmvq_q5_1",
-            "flambeau_mmvq_q5_1_q8_1",
-            weights,
-            act_q8_1,
-            dst,
+            ctx,
+            KernelEntry { stem: "mmvq_q5_1", entry: "flambeau_mmvq_q5_1_q8_1" },
+            bufs,
             n_rows,
             n_blocks_q32,
-            256,
-            1,
+            tune,
         );
     }
     let cfg = QMatMulCfg {
@@ -1119,7 +1124,11 @@ pub fn mmvq(
     }
     let nb_per_row = k / block_elems(dtype_weight);
     mmvq_launch(
-        reg, stream, recipe, weights, act_q8_1, dst, n_rows, nb_per_row,
+        crate::OpCtx { reg, stream },
+        recipe,
+        crate::MmvqBuffers { weights, act_q8_1, dst },
+        n_rows,
+        nb_per_row,
     )
 }
 
@@ -1297,17 +1306,12 @@ pub fn mmvq_f16_direct(
         other => bail!("mmvq_f16_direct: no F16-direct kernel for {}", other.name()),
     };
     mmvq_simple_launch(
-        reg,
-        stream,
-        stem,
-        entry,
-        weights,
-        act_q8_1,
-        dst_f16,
+        crate::OpCtx { reg, stream },
+        KernelEntry { stem, entry },
+        crate::MmvqBuffers { weights, act_q8_1, dst: dst_f16 },
         n_rows,
         units,
-        threads,
-        rows_per_block,
+        MmvqLaunchTune { threads, rows_per_block },
     )
 }
 
@@ -1323,21 +1327,35 @@ pub fn mmvq_f16_direct(
 /// Grid = `ceil(n_rows / rows_per_block)`. `units_per_row` is the
 /// caller-defined inner-loop count (n_blocks for 32-element-block
 /// dtypes, n_superblocks for K-quants). #120 / #120-followup.
+/// Module + kernel-entry pair for direct kernel launches that don't
+/// flow through `Recipe`. File-private; if a third launcher needs this
+/// shape outside `qmatmul.rs`, lift to `sig.rs`.
+#[derive(Copy, Clone, Debug)]
+pub struct KernelEntry {
+    pub stem: &'static str,
+    pub entry: &'static str,
+}
+
+/// Launch-tuning knobs for single-row `mmvq_simple_launch`-style
+/// kernels (vs MMQ tile launchers that use `Recipe`).
+#[derive(Copy, Clone, Debug)]
+pub struct MmvqLaunchTune {
+    pub threads: u32,
+    pub rows_per_block: u32,
+}
+
 pub fn mmvq_simple_launch(
-    reg: &OpsRegistry,
-    stream: &HipStream,
-    module_stem: &'static str,
-    kernel_entry: &'static str,
-    weights: DevicePtr,
-    act_q8_1: DevicePtr,
-    dst: DevicePtr,
+    ctx: crate::OpCtx<'_>,
+    entry: KernelEntry,
+    bufs: crate::MmvqBuffers,
     n_rows: usize,
     units_per_row: usize,
-    threads: u32,
-    rows_per_block: u32,
+    tune: MmvqLaunchTune,
 ) -> Result<()> {
-    let module = reg.expect_module(module_stem)?;
-    let kernel = module.kernel(kernel_entry)?;
+    let crate::OpCtx { reg, stream } = ctx;
+    let crate::MmvqBuffers { weights, act_q8_1, dst } = bufs;
+    let module = reg.expect_module(entry.stem)?;
+    let kernel = module.kernel(entry.entry)?;
     let n_rows_i = n_rows as i32;
     let n_units_i = units_per_row as i32;
     let w_ptr: u64 = weights.as_usize() as u64;
@@ -1349,8 +1367,8 @@ pub fn mmvq_simple_launch(
     args.push(&d_ptr);
     args.push(&n_rows_i);
     args.push(&n_units_i);
-    let grid = (n_rows as u32).div_ceil(rows_per_block);
-    let cfg = LaunchCfg::one_d(grid, threads);
+    let grid = (n_rows as u32).div_ceil(tune.rows_per_block);
+    let cfg = LaunchCfg::one_d(grid, tune.threads);
     unsafe { kernel.launch(stream, cfg, args)? };
     Ok(())
 }
@@ -1362,15 +1380,14 @@ pub fn mmvq_simple_launch(
 /// activation tile (8 Q8_1 blocks) is read from L1 per sub-block across
 /// the 64 threads.
 fn mmq_f16_tile_launch(
-    reg: &OpsRegistry,
-    stream: &HipStream,
-    weights: DevicePtr,
-    act_q8_1: DevicePtr,
-    dst: DevicePtr,
+    ctx: crate::OpCtx<'_>,
+    bufs: crate::MmvqBuffers,
     n_rows: usize,
     n_tokens: usize,
     k: usize,
 ) -> Result<()> {
+    let crate::OpCtx { reg, stream } = ctx;
+    let crate::MmvqBuffers { weights, act_q8_1, dst } = bufs;
     assert_eq!(k % 32, 0, "mmq_f16_tile requires k % 32 == 0");
     if n_tokens == 0 {
         return Ok(());
@@ -1408,15 +1425,14 @@ fn mmq_f16_tile_launch(
 /// picks up n_tokens via grid.y. Stem `mmq_f16_q8_1`, block = 256, grid =
 /// (n_rows, n_tokens).
 fn mmq_f16_launch(
-    reg: &OpsRegistry,
-    stream: &HipStream,
-    weights: DevicePtr,
-    act_q8_1: DevicePtr,
-    dst: DevicePtr,
+    ctx: crate::OpCtx<'_>,
+    bufs: crate::MmvqBuffers,
     n_rows: usize,
     n_tokens: usize,
     k: usize,
 ) -> Result<()> {
+    let crate::OpCtx { reg, stream } = ctx;
+    let crate::MmvqBuffers { weights, act_q8_1, dst } = bufs;
     assert_eq!(k % 32, 0, "mmq_f16_q8_1 requires k % 32 == 0");
     if n_tokens == 0 {
         return Ok(());
@@ -1448,14 +1464,13 @@ fn mmq_f16_launch(
 /// Direct launch for the F16-weight × Q8_1-activation MMVQ.
 /// Kernel stem `mmvq_f16_q8_1`, block = 256 threads, grid = n_rows.
 fn mmvq_f16_launch(
-    reg: &OpsRegistry,
-    stream: &HipStream,
-    weights: DevicePtr,
-    act_q8_1: DevicePtr,
-    dst: DevicePtr,
+    ctx: crate::OpCtx<'_>,
+    bufs: crate::MmvqBuffers,
     n_rows: usize,
     k: usize,
 ) -> Result<()> {
+    let crate::OpCtx { reg, stream } = ctx;
+    let crate::MmvqBuffers { weights, act_q8_1, dst } = bufs;
     assert_eq!(k % 32, 0, "mmvq_f16_q8_1 requires k % 32 == 0");
     let module = reg.expect_module("mmvq_f16_q8_1")?;
     let kernel = module.kernel("flambeau_mmvq_f16_q8_1")?;
@@ -1506,7 +1521,12 @@ pub fn mmq(
     let recipe = Recipe::from_impl_id(desc.impl_id)?;
     let nb_per_row = k / block_elems(dtype_weight);
     mmq_launch(
-        reg, stream, recipe, weights, act_q8_1, dst, n, m, nb_per_row,
+        crate::OpCtx { reg, stream },
+        recipe,
+        crate::MmvqBuffers { weights, act_q8_1, dst },
+        n,
+        m,
+        nb_per_row,
     )
 }
 
@@ -2300,15 +2320,14 @@ impl Recipe {
 }
 
 fn mmvq_launch(
-    reg: &OpsRegistry,
-    stream: &HipStream,
+    ctx: crate::OpCtx<'_>,
     recipe: Recipe,
-    weights: DevicePtr,
-    act_q8_1: DevicePtr,
-    dst: DevicePtr,
+    bufs: crate::MmvqBuffers,
     n_rows: usize,
     n_units: usize,
 ) -> Result<()> {
+    let crate::OpCtx { reg, stream } = ctx;
+    let crate::MmvqBuffers { weights, act_q8_1, dst } = bufs;
     let module = reg.expect_module(recipe.stem)?;
     let kernel = module.kernel(recipe.entry)?;
     let n_rows_i = n_rows as i32;
@@ -2329,16 +2348,15 @@ fn mmvq_launch(
 }
 
 fn mmq_launch(
-    reg: &OpsRegistry,
-    stream: &HipStream,
+    ctx: crate::OpCtx<'_>,
     recipe: Recipe,
-    weights: DevicePtr,
-    act_q8_1: DevicePtr,
-    dst: DevicePtr,
+    bufs: crate::MmvqBuffers,
     n_rows: usize,
     n_batches: usize,
     n_blocks_per_row: usize,
 ) -> Result<()> {
+    let crate::OpCtx { reg, stream } = ctx;
+    let crate::MmvqBuffers { weights, act_q8_1, dst } = bufs;
     let module = reg.expect_module(recipe.stem)?;
     let kernel = module.kernel(recipe.entry)?;
     let n_rows_i = n_rows as i32;
@@ -2373,16 +2391,15 @@ fn mmq_launch(
 /// dst : f32 * [n_batches, n_rows] (col-major in our naming)
 /// where `n_big_blocks_k = n_blocks_per_row * QK4_1 / (4 * QK8_1) = n_blocks_per_row / 4`.
 fn mmq_lds_x64_launch(
-    reg: &OpsRegistry,
-    stream: &HipStream,
+    ctx: crate::OpCtx<'_>,
     recipe: Recipe,
-    weights: DevicePtr,
-    act_q8_1_mmq: DevicePtr,
-    dst: DevicePtr,
+    bufs: crate::MmvqBuffers,
     n_rows: usize,
     n_batches: usize,
     n_blocks_per_row: usize,
 ) -> Result<()> {
+    let crate::OpCtx { reg, stream } = ctx;
+    let crate::MmvqBuffers { weights, act_q8_1: act_q8_1_mmq, dst } = bufs;
     let module = reg.expect_module(recipe.stem)?;
     let kernel = module.kernel(recipe.entry)?;
 
@@ -2436,16 +2453,15 @@ fn mmq_lds_x64_launch(
 /// act_q8_1 : flambeau_block_q8_1 * [n_batches, K/QK8_1] (standard layout)
 /// dst : f32 * [n_batches, n_rows] (col-major; `dst[col*nrows_dst+row]`)
 fn mmq_wave64_launch(
-    reg: &OpsRegistry,
-    stream: &HipStream,
+    ctx: crate::OpCtx<'_>,
     recipe: Recipe,
-    weights: DevicePtr,
-    act_q8_1: DevicePtr,
-    dst: DevicePtr,
+    bufs: crate::MmvqBuffers,
     n_rows: usize,
     n_batches: usize,
     k: usize,
 ) -> Result<()> {
+    let crate::OpCtx { reg, stream } = ctx;
+    let crate::MmvqBuffers { weights, act_q8_1, dst } = bufs;
     let module = reg.expect_module(recipe.stem)?;
     let kernel = module.kernel(recipe.entry)?;
     let ncols_x = k as i32;

@@ -72,17 +72,19 @@ pub fn output_head_local<H: TopologyHooks>(
     if use_r4_lmhead {
         let n_superblocks = hidden / 256;
         flambeau_ops::hip::qmatmul::mmvq_simple_launch(
-            state.reg,
-            state.stream,
-            "mmvq_q4_k_r4",
-            "flambeau_mmvq_q4_k_r4_q8_1",
-            lm_head.lm_head.ptr,
-            state.pool.norm_q8_1,
-            state.pool.logits_f32_dev,
+            flambeau_ops::OpCtx { reg: state.reg, stream: state.stream },
+            flambeau_ops::hip::qmatmul::KernelEntry {
+                stem: "mmvq_q4_k_r4",
+                entry: "flambeau_mmvq_q4_k_r4_q8_1",
+            },
+            flambeau_ops::MmvqBuffers {
+                weights: lm_head.lm_head.ptr,
+                act_q8_1: state.pool.norm_q8_1,
+                dst: state.pool.logits_f32_dev,
+            },
             vocab,
             n_superblocks,
-            64,
-            4,
+            flambeau_ops::hip::qmatmul::MmvqLaunchTune { threads: 64, rows_per_block: 4 },
         )?;
     } else {
         lm_head.lm_head.qmatmul(
