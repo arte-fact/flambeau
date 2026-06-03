@@ -70,26 +70,16 @@ impl<'a> Ops for HipOps<'a> {
 
     fn mmvq_q4_0_gate_up_t128(
         &self,
-        gate_w: DevicePtr,
-        up_w: DevicePtr,
-        y_q8_1: DevicePtr,
-        gate_out: DevicePtr,
-        up_out: DevicePtr,
-        n_rows_gate: usize,
-        n_rows_up: usize,
-        k: usize,
+        buffers: crate::MmvqGateUpBuffers,
+        shape: crate::MmvqGateUpShape,
     ) -> Result<()> {
         super::qmatmul::mmvq_q4_0_gate_up_t128(
-            self.reg,
-            self.stream,
-            gate_w,
-            up_w,
-            y_q8_1,
-            gate_out,
-            up_out,
-            n_rows_gate,
-            n_rows_up,
-            k,
+            crate::OpCtx {
+                reg: self.reg,
+                stream: self.stream,
+            },
+            buffers,
+            shape,
         )
     }
 
@@ -186,101 +176,61 @@ impl<'a> Ops for HipOps<'a> {
 
     fn mmvq_q4_0_gate_up(
         &self,
-        gate_w: DevicePtr,
-        up_w: DevicePtr,
-        y_q8_1: DevicePtr,
-        gate_out: DevicePtr,
-        up_out: DevicePtr,
-        n_rows_gate: usize,
-        n_rows_up: usize,
-        k: usize,
+        buffers: crate::MmvqGateUpBuffers,
+        shape: crate::MmvqGateUpShape,
     ) -> Result<()> {
         super::qmatmul::mmvq_q4_0_gate_up(
-            self.reg,
-            self.stream,
-            gate_w,
-            up_w,
-            y_q8_1,
-            gate_out,
-            up_out,
-            n_rows_gate,
-            n_rows_up,
-            k,
+            crate::OpCtx {
+                reg: self.reg,
+                stream: self.stream,
+            },
+            buffers,
+            shape,
         )
     }
 
     fn mmvq_q4_1_gate_up(
         &self,
-        gate_w: DevicePtr,
-        up_w: DevicePtr,
-        y_q8_1: DevicePtr,
-        gate_out: DevicePtr,
-        up_out: DevicePtr,
-        n_rows_gate: usize,
-        n_rows_up: usize,
-        k: usize,
+        buffers: crate::MmvqGateUpBuffers,
+        shape: crate::MmvqGateUpShape,
     ) -> Result<()> {
         super::qmatmul::mmvq_q4_1_gate_up(
-            self.reg,
-            self.stream,
-            gate_w,
-            up_w,
-            y_q8_1,
-            gate_out,
-            up_out,
-            n_rows_gate,
-            n_rows_up,
-            k,
+            crate::OpCtx {
+                reg: self.reg,
+                stream: self.stream,
+            },
+            buffers,
+            shape,
         )
     }
 
     fn mmvq_q8_0_gate_up(
         &self,
-        gate_w: DevicePtr,
-        up_w: DevicePtr,
-        y_q8_1: DevicePtr,
-        gate_out: DevicePtr,
-        up_out: DevicePtr,
-        n_rows_gate: usize,
-        n_rows_up: usize,
-        k: usize,
+        buffers: crate::MmvqGateUpBuffers,
+        shape: crate::MmvqGateUpShape,
     ) -> Result<()> {
         super::qmatmul::mmvq_q8_0_gate_up(
-            self.reg,
-            self.stream,
-            gate_w,
-            up_w,
-            y_q8_1,
-            gate_out,
-            up_out,
-            n_rows_gate,
-            n_rows_up,
-            k,
+            crate::OpCtx {
+                reg: self.reg,
+                stream: self.stream,
+            },
+            buffers,
+            shape,
         )
     }
 
     fn mmvq_q5_k_gate_up(
         &self,
-        gate_w: DevicePtr,
-        up_w: DevicePtr,
-        y_q8_1: DevicePtr,
-        gate_out: DevicePtr,
-        up_out: DevicePtr,
-        n_rows_gate: usize,
-        n_rows_up: usize,
-        k: usize,
+        buffers: crate::MmvqGateUpBuffers,
+        shape: crate::MmvqGateUpShape,
     ) -> Result<()> {
         super::qmatmul::mmvq_q5_k_gate_up(
-            self.reg,
-            self.stream,
-            gate_w,
-            up_w,
-            y_q8_1,
-            gate_out,
-            up_out,
-            n_rows_gate,
-            n_rows_up,
-            k,
+            crate::OpCtx {
+                reg: self.reg,
+                stream: self.stream,
+            },
+            buffers,
+            shape,
         )
     }
 

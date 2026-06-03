@@ -155,14 +155,14 @@ pub fn mmvq_q4_0_gate_up_t128_decode(
         );
     }
     ops.mmvq_q4_0_gate_up_t128(
-        gate_w.ptr,
-        up_w.ptr,
-        act_q8_1.ptr,
-        gate_out.ptr,
-        up_out.ptr,
-        n,
-        n,
-        k,
+        flambeau_ops::MmvqGateUpBuffers {
+            gate_w: gate_w.ptr,
+            up_w: up_w.ptr,
+            act_q8_1: act_q8_1.ptr,
+            gate_out: gate_out.ptr,
+            up_out: up_out.ptr,
+        },
+        flambeau_ops::MmvqGateUpShape { n_rows_gate: n, n_rows_up: n, k },
     )
 }
 

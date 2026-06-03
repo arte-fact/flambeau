@@ -599,18 +599,13 @@ pub fn mmvq_q5_k_row_tile_batched(
 /// sharing as `mmvq_q4_0_gate_up`, but with the t128 schedule for the
 /// gfx906 latency-bound regime.
 pub fn mmvq_q4_0_gate_up_t128(
-    reg: &OpsRegistry,
-    stream: &HipStream,
-    gate_w: DevicePtr,
-    up_w: DevicePtr,
-    y_q8_1: DevicePtr,
-    gate_out: DevicePtr,
-    up_out: DevicePtr,
-    n_rows_gate: usize,
-    n_rows_up: usize,
-    k: usize,
+    ctx: crate::OpCtx<'_>,
+    buffers: crate::MmvqGateUpBuffers,
+    shape: crate::MmvqGateUpShape,
 ) -> Result<()> {
-    let module = reg.expect_module("mmvq_q4_0_gate_up_t128_dp4a")?;
+    let crate::MmvqGateUpBuffers { gate_w, up_w, act_q8_1: y_q8_1, gate_out, up_out } = buffers;
+    let crate::MmvqGateUpShape { n_rows_gate, n_rows_up, k } = shape;
+    let module = ctx.reg.expect_module("mmvq_q4_0_gate_up_t128_dp4a")?;
     let kernel = module.kernel("flambeau_mmvq_q4_0_gate_up_t128_dp4a_q8_1")?;
     let n_rows_g = n_rows_gate as i32;
     let n_rows_u = n_rows_up as i32;
@@ -631,7 +626,7 @@ pub fn mmvq_q4_0_gate_up_t128(
     args.push(&n_blocks_i);
     let grid = n_rows_gate.max(n_rows_up) as u32;
     let cfg = LaunchCfg::one_d(grid, 128);
-    unsafe { kernel.launch(stream, cfg, args)? };
+    unsafe { kernel.launch(ctx.stream, cfg, args)? };
     Ok(())
 }
 
@@ -711,18 +706,13 @@ pub fn mmvq_q4_0_kv_f16dst(
 /// when both weights are Q4_0 — the common case on Qwen3.6-x-Q4_0
 /// (attn_qkv+attn_gate in GDN, ffn_gate+ffn_up in dense FFN).
 pub fn mmvq_q4_0_gate_up(
-    reg: &OpsRegistry,
-    stream: &HipStream,
-    gate_w: DevicePtr,
-    up_w: DevicePtr,
-    y_q8_1: DevicePtr,
-    gate_out: DevicePtr,
-    up_out: DevicePtr,
-    n_rows_gate: usize,
-    n_rows_up: usize,
-    k: usize,
+    ctx: crate::OpCtx<'_>,
+    buffers: crate::MmvqGateUpBuffers,
+    shape: crate::MmvqGateUpShape,
 ) -> Result<()> {
-    let module = reg.expect_module("mmvq_q4_0_gate_up_dp4a")?;
+    let crate::MmvqGateUpBuffers { gate_w, up_w, act_q8_1: y_q8_1, gate_out, up_out } = buffers;
+    let crate::MmvqGateUpShape { n_rows_gate, n_rows_up, k } = shape;
+    let module = ctx.reg.expect_module("mmvq_q4_0_gate_up_dp4a")?;
     let kernel = module.kernel("flambeau_mmvq_q4_0_gate_up_dp4a_q8_1")?;
     let n_rows_g = n_rows_gate as i32;
     let n_rows_u = n_rows_up as i32;
@@ -743,7 +733,7 @@ pub fn mmvq_q4_0_gate_up(
     args.push(&n_blocks_i);
     let grid = n_rows_gate.max(n_rows_up) as u32;
     let cfg = LaunchCfg::one_d(grid, 256);
-    unsafe { kernel.launch(stream, cfg, args)? };
+    unsafe { kernel.launch(ctx.stream, cfg, args)? };
     Ok(())
 }
 
@@ -940,18 +930,13 @@ pub fn mmvq_q8_0_row_tile_batched(
 /// for Q4_1 weights (Qwen3.5-9B-Q4_1 / 27B-Q4_1 dense FFN). Reads the Q8_1
 /// activation once per block, produces both gate and up outputs.
 pub fn mmvq_q4_1_gate_up(
-    reg: &OpsRegistry,
-    stream: &HipStream,
-    gate_w: DevicePtr,
-    up_w: DevicePtr,
-    y_q8_1: DevicePtr,
-    gate_out: DevicePtr,
-    up_out: DevicePtr,
-    n_rows_gate: usize,
-    n_rows_up: usize,
-    k: usize,
+    ctx: crate::OpCtx<'_>,
+    buffers: crate::MmvqGateUpBuffers,
+    shape: crate::MmvqGateUpShape,
 ) -> Result<()> {
-    let module = reg.expect_module("mmvq_q4_1_gate_up_dp4a")?;
+    let crate::MmvqGateUpBuffers { gate_w, up_w, act_q8_1: y_q8_1, gate_out, up_out } = buffers;
+    let crate::MmvqGateUpShape { n_rows_gate, n_rows_up, k } = shape;
+    let module = ctx.reg.expect_module("mmvq_q4_1_gate_up_dp4a")?;
     let kernel = module.kernel("flambeau_mmvq_q4_1_gate_up_dp4a_q8_1")?;
     let n_rows_g = n_rows_gate as i32;
     let n_rows_u = n_rows_up as i32;
@@ -972,28 +957,23 @@ pub fn mmvq_q4_1_gate_up(
     args.push(&n_blocks_i);
     let grid = n_rows_gate.max(n_rows_up) as u32;
     let cfg = LaunchCfg::one_d(grid, 256);
-    unsafe { kernel.launch(stream, cfg, args)? };
+    unsafe { kernel.launch(ctx.stream, cfg, args)? };
     Ok(())
 }
 
 pub fn mmvq_q8_0_gate_up(
-    reg: &OpsRegistry,
-    stream: &HipStream,
-    gate_w: DevicePtr,
-    up_w: DevicePtr,
-    y_q8_1: DevicePtr,
-    gate_out: DevicePtr,
-    up_out: DevicePtr,
-    n_rows_gate: usize,
-    n_rows_up: usize,
-    k: usize,
+    ctx: crate::OpCtx<'_>,
+    buffers: crate::MmvqGateUpBuffers,
+    shape: crate::MmvqGateUpShape,
 ) -> Result<()> {
+    let crate::MmvqGateUpBuffers { gate_w, up_w, act_q8_1: y_q8_1, gate_out, up_out } = buffers;
+    let crate::MmvqGateUpShape { n_rows_gate, n_rows_up, k } = shape;
     let (stem, entry, threads) = (
         "mmvq_q8_0_gate_up_t128_vdr2",
         "flambeau_mmvq_q8_0_gate_up_t128_vdr2_q8_1",
         128u32,
     );
-    let module = reg.expect_module(stem)?;
+    let module = ctx.reg.expect_module(stem)?;
     let kernel = module.kernel(entry)?;
     let n_rows_g = n_rows_gate as i32;
     let n_rows_u = n_rows_up as i32;
@@ -1014,7 +994,7 @@ pub fn mmvq_q8_0_gate_up(
     args.push(&n_blocks_i);
     let grid = n_rows_gate.max(n_rows_up) as u32;
     let cfg = LaunchCfg::one_d(grid, threads);
-    unsafe { kernel.launch(stream, cfg, args)? };
+    unsafe { kernel.launch(ctx.stream, cfg, args)? };
     Ok(())
 }
 
@@ -1023,24 +1003,19 @@ pub fn mmvq_q8_0_gate_up(
 /// products. Used by the qwen3.5/3.6 shared-expert FFN path when
 /// `ffn_gate_shexp` and `ffn_up_shexp` are both Q5_K.
 pub fn mmvq_q5_k_gate_up(
-    reg: &OpsRegistry,
-    stream: &HipStream,
-    gate_w: DevicePtr,
-    up_w: DevicePtr,
-    y_q8_1: DevicePtr,
-    gate_out: DevicePtr,
-    up_out: DevicePtr,
-    n_rows_gate: usize,
-    n_rows_up: usize,
-    k: usize,
+    ctx: crate::OpCtx<'_>,
+    buffers: crate::MmvqGateUpBuffers,
+    shape: crate::MmvqGateUpShape,
 ) -> Result<()> {
+    let crate::MmvqGateUpBuffers { gate_w, up_w, act_q8_1: y_q8_1, gate_out, up_out } = buffers;
+    let crate::MmvqGateUpShape { n_rows_gate, n_rows_up, k } = shape;
     if k % flambeau_quant::QK_K != 0 {
         bail!(
             "mmvq_q5_k_gate_up: k={k} must be a multiple of QK_K={}",
             flambeau_quant::QK_K
         );
     }
-    let module = reg.expect_module("mmvq_q5_k_gate_up_dp4a")?;
+    let module = ctx.reg.expect_module("mmvq_q5_k_gate_up_dp4a")?;
     let kernel = module.kernel("flambeau_mmvq_q5_k_gate_up_dp4a_q8_1")?;
     let n_rows_g = n_rows_gate as i32;
     let n_rows_u = n_rows_up as i32;
@@ -1061,7 +1036,7 @@ pub fn mmvq_q5_k_gate_up(
     args.push(&n_sb_per_row);
     let grid = n_rows_gate.max(n_rows_up) as u32;
     let cfg = LaunchCfg::one_d(grid, 256);
-    unsafe { kernel.launch(stream, cfg, args)? };
+    unsafe { kernel.launch(ctx.stream, cfg, args)? };
     Ok(())
 }
 

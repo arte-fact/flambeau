@@ -619,26 +619,14 @@ impl DeltaNetLayer {
         let fuse_q4_0 = qkv_dt == QDtype::Q4_0 && gate_dt == QDtype::Q4_0;
         if fuse_q8_0 {
             ops.mmvq_q8_0_gate_up(
-                self.attn_qkv.ptr,
-                self.attn_gate.ptr,
-                scratch.x_q8_1,
-                scratch.qkv_mixed_f32,
-                scratch.z_f32,
-                conv_channels,
-                d_inner,
-                hidden,
+                flambeau_ops::MmvqGateUpBuffers { gate_w: self.attn_qkv.ptr, up_w: self.attn_gate.ptr, act_q8_1: scratch.x_q8_1, gate_out: scratch.qkv_mixed_f32, up_out: scratch.z_f32 },
+                flambeau_ops::MmvqGateUpShape { n_rows_gate: conv_channels, n_rows_up: d_inner, k: hidden },
             )
             .context("attn_qkv + attn_gate fused mmvq_q8_0")?;
         } else if fuse_q4_0 {
             ops.mmvq_q4_0_gate_up_t128(
-                self.attn_qkv.ptr,
-                self.attn_gate.ptr,
-                scratch.x_q8_1,
-                scratch.qkv_mixed_f32,
-                scratch.z_f32,
-                conv_channels,
-                d_inner,
-                hidden,
+                flambeau_ops::MmvqGateUpBuffers { gate_w: self.attn_qkv.ptr, up_w: self.attn_gate.ptr, act_q8_1: scratch.x_q8_1, gate_out: scratch.qkv_mixed_f32, up_out: scratch.z_f32 },
+                flambeau_ops::MmvqGateUpShape { n_rows_gate: conv_channels, n_rows_up: d_inner, k: hidden },
             )
             .context("attn_qkv + attn_gate fused mmvq_q4_0_t128")?;
         } else {
@@ -668,14 +656,8 @@ impl DeltaNetLayer {
         let fuse_alpha_beta = alpha_dt == QDtype::Q8_0 && beta_dt == QDtype::Q8_0;
         if fuse_alpha_beta {
             ops.mmvq_q8_0_gate_up(
-                self.ssm_alpha.ptr,
-                self.ssm_beta.ptr,
-                scratch.x_q8_1,
-                scratch.alpha_f32,
-                scratch.beta_f32,
-                num_v_heads,
-                num_v_heads,
-                hidden,
+                flambeau_ops::MmvqGateUpBuffers { gate_w: self.ssm_alpha.ptr, up_w: self.ssm_beta.ptr, act_q8_1: scratch.x_q8_1, gate_out: scratch.alpha_f32, up_out: scratch.beta_f32 },
+                flambeau_ops::MmvqGateUpShape { n_rows_gate: num_v_heads, n_rows_up: num_v_heads, k: hidden },
             )
             .context("ssm alpha+beta fused mmvq_q8_0")?;
         } else {
@@ -970,26 +952,14 @@ impl DeltaNetLayer {
                 let z_i = scratch.z_f32.offset_bytes(i * z_row_bytes);
                 if fuse_q8_0 {
                     ops.mmvq_q8_0_gate_up(
-                        self.attn_qkv.ptr,
-                        self.attn_gate.ptr,
-                        x_q8_1_i,
-                        qkv_mixed_i,
-                        z_i,
-                        conv_channels,
-                        d_inner,
-                        hidden,
+                        flambeau_ops::MmvqGateUpBuffers { gate_w: self.attn_qkv.ptr, up_w: self.attn_gate.ptr, act_q8_1: x_q8_1_i, gate_out: qkv_mixed_i, up_out: z_i },
+                        flambeau_ops::MmvqGateUpShape { n_rows_gate: conv_channels, n_rows_up: d_inner, k: hidden },
                     )
                     .context("gdn batched: attn_qkv + attn_gate fused mmvq_q8_0")?;
                 } else if fuse_q4_0 {
                     ops.mmvq_q4_0_gate_up_t128(
-                        self.attn_qkv.ptr,
-                        self.attn_gate.ptr,
-                        x_q8_1_i,
-                        qkv_mixed_i,
-                        z_i,
-                        conv_channels,
-                        d_inner,
-                        hidden,
+                        flambeau_ops::MmvqGateUpBuffers { gate_w: self.attn_qkv.ptr, up_w: self.attn_gate.ptr, act_q8_1: x_q8_1_i, gate_out: qkv_mixed_i, up_out: z_i },
+                        flambeau_ops::MmvqGateUpShape { n_rows_gate: conv_channels, n_rows_up: d_inner, k: hidden },
                     )
                     .context("gdn batched: attn_qkv + attn_gate fused mmvq_q4_0_t128")?;
                 } else {
@@ -1039,14 +1009,8 @@ impl DeltaNetLayer {
                 let beta_i = scratch.beta_f32.offset_bytes(i * alphabeta_row_bytes);
                 if fuse_alpha_beta {
                     ops.mmvq_q8_0_gate_up(
-                        self.ssm_alpha.ptr,
-                        self.ssm_beta.ptr,
-                        x_q8_1_i,
-                        alpha_i,
-                        beta_i,
-                        num_v_heads,
-                        num_v_heads,
-                        hidden,
+                        flambeau_ops::MmvqGateUpBuffers { gate_w: self.ssm_alpha.ptr, up_w: self.ssm_beta.ptr, act_q8_1: x_q8_1_i, gate_out: alpha_i, up_out: beta_i },
+                        flambeau_ops::MmvqGateUpShape { n_rows_gate: num_v_heads, n_rows_up: num_v_heads, k: hidden },
                     )
                     .context("gdn batched: ssm alpha+beta fused mmvq_q8_0")?;
                 } else {

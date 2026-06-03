@@ -50,14 +50,8 @@ pub trait Ops {
 
     fn mmvq_q4_0_gate_up_t128(
         &self,
-        gate_w: DevicePtr,
-        up_w: DevicePtr,
-        y_q8_1: DevicePtr,
-        gate_out: DevicePtr,
-        up_out: DevicePtr,
-        n_rows_gate: usize,
-        n_rows_up: usize,
-        k: usize,
+        buffers: crate::MmvqGateUpBuffers,
+        shape: crate::MmvqGateUpShape,
     ) -> Result<()>;
 
     /// Q4_0 gate+up row-tile batched MMVQ for n_slots ∈ [2, 4]. Each
@@ -122,50 +116,26 @@ pub trait Ops {
 
     fn mmvq_q4_0_gate_up(
         &self,
-        gate_w: DevicePtr,
-        up_w: DevicePtr,
-        y_q8_1: DevicePtr,
-        gate_out: DevicePtr,
-        up_out: DevicePtr,
-        n_rows_gate: usize,
-        n_rows_up: usize,
-        k: usize,
+        buffers: crate::MmvqGateUpBuffers,
+        shape: crate::MmvqGateUpShape,
     ) -> Result<()>;
 
     fn mmvq_q4_1_gate_up(
         &self,
-        gate_w: DevicePtr,
-        up_w: DevicePtr,
-        y_q8_1: DevicePtr,
-        gate_out: DevicePtr,
-        up_out: DevicePtr,
-        n_rows_gate: usize,
-        n_rows_up: usize,
-        k: usize,
+        buffers: crate::MmvqGateUpBuffers,
+        shape: crate::MmvqGateUpShape,
     ) -> Result<()>;
 
     fn mmvq_q8_0_gate_up(
         &self,
-        gate_w: DevicePtr,
-        up_w: DevicePtr,
-        y_q8_1: DevicePtr,
-        gate_out: DevicePtr,
-        up_out: DevicePtr,
-        n_rows_gate: usize,
-        n_rows_up: usize,
-        k: usize,
+        buffers: crate::MmvqGateUpBuffers,
+        shape: crate::MmvqGateUpShape,
     ) -> Result<()>;
 
     fn mmvq_q5_k_gate_up(
         &self,
-        gate_w: DevicePtr,
-        up_w: DevicePtr,
-        y_q8_1: DevicePtr,
-        gate_out: DevicePtr,
-        up_out: DevicePtr,
-        n_rows_gate: usize,
-        n_rows_up: usize,
-        k: usize,
+        buffers: crate::MmvqGateUpBuffers,
+        shape: crate::MmvqGateUpShape,
     ) -> Result<()>;
 
     fn mmvq(
