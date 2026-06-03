@@ -2536,18 +2536,21 @@ pub fn indexed_moe_mmq_q8_0_down_tile8(
 /// MMQ_X=32-64); at MMQ_X=8 the LDS overhead dominates. Opt-in via
 /// `FLAMBEAU_MOE_VARIANT=turbo`; default stays on `_tile8`.
 pub fn indexed_moe_mmq_q4_k_gate_up_turbo(
-    reg: &OpsRegistry,
-    stream: &HipStream,
-    gate_w: DevicePtr,
-    up_w: DevicePtr,
-    y_mmq: DevicePtr, // DS4 Q8_1 activation — per-TOKEN layout (not per-pair)
-    expert_ids: DevicePtr,
-    sorted_pair_idx_padded: DevicePtr,
-    padded_offsets: DevicePtr,
-    gate_out: DevicePtr,
-    up_out: DevicePtr,
+    ctx: crate::OpCtx<'_>,
+    bufs: crate::MoeMmqQ4KGateUpTurboBuffers,
     shape: MoeShape, // n_rows=inter, n_sb_per_row=hidden/QK_K
 ) -> Result<()> {
+    let crate::OpCtx { reg, stream } = ctx;
+    let crate::MoeMmqQ4KGateUpTurboBuffers {
+        gate_w,
+        up_w,
+        y_mmq,
+        expert_ids,
+        sorted_pair_idx_padded,
+        padded_offsets,
+        gate_out,
+        up_out,
+    } = bufs;
     let module = reg.expect_module("indexed_moe_mmq_q4_k_gate_up_turbo")?;
     let kernel = module.kernel("flambeau_indexed_moe_mmq_q4_k_gate_up_turbo_q8_1")?;
 
@@ -2600,16 +2603,19 @@ pub fn indexed_moe_mmq_q4_k_gate_up_turbo(
 /// Single weight matrix; activation indexed by per-pair sort; output also
 /// indexed by per-pair.
 pub fn indexed_moe_mmq_q4_k_down_turbo(
-    reg: &OpsRegistry,
-    stream: &HipStream,
-    down_w: DevicePtr,
-    y_mmq: DevicePtr,
-    expert_ids: DevicePtr,
-    sorted_pair_idx_padded: DevicePtr,
-    padded_offsets: DevicePtr,
-    dst: DevicePtr,
+    ctx: crate::OpCtx<'_>,
+    bufs: crate::MoeMmqQ4KDownTurboBuffers,
     shape: MoeShape, // n_tokens holds n_pairs; top_k unused (kernel signature lacks it)
 ) -> Result<()> {
+    let crate::OpCtx { reg, stream } = ctx;
+    let crate::MoeMmqQ4KDownTurboBuffers {
+        down_w,
+        y_mmq,
+        expert_ids,
+        sorted_pair_idx_padded,
+        padded_offsets,
+        dst,
+    } = bufs;
     let module = reg.expect_module("indexed_moe_mmq_q4_k_down_turbo")?;
     let kernel = module.kernel("flambeau_indexed_moe_mmq_q4_k_down_turbo_q8_1")?;
 
@@ -2944,18 +2950,13 @@ pub fn indexed_moe_mmvq_q4_k_gate_up(
 /// - `bucket_slots[n_buckets, MMQ_X]` i32 packed `(token << 16 | slot)`, `-1` sentinel
 /// - `dst[n_tokens, top_k, n_rows]` F32
 pub fn indexed_moe_mmq_q4_k(
-    reg: &OpsRegistry,
-    stream: &HipStream,
-    w: DevicePtr,
-    y: DevicePtr,
-    bucket_expert: DevicePtr,
-    bucket_slots: DevicePtr,
-    dst: DevicePtr,
-    n_rows: usize,
-    n_sb_per_row: usize,
-    top_k: usize,
-    n_buckets: usize,
+    ctx: crate::OpCtx<'_>,
+    bufs: crate::MoeMmqQ4KBuffers,
+    shape: crate::MoeMmqQ4KShape,
 ) -> Result<()> {
+    let crate::OpCtx { reg, stream } = ctx;
+    let crate::MoeMmqQ4KBuffers { w, y, bucket_expert, bucket_slots, dst } = bufs;
+    let crate::MoeMmqQ4KShape { n_rows, n_sb_per_row, top_k, n_buckets } = shape;
     let module = reg.expect_module("indexed_moe_mmq_q4_k")?;
     let kernel = module.kernel("flambeau_indexed_moe_mmq_q4_k_q8_1")?;
 

@@ -717,25 +717,12 @@ impl<'a> Ops for HipOps<'a> {
 
     fn apply_penalties_f32(
         &self,
-        logits: DevicePtr,
-        token_counts: DevicePtr,
+        bufs: crate::PenaltyBuffers,
         n_pairs: usize,
         vocab: usize,
-        repetition_penalty: f32,
-        presence_penalty: f32,
-        frequency_penalty: f32,
+        knobs: crate::PenaltyKnobs,
     ) -> Result<()> {
-        super::sampling::apply_penalties_f32(
-            self.reg,
-            self.stream,
-            logits,
-            token_counts,
-            n_pairs,
-            vocab,
-            repetition_penalty,
-            presence_penalty,
-            frequency_penalty,
-        )
+        super::sampling::apply_penalties_f32(self.ctx(), bufs, n_pairs, vocab, knobs)
     }
 
     fn topk_softmax_f32(
@@ -1691,52 +1678,18 @@ impl<'a> Ops for HipOps<'a> {
 
     fn indexed_moe_mmq_q4_k_gate_up_turbo(
         &self,
-        gate_w: DevicePtr,
-        up_w: DevicePtr,
-        y_mmq: DevicePtr,
-        expert_ids: DevicePtr,
-        sorted_pair_idx_padded: DevicePtr,
-        padded_offsets: DevicePtr,
-        gate_out: DevicePtr,
-        up_out: DevicePtr,
+        bufs: crate::MoeMmqQ4KGateUpTurboBuffers,
         shape: MoeShape,
     ) -> Result<()> {
-        super::moe::indexed_moe_mmq_q4_k_gate_up_turbo(
-            self.reg,
-            self.stream,
-            gate_w,
-            up_w,
-            y_mmq,
-            expert_ids,
-            sorted_pair_idx_padded,
-            padded_offsets,
-            gate_out,
-            up_out,
-            shape,
-        )
+        super::moe::indexed_moe_mmq_q4_k_gate_up_turbo(self.ctx(), bufs, shape)
     }
 
     fn indexed_moe_mmq_q4_k_down_turbo(
         &self,
-        down_w: DevicePtr,
-        y_mmq: DevicePtr,
-        expert_ids: DevicePtr,
-        sorted_pair_idx_padded: DevicePtr,
-        padded_offsets: DevicePtr,
-        dst: DevicePtr,
+        bufs: crate::MoeMmqQ4KDownTurboBuffers,
         shape: MoeShape,
     ) -> Result<()> {
-        super::moe::indexed_moe_mmq_q4_k_down_turbo(
-            self.reg,
-            self.stream,
-            down_w,
-            y_mmq,
-            expert_ids,
-            sorted_pair_idx_padded,
-            padded_offsets,
-            dst,
-            shape,
-        )
+        super::moe::indexed_moe_mmq_q4_k_down_turbo(self.ctx(), bufs, shape)
     }
 
     fn indexed_moe_mmq_q5_k_down_tile8(
@@ -1801,29 +1754,10 @@ impl<'a> Ops for HipOps<'a> {
 
     fn indexed_moe_mmq_q4_k(
         &self,
-        w: DevicePtr,
-        y: DevicePtr,
-        bucket_expert: DevicePtr,
-        bucket_slots: DevicePtr,
-        dst: DevicePtr,
-        n_rows: usize,
-        n_sb_per_row: usize,
-        top_k: usize,
-        n_buckets: usize,
+        bufs: crate::MoeMmqQ4KBuffers,
+        shape: crate::MoeMmqQ4KShape,
     ) -> Result<()> {
-        super::moe::indexed_moe_mmq_q4_k(
-            self.reg,
-            self.stream,
-            w,
-            y,
-            bucket_expert,
-            bucket_slots,
-            dst,
-            n_rows,
-            n_sb_per_row,
-            top_k,
-            n_buckets,
-        )
+        super::moe::indexed_moe_mmq_q4_k(self.ctx(), bufs, shape)
     }
 
     fn shared_expert_scale_f32(

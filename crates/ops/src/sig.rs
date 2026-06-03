@@ -633,3 +633,70 @@ pub struct GdnSplitQkvShape {
     pub qk_size: usize,
     pub v_size: usize,
 }
+
+// ---------------------------------------------------------------------------
+// Sampling penalty aggregates.
+// ---------------------------------------------------------------------------
+
+/// Buffers for [`Ops::apply_penalties_f32`].
+#[derive(Copy, Clone, Debug)]
+pub struct PenaltyBuffers {
+    pub logits: DevicePtr,
+    pub token_counts: DevicePtr,
+}
+
+/// OpenAI-style penalty knobs.
+#[derive(Copy, Clone, Debug)]
+pub struct PenaltyKnobs {
+    pub repetition: f32,
+    pub presence: f32,
+    pub frequency: f32,
+}
+
+// ---------------------------------------------------------------------------
+// MoE Q4_K turbo aggregates — used by `indexed_moe_mmq_q4_k_*_turbo` and the
+// bucket-sorted `indexed_moe_mmq_q4_k` paths.
+// ---------------------------------------------------------------------------
+
+/// Buffers for [`Ops::indexed_moe_mmq_q4_k_gate_up_turbo`].
+#[derive(Copy, Clone, Debug)]
+pub struct MoeMmqQ4KGateUpTurboBuffers {
+    pub gate_w: DevicePtr,
+    pub up_w: DevicePtr,
+    pub y_mmq: DevicePtr,
+    pub expert_ids: DevicePtr,
+    pub sorted_pair_idx_padded: DevicePtr,
+    pub padded_offsets: DevicePtr,
+    pub gate_out: DevicePtr,
+    pub up_out: DevicePtr,
+}
+
+/// Buffers for [`Ops::indexed_moe_mmq_q4_k_down_turbo`].
+#[derive(Copy, Clone, Debug)]
+pub struct MoeMmqQ4KDownTurboBuffers {
+    pub down_w: DevicePtr,
+    pub y_mmq: DevicePtr,
+    pub expert_ids: DevicePtr,
+    pub sorted_pair_idx_padded: DevicePtr,
+    pub padded_offsets: DevicePtr,
+    pub dst: DevicePtr,
+}
+
+/// Buffers for the bucket-sorted [`Ops::indexed_moe_mmq_q4_k`].
+#[derive(Copy, Clone, Debug)]
+pub struct MoeMmqQ4KBuffers {
+    pub w: DevicePtr,
+    pub y: DevicePtr,
+    pub bucket_expert: DevicePtr,
+    pub bucket_slots: DevicePtr,
+    pub dst: DevicePtr,
+}
+
+/// Shape for the bucket-sorted [`Ops::indexed_moe_mmq_q4_k`].
+#[derive(Copy, Clone, Debug)]
+pub struct MoeMmqQ4KShape {
+    pub n_rows: usize,
+    pub n_sb_per_row: usize,
+    pub top_k: usize,
+    pub n_buckets: usize,
+}

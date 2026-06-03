@@ -39,16 +39,19 @@ pub const SAMPLER_K_OUT_MAX: usize = 2048;
 /// - `n_pairs == 0` (penalty path should short-circuit on host).
 /// - kernel-launch dispatch failure.
 pub fn apply_penalties_f32(
-    reg: &OpsRegistry,
-    stream: &HipStream,
-    logits: DevicePtr,
-    token_counts: DevicePtr,
+    ctx: crate::OpCtx<'_>,
+    bufs: crate::PenaltyBuffers,
     n_pairs: usize,
     vocab: usize,
-    repetition_penalty: f32,
-    presence_penalty: f32,
-    frequency_penalty: f32,
+    knobs: crate::PenaltyKnobs,
 ) -> Result<()> {
+    let crate::OpCtx { reg, stream } = ctx;
+    let crate::PenaltyBuffers { logits, token_counts } = bufs;
+    let crate::PenaltyKnobs {
+        repetition: repetition_penalty,
+        presence: presence_penalty,
+        frequency: frequency_penalty,
+    } = knobs;
     if n_pairs == 0 {
         bail!("sampler::apply_penalties_f32: n_pairs must be >= 1 — caller should short-circuit");
     }

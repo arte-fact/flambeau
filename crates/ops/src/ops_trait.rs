@@ -462,13 +462,10 @@ pub trait Ops {
 
     fn apply_penalties_f32(
         &self,
-        logits: DevicePtr,
-        token_counts: DevicePtr,
+        bufs: crate::PenaltyBuffers,
         n_pairs: usize,
         vocab: usize,
-        repetition_penalty: f32,
-        presence_penalty: f32,
-        frequency_penalty: f32,
+        knobs: crate::PenaltyKnobs,
     ) -> Result<()>;
 
     fn topk_softmax_f32(
@@ -915,25 +912,13 @@ pub trait Ops {
 
     fn indexed_moe_mmq_q4_k_gate_up_turbo(
         &self,
-        gate_w: DevicePtr,
-        up_w: DevicePtr,
-        y_mmq: DevicePtr,
-        expert_ids: DevicePtr,
-        sorted_pair_idx_padded: DevicePtr,
-        padded_offsets: DevicePtr,
-        gate_out: DevicePtr,
-        up_out: DevicePtr,
+        bufs: crate::MoeMmqQ4KGateUpTurboBuffers,
         shape: MoeShape,
     ) -> Result<()>;
 
     fn indexed_moe_mmq_q4_k_down_turbo(
         &self,
-        down_w: DevicePtr,
-        y_mmq: DevicePtr,
-        expert_ids: DevicePtr,
-        sorted_pair_idx_padded: DevicePtr,
-        padded_offsets: DevicePtr,
-        dst: DevicePtr,
+        bufs: crate::MoeMmqQ4KDownTurboBuffers,
         shape: MoeShape,
     ) -> Result<()>;
 
@@ -963,15 +948,8 @@ pub trait Ops {
 
     fn indexed_moe_mmq_q4_k(
         &self,
-        w: DevicePtr,
-        y: DevicePtr,
-        bucket_expert: DevicePtr,
-        bucket_slots: DevicePtr,
-        dst: DevicePtr,
-        n_rows: usize,
-        n_sb_per_row: usize,
-        top_k: usize,
-        n_buckets: usize,
+        bufs: crate::MoeMmqQ4KBuffers,
+        shape: crate::MoeMmqQ4KShape,
     ) -> Result<()>;
 
     fn shared_expert_scale_f32(

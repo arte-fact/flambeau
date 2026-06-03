@@ -49,6 +49,9 @@ pub use sig::{
     GdnStepBuffers, GdnStepAlphaBetaBuffers, GdnStepAlphaBetaBatchedSlotsBuffers, GdnStepShape,
     GdnAlphaBetaBuffers, GdnAlphaBetaShape, GdnConvTrioBatchedSlotsBuffers, GdnConvTrioShape,
     GdnSplitQkvBuffers, GdnSplitQkvShape,
+    PenaltyBuffers, PenaltyKnobs,
+    MoeMmqQ4KGateUpTurboBuffers, MoeMmqQ4KDownTurboBuffers,
+    MoeMmqQ4KBuffers, MoeMmqQ4KShape,
 };
 
 #[cfg(feature = "hip")]
