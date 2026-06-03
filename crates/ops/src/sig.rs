@@ -77,6 +77,8 @@ pub struct MmvqGateUpBatchShape {
 
 // --- attention family -------------------------------------------------------
 
+use flambeau_backend_hip::ScalarSlot;
+
 #[derive(Copy, Clone, Debug)]
 pub struct AttnBuffers {
     pub q: DevicePtr,
@@ -85,12 +87,84 @@ pub struct AttnBuffers {
     pub out: DevicePtr,
 }
 
+/// Batched (single-launch over N slots) decode buffers. `k_cache_ptrs`
+/// + `v_cache_ptrs` + `n_tokens_kv_ptrs` are device-side `[n_slots]`
+/// arrays of per-slot KV-cache pointers + tail lengths.
+#[derive(Copy, Clone, Debug)]
+pub struct AttnBatchedBuffers {
+    pub q_batched: DevicePtr,
+    pub k_cache_ptrs: DevicePtr,
+    pub v_cache_ptrs: DevicePtr,
+    pub out_batched: DevicePtr,
+    pub n_tokens_kv_ptrs: DevicePtr,
+}
+
+/// PagedAttention decode buffers. K/V live in shared pools indexed via
+/// `block_tables`. `n_tokens_kv_ptrs` is `[n_slots]` i32 device array.
+#[derive(Copy, Clone, Debug)]
+pub struct AttnPagedDecodeBuffers {
+    pub q_batched: DevicePtr,
+    pub k_pool: DevicePtr,
+    pub v_pool: DevicePtr,
+    pub block_tables: DevicePtr,
+    pub out_batched: DevicePtr,
+    pub n_tokens_kv_ptrs: DevicePtr,
+}
+
+/// PagedAttention prefill buffers. One slot's prefill walks a single
+/// `block_table` row across `n_q_tokens` K/V rows in the pool.
+#[derive(Copy, Clone, Debug)]
+pub struct AttnPagedPrefillBuffers {
+    pub q: DevicePtr,
+    pub k_pool: DevicePtr,
+    pub v_pool: DevicePtr,
+    pub block_table: DevicePtr,
+    pub out: DevicePtr,
+}
+
+/// Extra scratch the split-K decode variant needs alongside
+/// [`AttnBuffers`]. Per-`(head, chunk)` running max + softmax denom +
+/// partial output vectors get merged in the combine pass.
+#[derive(Copy, Clone, Debug)]
+pub struct AttnSplitkPartials {
+    pub partials_m: DevicePtr,
+    pub partials_s: DevicePtr,
+    pub partials_o: DevicePtr,
+}
+
 #[derive(Copy, Clone, Debug)]
 pub struct AttnDecodeShape {
     pub n_heads_q: usize,
     pub n_heads_kv: usize,
     pub head_dim: usize,
     pub n_tokens_kv: usize,
+}
+
+#[derive(Copy, Clone, Debug)]
+pub struct AttnDecodeBatchedShape {
+    pub n_heads_q: usize,
+    pub n_heads_kv: usize,
+    pub head_dim: usize,
+    pub n_slots: usize,
+}
+
+#[derive(Copy, Clone, Debug)]
+pub struct AttnDecodePagedShape {
+    pub n_heads_q: usize,
+    pub n_heads_kv: usize,
+    pub head_dim: usize,
+    pub n_slots: usize,
+    pub page_size: usize,
+    pub max_pages_per_slot: usize,
+}
+
+#[derive(Copy, Clone, Debug)]
+pub struct AttnSplitkShape {
+    pub n_heads_q: usize,
+    pub n_heads_kv: usize,
+    pub head_dim: usize,
+    pub n_tokens_kv: usize,
+    pub chunk_size: usize,
 }
 
 #[derive(Copy, Clone, Debug)]
@@ -104,9 +178,34 @@ pub struct AttnPrefillShape {
 }
 
 #[derive(Copy, Clone, Debug)]
+pub struct AttnPrefillPagedShape {
+    pub n_q_tokens: usize,
+    pub n_heads_q: usize,
+    pub n_heads_kv: usize,
+    pub head_dim: usize,
+    pub n_k_tokens: usize,
+    pub q_offset: usize,
+    pub page_size: usize,
+}
+
+#[derive(Copy, Clone, Debug)]
 pub struct AttnKnobs {
     pub scale: f32,
     pub window_size: i32,
+}
+
+/// Graph-capture slot for `attention_decode_f16_slots`. `Some(slot)`
+/// tags the `n_tokens_kv` kernel arg for per-replay update.
+#[derive(Copy, Clone, Debug)]
+pub struct AttnDecodeSlots {
+    pub n_tokens_kv: ScalarSlot,
+}
+
+/// Graph-capture slots for `attention_prefill_f16_slots`.
+#[derive(Copy, Clone, Debug)]
+pub struct AttnPrefillSlots {
+    pub n_k: ScalarSlot,
+    pub q_off: ScalarSlot,
 }
 
 // --- norm / fused-norm family ----------------------------------------------

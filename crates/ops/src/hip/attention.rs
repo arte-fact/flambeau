@@ -28,73 +28,49 @@ use super::OpsRegistry;
 ///   output lane). Kernel supports `head_dim ∈ {128, 256}` — both
 ///   Qwen3.5 (GQA-32/4, head_dim=128) and Qwen3.6 (GQA-16/2, head_dim=256).
 pub fn attention_decode_f16(
-    reg: &OpsRegistry,
-    stream: &HipStream,
-    q: DevicePtr,
-    k_cache: DevicePtr,
-    v_cache: DevicePtr,
-    out: DevicePtr,
-    n_heads_q: usize,
-    n_heads_kv: usize,
-    head_dim: usize,
-    n_tokens_kv: usize,
-    scale: f32,
-    window_size: i32,
+    ctx: crate::OpCtx<'_>,
+    buffers: crate::AttnBuffers,
+    shape: crate::AttnDecodeShape,
+    knobs: crate::AttnKnobs,
 ) -> Result<()> {
-    attention_decode_f16_slots(
-        reg,
-        stream,
-        q,
-        k_cache,
-        v_cache,
-        out,
+    attention_decode_f16_slots(ctx, buffers, shape, knobs, None)
+}
+
+/// 7.a-i3 — graph-captureable variant of [`attention_decode_f16`].
+/// Identical behaviour for non-capture callers (slots=None). When
+/// `slots` is Some, the n_tokens_kv kernel arg is tagged via
+/// `KernelArgs::push_slot` so the graph recorder can bind the slot.
+/// Caller then updates the slot per replay via `HipGraphExec::set_slot`
+/// to track the growing KV cache tail.
+pub fn attention_decode_f16_slots(
+    ctx: crate::OpCtx<'_>,
+    buffers: crate::AttnBuffers,
+    shape: crate::AttnDecodeShape,
+    knobs: crate::AttnKnobs,
+    slots: Option<crate::AttnDecodeSlots>,
+) -> Result<()> {
+    let crate::AttnBuffers { q, k, v, out } = buffers;
+    let crate::AttnDecodeShape {
         n_heads_q,
         n_heads_kv,
         head_dim,
         n_tokens_kv,
-        scale,
-        window_size,
-        None,
-    )
-}
-
-/// 7.a-i3 — graph-captureable variant of [`attention_decode_f16`].
-/// Identical behaviour for non-capture callers (slot=None). When
-/// `n_tokens_kv_slot` is Some, the n_tokens_kv kernel arg is tagged
-/// via `KernelArgs::push_slot` so the graph recorder can bind the
-/// slot. Caller then updates the slot per replay via
-/// `HipGraphExec::set_slot` to track the growing KV cache tail.
-pub fn attention_decode_f16_slots(
-    reg: &OpsRegistry,
-    stream: &HipStream,
-    q: DevicePtr,
-    k_cache: DevicePtr,
-    v_cache: DevicePtr,
-    out: DevicePtr,
-    n_heads_q: usize,
-    n_heads_kv: usize,
-    head_dim: usize,
-    n_tokens_kv: usize,
-    scale: f32,
-    window_size: i32,
-    n_tokens_kv_slot: Option<flambeau_backend_hip::ScalarSlot>,
-) -> Result<()> {
+    } = shape;
+    let crate::AttnKnobs { scale, window_size } = knobs;
     assert!(
         head_dim == 64 || head_dim == 128 || head_dim == 256 || head_dim == 512,
         "attention_decode_f16: head_dim {head_dim} not supported (expected 64, 128, 256, or 512)"
     );
-    let module = reg.expect_module("attention_decode_f16")?;
+    let module = ctx.reg.expect_module("attention_decode_f16")?;
     let kernel = module.kernel("flambeau_attention_decode_f16")?;
 
     let n_heads_q_i = n_heads_q as i32;
     let n_heads_kv_i = n_heads_kv as i32;
     let head_dim_i = head_dim as i32;
     let n_tokens_i = n_tokens_kv as i32;
-    let scale_f = scale;
-    let window_i = window_size;
     let q_ptr: u64 = q.as_usize() as u64;
-    let k_ptr: u64 = k_cache.as_usize() as u64;
-    let v_ptr: u64 = v_cache.as_usize() as u64;
+    let k_ptr: u64 = k.as_usize() as u64;
+    let v_ptr: u64 = v.as_usize() as u64;
     let o_ptr: u64 = out.as_usize() as u64;
     let mut args = KernelArgs::new();
     args.push(&q_ptr);
@@ -104,14 +80,14 @@ pub fn attention_decode_f16_slots(
     args.push(&n_heads_q_i);
     args.push(&n_heads_kv_i);
     args.push(&head_dim_i);
-    match n_tokens_kv_slot {
-        Some(s) => args.push_slot(&n_tokens_i, s),
+    match slots {
+        Some(s) => args.push_slot(&n_tokens_i, s.n_tokens_kv),
         None => args.push(&n_tokens_i),
     }
-    args.push(&scale_f);
-    args.push(&window_i);
+    args.push(&scale);
+    args.push(&window_size);
     let cfg = LaunchCfg::one_d(n_heads_q as u32, head_dim as u32);
-    unsafe { kernel.launch(stream, cfg, args)? };
+    unsafe { kernel.launch(ctx.stream, cfg, args)? };
     Ok(())
 }
 

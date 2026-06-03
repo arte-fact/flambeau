@@ -33,9 +33,11 @@ pub use hip::{OpsRegistry, OpsRegistryError};
 
 #[cfg(feature = "hip")]
 pub use sig::{
-    AttnBuffers, AttnDecodeShape, AttnKnobs, AttnPrefillShape, MatmulShape, MmvqBatchShape,
-    MmvqBuffers, MmvqGateUpBatchShape, MmvqGateUpBuffers, MmvqGateUpShape, MmvqShape, NormBuffers,
-    NormResidual, OpCtx,
+    AttnBatchedBuffers, AttnBuffers, AttnDecodeBatchedShape, AttnDecodePagedShape,
+    AttnDecodeShape, AttnDecodeSlots, AttnKnobs, AttnPagedDecodeBuffers, AttnPagedPrefillBuffers,
+    AttnPrefillPagedShape, AttnPrefillShape, AttnPrefillSlots, AttnSplitkPartials,
+    AttnSplitkShape, MatmulShape, MmvqBatchShape, MmvqBuffers, MmvqGateUpBatchShape,
+    MmvqGateUpBuffers, MmvqGateUpShape, MmvqShape, NormBuffers, NormResidual, OpCtx,
 };
 
 #[cfg(feature = "hip")]

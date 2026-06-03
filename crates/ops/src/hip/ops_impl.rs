@@ -365,61 +365,37 @@ impl<'a> Ops for HipOps<'a> {
 
     fn attention_decode_f16(
         &self,
-        q: DevicePtr,
-        k_cache: DevicePtr,
-        v_cache: DevicePtr,
-        out: DevicePtr,
-        n_heads_q: usize,
-        n_heads_kv: usize,
-        head_dim: usize,
-        n_tokens_kv: usize,
-        scale: f32,
-        window_size: i32,
+        buffers: crate::AttnBuffers,
+        shape: crate::AttnDecodeShape,
+        knobs: crate::AttnKnobs,
     ) -> Result<()> {
         super::attention::attention_decode_f16(
-            self.reg,
-            self.stream,
-            q,
-            k_cache,
-            v_cache,
-            out,
-            n_heads_q,
-            n_heads_kv,
-            head_dim,
-            n_tokens_kv,
-            scale,
-            window_size,
+            crate::OpCtx {
+                reg: self.reg,
+                stream: self.stream,
+            },
+            buffers,
+            shape,
+            knobs,
         )
     }
 
     fn attention_decode_f16_slots(
         &self,
-        q: DevicePtr,
-        k_cache: DevicePtr,
-        v_cache: DevicePtr,
-        out: DevicePtr,
-        n_heads_q: usize,
-        n_heads_kv: usize,
-        head_dim: usize,
-        n_tokens_kv: usize,
-        scale: f32,
-        window_size: i32,
-        n_tokens_kv_slot: Option<flambeau_backend_hip::ScalarSlot>,
+        buffers: crate::AttnBuffers,
+        shape: crate::AttnDecodeShape,
+        knobs: crate::AttnKnobs,
+        slots: Option<crate::AttnDecodeSlots>,
     ) -> Result<()> {
         super::attention::attention_decode_f16_slots(
-            self.reg,
-            self.stream,
-            q,
-            k_cache,
-            v_cache,
-            out,
-            n_heads_q,
-            n_heads_kv,
-            head_dim,
-            n_tokens_kv,
-            scale,
-            window_size,
-            n_tokens_kv_slot,
+            crate::OpCtx {
+                reg: self.reg,
+                stream: self.stream,
+            },
+            buffers,
+            shape,
+            knobs,
+            slots,
         )
     }
 

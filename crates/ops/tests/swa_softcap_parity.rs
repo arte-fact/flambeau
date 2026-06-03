@@ -200,18 +200,10 @@ fn swa_decode_window_4_of_8() {
 
     let scale = 1.0 / (head_dim as f32).sqrt();
     attention_decode_f16(
-        &reg,
-        dev.default_stream(),
-        d_q,
-        d_k,
-        d_v,
-        d_out,
-        n_heads_q,
-        n_heads_kv,
-        head_dim,
-        n_tokens,
-        scale,
-        window,
+        flambeau_ops::OpCtx { reg: &reg, stream: dev.default_stream() },
+        flambeau_ops::AttnBuffers { q: d_q, k: d_k, v: d_v, out: d_out },
+        flambeau_ops::AttnDecodeShape { n_heads_q, n_heads_kv, head_dim, n_tokens_kv: n_tokens },
+        flambeau_ops::AttnKnobs { scale, window_size: window },
     )
     .unwrap();
     dev.default_stream().synchronize().unwrap();
@@ -267,33 +259,17 @@ fn swa_decode_window_geq_ntokens_matches_unbounded() {
 
     let scale = 1.0 / (head_dim as f32).sqrt();
     attention_decode_f16(
-        &reg,
-        dev.default_stream(),
-        d_q,
-        d_k,
-        d_v,
-        d_out_off,
-        n_heads_q,
-        n_heads_kv,
-        head_dim,
-        n_tokens,
-        scale,
-        0,
+        flambeau_ops::OpCtx { reg: &reg, stream: dev.default_stream() },
+        flambeau_ops::AttnBuffers { q: d_q, k: d_k, v: d_v, out: d_out_off },
+        flambeau_ops::AttnDecodeShape { n_heads_q, n_heads_kv, head_dim, n_tokens_kv: n_tokens },
+        flambeau_ops::AttnKnobs { scale, window_size: 0 },
     )
     .unwrap();
     attention_decode_f16(
-        &reg,
-        dev.default_stream(),
-        d_q,
-        d_k,
-        d_v,
-        d_out_big,
-        n_heads_q,
-        n_heads_kv,
-        head_dim,
-        n_tokens,
-        scale,
-        16,
+        flambeau_ops::OpCtx { reg: &reg, stream: dev.default_stream() },
+        flambeau_ops::AttnBuffers { q: d_q, k: d_k, v: d_v, out: d_out_big },
+        flambeau_ops::AttnDecodeShape { n_heads_q, n_heads_kv, head_dim, n_tokens_kv: n_tokens },
+        flambeau_ops::AttnKnobs { scale, window_size: 16 },
     )
     .unwrap();
     dev.default_stream().synchronize().unwrap();
@@ -353,18 +329,10 @@ fn splitk_matches_single_pass_gemma4_hd512() {
 
     let scale = 1.0 / (head_dim as f32).sqrt();
     attention_decode_f16(
-        &reg,
-        dev.default_stream(),
-        d_q,
-        d_k,
-        d_v,
-        d_out_single,
-        n_heads_q,
-        n_heads_kv,
-        head_dim,
-        n_tokens,
-        scale,
-        window,
+        flambeau_ops::OpCtx { reg: &reg, stream: dev.default_stream() },
+        flambeau_ops::AttnBuffers { q: d_q, k: d_k, v: d_v, out: d_out_single },
+        flambeau_ops::AttnDecodeShape { n_heads_q, n_heads_kv, head_dim, n_tokens_kv: n_tokens },
+        flambeau_ops::AttnKnobs { scale, window_size: window },
     )
     .unwrap();
     attention_decode_f16_splitk(
@@ -451,18 +419,10 @@ fn swa_decode_splitk_matches_window_4() {
 
     let scale = 1.0 / (head_dim as f32).sqrt();
     attention_decode_f16(
-        &reg,
-        dev.default_stream(),
-        d_q,
-        d_k,
-        d_v,
-        d_out_single,
-        n_heads_q,
-        n_heads_kv,
-        head_dim,
-        n_tokens,
-        scale,
-        window,
+        flambeau_ops::OpCtx { reg: &reg, stream: dev.default_stream() },
+        flambeau_ops::AttnBuffers { q: d_q, k: d_k, v: d_v, out: d_out_single },
+        flambeau_ops::AttnDecodeShape { n_heads_q, n_heads_kv, head_dim, n_tokens_kv: n_tokens },
+        flambeau_ops::AttnKnobs { scale, window_size: window },
     )
     .unwrap();
     attention_decode_f16_splitk(

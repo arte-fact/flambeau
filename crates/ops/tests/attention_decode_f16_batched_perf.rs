@@ -142,18 +142,26 @@ fn ab_perf_qwen36_27b_tp2_local() -> Result<()> {
                 let q_row = DevicePtr(d_q.as_usize() + q_off);
                 let out_row = DevicePtr(d_out.as_usize() + q_off);
                 attention_decode_f16_slots(
-                    &reg,
-                    stream,
-                    q_row,
-                    d_k_per_slot[s],
-                    d_v_per_slot[s],
-                    out_row,
-                    n_heads_q,
-                    n_heads_kv,
-                    head_dim,
-                    kv_len,
-                    scale,
-                    /* window_size = */ 0,
+                    flambeau_ops::OpCtx {
+                        reg: &reg,
+                        stream,
+                    },
+                    flambeau_ops::AttnBuffers {
+                        q: q_row,
+                        k: d_k_per_slot[s],
+                        v: d_v_per_slot[s],
+                        out: out_row,
+                    },
+                    flambeau_ops::AttnDecodeShape {
+                        n_heads_q,
+                        n_heads_kv,
+                        head_dim,
+                        n_tokens_kv: kv_len,
+                    },
+                    flambeau_ops::AttnKnobs {
+                        scale,
+                        window_size: 0,
+                    },
                     None,
                 )
                 .unwrap();

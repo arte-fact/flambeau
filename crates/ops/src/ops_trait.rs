@@ -216,35 +216,20 @@ pub trait Ops {
 
     fn attention_decode_f16(
         &self,
-        q: DevicePtr,
-        k_cache: DevicePtr,
-        v_cache: DevicePtr,
-        out: DevicePtr,
-        n_heads_q: usize,
-        n_heads_kv: usize,
-        head_dim: usize,
-        n_tokens_kv: usize,
-        scale: f32,
-        window_size: i32,
+        buffers: crate::AttnBuffers,
+        shape: crate::AttnDecodeShape,
+        knobs: crate::AttnKnobs,
     ) -> Result<()>;
 
-    /// Graph-capture variant of `attention_decode_f16`. When
-    /// `n_tokens_kv_slot` is `Some`, the recorder tags the
-    /// `n_tokens_kv` kernel arg so the caller can update it per
-    /// replay via `HipGraphExec::set_slot`.
+    /// Graph-capture variant of `attention_decode_f16`. When `slots`
+    /// is `Some`, the recorder tags the `n_tokens_kv` kernel arg so the
+    /// caller can update it per replay via `HipGraphExec::set_slot`.
     fn attention_decode_f16_slots(
         &self,
-        q: DevicePtr,
-        k_cache: DevicePtr,
-        v_cache: DevicePtr,
-        out: DevicePtr,
-        n_heads_q: usize,
-        n_heads_kv: usize,
-        head_dim: usize,
-        n_tokens_kv: usize,
-        scale: f32,
-        window_size: i32,
-        n_tokens_kv_slot: Option<ScalarSlot>,
+        buffers: crate::AttnBuffers,
+        shape: crate::AttnDecodeShape,
+        knobs: crate::AttnKnobs,
+        slots: Option<crate::AttnDecodeSlots>,
     ) -> Result<()>;
 
     fn attention_decode_f16_batched(
