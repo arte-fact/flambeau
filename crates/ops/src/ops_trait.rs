@@ -14,7 +14,6 @@
 
 use crate::MoeShape;
 use anyhow::Result;
-use flambeau_backend_hip::ScalarSlot;
 use flambeau_core::device::DevicePtr;
 use flambeau_core::op::QDtype;
 
@@ -202,13 +201,8 @@ pub trait Ops {
     /// `dst + write_pos * kv_width` per slot.
     fn kv_append_f16_batched_slots(
         &self,
-        k_src: DevicePtr,
-        v_src: DevicePtr,
-        slot_k_dst_ptrs: DevicePtr,
-        slot_v_dst_ptrs: DevicePtr,
-        slot_write_pos: DevicePtr,
-        n_slots: usize,
-        kv_width: usize,
+        buf: crate::KvAppendBatchedSlotsBuffers,
+        shape: crate::KvAppendBatchedSlotsShape,
     ) -> Result<()>;
 
     /// PagedAttention prefill attention. Same flash-attn-v2 body as
@@ -229,15 +223,8 @@ pub trait Ops {
     /// n_tokens)`. `page_size` must be a power of two.
     fn kv_append_f16_paged_prefill(
         &self,
-        k_src: DevicePtr,
-        v_src: DevicePtr,
-        k_pool: DevicePtr,
-        v_pool: DevicePtr,
-        block_table: DevicePtr,
-        n_tokens: usize,
-        kv_width: usize,
-        start_pos: usize,
-        page_size: usize,
+        buf: crate::KvAppendPagedPrefillBuffers,
+        shape: crate::KvAppendPagedPrefillShape,
     ) -> Result<()>;
 
     /// PagedAttention sibling of `kv_append_f16_batched_slots`. Writes
@@ -247,16 +234,8 @@ pub trait Ops {
     /// of two.
     fn kv_append_f16_paged_slots(
         &self,
-        k_src: DevicePtr,
-        v_src: DevicePtr,
-        k_pool: DevicePtr,
-        v_pool: DevicePtr,
-        block_tables: DevicePtr,
-        slot_write_pos: DevicePtr,
-        n_slots: usize,
-        kv_width: usize,
-        page_size: usize,
-        max_pages_per_slot: usize,
+        buf: crate::KvAppendPagedSlotsBuffers,
+        shape: crate::KvAppendPagedSlotsShape,
     ) -> Result<()>;
 
     /// PagedAttention sibling of `attention_decode_f16_batched`. Reads
@@ -273,13 +252,8 @@ pub trait Ops {
     /// See `hip::attention::kv_append_v_unit_norm_f16`.
     fn kv_append_v_unit_norm_f16(
         &self,
-        k_src: DevicePtr,
-        v_src: DevicePtr,
-        k_cache: DevicePtr,
-        v_cache: DevicePtr,
-        n_tokens: usize,
-        n_kv_heads: usize,
-        head_dim: usize,
+        buf: crate::KvAppendBuffers,
+        shape: crate::KvAppendVUnitShape,
         write_pos: usize,
         eps: f32,
     ) -> Result<()>;

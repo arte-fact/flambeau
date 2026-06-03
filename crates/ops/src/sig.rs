@@ -359,3 +359,70 @@ pub struct RopePartialShape {
     pub head_dim: usize,
     pub rotated_dims: usize,
 }
+
+// --- KV-append family ------------------------------------------------------
+
+#[derive(Copy, Clone, Debug)]
+pub struct KvAppendBuffers {
+    pub k_src: DevicePtr,
+    pub v_src: DevicePtr,
+    pub k_dst: DevicePtr,
+    pub v_dst: DevicePtr,
+}
+
+#[derive(Copy, Clone, Debug)]
+pub struct KvAppendPagedSlotsBuffers {
+    pub k_src: DevicePtr,
+    pub v_src: DevicePtr,
+    pub k_pool: DevicePtr,
+    pub v_pool: DevicePtr,
+    pub block_tables: DevicePtr,
+    pub slot_write_pos: DevicePtr,
+}
+
+#[derive(Copy, Clone, Debug)]
+pub struct KvAppendPagedPrefillBuffers {
+    pub k_src: DevicePtr,
+    pub v_src: DevicePtr,
+    pub k_pool: DevicePtr,
+    pub v_pool: DevicePtr,
+    pub block_table: DevicePtr,
+}
+
+#[derive(Copy, Clone, Debug)]
+pub struct KvAppendBatchedSlotsBuffers {
+    pub k_src: DevicePtr,
+    pub v_src: DevicePtr,
+    pub slot_k_dst_ptrs: DevicePtr,
+    pub slot_v_dst_ptrs: DevicePtr,
+    pub slot_write_pos: DevicePtr,
+}
+
+#[derive(Copy, Clone, Debug)]
+pub struct KvAppendVUnitShape {
+    pub n_tokens: usize,
+    pub n_kv_heads: usize,
+    pub head_dim: usize,
+}
+
+#[derive(Copy, Clone, Debug)]
+pub struct KvAppendPagedSlotsShape {
+    pub n_slots: usize,
+    pub kv_width: usize,
+    pub page_size: usize,
+    pub max_pages_per_slot: usize,
+}
+
+#[derive(Copy, Clone, Debug)]
+pub struct KvAppendPagedPrefillShape {
+    pub n_tokens: usize,
+    pub kv_width: usize,
+    pub start_pos: usize,
+    pub page_size: usize,
+}
+
+#[derive(Copy, Clone, Debug)]
+pub struct KvAppendBatchedSlotsShape {
+    pub n_slots: usize,
+    pub kv_width: usize,
+}

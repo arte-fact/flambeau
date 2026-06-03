@@ -352,25 +352,10 @@ impl<'a> Ops for HipOps<'a> {
 
     fn kv_append_f16_batched_slots(
         &self,
-        k_src: DevicePtr,
-        v_src: DevicePtr,
-        slot_k_dst_ptrs: DevicePtr,
-        slot_v_dst_ptrs: DevicePtr,
-        slot_write_pos: DevicePtr,
-        n_slots: usize,
-        kv_width: usize,
+        buf: crate::KvAppendBatchedSlotsBuffers,
+        shape: crate::KvAppendBatchedSlotsShape,
     ) -> Result<()> {
-        super::attention::kv_append_f16_batched_slots(
-            self.reg,
-            self.stream,
-            k_src,
-            v_src,
-            slot_k_dst_ptrs,
-            slot_v_dst_ptrs,
-            slot_write_pos,
-            n_slots,
-            kv_width,
-        )
+        super::attention::kv_append_f16_batched_slots(self.ctx(), buf, shape)
     }
 
     fn attention_prefill_f16_paged(
@@ -392,58 +377,18 @@ impl<'a> Ops for HipOps<'a> {
 
     fn kv_append_f16_paged_prefill(
         &self,
-        k_src: DevicePtr,
-        v_src: DevicePtr,
-        k_pool: DevicePtr,
-        v_pool: DevicePtr,
-        block_table: DevicePtr,
-        n_tokens: usize,
-        kv_width: usize,
-        start_pos: usize,
-        page_size: usize,
+        buf: crate::KvAppendPagedPrefillBuffers,
+        shape: crate::KvAppendPagedPrefillShape,
     ) -> Result<()> {
-        super::attention::kv_append_f16_paged_prefill(
-            self.reg,
-            self.stream,
-            k_src,
-            v_src,
-            k_pool,
-            v_pool,
-            block_table,
-            n_tokens,
-            kv_width,
-            start_pos,
-            page_size,
-        )
+        super::attention::kv_append_f16_paged_prefill(self.ctx(), buf, shape)
     }
 
     fn kv_append_f16_paged_slots(
         &self,
-        k_src: DevicePtr,
-        v_src: DevicePtr,
-        k_pool: DevicePtr,
-        v_pool: DevicePtr,
-        block_tables: DevicePtr,
-        slot_write_pos: DevicePtr,
-        n_slots: usize,
-        kv_width: usize,
-        page_size: usize,
-        max_pages_per_slot: usize,
+        buf: crate::KvAppendPagedSlotsBuffers,
+        shape: crate::KvAppendPagedSlotsShape,
     ) -> Result<()> {
-        super::attention::kv_append_f16_paged_slots(
-            self.reg,
-            self.stream,
-            k_src,
-            v_src,
-            k_pool,
-            v_pool,
-            block_tables,
-            slot_write_pos,
-            n_slots,
-            kv_width,
-            page_size,
-            max_pages_per_slot,
-        )
+        super::attention::kv_append_f16_paged_slots(self.ctx(), buf, shape)
     }
 
     fn attention_decode_f16_paged(
@@ -465,29 +410,12 @@ impl<'a> Ops for HipOps<'a> {
 
     fn kv_append_v_unit_norm_f16(
         &self,
-        k_src: DevicePtr,
-        v_src: DevicePtr,
-        k_cache: DevicePtr,
-        v_cache: DevicePtr,
-        n_tokens: usize,
-        n_kv_heads: usize,
-        head_dim: usize,
+        buf: crate::KvAppendBuffers,
+        shape: crate::KvAppendVUnitShape,
         write_pos: usize,
         eps: f32,
     ) -> Result<()> {
-        super::attention::kv_append_v_unit_norm_f16(
-            self.reg,
-            self.stream,
-            k_src,
-            v_src,
-            k_cache,
-            v_cache,
-            n_tokens,
-            n_kv_heads,
-            head_dim,
-            write_pos,
-            eps,
-        )
+        super::attention::kv_append_v_unit_norm_f16(self.ctx(), buf, shape, write_pos, eps)
     }
 
     fn attention_decode_f16_splitk(

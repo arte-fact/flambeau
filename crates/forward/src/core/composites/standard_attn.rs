@@ -530,13 +530,17 @@ pub fn standard_attn_local<H: TopologyHooks>(
                 // gemma4 F16 path: fuse V unit-RMSNorm into the cache
                 // write. K copy + V normalize-then-copy in one launch.
                 ops.kv_append_v_unit_norm_f16(
-                    state.pool.k_f16,
-                    state.pool.v_f16,
-                    k_cache.ptr,
-                    v_cache.ptr,
-                    n,
-                    weights.n_kv_heads,
-                    weights.head_dim,
+                    flambeau_ops::KvAppendBuffers {
+                        k_src: state.pool.k_f16,
+                        v_src: state.pool.v_f16,
+                        k_dst: k_cache.ptr,
+                        v_dst: v_cache.ptr,
+                    },
+                    flambeau_ops::KvAppendVUnitShape {
+                        n_tokens: n,
+                        n_kv_heads: weights.n_kv_heads,
+                        head_dim: weights.head_dim,
+                    },
                     start_position,
                     weights.rms_eps,
                 )?;

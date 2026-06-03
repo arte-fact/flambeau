@@ -44,13 +44,14 @@ pub fn kv_append_f16_batched_slots(
         );
     }
     ops.kv_append_f16_batched_slots(
-        k_src.ptr,
-        v_src.ptr,
-        slot_k_dst_ptrs,
-        slot_v_dst_ptrs,
-        slot_write_pos,
-        n_slots,
-        kv_width,
+        flambeau_ops::KvAppendBatchedSlotsBuffers {
+            k_src: k_src.ptr,
+            v_src: v_src.ptr,
+            slot_k_dst_ptrs,
+            slot_v_dst_ptrs,
+            slot_write_pos,
+        },
+        flambeau_ops::KvAppendBatchedSlotsShape { n_slots, kv_width },
     )
 }
 
@@ -208,15 +209,19 @@ pub fn kv_append_f16_paged_prefill(
         );
     }
     ops.kv_append_f16_paged_prefill(
-        k_src.ptr,
-        v_src.ptr,
-        k_pool,
-        v_pool,
-        block_table,
-        n_tokens,
-        kv_width,
-        start_pos,
-        page_size,
+        flambeau_ops::KvAppendPagedPrefillBuffers {
+            k_src: k_src.ptr,
+            v_src: v_src.ptr,
+            k_pool,
+            v_pool,
+            block_table,
+        },
+        flambeau_ops::KvAppendPagedPrefillShape {
+            n_tokens,
+            kv_width,
+            start_pos,
+            page_size,
+        },
     )
 }
 
@@ -261,16 +266,20 @@ pub fn kv_append_f16_paged_slots(
         );
     }
     ops.kv_append_f16_paged_slots(
-        k_src.ptr,
-        v_src.ptr,
-        k_pool,
-        v_pool,
-        block_tables,
-        slot_write_pos,
-        n_slots,
-        kv_width,
-        page_size,
-        max_pages_per_slot,
+        flambeau_ops::KvAppendPagedSlotsBuffers {
+            k_src: k_src.ptr,
+            v_src: v_src.ptr,
+            k_pool,
+            v_pool,
+            block_tables,
+            slot_write_pos,
+        },
+        flambeau_ops::KvAppendPagedSlotsShape {
+            n_slots,
+            kv_width,
+            page_size,
+            max_pages_per_slot,
+        },
     )
 }
 

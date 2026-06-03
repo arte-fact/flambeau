@@ -39,8 +39,11 @@ pub use sig::{
     AttnSplitkShape, MatmulShape, MmvqBatchShape, MmvqBuffers, MmvqGateUpBatchShape,
     MmvqGateUpBuffers, MmvqGateUpShape, MmvqShape, MoeMmvqBuffers, MoeMmvqGateUpBuffers,
     MoeMmqTile8DownBuffers, MoeMmqTile8GateUpBuffers, MoeMmvqGateUpSortedBuffers, MoeMmvqShape,
-    MoeMmvqSortedBuffers, NormBuffers, NormFusedAddBuffers, NormResidualBuffers, NormShape, OpCtx,
-    RopeBuffers, RopeFusedBuffers, RopePartialShape, RopeShape,
+    KvAppendBatchedSlotsBuffers, KvAppendBatchedSlotsShape, KvAppendBuffers,
+    KvAppendPagedPrefillBuffers, KvAppendPagedPrefillShape, KvAppendPagedSlotsBuffers,
+    KvAppendPagedSlotsShape, KvAppendVUnitShape, MoeMmvqSortedBuffers, NormBuffers,
+    NormFusedAddBuffers, NormResidualBuffers, NormShape, OpCtx, RopeBuffers, RopeFusedBuffers,
+    RopePartialShape, RopeShape,
 };
 
 #[cfg(feature = "hip")]

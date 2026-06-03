@@ -299,40 +299,32 @@ pub fn attention_decode_f16_paged(
 /// `slot_write_pos` must point at ≥ `n_slots` i32 elements with each
 /// `(slot_write_pos[s] / page_size) < max_pages_per_slot`.
 pub fn kv_append_f16_paged_slots(
-    reg: &OpsRegistry,
-    stream: &HipStream,
-    k_src: DevicePtr,
-    v_src: DevicePtr,
-    k_pool: DevicePtr,
-    v_pool: DevicePtr,
-    block_tables: DevicePtr,
-    slot_write_pos: DevicePtr,
-    n_slots: usize,
-    kv_width: usize,
-    page_size: usize,
-    max_pages_per_slot: usize,
+    ctx: crate::OpCtx<'_>,
+    buf: crate::KvAppendPagedSlotsBuffers,
+    shape: crate::KvAppendPagedSlotsShape,
 ) -> Result<()> {
     assert!(
-        page_size > 0 && page_size.is_power_of_two(),
-        "kv_append_f16_paged_slots: page_size {page_size} must be a positive power of two"
+        shape.page_size > 0 && shape.page_size.is_power_of_two(),
+        "kv_append_f16_paged_slots: page_size {} must be a positive power of two",
+        shape.page_size
     );
     assert!(
-        max_pages_per_slot >= 1,
+        shape.max_pages_per_slot >= 1,
         "kv_append_f16_paged_slots: max_pages_per_slot must be >= 1"
     );
-    let module = reg.expect_module("kv_append_f16_paged_slots")?;
+    let module = ctx.reg.expect_module("kv_append_f16_paged_slots")?;
     let kernel = module.kernel("flambeau_kv_append_f16_paged_slots")?;
 
-    let n_slots_i = n_slots as i32;
-    let kv_width_i = kv_width as i32;
-    let page_size_i = page_size as i32;
-    let max_pps_i = max_pages_per_slot as i32;
-    let k_src_ptr: u64 = k_src.as_usize() as u64;
-    let v_src_ptr: u64 = v_src.as_usize() as u64;
-    let k_pool_ptr: u64 = k_pool.as_usize() as u64;
-    let v_pool_ptr: u64 = v_pool.as_usize() as u64;
-    let bt_ptr: u64 = block_tables.as_usize() as u64;
-    let wpos_ptr: u64 = slot_write_pos.as_usize() as u64;
+    let n_slots_i = shape.n_slots as i32;
+    let kv_width_i = shape.kv_width as i32;
+    let page_size_i = shape.page_size as i32;
+    let max_pps_i = shape.max_pages_per_slot as i32;
+    let k_src_ptr: u64 = buf.k_src.as_usize() as u64;
+    let v_src_ptr: u64 = buf.v_src.as_usize() as u64;
+    let k_pool_ptr: u64 = buf.k_pool.as_usize() as u64;
+    let v_pool_ptr: u64 = buf.v_pool.as_usize() as u64;
+    let bt_ptr: u64 = buf.block_tables.as_usize() as u64;
+    let wpos_ptr: u64 = buf.slot_write_pos.as_usize() as u64;
     let mut args = KernelArgs::new();
     args.push(&k_src_ptr);
     args.push(&v_src_ptr);
@@ -344,13 +336,13 @@ pub fn kv_append_f16_paged_slots(
     args.push(&kv_width_i);
     args.push(&page_size_i);
     args.push(&max_pps_i);
-    let block_threads: u32 = kv_width.min(128) as u32;
+    let block_threads: u32 = shape.kv_width.min(128) as u32;
     let cfg = LaunchCfg {
-        grid: (n_slots as u32, 1, 1),
+        grid: (shape.n_slots as u32, 1, 1),
         block: (block_threads.max(1), 1, 1),
         shared_bytes: 0,
     };
-    unsafe { kernel.launch(stream, cfg, args)? };
+    unsafe { kernel.launch(ctx.stream, cfg, args)? };
     Ok(())
 }
 
@@ -460,34 +452,27 @@ pub fn attention_prefill_f16_paged(
 /// elements. `k_src` / `v_src` must each point at ≥ `n_tokens *
 /// kv_width` F16 elements.
 pub fn kv_append_f16_paged_prefill(
-    reg: &OpsRegistry,
-    stream: &HipStream,
-    k_src: DevicePtr,
-    v_src: DevicePtr,
-    k_pool: DevicePtr,
-    v_pool: DevicePtr,
-    block_table: DevicePtr,
-    n_tokens: usize,
-    kv_width: usize,
-    start_pos: usize,
-    page_size: usize,
+    ctx: crate::OpCtx<'_>,
+    buf: crate::KvAppendPagedPrefillBuffers,
+    shape: crate::KvAppendPagedPrefillShape,
 ) -> Result<()> {
     assert!(
-        page_size > 0 && page_size.is_power_of_two(),
-        "kv_append_f16_paged_prefill: page_size {page_size} must be a positive power of two"
+        shape.page_size > 0 && shape.page_size.is_power_of_two(),
+        "kv_append_f16_paged_prefill: page_size {} must be a positive power of two",
+        shape.page_size
     );
-    let module = reg.expect_module("kv_append_f16_paged_prefill")?;
+    let module = ctx.reg.expect_module("kv_append_f16_paged_prefill")?;
     let kernel = module.kernel("flambeau_kv_append_f16_paged_prefill")?;
 
-    let n_tokens_i = n_tokens as i32;
-    let kv_width_i = kv_width as i32;
-    let start_pos_i = start_pos as i32;
-    let page_size_i = page_size as i32;
-    let k_src_ptr: u64 = k_src.as_usize() as u64;
-    let v_src_ptr: u64 = v_src.as_usize() as u64;
-    let k_pool_ptr: u64 = k_pool.as_usize() as u64;
-    let v_pool_ptr: u64 = v_pool.as_usize() as u64;
-    let bt_ptr: u64 = block_table.as_usize() as u64;
+    let n_tokens_i = shape.n_tokens as i32;
+    let kv_width_i = shape.kv_width as i32;
+    let start_pos_i = shape.start_pos as i32;
+    let page_size_i = shape.page_size as i32;
+    let k_src_ptr: u64 = buf.k_src.as_usize() as u64;
+    let v_src_ptr: u64 = buf.v_src.as_usize() as u64;
+    let k_pool_ptr: u64 = buf.k_pool.as_usize() as u64;
+    let v_pool_ptr: u64 = buf.v_pool.as_usize() as u64;
+    let bt_ptr: u64 = buf.block_table.as_usize() as u64;
     let mut args = KernelArgs::new();
     args.push(&k_src_ptr);
     args.push(&v_src_ptr);
@@ -498,13 +483,13 @@ pub fn kv_append_f16_paged_prefill(
     args.push(&kv_width_i);
     args.push(&start_pos_i);
     args.push(&page_size_i);
-    let block_threads: u32 = kv_width.min(128) as u32;
+    let block_threads: u32 = shape.kv_width.min(128) as u32;
     let cfg = LaunchCfg {
-        grid: (n_tokens as u32, 1, 1),
+        grid: (shape.n_tokens as u32, 1, 1),
         block: (block_threads.max(1), 1, 1),
         shared_bytes: 0,
     };
-    unsafe { kernel.launch(stream, cfg, args)? };
+    unsafe { kernel.launch(ctx.stream, cfg, args)? };
     Ok(())
 }
 
@@ -521,26 +506,20 @@ pub fn kv_append_f16_paged_prefill(
 /// per slot from `k_src` / `v_src` (both `[N, kv_width]` slot-major)
 /// at `dst + write_pos * kv_width`.
 pub fn kv_append_f16_batched_slots(
-    reg: &OpsRegistry,
-    stream: &HipStream,
-    k_src: DevicePtr,
-    v_src: DevicePtr,
-    slot_k_dst_ptrs: DevicePtr,
-    slot_v_dst_ptrs: DevicePtr,
-    slot_write_pos: DevicePtr,
-    n_slots: usize,
-    kv_width: usize,
+    ctx: crate::OpCtx<'_>,
+    buf: crate::KvAppendBatchedSlotsBuffers,
+    shape: crate::KvAppendBatchedSlotsShape,
 ) -> Result<()> {
-    let module = reg.expect_module("kv_append_f16_batched_slots")?;
+    let module = ctx.reg.expect_module("kv_append_f16_batched_slots")?;
     let kernel = module.kernel("flambeau_kv_append_f16_batched_slots")?;
 
-    let n_slots_i = n_slots as i32;
-    let kv_width_i = kv_width as i32;
-    let k_src_ptr: u64 = k_src.as_usize() as u64;
-    let v_src_ptr: u64 = v_src.as_usize() as u64;
-    let k_dst_arr: u64 = slot_k_dst_ptrs.as_usize() as u64;
-    let v_dst_arr: u64 = slot_v_dst_ptrs.as_usize() as u64;
-    let wpos_ptr: u64 = slot_write_pos.as_usize() as u64;
+    let n_slots_i = shape.n_slots as i32;
+    let kv_width_i = shape.kv_width as i32;
+    let k_src_ptr: u64 = buf.k_src.as_usize() as u64;
+    let v_src_ptr: u64 = buf.v_src.as_usize() as u64;
+    let k_dst_arr: u64 = buf.slot_k_dst_ptrs.as_usize() as u64;
+    let v_dst_arr: u64 = buf.slot_v_dst_ptrs.as_usize() as u64;
+    let wpos_ptr: u64 = buf.slot_write_pos.as_usize() as u64;
     let mut args = KernelArgs::new();
     args.push(&k_src_ptr);
     args.push(&v_src_ptr);
@@ -549,13 +528,13 @@ pub fn kv_append_f16_batched_slots(
     args.push(&wpos_ptr);
     args.push(&n_slots_i);
     args.push(&kv_width_i);
-    let block_threads: u32 = kv_width.min(128) as u32;
+    let block_threads: u32 = shape.kv_width.min(128) as u32;
     let cfg = LaunchCfg {
-        grid: (n_slots as u32, 1, 1),
+        grid: (shape.n_slots as u32, 1, 1),
         block: (block_threads.max(1), 1, 1),
         shared_bytes: 0,
     };
-    unsafe { kernel.launch(stream, cfg, args)? };
+    unsafe { kernel.launch(ctx.stream, cfg, args)? };
     Ok(())
 }
 
@@ -1250,19 +1229,13 @@ fn push_scalar_maybe_slot<'a, T: 'a>(
 /// `write_pos`: starting row offset within the slot.
 /// `head_dim` ∈ {64, 128, 256, 512}.
 pub fn kv_append_v_unit_norm_f16(
-    reg: &OpsRegistry,
-    stream: &HipStream,
-    k_src: DevicePtr,
-    v_src: DevicePtr,
-    k_cache: DevicePtr,
-    v_cache: DevicePtr,
-    n_tokens: usize,
-    n_kv_heads: usize,
-    head_dim: usize,
+    ctx: crate::OpCtx<'_>,
+    buf: crate::KvAppendBuffers,
+    shape: crate::KvAppendVUnitShape,
     write_pos: usize,
     eps: f32,
 ) -> Result<()> {
-    let entry = match head_dim {
+    let entry = match shape.head_dim {
         64 => "flambeau_kv_append_v_unit_norm_f16_d64",
         128 => "flambeau_kv_append_v_unit_norm_f16_d128",
         256 => "flambeau_kv_append_v_unit_norm_f16_d256",
@@ -1271,16 +1244,15 @@ pub fn kv_append_v_unit_norm_f16(
             "kv_append_v_unit_norm_f16: head_dim {other} not in {{64, 128, 256, 512}}"
         ),
     };
-    let module = reg.expect_module("kv_append_v_unit_norm_f16")?;
+    let module = ctx.reg.expect_module("kv_append_v_unit_norm_f16")?;
     let kernel = module.kernel(entry)?;
 
-    let n_kv_heads_i = n_kv_heads as i32;
+    let n_kv_heads_i = shape.n_kv_heads as i32;
     let write_pos_i = write_pos as i32;
-    let eps_f = eps;
-    let k_src_p: u64 = k_src.as_usize() as u64;
-    let v_src_p: u64 = v_src.as_usize() as u64;
-    let k_dst_p: u64 = k_cache.as_usize() as u64;
-    let v_dst_p: u64 = v_cache.as_usize() as u64;
+    let k_src_p: u64 = buf.k_src.as_usize() as u64;
+    let v_src_p: u64 = buf.v_src.as_usize() as u64;
+    let k_dst_p: u64 = buf.k_dst.as_usize() as u64;
+    let v_dst_p: u64 = buf.v_dst.as_usize() as u64;
     let mut args = flambeau_backend_hip::KernelArgs::new();
     args.push(&k_src_p);
     args.push(&v_src_p);
@@ -1288,12 +1260,12 @@ pub fn kv_append_v_unit_norm_f16(
     args.push(&v_dst_p);
     args.push(&n_kv_heads_i);
     args.push(&write_pos_i);
-    args.push(&eps_f);
+    args.push(&eps);
     let cfg = flambeau_backend_hip::LaunchCfg {
-        grid: (n_tokens as u32, n_kv_heads as u32, 1),
-        block: (head_dim as u32, 1, 1),
+        grid: (shape.n_tokens as u32, shape.n_kv_heads as u32, 1),
+        block: (shape.head_dim as u32, 1, 1),
         shared_bytes: 0,
     };
-    unsafe { kernel.launch(stream, cfg, args)? };
+    unsafe { kernel.launch(ctx.stream, cfg, args)? };
     Ok(())
 }
