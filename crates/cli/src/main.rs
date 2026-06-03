@@ -298,6 +298,11 @@ fn main() -> Result<()> {
             devices,
             mesh_mode,
         } => infer_main(&model, &prompt, max_tokens, &devices, &mesh_mode)?,
+        #[cfg(not(feature = "hip_serve"))]
+        Cmd::Serve { .. } => anyhow::bail!(
+            "`flambeau serve` requires building with --features hip_serve (needs ROCm + HIP devices)"
+        ),
+        #[cfg(feature = "hip_serve")]
         Cmd::Serve {
             model,
             devices,
@@ -356,6 +361,7 @@ fn main() -> Result<()> {
     Ok(())
 }
 
+#[cfg(feature = "hip_serve")]
 struct ServeArgs {
     model: String,
     devices: String,
@@ -380,13 +386,6 @@ struct ServeArgs {
     kv: String,
     default_system: Option<String>,
     embedding_max_tokens: usize,
-}
-
-#[cfg(not(feature = "hip_serve"))]
-fn serve_cmd(_args: ServeArgs) -> Result<()> {
-    anyhow::bail!(
-        "`flambeau serve` requires building with --features hip_serve (needs ROCm + HIP devices)"
-    );
 }
 
 fn infer_main(

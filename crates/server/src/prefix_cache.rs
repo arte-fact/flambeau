@@ -244,7 +244,8 @@ struct PrefixCacheInner {
     /// the chain-equality check at lookup).
     by_terminal: HashMap<ChunkKey, Vec<CacheEntry>>,
     /// LRU order: front = most recently touched. Populated by
-    /// `insert_with_kv` (#229).
+    /// `insert_with_kv`, which only exists when the `hip` feature is on.
+    #[cfg(feature = "hip")]
     lru_order: std::collections::VecDeque<ChunkKey>,
     /// Total VRAM used by all entries.
     used_bytes: usize,
