@@ -458,15 +458,19 @@ pub fn standard_attn_local<H: TopologyHooks>(
         let v_f16_view = unsafe { Tensor::<F16>::from_raw(state.pool.v_f16, n * kv_width) };
         if !is_kv_shared {
             flambeau_model_ops::kv_append_f16_paged_prefill(
-                &k_f16_rope,
-                &v_f16_view,
-                paged_cache.k_pool,
-                paged_cache.v_pool,
-                slot_block_table_ptr,
-                n,
-                kv_width,
-                start_position,
-                page_size,
+                flambeau_ops::KvAppendPagedPrefillBuffers {
+                    k_src: k_f16_rope.ptr,
+                    v_src: v_f16_view.ptr,
+                    k_pool: paged_cache.k_pool,
+                    v_pool: paged_cache.v_pool,
+                    block_table: slot_block_table_ptr,
+                },
+                flambeau_ops::KvAppendPagedPrefillShape {
+                    n_tokens: n,
+                    kv_width,
+                    start_pos: start_position,
+                    page_size,
+                },
                 &ops,
             )?;
         }
@@ -477,31 +481,28 @@ pub fn standard_attn_local<H: TopologyHooks>(
         // earlier per-token `attn_decode_f16_paged` loop was the E3d
         // stub; this slice replaces it with the real multi-row paged
         // kernel — one launch instead of L.
-        let q_view = unsafe {
-            Tensor::<F16>::from_raw(state.pool.q_f16, n * weights.n_heads * weights.head_dim)
-        };
-        let mut out_view = unsafe {
-            Tensor::<F16>::from_raw(
-                state.pool.attn_out_f16,
-                n * weights.n_heads * weights.head_dim,
-            )
-        };
         flambeau_model_ops::attn_prefill_f16_paged(
-            &q_view,
-            paged_cache.k_pool,
-            paged_cache.v_pool,
-            slot_block_table_ptr,
-            &mut out_view,
-            n,
-            weights.n_heads,
-            weights.n_kv_heads,
-            weights.head_dim,
-            start_position + n,
-            start_position,
-            page_size,
-            scale,
-            // window_size guard above already bailed on SWA when paged on.
-            0,
+            flambeau_ops::AttnPagedPrefillBuffers {
+                q: state.pool.q_f16,
+                k_pool: paged_cache.k_pool,
+                v_pool: paged_cache.v_pool,
+                block_table: slot_block_table_ptr,
+                out: state.pool.attn_out_f16,
+            },
+            flambeau_ops::AttnPrefillPagedShape {
+                n_q_tokens: n,
+                n_heads_q: weights.n_heads,
+                n_heads_kv: weights.n_kv_heads,
+                head_dim: weights.head_dim,
+                n_k_tokens: start_position + n,
+                q_offset: start_position,
+                page_size,
+            },
+            flambeau_ops::AttnKnobs {
+                scale,
+                // window_size guard above already bailed on SWA when paged on.
+                window_size: 0,
+            },
             &ops,
         )?;
         // Suppress unused-mpps lint when the paged-prefill kernel
@@ -924,36 +925,41 @@ pub fn standard_attn_local<H: TopologyHooks>(
         let v_src_full = unsafe { Tensor::<F16>::from_raw(state.pool.v_f16, n * kv_width) };
         if !is_kv_shared {
             flambeau_model_ops::kv_append_f16_paged_slots(
-                &k_src_full,
-                &v_src_full,
-                paged_cache.k_pool,
-                paged_cache.v_pool,
-                paged_cache.block_tables,
-                state.pool.attn_slot_write_pos,
-                n,
-                kv_width,
-                page_size,
-                mpps,
+                flambeau_ops::KvAppendPagedSlotsBuffers {
+                    k_src: k_src_full.ptr,
+                    v_src: v_src_full.ptr,
+                    k_pool: paged_cache.k_pool,
+                    v_pool: paged_cache.v_pool,
+                    block_tables: paged_cache.block_tables,
+                    slot_write_pos: state.pool.attn_slot_write_pos,
+                },
+                flambeau_ops::KvAppendPagedSlotsShape {
+                    n_slots: n,
+                    kv_width,
+                    page_size,
+                    max_pages_per_slot: mpps,
+                },
                 &ops,
             )?;
         }
         let _ = (&k_src_full, &v_src_full);
-        let q_batched = unsafe { Tensor::<F16>::from_raw(state.pool.q_f16, n * q_width) };
-        let mut attn_out_batched =
-            unsafe { Tensor::<F16>::from_raw(state.pool.attn_out_f16, n * q_width) };
         flambeau_model_ops::attn_decode_f16_paged(
-            &q_batched,
-            paged_cache.k_pool,
-            paged_cache.v_pool,
-            paged_cache.block_tables,
-            &mut attn_out_batched,
-            state.pool.attn_slot_n_kv,
-            weights.n_heads,
-            weights.n_kv_heads,
-            weights.head_dim,
-            n,
-            page_size,
-            mpps,
+            flambeau_ops::AttnPagedDecodeBuffers {
+                q_batched: state.pool.q_f16,
+                k_pool: paged_cache.k_pool,
+                v_pool: paged_cache.v_pool,
+                block_tables: paged_cache.block_tables,
+                out_batched: state.pool.attn_out_f16,
+                n_tokens_kv_ptrs: state.pool.attn_slot_n_kv,
+            },
+            flambeau_ops::AttnDecodePagedShape {
+                n_heads_q: weights.n_heads,
+                n_heads_kv: weights.n_kv_heads,
+                head_dim: weights.head_dim,
+                n_slots: n,
+                page_size,
+                max_pages_per_slot: mpps,
+            },
             scale,
             &ops,
         )?;
@@ -1073,16 +1079,18 @@ pub fn standard_attn_local<H: TopologyHooks>(
         let v_src_full = unsafe { Tensor::<F16>::from_raw(state.pool.v_f16, n * kv_width) };
         if !is_kv_shared {
             flambeau_model_ops::kv_append_f16_batched_slots(
-                &k_src_full,
-                &v_src_full,
-                state.pool.attn_slot_k_dst_ptrs,
-                state.pool.attn_slot_v_dst_ptrs,
-                state.pool.attn_slot_write_pos,
-                n,
-                kv_width,
+                flambeau_ops::KvAppendBatchedSlotsBuffers {
+                    k_src: k_src_full.ptr,
+                    v_src: v_src_full.ptr,
+                    slot_k_dst_ptrs: state.pool.attn_slot_k_dst_ptrs,
+                    slot_v_dst_ptrs: state.pool.attn_slot_v_dst_ptrs,
+                    slot_write_pos: state.pool.attn_slot_write_pos,
+                },
+                flambeau_ops::KvAppendBatchedSlotsShape { n_slots: n, kv_width },
                 &ops,
             )?;
         }
+        let _ = (&k_src_full, &v_src_full);
         // Step 2: when SWA windowing applies, replace the slot ptr
         // arrays with the offset (window-start) ptrs before
         // attention. The kv_append above already landed against the
@@ -1114,22 +1122,24 @@ pub fn standard_attn_local<H: TopologyHooks>(
             }
             flambeau_core::Stream::synchronize(state.stream)?;
         }
-        let _ = (&k_src_full, &v_src_full);
-        let q_batched = unsafe { Tensor::<F16>::from_raw(state.pool.q_f16, n * q_width) };
-        let mut attn_out_batched =
-            unsafe { Tensor::<F16>::from_raw(state.pool.attn_out_f16, n * q_width) };
         flambeau_model_ops::attn_decode_f16_batched(
-            &q_batched,
-            state.pool.attn_slot_k_dst_ptrs,
-            state.pool.attn_slot_v_dst_ptrs,
-            &mut attn_out_batched,
-            state.pool.attn_slot_n_kv,
-            weights.n_heads,
-            weights.n_kv_heads,
-            weights.head_dim,
-            n,
-            scale,
-            kernel_window,
+            flambeau_ops::AttnBatchedBuffers {
+                q_batched: state.pool.q_f16,
+                k_cache_ptrs: state.pool.attn_slot_k_dst_ptrs,
+                v_cache_ptrs: state.pool.attn_slot_v_dst_ptrs,
+                out_batched: state.pool.attn_out_f16,
+                n_tokens_kv_ptrs: state.pool.attn_slot_n_kv,
+            },
+            flambeau_ops::AttnDecodeBatchedShape {
+                n_heads_q: weights.n_heads,
+                n_heads_kv: weights.n_kv_heads,
+                head_dim: weights.head_dim,
+                n_slots: n,
+            },
+            flambeau_ops::AttnKnobs {
+                scale,
+                window_size: kernel_window,
+            },
             &ops,
         )?;
     }

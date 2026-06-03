@@ -520,16 +520,18 @@ pub fn standard_attn_mixed_local<H: TopologyHooks>(
                 .context("standard_attn_mixed: attn_slot_n_kv HtoD")?;
         }
         flambeau_core::Stream::synchronize(state.stream)?;
-        let k_dec_src = unsafe { Tensor::<F16>::from_raw(k_dec_ptr, n_dec * kv_width) };
-        let v_dec_src = unsafe { Tensor::<F16>::from_raw(v_dec_ptr, n_dec * kv_width) };
         flambeau_model_ops::kv_append_f16_batched_slots(
-            &k_dec_src,
-            &v_dec_src,
-            state.pool.attn_slot_k_dst_ptrs,
-            state.pool.attn_slot_v_dst_ptrs,
-            state.pool.attn_slot_write_pos,
-            n_dec,
-            kv_width,
+            flambeau_ops::KvAppendBatchedSlotsBuffers {
+                k_src: k_dec_ptr,
+                v_src: v_dec_ptr,
+                slot_k_dst_ptrs: state.pool.attn_slot_k_dst_ptrs,
+                slot_v_dst_ptrs: state.pool.attn_slot_v_dst_ptrs,
+                slot_write_pos: state.pool.attn_slot_write_pos,
+            },
+            flambeau_ops::KvAppendBatchedSlotsShape {
+                n_slots: n_dec,
+                kv_width,
+            },
             &ops,
         )?;
         if any_offset {
@@ -557,20 +559,24 @@ pub fn standard_attn_mixed_local<H: TopologyHooks>(
             }
             flambeau_core::Stream::synchronize(state.stream)?;
         }
-        let q_dec = unsafe { Tensor::<F16>::from_raw(q_dec_ptr, n_dec * q_width) };
-        let mut out_dec = unsafe { Tensor::<F16>::from_raw(out_dec_ptr, n_dec * q_width) };
         flambeau_model_ops::attn_decode_f16_batched(
-            &q_dec,
-            state.pool.attn_slot_k_dst_ptrs,
-            state.pool.attn_slot_v_dst_ptrs,
-            &mut out_dec,
-            state.pool.attn_slot_n_kv,
-            weights.n_heads,
-            weights.n_kv_heads,
-            weights.head_dim,
-            n_dec,
-            scale,
-            kernel_window,
+            flambeau_ops::AttnBatchedBuffers {
+                q_batched: q_dec_ptr,
+                k_cache_ptrs: state.pool.attn_slot_k_dst_ptrs,
+                v_cache_ptrs: state.pool.attn_slot_v_dst_ptrs,
+                out_batched: out_dec_ptr,
+                n_tokens_kv_ptrs: state.pool.attn_slot_n_kv,
+            },
+            flambeau_ops::AttnDecodeBatchedShape {
+                n_heads_q: weights.n_heads,
+                n_heads_kv: weights.n_kv_heads,
+                head_dim: weights.head_dim,
+                n_slots: n_dec,
+            },
+            flambeau_ops::AttnKnobs {
+                scale,
+                window_size: kernel_window,
+            },
             &ops,
         )?;
     }
