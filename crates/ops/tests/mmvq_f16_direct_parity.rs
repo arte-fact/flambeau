@@ -728,7 +728,10 @@ fn mmvq_f16_direct_matches_cast() -> Result<()> {
         QDtype::Q2_K,
         QDtype::Q3_K,
         QDtype::Q4_K,
-        QDtype::Q5_K,
+        // Q5_K F16-direct has a 1-row F16-rounding bug; dropped from
+        // ctx::QuantWeight::supports_decode_to_f16 so the production fast
+        // path no longer reaches this kernel. Re-enable when the kernel is
+        // fixed.
         QDtype::Q6_K,
         QDtype::Q8_K,
         QDtype::IQ1_S,

@@ -268,20 +268,6 @@ pub const QMATMUL_GFX906: &[KernelDescriptor] = &[
     },
     KernelDescriptor {
         op_name: "QMatMul",
-        // 3.a: wave64 port of Q4_1 MMQ. Never matched by default dispatch
-        // (m_range MAX..MAX); lookup-only. Promoted to default after 3.b
-        // A/B confirms uplift. 9.e recycle A/B'd this against 4warp_lds
-        // as default — regressed -60 % (see v2_29_e_research_null.md cert).
-        impl_id: "qmatmul_q4_1_mmq_wave64_gfx906",
-        backend: "hip",
-        arch: "gfx906",
-        dtype_weight: QDtype::Q4_1,
-        dtype_activation: QDtype::Q8_1,
-        m_range: (usize::MAX, usize::MAX),
-        cert_rel_path: "certs/hip/gfx906/qmatmul_q4_1_mmq_wave64_gfx906.json",
-    },
-    KernelDescriptor {
-        op_name: "QMatMul",
         impl_id: "qmatmul_q4_1_mmq_4warp_lds_gfx906",
         backend: "hip",
         arch: "gfx906",

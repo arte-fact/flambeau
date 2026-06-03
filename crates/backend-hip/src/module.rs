@@ -431,7 +431,21 @@ impl HipKernel<'_> {
                 ptr::null_mut(),
             )
         };
-        check(code, "hipModuleLaunchKernel")
+        if code == HIP_SUCCESS {
+            Ok(())
+        } else {
+            Err(DeviceError::Backend {
+                backend: BACKEND,
+                code,
+                message: format!(
+                    "hipModuleLaunchKernel({}) grid={:?} block={:?}: {}",
+                    self.name,
+                    cfg.grid,
+                    cfg.block,
+                    error_string(code)
+                ),
+            })
+        }
     }
 
     /// Lower-latency launch: caller pre-built the arg pointer array.
@@ -471,6 +485,20 @@ impl HipKernel<'_> {
                 ptr::null_mut(),
             )
         };
-        check(code, "hipModuleLaunchKernel")
+        if code == HIP_SUCCESS {
+            Ok(())
+        } else {
+            Err(DeviceError::Backend {
+                backend: BACKEND,
+                code,
+                message: format!(
+                    "hipModuleLaunchKernel({}) grid={:?} block={:?}: {}",
+                    self.name,
+                    cfg.grid,
+                    cfg.block,
+                    error_string(code)
+                ),
+            })
+        }
     }
 }

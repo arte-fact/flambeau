@@ -1,10 +1,10 @@
 {
   "schema_version": 1,
-  "impl_id": "qmatmul_iq1_m_mmvq_nw1_r2_gfx906",
+  "impl_id": "qmatmul_q6_K_mmvq_single_row_gfx906",
   "backend": "hip",
   "arch": "gfx906",
   "op": "qmatmul_mmvq",
-  "dtype_weight": "IQ1_M",
+  "dtype_weight": "Q6_K",
   "dtype_activation": "Q8_1",
   "tolerance_formula": "|err| <= 3e-2 * max(|ref|, sqrt(k))",
   "results": [
@@ -13,7 +13,7 @@
       "k": 2048,
       "n": 2048,
       "seed": 13532696731359440213,
-      "max_rel_err": 2.0121622e-8,
+      "max_rel_err": 0.000003756841,
       "tolerance": 0.03,
       "pass": true
     },
@@ -22,7 +22,7 @@
       "k": 5120,
       "n": 5120,
       "seed": 6161625717786667349,
-      "max_rel_err": 3.6433346e-7,
+      "max_rel_err": 0.000039371505,
       "tolerance": 0.03,
       "pass": true
     },
@@ -31,7 +31,7 @@
       "k": 15360,
       "n": 15360,
       "seed": 38133079586976085,
-      "max_rel_err": 4.5688626e-9,
+      "max_rel_err": 0.000057926827,
       "tolerance": 0.03,
       "pass": true
     },
@@ -40,7 +40,7 @@
       "k": 2048,
       "n": 2048,
       "seed": 13532696731493061414,
-      "max_rel_err": 1.9252137e-7,
+      "max_rel_err": 0.0012432904,
       "tolerance": 0.03,
       "pass": true
     },
@@ -49,7 +49,7 @@
       "k": 5120,
       "n": 5120,
       "seed": 6161625717920288550,
-      "max_rel_err": 1.2271134e-7,
+      "max_rel_err": 0.0006643743,
       "tolerance": 0.03,
       "pass": true
     },
@@ -58,7 +58,7 @@
       "k": 15360,
       "n": 15360,
       "seed": 38133079720597286,
-      "max_rel_err": 2.735306e-7,
+      "max_rel_err": 0.0006019279,
       "tolerance": 0.03,
       "pass": true
     },
@@ -67,7 +67,7 @@
       "k": 2048,
       "n": 2048,
       "seed": 13532696731645771358,
-      "max_rel_err": 1.9196573e-7,
+      "max_rel_err": 0.0010100473,
       "tolerance": 0.03,
       "pass": true
     },
@@ -76,7 +76,7 @@
       "k": 5120,
       "n": 5120,
       "seed": 6161625718072998494,
-      "max_rel_err": 2.4198656e-7,
+      "max_rel_err": 0.0035530857,
       "tolerance": 0.03,
       "pass": true
     },
@@ -85,7 +85,7 @@
       "k": 15360,
       "n": 15360,
       "seed": 38133079873307230,
-      "max_rel_err": 1.7858392e-7,
+      "max_rel_err": 0.0013667471,
       "tolerance": 0.03,
       "pass": true
     },
@@ -94,7 +94,7 @@
       "k": 2048,
       "n": 2048,
       "seed": 13532696733783710574,
-      "max_rel_err": 2.7099108e-7,
+      "max_rel_err": 0.0024149409,
       "tolerance": 0.03,
       "pass": true
     },
@@ -103,7 +103,7 @@
       "k": 5120,
       "n": 5120,
       "seed": 6161625720210937710,
-      "max_rel_err": 2.787427e-7,
+      "max_rel_err": 0.003223644,
       "tolerance": 0.03,
       "pass": true
     },
@@ -112,7 +112,7 @@
       "k": 15360,
       "n": 15360,
       "seed": 38133082011246446,
-      "max_rel_err": 2.9183892e-7,
+      "max_rel_err": 0.003832689,
       "tolerance": 0.03,
       "pass": true
     },
@@ -121,7 +121,7 @@
       "k": 2048,
       "n": 2048,
       "seed": 13532696741113787886,
-      "max_rel_err": 3.079519e-7,
+      "max_rel_err": 0.0035189297,
       "tolerance": 0.03,
       "pass": true
     },
@@ -130,7 +130,7 @@
       "k": 5120,
       "n": 5120,
       "seed": 6161625727541015022,
-      "max_rel_err": 3.9494623e-7,
+      "max_rel_err": 0.0036613771,
       "tolerance": 0.03,
       "pass": true
     },
@@ -139,18 +139,18 @@
       "k": 15360,
       "n": 15360,
       "seed": 38133089341323758,
-      "max_rel_err": 3.9162967e-7,
+      "max_rel_err": 0.0040032086,
       "tolerance": 0.03,
       "pass": true
     }
   ],
   "pass": true,
-  "emitted_at": "2026-05-13T08:08:11Z",
+  "emitted_at": "2026-05-21T14:00:03Z",
   "rig": "threadreaper-gfx906",
   "pmc": {
-    "vgpr_count": 33,
+    "vgpr_count": 22,
     "sgpr_count": null,
-    "waves_per_simd": 7,
+    "waves_per_simd": 10,
     "mem_busy_pct": null,
     "valu_busy_pct": null
   }

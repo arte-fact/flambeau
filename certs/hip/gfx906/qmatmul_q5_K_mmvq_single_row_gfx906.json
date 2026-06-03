@@ -1,10 +1,10 @@
 {
   "schema_version": 1,
-  "impl_id": "qmatmul_q3_K_mmvq_dp4a_gfx906",
+  "impl_id": "qmatmul_q5_K_mmvq_single_row_gfx906",
   "backend": "hip",
   "arch": "gfx906",
   "op": "qmatmul_mmvq",
-  "dtype_weight": "Q3_K",
+  "dtype_weight": "Q5_K",
   "dtype_activation": "Q8_1",
   "tolerance_formula": "|err| <= 3e-2 * max(|ref|, sqrt(k))",
   "results": [
@@ -13,7 +13,7 @@
       "k": 2048,
       "n": 2048,
       "seed": 13532696731359440213,
-      "max_rel_err": 0.000017198183,
+      "max_rel_err": 0.00010616088,
       "tolerance": 0.03,
       "pass": true
     },
@@ -22,7 +22,7 @@
       "k": 5120,
       "n": 5120,
       "seed": 6161625717786667349,
-      "max_rel_err": 0.00011929896,
+      "max_rel_err": 0.000026828724,
       "tolerance": 0.03,
       "pass": true
     },
@@ -31,7 +31,7 @@
       "k": 15360,
       "n": 15360,
       "seed": 38133079586976085,
-      "max_rel_err": 0.00019288102,
+      "max_rel_err": 0.000014518196,
       "tolerance": 0.03,
       "pass": true
     },
@@ -40,7 +40,7 @@
       "k": 2048,
       "n": 2048,
       "seed": 13532696731493061414,
-      "max_rel_err": 0.000473562,
+      "max_rel_err": 0.0005512187,
       "tolerance": 0.03,
       "pass": true
     },
@@ -49,7 +49,7 @@
       "k": 5120,
       "n": 5120,
       "seed": 6161625717920288550,
-      "max_rel_err": 0.0003720379,
+      "max_rel_err": 0.0020007945,
       "tolerance": 0.03,
       "pass": true
     },
@@ -58,7 +58,7 @@
       "k": 15360,
       "n": 15360,
       "seed": 38133079720597286,
-      "max_rel_err": 0.00028137938,
+      "max_rel_err": 0.00045447162,
       "tolerance": 0.03,
       "pass": true
     },
@@ -67,7 +67,7 @@
       "k": 2048,
       "n": 2048,
       "seed": 13532696731645771358,
-      "max_rel_err": 0.00045712473,
+      "max_rel_err": 0.0009883015,
       "tolerance": 0.03,
       "pass": true
     },
@@ -76,7 +76,7 @@
       "k": 5120,
       "n": 5120,
       "seed": 6161625718072998494,
-      "max_rel_err": 0.00048439295,
+      "max_rel_err": 0.0034186023,
       "tolerance": 0.03,
       "pass": true
     },
@@ -85,7 +85,7 @@
       "k": 15360,
       "n": 15360,
       "seed": 38133079873307230,
-      "max_rel_err": 0.00022435327,
+      "max_rel_err": 0.0021779665,
       "tolerance": 0.03,
       "pass": true
     },
@@ -94,7 +94,7 @@
       "k": 2048,
       "n": 2048,
       "seed": 13532696733783710574,
-      "max_rel_err": 0.00048325578,
+      "max_rel_err": 0.004707466,
       "tolerance": 0.03,
       "pass": true
     },
@@ -103,7 +103,7 @@
       "k": 5120,
       "n": 5120,
       "seed": 6161625720210937710,
-      "max_rel_err": 0.00045635086,
+      "max_rel_err": 0.003154418,
       "tolerance": 0.03,
       "pass": true
     },
@@ -112,7 +112,7 @@
       "k": 15360,
       "n": 15360,
       "seed": 38133082011246446,
-      "max_rel_err": 0.0004478601,
+      "max_rel_err": 0.009796319,
       "tolerance": 0.03,
       "pass": true
     },
@@ -121,7 +121,7 @@
       "k": 2048,
       "n": 2048,
       "seed": 13532696741113787886,
-      "max_rel_err": 0.0006252907,
+      "max_rel_err": 0.00548752,
       "tolerance": 0.03,
       "pass": true
     },
@@ -130,7 +130,7 @@
       "k": 5120,
       "n": 5120,
       "seed": 6161625727541015022,
-      "max_rel_err": 0.00068224716,
+      "max_rel_err": 0.007652208,
       "tolerance": 0.03,
       "pass": true
     },
@@ -139,18 +139,18 @@
       "k": 15360,
       "n": 15360,
       "seed": 38133089341323758,
-      "max_rel_err": 0.00073157204,
+      "max_rel_err": 0.0061332257,
       "tolerance": 0.03,
       "pass": true
     }
   ],
   "pass": true,
-  "emitted_at": "2026-06-02T08:19:35Z",
+  "emitted_at": "2026-05-21T14:00:03Z",
   "rig": "threadreaper-gfx906",
   "pmc": {
-    "vgpr_count": 28,
+    "vgpr_count": 32,
     "sgpr_count": null,
-    "waves_per_simd": 9,
+    "waves_per_simd": 8,
     "mem_busy_pct": null,
     "valu_busy_pct": null
   }

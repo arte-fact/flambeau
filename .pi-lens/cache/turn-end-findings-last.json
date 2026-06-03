@@ -1,0 +1,4 @@
+{
+  "signature": "bench_final.sh::Unresolved from this turn — bench_final.sh:\n🔴 STOP — 1 issue(s) must be fixed:\n  L73: [SC2034] P_TEXT appears unused. Verify use (or export if used externally).\n    💡 Fix: Remove the unused declaration or rename with '_' prefix if intentionally unused.",
+  "sessionId": "lens-mpfg0ijk-f7507db8"
+}

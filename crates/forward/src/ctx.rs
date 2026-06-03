@@ -298,6 +298,9 @@ impl QuantWeight {
     /// this; unsupported dtypes (F16, BF16) keep the F32+cast pair.
     pub fn supports_decode_to_f16(&self) -> bool {
         use flambeau_core::op::QDtype;
+        // Q5_K's F16-direct kernel diverges from F32+cast in 1/12288 rows
+        // (mmvq_f16_direct_parity caught it); kept on the slow F32+cast
+        // pair until the kernel is fixed.
         matches!(
             self.dtype,
             QDtype::Q4_0
@@ -308,7 +311,6 @@ impl QuantWeight {
                 | QDtype::Q2_K
                 | QDtype::Q3_K
                 | QDtype::Q4_K
-                | QDtype::Q5_K
                 | QDtype::Q6_K
                 | QDtype::Q8_K
                 | QDtype::IQ1_S
