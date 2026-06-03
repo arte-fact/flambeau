@@ -112,17 +112,31 @@ fn seeded_f32(seed: u64, n: usize, lo: f32) -> Vec<f32> {
 
 /// Reference single-query attention over a half-open key range
 /// `[t_start, t_end)`. Returns the per-head output `[n_heads_q, head_dim]`.
-fn cpu_decode_attn_ref(
-    q: &[f32],
-    k: &[f32],
-    v: &[f32],
+/// CPU-reference parameters for [`cpu_decode_attn_ref`].
+#[derive(Copy, Clone, Debug)]
+struct CpuDecodeAttnRef {
     n_heads_q: usize,
     n_heads_kv: usize,
     head_dim: usize,
     t_start: usize,
     t_end: usize,
     scale: f32,
+}
+
+fn cpu_decode_attn_ref(
+    q: &[f32],
+    k: &[f32],
+    v: &[f32],
+    args: CpuDecodeAttnRef,
 ) -> Vec<f32> {
+    let CpuDecodeAttnRef {
+        n_heads_q,
+        n_heads_kv,
+        head_dim,
+        t_start,
+        t_end,
+        scale,
+    } = args;
     let group = n_heads_q / n_heads_kv;
     let mut out = vec![0.0f32; n_heads_q * head_dim];
     for qh in 0..n_heads_q {
@@ -216,7 +230,17 @@ fn swa_decode_window_4_of_8() {
     let v_ref: Vec<f32> = v_f16.iter().map(|v| v.to_f32()).collect();
     // qpos = n_tokens - 1 = 7; window = 4 → t_start = 7 - 4 + 1 = 4.
     let reference = cpu_decode_attn_ref(
-        &q_ref, &k_ref, &v_ref, n_heads_q, n_heads_kv, head_dim, 4, n_tokens, scale,
+        &q_ref,
+        &k_ref,
+        &v_ref,
+        CpuDecodeAttnRef {
+            n_heads_q,
+            n_heads_kv,
+            head_dim,
+            t_start: 4,
+            t_end: n_tokens,
+            scale,
+        },
     );
 
     let err = max_abs_diff(&got, &reference);
@@ -502,7 +526,17 @@ fn swa_prefill_window_3_of_8() {
         let t_end = (qpos + 1).min(n_k);
         let q_slice = &q_ref[q_idx * n_heads_q * head_dim..(q_idx + 1) * n_heads_q * head_dim];
         let per_q = cpu_decode_attn_ref(
-            q_slice, &k_ref, &v_ref, n_heads_q, n_heads_kv, head_dim, t_start, t_end, scale,
+            q_slice,
+            &k_ref,
+            &v_ref,
+            CpuDecodeAttnRef {
+                n_heads_q,
+                n_heads_kv,
+                head_dim,
+                t_start,
+                t_end,
+                scale,
+            },
         );
         reference[q_idx * n_heads_q * head_dim..(q_idx + 1) * n_heads_q * head_dim]
             .copy_from_slice(&per_q);
@@ -671,7 +705,17 @@ fn swa_prefill_flash_tile_window_4() {
         let t_end = (qpos + 1).min(n_k);
         let q_slice = &q_ref[q_idx * n_heads_q * head_dim..(q_idx + 1) * n_heads_q * head_dim];
         let per_q = cpu_decode_attn_ref(
-            q_slice, &k_ref, &v_ref, n_heads_q, n_heads_kv, head_dim, t_start, t_end, scale,
+            q_slice,
+            &k_ref,
+            &v_ref,
+            CpuDecodeAttnRef {
+                n_heads_q,
+                n_heads_kv,
+                head_dim,
+                t_start,
+                t_end,
+                scale,
+            },
         );
         reference[q_idx * n_heads_q * head_dim..(q_idx + 1) * n_heads_q * head_dim]
             .copy_from_slice(&per_q);

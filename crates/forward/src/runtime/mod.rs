@@ -149,29 +149,22 @@ impl<A: Arch> Session<A> {
     pub fn new(
         file: GgufFile,
         topology: Topology,
-        ctx_cap: Option<usize>,
-        prefill_ubatch: usize,
-        max_slots: usize,
-        paged_kv_pages: Option<usize>,
-        kv_layout: KvLayout,
+        params: orchestrate::LaunchParams,
     ) -> Result<Self> {
+        let orchestrate::LaunchParams {
+            ctx_cap,
+            prefill_ubatch,
+            max_slots,
+            paged_kv_pages,
+            kv_layout,
+        } = params;
         if prefill_ubatch == 0 {
             anyhow::bail!("Session::new: prefill_ubatch must be > 0");
         }
         if max_slots == 0 {
             anyhow::bail!("Session::new: max_slots must be > 0");
         }
-        let handles = orchestrate::launch::<A>(
-            file,
-            &topology,
-            orchestrate::LaunchParams {
-                ctx_cap,
-                prefill_ubatch,
-                max_slots,
-                paged_kv_pages,
-                kv_layout,
-            },
-        )?;
+        let handles = orchestrate::launch::<A>(file, &topology, params)?;
         Ok(Self {
             topology,
             handles,

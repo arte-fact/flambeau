@@ -682,13 +682,17 @@ impl ServerState {
                 decode_logits_owned.iter_mut().collect();
             self.model.forward_mixed_decode(
                 self,
-                prefill_inflight,
-                prefill_tokens,
-                prefill_start_position,
-                &mut prefill_logits,
-                decode_inflights.as_mut_slice(),
-                &decode_slots,
-                decode_logits_refs.as_mut_slice(),
+                flambeau_server_core::MixedBatchPrefill {
+                    inflight: prefill_inflight,
+                    tokens: prefill_tokens,
+                    start_position: prefill_start_position,
+                    logits_out: &mut prefill_logits,
+                },
+                flambeau_server_core::MixedBatchDecodes {
+                    inflights: decode_inflights.as_mut_slice(),
+                    slots: &decode_slots,
+                    logits_refs: decode_logits_refs.as_mut_slice(),
+                },
             )?;
         }
 

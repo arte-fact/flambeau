@@ -241,11 +241,13 @@ pub(crate) async fn serve_inner_v2(
         gguf_arch,
         shared_gguf,
         topology.clone(),
-        cfg.ctx_cap,
-        prefill_ubatch,
-        inflight_slots,
-        cfg.paged_kv_pages,
-        kv_layout,
+        flambeau_forward::LaunchParams {
+            ctx_cap: cfg.ctx_cap,
+            prefill_ubatch,
+            max_slots: inflight_slots,
+            paged_kv_pages: cfg.paged_kv_pages,
+            kv_layout,
+        },
     )
     .with_context(|| format!("v2 shared session ({gguf_arch})"))?;
     let shared: crate::v2_handle::SharedV2Session = Arc::new(Mutex::new(shared_session));
@@ -406,48 +408,20 @@ fn create_v2_shared_session(
     gguf_arch: &str,
     file: GgufFile,
     topology: flambeau_forward::Topology,
-    ctx_cap: Option<usize>,
-    prefill_ubatch: usize,
-    max_slots: usize,
-    paged_kv_pages: Option<usize>,
-    kv_layout: flambeau_forward::KvLayout,
+    params: flambeau_forward::LaunchParams,
 ) -> Result<Box<dyn crate::v2_handle::V2BatchableSession>> {
     use flambeau_forward::Session;
     match gguf_arch {
         "qwen35" => {
-            let s = Session::<flambeau_qwen35_v2::Qwen35V2>::new(
-                file,
-                topology,
-                ctx_cap,
-                prefill_ubatch,
-                max_slots,
-                paged_kv_pages,
-                kv_layout,
-            )?;
+            let s = Session::<flambeau_qwen35_v2::Qwen35V2>::new(file, topology, params)?;
             Ok(Box::new(s))
         }
         "qwen35moe" => {
-            let s = Session::<flambeau_qwen35moe_v2::Qwen35MoeV2>::new(
-                file,
-                topology,
-                ctx_cap,
-                prefill_ubatch,
-                max_slots,
-                paged_kv_pages,
-                kv_layout,
-            )?;
+            let s = Session::<flambeau_qwen35moe_v2::Qwen35MoeV2>::new(file, topology, params)?;
             Ok(Box::new(s))
         }
         "gemma3" | "gemma4" | "gemma4-26b-a4b" | "gemma4-31b" | "gemma4-9b" | "gemma4-2b" => {
-            let s = Session::<flambeau_gemma4_v2::Gemma4V2>::new(
-                file,
-                topology,
-                ctx_cap,
-                prefill_ubatch,
-                max_slots,
-                paged_kv_pages,
-                kv_layout,
-            )?;
+            let s = Session::<flambeau_gemma4_v2::Gemma4V2>::new(file, topology, params)?;
             Ok(Box::new(s))
         }
         other => bail!("v2 serve: unsupported GGUF arch `{other}`"),

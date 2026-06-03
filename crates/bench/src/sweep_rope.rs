@@ -144,7 +144,12 @@ fn run_shape_cert(
     let d_pos = alloc_and_upload(dev, &positions);
 
     launch_rope(
-        dev, kernel, d_x, d_pos, theta_base, n_tokens, n_heads, head_dim,
+        dev,
+        kernel,
+        d_x,
+        d_pos,
+        theta_base,
+        RopeShape { n_tokens, n_heads, head_dim },
     )?;
 
     // Copy out the rotated tensor for the oracle check.
@@ -167,7 +172,12 @@ fn run_shape_cert(
     let neg_positions: Vec<i32> = positions.iter().map(|p| -p).collect();
     let d_neg_pos = alloc_and_upload(dev, &neg_positions);
     launch_rope(
-        dev, kernel, d_x, d_neg_pos, theta_base, n_tokens, n_heads, head_dim,
+        dev,
+        kernel,
+        d_x,
+        d_neg_pos,
+        theta_base,
+        RopeShape { n_tokens, n_heads, head_dim },
     )?;
 
     let mut got2 = vec![f16::from_f32(0.0); total];
@@ -194,16 +204,23 @@ fn run_shape_cert(
     Ok(oracle_err.max(roundtrip_err))
 }
 
+/// Shape for `launch_rope` — `(n_tokens, n_heads, head_dim)`.
+#[derive(Copy, Clone, Debug)]
+struct RopeShape {
+    n_tokens: usize,
+    n_heads: usize,
+    head_dim: usize,
+}
+
 fn launch_rope(
     dev: &HipDevice,
     kernel: &HipKernel<'_>,
     d_x: DevicePtr,
     d_pos: DevicePtr,
     theta_base: f32,
-    n_tokens: usize,
-    n_heads: usize,
-    head_dim: usize,
+    shape: RopeShape,
 ) -> Result<()> {
+    let RopeShape { n_tokens, n_heads, head_dim } = shape;
     let stream = dev.default_stream();
     let theta = theta_base;
     let n_heads_i = n_heads as i32;

@@ -34,6 +34,21 @@ pub trait SessionContext {
     fn extras(&self) -> Option<&dyn Any>;
 }
 
+/// Prefill leg of a mixed-batch dispatch.
+pub struct MixedBatchPrefill<'a> {
+    pub inflight: &'a mut dyn Session,
+    pub tokens: &'a [u32],
+    pub start_position: usize,
+    pub logits_out: &'a mut Vec<f32>,
+}
+
+/// Decode leg of a mixed-batch dispatch.
+pub struct MixedBatchDecodes<'a, 'b> {
+    pub inflights: &'a mut [&'b mut dyn Session],
+    pub slots: &'a [BatchSlot],
+    pub logits_refs: &'a mut [&'b mut Vec<f32>],
+}
+
 pub trait Model: Send + Sync + 'static {
     /// Topology label for handler metrics: `"pp"`, `"tp"`, `"pp+tp"`,
     /// `"gemma4_pp"`, …
@@ -124,13 +139,8 @@ pub trait Model: Send + Sync + 'static {
     fn forward_mixed_decode(
         &self,
         _ctx: &dyn SessionContext,
-        _prefill_inflight: &mut dyn Session,
-        _prefill_tokens: &[u32],
-        _prefill_start_position: usize,
-        _prefill_logits_out: &mut Vec<f32>,
-        _decode_inflights: &mut [&mut dyn Session],
-        _decode_slots: &[BatchSlot],
-        _decode_logits_refs: &mut [&mut Vec<f32>],
+        _prefill: MixedBatchPrefill<'_>,
+        _decodes: MixedBatchDecodes<'_, '_>,
     ) -> Result<()> {
         anyhow::bail!(
             "Model::forward_mixed_decode: not implemented for this arch \

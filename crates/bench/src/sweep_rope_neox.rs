@@ -53,10 +53,7 @@ pub fn run_sweep(repo_root: &Path) -> Result<Cert> {
         let max_rel_err = run_shape(
             &dev,
             &kernel,
-            n_tokens,
-            n_heads,
-            head_dim,
-            rotated_dims,
+            RopeNeoxShape { n_tokens, n_heads, head_dim, rotated_dims },
             theta_base,
             seed,
         )?;
@@ -99,16 +96,23 @@ pub fn run_sweep(repo_root: &Path) -> Result<Cert> {
     Ok(cert)
 }
 
-fn run_shape(
-    dev: &HipDevice,
-    kernel: &HipKernel<'_>,
+/// Shared shape for `sweep_rope_neox`'s `run_shape` + `launch` helpers.
+#[derive(Copy, Clone, Debug)]
+struct RopeNeoxShape {
     n_tokens: usize,
     n_heads: usize,
     head_dim: usize,
     rotated_dims: usize,
+}
+
+fn run_shape(
+    dev: &HipDevice,
+    kernel: &HipKernel<'_>,
+    shape: RopeNeoxShape,
     theta_base: f32,
     seed: u64,
 ) -> Result<f32> {
+    let RopeNeoxShape { n_tokens, n_heads, head_dim, rotated_dims } = shape;
     assert_eq!(rotated_dims % 2, 0);
     assert!(rotated_dims <= head_dim);
 
@@ -153,10 +157,7 @@ fn run_shape(
         d_x,
         d_pos,
         theta_base,
-        n_tokens,
-        n_heads,
-        head_dim,
-        rotated_dims,
+        RopeNeoxShape { n_tokens, n_heads, head_dim, rotated_dims },
     )?;
 
     let mut got1 = vec![f16::from_f32(0.0); total];
@@ -182,10 +183,7 @@ fn run_shape(
         d_x,
         d_neg_pos,
         theta_base,
-        n_tokens,
-        n_heads,
-        head_dim,
-        rotated_dims,
+        RopeNeoxShape { n_tokens, n_heads, head_dim, rotated_dims },
     )?;
 
     let mut got2 = vec![f16::from_f32(0.0); total];
@@ -217,11 +215,9 @@ fn launch(
     d_x: DevicePtr,
     d_pos: DevicePtr,
     theta_base: f32,
-    n_tokens: usize,
-    n_heads: usize,
-    head_dim: usize,
-    rotated_dims: usize,
+    shape: RopeNeoxShape,
 ) -> Result<()> {
+    let RopeNeoxShape { n_tokens, n_heads, head_dim, rotated_dims } = shape;
     let stream = dev.default_stream();
     let theta = theta_base;
     let n_heads_i = n_heads as i32;

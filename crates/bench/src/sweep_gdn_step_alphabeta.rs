@@ -65,7 +65,14 @@ pub fn run_sweep(repo_root: &Path) -> Result<Cert> {
     for (b, h_v, l, n_rep) in shapes {
         let seed = 0xC0FF1010
             ^ ((b as u64) * 1013 + (h_v as u64) * 47 + (l as u64) * 17 + (n_rep as u64) * 3);
-        let max_rel_err = run_shape(&dev, &kfused, &kab, &kstep, b, h_v, l, n_rep, seed)?;
+        let max_rel_err = run_shape(
+            &dev,
+            &kfused,
+            &kab,
+            &kstep,
+            GdnAlphaBetaShape { b, h_v, l, n_rep },
+            seed,
+        )?;
         // Fused vs unfused are arithmetically identical at FP32 — same
         // softplus/sigmoid/exp ops, same warp reductions. Tight tol.
         let tol = 1e-5;
@@ -107,17 +114,24 @@ pub fn run_sweep(repo_root: &Path) -> Result<Cert> {
     Ok(cert)
 }
 
+/// Shared shape for `sweep_gdn_step_alphabeta`'s `run_shape` harness.
+#[derive(Copy, Clone, Debug)]
+struct GdnAlphaBetaShape {
+    b: usize,
+    h_v: usize,
+    l: usize,
+    n_rep: usize,
+}
+
 fn run_shape(
     dev: &HipDevice,
     kfused: &HipKernel<'_>,
     kab: &HipKernel<'_>,
     kstep: &HipKernel<'_>,
-    b: usize,
-    h_v: usize,
-    l: usize,
-    n_rep: usize,
+    shape: GdnAlphaBetaShape,
     seed: u64,
 ) -> Result<f32> {
+    let GdnAlphaBetaShape { b, h_v, l, n_rep } = shape;
     assert!(h_v % n_rep == 0, "h_v must be a multiple of n_rep");
     let h_kv = h_v / n_rep;
 

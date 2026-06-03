@@ -61,7 +61,11 @@ pub fn run_sweep(repo_root: &Path) -> Result<Cert> {
         for n_tokens in contexts {
             let seed = 0xDECADE ^ (head_dim as u64 * 7919) ^ (n_tokens as u64 * 101);
             let (got, reference) = run_shape(
-                &dev, &k_chunk, &k_combine, head_dim, n_heads_q, n_heads_kv, n_tokens, seed,
+                &dev,
+                &k_chunk,
+                &k_combine,
+                SplitkShape { head_dim, n_heads_q, n_heads_kv, n_tokens },
+                seed,
             )?;
             let max_rel = max_rel_err_with_floor(&got, &reference, (head_dim as f32).sqrt() * 0.01);
             // Same tolerance as the single-pass cert: 2e-2 covers F16 round-trip
@@ -112,16 +116,23 @@ pub fn run_sweep(repo_root: &Path) -> Result<Cert> {
     Ok(cert)
 }
 
-fn run_shape(
-    dev: &HipDevice,
-    k_chunk: &HipKernel<'_>,
-    k_combine: &HipKernel<'_>,
+/// Shared shape for `sweep_attention_splitk`'s `run_shape` harness.
+#[derive(Copy, Clone, Debug)]
+struct SplitkShape {
     head_dim: usize,
     n_heads_q: usize,
     n_heads_kv: usize,
     n_tokens: usize,
+}
+
+fn run_shape(
+    dev: &HipDevice,
+    k_chunk: &HipKernel<'_>,
+    k_combine: &HipKernel<'_>,
+    shape: SplitkShape,
     seed: u64,
 ) -> Result<(Vec<f32>, Vec<f32>)> {
+    let SplitkShape { head_dim, n_heads_q, n_heads_kv, n_tokens } = shape;
     let q_len = n_heads_q * head_dim;
     let kv_len = n_tokens * n_heads_kv * head_dim;
     let q_f32 = seeded_f32_range(seed, q_len, -0.5, 0.5);

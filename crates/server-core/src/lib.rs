@@ -20,4 +20,6 @@ mod traits;
 #[cfg(feature = "hip")]
 pub use logits_sink::LogitsSink;
 #[cfg(feature = "hip")]
-pub use traits::{BatchSlot, Model, Session, SessionContext};
+pub use traits::{
+    BatchSlot, MixedBatchDecodes, MixedBatchPrefill, Model, Session, SessionContext,
+};

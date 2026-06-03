@@ -125,7 +125,12 @@ impl TopologyHooks for TpHooks {
             anyhow!("TpHooks::ar_postattn_residual_rmsnorm_f32_to_f16: bar coordinator not configured")
         })?;
         bar_ar_postattn_residual_rmsnorm_f32_to_f16(
-            bar, self.rank, bufs, n_rows, n, eps, device, stream,
+            bar,
+            self.rank,
+            bufs,
+            crate::runtime::ar::BarArPostAttnNormParams { n_rows, n, eps },
+            device,
+            stream,
         )
     }
 }
@@ -237,7 +242,12 @@ impl TopologyHooks for HybridHooks {
             anyhow!("HybridHooks::ar_postattn_residual_rmsnorm_f32_to_f16: bar coordinator not configured")
         })?;
         bar_ar_postattn_residual_rmsnorm_f32_to_f16(
-            bar, self.rank_in_stage, bufs, n_rows, n, eps, device, stream,
+            bar,
+            self.rank_in_stage,
+            bufs,
+            crate::runtime::ar::BarArPostAttnNormParams { n_rows, n, eps },
+            device,
+            stream,
         )
     }
 }

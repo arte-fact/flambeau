@@ -64,7 +64,17 @@ pub fn run_sweep(repo_root: &Path) -> Result<Cert> {
                 ^ (n_k as u64 * 31)
                 ^ (q_off as u64);
             let (got, reference) = run_shape(
-                &dev, &kernel, head_dim, n_heads_q, n_heads_kv, n_q, n_k, q_off, seed,
+                &dev,
+                &kernel,
+                PrefillShape {
+                    head_dim,
+                    n_heads_q,
+                    n_heads_kv,
+                    n_q_tokens: n_q,
+                    n_k_tokens: n_k,
+                    q_offset: q_off,
+                },
+                seed,
             )?;
             let max_rel = max_rel_err_with_floor(&got, &reference, (head_dim as f32).sqrt() * 0.01);
             let tol = 2e-2;
@@ -113,17 +123,31 @@ pub fn run_sweep(repo_root: &Path) -> Result<Cert> {
     Ok(cert)
 }
 
-fn run_shape(
-    dev: &HipDevice,
-    kernel: &HipKernel<'_>,
+/// Shared shape for the `run_shape*` harness fns.
+#[derive(Copy, Clone, Debug)]
+struct PrefillShape {
     head_dim: usize,
     n_heads_q: usize,
     n_heads_kv: usize,
     n_q_tokens: usize,
     n_k_tokens: usize,
     q_offset: usize,
+}
+
+fn run_shape(
+    dev: &HipDevice,
+    kernel: &HipKernel<'_>,
+    shape: PrefillShape,
     seed: u64,
 ) -> Result<(Vec<f32>, Vec<f32>)> {
+    let PrefillShape {
+        head_dim,
+        n_heads_q,
+        n_heads_kv,
+        n_q_tokens,
+        n_k_tokens,
+        q_offset,
+    } = shape;
     let q_len = n_q_tokens * n_heads_q * head_dim;
     let kv_len = n_k_tokens * n_heads_kv * head_dim;
     let q_f32 = seeded_f32_range(seed, q_len, -0.5, 0.5);
@@ -299,7 +323,17 @@ pub fn run_sweep_flash_tile(repo_root: &Path) -> Result<Cert> {
                 ^ (n_k as u64 * 31)
                 ^ (q_off as u64);
             let (got, reference) = run_shape_flash_tile(
-                &dev, kernel, head_dim, n_heads_q, n_heads_kv, n_q, n_k, q_off, seed,
+                &dev,
+                kernel,
+                PrefillShape {
+                    head_dim,
+                    n_heads_q,
+                    n_heads_kv,
+                    n_q_tokens: n_q,
+                    n_k_tokens: n_k,
+                    q_offset: q_off,
+                },
+                seed,
             )?;
             let max_rel = max_rel_err_with_floor(&got, &reference, (head_dim as f32).sqrt() * 0.01);
             let tol = 2e-2;
@@ -351,14 +385,17 @@ pub fn run_sweep_flash_tile(repo_root: &Path) -> Result<Cert> {
 fn run_shape_flash_tile(
     dev: &HipDevice,
     kernel: &HipKernel<'_>,
-    head_dim: usize,
-    n_heads_q: usize,
-    n_heads_kv: usize,
-    n_q_tokens: usize,
-    n_k_tokens: usize,
-    q_offset: usize,
+    shape: PrefillShape,
     seed: u64,
 ) -> Result<(Vec<f32>, Vec<f32>)> {
+    let PrefillShape {
+        head_dim,
+        n_heads_q,
+        n_heads_kv,
+        n_q_tokens,
+        n_k_tokens,
+        q_offset,
+    } = shape;
     let q_len = n_q_tokens * n_heads_q * head_dim;
     let kv_len = n_k_tokens * n_heads_kv * head_dim;
     let q_f32 = seeded_f32_range(seed, q_len, -0.5, 0.5);

@@ -30,6 +30,19 @@ use crate::harness::{
     alloc_and_upload, max_rel_err_with_floor as harness_err_floor, rig, seeded_f32_range,
 };
 
+/// Shared shape for `sweep_moe`'s `run_*_shape` harness fns. Field
+/// names match the original argument names; for the down variants
+/// `top_k` is unused (callers pass `1`).
+#[derive(Copy, Clone, Debug)]
+struct SweepMoeShape {
+    n_experts: usize,
+    n_rows: usize,
+    k_dim: usize,
+    top_k: usize,
+    n_tokens: usize,
+}
+
+
 const QK8: usize = QK8_0;
 
 // ---------------------------------------------------------------------------
@@ -210,7 +223,7 @@ pub fn run_indexed_moe_mmvq_sweep(repo_root: &Path) -> Result<Cert> {
     for (n_tokens, top_k, n_rows, k_dim) in cases {
         let seed = 0xDEC0DE ^ (n_tokens as u64 * 31 + top_k as u64 * 7);
         let max_rel = run_moe_mmvq_shape(
-            &dev, &kernel, &q_kernel, n_experts, n_rows, k_dim, top_k, n_tokens, seed,
+            &dev, &kernel, &q_kernel, SweepMoeShape { n_experts, n_rows, k_dim, top_k, n_tokens }, seed,
         )?;
         let tol = 5e-2;
         results.push(ShapeResult {
@@ -247,13 +260,10 @@ fn run_moe_mmvq_shape(
     dev: &HipDevice,
     kernel: &HipKernel<'_>,
     q_kernel: &HipKernel<'_>,
-    n_experts: usize,
-    n_rows: usize,
-    k_dim: usize,
-    top_k: usize,
-    n_tokens: usize,
+    shape: SweepMoeShape,
     seed: u64,
 ) -> Result<f32> {
+    let SweepMoeShape { n_experts, n_rows, k_dim, top_k, n_tokens } = shape;
     assert_eq!(k_dim % QK_K, 0);
     let nb_per_row = k_dim / QK_K;
 
@@ -419,7 +429,7 @@ pub fn run_indexed_moe_mmvq_r2_sweep(repo_root: &Path) -> Result<Cert> {
     for (n_tokens, top_k, n_rows, k_dim) in cases {
         let seed = 0xDEC0DE ^ (n_tokens as u64 * 83 + top_k as u64 * 29);
         let max_rel = run_r2_shape(
-            &dev, &kernel, &q_kernel, n_experts, n_rows, k_dim, top_k, n_tokens, seed,
+            &dev, &kernel, &q_kernel, SweepMoeShape { n_experts, n_rows, k_dim, top_k, n_tokens }, seed,
         )?;
         let tol = 5e-2;
         results.push(ShapeResult {
@@ -457,13 +467,10 @@ fn run_r2_shape(
     dev: &HipDevice,
     kernel: &HipKernel<'_>,
     q_kernel: &HipKernel<'_>,
-    n_experts: usize,
-    n_rows: usize,
-    k_dim: usize,
-    top_k: usize,
-    n_tokens: usize,
+    shape: SweepMoeShape,
     seed: u64,
 ) -> Result<f32> {
+    let SweepMoeShape { n_experts, n_rows, k_dim, top_k, n_tokens } = shape;
     assert_eq!(k_dim % QK_K, 0);
     assert_eq!(n_rows % 2, 0, "r2 grid expects even n_rows");
     let nb_per_row = k_dim / QK_K;
@@ -605,7 +612,7 @@ pub fn run_indexed_moe_mmvq_q5_k_sweep(repo_root: &Path) -> Result<Cert> {
     for (n_tokens, top_k, n_rows, k_dim) in cases {
         let seed = 0xDEC0DE ^ (n_tokens as u64 * 53 + top_k as u64 * 17) ^ 0xC5C5_u64; // Q5-specific spice
         let max_rel = run_q5k_shape(
-            &dev, &kernel, &q_kernel, n_experts, n_rows, k_dim, top_k, n_tokens, seed,
+            &dev, &kernel, &q_kernel, SweepMoeShape { n_experts, n_rows, k_dim, top_k, n_tokens }, seed,
         )?;
         let tol = 5e-2;
         results.push(ShapeResult {
@@ -644,13 +651,10 @@ fn run_q5k_shape(
     dev: &HipDevice,
     kernel: &HipKernel<'_>,
     q_kernel: &HipKernel<'_>,
-    n_experts: usize,
-    n_rows: usize,
-    k_dim: usize,
-    top_k: usize,
-    n_tokens: usize,
+    shape: SweepMoeShape,
     seed: u64,
 ) -> Result<f32> {
+    let SweepMoeShape { n_experts, n_rows, k_dim, top_k, n_tokens } = shape;
     assert_eq!(k_dim % QK_K, 0);
     let nb_per_row = k_dim / QK_K;
 
@@ -796,7 +800,7 @@ pub fn run_indexed_moe_mmvq_q6_k_sweep(repo_root: &Path) -> Result<Cert> {
     for (n_tokens, top_k, n_rows, k_dim) in cases {
         let seed = 0xDEC0DE ^ (n_tokens as u64 * 53 + top_k as u64 * 17) ^ 0xABCD_u64; // Q6_K-specific spice so seeds differ from Q4_K sweeps
         let max_rel = run_q6k_shape(
-            &dev, &kernel, &q_kernel, n_experts, n_rows, k_dim, top_k, n_tokens, seed,
+            &dev, &kernel, &q_kernel, SweepMoeShape { n_experts, n_rows, k_dim, top_k, n_tokens }, seed,
         )?;
         let tol = 5e-2;
         results.push(ShapeResult {
@@ -855,7 +859,7 @@ pub fn run_indexed_moe_mmvq_q8_0_sweep(repo_root: &Path) -> Result<Cert> {
         let seed =
             0xDEC0DE ^ (n_tokens as u64 * 53 + top_k as u64 * 17 + n_rows as u64 * 7) ^ 0xB8D0u64;
         let max_rel = run_q8_0_shape(
-            &dev, &kernel, &q_kernel, n_experts, n_rows, k_dim, top_k, n_tokens, seed,
+            &dev, &kernel, &q_kernel, SweepMoeShape { n_experts, n_rows, k_dim, top_k, n_tokens }, seed,
         )?;
         let tol = 3e-2;
         results.push(ShapeResult {
@@ -893,13 +897,10 @@ fn run_q8_0_shape(
     dev: &HipDevice,
     kernel: &HipKernel<'_>,
     q_kernel: &HipKernel<'_>,
-    n_experts: usize,
-    n_rows: usize,
-    k_dim: usize,
-    top_k: usize,
-    n_tokens: usize,
+    shape: SweepMoeShape,
     seed: u64,
 ) -> Result<f32> {
+    let SweepMoeShape { n_experts, n_rows, k_dim, top_k, n_tokens } = shape;
     assert_eq!(k_dim % QK8, 0);
     let nb_per_row = k_dim / QK8;
 
@@ -1029,13 +1030,10 @@ fn run_q6k_shape(
     dev: &HipDevice,
     kernel: &HipKernel<'_>,
     q_kernel: &HipKernel<'_>,
-    n_experts: usize,
-    n_rows: usize,
-    k_dim: usize,
-    top_k: usize,
-    n_tokens: usize,
+    shape: SweepMoeShape,
     seed: u64,
 ) -> Result<f32> {
+    let SweepMoeShape { n_experts, n_rows, k_dim, top_k, n_tokens } = shape;
     assert_eq!(k_dim % QK_K, 0);
     let nb_per_row = k_dim / QK_K;
 
@@ -1188,7 +1186,7 @@ pub fn run_gate_up_sweep(repo_root: &Path) -> Result<Cert> {
     for (n_tokens, top_k, n_rows, k_dim) in cases {
         let seed = 0xDEC0DE ^ (n_tokens as u64 * 47 + top_k as u64 * 101);
         let max_rel = run_gate_up_shape(
-            &dev, &kernel, &q_kernel, n_experts, n_rows, k_dim, top_k, n_tokens, seed,
+            &dev, &kernel, &q_kernel, SweepMoeShape { n_experts, n_rows, k_dim, top_k, n_tokens }, seed,
         )?;
         let tol = 5e-2;
         results.push(ShapeResult {
@@ -1226,13 +1224,10 @@ fn run_gate_up_shape(
     dev: &HipDevice,
     kernel: &HipKernel<'_>,
     q_kernel: &HipKernel<'_>,
-    n_experts: usize,
-    n_rows: usize,
-    k_dim: usize,
-    top_k: usize,
-    n_tokens: usize,
+    shape: SweepMoeShape,
     seed: u64,
 ) -> Result<f32> {
+    let SweepMoeShape { n_experts, n_rows, k_dim, top_k, n_tokens } = shape;
     assert_eq!(k_dim % QK_K, 0);
     let nb_per_row = k_dim / QK_K;
 
@@ -1436,7 +1431,7 @@ pub fn run_indexed_moe_mmq_sweep(repo_root: &Path) -> Result<Cert> {
     for (n_tokens, top_k, n_rows, k_dim) in cases {
         let seed = 0xDEC0DE ^ (n_tokens as u64 * 131 + top_k as u64 * 17);
         let max_rel = run_mmq_shape(
-            &dev, &kernel, &q_kernel, n_experts, n_rows, k_dim, top_k, n_tokens, seed,
+            &dev, &kernel, &q_kernel, SweepMoeShape { n_experts, n_rows, k_dim, top_k, n_tokens }, seed,
         )?;
         let tol = 5e-2;
         results.push(ShapeResult {
@@ -1473,13 +1468,10 @@ fn run_mmq_shape(
     dev: &HipDevice,
     kernel: &HipKernel<'_>,
     q_kernel: &HipKernel<'_>,
-    n_experts: usize,
-    n_rows: usize,
-    k_dim: usize,
-    top_k: usize,
-    n_tokens: usize,
+    shape: SweepMoeShape,
     seed: u64,
 ) -> Result<f32> {
+    let SweepMoeShape { n_experts, n_rows, k_dim, top_k, n_tokens } = shape;
     assert_eq!(k_dim % QK_K, 0);
     let nb_per_row = k_dim / QK_K;
 
@@ -1798,7 +1790,7 @@ pub fn run_indexed_moe_mmq_q8_0_gate_up_tile8_sweep(repo_root: &Path) -> Result<
         let seed =
             0xDEC0DE ^ (n_tokens as u64 * 53 + top_k as u64 * 17 + n_rows as u64 * 7) ^ 0xB822u64;
         let max_rel = run_q8_0_tile8_gate_up_shape(
-            &dev, &kernel, &q_kernel, n_experts, n_rows, k_dim, top_k, n_tokens, seed,
+            &dev, &kernel, &q_kernel, SweepMoeShape { n_experts, n_rows, k_dim, top_k, n_tokens }, seed,
         )?;
         let tol = 3e-2;
         results.push(ShapeResult {
@@ -1856,7 +1848,7 @@ pub fn run_indexed_moe_mmq_q8_0_down_tile8_sweep(repo_root: &Path) -> Result<Cer
         let seed =
             0xDEC0DE ^ (n_tokens as u64 * 53 + top_k as u64 * 17 + n_rows as u64 * 7) ^ 0xB844u64;
         let max_rel = run_q8_0_tile8_down_shape(
-            &dev, &kernel, &q_kernel, n_experts, n_rows, k_dim, top_k, n_tokens, seed,
+            &dev, &kernel, &q_kernel, SweepMoeShape { n_experts, n_rows, k_dim, top_k, n_tokens }, seed,
         )?;
         let tol = 3e-2;
         results.push(ShapeResult {
@@ -1909,13 +1901,10 @@ fn run_q8_0_tile8_gate_up_shape(
     dev: &HipDevice,
     kernel: &HipKernel<'_>,
     q_kernel: &HipKernel<'_>,
-    n_experts: usize,
-    n_rows: usize,
-    k_dim: usize,
-    top_k: usize,
-    n_tokens: usize,
+    shape: SweepMoeShape,
     seed: u64,
 ) -> Result<f32> {
+    let SweepMoeShape { n_experts, n_rows, k_dim, top_k, n_tokens } = shape;
     assert_eq!(k_dim % QK8, 0);
     let nb_per_row = k_dim / QK8;
 
@@ -2072,13 +2061,10 @@ fn run_q8_0_tile8_down_shape(
     dev: &HipDevice,
     kernel: &HipKernel<'_>,
     q_kernel: &HipKernel<'_>,
-    n_experts: usize,
-    n_rows: usize,
-    k_dim: usize,
-    top_k: usize,
-    n_tokens: usize,
+    shape: SweepMoeShape,
     seed: u64,
 ) -> Result<f32> {
+    let SweepMoeShape { n_experts, n_rows, k_dim, top_k, n_tokens } = shape;
     assert_eq!(k_dim % QK8, 0);
     assert_eq!(top_k, 1, "down path is re-indexed with top_k_inner=1");
     let nb_per_row = k_dim / QK8;
@@ -2276,7 +2262,7 @@ pub fn run_indexed_moe_mmvq_q3_k_sweep(repo_root: &Path) -> Result<Cert> {
     for (n_tokens, top_k, n_rows, k_dim) in cases {
         let seed = 0xDEC0DE ^ (n_tokens as u64 * 53 + top_k as u64 * 17) ^ 0xD3D3_u64;
         let max_rel = run_q3k_shape(
-            &dev, &kernel, &q_kernel, n_experts, n_rows, k_dim, top_k, n_tokens, seed,
+            &dev, &kernel, &q_kernel, SweepMoeShape { n_experts, n_rows, k_dim, top_k, n_tokens }, seed,
         )?;
         let tol = 5e-2;
         results.push(ShapeResult {
@@ -2327,7 +2313,7 @@ pub fn run_indexed_moe_mmvq_q2_k_sweep(repo_root: &Path) -> Result<Cert> {
     for (n_tokens, top_k, n_rows, k_dim) in cases {
         let seed = 0xDEC0DE ^ (n_tokens as u64 * 53 + top_k as u64 * 17) ^ 0xD2D2_u64;
         let max_rel = run_q2k_shape(
-            &dev, &kernel, &q_kernel, n_experts, n_rows, k_dim, top_k, n_tokens, seed,
+            &dev, &kernel, &q_kernel, SweepMoeShape { n_experts, n_rows, k_dim, top_k, n_tokens }, seed,
         )?;
         let tol = 5e-2;
         results.push(ShapeResult {
@@ -2366,13 +2352,10 @@ fn run_q3k_shape(
     dev: &HipDevice,
     kernel: &HipKernel<'_>,
     q_kernel: &HipKernel<'_>,
-    n_experts: usize,
-    n_rows: usize,
-    k_dim: usize,
-    top_k: usize,
-    n_tokens: usize,
+    shape: SweepMoeShape,
     seed: u64,
 ) -> Result<f32> {
+    let SweepMoeShape { n_experts, n_rows, k_dim, top_k, n_tokens } = shape;
     assert_eq!(k_dim % QK_K, 0);
     let nb_per_row = k_dim / QK_K;
 
@@ -2484,13 +2467,10 @@ fn run_q2k_shape(
     dev: &HipDevice,
     kernel: &HipKernel<'_>,
     q_kernel: &HipKernel<'_>,
-    n_experts: usize,
-    n_rows: usize,
-    k_dim: usize,
-    top_k: usize,
-    n_tokens: usize,
+    shape: SweepMoeShape,
     seed: u64,
 ) -> Result<f32> {
+    let SweepMoeShape { n_experts, n_rows, k_dim, top_k, n_tokens } = shape;
     assert_eq!(k_dim % QK_K, 0);
     let nb_per_row = k_dim / QK_K;
 
@@ -2768,13 +2748,10 @@ fn run_tile8_gate_up_shape(
     kernel: &HipKernel<'_>,
     q_kernel: &HipKernel<'_>,
     wk: Tile8Wk,
-    n_experts: usize,
-    n_rows: usize,
-    k_dim: usize,
-    top_k: usize,
-    n_tokens: usize,
+    shape: SweepMoeShape,
     seed: u64,
 ) -> Result<f32> {
+    let SweepMoeShape { n_experts, n_rows, k_dim, top_k, n_tokens } = shape;
     let block_elems = wk.block_elems();
     assert_eq!(k_dim % block_elems, 0);
     let nb_per_row = k_dim / block_elems;
@@ -2933,12 +2910,10 @@ fn run_tile8_down_shape(
     kernel: &HipKernel<'_>,
     q_kernel: &HipKernel<'_>,
     wk: Tile8Wk,
-    n_experts: usize,
-    n_rows: usize,
-    k_dim: usize,
-    n_tokens: usize,
+    shape: SweepMoeShape,
     seed: u64,
 ) -> Result<f32> {
+    let SweepMoeShape { n_experts, n_rows, k_dim, top_k: _, n_tokens } = shape;
     let block_elems = wk.block_elems();
     assert_eq!(k_dim % block_elems, 0);
     let nb_per_row = k_dim / block_elems;
@@ -3099,7 +3074,7 @@ fn run_tile8_gate_up_sweep(
         let seed =
             0xDEC0DE ^ (n_tokens as u64 * 53 + top_k as u64 * 17 + n_rows as u64 * 7) ^ extra_seed;
         let max_rel = run_tile8_gate_up_shape(
-            &dev, &kernel, &q_kernel, wk, n_experts, n_rows, k_dim, top_k, n_tokens, seed,
+            &dev, &kernel, &q_kernel, wk, SweepMoeShape { n_experts, n_rows, k_dim, top_k, n_tokens }, seed,
         )?;
         let tol = wk.tol();
         results.push(ShapeResult {
@@ -3158,7 +3133,7 @@ fn run_tile8_down_sweep(
     for (n_tokens, n_rows, k_dim) in tile8_down_cases(wk) {
         let seed = 0xDEC0DE ^ (n_tokens as u64 * 53 + n_rows as u64 * 7) ^ extra_seed;
         let max_rel = run_tile8_down_shape(
-            &dev, &kernel, &q_kernel, wk, n_experts, n_rows, k_dim, n_tokens, seed,
+            &dev, &kernel, &q_kernel, wk, SweepMoeShape { n_experts, n_rows, k_dim, top_k: 1, n_tokens }, seed,
         )?;
         let tol = wk.tol();
         results.push(ShapeResult {

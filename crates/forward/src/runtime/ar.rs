@@ -288,16 +288,23 @@ pub fn bar_ar_sum_f32(
 /// payload halving in S1; the launch-count win is what matters).
 /// `n_rows` blocks of 256 threads; per-row hidden `n` must satisfy
 /// `n <= 8192`. `resid_out` must NOT alias `resid_in`.
+/// Per-call knobs for [`bar_ar_postattn_residual_rmsnorm_f32_to_f16`].
+#[derive(Copy, Clone, Debug)]
+pub struct BarArPostAttnNormParams {
+    pub n_rows: usize,
+    pub n: usize,
+    pub eps: f32,
+}
+
 pub fn bar_ar_postattn_residual_rmsnorm_f32_to_f16(
     coord: &BarArCoordinator,
     rank: usize,
     bufs: crate::core::ArPostAttnRmsNormHookBuffers,
-    n_rows: usize,
-    n: usize,
-    eps: f32,
+    params: BarArPostAttnNormParams,
     _device: &HipDevice,
     stream: &HipStream,
 ) -> Result<()> {
+    let BarArPostAttnNormParams { n_rows, n, eps } = params;
     let crate::core::ArPostAttnRmsNormHookBuffers {
         proj_local_f32,
         post_norm_w_f16,

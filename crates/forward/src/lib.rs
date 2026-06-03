@@ -26,4 +26,5 @@ pub use engine::{
 pub use per_layer_embd::{
     PerLayerEmbedBlock, PerLayerEmbedDecodeScratch, PerLayerEmbedLayerWeights,
 };
+pub use runtime::orchestrate::LaunchParams;
 pub use runtime::{Arch, Session, Topology};

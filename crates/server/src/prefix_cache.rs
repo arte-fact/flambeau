@@ -225,6 +225,15 @@ pub struct CacheHit<'a> {
 /// lookup function walks the prompt's chunk_keys longest-to-shortest,
 /// returning the first match whose stored chain prefix-matches the
 /// caller's keys exactly.
+/// Metadata for a [`PrefixCache::insert_with_kv`] call.
+#[derive(Copy, Clone, Debug)]
+pub struct PrefixCacheInsert {
+    pub topology: TopologyTag,
+    pub chunk_tokens: usize,
+    pub n_tokens: usize,
+    pub bytes: usize,
+}
+
 pub struct PrefixCache {
     inner: RwLock<PrefixCacheInner>,
     /// VRAM budget across all entries (bytes). Sized at construction
@@ -389,13 +398,11 @@ impl PrefixCache {
     pub fn insert_with_kv(
         &self,
         chain: Vec<ChunkKey>,
-        topology: TopologyTag,
-        chunk_tokens: usize,
-        n_tokens: usize,
+        meta: PrefixCacheInsert,
         kv: std::sync::Arc<KvSnapshot>,
         last_logits: Option<std::sync::Arc<Vec<f32>>>,
-        bytes: usize,
     ) {
+        let PrefixCacheInsert { topology, chunk_tokens, n_tokens, bytes } = meta;
         let Some(&terminal) = chain.last() else {
             return;
         };

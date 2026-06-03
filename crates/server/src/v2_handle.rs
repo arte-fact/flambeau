@@ -253,14 +253,20 @@ impl Model for V2Model {
     fn forward_mixed_decode(
         &self,
         _ctx: &dyn crate::model_handle::SessionContext,
-        prefill_inflight: &mut dyn ServerSession,
-        prefill_tokens: &[u32],
-        prefill_start_position: usize,
-        prefill_logits_out: &mut Vec<f32>,
-        decode_inflights: &mut [&mut dyn ServerSession],
-        decode_slots: &[crate::model_handle::BatchSlot],
-        decode_logits_refs: &mut [&mut Vec<f32>],
+        prefill: flambeau_server_core::MixedBatchPrefill<'_>,
+        decodes: flambeau_server_core::MixedBatchDecodes<'_, '_>,
     ) -> Result<()> {
+        let flambeau_server_core::MixedBatchPrefill {
+            inflight: prefill_inflight,
+            tokens: prefill_tokens,
+            start_position: prefill_start_position,
+            logits_out: prefill_logits_out,
+        } = prefill;
+        let flambeau_server_core::MixedBatchDecodes {
+            inflights: decode_inflights,
+            slots: decode_slots,
+            logits_refs: decode_logits_refs,
+        } = decodes;
         if decode_slots.len() != decode_logits_refs.len()
             || decode_slots.len() != decode_inflights.len()
         {
