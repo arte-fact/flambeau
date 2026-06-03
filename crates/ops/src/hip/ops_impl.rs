@@ -1610,28 +1610,16 @@ impl<'a> Ops for HipOps<'a> {
     }
     fn indexed_moe_mmvq_q4_k_r2_sorted(
         &self,
-        w: DevicePtr,
-        y: DevicePtr,
-        expert_ids: DevicePtr,
-        sorted_pair_idx: DevicePtr,
-        dst: DevicePtr,
-        n_rows: usize,
-        n_tokens: usize,
-        top_k: usize,
-        n_sb_per_row: usize,
+        buffers: crate::MoeMmvqSortedBuffers,
+        shape: crate::MoeMmvqShape,
     ) -> Result<()> {
         super::moe::indexed_moe_mmvq_q4_k_r2_sorted(
-            self.reg,
-            self.stream,
-            w,
-            y,
-            expert_ids,
-            sorted_pair_idx,
-            dst,
-            n_rows,
-            n_tokens,
-            top_k,
-            n_sb_per_row,
+            crate::OpCtx {
+                reg: self.reg,
+                stream: self.stream,
+            },
+            buffers,
+            shape,
         )
     }
 
@@ -2454,61 +2442,31 @@ impl<'a> Ops for HipOps<'a> {
 
     fn indexed_moe_mmvq_q4_k_gate_up_sorted(
         &self,
-        w_gate: DevicePtr,
-        w_up: DevicePtr,
-        y: DevicePtr,
-        expert_ids: DevicePtr,
-        sorted_pair_idx: DevicePtr,
-        gate_out: DevicePtr,
-        up_out: DevicePtr,
-        n_rows: usize,
-        n_tokens: usize,
-        top_k: usize,
-        n_sb_per_row: usize,
+        buffers: crate::MoeMmvqGateUpSortedBuffers,
+        shape: crate::MoeMmvqShape,
     ) -> Result<()> {
         super::moe::indexed_moe_mmvq_q4_k_gate_up_sorted(
-            self.reg,
-            self.stream,
-            w_gate,
-            w_up,
-            y,
-            expert_ids,
-            sorted_pair_idx,
-            gate_out,
-            up_out,
-            n_rows,
-            n_tokens,
-            top_k,
-            n_sb_per_row,
+            crate::OpCtx {
+                reg: self.reg,
+                stream: self.stream,
+            },
+            buffers,
+            shape,
         )
     }
 
     fn indexed_moe_mmvq_q4_k_gate_up(
         &self,
-        w_gate: DevicePtr,
-        w_up: DevicePtr,
-        y: DevicePtr,
-        expert_ids: DevicePtr,
-        gate_out: DevicePtr,
-        up_out: DevicePtr,
-        n_rows: usize,
-        n_tokens: usize,
-        top_k: usize,
-        n_sb_per_row: usize,
+        buffers: crate::MoeMmvqGateUpBuffers,
+        shape: crate::MoeMmvqShape,
     ) -> Result<()> {
         super::moe::indexed_moe_mmvq_q4_k_gate_up(
-            self.reg,
-            self.stream,
-            w_gate,
-            w_up,
-            y,
-            expert_ids,
-            gate_out,
-            up_out,
-            n_rows,
-            n_tokens,
-            top_k,
-            n_sb_per_row,
+            crate::OpCtx {
+                reg: self.reg,
+                stream: self.stream,
+            },
+            buffers,
+            shape,
         )
     }
 

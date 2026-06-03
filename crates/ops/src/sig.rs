@@ -246,6 +246,19 @@ pub struct MoeMmvqSortedBuffers {
     pub dst: DevicePtr,
 }
 
+/// Fused gate + up MoE MMVQ with sorted-pair token-index reorder —
+/// extends [`MoeMmvqGateUpBuffers`] with the sorted pair index array.
+#[derive(Copy, Clone, Debug)]
+pub struct MoeMmvqGateUpSortedBuffers {
+    pub gate_w: DevicePtr,
+    pub up_w: DevicePtr,
+    pub act: DevicePtr,
+    pub expert_ids: DevicePtr,
+    pub sorted_pair_idx: DevicePtr,
+    pub gate_out: DevicePtr,
+    pub up_out: DevicePtr,
+}
+
 /// Shape parameters shared across every MoE MMVQ variant.
 /// `n_sb_per_row` is super-blocks for K-quants / Q-blocks (k / 32)
 /// for `_0` quants — the kernel ABI takes the raw count.

@@ -995,19 +995,13 @@ pub fn indexed_moe_mmvq_q8_0_gate_up(
 /// sorted-reorder variant of `indexed_moe_mmvq_q4_k_r2` (down
 /// projection). Same ordering trick as the gate_up sorted kernel.
 pub fn indexed_moe_mmvq_q4_k_r2_sorted(
-    reg: &OpsRegistry,
-    stream: &HipStream,
-    w: DevicePtr,
-    y: DevicePtr,
-    expert_ids: DevicePtr,
-    sorted_pair_idx: DevicePtr,
-    dst: DevicePtr,
-    n_rows: usize,
-    n_tokens: usize,
-    top_k: usize,
-    n_sb_per_row: usize,
+    ctx: crate::OpCtx<'_>,
+    buffers: crate::MoeMmvqSortedBuffers,
+    shape: crate::MoeMmvqShape,
 ) -> Result<()> {
-    let module = reg.expect_module("indexed_moe_mmvq_q4_k_r4_sorted_dp4a")?;
+    let crate::MoeMmvqSortedBuffers { weights: w, act: y, expert_ids, sorted_pair_idx, dst } = buffers;
+    let crate::MoeMmvqShape { n_rows, n_tokens, top_k, n_sb_per_row } = shape;
+    let module = ctx.reg.expect_module("indexed_moe_mmvq_q4_k_r4_sorted_dp4a")?;
     let kernel = module.kernel("flambeau_indexed_moe_mmvq_q4_k_r4_sorted_dp4a_q8_1")?;
     let n_rows_i = n_rows as i32;
     let n_tokens_i = n_tokens as i32;
@@ -1033,7 +1027,7 @@ pub fn indexed_moe_mmvq_q4_k_r2_sorted(
         block: (64, 1, 1),
         shared_bytes: 0,
     };
-    unsafe { kernel.launch(stream, cfg, args)? };
+    unsafe { kernel.launch(ctx.stream, cfg, args)? };
     Ok(())
 }
 
@@ -3068,21 +3062,13 @@ pub fn indexed_moe_mmq_q6_k_down_tile8(
 /// Must be called after `moe_sort_by_expert` has populated
 /// `sorted_pair_idx[total]` with the sort permutation.
 pub fn indexed_moe_mmvq_q4_k_gate_up_sorted(
-    reg: &OpsRegistry,
-    stream: &HipStream,
-    w_gate: DevicePtr,
-    w_up: DevicePtr,
-    y: DevicePtr,
-    expert_ids: DevicePtr,
-    sorted_pair_idx: DevicePtr,
-    gate_out: DevicePtr,
-    up_out: DevicePtr,
-    n_rows: usize,
-    n_tokens: usize,
-    top_k: usize,
-    n_sb_per_row: usize,
+    ctx: crate::OpCtx<'_>,
+    buffers: crate::MoeMmvqGateUpSortedBuffers,
+    shape: crate::MoeMmvqShape,
 ) -> Result<()> {
-    let module = reg.expect_module("indexed_moe_mmvq_q4_k_gate_up_r4_sorted_dp4a")?;
+    let crate::MoeMmvqGateUpSortedBuffers { gate_w: w_gate, up_w: w_up, act: y, expert_ids, sorted_pair_idx, gate_out, up_out } = buffers;
+    let crate::MoeMmvqShape { n_rows, n_tokens, top_k, n_sb_per_row } = shape;
+    let module = ctx.reg.expect_module("indexed_moe_mmvq_q4_k_gate_up_r4_sorted_dp4a")?;
     let kernel = module.kernel("flambeau_indexed_moe_mmvq_q4_k_gate_up_r4_sorted_dp4a_q8_1")?;
 
     let n_rows_i = n_rows as i32;
@@ -3114,31 +3100,24 @@ pub fn indexed_moe_mmvq_q4_k_gate_up_sorted(
         block: (64, 1, 1),
         shared_bytes: 0,
     };
-    unsafe { kernel.launch(stream, cfg, args)? };
+    unsafe { kernel.launch(ctx.stream, cfg, args)? };
     Ok(())
 }
 
 pub fn indexed_moe_mmvq_q4_k_gate_up(
-    reg: &OpsRegistry,
-    stream: &HipStream,
-    w_gate: DevicePtr,
-    w_up: DevicePtr,
-    y: DevicePtr,
-    expert_ids: DevicePtr,
-    gate_out: DevicePtr,
-    up_out: DevicePtr,
-    n_rows: usize,
-    n_tokens: usize,
-    top_k: usize,
-    n_sb_per_row: usize,
+    ctx: crate::OpCtx<'_>,
+    buffers: crate::MoeMmvqGateUpBuffers,
+    shape: crate::MoeMmvqShape,
 ) -> Result<()> {
+    let crate::MoeMmvqGateUpBuffers { gate_w: w_gate, up_w: w_up, act: y, expert_ids, gate_out, up_out } = buffers;
+    let crate::MoeMmvqShape { n_rows, n_tokens, top_k, n_sb_per_row } = shape;
     // productisation: r4 variant — 4 rows per block (quarter-warp
     // per row) halves block count vs r2 and quarters vs the baseline.
     // Measured +19 % pp=512 on Qwen3.6-35B-A3B Mesh<2>, +7 % decode.
     // Parity bit-exact with llama.cpp on 8-token greedy.
     let stem = "indexed_moe_mmvq_q4_k_gate_up_r4_dp4a";
     let entry = "flambeau_indexed_moe_mmvq_q4_k_gate_up_r4_dp4a_q8_1";
-    let module = reg.expect_module(stem)?;
+    let module = ctx.reg.expect_module(stem)?;
     let kernel = module.kernel(entry)?;
 
     let n_rows_i = n_rows as i32;
@@ -3168,7 +3147,7 @@ pub fn indexed_moe_mmvq_q4_k_gate_up(
         block: (64, 1, 1),
         shared_bytes: 0,
     };
-    unsafe { kernel.launch(stream, cfg, args)? };
+    unsafe { kernel.launch(ctx.stream, cfg, args)? };
     Ok(())
 }
 
