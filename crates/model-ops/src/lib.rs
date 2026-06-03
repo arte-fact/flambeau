@@ -50,7 +50,7 @@ pub use ops::attn_decode_batched::{
     attn_decode_f16_batched, attn_decode_f16_paged, attn_prefill_f16_paged,
     kv_append_f16_batched_slots, kv_append_f16_paged_prefill, kv_append_f16_paged_slots,
 };
-pub use ops::attn_decode_splitk::{attn_decode_f16_splitk, splitk_chunk_size};
+pub use ops::attn_decode_splitk::{attn_decode_f16_splitk, splitk_chunk_size, SplitkOutputs};
 // pub use ops::attn_decode_splitk_h2::attn_decode_f16_splitk_h2;
 pub use ops::attn_prefill::attn_prefill_f16;
 pub use ops::cast::{cast_f16_to_f32, cast_f32_to_f16};

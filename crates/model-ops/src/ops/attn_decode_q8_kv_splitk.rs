@@ -15,14 +15,17 @@ pub fn attn_decode_q8_kv_splitk(
     q: &Tensor<F16>,
     k_cache: &Tensor<Q8_0>,
     v_cache: &Tensor<Q8_0>,
-    out: &mut Tensor<F16>,
-    partials_m: &mut Tensor<F32>,
-    partials_s: &mut Tensor<F32>,
-    partials_o: &mut Tensor<F32>,
+    outputs: crate::ops::attn_decode_splitk::SplitkOutputs<'_>,
     shape: flambeau_ops::AttnSplitkShape,
     knobs: flambeau_ops::AttnKnobs,
     ops: &HipOps<'_>,
 ) -> Result<()> {
+    let crate::ops::attn_decode_splitk::SplitkOutputs {
+        out,
+        m: partials_m,
+        s: partials_s,
+        o: partials_o,
+    } = outputs;
     let flambeau_ops::AttnSplitkShape {
         n_heads_q,
         n_heads_kv,

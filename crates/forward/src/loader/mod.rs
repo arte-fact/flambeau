@@ -33,6 +33,7 @@ pub use globals::{load_embedding, load_lm_head, EmbeddingSpec, LmHeadSpec};
 pub use moe::{
     upload_moe_experts_fused_gate_up_stacked, upload_moe_experts_stacked,
     upload_moe_experts_stacked_col_sharded, upload_moe_experts_stacked_row_sharded,
+    MoeStackedShape,
 };
 pub use primitives::{
     dtype_qmatmul_native, ggml_to_qdtype, upload_bytes, upload_dequant_to_f16, upload_f16_from_f32,

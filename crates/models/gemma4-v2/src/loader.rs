@@ -328,9 +328,11 @@ fn load_with_shard(
                 file,
                 device,
                 &gate_up_exps,
-                mdims.num_experts,
-                mdims.moe_intermediate,
-                config.hidden,
+                flambeau_forward::loader::MoeStackedShape {
+                    n_experts: mdims.num_experts,
+                    dim_a: mdims.moe_intermediate,
+                    dim_b: config.hidden,
+                },
                 shard,
                 &mut allocs,
             )?;
@@ -340,9 +342,11 @@ fn load_with_shard(
                 file,
                 device,
                 &down_exps,
-                mdims.num_experts,
-                config.hidden,
-                mdims.moe_intermediate,
+                flambeau_forward::loader::MoeStackedShape {
+                    n_experts: mdims.num_experts,
+                    dim_a: config.hidden,
+                    dim_b: mdims.moe_intermediate,
+                },
                 shard,
                 &mut allocs,
             )?;

@@ -209,13 +209,16 @@ fn load_with_shard(
         // gate/up: `[n_experts, intermediate, hidden]` — col-shard the
         // `intermediate` dim (= outer dim of each expert's slab) so each
         // rank computes a partial gate/up over [local_intermediate, hidden].
+        let gate_up_shape = flambeau_forward::loader::MoeStackedShape {
+            n_experts: config.num_experts,
+            dim_a: config.expert_intermediate,
+            dim_b: config.hidden,
+        };
         let experts_gate = upload_moe_experts_stacked_col_sharded(
             file,
             device,
             &gate_exps_name,
-            config.num_experts,
-            config.expert_intermediate,
-            config.hidden,
+            gate_up_shape,
             shard,
             &mut allocs,
         )?;
@@ -223,9 +226,7 @@ fn load_with_shard(
             file,
             device,
             &up_exps_name,
-            config.num_experts,
-            config.expert_intermediate,
-            config.hidden,
+            gate_up_shape,
             shard,
             &mut allocs,
         )?;
@@ -237,9 +238,11 @@ fn load_with_shard(
             file,
             device,
             &down_exps_name,
-            config.num_experts,
-            config.hidden,
-            config.expert_intermediate,
+            flambeau_forward::loader::MoeStackedShape {
+                n_experts: config.num_experts,
+                dim_a: config.hidden,
+                dim_b: config.expert_intermediate,
+            },
             shard,
             &mut allocs,
         )?;

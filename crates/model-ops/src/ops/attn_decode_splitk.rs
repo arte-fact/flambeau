@@ -10,6 +10,16 @@ use crate::dtype::{F16, F32};
 use crate::error::Result;
 use crate::tensor::Tensor;
 
+/// Output + split-K partial buffers for a splitk attention call. F16
+/// output, F32 partials (m, s, o) shared across both F16-KV and Q8-KV
+/// variants since splitk merges in F32.
+pub struct SplitkOutputs<'a> {
+    pub out: &'a mut Tensor<F16>,
+    pub m: &'a mut Tensor<F32>,
+    pub s: &'a mut Tensor<F32>,
+    pub o: &'a mut Tensor<F32>,
+}
+
 /// Caller must size partials at `n_heads_q * n_chunks` (m, s) and
 /// `n_heads_q * n_chunks * head_dim` (o), where `n_chunks =
 /// ceil(n_tokens_kv / chunk_size)`.
@@ -17,14 +27,12 @@ pub fn attn_decode_f16_splitk(
     q: &Tensor<F16>,
     k_cache: &Tensor<F16>,
     v_cache: &Tensor<F16>,
-    out: &mut Tensor<F16>,
-    partials_m: &mut Tensor<F32>,
-    partials_s: &mut Tensor<F32>,
-    partials_o: &mut Tensor<F32>,
+    outputs: SplitkOutputs<'_>,
     shape: flambeau_ops::AttnSplitkShape,
     knobs: flambeau_ops::AttnKnobs,
     ops: &HipOps<'_>,
 ) -> Result<()> {
+    let SplitkOutputs { out, m: partials_m, s: partials_s, o: partials_o } = outputs;
     let flambeau_ops::AttnSplitkShape {
         n_heads_q,
         n_heads_kv,
@@ -222,8 +230,13 @@ mod attn_microbench {
 
             for _ in 0..N_WARMUP {
                 attn_decode_f16_splitk(
-                    &q_t, &k_t, &v_t, &mut out_t,
-                    &mut pm_t, &mut ps_t, &mut po_t,
+                    &q_t, &k_t, &v_t,
+                    SplitkOutputs {
+                        out: &mut out_t,
+                        m: &mut pm_t,
+                        s: &mut ps_t,
+                        o: &mut po_t,
+                    },
                     flambeau_ops::AttnSplitkShape {
                         n_heads_q: N_HEADS_Q,
                         n_heads_kv: N_HEADS_KV,
@@ -241,8 +254,13 @@ mod attn_microbench {
             let t0 = Instant::now();
             for _ in 0..N_ITERS {
                 attn_decode_f16_splitk(
-                    &q_t, &k_t, &v_t, &mut out_t,
-                    &mut pm_t, &mut ps_t, &mut po_t,
+                    &q_t, &k_t, &v_t,
+                    SplitkOutputs {
+                        out: &mut out_t,
+                        m: &mut pm_t,
+                        s: &mut ps_t,
+                        o: &mut po_t,
+                    },
                     flambeau_ops::AttnSplitkShape {
                         n_heads_q: N_HEADS_Q,
                         n_heads_kv: N_HEADS_KV,

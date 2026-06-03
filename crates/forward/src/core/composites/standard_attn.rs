@@ -698,10 +698,12 @@ pub fn standard_attn_local<H: TopologyHooks>(
                         &q_f16_rope,
                         &k_cache_q8,
                         &v_cache_q8,
-                        &mut attn_out,
-                        &mut partials_m,
-                        &mut partials_s,
-                        &mut partials_o,
+                        flambeau_model_ops::SplitkOutputs {
+                            out: &mut attn_out,
+                            m: &mut partials_m,
+                            s: &mut partials_s,
+                            o: &mut partials_o,
+                        },
                         flambeau_ops::AttnSplitkShape {
                             n_heads_q: weights.n_heads,
                             n_heads_kv: weights.n_kv_heads,
@@ -776,10 +778,12 @@ pub fn standard_attn_local<H: TopologyHooks>(
                     &q_f16_rope,
                     &k_cache_eff_t,
                     &v_cache_eff_t,
-                    &mut attn_out,
-                    &mut partials_m,
-                    &mut partials_s,
-                    &mut partials_o,
+                    flambeau_model_ops::SplitkOutputs {
+                        out: &mut attn_out,
+                        m: &mut partials_m,
+                        s: &mut partials_s,
+                        o: &mut partials_o,
+                    },
                     flambeau_ops::AttnSplitkShape {
                         n_heads_q: weights.n_heads,
                         n_heads_kv: weights.n_kv_heads,

@@ -15,6 +15,18 @@ use crate::ctx::QuantWeight;
 use super::primitives::{dtype_qmatmul_native, ggml_to_qdtype, upload_bytes};
 use super::ShardMode;
 
+/// Stacked MoE expert tensor shape (`[n_experts, dim_a, dim_b]`).
+/// Field names match the call-site `dim_a/dim_b` convention from
+/// `upload_moe_experts_stacked` etc.; gemma4's fused gate+up loader
+/// uses (inter, hidden) and constructs as `{ n_experts, dim_a: inter,
+/// dim_b: hidden }`.
+#[derive(Copy, Clone, Debug)]
+pub struct MoeStackedShape {
+    pub n_experts: usize,
+    pub dim_a: usize,
+    pub dim_b: usize,
+}
+
 /// Upload a `[n_experts, dim_a, dim_b]` stacked-expert quant tensor
 /// as one buffer and return `n_experts` `QuantWeight` views, each
 /// pointing at its expert's `dim_a * dim_b` element slice.
@@ -26,11 +38,10 @@ pub fn upload_moe_experts_stacked(
     file: &GgufFile,
     device: &HipDevice,
     name: &str,
-    n_experts: usize,
-    dim_a: usize,
-    dim_b: usize,
+    shape: MoeStackedShape,
     allocs: &mut Vec<(DevicePtr, usize)>,
 ) -> Result<Vec<QuantWeight>> {
+    let MoeStackedShape { n_experts, dim_a, dim_b } = shape;
     let info = file.info(name).with_context(|| format!("info {name}"))?;
     if !dtype_qmatmul_native(info.dtype) {
         bail!(
@@ -82,12 +93,11 @@ pub fn upload_moe_experts_stacked_col_sharded(
     file: &GgufFile,
     device: &HipDevice,
     name: &str,
-    n_experts: usize,
-    dim_a: usize,
-    dim_b: usize,
+    shape: MoeStackedShape,
     shard: ShardMode,
     allocs: &mut Vec<(DevicePtr, usize)>,
 ) -> Result<Vec<QuantWeight>> {
+    let MoeStackedShape { n_experts, dim_a, dim_b } = shape;
     let (rank, n_ranks) = match shard {
         ShardMode::Replicated => (0_usize, 1_usize),
         ShardMode::Tp { rank, n_ranks } => (rank, n_ranks),
@@ -157,12 +167,11 @@ pub fn upload_moe_experts_fused_gate_up_stacked(
     file: &GgufFile,
     device: &HipDevice,
     name: &str,
-    n_experts: usize,
-    inter: usize,
-    hidden: usize,
+    shape: MoeStackedShape,
     shard: ShardMode,
     allocs: &mut Vec<(DevicePtr, usize)>,
 ) -> Result<(Vec<QuantWeight>, Vec<QuantWeight>)> {
+    let MoeStackedShape { n_experts, dim_a: inter, dim_b: hidden } = shape;
     let (rank, n_ranks) = match shard {
         ShardMode::Replicated => (0_usize, 1_usize),
         ShardMode::Tp { rank, n_ranks } => (rank, n_ranks),
@@ -239,12 +248,11 @@ pub fn upload_moe_experts_stacked_row_sharded(
     file: &GgufFile,
     device: &HipDevice,
     name: &str,
-    n_experts: usize,
-    dim_a: usize,
-    dim_b: usize,
+    shape: MoeStackedShape,
     shard: ShardMode,
     allocs: &mut Vec<(DevicePtr, usize)>,
 ) -> Result<Vec<QuantWeight>> {
+    let MoeStackedShape { n_experts, dim_a, dim_b } = shape;
     let (rank, n_ranks) = match shard {
         ShardMode::Replicated => (0_usize, 1_usize),
         ShardMode::Tp { rank, n_ranks } => (rank, n_ranks),
